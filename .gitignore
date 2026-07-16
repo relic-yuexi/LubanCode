@@ -1,0 +1,17 @@
+# 密钥文件,绝不能提交
+测试.md
+
+# 构建产物
+build/
+out/
+
+# IDE / 工具生成物
+.vs/
+.cache/
+CMakeUserPresets.json
+compile_commands.json
+.vscode/
+*.user
+
+# vcpkg 本地安装(若在项目内安装)
+vcpkg_installed/
