@@ -1,4 +1,4 @@
-// 魂法分家(0.16.x)文件侧:EnsurePromptScaffold 首启生成三样、已存在不
+// 魂法分家(0.16.x)文件侧:EnsurePromptScaffold 首启生成四样、已存在不
 // 覆盖;ResetSystemPromptFile 备份 .bak 与重写;ListSouls 扫描列表。全部
 // 在临时目录里做,不碰真实用户主目录。
 
@@ -11,6 +11,7 @@
 #include <string>
 
 #include "config/prompt_files.hpp"
+#include "tools/skill_loader.hpp"
 
 using namespace lubancode::config;
 
@@ -58,12 +59,12 @@ const std::string kPersona = "测试人格段:你是一只测试用的木鸢。"
 
 }  // namespace
 
-TEST_CASE("EnsurePromptScaffold: 首启三样落地——法、魂、souls/wenyan.md") {
+TEST_CASE("EnsurePromptScaffold: 首启四样落地——法、魂、文言魂、配置技能") {
     TempDir dir;
     const std::string base = (dir.Path() / ".lubancode").string();
 
     const auto created = EnsurePromptScaffold(base, kPersona);
-    CHECK(created.size() == 3);
+    CHECK(created.size() == 4);
 
     // system_prompt.md:顶部注释 + 内置默认人格段原样副本。
     const std::string law = ReadAll(dir.Path() / ".lubancode" / "system_prompt.md");
@@ -85,19 +86,31 @@ TEST_CASE("EnsurePromptScaffold: 首启三样落地——法、魂、souls/wenya
     // souls/wenyan.md:文言文示例。
     const std::string wenyan = ReadAll(dir.Path() / ".lubancode" / "souls" / "wenyan.md");
     CHECK(wenyan.find("文言") != std::string::npos);
+
+    // skills/lubancode-config/SKILL.md:首启生成,frontmatter 能被正式解析器认出。
+    const std::string skill = ReadAll(dir.Path() / ".lubancode" / "skills" / "lubancode-config" / "SKILL.md");
+    REQUIRE_FALSE(skill.empty());
+    const auto parsed = lubancode::tools::ParseSkillMarkdown(skill);
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->name.has_value());
+    CHECK(*parsed->name == "lubancode-config");
+    REQUIRE(parsed->description.has_value());
+    CHECK(*parsed->description == "lubancode 自身配置的完整说明,用户要求修改 lubancode 配置时先加载本技能");
 }
 
 TEST_CASE("EnsurePromptScaffold: 已存在不覆盖,缺哪样只补哪样") {
     TempDir dir;
     const std::string base = (dir.Path() / ".lubancode").string();
-    REQUIRE(EnsurePromptScaffold(base, kPersona).size() == 3);
+    REQUIRE(EnsurePromptScaffold(base, kPersona).size() == 4);
 
-    // 用户改了法和魂——再跑一遍,一个字都不能动。
+    // 用户改了法、魂和配置技能——再跑一遍,一个字都不能动。
     WriteAll(dir.Path() / ".lubancode" / "system_prompt.md", "用户自定义的法");
     WriteAll(dir.Path() / ".lubancode" / "SOUL.md", "用户自定义的魂");
+    WriteAll(dir.Path() / ".lubancode" / "skills" / "lubancode-config" / "SKILL.md", "用户自定义的配置技能");
     CHECK(EnsurePromptScaffold(base, kPersona).empty());
     CHECK(ReadAll(dir.Path() / ".lubancode" / "system_prompt.md") == "用户自定义的法");
     CHECK(ReadAll(dir.Path() / ".lubancode" / "SOUL.md") == "用户自定义的魂");
+    CHECK(ReadAll(dir.Path() / ".lubancode" / "skills" / "lubancode-config" / "SKILL.md") == "用户自定义的配置技能");
 
     // 删掉 wenyan.md——只补这一样。
     std::filesystem::remove(dir.Path() / ".lubancode" / "souls" / "wenyan.md");
@@ -105,12 +118,13 @@ TEST_CASE("EnsurePromptScaffold: 已存在不覆盖,缺哪样只补哪样") {
     REQUIRE(created.size() == 1);
     CHECK(created[0].find("wenyan.md") != std::string::npos);
     CHECK(ReadAll(dir.Path() / ".lubancode" / "system_prompt.md") == "用户自定义的法");
+    CHECK(ReadAll(dir.Path() / ".lubancode" / "skills" / "lubancode-config" / "SKILL.md") == "用户自定义的配置技能");
 }
 
 TEST_CASE("ResetSystemPromptFile: 旧文件挪成 .bak,重写内置默认") {
     TempDir dir;
     const std::string base = (dir.Path() / ".lubancode").string();
-    REQUIRE(EnsurePromptScaffold(base, kPersona).size() == 3);
+    REQUIRE(EnsurePromptScaffold(base, kPersona).size() == 4);
     WriteAll(dir.Path() / ".lubancode" / "system_prompt.md", "每句话末尾加【鲁班】");
 
     const auto result = ResetSystemPromptFile(base, kPersona);
@@ -126,7 +140,7 @@ TEST_CASE("ResetSystemPromptFile: 旧文件挪成 .bak,重写内置默认") {
 TEST_CASE("ResetSystemPromptFile: 已有 .bak 就覆盖") {
     TempDir dir;
     const std::string base = (dir.Path() / ".lubancode").string();
-    REQUIRE(EnsurePromptScaffold(base, kPersona).size() == 3);
+    REQUIRE(EnsurePromptScaffold(base, kPersona).size() == 4);
     WriteAll(dir.Path() / ".lubancode" / "system_prompt.md.bak", "旧备份");
     WriteAll(dir.Path() / ".lubancode" / "system_prompt.md", "新的怪规矩");
 
@@ -149,7 +163,7 @@ TEST_CASE("ResetSystemPromptFile: 原文件不存在,直接写默认,没有 .bak
 TEST_CASE("ListSouls: 扫 souls/*.md,名字去扩展名,字典序;非 .md 不算") {
     TempDir dir;
     const std::string base = (dir.Path() / ".lubancode").string();
-    REQUIRE(EnsurePromptScaffold(base, kPersona).size() == 3);
+    REQUIRE(EnsurePromptScaffold(base, kPersona).size() == 4);
     WriteAll(dir.Path() / ".lubancode" / "souls" / "pirate.md", "海盗腔");
     WriteAll(dir.Path() / ".lubancode" / "souls" / "notes.txt", "不是魂");
 

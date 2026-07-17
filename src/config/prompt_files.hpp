@@ -1,9 +1,10 @@
-// 魂法分家(0.16.x)的文件侧:~/.lubancode/ 下三样东西的生成、读取、还原。
+// 魂法分家(0.16.x)的文件侧:~/.lubancode/ 下几样东西的生成、读取、还原。
 //   system_prompt.md —— "法",内容就是内置默认人格段的原样副本(顶部带一行
 //       注释说明),用户改它定制 lubancode 的行为;/prompt reset 一键还原。
 //   SOUL.md          —— "魂",风格叠加层,默认只有一行注释、实际内容空白
 //       (空白 = 无效果);写点风格指令就会注入在系统提示最后。
 //   souls/           —— 备选魂的目录,附一个 wenyan.md 文言文示例;/soul 切换。
+//   skills/lubancode-config/SKILL.md —— 内置配置手册,供模型按需加载。
 // 每次启动都过一遍 EnsurePromptScaffold:缺哪样补哪样,已存在的绝不覆盖。
 //
 // 注意分层:config 层不依赖 agent 层(依赖只许单向,cli -> agent -> api/tools,
@@ -26,12 +27,12 @@ std::string SoulsDirPath(const std::string& lubancode_dir);
 // souls/<名字>.md 的路径,名字就是 /soul 命令用的那个(文件名去扩展名)。
 std::string SoulPathByName(const std::string& lubancode_dir, const std::string& name);
 
-// 三份默认内容(生成、reset 共用同一份,不会出现两处写法不一致)。
+// 默认内容(生成、reset 共用同一份,不会出现两处写法不一致)。
 std::string DefaultSystemPromptFileContent(const std::string& default_persona);
 std::string DefaultSoulFileContent();
 std::string DefaultWenyanSoulFileContent();
 
-// 首启生成 + 每次启动查漏补缺:目录(含 souls/)不存在就建,三个文件
+// 首启生成 + 每次启动查漏补缺:目录(含 souls/、skills/)不存在就建,四个文件
 // 缺哪个补哪个,已存在的绝不覆盖(用户改过的内容一个字都不动)。
 // 返回本次真正新建的文件路径列表(空 = 全都在,什么也没做)。写不进去
 // (权限之类)不算错、不崩,跳过就是——法魂缺文件时运行期自有内置回退。
