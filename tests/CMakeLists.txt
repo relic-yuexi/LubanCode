@@ -11,6 +11,7 @@ add_executable(lubancode_tests
   test_search.cpp
   test_context.cpp
   test_config.cpp
+  test_model_catalog.cpp
   test_models.cpp
   test_setup_wizard.cpp
   test_slash_commands.cpp

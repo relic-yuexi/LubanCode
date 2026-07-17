@@ -26,6 +26,27 @@ inline std::string EnvironmentSegment(const std::string& cwd) {
            "这条不受上面人格设定的影响,该用工具时就用。";
 }
 
+// 模型目录(models.json)base_instructions 的独立段:既不是人格段(不被
+// --system-prompt 替换),也不是环境段本身,而是跟着"当前模型"走的又一段
+// ——切模型就换、切到目录外模型就没有。开头一行说明来源,免得模型把它
+// 跟人格设定混为一谈。
+inline std::string ModelInstructionsSegment(const std::string& base_instructions) {
+    return "模型专属指令(来自模型目录 models.json 的 base_instructions,随当前模型生效):\n" + base_instructions;
+}
+
+// 把模型专属段追加到一份已拼好的系统提示末尾;base_instructions 为空就
+// 原样返回,一个字符都不多。之所以单独给这个函数、不并进 BuildSystemPrompt
+// 的参数表:/model 切换要"下一轮请求生效",而 AgentLoop 的系统提示构造后
+// 改不了(agent 层现有文件不动),只能由发请求前的包装层(main.cpp 的
+// ModelInstructionsBackend)对 Request.system 现拼现用——单发模式没有
+// /model,构造时直接用这个函数拼一次也是同一份结构。
+inline std::string WithModelInstructions(const std::string& system_prompt, const std::string& base_instructions) {
+    if (base_instructions.empty()) {
+        return system_prompt;
+    }
+    return system_prompt + "\n\n" + ModelInstructionsSegment(base_instructions);
+}
+
 // custom_persona 留空(默认)时用 DefaultPersona();非空时整段替换人格,
 // 环境段照样追加在后面,不会被换掉。
 // skills_segment(M9 新增):tools::BuildSkillsPromptSegment() 算出来的
