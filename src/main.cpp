@@ -41,6 +41,7 @@
 #include "cli/diff.hpp"
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
+#include "cli/markdown.hpp"
 #include "cli/setup_wizard.hpp"
 #include "cli/slash_commands.hpp"
 #include "cli/spinner.hpp"
@@ -1105,6 +1106,198 @@ private:
     std::vector<Anchor> anchors_;
 };
 
+// ---------------------------------------------------------------------------
+// markdown(0.18.x):模型正文的两段式渲染记账员。
+//
+// 前一段:流式期间正文照旧逐字原样打(OnDelta 就是 on_text_delta 的唯一
+// 打印出口,现状零改动),顺带攒全文、记块首行号——流式里判 markdown
+// 结构不可靠,不赌。后一段:回合收束(RunTurn 里 Run() 正常返回、没被
+// ESC 打断)后,FinalizeRepaint 拿攒下的完整正文过 DetectMarkdownStructure,
+// 检测到结构才把刚打的原样正文整块擦掉、按 RenderMarkdown 重画——擦与画
+// 走 TranscriptPainter 同一套"记行数、擦、重打"的 Win32 锚点手艺;没有
+// 结构就一字不动,不重画不闪。
+//
+// 块的边界:工具条目要开画时(on_tool_start)当前块作罢、保持原样——
+// 重画只做回合收束时的最后一块,中途的过场白一两句话没有重画的价值,也
+// 免得跟条目锚点的账搅在一起;最后一块正好是"最后一次请求的完整正文"
+// (assembler 攒出的那条 assistant 文本,工具调用不会插在它中间)。
+//
+// 行数记账不猜折行:块首记起始行号,收束时按光标位移算物理行数——原样
+// 流式的长行由控制台自然折行,逐字模拟折行规则(延迟 EOL 那套)不可靠。
+// 滚屏对策跟 TranscriptPainter::EnsureRoom 同一套账:每个增量落笔前按
+// "换行数 + 显示宽/控制台宽 + 余量"高估一下要占的行数,快撞缓冲区底就
+// 自己先滚够、把 start_row_ 同步往上平移——滚动始终出自自己之手,行号
+// 永远对得上;正文块比整个缓冲区还高时才真的救不了。靠不住的账一律放弃
+// 重画(宁可漏渲染,不可错渲染):块首不在行首、探测失败、块高过整个
+// 缓冲区,全都原样保留。
+//
+// enabled=false(管道/重定向/plain 主题)时 OnDelta 退化成"拿锁原样打印"
+// (跟 0.18.0 的 on_text_delta 逐字节一致),其余方法全是空操作。
+// ---------------------------------------------------------------------------
+class StreamBodyTracker {
+public:
+    StreamBodyTracker(const lubancode::cli::Theme& theme, bool enabled) : theme_(theme), enabled_(enabled) {}
+
+    StreamBodyTracker(const StreamBodyTracker&) = delete;
+    StreamBodyTracker& operator=(const StreamBodyTracker&) = delete;
+
+    // 流式正文增量:原样打印 + 记账。M10 的锁规矩不变——流式期间的
+    // std::cout 写都拿 StdoutWriteMutex,跟监听线程的 "[已打断]"/"[已排队]"
+    // 错开。
+    void OnDelta(const std::string& text) {
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        if (!enabled_) {
+            std::cout << text;
+            std::cout.flush();
+            return;
+        }
+#ifdef _WIN32
+        const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (!in_block_) {
+            in_block_ = true;
+            unsafe_ = false;
+            buffer_.clear();
+            CONSOLE_SCREEN_BUFFER_INFO info{};
+            if (GetConsoleScreenBufferInfo(h_out, &info) && info.dwCursorPosition.X == 0) {
+                start_row_ = info.dwCursorPosition.Y;
+            } else {
+                unsafe_ = true;  // 块首不在行首/探测失败:账算不清,这块不动
+            }
+        }
+        // 落笔前先估这一笔要占几行(换行数 + 折行上限 + 余量),快撞缓冲区
+        // 底就自己先滚够、start_row_ 同步上移——滚动出自自己之手,行号
+        // 不失真;块首都得滚出顶(块比整个缓冲区还高)才认输。
+        if (!unsafe_) {
+            CONSOLE_SCREEN_BUFFER_INFO info{};
+            if (GetConsoleScreenBufferInfo(h_out, &info)) {
+                int rows_needed = 2;
+                for (const char c : text) {
+                    if (c == '\n') {
+                        ++rows_needed;
+                    }
+                }
+                rows_needed += static_cast<int>(lubancode::cli::DisplayWidthUtf8(text)) /
+                               (std::max)(1, static_cast<int>(info.dwSize.X));
+                const int overflow = info.dwCursorPosition.Y + rows_needed - info.dwSize.Y + 1;
+                if (overflow > 0) {
+                    if (overflow > start_row_) {
+                        unsafe_ = true;
+                    } else {
+                        const COORD saved = info.dwCursorPosition;
+                        SetConsoleCursorPosition(h_out, COORD{0, static_cast<SHORT>(info.dwSize.Y - 1)});
+                        for (int i = 0; i < overflow; ++i) {
+                            std::cout << "\n";
+                        }
+                        std::cout.flush();
+                        start_row_ -= overflow;
+                        SetConsoleCursorPosition(
+                            h_out, COORD{saved.X, static_cast<SHORT>(static_cast<int>(saved.Y) - overflow)});
+                    }
+                }
+            } else {
+                unsafe_ = true;
+            }
+        }
+        std::cout << text;
+        std::cout.flush();
+        buffer_ += text;
+#else
+        std::cout << text;
+        std::cout.flush();
+#endif
+    }
+
+    // 工具条目要开画了:当前块到此为止,屏上保持原样。
+    void OnBlockBreak() {
+        if (!enabled_) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        in_block_ = false;
+        buffer_.clear();
+    }
+
+    // 回合收束:最后一块正文已完整——检测到 markdown 结构就整块擦掉重画
+    // 渲染版,否则一字不动。只在 Run() 正常返回且没被打断时由 RunTurn 调。
+    void FinalizeRepaint() {
+        if (!enabled_ || !in_block_) {
+            return;
+        }
+        in_block_ = false;
+#ifdef _WIN32
+        if (unsafe_ || buffer_.empty() || !lubancode::cli::DetectMarkdownStructure(buffer_)) {
+            buffer_.clear();
+            return;
+        }
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
+        CONSOLE_SCREEN_BUFFER_INFO info{};
+        if (!GetConsoleScreenBufferInfo(h_out, &info)) {
+            buffer_.clear();
+            return;
+        }
+        const int buffer_height = info.dwSize.Y;
+        const SHORT buffer_width = info.dwSize.X;
+        const COORD cur = info.dwCursorPosition;
+        // 原样块占的物理行数按光标位移算(末行没换行、光标停在行中时也算
+        // 一行),不逐字模拟折行。
+        const int old_rows = static_cast<int>(cur.Y) - start_row_ + (cur.X > 0 ? 1 : 0);
+        if (old_rows <= 0) {
+            buffer_.clear();
+            return;
+        }
+        const int width = lubancode::cli::DetectConsoleWidth().value_or(80);
+        const std::vector<std::string> lines = lubancode::cli::RenderMarkdown(buffer_, theme_, width);
+        buffer_.clear();
+        if (lines.empty()) {
+            return;
+        }
+        const int new_rows = static_cast<int>(lines.size());
+        // 渲染版比原样块高(标题前后的空行、表格边线都要地方)、又贴着
+        // 缓冲区底:照 OnDelta 同一套,自己先滚够、start_row_ 同步上移。
+        // 渲染版比整个缓冲区还高才放弃(原样保留,信息不丢)。
+        if (start_row_ + new_rows >= buffer_height) {
+            const int overflow = start_row_ + new_rows - buffer_height + 1;
+            if (overflow > start_row_) {
+                return;
+            }
+            SetConsoleCursorPosition(h_out, COORD{0, static_cast<SHORT>(buffer_height - 1)});
+            for (int i = 0; i < overflow; ++i) {
+                std::cout << "\n";
+            }
+            std::cout.flush();
+            start_row_ -= overflow;
+        }
+        DWORD written = 0;
+        const int rows_to_clear = (std::max)(old_rows, new_rows);
+        for (int r = 0; r < rows_to_clear && start_row_ + r < buffer_height; ++r) {
+            const COORD row_pos{0, static_cast<SHORT>(start_row_ + r)};
+            FillConsoleOutputCharacterW(h_out, L' ', static_cast<DWORD>(buffer_width), row_pos, &written);
+        }
+        SetConsoleCursorPosition(h_out, COORD{0, static_cast<SHORT>(start_row_)});
+        for (int i = 0; i < new_rows; ++i) {
+            std::cout << lines[static_cast<std::size_t>(i)];
+            if (i + 1 < new_rows) {
+                std::cout << "\n";
+            }
+        }
+        std::cout.flush();
+        // 渲染版每行都截到 width-1,绝不物理折行;末行不带换行收梢,跟原样
+        // 流式一致——RunTurn 随后那个 "\n" 照常把行关上,下游行为分毫不差。
+#else
+        buffer_.clear();
+#endif
+    }
+
+private:
+    const lubancode::cli::Theme& theme_;
+    bool enabled_;
+    bool in_block_ = false;
+    bool unsafe_ = false;
+    int start_row_ = 0;
+    std::string buffer_;
+};
+
 // 统计一个磁盘文件现在有多少行(write_file 覆盖前掐一下旧行数,给 +N -M
 // 摘要用)。读不到(不存在/是目录/打不开)给 nullopt——"新文件"场景。
 std::optional<int> FileLineCount(const std::string& path_utf8) {
@@ -1611,7 +1804,7 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                             lubancode::cli::ContextTracker& context_tracker,
                                             lubancode::tools::ToolRegistry& registry,
                                             const lubancode::config::HooksConfig& hooks_config,
-                                            ToolDisplay& display) {
+                                            ToolDisplay& display, StreamBodyTracker& body_tracker) {
     lubancode::agent::Callbacks callbacks;
 
     // M9:hooks_config 四个数组全空是常态(没配 hooks 的用户占多数),这时候
@@ -1632,18 +1825,16 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         };
     }
 
-    // M10:这几处 std::cout 写都发生在"流式期间"(Run() 还没返回),跟
-    // TurnInputListener 监听线程自己打的 "[已打断]"/"[已排队] ..." 抢同一份
-    // stdout——拿 StdoutWriteMutex 包一下,两边错开,免得真终端上偶发交错
-    // 把画面弄花。管道模式下监听线程压根不起,这把锁形同虚设,不影响行为。
-    callbacks.on_text_delta = [](const std::string& text) {
-        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-        std::cout << text;
-        std::cout.flush();
-    };
+    // M10:流式期间的 std::cout 写要拿 StdoutWriteMutex 跟监听线程错开——
+    // 这条规矩没变,只是打印挪进了 StreamBodyTracker::OnDelta(锁在它里面
+    // 拿):正文照旧逐字原样打,顺带给回合收束后的 markdown 重画记账;
+    // 管道模式/plain 主题下 tracker 不启用,OnDelta 就是原来那三行。
+    callbacks.on_text_delta = [&body_tracker](const std::string& text) { body_tracker.OnDelta(text); };
 
     // UI-B:工具条目化渲染,建条目/画条目/管道行全在 ToolDisplay 里。
-    callbacks.on_tool_start = [&display](const std::string& name, const nlohmann::json& input) {
+    // markdown:条目要开画了,正文当前块到此为止(保持原样,不重画)。
+    callbacks.on_tool_start = [&display, &body_tracker](const std::string& name, const nlohmann::json& input) {
+        body_tracker.OnBlockBreak();
         display.OnToolStart(name, input);
     };
 
@@ -1808,9 +1999,13 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     // 是不是被 ESC 打断的"(打断态条目标 Interrupted)。
     std::atomic<bool> cancel_flag{false};
     ToolDisplay display(transcript, theme, is_console, todo_state, &cancel_flag, transcript_expanded);
+    // markdown:正文两段式渲染的记账员。渲染只活在真控制台 + 彩色主题——
+    // 管道/重定向(is_console 为假)和 plain 主题(theme.reset 空)全部
+    // enabled=false,正文原样输出,一个字节不动。
+    StreamBodyTracker body_tracker(theme, is_console && !theme.reset.empty());
     const lubancode::agent::Callbacks callbacks =
         BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker, registry,
-                        hooks_config, display);
+                        hooks_config, display, body_tracker);
 
     lubancode::cli::TurnInputListener listener(cancel_flag, theme);
 
@@ -1826,6 +2021,12 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
 
     RunTurnResult out;
     out.queued_lines = listener.TakeQueuedLines();
+
+    // markdown 两段式的后一段:回合正常收束(没报错、没被 ESC 打断)才把
+    // 最后一块正文按渲染版重画;半截话/报错现场保持原样,不赌。
+    if (result.has_value() && !result->cancelled) {
+        body_tracker.FinalizeRepaint();
+    }
 
     std::cout << "\n";
 

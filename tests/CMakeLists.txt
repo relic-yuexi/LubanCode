@@ -38,6 +38,7 @@ add_executable(lubancode_tests
   test_divider.cpp
   test_format_utils.cpp
   test_transcript.cpp
+  test_markdown.cpp
   test_diff.cpp
   test_plugins.cpp
   test_web_fetch.cpp
@@ -81,4 +82,9 @@ add_test(NAME lubancode_tests COMMAND lubancode_tests)
 if(WIN32)
   add_executable(screen_driver screen_driver.cpp)
   target_compile_features(screen_driver PRIVATE cxx_std_23)
+
+  # markdown(0.18.x):markdown 重画专用的刮屏驱动器,同样不进 ctest,
+  # 集成验证时手动跑:markdown_screen_driver <lubancode.exe> <工作目录> <报告文件>
+  add_executable(markdown_screen_driver markdown_screen_driver.cpp)
+  target_compile_features(markdown_screen_driver PRIVATE cxx_std_23)
 endif()
