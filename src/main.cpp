@@ -47,6 +47,7 @@
 #include "cli/todo_render.hpp"
 #include "cli/transcript.hpp"
 #include "config/config.hpp"
+#include "config/model_catalog.hpp"
 #include "mcp/client.hpp"
 #include "mcp/mcp_tool.hpp"
 #include "tools/agent_tool.hpp"
@@ -218,11 +219,39 @@ private:
     std::shared_ptr<std::string> current_think_;
 };
 
+// 包一层 Backend:真正发请求前,把模型目录(models.json)里当前模型的
+// base_instructions 作为独立段追加到 Request.system 末尾。跟 Model/
+// ThinkOverrideBackend 同一个套路、同一个理由(AgentLoop 的系统提示构造时
+// 定死,agent 层现有文件不动)——current_instructions 为空串就是"不追加",
+// 原样透传,零破坏。/model 切换改的和这里读的是同一块 shared_ptr<string>
+// 内存,切到目录外模型时上层把它清空,旧模型的指令自然不再发。
+class ModelInstructionsBackend : public lubancode::api::Backend {
+public:
+    ModelInstructionsBackend(lubancode::api::Backend& inner, std::shared_ptr<std::string> current_instructions)
+        : inner_(inner), current_instructions_(std::move(current_instructions)) {}
+
+    std::expected<void, lubancode::api::Error> send_stream(
+        const lubancode::api::Request& request,
+        const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* cancel = nullptr) override {
+        lubancode::api::Request patched = request;
+        patched.system = lubancode::agent::WithModelInstructions(request.system, *current_instructions_);
+        return inner_.send_stream(patched, on_event, cancel);
+    }
+
+private:
+    lubancode::api::Backend& inner_;
+    std::shared_ptr<std::string> current_instructions_;
+};
+
 // --config、/config 共用:打印最终生效的配置和每个字段的来源。session_model
 // 有值时(/config 场景)额外打一行"本会话实际在用的 model"——/model 切换
 // 只影响会话内存,不一定跟 config.model(四级合并出来的那份)一致。
+// catalog 非空时(现在两个调用点都传)追加两行:模型目录路径 + 条目数,
+// 以及"当前模型(会话在用的那个,没有就看 config.model)命没命中目录"。
 void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
-                             const std::optional<std::string>& session_model = std::nullopt) {
+                             const std::optional<std::string>& session_model = std::nullopt,
+                             const lubancode::config::ModelCatalog* catalog = nullptr) {
     const auto& config = result.config;
     const auto& sources = result.sources;
     const std::string wire_str = config.wire == lubancode::config::Wire::Responses ? "responses" : "anthropic";
@@ -301,6 +330,31 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
         } else {
             std::cout << config.search.provider
                       << " (api_key " << lubancode::config::MaskApiKey(config.search.api_key) << ")";
+        }
+        std::cout << "\n";
+    }
+    // 模型目录(models.json):路径 + 条目数,以及当前模型命没命中。
+    if (catalog != nullptr) {
+        std::cout << "  模型目录           = ";
+        if (catalog->source_path.empty()) {
+            const auto expected = lubancode::config::ModelCatalogPath();
+            std::cout << "(未配置," << (expected.has_value() ? *expected : std::string("<找不到主目录>/.lubancode/models.json"))
+                       << " 不存在)";
+        } else {
+            std::cout << catalog->source_path << "(" << catalog->models.size() << " 个条目)";
+        }
+        std::cout << "\n";
+        const std::string& current = session_model.has_value() ? *session_model : config.model;
+        const auto* entry = catalog->FindBySlug(current);
+        std::cout << "  当前模型命中目录   = ";
+        if (current.empty()) {
+            std::cout << "(model 未设置)";
+        } else if (entry != nullptr) {
+            std::cout << "是(" << entry->slug
+                       << (entry->display_name.empty() ? std::string() : ",display_name: " + entry->display_name)
+                       << ")";
+        } else {
+            std::cout << "否(" << current << " 不在目录里,一切按现状)";
         }
         std::cout << "\n";
     }
@@ -1786,21 +1840,77 @@ void HandleCompactCommand(const std::string& args, lubancode::agent::AgentLoop& 
 // 那一刻(responses 原样递,anthropic 查映射表、映射不上打警告)去判断,
 // 原样存,不强制转小写(anthropic 那张映射表自己做大小写不敏感匹配,
 // responses 要"原样递",这里转了小写反而破坏这条承诺)。
-void HandleThinkCommand(const std::string& args, const std::shared_ptr<std::string>& current_think) {
+// entry:当前模型在模型目录(models.json)里的条目,没有就是 nullptr。
+// 有条目且声明了 supported_think_levels → 裸敲列真实档位带描述,设了表外
+// 档位只提示"目录未声明,仍会发送",不拦;没有条目 → 维持现状提示。
+void HandleThinkCommand(const std::string& args, const std::shared_ptr<std::string>& current_think,
+                         const lubancode::config::ModelCatalogEntry* entry = nullptr) {
+    const std::vector<std::string> hint_lines = lubancode::config::ThinkLevelHintLines(entry);
     if (args.empty()) {
         std::cout << "当前推理强度: " << (current_think->empty() ? "(未设置,不发这个参数)" : *current_think) << "\n";
-        std::cout << "支持哪些档位以服务商为准。\n";
+        if (!hint_lines.empty()) {
+            std::cout << "模型目录声明的档位(" << entry->slug << "):\n";
+            for (const auto& line : hint_lines) {
+                std::cout << line << "\n";
+            }
+        } else {
+            std::cout << "支持哪些档位以服务商为准。\n";
+        }
         return;
     }
     *current_think = args;
-    std::cout << "推理强度已切到 " << args << "(本会话生效)。支持哪些档位以服务商为准。\n";
+    std::cout << "推理强度已切到 " << args << "(本会话生效)。";
+    if (!hint_lines.empty()) {
+        if (!lubancode::config::ThinkLevelDeclared(*entry, args)) {
+            std::cout << "提示: 模型目录未声明该档,仍会发送。";
+        }
+        std::cout << "\n";
+    } else {
+        std::cout << "支持哪些档位以服务商为准。\n";
+    }
+}
+
+// 把模型目录条目应用到会话状态:/model 切换(两个 explicit 都传 false,
+// 目录声明了就用)和交互模式启动(explicit 按 Source 判断,用户显式配过的
+// 不动)共用这一段。改 current_think / 会话窗口 / base_instructions,干了
+// 什么就打一行;模型不在目录时 ComputeCatalogApplication 给回一份"全空"
+// 的应用——think/窗口不动,base_instructions 清空(旧模型的指令不再发),
+// 一切回退现状,不打任何多余的话。
+void ApplyModelCatalog(const lubancode::config::ModelCatalog& catalog, const std::string& slug,
+                        bool think_explicit, bool window_explicit,
+                        const std::shared_ptr<std::string>& current_think,
+                        lubancode::cli::ContextTracker& context_tracker,
+                        const std::shared_ptr<std::string>& current_model_instructions) {
+    const auto apply =
+        lubancode::config::ComputeCatalogApplication(catalog, slug, think_explicit, window_explicit);
+    if (apply.think.has_value()) {
+        *current_think = *apply.think;
+        std::cout << "think→" << *apply.think << "(目录默认)\n";
+    }
+    if (apply.context_window_tokens.has_value()) {
+        context_tracker.set_window_tokens(*apply.context_window_tokens);
+        std::cout << "上下文窗口→" << *apply.context_window_tokens << " tokens(目录声明)\n";
+    }
+    if (*current_model_instructions != apply.base_instructions) {
+        *current_model_instructions = apply.base_instructions;
+        if (!apply.base_instructions.empty()) {
+            std::cout << "base_instructions 已注入系统提示(目录条目 " << slug << ",下一轮请求生效)\n";
+        }
+    }
 }
 
 // /model 命令的执行逻辑:带参数直接切;不带参数拉列表编号选。切完了,
 // 有配置文件才问"写进配置文件?",没有就只提示本会话生效。
+// catalog:模型目录——列表里优先显示目录条目的 display_name(其次接口
+// 给的 display_name,最后 id 兜底);切换成功后按目录条目应用
+// default_think / context_window / base_instructions(见 ApplyModelCatalog)。
 void HandleModelCommand(const std::string& args, const lubancode::config::Config& config,
                          const std::shared_ptr<std::string>& current_model,
-                         std::optional<std::string>& config_file_path) {
+                         std::optional<std::string>& config_file_path,
+                         const lubancode::config::ModelCatalog& catalog,
+                         const std::shared_ptr<std::string>& current_think,
+                         lubancode::cli::ContextTracker& context_tracker,
+                         const std::shared_ptr<std::string>& current_model_instructions) {
     std::string chosen;
 
     if (!args.empty()) {
@@ -1817,7 +1927,15 @@ void HandleModelCommand(const std::string& args, const lubancode::config::Config
         }
         for (std::size_t i = 0; i < list_result->size(); ++i) {
             const auto& m = (*list_result)[i];
-            const std::string& label = m.display_name.empty() ? m.id : m.display_name;
+            const auto* entry = catalog.FindBySlug(m.id);
+            std::string label;
+            if (entry != nullptr && !entry->display_name.empty()) {
+                // 目录条目的 display_name 优先,后面括号带上 slug——选完切换
+                // 用的还是 API 模型名,展示名和真名对得上号。
+                label = entry->display_name + "(" + m.id + ")";
+            } else {
+                label = m.display_name.empty() ? m.id : m.display_name;
+            }
             std::cout << "  " << (i + 1) << ") " << label << "\n";
         }
         const std::optional<std::string> selection = lubancode::cli::ReadLine("选择模型编号 [1]: ");
@@ -1844,6 +1962,11 @@ void HandleModelCommand(const std::string& args, const lubancode::config::Config
 
     *current_model = chosen;
     std::cout << "已切换到模型: " << chosen << "(本会话生效)\n";
+
+    // 模型目录应用:主动切换,目录声明了就用(两个 explicit 都传 false);
+    // 切到目录外的名字时这一步什么都不动(base_instructions 清空),回退现状。
+    ApplyModelCatalog(catalog, chosen, /*think_explicit=*/false, /*window_explicit=*/false, current_think,
+                       context_tracker, current_model_instructions);
 
     if (config_file_path.has_value()) {
         const std::optional<std::string> answer =
@@ -2051,7 +2174,7 @@ void HandleExportCommand(const std::string& args, const lubancode::agent::AgentL
 // 一场存档都没有就正常开新会话,不报错。
 void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_confirm,
                       const lubancode::cli::Theme& theme, const std::string& persona, bool spinner_enabled,
-                      bool continue_last = false) {
+                      const lubancode::config::ModelCatalog& model_catalog, bool continue_last = false) {
     const lubancode::config::Config& config = config_result.config;
 
     // M9:技能扫描一次,主代理、子代理、系统提示词、/skills 命令共用同一份
@@ -2063,19 +2186,35 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     std::unique_ptr<lubancode::api::Backend> real_backend = BuildBackend(config);
     auto current_model = std::make_shared<std::string>(config.model);
     auto current_think = std::make_shared<std::string>(config.think);
+    // 模型目录 base_instructions 的会话级状态:启动/切换模型时由
+    // ApplyModelCatalog 填,ModelInstructionsBackend 发请求前现拼进
+    // Request.system;空串 = 不追加,零破坏。
+    auto current_model_instructions = std::make_shared<std::string>();
     ModelOverrideBackend model_backend(*real_backend, current_model);
     ThinkOverrideBackend think_backend(model_backend, current_think);
+    ModelInstructionsBackend instructions_backend(think_backend, current_model_instructions);
     // SpinnerBackend 包最外层:每次 send_stream 起转轮,收到第一个流事件就
-    // 停,Model/ThinkOverrideBackend 分别负责 /model、/think 切换生效,
-    // 几层包装顺序不影响语义(补丁都在更内层做,转轮只关心"发出去了没有
-    // 第一个字节回来")。/compact 触发的压缩请求不走这几层包装,直接用
-    // *real_backend——理由见 HandleCompactCommand 注释。
-    SpinnerBackend wrapped_backend(think_backend, theme, spinner_enabled);
+    // 停,Model/Think/ModelInstructions 各层分别负责 /model、/think、目录
+    // base_instructions 切换生效,几层包装顺序不影响语义(补丁都在更内层
+    // 做,转轮只关心"发出去了没有第一个字节回来")。/compact 触发的压缩
+    // 请求不走这几层包装,直接用 *real_backend——理由见
+    // HandleCompactCommand 注释。
+    SpinnerBackend wrapped_backend(instructions_backend, theme, spinner_enabled);
 
     // ContextTracker:会话级"上下文占用"记账,/context、自动 compact 都靠它。
     lubancode::cli::ContextTracker context_tracker(config.context_window_tokens);
 
     PrintBanner(config, theme);
+
+    // 模型目录:启动时当前模型就在目录里,同样应用 default_think /
+    // context_window / base_instructions——但用户显式配过的字段(Source
+    // 不是内置默认值)不动,目录只是"该模型的出厂默认",压不过用户自己
+    // 的配置。打印紧跟横幅,干了什么一眼看全。
+    ApplyModelCatalog(model_catalog, *current_model,
+                       /*think_explicit=*/config_result.sources.think != lubancode::config::Source::Default,
+                       /*window_explicit=*/config_result.sources.context_window_tokens !=
+                           lubancode::config::Source::Default,
+                       current_think, context_tracker, current_model_instructions);
 
     // M8:mcp_servers 声明在 sub_registry/registry 之前——函数退出时按声明的
     // 反序析构,sub_registry/registry(里头的 McpTool 持有 mcp::Client& 引用)
@@ -2223,10 +2362,11 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     PrintSlashHelp();
                     break;
                 case lubancode::cli::SlashCommand::Model:
-                    HandleModelCommand(parsed.args, config, current_model, config_file_path);
+                    HandleModelCommand(parsed.args, config, current_model, config_file_path, model_catalog,
+                                        current_think, context_tracker, current_model_instructions);
                     break;
                 case lubancode::cli::SlashCommand::Config:
-                    PrintConfigDiagnostics(config_result, *current_model);
+                    PrintConfigDiagnostics(config_result, *current_model, &model_catalog);
                     break;
                 case lubancode::cli::SlashCommand::Clear:
                     rebuild_loop();
@@ -2251,7 +2391,9 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     break;
                 }
                 case lubancode::cli::SlashCommand::Think:
-                    HandleThinkCommand(parsed.args, current_think);
+                    // 目录条目按"此刻的会话模型"现查——/model 切过之后,
+                    // /think 列的就是新模型声明的档位。
+                    HandleThinkCommand(parsed.args, current_think, model_catalog.FindBySlug(*current_model));
                     break;
                 case lubancode::cli::SlashCommand::Skills:
                     PrintSkillsCommand(skills, CurrentDirUtf8(), home_dir);
@@ -2358,8 +2500,14 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
 // 单发模式(位置参数):也走 agent loop,同样支持工具,只是只问这一句。
 // 管道/单发场景下 spinner_enabled 传进来的必然是 false(RunCli 里按
 // DetectConsoleCapability().is_console 算好的),这里不用再判断一次。
+// model_instructions:模型目录里当前模型的 base_instructions(RunCli 按
+// 目录算好传进来,不在目录就是空串)。单发模式没有 /model,不用会话级
+// 状态和包装层,构造 AgentLoop 时直接拼进系统提示,结构跟交互模式发出去
+// 的一模一样;think/context_window 的目录应用同样由 RunCli 预先并进
+// config,这里不重复判断——保持这个函数只管"按给定配置问一句"。
 int AskOnce(const lubancode::config::Config& config, const std::string& question, bool auto_confirm,
-            const lubancode::cli::Theme& theme, const std::string& persona, bool spinner_enabled) {
+            const lubancode::cli::Theme& theme, const std::string& persona, bool spinner_enabled,
+            const std::string& model_instructions = std::string()) {
     // M9:技能扫描,理由同 InteractiveLoop——单发模式也该能用技能。
     const std::optional<std::string> home_dir = lubancode::config::HomeDir();
     const std::vector<lubancode::tools::SkillMeta> skills = lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir);
@@ -2401,9 +2549,11 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     registry.Register(std::make_unique<lubancode::tools::TodoWriteTool>(todo_state));
     // M7:插件同样只挂主 registry,不挂 sub_registry。
     MountPlugins(plugin_host, registry, theme, plugin_mounted, plugin_warnings);
-    lubancode::agent::AgentLoop loop(wrapped_backend, registry, config.model,
-                                      lubancode::agent::BuildSystemPrompt(CurrentDirUtf8(), persona, skills_segment),
-                                      /*max_tokens=*/4096, /*max_turns=*/25, config.max_context_chars);
+    lubancode::agent::AgentLoop loop(
+        wrapped_backend, registry, config.model,
+        lubancode::agent::WithModelInstructions(
+            lubancode::agent::BuildSystemPrompt(CurrentDirUtf8(), persona, skills_segment), model_instructions),
+        /*max_tokens=*/4096, /*max_turns=*/25, config.max_context_chars);
     std::set<std::string> always_allowed_tools;
     lubancode::cli::ContextTracker context_tracker(config.context_window_tokens);
 
@@ -2493,8 +2643,15 @@ int RunCli(const std::vector<std::string>& args) {
         std::cout << *config_result->migration_notice << "\n";
     }
 
+    // 模型目录(models.json):启动时读一次,坏 JSON/坏条目只打警告跳过,
+    // 文件不存在就是空目录,一切回退现状,绝不拦人。
+    const lubancode::config::ModelCatalog model_catalog = lubancode::config::LoadModelCatalog();
+    for (const auto& warning : model_catalog.warnings) {
+        std::cout << "[models.json 警告] " << warning << "\n";
+    }
+
     if (print_config) {
-        PrintConfigDiagnostics(*config_result);
+        PrintConfigDiagnostics(*config_result, std::nullopt, &model_catalog);
         return 0;
     }
 
@@ -2548,7 +2705,23 @@ int RunCli(const std::vector<std::string>& args) {
                 std::cerr << configured_check.error() << "\n";
                 return 1;
             }
-            return AskOnce(config_result->config, positional, auto_confirm, theme, persona, spinner_enabled);
+            // 模型目录应用(单发模式):think/context_window 直接并进这份
+            // 一次性的配置副本(用户显式配过的不动,跟交互模式同一条规矩),
+            // base_instructions 单独传给 AskOnce 拼进系统提示。不打提示行——
+            // 单发/管道模式的输出常被重定向,不该混进这些会话性的话。
+            lubancode::config::Config once_config = config_result->config;
+            const auto catalog_apply = lubancode::config::ComputeCatalogApplication(
+                model_catalog, once_config.model,
+                config_result->sources.think != lubancode::config::Source::Default,
+                config_result->sources.context_window_tokens != lubancode::config::Source::Default);
+            if (catalog_apply.think.has_value()) {
+                once_config.think = *catalog_apply.think;
+            }
+            if (catalog_apply.context_window_tokens.has_value()) {
+                once_config.context_window_tokens = *catalog_apply.context_window_tokens;
+            }
+            return AskOnce(once_config, positional, auto_confirm, theme, persona, spinner_enabled,
+                            catalog_apply.base_instructions);
         }
 
         // 交互模式:base_url/api_key/model 有一个解不出来,就先走一遍初次
@@ -2576,7 +2749,7 @@ int RunCli(const std::vector<std::string>& args) {
             effective.sources.auth_token = marked;
             effective.sources.model = marked;
         }
-        InteractiveLoop(effective, auto_confirm, theme, persona, spinner_enabled, continue_last);
+        InteractiveLoop(effective, auto_confirm, theme, persona, spinner_enabled, model_catalog, continue_last);
     } catch (const std::exception& e) {
         std::cerr << "[错误] 未预料的异常: " << e.what() << "\n";
         return 1;

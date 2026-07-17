@@ -218,6 +218,59 @@ lubancode 最终生效的配置:
 
 配置文件坏了(不是合法 JSON)、`api_key` 四级都没配到,都会报错,错误信息里带着文件路径或者提示去哪几个地方配。
 
+## 模型目录(models.json)
+
+除了四级配置,还可以在**主目录**放一份模型目录:`<主目录>/.lubancode/models.json`,给每个模型写一条详细配置(思路借鉴 Codex 的 model-catalog)。目录是锦上添花,不是硬依赖:文件不存在就是空目录,一切行为跟没有这个功能时一模一样;整份 JSON 坏了、或者某一条写坏了,启动时打一行警告跳过,绝不报错拦人。
+
+当前会话模型的 slug 命中目录条目时:
+
+- **启动**和 **`/model` 切换**后,自动应用条目里的 `default_think`(打一行 `think→high(目录默认)`)、`context_window`(更新会话窗口,`/context` 立刻能看到)、`base_instructions`(作为独立段注入系统提示,下一轮请求生效)。启动时用户显式配过的字段(环境变量/配置文件里写了 `think`/`context_window`)不动——目录只是"该模型的出厂默认",压不过用户自己的配置。
+- **`/think`(`/effort`)裸敲**时列出条目声明的真实档位和描述;设一个表外档位只提示"目录未声明该档,仍会发送",不拦。
+- **`/model`** 列表里优先显示条目的 `display_name`(括号带 slug)。
+- **`/config`** 里能看到目录路径、条目数、当前模型命没命中。
+- 切到目录外的模型名,上面这些全部回退现状,旧模型注入的 `base_instructions` 也一并清掉。
+
+MiniMax-M3 的完整示例:
+
+```json
+{
+  "models": [
+    {
+      "slug": "MiniMax-M3",
+      "display_name": "MiniMax M3",
+      "description": "MiniMax 旗舰模型,anthropic 兼容端点,支持 Adaptive Thinking",
+      "default_think": "high",
+      "supported_think_levels": [
+        { "effort": "none", "description": "关闭思考,直答,最快" },
+        { "effort": "high", "description": "开启 Adaptive Thinking,想多深由模型自己定" }
+      ],
+      "base_instructions": "工具调用要果断,能并行读文件就并行读;回答用中文,简洁准确。",
+      "context_window": "1m",
+      "supports_parallel_tool_calls": true,
+      "input_modalities": ["text"],
+      "truncation_policy": "auto"
+    }
+  ]
+}
+```
+
+各字段含义(除 `slug` 全部可选,没写就不应用):
+
+| 字段 | 含义 |
+|------|------|
+| `slug` | **必填**,就是发请求用的 API 模型名,按它查条目 |
+| `display_name` | 展示名,`/model` 列表用 |
+| `description` | 一句话说明,给人看的 |
+| `default_think` | 切到该模型时自动应用的推理强度档位 |
+| `supported_think_levels` | 该模型真实支持的档位表,每档 `effort` + `description`,`/think` 裸敲时列出来;设表外档位只提示不拦 |
+| `base_instructions` | 模型专属指令,作为独立段注入系统提示——不碰 `--system-prompt` 的人格段,两者互不覆盖,切走模型就撤掉 |
+| `context_window` | 上下文窗口,`"1m"`/`"512k"`/裸数字都认(十进制,k=1000、m=1000000) |
+| `supports_parallel_tool_calls` | 是否支持并行工具调用(先解析存储,暂不启用) |
+| `input_modalities` | 输入模态,如 `["text", "image"]`(先解析存储,暂不启用) |
+| `truncation_policy` | 截断策略(先解析存储,暂不启用) |
+
+M3 的档位设计是"**非 `none` 即开 Adaptive Thinking**"——只要档位不是 `none`,就打开自适应思考,想多深由模型自己定,所以目录里只声明 `none`/`high` 两档就够了。
+
 ## 终端体验
 
 ### 配色主题
