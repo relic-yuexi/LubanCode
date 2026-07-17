@@ -80,11 +80,21 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
         }
     }
 
-    const std::string system_prompt = agent::BuildSystemPrompt(cwd_, SubAgentPersona(), skills_segment_);
+    // tool_search:延迟工具索引段按"此刻的 loaded 集合"现算(provider 里
+    // 闭包着 main.cpp 那份 shared_ptr),拼在子代理系统提示末尾。子代理
+    // 运行中途自己 tool_search 挂载了新工具,这段索引不会跟着刷新(系统
+    // 提示构造后定死)——但 tools 数组每轮现拼(见 AgentLoop 注释),挂载
+    // 照样生效,索引段只是稍显陈旧,无害。
+    const std::string system_prompt = agent::WithDeferredToolsIndex(
+        agent::BuildSystemPrompt(cwd_, SubAgentPersona(), skills_segment_),
+        deferred_index_provider_ ? deferred_index_provider_() : std::string());
     // 每次 execute() 都是全新的、空历史的子代理——没有跨调用的状态,
     // 子代理内部也不做自动 compact(短命任务用不上),AgentLoop 自带的
     // 字符数硬安全网(TrimHistory)照样生效,不用额外处理。
     agent::AgentLoop sub_loop(backend_, sub_registry_, model_, system_prompt, /*max_tokens=*/4096, max_turns);
+    if (tool_filter_) {
+        sub_loop.SetToolFilter(tool_filter_);
+    }
 
     agent::Callbacks sub_callbacks;
     // on_text_delta 留空:子代理的碎碎念不逐字外放,免得刷屏。

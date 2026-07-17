@@ -47,6 +47,7 @@ public:
     std::string description() const override;  // [plugin:<文件名>] 前缀
     nlohmann::json input_schema() const override;
     bool needs_confirm() const override { return true; }
+    bool deferred() const override { return true; }  // tool_search:外挂工具走延迟挂载
     Result execute(const nlohmann::json& input) override;
 
     const std::string& stem() const { return stem_; }

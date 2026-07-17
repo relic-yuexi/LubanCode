@@ -1158,3 +1158,41 @@ TEST_CASE("MergeConfig: 配置文件里的 search 段原样进最终配置;没�
     REQUIRE(merged_empty.has_value());
     CHECK_FALSE(merged_empty->config.search.Configured());
 }
+
+// ---------------------------------------------------------------------------
+// tool_search_threshold(延迟挂载阈值):只有配置文件和内置默认值两级。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseFileConfigJson: tool_search_threshold 正常解析,0 也认,负数/非整数报错") {
+    const auto ok = config::ParseFileConfigJson(R"({"tool_search_threshold": 5})", "x.json");
+    REQUIRE(ok.has_value());
+    REQUIRE(ok->tool_search_threshold.has_value());
+    CHECK(*ok->tool_search_threshold == 5);
+
+    const auto zero = config::ParseFileConfigJson(R"({"tool_search_threshold": 0})", "x.json");
+    REQUIRE(zero.has_value());
+    CHECK(*zero->tool_search_threshold == 0);
+
+    const auto missing = config::ParseFileConfigJson(R"({})", "x.json");
+    REQUIRE(missing.has_value());
+    CHECK_FALSE(missing->tool_search_threshold.has_value());
+
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"tool_search_threshold": -1})", "x.json").has_value());
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"tool_search_threshold": "20"})", "x.json").has_value());
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"tool_search_threshold": 2.5})", "x.json").has_value());
+}
+
+TEST_CASE("MergeConfig: tool_search_threshold 配置文件压过默认值,没写走默认 20") {
+    const auto defaulted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    REQUIRE(defaulted.has_value());
+    CHECK(defaulted->config.tool_search_threshold == config::kDefaultToolSearchThreshold);
+    CHECK(defaulted->config.tool_search_threshold == 20);
+    CHECK(defaulted->sources.tool_search_threshold == config::Source::Default);
+
+    config::FileConfig file;
+    file.tool_search_threshold = 5;
+    const auto from_file = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE(from_file.has_value());
+    CHECK(from_file->config.tool_search_threshold == 5);
+    CHECK(from_file->sources.tool_search_threshold == config::Source::ConfigFile);
+}

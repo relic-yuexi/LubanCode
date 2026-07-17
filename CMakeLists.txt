@@ -172,6 +172,7 @@ add_library(lubancode_core STATIC
   src/tools/skill_loader.cpp
   src/tools/skill_tool.cpp
   src/tools/todo_tool.cpp
+  src/tools/tool_search.cpp
   src/tools/plugin_loader.cpp
   src/tools/lua_tool.cpp
   src/tools/web_fetch.cpp

@@ -73,6 +73,8 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Todos;
     } else if (lower == "/plugins") {
         parsed.command = SlashCommand::Plugins;
+    } else if (lower == "/tools") {
+        parsed.command = SlashCommand::Tools;
     } else if (lower == "/sessions") {
         parsed.command = SlashCommand::Sessions;
     } else if (lower == "/resume") {
@@ -107,6 +109,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
         {"/lsp", "列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)"},
         {"/todos", "查看当前待办清单"},
         {"/plugins", "列出挂载的插件工具(DLL + lua)和加载警告"},
+        {"/tools", "列工具三态:核心(恒在)/已加载/延迟未加载(tool_search 延迟挂载)"},
         {"/sessions", "列本目录最近 20 场会话存档,倒序编号;/sessions all 列全部目录"},
         {"/resume", "/resume 编号或id 载入该场存档历史续聊"},
         {"/export", "当前会话导出 Markdown;/export 路径 可指定输出文件"},

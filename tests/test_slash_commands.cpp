@@ -242,3 +242,19 @@ TEST_CASE("AllSlashCommands: /soul //prompt 都在列表里") {
     CHECK(has_soul);
     CHECK(has_prompt);
 }
+
+TEST_CASE("ParseSlashCommand: /tools(tool_search 延迟挂载)") {
+    const auto parsed = cli::ParseSlashCommand("/tools");
+    CHECK(parsed.command == cli::SlashCommand::Tools);
+    CHECK(parsed.args.empty());
+    CHECK(cli::ParseSlashCommand("/Tools").command == cli::SlashCommand::Tools);
+}
+
+TEST_CASE("AllSlashCommands: /tools 在列表里") {
+    const auto& commands = cli::AllSlashCommands();
+    bool has_tools = false;
+    for (const auto& c : commands) {
+        if (c.name == "/tools") has_tools = true;
+    }
+    CHECK(has_tools);
+}

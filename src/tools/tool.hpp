@@ -25,6 +25,13 @@ public:
     // 执行前要不要先问用户一句。默认不用(比如 read_file 这种只读的)。
     virtual bool needs_confirm() const { return false; }
 
+    // tool_search:这个工具是不是"延迟挂载"的——注册表总工具数超过阈值时,
+    // 延迟工具不直接进请求的 tools 数组,只在系统提示的索引段里露个名字,
+    // 模型用 tool_search 检索命中后才真正挂载。默认 false(内置九件套和
+    // web_fetch/web_search 都是核心,恒在);McpTool(经 DeferredTool 包装)、
+    // PluginTool、LuaTool 这些外挂工具才是 true——它们是工具表膨胀的主力。
+    virtual bool deferred() const { return false; }
+
     struct Result {
         std::string content;    // 回传给模型的文本(成功的结果,或者人能看懂的错误说明)
         bool is_error = false;  // 执行失败/被拒绝时置位

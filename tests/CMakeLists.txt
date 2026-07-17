@@ -33,6 +33,7 @@ add_executable(lubancode_tests
   test_lsp_client.cpp
   test_lsp_tool.cpp
   test_todo_tool.cpp
+  test_tool_search.cpp
   test_todo_render.cpp
   test_divider.cpp
   test_format_utils.cpp

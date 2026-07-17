@@ -16,7 +16,8 @@ namespace {
 // 上层能看到完整的生命周期。工具真执行完之后再跑一遍 post_tool 钩子
 // (M9)——这是本次任务在 agent/ 里唯一的挂接点,函数本身不知道 hooks 具体
 // 怎么解析执行,只在两个该介入的地方各调一次回调。
-tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUseBlock& call, const Callbacks& callbacks) {
+tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUseBlock& call, const Callbacks& callbacks,
+                                const std::function<bool(const tools::Tool&)>& tool_filter) {
     if (callbacks.on_tool_start) {
         callbacks.on_tool_start(call.name, call.input);
     }
@@ -24,6 +25,18 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     tools::Tool* tool = registry.Find(call.name);
     if (tool == nullptr) {
         tools::Tool::Result result{"未知工具: " + call.name, true};
+        if (callbacks.on_tool_done) {
+            callbacks.on_tool_done(call.name, result);
+        }
+        return result;
+    }
+
+    // tool_search(延迟挂载):注册表里查得到,但过滤谓词不放行——延迟工具
+    // 还没挂载。不当"未知工具"糊弄,给一条指路的友好错误,模型下一步自然
+    // 去调 tool_search。
+    if (tool_filter && !tool_filter(*tool)) {
+        tools::Tool::Result result{"工具 " + call.name + " 存在但尚未挂载:请先用 tool_search 检索挂载,再调用。",
+                                    true};
         if (callbacks.on_tool_done) {
             callbacks.on_tool_done(call.name, result);
         }
@@ -78,6 +91,11 @@ std::vector<api::ToolDefinition> AgentLoop::BuildToolDefinitions() const {
     std::vector<api::ToolDefinition> defs;
     defs.reserve(registry_.All().size());
     for (const auto& tool : registry_.All()) {
+        // tool_search(延迟挂载):谓词不放行的工具(延迟且未挂载)不进
+        // tools 数组。没设谓词就是全量,跟从前一样。
+        if (tool_filter_ && !tool_filter_(*tool)) {
+            continue;
+        }
         defs.push_back(api::ToolDefinition{tool->name(), tool->description(), tool->input_schema()});
     }
     return defs;
@@ -90,15 +108,17 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(const std::string& user_in
     user_message.content.push_back(api::TextBlock{user_input});
     history_.push_back(std::move(user_message));
 
-    const std::vector<api::ToolDefinition> tool_defs = BuildToolDefinitions();
-
     for (int turn = 0; turn < max_turns_; ++turn) {
         api::Request request;
         request.model = model_;
         request.system = system_prompt_;
         request.messages = TrimHistory(history_, max_context_chars_);
         request.max_tokens = max_tokens_;
-        request.tools = tool_defs;
+        // 每轮现拼,不在 Run() 开头拼一次复用:tool_search 命中会在一次
+        // Run() 中途把工具加进 loaded 集合(谓词的判定依据),下一轮请求
+        // 就得带上新挂载工具的完整定义。没设谓词时,重拼出来的内容每轮
+        // 一样,行为不变,只多花一点拼 JSON 的工夫。
+        request.tools = BuildToolDefinitions();
 
         // 硬上限:轮级裁剪 + 工具结果截断都做完还是装不下(比如单条用户输入
         // 就超大),明确报错,不把一份注定被拒的超大请求发出去。
@@ -209,7 +229,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(const std::string& user_in
                 tool_results.push_back(api::ToolResultBlock{call.id, "用户按 ESC 打断,该工具未执行", true});
                 continue;
             }
-            const tools::Tool::Result result = RunOneTool(registry_, call, callbacks);
+            const tools::Tool::Result result = RunOneTool(registry_, call, callbacks, tool_filter_);
             tool_results.push_back(api::ToolResultBlock{call.id, result.content, result.is_error});
             if (cancel != nullptr && cancel->load()) {
                 interrupted = true;

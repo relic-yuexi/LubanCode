@@ -48,6 +48,20 @@ inline std::string WithModelInstructions(const std::string& system_prompt, const
     return system_prompt + "\n\n" + ModelInstructionsSegment(base_instructions);
 }
 
+// tool_search(延迟挂载)的索引段注入点:把"另有 N 个延迟工具……"那一段
+// (tools::BuildDeferredToolsIndexSegment 算出来)追加到已拼好的系统提示
+// 末尾;空串原样返回,一个字符都不多。跟 WithModelInstructions 同一个路数、
+// 同一个理由:索引段随 loaded 集合逐轮变化(检索命中的工具要从索引里消失),
+// AgentLoop 的系统提示构造后改不了,只能由发请求前的包装层(main.cpp 的
+// DeferredIndexBackend)对 Request.system 现拼现用;子代理则在 AgentTool
+// 构造 sub_loop 系统提示时按当下的 loaded 拼一次。
+inline std::string WithDeferredToolsIndex(const std::string& system_prompt, const std::string& index_segment) {
+    if (index_segment.empty()) {
+        return system_prompt;
+    }
+    return system_prompt + "\n\n" + index_segment;
+}
+
 // custom_persona 留空(默认)时用 DefaultPersona();非空时整段替换人格,
 // 环境段照样追加在后面,不会被换掉。
 // skills_segment(M9 新增):tools::BuildSkillsPromptSegment() 算出来的
