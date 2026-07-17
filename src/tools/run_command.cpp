@@ -25,8 +25,9 @@ std::string RunCommandTool::name() const {
 }
 
 std::string RunCommandTool::description() const {
-    return "在 shell(Windows 下是 PowerShell)里执行一条命令,拿到合并后的标准输出/标准错误,"
-           "以及退出码。执行前要经用户确认。超时会被强制杀掉。";
+    return "在 shell 里执行一条命令,拿到合并后的标准输出/标准错误,以及退出码。"
+           "shell 参数可选 powershell(默认)或 cmd,分别按对应语法写命令。执行前要经用户确认。"
+           "超时会被强制杀掉。";
 }
 
 nlohmann::json RunCommandTool::input_schema() const {
@@ -37,13 +38,19 @@ nlohmann::json RunCommandTool::input_schema() const {
 
     nlohmann::json command_prop = nlohmann::json::object();
     command_prop["type"] = "string";
-    command_prop["description"] = "要执行的命令,按 PowerShell 语法写";
+    command_prop["description"] = "要执行的命令,按所选 shell 的语法写(默认 PowerShell 语法)";
     properties["command"] = command_prop;
 
     nlohmann::json timeout_prop = nlohmann::json::object();
     timeout_prop["type"] = "integer";
     timeout_prop["description"] = "超时时间,单位毫秒,不填默认 120000(2 分钟)";
     properties["timeout_ms"] = timeout_prop;
+
+    nlohmann::json shell_prop = nlohmann::json::object();
+    shell_prop["type"] = "string";
+    shell_prop["enum"] = nlohmann::json::array({"powershell", "cmd"});
+    shell_prop["description"] = "用哪个 shell 执行,不填默认 powershell";
+    properties["shell"] = shell_prop;
 
     schema["properties"] = properties;
     schema["required"] = nlohmann::json::array({"command"});
@@ -77,6 +84,32 @@ std::string WideToUtf8(const std::wstring& wide) {
         WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), utf8.data(), len, nullptr, nullptr);
     }
     return utf8;
+}
+
+// cmd.exe 路径专用:把捕获到的字节按系统 ANSI 代码页(国内机器是 GBK,
+// CP_ACP)解出来,转成 UTF-8。
+//
+// 踩过的坑:一开始想学 PowerShell 那条路,在跑命令前先 `chcp 65001>nul`
+// 把这个隐藏控制台的活动代码页切到 UTF-8,指望后续输出自然就是 UTF-8——
+// 实测不管用。chcp 改的是"控制台对象"本身的代码页,只在输出真的经
+// WriteConsole 写向一个显示中的控制台屏幕缓冲区时才起作用;这里 stdout/
+// stderr 被重定向到匿名管道(不是控制台),cmd.exe 内置命令(echo/dir/type
+// 之类)走的是 WriteFile 直接写字节,这条路径下的宽字符转窄字节固定用的
+// 是系统 ANSI 代码页,不受 chcp 影响——用十六进制实测验证过:即使先
+// `chcp 65001` 再 `echo 你好世界`,管道里收到的字节原样是 GBK
+// (C4E3 BAC3 CAC0 BDE7),不是 UTF-8。索性放弃"提前切代码页"这条路,
+// 改成事后按 CP_ACP 解码、转 UTF-8——这个办法实测靠谱。
+std::string AcpBytesToUtf8(const std::string& acp_bytes) {
+    if (acp_bytes.empty()) {
+        return std::string();
+    }
+    const int wlen = MultiByteToWideChar(CP_ACP, 0, acp_bytes.data(), static_cast<int>(acp_bytes.size()), nullptr, 0);
+    if (wlen <= 0) {
+        return acp_bytes;  // 解不出来就原样返回,好歹不丢数据
+    }
+    std::wstring wide(static_cast<std::size_t>(wlen), L'\0');
+    MultiByteToWideChar(CP_ACP, 0, acp_bytes.data(), static_cast<int>(acp_bytes.size()), wide.data(), wlen);
+    return WideToUtf8(wide);
 }
 
 // 手写的标准 base64 编码,-EncodedCommand 要的就是这个格式,不引额外依赖。
@@ -140,6 +173,17 @@ std::string BuildEncodedCommand(const std::string& user_command_utf8) {
     return Base64Encode(reinterpret_cast<const unsigned char*>(wide.data()), wide.size() * sizeof(wchar_t));
 }
 
+// 命令原样交给 cmd 执行,不做代码页预处理(chcp 那条路实测对重定向管道
+// 不起作用,见 AcpBytesToUtf8 的注释)——输出捕获回来以后统一按 CP_ACP
+// 解码转 UTF-8。
+std::wstring BuildCmdCommandLine(const std::string& user_command_utf8) {
+    const std::wstring wide_script = Utf8ToWide(user_command_utf8);
+    // cmd /d /s /c "<script>":/d 不跑注册表 AutoRun 项,/s 让外层这对引号
+    // 整体当"一段"解析、不逐个匹配内部引号——这是拿 cmd 跑任意命令行
+    // (命令里本身可能也带引号)的标准写法。
+    return L"cmd.exe /d /s /c \"" + wide_script + L"\"";
+}
+
 struct ProcResult {
     std::string output;
     DWORD exit_code = 0;
@@ -148,9 +192,11 @@ struct ProcResult {
     std::string spawn_error;
 };
 
-// 起一个 powershell.exe 子进程,合并捕获 stdout/stderr,超时就连同它派生出的
-// 子子进程一起杀掉(靠 Job Object 的 KILL_ON_JOB_CLOSE)。
-ProcResult RunPowerShell(const std::string& encoded_command, int timeout_ms) {
+// 起一个子进程(cmdline 是完整的"可执行文件 + 参数"命令行,调用方拼好),
+// 合并捕获 stdout/stderr,超时就连同它派生出的子子进程一起杀掉(靠 Job
+// Object 的 KILL_ON_JOB_CLOSE)。PowerShell 路径、cmd 路径共用这一份实现,
+// 区别只在调用方怎么拼 cmdline。
+ProcResult RunChildProcess(const std::wstring& cmdline, int timeout_ms) {
     ProcResult result;
 
     SECURITY_ATTRIBUTES sa{};
@@ -180,7 +226,6 @@ ProcResult RunPowerShell(const std::string& encoded_command, int timeout_ms) {
 
     PROCESS_INFORMATION pi{};
 
-    std::wstring cmdline = L"powershell.exe -NoProfile -NonInteractive -EncodedCommand " + Utf8ToWide(encoded_command);
     std::vector<wchar_t> cmdline_buf(cmdline.begin(), cmdline.end());
     cmdline_buf.push_back(L'\0');
 
@@ -197,7 +242,7 @@ ProcResult RunPowerShell(const std::string& encoded_command, int timeout_ms) {
     if (!ok) {
         CloseHandle(read_pipe);
         result.spawn_failed = true;
-        result.spawn_error = "启动 powershell 失败(错误码 " + std::to_string(GetLastError()) + ")";
+        result.spawn_error = "启动子进程失败(错误码 " + std::to_string(GetLastError()) + ")";
         return result;
     }
 
@@ -274,8 +319,28 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
         }
     }
 
-    const std::string encoded = BuildEncodedCommand(command);
-    const ProcResult proc = RunPowerShell(encoded, timeout_ms);
+    std::string shell = "powershell";
+    if (auto it = input.find("shell"); it != input.end() && !it->is_null()) {
+        if (!it->is_string()) {
+            return {"shell 参数必须是字符串", true};
+        }
+        shell = it->get<std::string>();
+        if (shell != "powershell" && shell != "cmd") {
+            return {"shell 参数只认得 powershell 或 cmd,写的是: " + shell, true};
+        }
+    }
+
+    const bool is_cmd = (shell == "cmd");
+    const std::wstring cmdline = is_cmd ? BuildCmdCommandLine(command)
+                                          : (L"powershell.exe -NoProfile -NonInteractive -EncodedCommand " +
+                                             Utf8ToWide(BuildEncodedCommand(command)));
+    ProcResult proc = RunChildProcess(cmdline, timeout_ms);
+    // cmd.exe 走的是系统 ANSI 代码页(国内机器上是 GBK)往管道里写字节,
+    // 跟 PowerShell 路径(脚本里显式设了 [Console]::OutputEncoding=UTF8)
+    // 不一样,这里捕获回来的原始字节要单独转一道才是合法 UTF-8。
+    if (is_cmd) {
+        proc.output = AcpBytesToUtf8(proc.output);
+    }
 
     if (proc.spawn_failed) {
         return {proc.spawn_error, true};

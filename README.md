@@ -66,10 +66,10 @@ cpr 默认会自己再拉一份 `curl`(默认地址在 `github.com/curl/curl/rel
 
 lubancode 要跟大模型对话,得知道 wire(协议)、base_url、api_key、model 这几件事。配置分四级,优先级从高到低,按**字段**逐个决——不是整套配置一刀切:
 
-1. **LUBANCODE_ 专属环境变量**:`LUBANCODE_WIRE`、`LUBANCODE_BASE_URL`、`LUBANCODE_API_KEY`、`LUBANCODE_MODEL`、`LUBANCODE_MAX_CONTEXT`
-2. **配置文件**:先找当前目录的 `.lubancode.json`,找不到再找用户主目录(Windows 是 `%USERPROFILE%`)下的 `.lubancode.json`
+1. **LUBANCODE_ 专属环境变量**:`LUBANCODE_WIRE`、`LUBANCODE_BASE_URL`、`LUBANCODE_API_KEY`、`LUBANCODE_MODEL`、`LUBANCODE_MAX_CONTEXT`、`LUBANCODE_THEME`、`LUBANCODE_SYSTEM_PROMPT_FILE`
+2. **配置文件**:先找当前目录的 `.lubancode.json`,找不到再找用户主目录(Windows 是 `%USERPROFILE%`)下的 `.lubancode.json`,字段除了 `wire`/`base_url`/`api_key`/`model`/`max_context_chars`,还可以写 `theme`、`system_prompt_file`
 3. **通用环境变量**(向后兼容):`wire=anthropic` 时读 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_MODEL`;`wire=responses` 时读 `OPENAI_BASE_URL`/`OPENAI_API_KEY`/`OPENAI_MODEL`
-4. **内置默认值**:只有 `wire=anthropic`、`max_context_chars=600000` 这两项。`base_url`/`api_key`/`model` **没有内置默认值**——lubancode 是通用工具,不绑死哪一家模型服务,这三项四级都没配到,交互模式会自动走一遍初次配置向导,单发模式/管道模式会直接报错并提示三条配置途径。
+4. **内置默认值**:`wire=anthropic`、`max_context_chars=600000`、`theme=dark`。`base_url`/`api_key`/`model`/`system_prompt_file` **没有内置默认值**——lubancode 是通用工具,不绑死哪一家模型服务,`base_url`/`api_key`/`model` 这三项四级都没配到,交互模式会自动走一遍初次配置向导,单发模式/管道模式会直接报错并提示三条配置途径;`system_prompt_file` 没配到就用内置的默认人格。
 
 ### 为什么要有专属环境变量
 
@@ -110,7 +110,8 @@ model:
 
 保存到 C:/Users/你的用户名/.lubancode.json? [Y/n]: 
 已保存到 C:/Users/你的用户名/.lubancode.json
-lubancode 0.3.0 - 输入问题回车发送,exit 退出,/help 看命令
+lubancode 0.4.0  [anthropic] MiniMax-M3
+cwd: D:/your/project  ·  输入问题回车发送,exit 退出,/help 看命令
 > 
 ```
 
@@ -164,6 +165,42 @@ lubancode 最终生效的配置:
 ```
 
 配置文件坏了(不是合法 JSON)、`api_key` 四级都没配到,都会报错,错误信息里带着文件路径或者提示去哪几个地方配。
+
+## 终端体验
+
+### 配色主题
+
+交互模式默认按 `dark` 主题给启动横幅、`> ` 提示符、`[工具]` 行、确认提示、`[错误]`、token 统计行上色,模型回复正文本身**不**上色(保持原样,不干扰阅读)。可选三套:
+
+- `dark`(默认):适合深色背景终端
+- `light`:适合浅色背景终端
+- `plain`:完全不上色,等同于纯文本
+
+切换方式跟别的字段一样,按四级优先级:`LUBANCODE_THEME` 环境变量,或者配置文件里的 `"theme"` 字段(`"dark"`/`"light"`/`"plain"`)。
+
+程序启动时会自动探测 stdout 是不是一个真终端:管道/重定向到文件时,不管配的哪个主题,一律自动降级成 `plain`,不会往文件里混进 ANSI 转义序列;Windows 下还会尝试给控制台开 `ENABLE_VIRTUAL_TERMINAL_PROCESSING`,开不开得成也会影响是否真正上色。想在管道模式下也强制看到颜色(比如拿 `grep` 校验 ANSI 序列),设 `LUBANCODE_FORCE_COLOR=1` 可以绕开这个自动降级。
+
+### 思考中转轮 & token 统计
+
+交互模式下,发出请求到模型开始吐第一个字之间,会在原地转一个 ASCII 字符(`-\|/`,不用 Unicode 盲文块,避免某些控制台字体下显示成方块),旁边跟着"思考中"字样;模型一旦开始出字或者在跑工具,转轮就停了,不会跟输出混在一起。管道/非真终端模式下转轮完全不开,不会往输出里混入任何转轮字符。
+
+每次问答(哪怕中间因为工具调用来回了好几轮)结束后,会打一行暗色的 token 用量统计,累计这一次问答里所有请求的输入/输出 token 数和请求次数,例如:
+
+```
+[tokens] 输入 1024 · 输出 256 · 请求 3 次
+```
+
+### `--system-prompt`:自定义人格
+
+lubancode 的系统提示词拆成两段:**人格段**(定义"模型是谁、该用什么语气说话")和**环境段**(工作目录、"该用工具时就用工具"这条硬规矩)。`--system-prompt` 换的只是人格段,环境段不管怎么换人格都会原样追加,所以自定义人格哪怕定得很出格(比如"只用文言文回答"),工具照样能正常调用。
+
+```bash
+lubancode --system-prompt ./persona.md "帮我看看这个项目的结构"
+```
+
+- 文件要求 UTF-8 编码的 `.md` 或 `.txt`,内容整篇原样当人格段用
+- 文件不存在、打不开、或者内容是空的,启动时就会报可读的错误,不会打到一半才发现
+- 也可以写进配置文件的 `"system_prompt_file"` 字段(或者 `LUBANCODE_SYSTEM_PROMPT_FILE` 环境变量),`--system-prompt` 命令行参数会压过配置文件里的这个字段
 
 ## 目录结构
 

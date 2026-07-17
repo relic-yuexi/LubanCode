@@ -45,12 +45,18 @@ std::string ToString(Source source);
 // api/tools;config 不该反过来牵扯 agent),所以这里单独定义一份。
 constexpr std::size_t kDefaultMaxContextChars = 600000;
 
+// theme 字段的内置默认值:三套内置调色板见 cli/theme.hpp,这里只存名字
+// (字符串),不依赖 cli 层(依赖只许单向,config 不该反过来牵扯 cli)。
+constexpr const char* kDefaultTheme = "dark";
+
 struct Config {
     Wire wire = Wire::Anthropic;
     std::string base_url;
     std::string auth_token;  // 即 api_key
     std::string model;
     std::size_t max_context_chars = kDefaultMaxContextChars;
+    std::string theme = kDefaultTheme;   // dark / light / plain,没配到就是 kDefaultTheme
+    std::string system_prompt_file;      // --system-prompt / system_prompt_file,没配到就是空串
 };
 
 // 每个字段最终来自哪一级,跟 Config 里的字段一一对应。
@@ -60,6 +66,8 @@ struct ConfigSources {
     Source auth_token = Source::Default;
     Source model = Source::Default;
     Source max_context_chars = Source::Default;
+    Source theme = Source::Default;
+    Source system_prompt_file = Source::Default;
 };
 
 struct ConfigResult {
@@ -80,6 +88,8 @@ struct FileConfig {
     std::optional<std::string> api_key;
     std::optional<std::string> model;
     std::optional<std::size_t> max_context_chars;
+    std::optional<std::string> theme;               // dark / light / plain
+    std::optional<std::string> system_prompt_file;   // 人格文件路径
     std::string source_path;
 };
 
@@ -91,6 +101,8 @@ struct LubancodeEnvValues {
     std::optional<std::string> api_key;
     std::optional<std::string> model;
     std::optional<std::size_t> max_context_chars;
+    std::optional<std::string> theme;               // LUBANCODE_THEME
+    std::optional<std::string> system_prompt_file;   // LUBANCODE_SYSTEM_PROMPT_FILE
 };
 
 // 通用环境变量(ANTHROPIC_*/OPENAI_*)读出来的值。两组都传全,MergeConfig
@@ -164,5 +176,10 @@ std::expected<std::optional<FileConfig>, std::string> LoadFileConfig();
 // 真正的入口:读 LUBANCODE_ 专属环境变量、找并读配置文件、读通用环境变量,
 // 按四级优先级合并出最终配置。
 std::expected<ConfigResult, std::string> LoadFromEnv();
+
+// 读 --system-prompt / system_prompt_file 指向的人格文件,UTF-8 原样读入,
+// 整篇作为字符串返回。文件打不开(不存在、没权限……)或者内容是空的,
+// 都返回带路径的可读错误——语义上这两种情况都没法拿来当人格段用。
+std::expected<std::string, std::string> ReadSystemPromptFile(const std::string& path);
 
 }  // namespace lubancode::config

@@ -158,3 +158,48 @@ TEST_CASE("run_command: 缺少必填参数 command,报错不崩") {
 
     CHECK(result.is_error);
 }
+
+TEST_CASE("run_command: shell 参数写了不认得的值,报错不崩") {
+    RunCommandTool tool;
+    nlohmann::json input;
+    input["command"] = "echo hi";
+    input["shell"] = "bash";
+    const Tool::Result result = tool.execute(input);
+
+    CHECK(result.is_error);
+    CHECK(result.content.find("shell") != std::string::npos);
+}
+
+TEST_CASE("run_command: shell=cmd,跑 echo,拿到输出和退出码 0") {
+    RunCommandTool tool;
+    nlohmann::json input;
+    input["command"] = "echo hello-from-cmd-test";
+    input["shell"] = "cmd";
+    const Tool::Result result = tool.execute(input);
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("hello-from-cmd-test") != std::string::npos);
+    CHECK(result.content.find("[退出码 0]") != std::string::npos);
+}
+
+TEST_CASE("run_command: shell=cmd,中文输出不乱码") {
+    RunCommandTool tool;
+    nlohmann::json input;
+    input["command"] = "echo 你好世界";
+    input["shell"] = "cmd";
+    const Tool::Result result = tool.execute(input);
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("你好世界") != std::string::npos);
+}
+
+TEST_CASE("run_command: shell=cmd,非零退出码,is_error 置位") {
+    RunCommandTool tool;
+    nlohmann::json input;
+    input["command"] = "exit 3";
+    input["shell"] = "cmd";
+    const Tool::Result result = tool.execute(input);
+
+    CHECK(result.is_error);
+    CHECK(result.content.find("3") != std::string::npos);
+}

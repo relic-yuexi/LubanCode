@@ -114,6 +114,10 @@ std::expected<void, std::string> AgentLoop::Run(const std::string& user_input, c
         const std::string stop_reason = assembler.stop_reason();
         history_.push_back(assistant_message);
 
+        if (callbacks.on_usage) {
+            callbacks.on_usage(assembler.usage());
+        }
+
         if (stop_reason != "tool_use") {
             return {};
         }

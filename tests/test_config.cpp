@@ -5,6 +5,9 @@
 
 #include <doctest/doctest.h>
 
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <string>
 
 #include "config/config.hpp"
@@ -490,4 +493,140 @@ TEST_CASE("MergeConfig: 不设置 config_file_path,默认是 std::nullopt") {
     const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
     REQUIRE(result.has_value());
     CHECK_FALSE(result->config_file_path.has_value());
+}
+
+// ---------------------------------------------------------------------------
+// theme:1 级(LUBANCODE_THEME)> 2 级(配置文件)> 4 级默认值(dark),
+// 没有通用 env 这一层(第 3 级压根不认 theme 这种 lubancode 专属概念)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("MergeConfig: theme 什么都没设置时,用内置默认值 dark") {
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.theme == config::kDefaultTheme);
+    CHECK(result->sources.theme == config::Source::Default);
+}
+
+TEST_CASE("MergeConfig: theme 配置文件压过默认值") {
+    config::FileConfig file;
+    file.theme = "light";
+    file.source_path = "/tmp/.lubancode.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.theme == "light");
+    CHECK(result->sources.theme == config::Source::ConfigFile);
+}
+
+TEST_CASE("MergeConfig: theme 专属 env 压过配置文件") {
+    config::LubancodeEnvValues lubancode_env;
+    lubancode_env.theme = "plain";
+
+    config::FileConfig file;
+    file.theme = "light";
+    file.source_path = "/tmp/.lubancode.json";
+
+    const auto result = config::MergeConfig(lubancode_env, file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.theme == "plain");
+    CHECK(result->sources.theme == config::Source::LubancodeEnv);
+}
+
+// ---------------------------------------------------------------------------
+// system_prompt_file:跟 theme 同一套优先级规则(1 级 > 2 级 > 4 级默认值,
+// 默认值是空字符串,表示"没指定,用内置人格")。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("MergeConfig: system_prompt_file 什么都没设置时留空") {
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.system_prompt_file.empty());
+    CHECK(result->sources.system_prompt_file == config::Source::Default);
+}
+
+TEST_CASE("MergeConfig: system_prompt_file 配置文件压过默认值") {
+    config::FileConfig file;
+    file.system_prompt_file = "./persona.md";
+    file.source_path = "/tmp/.lubancode.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.system_prompt_file == "./persona.md");
+    CHECK(result->sources.system_prompt_file == config::Source::ConfigFile);
+}
+
+TEST_CASE("MergeConfig: system_prompt_file 专属 env 压过配置文件") {
+    config::LubancodeEnvValues lubancode_env;
+    lubancode_env.system_prompt_file = "./env-persona.md";
+
+    config::FileConfig file;
+    file.system_prompt_file = "./file-persona.md";
+    file.source_path = "/tmp/.lubancode.json";
+
+    const auto result = config::MergeConfig(lubancode_env, file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.system_prompt_file == "./env-persona.md");
+    CHECK(result->sources.system_prompt_file == config::Source::LubancodeEnv);
+}
+
+TEST_CASE("ParseFileConfigJson: 能解出 theme 和 system_prompt_file 字段") {
+    const std::string json = R"({"theme": "light", "system_prompt_file": "./persona.md"})";
+    const auto result = config::ParseFileConfigJson(json, "/tmp/.lubancode.json");
+    REQUIRE(result.has_value());
+    REQUIRE(result->theme.has_value());
+    CHECK(*result->theme == "light");
+    REQUIRE(result->system_prompt_file.has_value());
+    CHECK(*result->system_prompt_file == "./persona.md");
+}
+
+// ---------------------------------------------------------------------------
+// ReadSystemPromptFile:真读磁盘文件(--system-prompt 用),UTF-8 文本原样
+// 读出来;文件打不开、内容是空的,都要给可读的错误信息。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 用完即删的临时文件,内容按 UTF-8 原样写入。
+class TempPromptFile {
+public:
+    explicit TempPromptFile(const std::string& content) {
+        path_ = std::filesystem::temp_directory_path() /
+                ("lubancode_prompt_test_" + std::to_string(reinterpret_cast<std::uintptr_t>(this)) + ".md");
+        std::ofstream file(path_, std::ios::binary);
+        file << content;
+    }
+    ~TempPromptFile() {
+        std::error_code ec;
+        std::filesystem::remove(path_, ec);
+    }
+
+    std::string Utf8Path() const {
+        const std::u8string u8 = path_.u8string();
+        return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+    }
+
+private:
+    std::filesystem::path path_;
+};
+
+}  // namespace
+
+TEST_CASE("ReadSystemPromptFile: 正常 .md 文件,内容原样读出来") {
+    TempPromptFile file("你只用文言文回答问题,言简意赅。");
+    const auto result = config::ReadSystemPromptFile(file.Utf8Path());
+    REQUIRE(result.has_value());
+    CHECK(*result == "你只用文言文回答问题,言简意赅。");
+}
+
+TEST_CASE("ReadSystemPromptFile: 文件不存在,报可读的错误") {
+    const auto result = config::ReadSystemPromptFile("D:/lubancode/这个人格文件肯定不存在_xyz_123.md");
+    REQUIRE_FALSE(result.has_value());
+    CHECK_FALSE(result.error().empty());
+}
+
+TEST_CASE("ReadSystemPromptFile: 空文件报错") {
+    TempPromptFile file("");
+    const auto result = config::ReadSystemPromptFile(file.Utf8Path());
+    REQUIRE_FALSE(result.has_value());
+    CHECK_FALSE(result.error().empty());
 }

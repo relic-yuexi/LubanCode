@@ -103,6 +103,18 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
         }
         config.model = parsed["model"].get<std::string>();
     }
+    if (parsed.contains("theme")) {
+        if (!parsed["theme"].is_string()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 theme 字段必须是字符串");
+        }
+        config.theme = parsed["theme"].get<std::string>();
+    }
+    if (parsed.contains("system_prompt_file")) {
+        if (!parsed["system_prompt_file"].is_string()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 system_prompt_file 字段必须是字符串");
+        }
+        config.system_prompt_file = parsed["system_prompt_file"].get<std::string>();
+    }
     if (parsed.contains("max_context_chars")) {
         const auto& field = parsed["max_context_chars"];
         if (!field.is_number_integer() && !field.is_number_unsigned()) {
@@ -256,6 +268,31 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.sources.max_context_chars = Source::Default;
     }
 
+    // ---- theme:1 级 > 2 级 > 4 级默认值,没有通用 env 这一级(跟 wire 一样,
+    // "主题名字"这种事通用环境变量 ANTHROPIC_*/OPENAI_* 压根没这个概念) ----
+    if (lubancode_env.theme.has_value()) {
+        result.config.theme = *lubancode_env.theme;
+        result.sources.theme = Source::LubancodeEnv;
+    } else if (file_config.has_value() && file_config->theme.has_value()) {
+        result.config.theme = *file_config->theme;
+        result.sources.theme = Source::ConfigFile;
+    } else {
+        result.config.theme = kDefaultTheme;
+        result.sources.theme = Source::Default;
+    }
+
+    // ---- system_prompt_file:同上,1 级 > 2 级 > 4 级默认值(空串) ----
+    if (lubancode_env.system_prompt_file.has_value()) {
+        result.config.system_prompt_file = *lubancode_env.system_prompt_file;
+        result.sources.system_prompt_file = Source::LubancodeEnv;
+    } else if (file_config.has_value() && file_config->system_prompt_file.has_value()) {
+        result.config.system_prompt_file = *file_config->system_prompt_file;
+        result.sources.system_prompt_file = Source::ConfigFile;
+    } else {
+        result.config.system_prompt_file.clear();
+        result.sources.system_prompt_file = Source::Default;
+    }
+
     return result;
 }
 
@@ -385,6 +422,8 @@ std::expected<ConfigResult, std::string> LoadFromEnv() {
     lubancode_env.base_url = GetEnv("LUBANCODE_BASE_URL");
     lubancode_env.api_key = GetEnv("LUBANCODE_API_KEY");
     lubancode_env.model = GetEnv("LUBANCODE_MODEL");
+    lubancode_env.theme = GetEnv("LUBANCODE_THEME");
+    lubancode_env.system_prompt_file = GetEnv("LUBANCODE_SYSTEM_PROMPT_FILE");
     if (const auto raw = GetEnv("LUBANCODE_MAX_CONTEXT"); raw.has_value()) {
         try {
             const long long parsed = std::stoll(*raw);
@@ -416,6 +455,20 @@ std::expected<ConfigResult, std::string> LoadFromEnv() {
         merged->config_file_path = (*file_config)->source_path;
     }
     return merged;
+}
+
+std::expected<std::string, std::string> ReadSystemPromptFile(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+        return std::unexpected("--system-prompt 指定的文件打不开: " + path + "(检查路径和读权限)");
+    }
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    std::string content = buffer.str();
+    if (content.empty()) {
+        return std::unexpected("--system-prompt 指定的文件是空的: " + path);
+    }
+    return content;
 }
 
 }  // namespace lubancode::config

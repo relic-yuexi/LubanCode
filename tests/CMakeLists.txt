@@ -14,6 +14,8 @@ add_executable(lubancode_tests
   test_models.cpp
   test_setup_wizard.cpp
   test_slash_commands.cpp
+  test_theme.cpp
+  test_prompts.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_core doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)

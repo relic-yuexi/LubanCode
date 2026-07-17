@@ -5,6 +5,7 @@
 // 模式缺配置则直接报可读的错。交互循环里加了 /help /model /config /clear
 // /exit 几个 slash 命令,/model 能让模型切换真正在下一次请求生效。
 
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <iostream>
@@ -27,6 +28,8 @@
 #include "cli/console_input.hpp"
 #include "cli/setup_wizard.hpp"
 #include "cli/slash_commands.hpp"
+#include "cli/spinner.hpp"
+#include "cli/theme.hpp"
 #include "config/config.hpp"
 #include "tools/edit_file.hpp"
 #include "tools/read_file.hpp"
@@ -42,7 +45,7 @@
 
 namespace {
 
-constexpr std::string_view kVersion = "0.3.0";
+constexpr std::string_view kVersion = "0.4.0";
 
 void PrintVersion() {
     std::cout << "lubancode " << kVersion << "\n";
@@ -58,10 +61,13 @@ void PrintHelp() {
         << "                              向导,配完直接进入会话,不用重启。exit/quit 或 EOF(Ctrl+Z /\n"
         << "                              管道读尽)退出;空行只是重新给提示符,不退出\n\n"
         << "选项:\n"
-        << "  --version   打印版本号\n"
-        << "  --help      打印本帮助\n"
-        << "  --yes       自动确认所有需要确认的工具调用(比如 run_command),不再逐条询问\n"
-        << "  --config    打印最终生效的配置(api_key 打码)和每个字段来自哪一级,排查配置问题用\n\n"
+        << "  --version              打印版本号\n"
+        << "  --help                 打印本帮助\n"
+        << "  --yes                  自动确认所有需要确认的工具调用(比如 run_command),不再逐条询问\n"
+        << "  --config               打印最终生效的配置(api_key 打码)和每个字段来自哪一级,排查配置问题用\n"
+        << "  --system-prompt <文件> 用这个文件(.md/.txt,UTF-8)替换默认系统提示的人格段,工作目录、\n"
+        << "                         工具调用这些运行必需的上下文照样追加,不受影响。压过配置文件里的\n"
+        << "                         system_prompt_file 字段\n\n"
         << "交互模式里,输入以 / 开头的一行走命令,不发给模型:\n"
         << "  /help           列出所有命令\n"
         << "  /model          拉取模型列表,编号选择切换(默认第一个)\n"
@@ -76,17 +82,20 @@ void PrintHelp() {
         << "       LUBANCODE_API_KEY       认证令牌\n"
         << "       LUBANCODE_MODEL         模型名\n"
         << "       LUBANCODE_MAX_CONTEXT   history 裁剪阈值(字符数)\n"
+        << "       LUBANCODE_THEME         终端配色主题,dark / light / plain\n"
+        << "       LUBANCODE_SYSTEM_PROMPT_FILE  人格文件路径,同 --system-prompt(命令行参数压过这个)\n"
         << "  2) 配置文件(第一个找到的生效):cwd 的 .lubancode.json,找不到再找用户主目录的\n"
-        << "     .lubancode.json。字段:wire / base_url / api_key / model / max_context_chars,全部可选。\n"
+        << "     .lubancode.json。字段:wire / base_url / api_key / model / max_context_chars / theme /\n"
+        << "     system_prompt_file,全部可选。\n"
         << "  3) 通用环境变量(向后兼容旧用法,跟 Claude Code 等工具共用同名变量时容易撞车,\n"
         << "     建议改用第 1 级的 LUBANCODE_* 专属变量):\n"
         << "       wire=anthropic 时读 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL\n"
         << "       wire=responses 时读 OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL\n"
-        << "  4) 内置默认值:只有 wire=anthropic、max_context_chars=" << lubancode::config::kDefaultMaxContextChars
-        << "。base_url/api_key/model\n"
-        << "     不绑死任何一家模型服务,没有内置默认值——四级都没配到,交互模式会自动走初次配置\n"
-        << "     向导;单发模式/管道模式会直接报错,提示三条配置途径。用 --config 能看到当前实际\n"
-        << "     生效的配置和每个字段的来源。\n";
+        << "  4) 内置默认值:wire=anthropic、max_context_chars=" << lubancode::config::kDefaultMaxContextChars
+        << "、theme=" << lubancode::config::kDefaultTheme << "。\n"
+        << "     base_url/api_key/model/system_prompt_file 不绑死任何一家模型服务,没有内置默认值——\n"
+        << "     四级都没配到,交互模式会自动走初次配置向导;单发模式/管道模式会直接报错,提示三条\n"
+        << "     配置途径。用 --config 能看到当前实际生效的配置和每个字段的来源。\n";
 }
 
 // 按 wire 造对应的后端实现。agent 层只认 Backend 这个抽象接口,不关心
@@ -141,6 +150,10 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
               << lubancode::config::ToString(sources.model) << "]\n";
     std::cout << "  max_context_chars  = " << config.max_context_chars << "  ["
               << lubancode::config::ToString(sources.max_context_chars) << "]\n";
+    std::cout << "  theme              = " << config.theme << "  [" << lubancode::config::ToString(sources.theme)
+              << "]\n";
+    std::cout << "  system_prompt_file = " << (config.system_prompt_file.empty() ? "(未设置)" : config.system_prompt_file)
+              << "  [" << lubancode::config::ToString(sources.system_prompt_file) << "]\n";
     if (result.config_file_path.has_value()) {
         std::cout << "  配置文件           = " << *result.config_file_path << "\n";
     }
@@ -158,6 +171,51 @@ std::string CurrentDirUtf8() {
     const std::filesystem::path cwd = std::filesystem::current_path();
     const std::u8string u8 = cwd.u8string();
     return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+}
+
+// 包一层 Backend:发起真正的网络请求前起一个"思考中"转轮(cli::Spinner),
+// 收到第一个流事件就停。转轮跟着 send_stream 这一次调用走——AgentLoop 一次
+// Run() 里可能因为工具调用来回好几趟,每趟各自单独调一次 send_stream,
+// 工具执行发生在两次 send_stream 之间(loop.cpp 里,不在这层包装范围内),
+// 天然满足"工具执行期间不转,发下一轮请求再转"这条要求,不用改
+// agent/loop.cpp 一个字。spinner_enabled 由调用方按"stdout 是不是真控制台"
+// 算好传进来——管道模式下这层直接透传,不起线程、不输出任何转轮字符。
+class SpinnerBackend : public lubancode::api::Backend {
+public:
+    SpinnerBackend(lubancode::api::Backend& inner, const lubancode::cli::Theme& theme, bool spinner_enabled)
+        : inner_(inner), theme_(theme), spinner_enabled_(spinner_enabled) {}
+
+    std::expected<void, lubancode::api::Error> send_stream(
+        const lubancode::api::Request& request,
+        const std::function<void(const lubancode::api::StreamEvent&)>& on_event) override {
+        lubancode::cli::Spinner spinner(theme_, spinner_enabled_);
+        bool stopped = false;
+        const auto wrapped = [&](const lubancode::api::StreamEvent& event) {
+            if (!stopped) {
+                spinner.Stop();
+                stopped = true;
+            }
+            on_event(event);
+        };
+        return inner_.send_stream(request, wrapped);
+        // spinner 在这里析构,Stop() 兜底再调一次也是安全的(空操作)——
+        // 万一 send_stream 直接失败、一个事件都没吐(比如连都没连上),
+        // 转轮不会一直转着。
+    }
+
+private:
+    lubancode::api::Backend& inner_;
+    const lubancode::cli::Theme& theme_;
+    bool spinner_enabled_;
+};
+
+// 交互模式启动横幅:一眼看全版本、wire、当前模型、工作目录,两行,不啰嗦。
+void PrintBanner(const lubancode::config::Config& config, const lubancode::cli::Theme& theme) {
+    const std::string wire_str = config.wire == lubancode::config::Wire::Responses ? "responses" : "anthropic";
+    std::cout << theme.banner << "lubancode " << kVersion << "  [" << wire_str << "] " << config.model << theme.reset
+              << "\n";
+    std::cout << theme.stats << "cwd: " << CurrentDirUtf8() << "  ·  输入问题回车发送,exit 退出,/help 看命令"
+              << theme.reset << "\n";
 }
 
 lubancode::tools::ToolRegistry BuildToolRegistry() {
@@ -212,18 +270,31 @@ void PrintConfirmDetails(const std::string& name, const nlohmann::json& input) {
         PrintFirstLines(new_s, 3);
     } else if (name == "run_command") {
         const std::string command = input.value("command", std::string());
-        std::cout << "    命令: " << command << "\n";
+        const std::string shell = input.value("shell", std::string("powershell"));
+        std::cout << "    命令(" << shell << "): " << command << "\n";
     } else {
         std::cout << "    参数: " << input.dump() << "\n";
     }
     std::cout.flush();
 }
 
-// 交互循环、单发模式共用的回调:文本打字机打印,工具调用打一行提示,
-// needs_confirm 的工具按 auto_confirm 决定是自动放行还是问用户一句
-// (三选:y 本次允许 / a 本会话总是允许该工具 / N 拒绝)。always_allowed_tools
-// 由调用方持有,跨多轮 Run() 保留,选过 a 的工具本会话内不会再问。
-lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::string>& always_allowed_tools) {
+// 一次 Run() 内(可能因为工具调用来回好几趟)的 token 用量累计:输入、
+// 输出 tokens 各自求和,再数一下总共发了几次独立请求。RunTurn() 结束后
+// 打一行,不跨多次用户提问累计——一问一答算一次统计。
+struct UsageStats {
+    std::int64_t input_tokens = 0;
+    std::int64_t output_tokens = 0;
+    int request_count = 0;
+};
+
+// 交互循环、单发模式共用的回调:文本打字机打印(正文保持原色,不着色),
+// 工具调用打一行提示,needs_confirm 的工具按 auto_confirm 决定是自动放行
+// 还是问用户一句(三选:y 本次允许 / a 本会话总是允许该工具 / N 拒绝)。
+// always_allowed_tools 由调用方持有,跨多轮 Run() 保留,选过 a 的工具本
+// 会话内不会再问。usage_stats 由调用方持有,只在这一次 Run() 范围内累计
+// (RunTurn() 每次都会传一份新的进来)。
+lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::string>& always_allowed_tools,
+                                            const lubancode::cli::Theme& theme, UsageStats& usage_stats) {
     lubancode::agent::Callbacks callbacks;
 
     callbacks.on_text_delta = [](const std::string& text) {
@@ -231,13 +302,13 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         std::cout.flush();
     };
 
-    callbacks.on_tool_start = [](const std::string& name, const nlohmann::json& input) {
-        std::cout << "\n[工具] " << name << " " << input.dump() << "\n";
+    callbacks.on_tool_start = [&theme](const std::string& name, const nlohmann::json& input) {
+        std::cout << "\n" << theme.tool_line << "[工具] " << name << " " << input.dump() << theme.reset << "\n";
         std::cout.flush();
     };
 
-    callbacks.on_tool_confirm = [auto_confirm, &always_allowed_tools](const std::string& name,
-                                                                       const nlohmann::json& input) -> bool {
+    callbacks.on_tool_confirm = [auto_confirm, &always_allowed_tools, &theme](const std::string& name,
+                                                                               const nlohmann::json& input) -> bool {
         if (auto_confirm) {
             return true;
         }
@@ -245,8 +316,8 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
             return true;
         }
         PrintConfirmDetails(name, input);
-        const std::optional<std::string> answer =
-            lubancode::cli::ReadLine("[y] 本次允许  [a] 本会话总是允许(该工具)  [N] 拒绝: ");
+        const std::optional<std::string> answer = lubancode::cli::ReadLine(
+            theme.confirm + "[y] 本次允许  [a] 本会话总是允许(该工具)  [N] 拒绝: " + theme.reset);
         if (!answer.has_value()) {
             return false;  // 读到 EOF,按拒绝处理,不要在这儿卡住
         }
@@ -257,29 +328,43 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         return *answer == "y" || *answer == "Y";
     };
 
-    callbacks.on_tool_done = [](const std::string& name, const lubancode::tools::Tool::Result& result) {
+    callbacks.on_tool_done = [&theme](const std::string& name, const lubancode::tools::Tool::Result& result) {
         if (result.is_error) {
-            std::cout << "[工具出错] " << name << ": " << result.content << "\n";
+            std::cout << theme.error << "[工具出错] " << name << ": " << result.content << theme.reset << "\n";
             std::cout.flush();
         }
+    };
+
+    callbacks.on_usage = [&usage_stats](const lubancode::api::Usage& usage) {
+        usage_stats.input_tokens += usage.input_tokens;
+        usage_stats.output_tokens += usage.output_tokens;
+        usage_stats.request_count += 1;
     };
 
     return callbacks;
 }
 
 // 发一轮用户输入,走 agent loop(可能会有若干次工具调用来回),流式打字机
-// 打印回复。返回 0 表示成功,非 0 表示出错。always_allowed_tools 由调用方
+// 打印回复,结束后打一行 token 用量统计(暗色/淡色,plain 主题下就是空
+// 前后缀)。返回 0 表示成功,非 0 表示出错。always_allowed_tools 由调用方
 // 持有,记录本会话内选过"总是允许"的工具。
 int RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bool auto_confirm,
-            std::set<std::string>& always_allowed_tools) {
-    const lubancode::agent::Callbacks callbacks = BuildCallbacks(auto_confirm, always_allowed_tools);
+            std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme) {
+    UsageStats usage_stats;
+    const lubancode::agent::Callbacks callbacks = BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats);
 
     const auto result = loop.Run(user_input, callbacks);
     std::cout << "\n";
 
     if (!result.has_value()) {
-        std::cerr << "[错误] " << result.error() << "\n";
+        std::cerr << theme.error << "[错误] " << result.error() << theme.reset << "\n";
         return 1;
+    }
+
+    if (usage_stats.request_count > 0) {
+        std::cout << theme.stats << "[tokens] 输入 " << usage_stats.input_tokens << " · 输出 "
+                   << usage_stats.output_tokens << " · 请求 " << usage_stats.request_count << " 次" << theme.reset
+                   << "\n";
     }
     return 0;
 }
@@ -410,14 +495,19 @@ void HandleModelCommand(const std::string& args, const lubancode::config::Config
 // 真正"这一刻发请求用哪个 model"的会话级状态,两者可能因为 /model 切换而
 // 不一致——ModelOverrideBackend 在真正发请求前把 Request.model 换成
 // *current_model,这样 /model 切换才能不碰 agent/loop.hpp/.cpp 就真正生效。
-void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_confirm) {
-    std::cout << "lubancode " << kVersion << " - 输入问题回车发送,exit 退出,/help 看命令\n";
-
+void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_confirm,
+                      const lubancode::cli::Theme& theme, const std::string& persona, bool spinner_enabled) {
     const lubancode::config::Config& config = config_result.config;
 
     std::unique_ptr<lubancode::api::Backend> real_backend = BuildBackend(config);
     auto current_model = std::make_shared<std::string>(config.model);
-    ModelOverrideBackend wrapped_backend(*real_backend, current_model);
+    ModelOverrideBackend model_backend(*real_backend, current_model);
+    // SpinnerBackend 包最外层:每次 send_stream 起转轮,收到第一个流事件就
+    // 停,ModelOverrideBackend 负责 /model 切换生效,两层包装顺序不影响
+    // 语义(model 补丁在更内层做,转轮只关心"发出去了没有第一个字节回来")。
+    SpinnerBackend wrapped_backend(model_backend, theme, spinner_enabled);
+
+    PrintBanner(config, theme);
 
     lubancode::tools::ToolRegistry registry = BuildToolRegistry();
 
@@ -425,7 +515,8 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     const auto rebuild_loop = [&]() {
         // max_tokens=4096、max_turns=25 是 AgentLoop 自己的默认值,这里显式
         // 传出来是为了能把 config.max_context_chars 一起传进去。
-        loop.emplace(wrapped_backend, registry, config.model, lubancode::agent::BuildSystemPrompt(CurrentDirUtf8()),
+        loop.emplace(wrapped_backend, registry, config.model,
+                     lubancode::agent::BuildSystemPrompt(CurrentDirUtf8(), persona),
                      /*max_tokens=*/4096, /*max_turns=*/25, config.max_context_chars);
     };
     rebuild_loop();
@@ -434,7 +525,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     std::optional<std::string> config_file_path = config_result.config_file_path;
 
     while (true) {
-        const std::optional<std::string> line = lubancode::cli::ReadLine("> ");
+        const std::optional<std::string> line = lubancode::cli::ReadLine(theme.prompt + "> " + theme.reset);
         if (!line.has_value()) {
             break;  // EOF:Ctrl+Z 或管道读尽
         }
@@ -472,19 +563,24 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
             continue;
         }
 
-        RunTurn(*loop, *line, auto_confirm, always_allowed_tools);
+        RunTurn(*loop, *line, auto_confirm, always_allowed_tools, theme);
     }
 }
 
 // 单发模式(位置参数):也走 agent loop,同样支持工具,只是只问这一句。
-int AskOnce(const lubancode::config::Config& config, const std::string& question, bool auto_confirm) {
+// 管道/单发场景下 spinner_enabled 传进来的必然是 false(RunCli 里按
+// DetectConsoleCapability().is_console 算好的),这里不用再判断一次。
+int AskOnce(const lubancode::config::Config& config, const std::string& question, bool auto_confirm,
+            const lubancode::cli::Theme& theme, const std::string& persona, bool spinner_enabled) {
     std::unique_ptr<lubancode::api::Backend> backend = BuildBackend(config);
+    SpinnerBackend wrapped_backend(*backend, theme, spinner_enabled);
     lubancode::tools::ToolRegistry registry = BuildToolRegistry();
-    lubancode::agent::AgentLoop loop(*backend, registry, config.model, lubancode::agent::BuildSystemPrompt(CurrentDirUtf8()),
+    lubancode::agent::AgentLoop loop(wrapped_backend, registry, config.model,
+                                      lubancode::agent::BuildSystemPrompt(CurrentDirUtf8(), persona),
                                       /*max_tokens=*/4096, /*max_turns=*/25, config.max_context_chars);
     std::set<std::string> always_allowed_tools;
 
-    return RunTurn(loop, question, auto_confirm, always_allowed_tools);
+    return RunTurn(loop, question, auto_confirm, always_allowed_tools, theme);
 }
 
 // 真正的入口逻辑,跟平台无关:args[0] 是程序名,args[1..] 是实参。
@@ -496,6 +592,7 @@ int RunCli(const std::vector<std::string>& args) {
     std::string positional;
     bool auto_confirm = false;
     bool print_config = false;
+    std::string system_prompt_file_arg;
     for (std::size_t i = 1; i < args.size(); ++i) {
         const std::string& arg = args[i];
         if (arg == "--version") {
@@ -512,6 +609,14 @@ int RunCli(const std::vector<std::string>& args) {
         }
         if (arg == "--config") {
             print_config = true;
+            continue;
+        }
+        if (arg == "--system-prompt") {
+            if (i + 1 >= args.size()) {
+                std::cerr << "--system-prompt 后面要跟一个文件路径\n";
+                return 1;
+            }
+            system_prompt_file_arg = args[++i];
             continue;
         }
         if (!positional.empty()) {
@@ -531,6 +636,32 @@ int RunCli(const std::vector<std::string>& args) {
         return 0;
     }
 
+    // --system-prompt 命令行参数压过配置文件里的 system_prompt_file 字段
+    // (四级合并已经把 config.system_prompt_file 算好了,这里只是命令行
+    // 再压一级)。只替换人格段,工作目录、工具调用这些运行必需的上下文
+    // (prompts.hpp 的 EnvironmentSegment)照样由 BuildSystemPrompt 追加,
+    // 不受这里影响。
+    const std::string effective_prompt_file =
+        !system_prompt_file_arg.empty() ? system_prompt_file_arg : config_result->config.system_prompt_file;
+    std::string persona;
+    if (!effective_prompt_file.empty()) {
+        const auto persona_result = lubancode::config::ReadSystemPromptFile(effective_prompt_file);
+        if (!persona_result.has_value()) {
+            std::cerr << persona_result.error() << "\n";
+            return 1;
+        }
+        persona = *persona_result;
+    }
+
+    // 主题、转轮开关这两样跟"配没配好模型"无关,不管走哪条路都先算好。
+    // DetectConsoleCapability() 内部已经处理了 LUBANCODE_FORCE_COLOR 强制
+    // 着色的情况(管道模式下也能测出 ANSI 序列),但转轮不受这个开关影响——
+    // is_console 为假(管道)时无论如何都不转,免得转轮字符污染管道输出。
+    const lubancode::cli::ConsoleCapability console_cap = lubancode::cli::DetectConsoleCapability();
+    const lubancode::cli::Theme theme =
+        lubancode::cli::ResolveTheme(config_result->config.theme, console_cap.colors_enabled);
+    const bool spinner_enabled = console_cap.is_console;
+
     // 兜底:JSON 编码、网络库内部等地方万一抛出没接住的异常,也不能让
     // 整个进程崩掉(崩掉的话用户只会看到一个莫名其妙的退出码)。
     try {
@@ -542,7 +673,7 @@ int RunCli(const std::vector<std::string>& args) {
                 std::cerr << configured_check.error() << "\n";
                 return 1;
             }
-            return AskOnce(config_result->config, positional, auto_confirm);
+            return AskOnce(config_result->config, positional, auto_confirm, theme, persona, spinner_enabled);
         }
 
         // 交互模式:base_url/api_key/model 有一个解不出来,就先走一遍初次
@@ -570,7 +701,7 @@ int RunCli(const std::vector<std::string>& args) {
             effective.sources.auth_token = marked;
             effective.sources.model = marked;
         }
-        InteractiveLoop(effective, auto_confirm);
+        InteractiveLoop(effective, auto_confirm, theme, persona, spinner_enabled);
     } catch (const std::exception& e) {
         std::cerr << "[错误] 未预料的异常: " << e.what() << "\n";
         return 1;

@@ -5,6 +5,7 @@
 
 #include <doctest/doctest.h>
 
+#include <cstdint>
 #include <variant>
 #include <vector>
 
@@ -194,6 +195,63 @@ TEST_CASE("超过最大轮数报错") {
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().find("轮数") != std::string::npos);
     CHECK(backend.captured_requests.size() == 3);  // 正好用满 max_turns 次请求
+}
+
+TEST_CASE("on_usage: 一次 Run() 内多次请求(工具调用来回),每次 MessageDone 都触发一次回调,可累计") {
+    FakeBackend backend;
+    backend.scripts = {
+        {
+            api::MessageStart{"msg", "model"},
+            api::ToolUseStart{0, "toolu_usage", "fake_tool"},
+            api::ToolUseInputDelta{0, "{}"},
+            api::ContentBlockDone{0},
+            api::MessageDone{"tool_use", api::Usage{100, 20}},
+        },
+        {
+            api::MessageStart{"msg2", "model"},
+            api::TextDelta{"好了"},
+            api::ContentBlockDone{0},
+            api::MessageDone{"end_turn", api::Usage{50, 30}},
+        },
+    };
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"工具结果", false}, false));
+
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+
+    std::vector<api::Usage> usages;
+    agent::Callbacks callbacks;
+    callbacks.on_usage = [&](const api::Usage& usage) { usages.push_back(usage); };
+
+    const auto result = loop.Run("帮我用一下工具", callbacks);
+
+    REQUIRE(result.has_value());
+    REQUIRE(usages.size() == 2);
+    CHECK(usages[0].input_tokens == 100);
+    CHECK(usages[0].output_tokens == 20);
+    CHECK(usages[1].input_tokens == 50);
+    CHECK(usages[1].output_tokens == 30);
+
+    std::int64_t total_input = 0;
+    std::int64_t total_output = 0;
+    for (const auto& u : usages) {
+        total_input += u.input_tokens;
+        total_output += u.output_tokens;
+    }
+    CHECK(total_input == 150);
+    CHECK(total_output == 50);
+}
+
+TEST_CASE("on_usage: 没设这个回调,不影响其余行为(可选回调,空着也不崩)") {
+    FakeBackend backend;
+    backend.scripts = {TextOnlyScript("没事")};
+    tools::ToolRegistry registry;
+
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    agent::Callbacks callbacks;  // on_usage 没设
+
+    const auto result = loop.Run("你好", callbacks);
+    REQUIRE(result.has_value());
 }
 
 TEST_CASE("未知工具名:不崩,tool_result 里说明是未知工具") {

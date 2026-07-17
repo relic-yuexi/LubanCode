@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(lubancode VERSION 0.3.0 LANGUAGES CXX)
+project(lubancode VERSION 0.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -144,12 +144,13 @@ add_library(lubancode_core STATIC
   src/agent/context.cpp
   src/cli/setup_wizard.cpp
   src/cli/slash_commands.cpp
+  src/cli/theme.cpp
 )
 target_include_directories(lubancode_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(lubancode_core PUBLIC cpr::cpr nlohmann_json::nlohmann_json)
 target_compile_features(lubancode_core PUBLIC cxx_std_23)
 
-add_executable(lubancode src/main.cpp src/cli/console_input.cpp)
+add_executable(lubancode src/main.cpp src/cli/console_input.cpp src/cli/spinner.cpp)
 target_link_libraries(lubancode PRIVATE lubancode_core)
 target_compile_features(lubancode PRIVATE cxx_std_23)
 
