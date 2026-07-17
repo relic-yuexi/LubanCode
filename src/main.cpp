@@ -97,8 +97,8 @@ void PrintHelp() {
         << "  --version              打印版本号\n"
         << "  --help                 打印本帮助\n"
         << "  --yes                  自动确认所有需要确认的工具调用(比如 run_command),不再逐条询问\n"
-        << "  --continue             交互模式启动时自动恢复最近一场会话存档(等价开场 /resume 最近一场);\n"
-        << "                         没有存档就正常开新会话\n"
+        << "  --continue             交互模式启动时自动恢复本目录最近一场会话存档(等价开场 /resume\n"
+        << "                         最近一场);本目录没有存档就正常开新会话\n"
         << "  --config               打印最终生效的配置(api_key 打码)和每个字段来自哪一级,排查配置问题用\n"
         << "  --system-prompt <文件> 用这个文件(.md/.txt,UTF-8)替换默认系统提示的人格段,工作目录、\n"
         << "                         工具调用这些运行必需的上下文照样追加,不受影响。压过配置文件里的\n"
@@ -120,9 +120,10 @@ void PrintHelp() {
         << "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
         << "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
         << "  /plugins        列出挂载的插件工具(主目录 .lubancode/plugins 下的 *.dll 和 *.lua)\n"
-        << "  /sessions       列最近 20 场会话存档(时间倒序编号)\n"
-        << "  /resume 编号或id  载入该场存档历史续聊\n"
-        << "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md)\n"
+        << "  /sessions       列本目录最近 20 场会话存档(时间倒序编号);/sessions all 列全部目录\n"
+        << "  /resume 编号或id  载入该场存档历史续聊(编号按本目录列表数)\n"
+        << "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md;全量流水,压缩点带标注)\n"
+        << "  /title [标题]   看/设本场会话标题,/sessions 列表和 /export 大标题都用它\n"
         << "  Shift+Enter     输入框里插一个换行,写多行消息(Alt+Enter 同义;注意 Windows Terminal\n"
         << "                  默认把 Alt+Enter 绑成全屏切换、会吞掉这个键,用 Shift+Enter 最稳);\n"
         << "                  Enter 把整段(多行拼换行)一次发出,空白内容按 Enter 原地不动\n"
@@ -1771,9 +1772,10 @@ void PrintSlashHelp() {
               << "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
               << "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
               << "  /plugins        列出挂载的插件工具(DLL + lua)和加载警告\n"
-              << "  /sessions       列最近 20 场会话存档(时间倒序编号)\n"
-              << "  /resume 编号或id  载入该场存档历史续聊,后续消息追加写回同一文件\n"
-              << "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md)\n"
+              << "  /sessions       列本目录最近 20 场会话存档(时间倒序编号);/sessions all 列全部目录\n"
+              << "  /resume 编号或id  载入该场存档历史续聊(编号按本目录列表数),后续消息追加写回同一文件\n"
+              << "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md;全量流水,压缩点带标注)\n"
+              << "  /title [标题]   看/设本场会话标题,/sessions 列表和 /export 大标题都用它\n"
               << "  /exit           退出(裸词 exit/quit 也认)\n"
               << "多行输入:Shift+Enter 插换行(Alt+Enter 同义,但 Windows Terminal 默认把它绑成全屏\n"
               << "切换、会吞掉,推荐 Shift+Enter);Enter 发送整段;多行时首行的 / 是正文,不当命令。\n"
@@ -1864,15 +1866,18 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
 // ModelOverrideBackend 的那份——Compact() 会自己把 compact_model 写进
 // request.model,要是走了 ModelOverrideBackend,会被强制换回当前会话
 // model,压缩模型这个字段就形同虚设了。
-void HandleCompactCommand(const std::string& args, lubancode::agent::AgentLoop& loop,
-                           lubancode::api::Backend& raw_backend, const std::string& compact_model,
-                           const lubancode::cli::Theme& theme, bool spinner_enabled) {
+// 压缩成功时返回对应的 compact 事件(archive + kept_from),调用方追加写进
+// 存档流水,/resume 才能回放出压缩后的活状态;失败/没得压给 nullopt。
+std::optional<lubancode::agent::CompactEvent> HandleCompactCommand(
+    const std::string& args, lubancode::agent::AgentLoop& loop, lubancode::api::Backend& raw_backend,
+    const std::string& compact_model, const lubancode::cli::Theme& theme, bool spinner_enabled) {
     const std::vector<lubancode::api::Message>& history = loop.History();
     if (history.empty()) {
         std::cout << "当前没有对话历史,不用压缩。\n";
-        return;
+        return std::nullopt;
     }
     const std::size_t before_tokens = EstimateTokens(EstimateHistoryChars(history));
+    const std::size_t old_size = history.size();
 
     lubancode::cli::Spinner spinner(theme, spinner_enabled);
     const auto result = lubancode::agent::Compact(raw_backend, compact_model, history, args);
@@ -1880,13 +1885,15 @@ void HandleCompactCommand(const std::string& args, lubancode::agent::AgentLoop& 
 
     if (!result.has_value()) {
         std::cout << theme.error << "压缩失败: " << result.error().message << theme.reset << "\n";
-        return;
+        return std::nullopt;
     }
 
     const auto new_history = lubancode::agent::BuildCompactedHistory(history, *result);
+    const auto event = lubancode::agent::MakeCompactEvent(old_size, new_history);
     loop.ReplaceHistory(new_history);
     const std::size_t after_tokens = EstimateTokens(EstimateHistoryChars(new_history));
     std::cout << "压缩前 ~" << before_tokens << " tokens → 压缩后 ~" << after_tokens << " tokens\n";
+    return event;
 }
 
 // /think(/effort 同义)命令:不带参数看当前档位,带参数切档位(本会话
@@ -2044,43 +2051,67 @@ void HandleModelCommand(const std::string& args, const lubancode::config::Config
 // 这里只做"接命令、找文件、打印"这层壳。
 // ---------------------------------------------------------------------------
 
-// /sessions:列最近 20 场(id、开始时间、首句摘要、消息数),时间倒序编号。
-void PrintSessionsCommand(const std::string& sessions_dir) {
+// /sessions:列最近 20 场(id、开始时间、标题或首句摘要、消息数),时间
+// 倒序编号。默认只列 meta.cwd 是当前目录的场子;/sessions all 列全部目录,
+// 每条带目录路径(过长中间省略)。
+void PrintSessionsCommand(const std::string& sessions_dir, const std::string& args) {
     if (sessions_dir.empty()) {
         std::cout << "找不到用户主目录,会话存档不可用。\n";
         return;
     }
-    const auto entries = lubancode::agent::ListSessions(sessions_dir, 20);
-    if (entries.empty()) {
-        std::cout << "还没有会话存档(" << sessions_dir << " 下没有 .jsonl)。\n";
+    const bool all = args == "all";
+    if (!args.empty() && !all) {
+        std::cout << "用法:/sessions(本目录)或 /sessions all(全部目录)\n";
         return;
     }
-    std::cout << "最近 " << entries.size() << " 场会话(时间倒序;/resume 编号或id 续聊):\n";
+    const auto entries =
+        lubancode::agent::ListSessions(sessions_dir, 20, all ? std::string() : CurrentDirUtf8());
+    if (entries.empty()) {
+        if (all) {
+            std::cout << "还没有会话存档(" << sessions_dir << " 下没有 .jsonl)。\n";
+        } else {
+            std::cout << "本目录还没有会话存档(/sessions all 看全部目录)。\n";
+        }
+        return;
+    }
+    std::cout << "最近 " << entries.size() << " 场会话("
+              << (all ? "全部目录" : "本目录,/sessions all 看全部")
+              << ";时间倒序,/resume 编号或id 续聊):\n";
     for (std::size_t i = 0; i < entries.size(); ++i) {
         const auto& entry = entries[i];
+        // 标题优先,没设过标题回退首句摘要。
+        const std::string& label = !entry.title.empty() ? entry.title : entry.first_user_text;
         std::cout << "  " << (i + 1) << ") " << entry.id << "\n"
                    << "      " << (entry.started_at.empty() ? "(开始时间未知)" : entry.started_at) << " · "
                    << entry.message_count << " 条 · "
-                   << (entry.first_user_text.empty() ? "(没有用户文本)"
-                                                      : lubancode::agent::TruncateUtf8Chars(entry.first_user_text, 40))
+                   << (label.empty() ? "(没有用户文本)" : lubancode::agent::TruncateUtf8Chars(label, 40))
                    << "\n";
+        if (all) {
+            std::cout << "      目录: "
+                       << (entry.cwd.empty() ? "(未知)"
+                                              : lubancode::agent::AbbreviateUtf8Middle(entry.cwd, 48))
+                       << "\n";
+        }
     }
 }
 
 // /resume <编号或id> 和 --continue 共用的执行逻辑。target 是编号(按
 // ListSessions 的倒序编号)、会话 id、或空串(--continue:最近一场)。
-// 成功:反序列化 + 成对修补 + ReplaceHistory + 接管文件继续追加,返回 true。
-// quiet_if_none:--continue 找不到任何存档时不报错、安静开新会话。
+// 编号和"最近一场"都只在**本目录**(meta.cwd == 当前 cwd)的场子里数;
+// 直接给 id 的仍然全局能找(拼路径兜底),跨目录恢复留了这条明路。
+// 成功:回放事件 + 成对修补 + ReplaceHistory + 接管文件继续追加,返回 true;
+// session_title 同步成存档里最后一条 title 事件(没有就清空)。
+// quiet_if_none:--continue 本目录找不到任何存档时不报错、安静开新会话。
 bool ResumeSession(const std::string& target, const std::string& sessions_dir,
                     lubancode::agent::AgentLoop& loop, lubancode::agent::SessionStore& store,
                     std::size_t& persisted_count, lubancode::agent::SessionMeta& session_meta,
-                    const std::string& wire_str, const std::string& current_model,
+                    std::string& session_title, const std::string& wire_str, const std::string& current_model,
                     const lubancode::cli::Theme& theme, bool quiet_if_none) {
     if (sessions_dir.empty()) {
         std::cout << "找不到用户主目录,会话存档不可用。\n";
         return false;
     }
-    const auto entries = lubancode::agent::ListSessions(sessions_dir, 20);
+    const auto entries = lubancode::agent::ListSessions(sessions_dir, 20, CurrentDirUtf8());
 
     std::string id;
     std::string file_path;
@@ -2092,10 +2123,10 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
         }
     }
     if (target.empty()) {
-        // --continue:最近一场;一场都没有就按 quiet_if_none 处理。
+        // --continue:本目录最近一场;一场都没有就按 quiet_if_none 处理。
         if (entries.empty()) {
             if (!quiet_if_none) {
-                std::cout << "还没有会话存档,没什么可恢复。\n";
+                std::cout << "本目录还没有会话存档,没什么可恢复(/sessions all 看全部目录)。\n";
             }
             return false;
         }
@@ -2109,7 +2140,8 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
             n = 0;
         }
         if (n < 1 || n > entries.size()) {
-            std::cout << "编号 " << target << " 超出范围(现有 " << entries.size() << " 场,/sessions 看列表)。\n";
+            std::cout << "编号 " << target << " 超出范围(本目录现有 " << entries.size()
+                       << " 场,/sessions 看列表)。\n";
             return false;
         }
         id = entries[n - 1].id;
@@ -2147,8 +2179,15 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
                    << theme.reset << "\n";
     }
     session_meta = session->meta;
+    session_title = session->title;
 
-    std::cout << "已恢复 " << id << "," << session->messages.size() << " 条消息";
+    if (session->compact_count > 0) {
+        // 经过压缩的场子:恢复的是回放出来的有效态,不是全量流水。
+        std::cout << "已恢复 " << id << ",有效 " << session->messages.size() << " 条(全量 "
+                   << session->all_messages.size() << " 条,经 " << session->compact_count << " 次压缩)";
+    } else {
+        std::cout << "已恢复 " << id << "," << session->messages.size() << " 条消息";
+    }
     if (session->repaired > 0) {
         std::cout << "(补了 " << session->repaired << " 条缺失的工具结果)";
     }
@@ -2171,11 +2210,12 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
     return true;
 }
 
-// /export [路径]:当前会话(内存里的这份历史,恢复/修补过的就是修补后的)
-// 导出 Markdown,默认写 sessions/<id>.md。
+// /export [路径]:当前会话导出 Markdown,默认写 sessions/<id>.md。
+// 有存档文件就从文件读**全量流水**导出(压缩不丢内容,发生点插一行标注);
+// 没有存档文件(没落过盘)退回导内存里这份历史。/title 设过的标题当大标题。
 void HandleExportCommand(const std::string& args, const lubancode::agent::AgentLoop& loop,
                           const lubancode::agent::SessionStore& store, const std::string& sessions_dir,
-                          const lubancode::agent::SessionMeta& session_meta) {
+                          const lubancode::agent::SessionMeta& session_meta, const std::string& session_title) {
     const auto& history = loop.History();
     if (history.empty()) {
         std::cout << "当前会话还没有内容,没什么可导出。\n";
@@ -2191,7 +2231,27 @@ void HandleExportCommand(const std::string& args, const lubancode::agent::AgentL
         }
         out_path = sessions_dir + "/" + id + ".md";
     }
-    const std::string markdown = lubancode::agent::ExportSessionMarkdown(session_meta, history, id);
+
+    // 全量优先:存档文件在,就按文件里的流水导(含压缩标注);读不动再退
+    // 回内存这份(此时没有压缩位置可标)。
+    std::string markdown;
+    bool exported_from_file = false;
+    if (!store.file_path().empty()) {
+        if (const auto content = lubancode::agent::ReadSessionFileBytes(store.file_path());
+            content.has_value()) {
+            if (const auto session = lubancode::agent::ParseSessionFile(*content); session.has_value()) {
+                const std::string& title = !session->title.empty() ? session->title : session_title;
+                markdown = lubancode::agent::ExportSessionMarkdown(session->meta, session->all_messages, id,
+                                                                     /*max_result_lines=*/30, title,
+                                                                     session->compact_positions);
+                exported_from_file = true;
+            }
+        }
+    }
+    if (!exported_from_file) {
+        markdown = lubancode::agent::ExportSessionMarkdown(session_meta, history, id,
+                                                             /*max_result_lines=*/30, session_title);
+    }
 
     const std::filesystem::path path(
         std::u8string(reinterpret_cast<const char8_t*>(out_path.data()), out_path.size()));
@@ -2464,6 +2524,8 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     std::string session_start_ts = lubancode::agent::NowIdTimestamp();
     std::size_t persisted_count = 0;   // history 里前多少条已经落过盘
     bool session_store_broken = false;  // 建档失败过,别每轮都再撞一次
+    std::string session_title;          // /title 设的标题;resume 时取存档里最后一条
+    bool session_title_pending = false;  // 建档前设了标题,建档成功后补写事件行
 
     // 把 history 里 persisted_count 之后的消息逐条追加落盘(append+flush,
     // 崩溃安全)。history 被 ReplaceHistory 换短(/compact)的场合由调用处
@@ -2503,6 +2565,11 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                            << " 建档失败,本场对话不落盘(不影响继续聊)。" << theme.reset << "\n";
                 return;
             }
+            // 建档前 /title 设过标题:现在有文件了,把事件行补上。
+            if (session_title_pending && !session_title.empty()) {
+                session_store.AppendTitleEvent(session_title);
+            }
+            session_title_pending = false;
         }
         for (std::size_t i = persisted_count; i < history.size(); ++i) {
             if (!session_store.AppendMessage(history[i])) {
@@ -2515,10 +2582,11 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         persisted_count = history.size();
     };
 
-    // --continue:等价开场自动 /resume 最近一场;没有存档就安静开新会话。
+    // --continue:等价开场自动 /resume 本目录最近一场;本目录没有存档就
+    // 安静开新会话。
     if (continue_last) {
-        ResumeSession("", sessions_dir, *loop, session_store, persisted_count, session_meta, wire_str,
-                       *current_model, theme, /*quiet_if_none=*/true);
+        ResumeSession("", sessions_dir, *loop, session_store, persisted_count, session_meta, session_title,
+                       wire_str, *current_model, theme, /*quiet_if_none=*/true);
     }
 
     // M10:排队消息队列——某一轮流式期间(RunTurn 内 TurnInputListener 存活
@@ -2550,11 +2618,13 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                 case lubancode::cli::SlashCommand::Clear:
                     rebuild_loop();
                     // 存档跟着翻篇:旧文件留在磁盘上,新会话下一条消息另起
-                    // 一份新文件(id 用新的时间戳)。
+                    // 一份新文件(id 用新的时间戳)。标题属于旧场子,一并翻篇。
                     session_store.Reset();
                     session_start_ts = lubancode::agent::NowIdTimestamp();
                     persisted_count = 0;
                     session_store_broken = false;
+                    session_title.clear();
+                    session_title_pending = false;
                     std::cout << "已清空对话历史。\n";
                     break;
                 case lubancode::cli::SlashCommand::Context:
@@ -2562,11 +2632,16 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     break;
                 case lubancode::cli::SlashCommand::Compact: {
                     const std::string compact_model = config.compact_model.empty() ? *current_model : config.compact_model;
-                    HandleCompactCommand(parsed.args, *loop, *real_backend, compact_model, theme, spinner_enabled);
+                    const auto compact_event =
+                        HandleCompactCommand(parsed.args, *loop, *real_backend, compact_model, theme, spinner_enabled);
                     // 压缩把 history 换短了(失败则原样):落盘基线收到新长度,
-                    // 存档文件保持只追加——文件里是压缩前的全量流水,续聊的
-                    // 新消息接着往后写,/resume 载入的是全量,不丢内容。
+                    // 存档文件保持只追加——全量流水不动,补写一行 compact
+                    // 事件,/resume 按事件回放出压缩后的活状态,/export 仍走
+                    // 全量,不丢内容。
                     persisted_count = (std::min)(persisted_count, loop->History().size());
+                    if (compact_event.has_value() && session_store.active() && !session_store_broken) {
+                        session_store.AppendCompactEvent(*compact_event);
+                    }
                     break;
                 }
                 case lubancode::cli::SlashCommand::Think:
@@ -2590,19 +2665,43 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     PrintPluginsCommand(plugin_mounted, plugin_warnings);
                     break;
                 case lubancode::cli::SlashCommand::Sessions:
-                    PrintSessionsCommand(sessions_dir);
+                    PrintSessionsCommand(sessions_dir, parsed.args);
                     break;
                 case lubancode::cli::SlashCommand::Resume:
                     if (parsed.args.empty()) {
                         std::cout << "用法:/resume 编号或id(/sessions 看列表)\n";
                     } else {
                         ResumeSession(parsed.args, sessions_dir, *loop, session_store, persisted_count,
-                                       session_meta, wire_str, *current_model, theme, /*quiet_if_none=*/false);
+                                       session_meta, session_title, wire_str, *current_model, theme,
+                                       /*quiet_if_none=*/false);
                         session_store_broken = false;  // 换了场,存档失败的旧账翻篇
+                        session_title_pending = false;
                     }
                     break;
                 case lubancode::cli::SlashCommand::Export:
-                    HandleExportCommand(parsed.args, *loop, session_store, sessions_dir, session_meta);
+                    HandleExportCommand(parsed.args, *loop, session_store, sessions_dir, session_meta,
+                                         session_title);
+                    break;
+                case lubancode::cli::SlashCommand::Title:
+                    if (parsed.args.empty()) {
+                        std::cout << (session_title.empty() ? "本场还没设标题(/title 标题 起一个)。\n"
+                                                             : "当前标题: " + session_title + "\n");
+                    } else {
+                        session_title = parsed.args;
+                        if (session_store.active() && !session_store_broken) {
+                            if (session_store.AppendTitleEvent(session_title)) {
+                                std::cout << "标题已设为: " << session_title << "\n";
+                            } else {
+                                std::cout << theme.error << "[会话存档] 标题写入失败,只在本次会话内存里生效。"
+                                           << theme.reset << "\n";
+                            }
+                        } else {
+                            // 还没建档(首条消息才落盘):先记着,建档成功后
+                            // 由 persist_new_messages 补写事件行。
+                            session_title_pending = true;
+                            std::cout << "标题已设为: " << session_title << "(首条消息落盘后写入存档)\n";
+                        }
+                    }
                     break;
                 case lubancode::cli::SlashCommand::Exit:
                     return false;
@@ -2625,9 +2724,15 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
             const auto compact_result = lubancode::agent::Compact(*real_backend, compact_model, loop->History(), "");
             spinner.Stop();
             if (compact_result.has_value()) {
-                loop->ReplaceHistory(lubancode::agent::BuildCompactedHistory(loop->History(), *compact_result));
-                // 落盘基线收到新长度,理由同 /compact 分支。
+                const std::size_t old_size = loop->History().size();
+                const auto new_history = lubancode::agent::BuildCompactedHistory(loop->History(), *compact_result);
+                const auto compact_event = lubancode::agent::MakeCompactEvent(old_size, new_history);
+                loop->ReplaceHistory(new_history);
+                // 落盘基线收到新长度,补写 compact 事件,理由同 /compact 分支。
                 persisted_count = (std::min)(persisted_count, loop->History().size());
+                if (session_store.active() && !session_store_broken) {
+                    session_store.AppendCompactEvent(compact_event);
+                }
                 std::cout << "[compact] 自动压缩完成。\n";
             } else {
                 std::cout << theme.error << "[compact] 自动压缩失败: " << compact_result.error().message
