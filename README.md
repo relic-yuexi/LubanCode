@@ -67,7 +67,7 @@ cpr 默认会自己再拉一份 `curl`(默认地址在 `github.com/curl/curl/rel
 lubancode 要跟大模型对话,得知道 wire(协议)、base_url、api_key、model 这几件事。配置分四级,优先级从高到低,按**字段**逐个决——不是整套配置一刀切:
 
 1. **LUBANCODE_ 专属环境变量**:`LUBANCODE_WIRE`、`LUBANCODE_BASE_URL`、`LUBANCODE_API_KEY`、`LUBANCODE_MODEL`、`LUBANCODE_MAX_CONTEXT`、`LUBANCODE_THEME`、`LUBANCODE_SYSTEM_PROMPT_FILE`
-2. **配置文件**:先找当前目录的 `.lubancode.json`,找不到再找用户主目录(Windows 是 `%USERPROFILE%`)下的 `.lubancode.json`,字段除了 `wire`/`base_url`/`api_key`/`model`/`max_context_chars`,还可以写 `theme`、`system_prompt_file`
+2. **配置文件**:`.lubancode/` 是 lubancode 的"家",往后 `plugins/`、`skills/` 也会住这儿,配置只是先搬进去的第一样东西。查找顺序四级:当前目录的 `.lubancode/config.json` → 用户主目录(Windows 是 `%USERPROFILE%`)下的 `.lubancode/config.json` → 当前目录的旧位置 `.lubancode.json` → 用户主目录的旧位置 `.lubancode.json`。命中旧位置且新位置还没有文件时,会自动把文件搬过去(建好 `.lubancode/` 目录,原地挪一份,搬不动就复制再删旧的),屏幕上打一行"配置已迁移到 ..."通知;搬家失败也不会中断程序,照旧用回那份旧文件,只是提示一句。字段除了 `wire`/`base_url`/`api_key`/`model`/`max_context_chars`,还可以写 `theme`、`system_prompt_file`
 3. **通用环境变量**(向后兼容):`wire=anthropic` 时读 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_MODEL`;`wire=responses` 时读 `OPENAI_BASE_URL`/`OPENAI_API_KEY`/`OPENAI_MODEL`
 4. **内置默认值**:`wire=anthropic`、`max_context_chars=600000`、`theme=dark`。`base_url`/`api_key`/`model`/`system_prompt_file` **没有内置默认值**——lubancode 是通用工具,不绑死哪一家模型服务,`base_url`/`api_key`/`model` 这三项四级都没配到,交互模式会自动走一遍初次配置向导,单发模式/管道模式会直接报错并提示三条配置途径;`system_prompt_file` 没配到就用内置的默认人格。
 
@@ -108,18 +108,20 @@ model:
   api_key  = sk-xxxxxx...
   model    = MiniMax-M3
 
-保存到 C:/Users/你的用户名/.lubancode.json? [Y/n]: 
-已保存到 C:/Users/你的用户名/.lubancode.json
-lubancode 0.4.0  [anthropic] MiniMax-M3
+保存到 C:/Users/你的用户名/.lubancode/config.json? [Y/n]: 
+已保存到 C:/Users/你的用户名/.lubancode/config.json
+lubancode 0.5.0  [anthropic] MiniMax-M3
 cwd: D:/your/project  ·  输入问题回车发送,exit 退出,/help 看命令
 > 
 ```
 
-model 那一步回车不填,会真的去接口拉一份模型列表(`GET {base_url}/v1/models` 或 `{base_url}/models`,看 wire),编号选;拉取失败(网络问题、404 之类)会如实报错,然后回落到手输模型名,不会卡住。选 `Y`(默认)会把这份配置存进主目录的 `.lubancode.json`,下次直接进会话,不用再配一遍;选 `n` 只在这一次会话生效。
+model 那一步回车不填,会真的去接口拉一份模型列表(`GET {base_url}/v1/models` 或 `{base_url}/models`,看 wire),编号选;拉取失败(网络问题、404 之类)会如实报错,然后回落到手输模型名,不会卡住。选 `Y`(默认)会把这份配置存进主目录的 `.lubancode/config.json`,下次直接进会话,不用再配一遍;选 `n` 只在这一次会话生效。
 
-### 手动配置:主目录放一份 .lubancode.json
+如果机器上还留着老版本的旧配置(`~/.lubancode.json`),不用手动搬——启动时读到旧文件、新位置又还没有,会自动挪过去,打一行"配置已迁移到 C:/Users/你的用户名/.lubancode/config.json",接着照常进会话,内容一字不改,旧文件搬完就没了。
 
-也可以不走向导,自己在用户主目录(Windows 是 `%USERPROFILE%`,即 `C:\Users\你的用户名\`)下建一个 `.lubancode.json`,下面拿 MiniMax 举例(换成你自己在用的模型服务地址、密钥、模型名即可,lubancode 不绑定任何一家):
+### 手动配置:主目录放一份 .lubancode/config.json
+
+也可以不走向导,自己在用户主目录(Windows 是 `%USERPROFILE%`,即 `C:\Users\你的用户名\`)下建一个 `.lubancode` 目录,里面放一个 `config.json`,下面拿 MiniMax 举例(换成你自己在用的模型服务地址、密钥、模型名即可,lubancode 不绑定任何一家):
 
 ```json
 {
@@ -131,9 +133,9 @@ model 那一步回车不填,会真的去接口拉一份模型列表(`GET {base_u
 }
 ```
 
-字段全部可选,缺的自动往下一级找(通用环境变量,再往下是内置默认值——但 `base_url`/`api_key`/`model` 这三项没有内置默认值)。这份文件带着密钥,别提交进任何仓库——`.gitignore` 里已经排除了 `.lubancode.json`。
+字段全部可选,缺的自动往下一级找(通用环境变量,再往下是内置默认值——但 `base_url`/`api_key`/`model` 这三项没有内置默认值)。这份文件带着密钥,别提交进任何仓库——`.gitignore` 里已经排除了整个 `.lubancode/` 目录(连带旧位置的 `.lubancode.json` 一并排除,免得漏网)。
 
-也可以只在某个项目目录下放一份 `.lubancode.json`,cwd 那份优先级比主目录那份高,适合某个项目要连别的模型服务的场景。
+也可以只在某个项目目录下放一份 `.lubancode/config.json`,cwd 那份优先级比主目录那份高,适合某个项目要连别的模型服务的场景。
 
 ### 交互模式里的命令
 
@@ -157,10 +159,10 @@ model 那一步回车不填,会真的去接口拉一份模型列表(`GET {base_u
 ```
 lubancode 最终生效的配置:
 
-  wire               = anthropic  [配置文件(.lubancode.json)]
-  base_url           = https://api.minimaxi.com/anthropic  [配置文件(.lubancode.json)]
-  api_key            = sk-xxxxxx...  [配置文件(.lubancode.json)]
-  model              = MiniMax-M3  [配置文件(.lubancode.json)]
+  wire               = anthropic  [配置文件(.lubancode/config.json)]
+  base_url           = https://api.minimaxi.com/anthropic  [配置文件(.lubancode/config.json)]
+  api_key            = sk-xxxxxx...  [配置文件(.lubancode/config.json)]
+  model              = MiniMax-M3  [配置文件(.lubancode/config.json)]
   max_context_chars  = 600000  [内置默认值]
 ```
 
@@ -189,6 +191,27 @@ lubancode 最终生效的配置:
 ```
 [tokens] 输入 1024 · 输出 256 · 请求 3 次
 ```
+
+命中了 prompt cache 的话(Anthropic 后端看 `cache_read_input_tokens`,Responses 后端看 `usage.input_tokens_details.cached_tokens`),输入这一项后面会带一个括号,注明缓存命中了多少 token;没命中就照旧不带括号,不多打空括号:
+
+```
+[tokens] 输入 1578(缓存命中 128) · 输出 83 · 请求 2 次
+```
+
+### 逐键编辑、历史、Tab 补全、确认模式
+
+真实控制台下(不是管道/重定向进来的输入),`> ` 提示符这一行是逐键编辑的,不是敲完整行回车才生效:
+
+- 方向键左右移动光标,Home/End 跳到行首/行尾,Backspace 删字符;中日韩文字按显示宽度算,光标定位不会因为宽字符错位。
+- 上下方向键翻历史(本次会话里敲过的每一行,回车非空才记一条);翻到一半又开始敲字符,就地当成编辑这条历史,历史索引落回"底部"——再按一次 Up 是重新从最新一条开始翻,不接着刚才那条继续走。
+- 一行以 `/` 开头时,下面会实时跟一行淡色提示,列出当下匹配的命令名和一句话说明;按 Tab 补全公共前缀,唯一匹配直接补全命令全名(带一个尾随空格);还有多个匹配,再按一次 Tab 依次轮着候选走。
+- Shift+Tab 循环切换会话级"确认模式",切一次打一行提示,提示符前缀跟着变:
+  - `> `(默认,`确认`档):`write_file`/`edit_file`/`run_command` 等需要确认的工具照旧逐条问
+  - `[auto] > `(`auto` 档):`write_file`/`edit_file` 自动放行,`run_command` 仍然要问
+  - `[yolo] > `(`yolo` 档):全自动,什么都不问——跟命令行传 `--yes` 效果一样,`--yes` 直接从 `yolo` 档起手
+- Ctrl+C:行里有内容就清空、留在同一次输入里接着编辑;行是空的按 Ctrl+C 才当退出处理。Ctrl+D 一律当 EOF。
+
+输入是从管道/文件重定向进来的(比如 `printf "...\n" | lubancode`),不会走这条逐键编辑的路,原样按行读取,行为跟没有这套编辑器之前一样。
 
 ### `--system-prompt`:自定义人格
 

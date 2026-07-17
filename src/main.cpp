@@ -45,7 +45,7 @@
 
 namespace {
 
-constexpr std::string_view kVersion = "0.4.0";
+constexpr std::string_view kVersion = "0.5.0";
 
 void PrintVersion() {
     std::cout << "lubancode " << kVersion << "\n";
@@ -84,9 +84,10 @@ void PrintHelp() {
         << "       LUBANCODE_MAX_CONTEXT   history 裁剪阈值(字符数)\n"
         << "       LUBANCODE_THEME         终端配色主题,dark / light / plain\n"
         << "       LUBANCODE_SYSTEM_PROMPT_FILE  人格文件路径,同 --system-prompt(命令行参数压过这个)\n"
-        << "  2) 配置文件(第一个找到的生效):cwd 的 .lubancode.json,找不到再找用户主目录的\n"
-        << "     .lubancode.json。字段:wire / base_url / api_key / model / max_context_chars / theme /\n"
-        << "     system_prompt_file,全部可选。\n"
+        << "  2) 配置文件(第一个找到的生效,查找顺序:cwd 的 .lubancode/config.json → 主目录的\n"
+        << "     .lubancode/config.json → cwd 的旧位置 .lubancode.json → 主目录的旧位置\n"
+        << "     .lubancode.json;读到旧位置会自动挪到新位置)。字段:wire / base_url / api_key / model /\n"
+        << "     max_context_chars / theme / system_prompt_file,全部可选。\n"
         << "  3) 通用环境变量(向后兼容旧用法,跟 Claude Code 等工具共用同名变量时容易撞车,\n"
         << "     建议改用第 1 级的 LUBANCODE_* 专属变量):\n"
         << "       wire=anthropic 时读 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL\n"
@@ -284,6 +285,7 @@ void PrintConfirmDetails(const std::string& name, const nlohmann::json& input) {
 struct UsageStats {
     std::int64_t input_tokens = 0;
     std::int64_t output_tokens = 0;
+    std::int64_t cache_read_tokens = 0;
     int request_count = 0;
 };
 
@@ -309,7 +311,17 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
 
     callbacks.on_tool_confirm = [auto_confirm, &always_allowed_tools, &theme](const std::string& name,
                                                                                const nlohmann::json& input) -> bool {
-        if (auto_confirm) {
+        // 会话级确认模式(Shift+Tab 循环切),跟 --yes/auto_confirm 叠加:
+        //   yolo  —— 全自动放行(auto_confirm 本来就是这个语义,这里再查一遍
+        //             CurrentConfirmMode() 是为了让 Shift+Tab 中途切到 yolo
+        //             也立刻生效,不用等下一轮 --yes)
+        //   auto  —— write_file/edit_file 自动放行,run_command 之类仍然要问
+        //   confirm(默认)—— 老规矩,needs_confirm 的工具逐个问
+        const lubancode::cli::ConfirmMode mode = lubancode::cli::CurrentConfirmMode();
+        if (auto_confirm || mode == lubancode::cli::ConfirmMode::Yolo) {
+            return true;
+        }
+        if (mode == lubancode::cli::ConfirmMode::Auto && (name == "write_file" || name == "edit_file")) {
             return true;
         }
         if (always_allowed_tools.count(name) != 0) {
@@ -317,7 +329,7 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         }
         PrintConfirmDetails(name, input);
         const std::optional<std::string> answer = lubancode::cli::ReadLine(
-            theme.confirm + "[y] 本次允许  [a] 本会话总是允许(该工具)  [N] 拒绝: " + theme.reset);
+            theme.confirm + "[y] 本次允许  [a] 本会话总是允许(该工具)  [N] 拒绝: " + theme.reset, theme);
         if (!answer.has_value()) {
             return false;  // 读到 EOF,按拒绝处理,不要在这儿卡住
         }
@@ -338,6 +350,7 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
     callbacks.on_usage = [&usage_stats](const lubancode::api::Usage& usage) {
         usage_stats.input_tokens += usage.input_tokens;
         usage_stats.output_tokens += usage.output_tokens;
+        usage_stats.cache_read_tokens += usage.cache_read_tokens;
         usage_stats.request_count += 1;
     };
 
@@ -362,9 +375,12 @@ int RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bo
     }
 
     if (usage_stats.request_count > 0) {
-        std::cout << theme.stats << "[tokens] 输入 " << usage_stats.input_tokens << " · 输出 "
-                   << usage_stats.output_tokens << " · 请求 " << usage_stats.request_count << " 次" << theme.reset
-                   << "\n";
+        std::cout << theme.stats << "[tokens] 输入 " << usage_stats.input_tokens;
+        if (usage_stats.cache_read_tokens > 0) {
+            std::cout << "(缓存命中 " << usage_stats.cache_read_tokens << ")";
+        }
+        std::cout << " · 输出 " << usage_stats.output_tokens << " · 请求 " << usage_stats.request_count << " 次"
+                   << theme.reset << "\n";
     }
     return 0;
 }
@@ -385,8 +401,10 @@ std::optional<lubancode::config::Config> RunInitialSetupWizard(std::optional<std
         return lubancode::api::ListModels(wire, base_url, api_key);
     };
 
-    const auto home = lubancode::config::HomeDir();
-    io.home_config_display_path = (home.has_value() ? *home : std::string("<找不到主目录>")) + "/.lubancode.json";
+    const auto home_lubancode_dir = lubancode::config::HomeLubancodeDir();
+    io.home_config_display_path =
+        (home_lubancode_dir.has_value() ? *home_lubancode_dir : std::string("<找不到主目录>/.lubancode")) +
+        "/config.json";
 
     const auto outcome = lubancode::cli::RunSetupWizard(io);
     if (!outcome.has_value()) {
@@ -525,7 +543,8 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     std::optional<std::string> config_file_path = config_result.config_file_path;
 
     while (true) {
-        const std::optional<std::string> line = lubancode::cli::ReadLine(theme.prompt + "> " + theme.reset);
+        const std::optional<std::string> line =
+            lubancode::cli::ReadLine(theme.prompt + "> " + theme.reset, theme);
         if (!line.has_value()) {
             break;  // EOF:Ctrl+Z 或管道读尽
         }
@@ -630,6 +649,9 @@ int RunCli(const std::vector<std::string>& args) {
         std::cerr << config_result.error() << "\n";
         return 1;
     }
+    if (config_result->migration_notice.has_value()) {
+        std::cout << *config_result->migration_notice << "\n";
+    }
 
     if (print_config) {
         PrintConfigDiagnostics(*config_result);
@@ -661,6 +683,13 @@ int RunCli(const std::vector<std::string>& args) {
     const lubancode::cli::Theme theme =
         lubancode::cli::ResolveTheme(config_result->config.theme, console_cap.colors_enabled);
     const bool spinner_enabled = console_cap.is_console;
+
+    // --yes 等价于起手就把会话级确认模式切到 yolo(全自动,needs_confirm
+    // 的工具一概放行)——单发模式(AskOnce)也一起设,虽然单发模式走不到
+    // Shift+Tab 那条路,但 on_tool_confirm 统一查 CurrentConfirmMode(),
+    // 这里设了才对得上。
+    lubancode::cli::SetConfirmMode(auto_confirm ? lubancode::cli::ConfirmMode::Yolo
+                                                 : lubancode::cli::ConfirmMode::Confirm);
 
     // 兜底:JSON 编码、网络库内部等地方万一抛出没接住的异常,也不能让
     // 整个进程崩掉(崩掉的话用户只会看到一个莫名其妙的退出码)。

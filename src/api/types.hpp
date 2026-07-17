@@ -76,6 +76,13 @@ struct Request {
 struct Usage {
     std::int64_t input_tokens = 0;
     std::int64_t output_tokens = 0;
+    // 缓存命中/缓存写入的 token 数,不是所有厂商/wire 都会给,给不出来就是 0
+    // (M6.5 添加,anthropic wire 从 message_delta 的 usage 里读
+    // cache_read_input_tokens/cache_creation_input_tokens;responses wire 从
+    // response.completed 的 usage.input_tokens_details.cached_tokens 读
+    // cache_read_tokens,没有对应的 cache_creation 概念,恒为 0)。
+    std::int64_t cache_read_tokens = 0;
+    std::int64_t cache_creation_tokens = 0;
 };
 
 // 流的第一个事件,标记消息开始。

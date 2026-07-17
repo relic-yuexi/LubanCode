@@ -130,6 +130,28 @@ TEST_CASE("response.completed:纯文本回复,output 里没有 function_call,sto
     CHECK(done.usage.output_tokens == 243);
 }
 
+TEST_CASE("response.completed:usage.input_tokens_details.cached_tokens 映射进 cache_read_tokens") {
+    auto event = parse_event(Frame(
+        R"({"type":"response.completed","response":{"id":"resp_cache","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"你好"}]}],"usage":{"input_tokens":1578,"output_tokens":83,"total_tokens":1661,"input_tokens_details":{"cached_tokens":128}}},"sequence_number":56})"));
+
+    REQUIRE(event.has_value());
+    REQUIRE(std::holds_alternative<MessageDone>(*event));
+    const auto& done = std::get<MessageDone>(*event);
+    CHECK(done.usage.input_tokens == 1578);
+    CHECK(done.usage.output_tokens == 83);
+    CHECK(done.usage.cache_read_tokens == 128);
+    CHECK(done.usage.cache_creation_tokens == 0);  // responses wire 没有缓存写入这个概念
+}
+
+TEST_CASE("response.completed:没有 input_tokens_details 字段时,cache_read_tokens 落 0,不崩") {
+    auto event = parse_event(Frame(
+        R"({"type":"response.completed","response":{"id":"resp_nocache","status":"completed","output":[],"usage":{"input_tokens":37,"output_tokens":243,"total_tokens":280}},"sequence_number":56})"));
+
+    REQUIRE(event.has_value());
+    REQUIRE(std::holds_alternative<MessageDone>(*event));
+    CHECK(std::get<MessageDone>(*event).usage.cache_read_tokens == 0);
+}
+
 TEST_CASE("response.completed:output 里带 function_call,stop_reason 相当于 tool_use") {
     auto event = parse_event(Frame(
         R"({"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"function_call","id":"msg_fc1","name":"read_file","arguments":"{\"path\":\"vcpkg.json\"}","call_id":"call_abc123","status":"completed"}],"usage":{"input_tokens":50,"output_tokens":20,"total_tokens":70}},"sequence_number":9})"));

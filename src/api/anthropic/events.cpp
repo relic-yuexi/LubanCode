@@ -74,6 +74,9 @@ std::optional<StreamEvent> HandleMessageDelta(const json& data) {
     if (auto it = data.find("usage"); it != data.end() && it->is_object()) {
         event.usage.input_tokens = it->value("input_tokens", static_cast<std::int64_t>(0));
         event.usage.output_tokens = it->value("output_tokens", static_cast<std::int64_t>(0));
+        // 实测 MiniMax 在 message_delta 的顶层 usage 里回这两个字段;没有就是 0。
+        event.usage.cache_read_tokens = it->value("cache_read_input_tokens", static_cast<std::int64_t>(0));
+        event.usage.cache_creation_tokens = it->value("cache_creation_input_tokens", static_cast<std::int64_t>(0));
     }
     return event;
 }

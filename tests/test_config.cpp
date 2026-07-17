@@ -630,3 +630,115 @@ TEST_CASE("ReadSystemPromptFile: 空文件报错") {
     REQUIRE_FALSE(result.has_value());
     CHECK_FALSE(result.error().empty());
 }
+
+// ---------------------------------------------------------------------------
+// 配置迁移:旧位置 <dir>/.lubancode.json -> 新位置 <dir>/.lubancode/config.json。
+// MigrateConfigFileIfNeeded 吃的是两个具体路径字符串,真在临时目录里读写
+// 文件(不是纯函数,但落在一个每个用例独立的临时子目录里,互不干扰,用完
+// 就整个删掉)。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 每个用例一个独立的临时目录,用完整个删掉,几个用例之间不会互相踩脚。
+class TempConfigDir {
+public:
+    TempConfigDir() {
+        dir_ = std::filesystem::temp_directory_path() /
+               ("lubancode_config_migrate_test_" + std::to_string(reinterpret_cast<std::uintptr_t>(this)));
+        std::error_code ec;
+        std::filesystem::remove_all(dir_, ec);
+        std::filesystem::create_directories(dir_, ec);
+    }
+    ~TempConfigDir() {
+        std::error_code ec;
+        std::filesystem::remove_all(dir_, ec);
+    }
+
+    std::string OldPath() const { return (dir_ / ".lubancode.json").string(); }
+    std::string NewPath() const { return (dir_ / ".lubancode" / "config.json").string(); }
+
+    void WriteOldFile(const std::string& content) const {
+        std::ofstream file(OldPath(), std::ios::binary);
+        file << content;
+    }
+
+private:
+    std::filesystem::path dir_;
+};
+
+}  // namespace
+
+TEST_CASE("MigrateConfigFileIfNeeded: 只有旧文件,搬到新位置,内容不变,旧文件消失") {
+    TempConfigDir dir;
+    const std::string content = R"({"api_key": "sk-old-key-123"})";
+    dir.WriteOldFile(content);
+
+    const auto outcome = config::MigrateConfigFileIfNeeded(dir.OldPath(), dir.NewPath());
+
+    CHECK(outcome.effective_path == dir.NewPath());
+    REQUIRE(outcome.notice.has_value());
+    CHECK(outcome.notice->find(dir.NewPath()) != std::string::npos);
+
+    CHECK(std::filesystem::exists(dir.NewPath()));
+    CHECK_FALSE(std::filesystem::exists(dir.OldPath()));
+
+    std::ifstream moved(dir.NewPath(), std::ios::binary);
+    const std::string moved_content((std::istreambuf_iterator<char>(moved)), std::istreambuf_iterator<char>());
+    CHECK(moved_content == content);
+}
+
+TEST_CASE("MigrateConfigFileIfNeeded: 新旧都存在时,用新的,旧的原样留着不动") {
+    TempConfigDir dir;
+    dir.WriteOldFile(R"({"api_key": "sk-old"})");
+    std::filesystem::create_directories(std::filesystem::path(dir.NewPath()).parent_path());
+    {
+        std::ofstream new_file(dir.NewPath(), std::ios::binary);
+        new_file << R"({"api_key": "sk-new"})";
+    }
+
+    const auto outcome = config::MigrateConfigFileIfNeeded(dir.OldPath(), dir.NewPath());
+
+    CHECK(outcome.effective_path == dir.NewPath());
+    CHECK_FALSE(outcome.notice.has_value());  // 新的已经在了,不算"迁移",不该有通知
+
+    // 旧文件原样留着,没被碰过。
+    REQUIRE(std::filesystem::exists(dir.OldPath()));
+    std::ifstream old_file(dir.OldPath(), std::ios::binary);
+    const std::string old_content((std::istreambuf_iterator<char>(old_file)), std::istreambuf_iterator<char>());
+    CHECK(old_content == R"({"api_key": "sk-old"})");
+
+    std::ifstream new_file(dir.NewPath(), std::ios::binary);
+    const std::string new_content((std::istreambuf_iterator<char>(new_file)), std::istreambuf_iterator<char>());
+    CHECK(new_content == R"({"api_key": "sk-new"})");
+}
+
+TEST_CASE("MigrateConfigFileIfNeeded: 新旧都没有,什么都不做,也不报通知") {
+    TempConfigDir dir;
+    const auto outcome = config::MigrateConfigFileIfNeeded(dir.OldPath(), dir.NewPath());
+    CHECK(outcome.effective_path.empty());
+    CHECK_FALSE(outcome.notice.has_value());
+    CHECK_FALSE(std::filesystem::exists(dir.NewPath()));
+}
+
+TEST_CASE("MigrateConfigFileIfNeeded: 建目录、搬文件之后,内容能正常喂给 ParseFileConfigJson") {
+    // LoadFileConfig() 本身不吃路径参数(内部直接用 HomeDir()/cwd,没法在
+    // 单测里安全地借真实用户主目录摆弄),迁移这一步的文件系统逻辑已经在
+    // 上面几条用例里用 MigrateConfigFileIfNeeded 单独测过了;这里补一条端
+    // 到端一点的:搬完之后,新位置的文件内容依然是合法配置,能正常解析
+    // 出字段,不是被迁移过程弄坏的半截文件。
+    TempConfigDir dir;
+    dir.WriteOldFile(R"({"base_url": "https://example.com", "api_key": "sk-migrate-test"})");
+
+    const auto outcome = config::MigrateConfigFileIfNeeded(dir.OldPath(), dir.NewPath());
+    REQUIRE(outcome.effective_path == dir.NewPath());
+
+    std::ifstream new_file(dir.NewPath(), std::ios::binary);
+    const std::string new_content((std::istreambuf_iterator<char>(new_file)), std::istreambuf_iterator<char>());
+    const auto parsed = config::ParseFileConfigJson(new_content, dir.NewPath());
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->base_url.has_value());
+    CHECK(*parsed->base_url == "https://example.com");
+    REQUIRE(parsed->api_key.has_value());
+    CHECK(*parsed->api_key == "sk-migrate-test");
+}

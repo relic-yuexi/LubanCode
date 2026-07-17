@@ -1,11 +1,16 @@
 // 配置来源分四级,优先级从高到低:
 //   1) LUBANCODE_ 专属环境变量(LUBANCODE_WIRE / LUBANCODE_BASE_URL /
 //      LUBANCODE_API_KEY / LUBANCODE_MODEL / LUBANCODE_MAX_CONTEXT)
-//   2) 配置文件 .lubancode.json(先找 cwd,再找用户主目录)
+//   2) 配置文件(先找 cwd,再找用户主目录;新位置 <目录>/.lubancode/config.json,
+//      旧位置 <目录>/.lubancode.json,查找顺序见 LoadFileConfig 注释)
 //   3) 通用环境变量(ANTHROPIC_*/OPENAI_*,向后兼容老用法)
 //   4) 内置默认值
 // 按"字段"逐个决,不是整套配置一刀切——比如配置文件只写了 base_url,
 // model 照样能从下一级来。密钥绝不硬编码进源码。
+//
+// M6.5:配置文件挪进 <主目录>/.lubancode/ 目录(往后还要住 plugins/、skills/,
+// 是 lubancode 的家)。读到旧位置文件而新位置不存在时自动迁移(见
+// MigrateConfigFileIfNeeded),不留旧新两份配置混着用的糊涂账。
 //
 // lubancode 是通用工具,不绑死哪一家模型服务:内置默认值只有 wire=anthropic
 // 和 max_context_chars,base_url/api_key/model 三个字段没有内置默认值,四级
@@ -73,11 +78,16 @@ struct ConfigSources {
 struct ConfigResult {
     Config config;
     ConfigSources sources;
-    // 这份配置是从哪个 .lubancode.json 读出来的(cwd 或用户主目录),没有配置文件
-    // 就是 std::nullopt。跟 sources 不完全一样——sources 是"每个字段最终用了哪一级",
-    // 这个字段单纯记"读到的配置文件在哪",供 /model 之类想更新配置文件的场景用
-    // (LoadFromEnv 里填;MergeConfig 本身是纯函数,不碰路径)。
+    // 这份配置是从哪个配置文件读出来的(cwd 或用户主目录,新位置
+    // <目录>/.lubancode/config.json 或旧位置 <目录>/.lubancode.json),没有配置
+    // 文件就是 std::nullopt。跟 sources 不完全一样——sources 是"每个字段最终用了
+    // 哪一级",这个字段单纯记"读到的配置文件在哪",供 /model 之类想更新配置
+    // 文件的场景用(LoadFromEnv 里填;MergeConfig 本身是纯函数,不碰路径)。
     std::optional<std::string> config_file_path;
+    // 本次加载时如果发生了"旧位置 .lubancode.json 挪到新位置
+    // .lubancode/config.json"这件事,这里是要打印给用户看的那一行通知
+    // (成功或失败都会有一行);没发生迁移就是 std::nullopt。LoadFromEnv 里填。
+    std::optional<std::string> migration_notice;
 };
 
 // .lubancode.json 解析出来的字段,全部可选,缺的字段留 std::nullopt。
@@ -91,6 +101,10 @@ struct FileConfig {
     std::optional<std::string> theme;               // dark / light / plain
     std::optional<std::string> system_prompt_file;   // 人格文件路径
     std::string source_path;
+    // 这份 FileConfig 是不是从"旧位置迁移到新位置"这个动作里读出来的;
+    // 有值就是要打印给用户看的那一行通知(LoadFileConfig 填,LoadFromEnv
+    // 原样搬到 ConfigResult::migration_notice 上)。
+    std::optional<std::string> migration_notice;
 };
 
 // LUBANCODE_ 专属环境变量读出来的值,全部可选(没设置、或者设置了空串,
@@ -153,8 +167,35 @@ std::string MaskApiKey(const std::string& api_key);
 // 拼路径用,所以导出成公开函数。
 std::optional<std::string> HomeDir();
 
-// 把 config 写成 JSON,保存到用户主目录的 .lubancode.json(找不到主目录时
-// 报错)。成功时返回写入的完整路径。初次配置向导选择保存时调用这个。
+// <主目录>/.lubancode 这个目录的路径——lubancode 的"家",配置文件放
+// <主目录>/.lubancode/config.json,往后 plugins/、skills/ 也会住这儿。
+// 找不到主目录时返回 std::nullopt。
+std::optional<std::string> HomeLubancodeDir();
+
+// 一次"旧位置配置文件挪到新位置"的处理结果。
+struct ConfigMigrationOutcome {
+    // 之后应该实际去读的路径:新位置已存在、或者迁移成功,是新位置;
+    // 迁移失败,是旧位置(继续用旧的,不能让用户没法用);旧位置也不存在
+    // (压根没有配置文件),是空字符串。
+    std::string effective_path;
+    // 要打印给用户看的一行通知(迁移成功或失败都有);什么都没发生
+    // (新位置本来就存在,或者旧位置也不存在)时是 std::nullopt。
+    std::optional<std::string> notice;
+};
+
+// 纯粹处理文件系统这一件事,不解析 JSON:new_path 已经存在就什么都不干,直接
+// 说"用 new_path"；new_path 不存在但 old_path 存在,就尝试迁移——建目录、
+// std::filesystem::rename,跨盘导致 rename 失败就退化成 copy_file + remove;
+// 迁移失败(建目录失败、复制也失败)不算错误,不崩,继续用旧路径,notice
+// 里说明失败原因。两个路径都不存在,effective_path 留空、notice 留空
+// (调用方按"没有配置文件"处理)。
+// 单独导出成公开函数,是为了让"临时目录造旧文件,验证挪动逻辑"这条能绕开
+// 真实用户主目录直接单测。
+ConfigMigrationOutcome MigrateConfigFileIfNeeded(const std::string& old_path, const std::string& new_path);
+
+// 把 config 写成 JSON,保存到用户主目录的 .lubancode/config.json(目录不存在
+// 就先建;找不到主目录时报错)。成功时返回写入的完整路径。初次配置向导
+// 选择保存时调用这个。
 std::expected<std::string, std::string> SaveConfigFile(const Config& config);
 
 // 只更新一份已存在的配置文件里的 model 字段,其余字段原样保留(哪怕是
@@ -168,9 +209,15 @@ std::expected<void, std::string> UpdateModelInConfigFile(const std::string& file
 std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& json_text,
                                                              const std::string& file_path_for_error);
 
-// 找配置文件:先 cwd 的 .lubancode.json,找不到再找用户主目录(Windows 取
-// %USERPROFILE%)的 .lubancode.json。两处都没有,返回 std::nullopt(不算错)。
-// 找到了但解析失败,返回错误(带路径)。
+// 找配置文件,查找顺序:
+//   1) cwd 的新位置  <cwd>/.lubancode/config.json
+//   2) 主目录的新位置 <主目录>/.lubancode/config.json
+//   3) cwd 的旧位置  <cwd>/.lubancode.json          (存在就顺手迁移到 1)
+//   4) 主目录的旧位置 <主目录>/.lubancode.json        (存在就顺手迁移到 2)
+// 命中旧位置时,自动挪到对应的新位置(见 MigrateConfigFileIfNeeded),
+// 迁移的通知记在返回值的 FileConfig::migration_notice 里。四处都没有,
+// 返回 std::optional<FileConfig>(std::nullopt)(不算错)。找到了但解析
+// 失败,返回错误(带路径)。
 std::expected<std::optional<FileConfig>, std::string> LoadFileConfig();
 
 // 真正的入口:读 LUBANCODE_ 专属环境变量、找并读配置文件、读通用环境变量,

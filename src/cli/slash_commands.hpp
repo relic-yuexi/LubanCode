@@ -6,6 +6,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace lubancode::cli {
 
@@ -29,5 +30,13 @@ struct ParsedSlashCommand {
 // 命令词大小写不敏感(/Model 和 /model 视为一样);命令词和参数之间按第一个
 // 空白切开。输入前后空白先剥掉。
 ParsedSlashCommand ParseSlashCommand(const std::string& input);
+
+// 一个命令一条:名字 + 一句话说明。/help 打印用的就是这份,line_editor 的
+// Tab 补全、实时提示行也是从这份转过去的候选——统共这一份定义,不重复写。
+struct SlashCommandInfo {
+    std::string name;
+    std::string description;
+};
+const std::vector<SlashCommandInfo>& AllSlashCommands();
 
 }  // namespace lubancode::cli

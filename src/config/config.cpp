@@ -49,12 +49,30 @@ std::optional<std::string> HomeDir() {
 #endif
 }
 
+std::optional<std::string> HomeLubancodeDir() {
+    const auto home = HomeDir();
+    if (!home.has_value()) {
+        return std::nullopt;
+    }
+    return (std::filesystem::path(*home) / ".lubancode").string();
+}
+
+// 新位置配置文件的路径:<base_dir>/.lubancode/config.json。
+std::filesystem::path NewConfigPathFor(const std::filesystem::path& base_dir) {
+    return base_dir / ".lubancode" / "config.json";
+}
+
+// 旧位置配置文件的路径:<base_dir>/.lubancode.json。
+std::filesystem::path OldConfigPathFor(const std::filesystem::path& base_dir) {
+    return base_dir / ".lubancode.json";
+}
+
 std::string ToString(Source source) {
     switch (source) {
         case Source::LubancodeEnv:
             return "LUBANCODE_ 专属环境变量";
         case Source::ConfigFile:
-            return "配置文件(.lubancode.json)";
+            return "配置文件(.lubancode/config.json)";
         case Source::GenericEnv:
             return "通用环境变量(ANTHROPIC_*/OPENAI_*)";
         case Source::Default:
@@ -130,32 +148,99 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
     return config;
 }
 
+ConfigMigrationOutcome MigrateConfigFileIfNeeded(const std::string& old_path_str, const std::string& new_path_str) {
+    namespace fs = std::filesystem;
+    const fs::path old_path(old_path_str);
+    const fs::path new_path(new_path_str);
+
+    std::error_code ec;
+    if (fs::exists(new_path, ec) && !ec) {
+        return ConfigMigrationOutcome{new_path_str, std::nullopt};
+    }
+
+    ec.clear();
+    if (!fs::exists(old_path, ec) || ec) {
+        return ConfigMigrationOutcome{std::string(), std::nullopt};
+    }
+
+    ec.clear();
+    fs::create_directories(new_path.parent_path(), ec);
+    if (ec) {
+        return ConfigMigrationOutcome{old_path_str, "配置迁移失败(建目录 " + new_path.parent_path().string() +
+                                                          " 出错: " + ec.message() + "),继续使用旧配置 " + old_path_str};
+    }
+
+    ec.clear();
+    fs::rename(old_path, new_path, ec);
+    if (ec) {
+        // rename 失败多半是跨盘符导致的(比如 old/new 不在同一个磁盘分区),
+        // 退化成复制 + 删除旧文件。
+        ec.clear();
+        fs::copy_file(old_path, new_path, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            return ConfigMigrationOutcome{old_path_str,
+                                           "配置迁移失败(" + ec.message() + "),继续使用旧配置 " + old_path_str};
+        }
+        std::error_code remove_ec;
+        fs::remove(old_path, remove_ec);  // 尽力删除,删不掉不影响"已经迁移成功"这件事,不报错
+    }
+
+    return ConfigMigrationOutcome{new_path_str, "配置已迁移到 " + new_path_str};
+}
+
+namespace {
+
+// 真正读盘 + 解析一个已知存在的配置文件路径。
+std::expected<FileConfig, std::string> ReadAndParseConfigFile(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+        return std::unexpected("配置文件 " + path.string() + " 存在,但打不开(检查一下权限)");
+    }
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    return ParseFileConfigJson(buffer.str(), path.string());
+}
+
+}  // namespace
+
 std::expected<std::optional<FileConfig>, std::string> LoadFileConfig() {
     namespace fs = std::filesystem;
 
-    std::vector<fs::path> candidates;
-    candidates.push_back(fs::current_path() / ".lubancode.json");
+    std::vector<fs::path> base_dirs;
+    base_dirs.push_back(fs::current_path());
     if (const auto home = HomeDir(); home.has_value()) {
-        candidates.push_back(fs::path(*home) / ".lubancode.json");
+        base_dirs.push_back(fs::path(*home));
     }
 
-    for (const auto& path : candidates) {
+    // 第一遍:新位置优先,cwd 新位置 -> 主目录新位置。
+    for (const auto& base : base_dirs) {
+        const fs::path new_path = NewConfigPathFor(base);
         std::error_code ec;
-        if (!fs::exists(path, ec) || ec) {
+        if (fs::exists(new_path, ec) && !ec) {
+            const auto parsed = ReadAndParseConfigFile(new_path);
+            if (!parsed.has_value()) {
+                return std::unexpected(parsed.error());
+            }
+            return std::optional<FileConfig>(*parsed);
+        }
+    }
+
+    // 第二遍:旧位置,cwd 旧位置 -> 主目录旧位置,命中就顺手迁移。
+    for (const auto& base : base_dirs) {
+        const fs::path old_path = OldConfigPathFor(base);
+        std::error_code ec;
+        if (!fs::exists(old_path, ec) || ec) {
             continue;
         }
+        const fs::path new_path = NewConfigPathFor(base);
+        const ConfigMigrationOutcome outcome = MigrateConfigFileIfNeeded(old_path.string(), new_path.string());
+        const fs::path effective = outcome.effective_path.empty() ? old_path : fs::path(outcome.effective_path);
 
-        std::ifstream file(path, std::ios::binary);
-        if (!file.is_open()) {
-            return std::unexpected("配置文件 " + path.string() + " 存在,但打不开(检查一下权限)");
-        }
-        std::ostringstream buffer;
-        buffer << file.rdbuf();
-
-        const auto parsed = ParseFileConfigJson(buffer.str(), path.string());
+        auto parsed = ReadAndParseConfigFile(effective);
         if (!parsed.has_value()) {
             return std::unexpected(parsed.error());
         }
+        parsed->migration_notice = outcome.notice;
         return std::optional<FileConfig>(*parsed);
     }
 
@@ -305,7 +390,8 @@ std::expected<void, std::string> RequireApiKey(const ConfigResult& result) {
     return std::unexpected(
         "缺少 API Key,没有它没法跟模型对话。按优先级从高到低找了这些地方,都没找到:\n"
         "  1) 环境变量 LUBANCODE_API_KEY\n"
-        "  2) 配置文件(cwd 或用户主目录的 .lubancode.json)里的 api_key 字段\n"
+        "  2) 配置文件(cwd 或用户主目录的 .lubancode/config.json,旧位置 .lubancode.json 也认,\n"
+        "     读到会自动迁移)里的 api_key 字段\n"
         "  3) 通用环境变量 " +
         generic_api_key_name +
         "\n"
@@ -358,7 +444,8 @@ std::expected<void, std::string> RequireConfigured(const ConfigResult& result) {
         "缺少配置: " + joined +
         ",没法跟模型对话(lubancode 不内置哪一家的地址/模型,得自己配)。三条途径挑一种:\n"
         "  1) 不带位置参数运行 lubancode,进入交互模式,会自动走初次配置向导\n"
-        "  2) 在用户主目录放一份 .lubancode.json,把 " + joined + " 写进去(字段全部可选)\n"
+        "  2) 在用户主目录放一份 .lubancode/config.json(旧版 .lubancode.json 也认,读到会自动迁移),把 " +
+        joined + " 写进去(字段全部可选)\n"
         "  3) 设置对应的环境变量: " + joined_env + "\n"
         "配好之后用 --config 能看到当前每个字段实际读到了什么、来自哪一级。");
 }
@@ -370,7 +457,13 @@ std::expected<std::string, std::string> SaveConfigFile(const Config& config) {
     }
 
     namespace fs = std::filesystem;
-    const fs::path path = fs::path(*home) / ".lubancode.json";
+    const fs::path path = NewConfigPathFor(fs::path(*home));
+
+    std::error_code ec;
+    fs::create_directories(path.parent_path(), ec);
+    if (ec) {
+        return std::unexpected("建目录 " + path.parent_path().string() + " 失败: " + ec.message());
+    }
 
     nlohmann::json j;
     j["wire"] = (config.wire == Wire::Responses) ? "responses" : "anthropic";
@@ -453,6 +546,7 @@ std::expected<ConfigResult, std::string> LoadFromEnv() {
     auto merged = MergeConfig(lubancode_env, *file_config, generic_env);
     if (merged.has_value() && file_config->has_value()) {
         merged->config_file_path = (*file_config)->source_path;
+        merged->migration_notice = (*file_config)->migration_notice;
     }
     return merged;
 }

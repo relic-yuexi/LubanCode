@@ -61,4 +61,15 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
     return parsed;
 }
 
+const std::vector<SlashCommandInfo>& AllSlashCommands() {
+    static const std::vector<SlashCommandInfo> kCommands = {
+        {"/help", "列出所有命令"},
+        {"/model", "拉模型列表选,或 /model 名字 直接切"},
+        {"/config", "打印当前生效配置和本会话在用的 model"},
+        {"/clear", "清空对话历史"},
+        {"/exit", "退出(裸词 exit/quit 也认)"},
+    };
+    return kCommands;
+}
+
 }  // namespace lubancode::cli

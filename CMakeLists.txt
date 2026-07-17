@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(lubancode VERSION 0.4.0 LANGUAGES CXX)
+project(lubancode VERSION 0.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -119,10 +119,11 @@ endif()
 # ---------------------------------------------------------------------------
 # 核心库:api / config 这些不碰命令行交互的代码,单独编成静态库,
 # 好让可执行文件和测试程序都能链接同一份实现,不用测试再编一遍。
-# cli/setup_wizard.cpp、cli/slash_commands.cpp 虽然在 cli/ 目录下,但逻辑本身
-# 不碰真实 IO(打印/读一行/拉模型列表都是外部注入的函数),跟这里其余文件
-# 一样"纯逻辑可单测",所以也放进来;真正碰键盘/控制台的 cli/console_input.cpp
-# 留在 lubancode 可执行文件那边,不挪过来。
+# cli/setup_wizard.cpp、cli/slash_commands.cpp、cli/line_editor.cpp 虽然在
+# cli/ 目录下,但逻辑本身不碰真实 IO(打印/读一行/拉模型列表都是外部注入的
+# 函数,line_editor 的 LineEditorCore 吃抽象 KeyEvent、吐 RenderState,不认
+# Win32),跟这里其余文件一样"纯逻辑可单测",所以也放进来;真正碰键盘/
+# 控制台的 cli/console_input.cpp 留在 lubancode 可执行文件那边,不挪过来。
 # ---------------------------------------------------------------------------
 add_library(lubancode_core STATIC
   src/api/sse_framing.cpp
@@ -145,6 +146,7 @@ add_library(lubancode_core STATIC
   src/cli/setup_wizard.cpp
   src/cli/slash_commands.cpp
   src/cli/theme.cpp
+  src/cli/line_editor.cpp
 )
 target_include_directories(lubancode_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(lubancode_core PUBLIC cpr::cpr nlohmann_json::nlohmann_json)

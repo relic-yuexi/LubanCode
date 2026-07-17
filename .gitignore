@@ -1,7 +1,11 @@
 # 密钥文件,绝不能提交
 测试.md
 
-# lubancode 本地配置(可能带真密钥),别人机器上各配各的,不进仓库
+# lubancode 本地配置(可能带真密钥),别人机器上各配各的,不进仓库。
+# 新位置是 .lubancode/ 目录(config.json 住这儿,往后 plugins/、skills/ 也会
+# 住这儿);.lubancode.json 是 M6.5 之前的旧位置,读到会自动迁移,这里留着
+# 兜底,免得漏网的旧文件被误提交。
+.lubancode/
 .lubancode.json
 
 # 构建产物

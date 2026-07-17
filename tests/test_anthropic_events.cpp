@@ -102,6 +102,30 @@ TEST_CASE("message_delta 映射出 MessageDone,带上 stop_reason 和完整 usag
     CHECK(done.usage.output_tokens == 1078);
 }
 
+TEST_CASE("message_delta 的 usage 带 cache_read_input_tokens/cache_creation_input_tokens 时映射进 Usage") {
+    auto event = parse_event(Frame(
+        R"({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":1578,"output_tokens":83,"cache_creation_input_tokens":50,"cache_read_input_tokens":128}})"));
+
+    REQUIRE(event.has_value());
+    REQUIRE(std::holds_alternative<MessageDone>(*event));
+    const auto& done = std::get<MessageDone>(*event);
+    CHECK(done.usage.input_tokens == 1578);
+    CHECK(done.usage.output_tokens == 83);
+    CHECK(done.usage.cache_read_tokens == 128);
+    CHECK(done.usage.cache_creation_tokens == 50);
+}
+
+TEST_CASE("message_delta 的 usage 没有 cache 字段时,cache_read_tokens/cache_creation_tokens 落 0,不崩") {
+    auto event = parse_event(Frame(
+        R"({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":10,"output_tokens":5}})"));
+
+    REQUIRE(event.has_value());
+    REQUIRE(std::holds_alternative<MessageDone>(*event));
+    const auto& done = std::get<MessageDone>(*event);
+    CHECK(done.usage.cache_read_tokens == 0);
+    CHECK(done.usage.cache_creation_tokens == 0);
+}
+
 TEST_CASE("message_stop 不重复产生事件,MessageDone 已经在 message_delta 时发过") {
     auto event = parse_event(Frame(R"({"type":"message_stop"})"));
     CHECK_FALSE(event.has_value());
