@@ -38,10 +38,13 @@
 #include "config/config.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/edit_file.hpp"
+#include "tools/hooks.hpp"
 #include "tools/read_file.hpp"
 #include "tools/registry.hpp"
 #include "tools/run_command.hpp"
 #include "tools/search.hpp"
+#include "tools/skill_loader.hpp"
+#include "tools/skill_tool.hpp"
 #include "tools/write_file.hpp"
 
 #ifdef _WIN32
@@ -51,7 +54,7 @@
 
 namespace {
 
-constexpr std::string_view kVersion = "0.6.1";
+constexpr std::string_view kVersion = "0.7.0";
 
 void PrintVersion() {
     std::cout << "lubancode " << kVersion << "\n";
@@ -85,6 +88,7 @@ void PrintHelp() {
         << "  /compact [重点说明]  手动触发一次历史压缩,可选指定这次额外保留什么\n"
         << "  /think          看当前推理强度\n"
         << "  /think 档位     切推理强度,none/low/medium/high\n"
+        << "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
         << "  /exit           退出(裸词 exit/quit 也认)\n\n"
         << "配置优先级(从高到低,按字段逐个决,不是整套配置一刀切):\n"
         << "  1) LUBANCODE_ 专属环境变量\n"
@@ -204,6 +208,36 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
     if (result.config_file_path.has_value()) {
         std::cout << "  配置文件           = " << *result.config_file_path << "\n";
     }
+    // M9:hooks 只从配置文件来,没有来源分级可打,只打个数——四类都是空的
+    // 就直接说"未配置",省得打一堆 ×0。
+    {
+        const auto& hooks = config.hooks;
+        std::vector<std::string> parts;
+        if (!hooks.pre_tool.empty()) {
+            parts.push_back("pre_tool×" + std::to_string(hooks.pre_tool.size()));
+        }
+        if (!hooks.post_tool.empty()) {
+            parts.push_back("post_tool×" + std::to_string(hooks.post_tool.size()));
+        }
+        if (!hooks.session_start.empty()) {
+            parts.push_back("session_start×" + std::to_string(hooks.session_start.size()));
+        }
+        if (!hooks.session_end.empty()) {
+            parts.push_back("session_end×" + std::to_string(hooks.session_end.size()));
+        }
+        std::cout << "  hooks              = ";
+        if (parts.empty()) {
+            std::cout << "(未配置)";
+        } else {
+            for (std::size_t i = 0; i < parts.size(); ++i) {
+                if (i > 0) {
+                    std::cout << ", ";
+                }
+                std::cout << parts[i];
+            }
+        }
+        std::cout << "\n";
+    }
     if (session_model.has_value()) {
         std::cout << "\n  本会话实际在用的 model = " << *session_model;
         if (*session_model != config.model) {
@@ -276,13 +310,18 @@ void PrintBanner(const lubancode::config::Config& config, const lubancode::cli::
 // sub_registry 声明在前 main_registry 声明在后——这样析构顺序自然反过来,
 // 不会有悬垂引用;千万不能把它们塞进一个按值返回的结构体里再传出来,
 // 那样 move/copy 一趟,agent 工具里存的引用就废了。
-lubancode::tools::ToolRegistry BuildBaseToolRegistry() {
+// skills:M9 新增,main.cpp 启动时(或 InteractiveLoop/AskOnce 入口)扫描一次
+// 的技能清单,原样传进来注册成 "skill" 工具——子代理、主代理各自建的
+// registry 都要有这个工具(技能对子代理同样有用),所以调用方每次调用都
+// 传同一份清单进来。
+lubancode::tools::ToolRegistry BuildBaseToolRegistry(const std::vector<lubancode::tools::SkillMeta>& skills) {
     lubancode::tools::ToolRegistry registry;
     registry.Register(std::make_unique<lubancode::tools::ReadFileTool>());
     registry.Register(std::make_unique<lubancode::tools::RunCommandTool>());
     registry.Register(std::make_unique<lubancode::tools::WriteFileTool>());
     registry.Register(std::make_unique<lubancode::tools::EditFileTool>());
     registry.Register(std::make_unique<lubancode::tools::SearchTool>());
+    registry.Register(std::make_unique<lubancode::tools::SkillTool>(skills));
     return registry;
 }
 
@@ -358,8 +397,27 @@ struct UsageStats {
 lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::string>& always_allowed_tools,
                                             const lubancode::cli::Theme& theme, UsageStats& usage_stats,
                                             lubancode::cli::ContextTracker& context_tracker,
-                                            lubancode::tools::ToolRegistry& registry) {
+                                            lubancode::tools::ToolRegistry& registry,
+                                            const lubancode::config::HooksConfig& hooks_config) {
     lubancode::agent::Callbacks callbacks;
+
+    // M9:hooks_config 四个数组全空是常态(没配 hooks 的用户占多数),这时候
+    // 干脆不设这两个回调——跟"没有 hooks 系统"时行为完全一样,也省得每次
+    // 工具调用都白跑一趟"遍历空数组"。
+    if (!hooks_config.Empty()) {
+        callbacks.on_pre_tool_hook = [&hooks_config](const std::string& name,
+                                                       const nlohmann::json& input) -> std::optional<std::string> {
+            const auto outcome = lubancode::tools::RunPreToolHooks(hooks_config, name, input);
+            if (outcome.intercepted) {
+                return outcome.block_message;
+            }
+            return std::nullopt;
+        };
+        callbacks.on_post_tool_hook = [&hooks_config](const std::string& name, const nlohmann::json& input,
+                                                        const lubancode::tools::Tool::Result& result) {
+            lubancode::tools::RunPostToolHooks(hooks_config, name, input, result);
+        };
+    }
 
     callbacks.on_text_delta = [](const std::string& text) {
         std::cout << text;
@@ -440,6 +498,10 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
             usage_stats.cache_read_tokens += usage.cache_read_tokens;
             usage_stats.request_count += 1;
         };
+        // M9:pre_tool/post_tool 钩子原样转发,子代理内部的工具调用同样受管——
+        // 跟父级用的是同一份 callbacks.on_pre_tool_hook/on_post_tool_hook。
+        hooks.on_pre_tool_hook = callbacks.on_pre_tool_hook;
+        hooks.on_post_tool_hook = callbacks.on_post_tool_hook;
         agent_tool->SetHooks(std::move(hooks));
     }
 
@@ -454,10 +516,12 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
 // 转发钩子。
 int RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bool auto_confirm,
             std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
-            lubancode::cli::ContextTracker& context_tracker, lubancode::tools::ToolRegistry& registry) {
+            lubancode::cli::ContextTracker& context_tracker, lubancode::tools::ToolRegistry& registry,
+            const lubancode::config::HooksConfig& hooks_config) {
     UsageStats usage_stats;
     const lubancode::agent::Callbacks callbacks =
-        BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker, registry);
+        BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker, registry,
+                        hooks_config);
 
     const auto result = loop.Run(user_input, callbacks);
     std::cout << "\n";
@@ -526,7 +590,34 @@ void PrintSlashHelp() {
               << "  /context        看当前上下文占用;/context 256k|512k|1m 临时改窗口大小\n"
               << "  /compact        手动压缩历史;/compact 重点说明 可指定这次额外保留什么\n"
               << "  /think          看当前推理强度;/think none|low|medium|high 切档位\n"
+              << "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
               << "  /exit           退出(裸词 exit/quit 也认)\n";
+}
+
+// /skills 命令:列出扫描到的技能;一个都没有时打印两处目录路径,顺带说明
+// 怎么造一份(SKILL.md 起手 frontmatter 的最小样例)。
+void PrintSkillsCommand(const std::vector<lubancode::tools::SkillMeta>& skills, const std::string& project_dir,
+                         const std::optional<std::string>& home_dir) {
+    if (skills.empty()) {
+        std::cout << "还没有扫描到任何技能。\n\n"
+                   << "技能目录约定(先建目录,再放一份 <技能名>/SKILL.md):\n"
+                   << "  项目级: " << project_dir << "/.lubancode/skills/<技能名>/SKILL.md\n"
+                   << "  主目录级: " << (home_dir.has_value() ? *home_dir : std::string("<找不到主目录>"))
+                   << "/.lubancode/skills/<技能名>/SKILL.md\n\n"
+                   << "SKILL.md 起手要有 YAML frontmatter(name/description 两个字段,后面跟正文):\n"
+                   << "  ---\n"
+                   << "  name: 技能名\n"
+                   << "  description: 一句话说明这个技能是干什么的、什么时候该用\n"
+                   << "  ---\n"
+                   << "  正文写具体怎么做。\n";
+        return;
+    }
+    std::cout << "已扫描到 " << skills.size() << " 个技能:\n";
+    for (const auto& skill : skills) {
+        std::cout << "  - " << skill.name << " [" << skill.source_level << "]: "
+                   << (skill.description.empty() ? "(没写说明)" : skill.description) << "\n";
+        std::cout << "      " << skill.dir_path << "\n";
+    }
 }
 
 // 粗略估算一段历史占用了多少"token"——不真调分词器,按字符数打个折扣
@@ -710,6 +801,12 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                       const lubancode::cli::Theme& theme, const std::string& persona, bool spinner_enabled) {
     const lubancode::config::Config& config = config_result.config;
 
+    // M9:技能扫描一次,主代理、子代理、系统提示词、/skills 命令共用同一份
+    // 结果——扫描本身只在启动时做一次,不在每轮对话里重复读磁盘。
+    const std::optional<std::string> home_dir = lubancode::config::HomeDir();
+    const std::vector<lubancode::tools::SkillMeta> skills = lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir);
+    const std::string skills_segment = lubancode::tools::BuildSkillsPromptSegment(skills);
+
     std::unique_ptr<lubancode::api::Backend> real_backend = BuildBackend(config);
     auto current_model = std::make_shared<std::string>(config.model);
     auto current_think = std::make_shared<std::string>(config.think);
@@ -732,17 +829,17 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     // 基础工具之外多注册了 agent 工具本身。两者都是这个函数的局部变量,
     // sub_registry 声明在前、registry 在后,函数退出时按声明的反序析构,
     // agent 工具持有的 sub_registry 引用不会悬垂。
-    lubancode::tools::ToolRegistry sub_registry = BuildBaseToolRegistry();
-    lubancode::tools::ToolRegistry registry = BuildBaseToolRegistry();
-    registry.Register(std::make_unique<lubancode::tools::AgentTool>(wrapped_backend, sub_registry,
-                                                                      CurrentDirUtf8(), config.model));
+    lubancode::tools::ToolRegistry sub_registry = BuildBaseToolRegistry(skills);
+    lubancode::tools::ToolRegistry registry = BuildBaseToolRegistry(skills);
+    registry.Register(std::make_unique<lubancode::tools::AgentTool>(
+        wrapped_backend, sub_registry, CurrentDirUtf8(), config.model, /*default_max_turns=*/15, skills_segment));
 
     std::optional<lubancode::agent::AgentLoop> loop;
     const auto rebuild_loop = [&]() {
         // max_tokens=4096、max_turns=25 是 AgentLoop 自己的默认值,这里显式
         // 传出来是为了能把 config.max_context_chars 一起传进去。
         loop.emplace(wrapped_backend, registry, config.model,
-                     lubancode::agent::BuildSystemPrompt(CurrentDirUtf8(), persona),
+                     lubancode::agent::BuildSystemPrompt(CurrentDirUtf8(), persona, skills_segment),
                      /*max_tokens=*/4096, /*max_turns=*/25, config.max_context_chars);
     };
     rebuild_loop();
@@ -790,6 +887,9 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                 case lubancode::cli::SlashCommand::Think:
                     HandleThinkCommand(parsed.args, current_think);
                     break;
+                case lubancode::cli::SlashCommand::Skills:
+                    PrintSkillsCommand(skills, CurrentDirUtf8(), home_dir);
+                    break;
                 case lubancode::cli::SlashCommand::Exit:
                     return;
                 case lubancode::cli::SlashCommand::Unknown:
@@ -819,7 +919,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
             }
         }
 
-        RunTurn(*loop, *line, auto_confirm, always_allowed_tools, theme, context_tracker, registry);
+        RunTurn(*loop, *line, auto_confirm, always_allowed_tools, theme, context_tracker, registry, config.hooks);
     }
 }
 
@@ -828,6 +928,11 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
 // DetectConsoleCapability().is_console 算好的),这里不用再判断一次。
 int AskOnce(const lubancode::config::Config& config, const std::string& question, bool auto_confirm,
             const lubancode::cli::Theme& theme, const std::string& persona, bool spinner_enabled) {
+    // M9:技能扫描,理由同 InteractiveLoop——单发模式也该能用技能。
+    const std::optional<std::string> home_dir = lubancode::config::HomeDir();
+    const std::vector<lubancode::tools::SkillMeta> skills = lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir);
+    const std::string skills_segment = lubancode::tools::BuildSkillsPromptSegment(skills);
+
     std::unique_ptr<lubancode::api::Backend> backend = BuildBackend(config);
     // 单发模式没有 /think 命令,current_think 构造后不会再变,等价于直接
     // 按配置里的 think 发一次。
@@ -837,18 +942,40 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     // 两份工具表,理由同 InteractiveLoop:sub_registry 喂给 agent 工具当
     // "子代理能用什么"(不含 agent 自己,防递归),registry 是主循环真正
     // 用的那份,基础工具之外多注册了 agent 工具本身。
-    lubancode::tools::ToolRegistry sub_registry = BuildBaseToolRegistry();
-    lubancode::tools::ToolRegistry registry = BuildBaseToolRegistry();
-    registry.Register(std::make_unique<lubancode::tools::AgentTool>(wrapped_backend, sub_registry,
-                                                                      CurrentDirUtf8(), config.model));
+    lubancode::tools::ToolRegistry sub_registry = BuildBaseToolRegistry(skills);
+    lubancode::tools::ToolRegistry registry = BuildBaseToolRegistry(skills);
+    registry.Register(std::make_unique<lubancode::tools::AgentTool>(
+        wrapped_backend, sub_registry, CurrentDirUtf8(), config.model, /*default_max_turns=*/15, skills_segment));
     lubancode::agent::AgentLoop loop(wrapped_backend, registry, config.model,
-                                      lubancode::agent::BuildSystemPrompt(CurrentDirUtf8(), persona),
+                                      lubancode::agent::BuildSystemPrompt(CurrentDirUtf8(), persona, skills_segment),
                                       /*max_tokens=*/4096, /*max_turns=*/25, config.max_context_chars);
     std::set<std::string> always_allowed_tools;
     lubancode::cli::ContextTracker context_tracker(config.context_window_tokens);
 
-    return RunTurn(loop, question, auto_confirm, always_allowed_tools, theme, context_tracker, registry);
+    return RunTurn(loop, question, auto_confirm, always_allowed_tools, theme, context_tracker, registry,
+                    config.hooks);
 }
+
+// M9:session_start/session_end 钩子的生命周期跟"这一次 CLI 进程真正进入了
+// 一次会话"绑在一起——构造时跑 session_start,析构时跑 session_end。只在
+// RunCli 真正要进 AskOnce/InteractiveLoop 那条路时构造(--config/--version/
+// --help 这些提前 return 的路径不会走到这里,不该触发)。用的是最初
+// LoadFromEnv() 读出来的那份 hooks 配置,不是初次配置向导之后的
+// "effective"副本——向导只关心 wire/base_url/api_key/model 四个字段,压根
+// 不知道 hooks 这回事,拿它的副本反而会把用户配置文件里写的 hooks 弄丢。
+class SessionHookScope {
+public:
+    explicit SessionHookScope(const lubancode::config::HooksConfig& hooks) : hooks_(hooks) {
+        lubancode::tools::RunSessionStartHooks(hooks_);
+    }
+    ~SessionHookScope() { lubancode::tools::RunSessionEndHooks(hooks_); }
+
+    SessionHookScope(const SessionHookScope&) = delete;
+    SessionHookScope& operator=(const SessionHookScope&) = delete;
+
+private:
+    lubancode::config::HooksConfig hooks_;
+};
 
 // 真正的入口逻辑,跟平台无关:args[0] 是程序名,args[1..] 是实参。
 // Windows 下 argv 单独处理(见文件末尾的 wmain),是为了绕开 Windows
@@ -938,6 +1065,12 @@ int RunCli(const std::vector<std::string>& args) {
     // 这里设了才对得上。
     lubancode::cli::SetConfirmMode(auto_confirm ? lubancode::cli::ConfirmMode::Yolo
                                                  : lubancode::cli::ConfirmMode::Confirm);
+
+    // M9:真正要进一次会话了(单发问答也算一次会话)——session_start 在这里
+    // 跑,session_end 在这个作用域结束(RunCli 返回、或者中途抛异常被下面
+    // catch 住之后自然析构)时跑。--config/--version/--help 提前 return,
+    // 走不到这里,不会触发。
+    const SessionHookScope session_hook_scope(config_result->config.hooks);
 
     // 兜底:JSON 编码、网络库内部等地方万一抛出没接住的异常,也不能让
     // 整个进程崩掉(崩掉的话用户只会看到一个莫名其妙的退出码)。

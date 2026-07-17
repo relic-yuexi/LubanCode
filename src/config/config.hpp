@@ -27,6 +27,9 @@
 #include <expected>
 #include <optional>
 #include <string>
+#include <vector>
+
+#include <nlohmann/json_fwd.hpp>
 
 namespace lubancode::config {
 
@@ -60,6 +63,29 @@ constexpr const char* kDefaultTheme = "dark";
 // (字符数、老的硬安全网,单位不同、语义也不同)是两回事。
 constexpr std::size_t kDefaultContextWindowTokens = 256000;
 
+// M9:一条钩子。matcher 只有 pre_tool/post_tool 才有意义——工具名精确匹配,
+// 或者 "*" 匹配所有工具;session_start/session_end 没有这个概念,解析时留
+// 空串,执行时也不看这个字段。command 是要跑的一整条命令行,直接交给
+// cmd.exe 执行(不像 run_command 工具那样还分 powershell/cmd 两种 shell、
+// 也不需要用户确认这一步)。
+struct HookEntry {
+    std::string matcher;
+    std::string command;
+};
+
+// M9:hooks 配置整体——只从配置文件来,没有环境变量、也没有内置默认值这
+// 两级(跟其余字段不一样,config.json 里没写就是空,四个数组都是空的)。
+struct HooksConfig {
+    std::vector<HookEntry> pre_tool;
+    std::vector<HookEntry> post_tool;
+    std::vector<HookEntry> session_start;
+    std::vector<HookEntry> session_end;
+
+    bool Empty() const {
+        return pre_tool.empty() && post_tool.empty() && session_start.empty() && session_end.empty();
+    }
+};
+
 struct Config {
     Wire wire = Wire::Anthropic;
     std::string base_url;
@@ -71,6 +97,7 @@ struct Config {
     std::size_t context_window_tokens = kDefaultContextWindowTokens;  // M6.6:上下文窗口 token 数
     std::string compact_model;  // M6.6:压缩用的模型,空串 = 跟当前会话模型一致
     std::string think;          // M6.6:推理强度,none/low/medium/high,空串 = 不发这个参数
+    HooksConfig hooks;          // M9:钩子,只从配置文件读,没配就是四个空数组
 };
 
 // 每个字段最终来自哪一级,跟 Config 里的字段一一对应。
@@ -115,6 +142,7 @@ struct FileConfig {
     std::optional<std::string> context_window;        // "256k"/"512k"/"1m"/裸数字,原始字符串,解析交给 MergeConfig
     std::optional<std::string> compact_model;         // 压缩用的模型
     std::optional<std::string> think;                 // none/low/medium/high
+    std::optional<HooksConfig> hooks;                  // M9:hooks 段,整段有没有出现在 JSON 里
     std::string source_path;
     // 这份 FileConfig 是不是从"旧位置迁移到新位置"这个动作里读出来的;
     // 有值就是要打印给用户看的那一行通知(LoadFileConfig 填,LoadFromEnv
@@ -235,6 +263,16 @@ std::expected<void, std::string> UpdateModelInConfigFile(const std::string& file
 // 不影响解析本身。JSON 坏了、或者顶层不是一个 object,都返回带路径的错误。
 std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& json_text,
                                                              const std::string& file_path_for_error);
+
+// 纯函数,不碰 IO:解析 config.json 里的 "hooks" 字段(整个 JSON object)。
+// pre_tool/post_tool 是数组,每项 {"matcher": "工具名或 *(缺省当 *)",
+// "command": "..."(必填,字符串)};session_start/session_end 也是数组,
+// 每项只认 {"command": "..."}(写了 matcher 也不看,不报错)。
+// hooks_json 不是 object、四个字段里任意一个不是数组、数组元素不是
+// object、缺 command、字段类型不对……都直接报错,错误信息带上
+// file_path_for_error 和具体是第几项,方便定位。
+std::expected<HooksConfig, std::string> ParseHooksConfig(const nlohmann::json& hooks_json,
+                                                           const std::string& file_path_for_error);
 
 // 找配置文件,查找顺序:
 //   1) cwd 的新位置  <cwd>/.lubancode/config.json

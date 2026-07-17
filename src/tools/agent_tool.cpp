@@ -17,12 +17,13 @@ std::string SubAgentPersona() {
 }  // namespace
 
 AgentTool::AgentTool(api::Backend& backend, ToolRegistry& sub_registry, std::string cwd, std::string model,
-                      int default_max_turns)
+                      int default_max_turns, std::string skills_segment)
     : backend_(backend),
       sub_registry_(sub_registry),
       cwd_(std::move(cwd)),
       model_(std::move(model)),
-      default_max_turns_(default_max_turns) {}
+      default_max_turns_(default_max_turns),
+      skills_segment_(std::move(skills_segment)) {}
 
 std::string AgentTool::name() const {
     return "agent";
@@ -79,7 +80,7 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
         }
     }
 
-    const std::string system_prompt = agent::BuildSystemPrompt(cwd_, SubAgentPersona());
+    const std::string system_prompt = agent::BuildSystemPrompt(cwd_, SubAgentPersona(), skills_segment_);
     // 每次 execute() 都是全新的、空历史的子代理——没有跨调用的状态,
     // 子代理内部也不做自动 compact(短命任务用不上),AgentLoop 自带的
     // 字符数硬安全网(TrimHistory)照样生效,不用额外处理。
@@ -98,6 +99,9 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
             hooks_.on_usage(usage);
         }
     };
+    // M9:pre_tool/post_tool 钩子原样转发,子代理内部的工具调用同样受管。
+    sub_callbacks.on_pre_tool_hook = hooks_.on_pre_tool_hook;
+    sub_callbacks.on_post_tool_hook = hooks_.on_post_tool_hook;
 
     const auto result = sub_loop.Run(prompt, sub_callbacks);
     if (!result.has_value()) {

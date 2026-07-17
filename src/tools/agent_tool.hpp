@@ -19,6 +19,7 @@
 #pragma once
 
 #include <functional>
+#include <optional>
 #include <string>
 
 #include <nlohmann/json.hpp>
@@ -46,6 +47,13 @@ public:
         // 子代理每次独立请求结束的 usage,原样转发给父级 on_usage——累计
         // 进本轮 token 统计,请求次数也算进去。
         std::function<void(const api::Usage& usage)> on_usage;
+
+        // M9:子代理内部的工具调用也要受 pre_tool/post_tool 钩子管——原样
+        // 转发给父级的同名回调,子代理这边不重复实现匹配/执行逻辑。
+        std::function<std::optional<std::string>(const std::string& name, const nlohmann::json& input)>
+            on_pre_tool_hook;
+        std::function<void(const std::string& name, const nlohmann::json& input, const Tool::Result& result)>
+            on_post_tool_hook;
     };
 
     // backend:子代理发请求用的后端。main.cpp 传进来的通常是跟主循环共用
@@ -57,8 +65,12 @@ public:
     // 的包装层(比如 main.cpp 的 ModelOverrideBackend),这里填什么都会被
     // 覆盖掉,留空也没关系。
     // default_max_turns:入参没给 max_turns 时用这个默认值。
+    // skills_segment:M9 新增,系统提示词里"可用技能"那一段(见
+    // agent::BuildSkillsPromptSegment),子代理跟主代理共用同一份扫描结果,
+    // 空串表示没有技能(不注入)。main.cpp 扫描一次,主代理、子代理都传
+    // 同一份。
     AgentTool(api::Backend& backend, ToolRegistry& sub_registry, std::string cwd, std::string model = std::string(),
-              int default_max_turns = 15);
+              int default_max_turns = 15, std::string skills_segment = std::string());
 
     void SetHooks(Hooks hooks) { hooks_ = std::move(hooks); }
 
@@ -74,6 +86,7 @@ private:
     std::string cwd_;
     std::string model_;
     int default_max_turns_;
+    std::string skills_segment_;
     Hooks hooks_;
 };
 

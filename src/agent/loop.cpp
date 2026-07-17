@@ -10,9 +10,12 @@ namespace lubancode::agent {
 
 namespace {
 
-// 执行一个工具调用:先通知上层要开始了,needs_confirm 的话先问一句,
-// 拒绝/找不到工具/正常执行,最后都会走 on_tool_done 通知一遍,保证上层
-// 能看到完整的生命周期。
+// 执行一个工具调用:先通知上层要开始了,M9 的 pre_tool 钩子紧接着检查一遍
+// (拦截了就直接结束,连确认都不问),needs_confirm 的话再问一句,拒绝/
+// 找不到工具/被钩子拦截/正常执行,最后都会走 on_tool_done 通知一遍,保证
+// 上层能看到完整的生命周期。工具真执行完之后再跑一遍 post_tool 钩子
+// (M9)——这是本次任务在 agent/ 里唯一的挂接点,函数本身不知道 hooks 具体
+// 怎么解析执行,只在两个该介入的地方各调一次回调。
 tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUseBlock& call, const Callbacks& callbacks) {
     if (callbacks.on_tool_start) {
         callbacks.on_tool_start(call.name, call.input);
@@ -27,6 +30,17 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         return result;
     }
 
+    if (callbacks.on_pre_tool_hook) {
+        const std::optional<std::string> blocked = callbacks.on_pre_tool_hook(call.name, call.input);
+        if (blocked.has_value()) {
+            tools::Tool::Result result{*blocked, true};
+            if (callbacks.on_tool_done) {
+                callbacks.on_tool_done(call.name, result);
+            }
+            return result;
+        }
+    }
+
     if (tool->needs_confirm()) {
         const bool allowed = callbacks.on_tool_confirm ? callbacks.on_tool_confirm(call.name, call.input) : true;
         if (!allowed) {
@@ -39,6 +53,9 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     }
 
     tools::Tool::Result result = tool->execute(call.input);
+    if (callbacks.on_post_tool_hook) {
+        callbacks.on_post_tool_hook(call.name, call.input, result);
+    }
     if (callbacks.on_tool_done) {
         callbacks.on_tool_done(call.name, result);
     }

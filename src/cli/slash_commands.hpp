@@ -20,6 +20,7 @@ enum class SlashCommand {
     Context,  // /context [档位]:看当前上下文占用,或临时改窗口大小
     Compact,  // /compact [重点说明]:手动触发一次历史压缩
     Think,    // /think [档位]:看/改推理强度
+    Skills,   // /skills:列出扫描到的技能(M9)
     Unknown,  // 以 / 开头,但不认得这个命令
 };
 

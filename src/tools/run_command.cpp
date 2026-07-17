@@ -3,14 +3,7 @@
 #include <sstream>
 #include <string>
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-
-#include <jobapi2.h>
-#include <thread>
-#include <vector>
-#endif
+#include "tools/process_exec.hpp"
 
 namespace lubancode::tools {
 
@@ -62,55 +55,10 @@ nlohmann::json RunCommandTool::input_schema() const {
 
 namespace {
 
-std::wstring Utf8ToWide(const std::string& utf8) {
-    if (utf8.empty()) {
-        return std::wstring();
-    }
-    const int len = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
-    std::wstring wide(static_cast<std::size_t>(len), L'\0');
-    if (len > 0) {
-        MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), wide.data(), len);
-    }
-    return wide;
-}
-
-std::string WideToUtf8(const std::wstring& wide) {
-    if (wide.empty()) {
-        return std::string();
-    }
-    const int len = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
-    std::string utf8(static_cast<std::size_t>(len), '\0');
-    if (len > 0) {
-        WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), utf8.data(), len, nullptr, nullptr);
-    }
-    return utf8;
-}
-
-// cmd.exe 路径专用:把捕获到的字节按系统 ANSI 代码页(国内机器是 GBK,
-// CP_ACP)解出来,转成 UTF-8。
-//
-// 踩过的坑:一开始想学 PowerShell 那条路,在跑命令前先 `chcp 65001>nul`
-// 把这个隐藏控制台的活动代码页切到 UTF-8,指望后续输出自然就是 UTF-8——
-// 实测不管用。chcp 改的是"控制台对象"本身的代码页,只在输出真的经
-// WriteConsole 写向一个显示中的控制台屏幕缓冲区时才起作用;这里 stdout/
-// stderr 被重定向到匿名管道(不是控制台),cmd.exe 内置命令(echo/dir/type
-// 之类)走的是 WriteFile 直接写字节,这条路径下的宽字符转窄字节固定用的
-// 是系统 ANSI 代码页,不受 chcp 影响——用十六进制实测验证过:即使先
-// `chcp 65001` 再 `echo 你好世界`,管道里收到的字节原样是 GBK
-// (C4E3 BAC3 CAC0 BDE7),不是 UTF-8。索性放弃"提前切代码页"这条路,
-// 改成事后按 CP_ACP 解码、转 UTF-8——这个办法实测靠谱。
-std::string AcpBytesToUtf8(const std::string& acp_bytes) {
-    if (acp_bytes.empty()) {
-        return std::string();
-    }
-    const int wlen = MultiByteToWideChar(CP_ACP, 0, acp_bytes.data(), static_cast<int>(acp_bytes.size()), nullptr, 0);
-    if (wlen <= 0) {
-        return acp_bytes;  // 解不出来就原样返回,好歹不丢数据
-    }
-    std::wstring wide(static_cast<std::size_t>(wlen), L'\0');
-    MultiByteToWideChar(CP_ACP, 0, acp_bytes.data(), static_cast<int>(acp_bytes.size()), wide.data(), wlen);
-    return WideToUtf8(wide);
-}
+// Utf8ToWide/WideToUtf8/AcpBytesToUtf8/BuildCmdCommandLine/RunProcess 这几个
+// 都挪到 tools/process_exec.hpp 里了(M9:hooks 系统也要起子进程,抽出来
+// 两边共用,见该文件头注释)。这里只留 PowerShell 专属的 base64/编码命令
+// 拼接——hooks 不走 PowerShell 这条路,不需要共用。
 
 // 手写的标准 base64 编码,-EncodedCommand 要的就是这个格式,不引额外依赖。
 std::string Base64Encode(const unsigned char* data, std::size_t len) {
@@ -173,133 +121,6 @@ std::string BuildEncodedCommand(const std::string& user_command_utf8) {
     return Base64Encode(reinterpret_cast<const unsigned char*>(wide.data()), wide.size() * sizeof(wchar_t));
 }
 
-// 命令原样交给 cmd 执行,不做代码页预处理(chcp 那条路实测对重定向管道
-// 不起作用,见 AcpBytesToUtf8 的注释)——输出捕获回来以后统一按 CP_ACP
-// 解码转 UTF-8。
-std::wstring BuildCmdCommandLine(const std::string& user_command_utf8) {
-    const std::wstring wide_script = Utf8ToWide(user_command_utf8);
-    // cmd /d /s /c "<script>":/d 不跑注册表 AutoRun 项,/s 让外层这对引号
-    // 整体当"一段"解析、不逐个匹配内部引号——这是拿 cmd 跑任意命令行
-    // (命令里本身可能也带引号)的标准写法。
-    return L"cmd.exe /d /s /c \"" + wide_script + L"\"";
-}
-
-struct ProcResult {
-    std::string output;
-    DWORD exit_code = 0;
-    bool timed_out = false;
-    bool spawn_failed = false;
-    std::string spawn_error;
-};
-
-// 起一个子进程(cmdline 是完整的"可执行文件 + 参数"命令行,调用方拼好),
-// 合并捕获 stdout/stderr,超时就连同它派生出的子子进程一起杀掉(靠 Job
-// Object 的 KILL_ON_JOB_CLOSE)。PowerShell 路径、cmd 路径共用这一份实现,
-// 区别只在调用方怎么拼 cmdline。
-ProcResult RunChildProcess(const std::wstring& cmdline, int timeout_ms) {
-    ProcResult result;
-
-    SECURITY_ATTRIBUTES sa{};
-    sa.nLength = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-    sa.lpSecurityDescriptor = nullptr;
-
-    HANDLE read_pipe = nullptr;
-    HANDLE write_pipe = nullptr;
-    if (!CreatePipe(&read_pipe, &write_pipe, &sa, 0)) {
-        result.spawn_failed = true;
-        result.spawn_error = "创建管道失败(错误码 " + std::to_string(GetLastError()) + ")";
-        return result;
-    }
-    // 父进程这边留着的读端不能被子进程继承,不然子进程退出后管道写端还有一份
-    // 在父进程手里,ReadFile 会一直等不到 EOF。
-    SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0);
-
-    HANDLE stdin_null = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ, &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdOutput = write_pipe;
-    si.hStdError = write_pipe;
-    si.hStdInput = stdin_null;
-
-    PROCESS_INFORMATION pi{};
-
-    std::vector<wchar_t> cmdline_buf(cmdline.begin(), cmdline.end());
-    cmdline_buf.push_back(L'\0');
-
-    const BOOL ok = CreateProcessW(
-        nullptr, cmdline_buf.data(), nullptr, nullptr, TRUE,
-        CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
-
-    // 子进程已经拿到了自己那份继承来的句柄,父进程这边的可以关了。
-    CloseHandle(write_pipe);
-    if (stdin_null != nullptr && stdin_null != INVALID_HANDLE_VALUE) {
-        CloseHandle(stdin_null);
-    }
-
-    if (!ok) {
-        CloseHandle(read_pipe);
-        result.spawn_failed = true;
-        result.spawn_error = "启动子进程失败(错误码 " + std::to_string(GetLastError()) + ")";
-        return result;
-    }
-
-    // Job Object:进程挂在 CREATE_SUSPENDED 状态先分进 job,再恢复运行,
-    // 这样超时时关掉 job 句柄,进程本身和它派生出来的所有子进程一起死,
-    // 不会漏杀(比如 run_command 跑 `ping` 这种会起孙进程的命令)。
-    HANDLE job = CreateJobObjectW(nullptr, nullptr);
-    if (job != nullptr) {
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limit{};
-        limit.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limit, sizeof(limit));
-        if (!AssignProcessToJobObject(job, pi.hProcess)) {
-            CloseHandle(job);
-            job = nullptr;
-        }
-    }
-    ResumeThread(pi.hThread);
-    CloseHandle(pi.hThread);
-
-    std::string output;
-    std::thread reader([&] {
-        char buf[4096];
-        DWORD n = 0;
-        while (ReadFile(read_pipe, buf, sizeof(buf), &n, nullptr) && n > 0) {
-            output.append(buf, n);
-        }
-    });
-
-    const DWORD wait_ms = timeout_ms > 0 ? static_cast<DWORD>(timeout_ms) : INFINITE;
-    const DWORD wait_result = WaitForSingleObject(pi.hProcess, wait_ms);
-    if (wait_result == WAIT_TIMEOUT) {
-        result.timed_out = true;
-        if (job != nullptr) {
-            CloseHandle(job);  // KILL_ON_JOB_CLOSE:关句柄的一瞬间,job 里所有进程全杀
-            job = nullptr;
-        } else {
-            TerminateProcess(pi.hProcess, 1);
-        }
-        WaitForSingleObject(pi.hProcess, 5000);
-    }
-
-    reader.join();  // 写端全关了(进程死透),ReadFile 自然返回 0,线程能退出
-
-    DWORD exit_code = 0;
-    GetExitCodeProcess(pi.hProcess, &exit_code);
-    result.exit_code = exit_code;
-    result.output = std::move(output);
-
-    if (job != nullptr) {
-        CloseHandle(job);
-    }
-    CloseHandle(read_pipe);
-    CloseHandle(pi.hProcess);
-
-    return result;
-}
-
 }  // namespace
 
 Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
@@ -334,7 +155,7 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
     const std::wstring cmdline = is_cmd ? BuildCmdCommandLine(command)
                                           : (L"powershell.exe -NoProfile -NonInteractive -EncodedCommand " +
                                              Utf8ToWide(BuildEncodedCommand(command)));
-    ProcResult proc = RunChildProcess(cmdline, timeout_ms);
+    ProcessResult proc = RunProcess(cmdline, timeout_ms);
     // cmd.exe 走的是系统 ANSI 代码页(国内机器上是 GBK)往管道里写字节,
     // 跟 PowerShell 路径(脚本里显式设了 [Console]::OutputEncoding=UTF8)
     // 不一样,这里捕获回来的原始字节要单独转一道才是合法 UTF-8。

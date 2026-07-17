@@ -7,6 +7,7 @@
 
 #include <expected>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -41,6 +42,22 @@ struct Callbacks {
     // 上层(main.cpp)自己决定要不要跨请求累计。可选;不设就跳过,不影响
     // 其余行为。
     std::function<void(const api::Usage& usage)> on_usage;
+
+    // M9:hooks.pre_tool。工具已经找到、还没问确认、更没执行的时候调用一次;
+    // 返回非空表示被拦截——值就是要塞进 tool_result 里的 is_error 说明文本,
+    // 该工具这次不会真的执行(needs_confirm 的确认也不会问)。返回
+    // std::nullopt(或者压根没设这个回调)表示放行,跟没有 hooks 系统时
+    // 的行为完全一样——main.cpp 不配 hooks 时就不设这个回调。
+    // agent/ 本身不知道、也不关心 hooks 具体怎么解析、怎么执行(config::/
+    // tools::hooks 那一层的事),只提供这一个挂接点,好保持依赖单向
+    // (agent/ 不反过来牵扯 config/)。
+    std::function<std::optional<std::string>(const std::string& name, const nlohmann::json& input)> on_pre_tool_hook;
+
+    // M9:hooks.post_tool。工具真的执行完了(拿到 Result)才调用一次;不会
+    // 影响返回给模型的结果,单纯给上层一个"跑一下 post_tool 命令"的机会。
+    // 不设就跳过。
+    std::function<void(const std::string& name, const nlohmann::json& input, const tools::Tool::Result& result)>
+        on_post_tool_hook;
 };
 
 class AgentLoop {

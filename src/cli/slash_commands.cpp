@@ -61,6 +61,8 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Compact;
     } else if (lower == "/think") {
         parsed.command = SlashCommand::Think;
+    } else if (lower == "/skills") {
+        parsed.command = SlashCommand::Skills;
     } else {
         parsed.command = SlashCommand::Unknown;
     }
@@ -77,6 +79,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
         {"/context", "看当前上下文占用;/context 256k|512k|1m 临时改窗口大小"},
         {"/compact", "手动压缩历史;/compact 重点说明 可指定这次额外保留什么"},
         {"/think", "看当前推理强度;/think none|low|medium|high 切档位"},
+        {"/skills", "列出扫描到的技能(主目录级 + 项目级)"},
     };
     return kCommands;
 }

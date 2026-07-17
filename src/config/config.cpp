@@ -128,6 +128,89 @@ std::expected<std::size_t, std::string> ParseContextWindowTokens(const std::stri
     return static_cast<std::size_t>(value) * multiplier;
 }
 
+namespace {
+
+// pre_tool/post_tool 认 matcher 字段,session_start/session_end 不认——用
+// with_matcher 区分,复用同一份数组解析逻辑。
+std::expected<std::vector<HookEntry>, std::string> ParseHookEntryArray(const nlohmann::json& arr,
+                                                                          const std::string& field_name,
+                                                                          bool with_matcher,
+                                                                          const std::string& file_path_for_error) {
+    if (!arr.is_array()) {
+        return std::unexpected("配置文件 " + file_path_for_error + " 里的 hooks." + field_name + " 字段必须是数组");
+    }
+    std::vector<HookEntry> out;
+    out.reserve(arr.size());
+    for (std::size_t i = 0; i < arr.size(); ++i) {
+        const auto& item = arr[i];
+        if (!item.is_object()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 hooks." + field_name + "[" +
+                                    std::to_string(i) + "] 必须是一个 JSON object");
+        }
+        if (!item.contains("command") || !item["command"].is_string()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 hooks." + field_name + "[" +
+                                    std::to_string(i) + "] 缺少必填字段 command(字符串)");
+        }
+        HookEntry entry;
+        entry.command = item["command"].get<std::string>();
+        if (with_matcher) {
+            entry.matcher = "*";  // 缺省当 "*"
+            if (item.contains("matcher")) {
+                if (!item["matcher"].is_string()) {
+                    return std::unexpected("配置文件 " + file_path_for_error + " 里的 hooks." + field_name + "[" +
+                                            std::to_string(i) + "] 的 matcher 字段必须是字符串");
+                }
+                const std::string matcher = item["matcher"].get<std::string>();
+                if (!matcher.empty()) {
+                    entry.matcher = matcher;
+                }
+            }
+        }
+        out.push_back(std::move(entry));
+    }
+    return out;
+}
+
+}  // namespace
+
+std::expected<HooksConfig, std::string> ParseHooksConfig(const nlohmann::json& hooks_json,
+                                                           const std::string& file_path_for_error) {
+    if (!hooks_json.is_object()) {
+        return std::unexpected("配置文件 " + file_path_for_error + " 里的 hooks 字段必须是一个 JSON object");
+    }
+
+    HooksConfig config;
+    if (hooks_json.contains("pre_tool")) {
+        auto parsed = ParseHookEntryArray(hooks_json["pre_tool"], "pre_tool", true, file_path_for_error);
+        if (!parsed.has_value()) {
+            return std::unexpected(parsed.error());
+        }
+        config.pre_tool = std::move(*parsed);
+    }
+    if (hooks_json.contains("post_tool")) {
+        auto parsed = ParseHookEntryArray(hooks_json["post_tool"], "post_tool", true, file_path_for_error);
+        if (!parsed.has_value()) {
+            return std::unexpected(parsed.error());
+        }
+        config.post_tool = std::move(*parsed);
+    }
+    if (hooks_json.contains("session_start")) {
+        auto parsed = ParseHookEntryArray(hooks_json["session_start"], "session_start", false, file_path_for_error);
+        if (!parsed.has_value()) {
+            return std::unexpected(parsed.error());
+        }
+        config.session_start = std::move(*parsed);
+    }
+    if (hooks_json.contains("session_end")) {
+        auto parsed = ParseHookEntryArray(hooks_json["session_end"], "session_end", false, file_path_for_error);
+        if (!parsed.has_value()) {
+            return std::unexpected(parsed.error());
+        }
+        config.session_end = std::move(*parsed);
+    }
+    return config;
+}
+
 std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& json_text,
                                                              const std::string& file_path_for_error) {
     nlohmann::json parsed;
@@ -212,6 +295,13 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
             return std::unexpected("配置文件 " + file_path_for_error + " 里的 max_context_chars 字段必须是正整数");
         }
         config.max_context_chars = static_cast<std::size_t>(value);
+    }
+    if (parsed.contains("hooks")) {
+        auto hooks_result = ParseHooksConfig(parsed["hooks"], file_path_for_error);
+        if (!hooks_result.has_value()) {
+            return std::unexpected(hooks_result.error());
+        }
+        config.hooks = std::move(*hooks_result);
     }
 
     return config;
@@ -512,6 +602,14 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     } else {
         result.config.think.clear();
         result.sources.think = Source::Default;
+    }
+
+    // ---- hooks:M9 新增,只从配置文件来,没有环境变量、没有内置默认值这
+    // 两级(HooksConfig 的 ConfigSources 也不需要——只有一个来源,没什么好
+    // 追踪的)。配置文件没写 hooks 字段,就是默认构造的空 HooksConfig
+    // (四个数组都是空的)。 ----
+    if (file_config.has_value() && file_config->hooks.has_value()) {
+        result.config.hooks = *file_config->hooks;
     }
 
     return result;

@@ -27,9 +27,18 @@ inline std::string EnvironmentSegment(const std::string& cwd) {
 
 // custom_persona 留空(默认)时用 DefaultPersona();非空时整段替换人格,
 // 环境段照样追加在后面,不会被换掉。
-inline std::string BuildSystemPrompt(const std::string& cwd, const std::string& custom_persona = std::string()) {
+// skills_segment(M9 新增):tools::BuildSkillsPromptSegment() 算出来的
+// "可用技能" 那一段,留空(默认,没有技能时也是空串)就不追加——不占
+// 一个字符,不影响没配技能的既有场景。放在环境段之后,同样不受人格设定
+// 影响(工具该用的时候还是要用,技能该加载的时候还是要加载)。
+inline std::string BuildSystemPrompt(const std::string& cwd, const std::string& custom_persona = std::string(),
+                                      const std::string& skills_segment = std::string()) {
     const std::string persona = custom_persona.empty() ? DefaultPersona() : custom_persona;
-    return persona + "\n\n" + EnvironmentSegment(cwd);
+    std::string prompt = persona + "\n\n" + EnvironmentSegment(cwd);
+    if (!skills_segment.empty()) {
+        prompt += "\n\n" + skills_segment;
+    }
+    return prompt;
 }
 
 }  // namespace lubancode::agent
