@@ -186,6 +186,103 @@ TEST_CASE("search glob: 按文件名通配找文件") {
     CHECK(result.content.find("bar.hpp") == std::string::npos);
 }
 
+TEST_CASE("search glob: **/*.md 既中根目录文件,也中子目录文件") {
+    TempDir dir;
+    dir.WriteFile("a.md", "");
+    dir.WriteFile("sub/b.md", "");
+    dir.WriteFile("sub/c.txt", "");
+
+    SearchTool tool;
+    nlohmann::json input;
+    input["mode"] = "glob";
+    input["pattern"] = "**/*.md";
+    input["path"] = dir.Utf8Path();
+    const Tool::Result result = tool.execute(input);
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("a.md") != std::string::npos);
+    CHECK(result.content.find("b.md") != std::string::npos);
+    CHECK(result.content.find("c.txt") == std::string::npos);
+}
+
+TEST_CASE("search glob: *.md 按文件名匹配,根目录和子目录都中") {
+    TempDir dir;
+    dir.WriteFile("a.md", "");
+    dir.WriteFile("sub/b.md", "");
+    dir.WriteFile("sub/c.txt", "");
+
+    SearchTool tool;
+    nlohmann::json input;
+    input["mode"] = "glob";
+    input["pattern"] = "*.md";
+    input["path"] = dir.Utf8Path();
+    const Tool::Result result = tool.execute(input);
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("a.md") != std::string::npos);
+    CHECK(result.content.find("b.md") != std::string::npos);
+    CHECK(result.content.find("c.txt") == std::string::npos);
+}
+
+TEST_CASE("search glob: sub/*.md 只中 sub 目录下一层,不中根目录也不中更深子目录") {
+    TempDir dir;
+    dir.WriteFile("a.md", "");
+    dir.WriteFile("sub/b.md", "");
+    dir.WriteFile("sub/deeper/d.md", "");
+
+    SearchTool tool;
+    nlohmann::json input;
+    input["mode"] = "glob";
+    input["pattern"] = "sub/*.md";
+    input["path"] = dir.Utf8Path();
+    const Tool::Result result = tool.execute(input);
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("a.md") == std::string::npos);
+    // 输出用的是 NormalizeSlashes 之后的正斜杠路径,不必再兼容反斜杠写法。
+    CHECK(result.content.find("sub/b.md") != std::string::npos);
+    CHECK(result.content.find("d.md") == std::string::npos);
+}
+
+TEST_CASE("search glob: docs/** 中 docs 目录下所有文件,不管深浅") {
+    TempDir dir;
+    dir.WriteFile("docs/a.md", "");
+    dir.WriteFile("docs/sub/b.txt", "");
+    dir.WriteFile("outside.md", "");
+
+    SearchTool tool;
+    nlohmann::json input;
+    input["mode"] = "glob";
+    input["pattern"] = "docs/**";
+    input["path"] = dir.Utf8Path();
+    const Tool::Result result = tool.execute(input);
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("a.md") != std::string::npos);
+    CHECK(result.content.find("b.txt") != std::string::npos);
+    CHECK(result.content.find("outside.md") == std::string::npos);
+}
+
+TEST_CASE("search grep: glob 过滤参数同样支持 **/ 语义,根目录和子目录文件都搜") {
+    TempDir dir;
+    dir.WriteFile("root.md", "needle_word\n");
+    dir.WriteFile("sub/nested.md", "needle_word\n");
+    dir.WriteFile("sub/nested.txt", "needle_word\n");
+
+    SearchTool tool;
+    nlohmann::json input;
+    input["mode"] = "grep";
+    input["pattern"] = "needle_word";
+    input["path"] = dir.Utf8Path();
+    input["glob"] = "**/*.md";
+    const Tool::Result result = tool.execute(input);
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("root.md") != std::string::npos);
+    CHECK(result.content.find("nested.md") != std::string::npos);
+    CHECK(result.content.find("nested.txt") == std::string::npos);
+}
+
 TEST_CASE("search: mode 不合法,报错不崩") {
     SearchTool tool;
     nlohmann::json input;

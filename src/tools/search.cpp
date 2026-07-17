@@ -56,29 +56,60 @@ bool LooksBinary(const std::filesystem::path& path) {
     return false;
 }
 
-// 把简单通配符转成 std::regex(ECMAScript):
-//   * 匹配任意长度但不跨目录(不匹配 '/')
-//   ** 匹配任意长度,可以跨目录
-//   ? 匹配单个非 '/' 字符
+// 把简单通配符转成 std::regex(ECMAScript),语义照 gitignore/ripgrep 那一套:
+//   *     匹配任意长度但不跨目录(不匹配 '/')
+//   ?     匹配单个非 '/' 字符
+//   **/   出现在开头或紧跟在 '/' 后面、后面又跟着 '/' 时,当"零层或多层目录"
+//         整体处理,比如 "**/*.md" 既要中根目录的 a.md,也要中 sub/b.md。
+//   /**   出现在结尾、前面是 '/' 时,当"这层目录本身,或者它底下任意深度"处理。
+//   其余出现的 "**"(前后凑不成上面两种干净边界的)退化成普通的 "任意字符"(.*)。
 // 其余字符按字面量转义。
 std::regex GlobToRegex(const std::string& glob_pattern) {
     std::string regex_str = "^";
-    for (std::size_t i = 0; i < glob_pattern.size(); ++i) {
+    const std::size_t n = glob_pattern.size();
+    std::size_t i = 0;
+    while (i < n) {
         const char c = glob_pattern[i];
-        if (c == '*') {
-            if (i + 1 < glob_pattern.size() && glob_pattern[i + 1] == '*') {
-                regex_str += ".*";
-                ++i;
-            } else {
-                regex_str += "[^/]*";
+        if (c == '*' && i + 1 < n && glob_pattern[i + 1] == '*') {
+            const std::size_t after = i + 2;
+            const bool prev_boundary = (i == 0) || (glob_pattern[i - 1] == '/');
+            const bool next_slash = (after < n) && (glob_pattern[after] == '/');
+            const bool next_end = (after == n);
+
+            if (prev_boundary && next_slash) {
+                // "**/" 在开头,或紧跟在 '/' 后面:零层或多层目录都算数
+                regex_str += "(?:.*/)?";
+                i = after + 1;  // 把 "**" 后面那个 '/' 也一起吃掉
+                continue;
             }
+            if (i > 0 && glob_pattern[i - 1] == '/' && next_end) {
+                // 路径末尾的 "/**":吞掉前面已经写进去的那个字面 '/',
+                // 换成"这层目录本身,或者它底下任意内容"
+                if (!regex_str.empty() && regex_str.back() == '/') {
+                    regex_str.pop_back();
+                }
+                regex_str += "(?:/.*)?";
+                i = after;
+                continue;
+            }
+            // 孤立的 "**"(前后不构成上面两种干净边界),退化成普通任意匹配
+            regex_str += ".*";
+            i = after;
+            continue;
+        }
+        if (c == '*') {
+            regex_str += "[^/]*";
+            ++i;
         } else if (c == '?') {
             regex_str += "[^/]";
+            ++i;
         } else if (std::string(".^$+(){}|[]\\").find(c) != std::string::npos) {
             regex_str += '\\';
             regex_str += c;
+            ++i;
         } else {
             regex_str += c;
+            ++i;
         }
     }
     regex_str += "$";
@@ -141,6 +172,10 @@ Tool::Result RunGrep(const std::filesystem::path& root, const std::string& patte
     }
 
     std::optional<std::regex> filter_regex;
+    // 跟 glob 模式一致:filter 里不带 '/' 就只拿文件名(basename)去配,
+    // 这样 "*.cpp" 才能递归找到所有目录下的 .cpp,不用非得写成 "**/*.cpp"。
+    // filter 里带 '/' 才拿相对 root 的完整路径去配。
+    const bool filter_basename_only = glob_filter.find('/') == std::string::npos;
     if (!glob_filter.empty()) {
         try {
             filter_regex = GlobToRegex(glob_filter);
@@ -158,17 +193,16 @@ Tool::Result RunGrep(const std::filesystem::path& root, const std::string& patte
             truncated = true;
             return false;
         }
+        const std::string rel_utf8 = NormalizeSlashes(PathToUtf8(rel_path));
         if (filter_regex.has_value()) {
-            const std::string basename = PathToUtf8(abs_path.filename());
-            if (!std::regex_match(basename, *filter_regex)) {
+            const std::string match_target = filter_basename_only ? PathToUtf8(abs_path.filename()) : rel_utf8;
+            if (!std::regex_match(match_target, *filter_regex)) {
                 return true;
             }
         }
         if (LooksBinary(abs_path)) {
             return true;
         }
-
-        const std::string rel_utf8 = NormalizeSlashes(PathToUtf8(rel_path));
 
         std::ifstream file(abs_path, std::ios::binary);
         if (!file.is_open()) {
@@ -269,7 +303,10 @@ nlohmann::json SearchTool::input_schema() const {
     nlohmann::json pattern_prop = nlohmann::json::object();
     pattern_prop["type"] = "string";
     pattern_prop["description"] =
-        "mode=grep 时是 ECMAScript 正则表达式;mode=glob 时是文件名通配符(如 *.cpp、src/**/*.hpp)";
+        "mode=grep 时是 ECMAScript 正则表达式;mode=glob 时是文件名通配符(支持 * ? **)。"
+        "不带 '/' 的写法(如 *.md)按文件名匹配,会递归找出整个目录树下所有同名文件,"
+        "不管它在哪层子目录里;带 '/' 的写法(如 src/**/*.hpp、docs/**)按相对路径匹配,"
+        "'**/' 表示零层或多层目录,写在开头就是'不管在不在根目录都算'。";
     properties["pattern"] = pattern_prop;
 
     nlohmann::json path_prop = nlohmann::json::object();
@@ -279,7 +316,10 @@ nlohmann::json SearchTool::input_schema() const {
 
     nlohmann::json glob_prop = nlohmann::json::object();
     glob_prop["type"] = "string";
-    glob_prop["description"] = "仅 mode=grep 有效:按文件名过滤要搜索的文件,比如 *.cpp,不填就搜所有非二进制文件";
+    glob_prop["description"] =
+        "仅 mode=grep 有效:按文件名或路径过滤要搜索的文件,不填就搜所有非二进制文件。"
+        "语义跟 pattern 的 glob 写法一样:*.cpp 这种不带 '/' 的按文件名递归匹配任意目录下的文件;"
+        "src/**/*.hpp 这种带 '/' 的按相对路径匹配。";
     properties["glob"] = glob_prop;
 
     schema["properties"] = properties;
