@@ -23,6 +23,7 @@ enum class SlashCommand {
     Skills,   // /skills:列出扫描到的技能(M9)
     Mcp,      // /mcp:列出挂载的 MCP 服务器状态、工具清单(M8)
     Todos,    // /todos:查看当前待办清单(M11/0.10.0)
+    Plugins,  // /plugins:列出挂载的插件工具(DLL + lua)和加载警告(M7)
     Unknown,  // 以 / 开头,但不认得这个命令
 };
 

@@ -51,6 +51,8 @@
 #include "tools/agent_tool.hpp"
 #include "tools/edit_file.hpp"
 #include "tools/hooks.hpp"
+#include "tools/lua_tool.hpp"
+#include "tools/plugin_loader.hpp"
 #include "tools/read_file.hpp"
 #include "tools/registry.hpp"
 #include "tools/run_command.hpp"
@@ -108,6 +110,7 @@ void PrintHelp() {
         << "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
         << "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
         << "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
+        << "  /plugins        列出挂载的插件工具(主目录 .lubancode/plugins 下的 *.dll 和 *.lua)\n"
         << "  Shift+Enter     输入框里插一个换行,写多行消息(Alt+Enter 同义;注意 Windows Terminal\n"
         << "                  默认把 Alt+Enter 绑成全屏切换、会吞掉这个键,用 Shift+Enter 最稳);\n"
         << "                  Enter 把整段(多行拼换行)一次发出,空白内容按 Enter 原地不动\n"
@@ -447,6 +450,91 @@ void RegisterMcpTools(std::vector<McpServerRuntime>& mcp_servers, lubancode::too
     for (auto& runtime : mcp_servers) {
         for (const auto& tool_info : runtime.tools) {
             registry.Register(std::make_unique<lubancode::mcp::McpTool>(*runtime.client, runtime.name, tool_info));
+        }
+    }
+}
+
+// M7:一条插件工具的挂载记录,/plugins 命令展示用。
+struct PluginMountInfo {
+    std::string tool_name;  // 完整名(plugin__<名>__<工具>),跟模型看到的一致
+    std::string kind;       // "DLL" 或 "lua"
+};
+
+// M7:扫两类插件(<主目录>/.lubancode/plugins 下的 *.dll 和 *.lua),挂进
+// 主 registry——子代理表不挂,短命跑腿不用外挂。每个插件打一行
+// "[plugin] 名: N 个工具";坏 DLL / 坏 lua 打警告跳过,不崩。
+// plugin_host 由调用方持有,且必须声明在 registry 之前(PluginTool 手里的
+// luban_tool_def* 指向 DLL 静态数据,模块要活得比 registry 久,析构反序那
+// 一套,理由同 mcp_servers);LuaTool 连 lua_State 整个搬进 registry,没有
+// 这层讲究。mounted/warnings 由调用方持有,交互模式给 /plugins 命令用。
+void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::tools::ToolRegistry& registry,
+                  const lubancode::cli::Theme& theme, std::vector<PluginMountInfo>& mounted,
+                  std::vector<std::string>& warnings) {
+    const auto home_dir = lubancode::config::HomeLubancodeDir();
+    if (!home_dir.has_value()) {
+        return;  // 找不到主目录,也就没有插件目录可扫
+    }
+    const std::filesystem::path plugins_dir =
+        std::filesystem::path(
+            std::u8string(reinterpret_cast<const char8_t*>(home_dir->data()), home_dir->size())) /
+        "plugins";
+
+    // C ABI DLL 插件
+    std::vector<std::string> new_warnings = plugin_host.LoadDirectory(plugins_dir);
+    auto wrapped_plugins = plugin_host.WrapTools(new_warnings);
+    for (auto& warning : new_warnings) {
+        std::cout << theme.error << warning << theme.reset << "\n";
+        warnings.push_back(std::move(warning));
+    }
+    for (auto& wrapped : wrapped_plugins) {
+        std::cout << "[plugin] " << wrapped.stem << ": " << wrapped.tools.size() << " 个工具\n";
+        for (auto& tool : wrapped.tools) {
+            mounted.push_back({tool->name(), "DLL"});
+            registry.Register(std::move(tool));
+        }
+    }
+
+    // Lua 插件
+    auto lua_result = lubancode::tools::LoadLuaPlugins(plugins_dir);
+    for (auto& warning : lua_result.warnings) {
+        std::cout << theme.error << warning << theme.reset << "\n";
+        warnings.push_back(std::move(warning));
+    }
+    for (auto& tool : lua_result.tools) {
+        std::cout << "[plugin] " << tool->stem() << ": 1 个工具\n";
+        mounted.push_back({tool->name(), "lua"});
+        registry.Register(std::move(tool));
+    }
+}
+
+// /plugins 命令:列已挂载的插件工具(完整工具名 + 类别)和启动时的加载
+// 警告;一个都没有时打印目录约定,顺带说明两类插件各自怎么写。
+void PrintPluginsCommand(const std::vector<PluginMountInfo>& mounted, const std::vector<std::string>& warnings) {
+    if (mounted.empty() && warnings.empty()) {
+        const auto home_dir = lubancode::config::HomeLubancodeDir();
+        const std::string dir =
+            (home_dir.has_value() ? *home_dir : std::string("<找不到主目录>/.lubancode")) + "/plugins";
+        std::cout << "没有挂载任何插件工具。\n\n"
+                   << "插件目录约定(放进去,下次启动即挂载):\n"
+                   << "  C ABI DLL: " << dir << "/*.dll\n"
+                   << "      导出 luban_plugin_entry(见仓库 include/luban_plugin.h),示例在\n"
+                   << "      examples/plugins/hello_plugin/。注意:DLL 跟宿主同进程,插件里崩了\n"
+                   << "      整个程序一起完蛋,装谁的插件风险自担。\n"
+                   << "  Lua:       " << dir << "/*.lua\n"
+                   << "      每个文件 return { name=..., description=..., input_schema=...,\n"
+                   << "      execute=function(input) ... end } 一张表,示例在 examples/plugins/word_count.lua。\n";
+        return;
+    }
+    if (!mounted.empty()) {
+        std::cout << "已挂载 " << mounted.size() << " 个插件工具:\n";
+        for (const auto& info : mounted) {
+            std::cout << "  - " << info.tool_name << "  (" << info.kind << ")\n";
+        }
+    }
+    if (!warnings.empty()) {
+        std::cout << "加载警告(这些没挂上):\n";
+        for (const auto& warning : warnings) {
+            std::cout << "  - " << warning << "\n";
         }
     }
 }
@@ -1549,6 +1637,7 @@ void PrintSlashHelp() {
               << "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
               << "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
               << "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
+              << "  /plugins        列出挂载的插件工具(DLL + lua)和加载警告\n"
               << "  /exit           退出(裸词 exit/quit 也认)\n"
               << "多行输入:Shift+Enter 插换行(Alt+Enter 同义,但 Windows Terminal 默认把它绑成全屏\n"
               << "切换、会吞掉,推荐 Shift+Enter);Enter 发送整段;多行时首行的 / 是正文,不当命令。\n";
@@ -1787,6 +1876,12 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     // 工具已挂载" 这行紧跟着横幅打出来。
     std::vector<McpServerRuntime> mcp_servers = StartMcpServers(config.mcp_servers, theme);
 
+    // M7:插件宿主声明在 sub_registry/registry 之前(析构反序,PluginTool
+    // 引用的 DLL 静态数据才不会先没),真正扫描挂载在 registry 建好之后。
+    lubancode::tools::PluginHost plugin_host;
+    std::vector<PluginMountInfo> plugin_mounted;
+    std::vector<std::string> plugin_warnings;
+
     // 两份工具表:sub_registry 只有基础工具,喂给 agent 工具当"子代理能用
     // 什么"(不含 agent 自己,防递归);registry 是主循环真正用的那份,
     // 基础工具之外多注册了 agent 工具本身。两者都是这个函数的局部变量,
@@ -1805,6 +1900,10 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     // 这份 shared_ptr 同时交给 /todos 命令、RunTurn(转给 on_tool_done 渲染)。
     auto todo_state = std::make_shared<lubancode::tools::TodoListState>();
     registry.Register(std::make_unique<lubancode::tools::TodoWriteTool>(todo_state));
+
+    // M7:插件工具只挂主 registry(不挂 sub_registry,短命跑腿不用外挂),
+    // 挂载行紧跟 [mcp] 那几行打出来。
+    MountPlugins(plugin_host, registry, theme, plugin_mounted, plugin_warnings);
 
     // UI-B(0.12.0):会话级工具条目存档,跨多轮 RunTurn 累积。full_output
     // 现在就存好(截 64KB),UI-C/D 的 Ctrl+E 全文查看直接从这儿取。
@@ -1871,6 +1970,9 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     break;
                 case lubancode::cli::SlashCommand::Todos:
                     std::cout << lubancode::cli::FormatTodoList(todo_state->items, theme);
+                    break;
+                case lubancode::cli::SlashCommand::Plugins:
+                    PrintPluginsCommand(plugin_mounted, plugin_warnings);
                     break;
                 case lubancode::cli::SlashCommand::Exit:
                     return false;
@@ -1965,6 +2067,12 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     // 模式没有横幅、没有 /mcp 命令,起服务器就在构建工具表之前干净利落地做。
     std::vector<McpServerRuntime> mcp_servers = StartMcpServers(config.mcp_servers, theme);
 
+    // M7:插件宿主同样声明在 registry 之前(析构反序,理由见 MountPlugins
+    // 注释)。单发模式没有 /plugins 命令,mounted/warnings 只是占位。
+    lubancode::tools::PluginHost plugin_host;
+    std::vector<PluginMountInfo> plugin_mounted;
+    std::vector<std::string> plugin_warnings;
+
     // 两份工具表,理由同 InteractiveLoop:sub_registry 喂给 agent 工具当
     // "子代理能用什么"(不含 agent 自己,防递归),registry 是主循环真正
     // 用的那份,基础工具之外多注册了 agent 工具本身。MCP 工具同样注册进
@@ -1981,6 +2089,8 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     // (单发模式压根没有下一轮循环),但 on_tool_done 该渲染的时候照样渲染。
     auto todo_state = std::make_shared<lubancode::tools::TodoListState>();
     registry.Register(std::make_unique<lubancode::tools::TodoWriteTool>(todo_state));
+    // M7:插件同样只挂主 registry,不挂 sub_registry。
+    MountPlugins(plugin_host, registry, theme, plugin_mounted, plugin_warnings);
     lubancode::agent::AgentLoop loop(wrapped_backend, registry, config.model,
                                       lubancode::agent::BuildSystemPrompt(CurrentDirUtf8(), persona, skills_segment),
                                       /*max_tokens=*/4096, /*max_turns=*/25, config.max_context_chars);

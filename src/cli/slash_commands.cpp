@@ -69,6 +69,8 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Mcp;
     } else if (lower == "/todos") {
         parsed.command = SlashCommand::Todos;
+    } else if (lower == "/plugins") {
+        parsed.command = SlashCommand::Plugins;
     } else {
         parsed.command = SlashCommand::Unknown;
     }
@@ -89,6 +91,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
         {"/skills", "列出扫描到的技能(主目录级 + 项目级)"},
         {"/mcp", "列出挂载的 MCP 服务器状态和工具清单"},
         {"/todos", "查看当前待办清单"},
+        {"/plugins", "列出挂载的插件工具(DLL + lua)和加载警告"},
     };
     return kCommands;
 }

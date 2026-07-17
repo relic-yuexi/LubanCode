@@ -157,6 +157,7 @@ model 那一步回车不填,会真的去接口拉一份模型列表(`GET {base_u
 | `/compact 重点说明` | 压缩时额外叮嘱模型多留意哪块(比如"重点保留数据库配置") |
 | `/think` | 看当前推理强度档位 |
 | `/think high` | 切推理强度档位(`none`/`low`/`medium`/`high`,本会话生效) |
+| `/plugins` | 列出挂载的插件工具(DLL + lua)和加载警告 |
 | `/exit` | 退出(裸词 `exit`/`quit` 也认) |
 
 `/model` 切换只影响当前会话;如果当前有生效的配置文件,切完会问一句要不要顺手写进去,不写就只是这一次会话用新模型,下次启动还是原来配的那个。
@@ -273,6 +274,33 @@ lubancode --system-prompt ./persona.md "帮我看看这个项目的结构"
 - 文件要求 UTF-8 编码的 `.md` 或 `.txt`,内容整篇原样当人格段用
 - 文件不存在、打不开、或者内容是空的,启动时就会报可读的错误,不会打到一半才发现
 - 也可以写进配置文件的 `"system_prompt_file"` 字段(或者 `LUBANCODE_SYSTEM_PROMPT_FILE` 环境变量),`--system-prompt` 命令行参数会压过配置文件里的这个字段
+
+## 插件(M7):C ABI DLL 和 Lua 两条路
+
+想给模型添工具,又不想改 lubancode 源码,把插件丢进主目录的 `.lubancode/plugins/` 就行,下次启动自动扫描挂载,启动时每个插件打一行 `[plugin] 名: N 个工具`,交互模式里 `/plugins` 看清单。两类插件的工具挂载后名字统一带前缀 `plugin__<文件名>__<工具名>`,执行前一律先问用户(`--yes` / yolo 模式照旧放行);坏插件(加载不了、格式不对、`api_version` 不合)只换来一行警告,不影响启动。插件只挂主会话的工具表,子代理用不上。
+
+### C ABI DLL 插件
+
+对外头文件是 [`include/luban_plugin.h`](include/luban_plugin.h),纯 C,任何能编 DLL 的语言都能写。插件唯一导出一个 `luban_plugin_entry`,返回工具清单;每个工具给出 name / description / JSON Schema / execute 函数指针。内存规矩:execute 返回的文本由插件分配,宿主拷贝完立刻回调 `free_result` 交还插件释放——两边 CRT 可能不同,谁分配谁释放,绝不跨堆。完整示例(reverse_text,文本按字符倒序)在 [`examples/plugins/hello_plugin/`](examples/plugins/hello_plugin/),一个 `.c` 文件加一份独立小 CMakeLists,照着抄就能起步。
+
+**风险自担**:DLL 插件跟 lubancode 同进程跑,插件里崩了(野指针、除零……)宿主兜不住,整个程序一起完蛋。只装信得过的插件。
+
+### Lua 插件
+
+不想碰编译器,写个 `.lua` 文件也行。每个文件是一个工具,脚本返回一张表:
+
+```lua
+return {
+    name = "word_count",
+    description = "统计文本里的词数。",
+    input_schema = [[{"type":"object","properties":{"text":{"type":"string"}}}]],  -- JSON 字符串或 lua 表都认
+    execute = function(input)   -- input 是入参 JSON 转好的 lua 表
+        return "词数: " .. ...  -- 返回字符串(数字/布尔/表也认,表会转回 JSON)
+    end,
+}
+```
+
+每个 Lua 工具一个独立的 `lua_State`,互相隔离;脚本里 `error()` 会被接住报给模型,不会带崩宿主。示例在 [`examples/plugins/word_count.lua`](examples/plugins/word_count.lua)。
 
 ## 目录结构
 
