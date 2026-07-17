@@ -117,6 +117,29 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# Lua 5.4(M7 Lua 插件用):不管走没走 vcpkg,统一 FetchContent 拉源码
+# (跟下面 doctest 一个待遇)。lua 官方仓库没有 CMakeLists,这里自己包一层:
+# GLOB 根目录的 *.c,排除 lua.c(独立解释器入口)/onelua.c(单文件合并编译
+# 用)/ltests.c(官方内部测试桩),编成静态库。地址同样走 codeload.github.com
+# (github.com 主站连不通,原因见上)。
+# ---------------------------------------------------------------------------
+include(FetchContent)
+enable_language(C)
+FetchContent_Declare(
+  lua
+  URL https://codeload.github.com/lua/lua/tar.gz/refs/tags/v5.4.7
+)
+FetchContent_MakeAvailable(lua)  # 没有 CMakeLists.txt,只下载解压,不 add_subdirectory
+file(GLOB _lubancode_lua_sources "${lua_SOURCE_DIR}/*.c")
+list(FILTER _lubancode_lua_sources EXCLUDE REGEX "(lua|onelua|ltests)\\.c$")
+add_library(lubancode_lua STATIC ${_lubancode_lua_sources})
+target_include_directories(lubancode_lua PUBLIC ${lua_SOURCE_DIR})
+if(MSVC)
+  # lua 是别人家的 C 代码,顶层的 /W4 会刷一屏没意义的告警,单独关掉。
+  target_compile_options(lubancode_lua PRIVATE /w)
+endif()
+
+# ---------------------------------------------------------------------------
 # 核心库:api / config 这些不碰命令行交互的代码,单独编成静态库,
 # 好让可执行文件和测试程序都能链接同一份实现,不用测试再编一遍。
 # cli/setup_wizard.cpp、cli/slash_commands.cpp、cli/line_editor.cpp 虽然在
@@ -147,6 +170,8 @@ add_library(lubancode_core STATIC
   src/tools/skill_loader.cpp
   src/tools/skill_tool.cpp
   src/tools/todo_tool.cpp
+  src/tools/plugin_loader.cpp
+  src/tools/lua_tool.cpp
   src/mcp/transport.cpp
   src/mcp/client.cpp
   src/mcp/mcp_tool.cpp
@@ -162,8 +187,11 @@ add_library(lubancode_core STATIC
   src/cli/todo_render.cpp
   src/cli/transcript.cpp
 )
-target_include_directories(lubancode_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(lubancode_core PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/include)  # M7:C ABI 插件对外头文件 luban_plugin.h
 target_link_libraries(lubancode_core PUBLIC cpr::cpr nlohmann_json::nlohmann_json)
+target_link_libraries(lubancode_core PRIVATE lubancode_lua)  # M7:Lua 插件运行时
 target_compile_features(lubancode_core PUBLIC cxx_std_23)
 
 add_executable(lubancode src/main.cpp src/cli/console_input.cpp src/cli/spinner.cpp)

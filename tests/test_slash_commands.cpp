@@ -176,3 +176,19 @@ TEST_CASE("AllSlashCommands: /todos 在列表里") {
     }
     CHECK(has_todos);
 }
+
+TEST_CASE("ParseSlashCommand: /plugins(M7)") {
+    const auto parsed = cli::ParseSlashCommand("/plugins");
+    CHECK(parsed.command == cli::SlashCommand::Plugins);
+    CHECK(parsed.args.empty());
+    CHECK(cli::ParseSlashCommand("/Plugins").command == cli::SlashCommand::Plugins);
+}
+
+TEST_CASE("AllSlashCommands: /plugins 在列表里") {
+    const auto& commands = cli::AllSlashCommands();
+    bool has_plugins = false;
+    for (const auto& c : commands) {
+        if (c.name == "/plugins") has_plugins = true;
+    }
+    CHECK(has_plugins);
+}

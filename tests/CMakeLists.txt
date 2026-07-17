@@ -31,6 +31,7 @@ add_executable(lubancode_tests
   test_todo_render.cpp
   test_divider.cpp
   test_transcript.cpp
+  test_plugins.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_core doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)
@@ -39,5 +40,24 @@ target_compile_features(lubancode_tests PRIVATE cxx_std_23)
 # 路径——ctest 跑的时候工作目录不一定是 tests/ 源码目录,不能瞎猜相对路径。
 target_compile_definitions(lubancode_tests PRIVATE
   LUBANCODE_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+
+# M7:真 DLL 加载测试的靶子——示例插件 hello_plugin(直接编 examples/ 里那
+# 份源码,顺带验证示例真的能编)+ api_version 填错的 bad_version_plugin。
+# 两个 DLL 落在同一个输出目录,目录路径喂给测试(LUBANCODE_TEST_PLUGIN_DIR),
+# PluginHost::LoadDirectory 真扫真载。
+if(WIN32)
+  add_library(hello_plugin_fixture SHARED
+    ${CMAKE_SOURCE_DIR}/examples/plugins/hello_plugin/hello_plugin.c)
+  target_include_directories(hello_plugin_fixture PRIVATE ${CMAKE_SOURCE_DIR}/include)
+  set_target_properties(hello_plugin_fixture PROPERTIES OUTPUT_NAME hello_plugin PREFIX "")
+
+  add_library(bad_version_plugin SHARED fixtures/bad_version_plugin.c)
+  target_include_directories(bad_version_plugin PRIVATE ${CMAKE_SOURCE_DIR}/include)
+  set_target_properties(bad_version_plugin PROPERTIES PREFIX "")
+
+  add_dependencies(lubancode_tests hello_plugin_fixture bad_version_plugin)
+  target_compile_definitions(lubancode_tests PRIVATE
+    LUBANCODE_TEST_PLUGIN_DIR="$<TARGET_FILE_DIR:hello_plugin_fixture>")
+endif()
 
 add_test(NAME lubancode_tests COMMAND lubancode_tests)
