@@ -1,17 +1,23 @@
 // lubancode - C++ AI 编程 CLI
-// M1:打通 Anthropic Messages 格式的流式问答通路。
-// 有位置参数就一次问答;没参数就进入简单的读一行、问一句的循环。
+// M2:agent 循环接上两个工具(read_file、run_command),从"会说话"变成"会干活"。
+// 有位置参数就一次问答;没参数就进入交互循环,历史跨轮保留。
 
+#include <filesystem>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <string_view>
-#include <type_traits>
-#include <variant>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
+#include "agent/loop.hpp"
+#include "agent/prompts.hpp"
 #include "api/anthropic/client.hpp"
-#include "api/types.hpp"
 #include "config/config.hpp"
+#include "tools/read_file.hpp"
+#include "tools/registry.hpp"
+#include "tools/run_command.hpp"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -20,7 +26,7 @@
 
 namespace {
 
-constexpr std::string_view kVersion = "0.1.0";
+constexpr std::string_view kVersion = "0.2.0";
 
 void PrintVersion() {
     std::cout << "lubancode " << kVersion << "\n";
@@ -30,67 +36,94 @@ void PrintHelp() {
     std::cout << "lubancode " << kVersion << " - C++ AI 编程 CLI\n\n"
               << "用法:\n"
               << "  lubancode [选项]\n"
-              << "  lubancode \"问题\"          一次问答,流式打印回复\n"
+              << "  lubancode \"问题\"          一次问答,能用工具就用工具\n"
               << "  lubancode                  不带参数则进入交互循环,空行或 exit 退出\n\n"
               << "选项:\n"
               << "  --version   打印版本号\n"
-              << "  --help      打印本帮助\n\n"
+              << "  --help      打印本帮助\n"
+              << "  --yes       自动确认所有需要确认的工具调用(比如 run_command),不再逐条询问\n\n"
               << "环境变量:\n"
               << "  ANTHROPIC_BASE_URL    API 地址,默认 https://api.minimaxi.com/anthropic\n"
               << "  ANTHROPIC_AUTH_TOKEN  认证令牌,必填\n"
               << "  ANTHROPIC_MODEL       模型名,默认 MiniMax-M3\n";
 }
 
-// 发一轮单次问答:拼一个只含这一句用户话的 Request,流式打印回复。
-// TextDelta 一到就 flush 输出,不攒。返回 0 表示成功,非 0 表示出错。
-int AskOnce(const lubancode::config::Config& config, const std::string& question) {
-    lubancode::api::anthropic::AnthropicBackend backend(config.base_url, config.auth_token);
+// 当前工作目录,转成 UTF-8 字符串(拼进系统提示词里给模型看)。
+std::string CurrentDirUtf8() {
+    const std::filesystem::path cwd = std::filesystem::current_path();
+    const std::u8string u8 = cwd.u8string();
+    return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+}
 
-    lubancode::api::Request request;
-    request.model = config.model;
-    request.max_tokens = 4096;
+lubancode::tools::ToolRegistry BuildToolRegistry() {
+    lubancode::tools::ToolRegistry registry;
+    registry.Register(std::make_unique<lubancode::tools::ReadFileTool>());
+    registry.Register(std::make_unique<lubancode::tools::RunCommandTool>());
+    return registry;
+}
 
-    lubancode::api::Message message;
-    message.role = lubancode::api::Role::User;
-    message.content.push_back(lubancode::api::TextBlock{question});
-    request.messages.push_back(std::move(message));
+// 交互循环、单发模式共用的回调:文本打字机打印,工具调用打一行提示,
+// needs_confirm 的工具按 auto_confirm 决定是自动放行还是问用户一句。
+lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm) {
+    lubancode::agent::Callbacks callbacks;
 
-    bool had_stream_error = false;
-    bool printed_anything = false;
+    callbacks.on_text_delta = [](const std::string& text) {
+        std::cout << text;
+        std::cout.flush();
+    };
 
-    const auto result = backend.send_stream(request, [&](const lubancode::api::StreamEvent& event) {
-        std::visit(
-            [&](const auto& e) {
-                using T = std::decay_t<decltype(e)>;
-                if constexpr (std::is_same_v<T, lubancode::api::TextDelta>) {
-                    std::cout << e.text;
-                    std::cout.flush();
-                    printed_anything = true;
-                } else if constexpr (std::is_same_v<T, lubancode::api::StreamError>) {
-                    std::cerr << "\n[错误] " << e.message << "\n";
-                    had_stream_error = true;
-                }
-                // MessageStart / ToolUseStart / ToolUseInputDelta /
-                // ContentBlockDone / MessageDone:M1 的单轮问答不需要
-                // 额外处理,交给以后的 agent 循环用。
-            },
-            event);
-    });
+    callbacks.on_tool_start = [](const std::string& name, const nlohmann::json& input) {
+        std::cout << "\n[工具] " << name << " " << input.dump() << "\n";
+        std::cout.flush();
+    };
+
+    callbacks.on_tool_confirm = [auto_confirm](const std::string& name, const nlohmann::json&) -> bool {
+        if (auto_confirm) {
+            return true;
+        }
+        std::cout << "执行 " << name << "? [y/N] ";
+        std::cout.flush();
+        std::string answer;
+        if (!std::getline(std::cin, answer)) {
+            return false;
+        }
+        return answer == "y" || answer == "Y";
+    };
+
+    callbacks.on_tool_done = [](const std::string& name, const lubancode::tools::Tool::Result& result) {
+        if (result.is_error) {
+            std::cout << "[工具出错] " << name << ": " << result.content << "\n";
+            std::cout.flush();
+        }
+    };
+
+    return callbacks;
+}
+
+// 发一轮用户输入,走 agent loop(可能会有若干次工具调用来回),流式打字机
+// 打印回复。返回 0 表示成功,非 0 表示出错。
+int RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bool auto_confirm) {
+    const lubancode::agent::Callbacks callbacks = BuildCallbacks(auto_confirm);
+
+    const auto result = loop.Run(user_input, callbacks);
+    std::cout << "\n";
 
     if (!result.has_value()) {
-        std::cerr << "[错误] " << result.error().message << "\n";
+        std::cerr << "[错误] " << result.error() << "\n";
         return 1;
     }
-    if (printed_anything) {
-        std::cout << "\n";
-    }
-    return had_stream_error ? 1 : 0;
+    return 0;
 }
 
 // 没带参数时的交互循环:读一行、问一句,空行或 exit 退出。
-// M1 不攒对话历史,每次都是单发的一轮问答。
-void InteractiveLoop(const lubancode::config::Config& config) {
+// AgentLoop 在循环外面建一次,历史跨轮保留。
+void InteractiveLoop(const lubancode::config::Config& config, bool auto_confirm) {
     std::cout << "lubancode " << kVersion << " - 输入问题回车发送,空行或 exit 退出\n";
+
+    lubancode::api::anthropic::AnthropicBackend backend(config.base_url, config.auth_token);
+    lubancode::tools::ToolRegistry registry = BuildToolRegistry();
+    lubancode::agent::AgentLoop loop(backend, registry, config.model, lubancode::agent::BuildSystemPrompt(CurrentDirUtf8()));
+
     std::string line;
     while (true) {
         std::cout << "> ";
@@ -100,8 +133,17 @@ void InteractiveLoop(const lubancode::config::Config& config) {
         if (line.empty() || line == "exit") {
             break;
         }
-        AskOnce(config, line);
+        RunTurn(loop, line, auto_confirm);
     }
+}
+
+// 单发模式(位置参数):也走 agent loop,同样支持工具,只是只问这一句。
+int AskOnce(const lubancode::config::Config& config, const std::string& question, bool auto_confirm) {
+    lubancode::api::anthropic::AnthropicBackend backend(config.base_url, config.auth_token);
+    lubancode::tools::ToolRegistry registry = BuildToolRegistry();
+    lubancode::agent::AgentLoop loop(backend, registry, config.model, lubancode::agent::BuildSystemPrompt(CurrentDirUtf8()));
+
+    return RunTurn(loop, question, auto_confirm);
 }
 
 // 真正的入口逻辑,跟平台无关:args[0] 是程序名,args[1..] 是实参。
@@ -111,6 +153,7 @@ void InteractiveLoop(const lubancode::config::Config& config) {
 // 的 dump() 时直接抛 type_error(316: invalid UTF-8 byte)崩掉。
 int RunCli(const std::vector<std::string>& args) {
     std::string positional;
+    bool auto_confirm = false;
     for (std::size_t i = 1; i < args.size(); ++i) {
         const std::string& arg = args[i];
         if (arg == "--version") {
@@ -120,6 +163,10 @@ int RunCli(const std::vector<std::string>& args) {
         if (arg == "--help") {
             PrintHelp();
             return 0;
+        }
+        if (arg == "--yes") {
+            auto_confirm = true;
+            continue;
         }
         if (!positional.empty()) {
             positional += " ";
@@ -137,9 +184,9 @@ int RunCli(const std::vector<std::string>& args) {
     // 整个进程崩掉(崩掉的话用户只会看到一个莫名其妙的退出码)。
     try {
         if (!positional.empty()) {
-            return AskOnce(*config, positional);
+            return AskOnce(*config, positional, auto_confirm);
         }
-        InteractiveLoop(*config);
+        InteractiveLoop(*config, auto_confirm);
     } catch (const std::exception& e) {
         std::cerr << "[错误] 未预料的异常: " << e.what() << "\n";
         return 1;

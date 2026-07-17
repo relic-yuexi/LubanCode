@@ -124,7 +124,12 @@ add_library(lubancode_core STATIC
   src/api/sse_framing.cpp
   src/api/anthropic/client.cpp
   src/api/anthropic/events.cpp
+  src/api/assembler.cpp
   src/config/config.cpp
+  src/tools/registry.cpp
+  src/tools/read_file.cpp
+  src/tools/run_command.cpp
+  src/agent/loop.cpp
 )
 target_include_directories(lubancode_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(lubancode_core PUBLIC cpr::cpr nlohmann_json::nlohmann_json)
