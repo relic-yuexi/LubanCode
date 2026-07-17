@@ -82,7 +82,7 @@
 
 namespace {
 
-constexpr std::string_view kVersion = "0.18.0";
+constexpr std::string_view kVersion = "0.19.0";
 
 void PrintVersion() {
     std::cout << "lubancode " << kVersion << "\n";
