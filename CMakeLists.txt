@@ -124,6 +124,9 @@ add_library(lubancode_core STATIC
   src/api/sse_framing.cpp
   src/api/anthropic/client.cpp
   src/api/anthropic/events.cpp
+  src/api/responses/client.cpp
+  src/api/responses/events.cpp
+  src/api/responses/request.cpp
   src/api/assembler.cpp
   src/config/config.cpp
   src/tools/registry.cpp

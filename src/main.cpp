@@ -14,6 +14,8 @@
 #include "agent/loop.hpp"
 #include "agent/prompts.hpp"
 #include "api/anthropic/client.hpp"
+#include "api/backend.hpp"
+#include "api/responses/client.hpp"
 #include "config/config.hpp"
 #include "tools/read_file.hpp"
 #include "tools/registry.hpp"
@@ -43,9 +45,22 @@ void PrintHelp() {
               << "  --help      打印本帮助\n"
               << "  --yes       自动确认所有需要确认的工具调用(比如 run_command),不再逐条询问\n\n"
               << "环境变量:\n"
-              << "  ANTHROPIC_BASE_URL    API 地址,默认 https://api.minimaxi.com/anthropic\n"
-              << "  ANTHROPIC_AUTH_TOKEN  认证令牌,必填\n"
-              << "  ANTHROPIC_MODEL       模型名,默认 MiniMax-M3\n";
+              << "  LUBANCODE_WIRE        协议选择,anthropic(默认)或 responses\n"
+              << "  ANTHROPIC_BASE_URL    wire=anthropic 时的 API 地址,默认 https://api.minimaxi.com/anthropic\n"
+              << "  ANTHROPIC_AUTH_TOKEN  wire=anthropic 时的认证令牌,必填\n"
+              << "  ANTHROPIC_MODEL       wire=anthropic 时的模型名,默认 MiniMax-M3\n"
+              << "  OPENAI_BASE_URL       wire=responses 时的 API 地址,默认 https://api.minimaxi.com/v1\n"
+              << "  OPENAI_API_KEY        wire=responses 时的认证令牌,必填\n"
+              << "  OPENAI_MODEL          wire=responses 时的模型名,默认 MiniMax-M3\n";
+}
+
+// 按 wire 造对应的后端实现。agent 层只认 Backend 这个抽象接口,不关心
+// 背后具体是哪个协议在干活。
+std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::Config& config) {
+    if (config.wire == lubancode::config::Wire::Responses) {
+        return std::make_unique<lubancode::api::responses::ResponsesBackend>(config.base_url, config.auth_token);
+    }
+    return std::make_unique<lubancode::api::anthropic::AnthropicBackend>(config.base_url, config.auth_token);
 }
 
 // 当前工作目录,转成 UTF-8 字符串(拼进系统提示词里给模型看)。
@@ -120,9 +135,9 @@ int RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bo
 void InteractiveLoop(const lubancode::config::Config& config, bool auto_confirm) {
     std::cout << "lubancode " << kVersion << " - 输入问题回车发送,空行或 exit 退出\n";
 
-    lubancode::api::anthropic::AnthropicBackend backend(config.base_url, config.auth_token);
+    std::unique_ptr<lubancode::api::Backend> backend = BuildBackend(config);
     lubancode::tools::ToolRegistry registry = BuildToolRegistry();
-    lubancode::agent::AgentLoop loop(backend, registry, config.model, lubancode::agent::BuildSystemPrompt(CurrentDirUtf8()));
+    lubancode::agent::AgentLoop loop(*backend, registry, config.model, lubancode::agent::BuildSystemPrompt(CurrentDirUtf8()));
 
     std::string line;
     while (true) {
@@ -139,9 +154,9 @@ void InteractiveLoop(const lubancode::config::Config& config, bool auto_confirm)
 
 // 单发模式(位置参数):也走 agent loop,同样支持工具,只是只问这一句。
 int AskOnce(const lubancode::config::Config& config, const std::string& question, bool auto_confirm) {
-    lubancode::api::anthropic::AnthropicBackend backend(config.base_url, config.auth_token);
+    std::unique_ptr<lubancode::api::Backend> backend = BuildBackend(config);
     lubancode::tools::ToolRegistry registry = BuildToolRegistry();
-    lubancode::agent::AgentLoop loop(backend, registry, config.model, lubancode::agent::BuildSystemPrompt(CurrentDirUtf8()));
+    lubancode::agent::AgentLoop loop(*backend, registry, config.model, lubancode::agent::BuildSystemPrompt(CurrentDirUtf8()));
 
     return RunTurn(loop, question, auto_confirm);
 }
