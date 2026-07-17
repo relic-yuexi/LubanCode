@@ -87,6 +87,40 @@ std::optional<api::ContentBlock> BlockFromJson(const nlohmann::json& j) {
     return std::nullopt;  // 认不得的块类型
 }
 
+// 消息 -> JSON 对象(role + content 块数组)。消息行和 compact 事件里的
+// archive 共用这一份,格式天然一致。
+nlohmann::json MessageToJson(const api::Message& message) {
+    nlohmann::json j;
+    j["role"] = message.role == api::Role::Assistant ? "assistant" : "user";
+    nlohmann::json blocks = nlohmann::json::array();
+    for (const auto& block : message.content) {
+        blocks.push_back(BlockToJson(block));
+    }
+    j["content"] = std::move(blocks);
+    return j;
+}
+
+// JSON 对象 -> 消息。缺 role/content、角色认不得,给 nullopt;认不得的
+// 内容块跳过,不废整条。
+std::optional<api::Message> MessageFromJson(const nlohmann::json& j) {
+    if (!j.is_object() || !j.contains("role") || !j.contains("content") || !j["content"].is_array()) {
+        return std::nullopt;
+    }
+    const std::string role = j.value("role", std::string());
+    if (role != "user" && role != "assistant") {
+        return std::nullopt;
+    }
+    api::Message message;
+    message.role = role == "assistant" ? api::Role::Assistant : api::Role::User;
+    for (const auto& bj : j["content"]) {
+        auto block = BlockFromJson(bj);
+        if (block.has_value()) {
+            message.content.push_back(std::move(*block));
+        }
+    }
+    return message;
+}
+
 std::string FormatLocalTime(const char* fmt) {
     const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     std::tm tm_buf{};
@@ -158,36 +192,94 @@ std::optional<SessionMeta> ParseSessionMeta(const std::string& line) {
 // ---------------------------------------------------------------------------
 
 std::string SerializeSessionMessage(const api::Message& message, const std::string& ts) {
-    nlohmann::json j;
-    j["role"] = message.role == api::Role::Assistant ? "assistant" : "user";
-    nlohmann::json blocks = nlohmann::json::array();
-    for (const auto& block : message.content) {
-        blocks.push_back(BlockToJson(block));
-    }
-    j["content"] = std::move(blocks);
+    nlohmann::json j = MessageToJson(message);
     j["ts"] = ts;
     return j.dump();
 }
 
 std::optional<api::Message> DeserializeSessionMessage(const std::string& line) {
     const nlohmann::json j = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
-    if (!j.is_object() || !j.contains("role") || !j.contains("content") || !j["content"].is_array()) {
+    return MessageFromJson(j);
+}
+
+// ---------------------------------------------------------------------------
+// 事件行(compact / title)
+// ---------------------------------------------------------------------------
+
+std::string SerializeCompactEvent(const CompactEvent& event, const std::string& ts) {
+    nlohmann::json j;
+    j["type"] = "compact";
+    j["archive"] = MessageToJson(event.archive);
+    j["kept_from"] = event.kept_from;
+    j["ts"] = ts;
+    return j.dump();
+}
+
+std::optional<CompactEvent> ParseCompactEvent(const std::string& line) {
+    const nlohmann::json j = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+    if (!j.is_object() || j.value("type", std::string()) != "compact") {
         return std::nullopt;
     }
-    const std::string role = j.value("role", std::string());
-    if (role != "user" && role != "assistant") {
+    if (!j.contains("archive") || !j.contains("kept_from") || !j["kept_from"].is_number_integer()) {
         return std::nullopt;
     }
-    api::Message message;
-    message.role = role == "assistant" ? api::Role::Assistant : api::Role::User;
-    for (const auto& bj : j["content"]) {
-        auto block = BlockFromJson(bj);
-        if (block.has_value()) {
-            message.content.push_back(std::move(*block));
-        }
-        // 认不得的块跳过,别把整条消息废掉
+    const auto kept = j["kept_from"].get<long long>();
+    if (kept < 0) {
+        return std::nullopt;
     }
-    return message;
+    auto archive = MessageFromJson(j["archive"]);
+    if (!archive.has_value()) {
+        return std::nullopt;
+    }
+    CompactEvent event;
+    event.archive = std::move(*archive);
+    event.kept_from = static_cast<std::size_t>(kept);
+    return event;
+}
+
+CompactEvent MakeCompactEvent(std::size_t old_history_size, const std::vector<api::Message>& new_history) {
+    CompactEvent event;
+    if (new_history.empty()) {
+        // 不该发生(BuildCompactedHistory 至少给一条),纯防御:空 archive、
+        // 全不保留。
+        event.archive.role = api::Role::User;
+        event.kept_from = old_history_size;
+        return event;
+    }
+    event.archive = new_history.front();
+    const std::size_t kept_count = new_history.size() - 1;
+    event.kept_from = old_history_size >= kept_count ? old_history_size - kept_count : 0;
+    return event;
+}
+
+std::vector<api::Message> ApplyCompactEvent(std::vector<api::Message> effective, const CompactEvent& event) {
+    const std::size_t from = (std::min)(event.kept_from, effective.size());
+    std::vector<api::Message> out;
+    out.reserve(1 + (effective.size() - from));
+    out.push_back(event.archive);
+    for (std::size_t i = from; i < effective.size(); ++i) {
+        out.push_back(std::move(effective[i]));
+    }
+    return out;
+}
+
+std::string SerializeTitleEvent(const std::string& title, const std::string& ts) {
+    nlohmann::json j;
+    j["type"] = "title";
+    j["title"] = title;
+    j["ts"] = ts;
+    return j.dump();
+}
+
+std::optional<std::string> ParseTitleEvent(const std::string& line) {
+    const nlohmann::json j = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+    if (!j.is_object() || j.value("type", std::string()) != "title") {
+        return std::nullopt;
+    }
+    if (!j.contains("title") || !j["title"].is_string()) {
+        return std::nullopt;
+    }
+    return j["title"].get<std::string>();
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +345,58 @@ std::string TruncateUtf8Chars(const std::string& text, std::size_t max_chars) {
         return text;
     }
     return text.substr(0, pos) + "…";
+}
+
+std::string AbbreviateUtf8Middle(const std::string& text, std::size_t max_chars) {
+    if (max_chars < 2) {
+        return TruncateUtf8Chars(text, max_chars);
+    }
+    // 先数码点、记每个码点的字节起点。
+    std::vector<std::size_t> starts;
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+        starts.push_back(pos);
+        std::size_t len = Utf8CharLen(static_cast<unsigned char>(text[pos]));
+        if (pos + len > text.size()) {
+            len = 1;
+        }
+        pos += len;
+    }
+    if (starts.size() <= max_chars) {
+        return text;
+    }
+    // 头尾各留一半(省略号占一个字位),路径场景开头是盘符、结尾是目录名,
+    // 两头都要看得见。
+    const std::size_t keep = max_chars - 1;
+    const std::size_t head = keep - keep / 2;  // 头多分一个
+    const std::size_t tail = keep / 2;
+    const std::size_t head_end = starts[head];
+    const std::size_t tail_begin = tail == 0 ? text.size() : starts[starts.size() - tail];
+    return text.substr(0, head_end) + "…" + text.substr(tail_begin);
+}
+
+std::string NormalizePathForCompare(const std::string& utf8_path) {
+    if (utf8_path.empty()) {
+        return std::string();
+    }
+    std::error_code ec;
+    std::filesystem::path p = std::filesystem::weakly_canonical(Utf8Path(utf8_path), ec);
+    if (ec || p.empty()) {
+        p = Utf8Path(utf8_path).lexically_normal();
+    }
+    std::string s = PathToUtf8(p);
+    std::replace(s.begin(), s.end(), '\\', '/');
+    // 大小写按 Windows 习惯不敏感(盘符、目录名都是 ASCII 场景居多;多字节
+    // 字符的字节不落在 A-Z 区间,这个循环碰不着它们)。
+    for (char& c : s) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    while (s.size() > 1 && s.back() == '/') {
+        s.pop_back();
+    }
+    return s;
 }
 
 // ---------------------------------------------------------------------------
@@ -368,8 +512,41 @@ std::optional<LoadedSession> ParseSessionFile(const std::string& content) {
         if (line.empty()) {
             continue;
         }
-        auto message = DeserializeSessionMessage(line);
+        const nlohmann::json j = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+        if (!j.is_object()) {
+            session.skipped_lines += 1;
+            continue;
+        }
+        // 事件行顶层带 "type" 字段,消息行没有(消息行的 type 都在 content
+        // 块里,一层之隔),靠这个分流。
+        if (j.contains("type") && j["type"].is_string()) {
+            const std::string type = j["type"].get<std::string>();
+            if (type == "compact") {
+                auto event = ParseCompactEvent(line);
+                if (!event.has_value()) {
+                    session.skipped_lines += 1;  // 坏事件行跳过,不废整场
+                    continue;
+                }
+                session.compact_positions.push_back(session.all_messages.size());
+                session.compact_count += 1;
+                session.messages = ApplyCompactEvent(std::move(session.messages), *event);
+                continue;
+            }
+            if (type == "title") {
+                auto title = ParseTitleEvent(line);
+                if (title.has_value()) {
+                    session.title = std::move(*title);  // append-only,最后一条胜
+                } else {
+                    session.skipped_lines += 1;
+                }
+                continue;
+            }
+            session.skipped_lines += 1;  // 认不得的事件类型,跳过
+            continue;
+        }
+        auto message = MessageFromJson(j);
         if (message.has_value()) {
+            session.all_messages.push_back(*message);
             session.messages.push_back(std::move(*message));
         } else {
             session.skipped_lines += 1;
@@ -380,7 +557,9 @@ std::optional<LoadedSession> ParseSessionFile(const std::string& content) {
 }
 
 std::string ExportSessionMarkdown(const SessionMeta& meta, const std::vector<api::Message>& messages,
-                                   const std::string& session_id, int max_result_lines) {
+                                   const std::string& session_id, int max_result_lines,
+                                   const std::string& title,
+                                   const std::vector<std::size_t>& compact_positions) {
     // tool_use id -> 结果内容,就近配对(id 冲突在正常存档里不会有,真有也
     // 只是后写的盖前头的,导出展示无伤大雅)。
     struct ResultRef {
@@ -397,13 +576,30 @@ std::string ExportSessionMarkdown(const SessionMeta& meta, const std::vector<api
     }
 
     std::string out;
-    out += "# 会话 " + session_id + "\n\n";
+    if (!title.empty()) {
+        // /title 设过标题:标题当大标题,会话 id 降成一行元信息。
+        out += "# " + title + "\n\n";
+        out += "- 会话: " + session_id + "\n";
+    } else {
+        out += "# 会话 " + session_id + "\n\n";
+    }
     out += "- 开始时间: " + (meta.started_at.empty() ? std::string("(未知)") : meta.started_at) + "\n";
     out += "- wire: " + meta.wire + "\n";
     out += "- model: " + meta.model + "\n";
     out += "- cwd: " + meta.cwd + "\n";
 
-    for (const auto& message : messages) {
+    // 压缩标注:compact_positions 升序,next_compact 指着下一个还没插的。
+    std::size_t next_compact = 0;
+    const auto emit_compact_notes = [&](std::size_t message_index) {
+        while (next_compact < compact_positions.size() && compact_positions[next_compact] <= message_index) {
+            out += "\n> ⚡ 此处发生过一次上下文压缩\n";
+            ++next_compact;
+        }
+    };
+
+    for (std::size_t mi = 0; mi < messages.size(); ++mi) {
+        const auto& message = messages[mi];
+        emit_compact_notes(mi);
         // 这条消息里有没有值得单开一节的正文(文本块)?只装着 tool_result
         // 的 user 消息不开"用户"节——结果已折进对应 tool_use 的 details。
         std::string text;
@@ -449,6 +645,8 @@ std::string ExportSessionMarkdown(const SessionMeta& meta, const std::vector<api
             out += "\n</details>\n";
         }
     }
+    // 压缩发生在最后一条消息之后(极少见,但位置合法):标注补在末尾。
+    emit_compact_notes(messages.size());
     return out;
 }
 
@@ -503,6 +701,24 @@ bool SessionStore::AppendMessage(const api::Message& message) {
     return out_.good();
 }
 
+bool SessionStore::AppendCompactEvent(const CompactEvent& event) {
+    if (!out_.is_open()) {
+        return false;
+    }
+    out_ << SerializeCompactEvent(event, NowTimestamp()) << "\n";
+    out_.flush();
+    return out_.good();
+}
+
+bool SessionStore::AppendTitleEvent(const std::string& title) {
+    if (!out_.is_open()) {
+        return false;
+    }
+    out_ << SerializeTitleEvent(title, NowTimestamp()) << "\n";
+    out_.flush();
+    return out_.good();
+}
+
 void SessionStore::Reset() {
     if (out_.is_open()) {
         out_.close();
@@ -511,13 +727,34 @@ void SessionStore::Reset() {
     file_path_.clear();
 }
 
-std::vector<SessionListEntry> ListSessions(const std::string& sessions_dir, std::size_t limit) {
+namespace {
+
+// 只读文件第一行(meta 行),cwd 过滤用——不匹配的场子不必整个读进来。
+std::optional<std::string> ReadFirstLine(const std::string& file_path) {
+    std::ifstream file(Utf8Path(file_path), std::ios::binary);
+    if (!file.is_open()) {
+        return std::nullopt;
+    }
+    std::string line;
+    if (!std::getline(file, line)) {
+        return std::nullopt;
+    }
+    if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+    }
+    return line;
+}
+
+}  // namespace
+
+std::vector<SessionListEntry> ListSessions(const std::string& sessions_dir, std::size_t limit,
+                                            const std::string& cwd_filter) {
     namespace fs = std::filesystem;
-    std::vector<SessionListEntry> entries;
+    std::vector<SessionListEntry> candidates;
     std::error_code ec;
     fs::directory_iterator it(Utf8Path(sessions_dir), ec);
     if (ec) {
-        return entries;  // 目录不存在:还没存过任何会话
+        return candidates;  // 目录不存在:还没存过任何会话
     }
     for (const auto& dir_entry : it) {
         if (!dir_entry.is_regular_file(ec) || dir_entry.path().extension() != ".jsonl") {
@@ -526,14 +763,32 @@ std::vector<SessionListEntry> ListSessions(const std::string& sessions_dir, std:
         SessionListEntry entry;
         entry.id = PathToUtf8(dir_entry.path().stem());
         entry.file_path = PathToUtf8(dir_entry.path());
-        entries.push_back(std::move(entry));
+        candidates.push_back(std::move(entry));
     }
     // id 以 yyyymmdd-HHMMSS 起头,字典倒序即时间倒序。
-    std::sort(entries.begin(), entries.end(),
+    std::sort(candidates.begin(), candidates.end(),
               [](const SessionListEntry& a, const SessionListEntry& b) { return a.id > b.id; });
-    if (entries.size() > limit) {
-        entries.resize(limit);
+
+    // cwd 过滤:只读每个候选的 meta 行来比对,凑够 limit 场就收手。
+    const std::string want = cwd_filter.empty() ? std::string() : NormalizePathForCompare(cwd_filter);
+    std::vector<SessionListEntry> entries;
+    for (auto& candidate : candidates) {
+        if (entries.size() >= limit) {
+            break;
+        }
+        if (!want.empty()) {
+            const auto first_line = ReadFirstLine(candidate.file_path);
+            if (!first_line.has_value()) {
+                continue;
+            }
+            const auto meta = ParseSessionMeta(*first_line);
+            if (!meta.has_value() || NormalizePathForCompare(meta->cwd) != want) {
+                continue;  // 读不出 meta 或不是本目录的场子,过滤模式下不列
+            }
+        }
+        entries.push_back(std::move(candidate));
     }
+
     // 只给留下来的这最多 limit 场读文件补详情(别把整目录都读一遍)。
     for (auto& entry : entries) {
         const auto content = ReadSessionFileBytes(entry.file_path);
@@ -554,9 +809,25 @@ std::vector<SessionListEntry> ListSessions(const std::string& sessions_dir, std:
                 first = false;
                 if (const auto meta = ParseSessionMeta(line); meta.has_value()) {
                     entry.started_at = meta->started_at;
+                    entry.cwd = meta->cwd;
                     continue;  // meta 行不算消息
                 }
                 // 首行不是 meta:旧格式/坏文件,照样往下数
+            }
+            // 事件行(顶层 type 字段)不算消息;title 事件取最后一条。
+            // 先用子串粗筛(省得每行都过一遍 JSON 解析),撞上了再真解析
+            // 验顶层 type——消息行万一在嵌套的 tool_use input 里带同样字样,
+            // 解析这关过不了,照旧按消息数。
+            if (line.find("\"type\":\"title\"") != std::string::npos) {
+                if (auto title = ParseTitleEvent(line); title.has_value()) {
+                    entry.title = std::move(*title);
+                    continue;
+                }
+            }
+            if (line.find("\"type\":\"compact\"") != std::string::npos) {
+                if (ParseCompactEvent(line).has_value()) {
+                    continue;
+                }
             }
             entry.message_count += 1;
             if (entry.first_user_text.empty()) {

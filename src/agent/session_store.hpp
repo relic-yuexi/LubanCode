@@ -15,6 +15,17 @@
 //     {"type":"text","text":...}
 //     {"type":"tool_use","id":...,"name":...,"input":{...}}
 //     {"type":"tool_result","tool_use_id":...,"content":...,"is_error":...}
+// 0.16.x 起,消息行之外还有两种**事件行**(顶层带 "type" 字段,消息行没有,
+// 靠这个区分;旧版本读到事件行会当坏行跳过,一个不坏):
+//   压缩事件: {"type":"compact","archive":{"role":...,"content":[...]},
+//              "kept_from":<int>,"ts":...}
+//     压缩(手动 /compact 或自动)发生时追加。archive 是压缩后顶在有效历史
+//     最前面的那条消息(存档正文已并入保留轮的 user 文本,跟内存里
+//     BuildCompactedHistory 的产物一致);kept_from 是压缩前**有效历史**里
+//     从第几条(0 起数)起原样保留。回放时把已积累的有效列表换成
+//     [archive] + 有效列表[kept_from..],恢复出来的正是压缩后的活状态。
+//   标题事件: {"type":"title","title":...,"ts":...}
+//     /title 追加,append-only,最后一条胜。
 // api_key 之类的敏感配置本来就不在历史消息里,meta 也只存 wire/model/cwd,
 // 存档文件里不会出现任何凭据。
 
@@ -60,6 +71,39 @@ std::string SerializeSessionMessage(const api::Message& message, const std::stri
 std::optional<api::Message> DeserializeSessionMessage(const std::string& line);
 
 // ---------------------------------------------------------------------------
+// 事件行(compact / title)
+// ---------------------------------------------------------------------------
+
+// 压缩事件:archive 是压缩后顶在有效历史最前面的那条消息(存档正文已并入
+// 保留轮),kept_from 是压缩前有效历史里从第几条(0 起数)起原样保留。
+struct CompactEvent {
+    api::Message archive;
+    std::size_t kept_from = 0;
+};
+
+// 事件 -> 一行 JSON(不带换行符)。
+std::string SerializeCompactEvent(const CompactEvent& event, const std::string& ts);
+
+// 一行 JSON -> 压缩事件。不是合法 JSON、type 不是 "compact"、缺 archive 或
+// kept_from(或类型不对),给 nullopt——坏事件行调用方跳过,不废整场。
+std::optional<CompactEvent> ParseCompactEvent(const std::string& line);
+
+// 由"压缩前有效历史长度 + BuildCompactedHistory 拼出的新历史"算出事件:
+// archive = new_history.front(),kept_from = old_size - (new_history.size()-1)。
+// 新历史为空(不该发生,纯防御)给 kept_from = old_size + 空 archive。
+CompactEvent MakeCompactEvent(std::size_t old_history_size, const std::vector<api::Message>& new_history);
+
+// 回放一次压缩事件:effective 换成 [archive] + effective[kept_from..]。
+// kept_from 越界按"全不保留"处理(夹到 effective.size()),不越界访问。
+std::vector<api::Message> ApplyCompactEvent(std::vector<api::Message> effective, const CompactEvent& event);
+
+// 标题事件 -> 一行 JSON(不带换行符)。
+std::string SerializeTitleEvent(const std::string& title, const std::string& ts);
+
+// 一行 JSON -> 标题。type 不是 "title" 或缺 title 字段给 nullopt。
+std::optional<std::string> ParseTitleEvent(const std::string& line);
+
+// ---------------------------------------------------------------------------
 // 会话 id
 // ---------------------------------------------------------------------------
 
@@ -75,6 +119,15 @@ std::string MakeSessionId(const std::string& timestamp, const std::string& first
 // 按 UTF-8 码点截前 max_chars 个字(绝不从多字节字符中间掐断),截了补 "…"。
 // /sessions 列表的首句摘要用。
 std::string TruncateUtf8Chars(const std::string& text, std::size_t max_chars);
+
+// 超过 max_chars 个码点时保留头尾、中间换 "…"(总码点数不超过 max_chars)。
+// /sessions all 缩略显示过长目录路径用。max_chars < 2 时退化成 TruncateUtf8Chars。
+std::string AbbreviateUtf8Middle(const std::string& text, std::size_t max_chars);
+
+// cwd 归一化比较键:weakly_canonical 归一(失败退 lexically_normal),
+// 反斜杠统一成正斜杠,ASCII 大小写按 Windows 习惯折成小写,尾斜杠剥掉。
+// 两个路径指没指同一个目录,比这个函数的返回值。
+std::string NormalizePathForCompare(const std::string& utf8_path);
 
 // ---------------------------------------------------------------------------
 // tool_use / tool_result 成对修补
@@ -93,21 +146,36 @@ int RepairToolPairs(std::vector<api::Message>& history);
 
 struct LoadedSession {
     SessionMeta meta;
-    std::vector<api::Message> messages;  // 已做过 RepairToolPairs
+    // 有效态:按顺序回放 compact 事件之后的消息列表(已做过 RepairToolPairs),
+    // /resume 恢复进内存的就是这份——压缩后的活状态,不背全量旧账。
+    std::vector<api::Message> messages;
+    // 全量流水:文件里全部消息行,原样按序(不回放事件、不修补)。/export
+    // 走这份。旧存档(无事件行)两份内容一致(除修补差异)。
+    std::vector<api::Message> all_messages;
+    // 每次压缩发生在全量流水的第几条之前(即事件行之前已有的消息条数),
+    // 升序;/export 按这个位置插标注行。
+    std::vector<std::size_t> compact_positions;
+    std::string title;                   // 最后一条 title 事件;没有就空
+    int compact_count = 0;               // 回放掉的 compact 事件数
     int repaired = 0;                    // 修补的孤儿 tool_use 块数
-    int skipped_lines = 0;               // 解析不动、跳过的行数
+    int skipped_lines = 0;               // 解析不动、跳过的行数(坏事件行也算)
 };
 
-// 纯函数:整个 .jsonl 文件内容 -> meta + 消息列表(已修补成对)。首行不是
-// 合法 meta 给 nullopt(压根不是本工具的存档,别硬解)。
+// 纯函数:整个 .jsonl 文件内容 -> meta + 有效态消息列表(事件已回放、已修补
+// 成对)+ 全量流水。首行不是合法 meta 给 nullopt(压根不是本工具的存档,
+// 别硬解)。旧存档没有事件行,按现状全量恢复,一个不坏。
 std::optional<LoadedSession> ParseSessionFile(const std::string& content);
 
 // 纯函数:会话 -> Markdown。用户/助手分节(## 用户 / ## 助手),工具调用
 // 折叠成 <details>(名字 + 入参 JSON + 结果前 max_result_lines 行,超了标注
 // 省略);tool_result 就近配对到 tool_use 的 details 里,只装着 tool_result
-// 的 user 消息不再单开"用户"一节。
+// 的 user 消息不再单开"用户"一节。title 非空时用它当大标题(会话 id 降为
+// 一行元信息);compact_positions 里的每个位置(第 N 条消息之前)插一行
+// "> ⚡ 此处发生过一次上下文压缩" 标注。
 std::string ExportSessionMarkdown(const SessionMeta& meta, const std::vector<api::Message>& messages,
-                                   const std::string& session_id, int max_result_lines = 30);
+                                   const std::string& session_id, int max_result_lines = 30,
+                                   const std::string& title = std::string(),
+                                   const std::vector<std::size_t>& compact_positions = {});
 
 // ---------------------------------------------------------------------------
 // 磁盘薄壳
@@ -130,6 +198,12 @@ public:
     // 追加一条消息(自动带当前时刻的 ts),append+flush。
     bool AppendMessage(const api::Message& message);
 
+    // 追加一条压缩事件行(自动带 ts),append+flush。
+    bool AppendCompactEvent(const CompactEvent& event);
+
+    // 追加一条标题事件行(自动带 ts),append+flush。
+    bool AppendTitleEvent(const std::string& title);
+
     // /clear:关掉当前文件(留在磁盘上),回到"没有活动会话"状态,下一条
     // 用户消息再 Begin 一场新的。
     void Reset();
@@ -151,13 +225,18 @@ struct SessionListEntry {
     std::string id;               // 文件名去掉 .jsonl
     std::string file_path;
     std::string started_at;       // meta 里的,读不出 meta 就空着
+    std::string cwd;              // meta 里的,/sessions all 显示用
+    std::string title;            // 最后一条 title 事件;没有就空,展示层回退首句摘要
     std::string first_user_text;  // 首条用户消息第一行(原样,展示层自己截)
-    std::size_t message_count = 0;
+    std::size_t message_count = 0;  // 全量消息行数(事件行不算)
 };
 
 // 扫 sessions_dir 下的 *.jsonl,按 id 倒序(id 以 yyyymmdd-HHMMSS 起头,
 // 字典倒序即时间倒序)取最近 limit 场。目录不存在给空表。
-std::vector<SessionListEntry> ListSessions(const std::string& sessions_dir, std::size_t limit = 20);
+// cwd_filter 非空时只留 meta.cwd 跟它指同一个目录的场子(两边都过
+// NormalizePathForCompare 再比);空串 = 不过滤,全列。
+std::vector<SessionListEntry> ListSessions(const std::string& sessions_dir, std::size_t limit = 20,
+                                            const std::string& cwd_filter = std::string());
 
 // 整个读进来(二进制,按 UTF-8 字节串用)。读不到给 nullopt。
 std::optional<std::string> ReadSessionFileBytes(const std::string& file_path);
