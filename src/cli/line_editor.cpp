@@ -63,6 +63,42 @@ std::u32string CurrentWord(const std::u32string& line) {
     return space_pos == std::u32string::npos ? line : line.substr(0, space_pos);
 }
 
+// UI-A:多行 composer 的拼接/拆分。历史条目、draft、RenderState::line 都用
+// "多行拼 '\n'"这一种存法,拆装只在这两个函数里做,不散落各处。
+std::u32string JoinLines(const std::vector<std::u32string>& lines) {
+    std::u32string out;
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        if (i > 0) {
+            out.push_back(U'\n');
+        }
+        out += lines[i];
+    }
+    return out;
+}
+
+std::vector<std::u32string> SplitJoined(const std::u32string& joined) {
+    std::vector<std::u32string> out(1);
+    for (char32_t c : joined) {
+        if (c == U'\n') {
+            out.emplace_back();
+        } else {
+            out.back().push_back(c);
+        }
+    }
+    return out;
+}
+
+// "空 composer(全空白)不发送"里的"全空白":空格、Tab、全角空格、回车
+// 换行都算。别的不猜——判得太宽反而会把用户真想发的内容拦下来。
+bool AllWhitespace(const std::u32string& text) {
+    for (char32_t c : text) {
+        if (c != U' ' && c != U'\t' && c != U'　' && c != U'\n' && c != U'\r') {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::u32string AsciiToU32(const std::string& text) {
     std::u32string out;
     out.reserve(text.size());
@@ -159,6 +195,10 @@ int CharDisplayWidth(char32_t cp) {
         (cp >= 0xF900 && cp <= 0xFAFF) ||   // CJK 兼容表意文字
         (cp >= 0xFF00 && cp <= 0xFF60) ||   // 全角字符
         (cp >= 0xFFE0 && cp <= 0xFFE6) ||
+        (cp >= 0x1F300 && cp <= 0x1F64F) || // UI-A:emoji 常用区段(杂项符号和象形文字、表情),
+        (cp >= 0x1F680 && cp <= 0x1F6FF) || // 交通与地图符号,
+        (cp >= 0x1F900 && cp <= 0x1F9FF) || // 补充符号和象形文字,
+        (cp >= 0x1FA70 && cp <= 0x1FAFF) || // 符号和象形文字扩展 A——终端都按两列画
         (cp >= 0x20000 && cp <= 0x3FFFD);   // CJK 扩展 B 及以上
     return wide ? 2 : 1;
 }
@@ -262,9 +302,9 @@ EditLineWindow ComputeEditLineWindow(const std::u32string& line, std::size_t cur
 LineEditorCore::LineEditorCore(std::vector<CompletionCandidate> slash_candidates)
     : slash_candidates_(std::move(slash_candidates)) {}
 
-void LineEditorCore::BeginLine() {
-    line_.clear();
-    cursor_ = 0;
+void LineEditorCore::BeginLine(bool composer) {
+    composer_ = composer;
+    ClearBuffer();
     tab_cycle_.reset();
     ResetHistoryBrowsing();
 }
@@ -274,18 +314,48 @@ void LineEditorCore::ResetHistoryBrowsing() {
     draft_.clear();
 }
 
+void LineEditorCore::ClearBuffer() {
+    lines_.assign(1, std::u32string());
+    row_ = 0;
+    col_ = 0;
+}
+
+void LineEditorCore::LoadJoined(const std::u32string& joined) {
+    lines_ = SplitJoined(joined);
+    row_ = lines_.size() - 1;
+    col_ = lines_[row_].size();
+}
+
 void LineEditorCore::InsertChar(char32_t ch) {
-    line_.insert(line_.begin() + static_cast<std::ptrdiff_t>(cursor_), ch);
-    ++cursor_;
+    lines_[row_].insert(col_, 1, ch);
+    ++col_;
+    ResetHistoryBrowsing();
+}
+
+void LineEditorCore::InsertNewLine() {
+    std::u32string rest = lines_[row_].substr(col_);
+    lines_[row_].resize(col_);
+    lines_.insert(lines_.begin() + static_cast<std::ptrdiff_t>(row_) + 1, std::move(rest));
+    ++row_;
+    col_ = 0;
     ResetHistoryBrowsing();
 }
 
 void LineEditorCore::DeleteBackward() {
-    if (cursor_ == 0) {
+    if (col_ > 0) {
+        lines_[row_].erase(col_ - 1, 1);
+        --col_;
+        ResetHistoryBrowsing();
         return;
     }
-    line_.erase(line_.begin() + static_cast<std::ptrdiff_t>(cursor_ - 1));
-    --cursor_;
+    if (row_ == 0) {
+        return;  // 整个 composer 的开头,退无可退——跟单行时代行首退格一个样,什么都不发生
+    }
+    // 行首退格:把这一行整个并进上一行,光标落在缝合点上。
+    col_ = lines_[row_ - 1].size();
+    lines_[row_ - 1] += lines_[row_];
+    lines_.erase(lines_.begin() + static_cast<std::ptrdiff_t>(row_));
+    --row_;
     ResetHistoryBrowsing();
 }
 
@@ -295,27 +365,25 @@ void LineEditorCore::MoveHistory(bool up) {
             return;
         }
         if (!history_index_.has_value()) {
-            draft_ = line_;
+            draft_ = JoinLines(lines_);
             history_index_ = 0;
         } else if (*history_index_ + 1 < history_.size()) {
             ++(*history_index_);
         } else {
             return;  // 已经翻到最老的一条,到头了
         }
-        line_ = history_[history_.size() - 1 - *history_index_];
-        cursor_ = line_.size();
+        LoadJoined(history_[history_.size() - 1 - *history_index_]);
     } else {
         if (!history_index_.has_value()) {
             return;  // 已经在底部,没什么好往下翻的
         }
         if (*history_index_ == 0) {
-            line_ = draft_;
+            LoadJoined(draft_);
             history_index_.reset();
         } else {
             --(*history_index_);
-            line_ = history_[history_.size() - 1 - *history_index_];
+            LoadJoined(history_[history_.size() - 1 - *history_index_]);
         }
-        cursor_ = line_.size();
     }
 }
 
@@ -341,12 +409,17 @@ std::vector<std::string> LineEditorCore::MatchingCandidateNames(const std::u32st
 // 用户最初敲的那截前缀——suffix 得在第一次按 Tab、词边界还没被改写之前就
 // 存进 TabCycleState 里,后面轮转直接复用这份存好的值。
 void LineEditorCore::CompleteToCandidate(const std::string& name, const std::u32string& suffix) {
+    // 补全只在"composer 恰好一行"时触发(HandleTab 顶部拦掉了多行),这里
+    // 直接操作 lines_[0] 就是操作整个 composer。
     const std::u32string name32 = AsciiToU32(name);
-    line_ = suffix.empty() ? (name32 + U' ') : (name32 + suffix);
-    cursor_ = line_.size();
+    lines_[0] = suffix.empty() ? (name32 + U' ') : (name32 + suffix);
+    col_ = lines_[0].size();
 }
 
 void LineEditorCore::HandleTab() {
+    if (lines_.size() != 1) {
+        return;  // UI-A:多行 composer 里 / 是正文不是命令,Tab 不补全
+    }
     if (tab_cycle_.has_value()) {
         // 上一个按键就是 Tab(其余任何按键都会清空 tab_cycle_,见 HandleKey),
         // 这次接着轮转到下一个候选。
@@ -358,14 +431,14 @@ void LineEditorCore::HandleTab() {
         return;
     }
 
-    if (line_.empty() || line_.front() != U'/') {
+    if (lines_[0].empty() || lines_[0].front() != U'/') {
         return;  // 不是 slash 命令,Tab 什么都不做
     }
-    const std::u32string word = CurrentWord(line_);
-    if (cursor_ > word.size()) {
+    const std::u32string word = CurrentWord(lines_[0]);
+    if (col_ > word.size()) {
         return;  // 光标已经越过命令词、落在参数区了,不补全
     }
-    const std::u32string suffix = line_.substr(word.size());  // 词后面剩下的部分,原样保留
+    const std::u32string suffix = lines_[0].substr(word.size());  // 词后面剩下的部分,原样保留
 
     const std::vector<std::string> matches = MatchingCandidateNames(word);
     if (matches.empty()) {
@@ -379,8 +452,8 @@ void LineEditorCore::HandleTab() {
     const std::u32string lcp = AsciiToU32(LongestCommonPrefix(matches));
     if (lcp.size() > word.size()) {
         // 先补到公共前缀,先不进入轮转(index = -1);下次 Tab 再轮转。
-        line_ = lcp + suffix;
-        cursor_ = lcp.size();
+        lines_[0] = lcp + suffix;
+        col_ = lcp.size();
         tab_cycle_ = TabCycleState{matches, -1, suffix};
     } else {
         // 已经在公共前缀上了,没法再往前补,直接开始轮转第一个候选。
@@ -392,16 +465,27 @@ void LineEditorCore::HandleTab() {
 RenderState LineEditorCore::BuildRenderState(bool submitted, bool cleared, bool eof_requested,
                                               bool mode_changed) const {
     RenderState state;
-    state.line = line_;
-    state.cursor = cursor_;
-    state.cursor_display_col = DisplayWidth(line_.substr(0, cursor_));
+    state.lines = lines_;
+    state.cursor_row = row_;
+    state.cursor_col = col_;
+    state.line = JoinLines(lines_);
+    // 兼容字段 cursor:光标在拼接串里的码点位置——前面每行占"行长 + 1 个
+    // '\n'",再加行内偏移。单行场景就是 col_,跟升级前一模一样。
+    std::size_t joined_cursor = col_;
+    for (std::size_t i = 0; i < row_; ++i) {
+        joined_cursor += lines_[i].size() + 1;
+    }
+    state.cursor = joined_cursor;
+    state.cursor_display_col = DisplayWidth(lines_[row_].substr(0, col_));
     state.submitted = submitted;
     state.cleared = cleared;
     state.eof_requested = eof_requested;
     state.mode_changed = mode_changed;
     state.mode = confirm_mode_;
 
-    if (!line_.empty() && line_.front() == U'/') {
+    // UI-A:提示区只在"composer 恰好一行、且以 / 开头"时出现;多行时 / 是
+    // 正文,不当命令,不出提示。
+    if (lines_.size() == 1 && !lines_[0].empty() && lines_[0].front() == U'/') {
         // 正在轮转(tab_cycle_ 有值)时,候选名单和"选中第几个"直接用这次
         // Tab 会话存下来的那份,不能拿当前行现算——轮转途中 line_ 已经被
         // 换成候选名本身,重新按 CurrentWord(line_) 去匹配只会匹配出它
@@ -412,7 +496,7 @@ RenderState LineEditorCore::BuildRenderState(bool submitted, bool cleared, bool 
             matches = tab_cycle_->matches;
             selected_index = tab_cycle_->index;
         } else {
-            const std::u32string word = CurrentWord(line_);
+            const std::u32string word = CurrentWord(lines_[0]);
             matches = MatchingCandidateNames(word);
         }
         state.hint_lines = BuildHintLines(matches, selected_index);
@@ -456,38 +540,71 @@ RenderState LineEditorCore::CurrentRenderState() const {
 }
 
 RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
-    if (event.kind != KeyKind::Tab) {
+    // UI-A:非 composer 模式(确认提示、/model 选择、向导……)不认"插换行"
+    // 这回事,NewLine 直接当 Enter 处理——单行读取场景语义跟升级前一字不差
+    // (以前终端层遇到 VK_RETURN 不看修饰键,Shift+Enter 本来就是提交)。
+    KeyEvent effective = event;
+    if (effective.kind == KeyKind::NewLine && !composer_) {
+        effective.kind = KeyKind::Enter;
+    }
+
+    if (effective.kind != KeyKind::Tab) {
         tab_cycle_.reset();
     }
 
-    switch (event.kind) {
+    switch (effective.kind) {
         case KeyKind::Char:
-            InsertChar(event.ch);
+            InsertChar(effective.ch);
+            break;
+        case KeyKind::NewLine:
+            InsertNewLine();
             break;
         case KeyKind::Backspace:
             DeleteBackward();
             break;
         case KeyKind::Left:
-            if (cursor_ > 0) {
-                --cursor_;
+            if (col_ > 0) {
+                --col_;
+            } else if (row_ > 0) {
+                // 行首再按左:跨过行边界,落到上一行行尾。
+                --row_;
+                col_ = lines_[row_].size();
             }
             break;
         case KeyKind::Right:
-            if (cursor_ < line_.size()) {
-                ++cursor_;
+            if (col_ < lines_[row_].size()) {
+                ++col_;
+            } else if (row_ + 1 < lines_.size()) {
+                // 行尾再按右:落到下一行行首。
+                ++row_;
+                col_ = 0;
             }
             break;
         case KeyKind::Home:
-            cursor_ = 0;
+            col_ = 0;  // 当前行行首,不是整个 composer 开头
             break;
         case KeyKind::End:
-            cursor_ = line_.size();
+            col_ = lines_[row_].size();  // 当前行行尾
             break;
         case KeyKind::Up:
-            MoveHistory(true);
+            // UI-A 的取舍:光标不在第一行,就是行间移动;在第一行,才翻历史。
+            // 单行 composer 恒在"第一行",跟升级前"上键=翻历史"完全一致;
+            // 多行时规则统一("第一行再上=翻历史"),不用记"多行就翻不了
+            // 历史"这种特例——翻走了 draft 也存着,Down 到底就回来,不丢字。
+            if (row_ > 0) {
+                --row_;
+                col_ = std::min(col_, lines_[row_].size());
+            } else {
+                MoveHistory(true);
+            }
             break;
         case KeyKind::Down:
-            MoveHistory(false);
+            if (row_ + 1 < lines_.size()) {
+                ++row_;
+                col_ = std::min(col_, lines_[row_].size());
+            } else {
+                MoveHistory(false);
+            }
             break;
         case KeyKind::Tab:
             HandleTab();
@@ -496,40 +613,47 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
             confirm_mode_ = NextConfirmMode(confirm_mode_);
             return BuildRenderState(false, false, false, true);
         case KeyKind::Enter: {
-            const std::u32string submitted_line = line_;
-            if (!submitted_line.empty()) {
-                history_.push_back(submitted_line);
+            const std::u32string joined = JoinLines(lines_);
+            if (composer_ && AllWhitespace(joined)) {
+                break;  // UI-A:空 composer(全空白)不发送,原地不动
             }
-            line_.clear();
-            cursor_ = 0;
+            if (!joined.empty()) {
+                history_.push_back(joined);
+            }
+            const std::vector<std::u32string> submitted_lines = lines_;
+            ClearBuffer();
             ResetHistoryBrowsing();
             RenderState state = BuildRenderState(true, false, false, false);
-            state.line = submitted_line;
-            state.cursor = submitted_line.size();
-            state.cursor_display_col = DisplayWidth(submitted_line);
+            // 提交帧画的是"刚提交的完整内容"(终端层靠它把整段留在屏幕上),
+            // 不是清空后的缓冲;光标摆到末行末尾,终端层从那儿换行接下文。
+            state.lines = submitted_lines;
+            state.cursor_row = submitted_lines.size() - 1;
+            state.cursor_col = submitted_lines.back().size();
+            state.line = joined;
+            state.cursor = joined.size();
+            state.cursor_display_col = DisplayWidth(submitted_lines.back());
             state.hint_lines.clear();
             return state;
         }
         case KeyKind::CtrlC: {
-            if (line_.empty()) {
+            if (lines_.size() == 1 && lines_[0].empty()) {
                 return BuildRenderState(false, false, true, false);
             }
-            line_.clear();
-            cursor_ = 0;
+            // 非空:清空整个 composer(所有行),留在同一次 ReadLine 里继续。
+            ClearBuffer();
             ResetHistoryBrowsing();
             return BuildRenderState(false, true, false, false);
         }
         case KeyKind::CtrlD:
             return BuildRenderState(false, false, true, false);
         case KeyKind::Esc: {
-            // M10:空闲编辑态清空当前行和提示区,跟非空行 Ctrl+C 是同一个
-            // 效果(cleared=true,留在同一次 ReadLine 里继续等下一下按键),
-            // 但空行按 Esc 不像 Ctrl+C 那样触发 EOF——Esc 单纯是"清一下",
-            // 不是"我要退出输入"。esc_pressed 额外标一下,终端层在"确认
-            // 提示 [y/a/N]"那种读法下会看这个标志,把这一下直接当拒绝处理,
-            // 不用非空行清完还要用户再按一次 Enter。
-            line_.clear();
-            cursor_ = 0;
+            // M10:空闲编辑态清空整个 composer 和提示区,跟非空 Ctrl+C 是同
+            // 一个效果(cleared=true,留在同一次 ReadLine 里继续等下一下按
+            // 键),但空 composer 按 Esc 不像 Ctrl+C 那样触发 EOF——Esc 单纯
+            // 是"清一下",不是"我要退出输入"。esc_pressed 额外标一下,终端层
+            // 在"确认提示 [y/a/N]"那种读法下会看这个标志,把这一下直接当拒绝
+            // 处理,不用非空清完还要用户再按一次 Enter。
+            ClearBuffer();
             ResetHistoryBrowsing();
             RenderState state = BuildRenderState(false, true, false, false);
             state.esc_pressed = true;

@@ -543,6 +543,299 @@ TEST_CASE("ComputeEditLineWindow: 超宽时窗口式截断,光标始终落在窗
     CHECK(Utf32ToUtf8(line).find(Utf32ToUtf8(window.text)) != std::string::npos);
 }
 
+// ---------------------------------------------------------------------------
+// UI-A(0.11.0):多行 composer。BeginLine(true) 开 composer 模式(只有主提示
+// 符走这一档);默认 BeginLine() 保持单行语义,上面全部老用例原样跑。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("多行 composer: NewLine 在光标处插换行,劈开当前行") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    TypeString(editor, "abc");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Left));  // 光标落在 b、c 之间
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::NewLine));
+    REQUIRE(state.lines.size() == 2);
+    CHECK(state.lines[0] == U"ab");
+    CHECK(state.lines[1] == U"c");
+    CHECK(state.cursor_row == 1);
+    CHECK(state.cursor_col == 0);
+    CHECK(state.line == U"ab\nc");   // 兼容字段:多行拼 '\n'
+    CHECK(state.cursor == 3);        // 拼接串里 "ab\n" 之后
+    CHECK_FALSE(state.submitted);    // 插换行不是提交
+}
+
+TEST_CASE("多行 composer: Enter 全发,多行拼 \\n,历史记一条") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    TypeString(editor, "one");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::NewLine));
+    TypeString(editor, "two");
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Enter));
+    CHECK(state.submitted);
+    CHECK(state.line == U"one\ntwo");
+    REQUIRE(state.lines.size() == 2);
+    CHECK(state.lines[0] == U"one");  // 提交帧画的是完整内容,终端层靠它留痕
+    CHECK(state.lines[1] == U"two");
+    CHECK(editor.history_size() == 1);
+    CHECK(editor.CurrentRenderState().line.empty());  // 提交后缓冲清空
+}
+
+TEST_CASE("多行 composer: 空/全空白 composer 按 Enter 不发送,原地不动") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Enter));
+    CHECK_FALSE(state.submitted);
+    CHECK(editor.history_size() == 0);
+
+    // 空格、Tab 字符、换行凑一段全空白,照样不发。
+    TypeString(editor, "  ");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::NewLine));
+    editor.HandleKey(KeyEvent::Char(U'\t'));
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Enter));
+    CHECK_FALSE(state.submitted);
+    CHECK(state.line == U"  \n\t");  // 内容原样在,没被清、没被发
+    CHECK(editor.history_size() == 0);
+}
+
+TEST_CASE("非 composer 模式: NewLine 等同 Enter,空行照样提交(确认提示语义不回归)") {
+    LineEditorCore editor;
+    editor.BeginLine();  // 默认单行模式:确认提示 [y/a/N]、/model 编号选择走这档
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::NewLine));
+    CHECK(state.submitted);       // Shift+Enter 在单行读取里就是提交
+    CHECK(state.line.empty());    // 空行提交(确认提示靠这个当"默认拒绝/默认选项")
+    CHECK(editor.history_size() == 0);
+
+    editor.BeginLine();
+    TypeString(editor, "y");
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::NewLine));
+    CHECK(state.submitted);
+    CHECK(state.line == U"y");
+}
+
+TEST_CASE("多行 composer: 左右键跨行边界") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    TypeString(editor, "ab");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::NewLine));
+    TypeString(editor, "cd");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Home));  // 光标 (1, 0)
+
+    // 行首按左:落到上一行行尾。
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Left));
+    CHECK(state.cursor_row == 0);
+    CHECK(state.cursor_col == 2);
+
+    // 行尾按右:落到下一行行首。
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Right));
+    CHECK(state.cursor_row == 1);
+    CHECK(state.cursor_col == 0);
+
+    // 整个 composer 开头按左:不动。
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Up));    // 回第一行(列钳到 0)
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Home));
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Left));
+    CHECK(state.cursor_row == 0);
+    CHECK(state.cursor_col == 0);
+}
+
+TEST_CASE("多行 composer: 行首退格把这一行并进上一行") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    TypeString(editor, "ab");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::NewLine));
+    TypeString(editor, "cd");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Home));  // (1, 0)
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Backspace));
+    REQUIRE(state.lines.size() == 1);
+    CHECK(state.lines[0] == U"abcd");
+    CHECK(state.cursor_row == 0);
+    CHECK(state.cursor_col == 2);  // 光标落在缝合点
+
+    // 整个 composer 开头退格:什么都不发生。
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Home));
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Backspace));
+    CHECK(state.lines[0] == U"abcd");
+    CHECK(state.cursor_col == 0);
+}
+
+TEST_CASE("多行 composer: 上下键行间移动,列钳到目标行长度") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    TypeString(editor, "abcdef");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::NewLine));
+    TypeString(editor, "xy");
+    // 光标 (1, 2);Up 回第一行,列保持 2。
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Up));
+    CHECK(state.cursor_row == 0);
+    CHECK(state.cursor_col == 2);
+    // End 到第一行行尾(6),Down 到第二行,列钳到 2。
+    editor.HandleKey(KeyEvent::Simple(KeyKind::End));
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Down));
+    CHECK(state.cursor_row == 1);
+    CHECK(state.cursor_col == 2);
+}
+
+TEST_CASE("多行 composer: 第一行再按上才翻历史,翻回底部还原多行草稿") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    TypeString(editor, "old");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Enter));  // 历史:{"old"}
+
+    editor.BeginLine(true);
+    TypeString(editor, "l1");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::NewLine));
+    TypeString(editor, "l2");  // 两行草稿,光标 (1, 2)
+
+    // 第一下 Up:只是行间移动,不翻历史。
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Up));
+    CHECK(state.cursor_row == 0);
+    CHECK(state.line == U"l1\nl2");
+
+    // 已在第一行,再 Up:翻历史,载入 "old"。
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Up));
+    CHECK(state.line == U"old");
+    REQUIRE(state.lines.size() == 1);
+
+    // Down 翻回底部:多行草稿完整还原。
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Down));
+    CHECK(state.line == U"l1\nl2");
+    REQUIRE(state.lines.size() == 2);
+    CHECK(state.lines[0] == U"l1");
+    CHECK(state.lines[1] == U"l2");
+}
+
+TEST_CASE("多行 composer: 多行历史条目往返载入,行结构和光标都对") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    for (char32_t c : std::u32string(U"第一行")) {
+        editor.HandleKey(KeyEvent::Char(c));
+    }
+    editor.HandleKey(KeyEvent::Simple(KeyKind::NewLine));
+    for (char32_t c : std::u32string(U"第二行")) {
+        editor.HandleKey(KeyEvent::Char(c));
+    }
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Enter));
+    CHECK(editor.history_size() == 1);
+
+    editor.BeginLine(true);
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Up));
+    REQUIRE(state.lines.size() == 2);
+    CHECK(state.lines[0] == U"第一行");
+    CHECK(state.lines[1] == U"第二行");
+    CHECK(state.cursor_row == 1);                 // 载入后光标在末行末尾
+    CHECK(state.cursor_col == 3);
+    CHECK(state.cursor_display_col == 6);         // 三个汉字,每个两列
+    CHECK(state.line == U"第一行\n第二行");
+
+    // 原样再提交:历史又记一条,内容一致。
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Enter));
+    CHECK(state.submitted);
+    CHECK(state.line == U"第一行\n第二行");
+    CHECK(editor.history_size() == 2);
+}
+
+TEST_CASE("多行 composer: 多行时首行的 / 是正文,不出提示、Tab 不补全") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    TypeString(editor, "/he");
+    CHECK_FALSE(editor.CurrentRenderState().hint_lines.empty());  // 单行时提示照旧
+
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::NewLine));
+    CHECK(state.hint_lines.empty());  // 一变多行,提示区立刻消失
+
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.line == U"/he\n");    // Tab 不补全,内容原样
+    CHECK(state.hint_lines.empty());
+
+    // 退格并回单行,提示区回来。
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Backspace));
+    CHECK(state.line == U"/he");
+    CHECK_FALSE(state.hint_lines.empty());
+}
+
+TEST_CASE("多行 composer: Ctrl+C 非空清空整个 composer,空则请求 EOF") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    TypeString(editor, "aa");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::NewLine));
+    TypeString(editor, "bb");
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::CtrlC));
+    CHECK(state.cleared);
+    CHECK_FALSE(state.eof_requested);
+    REQUIRE(state.lines.size() == 1);  // 所有行一并清,不是只清当前行
+    CHECK(state.lines[0].empty());
+
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::CtrlC));  // 已空,再按当 EOF
+    CHECK(state.eof_requested);
+}
+
+TEST_CASE("多行 composer: Esc 清空整个 composer,esc_pressed 置位") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    TypeString(editor, "aa");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::NewLine));
+    TypeString(editor, "bb");
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Esc));
+    CHECK(state.esc_pressed);
+    CHECK(state.cleared);
+    CHECK(state.line.empty());
+    CHECK_FALSE(state.eof_requested);
+}
+
+TEST_CASE("多行 composer: Home/End 作用于当前行,不是整个 composer") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    TypeString(editor, "abc");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::NewLine));
+    TypeString(editor, "de");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Left));  // (1, 1)
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Home));
+    CHECK(state.cursor_row == 1);
+    CHECK(state.cursor_col == 0);
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::End));
+    CHECK(state.cursor_row == 1);
+    CHECK(state.cursor_col == 2);
+}
+
+TEST_CASE("emoji: 代理对合成的码点按宽字符算,编辑不劈半") {
+    CHECK(CharDisplayWidth(U'😀') == 2);       // U+1F600,终端层由代理对拼出的码点
+    CHECK(CharDisplayWidth(U'🚀') == 2);       // U+1F680
+    CHECK(CharDisplayWidth(U'🧠') == 2);       // U+1F9E0
+    CHECK(CharDisplayWidth(U'🪐') == 2);       // U+1FA90
+    CHECK(DisplayWidth(U"a😀中") == 5);
+
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    editor.HandleKey(KeyEvent::Char(U'中'));
+    editor.HandleKey(KeyEvent::Char(char32_t{0x1F600}));
+    RenderState state = editor.CurrentRenderState();
+    CHECK(state.cursor == 2);              // 按码点算两个字符
+    CHECK(state.cursor_display_col == 4);  // 显示宽度 2 + 2
+
+    // 退格一下删掉整个 emoji(单个码点),不会劈出半个代理对。
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Backspace));
+    CHECK(state.line == U"中");
+    CHECK(state.cursor_display_col == 2);
+
+    // 窗口截断也不切半个 emoji 宽度。
+    CHECK(TruncateToDisplayWidth(U"😀😀", 3) == U"😀");
+}
+
+TEST_CASE("多行 composer: cursor 兼容字段按拼接串算,显示列按当前行算") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    TypeString(editor, "ab");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::NewLine));
+    editor.HandleKey(KeyEvent::Char(U'中'));
+    editor.HandleKey(KeyEvent::Char(U'c'));
+    const RenderState state = editor.CurrentRenderState();
+    CHECK(state.line == U"ab\n中c");
+    CHECK(state.cursor == 5);              // "ab\n中c" 里末尾:2 + 1(\n) + 2
+    CHECK(state.cursor_row == 1);
+    CHECK(state.cursor_col == 2);
+    CHECK(state.cursor_display_col == 3);  // 当前行 "中c":2 + 1,跟第一行无关
+}
+
 TEST_CASE("ComputeEditLineWindow: 超宽时不切半个宽字符") {
     // 全是宽字符(每个占 2 列),content_width 给奇数,窗口不该出现半个字宽。
     const std::u32string line = U"一二三四五六七八九十";  // 10 个汉字,宽度各 2,总宽 20

@@ -42,8 +42,17 @@ namespace lubancode::cli {
 // 读取提交了一个空串返回——main.cpp 的确认回调本来就把"不是 y/Y/a/A"的
 // 任何答案都当拒绝,空串自然而然就是拒绝,不用另外加一条判断分支。默认
 // false,不影响其余调用点(主提示符、/model 选择……)的行为。
+//
+// composer:UI-A(0.11.0)多行 composer 开关,只有 main.cpp 的 `> ` 主提示符
+// 传 true。真控制台下开了它:Alt+Enter / Shift+Enter 在光标处插换行(实测
+// 这台机器 Windows Terminal 会吞 Alt+Enter——默认绑成全屏切换,keydown 根本
+// 到不了输入缓冲;conhost 两个都收得到。所以 /help 里推荐 Shift+Enter),
+// Enter 把全部行拼 '\n' 一次发出,全空白 composer 按 Enter 原地不动;编辑区
+// 占 N 行,提示符只在第一行,后续行两空格续行缩进。默认 false 的调用点
+// (确认提示、/model 编号选择、向导)单行语义跟升级前一字不差。管道/重定向
+// 模式没有 composer 概念,这个参数完全没作用,照旧逐行 getline。
 std::optional<std::string> ReadLine(const std::string& prompt, const Theme& theme = Theme{},
-                                     bool esc_rejects = false);
+                                     bool esc_rejects = false, bool composer = false);
 
 // 会话级确认模式的查询/设置。真控制台下 Shift+Tab 会改这个状态(存在
 // ReadLine() 内部维护的、贯穿整条交互会话的 LineEditorCore 实例里,见

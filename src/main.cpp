@@ -61,7 +61,7 @@
 
 namespace {
 
-constexpr std::string_view kVersion = "0.10.0";
+constexpr std::string_view kVersion = "0.11.0";
 
 void PrintVersion() {
     std::cout << "lubancode " << kVersion << "\n";
@@ -99,8 +99,11 @@ void PrintHelp() {
         << "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
         << "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
         << "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
+        << "  Shift+Enter     输入框里插一个换行,写多行消息(Alt+Enter 同义;注意 Windows Terminal\n"
+        << "                  默认把 Alt+Enter 绑成全屏切换、会吞掉这个键,用 Shift+Enter 最稳);\n"
+        << "                  Enter 把整段(多行拼换行)一次发出,空白内容按 Enter 原地不动\n"
         << "  ESC             流式回复期间按下:打断当前这轮回答,已出的半截话保留、下一轮能接着聊;\n"
-        << "                  空闲时按下:清空正在编辑的这一行;确认提示 [y/a/N] 下按下:等同拒绝\n"
+        << "                  空闲时按下:清空正在编辑的整段输入;确认提示 [y/a/N] 下按下:等同拒绝\n"
         << "  流式期间打字回车  不会打断当前流,而是排进队列,本轮结束后按顺序自动发出\n"
         << "  /exit           退出(裸词 exit/quit 也认)\n\n"
         << "配置优先级(从高到低,按字段逐个决,不是整套配置一刀切):\n"
@@ -791,7 +794,9 @@ void PrintSlashHelp() {
               << "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
               << "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
               << "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
-              << "  /exit           退出(裸词 exit/quit 也认)\n";
+              << "  /exit           退出(裸词 exit/quit 也认)\n"
+              << "多行输入:Shift+Enter 插换行(Alt+Enter 同义,但 Windows Terminal 默认把它绑成全屏\n"
+              << "切换、会吞掉,推荐 Shift+Enter);Enter 发送整段;多行时首行的 / 是正文,不当命令。\n";
 }
 
 // /skills 命令:列出扫描到的技能;一个都没有时打印两处目录路径,顺带说明
@@ -1155,8 +1160,12 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
             pending_queue.pop_front();
             std::cout << theme.prompt << "> " << theme.reset << content << "\n";
         } else {
+            // UI-A:主提示符是唯一开 composer 的读取点——Alt/Shift+Enter 插
+            // 换行、Enter 全发、全空白不发送。别的 ReadLine 调用点(确认提示、
+            // /model 编号选择、向导)保持单行语义。
             const std::optional<std::string> line =
-                lubancode::cli::ReadLine(theme.prompt + "> " + theme.reset, theme);
+                lubancode::cli::ReadLine(theme.prompt + "> " + theme.reset, theme,
+                                          /*esc_rejects=*/false, /*composer=*/true);
             if (!line.has_value()) {
                 break;  // EOF:Ctrl+Z 或管道读尽
             }

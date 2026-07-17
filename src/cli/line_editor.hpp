@@ -38,6 +38,9 @@ enum class KeyKind {
     Tab,
     ShiftTab,
     Enter,
+    NewLine,  // UI-A:Alt+Enter / Shift+Enter——composer 模式下在光标处插换行;
+              // 非 composer 模式(确认提示、/model 选择……)下等同 Enter,单行
+              // 语义一个字都不变
     CtrlC,
     CtrlD,
     Esc,  // M10:ESC 打断/清行。终端层只在真控制台下(VK_ESCAPE)产出这个
@@ -76,10 +79,11 @@ struct CompletionCandidate {
 };
 
 // 简易 East Asian Width 判定:>= 0x1100 起,常用的 CJK 统一表意文字、
-// 假名、韩文音节、全角标点这些区段按显示宽度 2 算,其余按 1 算。不是一份
-// 完整的 Unicode East Asian Width 表(生僻扩展区、emoji 宽字符没覆盖),
-// 对日常中文/日文/韩文终端交互场景够用——这是刻意的取舍:真要做全,该去
-// 啃 Unicode UAX #11 那张完整宽度表,对一个 CLI 的光标定位需求性价比不高。
+// 假名、韩文音节、全角标点这些区段按显示宽度 2 算,其余按 1 算。UI-A
+// (0.11.0)补上了常用 emoji 区段(U+1F300 起那几段,终端都按两列画)。
+// 仍不是一份完整的 Unicode East Asian Width 表(生僻扩展区没覆盖),对
+// 日常中文/日文/韩文/emoji 终端交互场景够用——这是刻意的取舍:真要做全,
+// 该去啃 Unicode UAX #11 那张完整宽度表,对一个 CLI 的光标定位需求性价比不高。
 int CharDisplayWidth(char32_t codepoint);
 std::size_t DisplayWidth(const std::u32string& text);
 
@@ -114,9 +118,19 @@ EditLineWindow ComputeEditLineWindow(const std::u32string& line, std::size_t cur
 // 到 cursor_display_col 那一列、hint_lines 非空就在下面逐行展示(每个元素
 // 一个逻辑行,终端层负责按控制台实际宽度截断,核心层不折行、不猜宽度)。
 struct RenderState {
-    std::u32string line;                 // 当前行内容,按码点存
-    std::size_t cursor = 0;              // 光标在 line 里的码点位置(不是显示列)
-    std::size_t cursor_display_col = 0;  // 光标对应的显示列宽(CJK 按 2 算),终端层定位光标直接用这个
+    // UI-A(0.11.0)多行 composer:编辑区从一行升级成 N 行。lines 至少一个
+    // 元素(空 composer 就是一个空串);cursor_row/cursor_col 是光标落在第几
+    // 行、行内第几个码点。单行场景 lines.size()==1,跟升级前完全一个样。
+    std::vector<std::u32string> lines{std::u32string()};
+    std::size_t cursor_row = 0;
+    std::size_t cursor_col = 0;
+
+    // 兼容字段:line 是全部行拼 '\n' 的整体内容(Enter 提交后终端层转
+    // UTF-8 返回的就是它);cursor 是光标在这个拼接串里的码点位置。单行场景
+    // 两者跟升级前语义分毫不差,老单测原样过。
+    std::u32string line;
+    std::size_t cursor = 0;
+    std::size_t cursor_display_col = 0;  // 光标在"当前行"里的显示列宽(CJK/emoji 按 2 算),终端层定位光标直接用这个
     std::vector<std::string> hint_lines;  // line 以 / 开头时,匹配的命令逐行列出;不需要显示就是空 vector
     bool submitted = false;              // Enter:line 是这一行最终提交的内容
     bool cleared = false;                // Ctrl+C 清空了非空行,留在同一次 ReadLine 里继续编辑
@@ -136,7 +150,13 @@ public:
     // 开始读新的一行:清空行缓冲、光标、Tab 补全会话状态、历史浏览位置
     // (回到"底部");历史列表本身和确认模式是会话级的,跨多轮 BeginLine()
     // 保留,这里不碰。
-    void BeginLine();
+    //
+    // composer=true 是 UI-A 的多行 composer 模式(只有 main.cpp 的 `> ` 主
+    // 提示符走这一档):NewLine(Alt/Shift+Enter)插换行、Enter 全发、全空白
+    // composer 不发送。composer=false(默认)保持升级前的单行语义一字不变:
+    // NewLine 等同 Enter、空行 Enter 照样提交(确认提示 [y/a/N] 靠空行当
+    // 拒绝、/model 编号选择靠空行选默认项,这两条不能破)。
+    void BeginLine(bool composer = false);
 
     // 喂一个按键事件,返回喂完这一下之后该怎么画。
     RenderState HandleKey(const KeyEvent& event);
@@ -163,19 +183,27 @@ private:
 
     std::vector<CompletionCandidate> slash_candidates_;
 
-    std::u32string line_;
-    std::size_t cursor_ = 0;
+    // UI-A:行缓冲从单 u32string 升级成 vector<u32string> + (row, col) 光标。
+    // 不变式:lines_ 永远至少一个元素(空 composer 就是一个空串)。
+    std::vector<std::u32string> lines_{std::u32string()};
+    std::size_t row_ = 0;
+    std::size_t col_ = 0;
+    bool composer_ = false;  // 见 BeginLine() 注释
 
+    // 历史一条就是一次完整提交的 composer 内容(多行拼 '\n' 存);draft_ 同理。
     std::vector<std::u32string> history_;
     std::optional<std::size_t> history_index_;  // nullopt = 在"底部"(没有在翻历史)
-    std::u32string draft_;                      // 开始翻历史之前正在编辑的那一行,翻回底部时恢复
+    std::u32string draft_;                      // 开始翻历史之前正在编辑的内容(拼 '\n'),翻回底部时恢复
 
     std::optional<TabCycleState> tab_cycle_;
     ConfirmMode confirm_mode_ = ConfirmMode::Confirm;
 
     void ResetHistoryBrowsing();  // "翻到一半又编辑" -> 落回底部,但保留当前(已编辑的)内容
     void InsertChar(char32_t ch);
-    void DeleteBackward();
+    void InsertNewLine();   // 光标处劈开当前行,插入新行,光标落到新行行首
+    void DeleteBackward();  // 行内退格删一个字符;行首退格把这一行并进上一行
+    void ClearBuffer();     // 整个 composer 清空回"单个空行"
+    void LoadJoined(const std::u32string& joined);  // 按 '\n' 拆开装进 lines_,光标落到末尾
     void MoveHistory(bool up);
     void HandleTab();
     void CompleteToCandidate(const std::string& name, const std::u32string& suffix);

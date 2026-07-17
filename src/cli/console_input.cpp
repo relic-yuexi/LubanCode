@@ -171,80 +171,107 @@ void EnsureRoomForRows(HANDLE h_out, SHORT& start_row, SHORT buffer_height, SHOR
     }
 }
 
-// 按 RenderState 重画"编辑区域":第一行是 提示符前缀 + prompt + 当前行
-// 内容,后面紧跟 0~N 行 hint_lines(每个元素一个逻辑行,列出匹配的 slash
-// 命令)。start_row/prompt_end_col 是这次 ReadLine() 调用一开始(或者
-// Shift+Tab 切模式重打提示符之后)测出来的,之后的每次重画都锚定在这个
-// 位置上。
+// 按 RenderState 重画"编辑区域"。UI-A(0.11.0)起编辑区不止一行:第一行是
+// 提示符前缀 + prompt + composer 第一行,composer 后续行各占一个物理行、
+// 行首两空格续行缩进(提示符只在第一行),再往下紧跟 0~N 行 hint_lines
+// (每个元素一个逻辑行,列出匹配的 slash 命令——多行 composer 下核心层
+// 保证 hint_lines 恒空)。start_row/prompt_end_col 是这次 ReadLine() 调用
+// 一开始(或者 Shift+Tab 切模式重打提示符之后)测出来的,之后的每次重画
+// 都锚定在这个位置上。
 //
-// 相比升级前的版本,这里补上两条账,对应"提示堆残骸"这个 bug 的两个病根:
+// 记账规则沿用修"提示堆残骸"那次立下的两条,只是从"提示行数"扩成"第一行
+// 之外的全部行数"(composer 续行 + 提示行统一算):
 //   1. 每行落笔之前按控制台此刻的实际宽度(dwSize.X)截断,物理上绝不
 //      折行——折行会让"起始行/光标位"这两个锚点失效,是清不干净的根子。
-//      编辑行本身超宽同样按可视窗口截断(见 ComputeEditLineWindow),不
-//      让编辑行折行破坏锚点。
-//   2. 上一帧到底画了几行提示得记账(prev_hint_line_count):这一帧提示
-//      行数比上一帧少,多出来的旧行要显式清空,不能只清"新内容覆盖到的
-//      那部分"——这是"旧提示不擦、越敲越堆"的根子。
-// 顺带用 EnsureRoomForRows 把"离缓冲区底部太近导致自动滚屏、坐标跟着失效"
-// 这条已知限制也堵上了。
+//      每一行 composer 内容都各自按可视窗口截断(ComputeEditLineWindow
+//      按行应用,光标所在行给真光标位、其余行从行首截),绝不折行。
+//   2. 上一帧第一行之外到底画了几行得记账(prev_body_row_count):这一帧
+//      行数比上一帧少(删行、清空、提示消失),多出来的旧行要显式清空,
+//      不能只清"新内容覆盖到的那部分"。
+// 顺带用 EnsureRoomForRows 按总行数探底滚屏,把"离缓冲区底部太近导致自动
+// 滚屏、坐标跟着失效"这条已知限制堵住(增删行时锚点账目同步修正)。
 void RedrawEditArea(HANDLE h_out, SHORT& start_row, SHORT& prompt_end_col, const RenderState& state,
-                     int& prev_hint_line_count) {
+                     int& prev_body_row_count) {
     CONSOLE_SCREEN_BUFFER_INFO info{};
     if (!GetConsoleScreenBufferInfo(h_out, &info)) {
         return;  // 拿不到屏幕信息就没法定位,这一帧放弃重画,下一帧再试
     }
     const SHORT buffer_width = info.dwSize.X;
     const SHORT buffer_height = info.dwSize.Y;
-    const int new_hint_count = static_cast<int>(state.hint_lines.size());
-    // 这一帧要碰(清或画)的提示行数上限:取新旧两帧行数的较大值,保证
-    // 旧帧多出来的行不会被漏清。
-    const int rows_to_touch = std::max(new_hint_count, prev_hint_line_count);
+
+    constexpr SHORT kContinuationIndent = 2;  // composer 续行的两空格缩进
+
+    // 核心层保证 state.lines 至少一个元素,这里再兜一手,免得空 vector 把
+    // 下标访问带崩。
+    const std::vector<std::u32string> fallback_lines{std::u32string()};
+    const std::vector<std::u32string>& edit_lines = state.lines.empty() ? fallback_lines : state.lines;
+    const int edit_row_count = static_cast<int>(edit_lines.size());
+    const int hint_count = static_cast<int>(state.hint_lines.size());
+    // "第一行之外"这一帧要占的行数(composer 续行 + 提示行),跟上一帧取
+    // 较大值,保证旧帧多出来的行(删行、清 composer、提示消失)不漏清。
+    const int body_rows = (edit_row_count - 1) + hint_count;
+    const int rows_to_touch = std::max(body_rows, prev_body_row_count);
 
     EnsureRoomForRows(h_out, start_row, buffer_height, static_cast<SHORT>(1 + rows_to_touch));
 
     DWORD written = 0;
 
-    // 编辑行:按"width - 1"留一列安全边界,窗口式截断保证光标可见、绝不
-    // 折行(取舍见 ComputeEditLineWindow 头文件注释——每帧独立按光标位置
-    // 重算窗口,不跨帧持久化滚动偏移)。
-    const int content_width = static_cast<int>(buffer_width) - static_cast<int>(prompt_end_col) - 1;
-    const EditLineWindow window = ComputeEditLineWindow(state.line, state.cursor, content_width);
+    // 光标最终该落的位置,画完统一挪过去(先给个兜底值:第一行提示符后)。
+    COORD final_cursor{prompt_end_col, start_row};
 
-    // 只清"提示符之后"这一段(从 prompt_end_col 到行尾),提示符本身那几列
-    // 一个字符都不碰——这里曾经是从第 0 列开始、清整行宽度,结果提示符
-    // (比如 "> "/"[auto] > ")在敲下第一个字符那一刻就被空格盖没了,每帧
-    // 重画都会复发。既然编辑内容永远从 prompt_end_col 起画,清的范围也该
-    // 从 prompt_end_col 起,一分不多清。
-    const int clear_width = static_cast<int>(buffer_width) - static_cast<int>(prompt_end_col);
-    if (clear_width > 0) {
-        const COORD line_pos{prompt_end_col, start_row};
-        FillConsoleOutputCharacterW(h_out, L' ', static_cast<DWORD>(clear_width), line_pos, &written);
+    // 第一行:只清"提示符之后"这一段(从 prompt_end_col 到行尾),提示符
+    // 本身那几列一个字符都不碰——清整行会把 "> "/"[auto] > " 盖没,是修过
+    // 的老 bug,别再犯。
+    {
+        const int content_width = static_cast<int>(buffer_width) - static_cast<int>(prompt_end_col) - 1;
+        const std::size_t cursor_in_row = state.cursor_row == 0 ? state.cursor_col : 0;
+        const EditLineWindow window = ComputeEditLineWindow(edit_lines[0], cursor_in_row, content_width);
+        const int clear_width = static_cast<int>(buffer_width) - static_cast<int>(prompt_end_col);
+        if (clear_width > 0) {
+            const COORD line_pos{prompt_end_col, start_row};
+            FillConsoleOutputCharacterW(h_out, L' ', static_cast<DWORD>(clear_width), line_pos, &written);
+        }
+        SetConsoleCursorPosition(h_out, COORD{prompt_end_col, start_row});
+        std::cout << Utf32ToUtf8(window.text);
+        std::cout.flush();
+        if (state.cursor_row == 0) {
+            final_cursor = COORD{static_cast<SHORT>(prompt_end_col + static_cast<SHORT>(window.cursor_display_col)),
+                                  start_row};
+        }
     }
-    SetConsoleCursorPosition(h_out, COORD{prompt_end_col, start_row});
-    std::cout << Utf32ToUtf8(window.text);
-    std::cout.flush();
 
-    // 提示行:逐行先清后画。i >= new_hint_count 但 i < rows_to_touch 的行
-    // 是上一帧画过、这一帧不再需要的,只清不画。
-    for (int i = 0; i < rows_to_touch; ++i) {
-        const COORD hint_pos{0, static_cast<SHORT>(start_row + 1 + i)};
-        SetConsoleCursorPosition(h_out, hint_pos);
-        FillConsoleOutputCharacterW(h_out, L' ', static_cast<DWORD>(buffer_width), hint_pos, &written);
-        if (i < new_hint_count) {
+    // 第一行之外:逐行先整行清、再按行的身份画——composer 续行(两空格
+    // 缩进 + 窗口截断)、提示行(截宽),或者旧帧残行(只清不画)。
+    for (int i = 1; i <= rows_to_touch; ++i) {
+        const COORD row_pos{0, static_cast<SHORT>(start_row + i)};
+        FillConsoleOutputCharacterW(h_out, L' ', static_cast<DWORD>(buffer_width), row_pos, &written);
+        if (i < edit_row_count) {
+            const int content_width = static_cast<int>(buffer_width) - kContinuationIndent - 1;
+            const std::size_t row_index = static_cast<std::size_t>(i);
+            const std::size_t cursor_in_row = state.cursor_row == row_index ? state.cursor_col : 0;
+            const EditLineWindow window = ComputeEditLineWindow(edit_lines[row_index], cursor_in_row, content_width);
+            SetConsoleCursorPosition(h_out, COORD{kContinuationIndent, row_pos.Y});
+            std::cout << Utf32ToUtf8(window.text);
+            std::cout.flush();
+            if (state.cursor_row == row_index) {
+                final_cursor =
+                    COORD{static_cast<SHORT>(kContinuationIndent + static_cast<SHORT>(window.cursor_display_col)),
+                           row_pos.Y};
+            }
+        } else if (i - edit_row_count < hint_count) {
             const int hint_width = static_cast<int>(buffer_width) - 1;
-            const std::string truncated =
-                TruncateUtf8ToDisplayWidth(state.hint_lines[static_cast<std::size_t>(i)], hint_width);
-            SetConsoleCursorPosition(h_out, hint_pos);
+            const std::string truncated = TruncateUtf8ToDisplayWidth(
+                state.hint_lines[static_cast<std::size_t>(i - edit_row_count)], hint_width);
+            SetConsoleCursorPosition(h_out, row_pos);
             std::cout << truncated;
             std::cout.flush();
         }
     }
-    prev_hint_line_count = new_hint_count;
+    prev_body_row_count = body_rows;
 
-    // 提示行画完,光标要挪回编辑行、落在窗口内换算过的那一列——不管画没画
-    // 提示行,这一步都得做,不然光标就停在最后一行提示上了。
-    const SHORT target_col = static_cast<SHORT>(prompt_end_col + static_cast<SHORT>(window.cursor_display_col));
-    SetConsoleCursorPosition(h_out, COORD{target_col, start_row});
+    // 画完把光标挪回它该在的那一行那一列——不管画没画续行/提示行,这一步
+    // 都得做,不然光标就停在最后一行上了。
+    SetConsoleCursorPosition(h_out, final_cursor);
 }
 
 // M11(0.10.0):Shift+Tab 切确认档位时提示符前缀该套什么颜色——auto 用
@@ -268,12 +295,13 @@ std::string ColoredConfirmPrefix(ConfirmMode mode, const Theme& theme) {
     return prefix;
 }
 
-// 逐键读入这一行,真控制台专用。ReadConsoleInputW 逐个读键盘事件,翻译成
-// cli::KeyEvent 喂 SharedEditor(),按吐出来的 RenderState 重画。
+// 逐键读入这一次输入(UI-A 起,composer 模式下可能是多行),真控制台专用。
+// ReadConsoleInputW 逐个读键盘事件,翻译成 cli::KeyEvent 喂 SharedEditor(),
+// 按吐出来的 RenderState 重画。
 //
-// esc_rejects:见 console_input.hpp 里 ReadLine() 的同名参数注释——true 时
-// Esc 直接当"这次读取交了个空串"处理,不留在循环里继续等。
-std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const Theme& theme, bool esc_rejects) {
+// esc_rejects/composer:见 console_input.hpp 里 ReadLine() 的同名参数注释。
+std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const Theme& theme, bool esc_rejects,
+                                             bool composer) {
     // 整个函数体都攥着这把锁:M10 的 TurnInputListener 监听线程只在抢到锁
     // 的间隙才读控制台输入,这一行锁一上,就等于宣布"编辑器正在读",监听
     // 线程会自动让出、不跟这里抢同一份 ReadConsoleInputW 输入。
@@ -303,7 +331,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     } mode_guard{h_in, original_mode};
 
     LineEditorCore& editor = SharedEditor();
-    editor.BeginLine();
+    editor.BeginLine(composer);
 
     const std::string full_prompt = ColoredConfirmPrefix(editor.confirm_mode(), theme) + prompt;
     std::cout << full_prompt;
@@ -315,7 +343,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     }
     SHORT start_row = info.dwCursorPosition.Y;
     SHORT prompt_end_col = info.dwCursorPosition.X;
-    int prev_hint_line_count = 0;
+    int prev_body_row_count = 0;  // 上一帧第一行之外画了几行(composer 续行 + 提示行),见 RedrawEditArea
 
     std::optional<char32_t> pending_high_surrogate;
 
@@ -331,6 +359,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         const KEY_EVENT_RECORD& ke = record.Event.KeyEvent;
         const bool ctrl = (ke.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0;
         const bool shift = (ke.dwControlKeyState & SHIFT_PRESSED) != 0;
+        const bool alt = (ke.dwControlKeyState & (LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED)) != 0;
 
         std::optional<KeyEvent> mapped;
         if (ctrl && ke.wVirtualKeyCode == 'C') {
@@ -354,7 +383,13 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         } else if (ke.wVirtualKeyCode == VK_TAB) {
             mapped = KeyEvent::Simple(shift ? KeyKind::ShiftTab : KeyKind::Tab);
         } else if (ke.wVirtualKeyCode == VK_RETURN) {
-            mapped = KeyEvent::Simple(KeyKind::Enter);
+            // UI-A:Alt+Enter / Shift+Enter 都翻成 NewLine(插换行)。实测这台
+            // 机器:Windows Terminal 把 Alt+Enter 绑成了全屏切换,keydown 根本
+            // 进不了输入缓冲(只漏一个 keyup,bKeyDown==FALSE 早被上面滤掉),
+            // 等于天然收不到;conhost 下两个组合都完好。所以两个都认,文档里
+            // 推荐 Shift+Enter。非 composer 读取里 NewLine 会被核心层当 Enter,
+            // 确认提示那些单行场景语义不变。
+            mapped = KeyEvent::Simple((shift || alt) ? KeyKind::NewLine : KeyKind::Enter);
         } else if (ke.wVirtualKeyCode == VK_ESCAPE) {
             mapped = KeyEvent::Simple(KeyKind::Esc);
         } else if (ke.uChar.UnicodeChar != 0 && !ctrl) {
@@ -403,7 +438,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             }
         }
 
-        RedrawEditArea(h_out, start_row, prompt_end_col, state, prev_hint_line_count);
+        RedrawEditArea(h_out, start_row, prompt_end_col, state, prev_body_row_count);
 
         if (state.esc_pressed && esc_rejects) {
             // 确认提示 [y/a/N] 场景:Esc 不留在循环里继续等,直接当这次
@@ -413,13 +448,21 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             return std::string();
         }
         if (state.eof_requested) {
+            // Ctrl+D 可能按在多行 composer 中间某一行:先把光标挪到编辑区
+            // 最后一行再换行,免得接下来的输出打在 composer 剩余行身上。
+            if (state.lines.size() > 1) {
+                SetConsoleCursorPosition(
+                    h_out, COORD{0, static_cast<SHORT>(start_row + static_cast<SHORT>(state.lines.size()) - 1)});
+            }
             std::cout << "\n";
             return std::nullopt;
         }
         if (state.cleared) {
-            continue;  // 行已经清空,继续在同一次调用里编辑
+            continue;  // composer 已经清空,继续在同一次调用里编辑
         }
         if (state.submitted) {
+            // 提交:RedrawEditArea 刚按提交帧把完整多行内容画在屏幕上、光标
+            // 停在末行末尾,这里换行收尾——整段内容留在历史区,spec 第 7 条。
             std::cout << "\n";
             return Utf32ToUtf8(state.line);
         }
@@ -430,14 +473,16 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
 
 }  // namespace
 
-std::optional<std::string> ReadLine(const std::string& prompt, const Theme& theme, bool esc_rejects) {
+std::optional<std::string> ReadLine(const std::string& prompt, const Theme& theme, bool esc_rejects, bool composer) {
 #ifdef _WIN32
     if (StdinIsRealConsole()) {
-        return ReadLineKeyByKey(prompt, theme, esc_rejects);
+        return ReadLineKeyByKey(prompt, theme, esc_rejects, composer);
     }
+    (void)composer;  // 管道/重定向:没有 composer 概念,照旧逐行 getline
 #else
     (void)theme;
     (void)esc_rejects;
+    (void)composer;
 #endif
 
     if (!prompt.empty()) {
