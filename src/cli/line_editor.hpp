@@ -60,7 +60,9 @@ struct KeyEvent {
 // Shift+Tab 循环切换的三档会话级确认模式,main.cpp 的工具确认回调按这个
 // 分流:
 //   Confirm(默认) —— needs_confirm 的工具逐个问(现状)
-//   Auto           —— write_file/edit_file 自动放行,run_command 仍问
+//   Auto           —— write_file/edit_file 自动放行;run_command 过命令
+//                     安全分类(tools/command_safety),安全命令放行、
+//                     危险仍问;MCP/插件等外挂工具仍问
 //   Yolo           —— 全自动(等价 --yes)
 enum class ConfirmMode { Confirm, Auto, Yolo };
 
