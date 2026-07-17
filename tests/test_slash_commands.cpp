@@ -192,3 +192,17 @@ TEST_CASE("AllSlashCommands: /plugins 在列表里") {
     }
     CHECK(has_plugins);
 }
+
+TEST_CASE("ParseSlashCommand: /lsp,大小写不敏感") {
+    CHECK(cli::ParseSlashCommand("/lsp").command == cli::SlashCommand::Lsp);
+    CHECK(cli::ParseSlashCommand("/LSP").command == cli::SlashCommand::Lsp);
+}
+
+TEST_CASE("AllSlashCommands: /lsp 在列表里") {
+    const auto& commands = cli::AllSlashCommands();
+    bool has_lsp = false;
+    for (const auto& c : commands) {
+        if (c.name == "/lsp") has_lsp = true;
+    }
+    CHECK(has_lsp);
+}

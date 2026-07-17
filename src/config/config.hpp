@@ -108,6 +108,19 @@ struct McpServerConfig {
     std::vector<std::pair<std::string, std::string>> env;
 };
 
+// LSP:一个语言服务器的配置。command 必填;args 可选(缺省空);extensions
+// 必填(非空字符串数组,按扩展名把文件路由到这个服务器,比如 [".cpp",".h"]);
+// idle_minutes 可选(缺省 10,闲置多少分钟后关停进程,下次用到再拉起)。
+// 键是语言名("cpp"/"python"...),同时充当 textDocument/didOpen 的
+// languageId。跟 hooks/mcpServers 一样只从配置文件来——没配置 = 不启用 =
+// lsp 工具不注册。
+struct LspServerConfig {
+    std::string command;
+    std::vector<std::string> args;
+    std::vector<std::string> extensions;
+    int idle_minutes = 10;
+};
+
 struct Config {
     Wire wire = Wire::Anthropic;
     std::string base_url;
@@ -126,6 +139,9 @@ struct Config {
     // websearch:搜索服务,只从配置文件来,没配就是空的(Configured()=false,
     // web_search 工具不注册)。
     SearchConfig search;
+    // LSP:语言服务器,键是语言名,只从配置文件来(待遇同 hooks/
+    // mcpServers),没配就是空 map——空 map 意味着 lsp 工具不注册。
+    std::map<std::string, LspServerConfig> lsp_servers;
 };
 
 // 每个字段最终来自哪一级,跟 Config 里的字段一一对应。
@@ -176,6 +192,8 @@ struct FileConfig {
     std::optional<std::map<std::string, McpServerConfig>> mcp_servers;
     // websearch:search 段,整段有没有出现在 JSON 里(同上,只从配置文件来)。
     std::optional<SearchConfig> search;
+    // LSP:lsp 段,整段有没有出现在 JSON 里(待遇同 mcpServers)。
+    std::optional<std::map<std::string, LspServerConfig>> lsp_servers;
     std::string source_path;
     // 这份 FileConfig 是不是从"旧位置迁移到新位置"这个动作里读出来的;
     // 有值就是要打印给用户看的那一行通知(LoadFileConfig 填,LoadFromEnv
@@ -323,6 +341,16 @@ std::expected<std::map<std::string, McpServerConfig>, std::string> ParseMcpServe
 // 空串……都直接报错,错误信息带上 file_path_for_error,方便定位。
 std::expected<SearchConfig, std::string> ParseSearchConfig(const nlohmann::json& search_json,
                                                              const std::string& file_path_for_error);
+// 纯函数,不碰 IO:解析 config.json 里的 "lsp" 字段(整个 JSON object)。
+// 每个键是语言名,值是 {"command": "...(必填,字符串)",
+// "args": ["...", ...](可选,字符串数组,缺省空),
+// "extensions": [".cpp", ...](必填,非空字符串数组),
+// "idle_minutes": 10(可选,正整数,缺省 10)}。
+// lsp_json 不是 object、某个语言的值不是 object、缺 command、extensions
+// 缺失/空/类型不对、idle_minutes 不是正整数……都直接报错,错误信息带上
+// file_path_for_error 和具体是哪个语言的哪个字段,方便定位。
+std::expected<std::map<std::string, LspServerConfig>, std::string> ParseLspServersConfig(
+    const nlohmann::json& lsp_json, const std::string& file_path_for_error);
 
 // 找配置文件,查找顺序:
 //   1) cwd 的新位置  <cwd>/.lubancode/config.json

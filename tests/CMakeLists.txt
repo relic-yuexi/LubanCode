@@ -28,6 +28,10 @@ add_executable(lubancode_tests
   test_mcp_config.cpp
   test_mcp_client.cpp
   test_mcp_tool.cpp
+  test_lsp_framing.cpp
+  test_lsp_config.cpp
+  test_lsp_client.cpp
+  test_lsp_tool.cpp
   test_todo_tool.cpp
   test_todo_render.cpp
   test_divider.cpp

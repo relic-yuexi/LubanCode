@@ -22,6 +22,7 @@ enum class SlashCommand {
     Think,    // /think [档位]:看/改推理强度
     Skills,   // /skills:列出扫描到的技能(M9)
     Mcp,      // /mcp:列出挂载的 MCP 服务器状态、工具清单(M8)
+    Lsp,      // /lsp:列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)
     Todos,    // /todos:查看当前待办清单(M11/0.10.0)
     Plugins,  // /plugins:列出挂载的插件工具(DLL + lua)和加载警告(M7)
     Sessions,  // /sessions:列最近的会话存档(0.13.x 会话存档与续聊)

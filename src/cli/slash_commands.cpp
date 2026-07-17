@@ -67,6 +67,8 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Skills;
     } else if (lower == "/mcp") {
         parsed.command = SlashCommand::Mcp;
+    } else if (lower == "/lsp") {
+        parsed.command = SlashCommand::Lsp;
     } else if (lower == "/todos") {
         parsed.command = SlashCommand::Todos;
     } else if (lower == "/plugins") {
@@ -96,6 +98,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
         {"/effort", "同 /think(推理强度别名)"},
         {"/skills", "列出扫描到的技能(主目录级 + 项目级)"},
         {"/mcp", "列出挂载的 MCP 服务器状态和工具清单"},
+        {"/lsp", "列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)"},
         {"/todos", "查看当前待办清单"},
         {"/plugins", "列出挂载的插件工具(DLL + lua)和加载警告"},
         {"/sessions", "列最近 20 场会话存档,倒序编号"},

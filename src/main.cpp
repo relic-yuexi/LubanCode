@@ -48,6 +48,7 @@
 #include "cli/transcript.hpp"
 #include "config/config.hpp"
 #include "config/model_catalog.hpp"
+#include "lsp/manager.hpp"
 #include "mcp/client.hpp"
 #include "mcp/mcp_tool.hpp"
 #include "tools/agent_tool.hpp"
@@ -55,6 +56,7 @@
 #include "tools/hooks.hpp"
 #include "tools/lua_tool.hpp"
 #include "tools/plugin_loader.hpp"
+#include "tools/lsp_tool.hpp"
 #include "tools/read_file.hpp"
 #include "tools/registry.hpp"
 #include "tools/run_command.hpp"
@@ -115,6 +117,7 @@ void PrintHelp() {
         << "                  映射,responses 原样递给 API)\n"
         << "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
         << "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
+        << "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
         << "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
         << "  /plugins        列出挂载的插件工具(主目录 .lubancode/plugins 下的 *.dll 和 *.lua)\n"
         << "  /sessions       列最近 20 场会话存档(时间倒序编号)\n"
@@ -148,6 +151,11 @@ void PrintHelp() {
         << "       起进程握手成功后,工具以 mcp__服务器名__工具名 挂进工具表,/mcp 看状态\n"
         << "       \"search\": {\"provider\": \"tavily|brave|serper\", \"api_key\": \"...\"}\n"
         << "       配了这一段才会注册 web_search 工具;web_fetch 工具无须配置,始终可用\n"
+        << "     再有 lsp 一段(同样只从配置文件读;没配 = 不启用 = lsp 工具不注册):\n"
+        << "       \"lsp\": {\"cpp\": {\"command\": \"clangd\", \"args\": [...], \"extensions\": [\".cpp\", \".hpp\"],\n"
+        << "                \"idle_minutes\": 10}}\n"
+        << "       配了才注册 lsp 工具(definition/references/symbols/diagnostics 语义查询),懒启动、\n"
+        << "       闲置自动关停,/lsp 看各语言服务器状态\n"
         << "  3) 通用环境变量(向后兼容旧用法,跟 Claude Code 等工具共用同名变量时容易撞车,\n"
         << "     建议改用第 1 级的 LUBANCODE_* 专属变量):\n"
         << "       wire=anthropic 时读 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL\n"
@@ -638,6 +646,21 @@ void PrintMcpCommand(const std::vector<McpServerRuntime>& mcp_servers) {
         for (const auto& tool_info : runtime.tools) {
             std::cout << "      mcp__" << runtime.name << "__" << tool_info.name << "\n";
         }
+    }
+}
+
+// /lsp 命令:每个配置了的语言一行状态(未启动/运行中/已闲置关停/已退出)。
+// StatusList() 要顺手收割闲置进程(改内部状态),所以入参是可变引用,
+// 不装 const。
+void PrintLspCommand(std::optional<lubancode::lsp::Manager>& lsp_manager) {
+    if (!lsp_manager.has_value()) {
+        std::cout << "没有配置任何 LSP 服务器(config.json 里没写 lsp 段,lsp 工具也没注册)。\n";
+        return;
+    }
+    const auto statuses = lsp_manager->StatusList();
+    std::cout << "已配置 " << statuses.size() << " 个 LSP 服务器:\n";
+    for (const auto& status : statuses) {
+        std::cout << "  - " << status.language << " (" << status.command << "): " << status.state << "\n";
     }
 }
 
@@ -1721,6 +1744,7 @@ void PrintSlashHelp() {
               << "  /think          看当前推理强度;/think 档位 切档位,档位以服务商为准(/effort 同义)\n"
               << "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
               << "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
+              << "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
               << "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
               << "  /plugins        列出挂载的插件工具(DLL + lua)和加载警告\n"
               << "  /sessions       列最近 20 场会话存档(时间倒序编号)\n"
@@ -2228,6 +2252,14 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     lubancode::tools::PluginHost plugin_host;
     std::vector<PluginMountInfo> plugin_mounted;
     std::vector<std::string> plugin_warnings;
+    // LSP:lsp_manager 声明在两份 registry 之前(析构反序,LspTool 持有的
+    // Manager& 不会悬垂,理由同上面的 mcp_servers)。配置了 lsp 段才构造,
+    // 构造本身不起任何进程(懒启动,首次用到某语言才拉),析构时把还活着
+    // 的服务器按 shutdown/exit + 2s 兜底的规矩全关掉。
+    std::optional<lubancode::lsp::Manager> lsp_manager;
+    if (!config.lsp_servers.empty()) {
+        lsp_manager.emplace(config.lsp_servers, CurrentDirUtf8());
+    }
 
     // 两份工具表:sub_registry 只有基础工具,喂给 agent 工具当"子代理能用
     // 什么"(不含 agent 自己,防递归);registry 是主循环真正用的那份,
@@ -2239,6 +2271,13 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     lubancode::tools::ToolRegistry registry = BuildBaseToolRegistry(skills, config.search);
     RegisterMcpTools(mcp_servers, sub_registry);
     RegisterMcpTools(mcp_servers, registry);
+    // lsp 工具:主表 + 子代理表都挂(语义查询对子代理同样有用),两份
+    // LspTool 实例共享同一个 Manager(背后同一批服务器进程,不会因为注册
+    // 两份就多起进程)。没配 lsp 段就完全不注册——不配置 = 不启用。
+    if (lsp_manager.has_value()) {
+        sub_registry.Register(std::make_unique<lubancode::tools::LspTool>(*lsp_manager));
+        registry.Register(std::make_unique<lubancode::tools::LspTool>(*lsp_manager));
+    }
     registry.Register(std::make_unique<lubancode::tools::AgentTool>(
         wrapped_backend, sub_registry, CurrentDirUtf8(), config.model, /*default_max_turns=*/15, skills_segment));
 
@@ -2401,6 +2440,9 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                 case lubancode::cli::SlashCommand::Mcp:
                     PrintMcpCommand(mcp_servers);
                     break;
+                case lubancode::cli::SlashCommand::Lsp:
+                    PrintLspCommand(lsp_manager);
+                    break;
                 case lubancode::cli::SlashCommand::Todos:
                     std::cout << lubancode::cli::FormatTodoList(todo_state->items, theme);
                     break;
@@ -2530,6 +2572,13 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     lubancode::tools::PluginHost plugin_host;
     std::vector<PluginMountInfo> plugin_mounted;
     std::vector<std::string> plugin_warnings;
+    // LSP:声明在两份 registry 之前,理由同 InteractiveLoop(析构反序,
+    // LspTool 持有的 Manager& 不会悬垂)。单发模式没有 /lsp 命令可看,但
+    // 工具本身照样能用;AskOnce 返回时 Manager 析构,起过的服务器全关。
+    std::optional<lubancode::lsp::Manager> lsp_manager;
+    if (!config.lsp_servers.empty()) {
+        lsp_manager.emplace(config.lsp_servers, CurrentDirUtf8());
+    }
 
     // 两份工具表,理由同 InteractiveLoop:sub_registry 喂给 agent 工具当
     // "子代理能用什么"(不含 agent 自己,防递归),registry 是主循环真正
@@ -2539,6 +2588,10 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     lubancode::tools::ToolRegistry registry = BuildBaseToolRegistry(skills, config.search);
     RegisterMcpTools(mcp_servers, sub_registry);
     RegisterMcpTools(mcp_servers, registry);
+    if (lsp_manager.has_value()) {
+        sub_registry.Register(std::make_unique<lubancode::tools::LspTool>(*lsp_manager));
+        registry.Register(std::make_unique<lubancode::tools::LspTool>(*lsp_manager));
+    }
     registry.Register(std::make_unique<lubancode::tools::AgentTool>(
         wrapped_backend, sub_registry, CurrentDirUtf8(), config.model, /*default_max_turns=*/15, skills_segment));
     // M11(0.10.0):单发模式也挂 todo_write(只挂主 registry,不挂 sub_registry,

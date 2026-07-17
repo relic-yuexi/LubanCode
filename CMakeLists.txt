@@ -178,6 +178,10 @@ add_library(lubancode_core STATIC
   src/mcp/transport.cpp
   src/mcp/client.cpp
   src/mcp/mcp_tool.cpp
+  src/lsp/transport.cpp
+  src/lsp/client.cpp
+  src/lsp/manager.cpp
+  src/tools/lsp_tool.cpp
   src/agent/loop.cpp
   src/agent/context.cpp
   src/agent/compact.cpp
