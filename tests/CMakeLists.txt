@@ -32,6 +32,7 @@ add_executable(lubancode_tests
   test_divider.cpp
   test_transcript.cpp
   test_diff.cpp
+  test_session_store.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_core doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)
