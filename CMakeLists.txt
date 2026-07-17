@@ -16,6 +16,14 @@ endif()
 # ---------------------------------------------------------------------------
 if(MSVC)
   add_compile_options(/utf-8 /W4 /permissive-)
+
+  # 全静态链接,exe 自己就能跑,不用到处放 DLL、操心 PATH(见下方
+  # BUILD_SHARED_LIBS OFF)。cpr 在 BUILD_SHARED_LIBS OFF 时,会在它自己的
+  # CMakeLists.txt 里把运行时库也改成静态的(MultiThreaded[Debug]),这里
+  # 顶层项目得跟着定成一样的,不然 lubancode/lubancode_core 用的是默认的
+  # 动态运行时(MultiThreaded[Debug]DLL),跟 cpr/curl 的静态运行时对不上,
+  # 链接时会报 LNK2038(RuntimeLibrary 不匹配)。
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 else()
   add_compile_options(-Wall -Wextra)
 endif()
@@ -108,8 +116,36 @@ else()
   FetchContent_MakeAvailable(cpr nlohmann_json)
 endif()
 
+# ---------------------------------------------------------------------------
+# 核心库:api / config 这些不碰命令行交互的代码,单独编成静态库,
+# 好让可执行文件和测试程序都能链接同一份实现,不用测试再编一遍。
+# ---------------------------------------------------------------------------
+add_library(lubancode_core STATIC
+  src/api/sse_framing.cpp
+  src/api/anthropic/client.cpp
+  src/api/anthropic/events.cpp
+  src/config/config.cpp
+)
+target_include_directories(lubancode_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(lubancode_core PUBLIC cpr::cpr nlohmann_json::nlohmann_json)
+target_compile_features(lubancode_core PUBLIC cxx_std_23)
+
 add_executable(lubancode src/main.cpp)
-target_link_libraries(lubancode PRIVATE cpr::cpr nlohmann_json::nlohmann_json)
+target_link_libraries(lubancode PRIVATE lubancode_core)
 target_compile_features(lubancode PRIVATE cxx_std_23)
 
 install(TARGETS lubancode RUNTIME DESTINATION bin)
+
+# ---------------------------------------------------------------------------
+# 测试:doctest 单头文件,同样走 FetchContent,走 codeload.github.com 镜像
+# (原因同上:github.com 主站连不通,codeload.github.com 的归档包下载是通的)。
+# ---------------------------------------------------------------------------
+include(FetchContent)
+FetchContent_Declare(
+  doctest
+  URL https://codeload.github.com/doctest/doctest/tar.gz/refs/tags/v2.4.12
+)
+FetchContent_MakeAvailable(doctest)
+
+enable_testing()
+add_subdirectory(tests)
