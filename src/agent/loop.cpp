@@ -48,13 +48,14 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
 }  // namespace
 
 AgentLoop::AgentLoop(api::Backend& backend, tools::ToolRegistry& registry, std::string model,
-                      std::string system_prompt, int max_tokens, int max_turns)
+                      std::string system_prompt, int max_tokens, int max_turns, std::size_t max_context_chars)
     : backend_(backend),
       registry_(registry),
       model_(std::move(model)),
       system_prompt_(std::move(system_prompt)),
       max_tokens_(max_tokens),
-      max_turns_(max_turns) {}
+      max_turns_(max_turns),
+      max_context_chars_(max_context_chars) {}
 
 std::vector<api::ToolDefinition> AgentLoop::BuildToolDefinitions() const {
     std::vector<api::ToolDefinition> defs;
@@ -77,7 +78,7 @@ std::expected<void, std::string> AgentLoop::Run(const std::string& user_input, c
         api::Request request;
         request.model = model_;
         request.system = system_prompt_;
-        request.messages = history_;
+        request.messages = TrimHistory(history_, max_context_chars_);
         request.max_tokens = max_tokens_;
         request.tools = tool_defs;
 

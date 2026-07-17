@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <set>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -17,9 +19,12 @@
 #include "api/backend.hpp"
 #include "api/responses/client.hpp"
 #include "config/config.hpp"
+#include "tools/edit_file.hpp"
 #include "tools/read_file.hpp"
 #include "tools/registry.hpp"
 #include "tools/run_command.hpp"
+#include "tools/search.hpp"
+#include "tools/write_file.hpp"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -74,12 +79,66 @@ lubancode::tools::ToolRegistry BuildToolRegistry() {
     lubancode::tools::ToolRegistry registry;
     registry.Register(std::make_unique<lubancode::tools::ReadFileTool>());
     registry.Register(std::make_unique<lubancode::tools::RunCommandTool>());
+    registry.Register(std::make_unique<lubancode::tools::WriteFileTool>());
+    registry.Register(std::make_unique<lubancode::tools::EditFileTool>());
+    registry.Register(std::make_unique<lubancode::tools::SearchTool>());
     return registry;
 }
 
+// 打印一段文本的前几行,超过就注明省略了多少行。给确认前的改动摘要用。
+void PrintFirstLines(const std::string& text, int max_lines) {
+    std::vector<std::string> lines;
+    std::istringstream iss(text);
+    std::string line;
+    while (std::getline(iss, line)) {
+        lines.push_back(line);
+    }
+    if (lines.empty() && !text.empty()) {
+        lines.push_back(text);  // 没有换行符的单行内容
+    }
+    const int total = static_cast<int>(lines.size());
+    for (int i = 0; i < total && i < max_lines; ++i) {
+        std::cout << "      " << lines[static_cast<std::size_t>(i)] << "\n";
+    }
+    if (total > max_lines) {
+        std::cout << "      ...(共 " << total << " 行,已省略其余)\n";
+    }
+}
+
+// 确认前把工具的入参打印清楚,好让人一眼看明白将要发生什么:
+// write_file/edit_file 显示路径和内容/改动的前几行摘要,run_command 显示
+// 完整命令,别的按通用 JSON 打印兜底。
+void PrintConfirmDetails(const std::string& name, const nlohmann::json& input) {
+    if (name == "write_file") {
+        const std::string path = input.value("path", std::string());
+        const std::string content = input.value("content", std::string());
+        std::cout << "    路径: " << path << "\n";
+        std::cout << "    内容(" << content.size() << " 字节),前几行:\n";
+        PrintFirstLines(content, 5);
+    } else if (name == "edit_file") {
+        const std::string path = input.value("path", std::string());
+        const std::string old_s = input.value("old_string", std::string());
+        const std::string new_s = input.value("new_string", std::string());
+        const bool replace_all = input.value("replace_all", false);
+        std::cout << "    路径: " << path << (replace_all ? "  (replace_all=true,全部替换)" : "") << "\n";
+        std::cout << "    - 旧文本:\n";
+        PrintFirstLines(old_s, 3);
+        std::cout << "    + 新文本:\n";
+        PrintFirstLines(new_s, 3);
+    } else if (name == "run_command") {
+        const std::string command = input.value("command", std::string());
+        std::cout << "    命令: " << command << "\n";
+    } else {
+        std::cout << "    参数: " << input.dump() << "\n";
+    }
+    std::cout.flush();
+}
+
 // 交互循环、单发模式共用的回调:文本打字机打印,工具调用打一行提示,
-// needs_confirm 的工具按 auto_confirm 决定是自动放行还是问用户一句。
-lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm) {
+// needs_confirm 的工具按 auto_confirm 决定是自动放行还是问用户一句
+// (三选:y 本次允许 / a 本会话总是允许该工具 / N 拒绝)。always_allowed_tools
+// 由调用方持有,跨多轮 Run() 保留,选过 a 的工具本会话内不会再问。
+lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::string>& always_allowed_tools) {
     lubancode::agent::Callbacks callbacks;
 
     callbacks.on_text_delta = [](const std::string& text) {
@@ -92,15 +151,24 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm) {
         std::cout.flush();
     };
 
-    callbacks.on_tool_confirm = [auto_confirm](const std::string& name, const nlohmann::json&) -> bool {
+    callbacks.on_tool_confirm = [auto_confirm, &always_allowed_tools](const std::string& name,
+                                                                       const nlohmann::json& input) -> bool {
         if (auto_confirm) {
             return true;
         }
-        std::cout << "执行 " << name << "? [y/N] ";
+        if (always_allowed_tools.count(name) != 0) {
+            return true;
+        }
+        PrintConfirmDetails(name, input);
+        std::cout << "[y] 本次允许  [a] 本会话总是允许(该工具)  [N] 拒绝: ";
         std::cout.flush();
         std::string answer;
         if (!std::getline(std::cin, answer)) {
             return false;
+        }
+        if (answer == "a" || answer == "A") {
+            always_allowed_tools.insert(name);
+            return true;
         }
         return answer == "y" || answer == "Y";
     };
@@ -116,9 +184,11 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm) {
 }
 
 // 发一轮用户输入,走 agent loop(可能会有若干次工具调用来回),流式打字机
-// 打印回复。返回 0 表示成功,非 0 表示出错。
-int RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bool auto_confirm) {
-    const lubancode::agent::Callbacks callbacks = BuildCallbacks(auto_confirm);
+// 打印回复。返回 0 表示成功,非 0 表示出错。always_allowed_tools 由调用方
+// 持有,记录本会话内选过"总是允许"的工具。
+int RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bool auto_confirm,
+            std::set<std::string>& always_allowed_tools) {
+    const lubancode::agent::Callbacks callbacks = BuildCallbacks(auto_confirm, always_allowed_tools);
 
     const auto result = loop.Run(user_input, callbacks);
     std::cout << "\n";
@@ -131,13 +201,15 @@ int RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bo
 }
 
 // 没带参数时的交互循环:读一行、问一句,空行或 exit 退出。
-// AgentLoop 在循环外面建一次,历史跨轮保留。
+// AgentLoop 在循环外面建一次,历史跨轮保留;always_allowed_tools 同样在
+// 循环外面建一次,"本会话总是允许"才能真的跨多轮用户输入生效。
 void InteractiveLoop(const lubancode::config::Config& config, bool auto_confirm) {
     std::cout << "lubancode " << kVersion << " - 输入问题回车发送,空行或 exit 退出\n";
 
     std::unique_ptr<lubancode::api::Backend> backend = BuildBackend(config);
     lubancode::tools::ToolRegistry registry = BuildToolRegistry();
     lubancode::agent::AgentLoop loop(*backend, registry, config.model, lubancode::agent::BuildSystemPrompt(CurrentDirUtf8()));
+    std::set<std::string> always_allowed_tools;
 
     std::string line;
     while (true) {
@@ -148,7 +220,7 @@ void InteractiveLoop(const lubancode::config::Config& config, bool auto_confirm)
         if (line.empty() || line == "exit") {
             break;
         }
-        RunTurn(loop, line, auto_confirm);
+        RunTurn(loop, line, auto_confirm, always_allowed_tools);
     }
 }
 
@@ -157,8 +229,9 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     std::unique_ptr<lubancode::api::Backend> backend = BuildBackend(config);
     lubancode::tools::ToolRegistry registry = BuildToolRegistry();
     lubancode::agent::AgentLoop loop(*backend, registry, config.model, lubancode::agent::BuildSystemPrompt(CurrentDirUtf8()));
+    std::set<std::string> always_allowed_tools;
 
-    return RunTurn(loop, question, auto_confirm);
+    return RunTurn(loop, question, auto_confirm, always_allowed_tools);
 }
 
 // 真正的入口逻辑,跟平台无关:args[0] 是程序名,args[1..] 是实参。

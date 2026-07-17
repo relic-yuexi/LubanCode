@@ -7,6 +7,9 @@ add_executable(lubancode_tests
   test_loop.cpp
   test_responses_request.cpp
   test_responses_events.cpp
+  test_write_edit.cpp
+  test_search.cpp
+  test_context.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_core doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)

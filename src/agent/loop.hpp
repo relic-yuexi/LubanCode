@@ -12,6 +12,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agent/context.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "tools/registry.hpp"
@@ -39,8 +40,11 @@ class AgentLoop {
 public:
     // max_turns:一次 Run() 里最多跟模型来回几趟(每趟一次工具调用算一趟),
     // 超过这个数还没到 end_turn 就报错退出,防止死循环。默认 25。
+    // max_context_chars:发给模型前 history 裁剪的阈值(字符数),默认读
+    // 环境变量 LUBANCODE_MAX_CONTEXT(没设置就是 kDefaultMaxContextChars)。
     AgentLoop(api::Backend& backend, tools::ToolRegistry& registry, std::string model,
-              std::string system_prompt, int max_tokens = 4096, int max_turns = 25);
+              std::string system_prompt, int max_tokens = 4096, int max_turns = 25,
+              std::size_t max_context_chars = MaxContextCharsFromEnv());
 
     // 发一轮用户输入。内部可能会跑好几个来回(工具调用),直到模型给出
     // end_turn(或者别的非 tool_use 的 stop_reason)才返回。历史跨多次
@@ -56,6 +60,7 @@ private:
     std::string system_prompt_;
     int max_tokens_;
     int max_turns_;
+    std::size_t max_context_chars_;
     std::vector<api::Message> history_;
 
     std::vector<api::ToolDefinition> BuildToolDefinitions() const;

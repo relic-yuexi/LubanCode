@@ -132,7 +132,11 @@ add_library(lubancode_core STATIC
   src/tools/registry.cpp
   src/tools/read_file.cpp
   src/tools/run_command.cpp
+  src/tools/write_file.cpp
+  src/tools/edit_file.cpp
+  src/tools/search.cpp
   src/agent/loop.cpp
+  src/agent/context.cpp
 )
 target_include_directories(lubancode_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(lubancode_core PUBLIC cpr::cpr nlohmann_json::nlohmann_json)
