@@ -22,3 +22,6 @@ compile_commands.json
 
 # vcpkg 本地安装(若在项目内安装)
 vcpkg_installed/
+
+# Claude 会话与 worktree
+.claude/

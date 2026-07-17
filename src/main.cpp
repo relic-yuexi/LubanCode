@@ -37,6 +37,7 @@
 #include "api/responses/client.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
+#include "cli/diff.hpp"
 #include "cli/divider.hpp"
 #include "cli/setup_wizard.hpp"
 #include "cli/slash_commands.hpp"
@@ -69,7 +70,7 @@
 
 namespace {
 
-constexpr std::string_view kVersion = "0.12.0";
+constexpr std::string_view kVersion = "0.13.0";
 
 void PrintVersion() {
     std::cout << "lubancode " << kVersion << "\n";
@@ -775,6 +776,119 @@ std::optional<int> FileLineCount(const std::string& path_utf8) {
     return lubancode::cli::CountLines(content);
 }
 
+// UI-C(0.13.0):读文件全文(二进制读入,当 UTF-8 字节串用),给 diff
+// 预览当"旧内容"。读不到(不存在/是目录/打不开)给 nullopt——write_file
+// 按新文件处理(全 + 新增),edit_file 走回退对比,绝不因此崩。
+std::optional<std::string> ReadFileBytes(const std::string& path_utf8) {
+    const std::filesystem::path path(
+        std::u8string(reinterpret_cast<const char8_t*>(path_utf8.data()), path_utf8.size()));
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec) || std::filesystem::is_directory(path, ec)) {
+        return std::nullopt;
+    }
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+        return std::nullopt;
+    }
+    return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+}
+
+// UI-C:预览截断双限——超 400 行或 32KiB 就截,截了标注省略行数,完整版
+// 存进 TranscriptItem.full_output(那边另有 64KB 的库容上限)。
+constexpr int kDiffPreviewMaxLines = 400;
+constexpr std::size_t kDiffPreviewMaxBytes = 32 * 1024;
+
+// UI-C:终态条目里留存的 diff 行数上限——git 那种效果,diff 直接挂在
+// ⎿ 摘要底下不擦,但条目不能无限铺屏,超了标注省略(Ctrl+E 看全)。
+constexpr int kDiffFinalMaxLines = 24;
+constexpr std::size_t kDiffFinalMaxBytes = 8 * 1024;
+
+// UI-C:一份拼装好的 diff 预览。colored 是直接可打印的整块(路径行 +
+// diff 标题行 + diff 正文,每行缩进四空格、带主题色、按宽/行/字节截断);
+// full 是 plain 全量(不截行、不截字节、不带色),终态并进 full_output
+// 给 Ctrl+E(下棒实装)看全;final_lines 是终态条目摘要里留存的 diff
+// (行数收紧到 kDiffFinalMaxLines,预先按宽截好——夹 ANSI 的行渲染层
+// 不再截宽,物理折行会毁掉原地改写的行数记账)。
+struct FileDiffPreview {
+    std::string colored;
+    std::string full;
+    std::vector<std::string> final_lines;
+    int line_count = 0;  // colored 的行数,ReserveRows 记账用
+};
+
+// 按 edit_file/write_file 的入参拼 diff 预览;别的工具给 nullopt。读旧
+// 文件在这一层做(tools/ 层一字不动):edit_file 拿真文件内容做整文替换
+// 后对比(变更处自带 ±3 行真实上下文和行号),找不到 old_string 回退成
+// 只比 old/new 两段;write_file 旧文件存在做行级对比,不存在全部算新增。
+std::optional<FileDiffPreview> BuildFileDiffPreview(const std::string& name, const nlohmann::json& input,
+                                                     const lubancode::cli::Theme& theme) {
+    namespace cli = lubancode::cli;
+    if (name != "write_file" && name != "edit_file") {
+        return std::nullopt;
+    }
+    const std::string path = input.value("path", std::string());
+    const std::optional<std::string> old_content = ReadFileBytes(path);
+
+    std::vector<cli::DiffLine> diff;
+    std::string header;
+    if (name == "edit_file") {
+        const bool replace_all = input.value("replace_all", false);
+        auto edit = cli::BuildEditDiff(old_content.value_or(std::string()), input.value("old_string", std::string()),
+                                        input.value("new_string", std::string()), replace_all);
+        diff = std::move(edit.lines);
+        if (!edit.located) {
+            header = "diff(old_string 在文件里没找到,只对比新旧两段):";
+        } else if (replace_all) {
+            header = "diff(replace_all,替换 " + std::to_string(edit.replaced_count) + " 处):";
+        } else {
+            header = "diff:";
+        }
+    } else {
+        diff = cli::BuildWriteDiff(old_content, input.value("content", std::string()));
+        header = old_content.has_value() ? "diff(覆盖已有文件):" : "diff(新文件,全部新增):";
+    }
+
+    const int width = cli::DetectConsoleWidth().value_or(80);
+    // 每行缩四空格,diff 行本身的宽度上限就得让出这四列(再留一列,免得
+    // 顶格写到最后一格触发控制台自动换行、毁掉行数记账)。
+    const std::string body = cli::FormatDiff(diff, theme, width - 5, kDiffPreviewMaxLines, kDiffPreviewMaxBytes);
+
+    FileDiffPreview out;
+    out.full = header + "\n" +
+               cli::FormatDiff(diff, cli::BuiltinTheme("plain"), /*width=*/0, /*max_lines=*/0, /*max_bytes=*/0);
+
+    // 终态条目里留存的那份:行数收紧,宽度给 ⎿ 前缀让出十列(子代理条目
+    // 再缩四格也够用)。
+    {
+        const std::string final_body =
+            cli::FormatDiff(diff, theme, width - 10, kDiffFinalMaxLines, kDiffFinalMaxBytes);
+        std::size_t p = 0;
+        while (p < final_body.size()) {
+            std::size_t nl = final_body.find('\n', p);
+            if (nl == std::string::npos) {
+                nl = final_body.size();
+            }
+            out.final_lines.push_back(final_body.substr(p, nl - p));
+            p = nl + 1;
+        }
+    }
+
+    const std::string block = "路径: " + path + "\n" + header + "\n" + body;
+    std::string indented;
+    std::size_t pos = 0;
+    while (pos < block.size()) {
+        std::size_t nl = block.find('\n', pos);
+        if (nl == std::string::npos) {
+            nl = block.size();
+        }
+        indented += "    " + block.substr(pos, nl - pos) + "\n";
+        pos = nl + 1;
+    }
+    out.colored = std::move(indented);
+    out.line_count = cli::CountLines(out.colored);
+    return out;
+}
+
 // UI-B(0.12.0):一轮 Run() 里工具调用的展示总管。回调层(BuildCallbacks)
 // 只管把事件转进来,这里统一负责:
 //   - 建/更新 TranscriptItem(会话级 transcript vector 持有,UI-C/D 的
@@ -813,6 +927,17 @@ struct ToolDisplay {
     std::optional<int> sub_write_old_lines;
     int agent_rounds = 0;
     int agent_sub_tools = 0;
+    // UI-C:确认前 diff 预览的记账。*_diff_full 存 plain 全量,终态并进
+    // full_output;*_diff_final 是终态条目摘要里留存的 diff 行(git 那种
+    // 效果,成功后 diff 挂在 ⎿ 块底下不消失);*_preview_below 标记"自动
+    // 放行路子里预览还垫在条目下面",工具执行完 TrimBelow 擦掉(确认路子
+    // 的预览由 OnConfirmAnswered 的 TrimBelow 顺手带走,不用这个标记)。
+    std::string main_diff_full;
+    std::string sub_diff_full;
+    std::vector<std::string> main_diff_final;
+    std::vector<std::string> sub_diff_final;
+    bool main_preview_below = false;
+    bool sub_preview_below = false;
 
     void OnToolStart(const std::string& name, const nlohmann::json& input) {
         if (!is_console) {
@@ -823,6 +948,9 @@ struct ToolDisplay {
         main_input = input;
         main_write_old_lines =
             name == "write_file" ? FileLineCount(input.value("path", std::string())) : std::nullopt;
+        main_diff_full.clear();
+        main_diff_final.clear();
+        main_preview_below = false;
         if (name == "agent") {
             agent_rounds = 0;
             agent_sub_tools = 0;
@@ -838,7 +966,15 @@ struct ToolDisplay {
             return;
         }
         auto& item = transcript[static_cast<std::size_t>(active_main)];
-        FinalizeItem(item, name, main_input, result, main_write_old_lines, agent_rounds, agent_sub_tools);
+        // UI-C:自动放行时垫在条目下面的 diff 预览,执行完了就擦——终态只
+        // 留 +N -M 简短摘要,不铺屏(确认路子的预览已被 OnConfirmAnswered
+        // 的 TrimBelow 带走,标记不会是 true)。
+        if (main_preview_below && is_console) {
+            painter.TrimBelow(item.id);
+        }
+        main_preview_below = false;
+        FinalizeItem(item, name, main_input, result, main_write_old_lines, agent_rounds, agent_sub_tools,
+                      main_diff_full, main_diff_final);
         if (is_console) {
             painter.Repaint(item);
         } else {
@@ -865,6 +1001,9 @@ struct ToolDisplay {
         sub_input = input;
         sub_write_old_lines =
             name == "write_file" ? FileLineCount(input.value("path", std::string())) : std::nullopt;
+        sub_diff_full.clear();
+        sub_diff_final.clear();
+        sub_preview_below = false;
         active_sub = NewItem(lubancode::cli::TranscriptKind::SubTool, name, input);
         if (is_console) {
             painter.PaintNew(transcript[static_cast<std::size_t>(active_sub)]);
@@ -881,7 +1020,11 @@ struct ToolDisplay {
             return;
         }
         auto& item = transcript[static_cast<std::size_t>(active_sub)];
-        FinalizeItem(item, name, sub_input, result, sub_write_old_lines, 0, 0);
+        if (sub_preview_below && is_console) {
+            painter.TrimBelow(item.id);  // 理由同 OnToolDone
+        }
+        sub_preview_below = false;
+        FinalizeItem(item, name, sub_input, result, sub_write_old_lines, 0, 0, sub_diff_full, sub_diff_final);
         if (is_console) {
             painter.Repaint(item);
         }
@@ -902,6 +1045,37 @@ struct ToolDisplay {
             painter.Repaint(item);
         }
         active_sub = -1;
+    }
+
+    // UI-C:edit_file/write_file 确认前的统一 diff 预览,画在当前条目
+    // (子工具优先)下面。trim_on_done=true 是自动放行那条路(auto/yolo/
+    // --yes/选过 a)——打完不等确认,工具执行完 OnToolDone/OnSubToolResult
+    // 里 TrimBelow 擦掉;false 是确认路子,预览随确认块一起被
+    // OnConfirmAnswered 的 TrimBelow 带走。管道模式(is_console 为假)
+    // 整个不打,保持稳定纯文本输出。
+    void ShowDiffPreview(const std::string& name, const nlohmann::json& input, bool trim_on_done) {
+        if (!is_console) {
+            return;
+        }
+        const auto preview = BuildFileDiffPreview(name, input, theme);
+        if (!preview.has_value()) {
+            return;
+        }
+        const bool sub = active_sub >= 0;
+        (sub ? sub_diff_full : main_diff_full) = preview->full;
+        (sub ? sub_diff_final : main_diff_final) = preview->final_lines;
+        // 预览可能有几百行,先在缓冲区底部把行数留够(外加确认块的余量),
+        // 免得打印期间自然滚屏把锚点推歪。ReserveRows 自己拿 stdout 锁,
+        // 不能包在下面那把锁里(std::mutex 不可重入)。
+        painter.ReserveRows(preview->line_count + 24);
+        {
+            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+            std::cout << preview->colored;
+            std::cout.flush();
+        }
+        if (trim_on_done) {
+            (sub ? sub_preview_below : main_preview_below) = true;
+        }
     }
 
     // 确认真的要问出口了(自动放行的几条路都没走到)——条目改成"待确认"态,
@@ -967,10 +1141,15 @@ private:
     // (确认回调里已定格)不再覆盖,ESC 打断标成 Interrupted。
     void FinalizeItem(lubancode::cli::TranscriptItem& item, const std::string& name, const nlohmann::json& input,
                        const lubancode::tools::Tool::Result& result, std::optional<int> write_old_lines,
-                       int rounds, int sub_tools) {
+                       int rounds, int sub_tools, const std::string& diff_full = std::string(),
+                       const std::vector<std::string>& diff_final = {}) {
         namespace cli = lubancode::cli;
         item.end_time = std::chrono::steady_clock::now();
-        item.full_output = cli::TruncateUtf8Bytes(result.content, cli::kFullOutputCapBytes);
+        // UI-C:有 diff 预览的(edit_file/write_file),完整 plain diff 跟着
+        // 工具结果一起进 full_output——屏上的预览是要被擦掉的,Ctrl+E
+        // (下棒实装)从这儿看全。
+        item.full_output = cli::TruncateUtf8Bytes(
+            diff_full.empty() ? result.content : result.content + "\n\n" + diff_full, cli::kFullOutputCapBytes);
         const double seconds = std::chrono::duration<double>(item.end_time - item.start_time).count();
 
         if (item.status == cli::TranscriptStatus::Cancelled) {
@@ -1000,10 +1179,16 @@ private:
         } else if (name == "write_file") {
             item.summary_lines = {
                 cli::WriteDiffSummary(cli::CountLines(input.value("content", std::string())), write_old_lines)};
+            // UI-C:终态把 diff 留在条目里(git 那种效果)——首行 +N -M,
+            // 底下接 diff 正文(建预览时已按宽截好、行数收紧,超长有
+            // Ctrl+E 标注)。管道模式没建预览,diff_final 是空的,摘要
+            // 保持一行 +N -M 不变。
+            item.summary_lines.insert(item.summary_lines.end(), diff_final.begin(), diff_final.end());
         } else if (name == "edit_file") {
             item.summary_lines = {
                 cli::WriteDiffSummary(cli::CountLines(input.value("new_string", std::string())),
                                        cli::CountLines(input.value("old_string", std::string())))};
+            item.summary_lines.insert(item.summary_lines.end(), diff_final.begin(), diff_final.end());
         } else if (name == "search") {
             item.summary_lines = {cli::SearchDoneSummary(result.content)};
         } else if (name == "agent") {
@@ -1123,20 +1308,30 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         //   auto  —— write_file/edit_file 自动放行,run_command 之类仍然要问
         //   confirm(默认)—— 老规矩,needs_confirm 的工具逐个问
         const lubancode::cli::ConfirmMode mode = lubancode::cli::CurrentConfirmMode();
-        if (auto_confirm || mode == lubancode::cli::ConfirmMode::Yolo) {
-            return true;
-        }
-        if (mode == lubancode::cli::ConfirmMode::Auto && (name == "write_file" || name == "edit_file")) {
-            return true;
-        }
-        if (always_allowed_tools.count(name) != 0) {
+        const bool file_tool = name == "write_file" || name == "edit_file";
+        const bool auto_pass = auto_confirm || mode == lubancode::cli::ConfirmMode::Yolo ||
+                               (mode == lubancode::cli::ConfirmMode::Auto && file_tool) ||
+                               always_allowed_tools.count(name) != 0;
+        if (auto_pass) {
+            // UI-C:自动放行(--yes/yolo/auto 档的文件工具/选过 a)也把统一
+            // diff 预览打出来——用户看得见将要发生什么,但不停下等确认,
+            // 打完即执行;执行完预览被 TrimBelow 擦掉,条目只留 +N -M。
+            // 管道模式 ShowDiffPreview 内部直接返回,输出照旧是稳定纯文本。
+            if (file_tool) {
+                display.ShowDiffPreview(name, input, /*trim_on_done=*/true);
+            }
             return true;
         }
         // UI-B:真的要问了——条目先改成"待确认"态(黄灯 + 待确认),确认块
         // (参数详情 + [y/a/N] 提示)跟在条目下面;答完确认块整个擦掉,
         // 拒绝则条目原地改灰 Cancelled,允许则改回 Running 等终态。
+        // UI-C:edit_file/write_file 在真控制台下,参数详情换成统一 diff
+        // 预览(路径 + 行级 diff,- 红 + 绿),answered 后随确认块一起擦;
+        // 管道模式沿用老的参数摘要,不打 diff。
         const int pending_idx = display.OnConfirmRequest();
-        {
+        if (file_tool && display.is_console) {
+            display.ShowDiffPreview(name, input, /*trim_on_done=*/false);
+        } else {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
             PrintConfirmDetails(name, input);
         }
