@@ -1,0 +1,368 @@
+// 0.17.0 集成验证用的"刮屏驱动器":不是单测,不进 ctest。自己开一个全新
+// 控制台(AllocConsole),把 lubancode.exe 当子进程挂进同一个控制台,用
+// WriteConsoleInputW 假装敲键盘、用 ReadConsoleOutputW 逐格刮屏幕缓冲区,
+// 验证输入框(上横线/提示行/下横线/状态行)、切档零新增行、多行长高、
+// 提交收尾、焦点键位这些"只有真控制台才看得见"的行为。结论逐行写进
+// 报告文件(PASS/FAIL/SKIP/INFO),退出码 0 = 全过。
+//
+// 用法: screen_driver <lubancode.exe 路径> <子进程工作目录> <报告文件路径>
+// 环境变量(LUBANCODE_BASE_URL/API_KEY/MODEL、USERPROFILE)由调用方设好,
+// 子进程原样继承。
+
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+
+#include <fstream>
+#include <string>
+#include <vector>
+
+namespace {
+
+HANDLE g_conin = INVALID_HANDLE_VALUE;
+HANDLE g_conout = INVALID_HANDLE_VALUE;
+std::ofstream g_report;
+int g_failures = 0;
+
+void Log(const std::string& line) {
+    g_report << line << "\n";
+    g_report.flush();
+}
+
+void Check(bool ok, const std::string& what) {
+    if (ok) {
+        Log("PASS: " + what);
+    } else {
+        Log("FAIL: " + what);
+        ++g_failures;
+    }
+}
+
+std::string WideToUtf8(const std::wstring& w) {
+    if (w.empty()) {
+        return {};
+    }
+    const int len = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+    std::string out(static_cast<std::size_t>(len), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), out.data(), len, nullptr, nullptr);
+    return out;
+}
+
+std::wstring Utf8ToWide(const std::string& s) {
+    if (s.empty()) {
+        return {};
+    }
+    const int len = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring out(static_cast<std::size_t>(len), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), out.data(), len);
+    return out;
+}
+
+int BufferWidth() {
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    GetConsoleScreenBufferInfo(g_conout, &info);
+    return info.dwSize.X;
+}
+
+// 刮一行:CHAR_INFO 逐格读,宽字符的 TRAILING 半格跳过,行尾空白剪掉。
+// attrs 非空时顺带带出每一格的属性(按可见字符的顺序,不含跳过的半格)。
+std::string ReadRow(int row, std::vector<WORD>* attrs = nullptr) {
+    const int width = BufferWidth();
+    std::vector<CHAR_INFO> cells(static_cast<std::size_t>(width));
+    SMALL_RECT region{0, static_cast<SHORT>(row), static_cast<SHORT>(width - 1), static_cast<SHORT>(row)};
+    if (!ReadConsoleOutputW(g_conout, cells.data(), COORD{static_cast<SHORT>(width), 1}, COORD{0, 0}, &region)) {
+        return {};
+    }
+    std::wstring text;
+    if (attrs != nullptr) {
+        attrs->clear();
+    }
+    for (const CHAR_INFO& cell : cells) {
+        if (cell.Attributes & COMMON_LVB_TRAILING_BYTE) {
+            continue;
+        }
+        text.push_back(cell.Char.UnicodeChar);
+        if (attrs != nullptr) {
+            attrs->push_back(cell.Attributes);
+        }
+    }
+    while (!text.empty() && (text.back() == L' ' || text.back() == L'\0')) {
+        text.pop_back();
+        if (attrs != nullptr && !attrs->empty()) {
+            attrs->pop_back();
+        }
+    }
+    return WideToUtf8(text);
+}
+
+// 从底往上找最后一个含 needle 的行号,找不到给 -1。
+int FindLastRow(const std::string& needle, int max_rows = 400) {
+    for (int row = max_rows - 1; row >= 0; --row) {
+        if (ReadRow(row).find(needle) != std::string::npos) {
+            return row;
+        }
+    }
+    return -1;
+}
+
+bool WaitForText(const std::string& needle, int timeout_ms, int* found_row = nullptr) {
+    const DWORD deadline = GetTickCount() + static_cast<DWORD>(timeout_ms);
+    while (GetTickCount() < deadline) {
+        const int row = FindLastRow(needle);
+        if (row >= 0) {
+            if (found_row != nullptr) {
+                *found_row = row;
+            }
+            return true;
+        }
+        Sleep(100);
+    }
+    return false;
+}
+
+// 等"某一行的内容变成含 needle"(盯着固定行号,不全屏扫)。
+bool WaitForRowText(int row, const std::string& needle, int timeout_ms) {
+    const DWORD deadline = GetTickCount() + static_cast<DWORD>(timeout_ms);
+    while (GetTickCount() < deadline) {
+        if (ReadRow(row).find(needle) != std::string::npos) {
+            return true;
+        }
+        Sleep(50);
+    }
+    return false;
+}
+
+void SendKey(WORD vk, wchar_t ch, DWORD control_state) {
+    INPUT_RECORD records[2]{};
+    for (int i = 0; i < 2; ++i) {
+        records[i].EventType = KEY_EVENT;
+        records[i].Event.KeyEvent.bKeyDown = i == 0 ? TRUE : FALSE;
+        records[i].Event.KeyEvent.wRepeatCount = 1;
+        records[i].Event.KeyEvent.wVirtualKeyCode = vk;
+        records[i].Event.KeyEvent.uChar.UnicodeChar = ch;
+        records[i].Event.KeyEvent.dwControlKeyState = control_state;
+    }
+    DWORD written = 0;
+    WriteConsoleInputW(g_conin, records, 2, &written);
+}
+
+void SendText(const std::string& utf8) {
+    for (wchar_t wc : Utf8ToWide(utf8)) {
+        SendKey(0, wc, 0);
+        Sleep(15);  // 逐键小睡,别把编辑器的重画节奏挤爆
+    }
+}
+
+// 一行里是不是一根框横线(至少 40 个 '─' 或 '-' 连排)。
+bool IsRuleRow(int row) {
+    const std::string text = ReadRow(row);
+    int run = 0;
+    for (std::size_t i = 0; i < text.size();) {
+        const bool box_char = text.compare(i, 3, "\xe2\x94\x80") == 0;
+        if (box_char || text[i] == '-') {
+            ++run;
+            if (run >= 40) {
+                return true;
+            }
+            i += box_char ? 3 : 1;
+        } else {
+            run = 0;
+            ++i;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+int wmain(int argc, wchar_t** argv) {
+    if (argc < 4) {
+        return 2;
+    }
+    const std::wstring exe_path = argv[1];
+    const std::wstring workdir = argv[2];
+    g_report.open(argv[3], std::ios::binary | std::ios::trunc);
+    if (!g_report.is_open()) {
+        return 2;
+    }
+
+    // 全新控制台:120 列宽(框横线该取 min(119, 100) = 100 列),缓冲 400 行。
+    FreeConsole();
+    if (!AllocConsole()) {
+        Log("FAIL: AllocConsole");
+        return 1;
+    }
+    // 句柄开成可继承的:CreateProcess 得用 STARTF_USESTDHANDLES 把这两个
+    // 控制台句柄显式塞给子进程当 stdin/stdout/stderr——驱动器自己是被
+    // bash 用管道句柄起的,不显式指定的话 CreateProcess 会把父进程的管道
+    // std 句柄复制给子进程(Vista 起的 std 句柄复制怪癖),子进程一探测
+    // stdin 是管道,整条逐键/输入框路径就走不进去(实测踩过)。
+    SECURITY_ATTRIBUTES inheritable{};
+    inheritable.nLength = sizeof(inheritable);
+    inheritable.bInheritHandle = TRUE;
+    g_conin = CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &inheritable,
+                           OPEN_EXISTING, 0, nullptr);
+    g_conout = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &inheritable,
+                            OPEN_EXISTING, 0, nullptr);
+    if (g_conin == INVALID_HANDLE_VALUE || g_conout == INVALID_HANDLE_VALUE) {
+        Log("FAIL: open CONIN$/CONOUT$");
+        return 1;
+    }
+    SMALL_RECT small{0, 0, 1, 1};
+    SetConsoleWindowInfo(g_conout, TRUE, &small);
+    SetConsoleScreenBufferSize(g_conout, COORD{120, 400});
+    SMALL_RECT window{0, 0, 119, 40};
+    SetConsoleWindowInfo(g_conout, TRUE, &window);
+    FlushConsoleInputBuffer(g_conin);
+    Log("INFO: console buffer " + std::to_string(BufferWidth()) + " cols");
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = g_conin;
+    si.hStdOutput = g_conout;
+    si.hStdError = g_conout;
+    PROCESS_INFORMATION pi{};
+    std::wstring cmdline = L"\"" + exe_path + L"\"";
+    if (!CreateProcessW(exe_path.c_str(), cmdline.data(), nullptr, nullptr, TRUE, 0, nullptr, workdir.c_str(), &si,
+                         &pi)) {
+        Log("FAIL: CreateProcess " + std::to_string(GetLastError()));
+        return 1;
+    }
+    CloseHandle(pi.hThread);
+
+    // ---- F1 开场帧:上横线 / 提示行 / 下横线 / 状态行 四件套就位 ----
+    int status_row = -1;
+    Check(WaitForText("shift+tab", 30000, &status_row), "F1 开场:状态行出现(30s 内)");
+    Sleep(300);
+    status_row = FindLastRow("shift+tab");
+    const int prompt_row = status_row - 2;  // 版式:提示行 / 下横线 / 状态行
+    {
+        const std::string status = ReadRow(status_row);
+        Check(status.find("\xe2\x8f\xb5\xe2\x8f\xb5") != std::string::npos, "F1 状态行有 ⏵⏵ 前缀");
+        Check(status.find("确认模式") != std::string::npos, "F1 状态行显示确认档");
+        Check(status.find("MiniMax-M3") != std::string::npos, "F1 状态行显示模型名");
+        Check(status.find("context ") != std::string::npos, "F1 状态行显示 context 占比");
+        Check(IsRuleRow(prompt_row - 1), "F1 上横线在提示行上一行");
+        Check(IsRuleRow(prompt_row + 1), "F1 下横线在提示行下一行");
+        // 空 composer 的提示行只剩 "> ",行尾空白被 ReadRow 剪掉,按裸 ">" 认。
+        const std::string prompt_text = ReadRow(prompt_row);
+        Check(!prompt_text.empty() && prompt_text.back() == '>', "F1 提示行有 '> '");
+        Log("INFO: F1 屏面 prompt_row=" + std::to_string(prompt_row) + " status_row=" + std::to_string(status_row));
+    }
+
+    // ---- F2 打字帧:框内容更新,状态行原地不动 ----
+    SendText("abc");
+    Check(WaitForRowText(prompt_row, "> abc", 5000), "F2 打字:提示行变成 '> abc'");
+    Check(FindLastRow("shift+tab") == status_row, "F2 打字:状态行行号不动");
+
+    // ---- F3 切档帧:Shift+Tab 三连,状态行原地变档、屏上零新增行 ----
+    SendKey(VK_TAB, 0, SHIFT_PRESSED);
+    Check(WaitForRowText(status_row, "auto", 5000), "F3 切档:状态行变 auto");
+    Check(ReadRow(prompt_row).find("[auto]") != std::string::npos, "F3 切档:提示符前缀变 [auto]");
+    Check(FindLastRow("shift+tab") == status_row, "F3 切档:auto 档零新增行");
+    SendKey(VK_TAB, 0, SHIFT_PRESSED);
+    Check(WaitForRowText(status_row, "yolo", 5000), "F3 切档:状态行变 yolo");
+    {
+        // 配色属性:yolo 段是亮红(FOREGROUND_RED 有、GREEN 无)。
+        std::vector<WORD> attrs;
+        const std::string status = ReadRow(status_row, &attrs);
+        const std::size_t pos = status.find("yolo");
+        bool red = false;
+        if (pos != std::string::npos) {
+            // pos 是 UTF-8 字节偏移,attrs 是按字符排的——数一下 yolo 前面
+            // 有几个字符。
+            std::size_t chars = 0;
+            for (std::size_t i = 0; i < pos;) {
+                const unsigned char c = static_cast<unsigned char>(status[i]);
+                i += c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : 4;
+                ++chars;
+            }
+            if (chars < attrs.size()) {
+                const WORD a = attrs[chars];
+                red = (a & FOREGROUND_RED) != 0 && (a & FOREGROUND_GREEN) == 0;
+            }
+        }
+        Check(red, "F3 切档:yolo 段是红色属性");
+    }
+    Check(FindLastRow("shift+tab") == status_row, "F3 切档:yolo 档零新增行");
+    SendKey(VK_TAB, 0, SHIFT_PRESSED);
+    Check(WaitForRowText(status_row, "确认模式", 5000), "F3 切档:转回确认档");
+
+    // ---- F4 多行帧:Shift+Enter 框长高一行 ----
+    SendKey(VK_RETURN, L'\r', SHIFT_PRESSED);
+    Sleep(400);
+    Check(IsRuleRow(prompt_row + 2), "F4 多行:下横线随框长高挪到 +2");
+    Check(FindLastRow("shift+tab") == status_row + 1, "F4 多行:状态行跟着下移一行");
+    SendText("def");
+    Check(WaitForRowText(prompt_row + 1, "def", 5000), "F4 多行:续行显示 def(两空格缩进)");
+
+    // ---- F5 键位矫正:Ctrl+C 清空,Tab(空框)进焦点态无条目退回,Shift+Tab 仍切档 ----
+    SendKey('C', 3, LEFT_CTRL_PRESSED);
+    Sleep(400);
+    Check(IsRuleRow(prompt_row + 1), "F5 清空:框缩回单行");
+    SendKey(VK_TAB, 0, 0);  // 空框 Tab:transcript 还是空的,焦点请求没人接,状态机得退回来
+    Sleep(300);
+    SendKey(VK_TAB, 0, SHIFT_PRESSED);
+    Check(WaitForRowText(status_row, "auto", 5000), "F5 键位:无条目时 Tab 后 Shift+Tab 仍切档(焦点态已退)");
+    SendKey(VK_TAB, 0, SHIFT_PRESSED);
+    SendKey(VK_TAB, 0, SHIFT_PRESSED);
+    Check(WaitForRowText(status_row, "确认模式", 5000), "F5 键位:切回确认档");
+
+    // ---- F6 提交帧:横线擦掉、提交行保留;一轮问答后统计行 + 新框 ----
+    SendText("请用 read_file 工具读取 hello.txt,然后原样告诉我文件内容。");
+    SendKey(VK_RETURN, L'\r', 0);
+    Sleep(600);
+    {
+        // 收尾后 "> 请用..." 上移到原上横线那一行,原提示行现在是别的内容。
+        const int submitted_row = FindLastRow("> 请用");
+        Check(submitted_row == prompt_row - 1, "F6 提交:横线擦掉,提交行上移一行保留");
+        Check(!IsRuleRow(prompt_row + 1), "F6 提交:下横线已擦");
+    }
+    Check(WaitForText("[tokens]", 180000), "F6 一轮问答:统计行出现(180s 内)");
+    Sleep(1500);
+    {
+        const int tokens_row = FindLastRow("[tokens]");
+        const std::string tokens_line = ReadRow(tokens_row);
+        Log("INFO: 统计行 = " + tokens_line);
+        Check(tokens_line.find("输入 ") != std::string::npos, "F6 统计行有输入 token 数(FormatTokenCount 接线)");
+        const int new_status = FindLastRow("shift+tab");
+        const std::string status = ReadRow(new_status);
+        Log("INFO: 新状态行 = " + status);
+        Check(new_status > tokens_row, "F6 新一帧框在统计行之下");
+        Check(status.find("context ") != std::string::npos && status.find("context 0%") == std::string::npos,
+              "F6 状态行 context 占比已刷新(非 0%)");
+        Check(status.find("(") != std::string::npos, "F6 状态行 context 旁带 token 数字(k 化接线)");
+    }
+
+    // ---- F7 焦点态:Tab 进焦点态(现在有条目了),ESC 退出 ----
+    {
+        const int status_row2 = FindLastRow("shift+tab");
+        SendKey(VK_TAB, 0, 0);
+        const bool focused = WaitForText("[焦点 ", 5000);
+        Check(focused, "F7 焦点:空框 Tab 进焦点态选最近条目");
+        Sleep(300);
+        SendKey(VK_ESCAPE, 0, 0);
+        Sleep(500);
+        // ESC 退出焦点态回编辑:接着 Shift+Tab 得是切档。
+        const int status_row3 = FindLastRow("shift+tab");
+        SendKey(VK_TAB, 0, SHIFT_PRESSED);
+        Check(WaitForRowText(status_row3, "auto", 5000), "F7 焦点:ESC 退出后 Shift+Tab 恢复切档");
+        SendKey(VK_TAB, 0, SHIFT_PRESSED);
+        SendKey(VK_TAB, 0, SHIFT_PRESSED);
+        WaitForRowText(status_row3, "确认模式", 5000);
+        (void)status_row2;
+    }
+
+    // ---- 收尾:exit ----
+    SendText("exit");
+    SendKey(VK_RETURN, L'\r', 0);
+    if (WaitForSingleObject(pi.hProcess, 15000) != WAIT_OBJECT_0) {
+        Log("INFO: exit 超时,强杀子进程");
+        TerminateProcess(pi.hProcess, 9);
+    }
+    CloseHandle(pi.hProcess);
+
+    Log(g_failures == 0 ? "RESULT: ALL PASS" : "RESULT: " + std::to_string(g_failures) + " FAIL");
+    return g_failures == 0 ? 0 : 1;
+}

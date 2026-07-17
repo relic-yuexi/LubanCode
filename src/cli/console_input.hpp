@@ -73,8 +73,8 @@ void SetConfirmMode(ConfirmMode mode);
 // 按原语义继续(比如 Escape 不在聚焦查看态时还是"清空输入")。
 enum class UiKeyAction {
     ToggleExpand,  // Ctrl+O:紧凑/详细全局切换
-    FocusOlder,    // 空 composer Tab:焦点移到上一条(从最近往旧走)
-    FocusNewer,    // 空 composer Shift+Tab:焦点往新走
+    FocusOlder,    // 焦点往旧走(0.17.0:空 composer Tab 进焦点态选最近一条,焦点态内 Tab)
+    FocusNewer,    // 焦点往新走(0.17.0:焦点态内 Shift+Tab;态外 Shift+Tab 恒切确认档,不发这个)
     FocusView,     // Ctrl+E:聚焦查看当前焦点条目(已在聚焦态则返回)
     Escape,        // ESC:回调只在聚焦查看态消费它(返回会话画面),否则还给编辑器
 };
@@ -84,6 +84,15 @@ using TranscriptUiHandler = std::function<bool(UiKeyAction)>;
 // 清掉——回调抓着循环里的局部引用)。传空 handler 即清除。管道/重定向模式
 // 走不到逐键路径,注册了也永远不会被调,天然无感。
 void SetTranscriptUiHandler(TranscriptUiHandler handler);
+
+// 0.17.0:常驻状态行(composer 输入框下横线之下那一行)要展示的会话数据。
+// main.cpp 在每轮给主提示符之前更新一次(/model 切换、context 百分比刷新
+// 全走这一条路,反正每轮循环都会路过);终端层每帧重画状态行时读它,配上
+// 此刻的确认档(SharedEditor 里那份)拼整行文本(拼装规则是
+// cli/format_utils 的纯函数,单测钉在那边)。管道/重定向模式画不出状态行,
+// 设不设都无感。
+void SetStatusLineData(const std::string& model, int context_percent, long long used_tokens,
+                        long long window_tokens);
 
 // M11(0.10.0):真控制台此刻的显示宽度(列数),给分界线(cli::BuildDividerLine)
 // 探测用。查的是 stdout 那个句柄(跟 DetectConsoleCapability 一致)——分界线

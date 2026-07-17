@@ -40,6 +40,7 @@
 #include "cli/context_tracker.hpp"
 #include "cli/diff.hpp"
 #include "cli/divider.hpp"
+#include "cli/format_utils.hpp"
 #include "cli/setup_wizard.hpp"
 #include "cli/slash_commands.hpp"
 #include "cli/spinner.hpp"
@@ -78,7 +79,7 @@
 
 namespace {
 
-constexpr std::string_view kVersion = "0.16.0";
+constexpr std::string_view kVersion = "0.17.0";
 
 void PrintVersion() {
     std::cout << "lubancode " << kVersion << "\n";
@@ -134,10 +135,11 @@ void PrintHelp() {
         << "  Ctrl+O          紧凑/详细全局切换:把全部工具条目按新档整块重打(详细 = 完整参数\n"
         << "                  JSON + 完整输出/diff 全文),再按切回\n"
         << "  Ctrl+E          聚焦查看当前焦点条目(无焦点则最近一条)全文;再按 Ctrl+E 或 ESC 返回\n"
-        << "  Tab             输入框有内容:补全/轮转 slash 命令(现职);输入框为空:焦点移到\n"
-        << "                  上一条工具条目(从最近往旧走)\n"
-        << "  Shift+Tab       输入框有内容:循环切确认档(confirm/auto/yolo,现职);输入框为空:\n"
-        << "                  焦点往新走\n"
+        << "  Tab             输入框有内容:补全/轮转 slash 命令(现职);输入框为空:进入焦点态\n"
+        << "                  并选中最近一条工具条目;焦点态内 Tab 往旧走、Shift+Tab 往新走,\n"
+        << "                  ESC/Enter 退出焦点态回编辑\n"
+        << "  Shift+Tab       循环切确认档(confirm/auto/yolo)——任何时候都是,跟状态行提示\n"
+        << "                  一致;只有焦点态内例外(那里是焦点往新走)\n"
         << "  流式期间打字回车  不会打断当前流,而是排进队列,本轮结束后按顺序自动发出\n"
         << "  /exit           退出(裸词 exit/quit 也认)\n\n"
         << "配置优先级(从高到低,按字段逐个决,不是整套配置一刀切):\n"
@@ -1705,11 +1707,14 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     out.cancelled = result->cancelled;
 
     if (usage_stats.request_count > 0) {
-        std::cout << theme.stats << "[tokens] 输入 " << usage_stats.input_tokens;
+        // 0.17.0:token 数字统一 k 化(cli::FormatTokenCount),超过 10k 的
+        // 数字不再铺一长串数位。
+        std::cout << theme.stats << "[tokens] 输入 " << lubancode::cli::FormatTokenCount(usage_stats.input_tokens);
         if (usage_stats.cache_read_tokens > 0) {
-            std::cout << "(缓存命中 " << usage_stats.cache_read_tokens << ")";
+            std::cout << "(缓存命中 " << lubancode::cli::FormatTokenCount(usage_stats.cache_read_tokens) << ")";
         }
-        std::cout << " · 输出 " << usage_stats.output_tokens << " · 请求 " << usage_stats.request_count << " 次"
+        std::cout << " · 输出 " << lubancode::cli::FormatTokenCount(usage_stats.output_tokens) << " · 请求 "
+                   << usage_stats.request_count << " 次"
                    << " · context " << context_tracker.UsagePercent() << "%" << theme.reset << "\n";
     }
     // 回合正常结束(不是上面那条 !result.has_value() 的报错早退)——统计行
@@ -1779,10 +1784,11 @@ void PrintSlashHelp() {
               << "切换、会吞掉,推荐 Shift+Enter);Enter 发送整段;多行时首行的 / 是正文,不当命令。\n"
               << "候选菜单:/ 开头时按 ↓ 进入直选(↓↑ 循环移动,Enter 执行选中命令、已敲的参数尾巴\n"
               << "原样保留;打字/退格/ESC 回普通编辑);Tab 补全/轮转照旧。\n"
-              << "条目查看(0.16.0):Ctrl+O 紧凑/详细全局切换(详细 = 完整参数 + 输出/diff 全文,\n"
-              << "整块重打);输入框为空时 Tab = 焦点往旧走、Shift+Tab = 焦点往新走(有内容时两键\n"
-              << "维持补全/切档现职——这是定案键位);Ctrl+E 聚焦查看焦点条目全文(无焦点则最近\n"
-              << "一条),再按 Ctrl+E 或 ESC 返回;流式输出期间这些键不响应。\n";
+              << "条目查看:Ctrl+O 紧凑/详细全局切换(详细 = 完整参数 + 输出/diff 全文,整块重打);\n"
+              << "Shift+Tab 任何时候都是切确认档(confirm/auto/yolo,状态行实时显示);输入框为空时\n"
+              << "Tab 进入焦点态选最近一条,焦点态内 Tab 往旧走、Shift+Tab 往新走(这时不切档),\n"
+              << "ESC/Enter 退出焦点态回编辑,有内容时 Tab 维持补全现职;Ctrl+E 聚焦查看焦点条目\n"
+              << "全文(无焦点则最近一条),再按 Ctrl+E 或 ESC 返回;流式输出期间这些键不响应。\n";
 }
 
 // /skills 命令:列出扫描到的技能;一个都没有时打印两处目录路径,顺带说明
@@ -1842,7 +1848,10 @@ std::size_t EstimateTokens(std::size_t chars) { return (chars + 1) / 2; }
 // 窗口大小,只本会话生效,不改配置文件。
 void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracker& context_tracker) {
     if (args.empty()) {
-        std::cout << "上下文占用: " << context_tracker.current_tokens() << " / " << context_tracker.window_tokens()
+        std::cout << "上下文占用: "
+                   << lubancode::cli::FormatTokenCount(static_cast<std::int64_t>(context_tracker.current_tokens()))
+                   << " / "
+                   << lubancode::cli::FormatTokenCount(static_cast<std::int64_t>(context_tracker.window_tokens()))
                    << " tokens (" << context_tracker.UsagePercent() << "%)";
         if (context_tracker.ShouldAutoCompact()) {
             std::cout << "  —— 接近上限了,建议 /compact 一下";
@@ -2659,6 +2668,13 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
             pending_queue.pop_front();
             std::cout << theme.prompt << "> " << theme.reset << content << "\n";
         } else {
+            // 0.17.0:每次给主提示符之前刷新常驻状态行数据——模型名跟着
+            // /model 实时变,context 百分比每轮结束后就是新的,反正循环每圈
+            // 都路过这里,不用另找刷新点。
+            lubancode::cli::SetStatusLineData(
+                *current_model, context_tracker.UsagePercent(),
+                static_cast<long long>(context_tracker.current_tokens()),
+                static_cast<long long>(context_tracker.window_tokens()));
             // UI-A:主提示符是唯一开 composer 的读取点——Alt/Shift+Enter 插
             // 换行、Enter 全发、全空白不发送。别的 ReadLine 调用点(确认提示、
             // /model 编号选择、向导)保持单行语义。

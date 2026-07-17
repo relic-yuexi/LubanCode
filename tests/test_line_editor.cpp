@@ -1013,20 +1013,115 @@ TEST_CASE("菜单直选: 候选超过 6 个时,选中项循环到窗口外,展�
 }
 
 // ---------------------------------------------------------------------------
-// UI-D(0.16.0):Ctrl+O / Ctrl+E / 空 composer 焦点导航的按键语义翻译。
+// UI-D(0.16.0)/ 0.17.0 键位矫正:Ctrl+O / Ctrl+E / 焦点态的按键语义翻译。
+// 0.17.0 改钉:Shift+Tab 任何时候都是切档(焦点态内除外);空 composer Tab
+// 进入显式焦点态,态内 Tab/Shift+Tab 移动、ESC/Enter 退出。
 // ---------------------------------------------------------------------------
 
-TEST_CASE("UI-D: 空 composer 下 Tab=焦点往旧走,Shift+Tab=往新走且不切档") {
+TEST_CASE("0.17.0: 空 composer 的 Shift+Tab 是切档,不是焦点导航") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::ShiftTab));
+    CHECK(state.focus_move == 0);
+    CHECK(state.mode_changed);
+    CHECK(editor.confirm_mode() == ConfirmMode::Auto);
+    CHECK_FALSE(state.focus_active);
+}
+
+TEST_CASE("0.17.0: 空 composer Tab 进入焦点态并请求选最近条目") {
     LineEditorCore editor(SampleCandidates());
     editor.BeginLine(true);
     RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
     CHECK(state.focus_move == 1);
+    CHECK(state.focus_active);
     CHECK(state.line.empty());  // 行内容不动
+    CHECK(editor.focus_mode());
+}
+
+TEST_CASE("0.17.0: 焦点态内 Tab 往旧走、Shift+Tab 往新走且不切档") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));  // 进焦点态
+
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.focus_move == 1);
+    CHECK(state.focus_active);
 
     state = editor.HandleKey(KeyEvent::Simple(KeyKind::ShiftTab));
     CHECK(state.focus_move == -1);
-    CHECK_FALSE(state.mode_changed);  // 空 composer 的 Shift+Tab 不再切确认档
+    CHECK_FALSE(state.mode_changed);  // 焦点态内 Shift+Tab 是方向键,不切档
     CHECK(editor.confirm_mode() == ConfirmMode::Confirm);
+    CHECK(state.focus_active);
+}
+
+TEST_CASE("0.17.0: 焦点态 ESC 退出回编辑,不清行不转发") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Esc));
+    CHECK_FALSE(state.focus_active);
+    CHECK_FALSE(state.cleared);
+    CHECK_FALSE(state.esc_pressed);  // 不当"清行 ESC"转发给终端层
+    CHECK_FALSE(editor.focus_mode());
+
+    // 退出焦点态之后,Shift+Tab 恢复切档本职。
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::ShiftTab));
+    CHECK(state.mode_changed);
+    CHECK(state.focus_move == 0);
+}
+
+TEST_CASE("0.17.0: 焦点态 Enter 退出回编辑,不提交") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+
+    const std::size_t history_before = editor.history_size();
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Enter));
+    CHECK_FALSE(state.submitted);
+    CHECK_FALSE(state.focus_active);
+    CHECK(editor.history_size() == history_before);
+}
+
+TEST_CASE("0.17.0: 焦点态里打字直接退出焦点态并落进 composer") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+
+    RenderState state = editor.HandleKey(KeyEvent::Char(U'a'));
+    CHECK_FALSE(state.focus_active);
+    CHECK(state.line == U"a");
+}
+
+TEST_CASE("0.17.0: 焦点态里 Ctrl+E 照旧转发聚焦查看请求,不退出焦点态") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::CtrlE));
+    CHECK(state.focus_view_requested);
+    CHECK(state.focus_active);
+}
+
+TEST_CASE("0.17.0: ExitFocusMode 由终端层在焦点请求没被消费时调,退回编辑态") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(editor.focus_mode());
+    editor.ExitFocusMode();
+    CHECK_FALSE(editor.focus_mode());
+    // 退掉之后 Shift+Tab 立刻恢复切档。
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::ShiftTab));
+    CHECK(state.mode_changed);
+}
+
+TEST_CASE("0.17.0: BeginLine 清掉焦点态,不跨读取残留") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(editor.focus_mode());
+    editor.BeginLine(true);
+    CHECK_FALSE(editor.focus_mode());
 }
 
 TEST_CASE("UI-D: composer 有内容时 Tab/Shift+Tab 维持补全/切档现职") {
@@ -1036,6 +1131,7 @@ TEST_CASE("UI-D: composer 有内容时 Tab/Shift+Tab 维持补全/切档现职")
     RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
     CHECK(state.focus_move == 0);
     CHECK(state.line == U"/help ");  // 还是补全
+    CHECK_FALSE(state.focus_active);
 
     state = editor.HandleKey(KeyEvent::Simple(KeyKind::ShiftTab));
     CHECK(state.focus_move == 0);

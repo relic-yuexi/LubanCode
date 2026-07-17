@@ -90,6 +90,11 @@ struct CompletionCandidate {
 int CharDisplayWidth(char32_t codepoint);
 std::size_t DisplayWidth(const std::u32string& text);
 
+// UTF-8 版本的显示宽度:内部解码成码点按 DisplayWidth 算。0.17.0 状态行
+// 分段截宽用(先算模式段占了几列,剩余宽度才轮到信息段),跟
+// TruncateUtf8ToDisplayWidth 同一套解码,不另写一份。
+std::size_t DisplayWidthUtf8(const std::string& utf8);
+
 // 手写 UTF-32 -> UTF-8 编码,不依赖 Win32 API,核心层和终端层共用
 // (核心层的 RenderState::line 按码点存,真要写到控制台/拼回 std::string
 // 结果时需要转回 UTF-8)。
@@ -144,7 +149,13 @@ struct RenderState {
     // SetTranscriptUiHandler 注册的回调,重画的活全在 main.cpp。
     bool toggle_expand_requested = false;  // Ctrl+O:紧凑/详细切换
     bool focus_view_requested = false;     // Ctrl+E:聚焦查看焦点条目
-    int focus_move = 0;                    // 空 composer 下 Tab=+1(往旧走)、Shift+Tab=-1(往新走)
+    int focus_move = 0;   // 焦点移动请求:+1 往旧走、-1 往新走(0.17.0 起只在焦点态
+                          // 内产生,外加"空 composer Tab 进焦点态"那一下的 +1)
+    // 0.17.0 键位矫正:焦点态是显式模式——空 composer 按 Tab 进入(同时发
+    // focus_move=+1 选最近条目),态内 Tab=往旧、Shift+Tab=往新(不切档),
+    // ESC/Enter 退出回编辑,其余按键先退出再按原语义处理。这个字段是"这一
+    // 帧之后焦点态开没开"的镜像,给单测/终端层断言用。
+    bool focus_active = false;
     bool submitted = false;              // Enter:line 是这一行最终提交的内容
     bool cleared = false;                // Ctrl+C 清空了非空行,留在同一次 ReadLine 里继续编辑
     bool eof_requested = false;          // Ctrl+D,或 Ctrl+C 在空行按下:整个读取应该当 EOF 处理
@@ -179,6 +190,12 @@ public:
     RenderState CurrentRenderState() const;
 
     ConfirmMode confirm_mode() const { return confirm_mode_; }
+
+    // 0.17.0:终端层在"焦点导航请求没被应用层消费"(比如 transcript 是空
+    // 的)时调,把焦点态退掉——不然核心层还当自己在焦点态里,下一下
+    // Shift+Tab 会被当成焦点移动而不是切档,状态机跟屏幕对不上。
+    void ExitFocusMode() { focus_mode_ = false; }
+    bool focus_mode() const { return focus_mode_; }
     // 外部强制设定确认模式(比如 --yes 等价于起手切到 Yolo)。不算"切换",
     // 不会在下一次渲染里置 mode_changed。
     void set_confirm_mode(ConfirmMode mode) { confirm_mode_ = mode; }
@@ -222,6 +239,7 @@ private:
     std::optional<TabCycleState> tab_cycle_;
     std::optional<MenuSelectionState> menu_selection_;
     ConfirmMode confirm_mode_ = ConfirmMode::Confirm;
+    bool focus_mode_ = false;  // 0.17.0 焦点态,见 RenderState::focus_active 注释
 
     void ResetHistoryBrowsing();  // "翻到一半又编辑" -> 落回底部,但保留当前(已编辑的)内容
     void InsertChar(char32_t ch);

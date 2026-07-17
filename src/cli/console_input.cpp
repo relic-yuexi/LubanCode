@@ -48,6 +48,8 @@
 #include <iostream>
 #include <mutex>
 
+#include "cli/divider.hpp"
+#include "cli/format_utils.hpp"
 #include "cli/slash_commands.hpp"
 
 #ifdef _WIN32
@@ -91,6 +93,20 @@ LineEditorCore& SharedEditor() {
 TranscriptUiHandler& UiHandlerSlot() {
     static TranscriptUiHandler handler;
     return handler;
+}
+
+// 0.17.0:常驻状态行数据(模型名/context 百分比/token 数)。main.cpp 每轮
+// 更新,ReadLineKeyByKey 每帧重画状态行时读——都在主线程上,不用加锁
+// (监听线程从不碰状态行)。
+struct StatusLineData {
+    std::string model;
+    int percent = 0;
+    long long used_tokens = 0;
+    long long window_tokens = 0;
+};
+StatusLineData& StatusDataSlot() {
+    static StatusLineData data;
+    return data;
 }
 
 // M10:谁在真的调 ReadConsoleInputW 读键盘,谁就得先拿到这把锁——
@@ -178,6 +194,61 @@ void EnsureRoomForRows(HANDLE h_out, SHORT& start_row, SHORT buffer_height, SHOR
     }
 }
 
+// -----------------------------------------------------------------------
+// 0.17.0 输入框化(Claude Code 版式):composer 主提示符的编辑区装进两根
+// 长横线之间——上横线、`> ` 输入行(多行 composer 随内容长高)、下横线,
+// 下横线之下再常驻一行状态行(确认档/模型名/context 占比),slash 候选
+// 提示行挪到状态行之下。只有 composer 读取开框;确认提示、/model 编号
+// 选择、向导这些单行读取跟从前一个样。管道/重定向走不到逐键路径,天然
+// 无框无状态行。
+// -----------------------------------------------------------------------
+
+// 输入框上下横线的宽度上限:min(控制台宽 - 1, 100)。比输入/输出分界线的
+// 80 宽——框是常驻画面的主角,略宽一点撑住版式;分界线那条老规矩不动。
+constexpr int kComposerBoxMaxWidth = 100;
+
+struct BoxChrome {
+    bool enabled = false;
+    const Theme* theme = nullptr;
+    ConfirmMode mode = ConfirmMode::Confirm;
+};
+
+// 一根框线(带主题淡色;plain 主题 theme.stats/reset 都是空串,自动退化成
+// 无色 '-' 线,不用另判断)。
+std::string BoxRuleLine(const Theme& theme, int console_width) {
+    const bool plain = theme.reset.empty();
+    return theme.stats + BuildDividerLine(console_width, plain, kComposerBoxMaxWidth) + theme.reset;
+}
+
+// 状态行:模式段按档配色(确认=默认色、auto=stats、yolo=error,跟提示符
+// 前缀 ColoredConfirmPrefix 同一套语义),信息段恒 stats 淡色。文本拼装是
+// cli/format_utils 的纯函数,这里只管配色和按控制台宽度分段截断(截断得
+// 按段做——夹着 ANSI 的整行没法安全截)。
+void PrintStatusLine(const BoxChrome& chrome, int max_width) {
+    const Theme& theme = *chrome.theme;
+    const StatusLineData& data = StatusDataSlot();
+    std::string seg_mode = StatusLineModeSegment(chrome.mode);
+    std::string seg_info =
+        StatusLineInfoSegment(data.model, data.percent, data.used_tokens, data.window_tokens);
+    seg_mode = TruncateUtf8ToDisplayWidth(seg_mode, max_width);
+    const int rest = max_width - static_cast<int>(DisplayWidthUtf8(seg_mode));
+    seg_info = rest > 0 ? TruncateUtf8ToDisplayWidth(seg_info, rest) : std::string();
+
+    std::string mode_color;
+    switch (chrome.mode) {
+        case ConfirmMode::Auto:
+            mode_color = theme.stats;
+            break;
+        case ConfirmMode::Yolo:
+            mode_color = theme.error;
+            break;
+        case ConfirmMode::Confirm:
+            break;  // 默认色
+    }
+    std::cout << mode_color << seg_mode << (mode_color.empty() ? std::string() : theme.reset)
+              << theme.stats << seg_info << theme.reset;
+}
+
 // 按 RenderState 重画"编辑区域"。UI-A(0.11.0)起编辑区不止一行:第一行是
 // 提示符前缀 + prompt + composer 第一行,composer 后续行各占一个物理行、
 // 行首两空格续行缩进(提示符只在第一行),再往下紧跟 0~N 行 hint_lines
@@ -198,7 +269,7 @@ void EnsureRoomForRows(HANDLE h_out, SHORT& start_row, SHORT buffer_height, SHOR
 // 顺带用 EnsureRoomForRows 按总行数探底滚屏,把"离缓冲区底部太近导致自动
 // 滚屏、坐标跟着失效"这条已知限制堵住(增删行时锚点账目同步修正)。
 void RedrawEditArea(HANDLE h_out, SHORT& start_row, SHORT& prompt_end_col, const RenderState& state,
-                     int& prev_body_row_count) {
+                     int& prev_body_row_count, const BoxChrome& chrome = BoxChrome{}) {
     CONSOLE_SCREEN_BUFFER_INFO info{};
     if (!GetConsoleScreenBufferInfo(h_out, &info)) {
         return;  // 拿不到屏幕信息就没法定位,这一帧放弃重画,下一帧再试
@@ -214,9 +285,14 @@ void RedrawEditArea(HANDLE h_out, SHORT& start_row, SHORT& prompt_end_col, const
     const std::vector<std::u32string>& edit_lines = state.lines.empty() ? fallback_lines : state.lines;
     const int edit_row_count = static_cast<int>(edit_lines.size());
     const int hint_count = static_cast<int>(state.hint_lines.size());
-    // "第一行之外"这一帧要占的行数(composer 续行 + 提示行),跟上一帧取
-    // 较大值,保证旧帧多出来的行(删行、清 composer、提示消失)不漏清。
-    const int body_rows = (edit_row_count - 1) + hint_count;
+    // 0.17.0 输入框化:开框时最后一个编辑行下面再垫两行——下横线 + 状态行,
+    // 提示行(hint_lines)排在状态行之下。锚点记账原样扩展:这两行也算进
+    // body_rows,多退少补、EnsureRoomForRows 探底,全套现成机制照走。
+    const int box_rows = chrome.enabled ? 2 : 0;
+    // "第一行之外"这一帧要占的行数(composer 续行 + 框线/状态行 + 提示行),
+    // 跟上一帧取较大值,保证旧帧多出来的行(删行、清 composer、提示消失)
+    // 不漏清。
+    const int body_rows = (edit_row_count - 1) + box_rows + hint_count;
     const int rows_to_touch = std::max(body_rows, prev_body_row_count);
 
     EnsureRoomForRows(h_out, start_row, buffer_height, static_cast<SHORT>(1 + rows_to_touch));
@@ -248,7 +324,8 @@ void RedrawEditArea(HANDLE h_out, SHORT& start_row, SHORT& prompt_end_col, const
     }
 
     // 第一行之外:逐行先整行清、再按行的身份画——composer 续行(两空格
-    // 缩进 + 窗口截断)、提示行(截宽),或者旧帧残行(只清不画)。
+    // 缩进 + 窗口截断)、下横线/状态行(开框时)、提示行(截宽),或者
+    // 旧帧残行(只清不画)。
     for (int i = 1; i <= rows_to_touch; ++i) {
         const COORD row_pos{0, static_cast<SHORT>(start_row + i)};
         FillConsoleOutputCharacterW(h_out, L' ', static_cast<DWORD>(buffer_width), row_pos, &written);
@@ -265,10 +342,20 @@ void RedrawEditArea(HANDLE h_out, SHORT& start_row, SHORT& prompt_end_col, const
                     COORD{static_cast<SHORT>(kContinuationIndent + static_cast<SHORT>(window.cursor_display_col)),
                            row_pos.Y};
             }
-        } else if (i - edit_row_count < hint_count) {
+        } else if (chrome.enabled && i == edit_row_count) {
+            // 下横线,紧贴最后一个编辑行。
+            SetConsoleCursorPosition(h_out, row_pos);
+            std::cout << BoxRuleLine(*chrome.theme, buffer_width);
+            std::cout.flush();
+        } else if (chrome.enabled && i == edit_row_count + 1) {
+            // 常驻状态行。
+            SetConsoleCursorPosition(h_out, row_pos);
+            PrintStatusLine(chrome, static_cast<int>(buffer_width) - 1);
+            std::cout.flush();
+        } else if (i - edit_row_count - box_rows >= 0 && i - edit_row_count - box_rows < hint_count) {
             const int hint_width = static_cast<int>(buffer_width) - 1;
             const std::string truncated = TruncateUtf8ToDisplayWidth(
-                state.hint_lines[static_cast<std::size_t>(i - edit_row_count)], hint_width);
+                state.hint_lines[static_cast<std::size_t>(i - edit_row_count - box_rows)], hint_width);
             SetConsoleCursorPosition(h_out, row_pos);
             std::cout << truncated;
             std::cout.flush();
@@ -300,6 +387,52 @@ std::string ColoredConfirmPrefix(ConfirmMode mode, const Theme& theme) {
             return prefix;
     }
     return prefix;
+}
+
+// 0.17.0 输入框化的提交收尾:横线擦掉、提交行保留。取舍:两个方案里选了
+// "只留 `> 内容`"这条——框连横线留在滚动历史的话,每一问上下各一根 100 列
+// 横线,再加 RunTurn 紧接着打的输入/输出分界线,三根线叠一块,滚动历史
+// 全是线;擦掉横线后历史里就是干干净净的 `> 问题` + 分界线 + 回答,跟
+// 0.16.0 的历史观感一致,框只属于"正在输入"这一刻。
+//
+// 做法:把整个框(上横线在 start_row - 1,下横线/状态行/提示行在编辑行
+// 之下)统统清掉,从上横线那一行起重打提交内容(`> ` 第一行、两空格续行,
+// 每行按宽截断防折行——完整内容反正在历史/存档里),光标停在末行末尾,
+// 调用方接着换行。内容整体上移一行,不留空行。
+void CollapseBoxOnSubmit(HANDLE h_out, SHORT start_row, int prev_body_row_count, const RenderState& state,
+                          const Theme& theme, const std::string& prompt) {
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    if (!GetConsoleScreenBufferInfo(h_out, &info)) {
+        return;  // 拿不到屏幕信息就不收尾了,提交帧画面已经在屏上,不算坏
+    }
+    const SHORT buffer_width = info.dwSize.X;
+    const SHORT top = start_row > 0 ? static_cast<SHORT>(start_row - 1) : start_row;
+    SHORT bottom = static_cast<SHORT>(start_row + prev_body_row_count);
+    if (bottom >= info.dwSize.Y) {
+        bottom = static_cast<SHORT>(info.dwSize.Y - 1);
+    }
+    DWORD written = 0;
+    for (SHORT r = top; r <= bottom; ++r) {
+        const COORD row_pos{0, r};
+        FillConsoleOutputCharacterW(h_out, L' ', static_cast<DWORD>(buffer_width), row_pos, &written);
+        FillConsoleOutputAttribute(h_out, info.wAttributes, static_cast<DWORD>(buffer_width), row_pos, &written);
+    }
+    SetConsoleCursorPosition(h_out, COORD{0, top});
+    std::cout << ColoredConfirmPrefix(state.mode, theme) << prompt;
+    std::cout.flush();
+    CONSOLE_SCREEN_BUFFER_INFO after{};
+    int first_width = static_cast<int>(buffer_width) - 3;
+    if (GetConsoleScreenBufferInfo(h_out, &after)) {
+        first_width = static_cast<int>(buffer_width) - static_cast<int>(after.dwCursorPosition.X) - 1;
+    }
+    if (!state.lines.empty()) {
+        std::cout << Utf32ToUtf8(TruncateToDisplayWidth(state.lines[0], first_width));
+        for (std::size_t i = 1; i < state.lines.size(); ++i) {
+            std::cout << "\n  "
+                      << Utf32ToUtf8(TruncateToDisplayWidth(state.lines[i], static_cast<int>(buffer_width) - 3));
+        }
+    }
+    std::cout.flush();
 }
 
 // 逐键读入这一次输入(UI-A 起,composer 模式下可能是多行),真控制台专用。
@@ -340,6 +473,18 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     LineEditorCore& editor = SharedEditor();
     editor.BeginLine(composer);
 
+    // 0.17.0:composer 读取开输入框(上横线 + `> ` 输入行 + 下横线 + 状态
+    // 行)。上横线打在提示符上一行,不进重画账(锚点 start_row 是提示符
+    // 行,横线在 start_row - 1,重画从不碰它;EnsureRoomForRows 逼滚屏时
+    // 整个缓冲区内容连横线一起上移,start_row 同步修正,账目还是平的)。
+    const bool box = composer;
+    BoxChrome chrome{box, &theme, editor.confirm_mode()};
+    if (box) {
+        CONSOLE_SCREEN_BUFFER_INFO pre_info{};
+        const int console_width = GetConsoleScreenBufferInfo(h_out, &pre_info) ? pre_info.dwSize.X : 80;
+        std::cout << BoxRuleLine(theme, console_width) << "\n";
+    }
+
     const std::string full_prompt = ColoredConfirmPrefix(editor.confirm_mode(), theme) + prompt;
     std::cout << full_prompt;
     std::cout.flush();
@@ -350,7 +495,13 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     }
     SHORT start_row = info.dwCursorPosition.Y;
     SHORT prompt_end_col = info.dwCursorPosition.X;
-    int prev_body_row_count = 0;  // 上一帧第一行之外画了几行(composer 续行 + 提示行),见 RedrawEditArea
+    int prev_body_row_count = 0;  // 上一帧第一行之外画了几行(composer 续行 + 框线/状态行 + 提示行)
+
+    if (box) {
+        // 开场帧:下横线 + 状态行立刻就位,不等第一个按键。
+        RedrawEditArea(h_out, start_row, prompt_end_col, editor.CurrentRenderState(), prev_body_row_count,
+                        chrome);
+    }
 
     std::optional<char32_t> pending_high_surrogate;
 
@@ -457,6 +608,13 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 }
                 const bool handled = UiHandlerSlot()(*action);
                 if (handled) {
+                    // 回调铺完内容,整个框(上横线起)重打一遍、重测锚点。
+                    if (box) {
+                        CONSOLE_SCREEN_BUFFER_INFO rule_info{};
+                        const int console_width =
+                            GetConsoleScreenBufferInfo(h_out, &rule_info) ? rule_info.dwSize.X : 80;
+                        std::cout << BoxRuleLine(theme, console_width) << "\n";
+                    }
                     std::cout << ColoredConfirmPrefix(editor.confirm_mode(), theme) << prompt;
                     std::cout.flush();
                     CONSOLE_SCREEN_BUFFER_INFO after_info{};
@@ -465,18 +623,26 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                         prompt_end_col = after_info.dwCursorPosition.X;
                     }
                     prev_body_row_count = 0;
-                    RedrawEditArea(h_out, start_row, prompt_end_col, state, prev_body_row_count);
+                    chrome.mode = editor.confirm_mode();
+                    RedrawEditArea(h_out, start_row, prompt_end_col, state, prev_body_row_count, chrome);
                     continue;
+                }
+                // 0.17.0:焦点导航请求没被消费(比如 transcript 还是空的)——
+                // 把核心层的焦点态退掉,不然屏上什么都没发生,下一下
+                // Shift+Tab 却被当成"焦点往新走"吞掉,切不了档。
+                if (*action == UiKeyAction::FocusOlder || *action == UiKeyAction::FocusNewer) {
+                    editor.ExitFocusMode();
                 }
             }
         }
 
         // M11(0.10.0):切档原地更新,不打印任何新行——用户反馈过"连按几轮
         // Shift+Tab,'已切换到 X 模式' 通知行滚出一屏残骸"。档位只体现在
-        // 提示符前缀的颜色/文字上(ColoredConfirmPrefix),这里原地清掉
-        // start_row 这一整行、换上新前缀,起始行号不变,不往下挪一行。
-        // 提示区(hint_lines)、编辑内容不受影响,紧接着的 RedrawEditArea
-        // 照常重画。
+        // 提示符前缀的颜色/文字上(ColoredConfirmPrefix)和常驻状态行上
+        // (0.17.0,紧接着的 RedrawEditArea 每帧都重画状态行,chrome.mode
+        // 下面刚同步过,自然带上新档),这里原地清掉 start_row 这一整行、
+        // 换上新前缀,起始行号不变,不往下挪一行——切档只动状态行和提示符
+        // 前缀,屏上零新增行。
         if (state.mode_changed) {
             CONSOLE_SCREEN_BUFFER_INFO row_info{};
             if (GetConsoleScreenBufferInfo(h_out, &row_info)) {
@@ -494,7 +660,16 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             }
         }
 
-        RedrawEditArea(h_out, start_row, prompt_end_col, state, prev_body_row_count);
+        if (box && state.submitted) {
+            // 0.17.0 输入框化的提交收尾:横线/状态行擦掉,只留 `> 内容`,
+            // 换行收尾——取舍见 CollapseBoxOnSubmit 注释。
+            CollapseBoxOnSubmit(h_out, start_row, prev_body_row_count, state, theme, prompt);
+            std::cout << "\n";
+            return Utf32ToUtf8(state.line);
+        }
+
+        chrome.mode = editor.confirm_mode();
+        RedrawEditArea(h_out, start_row, prompt_end_col, state, prev_body_row_count, chrome);
 
         if (state.esc_pressed && esc_rejects) {
             // 确认提示 [y/a/N] 场景:Esc 不留在循环里继续等,直接当这次
@@ -504,11 +679,13 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             return std::string();
         }
         if (state.eof_requested) {
-            // Ctrl+D 可能按在多行 composer 中间某一行:先把光标挪到编辑区
-            // 最后一行再换行,免得接下来的输出打在 composer 剩余行身上。
-            if (state.lines.size() > 1) {
+            // Ctrl+D/Ctrl+Z 可能按在多行 composer 中间某一行,框下面还垫着
+            // 横线/状态行:先把光标挪到编辑区(含框)最下面一行再换行,免得
+            // 接下来的输出打在残留画面身上。prev_body_row_count 刚被
+            // RedrawEditArea 更新过,就是"第一行之外"的总行数。
+            if (prev_body_row_count > 0) {
                 SetConsoleCursorPosition(
-                    h_out, COORD{0, static_cast<SHORT>(start_row + static_cast<SHORT>(state.lines.size()) - 1)});
+                    h_out, COORD{0, static_cast<SHORT>(start_row + static_cast<SHORT>(prev_body_row_count))});
             }
             std::cout << "\n";
             return std::nullopt;
@@ -517,8 +694,8 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             continue;  // composer 已经清空,继续在同一次调用里编辑
         }
         if (state.submitted) {
-            // 提交:RedrawEditArea 刚按提交帧把完整多行内容画在屏幕上、光标
-            // 停在末行末尾,这里换行收尾——整段内容留在历史区,spec 第 7 条。
+            // 非框读取的提交:RedrawEditArea 刚按提交帧把完整多行内容画在
+            // 屏幕上、光标停在末行末尾,这里换行收尾。
             std::cout << "\n";
             return Utf32ToUtf8(state.line);
         }
@@ -558,6 +735,15 @@ ConfirmMode CurrentConfirmMode() { return SharedEditor().confirm_mode(); }
 void SetConfirmMode(ConfirmMode mode) { SharedEditor().set_confirm_mode(mode); }
 
 void SetTranscriptUiHandler(TranscriptUiHandler handler) { UiHandlerSlot() = std::move(handler); }
+
+void SetStatusLineData(const std::string& model, int context_percent, long long used_tokens,
+                        long long window_tokens) {
+    StatusLineData& data = StatusDataSlot();
+    data.model = model;
+    data.percent = context_percent;
+    data.used_tokens = used_tokens;
+    data.window_tokens = window_tokens;
+}
 
 std::optional<int> DetectConsoleWidth() {
 #ifdef _WIN32

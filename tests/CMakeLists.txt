@@ -35,6 +35,7 @@ add_executable(lubancode_tests
   test_todo_tool.cpp
   test_todo_render.cpp
   test_divider.cpp
+  test_format_utils.cpp
   test_transcript.cpp
   test_diff.cpp
   test_plugins.cpp
@@ -70,3 +71,12 @@ if(WIN32)
 endif()
 
 add_test(NAME lubancode_tests COMMAND lubancode_tests)
+
+# 0.17.0:集成验证用的刮屏驱动器(AllocConsole + WriteConsoleInput +
+# ReadConsoleOutput,真控制台专用),不进 ctest——要真钥匙、要弹控制台
+# 窗口,只在集成验证时手动跑:
+#   screen_driver <lubancode.exe> <子进程工作目录> <报告文件>
+if(WIN32)
+  add_executable(screen_driver screen_driver.cpp)
+  target_compile_features(screen_driver PRIVATE cxx_std_23)
+endif()

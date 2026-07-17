@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(lubancode VERSION 0.16.0 LANGUAGES CXX)
+project(lubancode VERSION 0.17.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -192,6 +192,7 @@ add_library(lubancode_core STATIC
   src/cli/line_editor.cpp
   src/cli/context_tracker.cpp
   src/cli/divider.cpp
+  src/cli/format_utils.cpp
   src/cli/todo_render.cpp
   src/cli/transcript.cpp
   src/cli/diff.cpp

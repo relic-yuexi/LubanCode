@@ -43,6 +43,12 @@ TEST_CASE("BuildDividerLine: plain=true 时用半角 \"-\" 代替 box-drawing �
     }
 }
 
+TEST_CASE("BuildDividerLine: max_width 参数放宽上限(0.17.0 输入框横线传 100)") {
+    CHECK(BuildDividerLine(120, /*plain=*/false, /*max_width=*/100).size() == kUnitBytes * 100);
+    CHECK(BuildDividerLine(80, /*plain=*/false, /*max_width=*/100).size() == kUnitBytes * 79);
+    CHECK(BuildDividerLine(0, /*plain=*/true, /*max_width=*/100).size() == 100);  // 探测失败按 max_width 兜底
+}
+
 TEST_CASE("BuildDividerLine: 非 plain 时,内容确实是重复的 U+2500 字符") {
     const std::string line = BuildDividerLine(6, /*plain=*/false);
     REQUIRE(line.size() == kUnitBytes * 5);

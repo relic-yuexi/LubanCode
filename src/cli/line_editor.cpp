@@ -255,6 +255,8 @@ std::string TruncateUtf8ToDisplayWidth(const std::string& utf8, int max_width) {
     return Utf32ToUtf8(TruncateToDisplayWidth(Utf8ToUtf32(utf8), max_width));
 }
 
+std::size_t DisplayWidthUtf8(const std::string& utf8) { return DisplayWidth(Utf8ToUtf32(utf8)); }
+
 EditLineWindow ComputeEditLineWindow(const std::u32string& line, std::size_t cursor, int content_width) {
     if (content_width <= 0) {
         return EditLineWindow{};
@@ -307,6 +309,7 @@ void LineEditorCore::BeginLine(bool composer) {
     ClearBuffer();
     tab_cycle_.reset();
     menu_selection_.reset();
+    focus_mode_ = false;  // 焦点态不跨读取——新一次 ReadLine 从编辑态起步
     ResetHistoryBrowsing();
 }
 
@@ -483,6 +486,7 @@ RenderState LineEditorCore::BuildRenderState(bool submitted, bool cleared, bool 
     state.eof_requested = eof_requested;
     state.mode_changed = mode_changed;
     state.mode = confirm_mode_;
+    state.focus_active = focus_mode_;
 
     // UI-A:提示区只在"composer 恰好一行、且以 / 开头"时出现;多行时 / 是
     // 正文,不当命令,不出提示。
@@ -563,6 +567,38 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
 
     if (effective.kind != KeyKind::Tab) {
         tab_cycle_.reset();
+    }
+
+    // 0.17.0 键位矫正:焦点态是显式模式(空 composer 按 Tab 进入,见下面
+    // Tab 分支)。态内 Tab=焦点往旧走、Shift+Tab=往新走(这时不切档——
+    // 焦点态里两个键就是一对方向键);ESC/Enter 退出焦点态回编辑,不清行、
+    // 不提交(composer 本来就是空的);Ctrl+O/Ctrl+E 不退出,落到下面原语义
+    // 继续转发(焦点态里看全文正是 Ctrl+E 的本职);其余按键(打字、退格、
+    // 上下左右……)先退出焦点态,再按各自原语义处理——打字直接落进
+    // composer,不用先按一下 ESC。
+    if (focus_mode_) {
+        switch (effective.kind) {
+            case KeyKind::Tab: {
+                RenderState state = BuildRenderState(false, false, false, false);
+                state.focus_move = 1;
+                return state;
+            }
+            case KeyKind::ShiftTab: {
+                RenderState state = BuildRenderState(false, false, false, false);
+                state.focus_move = -1;
+                return state;
+            }
+            case KeyKind::Esc:
+            case KeyKind::Enter:
+                focus_mode_ = false;
+                return BuildRenderState(false, false, false, false);
+            case KeyKind::CtrlO:
+            case KeyKind::CtrlE:
+                break;  // 保持焦点态,落到下面的原语义(转发请求)
+            default:
+                focus_mode_ = false;
+                break;  // 退出焦点态,按键原语义继续走下面的 switch
+        }
     }
 
     // 0.16.0 slash 候选菜单直选:菜单选择态优先于一切旧语义。↓/↑ 循环移动
@@ -667,10 +703,12 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
             }
             break;
         case KeyKind::Tab:
-            // UI-D(0.16.0):composer 整个为空时,Tab 不再是补全(本来也无
-            // 从补起),改成"焦点移到上一条工具条目"(从最近往旧走)的请求,
-            // 转发给应用层。有内容时补全/轮转职责一字不变。
+            // 0.17.0 键位矫正:composer 整个为空时,Tab 进入焦点态、顺带发
+            // 一个"选最近条目"的焦点请求(focus_move=+1,应用层起手落在最近
+            // 一条上);之后的移动全在上面的焦点态分支里。有内容时补全/轮转
+            // 职责一字不变。
             if (composer_ && lines_.size() == 1 && lines_[0].empty()) {
+                focus_mode_ = true;
                 RenderState state = BuildRenderState(false, false, false, false);
                 state.focus_move = 1;
                 return state;
@@ -678,14 +716,10 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
             HandleTab();
             break;
         case KeyKind::ShiftTab:
-            // UI-D(0.16.0):composer 整个为空时,Shift+Tab 是"焦点往新走"
-            // 的请求,不切确认档;有内容时(以及一切非 composer 读取,比如
-            // 确认提示 [y/a/N])维持切档现职。
-            if (composer_ && lines_.size() == 1 && lines_[0].empty()) {
-                RenderState state = BuildRenderState(false, false, false, false);
-                state.focus_move = -1;
-                return state;
-            }
+            // 0.17.0 键位矫正:Shift+Tab 任何时候都是切确认档(跟常驻状态行
+            // 的 "shift+tab 切换" 提示一致)——UI-D 曾把空 composer 的这一下
+            // 划给焦点导航,害得切档要先打个字,改回来。焦点态内的
+            // Shift+Tab(往新走)在上面的焦点态分支里,走不到这儿。
             confirm_mode_ = NextConfirmMode(confirm_mode_);
             return BuildRenderState(false, false, false, true);
         case KeyKind::Enter: {

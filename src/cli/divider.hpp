@@ -11,10 +11,12 @@
 namespace lubancode::cli {
 
 // console_width 是探测到的控制台实际列数(<= 0 表示探测失败/没探测到,
-// 按 80 兜底)。实际打印宽度 = min(console_width - 1, 80)——留一列安全
-// 边界,同时不管控制台多宽都不铺满一整行。plain 为真(plain 主题,或者
-// 干脆不支持 ANSI/不是真控制台)时用半角 "-",否则用整宽字符 "─"
-// (U+2500)。宽度算出来 <= 0 时返回空串。
-std::string BuildDividerLine(int console_width, bool plain);
+// 按 max_width 兜底)。实际打印宽度 = min(console_width - 1, max_width)——
+// 留一列安全边界,同时不管控制台多宽都不铺满一整行。plain 为真(plain
+// 主题,或者干脆不支持 ANSI/不是真控制台)时用半角 "-",否则用整宽字符
+// "─"(U+2500)。宽度算出来 <= 0 时返回空串。
+// max_width 默认 80(输入/输出分界线的老规矩);0.17.0 的 composer 输入框
+// 上下横线传 100,别的调用点一个不改。
+std::string BuildDividerLine(int console_width, bool plain, int max_width = 80);
 
 }  // namespace lubancode::cli
