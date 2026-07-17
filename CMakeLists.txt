@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(lubancode VERSION 0.9.0 LANGUAGES CXX)
+project(lubancode VERSION 0.10.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -146,6 +146,7 @@ add_library(lubancode_core STATIC
   src/tools/hooks.cpp
   src/tools/skill_loader.cpp
   src/tools/skill_tool.cpp
+  src/tools/todo_tool.cpp
   src/mcp/transport.cpp
   src/mcp/client.cpp
   src/mcp/mcp_tool.cpp
@@ -157,6 +158,8 @@ add_library(lubancode_core STATIC
   src/cli/theme.cpp
   src/cli/line_editor.cpp
   src/cli/context_tracker.cpp
+  src/cli/divider.cpp
+  src/cli/todo_render.cpp
 )
 target_include_directories(lubancode_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(lubancode_core PUBLIC cpr::cpr nlohmann_json::nlohmann_json)

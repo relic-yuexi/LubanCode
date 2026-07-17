@@ -210,9 +210,16 @@ void RedrawEditArea(HANDLE h_out, SHORT& start_row, SHORT& prompt_end_col, const
     const int content_width = static_cast<int>(buffer_width) - static_cast<int>(prompt_end_col) - 1;
     const EditLineWindow window = ComputeEditLineWindow(state.line, state.cursor, content_width);
 
-    const COORD line_pos{0, start_row};
-    SetConsoleCursorPosition(h_out, line_pos);
-    FillConsoleOutputCharacterW(h_out, L' ', static_cast<DWORD>(buffer_width), line_pos, &written);
+    // 只清"提示符之后"这一段(从 prompt_end_col 到行尾),提示符本身那几列
+    // 一个字符都不碰——这里曾经是从第 0 列开始、清整行宽度,结果提示符
+    // (比如 "> "/"[auto] > ")在敲下第一个字符那一刻就被空格盖没了,每帧
+    // 重画都会复发。既然编辑内容永远从 prompt_end_col 起画,清的范围也该
+    // 从 prompt_end_col 起,一分不多清。
+    const int clear_width = static_cast<int>(buffer_width) - static_cast<int>(prompt_end_col);
+    if (clear_width > 0) {
+        const COORD line_pos{prompt_end_col, start_row};
+        FillConsoleOutputCharacterW(h_out, L' ', static_cast<DWORD>(clear_width), line_pos, &written);
+    }
     SetConsoleCursorPosition(h_out, COORD{prompt_end_col, start_row});
     std::cout << Utf32ToUtf8(window.text);
     std::cout.flush();
@@ -238,6 +245,27 @@ void RedrawEditArea(HANDLE h_out, SHORT& start_row, SHORT& prompt_end_col, const
     // 提示行,这一步都得做,不然光标就停在最后一行提示上了。
     const SHORT target_col = static_cast<SHORT>(prompt_end_col + static_cast<SHORT>(window.cursor_display_col));
     SetConsoleCursorPosition(h_out, COORD{target_col, start_row});
+}
+
+// M11(0.10.0):Shift+Tab 切确认档位时提示符前缀该套什么颜色——auto 用
+// theme.stats(跟别的淡色提示一致),yolo 用 theme.error(全放行,得扎眼
+// 一点),confirm(默认档)不着色。ConfirmModePromptPrefix() 本身保持纯
+// 文本、不夹 ANSI(line_editor 的单测直接断言它的返回值是 "" / "[auto] " /
+// "[yolo] ",不能把颜色码焊死在里头),颜色只在这个终端层的打印点包一层。
+std::string ColoredConfirmPrefix(ConfirmMode mode, const Theme& theme) {
+    const std::string prefix = ConfirmModePromptPrefix(mode);
+    if (prefix.empty()) {
+        return prefix;
+    }
+    switch (mode) {
+        case ConfirmMode::Auto:
+            return theme.stats + prefix + theme.reset;
+        case ConfirmMode::Yolo:
+            return theme.error + prefix + theme.reset;
+        case ConfirmMode::Confirm:
+            return prefix;
+    }
+    return prefix;
 }
 
 // 逐键读入这一行,真控制台专用。ReadConsoleInputW 逐个读键盘事件,翻译成
@@ -277,7 +305,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     LineEditorCore& editor = SharedEditor();
     editor.BeginLine();
 
-    const std::string full_prompt = ConfirmModePromptPrefix(editor.confirm_mode()) + prompt;
+    const std::string full_prompt = ColoredConfirmPrefix(editor.confirm_mode(), theme) + prompt;
     std::cout << full_prompt;
     std::cout.flush();
 
@@ -352,21 +380,27 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
 
         const RenderState state = editor.HandleKey(*mapped);
 
+        // M11(0.10.0):切档原地更新,不打印任何新行——用户反馈过"连按几轮
+        // Shift+Tab,'已切换到 X 模式' 通知行滚出一屏残骸"。档位只体现在
+        // 提示符前缀的颜色/文字上(ColoredConfirmPrefix),这里原地清掉
+        // start_row 这一整行、换上新前缀,起始行号不变,不往下挪一行。
+        // 提示区(hint_lines)、编辑内容不受影响,紧接着的 RedrawEditArea
+        // 照常重画。
         if (state.mode_changed) {
-            std::cout << "\n" << theme.stats << "已切换到 " << ConfirmModeLabel(state.mode) << " 模式" << theme.reset
-                       << "\n";
-            const std::string new_full_prompt = ConfirmModePromptPrefix(state.mode) + prompt;
-            std::cout << new_full_prompt;
-            std::cout.flush();
-            // 重打提示符之后,行的起始行号和"提示符打完光标停在哪一列"都
-            // 可能变了(比如 "" -> "[auto] " 前缀变长了),两个锚点一起
-            // 重新测,不然后面重画会画歪。
-            CONSOLE_SCREEN_BUFFER_INFO after_notice_info{};
-            if (GetConsoleScreenBufferInfo(h_out, &after_notice_info)) {
-                start_row = after_notice_info.dwCursorPosition.Y;
-                prompt_end_col = after_notice_info.dwCursorPosition.X;
+            CONSOLE_SCREEN_BUFFER_INFO row_info{};
+            if (GetConsoleScreenBufferInfo(h_out, &row_info)) {
+                const SHORT buffer_width = row_info.dwSize.X;
+                DWORD written = 0;
+                const COORD row_pos{0, start_row};
+                FillConsoleOutputCharacterW(h_out, L' ', static_cast<DWORD>(buffer_width), row_pos, &written);
+                SetConsoleCursorPosition(h_out, row_pos);
+                std::cout << ColoredConfirmPrefix(state.mode, theme) << prompt;
+                std::cout.flush();
+                CONSOLE_SCREEN_BUFFER_INFO after_info{};
+                if (GetConsoleScreenBufferInfo(h_out, &after_info)) {
+                    prompt_end_col = after_info.dwCursorPosition.X;
+                }
             }
-            prev_hint_line_count = 0;
         }
 
         RedrawEditArea(h_out, start_row, prompt_end_col, state, prev_hint_line_count);
@@ -421,6 +455,22 @@ std::optional<std::string> ReadLine(const std::string& prompt, const Theme& them
 ConfirmMode CurrentConfirmMode() { return SharedEditor().confirm_mode(); }
 
 void SetConfirmMode(ConfirmMode mode) { SharedEditor().set_confirm_mode(mode); }
+
+std::optional<int> DetectConsoleWidth() {
+#ifdef _WIN32
+    const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (h_out == nullptr || h_out == INVALID_HANDLE_VALUE) {
+        return std::nullopt;
+    }
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    if (!GetConsoleScreenBufferInfo(h_out, &info)) {
+        return std::nullopt;
+    }
+    return static_cast<int>(info.dwSize.X);
+#else
+    return std::nullopt;
+#endif
+}
 
 std::mutex& StdoutWriteMutex() {
     static std::mutex m;

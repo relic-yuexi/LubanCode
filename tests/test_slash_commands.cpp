@@ -157,3 +157,22 @@ TEST_CASE("AllSlashCommands: /effort 单独列一条,/help、Tab 候选都能看
     }
     CHECK(has_effort);
 }
+
+TEST_CASE("ParseSlashCommand: /todos") {
+    const auto parsed = cli::ParseSlashCommand("/todos");
+    CHECK(parsed.command == cli::SlashCommand::Todos);
+    CHECK(parsed.args.empty());
+}
+
+TEST_CASE("ParseSlashCommand: /Todos 大小写不敏感") {
+    CHECK(cli::ParseSlashCommand("/Todos").command == cli::SlashCommand::Todos);
+}
+
+TEST_CASE("AllSlashCommands: /todos 在列表里") {
+    const auto& commands = cli::AllSlashCommands();
+    bool has_todos = false;
+    for (const auto& c : commands) {
+        if (c.name == "/todos") has_todos = true;
+    }
+    CHECK(has_todos);
+}

@@ -55,6 +55,13 @@ std::optional<std::string> ReadLine(const std::string& prompt, const Theme& them
 ConfirmMode CurrentConfirmMode();
 void SetConfirmMode(ConfirmMode mode);
 
+// M11(0.10.0):真控制台此刻的显示宽度(列数),给分界线(cli::BuildDividerLine)
+// 探测用。查的是 stdout 那个句柄(跟 DetectConsoleCapability 一致)——分界线
+// 关心的是"要打印到哪儿",不是 stdin。探测不到(非真控制台、GetConsoleScreenBufferInfo
+// 失败……)返回 std::nullopt,调用方按 80 列兜底。非 Windows 平台恒返回
+// std::nullopt。
+std::optional<int> DetectConsoleWidth();
+
 // M10:main.cpp 的流式回调(打字机输出 on_text_delta、on_tool_start……)在
 // 主线程上打印;TurnInputListener 的 "[已打断]"/"[已排队] ..." 提示在监听
 // 线程上打印——两边都写 std::cout,不加锁会在真终端上偶发交错、把画面

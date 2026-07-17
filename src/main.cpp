@@ -33,10 +33,12 @@
 #include "api/responses/client.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
+#include "cli/divider.hpp"
 #include "cli/setup_wizard.hpp"
 #include "cli/slash_commands.hpp"
 #include "cli/spinner.hpp"
 #include "cli/theme.hpp"
+#include "cli/todo_render.hpp"
 #include "config/config.hpp"
 #include "mcp/client.hpp"
 #include "mcp/mcp_tool.hpp"
@@ -49,6 +51,7 @@
 #include "tools/search.hpp"
 #include "tools/skill_loader.hpp"
 #include "tools/skill_tool.hpp"
+#include "tools/todo_tool.hpp"
 #include "tools/write_file.hpp"
 
 #ifdef _WIN32
@@ -58,7 +61,7 @@
 
 namespace {
 
-constexpr std::string_view kVersion = "0.9.0";
+constexpr std::string_view kVersion = "0.10.0";
 
 void PrintVersion() {
     std::cout << "lubancode " << kVersion << "\n";
@@ -95,6 +98,7 @@ void PrintHelp() {
         << "                  映射,responses 原样递给 API)\n"
         << "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
         << "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
+        << "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
         << "  ESC             流式回复期间按下:打断当前这轮回答,已出的半截话保留、下一轮能接着聊;\n"
         << "                  空闲时按下:清空正在编辑的这一行;确认提示 [y/a/N] 下按下:等同拒绝\n"
         << "  流式期间打字回车  不会打断当前流,而是排进队列,本轮结束后按顺序自动发出\n"
@@ -316,6 +320,27 @@ private:
     bool spinner_enabled_;
 };
 
+// M11(0.10.0):输入/输出分界线。用户回车提交、模型真要开始作答那一刻打
+// 一条,回合结束的统计行之后再打一条,把一问一答从视觉上框出来——纯粹
+// 是一条线,不带文字、不带花边。is_console 为假(管道/重定向)时直接
+// 什么都不打,不污染被重定向的输出。宽度用 cli::DetectConsoleWidth()
+// 现测,测不到就交给 cli::BuildDividerLine 自己按 80 列兜底。颜色用
+// theme.stats(跟 token 统计行、cwd 提示同一档"淡色信息"),plain 主题下
+// theme.stats 本来就是空串,着色形同虚设,不用另外判断。
+void PrintDivider(const lubancode::cli::Theme& theme, bool is_console) {
+    if (!is_console) {
+        return;
+    }
+    const std::optional<int> width = lubancode::cli::DetectConsoleWidth();
+    const bool plain = theme.reset.empty();
+    const std::string line = lubancode::cli::BuildDividerLine(width.value_or(80), plain);
+    if (line.empty()) {
+        return;
+    }
+    std::cout << theme.stats << line << theme.reset << "\n";
+    std::cout.flush();
+}
+
 // 交互模式启动横幅:一眼看全版本、wire、当前模型、工作目录,两行,不啰嗦。
 void PrintBanner(const lubancode::config::Config& config, const lubancode::cli::Theme& theme) {
     const std::string wire_str = config.wire == lubancode::config::Wire::Responses ? "responses" : "anthropic";
@@ -500,11 +525,16 @@ struct UsageStats {
 // 如果里面注册了 "agent" 工具,这里顺带把这一轮现算好的确认/记账/打印
 // 逻辑通过 SetHooks 灌给它,子代理被调用时就能用上同一套(详见
 // tools/agent_tool.hpp 顶部注释)。
+// todo_state:M11(0.10.0)新增,todo_write 工具(如果这一轮的 registry 里
+// 注册了)背后的会话级待办清单——传进来是为了 on_tool_done 能在 todo_write
+// 成功调用之后立刻把最新清单画出来。可以是空指针(没注册这个工具的场景,
+// 目前调用点都注册了,留这个口子只是让调用方多一分自由)。
 lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::string>& always_allowed_tools,
                                             const lubancode::cli::Theme& theme, UsageStats& usage_stats,
                                             lubancode::cli::ContextTracker& context_tracker,
                                             lubancode::tools::ToolRegistry& registry,
-                                            const lubancode::config::HooksConfig& hooks_config) {
+                                            const lubancode::config::HooksConfig& hooks_config,
+                                            std::shared_ptr<lubancode::tools::TodoListState> todo_state = nullptr) {
     lubancode::agent::Callbacks callbacks;
 
     // M9:hooks_config 四个数组全空是常态(没配 hooks 的用户占多数),这时候
@@ -578,10 +608,20 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         return *answer == "y" || *answer == "Y";
     };
 
-    callbacks.on_tool_done = [&theme](const std::string& name, const lubancode::tools::Tool::Result& result) {
+    callbacks.on_tool_done = [&theme, todo_state](const std::string& name,
+                                                    const lubancode::tools::Tool::Result& result) {
         if (result.is_error) {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
             std::cout << theme.error << "[工具出错] " << name << ": " << result.content << theme.reset << "\n";
+            std::cout.flush();
+            return;
+        }
+        // M11(0.10.0):todo_write 成功调用之后,紧接着把最新清单画出来——
+        // 让"计划、进度"这件事在屏幕上跟着模型的每一步调用同步可见,不用
+        // 用户另外敲 /todos 才看得到。
+        if (name == "todo_write" && todo_state) {
+            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+            std::cout << lubancode::cli::FormatTodoList(todo_state->items, theme);
             std::cout.flush();
         }
     };
@@ -646,17 +686,27 @@ struct RunTurnResult {
 // M10:这里起一条 TurnInputListener,存活区间正好是"发出请求到本轮 Run()
 // 结束"——ESC 打断、消息排队都靠它。真控制台之外(管道/重定向)监听器
 // 构造函数自己判断不起线程,行为跟 0.7.0 完全一致。
+// is_console:M11(0.10.0)新增,决定要不要打输入/输出分界线(管道/重定向
+// 模式恒为假,分界线完全不出现,不污染被重定向的输出)。todo_state 同样
+// M11 新增,转发给 BuildCallbacks 给 on_tool_done 用;留空指针表示这一轮
+// 的 registry 没注册 todo_write(目前两个调用点都注册了,这个默认值只是
+// 留个口子)。
 RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bool auto_confirm,
                        std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
                        lubancode::cli::ContextTracker& context_tracker, lubancode::tools::ToolRegistry& registry,
-                       const lubancode::config::HooksConfig& hooks_config) {
+                       const lubancode::config::HooksConfig& hooks_config, bool is_console,
+                       std::shared_ptr<lubancode::tools::TodoListState> todo_state = nullptr) {
     UsageStats usage_stats;
     const lubancode::agent::Callbacks callbacks =
         BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker, registry,
-                        hooks_config);
+                        hooks_config, todo_state);
 
     std::atomic<bool> cancel_flag{false};
     lubancode::cli::TurnInputListener listener(cancel_flag, theme);
+
+    // 用户这一行已经提交、真要开始等模型作答了——分界线打在这儿,紧跟在
+    // 提示符那一行之后、模型正文开始打字机输出之前。
+    PrintDivider(theme, is_console);
 
     const auto result = loop.Run(user_input, callbacks, &cancel_flag);
 
@@ -684,6 +734,9 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
         std::cout << " · 输出 " << usage_stats.output_tokens << " · 请求 " << usage_stats.request_count << " 次"
                    << " · context " << context_tracker.UsagePercent() << "%" << theme.reset << "\n";
     }
+    // 回合正常结束(不是上面那条 !result.has_value() 的报错早退)——统计行
+    // 之后再打一条分界线,跟开头那条首尾呼应,把这一问一答框完整。
+    PrintDivider(theme, is_console);
     return out;
 }
 
@@ -737,6 +790,7 @@ void PrintSlashHelp() {
               << "  /think          看当前推理强度;/think 档位 切档位,档位以服务商为准(/effort 同义)\n"
               << "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
               << "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
+              << "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
               << "  /exit           退出(裸词 exit/quit 也认)\n";
 }
 
@@ -986,6 +1040,12 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     registry.Register(std::make_unique<lubancode::tools::AgentTool>(
         wrapped_backend, sub_registry, CurrentDirUtf8(), config.model, /*default_max_turns=*/15, skills_segment));
 
+    // M11(0.10.0):todo_write 只挂主注册表(registry),绝不挂 sub_registry——
+    // 子代理是短命的一次性跑腿,不该有权限乱写主会话的待办清单。todo_state
+    // 这份 shared_ptr 同时交给 /todos 命令、RunTurn(转给 on_tool_done 渲染)。
+    auto todo_state = std::make_shared<lubancode::tools::TodoListState>();
+    registry.Register(std::make_unique<lubancode::tools::TodoWriteTool>(todo_state));
+
     std::optional<lubancode::agent::AgentLoop> loop;
     const auto rebuild_loop = [&]() {
         // max_tokens=4096、max_turns=25 是 AgentLoop 自己的默认值,这里显式
@@ -1045,6 +1105,9 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                 case lubancode::cli::SlashCommand::Mcp:
                     PrintMcpCommand(mcp_servers);
                     break;
+                case lubancode::cli::SlashCommand::Todos:
+                    std::cout << lubancode::cli::FormatTodoList(todo_state->items, theme);
+                    break;
                 case lubancode::cli::SlashCommand::Exit:
                     return false;
                 case lubancode::cli::SlashCommand::Unknown:
@@ -1076,7 +1139,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
 
         const RunTurnResult turn_result =
             RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry,
-                    config.hooks);
+                    config.hooks, spinner_enabled, todo_state);
         for (auto& queued : turn_result.queued_lines) {
             pending_queue.push_back(std::move(queued));
         }
@@ -1144,6 +1207,12 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     RegisterMcpTools(mcp_servers, registry);
     registry.Register(std::make_unique<lubancode::tools::AgentTool>(
         wrapped_backend, sub_registry, CurrentDirUtf8(), config.model, /*default_max_turns=*/15, skills_segment));
+    // M11(0.10.0):单发模式也挂 todo_write(只挂主 registry,不挂 sub_registry,
+    // 理由同 InteractiveLoop)——单发问答一样可能是"先列计划再分步做"这种
+    // 多步骤任务,没道理只有交互模式能用这个工具。没有 /todos 命令可看
+    // (单发模式压根没有下一轮循环),但 on_tool_done 该渲染的时候照样渲染。
+    auto todo_state = std::make_shared<lubancode::tools::TodoListState>();
+    registry.Register(std::make_unique<lubancode::tools::TodoWriteTool>(todo_state));
     lubancode::agent::AgentLoop loop(wrapped_backend, registry, config.model,
                                       lubancode::agent::BuildSystemPrompt(CurrentDirUtf8(), persona, skills_segment),
                                       /*max_tokens=*/4096, /*max_turns=*/25, config.max_context_chars);
@@ -1154,7 +1223,7 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     // 退出,ESC/排队这套机制天生只对交互循环有意义(spec 也只要求交互模式
     // 的手测清单),这里只取 status,忽略 queued_lines/cancelled。
     return RunTurn(loop, question, auto_confirm, always_allowed_tools, theme, context_tracker, registry,
-                    config.hooks)
+                    config.hooks, spinner_enabled, todo_state)
         .status;
 }
 
