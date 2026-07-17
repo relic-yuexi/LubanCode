@@ -147,6 +147,8 @@ add_library(lubancode_core STATIC
   src/tools/skill_loader.cpp
   src/tools/skill_tool.cpp
   src/tools/todo_tool.cpp
+  src/tools/web_fetch.cpp
+  src/tools/web_search.cpp
   src/mcp/transport.cpp
   src/mcp/client.cpp
   src/mcp/mcp_tool.cpp

@@ -88,6 +88,17 @@ struct HooksConfig {
     }
 };
 
+// websearch:搜索服务配置,只从配置文件来(跟 hooks/mcpServers 同样待遇,
+// 没有环境变量、没有内置默认值这两级)。provider 只认 tavily/brave/serper
+// 三家;api_key 必填非空。没配这一段,web_search 工具压根不注册(模型
+// 看不见,不会瞎调)。api_key 不打日志、展示时走 MaskApiKey 打码。
+struct SearchConfig {
+    std::string provider;
+    std::string api_key;
+
+    bool Configured() const { return !provider.empty() && !api_key.empty(); }
+};
+
 // M8:一个 MCP 服务器的配置。command 必填,args/env 可选(缺省空)。
 // env 用 vector<pair> 而不是 map——直接对得上 tools::RunProcess 的
 // extra_env 入参类型(顺序在这里不重要,但没必要多一趟转换)。
@@ -112,6 +123,9 @@ struct Config {
     // M8:MCP 服务器,键是服务器名,只从配置文件来(跟 hooks 一样没有
     // 环境变量、没有内置默认值这两级),没配就是空 map。
     std::map<std::string, McpServerConfig> mcp_servers;
+    // websearch:搜索服务,只从配置文件来,没配就是空的(Configured()=false,
+    // web_search 工具不注册)。
+    SearchConfig search;
 };
 
 // 每个字段最终来自哪一级,跟 Config 里的字段一一对应。
@@ -160,6 +174,8 @@ struct FileConfig {
     // M8:mcpServers 段,整段有没有出现在 JSON 里(跟 hooks 同样待遇——
     // 只从配置文件来,没有环境变量、没有内置默认值)。
     std::optional<std::map<std::string, McpServerConfig>> mcp_servers;
+    // websearch:search 段,整段有没有出现在 JSON 里(同上,只从配置文件来)。
+    std::optional<SearchConfig> search;
     std::string source_path;
     // 这份 FileConfig 是不是从"旧位置迁移到新位置"这个动作里读出来的;
     // 有值就是要打印给用户看的那一行通知(LoadFileConfig 填,LoadFromEnv
@@ -300,6 +316,13 @@ std::expected<HooksConfig, std::string> ParseHooksConfig(const nlohmann::json& h
 // 具体是哪个服务器的哪个字段,方便定位。
 std::expected<std::map<std::string, McpServerConfig>, std::string> ParseMcpServersConfig(
     const nlohmann::json& mcp_servers_json, const std::string& file_path_for_error);
+
+// 纯函数,不碰 IO:解析 config.json 里的 "search" 字段(整个 JSON object)。
+// 格式 {"provider": "tavily"|"brave"|"serper", "api_key": "..."},两个字段
+// 都必填。search_json 不是 object、provider 不是这三家之一、api_key 缺失或
+// 空串……都直接报错,错误信息带上 file_path_for_error,方便定位。
+std::expected<SearchConfig, std::string> ParseSearchConfig(const nlohmann::json& search_json,
+                                                             const std::string& file_path_for_error);
 
 // 找配置文件,查找顺序:
 //   1) cwd 的新位置  <cwd>/.lubancode/config.json

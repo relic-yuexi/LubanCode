@@ -228,6 +228,34 @@ std::expected<std::map<std::string, McpServerConfig>, std::string> ParseMcpServe
     return out;
 }
 
+std::expected<SearchConfig, std::string> ParseSearchConfig(const nlohmann::json& search_json,
+                                                             const std::string& file_path_for_error) {
+    if (!search_json.is_object()) {
+        return std::unexpected("配置文件 " + file_path_for_error + " 里的 search 字段必须是一个 JSON object");
+    }
+    if (!search_json.contains("provider") || !search_json["provider"].is_string()) {
+        return std::unexpected("配置文件 " + file_path_for_error +
+                                " 里的 search 段缺少必填字段 provider(字符串,tavily/brave/serper 三选一)");
+    }
+    const std::string provider = search_json["provider"].get<std::string>();
+    if (provider != "tavily" && provider != "brave" && provider != "serper") {
+        return std::unexpected("配置文件 " + file_path_for_error +
+                                " 里的 search.provider 只认 tavily/brave/serper,写的是: " + provider);
+    }
+    if (!search_json.contains("api_key") || !search_json["api_key"].is_string()) {
+        return std::unexpected("配置文件 " + file_path_for_error + " 里的 search 段缺少必填字段 api_key(字符串)");
+    }
+    const std::string api_key = search_json["api_key"].get<std::string>();
+    if (api_key.empty()) {
+        return std::unexpected("配置文件 " + file_path_for_error + " 里的 search.api_key 不能是空串");
+    }
+
+    SearchConfig config;
+    config.provider = provider;
+    config.api_key = api_key;
+    return config;
+}
+
 std::expected<HooksConfig, std::string> ParseHooksConfig(const nlohmann::json& hooks_json,
                                                            const std::string& file_path_for_error) {
     if (!hooks_json.is_object()) {
@@ -364,6 +392,13 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
             return std::unexpected(mcp_result.error());
         }
         config.mcp_servers = std::move(*mcp_result);
+    }
+    if (parsed.contains("search")) {
+        auto search_result = ParseSearchConfig(parsed["search"], file_path_for_error);
+        if (!search_result.has_value()) {
+            return std::unexpected(search_result.error());
+        }
+        config.search = std::move(*search_result);
     }
 
     return config;
@@ -669,6 +704,12 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     // 默认值这两级(跟 hooks 一样)。配置文件没写这字段,就是空 map。 ----
     if (file_config.has_value() && file_config->mcp_servers.has_value()) {
         result.config.mcp_servers = *file_config->mcp_servers;
+    }
+
+    // ---- search:websearch 用,只从配置文件来(跟 hooks/mcpServers 一样)。
+    // 没写这一段就是空的 SearchConfig,web_search 工具不注册。 ----
+    if (file_config.has_value() && file_config->search.has_value()) {
+        result.config.search = *file_config->search;
     }
 
     return result;

@@ -57,6 +57,8 @@
 #include "tools/skill_loader.hpp"
 #include "tools/skill_tool.hpp"
 #include "tools/todo_tool.hpp"
+#include "tools/web_fetch.hpp"
+#include "tools/web_search.hpp"
 #include "tools/write_file.hpp"
 
 #ifdef _WIN32
@@ -130,9 +132,11 @@ void PrintHelp() {
         << "     .lubancode/config.json → cwd 的旧位置 .lubancode.json → 主目录的旧位置\n"
         << "     .lubancode.json;读到旧位置会自动挪到新位置)。字段:wire / base_url / api_key / model /\n"
         << "     max_context_chars / theme / system_prompt_file / context_window / compact_model / think,\n"
-        << "     全部可选。另有 hooks / mcpServers 两段(只从配置文件读,没有环境变量、没有内置默认值):\n"
+        << "     全部可选。另有 hooks / mcpServers / search 三段(只从配置文件读,没有环境变量、没有内置默认值):\n"
         << "       \"mcpServers\": {\"服务器名\": {\"command\": \"...\", \"args\": [...], \"env\": {...}}}\n"
         << "       起进程握手成功后,工具以 mcp__服务器名__工具名 挂进工具表,/mcp 看状态\n"
+        << "       \"search\": {\"provider\": \"tavily|brave|serper\", \"api_key\": \"...\"}\n"
+        << "       配了这一段才会注册 web_search 工具;web_fetch 工具无须配置,始终可用\n"
         << "  3) 通用环境变量(向后兼容旧用法,跟 Claude Code 等工具共用同名变量时容易撞车,\n"
         << "     建议改用第 1 级的 LUBANCODE_* 专属变量):\n"
         << "       wire=anthropic 时读 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL\n"
@@ -278,6 +282,18 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
         }
         std::cout << "\n";
     }
+    // websearch:search 段同样只从配置文件来。api_key 照例打码,provider
+    // 直接亮出来——配了这一段 web_search 工具才会注册。
+    {
+        std::cout << "  search             = ";
+        if (!config.search.Configured()) {
+            std::cout << "(未配置,web_search 工具不注册)";
+        } else {
+            std::cout << config.search.provider
+                      << " (api_key " << lubancode::config::MaskApiKey(config.search.api_key) << ")";
+        }
+        std::cout << "\n";
+    }
     if (session_model.has_value()) {
         std::cout << "\n  本会话实际在用的 model = " << *session_model;
         if (*session_model != config.model) {
@@ -376,7 +392,12 @@ void PrintBanner(const lubancode::config::Config& config, const lubancode::cli::
 // 的技能清单,原样传进来注册成 "skill" 工具——子代理、主代理各自建的
 // registry 都要有这个工具(技能对子代理同样有用),所以调用方每次调用都
 // 传同一份清单进来。
-lubancode::tools::ToolRegistry BuildBaseToolRegistry(const std::vector<lubancode::tools::SkillMeta>& skills) {
+// search_config:websearch 用。web_fetch 无条件注册;web_search 只在配置文件
+// 写了 search 段(provider + api_key 齐活)时才注册——没配就不挂,模型的
+// 工具表里压根没有这一项,不会瞎调。两个都进基础表,子代理也能用(子代理
+// 干"搜了再读再总结"正合适)。
+lubancode::tools::ToolRegistry BuildBaseToolRegistry(const std::vector<lubancode::tools::SkillMeta>& skills,
+                                                       const lubancode::config::SearchConfig& search_config) {
     lubancode::tools::ToolRegistry registry;
     registry.Register(std::make_unique<lubancode::tools::ReadFileTool>());
     registry.Register(std::make_unique<lubancode::tools::RunCommandTool>());
@@ -384,6 +405,10 @@ lubancode::tools::ToolRegistry BuildBaseToolRegistry(const std::vector<lubancode
     registry.Register(std::make_unique<lubancode::tools::EditFileTool>());
     registry.Register(std::make_unique<lubancode::tools::SearchTool>());
     registry.Register(std::make_unique<lubancode::tools::SkillTool>(skills));
+    registry.Register(std::make_unique<lubancode::tools::WebFetchTool>("lubancode/" + std::string(kVersion)));
+    if (search_config.Configured()) {
+        registry.Register(std::make_unique<lubancode::tools::WebSearchTool>(search_config));
+    }
     return registry;
 }
 
@@ -1598,8 +1623,8 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     // sub_registry 声明在前、registry 在后,函数退出时按声明的反序析构,
     // agent 工具持有的 sub_registry 引用不会悬垂。MCP 工具同样注册进两份
     // (子代理也能用外部工具)。
-    lubancode::tools::ToolRegistry sub_registry = BuildBaseToolRegistry(skills);
-    lubancode::tools::ToolRegistry registry = BuildBaseToolRegistry(skills);
+    lubancode::tools::ToolRegistry sub_registry = BuildBaseToolRegistry(skills, config.search);
+    lubancode::tools::ToolRegistry registry = BuildBaseToolRegistry(skills, config.search);
     RegisterMcpTools(mcp_servers, sub_registry);
     RegisterMcpTools(mcp_servers, registry);
     registry.Register(std::make_unique<lubancode::tools::AgentTool>(
@@ -1774,8 +1799,8 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     // "子代理能用什么"(不含 agent 自己,防递归),registry 是主循环真正
     // 用的那份,基础工具之外多注册了 agent 工具本身。MCP 工具同样注册进
     // 两份。
-    lubancode::tools::ToolRegistry sub_registry = BuildBaseToolRegistry(skills);
-    lubancode::tools::ToolRegistry registry = BuildBaseToolRegistry(skills);
+    lubancode::tools::ToolRegistry sub_registry = BuildBaseToolRegistry(skills, config.search);
+    lubancode::tools::ToolRegistry registry = BuildBaseToolRegistry(skills, config.search);
     RegisterMcpTools(mcp_servers, sub_registry);
     RegisterMcpTools(mcp_servers, registry);
     registry.Register(std::make_unique<lubancode::tools::AgentTool>(
