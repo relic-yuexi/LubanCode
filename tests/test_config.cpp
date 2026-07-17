@@ -27,13 +27,14 @@ config::GenericEnvValues EmptyGenericEnv() {
 // 四级优先级:每一级都设置同一字段,验证高优先级压过低优先级。
 // ---------------------------------------------------------------------------
 
-TEST_CASE("MergeConfig: 什么都没设置时,全走内置默认值") {
+TEST_CASE("MergeConfig: 什么都没设置时,wire/max_context_chars 走内置默认值,base_url/model/api_key 留空") {
     const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
     REQUIRE(result.has_value());
 
+    // lubancode 不绑死哪一家模型服务:base_url、model、api_key 都没有内置默认值。
     CHECK(result->config.wire == config::Wire::Anthropic);
-    CHECK(result->config.base_url == "https://api.minimaxi.com/anthropic");
-    CHECK(result->config.model == "MiniMax-M3");
+    CHECK(result->config.base_url.empty());
+    CHECK(result->config.model.empty());
     CHECK(result->config.auth_token.empty());
     CHECK(result->config.max_context_chars == config::kDefaultMaxContextChars);
 
@@ -169,7 +170,7 @@ TEST_CASE("MergeConfig: 配置文件只写了 base_url 和 api_key,model 从通�
     CHECK(result->sources.max_context_chars == config::Source::Default);
 }
 
-TEST_CASE("MergeConfig: 配置文件只写了 model,base_url/api_key 从内置默认值/空来") {
+TEST_CASE("MergeConfig: 配置文件只写了 model,base_url/api_key 没有默认值,留空") {
     config::FileConfig file;
     file.model = "only-model-from-file";
     file.source_path = "/tmp/.lubancode.json";
@@ -180,7 +181,7 @@ TEST_CASE("MergeConfig: 配置文件只写了 model,base_url/api_key 从内置�
     CHECK(result->config.model == "only-model-from-file");
     CHECK(result->sources.model == config::Source::ConfigFile);
 
-    CHECK(result->config.base_url == "https://api.minimaxi.com/anthropic");
+    CHECK(result->config.base_url.empty());
     CHECK(result->sources.base_url == config::Source::Default);
 
     CHECK(result->config.auth_token.empty());
@@ -211,15 +212,15 @@ TEST_CASE("MergeConfig: wire=responses 时,通用 env 读 OPENAI_*,不读 ANTHRO
     CHECK(result->config.model == "openai-model");
 }
 
-TEST_CASE("MergeConfig: wire=responses 且什么都没配时,走 responses 专属默认值") {
+TEST_CASE("MergeConfig: wire=responses 且什么都没配时,base_url/model 一样没有默认值,留空") {
     config::LubancodeEnvValues lubancode_env;
     lubancode_env.wire = "responses";
 
     const auto result = config::MergeConfig(lubancode_env, std::nullopt, EmptyGenericEnv());
     REQUIRE(result.has_value());
 
-    CHECK(result->config.base_url == "https://api.minimaxi.com/v1");
-    CHECK(result->config.model == "MiniMax-M3");
+    CHECK(result->config.base_url.empty());
+    CHECK(result->config.model.empty());
 }
 
 TEST_CASE("MergeConfig: 配置文件里的 wire 压过默认值,专属 env 的 wire 又压过配置文件") {
@@ -417,4 +418,76 @@ TEST_CASE("ToString(Source): 四种来源都有非空的中文说法") {
     CHECK_FALSE(config::ToString(config::Source::ConfigFile).empty());
     CHECK_FALSE(config::ToString(config::Source::GenericEnv).empty());
     CHECK_FALSE(config::ToString(config::Source::Default).empty());
+}
+
+// ---------------------------------------------------------------------------
+// RequireConfigured:base_url/api_key/model 三个字段都不许空,非交互路径
+// (单发模式/管道模式)用这个,跟只管 api_key 一个字段的 RequireApiKey 分开。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RequireConfigured: 三个字段都有值时通过") {
+    config::LubancodeEnvValues lubancode_env;
+    lubancode_env.base_url = "https://example.com";
+    lubancode_env.api_key = "some-key";
+    lubancode_env.model = "some-model";
+    const auto result = config::MergeConfig(lubancode_env, std::nullopt, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(config::RequireConfigured(*result).has_value());
+}
+
+TEST_CASE("RequireConfigured: 什么都没配时报错,三个字段都点名,并且提到三条配置途径") {
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+
+    const auto check = config::RequireConfigured(*result);
+    REQUIRE_FALSE(check.has_value());
+    const std::string& message = check.error();
+    CHECK(message.find("base_url") != std::string::npos);
+    CHECK(message.find("api_key") != std::string::npos);
+    CHECK(message.find("model") != std::string::npos);
+    CHECK(message.find("向导") != std::string::npos);
+    CHECK(message.find(".lubancode.json") != std::string::npos);
+    CHECK(message.find("LUBANCODE_") != std::string::npos);
+}
+
+TEST_CASE("RequireConfigured: 只缺 model 时,错误信息只点名 model,不提 base_url/api_key") {
+    config::LubancodeEnvValues lubancode_env;
+    lubancode_env.base_url = "https://example.com";
+    lubancode_env.api_key = "some-key";
+    const auto result = config::MergeConfig(lubancode_env, std::nullopt, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+
+    const auto check = config::RequireConfigured(*result);
+    REQUIRE_FALSE(check.has_value());
+    const std::string& message = check.error();
+    CHECK(message.find("model") != std::string::npos);
+    CHECK(message.find("base_url") == std::string::npos);
+    CHECK(message.find("api_key") == std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// MaskApiKey:打码规则。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("MaskApiKey: 空字符串显示未设置") {
+    CHECK(config::MaskApiKey("") == "(未设置)");
+}
+
+TEST_CASE("MaskApiKey: 超过 8 位只留前 8 位加省略号") {
+    CHECK(config::MaskApiKey("sk-cp-abcdefghijklmnop") == "sk-cp-ab...");
+}
+
+TEST_CASE("MaskApiKey: 不超过 8 位原样加省略号,不截断出空字符串") {
+    CHECK(config::MaskApiKey("short") == "short...");
+}
+
+// ---------------------------------------------------------------------------
+// ConfigResult::config_file_path:LoadFromEnv 才会填,MergeConfig 是纯函数,
+// 不碰路径,默认应该是 std::nullopt。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("MergeConfig: 不设置 config_file_path,默认是 std::nullopt") {
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK_FALSE(result->config_file_path.has_value());
 }

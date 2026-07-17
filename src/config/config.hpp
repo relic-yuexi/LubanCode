@@ -7,6 +7,12 @@
 // 按"字段"逐个决,不是整套配置一刀切——比如配置文件只写了 base_url,
 // model 照样能从下一级来。密钥绝不硬编码进源码。
 //
+// lubancode 是通用工具,不绑死哪一家模型服务:内置默认值只有 wire=anthropic
+// 和 max_context_chars,base_url/api_key/model 三个字段没有内置默认值,四级
+// 都没配到就是空。空着不算错——MergeConfig 不报错,只是留空;真要跟模型
+// 对话之前(交互模式的初次配置向导、单发模式的 RequireConfigured)才会因为
+// 缺东西而拦下来。
+//
 // 加载逻辑拆成两半:纯函数 MergeConfig 只管按优先级合并、不碰任何 IO,
 // 好单测;LoadFileConfig/LoadFromEnv 才是真正读环境变量、读磁盘文件的地方。
 
@@ -59,6 +65,11 @@ struct ConfigSources {
 struct ConfigResult {
     Config config;
     ConfigSources sources;
+    // 这份配置是从哪个 .lubancode.json 读出来的(cwd 或用户主目录),没有配置文件
+    // 就是 std::nullopt。跟 sources 不完全一样——sources 是"每个字段最终用了哪一级",
+    // 这个字段单纯记"读到的配置文件在哪",供 /model 之类想更新配置文件的场景用
+    // (LoadFromEnv 里填;MergeConfig 本身是纯函数,不碰路径)。
+    std::optional<std::string> config_file_path;
 };
 
 // .lubancode.json 解析出来的字段,全部可选,缺的字段留 std::nullopt。
@@ -111,6 +122,34 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
 // 让人知道去哪儿配。真正要跟模型对话之前(AskOnce/InteractiveLoop 之前)
 // 才需要调这个;--config 只是看一眼配置,不需要。
 std::expected<void, std::string> RequireApiKey(const ConfigResult& result);
+
+// 纯函数:非交互场景(单发模式 `lubancode "问题"`、管道模式)在真正发请求前的
+// 最后一关——base_url、api_key、model 三个字段都不许是空的(三个都没有内置
+// 默认值)。缺哪个说哪个,统一给出三条配置途径:交互模式走初次配置向导 /
+// 用户主目录放一份 .lubancode.json / 设 LUBANCODE_* 环境变量。
+// 跟 RequireApiKey 的区别:RequireApiKey 只管 api_key 一个字段(给
+// --config 之外的地方单独复用),这个管三个字段一起,是非交互路径实际会
+// 调用的那个。
+std::expected<void, std::string> RequireConfigured(const ConfigResult& result);
+
+// 把 api_key 打码:只留前 8 位 + "...",没设置就显示 (未设置)。--config、
+// 初次配置向导的汇总展示都用这个,统一打码规则。
+std::string MaskApiKey(const std::string& api_key);
+
+// 用户主目录:Windows 取 %USERPROFILE%,别的平台取 $HOME。找不到返回
+// std::nullopt。LoadFileConfig 内部用,也供初次配置向导/SaveConfigFile
+// 拼路径用,所以导出成公开函数。
+std::optional<std::string> HomeDir();
+
+// 把 config 写成 JSON,保存到用户主目录的 .lubancode.json(找不到主目录时
+// 报错)。成功时返回写入的完整路径。初次配置向导选择保存时调用这个。
+std::expected<std::string, std::string> SaveConfigFile(const Config& config);
+
+// 只更新一份已存在的配置文件里的 model 字段,其余字段原样保留(哪怕是
+// 这份 FileConfig 结构体不认得的字段,也不会被冲掉——直接读原始 JSON、
+// 改一个字段、写回去,不经过 FileConfig 这层)。/model 切换后问"写进配置
+// 文件?"选是,就调这个。file_path 打不开、内容不是合法 JSON,都报错。
+std::expected<void, std::string> UpdateModelInConfigFile(const std::string& file_path, const std::string& model);
 
 // 把一段 JSON 文本解析成 FileConfig。file_path_for_error 只用来拼错误信息,
 // 不影响解析本身。JSON 坏了、或者顶层不是一个 object,都返回带路径的错误。

@@ -69,15 +69,56 @@ lubancode 要跟大模型对话,得知道 wire(协议)、base_url、api_key、mo
 1. **LUBANCODE_ 专属环境变量**:`LUBANCODE_WIRE`、`LUBANCODE_BASE_URL`、`LUBANCODE_API_KEY`、`LUBANCODE_MODEL`、`LUBANCODE_MAX_CONTEXT`
 2. **配置文件**:先找当前目录的 `.lubancode.json`,找不到再找用户主目录(Windows 是 `%USERPROFILE%`)下的 `.lubancode.json`
 3. **通用环境变量**(向后兼容):`wire=anthropic` 时读 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_MODEL`;`wire=responses` 时读 `OPENAI_BASE_URL`/`OPENAI_API_KEY`/`OPENAI_MODEL`
-4. **内置默认值**:`wire=anthropic`,`base_url`/`model` 给对应的 MiniMax 端点(`api_key` 没有默认值,必须自己配一个)
+4. **内置默认值**:只有 `wire=anthropic`、`max_context_chars=600000` 这两项。`base_url`/`api_key`/`model` **没有内置默认值**——lubancode 是通用工具,不绑死哪一家模型服务,这三项四级都没配到,交互模式会自动走一遍初次配置向导,单发模式/管道模式会直接报错并提示三条配置途径。
 
 ### 为什么要有专属环境变量
 
 不少人机器上已经装了 Claude Code、Codex 之类的工具,全局环境变量里早就设好了 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`——这些变量是给那些工具专用的中转服务配的,lubancode 要是也去读它们,轻则连错服务,重则被中转拒之门外(比如报 `this group only allows Claude Code clients`)。所以 lubancode 才自立门户,推荐直接用 `LUBANCODE_*` 专属变量,或者干脆放一份配置文件,不跟别的工具打架。
 
-### 推荐做法:主目录放一份 .lubancode.json
+### 最快上手:交互模式的初次配置向导
 
-在用户主目录(Windows 是 `%USERPROFILE%`,即 `C:\Users\你的用户名\`)下建一个 `.lubancode.json`:
+第一次用、还没配过 `base_url`/`api_key`/`model` 的话,什么都不用提前准备,直接不带参数运行 `lubancode`,会自动进初次配置向导:
+
+```
+$ lubancode
+=== lubancode 初次配置向导 ===
+(base_url / api_key 没读到,先配一遍,配完直接进入会话)
+
+接口格式:
+  1) anthropic (Claude 系)
+  2) responses (OpenAI 系)
+选择 [1]: 1
+
+base_url(必填),例如:
+  https://api.minimaxi.com/anthropic
+base_url: https://api.minimaxi.com/anthropic
+
+api_key(必填): sk-...
+
+model:回车自动从接口获取列表,或者直接输入模型名。
+model: 
+  1) MiniMax-M3
+  2) MiniMax-M2.7
+  ...
+选择模型编号 [1]: 1
+
+配置汇总:
+  wire     = anthropic
+  base_url = https://api.minimaxi.com/anthropic
+  api_key  = sk-xxxxxx...
+  model    = MiniMax-M3
+
+保存到 C:/Users/你的用户名/.lubancode.json? [Y/n]: 
+已保存到 C:/Users/你的用户名/.lubancode.json
+lubancode 0.3.0 - 输入问题回车发送,exit 退出,/help 看命令
+> 
+```
+
+model 那一步回车不填,会真的去接口拉一份模型列表(`GET {base_url}/v1/models` 或 `{base_url}/models`,看 wire),编号选;拉取失败(网络问题、404 之类)会如实报错,然后回落到手输模型名,不会卡住。选 `Y`(默认)会把这份配置存进主目录的 `.lubancode.json`,下次直接进会话,不用再配一遍;选 `n` 只在这一次会话生效。
+
+### 手动配置:主目录放一份 .lubancode.json
+
+也可以不走向导,自己在用户主目录(Windows 是 `%USERPROFILE%`,即 `C:\Users\你的用户名\`)下建一个 `.lubancode.json`,下面拿 MiniMax 举例(换成你自己在用的模型服务地址、密钥、模型名即可,lubancode 不绑定任何一家):
 
 ```json
 {
@@ -89,9 +130,24 @@ lubancode 要跟大模型对话,得知道 wire(协议)、base_url、api_key、mo
 }
 ```
 
-字段全部可选,缺的自动往下一级找(通用环境变量,再往下是内置默认值)。这份文件带着密钥,别提交进任何仓库——`.gitignore` 里已经排除了 `.lubancode.json`。
+字段全部可选,缺的自动往下一级找(通用环境变量,再往下是内置默认值——但 `base_url`/`api_key`/`model` 这三项没有内置默认值)。这份文件带着密钥,别提交进任何仓库——`.gitignore` 里已经排除了 `.lubancode.json`。
 
 也可以只在某个项目目录下放一份 `.lubancode.json`,cwd 那份优先级比主目录那份高,适合某个项目要连别的模型服务的场景。
+
+### 交互模式里的命令
+
+交互模式下,输入以 `/` 开头的一行走命令,不发给模型:
+
+| 命令 | 作用 |
+| --- | --- |
+| `/help` | 列出所有命令 |
+| `/model` | 拉取模型列表,编号选择切换(不带参数) |
+| `/model 名字` | 直接切到指定模型名,不用拉列表 |
+| `/config` | 打印当前生效配置(`api_key` 打码)和本会话实际在用的 model |
+| `/clear` | 清空对话历史 |
+| `/exit` | 退出(裸词 `exit`/`quit` 也认) |
+
+`/model` 切换只影响当前会话;如果当前有生效的配置文件,切完会问一句要不要顺手写进去,不写就只是这一次会话用新模型,下次启动还是原来配的那个。
 
 ### 排查配置问题
 

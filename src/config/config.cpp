@@ -1,5 +1,6 @@
 #include "config/config.hpp"
 
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -13,12 +14,6 @@
 namespace lubancode::config {
 
 namespace {
-
-constexpr const char* kDefaultAnthropicBaseUrl = "https://api.minimaxi.com/anthropic";
-constexpr const char* kDefaultAnthropicModel = "MiniMax-M3";
-
-constexpr const char* kDefaultOpenAiBaseUrl = "https://api.minimaxi.com/v1";
-constexpr const char* kDefaultOpenAiModel = "MiniMax-M3";
 
 // 读一个环境变量;没设置或者是空串都算"没有"。
 std::optional<std::string> GetEnv(const char* name) {
@@ -44,7 +39,8 @@ std::optional<std::string> GetEnv(const char* name) {
 #endif
 }
 
-// 用户主目录:Windows 取 %USERPROFILE%,别的平台取 $HOME。
+}  // namespace
+
 std::optional<std::string> HomeDir() {
 #ifdef _WIN32
     return GetEnv("USERPROFILE");
@@ -52,8 +48,6 @@ std::optional<std::string> HomeDir() {
     return GetEnv("HOME");
 #endif
 }
-
-}  // namespace
 
 std::string ToString(Source source) {
     switch (source) {
@@ -192,8 +186,11 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     result.sources.wire = wire_source;
 
     const bool is_anthropic = (wire == Wire::Anthropic);
-    const std::string default_base_url = is_anthropic ? kDefaultAnthropicBaseUrl : kDefaultOpenAiBaseUrl;
-    const std::string default_model = is_anthropic ? kDefaultAnthropicModel : kDefaultOpenAiModel;
+    // base_url、model 没有内置默认值(lubancode 不绑死哪一家模型服务)——
+    // 四级都没配到时就是空串,来源记 Default,留给上层(初次配置向导 /
+    // RequireConfigured)去拦。
+    const std::string default_base_url;
+    const std::string default_model;
     const std::optional<std::string>& generic_base_url =
         is_anthropic ? generic_env.anthropic_base_url : generic_env.openai_base_url;
     const std::optional<std::string>& generic_api_key =
@@ -279,6 +276,109 @@ std::expected<void, std::string> RequireApiKey(const ConfigResult& result) {
         "挑一种配上,再重新运行 lubancode。用 --config 能看到当前每个字段实际读到了什么。");
 }
 
+std::string MaskApiKey(const std::string& api_key) {
+    if (api_key.empty()) {
+        return "(未设置)";
+    }
+    if (api_key.size() <= 8) {
+        return api_key + "...";
+    }
+    return api_key.substr(0, 8) + "...";
+}
+
+std::expected<void, std::string> RequireConfigured(const ConfigResult& result) {
+    std::vector<std::string> missing;
+    if (result.config.base_url.empty()) {
+        missing.push_back("base_url");
+    }
+    if (result.config.auth_token.empty()) {
+        missing.push_back("api_key");
+    }
+    if (result.config.model.empty()) {
+        missing.push_back("model");
+    }
+    if (missing.empty()) {
+        return {};
+    }
+
+    // 提示语只点名实际缺的那几个字段——不然"只缺 model"时,提示里混进
+    // "base_url"/"api_key" 字样反而误导人去查不缺的字段。
+    std::string joined;
+    std::string joined_env;
+    for (std::size_t i = 0; i < missing.size(); ++i) {
+        if (i != 0) {
+            joined += "、";
+            joined_env += " / ";
+        }
+        joined += missing[i];
+        joined_env += "LUBANCODE_";
+        for (const char c : missing[i]) {
+            joined_env += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        }
+    }
+
+    return std::unexpected(
+        "缺少配置: " + joined +
+        ",没法跟模型对话(lubancode 不内置哪一家的地址/模型,得自己配)。三条途径挑一种:\n"
+        "  1) 不带位置参数运行 lubancode,进入交互模式,会自动走初次配置向导\n"
+        "  2) 在用户主目录放一份 .lubancode.json,把 " + joined + " 写进去(字段全部可选)\n"
+        "  3) 设置对应的环境变量: " + joined_env + "\n"
+        "配好之后用 --config 能看到当前每个字段实际读到了什么、来自哪一级。");
+}
+
+std::expected<std::string, std::string> SaveConfigFile(const Config& config) {
+    const auto home = HomeDir();
+    if (!home.has_value()) {
+        return std::unexpected("找不到用户主目录(Windows 下是 %USERPROFILE%),没法保存配置文件");
+    }
+
+    namespace fs = std::filesystem;
+    const fs::path path = fs::path(*home) / ".lubancode.json";
+
+    nlohmann::json j;
+    j["wire"] = (config.wire == Wire::Responses) ? "responses" : "anthropic";
+    j["base_url"] = config.base_url;
+    j["api_key"] = config.auth_token;
+    j["model"] = config.model;
+    j["max_context_chars"] = config.max_context_chars;
+
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file.is_open()) {
+        return std::unexpected("配置文件 " + path.string() + " 打不开写入(检查一下权限)");
+    }
+    file << j.dump(2);
+    file.close();
+    return path.string();
+}
+
+std::expected<void, std::string> UpdateModelInConfigFile(const std::string& file_path, const std::string& model) {
+    std::ifstream in(file_path, std::ios::binary);
+    if (!in.is_open()) {
+        return std::unexpected("配置文件 " + file_path + " 打不开(检查一下权限)");
+    }
+    std::ostringstream buffer;
+    buffer << in.rdbuf();
+    in.close();
+
+    nlohmann::json parsed;
+    try {
+        parsed = nlohmann::json::parse(buffer.str());
+    } catch (const nlohmann::json::parse_error& e) {
+        return std::unexpected("配置文件 " + file_path + " 不是合法 JSON: " + std::string(e.what()));
+    }
+    if (!parsed.is_object()) {
+        return std::unexpected("配置文件 " + file_path + " 顶层必须是一个 JSON object(花括号包起来的那种)");
+    }
+    parsed["model"] = model;
+
+    std::ofstream out(file_path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+        return std::unexpected("配置文件 " + file_path + " 打不开写入(检查一下权限)");
+    }
+    out << parsed.dump(2);
+    return {};
+}
+
 std::expected<ConfigResult, std::string> LoadFromEnv() {
     LubancodeEnvValues lubancode_env;
     lubancode_env.wire = GetEnv("LUBANCODE_WIRE");
@@ -311,7 +411,11 @@ std::expected<ConfigResult, std::string> LoadFromEnv() {
     generic_env.openai_api_key = GetEnv("OPENAI_API_KEY");
     generic_env.openai_model = GetEnv("OPENAI_MODEL");
 
-    return MergeConfig(lubancode_env, *file_config, generic_env);
+    auto merged = MergeConfig(lubancode_env, *file_config, generic_env);
+    if (merged.has_value() && file_config->has_value()) {
+        merged->config_file_path = (*file_config)->source_path;
+    }
+    return merged;
 }
 
 }  // namespace lubancode::config
