@@ -29,6 +29,8 @@ enum class SlashCommand {
     Resume,    // /resume <编号或id>:载入某场存档历史续聊
     Export,    // /export [路径]:当前会话导出 Markdown
     Title,     // /title [标题]:看/设当前会话标题(追加 title 事件行,最后一条胜)
+    Soul,      // /soul [名字|off|default]:魂(风格叠加层)查看/切换(0.16.x 魂法分家)
+    Prompt,    // /prompt [reset]:看法(系统提示词)的来源,或还原 system_prompt.md
     Unknown,  // 以 / 开头,但不认得这个命令
 };
 

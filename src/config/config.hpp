@@ -132,6 +132,10 @@ struct Config {
     std::size_t context_window_tokens = kDefaultContextWindowTokens;  // M6.6:上下文窗口 token 数
     std::string compact_model;  // M6.6:压缩用的模型,空串 = 跟当前会话模型一致
     std::string think;          // M6.6:推理强度,none/low/medium/high,空串 = 不发这个参数
+    // 魂法分家:启动时用哪个"魂"(风格叠加层)。空串或 "default" = 主目录
+    // 的 SOUL.md;"off" = 不叠加;别的名字 = souls/<名字>.md。/soul 切换后
+    // 选"写进配置"就记在这儿。
+    std::string soul;
     HooksConfig hooks;          // M9:钩子,只从配置文件读,没配就是四个空数组
     // M8:MCP 服务器,键是服务器名,只从配置文件来(跟 hooks 一样没有
     // 环境变量、没有内置默认值这两级),没配就是空 map。
@@ -156,6 +160,7 @@ struct ConfigSources {
     Source context_window_tokens = Source::Default;
     Source compact_model = Source::Default;
     Source think = Source::Default;
+    Source soul = Source::Default;
 };
 
 struct ConfigResult {
@@ -186,6 +191,7 @@ struct FileConfig {
     std::optional<std::string> context_window;        // "256k"/"512k"/"1m"/裸数字,原始字符串,解析交给 MergeConfig
     std::optional<std::string> compact_model;         // 压缩用的模型
     std::optional<std::string> think;                 // none/low/medium/high
+    std::optional<std::string> soul;                  // 魂的名字(default/off/souls 里的文件名)
     std::optional<HooksConfig> hooks;                  // M9:hooks 段,整段有没有出现在 JSON 里
     // M8:mcpServers 段,整段有没有出现在 JSON 里(跟 hooks 同样待遇——
     // 只从配置文件来,没有环境变量、没有内置默认值)。
@@ -214,6 +220,7 @@ struct LubancodeEnvValues {
     std::optional<std::string> context_window;        // LUBANCODE_CONTEXT_WINDOW,原始字符串
     std::optional<std::string> compact_model;         // LUBANCODE_COMPACT_MODEL
     std::optional<std::string> think;                 // LUBANCODE_THINK
+    std::optional<std::string> soul;                  // LUBANCODE_SOUL
 };
 
 // 通用环境变量(ANTHROPIC_*/OPENAI_*)读出来的值。两组都传全,MergeConfig
@@ -309,6 +316,10 @@ std::expected<std::string, std::string> SaveConfigFile(const Config& config);
 // 改一个字段、写回去,不经过 FileConfig 这层)。/model 切换后问"写进配置
 // 文件?"选是,就调这个。file_path 打不开、内容不是合法 JSON,都报错。
 std::expected<void, std::string> UpdateModelInConfigFile(const std::string& file_path, const std::string& model);
+
+// 同上,只更新 soul 字段(/soul 切换后问"写进配置?"选是时调用),其余
+// 字段一个都不碰。
+std::expected<void, std::string> UpdateSoulInConfigFile(const std::string& file_path, const std::string& soul);
 
 // 把一段 JSON 文本解析成 FileConfig。file_path_for_error 只用来拼错误信息,
 // 不影响解析本身。JSON 坏了、或者顶层不是一个 object,都返回带路径的错误。

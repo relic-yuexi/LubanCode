@@ -206,3 +206,39 @@ TEST_CASE("AllSlashCommands: /lsp 在列表里") {
     }
     CHECK(has_lsp);
 }
+
+TEST_CASE("ParseSlashCommand: /soul 不带参数(0.16.x 魂法分家)") {
+    const auto parsed = cli::ParseSlashCommand("/soul");
+    CHECK(parsed.command == cli::SlashCommand::Soul);
+    CHECK(parsed.args.empty());
+}
+
+TEST_CASE("ParseSlashCommand: /soul 带名字/off/default 参数") {
+    CHECK(cli::ParseSlashCommand("/soul wenyan").args == "wenyan");
+    CHECK(cli::ParseSlashCommand("/soul wenyan").command == cli::SlashCommand::Soul);
+    CHECK(cli::ParseSlashCommand("/soul off").args == "off");
+    CHECK(cli::ParseSlashCommand("/soul default").args == "default");
+    CHECK(cli::ParseSlashCommand("/Soul wenyan").command == cli::SlashCommand::Soul);
+}
+
+TEST_CASE("ParseSlashCommand: /prompt 不带参数和带 reset") {
+    const auto bare = cli::ParseSlashCommand("/prompt");
+    CHECK(bare.command == cli::SlashCommand::Prompt);
+    CHECK(bare.args.empty());
+    const auto reset = cli::ParseSlashCommand("/prompt reset");
+    CHECK(reset.command == cli::SlashCommand::Prompt);
+    CHECK(reset.args == "reset");
+    CHECK(cli::ParseSlashCommand("/PROMPT").command == cli::SlashCommand::Prompt);
+}
+
+TEST_CASE("AllSlashCommands: /soul //prompt 都在列表里") {
+    const auto& commands = cli::AllSlashCommands();
+    bool has_soul = false;
+    bool has_prompt = false;
+    for (const auto& c : commands) {
+        if (c.name == "/soul") has_soul = true;
+        if (c.name == "/prompt") has_prompt = true;
+    }
+    CHECK(has_soul);
+    CHECK(has_prompt);
+}

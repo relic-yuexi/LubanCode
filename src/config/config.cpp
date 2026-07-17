@@ -431,6 +431,12 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
         }
         config.think = parsed["think"].get<std::string>();
     }
+    if (parsed.contains("soul")) {
+        if (!parsed["soul"].is_string()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 soul 字段必须是字符串");
+        }
+        config.soul = parsed["soul"].get<std::string>();
+    }
     if (parsed.contains("max_context_chars")) {
         const auto& field = parsed["max_context_chars"];
         if (!field.is_number_integer() && !field.is_number_unsigned()) {
@@ -762,6 +768,20 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.sources.think = Source::Default;
     }
 
+    // ---- soul:1 级(LUBANCODE_SOUL)> 2 级 > 4 级默认值(空串 = 用主目录
+    // SOUL.md),没有通用 env 这一级。名字对不对得上 souls/ 里的文件,这里
+    // 不校验——启动时按名字找文件,找不到打警告、魂不生效,不拦人。 ----
+    if (lubancode_env.soul.has_value()) {
+        result.config.soul = *lubancode_env.soul;
+        result.sources.soul = Source::LubancodeEnv;
+    } else if (file_config.has_value() && file_config->soul.has_value()) {
+        result.config.soul = *file_config->soul;
+        result.sources.soul = Source::ConfigFile;
+    } else {
+        result.config.soul.clear();
+        result.sources.soul = Source::Default;
+    }
+
     // ---- hooks:M9 新增,只从配置文件来,没有环境变量、没有内置默认值这
     // 两级(HooksConfig 的 ConfigSources 也不需要——只有一个来源,没什么好
     // 追踪的)。配置文件没写 hooks 字段,就是默认构造的空 HooksConfig
@@ -891,7 +911,13 @@ std::expected<std::string, std::string> SaveConfigFile(const Config& config) {
     return path.string();
 }
 
-std::expected<void, std::string> UpdateModelInConfigFile(const std::string& file_path, const std::string& model) {
+namespace {
+
+// 只更新一份已存在配置文件里的某个字符串字段,其余字段(哪怕是 FileConfig
+// 不认得的)原样保留——直接读原始 JSON、改一个键、写回去。
+// UpdateModelInConfigFile / UpdateSoulInConfigFile 共用这一份。
+std::expected<void, std::string> UpdateStringFieldInConfigFile(const std::string& file_path, const char* field,
+                                                                 const std::string& value) {
     std::ifstream in(file_path, std::ios::binary);
     if (!in.is_open()) {
         return std::unexpected("配置文件 " + file_path + " 打不开(检查一下权限)");
@@ -909,7 +935,7 @@ std::expected<void, std::string> UpdateModelInConfigFile(const std::string& file
     if (!parsed.is_object()) {
         return std::unexpected("配置文件 " + file_path + " 顶层必须是一个 JSON object(花括号包起来的那种)");
     }
-    parsed["model"] = model;
+    parsed[field] = value;
 
     std::ofstream out(file_path, std::ios::binary | std::ios::trunc);
     if (!out.is_open()) {
@@ -917,6 +943,16 @@ std::expected<void, std::string> UpdateModelInConfigFile(const std::string& file
     }
     out << parsed.dump(2);
     return {};
+}
+
+}  // namespace
+
+std::expected<void, std::string> UpdateModelInConfigFile(const std::string& file_path, const std::string& model) {
+    return UpdateStringFieldInConfigFile(file_path, "model", model);
+}
+
+std::expected<void, std::string> UpdateSoulInConfigFile(const std::string& file_path, const std::string& soul) {
+    return UpdateStringFieldInConfigFile(file_path, "soul", soul);
 }
 
 std::expected<ConfigResult, std::string> LoadFromEnv() {
@@ -930,6 +966,7 @@ std::expected<ConfigResult, std::string> LoadFromEnv() {
     lubancode_env.context_window = GetEnv("LUBANCODE_CONTEXT_WINDOW");
     lubancode_env.compact_model = GetEnv("LUBANCODE_COMPACT_MODEL");
     lubancode_env.think = GetEnv("LUBANCODE_THINK");
+    lubancode_env.soul = GetEnv("LUBANCODE_SOUL");
     if (const auto raw = GetEnv("LUBANCODE_MAX_CONTEXT"); raw.has_value()) {
         try {
             const long long parsed = std::stoll(*raw);

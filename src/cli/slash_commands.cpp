@@ -81,6 +81,10 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Export;
     } else if (lower == "/title") {
         parsed.command = SlashCommand::Title;
+    } else if (lower == "/soul") {
+        parsed.command = SlashCommand::Soul;
+    } else if (lower == "/prompt") {
+        parsed.command = SlashCommand::Prompt;
     } else {
         parsed.command = SlashCommand::Unknown;
     }
@@ -107,6 +111,8 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
         {"/resume", "/resume 编号或id 载入该场存档历史续聊"},
         {"/export", "当前会话导出 Markdown;/export 路径 可指定输出文件"},
         {"/title", "看当前会话标题;/title 标题 给本场起名,/sessions 列表和导出都用它"},
+        {"/soul", "列出可用的魂;/soul 名字 切换风格叠加层,/soul off 关,/soul default 回 SOUL.md"},
+        {"/prompt", "看当前法(系统提示词)的来源和字数;/prompt reset 还原 system_prompt.md"},
     };
     return kCommands;
 }

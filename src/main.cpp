@@ -49,6 +49,7 @@
 #include "cli/transcript.hpp"
 #include "config/config.hpp"
 #include "config/model_catalog.hpp"
+#include "config/prompt_files.hpp"
 #include "lsp/manager.hpp"
 #include "mcp/client.hpp"
 #include "mcp/mcp_tool.hpp"
@@ -103,7 +104,15 @@ void PrintHelp() {
         << "  --config               打印最终生效的配置(api_key 打码)和每个字段来自哪一级,排查配置问题用\n"
         << "  --system-prompt <文件> 用这个文件(.md/.txt,UTF-8)替换默认系统提示的人格段,工作目录、\n"
         << "                         工具调用这些运行必需的上下文照样追加,不受影响。压过配置文件里的\n"
-        << "                         system_prompt_file 字段\n\n"
+        << "                         system_prompt_file 字段,也压过 ~/.lubancode/system_prompt.md\n"
+        << "  --reset-system-prompt  把 ~/.lubancode/system_prompt.md(法)还原成内置默认,旧文件挪成\n"
+        << "                         system_prompt.md.bak(同 /prompt reset,只是不进交互、打结果就退)\n\n"
+        << "魂法分家(首次启动自动生成,缺了每次启动补齐,已存在不覆盖):\n"
+        << "  ~/.lubancode/system_prompt.md  \"法\"——系统提示词人格段,改它定制行为;内容剥掉顶部注释后\n"
+        << "                                 全空白就回退内置默认\n"
+        << "  ~/.lubancode/SOUL.md           \"魂\"——风格叠加层,写点风格指令(如\"只用文言文答话\"),\n"
+        << "                                 注入在系统提示最后;留空 = 无效果\n"
+        << "  ~/.lubancode/souls/*.md        备选魂(自带 wenyan.md 文言示例),交互模式 /soul 名字 切换\n\n"
         << "交互模式里,输入以 / 开头的一行走命令,不发给模型:\n"
         << "  /help           列出所有命令\n"
         << "  /model          拉取模型列表,编号选择切换(默认第一个)\n"
@@ -125,6 +134,9 @@ void PrintHelp() {
         << "  /resume 编号或id  载入该场存档历史续聊(编号按本目录列表数)\n"
         << "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md;全量流水,压缩点带标注)\n"
         << "  /title [标题]   看/设本场会话标题,/sessions 列表和 /export 大标题都用它\n"
+        << "  /soul           列出可用的魂;/soul 名字 切换风格叠加层(即时生效),/soul off 关,\n"
+        << "                  /soul default 回 SOUL.md\n"
+        << "  /prompt         看当前法(系统提示词)的来源和字数;/prompt reset 还原 system_prompt.md\n"
         << "  Shift+Enter     输入框里插一个换行,写多行消息(Alt+Enter 同义;注意 Windows Terminal\n"
         << "                  默认把 Alt+Enter 绑成全屏切换、会吞掉这个键,用 Shift+Enter 最稳);\n"
         << "                  Enter 把整段(多行拼换行)一次发出,空白内容按 Enter 原地不动\n"
@@ -155,6 +167,8 @@ void PrintHelp() {
         << "       LUBANCODE_CONTEXT_WINDOW      上下文窗口 token 数,256k/512k/1m/裸数字\n"
         << "       LUBANCODE_COMPACT_MODEL       压缩用的模型,空 = 跟当前会话模型一致\n"
         << "       LUBANCODE_THINK               推理强度,档位以服务商为准,空 = 不发这个参数\n"
+        << "       LUBANCODE_SOUL                魂的名字,default = SOUL.md,off = 不叠加,别的名字\n"
+        << "                                     = souls/<名字>.md\n"
         << "  2) 配置文件(第一个找到的生效,查找顺序:cwd 的 .lubancode/config.json → 主目录的\n"
         << "     .lubancode/config.json → cwd 的旧位置 .lubancode.json → 主目录的旧位置\n"
         << "     .lubancode.json;读到旧位置会自动挪到新位置)。字段:wire / base_url / api_key / model /\n"
@@ -265,6 +279,32 @@ private:
     std::shared_ptr<std::string> current_instructions_;
 };
 
+// 包一层 Backend:真正发请求前,把当前的"魂"(SOUL.md / souls/ 的风格叠加
+// 层)追加到 Request.system 最后。跟上面几层同一个套路、同一个理由。魂
+// 必须压轴——所以这一层要放在 ModelInstructionsBackend 的更内侧(请求先
+// 经过 instructions 层追加模型专属段,再到这层追加魂),字符串里魂自然
+// 排最后。current_soul 存的是魂文件的原始内容(注释由 agent::WithSoul 在
+// 注入时剥),/soul 切换改的和这里读的是同一块 shared_ptr<string> 内存,
+// 下一轮请求即时生效;空串(SOUL.md 默认、或 /soul off)= 不追加,零破坏。
+class SoulOverlayBackend : public lubancode::api::Backend {
+public:
+    SoulOverlayBackend(lubancode::api::Backend& inner, std::shared_ptr<std::string> current_soul)
+        : inner_(inner), current_soul_(std::move(current_soul)) {}
+
+    std::expected<void, lubancode::api::Error> send_stream(
+        const lubancode::api::Request& request,
+        const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* cancel = nullptr) override {
+        lubancode::api::Request patched = request;
+        patched.system = lubancode::agent::WithSoul(request.system, *current_soul_);
+        return inner_.send_stream(patched, on_event, cancel);
+    }
+
+private:
+    lubancode::api::Backend& inner_;
+    std::shared_ptr<std::string> current_soul_;
+};
+
 // --config、/config 共用:打印最终生效的配置和每个字段的来源。session_model
 // 有值时(/config 场景)额外打一行"本会话实际在用的 model"——/model 切换
 // 只影响会话内存,不一定跟 config.model(四级合并出来的那份)一致。
@@ -297,6 +337,8 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
               << "  [" << lubancode::config::ToString(sources.compact_model) << "]\n";
     std::cout << "  think              = " << (config.think.empty() ? "(未设置,不发这个参数)" : config.think) << "  ["
               << lubancode::config::ToString(sources.think) << "]\n";
+    std::cout << "  soul               = " << (config.soul.empty() ? "(未设置,用主目录 SOUL.md)" : config.soul)
+              << "  [" << lubancode::config::ToString(sources.soul) << "]\n";
     if (result.config_file_path.has_value()) {
         std::cout << "  配置文件           = " << *result.config_file_path << "\n";
     }
@@ -1781,6 +1823,9 @@ void PrintSlashHelp() {
               << "  /resume 编号或id  载入该场存档历史续聊(编号按本目录列表数),后续消息追加写回同一文件\n"
               << "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md;全量流水,压缩点带标注)\n"
               << "  /title [标题]   看/设本场会话标题,/sessions 列表和 /export 大标题都用它\n"
+              << "  /soul           列出可用的魂;/soul 名字 切换(即时生效),/soul off 关,\n"
+              << "                  /soul default 回 SOUL.md\n"
+              << "  /prompt         看当前法(系统提示词)的来源和字数;/prompt reset 还原 system_prompt.md\n"
               << "  /exit           退出(裸词 exit/quit 也认)\n"
               << "多行输入:Shift+Enter 插换行(Alt+Enter 同义,但 Windows Terminal 默认把它绑成全屏\n"
               << "切换、会吞掉,推荐 Shift+Enter);Enter 发送整段;多行时首行的 / 是正文,不当命令。\n"
@@ -2055,6 +2100,160 @@ void HandleModelCommand(const std::string& args, const lubancode::config::Config
 }
 
 // ---------------------------------------------------------------------------
+// 魂法分家(0.16.x):/soul //prompt 的执行逻辑。纯拼接/剥注释在
+// agent/prompts.hpp,文件生成/还原/扫描在 config/prompt_files,这里只做
+// "接命令、找文件、打印、问一句"这层壳。
+// ---------------------------------------------------------------------------
+
+// 数一段 UTF-8 文本有多少个字符(码点)——/prompt 报"字数"用,字节数对
+// 中文没意义。
+std::size_t CountUtf8Chars(const std::string& text) {
+    std::size_t count = 0;
+    for (const char c : text) {
+        if ((static_cast<unsigned char>(c) & 0xC0) != 0x80) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// 按魂名读内容(原始全文,注释留给注入时剥):"off" -> 空;空串/"default"
+// -> SOUL.md;别的名字 -> souls/<名字>.md。文件缺了返回空串(= 无效果),
+// warn 为真时打一行说明。启动读一次、/soul 切换即时重读,都走这一个函数。
+std::string LoadSoulContentByName(const std::string& name, bool warn) {
+    if (name == "off") {
+        return std::string();
+    }
+    const auto luban_dir = lubancode::config::HomeLubancodeDir();
+    if (!luban_dir.has_value()) {
+        return std::string();
+    }
+    const std::string path = (name.empty() || name == "default")
+                                  ? lubancode::config::SoulFilePath(*luban_dir)
+                                  : lubancode::config::SoulPathByName(*luban_dir, name);
+    const auto content = lubancode::config::ReadTextFileIfExists(path);
+    if (!content.has_value()) {
+        if (warn) {
+            std::cout << "[soul] 找不到 " << path << ",魂不生效。\n";
+        }
+        return std::string();
+    }
+    return *content;
+}
+
+// /soul 命令:裸敲列出 souls/*.md + default(SOUL.md)+ 当前生效的;
+// /soul 名字 切换(会话级即时生效,下一轮请求换新系统提示,然后问要不要
+// 写进配置);/soul off 本会话关魂;/soul default 回 SOUL.md(这两个只管
+// 本会话,不问写配置)。切换即时重读所选文件——用户改了魂文件,切一下
+// 就生效,不用重启。
+void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::string>& current_soul,
+                        std::string& current_soul_name, const std::optional<std::string>& config_file_path) {
+    const auto luban_dir = lubancode::config::HomeLubancodeDir();
+    if (!luban_dir.has_value()) {
+        std::cout << "找不到用户主目录,魂文件没处安身,/soul 用不了。\n";
+        return;
+    }
+
+    if (args.empty()) {
+        const std::vector<std::string> souls = lubancode::config::ListSouls(*luban_dir);
+        std::cout << "可用的魂(风格叠加层,注入在系统提示最后):\n";
+        std::cout << "  - default(主目录 SOUL.md)\n";
+        for (const auto& name : souls) {
+            std::cout << "  - " << name << "\n";
+        }
+        std::cout << "当前生效: " << current_soul_name;
+        if (lubancode::agent::StripPromptComments(*current_soul).empty() && current_soul_name != "off") {
+            std::cout << "(内容空白,无效果)";
+        }
+        std::cout << "\n用法:/soul 名字 切换;/soul off 本会话关魂;/soul default 回 SOUL.md。\n";
+        return;
+    }
+
+    if (args == "off") {
+        current_soul->clear();
+        current_soul_name = "off";
+        std::cout << "魂已关(本会话生效,下一轮请求换新系统提示)。\n";
+        return;
+    }
+
+    if (args == "default") {
+        *current_soul = LoadSoulContentByName("default", /*warn=*/true);
+        current_soul_name = "default";
+        std::cout << "已切回 SOUL.md";
+        if (lubancode::agent::StripPromptComments(*current_soul).empty()) {
+            std::cout << "(内容空白,无效果)";
+        }
+        std::cout << "。\n";
+        return;
+    }
+
+    const std::string path = lubancode::config::SoulPathByName(*luban_dir, args);
+    const auto content = lubancode::config::ReadTextFileIfExists(path);
+    if (!content.has_value()) {
+        std::cout << "找不到魂 " << args << "(" << path << ")。/soul 裸敲能看可用列表。\n";
+        return;
+    }
+    *current_soul = *content;
+    current_soul_name = args;
+    std::cout << "已切换魂: " << args << "(本会话即时生效,下一轮请求换新系统提示)\n";
+
+    if (config_file_path.has_value()) {
+        const std::optional<std::string> answer = lubancode::cli::ReadLine("写进配置? [y/N]: ");
+        if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
+            const auto updated = lubancode::config::UpdateSoulInConfigFile(*config_file_path, args);
+            if (updated.has_value()) {
+                std::cout << "已更新 " << *config_file_path << "\n";
+            } else {
+                std::cout << "更新失败: " << updated.error() << "\n";
+            }
+        }
+    } else {
+        std::cout << "当前没有生效的配置文件,只在本会话生效。\n";
+    }
+}
+
+// /prompt 命令:裸敲显示当前法(人格段)的来源和字数;/prompt reset 带
+// 二次确认,把 system_prompt.md 还原成内置默认(旧文件挪成 .bak)。
+// persona 是本会话实际在用的人格段(空串 = 内置默认);law_source 是启动时
+// 算好的来源说明(CLI 参数/文件/内置)。
+void HandlePromptCommand(const std::string& args, const std::string& law_source, const std::string& persona) {
+    if (args.empty()) {
+        const std::string& effective = persona.empty() ? lubancode::agent::DefaultPersona() : persona;
+        std::cout << "当前的法(系统提示词人格段):\n"
+                   << "  来源: " << law_source << "\n"
+                   << "  字数: " << CountUtf8Chars(effective) << "\n"
+                   << "用法:/prompt reset 把 system_prompt.md 还原成内置默认(旧文件留 .bak)。\n";
+        return;
+    }
+    if (args != "reset") {
+        std::cout << "用法:/prompt 看当前法的来源;/prompt reset 还原 system_prompt.md。\n";
+        return;
+    }
+
+    const std::optional<std::string> answer = lubancode::cli::ReadLine("确定还原? [y/N]: ");
+    if (!answer.has_value() || (*answer != "y" && *answer != "Y")) {
+        std::cout << "取消还原。\n";
+        return;
+    }
+    const auto luban_dir = lubancode::config::HomeLubancodeDir();
+    if (!luban_dir.has_value()) {
+        std::cout << "找不到用户主目录,没法还原。\n";
+        return;
+    }
+    const auto reset_result =
+        lubancode::config::ResetSystemPromptFile(*luban_dir, lubancode::agent::DefaultPersona());
+    if (!reset_result.has_value()) {
+        std::cout << "还原失败: " << reset_result.error() << "\n";
+        return;
+    }
+    std::cout << "已把 " << lubancode::config::SystemPromptFilePath(*luban_dir) << " 还原成内置默认";
+    if (!reset_result->empty()) {
+        std::cout << ",旧文件在 " << *reset_result;
+    }
+    std::cout << "。\n本会话的法不变,下次启动按新文件生效。\n";
+}
+
+// ---------------------------------------------------------------------------
 // 会话存档与续聊(0.13.x):/sessions //resume //export 和 --continue 的
 // 执行逻辑。序列化/成对修补/导出全在 agent/session_store 里(纯函数),
 // 这里只做"接命令、找文件、打印"这层壳。
@@ -2295,9 +2494,12 @@ void HandleExportCommand(const std::string& args, const lubancode::agent::AgentL
 // *current_model,这样 /model 切换才能不碰 agent/loop.hpp/.cpp 就真正生效。
 // continue_last:--continue 启动参数,进循环前先自动 /resume 最近一场;
 // 一场存档都没有就正常开新会话,不报错。
+// law_source:魂法分家(0.16.x)新增,启动时算好的"法从哪儿来"说明
+// (CLI 参数/文件/内置),/prompt 裸敲展示用,不参与任何逻辑。
 void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_confirm,
                       const lubancode::cli::Theme& theme, const std::string& persona, bool spinner_enabled,
-                      const lubancode::config::ModelCatalog& model_catalog, bool continue_last = false) {
+                      const lubancode::config::ModelCatalog& model_catalog, bool continue_last = false,
+                      const std::string& law_source = "内置默认") {
     const lubancode::config::Config& config = config_result.config;
 
     // M9:技能扫描一次,主代理、子代理、系统提示词、/skills 命令共用同一份
@@ -2313,9 +2515,15 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     // ApplyModelCatalog 填,ModelInstructionsBackend 发请求前现拼进
     // Request.system;空串 = 不追加,零破坏。
     auto current_model_instructions = std::make_shared<std::string>();
+    // 魂(0.16.x):启动按配置的 soul 名读一次(空 = SOUL.md),/soul 切换
+    // 即时重读、改的就是这块内存。SoulOverlayBackend 放在 instructions 层
+    // 更内侧,魂在系统提示里永远压轴(见类注释)。
+    std::string current_soul_name = config.soul.empty() ? "default" : config.soul;
+    auto current_soul = std::make_shared<std::string>(LoadSoulContentByName(current_soul_name, /*warn=*/true));
     ModelOverrideBackend model_backend(*real_backend, current_model);
     ThinkOverrideBackend think_backend(model_backend, current_think);
-    ModelInstructionsBackend instructions_backend(think_backend, current_model_instructions);
+    SoulOverlayBackend soul_backend(think_backend, current_soul);
+    ModelInstructionsBackend instructions_backend(soul_backend, current_model_instructions);
     // SpinnerBackend 包最外层:每次 send_stream 起转轮,收到第一个流事件就
     // 停,Model/Think/ModelInstructions 各层分别负责 /model、/think、目录
     // base_instructions 切换生效,几层包装顺序不影响语义(补丁都在更内层
@@ -2712,6 +2920,12 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                         }
                     }
                     break;
+                case lubancode::cli::SlashCommand::Soul:
+                    HandleSoulCommand(parsed.args, current_soul, current_soul_name, config_file_path);
+                    break;
+                case lubancode::cli::SlashCommand::Prompt:
+                    HandlePromptCommand(parsed.args, law_source, persona);
+                    break;
                 case lubancode::cli::SlashCommand::Exit:
                     return false;
                 case lubancode::cli::SlashCommand::Unknown:
@@ -2812,9 +3026,13 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
 // 状态和包装层,构造 AgentLoop 时直接拼进系统提示,结构跟交互模式发出去
 // 的一模一样;think/context_window 的目录应用同样由 RunCli 预先并进
 // config,这里不重复判断——保持这个函数只管"按给定配置问一句"。
+// soul_content(0.16.x 魂法分家):当前魂文件的原始内容(RunCli 按配置的
+// soul 名读好传进来),单发模式没有 /soul,构造时直接叠加在系统提示最后
+// (WithModelInstructions 之后,压轴),跟交互模式发出去的结构一模一样;
+// 空串 = 不叠加。
 int AskOnce(const lubancode::config::Config& config, const std::string& question, bool auto_confirm,
             const lubancode::cli::Theme& theme, const std::string& persona, bool spinner_enabled,
-            const std::string& model_instructions = std::string()) {
+            const std::string& model_instructions = std::string(), const std::string& soul_content = std::string()) {
     // M9:技能扫描,理由同 InteractiveLoop——单发模式也该能用技能。
     const std::optional<std::string> home_dir = lubancode::config::HomeDir();
     const std::vector<lubancode::tools::SkillMeta> skills = lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir);
@@ -2869,8 +3087,10 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     MountPlugins(plugin_host, registry, theme, plugin_mounted, plugin_warnings);
     lubancode::agent::AgentLoop loop(
         wrapped_backend, registry, config.model,
-        lubancode::agent::WithModelInstructions(
-            lubancode::agent::BuildSystemPrompt(CurrentDirUtf8(), persona, skills_segment), model_instructions),
+        lubancode::agent::WithSoul(
+            lubancode::agent::WithModelInstructions(
+                lubancode::agent::BuildSystemPrompt(CurrentDirUtf8(), persona, skills_segment), model_instructions),
+            soul_content),
         /*max_tokens=*/4096, /*max_turns=*/25, config.max_context_chars);
     std::set<std::string> always_allowed_tools;
     lubancode::cli::ContextTracker context_tracker(config.context_window_tokens);
@@ -2946,6 +3166,27 @@ int RunCli(const std::vector<std::string>& args) {
             system_prompt_file_arg = args[++i];
             continue;
         }
+        if (arg == "--reset-system-prompt") {
+            // 跟 /prompt reset 同效,只是不进交互、不二次确认(命令行参数
+            // 本身就是明确意图),打结果就退。
+            const auto luban_dir = lubancode::config::HomeLubancodeDir();
+            if (!luban_dir.has_value()) {
+                std::cerr << "找不到用户主目录(Windows 下是 %USERPROFILE%),没法还原 system_prompt.md\n";
+                return 1;
+            }
+            const auto reset_result =
+                lubancode::config::ResetSystemPromptFile(*luban_dir, lubancode::agent::DefaultPersona());
+            if (!reset_result.has_value()) {
+                std::cerr << "还原失败: " << reset_result.error() << "\n";
+                return 1;
+            }
+            std::cout << "已把 " << lubancode::config::SystemPromptFilePath(*luban_dir) << " 还原成内置默认";
+            if (!reset_result->empty()) {
+                std::cout << ",旧文件在 " << *reset_result;
+            }
+            std::cout << "。\n";
+            return 0;
+        }
         if (!positional.empty()) {
             positional += " ";
         }
@@ -2959,6 +3200,14 @@ int RunCli(const std::vector<std::string>& args) {
     }
     if (config_result->migration_notice.has_value()) {
         std::cout << *config_result->migration_notice << "\n";
+    }
+
+    // 魂法分家(0.16.x):每次启动查漏补缺——~/.lubancode/ 下的
+    // system_prompt.md(法)/ SOUL.md(魂)/ souls/wenyan.md(示例)缺哪样
+    // 补哪样,已存在的绝不覆盖。首启就是"三样全补"。静默做,不打输出
+    // (单发/管道模式的输出常被重定向,不该混进这些话)。
+    if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
+        lubancode::config::EnsurePromptScaffold(*luban_dir, lubancode::agent::DefaultPersona());
     }
 
     // 模型目录(models.json):启动时读一次,坏 JSON/坏条目只打警告跳过,
@@ -2981,6 +3230,7 @@ int RunCli(const std::vector<std::string>& args) {
     const std::string effective_prompt_file =
         !system_prompt_file_arg.empty() ? system_prompt_file_arg : config_result->config.system_prompt_file;
     std::string persona;
+    std::string law_source = "内置默认(DefaultPersona)";  // /prompt 裸敲展示用
     if (!effective_prompt_file.empty()) {
         const auto persona_result = lubancode::config::ReadSystemPromptFile(effective_prompt_file);
         if (!persona_result.has_value()) {
@@ -2988,6 +3238,19 @@ int RunCli(const std::vector<std::string>& args) {
             return 1;
         }
         persona = *persona_result;
+        law_source = (!system_prompt_file_arg.empty() ? std::string("CLI 参数 --system-prompt(")
+                                                       : std::string("配置指定的人格文件(")) +
+                     effective_prompt_file + ")";
+    } else if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
+        // 魂法分家:没有 CLI/配置指定的人格文件时,法从 ~/.lubancode/
+        // system_prompt.md 来(顶部注释剥掉;文件缺失或剥完全空白,persona
+        // 留空串,BuildSystemPrompt 自回退内置默认)。
+        const std::string law_path = lubancode::config::SystemPromptFilePath(*luban_dir);
+        const auto law_content = lubancode::config::ReadTextFileIfExists(law_path);
+        persona = lubancode::agent::ResolvePersona(std::string(), law_content.value_or(std::string()));
+        if (!persona.empty()) {
+            law_source = "文件 " + law_path;
+        }
     }
 
     // 主题、转轮开关这两样跟"配没配好模型"无关,不管走哪条路都先算好。
@@ -3038,8 +3301,12 @@ int RunCli(const std::vector<std::string>& args) {
             if (catalog_apply.context_window_tokens.has_value()) {
                 once_config.context_window_tokens = *catalog_apply.context_window_tokens;
             }
+            // 魂:按配置的 soul 名读一次(缺文件不警告——管道输出保持干净),
+            // 拼在系统提示最后。
+            const std::string soul_content =
+                LoadSoulContentByName(once_config.soul.empty() ? "default" : once_config.soul, /*warn=*/false);
             return AskOnce(once_config, positional, auto_confirm, theme, persona, spinner_enabled,
-                            catalog_apply.base_instructions);
+                            catalog_apply.base_instructions, soul_content);
         }
 
         // 交互模式:base_url/api_key/model 有一个解不出来,就先走一遍初次
@@ -3067,7 +3334,8 @@ int RunCli(const std::vector<std::string>& args) {
             effective.sources.auth_token = marked;
             effective.sources.model = marked;
         }
-        InteractiveLoop(effective, auto_confirm, theme, persona, spinner_enabled, model_catalog, continue_last);
+        InteractiveLoop(effective, auto_confirm, theme, persona, spinner_enabled, model_catalog, continue_last,
+                         law_source);
     } catch (const std::exception& e) {
         std::cerr << "[错误] 未预料的异常: " << e.what() << "\n";
         return 1;

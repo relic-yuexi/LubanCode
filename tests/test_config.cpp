@@ -634,6 +634,55 @@ TEST_CASE("MergeConfig: 配置文件里的 think 也是任意字符串都放行"
 }
 
 // ---------------------------------------------------------------------------
+// soul(0.16.x 魂法分家):1 级(LUBANCODE_SOUL)> 2 级 > 4 级默认值
+// (空串 = 用主目录 SOUL.md),没有通用 env 这一级。名字对不对得上文件,
+// 这里不校验(启动时按名字找,找不到打警告、魂不生效)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("MergeConfig: soul 什么都没设置时留空(= 用 SOUL.md)") {
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.soul.empty());
+    CHECK(result->sources.soul == config::Source::Default);
+}
+
+TEST_CASE("MergeConfig: soul 配置文件压过默认值") {
+    config::FileConfig file;
+    file.soul = "wenyan";
+    file.source_path = "/tmp/.lubancode.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.soul == "wenyan");
+    CHECK(result->sources.soul == config::Source::ConfigFile);
+}
+
+TEST_CASE("MergeConfig: soul 专属 env(LUBANCODE_SOUL)压过配置文件") {
+    config::LubancodeEnvValues lubancode_env;
+    lubancode_env.soul = "pirate";
+
+    config::FileConfig file;
+    file.soul = "wenyan";
+    file.source_path = "/tmp/.lubancode.json";
+
+    const auto result = config::MergeConfig(lubancode_env, file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.soul == "pirate");
+    CHECK(result->sources.soul == config::Source::LubancodeEnv);
+}
+
+TEST_CASE("ParseFileConfigJson: 能解出 soul 字段;类型不对报错") {
+    const auto ok = config::ParseFileConfigJson(R"({"soul": "wenyan"})", "/tmp/.lubancode.json");
+    REQUIRE(ok.has_value());
+    REQUIRE(ok->soul.has_value());
+    CHECK(*ok->soul == "wenyan");
+
+    const auto bad = config::ParseFileConfigJson(R"({"soul": 42})", "/tmp/.lubancode.json");
+    REQUIRE_FALSE(bad.has_value());
+    CHECK(bad.error().find("soul") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
 // ParseFileConfigJson:context_window/compact_model/think 三个新字段。
 // ---------------------------------------------------------------------------
 
@@ -901,6 +950,26 @@ TEST_CASE("ReadSystemPromptFile: 空文件报错") {
     const auto result = config::ReadSystemPromptFile(file.Utf8Path());
     REQUIRE_FALSE(result.has_value());
     CHECK_FALSE(result.error().empty());
+}
+
+TEST_CASE("UpdateSoulInConfigFile: 只改 soul 字段,别的字段(含不认得的)原样保留") {
+    TempPromptFile file(R"({"model": "MiniMax-M3", "自定义字段": 42})");
+    const auto updated = config::UpdateSoulInConfigFile(file.Utf8Path(), "wenyan");
+    REQUIRE(updated.has_value());
+
+    std::ifstream in(file.Utf8Path(), std::ios::binary);
+    const std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(content.find("\"soul\"") != std::string::npos);
+    CHECK(content.find("wenyan") != std::string::npos);
+    CHECK(content.find("MiniMax-M3") != std::string::npos);
+    CHECK(content.find("自定义字段") != std::string::npos);
+}
+
+TEST_CASE("UpdateSoulInConfigFile: 文件不是合法 JSON,报错不写") {
+    TempPromptFile file("这不是 JSON");
+    const auto updated = config::UpdateSoulInConfigFile(file.Utf8Path(), "wenyan");
+    REQUIRE_FALSE(updated.has_value());
+    CHECK_FALSE(updated.error().empty());
 }
 
 // ---------------------------------------------------------------------------
