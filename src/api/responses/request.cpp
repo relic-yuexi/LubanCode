@@ -60,6 +60,13 @@ nlohmann::json BuildRequestJson(const Request& request) {
         body["instructions"] = request.system;
     }
 
+    // M6.6:推理强度。实测(MiniMax-M3 真实 responses 端点)none/low/medium/
+    // high 四档都能用,HTTP 200、reasoning_tokens 随档位递增,没有任何一档
+    // 报 400——所以这里不做档位限制/回退,原样透传配置里写的那个字符串。
+    if (!request.reasoning_effort.empty()) {
+        body["reasoning"] = json{{"effort", request.reasoning_effort}};
+    }
+
     json input = json::array();
     for (const auto& message : request.messages) {
         for (const auto& block : message.content) {

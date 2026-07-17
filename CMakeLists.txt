@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(lubancode VERSION 0.5.0 LANGUAGES CXX)
+project(lubancode VERSION 0.6.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -143,10 +143,12 @@ add_library(lubancode_core STATIC
   src/tools/search.cpp
   src/agent/loop.cpp
   src/agent/context.cpp
+  src/agent/compact.cpp
   src/cli/setup_wizard.cpp
   src/cli/slash_commands.cpp
   src/cli/theme.cpp
   src/cli/line_editor.cpp
+  src/cli/context_tracker.cpp
 )
 target_include_directories(lubancode_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(lubancode_core PUBLIC cpr::cpr nlohmann_json::nlohmann_json)

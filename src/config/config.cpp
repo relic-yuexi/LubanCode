@@ -81,6 +81,53 @@ std::string ToString(Source source) {
     return "未知来源";
 }
 
+std::expected<std::size_t, std::string> ParseContextWindowTokens(const std::string& raw) {
+    if (raw.empty()) {
+        return std::unexpected(std::string("context_window 不能是空串"));
+    }
+
+    std::string lower = raw;
+    for (char& c : lower) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+
+    std::size_t multiplier = 1;
+    std::string digits = lower;
+    if (lower.back() == 'k') {
+        multiplier = 1000;
+        digits = lower.substr(0, lower.size() - 1);
+    } else if (lower.back() == 'm') {
+        multiplier = 1000000;
+        digits = lower.substr(0, lower.size() - 1);
+    }
+
+    if (digits.empty()) {
+        return std::unexpected("context_window 取值不对: " + raw + "(k/m 后缀前面得跟数字,比如 256k)");
+    }
+    for (const char c : digits) {
+        if (std::isdigit(static_cast<unsigned char>(c)) == 0) {
+            return std::unexpected("context_window 取值不对: " + raw + "(只认 256k / 512k / 1m 这种写法,或者裸数字)");
+        }
+    }
+
+    long long value = 0;
+    try {
+        std::size_t consumed = 0;
+        value = std::stoll(digits, &consumed);
+        if (consumed != digits.size()) {
+            return std::unexpected("context_window 取值不对: " + raw);
+        }
+    } catch (...) {
+        return std::unexpected("context_window 取值不对: " + raw);
+    }
+
+    if (value <= 0) {
+        return std::unexpected("context_window 必须是正数: " + raw);
+    }
+
+    return static_cast<std::size_t>(value) * multiplier;
+}
+
 std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& json_text,
                                                              const std::string& file_path_for_error) {
     nlohmann::json parsed;
@@ -132,6 +179,28 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
             return std::unexpected("配置文件 " + file_path_for_error + " 里的 system_prompt_file 字段必须是字符串");
         }
         config.system_prompt_file = parsed["system_prompt_file"].get<std::string>();
+    }
+    if (parsed.contains("context_window")) {
+        const auto& field = parsed["context_window"];
+        if (field.is_string()) {
+            config.context_window = field.get<std::string>();
+        } else if (field.is_number_integer() || field.is_number_unsigned()) {
+            config.context_window = std::to_string(field.get<long long>());
+        } else {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 context_window 字段必须是字符串或数字");
+        }
+    }
+    if (parsed.contains("compact_model")) {
+        if (!parsed["compact_model"].is_string()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 compact_model 字段必须是字符串");
+        }
+        config.compact_model = parsed["compact_model"].get<std::string>();
+    }
+    if (parsed.contains("think")) {
+        if (!parsed["think"].is_string()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 think 字段必须是字符串");
+        }
+        config.think = parsed["think"].get<std::string>();
     }
     if (parsed.contains("max_context_chars")) {
         const auto& field = parsed["max_context_chars"];
@@ -378,6 +447,73 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.sources.system_prompt_file = Source::Default;
     }
 
+    // ---- context_window:1 级 > 2 级 > 4 级默认值,没有通用 env 这一级。
+    // 取值要过 ParseContextWindowTokens 校验,坏值直接报错(没法糊弄一个
+    // "留空当默认"的语义——用户显式写了却写错,该让他知道)。 ----
+    std::string context_window_error_origin;
+    std::optional<std::string> context_window_raw;
+    if (lubancode_env.context_window.has_value()) {
+        context_window_raw = *lubancode_env.context_window;
+        context_window_error_origin = "环境变量 LUBANCODE_CONTEXT_WINDOW";
+        result.sources.context_window_tokens = Source::LubancodeEnv;
+    } else if (file_config.has_value() && file_config->context_window.has_value()) {
+        context_window_raw = *file_config->context_window;
+        context_window_error_origin = "配置文件 " + file_config->source_path + " 里的 context_window 字段";
+        result.sources.context_window_tokens = Source::ConfigFile;
+    }
+    if (context_window_raw.has_value()) {
+        const auto parsed_window = ParseContextWindowTokens(*context_window_raw);
+        if (!parsed_window.has_value()) {
+            return std::unexpected(context_window_error_origin + ": " + parsed_window.error());
+        }
+        result.config.context_window_tokens = *parsed_window;
+    } else {
+        result.config.context_window_tokens = kDefaultContextWindowTokens;
+        result.sources.context_window_tokens = Source::Default;
+    }
+
+    // ---- compact_model:1 级 > 2 级 > 4 级默认值(空串 = 跟当前会话模型
+    // 一致),没有通用 env 这一级、没有校验(留给真正压缩时用,压不动
+    // 由那时候的请求自然报错)。 ----
+    if (lubancode_env.compact_model.has_value()) {
+        result.config.compact_model = *lubancode_env.compact_model;
+        result.sources.compact_model = Source::LubancodeEnv;
+    } else if (file_config.has_value() && file_config->compact_model.has_value()) {
+        result.config.compact_model = *file_config->compact_model;
+        result.sources.compact_model = Source::ConfigFile;
+    } else {
+        result.config.compact_model.clear();
+        result.sources.compact_model = Source::Default;
+    }
+
+    // ---- think:1 级 > 2 级 > 4 级默认值(空串 = 不发这个参数),没有通用
+    // env 这一级。只认 none/low/medium/high(大小写不敏感,存进 Config 时
+    // 统一存小写),写别的值直接报错——跟 wire 一样,没法留空糊弄过去。 ----
+    std::string think_error_origin;
+    std::optional<std::string> think_raw;
+    if (lubancode_env.think.has_value()) {
+        think_raw = *lubancode_env.think;
+        think_error_origin = "环境变量 LUBANCODE_THINK";
+        result.sources.think = Source::LubancodeEnv;
+    } else if (file_config.has_value() && file_config->think.has_value()) {
+        think_raw = *file_config->think;
+        think_error_origin = "配置文件 " + file_config->source_path + " 里的 think 字段";
+        result.sources.think = Source::ConfigFile;
+    }
+    if (think_raw.has_value()) {
+        std::string lower = *think_raw;
+        for (char& c : lower) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        if (lower != "none" && lower != "low" && lower != "medium" && lower != "high") {
+            return std::unexpected(think_error_origin + " 只认得 none/low/medium/high,写的是: " + *think_raw);
+        }
+        result.config.think = lower;
+    } else {
+        result.config.think.clear();
+        result.sources.think = Source::Default;
+    }
+
     return result;
 }
 
@@ -517,6 +653,9 @@ std::expected<ConfigResult, std::string> LoadFromEnv() {
     lubancode_env.model = GetEnv("LUBANCODE_MODEL");
     lubancode_env.theme = GetEnv("LUBANCODE_THEME");
     lubancode_env.system_prompt_file = GetEnv("LUBANCODE_SYSTEM_PROMPT_FILE");
+    lubancode_env.context_window = GetEnv("LUBANCODE_CONTEXT_WINDOW");
+    lubancode_env.compact_model = GetEnv("LUBANCODE_COMPACT_MODEL");
+    lubancode_env.think = GetEnv("LUBANCODE_THINK");
     if (const auto raw = GetEnv("LUBANCODE_MAX_CONTEXT"); raw.has_value()) {
         try {
             const long long parsed = std::stoll(*raw);

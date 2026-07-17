@@ -66,10 +66,10 @@ cpr 默认会自己再拉一份 `curl`(默认地址在 `github.com/curl/curl/rel
 
 lubancode 要跟大模型对话,得知道 wire(协议)、base_url、api_key、model 这几件事。配置分四级,优先级从高到低,按**字段**逐个决——不是整套配置一刀切:
 
-1. **LUBANCODE_ 专属环境变量**:`LUBANCODE_WIRE`、`LUBANCODE_BASE_URL`、`LUBANCODE_API_KEY`、`LUBANCODE_MODEL`、`LUBANCODE_MAX_CONTEXT`、`LUBANCODE_THEME`、`LUBANCODE_SYSTEM_PROMPT_FILE`
-2. **配置文件**:`.lubancode/` 是 lubancode 的"家",往后 `plugins/`、`skills/` 也会住这儿,配置只是先搬进去的第一样东西。查找顺序四级:当前目录的 `.lubancode/config.json` → 用户主目录(Windows 是 `%USERPROFILE%`)下的 `.lubancode/config.json` → 当前目录的旧位置 `.lubancode.json` → 用户主目录的旧位置 `.lubancode.json`。命中旧位置且新位置还没有文件时,会自动把文件搬过去(建好 `.lubancode/` 目录,原地挪一份,搬不动就复制再删旧的),屏幕上打一行"配置已迁移到 ..."通知;搬家失败也不会中断程序,照旧用回那份旧文件,只是提示一句。字段除了 `wire`/`base_url`/`api_key`/`model`/`max_context_chars`,还可以写 `theme`、`system_prompt_file`
+1. **LUBANCODE_ 专属环境变量**:`LUBANCODE_WIRE`、`LUBANCODE_BASE_URL`、`LUBANCODE_API_KEY`、`LUBANCODE_MODEL`、`LUBANCODE_MAX_CONTEXT`、`LUBANCODE_THEME`、`LUBANCODE_SYSTEM_PROMPT_FILE`、`LUBANCODE_CONTEXT_WINDOW`、`LUBANCODE_COMPACT_MODEL`、`LUBANCODE_THINK`
+2. **配置文件**:`.lubancode/` 是 lubancode 的"家",往后 `plugins/`、`skills/` 也会住这儿,配置只是先搬进去的第一样东西。查找顺序四级:当前目录的 `.lubancode/config.json` → 用户主目录(Windows 是 `%USERPROFILE%`)下的 `.lubancode/config.json` → 当前目录的旧位置 `.lubancode.json` → 用户主目录的旧位置 `.lubancode.json`。命中旧位置且新位置还没有文件时,会自动把文件搬过去(建好 `.lubancode/` 目录,原地挪一份,搬不动就复制再删旧的),屏幕上打一行"配置已迁移到 ..."通知;搬家失败也不会中断程序,照旧用回那份旧文件,只是提示一句。字段除了 `wire`/`base_url`/`api_key`/`model`/`max_context_chars`,还可以写 `theme`、`system_prompt_file`、`context_window`、`compact_model`、`think`
 3. **通用环境变量**(向后兼容):`wire=anthropic` 时读 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_MODEL`;`wire=responses` 时读 `OPENAI_BASE_URL`/`OPENAI_API_KEY`/`OPENAI_MODEL`
-4. **内置默认值**:`wire=anthropic`、`max_context_chars=600000`、`theme=dark`。`base_url`/`api_key`/`model`/`system_prompt_file` **没有内置默认值**——lubancode 是通用工具,不绑死哪一家模型服务,`base_url`/`api_key`/`model` 这三项四级都没配到,交互模式会自动走一遍初次配置向导,单发模式/管道模式会直接报错并提示三条配置途径;`system_prompt_file` 没配到就用内置的默认人格。
+4. **内置默认值**:`wire=anthropic`、`max_context_chars=600000`、`theme=dark`、`context_window=256000`。`base_url`/`api_key`/`model`/`system_prompt_file`/`compact_model`/`think` **没有内置默认值**——lubancode 是通用工具,不绑死哪一家模型服务,`base_url`/`api_key`/`model` 这三项四级都没配到,交互模式会自动走一遍初次配置向导,单发模式/管道模式会直接报错并提示三条配置途径;`system_prompt_file` 没配到就用内置的默认人格;`compact_model` 没配到,`/compact` 就跟正常对话用同一个模型;`think` 没配到就不往请求里带推理强度这个参数,跟旧版本行为一致。
 
 ### 为什么要有专属环境变量
 
@@ -110,7 +110,7 @@ model:
 
 保存到 C:/Users/你的用户名/.lubancode/config.json? [Y/n]: 
 已保存到 C:/Users/你的用户名/.lubancode/config.json
-lubancode 0.5.0  [anthropic] MiniMax-M3
+lubancode 0.6.0  [anthropic] MiniMax-M3
 cwd: D:/your/project  ·  输入问题回车发送,exit 退出,/help 看命令
 > 
 ```
@@ -129,7 +129,10 @@ model 那一步回车不填,会真的去接口拉一份模型列表(`GET {base_u
   "base_url": "https://api.minimaxi.com/anthropic",
   "api_key": "sk-替换成你自己的密钥",
   "model": "MiniMax-M3",
-  "max_context_chars": 600000
+  "max_context_chars": 600000,
+  "context_window": "256k",
+  "compact_model": "",
+  "think": ""
 }
 ```
 
@@ -148,9 +151,55 @@ model 那一步回车不填,会真的去接口拉一份模型列表(`GET {base_u
 | `/model 名字` | 直接切到指定模型名,不用拉列表 |
 | `/config` | 打印当前生效配置(`api_key` 打码)和本会话实际在用的 model |
 | `/clear` | 清空对话历史 |
+| `/context` | 看当前上下文占用(占了多少 token / 窗口多大 / 百分比) |
+| `/context 512k` | 本会话把上下文窗口档位改成 512k(不改配置文件,只影响这一次会话) |
+| `/compact` | 手动把当前对话历史压缩成一份存档,腾出窗口空间 |
+| `/compact 重点说明` | 压缩时额外叮嘱模型多留意哪块(比如"重点保留数据库配置") |
+| `/think` | 看当前推理强度档位 |
+| `/think high` | 切推理强度档位(`none`/`low`/`medium`/`high`,本会话生效) |
 | `/exit` | 退出(裸词 `exit`/`quit` 也认) |
 
 `/model` 切换只影响当前会话;如果当前有生效的配置文件,切完会问一句要不要顺手写进去,不写就只是这一次会话用新模型,下次启动还是原来配的那个。
+
+### 上下文管理:`/context` 与 `/compact`
+
+对话越聊越长,迟早会顶到模型的上下文窗口。lubancode 按**真实用量**记账——每次请求结束,拿这一次 `usage.input_tokens + usage.output_tokens` 直接覆盖(不是累加历史每一轮),跟"窗口大小"一除,就是当前占用百分比:
+
+```
+> /context
+上下文占用: 45230 / 256000 tokens (17%)
+```
+
+窗口大小来自 `context_window` 配置(支持 `"256k"`/`"512k"`/`"1m"` 这种带单位写法,也能直接写数字,默认 256000),`/context 512k` 可以在当前会话临时改档位,不动配置文件。
+
+占用一旦超过窗口的 80%,发下一条消息前会自动先压缩一次:
+
+```
+> 继续往下写
+[compact] 上下文接近上限,自动压缩中...
+[compact] 自动压缩完成。
+好的,接着上次的思路……
+```
+
+也可以用 `/compact` 手动触发,想让这次压缩额外留意某个点,可以带一句话:
+
+```
+> /compact 重点保留数据库连接字符串
+压缩前 ~48000 tokens → 压缩后 ~6200 tokens
+```
+
+压缩的做法是把当前整段历史连同一条"总结存档"的指令发给模型(可以用 `compact_model` 配置单独指定一个更便宜/更快的模型专门干这活,不设就跟主对话用同一个模型),模型给出的摘要顶在新历史最前面,后面接上"最近一次真正的用户输入"开始的完整最后一轮(工具调用和工具结果不会被这刀切开)。这是**语义压缩**,跟 `max_context_chars` 那道按字符数硬切的兜底安全网是两条独立防线,互不依赖——`agent::Compact` 失败(网络问题等)只会打一行警告,不影响继续对话,旧历史原样保留。
+
+### 推理强度:`/think`
+
+支持"思考"/推理强度这个参数的模型(比如打开了 extended thinking 的 Claude 系,或者 Responses 协议里的 `reasoning.effort`),可以用 `think` 配置字段或 `/think` 命令挑档位:`none`/`low`/`medium`/`high`。不设(默认空)就完全不往请求里带这个参数,行为跟没有这个功能的旧版本一样。
+
+```
+> /think high
+推理强度已切到 high(本会话生效)。
+```
+
+Anthropic 协议这边映射成 `thinking.type`(`none` → `disabled`,其余三档 → `enabled` + 按档位递增的 `budget_tokens`,并且永远夹在 `max_tokens` 以内不越界);Responses 协议这边映射成 `reasoning.effort` 原样透传。实测跑过 MiniMax-M3 真实的 anthropic 兼容端点和 responses 端点:两条协议、`none`/`low`/`medium`/`high` 四档都能用,HTTP 200,`high` 档明显比 `none` 档耗更多输出 token(说明真的在"多想"),没有任何一档报错。
 
 ### 排查配置问题
 
@@ -186,16 +235,16 @@ lubancode 最终生效的配置:
 
 交互模式下,发出请求到模型开始吐第一个字之间,会在原地转一个 ASCII 字符(`-\|/`,不用 Unicode 盲文块,避免某些控制台字体下显示成方块),旁边跟着"思考中"字样;模型一旦开始出字或者在跑工具,转轮就停了,不会跟输出混在一起。管道/非真终端模式下转轮完全不开,不会往输出里混入任何转轮字符。
 
-每次问答(哪怕中间因为工具调用来回了好几轮)结束后,会打一行暗色的 token 用量统计,累计这一次问答里所有请求的输入/输出 token 数和请求次数,例如:
+每次问答(哪怕中间因为工具调用来回了好几轮)结束后,会打一行暗色的 token 用量统计,累计这一次问答里所有请求的输入/输出 token 数和请求次数,末尾还带一项本次问答结束时的上下文占用百分比(跟 `/context` 算法一致,按最近一次请求的真实用量算,不是累加),例如:
 
 ```
-[tokens] 输入 1024 · 输出 256 · 请求 3 次
+[tokens] 输入 1024 · 输出 256 · 请求 3 次 · context 12%
 ```
 
 命中了 prompt cache 的话(Anthropic 后端看 `cache_read_input_tokens`,Responses 后端看 `usage.input_tokens_details.cached_tokens`),输入这一项后面会带一个括号,注明缓存命中了多少 token;没命中就照旧不带括号,不多打空括号:
 
 ```
-[tokens] 输入 1578(缓存命中 128) · 输出 83 · 请求 2 次
+[tokens] 输入 1578(缓存命中 128) · 输出 83 · 请求 2 次 · context 34%
 ```
 
 ### 逐键编辑、历史、Tab 补全、确认模式

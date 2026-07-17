@@ -413,6 +413,276 @@ TEST_CASE("ParseFileConfigJson: max_context_chars 不是正整数时报错") {
 }
 
 // ---------------------------------------------------------------------------
+// ParseContextWindowTokens:M6.6 新增,"256k"/"512k"/"1m"/裸数字 -> token 数,
+// k/m 按十进制换算,大小写不敏感,坏值(空串/非数字/0/负数)都报错。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseContextWindowTokens: 256k/512k/1m 按十进制换算") {
+    const auto k256 = config::ParseContextWindowTokens("256k");
+    REQUIRE(k256.has_value());
+    CHECK(*k256 == 256000);
+
+    const auto k512 = config::ParseContextWindowTokens("512k");
+    REQUIRE(k512.has_value());
+    CHECK(*k512 == 512000);
+
+    const auto m1 = config::ParseContextWindowTokens("1m");
+    REQUIRE(m1.has_value());
+    CHECK(*m1 == 1000000);
+}
+
+TEST_CASE("ParseContextWindowTokens: k/m 大小写不敏感") {
+    const auto upper_k = config::ParseContextWindowTokens("256K");
+    REQUIRE(upper_k.has_value());
+    CHECK(*upper_k == 256000);
+
+    const auto upper_m = config::ParseContextWindowTokens("1M");
+    REQUIRE(upper_m.has_value());
+    CHECK(*upper_m == 1000000);
+}
+
+TEST_CASE("ParseContextWindowTokens: 裸数字直接当 token 数") {
+    const auto result = config::ParseContextWindowTokens("128000");
+    REQUIRE(result.has_value());
+    CHECK(*result == 128000);
+}
+
+TEST_CASE("ParseContextWindowTokens: 空串报错") {
+    const auto result = config::ParseContextWindowTokens("");
+    REQUIRE_FALSE(result.has_value());
+}
+
+TEST_CASE("ParseContextWindowTokens: 非数字(比如 abc)报错") {
+    const auto result = config::ParseContextWindowTokens("abc");
+    REQUIRE_FALSE(result.has_value());
+}
+
+TEST_CASE("ParseContextWindowTokens: 0 报错") {
+    const auto result = config::ParseContextWindowTokens("0");
+    REQUIRE_FALSE(result.has_value());
+}
+
+TEST_CASE("ParseContextWindowTokens: 负数报错") {
+    const auto result = config::ParseContextWindowTokens("-100");
+    REQUIRE_FALSE(result.has_value());
+}
+
+TEST_CASE("ParseContextWindowTokens: 只有 k/m 后缀没有数字报错") {
+    const auto result = config::ParseContextWindowTokens("k");
+    REQUIRE_FALSE(result.has_value());
+}
+
+// ---------------------------------------------------------------------------
+// context_window_tokens:1 级(LUBANCODE_CONTEXT_WINDOW)> 2 级(配置文件)>
+// 4 级默认值(256k),没有通用 env 这一级。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("MergeConfig: context_window_tokens 什么都没设置时用内置默认值 256k") {
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.context_window_tokens == config::kDefaultContextWindowTokens);
+    CHECK(result->sources.context_window_tokens == config::Source::Default);
+}
+
+TEST_CASE("MergeConfig: context_window_tokens 配置文件压过默认值") {
+    config::FileConfig file;
+    file.context_window = "512k";
+    file.source_path = "/tmp/.lubancode.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.context_window_tokens == 512000);
+    CHECK(result->sources.context_window_tokens == config::Source::ConfigFile);
+}
+
+TEST_CASE("MergeConfig: context_window_tokens 专属 env 压过配置文件") {
+    config::LubancodeEnvValues lubancode_env;
+    lubancode_env.context_window = "1m";
+
+    config::FileConfig file;
+    file.context_window = "512k";
+    file.source_path = "/tmp/.lubancode.json";
+
+    const auto result = config::MergeConfig(lubancode_env, file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.context_window_tokens == 1000000);
+    CHECK(result->sources.context_window_tokens == config::Source::LubancodeEnv);
+}
+
+TEST_CASE("MergeConfig: context_window 坏值报错,错误信息带上是哪里写的") {
+    config::LubancodeEnvValues lubancode_env;
+    lubancode_env.context_window = "abc";
+
+    const auto result = config::MergeConfig(lubancode_env, std::nullopt, EmptyGenericEnv());
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().find("LUBANCODE_CONTEXT_WINDOW") != std::string::npos);
+}
+
+TEST_CASE("MergeConfig: 配置文件里的 context_window 坏值报错,错误信息带文件路径") {
+    config::FileConfig file;
+    file.context_window = "0";
+    file.source_path = "/home/user/.lubancode.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().find("/home/user/.lubancode.json") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// compact_model:1 级 > 2 级 > 4 级默认值(空串 = 跟当前会话模型一致),
+// 没有通用 env 这一级、没有取值校验。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("MergeConfig: compact_model 什么都没设置时留空") {
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.compact_model.empty());
+    CHECK(result->sources.compact_model == config::Source::Default);
+}
+
+TEST_CASE("MergeConfig: compact_model 配置文件压过默认值") {
+    config::FileConfig file;
+    file.compact_model = "MiniMax-M3-mini";
+    file.source_path = "/tmp/.lubancode.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.compact_model == "MiniMax-M3-mini");
+    CHECK(result->sources.compact_model == config::Source::ConfigFile);
+}
+
+TEST_CASE("MergeConfig: compact_model 专属 env 压过配置文件") {
+    config::LubancodeEnvValues lubancode_env;
+    lubancode_env.compact_model = "env-compact-model";
+
+    config::FileConfig file;
+    file.compact_model = "file-compact-model";
+    file.source_path = "/tmp/.lubancode.json";
+
+    const auto result = config::MergeConfig(lubancode_env, file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.compact_model == "env-compact-model");
+    CHECK(result->sources.compact_model == config::Source::LubancodeEnv);
+}
+
+// ---------------------------------------------------------------------------
+// think:1 级 > 2 级 > 4 级默认值(空串 = 不发这个参数),没有通用 env 这
+// 一级,只认 none/low/medium/high(大小写不敏感,存进 Config 时统一小写)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("MergeConfig: think 什么都没设置时留空") {
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.think.empty());
+    CHECK(result->sources.think == config::Source::Default);
+}
+
+TEST_CASE("MergeConfig: think 配置文件压过默认值") {
+    config::FileConfig file;
+    file.think = "medium";
+    file.source_path = "/tmp/.lubancode.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.think == "medium");
+    CHECK(result->sources.think == config::Source::ConfigFile);
+}
+
+TEST_CASE("MergeConfig: think 专属 env 压过配置文件") {
+    config::LubancodeEnvValues lubancode_env;
+    lubancode_env.think = "high";
+
+    config::FileConfig file;
+    file.think = "medium";
+    file.source_path = "/tmp/.lubancode.json";
+
+    const auto result = config::MergeConfig(lubancode_env, file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.think == "high");
+    CHECK(result->sources.think == config::Source::LubancodeEnv);
+}
+
+TEST_CASE("MergeConfig: think 大小写不敏感,存进 Config 时统一小写") {
+    config::LubancodeEnvValues lubancode_env;
+    lubancode_env.think = "HIGH";
+
+    const auto result = config::MergeConfig(lubancode_env, std::nullopt, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.think == "high");
+}
+
+TEST_CASE("MergeConfig: think 是不认得的值时报错,错误信息带上是哪里写的和坏值本身") {
+    config::LubancodeEnvValues lubancode_env;
+    lubancode_env.think = "extreme";
+
+    const auto result = config::MergeConfig(lubancode_env, std::nullopt, EmptyGenericEnv());
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().find("LUBANCODE_THINK") != std::string::npos);
+    CHECK(result.error().find("extreme") != std::string::npos);
+}
+
+TEST_CASE("MergeConfig: 配置文件里的 think 是不认得的值,错误信息带文件路径") {
+    config::FileConfig file;
+    file.think = "ultra";
+    file.source_path = "/home/user/.lubancode.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().find("/home/user/.lubancode.json") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// ParseFileConfigJson:context_window/compact_model/think 三个新字段。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseFileConfigJson: context_window 写成字符串,原样存进 FileConfig") {
+    const std::string json = R"({"context_window": "512k"})";
+    const auto result = config::ParseFileConfigJson(json, "/tmp/.lubancode.json");
+    REQUIRE(result.has_value());
+    REQUIRE(result->context_window.has_value());
+    CHECK(*result->context_window == "512k");
+}
+
+TEST_CASE("ParseFileConfigJson: context_window 写成数字,转成字符串存进 FileConfig") {
+    const std::string json = R"({"context_window": 128000})";
+    const auto result = config::ParseFileConfigJson(json, "/tmp/.lubancode.json");
+    REQUIRE(result.has_value());
+    REQUIRE(result->context_window.has_value());
+    CHECK(*result->context_window == "128000");
+}
+
+TEST_CASE("ParseFileConfigJson: context_window 类型不对(比如是数组)报错") {
+    const std::string json = R"({"context_window": [1, 2, 3]})";
+    const auto result = config::ParseFileConfigJson(json, "/tmp/.lubancode.json");
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().find("context_window") != std::string::npos);
+}
+
+TEST_CASE("ParseFileConfigJson: 能解出 compact_model 和 think 字段") {
+    const std::string json = R"({"compact_model": "MiniMax-M3-mini", "think": "low"})";
+    const auto result = config::ParseFileConfigJson(json, "/tmp/.lubancode.json");
+    REQUIRE(result.has_value());
+    REQUIRE(result->compact_model.has_value());
+    CHECK(*result->compact_model == "MiniMax-M3-mini");
+    REQUIRE(result->think.has_value());
+    CHECK(*result->think == "low");
+}
+
+TEST_CASE("ParseFileConfigJson: compact_model 类型不对报错") {
+    const std::string json = R"({"compact_model": 123})";
+    const auto result = config::ParseFileConfigJson(json, "/tmp/.lubancode.json");
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().find("compact_model") != std::string::npos);
+}
+
+TEST_CASE("ParseFileConfigJson: think 类型不对报错") {
+    const std::string json = R"({"think": 123})";
+    const auto result = config::ParseFileConfigJson(json, "/tmp/.lubancode.json");
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().find("think") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
 // ToString(Source):--config 诊断输出用的中文说法,四种来源都要有说法。
 // ---------------------------------------------------------------------------
 

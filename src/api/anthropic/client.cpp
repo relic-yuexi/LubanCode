@@ -1,6 +1,7 @@
 #include "api/anthropic/client.hpp"
 
 #include <charconv>
+#include <optional>
 #include <type_traits>
 #include <utility>
 
@@ -12,9 +13,9 @@
 
 namespace lubancode::api::anthropic {
 
-namespace {
-
 using nlohmann::json;
+
+namespace {
 
 std::string RoleToString(Role role) {
     return role == Role::User ? "user" : "assistant";
@@ -39,7 +40,52 @@ json ContentBlockToJson(const ContentBlock& block) {
         block);
 }
 
+// M6.6:think 档位 -> Anthropic 风格 thinking 参数。实测(MiniMax-M3 真实
+// anthropic 兼容端点 /anthropic/v1/messages)确认支持
+// {"type":"enabled","budget_tokens":N} / {"type":"disabled"},HTTP 200,
+// 且 enabled 时真的返回 thinking 内容块——所以这里走"接受并映射"这条路,
+// 不是"协议不支持,打警告跳过"那条路。
+// 档位 -> budget_tokens 的具体数字是任务明确交给这里自己定的一个设计选择
+// (原话"档位→budget 映射你定"),选的是 low=1024/medium=4096/high=16384
+// 这组常见量级;唯一的硬约束是 Anthropic 要求 budget_tokens 必须小于
+// max_tokens(不然思考预算比整个回复上限还大,没意义、也可能被端点拒绝),
+// 所以这里按 request.max_tokens 兜底夹一下,budget 超过 max_tokens 时退化成
+// "max_tokens 留 256 给正文,剩下全给思考",绝不出现 budget >= max_tokens
+// 的组合。
+std::optional<json> BuildThinkingJson(const Request& request) {
+    if (request.reasoning_effort.empty()) {
+        return std::nullopt;
+    }
+    if (request.reasoning_effort == "none") {
+        return json{{"type", "disabled"}};
+    }
+
+    int budget = 1024;
+    if (request.reasoning_effort == "low") {
+        budget = 1024;
+    } else if (request.reasoning_effort == "medium") {
+        budget = 4096;
+    } else if (request.reasoning_effort == "high") {
+        budget = 16384;
+    } else {
+        // 不认得的档位(配置层已经拦过合法值,理论上到不了这里):当没设置处理。
+        return std::nullopt;
+    }
+
+    if (budget >= request.max_tokens) {
+        budget = request.max_tokens > 256 ? request.max_tokens - 256 : request.max_tokens / 2;
+        if (budget < 1) {
+            budget = 1;
+        }
+    }
+
+    return json{{"type", "enabled"}, {"budget_tokens", budget}};
+}
+
+}  // namespace
+
 // 拼出 Anthropic Messages API 的请求体(stream: true 恒开,M1 只走流式)。
+// 声明在 client.hpp 里,单测用;线上代码路径(send_stream)也是调这个函数。
 json BuildRequestJson(const Request& request) {
     json body;
     body["model"] = request.model;
@@ -48,6 +94,10 @@ json BuildRequestJson(const Request& request) {
 
     if (!request.system.empty()) {
         body["system"] = request.system;
+    }
+
+    if (const auto thinking = BuildThinkingJson(request); thinking.has_value()) {
+        body["thinking"] = *thinking;
     }
 
     json messages = json::array();
@@ -74,6 +124,8 @@ json BuildRequestJson(const Request& request) {
 
     return body;
 }
+
+namespace {
 
 // 从 HTTP 状态行(形如 "HTTP/1.1 200 OK")里抠出状态码。抠不出来返回 0。
 int ExtractStatusCode(std::string_view header_line) {

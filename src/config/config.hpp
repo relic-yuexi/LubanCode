@@ -54,6 +54,12 @@ constexpr std::size_t kDefaultMaxContextChars = 600000;
 // (字符串),不依赖 cli 层(依赖只许单向,config 不该反过来牵扯 cli)。
 constexpr const char* kDefaultTheme = "dark";
 
+// context_window(上下文窗口 token 数)的内置默认值:256k,decimal 换算
+// (k=1000,m=1,000,000,见 ParseContextWindowTokens 注释)。M6.6 新增,是
+// /context、/compact 自动触发用的"窗口大小"依据,跟 max_context_chars
+// (字符数、老的硬安全网,单位不同、语义也不同)是两回事。
+constexpr std::size_t kDefaultContextWindowTokens = 256000;
+
 struct Config {
     Wire wire = Wire::Anthropic;
     std::string base_url;
@@ -62,6 +68,9 @@ struct Config {
     std::size_t max_context_chars = kDefaultMaxContextChars;
     std::string theme = kDefaultTheme;   // dark / light / plain,没配到就是 kDefaultTheme
     std::string system_prompt_file;      // --system-prompt / system_prompt_file,没配到就是空串
+    std::size_t context_window_tokens = kDefaultContextWindowTokens;  // M6.6:上下文窗口 token 数
+    std::string compact_model;  // M6.6:压缩用的模型,空串 = 跟当前会话模型一致
+    std::string think;          // M6.6:推理强度,none/low/medium/high,空串 = 不发这个参数
 };
 
 // 每个字段最终来自哪一级,跟 Config 里的字段一一对应。
@@ -73,6 +82,9 @@ struct ConfigSources {
     Source max_context_chars = Source::Default;
     Source theme = Source::Default;
     Source system_prompt_file = Source::Default;
+    Source context_window_tokens = Source::Default;
+    Source compact_model = Source::Default;
+    Source think = Source::Default;
 };
 
 struct ConfigResult {
@@ -100,6 +112,9 @@ struct FileConfig {
     std::optional<std::size_t> max_context_chars;
     std::optional<std::string> theme;               // dark / light / plain
     std::optional<std::string> system_prompt_file;   // 人格文件路径
+    std::optional<std::string> context_window;        // "256k"/"512k"/"1m"/裸数字,原始字符串,解析交给 MergeConfig
+    std::optional<std::string> compact_model;         // 压缩用的模型
+    std::optional<std::string> think;                 // none/low/medium/high
     std::string source_path;
     // 这份 FileConfig 是不是从"旧位置迁移到新位置"这个动作里读出来的;
     // 有值就是要打印给用户看的那一行通知(LoadFileConfig 填,LoadFromEnv
@@ -117,6 +132,9 @@ struct LubancodeEnvValues {
     std::optional<std::size_t> max_context_chars;
     std::optional<std::string> theme;               // LUBANCODE_THEME
     std::optional<std::string> system_prompt_file;   // LUBANCODE_SYSTEM_PROMPT_FILE
+    std::optional<std::string> context_window;        // LUBANCODE_CONTEXT_WINDOW,原始字符串
+    std::optional<std::string> compact_model;         // LUBANCODE_COMPACT_MODEL
+    std::optional<std::string> think;                 // LUBANCODE_THINK
 };
 
 // 通用环境变量(ANTHROPIC_*/OPENAI_*)读出来的值。两组都传全,MergeConfig
@@ -142,6 +160,15 @@ struct GenericEnvValues {
 std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& lubancode_env,
                                                        const std::optional<FileConfig>& file_config,
                                                        const GenericEnvValues& generic_env);
+
+// 解析 context_window 的字符串取值:"256k"/"512k"/"1m"(大小写不敏感),
+// 或者裸数字(直接就是 token 数)。k/m 按十进制换算(k=1000,m=1,000,000)——
+// 选十进制不选 1024 进制,是图一个整数、好心算,跟这行字段本来就是"档位"
+// 性质(不是精确到字节的量)相配。裸数字、k/m 后缀两种写法之外的输入
+// (空串、非数字、0、负数、"abc" 这种)都报错,错误信息里说明这个坏值本身
+// 是什么,不带"从哪儿来"(调用方 MergeConfig/ParseFileConfigJson 自己拼上
+// "环境变量 LUBANCODE_CONTEXT_WINDOW 里的" 这类前缀)。
+std::expected<std::size_t, std::string> ParseContextWindowTokens(const std::string& raw);
 
 // 纯函数:检查合并结果里的 api_key 是不是空的。空的话报错,错误信息里把
 // 四级来源都提一遍(按 result.config.wire 挑出对应的通用环境变量名),

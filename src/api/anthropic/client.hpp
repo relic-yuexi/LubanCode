@@ -7,10 +7,19 @@
 #include <functional>
 #include <string>
 
+#include <nlohmann/json.hpp>
+
 #include "api/backend.hpp"
 #include "api/types.hpp"
 
 namespace lubancode::api::anthropic {
+
+// 纯函数:把中立 Request 翻译成 Anthropic Messages API 的请求体 JSON
+// (stream 恒为 true)。send_stream 内部就是调这个函数拼请求体——单独在头文件
+// 里声明出来,只是为了让单测能直接调用、断言拼出来的 JSON 长什么样(比如
+// M6.6 的 think 强度要不要出现在 "thinking" 字段里),不碰网络、不改变任何
+// 线上行为。
+nlohmann::json BuildRequestJson(const Request& request);
 
 class AnthropicBackend : public Backend {
 public:

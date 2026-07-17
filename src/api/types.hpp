@@ -67,6 +67,12 @@ struct Request {
     std::vector<Message> messages;
     int max_tokens = 4096;
     std::vector<ToolDefinition> tools;  // M1 先留空位,不填
+    // M6.6:推理强度,none/low/medium/high,空串 = 不发这个参数(维持原有
+    // 行为)。responses wire 翻成 "reasoning":{"effort":...};anthropic wire
+    // 翻成 "thinking":{"type":"enabled","budget_tokens":...}(none 翻成
+    // "type":"disabled"),映射关系见 anthropic/client.cpp 里的
+    // BuildThinkingJson 注释。
+    std::string reasoning_effort;
 };
 
 // ---------------------------------------------------------------------------

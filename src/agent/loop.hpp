@@ -60,6 +60,18 @@ public:
 
     const std::vector<api::Message>& history() const { return history_; }
 
+    // M6.6:/compact 用。跟 history() 是同一份数据,单独起个大写名字是为了
+    // 跟任务规矩"只许新增两个方法,不许改现有的"对齐——不改名、不改签名、
+    // 不复用 history(),原样再加一份。
+    const std::vector<api::Message>& History() const { return history_; }
+
+    // M6.6:/compact 压缩完之后,把 AgentLoop 内部存的完整历史换成压缩后的
+    // 那份(archive 消息 + 最近一轮完整对话)。是本次任务里唯一允许写
+    // history_ 的新入口,agent/compact.cpp 里的 Compact() 本身不碰
+    // AgentLoop,只管算出新历史,真正替换由调用方(main.cpp)拿到新历史后
+    // 调这个方法完成。
+    void ReplaceHistory(std::vector<api::Message> new_history) { history_ = std::move(new_history); }
+
 private:
     api::Backend& backend_;
     tools::ToolRegistry& registry_;

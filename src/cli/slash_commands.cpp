@@ -55,6 +55,12 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Clear;
     } else if (lower == "/exit" || lower == "/quit") {
         parsed.command = SlashCommand::Exit;
+    } else if (lower == "/context") {
+        parsed.command = SlashCommand::Context;
+    } else if (lower == "/compact") {
+        parsed.command = SlashCommand::Compact;
+    } else if (lower == "/think") {
+        parsed.command = SlashCommand::Think;
     } else {
         parsed.command = SlashCommand::Unknown;
     }
@@ -68,6 +74,9 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
         {"/config", "打印当前生效配置和本会话在用的 model"},
         {"/clear", "清空对话历史"},
         {"/exit", "退出(裸词 exit/quit 也认)"},
+        {"/context", "看当前上下文占用;/context 256k|512k|1m 临时改窗口大小"},
+        {"/compact", "手动压缩历史;/compact 重点说明 可指定这次额外保留什么"},
+        {"/think", "看当前推理强度;/think none|low|medium|high 切档位"},
     };
     return kCommands;
 }

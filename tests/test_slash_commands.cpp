@@ -79,3 +79,60 @@ TEST_CASE("ParseSlashCommand: 输入前后有空白,先剥掉再判断") {
     const auto parsed = cli::ParseSlashCommand("   /help   ");
     CHECK(parsed.command == cli::SlashCommand::Help);
 }
+
+TEST_CASE("ParseSlashCommand: /context 不带参数") {
+    const auto parsed = cli::ParseSlashCommand("/context");
+    CHECK(parsed.command == cli::SlashCommand::Context);
+    CHECK(parsed.args.empty());
+}
+
+TEST_CASE("ParseSlashCommand: /context 带档位参数") {
+    const auto parsed = cli::ParseSlashCommand("/context 512k");
+    CHECK(parsed.command == cli::SlashCommand::Context);
+    CHECK(parsed.args == "512k");
+}
+
+TEST_CASE("ParseSlashCommand: /compact 不带参数") {
+    const auto parsed = cli::ParseSlashCommand("/compact");
+    CHECK(parsed.command == cli::SlashCommand::Compact);
+    CHECK(parsed.args.empty());
+}
+
+TEST_CASE("ParseSlashCommand: /compact 带重点说明参数") {
+    const auto parsed = cli::ParseSlashCommand("/compact 重点保留数据库配置");
+    CHECK(parsed.command == cli::SlashCommand::Compact);
+    CHECK(parsed.args == "重点保留数据库配置");
+}
+
+TEST_CASE("ParseSlashCommand: /think 不带参数") {
+    const auto parsed = cli::ParseSlashCommand("/think");
+    CHECK(parsed.command == cli::SlashCommand::Think);
+    CHECK(parsed.args.empty());
+}
+
+TEST_CASE("ParseSlashCommand: /think 带档位参数") {
+    const auto parsed = cli::ParseSlashCommand("/think high");
+    CHECK(parsed.command == cli::SlashCommand::Think);
+    CHECK(parsed.args == "high");
+}
+
+TEST_CASE("ParseSlashCommand: /context /compact /think 命令词大小写不敏感") {
+    CHECK(cli::ParseSlashCommand("/CONTEXT").command == cli::SlashCommand::Context);
+    CHECK(cli::ParseSlashCommand("/Compact").command == cli::SlashCommand::Compact);
+    CHECK(cli::ParseSlashCommand("/THINK").command == cli::SlashCommand::Think);
+}
+
+TEST_CASE("AllSlashCommands: 新命令 /context /compact /think 都在列表里") {
+    const auto& commands = cli::AllSlashCommands();
+    bool has_context = false;
+    bool has_compact = false;
+    bool has_think = false;
+    for (const auto& c : commands) {
+        if (c.name == "/context") has_context = true;
+        if (c.name == "/compact") has_compact = true;
+        if (c.name == "/think") has_think = true;
+    }
+    CHECK(has_context);
+    CHECK(has_compact);
+    CHECK(has_think);
+}

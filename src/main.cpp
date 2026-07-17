@@ -5,6 +5,7 @@
 // 模式缺配置则直接报可读的错。交互循环里加了 /help /model /config /clear
 // /exit 几个 slash 命令,/model 能让模型切换真正在下一次请求生效。
 
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -15,10 +16,13 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <variant>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
+#include "agent/compact.hpp"
 #include "agent/loop.hpp"
 #include "agent/prompts.hpp"
 #include "api/anthropic/client.hpp"
@@ -26,6 +30,7 @@
 #include "api/models.hpp"
 #include "api/responses/client.hpp"
 #include "cli/console_input.hpp"
+#include "cli/context_tracker.hpp"
 #include "cli/setup_wizard.hpp"
 #include "cli/slash_commands.hpp"
 #include "cli/spinner.hpp"
@@ -45,7 +50,7 @@
 
 namespace {
 
-constexpr std::string_view kVersion = "0.5.0";
+constexpr std::string_view kVersion = "0.6.0";
 
 void PrintVersion() {
     std::cout << "lubancode " << kVersion << "\n";
@@ -74,6 +79,11 @@ void PrintHelp() {
         << "  /model 名字     直接切到指定模型名,不用拉列表\n"
         << "  /config         打印当前生效配置(复用 --config 的逻辑),外加本会话实际在用的 model\n"
         << "  /clear          清空对话历史\n"
+        << "  /context        看当前上下文占用(token 数/窗口大小/百分比)\n"
+        << "  /context 512k   临时改窗口大小(256k/512k/1m/裸数字都认),只本会话生效\n"
+        << "  /compact [重点说明]  手动触发一次历史压缩,可选指定这次额外保留什么\n"
+        << "  /think          看当前推理强度\n"
+        << "  /think 档位     切推理强度,none/low/medium/high\n"
         << "  /exit           退出(裸词 exit/quit 也认)\n\n"
         << "配置优先级(从高到低,按字段逐个决,不是整套配置一刀切):\n"
         << "  1) LUBANCODE_ 专属环境变量\n"
@@ -81,22 +91,27 @@ void PrintHelp() {
         << "       LUBANCODE_BASE_URL      API 地址\n"
         << "       LUBANCODE_API_KEY       认证令牌\n"
         << "       LUBANCODE_MODEL         模型名\n"
-        << "       LUBANCODE_MAX_CONTEXT   history 裁剪阈值(字符数)\n"
+        << "       LUBANCODE_MAX_CONTEXT   history 裁剪阈值(字符数,老的硬安全网)\n"
         << "       LUBANCODE_THEME         终端配色主题,dark / light / plain\n"
         << "       LUBANCODE_SYSTEM_PROMPT_FILE  人格文件路径,同 --system-prompt(命令行参数压过这个)\n"
+        << "       LUBANCODE_CONTEXT_WINDOW      上下文窗口 token 数,256k/512k/1m/裸数字\n"
+        << "       LUBANCODE_COMPACT_MODEL       压缩用的模型,空 = 跟当前会话模型一致\n"
+        << "       LUBANCODE_THINK               推理强度,none/low/medium/high,空 = 不发这个参数\n"
         << "  2) 配置文件(第一个找到的生效,查找顺序:cwd 的 .lubancode/config.json → 主目录的\n"
         << "     .lubancode/config.json → cwd 的旧位置 .lubancode.json → 主目录的旧位置\n"
         << "     .lubancode.json;读到旧位置会自动挪到新位置)。字段:wire / base_url / api_key / model /\n"
-        << "     max_context_chars / theme / system_prompt_file,全部可选。\n"
+        << "     max_context_chars / theme / system_prompt_file / context_window / compact_model / think,\n"
+        << "     全部可选。\n"
         << "  3) 通用环境变量(向后兼容旧用法,跟 Claude Code 等工具共用同名变量时容易撞车,\n"
         << "     建议改用第 1 级的 LUBANCODE_* 专属变量):\n"
         << "       wire=anthropic 时读 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL\n"
         << "       wire=responses 时读 OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL\n"
         << "  4) 内置默认值:wire=anthropic、max_context_chars=" << lubancode::config::kDefaultMaxContextChars
-        << "、theme=" << lubancode::config::kDefaultTheme << "。\n"
-        << "     base_url/api_key/model/system_prompt_file 不绑死任何一家模型服务,没有内置默认值——\n"
-        << "     四级都没配到,交互模式会自动走初次配置向导;单发模式/管道模式会直接报错,提示三条\n"
-        << "     配置途径。用 --config 能看到当前实际生效的配置和每个字段的来源。\n";
+        << "、theme=" << lubancode::config::kDefaultTheme
+        << "、context_window=" << lubancode::config::kDefaultContextWindowTokens << "。\n"
+        << "     base_url/api_key/model/system_prompt_file/compact_model/think 不绑死任何一家模型服务,\n"
+        << "     没有内置默认值——四级都没配到,交互模式会自动走初次配置向导;单发模式/管道模式会直接\n"
+        << "     报错,提示三条配置途径。用 --config 能看到当前实际生效的配置和每个字段的来源。\n";
 }
 
 // 按 wire 造对应的后端实现。agent 层只认 Backend 这个抽象接口,不关心
@@ -132,6 +147,30 @@ private:
     std::shared_ptr<std::string> current_model_;
 };
 
+// 包一层 Backend:真正发请求前,把 Request.reasoning_effort 换成"当前会话
+// 实际在用的推理强度"。跟 ModelOverrideBackend 是同一个套路,同样的理由
+// (AgentLoop 没有 setter,agent 层现有文件不让动)——current_think 为空串
+// 就是"不发这个参数",维持原有行为不变。/think 命令改的和这里读的是
+// 同一块 shared_ptr<string> 内存,单发模式(AskOnce)没有 /think 命令,
+// current_think 构造后就不再变,等价于"直接按配置发一次"。
+class ThinkOverrideBackend : public lubancode::api::Backend {
+public:
+    ThinkOverrideBackend(lubancode::api::Backend& inner, std::shared_ptr<std::string> current_think)
+        : inner_(inner), current_think_(std::move(current_think)) {}
+
+    std::expected<void, lubancode::api::Error> send_stream(
+        const lubancode::api::Request& request,
+        const std::function<void(const lubancode::api::StreamEvent&)>& on_event) override {
+        lubancode::api::Request patched = request;
+        patched.reasoning_effort = *current_think_;
+        return inner_.send_stream(patched, on_event);
+    }
+
+private:
+    lubancode::api::Backend& inner_;
+    std::shared_ptr<std::string> current_think_;
+};
+
 // --config、/config 共用:打印最终生效的配置和每个字段的来源。session_model
 // 有值时(/config 场景)额外打一行"本会话实际在用的 model"——/model 切换
 // 只影响会话内存,不一定跟 config.model(四级合并出来的那份)一致。
@@ -155,6 +194,12 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
               << "]\n";
     std::cout << "  system_prompt_file = " << (config.system_prompt_file.empty() ? "(未设置)" : config.system_prompt_file)
               << "  [" << lubancode::config::ToString(sources.system_prompt_file) << "]\n";
+    std::cout << "  context_window     = " << config.context_window_tokens << " tokens  ["
+              << lubancode::config::ToString(sources.context_window_tokens) << "]\n";
+    std::cout << "  compact_model      = " << (config.compact_model.empty() ? "(未设置,跟会话模型一致)" : config.compact_model)
+              << "  [" << lubancode::config::ToString(sources.compact_model) << "]\n";
+    std::cout << "  think              = " << (config.think.empty() ? "(未设置,不发这个参数)" : config.think) << "  ["
+              << lubancode::config::ToString(sources.think) << "]\n";
     if (result.config_file_path.has_value()) {
         std::cout << "  配置文件           = " << *result.config_file_path << "\n";
     }
@@ -296,7 +341,8 @@ struct UsageStats {
 // 会话内不会再问。usage_stats 由调用方持有,只在这一次 Run() 范围内累计
 // (RunTurn() 每次都会传一份新的进来)。
 lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::string>& always_allowed_tools,
-                                            const lubancode::cli::Theme& theme, UsageStats& usage_stats) {
+                                            const lubancode::cli::Theme& theme, UsageStats& usage_stats,
+                                            lubancode::cli::ContextTracker& context_tracker) {
     lubancode::agent::Callbacks callbacks;
 
     callbacks.on_text_delta = [](const std::string& text) {
@@ -347,11 +393,14 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         }
     };
 
-    callbacks.on_usage = [&usage_stats](const lubancode::api::Usage& usage) {
+    callbacks.on_usage = [&usage_stats, &context_tracker](const lubancode::api::Usage& usage) {
         usage_stats.input_tokens += usage.input_tokens;
         usage_stats.output_tokens += usage.output_tokens;
         usage_stats.cache_read_tokens += usage.cache_read_tokens;
         usage_stats.request_count += 1;
+        // ContextTracker 只认"最近一次请求"的真实用量,整个覆盖,不跟着
+        // usage_stats 一起累加——语义区别见 cli/context_tracker.hpp 文件头。
+        context_tracker.Update(usage);
     };
 
     return callbacks;
@@ -362,9 +411,11 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
 // 前后缀)。返回 0 表示成功,非 0 表示出错。always_allowed_tools 由调用方
 // 持有,记录本会话内选过"总是允许"的工具。
 int RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bool auto_confirm,
-            std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme) {
+            std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
+            lubancode::cli::ContextTracker& context_tracker) {
     UsageStats usage_stats;
-    const lubancode::agent::Callbacks callbacks = BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats);
+    const lubancode::agent::Callbacks callbacks =
+        BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker);
 
     const auto result = loop.Run(user_input, callbacks);
     std::cout << "\n";
@@ -380,7 +431,7 @@ int RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bo
             std::cout << "(缓存命中 " << usage_stats.cache_read_tokens << ")";
         }
         std::cout << " · 输出 " << usage_stats.output_tokens << " · 请求 " << usage_stats.request_count << " 次"
-                   << theme.reset << "\n";
+                   << " · context " << context_tracker.UsagePercent() << "%" << theme.reset << "\n";
     }
     return 0;
 }
@@ -430,7 +481,107 @@ void PrintSlashHelp() {
               << "  /model 名字     直接切到指定模型名,不用拉列表\n"
               << "  /config         打印当前生效配置(api_key 打码),外加本会话实际在用的 model\n"
               << "  /clear          清空对话历史\n"
+              << "  /context        看当前上下文占用;/context 256k|512k|1m 临时改窗口大小\n"
+              << "  /compact        手动压缩历史;/compact 重点说明 可指定这次额外保留什么\n"
+              << "  /think          看当前推理强度;/think none|low|medium|high 切档位\n"
               << "  /exit           退出(裸词 exit/quit 也认)\n";
+}
+
+// 粗略估算一段历史占用了多少"token"——不真调分词器,按字符数打个折扣
+// (中英文混排,经验上大致两个字符算一个 token),仅供 /compact 报告
+// "压缩前后省了多少"用,数字前带 ~ 提醒这是估算值,不是真实用量(真实
+// 用量要靠 usage.input_tokens,那个得等实际发一次请求才知道)。
+std::size_t EstimateHistoryChars(const std::vector<lubancode::api::Message>& history) {
+    std::size_t total = 0;
+    for (const auto& message : history) {
+        for (const auto& block : message.content) {
+            std::visit(
+                [&total](const auto& b) {
+                    using T = std::decay_t<decltype(b)>;
+                    if constexpr (std::is_same_v<T, lubancode::api::TextBlock>) {
+                        total += b.text.size();
+                    } else if constexpr (std::is_same_v<T, lubancode::api::ToolUseBlock>) {
+                        total += b.name.size() + b.input.dump().size();
+                    } else if constexpr (std::is_same_v<T, lubancode::api::ToolResultBlock>) {
+                        total += b.content.size();
+                    }
+                },
+                block);
+        }
+    }
+    return total;
+}
+
+std::size_t EstimateTokens(std::size_t chars) { return (chars + 1) / 2; }
+
+// /context 命令:不带参数看当前占用,带参数(256k/512k/1m/裸数字)临时改
+// 窗口大小,只本会话生效,不改配置文件。
+void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracker& context_tracker) {
+    if (args.empty()) {
+        std::cout << "上下文占用: " << context_tracker.current_tokens() << " / " << context_tracker.window_tokens()
+                   << " tokens (" << context_tracker.UsagePercent() << "%)";
+        if (context_tracker.ShouldAutoCompact()) {
+            std::cout << "  —— 接近上限了,建议 /compact 一下";
+        }
+        std::cout << "\n";
+        return;
+    }
+    const auto parsed = lubancode::config::ParseContextWindowTokens(args);
+    if (!parsed.has_value()) {
+        std::cout << parsed.error() << "\n";
+        return;
+    }
+    context_tracker.set_window_tokens(*parsed);
+    std::cout << "上下文窗口已改成 " << *parsed << " tokens(只本会话生效,没改配置文件)。\n";
+}
+
+// /compact 命令:把当前历史整段发给模型换一份压缩存档,顶替掉中间那段
+// 老对话,只留 archive + 最近一轮完整对话。backend 传裸的、没包
+// ModelOverrideBackend 的那份——Compact() 会自己把 compact_model 写进
+// request.model,要是走了 ModelOverrideBackend,会被强制换回当前会话
+// model,压缩模型这个字段就形同虚设了。
+void HandleCompactCommand(const std::string& args, lubancode::agent::AgentLoop& loop,
+                           lubancode::api::Backend& raw_backend, const std::string& compact_model,
+                           const lubancode::cli::Theme& theme, bool spinner_enabled) {
+    const std::vector<lubancode::api::Message>& history = loop.History();
+    if (history.empty()) {
+        std::cout << "当前没有对话历史,不用压缩。\n";
+        return;
+    }
+    const std::size_t before_tokens = EstimateTokens(EstimateHistoryChars(history));
+
+    lubancode::cli::Spinner spinner(theme, spinner_enabled);
+    const auto result = lubancode::agent::Compact(raw_backend, compact_model, history, args);
+    spinner.Stop();
+
+    if (!result.has_value()) {
+        std::cout << theme.error << "压缩失败: " << result.error().message << theme.reset << "\n";
+        return;
+    }
+
+    const auto new_history = lubancode::agent::BuildCompactedHistory(history, *result);
+    loop.ReplaceHistory(new_history);
+    const std::size_t after_tokens = EstimateTokens(EstimateHistoryChars(new_history));
+    std::cout << "压缩前 ~" << before_tokens << " tokens → 压缩后 ~" << after_tokens << " tokens\n";
+}
+
+// /think 命令:不带参数看当前档位,带参数切档位(本会话生效)。跟 config
+// 层的 think 校验用同一套规则(none/low/medium/high,大小写不敏感)。
+void HandleThinkCommand(const std::string& args, const std::shared_ptr<std::string>& current_think) {
+    if (args.empty()) {
+        std::cout << "当前推理强度: " << (current_think->empty() ? "(未设置,不发这个参数)" : *current_think) << "\n";
+        return;
+    }
+    std::string lower = args;
+    for (char& c : lower) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (lower != "none" && lower != "low" && lower != "medium" && lower != "high") {
+        std::cout << "只认得 none/low/medium/high,写的是: " << args << "\n";
+        return;
+    }
+    *current_think = lower;
+    std::cout << "推理强度已切到 " << lower << "(本会话生效)。\n";
 }
 
 // /model 命令的执行逻辑:带参数直接切;不带参数拉列表编号选。切完了,
@@ -519,11 +670,18 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
 
     std::unique_ptr<lubancode::api::Backend> real_backend = BuildBackend(config);
     auto current_model = std::make_shared<std::string>(config.model);
+    auto current_think = std::make_shared<std::string>(config.think);
     ModelOverrideBackend model_backend(*real_backend, current_model);
+    ThinkOverrideBackend think_backend(model_backend, current_think);
     // SpinnerBackend 包最外层:每次 send_stream 起转轮,收到第一个流事件就
-    // 停,ModelOverrideBackend 负责 /model 切换生效,两层包装顺序不影响
-    // 语义(model 补丁在更内层做,转轮只关心"发出去了没有第一个字节回来")。
-    SpinnerBackend wrapped_backend(model_backend, theme, spinner_enabled);
+    // 停,Model/ThinkOverrideBackend 分别负责 /model、/think 切换生效,
+    // 几层包装顺序不影响语义(补丁都在更内层做,转轮只关心"发出去了没有
+    // 第一个字节回来")。/compact 触发的压缩请求不走这几层包装,直接用
+    // *real_backend——理由见 HandleCompactCommand 注释。
+    SpinnerBackend wrapped_backend(think_backend, theme, spinner_enabled);
+
+    // ContextTracker:会话级"上下文占用"记账,/context、自动 compact 都靠它。
+    lubancode::cli::ContextTracker context_tracker(config.context_window_tokens);
 
     PrintBanner(config, theme);
 
@@ -571,6 +729,17 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     rebuild_loop();
                     std::cout << "已清空对话历史。\n";
                     break;
+                case lubancode::cli::SlashCommand::Context:
+                    HandleContextCommand(parsed.args, context_tracker);
+                    break;
+                case lubancode::cli::SlashCommand::Compact: {
+                    const std::string compact_model = config.compact_model.empty() ? *current_model : config.compact_model;
+                    HandleCompactCommand(parsed.args, *loop, *real_backend, compact_model, theme, spinner_enabled);
+                    break;
+                }
+                case lubancode::cli::SlashCommand::Think:
+                    HandleThinkCommand(parsed.args, current_think);
+                    break;
                 case lubancode::cli::SlashCommand::Exit:
                     return;
                 case lubancode::cli::SlashCommand::Unknown:
@@ -582,7 +751,25 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
             continue;
         }
 
-        RunTurn(*loop, *line, auto_confirm, always_allowed_tools, theme);
+        // 自动压缩:发真正的用户输入前,占用超过阈值(80%)就先压一压。
+        // 用裸的 *real_backend(理由同 /compact),失败只警告不拦——字符数
+        // 硬安全网(TrimHistory)还在,不会真的爆掉。
+        if (context_tracker.ShouldAutoCompact()) {
+            std::cout << theme.stats << "[compact] 上下文接近上限,自动压缩中..." << theme.reset << "\n";
+            lubancode::cli::Spinner spinner(theme, spinner_enabled);
+            const std::string compact_model = config.compact_model.empty() ? *current_model : config.compact_model;
+            const auto compact_result = lubancode::agent::Compact(*real_backend, compact_model, loop->History(), "");
+            spinner.Stop();
+            if (compact_result.has_value()) {
+                loop->ReplaceHistory(lubancode::agent::BuildCompactedHistory(loop->History(), *compact_result));
+                std::cout << "[compact] 自动压缩完成。\n";
+            } else {
+                std::cout << theme.error << "[compact] 自动压缩失败: " << compact_result.error().message
+                           << theme.reset << "(继续按原历史发送,字符数安全网仍会兜底)\n";
+            }
+        }
+
+        RunTurn(*loop, *line, auto_confirm, always_allowed_tools, theme, context_tracker);
     }
 }
 
@@ -592,14 +779,19 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
 int AskOnce(const lubancode::config::Config& config, const std::string& question, bool auto_confirm,
             const lubancode::cli::Theme& theme, const std::string& persona, bool spinner_enabled) {
     std::unique_ptr<lubancode::api::Backend> backend = BuildBackend(config);
-    SpinnerBackend wrapped_backend(*backend, theme, spinner_enabled);
+    // 单发模式没有 /think 命令,current_think 构造后不会再变,等价于直接
+    // 按配置里的 think 发一次。
+    auto current_think = std::make_shared<std::string>(config.think);
+    ThinkOverrideBackend think_backend(*backend, current_think);
+    SpinnerBackend wrapped_backend(think_backend, theme, spinner_enabled);
     lubancode::tools::ToolRegistry registry = BuildToolRegistry();
     lubancode::agent::AgentLoop loop(wrapped_backend, registry, config.model,
                                       lubancode::agent::BuildSystemPrompt(CurrentDirUtf8(), persona),
                                       /*max_tokens=*/4096, /*max_turns=*/25, config.max_context_chars);
     std::set<std::string> always_allowed_tools;
+    lubancode::cli::ContextTracker context_tracker(config.context_window_tokens);
 
-    return RunTurn(loop, question, auto_confirm, always_allowed_tools, theme);
+    return RunTurn(loop, question, auto_confirm, always_allowed_tools, theme, context_tracker);
 }
 
 // 真正的入口逻辑,跟平台无关:args[0] 是程序名,args[1..] 是实参。

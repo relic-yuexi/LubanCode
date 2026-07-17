@@ -188,3 +188,27 @@ TEST_CASE("没有工具时不写 tools 字段") {
     const auto body = BuildRequestJson(request);
     CHECK_FALSE(body.contains("tools"));
 }
+
+TEST_CASE("reasoning_effort 为空串时不写 reasoning 字段") {
+    Request request;
+    request.reasoning_effort = "";
+    const auto body = BuildRequestJson(request);
+    CHECK_FALSE(body.contains("reasoning"));
+}
+
+TEST_CASE("reasoning_effort 非空时映射成 reasoning.effort") {
+    Request request;
+    request.reasoning_effort = "high";
+    const auto body = BuildRequestJson(request);
+    REQUIRE(body.contains("reasoning"));
+    CHECK(body.at("reasoning").at("effort") == "high");
+}
+
+TEST_CASE("reasoning_effort 支持 none/low/medium/high 四档,原样透传不做限制") {
+    for (const std::string& level : {"none", "low", "medium", "high"}) {
+        Request request;
+        request.reasoning_effort = level;
+        const auto body = BuildRequestJson(request);
+        CHECK(body.at("reasoning").at("effort") == level);
+    }
+}
