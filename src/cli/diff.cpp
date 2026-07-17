@@ -271,14 +271,24 @@ std::string FormatDiff(const std::vector<DiffLine>& diff, const Theme& theme, in
                    " 行(Ctrl+E 查看完整)\n";
             return out;
         }
-        // 上色只在 -/+ 行(整行染),折叠标注走淡色,上下文不染。plain
-        // 主题各字段全是空串,天然退化成纯文本,靠前缀辨认。
+        // 上色(Claude Code Update 样式):删除行整行(行号 + '- ' + 内容)
+        // 套红底、新增行套绿底,行尾紧跟 reset——背景只铺到内容实际结尾,
+        // 不填充到终端宽,拖选复制不带大片色块;截宽在上头已做完,reset
+        // 永远落在行尾。上下文行行号栏染淡色、正文原色;折叠标注走淡色,
+        // 不上底。plain 主题各字段全是空串,天然退化成纯文本,靠前缀辨认。
         if (rows[r].kind == DiffLineKind::Del) {
-            out += theme.error + plain + theme.reset;
+            out += theme.diff_del_bg + plain + theme.reset;
         } else if (rows[r].kind == DiffLineKind::Add) {
-            out += theme.prompt + plain + theme.reset;
+            out += theme.diff_add_bg + plain + theme.reset;
         } else if (rows[r].folded) {
             out += theme.stats + plain + theme.reset;
+        } else if (!theme.diff_line_no.empty()) {
+            // 行号栏(数字 + 空格 + 符号位 + 空格)全是 ASCII,按字节切安全;
+            // 宽度掐得极窄时行可能比栏还短,取短的那头。
+            const std::size_t gutter = static_cast<std::size_t>(num_w) + 3 < plain.size()
+                                            ? static_cast<std::size_t>(num_w) + 3
+                                            : plain.size();
+            out += theme.diff_line_no + plain.substr(0, gutter) + theme.reset + plain.substr(gutter);
         } else {
             out += plain;
         }

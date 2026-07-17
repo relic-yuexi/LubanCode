@@ -47,6 +47,9 @@ Theme DarkTheme() {
     t.stats = "\x1b[2;37m";      // 暗淡的白(灰)
     t.spinner = "\x1b[36m";      // 青
     t.reset = "\x1b[0m";
+    t.diff_add_bg = "\x1b[48;5;22m";   // 深绿底(默认前景在深色终端上看得清)
+    t.diff_del_bg = "\x1b[48;5;52m";   // 深红底
+    t.diff_line_no = "\x1b[2;37m";     // 行号栏淡灰
     return t;
 }
 
@@ -60,6 +63,9 @@ Theme LightTheme() {
     t.stats = "\x1b[2;30m";      // 暗淡的黑(浅灰)
     t.spinner = "\x1b[0;36m";    // 深青
     t.reset = "\x1b[0m";
+    t.diff_add_bg = "\x1b[48;5;194m";  // 浅绿底(浅色终端下深色前景照样清楚)
+    t.diff_del_bg = "\x1b[48;5;224m";  // 浅红底
+    t.diff_line_no = "\x1b[2;30m";     // 行号栏浅灰
     return t;
 }
 

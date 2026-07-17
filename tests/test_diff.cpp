@@ -1,8 +1,9 @@
 // UI-C(0.13.0):diff 预览纯函数单测——ComputeLineDiff 的八类形状(纯增/
 // 纯删/改中间/首尾改/无变化/完全重写/单行/空对空)、FormatDiff 的前缀与
-// 行号栏、染色只在 +/- 行、行数与字节双限截断、上下文折叠,以及
-// BuildEditDiff 的定位(单行/跨行/找不到回退/replace_all 处数)和
-// BuildWriteDiff 的新文件/覆盖两条路。
+// 行号栏、Claude Code Update 样式的染色(- 行红底、+ 行绿底、上下文行号
+// 栏淡色、折叠标注不上底、截宽后 reset 仍在行尾)、行数与字节双限截断、
+// 上下文折叠,以及 BuildEditDiff 的定位(单行/跨行/找不到回退/replace_all
+// 处数)和 BuildWriteDiff 的新文件/覆盖两条路。
 
 #include <doctest/doctest.h>
 
@@ -166,26 +167,82 @@ TEST_CASE("FormatDiff: plain 主题下前缀与行号栏——'  2 - b' 样式")
     CHECK(text.find('\x1b') == std::string::npos);  // plain 不夹 ANSI
 }
 
-TEST_CASE("FormatDiff: 彩色主题只染 +/- 行,上下文不染") {
+TEST_CASE("FormatDiff: 彩色主题——删除行红底、新增行绿底,整行套色、行尾 reset") {
     const auto theme = BuiltinTheme("dark");
     const auto diff = ComputeLineDiff({"a", "b", "c"}, {"a", "x", "c"});
     const std::string text = FormatDiff(diff, theme, 0, 0, 0);
     const auto lines = Lines(text);
-    bool saw_red = false;
-    bool saw_green = false;
+    bool saw_del = false;
+    bool saw_add = false;
     for (const auto& line : lines) {
         if (line.find(" - b") != std::string::npos) {
-            CHECK(line.find(theme.error) == 0);  // 整行以红色起头
-            saw_red = true;
+            // 整行(行号 + '- ' + 内容)以红底起头,行尾紧跟 reset——底色
+            // 只铺到内容实际结尾,不填充到终端宽。
+            CHECK(line.find(theme.diff_del_bg) == 0);
+            CHECK(line.rfind(theme.reset) == line.size() - theme.reset.size());
+            saw_del = true;
         } else if (line.find(" + x") != std::string::npos) {
-            CHECK(line.find(theme.prompt) == 0);  // 整行以绿色起头
-            saw_green = true;
-        } else if (!line.empty()) {
-            CHECK(line.find('\x1b') == std::string::npos);  // 上下文行素面
+            CHECK(line.find(theme.diff_add_bg) == 0);
+            CHECK(line.rfind(theme.reset) == line.size() - theme.reset.size());
+            saw_add = true;
         }
     }
-    CHECK(saw_red);
-    CHECK(saw_green);
+    CHECK(saw_del);
+    CHECK(saw_add);
+}
+
+TEST_CASE("FormatDiff: 彩色主题——上下文行行号栏淡色、正文原色、不上底") {
+    const auto theme = BuiltinTheme("dark");
+    const auto diff = ComputeLineDiff({"a", "b", "c"}, {"a", "x", "c"});
+    const std::string text = FormatDiff(diff, theme, 0, 0, 0);
+    for (const auto& line : Lines(text)) {
+        if (line.find("  a") == std::string::npos && line.find("  c") == std::string::npos) {
+            continue;
+        }
+        CHECK(line.find(theme.diff_line_no) == 0);  // 行号栏淡色起头
+        CHECK(line.find(theme.diff_del_bg) == std::string::npos);  // 无底色
+        CHECK(line.find(theme.diff_add_bg) == std::string::npos);
+        // 行号栏染完就 reset,正文素面(reset 之后不再有 ANSI)。
+        const std::size_t reset_pos = line.find(theme.reset);
+        REQUIRE(reset_pos != std::string::npos);
+        CHECK(line.find('\x1b', reset_pos + theme.reset.size()) == std::string::npos);
+    }
+}
+
+TEST_CASE("FormatDiff: 彩色主题——折叠标注走淡色,不上底色") {
+    const auto theme = BuiltinTheme("dark");
+    std::vector<std::string> old_lines;
+    std::vector<std::string> new_lines;
+    for (int i = 1; i <= 20; ++i) {
+        old_lines.push_back("line" + std::to_string(i));
+        new_lines.push_back(i == 10 ? "CHANGED" : "line" + std::to_string(i));
+    }
+    const std::string text = FormatDiff(ComputeLineDiff(old_lines, new_lines), theme, 0, 0, 0);
+    for (const auto& line : Lines(text)) {
+        if (line.find("行未变") == std::string::npos) {
+            continue;
+        }
+        CHECK(line.find(theme.stats) == 0);
+        CHECK(line.find(theme.diff_del_bg) == std::string::npos);
+        CHECK(line.find(theme.diff_add_bg) == std::string::npos);
+    }
+}
+
+TEST_CASE("FormatDiff: 彩色主题——生成时截宽,截断后 reset 仍在行尾") {
+    const auto theme = BuiltinTheme("dark");
+    const std::string long_line(120, 'y');
+    const std::string text = FormatDiff(ComputeLineDiff({}, {long_line}), theme, /*width=*/40, 0, 0);
+    const auto lines = Lines(text);
+    REQUIRE(!lines.empty());
+    const std::string& line = lines[0];
+    CHECK(line.find(theme.diff_add_bg) == 0);
+    CHECK(line.rfind(theme.reset) == line.size() - theme.reset.size());  // 截断点在 reset 之前
+    CHECK(line.find("...") != std::string::npos);
+    // 去掉 ANSI 后正文不超宽(全 ASCII,字节数即显示宽)。
+    const std::string plain =
+        line.substr(theme.diff_add_bg.size(), line.size() - theme.diff_add_bg.size() - theme.reset.size());
+    CHECK(plain.size() <= 40);
+    CHECK(plain.find('\x1b') == std::string::npos);
 }
 
 TEST_CASE("FormatDiff: 无变化给固定提示") {

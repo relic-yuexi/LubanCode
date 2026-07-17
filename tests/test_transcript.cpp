@@ -208,10 +208,10 @@ TEST_CASE("ReadFileDoneSummary: 行数;空文件 0 行") {
     CHECK(ReadFileDoneSummary("(空文件)") == "读取 0 行");
 }
 
-TEST_CASE("WriteDiffSummary: +N -M;新文件只有 +N") {
-    CHECK(WriteDiffSummary(39, 36) == "+39 -36");
-    CHECK(WriteDiffSummary(5, std::nullopt) == "+5");
-    CHECK(WriteDiffSummary(0, 3) == "+0 -3");
+TEST_CASE("WriteDiffSummary: 新增 N 行,删除 M 行;新文件只有新增") {
+    CHECK(WriteDiffSummary(39, 36) == "新增 39 行,删除 36 行");
+    CHECK(WriteDiffSummary(5, std::nullopt) == "新增 5 行");
+    CHECK(WriteDiffSummary(0, 3) == "新增 0 行,删除 3 行");
 }
 
 TEST_CASE("SearchDoneSummary: 命中数,没搜到算 0,截断提示行不计") {
@@ -313,7 +313,7 @@ TEST_CASE("FormatTranscriptItem expanded: diff 全文跟在工具结果后一起
     TranscriptItem item = MakeItem(TranscriptStatus::Ok);
     item.tool_name = "edit_file";
     item.title = "edit_file(a.txt)";
-    item.summary_lines = {"+1 -1"};
+    item.summary_lines = {"新增 1 行,删除 1 行"};
     // full_output 的存法跟 main.cpp FinalizeItem 一致:结果 + 空行 + 完整 diff。
     item.full_output = "成功替换 1 处\n\ndiff:\n   1    ctx\n   2  - old\n   2  + new";
     const std::string out = FormatTranscriptItem(item, theme, 0, /*expanded=*/true);

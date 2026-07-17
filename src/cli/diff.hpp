@@ -5,9 +5,12 @@
 //   1. ComputeLineDiff:行级 LCS(手写朴素 DP,先剥公共前后缀,中段规模
 //      超限退化成整删整增,不引库、不爆内存);
 //   2. FormatDiff:排版——行号栏 + -/+/空格前缀,变更行前后各留 3 行
-//      上下文,中间未变的长段折叠成一行标注;彩色主题 - 染红(theme.error)
-//      + 染绿(theme.prompt),上下文不染;超行数/字节双限截断,并标注
-//      省略了多少行;
+//      上下文,中间未变的长段折叠成一行标注;彩色主题走 Claude Code
+//      Update 样式:- 行整行红底(theme.diff_del_bg)、+ 行整行绿底
+//      (theme.diff_add_bg),底色只铺到内容实际结尾(行尾即 reset,不
+//      填充到终端宽),上下文行行号栏淡色(theme.diff_line_no)、正文
+//      原色,折叠/截断标注不上底;超行数/字节双限截断,并标注省略了
+//      多少行;
 //   3. BuildEditDiff / BuildWriteDiff:按两个工具的入参语义拼 diff 输入
 //      (edit 拿真文件内容做整文替换后对比,天然带上下文和真实行号;
 //      找不到 old_string 回退成只比 old/new 两段;write 对比旧文件与新

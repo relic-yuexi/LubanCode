@@ -251,9 +251,9 @@ std::string ReadFileDoneSummary(const std::string& content) {
 }
 
 std::string WriteDiffSummary(int added_lines, std::optional<int> removed_lines) {
-    std::string out = "+" + std::to_string(added_lines);
+    std::string out = "新增 " + std::to_string(added_lines) + " 行";
     if (removed_lines.has_value()) {
-        out += " -" + std::to_string(*removed_lines);
+        out += ",删除 " + std::to_string(*removed_lines) + " 行";
     }
     return out;
 }
