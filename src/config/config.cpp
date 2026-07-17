@@ -11,6 +11,10 @@
 
 #include <nlohmann/json.hpp>
 
+// i18n:cli/i18n 是零依赖的叶子字符串表(只用标准库 + json),config 层引它
+// 不构成反向依赖——它不牵扯 cli 的任何交互逻辑。
+#include "cli/i18n.hpp"
+
 namespace lubancode::config {
 
 namespace {
@@ -70,15 +74,15 @@ std::filesystem::path OldConfigPathFor(const std::filesystem::path& base_dir) {
 std::string ToString(Source source) {
     switch (source) {
         case Source::LubancodeEnv:
-            return "LUBANCODE_ 专属环境变量";
+            return cli::tr("config.source.lubancode_env");
         case Source::ConfigFile:
-            return "配置文件(.lubancode/config.json)";
+            return cli::tr("config.source.config_file");
         case Source::GenericEnv:
-            return "通用环境变量(ANTHROPIC_*/OPENAI_*)";
+            return cli::tr("config.source.generic_env");
         case Source::Default:
-            return "内置默认值";
+            return cli::tr("config.source.default");
     }
-    return "未知来源";
+    return cli::tr("config.source.unknown");
 }
 
 std::expected<std::size_t, std::string> ParseContextWindowTokens(const std::string& raw) {
@@ -403,6 +407,12 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
         }
         config.theme = parsed["theme"].get<std::string>();
     }
+    if (parsed.contains("language")) {
+        if (!parsed["language"].is_string()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 language 字段必须是字符串");
+        }
+        config.language = parsed["language"].get<std::string>();
+    }
     if (parsed.contains("system_prompt_file")) {
         if (!parsed["system_prompt_file"].is_string()) {
             return std::unexpected("配置文件 " + file_path_for_error + " 里的 system_prompt_file 字段必须是字符串");
@@ -711,6 +721,20 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.sources.theme = Source::Default;
     }
 
+    // ---- language(i18n):1 级(LUBANCODE_LANG)> 2 级 > 4 级默认值(空串
+    // = 跟系统),没有通用 env 这一级。语言码对不对得上可选列表这里不校验——
+    // 启动时按码找表,找不到 tr 自然回退 zh-CN,不拦人。 ----
+    if (lubancode_env.language.has_value()) {
+        result.config.language = *lubancode_env.language;
+        result.sources.language = Source::LubancodeEnv;
+    } else if (file_config.has_value() && file_config->language.has_value()) {
+        result.config.language = *file_config->language;
+        result.sources.language = Source::ConfigFile;
+    } else {
+        result.config.language.clear();
+        result.sources.language = Source::Default;
+    }
+
     // ---- system_prompt_file:同上,1 级 > 2 级 > 4 级默认值(空串) ----
     if (lubancode_env.system_prompt_file.has_value()) {
         result.config.system_prompt_file = *lubancode_env.system_prompt_file;
@@ -841,16 +865,7 @@ std::expected<void, std::string> RequireApiKey(const ConfigResult& result) {
     }
     const std::string generic_api_key_name =
         result.config.wire == Wire::Anthropic ? "ANTHROPIC_AUTH_TOKEN" : "OPENAI_API_KEY";
-    return std::unexpected(
-        "缺少 API Key,没有它没法跟模型对话。按优先级从高到低找了这些地方,都没找到:\n"
-        "  1) 环境变量 LUBANCODE_API_KEY\n"
-        "  2) 配置文件(cwd 或用户主目录的 .lubancode/config.json,旧位置 .lubancode.json 也认,\n"
-        "     读到会自动迁移)里的 api_key 字段\n"
-        "  3) 通用环境变量 " +
-        generic_api_key_name +
-        "\n"
-        "  4) 内置默认值(api_key 没有内置默认值,必须自己配一个)\n"
-        "挑一种配上,再重新运行 lubancode。用 --config 能看到当前每个字段实际读到了什么。");
+    return std::unexpected(cli::trf("error.api_key_missing", generic_api_key_name));
 }
 
 std::string MaskApiKey(const std::string& api_key) {
@@ -894,14 +909,7 @@ std::expected<void, std::string> RequireConfigured(const ConfigResult& result) {
         }
     }
 
-    return std::unexpected(
-        "缺少配置: " + joined +
-        ",没法跟模型对话(lubancode 不内置哪一家的地址/模型,得自己配)。三条途径挑一种:\n"
-        "  1) 不带位置参数运行 lubancode,进入交互模式,会自动走初次配置向导\n"
-        "  2) 在用户主目录放一份 .lubancode/config.json(旧版 .lubancode.json 也认,读到会自动迁移),把 " +
-        joined + " 写进去(字段全部可选)\n"
-        "  3) 设置对应的环境变量: " + joined_env + "\n"
-        "配好之后用 --config 能看到当前每个字段实际读到了什么、来自哪一级。");
+    return std::unexpected(cli::trf("error.not_configured", joined, joined_env));
 }
 
 std::expected<std::string, std::string> SaveConfigFile(const Config& config) {
@@ -925,6 +933,9 @@ std::expected<std::string, std::string> SaveConfigFile(const Config& config) {
     j["api_key"] = config.auth_token;
     j["model"] = config.model;
     j["max_context_chars"] = config.max_context_chars;
+    if (!config.language.empty()) {
+        j["language"] = config.language;  // i18n:向导选过语言才写,空 = 跟系统,不落字段
+    }
 
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file.is_open()) {
@@ -979,6 +990,11 @@ std::expected<void, std::string> UpdateSoulInConfigFile(const std::string& file_
     return UpdateStringFieldInConfigFile(file_path, "soul", soul);
 }
 
+std::expected<void, std::string> UpdateLanguageInConfigFile(const std::string& file_path,
+                                                              const std::string& language) {
+    return UpdateStringFieldInConfigFile(file_path, "language", language);
+}
+
 std::expected<ConfigResult, std::string> LoadFromEnv() {
     LubancodeEnvValues lubancode_env;
     lubancode_env.wire = GetEnv("LUBANCODE_WIRE");
@@ -986,6 +1002,7 @@ std::expected<ConfigResult, std::string> LoadFromEnv() {
     lubancode_env.api_key = GetEnv("LUBANCODE_API_KEY");
     lubancode_env.model = GetEnv("LUBANCODE_MODEL");
     lubancode_env.theme = GetEnv("LUBANCODE_THEME");
+    lubancode_env.language = GetEnv("LUBANCODE_LANG");
     lubancode_env.system_prompt_file = GetEnv("LUBANCODE_SYSTEM_PROMPT_FILE");
     lubancode_env.context_window = GetEnv("LUBANCODE_CONTEXT_WINDOW");
     lubancode_env.compact_model = GetEnv("LUBANCODE_COMPACT_MODEL");

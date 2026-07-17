@@ -66,8 +66,8 @@ cpr 默认会自己再拉一份 `curl`(默认地址在 `github.com/curl/curl/rel
 
 lubancode 要跟大模型对话,得知道 wire(协议)、base_url、api_key、model 这几件事。配置分四级,优先级从高到低,按**字段**逐个决——不是整套配置一刀切:
 
-1. **LUBANCODE_ 专属环境变量**:`LUBANCODE_WIRE`、`LUBANCODE_BASE_URL`、`LUBANCODE_API_KEY`、`LUBANCODE_MODEL`、`LUBANCODE_MAX_CONTEXT`、`LUBANCODE_THEME`、`LUBANCODE_SYSTEM_PROMPT_FILE`、`LUBANCODE_CONTEXT_WINDOW`、`LUBANCODE_COMPACT_MODEL`、`LUBANCODE_THINK`
-2. **配置文件**:`.lubancode/` 是 lubancode 的"家",往后 `plugins/`、`skills/` 也会住这儿,配置只是先搬进去的第一样东西。查找顺序四级:当前目录的 `.lubancode/config.json` → 用户主目录(Windows 是 `%USERPROFILE%`)下的 `.lubancode/config.json` → 当前目录的旧位置 `.lubancode.json` → 用户主目录的旧位置 `.lubancode.json`。命中旧位置且新位置还没有文件时,会自动把文件搬过去(建好 `.lubancode/` 目录,原地挪一份,搬不动就复制再删旧的),屏幕上打一行"配置已迁移到 ..."通知;搬家失败也不会中断程序,照旧用回那份旧文件,只是提示一句。字段除了 `wire`/`base_url`/`api_key`/`model`/`max_context_chars`,还可以写 `theme`、`system_prompt_file`、`context_window`、`compact_model`、`think`
+1. **LUBANCODE_ 专属环境变量**:`LUBANCODE_WIRE`、`LUBANCODE_BASE_URL`、`LUBANCODE_API_KEY`、`LUBANCODE_MODEL`、`LUBANCODE_MAX_CONTEXT`、`LUBANCODE_THEME`、`LUBANCODE_LANG`、`LUBANCODE_SYSTEM_PROMPT_FILE`、`LUBANCODE_CONTEXT_WINDOW`、`LUBANCODE_COMPACT_MODEL`、`LUBANCODE_THINK`
+2. **配置文件**:`.lubancode/` 是 lubancode 的"家",往后 `plugins/`、`skills/` 也会住这儿,配置只是先搬进去的第一样东西。查找顺序四级:当前目录的 `.lubancode/config.json` → 用户主目录(Windows 是 `%USERPROFILE%`)下的 `.lubancode/config.json` → 当前目录的旧位置 `.lubancode.json` → 用户主目录的旧位置 `.lubancode.json`。命中旧位置且新位置还没有文件时,会自动把文件搬过去(建好 `.lubancode/` 目录,原地挪一份,搬不动就复制再删旧的),屏幕上打一行"配置已迁移到 ..."通知;搬家失败也不会中断程序,照旧用回那份旧文件,只是提示一句。字段除了 `wire`/`base_url`/`api_key`/`model`/`max_context_chars`,还可以写 `theme`、`language`、`system_prompt_file`、`context_window`、`compact_model`、`think`
 3. **通用环境变量**(向后兼容):`wire=anthropic` 时读 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_MODEL`;`wire=responses` 时读 `OPENAI_BASE_URL`/`OPENAI_API_KEY`/`OPENAI_MODEL`
 4. **内置默认值**:`wire=anthropic`、`max_context_chars=600000`、`theme=dark`、`context_window=256000`。`base_url`/`api_key`/`model`/`system_prompt_file`/`compact_model`/`think` **没有内置默认值**——lubancode 是通用工具,不绑死哪一家模型服务,`base_url`/`api_key`/`model` 这三项四级都没配到,交互模式会自动走一遍初次配置向导,单发模式/管道模式会直接报错并提示三条配置途径;`system_prompt_file` 没配到就用内置的默认人格;`compact_model` 没配到,`/compact` 就跟正常对话用同一个模型;`think` 没配到就不往请求里带推理强度这个参数,跟旧版本行为一致。
 
@@ -83,6 +83,11 @@ lubancode 要跟大模型对话,得知道 wire(协议)、base_url、api_key、mo
 $ lubancode
 === lubancode 初次配置向导 ===
 (base_url / api_key 没读到,先配一遍,配完直接进入会话)
+
+界面语言 / Language:
+  1) 中文(zh-CN)
+  2) English (en)
+选择 / Select [1]: 1
 
 接口格式:
   1) anthropic (Claude 系)
@@ -270,6 +275,36 @@ MiniMax-M3 的完整示例:
 | `truncation_policy` | 截断策略(先解析存储,暂不启用) |
 
 M3 的档位设计是"**非 `none` 即开 Adaptive Thinking**"——只要档位不是 `none`,就打开自适应思考,想多深由模型自己定,所以目录里只声明 `none`/`high` 两档就够了。
+
+## 界面语言(i18n)
+
+界面文案分中英两套,编译进程序;还能用语言包扩展别的语言。**只译界面**——发给模型的一切(系统提示、工具描述、tool_result)不在范围内,那是模型的事。日志/管道模式的输出同样跟随所选语言(表驱动,天然如此)。
+
+### 怎么选语言
+
+- **config 字段 `language`**(四级合并,env 是 `LUBANCODE_LANG`):`zh-CN` / `en` / 语言包里的语言码。空 = 跟系统(Windows 按 `GetUserDefaultUILanguage`:zh 前缀 → `zh-CN`,en 前缀 → `en`,认不出 → `zh-CN`)。
+- **`/language`**:交互模式列可选语言、即时切换(会话级),有配置文件会问一句要不要写回(跟 `/model` 一个套路);`/language en` 直接切,`/lang` 是别名。
+- **初次配置向导**:第一问就是选语言,选完向导后续文案立刻换。
+
+### 语言包
+
+`<主目录>/.lubancode/languages/*.json`,文件名即语言码(`ja.json` → `ja`),内容是平面键值对:
+
+```json
+{
+  "language.name": "日本語 (ja)",
+  "banner.hint": "質問を入力して Enter で送信",
+  "slash.desc.help": "コマンド一覧"
+}
+```
+
+启动扫一遍,可选语言 = 内置两种 + 扫到的。文件名撞内置语言码(`zh-CN.json` / `en.json`)就按键**覆盖**内置同键——想改个别措辞不用改源码。坏 JSON(解析失败/顶层不是 object/值不是字符串)打一行警告、整个文件跳过,不拦人。`language.name` 是可选键,包自报家门用(`/language` 列表里的展示名)。
+
+### 键名与回退
+
+键名分层小写点号:`help.slash`、`status.mode.confirm`、`confirm.prompt`、`error.api_key_missing`、`cmd.model.switched` 这类。占位符 `{0}` `{1}` 按序填。查表顺序:**当前语言(用户包盖内置)→ zh-CN → 键名本身**。
+
+覆盖度:**zh-CN 全量;en 是 P0 全量、P1 渐进**——P0(帮助、横幅、状态行、确认提示、向导、slash 描述表、`/language`/`/config` 输出、transcript 摘要词、常见错误)中英齐备;P1(各命令的详细输出、罕见错误)已键化进 zh-CN 表、en 暂缺的键诚实回退中文,不机翻凑数(缺哪些见 `src/cli/i18n.cpp` en 表末尾的 TODO 注释,语言包也能补)。plain 主题的 `[RUNNING]`/`[OK]` 状态词本来就是英文,不进表、不随语言变。
 
 ## 终端体验
 

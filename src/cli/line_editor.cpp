@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cctype>
 
+#include "cli/i18n.hpp"
+
 namespace lubancode::cli {
 
 namespace {
@@ -153,13 +155,13 @@ ConfirmMode NextConfirmMode(ConfirmMode mode) {
 std::string ConfirmModeLabel(ConfirmMode mode) {
     switch (mode) {
         case ConfirmMode::Confirm:
-            return "确认";
+            return tr("mode.confirm");
         case ConfirmMode::Auto:
             return "auto";
         case ConfirmMode::Yolo:
             return "yolo";
     }
-    return "确认";
+    return tr("mode.confirm");
 }
 
 std::string ConfirmModePromptPrefix(ConfirmMode mode) {
@@ -547,7 +549,7 @@ std::vector<std::string> LineEditorCore::BuildHintLines(const std::vector<std::s
         lines.push_back(std::move(line));
     }
     if (matches.size() > kMaxLines) {
-        lines.push_back("  … 共 " + std::to_string(matches.size()) + " 个命令");
+        lines.push_back(trf("ui.menu_more", matches.size()));
     }
     return lines;
 }

@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <string_view>
 
+#include "cli/i18n.hpp"
 #include "cli/line_editor.hpp"  // TruncateUtf8ToDisplayWidth
 
 namespace lubancode::cli {
@@ -143,16 +144,16 @@ std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme,
         const std::string body_indent = indent + "  ";
         const int body_cols = indent_cols + 2;
         if (!item.input_json.empty()) {
-            std::string param_line = "参数: " + item.input_json;
+            std::string param_line = tr("transcript.params_prefix") + item.input_json;
             if (width > 0) {
                 param_line = TruncateWithEllipsis(param_line, width - body_cols - 1);
             }
             out += body_indent + param_line + "\n";
         }
         if (item.full_output.empty()) {
-            out += body_indent + "(无完整输出)\n";
+            out += body_indent + tr("transcript.no_full_output") + "\n";
         } else {
-            out += body_indent + "── 完整输出(" + std::to_string(CountLines(item.full_output)) + " 行)──\n";
+            out += body_indent + trf("transcript.full_output_header", CountLines(item.full_output)) + "\n";
             for (std::string& line : SplitLines(item.full_output)) {
                 if (width > 0 && line.find('\x1b') == std::string::npos) {
                     line = TruncateWithEllipsis(line, width - body_cols - 1);
@@ -178,7 +179,7 @@ std::string BuildToolTitle(const std::string& name, const nlohmann::json& input)
         if (const auto it = input.find("todos"); it != input.end() && it->is_array()) {
             count = it->size();
         }
-        arg = std::to_string(count) + " 项";
+        arg = trf("transcript.todo_count", count);
     } else {
         // MCP 工具(mcp__server__tool)和其余工具:入参紧凑 JSON。
         arg = input.is_null() ? std::string() : input.dump();
@@ -236,7 +237,7 @@ std::optional<int> ParseRunCommandExitCode(const std::string& content) {
 std::string RunCommandDoneSummary(const std::string& content, double seconds) {
     std::string out = "Done";
     if (const auto code = ParseRunCommandExitCode(content); code.has_value()) {
-        out += " · 退出码 " + std::to_string(*code);
+        out += " · " + trf("transcript.exit_code", *code);
     }
     out += " · " + FormatSeconds(seconds);
     return out;
@@ -245,17 +246,16 @@ std::string RunCommandDoneSummary(const std::string& content, double seconds) {
 std::string ReadFileDoneSummary(const std::string& content) {
     constexpr std::string_view kEmptyFile = "(空文件)";  // 跟 read_file.cpp 的原文逐字节一致
     if (content.compare(0, kEmptyFile.size(), kEmptyFile) == 0) {
-        return "读取 0 行";
+        return trf("transcript.read_lines", 0);
     }
-    return "读取 " + std::to_string(CountLines(content)) + " 行";
+    return trf("transcript.read_lines", CountLines(content));
 }
 
 std::string WriteDiffSummary(int added_lines, std::optional<int> removed_lines) {
-    std::string out = "新增 " + std::to_string(added_lines) + " 行";
     if (removed_lines.has_value()) {
-        out += ",删除 " + std::to_string(*removed_lines) + " 行";
+        return trf("transcript.added_removed", added_lines, *removed_lines);
     }
-    return out;
+    return trf("transcript.added", added_lines);
 }
 
 std::string SearchDoneSummary(const std::string& content) {
@@ -270,11 +270,11 @@ std::string SearchDoneSummary(const std::string& content) {
             }
         }
     }
-    return "命中 " + std::to_string(hits) + " 处";
+    return trf("transcript.hits", hits);
 }
 
 std::string AgentDoneSummary(int rounds, int sub_tool_calls) {
-    return "子代理 " + std::to_string(rounds) + " 轮 · " + std::to_string(sub_tool_calls) + " 次工具";
+    return trf("transcript.agent", rounds, sub_tool_calls);
 }
 
 std::vector<std::string> ErrorSummaryLines(const std::string& tool_name, const std::string& content) {
@@ -283,14 +283,14 @@ std::vector<std::string> ErrorSummaryLines(const std::string& tool_name, const s
     std::vector<std::string> out;
 
     if (lines.empty()) {
-        out.push_back("Error: (无输出)");
+        out.push_back(tr("transcript.error_no_output"));
         return out;
     }
 
     // run_command 的失败结果开头是 "[退出码 N]",首行改写成人话。
     if (tool_name == "run_command") {
         if (const auto code = ParseRunCommandExitCode(content); code.has_value()) {
-            out.push_back("Error: 退出码 " + std::to_string(*code));
+            out.push_back(trf("transcript.error_exit_code", *code));
         } else {
             out.push_back("Error: " + lines[0]);
         }
@@ -302,7 +302,7 @@ std::vector<std::string> ErrorSummaryLines(const std::string& tool_name, const s
         out.push_back(lines[i]);
     }
     if (total > 5) {
-        out.push_back("(共 " + std::to_string(total) + " 行,Ctrl+E 查看完整)");
+        out.push_back(trf("transcript.error_truncated", total));
     }
     return out;
 }

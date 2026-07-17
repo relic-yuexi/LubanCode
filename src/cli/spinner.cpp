@@ -6,6 +6,7 @@
 #include <string>
 
 #include "cli/console_input.hpp"
+#include "cli/i18n.hpp"
 
 namespace lubancode::cli {
 
@@ -30,8 +31,8 @@ Spinner::Spinner(const Theme& theme, bool enabled) : enabled_(enabled), stopped_
                 // 跟 ESC 监听线程的"已打断/已排队"提示共用一个 stdout 锁,
                 // 不持锁的话转轮帧会跟那些提示交错,花屏。
                 std::lock_guard<std::mutex> lock(StdoutWriteMutex());
-                std::cout << "\r" << theme.spinner << kFrames[frame % kFrameCount] << theme.reset << " 思考中"
-                          << std::flush;
+                std::cout << "\r" << theme.spinner << kFrames[frame % kFrameCount] << theme.reset << " "
+                          << tr("spinner.thinking") << std::flush;
             }
             ++frame;
             std::this_thread::sleep_for(kFrameInterval);

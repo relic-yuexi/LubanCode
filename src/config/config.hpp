@@ -134,6 +134,9 @@ struct Config {
     std::string model;
     std::size_t max_context_chars = kDefaultMaxContextChars;
     std::string theme = kDefaultTheme;   // dark / light / plain,没配到就是 kDefaultTheme
+    // i18n:界面语言(zh-CN / en / languages/ 里的语言码)。空串 = 跟系统
+    // (启动时 DetectSystemLanguage 探测)。四级合并,env 是 LUBANCODE_LANG。
+    std::string language;
     std::string system_prompt_file;      // --system-prompt / system_prompt_file,没配到就是空串
     std::size_t context_window_tokens = kDefaultContextWindowTokens;  // M6.6:上下文窗口 token 数
     std::string compact_model;  // M6.6:压缩用的模型,空串 = 跟当前会话模型一致
@@ -165,6 +168,7 @@ struct ConfigSources {
     Source model = Source::Default;
     Source max_context_chars = Source::Default;
     Source theme = Source::Default;
+    Source language = Source::Default;  // i18n:界面语言
     Source system_prompt_file = Source::Default;
     Source context_window_tokens = Source::Default;
     Source compact_model = Source::Default;
@@ -197,6 +201,7 @@ struct FileConfig {
     std::optional<std::string> model;
     std::optional<std::size_t> max_context_chars;
     std::optional<std::string> theme;               // dark / light / plain
+    std::optional<std::string> language;             // i18n:界面语言码
     std::optional<std::string> system_prompt_file;   // 人格文件路径
     std::optional<std::string> context_window;        // "256k"/"512k"/"1m"/裸数字,原始字符串,解析交给 MergeConfig
     std::optional<std::string> compact_model;         // 压缩用的模型
@@ -228,6 +233,7 @@ struct LubancodeEnvValues {
     std::optional<std::string> model;
     std::optional<std::size_t> max_context_chars;
     std::optional<std::string> theme;               // LUBANCODE_THEME
+    std::optional<std::string> language;             // LUBANCODE_LANG(i18n 界面语言)
     std::optional<std::string> system_prompt_file;   // LUBANCODE_SYSTEM_PROMPT_FILE
     std::optional<std::string> context_window;        // LUBANCODE_CONTEXT_WINDOW,原始字符串
     std::optional<std::string> compact_model;         // LUBANCODE_COMPACT_MODEL
@@ -332,6 +338,11 @@ std::expected<void, std::string> UpdateModelInConfigFile(const std::string& file
 // 同上,只更新 soul 字段(/soul 切换后问"写进配置?"选是时调用),其余
 // 字段一个都不碰。
 std::expected<void, std::string> UpdateSoulInConfigFile(const std::string& file_path, const std::string& soul);
+
+// 同上,只更新 language 字段(/language 切换后问"写进配置文件?"选是时
+// 调用,沿用 /model 那套写回)。
+std::expected<void, std::string> UpdateLanguageInConfigFile(const std::string& file_path,
+                                                              const std::string& language);
 
 // 把一段 JSON 文本解析成 FileConfig。file_path_for_error 只用来拼错误信息,
 // 不影响解析本身。JSON 坏了、或者顶层不是一个 object,都返回带路径的错误。

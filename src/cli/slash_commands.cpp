@@ -2,6 +2,8 @@
 
 #include <cctype>
 
+#include "cli/i18n.hpp"
+
 namespace lubancode::cli {
 
 namespace {
@@ -87,6 +89,9 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Soul;
     } else if (lower == "/prompt") {
         parsed.command = SlashCommand::Prompt;
+    } else if (lower == "/language" || lower == "/lang") {
+        // /lang 是 /language 的省事别名,跟 LUBANCODE_LANG 环境变量对得上口。
+        parsed.command = SlashCommand::Language;
     } else {
         parsed.command = SlashCommand::Unknown;
     }
@@ -94,30 +99,39 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
 }
 
 const std::vector<SlashCommandInfo>& AllSlashCommands() {
-    static const std::vector<SlashCommandInfo> kCommands = {
-        {"/help", "列出所有命令"},
-        {"/model", "拉模型列表选,或 /model 名字 直接切"},
-        {"/config", "打印当前生效配置和本会话在用的 model"},
-        {"/clear", "清空对话历史"},
-        {"/exit", "退出(裸词 exit/quit 也认)"},
-        {"/context", "看当前上下文占用;/context 256k|512k|1m 临时改窗口大小"},
-        {"/compact", "手动压缩历史;/compact 重点说明 可指定这次额外保留什么"},
-        {"/think", "看当前推理强度;/think 档位 切档位,档位以服务商为准(/effort 同义)"},
-        {"/effort", "同 /think(推理强度别名)"},
-        {"/skills", "列出扫描到的技能(主目录级 + 项目级)"},
-        {"/mcp", "列出挂载的 MCP 服务器状态和工具清单"},
-        {"/lsp", "列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)"},
-        {"/todos", "查看当前待办清单"},
-        {"/plugins", "列出挂载的插件工具(DLL + lua)和加载警告"},
-        {"/tools", "列工具三态:核心(恒在)/已加载/延迟未加载(tool_search 延迟挂载)"},
-        {"/sessions", "列本目录最近 20 场会话存档,倒序编号;/sessions all 列全部目录"},
-        {"/resume", "/resume 编号或id 载入该场存档历史续聊"},
-        {"/export", "当前会话导出 Markdown;/export 路径 可指定输出文件"},
-        {"/title", "看当前会话标题;/title 标题 给本场起名,/sessions 列表和导出都用它"},
-        {"/soul", "列出可用的魂;/soul 名字 切换风格叠加层,/soul off 关,/soul default 回 SOUL.md"},
-        {"/prompt", "看当前法(系统提示词)的来源和字数;/prompt reset 还原 system_prompt.md"},
-    };
-    return kCommands;
+    // i18n:说明文字按当前语言现查(tr),语言切换后惰性重建——静态表 +
+    // 记住"上次是按哪种语言建的",不一致就重来一遍。交互循环是单线程消费
+    // (Tab 补全、/help),不用加锁。
+    static std::vector<SlashCommandInfo> commands;
+    static std::string built_for;
+    if (commands.empty() || built_for != CurrentLanguage()) {
+        built_for = CurrentLanguage();
+        commands = {
+            {"/help", tr("slash.desc.help")},
+            {"/model", tr("slash.desc.model")},
+            {"/config", tr("slash.desc.config")},
+            {"/language", tr("slash.desc.language")},
+            {"/clear", tr("slash.desc.clear")},
+            {"/exit", tr("slash.desc.exit")},
+            {"/context", tr("slash.desc.context")},
+            {"/compact", tr("slash.desc.compact")},
+            {"/think", tr("slash.desc.think")},
+            {"/effort", tr("slash.desc.effort")},
+            {"/skills", tr("slash.desc.skills")},
+            {"/mcp", tr("slash.desc.mcp")},
+            {"/lsp", tr("slash.desc.lsp")},
+            {"/todos", tr("slash.desc.todos")},
+            {"/plugins", tr("slash.desc.plugins")},
+            {"/tools", tr("slash.desc.tools")},
+            {"/sessions", tr("slash.desc.sessions")},
+            {"/resume", tr("slash.desc.resume")},
+            {"/export", tr("slash.desc.export")},
+            {"/title", tr("slash.desc.title")},
+            {"/soul", tr("slash.desc.soul")},
+            {"/prompt", tr("slash.desc.prompt")},
+        };
+    }
+    return commands;
 }
 
 }  // namespace lubancode::cli

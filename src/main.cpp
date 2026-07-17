@@ -10,6 +10,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -41,6 +42,7 @@
 #include "cli/diff.hpp"
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
+#include "cli/i18n.hpp"
 #include "cli/markdown.hpp"
 #include "cli/setup_wizard.hpp"
 #include "cli/slash_commands.hpp"
@@ -84,124 +86,26 @@ namespace {
 
 constexpr std::string_view kVersion = "0.19.0";
 
+// i18n:tr/trf 在本文件里到处用,拉进匿名命名空间省得每处全限定。
+using lubancode::cli::tr;
+using lubancode::cli::trf;
+
 void PrintVersion() {
     std::cout << "lubancode " << kVersion << "\n";
 }
 
+// i18n:帮助文本按节进表(help.title/usage/options/scaffold/slash/config),
+// 版本号、三个内置默认值走占位符。zh-CN 表的值与旧字面文案一致。
 void PrintHelp() {
-    std::cout
-        << "lubancode " << kVersion << " - C++ AI 编程 CLI\n\n"
-        << "用法:\n"
-        << "  lubancode [选项]\n"
-        << "  lubancode \"问题\"          一次问答,能用工具就用工具\n"
-        << "  lubancode                  不带参数则进入交互循环;首次运行缺配置会先走一遍初次配置\n"
-        << "                              向导,配完直接进入会话,不用重启。exit/quit 或 EOF(Ctrl+Z /\n"
-        << "                              管道读尽)退出;空行只是重新给提示符,不退出\n\n"
-        << "选项:\n"
-        << "  --version              打印版本号\n"
-        << "  --help                 打印本帮助\n"
-        << "  --yes                  自动确认所有需要确认的工具调用(比如 run_command),不再逐条询问\n"
-        << "  --continue             交互模式启动时自动恢复本目录最近一场会话存档(等价开场 /resume\n"
-        << "                         最近一场);本目录没有存档就正常开新会话\n"
-        << "  --config               打印最终生效的配置(api_key 打码)和每个字段来自哪一级,排查配置问题用\n"
-        << "  --system-prompt <文件> 用这个文件(.md/.txt,UTF-8)替换默认系统提示的人格段,工作目录、\n"
-        << "                         工具调用这些运行必需的上下文照样追加,不受影响。压过配置文件里的\n"
-        << "                         system_prompt_file 字段,也压过 ~/.lubancode/system_prompt.md\n"
-        << "  --reset-system-prompt  把 ~/.lubancode/system_prompt.md(法)还原成内置默认,旧文件挪成\n"
-        << "                         system_prompt.md.bak(同 /prompt reset,只是不进交互、打结果就退)\n\n"
-        << "魂法分家(首次启动自动生成,缺了每次启动补齐,已存在不覆盖):\n"
-        << "  ~/.lubancode/system_prompt.md  \"法\"——系统提示词人格段,改它定制行为;内容剥掉顶部注释后\n"
-        << "                                 全空白就回退内置默认\n"
-        << "  ~/.lubancode/SOUL.md           \"魂\"——风格叠加层,写点风格指令(如\"只用文言文答话\"),\n"
-        << "                                 注入在系统提示最后;留空 = 无效果\n"
-        << "  ~/.lubancode/souls/*.md        备选魂(自带 wenyan.md 文言示例),交互模式 /soul 名字 切换\n\n"
-        << "交互模式里,输入以 / 开头的一行走命令,不发给模型:\n"
-        << "  /help           列出所有命令\n"
-        << "  /model          拉取模型列表,编号选择切换(默认第一个)\n"
-        << "  /model 名字     直接切到指定模型名,不用拉列表\n"
-        << "  /config         打印当前生效配置(复用 --config 的逻辑),外加本会话实际在用的 model\n"
-        << "  /clear          清空对话历史\n"
-        << "  /context        看当前上下文占用(token 数/窗口大小/百分比)\n"
-        << "  /context 512k   临时改窗口大小(256k/512k/1m/裸数字都认),只本会话生效\n"
-        << "  /compact [重点说明]  手动触发一次历史压缩,可选指定这次额外保留什么\n"
-        << "  /think          看当前推理强度(/effort 同义)\n"
-        << "  /think 档位     切推理强度,档位以服务商为准(anthropic 内置 none/low/medium/high/xhigh/max\n"
-        << "                  映射,responses 原样递给 API)\n"
-        << "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
-        << "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
-        << "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
-        << "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
-        << "  /plugins        列出挂载的插件工具(主目录 .lubancode/plugins 下的 *.dll 和 *.lua)\n"
-        << "  /tools          列工具三态:核心(恒在)/已加载/延迟未加载(工具总数超过配置文件\n"
-        << "                  tool_search_threshold(默认 20,0=永不延迟)时,MCP/插件等外挂工具\n"
-        << "                  延迟挂载,模型用 tool_search 检索后方可调用)\n"
-        << "  /sessions       列最近 20 场会话存档(时间倒序编号)\n"
-        << "  /resume 编号或id  载入该场存档历史续聊\n"
-        << "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md)\n"
-        << "  /sessions       列本目录最近 20 场会话存档(时间倒序编号);/sessions all 列全部目录\n"
-        << "  /resume 编号或id  载入该场存档历史续聊(编号按本目录列表数)\n"
-        << "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md;全量流水,压缩点带标注)\n"
-        << "  /title [标题]   看/设本场会话标题,/sessions 列表和 /export 大标题都用它\n"
-        << "  /soul           列出可用的魂;/soul 名字 切换风格叠加层(即时生效),/soul off 关,\n"
-        << "                  /soul default 回 SOUL.md\n"
-        << "  /prompt         看当前法(系统提示词)的来源和字数;/prompt reset 还原 system_prompt.md\n"
-        << "  Shift+Enter     输入框里插一个换行,写多行消息(Alt+Enter 同义;注意 Windows Terminal\n"
-        << "                  默认把 Alt+Enter 绑成全屏切换、会吞掉这个键,用 Shift+Enter 最稳);\n"
-        << "                  Enter 把整段(多行拼换行)一次发出,空白内容按 Enter 原地不动\n"
-        << "  ESC             流式回复期间按下:打断当前这轮回答,已出的半截话保留、下一轮能接着聊;\n"
-        << "                  空闲时按下:清空正在编辑的整段输入;确认提示 [y/a/N] 下按下:等同拒绝;\n"
-        << "                  聚焦查看(Ctrl+E)画面里按下:返回会话\n"
-        << "  / 后按 ↓↑       进入候选菜单直选(↓ 选中第一条,↓↑ 循环移动),Enter 执行选中命令\n"
-        << "                  (已敲的参数尾巴原样保留),继续打字/退格/ESC 回普通编辑\n"
-        << "  Ctrl+O          紧凑/详细全局切换:把全部工具条目按新档整块重打(详细 = 完整参数\n"
-        << "                  JSON + 完整输出/diff 全文),再按切回\n"
-        << "  Ctrl+E          聚焦查看当前焦点条目(无焦点则最近一条)全文;再按 Ctrl+E 或 ESC 返回\n"
-        << "  Tab             输入框有内容:补全/轮转 slash 命令(现职);输入框为空:进入焦点态\n"
-        << "                  并选中最近一条工具条目;焦点态内 Tab 往旧走、Shift+Tab 往新走,\n"
-        << "                  ESC/Enter 退出焦点态回编辑\n"
-        << "  Shift+Tab       循环切确认档(confirm/auto/yolo)——任何时候都是,跟状态行提示\n"
-        << "                  一致;只有焦点态内例外(那里是焦点往新走)\n"
-        << "  流式期间打字回车  不会打断当前流,而是排进队列,本轮结束后按顺序自动发出\n"
-        << "  /exit           退出(裸词 exit/quit 也认)\n\n"
-        << "配置优先级(从高到低,按字段逐个决,不是整套配置一刀切):\n"
-        << "  1) LUBANCODE_ 专属环境变量\n"
-        << "       LUBANCODE_WIRE          协议选择,anthropic 或 responses\n"
-        << "       LUBANCODE_BASE_URL      API 地址\n"
-        << "       LUBANCODE_API_KEY       认证令牌\n"
-        << "       LUBANCODE_MODEL         模型名\n"
-        << "       LUBANCODE_MAX_CONTEXT   history 裁剪阈值(字符数,老的硬安全网)\n"
-        << "       LUBANCODE_THEME         终端配色主题,dark / light / plain\n"
-        << "       LUBANCODE_SYSTEM_PROMPT_FILE  人格文件路径,同 --system-prompt(命令行参数压过这个)\n"
-        << "       LUBANCODE_CONTEXT_WINDOW      上下文窗口 token 数,256k/512k/1m/裸数字\n"
-        << "       LUBANCODE_COMPACT_MODEL       压缩用的模型,空 = 跟当前会话模型一致\n"
-        << "       LUBANCODE_THINK               推理强度,档位以服务商为准,空 = 不发这个参数\n"
-        << "       LUBANCODE_SOUL                魂的名字,default = SOUL.md,off = 不叠加,别的名字\n"
-        << "                                     = souls/<名字>.md\n"
-        << "  2) 配置文件(第一个找到的生效,查找顺序:cwd 的 .lubancode/config.json → 主目录的\n"
-        << "     .lubancode/config.json → cwd 的旧位置 .lubancode.json → 主目录的旧位置\n"
-        << "     .lubancode.json;读到旧位置会自动挪到新位置)。字段:wire / base_url / api_key / model /\n"
-        << "     max_context_chars / theme / system_prompt_file / context_window / compact_model / think,\n"
-        << "     全部可选。另有 hooks / mcpServers / search 三段(只从配置文件读,没有环境变量、没有内置默认值):\n"
-        << "       \"mcpServers\": {\"服务器名\": {\"command\": \"...\", \"args\": [...], \"env\": {...}}}\n"
-        << "       起进程握手成功后,工具以 mcp__服务器名__工具名 挂进工具表,/mcp 看状态\n"
-        << "       \"search\": {\"provider\": \"tavily|brave|serper\", \"api_key\": \"...\"}\n"
-        << "       配了这一段才会注册 web_search 工具;web_fetch 工具无须配置,始终可用\n"
-        << "     再有 lsp 一段(同样只从配置文件读;没配 = 不启用 = lsp 工具不注册):\n"
-        << "       \"lsp\": {\"cpp\": {\"command\": \"clangd\", \"args\": [...], \"extensions\": [\".cpp\", \".hpp\"],\n"
-        << "                \"idle_minutes\": 10}}\n"
-        << "       配了才注册 lsp 工具(definition/references/symbols/diagnostics 语义查询),懒启动、\n"
-        << "       闲置自动关停,/lsp 看各语言服务器状态\n"
-        << "  3) 通用环境变量(向后兼容旧用法,跟 Claude Code 等工具共用同名变量时容易撞车,\n"
-        << "     建议改用第 1 级的 LUBANCODE_* 专属变量):\n"
-        << "       wire=anthropic 时读 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL\n"
-        << "       wire=responses 时读 OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL\n"
-        << "  4) 内置默认值:wire=anthropic、max_context_chars=" << lubancode::config::kDefaultMaxContextChars
-        << "、theme=" << lubancode::config::kDefaultTheme
-        << "、context_window=" << lubancode::config::kDefaultContextWindowTokens << "。\n"
-        << "     base_url/api_key/model/system_prompt_file/compact_model/think 不绑死任何一家模型服务,\n"
-        << "     没有内置默认值——四级都没配到,交互模式会自动走初次配置向导;单发模式/管道模式会直接\n"
-        << "     报错,提示三条配置途径。用 --config 能看到当前实际生效的配置和每个字段的来源。\n";
+    std::cout << trf("help.title", kVersion) << "\n\n"
+              << tr("help.usage") << "\n"
+              << tr("help.options") << "\n"
+              << tr("help.scaffold") << "\n"
+              << tr("help.slash") << "\n"
+              << trf("help.config", lubancode::config::kDefaultMaxContextChars,
+                      lubancode::config::kDefaultTheme, lubancode::config::kDefaultContextWindowTokens);
 }
+
 
 // 按 wire 造对应的后端实现。agent 层只认 Backend 这个抽象接口,不关心
 // 背后具体是哪个协议在干活。
@@ -359,28 +263,28 @@ void PrintToolsCommand(const lubancode::tools::ToolRegistry& registry, const std
         }
     }
     if (!deferral_enabled) {
-        std::cout << "工具共 " << registry.All().size() << " 个,"
-                   << (threshold == 0 ? std::string("阈值 0(永不延迟)")
-                                       : "低于阈值 " + std::to_string(threshold))
-                   << ",全量直挂,tool_search 延迟机制未启用。\n";
+        std::cout << trf("cmd.tools.no_deferral", registry.All().size(),
+                          threshold == 0 ? tr("cmd.tools.threshold_zero")
+                                          : trf("cmd.tools.below_threshold", threshold))
+                   << "\n";
         for (const auto& tool : registry.All()) {
             std::cout << "  - " << tool->name() << "\n";
         }
         return;
     }
-    std::cout << "tool_search 延迟挂载已启用(阈值 " << threshold << ",loaded 集合会话级,/clear 不清)。\n";
-    std::cout << "核心工具(恒在)" << core.size() << " 个:\n";
+    std::cout << trf("cmd.tools.enabled", threshold) << "\n";
+    std::cout << trf("cmd.tools.core", core.size()) << "\n";
     for (const auto* tool : core) {
         std::cout << "  - " << tool->name() << "\n";
     }
-    std::cout << "已加载的延迟工具 " << loaded_deferred.size() << " 个:\n";
+    std::cout << trf("cmd.tools.loaded", loaded_deferred.size()) << "\n";
     for (const auto* tool : loaded_deferred) {
         std::cout << "  - " << tool->name() << "\n";
     }
     if (loaded_deferred.empty()) {
-        std::cout << "  (还没有,模型用 tool_search 命中后会出现在这里)\n";
+        std::cout << tr("cmd.tools.none_loaded") << "\n";
     }
-    std::cout << "延迟未加载 " << pending_deferred.size() << " 个(在系统提示索引段里,检索后挂载):\n";
+    std::cout << trf("cmd.tools.pending", pending_deferred.size()) << "\n";
     for (const auto* tool : pending_deferred) {
         std::cout << "  - " << tool->name() << "\n";
     }
@@ -398,33 +302,40 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
     const auto& sources = result.sources;
     const std::string wire_str = config.wire == lubancode::config::Wire::Responses ? "responses" : "anthropic";
 
-    std::cout << "lubancode 最终生效的配置:\n\n";
+    std::cout << tr("config.header") << "\n\n";
     std::cout << "  wire               = " << wire_str << "  [" << lubancode::config::ToString(sources.wire) << "]\n";
-    std::cout << "  base_url           = " << (config.base_url.empty() ? "(未设置)" : config.base_url) << "  ["
-              << lubancode::config::ToString(sources.base_url) << "]\n";
+    std::cout << "  base_url           = " << (config.base_url.empty() ? tr("config.not_set") : config.base_url)
+              << "  [" << lubancode::config::ToString(sources.base_url) << "]\n";
     std::cout << "  api_key            = " << lubancode::config::MaskApiKey(config.auth_token) << "  ["
               << lubancode::config::ToString(sources.auth_token) << "]\n";
-    std::cout << "  model              = " << (config.model.empty() ? "(未设置)" : config.model) << "  ["
+    std::cout << "  model              = " << (config.model.empty() ? tr("config.not_set") : config.model) << "  ["
               << lubancode::config::ToString(sources.model) << "]\n";
     std::cout << "  max_context_chars  = " << config.max_context_chars << "  ["
               << lubancode::config::ToString(sources.max_context_chars) << "]\n";
     std::cout << "  theme              = " << config.theme << "  [" << lubancode::config::ToString(sources.theme)
               << "]\n";
-    std::cout << "  system_prompt_file = " << (config.system_prompt_file.empty() ? "(未设置)" : config.system_prompt_file)
-              << "  [" << lubancode::config::ToString(sources.system_prompt_file) << "]\n";
+    // i18n:language 空 = 跟系统,顺带亮出此刻实际生效的语言码。
+    std::cout << "  language           = "
+              << (config.language.empty() ? trf("config.language.follow_system", lubancode::cli::CurrentLanguage())
+                                           : config.language)
+              << "  [" << lubancode::config::ToString(sources.language) << "]\n";
+    std::cout << "  system_prompt_file = "
+              << (config.system_prompt_file.empty() ? tr("config.not_set") : config.system_prompt_file) << "  ["
+              << lubancode::config::ToString(sources.system_prompt_file) << "]\n";
     std::cout << "  context_window     = " << config.context_window_tokens << " tokens  ["
               << lubancode::config::ToString(sources.context_window_tokens) << "]\n";
-    std::cout << "  compact_model      = " << (config.compact_model.empty() ? "(未设置,跟会话模型一致)" : config.compact_model)
-              << "  [" << lubancode::config::ToString(sources.compact_model) << "]\n";
-    std::cout << "  think              = " << (config.think.empty() ? "(未设置,不发这个参数)" : config.think) << "  ["
-              << lubancode::config::ToString(sources.think) << "]\n";
-    std::cout << "  soul               = " << (config.soul.empty() ? "(未设置,用主目录 SOUL.md)" : config.soul)
+    std::cout << "  compact_model      = "
+              << (config.compact_model.empty() ? tr("config.compact_model.unset") : config.compact_model) << "  ["
+              << lubancode::config::ToString(sources.compact_model) << "]\n";
+    std::cout << "  think              = " << (config.think.empty() ? tr("config.think.unset") : config.think)
+              << "  [" << lubancode::config::ToString(sources.think) << "]\n";
+    std::cout << "  soul               = " << (config.soul.empty() ? tr("config.soul.unset") : config.soul)
               << "  [" << lubancode::config::ToString(sources.soul) << "]\n";
     std::cout << "  tool_search_threshold = " << config.tool_search_threshold
-              << (config.tool_search_threshold == 0 ? "(永不延迟)" : "") << "  ["
+              << (config.tool_search_threshold == 0 ? tr("config.threshold.never") : "") << "  ["
               << lubancode::config::ToString(sources.tool_search_threshold) << "]\n";
     if (result.config_file_path.has_value()) {
-        std::cout << "  配置文件           = " << *result.config_file_path << "\n";
+        std::cout << trf("config.label.file", *result.config_file_path) << "\n";
     }
     // M9:hooks 只从配置文件来,没有来源分级可打,只打个数——四类都是空的
     // 就直接说"未配置",省得打一堆 ×0。
@@ -445,7 +356,7 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
         }
         std::cout << "  hooks              = ";
         if (parts.empty()) {
-            std::cout << "(未配置)";
+            std::cout << tr("config.hooks.none");
         } else {
             for (std::size_t i = 0; i < parts.size(); ++i) {
                 if (i > 0) {
@@ -462,9 +373,9 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
     {
         std::cout << "  mcpServers         = ";
         if (config.mcp_servers.empty()) {
-            std::cout << "(未配置)";
+            std::cout << tr("config.hooks.none");
         } else {
-            std::cout << config.mcp_servers.size() << " 个服务器";
+            std::cout << trf("config.mcp.count", config.mcp_servers.size());
         }
         std::cout << "\n";
     }
@@ -473,7 +384,7 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
     {
         std::cout << "  search             = ";
         if (!config.search.Configured()) {
-            std::cout << "(未配置,web_search 工具不注册)";
+            std::cout << tr("config.search.none");
         } else {
             std::cout << config.search.provider
                       << " (api_key " << lubancode::config::MaskApiKey(config.search.api_key) << ")";
@@ -482,33 +393,35 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
     }
     // 模型目录(models.json):路径 + 条目数,以及当前模型命没命中。
     if (catalog != nullptr) {
-        std::cout << "  模型目录           = ";
+        std::cout << tr("config.label.catalog");
         if (catalog->source_path.empty()) {
             const auto expected = lubancode::config::ModelCatalogPath();
-            std::cout << "(未配置," << (expected.has_value() ? *expected : std::string("<找不到主目录>/.lubancode/models.json"))
-                       << " 不存在)";
+            std::cout << trf("config.catalog.none",
+                              expected.has_value() ? *expected
+                                                    : tr("path.no_home") + "/.lubancode/models.json");
         } else {
-            std::cout << catalog->source_path << "(" << catalog->models.size() << " 个条目)";
+            std::cout << trf("config.catalog.entries", catalog->source_path, catalog->models.size());
         }
         std::cout << "\n";
         const std::string& current = session_model.has_value() ? *session_model : config.model;
         const auto* entry = catalog->FindBySlug(current);
-        std::cout << "  当前模型命中目录   = ";
+        std::cout << tr("config.label.catalog_hit");
         if (current.empty()) {
-            std::cout << "(model 未设置)";
+            std::cout << tr("config.catalog.model_unset");
         } else if (entry != nullptr) {
-            std::cout << "是(" << entry->slug
-                       << (entry->display_name.empty() ? std::string() : ",display_name: " + entry->display_name)
-                       << ")";
+            std::cout << trf("config.catalog.hit",
+                              entry->slug + (entry->display_name.empty()
+                                                  ? std::string()
+                                                  : trf("config.catalog.display_name", entry->display_name)));
         } else {
-            std::cout << "否(" << current << " 不在目录里,一切按现状)";
+            std::cout << trf("config.catalog.miss", current);
         }
         std::cout << "\n";
     }
     if (session_model.has_value()) {
-        std::cout << "\n  本会话实际在用的 model = " << *session_model;
+        std::cout << "\n" << trf("config.session_model", *session_model);
         if (*session_model != config.model) {
-            std::cout << "  (只在本会话生效,尚未写入配置文件)";
+            std::cout << tr("config.session_model.note");
         }
         std::cout << "\n";
     }
@@ -584,8 +497,7 @@ void PrintBanner(const lubancode::config::Config& config, const lubancode::cli::
     const std::string wire_str = config.wire == lubancode::config::Wire::Responses ? "responses" : "anthropic";
     std::cout << theme.banner << "lubancode " << kVersion << "  [" << wire_str << "] " << config.model << theme.reset
               << "\n";
-    std::cout << theme.stats << "cwd: " << CurrentDirUtf8() << "  ·  输入问题回车发送,exit 退出,/help 看命令"
-              << theme.reset << "\n";
+    std::cout << theme.stats << "cwd: " << CurrentDirUtf8() << "  ·  " << tr("banner.hint") << theme.reset << "\n";
 }
 
 // 基础工具集(不含 "agent" 自己)。子代理的工具表就是这一份原样一份——
@@ -647,27 +559,24 @@ std::vector<McpServerRuntime> StartMcpServers(
         auto client = std::make_unique<lubancode::mcp::Client>(name);
         const auto start_result = client->StartProcess(server_config.command, server_config.args, server_config.env);
         if (!start_result.success) {
-            std::cout << theme.error << "[mcp] " << name << ": 启动失败 - " << start_result.error << theme.reset
-                       << "\n";
+            std::cout << theme.error << trf("mcp.start_failed", name, start_result.error) << theme.reset << "\n";
             continue;
         }
         const auto init_result = client->Initialize();
         if (!init_result.has_value()) {
-            std::cout << theme.error << "[mcp] " << name << ": 握手失败 - " << init_result.error() << theme.reset
-                       << "\n";
+            std::cout << theme.error << trf("mcp.init_failed", name, init_result.error()) << theme.reset << "\n";
             continue;
         }
         auto tools_result = client->ListTools();
         if (!tools_result.has_value()) {
-            std::cout << theme.error << "[mcp] " << name << ": 获取工具清单失败 - " << tools_result.error()
-                       << theme.reset << "\n";
+            std::cout << theme.error << trf("mcp.list_failed", name, tools_result.error()) << theme.reset << "\n";
             continue;
         }
 
         McpServerRuntime runtime;
         runtime.name = name;
         runtime.tools = std::move(*tools_result);
-        std::cout << "[mcp] " << name << ": " << runtime.tools.size() << " 个工具已挂载\n";
+        std::cout << trf("mcp.mounted", name, runtime.tools.size()) << "\n";
         runtime.client = std::move(client);
         out.push_back(std::move(runtime));
     }
@@ -723,7 +632,7 @@ void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::tools::T
         warnings.push_back(std::move(warning));
     }
     for (auto& wrapped : wrapped_plugins) {
-        std::cout << "[plugin] " << wrapped.stem << ": " << wrapped.tools.size() << " 个工具\n";
+        std::cout << trf("plugin.mounted_line", wrapped.stem, wrapped.tools.size()) << "\n";
         for (auto& tool : wrapped.tools) {
             mounted.push_back({tool->name(), "DLL"});
             registry.Register(std::move(tool));
@@ -737,7 +646,7 @@ void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::tools::T
         warnings.push_back(std::move(warning));
     }
     for (auto& tool : lua_result.tools) {
-        std::cout << "[plugin] " << tool->stem() << ": 1 个工具\n";
+        std::cout << trf("plugin.mounted_line", tool->stem(), 1) << "\n";
         mounted.push_back({tool->name(), "lua"});
         registry.Register(std::move(tool));
     }
@@ -749,26 +658,18 @@ void PrintPluginsCommand(const std::vector<PluginMountInfo>& mounted, const std:
     if (mounted.empty() && warnings.empty()) {
         const auto home_dir = lubancode::config::HomeLubancodeDir();
         const std::string dir =
-            (home_dir.has_value() ? *home_dir : std::string("<找不到主目录>/.lubancode")) + "/plugins";
-        std::cout << "没有挂载任何插件工具。\n\n"
-                   << "插件目录约定(放进去,下次启动即挂载):\n"
-                   << "  C ABI DLL: " << dir << "/*.dll\n"
-                   << "      导出 luban_plugin_entry(见仓库 include/luban_plugin.h),示例在\n"
-                   << "      examples/plugins/hello_plugin/。注意:DLL 跟宿主同进程,插件里崩了\n"
-                   << "      整个程序一起完蛋,装谁的插件风险自担。\n"
-                   << "  Lua:       " << dir << "/*.lua\n"
-                   << "      每个文件 return { name=..., description=..., input_schema=...,\n"
-                   << "      execute=function(input) ... end } 一张表,示例在 examples/plugins/word_count.lua。\n";
+            (home_dir.has_value() ? *home_dir : tr("path.no_home") + "/.lubancode") + "/plugins";
+        std::cout << trf("cmd.plugins.empty", dir) << "\n";
         return;
     }
     if (!mounted.empty()) {
-        std::cout << "已挂载 " << mounted.size() << " 个插件工具:\n";
+        std::cout << trf("cmd.plugins.mounted", mounted.size()) << "\n";
         for (const auto& info : mounted) {
             std::cout << "  - " << info.tool_name << "  (" << info.kind << ")\n";
         }
     }
     if (!warnings.empty()) {
-        std::cout << "加载警告(这些没挂上):\n";
+        std::cout << tr("cmd.plugins.warnings") << "\n";
         for (const auto& warning : warnings) {
             std::cout << "  - " << warning << "\n";
         }
@@ -779,13 +680,14 @@ void PrintPluginsCommand(const std::vector<PluginMountInfo>& mounted, const std:
 // 完整工具名(mcp__服务器名__工具名,跟模型实际看到的名字一致)。
 void PrintMcpCommand(const std::vector<McpServerRuntime>& mcp_servers) {
     if (mcp_servers.empty()) {
-        std::cout << "没有挂载任何 MCP 服务器(config.json 里没写 mcpServers,或者配了但全部启动失败)。\n";
+        std::cout << tr("cmd.mcp.empty") << "\n";
         return;
     }
     for (const auto& runtime : mcp_servers) {
         const bool alive = runtime.client != nullptr && runtime.client->Alive();
-        std::cout << "  - " << runtime.name << ": " << (alive ? "运行中" : "已退出") << ", " << runtime.tools.size()
-                   << " 个工具\n";
+        std::cout << trf("cmd.mcp.line", runtime.name, alive ? tr("mcp.state.alive") : tr("mcp.state.dead"),
+                          runtime.tools.size())
+                   << "\n";
         for (const auto& tool_info : runtime.tools) {
             std::cout << "      mcp__" << runtime.name << "__" << tool_info.name << "\n";
         }
@@ -797,11 +699,11 @@ void PrintMcpCommand(const std::vector<McpServerRuntime>& mcp_servers) {
 // 不装 const。
 void PrintLspCommand(std::optional<lubancode::lsp::Manager>& lsp_manager) {
     if (!lsp_manager.has_value()) {
-        std::cout << "没有配置任何 LSP 服务器(config.json 里没写 lsp 段,lsp 工具也没注册)。\n";
+        std::cout << tr("cmd.lsp.empty") << "\n";
         return;
     }
     const auto statuses = lsp_manager->StatusList();
-    std::cout << "已配置 " << statuses.size() << " 个 LSP 服务器:\n";
+    std::cout << trf("cmd.lsp.header", statuses.size()) << "\n";
     for (const auto& status : statuses) {
         std::cout << "  - " << status.language << " (" << status.command << "): " << status.state << "\n";
     }
@@ -823,7 +725,7 @@ void PrintFirstLines(const std::string& text, int max_lines) {
         std::cout << "      " << lines[static_cast<std::size_t>(i)] << "\n";
     }
     if (total > max_lines) {
-        std::cout << "      ...(共 " << total << " 行,已省略其余)\n";
+        std::cout << trf("confirm.detail.omitted", total) << "\n";
     }
 }
 
@@ -834,25 +736,26 @@ void PrintConfirmDetails(const std::string& name, const nlohmann::json& input) {
     if (name == "write_file") {
         const std::string path = input.value("path", std::string());
         const std::string content = input.value("content", std::string());
-        std::cout << "    路径: " << path << "\n";
-        std::cout << "    内容(" << content.size() << " 字节),前几行:\n";
+        std::cout << trf("confirm.detail.path", path) << "\n";
+        std::cout << trf("confirm.detail.content", content.size()) << "\n";
         PrintFirstLines(content, 5);
     } else if (name == "edit_file") {
         const std::string path = input.value("path", std::string());
         const std::string old_s = input.value("old_string", std::string());
         const std::string new_s = input.value("new_string", std::string());
         const bool replace_all = input.value("replace_all", false);
-        std::cout << "    路径: " << path << (replace_all ? "  (replace_all=true,全部替换)" : "") << "\n";
-        std::cout << "    - 旧文本:\n";
+        std::cout << trf("confirm.detail.path", path) << (replace_all ? tr("confirm.detail.replace_all") : "")
+                  << "\n";
+        std::cout << tr("confirm.detail.old") << "\n";
         PrintFirstLines(old_s, 3);
-        std::cout << "    + 新文本:\n";
+        std::cout << tr("confirm.detail.new") << "\n";
         PrintFirstLines(new_s, 3);
     } else if (name == "run_command") {
         const std::string command = input.value("command", std::string());
         const std::string shell = input.value("shell", std::string("powershell"));
-        std::cout << "    命令(" << shell << "): " << command << "\n";
+        std::cout << trf("confirm.detail.command", shell, command) << "\n";
     } else {
-        std::cout << "    参数: " << input.dump() << "\n";
+        std::cout << trf("confirm.detail.args", input.dump()) << "\n";
     }
     std::cout.flush();
 }
@@ -1376,15 +1279,15 @@ std::optional<FileDiffPreview> BuildFileDiffPreview(const std::string& name, con
                                         input.value("new_string", std::string()), replace_all);
         diff = std::move(edit.lines);
         if (!edit.located) {
-            header = "diff(old_string 在文件里没找到,只对比新旧两段):";
+            header = tr("diff.not_located");
         } else if (replace_all) {
-            header = "diff(replace_all,替换 " + std::to_string(edit.replaced_count) + " 处):";
+            header = trf("diff.replace_all", edit.replaced_count);
         } else {
-            header = "diff:";
+            header = tr("diff.plain");
         }
     } else {
         diff = cli::BuildWriteDiff(old_content, input.value("content", std::string()));
-        header = old_content.has_value() ? "diff(覆盖已有文件):" : "diff(新文件,全部新增):";
+        header = old_content.has_value() ? tr("diff.overwrite") : tr("diff.new_file");
     }
 
     const int width = cli::DetectConsoleWidth().value_or(80);
@@ -1412,7 +1315,7 @@ std::optional<FileDiffPreview> BuildFileDiffPreview(const std::string& name, con
         }
     }
 
-    const std::string block = "路径: " + path + "\n" + header + "\n" + body;
+    const std::string block = trf("diff.path", path) + "\n" + header + "\n" + body;
     std::string indented;
     std::size_t pos = 0;
     while (pos < block.size()) {
@@ -1481,7 +1384,8 @@ struct ToolDisplay {
     void OnToolStart(const std::string& name, const nlohmann::json& input) {
         if (!is_console) {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-            std::cout << "\n" << theme.tool_line << "[工具] " << name << " " << input.dump() << theme.reset << "\n";
+            std::cout << "\n" << theme.tool_line << tr("pipe.tool_start") << name << " " << input.dump() << theme.reset
+                      << "\n";
             std::cout.flush();
         }
         main_input = input;
@@ -1518,7 +1422,7 @@ struct ToolDisplay {
             painter.Repaint(item);
         } else {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-            std::cout << "[工具完成] " << name << ": " << PipeSummary(item, name) << "\n";
+            std::cout << tr("pipe.tool_done") << name << ": " << PipeSummary(item, name) << "\n";
             // 管道模式沿用 M11 的行为:todo_write 成功后紧跟着把清单打出来,
             // 重定向日志里"计划走到哪一步了"仍然可读。
             if (name == "todo_write" && !result.is_error && todo_state) {
@@ -1534,7 +1438,8 @@ struct ToolDisplay {
         if (!is_console) {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
             std::cout << "\n"
-                       << theme.stats << "  [子代理·工具] " << name << " " << input.dump() << theme.reset << "\n";
+                       << theme.stats << tr("pipe.subtool_start") << name << " " << input.dump() << theme.reset
+                       << "\n";
             std::cout.flush();
         }
         sub_input = input;
@@ -1625,7 +1530,7 @@ struct ToolDisplay {
         if (idx >= 0) {
             auto& item = transcript[static_cast<std::size_t>(idx)];
             item.status = lubancode::cli::TranscriptStatus::Pending;
-            item.summary_lines = {"待确认"};
+            item.summary_lines = {tr("transcript.pending")};
             if (is_console) {
                 painter.Repaint(item);
                 // 确认块 + 编辑器提示行撑死二十来行,先在缓冲区底部预留好,
@@ -1768,7 +1673,7 @@ private:
     // 取条目摘要第一行;todo_write 的摘要是清单本身,换成一句人话。
     std::string PipeSummary(const lubancode::cli::TranscriptItem& item, const std::string& name) const {
         if (name == "todo_write" && item.status == lubancode::cli::TranscriptStatus::Ok && todo_state) {
-            return "已更新待办清单(" + std::to_string(todo_state->items.size()) + " 项)";
+            return trf("pipe.todo_updated", todo_state->items.size());
         }
         if (item.summary_lines.empty()) {
             return "Done";
@@ -1877,7 +1782,7 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         // M10:esc_rejects=true——按 Esc 直接当这次确认提交了一个空串,
         // 走到下面 "不是 y/Y/a/A 就算拒绝" 那条老路,不用另加判断分支。
         const std::optional<std::string> answer = lubancode::cli::ReadLine(
-            theme.confirm + "[y] 本次允许  [a] 本会话总是允许(该工具)  [N] 拒绝: " + theme.reset, theme,
+            theme.confirm + tr("confirm.prompt") + theme.reset, theme,
             /*esc_rejects=*/true);
         bool allowed = false;
         if (answer.has_value()) {  // 读到 EOF 按拒绝处理,不要在这儿卡住
@@ -2031,7 +1936,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     std::cout << "\n";
 
     if (!result.has_value()) {
-        std::cerr << theme.error << "[错误] " << result.error() << theme.reset << "\n";
+        std::cerr << theme.error << tr("error.prefix") << result.error() << theme.reset << "\n";
         out.status = 1;
         return out;
     }
@@ -2039,14 +1944,17 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
 
     if (usage_stats.request_count > 0) {
         // 0.17.0:token 数字统一 k 化(cli::FormatTokenCount),超过 10k 的
-        // 数字不再铺一长串数位。
-        std::cout << theme.stats << "[tokens] 输入 " << lubancode::cli::FormatTokenCount(usage_stats.input_tokens);
-        if (usage_stats.cache_read_tokens > 0) {
-            std::cout << "(缓存命中 " << lubancode::cli::FormatTokenCount(usage_stats.cache_read_tokens) << ")";
-        }
-        std::cout << " · 输出 " << lubancode::cli::FormatTokenCount(usage_stats.output_tokens) << " · 请求 "
-                   << usage_stats.request_count << " 次"
-                   << " · context " << context_tracker.UsagePercent() << "%" << theme.reset << "\n";
+        // 数字不再铺一长串数位。i18n:整行进表(stats.line),缓存命中那一节
+        // 有则先按 stats.cache 拼好塞进 {1},没有就是空串。
+        const std::string cache_part =
+            usage_stats.cache_read_tokens > 0
+                ? trf("stats.cache", lubancode::cli::FormatTokenCount(usage_stats.cache_read_tokens))
+                : std::string();
+        std::cout << theme.stats
+                  << trf("stats.line", lubancode::cli::FormatTokenCount(usage_stats.input_tokens), cache_part,
+                          lubancode::cli::FormatTokenCount(usage_stats.output_tokens), usage_stats.request_count,
+                          context_tracker.UsagePercent())
+                  << theme.reset << "\n";
     }
     // 回合正常结束(不是上面那条 !result.has_value() 的报错早退)——统计行
     // 之后再打一条分界线,跟开头那条首尾呼应,把这一问一答框完整。
@@ -2072,7 +1980,7 @@ std::optional<lubancode::config::Config> RunInitialSetupWizard(std::optional<std
 
     const auto home_lubancode_dir = lubancode::config::HomeLubancodeDir();
     io.home_config_display_path =
-        (home_lubancode_dir.has_value() ? *home_lubancode_dir : std::string("<找不到主目录>/.lubancode")) +
+        (home_lubancode_dir.has_value() ? *home_lubancode_dir : tr("path.no_home") + "/.lubancode") +
         "/config.json";
 
     const auto outcome = lubancode::cli::RunSetupWizard(io);
@@ -2083,51 +1991,17 @@ std::optional<lubancode::config::Config> RunInitialSetupWizard(std::optional<std
     if (outcome->save_requested) {
         const auto saved = lubancode::config::SaveConfigFile(outcome->config);
         if (saved.has_value()) {
-            std::cout << "已保存到 " << *saved << "\n";
+            std::cout << trf("wizard.saved", *saved) << "\n";
             out_config_file_path = *saved;
         } else {
-            std::cout << "保存失败: " << saved.error() << "(不影响本次继续用,只是这份配置这次没记住)\n";
+            std::cout << trf("wizard.save_failed", saved.error()) << "\n";
         }
     }
     return outcome->config;
 }
 
 void PrintSlashHelp() {
-    std::cout << "可用命令:\n"
-              << "  /help           列出所有命令\n"
-              << "  /model          拉取模型列表,编号选择切换(默认第一个)\n"
-              << "  /model 名字     直接切到指定模型名,不用拉列表\n"
-              << "  /config         打印当前生效配置(api_key 打码),外加本会话实际在用的 model\n"
-              << "  /clear          清空对话历史\n"
-              << "  /context        看当前上下文占用;/context 256k|512k|1m 临时改窗口大小\n"
-              << "  /compact        手动压缩历史;/compact 重点说明 可指定这次额外保留什么\n"
-              << "  /think          看当前推理强度;/think 档位 切档位,档位以服务商为准(/effort 同义)\n"
-              << "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
-              << "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
-              << "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
-              << "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
-              << "  /plugins        列出挂载的插件工具(DLL + lua)和加载警告\n"
-              << "  /tools          列工具三态:核心(恒在)/已加载/延迟未加载(tool_search 延迟挂载)\n"
-              << "  /sessions       列最近 20 场会话存档(时间倒序编号)\n"
-              << "  /resume 编号或id  载入该场存档历史续聊,后续消息追加写回同一文件\n"
-              << "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md)\n"
-              << "  /sessions       列本目录最近 20 场会话存档(时间倒序编号);/sessions all 列全部目录\n"
-              << "  /resume 编号或id  载入该场存档历史续聊(编号按本目录列表数),后续消息追加写回同一文件\n"
-              << "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md;全量流水,压缩点带标注)\n"
-              << "  /title [标题]   看/设本场会话标题,/sessions 列表和 /export 大标题都用它\n"
-              << "  /soul           列出可用的魂;/soul 名字 切换(即时生效),/soul off 关,\n"
-              << "                  /soul default 回 SOUL.md\n"
-              << "  /prompt         看当前法(系统提示词)的来源和字数;/prompt reset 还原 system_prompt.md\n"
-              << "  /exit           退出(裸词 exit/quit 也认)\n"
-              << "多行输入:Shift+Enter 插换行(Alt+Enter 同义,但 Windows Terminal 默认把它绑成全屏\n"
-              << "切换、会吞掉,推荐 Shift+Enter);Enter 发送整段;多行时首行的 / 是正文,不当命令。\n"
-              << "候选菜单:/ 开头时按 ↓ 进入直选(↓↑ 循环移动,Enter 执行选中命令、已敲的参数尾巴\n"
-              << "原样保留;打字/退格/ESC 回普通编辑);Tab 补全/轮转照旧。\n"
-              << "条目查看:Ctrl+O 紧凑/详细全局切换(详细 = 完整参数 + 输出/diff 全文,整块重打);\n"
-              << "Shift+Tab 任何时候都是切确认档(confirm/auto/yolo,状态行实时显示);输入框为空时\n"
-              << "Tab 进入焦点态选最近一条,焦点态内 Tab 往旧走、Shift+Tab 往新走(这时不切档),\n"
-              << "ESC/Enter 退出焦点态回编辑,有内容时 Tab 维持补全现职;Ctrl+E 聚焦查看焦点条目\n"
-              << "全文(无焦点则最近一条),再按 Ctrl+E 或 ESC 返回;流式输出期间这些键不响应。\n";
+    std::cout << tr("slash_help.body");
 }
 
 // /skills 命令:列出扫描到的技能;一个都没有时打印两处目录路径,顺带说明
@@ -2135,23 +2009,15 @@ void PrintSlashHelp() {
 void PrintSkillsCommand(const std::vector<lubancode::tools::SkillMeta>& skills, const std::string& project_dir,
                          const std::optional<std::string>& home_dir) {
     if (skills.empty()) {
-        std::cout << "还没有扫描到任何技能。\n\n"
-                   << "技能目录约定(先建目录,再放一份 <技能名>/SKILL.md):\n"
-                   << "  项目级: " << project_dir << "/.lubancode/skills/<技能名>/SKILL.md\n"
-                   << "  主目录级: " << (home_dir.has_value() ? *home_dir : std::string("<找不到主目录>"))
-                   << "/.lubancode/skills/<技能名>/SKILL.md\n\n"
-                   << "SKILL.md 起手要有 YAML frontmatter(name/description 两个字段,后面跟正文):\n"
-                   << "  ---\n"
-                   << "  name: 技能名\n"
-                   << "  description: 一句话说明这个技能是干什么的、什么时候该用\n"
-                   << "  ---\n"
-                   << "  正文写具体怎么做。\n";
+        std::cout << trf("cmd.skills.empty", project_dir,
+                          home_dir.has_value() ? *home_dir : tr("path.no_home"))
+                   << "\n";
         return;
     }
-    std::cout << "已扫描到 " << skills.size() << " 个技能:\n";
+    std::cout << trf("cmd.skills.header", skills.size()) << "\n";
     for (const auto& skill : skills) {
         std::cout << "  - " << skill.name << " [" << skill.source_level << "]: "
-                   << (skill.description.empty() ? "(没写说明)" : skill.description) << "\n";
+                   << (skill.description.empty() ? tr("cmd.skills.no_desc") : skill.description) << "\n";
         std::cout << "      " << skill.dir_path << "\n";
     }
 }
@@ -2187,13 +2053,12 @@ std::size_t EstimateTokens(std::size_t chars) { return (chars + 1) / 2; }
 // 窗口大小,只本会话生效,不改配置文件。
 void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracker& context_tracker) {
     if (args.empty()) {
-        std::cout << "上下文占用: "
-                   << lubancode::cli::FormatTokenCount(static_cast<std::int64_t>(context_tracker.current_tokens()))
-                   << " / "
-                   << lubancode::cli::FormatTokenCount(static_cast<std::int64_t>(context_tracker.window_tokens()))
-                   << " tokens (" << context_tracker.UsagePercent() << "%)";
+        std::cout << trf("cmd.context.usage",
+                          lubancode::cli::FormatTokenCount(static_cast<std::int64_t>(context_tracker.current_tokens())),
+                          lubancode::cli::FormatTokenCount(static_cast<std::int64_t>(context_tracker.window_tokens())),
+                          context_tracker.UsagePercent());
         if (context_tracker.ShouldAutoCompact()) {
-            std::cout << "  —— 接近上限了,建议 /compact 一下";
+            std::cout << tr("cmd.context.compact_hint");
         }
         std::cout << "\n";
         return;
@@ -2204,7 +2069,7 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
         return;
     }
     context_tracker.set_window_tokens(*parsed);
-    std::cout << "上下文窗口已改成 " << *parsed << " tokens(只本会话生效,没改配置文件)。\n";
+    std::cout << trf("cmd.context.window_changed", *parsed) << "\n";
 }
 
 // /compact 命令:把当前历史整段发给模型换一份压缩存档,顶替掉中间那段
@@ -2219,7 +2084,7 @@ std::optional<lubancode::agent::CompactEvent> HandleCompactCommand(
     const std::string& compact_model, const lubancode::cli::Theme& theme, bool spinner_enabled) {
     const std::vector<lubancode::api::Message>& history = loop.History();
     if (history.empty()) {
-        std::cout << "当前没有对话历史,不用压缩。\n";
+        std::cout << tr("cmd.compact.empty") << "\n";
         return std::nullopt;
     }
     const std::size_t before_tokens = EstimateTokens(EstimateHistoryChars(history));
@@ -2230,7 +2095,7 @@ std::optional<lubancode::agent::CompactEvent> HandleCompactCommand(
     spinner.Stop();
 
     if (!result.has_value()) {
-        std::cout << theme.error << "压缩失败: " << result.error().message << theme.reset << "\n";
+        std::cout << theme.error << trf("cmd.compact.failed", result.error().message) << theme.reset << "\n";
         return std::nullopt;
     }
 
@@ -2238,7 +2103,7 @@ std::optional<lubancode::agent::CompactEvent> HandleCompactCommand(
     const auto event = lubancode::agent::MakeCompactEvent(old_size, new_history);
     loop.ReplaceHistory(new_history);
     const std::size_t after_tokens = EstimateTokens(EstimateHistoryChars(new_history));
-    std::cout << "压缩前 ~" << before_tokens << " tokens → 压缩后 ~" << after_tokens << " tokens\n";
+    std::cout << trf("cmd.compact.result", before_tokens, after_tokens) << "\n";
     return event;
 }
 
@@ -2254,26 +2119,27 @@ void HandleThinkCommand(const std::string& args, const std::shared_ptr<std::stri
                          const lubancode::config::ModelCatalogEntry* entry = nullptr) {
     const std::vector<std::string> hint_lines = lubancode::config::ThinkLevelHintLines(entry);
     if (args.empty()) {
-        std::cout << "当前推理强度: " << (current_think->empty() ? "(未设置,不发这个参数)" : *current_think) << "\n";
+        std::cout << trf("cmd.think.current", current_think->empty() ? tr("config.think.unset") : *current_think)
+                  << "\n";
         if (!hint_lines.empty()) {
-            std::cout << "模型目录声明的档位(" << entry->slug << "):\n";
+            std::cout << trf("cmd.think.catalog_header", entry->slug) << "\n";
             for (const auto& line : hint_lines) {
                 std::cout << line << "\n";
             }
         } else {
-            std::cout << "支持哪些档位以服务商为准。\n";
+            std::cout << tr("cmd.think.provider") << "\n";
         }
         return;
     }
     *current_think = args;
-    std::cout << "推理强度已切到 " << args << "(本会话生效)。";
+    std::cout << trf("cmd.think.switched", args);
     if (!hint_lines.empty()) {
         if (!lubancode::config::ThinkLevelDeclared(*entry, args)) {
-            std::cout << "提示: 模型目录未声明该档,仍会发送。";
+            std::cout << tr("cmd.think.undeclared");
         }
         std::cout << "\n";
     } else {
-        std::cout << "支持哪些档位以服务商为准。\n";
+        std::cout << tr("cmd.think.provider") << "\n";
     }
 }
 
@@ -2292,16 +2158,16 @@ void ApplyModelCatalog(const lubancode::config::ModelCatalog& catalog, const std
         lubancode::config::ComputeCatalogApplication(catalog, slug, think_explicit, window_explicit);
     if (apply.think.has_value()) {
         *current_think = *apply.think;
-        std::cout << "think→" << *apply.think << "(目录默认)\n";
+        std::cout << trf("catalog.apply_think", *apply.think) << "\n";
     }
     if (apply.context_window_tokens.has_value()) {
         context_tracker.set_window_tokens(*apply.context_window_tokens);
-        std::cout << "上下文窗口→" << *apply.context_window_tokens << " tokens(目录声明)\n";
+        std::cout << trf("catalog.apply_window", *apply.context_window_tokens) << "\n";
     }
     if (*current_model_instructions != apply.base_instructions) {
         *current_model_instructions = apply.base_instructions;
         if (!apply.base_instructions.empty()) {
-            std::cout << "base_instructions 已注入系统提示(目录条目 " << slug << ",下一轮请求生效)\n";
+            std::cout << trf("catalog.apply_instructions", slug) << "\n";
         }
     }
 }
@@ -2325,11 +2191,11 @@ void HandleModelCommand(const std::string& args, const lubancode::config::Config
     } else {
         const auto list_result = lubancode::api::ListModels(config.wire, config.base_url, config.auth_token);
         if (!list_result.has_value()) {
-            std::cout << "拉取模型列表失败: " << list_result.error().message << "\n";
+            std::cout << trf("cmd.model.fetch_failed", list_result.error().message) << "\n";
             return;
         }
         if (list_result->empty()) {
-            std::cout << "接口返回的模型列表是空的。\n";
+            std::cout << tr("cmd.model.list_empty") << "\n";
             return;
         }
         for (std::size_t i = 0; i < list_result->size(); ++i) {
@@ -2345,7 +2211,7 @@ void HandleModelCommand(const std::string& args, const lubancode::config::Config
             }
             std::cout << "  " << (i + 1) << ") " << label << "\n";
         }
-        const std::optional<std::string> selection = lubancode::cli::ReadLine("选择模型编号 [1]: ");
+        const std::optional<std::string> selection = lubancode::cli::ReadLine(tr("cmd.model.choose"));
         if (!selection.has_value()) {
             return;
         }
@@ -2355,12 +2221,12 @@ void HandleModelCommand(const std::string& args, const lubancode::config::Config
                 std::size_t consumed = 0;
                 const int n = std::stoi(*selection, &consumed);
                 if (consumed != selection->size() || n < 1 || static_cast<std::size_t>(n) > list_result->size()) {
-                    std::cout << "编号不对,取消切换。\n";
+                    std::cout << tr("cmd.model.bad_number") << "\n";
                     return;
                 }
                 idx = static_cast<std::size_t>(n - 1);
             } catch (...) {
-                std::cout << "没听懂,取消切换。\n";
+                std::cout << tr("cmd.model.not_number") << "\n";
                 return;
             }
         }
@@ -2368,7 +2234,7 @@ void HandleModelCommand(const std::string& args, const lubancode::config::Config
     }
 
     *current_model = chosen;
-    std::cout << "已切换到模型: " << chosen << "(本会话生效)\n";
+    std::cout << trf("cmd.model.switched", chosen) << "\n";
 
     // 模型目录应用:主动切换,目录声明了就用(两个 explicit 都传 false);
     // 切到目录外的名字时这一步什么都不动(base_instructions 清空),回退现状。
@@ -2377,17 +2243,83 @@ void HandleModelCommand(const std::string& args, const lubancode::config::Config
 
     if (config_file_path.has_value()) {
         const std::optional<std::string> answer =
-            lubancode::cli::ReadLine("写进配置文件 " + *config_file_path + "? [y/N]: ");
+            lubancode::cli::ReadLine(trf("cmd.write_config_prompt", *config_file_path));
         if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
             const auto updated = lubancode::config::UpdateModelInConfigFile(*config_file_path, chosen);
             if (updated.has_value()) {
-                std::cout << "已更新 " << *config_file_path << "\n";
+                std::cout << trf("cmd.write_config.updated", *config_file_path) << "\n";
             } else {
-                std::cout << "更新失败: " << updated.error() << "\n";
+                std::cout << trf("cmd.write_config.failed", updated.error()) << "\n";
             }
         }
     } else {
-        std::cout << "当前没有生效的配置文件,只在本会话生效。\n";
+        std::cout << tr("cmd.session_only") << "\n";
+    }
+}
+
+// /language 命令(i18n):裸敲列可选语言(内置两种 + 语言包)编号选;带参数
+// 直接按语言码切。切换即时生效(会话级),有配置文件就问一句要不要写回
+// (沿用 /model 那套 UpdateLanguageInConfigFile),没有就提示只在本会话生效。
+void HandleLanguageCommand(const std::string& args, std::optional<std::string>& config_file_path) {
+    namespace cli = lubancode::cli;
+    std::string chosen;
+
+    if (!args.empty()) {
+        if (!cli::HasLanguage(args)) {
+            std::cout << trf("cmd.language.unknown", args) << "\n";
+            return;
+        }
+        chosen = args;
+    } else {
+        const std::vector<std::string> langs = cli::AvailableLanguages();
+        std::cout << tr("cmd.language.list_header") << "\n";
+        std::size_t current_idx = 1;
+        for (std::size_t i = 0; i < langs.size(); ++i) {
+            const bool is_current = langs[i] == cli::CurrentLanguage();
+            if (is_current) {
+                current_idx = i + 1;
+            }
+            std::cout << "  " << (i + 1) << ") " << cli::LanguageDisplayName(langs[i])
+                      << (is_current ? "  " + tr("cmd.language.current_mark") : "") << "\n";
+        }
+        const std::optional<std::string> selection = cli::ReadLine(trf("cmd.language.choose", current_idx));
+        if (!selection.has_value()) {
+            return;
+        }
+        std::size_t idx = current_idx - 1;
+        if (!selection->empty()) {
+            try {
+                std::size_t consumed = 0;
+                const int n = std::stoi(*selection, &consumed);
+                if (consumed != selection->size() || n < 1 || static_cast<std::size_t>(n) > langs.size()) {
+                    std::cout << tr("cmd.language.bad_number") << "\n";
+                    return;
+                }
+                idx = static_cast<std::size_t>(n - 1);
+            } catch (...) {
+                std::cout << tr("cmd.language.bad_number") << "\n";
+                return;
+            }
+        }
+        chosen = langs[idx];
+    }
+
+    cli::SetLanguage(chosen);
+    std::cout << trf("cmd.language.switched", cli::LanguageDisplayName(chosen)) << "\n";
+
+    if (config_file_path.has_value()) {
+        const std::optional<std::string> answer =
+            cli::ReadLine(trf("cmd.write_config_prompt", *config_file_path));
+        if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
+            const auto updated = lubancode::config::UpdateLanguageInConfigFile(*config_file_path, chosen);
+            if (updated.has_value()) {
+                std::cout << trf("cmd.write_config.updated", *config_file_path) << "\n";
+            } else {
+                std::cout << trf("cmd.write_config.failed", updated.error()) << "\n";
+            }
+        }
+    } else {
+        std::cout << tr("cmd.session_only") << "\n";
     }
 }
 
@@ -2426,7 +2358,7 @@ std::string LoadSoulContentByName(const std::string& name, bool warn) {
     const auto content = lubancode::config::ReadTextFileIfExists(path);
     if (!content.has_value()) {
         if (warn) {
-            std::cout << "[soul] 找不到 " << path << ",魂不生效。\n";
+            std::cout << trf("soul.not_found", path) << "\n";
         }
         return std::string();
     }
@@ -2442,38 +2374,38 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
                         std::string& current_soul_name, const std::optional<std::string>& config_file_path) {
     const auto luban_dir = lubancode::config::HomeLubancodeDir();
     if (!luban_dir.has_value()) {
-        std::cout << "找不到用户主目录,魂文件没处安身,/soul 用不了。\n";
+        std::cout << tr("cmd.soul.no_home") << "\n";
         return;
     }
 
     if (args.empty()) {
         const std::vector<std::string> souls = lubancode::config::ListSouls(*luban_dir);
-        std::cout << "可用的魂(风格叠加层,注入在系统提示最后):\n";
-        std::cout << "  - default(主目录 SOUL.md)\n";
+        std::cout << tr("cmd.soul.list_header") << "\n";
+        std::cout << tr("cmd.soul.default_item") << "\n";
         for (const auto& name : souls) {
             std::cout << "  - " << name << "\n";
         }
-        std::cout << "当前生效: " << current_soul_name;
+        std::cout << trf("cmd.soul.current", current_soul_name);
         if (lubancode::agent::StripPromptComments(*current_soul).empty() && current_soul_name != "off") {
-            std::cout << "(内容空白,无效果)";
+            std::cout << tr("cmd.soul.empty_note");
         }
-        std::cout << "\n用法:/soul 名字 切换;/soul off 本会话关魂;/soul default 回 SOUL.md。\n";
+        std::cout << "\n" << tr("cmd.soul.usage") << "\n";
         return;
     }
 
     if (args == "off") {
         current_soul->clear();
         current_soul_name = "off";
-        std::cout << "魂已关(本会话生效,下一轮请求换新系统提示)。\n";
+        std::cout << tr("cmd.soul.off") << "\n";
         return;
     }
 
     if (args == "default") {
         *current_soul = LoadSoulContentByName("default", /*warn=*/true);
         current_soul_name = "default";
-        std::cout << "已切回 SOUL.md";
+        std::cout << tr("cmd.soul.back_default");
         if (lubancode::agent::StripPromptComments(*current_soul).empty()) {
-            std::cout << "(内容空白,无效果)";
+            std::cout << tr("cmd.soul.empty_note");
         }
         std::cout << "。\n";
         return;
@@ -2482,25 +2414,25 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
     const std::string path = lubancode::config::SoulPathByName(*luban_dir, args);
     const auto content = lubancode::config::ReadTextFileIfExists(path);
     if (!content.has_value()) {
-        std::cout << "找不到魂 " << args << "(" << path << ")。/soul 裸敲能看可用列表。\n";
+        std::cout << trf("cmd.soul.missing", args, path) << "\n";
         return;
     }
     *current_soul = *content;
     current_soul_name = args;
-    std::cout << "已切换魂: " << args << "(本会话即时生效,下一轮请求换新系统提示)\n";
+    std::cout << trf("cmd.soul.switched", args) << "\n";
 
     if (config_file_path.has_value()) {
-        const std::optional<std::string> answer = lubancode::cli::ReadLine("写进配置? [y/N]: ");
+        const std::optional<std::string> answer = lubancode::cli::ReadLine(tr("cmd.soul.write_prompt"));
         if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
             const auto updated = lubancode::config::UpdateSoulInConfigFile(*config_file_path, args);
             if (updated.has_value()) {
-                std::cout << "已更新 " << *config_file_path << "\n";
+                std::cout << trf("cmd.write_config.updated", *config_file_path) << "\n";
             } else {
-                std::cout << "更新失败: " << updated.error() << "\n";
+                std::cout << trf("cmd.write_config.failed", updated.error()) << "\n";
             }
         }
     } else {
-        std::cout << "当前没有生效的配置文件,只在本会话生效。\n";
+        std::cout << tr("cmd.session_only") << "\n";
     }
 }
 
@@ -2511,38 +2443,35 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
 void HandlePromptCommand(const std::string& args, const std::string& law_source, const std::string& persona) {
     if (args.empty()) {
         const std::string& effective = persona.empty() ? lubancode::agent::DefaultPersona() : persona;
-        std::cout << "当前的法(系统提示词人格段):\n"
-                   << "  来源: " << law_source << "\n"
-                   << "  字数: " << CountUtf8Chars(effective) << "\n"
-                   << "用法:/prompt reset 把 system_prompt.md 还原成内置默认(旧文件留 .bak)。\n";
+        std::cout << trf("cmd.prompt.info", law_source, CountUtf8Chars(effective)) << "\n";
         return;
     }
     if (args != "reset") {
-        std::cout << "用法:/prompt 看当前法的来源;/prompt reset 还原 system_prompt.md。\n";
+        std::cout << tr("cmd.prompt.usage") << "\n";
         return;
     }
 
-    const std::optional<std::string> answer = lubancode::cli::ReadLine("确定还原? [y/N]: ");
+    const std::optional<std::string> answer = lubancode::cli::ReadLine(tr("cmd.prompt.confirm"));
     if (!answer.has_value() || (*answer != "y" && *answer != "Y")) {
-        std::cout << "取消还原。\n";
+        std::cout << tr("cmd.prompt.cancelled") << "\n";
         return;
     }
     const auto luban_dir = lubancode::config::HomeLubancodeDir();
     if (!luban_dir.has_value()) {
-        std::cout << "找不到用户主目录,没法还原。\n";
+        std::cout << tr("cmd.prompt.no_home") << "\n";
         return;
     }
     const auto reset_result =
         lubancode::config::ResetSystemPromptFile(*luban_dir, lubancode::agent::DefaultPersona());
     if (!reset_result.has_value()) {
-        std::cout << "还原失败: " << reset_result.error() << "\n";
+        std::cout << trf("cmd.prompt.reset_failed", reset_result.error()) << "\n";
         return;
     }
-    std::cout << "已把 " << lubancode::config::SystemPromptFilePath(*luban_dir) << " 还原成内置默认";
+    std::cout << trf("cmd.prompt.reset_done", lubancode::config::SystemPromptFilePath(*luban_dir));
     if (!reset_result->empty()) {
-        std::cout << ",旧文件在 " << *reset_result;
+        std::cout << trf("cmd.prompt.old_file", *reset_result);
     }
-    std::cout << "。\n本会话的法不变,下次启动按新文件生效。\n";
+    std::cout << "。\n" << tr("cmd.prompt.reset_tail") << "\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -2556,40 +2485,42 @@ void HandlePromptCommand(const std::string& args, const std::string& law_source,
 // 每条带目录路径(过长中间省略)。
 void PrintSessionsCommand(const std::string& sessions_dir, const std::string& args) {
     if (sessions_dir.empty()) {
-        std::cout << "找不到用户主目录,会话存档不可用。\n";
+        std::cout << tr("session.no_home") << "\n";
         return;
     }
     const bool all = args == "all";
     if (!args.empty() && !all) {
-        std::cout << "用法:/sessions(本目录)或 /sessions all(全部目录)\n";
+        std::cout << tr("cmd.sessions.usage") << "\n";
         return;
     }
     const auto entries =
         lubancode::agent::ListSessions(sessions_dir, 20, all ? std::string() : CurrentDirUtf8());
     if (entries.empty()) {
         if (all) {
-            std::cout << "还没有会话存档(" << sessions_dir << " 下没有 .jsonl)。\n";
+            std::cout << trf("cmd.sessions.none_all", sessions_dir) << "\n";
         } else {
-            std::cout << "本目录还没有会话存档(/sessions all 看全部目录)。\n";
+            std::cout << tr("cmd.sessions.none_here") << "\n";
         }
         return;
     }
-    std::cout << "最近 " << entries.size() << " 场会话("
-              << (all ? "全部目录" : "本目录,/sessions all 看全部")
-              << ";时间倒序,/resume 编号或id 续聊):\n";
+    std::cout << trf("cmd.sessions.header", entries.size(),
+                      all ? tr("cmd.sessions.scope_all") : tr("cmd.sessions.scope_here"))
+              << "\n";
     for (std::size_t i = 0; i < entries.size(); ++i) {
         const auto& entry = entries[i];
         // 标题优先,没设过标题回退首句摘要。
         const std::string& label = !entry.title.empty() ? entry.title : entry.first_user_text;
         std::cout << "  " << (i + 1) << ") " << entry.id << "\n"
-                   << "      " << (entry.started_at.empty() ? "(开始时间未知)" : entry.started_at) << " · "
-                   << entry.message_count << " 条 · "
-                   << (label.empty() ? "(没有用户文本)" : lubancode::agent::TruncateUtf8Chars(label, 40))
+                   << trf("cmd.sessions.entry",
+                           entry.started_at.empty() ? tr("cmd.sessions.unknown_time") : entry.started_at,
+                           entry.message_count,
+                           label.empty() ? tr("cmd.sessions.no_text")
+                                          : lubancode::agent::TruncateUtf8Chars(label, 40))
                    << "\n";
         if (all) {
-            std::cout << "      目录: "
-                       << (entry.cwd.empty() ? "(未知)"
-                                              : lubancode::agent::AbbreviateUtf8Middle(entry.cwd, 48))
+            std::cout << trf("cmd.sessions.dir_line",
+                              entry.cwd.empty() ? tr("cmd.sessions.dir_unknown")
+                                                 : lubancode::agent::AbbreviateUtf8Middle(entry.cwd, 48))
                        << "\n";
         }
     }
@@ -2608,7 +2539,7 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
                     std::string& session_title, const std::string& wire_str, const std::string& current_model,
                     const lubancode::cli::Theme& theme, bool quiet_if_none) {
     if (sessions_dir.empty()) {
-        std::cout << "找不到用户主目录,会话存档不可用。\n";
+        std::cout << tr("session.no_home") << "\n";
         return false;
     }
     const auto entries = lubancode::agent::ListSessions(sessions_dir, 20, CurrentDirUtf8());
@@ -2626,7 +2557,7 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
         // --continue:本目录最近一场;一场都没有就按 quiet_if_none 处理。
         if (entries.empty()) {
             if (!quiet_if_none) {
-                std::cout << "本目录还没有会话存档,没什么可恢复(/sessions all 看全部目录)。\n";
+                std::cout << tr("cmd.resume.none") << "\n";
             }
             return false;
         }
@@ -2640,8 +2571,7 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
             n = 0;
         }
         if (n < 1 || n > entries.size()) {
-            std::cout << "编号 " << target << " 超出范围(本目录现有 " << entries.size()
-                       << " 场,/sessions 看列表)。\n";
+            std::cout << trf("cmd.resume.out_of_range", target, entries.size()) << "\n";
             return false;
         }
         id = entries[n - 1].id;
@@ -2663,49 +2593,47 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
 
     const auto content = lubancode::agent::ReadSessionFileBytes(file_path);
     if (!content.has_value()) {
-        std::cout << "读不到存档 " << file_path << "。\n";
+        std::cout << trf("cmd.resume.read_failed", file_path) << "\n";
         return false;
     }
     auto session = lubancode::agent::ParseSessionFile(*content);
     if (!session.has_value()) {
-        std::cout << "存档 " << file_path << " 首行不是合法 meta,认不得这个格式。\n";
+        std::cout << trf("cmd.resume.bad_meta", file_path) << "\n";
         return false;
     }
 
     loop.ReplaceHistory(session->messages);
     persisted_count = session->messages.size();
     if (!store.ResumeAt(file_path, id)) {
-        std::cout << theme.error << "[会话存档] 接管 " << file_path << " 失败,恢复的历史只在内存里,本场不再落盘。"
-                   << theme.reset << "\n";
+        std::cout << theme.error << trf("cmd.resume.takeover_failed", file_path) << theme.reset << "\n";
     }
     session_meta = session->meta;
     session_title = session->title;
 
     if (session->compact_count > 0) {
         // 经过压缩的场子:恢复的是回放出来的有效态,不是全量流水。
-        std::cout << "已恢复 " << id << ",有效 " << session->messages.size() << " 条(全量 "
-                   << session->all_messages.size() << " 条,经 " << session->compact_count << " 次压缩)";
+        std::cout << trf("cmd.resume.restored_compact", id, session->messages.size(),
+                          session->all_messages.size(), session->compact_count);
     } else {
-        std::cout << "已恢复 " << id << "," << session->messages.size() << " 条消息";
+        std::cout << trf("cmd.resume.restored", id, session->messages.size());
     }
     if (session->repaired > 0) {
-        std::cout << "(补了 " << session->repaired << " 条缺失的工具结果)";
+        std::cout << trf("cmd.resume.repaired", session->repaired);
     }
     if (session->skipped_lines > 0) {
-        std::cout << "(跳过 " << session->skipped_lines << " 行解析不动的存档)";
+        std::cout << trf("cmd.resume.skipped", session->skipped_lines);
     }
     std::cout << "。\n";
     // context 记账:真实 usage 得等恢复后第一次请求才校准,这里先按字符
     // 粗估打一行,心里有数。
-    std::cout << "上下文占用(按字符粗估): ~"
-               << EstimateTokens(EstimateHistoryChars(session->messages)) << " tokens,首轮请求后以真实用量为准。\n";
+    std::cout << trf("cmd.resume.estimate", EstimateTokens(EstimateHistoryChars(session->messages))) << "\n";
     if (!session->meta.model.empty() && session->meta.model != current_model) {
-        std::cout << theme.stats << "[提醒] 存档时用的 model 是 " << session->meta.model << ",当前是 "
-                   << current_model << ",继续聊没问题,风格可能有差。" << theme.reset << "\n";
+        std::cout << theme.stats << trf("cmd.resume.model_mismatch", session->meta.model, current_model)
+                  << theme.reset << "\n";
     }
     if (!session->meta.wire.empty() && session->meta.wire != wire_str) {
-        std::cout << theme.stats << "[提醒] 存档时用的 wire 是 " << session->meta.wire << ",当前是 " << wire_str
-                   << "。" << theme.reset << "\n";
+        std::cout << theme.stats << trf("cmd.resume.wire_mismatch", session->meta.wire, wire_str) << theme.reset
+                  << "\n";
     }
     return true;
 }
@@ -2718,7 +2646,7 @@ void HandleExportCommand(const std::string& args, const lubancode::agent::AgentL
                           const lubancode::agent::SessionMeta& session_meta, const std::string& session_title) {
     const auto& history = loop.History();
     if (history.empty()) {
-        std::cout << "当前会话还没有内容,没什么可导出。\n";
+        std::cout << tr("cmd.export.empty") << "\n";
         return;
     }
     const std::string id =
@@ -2726,7 +2654,7 @@ void HandleExportCommand(const std::string& args, const lubancode::agent::AgentL
     std::string out_path = args;
     if (out_path.empty()) {
         if (sessions_dir.empty()) {
-            std::cout << "找不到用户主目录,请显式给个路径:/export 路径\n";
+            std::cout << tr("cmd.export.need_path") << "\n";
             return;
         }
         out_path = sessions_dir + "/" + id + ".md";
@@ -2761,12 +2689,12 @@ void HandleExportCommand(const std::string& args, const lubancode::agent::AgentL
     }
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file.is_open()) {
-        std::cout << "写不进 " << out_path << "。\n";
+        std::cout << trf("cmd.export.write_failed", out_path) << "\n";
         return;
     }
     file << markdown;
     file.close();
-    std::cout << "已导出 Markdown: " << out_path << "\n";
+    std::cout << trf("cmd.export.done", out_path) << "\n";
 }
 
 // 没带参数时的交互循环:读一行、问一句,exit/quit 或 EOF 退出。
@@ -2925,8 +2853,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         });
     }
     if (main_deferral) {
-        std::cout << theme.stats << "[tool_search] 工具超过阈值 " << tool_search_threshold
-                   << ",MCP/插件等外挂工具改为延迟挂载(/tools 看三态)" << theme.reset << "\n";
+        std::cout << theme.stats << trf("tool_search.enabled", tool_search_threshold) << theme.reset << "\n";
     }
     // 主 AgentLoop 的索引段:发请求前现算现拼(见 DeferredIndexBackend 注释)。
     // 未启用时 provider 恒给空串,这层包装纯透传。
@@ -2975,10 +2902,10 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                 transcript_expanded = !transcript_expanded;
                 focus_view_active = false;
                 std::cout << "\n" << theme.stats
-                          << (transcript_expanded ? "—— 详细模式(Ctrl+O 切回紧凑)——" : "—— 紧凑模式 ——")
+                          << (transcript_expanded ? tr("ui.expanded") : tr("ui.compact"))
                           << theme.reset << "\n";
                 if (count == 0) {
-                    std::cout << "(本会话还没有工具条目)\n";
+                    std::cout << tr("ui.no_items") << "\n";
                     return true;
                 }
                 for (std::size_t i = 0; i < transcript.size(); ++i) {
@@ -3001,8 +2928,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                 } else if (focus_index + 1 < count) {
                     ++focus_index;  // 到最新一条停住
                 }
-                std::cout << "\n" << theme.stats << "[焦点 " << (focus_index + 1) << "/" << count
-                          << "] Tab 往旧 · Shift+Tab 往新 · Ctrl+E 查看全文" << theme.reset << "\n";
+                std::cout << "\n" << theme.stats << trf("ui.focus", focus_index + 1, count) << theme.reset << "\n";
                 std::cout << cli::FormatTranscriptItem(transcript[static_cast<std::size_t>(focus_index)], theme,
                                                         width, /*expanded=*/false, /*focused=*/true);
                 return true;
@@ -3012,7 +2938,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     // 再按 Ctrl+E:返回。简化重画:横幅 + 最近几条摘要,
                     // 聚焦画面留在滚动历史里。
                     focus_view_active = false;
-                    std::cout << "\n" << theme.stats << "—— 返回会话 ——" << theme.reset << "\n";
+                    std::cout << "\n" << theme.stats << tr("ui.back") << theme.reset << "\n";
                     PrintBanner(config, theme);
                     print_recent_items(5);
                     return true;
@@ -3022,8 +2948,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                 }
                 const int idx = focus_index >= 0 ? focus_index : count - 1;
                 focus_view_active = true;
-                std::cout << "\n" << theme.banner << "—— 聚焦查看 条目 " << (idx + 1) << "/" << count
-                          << ",Ctrl+E 或 ESC 返回 ——" << theme.reset << "\n";
+                std::cout << "\n" << theme.banner << trf("ui.focus_view", idx + 1, count) << theme.reset << "\n";
                 // width=0:标题 + 完整参数 + full_output 全文如实铺,不截宽,
                 // 超长靠终端自然折行/滚动(不真清屏——conhost 的滚回缓冲跟
                 // 屏幕缓冲是同一块,真清会把历史一并抹掉,取舍见报告)。
@@ -3036,7 +2961,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     return false;  // 不在聚焦查看态:ESC 还给编辑器,维持"清空输入"老语义
                 }
                 focus_view_active = false;
-                std::cout << "\n" << theme.stats << "—— 返回会话 ——" << theme.reset << "\n";
+                std::cout << "\n" << theme.stats << tr("ui.back") << theme.reset << "\n";
                 PrintBanner(config, theme);
                 print_recent_items(5);
                 return true;
@@ -3134,8 +3059,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
             if (!session_store.Begin(session_meta,
                                       lubancode::agent::MakeSessionId(session_start_ts, first_text))) {
                 session_store_broken = true;
-                std::cout << theme.error << "[会话存档] 在 " << sessions_dir
-                           << " 建档失败,本场对话不落盘(不影响继续聊)。" << theme.reset << "\n";
+                std::cout << theme.error << trf("session.create_failed", sessions_dir) << theme.reset << "\n";
                 return;
             }
             // 建档前 /title 设过标题:现在有文件了,把事件行补上。
@@ -3147,8 +3071,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         for (std::size_t i = persisted_count; i < history.size(); ++i) {
             if (!session_store.AppendMessage(history[i])) {
                 session_store_broken = true;
-                std::cout << theme.error << "[会话存档] 追加写入失败,后续不再落盘(不影响继续聊)。"
-                           << theme.reset << "\n";
+                std::cout << theme.error << tr("session.append_failed") << theme.reset << "\n";
                 return;
             }
         }
@@ -3188,6 +3111,9 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                 case lubancode::cli::SlashCommand::Config:
                     PrintConfigDiagnostics(config_result, *current_model, &model_catalog);
                     break;
+                case lubancode::cli::SlashCommand::Language:
+                    HandleLanguageCommand(parsed.args, config_file_path);
+                    break;
                 case lubancode::cli::SlashCommand::Clear:
                     rebuild_loop();
                     // 存档跟着翻篇:旧文件留在磁盘上,新会话下一条消息另起
@@ -3198,7 +3124,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     session_store_broken = false;
                     session_title.clear();
                     session_title_pending = false;
-                    std::cout << "已清空对话历史。\n";
+                    std::cout << tr("cmd.clear.done") << "\n";
                     break;
                 case lubancode::cli::SlashCommand::Context:
                     HandleContextCommand(parsed.args, context_tracker);
@@ -3245,7 +3171,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     break;
                 case lubancode::cli::SlashCommand::Resume:
                     if (parsed.args.empty()) {
-                        std::cout << "用法:/resume 编号或id(/sessions 看列表)\n";
+                        std::cout << tr("cmd.resume.usage") << "\n";
                     } else {
                         ResumeSession(parsed.args, sessions_dir, *loop, session_store, persisted_count,
                                        session_meta, session_title, wire_str, *current_model, theme,
@@ -3260,22 +3186,22 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     break;
                 case lubancode::cli::SlashCommand::Title:
                     if (parsed.args.empty()) {
-                        std::cout << (session_title.empty() ? "本场还没设标题(/title 标题 起一个)。\n"
-                                                             : "当前标题: " + session_title + "\n");
+                        std::cout << (session_title.empty() ? tr("cmd.title.none")
+                                                             : trf("cmd.title.current", session_title))
+                                   << "\n";
                     } else {
                         session_title = parsed.args;
                         if (session_store.active() && !session_store_broken) {
                             if (session_store.AppendTitleEvent(session_title)) {
-                                std::cout << "标题已设为: " << session_title << "\n";
+                                std::cout << trf("cmd.title.set", session_title) << "\n";
                             } else {
-                                std::cout << theme.error << "[会话存档] 标题写入失败,只在本次会话内存里生效。"
-                                           << theme.reset << "\n";
+                                std::cout << theme.error << tr("cmd.title.write_failed") << theme.reset << "\n";
                             }
                         } else {
                             // 还没建档(首条消息才落盘):先记着,建档成功后
                             // 由 persist_new_messages 补写事件行。
                             session_title_pending = true;
-                            std::cout << "标题已设为: " << session_title << "(首条消息落盘后写入存档)\n";
+                            std::cout << trf("cmd.title.set_pending", session_title) << "\n";
                         }
                     }
                     break;
@@ -3288,7 +3214,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                 case lubancode::cli::SlashCommand::Exit:
                     return false;
                 case lubancode::cli::SlashCommand::Unknown:
-                    std::cout << "不认得命令 " << parsed.raw_word << ",试试 /help\n";
+                    std::cout << trf("error.unknown_command", parsed.raw_word) << "\n";
                     break;
                 case lubancode::cli::SlashCommand::NotSlash:
                     break;  // 走不到这里,switch 外层已经排除了
@@ -3300,7 +3226,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         // 用裸的 *real_backend(理由同 /compact),失败只警告不拦——字符数
         // 硬安全网(TrimHistory)还在,不会真的爆掉。
         if (context_tracker.ShouldAutoCompact()) {
-            std::cout << theme.stats << "[compact] 上下文接近上限,自动压缩中..." << theme.reset << "\n";
+            std::cout << theme.stats << tr("compact.auto_start") << theme.reset << "\n";
             lubancode::cli::Spinner spinner(theme, spinner_enabled);
             const std::string compact_model = config.compact_model.empty() ? *current_model : config.compact_model;
             const auto compact_result = lubancode::agent::Compact(*real_backend, compact_model, loop->History(), "");
@@ -3315,10 +3241,10 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                 if (session_store.active() && !session_store_broken) {
                     session_store.AppendCompactEvent(compact_event);
                 }
-                std::cout << "[compact] 自动压缩完成。\n";
+                std::cout << tr("compact.auto_done") << "\n";
             } else {
-                std::cout << theme.error << "[compact] 自动压缩失败: " << compact_result.error().message
-                           << theme.reset << "(继续按原历史发送,字符数安全网仍会兜底)\n";
+                std::cout << theme.error << trf("compact.auto_failed", compact_result.error().message)
+                           << theme.reset << tr("compact.auto_failed_tail") << "\n";
             }
         }
 
@@ -3536,6 +3462,33 @@ private:
 // 一旦经这条路转一圈,就会被拆成不合法的 UTF-8 字节,喂给 nlohmann::json
 // 的 dump() 时直接抛 type_error(316: invalid UTF-8 byte)崩掉。
 int RunCli(const std::vector<std::string>& args) {
+    // i18n 早初始化:--help/--version 在读配置之前就要打印,先扫语言包、按
+    // LUBANCODE_LANG(空 = 系统探测)定一版语言;配置加载成功后按四级合并的
+    // language 字段再定一次(env 仍是最高级,两次结果一致;差别只在"语言写
+    // 在配置文件里、又用 --help"这一种组合——那时 --help 按 env/系统走,
+    // 属于诚实的取舍,不为它提前解析整份配置)。坏语言包的警告攒着,等语言
+    // 定下来再打(警告本身也要按所选语言出)。
+    std::vector<std::string> language_pack_warnings;
+    if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
+        language_pack_warnings = lubancode::cli::LoadLanguagePacksFromDir(*luban_dir + "/languages");
+    }
+    {
+        std::string early_lang;
+#ifdef _WIN32
+        char* env_lang = nullptr;
+        std::size_t env_size = 0;
+        if (_dupenv_s(&env_lang, &env_size, "LUBANCODE_LANG") == 0 && env_lang != nullptr) {
+            early_lang = env_lang;
+            std::free(env_lang);
+        }
+#else
+        if (const char* env_lang = std::getenv("LUBANCODE_LANG"); env_lang != nullptr) {
+            early_lang = env_lang;
+        }
+#endif
+        lubancode::cli::SetLanguage(early_lang.empty() ? lubancode::cli::DetectSystemLanguage() : early_lang);
+    }
+
     std::string positional;
     bool auto_confirm = false;
     bool print_config = false;
@@ -3565,7 +3518,7 @@ int RunCli(const std::vector<std::string>& args) {
         }
         if (arg == "--system-prompt") {
             if (i + 1 >= args.size()) {
-                std::cerr << "--system-prompt 后面要跟一个文件路径\n";
+                std::cerr << tr("error.system_prompt_arg") << "\n";
                 return 1;
             }
             system_prompt_file_arg = args[++i];
@@ -3576,18 +3529,18 @@ int RunCli(const std::vector<std::string>& args) {
             // 本身就是明确意图),打结果就退。
             const auto luban_dir = lubancode::config::HomeLubancodeDir();
             if (!luban_dir.has_value()) {
-                std::cerr << "找不到用户主目录(Windows 下是 %USERPROFILE%),没法还原 system_prompt.md\n";
+                std::cerr << tr("resetprompt.no_home") << "\n";
                 return 1;
             }
             const auto reset_result =
                 lubancode::config::ResetSystemPromptFile(*luban_dir, lubancode::agent::DefaultPersona());
             if (!reset_result.has_value()) {
-                std::cerr << "还原失败: " << reset_result.error() << "\n";
+                std::cerr << trf("cmd.prompt.reset_failed", reset_result.error()) << "\n";
                 return 1;
             }
-            std::cout << "已把 " << lubancode::config::SystemPromptFilePath(*luban_dir) << " 还原成内置默认";
+            std::cout << trf("cmd.prompt.reset_done", lubancode::config::SystemPromptFilePath(*luban_dir));
             if (!reset_result->empty()) {
-                std::cout << ",旧文件在 " << *reset_result;
+                std::cout << trf("cmd.prompt.old_file", *reset_result);
             }
             std::cout << "。\n";
             return 0;
@@ -3607,6 +3560,15 @@ int RunCli(const std::vector<std::string>& args) {
         std::cout << *config_result->migration_notice << "\n";
     }
 
+    // i18n:配置读出来了,按四级合并的 language 字段定稿(空 = 跟系统)。
+    // 语言包早在函数开头扫过,这里只是切码;坏包警告攒到现在,按定稿语言打。
+    lubancode::cli::SetLanguage(config_result->config.language.empty()
+                                     ? lubancode::cli::DetectSystemLanguage()
+                                     : config_result->config.language);
+    for (const auto& warning : language_pack_warnings) {
+        std::cout << trf("i18n.pack_warning", warning) << "\n";
+    }
+
     // 魂法分家(0.16.x):每次启动查漏补缺——~/.lubancode/ 下的
     // system_prompt.md(法)/ SOUL.md(魂)/ souls/wenyan.md(示例)缺哪样
     // 补哪样,已存在的绝不覆盖。首启就是"三样全补"。静默做,不打输出
@@ -3619,7 +3581,7 @@ int RunCli(const std::vector<std::string>& args) {
     // 文件不存在就是空目录,一切回退现状,绝不拦人。
     const lubancode::config::ModelCatalog model_catalog = lubancode::config::LoadModelCatalog();
     for (const auto& warning : model_catalog.warnings) {
-        std::cout << "[models.json 警告] " << warning << "\n";
+        std::cout << trf("catalog.warning", warning) << "\n";
     }
 
     if (print_config) {
@@ -3635,7 +3597,7 @@ int RunCli(const std::vector<std::string>& args) {
     const std::string effective_prompt_file =
         !system_prompt_file_arg.empty() ? system_prompt_file_arg : config_result->config.system_prompt_file;
     std::string persona;
-    std::string law_source = "内置默认(编译期嵌入的 core 模块)";  // /prompt 裸敲展示用
+    std::string law_source = tr("law.builtin");  // /prompt 裸敲展示用
     if (!effective_prompt_file.empty()) {
         const auto persona_result = lubancode::config::ReadSystemPromptFile(effective_prompt_file);
         if (!persona_result.has_value()) {
@@ -3643,9 +3605,8 @@ int RunCli(const std::vector<std::string>& args) {
             return 1;
         }
         persona = *persona_result;
-        law_source = (!system_prompt_file_arg.empty() ? std::string("CLI 参数 --system-prompt(")
-                                                       : std::string("配置指定的人格文件(")) +
-                     effective_prompt_file + ")";
+        law_source = !system_prompt_file_arg.empty() ? trf("law.cli_arg", effective_prompt_file)
+                                                      : trf("law.config_file", effective_prompt_file);
     } else if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
         // 魂法分家:没有 CLI/配置指定的人格文件时,法从 ~/.lubancode/
         // system_prompt.md 来(顶部注释剥掉;文件缺失或剥完全空白,persona
@@ -3654,7 +3615,7 @@ int RunCli(const std::vector<std::string>& args) {
         const auto law_content = lubancode::config::ReadTextFileIfExists(law_path);
         persona = lubancode::agent::ResolvePersona(std::string(), law_content.value_or(std::string()));
         if (!persona.empty()) {
-            law_source = "文件 " + law_path;
+            law_source = trf("law.file", law_path);
         }
     }
 
@@ -3724,7 +3685,7 @@ int RunCli(const std::vector<std::string>& args) {
             effective.config.model.empty()) {
             const auto wizard_config = RunInitialSetupWizard(effective.config_file_path);
             if (!wizard_config.has_value()) {
-                std::cerr << "配置向导未完成,退出。\n";
+                std::cerr << tr("error.wizard_incomplete") << "\n";
                 return 1;
             }
             effective.config = *wizard_config;
@@ -3742,7 +3703,7 @@ int RunCli(const std::vector<std::string>& args) {
         InteractiveLoop(effective, auto_confirm, theme, persona, spinner_enabled, model_catalog, continue_last,
                          law_source);
     } catch (const std::exception& e) {
-        std::cerr << "[错误] 未预料的异常: " << e.what() << "\n";
+        std::cerr << tr("error.prefix") << trf("error.unexpected", e.what()) << "\n";
         return 1;
     }
     return 0;

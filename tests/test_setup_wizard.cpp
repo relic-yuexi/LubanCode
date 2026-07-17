@@ -49,6 +49,7 @@ struct ScriptedIO {
 TEST_CASE("RunSetupWizard: 全部手填,直接输入模型名,默认保存") {
     ScriptedIO scripted;
     scripted.inputs = {
+        "",                                 // 语言:回车 -> 默认(当前语言)
         "1",                                // wire = anthropic
         "https://api.example.com/anthropic/",  // base_url,带尾部斜杠
         "sk-test-key-1234567890",           // api_key
@@ -81,6 +82,7 @@ TEST_CASE("RunSetupWizard: wire 选 2 (responses),回车走 model 列表选号")
         };
     };
     scripted.inputs = {
+        "",                               // 语言:回车 -> 默认
         "2",                              // wire = responses
         "https://api.example.com/v1",     // base_url
         "the-key",                        // api_key
@@ -104,6 +106,7 @@ TEST_CASE("RunSetupWizard: model 列表拉取失败,回落到手输模型名") {
         return std::unexpected(api::Error{api::ErrorKind::Network, "连接被拒绝", 0});
     };
     scripted.inputs = {
+        "",                                // 语言:回车 -> 默认
         "1",                               // wire
         "https://api.example.com/anthropic",
         "the-key",
@@ -126,7 +129,7 @@ TEST_CASE("RunSetupWizard: model 列表是空的,同样回落到手输") {
         return std::vector<api::ModelInfo>{};
     };
     scripted.inputs = {
-        "1", "https://api.example.com/anthropic", "the-key", "", "TypedModel", "Y",
+        "", "1", "https://api.example.com/anthropic", "the-key", "", "TypedModel", "Y",
     };
     auto io = scripted.Build();
     const auto outcome = cli::RunSetupWizard(io);
@@ -142,6 +145,7 @@ TEST_CASE("RunSetupWizard: model 编号选择留空走默认第一个") {
         return std::vector<api::ModelInfo>{{"first-model", ""}, {"second-model", "Second"}};
     };
     scripted.inputs = {
+        "",  // 语言:回车 -> 默认
         "",  // wire:回车 -> 默认 1 (anthropic)
         "https://api.example.com/anthropic",
         "the-key",
@@ -161,6 +165,7 @@ TEST_CASE("RunSetupWizard: model 编号选择留空走默认第一个") {
 TEST_CASE("RunSetupWizard: base_url/api_key 空输入会被拒绝,重新问") {
     ScriptedIO scripted;
     scripted.inputs = {
+        "",                                  // 语言:回车 -> 默认
         "1",
         "",                                  // base_url 空,拒绝
         "https://api.example.com/anthropic",  // 重新输入,通过
@@ -180,6 +185,7 @@ TEST_CASE("RunSetupWizard: base_url/api_key 空输入会被拒绝,重新问") {
 TEST_CASE("RunSetupWizard: 中途 EOF,返回 std::nullopt") {
     ScriptedIO scripted;
     scripted.inputs = {
+        "",  // 语言:回车 -> 默认
         "1",
         "https://api.example.com/anthropic",
         // api_key 这一步之后没有更多输入了 -> EOF
@@ -192,6 +198,7 @@ TEST_CASE("RunSetupWizard: 中途 EOF,返回 std::nullopt") {
 TEST_CASE("RunSetupWizard: wire 编号不认得时重问,直到给出合法值") {
     ScriptedIO scripted;
     scripted.inputs = {
+        "",   // 语言:回车 -> 默认
         "9",  // 不合法
         "abc", // 不合法
         "2",  // responses

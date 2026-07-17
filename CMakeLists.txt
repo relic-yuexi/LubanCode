@@ -214,6 +214,7 @@ add_library(lubancode_core STATIC
   src/agent/context.cpp
   src/agent/compact.cpp
   src/agent/session_store.cpp
+  src/cli/i18n.cpp
   src/cli/setup_wizard.cpp
   src/cli/slash_commands.cpp
   src/cli/theme.cpp

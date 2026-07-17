@@ -50,6 +50,7 @@
 
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
+#include "cli/i18n.hpp"
 #include "cli/slash_commands.hpp"
 
 #ifdef _WIN32
@@ -841,7 +842,7 @@ void TurnInputListener::ThreadMain() {
         if (ke.wVirtualKeyCode == VK_ESCAPE) {
             cancel_flag_.store(true);
             std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
-            std::cout << "\n" << theme_.stats << "[已打断]" << theme_.reset << "\n";
+            std::cout << "\n" << theme_.stats << tr("input.interrupted") << theme_.reset << "\n";
             std::cout.flush();
             continue;
         }
@@ -850,7 +851,7 @@ void TurnInputListener::ThreadMain() {
                 const std::string line = Utf32ToUtf8(buffer);
                 {
                     std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
-                    std::cout << "\n" << theme_.stats << "[已排队] " << theme_.reset << line << "\n";
+                    std::cout << "\n" << theme_.stats << tr("input.queued") << theme_.reset << line << "\n";
                     std::cout.flush();
                 }
                 {

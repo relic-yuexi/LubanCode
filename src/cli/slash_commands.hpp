@@ -32,6 +32,7 @@ enum class SlashCommand {
     Title,     // /title [标题]:看/设当前会话标题(追加 title 事件行,最后一条胜)
     Soul,      // /soul [名字|off|default]:魂(风格叠加层)查看/切换(0.16.x 魂法分家)
     Prompt,    // /prompt [reset]:看法(系统提示词)的来源,或还原 system_prompt.md
+    Language,  // /language [语言码]:列可选界面语言/切换(i18n)
     Unknown,  // 以 / 开头,但不认得这个命令
 };
 
@@ -48,6 +49,8 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input);
 
 // 一个命令一条:名字 + 一句话说明。/help 打印用的就是这份,line_editor 的
 // Tab 补全、实时提示行也是从这份转过去的候选——统共这一份定义,不重复写。
+// i18n:说明文字经 tr(slash.desc.*)取值,/language 切换后下一次调用重建,
+// 返回引用在下一次语言切换之前有效。
 struct SlashCommandInfo {
     std::string name;
     std::string description;

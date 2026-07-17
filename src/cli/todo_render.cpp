@@ -1,5 +1,7 @@
 #include "cli/todo_render.hpp"
 
+#include "cli/i18n.hpp"
+
 namespace lubancode::cli {
 
 namespace {
@@ -10,7 +12,7 @@ constexpr const char* kEmptyBox = "\xE2\x98\x90";        // ☐ U+2610
 
 std::string FormatTodoList(const std::vector<tools::TodoItem>& items, const Theme& theme) {
     if (items.empty()) {
-        return "没有待办。\n";
+        return tr("todo.empty") + "\n";
     }
     const bool plain = theme.reset.empty();
     std::string out;
