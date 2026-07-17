@@ -1,6 +1,9 @@
 # 密钥文件,绝不能提交
 测试.md
 
+# lubancode 本地配置(可能带真密钥),别人机器上各配各的,不进仓库
+.lubancode.json
+
 # 构建产物
 build/
 out/

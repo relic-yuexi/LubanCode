@@ -62,6 +62,53 @@ cpr 默认会自己再拉一份 `curl`(默认地址在 `github.com/curl/curl/rel
 
 依赖默认编译成静态库(`BUILD_SHARED_LIBS OFF`),这样 `lubancode.exe` 自己就能跑,不用把 `cpr.dll`、`libcurl-*.dll` 之类的运行时依赖到处放、还得操心 PATH。
 
+## 配置
+
+lubancode 要跟大模型对话,得知道 wire(协议)、base_url、api_key、model 这几件事。配置分四级,优先级从高到低,按**字段**逐个决——不是整套配置一刀切:
+
+1. **LUBANCODE_ 专属环境变量**:`LUBANCODE_WIRE`、`LUBANCODE_BASE_URL`、`LUBANCODE_API_KEY`、`LUBANCODE_MODEL`、`LUBANCODE_MAX_CONTEXT`
+2. **配置文件**:先找当前目录的 `.lubancode.json`,找不到再找用户主目录(Windows 是 `%USERPROFILE%`)下的 `.lubancode.json`
+3. **通用环境变量**(向后兼容):`wire=anthropic` 时读 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_MODEL`;`wire=responses` 时读 `OPENAI_BASE_URL`/`OPENAI_API_KEY`/`OPENAI_MODEL`
+4. **内置默认值**:`wire=anthropic`,`base_url`/`model` 给对应的 MiniMax 端点(`api_key` 没有默认值,必须自己配一个)
+
+### 为什么要有专属环境变量
+
+不少人机器上已经装了 Claude Code、Codex 之类的工具,全局环境变量里早就设好了 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`——这些变量是给那些工具专用的中转服务配的,lubancode 要是也去读它们,轻则连错服务,重则被中转拒之门外(比如报 `this group only allows Claude Code clients`)。所以 lubancode 才自立门户,推荐直接用 `LUBANCODE_*` 专属变量,或者干脆放一份配置文件,不跟别的工具打架。
+
+### 推荐做法:主目录放一份 .lubancode.json
+
+在用户主目录(Windows 是 `%USERPROFILE%`,即 `C:\Users\你的用户名\`)下建一个 `.lubancode.json`:
+
+```json
+{
+  "wire": "anthropic",
+  "base_url": "https://api.minimaxi.com/anthropic",
+  "api_key": "sk-替换成你自己的密钥",
+  "model": "MiniMax-M3",
+  "max_context_chars": 600000
+}
+```
+
+字段全部可选,缺的自动往下一级找(通用环境变量,再往下是内置默认值)。这份文件带着密钥,别提交进任何仓库——`.gitignore` 里已经排除了 `.lubancode.json`。
+
+也可以只在某个项目目录下放一份 `.lubancode.json`,cwd 那份优先级比主目录那份高,适合某个项目要连别的模型服务的场景。
+
+### 排查配置问题
+
+`lubancode --config` 能打印出当前实际生效的配置,以及每个字段是从哪一级来的(`api_key` 会打码,只显示前 8 位):
+
+```
+lubancode 最终生效的配置:
+
+  wire               = anthropic  [配置文件(.lubancode.json)]
+  base_url           = https://api.minimaxi.com/anthropic  [配置文件(.lubancode.json)]
+  api_key            = sk-xxxxxx...  [配置文件(.lubancode.json)]
+  model              = MiniMax-M3  [配置文件(.lubancode.json)]
+  max_context_chars  = 600000  [内置默认值]
+```
+
+配置文件坏了(不是合法 JSON)、`api_key` 四级都没配到,都会报错,错误信息里带着文件路径或者提示去哪几个地方配。
+
 ## 目录结构
 
 ```

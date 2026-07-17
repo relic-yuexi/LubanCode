@@ -42,23 +42,64 @@ void PrintVersion() {
 }
 
 void PrintHelp() {
-    std::cout << "lubancode " << kVersion << " - C++ AI 编程 CLI\n\n"
-              << "用法:\n"
-              << "  lubancode [选项]\n"
-              << "  lubancode \"问题\"          一次问答,能用工具就用工具\n"
-              << "  lubancode                  不带参数则进入交互循环,exit/quit 或 EOF(Ctrl+Z / 管道读尽)退出;空行只是重新给提示符,不退出\n\n"
-              << "选项:\n"
-              << "  --version   打印版本号\n"
-              << "  --help      打印本帮助\n"
-              << "  --yes       自动确认所有需要确认的工具调用(比如 run_command),不再逐条询问\n\n"
-              << "环境变量:\n"
-              << "  LUBANCODE_WIRE        协议选择,anthropic(默认)或 responses\n"
-              << "  ANTHROPIC_BASE_URL    wire=anthropic 时的 API 地址,默认 https://api.minimaxi.com/anthropic\n"
-              << "  ANTHROPIC_AUTH_TOKEN  wire=anthropic 时的认证令牌,必填\n"
-              << "  ANTHROPIC_MODEL       wire=anthropic 时的模型名,默认 MiniMax-M3\n"
-              << "  OPENAI_BASE_URL       wire=responses 时的 API 地址,默认 https://api.minimaxi.com/v1\n"
-              << "  OPENAI_API_KEY        wire=responses 时的认证令牌,必填\n"
-              << "  OPENAI_MODEL          wire=responses 时的模型名,默认 MiniMax-M3\n";
+    std::cout
+        << "lubancode " << kVersion << " - C++ AI 编程 CLI\n\n"
+        << "用法:\n"
+        << "  lubancode [选项]\n"
+        << "  lubancode \"问题\"          一次问答,能用工具就用工具\n"
+        << "  lubancode                  不带参数则进入交互循环,exit/quit 或 EOF(Ctrl+Z / 管道读尽)退出;空行只是重新给提示符,不退出\n\n"
+        << "选项:\n"
+        << "  --version   打印版本号\n"
+        << "  --help      打印本帮助\n"
+        << "  --yes       自动确认所有需要确认的工具调用(比如 run_command),不再逐条询问\n"
+        << "  --config    打印最终生效的配置(api_key 打码)和每个字段来自哪一级,排查配置问题用\n\n"
+        << "配置优先级(从高到低,按字段逐个决,不是整套配置一刀切):\n"
+        << "  1) LUBANCODE_ 专属环境变量\n"
+        << "       LUBANCODE_WIRE          协议选择,anthropic 或 responses\n"
+        << "       LUBANCODE_BASE_URL      API 地址\n"
+        << "       LUBANCODE_API_KEY       认证令牌\n"
+        << "       LUBANCODE_MODEL         模型名\n"
+        << "       LUBANCODE_MAX_CONTEXT   history 裁剪阈值(字符数)\n"
+        << "  2) 配置文件(第一个找到的生效):cwd 的 .lubancode.json,找不到再找用户主目录的\n"
+        << "     .lubancode.json。字段:wire / base_url / api_key / model / max_context_chars,全部可选。\n"
+        << "  3) 通用环境变量(向后兼容旧用法,跟 Claude Code 等工具共用同名变量时容易撞车,\n"
+        << "     建议改用第 1 级的 LUBANCODE_* 专属变量):\n"
+        << "       wire=anthropic 时读 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL\n"
+        << "       wire=responses 时读 OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL\n"
+        << "  4) 内置默认值:wire=anthropic,base_url 按 wire 给对应 MiniMax 端点,model=MiniMax-M3,\n"
+        << "     max_context_chars=" << lubancode::config::kDefaultMaxContextChars << "(api_key 没有默认值,必须自己配)\n\n"
+        << "遇到跟别的工具共用环境变量导致被拒之类的问题,配一个 LUBANCODE_BASE_URL/LUBANCODE_API_KEY,\n"
+        << "或者在主目录放一份 .lubancode.json,就不会跟别的工具的环境变量撞车了。用 --config 能看到\n"
+        << "当前实际生效的配置和每个字段的来源。\n";
+}
+
+// 把 api_key 打码:只留前 8 位 + "...",没设置就显示 (未设置)。
+std::string MaskApiKey(const std::string& api_key) {
+    if (api_key.empty()) {
+        return "(未设置)";
+    }
+    if (api_key.size() <= 8) {
+        return api_key + "...";
+    }
+    return api_key.substr(0, 8) + "...";
+}
+
+// --config:打印最终生效的配置和每个字段的来源,方便排查"读到的到底是哪一份"。
+void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result) {
+    const auto& config = result.config;
+    const auto& sources = result.sources;
+    const std::string wire_str = config.wire == lubancode::config::Wire::Responses ? "responses" : "anthropic";
+
+    std::cout << "lubancode 最终生效的配置:\n\n";
+    std::cout << "  wire               = " << wire_str << "  [" << lubancode::config::ToString(sources.wire) << "]\n";
+    std::cout << "  base_url           = " << config.base_url << "  [" << lubancode::config::ToString(sources.base_url)
+              << "]\n";
+    std::cout << "  api_key            = " << MaskApiKey(config.auth_token) << "  ["
+              << lubancode::config::ToString(sources.auth_token) << "]\n";
+    std::cout << "  model              = " << config.model << "  [" << lubancode::config::ToString(sources.model)
+              << "]\n";
+    std::cout << "  max_context_chars  = " << config.max_context_chars << "  ["
+              << lubancode::config::ToString(sources.max_context_chars) << "]\n";
 }
 
 // 按 wire 造对应的后端实现。agent 层只认 Backend 这个抽象接口,不关心
@@ -212,7 +253,12 @@ void InteractiveLoop(const lubancode::config::Config& config, bool auto_confirm)
 
     std::unique_ptr<lubancode::api::Backend> backend = BuildBackend(config);
     lubancode::tools::ToolRegistry registry = BuildToolRegistry();
-    lubancode::agent::AgentLoop loop(*backend, registry, config.model, lubancode::agent::BuildSystemPrompt(CurrentDirUtf8()));
+    // max_tokens=4096、max_turns=25 是 AgentLoop 自己的默认值(见
+    // agent/loop.hpp);这里显式传出来,是为了能把 config.max_context_chars
+    // (来自四级合并后的配置,而不是只认 LUBANCODE_MAX_CONTEXT 环境变量)
+    // 一起传进去,C++ 没法只跳过中间几个参数用默认值。
+    lubancode::agent::AgentLoop loop(*backend, registry, config.model, lubancode::agent::BuildSystemPrompt(CurrentDirUtf8()),
+                                      /*max_tokens=*/4096, /*max_turns=*/25, config.max_context_chars);
     std::set<std::string> always_allowed_tools;
 
     while (true) {
@@ -234,7 +280,8 @@ void InteractiveLoop(const lubancode::config::Config& config, bool auto_confirm)
 int AskOnce(const lubancode::config::Config& config, const std::string& question, bool auto_confirm) {
     std::unique_ptr<lubancode::api::Backend> backend = BuildBackend(config);
     lubancode::tools::ToolRegistry registry = BuildToolRegistry();
-    lubancode::agent::AgentLoop loop(*backend, registry, config.model, lubancode::agent::BuildSystemPrompt(CurrentDirUtf8()));
+    lubancode::agent::AgentLoop loop(*backend, registry, config.model, lubancode::agent::BuildSystemPrompt(CurrentDirUtf8()),
+                                      /*max_tokens=*/4096, /*max_turns=*/25, config.max_context_chars);
     std::set<std::string> always_allowed_tools;
 
     return RunTurn(loop, question, auto_confirm, always_allowed_tools);
@@ -248,6 +295,7 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
 int RunCli(const std::vector<std::string>& args) {
     std::string positional;
     bool auto_confirm = false;
+    bool print_config = false;
     for (std::size_t i = 1; i < args.size(); ++i) {
         const std::string& arg = args[i];
         if (arg == "--version") {
@@ -262,25 +310,42 @@ int RunCli(const std::vector<std::string>& args) {
             auto_confirm = true;
             continue;
         }
+        if (arg == "--config") {
+            print_config = true;
+            continue;
+        }
         if (!positional.empty()) {
             positional += " ";
         }
         positional += arg;
     }
 
-    const auto config = lubancode::config::LoadFromEnv();
-    if (!config.has_value()) {
-        std::cerr << config.error() << "\n";
+    const auto config_result = lubancode::config::LoadFromEnv();
+    if (!config_result.has_value()) {
+        std::cerr << config_result.error() << "\n";
         return 1;
     }
+
+    if (print_config) {
+        PrintConfigDiagnostics(*config_result);
+        return 0;
+    }
+
+    const auto api_key_check = lubancode::config::RequireApiKey(*config_result);
+    if (!api_key_check.has_value()) {
+        std::cerr << api_key_check.error() << "\n";
+        return 1;
+    }
+
+    const lubancode::config::Config& config = config_result->config;
 
     // 兜底:JSON 编码、网络库内部等地方万一抛出没接住的异常,也不能让
     // 整个进程崩掉(崩掉的话用户只会看到一个莫名其妙的退出码)。
     try {
         if (!positional.empty()) {
-            return AskOnce(*config, positional, auto_confirm);
+            return AskOnce(config, positional, auto_confirm);
         }
-        InteractiveLoop(*config, auto_confirm);
+        InteractiveLoop(config, auto_confirm);
     } catch (const std::exception& e) {
         std::cerr << "[错误] 未预料的异常: " << e.what() << "\n";
         return 1;
