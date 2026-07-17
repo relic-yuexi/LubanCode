@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -18,6 +19,7 @@
 #include "api/anthropic/client.hpp"
 #include "api/backend.hpp"
 #include "api/responses/client.hpp"
+#include "cli/console_input.hpp"
 #include "config/config.hpp"
 #include "tools/edit_file.hpp"
 #include "tools/read_file.hpp"
@@ -44,7 +46,7 @@ void PrintHelp() {
               << "用法:\n"
               << "  lubancode [选项]\n"
               << "  lubancode \"问题\"          一次问答,能用工具就用工具\n"
-              << "  lubancode                  不带参数则进入交互循环,空行或 exit 退出\n\n"
+              << "  lubancode                  不带参数则进入交互循环,exit/quit 或 EOF(Ctrl+Z / 管道读尽)退出;空行只是重新给提示符,不退出\n\n"
               << "选项:\n"
               << "  --version   打印版本号\n"
               << "  --help      打印本帮助\n"
@@ -160,17 +162,16 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
             return true;
         }
         PrintConfirmDetails(name, input);
-        std::cout << "[y] 本次允许  [a] 本会话总是允许(该工具)  [N] 拒绝: ";
-        std::cout.flush();
-        std::string answer;
-        if (!std::getline(std::cin, answer)) {
-            return false;
+        const std::optional<std::string> answer =
+            lubancode::cli::ReadLine("[y] 本次允许  [a] 本会话总是允许(该工具)  [N] 拒绝: ");
+        if (!answer.has_value()) {
+            return false;  // 读到 EOF,按拒绝处理,不要在这儿卡住
         }
-        if (answer == "a" || answer == "A") {
+        if (*answer == "a" || *answer == "A") {
             always_allowed_tools.insert(name);
             return true;
         }
-        return answer == "y" || answer == "Y";
+        return *answer == "y" || *answer == "Y";
     };
 
     callbacks.on_tool_done = [](const std::string& name, const lubancode::tools::Tool::Result& result) {
@@ -200,27 +201,32 @@ int RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bo
     return 0;
 }
 
-// 没带参数时的交互循环:读一行、问一句,空行或 exit 退出。
+// 没带参数时的交互循环:读一行、问一句,exit/quit 或 EOF 退出。
+// 空行不退出——只是重新给一次提示符,继续等下一行(老规则"空行退出"跟
+// Windows 控制台偶发读空串的老毛病撞在一块,会把读空串误当成用户要退出,
+// 改成只认 exit/quit/EOF 才靠谱)。
 // AgentLoop 在循环外面建一次,历史跨轮保留;always_allowed_tools 同样在
 // 循环外面建一次,"本会话总是允许"才能真的跨多轮用户输入生效。
 void InteractiveLoop(const lubancode::config::Config& config, bool auto_confirm) {
-    std::cout << "lubancode " << kVersion << " - 输入问题回车发送,空行或 exit 退出\n";
+    std::cout << "lubancode " << kVersion << " - 输入问题回车发送,exit 退出\n";
 
     std::unique_ptr<lubancode::api::Backend> backend = BuildBackend(config);
     lubancode::tools::ToolRegistry registry = BuildToolRegistry();
     lubancode::agent::AgentLoop loop(*backend, registry, config.model, lubancode::agent::BuildSystemPrompt(CurrentDirUtf8()));
     std::set<std::string> always_allowed_tools;
 
-    std::string line;
     while (true) {
-        std::cout << "> ";
-        if (!std::getline(std::cin, line)) {
+        const std::optional<std::string> line = lubancode::cli::ReadLine("> ");
+        if (!line.has_value()) {
+            break;  // EOF:Ctrl+Z 或管道读尽
+        }
+        if (line->empty()) {
+            continue;  // 空行不退出,重新给提示符
+        }
+        if (*line == "exit" || *line == "quit") {
             break;
         }
-        if (line.empty() || line == "exit") {
-            break;
-        }
-        RunTurn(loop, line, auto_confirm, always_allowed_tools);
+        RunTurn(loop, *line, auto_confirm, always_allowed_tools);
     }
 }
 

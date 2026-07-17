@@ -142,7 +142,7 @@ target_include_directories(lubancode_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
 target_link_libraries(lubancode_core PUBLIC cpr::cpr nlohmann_json::nlohmann_json)
 target_compile_features(lubancode_core PUBLIC cxx_std_23)
 
-add_executable(lubancode src/main.cpp)
+add_executable(lubancode src/main.cpp src/cli/console_input.cpp)
 target_link_libraries(lubancode PRIVATE lubancode_core)
 target_compile_features(lubancode PRIVATE cxx_std_23)
 
