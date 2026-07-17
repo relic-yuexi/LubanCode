@@ -159,6 +159,7 @@ add_library(lubancode_core STATIC
   src/api/models.cpp
   src/config/config.cpp
   src/config/model_catalog.cpp
+  src/config/prompt_files.cpp
   src/tools/registry.cpp
   src/tools/read_file.cpp
   src/tools/run_command.cpp
