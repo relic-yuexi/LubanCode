@@ -24,6 +24,9 @@ enum class SlashCommand {
     Mcp,      // /mcp:列出挂载的 MCP 服务器状态、工具清单(M8)
     Todos,    // /todos:查看当前待办清单(M11/0.10.0)
     Plugins,  // /plugins:列出挂载的插件工具(DLL + lua)和加载警告(M7)
+    Sessions,  // /sessions:列最近的会话存档(0.13.x 会话存档与续聊)
+    Resume,    // /resume <编号或id>:载入某场存档历史续聊
+    Export,    // /export [路径]:当前会话导出 Markdown
     Unknown,  // 以 / 开头,但不认得这个命令
 };
 

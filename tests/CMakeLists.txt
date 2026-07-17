@@ -35,6 +35,7 @@ add_executable(lubancode_tests
   test_plugins.cpp
   test_web_fetch.cpp
   test_web_search.cpp
+  test_session_store.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_core doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)

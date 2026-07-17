@@ -71,6 +71,12 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Todos;
     } else if (lower == "/plugins") {
         parsed.command = SlashCommand::Plugins;
+    } else if (lower == "/sessions") {
+        parsed.command = SlashCommand::Sessions;
+    } else if (lower == "/resume") {
+        parsed.command = SlashCommand::Resume;
+    } else if (lower == "/export") {
+        parsed.command = SlashCommand::Export;
     } else {
         parsed.command = SlashCommand::Unknown;
     }
@@ -92,6 +98,9 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
         {"/mcp", "列出挂载的 MCP 服务器状态和工具清单"},
         {"/todos", "查看当前待办清单"},
         {"/plugins", "列出挂载的插件工具(DLL + lua)和加载警告"},
+        {"/sessions", "列最近 20 场会话存档,倒序编号"},
+        {"/resume", "/resume 编号或id 载入该场存档历史续聊"},
+        {"/export", "当前会话导出 Markdown;/export 路径 可指定输出文件"},
     };
     return kCommands;
 }

@@ -31,6 +31,7 @@
 #include "agent/compact.hpp"
 #include "agent/loop.hpp"
 #include "agent/prompts.hpp"
+#include "agent/session_store.hpp"
 #include "api/anthropic/client.hpp"
 #include "api/backend.hpp"
 #include "api/models.hpp"
@@ -93,6 +94,8 @@ void PrintHelp() {
         << "  --version              打印版本号\n"
         << "  --help                 打印本帮助\n"
         << "  --yes                  自动确认所有需要确认的工具调用(比如 run_command),不再逐条询问\n"
+        << "  --continue             交互模式启动时自动恢复最近一场会话存档(等价开场 /resume 最近一场);\n"
+        << "                         没有存档就正常开新会话\n"
         << "  --config               打印最终生效的配置(api_key 打码)和每个字段来自哪一级,排查配置问题用\n"
         << "  --system-prompt <文件> 用这个文件(.md/.txt,UTF-8)替换默认系统提示的人格段,工作目录、\n"
         << "                         工具调用这些运行必需的上下文照样追加,不受影响。压过配置文件里的\n"
@@ -113,6 +116,9 @@ void PrintHelp() {
         << "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
         << "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
         << "  /plugins        列出挂载的插件工具(主目录 .lubancode/plugins 下的 *.dll 和 *.lua)\n"
+        << "  /sessions       列最近 20 场会话存档(时间倒序编号)\n"
+        << "  /resume 编号或id  载入该场存档历史续聊\n"
+        << "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md)\n"
         << "  Shift+Enter     输入框里插一个换行,写多行消息(Alt+Enter 同义;注意 Windows Terminal\n"
         << "                  默认把 Alt+Enter 绑成全屏切换、会吞掉这个键,用 Shift+Enter 最稳);\n"
         << "                  Enter 把整段(多行拼换行)一次发出,空白内容按 Enter 原地不动\n"
@@ -1663,6 +1669,9 @@ void PrintSlashHelp() {
               << "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
               << "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
               << "  /plugins        列出挂载的插件工具(DLL + lua)和加载警告\n"
+              << "  /sessions       列最近 20 场会话存档(时间倒序编号)\n"
+              << "  /resume 编号或id  载入该场存档历史续聊,后续消息追加写回同一文件\n"
+              << "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md)\n"
               << "  /exit           退出(裸词 exit/quit 也认)\n"
               << "多行输入:Shift+Enter 插换行(Alt+Enter 同义,但 Windows Terminal 默认把它绑成全屏\n"
               << "切换、会吞掉,推荐 Shift+Enter);Enter 发送整段;多行时首行的 / 是正文,不当命令。\n";
@@ -1852,6 +1861,177 @@ void HandleModelCommand(const std::string& args, const lubancode::config::Config
     }
 }
 
+// ---------------------------------------------------------------------------
+// 会话存档与续聊(0.13.x):/sessions //resume //export 和 --continue 的
+// 执行逻辑。序列化/成对修补/导出全在 agent/session_store 里(纯函数),
+// 这里只做"接命令、找文件、打印"这层壳。
+// ---------------------------------------------------------------------------
+
+// /sessions:列最近 20 场(id、开始时间、首句摘要、消息数),时间倒序编号。
+void PrintSessionsCommand(const std::string& sessions_dir) {
+    if (sessions_dir.empty()) {
+        std::cout << "找不到用户主目录,会话存档不可用。\n";
+        return;
+    }
+    const auto entries = lubancode::agent::ListSessions(sessions_dir, 20);
+    if (entries.empty()) {
+        std::cout << "还没有会话存档(" << sessions_dir << " 下没有 .jsonl)。\n";
+        return;
+    }
+    std::cout << "最近 " << entries.size() << " 场会话(时间倒序;/resume 编号或id 续聊):\n";
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        const auto& entry = entries[i];
+        std::cout << "  " << (i + 1) << ") " << entry.id << "\n"
+                   << "      " << (entry.started_at.empty() ? "(开始时间未知)" : entry.started_at) << " · "
+                   << entry.message_count << " 条 · "
+                   << (entry.first_user_text.empty() ? "(没有用户文本)"
+                                                      : lubancode::agent::TruncateUtf8Chars(entry.first_user_text, 40))
+                   << "\n";
+    }
+}
+
+// /resume <编号或id> 和 --continue 共用的执行逻辑。target 是编号(按
+// ListSessions 的倒序编号)、会话 id、或空串(--continue:最近一场)。
+// 成功:反序列化 + 成对修补 + ReplaceHistory + 接管文件继续追加,返回 true。
+// quiet_if_none:--continue 找不到任何存档时不报错、安静开新会话。
+bool ResumeSession(const std::string& target, const std::string& sessions_dir,
+                    lubancode::agent::AgentLoop& loop, lubancode::agent::SessionStore& store,
+                    std::size_t& persisted_count, lubancode::agent::SessionMeta& session_meta,
+                    const std::string& wire_str, const std::string& current_model,
+                    const lubancode::cli::Theme& theme, bool quiet_if_none) {
+    if (sessions_dir.empty()) {
+        std::cout << "找不到用户主目录,会话存档不可用。\n";
+        return false;
+    }
+    const auto entries = lubancode::agent::ListSessions(sessions_dir, 20);
+
+    std::string id;
+    std::string file_path;
+    bool all_digits = !target.empty();
+    for (const char c : target) {
+        if (c < '0' || c > '9') {
+            all_digits = false;
+            break;
+        }
+    }
+    if (target.empty()) {
+        // --continue:最近一场;一场都没有就按 quiet_if_none 处理。
+        if (entries.empty()) {
+            if (!quiet_if_none) {
+                std::cout << "还没有会话存档,没什么可恢复。\n";
+            }
+            return false;
+        }
+        id = entries.front().id;
+        file_path = entries.front().file_path;
+    } else if (all_digits) {
+        std::size_t n = 0;
+        try {
+            n = static_cast<std::size_t>(std::stoul(target));
+        } catch (...) {
+            n = 0;
+        }
+        if (n < 1 || n > entries.size()) {
+            std::cout << "编号 " << target << " 超出范围(现有 " << entries.size() << " 场,/sessions 看列表)。\n";
+            return false;
+        }
+        id = entries[n - 1].id;
+        file_path = entries[n - 1].file_path;
+    } else {
+        // 按 id 找:先在列表里对,不在(比 20 场更老)就直接拼路径试。
+        for (const auto& entry : entries) {
+            if (entry.id == target) {
+                id = entry.id;
+                file_path = entry.file_path;
+                break;
+            }
+        }
+        if (id.empty()) {
+            id = target;
+            file_path = sessions_dir + "/" + target + ".jsonl";
+        }
+    }
+
+    const auto content = lubancode::agent::ReadSessionFileBytes(file_path);
+    if (!content.has_value()) {
+        std::cout << "读不到存档 " << file_path << "。\n";
+        return false;
+    }
+    auto session = lubancode::agent::ParseSessionFile(*content);
+    if (!session.has_value()) {
+        std::cout << "存档 " << file_path << " 首行不是合法 meta,认不得这个格式。\n";
+        return false;
+    }
+
+    loop.ReplaceHistory(session->messages);
+    persisted_count = session->messages.size();
+    if (!store.ResumeAt(file_path, id)) {
+        std::cout << theme.error << "[会话存档] 接管 " << file_path << " 失败,恢复的历史只在内存里,本场不再落盘。"
+                   << theme.reset << "\n";
+    }
+    session_meta = session->meta;
+
+    std::cout << "已恢复 " << id << "," << session->messages.size() << " 条消息";
+    if (session->repaired > 0) {
+        std::cout << "(补了 " << session->repaired << " 条缺失的工具结果)";
+    }
+    if (session->skipped_lines > 0) {
+        std::cout << "(跳过 " << session->skipped_lines << " 行解析不动的存档)";
+    }
+    std::cout << "。\n";
+    // context 记账:真实 usage 得等恢复后第一次请求才校准,这里先按字符
+    // 粗估打一行,心里有数。
+    std::cout << "上下文占用(按字符粗估): ~"
+               << EstimateTokens(EstimateHistoryChars(session->messages)) << " tokens,首轮请求后以真实用量为准。\n";
+    if (!session->meta.model.empty() && session->meta.model != current_model) {
+        std::cout << theme.stats << "[提醒] 存档时用的 model 是 " << session->meta.model << ",当前是 "
+                   << current_model << ",继续聊没问题,风格可能有差。" << theme.reset << "\n";
+    }
+    if (!session->meta.wire.empty() && session->meta.wire != wire_str) {
+        std::cout << theme.stats << "[提醒] 存档时用的 wire 是 " << session->meta.wire << ",当前是 " << wire_str
+                   << "。" << theme.reset << "\n";
+    }
+    return true;
+}
+
+// /export [路径]:当前会话(内存里的这份历史,恢复/修补过的就是修补后的)
+// 导出 Markdown,默认写 sessions/<id>.md。
+void HandleExportCommand(const std::string& args, const lubancode::agent::AgentLoop& loop,
+                          const lubancode::agent::SessionStore& store, const std::string& sessions_dir,
+                          const lubancode::agent::SessionMeta& session_meta) {
+    const auto& history = loop.History();
+    if (history.empty()) {
+        std::cout << "当前会话还没有内容,没什么可导出。\n";
+        return;
+    }
+    const std::string id =
+        !store.session_id().empty() ? store.session_id() : lubancode::agent::NowIdTimestamp() + "-export";
+    std::string out_path = args;
+    if (out_path.empty()) {
+        if (sessions_dir.empty()) {
+            std::cout << "找不到用户主目录,请显式给个路径:/export 路径\n";
+            return;
+        }
+        out_path = sessions_dir + "/" + id + ".md";
+    }
+    const std::string markdown = lubancode::agent::ExportSessionMarkdown(session_meta, history, id);
+
+    const std::filesystem::path path(
+        std::u8string(reinterpret_cast<const char8_t*>(out_path.data()), out_path.size()));
+    std::error_code ec;
+    if (path.has_parent_path()) {
+        std::filesystem::create_directories(path.parent_path(), ec);
+    }
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file.is_open()) {
+        std::cout << "写不进 " << out_path << "。\n";
+        return;
+    }
+    file << markdown;
+    file.close();
+    std::cout << "已导出 Markdown: " << out_path << "\n";
+}
+
 // 没带参数时的交互循环:读一行、问一句,exit/quit 或 EOF 退出。
 // 空行不退出——只是重新给一次提示符,继续等下一行(老规则"空行退出"跟
 // Windows 控制台偶发读空串的老毛病撞在一块,会把读空串误当成用户要退出,
@@ -1867,8 +2047,11 @@ void HandleModelCommand(const std::string& args, const lubancode::config::Config
 // 真正"这一刻发请求用哪个 model"的会话级状态,两者可能因为 /model 切换而
 // 不一致——ModelOverrideBackend 在真正发请求前把 Request.model 换成
 // *current_model,这样 /model 切换才能不碰 agent/loop.hpp/.cpp 就真正生效。
+// continue_last:--continue 启动参数,进循环前先自动 /resume 最近一场;
+// 一场存档都没有就正常开新会话,不报错。
 void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_confirm,
-                      const lubancode::cli::Theme& theme, const std::string& persona, bool spinner_enabled) {
+                      const lubancode::cli::Theme& theme, const std::string& persona, bool spinner_enabled,
+                      bool continue_last = false) {
     const lubancode::config::Config& config = config_result.config;
 
     // M9:技能扫描一次,主代理、子代理、系统提示词、/skills 命令共用同一份
@@ -1947,6 +2130,79 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     std::set<std::string> always_allowed_tools;
     std::optional<std::string> config_file_path = config_result.config_file_path;
 
+    // -----------------------------------------------------------------------
+    // 会话存档(0.13.x):每轮结束把 history 里新增的消息逐条追加写
+    // <主目录>/.lubancode/sessions/<会话id>.jsonl。文件在首条用户消息落地时
+    // 才建(会话 id 的 slug 要用它),此前只记一个启动时间戳。找不到主目录
+    // (sessions_dir 空)或建档失败,打一行警告后本场闭嘴,不拦着人聊。
+    // 单发模式(AskOnce)不走这里,天然不落盘。
+    // -----------------------------------------------------------------------
+    const std::string wire_str = config.wire == lubancode::config::Wire::Responses ? "responses" : "anthropic";
+    const auto home_lubancode = lubancode::config::HomeLubancodeDir();
+    const std::string sessions_dir =
+        home_lubancode.has_value() ? (*home_lubancode + "/sessions") : std::string();
+    lubancode::agent::SessionStore session_store(sessions_dir);
+    lubancode::agent::SessionMeta session_meta;  // /export 用;Begin/resume 时填
+    std::string session_start_ts = lubancode::agent::NowIdTimestamp();
+    std::size_t persisted_count = 0;   // history 里前多少条已经落过盘
+    bool session_store_broken = false;  // 建档失败过,别每轮都再撞一次
+
+    // 把 history 里 persisted_count 之后的消息逐条追加落盘(append+flush,
+    // 崩溃安全)。history 被 ReplaceHistory 换短(/compact)的场合由调用处
+    // 先把 persisted_count 收到新长度,这里只管"只增不减"的常态。
+    const auto persist_new_messages = [&]() {
+        if (sessions_dir.empty() || session_store_broken) {
+            return;
+        }
+        const auto& history = loop->History();
+        if (history.size() <= persisted_count) {
+            return;
+        }
+        if (!session_store.active()) {
+            // 首条用户消息的第一段文本做 slug。
+            std::string first_text;
+            for (const auto& message : history) {
+                if (message.role != lubancode::api::Role::User) {
+                    continue;
+                }
+                for (const auto& block : message.content) {
+                    if (const auto* tb = std::get_if<lubancode::api::TextBlock>(&block)) {
+                        first_text = tb->text;
+                        break;
+                    }
+                }
+                break;
+            }
+            session_meta = lubancode::agent::SessionMeta{};
+            session_meta.wire = wire_str;
+            session_meta.model = *current_model;
+            session_meta.cwd = CurrentDirUtf8();
+            session_meta.started_at = lubancode::agent::NowTimestamp();
+            if (!session_store.Begin(session_meta,
+                                      lubancode::agent::MakeSessionId(session_start_ts, first_text))) {
+                session_store_broken = true;
+                std::cout << theme.error << "[会话存档] 在 " << sessions_dir
+                           << " 建档失败,本场对话不落盘(不影响继续聊)。" << theme.reset << "\n";
+                return;
+            }
+        }
+        for (std::size_t i = persisted_count; i < history.size(); ++i) {
+            if (!session_store.AppendMessage(history[i])) {
+                session_store_broken = true;
+                std::cout << theme.error << "[会话存档] 追加写入失败,后续不再落盘(不影响继续聊)。"
+                           << theme.reset << "\n";
+                return;
+            }
+        }
+        persisted_count = history.size();
+    };
+
+    // --continue:等价开场自动 /resume 最近一场;没有存档就安静开新会话。
+    if (continue_last) {
+        ResumeSession("", sessions_dir, *loop, session_store, persisted_count, session_meta, wire_str,
+                       *current_model, theme, /*quiet_if_none=*/true);
+    }
+
     // M10:排队消息队列——某一轮流式期间(RunTurn 内 TurnInputListener 存活
     // 那段窗口)敲了字回车,不会打断当前流,落进这里;本轮结束后逐条自动
     // 发出(包括 slash 命令),打法跟手输一模一样:打一行 "> <内容>" 再走
@@ -1974,6 +2230,12 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     break;
                 case lubancode::cli::SlashCommand::Clear:
                     rebuild_loop();
+                    // 存档跟着翻篇:旧文件留在磁盘上,新会话下一条消息另起
+                    // 一份新文件(id 用新的时间戳)。
+                    session_store.Reset();
+                    session_start_ts = lubancode::agent::NowIdTimestamp();
+                    persisted_count = 0;
+                    session_store_broken = false;
                     std::cout << "已清空对话历史。\n";
                     break;
                 case lubancode::cli::SlashCommand::Context:
@@ -1982,6 +2244,10 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                 case lubancode::cli::SlashCommand::Compact: {
                     const std::string compact_model = config.compact_model.empty() ? *current_model : config.compact_model;
                     HandleCompactCommand(parsed.args, *loop, *real_backend, compact_model, theme, spinner_enabled);
+                    // 压缩把 history 换短了(失败则原样):落盘基线收到新长度,
+                    // 存档文件保持只追加——文件里是压缩前的全量流水,续聊的
+                    // 新消息接着往后写,/resume 载入的是全量,不丢内容。
+                    persisted_count = (std::min)(persisted_count, loop->History().size());
                     break;
                 }
                 case lubancode::cli::SlashCommand::Think:
@@ -1998,6 +2264,21 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     break;
                 case lubancode::cli::SlashCommand::Plugins:
                     PrintPluginsCommand(plugin_mounted, plugin_warnings);
+                    break;
+                case lubancode::cli::SlashCommand::Sessions:
+                    PrintSessionsCommand(sessions_dir);
+                    break;
+                case lubancode::cli::SlashCommand::Resume:
+                    if (parsed.args.empty()) {
+                        std::cout << "用法:/resume 编号或id(/sessions 看列表)\n";
+                    } else {
+                        ResumeSession(parsed.args, sessions_dir, *loop, session_store, persisted_count,
+                                       session_meta, wire_str, *current_model, theme, /*quiet_if_none=*/false);
+                        session_store_broken = false;  // 换了场,存档失败的旧账翻篇
+                    }
+                    break;
+                case lubancode::cli::SlashCommand::Export:
+                    HandleExportCommand(parsed.args, *loop, session_store, sessions_dir, session_meta);
                     break;
                 case lubancode::cli::SlashCommand::Exit:
                     return false;
@@ -2021,6 +2302,8 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
             spinner.Stop();
             if (compact_result.has_value()) {
                 loop->ReplaceHistory(lubancode::agent::BuildCompactedHistory(loop->History(), *compact_result));
+                // 落盘基线收到新长度,理由同 /compact 分支。
+                persisted_count = (std::min)(persisted_count, loop->History().size());
                 std::cout << "[compact] 自动压缩完成。\n";
             } else {
                 std::cout << theme.error << "[compact] 自动压缩失败: " << compact_result.error().message
@@ -2031,6 +2314,8 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         const RunTurnResult turn_result =
             RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry,
                     config.hooks, spinner_enabled, transcript, todo_state);
+        // 每轮结束(成功/出错/ESC 打断都算)把新增消息逐条追加落盘。
+        persist_new_messages();
         for (auto& queued : turn_result.queued_lines) {
             pending_queue.push_back(std::move(queued));
         }
@@ -2161,9 +2446,14 @@ int RunCli(const std::vector<std::string>& args) {
     std::string positional;
     bool auto_confirm = false;
     bool print_config = false;
+    bool continue_last = false;
     std::string system_prompt_file_arg;
     for (std::size_t i = 1; i < args.size(); ++i) {
         const std::string& arg = args[i];
+        if (arg == "--continue") {
+            continue_last = true;
+            continue;
+        }
         if (arg == "--version") {
             PrintVersion();
             return 0;
@@ -2286,7 +2576,7 @@ int RunCli(const std::vector<std::string>& args) {
             effective.sources.auth_token = marked;
             effective.sources.model = marked;
         }
-        InteractiveLoop(effective, auto_confirm, theme, persona, spinner_enabled);
+        InteractiveLoop(effective, auto_confirm, theme, persona, spinner_enabled, continue_last);
     } catch (const std::exception& e) {
         std::cerr << "[错误] 未预料的异常: " << e.what() << "\n";
         return 1;
