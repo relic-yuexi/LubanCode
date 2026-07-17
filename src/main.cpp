@@ -81,7 +81,7 @@
 
 namespace {
 
-constexpr std::string_view kVersion = "0.17.0";
+constexpr std::string_view kVersion = "0.18.0";
 
 void PrintVersion() {
     std::cout << "lubancode " << kVersion << "\n";
@@ -361,37 +361,27 @@ void PrintToolsCommand(const lubancode::tools::ToolRegistry& registry, const std
         std::cout << "工具共 " << registry.All().size() << " 个,"
                    << (threshold == 0 ? std::string("阈值 0(永不延迟)")
                                        : "低于阈值 " + std::to_string(threshold))
-                   << ",全量直挂,tool_search 延迟机制未启用。
-";
+                   << ",全量直挂,tool_search 延迟机制未启用。\n";
         for (const auto& tool : registry.All()) {
-            std::cout << "  - " << tool->name() << "
-";
+            std::cout << "  - " << tool->name() << "\n";
         }
         return;
     }
-    std::cout << "tool_search 延迟挂载已启用(阈值 " << threshold << ",loaded 集合会话级,/clear 不清)。
-";
-    std::cout << "核心工具(恒在)" << core.size() << " 个:
-";
+    std::cout << "tool_search 延迟挂载已启用(阈值 " << threshold << ",loaded 集合会话级,/clear 不清)。\n";
+    std::cout << "核心工具(恒在)" << core.size() << " 个:\n";
     for (const auto* tool : core) {
-        std::cout << "  - " << tool->name() << "
-";
+        std::cout << "  - " << tool->name() << "\n";
     }
-    std::cout << "已加载的延迟工具 " << loaded_deferred.size() << " 个:
-";
+    std::cout << "已加载的延迟工具 " << loaded_deferred.size() << " 个:\n";
     for (const auto* tool : loaded_deferred) {
-        std::cout << "  - " << tool->name() << "
-";
+        std::cout << "  - " << tool->name() << "\n";
     }
     if (loaded_deferred.empty()) {
-        std::cout << "  (还没有,模型用 tool_search 命中后会出现在这里)
-";
+        std::cout << "  (还没有,模型用 tool_search 命中后会出现在这里)\n";
     }
-    std::cout << "延迟未加载 " << pending_deferred.size() << " 个(在系统提示索引段里,检索后挂载):
-";
+    std::cout << "延迟未加载 " << pending_deferred.size() << " 个(在系统提示索引段里,检索后挂载):\n";
     for (const auto* tool : pending_deferred) {
-        std::cout << "  - " << tool->name() << "
-";
+        std::cout << "  - " << tool->name() << "\n";
     }
 }
 
