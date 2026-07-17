@@ -10,6 +10,8 @@
 #include <fstream>
 #include <string>
 
+#include <nlohmann/json.hpp>
+
 #include "config/config.hpp"
 
 using namespace lubancode;
@@ -1011,4 +1013,79 @@ TEST_CASE("MigrateConfigFileIfNeeded: 建目录、搬文件之后,内容能正�
     CHECK(*parsed->base_url == "https://example.com");
     REQUIRE(parsed->api_key.has_value());
     CHECK(*parsed->api_key == "sk-migrate-test");
+}
+
+// ---------------------------------------------------------------------------
+// websearch:search 段解析 + 合并。只从配置文件来,没配就是空的
+// (Configured()=false,web_search 工具不注册)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseSearchConfig: provider + api_key 齐活,三家都认") {
+    for (const std::string provider : {"tavily", "brave", "serper"}) {
+        nlohmann::json j = {{"provider", provider}, {"api_key", "sk-search-test"}};
+        const auto result = config::ParseSearchConfig(j, "/tmp/config.json");
+        REQUIRE(result.has_value());
+        CHECK(result->provider == provider);
+        CHECK(result->api_key == "sk-search-test");
+        CHECK(result->Configured());
+    }
+}
+
+TEST_CASE("ParseSearchConfig: 不是 object 报错") {
+    const auto result = config::ParseSearchConfig(nlohmann::json("tavily"), "/tmp/config.json");
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().find("search") != std::string::npos);
+}
+
+TEST_CASE("ParseSearchConfig: provider 不认识报错,错误信息带文件路径") {
+    nlohmann::json j = {{"provider", "bing"}, {"api_key", "k"}};
+    const auto result = config::ParseSearchConfig(j, "/home/u/.lubancode/config.json");
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().find("bing") != std::string::npos);
+    CHECK(result.error().find("/home/u/.lubancode/config.json") != std::string::npos);
+}
+
+TEST_CASE("ParseSearchConfig: 缺 provider / 缺 api_key / api_key 空串,都报错") {
+    CHECK_FALSE(config::ParseSearchConfig(nlohmann::json{{"api_key", "k"}}, "p").has_value());
+    CHECK_FALSE(config::ParseSearchConfig(nlohmann::json{{"provider", "tavily"}}, "p").has_value());
+    CHECK_FALSE(
+        config::ParseSearchConfig(nlohmann::json{{"provider", "tavily"}, {"api_key", ""}}, "p").has_value());
+}
+
+TEST_CASE("ParseFileConfigJson: search 段解出来,缺省是 nullopt") {
+    const auto with_search = config::ParseFileConfigJson(
+        R"({"search": {"provider": "brave", "api_key": "sk-b"}})", "/tmp/config.json");
+    REQUIRE(with_search.has_value());
+    REQUIRE(with_search->search.has_value());
+    CHECK(with_search->search->provider == "brave");
+    CHECK(with_search->search->api_key == "sk-b");
+
+    const auto without = config::ParseFileConfigJson("{}", "/tmp/config.json");
+    REQUIRE(without.has_value());
+    CHECK_FALSE(without->search.has_value());
+}
+
+TEST_CASE("ParseFileConfigJson: search 段坏了,整个文件解析报错") {
+    const auto result = config::ParseFileConfigJson(
+        R"({"search": {"provider": "nope", "api_key": "k"}})", "/tmp/config.json");
+    CHECK_FALSE(result.has_value());
+}
+
+TEST_CASE("MergeConfig: 配置文件里的 search 段原样进最终配置;没写就是未配置") {
+    config::FileConfig file;
+    file.source_path = "/tmp/config.json";
+    config::SearchConfig search;
+    search.provider = "serper";
+    search.api_key = "sk-s";
+    file.search = search;
+
+    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE(merged.has_value());
+    CHECK(merged->config.search.provider == "serper");
+    CHECK(merged->config.search.api_key == "sk-s");
+    CHECK(merged->config.search.Configured());
+
+    const auto merged_empty = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    REQUIRE(merged_empty.has_value());
+    CHECK_FALSE(merged_empty->config.search.Configured());
 }
