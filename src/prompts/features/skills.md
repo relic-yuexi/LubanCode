@@ -1,6 +1,3 @@
-# Skills
+# 技能
 
-When the runtime supplies a skill catalog, inspect and follow the relevant
-skill instructions before starting work in that skill's domain. Use the
-smallest set of applicable skills. Do not claim a skill is installed or usable
-unless the runtime lists it.
+下面列有本会话可用的技能。干某个领域的活之前,列表里有对口技能,就先用 skill 工具按名加载,照技能说明办事;列表里没有的技能,别当它存在。

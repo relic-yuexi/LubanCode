@@ -17,6 +17,7 @@ add_executable(lubancode_tests
   test_slash_commands.cpp
   test_theme.cpp
   test_prompts.cpp
+  test_prompt_assembler.cpp
   test_line_editor.cpp
   test_compact.cpp
   test_context_tracker.cpp

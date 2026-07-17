@@ -140,6 +140,30 @@ if(MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
+# 提示词模块编译期嵌入(0.19.x):src/prompts/{core,features,platforms}/*.md
+# 构建期由 cmake/embed_prompts.cmake 生成 <build>/generated/embedded_prompts.hpp
+# (每个模块一个 constexpr 常量),prompt_assembler.cpp 引用它做运行时条件
+# 拼装。选 add_custom_command(构建期)而不是 configure 期 file(READ):
+# .md 改一字,时间戳就能触发重生成 + 重编,不必重新 configure;新增/删除
+# .md 靠 GLOB 的 CONFIGURE_DEPENDS 自动重新 configure 补上依赖清单。
+# ---------------------------------------------------------------------------
+set(_lubancode_prompts_dir "${CMAKE_CURRENT_SOURCE_DIR}/src/prompts")
+set(_lubancode_embedded_prompts "${CMAKE_BINARY_DIR}/generated/embedded_prompts.hpp")
+file(GLOB _lubancode_prompt_modules CONFIGURE_DEPENDS
+  "${_lubancode_prompts_dir}/core/*.md"
+  "${_lubancode_prompts_dir}/features/*.md"
+  "${_lubancode_prompts_dir}/platforms/*.md")
+add_custom_command(
+  OUTPUT "${_lubancode_embedded_prompts}"
+  COMMAND ${CMAKE_COMMAND}
+          -DPROMPTS_DIR=${_lubancode_prompts_dir}
+          -DOUTPUT=${_lubancode_embedded_prompts}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_prompts.cmake
+  DEPENDS ${_lubancode_prompt_modules} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_prompts.cmake
+  COMMENT "lubancode: 生成 embedded_prompts.hpp(提示词模块编译期嵌入)"
+  VERBATIM)
+
+# ---------------------------------------------------------------------------
 # 核心库:api / config 这些不碰命令行交互的代码,单独编成静态库,
 # 好让可执行文件和测试程序都能链接同一份实现,不用测试再编一遍。
 # cli/setup_wizard.cpp、cli/slash_commands.cpp、cli/line_editor.cpp 虽然在
@@ -185,6 +209,8 @@ add_library(lubancode_core STATIC
   src/lsp/manager.cpp
   src/tools/lsp_tool.cpp
   src/agent/loop.cpp
+  src/agent/prompt_assembler.cpp
+  "${_lubancode_embedded_prompts}"
   src/agent/context.cpp
   src/agent/compact.cpp
   src/agent/session_store.cpp
@@ -202,7 +228,8 @@ add_library(lubancode_core STATIC
 )
 target_include_directories(lubancode_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
-  ${CMAKE_CURRENT_SOURCE_DIR}/include)  # M7:C ABI 插件对外头文件 luban_plugin.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include   # M7:C ABI 插件对外头文件 luban_plugin.h
+  ${CMAKE_BINARY_DIR}/generated)        # 0.19.x:embedded_prompts.hpp(提示词嵌入)
 target_link_libraries(lubancode_core PUBLIC cpr::cpr nlohmann_json::nlohmann_json)
 target_link_libraries(lubancode_core PRIVATE lubancode_lua)  # M7:Lua 插件运行时
 target_compile_features(lubancode_core PUBLIC cxx_std_23)

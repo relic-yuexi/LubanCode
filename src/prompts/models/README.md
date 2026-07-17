@@ -1,16 +1,8 @@
-# Model Modules
+# 模型模块(故意留空)
 
-Add a model module only after testing a real difference. Its path is
-`models/<platform>/<model>.md`.
+模型专属指令不放这儿。模型身份、模型专属提示走 `~/.lubancode/models.json` 目录里
+`base_instructions` 字段,随当前模型注入系统提示(`src/agent/prompts.hpp` 的
+`WithModelInstructions`),`/model` 切换即换。
 
-Examples:
-
-```text
-models/openai/gpt-5.md
-models/minimax/MiniMax-M3.md
-models/qwen/qwen3-coder.md
-```
-
-Keep each module narrow: output quirks, verified tool-call limits, or a
-model-specific workaround. Do not repeat core safety, general style, or
-provider-wide rules.
+要给某个模型写专属提示,改 models.json,别往这个目录添文件——本目录的 .md
+不参与编译期嵌入(嵌入脚本只认 core/、features/、platforms/ 三处)。

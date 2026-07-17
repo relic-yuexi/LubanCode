@@ -3050,6 +3050,18 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         ~UiHandlerGuard() { lubancode::cli::SetTranscriptUiHandler(nullptr); }
     } ui_handler_guard;
 
+    // 0.19.x 提示词模块化:系统提示按会话实际启用的能力条件拼装——
+    // skills 有技能才注、mcp/web/lsp 配了才注、平台段按 wire。法(persona)
+    // 非空时 core 模块让位,环境/features 段照拼。
+    lubancode::agent::PromptOptions prompt_options;
+    prompt_options.cwd = CurrentDirUtf8();
+    prompt_options.persona = persona;
+    prompt_options.skills_segment = skills_segment;
+    prompt_options.mcp = !config.mcp_servers.empty();
+    prompt_options.web = config.search.Configured();
+    prompt_options.lsp = !config.lsp_servers.empty();
+    prompt_options.wire = config.wire == lubancode::config::Wire::Responses ? "responses" : "anthropic";
+
     std::optional<lubancode::agent::AgentLoop> loop;
     const auto rebuild_loop = [&]() {
         // max_tokens=4096、max_turns=25 是 AgentLoop 自己的默认值,这里显式
@@ -3058,7 +3070,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         // 透传);/clear 重建后过滤谓词要重新灌一遍——loaded 集合不清,
         // 已挂载的工具跨 /clear 仍然可用。
         loop.emplace(index_backend, registry, config.model,
-                     lubancode::agent::BuildSystemPrompt(CurrentDirUtf8(), persona, skills_segment),
+                     lubancode::agent::AssembleSystemPrompt(prompt_options),
                      /*max_tokens=*/4096, /*max_turns=*/25, config.max_context_chars);
         if (main_deferral) {
             loop->SetToolFilter(tool_filter);
@@ -3464,11 +3476,22 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
                                   : std::string();
         });
 
+    // 0.19.x 提示词模块化:跟 InteractiveLoop 同一套条件拼装(skills 有才注、
+    // mcp/web/lsp 配了才注、平台段按 wire),发出去的结构两种模式一模一样。
+    lubancode::agent::PromptOptions prompt_options;
+    prompt_options.cwd = CurrentDirUtf8();
+    prompt_options.persona = persona;
+    prompt_options.skills_segment = skills_segment;
+    prompt_options.mcp = !config.mcp_servers.empty();
+    prompt_options.web = config.search.Configured();
+    prompt_options.lsp = !config.lsp_servers.empty();
+    prompt_options.wire = config.wire == lubancode::config::Wire::Responses ? "responses" : "anthropic";
+
     lubancode::agent::AgentLoop loop(
         index_backend, registry, config.model,
         lubancode::agent::WithSoul(
             lubancode::agent::WithModelInstructions(
-                lubancode::agent::BuildSystemPrompt(CurrentDirUtf8(), persona, skills_segment), model_instructions),
+                lubancode::agent::AssembleSystemPrompt(prompt_options), model_instructions),
             soul_content),
         /*max_tokens=*/4096, /*max_turns=*/25, config.max_context_chars);
     if (main_deferral) {
@@ -3612,7 +3635,7 @@ int RunCli(const std::vector<std::string>& args) {
     const std::string effective_prompt_file =
         !system_prompt_file_arg.empty() ? system_prompt_file_arg : config_result->config.system_prompt_file;
     std::string persona;
-    std::string law_source = "内置默认(DefaultPersona)";  // /prompt 裸敲展示用
+    std::string law_source = "内置默认(编译期嵌入的 core 模块)";  // /prompt 裸敲展示用
     if (!effective_prompt_file.empty()) {
         const auto persona_result = lubancode::config::ReadSystemPromptFile(effective_prompt_file);
         if (!persona_result.has_value()) {
