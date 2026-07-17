@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(lubancode VERSION 0.11.0 LANGUAGES CXX)
+project(lubancode VERSION 0.12.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -160,6 +160,7 @@ add_library(lubancode_core STATIC
   src/cli/context_tracker.cpp
   src/cli/divider.cpp
   src/cli/todo_render.cpp
+  src/cli/transcript.cpp
 )
 target_include_directories(lubancode_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(lubancode_core PUBLIC cpr::cpr nlohmann_json::nlohmann_json)

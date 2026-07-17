@@ -1,0 +1,275 @@
+// UI-B(0.12.0):工具条目化渲染的纯函数单测——FormatTranscriptItem 的
+// 五种状态 × 彩色/plain、超宽截断、多行摘要缩进、子代理条目缩进,以及
+// 各工具的参数摘要(BuildToolTitle)和结果摘要(run_command 退出码+耗时、
+// write/edit 的 +N -M、错误前 5 行截断……)生成逻辑。
+
+#include <doctest/doctest.h>
+
+#include <string>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+
+#include "cli/theme.hpp"
+#include "cli/transcript.hpp"
+
+using lubancode::cli::AgentDoneSummary;
+using lubancode::cli::BuildToolTitle;
+using lubancode::cli::BuiltinTheme;
+using lubancode::cli::CountLines;
+using lubancode::cli::ErrorSummaryLines;
+using lubancode::cli::FormatTranscriptItem;
+using lubancode::cli::ParseRunCommandExitCode;
+using lubancode::cli::ReadFileDoneSummary;
+using lubancode::cli::RunCommandDoneSummary;
+using lubancode::cli::SearchDoneSummary;
+using lubancode::cli::TranscriptItem;
+using lubancode::cli::TranscriptKind;
+using lubancode::cli::TranscriptStatus;
+using lubancode::cli::TranscriptStatusWord;
+using lubancode::cli::TruncateUtf8Bytes;
+using lubancode::cli::TruncateUtf8Codepoints;
+using lubancode::cli::WriteDiffSummary;
+
+namespace {
+
+constexpr const char* kDot = "\xE2\x97\x8F";    // ●
+constexpr const char* kElbow = "\xE2\x8E\xBF";  // ⎿
+
+TranscriptItem MakeItem(TranscriptStatus status, TranscriptKind kind = TranscriptKind::Tool) {
+    TranscriptItem item;
+    item.id = 1;
+    item.kind = kind;
+    item.tool_name = "run_command";
+    item.title = "run_command(git log --oneline -3)";
+    item.summary_lines = {"Done · 退出码 0 · 1.2s"};
+    item.status = status;
+    return item;
+}
+
+}  // namespace
+
+// ---- FormatTranscriptItem:五种状态 × 彩色/plain ---------------------------
+
+TEST_CASE("FormatTranscriptItem: plain 主题下五种状态各自的文字状态灯") {
+    const auto theme = BuiltinTheme("plain");
+    const struct {
+        TranscriptStatus status;
+        const char* word;
+    } cases[] = {
+        {TranscriptStatus::Running, "[RUNNING]"},   {TranscriptStatus::Ok, "[OK]"},
+        {TranscriptStatus::Error, "[ERROR]"},       {TranscriptStatus::Cancelled, "[CANCELLED]"},
+        {TranscriptStatus::Interrupted, "[INTERRUPTED]"},
+    };
+    for (const auto& c : cases) {
+        const std::string out = FormatTranscriptItem(MakeItem(c.status), theme, 120);
+        CHECK(out.find(c.word) == 0);  // 状态词在行首
+        CHECK(out.find("run_command(git log --oneline -3)") != std::string::npos);
+        CHECK(out.find("\x1b") == std::string::npos);  // plain 不夹任何 ANSI
+        CHECK(out.find(kDot) == std::string::npos);    // plain 不用 ● 字符
+    }
+    // 待确认态(plain)是 [CONFIRM]
+    const std::string pending = FormatTranscriptItem(MakeItem(TranscriptStatus::Pending), theme, 120);
+    CHECK(pending.find("[CONFIRM]") == 0);
+    CHECK(TranscriptStatusWord(TranscriptStatus::Pending) == "[CONFIRM]");
+}
+
+TEST_CASE("FormatTranscriptItem: 彩色主题只染状态灯,正文参数不染色") {
+    const auto theme = BuiltinTheme("dark");
+    const struct {
+        TranscriptStatus status;
+        std::string color;
+    } cases[] = {
+        {TranscriptStatus::Running, theme.tool_line},           // 执行中:黄
+        {TranscriptStatus::Pending, theme.tool_line},           // 待确认:黄
+        {TranscriptStatus::Ok, theme.prompt},                   // 成功:绿
+        {TranscriptStatus::Error, theme.error},                 // 失败:红
+        {TranscriptStatus::Cancelled, theme.stats},             // 拒绝:灰
+        {TranscriptStatus::Interrupted, "\x1b[2m" + theme.tool_line},  // 打断:灰黄(dim + 黄)
+    };
+    for (const auto& c : cases) {
+        const std::string out = FormatTranscriptItem(MakeItem(c.status), theme, 120);
+        // 状态灯:颜色 + ● + reset,紧跟一个空格,然后是不着色的正文
+        const std::string light = c.color + kDot + theme.reset + " ";
+        CHECK(out.find(light) == 0);
+        // 正文(工具名)出现在 reset 之后——只染灯,不染参数
+        CHECK(out.find("run_command(git log --oneline -3)") > out.find(theme.reset));
+    }
+}
+
+TEST_CASE("FormatTranscriptItem: 摘要行缩进——⎿ 开头,续行再缩两空格") {
+    const auto theme = BuiltinTheme("plain");
+    TranscriptItem item = MakeItem(TranscriptStatus::Error);
+    item.summary_lines = {"Error: 服务器未响应(超时 30s)", "连接在 tools/call 后关闭"};
+    const std::string out = FormatTranscriptItem(item, theme, 120);
+    CHECK(out.find("\n  " + std::string(kElbow) + " Error: 服务器未响应(超时 30s)\n") != std::string::npos);
+    CHECK(out.find("\n    连接在 tools/call 后关闭\n") != std::string::npos);
+}
+
+TEST_CASE("FormatTranscriptItem: 子代理条目整体再缩四空格") {
+    const auto theme = BuiltinTheme("plain");
+    TranscriptItem item = MakeItem(TranscriptStatus::Ok, TranscriptKind::SubTool);
+    item.summary_lines = {"读取 12 行", "第二行"};
+    const std::string out = FormatTranscriptItem(item, theme, 120);
+    CHECK(out.find("    [OK] ") == 0);
+    CHECK(out.find("\n      " + std::string(kElbow) + " 读取 12 行\n") != std::string::npos);
+    CHECK(out.find("\n        第二行\n") != std::string::npos);
+}
+
+TEST_CASE("FormatTranscriptItem: 首行超宽按终端宽截断加 ...") {
+    const auto theme = BuiltinTheme("plain");
+    TranscriptItem item = MakeItem(TranscriptStatus::Ok);
+    item.title = "run_command(" + std::string(200, 'x') + ")";
+    const int width = 40;
+    const std::string out = FormatTranscriptItem(item, theme, width);
+    const std::string first_line = out.substr(0, out.find('\n'));
+    CHECK(first_line.size() <= static_cast<std::size_t>(width));  // 纯 ASCII,字节数即显示宽
+    CHECK(first_line.find("...") != std::string::npos);
+    // 宽度富余时不截断
+    const std::string wide = FormatTranscriptItem(item, theme, 500);
+    CHECK(wide.find(item.title) != std::string::npos);
+}
+
+TEST_CASE("FormatTranscriptItem: width<=0 不截断") {
+    const auto theme = BuiltinTheme("plain");
+    TranscriptItem item = MakeItem(TranscriptStatus::Ok);
+    item.title = "run_command(" + std::string(300, 'y') + ")";
+    const std::string out = FormatTranscriptItem(item, theme, 0);
+    CHECK(out.find(item.title) != std::string::npos);
+}
+
+// ---- BuildToolTitle:各工具的参数摘要 --------------------------------------
+
+TEST_CASE("BuildToolTitle: run_command 显示命令,read/write/edit 显示路径") {
+    CHECK(BuildToolTitle("run_command", {{"command", "git status"}}) == "run_command(git status)");
+    CHECK(BuildToolTitle("read_file", {{"path", "src/main.cpp"}}) == "read_file(src/main.cpp)");
+    CHECK(BuildToolTitle("write_file", {{"path", "a.txt"}, {"content", "xxx"}}) == "write_file(a.txt)");
+    CHECK(BuildToolTitle("edit_file", {{"path", "b.txt"}, {"old_string", "o"}, {"new_string", "n"}}) ==
+          "edit_file(b.txt)");
+}
+
+TEST_CASE("BuildToolTitle: agent 显示任务前 40 个码点") {
+    const std::string long_prompt(100, 'p');
+    const std::string title = BuildToolTitle("agent", {{"prompt", long_prompt}});
+    CHECK(title == "agent(" + long_prompt.substr(0, 40) + "...)");
+    // 中文按码点截,不劈开多字节字符
+    std::string cjk;
+    for (int i = 0; i < 50; ++i) {
+        cjk += "汉";
+    }
+    const std::string cjk_title = BuildToolTitle("agent", {{"prompt", cjk}});
+    CHECK(cjk_title.find("agent(") == 0);
+    CHECK(cjk_title.find("...") != std::string::npos);
+    // 40 个"汉"是 120 字节,加上前后缀不该更长
+    CHECK(cjk_title.size() == std::string("agent(").size() + 40 * 3 + 3 + 1);
+}
+
+TEST_CASE("BuildToolTitle: MCP 工具显示参数紧凑 JSON,换行压成空格") {
+    const nlohmann::json input = {{"a", 17}, {"b", 25}};
+    CHECK(BuildToolTitle("mcp__test__add", input) == "mcp__test__add(" + input.dump() + ")");
+    const std::string multi = BuildToolTitle("run_command", {{"command", "echo a\necho b"}});
+    CHECK(multi.find('\n') == std::string::npos);
+}
+
+TEST_CASE("BuildToolTitle: todo_write 显示几项") {
+    const nlohmann::json input = {{"todos", nlohmann::json::array({{{"content", "a"}}, {{"content", "b"}}})}};
+    CHECK(BuildToolTitle("todo_write", input) == "todo_write(2 项)");
+}
+
+// ---- 行统计、退出码解析 ----------------------------------------------------
+
+TEST_CASE("CountLines: 空串 0 行,末尾没换行的最后一截也算一行") {
+    CHECK(CountLines("") == 0);
+    CHECK(CountLines("a") == 1);
+    CHECK(CountLines("a\n") == 1);
+    CHECK(CountLines("a\nb") == 2);
+    CHECK(CountLines("a\nb\nc\n") == 3);
+}
+
+TEST_CASE("ParseRunCommandExitCode: 认 [退出码 N] 前缀") {
+    CHECK(ParseRunCommandExitCode("[退出码 0]\nok") == 0);
+    CHECK(ParseRunCommandExitCode("[退出码 3]\n") == 3);
+    CHECK(ParseRunCommandExitCode("[退出码 -1]\n") == -1);
+    CHECK_FALSE(ParseRunCommandExitCode("随便什么").has_value());
+    CHECK_FALSE(ParseRunCommandExitCode("[退出码 x]").has_value());
+    CHECK_FALSE(ParseRunCommandExitCode("").has_value());
+}
+
+// ---- 各工具的结果摘要 ------------------------------------------------------
+
+TEST_CASE("RunCommandDoneSummary: 退出码 + 耗时") {
+    CHECK(RunCommandDoneSummary("[退出码 0]\nxxx", 1.23) == "Done · 退出码 0 · 1.2s");
+    // 解析不出退出码就省掉那一节
+    CHECK(RunCommandDoneSummary("没有退出码前缀", 0.5) == "Done · 0.5s");
+}
+
+TEST_CASE("ReadFileDoneSummary: 行数;空文件 0 行") {
+    CHECK(ReadFileDoneSummary("     1\ta\n     2\tb\n") == "读取 2 行");
+    CHECK(ReadFileDoneSummary("(空文件)") == "读取 0 行");
+}
+
+TEST_CASE("WriteDiffSummary: +N -M;新文件只有 +N") {
+    CHECK(WriteDiffSummary(39, 36) == "+39 -36");
+    CHECK(WriteDiffSummary(5, std::nullopt) == "+5");
+    CHECK(WriteDiffSummary(0, 3) == "+0 -3");
+}
+
+TEST_CASE("SearchDoneSummary: 命中数,没搜到算 0,截断提示行不计") {
+    CHECK(SearchDoneSummary("a.cpp:1:hit\nb.cpp:2:hit\n") == "命中 2 处");
+    CHECK(SearchDoneSummary("没搜到匹配的内容") == "命中 0 处");
+    CHECK(SearchDoneSummary("没找到匹配的文件") == "命中 0 处");
+    CHECK(SearchDoneSummary("a.cpp:1:hit\n……(结果超过 100 条,已截断,建议缩小 pattern 或 path 范围)\n") ==
+          "命中 1 处");
+}
+
+TEST_CASE("AgentDoneSummary: 子代理轮数和子工具次数") {
+    CHECK(AgentDoneSummary(3, 5) == "子代理 3 轮 · 5 次工具");
+}
+
+TEST_CASE("ErrorSummaryLines: 首行固定 Error:,最多前 5 行,超长带截断标注") {
+    // 普通错误:首行 Error: + 原首行
+    const auto short_err = ErrorSummaryLines("mcp__test__add", "服务器未响应(超时 30s)\n连接在 tools/call 后关闭");
+    REQUIRE(short_err.size() == 2);
+    CHECK(short_err[0] == "Error: 服务器未响应(超时 30s)");
+    CHECK(short_err[1] == "连接在 tools/call 后关闭");
+
+    // 长错误:只留前 5 行,追加截断标注
+    std::string long_err;
+    for (int i = 1; i <= 9; ++i) {
+        long_err += "line" + std::to_string(i) + "\n";
+    }
+    const auto lines = ErrorSummaryLines("write_file", long_err);
+    REQUIRE(lines.size() == 6);
+    CHECK(lines[0] == "Error: line1");
+    CHECK(lines[4] == "line5");
+    CHECK(lines[5].find("共 9 行") != std::string::npos);
+    CHECK(lines[5].find("Ctrl+E") != std::string::npos);
+
+    // run_command 失败:首行改写成 "Error: 退出码 N"
+    const auto run_err = ErrorSummaryLines("run_command", "[退出码 3]\n命令输出第一行");
+    REQUIRE(run_err.size() == 2);
+    CHECK(run_err[0] == "Error: 退出码 3");
+    CHECK(run_err[1] == "命令输出第一行");
+
+    // 空输出兜底
+    const auto empty_err = ErrorSummaryLines("read_file", "");
+    REQUIRE(empty_err.size() == 1);
+    CHECK(empty_err[0] == "Error: (无输出)");
+}
+
+// ---- UTF-8 截断 ------------------------------------------------------------
+
+TEST_CASE("TruncateUtf8Bytes: 不劈开多字节字符") {
+    std::string cjk = "汉字汉字";  // 12 字节
+    CHECK(TruncateUtf8Bytes(cjk, 12) == cjk);
+    CHECK(TruncateUtf8Bytes(cjk, 11) == "汉字汉");  // 第 11 字节落在"字"中间,退到 9
+    CHECK(TruncateUtf8Bytes(cjk, 7) == "汉字");
+    CHECK(TruncateUtf8Bytes("abc", 2) == "ab");
+}
+
+TEST_CASE("TruncateUtf8Codepoints: 按码点截,超长加 ...") {
+    CHECK(TruncateUtf8Codepoints("abcdef", 6) == "abcdef");
+    CHECK(TruncateUtf8Codepoints("abcdef", 3) == "abc...");
+    CHECK(TruncateUtf8Codepoints("汉字汉字", 2) == "汉字...");
+    CHECK(TruncateUtf8Codepoints("", 5) == "");
+}

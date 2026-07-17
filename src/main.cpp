@@ -5,13 +5,17 @@
 // 模式缺配置则直接报可读的错。交互循环里加了 /help /model /config /clear
 // /exit 几个 slash 命令,/model 能让模型切换真正在下一次请求生效。
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <set>
@@ -39,6 +43,7 @@
 #include "cli/spinner.hpp"
 #include "cli/theme.hpp"
 #include "cli/todo_render.hpp"
+#include "cli/transcript.hpp"
 #include "config/config.hpp"
 #include "mcp/client.hpp"
 #include "mcp/mcp_tool.hpp"
@@ -56,12 +61,15 @@
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+// windows.h 的 max/min 宏会跟 <algorithm> 的 std::max/std::min 撞车(UI-B
+// 的锚点记账用到了 std::max),NOMINMAX 关掉,跟 console_input.cpp 一个规矩。
+#define NOMINMAX
 #include <windows.h>
 #endif
 
 namespace {
 
-constexpr std::string_view kVersion = "0.11.0";
+constexpr std::string_view kVersion = "0.12.0";
 
 void PrintVersion() {
     std::cout << "lubancode " << kVersion << "\n";
@@ -509,6 +517,540 @@ void PrintConfirmDetails(const std::string& name, const nlohmann::json& input) {
     std::cout.flush();
 }
 
+// ---------------------------------------------------------------------------
+// UI-B(0.12.0):工具条目的控制台原地改写。
+//
+// 纯渲染(条目长什么样)在 cli/transcript.cpp 的 FormatTranscriptItem 里,
+// 这里只管"画在哪、怎么改"的 Win32 锚点记账:每画一个条目记下起始行号和
+// 行数;工具结束后回到起始行,整块清掉重画成终态。工具执行期间没有别的
+// 输出流(流式文本只在 API 响应期),原地回写是安全的——唯一会往下垫内容
+// 的两个场景(确认交互块、子代理条目画在 agent 条目下面)各有对策:
+//   1. 确认块:待确认态画好后先 ReserveRows 在缓冲区底部预留足够行,免得
+//      交互期间自然滚屏把锚点推歪;用户答完 TrimBelow 把确认块整个擦掉,
+//      条目重新成为屏幕最后的内容,后续改写照常。
+//   2. agent 条目:终态摘要固定一行,行数跟执行中帧一致,原地改写不用长高;
+//      万一要长高而下面垫着内容(比如 ESC 打断提示),砍到原有行数——完整
+//      信息反正都在 full_output 里,UI-C 的 Ctrl+E 能看全。
+// enabled=false(管道/重定向)时所有方法都是空操作,管道模式的稳定纯文本
+// 输出由 ToolDisplay 另走一条路。
+class TranscriptPainter {
+public:
+    TranscriptPainter(const lubancode::cli::Theme& theme, bool enabled) : theme_(theme), enabled_(enabled) {}
+
+    TranscriptPainter(const TranscriptPainter&) = delete;
+    TranscriptPainter& operator=(const TranscriptPainter&) = delete;
+
+    // 画一个新条目(跟前面的输出空一行分隔),登记锚点。
+    void PaintNew(const lubancode::cli::TranscriptItem& item) {
+        if (!enabled_) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+#ifdef _WIN32
+        const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
+        CONSOLE_SCREEN_BUFFER_INFO info{};
+        const std::string text = Render(item);
+        if (!GetConsoleScreenBufferInfo(h_out, &info)) {
+            std::cout << "\n" << text;
+            std::cout.flush();
+            return;
+        }
+        if (info.dwCursorPosition.X > 0) {
+            std::cout << "\n";  // 流式正文多半没换行收尾,先把光标归位到行首
+        }
+        std::cout << "\n";  // 空行分隔
+        std::cout.flush();
+        if (!GetConsoleScreenBufferInfo(h_out, &info)) {
+            std::cout << text;
+            std::cout.flush();
+            return;
+        }
+        int start_row = info.dwCursorPosition.Y;
+        const int rows = lubancode::cli::CountLines(text);
+        EnsureRoom(h_out, start_row, rows);
+        SetConsoleCursorPosition(h_out, COORD{0, static_cast<SHORT>(start_row)});
+        std::cout << text;
+        std::cout.flush();
+        anchors_.push_back(Anchor{item.id, start_row, rows});
+#else
+        std::cout << "\n" << Render(item);
+        std::cout.flush();
+#endif
+    }
+
+    // 原地改写一个已登记的条目(执行中 -> 待确认 -> 终态)。
+    void Repaint(const lubancode::cli::TranscriptItem& item) {
+        if (!enabled_) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+#ifdef _WIN32
+        Anchor* anchor = Find(item.id);
+        if (anchor == nullptr) {
+            return;
+        }
+        const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
+        CONSOLE_SCREEN_BUFFER_INFO info{};
+        if (!GetConsoleScreenBufferInfo(h_out, &info)) {
+            return;
+        }
+        const SHORT buffer_width = info.dwSize.X;
+        const COORD saved_cursor = info.dwCursorPosition;
+        std::string text = Render(item);
+        int new_rows = lubancode::cli::CountLines(text);
+
+        // 条目是不是屏幕上最后的内容(光标正停在条目下一行行首)。不是的话
+        // 不能长高——往下多画会盖住垫在下面的输出,只能砍到原有行数。
+        const bool at_tail =
+            saved_cursor.X == 0 && static_cast<int>(saved_cursor.Y) == anchor->start_row + anchor->rows;
+        if (!at_tail && new_rows > anchor->rows) {
+            text = FirstNLines(text, anchor->rows);
+            new_rows = anchor->rows;
+        }
+
+        const int rows_to_clear = (std::max)(anchor->rows, new_rows);
+        if (at_tail) {
+            int start_row = anchor->start_row;
+            EnsureRoom(h_out, start_row, rows_to_clear);  // 里头会同步平移所有锚点
+        }
+        DWORD written = 0;
+        for (int r = 0; r < rows_to_clear; ++r) {
+            const COORD row_pos{0, static_cast<SHORT>(anchor->start_row + r)};
+            FillConsoleOutputCharacterW(h_out, L' ', static_cast<DWORD>(buffer_width), row_pos, &written);
+        }
+        SetConsoleCursorPosition(h_out, COORD{0, static_cast<SHORT>(anchor->start_row)});
+        std::cout << text;
+        std::cout.flush();
+        anchor->rows = new_rows;
+        if (!at_tail) {
+            SetConsoleCursorPosition(h_out, saved_cursor);  // 下面还垫着别的内容,光标放回去
+        }
+#else
+        std::cout << Render(item);
+        std::cout.flush();
+#endif
+    }
+
+    // 把条目末尾到当前光标之间的行全部擦掉、光标回到条目末尾——确认交互块
+    // (参数详情 + [y/a/N] 提示)答完之后收尾用,让条目重新成为屏幕最后的
+    // 内容,后续原地改写不受它牵连。
+    void TrimBelow(int item_id) {
+        if (!enabled_) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+#ifdef _WIN32
+        Anchor* anchor = Find(item_id);
+        if (anchor == nullptr) {
+            return;
+        }
+        const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
+        CONSOLE_SCREEN_BUFFER_INFO info{};
+        if (!GetConsoleScreenBufferInfo(h_out, &info)) {
+            return;
+        }
+        const int end_row = anchor->start_row + anchor->rows;
+        if (static_cast<int>(info.dwCursorPosition.Y) < end_row) {
+            return;
+        }
+        DWORD written = 0;
+        for (int r = end_row; r <= static_cast<int>(info.dwCursorPosition.Y); ++r) {
+            const COORD row_pos{0, static_cast<SHORT>(r)};
+            FillConsoleOutputCharacterW(h_out, L' ', static_cast<DWORD>(info.dwSize.X), row_pos, &written);
+        }
+        SetConsoleCursorPosition(h_out, COORD{0, static_cast<SHORT>(end_row)});
+#endif
+    }
+
+    // 在缓冲区底部预留 rows 行(必要时主动滚屏、同步平移所有锚点)。确认
+    // 交互开始前调一次,免得交互期间的自然滚屏让锚点失效。
+    void ReserveRows(int rows) {
+        if (!enabled_) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+#ifdef _WIN32
+        const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
+        CONSOLE_SCREEN_BUFFER_INFO info{};
+        if (!GetConsoleScreenBufferInfo(h_out, &info)) {
+            return;
+        }
+        const COORD saved = info.dwCursorPosition;
+        int row = saved.Y;
+        const int before = row;
+        EnsureRoom(h_out, row, rows);
+        if (row != before) {
+            SetConsoleCursorPosition(h_out, COORD{saved.X, static_cast<SHORT>(row)});
+        }
+#else
+        (void)rows;
+#endif
+    }
+
+private:
+    struct Anchor {
+        int item_id = 0;
+        int start_row = 0;
+        int rows = 0;
+    };
+
+    std::string Render(const lubancode::cli::TranscriptItem& item) const {
+        const int width = lubancode::cli::DetectConsoleWidth().value_or(80);
+        return lubancode::cli::FormatTranscriptItem(item, theme_, width);
+    }
+
+    static std::string FirstNLines(const std::string& text, int n) {
+        std::string out;
+        int count = 0;
+        std::size_t pos = 0;
+        while (pos < text.size() && count < n) {
+            const std::size_t nl = text.find('\n', pos);
+            if (nl == std::string::npos) {
+                out += text.substr(pos);
+                out += "\n";
+                return out;
+            }
+            out += text.substr(pos, nl - pos + 1);
+            pos = nl + 1;
+            ++count;
+        }
+        return out;
+    }
+
+#ifdef _WIN32
+    Anchor* Find(int item_id) {
+        for (auto& anchor : anchors_) {
+            if (anchor.item_id == item_id) {
+                return &anchor;
+            }
+        }
+        return nullptr;
+    }
+
+    // 从 start_row 起要写 rows_needed 行,会不会撞到缓冲区最后一行?会的话
+    // 先主动滚够行数,再把所有登记过的锚点(和调用方手里这个 start_row)
+    // 一起往上平移——跟 console_input.cpp 的 EnsureRoomForRows 同一套账。
+    void EnsureRoom(HANDLE h_out, int& start_row, int rows_needed) {
+        CONSOLE_SCREEN_BUFFER_INFO info{};
+        if (!GetConsoleScreenBufferInfo(h_out, &info)) {
+            return;
+        }
+        const int buffer_height = info.dwSize.Y;
+        const int needed_bottom = start_row + rows_needed - 1;
+        if (needed_bottom < buffer_height) {
+            return;
+        }
+        const int overflow = needed_bottom - buffer_height + 1;
+        SetConsoleCursorPosition(h_out, COORD{0, static_cast<SHORT>(buffer_height - 1)});
+        for (int i = 0; i < overflow; ++i) {
+            std::cout << "\n";
+        }
+        std::cout.flush();
+        for (auto& anchor : anchors_) {
+            anchor.start_row = (std::max)(0, anchor.start_row - overflow);
+        }
+        start_row = (std::max)(0, start_row - overflow);
+    }
+#endif
+
+    const lubancode::cli::Theme& theme_;
+    bool enabled_;
+    std::vector<Anchor> anchors_;
+};
+
+// 统计一个磁盘文件现在有多少行(write_file 覆盖前掐一下旧行数,给 +N -M
+// 摘要用)。读不到(不存在/是目录/打不开)给 nullopt——"新文件"场景。
+std::optional<int> FileLineCount(const std::string& path_utf8) {
+    const std::filesystem::path path(
+        std::u8string(reinterpret_cast<const char8_t*>(path_utf8.data()), path_utf8.size()));
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec) || std::filesystem::is_directory(path, ec)) {
+        return std::nullopt;
+    }
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+        return std::nullopt;
+    }
+    const std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    return lubancode::cli::CountLines(content);
+}
+
+// UI-B(0.12.0):一轮 Run() 里工具调用的展示总管。回调层(BuildCallbacks)
+// 只管把事件转进来,这里统一负责:
+//   - 建/更新 TranscriptItem(会话级 transcript vector 持有,UI-C/D 的
+//     Ctrl+E 全文查看、回放都要用,full_output 现在就存好);
+//   - 真控制台:走 TranscriptPainter 画条目、原地改写状态;
+//   - 管道/重定向:保持稳定纯文本——启动一行 "[工具] name {...}"(现状),
+//     结束一行 "[工具完成] name: 摘要"(新增,不回写、不夹 ANSI)。
+// 计时(run_command 耗时)、行统计(write/edit 的 +N -M)全在这一层做,
+// tools/ 层一个字不动。
+struct ToolDisplay {
+    ToolDisplay(std::vector<lubancode::cli::TranscriptItem>& transcript_ref, const lubancode::cli::Theme& theme_ref,
+                bool console, std::shared_ptr<lubancode::tools::TodoListState> todo,
+                const std::atomic<bool>* cancel)
+        : transcript(transcript_ref),
+          theme(theme_ref),
+          is_console(console),
+          painter(theme_ref, console),
+          todo_state(std::move(todo)),
+          cancel_flag(cancel) {}
+
+    std::vector<lubancode::cli::TranscriptItem>& transcript;
+    const lubancode::cli::Theme& theme;
+    bool is_console;
+    TranscriptPainter painter;
+    std::shared_ptr<lubancode::tools::TodoListState> todo_state;
+    const std::atomic<bool>* cancel_flag = nullptr;
+
+    // 主工具、子代理内层工具都是严格串行的,各留一个"进行中"槽位就够
+    // (agent 工具执行期间 active_main 指着 agent 条目,active_sub 指着
+    // 它肚子里正在跑的那个)。
+    int active_main = -1;  // transcript 下标,-1 = 没有进行中的主工具
+    int active_sub = -1;
+    nlohmann::json main_input;
+    nlohmann::json sub_input;
+    std::optional<int> main_write_old_lines;
+    std::optional<int> sub_write_old_lines;
+    int agent_rounds = 0;
+    int agent_sub_tools = 0;
+
+    void OnToolStart(const std::string& name, const nlohmann::json& input) {
+        if (!is_console) {
+            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+            std::cout << "\n" << theme.tool_line << "[工具] " << name << " " << input.dump() << theme.reset << "\n";
+            std::cout.flush();
+        }
+        main_input = input;
+        main_write_old_lines =
+            name == "write_file" ? FileLineCount(input.value("path", std::string())) : std::nullopt;
+        if (name == "agent") {
+            agent_rounds = 0;
+            agent_sub_tools = 0;
+        }
+        active_main = NewItem(lubancode::cli::TranscriptKind::Tool, name, input);
+        if (is_console) {
+            painter.PaintNew(transcript[static_cast<std::size_t>(active_main)]);
+        }
+    }
+
+    void OnToolDone(const std::string& name, const lubancode::tools::Tool::Result& result) {
+        if (active_main < 0) {
+            return;
+        }
+        auto& item = transcript[static_cast<std::size_t>(active_main)];
+        FinalizeItem(item, name, main_input, result, main_write_old_lines, agent_rounds, agent_sub_tools);
+        if (is_console) {
+            painter.Repaint(item);
+        } else {
+            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+            std::cout << "[工具完成] " << name << ": " << PipeSummary(item, name) << "\n";
+            // 管道模式沿用 M11 的行为:todo_write 成功后紧跟着把清单打出来,
+            // 重定向日志里"计划走到哪一步了"仍然可读。
+            if (name == "todo_write" && !result.is_error && todo_state) {
+                std::cout << lubancode::cli::FormatTodoList(todo_state->items, theme);
+            }
+            std::cout.flush();
+        }
+        active_main = -1;
+    }
+
+    void OnSubToolStart(const std::string& name, const nlohmann::json& input) {
+        agent_sub_tools += 1;
+        if (!is_console) {
+            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+            std::cout << "\n"
+                       << theme.stats << "  [子代理·工具] " << name << " " << input.dump() << theme.reset << "\n";
+            std::cout.flush();
+        }
+        sub_input = input;
+        sub_write_old_lines =
+            name == "write_file" ? FileLineCount(input.value("path", std::string())) : std::nullopt;
+        active_sub = NewItem(lubancode::cli::TranscriptKind::SubTool, name, input);
+        if (is_console) {
+            painter.PaintNew(transcript[static_cast<std::size_t>(active_sub)]);
+        }
+    }
+
+    // 子工具真执行完(agent 工具转发的 post_tool 钩子)——终态回写。拒绝
+    // 那条路走不到这里(post_tool 只在真执行后触发),由 OnConfirmAnswered
+    // 定格成 Cancelled。
+    void OnSubToolResult(const std::string& name, const nlohmann::json& input,
+                          const lubancode::tools::Tool::Result& result) {
+        (void)input;
+        if (active_sub < 0) {
+            return;
+        }
+        auto& item = transcript[static_cast<std::size_t>(active_sub)];
+        FinalizeItem(item, name, sub_input, result, sub_write_old_lines, 0, 0);
+        if (is_console) {
+            painter.Repaint(item);
+        }
+        active_sub = -1;
+    }
+
+    // 子工具被 pre_tool 钩子拦截(post_tool 不会再来了)——条目定格成失败态。
+    void OnSubBlocked(const std::string& message) {
+        if (active_sub < 0) {
+            return;
+        }
+        auto& item = transcript[static_cast<std::size_t>(active_sub)];
+        item.status = lubancode::cli::TranscriptStatus::Error;
+        item.summary_lines = lubancode::cli::ErrorSummaryLines(item.tool_name, message);
+        item.full_output = lubancode::cli::TruncateUtf8Bytes(message, lubancode::cli::kFullOutputCapBytes);
+        item.end_time = std::chrono::steady_clock::now();
+        if (is_console) {
+            painter.Repaint(item);
+        }
+        active_sub = -1;
+    }
+
+    // 确认真的要问出口了(自动放行的几条路都没走到)——条目改成"待确认"态,
+    // 确认块(参数详情 + [y/a/N])跟在条目下面打。返回该条目的 transcript
+    // 下标,答完交回 OnConfirmAnswered。
+    int OnConfirmRequest() {
+        const int idx = active_sub >= 0 ? active_sub : active_main;
+        if (idx >= 0) {
+            auto& item = transcript[static_cast<std::size_t>(idx)];
+            item.status = lubancode::cli::TranscriptStatus::Pending;
+            item.summary_lines = {"待确认"};
+            if (is_console) {
+                painter.Repaint(item);
+                // 确认块 + 编辑器提示行撑死二十来行,先在缓冲区底部预留好,
+                // 免得交互期间自然滚屏把锚点推歪。
+                painter.ReserveRows(24);
+            }
+        }
+        return idx;
+    }
+
+    void OnConfirmAnswered(int idx, bool allowed) {
+        if (idx < 0) {
+            return;
+        }
+        auto& item = transcript[static_cast<std::size_t>(idx)];
+        if (is_console) {
+            painter.TrimBelow(item.id);  // 确认块用完就擦,条目回到屏幕末尾
+        }
+        if (allowed) {
+            item.status = lubancode::cli::TranscriptStatus::Running;
+            item.summary_lines = {"Running..."};
+        } else {
+            item.status = lubancode::cli::TranscriptStatus::Cancelled;
+            item.summary_lines = {"Cancelled"};
+            if (idx == active_sub) {
+                active_sub = -1;  // 子工具拒绝后 post_tool 钩子不会再来,槽位在这儿收掉
+            }
+        }
+        if (is_console) {
+            painter.Repaint(item);
+        }
+    }
+
+private:
+    int NewItem(lubancode::cli::TranscriptKind kind, const std::string& name, const nlohmann::json& input) {
+        lubancode::cli::TranscriptItem item;
+        item.id = static_cast<int>(transcript.size()) + 1;
+        item.kind = kind;
+        item.tool_name = name;
+        item.title = lubancode::cli::BuildToolTitle(name, input);
+        item.status = lubancode::cli::TranscriptStatus::Running;
+        item.summary_lines = {"Running..."};
+        item.start_time = std::chrono::steady_clock::now();
+        transcript.push_back(std::move(item));
+        return static_cast<int>(transcript.size()) - 1;
+    }
+
+    // 终态归档:状态 + 摘要 + full_output + 计时,一处算完。摘要规则:
+    // run_command 退出码+耗时;read_file 行数;write/edit +N -M;search
+    // 命中数;agent 子代理轮数/子工具次数;todo_write 接现成清单渲染;
+    // MCP 和其余工具取结果第一行。失败态固定 "Error: ..." 开头,拒绝态
+    // (确认回调里已定格)不再覆盖,ESC 打断标成 Interrupted。
+    void FinalizeItem(lubancode::cli::TranscriptItem& item, const std::string& name, const nlohmann::json& input,
+                       const lubancode::tools::Tool::Result& result, std::optional<int> write_old_lines,
+                       int rounds, int sub_tools) {
+        namespace cli = lubancode::cli;
+        item.end_time = std::chrono::steady_clock::now();
+        item.full_output = cli::TruncateUtf8Bytes(result.content, cli::kFullOutputCapBytes);
+        const double seconds = std::chrono::duration<double>(item.end_time - item.start_time).count();
+
+        if (item.status == cli::TranscriptStatus::Cancelled) {
+            return;  // 确认回调里已经定格成拒绝态,别拿 "用户拒绝执行该工具" 再盖一遍
+        }
+        if (result.is_error) {
+            if (result.content == "用户拒绝执行该工具") {
+                item.status = cli::TranscriptStatus::Cancelled;
+                item.summary_lines = {"Cancelled"};
+                return;
+            }
+            item.status = cli::TranscriptStatus::Error;
+            item.summary_lines = cli::ErrorSummaryLines(name, result.content);
+            return;
+        }
+        if (cancel_flag != nullptr && cancel_flag->load()) {
+            item.status = cli::TranscriptStatus::Interrupted;
+            item.summary_lines = {"Interrupted"};
+            return;
+        }
+
+        item.status = cli::TranscriptStatus::Ok;
+        if (name == "run_command") {
+            item.summary_lines = {cli::RunCommandDoneSummary(result.content, seconds)};
+        } else if (name == "read_file") {
+            item.summary_lines = {cli::ReadFileDoneSummary(result.content)};
+        } else if (name == "write_file") {
+            item.summary_lines = {
+                cli::WriteDiffSummary(cli::CountLines(input.value("content", std::string())), write_old_lines)};
+        } else if (name == "edit_file") {
+            item.summary_lines = {
+                cli::WriteDiffSummary(cli::CountLines(input.value("new_string", std::string())),
+                                       cli::CountLines(input.value("old_string", std::string())))};
+        } else if (name == "search") {
+            item.summary_lines = {cli::SearchDoneSummary(result.content)};
+        } else if (name == "agent") {
+            item.summary_lines = {cli::AgentDoneSummary(rounds, sub_tools)};
+        } else if (name == "todo_write" && todo_state) {
+            // 沿用现有清单渲染,清单接在 ⎿ 之后(FormatTodoList 每行自带的
+            // 两空格缩进剥掉,条目渲染自己管缩进)。
+            item.summary_lines.clear();
+            const std::string rendered = cli::FormatTodoList(todo_state->items, theme);
+            std::size_t pos = 0;
+            while (pos < rendered.size()) {
+                std::size_t nl = rendered.find('\n', pos);
+                if (nl == std::string::npos) {
+                    nl = rendered.size();
+                }
+                std::string line = rendered.substr(pos, nl - pos);
+                if (line.compare(0, 2, "  ") == 0) {
+                    line.erase(0, 2);
+                }
+                if (!line.empty()) {
+                    item.summary_lines.push_back(std::move(line));
+                }
+                pos = nl + 1;
+            }
+        } else {
+            // MCP(mcp__server__tool)和其余工具:结果前一行当摘要。
+            std::string first_line = result.content.substr(0, result.content.find('\n'));
+            if (first_line.empty()) {
+                first_line = "Done";
+            }
+            item.summary_lines = {std::move(first_line)};
+        }
+    }
+
+    // 管道模式那行 "[工具完成] name: 摘要" 的摘要——不回写、不夹 ANSI,
+    // 取条目摘要第一行;todo_write 的摘要是清单本身,换成一句人话。
+    std::string PipeSummary(const lubancode::cli::TranscriptItem& item, const std::string& name) const {
+        if (name == "todo_write" && item.status == lubancode::cli::TranscriptStatus::Ok && todo_state) {
+            return "已更新待办清单(" + std::to_string(todo_state->items.size()) + " 项)";
+        }
+        if (item.summary_lines.empty()) {
+            return "Done";
+        }
+        return item.summary_lines.front();
+    }
+};
+
 // 一次 Run() 内(可能因为工具调用来回好几趟)的 token 用量累计:输入、
 // 输出 tokens 各自求和,再数一下总共发了几次独立请求。RunTurn() 结束后
 // 打一行,不跨多次用户提问累计——一问一答算一次统计。
@@ -528,16 +1070,15 @@ struct UsageStats {
 // 如果里面注册了 "agent" 工具,这里顺带把这一轮现算好的确认/记账/打印
 // 逻辑通过 SetHooks 灌给它,子代理被调用时就能用上同一套(详见
 // tools/agent_tool.hpp 顶部注释)。
-// todo_state:M11(0.10.0)新增,todo_write 工具(如果这一轮的 registry 里
-// 注册了)背后的会话级待办清单——传进来是为了 on_tool_done 能在 todo_write
-// 成功调用之后立刻把最新清单画出来。可以是空指针(没注册这个工具的场景,
-// 目前调用点都注册了,留这个口子只是让调用方多一分自由)。
+// display:UI-B(0.12.0)新增,这一轮的工具条目展示总管(建条目、原地
+// 改写状态、管道模式的 [工具]/[工具完成] 稳定纯文本),todo_state 也归它
+// 持有。回调层只管把事件原样转进去。
 lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::string>& always_allowed_tools,
                                             const lubancode::cli::Theme& theme, UsageStats& usage_stats,
                                             lubancode::cli::ContextTracker& context_tracker,
                                             lubancode::tools::ToolRegistry& registry,
                                             const lubancode::config::HooksConfig& hooks_config,
-                                            std::shared_ptr<lubancode::tools::TodoListState> todo_state = nullptr) {
+                                            ToolDisplay& display) {
     lubancode::agent::Callbacks callbacks;
 
     // M9:hooks_config 四个数组全空是常态(没配 hooks 的用户占多数),这时候
@@ -568,14 +1109,13 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         std::cout.flush();
     };
 
-    callbacks.on_tool_start = [&theme](const std::string& name, const nlohmann::json& input) {
-        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-        std::cout << "\n" << theme.tool_line << "[工具] " << name << " " << input.dump() << theme.reset << "\n";
-        std::cout.flush();
+    // UI-B:工具条目化渲染,建条目/画条目/管道行全在 ToolDisplay 里。
+    callbacks.on_tool_start = [&display](const std::string& name, const nlohmann::json& input) {
+        display.OnToolStart(name, input);
     };
 
-    callbacks.on_tool_confirm = [auto_confirm, &always_allowed_tools, &theme](const std::string& name,
-                                                                               const nlohmann::json& input) -> bool {
+    callbacks.on_tool_confirm = [auto_confirm, &always_allowed_tools, &theme,
+                                  &display](const std::string& name, const nlohmann::json& input) -> bool {
         // 会话级确认模式(Shift+Tab 循环切),跟 --yes/auto_confirm 叠加:
         //   yolo  —— 全自动放行(auto_confirm 本来就是这个语义,这里再查一遍
         //             CurrentConfirmMode() 是为了让 Shift+Tab 中途切到 yolo
@@ -592,6 +1132,10 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         if (always_allowed_tools.count(name) != 0) {
             return true;
         }
+        // UI-B:真的要问了——条目先改成"待确认"态(黄灯 + 待确认),确认块
+        // (参数详情 + [y/a/N] 提示)跟在条目下面;答完确认块整个擦掉,
+        // 拒绝则条目原地改灰 Cancelled,允许则改回 Running 等终态。
+        const int pending_idx = display.OnConfirmRequest();
         {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
             PrintConfirmDetails(name, input);
@@ -601,32 +1145,21 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         const std::optional<std::string> answer = lubancode::cli::ReadLine(
             theme.confirm + "[y] 本次允许  [a] 本会话总是允许(该工具)  [N] 拒绝: " + theme.reset, theme,
             /*esc_rejects=*/true);
-        if (!answer.has_value()) {
-            return false;  // 读到 EOF,按拒绝处理,不要在这儿卡住
+        bool allowed = false;
+        if (answer.has_value()) {  // 读到 EOF 按拒绝处理,不要在这儿卡住
+            if (*answer == "a" || *answer == "A") {
+                always_allowed_tools.insert(name);
+                allowed = true;
+            } else {
+                allowed = (*answer == "y" || *answer == "Y");
+            }
         }
-        if (*answer == "a" || *answer == "A") {
-            always_allowed_tools.insert(name);
-            return true;
-        }
-        return *answer == "y" || *answer == "Y";
+        display.OnConfirmAnswered(pending_idx, allowed);
+        return allowed;
     };
 
-    callbacks.on_tool_done = [&theme, todo_state](const std::string& name,
-                                                    const lubancode::tools::Tool::Result& result) {
-        if (result.is_error) {
-            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-            std::cout << theme.error << "[工具出错] " << name << ": " << result.content << theme.reset << "\n";
-            std::cout.flush();
-            return;
-        }
-        // M11(0.10.0):todo_write 成功调用之后,紧接着把最新清单画出来——
-        // 让"计划、进度"这件事在屏幕上跟着模型的每一步调用同步可见,不用
-        // 用户另外敲 /todos 才看得到。
-        if (name == "todo_write" && todo_state) {
-            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-            std::cout << lubancode::cli::FormatTodoList(todo_state->items, theme);
-            std::cout.flush();
-        }
+    callbacks.on_tool_done = [&display](const std::string& name, const lubancode::tools::Tool::Result& result) {
+        display.OnToolDone(name, result);
     };
 
     callbacks.on_usage = [&usage_stats, &context_tracker](const lubancode::api::Usage& usage) {
@@ -649,21 +1182,42 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         agent_tool != nullptr) {
         lubancode::tools::AgentTool::Hooks hooks;
         hooks.on_tool_confirm = callbacks.on_tool_confirm;
-        hooks.on_sub_tool_start = [&theme](const std::string& name, const nlohmann::json& input) {
-            std::cout << "\n"
-                       << theme.stats << "  [子代理·工具] " << name << " " << input.dump() << theme.reset << "\n";
-            std::cout.flush();
+        // UI-B:子代理内层工具也走条目样式(前缀缩进四空格),状态同样原地
+        // 更新——启动靠 on_sub_tool_start,终态靠下面包了一层的 post_tool
+        // 钩子(agent 工具没有单独的"子工具结束"回调,post_tool 正好在真
+        // 执行完之后带着 Result 触发一次,借它回写;拒绝那条路在确认回调里
+        // 已经定格,pre_tool 拦截另包一层)。
+        hooks.on_sub_tool_start = [&display](const std::string& name, const nlohmann::json& input) {
+            display.OnSubToolStart(name, input);
         };
-        hooks.on_usage = [&usage_stats](const lubancode::api::Usage& usage) {
+        hooks.on_usage = [&usage_stats, &display](const lubancode::api::Usage& usage) {
             usage_stats.input_tokens += usage.input_tokens;
             usage_stats.output_tokens += usage.output_tokens;
             usage_stats.cache_read_tokens += usage.cache_read_tokens;
             usage_stats.request_count += 1;
+            display.agent_rounds += 1;  // 子代理每一次独立请求算一轮,agent 条目终态摘要用
         };
-        // M9:pre_tool/post_tool 钩子原样转发,子代理内部的工具调用同样受管——
-        // 跟父级用的是同一份 callbacks.on_pre_tool_hook/on_post_tool_hook。
-        hooks.on_pre_tool_hook = callbacks.on_pre_tool_hook;
-        hooks.on_post_tool_hook = callbacks.on_post_tool_hook;
+        // M9:pre_tool/post_tool 钩子照旧转发给父级同一份;UI-B 在外面再包
+        // 一层,给子工具条目回写终态/拦截态用。
+        if (callbacks.on_pre_tool_hook) {
+            hooks.on_pre_tool_hook = [&display, base = callbacks.on_pre_tool_hook](
+                                          const std::string& name,
+                                          const nlohmann::json& input) -> std::optional<std::string> {
+                std::optional<std::string> blocked = base(name, input);
+                if (blocked.has_value()) {
+                    display.OnSubBlocked(*blocked);
+                }
+                return blocked;
+            };
+        }
+        hooks.on_post_tool_hook = [&display, base = callbacks.on_post_tool_hook](
+                                       const std::string& name, const nlohmann::json& input,
+                                       const lubancode::tools::Tool::Result& result) {
+            if (base) {
+                base(name, input, result);
+            }
+            display.OnSubToolResult(name, input, result);
+        };
         agent_tool->SetHooks(std::move(hooks));
     }
 
@@ -694,17 +1248,23 @@ struct RunTurnResult {
 // M11 新增,转发给 BuildCallbacks 给 on_tool_done 用;留空指针表示这一轮
 // 的 registry 没注册 todo_write(目前两个调用点都注册了,这个默认值只是
 // 留个口子)。
+// transcript:UI-B(0.12.0)新增,会话级工具条目存档(InteractiveLoop/
+// AskOnce 各持有一份,跨多轮累积),UI-C/D 的 Ctrl+E 全文查看要用。
 RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bool auto_confirm,
                        std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
                        lubancode::cli::ContextTracker& context_tracker, lubancode::tools::ToolRegistry& registry,
                        const lubancode::config::HooksConfig& hooks_config, bool is_console,
+                       std::vector<lubancode::cli::TranscriptItem>& transcript,
                        std::shared_ptr<lubancode::tools::TodoListState> todo_state = nullptr) {
     UsageStats usage_stats;
+    // cancel_flag 先于 display/callbacks 建:ToolDisplay 要拿它判断"这一轮
+    // 是不是被 ESC 打断的"(打断态条目标 Interrupted)。
+    std::atomic<bool> cancel_flag{false};
+    ToolDisplay display(transcript, theme, is_console, todo_state, &cancel_flag);
     const lubancode::agent::Callbacks callbacks =
         BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker, registry,
-                        hooks_config, todo_state);
+                        hooks_config, display);
 
-    std::atomic<bool> cancel_flag{false};
     lubancode::cli::TurnInputListener listener(cancel_flag, theme);
 
     // 用户这一行已经提交、真要开始等模型作答了——分界线打在这儿,紧跟在
@@ -1051,6 +1611,10 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     auto todo_state = std::make_shared<lubancode::tools::TodoListState>();
     registry.Register(std::make_unique<lubancode::tools::TodoWriteTool>(todo_state));
 
+    // UI-B(0.12.0):会话级工具条目存档,跨多轮 RunTurn 累积。full_output
+    // 现在就存好(截 64KB),UI-C/D 的 Ctrl+E 全文查看直接从这儿取。
+    std::vector<lubancode::cli::TranscriptItem> transcript;
+
     std::optional<lubancode::agent::AgentLoop> loop;
     const auto rebuild_loop = [&]() {
         // max_tokens=4096、max_turns=25 是 AgentLoop 自己的默认值,这里显式
@@ -1144,7 +1708,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
 
         const RunTurnResult turn_result =
             RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry,
-                    config.hooks, spinner_enabled, todo_state);
+                    config.hooks, spinner_enabled, transcript, todo_state);
         for (auto& queued : turn_result.queued_lines) {
             pending_queue.push_back(std::move(queued));
         }
@@ -1231,8 +1795,9 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     // 单发模式没有下一轮循环好把排队消息接着发出去——AskOnce 只问这一句就
     // 退出,ESC/排队这套机制天生只对交互循环有意义(spec 也只要求交互模式
     // 的手测清单),这里只取 status,忽略 queued_lines/cancelled。
+    std::vector<lubancode::cli::TranscriptItem> transcript;
     return RunTurn(loop, question, auto_confirm, always_allowed_tools, theme, context_tracker, registry,
-                    config.hooks, spinner_enabled, todo_state)
+                    config.hooks, spinner_enabled, transcript, todo_state)
         .status;
 }
 
