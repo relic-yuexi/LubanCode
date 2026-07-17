@@ -92,23 +92,28 @@ std::string TranscriptStatusWord(TranscriptStatus status) {
     return "[?]";
 }
 
-std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme, int width) {
+std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme, int width,
+                                  bool expanded, bool focused) {
     const bool plain = theme.reset.empty();
     const std::string indent = item.kind == TranscriptKind::SubTool ? "    " : "";
     const int indent_cols = static_cast<int>(indent.size());
+    // UI-D:焦点标记 "► "(U+25BA + 空格,显示宽度按 2 算——► 在多数终端
+    // 占一列,加空格共两列),只加在首行行首、缩进之前,一眼扫得到。
+    const std::string focus_mark = focused ? "\xE2\x96\xBA " : "";
+    const int focus_cols = focused ? 2 : 0;
 
     std::string out;
 
-    // 首行:状态灯 + 工具名(参数摘要),超宽按显示宽度截断加 "..."。
+    // 首行:[焦点标记 +] 状态灯 + 工具名(参数摘要),超宽按显示宽度截断加 "..."。
     {
         std::string prefix;
-        int prefix_cols = indent_cols;
+        int prefix_cols = indent_cols + focus_cols;
         if (plain) {
             const std::string word = TranscriptStatusWord(item.status);
-            prefix = indent + word + " ";
+            prefix = focus_mark + indent + word + " ";
             prefix_cols += static_cast<int>(word.size()) + 1;
         } else {
-            prefix = indent + StatusColor(item.status, theme) + kDot + theme.reset + " ";
+            prefix = focus_mark + indent + StatusColor(item.status, theme) + kDot + theme.reset + " ";
             prefix_cols += 2;  // ● 一列 + 空格一列
         }
         std::string title = item.title;
@@ -129,6 +134,32 @@ std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme,
             line = TruncateWithEllipsis(line, width - prefix_cols - 1);
         }
         out += prefix + line + "\n";
+    }
+
+    // UI-D 展开版:完整入参 JSON 一行 + full_output 全文(标题行 + 每行缩进)。
+    // 截断规则跟摘要行一致:width > 0 且不夹 ANSI 才截——展开版可能被
+    // TranscriptPainter 原地重画,物理折行同样会毁掉行数记账。
+    if (expanded) {
+        const std::string body_indent = indent + "  ";
+        const int body_cols = indent_cols + 2;
+        if (!item.input_json.empty()) {
+            std::string param_line = "参数: " + item.input_json;
+            if (width > 0) {
+                param_line = TruncateWithEllipsis(param_line, width - body_cols - 1);
+            }
+            out += body_indent + param_line + "\n";
+        }
+        if (item.full_output.empty()) {
+            out += body_indent + "(无完整输出)\n";
+        } else {
+            out += body_indent + "── 完整输出(" + std::to_string(CountLines(item.full_output)) + " 行)──\n";
+            for (std::string& line : SplitLines(item.full_output)) {
+                if (width > 0 && line.find('\x1b') == std::string::npos) {
+                    line = TruncateWithEllipsis(line, width - body_cols - 1);
+                }
+                out += body_indent + line + "\n";
+            }
+        }
     }
 
     return out;
@@ -271,7 +302,7 @@ std::vector<std::string> ErrorSummaryLines(const std::string& tool_name, const s
         out.push_back(lines[i]);
     }
     if (total > 5) {
-        out.push_back("(共 " + std::to_string(total) + " 行,Ctrl+E 查看完整——下棒实装)");
+        out.push_back("(共 " + std::to_string(total) + " 行,Ctrl+E 查看完整)");
     }
     return out;
 }

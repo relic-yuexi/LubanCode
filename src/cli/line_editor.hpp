@@ -43,7 +43,10 @@ enum class KeyKind {
               // 语义一个字都不变
     CtrlC,
     CtrlD,
-    Esc,  // M10:ESC 打断/清行。终端层只在真控制台下(VK_ESCAPE)产出这个
+    Esc,   // M10:ESC 打断/清行。终端层只在真控制台下(VK_ESCAPE)产出这个
+    CtrlO,  // UI-D:紧凑/详细全局切换。核心层只在 composer 模式下置
+            // toggle_expand_requested,真正重画 transcript 是 main.cpp 的事
+    CtrlE,  // UI-D:聚焦查看当前焦点条目。同上,核心层只置 focus_view_requested
 };
 
 struct KeyEvent {
@@ -132,6 +135,16 @@ struct RenderState {
     std::size_t cursor = 0;
     std::size_t cursor_display_col = 0;  // 光标在"当前行"里的显示列宽(CJK/emoji 按 2 算),终端层定位光标直接用这个
     std::vector<std::string> hint_lines;  // line 以 / 开头时,匹配的命令逐行列出;不需要显示就是空 vector
+    // 0.16.0 slash 候选菜单直选:当前被选中的候选下标(菜单选择态或 Tab 轮转
+    // 里那个,标记已经打进 hint_lines 的 "> " 前缀了,这个字段是给单测/上层
+    // 断言用的镜像);-1 = 没有选中任何一个。
+    int selected_index = -1;
+    // UI-D(0.16.0):三个"转发给应用层"的按键请求。核心层不认识 transcript,
+    // 只负责在 composer 模式下把键翻成语义;终端层看到非零就调
+    // SetTranscriptUiHandler 注册的回调,重画的活全在 main.cpp。
+    bool toggle_expand_requested = false;  // Ctrl+O:紧凑/详细切换
+    bool focus_view_requested = false;     // Ctrl+E:聚焦查看焦点条目
+    int focus_move = 0;                    // 空 composer 下 Tab=+1(往旧走)、Shift+Tab=-1(往新走)
     bool submitted = false;              // Enter:line 是这一行最终提交的内容
     bool cleared = false;                // Ctrl+C 清空了非空行,留在同一次 ReadLine 里继续编辑
     bool eof_requested = false;          // Ctrl+D,或 Ctrl+C 在空行按下:整个读取应该当 EOF 处理
@@ -181,6 +194,17 @@ private:
                                             // 补全/轮转时原样接在候选名后面,不吞用户打的东西
     };
 
+    // 0.16.0 slash 候选菜单直选:单行、以 / 开头、候选非空时按 ↓ 进入。
+    // ↓/↑ 循环移动,Enter 把整行换成"选中候选名 + 进入时存下的参数尾巴"并
+    // 提交,ESC 只退出选择态(不清行),打字/退格/Tab 等其余按键退出选择态
+    // 后按原语义继续处理。suffix 的存法跟 TabCycleState 一个道理:进入那一刻
+    // 存好,之后不再从行内容现算。
+    struct MenuSelectionState {
+        std::vector<std::string> matches;
+        int index = 0;
+        std::u32string suffix;
+    };
+
     std::vector<CompletionCandidate> slash_candidates_;
 
     // UI-A:行缓冲从单 u32string 升级成 vector<u32string> + (row, col) 光标。
@@ -196,6 +220,7 @@ private:
     std::u32string draft_;                      // 开始翻历史之前正在编辑的内容(拼 '\n'),翻回底部时恢复
 
     std::optional<TabCycleState> tab_cycle_;
+    std::optional<MenuSelectionState> menu_selection_;
     ConfirmMode confirm_mode_ = ConfirmMode::Confirm;
 
     void ResetHistoryBrowsing();  // "翻到一半又编辑" -> 落回底部,但保留当前(已编辑的)内容
@@ -212,8 +237,9 @@ private:
 
     // 把匹配到的候选名单排成 hint_lines:一行一个 `  /name  说明`,最多 6 行,
     // 超出加一行 "  … 共 N 个命令";selected_index >= 0 时,那一行的前缀
-    // 换成 "> ",标出 Tab 轮转当前选中的是谁(-1 表示还没真正选中任何一个,
-    // 比如刚补完公共前缀、下一下 Tab 才开始轮转)。
+    // 换成 "> ",标出当前选中的是谁(Tab 轮转或菜单选择态共用;-1 表示还没
+    // 真正选中任何一个)。0.16.0 起:选中项落到第 6 行之外时,展示窗口往下
+    // 挪,保证 "> " 标记永远看得见(窗口起点 = 选中下标 - 5)。
     std::vector<std::string> BuildHintLines(const std::vector<std::string>& matches, int selected_index) const;
 };
 

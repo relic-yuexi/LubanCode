@@ -49,7 +49,7 @@ std::vector<DiffLine> ComputeLineDiff(const std::vector<std::string>& old_lines,
 //             <= 0 不截宽。
 //   max_lines 正文最多多少行;<= 0 不限。
 //   max_bytes 正文(不含 ANSI 色码)最多多少字节;0 不限。
-// 两限任一触顶就停,补一行 "… 已省略 N 行(Ctrl+E 查看完整——下棒实装)"。
+// 两限任一触顶就停,补一行 "… 已省略 N 行(Ctrl+E 查看完整)"。
 // 变更行前后各 3 行上下文,更远的未变段折叠成 "…(N 行未变)"。没有任何
 // 变更时给 "(无变化)"。
 std::string FormatDiff(const std::vector<DiffLine>& diff, const Theme& theme, int width, int max_lines,

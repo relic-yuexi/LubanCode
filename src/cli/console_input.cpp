@@ -86,6 +86,13 @@ LineEditorCore& SharedEditor() {
     return editor;
 }
 
+// UI-D(0.16.0):会话级 UI 按键回调(Ctrl+O/Ctrl+E/焦点导航)。存这儿、
+// 由 SetTranscriptUiHandler 装卸;ReadLineKeyByKey 只在 composer 读取里查它。
+TranscriptUiHandler& UiHandlerSlot() {
+    static TranscriptUiHandler handler;
+    return handler;
+}
+
 // M10:谁在真的调 ReadConsoleInputW 读键盘,谁就得先拿到这把锁——
 // ReadLineKeyByKey() 整个调用期间(从进函数到返回)一直攥着它,
 // TurnInputListener 的监听线程只在抢到锁的间隙才读一次。这样"监听只活在
@@ -366,6 +373,10 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             mapped = KeyEvent::Simple(KeyKind::CtrlC);
         } else if (ctrl && ke.wVirtualKeyCode == 'D') {
             mapped = KeyEvent::Simple(KeyKind::CtrlD);
+        } else if (ctrl && ke.wVirtualKeyCode == 'O') {
+            mapped = KeyEvent::Simple(KeyKind::CtrlO);  // UI-D:紧凑/详细切换
+        } else if (ctrl && ke.wVirtualKeyCode == 'E') {
+            mapped = KeyEvent::Simple(KeyKind::CtrlE);  // UI-D:聚焦查看
         } else if (ke.wVirtualKeyCode == VK_BACK) {
             mapped = KeyEvent::Simple(KeyKind::Backspace);
         } else if (ke.wVirtualKeyCode == VK_LEFT) {
@@ -414,6 +425,51 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         }
 
         const RenderState state = editor.HandleKey(*mapped);
+
+        // UI-D(0.16.0):composer 读取里,把核心层翻好的 UI 按键语义转发给
+        // 应用层回调。流程:光标先挪到编辑区最后一行、换行(回调的输出从
+        // 编辑区下面开始铺,旧编辑区画面留在上面,滚动历史自然带走);回调
+        // 返回 true 表示真铺了内容——重打提示符、重测锚点、按当前编辑内容
+        // 原样重画,接着等键;返回 false 表示这个键没被消费(比如焦点导航
+        // 时 transcript 是空的、ESC 不在聚焦查看态),落回下面的原有处理
+        // (RedrawEditArea 会把光标摆回去,挪动无痕)。
+        if (composer && UiHandlerSlot()) {
+            std::optional<UiKeyAction> action;
+            if (state.toggle_expand_requested) {
+                action = UiKeyAction::ToggleExpand;
+            } else if (state.focus_view_requested) {
+                action = UiKeyAction::FocusView;
+            } else if (state.focus_move > 0) {
+                action = UiKeyAction::FocusOlder;
+            } else if (state.focus_move < 0) {
+                action = UiKeyAction::FocusNewer;
+            } else if (state.esc_pressed) {
+                action = UiKeyAction::Escape;
+            }
+            if (action.has_value()) {
+                CONSOLE_SCREEN_BUFFER_INFO before_info{};
+                if (GetConsoleScreenBufferInfo(h_out, &before_info)) {
+                    SHORT last_row = static_cast<SHORT>(start_row + prev_body_row_count);
+                    if (last_row >= before_info.dwSize.Y) {
+                        last_row = static_cast<SHORT>(before_info.dwSize.Y - 1);
+                    }
+                    SetConsoleCursorPosition(h_out, COORD{0, last_row});
+                }
+                const bool handled = UiHandlerSlot()(*action);
+                if (handled) {
+                    std::cout << ColoredConfirmPrefix(editor.confirm_mode(), theme) << prompt;
+                    std::cout.flush();
+                    CONSOLE_SCREEN_BUFFER_INFO after_info{};
+                    if (GetConsoleScreenBufferInfo(h_out, &after_info)) {
+                        start_row = after_info.dwCursorPosition.Y;
+                        prompt_end_col = after_info.dwCursorPosition.X;
+                    }
+                    prev_body_row_count = 0;
+                    RedrawEditArea(h_out, start_row, prompt_end_col, state, prev_body_row_count);
+                    continue;
+                }
+            }
+        }
 
         // M11(0.10.0):切档原地更新,不打印任何新行——用户反馈过"连按几轮
         // Shift+Tab,'已切换到 X 模式' 通知行滚出一屏残骸"。档位只体现在
@@ -500,6 +556,8 @@ std::optional<std::string> ReadLine(const std::string& prompt, const Theme& them
 ConfirmMode CurrentConfirmMode() { return SharedEditor().confirm_mode(); }
 
 void SetConfirmMode(ConfirmMode mode) { SharedEditor().set_confirm_mode(mode); }
+
+void SetTranscriptUiHandler(TranscriptUiHandler handler) { UiHandlerSlot() = std::move(handler); }
 
 std::optional<int> DetectConsoleWidth() {
 #ifdef _WIN32

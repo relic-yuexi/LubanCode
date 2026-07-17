@@ -843,3 +843,241 @@ TEST_CASE("ComputeEditLineWindow: 超宽时不切半个宽字符") {
     CHECK(DisplayWidth(window.text) <= 5);
     CHECK(DisplayWidth(window.text) % 2 == 0);  // 全宽字符窗口,显示宽度必是偶数,没有切半个字
 }
+
+// ---------------------------------------------------------------------------
+// 0.16.0:slash 候选菜单 ↓↑ 直选(菜单选择态状态机)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("菜单直选: / 开头且候选非空,按 Down 进入选择态,选中第一条") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    TypeString(editor, "/c");  // 匹配 /config、/clear
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Down));
+    CHECK(state.selected_index == 0);
+    CHECK(state.line == U"/c");  // 进菜单不改行内容
+    REQUIRE(state.hint_lines.size() == 2);
+    CHECK(state.hint_lines[0].rfind("> ", 0) == 0);  // 第一条标中
+    CHECK(state.hint_lines[1].rfind("  ", 0) == 0);
+}
+
+TEST_CASE("菜单直选: Down/Up 循环移动,到底回头、到顶回尾") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    TypeString(editor, "/c");  // 两个候选
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Down));  // 进菜单,idx 0
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Down));
+    CHECK(state.selected_index == 1);
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Down));  // 到底,循环回第一条
+    CHECK(state.selected_index == 0);
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Up));  // 到顶,循环到最后一条
+    CHECK(state.selected_index == 1);
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Up));
+    CHECK(state.selected_index == 0);
+    // 全程行内容不动。
+    CHECK(state.line == U"/c");
+}
+
+TEST_CASE("菜单直选: Enter 采纳选中命令并提交,整行换成命令名") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    TypeString(editor, "/mo");  // 只匹配 /model
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Down));
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Enter));
+    CHECK(state.submitted);
+    CHECK(state.line == U"/model");
+    CHECK(editor.history_size() == 1);
+    CHECK(editor.CurrentRenderState().line.empty());  // 提交后缓冲清空
+}
+
+TEST_CASE("菜单直选: Enter 采纳时,用户已敲的参数尾巴原样拼接") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    TypeString(editor, "/mo abc");  // 命令词 /mo + 参数尾巴 " abc"
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Down));
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Enter));
+    CHECK(state.submitted);
+    CHECK(state.line == U"/model abc");
+}
+
+TEST_CASE("菜单直选: 继续打字退出选择态,候选随新前缀刷新") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    TypeString(editor, "/c");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Down));  // 进菜单
+    const RenderState state = editor.HandleKey(KeyEvent::Char(U'l'));
+    CHECK(state.selected_index == -1);  // 选择态退了
+    CHECK(state.line == U"/cl");        // 字符正常插入
+    REQUIRE(state.hint_lines.size() == 1);  // 只剩 /clear 匹配
+    CHECK(state.hint_lines[0].find("/clear") != std::string::npos);
+    CHECK(state.hint_lines[0].rfind("  ", 0) == 0);  // 没有选中标记
+}
+
+TEST_CASE("菜单直选: 退格退出选择态,回普通编辑") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    TypeString(editor, "/cl");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Down));
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Backspace));
+    CHECK(state.selected_index == -1);
+    CHECK(state.line == U"/c");  // 退格正常删字符
+    REQUIRE(state.hint_lines.size() == 2);  // /config、/clear 又都回来了
+}
+
+TEST_CASE("菜单直选: ESC 退出选择态但不清行(跟空闲态 ESC 清 composer 不同)") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    TypeString(editor, "/c");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Down));
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Esc));
+    CHECK(state.selected_index == -1);
+    CHECK(state.line == U"/c");        // 行内容原封不动
+    CHECK_FALSE(state.cleared);
+    CHECK_FALSE(state.esc_pressed);
+    CHECK_FALSE(state.hint_lines.empty());  // 候选提示还在,只是没了标记
+
+    // 退出选择态之后再按 ESC,才是老的"清空输入"语义。
+    const RenderState after = editor.HandleKey(KeyEvent::Simple(KeyKind::Esc));
+    CHECK(after.cleared);
+    CHECK(after.esc_pressed);
+    CHECK(after.line.empty());
+}
+
+TEST_CASE("菜单直选: 选择态里按 Tab 退出菜单并走补全老路") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    TypeString(editor, "/mo");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Down));
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.line == U"/model ");  // 唯一匹配,老规矩补全整名 + 空格
+}
+
+TEST_CASE("菜单直选: 非 slash 行按 Down 仍是翻历史,不进菜单") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    TypeString(editor, "hello");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Enter));  // 历史 {"hello"}
+    editor.BeginLine(true);
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Up));  // 翻到 "hello"
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Down));
+    CHECK(state.selected_index == -1);
+    CHECK(state.line.empty());  // 翻回底部草稿(空),Down 的历史职责没回归
+}
+
+TEST_CASE("菜单直选: / 开头但候选为空,Down 不进菜单(仍是历史语义)") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    TypeString(editor, "/zzz");
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Down));
+    CHECK(state.selected_index == -1);
+    CHECK(state.line == U"/zzz");  // 在底部,Down 无历史可翻,原地不动
+    CHECK(state.hint_lines.empty());
+}
+
+TEST_CASE("菜单直选: 多行 composer 里 / 是正文,Down 是行间移动不进菜单") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    TypeString(editor, "/he");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::NewLine));
+    TypeString(editor, "x");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Up));  // 光标回第一行
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Down));
+    CHECK(state.selected_index == -1);
+    CHECK(state.cursor_row == 1);  // 单纯的行间移动
+    CHECK(state.hint_lines.empty());
+}
+
+TEST_CASE("菜单直选: 候选超过 6 个时,选中项循环到窗口外,展示窗口跟着挪") {
+    std::vector<CompletionCandidate> candidates;
+    for (int i = 0; i < 8; ++i) {
+        candidates.push_back(CompletionCandidate{"/a" + std::to_string(i), "说明"});
+    }
+    LineEditorCore editor(std::move(candidates));
+    editor.BeginLine(true);
+    TypeString(editor, "/a");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::Down));  // idx 0
+    RenderState state{};
+    for (int i = 0; i < 7; ++i) {
+        state = editor.HandleKey(KeyEvent::Simple(KeyKind::Down));  // 一路到 idx 7
+    }
+    CHECK(state.selected_index == 7);
+    // 窗口挪到 [2, 8),选中项 /a7 在最后一行、带 "> " 标记。
+    REQUIRE(state.hint_lines.size() == 7);  // 6 行候选 + 1 行汇总
+    CHECK(state.hint_lines[5].rfind("> ", 0) == 0);
+    CHECK(state.hint_lines[5].find("/a7") != std::string::npos);
+    CHECK(state.hint_lines[6].find("8") != std::string::npos);  // 汇总行还在
+    // 再 Down 一下循环回第一条,窗口也回到头。
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Down));
+    CHECK(state.selected_index == 0);
+    CHECK(state.hint_lines[0].rfind("> ", 0) == 0);
+    CHECK(state.hint_lines[0].find("/a0") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// UI-D(0.16.0):Ctrl+O / Ctrl+E / 空 composer 焦点导航的按键语义翻译。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("UI-D: 空 composer 下 Tab=焦点往旧走,Shift+Tab=往新走且不切档") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.focus_move == 1);
+    CHECK(state.line.empty());  // 行内容不动
+
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::ShiftTab));
+    CHECK(state.focus_move == -1);
+    CHECK_FALSE(state.mode_changed);  // 空 composer 的 Shift+Tab 不再切确认档
+    CHECK(editor.confirm_mode() == ConfirmMode::Confirm);
+}
+
+TEST_CASE("UI-D: composer 有内容时 Tab/Shift+Tab 维持补全/切档现职") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine(true);
+    TypeString(editor, "/he");
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.focus_move == 0);
+    CHECK(state.line == U"/help ");  // 还是补全
+
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::ShiftTab));
+    CHECK(state.focus_move == 0);
+    CHECK(state.mode_changed);  // 还是切档
+    CHECK(editor.confirm_mode() == ConfirmMode::Auto);
+}
+
+TEST_CASE("UI-D: 非 composer(确认提示等单行读取)Tab/Shift+Tab 语义不回归") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine();  // 单行模式,空行
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.focus_move == 0);  // 不是焦点导航
+
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::ShiftTab));
+    CHECK(state.focus_move == 0);
+    CHECK(state.mode_changed);  // 空行也照样切档(升级前语义)
+}
+
+TEST_CASE("UI-D: Ctrl+O/Ctrl+E 只在 composer 模式下转发请求") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::CtrlO));
+    CHECK(state.toggle_expand_requested);
+    CHECK_FALSE(state.focus_view_requested);
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::CtrlE));
+    CHECK(state.focus_view_requested);
+    CHECK_FALSE(state.toggle_expand_requested);
+
+    editor.BeginLine();  // 非 composer:两个键都无动作
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::CtrlO));
+    CHECK_FALSE(state.toggle_expand_requested);
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::CtrlE));
+    CHECK_FALSE(state.focus_view_requested);
+}
+
+TEST_CASE("UI-D: Ctrl+O/Ctrl+E 不动行内容、不打断编辑") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    TypeString(editor, "abc");
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::CtrlO));
+    CHECK(state.line == U"abc");
+    CHECK(state.cursor == 3);
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::CtrlE));
+    CHECK(state.line == U"abc");
+}

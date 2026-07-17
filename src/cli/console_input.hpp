@@ -15,6 +15,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -63,6 +64,26 @@ std::optional<std::string> ReadLine(const std::string& prompt, const Theme& them
 // 根本读不到"按键",只有整行文本。
 ConfirmMode CurrentConfirmMode();
 void SetConfirmMode(ConfirmMode mode);
+
+// UI-D(0.16.0):等输入期间(composer 主提示符)按下 Ctrl+O / Ctrl+E /
+// 空 composer Tab / Shift+Tab / ESC(聚焦查看态返回用)时,终端层把语义
+// 转发给应用层的动作。终端层自己零 transcript 知识:回调打印什么它不管,
+// 回调返回 true(真干了事)就当"编辑区下面铺了一段新内容"处理——重打
+// 提示符、重测锚点、按当前编辑内容原样重画;返回 false 当这个键没被消费,
+// 按原语义继续(比如 Escape 不在聚焦查看态时还是"清空输入")。
+enum class UiKeyAction {
+    ToggleExpand,  // Ctrl+O:紧凑/详细全局切换
+    FocusOlder,    // 空 composer Tab:焦点移到上一条(从最近往旧走)
+    FocusNewer,    // 空 composer Shift+Tab:焦点往新走
+    FocusView,     // Ctrl+E:聚焦查看当前焦点条目(已在聚焦态则返回)
+    Escape,        // ESC:回调只在聚焦查看态消费它(返回会话画面),否则还给编辑器
+};
+using TranscriptUiHandler = std::function<bool(UiKeyAction)>;
+
+// 注册/清除会话级的 UI 按键回调(InteractiveLoop 进循环前注册,退出前必须
+// 清掉——回调抓着循环里的局部引用)。传空 handler 即清除。管道/重定向模式
+// 走不到逐键路径,注册了也永远不会被调,天然无感。
+void SetTranscriptUiHandler(TranscriptUiHandler handler);
 
 // M11(0.10.0):真控制台此刻的显示宽度(列数),给分界线(cli::BuildDividerLine)
 // 探测用。查的是 stdout 那个句柄(跟 DetectConsoleCapability 一致)——分界线

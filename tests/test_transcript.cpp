@@ -273,3 +273,100 @@ TEST_CASE("TruncateUtf8Codepoints: 按码点截,超长加 ...") {
     CHECK(TruncateUtf8Codepoints("汉字汉字", 2) == "汉字...");
     CHECK(TruncateUtf8Codepoints("", 5) == "");
 }
+
+// ---- UI-D(0.16.0):展开版 + 焦点标记 --------------------------------------
+
+TEST_CASE("FormatTranscriptItem expanded: 完整参数 JSON + full_output 全文逐行铺") {
+    const auto theme = BuiltinTheme("plain");
+    TranscriptItem item = MakeItem(TranscriptStatus::Ok);
+    item.input_json = R"({"command":"git status"})";
+    item.full_output = "[退出码 0]\nline1\nline2\nline3";
+    const std::string out = FormatTranscriptItem(item, theme, 120, /*expanded=*/true);
+    // 紧凑部分原样在前(状态灯 + 标题 + 摘要)。
+    CHECK(out.find("[OK] run_command(git log --oneline -3)") == 0);
+    CHECK(out.find("Done · 退出码 0 · 1.2s") != std::string::npos);
+    // 展开部分:参数一行 + 输出标题行 + 正文逐行(两空格缩进)。
+    CHECK(out.find("\n  参数: {\"command\":\"git status\"}\n") != std::string::npos);
+    CHECK(out.find("完整输出(4 行)") != std::string::npos);
+    CHECK(out.find("\n  [退出码 0]\n") != std::string::npos);
+    CHECK(out.find("\n  line1\n") != std::string::npos);
+    CHECK(out.find("\n  line3\n") != std::string::npos);
+    // 紧凑版(expanded=false)一个展开痕迹都不该有。
+    const std::string compact = FormatTranscriptItem(item, theme, 120);
+    CHECK(compact.find("参数:") == std::string::npos);
+    CHECK(compact.find("完整输出") == std::string::npos);
+    CHECK(compact.find("line1") == std::string::npos);
+}
+
+TEST_CASE("FormatTranscriptItem expanded: full_output 为空补一行占位") {
+    const auto theme = BuiltinTheme("plain");
+    TranscriptItem item = MakeItem(TranscriptStatus::Running);
+    item.summary_lines = {"Running..."};
+    const std::string out = FormatTranscriptItem(item, theme, 120, /*expanded=*/true);
+    CHECK(out.find("(无完整输出)") != std::string::npos);
+    // 没有入参 JSON 就不出参数行。
+    CHECK(out.find("参数:") == std::string::npos);
+}
+
+TEST_CASE("FormatTranscriptItem expanded: diff 全文跟在工具结果后一起铺出") {
+    const auto theme = BuiltinTheme("plain");
+    TranscriptItem item = MakeItem(TranscriptStatus::Ok);
+    item.tool_name = "edit_file";
+    item.title = "edit_file(a.txt)";
+    item.summary_lines = {"+1 -1"};
+    // full_output 的存法跟 main.cpp FinalizeItem 一致:结果 + 空行 + 完整 diff。
+    item.full_output = "成功替换 1 处\n\ndiff:\n   1    ctx\n   2  - old\n   2  + new";
+    const std::string out = FormatTranscriptItem(item, theme, 0, /*expanded=*/true);
+    CHECK(out.find("- old") != std::string::npos);
+    CHECK(out.find("+ new") != std::string::npos);
+    CHECK(out.find("成功替换 1 处") != std::string::npos);
+}
+
+TEST_CASE("FormatTranscriptItem expanded: width>0 时展开行按显示宽截断,width<=0 不截") {
+    const auto theme = BuiltinTheme("plain");
+    TranscriptItem item = MakeItem(TranscriptStatus::Ok);
+    item.full_output = std::string(200, 'z');
+    const int width = 40;
+    const std::string truncated = FormatTranscriptItem(item, theme, width, /*expanded=*/true);
+    // 每一行都不超过终端宽(物理折行会毁掉原地改写的行数记账)。
+    std::size_t pos = 0;
+    while (pos < truncated.size()) {
+        std::size_t nl = truncated.find('\n', pos);
+        if (nl == std::string::npos) {
+            nl = truncated.size();
+        }
+        CHECK(nl - pos <= static_cast<std::size_t>(width));
+        pos = nl + 1;
+    }
+    // width=0(Ctrl+E 聚焦查看):全文如实,不截。
+    const std::string full = FormatTranscriptItem(item, theme, 0, /*expanded=*/true);
+    CHECK(full.find(std::string(200, 'z')) != std::string::npos);
+}
+
+TEST_CASE("FormatTranscriptItem focused: 首行加 ► 前缀,plain/彩色都认") {
+    const auto plain = BuiltinTheme("plain");
+    TranscriptItem item = MakeItem(TranscriptStatus::Ok);
+    const std::string out = FormatTranscriptItem(item, plain, 120, /*expanded=*/false, /*focused=*/true);
+    CHECK(out.rfind("\xE2\x96\xBA [OK] ", 0) == 0);  // "► [OK] " 打头
+    // 摘要行不带标记。
+    CHECK(out.find("\n\xE2\x96\xBA") == std::string::npos);
+
+    const auto dark = BuiltinTheme("dark");
+    const std::string colored = FormatTranscriptItem(item, dark, 120, false, true);
+    CHECK(colored.rfind("\xE2\x96\xBA ", 0) == 0);  // 彩色主题同样 ► 打头,标记不上色
+
+    // 不聚焦时一个 ► 都没有。
+    const std::string unfocused = FormatTranscriptItem(item, plain, 120);
+    CHECK(unfocused.find("\xE2\x96\xBA") == std::string::npos);
+}
+
+TEST_CASE("FormatTranscriptItem focused+expanded: 子代理条目缩进不乱") {
+    const auto theme = BuiltinTheme("plain");
+    TranscriptItem item = MakeItem(TranscriptStatus::Ok, TranscriptKind::SubTool);
+    item.input_json = "{\"path\":\"a.txt\"}";
+    item.full_output = "内容";
+    const std::string out = FormatTranscriptItem(item, theme, 120, /*expanded=*/true, /*focused=*/true);
+    CHECK(out.rfind("\xE2\x96\xBA     [OK] ", 0) == 0);  // ► + 子代理四空格缩进
+    CHECK(out.find("\n      参数: ") != std::string::npos);  // 4 + 2 缩进
+    CHECK(out.find("\n      内容\n") != std::string::npos);
+}

@@ -268,7 +268,7 @@ std::string FormatDiff(const std::vector<DiffLine>& diff, const Theme& theme, in
         const std::size_t line_bytes = plain.size() + 1;
         if ((limit_lines && emitted >= max_lines) || (limit_bytes && bytes + line_bytes > max_bytes)) {
             out += "\xE2\x80\xA6 已省略 " + std::to_string(rows.size() - r) +
-                   " 行(Ctrl+E 查看完整——下棒实装)\n";
+                   " 行(Ctrl+E 查看完整)\n";
             return out;
         }
         // 上色只在 -/+ 行(整行染),折叠标注走淡色,上下文不染。plain

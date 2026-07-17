@@ -78,7 +78,7 @@
 
 namespace {
 
-constexpr std::string_view kVersion = "0.15.0";
+constexpr std::string_view kVersion = "0.16.0";
 
 void PrintVersion() {
     std::cout << "lubancode " << kVersion << "\n";
@@ -127,7 +127,17 @@ void PrintHelp() {
         << "                  默认把 Alt+Enter 绑成全屏切换、会吞掉这个键,用 Shift+Enter 最稳);\n"
         << "                  Enter 把整段(多行拼换行)一次发出,空白内容按 Enter 原地不动\n"
         << "  ESC             流式回复期间按下:打断当前这轮回答,已出的半截话保留、下一轮能接着聊;\n"
-        << "                  空闲时按下:清空正在编辑的整段输入;确认提示 [y/a/N] 下按下:等同拒绝\n"
+        << "                  空闲时按下:清空正在编辑的整段输入;确认提示 [y/a/N] 下按下:等同拒绝;\n"
+        << "                  聚焦查看(Ctrl+E)画面里按下:返回会话\n"
+        << "  / 后按 ↓↑       进入候选菜单直选(↓ 选中第一条,↓↑ 循环移动),Enter 执行选中命令\n"
+        << "                  (已敲的参数尾巴原样保留),继续打字/退格/ESC 回普通编辑\n"
+        << "  Ctrl+O          紧凑/详细全局切换:把全部工具条目按新档整块重打(详细 = 完整参数\n"
+        << "                  JSON + 完整输出/diff 全文),再按切回\n"
+        << "  Ctrl+E          聚焦查看当前焦点条目(无焦点则最近一条)全文;再按 Ctrl+E 或 ESC 返回\n"
+        << "  Tab             输入框有内容:补全/轮转 slash 命令(现职);输入框为空:焦点移到\n"
+        << "                  上一条工具条目(从最近往旧走)\n"
+        << "  Shift+Tab       输入框有内容:循环切确认档(confirm/auto/yolo,现职);输入框为空:\n"
+        << "                  焦点往新走\n"
         << "  流式期间打字回车  不会打断当前流,而是排进队列,本轮结束后按顺序自动发出\n"
         << "  /exit           退出(裸词 exit/quit 也认)\n\n"
         << "配置优先级(从高到低,按字段逐个决,不是整套配置一刀切):\n"
@@ -732,7 +742,13 @@ void PrintConfirmDetails(const std::string& name, const nlohmann::json& input) {
 // 输出由 ToolDisplay 另走一条路。
 class TranscriptPainter {
 public:
-    TranscriptPainter(const lubancode::cli::Theme& theme, bool enabled) : theme_(theme), enabled_(enabled) {}
+    // expanded:UI-D(0.16.0)紧凑/详细全局开关的会话级状态(InteractiveLoop
+    // 持有,Ctrl+O 翻转),指针判空兜底(AskOnce 不传,恒紧凑)。详细态下
+    // 新条目/终态改写直接按展开版画(完整参数 + full_output 全文,行数多就
+    // 整屏往下铺,滚动自然发生);FormatTranscriptItem 的 width>0 截断保证
+    // 每行绝不物理折行,锚点记账照旧成立。
+    TranscriptPainter(const lubancode::cli::Theme& theme, bool enabled, const bool* expanded = nullptr)
+        : theme_(theme), enabled_(enabled), expanded_(expanded) {}
 
     TranscriptPainter(const TranscriptPainter&) = delete;
     TranscriptPainter& operator=(const TranscriptPainter&) = delete;
@@ -893,7 +909,8 @@ private:
 
     std::string Render(const lubancode::cli::TranscriptItem& item) const {
         const int width = lubancode::cli::DetectConsoleWidth().value_or(80);
-        return lubancode::cli::FormatTranscriptItem(item, theme_, width);
+        const bool expanded = expanded_ != nullptr && *expanded_;
+        return lubancode::cli::FormatTranscriptItem(item, theme_, width, expanded);
     }
 
     static std::string FirstNLines(const std::string& text, int n) {
@@ -952,6 +969,7 @@ private:
 
     const lubancode::cli::Theme& theme_;
     bool enabled_;
+    const bool* expanded_ = nullptr;  // UI-D:紧凑/详细会话级开关,见构造函数注释
     std::vector<Anchor> anchors_;
 };
 
@@ -1002,7 +1020,7 @@ constexpr std::size_t kDiffFinalMaxBytes = 8 * 1024;
 // UI-C:一份拼装好的 diff 预览。colored 是直接可打印的整块(路径行 +
 // diff 标题行 + diff 正文,每行缩进四空格、带主题色、按宽/行/字节截断);
 // full 是 plain 全量(不截行、不截字节、不带色),终态并进 full_output
-// 给 Ctrl+E(下棒实装)看全;final_lines 是终态条目摘要里留存的 diff
+// 给 Ctrl+E 聚焦查看看全;final_lines 是终态条目摘要里留存的 diff
 // (行数收紧到 kDiffFinalMaxLines,预先按宽截好——夹 ANSI 的行渲染层
 // 不再截宽,物理折行会毁掉原地改写的行数记账)。
 struct FileDiffPreview {
@@ -1097,11 +1115,11 @@ std::optional<FileDiffPreview> BuildFileDiffPreview(const std::string& name, con
 struct ToolDisplay {
     ToolDisplay(std::vector<lubancode::cli::TranscriptItem>& transcript_ref, const lubancode::cli::Theme& theme_ref,
                 bool console, std::shared_ptr<lubancode::tools::TodoListState> todo,
-                const std::atomic<bool>* cancel)
+                const std::atomic<bool>* cancel, const bool* expanded = nullptr)
         : transcript(transcript_ref),
           theme(theme_ref),
           is_console(console),
-          painter(theme_ref, console),
+          painter(theme_ref, console, expanded),
           todo_state(std::move(todo)),
           cancel_flag(cancel) {}
 
@@ -1323,6 +1341,8 @@ private:
         item.kind = kind;
         item.tool_name = name;
         item.title = lubancode::cli::BuildToolTitle(name, input);
+        // UI-D:完整入参存档,展开版("参数: {...}")和 Ctrl+E 聚焦查看用。
+        item.input_json = input.is_null() ? std::string() : input.dump();
         item.status = lubancode::cli::TranscriptStatus::Running;
         item.summary_lines = {"Running..."};
         item.start_time = std::chrono::steady_clock::now();
@@ -1343,7 +1363,7 @@ private:
         item.end_time = std::chrono::steady_clock::now();
         // UI-C:有 diff 预览的(edit_file/write_file),完整 plain diff 跟着
         // 工具结果一起进 full_output——屏上的预览是要被擦掉的,Ctrl+E
-        // (下棒实装)从这儿看全。
+        // 聚焦查看从这儿看全。
         item.full_output = cli::TruncateUtf8Bytes(
             diff_full.empty() ? result.content : result.content + "\n\n" + diff_full, cli::kFullOutputCapBytes);
         const double seconds = std::chrono::duration<double>(item.end_time - item.start_time).count();
@@ -1641,17 +1661,21 @@ struct RunTurnResult {
 // 留个口子)。
 // transcript:UI-B(0.12.0)新增,会话级工具条目存档(InteractiveLoop/
 // AskOnce 各持有一份,跨多轮累积),UI-C/D 的 Ctrl+E 全文查看要用。
+// transcript_expanded:UI-D(0.16.0)紧凑/详细会话级开关(Ctrl+O 翻转,
+// InteractiveLoop 持有),详细态下这一轮新画的条目直接按展开版画;AskOnce
+// 不传(nullptr),恒紧凑。
 RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bool auto_confirm,
                        std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
                        lubancode::cli::ContextTracker& context_tracker, lubancode::tools::ToolRegistry& registry,
                        const lubancode::config::HooksConfig& hooks_config, bool is_console,
                        std::vector<lubancode::cli::TranscriptItem>& transcript,
-                       std::shared_ptr<lubancode::tools::TodoListState> todo_state = nullptr) {
+                       std::shared_ptr<lubancode::tools::TodoListState> todo_state = nullptr,
+                       const bool* transcript_expanded = nullptr) {
     UsageStats usage_stats;
     // cancel_flag 先于 display/callbacks 建:ToolDisplay 要拿它判断"这一轮
     // 是不是被 ESC 打断的"(打断态条目标 Interrupted)。
     std::atomic<bool> cancel_flag{false};
-    ToolDisplay display(transcript, theme, is_console, todo_state, &cancel_flag);
+    ToolDisplay display(transcript, theme, is_console, todo_state, &cancel_flag, transcript_expanded);
     const lubancode::agent::Callbacks callbacks =
         BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker, registry,
                         hooks_config, display);
@@ -1752,7 +1776,13 @@ void PrintSlashHelp() {
               << "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md)\n"
               << "  /exit           退出(裸词 exit/quit 也认)\n"
               << "多行输入:Shift+Enter 插换行(Alt+Enter 同义,但 Windows Terminal 默认把它绑成全屏\n"
-              << "切换、会吞掉,推荐 Shift+Enter);Enter 发送整段;多行时首行的 / 是正文,不当命令。\n";
+              << "切换、会吞掉,推荐 Shift+Enter);Enter 发送整段;多行时首行的 / 是正文,不当命令。\n"
+              << "候选菜单:/ 开头时按 ↓ 进入直选(↓↑ 循环移动,Enter 执行选中命令、已敲的参数尾巴\n"
+              << "原样保留;打字/退格/ESC 回普通编辑);Tab 补全/轮转照旧。\n"
+              << "条目查看(0.16.0):Ctrl+O 紧凑/详细全局切换(详细 = 完整参数 + 输出/diff 全文,\n"
+              << "整块重打);输入框为空时 Tab = 焦点往旧走、Shift+Tab = 焦点往新走(有内容时两键\n"
+              << "维持补全/切档现职——这是定案键位);Ctrl+E 聚焦查看焦点条目全文(无焦点则最近\n"
+              << "一条),再按 Ctrl+E 或 ESC 返回;流式输出期间这些键不响应。\n";
 }
 
 // /skills 命令:列出扫描到的技能;一个都没有时打印两处目录路径,顺带说明
@@ -2292,8 +2322,118 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     MountPlugins(plugin_host, registry, theme, plugin_mounted, plugin_warnings);
 
     // UI-B(0.12.0):会话级工具条目存档,跨多轮 RunTurn 累积。full_output
-    // 现在就存好(截 64KB),UI-C/D 的 Ctrl+E 全文查看直接从这儿取。
+    // 现在就存好(截 64KB),UI-D 的 Ctrl+E 全文查看直接从这儿取。
     std::vector<lubancode::cli::TranscriptItem> transcript;
+
+    // -----------------------------------------------------------------------
+    // UI-D(0.16.0):Ctrl+O 紧凑/详细 + 焦点导航 + Ctrl+E 聚焦查看。
+    // 三样会话级状态都在这儿;按键语义翻译在 LineEditorCore(composer 空不空、
+    // 键是什么),转发管道在 console_input 的 SetTranscriptUiHandler,真正
+    // 打印重画全在下面这个回调里。只在等输入时会被调(流式期间监听线程
+    // 天然吞不进这些键);管道模式走不到逐键路径,整套无感。
+    // -----------------------------------------------------------------------
+    bool transcript_expanded = false;  // Ctrl+O 全局开关,RunTurn 里新条目也按它画
+    int focus_index = -1;              // 焦点条目的 transcript 下标,-1 = 无焦点
+    bool focus_view_active = false;    // 正在聚焦查看
+
+    // 聚焦查看返回时的"简化重画":最近几条紧凑摘要(焦点标记照带)。
+    const auto print_recent_items = [&transcript, &theme, &focus_index](std::size_t count) {
+        const int width = lubancode::cli::DetectConsoleWidth().value_or(80);
+        const std::size_t from = transcript.size() > count ? transcript.size() - count : 0;
+        for (std::size_t i = from; i < transcript.size(); ++i) {
+            std::cout << lubancode::cli::FormatTranscriptItem(transcript[i], theme, width, /*expanded=*/false,
+                                                               static_cast<int>(i) == focus_index);
+        }
+    };
+
+    lubancode::cli::SetTranscriptUiHandler([&](lubancode::cli::UiKeyAction action) -> bool {
+        namespace cli = lubancode::cli;
+        const int width = cli::DetectConsoleWidth().value_or(80);
+        const int count = static_cast<int>(transcript.size());
+        switch (action) {
+            case cli::UiKeyAction::ToggleExpand: {
+                // Ctrl+O:全局切换。简化方案:从当前光标处把全部条目按新档
+                // 重打一遍,旧画面留在滚动历史里——跨轮条目的逐条锚点早就
+                // 失效(TranscriptPainter 一轮一个),原地整体重排要重建
+                // 全部行号记账,代价配不上收益,取舍见报告。聚焦查看态顺带
+                // 退出,免得两种"整块铺屏"叠一块。
+                transcript_expanded = !transcript_expanded;
+                focus_view_active = false;
+                std::cout << "\n" << theme.stats
+                          << (transcript_expanded ? "—— 详细模式(Ctrl+O 切回紧凑)——" : "—— 紧凑模式 ——")
+                          << theme.reset << "\n";
+                if (count == 0) {
+                    std::cout << "(本会话还没有工具条目)\n";
+                    return true;
+                }
+                for (std::size_t i = 0; i < transcript.size(); ++i) {
+                    std::cout << cli::FormatTranscriptItem(transcript[i], theme, width, transcript_expanded,
+                                                            static_cast<int>(i) == focus_index);
+                }
+                return true;
+            }
+            case cli::UiKeyAction::FocusOlder:
+            case cli::UiKeyAction::FocusNewer: {
+                if (count == 0) {
+                    return false;  // 没条目,键还回去(本来也无事发生)
+                }
+                if (focus_index < 0) {
+                    focus_index = count - 1;  // 起手落在最近一条
+                } else if (action == cli::UiKeyAction::FocusOlder) {
+                    if (focus_index > 0) {
+                        --focus_index;  // 到最老一条停住
+                    }
+                } else if (focus_index + 1 < count) {
+                    ++focus_index;  // 到最新一条停住
+                }
+                std::cout << "\n" << theme.stats << "[焦点 " << (focus_index + 1) << "/" << count
+                          << "] Tab 往旧 · Shift+Tab 往新 · Ctrl+E 查看全文" << theme.reset << "\n";
+                std::cout << cli::FormatTranscriptItem(transcript[static_cast<std::size_t>(focus_index)], theme,
+                                                        width, /*expanded=*/false, /*focused=*/true);
+                return true;
+            }
+            case cli::UiKeyAction::FocusView: {
+                if (focus_view_active) {
+                    // 再按 Ctrl+E:返回。简化重画:横幅 + 最近几条摘要,
+                    // 聚焦画面留在滚动历史里。
+                    focus_view_active = false;
+                    std::cout << "\n" << theme.stats << "—— 返回会话 ——" << theme.reset << "\n";
+                    PrintBanner(config, theme);
+                    print_recent_items(5);
+                    return true;
+                }
+                if (count == 0) {
+                    return false;
+                }
+                const int idx = focus_index >= 0 ? focus_index : count - 1;
+                focus_view_active = true;
+                std::cout << "\n" << theme.banner << "—— 聚焦查看 条目 " << (idx + 1) << "/" << count
+                          << ",Ctrl+E 或 ESC 返回 ——" << theme.reset << "\n";
+                // width=0:标题 + 完整参数 + full_output 全文如实铺,不截宽,
+                // 超长靠终端自然折行/滚动(不真清屏——conhost 的滚回缓冲跟
+                // 屏幕缓冲是同一块,真清会把历史一并抹掉,取舍见报告)。
+                std::cout << cli::FormatTranscriptItem(transcript[static_cast<std::size_t>(idx)], theme,
+                                                        /*width=*/0, /*expanded=*/true);
+                return true;
+            }
+            case cli::UiKeyAction::Escape: {
+                if (!focus_view_active) {
+                    return false;  // 不在聚焦查看态:ESC 还给编辑器,维持"清空输入"老语义
+                }
+                focus_view_active = false;
+                std::cout << "\n" << theme.stats << "—— 返回会话 ——" << theme.reset << "\n";
+                PrintBanner(config, theme);
+                print_recent_items(5);
+                return true;
+            }
+        }
+        return false;
+    });
+    // 回调抓着一堆局部引用,InteractiveLoop 返回前必须清掉(异常路径也算,
+    // 所以用 RAII 不用手动调)。
+    struct UiHandlerGuard {
+        ~UiHandlerGuard() { lubancode::cli::SetTranscriptUiHandler(nullptr); }
+    } ui_handler_guard;
 
     std::optional<lubancode::agent::AgentLoop> loop;
     const auto rebuild_loop = [&]() {
@@ -2495,9 +2635,13 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
             }
         }
 
+        // 人在聚焦查看画面里直接敲了正文发送:视为离开聚焦态(新一轮输出
+        // 马上往下铺,聚焦画面已经不是"当前画面"了),下次 Ctrl+E 是重新
+        // 聚焦,不是"返回"。
+        focus_view_active = false;
         const RunTurnResult turn_result =
             RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry,
-                    config.hooks, spinner_enabled, transcript, todo_state);
+                    config.hooks, spinner_enabled, transcript, todo_state, &transcript_expanded);
         // 每轮结束(成功/出错/ESC 打断都算)把新增消息逐条追加落盘。
         persist_new_messages();
         for (auto& queued : turn_result.queued_lines) {

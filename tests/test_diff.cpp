@@ -225,7 +225,7 @@ TEST_CASE("FormatDiff: 行数超限截断并标注省略行数") {
     const std::string text = FormatDiff(ComputeLineDiff({}, new_lines), theme, 0, /*max_lines=*/10, 0);
     const auto lines = Lines(text);
     REQUIRE(lines.size() == 11);  // 10 行正文 + 1 行省略标注
-    CHECK(lines.back() == "… 已省略 20 行(Ctrl+E 查看完整——下棒实装)");
+    CHECK(lines.back() == "… 已省略 20 行(Ctrl+E 查看完整)");
 }
 
 TEST_CASE("FormatDiff: 字节超限同样截断标注") {

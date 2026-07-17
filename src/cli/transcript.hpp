@@ -45,6 +45,7 @@ struct TranscriptItem {
     TranscriptKind kind = TranscriptKind::Tool;
     std::string tool_name;                    // 原始工具名(run_command / mcp__x__y ……)
     std::string title;                        // 首行正文:工具名(关键参数摘要),不含状态灯
+    std::string input_json;                   // 完整入参紧凑 JSON(UI-D 展开版/聚焦查看用;空 = 没有入参)
     std::vector<std::string> summary_lines;   // ⎿ 之后那几行
     std::string full_output;                  // 完整结果,截 kFullOutputCapBytes
     TranscriptStatus status = TranscriptStatus::Running;
@@ -56,7 +57,18 @@ struct TranscriptItem {
 // 首行超宽按显示宽度截断加 "..."(绝不物理折行——折行会毁掉原地改写的
 // 行数记账);width <= 0 表示不截断。摘要行不截(可能夹着 todo 清单自带
 // 的颜色序列,按显示宽截断会把 ANSI 剪碎)。
-std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme, int width);
+//
+// UI-D(0.16.0)两个新开关:
+//   expanded —— 详细版:摘要之后追加完整入参 JSON 一行("参数: {...}"),
+//     再接 full_output 全文(含 UI-C 并进去的完整 diff),一行分隔标题
+//     "── 完整输出(N 行)──"、正文每行缩进;full_output 为空补一行
+//     "(无完整输出)"。width > 0 时这些行同样按显示宽截断(Ctrl+O 的整块
+//     重打走 TranscriptPainter 之外的裸打印也不许物理折行,免得铺屏乱套);
+//     width <= 0 不截(Ctrl+E 聚焦查看给 0,全文如实铺,终端自然折行/滚动)。
+//     夹 ANSI 的行照旧不截。
+//   focused —— 焦点条目:首行行首加 "► " 醒目标记(占两列,宽度记账让位)。
+std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme, int width,
+                                  bool expanded = false, bool focused = false);
 
 // plain 主题下的状态文字([RUNNING]/[OK]/…),渲染和单测共用一份映射。
 std::string TranscriptStatusWord(TranscriptStatus status);
@@ -95,7 +107,7 @@ std::string SearchDoneSummary(const std::string& content);
 std::string AgentDoneSummary(int rounds, int sub_tool_calls);
 
 // 失败态摘要:首行固定 "Error: <首行>",接错误输出的后续行,总共最多取
-// 前 5 行;更长的补一行截断标注 "(共 N 行,Ctrl+E 查看完整——下棒实装)"。
+// 前 5 行;更长的补一行截断标注 "(共 N 行,Ctrl+E 查看完整)"。
 // run_command 的失败结果([退出码 N] 开头)首行改写成 "Error: 退出码 N"。
 std::vector<std::string> ErrorSummaryLines(const std::string& tool_name, const std::string& content);
 

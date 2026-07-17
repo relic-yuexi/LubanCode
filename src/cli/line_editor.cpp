@@ -306,6 +306,7 @@ void LineEditorCore::BeginLine(bool composer) {
     composer_ = composer;
     ClearBuffer();
     tab_cycle_.reset();
+    menu_selection_.reset();
     ResetHistoryBrowsing();
 }
 
@@ -486,13 +487,17 @@ RenderState LineEditorCore::BuildRenderState(bool submitted, bool cleared, bool 
     // UI-A:提示区只在"composer 恰好一行、且以 / 开头"时出现;多行时 / 是
     // 正文,不当命令,不出提示。
     if (lines_.size() == 1 && !lines_[0].empty() && lines_[0].front() == U'/') {
-        // 正在轮转(tab_cycle_ 有值)时,候选名单和"选中第几个"直接用这次
-        // Tab 会话存下来的那份,不能拿当前行现算——轮转途中 line_ 已经被
-        // 换成候选名本身,重新按 CurrentWord(line_) 去匹配只会匹配出它
-        // 自己一个,候选名单会跟着"塌缩成一个",连带轮转标记也没地方标。
+        // 菜单选择态(0.16.0 ↓↑ 直选)优先:候选名单和选中下标用进入菜单
+        // 那一刻存下的那份。其次是正在轮转的 Tab 会话(tab_cycle_ 有值),
+        // 同样不能拿当前行现算——轮转途中 line_ 已经被换成候选名本身,重新
+        // 按 CurrentWord(line_) 去匹配只会匹配出它自己一个,候选名单会跟着
+        // "塌缩成一个",连带选中标记也没地方标。
         std::vector<std::string> matches;
         int selected_index = -1;
-        if (tab_cycle_.has_value()) {
+        if (menu_selection_.has_value()) {
+            matches = menu_selection_->matches;
+            selected_index = menu_selection_->index;
+        } else if (tab_cycle_.has_value()) {
             matches = tab_cycle_->matches;
             selected_index = tab_cycle_->index;
         } else {
@@ -500,6 +505,7 @@ RenderState LineEditorCore::BuildRenderState(bool submitted, bool cleared, bool 
             matches = MatchingCandidateNames(word);
         }
         state.hint_lines = BuildHintLines(matches, selected_index);
+        state.selected_index = selected_index;
     }
 
     return state;
@@ -512,8 +518,15 @@ std::vector<std::string> LineEditorCore::BuildHintLines(const std::vector<std::s
         return lines;
     }
     constexpr std::size_t kMaxLines = 6;
-    const std::size_t shown = std::min(matches.size(), kMaxLines);
-    for (std::size_t i = 0; i < shown; ++i) {
+    // 选中项落在前 6 个之外时,展示窗口往下挪到"选中项是窗口最后一行",
+    // 保证 "> " 标记永远看得见(菜单选择态循环到第 7 个往后、Tab 轮转同理)。
+    std::size_t begin = 0;
+    if (selected_index >= static_cast<int>(kMaxLines)) {
+        begin = static_cast<std::size_t>(selected_index) - kMaxLines + 1;
+    }
+    const std::size_t shown = std::min(matches.size() - begin, kMaxLines);
+    for (std::size_t offset = 0; offset < shown; ++offset) {
+        const std::size_t i = begin + offset;
         const std::string& name = matches[i];
         std::string description;
         for (const auto& cand : slash_candidates_) {
@@ -550,6 +563,41 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
 
     if (effective.kind != KeyKind::Tab) {
         tab_cycle_.reset();
+    }
+
+    // 0.16.0 slash 候选菜单直选:菜单选择态优先于一切旧语义。↓/↑ 循环移动
+    // 选中标记;Enter 把整行换成"选中候选名 + 进入时存下的参数尾巴"再走
+    // 下面正常的 Enter 提交路;ESC 只退出选择态(不清行,跟空闲态 ESC 清
+    // composer 是两码事);其余任何按键(打字、退格、Tab、左右键……)先退出
+    // 选择态,再按各自原语义继续处理——打字/退格回普通编辑后,候选提示会
+    // 随新前缀自动刷新(BuildRenderState 现算)。
+    if (menu_selection_.has_value()) {
+        const int count = static_cast<int>(menu_selection_->matches.size());
+        switch (effective.kind) {
+            case KeyKind::Down:
+                menu_selection_->index = (menu_selection_->index + 1) % count;
+                return BuildRenderState(false, false, false, false);
+            case KeyKind::Up:
+                menu_selection_->index = (menu_selection_->index + count - 1) % count;
+                return BuildRenderState(false, false, false, false);
+            case KeyKind::Esc:
+                menu_selection_.reset();
+                return BuildRenderState(false, false, false, false);
+            case KeyKind::Enter: {
+                // 采纳:整行替换成选中命令名,用户已敲的参数尾巴(suffix)
+                // 原样接在后面,然后落进下面的 Enter 分支正常提交。
+                const std::string& name =
+                    menu_selection_->matches[static_cast<std::size_t>(menu_selection_->index)];
+                lines_.assign(1, AsciiToU32(name) + menu_selection_->suffix);
+                row_ = 0;
+                col_ = lines_[0].size();
+                menu_selection_.reset();
+                break;  // 不 return,交给下面 switch 的 Enter 分支提交
+            }
+            default:
+                menu_selection_.reset();
+                break;  // 退出选择态,按键本身的原语义继续走下面的 switch
+        }
     }
 
     switch (effective.kind) {
@@ -602,14 +650,42 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
             if (row_ + 1 < lines_.size()) {
                 ++row_;
                 col_ = std::min(col_, lines_[row_].size());
+            } else if (lines_.size() == 1 && !lines_[0].empty() && lines_[0].front() == U'/') {
+                // 0.16.0:单行、以 / 开头、候选非空——↓ 进入菜单选择态,选中
+                // 第一条。候选为空(比如 /zzz)不进菜单,↓ 保持翻历史的老
+                // 语义;多行 composer 里 / 是正文,走不到这个分支(上面的
+                // 行间移动先接住了)。
+                const std::u32string word = CurrentWord(lines_[0]);
+                std::vector<std::string> matches = MatchingCandidateNames(word);
+                if (!matches.empty()) {
+                    menu_selection_ = MenuSelectionState{std::move(matches), 0, lines_[0].substr(word.size())};
+                } else {
+                    MoveHistory(false);
+                }
             } else {
                 MoveHistory(false);
             }
             break;
         case KeyKind::Tab:
+            // UI-D(0.16.0):composer 整个为空时,Tab 不再是补全(本来也无
+            // 从补起),改成"焦点移到上一条工具条目"(从最近往旧走)的请求,
+            // 转发给应用层。有内容时补全/轮转职责一字不变。
+            if (composer_ && lines_.size() == 1 && lines_[0].empty()) {
+                RenderState state = BuildRenderState(false, false, false, false);
+                state.focus_move = 1;
+                return state;
+            }
             HandleTab();
             break;
         case KeyKind::ShiftTab:
+            // UI-D(0.16.0):composer 整个为空时,Shift+Tab 是"焦点往新走"
+            // 的请求,不切确认档;有内容时(以及一切非 composer 读取,比如
+            // 确认提示 [y/a/N])维持切档现职。
+            if (composer_ && lines_.size() == 1 && lines_[0].empty()) {
+                RenderState state = BuildRenderState(false, false, false, false);
+                state.focus_move = -1;
+                return state;
+            }
             confirm_mode_ = NextConfirmMode(confirm_mode_);
             return BuildRenderState(false, false, false, true);
         case KeyKind::Enter: {
@@ -657,6 +733,23 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
             ResetHistoryBrowsing();
             RenderState state = BuildRenderState(false, true, false, false);
             state.esc_pressed = true;
+            return state;
+        }
+        case KeyKind::CtrlO: {
+            // UI-D:紧凑/详细全局切换请求。只在 composer(主提示符)下转发,
+            // 确认提示、/model 选择这些单行读取不认这个键(什么都不发生)。
+            RenderState state = BuildRenderState(false, false, false, false);
+            if (composer_) {
+                state.toggle_expand_requested = true;
+            }
+            return state;
+        }
+        case KeyKind::CtrlE: {
+            // UI-D:聚焦查看请求,同上只在 composer 下转发。
+            RenderState state = BuildRenderState(false, false, false, false);
+            if (composer_) {
+                state.focus_view_requested = true;
+            }
             return state;
         }
     }
