@@ -109,6 +109,19 @@ std::optional<int> DetectConsoleWidth();
 // 锁永远拿得到,不影响非交互路径的性能/行为。
 std::mutex& StdoutWriteMutex();
 
+// markdown 收束重画 × M10 监听线程的对账口子:TurnInputListener 在流式
+// 当口打完 "[已打断]"/"[已排队] ..." 整行之后(此刻它正持着
+// StdoutWriteMutex)调这个钩子。正文重画的行数账按"块首行号 + 光标位移"
+// 记,监听线程插进来的这几行不在账上——不通气的话,收束重画会把排队回显
+// 整行擦掉,恰逢贴着缓冲区底滚屏时锚点还会错行。main.cpp 的 RunTurn 把
+// 钩子接到 StreamBodyTracker 上:作废当前块锚点,这一块保持原样不重画
+// (宁可漏渲染,不擦用户的回显)。
+// 约定:钩子在持有 StdoutWriteMutex 的前提下被调,钩子实现不得再去锁它;
+// 设置/清除(传空)也在锁内做,跟监听线程的调用天然错开。RunTurn 在
+// listener.Stop()(线程已 join,不会再有人调)之后立刻清除,钩子绝不
+// 活过它抓引用的对象。
+void SetStreamScreenPrintHook(std::function<void()> hook);
+
 // M10:ESC 打断当前轮 + 消息排队用的监听器。main.cpp 在"发出请求到本轮
 // Run() 结束"这段窗口期起一个实例:ESC 键按下就把 cancel_flag 置位、打一行
 // 淡色 "[已打断]";其余可打印字符进内部排队缓冲(Backspace 能退格),遇

@@ -141,6 +141,30 @@ TEST_CASE("语言包: 坏 JSON / 顶层不是 object / 值不是字符串,警告
     std::filesystem::remove_all(dir);
 }
 
+TEST_CASE("语言包: 目录里混着子目录/悬空链接,跳过不崩,好包照装") {
+    // 修复钉子:目录扫描一度用 throwing 版 is_regular_file() 和 range-for
+    // 的 operator++,悬空符号链接/权限变动会抛 filesystem_error 直接掀翻
+    // 启动。现在全走 error_code 重载——脏条目跳过,好包照装,永不抛。
+    // "扫描中途权限变动/ACCESS_DENIED"这类真会让 error_code 置位的场景
+    // 没法在单测里稳定摆出来(要跨进程改 ACL),那半边靠走查:增量与状态
+    // 全用 ec 重载,失败只落警告,见 i18n.cpp LoadLanguagePacksFromDir 注释。
+    LangGuard guard;
+    const auto dir = MakeTempLangDir("dirty");
+    WriteFileUtf8(dir / "ja.json", R"({"banner.hint": "OK"})");
+    std::filesystem::create_directories(dir / "sub.json");  // 顶着 .json 名的子目录
+    std::error_code link_ec;
+    // 悬空符号链接:Windows 没开发者模式/管理员权限时建不出来——建不成就
+    // 只靠子目录那半边(is_regular_file 的 ec 重载对两者同一条路)。
+    std::filesystem::create_symlink(dir / "no_such_target.json", dir / "dangling.json", link_ec);
+
+    const auto warnings = cli::LoadLanguagePacksFromDir(dir.string());
+    CHECK(warnings.empty());  // 脏条目静默跳过,跟"非 .json 不理会"同一待遇
+    CHECK(cli::HasLanguage("ja"));
+    CHECK_FALSE(cli::HasLanguage("sub"));
+    CHECK_FALSE(cli::HasLanguage("dangling"));
+    std::filesystem::remove_all(dir);
+}
+
 TEST_CASE("MapLocaleToLanguage: zh 前缀→zh-CN,en 前缀→en,认不出→zh-CN") {
     CHECK(cli::MapLocaleToLanguage("zh-CN") == "zh-CN");
     CHECK(cli::MapLocaleToLanguage("zh-TW") == "zh-CN");

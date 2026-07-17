@@ -1003,8 +1003,20 @@ std::vector<std::string> LoadLanguagePacksFromDir(const std::string& dir) {
     std::error_code ec;
     const fs::path dir_path(std::u8string(reinterpret_cast<const char8_t*>(dir.data()), dir.size()));
     if (fs::exists(dir_path, ec) && fs::is_directory(dir_path, ec)) {
-        for (const auto& entry : fs::directory_iterator(dir_path, ec)) {
-            if (!entry.is_regular_file()) {
+        // 扫描全程走 error_code 重载,一处也不许抛:throwing 版的
+        // entry.is_regular_file() 和 range-for 隐含的 operator++ 碰上悬空
+        // 符号链接、扫描中途的权限变动会直接抛 filesystem_error,把启动
+        // 掀翻——语言包是锦上添花,永远不能阻断启动。构造失败/中途递进
+        // 失败记条警告收场;单个脏条目(状态查不动、不是普通文件)悄悄
+        // 跳过,跟"目录/非 .json 不理会"同一待遇。
+        fs::directory_iterator dir_it(dir_path, ec);
+        if (ec) {
+            warnings.push_back(dir + ": 语言包目录打不开,整体跳过(" + ec.message() + ")");
+        }
+        for (; !ec && dir_it != fs::directory_iterator(); dir_it.increment(ec)) {
+            const fs::directory_entry& entry = *dir_it;
+            std::error_code entry_ec;
+            if (!entry.is_regular_file(entry_ec) || entry_ec) {
                 continue;
             }
             const fs::path& path = entry.path();
@@ -1049,6 +1061,11 @@ std::vector<std::string> LoadLanguagePacksFromDir(const std::string& dir) {
                 continue;
             }
             packs[code] = std::move(table);
+        }
+        if (ec) {
+            // dir_it.increment(ec) 失败时迭代器已被置成 end,循环自然收束
+            // ——装上的照装,剩下的作罢,记一笔就行。
+            warnings.push_back(dir + ": 语言包目录扫描中断,剩余文件跳过(" + ec.message() + ")");
         }
     }
 

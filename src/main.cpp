@@ -1110,6 +1110,14 @@ public:
 #endif
     }
 
+    // 监听线程在流式正文当中插打了整行提示([已排队]/[已打断]):这几行
+    // 不在本块的行数账上,"块首行号 + 光标位移"这笔账从此骗人——作废当前
+    // 块,收束时保持原样不重画,用户的回显一根汗毛不动;下一块(工具条目
+    // 之后)照常重新取锚,不受牵连。经 cli::SetStreamScreenPrintHook 由监听
+    // 线程调,调用方彼时正持有 StdoutWriteMutex(跟 OnDelta 里读写 unsafe_
+    // 的锁是同一把),这里不再锁、也不能再锁(非递归)。
+    void InvalidateBlockAnchor() { unsafe_ = true; }
+
     // 工具条目要开画了:当前块到此为止,屏上保持原样。
     void OnBlockBreak() {
         if (!enabled_) {
@@ -1913,6 +1921,12 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                         hooks_config, display, body_tracker);
 
     lubancode::cli::TurnInputListener listener(cancel_flag, theme);
+    // markdown × M10:监听线程随时可能在流式正文当中插打 [已排队]/[已打断]
+    // 整行——这几行不在 body_tracker 的行数账里,不通气的话收束重画会把
+    // 排队回显擦掉、贴着缓冲区底时锚点还会错行。钩子在监听线程持
+    // StdoutWriteMutex 时被调(跟 OnDelta 同一把锁),Stop()(join 完)之后
+    // 立刻摘掉,绝不活过 body_tracker。
+    lubancode::cli::SetStreamScreenPrintHook([&body_tracker] { body_tracker.InvalidateBlockAnchor(); });
 
     // 用户这一行已经提交、真要开始等模型作答了——分界线打在这儿,紧跟在
     // 提示符那一行之后、模型正文开始打字机输出之前。
@@ -1923,6 +1937,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     // Run() 已经返回,不管是不是被打断——立刻收线程,保证下一次 ReadLine()
     // (排队回显的 "> " 或者下一轮主提示符)开始之前监听线程已经彻底退出。
     listener.Stop();
+    lubancode::cli::SetStreamScreenPrintHook(nullptr);  // 线程已 join,摘钩,别让它抓着局部引用过夜
 
     RunTurnResult out;
     out.queued_lines = listener.TakeQueuedLines();

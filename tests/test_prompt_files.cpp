@@ -121,6 +121,28 @@ TEST_CASE("EnsurePromptScaffold: 已存在不覆盖,缺哪样只补哪样") {
     CHECK(ReadAll(dir.Path() / ".lubancode" / "skills" / "lubancode-config" / "SKILL.md") == "用户自定义的配置技能");
 }
 
+TEST_CASE("EnsurePromptScaffold: 排他创建——抢先落地的用户文件一字不动,也不计入 created") {
+    // 修复钉子:老写法先 exists 探一眼、再 trunc 开写,两步之间有窗口,
+    // 并发进程恰在此刻落地的用户文件会被覆盖。现在检查与创建并成一步
+    // (Windows CREATE_NEW / POSIX fopen "wbx"),窗口本身已不存在。真正的
+    // 并发撞车没法在单测里稳定摆出来,这里钉的是"存在即失败"这半边契约:
+    // 哪怕是空文件,也算存在,绝不覆盖、绝不记账。
+    TempDir dir;
+    const std::string base = (dir.Path() / ".lubancode").string();
+    std::filesystem::create_directories(dir.Path() / ".lubancode");
+    WriteAll(dir.Path() / ".lubancode" / "system_prompt.md", "用户抢先写的法");
+    WriteAll(dir.Path() / ".lubancode" / "SOUL.md", "");  // 空文件也算存在
+
+    const auto created = EnsurePromptScaffold(base, kPersona);
+    CHECK(created.size() == 2);  // 只补 wenyan.md 和 SKILL.md
+    for (const auto& path : created) {
+        CHECK(path.find("system_prompt.md") == std::string::npos);
+        CHECK(path.find("SOUL.md") == std::string::npos);
+    }
+    CHECK(ReadAll(dir.Path() / ".lubancode" / "system_prompt.md") == "用户抢先写的法");
+    CHECK(ReadAll(dir.Path() / ".lubancode" / "SOUL.md").empty());
+}
+
 TEST_CASE("ResetSystemPromptFile: 旧文件挪成 .bak,重写内置默认") {
     TempDir dir;
     const std::string base = (dir.Path() / ".lubancode").string();

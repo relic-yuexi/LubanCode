@@ -1,10 +1,19 @@
 #include "config/prompt_files.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <system_error>
+
+#ifdef _WIN32
+// CreateFileW(CREATE_NEW) 排他创建脚手架文件用。max/min 宏与 <algorithm>
+// 撞车的老坑,照例 NOMINMAX 关掉(跟 console_input.cpp 一套写法)。
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 namespace lubancode::config {
 
@@ -302,7 +311,8 @@ std::string PathToUtf8(const fs::path& path) {
     return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
 }
 
-// 整篇写入(binary + trunc)。成功 true。
+// 整篇写入(binary + trunc)。成功 true。覆盖语义,给 /prompt reset 这类
+// "明确要重写"的场景用;脚手架"不存在才建"走下面的排他创建,别混。
 bool WriteWholeFile(const fs::path& path, const std::string& content) {
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file.is_open()) {
@@ -310,6 +320,43 @@ bool WriteWholeFile(const fs::path& path, const std::string& content) {
     }
     file << content;
     return file.good();
+}
+
+// 排他创建 + 整篇写入:检查与创建并成一步,文件已存在——包括并发进程
+// 刚抢先建出来的——直接失败返回 false,绝不 trunc 覆盖。"先 exists 探
+// 一眼再开写"的老路数中间有窗口期,会把并发刚落地的用户文件盖掉,脚手架
+// 一律走这条。Windows 用 CreateFileW 的 CREATE_NEW(宽字符路径,不踩系统
+// ANSI 代码页,跟 Utf8Path 一套约定);其余平台用 C11 fopen 的 "x" 旗
+// (O_CREAT|O_EXCL 语义)。写不全/收不了尾也算失败,调用方只在 true 时
+// 记账。
+bool CreateNewFileWithContent(const fs::path& path, const std::string& content) {
+#ifdef _WIN32
+    const HANDLE handle =
+        ::CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return false;  // 已存在(ERROR_FILE_EXISTS)/建不了,一律当"已存在"跳过
+    }
+    bool ok = true;
+    std::size_t offset = 0;
+    while (ok && offset < content.size()) {
+        const DWORD chunk = static_cast<DWORD>((std::min)(content.size() - offset, static_cast<std::size_t>(1) << 20));
+        DWORD written = 0;
+        ok = ::WriteFile(handle, content.data() + offset, chunk, &written, nullptr) != 0 && written == chunk;
+        offset += written;
+    }
+    if (::CloseHandle(handle) == 0) {
+        ok = false;
+    }
+    return ok;
+#else
+    std::FILE* file = std::fopen(path.c_str(), "wbx");
+    if (file == nullptr) {
+        return false;  // 已存在/建不了,一律当"已存在"跳过
+    }
+    const std::size_t written = content.empty() ? 0 : std::fwrite(content.data(), 1, content.size(), file);
+    const bool closed = std::fclose(file) == 0;
+    return written == content.size() && closed;
+#endif
 }
 
 }  // namespace
@@ -366,13 +413,10 @@ std::vector<std::string> EnsurePromptScaffold(const std::string& lubancode_dir, 
         return created;
     }
 
-    // 一个文件一条:不存在才写,写成了才记账;写失败不吭声(运行期有回退)。
+    // 一个文件一条:排他创建(CREATE_NEW 语义),建成且写全了才记账;已
+    // 存在(含并发抢先落地的)、建失败、写失败都不吭声(运行期有回退)。
     const auto ensure_file = [&created](const fs::path& path, const std::string& content) {
-        std::error_code exists_ec;
-        if (fs::exists(path, exists_ec) || exists_ec) {
-            return;
-        }
-        if (WriteWholeFile(path, content)) {
+        if (CreateNewFileWithContent(path, content)) {
             created.push_back(PathToUtf8(path));
         }
     };

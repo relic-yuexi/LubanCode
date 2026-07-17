@@ -291,6 +291,54 @@ TEST_CASE("RenderMarkdown: 所有输出行截到 width-1 以内(锚点铁律)") 
     }
 }
 
+TEST_CASE("RenderMarkdown: 极窄终端(width=3/4/5)一切元素不破 width-1 铁律") {
+    // 修复钉子:width<5 时表格压无可压仍画框线、代码块/引用/列表的固定
+    // 前缀比 width-1 还宽,都会物理折行、毁掉重画的行数账。现在放不下就
+    // 退回逐行裸截。
+    const std::string text =
+        "# 标题文字\n"
+        "| 键 | 值 |\n"
+        "| --- | --- |\n"
+        "| 甲甲甲 | 乙乙乙 |\n"
+        "- 无序列表项内容\n"
+        "    - 嵌套两层的列表项\n"
+        "1. 有序列表项内容\n"
+        "> 引用的一句话\n"
+        "```cpp\nint x = 42;\n```\n"
+        "普通段落文字也来一行。";
+    for (const int width : {3, 4, 5}) {
+        CAPTURE(width);
+        for (const std::string& line : RenderMarkdown(text, BuiltinTheme("dark"), width)) {
+            CAPTURE(line);
+            CHECK(DisplayWidthUtf8(StripAnsi(line)) <= static_cast<std::size_t>(width - 1));
+        }
+    }
+}
+
+TEST_CASE("RenderMarkdown: 窄到框线盛不下的表格退回逐行截断,不画边线") {
+    // 一列的表框架底线就要 6 列;width=5(content_limit=4)画不下,退回
+    // 原样行裸截——一根 ─ 都不该出现。
+    const auto lines = RenderMarkdown("| 键 | 值 |\n| --- | --- |\n| 甲 | 乙 |", BuiltinTheme("dark"), 5);
+    REQUIRE_FALSE(lines.empty());
+    for (const std::string& line : lines) {
+        CHECK_FALSE(Contains(line, kHBar));
+        CHECK(DisplayWidthUtf8(StripAnsi(line)) <= 4);
+    }
+}
+
+TEST_CASE("RenderMarkdown: 宽度刚够时表格照旧画框(退路不越界抢活)") {
+    // 单列表:框架 = 2 竖线 + 列宽 + 两空格。width=20 绰绰有余,必须照常
+    // 走框线渲染——退路只在压无可压时接手。
+    const auto lines = RenderMarkdown("| 键 |\n| --- |\n| 甲 |", BuiltinTheme("dark"), 20);
+    bool has_border = false;
+    for (const std::string& line : lines) {
+        if (Contains(line, kHBar)) {
+            has_border = true;
+        }
+    }
+    CHECK(has_border);
+}
+
 // ---- 混合文档 -------------------------------------------------------------
 
 TEST_CASE("RenderMarkdown: 混合文档各元素齐活,顺序不乱") {

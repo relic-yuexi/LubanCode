@@ -767,6 +767,22 @@ std::mutex& StdoutWriteMutex() {
     return m;
 }
 
+namespace {
+
+// 见头文件 SetStreamScreenPrintHook 注释。读与写全在 StdoutWriteMutex
+// 之内(设置方锁内赋值,监听线程锁内取用),不必再套一层原子/锁。
+std::function<void()>& StreamScreenPrintHookSlot() {
+    static std::function<void()> hook;
+    return hook;
+}
+
+}  // namespace
+
+void SetStreamScreenPrintHook(std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    StreamScreenPrintHookSlot() = std::move(hook);
+}
+
 TurnInputListener::TurnInputListener(std::atomic<bool>& cancel_flag, const Theme& theme)
     : cancel_flag_(cancel_flag), theme_(theme) {
 #ifdef _WIN32
@@ -844,6 +860,9 @@ void TurnInputListener::ThreadMain() {
             std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
             std::cout << "\n" << theme_.stats << tr("input.interrupted") << theme_.reset << "\n";
             std::cout.flush();
+            if (const auto& hook = StreamScreenPrintHookSlot()) {
+                hook();  // 插打了整行,正文块的行数账作废(锁还攥着,见头文件约定)
+            }
             continue;
         }
         if (ke.wVirtualKeyCode == VK_RETURN) {
@@ -853,6 +872,9 @@ void TurnInputListener::ThreadMain() {
                     std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
                     std::cout << "\n" << theme_.stats << tr("input.queued") << theme_.reset << line << "\n";
                     std::cout.flush();
+                    if (const auto& hook = StreamScreenPrintHookSlot()) {
+                        hook();  // 同 ESC 分支:回显插了行,通知正文块作废锚点
+                    }
                 }
                 {
                     std::lock_guard<std::mutex> lock(queue_mutex_);

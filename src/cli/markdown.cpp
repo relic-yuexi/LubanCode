@@ -320,7 +320,8 @@ void FlushTable(std::vector<std::string>& table_buf, std::vector<std::string>& o
         table_buf.clear();
         return;
     }
-    table_buf.clear();
+    // 注意:table_buf 先不清——底下压宽压到底仍放不下时,还要拿原始行走
+    // 逐行截断的退路。
 
     std::size_t ncols = 0;
     for (const auto& row : rows) {
@@ -357,6 +358,17 @@ void FlushTable(std::vector<std::string>& table_buf, std::vector<std::string>& o
         --*widest;
         --total;
     }
+    // 压无可压还是放不下(极窄终端:一列的框架底线就要 6 列)——框线一画
+    // 必物理折行,重画的行数账立刻失准。铁律优先:退回逐行截断原样过,
+    // 宁可不画框,不破 width-1。
+    if (total > content_limit) {
+        for (const std::string& raw : table_buf) {
+            out.push_back(TruncatePlain(raw, content_limit));
+        }
+        table_buf.clear();
+        return;
+    }
+    table_buf.clear();
 
     out.push_back(BorderLine(widths, "\xE2\x94\x8C", "\xE2\x94\xAC", "\xE2\x94\x90", theme));  // ┌ ┬ ┐
     for (std::size_t r = 0; r < rows.size(); ++r) {
@@ -449,8 +461,14 @@ std::vector<std::string> RenderMarkdown(const std::string& text, const Theme& th
                 in_code = false;
                 continue;
             }
-            out.push_back("  " + theme.stats + "\xE2\x94\x82" + theme.reset + " " +
-                          TruncatePlain(line, content_limit - 4));
+            // "  │ " 前缀占 4 列;极窄终端连前缀都盛不下时,挂上去必物理
+            // 折行(破 width-1 铁律、重画行数失准)——退回裸截,不挂前缀。
+            if (content_limit < 4) {
+                out.push_back(TruncatePlain(line, content_limit));
+            } else {
+                out.push_back("  " + theme.stats + "\xE2\x94\x82" + theme.reset + " " +
+                              TruncatePlain(line, content_limit - 4));
+            }
             continue;
         }
 
@@ -459,8 +477,12 @@ std::vector<std::string> RenderMarkdown(const std::string& text, const Theme& th
             in_code = true;
             const std::string lang = Trim(trimmed.substr(3));
             if (!lang.empty()) {
-                out.push_back("  " + theme.stats + "\xE2\x94\x82 " + TruncatePlain(lang, content_limit - 4) +
-                              theme.reset);
+                if (content_limit < 4) {  // 同上:前缀 4 列放不下就裸截
+                    out.push_back(theme.stats + TruncatePlain(lang, content_limit) + theme.reset);
+                } else {
+                    out.push_back("  " + theme.stats + "\xE2\x94\x82 " + TruncatePlain(lang, content_limit - 4) +
+                                  theme.reset);
+                }
             }
             continue;
         }
@@ -492,6 +514,10 @@ std::vector<std::string> RenderMarkdown(const std::string& text, const Theme& th
 
         if (IsQuoteLine(trimmed)) {
             const std::string content = trimmed.size() > 2 ? trimmed.substr(2) : std::string();
+            if (content_limit < 2) {  // "│ " 前缀 2 列都盛不下(width<=2):裸截保铁律
+                out.push_back(TruncatePlain(trimmed, content_limit));
+                continue;
+            }
             out.push_back(theme.stats + "\xE2\x94\x82" + theme.reset + " " +
                           AssembleRuns(ParseInline(content, plain), content_limit - 2).text);
             continue;
@@ -501,6 +527,10 @@ std::vector<std::string> RenderMarkdown(const std::string& text, const Theme& th
             const std::size_t level = indent_spaces / 2;
             const std::string pad(2 * (level + 1), ' ');
             const int prefix_cols = static_cast<int>(pad.size()) + 2;
+            if (prefix_cols > content_limit) {  // 缩进 + 圆点都放不下(极窄/嵌套过深):裸截
+                out.push_back(TruncatePlain(trimmed, content_limit));
+                continue;
+            }
             out.push_back(pad + "\xE2\x80\xA2 " +  // •
                           AssembleRuns(ParseInline(trimmed.substr(pos), plain), content_limit - prefix_cols).text);
             continue;
@@ -510,6 +540,10 @@ std::vector<std::string> RenderMarkdown(const std::string& text, const Theme& th
             const std::string pad(2 * (level + 1), ' ');
             const std::string number = trimmed.substr(0, marker.digits) + ". ";
             const int prefix_cols = static_cast<int>(pad.size() + number.size());
+            if (prefix_cols > content_limit) {  // 同上:固定前缀超限就裸截
+                out.push_back(TruncatePlain(trimmed, content_limit));
+                continue;
+            }
             out.push_back(pad + number +
                           AssembleRuns(ParseInline(trimmed.substr(marker.content_pos), plain),
                                        content_limit - prefix_cols)
