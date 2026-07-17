@@ -123,7 +123,7 @@ std::optional<StreamEvent> HandleError(const json& data) {
 
 }  // namespace
 
-std::optional<StreamEvent> parse_event(const SseFrame& frame) {
+std::optional<StreamEvent> parse_event(const SseFrame& frame) try {
     json data;
     try {
         data = json::parse(frame.data);
@@ -167,6 +167,12 @@ std::optional<StreamEvent> parse_event(const SseFrame& frame) {
     // response.in_progress、response.content_part.*、response.output_text.done、
     // response.function_call_arguments.done、reasoning 相关、内置工具/MCP
     // 相关……):静默跳过,别崩。
+    return std::nullopt;
+} catch (const json::exception&) {
+    // 字段存在但类型不对时,.value()/.get() 抛的是 type_error(不是
+    // parse_error)——这里跑在 libcurl 的 WriteCallback 栈上,异常穿透出去
+    // 就是未定义行为/进程崩溃。坏帧一律当没看见;整条流缺了 MessageDone
+    // 的兜底在 client 层(send_stream 末尾检查)。
     return std::nullopt;
 }
 

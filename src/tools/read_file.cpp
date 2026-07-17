@@ -27,8 +27,9 @@ std::string ReadFileTool::name() const {
 }
 
 std::string ReadFileTool::description() const {
-    return "读取文件内容,每行前面带上行号(类似 cat -n)。参数 offset/limit 可以只读文件的一部分,"
-           "省略的话就从头读到尾。路径可以是相对路径,也可以是绝对路径。";
+    return "读取文件内容,每行前面带上行号(类似 cat -n)。参数 offset/limit 可以只读文件的一部分;"
+           "limit 省略时默认最多读 2000 行,单次输出至多约 1MB,超出会截断并标注,可以用 offset "
+           "从截断处继续翻页。路径可以是相对路径,也可以是绝对路径。";
 }
 
 nlohmann::json ReadFileTool::input_schema() const {
@@ -84,20 +85,36 @@ Tool::Result ReadFileTool::execute(const nlohmann::json& input) {
 
     long long offset = 1;
     if (auto it = input.find("offset"); it != input.end() && !it->is_null()) {
+        if (!it->is_number_integer()) {
+            return {"offset 得是整数", true};
+        }
         offset = it->get<long long>();
         if (offset < 1) {
             offset = 1;
         }
     }
-    long long limit = -1;  // -1 表示不限制
+    // 上限兜底:模型不给 limit 就默认最多 2000 行,总字节也封顶——不设的话
+    // 一个超大文件(日志、构建产物)一口气全读进上下文,内存和 token 双爆。
+    constexpr long long kDefaultLimitLines = 2000;
+    constexpr std::size_t kMaxOutputBytes = 1024 * 1024;  // 约 1MB
+    long long limit = kDefaultLimitLines;
     if (auto it = input.find("limit"); it != input.end() && !it->is_null()) {
+        if (!it->is_number_integer()) {
+            return {"limit 得是整数", true};
+        }
         limit = it->get<long long>();
+        if (limit < 0) {
+            limit = kDefaultLimitLines;
+        }
     }
 
     std::ostringstream out;
     std::string line;
     long long line_no = 0;
     long long emitted = 0;
+    long long last_emitted_line = 0;
+    bool truncated_by_bytes = false;
+    std::size_t out_bytes = 0;
     while (std::getline(file, line)) {
         ++line_no;
         if (!line.empty() && line.back() == '\r') {
@@ -106,11 +123,17 @@ Tool::Result ReadFileTool::execute(const nlohmann::json& input) {
         if (line_no < offset) {
             continue;
         }
-        if (limit >= 0 && emitted >= limit) {
+        if (emitted >= limit) {
             break;
         }
         out << std::setw(6) << line_no << "\t" << line << "\n";
+        out_bytes += 7 + line.size() + 1;
         ++emitted;
+        last_emitted_line = line_no;
+        if (out_bytes >= kMaxOutputBytes) {
+            truncated_by_bytes = true;
+            break;
+        }
     }
 
     if (emitted == 0) {
@@ -118,6 +141,16 @@ Tool::Result ReadFileTool::execute(const nlohmann::json& input) {
             return {"(空文件)", false};
         }
         return {"(offset 超过了文件总行数 " + std::to_string(line_no) + ")", false};
+    }
+
+    // 行数/字节任一上限触发,且文件后头确实还有内容,就标注截断并告知翻页办法。
+    const bool hit_line_limit = emitted >= limit;
+    if (truncated_by_bytes || hit_line_limit) {
+        std::string peek;
+        if (std::getline(file, peek) || line_no > last_emitted_line) {
+            out << "[内容过长已截断,只读到第 " << last_emitted_line << " 行;继续读请用 offset="
+                << (last_emitted_line + 1) << "]\n";
+        }
     }
 
     return {out.str(), false};

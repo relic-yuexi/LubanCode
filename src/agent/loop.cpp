@@ -100,6 +100,13 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(const std::string& user_in
         request.max_tokens = max_tokens_;
         request.tools = tool_defs;
 
+        // 硬上限:轮级裁剪 + 工具结果截断都做完还是装不下(比如单条用户输入
+        // 就超大),明确报错,不把一份注定被拒的超大请求发出去。
+        if (EstimateChars(request.messages) > max_context_chars_) {
+            return std::unexpected("上下文超过上限(" + std::to_string(max_context_chars_) +
+                                    " 字符),裁剪与截断后仍装不下,无法发送。请用 /compact 压缩历史,或开新会话。");
+        }
+
         api::MessageAssembler assembler;
         bool stream_error = false;
         std::string stream_error_message;
@@ -170,7 +177,19 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(const std::string& user_in
             callbacks.on_usage(assembler.usage());
         }
 
-        if (stop_reason != "tool_use") {
+        // 防御:stop_reason 说的是 end_turn(或者干脆是空的——终止帧丢了),
+        // 消息里却攒出了 tool_use 块。信块不信帧:照 tool_use 处理,把工具跑了、
+        // 结果成对喂回去。不然历史里就留下一条没有 tool_result 配对的 tool_use,
+        // 下一轮请求直接被 API 以 400 拒掉。
+        bool has_tool_use = false;
+        for (const auto& block : assistant_message.content) {
+            if (std::holds_alternative<api::ToolUseBlock>(block)) {
+                has_tool_use = true;
+                break;
+            }
+        }
+
+        if (stop_reason != "tool_use" && !has_tool_use) {
             return RunOutcome{};
         }
 

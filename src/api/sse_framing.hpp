@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -23,14 +24,23 @@ struct SseFrame {
 // 留在内部缓冲里,下次 feed() 接着用。
 class SseFramer {
 public:
+    // 单帧累积上限(字节):残行缓冲或 data 累积超过这个数,视为协议错误,
+    // 分帧器报废(overflowed() 置真、不再产出帧),防止坏流把内存吃光。
+    static constexpr std::size_t kMaxFrameBytes = 8 * 1024 * 1024;
+
     // 喂一段新到达的字节。返回这次新凑齐的完整帧(可能是 0 帧、1 帧、多帧)。
+    // 一旦 overflowed() 为真,后续 feed 不再产出任何帧,调用方应当断连报错。
     std::vector<SseFrame> feed(std::string_view chunk);
+
+    // 单帧超过 kMaxFrameBytes,协议已不可信。
+    bool overflowed() const { return overflowed_; }
 
 private:
     std::string buffer_;         // 还没凑成一整行的残句
     std::string pending_event_;  // 当前正在累积的事件,event 字段
     std::string pending_data_;   // 当前正在累积的事件,data 字段(已按 \n 拼接)
     bool has_data_ = false;      // data 字段是否出现过(哪怕值是空串)
+    bool overflowed_ = false;    // 超限报废标志
 
     void ProcessLine(std::string_view line, std::vector<SseFrame>& out);
     void Dispatch(std::vector<SseFrame>& out);

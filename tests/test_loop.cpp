@@ -421,3 +421,53 @@ TEST_CASE("没有取消:cancel 指针传了但没置位,行为跟不传一模一
     CHECK_FALSE(result->cancelled);
     REQUIRE(loop.history().size() == 2);
 }
+
+TEST_CASE("防御:stop_reason 不是 tool_use(帧丢了/说成 end_turn)但消息里有 tool_use 块,照样执行工具并成对喂回") {
+    FakeBackend backend;
+    backend.scripts = {
+        {
+            // 模型明明发了 tool_use 块,stop_reason 却是 end_turn(或者流坏了
+            // 压根没有 MessageDone,stop_reason 是空串)——不能当 end_turn 收场,
+            // 不然历史里留一条没有 tool_result 配对的 tool_use,下一轮 400。
+            api::MessageStart{"msg", "model"},
+            api::ToolUseStart{0, "toolu_x", "fake_tool"},
+            api::ToolUseInputDelta{0, "{}"},
+            api::ContentBlockDone{0},
+            api::MessageDone{"end_turn", api::Usage{}},
+        },
+        TextOnlyScript("好了"),
+    };
+    tools::ToolRegistry registry;
+    auto* fake_tool_ptr = new FakeTool("fake_tool", tools::Tool::Result{"工具结果", false}, false);
+    registry.Register(std::unique_ptr<FakeTool>(fake_tool_ptr));
+
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    agent::Callbacks callbacks;
+    const auto result = loop.Run("用工具", callbacks);
+
+    REQUIRE(result.has_value());
+    CHECK(fake_tool_ptr->call_count == 1);          // 工具真的跑了
+    CHECK(backend.captured_requests.size() == 2);   // 结果喂回去又请求了一轮
+
+    // 历史:user、assistant(tool_use)、user(tool_result)、assistant(text),配对完整。
+    REQUIRE(loop.history().size() == 4);
+    REQUIRE(std::holds_alternative<api::ToolResultBlock>(loop.history()[2].content[0]));
+    CHECK(std::get<api::ToolResultBlock>(loop.history()[2].content[0]).tool_use_id == "toolu_x");
+}
+
+TEST_CASE("上下文硬上限:裁剪与截断后仍超限(单条用户输入就超大),报错不发请求") {
+    FakeBackend backend;
+    backend.scripts = {TextOnlyScript("不该走到这里")};
+    tools::ToolRegistry registry;
+
+    // max_context_chars 压到 200,用户输入 10 倍于此——裁不动也截不动
+    // (截断只动 tool_result),该明确报错,不能把超大请求发出去。
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt", 4096, 25,
+                          /*max_context_chars=*/200);
+    agent::Callbacks callbacks;
+    const auto result = loop.Run(std::string(2000, 'x'), callbacks);
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().find("上下文") != std::string::npos);
+    CHECK(backend.captured_requests.empty());  // 一次请求都没发出去
+}

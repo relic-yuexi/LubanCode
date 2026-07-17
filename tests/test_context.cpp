@@ -98,18 +98,29 @@ TEST_CASE("TrimHistory: 超限时保留最早一轮和最近 N 轮,中间整轮�
     REQUIRE(std::holds_alternative<api::TextBlock>(trimmed[0].content[0]));
     CHECK(std::get<api::TextBlock>(trimmed[0].content[0]).text.find("turn0") != std::string::npos);
 
-    // 中间某处出现占位说明。
+    // 裁剪说明并入了保留区间第一条 user 消息的开头(不再单独成一条消息——
+    // 那样会跟后面的 user 输入连成相邻两条 user,违反角色交替)。
     bool found_notice = false;
     for (const auto& message : trimmed) {
         for (const auto& block : message.content) {
             if (std::holds_alternative<api::TextBlock>(block)) {
-                if (std::get<api::TextBlock>(block).text == "[早前对话已裁剪]") {
+                const std::string& text = std::get<api::TextBlock>(block).text;
+                if (text.rfind("[早前对话已裁剪]", 0) == 0) {
                     found_notice = true;
+                    // 并入:同一条消息里还带着 recent1 的原始输入。
+                    CHECK(text.find("recent1") != std::string::npos);
+                    CHECK(message.role == api::Role::User);
                 }
             }
         }
     }
     CHECK(found_notice);
+
+    // 裁剪后不允许出现相邻两条"带用户文本输入"的 user 消息(角色交替)。
+    for (std::size_t i = 0; i + 1 < trimmed.size(); ++i) {
+        const bool both_user = trimmed[i].role == api::Role::User && trimmed[i + 1].role == api::Role::User;
+        CHECK_FALSE(both_user);
+    }
 
     // 最近三轮的文本都还在。
     bool has_recent1 = false;
@@ -190,4 +201,41 @@ TEST_CASE("MaxContextCharsFromEnv: 没设置环境变量时返回默认值") {
     // 测试环境里一般不会设这个变量;这里只验证函数在没设置时不崩、给出合理默认值。
     const std::size_t value = agent::MaxContextCharsFromEnv();
     CHECK(value > 0);
+}
+
+TEST_CASE("TrimHistory: 轮数不够裁但单条 tool_result 超大时,内容尾部截断并标注,配对不破") {
+    std::vector<api::Message> history;
+    history.push_back(UserText("用户输入"));
+    history.push_back(AssistantToolUse("tool_big", "some_tool"));
+    history.push_back(UserToolResult("tool_big", std::string(50000, 'x')));
+    history.push_back(AssistantText("回复"));
+
+    // 只有一轮,按轮裁不动;阈值远小于 tool_result 的体积,逼出截断兜底。
+    const auto trimmed = agent::TrimHistory(history, /*max_chars=*/10000, /*keep_recent_turns=*/3);
+
+    // 消息条数不变,tool_use/tool_result 配对原样。
+    REQUIRE(trimmed.size() == history.size());
+    REQUIRE(std::holds_alternative<api::ToolResultBlock>(trimmed[2].content[0]));
+    const auto& tool_result = std::get<api::ToolResultBlock>(trimmed[2].content[0]);
+    CHECK(tool_result.tool_use_id == "tool_big");
+    CHECK(tool_result.content.size() < 50000);
+    CHECK(tool_result.content.find("[内容过长已截断]") != std::string::npos);
+
+    // 截断后总量确实落回了阈值以内。
+    CHECK(agent::EstimateChars(trimmed) <= 10000);
+}
+
+TEST_CASE("TrimHistory: 截断有下限,不会把 tool_result 截成空壳") {
+    std::vector<api::Message> history;
+    history.push_back(UserText("输入"));
+    history.push_back(AssistantToolUse("tool_a", "t"));
+    history.push_back(UserToolResult("tool_a", std::string(5000, 'x')));
+
+    // 阈值小到不可能满足,但每条 tool_result 至少保底 1KB,不至于清空。
+    const auto trimmed = agent::TrimHistory(history, /*max_chars=*/10, /*keep_recent_turns=*/3);
+
+    REQUIRE(trimmed.size() == history.size());
+    const auto& tool_result = std::get<api::ToolResultBlock>(trimmed[2].content[0]);
+    CHECK(tool_result.content.size() >= 1024);
+    CHECK(tool_result.content.find('x') != std::string::npos);
 }

@@ -119,3 +119,38 @@ TEST_CASE("连续多帧之间状态不串味") {
     CHECK(frames[2].event == "third");
     CHECK(frames[2].data == "three");
 }
+
+TEST_CASE("帧长上限:残行/单帧 data 超过 8MB 时报废,不再吐帧,不无限吃内存") {
+    SseFramer framer;
+
+    // 一行 data 迟迟不见换行,累积超过上限。
+    const std::string chunk(1024 * 1024, 'x');
+    framer.feed("data: ");
+    for (int i = 0; i < 9; ++i) {
+        framer.feed(chunk);
+    }
+    CHECK(framer.overflowed());
+
+    // 报废之后,再喂正常事件也不吐帧了(调用方看 overflowed() 断连)。
+    auto frames = framer.feed("data: {}\n\n");
+    CHECK(frames.empty());
+}
+
+TEST_CASE("帧长上限:超限前已凑齐的完整帧照常交出") {
+    SseFramer framer;
+    std::string input = "data: ok\n\n";
+    input += "data: ";
+    input += std::string(9 * 1024 * 1024, 'y');  // 超限的残行
+    const auto frames = framer.feed(input);
+    REQUIRE(frames.size() == 1);
+    CHECK(frames[0].data == "ok");
+    CHECK(framer.overflowed());
+}
+
+TEST_CASE("正常大小的流水线不触发 overflowed") {
+    SseFramer framer;
+    for (int i = 0; i < 1000; ++i) {
+        framer.feed("data: {\"n\":" + std::to_string(i) + "}\n\n");
+    }
+    CHECK_FALSE(framer.overflowed());
+}

@@ -90,16 +90,28 @@ TEST_CASE("BuildCompactedHistory: 新历史 = archive + 最近一轮完整对话
     api::Message archive = UserText("[对话存档,此前内容已压缩] 摘要正文");
     const auto new_history = agent::BuildCompactedHistory(history, archive);
 
-    // archive 打头
+    // 存档正文并入保留轮第一条 user 消息的开头——不再单独成一条消息,
+    // 不然存档 user 紧跟保留轮的 user 输入,相邻两条 user 违反角色交替。
     REQUIRE_FALSE(new_history.empty());
     CHECK(new_history[0].role == api::Role::User);
     REQUIRE(std::holds_alternative<api::TextBlock>(new_history[0].content[0]));
-    CHECK(std::get<api::TextBlock>(new_history[0].content[0]).text.find("对话存档") != std::string::npos);
+    const std::string& first_text = std::get<api::TextBlock>(new_history[0].content[0]).text;
+    CHECK(first_text.find("对话存档") != std::string::npos);
+    CHECK(first_text.find("摘要正文") != std::string::npos);
+    CHECK(first_text.find("最近一次提问") != std::string::npos);
+    // 存档在前,原始输入在后。
+    CHECK(first_text.find("对话存档") < first_text.find("最近一次提问"));
 
-    // 后面接的是"最近一次提问"开始的那一轮,不是"第一句话"那一轮
-    REQUIRE(new_history.size() == 1 + 4);
-    REQUIRE(std::holds_alternative<api::TextBlock>(new_history[1].content[0]));
-    CHECK(std::get<api::TextBlock>(new_history[1].content[0]).text == "最近一次提问");
+    // 消息总数 = 保留轮的 4 条(第一条已与存档合并),后面紧跟 assistant。
+    REQUIRE(new_history.size() == 4);
+    CHECK(new_history[1].role == api::Role::Assistant);
+
+    // 合并后不出现相邻两条 user 消息。
+    for (std::size_t i = 0; i + 1 < new_history.size(); ++i) {
+        const bool both_user =
+            new_history[i].role == api::Role::User && new_history[i + 1].role == api::Role::User;
+        CHECK_FALSE(both_user);
+    }
 
     // "第一句话"/"张三"不该出现在新历史里(已经被压缩进 archive,不在这里重复)
     bool found_old = false;

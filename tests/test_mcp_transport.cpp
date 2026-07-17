@@ -74,3 +74,34 @@ TEST_CASE("LineFramer: 没有换行符,什么都不吐,残留在缓冲里等下�
     REQUIRE(finally.size() == 1);
     CHECK(finally[0] == "no-newline-yet-still-nothing");
 }
+
+TEST_CASE("LineFramer: 单行超过 8MB 上限,置 overflowed、清空缓冲、不再吐行") {
+    mcp::LineFramer framer;
+    const std::string chunk(1024 * 1024, 'x');
+    for (int i = 0; i < 9; ++i) {
+        framer.Feed(chunk);  // 一直不给换行
+    }
+    CHECK(framer.overflowed());
+
+    // 报废之后,正常行也不吐了(传输层看 overflowed() 断连)。
+    const auto lines = framer.Feed("normal\n");
+    CHECK(lines.empty());
+}
+
+TEST_CASE("LineFramer: 超限前已凑齐的完整行照常交出,残行丢弃") {
+    mcp::LineFramer framer;
+    std::string input = "good-line\n";
+    input += std::string(9 * 1024 * 1024, 'y');  // 没有换行的超长残行
+    const auto lines = framer.Feed(input);
+    REQUIRE(lines.size() == 1);
+    CHECK(lines[0] == "good-line");
+    CHECK(framer.overflowed());
+}
+
+TEST_CASE("LineFramer: 正常行量不触发 overflowed") {
+    mcp::LineFramer framer;
+    for (int i = 0; i < 1000; ++i) {
+        framer.Feed("line-" + std::to_string(i) + "\n");
+    }
+    CHECK_FALSE(framer.overflowed());
+}

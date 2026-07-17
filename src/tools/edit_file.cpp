@@ -104,6 +104,9 @@ Tool::Result EditFileTool::execute(const nlohmann::json& input) {
 
     bool replace_all = false;
     if (auto it = input.find("replace_all"); it != input.end() && !it->is_null()) {
+        if (!it->is_boolean()) {
+            return {"replace_all 得是布尔值(true/false)", true};
+        }
         replace_all = it->get<bool>();
     }
 

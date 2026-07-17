@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cctype>
 #include <charconv>
+#include <chrono>
 #include <iostream>
 #include <optional>
 #include <type_traits>
@@ -180,6 +181,9 @@ std::expected<void, Error> AnthropicBackend::send_stream(
     int status_code = 0;
     bool status_known = false;
     bool cancelled = false;
+    bool frame_overflow = false;
+    bool saw_message_done = false;
+    bool saw_stream_error = false;
 
     cpr::HeaderCallback header_cb(
         [&](const std::string_view& header, intptr_t) -> bool {
@@ -208,8 +212,31 @@ std::expected<void, Error> AnthropicBackend::send_stream(
             }
             for (const SseFrame& frame : framer.feed(data)) {
                 if (auto event = parse_event(frame); event.has_value()) {
+                    if (std::holds_alternative<MessageDone>(*event)) {
+                        saw_message_done = true;
+                    } else if (std::holds_alternative<StreamError>(*event)) {
+                        saw_stream_error = true;
+                    }
                     on_event(*event);
                 }
+            }
+            if (framer.overflowed()) {
+                // 单帧超过上限,协议已不可信:掐断传输,后面按协议错误报。
+                frame_overflow = true;
+                return false;
+            }
+            return true;
+        });
+
+    // ProgressCallback 在连接/TLS 握手阶段(还没有响应体)也会被周期性调用,
+    // 返回 false 即中止——WriteCallback 只有数据到达才触发,光靠它,ESC 在
+    // 连不上的服务器面前毫无办法。总超时不设死(流式回复可以很长),连接
+    // 阶段单独给 15s 上限。
+    cpr::ProgressCallback progress_cb(
+        [&](cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, intptr_t) -> bool {
+            if (cancel != nullptr && cancel->load()) {
+                cancelled = true;
+                return false;
             }
             return true;
         });
@@ -223,11 +250,17 @@ std::expected<void, Error> AnthropicBackend::send_stream(
             {"Authorization", "Bearer " + auth_token_},
         },
         cpr::Body{body_str},
+        cpr::ConnectTimeout{std::chrono::milliseconds(15000)},
         header_cb,
-        write_cb);
+        write_cb,
+        progress_cb);
 
     if (cancelled || (cancel != nullptr && cancel->load())) {
         return std::unexpected(Error{ErrorKind::Cancelled, "用户按 ESC 打断了这次请求", 0});
+    }
+
+    if (frame_overflow) {
+        return std::unexpected(Error{ErrorKind::Parse, "SSE 单帧超过大小上限(8MB),协议错误,已断开", 0});
     }
 
     if (response.error) {
@@ -241,6 +274,15 @@ std::expected<void, Error> AnthropicBackend::send_stream(
             message = "服务端返回了非 200 状态码,但响应体是空的";
         }
         return std::unexpected(Error{ErrorKind::HttpStatus, std::move(message), final_status});
+    }
+
+    // 流"正常"走完却没等到 MessageDone(message_delta):终止帧丢了或被当坏帧
+    // 跳过了。这时 assembler 攒出来的消息不完整(stop_reason 是空的),当成功
+    // 返回的话,上层会把半截消息当 end_turn 入历史——里头若有 tool_use,下一轮
+    // 请求就 400。宁可明确报错。saw_stream_error 时不报:错误事件本身已经把
+    // "这条流失败了"传给上层了。
+    if (!saw_message_done && !saw_stream_error) {
+        return std::unexpected(Error{ErrorKind::Parse, "流意外结束:未收到消息终止事件,响应不完整", 0});
     }
 
     return {};

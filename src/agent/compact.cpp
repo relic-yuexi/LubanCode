@@ -31,7 +31,6 @@ bool IsUserTurnStart(const api::Message& message) {
 std::vector<api::Message> BuildCompactedHistory(const std::vector<api::Message>& history,
                                                   const api::Message& archive) {
     std::vector<api::Message> new_history;
-    new_history.push_back(archive);
 
     std::size_t start = history.size();
     for (std::size_t i = history.size(); i-- > 0;) {
@@ -41,9 +40,38 @@ std::vector<api::Message> BuildCompactedHistory(const std::vector<api::Message>&
         }
     }
 
-    if (start < history.size()) {
-        new_history.insert(new_history.end(), history.begin() + static_cast<std::ptrdiff_t>(start), history.end());
+    if (start >= history.size()) {
+        // 没有可保留的用户轮,存档只能自己单独成一条。
+        new_history.push_back(archive);
+        return new_history;
     }
+
+    // 存档正文并入保留轮的第一条 user 消息开头,不单独成一条消息——独立的
+    // 存档 user 消息紧跟保留轮的 user 输入,就是相邻两条 user,违反 Anthropic
+    // 的角色交替要求(标准端点 400;MiniMax 宽容,才一直没暴露)。
+    std::string archive_text;
+    for (const auto& block : archive.content) {
+        if (std::holds_alternative<api::TextBlock>(block)) {
+            archive_text += std::get<api::TextBlock>(block).text;
+        }
+    }
+
+    api::Message merged = history[start];
+    bool merged_into_text = false;
+    for (auto& block : merged.content) {
+        if (std::holds_alternative<api::TextBlock>(block)) {
+            auto& text_block = std::get<api::TextBlock>(block);
+            text_block.text = archive_text + "\n\n" + text_block.text;
+            merged_into_text = true;
+            break;
+        }
+    }
+    if (!merged_into_text) {
+        // IsUserTurnStart 保证有 TextBlock,这里纯防御。
+        merged.content.push_back(api::TextBlock{archive_text});
+    }
+    new_history.push_back(std::move(merged));
+    new_history.insert(new_history.end(), history.begin() + static_cast<std::ptrdiff_t>(start) + 1, history.end());
 
     return new_history;
 }

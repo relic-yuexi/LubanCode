@@ -203,3 +203,129 @@ TEST_CASE("run_command: shell=cmd,非零退出码,is_error 置位") {
     CHECK(result.is_error);
     CHECK(result.content.find("3") != std::string::npos);
 }
+
+// ---------------------------------------------------------------------------
+// 0.13.1 加固:参数类型校验、读取/输出上限
+// ---------------------------------------------------------------------------
+
+#include "tools/process_exec.hpp"
+
+TEST_CASE("run_command: timeout_ms 传成字符串,返回 is_error,不抛异常") {
+    RunCommandTool tool;
+    nlohmann::json input;
+    input["command"] = "echo hi";
+    input["timeout_ms"] = "很快";
+    Tool::Result result{"", false};
+    CHECK_NOTHROW(result = tool.execute(input));
+    CHECK(result.is_error);
+    CHECK(result.content.find("timeout_ms") != std::string::npos);
+}
+
+TEST_CASE("run_command: timeout_ms 传成数组,返回 is_error,不抛异常") {
+    RunCommandTool tool;
+    nlohmann::json input;
+    input["command"] = "echo hi";
+    input["timeout_ms"] = nlohmann::json::array({1000});
+    Tool::Result result{"", false};
+    CHECK_NOTHROW(result = tool.execute(input));
+    CHECK(result.is_error);
+}
+
+TEST_CASE("read_file: offset/limit 传成字符串,返回 is_error,不抛异常") {
+    TempFile file("a\nb\nc\n");
+    ReadFileTool tool;
+
+    nlohmann::json input;
+    input["path"] = file.Utf8Path();
+    input["offset"] = "2";
+    Tool::Result result{"", false};
+    CHECK_NOTHROW(result = tool.execute(input));
+    CHECK(result.is_error);
+    CHECK(result.content.find("offset") != std::string::npos);
+
+    nlohmann::json input2;
+    input2["path"] = file.Utf8Path();
+    input2["limit"] = "abc";
+    CHECK_NOTHROW(result = tool.execute(input2));
+    CHECK(result.is_error);
+    CHECK(result.content.find("limit") != std::string::npos);
+}
+
+TEST_CASE("read_file: 不给 limit 默认最多 2000 行,截断标注告知 offset 翻页") {
+    std::string content;
+    for (int i = 1; i <= 2300; ++i) {
+        content += "line-" + std::to_string(i) + "\n";
+    }
+    TempFile file(content);
+    ReadFileTool tool;
+
+    nlohmann::json input;
+    input["path"] = file.Utf8Path();
+    const Tool::Result result = tool.execute(input);
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("line-2000") != std::string::npos);
+    CHECK(result.content.find("line-2001") == std::string::npos);
+    CHECK(result.content.find("[内容过长已截断") != std::string::npos);
+    CHECK(result.content.find("offset=2001") != std::string::npos);
+
+    // 按标注翻页,能接着读到后面的行,并且读到尾就不再标注截断。
+    nlohmann::json page2;
+    page2["path"] = file.Utf8Path();
+    page2["offset"] = 2001;
+    const Tool::Result result2 = tool.execute(page2);
+    CHECK_FALSE(result2.is_error);
+    CHECK(result2.content.find("line-2001") != std::string::npos);
+    CHECK(result2.content.find("line-2300") != std::string::npos);
+    CHECK(result2.content.find("[内容过长已截断") == std::string::npos);
+}
+
+TEST_CASE("read_file: 刚好读到文件末尾,不标注截断") {
+    TempFile file("a\nb\nc\n");
+    ReadFileTool tool;
+    nlohmann::json input;
+    input["path"] = file.Utf8Path();
+    input["limit"] = 3;
+    const Tool::Result result = tool.execute(input);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("[内容过长已截断") == std::string::npos);
+}
+
+#ifdef _WIN32
+
+TEST_CASE("RunProcess: 输出超上限被截断,进程连 Job 一起被杀,按时返回") {
+    using lubancode::tools::BuildCmdCommandLine;
+    using lubancode::tools::ProcessResult;
+    using lubancode::tools::RunProcess;
+
+    // cmd 的无限循环狂写输出;上限压到 16KB,几乎立刻触发。
+    const std::wstring cmdline = BuildCmdCommandLine("for /L %i in (1,0,2) do @echo 0123456789012345678901234567890123456789");
+
+    const auto started = std::chrono::steady_clock::now();
+    const ProcessResult proc = RunProcess(cmdline, /*timeout_ms=*/60000, {}, /*max_output_bytes=*/16 * 1024);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    CHECK_FALSE(proc.spawn_failed);
+    CHECK_FALSE(proc.timed_out);  // 是超上限被杀,不是超时
+    CHECK(proc.output_truncated);
+    CHECK(proc.output.size() <= 16 * 1024);
+    CHECK_FALSE(proc.output.empty());
+    // 远小于 60s 的超时:说明确实是靠上限提前掐掉的,读线程也没吊死。
+    CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() < 15000);
+}
+
+TEST_CASE("run_command: 海量输出被截断并标注,不吃光内存") {
+    RunCommandTool tool;
+    nlohmann::json input;
+    // PowerShell 一口气吐 ~6MB(超过 2MB 上限)。
+    input["command"] = "1..200000 | ForEach-Object { '0123456789012345678901234567890' }";
+    input["timeout_ms"] = 90000;
+
+    const Tool::Result result = tool.execute(input);
+
+    CHECK(result.content.find("[输出超过上限") != std::string::npos);
+    // 截断在 2MB 上限附近,不会整整 6MB 全吞进来。
+    CHECK(result.content.size() <= 2 * 1024 * 1024 + 4096);
+}
+
+#endif  // _WIN32

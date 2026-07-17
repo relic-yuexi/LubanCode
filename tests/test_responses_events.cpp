@@ -268,3 +268,15 @@ TEST_CASE("完整的 function_call 流式响应,arguments 劈成好几段,事件
     REQUIRE(std::holds_alternative<MessageDone>(events[4]));
     CHECK(std::get<MessageDone>(events[4]).stop_reason == "tool_use");
 }
+
+TEST_CASE("字段类型不对(type_error 一族)不抛异常、不崩,当坏帧跳过") {
+    CHECK_NOTHROW(parse_event(Frame(R"({"type":"response.output_text.delta","delta":42})")));
+    CHECK_NOTHROW(parse_event(Frame(R"({"type":"response.output_item.added","output_index":"x","item":{"type":"function_call","call_id":[],"name":9}})")));
+    CHECK_NOTHROW(parse_event(Frame(R"({"type":"response.function_call_arguments.delta","output_index":0,"delta":{}})")));
+    CHECK_NOTHROW(parse_event(Frame(R"({"type":"response.output_item.done","output_index":[],"item":{"type":"message"}})")));
+    CHECK_NOTHROW(parse_event(Frame(R"({"type":"response.completed","response":{"status":123,"usage":{"input_tokens":"a"}}})")));
+    CHECK_NOTHROW(parse_event(Frame(R"({"type":"error","error":{"message":[]}})")));
+
+    auto bad = parse_event(Frame(R"({"type":"response.output_text.delta","delta":42})"));
+    CHECK_FALSE(bad.has_value());
+}

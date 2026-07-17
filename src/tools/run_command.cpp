@@ -134,6 +134,11 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
 
     int timeout_ms = kDefaultTimeoutMs;
     if (auto it = input.find("timeout_ms"); it != input.end() && !it->is_null()) {
+        // 模型偶尔会把数字发成字符串/数组,直接 get<int>() 会抛异常穿透出去,
+        // 这里先验类型,不合就体面报错。
+        if (!it->is_number_integer()) {
+            return {"timeout_ms 得是整数(毫秒)", true};
+        }
         timeout_ms = it->get<int>();
         if (timeout_ms <= 0) {
             timeout_ms = kDefaultTimeoutMs;
@@ -173,6 +178,11 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
             oss << "终止前捕获到的输出:\n" << proc.output;
         }
         return {oss.str(), true};
+    }
+    if (proc.output_truncated) {
+        std::ostringstream oss;
+        oss << "[输出超过上限(2MB)已截断,命令已被强制终止。以下是截断前捕获到的输出]\n" << proc.output;
+        return {oss.str(), false};
     }
 
     std::ostringstream oss;

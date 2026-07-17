@@ -164,9 +164,62 @@ TEST_CASE("Client: 进程在等待响应期间死掉,is_error 结果里说明进
         }).detach();
     };
 
+    const auto start = std::chrono::steady_clock::now();
     const auto result = client.CallTool("whatever", nlohmann::json::object());
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
     CHECK(result.is_error);
     CHECK(result.content.find("退出") != std::string::npos);
+    // 死进程要快速失败:靠 100ms 分段轮询 IsAlive 发现,不许傻等满 5s 超时。
+    CHECK(elapsed < std::chrono::milliseconds(2000));
+}
+
+TEST_CASE("Client: OnLine 收到 id 类型不对/字段类型不对的行,不崩、不影响后续配对") {
+    mcp::Client client("test");
+    client.SetTimeoutsForTest(/*default_timeout_ms=*/300, /*tool_call_timeout_ms=*/300);
+    FakeTransport transport;
+    client.AttachTransportForTest(&transport);
+
+    // 这些行以前会让 OnLine 在读线程上抛 type_error → std::terminate 全程序暴毙。
+    CHECK_NOTHROW(client.OnLine(R"({"jsonrpc":"2.0","id":"not-a-number","result":{}})"));
+    CHECK_NOTHROW(client.OnLine(R"({"jsonrpc":"2.0","id":3.14,"result":{}})"));
+    CHECK_NOTHROW(client.OnLine(R"(这一行压根不是 JSON)"));
+    CHECK_NOTHROW(client.OnLine(R"([1,2,3])"));
+
+    // 坏行只被丢弃,正常请求-响应仍然走得通。
+    transport.on_write = [&](const std::string& line) {
+        const auto request = nlohmann::json::parse(line);
+        const nlohmann::json response = {
+            {"jsonrpc", "2.0"},
+            {"id", request.at("id")},
+            {"result", {{"content", nlohmann::json::array({{{"type", "text"}, {"text", "ok"}}})}, {"isError", false}}}};
+        client.OnLine(response.dump());
+    };
+    const auto result = client.CallTool("whatever", nlohmann::json::object());
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content == "ok");
+}
+
+TEST_CASE("Client: tools/call 响应字段类型不对(isError 是字符串),不崩,翻译成 is_error 结果") {
+    mcp::Client client("test");
+    FakeTransport transport;
+    client.AttachTransportForTest(&transport);
+
+    transport.on_write = [&](const std::string& line) {
+        const auto request = nlohmann::json::parse(line);
+        const nlohmann::json response = {
+            {"jsonrpc", "2.0"},
+            {"id", request.at("id")},
+            {"result",
+             {{"content", nlohmann::json::array({{{"type", 123}, {"text", "x"}}})},
+              {"isError", "yes"}}}};  // isError 该是 bool,type 该是字符串——全错
+        client.OnLine(response.dump());
+    };
+
+    tools::Tool::Result result{"", false};
+    CHECK_NOTHROW(result = client.CallTool("whatever", nlohmann::json::object()));
+    CHECK(result.is_error);
+    CHECK_FALSE(result.content.empty());  // 有人话错误说明,不是空
 }
 
 TEST_CASE("Client: 响应里带 error 字段,翻译成可读的失败结果") {
@@ -299,6 +352,45 @@ TEST_CASE("Client + 真实 Python 夹具:握手 + tools/list + tools/call(echo/a
 
     client.Shutdown();
     CHECK_FALSE(client.Alive());
+}
+
+TEST_CASE("Client + 真实 Python 夹具:坏响应模式(tools/call 字段类型全错)不崩,报可读错") {
+    mcp::Client client("test");
+    const std::string script = std::string(LUBANCODE_TEST_FIXTURES_DIR) + "/mcp_test_server.py";
+    const auto start_result = client.StartProcess("python", {script, "--bad-tools-call"}, {});
+    REQUIRE_MESSAGE(start_result.success, start_result.error);
+
+    const auto init_result = client.Initialize();
+    REQUIRE_MESSAGE(init_result.has_value(), init_result.error());
+
+    tools::Tool::Result result{"", false};
+    CHECK_NOTHROW(result = client.CallTool("echo", {{"text", "hi"}}));
+    CHECK(result.is_error);
+    CHECK_FALSE(result.content.empty());  // 可读的错误说明,不是空串、更不是崩
+
+    client.Shutdown();
+}
+
+TEST_CASE("Client + 真实 Python 夹具:服务器在 tools/call 等待期间死掉,快速失败(<5s)") {
+    mcp::Client client("test");
+    const std::string script = std::string(LUBANCODE_TEST_FIXTURES_DIR) + "/mcp_test_server.py";
+    const auto start_result = client.StartProcess("python", {script}, {});
+    REQUIRE_MESSAGE(start_result.success, start_result.error);
+
+    const auto init_result = client.Initialize();
+    REQUIRE_MESSAGE(init_result.has_value(), init_result.error());
+
+    // die 工具让服务器一声不吭直接退出——tools/call 的 120s 超时不该被
+    // 傻等满,IsAlive 分段轮询要在几百毫秒内发现进程没了。
+    const auto start = std::chrono::steady_clock::now();
+    const auto result = client.CallTool("die", nlohmann::json::object());
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    CHECK(result.is_error);
+    CHECK(result.content.find("退出") != std::string::npos);
+    CHECK(elapsed < std::chrono::seconds(5));
+
+    client.Shutdown();
 }
 
 #endif  // _WIN32

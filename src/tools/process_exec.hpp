@@ -10,6 +10,7 @@
 // PowerShell 那条路,直接走 cmd.exe。
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <utility>
 #include <vector>
@@ -21,8 +22,13 @@ struct ProcessResult {
     unsigned long exit_code = 0;
     bool timed_out = false;
     bool spawn_failed = false;
+    bool output_truncated = false;   // 输出超过上限被截断,进程(连带 Job)已被强制终止
     std::string spawn_error;
 };
+
+// 单次执行捕获输出的默认上限(字节)。超过就截断、杀掉整个 Job,防止一条
+// 命令把内存吃光(比如 ping -t、dir /s C:\)。
+constexpr std::size_t kDefaultMaxOutputBytes = 2 * 1024 * 1024;
 
 #ifdef _WIN32
 
@@ -47,14 +53,19 @@ std::wstring BuildCmdCommandLine(const std::string& user_command_utf8);
 // 进程环境的一份快照)-> 立刻还原"这个套路,不是手搭一份独立环境块——这
 // 要求调用方是单线程顺序调用(tools 层的工具执行、钩子执行本来就是顺序
 // 跑的,见 agent/loop.cpp,不存在并发覆盖的风险)。
+//
+// max_output_bytes:捕获输出的上限,超过就截断保留前段、置 output_truncated
+// 并强制终止整个 Job。测试用小值,生产路径用默认值即可。
 ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms,
-                          const std::vector<std::pair<std::string, std::string>>& extra_env = {});
+                          const std::vector<std::pair<std::string, std::string>>& extra_env = {},
+                          std::size_t max_output_bytes = kDefaultMaxOutputBytes);
 
 #else
 
 // 非 Windows 平台没实现,调用方按 spawn_failed 处理。
 ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms,
-                          const std::vector<std::pair<std::string, std::string>>& extra_env = {});
+                          const std::vector<std::pair<std::string, std::string>>& extra_env = {},
+                          std::size_t max_output_bytes = kDefaultMaxOutputBytes);
 
 #endif
 

@@ -3,6 +3,9 @@
 namespace lubancode::api {
 
 std::vector<SseFrame> SseFramer::feed(std::string_view chunk) {
+    if (overflowed_) {
+        return {};
+    }
     buffer_.append(chunk);
 
     std::vector<SseFrame> out;
@@ -24,6 +27,18 @@ std::vector<SseFrame> SseFramer::feed(std::string_view chunk) {
         start = newline_pos + 1;
     }
     buffer_.erase(0, start);
+
+    // 帧长上限:残行缓冲或 data 累积超限,视为协议错误,报废——这一批已经
+    // 凑齐的完整帧照常交出去,调用方看 overflowed() 决定断连。
+    if (buffer_.size() > kMaxFrameBytes || pending_data_.size() > kMaxFrameBytes) {
+        overflowed_ = true;
+        buffer_.clear();
+        buffer_.shrink_to_fit();
+        pending_event_.clear();
+        pending_data_.clear();
+        pending_data_.shrink_to_fit();
+        has_data_ = false;
+    }
 
     return out;
 }

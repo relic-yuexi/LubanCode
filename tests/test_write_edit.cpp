@@ -210,3 +210,23 @@ TEST_CASE("edit_file: 文件不存在,报错不崩") {
     const Tool::Result result = tool.execute(input);
     CHECK(result.is_error);
 }
+
+TEST_CASE("edit_file: replace_all 传成字符串,返回 is_error,不抛异常") {
+    TempDir dir;
+    const std::string path = dir.Utf8Path("replall.txt");
+    {
+        std::ofstream f(lubancode::tools::Utf8ToPath(path), std::ios::binary);
+        f << "aaa";
+    }
+
+    EditFileTool tool;
+    nlohmann::json input;
+    input["path"] = path;
+    input["old_string"] = "a";
+    input["new_string"] = "b";
+    input["replace_all"] = "true";  // 该是布尔,给成字符串
+    Tool::Result result{"", false};
+    CHECK_NOTHROW(result = tool.execute(input));
+    CHECK(result.is_error);
+    CHECK(result.content.find("replace_all") != std::string::npos);
+}

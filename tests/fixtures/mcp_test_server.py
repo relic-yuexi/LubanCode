@@ -23,6 +23,8 @@ if hasattr(sys.stdin, "reconfigure"):
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
+BAD_TOOLS_CALL = "--bad-tools-call" in sys.argv[1:]
+
 TOOLS = [
     {
         "name": "echo",
@@ -79,6 +81,20 @@ def handle_tools_list(msg_id, _params):
 def handle_tools_call(msg_id, params):
     name = params.get("name", "")
     arguments = params.get("arguments", {}) or {}
+
+    # 0.13.1 加固验证:--bad-tools-call 启动的"坏响应模式"——tools/call 的
+    # 响应字段类型全是错的(type/text 是数字、isError 是字符串),客户端
+    # 必须不崩、翻译成可读的 is_error 结果。initialize/tools/list 不受影响。
+    if BAD_TOOLS_CALL:
+        send_result(msg_id, {"content": [{"type": 123, "text": 456}], "isError": "yes"})
+        return
+
+    # 0.13.1 加固验证:die 工具(不在 tools/list 里公开)——收到调用后一声
+    # 不吭直接退出进程,模拟"服务器在 tools/call 等待期间死掉",客户端要
+    # 靠 IsAlive 轮询快速失败,不许傻等满 120s 超时。
+    if name == "die":
+        sys.stdout.flush()
+        sys.exit(0)
 
     if name == "echo":
         text = arguments.get("text", "")

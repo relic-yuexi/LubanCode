@@ -33,11 +33,20 @@ namespace lubancode::mcp {
 // 行尾的 \r(不管来源是 \r\n 还是单纯 \n)。
 class LineFramer {
 public:
+    // 单行(未收到换行前的累积缓冲)上限:超过就置 overflowed、清空缓冲,
+    // 防止一个不换行狂写的坏服务器把内存吃光。
+    static constexpr std::size_t kMaxLineBytes = 8 * 1024 * 1024;
+
     // 喂一段新到达的字节。返回这次新凑齐的完整行(可能是 0 行、1 行、多行)。
+    // 一旦 overflowed() 为真,分帧器进入报废状态,后续 Feed 不再产出任何行。
     std::vector<std::string> Feed(std::string_view chunk);
+
+    // 单行累积超过 kMaxLineBytes,协议已不可信——调用方应当断连。
+    bool overflowed() const { return overflowed_; }
 
 private:
     std::string buffer_;  // 还没凑成一整行的残句
+    bool overflowed_ = false;
 };
 
 // 一次启动子进程的结果。
@@ -108,6 +117,9 @@ private:
 
     std::atomic<bool> started_{false};
     std::atomic<bool> shutdown_done_{false};
+    std::atomic<bool> reader_stop_{false};
+    std::atomic<bool> stdout_reader_done_{false};
+    std::atomic<bool> stderr_reader_done_{false};
 };
 
 #else

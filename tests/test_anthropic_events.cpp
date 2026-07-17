@@ -191,3 +191,18 @@ TEST_CASE("data 里没有 type 字段,也不会崩") {
     auto event = parse_event(Frame(R"({"foo":"bar"})"));
     CHECK_FALSE(event.has_value());
 }
+
+TEST_CASE("字段类型不对(type_error 一族)不抛异常、不崩,当坏帧跳过") {
+    // 这些帧 JSON 合法、type 字段也认得,但内层字段类型全是错的——以前
+    // .value()/.get() 会抛 type_error 穿透进 libcurl 回调栈,直接崩。
+    CHECK_NOTHROW(parse_event(Frame(R"({"type":"message_start","message":{"id":123,"model":[]}})")));
+    CHECK_NOTHROW(parse_event(Frame(R"({"type":"content_block_start","index":"x","content_block":{"type":"tool_use","id":[],"name":7}})")));
+    CHECK_NOTHROW(parse_event(Frame(R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":42}})")));
+    CHECK_NOTHROW(parse_event(Frame(R"({"type":"content_block_stop","index":"oops"})")));
+    CHECK_NOTHROW(parse_event(Frame(R"({"type":"message_delta","delta":{"stop_reason":[]},"usage":{"input_tokens":"a"}})")));
+    CHECK_NOTHROW(parse_event(Frame(R"({"type":"error","error":{"message":123}})")));
+
+    // 坏帧的结果是"跳过",不是半个歪事件。
+    auto bad = parse_event(Frame(R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":42}})"));
+    CHECK_FALSE(bad.has_value());
+}

@@ -1,5 +1,6 @@
 #include "mcp/client.hpp"
 
+#include <algorithm>
 #include <chrono>
 
 namespace lubancode::mcp {
@@ -40,33 +41,38 @@ void Client::AttachTransportForTest(Transport* transport) {
 }
 
 void Client::OnLine(const std::string& line) {
-    nlohmann::json parsed;
+    // 这个回调跑在传输层的读线程上——任何异常漏出去都没人接,整个进程直接
+    // std::terminate。所以整个函数体包在 try/catch 里,坏消息一律丢弃。
+    // 用 json::exception 基类兜底:parse_error(整行不是 JSON)和 type_error
+    // (字段存在但类型不对,比如 id 是字符串)两种都接得住。
     try {
-        parsed = nlohmann::json::parse(line);
-    } catch (const nlohmann::json::parse_error&) {
-        // 非法 JSON 行,忽略——不是我们能处理的东西,不该把整个客户端搞崩。
-        return;
-    }
+        nlohmann::json parsed = nlohmann::json::parse(line);
 
-    if (!parsed.is_object() || !parsed.contains("id") || parsed["id"].is_null()) {
-        // 没有 id 的消息(服务器主动发的通知之类),协议层眼下用不上,忽略。
-        return;
-    }
-
-    const std::int64_t id = parsed["id"].get<std::int64_t>();
-
-    std::shared_ptr<PendingEntry> entry;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = pending_.find(id);
-        if (it == pending_.end()) {
-            return;  // 不认识的 id(可能是超时后迟到的响应),丢掉。
+        if (!parsed.is_object() || !parsed.contains("id") || !parsed["id"].is_number_integer()) {
+            // 没有 id 的消息(服务器主动发的通知之类)、或者 id 类型不对,
+            // 协议层眼下用不上,忽略。
+            return;
         }
-        entry = it->second;
-        entry->response = std::move(parsed);
-        entry->done = true;
+
+        const std::int64_t id = parsed["id"].get<std::int64_t>();
+
+        std::shared_ptr<PendingEntry> entry;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = pending_.find(id);
+            if (it == pending_.end()) {
+                return;  // 不认识的 id(可能是超时后迟到的响应),丢掉。
+            }
+            entry = it->second;
+            entry->response = std::move(parsed);
+            entry->done = true;
+        }
+        cv_.notify_all();
+    } catch (const nlohmann::json::exception&) {
+        // 非法 JSON 行/字段类型不对,忽略——不是我们能处理的东西,不该把
+        // 整个客户端(乃至整个进程)搞崩。
+        return;
     }
-    cv_.notify_all();
 }
 
 std::expected<nlohmann::json, std::string> Client::SendRequestAndWait(const std::string& method,
@@ -91,23 +97,29 @@ std::expected<nlohmann::json, std::string> Client::SendRequestAndWait(const std:
         return std::unexpected("MCP 服务器 " + server_name_ + " 写入请求失败(进程可能已退出): " + method);
     }
 
+    // 分段等待(每段 100ms)轮询进程死活:进程死了没人来 notify 这个 cv,
+    // 一口气 wait_for 满 timeout_ms 的话,tools/call 会白等上 120s 才发现
+    // 对面早就没了。分段醒来查一次 IsAlive,死进程几百毫秒内就能失败返回。
     std::unique_lock<std::mutex> lock(mutex_);
-    const bool woke = cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&entry, this]() {
-        return entry->done || !transport_->IsAlive();
-    });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (!entry->done && transport_->IsAlive()) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            break;
+        }
+        const auto slice = std::min<std::chrono::steady_clock::duration>(deadline - now, std::chrono::milliseconds(100));
+        cv_.wait_for(lock, slice, [&entry]() { return entry->done; });
+    }
     pending_.erase(id);
 
     if (!entry->done) {
-        if (!woke || !transport_->IsAlive()) {
-            const std::string stderr_tail = transport_->StderrTail();
-            std::string message = "MCP 服务器 " + server_name_ + " 在等待 " + method + " 响应时";
-            message += transport_->IsAlive() ? "超时" : "进程已退出";
-            if (!stderr_tail.empty()) {
-                message += "(stderr: " + stderr_tail + ")";
-            }
-            return std::unexpected(message);
+        const std::string stderr_tail = transport_->StderrTail();
+        std::string message = "MCP 服务器 " + server_name_ + " 在等待 " + method + " 响应时";
+        message += transport_->IsAlive() ? "超时" : "进程已退出";
+        if (!stderr_tail.empty()) {
+            message += "(stderr: " + stderr_tail + ")";
         }
-        return std::unexpected("MCP 服务器 " + server_name_ + " 等待 " + method + " 响应异常中止");
+        return std::unexpected(message);
     }
 
     const nlohmann::json& response = entry->response;
@@ -159,21 +171,26 @@ std::expected<std::vector<ToolInfo>, std::string> Client::ListTools() {
         return std::unexpected("MCP 服务器 " + server_name_ + " 的 tools/list 响应里没有 tools 数组");
     }
 
-    std::vector<ToolInfo> tools;
-    for (const auto& item : value["tools"]) {
-        ToolInfo info;
-        info.name = item.value("name", std::string());
-        info.description = item.value("description", std::string());
-        if (item.contains("inputSchema")) {
-            info.input_schema = item["inputSchema"];
-        } else {
-            info.input_schema = nlohmann::json::object();
+    // .value() 在字段存在但类型不对时抛 type_error,不能让它穿透出去。
+    try {
+        std::vector<ToolInfo> tools;
+        for (const auto& item : value["tools"]) {
+            ToolInfo info;
+            info.name = item.value("name", std::string());
+            info.description = item.value("description", std::string());
+            if (item.contains("inputSchema")) {
+                info.input_schema = item["inputSchema"];
+            } else {
+                info.input_schema = nlohmann::json::object();
+            }
+            if (!info.name.empty()) {
+                tools.push_back(std::move(info));
+            }
         }
-        if (!info.name.empty()) {
-            tools.push_back(std::move(info));
-        }
+        return tools;
+    } catch (const nlohmann::json::exception& e) {
+        return std::unexpected("MCP 服务器 " + server_name_ + " 的 tools/list 响应字段类型不对: " + e.what());
     }
-    return tools;
 }
 
 tools::Tool::Result Client::CallTool(const std::string& tool_name, const nlohmann::json& arguments) {
@@ -183,22 +200,29 @@ tools::Tool::Result Client::CallTool(const std::string& tool_name, const nlohman
         return tools::Tool::Result{result.error(), true};
     }
 
-    const nlohmann::json& value = *result;
-    const bool is_error = value.value("isError", false);
+    // CallTool 承诺不抛异常;.value() 在字段存在但类型不对时抛 type_error,
+    // 这里兜住,翻译成 is_error 的结果。
+    try {
+        const nlohmann::json& value = *result;
+        const bool is_error = value.value("isError", false);
 
-    std::string text;
-    if (value.contains("content") && value["content"].is_array()) {
-        for (const auto& block : value["content"]) {
-            const std::string type = block.value("type", std::string());
-            if (type == "text") {
-                text += block.value("text", std::string());
-            } else {
-                text += "[不支持的内容类型: " + (type.empty() ? std::string("未知") : type) + "]";
+        std::string text;
+        if (value.contains("content") && value["content"].is_array()) {
+            for (const auto& block : value["content"]) {
+                const std::string type = block.value("type", std::string());
+                if (type == "text") {
+                    text += block.value("text", std::string());
+                } else {
+                    text += "[不支持的内容类型: " + (type.empty() ? std::string("未知") : type) + "]";
+                }
             }
         }
-    }
 
-    return tools::Tool::Result{text, is_error};
+        return tools::Tool::Result{text, is_error};
+    } catch (const nlohmann::json::exception& e) {
+        return tools::Tool::Result{
+            "MCP 服务器 " + server_name_ + " 的 tools/call 响应字段类型不对: " + e.what(), true};
+    }
 }
 
 void Client::Shutdown() {

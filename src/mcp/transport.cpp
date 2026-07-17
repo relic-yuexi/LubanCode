@@ -4,12 +4,16 @@
 
 #ifdef _WIN32
 #include <jobapi2.h>
+#include <chrono>
 #include <optional>
 #endif
 
 namespace lubancode::mcp {
 
 std::vector<std::string> LineFramer::Feed(std::string_view chunk) {
+    if (overflowed_) {
+        return {};
+    }
     buffer_.append(chunk);
 
     std::vector<std::string> out;
@@ -27,6 +31,14 @@ std::vector<std::string> LineFramer::Feed(std::string_view chunk) {
         start = newline_pos + 1;
     }
     buffer_.erase(0, start);
+
+    if (buffer_.size() > kMaxLineBytes) {
+        // 残行迟迟不见换行、还越攒越大:协议不对劲,报废,别把内存吃光。
+        // 这一批已经凑齐的完整行照常交出去,残行丢弃。
+        overflowed_ = true;
+        buffer_.clear();
+        buffer_.shrink_to_fit();
+    }
 
     return out;
 }
@@ -213,20 +225,33 @@ TransportStartResult StdioTransport::Start(const std::string& command, const std
 void StdioTransport::StdoutReaderThread() {
     char buf[4096];
     DWORD n = 0;
-    while (ReadFile(stdout_read_, buf, sizeof(buf), &n, nullptr) && n > 0) {
+    while (!reader_stop_.load() && ReadFile(stdout_read_, buf, sizeof(buf), &n, nullptr) && n > 0) {
         const std::vector<std::string> lines = line_framer_.Feed(std::string_view(buf, n));
         for (const auto& line : lines) {
             if (on_line_) {
                 on_line_(line);
             }
         }
+        if (line_framer_.overflowed()) {
+            // 单行超过上限,协议已不可信:记一笔诊断信息,把进程杀掉断连。
+            // 进程一死,等待中的请求靠 IsAlive 轮询很快就能失败返回。
+            {
+                std::lock_guard<std::mutex> lock(stderr_mutex_);
+                stderr_buffer_ += "[lubancode] 服务器单行输出超过上限(8MB),协议错误,已断开";
+            }
+            if (process_ != nullptr) {
+                TerminateProcess(process_, 1);
+            }
+            break;
+        }
     }
+    stdout_reader_done_.store(true);
 }
 
 void StdioTransport::StderrReaderThread() {
     char buf[4096];
     DWORD n = 0;
-    while (ReadFile(stderr_read_, buf, sizeof(buf), &n, nullptr) && n > 0) {
+    while (!reader_stop_.load() && ReadFile(stderr_read_, buf, sizeof(buf), &n, nullptr) && n > 0) {
         std::lock_guard<std::mutex> lock(stderr_mutex_);
         stderr_buffer_.append(buf, n);
         // 环形日志缓冲:只留最近 8KB,出错时给人看够用,不无限增长。
@@ -235,15 +260,32 @@ void StdioTransport::StderrReaderThread() {
             stderr_buffer_.erase(0, stderr_buffer_.size() - kMaxStderrBytes);
         }
     }
+    stderr_reader_done_.store(true);
 }
 
 void StdioTransport::JoinReaderThreads() {
-    if (stdout_thread_.joinable()) {
-        stdout_thread_.join();
-    }
-    if (stderr_thread_.joinable()) {
-        stderr_thread_.join();
-    }
+    // 兜底:进程树都该死透了,正常情况下写端全关、ReadFile 返回 0,线程
+    // 自己收尾。万一有后代进程漏杀(没有 Job)还握着写端,ReadFile 会一直
+    // 挂着——限时等一等,等不到就置停止标志 + 取消挂起的同步 IO,绝不吊死。
+    const auto wait_reader = [this](std::thread& thread, std::atomic<bool>& done) {
+        if (!thread.joinable()) {
+            return;
+        }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!done.load() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (!done.load()) {
+            reader_stop_.store(true);
+            while (!done.load()) {
+                CancelSynchronousIo(thread.native_handle());
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+        }
+        thread.join();
+    };
+    wait_reader(stdout_thread_, stdout_reader_done_);
+    wait_reader(stderr_thread_, stderr_reader_done_);
 }
 
 bool StdioTransport::WriteLine(const std::string& message) {
@@ -294,8 +336,14 @@ void StdioTransport::Shutdown(int wait_ms) {
         }
     }
 
-    // 进程已经死透(或者被杀了),两条读线程的 ReadFile 会自然返回 0/失败,
-    // 线程能正常退出——这里 join 收尾。
+    // 根进程退了不代表后代也退了:后代若继承了 stdout/stderr 写端还活着,
+    // 读线程等不到 EOF。先把 Job 收掉(KILL_ON_JOB_CLOSE 连带清光后代),
+    // 写端才会全关,读线程才能正常收尾;JoinReaderThreads 里另有限时+取消
+    // IO 的兜底。
+    if (job_ != nullptr) {
+        CloseHandle(job_);
+        job_ = nullptr;
+    }
     JoinReaderThreads();
 
     if (stdout_read_ != nullptr) {

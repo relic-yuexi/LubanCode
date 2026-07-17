@@ -5,6 +5,9 @@
 #include <windows.h>
 
 #include <jobapi2.h>
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <optional>
 #include <thread>
 #endif
@@ -76,7 +79,8 @@ std::optional<std::wstring> GetEnvVarW(const std::wstring& name) {
 }  // namespace
 
 ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms,
-                          const std::vector<std::pair<std::string, std::string>>& extra_env) {
+                          const std::vector<std::pair<std::string, std::string>>& extra_env,
+                          std::size_t max_output_bytes) {
     ProcessResult result;
 
     // 临时把 extra_env 写进当前进程的环境变量。CreateProcessW 的
@@ -168,19 +172,43 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms,
     ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
 
+    // overflow_event:读线程发现输出超上限时置信号,主线程的等待立刻醒来
+    // 杀进程,不用等超时。手动重置事件,只置一次。
+    HANDLE overflow_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+
     std::string output;
+    std::atomic<bool> output_over_limit{false};
+    std::atomic<bool> reader_stop{false};
+    std::atomic<bool> reader_done{false};
     std::thread reader([&] {
         char buf[4096];
         DWORD n = 0;
-        while (ReadFile(read_pipe, buf, sizeof(buf), &n, nullptr) && n > 0) {
-            output.append(buf, n);
+        while (!reader_stop.load() && ReadFile(read_pipe, buf, sizeof(buf), &n, nullptr) && n > 0) {
+            if (output.size() < max_output_bytes) {
+                const std::size_t room = max_output_bytes - output.size();
+                output.append(buf, std::min<std::size_t>(n, room));
+                if (output.size() >= max_output_bytes && !output_over_limit.load()) {
+                    output_over_limit.store(true);
+                    if (overflow_event != nullptr) {
+                        SetEvent(overflow_event);
+                    }
+                }
+            }
+            // 超限之后继续读但直接丢弃——不读的话管道缓冲区一满,子进程会
+            // 卡在写上死不掉;反正马上就要被杀,读空到 EOF 为止。
         }
+        reader_done.store(true);
     });
 
     const DWORD wait_ms = timeout_ms > 0 ? static_cast<DWORD>(timeout_ms) : INFINITE;
-    const DWORD wait_result = WaitForSingleObject(pi.hProcess, wait_ms);
-    if (wait_result == WAIT_TIMEOUT) {
-        result.timed_out = true;
+    HANDLE wait_handles[2] = {pi.hProcess, overflow_event};
+    const DWORD wait_count = overflow_event != nullptr ? 2 : 1;
+    const DWORD wait_result = WaitForMultipleObjects(wait_count, wait_handles, FALSE, wait_ms);
+    if (wait_result == WAIT_TIMEOUT || wait_result == WAIT_OBJECT_0 + 1) {
+        // 超时,或者输出超上限:都要把整个 Job 杀干净。
+        if (wait_result == WAIT_TIMEOUT) {
+            result.timed_out = true;
+        }
         if (job != nullptr) {
             CloseHandle(job);  // KILL_ON_JOB_CLOSE:关句柄的一瞬间,job 里所有进程全杀
             job = nullptr;
@@ -190,15 +218,40 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms,
         WaitForSingleObject(pi.hProcess, 5000);
     }
 
-    reader.join();  // 写端全关了(进程死透),ReadFile 自然返回 0,线程能退出
+    // 根进程退出不等于后代也退出:后代若继承了管道写端还活着,ReadFile 永远
+    // 等不到 EOF,直接 join 会吊死。先把 Job 收掉(连带杀光可能残留的后代),
+    // 写端才会全关、读线程才能收尾。
+    if (job != nullptr) {
+        CloseHandle(job);
+        job = nullptr;
+    }
+
+    // 兜底(比如 Job 创建/绑定失败过、杀不到后代):限时等读线程,等不到就
+    // 取消挂起的 ReadFile,绝不无限期阻塞。
+    const auto reader_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!reader_done.load() && std::chrono::steady_clock::now() < reader_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (!reader_done.load()) {
+        reader_stop.store(true);
+        while (!reader_done.load()) {
+            CancelSynchronousIo(reader.native_handle());
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+    reader.join();
 
     DWORD exit_code = 0;
     GetExitCodeProcess(pi.hProcess, &exit_code);
     result.exit_code = exit_code;
     result.output = std::move(output);
+    result.output_truncated = output_over_limit.load();
 
     if (job != nullptr) {
         CloseHandle(job);
+    }
+    if (overflow_event != nullptr) {
+        CloseHandle(overflow_event);
     }
     CloseHandle(read_pipe);
     CloseHandle(pi.hProcess);
@@ -208,7 +261,8 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms,
 
 #else  // !_WIN32
 
-ProcessResult RunProcess(const std::wstring&, int, const std::vector<std::pair<std::string, std::string>>&) {
+ProcessResult RunProcess(const std::wstring&, int, const std::vector<std::pair<std::string, std::string>>&,
+                          std::size_t) {
     ProcessResult result;
     result.spawn_failed = true;
     result.spawn_error = "RunProcess 眼下只实现了 Windows";

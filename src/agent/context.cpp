@@ -52,6 +52,43 @@ bool IsUserTurnStart(const api::Message& message) {
     return false;
 }
 
+// 硬上限兜底:轮级裁剪之后仍旧超限(往往是单条工具结果就大得离谱),把
+// 超大的 ToolResultBlock 内容从尾部截短、打上标注。只动 tool_result 的
+// content 字符串,消息条数、tool_use/tool_result 的配对关系一概不碰。
+// 每条至少留 kMinKeepChars,免得截成空壳,模型连是什么工具的结果都看不出。
+std::vector<api::Message> ShrinkOversizedToolResults(std::vector<api::Message> messages, std::size_t max_chars) {
+    constexpr std::size_t kMinKeepChars = 1024;
+    const char kMark[] = "\n[内容过长已截断]";
+    const std::size_t mark_size = sizeof(kMark) - 1;
+
+    std::size_t total = EstimateChars(messages);
+    if (total <= max_chars) {
+        return messages;
+    }
+
+    for (auto& message : messages) {
+        for (auto& block : message.content) {
+            if (total <= max_chars) {
+                return messages;
+            }
+            if (!std::holds_alternative<api::ToolResultBlock>(block)) {
+                continue;
+            }
+            auto& tool_result = std::get<api::ToolResultBlock>(block);
+            if (tool_result.content.size() <= kMinKeepChars + mark_size) {
+                continue;
+            }
+            const std::size_t overage = total - max_chars;
+            const std::size_t reducible = tool_result.content.size() - kMinKeepChars - mark_size;
+            const std::size_t cut = overage < reducible ? overage + mark_size : reducible + mark_size;
+            tool_result.content.resize(tool_result.content.size() - cut);
+            tool_result.content += kMark;
+            total = EstimateChars(messages);
+        }
+    }
+    return messages;
+}
+
 }  // namespace
 
 std::size_t EstimateChars(const std::vector<api::Message>& history) {
@@ -121,13 +158,13 @@ std::vector<api::Message> TrimHistory(const std::vector<api::Message>& history, 
 
     if (turns.empty()) {
         // 找不到任何一条"真正的用户输入"消息(不应该发生,history 总是从
-        // 用户消息开始),没法安全地按轮裁剪,原样返回。
-        return history;
+        // 用户消息开始),没法安全地按轮裁剪,只做工具结果截断兜底。
+        return ShrinkOversizedToolResults(history, max_chars);
     }
 
     if (turns.size() <= keep_recent_turns + 1) {
         // 第一轮 + 最近 N 轮已经盖住了全部历史,没有中间可丢的。
-        return history;
+        return ShrinkOversizedToolResults(history, max_chars);
     }
 
     const std::size_t first_turn_end = turns.front().second;
@@ -136,26 +173,39 @@ std::vector<api::Message> TrimHistory(const std::vector<api::Message>& history, 
 
     if (recent_start <= first_turn_end) {
         // 保留区间已经衔接甚至重叠,没有中间段可丢。
-        return history;
+        return ShrinkOversizedToolResults(history, max_chars);
     }
 
     std::vector<api::Message> trimmed;
-    trimmed.reserve(first_turn_end + (history.size() - recent_start) + 1);
+    trimmed.reserve(first_turn_end + (history.size() - recent_start));
 
     for (std::size_t i = 0; i < first_turn_end; ++i) {
         trimmed.push_back(history[i]);
     }
 
-    api::Message notice;
-    notice.role = api::Role::User;
-    notice.content.push_back(api::TextBlock{"[早前对话已裁剪]"});
-    trimmed.push_back(std::move(notice));
+    // 裁剪说明并入保留区间第一条 user 消息的开头,不单独插一条 user 消息——
+    // 独立插会跟紧随其后的 user 输入连成相邻两条 user,违反 Anthropic 的
+    // 角色交替要求(标准端点直接 400;MiniMax 宽容,才一直没炸)。
+    api::Message merged = history[recent_start];
+    bool merged_into_text = false;
+    for (auto& block : merged.content) {
+        if (std::holds_alternative<api::TextBlock>(block)) {
+            auto& text_block = std::get<api::TextBlock>(block);
+            text_block.text = "[早前对话已裁剪]\n\n" + text_block.text;
+            merged_into_text = true;
+            break;
+        }
+    }
+    if (!merged_into_text) {
+        merged.content.push_back(api::TextBlock{"[早前对话已裁剪]"});
+    }
+    trimmed.push_back(std::move(merged));
 
-    for (std::size_t i = recent_start; i < history.size(); ++i) {
+    for (std::size_t i = recent_start + 1; i < history.size(); ++i) {
         trimmed.push_back(history[i]);
     }
 
-    return trimmed;
+    return ShrinkOversizedToolResults(std::move(trimmed), max_chars);
 }
 
 }  // namespace lubancode::agent
