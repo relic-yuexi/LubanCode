@@ -87,14 +87,36 @@ std::size_t DisplayWidth(const std::u32string& text);
 // 结果时需要转回 UTF-8)。
 std::string Utf32ToUtf8(const std::u32string& text);
 
+// 按显示宽度截断:从头开始累加每个字符的显示宽度,一旦下一个字符会让
+// 累计宽度超过 max_width 就整个不要那个字符——绝不会把一个占 2 列的宽字符
+// 切成半个字宽。max_width <= 0 给空串。终端层"保证物理上永不折行"的截断
+// 落在这个纯函数上,可以脱离控制台单测。
+std::u32string TruncateToDisplayWidth(const std::u32string& text, int max_width);
+
+// UTF-8 版本:内部解码成码点、按上面那个函数截断、再编码回 UTF-8。专给
+// hint_lines(本来就是 UTF-8 std::string,可能夹汉字)截断用,不用另写一份
+// 逻辑。遇到非法字节序列按"跳过这一个字节"处理,不中断——对内部自己拼出来
+// 的字符串够用,不是给外部不可信输入准备的严格校验器。
+std::string TruncateUtf8ToDisplayWidth(const std::string& utf8, int max_width);
+
+// 编辑行超宽时的可视窗口:保证光标所在列落在窗口内,绝不让编辑行折行。
+// content_width <= 0 时给空窗口。取舍见 console_input.cpp 里调用处的注释——
+// 每帧独立按当前光标位置重算窗口,不跨帧持久化滚动偏移。
+struct EditLineWindow {
+    std::u32string text;                 // 窗口内的可见文本
+    std::size_t cursor_display_col = 0;  // 光标在窗口内(不是整行里)的显示列
+};
+EditLineWindow ComputeEditLineWindow(const std::u32string& line, std::size_t cursor, int content_width);
+
 // 每次 HandleKey()/CurrentRenderState() 之后吐出来的"这一刻该怎么画"。
 // 终端层拿这个重画:定位到编辑区域起始行、清行、按 line 重写、把光标定位
-// 到 cursor_display_col 那一列、hint_line 非空就在下面另起一行淡色展示。
+// 到 cursor_display_col 那一列、hint_lines 非空就在下面逐行展示(每个元素
+// 一个逻辑行,终端层负责按控制台实际宽度截断,核心层不折行、不猜宽度)。
 struct RenderState {
     std::u32string line;                 // 当前行内容,按码点存
     std::size_t cursor = 0;              // 光标在 line 里的码点位置(不是显示列)
     std::size_t cursor_display_col = 0;  // 光标对应的显示列宽(CJK 按 2 算),终端层定位光标直接用这个
-    std::string hint_line;               // line 以 / 开头时,实时匹配的命令 + 说明拼成一行;不需要显示就是空串
+    std::vector<std::string> hint_lines;  // line 以 / 开头时,匹配的命令逐行列出;不需要显示就是空 vector
     bool submitted = false;              // Enter:line 是这一行最终提交的内容
     bool cleared = false;                // Ctrl+C 清空了非空行,留在同一次 ReadLine 里继续编辑
     bool eof_requested = false;          // Ctrl+D,或 Ctrl+C 在空行按下:整个读取应该当 EOF 处理
@@ -156,6 +178,12 @@ private:
     void CompleteToCandidate(const std::string& name, const std::u32string& suffix);
     RenderState BuildRenderState(bool submitted, bool cleared, bool eof_requested, bool mode_changed) const;
     std::vector<std::string> MatchingCandidateNames(const std::u32string& word) const;
+
+    // 把匹配到的候选名单排成 hint_lines:一行一个 `  /name  说明`,最多 6 行,
+    // 超出加一行 "  … 共 N 个命令";selected_index >= 0 时,那一行的前缀
+    // 换成 "> ",标出 Tab 轮转当前选中的是谁(-1 表示还没真正选中任何一个,
+    // 比如刚补完公共前缀、下一下 Tab 才开始轮转)。
+    std::vector<std::string> BuildHintLines(const std::vector<std::string>& matches, int selected_index) const;
 };
 
 }  // namespace lubancode::cli

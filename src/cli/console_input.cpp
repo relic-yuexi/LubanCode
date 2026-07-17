@@ -29,15 +29,31 @@
 // LineEditorCore 纯逻辑部分的完整单测(见 tests/test_line_editor.cpp)。
 // SetConsoleMode 失败(极少见,比如某些非标准终端模拟器)时,退回到老的
 // ReadLineFromConsole()(整行读入,没有补全/历史/模式切换,但至少能用)。
+//
+// 补丁记录:用户实测报过 slash 补全提示"越敲越堆、清不干净"——病根有二:
+//   1. 老版本提示是单行大拼串,超过控制台宽度被自动折行,重画逻辑记的
+//      起始行/光标位这两个锚点没算上折出去的那些物理行,清不到。
+//   2. 上一帧画了几行提示没记账,新帧不知道该擦几行。
+// 修法:核心层 RenderState 把提示从单行字符串(hint_line)改成
+// std::vector<std::string> hint_lines(一元素一逻辑行,核心层保证不折行由
+// 终端层截断兜底);终端层每行落笔前按 dwSize.X 截断、记住上一帧画了几行
+// 提示、多退少补地清。顺带把"离缓冲区底部太近导致自动滚屏、锚点跟着失效"
+// 这条以前记在案但没堵上的已知限制也一并处理了(见 RedrawEditArea/
+// EnsureRoomForRows)。
 
 #include "cli/console_input.hpp"
 
+#include <algorithm>
 #include <iostream>
 
 #include "cli/slash_commands.hpp"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+// windows.h 自己定义的 max/min 宏会跟 <algorithm> 的 std::max/std::min 撞车
+// (std::max(a, b) 被预处理器拆成 std::max(a, b) 的 max(...) 部分,展开成
+// 一坨语法错误)。NOMINMAX 关掉这两个宏,规矩做法。
+#define NOMINMAX
 #include <windows.h>
 
 #include <cstddef>
@@ -118,38 +134,96 @@ std::optional<std::string> ReadLineFromConsole() {
     return utf8;
 }
 
+// 探一下从 start_row 起要画 total_rows 行(编辑行 + 提示行)会不会撞到
+// 控制台缓冲区最后一行(GetConsoleScreenBufferInfo 的 dwSize.Y)——真撞上
+// 了,后面往下写东西会让缓冲区内容整体往上滚,start_row 记的那个绝对行号
+// 就跟着报废。这里主动先滚够所需的行数(挪到缓冲区最后一行、写换行逼滚屏)、
+// 同步把 start_row 往上修正相同的行数,账目对平之后再画,不留"锚点失效"
+// 的口子——这是修复"提示行堆残骸"时确认到的另一个锚点失效来源,原地一并
+// 堵上。
+void EnsureRoomForRows(HANDLE h_out, SHORT& start_row, SHORT buffer_height, SHORT total_rows) {
+    const SHORT needed_bottom_row = static_cast<SHORT>(start_row + total_rows - 1);
+    if (needed_bottom_row < buffer_height) {
+        return;  // 缓冲区里本来就放得下,不用滚
+    }
+    const SHORT overflow = static_cast<SHORT>(needed_bottom_row - buffer_height + 1);
+    SetConsoleCursorPosition(h_out, COORD{0, static_cast<SHORT>(buffer_height - 1)});
+    for (SHORT i = 0; i < overflow; ++i) {
+        std::cout << "\n";
+    }
+    std::cout.flush();
+    start_row = static_cast<SHORT>(start_row - overflow);
+    if (start_row < 0) {
+        start_row = 0;
+    }
+}
+
 // 按 RenderState 重画"编辑区域":第一行是 提示符前缀 + prompt + 当前行
-// 内容,紧接着第二行是 hint_line(非空时才画)。start_row/prompt_end_col
-// 是这次 ReadLine() 调用一开始就定死的(打完 prompt 那一刻测出来的),
-// 之后的每次重画都锚定在这个位置上——已知限制:如果这行离控制台可视窗口
-// 底部只剩一两行,多占的提示行会触发控制台自动向上滚屏,这两个坐标就跟着
-// 失效,真机上如果撞见"光标乱跳"大概率是这个,当前 headless 环境没法
-// 验证,如实记在这里。
-void RedrawEditArea(HANDLE h_out, SHORT start_row, SHORT buffer_width, SHORT prompt_end_col,
-                     const RenderState& state, bool& hint_shown_last_time) {
+// 内容,后面紧跟 0~N 行 hint_lines(每个元素一个逻辑行,列出匹配的 slash
+// 命令)。start_row/prompt_end_col 是这次 ReadLine() 调用一开始(或者
+// Shift+Tab 切模式重打提示符之后)测出来的,之后的每次重画都锚定在这个
+// 位置上。
+//
+// 相比升级前的版本,这里补上两条账,对应"提示堆残骸"这个 bug 的两个病根:
+//   1. 每行落笔之前按控制台此刻的实际宽度(dwSize.X)截断,物理上绝不
+//      折行——折行会让"起始行/光标位"这两个锚点失效,是清不干净的根子。
+//      编辑行本身超宽同样按可视窗口截断(见 ComputeEditLineWindow),不
+//      让编辑行折行破坏锚点。
+//   2. 上一帧到底画了几行提示得记账(prev_hint_line_count):这一帧提示
+//      行数比上一帧少,多出来的旧行要显式清空,不能只清"新内容覆盖到的
+//      那部分"——这是"旧提示不擦、越敲越堆"的根子。
+// 顺带用 EnsureRoomForRows 把"离缓冲区底部太近导致自动滚屏、坐标跟着失效"
+// 这条已知限制也堵上了。
+void RedrawEditArea(HANDLE h_out, SHORT& start_row, SHORT& prompt_end_col, const RenderState& state,
+                     int& prev_hint_line_count) {
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    if (!GetConsoleScreenBufferInfo(h_out, &info)) {
+        return;  // 拿不到屏幕信息就没法定位,这一帧放弃重画,下一帧再试
+    }
+    const SHORT buffer_width = info.dwSize.X;
+    const SHORT buffer_height = info.dwSize.Y;
+    const int new_hint_count = static_cast<int>(state.hint_lines.size());
+    // 这一帧要碰(清或画)的提示行数上限:取新旧两帧行数的较大值,保证
+    // 旧帧多出来的行不会被漏清。
+    const int rows_to_touch = std::max(new_hint_count, prev_hint_line_count);
+
+    EnsureRoomForRows(h_out, start_row, buffer_height, static_cast<SHORT>(1 + rows_to_touch));
+
     DWORD written = 0;
+
+    // 编辑行:按"width - 1"留一列安全边界,窗口式截断保证光标可见、绝不
+    // 折行(取舍见 ComputeEditLineWindow 头文件注释——每帧独立按光标位置
+    // 重算窗口,不跨帧持久化滚动偏移)。
+    const int content_width = static_cast<int>(buffer_width) - static_cast<int>(prompt_end_col) - 1;
+    const EditLineWindow window = ComputeEditLineWindow(state.line, state.cursor, content_width);
+
     const COORD line_pos{0, start_row};
     SetConsoleCursorPosition(h_out, line_pos);
     FillConsoleOutputCharacterW(h_out, L' ', static_cast<DWORD>(buffer_width), line_pos, &written);
-    if (hint_shown_last_time) {
-        const COORD hint_pos{0, static_cast<SHORT>(start_row + 1)};
-        FillConsoleOutputCharacterW(h_out, L' ', static_cast<DWORD>(buffer_width), hint_pos, &written);
-    }
-
     SetConsoleCursorPosition(h_out, COORD{prompt_end_col, start_row});
-    std::cout << Utf32ToUtf8(state.line);
+    std::cout << Utf32ToUtf8(window.text);
     std::cout.flush();
 
-    if (!state.hint_line.empty()) {
-        SetConsoleCursorPosition(h_out, COORD{0, static_cast<SHORT>(start_row + 1)});
-        std::cout << "  " << state.hint_line;
-        std::cout.flush();
-        hint_shown_last_time = true;
-    } else {
-        hint_shown_last_time = false;
+    // 提示行:逐行先清后画。i >= new_hint_count 但 i < rows_to_touch 的行
+    // 是上一帧画过、这一帧不再需要的,只清不画。
+    for (int i = 0; i < rows_to_touch; ++i) {
+        const COORD hint_pos{0, static_cast<SHORT>(start_row + 1 + i)};
+        SetConsoleCursorPosition(h_out, hint_pos);
+        FillConsoleOutputCharacterW(h_out, L' ', static_cast<DWORD>(buffer_width), hint_pos, &written);
+        if (i < new_hint_count) {
+            const int hint_width = static_cast<int>(buffer_width) - 1;
+            const std::string truncated =
+                TruncateUtf8ToDisplayWidth(state.hint_lines[static_cast<std::size_t>(i)], hint_width);
+            SetConsoleCursorPosition(h_out, hint_pos);
+            std::cout << truncated;
+            std::cout.flush();
+        }
     }
+    prev_hint_line_count = new_hint_count;
 
-    const SHORT target_col = static_cast<SHORT>(prompt_end_col + static_cast<SHORT>(state.cursor_display_col));
+    // 提示行画完,光标要挪回编辑行、落在窗口内换算过的那一列——不管画没画
+    // 提示行,这一步都得做,不然光标就停在最后一行提示上了。
+    const SHORT target_col = static_cast<SHORT>(prompt_end_col + static_cast<SHORT>(window.cursor_display_col));
     SetConsoleCursorPosition(h_out, COORD{target_col, start_row});
 }
 
@@ -191,9 +265,8 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         return ReadLineFromConsole();  // 拿不到屏幕信息就没法定位光标,退回整行读入
     }
     SHORT start_row = info.dwCursorPosition.Y;
-    const SHORT prompt_end_col = info.dwCursorPosition.X;
-    const SHORT buffer_width = info.dwSize.X;
-    bool hint_shown_last_time = false;
+    SHORT prompt_end_col = info.dwCursorPosition.X;
+    int prev_hint_line_count = 0;
 
     std::optional<char32_t> pending_high_surrogate;
 
@@ -259,16 +332,21 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         if (state.mode_changed) {
             std::cout << "\n" << theme.stats << "已切换到 " << ConfirmModeLabel(state.mode) << " 模式" << theme.reset
                        << "\n";
-            std::cout << ConfirmModePromptPrefix(state.mode) << prompt;
+            const std::string new_full_prompt = ConfirmModePromptPrefix(state.mode) + prompt;
+            std::cout << new_full_prompt;
             std::cout.flush();
+            // 重打提示符之后,行的起始行号和"提示符打完光标停在哪一列"都
+            // 可能变了(比如 "" -> "[auto] " 前缀变长了),两个锚点一起
+            // 重新测,不然后面重画会画歪。
             CONSOLE_SCREEN_BUFFER_INFO after_notice_info{};
             if (GetConsoleScreenBufferInfo(h_out, &after_notice_info)) {
                 start_row = after_notice_info.dwCursorPosition.Y;
+                prompt_end_col = after_notice_info.dwCursorPosition.X;
             }
-            hint_shown_last_time = false;
+            prev_hint_line_count = 0;
         }
 
-        RedrawEditArea(h_out, start_row, buffer_width, prompt_end_col, state, hint_shown_last_time);
+        RedrawEditArea(h_out, start_row, prompt_end_col, state, prev_hint_line_count);
 
         if (state.eof_requested) {
             std::cout << "\n";

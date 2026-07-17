@@ -156,6 +156,7 @@ TEST_CASE("LineEditorCore: Tab 补全,没有匹配的候选,行内容不变") {
     TypeString(editor, "/zzz");
     const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
     CHECK(state.line == U"/zzz");
+    CHECK(state.hint_lines.empty());  // 没有候选匹配,提示区跟着清空
 }
 
 TEST_CASE("LineEditorCore: Tab 补全,唯一匹配直接补全整名 + 空格") {
@@ -167,6 +168,25 @@ TEST_CASE("LineEditorCore: Tab 补全,唯一匹配直接补全整名 + 空格") 
     CHECK(state.cursor == state.line.size());
 }
 
+namespace {
+
+// 找出 hint_lines 里以 "> " 开头的那一行(轮转当前选中的标记行),
+// 断言"恰好一行被标中",顺带把这一行内容吐出来核对候选名对不对。
+std::string FindMarkedHintLine(const std::vector<std::string>& hint_lines) {
+    std::string marked;
+    int marked_count = 0;
+    for (const auto& line : hint_lines) {
+        if (line.rfind("> ", 0) == 0) {
+            marked = line;
+            ++marked_count;
+        }
+    }
+    CHECK(marked_count == 1);
+    return marked;
+}
+
+}  // namespace
+
 TEST_CASE("LineEditorCore: Tab 补全,多个匹配先补公共前缀,再按 Tab 轮转候选") {
     LineEditorCore editor(SampleCandidates());
     editor.BeginLine();
@@ -177,11 +197,19 @@ TEST_CASE("LineEditorCore: Tab 补全,多个匹配先补公共前缀,再按 Tab 
     const bool first_is_config_or_clear = (state.line == U"/config ") || (state.line == U"/clear ");
     CHECK(first_is_config_or_clear);
     const std::u32string first_candidate = state.line;
+    // 轮转会话开始了,两个候选都还在提示区里,当前选中那个行首标 "> "。
+    REQUIRE(state.hint_lines.size() == 2);
+    std::string marked = FindMarkedHintLine(state.hint_lines);
+    CHECK(marked.find(Utf32ToUtf8(first_candidate.substr(0, first_candidate.size() - 1))) != std::string::npos);
 
     state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
     CHECK(state.line != first_candidate);  // 轮转到另一个候选
     const bool second_is_config_or_clear = (state.line == U"/config ") || (state.line == U"/clear ");
     CHECK(second_is_config_or_clear);
+    REQUIRE(state.hint_lines.size() == 2);
+    marked = FindMarkedHintLine(state.hint_lines);
+    // 标记跟着轮转换到了当前选中的候选那一行,不是停在原地。
+    CHECK(marked.find(Utf32ToUtf8(state.line.substr(0, state.line.size() - 1))) != std::string::npos);
 
     state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
     CHECK(state.line == first_candidate);  // 只有两个候选,转一圈回到第一个
@@ -201,10 +229,21 @@ TEST_CASE("LineEditorCore: Tab 补全,公共前缀比已输入的还长时,第�
 
     RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
     CHECK(state.line == U"/fooba");  // 只补到公共前缀,没有直接选中某个候选
+    // 两个候选都列出来了,但还没真正选中任何一个,不该有 "> " 标记。
+    REQUIRE(state.hint_lines.size() == 2);
+    CHECK(state.hint_lines[0].rfind("> ", 0) != 0);
+    CHECK(state.hint_lines[1].rfind("> ", 0) != 0);
+    CHECK(state.hint_lines[0].rfind("  ", 0) == 0);
+    CHECK(state.hint_lines[1].rfind("  ", 0) == 0);
 
     state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
     const bool is_first_candidate = (state.line == U"/foobar ") || (state.line == U"/foobaz ");
     CHECK(is_first_candidate);  // 再按一下 Tab,才真正开始轮转
+    // 这下真正选中了,该有恰好一行标 "> " 了。
+    REQUIRE(state.hint_lines.size() == 2);
+    const int marked_count = static_cast<int>(state.hint_lines[0].rfind("> ", 0) == 0) +
+                              static_cast<int>(state.hint_lines[1].rfind("> ", 0) == 0);
+    CHECK(marked_count == 1);
 }
 
 TEST_CASE("LineEditorCore: 敲字符会打断正在进行的 Tab 轮转会话") {
@@ -227,17 +266,95 @@ TEST_CASE("LineEditorCore: 不以 / 开头,Tab 什么都不做,也没有提示�
     TypeString(editor, "hello");
     const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
     CHECK(state.line == U"hello");
-    CHECK(state.hint_line.empty());
+    CHECK(state.hint_lines.empty());
 }
 
-TEST_CASE("LineEditorCore: 行以 / 开头时,实时提示行列出匹配的命令") {
+TEST_CASE("LineEditorCore: 行以 / 开头时,提示区一行一个候选,列出匹配的命令") {
     LineEditorCore editor(SampleCandidates());
     editor.BeginLine();
     TypeString(editor, "/c");
     const RenderState state = editor.CurrentRenderState();
-    CHECK_FALSE(state.hint_line.empty());
-    CHECK(state.hint_line.find("/config") != std::string::npos);
-    CHECK(state.hint_line.find("/clear") != std::string::npos);
+    REQUIRE(state.hint_lines.size() == 2);  // 匹配 /config、/clear
+    const std::string joined = state.hint_lines[0] + "\n" + state.hint_lines[1];
+    CHECK(joined.find("/config") != std::string::npos);
+    CHECK(joined.find("/clear") != std::string::npos);
+    // 一行一个候选:任何单独一行不该同时出现两个候选名。
+    CHECK_FALSE((state.hint_lines[0].find("/config") != std::string::npos &&
+                 state.hint_lines[0].find("/clear") != std::string::npos));
+    CHECK_FALSE((state.hint_lines[1].find("/config") != std::string::npos &&
+                 state.hint_lines[1].find("/clear") != std::string::npos));
+    // 还没开始 Tab 轮转,不该有选中标记。
+    CHECK(state.hint_lines[0].rfind("  ", 0) == 0);
+    CHECK(state.hint_lines[1].rfind("  ", 0) == 0);
+}
+
+TEST_CASE("LineEditorCore: 退格删到不再以 / 开头,提示区清空") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine();
+    TypeString(editor, "/c");
+    CHECK_FALSE(editor.CurrentRenderState().hint_lines.empty());
+
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Backspace));  // "/"
+    CHECK(state.line == U"/");
+    // "/" 本身不匹配任何完整候选前缀过滤? 匹配规则是前缀匹配,"/" 匹配全部候选。
+    CHECK_FALSE(state.hint_lines.empty());
+
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Backspace));  // 删掉 "/"
+    CHECK(state.line.empty());
+    CHECK(state.hint_lines.empty());  // 不再以 / 开头,提示区清空
+}
+
+TEST_CASE("LineEditorCore: 敲一个不匹配任何候选的 / 命令词,提示区清空") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine();
+    TypeString(editor, "/z");
+    const RenderState state = editor.CurrentRenderState();
+    CHECK(state.hint_lines.empty());  // /z 不匹配任何候选
+}
+
+TEST_CASE("LineEditorCore: 只有 1 个候选匹配,提示区只有 1 行,没有汇总行") {
+    LineEditorCore editor(SampleCandidates());
+    editor.BeginLine();
+    TypeString(editor, "/mo");  // 只有 /model 匹配
+    const RenderState state = editor.CurrentRenderState();
+    REQUIRE(state.hint_lines.size() == 1);
+    CHECK(state.hint_lines[0].find("/model") != std::string::npos);
+}
+
+TEST_CASE("LineEditorCore: 候选恰好 6 个,提示区正好 6 行,不加汇总行") {
+    std::vector<CompletionCandidate> candidates;
+    for (int i = 0; i < 6; ++i) {
+        candidates.push_back(CompletionCandidate{"/a" + std::to_string(i), "候选说明 " + std::to_string(i)});
+    }
+    LineEditorCore editor(std::move(candidates));
+    editor.BeginLine();
+    TypeString(editor, "/a");  // 恰好 6 个候选全匹配
+
+    const RenderState state = editor.CurrentRenderState();
+    REQUIRE(state.hint_lines.size() == 6);  // 没有超过上限,不加汇总行
+    for (int i = 0; i < 6; ++i) {
+        CHECK(state.hint_lines[static_cast<std::size_t>(i)].find("/a" + std::to_string(i)) != std::string::npos);
+    }
+}
+
+TEST_CASE("LineEditorCore: 候选超过 6 个,提示区最多 6 行 + 一行汇总") {
+    std::vector<CompletionCandidate> candidates;
+    for (int i = 0; i < 8; ++i) {
+        candidates.push_back(CompletionCandidate{"/a" + std::to_string(i), "候选说明 " + std::to_string(i)});
+    }
+    LineEditorCore editor(std::move(candidates));
+    editor.BeginLine();
+    TypeString(editor, "/a");  // 8 个候选全匹配
+
+    const RenderState state = editor.CurrentRenderState();
+    REQUIRE(state.hint_lines.size() == 7);  // 6 行候选 + 1 行汇总
+    for (int i = 0; i < 6; ++i) {
+        CHECK(state.hint_lines[static_cast<std::size_t>(i)].find("/a" + std::to_string(i)) != std::string::npos);
+    }
+    const std::string& summary = state.hint_lines[6];
+    CHECK(summary.find("8") != std::string::npos);  // 汇总行报出总数
+    CHECK(summary.find("/a6") == std::string::npos);  // 第 7、8 个候选没有单独一行
+    CHECK(summary.find("/a7") == std::string::npos);
 }
 
 TEST_CASE("LineEditorCore: ShiftTab 循环切换确认模式,三档循环") {
@@ -334,4 +451,83 @@ TEST_CASE("LineEditorCore: 光标显示列宽随 CJK 字符按 2 算") {
 TEST_CASE("Utf32ToUtf8: ASCII 和汉字都能正确编码回 UTF-8") {
     CHECK(Utf32ToUtf8(U"abc") == "abc");
     CHECK(Utf32ToUtf8(U"中文") == "\xe4\xb8\xad\xe6\x96\x87");
+}
+
+// 以下几个 TEST_CASE 是终端层"保证物理上永不折行"截断逻辑里,能脱离真实
+// 控制台单测的纯函数部分:按显示宽度截断(UTF-32/UTF-8 两个版本)、编辑行
+// 超宽时的可视窗口计算。
+
+TEST_CASE("TruncateToDisplayWidth: 纯 ASCII,恰好边界,超宽截断") {
+    CHECK(TruncateToDisplayWidth(U"hello", 10) == U"hello");   // 够宽,原样不动
+    CHECK(TruncateToDisplayWidth(U"hello", 5) == U"hello");    // 恰好等宽,不截
+    CHECK(TruncateToDisplayWidth(U"hello", 3) == U"hel");      // 超宽,截到刚好塞满
+    CHECK(TruncateToDisplayWidth(U"hello", 0) == U"");         // 宽度给 0,空串
+    CHECK(TruncateToDisplayWidth(U"hello", -1) == U"");        // 负数按 0 处理
+}
+
+TEST_CASE("TruncateToDisplayWidth: 中英混排,宽字符绝不切半个字宽") {
+    // "a中b" 每个字符宽度依次是 1、2、1,累计宽度 1、3、4。
+    CHECK(TruncateToDisplayWidth(U"a中b", 4) == U"a中b");  // 恰好放得下整串
+    CHECK(TruncateToDisplayWidth(U"a中b", 3) == U"a中");   // 放不下最后的 b,砍掉整个字符
+    CHECK(TruncateToDisplayWidth(U"a中b", 2) == U"a");     // 放不下"中"(要 2 列,只剩 1 列),整个不要
+    CHECK(TruncateToDisplayWidth(U"a中b", 1) == U"a");
+    CHECK(TruncateToDisplayWidth(U"中文", 3) == U"中");    // 剩 1 列放不下第二个汉字,不切半个字宽
+}
+
+TEST_CASE("TruncateUtf8ToDisplayWidth: UTF-8 版本,纯 ASCII、中英混排、边界、超宽都对") {
+    CHECK(TruncateUtf8ToDisplayWidth("hello", 10) == "hello");
+    CHECK(TruncateUtf8ToDisplayWidth("hello", 5) == "hello");
+    CHECK(TruncateUtf8ToDisplayWidth("hello", 3) == "hel");
+    CHECK(TruncateUtf8ToDisplayWidth("", 5) == "");
+    CHECK(TruncateUtf8ToDisplayWidth("hello", 0) == "");
+
+    // "a中b":UTF-8 编码,宽度同上面 UTF-32 版本的用例。
+    const std::string mixed = Utf32ToUtf8(U"a中b");
+    CHECK(TruncateUtf8ToDisplayWidth(mixed, 4) == Utf32ToUtf8(U"a中b"));
+    CHECK(TruncateUtf8ToDisplayWidth(mixed, 3) == Utf32ToUtf8(U"a中"));
+    CHECK(TruncateUtf8ToDisplayWidth(mixed, 2) == Utf32ToUtf8(U"a"));
+}
+
+TEST_CASE("ComputeEditLineWindow: 整行放得下时,窗口就是整行,光标列不变") {
+    const EditLineWindow window = ComputeEditLineWindow(U"hello", 3, 20);
+    CHECK(window.text == U"hello");
+    CHECK(window.cursor_display_col == 3);
+}
+
+TEST_CASE("ComputeEditLineWindow: content_width <= 0 给空窗口") {
+    const EditLineWindow window = ComputeEditLineWindow(U"hello", 2, 0);
+    CHECK(window.text.empty());
+    CHECK(window.cursor_display_col == 0);
+}
+
+TEST_CASE("ComputeEditLineWindow: 超宽时窗口式截断,光标始终落在窗口可见范围内") {
+    // 20 个字符的行,窗口只给 5 列宽,光标在各个位置都不能被挤出窗口外。
+    const std::u32string line = U"0123456789abcdefghij";  // 20 个字符,宽度各 1
+
+    // 光标在行首:窗口应该覆盖行首。
+    EditLineWindow window = ComputeEditLineWindow(line, 0, 5);
+    CHECK(DisplayWidth(window.text) <= 5);
+    CHECK(window.cursor_display_col <= DisplayWidth(window.text));
+    CHECK(window.text.front() == U'0');  // 光标在最左边,窗口从行首开始截
+
+    // 光标在行尾:窗口应该覆盖行尾,光标落在窗口最后一列。
+    window = ComputeEditLineWindow(line, line.size(), 5);
+    CHECK(DisplayWidth(window.text) <= 5);
+    CHECK(window.cursor_display_col == DisplayWidth(window.text));  // 光标顶在窗口最右边
+    CHECK(window.text.back() == U'j');
+
+    // 光标在行中间:不折行(窗口宽度不超过 content_width),光标在窗口内可见。
+    window = ComputeEditLineWindow(line, 10, 5);
+    CHECK(DisplayWidth(window.text) <= 5);
+    CHECK(window.cursor_display_col <= DisplayWidth(window.text));
+    // 窗口里的字符必须在原串里连续出现(没有被稀奇古怪地拼接)。
+    CHECK(Utf32ToUtf8(line).find(Utf32ToUtf8(window.text)) != std::string::npos);
+}
+
+TEST_CASE("ComputeEditLineWindow: 超宽时不切半个宽字符") {
+    // 全是宽字符(每个占 2 列),content_width 给奇数,窗口不该出现半个字宽。
+    const std::u32string line = U"一二三四五六七八九十";  // 10 个汉字,宽度各 2,总宽 20
+    const EditLineWindow window = ComputeEditLineWindow(line, 5, 5);
+    CHECK(DisplayWidth(window.text) <= 5);
+    CHECK(DisplayWidth(window.text) % 2 == 0);  // 全宽字符窗口,显示宽度必是偶数,没有切半个字
 }

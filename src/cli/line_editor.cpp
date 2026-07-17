@@ -7,6 +7,57 @@ namespace lubancode::cli {
 
 namespace {
 
+// 手写 UTF-8 -> UTF-32 解码,只给 TruncateUtf8ToDisplayWidth 内部用。非法
+// 起始字节、序列被截断、续字节不是 10xxxxxx 这几种情况一律跳过一个字节
+// 继续——这是给自己代码拼出来的字符串(候选名 + 中文说明)截断用,不是
+// 拿来校验外部不可信输入的严格解码器。
+std::u32string Utf8ToUtf32(const std::string& text) {
+    std::u32string out;
+    std::size_t i = 0;
+    const std::size_t n = text.size();
+    while (i < n) {
+        const unsigned char c0 = static_cast<unsigned char>(text[i]);
+        char32_t cp = 0;
+        std::size_t extra = 0;
+        if (c0 < 0x80) {
+            cp = c0;
+            extra = 0;
+        } else if ((c0 & 0xE0) == 0xC0) {
+            cp = c0 & 0x1F;
+            extra = 1;
+        } else if ((c0 & 0xF0) == 0xE0) {
+            cp = c0 & 0x0F;
+            extra = 2;
+        } else if ((c0 & 0xF8) == 0xF0) {
+            cp = c0 & 0x07;
+            extra = 3;
+        } else {
+            ++i;
+            continue;
+        }
+        if (i + extra >= n) {
+            break;  // 序列被截断,到此为止
+        }
+        bool ok = true;
+        char32_t decoded = cp;
+        for (std::size_t k = 1; k <= extra; ++k) {
+            const unsigned char ck = static_cast<unsigned char>(text[i + k]);
+            if ((ck & 0xC0) != 0x80) {
+                ok = false;
+                break;
+            }
+            decoded = (decoded << 6) | (ck & 0x3F);
+        }
+        if (!ok) {
+            ++i;
+            continue;
+        }
+        out.push_back(decoded);
+        i += extra + 1;
+    }
+    return out;
+}
+
 std::u32string CurrentWord(const std::u32string& line) {
     const std::size_t space_pos = line.find(U' ');
     return space_pos == std::u32string::npos ? line : line.substr(0, space_pos);
@@ -141,6 +192,71 @@ std::string Utf32ToUtf8(const std::u32string& text) {
         }
     }
     return out;
+}
+
+std::u32string TruncateToDisplayWidth(const std::u32string& text, int max_width) {
+    if (max_width <= 0) {
+        return {};
+    }
+    std::u32string out;
+    int width = 0;
+    for (char32_t c : text) {
+        const int w = CharDisplayWidth(c);
+        if (width + w > max_width) {
+            break;  // 下一个字符会超宽,整个不要它——不切半个字宽
+        }
+        out.push_back(c);
+        width += w;
+    }
+    return out;
+}
+
+std::string TruncateUtf8ToDisplayWidth(const std::string& utf8, int max_width) {
+    return Utf32ToUtf8(TruncateToDisplayWidth(Utf8ToUtf32(utf8), max_width));
+}
+
+EditLineWindow ComputeEditLineWindow(const std::u32string& line, std::size_t cursor, int content_width) {
+    if (content_width <= 0) {
+        return EditLineWindow{};
+    }
+    const std::size_t safe_cursor = std::min(cursor, line.size());
+    const std::size_t cursor_col = DisplayWidth(line.substr(0, safe_cursor));
+    const std::size_t total_width = DisplayWidth(line);
+    const std::size_t cw = static_cast<std::size_t>(content_width);
+    if (total_width <= cw) {
+        return EditLineWindow{line, cursor_col};
+    }
+
+    // 整行放不下:窗口起点尽量让光标落在中间,不越过 [0, total_width - cw]。
+    std::size_t desired_start = cursor_col > cw / 2 ? cursor_col - cw / 2 : 0;
+    const std::size_t max_start = total_width - cw;
+    if (desired_start > max_start) {
+        desired_start = max_start;
+    }
+
+    // 把"窗口起点该在第几列"换算成"该从第几个码点开始"——不能砍在一个
+    // 宽字符中间。
+    std::size_t start_index = 0;
+    std::size_t start_col = 0;
+    while (start_index < line.size()) {
+        const std::size_t w = static_cast<std::size_t>(CharDisplayWidth(line[start_index]));
+        if (start_col + w > desired_start) {
+            break;
+        }
+        start_col += w;
+        ++start_index;
+    }
+
+    EditLineWindow window;
+    window.text = TruncateToDisplayWidth(line.substr(start_index), content_width);
+    window.cursor_display_col = cursor_col >= start_col ? cursor_col - start_col : 0;
+    // 保险:极端取舍下(比如窗口起点因为宽字符对齐往前挪了一列)光标列可能
+    // 比窗口文本本身的显示宽度还宽一点点,夹到窗口末尾,不越界。
+    const std::size_t window_width = DisplayWidth(window.text);
+    if (window.cursor_display_col > window_width) {
+        window.cursor_display_col = window_width;
+    }
+    return window;
 }
 
 LineEditorCore::LineEditorCore(std::vector<CompletionCandidate> slash_candidates)
@@ -286,33 +402,53 @@ RenderState LineEditorCore::BuildRenderState(bool submitted, bool cleared, bool 
     state.mode = confirm_mode_;
 
     if (!line_.empty() && line_.front() == U'/') {
-        const std::u32string word = CurrentWord(line_);
-        const std::vector<std::string> matches = MatchingCandidateNames(word);
-        std::string hint;
-        std::size_t shown = 0;
-        for (const auto& name : matches) {
-            if (shown >= 8) {
-                break;  // 候选太多就不全列了,够看就行
-            }
-            for (const auto& cand : slash_candidates_) {
-                if (cand.name == name) {
-                    if (!hint.empty()) {
-                        hint += "  ";
-                    }
-                    hint += cand.name;
-                    if (!cand.description.empty()) {
-                        hint += " ";
-                        hint += cand.description;
-                    }
-                    ++shown;
-                    break;
-                }
-            }
+        // 正在轮转(tab_cycle_ 有值)时,候选名单和"选中第几个"直接用这次
+        // Tab 会话存下来的那份,不能拿当前行现算——轮转途中 line_ 已经被
+        // 换成候选名本身,重新按 CurrentWord(line_) 去匹配只会匹配出它
+        // 自己一个,候选名单会跟着"塌缩成一个",连带轮转标记也没地方标。
+        std::vector<std::string> matches;
+        int selected_index = -1;
+        if (tab_cycle_.has_value()) {
+            matches = tab_cycle_->matches;
+            selected_index = tab_cycle_->index;
+        } else {
+            const std::u32string word = CurrentWord(line_);
+            matches = MatchingCandidateNames(word);
         }
-        state.hint_line = hint;
+        state.hint_lines = BuildHintLines(matches, selected_index);
     }
 
     return state;
+}
+
+std::vector<std::string> LineEditorCore::BuildHintLines(const std::vector<std::string>& matches,
+                                                          int selected_index) const {
+    std::vector<std::string> lines;
+    if (matches.empty()) {
+        return lines;
+    }
+    constexpr std::size_t kMaxLines = 6;
+    const std::size_t shown = std::min(matches.size(), kMaxLines);
+    for (std::size_t i = 0; i < shown; ++i) {
+        const std::string& name = matches[i];
+        std::string description;
+        for (const auto& cand : slash_candidates_) {
+            if (cand.name == name) {
+                description = cand.description;
+                break;
+            }
+        }
+        const bool selected = selected_index >= 0 && static_cast<std::size_t>(selected_index) == i;
+        std::string line = selected ? "> " : "  ";
+        line += name;
+        line += "  ";
+        line += description;
+        lines.push_back(std::move(line));
+    }
+    if (matches.size() > kMaxLines) {
+        lines.push_back("  … 共 " + std::to_string(matches.size()) + " 个命令");
+    }
+    return lines;
 }
 
 RenderState LineEditorCore::CurrentRenderState() const {
@@ -371,7 +507,7 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
             state.line = submitted_line;
             state.cursor = submitted_line.size();
             state.cursor_display_col = DisplayWidth(submitted_line);
-            state.hint_line.clear();
+            state.hint_lines.clear();
             return state;
         }
         case KeyKind::CtrlC: {
