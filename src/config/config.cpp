@@ -228,6 +228,69 @@ std::expected<std::map<std::string, McpServerConfig>, std::string> ParseMcpServe
     return out;
 }
 
+std::expected<std::map<std::string, LspServerConfig>, std::string> ParseLspServersConfig(
+    const nlohmann::json& lsp_json, const std::string& file_path_for_error) {
+    if (!lsp_json.is_object()) {
+        return std::unexpected("配置文件 " + file_path_for_error + " 里的 lsp 字段必须是一个 JSON object");
+    }
+
+    std::map<std::string, LspServerConfig> out;
+    for (auto it = lsp_json.begin(); it != lsp_json.end(); ++it) {
+        const std::string& language = it.key();
+        const nlohmann::json& value = it.value();
+        if (!value.is_object()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 lsp." + language +
+                                    " 必须是一个 JSON object");
+        }
+        if (!value.contains("command") || !value["command"].is_string() ||
+            value["command"].get<std::string>().empty()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 lsp." + language +
+                                    " 缺少必填字段 command(非空字符串)");
+        }
+
+        LspServerConfig server;
+        server.command = value["command"].get<std::string>();
+
+        if (value.contains("args")) {
+            if (!value["args"].is_array()) {
+                return std::unexpected("配置文件 " + file_path_for_error + " 里的 lsp." + language +
+                                        ".args 字段必须是数组");
+            }
+            for (const auto& item : value["args"]) {
+                if (!item.is_string()) {
+                    return std::unexpected("配置文件 " + file_path_for_error + " 里的 lsp." + language +
+                                            ".args 数组元素必须是字符串");
+                }
+                server.args.push_back(item.get<std::string>());
+            }
+        }
+
+        if (!value.contains("extensions") || !value["extensions"].is_array() || value["extensions"].empty()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 lsp." + language +
+                                    " 缺少必填字段 extensions(非空字符串数组,比如 [\".cpp\", \".hpp\"])");
+        }
+        for (const auto& item : value["extensions"]) {
+            if (!item.is_string() || item.get<std::string>().empty()) {
+                return std::unexpected("配置文件 " + file_path_for_error + " 里的 lsp." + language +
+                                        ".extensions 数组元素必须是非空字符串");
+            }
+            server.extensions.push_back(item.get<std::string>());
+        }
+
+        if (value.contains("idle_minutes")) {
+            const auto& field = value["idle_minutes"];
+            if ((!field.is_number_integer() && !field.is_number_unsigned()) || field.get<long long>() <= 0) {
+                return std::unexpected("配置文件 " + file_path_for_error + " 里的 lsp." + language +
+                                        ".idle_minutes 字段必须是正整数");
+            }
+            server.idle_minutes = static_cast<int>(field.get<long long>());
+        }
+
+        out.emplace(language, std::move(server));
+    }
+    return out;
+}
+
 std::expected<HooksConfig, std::string> ParseHooksConfig(const nlohmann::json& hooks_json,
                                                            const std::string& file_path_for_error) {
     if (!hooks_json.is_object()) {
@@ -364,6 +427,13 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
             return std::unexpected(mcp_result.error());
         }
         config.mcp_servers = std::move(*mcp_result);
+    }
+    if (parsed.contains("lsp")) {
+        auto lsp_result = ParseLspServersConfig(parsed["lsp"], file_path_for_error);
+        if (!lsp_result.has_value()) {
+            return std::unexpected(lsp_result.error());
+        }
+        config.lsp_servers = std::move(*lsp_result);
     }
 
     return config;
@@ -669,6 +739,12 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     // 默认值这两级(跟 hooks 一样)。配置文件没写这字段,就是空 map。 ----
     if (file_config.has_value() && file_config->mcp_servers.has_value()) {
         result.config.mcp_servers = *file_config->mcp_servers;
+    }
+
+    // ---- lsp:待遇同 mcpServers,只从配置文件来。没配 = 空 map = lsp 工具
+    // 不注册。 ----
+    if (file_config.has_value() && file_config->lsp_servers.has_value()) {
+        result.config.lsp_servers = *file_config->lsp_servers;
     }
 
     return result;
