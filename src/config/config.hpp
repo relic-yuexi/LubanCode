@@ -65,6 +65,12 @@ constexpr const char* kDefaultTheme = "dark";
 // (字符数、老的硬安全网,单位不同、语义也不同)是两回事。
 constexpr std::size_t kDefaultContextWindowTokens = 256000;
 
+// tool_search(延迟挂载)的阈值默认值:注册表总工具数超过这个数才启用
+// 延迟机制(超了才把 MCP/插件这类外挂工具改成"检索后挂载");0 = 永不
+// 延迟,一切照旧全量直挂。内置工具撑死十几个,默认 20 意味着不挂一堆
+// 外挂工具的用户永远走不到延迟这条路,现状行为零变化。
+constexpr int kDefaultToolSearchThreshold = 20;
+
 // M9:一条钩子。matcher 只有 pre_tool/post_tool 才有意义——工具名精确匹配,
 // 或者 "*" 匹配所有工具;session_start/session_end 没有这个概念,解析时留
 // 空串,执行时也不看这个字段。command 是要跑的一整条命令行,直接交给
@@ -142,6 +148,9 @@ struct Config {
     // LSP:语言服务器,键是语言名,只从配置文件来(待遇同 hooks/
     // mcpServers),没配就是空 map——空 map 意味着 lsp 工具不注册。
     std::map<std::string, LspServerConfig> lsp_servers;
+    // tool_search:延迟挂载的启用阈值,0 = 永不延迟。只从配置文件读
+    // (没有环境变量这一级),没配就是默认 20。
+    int tool_search_threshold = kDefaultToolSearchThreshold;
 };
 
 // 每个字段最终来自哪一级,跟 Config 里的字段一一对应。
@@ -156,6 +165,7 @@ struct ConfigSources {
     Source context_window_tokens = Source::Default;
     Source compact_model = Source::Default;
     Source think = Source::Default;
+    Source tool_search_threshold = Source::Default;  // tool_search:配置文件或默认,只有这两级
 };
 
 struct ConfigResult {
@@ -194,6 +204,8 @@ struct FileConfig {
     std::optional<SearchConfig> search;
     // LSP:lsp 段,整段有没有出现在 JSON 里(待遇同 mcpServers)。
     std::optional<std::map<std::string, LspServerConfig>> lsp_servers;
+    // tool_search:延迟挂载阈值,非负整数(0 = 永不延迟)。
+    std::optional<int> tool_search_threshold;
     std::string source_path;
     // 这份 FileConfig 是不是从"旧位置迁移到新位置"这个动作里读出来的;
     // 有值就是要打印给用户看的那一行通知(LoadFileConfig 填,LoadFromEnv

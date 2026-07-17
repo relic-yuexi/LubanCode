@@ -93,6 +93,15 @@ public:
 
     const std::vector<api::Message>& history() const { return history_; }
 
+    // tool_search(延迟挂载):工具过滤谓词。设了之后,每轮请求的 tools
+    // 数组只拼"谓词放行"的工具;模型调用了"注册表里查得到、谓词却不放行"
+    // 的工具(延迟且未挂载)时,不执行,回一条友好错误让模型先走
+    // tool_search。谓词由 main.cpp 注入(按 loaded 集合过滤),AgentLoop
+    // 自己不懂什么叫"延迟"——不设(默认)行为跟从前完全一样。每轮现查
+    // 而不是构造时定死,是因为 tool_search 命中会在一次 Run() 中途改变
+    // loaded 集合,下一轮请求就得看到新挂载的工具。
+    void SetToolFilter(std::function<bool(const tools::Tool&)> filter) { tool_filter_ = std::move(filter); }
+
     // M6.6:/compact 用。跟 history() 是同一份数据,单独起个大写名字是为了
     // 跟任务规矩"只许新增两个方法,不许改现有的"对齐——不改名、不改签名、
     // 不复用 history(),原样再加一份。
@@ -114,6 +123,7 @@ private:
     int max_turns_;
     std::size_t max_context_chars_;
     std::vector<api::Message> history_;
+    std::function<bool(const tools::Tool&)> tool_filter_;  // tool_search:空 = 不过滤,全量直挂
 
     std::vector<api::ToolDefinition> BuildToolDefinitions() const;
 };

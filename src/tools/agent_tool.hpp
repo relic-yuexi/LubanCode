@@ -74,6 +74,17 @@ public:
 
     void SetHooks(Hooks hooks) { hooks_ = std::move(hooks); }
 
+    // tool_search(延迟挂载):子代理注册表同机制。filter 原样灌给每次
+    // execute() 新建的 sub_loop(loaded 集合与主会话共享,挂载一次两边
+    // 可用);index_provider 每次 execute() 现算"延迟未加载"索引段,拼进
+    // 子代理系统提示末尾。两个都不设(默认)= 子代理不启用延迟,行为跟
+    // 从前完全一样。启动时(main.cpp)设一次,不随 RunTurn 重灌——它们
+    // 跟 Hooks(每轮现算的转发回调)生命周期不同。
+    void SetToolFilter(std::function<bool(const Tool&)> filter) { tool_filter_ = std::move(filter); }
+    void SetDeferredIndexProvider(std::function<std::string()> provider) {
+        deferred_index_provider_ = std::move(provider);
+    }
+
     std::string name() const override;
     std::string description() const override;
     nlohmann::json input_schema() const override;
@@ -88,6 +99,8 @@ private:
     int default_max_turns_;
     std::string skills_segment_;
     Hooks hooks_;
+    std::function<bool(const Tool&)> tool_filter_;            // tool_search:空 = 不过滤
+    std::function<std::string()> deferred_index_provider_;    // tool_search:空 = 不注索引段
 };
 
 }  // namespace lubancode::tools

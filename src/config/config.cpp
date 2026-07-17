@@ -442,6 +442,19 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
         }
         config.max_context_chars = static_cast<std::size_t>(value);
     }
+    if (parsed.contains("tool_search_threshold")) {
+        const auto& field = parsed["tool_search_threshold"];
+        if (!field.is_number_integer() && !field.is_number_unsigned()) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                    " 里的 tool_search_threshold 字段必须是非负整数(0 = 永不延迟)");
+        }
+        const long long value = field.get<long long>();
+        if (value < 0) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                    " 里的 tool_search_threshold 字段必须是非负整数(0 = 永不延迟)");
+        }
+        config.tool_search_threshold = static_cast<int>(value);
+    }
     if (parsed.contains("hooks")) {
         auto hooks_result = ParseHooksConfig(parsed["hooks"], file_path_for_error);
         if (!hooks_result.has_value()) {
@@ -760,6 +773,17 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     } else {
         result.config.think.clear();
         result.sources.think = Source::Default;
+    }
+
+    // ---- tool_search_threshold:2 级 > 4 级默认值(20),没有环境变量这
+    // 一级(跟 hooks/mcpServers 同待遇,但有内置默认值)。取值校验在
+    // ParseFileConfigJson 里做过了(非负整数),这里直接用。 ----
+    if (file_config.has_value() && file_config->tool_search_threshold.has_value()) {
+        result.config.tool_search_threshold = *file_config->tool_search_threshold;
+        result.sources.tool_search_threshold = Source::ConfigFile;
+    } else {
+        result.config.tool_search_threshold = kDefaultToolSearchThreshold;
+        result.sources.tool_search_threshold = Source::Default;
     }
 
     // ---- hooks:M9 新增,只从配置文件来,没有环境变量、没有内置默认值这

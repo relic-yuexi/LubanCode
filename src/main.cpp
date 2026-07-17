@@ -64,6 +64,7 @@
 #include "tools/skill_loader.hpp"
 #include "tools/skill_tool.hpp"
 #include "tools/todo_tool.hpp"
+#include "tools/tool_search.hpp"
 #include "tools/web_fetch.hpp"
 #include "tools/web_search.hpp"
 #include "tools/write_file.hpp"
@@ -120,6 +121,9 @@ void PrintHelp() {
         << "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
         << "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
         << "  /plugins        列出挂载的插件工具(主目录 .lubancode/plugins 下的 *.dll 和 *.lua)\n"
+        << "  /tools          列工具三态:核心(恒在)/已加载/延迟未加载(工具总数超过配置文件\n"
+        << "                  tool_search_threshold(默认 20,0=永不延迟)时,MCP/插件等外挂工具\n"
+        << "                  延迟挂载,模型用 tool_search 检索后方可调用)\n"
         << "  /sessions       列最近 20 场会话存档(时间倒序编号)\n"
         << "  /resume 编号或id  载入该场存档历史续聊\n"
         << "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md)\n"
@@ -262,6 +266,79 @@ private:
     std::shared_ptr<std::string> current_instructions_;
 };
 
+// tool_search(延迟挂载):包一层 Backend,真正发请求前把"延迟未加载"工具
+// 的紧凑索引段追加到 Request.system 末尾。跟 ModelInstructionsBackend 同一个
+// 套路、同一个理由(AgentLoop 的系统提示构造后改不了,agent 层现有构造不
+// 破)——index_provider 每次 send_stream 现算,tool_search 命中后的下一次
+// 请求,新挂载的工具自然从索引段里消失;provider 给空串就原样透传,零破坏。
+// 这层只包给主 AgentLoop 用,不进 AgentTool 拿的那条链——子代理的索引段
+// 按它自己的注册表算,由 AgentTool::SetDeferredIndexProvider 单独注入,
+// 两边各管各的,不会重复追加。
+class DeferredIndexBackend : public lubancode::api::Backend {
+public:
+    DeferredIndexBackend(lubancode::api::Backend& inner, std::function<std::string()> index_provider)
+        : inner_(inner), index_provider_(std::move(index_provider)) {}
+
+    std::expected<void, lubancode::api::Error> send_stream(
+        const lubancode::api::Request& request,
+        const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* cancel = nullptr) override {
+        lubancode::api::Request patched = request;
+        patched.system = lubancode::agent::WithDeferredToolsIndex(
+            request.system, index_provider_ ? index_provider_() : std::string());
+        return inner_.send_stream(patched, on_event, cancel);
+    }
+
+private:
+    lubancode::api::Backend& inner_;
+    std::function<std::string()> index_provider_;
+};
+
+// /tools 命令:列工具三态——核心(恒在)/已加载的延迟工具/延迟未加载,
+// 各带计数。没启用延迟机制(总数没超阈值,或阈值是 0)时说明一句,不摆
+// 三态的空架子。
+void PrintToolsCommand(const lubancode::tools::ToolRegistry& registry, const std::set<std::string>& loaded,
+                        bool deferral_enabled, int threshold) {
+    std::vector<const lubancode::tools::Tool*> core;
+    std::vector<const lubancode::tools::Tool*> loaded_deferred;
+    std::vector<const lubancode::tools::Tool*> pending_deferred;
+    for (const auto& tool : registry.All()) {
+        if (!tool->deferred()) {
+            core.push_back(tool.get());
+        } else if (loaded.count(tool->name()) != 0) {
+            loaded_deferred.push_back(tool.get());
+        } else {
+            pending_deferred.push_back(tool.get());
+        }
+    }
+    if (!deferral_enabled) {
+        std::cout << "工具共 " << registry.All().size() << " 个,"
+                   << (threshold == 0 ? std::string("阈值 0(永不延迟)")
+                                       : "低于阈值 " + std::to_string(threshold))
+                   << ",全量直挂,tool_search 延迟机制未启用。\n";
+        for (const auto& tool : registry.All()) {
+            std::cout << "  - " << tool->name() << "\n";
+        }
+        return;
+    }
+    std::cout << "tool_search 延迟挂载已启用(阈值 " << threshold << ",loaded 集合会话级,/clear 不清)。\n";
+    std::cout << "核心工具(恒在)" << core.size() << " 个:\n";
+    for (const auto* tool : core) {
+        std::cout << "  - " << tool->name() << "\n";
+    }
+    std::cout << "已加载的延迟工具 " << loaded_deferred.size() << " 个:\n";
+    for (const auto* tool : loaded_deferred) {
+        std::cout << "  - " << tool->name() << "\n";
+    }
+    if (loaded_deferred.empty()) {
+        std::cout << "  (还没有,模型用 tool_search 命中后会出现在这里)\n";
+    }
+    std::cout << "延迟未加载 " << pending_deferred.size() << " 个(在系统提示索引段里,检索后挂载):\n";
+    for (const auto* tool : pending_deferred) {
+        std::cout << "  - " << tool->name() << "\n";
+    }
+}
+
 // --config、/config 共用:打印最终生效的配置和每个字段的来源。session_model
 // 有值时(/config 场景)额外打一行"本会话实际在用的 model"——/model 切换
 // 只影响会话内存,不一定跟 config.model(四级合并出来的那份)一致。
@@ -294,6 +371,9 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
               << "  [" << lubancode::config::ToString(sources.compact_model) << "]\n";
     std::cout << "  think              = " << (config.think.empty() ? "(未设置,不发这个参数)" : config.think) << "  ["
               << lubancode::config::ToString(sources.think) << "]\n";
+    std::cout << "  tool_search_threshold = " << config.tool_search_threshold
+              << (config.tool_search_threshold == 0 ? "(永不延迟)" : "") << "  ["
+              << lubancode::config::ToString(sources.tool_search_threshold) << "]\n";
     if (result.config_file_path.has_value()) {
         std::cout << "  配置文件           = " << *result.config_file_path << "\n";
     }
@@ -552,7 +632,11 @@ std::vector<McpServerRuntime> StartMcpServers(
 void RegisterMcpTools(std::vector<McpServerRuntime>& mcp_servers, lubancode::tools::ToolRegistry& registry) {
     for (auto& runtime : mcp_servers) {
         for (const auto& tool_info : runtime.tools) {
-            registry.Register(std::make_unique<lubancode::mcp::McpTool>(*runtime.client, runtime.name, tool_info));
+            // tool_search:MCP 工具裹一层 DeferredTool 标成延迟挂载(mcp/
+            // 目录不动,没法直接在 McpTool 上加 override)。阈值没超时延迟
+            // 机制整个不启用,这层包装只是纯转发,行为不变。
+            registry.Register(std::make_unique<lubancode::tools::DeferredTool>(
+                std::make_unique<lubancode::mcp::McpTool>(*runtime.client, runtime.name, tool_info)));
         }
     }
 }
@@ -1771,6 +1855,7 @@ void PrintSlashHelp() {
               << "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
               << "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
               << "  /plugins        列出挂载的插件工具(DLL + lua)和加载警告\n"
+              << "  /tools          列工具三态:核心(恒在)/已加载/延迟未加载(tool_search 延迟挂载)\n"
               << "  /sessions       列最近 20 场会话存档(时间倒序编号)\n"
               << "  /resume 编号或id  载入该场存档历史续聊,后续消息追加写回同一文件\n"
               << "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md)\n"
@@ -2321,6 +2406,52 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     // 挂载行紧跟 [mcp] 那几行打出来。
     MountPlugins(plugin_host, registry, theme, plugin_mounted, plugin_warnings);
 
+    // -----------------------------------------------------------------------
+    // tool_search(延迟挂载):全部工具(MCP/插件/LSP/agent/todo)都注册完了
+    // 才数总数、定启停——阈值判定看的是"这一场会话工具表实际多大"。
+    // loaded 集合是会话级的(/clear 不清:工具挂载与对话历史无关),主会话
+    // 与子代理共享同一份(挂载一次两边可用)。主表/子表各自按各自的总数
+    // 判定,同一个阈值;启用的那张表才注册 tool_search 自身(注册前先数,
+    // tool_search 不算在阈值账里)。没启用(默认阈值 20,不挂一堆外挂
+    // 工具到不了)时:不注册 tool_search、不设过滤谓词、索引段恒空——
+    // 跟 0.16.0 现状完全一致。
+    // -----------------------------------------------------------------------
+    auto loaded_tools = std::make_shared<std::set<std::string>>();
+    const int tool_search_threshold = config.tool_search_threshold;
+    const bool main_deferral = lubancode::tools::DeferralEnabled(registry.All().size(), tool_search_threshold);
+    const bool sub_deferral = lubancode::tools::DeferralEnabled(sub_registry.All().size(), tool_search_threshold);
+    if (main_deferral) {
+        registry.Register(std::make_unique<lubancode::tools::ToolSearchTool>(registry, loaded_tools));
+    }
+    if (sub_deferral) {
+        sub_registry.Register(std::make_unique<lubancode::tools::ToolSearchTool>(sub_registry, loaded_tools));
+    }
+    std::function<bool(const lubancode::tools::Tool&)> tool_filter;
+    if (main_deferral || sub_deferral) {
+        // 谓词本身不区分主表/子表——放行"非延迟"或"已挂载",两边通用。
+        tool_filter = [loaded_tools](const lubancode::tools::Tool& tool) {
+            return !tool.deferred() || loaded_tools->count(tool.name()) != 0;
+        };
+    }
+    if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry.Find("agent"));
+        agent_tool != nullptr && sub_deferral) {
+        agent_tool->SetToolFilter(tool_filter);
+        agent_tool->SetDeferredIndexProvider([&sub_registry, loaded_tools]() {
+            return lubancode::tools::BuildDeferredToolsIndexSegment(sub_registry, *loaded_tools);
+        });
+    }
+    if (main_deferral) {
+        std::cout << theme.stats << "[tool_search] 工具超过阈值 " << tool_search_threshold
+                   << ",MCP/插件等外挂工具改为延迟挂载(/tools 看三态)" << theme.reset << "\n";
+    }
+    // 主 AgentLoop 的索引段:发请求前现算现拼(见 DeferredIndexBackend 注释)。
+    // 未启用时 provider 恒给空串,这层包装纯透传。
+    DeferredIndexBackend index_backend(
+        wrapped_backend, [&registry, loaded_tools, main_deferral]() {
+            return main_deferral ? lubancode::tools::BuildDeferredToolsIndexSegment(registry, *loaded_tools)
+                                  : std::string();
+        });
+
     // UI-B(0.12.0):会话级工具条目存档,跨多轮 RunTurn 累积。full_output
     // 现在就存好(截 64KB),UI-D 的 Ctrl+E 全文查看直接从这儿取。
     std::vector<lubancode::cli::TranscriptItem> transcript;
@@ -2439,9 +2570,15 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     const auto rebuild_loop = [&]() {
         // max_tokens=4096、max_turns=25 是 AgentLoop 自己的默认值,这里显式
         // 传出来是为了能把 config.max_context_chars 一起传进去。
-        loop.emplace(wrapped_backend, registry, config.model,
+        // tool_search:backend 换成 index_backend(索引段包装,未启用时纯
+        // 透传);/clear 重建后过滤谓词要重新灌一遍——loaded 集合不清,
+        // 已挂载的工具跨 /clear 仍然可用。
+        loop.emplace(index_backend, registry, config.model,
                      lubancode::agent::BuildSystemPrompt(CurrentDirUtf8(), persona, skills_segment),
                      /*max_tokens=*/4096, /*max_turns=*/25, config.max_context_chars);
+        if (main_deferral) {
+            loop->SetToolFilter(tool_filter);
+        }
     };
     rebuild_loop();
 
@@ -2588,6 +2725,9 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     break;
                 case lubancode::cli::SlashCommand::Plugins:
                     PrintPluginsCommand(plugin_mounted, plugin_warnings);
+                    break;
+                case lubancode::cli::SlashCommand::Tools:
+                    PrintToolsCommand(registry, *loaded_tools, main_deferral, tool_search_threshold);
                     break;
                 case lubancode::cli::SlashCommand::Sessions:
                     PrintSessionsCommand(sessions_dir);
@@ -2746,11 +2886,46 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     registry.Register(std::make_unique<lubancode::tools::TodoWriteTool>(todo_state));
     // M7:插件同样只挂主 registry,不挂 sub_registry。
     MountPlugins(plugin_host, registry, theme, plugin_mounted, plugin_warnings);
+
+    // tool_search(延迟挂载):跟 InteractiveLoop 同一套接线,理由见那边的
+    // 大段注释。单发模式没有 /tools 命令可看,机制本身照常生效。
+    auto loaded_tools = std::make_shared<std::set<std::string>>();
+    const int tool_search_threshold = config.tool_search_threshold;
+    const bool main_deferral = lubancode::tools::DeferralEnabled(registry.All().size(), tool_search_threshold);
+    const bool sub_deferral = lubancode::tools::DeferralEnabled(sub_registry.All().size(), tool_search_threshold);
+    if (main_deferral) {
+        registry.Register(std::make_unique<lubancode::tools::ToolSearchTool>(registry, loaded_tools));
+    }
+    if (sub_deferral) {
+        sub_registry.Register(std::make_unique<lubancode::tools::ToolSearchTool>(sub_registry, loaded_tools));
+    }
+    std::function<bool(const lubancode::tools::Tool&)> tool_filter;
+    if (main_deferral || sub_deferral) {
+        tool_filter = [loaded_tools](const lubancode::tools::Tool& tool) {
+            return !tool.deferred() || loaded_tools->count(tool.name()) != 0;
+        };
+    }
+    if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry.Find("agent"));
+        agent_tool != nullptr && sub_deferral) {
+        agent_tool->SetToolFilter(tool_filter);
+        agent_tool->SetDeferredIndexProvider([&sub_registry, loaded_tools]() {
+            return lubancode::tools::BuildDeferredToolsIndexSegment(sub_registry, *loaded_tools);
+        });
+    }
+    DeferredIndexBackend index_backend(
+        wrapped_backend, [&registry, loaded_tools, main_deferral]() {
+            return main_deferral ? lubancode::tools::BuildDeferredToolsIndexSegment(registry, *loaded_tools)
+                                  : std::string();
+        });
+
     lubancode::agent::AgentLoop loop(
-        wrapped_backend, registry, config.model,
+        index_backend, registry, config.model,
         lubancode::agent::WithModelInstructions(
             lubancode::agent::BuildSystemPrompt(CurrentDirUtf8(), persona, skills_segment), model_instructions),
         /*max_tokens=*/4096, /*max_turns=*/25, config.max_context_chars);
+    if (main_deferral) {
+        loop.SetToolFilter(tool_filter);
+    }
     std::set<std::string> always_allowed_tools;
     lubancode::cli::ContextTracker context_tracker(config.context_window_tokens);
 
