@@ -13,6 +13,7 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -150,6 +151,49 @@ void SendText(const std::string& utf8) {
     for (wchar_t wc : Utf8ToWide(utf8)) {
         SendKey(0, wc, 0);
         Sleep(15);  // 逐键小睡,别把编辑器的重画节奏挤爆
+    }
+}
+
+// UTF-8 字节偏移换算成字符序号(attrs 是按可见字符排的)。
+std::size_t CharIndexOfBytePos(const std::string& utf8, std::size_t byte_pos) {
+    std::size_t chars = 0;
+    for (std::size_t i = 0; i < byte_pos && i < utf8.size();) {
+        const unsigned char c = static_cast<unsigned char>(utf8[i]);
+        i += c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : 4;
+        ++chars;
+    }
+    return chars;
+}
+
+// 验一行 diff 的背景属性:needle 覆盖的格子背景要 red/green 如愿(256 色
+// 深红底/深绿底被 conhost 映到 BACKGROUND_RED/BACKGROUND_GREEN),行末
+// 最后一格(内容之外)不许带底色——背景只铺到内容实际结尾,不填充终端宽。
+void CheckDiffRowBg(int row, const std::string& needle, bool want_red, bool want_green, const std::string& what) {
+    std::vector<WORD> attrs;
+    const std::string text = ReadRow(row, &attrs);
+    const std::size_t pos = text.find(needle);
+    if (pos == std::string::npos) {
+        Check(false, what + "(行里没找到 \"" + needle + "\")");
+        return;
+    }
+    const std::size_t first = CharIndexOfBytePos(text, pos);
+    const std::size_t last = CharIndexOfBytePos(text, pos + needle.size() - 1);
+    bool ok = last < attrs.size();
+    for (std::size_t i = first; ok && i <= last; ++i) {
+        const bool red = (attrs[i] & BACKGROUND_RED) != 0;
+        const bool green = (attrs[i] & BACKGROUND_GREEN) != 0;
+        ok = red == want_red && green == want_green;
+    }
+    Check(ok, what);
+
+    // 行尾格子(ReadRow 已剪掉的行尾空白之外)原始属性:直接刮最后一格。
+    const int width = BufferWidth();
+    CHAR_INFO cell{};
+    SMALL_RECT region{static_cast<SHORT>(width - 1), static_cast<SHORT>(row), static_cast<SHORT>(width - 1),
+                       static_cast<SHORT>(row)};
+    if (ReadConsoleOutputW(g_conout, &cell, COORD{1, 1}, COORD{0, 0}, &region)) {
+        Check((cell.Attributes & (BACKGROUND_RED | BACKGROUND_GREEN | BACKGROUND_BLUE)) == 0,
+              what + ":底色没铺到终端宽(行尾格无背景)");
     }
 }
 
@@ -352,6 +396,66 @@ int wmain(int argc, wchar_t** argv) {
         SendKey(VK_TAB, 0, SHIFT_PRESSED);
         WaitForRowText(status_row3, "确认模式", 5000);
         (void)status_row2;
+    }
+
+    // ---- F8 diff 帧(0.18.0):edit_file 预览删除行红底、新增行绿底、
+    // 上下文无底;确认放行后终态留存同验,摘要是 "新增 N 行,删除 M 行"。----
+    {
+        // 素材文件驱动器自己写,别劳模型的驾。
+        std::ofstream demo(std::filesystem::path(workdir) / L"diffdemo.txt", std::ios::binary | std::ios::trunc);
+        demo << "alpha\nbeta\ngamma\ndelta\nepsilon\n";
+        demo.close();
+        const int prev_tokens_row = FindLastRow("[tokens]");
+        SendText("请用 edit_file 工具把 diffdemo.txt 里的 gamma 这一行替换成 GAMMA,其余行一个字不动,替换完不用解释。");
+        SendKey(VK_RETURN, L'\r', 0);
+        // 确认档下 edit_file 要问 [y/a/N],确认块上方垫着 diff 预览。
+        Check(WaitForText("- gamma", 180000), "F8 预览:diff 里出现删除行 '- gamma'(180s 内)");
+        Sleep(800);
+        {
+            const int del_row = FindLastRow("- gamma");
+            const int add_row = FindLastRow("+ GAMMA");
+            const int ctx_row = FindLastRow("beta");
+            Check(del_row >= 0 && add_row >= 0 && ctx_row >= 0, "F8 预览:删/增/上下文三种行都在屏上");
+            if (del_row >= 0) {
+                CheckDiffRowBg(del_row, "- gamma", /*want_red=*/true, /*want_green=*/false,
+                                "F8 预览:删除行整行红底属性");
+            }
+            if (add_row >= 0) {
+                CheckDiffRowBg(add_row, "+ GAMMA", /*want_red=*/false, /*want_green=*/true,
+                                "F8 预览:新增行整行绿底属性");
+            }
+            if (ctx_row >= 0) {
+                CheckDiffRowBg(ctx_row, "beta", /*want_red=*/false, /*want_green=*/false,
+                                "F8 预览:上下文行无底色");
+            }
+        }
+        // 放行,等终态摘要 + 留存 diff。
+        SendText("y");
+        SendKey(VK_RETURN, L'\r', 0);
+        Check(WaitForText("新增 1 行,删除 1 行", 60000), "F8 终态:摘要新文案 '新增 1 行,删除 1 行'(60s 内)");
+        Sleep(1000);
+        {
+            const int del_row = FindLastRow("- gamma");
+            const int add_row = FindLastRow("+ GAMMA");
+            Check(del_row >= 0 && add_row >= 0, "F8 终态:条目里留存 diff(删/增行都在)");
+            if (del_row >= 0) {
+                CheckDiffRowBg(del_row, "- gamma", /*want_red=*/true, /*want_green=*/false,
+                                "F8 终态:留存删除行红底属性");
+            }
+            if (add_row >= 0) {
+                CheckDiffRowBg(add_row, "+ GAMMA", /*want_red=*/false, /*want_green=*/true,
+                                "F8 终态:留存新增行绿底属性");
+            }
+        }
+        // 等这一轮新的统计行落定(F6 那行还在屏上,得盯"更靠下的一行"),
+        // 别让收尾 exit 跟工具轮次撞车。
+        {
+            const DWORD deadline = GetTickCount() + 60000;
+            while (GetTickCount() < deadline && FindLastRow("[tokens]") <= prev_tokens_row) {
+                Sleep(200);
+            }
+        }
+        Sleep(1000);
     }
 
     // ---- 收尾:exit ----

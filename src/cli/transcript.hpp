@@ -96,7 +96,8 @@ std::string RunCommandDoneSummary(const std::string& content, double seconds);
 // "读取 N 行"。
 std::string ReadFileDoneSummary(const std::string& content);
 
-// "+N -M"。removed_lines 为空(写的是新文件)时只有 "+N"。
+// "新增 N 行,删除 M 行"。removed_lines 为空(写的是新文件)时只有
+// "新增 N 行"。
 std::string WriteDiffSummary(int added_lines, std::optional<int> removed_lines);
 
 // "命中 N 处"。"没搜到匹配的内容"/"没找到匹配的文件" 算 0;截断提示行

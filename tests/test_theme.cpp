@@ -22,6 +22,9 @@ TEST_CASE("BuiltinTheme: dark 是默认主题,着色字段非空") {
     CHECK_FALSE(t.stats.empty());
     CHECK_FALSE(t.spinner.empty());
     CHECK_FALSE(t.reset.empty());
+    CHECK_FALSE(t.diff_add_bg.empty());
+    CHECK_FALSE(t.diff_del_bg.empty());
+    CHECK_FALSE(t.diff_line_no.empty());
 }
 
 TEST_CASE("BuiltinTheme: light 主题着色字段非空,且跟 dark 不完全一样") {
@@ -29,8 +32,13 @@ TEST_CASE("BuiltinTheme: light 主题着色字段非空,且跟 dark 不完全一
     const Theme light = BuiltinTheme("light");
     CHECK_FALSE(light.banner.empty());
     CHECK_FALSE(light.prompt.empty());
+    CHECK_FALSE(light.diff_add_bg.empty());
+    CHECK_FALSE(light.diff_del_bg.empty());
+    CHECK_FALSE(light.diff_line_no.empty());
     // 两套主题不能是同一份配色(不然分两套毫无意义)。
     CHECK((dark.banner != light.banner || dark.prompt != light.prompt || dark.stats != light.stats));
+    CHECK(dark.diff_add_bg != light.diff_add_bg);
+    CHECK(dark.diff_del_bg != light.diff_del_bg);
 }
 
 TEST_CASE("BuiltinTheme: plain 主题所有字段都是空串") {
@@ -43,6 +51,9 @@ TEST_CASE("BuiltinTheme: plain 主题所有字段都是空串") {
     CHECK(t.stats.empty());
     CHECK(t.spinner.empty());
     CHECK(t.reset.empty());
+    CHECK(t.diff_add_bg.empty());
+    CHECK(t.diff_del_bg.empty());
+    CHECK(t.diff_line_no.empty());
 }
 
 TEST_CASE("BuiltinTheme: 不认得的名字兜底成 dark") {

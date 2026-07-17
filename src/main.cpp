@@ -1242,8 +1242,8 @@ std::optional<FileDiffPreview> BuildFileDiffPreview(const std::string& name, con
 //   - 真控制台:走 TranscriptPainter 画条目、原地改写状态;
 //   - 管道/重定向:保持稳定纯文本——启动一行 "[工具] name {...}"(现状),
 //     结束一行 "[工具完成] name: 摘要"(新增,不回写、不夹 ANSI)。
-// 计时(run_command 耗时)、行统计(write/edit 的 +N -M)全在这一层做,
-// tools/ 层一个字不动。
+// 计时(run_command 耗时)、行统计(write/edit 的 "新增 N 行,删除 M 行")
+// 全在这一层做,tools/ 层一个字不动。
 struct ToolDisplay {
     ToolDisplay(std::vector<lubancode::cli::TranscriptItem>& transcript_ref, const lubancode::cli::Theme& theme_ref,
                 bool console, std::shared_ptr<lubancode::tools::TodoListState> todo,
@@ -1313,8 +1313,8 @@ struct ToolDisplay {
         }
         auto& item = transcript[static_cast<std::size_t>(active_main)];
         // UI-C:自动放行时垫在条目下面的 diff 预览,执行完了就擦——终态只
-        // 留 +N -M 简短摘要,不铺屏(确认路子的预览已被 OnConfirmAnswered
-        // 的 TrimBelow 带走,标记不会是 true)。
+        // 留 "新增 N 行,删除 M 行" 简短摘要,不铺屏(确认路子的预览已被
+        // OnConfirmAnswered 的 TrimBelow 带走,标记不会是 true)。
         if (main_preview_below && is_console) {
             painter.TrimBelow(item.id);
         }
@@ -1527,10 +1527,10 @@ private:
         } else if (name == "write_file") {
             item.summary_lines = {
                 cli::WriteDiffSummary(cli::CountLines(input.value("content", std::string())), write_old_lines)};
-            // UI-C:终态把 diff 留在条目里(git 那种效果)——首行 +N -M,
-            // 底下接 diff 正文(建预览时已按宽截好、行数收紧,超长有
-            // Ctrl+E 标注)。管道模式没建预览,diff_final 是空的,摘要
-            // 保持一行 +N -M 不变。
+            // UI-C:终态把 diff 留在条目里(git 那种效果)——首行
+            // "新增 N 行,删除 M 行",底下接 diff 正文(建预览时已按宽截
+            // 好、行数收紧,超长有 Ctrl+E 标注)。管道模式没建预览,
+            // diff_final 是空的,摘要保持一行文字不变。
             item.summary_lines.insert(item.summary_lines.end(), diff_final.begin(), diff_final.end());
         } else if (name == "edit_file") {
             item.summary_lines = {
@@ -1674,7 +1674,7 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         // (参数详情 + [y/a/N] 提示)跟在条目下面;答完确认块整个擦掉,
         // 拒绝则条目原地改灰 Cancelled,允许则改回 Running 等终态。
         // UI-C:edit_file/write_file 在真控制台下,参数详情换成统一 diff
-        // 预览(路径 + 行级 diff,- 红 + 绿),answered 后随确认块一起擦;
+        // 预览(路径 + 行级 diff,- 红底 + 绿底),answered 后随确认块一起擦;
         // 管道模式沿用老的参数摘要,不打 diff。
         const int pending_idx = display.OnConfirmRequest();
         if (file_tool && display.is_console) {
