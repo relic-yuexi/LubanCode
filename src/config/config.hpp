@@ -25,8 +25,10 @@
 
 #include <cstddef>
 #include <expected>
+#include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json_fwd.hpp>
@@ -86,6 +88,15 @@ struct HooksConfig {
     }
 };
 
+// M8:一个 MCP 服务器的配置。command 必填,args/env 可选(缺省空)。
+// env 用 vector<pair> 而不是 map——直接对得上 tools::RunProcess 的
+// extra_env 入参类型(顺序在这里不重要,但没必要多一趟转换)。
+struct McpServerConfig {
+    std::string command;
+    std::vector<std::string> args;
+    std::vector<std::pair<std::string, std::string>> env;
+};
+
 struct Config {
     Wire wire = Wire::Anthropic;
     std::string base_url;
@@ -98,6 +109,9 @@ struct Config {
     std::string compact_model;  // M6.6:压缩用的模型,空串 = 跟当前会话模型一致
     std::string think;          // M6.6:推理强度,none/low/medium/high,空串 = 不发这个参数
     HooksConfig hooks;          // M9:钩子,只从配置文件读,没配就是四个空数组
+    // M8:MCP 服务器,键是服务器名,只从配置文件来(跟 hooks 一样没有
+    // 环境变量、没有内置默认值这两级),没配就是空 map。
+    std::map<std::string, McpServerConfig> mcp_servers;
 };
 
 // 每个字段最终来自哪一级,跟 Config 里的字段一一对应。
@@ -143,6 +157,9 @@ struct FileConfig {
     std::optional<std::string> compact_model;         // 压缩用的模型
     std::optional<std::string> think;                 // none/low/medium/high
     std::optional<HooksConfig> hooks;                  // M9:hooks 段,整段有没有出现在 JSON 里
+    // M8:mcpServers 段,整段有没有出现在 JSON 里(跟 hooks 同样待遇——
+    // 只从配置文件来,没有环境变量、没有内置默认值)。
+    std::optional<std::map<std::string, McpServerConfig>> mcp_servers;
     std::string source_path;
     // 这份 FileConfig 是不是从"旧位置迁移到新位置"这个动作里读出来的;
     // 有值就是要打印给用户看的那一行通知(LoadFileConfig 填,LoadFromEnv
@@ -273,6 +290,16 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
 // file_path_for_error 和具体是第几项,方便定位。
 std::expected<HooksConfig, std::string> ParseHooksConfig(const nlohmann::json& hooks_json,
                                                            const std::string& file_path_for_error);
+
+// 纯函数,不碰 IO:解析 config.json 里的 "mcpServers" 字段(整个 JSON
+// object)。每个键是服务器名,值是 {"command": "...(必填,字符串)",
+// "args": ["...", ...](可选,字符串数组,缺省空),
+// "env": {"K": "V", ...}(可选,字符串到字符串的 object,缺省空)}。
+// mcp_servers_json 不是 object、某个服务器的值不是 object、缺 command、
+// args/env 类型不对……都直接报错,错误信息带上 file_path_for_error 和
+// 具体是哪个服务器的哪个字段,方便定位。
+std::expected<std::map<std::string, McpServerConfig>, std::string> ParseMcpServersConfig(
+    const nlohmann::json& mcp_servers_json, const std::string& file_path_for_error);
 
 // 找配置文件,查找顺序:
 //   1) cwd 的新位置  <cwd>/.lubancode/config.json

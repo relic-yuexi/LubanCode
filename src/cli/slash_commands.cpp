@@ -65,6 +65,8 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Think;
     } else if (lower == "/skills") {
         parsed.command = SlashCommand::Skills;
+    } else if (lower == "/mcp") {
+        parsed.command = SlashCommand::Mcp;
     } else {
         parsed.command = SlashCommand::Unknown;
     }
@@ -83,6 +85,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
         {"/think", "看当前推理强度;/think 档位 切档位,档位以服务商为准(/effort 同义)"},
         {"/effort", "同 /think(推理强度别名)"},
         {"/skills", "列出扫描到的技能(主目录级 + 项目级)"},
+        {"/mcp", "列出挂载的 MCP 服务器状态和工具清单"},
     };
     return kCommands;
 }

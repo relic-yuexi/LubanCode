@@ -21,6 +21,7 @@ enum class SlashCommand {
     Compact,  // /compact [重点说明]:手动触发一次历史压缩
     Think,    // /think [档位]:看/改推理强度
     Skills,   // /skills:列出扫描到的技能(M9)
+    Mcp,      // /mcp:列出挂载的 MCP 服务器状态、工具清单(M8)
     Unknown,  // 以 / 开头,但不认得这个命令
 };
 

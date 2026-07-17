@@ -173,6 +173,61 @@ std::expected<std::vector<HookEntry>, std::string> ParseHookEntryArray(const nlo
 
 }  // namespace
 
+std::expected<std::map<std::string, McpServerConfig>, std::string> ParseMcpServersConfig(
+    const nlohmann::json& mcp_servers_json, const std::string& file_path_for_error) {
+    if (!mcp_servers_json.is_object()) {
+        return std::unexpected("配置文件 " + file_path_for_error + " 里的 mcpServers 字段必须是一个 JSON object");
+    }
+
+    std::map<std::string, McpServerConfig> out;
+    for (auto it = mcp_servers_json.begin(); it != mcp_servers_json.end(); ++it) {
+        const std::string& server_name = it.key();
+        const nlohmann::json& value = it.value();
+        if (!value.is_object()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 mcpServers." + server_name +
+                                    " 必须是一个 JSON object");
+        }
+        if (!value.contains("command") || !value["command"].is_string()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 mcpServers." + server_name +
+                                    " 缺少必填字段 command(字符串)");
+        }
+
+        McpServerConfig server;
+        server.command = value["command"].get<std::string>();
+
+        if (value.contains("args")) {
+            if (!value["args"].is_array()) {
+                return std::unexpected("配置文件 " + file_path_for_error + " 里的 mcpServers." + server_name +
+                                        ".args 字段必须是数组");
+            }
+            for (const auto& item : value["args"]) {
+                if (!item.is_string()) {
+                    return std::unexpected("配置文件 " + file_path_for_error + " 里的 mcpServers." + server_name +
+                                            ".args 数组元素必须是字符串");
+                }
+                server.args.push_back(item.get<std::string>());
+            }
+        }
+
+        if (value.contains("env")) {
+            if (!value["env"].is_object()) {
+                return std::unexpected("配置文件 " + file_path_for_error + " 里的 mcpServers." + server_name +
+                                        ".env 字段必须是一个 JSON object(字符串到字符串)");
+            }
+            for (auto env_it = value["env"].begin(); env_it != value["env"].end(); ++env_it) {
+                if (!env_it.value().is_string()) {
+                    return std::unexpected("配置文件 " + file_path_for_error + " 里的 mcpServers." + server_name +
+                                            ".env." + env_it.key() + " 的值必须是字符串");
+                }
+                server.env.emplace_back(env_it.key(), env_it.value().get<std::string>());
+            }
+        }
+
+        out.emplace(server_name, std::move(server));
+    }
+    return out;
+}
+
 std::expected<HooksConfig, std::string> ParseHooksConfig(const nlohmann::json& hooks_json,
                                                            const std::string& file_path_for_error) {
     if (!hooks_json.is_object()) {
@@ -302,6 +357,13 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
             return std::unexpected(hooks_result.error());
         }
         config.hooks = std::move(*hooks_result);
+    }
+    if (parsed.contains("mcpServers")) {
+        auto mcp_result = ParseMcpServersConfig(parsed["mcpServers"], file_path_for_error);
+        if (!mcp_result.has_value()) {
+            return std::unexpected(mcp_result.error());
+        }
+        config.mcp_servers = std::move(*mcp_result);
     }
 
     return config;
@@ -601,6 +663,12 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     // (四个数组都是空的)。 ----
     if (file_config.has_value() && file_config->hooks.has_value()) {
         result.config.hooks = *file_config->hooks;
+    }
+
+    // ---- mcpServers:M8 新增,只从配置文件来,没有环境变量、没有内置
+    // 默认值这两级(跟 hooks 一样)。配置文件没写这字段,就是空 map。 ----
+    if (file_config.has_value() && file_config->mcp_servers.has_value()) {
+        result.config.mcp_servers = *file_config->mcp_servers;
     }
 
     return result;

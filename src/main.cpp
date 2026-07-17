@@ -38,6 +38,8 @@
 #include "cli/spinner.hpp"
 #include "cli/theme.hpp"
 #include "config/config.hpp"
+#include "mcp/client.hpp"
+#include "mcp/mcp_tool.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/edit_file.hpp"
 #include "tools/hooks.hpp"
@@ -56,7 +58,7 @@
 
 namespace {
 
-constexpr std::string_view kVersion = "0.8.0";
+constexpr std::string_view kVersion = "0.9.0";
 
 void PrintVersion() {
     std::cout << "lubancode " << kVersion << "\n";
@@ -92,6 +94,7 @@ void PrintHelp() {
         << "  /think 档位     切推理强度,档位以服务商为准(anthropic 内置 none/low/medium/high/xhigh/max\n"
         << "                  映射,responses 原样递给 API)\n"
         << "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
+        << "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
         << "  ESC             流式回复期间按下:打断当前这轮回答,已出的半截话保留、下一轮能接着聊;\n"
         << "                  空闲时按下:清空正在编辑的这一行;确认提示 [y/a/N] 下按下:等同拒绝\n"
         << "  流式期间打字回车  不会打断当前流,而是排进队列,本轮结束后按顺序自动发出\n"
@@ -112,7 +115,9 @@ void PrintHelp() {
         << "     .lubancode/config.json → cwd 的旧位置 .lubancode.json → 主目录的旧位置\n"
         << "     .lubancode.json;读到旧位置会自动挪到新位置)。字段:wire / base_url / api_key / model /\n"
         << "     max_context_chars / theme / system_prompt_file / context_window / compact_model / think,\n"
-        << "     全部可选。\n"
+        << "     全部可选。另有 hooks / mcpServers 两段(只从配置文件读,没有环境变量、没有内置默认值):\n"
+        << "       \"mcpServers\": {\"服务器名\": {\"command\": \"...\", \"args\": [...], \"env\": {...}}}\n"
+        << "       起进程握手成功后,工具以 mcp__服务器名__工具名 挂进工具表,/mcp 看状态\n"
         << "  3) 通用环境变量(向后兼容旧用法,跟 Claude Code 等工具共用同名变量时容易撞车,\n"
         << "     建议改用第 1 级的 LUBANCODE_* 专属变量):\n"
         << "       wire=anthropic 时读 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL\n"
@@ -246,6 +251,18 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
         }
         std::cout << "\n";
     }
+    // M8:mcpServers 同样只从配置文件来,没有分级来源可打,只打个数——
+    // /config 只报"配置了几个",实际存活状态得看 /mcp(那个才知道哪个真的
+    // 起来了、握手成没成功)。
+    {
+        std::cout << "  mcpServers         = ";
+        if (config.mcp_servers.empty()) {
+            std::cout << "(未配置)";
+        } else {
+            std::cout << config.mcp_servers.size() << " 个服务器";
+        }
+        std::cout << "\n";
+    }
     if (session_model.has_value()) {
         std::cout << "\n  本会话实际在用的 model = " << *session_model;
         if (*session_model != config.model) {
@@ -332,6 +349,86 @@ lubancode::tools::ToolRegistry BuildBaseToolRegistry(const std::vector<lubancode
     registry.Register(std::make_unique<lubancode::tools::SearchTool>());
     registry.Register(std::make_unique<lubancode::tools::SkillTool>(skills));
     return registry;
+}
+
+// M8:一个已经跑起来的 MCP 服务器运行时状态——协议客户端本体,加上握手时
+// 拿到的工具清单。/mcp 命令、注册进 registry 都要用这个。
+// client 用 unique_ptr 而不是直接存 mcp::Client 对象:McpTool 持有
+// mcp::Client& 引用,这份 runtime 要塞进 vector,vector 扩容/搬移只挪
+// unique_ptr 本身(一个指针),Client 对象的地址不变,McpTool 里存的引用
+// 不会失效。
+struct McpServerRuntime {
+    std::string name;
+    std::unique_ptr<lubancode::mcp::Client> client;
+    std::vector<lubancode::mcp::ToolInfo> tools;
+};
+
+// 按配置逐个起 MCP 服务器:起子进程 + initialize 握手 + tools/list。单个
+// 服务器出岔子(起不来、握手超时、tools/list 失败……)只打一行警告就跳过,
+// 不阻塞整个会话——只有真正跑通全流程的服务器才会进返回的 vector。
+// mcpServers 没配(config.mcp_servers 是空 map)时,这个函数循环零次,
+// 直接返回空 vector,天然满足"只有配了才起"这条要求,不用另外判断。
+std::vector<McpServerRuntime> StartMcpServers(
+    const std::map<std::string, lubancode::config::McpServerConfig>& configs, const lubancode::cli::Theme& theme) {
+    std::vector<McpServerRuntime> out;
+    for (const auto& [name, server_config] : configs) {
+        auto client = std::make_unique<lubancode::mcp::Client>(name);
+        const auto start_result = client->StartProcess(server_config.command, server_config.args, server_config.env);
+        if (!start_result.success) {
+            std::cout << theme.error << "[mcp] " << name << ": 启动失败 - " << start_result.error << theme.reset
+                       << "\n";
+            continue;
+        }
+        const auto init_result = client->Initialize();
+        if (!init_result.has_value()) {
+            std::cout << theme.error << "[mcp] " << name << ": 握手失败 - " << init_result.error() << theme.reset
+                       << "\n";
+            continue;
+        }
+        auto tools_result = client->ListTools();
+        if (!tools_result.has_value()) {
+            std::cout << theme.error << "[mcp] " << name << ": 获取工具清单失败 - " << tools_result.error()
+                       << theme.reset << "\n";
+            continue;
+        }
+
+        McpServerRuntime runtime;
+        runtime.name = name;
+        runtime.tools = std::move(*tools_result);
+        std::cout << "[mcp] " << name << ": " << runtime.tools.size() << " 个工具已挂载\n";
+        runtime.client = std::move(client);
+        out.push_back(std::move(runtime));
+    }
+    return out;
+}
+
+// 把每个 MCP 服务器握手拿到的工具包成 McpTool,注册进 registry——主循环表、
+// 子代理表都要各调一遍(MCP 工具对子代理同样有用),两份各自独立的
+// McpTool 实例,但底下持的是同一个 mcp::Client&(工具背后是同一个子进程,
+// 不会因为注册了两份就多起一个进程)。
+void RegisterMcpTools(std::vector<McpServerRuntime>& mcp_servers, lubancode::tools::ToolRegistry& registry) {
+    for (auto& runtime : mcp_servers) {
+        for (const auto& tool_info : runtime.tools) {
+            registry.Register(std::make_unique<lubancode::mcp::McpTool>(*runtime.client, runtime.name, tool_info));
+        }
+    }
+}
+
+// /mcp 命令:每个服务器一行状态(运行中/已退出)+ 工具数,底下缩进列出
+// 完整工具名(mcp__服务器名__工具名,跟模型实际看到的名字一致)。
+void PrintMcpCommand(const std::vector<McpServerRuntime>& mcp_servers) {
+    if (mcp_servers.empty()) {
+        std::cout << "没有挂载任何 MCP 服务器(config.json 里没写 mcpServers,或者配了但全部启动失败)。\n";
+        return;
+    }
+    for (const auto& runtime : mcp_servers) {
+        const bool alive = runtime.client != nullptr && runtime.client->Alive();
+        std::cout << "  - " << runtime.name << ": " << (alive ? "运行中" : "已退出") << ", " << runtime.tools.size()
+                   << " 个工具\n";
+        for (const auto& tool_info : runtime.tools) {
+            std::cout << "      mcp__" << runtime.name << "__" << tool_info.name << "\n";
+        }
+    }
 }
 
 // 打印一段文本的前几行,超过就注明省略了多少行。给确认前的改动摘要用。
@@ -639,6 +736,7 @@ void PrintSlashHelp() {
               << "  /compact        手动压缩历史;/compact 重点说明 可指定这次额外保留什么\n"
               << "  /think          看当前推理强度;/think 档位 切档位,档位以服务商为准(/effort 同义)\n"
               << "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
+              << "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
               << "  /exit           退出(裸词 exit/quit 也认)\n";
 }
 
@@ -868,13 +966,23 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
 
     PrintBanner(config, theme);
 
+    // M8:mcp_servers 声明在 sub_registry/registry 之前——函数退出时按声明的
+    // 反序析构,sub_registry/registry(里头的 McpTool 持有 mcp::Client& 引用)
+    // 会先于 mcp_servers(真正拥有 Client/子进程)析构,不会有悬垂引用。
+    // 起服务器放在 PrintBanner 之后、第一次给提示符之前,"[mcp] xxx: N 个
+    // 工具已挂载" 这行紧跟着横幅打出来。
+    std::vector<McpServerRuntime> mcp_servers = StartMcpServers(config.mcp_servers, theme);
+
     // 两份工具表:sub_registry 只有基础工具,喂给 agent 工具当"子代理能用
     // 什么"(不含 agent 自己,防递归);registry 是主循环真正用的那份,
     // 基础工具之外多注册了 agent 工具本身。两者都是这个函数的局部变量,
     // sub_registry 声明在前、registry 在后,函数退出时按声明的反序析构,
-    // agent 工具持有的 sub_registry 引用不会悬垂。
+    // agent 工具持有的 sub_registry 引用不会悬垂。MCP 工具同样注册进两份
+    // (子代理也能用外部工具)。
     lubancode::tools::ToolRegistry sub_registry = BuildBaseToolRegistry(skills);
     lubancode::tools::ToolRegistry registry = BuildBaseToolRegistry(skills);
+    RegisterMcpTools(mcp_servers, sub_registry);
+    RegisterMcpTools(mcp_servers, registry);
     registry.Register(std::make_unique<lubancode::tools::AgentTool>(
         wrapped_backend, sub_registry, CurrentDirUtf8(), config.model, /*default_max_turns=*/15, skills_segment));
 
@@ -933,6 +1041,9 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     break;
                 case lubancode::cli::SlashCommand::Skills:
                     PrintSkillsCommand(skills, CurrentDirUtf8(), home_dir);
+                    break;
+                case lubancode::cli::SlashCommand::Mcp:
+                    PrintMcpCommand(mcp_servers);
                     break;
                 case lubancode::cli::SlashCommand::Exit:
                     return false;
@@ -1017,11 +1128,20 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     auto current_think = std::make_shared<std::string>(config.think);
     ThinkOverrideBackend think_backend(*backend, current_think);
     SpinnerBackend wrapped_backend(think_backend, theme, spinner_enabled);
+
+    // M8:mcp_servers 声明在 sub_registry/registry 之前,理由同
+    // InteractiveLoop(析构反序,MCP 工具持有的 Client& 不会悬垂)。单发
+    // 模式没有横幅、没有 /mcp 命令,起服务器就在构建工具表之前干净利落地做。
+    std::vector<McpServerRuntime> mcp_servers = StartMcpServers(config.mcp_servers, theme);
+
     // 两份工具表,理由同 InteractiveLoop:sub_registry 喂给 agent 工具当
     // "子代理能用什么"(不含 agent 自己,防递归),registry 是主循环真正
-    // 用的那份,基础工具之外多注册了 agent 工具本身。
+    // 用的那份,基础工具之外多注册了 agent 工具本身。MCP 工具同样注册进
+    // 两份。
     lubancode::tools::ToolRegistry sub_registry = BuildBaseToolRegistry(skills);
     lubancode::tools::ToolRegistry registry = BuildBaseToolRegistry(skills);
+    RegisterMcpTools(mcp_servers, sub_registry);
+    RegisterMcpTools(mcp_servers, registry);
     registry.Register(std::make_unique<lubancode::tools::AgentTool>(
         wrapped_backend, sub_registry, CurrentDirUtf8(), config.model, /*default_max_turns=*/15, skills_segment));
     lubancode::agent::AgentLoop loop(wrapped_backend, registry, config.model,
