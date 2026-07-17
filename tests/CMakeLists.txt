@@ -20,6 +20,7 @@ add_executable(lubancode_tests
   test_compact.cpp
   test_context_tracker.cpp
   test_anthropic_request.cpp
+  test_agent_tool.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_core doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)

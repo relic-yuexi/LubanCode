@@ -36,6 +36,7 @@
 #include "cli/spinner.hpp"
 #include "cli/theme.hpp"
 #include "config/config.hpp"
+#include "tools/agent_tool.hpp"
 #include "tools/edit_file.hpp"
 #include "tools/read_file.hpp"
 #include "tools/registry.hpp"
@@ -50,7 +51,7 @@
 
 namespace {
 
-constexpr std::string_view kVersion = "0.6.0";
+constexpr std::string_view kVersion = "0.6.1";
 
 void PrintVersion() {
     std::cout << "lubancode " << kVersion << "\n";
@@ -264,7 +265,18 @@ void PrintBanner(const lubancode::config::Config& config, const lubancode::cli::
               << theme.reset << "\n";
 }
 
-lubancode::tools::ToolRegistry BuildToolRegistry() {
+// 基础工具集(不含 "agent" 自己)。子代理的工具表就是这一份原样一份——
+// 防递归:子代理没法再委托一个孙代理,深度硬限 1。主循环的工具表在这份
+// 基础上再多注册一个 "agent" 工具,两份各自独立构建(调用方各自新建一份,
+// 每次调用都新建各工具实例,互不共享状态——这些工具本来就是无状态的,
+// 多建几份不影响行为,只是各自持有自己的资源句柄)。
+//
+// 注:main_registry 里的 agent 工具会持有 sub_registry 的引用,调用方
+// (InteractiveLoop / AskOnce)必须把两份都声明成同一层级的局部变量、
+// sub_registry 声明在前 main_registry 声明在后——这样析构顺序自然反过来,
+// 不会有悬垂引用;千万不能把它们塞进一个按值返回的结构体里再传出来,
+// 那样 move/copy 一趟,agent 工具里存的引用就废了。
+lubancode::tools::ToolRegistry BuildBaseToolRegistry() {
     lubancode::tools::ToolRegistry registry;
     registry.Register(std::make_unique<lubancode::tools::ReadFileTool>());
     registry.Register(std::make_unique<lubancode::tools::RunCommandTool>());
@@ -339,10 +351,14 @@ struct UsageStats {
 // 还是问用户一句(三选:y 本次允许 / a 本会话总是允许该工具 / N 拒绝)。
 // always_allowed_tools 由调用方持有,跨多轮 Run() 保留,选过 a 的工具本
 // 会话内不会再问。usage_stats 由调用方持有,只在这一次 Run() 范围内累计
-// (RunTurn() 每次都会传一份新的进来)。
+// (RunTurn() 每次都会传一份新的进来)。registry 是这一轮实际在用的工具表——
+// 如果里面注册了 "agent" 工具,这里顺带把这一轮现算好的确认/记账/打印
+// 逻辑通过 SetHooks 灌给它,子代理被调用时就能用上同一套(详见
+// tools/agent_tool.hpp 顶部注释)。
 lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::string>& always_allowed_tools,
                                             const lubancode::cli::Theme& theme, UsageStats& usage_stats,
-                                            lubancode::cli::ContextTracker& context_tracker) {
+                                            lubancode::cli::ContextTracker& context_tracker,
+                                            lubancode::tools::ToolRegistry& registry) {
     lubancode::agent::Callbacks callbacks;
 
     callbacks.on_text_delta = [](const std::string& text) {
@@ -403,19 +419,45 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         context_tracker.Update(usage);
     };
 
+    // agent 工具(注册了的话)需要这一轮现算好的转发逻辑:确认回调直接
+    // 转发父级那份(三档确认模式照管子代理);usage 累进 usage_stats(统计
+    // 行的请求次数、输入输出 token 都要算上子代理那几次请求)但不动
+    // context_tracker——子代理是完全独立的上下文,它的用量跟"主对话历史
+    // 占用多大"是两回事,冲进去反而会把 /context 的数字带偏成子代理那次
+    // 请求的大小,而不是主对话真实占用。
+    if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry.Find("agent"));
+        agent_tool != nullptr) {
+        lubancode::tools::AgentTool::Hooks hooks;
+        hooks.on_tool_confirm = callbacks.on_tool_confirm;
+        hooks.on_sub_tool_start = [&theme](const std::string& name, const nlohmann::json& input) {
+            std::cout << "\n"
+                       << theme.stats << "  [子代理·工具] " << name << " " << input.dump() << theme.reset << "\n";
+            std::cout.flush();
+        };
+        hooks.on_usage = [&usage_stats](const lubancode::api::Usage& usage) {
+            usage_stats.input_tokens += usage.input_tokens;
+            usage_stats.output_tokens += usage.output_tokens;
+            usage_stats.cache_read_tokens += usage.cache_read_tokens;
+            usage_stats.request_count += 1;
+        };
+        agent_tool->SetHooks(std::move(hooks));
+    }
+
     return callbacks;
 }
 
 // 发一轮用户输入,走 agent loop(可能会有若干次工具调用来回),流式打字机
 // 打印回复,结束后打一行 token 用量统计(暗色/淡色,plain 主题下就是空
 // 前后缀)。返回 0 表示成功,非 0 表示出错。always_allowed_tools 由调用方
-// 持有,记录本会话内选过"总是允许"的工具。
+// 持有,记录本会话内选过"总是允许"的工具。registry 是这一轮实际在用的
+// 工具表,传给 BuildCallbacks 好给里头的 agent 工具(如果有)灌这一轮的
+// 转发钩子。
 int RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bool auto_confirm,
             std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
-            lubancode::cli::ContextTracker& context_tracker) {
+            lubancode::cli::ContextTracker& context_tracker, lubancode::tools::ToolRegistry& registry) {
     UsageStats usage_stats;
     const lubancode::agent::Callbacks callbacks =
-        BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker);
+        BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker, registry);
 
     const auto result = loop.Run(user_input, callbacks);
     std::cout << "\n";
@@ -685,7 +727,15 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
 
     PrintBanner(config, theme);
 
-    lubancode::tools::ToolRegistry registry = BuildToolRegistry();
+    // 两份工具表:sub_registry 只有基础工具,喂给 agent 工具当"子代理能用
+    // 什么"(不含 agent 自己,防递归);registry 是主循环真正用的那份,
+    // 基础工具之外多注册了 agent 工具本身。两者都是这个函数的局部变量,
+    // sub_registry 声明在前、registry 在后,函数退出时按声明的反序析构,
+    // agent 工具持有的 sub_registry 引用不会悬垂。
+    lubancode::tools::ToolRegistry sub_registry = BuildBaseToolRegistry();
+    lubancode::tools::ToolRegistry registry = BuildBaseToolRegistry();
+    registry.Register(std::make_unique<lubancode::tools::AgentTool>(wrapped_backend, sub_registry,
+                                                                      CurrentDirUtf8(), config.model));
 
     std::optional<lubancode::agent::AgentLoop> loop;
     const auto rebuild_loop = [&]() {
@@ -769,7 +819,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
             }
         }
 
-        RunTurn(*loop, *line, auto_confirm, always_allowed_tools, theme, context_tracker);
+        RunTurn(*loop, *line, auto_confirm, always_allowed_tools, theme, context_tracker, registry);
     }
 }
 
@@ -784,14 +834,20 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     auto current_think = std::make_shared<std::string>(config.think);
     ThinkOverrideBackend think_backend(*backend, current_think);
     SpinnerBackend wrapped_backend(think_backend, theme, spinner_enabled);
-    lubancode::tools::ToolRegistry registry = BuildToolRegistry();
+    // 两份工具表,理由同 InteractiveLoop:sub_registry 喂给 agent 工具当
+    // "子代理能用什么"(不含 agent 自己,防递归),registry 是主循环真正
+    // 用的那份,基础工具之外多注册了 agent 工具本身。
+    lubancode::tools::ToolRegistry sub_registry = BuildBaseToolRegistry();
+    lubancode::tools::ToolRegistry registry = BuildBaseToolRegistry();
+    registry.Register(std::make_unique<lubancode::tools::AgentTool>(wrapped_backend, sub_registry,
+                                                                      CurrentDirUtf8(), config.model));
     lubancode::agent::AgentLoop loop(wrapped_backend, registry, config.model,
                                       lubancode::agent::BuildSystemPrompt(CurrentDirUtf8(), persona),
                                       /*max_tokens=*/4096, /*max_turns=*/25, config.max_context_chars);
     std::set<std::string> always_allowed_tools;
     lubancode::cli::ContextTracker context_tracker(config.context_window_tokens);
 
-    return RunTurn(loop, question, auto_confirm, always_allowed_tools, theme, context_tracker);
+    return RunTurn(loop, question, auto_confirm, always_allowed_tools, theme, context_tracker, registry);
 }
 
 // 真正的入口逻辑,跟平台无关:args[0] 是程序名,args[1..] 是实参。

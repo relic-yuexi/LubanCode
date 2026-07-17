@@ -21,6 +21,19 @@ TEST_CASE("ContextTracker: Update 用 input+output 覆盖当前占用") {
     CHECK(tracker.UsagePercent() == 35);
 }
 
+TEST_CASE("ContextTracker: Update 把 cache_read/cache_creation 也算进占用(Anthropic 语义里 input_tokens 不含缓存)") {
+    cli::ContextTracker tracker(2000);
+    // 实测场景:压缩后一轮 input=144、cache_read=1472,旧公式(只算
+    // input+output)会报 0%(current_tokens=144),修完应报约 1600 tokens。
+    tracker.Update(api::Usage{144, 0, 1472, 0});
+    CHECK(tracker.current_tokens() == 1616);
+    CHECK(tracker.UsagePercent() == 81);  // 1616/2000 ≈ 80.8%,四舍五入 81
+
+    // cache_creation_tokens 同样要算进去。
+    tracker.Update(api::Usage{100, 20, 300, 500});
+    CHECK(tracker.current_tokens() == 920);  // 100+20+300+500
+}
+
 TEST_CASE("ContextTracker: 新一次 Update 整个覆盖上一次,不是累加") {
     cli::ContextTracker tracker(1000);
     tracker.Update(api::Usage{300, 50});

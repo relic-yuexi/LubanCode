@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(lubancode VERSION 0.6.0 LANGUAGES CXX)
+project(lubancode VERSION 0.6.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -141,6 +141,7 @@ add_library(lubancode_core STATIC
   src/tools/write_file.cpp
   src/tools/edit_file.cpp
   src/tools/search.cpp
+  src/tools/agent_tool.cpp
   src/agent/loop.cpp
   src/agent/context.cpp
   src/agent/compact.cpp
