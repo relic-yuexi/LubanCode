@@ -197,6 +197,7 @@ add_library(lubancode_core STATIC
   src/cli/format_utils.cpp
   src/cli/todo_render.cpp
   src/cli/transcript.cpp
+  src/cli/markdown.cpp
   src/cli/diff.cpp
 )
 target_include_directories(lubancode_core PUBLIC
