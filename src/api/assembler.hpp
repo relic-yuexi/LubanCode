@@ -27,6 +27,14 @@ public:
     // 攒好的完整 assistant 消息,content 按内容块产生的先后顺序排列。
     Message BuildMessage() const;
 
+    // 强制给还开着的块(文本或 tool_use)收尾,不等 ContentBlockDone/
+    // MessageDone 事件到来。ESC 打断流式传输那种"半截话"场景专用:流被
+    // cpr 从中间掐断,后面的收尾事件永远不会来了,调用方得手动催一下,
+    // 不然半截文本会被 BuildMessage() 悄悄漏掉。正常收尾路径
+    // (ContentBlockDone/MessageDone)不受影响,FinalizeCurrent() 本身
+    // 对"没有任何开着的块"这种情况是空操作,重复调用安全。
+    void FinalizeOpenBlock() { FinalizeCurrent(); }
+
     const std::string& stop_reason() const { return stop_reason_; }
     const Usage& usage() const { return usage_; }
 

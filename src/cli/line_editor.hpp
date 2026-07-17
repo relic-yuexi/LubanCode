@@ -40,6 +40,7 @@ enum class KeyKind {
     Enter,
     CtrlC,
     CtrlD,
+    Esc,  // M10:ESC 打断/清行。终端层只在真控制台下(VK_ESCAPE)产出这个
 };
 
 struct KeyEvent {
@@ -121,6 +122,8 @@ struct RenderState {
     bool cleared = false;                // Ctrl+C 清空了非空行,留在同一次 ReadLine 里继续编辑
     bool eof_requested = false;          // Ctrl+D,或 Ctrl+C 在空行按下:整个读取应该当 EOF 处理
     bool mode_changed = false;           // 这一次事件是不是 ShiftTab 触发的模式切换
+    bool esc_pressed = false;            // M10:这一下是不是 Esc 触发的(空闲态清行;终端层若在"确认
+                                          // 提示"模式下读,看到这个直接把整次 ReadLine 当拒绝处理)
     ConfirmMode mode = ConfirmMode::Confirm;
 };
 

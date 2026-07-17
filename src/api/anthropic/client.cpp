@@ -1,6 +1,9 @@
 #include "api/anthropic/client.hpp"
 
+#include <atomic>
+#include <cctype>
 #include <charconv>
+#include <iostream>
 #include <optional>
 #include <type_traits>
 #include <utility>
@@ -40,35 +43,49 @@ json ContentBlockToJson(const ContentBlock& block) {
         block);
 }
 
-// M6.6:think 档位 -> Anthropic 风格 thinking 参数。实测(MiniMax-M3 真实
+// M6.6/M10:think 档位 -> Anthropic 风格 thinking 参数。实测(MiniMax-M3 真实
 // anthropic 兼容端点 /anthropic/v1/messages)确认支持
 // {"type":"enabled","budget_tokens":N} / {"type":"disabled"},HTTP 200,
 // 且 enabled 时真的返回 thinking 内容块——所以这里走"接受并映射"这条路,
 // 不是"协议不支持,打警告跳过"那条路。
-// 档位 -> budget_tokens 的具体数字是任务明确交给这里自己定的一个设计选择
-// (原话"档位→budget 映射你定"),选的是 low=1024/medium=4096/high=16384
-// 这组常见量级;唯一的硬约束是 Anthropic 要求 budget_tokens 必须小于
-// max_tokens(不然思考预算比整个回复上限还大,没意义、也可能被端点拒绝),
-// 所以这里按 request.max_tokens 兜底夹一下,budget 超过 max_tokens 时退化成
+// M10:config/命令行层不再限死档位取值(responses wire 原样透传任意字符串,
+// 由服务商自己判断合不合法);但 anthropic wire 走的是自家的 thinking 参数,
+// 只认 budget_tokens 这个数字,没法"原样透传"一个任意字符串,所以内置一张
+// 映射表:none/low/medium/high/xhigh/max。档位 -> budget_tokens 的具体数字
+// 是任务明确交给这里自己定的一个设计选择(原话"档位→budget 映射你定"),
+// 选的是 1k/4k/16k/32k/48k 这组常见量级,越往上思考预算越宽裕;唯一的硬
+// 约束是 Anthropic 要求 budget_tokens 必须小于 max_tokens(不然思考预算比
+// 整个回复上限还大,没意义、也可能被端点拒绝),所以这里按
+// request.max_tokens 兜底夹一下,budget 超过 max_tokens 时退化成
 // "max_tokens 留 256 给正文,剩下全给思考",绝不出现 budget >= max_tokens
-// 的组合。
+// 的组合。映射表之外的档位名字(比如用户在 responses wire 下用惯了、后来
+// 切到 anthropic wire 的自定义字符串):不报错、不崩,只打一行警告到
+// stderr,当没设置处理(不发 thinking 字段),留给上层继续跑完这一轮。
 std::optional<json> BuildThinkingJson(const Request& request) {
     if (request.reasoning_effort.empty()) {
         return std::nullopt;
     }
-    if (request.reasoning_effort == "none") {
+    std::string lower = request.reasoning_effort;
+    for (char& c : lower) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (lower == "none") {
         return json{{"type", "disabled"}};
     }
 
-    int budget = 1024;
-    if (request.reasoning_effort == "low") {
-        budget = 1024;
-    } else if (request.reasoning_effort == "medium") {
-        budget = 4096;
-    } else if (request.reasoning_effort == "high") {
-        budget = 16384;
+    int budget = 0;
+    if (lower == "low") {
+        budget = 1024;    // 1k
+    } else if (lower == "medium") {
+        budget = 4096;    // 4k
+    } else if (lower == "high") {
+        budget = 16384;   // 16k
+    } else if (lower == "xhigh") {
+        budget = 32768;   // 32k
+    } else if (lower == "max") {
+        budget = 49152;   // 48k
     } else {
-        // 不认得的档位(配置层已经拦过合法值,理论上到不了这里):当没设置处理。
+        std::cerr << "[警告] anthropic 协议下无此档映射,已忽略: " << request.reasoning_effort << "\n";
         return std::nullopt;
     }
 
@@ -153,7 +170,8 @@ AnthropicBackend::AnthropicBackend(std::string base_url, std::string auth_token)
 
 std::expected<void, Error> AnthropicBackend::send_stream(
     const Request& request,
-    const std::function<void(const StreamEvent&)>& on_event) {
+    const std::function<void(const StreamEvent&)>& on_event,
+    const std::atomic<bool>* cancel) {
     const json body = BuildRequestJson(request);
     const std::string body_str = body.dump();
 
@@ -161,6 +179,7 @@ std::expected<void, Error> AnthropicBackend::send_stream(
     std::string error_body;
     int status_code = 0;
     bool status_known = false;
+    bool cancelled = false;
 
     cpr::HeaderCallback header_cb(
         [&](const std::string_view& header, intptr_t) -> bool {
@@ -173,6 +192,13 @@ std::expected<void, Error> AnthropicBackend::send_stream(
 
     cpr::WriteCallback write_cb(
         [&](const std::string_view& data, intptr_t) -> bool {
+            if (cancel != nullptr && cancel->load()) {
+                // 返回 false 让 cpr/libcurl 就地掐断这次传输;response.error
+                // 会因此被置位,靠上面这个 cancelled 标志把"用户主动打断"
+                // 和"真网络错"分开,不走到 ErrorKind::Network 那条报错路。
+                cancelled = true;
+                return false;
+            }
             const bool is_success = status_known && status_code >= 200 && status_code < 300;
             if (!is_success) {
                 // 非 2xx:这不是 SSE 流,是普通的错误响应体,原样攒起来
@@ -199,6 +225,10 @@ std::expected<void, Error> AnthropicBackend::send_stream(
         cpr::Body{body_str},
         header_cb,
         write_cb);
+
+    if (cancelled || (cancel != nullptr && cancel->load())) {
+        return std::unexpected(Error{ErrorKind::Cancelled, "用户按 ESC 打断了这次请求", 0});
+    }
 
     if (response.error) {
         return std::unexpected(Error{ErrorKind::Network, response.error.message, 0});

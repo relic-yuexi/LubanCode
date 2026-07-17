@@ -83,7 +83,8 @@ std::vector<api::ToolDefinition> AgentLoop::BuildToolDefinitions() const {
     return defs;
 }
 
-std::expected<void, std::string> AgentLoop::Run(const std::string& user_input, const Callbacks& callbacks) {
+std::expected<RunOutcome, std::string> AgentLoop::Run(const std::string& user_input, const Callbacks& callbacks,
+                                                        const std::atomic<bool>* cancel) {
     api::Message user_message;
     user_message.role = api::Role::User;
     user_message.content.push_back(api::TextBlock{user_input});
@@ -103,25 +104,59 @@ std::expected<void, std::string> AgentLoop::Run(const std::string& user_input, c
         bool stream_error = false;
         std::string stream_error_message;
 
-        const auto send_result = backend_.send_stream(request, [&](const api::StreamEvent& event) {
-            assembler.Feed(event);
-            std::visit(
-                [&](const auto& e) {
-                    using T = std::decay_t<decltype(e)>;
-                    if constexpr (std::is_same_v<T, api::TextDelta>) {
-                        if (callbacks.on_text_delta) {
-                            callbacks.on_text_delta(e.text);
+        const auto send_result = backend_.send_stream(
+            request,
+            [&](const api::StreamEvent& event) {
+                assembler.Feed(event);
+                std::visit(
+                    [&](const auto& e) {
+                        using T = std::decay_t<decltype(e)>;
+                        if constexpr (std::is_same_v<T, api::TextDelta>) {
+                            if (callbacks.on_text_delta) {
+                                callbacks.on_text_delta(e.text);
+                            }
+                        } else if constexpr (std::is_same_v<T, api::StreamError>) {
+                            stream_error = true;
+                            stream_error_message = e.message;
                         }
-                    } else if constexpr (std::is_same_v<T, api::StreamError>) {
-                        stream_error = true;
-                        stream_error_message = e.message;
-                    }
-                },
-                event);
-        });
+                    },
+                    event);
+            },
+            cancel);
 
         if (!send_result.has_value()) {
-            return std::unexpected("请求失败: " + send_result.error().message);
+            const api::Error& err = send_result.error();
+            if (err.kind == api::ErrorKind::Cancelled) {
+                // ESC 打断:流被从中间掐断,ContentBlockDone/MessageDone 永远
+                // 不会来了,手动把还开着的块(文本或 tool_use)收个尾,半截话
+                // 也要照常攒进历史,不能悄悄丢掉。
+                assembler.FinalizeOpenBlock();
+                api::Message assistant_message = assembler.BuildMessage();
+                assistant_message.content.push_back(api::TextBlock{"[用户按 ESC 打断了这条回答]"});
+                history_.push_back(assistant_message);
+
+                // 半截流里如果混进了没走完的 tool_use 块(硬收尾出来的,
+                // input 多半是空对象或者解析失败),必须给每一个都配一条
+                // tool_result——不然这条 assistant 消息下一轮重放给模型时,
+                // tool_use/tool_result 配对关系就破了,API 会直接拒绝整个
+                // 请求。
+                std::vector<api::ContentBlock> orphan_results;
+                for (const auto& block : assistant_message.content) {
+                    if (std::holds_alternative<api::ToolUseBlock>(block)) {
+                        const auto& call = std::get<api::ToolUseBlock>(block);
+                        orphan_results.push_back(api::ToolResultBlock{call.id, "用户按 ESC 打断,该工具未执行", true});
+                    }
+                }
+                if (!orphan_results.empty()) {
+                    api::Message orphan_message;
+                    orphan_message.role = api::Role::User;
+                    orphan_message.content = std::move(orphan_results);
+                    history_.push_back(std::move(orphan_message));
+                }
+
+                return RunOutcome{true};
+            }
+            return std::unexpected("请求失败: " + err.message);
         }
         if (stream_error) {
             return std::unexpected("模型返回错误: " + stream_error_message);
@@ -136,23 +171,40 @@ std::expected<void, std::string> AgentLoop::Run(const std::string& user_input, c
         }
 
         if (stop_reason != "tool_use") {
-            return {};
+            return RunOutcome{};
         }
 
+        // 工具循环:逐个执行模型要的工具调用。cancel 中途被置位("工具已
+        // 执行、结果还没发回"那个当口——正在跑的这个工具照常等它跑完、结果
+        // 照常入历史;还没轮到的后续工具不再真的执行,补一条"未执行"的合成
+        // 结果)保住 tool_use/tool_result 的成对约束,再从 Run() 正常返回。
+        bool interrupted = false;
         std::vector<api::ContentBlock> tool_results;
         for (const auto& block : assistant_message.content) {
             if (!std::holds_alternative<api::ToolUseBlock>(block)) {
                 continue;
             }
             const auto& call = std::get<api::ToolUseBlock>(block);
+            if (interrupted || (cancel != nullptr && cancel->load())) {
+                interrupted = true;
+                tool_results.push_back(api::ToolResultBlock{call.id, "用户按 ESC 打断,该工具未执行", true});
+                continue;
+            }
             const tools::Tool::Result result = RunOneTool(registry_, call, callbacks);
             tool_results.push_back(api::ToolResultBlock{call.id, result.content, result.is_error});
+            if (cancel != nullptr && cancel->load()) {
+                interrupted = true;
+            }
         }
 
         api::Message tool_result_message;
         tool_result_message.role = api::Role::User;
         tool_result_message.content = std::move(tool_results);
         history_.push_back(std::move(tool_result_message));
+
+        if (interrupted) {
+            return RunOutcome{true};
+        }
     }
 
     return std::unexpected("超过最大轮数(" + std::to_string(max_turns_) + "),已停止,避免死循环。");

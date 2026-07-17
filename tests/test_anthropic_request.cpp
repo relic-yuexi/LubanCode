@@ -8,6 +8,9 @@
 
 #include <doctest/doctest.h>
 
+#include <iostream>
+#include <sstream>
+
 #include "api/anthropic/client.hpp"
 #include "api/types.hpp"
 
@@ -69,4 +72,55 @@ TEST_CASE("system/thinking 都设置时,两个字段互不影响,各自正常出
     const auto body = BuildRequestJson(request);
     CHECK(body.at("system") == "你是一个有用的助手。");
     CHECK(body.at("thinking").at("type") == "enabled");
+}
+
+// ---------------------------------------------------------------------------
+// M10:档位放开成任意字符串——anthropic 这边内置一张 none/low/medium/high/
+// xhigh/max 映射表,新增 xhigh/max 两档;映射不上的名字打警告、当没设。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("reasoning_effort=xhigh/max 映射成 thinking.type=enabled,budget_tokens 比 high 更大") {
+    Request high_req;
+    high_req.reasoning_effort = "high";
+    high_req.max_tokens = 65536;
+    const int high_budget = BuildRequestJson(high_req).at("thinking").at("budget_tokens").get<int>();
+
+    Request xhigh_req;
+    xhigh_req.reasoning_effort = "xhigh";
+    xhigh_req.max_tokens = 65536;
+    const auto xhigh_body = BuildRequestJson(xhigh_req);
+    CHECK(xhigh_body.at("thinking").at("type") == "enabled");
+    const int xhigh_budget = xhigh_body.at("thinking").at("budget_tokens").get<int>();
+
+    Request max_req;
+    max_req.reasoning_effort = "max";
+    max_req.max_tokens = 65536;
+    const auto max_body = BuildRequestJson(max_req);
+    CHECK(max_body.at("thinking").at("type") == "enabled");
+    const int max_budget = max_body.at("thinking").at("budget_tokens").get<int>();
+
+    CHECK(high_budget < xhigh_budget);
+    CHECK(xhigh_budget < max_budget);
+}
+
+TEST_CASE("reasoning_effort 档位名大小写不敏感") {
+    Request request;
+    request.reasoning_effort = "XHIGH";
+    const auto body = BuildRequestJson(request);
+    CHECK(body.at("thinking").at("type") == "enabled");
+}
+
+TEST_CASE("reasoning_effort 是映射表之外的字符串:不写 thinking 字段,stderr 打警告") {
+    std::ostringstream captured;
+    std::streambuf* old_buf = std::cerr.rdbuf(captured.rdbuf());
+
+    Request request;
+    request.reasoning_effort = "extreme";
+    const auto body = BuildRequestJson(request);
+
+    std::cerr.rdbuf(old_buf);
+
+    CHECK_FALSE(body.contains("thinking"));
+    CHECK(captured.str().find("extreme") != std::string::npos);
+    CHECK(captured.str().find("警告") != std::string::npos);
 }

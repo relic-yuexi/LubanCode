@@ -136,3 +136,24 @@ TEST_CASE("AllSlashCommands: 新命令 /context /compact /think 都在列表里"
     CHECK(has_compact);
     CHECK(has_think);
 }
+
+TEST_CASE("ParseSlashCommand: /effort 是 /think 的别名,解到同一个命令") {
+    const auto parsed = cli::ParseSlashCommand("/effort");
+    CHECK(parsed.command == cli::SlashCommand::Think);
+    CHECK(parsed.args.empty());
+}
+
+TEST_CASE("ParseSlashCommand: /effort 带档位参数,大小写不敏感") {
+    const auto parsed = cli::ParseSlashCommand("/Effort xhigh");
+    CHECK(parsed.command == cli::SlashCommand::Think);
+    CHECK(parsed.args == "xhigh");
+}
+
+TEST_CASE("AllSlashCommands: /effort 单独列一条,/help、Tab 候选都能看见") {
+    const auto& commands = cli::AllSlashCommands();
+    bool has_effort = false;
+    for (const auto& c : commands) {
+        if (c.name == "/effort") has_effort = true;
+    }
+    CHECK(has_effort);
+}

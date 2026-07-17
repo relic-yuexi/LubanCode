@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <expected>
 #include <functional>
 #include <optional>
@@ -60,6 +61,14 @@ struct Callbacks {
         on_post_tool_hook;
 };
 
+// Run() 的收场情况。cancelled=true 表示这一轮是被 ESC 打断收场的——打断
+// 不是错误(std::expected 的 value 分支,不是 error 分支),半截 assistant
+// 文本已经照常带着打断标注入了历史,history() 状态完整、下一轮能正常接着
+// 聊,调用方(main.cpp)只需要照这个标志决定要不要额外打提示。
+struct RunOutcome {
+    bool cancelled = false;
+};
+
 class AgentLoop {
 public:
     // max_turns:一次 Run() 里最多跟模型来回几趟(每趟一次工具调用算一趟),
@@ -73,7 +82,14 @@ public:
     // 发一轮用户输入。内部可能会跑好几个来回(工具调用),直到模型给出
     // end_turn(或者别的非 tool_use 的 stop_reason)才返回。历史跨多次
     // Run() 调用保留,下一句问话会带着之前的上下文。
-    std::expected<void, std::string> Run(const std::string& user_input, const Callbacks& callbacks);
+    // cancel 非空且流式/工具执行期间被外部(cli 层的 ESC 监听线程)置位:
+    // 半截 assistant 文本(如果已经流出来了)照常攒进历史,末尾附一段打断
+    // 标注;工具循环发现自己被打断,已经在执行的那个工具的结果照常入历史、
+    // 还没轮到的补一条"未执行"的合成 tool_result(保住 tool_use/tool_result
+    // 成对约束,不然下一轮重放历史会被 API 拒绝);两种情况都从 Run() 正常
+    // 返回(RunOutcome::cancelled = true),不是 std::unexpected——打断不是错误。
+    std::expected<RunOutcome, std::string> Run(const std::string& user_input, const Callbacks& callbacks,
+                                                const std::atomic<bool>* cancel = nullptr);
 
     const std::vector<api::Message>& history() const { return history_; }
 

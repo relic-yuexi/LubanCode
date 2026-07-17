@@ -212,3 +212,16 @@ TEST_CASE("reasoning_effort 支持 none/low/medium/high 四档,原样透传不�
         CHECK(body.at("reasoning").at("effort") == level);
     }
 }
+
+// M10:档位放开成任意字符串——responses 这边压根不认字典,服务商定的档位
+// 名字原样递过去,哪怕是 anthropic 那套映射表里没有的名字(xhigh)、或者
+// 两边协议都没听过的生造词,都不在这层拦。
+TEST_CASE("reasoning_effort 是任意字符串(含 anthropic 专属档位名、生造词)都原样透传") {
+    for (const std::string& level : {"xhigh", "max", "ultra-think-9000"}) {
+        Request request;
+        request.reasoning_effort = level;
+        const auto body = BuildRequestJson(request);
+        REQUIRE(body.contains("reasoning"));
+        CHECK(body.at("reasoning").at("effort") == level);
+    }
+}

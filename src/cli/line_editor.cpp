@@ -521,6 +521,20 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
         }
         case KeyKind::CtrlD:
             return BuildRenderState(false, false, true, false);
+        case KeyKind::Esc: {
+            // M10:空闲编辑态清空当前行和提示区,跟非空行 Ctrl+C 是同一个
+            // 效果(cleared=true,留在同一次 ReadLine 里继续等下一下按键),
+            // 但空行按 Esc 不像 Ctrl+C 那样触发 EOF——Esc 单纯是"清一下",
+            // 不是"我要退出输入"。esc_pressed 额外标一下,终端层在"确认
+            // 提示 [y/a/N]"那种读法下会看这个标志,把这一下直接当拒绝处理,
+            // 不用非空行清完还要用户再按一次 Enter。
+            line_.clear();
+            cursor_ = 0;
+            ResetHistoryBrowsing();
+            RenderState state = BuildRenderState(false, true, false, false);
+            state.esc_pressed = true;
+            return state;
+        }
     }
 
     return BuildRenderState(false, false, false, false);

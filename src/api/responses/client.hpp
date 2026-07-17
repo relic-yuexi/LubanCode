@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <expected>
 #include <functional>
 #include <string>
@@ -20,7 +21,8 @@ public:
 
     std::expected<void, Error> send_stream(
         const Request& request,
-        const std::function<void(const StreamEvent&)>& on_event) override;
+        const std::function<void(const StreamEvent&)>& on_event,
+        const std::atomic<bool>* cancel = nullptr) override;
 
 private:
     std::string base_url_;

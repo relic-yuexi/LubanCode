@@ -577,28 +577,19 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     }
 
     // ---- think:1 级 > 2 级 > 4 级默认值(空串 = 不发这个参数),没有通用
-    // env 这一级。只认 none/low/medium/high(大小写不敏感,存进 Config 时
-    // 统一存小写),写别的值直接报错——跟 wire 一样,没法留空糊弄过去。 ----
-    std::string think_error_origin;
-    std::optional<std::string> think_raw;
+    // env 这一级。M10 把档位放开成任意字符串——档位这东西两边协议长得不一样:
+    // responses 这边原样把字符串递给 API,档位是服务商定的,lubancode 没资格
+    // 拦在半路先报错;anthropic 那边自己有一张映射表(见
+    // api/anthropic/client.cpp 的 BuildThinkingJson),映射不上会在真正发请求
+    // 那一刻打警告、当没设,不在这儿提前拦。这里只原样存,不做大小写归一化
+    // ——responses 要"原样递",硬转小写会破坏这条承诺;anthropic 那张映射表
+    // 自己内部做了大小写不敏感匹配,不依赖这里转不转小写。 ----
     if (lubancode_env.think.has_value()) {
-        think_raw = *lubancode_env.think;
-        think_error_origin = "环境变量 LUBANCODE_THINK";
+        result.config.think = *lubancode_env.think;
         result.sources.think = Source::LubancodeEnv;
     } else if (file_config.has_value() && file_config->think.has_value()) {
-        think_raw = *file_config->think;
-        think_error_origin = "配置文件 " + file_config->source_path + " 里的 think 字段";
+        result.config.think = *file_config->think;
         result.sources.think = Source::ConfigFile;
-    }
-    if (think_raw.has_value()) {
-        std::string lower = *think_raw;
-        for (char& c : lower) {
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        }
-        if (lower != "none" && lower != "low" && lower != "medium" && lower != "high") {
-            return std::unexpected(think_error_origin + " 只认得 none/low/medium/high,写的是: " + *think_raw);
-        }
-        result.config.think = lower;
     } else {
         result.config.think.clear();
         result.sources.think = Source::Default;

@@ -5,8 +5,10 @@
 // 模式缺配置则直接报可读的错。交互循环里加了 /help /model /config /clear
 // /exit 几个 slash 命令,/model 能让模型切换真正在下一次请求生效。
 
+#include <atomic>
 #include <cctype>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <functional>
 #include <iostream>
@@ -54,7 +56,7 @@
 
 namespace {
 
-constexpr std::string_view kVersion = "0.7.0";
+constexpr std::string_view kVersion = "0.8.0";
 
 void PrintVersion() {
     std::cout << "lubancode " << kVersion << "\n";
@@ -86,9 +88,13 @@ void PrintHelp() {
         << "  /context        看当前上下文占用(token 数/窗口大小/百分比)\n"
         << "  /context 512k   临时改窗口大小(256k/512k/1m/裸数字都认),只本会话生效\n"
         << "  /compact [重点说明]  手动触发一次历史压缩,可选指定这次额外保留什么\n"
-        << "  /think          看当前推理强度\n"
-        << "  /think 档位     切推理强度,none/low/medium/high\n"
+        << "  /think          看当前推理强度(/effort 同义)\n"
+        << "  /think 档位     切推理强度,档位以服务商为准(anthropic 内置 none/low/medium/high/xhigh/max\n"
+        << "                  映射,responses 原样递给 API)\n"
         << "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
+        << "  ESC             流式回复期间按下:打断当前这轮回答,已出的半截话保留、下一轮能接着聊;\n"
+        << "                  空闲时按下:清空正在编辑的这一行;确认提示 [y/a/N] 下按下:等同拒绝\n"
+        << "  流式期间打字回车  不会打断当前流,而是排进队列,本轮结束后按顺序自动发出\n"
         << "  /exit           退出(裸词 exit/quit 也认)\n\n"
         << "配置优先级(从高到低,按字段逐个决,不是整套配置一刀切):\n"
         << "  1) LUBANCODE_ 专属环境变量\n"
@@ -101,7 +107,7 @@ void PrintHelp() {
         << "       LUBANCODE_SYSTEM_PROMPT_FILE  人格文件路径,同 --system-prompt(命令行参数压过这个)\n"
         << "       LUBANCODE_CONTEXT_WINDOW      上下文窗口 token 数,256k/512k/1m/裸数字\n"
         << "       LUBANCODE_COMPACT_MODEL       压缩用的模型,空 = 跟当前会话模型一致\n"
-        << "       LUBANCODE_THINK               推理强度,none/low/medium/high,空 = 不发这个参数\n"
+        << "       LUBANCODE_THINK               推理强度,档位以服务商为准,空 = 不发这个参数\n"
         << "  2) 配置文件(第一个找到的生效,查找顺序:cwd 的 .lubancode/config.json → 主目录的\n"
         << "     .lubancode/config.json → cwd 的旧位置 .lubancode.json → 主目录的旧位置\n"
         << "     .lubancode.json;读到旧位置会自动挪到新位置)。字段:wire / base_url / api_key / model /\n"
@@ -141,10 +147,11 @@ public:
 
     std::expected<void, lubancode::api::Error> send_stream(
         const lubancode::api::Request& request,
-        const std::function<void(const lubancode::api::StreamEvent&)>& on_event) override {
+        const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* cancel = nullptr) override {
         lubancode::api::Request patched = request;
         patched.model = *current_model_;
-        return inner_.send_stream(patched, on_event);
+        return inner_.send_stream(patched, on_event, cancel);
     }
 
 private:
@@ -165,10 +172,11 @@ public:
 
     std::expected<void, lubancode::api::Error> send_stream(
         const lubancode::api::Request& request,
-        const std::function<void(const lubancode::api::StreamEvent&)>& on_event) override {
+        const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* cancel = nullptr) override {
         lubancode::api::Request patched = request;
         patched.reasoning_effort = *current_think_;
-        return inner_.send_stream(patched, on_event);
+        return inner_.send_stream(patched, on_event, cancel);
     }
 
 private:
@@ -268,7 +276,8 @@ public:
 
     std::expected<void, lubancode::api::Error> send_stream(
         const lubancode::api::Request& request,
-        const std::function<void(const lubancode::api::StreamEvent&)>& on_event) override {
+        const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* cancel = nullptr) override {
         lubancode::cli::Spinner spinner(theme_, spinner_enabled_);
         bool stopped = false;
         const auto wrapped = [&](const lubancode::api::StreamEvent& event) {
@@ -278,7 +287,7 @@ public:
             }
             on_event(event);
         };
-        return inner_.send_stream(request, wrapped);
+        return inner_.send_stream(request, wrapped, cancel);
         // spinner 在这里析构,Stop() 兜底再调一次也是安全的(空操作)——
         // 万一 send_stream 直接失败、一个事件都没吐(比如连都没连上),
         // 转轮不会一直转着。
@@ -419,12 +428,18 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         };
     }
 
+    // M10:这几处 std::cout 写都发生在"流式期间"(Run() 还没返回),跟
+    // TurnInputListener 监听线程自己打的 "[已打断]"/"[已排队] ..." 抢同一份
+    // stdout——拿 StdoutWriteMutex 包一下,两边错开,免得真终端上偶发交错
+    // 把画面弄花。管道模式下监听线程压根不起,这把锁形同虚设,不影响行为。
     callbacks.on_text_delta = [](const std::string& text) {
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         std::cout << text;
         std::cout.flush();
     };
 
     callbacks.on_tool_start = [&theme](const std::string& name, const nlohmann::json& input) {
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         std::cout << "\n" << theme.tool_line << "[工具] " << name << " " << input.dump() << theme.reset << "\n";
         std::cout.flush();
     };
@@ -447,9 +462,15 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         if (always_allowed_tools.count(name) != 0) {
             return true;
         }
-        PrintConfirmDetails(name, input);
+        {
+            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+            PrintConfirmDetails(name, input);
+        }
+        // M10:esc_rejects=true——按 Esc 直接当这次确认提交了一个空串,
+        // 走到下面 "不是 y/Y/a/A 就算拒绝" 那条老路,不用另加判断分支。
         const std::optional<std::string> answer = lubancode::cli::ReadLine(
-            theme.confirm + "[y] 本次允许  [a] 本会话总是允许(该工具)  [N] 拒绝: " + theme.reset, theme);
+            theme.confirm + "[y] 本次允许  [a] 本会话总是允许(该工具)  [N] 拒绝: " + theme.reset, theme,
+            /*esc_rejects=*/true);
         if (!answer.has_value()) {
             return false;  // 读到 EOF,按拒绝处理,不要在这儿卡住
         }
@@ -462,6 +483,7 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
 
     callbacks.on_tool_done = [&theme](const std::string& name, const lubancode::tools::Tool::Result& result) {
         if (result.is_error) {
+            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
             std::cout << theme.error << "[工具出错] " << name << ": " << result.content << theme.reset << "\n";
             std::cout.flush();
         }
@@ -508,28 +530,54 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
     return callbacks;
 }
 
+// RunTurn() 的结果:status 沿用老语义(0 成功、非 0 出错);cancelled 标记
+// 这一轮是不是被 ESC 打断的(打断不算错误,status 照样是 0);queued_lines
+// 是这一轮"流式期间"(监听线程存活的窗口)攒下的排队消息,按落队顺序,
+// 交给 InteractiveLoop 追加进它自己的队列,下一轮循环逐条自动发出。
+struct RunTurnResult {
+    int status = 0;
+    bool cancelled = false;
+    std::vector<std::string> queued_lines;
+};
+
 // 发一轮用户输入,走 agent loop(可能会有若干次工具调用来回),流式打字机
 // 打印回复,结束后打一行 token 用量统计(暗色/淡色,plain 主题下就是空
-// 前后缀)。返回 0 表示成功,非 0 表示出错。always_allowed_tools 由调用方
-// 持有,记录本会话内选过"总是允许"的工具。registry 是这一轮实际在用的
-// 工具表,传给 BuildCallbacks 好给里头的 agent 工具(如果有)灌这一轮的
-// 转发钩子。
-int RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bool auto_confirm,
-            std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
-            lubancode::cli::ContextTracker& context_tracker, lubancode::tools::ToolRegistry& registry,
-            const lubancode::config::HooksConfig& hooks_config) {
+// 前后缀)。always_allowed_tools 由调用方持有,记录本会话内选过"总是允许"
+// 的工具。registry 是这一轮实际在用的工具表,传给 BuildCallbacks 好给里头
+// 的 agent 工具(如果有)灌这一轮的转发钩子。
+//
+// M10:这里起一条 TurnInputListener,存活区间正好是"发出请求到本轮 Run()
+// 结束"——ESC 打断、消息排队都靠它。真控制台之外(管道/重定向)监听器
+// 构造函数自己判断不起线程,行为跟 0.7.0 完全一致。
+RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bool auto_confirm,
+                       std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
+                       lubancode::cli::ContextTracker& context_tracker, lubancode::tools::ToolRegistry& registry,
+                       const lubancode::config::HooksConfig& hooks_config) {
     UsageStats usage_stats;
     const lubancode::agent::Callbacks callbacks =
         BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker, registry,
                         hooks_config);
 
-    const auto result = loop.Run(user_input, callbacks);
+    std::atomic<bool> cancel_flag{false};
+    lubancode::cli::TurnInputListener listener(cancel_flag, theme);
+
+    const auto result = loop.Run(user_input, callbacks, &cancel_flag);
+
+    // Run() 已经返回,不管是不是被打断——立刻收线程,保证下一次 ReadLine()
+    // (排队回显的 "> " 或者下一轮主提示符)开始之前监听线程已经彻底退出。
+    listener.Stop();
+
+    RunTurnResult out;
+    out.queued_lines = listener.TakeQueuedLines();
+
     std::cout << "\n";
 
     if (!result.has_value()) {
         std::cerr << theme.error << "[错误] " << result.error() << theme.reset << "\n";
-        return 1;
+        out.status = 1;
+        return out;
     }
+    out.cancelled = result->cancelled;
 
     if (usage_stats.request_count > 0) {
         std::cout << theme.stats << "[tokens] 输入 " << usage_stats.input_tokens;
@@ -539,7 +587,7 @@ int RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bo
         std::cout << " · 输出 " << usage_stats.output_tokens << " · 请求 " << usage_stats.request_count << " 次"
                    << " · context " << context_tracker.UsagePercent() << "%" << theme.reset << "\n";
     }
-    return 0;
+    return out;
 }
 
 // 初次配置向导:接 cli::ReadLine 做输入、std::cout 做输出、api::ListModels
@@ -589,7 +637,7 @@ void PrintSlashHelp() {
               << "  /clear          清空对话历史\n"
               << "  /context        看当前上下文占用;/context 256k|512k|1m 临时改窗口大小\n"
               << "  /compact        手动压缩历史;/compact 重点说明 可指定这次额外保留什么\n"
-              << "  /think          看当前推理强度;/think none|low|medium|high 切档位\n"
+              << "  /think          看当前推理强度;/think 档位 切档位,档位以服务商为准(/effort 同义)\n"
               << "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
               << "  /exit           退出(裸词 exit/quit 也认)\n";
 }
@@ -698,23 +746,19 @@ void HandleCompactCommand(const std::string& args, lubancode::agent::AgentLoop& 
     std::cout << "压缩前 ~" << before_tokens << " tokens → 压缩后 ~" << after_tokens << " tokens\n";
 }
 
-// /think 命令:不带参数看当前档位,带参数切档位(本会话生效)。跟 config
-// 层的 think 校验用同一套规则(none/low/medium/high,大小写不敏感)。
+// /think(/effort 同义)命令:不带参数看当前档位,带参数切档位(本会话
+// 生效)。M10 把档位放开成任意字符串——不在这儿拦,认不认得留给发请求
+// 那一刻(responses 原样递,anthropic 查映射表、映射不上打警告)去判断,
+// 原样存,不强制转小写(anthropic 那张映射表自己做大小写不敏感匹配,
+// responses 要"原样递",这里转了小写反而破坏这条承诺)。
 void HandleThinkCommand(const std::string& args, const std::shared_ptr<std::string>& current_think) {
     if (args.empty()) {
         std::cout << "当前推理强度: " << (current_think->empty() ? "(未设置,不发这个参数)" : *current_think) << "\n";
+        std::cout << "支持哪些档位以服务商为准。\n";
         return;
     }
-    std::string lower = args;
-    for (char& c : lower) {
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
-    if (lower != "none" && lower != "low" && lower != "medium" && lower != "high") {
-        std::cout << "只认得 none/low/medium/high,写的是: " << args << "\n";
-        return;
-    }
-    *current_think = lower;
-    std::cout << "推理强度已切到 " << lower << "(本会话生效)。\n";
+    *current_think = args;
+    std::cout << "推理强度已切到 " << args << "(本会话生效)。支持哪些档位以服务商为准。\n";
 }
 
 // /model 命令的执行逻辑:带参数直接切;不带参数拉列表编号选。切完了,
@@ -847,20 +891,20 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     std::set<std::string> always_allowed_tools;
     std::optional<std::string> config_file_path = config_result.config_file_path;
 
-    while (true) {
-        const std::optional<std::string> line =
-            lubancode::cli::ReadLine(theme.prompt + "> " + theme.reset, theme);
-        if (!line.has_value()) {
-            break;  // EOF:Ctrl+Z 或管道读尽
-        }
-        if (line->empty()) {
-            continue;  // 空行不退出,重新给提示符
-        }
-        if (*line == "exit" || *line == "quit") {
-            break;
-        }
+    // M10:排队消息队列——某一轮流式期间(RunTurn 内 TurnInputListener 存活
+    // 那段窗口)敲了字回车,不会打断当前流,落进这里;本轮结束后逐条自动
+    // 发出(包括 slash 命令),打法跟手输一模一样:打一行 "> <内容>" 再走
+    // 下面同一套 process_line 逻辑。ESC 打断当前轮不影响这个队列——照样
+    // 保留、照样发,跟"是不是被打断"完全解耦。
+    std::deque<std::string> pending_queue;
 
-        const lubancode::cli::ParsedSlashCommand parsed = lubancode::cli::ParseSlashCommand(*line);
+    // 处理"确定不是空行、不是裸词 exit/quit"的一行输入,不管这行是刚
+    // ReadLine() 读到的、还是从 pending_queue 里取出来的自动发送的——两条
+    // 路径共用这一份 slash 分支 + 自动 compact 检查 + RunTurn 调用,行为
+    // 完全一致(spec 要求"队列里是 slash 命令也认")。返回 false 表示这一行
+    // 触发了 /exit,外层循环该退出了。
+    const auto process_line = [&](const std::string& content) -> bool {
+        const lubancode::cli::ParsedSlashCommand parsed = lubancode::cli::ParseSlashCommand(content);
         if (parsed.command != lubancode::cli::SlashCommand::NotSlash) {
             switch (parsed.command) {
                 case lubancode::cli::SlashCommand::Help:
@@ -891,14 +935,14 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     PrintSkillsCommand(skills, CurrentDirUtf8(), home_dir);
                     break;
                 case lubancode::cli::SlashCommand::Exit:
-                    return;
+                    return false;
                 case lubancode::cli::SlashCommand::Unknown:
                     std::cout << "不认得命令 " << parsed.raw_word << ",试试 /help\n";
                     break;
                 case lubancode::cli::SlashCommand::NotSlash:
                     break;  // 走不到这里,switch 外层已经排除了
             }
-            continue;
+            return true;
         }
 
         // 自动压缩:发真正的用户输入前,占用超过阈值(80%)就先压一压。
@@ -919,7 +963,41 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
             }
         }
 
-        RunTurn(*loop, *line, auto_confirm, always_allowed_tools, theme, context_tracker, registry, config.hooks);
+        const RunTurnResult turn_result =
+            RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry,
+                    config.hooks);
+        for (auto& queued : turn_result.queued_lines) {
+            pending_queue.push_back(std::move(queued));
+        }
+        return true;
+    };
+
+    while (true) {
+        std::string content;
+        if (!pending_queue.empty()) {
+            // 队列非空:先把队列里排在最前面的这条自动发出去,不再等
+            // ReadLine()——跟手输的视觉一致,打一行 "> <内容>" 再处理。
+            content = std::move(pending_queue.front());
+            pending_queue.pop_front();
+            std::cout << theme.prompt << "> " << theme.reset << content << "\n";
+        } else {
+            const std::optional<std::string> line =
+                lubancode::cli::ReadLine(theme.prompt + "> " + theme.reset, theme);
+            if (!line.has_value()) {
+                break;  // EOF:Ctrl+Z 或管道读尽
+            }
+            if (line->empty()) {
+                continue;  // 空行不退出,重新给提示符
+            }
+            content = *line;
+        }
+
+        if (content == "exit" || content == "quit") {
+            break;
+        }
+        if (!process_line(content)) {
+            break;
+        }
     }
 }
 
@@ -952,8 +1030,12 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     std::set<std::string> always_allowed_tools;
     lubancode::cli::ContextTracker context_tracker(config.context_window_tokens);
 
+    // 单发模式没有下一轮循环好把排队消息接着发出去——AskOnce 只问这一句就
+    // 退出,ESC/排队这套机制天生只对交互循环有意义(spec 也只要求交互模式
+    // 的手测清单),这里只取 status,忽略 queued_lines/cancelled。
     return RunTurn(loop, question, auto_confirm, always_allowed_tools, theme, context_tracker, registry,
-                    config.hooks);
+                    config.hooks)
+        .status;
 }
 
 // M9:session_start/session_end 钩子的生命周期跟"这一次 CLI 进程真正进入了

@@ -54,7 +54,8 @@ public:
 
     std::expected<void, api::Error> send_stream(
         const api::Request& request,
-        const std::function<void(const api::StreamEvent&)>& on_event) override {
+        const std::function<void(const api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* /*cancel*/ = nullptr) override {
         captured_requests.push_back(request);
         if (fail) {
             return std::unexpected(api::Error{api::ErrorKind::Network, fail_message, 0});

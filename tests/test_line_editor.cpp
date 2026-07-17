@@ -420,6 +420,25 @@ TEST_CASE("LineEditorCore: Ctrl+D 总是请求 EOF") {
     CHECK(state.eof_requested);
 }
 
+TEST_CASE("LineEditorCore: Esc 在非空行清空当前行,esc_pressed 置位,不请求 EOF") {
+    LineEditorCore editor;
+    editor.BeginLine();
+    TypeString(editor, "abc");
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Esc));
+    CHECK(state.esc_pressed);
+    CHECK(state.cleared);
+    CHECK(state.line.empty());
+    CHECK_FALSE(state.eof_requested);
+}
+
+TEST_CASE("LineEditorCore: Esc 在空行也只是清行、置 esc_pressed,不像 Ctrl+C 那样请求 EOF") {
+    LineEditorCore editor;
+    editor.BeginLine();
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Esc));
+    CHECK(state.esc_pressed);
+    CHECK_FALSE(state.eof_requested);
+}
+
 TEST_CASE("CharDisplayWidth/DisplayWidth: ASCII 宽度 1,常用汉字宽度 2") {
     CHECK(CharDisplayWidth(U'a') == 1);
     CHECK(CharDisplayWidth(U'1') == 1);

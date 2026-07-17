@@ -59,7 +59,9 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Context;
     } else if (lower == "/compact") {
         parsed.command = SlashCommand::Compact;
-    } else if (lower == "/think") {
+    } else if (lower == "/think" || lower == "/effort") {
+        // M10:/effort 是 /think 的别名,同一个命令枚举值——解析层面这俩
+        // 词天生等价,不用另开一个 SlashCommand::Effort 分叉出两套处理逻辑。
         parsed.command = SlashCommand::Think;
     } else if (lower == "/skills") {
         parsed.command = SlashCommand::Skills;
@@ -78,7 +80,8 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
         {"/exit", "退出(裸词 exit/quit 也认)"},
         {"/context", "看当前上下文占用;/context 256k|512k|1m 临时改窗口大小"},
         {"/compact", "手动压缩历史;/compact 重点说明 可指定这次额外保留什么"},
-        {"/think", "看当前推理强度;/think none|low|medium|high 切档位"},
+        {"/think", "看当前推理强度;/think 档位 切档位,档位以服务商为准(/effort 同义)"},
+        {"/effort", "同 /think(推理强度别名)"},
         {"/skills", "列出扫描到的技能(主目录级 + 项目级)"},
     };
     return kCommands;

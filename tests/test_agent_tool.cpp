@@ -5,6 +5,7 @@
 
 #include <doctest/doctest.h>
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -29,7 +30,8 @@ public:
 
     std::expected<void, api::Error> send_stream(
         const api::Request& request,
-        const std::function<void(const api::StreamEvent&)>& on_event) override {
+        const std::function<void(const api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* /*cancel*/ = nullptr) override {
         captured_requests.push_back(request);
         const std::size_t idx = captured_requests.size() - 1;
         if (idx >= scripts.size()) {

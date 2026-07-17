@@ -567,7 +567,8 @@ TEST_CASE("MergeConfig: compact_model 专属 env 压过配置文件") {
 
 // ---------------------------------------------------------------------------
 // think:1 级 > 2 级 > 4 级默认值(空串 = 不发这个参数),没有通用 env 这
-// 一级,只认 none/low/medium/high(大小写不敏感,存进 Config 时统一小写)。
+// 一级。M10 放开成任意字符串——档位是不是认得,留给发请求那一刻(responses
+// 原样递、anthropic 查映射表)去判断,这里不拦、不改大小写、原样存。
 // ---------------------------------------------------------------------------
 
 TEST_CASE("MergeConfig: think 什么都没设置时留空") {
@@ -602,33 +603,32 @@ TEST_CASE("MergeConfig: think 专属 env 压过配置文件") {
     CHECK(result->sources.think == config::Source::LubancodeEnv);
 }
 
-TEST_CASE("MergeConfig: think 大小写不敏感,存进 Config 时统一小写") {
+TEST_CASE("MergeConfig: think 原样存,不改大小写(M10 放开档位后,大小写归一化交给各自 wire 的映射层)") {
     config::LubancodeEnvValues lubancode_env;
     lubancode_env.think = "HIGH";
 
     const auto result = config::MergeConfig(lubancode_env, std::nullopt, EmptyGenericEnv());
     REQUIRE(result.has_value());
-    CHECK(result->config.think == "high");
+    CHECK(result->config.think == "HIGH");
 }
 
-TEST_CASE("MergeConfig: think 是不认得的值时报错,错误信息带上是哪里写的和坏值本身") {
+TEST_CASE("MergeConfig: think 是任意字符串都不报错(M10 放开档位,认不认得留给发请求那一刻判断)") {
     config::LubancodeEnvValues lubancode_env;
     lubancode_env.think = "extreme";
 
     const auto result = config::MergeConfig(lubancode_env, std::nullopt, EmptyGenericEnv());
-    REQUIRE_FALSE(result.has_value());
-    CHECK(result.error().find("LUBANCODE_THINK") != std::string::npos);
-    CHECK(result.error().find("extreme") != std::string::npos);
+    REQUIRE(result.has_value());
+    CHECK(result->config.think == "extreme");
 }
 
-TEST_CASE("MergeConfig: 配置文件里的 think 是不认得的值,错误信息带文件路径") {
+TEST_CASE("MergeConfig: 配置文件里的 think 也是任意字符串都放行") {
     config::FileConfig file;
     file.think = "ultra";
     file.source_path = "/home/user/.lubancode.json";
 
     const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
-    REQUIRE_FALSE(result.has_value());
-    CHECK(result.error().find("/home/user/.lubancode.json") != std::string::npos);
+    REQUIRE(result.has_value());
+    CHECK(result->config.think == "ultra");
 }
 
 // ---------------------------------------------------------------------------

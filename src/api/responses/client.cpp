@@ -1,5 +1,6 @@
 #include "api/responses/client.hpp"
 
+#include <atomic>
 #include <charconv>
 #include <utility>
 
@@ -44,7 +45,8 @@ ResponsesBackend::ResponsesBackend(std::string base_url, std::string auth_token)
 
 std::expected<void, Error> ResponsesBackend::send_stream(
     const Request& request,
-    const std::function<void(const StreamEvent&)>& on_event) {
+    const std::function<void(const StreamEvent&)>& on_event,
+    const std::atomic<bool>* cancel) {
     const json body = BuildRequestJson(request);
     const std::string body_str = body.dump();
 
@@ -52,6 +54,7 @@ std::expected<void, Error> ResponsesBackend::send_stream(
     std::string error_body;
     int status_code = 0;
     bool status_known = false;
+    bool cancelled = false;
 
     cpr::HeaderCallback header_cb(
         [&](const std::string_view& header, intptr_t) -> bool {
@@ -64,6 +67,10 @@ std::expected<void, Error> ResponsesBackend::send_stream(
 
     cpr::WriteCallback write_cb(
         [&](const std::string_view& data, intptr_t) -> bool {
+            if (cancel != nullptr && cancel->load()) {
+                cancelled = true;
+                return false;
+            }
             const bool is_success = status_known && status_code >= 200 && status_code < 300;
             if (!is_success) {
                 // 非 2xx:这不是 SSE 流,是普通的错误响应体,原样攒起来
@@ -90,6 +97,10 @@ std::expected<void, Error> ResponsesBackend::send_stream(
         cpr::Body{body_str},
         header_cb,
         write_cb);
+
+    if (cancelled || (cancel != nullptr && cancel->load())) {
+        return std::unexpected(Error{ErrorKind::Cancelled, "用户按 ESC 打断了这次请求", 0});
+    }
 
     if (response.error) {
         return std::unexpected(Error{ErrorKind::Network, response.error.message, 0});

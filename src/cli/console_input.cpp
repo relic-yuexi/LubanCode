@@ -44,7 +44,9 @@
 #include "cli/console_input.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <iostream>
+#include <mutex>
 
 #include "cli/slash_commands.hpp"
 
@@ -82,6 +84,17 @@ LineEditorCore& SharedEditor() {
         return LineEditorCore(std::move(candidates));
     }();
     return editor;
+}
+
+// M10:谁在真的调 ReadConsoleInputW 读键盘,谁就得先拿到这把锁——
+// ReadLineKeyByKey() 整个调用期间(从进函数到返回)一直攥着它,
+// TurnInputListener 的监听线程只在抢到锁的间隙才读一次。这样"监听只活在
+// 编辑器不在读的窗口期"这条要求不用靠回调层层传参去手动维护,两边天然靠锁
+// 互斥错开——工具确认提示 [y/a/N] 走的也是 ReadLineKeyByKey(),天然一并
+// 受益,不用另外接管。
+std::mutex& ConsoleReadMutex() {
+    static std::mutex m;
+    return m;
 }
 
 #ifdef _WIN32
@@ -229,7 +242,15 @@ void RedrawEditArea(HANDLE h_out, SHORT& start_row, SHORT& prompt_end_col, const
 
 // 逐键读入这一行,真控制台专用。ReadConsoleInputW 逐个读键盘事件,翻译成
 // cli::KeyEvent 喂 SharedEditor(),按吐出来的 RenderState 重画。
-std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const Theme& theme) {
+//
+// esc_rejects:见 console_input.hpp 里 ReadLine() 的同名参数注释——true 时
+// Esc 直接当"这次读取交了个空串"处理,不留在循环里继续等。
+std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const Theme& theme, bool esc_rejects) {
+    // 整个函数体都攥着这把锁:M10 的 TurnInputListener 监听线程只在抢到锁
+    // 的间隙才读控制台输入,这一行锁一上,就等于宣布"编辑器正在读",监听
+    // 线程会自动让出、不跟这里抢同一份 ReadConsoleInputW 输入。
+    std::lock_guard<std::mutex> console_read_lock(ConsoleReadMutex());
+
     const HANDLE h_in = GetStdHandle(STD_INPUT_HANDLE);
     const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
 
@@ -306,6 +327,8 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             mapped = KeyEvent::Simple(shift ? KeyKind::ShiftTab : KeyKind::Tab);
         } else if (ke.wVirtualKeyCode == VK_RETURN) {
             mapped = KeyEvent::Simple(KeyKind::Enter);
+        } else if (ke.wVirtualKeyCode == VK_ESCAPE) {
+            mapped = KeyEvent::Simple(KeyKind::Esc);
         } else if (ke.uChar.UnicodeChar != 0 && !ctrl) {
             const wchar_t wc = ke.uChar.UnicodeChar;
             if (wc >= 0xD800 && wc <= 0xDBFF) {
@@ -348,6 +371,13 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
 
         RedrawEditArea(h_out, start_row, prompt_end_col, state, prev_hint_line_count);
 
+        if (state.esc_pressed && esc_rejects) {
+            // 确认提示 [y/a/N] 场景:Esc 不留在循环里继续等,直接当这次
+            // 读取交了个空串——main.cpp 的确认回调本来就把"不是 y/Y/a/A"
+            // 都当拒绝,空串天然就是拒绝。
+            std::cout << "\n";
+            return std::string();
+        }
         if (state.eof_requested) {
             std::cout << "\n";
             return std::nullopt;
@@ -366,13 +396,14 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
 
 }  // namespace
 
-std::optional<std::string> ReadLine(const std::string& prompt, const Theme& theme) {
+std::optional<std::string> ReadLine(const std::string& prompt, const Theme& theme, bool esc_rejects) {
 #ifdef _WIN32
     if (StdinIsRealConsole()) {
-        return ReadLineKeyByKey(prompt, theme);
+        return ReadLineKeyByKey(prompt, theme, esc_rejects);
     }
 #else
     (void)theme;
+    (void)esc_rejects;
 #endif
 
     if (!prompt.empty()) {
@@ -390,5 +421,136 @@ std::optional<std::string> ReadLine(const std::string& prompt, const Theme& them
 ConfirmMode CurrentConfirmMode() { return SharedEditor().confirm_mode(); }
 
 void SetConfirmMode(ConfirmMode mode) { SharedEditor().set_confirm_mode(mode); }
+
+std::mutex& StdoutWriteMutex() {
+    static std::mutex m;
+    return m;
+}
+
+TurnInputListener::TurnInputListener(std::atomic<bool>& cancel_flag, const Theme& theme)
+    : cancel_flag_(cancel_flag), theme_(theme) {
+#ifdef _WIN32
+    if (StdinIsRealConsole()) {
+        enabled_ = true;
+        thread_ = std::thread([this] { ThreadMain(); });
+    }
+#endif
+}
+
+TurnInputListener::~TurnInputListener() { Stop(); }
+
+void TurnInputListener::Stop() {
+    if (!enabled_) {
+        return;
+    }
+    stop_requested_.store(true);
+    if (thread_.joinable()) {
+        thread_.join();
+    }
+    enabled_ = false;  // 幂等:重复调用/析构再调都不会再 join 一次已经空了的 thread_
+}
+
+std::vector<std::string> TurnInputListener::TakeQueuedLines() {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    std::vector<std::string> out = std::move(queued_lines_);
+    queued_lines_.clear();
+    return out;
+}
+
+#ifdef _WIN32
+
+void TurnInputListener::ThreadMain() {
+    const HANDLE h_in = GetStdHandle(STD_INPUT_HANDLE);
+    // 排队缓冲按码点存(不是 UTF-8 字节),Backspace 才不会把一个多字节字符
+    // 切成半个、写出乱码——跟 line_editor 那套一个思路,只是这里不需要
+    // 完整编辑器的光标移动/历史/补全,故意从简。
+    std::u32string buffer;
+    std::optional<char32_t> pending_high_surrogate;
+
+    while (!stop_requested_.load()) {
+        // try_lock:抢不到就说明编辑器(ReadLineKeyByKey,含工具确认提示)
+        // 正在读,乖乖让出、睡一下再抢,绝不跟前台读键盘的那次调用抢同一份
+        // 控制台输入。
+        std::unique_lock<std::mutex> read_lock(ConsoleReadMutex(), std::try_to_lock);
+        if (!read_lock.owns_lock()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+        }
+        // WaitForSingleObject 只是问"有没有事件可读",不消费——真正消费在
+        // 下面的 ReadConsoleInputW。超时就松开锁、回到循环顶部重新抢,好
+        // 让出机会给这段时间可能开始的前台读取。
+        const DWORD wait_result = WaitForSingleObject(h_in, 50);
+        if (wait_result != WAIT_OBJECT_0) {
+            continue;
+        }
+        if (stop_requested_.load()) {
+            break;
+        }
+        INPUT_RECORD record{};
+        DWORD read = 0;
+        if (!ReadConsoleInputW(h_in, &record, 1, &read) || read == 0) {
+            continue;
+        }
+        read_lock.unlock();  // 这一个事件读完了,处理逻辑不用再攥着锁
+
+        if (record.EventType != KEY_EVENT || record.Event.KeyEvent.bKeyDown == FALSE) {
+            continue;
+        }
+        const KEY_EVENT_RECORD& ke = record.Event.KeyEvent;
+        const bool ctrl = (ke.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0;
+
+        if (ke.wVirtualKeyCode == VK_ESCAPE) {
+            cancel_flag_.store(true);
+            std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+            std::cout << "\n" << theme_.stats << "[已打断]" << theme_.reset << "\n";
+            std::cout.flush();
+            continue;
+        }
+        if (ke.wVirtualKeyCode == VK_RETURN) {
+            if (!buffer.empty()) {
+                const std::string line = Utf32ToUtf8(buffer);
+                {
+                    std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+                    std::cout << "\n" << theme_.stats << "[已排队] " << theme_.reset << line << "\n";
+                    std::cout.flush();
+                }
+                {
+                    std::lock_guard<std::mutex> lock(queue_mutex_);
+                    queued_lines_.push_back(line);
+                }
+                buffer.clear();
+            }
+            continue;
+        }
+        if (ke.wVirtualKeyCode == VK_BACK) {
+            if (!buffer.empty()) {
+                buffer.pop_back();
+            }
+            continue;
+        }
+        if (ke.uChar.UnicodeChar != 0 && !ctrl) {
+            const wchar_t wc = ke.uChar.UnicodeChar;
+            if (wc >= 0xD800 && wc <= 0xDBFF) {
+                pending_high_surrogate = static_cast<char32_t>(wc);
+                continue;
+            }
+            char32_t cp = static_cast<char32_t>(wc);
+            if (wc >= 0xDC00 && wc <= 0xDFFF && pending_high_surrogate.has_value()) {
+                const char32_t high = *pending_high_surrogate;
+                pending_high_surrogate.reset();
+                cp = 0x10000 + ((high - 0xD800) << 10) + (static_cast<char32_t>(wc) - 0xDC00);
+            }
+            if (cp >= 0x20) {
+                buffer.push_back(cp);
+            }
+        }
+    }
+}
+
+#else
+
+void TurnInputListener::ThreadMain() {}
+
+#endif  // _WIN32
 
 }  // namespace lubancode::cli
