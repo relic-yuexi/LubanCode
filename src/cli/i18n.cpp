@@ -65,6 +65,7 @@ const Entry kZhCN[] = {
      "  /help           列出所有命令\n"
      "  /model          拉取模型列表,编号选择切换(默认第一个)\n"
      "  /model 名字     直接切到指定模型名,不用拉列表\n"
+     "  /provider       列已配服务端;/provider add|switch|remove 管多端模型\n"
      "  /config         打印当前生效配置(复用 --config 的逻辑),外加本会话实际在用的 model\n"
      "  /language       列可选界面语言并切换(内置 zh-CN/en,languages/*.json 可扩展)\n"
      "  /worktree       新建/列出/退出隔离工作树;/worktree new [名字] | list | exit keep|remove\n"
@@ -132,7 +133,8 @@ const Entry kZhCN[] = {
      "     .lubancode/config.json → cwd 的旧位置 .lubancode.json → 主目录的旧位置\n"
      "     .lubancode.json;读到旧位置会自动挪到新位置)。字段:wire / base_url / api_key / model /\n"
      "     max_context_chars / theme / language / system_prompt_file / context_window / compact_model /\n"
-     "     think,全部可选。另有 hooks / mcpServers / search 三段(只从配置文件读,没有环境变量、没有内置默认值):\n"
+     "     think,全部可选。providers 也是配置文件整段:每项写 name / base_url / wire / key_env / model / context_window,\n"
+     "     key_env 只记环境变量名,不存密钥;项目级 providers 整段压过全局。另有 hooks / mcpServers / search 三段(只从配置文件读,没有环境变量、没有内置默认值):\n"
      "       \"mcpServers\": {\"服务器名\": {\"command\": \"...\", \"args\": [...], \"env\": {...}}}\n"
      "       起进程握手成功后,工具以 mcp__服务器名__工具名 挂进工具表,/mcp 看状态\n"
      "       \"search\": {\"provider\": \"tavily|brave|serper\", \"api_key\": \"...\"}\n"
@@ -251,6 +253,7 @@ const Entry kZhCN[] = {
     // ---- slash 命令描述表 ----
     {"slash.desc.help", "列出所有命令"},
     {"slash.desc.model", "拉模型列表选,或 /model 名字 直接切"},
+    {"slash.desc.provider", "列、添、切、删模型服务端;/provider add|list|switch|remove"},
     {"slash.desc.config", "打印当前生效配置和本会话在用的 model"},
     {"slash.desc.language", "列可选界面语言并切换;/language 语言码 直接切"},
     {"slash.desc.image", "附本地图片;/image 路径 或在消息里写 @路径"},
@@ -525,6 +528,28 @@ const Entry kZhCN[] = {
     {"cmd.write_config.failed", "更新失败: {0}"},
     {"cmd.session_only", "当前没有生效的配置文件,只在本会话生效。"},
 
+    // ---- /provider ----
+    {"cmd.provider.usage",
+     "用法:\n"
+     "  /provider list\n"
+     "  /provider add <名字> <base_url> <anthropic|responses> [--key-env 环境变量名] [--model 默认模型] [--window 大小]\n"
+     "  /provider switch <名字> [模型]\n"
+     "  /provider remove <名字>"},
+    {"cmd.provider.empty", "还没有配 provider。用 /provider add 添一个。"},
+    {"cmd.provider.header", "已配 provider:"},
+    {"cmd.provider.line", "  - {0} [{1}] {2}; model={3}; window={4}; key_env={5}{6}"},
+    {"cmd.provider.current", " (当前)"},
+    {"cmd.provider.model_unset", "(未设置)"},
+    {"cmd.provider.added", "已添 provider {0},写进全局配置 {1}。"},
+    {"cmd.provider.add_failed", "添 provider 失败: {0}"},
+    {"cmd.provider.exists", "provider 已存在: {0}"},
+    {"cmd.provider.switched", "已切到 provider {0},后续请求走 {1}。"},
+    {"cmd.provider.not_found", "找不着 provider: {0}"},
+    {"cmd.provider.key_missing", "provider {0} 要环境变量 {1},眼下没取到值。"},
+    {"cmd.provider.removed", "已删 provider {0},全局配置在 {1}。"},
+    {"cmd.provider.remove_active", "provider {0} 正在用，先切到别处再删。"},
+    {"cmd.provider.remove_failed", "删 provider 失败: {0}"},
+
     // ---- /soul、/prompt ----
     {"soul.unavailable", "[soul] 无法读取 {0},已按无魂运行。"},
     {"cmd.soul.no_home", "找不到用户主目录,魂文件没处安身,/soul 用不了。"},
@@ -668,6 +693,7 @@ const Entry kEn[] = {
      "  /help           list all commands\n"
      "  /model          fetch the model list and switch by number (default: first)\n"
      "  /model <name>   switch directly to a model name without fetching the list\n"
+     "  /provider       list configured providers; /provider add|switch|remove manages endpoints\n"
      "  /config         print the effective configuration plus the model in use this session\n"
      "  /language       list available UI languages and switch (built-in zh-CN/en, extendable via\n"
      "                  languages/*.json)\n"
@@ -740,7 +766,9 @@ const Entry kEn[] = {
      "     .lubancode/config.json -> cwd legacy .lubancode.json -> home legacy .lubancode.json;\n"
      "     legacy locations are migrated automatically). Fields: wire / base_url / api_key / model /\n"
      "     max_context_chars / theme / language / system_prompt_file / context_window / compact_model /\n"
-     "     think, all optional. Plus hooks / mcpServers / search sections (config-file only):\n"
+     "     think, all optional. providers is also a whole config-file section: each entry has name / base_url / wire /\n"
+     "     key_env / model / context_window; key_env stores an environment variable name, never a key. Project providers\n"
+     "     replace the global list. Plus hooks / mcpServers / search sections (config-file only):\n"
      "       \"mcpServers\": {\"name\": {\"command\": \"...\", \"args\": [...], \"env\": {...}}}\n"
      "       after handshake, tools mount as mcp__name__tool; see /mcp for status\n"
      "       \"search\": {\"provider\": \"tavily|brave|serper\", \"api_key\": \"...\"}\n"
@@ -858,6 +886,7 @@ const Entry kEn[] = {
     // ---- slash command descriptions ----
     {"slash.desc.help", "list all commands"},
     {"slash.desc.model", "pick from the model list, or /model <name> to switch directly"},
+    {"slash.desc.provider", "list, add, switch, or remove model providers; /provider add|list|switch|remove"},
     {"slash.desc.config", "print the effective configuration and the session model"},
     {"slash.desc.language", "list available UI languages and switch; /language <code> switches directly"},
     {"slash.desc.image", "attach local images; /image <path> or @path in a message"},
@@ -1041,6 +1070,28 @@ const Entry kEn[] = {
     {"cmd.skill.remove_done", "Removed: {0}"},
     {"cmd.skill.error", "{0} failed: {1}"},
     {"cmd.skill.refreshed", "Skill discovery was refreshed; later turns in this session can use it."},
+
+    // ---- /provider ----
+    {"cmd.provider.usage",
+     "Usage:\n"
+     "  /provider list\n"
+     "  /provider add <name> <base_url> <anthropic|responses> [--key-env ENV] [--model MODEL] [--window SIZE]\n"
+     "  /provider switch <name> [model]\n"
+     "  /provider remove <name>"},
+    {"cmd.provider.empty", "No providers are configured. Use /provider add to add one."},
+    {"cmd.provider.header", "Configured providers:"},
+    {"cmd.provider.line", "  - {0} [{1}] {2}; model={3}; window={4}; key_env={5}{6}"},
+    {"cmd.provider.current", " (current)"},
+    {"cmd.provider.model_unset", "(not set)"},
+    {"cmd.provider.added", "Added provider {0} and saved it to global config {1}."},
+    {"cmd.provider.add_failed", "Could not add provider: {0}"},
+    {"cmd.provider.exists", "Provider already exists: {0}"},
+    {"cmd.provider.switched", "Switched to provider {0}; later requests use {1}."},
+    {"cmd.provider.not_found", "Provider not found: {0}"},
+    {"cmd.provider.key_missing", "Provider {0} needs environment variable {1}, but it is not set."},
+    {"cmd.provider.removed", "Removed provider {0}; global config is {1}."},
+    {"cmd.provider.remove_active", "Provider {0} is in use. Switch away before removing it."},
+    {"cmd.provider.remove_failed", "Could not remove provider: {0}"},
 
     // TODO(P1):以下 zh-CN 键暂缺英文翻译,tr 回退 zh-CN——诚实回退,不机翻凑数:
     //   mcp.* / plugin.* / tool_search.* / catalog.* / cmd.tools.* / cmd.plugins.* /

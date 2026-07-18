@@ -300,3 +300,56 @@ TEST_CASE("ParseSlashCommand: /skill 分发命令与参数") {
     }
     CHECK(found);
 }
+
+TEST_CASE("ParseSlashCommand: /provider 大小写不敏感,出现在候选里") {
+    const auto parsed = cli::ParseSlashCommand("/Provider list");
+    CHECK(parsed.command == cli::SlashCommand::Provider);
+    CHECK(parsed.args == "list");
+
+    bool found = false;
+    for (const auto& command : cli::AllSlashCommands()) {
+        if (command.name == "/provider") {
+            found = true;
+        }
+    }
+    CHECK(found);
+}
+
+TEST_CASE("ParseProviderCommand: add 解出必填项与可选项") {
+    const auto parsed = cli::ParseProviderCommand(
+        "add glm https://open.bigmodel.cn/api/paas/v4 responses --key-env ZAI_API_KEY --model glm-4.5 --window 128k");
+    CHECK(parsed.action == cli::ProviderCommandAction::Add);
+    CHECK(parsed.name == "glm");
+    CHECK(parsed.base_url == "https://open.bigmodel.cn/api/paas/v4");
+    CHECK(parsed.wire == "responses");
+    CHECK(parsed.key_env == "ZAI_API_KEY");
+    CHECK(parsed.model == "glm-4.5");
+    CHECK(parsed.window == "128k");
+}
+
+TEST_CASE("ParseProviderCommand: list/switch/remove 与错参") {
+    CHECK(cli::ParseProviderCommand("").action == cli::ProviderCommandAction::List);
+    CHECK(cli::ParseProviderCommand("list").action == cli::ProviderCommandAction::List);
+
+    const auto switched = cli::ParseProviderCommand("switch glm glm-4.5-air");
+    CHECK(switched.action == cli::ProviderCommandAction::Switch);
+    CHECK(switched.name == "glm");
+    CHECK(switched.model == "glm-4.5-air");
+
+    const auto removed = cli::ParseProviderCommand("remove glm");
+    CHECK(removed.action == cli::ProviderCommandAction::Remove);
+    CHECK(removed.name == "glm");
+
+    CHECK(cli::ParseProviderCommand("add only-two https://example.test").action ==
+          cli::ProviderCommandAction::Invalid);
+    CHECK(cli::ParseProviderCommand("add x https://example.test anthropic --model").action ==
+          cli::ProviderCommandAction::Invalid);
+    CHECK(cli::ParseProviderCommand("switch glm extra unexpected").action ==
+          cli::ProviderCommandAction::Invalid);
+}
+
+TEST_CASE("CanRemoveProvider: 当前在用端不许删") {
+    CHECK_FALSE(cli::CanRemoveProvider("glm", "glm"));
+    CHECK(cli::CanRemoveProvider("glm", "minimax"));
+    CHECK(cli::CanRemoveProvider("", "glm"));
+}

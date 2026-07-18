@@ -1,6 +1,8 @@
 #include "cli/slash_commands.hpp"
 
 #include <cctype>
+#include <sstream>
+#include <utility>
 
 #include "cli/i18n.hpp"
 
@@ -51,6 +53,8 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Help;
     } else if (lower == "/model") {
         parsed.command = SlashCommand::Model;
+    } else if (lower == "/provider") {
+        parsed.command = SlashCommand::Provider;
     } else if (lower == "/config") {
         parsed.command = SlashCommand::Config;
     } else if (lower == "/clear") {
@@ -104,6 +108,78 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
     return parsed;
 }
 
+ParsedProviderCommand ParseProviderCommand(const std::string& args) {
+    ParsedProviderCommand parsed;
+    std::istringstream input(args);
+    std::vector<std::string> words;
+    for (std::string word; input >> word;) {
+        words.push_back(std::move(word));
+    }
+
+    // 裸敲 /provider 与 /provider list 同义，方便查当前端。
+    if (words.empty() || (words.size() == 1 && ToLower(words[0]) == "list")) {
+        parsed.action = ProviderCommandAction::List;
+        return parsed;
+    }
+
+    const std::string action = ToLower(words[0]);
+    if (action == "switch") {
+        if (words.size() == 2 || words.size() == 3) {
+            parsed.action = ProviderCommandAction::Switch;
+            parsed.name = words[1];
+            if (words.size() == 3) {
+                parsed.model = words[2];
+            }
+        }
+        return parsed;
+    }
+    if (action == "remove") {
+        if (words.size() == 2) {
+            parsed.action = ProviderCommandAction::Remove;
+            parsed.name = words[1];
+        }
+        return parsed;
+    }
+    if (action != "add" || words.size() < 4) {
+        return parsed;
+    }
+
+    parsed.action = ProviderCommandAction::Add;
+    parsed.name = words[1];
+    parsed.base_url = words[2];
+    parsed.wire = ToLower(words[3]);
+    bool saw_key_env = false;
+    bool saw_model = false;
+    bool saw_window = false;
+    for (std::size_t i = 4; i < words.size();) {
+        if (i + 1 >= words.size()) {
+            parsed.action = ProviderCommandAction::Invalid;
+            return parsed;
+        }
+        const std::string& option = words[i];
+        const std::string& value = words[i + 1];
+        if (option == "--key-env" && !saw_key_env) {
+            parsed.key_env = value;
+            saw_key_env = true;
+        } else if (option == "--model" && !saw_model) {
+            parsed.model = value;
+            saw_model = true;
+        } else if (option == "--window" && !saw_window) {
+            parsed.window = value;
+            saw_window = true;
+        } else {
+            parsed.action = ProviderCommandAction::Invalid;
+            return parsed;
+        }
+        i += 2;
+    }
+    return parsed;
+}
+
+bool CanRemoveProvider(const std::string& active_provider, const std::string& name) {
+    return active_provider != name;
+}
+
 const std::vector<SlashCommandInfo>& AllSlashCommands() {
     // i18n:说明文字按当前语言现查(tr),语言切换后惰性重建——静态表 +
     // 记住"上次是按哪种语言建的",不一致就重来一遍。交互循环是单线程消费
@@ -115,6 +191,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
         commands = {
             {"/help", tr("slash.desc.help")},
             {"/model", tr("slash.desc.model")},
+            {"/provider", tr("slash.desc.provider")},
             {"/worktree", tr("slash.desc.worktree")},
             {"/config", tr("slash.desc.config")},
             {"/language", tr("slash.desc.language")},

@@ -70,6 +70,17 @@ constexpr const char* kDefaultTheme = "dark";
 // (字符数、老的硬安全网,单位不同、语义也不同)是两回事。
 constexpr std::size_t kDefaultContextWindowTokens = 256000;
 
+// 一家模型服务端的会话配置。providers 只记密钥所在环境变量的名字，绝不
+// 把密钥本身落到 config.json。model 可以留空：切过去后仍可用 /model 选。
+struct ProviderConfig {
+    std::string name;
+    std::string base_url;
+    Wire wire = Wire::Anthropic;
+    std::string key_env = "ANTHROPIC_AUTH_TOKEN";
+    std::string model;
+    std::size_t context_window_tokens = kDefaultContextWindowTokens;
+};
+
 // tool_search(延迟挂载)的阈值默认值:注册表总工具数超过这个数才启用
 // 延迟机制(超了才把 MCP/插件这类外挂工具改成"检索后挂载");0 = 永不
 // 延迟,一切照旧全量直挂。内置工具撑死十几个,默认 20 意味着不挂一堆
@@ -189,6 +200,9 @@ struct Config {
     int connect_timeout_ms = kDefaultConnectTimeoutMs;
     int stream_idle_timeout_secs = kDefaultStreamIdleTimeoutSecs;
     int request_timeout_secs = kDefaultRequestTimeoutSecs;
+    // 多端配置是配置文件里一个完整段：项目级写了 providers 就压全局那一
+    // 段，跟 hooks/mcpServers/lsp 的既有合并法一致。
+    std::vector<ProviderConfig> providers;
 };
 
 // 每个字段最终来自哪一级,跟 Config 里的字段一一对应。
@@ -209,6 +223,7 @@ struct ConfigSources {
     Source connect_timeout_ms = Source::Default;        // M11:配置文件或默认,只有这两级
     Source stream_idle_timeout_secs = Source::Default;   // 同上
     Source request_timeout_secs = Source::Default;       // 同上
+    Source providers = Source::Default;
 };
 
 // settings.local.json 里的 permissions 段,项目级本地权限(不进版本库)。
@@ -285,6 +300,7 @@ struct FileConfig {
     std::optional<int> connect_timeout_ms;
     std::optional<int> stream_idle_timeout_secs;
     std::optional<int> request_timeout_secs;
+    std::optional<std::vector<ProviderConfig>> providers;
     std::string source_path;
     // 这份 FileConfig 是不是从"旧位置迁移到新位置"这个动作里读出来的;
     // 有值就是要打印给用户看的那一行通知(LoadFileConfig 填,LoadFromEnv
@@ -352,6 +368,20 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
 // 是什么,不带"从哪儿来"(调用方 MergeConfig/ParseFileConfigJson 自己拼上
 // "环境变量 LUBANCODE_CONTEXT_WINDOW 里的" 这类前缀)。
 std::expected<std::size_t, std::string> ParseContextWindowTokens(const std::string& raw);
+
+// provider 的 wire 写法沿用既有配置字段：anthropic / responses。
+std::expected<Wire, std::string> ParseProviderWire(const std::string& raw);
+std::string ProviderWireName(Wire wire);
+
+// 粗验 provider：名字、地址、密钥环境变量名不许空；地址只要求 http:// 或
+// https:// 起首，避免把 URL 语义校得过死。/provider add 写盘前调用。
+std::expected<void, std::string> ValidateProviderConfig(const ProviderConfig& provider);
+
+// 运行时从 provider.key_env 取密钥；没有、或环境变量为空，返回 nullopt。
+// 这条接口刻意不接受明文 key，调用方也无需知道其值来自哪里。
+std::optional<std::string> ProviderApiKey(const ProviderConfig& provider);
+
+const ProviderConfig* FindProvider(const std::vector<ProviderConfig>& providers, const std::string& name);
 
 // 纯函数:检查合并结果里的 api_key 是不是空的。空的话报错,错误信息里把
 // 四级来源都提一遍(按 result.config.wire 挑出对应的通用环境变量名),
@@ -422,6 +452,19 @@ std::expected<void, std::string> UpdateSoulInConfigFile(const std::string& file_
 // 调用,沿用 /model 那套写回)。
 std::expected<void, std::string> UpdateLanguageInConfigFile(const std::string& file_path,
                                                               const std::string& language);
+
+// providers 段的纯解析与局部回写。回写只改 providers，其余用户字段原样
+// 保留；file_path 不存在时会按需建父目录并起一份 JSON object，便于单测和
+// /provider add 复用。
+std::expected<std::vector<ProviderConfig>, std::string> ParseProvidersConfig(
+    const nlohmann::json& providers_json, const std::string& file_path_for_error);
+std::expected<void, std::string> UpdateProvidersInConfigFile(const std::string& file_path,
+                                                               const std::vector<ProviderConfig>& providers);
+
+// /provider add/remove 永远改用户主目录的全局 config.json，不碰项目配置。
+// 成功时返回实际写入路径；删除找不到名字时报错。
+std::expected<std::string, std::string> AddProviderToGlobalConfig(const ProviderConfig& provider);
+std::expected<std::string, std::string> RemoveProviderFromGlobalConfig(const std::string& name);
 
 // 把一段 JSON 文本解析成 FileConfig。file_path_for_error 只用来拼错误信息,
 // 不影响解析本身。JSON 坏了、或者顶层不是一个 object,都返回带路径的错误。

@@ -1625,3 +1625,88 @@ TEST_CASE("EnsureGitignoreCoversSettingsLocal: 有 .gitignore 没挡就追加;�
         CHECK(notice.find("提示") != std::string::npos);
     }
 }
+
+// ---------------------------------------------------------------------------
+// providers:配置解析/整段合并/回写。密钥只存环境变量名，绝不应出现在 JSON。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseFileConfigJson: providers 解出默认 key_env 与上下文窗口") {
+    const auto parsed = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"minimax","base_url":"https://api.minimax.io/anthropic","wire":"anthropic","model":"MiniMax-M2","context_window":"1m"}]})",
+        "/tmp/config.json");
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->providers.has_value());
+    REQUIRE(parsed->providers->size() == 1);
+    const auto& provider = parsed->providers->front();
+    CHECK(provider.name == "minimax");
+    CHECK(provider.wire == config::Wire::Anthropic);
+    CHECK(provider.key_env == "ANTHROPIC_AUTH_TOKEN");
+    CHECK(provider.model == "MiniMax-M2");
+    CHECK(provider.context_window_tokens == 1000000);
+}
+
+TEST_CASE("ParseFileConfigJson: providers 坏地址、坏协议与重名都拦下") {
+    const auto bad_url = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"x","base_url":"api.example.test","wire":"anthropic"}]})", "/tmp/config.json");
+    CHECK_FALSE(bad_url.has_value());
+    CHECK(bad_url.error().find("http") != std::string::npos);
+
+    const auto bad_wire = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"x","base_url":"https://api.example.test","wire":"chat"}]})", "/tmp/config.json");
+    CHECK_FALSE(bad_wire.has_value());
+    CHECK(bad_wire.error().find("wire") != std::string::npos);
+
+    const auto duplicate = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"x","base_url":"https://a.test","wire":"anthropic"},{"name":"x","base_url":"https://b.test","wire":"responses"}]})",
+        "/tmp/config.json");
+    CHECK_FALSE(duplicate.has_value());
+    CHECK(duplicate.error().find("重复") != std::string::npos);
+}
+
+TEST_CASE("MergeConfig: 项目级 providers 整段压过全局") {
+    config::FileConfig project;
+    project.source_path = "/project/config.json";
+    project.providers = std::vector<config::ProviderConfig>{{
+        .name = "project",
+        .base_url = "https://project.example.test",
+        .wire = config::Wire::Responses,
+        .model = "project-model",
+    }};
+    config::FileConfig global;
+    global.source_path = "/global/config.json";
+    global.providers = std::vector<config::ProviderConfig>{{
+        .name = "global",
+        .base_url = "https://global.example.test",
+        .wire = config::Wire::Anthropic,
+        .model = "global-model",
+    }};
+
+    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    REQUIRE(merged.has_value());
+    REQUIRE(merged->config.providers.size() == 1);
+    CHECK(merged->config.providers.front().name == "project");
+    CHECK(merged->sources.providers == config::Source::ProjectConfigFile);
+}
+
+TEST_CASE("UpdateProvidersInConfigFile: 回写保留旁字段且不落明文密钥") {
+    TempCwdDir cwd;
+    const std::filesystem::path path = std::filesystem::path(cwd.Path()) / ".lubancode" / "config.json";
+    cwd.WriteFile(".lubancode/config.json", R"({"theme":"plain","自定义":7,"providers":[]})");
+
+    const std::vector<config::ProviderConfig> providers{{
+        .name = "glm",
+        .base_url = "https://open.bigmodel.cn/api/paas/v4",
+        .wire = config::Wire::Responses,
+        .key_env = "ZAI_API_KEY",
+        .model = "glm-4.5",
+        .context_window_tokens = 128000,
+    }};
+    REQUIRE(config::UpdateProvidersInConfigFile(path.string(), providers).has_value());
+
+    const nlohmann::json written = nlohmann::json::parse(cwd.ReadFile(".lubancode/config.json"));
+    CHECK(written["theme"] == "plain");
+    CHECK(written["自定义"] == 7);
+    REQUIRE(written["providers"].size() == 1);
+    CHECK(written["providers"][0]["key_env"] == "ZAI_API_KEY");
+    CHECK_FALSE(written["providers"][0].contains("api_key"));
+}

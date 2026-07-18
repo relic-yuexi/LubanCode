@@ -125,6 +125,26 @@ std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::C
         config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs);
 }
 
+// 会话里切 provider 时，外层 Model/Think/Soul 等包装器、AgentLoop 和工具
+// 都还握着 Backend&。这一层把真正的 client 藏起来并按需替换，引用地址
+// 不变；下一次请求自然落到新 base_url/wire/key 上。
+class RebuildableBackend : public lubancode::api::Backend {
+public:
+    explicit RebuildableBackend(const lubancode::config::Config& config) { Rebuild(config); }
+
+    void Rebuild(const lubancode::config::Config& config) { inner_ = BuildBackend(config); }
+
+    std::expected<void, lubancode::api::Error> send_stream(
+        const lubancode::api::Request& request,
+        const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* cancel = nullptr) override {
+        return inner_->send_stream(request, on_event, cancel);
+    }
+
+private:
+    std::unique_ptr<lubancode::api::Backend> inner_;
+};
+
 // 包一层 Backend:真正发请求前,把 Request.model 换成"当前会话实际在用的
 // model"。AgentLoop 的 model 是构造时定死的私有成员,没有 setter(agent 层
 // 现有文件不让动,详见任务规矩),这层包装是唯一能让 /model 切换在下一次
@@ -2715,13 +2735,14 @@ void ApplyModelCatalog(const lubancode::config::ModelCatalog& catalog, const std
 // catalog:模型目录——列表里优先显示目录条目的 display_name(其次接口
 // 给的 display_name,最后 id 兜底);切换成功后按目录条目应用
 // default_think / context_window / base_instructions(见 ApplyModelCatalog)。
-void HandleModelCommand(const std::string& args, const lubancode::config::Config& config,
+void HandleModelCommand(const std::string& args, lubancode::config::Config& config,
                          const std::shared_ptr<std::string>& current_model,
                          std::optional<std::string>& config_file_path,
                          const lubancode::config::ModelCatalog& catalog,
                          const std::shared_ptr<std::string>& current_think,
                          lubancode::cli::ContextTracker& context_tracker,
-                         const std::shared_ptr<std::string>& current_model_instructions) {
+                         const std::shared_ptr<std::string>& current_model_instructions,
+                         bool offer_config_write = true) {
     std::string chosen;
 
     if (!args.empty()) {
@@ -2773,6 +2794,7 @@ void HandleModelCommand(const std::string& args, const lubancode::config::Config
     }
 
     *current_model = chosen;
+    config.model = chosen;
     std::cout << trf("cmd.model.switched", chosen) << "\n";
 
     // 模型目录应用:主动切换,目录声明了就用(两个 explicit 都传 false);
@@ -2780,7 +2802,7 @@ void HandleModelCommand(const std::string& args, const lubancode::config::Config
     ApplyModelCatalog(catalog, chosen, /*think_explicit=*/false, /*window_explicit=*/false, current_think,
                        context_tracker, current_model_instructions);
 
-    if (config_file_path.has_value()) {
+    if (offer_config_write && config_file_path.has_value()) {
         const std::optional<std::string> answer =
             lubancode::cli::ReadLine(trf("cmd.write_config_prompt", *config_file_path));
         if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
@@ -2791,8 +2813,144 @@ void HandleModelCommand(const std::string& args, const lubancode::config::Config
                 std::cout << trf("cmd.write_config.failed", updated.error()) << "\n";
             }
         }
-    } else {
+    } else if (offer_config_write) {
         std::cout << tr("cmd.session_only") << "\n";
+    }
+}
+
+void PrintProviderList(const std::vector<lubancode::config::ProviderConfig>& providers,
+                       const lubancode::config::Config& current_config,
+                       const std::string& active_provider) {
+    if (providers.empty()) {
+        std::cout << tr("cmd.provider.empty") << "\n";
+        return;
+    }
+    std::cout << tr("cmd.provider.header") << "\n";
+    for (const auto& provider : providers) {
+        const std::string model = provider.model.empty() ? tr("cmd.provider.model_unset") : provider.model;
+        const bool is_current = provider.name == active_provider ||
+                                (active_provider.empty() && provider.wire == current_config.wire &&
+                                 provider.base_url == current_config.base_url && provider.model == current_config.model);
+        const std::string current = is_current ? tr("cmd.provider.current") : "";
+        std::cout << trf("cmd.provider.line", provider.name, lubancode::config::ProviderWireName(provider.wire),
+                          provider.base_url, model, provider.context_window_tokens, provider.key_env, current)
+                  << "\n";
+    }
+}
+
+// /provider:添端只写全局配置；项目级若自行写了 providers，加载时仍按既有
+// "整段压过"规则优先。切端只改本会话：换 client、换提示词平台段、换模型
+// 列表所用的连接，旧历史保留不动。
+void HandleProviderCommand(const std::string& args, lubancode::config::Config& config,
+                           std::string& active_provider, RebuildableBackend& real_backend,
+                           std::string& session_wire,
+                           const std::shared_ptr<std::string>& current_model,
+                           const std::shared_ptr<std::string>& current_think,
+                           lubancode::cli::ContextTracker& context_tracker,
+                           const std::shared_ptr<std::string>& current_model_instructions,
+                           const lubancode::config::ModelCatalog& catalog,
+                           lubancode::agent::PromptOptions& prompt_options,
+                           const std::function<void(bool)>& rebuild_loop) {
+    const lubancode::cli::ParsedProviderCommand command = lubancode::cli::ParseProviderCommand(args);
+    switch (command.action) {
+        case lubancode::cli::ProviderCommandAction::List:
+            PrintProviderList(config.providers, config, active_provider);
+            return;
+        case lubancode::cli::ProviderCommandAction::Add: {
+            const auto wire = lubancode::config::ParseProviderWire(command.wire);
+            if (!wire.has_value()) {
+                std::cout << trf("cmd.provider.add_failed", wire.error()) << "\n";
+                return;
+            }
+            std::size_t window = lubancode::config::kDefaultContextWindowTokens;
+            if (!command.window.empty()) {
+                const auto parsed_window = lubancode::config::ParseContextWindowTokens(command.window);
+                if (!parsed_window.has_value()) {
+                    std::cout << trf("cmd.provider.add_failed", parsed_window.error()) << "\n";
+                    return;
+                }
+                window = *parsed_window;
+            }
+            lubancode::config::ProviderConfig provider{
+                .name = command.name,
+                .base_url = command.base_url,
+                .wire = *wire,
+                .key_env = command.key_env,
+                .model = command.model,
+                .context_window_tokens = window,
+            };
+            const auto valid = lubancode::config::ValidateProviderConfig(provider);
+            if (!valid.has_value()) {
+                std::cout << trf("cmd.provider.add_failed", valid.error()) << "\n";
+                return;
+            }
+            if (lubancode::config::FindProvider(config.providers, provider.name) != nullptr) {
+                std::cout << trf("cmd.provider.add_failed", trf("cmd.provider.exists", provider.name)) << "\n";
+                return;
+            }
+            const auto saved = lubancode::config::AddProviderToGlobalConfig(provider);
+            if (!saved.has_value()) {
+                std::cout << trf("cmd.provider.add_failed", saved.error()) << "\n";
+                return;
+            }
+            config.providers.push_back(std::move(provider));
+            std::cout << trf("cmd.provider.added", command.name, *saved) << "\n";
+            return;
+        }
+        case lubancode::cli::ProviderCommandAction::Switch: {
+            const lubancode::config::ProviderConfig* provider =
+                lubancode::config::FindProvider(config.providers, command.name);
+            if (provider == nullptr) {
+                std::cout << trf("cmd.provider.not_found", command.name) << "\n";
+                return;
+            }
+            const auto api_key = lubancode::config::ProviderApiKey(*provider);
+            if (!api_key.has_value()) {
+                std::cout << trf("cmd.provider.key_missing", provider->name, provider->key_env) << "\n";
+                return;
+            }
+
+            config.wire = provider->wire;
+            config.base_url = provider->base_url;
+            config.auth_token = *api_key;
+            config.model = command.model.empty() ? provider->model : command.model;
+            config.context_window_tokens = provider->context_window_tokens;
+            *current_model = config.model;
+            active_provider = provider->name;
+            session_wire = lubancode::config::ProviderWireName(config.wire);
+            real_backend.Rebuild(config);
+            prompt_options.wire = lubancode::config::ProviderWireName(config.wire);
+            context_tracker.set_window_tokens(config.context_window_tokens);
+            ApplyModelCatalog(catalog, *current_model, /*think_explicit=*/false, /*window_explicit=*/true,
+                              current_think, context_tracker, current_model_instructions);
+            rebuild_loop(/*preserve_history=*/true);
+            std::cout << trf("cmd.provider.switched", provider->name, provider->base_url) << "\n";
+            return;
+        }
+        case lubancode::cli::ProviderCommandAction::Remove:
+            if (!lubancode::cli::CanRemoveProvider(active_provider, command.name)) {
+                std::cout << trf("cmd.provider.remove_active", command.name) << "\n";
+                return;
+            }
+            if (lubancode::config::FindProvider(config.providers, command.name) == nullptr) {
+                std::cout << trf("cmd.provider.not_found", command.name) << "\n";
+                return;
+            }
+            if (const auto removed = lubancode::config::RemoveProviderFromGlobalConfig(command.name);
+                removed.has_value()) {
+                config.providers.erase(std::remove_if(config.providers.begin(), config.providers.end(),
+                                                      [&](const lubancode::config::ProviderConfig& provider) {
+                                                          return provider.name == command.name;
+                                                      }),
+                                       config.providers.end());
+                std::cout << trf("cmd.provider.removed", command.name, *removed) << "\n";
+            } else {
+                std::cout << trf("cmd.provider.remove_failed", removed.error()) << "\n";
+            }
+            return;
+        case lubancode::cli::ProviderCommandAction::Invalid:
+            std::cout << tr("cmd.provider.usage") << "\n";
+            return;
     }
 }
 
@@ -3317,7 +3475,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                       const lubancode::config::ModelCatalog& model_catalog,
                       const lubancode::config::SettingsLocal& settings_local, bool continue_last = false,
                       const std::string& law_source = "内置默认") {
-    const lubancode::config::Config& config = config_result.config;
+    lubancode::config::Config& config = config_result.config;
 
     // M9:技能扫描一次,主代理、子代理、系统提示词、/skills 命令共用同一份
     // 结果——扫描本身只在启动时做一次,不在每轮对话里重复读磁盘。
@@ -3337,9 +3495,18 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     const std::filesystem::path project_skills_root =
         lubancode::tools::Utf8ToPath(CurrentDirUtf8()) / ".lubancode" / "skills";
 
-    std::unique_ptr<lubancode::api::Backend> real_backend = BuildBackend(config);
+    RebuildableBackend real_backend(config);
     auto current_model = std::make_shared<std::string>(config.model);
     auto current_think = std::make_shared<std::string>(config.think);
+    // 旧单端字段和某条 provider 完全对上时，起手就把它认作当前端。这样
+    // /provider list 的标记和“当前端不能删”都不留空档。
+    std::string active_provider;
+    for (const auto& provider : config.providers) {
+        if (provider.wire == config.wire && provider.base_url == config.base_url && provider.model == config.model) {
+            active_provider = provider.name;
+            break;
+        }
+    }
     // 模型目录 base_instructions 的会话级状态:启动/切换模型时由
     // ApplyModelCatalog 填,ModelInstructionsBackend 发请求前现拼进
     // Request.system;空串 = 不追加,零破坏。
@@ -3349,7 +3516,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     // 更内侧,魂在系统提示里永远压轴(见类注释)。
     std::string current_soul_name = config.soul.empty() ? "default" : config.soul;
     auto current_soul = std::make_shared<std::string>(LoadSoulContentByName(current_soul_name, /*warn=*/true));
-    ModelOverrideBackend model_backend(*real_backend, current_model);
+    ModelOverrideBackend model_backend(real_backend, current_model);
     ThinkOverrideBackend think_backend(model_backend, current_think);
     SoulOverlayBackend soul_backend(think_backend, current_soul);
     ModelInstructionsBackend instructions_backend(soul_backend, current_model_instructions);
@@ -3357,7 +3524,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     // 停,Model/Think/ModelInstructions 各层分别负责 /model、/think、目录
     // base_instructions 切换生效,几层包装顺序不影响语义(补丁都在更内层
     // 做,转轮只关心"发出去了没有第一个字节回来")。/compact 触发的压缩
-    // 请求不走这几层包装,直接用 *real_backend——理由见
+    // 请求不走这几层包装,直接用 real_backend——理由见
     // HandleCompactCommand 注释。
     SpinnerBackend wrapped_backend(instructions_backend, theme, spinner_enabled);
 
@@ -3655,7 +3822,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     // (sessions_dir 空)或建档失败,打一行警告后本场闭嘴,不拦着人聊。
     // 单发模式(AskOnce)不走这里,天然不落盘。
     // -----------------------------------------------------------------------
-    const std::string wire_str = config.wire == lubancode::config::Wire::Responses ? "responses" : "anthropic";
+    std::string wire_str = lubancode::config::ProviderWireName(config.wire);
     const std::string sessions_dir =
         home_lubancode.has_value() ? (*home_lubancode + "/sessions") : std::string();
     lubancode::agent::SessionStore session_store(sessions_dir);
@@ -3762,7 +3929,13 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     break;
                 case lubancode::cli::SlashCommand::Model:
                     HandleModelCommand(parsed.args, config, current_model, config_file_path, model_catalog,
-                                        current_think, context_tracker, current_model_instructions);
+                                        current_think, context_tracker, current_model_instructions,
+                                        /*offer_config_write=*/active_provider.empty());
+                    break;
+                case lubancode::cli::SlashCommand::Provider:
+                    HandleProviderCommand(parsed.args, config, active_provider, real_backend, wire_str,
+                                          current_model, current_think, context_tracker,
+                                          current_model_instructions, model_catalog, prompt_options, rebuild_loop);
                     break;
                 case lubancode::cli::SlashCommand::Config:
                     PrintConfigDiagnostics(config_result, *current_model, &model_catalog, &settings_local);
@@ -3852,7 +4025,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                 case lubancode::cli::SlashCommand::Compact: {
                     const std::string compact_model = config.compact_model.empty() ? *current_model : config.compact_model;
                     const auto compact_event =
-                        HandleCompactCommand(parsed.args, *loop, *real_backend, compact_model, theme, spinner_enabled);
+                        HandleCompactCommand(parsed.args, *loop, real_backend, compact_model, theme, spinner_enabled);
                     // 压缩把 history 换短了(失败则原样):落盘基线收到新长度,
                     // 存档文件保持只追加——全量流水不动,补写一行 compact
                     // 事件,/resume 按事件回放出压缩后的活状态,/export 仍走
@@ -3953,13 +4126,13 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         }
 
         // 自动压缩:发真正的用户输入前,占用超过阈值(80%)就先压一压。
-        // 用裸的 *real_backend(理由同 /compact),失败只警告不拦——字符数
+        // 用裸的 real_backend(理由同 /compact),失败只警告不拦——字符数
         // 硬安全网(TrimHistory)还在,不会真的爆掉。
         if (context_tracker.ShouldAutoCompact()) {
             std::cout << theme.stats << tr("compact.auto_start") << theme.reset << "\n";
             lubancode::cli::Spinner spinner(theme, spinner_enabled);
             const std::string compact_model = config.compact_model.empty() ? *current_model : config.compact_model;
-            const auto compact_result = lubancode::agent::Compact(*real_backend, compact_model, loop->History(), "");
+            const auto compact_result = lubancode::agent::Compact(real_backend, compact_model, loop->History(), "");
             spinner.Stop();
             if (compact_result.has_value()) {
                 const std::size_t old_size = loop->History().size();

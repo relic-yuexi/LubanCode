@@ -14,6 +14,7 @@ enum class SlashCommand {
     NotSlash,  // 不是以 / 开头,交互循环不该拦截,原样发给模型
     Help,
     Model,
+    Provider,  // /provider add|list|switch|remove:多端模型服务配置
     Config,
     Clear,
     Exit,
@@ -49,6 +50,27 @@ struct ParsedSlashCommand {
 // 命令词大小写不敏感(/Model 和 /model 视为一样);命令词和参数之间按第一个
 // 空白切开。输入前后空白先剥掉。
 ParsedSlashCommand ParseSlashCommand(const std::string& input);
+
+// /provider 的二级参数也收在 cli 层做纯解析，main.cpp 只接收已拆好的
+// 字段、做写盘和切会话。model / window 选项都只认一个值；少参数、重复
+// 选项、夹生子命令一律 Invalid，由调用方统一打印用法。
+enum class ProviderCommandAction { Invalid, List, Add, Switch, Remove };
+
+struct ParsedProviderCommand {
+    ProviderCommandAction action = ProviderCommandAction::Invalid;
+    std::string name;
+    std::string base_url;
+    std::string wire;
+    std::string key_env = "ANTHROPIC_AUTH_TOKEN";
+    std::string model;
+    std::string window;
+};
+
+ParsedProviderCommand ParseProviderCommand(const std::string& args);
+
+// /provider remove 的会话级护栏。拆成纯函数，命令处理与单测共用，免得
+// "当前端不许删"这条规矩散在 main 的 IO 分支里。
+bool CanRemoveProvider(const std::string& active_provider, const std::string& name);
 
 // 一个命令一条:名字 + 一句话说明。/help 打印用的就是这份,line_editor 的
 // Tab 补全、实时提示行也是从这份转过去的候选——统共这一份定义,不重复写。

@@ -1,5 +1,6 @@
 #include "config/config.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
@@ -48,6 +49,49 @@ std::filesystem::path NewConfigPathFor(const std::filesystem::path& base_dir) {
 // 旧位置配置文件的路径:<base_dir>/.lubancode.json。
 std::filesystem::path OldConfigPathFor(const std::filesystem::path& base_dir) {
     return base_dir / ".lubancode.json";
+}
+
+std::expected<Wire, std::string> ParseProviderWire(const std::string& raw) {
+    if (raw == "anthropic") {
+        return Wire::Anthropic;
+    }
+    if (raw == "responses") {
+        return Wire::Responses;
+    }
+    return std::unexpected("只认得 anthropic 或 responses,写的是: " + raw);
+}
+
+std::string ProviderWireName(Wire wire) {
+    return wire == Wire::Responses ? "responses" : "anthropic";
+}
+
+std::expected<void, std::string> ValidateProviderConfig(const ProviderConfig& provider) {
+    if (provider.name.empty()) {
+        return std::unexpected("provider 名字不能为空");
+    }
+    if (provider.base_url.rfind("http://", 0) != 0 && provider.base_url.rfind("https://", 0) != 0) {
+        return std::unexpected("base_url 得以 http:// 或 https:// 开头");
+    }
+    if (provider.key_env.empty()) {
+        return std::unexpected("key_env 不能为空");
+    }
+    if (provider.context_window_tokens == 0) {
+        return std::unexpected("context_window 得是正整数");
+    }
+    return {};
+}
+
+std::optional<std::string> ProviderApiKey(const ProviderConfig& provider) {
+    return GetEnv(provider.key_env.c_str());
+}
+
+const ProviderConfig* FindProvider(const std::vector<ProviderConfig>& providers, const std::string& name) {
+    for (const ProviderConfig& provider : providers) {
+        if (provider.name == name) {
+            return &provider;
+        }
+    }
+    return nullptr;
 }
 
 std::string ToString(Source source) {
@@ -342,6 +386,89 @@ std::expected<HooksConfig, std::string> ParseHooksConfig(const nlohmann::json& h
     return config;
 }
 
+std::expected<std::vector<ProviderConfig>, std::string> ParseProvidersConfig(
+    const nlohmann::json& providers_json, const std::string& file_path_for_error) {
+    if (!providers_json.is_array()) {
+        return std::unexpected("配置文件 " + file_path_for_error + " 里的 providers 字段必须是数组");
+    }
+
+    std::vector<ProviderConfig> providers;
+    for (std::size_t i = 0; i < providers_json.size(); ++i) {
+        const nlohmann::json& item = providers_json[i];
+        const std::string prefix = "配置文件 " + file_path_for_error + " 里的 providers[" +
+                                   std::to_string(i) + "]";
+        if (!item.is_object()) {
+            return std::unexpected(prefix + " 必须是 JSON object");
+        }
+
+        const auto require_string = [&](const char* field) -> std::expected<std::string, std::string> {
+            if (!item.contains(field) || !item[field].is_string() || item[field].get<std::string>().empty()) {
+                return std::unexpected(prefix + " 里的 " + field + " 字段必须是非空字符串");
+            }
+            return item[field].get<std::string>();
+        };
+
+        ProviderConfig provider;
+        const auto name = require_string("name");
+        if (!name.has_value()) {
+            return std::unexpected(name.error());
+        }
+        provider.name = *name;
+        const auto base_url = require_string("base_url");
+        if (!base_url.has_value()) {
+            return std::unexpected(base_url.error());
+        }
+        provider.base_url = *base_url;
+        const auto wire = require_string("wire");
+        if (!wire.has_value()) {
+            return std::unexpected(wire.error());
+        }
+        const auto parsed_wire = ParseProviderWire(*wire);
+        if (!parsed_wire.has_value()) {
+            return std::unexpected(prefix + " 里的 wire 字段" + ": " + parsed_wire.error());
+        }
+        provider.wire = *parsed_wire;
+
+        if (item.contains("key_env")) {
+            if (!item["key_env"].is_string() || item["key_env"].get<std::string>().empty()) {
+                return std::unexpected(prefix + " 里的 key_env 字段必须是非空字符串");
+            }
+            provider.key_env = item["key_env"].get<std::string>();
+        }
+        if (item.contains("model")) {
+            if (!item["model"].is_string()) {
+                return std::unexpected(prefix + " 里的 model 字段必须是字符串");
+            }
+            provider.model = item["model"].get<std::string>();
+        }
+        if (item.contains("context_window")) {
+            std::string raw_window;
+            if (item["context_window"].is_string()) {
+                raw_window = item["context_window"].get<std::string>();
+            } else if (item["context_window"].is_number_integer() || item["context_window"].is_number_unsigned()) {
+                raw_window = std::to_string(item["context_window"].get<long long>());
+            } else {
+                return std::unexpected(prefix + " 里的 context_window 字段必须是字符串或数字");
+            }
+            const auto parsed_window = ParseContextWindowTokens(raw_window);
+            if (!parsed_window.has_value()) {
+                return std::unexpected(prefix + " 里的 context_window 字段: " + parsed_window.error());
+            }
+            provider.context_window_tokens = *parsed_window;
+        }
+
+        const auto valid = ValidateProviderConfig(provider);
+        if (!valid.has_value()) {
+            return std::unexpected(prefix + ": " + valid.error());
+        }
+        if (FindProvider(providers, provider.name) != nullptr) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 providers 名字重复: " + provider.name);
+        }
+        providers.push_back(std::move(provider));
+    }
+    return providers;
+}
+
 std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& json_text,
                                                              const std::string& file_path_for_error) {
     nlohmann::json parsed;
@@ -503,6 +630,13 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
             return std::unexpected(lsp_result.error());
         }
         config.lsp_servers = std::move(*lsp_result);
+    }
+    if (parsed.contains("providers")) {
+        auto providers_result = ParseProvidersConfig(parsed["providers"], file_path_for_error);
+        if (!providers_result.has_value()) {
+            return std::unexpected(providers_result.error());
+        }
+        config.providers = std::move(*providers_result);
     }
 
     return config;
@@ -938,7 +1072,7 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.sources.request_timeout_secs = Source::Default;
     }
 
-    // ---- 对象型整段(hooks/mcpServers/search/lsp):只从配置文件来,没有
+    // ---- 对象型整段(hooks/mcpServers/search/lsp/providers):只从配置文件来,没有
     // 环境变量、没有内置默认值这两级。按"整段"回退——项目级写了就用项目级
     // 那一整段,否则用全局那一整段(不做键级混合,语义清楚)。 ----
     if (project_file.has_value() && project_file->hooks.has_value()) {
@@ -963,6 +1097,17 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.config.lsp_servers = *project_file->lsp_servers;
     } else if (global_file.has_value() && global_file->lsp_servers.has_value()) {
         result.config.lsp_servers = *global_file->lsp_servers;
+    }
+
+    if (project_file.has_value() && project_file->providers.has_value()) {
+        result.config.providers = *project_file->providers;
+        result.sources.providers = Source::ProjectConfigFile;
+    } else if (global_file.has_value() && global_file->providers.has_value()) {
+        result.config.providers = *global_file->providers;
+        result.sources.providers = Source::GlobalConfigFile;
+    } else {
+        result.config.providers.clear();
+        result.sources.providers = Source::Default;
     }
 
     return result;
@@ -1049,6 +1194,18 @@ std::expected<std::string, std::string> SaveConfigFile(const Config& config) {
     j["api_key"] = config.auth_token;
     j["model"] = config.model;
     j["max_context_chars"] = config.max_context_chars;
+    if (!config.providers.empty()) {
+        nlohmann::json providers = nlohmann::json::array();
+        for (const ProviderConfig& provider : config.providers) {
+            providers.push_back({{"name", provider.name},
+                                 {"base_url", provider.base_url},
+                                 {"wire", ProviderWireName(provider.wire)},
+                                 {"key_env", provider.key_env},
+                                 {"model", provider.model},
+                                 {"context_window", provider.context_window_tokens}});
+        }
+        j["providers"] = std::move(providers);
+    }
     if (!config.language.empty()) {
         j["language"] = config.language;  // i18n:向导选过语言才写,空 = 跟系统,不落字段
     }
@@ -1109,6 +1266,157 @@ std::expected<void, std::string> UpdateSoulInConfigFile(const std::string& file_
 std::expected<void, std::string> UpdateLanguageInConfigFile(const std::string& file_path,
                                                               const std::string& language) {
     return UpdateStringFieldInConfigFile(file_path, "language", language);
+}
+
+namespace {
+
+nlohmann::json ProvidersToJson(const std::vector<ProviderConfig>& providers) {
+    nlohmann::json out = nlohmann::json::array();
+    for (const ProviderConfig& provider : providers) {
+        out.push_back({{"name", provider.name},
+                       {"base_url", provider.base_url},
+                       {"wire", ProviderWireName(provider.wire)},
+                       {"key_env", provider.key_env},
+                       {"model", provider.model},
+                       {"context_window", provider.context_window_tokens}});
+    }
+    return out;
+}
+
+std::expected<nlohmann::json, std::string> ReadConfigObjectForUpdate(const std::string& file_path) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::exists(fs::path(file_path), ec) && !ec) {
+        return nlohmann::json::object();
+    }
+    if (ec) {
+        return std::unexpected("检查配置文件 " + file_path + " 失败: " + ec.message());
+    }
+
+    std::ifstream in(file_path, std::ios::binary);
+    if (!in.is_open()) {
+        return std::unexpected("配置文件 " + file_path + " 打不开(检查一下权限)");
+    }
+    std::ostringstream buffer;
+    buffer << in.rdbuf();
+    try {
+        nlohmann::json root = nlohmann::json::parse(buffer.str());
+        if (!root.is_object()) {
+            return std::unexpected("配置文件 " + file_path + " 顶层必须是一个 JSON object(花括号包起来的那种)");
+        }
+        return root;
+    } catch (const nlohmann::json::parse_error& e) {
+        return std::unexpected("配置文件 " + file_path + " 不是合法 JSON: " + std::string(e.what()));
+    }
+}
+
+std::expected<void, std::string> WriteConfigObject(const std::string& file_path, const nlohmann::json& root) {
+    namespace fs = std::filesystem;
+    const fs::path path(file_path);
+    std::error_code ec;
+    if (!path.parent_path().empty()) {
+        fs::create_directories(path.parent_path(), ec);
+        if (ec) {
+            return std::unexpected("建目录 " + path.parent_path().string() + " 失败: " + ec.message());
+        }
+    }
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+        return std::unexpected("配置文件 " + file_path + " 打不开写入(检查一下权限)");
+    }
+    out << root.dump(2);
+    if (!out.good()) {
+        return std::unexpected("配置文件 " + file_path + " 写入失败(检查一下磁盘/权限)");
+    }
+    return {};
+}
+
+std::expected<std::vector<ProviderConfig>, std::string> ProvidersInConfigObject(const nlohmann::json& root,
+                                                                                  const std::string& file_path) {
+    if (!root.contains("providers")) {
+        return std::vector<ProviderConfig>{};
+    }
+    return ParseProvidersConfig(root["providers"], file_path);
+}
+
+}  // namespace
+
+std::expected<void, std::string> UpdateProvidersInConfigFile(const std::string& file_path,
+                                                               const std::vector<ProviderConfig>& providers) {
+    for (std::size_t i = 0; i < providers.size(); ++i) {
+        const auto valid = ValidateProviderConfig(providers[i]);
+        if (!valid.has_value()) {
+            return std::unexpected("providers[" + std::to_string(i) + "]: " + valid.error());
+        }
+        for (std::size_t j = 0; j < i; ++j) {
+            if (providers[j].name == providers[i].name) {
+                return std::unexpected("providers 名字重复: " + providers[i].name);
+            }
+        }
+    }
+    auto root = ReadConfigObjectForUpdate(file_path);
+    if (!root.has_value()) {
+        return std::unexpected(root.error());
+    }
+    (*root)["providers"] = ProvidersToJson(providers);
+    return WriteConfigObject(file_path, *root);
+}
+
+std::expected<std::string, std::string> AddProviderToGlobalConfig(const ProviderConfig& provider) {
+    const auto valid = ValidateProviderConfig(provider);
+    if (!valid.has_value()) {
+        return std::unexpected(valid.error());
+    }
+    const auto home = HomeDir();
+    if (!home.has_value()) {
+        return std::unexpected("找不到用户主目录,没法保存 provider 配置");
+    }
+    const std::string path = NewConfigPathFor(std::filesystem::path(*home)).string();
+    auto root = ReadConfigObjectForUpdate(path);
+    if (!root.has_value()) {
+        return std::unexpected(root.error());
+    }
+    auto providers = ProvidersInConfigObject(*root, path);
+    if (!providers.has_value()) {
+        return std::unexpected(providers.error());
+    }
+    if (FindProvider(*providers, provider.name) != nullptr) {
+        return std::unexpected("provider 已存在: " + provider.name);
+    }
+    providers->push_back(provider);
+    const auto written = UpdateProvidersInConfigFile(path, *providers);
+    if (!written.has_value()) {
+        return std::unexpected(written.error());
+    }
+    return path;
+}
+
+std::expected<std::string, std::string> RemoveProviderFromGlobalConfig(const std::string& name) {
+    const auto home = HomeDir();
+    if (!home.has_value()) {
+        return std::unexpected("找不到用户主目录,没法更新 provider 配置");
+    }
+    const std::string path = NewConfigPathFor(std::filesystem::path(*home)).string();
+    auto root = ReadConfigObjectForUpdate(path);
+    if (!root.has_value()) {
+        return std::unexpected(root.error());
+    }
+    auto providers = ProvidersInConfigObject(*root, path);
+    if (!providers.has_value()) {
+        return std::unexpected(providers.error());
+    }
+    auto it = std::find_if(providers->begin(), providers->end(), [&](const ProviderConfig& provider) {
+        return provider.name == name;
+    });
+    if (it == providers->end()) {
+        return std::unexpected("provider 不存在: " + name);
+    }
+    providers->erase(it);
+    const auto written = UpdateProvidersInConfigFile(path, *providers);
+    if (!written.has_value()) {
+        return std::unexpected(written.error());
+    }
+    return path;
 }
 
 std::expected<ConfigResult, std::string> LoadFromEnv() {
