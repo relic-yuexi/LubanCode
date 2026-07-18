@@ -2116,7 +2116,8 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                             const lubancode::config::HooksConfig& hooks_config,
                                             ToolDisplay& display, StreamBodyTracker& body_tracker,
                                             const std::vector<std::string>& allow_commands,
-                                            const std::vector<std::string>& deny_commands) {
+                                            const std::vector<std::string>& deny_commands,
+                                            const std::atomic<bool>* cancel_flag = nullptr) {
     lubancode::agent::Callbacks callbacks;
 
     // M9:hooks_config 四个数组全空是常态(没配 hooks 的用户占多数),这时候
@@ -2291,6 +2292,10 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         agent_tool != nullptr) {
         lubancode::tools::AgentTool::Hooks hooks;
         hooks.on_tool_confirm = callbacks.on_tool_confirm;
+        // ESC/Ctrl+C 打断信号透传:没这一行,子代理内部工具循环永远拿到
+        // nullptr,顶层怎么置位 cancel_flag 都传不进去——子代理会一路跑到
+        // 自己的 max_turns 或任务自然完成才停,ESC/Ctrl+C 对它形同虚设。
+        hooks.cancel = cancel_flag;
         // UI-B:子代理内层工具也走条目样式(前缀缩进四空格),状态同样原地
         // 更新——启动靠 on_sub_tool_start,终态靠下面包了一层的 post_tool
         // 钩子(agent 工具没有单独的"子工具结束"回调,post_tool 正好在真
@@ -2416,7 +2421,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     StreamBodyTracker body_tracker(theme, is_console && !theme.reset.empty());
     const lubancode::agent::Callbacks callbacks =
         BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker, registry,
-                        hooks_config, display, body_tracker, allow_commands, deny_commands);
+                        hooks_config, display, body_tracker, allow_commands, deny_commands, &cancel_flag);
 
     lubancode::cli::TurnInputListener listener(cancel_flag, theme);
     // markdown × M10:监听线程随时可能在流式正文当中插打 [已排队]/[已打断]

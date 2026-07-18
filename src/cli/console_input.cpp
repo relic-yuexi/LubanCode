@@ -51,6 +51,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
 #include <iostream>
 #include <mutex>
 
@@ -845,6 +846,32 @@ void TurnInputListener::ThreadMain() {
         RedrawStreamFooterLocked();
     };
 
+    // Esc 和单击 Ctrl+C 打断当前轮的收场动作完全一致,抽成一个共用 lambda——
+    // 置 cancel_flag、擦脚注、打一行 "[已打断]"、通知正文块作废锚点、关脚注。
+    auto interrupt_turn = [&] {
+        cancel_flag_.store(true);
+        std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+        EraseStreamFooterLocked();  // 先把脚注那行擦掉,[已打断] 才打得干净
+        std::cout << "\n" << theme_.stats << tr("input.interrupted") << theme_.reset << "\n";
+        std::cout.flush();
+        if (const auto& hook = StreamScreenPrintHookSlot()) {
+            hook();  // 插打了整行,正文块的行数账作废(锁还攥着,见头文件约定)
+        }
+        // 打断后本轮就要收场:关掉脚注,别让残余正文再把提示行重画回来。
+        FooterSlot().enabled = false;
+    };
+
+    // Ctrl+C 双击退出的计时基准——只在这一次 ThreadMain() 存活期(即这一轮
+    // Run() 的窗口)内有效,跨轮不留痕:TurnInputListener 是 RunTurn() 每轮
+    // 现建的新实例,下一轮按键节奏重新计时,不会因为"上一轮末尾按过一次"
+    // 而在下一轮开头误判成双击。
+    bool has_last_ctrlc = false;
+    std::chrono::steady_clock::time_point last_ctrlc_time{};
+    // 双击窗口:参照 bash/Python/Node REPL 以及 Claude Code 官方文档"Ctrl+C
+    // 打断、双击退出"的通用约定(经 web 检索核实,见交活报告),1200ms 内
+    // 认作"这是刚才那下的续拍"。
+    constexpr auto kCtrlCDoubleTapWindow = std::chrono::milliseconds(1200);
+
     while (!stop_requested_.load()) {
         // try_lock:抢不到就说明编辑器(ReadLineKeyByKey,含工具确认提示)
         // 正在读,乖乖让出、睡一下再抢,绝不跟前台读键盘的那次调用抢同一份
@@ -871,16 +898,33 @@ void TurnInputListener::ThreadMain() {
         }
         using PK = platform::KeyInput::Kind;
         if (key->kind == PK::Esc) {
-            cancel_flag_.store(true);
-            std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
-            EraseStreamFooterLocked();  // 先把脚注那行擦掉,[已打断] 才打得干净
-            std::cout << "\n" << theme_.stats << tr("input.interrupted") << theme_.reset << "\n";
-            std::cout.flush();
-            if (const auto& hook = StreamScreenPrintHookSlot()) {
-                hook();  // 插打了整行,正文块的行数账作废(锁还攥着,见头文件约定)
+            interrupt_turn();
+            continue;
+        }
+        if (key->kind == PK::CtrlC) {
+            // 根因二:这里以前完全没有 PK::CtrlC 分支,按了什么反应都没有,
+            // 直接被上面 "其余按键不理会" 那句注释描述的空路径吞掉——不管
+            // 外层 cancel_flag 有没有别的办法置位,Ctrl+C 本身在流式期间是
+            // 死键。语义对齐 bash/Python/Node REPL 和 Claude Code 官方文档
+            // 确认过的通用约定:单击等同 Esc(打断当前轮,不退出程序),
+            // 短时间内(kCtrlCDoubleTapWindow)连按两次才是"我要强制退出
+            // 整个程序"——双击不再走 cancel_flag 那套"打断收场"流程(它可能
+            // 被挂起的工具调用/子代理拖住迟迟不收场),直接 std::exit,保证
+            // "用户想跑路"这条路径永远畅通。
+            const auto now = std::chrono::steady_clock::now();
+            const bool double_tap = has_last_ctrlc && (now - last_ctrlc_time) < kCtrlCDoubleTapWindow;
+            has_last_ctrlc = true;
+            last_ctrlc_time = now;
+            if (double_tap) {
+                {
+                    std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+                    EraseStreamFooterLocked();
+                    std::cout << "\n" << theme_.stats << tr("input.ctrlc_exit") << theme_.reset << "\n";
+                    std::cout.flush();
+                }  // 退出前先放锁——std::exit 会跑静态对象析构,别让它们卡死在这把锁上。
+                std::exit(130);  // 130 = 128+SIGINT,"被 Ctrl+C 中断"的约定退出码
             }
-            // ESC 后本轮就要收场:关掉脚注,别让残余正文再把提示行重画回来。
-            FooterSlot().enabled = false;
+            interrupt_turn();
             continue;
         }
         if (key->kind == PK::Enter || key->kind == PK::NewLine) {

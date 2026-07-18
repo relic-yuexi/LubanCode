@@ -27,12 +27,17 @@ class FakeBackend : public api::Backend {
 public:
     std::vector<std::vector<api::StreamEvent>> scripts;
     std::vector<api::Request> captured_requests;
+    // 根因一回归用:每次 send_stream 收到的 cancel 指针原样记下来,断言它
+    // 就是 main.cpp 那份 cancel_flag 的地址,证明 AgentTool -> sub_loop.Run()
+    // 这一路确实把打断信号透传进去了,不是每次都收 nullptr。
+    std::vector<const std::atomic<bool>*> captured_cancel_ptrs;
 
     std::expected<void, api::Error> send_stream(
         const api::Request& request,
         const std::function<void(const api::StreamEvent&)>& on_event,
-        const std::atomic<bool>* /*cancel*/ = nullptr) override {
+        const std::atomic<bool>* cancel = nullptr) override {
         captured_requests.push_back(request);
+        captured_cancel_ptrs.push_back(cancel);
         const std::size_t idx = captured_requests.size() - 1;
         if (idx >= scripts.size()) {
             return std::unexpected(api::Error{api::ErrorKind::Api, "FakeBackend: 脚本用完了", 0});
@@ -269,6 +274,41 @@ TEST_CASE("agent 工具:不设 Hooks 也不崩(默认允许确认、不打印、
     CHECK_FALSE(result.is_error);
     // on_tool_confirm 没设,AgentLoop 默认视为允许(见 loop.cpp RunOneTool)。
     CHECK(fake_tool_ptr->call_count == 1);
+}
+
+TEST_CASE("agent 工具:hooks.cancel 原样透传给 sub_loop.Run()(根因一回归:ESC/Ctrl+C 打断信号不再在子代理这一层断线)") {
+    FakeBackend backend;
+    backend.scripts = {TextOnlyScript("子代理跑完了")};
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+
+    // 没设 hooks.cancel(默认 nullptr)时,子代理里的请求应该收到 nullptr——
+    // 跟从前(没有这个字段时)行为完全一样,不该凭空冒出一个非空指针。
+    {
+        nlohmann::json input;
+        input["prompt"] = "第一次不设 cancel";
+        const tools::Tool::Result result = agent_tool.execute(input);
+        CHECK_FALSE(result.is_error);
+        REQUIRE(backend.captured_cancel_ptrs.size() == 1);
+        CHECK(backend.captured_cancel_ptrs[0] == nullptr);
+    }
+
+    // 设了 hooks.cancel 之后,子代理内部每次独立请求收到的 cancel 指针都得
+    // 是这同一个地址——不是 main.cpp 传的另一份拷贝,也不是被悄悄丢弃成
+    // nullptr。这是 AgentTool::Hooks::cancel 字段 + execute() 里
+    // "sub_loop.Run(prompt, sub_callbacks, hooks_.cancel)" 那一行要保证的事。
+    std::atomic<bool> cancel_flag{false};
+    tools::AgentTool::Hooks hooks;
+    hooks.cancel = &cancel_flag;
+    agent_tool.SetHooks(hooks);
+
+    backend.scripts.push_back(TextOnlyScript("第二次也跑完了"));
+    nlohmann::json input2;
+    input2["prompt"] = "第二次设了 cancel";
+    const tools::Tool::Result result2 = agent_tool.execute(input2);
+    CHECK_FALSE(result2.is_error);
+    REQUIRE(backend.captured_cancel_ptrs.size() == 2);
+    CHECK(backend.captured_cancel_ptrs[1] == &cancel_flag);
 }
 
 TEST_CASE("注册表排除:子代理工具表不含 agent 自己,主表含 agent,防递归深度硬限 1") {
