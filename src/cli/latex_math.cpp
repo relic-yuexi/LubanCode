@@ -582,7 +582,12 @@ std::optional<Matrix> ParseMatrix(const std::string &source) {
             return std::nullopt;
         std::vector<std::string> row;
         for (const std::string &raw_cell : raw_row) {
-            ExpressionParser parser(Trim(raw_cell));
+            // Trim() 返回临时 std::string;直接喂给按 string_view 存源的
+            // ExpressionParser 会在这条语句结束时悬空(临时活不过分号),
+            // 下一行 Parse() 就读野内存。这里先落一个有名字的局部变量,
+            // 让它活过 Parse() 调用。
+            const std::string trimmed_cell = Trim(raw_cell);
+            ExpressionParser parser(trimmed_cell);
             auto rendered = parser.Parse();
             if (!rendered)
                 return std::nullopt;
@@ -594,6 +599,8 @@ std::optional<Matrix> ParseMatrix(const std::string &source) {
 }
 
 std::string RenderMatrixInline(const Matrix &matrix) {
+    // 头两个 '[' 分工不同：外层一个包全阵，内层一个开第一行；每行结束都
+    // 落一个 ']' 收行，循环完了还欠外层那个 ']'，得在结尾另外补上。
     std::string out = "[[";
     for (std::size_t row = 0; row < matrix.rows.size(); ++row) {
         if (row > 0)
@@ -605,6 +612,7 @@ std::string RenderMatrixInline(const Matrix &matrix) {
         }
         out += ']';
     }
+    out += ']';
     return out;
 }
 

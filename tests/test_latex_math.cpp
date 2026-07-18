@@ -150,7 +150,9 @@ TEST_CASE("LaTeX math Markdown: 围栏和行内代码都不认美元号") {
 TEST_CASE("LaTeX math Markdown: 转义美元号不触发公式") {
     const auto lines = RenderMarkdown(R"(价签是 \$x^2$，不是公式。)", BuiltinTheme("plain"), 80);
     REQUIRE(lines.size() == 1);
-    CHECK(lines[0] == "$x^2$，不是公式。");
+    // \$ 只转义开头那一个美元号(变普通 "$"字符),前面的"价签是 "原样留着;
+    // 后头单落的 "$" 找不到配对的闭合定界符,也原样留着,不触发公式转换。
+    CHECK(lines[0] == "价签是 $x^2$，不是公式。");
     CHECK(lines[0].find("x²") == std::string::npos);
 }
 
