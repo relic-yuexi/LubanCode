@@ -2457,8 +2457,9 @@ std::size_t CountUtf8Chars(const std::string& text) {
 }
 
 // 按魂名读内容(原始全文,注释留给注入时剥):"off" -> 空;空串/"default"
-// -> SOUL.md;别的名字 -> souls/<名字>.md。文件缺了返回空串(= 无效果),
-// warn 为真时打一行说明。启动读一次、/soul 切换即时重读,都走这一个函数。
+// -> SOUL.md;别的名字 -> souls/<名字>.md。默认 SOUL.md 走专用读口:缺失、
+// 打不开或 UTF-8 已坏都降成空魂,不拦启动。warn 为真时打一行说明。启动读
+// 一次、/soul 切换即时重读,都走这一个函数。
 std::string LoadSoulContentByName(const std::string& name, bool warn) {
     if (name == "off") {
         return std::string();
@@ -2467,24 +2468,25 @@ std::string LoadSoulContentByName(const std::string& name, bool warn) {
     if (!luban_dir.has_value()) {
         return std::string();
     }
-    const std::string path = (name.empty() || name == "default")
-                                  ? lubancode::config::SoulFilePath(*luban_dir)
-                                  : lubancode::config::SoulPathByName(*luban_dir, name);
-    const auto content = lubancode::config::ReadTextFileIfExists(path);
+    const bool default_soul = name.empty() || name == "default";
+    const std::string path = default_soul ? lubancode::config::SoulFilePath(*luban_dir)
+                                          : lubancode::config::SoulPathByName(*luban_dir, name);
+    const auto content = default_soul ? lubancode::config::ReadSoulFile(*luban_dir)
+                                      : lubancode::config::ReadTextFileIfExists(path);
     if (!content.has_value()) {
         if (warn) {
-            std::cout << trf("soul.not_found", path) << "\n";
+            std::cout << trf("soul.unavailable", path) << "\n";
         }
         return std::string();
     }
     return *content;
 }
 
-// /soul 命令:裸敲列出 souls/*.md + default(SOUL.md)+ 当前生效的;
-// /soul 名字 切换(会话级即时生效,下一轮请求换新系统提示,然后问要不要
-// 写进配置);/soul off 本会话关魂;/soul default 回 SOUL.md(这两个只管
-// 本会话,不问写配置)。切换即时重读所选文件——用户改了魂文件,切一下
-// 就生效,不用重启。
+// /soul 命令:裸敲看当前正文和可选旧魂;/soul clear 把 SOUL.md 还原成
+// 默认空魂;/soul <内容> 直接写 SOUL.md、立刻生效,下回启动也会读回来。
+// 兼容旧用法:参数恰好命中 souls/<名字>.md 时仍是选魂,off/default 也仍只
+// 管本会话。直接写/clear 后若已有配置文件,顺手把选魂项改回 default,
+// 免得下次启动又被旧的名字盖过去。
 void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::string>& current_soul,
                         std::string& current_soul_name, const std::optional<std::string>& config_file_path) {
     const auto luban_dir = lubancode::config::HomeLubancodeDir();
@@ -2495,14 +2497,17 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
 
     if (args.empty()) {
         const std::vector<std::string> souls = lubancode::config::ListSouls(*luban_dir);
-        std::cout << tr("cmd.soul.list_header") << "\n";
+        std::cout << trf("cmd.soul.current", current_soul_name) << "\n";
+        const std::string visible = lubancode::agent::StripPromptComments(*current_soul);
+        if (visible.empty()) {
+            std::cout << tr("cmd.soul.empty_note") << "\n";
+        } else {
+            std::cout << visible << "\n";
+        }
+        std::cout << tr("cmd.soul.available_header") << "\n";
         std::cout << tr("cmd.soul.default_item") << "\n";
         for (const auto& name : souls) {
             std::cout << "  - " << name << "\n";
-        }
-        std::cout << trf("cmd.soul.current", current_soul_name);
-        if (lubancode::agent::StripPromptComments(*current_soul).empty() && current_soul_name != "off") {
-            std::cout << tr("cmd.soul.empty_note");
         }
         std::cout << "\n" << tr("cmd.soul.usage") << "\n";
         return;
@@ -2526,29 +2531,61 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
         return;
     }
 
-    const std::string path = lubancode::config::SoulPathByName(*luban_dir, args);
-    const auto content = lubancode::config::ReadTextFileIfExists(path);
-    if (!content.has_value()) {
-        std::cout << trf("cmd.soul.missing", args, path) << "\n";
-        return;
-    }
-    *current_soul = *content;
-    current_soul_name = args;
-    std::cout << trf("cmd.soul.switched", args) << "\n" << tr("cmd.soul.switch_hint") << "\n";
-
-    if (config_file_path.has_value()) {
-        const std::optional<std::string> answer = lubancode::cli::ReadLine(tr("cmd.soul.write_prompt"));
-        if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
-            const auto updated = lubancode::config::UpdateSoulInConfigFile(*config_file_path, args);
-            if (updated.has_value()) {
-                std::cout << trf("cmd.write_config.updated", *config_file_path) << "\n";
-            } else {
-                std::cout << trf("cmd.write_config.failed", updated.error()) << "\n";
+    if (args == "clear") {
+        const auto cleared = lubancode::config::ClearSoulFile(*luban_dir);
+        if (!cleared.has_value()) {
+            std::cout << trf("cmd.soul.write_failed", cleared.error()) << "\n";
+            return;
+        }
+        *current_soul = lubancode::config::DefaultSoulFileContent();
+        current_soul_name = "default";
+        if (config_file_path.has_value()) {
+            const auto updated = lubancode::config::UpdateSoulInConfigFile(*config_file_path, "default");
+            if (!updated.has_value()) {
+                std::cout << trf("cmd.soul.default_config_failed", updated.error()) << "\n";
             }
         }
-    } else {
-        std::cout << tr("cmd.session_only") << "\n";
+        std::cout << tr("cmd.soul.cleared") << "\n" << tr("cmd.soul.switch_hint") << "\n";
+        return;
     }
+
+    const std::string path = lubancode::config::SoulPathByName(*luban_dir, args);
+    const auto content = lubancode::config::ReadTextFileIfExists(path);
+    if (content.has_value()) {
+        *current_soul = *content;
+        current_soul_name = args;
+        std::cout << trf("cmd.soul.switched", args) << "\n" << tr("cmd.soul.switch_hint") << "\n";
+
+        if (config_file_path.has_value()) {
+            const std::optional<std::string> answer = lubancode::cli::ReadLine(tr("cmd.soul.write_prompt"));
+            if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
+                const auto updated = lubancode::config::UpdateSoulInConfigFile(*config_file_path, args);
+                if (updated.has_value()) {
+                    std::cout << trf("cmd.write_config.updated", *config_file_path) << "\n";
+                } else {
+                    std::cout << trf("cmd.write_config.failed", updated.error()) << "\n";
+                }
+            }
+        } else {
+            std::cout << tr("cmd.session_only") << "\n";
+        }
+        return;
+    }
+
+    const auto written = lubancode::config::WriteSoulFile(*luban_dir, args);
+    if (!written.has_value()) {
+        std::cout << trf("cmd.soul.write_failed", written.error()) << "\n";
+        return;
+    }
+    *current_soul = args;
+    current_soul_name = "default";
+    if (config_file_path.has_value()) {
+        const auto updated = lubancode::config::UpdateSoulInConfigFile(*config_file_path, "default");
+        if (!updated.has_value()) {
+            std::cout << trf("cmd.soul.default_config_failed", updated.error()) << "\n";
+        }
+    }
+    std::cout << tr("cmd.soul.saved") << "\n" << tr("cmd.soul.switch_hint") << "\n";
 }
 
 // /prompt 命令:裸敲显示当前法(人格段)的来源和字数,外加各提示词模块

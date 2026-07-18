@@ -10,6 +10,7 @@
 #include <sstream>
 #include <string>
 
+#include "agent/prompts.hpp"
 #include "config/prompt_files.hpp"
 #include "tools/skill_loader.hpp"
 
@@ -217,6 +218,42 @@ TEST_CASE("ReadTextFileIfExists: 不存在返回 nullopt,存在原样读(中文�
     const auto content = ReadTextFileIfExists(Utf8(dir.Path() / std::filesystem::path(u8"有.md")));
     REQUIRE(content.has_value());
     CHECK(*content == "内容\n第二行");
+}
+
+TEST_CASE("SOUL.md: 写入后能读回,clear 还原默认内容") {
+    TempDir dir;
+    const std::string base = Utf8(dir.Path() / std::filesystem::path(u8".lubancode"));
+    const std::string soul = "答话短些。\n先动手,后回话。\n";
+
+    REQUIRE(WriteSoulFile(base, soul).has_value());
+    const auto loaded = ReadSoulFile(base);
+    REQUIRE(loaded.has_value());
+    CHECK(*loaded == soul);
+    // WithSoul 注入前会过 StripPromptComments,两端空白(含这里文件天然带的
+    // 收尾换行)按设计一并剥掉——跟"法"文件(ResolvePersona)同一套规矩,
+    // 不是读回丢了内容。故这里拿掉两端空白后的版本去比对,不直接找带
+    // 收尾换行的原串。
+    CHECK(lubancode::agent::WithSoul("base prompt", *loaded)
+              .find(lubancode::agent::StripPromptComments(soul)) != std::string::npos);
+
+    REQUIRE(ClearSoulFile(base).has_value());
+    const auto cleared = ReadSoulFile(base);
+    REQUIRE(cleared.has_value());
+    CHECK(*cleared == DefaultSoulFileContent());
+}
+
+TEST_CASE("SOUL.md: 损坏或不可读时按无魂回退,不抛错") {
+    TempDir dir;
+    const std::filesystem::path base = dir.Path() / ".lubancode";
+    std::filesystem::create_directories(base);
+
+    // 非法 UTF-8 不传进系统提示;ReadSoulFile 返回空让启动方照常继续。
+    WriteAll(base / "SOUL.md", std::string("答", 3) + std::string("\xFF", 1));
+    CHECK_FALSE(ReadSoulFile(Utf8(base)).has_value());
+
+    std::filesystem::remove(base / "SOUL.md");
+    std::filesystem::create_directories(base / "SOUL.md");
+    CHECK_FALSE(ReadSoulFile(Utf8(base)).has_value());
 }
 
 TEST_CASE("SoulPathByName / 各路径拼接") {

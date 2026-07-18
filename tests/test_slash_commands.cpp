@@ -213,7 +213,9 @@ TEST_CASE("ParseSlashCommand: /soul 不带参数(0.16.x 魂法分家)") {
     CHECK(parsed.args.empty());
 }
 
-TEST_CASE("ParseSlashCommand: /soul 带名字/off/default 参数") {
+TEST_CASE("ParseSlashCommand: /soul 带内容、clear 和旧的名字/off/default 参数") {
+    CHECK(cli::ParseSlashCommand("/soul 答话短些").args == "答话短些");
+    CHECK(cli::ParseSlashCommand("/soul clear").args == "clear");
     CHECK(cli::ParseSlashCommand("/soul wenyan").args == "wenyan");
     CHECK(cli::ParseSlashCommand("/soul wenyan").command == cli::SlashCommand::Soul);
     CHECK(cli::ParseSlashCommand("/soul off").args == "off");

@@ -248,8 +248,9 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
 
 - 默认魂是 `~/.lubancode/SOUL.md`。它默认只有一行注释、内容空白（空白 = 无效果）；写上风格指令就生效。
 - 添加一个新魂：在 `~/.lubancode/souls/` 下建 `<名字>.md`，正文写风格指令。例如加"猫娘"魂就写 `souls/catgirl.md`，正文写清语气规则（顶部可用 `<!-- 注释 -->` 写给人看的说明，注入前会剥掉）。
-- 切换：交互里 `/soul <名字>`（即时生效，下一轮请求换新系统提示）；`/soul off` 本会话关魂；`/soul default` 回 SOUL.md；`/soul` 裸敲列全部可用魂。
-- 持久化：配置 `soul` 字段或 `LUBANCODE_SOUL` 环境变量填魂名（不带 `.md`）。
+- 看/设：`/soul` 看当前正文；`/soul <内容>` 会把内容写进 `SOUL.md`，当场生效，下次启动也会读回来；`/soul clear` 把它还原成默认空魂。
+- 切换：`/soul <名字>` 若恰好命中 `souls/` 下已有文件，仍会切到那一魂；`/soul off` 本会话关魂；`/soul default` 回 SOUL.md。
+- 持久化选魂：配置 `soul` 字段或 `LUBANCODE_SOUL` 环境变量可填魂名（不带 `.md`）。直接写/清 SOUL.md 时，已有配置文件会自动切回 `default`；环境变量仍按优先级压过配置。
 - 切魂后历史里的旧风格回答可能带偏几轮，`/clear` 立净。
 
 ## 提示词运行时模块(prompts/)
@@ -424,6 +425,53 @@ bool CreateNewFileWithContent(const fs::path& path, const std::string& content) 
 #endif
 }
 
+// SOUL.md 是给人写的 UTF-8 提示词。流读取并不检验编码,坏字节若直塞进
+// 请求有的后端会拒绝;这里收口,让调用方安静回退成无魂。
+bool IsValidUtf8(const std::string& text) {
+    for (std::size_t i = 0; i < text.size();) {
+        const unsigned char first = static_cast<unsigned char>(text[i]);
+        if (first <= 0x7f) {
+            ++i;
+            continue;
+        }
+
+        std::size_t tail_count = 0;
+        unsigned int code_point = 0;
+        unsigned int minimum = 0;
+        if ((first & 0xe0) == 0xc0) {
+            tail_count = 1;
+            code_point = first & 0x1f;
+            minimum = 0x80;
+        } else if ((first & 0xf0) == 0xe0) {
+            tail_count = 2;
+            code_point = first & 0x0f;
+            minimum = 0x800;
+        } else if ((first & 0xf8) == 0xf0) {
+            tail_count = 3;
+            code_point = first & 0x07;
+            minimum = 0x10000;
+        } else {
+            return false;
+        }
+        if (i + tail_count >= text.size()) {
+            return false;
+        }
+        for (std::size_t j = 1; j <= tail_count; ++j) {
+            const unsigned char tail = static_cast<unsigned char>(text[i + j]);
+            if ((tail & 0xc0) != 0x80) {
+                return false;
+            }
+            code_point = (code_point << 6) | (tail & 0x3f);
+        }
+        if (code_point < minimum || code_point > 0x10ffff ||
+            (code_point >= 0xd800 && code_point <= 0xdfff)) {
+            return false;
+        }
+        i += tail_count + 1;
+    }
+    return true;
+}
+
 }  // namespace
 
 std::string SystemPromptFilePath(const std::string& lubancode_dir) {
@@ -540,6 +588,42 @@ std::optional<std::string> ReadTextFileIfExists(const std::string& path) {
     std::ostringstream buffer;
     buffer << file.rdbuf();
     return buffer.str();
+}
+
+std::optional<std::string> ReadSoulFile(const std::string& lubancode_dir) {
+    if (lubancode_dir.empty()) {
+        return std::nullopt;
+    }
+    const auto content = ReadTextFileIfExists(SoulFilePath(lubancode_dir));
+    if (!content.has_value() || !IsValidUtf8(*content)) {
+        return std::nullopt;
+    }
+    return content;
+}
+
+std::expected<void, std::string> WriteSoulFile(const std::string& lubancode_dir, const std::string& content) {
+    if (lubancode_dir.empty()) {
+        return std::unexpected(std::string("找不到 .lubancode 目录,没法写 SOUL.md"));
+    }
+    if (!IsValidUtf8(content)) {
+        return std::unexpected(std::string("SOUL.md 内容不是有效 UTF-8"));
+    }
+
+    const fs::path base = Utf8Path(lubancode_dir);
+    std::error_code ec;
+    fs::create_directories(base, ec);
+    if (ec) {
+        return std::unexpected("建目录 " + PathToUtf8(base) + " 失败: " + ec.message());
+    }
+    const fs::path soul_path = base / "SOUL.md";
+    if (!WriteWholeFile(soul_path, content)) {
+        return std::unexpected("写 " + PathToUtf8(soul_path) + " 失败(检查一下权限)");
+    }
+    return {};
+}
+
+std::expected<void, std::string> ClearSoulFile(const std::string& lubancode_dir) {
+    return WriteSoulFile(lubancode_dir, DefaultSoulFileContent());
 }
 
 std::expected<std::string, std::string> ResetSystemPromptFile(const std::string& lubancode_dir,

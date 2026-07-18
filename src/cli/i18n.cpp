@@ -86,8 +86,8 @@ const Entry kZhCN[] = {
      "  /resume 编号或id  载入该场存档历史续聊(编号按本目录列表数)\n"
      "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md;全量流水,压缩点带标注)\n"
      "  /title [标题]   看/设本场会话标题,/sessions 列表和 /export 大标题都用它\n"
-     "  /soul           列出可用的魂;/soul 名字 切换风格叠加层(即时生效),/soul off 关,\n"
-     "                  /soul default 回 SOUL.md\n"
+     "  /soul           看当前魂;/soul 内容 写进 SOUL.md 并即时生效,/soul clear 清空还原默认\n"
+     "                  /soul 名字 仍可切换已有备选魂,/soul off 关,/soul default 回 SOUL.md\n"
      "  /prompt         看当前法(系统提示词)的来源和字数;/prompt reset 还原 system_prompt.md\n"
      "  Shift+Enter     输入框里插一个换行,写多行消息(Alt+Enter 同义;注意 Windows Terminal\n"
      "                  默认把 Alt+Enter 绑成全屏切换、会吞掉这个键,用 Shift+Enter 最稳);\n"
@@ -169,8 +169,8 @@ const Entry kZhCN[] = {
      "  /resume 编号或id  载入该场存档历史续聊(编号按本目录列表数),后续消息追加写回同一文件\n"
      "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md;全量流水,压缩点带标注)\n"
      "  /title [标题]   看/设本场会话标题,/sessions 列表和 /export 大标题都用它\n"
-     "  /soul           列出可用的魂;/soul 名字 切换(即时生效),/soul off 关,\n"
-     "                  /soul default 回 SOUL.md\n"
+     "  /soul           看当前魂;/soul 内容 写进 SOUL.md 并即时生效,/soul clear 清空还原默认\n"
+     "                  /soul 名字 仍可切换已有备选魂,/soul off 关,/soul default 回 SOUL.md\n"
      "  /prompt         看当前法(系统提示词)的来源和字数;/prompt reset 还原 system_prompt.md\n"
      "  /exit           退出(裸词 exit/quit 也认)\n"
      "多行输入:Shift+Enter 插换行(Alt+Enter 同义,但 Windows Terminal 默认把它绑成全屏\n"
@@ -252,7 +252,7 @@ const Entry kZhCN[] = {
     {"slash.desc.resume", "/resume 编号或id 载入该场存档历史续聊"},
     {"slash.desc.export", "当前会话导出 Markdown;/export 路径 可指定输出文件"},
     {"slash.desc.title", "看当前会话标题;/title 标题 给本场起名,/sessions 列表和导出都用它"},
-    {"slash.desc.soul", "列出可用的魂;/soul 名字 切换风格叠加层,/soul off 关,/soul default 回 SOUL.md"},
+    {"slash.desc.soul", "看当前魂;/soul 内容 写进 SOUL.md,/soul clear 还原默认；名字仍可切换备选魂"},
     {"slash.desc.prompt", "看当前法(系统提示词)的来源和字数;/prompt reset 还原 system_prompt.md"},
 
     // ---- /language ----
@@ -456,17 +456,20 @@ const Entry kZhCN[] = {
     {"cmd.session_only", "当前没有生效的配置文件,只在本会话生效。"},
 
     // ---- /soul、/prompt ----
-    {"soul.not_found", "[soul] 找不到 {0},魂不生效。"},
+    {"soul.unavailable", "[soul] 无法读取 {0},已按无魂运行。"},
     {"cmd.soul.no_home", "找不到用户主目录,魂文件没处安身,/soul 用不了。"},
-    {"cmd.soul.list_header", "可用的魂(风格叠加层,注入在系统提示最后):"},
+    {"cmd.soul.available_header", "可选旧魂(输入名字切换):"},
     {"cmd.soul.default_item", "  - default(主目录 SOUL.md)"},
     {"cmd.soul.current", "当前生效: {0}"},
     {"cmd.soul.empty_note", "(内容空白,无效果)"},
-    {"cmd.soul.usage", "用法:/soul 名字 切换;/soul off 本会话关魂;/soul default 回 SOUL.md。"},
+    {"cmd.soul.usage", "用法:/soul 看当前;/soul 内容 写进 SOUL.md;/soul clear 还原默认。"},
     {"cmd.soul.off", "魂已关(本会话生效,下一轮请求换新系统提示)。"},
     {"cmd.soul.back_default", "已切回 SOUL.md"},
-    {"cmd.soul.missing", "找不到魂 {0}({1})。/soul 裸敲能看可用列表。"},
     {"cmd.soul.switched", "已切换魂: {0}(本会话即时生效,下一轮请求换新系统提示)"},
+    {"cmd.soul.saved", "魂已写进 SOUL.md,本会话和下次启动都生效。"},
+    {"cmd.soul.cleared", "SOUL.md 已还原默认,魂已清空。"},
+    {"cmd.soul.write_failed", "写 SOUL.md 失败: {0}"},
+    {"cmd.soul.default_config_failed", "SOUL.md 已写好,但没能把配置切回 default: {0}"},
     {"cmd.soul.switch_hint", "提示:历史里的旧风格回答可能带偏几轮,/clear 立净。"},
     {"cmd.soul.write_prompt", "写进配置? [y/N]: "},
     {"cmd.prompt.info",
@@ -617,8 +620,8 @@ const Entry kEn[] = {
      "  /resume <n|id>  load a session archive and continue chatting\n"
      "  /export [path]  export the current session as Markdown (default sessions/<id>.md)\n"
      "  /title [title]  show/set the session title, used by /sessions and /export\n"
-     "  /soul           list souls; /soul <name> switches the style overlay, /soul off disables,\n"
-     "                  /soul default returns to SOUL.md\n"
+     "  /soul           show the current soul; /soul <text> writes SOUL.md and takes effect now;\n"
+     "                  /soul clear restores its default; an existing soul name still switches it\n"
      "  /prompt         show the source and length of the current system prompt persona;\n"
      "                  /prompt reset restores system_prompt.md\n"
      "  Shift+Enter     insert a newline in the input box (Alt+Enter works too, but Windows Terminal\n"
@@ -704,8 +707,8 @@ const Entry kEn[] = {
      "  /resume <n|id>  load a session archive and continue; new messages append to the same file\n"
      "  /export [path]  export this session as Markdown (default sessions/<id>.md)\n"
      "  /title [title]  show/set the session title, used by /sessions and /export\n"
-     "  /soul           list souls; /soul <name> switches (instant), /soul off disables,\n"
-     "                  /soul default returns to SOUL.md\n"
+     "  /soul           show the current soul; /soul <text> writes SOUL.md and takes effect now;\n"
+     "                  /soul clear restores default; an existing soul name still switches it\n"
      "  /prompt         show the persona source and length; /prompt reset restores system_prompt.md\n"
      "  /exit           quit (bare exit/quit work too)\n"
      "Multi-line input: Shift+Enter inserts a newline (Alt+Enter too, but Windows Terminal may\n"
@@ -787,7 +790,7 @@ const Entry kEn[] = {
     {"slash.desc.resume", "/resume <n|id> loads a session archive and continues"},
     {"slash.desc.export", "export this session as Markdown; /export <path> picks the output file"},
     {"slash.desc.title", "show the session title; /title <title> names this session"},
-    {"slash.desc.soul", "list souls; /soul <name> switches the style overlay, /soul off disables"},
+    {"slash.desc.soul", "show the current soul; /soul <text> writes SOUL.md; /soul clear restores default"},
     {"slash.desc.prompt", "show the persona source/length; /prompt reset restores system_prompt.md"},
 
     // ---- /language ----
@@ -797,6 +800,24 @@ const Entry kEn[] = {
     {"cmd.language.switched", "Language switched to {0} (effective immediately, this session)"},
     {"cmd.language.unknown", "Unknown language {0} (run /language to list options)."},
     {"cmd.language.bad_number", "Invalid number; switch cancelled."},
+
+    // ---- /soul ----
+    {"soul.unavailable", "[soul] Could not read {0}; continuing without a soul."},
+    {"cmd.soul.no_home", "Could not find the home directory; /soul has nowhere to store its file."},
+    {"cmd.soul.available_header", "Available legacy souls (enter a name to switch):"},
+    {"cmd.soul.default_item", "  - default (home SOUL.md)"},
+    {"cmd.soul.current", "Currently active: {0}"},
+    {"cmd.soul.empty_note", "(empty; no effect)"},
+    {"cmd.soul.usage", "Usage: /soul shows it; /soul <text> writes SOUL.md; /soul clear restores default."},
+    {"cmd.soul.off", "Soul disabled for this session; the next request uses the new system prompt."},
+    {"cmd.soul.back_default", "Switched back to SOUL.md"},
+    {"cmd.soul.switched", "Soul switched to {0}; the next request uses the new system prompt."},
+    {"cmd.soul.saved", "Soul saved to SOUL.md; it is active now and after restart."},
+    {"cmd.soul.cleared", "SOUL.md restored to its default; soul cleared."},
+    {"cmd.soul.write_failed", "Could not write SOUL.md: {0}"},
+    {"cmd.soul.default_config_failed", "SOUL.md was written, but the config could not switch back to default: {0}"},
+    {"cmd.soul.switch_hint", "Earlier replies may keep the old style for a few turns; /clear removes that history."},
+    {"cmd.soul.write_prompt", "Save to config? [y/N]: "},
 
     // ---- /config diagnostics ----
     {"config.header", "Effective lubancode configuration:"},
@@ -886,7 +907,7 @@ const Entry kEn[] = {
     // TODO(P1):以下 zh-CN 键暂缺英文翻译,tr 回退 zh-CN——诚实回退,不机翻凑数:
     //   mcp.* / plugin.* / tool_search.* / catalog.* / cmd.tools.* / cmd.plugins.* /
     //   cmd.mcp.* / cmd.lsp.* / cmd.skills.* / cmd.context.* / cmd.compact.* / compact.* /
-    //   cmd.think.* / cmd.model.* / cmd.write_config* / cmd.session_only / soul.* / cmd.soul.* /
+    //   cmd.think.* / cmd.model.* / cmd.write_config* / cmd.session_only /
     //   cmd.prompt.* / law.* / resetprompt.* / session.* / cmd.sessions.* / cmd.resume.* /
     //   cmd.export.* / cmd.title.* / cmd.clear.* / ui.* / diff.* / settings.local.*
 };
