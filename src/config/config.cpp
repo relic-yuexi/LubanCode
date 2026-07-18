@@ -14,43 +14,22 @@
 // i18n:cli/i18n 是零依赖的叶子字符串表(只用标准库 + json),config 层引它
 // 不构成反向依赖——它不牵扯 cli 的任何交互逻辑。
 #include "cli/i18n.hpp"
+#include "platform/paths.hpp"
 
 namespace lubancode::config {
 
 namespace {
 
-// 读一个环境变量;没设置或者是空串都算"没有"。
+// 读一个环境变量;没设置或者是空串都算"没有"。跨平台单起委托 platform 层
+// (Windows _dupenv_s / POSIX getenv 的分支收拢在那边)。
 std::optional<std::string> GetEnv(const char* name) {
-#ifdef _WIN32
-    char* buffer = nullptr;
-    std::size_t size = 0;
-    const errno_t err = _dupenv_s(&buffer, &size, name);
-    if (err != 0 || buffer == nullptr) {
-        return std::nullopt;
-    }
-    std::string value(buffer);
-    std::free(buffer);
-    if (value.empty()) {
-        return std::nullopt;
-    }
-    return value;
-#else
-    const char* value = std::getenv(name);
-    if (value == nullptr || value[0] == '\0') {
-        return std::nullopt;
-    }
-    return std::string(value);
-#endif
+    return platform::GetEnvVar(name);
 }
 
 }  // namespace
 
 std::optional<std::string> HomeDir() {
-#ifdef _WIN32
-    return GetEnv("USERPROFILE");
-#else
-    return GetEnv("HOME");
-#endif
+    return platform::HomeDir();
 }
 
 std::optional<std::string> HomeLubancodeDir() {

@@ -1,6 +1,9 @@
 // LSP stdio 传输层。跟 mcp/transport.hpp 是同一个路数——起一个双向管道的
 // 长命子进程,stdin 能一直写、stdout 能一直读——但这里是 lsp/ 自己的一份
-// 独立实现,不 include mcp/ 的任何东西(mcp/ 归别的分支管,两边各养各的)。
+// 独立传输层,不 include mcp/ 的任何东西(mcp/ 归别的分支管,两边各养
+// 各的)。跨平台单(v0.20.x)起,起进程/管道/杀树那套 Win32 代码搬去了
+// platform::ChildProcess(POSIX 同接口),两边真正共用的只有那一层;分帧
+// 依旧各是各的。
 //
 // 分帧跟 MCP 的"一行一条"不一样:LSP 用 HTTP 风格的头部分帧,
 //   Content-Length: N\r\n
@@ -16,19 +19,14 @@
 // Transport,专门验证请求-响应配对和诊断缓存逻辑,不用真起子进程。
 #pragma once
 
-#include <atomic>
 #include <cstddef>
 #include <functional>
 #include <mutex>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#endif
+#include "platform/process.hpp"
 
 namespace lubancode::lsp {
 
@@ -53,12 +51,10 @@ struct TransportStartResult {
     std::string error;
 };
 
-#ifdef _WIN32
-
-// Windows 下长命子进程的双向管道传输:stdin 可写(带 Content-Length 头)、
-// stdout 可读(按头分帧,逐条喂给 on_message 回调),stderr 单独捕获进一个
-// 环形日志缓冲(出错时给人看,不跟 stdout 混在一起,免得污染 JSON-RPC
-// 消息流)。
+// 长命子进程的双向管道传输:stdin 可写(带 Content-Length 头)、stdout
+// 可读(按头分帧,逐条喂给 on_message 回调),stderr 单独捕获进一个环形
+// 日志缓冲(出错时给人看,不跟 stdout 混在一起,免得污染 JSON-RPC 消息
+// 流)。进程本体是 platform::ChildProcess(两平台同实现)。
 class StdioTransport {
 public:
     StdioTransport() = default;
@@ -78,57 +74,24 @@ public:
     bool WriteMessage(const std::string& body);
 
     // 关停:先关 stdin(协议层的 shutdown/exit 该发的已经发过了,关掉写端
-    // 等于再补一个 EOF),等 wait_ms 毫秒;还没退出就用 Job Object 把整棵
-    // 进程树杀掉。幂等,重复调用/析构时再调都安全。
+    // 等于再补一个 EOF),等 wait_ms 毫秒;还没退出就把整棵进程树杀掉。
+    // 幂等,重复调用/析构时再调都安全。
     void Shutdown(int wait_ms = 2000);
 
-    // 进程是否还活着(GetExitCodeProcess 查 STILL_ACTIVE)。
+    // 进程是否还活着。
     bool IsAlive() const;
 
     // stderr 捕获到的内容,最近若干字节(诊断/报错用)。
     std::string StderrTail() const;
 
 private:
-    void StdoutReaderThread();
-    void StderrReaderThread();
-    void JoinReaderThreads();
-
     std::function<void(std::string)> on_message_;
     ContentLengthFramer framer_;
 
-    std::mutex write_mutex_;
     mutable std::mutex stderr_mutex_;
     std::string stderr_buffer_;
 
-    HANDLE process_ = nullptr;
-    HANDLE job_ = nullptr;
-    HANDLE stdin_write_ = nullptr;
-    HANDLE stdout_read_ = nullptr;
-    HANDLE stderr_read_ = nullptr;
-
-    std::thread stdout_thread_;
-    std::thread stderr_thread_;
-
-    std::atomic<bool> started_{false};
-    std::atomic<bool> shutdown_done_{false};
+    platform::ChildProcess child_;
 };
-
-#else
-
-// 非 Windows 平台没实现,Start() 直接返回失败——上层(lsp::Manager)按
-// "这个服务器起不来"处理,报可读错误,不阻塞会话。
-class StdioTransport {
-public:
-    TransportStartResult Start(const std::string&, const std::vector<std::string>&,
-                                std::function<void(std::string)>) {
-        return TransportStartResult{false, "LSP StdioTransport 眼下只实现了 Windows"};
-    }
-    bool WriteMessage(const std::string&) { return false; }
-    void Shutdown(int = 2000) {}
-    bool IsAlive() const { return false; }
-    std::string StderrTail() const { return std::string(); }
-};
-
-#endif
 
 }  // namespace lubancode::lsp

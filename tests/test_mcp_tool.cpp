@@ -69,8 +69,8 @@ TEST_CASE("McpTool: needs_confirm() 恒为 true——外部代码,哪怕 Auto �
 }
 
 TEST_CASE("McpTool: execute() 真的转发到 Client::CallTool,参数和结果原样传递") {
-    mcp::Client client("srv");
     FakeTransport transport;
+    mcp::Client client("srv");
     client.AttachTransportForTest(&transport);
 
     nlohmann::json captured_params;

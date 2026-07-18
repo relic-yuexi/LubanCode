@@ -1,7 +1,7 @@
 // M9:hooks 系统——config.json 里配的外部命令,在工具调用前后、会话开始
 // 结束时跑一下。跟 run_command 工具是两回事:这里不经用户确认,也不走
-// PowerShell(直接扔给 cmd.exe),复用的只是起子进程这一层机制(见
-// tools/process_exec.hpp)。
+// PowerShell(直接扔给平台默认 shell:Windows cmd.exe / POSIX /bin/sh),
+// 复用的只是起子进程这一层机制(见 platform/process.hpp)。
 //
 // 语义(实现前 main.cpp/loop.cpp 那份 M9 任务书里定下来的):
 //   pre_tool  —— 命中的钩子只要有一条退出码非零,就拦截:那次工具调用

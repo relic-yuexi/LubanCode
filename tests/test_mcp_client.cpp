@@ -25,6 +25,11 @@ namespace {
 // 协议层看到的传输层就是 mcp::Transport 这个抽象接口——FakeTransport 只管
 // 记下写出去的每一行,真正的"服务器响应"由测试代码手动调 client.OnLine()
 // 模拟,不真起任何进程。
+//
+// 注意 FakeTransport 一律声明在 Client 之前(跟 test_lsp_client.cpp 同一条
+// 规矩):Client 析构时还会摸一把 transport_->Shutdown(),声明反了就是对
+// 已析构对象调虚函数——MSVC 下侥幸没炸,g++(Linux)下 "pure virtual
+// method called" 直接 SIGABRT,跨平台单在 WSL 上真机跑测揪出来的。
 class FakeTransport : public mcp::Transport {
 public:
     std::function<void(const std::string&)> on_write;
@@ -48,8 +53,8 @@ public:
 // ---------------------------------------------------------------------------
 
 TEST_CASE("Client: id 配对——写出去的请求带 id,响应带同样的 id 就能配对成功") {
-    mcp::Client client("test");
     FakeTransport transport;
+    mcp::Client client("test");
     client.AttachTransportForTest(&transport);
 
     transport.on_write = [&](const std::string& line) {
@@ -71,8 +76,8 @@ TEST_CASE("Client: id 配对——写出去的请求带 id,响应带同样的 id
 }
 
 TEST_CASE("Client: 两个并发请求乱序响应,各自按 id 配对到正确的结果") {
-    mcp::Client client("test");
     FakeTransport transport;
+    mcp::Client client("test");
     client.AttachTransportForTest(&transport);
 
     std::mutex req_mutex;
@@ -135,9 +140,9 @@ TEST_CASE("Client: 两个并发请求乱序响应,各自按 id 配对到正确�
 }
 
 TEST_CASE("Client: 服务器一直不回应,等到超时,is_error 结果里说明超时") {
+    FakeTransport transport;
     mcp::Client client("test");
     client.SetTimeoutsForTest(/*default_timeout_ms=*/50, /*tool_call_timeout_ms=*/50);
-    FakeTransport transport;
     client.AttachTransportForTest(&transport);
     // on_write 不设,永远不回应。
 
@@ -151,9 +156,9 @@ TEST_CASE("Client: 服务器一直不回应,等到超时,is_error 结果里说�
 }
 
 TEST_CASE("Client: 进程在等待响应期间死掉,is_error 结果里说明进程已退出") {
+    FakeTransport transport;
     mcp::Client client("test");
     client.SetTimeoutsForTest(/*default_timeout_ms=*/5000, /*tool_call_timeout_ms=*/5000);
-    FakeTransport transport;
     client.AttachTransportForTest(&transport);
 
     transport.on_write = [&](const std::string&) {
@@ -175,9 +180,9 @@ TEST_CASE("Client: 进程在等待响应期间死掉,is_error 结果里说明进
 }
 
 TEST_CASE("Client: OnLine 收到 id 类型不对/字段类型不对的行,不崩、不影响后续配对") {
+    FakeTransport transport;
     mcp::Client client("test");
     client.SetTimeoutsForTest(/*default_timeout_ms=*/300, /*tool_call_timeout_ms=*/300);
-    FakeTransport transport;
     client.AttachTransportForTest(&transport);
 
     // 这些行以前会让 OnLine 在读线程上抛 type_error → std::terminate 全程序暴毙。
@@ -201,8 +206,8 @@ TEST_CASE("Client: OnLine 收到 id 类型不对/字段类型不对的行,不崩
 }
 
 TEST_CASE("Client: tools/call 响应字段类型不对(isError 是字符串),不崩,翻译成 is_error 结果") {
-    mcp::Client client("test");
     FakeTransport transport;
+    mcp::Client client("test");
     client.AttachTransportForTest(&transport);
 
     transport.on_write = [&](const std::string& line) {
@@ -223,8 +228,8 @@ TEST_CASE("Client: tools/call 响应字段类型不对(isError 是字符串),不
 }
 
 TEST_CASE("Client: 响应里带 error 字段,翻译成可读的失败结果") {
-    mcp::Client client("test");
     FakeTransport transport;
+    mcp::Client client("test");
     client.AttachTransportForTest(&transport);
 
     transport.on_write = [&](const std::string& line) {
@@ -241,8 +246,8 @@ TEST_CASE("Client: 响应里带 error 字段,翻译成可读的失败结果") {
 }
 
 TEST_CASE("Client: CallTool 把多个 text 内容块拼接起来,isError=true 映射到 Result::is_error") {
-    mcp::Client client("test");
     FakeTransport transport;
+    mcp::Client client("test");
     client.AttachTransportForTest(&transport);
 
     transport.on_write = [&](const std::string& line) {
@@ -263,8 +268,8 @@ TEST_CASE("Client: CallTool 把多个 text 内容块拼接起来,isError=true �
 }
 
 TEST_CASE("Client: 非 text 内容块变成不支持提示占位符") {
-    mcp::Client client("test");
     FakeTransport transport;
+    mcp::Client client("test");
     client.AttachTransportForTest(&transport);
 
     transport.on_write = [&](const std::string& line) {
@@ -283,8 +288,8 @@ TEST_CASE("Client: 非 text 内容块变成不支持提示占位符") {
 }
 
 TEST_CASE("Client: Initialize 握手成功后会发一条 notifications/initialized 通知(无 id)") {
-    mcp::Client client("test");
     FakeTransport transport;
+    mcp::Client client("test");
     client.AttachTransportForTest(&transport);
 
     std::vector<nlohmann::json> written;
@@ -309,19 +314,26 @@ TEST_CASE("Client: Initialize 握手成功后会发一条 notifications/initiali
 
 // ---------------------------------------------------------------------------
 // 2) 真正的夹具:起 tests/fixtures/mcp_test_server.py,走完整流程。
-//    只在 Windows 下跑(StdioTransport 眼下只实现了 Windows)。
+//    两平台都跑(StdioTransport 底下是 platform::ChildProcess,跨平台单
+//    起两平台同实现;跑不了的环境缺的是 python,不是平台)。
 // ---------------------------------------------------------------------------
-
-#ifdef _WIN32
 
 #ifndef LUBANCODE_TEST_FIXTURES_DIR
 #define LUBANCODE_TEST_FIXTURES_DIR "."
 #endif
 
+// 真夹具用哪个 python:Windows 装的是 python.exe,Linux/macOS 发行版惯例
+// 是 python3(裸 python 常常不存在)。
+#ifdef _WIN32
+constexpr const char* kPythonCmd = "python";
+#else
+constexpr const char* kPythonCmd = "python3";
+#endif
+
 TEST_CASE("Client + 真实 Python 夹具:握手 + tools/list + tools/call(echo/add) + 未知工具报错 + 干净关停") {
     mcp::Client client("test");
     const std::string script = std::string(LUBANCODE_TEST_FIXTURES_DIR) + "/mcp_test_server.py";
-    const auto start_result = client.StartProcess("python", {script}, {});
+    const auto start_result = client.StartProcess(kPythonCmd, {script}, {});
     REQUIRE_MESSAGE(start_result.success, start_result.error);
 
     const auto init_result = client.Initialize();
@@ -357,7 +369,7 @@ TEST_CASE("Client + 真实 Python 夹具:握手 + tools/list + tools/call(echo/a
 TEST_CASE("Client + 真实 Python 夹具:坏响应模式(tools/call 字段类型全错)不崩,报可读错") {
     mcp::Client client("test");
     const std::string script = std::string(LUBANCODE_TEST_FIXTURES_DIR) + "/mcp_test_server.py";
-    const auto start_result = client.StartProcess("python", {script, "--bad-tools-call"}, {});
+    const auto start_result = client.StartProcess(kPythonCmd, {script, "--bad-tools-call"}, {});
     REQUIRE_MESSAGE(start_result.success, start_result.error);
 
     const auto init_result = client.Initialize();
@@ -374,7 +386,7 @@ TEST_CASE("Client + 真实 Python 夹具:坏响应模式(tools/call 字段类型
 TEST_CASE("Client + 真实 Python 夹具:服务器在 tools/call 等待期间死掉,快速失败(<5s)") {
     mcp::Client client("test");
     const std::string script = std::string(LUBANCODE_TEST_FIXTURES_DIR) + "/mcp_test_server.py";
-    const auto start_result = client.StartProcess("python", {script}, {});
+    const auto start_result = client.StartProcess(kPythonCmd, {script}, {});
     REQUIRE_MESSAGE(start_result.success, start_result.error);
 
     const auto init_result = client.Initialize();
@@ -393,4 +405,3 @@ TEST_CASE("Client + 真实 Python 夹具:服务器在 tools/call 等待期间死
     client.Shutdown();
 }
 
-#endif  // _WIN32

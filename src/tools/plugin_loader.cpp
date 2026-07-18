@@ -14,7 +14,9 @@ namespace lubancode::tools {
 namespace {
 
 // std::filesystem::path -> UTF-8 字符串(跟 main.cpp 的 CurrentDirUtf8 同款)。
-std::string PathToUtf8(const std::filesystem::path& path) {
+// 只有 Windows 的 DLL 扫描分支用到;POSIX 下动态库插件未实现(见
+// LoadDirectory),maybe_unused 免得 g++ -Wall 报 unused-function。
+[[maybe_unused]] std::string PathToUtf8(const std::filesystem::path& path) {
     const std::u8string u8 = path.u8string();
     return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
 }

@@ -138,7 +138,11 @@ TEST_CASE("run_command: 中文输出不乱码") {
 TEST_CASE("run_command: 超时会被强制终止,不会真的等满") {
     RunCommandTool tool;
     nlohmann::json input;
+#ifdef _WIN32
     input["command"] = "Start-Sleep -Seconds 20";
+#else
+    input["command"] = "sleep 20";
+#endif
     input["timeout_ms"] = 800;
 
     const auto started = std::chrono::steady_clock::now();
@@ -169,6 +173,35 @@ TEST_CASE("run_command: shell 参数写了不认得的值,报错不崩") {
     CHECK(result.is_error);
     CHECK(result.content.find("shell") != std::string::npos);
 }
+
+#ifndef _WIN32
+
+TEST_CASE("run_command(POSIX): shell=powershell/cmd 明说不支持,不悄悄换 shell") {
+    RunCommandTool tool;
+    for (const char* shell : {"powershell", "cmd"}) {
+        nlohmann::json input;
+        input["command"] = "echo hi";
+        input["shell"] = shell;
+        const Tool::Result result = tool.execute(input);
+        CHECK(result.is_error);
+        CHECK(result.content.find("Windows") != std::string::npos);
+    }
+}
+
+TEST_CASE("run_command(POSIX): shell=sh 显式指定,照常执行") {
+    RunCommandTool tool;
+    nlohmann::json input;
+    input["command"] = "echo hello-from-sh-test";
+    input["shell"] = "sh";
+    const Tool::Result result = tool.execute(input);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("hello-from-sh-test") != std::string::npos);
+    CHECK(result.content.find("[退出码 0]") != std::string::npos);
+}
+
+#endif  // !_WIN32
+
+#ifdef _WIN32
 
 TEST_CASE("run_command: shell=cmd,跑 echo,拿到输出和退出码 0") {
     RunCommandTool tool;
@@ -204,11 +237,13 @@ TEST_CASE("run_command: shell=cmd,非零退出码,is_error 置位") {
     CHECK(result.content.find("3") != std::string::npos);
 }
 
+#endif  // _WIN32
+
 // ---------------------------------------------------------------------------
 // 0.13.1 加固:参数类型校验、读取/输出上限
 // ---------------------------------------------------------------------------
 
-#include "tools/process_exec.hpp"
+#include "platform/process.hpp"
 
 TEST_CASE("run_command: timeout_ms 传成字符串,返回 is_error,不抛异常") {
     RunCommandTool tool;
@@ -291,18 +326,25 @@ TEST_CASE("read_file: 刚好读到文件末尾,不标注截断") {
     CHECK(result.content.find("[内容过长已截断") == std::string::npos);
 }
 
+TEST_CASE("RunProcess: 输出超上限被截断,进程连进程树一起被杀,按时返回") {
+    using lubancode::platform::ProcessResult;
+    using lubancode::platform::RunProcess;
+
 #ifdef _WIN32
-
-TEST_CASE("RunProcess: 输出超上限被截断,进程连 Job 一起被杀,按时返回") {
-    using lubancode::tools::BuildCmdCommandLine;
-    using lubancode::tools::ProcessResult;
-    using lubancode::tools::RunProcess;
-
     // cmd 的无限循环狂写输出;上限压到 16KB,几乎立刻触发。
-    const std::wstring cmdline = BuildCmdCommandLine("for /L %i in (1,0,2) do @echo 0123456789012345678901234567890123456789");
+    const std::wstring cmdline = lubancode::platform::BuildCmdCommandLine(
+        "for /L %i in (1,0,2) do @echo 0123456789012345678901234567890123456789");
 
     const auto started = std::chrono::steady_clock::now();
     const ProcessResult proc = RunProcess(cmdline, /*timeout_ms=*/60000, {}, /*max_output_bytes=*/16 * 1024);
+#else
+    // sh 的无限循环狂写输出;走可移植的 argv 入口。
+    const std::vector<std::string> argv = {
+        "/bin/sh", "-c", "while :; do echo 0123456789012345678901234567890123456789; done"};
+
+    const auto started = std::chrono::steady_clock::now();
+    const ProcessResult proc = RunProcess(argv, /*timeout_ms=*/60000, {}, /*max_output_bytes=*/16 * 1024);
+#endif
     const auto elapsed = std::chrono::steady_clock::now() - started;
 
     CHECK_FALSE(proc.spawn_failed);
@@ -317,8 +359,13 @@ TEST_CASE("RunProcess: 输出超上限被截断,进程连 Job 一起被杀,按�
 TEST_CASE("run_command: 海量输出被截断并标注,不吃光内存") {
     RunCommandTool tool;
     nlohmann::json input;
+#ifdef _WIN32
     // PowerShell 一口气吐 ~6MB(超过 2MB 上限)。
     input["command"] = "1..200000 | ForEach-Object { '0123456789012345678901234567890' }";
+#else
+    // sh 一口气吐 ~6.4MB(超过 2MB 上限)。
+    input["command"] = "i=0; while [ $i -lt 200000 ]; do echo 0123456789012345678901234567890; i=$((i+1)); done";
+#endif
     input["timeout_ms"] = 90000;
 
     const Tool::Result result = tool.execute(input);
@@ -327,5 +374,3 @@ TEST_CASE("run_command: 海量输出被截断并标注,不吃光内存") {
     // 截断在 2MB 上限附近,不会整整 6MB 全吞进来。
     CHECK(result.content.size() <= 2 * 1024 * 1024 + 4096);
 }
-
-#endif  // _WIN32

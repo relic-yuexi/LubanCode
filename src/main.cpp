@@ -74,13 +74,11 @@
 #include "tools/web_search.hpp"
 #include "tools/write_file.hpp"
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-// windows.h 的 max/min 宏会跟 <algorithm> 的 std::max/std::min 撞车(UI-B
-// 的锚点记账用到了 std::max),NOMINMAX 关掉,跟 console_input.cpp 一个规矩。
-#define NOMINMAX
-#include <windows.h>
-#endif
+// 跨平台单(v0.20.x):windows.h 不再进 main.cpp——控制台原语(屏幕信息/
+// 光标/清行/UTF-8 代码页)、宽窄转换全走 platform/,#ifdef 只剩文件末尾
+// wmain/main 入口那一处。
+#include "platform/console.hpp"
+#include "platform/paths.hpp"
 
 namespace {
 
@@ -795,36 +793,38 @@ public:
             return;
         }
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-#ifdef _WIN32
-        const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
-        CONSOLE_SCREEN_BUFFER_INFO info{};
         const std::string text = Render(item);
-        if (!GetConsoleScreenBufferInfo(h_out, &info)) {
+        if (!screen_) {
+            // 原地改写在这个平台上不开(见 platform::SupportsScreenRepaint):
+            // 退化成顺序打印,信息不丢。
             std::cout << "\n" << text;
             std::cout.flush();
             return;
         }
-        if (info.dwCursorPosition.X > 0) {
+        std::optional<lubancode::platform::ScreenInfo> info = lubancode::platform::GetScreenInfo();
+        if (!info.has_value()) {
+            std::cout << "\n" << text;
+            std::cout.flush();
+            return;
+        }
+        if (info->cursor_x > 0) {
             std::cout << "\n";  // 流式正文多半没换行收尾,先把光标归位到行首
         }
         std::cout << "\n";  // 空行分隔
         std::cout.flush();
-        if (!GetConsoleScreenBufferInfo(h_out, &info)) {
+        info = lubancode::platform::GetScreenInfo();
+        if (!info.has_value()) {
             std::cout << text;
             std::cout.flush();
             return;
         }
-        int start_row = info.dwCursorPosition.Y;
+        int start_row = info->cursor_y;
         const int rows = lubancode::cli::CountLines(text);
-        EnsureRoom(h_out, start_row, rows);
-        SetConsoleCursorPosition(h_out, COORD{0, static_cast<SHORT>(start_row)});
+        EnsureRoom(start_row, rows);
+        lubancode::platform::SetCursorPos(0, start_row);
         std::cout << text;
         std::cout.flush();
         anchors_.push_back(Anchor{item.id, start_row, rows});
-#else
-        std::cout << "\n" << Render(item);
-        std::cout.flush();
-#endif
     }
 
     // 原地改写一个已登记的条目(执行中 -> 待确认 -> 终态)。
@@ -833,25 +833,28 @@ public:
             return;
         }
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-#ifdef _WIN32
+        if (!screen_) {
+            std::cout << Render(item);
+            std::cout.flush();
+            return;
+        }
         Anchor* anchor = Find(item.id);
         if (anchor == nullptr) {
             return;
         }
-        const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
-        CONSOLE_SCREEN_BUFFER_INFO info{};
-        if (!GetConsoleScreenBufferInfo(h_out, &info)) {
+        const std::optional<lubancode::platform::ScreenInfo> info = lubancode::platform::GetScreenInfo();
+        if (!info.has_value()) {
             return;
         }
-        const SHORT buffer_width = info.dwSize.X;
-        const COORD saved_cursor = info.dwCursorPosition;
+        const int buffer_width = info->width;
+        const int saved_cursor_x = info->cursor_x;
+        const int saved_cursor_y = info->cursor_y;
         std::string text = Render(item);
         int new_rows = lubancode::cli::CountLines(text);
 
         // 条目是不是屏幕上最后的内容(光标正停在条目下一行行首)。不是的话
         // 不能长高——往下多画会盖住垫在下面的输出,只能砍到原有行数。
-        const bool at_tail =
-            saved_cursor.X == 0 && static_cast<int>(saved_cursor.Y) == anchor->start_row + anchor->rows;
+        const bool at_tail = saved_cursor_x == 0 && saved_cursor_y == anchor->start_row + anchor->rows;
         if (!at_tail && new_rows > anchor->rows) {
             text = FirstNLines(text, anchor->rows);
             new_rows = anchor->rows;
@@ -860,24 +863,18 @@ public:
         const int rows_to_clear = (std::max)(anchor->rows, new_rows);
         if (at_tail) {
             int start_row = anchor->start_row;
-            EnsureRoom(h_out, start_row, rows_to_clear);  // 里头会同步平移所有锚点
+            EnsureRoom(start_row, rows_to_clear);  // 里头会同步平移所有锚点
         }
-        DWORD written = 0;
         for (int r = 0; r < rows_to_clear; ++r) {
-            const COORD row_pos{0, static_cast<SHORT>(anchor->start_row + r)};
-            FillConsoleOutputCharacterW(h_out, L' ', static_cast<DWORD>(buffer_width), row_pos, &written);
+            lubancode::platform::ClearRowFrom(0, anchor->start_row + r, buffer_width);
         }
-        SetConsoleCursorPosition(h_out, COORD{0, static_cast<SHORT>(anchor->start_row)});
+        lubancode::platform::SetCursorPos(0, anchor->start_row);
         std::cout << text;
         std::cout.flush();
         anchor->rows = new_rows;
         if (!at_tail) {
-            SetConsoleCursorPosition(h_out, saved_cursor);  // 下面还垫着别的内容,光标放回去
+            lubancode::platform::SetCursorPos(saved_cursor_x, saved_cursor_y);  // 下面还垫着别的内容,光标放回去
         }
-#else
-        std::cout << Render(item);
-        std::cout.flush();
-#endif
     }
 
     // 把条目末尾到当前光标之间的行全部擦掉、光标回到条目末尾——确认交互块
@@ -888,27 +885,25 @@ public:
             return;
         }
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-#ifdef _WIN32
+        if (!screen_) {
+            return;  // 原地改写不开的平台上,确认块留在滚动历史里,不擦
+        }
         Anchor* anchor = Find(item_id);
         if (anchor == nullptr) {
             return;
         }
-        const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
-        CONSOLE_SCREEN_BUFFER_INFO info{};
-        if (!GetConsoleScreenBufferInfo(h_out, &info)) {
+        const std::optional<lubancode::platform::ScreenInfo> info = lubancode::platform::GetScreenInfo();
+        if (!info.has_value()) {
             return;
         }
         const int end_row = anchor->start_row + anchor->rows;
-        if (static_cast<int>(info.dwCursorPosition.Y) < end_row) {
+        if (info->cursor_y < end_row) {
             return;
         }
-        DWORD written = 0;
-        for (int r = end_row; r <= static_cast<int>(info.dwCursorPosition.Y); ++r) {
-            const COORD row_pos{0, static_cast<SHORT>(r)};
-            FillConsoleOutputCharacterW(h_out, L' ', static_cast<DWORD>(info.dwSize.X), row_pos, &written);
+        for (int r = end_row; r <= info->cursor_y; ++r) {
+            lubancode::platform::ClearRowFrom(0, r, info->width);
         }
-        SetConsoleCursorPosition(h_out, COORD{0, static_cast<SHORT>(end_row)});
-#endif
+        lubancode::platform::SetCursorPos(0, end_row);
     }
 
     // 在缓冲区底部预留 rows 行(必要时主动滚屏、同步平移所有锚点)。确认
@@ -918,22 +913,20 @@ public:
             return;
         }
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-#ifdef _WIN32
-        const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
-        CONSOLE_SCREEN_BUFFER_INFO info{};
-        if (!GetConsoleScreenBufferInfo(h_out, &info)) {
+        if (!screen_) {
             return;
         }
-        const COORD saved = info.dwCursorPosition;
-        int row = saved.Y;
-        const int before = row;
-        EnsureRoom(h_out, row, rows);
-        if (row != before) {
-            SetConsoleCursorPosition(h_out, COORD{saved.X, static_cast<SHORT>(row)});
+        const std::optional<lubancode::platform::ScreenInfo> info = lubancode::platform::GetScreenInfo();
+        if (!info.has_value()) {
+            return;
         }
-#else
-        (void)rows;
-#endif
+        const int saved_x = info->cursor_x;
+        int row = info->cursor_y;
+        const int before = row;
+        EnsureRoom(row, rows);
+        if (row != before) {
+            lubancode::platform::SetCursorPos(saved_x, row);
+        }
     }
 
 private:
@@ -967,7 +960,6 @@ private:
         return out;
     }
 
-#ifdef _WIN32
     Anchor* Find(int item_id) {
         for (auto& anchor : anchors_) {
             if (anchor.item_id == item_id) {
@@ -980,18 +972,18 @@ private:
     // 从 start_row 起要写 rows_needed 行,会不会撞到缓冲区最后一行?会的话
     // 先主动滚够行数,再把所有登记过的锚点(和调用方手里这个 start_row)
     // 一起往上平移——跟 console_input.cpp 的 EnsureRoomForRows 同一套账。
-    void EnsureRoom(HANDLE h_out, int& start_row, int rows_needed) {
-        CONSOLE_SCREEN_BUFFER_INFO info{};
-        if (!GetConsoleScreenBufferInfo(h_out, &info)) {
+    void EnsureRoom(int& start_row, int rows_needed) {
+        const std::optional<lubancode::platform::ScreenInfo> info = lubancode::platform::GetScreenInfo();
+        if (!info.has_value()) {
             return;
         }
-        const int buffer_height = info.dwSize.Y;
+        const int buffer_height = info->height;
         const int needed_bottom = start_row + rows_needed - 1;
         if (needed_bottom < buffer_height) {
             return;
         }
         const int overflow = needed_bottom - buffer_height + 1;
-        SetConsoleCursorPosition(h_out, COORD{0, static_cast<SHORT>(buffer_height - 1)});
+        lubancode::platform::SetCursorPos(0, buffer_height - 1);
         for (int i = 0; i < overflow; ++i) {
             std::cout << "\n";
         }
@@ -1001,10 +993,12 @@ private:
         }
         start_row = (std::max)(0, start_row - overflow);
     }
-#endif
 
     const lubancode::cli::Theme& theme_;
     bool enabled_;
+    // 原地改写在这个平台上开不开(POSIX 暂不开,原因见
+    // platform::SupportsScreenRepaint 注释);不开时各方法退化成顺序打印。
+    const bool screen_ = lubancode::platform::SupportsScreenRepaint();
     const bool* expanded_ = nullptr;  // UI-D:紧凑/详细会话级开关,见构造函数注释
     std::vector<Anchor> anchors_;
 };
@@ -1039,7 +1033,11 @@ private:
 // ---------------------------------------------------------------------------
 class StreamBodyTracker {
 public:
-    StreamBodyTracker(const lubancode::cli::Theme& theme, bool enabled) : theme_(theme), enabled_(enabled) {}
+    // 原地重画不开的平台(POSIX,见 platform::SupportsScreenRepaint 注释)
+    // 直接按 enabled=false 走:OnDelta 退化成"拿锁原样打印",信息不丢,
+    // 跟老版本非 Windows 分支逐字节一致。
+    StreamBodyTracker(const lubancode::cli::Theme& theme, bool enabled)
+        : theme_(theme), enabled_(enabled && lubancode::platform::SupportsScreenRepaint()) {}
 
     StreamBodyTracker(const StreamBodyTracker&) = delete;
     StreamBodyTracker& operator=(const StreamBodyTracker&) = delete;
@@ -1054,15 +1052,13 @@ public:
             std::cout.flush();
             return;
         }
-#ifdef _WIN32
-        const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
         if (!in_block_) {
             in_block_ = true;
             unsafe_ = false;
             buffer_.clear();
-            CONSOLE_SCREEN_BUFFER_INFO info{};
-            if (GetConsoleScreenBufferInfo(h_out, &info) && info.dwCursorPosition.X == 0) {
-                start_row_ = info.dwCursorPosition.Y;
+            const std::optional<lubancode::platform::ScreenInfo> info = lubancode::platform::GetScreenInfo();
+            if (info.has_value() && info->cursor_x == 0) {
+                start_row_ = info->cursor_y;
             } else {
                 unsafe_ = true;  // 块首不在行首/探测失败:账算不清,这块不动
             }
@@ -1071,8 +1067,8 @@ public:
         // 底就自己先滚够、start_row_ 同步上移——滚动出自自己之手,行号
         // 不失真;块首都得滚出顶(块比整个缓冲区还高)才认输。
         if (!unsafe_) {
-            CONSOLE_SCREEN_BUFFER_INFO info{};
-            if (GetConsoleScreenBufferInfo(h_out, &info)) {
+            const std::optional<lubancode::platform::ScreenInfo> info = lubancode::platform::GetScreenInfo();
+            if (info.has_value()) {
                 int rows_needed = 2;
                 for (const char c : text) {
                     if (c == '\n') {
@@ -1080,21 +1076,21 @@ public:
                     }
                 }
                 rows_needed += static_cast<int>(lubancode::cli::DisplayWidthUtf8(text)) /
-                               (std::max)(1, static_cast<int>(info.dwSize.X));
-                const int overflow = info.dwCursorPosition.Y + rows_needed - info.dwSize.Y + 1;
+                               (std::max)(1, info->width);
+                const int overflow = info->cursor_y + rows_needed - info->height + 1;
                 if (overflow > 0) {
                     if (overflow > start_row_) {
                         unsafe_ = true;
                     } else {
-                        const COORD saved = info.dwCursorPosition;
-                        SetConsoleCursorPosition(h_out, COORD{0, static_cast<SHORT>(info.dwSize.Y - 1)});
+                        const int saved_x = info->cursor_x;
+                        const int saved_y = info->cursor_y;
+                        lubancode::platform::SetCursorPos(0, info->height - 1);
                         for (int i = 0; i < overflow; ++i) {
                             std::cout << "\n";
                         }
                         std::cout.flush();
                         start_row_ -= overflow;
-                        SetConsoleCursorPosition(
-                            h_out, COORD{saved.X, static_cast<SHORT>(static_cast<int>(saved.Y) - overflow)});
+                        lubancode::platform::SetCursorPos(saved_x, saved_y - overflow);
                     }
                 }
             } else {
@@ -1104,10 +1100,6 @@ public:
         std::cout << text;
         std::cout.flush();
         buffer_ += text;
-#else
-        std::cout << text;
-        std::cout.flush();
-#endif
     }
 
     // 监听线程在流式正文当中插打了整行提示([已排队]/[已打断]):这几行
@@ -1135,24 +1127,21 @@ public:
             return;
         }
         in_block_ = false;
-#ifdef _WIN32
         if (unsafe_ || buffer_.empty() || !lubancode::cli::DetectMarkdownStructure(buffer_)) {
             buffer_.clear();
             return;
         }
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-        const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
-        CONSOLE_SCREEN_BUFFER_INFO info{};
-        if (!GetConsoleScreenBufferInfo(h_out, &info)) {
+        const std::optional<lubancode::platform::ScreenInfo> info = lubancode::platform::GetScreenInfo();
+        if (!info.has_value()) {
             buffer_.clear();
             return;
         }
-        const int buffer_height = info.dwSize.Y;
-        const SHORT buffer_width = info.dwSize.X;
-        const COORD cur = info.dwCursorPosition;
+        const int buffer_height = info->height;
+        const int buffer_width = info->width;
         // 原样块占的物理行数按光标位移算(末行没换行、光标停在行中时也算
         // 一行),不逐字模拟折行。
-        const int old_rows = static_cast<int>(cur.Y) - start_row_ + (cur.X > 0 ? 1 : 0);
+        const int old_rows = info->cursor_y - start_row_ + (info->cursor_x > 0 ? 1 : 0);
         if (old_rows <= 0) {
             buffer_.clear();
             return;
@@ -1172,20 +1161,18 @@ public:
             if (overflow > start_row_) {
                 return;
             }
-            SetConsoleCursorPosition(h_out, COORD{0, static_cast<SHORT>(buffer_height - 1)});
+            lubancode::platform::SetCursorPos(0, buffer_height - 1);
             for (int i = 0; i < overflow; ++i) {
                 std::cout << "\n";
             }
             std::cout.flush();
             start_row_ -= overflow;
         }
-        DWORD written = 0;
         const int rows_to_clear = (std::max)(old_rows, new_rows);
         for (int r = 0; r < rows_to_clear && start_row_ + r < buffer_height; ++r) {
-            const COORD row_pos{0, static_cast<SHORT>(start_row_ + r)};
-            FillConsoleOutputCharacterW(h_out, L' ', static_cast<DWORD>(buffer_width), row_pos, &written);
+            lubancode::platform::ClearRowFrom(0, start_row_ + r, buffer_width);
         }
-        SetConsoleCursorPosition(h_out, COORD{0, static_cast<SHORT>(start_row_)});
+        lubancode::platform::SetCursorPos(0, start_row_);
         for (int i = 0; i < new_rows; ++i) {
             std::cout << lines[static_cast<std::size_t>(i)];
             if (i + 1 < new_rows) {
@@ -1195,9 +1182,6 @@ public:
         std::cout.flush();
         // 渲染版每行都截到 width-1,绝不物理折行;末行不带换行收梢,跟原样
         // 流式一致——RunTurn 随后那个 "\n" 照常把行关上,下游行为分毫不差。
-#else
-        buffer_.clear();
-#endif
     }
 
 private:
@@ -3488,19 +3472,7 @@ int RunCli(const std::vector<std::string>& args) {
         language_pack_warnings = lubancode::cli::LoadLanguagePacksFromDir(*luban_dir + "/languages");
     }
     {
-        std::string early_lang;
-#ifdef _WIN32
-        char* env_lang = nullptr;
-        std::size_t env_size = 0;
-        if (_dupenv_s(&env_lang, &env_size, "LUBANCODE_LANG") == 0 && env_lang != nullptr) {
-            early_lang = env_lang;
-            std::free(env_lang);
-        }
-#else
-        if (const char* env_lang = std::getenv("LUBANCODE_LANG"); env_lang != nullptr) {
-            early_lang = env_lang;
-        }
-#endif
+        const std::string early_lang = lubancode::platform::GetEnvVar("LUBANCODE_LANG").value_or(std::string());
         lubancode::cli::SetLanguage(early_lang.empty() ? lubancode::cli::DetectSystemLanguage() : early_lang);
     }
 
@@ -3730,30 +3702,23 @@ int RunCli(const std::vector<std::string>& args) {
 
 // Windows 下用宽字符入口:窄字符 main(argc, char**) 的 argv 是 CRT 按
 // "系统 ANSI 代码页"(不是 UTF-8)解码来的,中文命令行参数会被解码错。
-// wmain 拿到的是原始的 UTF-16 参数,自己用 WideCharToMultiByte 转成
-// UTF-8,才能跟程序内部统一按 UTF-8 处理的字符串对上。
+// wmain 拿到的是原始的 UTF-16 参数,经 platform::WideToUtf8 转成 UTF-8,
+// 才能跟程序内部统一按 UTF-8 处理的字符串对上。这是全程序最后一处
+// #ifdef _WIN32(平台差异其余都收进 platform/ 了)。
 int wmain(int argc, wchar_t** argv) {
-    SetConsoleOutputCP(CP_UTF8);
-    SetConsoleCP(CP_UTF8);
+    lubancode::platform::SetupConsoleUtf8();
 
     std::vector<std::string> args;
     args.reserve(static_cast<std::size_t>(argc));
     for (int i = 0; i < argc; ++i) {
-        const int utf8_len = WideCharToMultiByte(CP_UTF8, 0, argv[i], -1, nullptr, 0, nullptr, nullptr);
-        std::string utf8;
-        if (utf8_len > 0) {
-            utf8.resize(static_cast<std::size_t>(utf8_len - 1));  // 去掉结尾的 \0
-            if (utf8_len > 1) {
-                WideCharToMultiByte(CP_UTF8, 0, argv[i], -1, utf8.data(), utf8_len, nullptr, nullptr);
-            }
-        }
-        args.push_back(std::move(utf8));
+        args.push_back(lubancode::platform::WideToUtf8(argv[i]));
     }
     return RunCli(args);
 }
 
 #else
 
+// POSIX 下 argv 天然就是字节串(约定 UTF-8),直通。
 int main(int argc, char** argv) {
     std::vector<std::string> args(argv, argv + argc);
     return RunCli(args);

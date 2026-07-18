@@ -2,9 +2,11 @@
 
 #include <iostream>
 
-#include "tools/process_exec.hpp"
+#include "platform/process.hpp"
 
 namespace lubancode::tools {
+
+using platform::ProcessResult;
 
 namespace {
 
@@ -33,24 +35,14 @@ std::string FirstLines(const std::string& text, int max_lines) {
     return out;
 }
 
-#ifdef _WIN32
+// 钩子命令走平台默认 shell:Windows 是 cmd.exe(RunShellCommand 内部已把
+// 系统 ANSI 代码页的输出转成 UTF-8——钩子没有走 PowerShell 的 UTF-8 输出
+// 编码那条路,跟 run_command 工具的 cmd 分支一个待遇);POSIX 是 /bin/sh,
+// 输出天然 UTF-8。
 ProcessResult ExecuteHookCommand(const std::string& command_utf8,
                                   const std::vector<std::pair<std::string, std::string>>& env, int timeout_ms) {
-    const std::wstring cmdline = BuildCmdCommandLine(command_utf8);
-    ProcessResult result = RunProcess(cmdline, timeout_ms, env);
-    // 钩子直接扔给 cmd.exe(没有走 PowerShell 的 UTF-8 输出编码那条路),
-    // 输出跟 run_command 工具的 cmd 分支一样,要按系统 ANSI 代码页转一道。
-    result.output = AcpBytesToUtf8(result.output);
-    return result;
+    return platform::RunShellCommand(command_utf8, timeout_ms, env);
 }
-#else
-ProcessResult ExecuteHookCommand(const std::string&, const std::vector<std::pair<std::string, std::string>>&, int) {
-    ProcessResult result;
-    result.spawn_failed = true;
-    result.spawn_error = "hooks 眼下只实现了 Windows";
-    return result;
-}
-#endif
 
 void RunSessionHooks(const std::vector<config::HookEntry>& entries, const char* label) {
     for (const auto& entry : entries) {

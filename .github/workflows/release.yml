@@ -1,0 +1,64 @@
+# 发布流水线(v0.20.x 跨平台单):推 v* tag 时三平台各打一个包挂上
+# GitHub Release。构建走 FetchContent(-DLUBANCODE_USE_CODELOAD=OFF,CI 网络
+# 直通 github 官方地址),静态链接,产物就是单个可执行文件 + README。
+#
+# 注意:ubuntu/macos 两腿的 POSIX 实现验证状态见 ci.yml 的注释——发布产物
+# 以 Windows 包为准,POSIX 包在 CI 两腿转绿之前按"预览"看待。
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: package-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            exe: build/Release/lubancode.exe
+            archive: lubancode-${{ github.ref_name }}-windows-x64.zip
+          - name: linux-x64
+            os: ubuntu-latest
+            exe: build/lubancode
+            archive: lubancode-${{ github.ref_name }}-linux-x64.tar.gz
+          - name: macos-arm64
+            os: macos-latest
+            exe: build/lubancode
+            archive: lubancode-${{ github.ref_name }}-macos-arm64.tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        shell: bash
+        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DLUBANCODE_USE_CODELOAD=OFF
+
+      - name: Build
+        shell: bash
+        run: cmake --build build --config Release -j 4
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist/lubancode
+          cp "${{ matrix.exe }}" dist/lubancode/
+          cp README.md dist/lubancode/
+          cd dist
+          case "${{ matrix.archive }}" in
+            *.zip)    7z a "../${{ matrix.archive }}" lubancode ;;
+            *.tar.gz) tar czf "../${{ matrix.archive }}" lubancode ;;
+          esac
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.archive }}

@@ -1,41 +1,13 @@
 #include "cli/theme.hpp"
 
-#include <cstdlib>
 #include <optional>
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#else
-#include <unistd.h>
-#endif
+#include "platform/console.hpp"
+#include "platform/paths.hpp"
 
 namespace lubancode::cli {
 
 namespace {
-
-std::optional<std::string> GetEnvVar(const char* name) {
-#ifdef _WIN32
-    char* buffer = nullptr;
-    std::size_t size = 0;
-    const errno_t err = _dupenv_s(&buffer, &size, name);
-    if (err != 0 || buffer == nullptr) {
-        return std::nullopt;
-    }
-    std::string value(buffer);
-    std::free(buffer);
-    if (value.empty()) {
-        return std::nullopt;
-    }
-    return value;
-#else
-    const char* value = std::getenv(name);
-    if (value == nullptr || value[0] == '\0') {
-        return std::nullopt;
-    }
-    return std::string(value);
-#endif
-}
 
 Theme DarkTheme() {
     Theme t;
@@ -99,46 +71,19 @@ bool ComputeColorsEnabled(bool stdout_is_console, bool vt_processing_ok, bool fo
     return stdout_is_console && vt_processing_ok;
 }
 
-#ifdef _WIN32
-
 ConsoleCapability DetectConsoleCapability() {
-    ConsoleCapability cap;
+    // 探测 + VT 开启统一在 platform::ProbeStdoutConsole(Windows 下顺手把
+    // ENABLE_VIRTUAL_TERMINAL_PROCESSING 打开;POSIX 真终端天然支持 ANSI,
+    // vt_enabled 恒真),这里只剩强制着色开关的合成。
+    const platform::StdoutConsoleProbe probe = platform::ProbeStdoutConsole();
 
-    const HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
-    bool is_console = false;
-    bool vt_ok = false;
-    if (h != nullptr && h != INVALID_HANDLE_VALUE && GetFileType(h) == FILE_TYPE_CHAR) {
-        DWORD mode = 0;
-        if (GetConsoleMode(h, &mode) != 0) {
-            is_console = true;
-            if ((mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0) {
-                vt_ok = true;
-            } else if (SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0) {
-                vt_ok = true;
-            }
-        }
-    }
-
-    const auto force = GetEnvVar("LUBANCODE_FORCE_COLOR");
+    const auto force = platform::GetEnvVar("LUBANCODE_FORCE_COLOR");
     const bool force_color = force.has_value() && *force == "1";
 
-    cap.is_console = is_console;
-    cap.colors_enabled = ComputeColorsEnabled(is_console, vt_ok, force_color);
-    return cap;
-}
-
-#else
-
-ConsoleCapability DetectConsoleCapability() {
     ConsoleCapability cap;
-    cap.is_console = isatty(fileno(stdout)) != 0;
-    const auto force = GetEnvVar("LUBANCODE_FORCE_COLOR");
-    const bool force_color = force.has_value() && *force == "1";
-    // 非 Windows 平台没有 VT 处理这层开关,真终端天然支持 ANSI。
-    cap.colors_enabled = ComputeColorsEnabled(cap.is_console, /*vt_processing_ok=*/true, force_color);
+    cap.is_console = probe.is_console;
+    cap.colors_enabled = ComputeColorsEnabled(probe.is_console, probe.vt_enabled, force_color);
     return cap;
 }
-
-#endif
 
 }  // namespace lubancode::cli

@@ -1,6 +1,9 @@
-// M8:MCP stdio 传输层。跟 tools/process_exec.hpp 的一次性捕获(起进程、
+// M8:MCP stdio 传输层。跟 platform/process.hpp 的一次性捕获(起进程、
 // 等它跑完、收尸)不是一回事——MCP 服务器是要活到会话结束的长命子进程,
 // 这里管的是"起一个双向管道的子进程,stdin 能一直写、stdout 能一直读"。
+// 跨平台单(v0.20.x)起,起进程/管道/杀树那套 Win32 代码搬去了
+// platform::ChildProcess(POSIX 同接口),这里只剩 MCP 自己的行分帧和
+// stderr 环形日志。
 //
 // 行分帧:MCP stdio 是换行分隔的 JSON-RPC 2.0(一行一条完整消息)。
 // LineFramer 是纯函数式的增量分帧器,写法跟 api/sse_framing.hpp 的
@@ -18,14 +21,10 @@
 #include <mutex>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <utility>
 #include <vector>
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#endif
+#include "platform/process.hpp"
 
 namespace lubancode::mcp {
 
@@ -55,11 +54,10 @@ struct TransportStartResult {
     std::string error;
 };
 
-#ifdef _WIN32
-
-// Windows 下长命子进程的双向管道传输:stdin 可写、stdout 可读(逐行喂给
-// on_line 回调),stderr 单独捕获进一个环形日志缓冲(出错时给人看,不跟
-// stdout 混在一起,免得污染 JSON-RPC 消息流)。
+// 长命子进程的双向管道传输:stdin 可写、stdout 可读(逐行喂给 on_line
+// 回调),stderr 单独捕获进一个环形日志缓冲(出错时给人看,不跟 stdout
+// 混在一起,免得污染 JSON-RPC 消息流)。进程本体是
+// platform::ChildProcess(两平台同实现)。
 class StdioTransport {
 public:
     StdioTransport() = default;
@@ -69,9 +67,8 @@ public:
     StdioTransport& operator=(const StdioTransport&) = delete;
 
     // 起子进程:command 是可执行文件(比如 "python"),args 是参数列表,
-    // env 是要额外注入子进程环境的键值对(同名覆盖当前进程环境,做法跟
-    // tools/process_exec.cpp 的 RunProcess 一致——临时设置、子进程创建后
-    // 立刻还原,不搭一份独立环境块)。on_line 在专属的读线程上,对
+    // env 是要额外注入子进程环境的键值对(同名覆盖当前进程环境,注入方式
+    // 见 platform/process.hpp 的说明)。on_line 在专属的读线程上,对
     // stdout 上凑齐的每一整行调用一次,按到达顺序,调用方自己保证线程
     // 安全(转发进协议层时补一把锁)。
     TransportStartResult Start(const std::string& command, const std::vector<std::string>& args,
@@ -84,61 +81,24 @@ public:
 
     // 关停:先关 stdin(相当于"发 shutdown 意向"——MCP 没有标准 shutdown
     // 请求,直接关 stdin 让服务器自己感知到 EOF、体面退出),等
-    // wait_ms 毫秒;还没退出就用 Job Object 把整棵进程树杀掉。幂等,重复
-    // 调用/析构时再调都安全。
+    // wait_ms 毫秒;还没退出就把整棵进程树杀掉。幂等,重复调用/析构时再调
+    // 都安全。
     void Shutdown(int wait_ms = 2000);
 
-    // 进程是否还活着(GetExitCodeProcess 查 STILL_ACTIVE)。
+    // 进程是否还活着。
     bool IsAlive() const;
 
     // stderr 捕获到的内容,最近若干字节(诊断/报错用)。
     std::string StderrTail() const;
 
 private:
-    void StdoutReaderThread();
-    void StderrReaderThread();
-    void JoinReaderThreads();
-
     std::function<void(std::string)> on_line_;
     LineFramer line_framer_;
 
-    std::mutex write_mutex_;
     mutable std::mutex stderr_mutex_;
     std::string stderr_buffer_;
 
-    HANDLE process_ = nullptr;
-    HANDLE job_ = nullptr;
-    HANDLE stdin_write_ = nullptr;
-    HANDLE stdout_read_ = nullptr;
-    HANDLE stderr_read_ = nullptr;
-
-    std::thread stdout_thread_;
-    std::thread stderr_thread_;
-
-    std::atomic<bool> started_{false};
-    std::atomic<bool> shutdown_done_{false};
-    std::atomic<bool> reader_stop_{false};
-    std::atomic<bool> stdout_reader_done_{false};
-    std::atomic<bool> stderr_reader_done_{false};
+    platform::ChildProcess child_;
 };
-
-#else
-
-// 非 Windows 平台没实现,Start() 直接返回失败——上层(main.cpp 的
-// StartMcpServers)按"这台服务器起不来"处理,打警告跳过,不阻塞会话。
-class StdioTransport {
-public:
-    TransportStartResult Start(const std::string&, const std::vector<std::string>&,
-                                const std::vector<std::pair<std::string, std::string>>&,
-                                std::function<void(std::string)>) {
-        return TransportStartResult{false, "StdioTransport 眼下只实现了 Windows"};
-    }
-    bool WriteLine(const std::string&) { return false; }
-    void Shutdown(int = 2000) {}
-    bool IsAlive() const { return false; }
-    std::string StderrTail() const { return std::string(); }
-};
-
-#endif
 
 }  // namespace lubancode::mcp

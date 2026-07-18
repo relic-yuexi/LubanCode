@@ -205,7 +205,7 @@ TEST_CASE("reasoning_effort 非空时映射成 reasoning.effort") {
 }
 
 TEST_CASE("reasoning_effort 支持 none/low/medium/high 四档,原样透传不做限制") {
-    for (const std::string& level : {"none", "low", "medium", "high"}) {
+    for (const std::string level : {"none", "low", "medium", "high"}) {  // 按值:初始化列表元素是 const char*,引用绑临时会招 -Wrange-loop-construct
         Request request;
         request.reasoning_effort = level;
         const auto body = BuildRequestJson(request);
@@ -217,7 +217,7 @@ TEST_CASE("reasoning_effort 支持 none/low/medium/high 四档,原样透传不�
 // 名字原样递过去,哪怕是 anthropic 那套映射表里没有的名字(xhigh)、或者
 // 两边协议都没听过的生造词,都不在这层拦。
 TEST_CASE("reasoning_effort 是任意字符串(含 anthropic 专属档位名、生造词)都原样透传") {
-    for (const std::string& level : {"xhigh", "max", "ultra-think-9000"}) {
+    for (const std::string level : {"xhigh", "max", "ultra-think-9000"}) {  // 同上,按值
         Request request;
         request.reasoning_effort = level;
         const auto body = BuildRequestJson(request);

@@ -2,9 +2,9 @@
 //   1) config::ParseHooksConfig —— 纯函数,喂各种 JSON 形状进去,只查解析
 //      结果/错误信息,不碰任何 IO。
 //   2) tools::RunPreToolHooks / RunPostToolHooks —— 真跑 `cmd /c exit N`
-//      这样的真实命令,验证拦截语义(pre_tool 非零退出拦截、post_tool 不拦
-//      截、matcher 不命中就不跑)。这部分只在 Windows 下跑(RunProcess 眼下
-//      只实现了 Windows)。
+//      (POSIX 下是 `exit N`)这样的真实命令,验证拦截语义(pre_tool 非零
+//      退出拦截、post_tool 不拦截、matcher 不命中就不跑)。两平台都跑,
+//      底下是 platform::RunShellCommand。
 //   3) 一次 FakeBackend 驱动的完整 AgentLoop 往返,验证模型真的能在
 //      tool_result 里看到"被 pre_tool 钩子拦截"的说明文字,继续对话。
 
@@ -110,15 +110,24 @@ TEST_CASE("ParseHooksConfig: session_start 写了 matcher 也不报错、不使�
 }
 
 // ---------------------------------------------------------------------------
-// 2) RunPreToolHooks / RunPostToolHooks:真跑命令,只在 Windows 下测
-//    (RunProcess 眼下只实现了 Windows,见 tools/process_exec.hpp)。
+// 2) RunPreToolHooks / RunPostToolHooks:真跑命令(平台默认 shell:Windows
+//    cmd.exe / POSIX /bin/sh,见 platform/process.hpp 的 RunShellCommand)。
+//    钩子命令按平台给——exit N 两边 shell 都认,前缀不同而已。
 // ---------------------------------------------------------------------------
 
+namespace {
 #ifdef _WIN32
+constexpr const char* kHookExit1 = "cmd /c exit 1";
+constexpr const char* kHookExit0 = "cmd /c exit 0";
+#else
+constexpr const char* kHookExit1 = "exit 1";
+constexpr const char* kHookExit0 = "exit 0";
+#endif
+}  // namespace
 
 TEST_CASE("RunPreToolHooks: 命中的钩子退出码非零,拦截,block_message 带退出码") {
     config::HooksConfig hooks;
-    hooks.pre_tool.push_back(config::HookEntry{"write_file", "cmd /c exit 1"});
+    hooks.pre_tool.push_back(config::HookEntry{"write_file", kHookExit1});
 
     const auto outcome = tools::RunPreToolHooks(hooks, "write_file", nlohmann::json::object());
     CHECK(outcome.intercepted);
@@ -128,7 +137,7 @@ TEST_CASE("RunPreToolHooks: 命中的钩子退出码非零,拦截,block_message 
 
 TEST_CASE("RunPreToolHooks: matcher 不命中,压根不跑,不拦截") {
     config::HooksConfig hooks;
-    hooks.pre_tool.push_back(config::HookEntry{"run_command", "cmd /c exit 1"});
+    hooks.pre_tool.push_back(config::HookEntry{"run_command", kHookExit1});
 
     const auto outcome = tools::RunPreToolHooks(hooks, "write_file", nlohmann::json::object());
     CHECK_FALSE(outcome.intercepted);
@@ -136,7 +145,7 @@ TEST_CASE("RunPreToolHooks: matcher 不命中,压根不跑,不拦截") {
 
 TEST_CASE("RunPreToolHooks: 退出码为 0,放行") {
     config::HooksConfig hooks;
-    hooks.pre_tool.push_back(config::HookEntry{"*", "cmd /c exit 0"});
+    hooks.pre_tool.push_back(config::HookEntry{"*", kHookExit0});
 
     const auto outcome = tools::RunPreToolHooks(hooks, "write_file", nlohmann::json::object());
     CHECK_FALSE(outcome.intercepted);
@@ -144,14 +153,12 @@ TEST_CASE("RunPreToolHooks: 退出码为 0,放行") {
 
 TEST_CASE("RunPostToolHooks: 退出码非零只警告,不影响调用方(没有返回值可拦)") {
     config::HooksConfig hooks;
-    hooks.post_tool.push_back(config::HookEntry{"*", "cmd /c exit 1"});
+    hooks.post_tool.push_back(config::HookEntry{"*", kHookExit1});
     // 这里只要不崩、能跑完就算过 —— post_tool 天生没有拦截能力,函数返回
     // void,没有别的可断言的地方,真正的"不拦截"由下面 FakeBackend 往返
     // 测试里再验证一次(post_tool 命中但 write_file 依然真的写了文件)。
     tools::RunPostToolHooks(hooks, "write_file", nlohmann::json::object(), tools::Tool::Result{"ok", false});
 }
-
-#endif  // _WIN32
 
 // ---------------------------------------------------------------------------
 // 3) FakeBackend 驱动的完整 AgentLoop 往返:验证模型真的能在 tool_result 里

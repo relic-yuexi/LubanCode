@@ -25,10 +25,16 @@ using namespace lubancode;
 
 namespace {
 
-// 造一份指到 Python 夹具的 lsp 配置(语言名 python,管 .py)。
+// 造一份指到 Python 夹具的 lsp 配置(语言名 python,管 .py)。真夹具用
+// 哪个 python:Windows 装的是 python.exe,Linux/macOS 发行版惯例是
+// python3(裸 python 常常不存在)。
 std::map<std::string, config::LspServerConfig> FixtureConfigs() {
     config::LspServerConfig server;
+#ifdef _WIN32
     server.command = "python";
+#else
+    server.command = "python3";
+#endif
     server.args = {std::string(LUBANCODE_TEST_FIXTURES_DIR) + "/lsp_test_server.py"};
     server.extensions = {".py"};
     std::map<std::string, config::LspServerConfig> configs;
@@ -237,10 +243,8 @@ TEST_CASE("LspTool: 找不到服务器命令,is_error 指路安装") {
 }
 
 // ---------------------------------------------------------------------------
-// 3) 真夹具全链路(只在 Windows 下跑,StdioTransport 眼下只实现了 Windows)
+// 3) 真夹具全链路(两平台都跑,StdioTransport 底下是 platform::ChildProcess)
 // ---------------------------------------------------------------------------
-
-#ifdef _WIN32
 
 TEST_CASE("LspTool + 真实 Python 夹具:四个 mode 全链路,懒启动只在首次查询发生") {
     lsp::Manager manager(FixtureConfigs(), std::filesystem::temp_directory_path().string());
@@ -301,5 +305,3 @@ TEST_CASE("Manager: 闲置关停 + 下次调用自动重启(阈值收窄到毫�
     manager.ShutdownAll();
     CHECK(manager.StatusList()[0].state == "未启动");
 }
-
-#endif  // _WIN32

@@ -1,0 +1,64 @@
+# CI 矩阵(v0.20.x 跨平台单):windows-latest(MSVC)+ ubuntu-latest(g++)
+# + macos-latest(clang)。依赖获取:vcpkg manifest 优先(runner 自带 vcpkg,
+# VCPKG_INSTALLATION_ROOT 指过去),configure 失败自动回退 FetchContent 拉
+# 源码构建。CI 网络直通 github.com,统一传 -DLUBANCODE_USE_CODELOAD=OFF 走
+# 官方地址(codeload 镜像是开发机网络环境的本地对策,见顶层 CMakeLists)。
+#
+# 腿的地位:
+#   - Windows 腿必须绿(开发主平台,804+ 单测在本机全量验证过)。
+#   - ubuntu / macos 两腿 continue-on-error: true —— POSIX 实现已在
+#     WSL Ubuntu(g++)真机编译测试过,但 CI 环境/macOS(clang)尚未亮过
+#     灯,观察中;亮灯稳定后摘掉这个标记。
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-msvc
+            os: windows-latest
+            experimental: false
+          - name: ubuntu-gcc
+            os: ubuntu-latest
+            experimental: true   # POSIX 腿观察中(WSL 已验,CI 首航)
+          - name: macos-clang
+            os: macos-latest
+            experimental: true   # POSIX 腿观察中(macOS 未经真机验证)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # vcpkg manifest 优先:runner 自带的 vcpkg 在 VCPKG_INSTALLATION_ROOT。
+      # configure 失败(vcpkg 缺包/版本冲突等)就清掉构建目录、去掉工具链
+      # 回退 FetchContent 源码构建——顶层 CMakeLists 对两条路都支持。
+      - name: Configure (vcpkg first, FetchContent fallback)
+        shell: bash
+        run: |
+          set -x
+          COMMON_FLAGS="-DCMAKE_BUILD_TYPE=Release -DLUBANCODE_USE_CODELOAD=OFF"
+          if [ -n "${VCPKG_INSTALLATION_ROOT:-}" ] && cmake -B build -S . $COMMON_FLAGS \
+               -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"; then
+            echo "configured with vcpkg"
+          else
+            echo "vcpkg configure failed or unavailable, falling back to FetchContent"
+            rm -rf build
+            cmake -B build -S . $COMMON_FLAGS
+          fi
+
+      - name: Build
+        shell: bash
+        run: cmake --build build --config Release -j 4
+
+      - name: Test
+        shell: bash
+        run: ctest --test-dir build -C Release --output-on-failure

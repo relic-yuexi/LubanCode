@@ -234,19 +234,25 @@ TEST_CASE("Client: 服务器反向请求(带 method 又带 id)收到 result=null
 
 // ---------------------------------------------------------------------------
 // 2) 真正的夹具:起 tests/fixtures/lsp_test_server.py,走完整流程。
-//    只在 Windows 下跑(StdioTransport 眼下只实现了 Windows)。
+//    两平台都跑(StdioTransport 底下是 platform::ChildProcess)。
 // ---------------------------------------------------------------------------
-
-#ifdef _WIN32
 
 #ifndef LUBANCODE_TEST_FIXTURES_DIR
 #define LUBANCODE_TEST_FIXTURES_DIR "."
 #endif
 
+// 真夹具用哪个 python:Windows 装的是 python.exe,Linux/macOS 发行版惯例
+// 是 python3(裸 python 常常不存在)。
+#ifdef _WIN32
+constexpr const char* kPythonCmd = "python";
+#else
+constexpr const char* kPythonCmd = "python3";
+#endif
+
 TEST_CASE("Client + 真实 Python 夹具:握手 + didOpen 诊断推送 + definition/references/documentSymbol + 干净关停") {
     lsp::Client client("python");
     const std::string script = std::string(LUBANCODE_TEST_FIXTURES_DIR) + "/lsp_test_server.py";
-    const auto start_result = client.StartProcess("python", {script});
+    const auto start_result = client.StartProcess(kPythonCmd, {script});
     REQUIRE_MESSAGE(start_result.success, start_result.error);
 
     const auto init_result = client.Initialize("file:///D:/proj");
@@ -283,4 +289,3 @@ TEST_CASE("Client + 真实 Python 夹具:握手 + didOpen 诊断推送 + definit
     CHECK_FALSE(client.Alive());
 }
 
-#endif  // _WIN32

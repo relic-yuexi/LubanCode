@@ -3,7 +3,11 @@
 #include <sstream>
 #include <string>
 
-#include "tools/process_exec.hpp"
+#include "platform/process.hpp"
+
+#ifdef _WIN32
+#include "platform/paths.hpp"  // Utf8ToWide:PowerShell -EncodedCommand 拼接用
+#endif
 
 namespace lubancode::tools {
 
@@ -18,9 +22,14 @@ std::string RunCommandTool::name() const {
 }
 
 std::string RunCommandTool::description() const {
+#ifdef _WIN32
     return "在 shell 里执行一条命令,拿到合并后的标准输出/标准错误,以及退出码。"
            "shell 参数可选 powershell(默认)或 cmd,分别按对应语法写命令。执行前要经用户确认。"
            "超时会被强制杀掉。";
+#else
+    return "在 shell(/bin/sh)里执行一条命令,拿到合并后的标准输出/标准错误,以及退出码。"
+           "按 POSIX sh 语法写命令。执行前要经用户确认。超时会被强制杀掉。";
+#endif
 }
 
 nlohmann::json RunCommandTool::input_schema() const {
@@ -31,7 +40,11 @@ nlohmann::json RunCommandTool::input_schema() const {
 
     nlohmann::json command_prop = nlohmann::json::object();
     command_prop["type"] = "string";
+#ifdef _WIN32
     command_prop["description"] = "要执行的命令,按所选 shell 的语法写(默认 PowerShell 语法)";
+#else
+    command_prop["description"] = "要执行的命令,按 POSIX sh 语法写";
+#endif
     properties["command"] = command_prop;
 
     nlohmann::json timeout_prop = nlohmann::json::object();
@@ -41,8 +54,13 @@ nlohmann::json RunCommandTool::input_schema() const {
 
     nlohmann::json shell_prop = nlohmann::json::object();
     shell_prop["type"] = "string";
+#ifdef _WIN32
     shell_prop["enum"] = nlohmann::json::array({"powershell", "cmd"});
     shell_prop["description"] = "用哪个 shell 执行,不填默认 powershell";
+#else
+    shell_prop["enum"] = nlohmann::json::array({"sh"});
+    shell_prop["description"] = "用哪个 shell 执行,本平台只有 sh(/bin/sh);powershell/cmd 是 Windows 专属";
+#endif
     properties["shell"] = shell_prop;
 
     schema["properties"] = properties;
@@ -55,10 +73,9 @@ nlohmann::json RunCommandTool::input_schema() const {
 
 namespace {
 
-// Utf8ToWide/WideToUtf8/AcpBytesToUtf8/BuildCmdCommandLine/RunProcess 这几个
-// 都挪到 tools/process_exec.hpp 里了(M9:hooks 系统也要起子进程,抽出来
-// 两边共用,见该文件头注释)。这里只留 PowerShell 专属的 base64/编码命令
-// 拼接——hooks 不走 PowerShell 这条路,不需要共用。
+// PowerShell 专属的 base64/编码命令拼接。进程执行的公共基建(RunProcess/
+// BuildCmdCommandLine/编码转换)在 platform/process.hpp、platform/paths.hpp
+// (跨平台单从 tools/process_exec.hpp 搬的家,见那两个文件头注释)。
 
 // 手写的标准 base64 编码,-EncodedCommand 要的就是这个格式,不引额外依赖。
 std::string Base64Encode(const unsigned char* data, std::size_t len) {
@@ -117,11 +134,13 @@ std::string BuildEncodedCommand(const std::string& user_command_utf8) {
         "& { " + user_command_utf8 + " } 2>&1 | Out-String -Stream | Write-Output\r\n"
         "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE } else { if ($?) { exit 0 } else { exit 1 } }\r\n";
 
-    const std::wstring wide = Utf8ToWide(script_utf8);
+    const std::wstring wide = platform::Utf8ToWide(script_utf8);
     return Base64Encode(reinterpret_cast<const unsigned char*>(wide.data()), wide.size() * sizeof(wchar_t));
 }
 
 }  // namespace
+
+#endif  // _WIN32
 
 Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
     if (!input.contains("command") || !input.at("command").is_string()) {
@@ -145,6 +164,7 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
         }
     }
 
+#ifdef _WIN32
     std::string shell = "powershell";
     if (auto it = input.find("shell"); it != input.end() && !it->is_null()) {
         if (!it->is_string()) {
@@ -157,16 +177,34 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
     }
 
     const bool is_cmd = (shell == "cmd");
-    const std::wstring cmdline = is_cmd ? BuildCmdCommandLine(command)
-                                          : (L"powershell.exe -NoProfile -NonInteractive -EncodedCommand " +
-                                             Utf8ToWide(BuildEncodedCommand(command)));
-    ProcessResult proc = RunProcess(cmdline, timeout_ms);
-    // cmd.exe 走的是系统 ANSI 代码页(国内机器上是 GBK)往管道里写字节,
-    // 跟 PowerShell 路径(脚本里显式设了 [Console]::OutputEncoding=UTF8)
-    // 不一样,这里捕获回来的原始字节要单独转一道才是合法 UTF-8。
+    platform::ProcessResult proc;
     if (is_cmd) {
-        proc.output = AcpBytesToUtf8(proc.output);
+        // RunShellCommand 内部已把 cmd.exe 的系统 ANSI 代码页输出转成 UTF-8
+        // (跟 PowerShell 路径不一样,那边脚本里显式设了
+        // [Console]::OutputEncoding=UTF8),这里拿到手就是合法 UTF-8。
+        proc = platform::RunShellCommand(command, timeout_ms);
+    } else {
+        const std::wstring cmdline = L"powershell.exe -NoProfile -NonInteractive -EncodedCommand " +
+                                      platform::Utf8ToWide(BuildEncodedCommand(command));
+        proc = platform::RunProcess(cmdline, timeout_ms);
     }
+#else
+    // POSIX:shell 一律 /bin/sh -c。powershell/cmd 是 Windows 专属选项,
+    // 模型带着旧习惯传过来就明说不支持,别悄悄换 shell 让语义走样。
+    if (auto it = input.find("shell"); it != input.end() && !it->is_null()) {
+        if (!it->is_string()) {
+            return {"shell 参数必须是字符串", true};
+        }
+        const std::string shell = it->get<std::string>();
+        if (shell == "powershell" || shell == "cmd") {
+            return {"shell=" + shell + " 是 Windows 专属,本平台请用 sh(/bin/sh)", true};
+        }
+        if (shell != "sh") {
+            return {"shell 参数只认得 sh,写的是: " + shell, true};
+        }
+    }
+    platform::ProcessResult proc = platform::RunShellCommand(command, timeout_ms);
+#endif
 
     if (proc.spawn_failed) {
         return {proc.spawn_error, true};
@@ -189,13 +227,5 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
     oss << "[退出码 " << proc.exit_code << "]\n" << proc.output;
     return {oss.str(), proc.exit_code != 0};
 }
-
-#else  // !_WIN32
-
-Tool::Result RunCommandTool::execute(const nlohmann::json&) {
-    return {"run_command 眼下只实现了 Windows(经 PowerShell 执行)", true};
-}
-
-#endif
 
 }  // namespace lubancode::tools

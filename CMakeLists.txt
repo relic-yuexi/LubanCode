@@ -29,6 +29,23 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# 依赖下载源开关:本机网络 github.com 主站(git clone / release 下载)连接
+# 常被重置,但 codeload.github.com 的归档包下载是通的,所以本机默认走
+# codeload 镜像;CI(GitHub Actions,网络直通 github.com)配置时传
+# -DLUBANCODE_USE_CODELOAD=OFF 走官方地址,两边各走各的。
+# ---------------------------------------------------------------------------
+option(LUBANCODE_USE_CODELOAD
+       "用 codeload.github.com 镜像拉 FetchContent 依赖(github 主站不通的网络环境用)" ON)
+# _lubancode_tarball(<out_var> <owner/repo> <tag>):按开关拼 tarball 地址。
+function(_lubancode_tarball out_var repo tag)
+  if(LUBANCODE_USE_CODELOAD)
+    set(${out_var} "https://codeload.github.com/${repo}/tar.gz/refs/tags/${tag}" PARENT_SCOPE)
+  else()
+    set(${out_var} "https://github.com/${repo}/archive/refs/tags/${tag}.tar.gz" PARENT_SCOPE)
+  endif()
+endfunction()
+
+# ---------------------------------------------------------------------------
 # 依赖获取:优先使用 vcpkg(manifest 模式,检测 VCPKG_ROOT / vcpkg 工具链已生效),
 # 否则回退到 CMake FetchContent 直接拉取 cpr 与 nlohmann-json 源码构建。
 # ---------------------------------------------------------------------------
@@ -53,9 +70,8 @@ else()
   # 运行时依赖丢得到处都是、还得操心 PATH。
   set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 
-  # 注:当前网络环境下 github.com 主站(git clone / release 下载)连接常被重置,
-  # 但 codeload.github.com 的归档包下载是通的,所以这里统一改成 URL 方式拉 tarball,
-  # 不用 GIT_REPOSITORY。
+  # 注:统一 URL 方式拉 tarball(不用 GIT_REPOSITORY),地址由顶部的
+  # LUBANCODE_USE_CODELOAD 开关决定走 codeload 镜像还是 github 官方。
 
   # cpr 自带的 libcurl 拉取开关:未找到系统 curl 时自行下载构建
   set(CPR_USE_SYSTEM_CURL OFF CACHE BOOL "" FORCE)
@@ -78,30 +94,34 @@ else()
   set(CMAKE_DISABLE_FIND_PACKAGE_Libpsl ON CACHE BOOL "" FORCE)
   set(CMAKE_DISABLE_FIND_PACKAGE_Libssh2 ON CACHE BOOL "" FORCE)
 
+  _lubancode_tarball(_lubancode_cpr_url "libcpr/cpr" "1.11.2")
   FetchContent_Declare(
     cpr
-    URL https://codeload.github.com/libcpr/cpr/tar.gz/refs/tags/1.11.2
+    URL ${_lubancode_cpr_url}
   )
 
   set(JSON_BuildTests OFF CACHE INTERNAL "")
   set(JSON_Install OFF CACHE INTERNAL "")
+  _lubancode_tarball(_lubancode_json_url "nlohmann/json" "v3.11.3")
   FetchContent_Declare(
     nlohmann_json
-    URL https://codeload.github.com/nlohmann/json/tar.gz/refs/tags/v3.11.3
+    URL ${_lubancode_json_url}
   )
 
   # cpr 内部会自己 FetchContent 一份 curl 源码,默认地址是
-  # github.com/curl/curl/releases/download/...,同样连不上。
-  # 这里提前用 codeload.github.com 把 curl 源码下载解压好,通过
-  # FETCHCONTENT_SOURCE_DIR_CURL 让 cpr 直接复用这份源码,不必自己再下载一次。
+  # github.com/curl/curl/releases/download/...(本机网络连不上)。
+  # 这里提前把 curl 源码 tarball 下载解压好(地址按 LUBANCODE_USE_CODELOAD
+  # 决定),通过 FETCHCONTENT_SOURCE_DIR_CURL 让 cpr 直接复用这份源码,
+  # 不必自己再下载一次。
   set(_lubancode_curl_tag "curl-8_10_1")
   set(_lubancode_vendor_dir "${CMAKE_BINARY_DIR}/_vendor")
   set(_lubancode_curl_src_dir "${_lubancode_vendor_dir}/curl-${_lubancode_curl_tag}")
   if(NOT EXISTS "${_lubancode_curl_src_dir}/CMakeLists.txt")
     file(MAKE_DIRECTORY "${_lubancode_vendor_dir}")
     message(STATUS "lubancode: 下载 curl 源码(${_lubancode_curl_tag})...")
+    _lubancode_tarball(_lubancode_curl_url "curl/curl" "${_lubancode_curl_tag}")
     file(DOWNLOAD
-      "https://codeload.github.com/curl/curl/tar.gz/refs/tags/${_lubancode_curl_tag}"
+      "${_lubancode_curl_url}"
       "${_lubancode_vendor_dir}/curl.tar.gz"
       STATUS _lubancode_curl_dl_status
       TLS_VERIFY ON)
@@ -125,9 +145,10 @@ endif()
 # ---------------------------------------------------------------------------
 include(FetchContent)
 enable_language(C)
+_lubancode_tarball(_lubancode_lua_url "lua/lua" "v5.4.7")
 FetchContent_Declare(
   lua
-  URL https://codeload.github.com/lua/lua/tar.gz/refs/tags/v5.4.7
+  URL ${_lubancode_lua_url}
 )
 FetchContent_MakeAvailable(lua)  # 没有 CMakeLists.txt,只下载解压,不 add_subdirectory
 file(GLOB _lubancode_lua_sources "${lua_SOURCE_DIR}/*.c")
@@ -172,7 +193,23 @@ add_custom_command(
 # Win32),跟这里其余文件一样"纯逻辑可单测",所以也放进来;真正碰键盘/
 # 控制台的 cli/console_input.cpp 留在 lubancode 可执行文件那边,不挪过来。
 # ---------------------------------------------------------------------------
+# 平台抽象层(v0.20.x 跨平台单):接口在 src/platform/*.hpp,实现按平台
+# 二选一。Windows 实现是从原调用点搬家的 Win32 代码;POSIX 实现语义对齐,
+# 验证状态见各文件头注释。
+if(WIN32)
+  set(_lubancode_platform_sources
+    src/platform/paths_win.cpp
+    src/platform/process_win.cpp
+    src/platform/console_win.cpp)
+else()
+  set(_lubancode_platform_sources
+    src/platform/paths_posix.cpp
+    src/platform/process_posix.cpp
+    src/platform/console_posix.cpp)
+endif()
+
 add_library(lubancode_core STATIC
+  ${_lubancode_platform_sources}
   src/api/sse_framing.cpp
   src/api/anthropic/client.cpp
   src/api/anthropic/events.cpp
@@ -191,7 +228,6 @@ add_library(lubancode_core STATIC
   src/tools/edit_file.cpp
   src/tools/search.cpp
   src/tools/agent_tool.cpp
-  src/tools/process_exec.cpp
   src/tools/hooks.cpp
   src/tools/skill_loader.cpp
   src/tools/skill_tool.cpp
@@ -246,9 +282,10 @@ install(TARGETS lubancode RUNTIME DESTINATION bin)
 # (原因同上:github.com 主站连不通,codeload.github.com 的归档包下载是通的)。
 # ---------------------------------------------------------------------------
 include(FetchContent)
+_lubancode_tarball(_lubancode_doctest_url "doctest/doctest" "v2.4.12")
 FetchContent_Declare(
   doctest
-  URL https://codeload.github.com/doctest/doctest/tar.gz/refs/tags/v2.4.12
+  URL ${_lubancode_doctest_url}
 )
 FetchContent_MakeAvailable(doctest)
 

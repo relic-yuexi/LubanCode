@@ -38,6 +38,35 @@ lubancode 0.1.0
 [demo] cpr 链接成功, CPR_VERSION = 1.11.1
 ```
 
+## Linux / macOS 构建(v0.20.x 跨平台单)
+
+状态先说清楚:
+
+- **平台抽象层已就位**:进程(fork/execvp + 进程组杀树)、终端(termios 逐键 + ANSI 光标)、路径(`$HOME`、UTF-8 直通)都有 POSIX 实现,在 `src/platform/*_posix.cpp`。
+- **Linux**:在 WSL Ubuntu(g++)真机编译、跑过单测(结果见各文件头注释与 CI)。
+- **macOS**:代码按 POSIX 通用写法就位,未经真机验证,待 CI(macos-latest, clang)亮灯。
+- CI 里 ubuntu/macos 两腿暂标 `continue-on-error`(观察中),Windows 腿必须绿。
+
+构建方式(需要 g++ 13+/clang 15+ 支持 C++23,以及 OpenSSL 开发包):
+
+```bash
+# Debian/Ubuntu 先装依赖
+sudo apt-get install -y build-essential cmake ninja-build libssl-dev
+
+cmake -B build/linux -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build/linux
+ctest --test-dir build/linux
+./build/linux/lubancode --version
+```
+
+依赖地址开关:`CMakeLists.txt` 默认走 `codeload.github.com` 镜像(本机网络 github 主站不通的对策);网络正常的环境(比如 CI)加 `-DLUBANCODE_USE_CODELOAD=OFF` 走 github 官方地址。
+
+POSIX 侧的几点已知差异:
+
+- `run_command` 工具走 `/bin/sh -c`,schema 里 shell 只有 `sh`;`powershell`/`cmd` 是 Windows 专属,传了会明说不支持。
+- 超时/关停杀进程树:Windows 用 Job Object,POSIX 用进程组(`SIGTERM` 客气两秒再 `SIGKILL`)。
+- 流式期间的工具条目原地改写、markdown 收束重画暂不开(POSIX 查光标位的 DSR 应答会跟后台按键监听抢 stdin,赛点没堵之前退化成顺序打印,信息不丢);逐键行编辑、历史、Tab 补全照常。
+
 ## 这台机器上的实际情况
 
 写这份骨架时探测过的工具链,如实记一笔:
