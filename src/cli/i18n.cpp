@@ -76,6 +76,8 @@ const Entry kZhCN[] = {
      "  /think 档位     切推理强度,档位以服务商为准(anthropic 内置 none/low/medium/high/xhigh/max\n"
      "                  映射,responses 原样递给 API)\n"
      "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
+     "  /skill list     列本机技能,标本地/远端来源;/skill install <url> 安装,/skill update [名字] 更新,\n"
+     "                  /skill remove <名字> 删除主目录级远端技能\n"
      "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
      "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
      "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
@@ -163,6 +165,8 @@ const Entry kZhCN[] = {
      "  /compact        手动压缩历史;/compact 重点说明 可指定这次额外保留什么\n"
      "  /think          看当前推理强度;/think 档位 切档位,档位以服务商为准(/effort 同义)\n"
      "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
+     "  /skill list     列本机技能,标本地/远端来源;/skill install <url> 安装,/skill update [名字] 更新,\n"
+     "                  /skill remove <名字> 删除主目录级远端技能\n"
      "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
      "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
      "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
@@ -258,6 +262,7 @@ const Entry kZhCN[] = {
     {"slash.desc.think", "看当前推理强度;/think 档位 切档位,档位以服务商为准(/effort 同义)"},
     {"slash.desc.effort", "同 /think(推理强度别名)"},
     {"slash.desc.skills", "列出扫描到的技能(主目录级 + 项目级)"},
+    {"slash.desc.skill", "安装、查看、更新或删除主目录里的远端技能"},
     {"slash.desc.mcp", "列出挂载的 MCP 服务器状态和工具清单"},
     {"slash.desc.lsp", "列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)"},
     {"slash.desc.todos", "查看当前待办清单"},
@@ -459,6 +464,22 @@ const Entry kZhCN[] = {
     {"cmd.skills.header", "已扫描到 {0} 个技能:"},
     {"cmd.skills.no_desc", "(没写说明)"},
 
+    // ---- /skill ----
+    {"cmd.skill.usage", "用法:/skill list | install <url> | update [名字] | remove <名字>"},
+    {"cmd.skill.no_home", "找不到用户主目录，远端技能没处安放。"},
+    {"cmd.skill.list_empty", "这里还没有技能。用 /skill install <url> 装一份。"},
+    {"cmd.skill.list_header", "本机技能:"},
+    {"cmd.skill.local", "本地自建"},
+    {"cmd.skill.remote", "远端 {0}，安装于 {1}"},
+    {"cmd.skill.scope_global", "主目录级"},
+    {"cmd.skill.scope_project", "项目级"},
+    {"cmd.skill.install_done", "已安装: {0}"},
+    {"cmd.skill.update_done", "已更新: {0}"},
+    {"cmd.skill.update_none", "没有记过来源的远端技能可更新。"},
+    {"cmd.skill.remove_done", "已删除: {0}"},
+    {"cmd.skill.error", "{0}失败: {1}"},
+    {"cmd.skill.refreshed", "技能清单已刷新，本会话后续对话也能用了。"},
+
     // ---- /context、/compact、/think ----
     {"cmd.context.usage", "上下文占用: {0} / {1} tokens ({2}%)"},
     {"cmd.context.compact_hint", "  —— 接近上限了,建议 /compact 一下"},
@@ -659,6 +680,8 @@ const Entry kEn[] = {
      "  /think <level>  set the reasoning effort; levels are provider-defined (anthropic maps\n"
      "                  none/low/medium/high/xhigh/max; responses passes it through)\n"
      "  /skills         list discovered skills (home-level + project-level)\n"
+     "  /skill list     list local skills and their source; /skill install <url> installs, /skill update [name]\n"
+     "                  updates, and /skill remove <name> removes a home-level remote skill\n"
      "  /mcp            list mounted MCP servers and their tools\n"
      "  /lsp            list LSP server status per language\n"
      "  /todos          show the current todo list (maintained by the todo_write tool)\n"
@@ -750,6 +773,8 @@ const Entry kEn[] = {
      "  /compact        compact the history; /compact <note> tells what to keep extra\n"
      "  /think          show reasoning effort; /think <level> sets it (provider-defined; /effort alias)\n"
      "  /skills         list discovered skills (home-level + project-level)\n"
+     "  /skill list     list local skills and their source; /skill install <url> installs, /skill update [name]\n"
+     "                  updates, and /skill remove <name> removes a home-level remote skill\n"
      "  /mcp            list mounted MCP servers and their tools\n"
      "  /lsp            list LSP server status per language\n"
      "  /todos          show the current todo list\n"
@@ -844,6 +869,7 @@ const Entry kEn[] = {
     {"slash.desc.think", "show/set reasoning effort; levels are provider-defined (/effort alias)"},
     {"slash.desc.effort", "same as /think (reasoning effort alias)"},
     {"slash.desc.skills", "list discovered skills (home-level + project-level)"},
+    {"slash.desc.skill", "install, list, update, or remove remote skills in the home directory"},
     {"slash.desc.mcp", "list mounted MCP servers and their tools"},
     {"slash.desc.lsp", "list LSP server status per language"},
     {"slash.desc.todos", "show the current todo list"},
@@ -999,6 +1025,22 @@ const Entry kEn[] = {
     {"pipe.tool_done", "[tool done] "},
     {"pipe.subtool_start", "  [subagent tool] "},
     {"pipe.todo_updated", "todo list updated ({0} items)"},
+
+    // ---- /skill ----
+    {"cmd.skill.usage", "Usage: /skill list | install <url> | update [name] | remove <name>"},
+    {"cmd.skill.no_home", "Cannot find the home directory; nowhere to store remote skills."},
+    {"cmd.skill.list_empty", "There are no skills here yet. Run /skill install <url> to add one."},
+    {"cmd.skill.list_header", "Local skills:"},
+    {"cmd.skill.local", "local"},
+    {"cmd.skill.remote", "remote {0}, installed {1}"},
+    {"cmd.skill.scope_global", "home-level"},
+    {"cmd.skill.scope_project", "project-level"},
+    {"cmd.skill.install_done", "Installed: {0}"},
+    {"cmd.skill.update_done", "Updated: {0}"},
+    {"cmd.skill.update_none", "There are no remote skills with saved sources to update."},
+    {"cmd.skill.remove_done", "Removed: {0}"},
+    {"cmd.skill.error", "{0} failed: {1}"},
+    {"cmd.skill.refreshed", "Skill discovery was refreshed; later turns in this session can use it."},
 
     // TODO(P1):以下 zh-CN 键暂缺英文翻译,tr 回退 zh-CN——诚实回退,不机翻凑数:
     //   mcp.* / plugin.* / tool_search.* / catalog.* / cmd.tools.* / cmd.plugins.* /

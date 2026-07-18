@@ -282,3 +282,21 @@ TEST_CASE("AllSlashCommands: /worktree 在列表里") {
     }
     CHECK(found);
 }
+
+TEST_CASE("ParseSlashCommand: /skill 分发命令与参数") {
+    const auto install = cli::ParseSlashCommand("/Skill install https://example.test/poem.md");
+    CHECK(install.command == cli::SlashCommand::Skill);
+    CHECK(install.args == "install https://example.test/poem.md");
+
+    const auto update = cli::ParseSlashCommand("/skill update poem");
+    CHECK(update.command == cli::SlashCommand::Skill);
+    CHECK(update.args == "update poem");
+
+    bool found = false;
+    for (const auto& command : cli::AllSlashCommands()) {
+        if (command.name == "/skill") {
+            found = true;
+        }
+    }
+    CHECK(found);
+}
