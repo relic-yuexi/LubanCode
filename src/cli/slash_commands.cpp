@@ -140,6 +140,18 @@ ParsedProviderCommand ParseProviderCommand(const std::string& args) {
         }
         return parsed;
     }
+    if (action == "set") {
+        // /provider set <名字> <字段> <值>,固定四个词,字段名和值都不认得
+        // 也照单全收(留给 main.cpp 报"不认得的字段"/"不认得的值"这种更
+        // 具体的错误),这里只管词数对不对。
+        if (words.size() == 4) {
+            parsed.action = ProviderCommandAction::Set;
+            parsed.name = words[1];
+            parsed.field = ToLower(words[2]);
+            parsed.value = ToLower(words[3]);
+        }
+        return parsed;
+    }
     if (action != "add") {
         return parsed;
     }

@@ -54,7 +54,7 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input);
 // /provider 的二级参数也收在 cli 层做纯解析，main.cpp 只接收已拆好的
 // 字段、做写盘和切会话。model / window 选项都只认一个值；少参数、重复
 // 选项、夹生子命令一律 Invalid，由调用方统一打印用法。
-enum class ProviderCommandAction { Invalid, List, Add, Switch, Remove };
+enum class ProviderCommandAction { Invalid, List, Add, Switch, Remove, Set };
 
 struct ParsedProviderCommand {
     ProviderCommandAction action = ProviderCommandAction::Invalid;
@@ -70,6 +70,13 @@ struct ParsedProviderCommand {
     // "/provider add 名字"这两种触发分步向导的写法(words.size() <= 2),
     // main.cpp 据此走 RunProviderAddWizard 而不是一行式解析结果。
     bool wizard = false;
+    // action == Set 时才有意义:field 是要设的字段名(已小写化,目前只认
+    // native_web_search),value 是原始值token(已小写化,on/off/true/false/
+    // 1/0 这类写法留给 main.cpp 调 config::ParseBoolToggle 去解读)——这层
+    // 只管拆词,不管字段认不认得、值合不合法,跟 wire/window 那两个字段
+    // 同一个分工路数。
+    std::string field;
+    std::string value;
 };
 
 ParsedProviderCommand ParseProviderCommand(const std::string& args);

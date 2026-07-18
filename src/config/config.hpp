@@ -392,6 +392,11 @@ std::expected<std::size_t, std::string> ParseContextWindowTokens(const std::stri
 std::expected<Wire, std::string> ParseProviderWire(const std::string& raw);
 std::string ProviderWireName(Wire wire);
 
+// /provider set <名字> <字段> <值> 的"值"解析:on/off、true/false、1/0 都
+// 认,大小写不敏感(cli 层已经小写化过,这里再兜一道);认不出就报错，
+// 错误信息里把认得的写法都列一遍。main.cpp 拿它把用户敲的字符串变 bool。
+std::expected<bool, std::string> ParseBoolToggle(const std::string& raw);
+
 // 粗验 provider：名字、地址、密钥环境变量名不许空；地址只要求 http:// 或
 // https:// 起首，避免把 URL 语义校得过死。/provider add 写盘前调用。
 std::expected<void, std::string> ValidateProviderConfig(const ProviderConfig& provider);
@@ -408,6 +413,14 @@ std::expected<void, std::string> ValidateProviderName(const std::string& name,
 std::optional<std::string> ProviderApiKey(const ProviderConfig& provider);
 
 const ProviderConfig* FindProvider(const std::vector<ProviderConfig>& providers, const std::string& name);
+
+// 纯函数,不摸文件:在内存里的 providers 列表找 name 对应那条,把
+// native_web_search 改成 enabled。找到就改完返回 true;找不到原样不动、
+// 返回 false——调用方(HandleProviderCommand /provider set 分支)据此判断
+// 要不要报"找不着 provider"、要不要接着落盘。目前只服务这一个字段,以后
+// 要扩展别的可设字段(比如 model_reasoning_effort),照这个函数抄一份或者
+// 改成传字段名 + 一个 mutate 回调都行。
+bool SetProviderNativeWebSearch(std::vector<ProviderConfig>& providers, const std::string& name, bool enabled);
 
 // 纯函数:检查合并结果里的 api_key 是不是空的。空的话报错,错误信息里把
 // 四级来源都提一遍(按 result.config.wire 挑出对应的通用环境变量名),
@@ -487,10 +500,16 @@ std::expected<std::vector<ProviderConfig>, std::string> ParseProvidersConfig(
 std::expected<void, std::string> UpdateProvidersInConfigFile(const std::string& file_path,
                                                                const std::vector<ProviderConfig>& providers);
 
-// /provider add/remove 永远改用户主目录的全局 config.json，不碰项目配置。
-// 成功时返回实际写入路径；删除找不到名字时报错。
+// /provider add/remove/set 永远改用户主目录的全局 config.json，不碰项目配置。
+// 成功时返回实际写入路径；删除/设置找不到名字时报错，不碰文件。
 std::expected<std::string, std::string> AddProviderToGlobalConfig(const ProviderConfig& provider);
 std::expected<std::string, std::string> RemoveProviderFromGlobalConfig(const std::string& name);
+
+// /provider set native_web_search 用:把全局配置里对应 provider 的
+// native_web_search 改掉再原样落盘(SetProviderNativeWebSearch 做实际改
+// 字段那一步),返回落盘路径。找不到这个 provider 名字就报错、不碰文件。
+std::expected<std::string, std::string> SetProviderNativeWebSearchInGlobalConfig(const std::string& name,
+                                                                                   bool enabled);
 
 // 把一段 JSON 文本解析成 FileConfig。file_path_for_error 只用来拼错误信息,
 // 不影响解析本身。JSON 坏了、或者顶层不是一个 object,都返回带路径的错误。

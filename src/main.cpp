@@ -3189,6 +3189,43 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             std::cout << trf("cmd.provider.switched", provider->name, provider->base_url) << "\n";
             return;
         }
+        case lubancode::cli::ProviderCommandAction::Set: {
+            // 目前只认 native_web_search 这一个可设字段;字段名不对、开关值
+            // 不认得,都跟 Add 分支同一个套路——套 set_failed 报个更具体的
+            // 原因,不写盘、不改内存。
+            if (command.field != "native_web_search") {
+                std::cout << trf("cmd.provider.set_failed", trf("cmd.provider.set_unknown_field", command.field))
+                          << "\n";
+                return;
+            }
+            const auto enabled = lubancode::config::ParseBoolToggle(command.value);
+            if (!enabled.has_value()) {
+                std::cout << trf("cmd.provider.set_failed", enabled.error()) << "\n";
+                return;
+            }
+            // 先改内存里这份:SetProviderNativeWebSearch 顺带当"名字存不存在"
+            // 的判断——找不到就原样不动、返回 false,不往下走落盘那一步。
+            if (!lubancode::config::SetProviderNativeWebSearch(config.providers, command.name, *enabled)) {
+                std::cout << trf("cmd.provider.not_found", command.name) << "\n";
+                return;
+            }
+            const auto saved = lubancode::config::SetProviderNativeWebSearchInGlobalConfig(command.name, *enabled);
+            if (!saved.has_value()) {
+                std::cout << trf("cmd.provider.set_failed", saved.error()) << "\n";
+                return;
+            }
+            std::cout << trf("cmd.provider.set_ok", command.name, command.field, *enabled ? "on" : "off", *saved)
+                      << "\n";
+            // 改的正好是当前活跃端:顶层镜像字段跟着同步、重建 backend,别让
+            // "刚改完当前端却要等下次 /provider switch 才生效"这种反直觉
+            // 体验发生——跟 Switch 分支改完就 Rebuild 是同一个道理。
+            if (active_provider == command.name) {
+                config.native_web_search = *enabled;
+                real_backend.Rebuild(config);
+                std::cout << trf("cmd.provider.set_active_applied", command.name) << "\n";
+            }
+            return;
+        }
         case lubancode::cli::ProviderCommandAction::Remove:
             if (!lubancode::cli::CanRemoveProvider(active_provider, command.name)) {
                 std::cout << trf("cmd.provider.remove_active", command.name) << "\n";
