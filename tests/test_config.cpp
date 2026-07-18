@@ -1710,3 +1710,104 @@ TEST_CASE("UpdateProvidersInConfigFile: 回写保留旁字段且不落明文密�
     CHECK(written["providers"][0]["key_env"] == "ZAI_API_KEY");
     CHECK_FALSE(written["providers"][0].contains("api_key"));
 }
+
+// ---------------------------------------------------------------------------
+// providers 新字段:api_key(可选,直接贴 key 落盘)、model_reasoning_effort
+// (可选,切端时应用)。#59 /provider add 向导新增。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseFileConfigJson: providers 解出 api_key 与 model_reasoning_effort") {
+    const auto parsed = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"sub-openai","base_url":"https://cc.moontidef.work","wire":"responses",)"
+        R"("api_key":"sk-pasted-key","model":"gpt-5.5","model_reasoning_effort":"xhigh"}]})",
+        "/tmp/config.json");
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->providers.has_value());
+    REQUIRE(parsed->providers->size() == 1);
+    const auto& provider = parsed->providers->front();
+    CHECK(provider.api_key == "sk-pasted-key");
+    CHECK(provider.model_reasoning_effort == "xhigh");
+}
+
+TEST_CASE("ParseFileConfigJson: providers 没写 api_key/model_reasoning_effort 时两个字段都留空") {
+    const auto parsed = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"minimax","base_url":"https://api.minimax.io/anthropic","wire":"anthropic"}]})",
+        "/tmp/config.json");
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->providers.has_value());
+    REQUIRE(parsed->providers->size() == 1);
+    const auto& provider = parsed->providers->front();
+    CHECK(provider.api_key.empty());
+    CHECK(provider.model_reasoning_effort.empty());
+}
+
+TEST_CASE("ParseFileConfigJson: providers 的 api_key/model_reasoning_effort 类型不对就报错") {
+    const auto bad_api_key = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"x","base_url":"https://a.test","wire":"anthropic","api_key":7}]})",
+        "/tmp/config.json");
+    CHECK_FALSE(bad_api_key.has_value());
+    CHECK(bad_api_key.error().find("api_key") != std::string::npos);
+
+    const auto bad_effort = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"x","base_url":"https://a.test","wire":"anthropic","model_reasoning_effort":7}]})",
+        "/tmp/config.json");
+    CHECK_FALSE(bad_effort.has_value());
+    CHECK(bad_effort.error().find("model_reasoning_effort") != std::string::npos);
+}
+
+TEST_CASE("UpdateProvidersInConfigFile: api_key/model_reasoning_effort 设置了就落盘,回读原样") {
+    TempCwdDir cwd;
+    const std::filesystem::path path = std::filesystem::path(cwd.Path()) / ".lubancode" / "config.json";
+    cwd.WriteFile(".lubancode/config.json", R"({"providers":[]})");
+
+    const std::vector<config::ProviderConfig> providers{{
+        .name = "sub-openai",
+        .base_url = "https://cc.moontidef.work",
+        .wire = config::Wire::Responses,
+        .api_key = "sk-pasted-key",
+        .model = "gpt-5.5",
+        .model_reasoning_effort = "xhigh",
+    }};
+    REQUIRE(config::UpdateProvidersInConfigFile(path.string(), providers).has_value());
+
+    const nlohmann::json written = nlohmann::json::parse(cwd.ReadFile(".lubancode/config.json"));
+    REQUIRE(written["providers"].size() == 1);
+    CHECK(written["providers"][0]["api_key"] == "sk-pasted-key");
+    CHECK(written["providers"][0]["model_reasoning_effort"] == "xhigh");
+
+    // 回读能解析出同样的值(往返不丢字段)。
+    const auto reparsed = config::ParseFileConfigJson(written.dump(), path.string());
+    REQUIRE(reparsed.has_value());
+    REQUIRE(reparsed->providers.has_value());
+    REQUIRE(reparsed->providers->size() == 1);
+    CHECK(reparsed->providers->front().api_key == "sk-pasted-key");
+    CHECK(reparsed->providers->front().model_reasoning_effort == "xhigh");
+}
+
+TEST_CASE("ProviderApiKey: api_key 非空时优先于 key_env,不管环境变量有没有设置") {
+    config::ProviderConfig provider;
+    provider.key_env = "LUBANCODE_TEST_PROVIDER_KEY_ENV_DOES_NOT_EXIST_XYZ";
+    provider.api_key = "sk-direct-pasted-key";
+    const auto key = config::ProviderApiKey(provider);
+    REQUIRE(key.has_value());
+    CHECK(*key == "sk-direct-pasted-key");
+}
+
+TEST_CASE("ProviderApiKey: api_key 为空时退回 key_env 环境变量,没设置就是 nullopt") {
+    config::ProviderConfig provider;
+    provider.key_env = "LUBANCODE_TEST_PROVIDER_KEY_ENV_DOES_NOT_EXIST_XYZ";
+    provider.api_key.clear();
+    const auto key = config::ProviderApiKey(provider);
+    CHECK_FALSE(key.has_value());
+}
+
+TEST_CASE("ValidateProviderName: 空名字、非法字符、重名都拦下") {
+    const std::vector<config::ProviderConfig> existing{{.name = "dup"}};
+
+    CHECK_FALSE(config::ValidateProviderName("", existing).has_value());
+    CHECK_FALSE(config::ValidateProviderName("has space", existing).has_value());
+    CHECK_FALSE(config::ValidateProviderName("has/slash", existing).has_value());
+    CHECK_FALSE(config::ValidateProviderName("dup", existing).has_value());
+
+    CHECK(config::ValidateProviderName("sub-openai_1.0", existing).has_value());
+}

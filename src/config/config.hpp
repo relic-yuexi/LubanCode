@@ -70,14 +70,21 @@ constexpr const char* kDefaultTheme = "dark";
 // (字符数、老的硬安全网,单位不同、语义也不同)是两回事。
 constexpr std::size_t kDefaultContextWindowTokens = 256000;
 
-// 一家模型服务端的会话配置。providers 只记密钥所在环境变量的名字，绝不
-// 把密钥本身落到 config.json。model 可以留空：切过去后仍可用 /model 选。
+// 一家模型服务端的会话配置。默认走 key_env(只记密钥所在环境变量的名字，
+// 不落明文)；/provider add 向导允许直接贴 key 落盘到 api_key 字段，取值
+// 优先级 api_key（非空）> 环境变量 key_env（见 ProviderApiKey）。api_key
+// 落了盘就不再是"只记名字"那套安全设计——展示/日志一律走 MaskApiKey 打码，
+// 由调用方自己当心。model 可以留空：切过去后仍可用 /model 选。
+// model_reasoning_effort 可选：切到这个 provider 时按 /think 同一套机制
+// 应用（写进 current_think），留空 = 不动当前档位。
 struct ProviderConfig {
     std::string name;
     std::string base_url;
     Wire wire = Wire::Anthropic;
     std::string key_env = "ANTHROPIC_AUTH_TOKEN";
+    std::string api_key;               // 可选，非空时优先于 key_env
     std::string model;
+    std::string model_reasoning_effort;  // 可选，切到该端时应用的推理档位
     std::size_t context_window_tokens = kDefaultContextWindowTokens;
 };
 
@@ -377,8 +384,15 @@ std::string ProviderWireName(Wire wire);
 // https:// 起首，避免把 URL 语义校得过死。/provider add 写盘前调用。
 std::expected<void, std::string> ValidateProviderConfig(const ProviderConfig& provider);
 
-// 运行时从 provider.key_env 取密钥；没有、或环境变量为空，返回 nullopt。
-// 这条接口刻意不接受明文 key，调用方也无需知道其值来自哪里。
+// 粗验 provider 名字本身：非空、只许字母/数字/下划线/点/短横线（不许空白、
+// 斜杠这类会跟 slash 命令解析或路径拼接打架的字符），且不与 existing 里
+// 任何一个重名。/provider add 向导用（一行式旧用法只查重名，不查字符集，
+// 维持既有行为不变）。
+std::expected<void, std::string> ValidateProviderName(const std::string& name,
+                                                        const std::vector<ProviderConfig>& existing);
+
+// 运行时取密钥：provider.api_key 非空就直接用（向导贴的明文）；否则退到
+// provider.key_env 对应的环境变量，没有、或环境变量为空，返回 nullopt。
 std::optional<std::string> ProviderApiKey(const ProviderConfig& provider);
 
 const ProviderConfig* FindProvider(const std::vector<ProviderConfig>& providers, const std::string& name);

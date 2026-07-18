@@ -140,7 +140,23 @@ ParsedProviderCommand ParseProviderCommand(const std::string& args) {
         }
         return parsed;
     }
-    if (action != "add" || words.size() < 4) {
+    if (action != "add") {
+        return parsed;
+    }
+
+    // 裸敲 `/provider add`,或者只给了名字 `/provider add 名字`:进分步向导
+    // (main.cpp 走 RunProviderAddWizard)。三个词及以上但凑不满一行式必填
+    // 的 <名字> <base_url> <协议> 三项(words.size() 3),不当向导触发——
+    // 那是用户敲一行式敲到一半、漏了参数,维持原样 Invalid,提示用法。
+    if (words.size() <= 2) {
+        parsed.action = ProviderCommandAction::Add;
+        parsed.wizard = true;
+        if (words.size() == 2) {
+            parsed.name = words[1];
+        }
+        return parsed;
+    }
+    if (words.size() < 4) {
         return parsed;
     }
 
@@ -149,7 +165,9 @@ ParsedProviderCommand ParseProviderCommand(const std::string& args) {
     parsed.base_url = words[2];
     parsed.wire = ToLower(words[3]);
     bool saw_key_env = false;
+    bool saw_key = false;
     bool saw_model = false;
+    bool saw_effort = false;
     bool saw_window = false;
     for (std::size_t i = 4; i < words.size();) {
         if (i + 1 >= words.size()) {
@@ -161,9 +179,15 @@ ParsedProviderCommand ParseProviderCommand(const std::string& args) {
         if (option == "--key-env" && !saw_key_env) {
             parsed.key_env = value;
             saw_key_env = true;
+        } else if (option == "--key" && !saw_key) {
+            parsed.key = value;
+            saw_key = true;
         } else if (option == "--model" && !saw_model) {
             parsed.model = value;
             saw_model = true;
+        } else if (option == "--effort" && !saw_effort) {
+            parsed.effort = value;
+            saw_effort = true;
         } else if (option == "--window" && !saw_window) {
             parsed.window = value;
             saw_window = true;

@@ -27,6 +27,11 @@ std::optional<std::string> GetEnv(const char* name) {
     return platform::GetEnvVar(name);
 }
 
+// 前向声明:定义在下面另一段匿名命名空间里(跟 UpdateProvidersInConfigFile
+// 挨着),这里提前声明给 SaveConfigFile 用——同一个翻译单元里的匿名命名空间
+// 全部等价于同一个具名空间,提前声明、后面定义没问题。
+nlohmann::json ProvidersToJson(const std::vector<ProviderConfig>& providers);
+
 }  // namespace
 
 std::optional<std::string> HomeDir() {
@@ -81,7 +86,27 @@ std::expected<void, std::string> ValidateProviderConfig(const ProviderConfig& pr
     return {};
 }
 
+std::expected<void, std::string> ValidateProviderName(const std::string& name,
+                                                        const std::vector<ProviderConfig>& existing) {
+    if (name.empty()) {
+        return std::unexpected("provider 名字不能为空");
+    }
+    for (const char c : name) {
+        const bool ok = std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_' || c == '.' || c == '-';
+        if (!ok) {
+            return std::unexpected("provider 名字只能包含字母、数字、下划线、点、短横线: " + name);
+        }
+    }
+    if (FindProvider(existing, name) != nullptr) {
+        return std::unexpected("provider 已存在: " + name);
+    }
+    return {};
+}
+
 std::optional<std::string> ProviderApiKey(const ProviderConfig& provider) {
+    if (!provider.api_key.empty()) {
+        return provider.api_key;
+    }
     return GetEnv(provider.key_env.c_str());
 }
 
@@ -435,11 +460,23 @@ std::expected<std::vector<ProviderConfig>, std::string> ParseProvidersConfig(
             }
             provider.key_env = item["key_env"].get<std::string>();
         }
+        if (item.contains("api_key")) {
+            if (!item["api_key"].is_string()) {
+                return std::unexpected(prefix + " 里的 api_key 字段必须是字符串");
+            }
+            provider.api_key = item["api_key"].get<std::string>();
+        }
         if (item.contains("model")) {
             if (!item["model"].is_string()) {
                 return std::unexpected(prefix + " 里的 model 字段必须是字符串");
             }
             provider.model = item["model"].get<std::string>();
+        }
+        if (item.contains("model_reasoning_effort")) {
+            if (!item["model_reasoning_effort"].is_string()) {
+                return std::unexpected(prefix + " 里的 model_reasoning_effort 字段必须是字符串");
+            }
+            provider.model_reasoning_effort = item["model_reasoning_effort"].get<std::string>();
         }
         if (item.contains("context_window")) {
             std::string raw_window;
@@ -1195,16 +1232,7 @@ std::expected<std::string, std::string> SaveConfigFile(const Config& config) {
     j["model"] = config.model;
     j["max_context_chars"] = config.max_context_chars;
     if (!config.providers.empty()) {
-        nlohmann::json providers = nlohmann::json::array();
-        for (const ProviderConfig& provider : config.providers) {
-            providers.push_back({{"name", provider.name},
-                                 {"base_url", provider.base_url},
-                                 {"wire", ProviderWireName(provider.wire)},
-                                 {"key_env", provider.key_env},
-                                 {"model", provider.model},
-                                 {"context_window", provider.context_window_tokens}});
-        }
-        j["providers"] = std::move(providers);
+        j["providers"] = ProvidersToJson(config.providers);
     }
     if (!config.language.empty()) {
         j["language"] = config.language;  // i18n:向导选过语言才写,空 = 跟系统,不落字段
@@ -1273,12 +1301,21 @@ namespace {
 nlohmann::json ProvidersToJson(const std::vector<ProviderConfig>& providers) {
     nlohmann::json out = nlohmann::json::array();
     for (const ProviderConfig& provider : providers) {
-        out.push_back({{"name", provider.name},
-                       {"base_url", provider.base_url},
-                       {"wire", ProviderWireName(provider.wire)},
-                       {"key_env", provider.key_env},
-                       {"model", provider.model},
-                       {"context_window", provider.context_window_tokens}});
+        nlohmann::json item = {{"name", provider.name},
+                               {"base_url", provider.base_url},
+                               {"wire", ProviderWireName(provider.wire)},
+                               {"key_env", provider.key_env},
+                               {"model", provider.model},
+                               {"context_window", provider.context_window_tokens}};
+        // api_key/model_reasoning_effort 都可选：没设置就不落这个键，别让
+        // 一份没贴过明文 key 的旧配置写回后平白多出一个空字符串字段。
+        if (!provider.api_key.empty()) {
+            item["api_key"] = provider.api_key;
+        }
+        if (!provider.model_reasoning_effort.empty()) {
+            item["model_reasoning_effort"] = provider.model_reasoning_effort;
+        }
+        out.push_back(std::move(item));
     }
     return out;
 }

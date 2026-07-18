@@ -49,4 +49,29 @@ struct WizardOutcome {
 // 中途读到 EOF(read_line 返回 nullopt)按用户放弃处理,返回 std::nullopt。
 std::optional<WizardOutcome> RunSetupWizard(WizardIO& io);
 
+// ---------------------------------------------------------------------------
+// 下面几个是向导用的通用小工具,原本关在 setup_wizard.cpp 的匿名命名空间里,
+// /provider add 向导(cli/provider_wizard.cpp)复用同一套问答机器,所以搬出来
+// 导出。行为不变,注释见 setup_wizard.cpp 里原来的位置。
+// ---------------------------------------------------------------------------
+
+// 剥掉尾部所有斜杠。
+std::string StripTrailingSlashes(const std::string& s);
+
+// 读一行、剥空白;EOF 时返回 std::nullopt。
+std::optional<std::string> ReadTrimmed(WizardIO& io, const std::string& prompt);
+
+// 反复问,直到读到非空字符串,或者 EOF(此时返回 std::nullopt)。
+std::optional<std::string> ReadRequired(WizardIO& io, const std::string& prompt, const std::string& empty_hint);
+
+// 编号选择,空输入按默认(1-based default_choice)处理,超范围/非数字重问。
+// EOF 返回 std::nullopt。
+std::optional<std::size_t> ReadChoice(WizardIO& io, const std::string& prompt, std::size_t count,
+                                       std::size_t default_choice);
+
+// model 这一步:输入非空就直接用;输入空就拉列表、编号选;拉取失败/列表为空
+// 都回落到"手动输入,必须非空"。返回值为空表示 EOF,调用方原样往上传。
+std::optional<std::string> ResolveModel(WizardIO& io, config::Wire wire, const std::string& base_url,
+                                         const std::string& api_key);
+
 }  // namespace lubancode::cli

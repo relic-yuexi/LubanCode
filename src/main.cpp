@@ -48,6 +48,7 @@
 #include "cli/image_input.hpp"
 #include "cli/worktree.hpp"
 #include "cli/markdown.hpp"
+#include "cli/provider_wizard.hpp"
 #include "cli/setup_wizard.hpp"
 #include "cli/slash_commands.hpp"
 #include "cli/spinner.hpp"
@@ -2832,10 +2833,50 @@ void PrintProviderList(const std::vector<lubancode::config::ProviderConfig>& pro
                                 (active_provider.empty() && provider.wire == current_config.wire &&
                                  provider.base_url == current_config.base_url && provider.model == current_config.model);
         const std::string current = is_current ? tr("cmd.provider.current") : "";
+        // api_key/model_reasoning_effort 都是可选字段;api_key 展示一律走
+        // MaskApiKey 打码,绝不明文——跟 /config、初次配置向导汇总同一个规矩。
+        std::string extra;
+        if (!provider.api_key.empty()) {
+            extra += trf("cmd.provider.extra_api_key", lubancode::config::MaskApiKey(provider.api_key));
+        }
+        if (!provider.model_reasoning_effort.empty()) {
+            extra += trf("cmd.provider.extra_effort", provider.model_reasoning_effort);
+        }
         std::cout << trf("cmd.provider.line", provider.name, lubancode::config::ProviderWireName(provider.wire),
-                          provider.base_url, model, provider.context_window_tokens, provider.key_env, current)
+                          provider.base_url, model, provider.context_window_tokens, provider.key_env, extra, current)
                   << "\n";
     }
+}
+
+// /provider add 向导:跟 RunInitialSetupWizard(初次配置向导)同一套 WizardIO
+// 建法——接 std::cout / cli::ReadLine / api::ListModels,不碰真实 IO 之外的
+// 任何东西。问出来的是一条 ProviderConfig,写盘复用一行式旧用法同一条路径
+// (AddProviderToGlobalConfig)。用户中途 EOF、或者最后一问回答 n,都当"整个
+// 添加动作被取消"处理:不改 config.providers、不写盘。
+void RunProviderAddWizardInteractive(const std::string& name_prefill, lubancode::config::Config& config) {
+    lubancode::cli::WizardIO io;
+    io.print = [](const std::string& line) {
+        std::cout << line << "\n";
+        std::cout.flush();
+    };
+    io.read_line = []() -> std::optional<std::string> { return lubancode::cli::ReadLine(""); };
+    io.fetch_models = [](lubancode::config::Wire wire, const std::string& base_url, const std::string& api_key) {
+        return lubancode::api::ListModels(wire, base_url, api_key);
+    };
+
+    const auto outcome = lubancode::cli::RunProviderAddWizard(io, name_prefill, config.providers);
+    if (!outcome.has_value() || !outcome->save_requested) {
+        std::cout << tr("cmd.provider.add_cancelled") << "\n";
+        return;
+    }
+
+    const auto saved = lubancode::config::AddProviderToGlobalConfig(outcome->provider);
+    if (!saved.has_value()) {
+        std::cout << trf("cmd.provider.add_failed", saved.error()) << "\n";
+        return;
+    }
+    config.providers.push_back(outcome->provider);
+    std::cout << trf("cmd.provider.added", outcome->provider.name, *saved) << "\n";
 }
 
 // /provider:添端只写全局配置；项目级若自行写了 providers，加载时仍按既有
@@ -2857,6 +2898,12 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             PrintProviderList(config.providers, config, active_provider);
             return;
         case lubancode::cli::ProviderCommandAction::Add: {
+            if (command.wizard) {
+                // 裸敲 /provider add,或者 /provider add <名字>(名字先给上,
+                // 跳过向导第一问)——走分步向导,不进下面的一行式解析路径。
+                RunProviderAddWizardInteractive(command.name, config);
+                return;
+            }
             const auto wire = lubancode::config::ParseProviderWire(command.wire);
             if (!wire.has_value()) {
                 std::cout << trf("cmd.provider.add_failed", wire.error()) << "\n";
@@ -2876,7 +2923,9 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                 .base_url = command.base_url,
                 .wire = *wire,
                 .key_env = command.key_env,
+                .api_key = command.key,
                 .model = command.model,
+                .model_reasoning_effort = command.effort,
                 .context_window_tokens = window,
             };
             const auto valid = lubancode::config::ValidateProviderConfig(provider);
@@ -2923,6 +2972,15 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             context_tracker.set_window_tokens(config.context_window_tokens);
             ApplyModelCatalog(catalog, *current_model, /*think_explicit=*/false, /*window_explicit=*/true,
                               current_think, context_tracker, current_model_instructions);
+            // provider 配了 model_reasoning_effort 就按 /think 同一套机制应用
+            // (直接改 current_think,下一次请求就带上);没配就不动——不管
+            // ApplyModelCatalog 刚才有没有按模型目录动过档位,都维持现状。
+            // 放在 ApplyModelCatalog 之后:provider 的显式配置该压过目录默认。
+            if (!provider->model_reasoning_effort.empty()) {
+                *current_think = provider->model_reasoning_effort;
+                std::cout << trf("cmd.provider.effort_applied", provider->name, provider->model_reasoning_effort)
+                          << "\n";
+            }
             rebuild_loop(/*preserve_history=*/true);
             std::cout << trf("cmd.provider.switched", provider->name, provider->base_url) << "\n";
             return;

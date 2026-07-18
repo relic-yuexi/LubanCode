@@ -20,8 +20,15 @@ std::string Trim(const std::string& s) {
     return s.substr(begin, end - begin);
 }
 
+std::string WireToString(config::Wire wire) {
+    return wire == config::Wire::Responses ? "responses" : "anthropic";
+}
+
+}  // namespace
+
 // 剥掉尾部所有斜杠(base_url 不该带结尾 /,后面各 client 自己拼 /v1/messages
-// 之类的路径,留着斜杠会拼出双斜杠)。
+// 之类的路径,留着斜杠会拼出双斜杠)。/provider add 向导(provider_wizard.cpp)
+// 复用这个函数,声明搬进了 setup_wizard.hpp。
 std::string StripTrailingSlashes(const std::string& s) {
     std::size_t end = s.size();
     while (end > 0 && s[end - 1] == '/') {
@@ -80,10 +87,6 @@ std::optional<std::size_t> ReadChoice(WizardIO& io, const std::string& prompt, s
     }
 }
 
-std::string WireToString(config::Wire wire) {
-    return wire == config::Wire::Responses ? "responses" : "anthropic";
-}
-
 // model 这一步:输入非空就直接用;输入空就拉列表、编号选;拉取失败/列表为空
 // 都回落到"手动输入,必须非空"。返回值为空表示 EOF,调用方原样往上传。
 std::optional<std::string> ResolveModel(WizardIO& io, config::Wire wire, const std::string& base_url,
@@ -121,6 +124,8 @@ std::optional<std::string> ResolveModel(WizardIO& io, config::Wire wire, const s
     }
     return models[*choice - 1].id;
 }
+
+namespace {
 
 // i18n:第一问选界面语言——选完立即 SetLanguage,向导后续文案(包括
 // 存进配置的 language 字段)即用所选语言。列表 = 内置两种 + 语言包;

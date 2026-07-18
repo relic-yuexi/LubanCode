@@ -250,6 +250,23 @@ const Entry kZhCN[] = {
     {"wizard.saved", "已保存到 {0}"},
     {"wizard.save_failed", "保存失败: {0}(不影响本次继续用,只是这份配置这次没记住)"},
 
+    // ---- /provider add 向导(裸敲 /provider add 或 /provider add 名字 触发) ----
+    {"provider_wizard.title", "=== 添 provider 向导 ==="},
+    {"provider_wizard.name.prompt", "名字: "},
+    {"provider_wizard.name.empty", "名字不能为空,再输一遍。"},
+    {"provider_wizard.name.prefill_invalid", "命令行给的名字 {0} 不能用: {1},改问一遍。"},
+    {"provider_wizard.base_url.bad_scheme", "base_url 得以 http:// 或 https:// 开头,再输一遍。"},
+    {"provider_wizard.api_key.prompt", "api_key(直接贴 key 落盘;留空则改问环境变量名): "},
+    {"provider_wizard.key_env.prompt", "环境变量名 [ANTHROPIC_AUTH_TOKEN]: "},
+    {"provider_wizard.effort.hint",
+     "model_reasoning_effort(可选,切到这个 provider 时自动应用的推理档位,候选跟 /think 一致: "
+     "none/low/medium/high/xhigh/max,留空跳过):"},
+    {"provider_wizard.effort.prompt", "effort: "},
+    {"provider_wizard.effort.unset", "(未设置)"},
+    {"provider_wizard.summary.title", "provider 配置汇总:"},
+    {"provider_wizard.confirm.prompt", "确认写入全局配置? [Y/n]: "},
+    {"provider_wizard.cancelled", "已取消,没有写入任何配置。"},
+
     // ---- slash 命令描述表 ----
     {"slash.desc.help", "列出所有命令"},
     {"slash.desc.model", "拉模型列表选,或 /model 名字 直接切"},
@@ -532,18 +549,25 @@ const Entry kZhCN[] = {
     {"cmd.provider.usage",
      "用法:\n"
      "  /provider list\n"
-     "  /provider add <名字> <base_url> <anthropic|responses> [--key-env 环境变量名] [--model 默认模型] [--window 大小]\n"
+     "  /provider add                          进分步向导(裸敲)\n"
+     "  /provider add <名字>                    进分步向导(名字先给上,跳过第一问)\n"
+     "  /provider add <名字> <base_url> <anthropic|responses> [--key-env 环境变量名] [--key 明文key] "
+     "[--model 默认模型] [--effort 推理档位] [--window 大小]\n"
      "  /provider switch <名字> [模型]\n"
      "  /provider remove <名字>"},
     {"cmd.provider.empty", "还没有配 provider。用 /provider add 添一个。"},
     {"cmd.provider.header", "已配 provider:"},
-    {"cmd.provider.line", "  - {0} [{1}] {2}; model={3}; window={4}; key_env={5}{6}"},
+    {"cmd.provider.line", "  - {0} [{1}] {2}; model={3}; window={4}; key_env={5}{6}{7}"},
     {"cmd.provider.current", " (当前)"},
     {"cmd.provider.model_unset", "(未设置)"},
+    {"cmd.provider.extra_api_key", "; api_key={0}"},
+    {"cmd.provider.extra_effort", "; effort={0}"},
     {"cmd.provider.added", "已添 provider {0},写进全局配置 {1}。"},
+    {"cmd.provider.add_cancelled", "已取消,没有添加 provider。"},
     {"cmd.provider.add_failed", "添 provider 失败: {0}"},
     {"cmd.provider.exists", "provider 已存在: {0}"},
     {"cmd.provider.switched", "已切到 provider {0},后续请求走 {1}。"},
+    {"cmd.provider.effort_applied", "已按 provider {0} 的配置,把推理档位设为 {1}。"},
     {"cmd.provider.not_found", "找不着 provider: {0}"},
     {"cmd.provider.key_missing", "provider {0} 要环境变量 {1},眼下没取到值。"},
     {"cmd.provider.removed", "已删 provider {0},全局配置在 {1}。"},
@@ -883,6 +907,23 @@ const Entry kEn[] = {
     {"wizard.saved", "Saved to {0}"},
     {"wizard.save_failed", "Save failed: {0} (this run continues; the config just was not persisted)"},
 
+    // ---- /provider add wizard (triggered by a bare /provider add, or /provider add <name>) ----
+    {"provider_wizard.title", "=== Add provider wizard ==="},
+    {"provider_wizard.name.prompt", "name: "},
+    {"provider_wizard.name.empty", "name cannot be empty; try again."},
+    {"provider_wizard.name.prefill_invalid", "The name {0} given on the command line cannot be used: {1}; asking again."},
+    {"provider_wizard.base_url.bad_scheme", "base_url must start with http:// or https://; try again."},
+    {"provider_wizard.api_key.prompt", "api_key (paste the key to store it directly; leave blank to use an env var instead): "},
+    {"provider_wizard.key_env.prompt", "environment variable name [ANTHROPIC_AUTH_TOKEN]: "},
+    {"provider_wizard.effort.hint",
+     "model_reasoning_effort (optional, applied automatically when switching to this provider; candidates match "
+     "/think: none/low/medium/high/xhigh/max; leave blank to skip):"},
+    {"provider_wizard.effort.prompt", "effort: "},
+    {"provider_wizard.effort.unset", "(not set)"},
+    {"provider_wizard.summary.title", "Provider configuration summary:"},
+    {"provider_wizard.confirm.prompt", "Confirm writing to the global config? [Y/n]: "},
+    {"provider_wizard.cancelled", "Cancelled; nothing was written."},
+
     // ---- slash command descriptions ----
     {"slash.desc.help", "list all commands"},
     {"slash.desc.model", "pick from the model list, or /model <name> to switch directly"},
@@ -1075,18 +1116,25 @@ const Entry kEn[] = {
     {"cmd.provider.usage",
      "Usage:\n"
      "  /provider list\n"
-     "  /provider add <name> <base_url> <anthropic|responses> [--key-env ENV] [--model MODEL] [--window SIZE]\n"
+     "  /provider add                          step-by-step wizard (bare)\n"
+     "  /provider add <name>                    step-by-step wizard (name given up front, skips the first question)\n"
+     "  /provider add <name> <base_url> <anthropic|responses> [--key-env ENV] [--key API_KEY] [--model MODEL] "
+     "[--effort LEVEL] [--window SIZE]\n"
      "  /provider switch <name> [model]\n"
      "  /provider remove <name>"},
     {"cmd.provider.empty", "No providers are configured. Use /provider add to add one."},
     {"cmd.provider.header", "Configured providers:"},
-    {"cmd.provider.line", "  - {0} [{1}] {2}; model={3}; window={4}; key_env={5}{6}"},
+    {"cmd.provider.line", "  - {0} [{1}] {2}; model={3}; window={4}; key_env={5}{6}{7}"},
     {"cmd.provider.current", " (current)"},
     {"cmd.provider.model_unset", "(not set)"},
+    {"cmd.provider.extra_api_key", "; api_key={0}"},
+    {"cmd.provider.extra_effort", "; effort={0}"},
     {"cmd.provider.added", "Added provider {0} and saved it to global config {1}."},
+    {"cmd.provider.add_cancelled", "Cancelled; no provider was added."},
     {"cmd.provider.add_failed", "Could not add provider: {0}"},
     {"cmd.provider.exists", "Provider already exists: {0}"},
     {"cmd.provider.switched", "Switched to provider {0}; later requests use {1}."},
+    {"cmd.provider.effort_applied", "Applied reasoning effort {1} from provider {0}."},
     {"cmd.provider.not_found", "Provider not found: {0}"},
     {"cmd.provider.key_missing", "Provider {0} needs environment variable {1}, but it is not set."},
     {"cmd.provider.removed", "Removed provider {0}; global config is {1}."},

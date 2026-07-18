@@ -62,8 +62,14 @@ struct ParsedProviderCommand {
     std::string base_url;
     std::string wire;
     std::string key_env = "ANTHROPIC_AUTH_TOKEN";
+    std::string key;     // --key:明文 api_key,可选,一行式旧用法的新增项
     std::string model;
+    std::string effort;  // --effort:model_reasoning_effort,可选
     std::string window;
+    // action == Add 且 wizard == true 时,说明这是"裸敲 /provider add"或
+    // "/provider add 名字"这两种触发分步向导的写法(words.size() <= 2),
+    // main.cpp 据此走 RunProviderAddWizard 而不是一行式解析结果。
+    bool wizard = false;
 };
 
 ParsedProviderCommand ParseProviderCommand(const std::string& args);
