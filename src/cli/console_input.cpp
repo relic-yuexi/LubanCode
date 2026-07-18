@@ -797,8 +797,9 @@ void EndStreamFooter() {
     f.hint.clear();
 }
 
-TurnInputListener::TurnInputListener(std::atomic<bool>& cancel_flag, const Theme& theme)
-    : cancel_flag_(cancel_flag), theme_(theme) {
+TurnInputListener::TurnInputListener(std::atomic<bool>& cancel_flag, const Theme& theme,
+                                      std::atomic<bool>* transcript_expanded)
+    : cancel_flag_(cancel_flag), theme_(theme), transcript_expanded_(transcript_expanded) {
     if (platform::StdinIsInteractive()) {
         enabled_ = true;
         thread_ = std::thread([this] { ThreadMain(); });
@@ -925,6 +926,31 @@ void TurnInputListener::ThreadMain() {
                 std::exit(130);  // 130 = 128+SIGINT,"被 Ctrl+C 中断"的约定退出码
             }
             interrupt_turn();
+            continue;
+        }
+        if (key->kind == PK::CtrlO) {
+            // 根因三:回合执行期间(ThreadMain 这条监听线程活着的这段窗口)
+            // 以前完全没有 CtrlO 分支,按了直接被吞——两轮之间的 composer
+            // 主循环(SetTranscriptUiHandler 那条链路)才处理得了,回合跑着
+            // 的时候按 Ctrl+O 没有任何反应。这里跟那边共用同一份 i18n 文案
+            // (ui.expanded/ui.compact),让用户至少能看见"按了确实有反应"。
+            // 取舍:这一刻已经收尾、被紧凑折叠收走的历史子工具条目不补画
+            // (风险/代价配不上收益,详情见交付说明)——只影响切换那一刻
+            // 之后新发生的子工具调用是否按展开画,不回溯改写屏幕上已经
+            // 定格的旧条目。
+            if (transcript_expanded_ != nullptr) {
+                *transcript_expanded_ = !*transcript_expanded_;
+                std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+                EraseStreamFooterLocked();
+                std::cout << "\n" << theme_.stats
+                          << (*transcript_expanded_ ? tr("ui.expanded") : tr("ui.compact")) << theme_.reset
+                          << "\n";
+                std::cout.flush();
+                if (const auto& hook = StreamScreenPrintHookSlot()) {
+                    hook();  // 同 Esc/Enter 分支:插了整行,正文块的行数账作废
+                }
+                RedrawStreamFooterLocked();
+            }
             continue;
         }
         if (key->kind == PK::Enter || key->kind == PK::NewLine) {

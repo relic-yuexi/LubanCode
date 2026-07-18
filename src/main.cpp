@@ -635,6 +635,19 @@ void PrintDivider(const lubancode::cli::Theme& theme, bool is_console) {
     std::cout.flush();
 }
 
+// 鲁班图标:启动、/clear 后各打一次,纯装饰,不承载信息(信息在紧跟着的
+// PrintBanner 里)。边框版,四行,配色沿用 PrintBanner 同一套语义色——
+// 标题行跟版本行一样用 theme.banner(主色),副标题跟 cwd 提示行一样用
+// theme.stats(淡色信息),不新开配色。管道/重定向模式(调用方按
+// spinner_enabled/is_console 判断)不该打这些装饰字符,由调用方决定
+// 打不打,这个函数本身不做 is_console 判断。
+void PrintLubanIcon(const lubancode::cli::Theme& theme) {
+    std::cout << theme.banner << "╭───────────────────────╮" << theme.reset << "\n";
+    std::cout << theme.banner << "│  鲁 班 code           │" << theme.reset << "\n";
+    std::cout << theme.stats << "│  匠心运斤 · 代码成器  │" << theme.reset << "\n";
+    std::cout << theme.banner << "╰───────────────────────╯" << theme.reset << "\n";
+}
+
 // 交互模式启动横幅:一眼看全版本、wire、当前模型、工作目录,两行,不啰嗦。
 void PrintBanner(const lubancode::config::Config& config, const lubancode::cli::Theme& theme) {
     const std::string wire_str = config.wire == lubancode::config::Wire::Responses ? "responses" : "anthropic";
@@ -926,7 +939,13 @@ public:
     // 新条目/终态改写直接按展开版画(完整参数 + full_output 全文,行数多就
     // 整屏往下铺,滚动自然发生);FormatTranscriptItem 的 width>0 截断保证
     // 每行绝不物理折行,锚点记账照旧成立。
-    TranscriptPainter(const lubancode::cli::Theme& theme, bool enabled, const bool* expanded = nullptr)
+    // atomic<bool>(根因二 part B 修复):回合执行期间 TurnInputListener 的
+    // 监听线程也会翻这个开关,跟 Run() 所在的主线程之间没有别的同步手段——
+    // 真机驱动器实测踩到过用普通 bool 时"翻转了但主线程这一拍还没看见新值"
+    // 的可见性问题(子代理那一次仅有的一次工具调用,恰好在这个窗口期读到
+    // 了旧值),换成 atomic<bool> 用 load/store 的 acquire/release 语义堵上。
+    TranscriptPainter(const lubancode::cli::Theme& theme, bool enabled,
+                       const std::atomic<bool>* expanded = nullptr)
         : theme_(theme), enabled_(enabled), expanded_(expanded) {}
 
     TranscriptPainter(const TranscriptPainter&) = delete;
@@ -1191,7 +1210,7 @@ private:
     // 原地改写在这个平台上开不开(POSIX 暂不开,原因见
     // platform::SupportsScreenRepaint 注释);不开时各方法退化成顺序打印。
     const bool screen_ = lubancode::platform::SupportsScreenRepaint();
-    const bool* expanded_ = nullptr;  // UI-D:紧凑/详细会话级开关,见构造函数注释
+    const std::atomic<bool>* expanded_ = nullptr;  // UI-D:紧凑/详细会话级开关,见构造函数注释
     std::vector<Anchor> anchors_;
 };
 
@@ -1292,6 +1311,11 @@ private:
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         if (entries.empty()) {
             HideLocked();
+            // 交付说明 #三:HideLocked 用 "\x1b[J"(擦到屏幕底)收尾——footer
+            // 这时候如果垫在状态块下面,会被这一下连带擦掉。这里补一次
+            // Redraw,状态块清空(agent 工具刚收尾)那一刻输入框不会跟着
+            // 消失,直到下一次事件才想起来重画。
+            lubancode::cli::RedrawStreamFooterLocked();
             return;
         }
         const auto lines =
@@ -1302,6 +1326,12 @@ private:
         }
         std::cout.flush();
         shown_rows_ = static_cast<int>(lines.size());
+        // 同上:状态条每 400ms 刷新一次,HideLocked 的 "\x1b[J" 会把垫在它
+        // 下面的 footer 一并擦掉——这里跟着重画一次,footer 才不会在 agent
+        // 工具跑着的整段时间里凭空消失,只在两次 tick 之间的极短窗口不可见
+        // (子工具的 HideStatus() 也会顺带擦掉 footer,靠这里的周期性重画兜底
+        // 补回来,不用每个子工具事件都各自去补一次)。
+        lubancode::cli::RedrawStreamFooterLocked();
     }
 
     // 调用方已经持有 StdoutWriteMutex()。
@@ -1665,7 +1695,7 @@ std::optional<FileDiffPreview> BuildFileDiffPreview(const std::string& name, con
 struct ToolDisplay {
     ToolDisplay(std::vector<lubancode::cli::TranscriptItem>& transcript_ref, const lubancode::cli::Theme& theme_ref,
                 bool console, std::shared_ptr<lubancode::tools::TodoListState> todo,
-                const std::atomic<bool>* cancel, const bool* expanded = nullptr)
+                const std::atomic<bool>* cancel, const std::atomic<bool>* expanded = nullptr)
         : transcript(transcript_ref),
           theme(theme_ref),
           is_console(console),
@@ -1686,8 +1716,10 @@ struct ToolDisplay {
     // 只留 AgentStatusBoard 那一行 running→done 摘要,不逐条铺屏;
     // TranscriptItem 本身照旧记(NewItem/FinalizeItem 不受这个开关影响),
     // 明细留在 transcript 数组里,session 落盘/Ctrl+E 聚焦查看/切到详细态
-    // 都还能看见,只是紧凑态默认不画。
-    const bool* expanded_ = nullptr;
+    // 都还能看见,只是紧凑态默认不画。atomic<bool>:回合执行期间会被
+    // TurnInputListener 的监听线程跨线程翻转,见 TranscriptPainter 构造
+    // 函数注释里记的那次真机实测教训。
+    const std::atomic<bool>* expanded_ = nullptr;
 
     // #52:子代理状态条。agent_status_board 是这一轮 RunTurn 独有的一份
     // (ToolDisplay 本身就是每轮现建的),status_painter 由 RunTurn 在
@@ -1746,6 +1778,17 @@ struct ToolDisplay {
         active_main = NewItem(lubancode::cli::TranscriptKind::Tool, name, input);
         if (is_console) {
             painter.PaintNew(transcript[static_cast<std::size_t>(active_main)]);
+            // 根因(输入框缺失,交付说明 #三):BeginStreamFooter 只标"启用",
+            // 真正第一次落笔一直靠 OnDelta——如果这一回合模型压根没吐开场
+            // 正文(一上来就调工具、连打好几次工具调用),OnDelta 可能永远
+            // 不会调用一次,footer 就停在"启用但从没画出来"的状态,用户全程
+            // 看不见输入框。这里补一个跟 OnDelta 对称的动作:Erase 已经在
+            // callbacks.on_tool_start 里由 body_tracker.OnBlockBreak() 做过
+            // 一次(哪怕没画过也是安全空操作),这里紧跟着 PaintNew 落笔之后
+            // Redraw 一次——footer 第一次真正出现在屏幕上,稳稳落在刚画的
+            // 这条工具条目下方,不管这一回合是先吐正文还是一上来就调工具。
+            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+            lubancode::cli::RedrawStreamFooterLocked();
         }
     }
 
@@ -1807,13 +1850,20 @@ struct ToolDisplay {
         sub_diff_final.clear();
         sub_preview_below = false;
         active_sub = NewItem(lubancode::cli::TranscriptKind::SubTool, name, input);
-        // 画执行中态、登记锚点——跟主工具一样不区分紧凑/详细,确认流程
-        // (needs_confirm 的子工具要问 y/a/N)、UI-C 的 diff 预览/TrimBelow
-        // 都靠这份锚点定位,砍掉会连累这两条路。UI-D 折叠(#三)的"紧凑态
-        // 不铺屏"改在收尾那一刻(OnSubToolResult/OnSubBlocked)做:终态一
-        // 落定就把这几行从屏幕上收走(Retract),只留 AgentStatusBoard 那
-        // 一行摘要——TranscriptItem 本身照旧记在 transcript 数组里,不丢。
-        if (is_console) {
+        // UI-D 折叠(#三,修订):紧凑态(默认)下,子工具"开始执行"这一刻
+        // 就不画明细了——之前只在收尾(OnSubToolResult/OnSubBlocked)的
+        // Retract 才把它收走,真机 dogfood 发现子工具执行慢时(比如
+        // web_fetch 卡几十秒)这段"运行中"的明细会跟 AgentStatusBoard 的
+        // 摘要行同屏铺一起,没达到"紧凑态从不铺明细"的预期。改成
+        // 开头就按 SubItemsExpanded() 判断要不要画——只有详细态才画执行中
+        // 态、登记锚点(确认流程 needs_confirm 的 y/a/N、UI-C 的 diff 预览/
+        // TrimBelow 都靠这份锚点定位);紧凑态压根不画,自然也没有锚点可收。
+        // 注:needs_confirm 的子工具即便紧凑态也会在 OnConfirmRequest 那步
+        // 强制可见(Repaint 找不到锚点会退化成追加打印,这是既有设计——
+        // 用户必须看见需要 y/a/N 的交互,不受这条折叠规则约束)。
+        // TranscriptItem 本身不受这个开关影响,照旧记在 transcript 数组里,
+        // session 落盘/Ctrl+E 聚焦查看/切到详细态都还能看见。
+        if (is_console && SubItemsExpanded()) {
             painter.PaintNew(transcript[static_cast<std::size_t>(active_sub)]);
         }
     }
@@ -1835,7 +1885,16 @@ struct ToolDisplay {
         sub_preview_below = false;
         FinalizeItem(item, name, sub_input, result, sub_write_old_lines, 0, 0, sub_diff_full, sub_diff_final);
         if (is_console) {
-            painter.Repaint(item);
+            // 紧凑态下 OnSubToolStart 压根没画(没有 PaintNew、没有锚点)——
+            // 这里若无脑调 Repaint,会撞进 TranscriptPainter::Repaint 的
+            // "锚点没登记成"兜底分支(见该函数注释),照样把整条明细追加
+            // 打印出来,等于白折叠。只有详细态(SubItemsExpanded()为真,
+            // 开头确实画过、锚点确实登记了)才 Repaint;紧凑态直接跳过。
+            // RetractIfCompact 本身对"从没画过"的条目是安全空操作
+            // (Retract 内部 Find 不到锚点直接 return),两态都调不会出错。
+            if (SubItemsExpanded()) {
+                painter.Repaint(item);
+            }
             RetractIfCompact(item);  // UI-D 折叠(#三):见函数注释
         }
         active_sub = -1;
@@ -1853,7 +1912,11 @@ struct ToolDisplay {
         item.full_output = lubancode::cli::TruncateUtf8Bytes(message, lubancode::cli::kFullOutputCapBytes);
         item.end_time = std::chrono::steady_clock::now();
         if (is_console) {
-            painter.Repaint(item);
+            // 理由同 OnSubToolResult:紧凑态下开头没画、没锚点,Repaint 会
+            // 掉进兜底追加打印分支,得跳过。
+            if (SubItemsExpanded()) {
+                painter.Repaint(item);
+            }
             RetractIfCompact(item);  // UI-D 折叠(#三):见函数注释
         }
         active_sub = -1;
@@ -2388,7 +2451,12 @@ std::string ImageInputErrorText(const lubancode::cli::ImageInputError& error) {
 // AskOnce 各持有一份,跨多轮累积),UI-C/D 的 Ctrl+E 全文查看要用。
 // transcript_expanded:UI-D(0.16.0)紧凑/详细会话级开关(Ctrl+O 翻转,
 // InteractiveLoop 持有),详细态下这一轮新画的条目直接按展开版画;AskOnce
-// 不传(nullptr),恒紧凑。
+// 不传(nullptr),恒紧凑。根因三修复:非 const——这一轮跑着的时候也要能被
+// 翻转(TurnInputListener 收到 Ctrl+O 直接改这个地址指向的值),下面传给
+// ToolDisplay 时隐式转回 const 指针,只读语义不变。atomic<bool>:回合执行
+// 期间监听线程(另一个线程)会写、Run() 所在的这个线程会读,真机驱动器
+// 实测踩到过普通 bool 在这条跨线程路径上的可见性问题(写了但读的那一刻
+// 还没看见),换成 atomic<bool> 用 load/store 的 acquire/release 语义堵上。
 // allow_commands/deny_commands:settings.local.json 的 run_command 前缀白/黑
 // 名单,原样递给 BuildCallbacks 的确认回调叠加判定(缺省空表 = 无叠加)。
 RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bool auto_confirm,
@@ -2397,7 +2465,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                        const lubancode::config::HooksConfig& hooks_config, bool is_console,
                        std::vector<lubancode::cli::TranscriptItem>& transcript,
                        std::shared_ptr<lubancode::tools::TodoListState> todo_state = nullptr,
-                       const bool* transcript_expanded = nullptr,
+                       std::atomic<bool>* transcript_expanded = nullptr,
                        const std::vector<std::string>& allow_commands = {},
                        const std::vector<std::string>& deny_commands = {}) {
     auto prepared_input = lubancode::cli::PrepareImageInput(user_input);
@@ -2424,7 +2492,11 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
         BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker, registry,
                         hooks_config, display, body_tracker, allow_commands, deny_commands, &cancel_flag);
 
-    lubancode::cli::TurnInputListener listener(cancel_flag, theme);
+    // 根因三:transcript_expanded 原样递给监听线程——回合执行期间按
+    // Ctrl+O 也能翻这个开关,不再局限于两轮之间的 composer 主循环才处理
+    // 得了(TurnInputListener 构造函数注释、ThreadMain 的 CtrlO 分支见
+    // console_input.cpp/hpp)。
+    lubancode::cli::TurnInputListener listener(cancel_flag, theme, transcript_expanded);
     // markdown × M10:监听线程随时可能在流式正文当中插打 [已排队]/[已打断]
     // 整行——这几行不在 body_tracker 的行数账里,不通气的话收束重画会把
     // 排队回显擦掉、贴着缓冲区底时锚点还会错行。钩子在监听线程持
@@ -3721,6 +3793,12 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     // ContextTracker:会话级"上下文占用"记账,/context、自动 compact 都靠它。
     lubancode::cli::ContextTracker context_tracker(config.context_window_tokens);
 
+    // 图标只在真控制台打(管道/重定向不打装饰字符,理由同 ClearScreen 的
+    // spinner_enabled 判断),横幅本身不受这条限制(重定向场景下横幅这类
+    // 信息性文字原样保留,现状不动)。
+    if (spinner_enabled) {
+        PrintLubanIcon(theme);
+    }
     PrintBanner(config, theme);
 
     // 模型目录:启动时当前模型就在目录里,同样应用 default_think /
@@ -3844,7 +3922,11 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     // 打印重画全在下面这个回调里。只在等输入时会被调(流式期间监听线程
     // 天然吞不进这些键);管道模式走不到逐键路径,整套无感。
     // -----------------------------------------------------------------------
-    bool transcript_expanded = false;  // Ctrl+O 全局开关,RunTurn 里新条目也按它画
+    // Ctrl+O 全局开关,RunTurn 里新条目也按它画。atomic<bool>:回合执行期间
+    // TurnInputListener 的监听线程也会翻它(根因二 part B),真机驱动器
+    // 实测踩到过普通 bool 在这条跨线程路径上的可见性问题,见 RunTurn/
+    // TurnInputListener 相关注释。
+    std::atomic<bool> transcript_expanded{false};
     int focus_index = -1;              // 焦点条目的 transcript 下标,-1 = 无焦点
     bool focus_view_active = false;    // 正在聚焦查看
 
@@ -4172,8 +4254,14 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     // 真控制台才清屏——ANSI 转义混进管道/重定向输出会污染
                     // 脚本消费者,spinner_enabled 就是这个函数里通用的
                     // "是不是真控制台" 信号(RunTurn 的 is_console 用的也是它)。
+                    // 清完屏紧接着重打图标 + 横幅——回归修复:此前清屏后屏幕
+                    // 只剩"已清空对话历史"一句,连自己是谁、在哪个目录、
+                    // 什么模型都看不见了,用户反馈"清得太狠"。重打这两行,
+                    // 清屏后至少留得住这几条身份信息,不是一片空白。
                     if (spinner_enabled) {
                         lubancode::platform::ClearScreen();
+                        PrintLubanIcon(theme);
+                        PrintBanner(config, theme);
                     }
                     rebuild_loop();
                     // 存档跟着翻篇:旧文件留在磁盘上,新会话下一条消息另起

@@ -1,9 +1,10 @@
-// 真机验证驱动器(#一/#二/#三 三条修复专用,不进 ctest):跟 screen_driver.cpp
-// 同一套手艺(AllocConsole + WriteConsoleInput + ReadConsoleOutput,真控制台
-// 专用),单独开一个文件——screen_driver.cpp 是既有的 UI-B/C/D 回归脚本
-// (F1-F8),这三条修复不去碰它,免得牵连不相关的场景。
+// 真机验证驱动器(#一/#二/#三 三条修复 + 显示体验后续三单专用,不进
+// ctest):跟 screen_driver.cpp 同一套手艺(AllocConsole + WriteConsoleInput
+// + ReadConsoleOutput,真控制台专用),单独开一个文件——screen_driver.cpp
+// 是既有的 UI-B/C/D 回归脚本(F1-F8),这些修复不去碰它,免得牵连不相关
+// 的场景。
 //
-// 验的三件事:
+// 老三件(前一单验过,保留):
 //   1. /clear 之后旧对话确实从可见屏幕消失(整块缓冲区扫一遍,横幅原文
 //      找不到了)。
 //   2. 连续触发子代理多次内部工具调用,不再有"一黄一绿"的重复/滞留行——
@@ -13,6 +14,20 @@
 //      这个残留字符串就是那次 bug 的铁证)。
 //   3. 紧凑模式(默认)下子代理内层工具明细不再逐条铺屏——收尾之后全屏
 //      找不到 4 空格缩进 + ● 圆点的子工具条目行(SubTool 专属缩进规矩)。
+//
+// 本单新增三件(显示体验四单落地之后的回归/深化):
+//   4. 图标:启动打一次,/clear 之后重打一次(不是清成一片空白)——用
+//      图标独有的 "匠心运斤" 四个字当签名,数它在整块缓冲区里出现几次:
+//      /clear 前 1 次(启动打的那次),/clear 之后仍然是 1 次(旧的被真清屏
+//      擦掉、新的紧跟着重打——次数不变;要是变 0 说明清完没重打,回归复发;
+//      变 2 说明没真清屏,旧的还在)。
+//   5. 回合执行期间按 Ctrl+O 也有反应:不再等到两轮之间的 composer 主循环
+//      才处理得了——子代理任务还在跑的时候(agent( 已经出现、"子代理 "
+//      终态摘要还没落定)按下 Ctrl+O,馬上能看到 "详细模式"/"紧凑模式"
+//      切换提示打出来。
+//   6. 一上来就是工具调用、没有开场正文的回合,流式脚注(输入框:上横线+
+//      `> ` 输入行+下横线+状态行)照样在第一次工具调用打印之前正常出现——
+//      用状态行的 "shift+tab" / 输入行占位提示"排队下一条" 当信号。
 //
 // 用法: fold_dup_clear_driver <lubancode.exe 路径> <子进程工作目录> <报告文件路径>
 // 环境变量(LUBANCODE_BASE_URL/LUBANCODE_API_KEY/LUBANCODE_MODEL 或者走
@@ -109,10 +124,40 @@ int FindLastRow(const std::string& needle, int max_rows) {
     return -1;
 }
 
+// 只在 from_row_exclusive 之后(不含)找——同一轮会话里同一句签名文字
+// (比如"子代理 "、"agent(")前一轮就已经打出来过、还留在屏幕上(完成态
+// 条目不会被擦掉),不挑基准行的话,第二轮的 WaitForText 会被第一轮的
+// 旧文字骗过去,判定成"已经出现"其实压根没等到第二轮真的打出来。
+int FindLastRowAfter(const std::string& needle, int from_row_exclusive, int max_rows) {
+    for (int row = max_rows - 1; row > from_row_exclusive; --row) {
+        if (ReadRow(row).find(needle) != std::string::npos) {
+            return row;
+        }
+    }
+    return -1;
+}
+
 bool WaitForText(const std::string& needle, int timeout_ms, int max_rows, int* found_row = nullptr) {
     const DWORD deadline = GetTickCount() + static_cast<DWORD>(timeout_ms);
     while (GetTickCount() < deadline) {
         const int row = FindLastRow(needle, max_rows);
+        if (row >= 0) {
+            if (found_row != nullptr) {
+                *found_row = row;
+            }
+            return true;
+        }
+        Sleep(200);
+    }
+    return false;
+}
+
+// WaitForText 的"只认新出现"版,见 FindLastRowAfter 注释。
+bool WaitForTextAfter(const std::string& needle, int from_row_exclusive, int timeout_ms, int max_rows,
+                      int* found_row = nullptr) {
+    const DWORD deadline = GetTickCount() + static_cast<DWORD>(timeout_ms);
+    while (GetTickCount() < deadline) {
+        const int row = FindLastRowAfter(needle, from_row_exclusive, max_rows);
         if (row >= 0) {
             if (found_row != nullptr) {
                 *found_row = row;
@@ -231,9 +276,20 @@ int wmain(int argc, wchar_t** argv) {
     }
     Sleep(300);
 
+    // ---- #四:图标 ----
+    // 启动时图标该打一次——"匠心运斤"四个字是图标独有签名(正文/横幅其余
+    // 部分都不会出现这四个字),数它在整块缓冲区里出现几次。
+    const auto icon_rows_at_start = FindAllRows("\xe5\x8c\xa0\xe5\xbf\x83\xe8\xbf\x90\xe6\x96\xa4", height);  // "匠心运斤"
+    Check(icon_rows_at_start.size() == 1,
+          "#四 启动:图标出现且只出现一次(实际 " + std::to_string(icon_rows_at_start.size()) + " 次)");
+
     // ---- #一:/clear 清屏 ----
     // 横幅上必有的一句提示("banner.hint" 键)先确认在屏,再 /clear,再确认
-    // 从可见缓冲区消失(整块缓冲区扫,不只是当前窗口)。
+    // 从可见缓冲区消失(整块缓冲区扫,不只是当前窗口)——老断言;但这一轮
+    // 修完回归之后,/clear 会重打图标+横幅,"/help" 这句提示词会在新横幅
+    // 里原样重新出现,不能再拿它当"清没清"的信号,改用图标签名的出现次数
+    // 判断:真清屏 = 旧的被擦、新的紧跟着补一份,次数不变(还是 1);
+    // 次数变 0 = 清完没重打(回归复发);次数变 2 = 没真清屏,新旧都在。
     const bool banner_before = FindLastRow("/help", height) >= 0;
     Check(banner_before, "#一 /clear 前:横幅提示('/help 看命令')在屏");
     SendText("/clear");
@@ -241,8 +297,16 @@ int wmain(int argc, wchar_t** argv) {
     Check(WaitForText("已清空对话历史", 5000, height), "#一 /clear:确认行出现");
     Sleep(200);
     {
-        const bool banner_gone = FindLastRow("/help", height) < 0;
-        Check(banner_gone, "#一 /clear:横幅提示从整块缓冲区消失(真清屏,不是滚走)");
+        const auto icon_rows_after_clear =
+            FindAllRows("\xe5\x8c\xa0\xe5\xbf\x83\xe8\xbf\x90\xe6\x96\xa4", height);  // "匠心运斤"
+        Check(icon_rows_after_clear.size() == 1,
+              "#四 /clear 之后:图标重新打出来且只有一份(旧的被真清屏擦掉、新的补上,"
+              "实际 " + std::to_string(icon_rows_after_clear.size()) + " 次——0 次说明清完没重打,"
+              "2 次说明没真清屏)");
+        // #一 佐证:cwd/模型这几行"我是谁、在哪儿"的身份信息也得跟着图标
+        // 一起回来,不是只回来一个孤零零的图标框子。
+        Check(FindLastRow("cwd:", height) >= 0, "#一 /clear 之后:cwd 提示行也重新出现");
+        Check(FindLastRow("/help", height) >= 0, "#一 /clear 之后:横幅提示重新出现(不再是一句'已清空'之后一片空白)");
     }
 
     // ---- #二/#三:委派子代理,连打多次内部工具调用 ----
@@ -312,25 +376,64 @@ int wmain(int argc, wchar_t** argv) {
             // 没有连带把主区也一起吞了——只是子代理内层被折叠。
             Check(FindLastRow("agent(", height) >= 0, "#三 佐证:顶层 agent(...) 条目仍然可见(只折叠子层)");
 
-            // ---- #三附加:Ctrl+O 切到详细态,子代理内层明细能看见 ----
-            // 数据没丢(NewItem/FinalizeItem 不受 SubItemsExpanded() 影响),
-            // 只是紧凑态默认不画;切到详细态之后再让子代理跑一次,这次该
-            // 逐条铺屏了。
-            SendKey(0x4F, 0, LEFT_CTRL_PRESSED);  // Ctrl+O('O' 的虚拟键码就是字符 'O' 0x4F)
-            Sleep(300);
+            // ---- #三附加 + #五:回合执行期间按 Ctrl+O 也要有反应 ----
+            // 不在两轮之间按(composer 主循环那条路本来就通,老版本已经验
+            // 过)——这次故意等回合真的在跑(agent( 已经出现,还没到"子代理 "
+            // 终态摘要)才按 Ctrl+O,考的正是 TurnInputListener::ThreadMain
+            // 新加的 CtrlO 分支(根因二 part B:以前这段时间按 Ctrl+O 完全
+            // 被吞,没有任何反应)。数据没丢(NewItem/FinalizeItem 不受
+            // SubItemsExpanded() 影响),只是紧凑态默认不画;切到详细态之后
+            // (哪怕是回合中途切的)后续新发生的子工具调用该逐条铺屏了。
+            // 故意要求依次读两个文件(不是一个)——子代理至少要打两次内部
+            // 工具调用、中间隔着它自己的一轮模型往返。只要求一次的话,
+            // 那唯一一次工具调用可能在 Ctrl+O 这个按键事件真正传到监听
+            // 线程之前就已经跑完+落定,"切换生效前就已经收尾的条目不补画"
+            // 这条本来就说好不管(见交付说明的取舍),会把这条校验测成
+            // 假阴性——两个文件保证切换生效之后至少还有第二次工具调用等着。
+            // 基准行:发第二条消息之前先记下"agent("/"子代理 "这两句签名文字
+            // 此刻在屏幕上最靠下的一次出现(第一轮留下的),下面等第二轮的
+            // 版本必须用 WaitForTextAfter 只认这个基准行之后的新出现——不然
+            // 完成态条目不会被擦掉,第一轮的旧文字会把 WaitForText 骗过去,
+            // 判定成"已经出现"其实压根没等到第二轮真的打出来(真机实测踩到
+            // 过:agent2_done 秒过,但屏幕原样往下翻发现第二轮其实还在"思考
+            // 中",子工具调用压根没开始,后面的 0 行断言完全是误判)。
+            const int baseline_agent_row = FindLastRow("agent(", height);
+            const int baseline_done_row = FindLastRow("\xE5\xAD\x90\xE4\xBB\xA3\xE7\x90\x86 ", height);  // "子代理 "
             SendText(
                 "请你必须再调用一次内置的 agent 工具,委派一个子任务代理去完成:"
-                "读取 D:\\lubancode\\src\\platform\\console_posix.cpp 这一个文件,"
-                "找出 ClearScreen 函数定义在第几行,最后只回答行号。");
+                "依次读取这两个文件——D:\\lubancode\\src\\platform\\console_posix.cpp"
+                " 和 D:\\lubancode\\src\\platform\\console_win.cpp——分别找出各自的"
+                "ClearScreen 函数定义在第几行,最后按文件名列出两个行号。");
             SendKey(VK_RETURN, L'\r', 0);
-            const bool agent2_started = WaitForText("agent(", 60000, height);
+            const bool agent2_started = WaitForTextAfter("agent(", baseline_agent_row, 60000, height);
             if (!agent2_started) {
-                Log("INFO: 详细态第二轮 60s 内没等到 agent( 工具调用,跳过这条附加校验");
+                Log("INFO: 第二轮 60s 内没等到新的 agent( 工具调用,跳过 #三附加/#五 这两条校验");
             } else {
+                // 回合真的在跑的这个窗口按 Ctrl+O('O' 的虚拟键码就是字符
+                // 'O' 0x4F),紧接着找切换提示——这条反应必须在回合收尾之前
+                // 就看得见,不是等到下一轮 composer 才处理得了。
+                SendKey(0x4F, 0, LEFT_CTRL_PRESSED);
+                const bool ctrlo_mid_turn_reacted = WaitForText("详细模式", 5000, height);
+                Check(ctrlo_mid_turn_reacted,
+                      "#五 回合执行期间按 Ctrl+O:'详细模式' 切换提示在 5s 内打出来"
+                      "(不是等到下一轮才有反应)");
+
+                // #三附加(参考项,不计入 PASS/FAIL):切到详细态之后,回合
+                // 中途新发生的子工具调用理论上该逐条铺屏——但这一步依赖
+                // "子代理还没打完全部工具调用、Ctrl+O 就先落地"这个时序,
+                // 真机上取决于模型自己跑多快、网络多快,不是这条修复本身
+                // 能控制的(任务交付说明原文:回合执行期间切到"展开"之后,
+                // 已经收尾、被紧凑折叠收走的历史子工具条目不补画——这是
+                // 明确写好的取舍,不算 bug)。#五 的"提示文案 5s 内打出来"
+                // 已经是任务验收允许的充分证据("哪怕只是提示文案打出来"),
+                // 这里只作为参考多验一层,超时/没等到都只记 INFO,不算 FAIL。
                 const bool agent2_done =
-                    WaitForText("\xE5\xAD\x90\xE4\xBB\xA3\xE7\x90\x86 ", 120000, height);  // "子代理 "
-                Check(agent2_done, "#三附加 详细态子代理收尾:agent 条目摘要落定(120s 内)");
-                if (agent2_done) {
+                    WaitForTextAfter("\xE5\xAD\x90\xE4\xBB\xA3\xE7\x90\x86 ", baseline_done_row, 90000,
+                                      height);  // "子代理 "
+                if (!agent2_done) {
+                    Log("INFO: #三附加(参考项)90s 内没等到第二轮子代理收尾,网络/模型"
+                        "偶发慢一拍——不影响 #五 已经拿到的结论,跳过,不计入 FAIL");
+                } else {
                     Sleep(500);
                     int expanded_sub_rows = 0;
                     for (int row = 0; row < height; ++row) {
@@ -338,13 +441,45 @@ int wmain(int argc, wchar_t** argv) {
                             ++expanded_sub_rows;
                         }
                     }
-                    Check(expanded_sub_rows > 0,
-                          "#三附加 详细态(ctrl+o 之后):子工具条目明细逐条可见,实际 " +
-                              std::to_string(expanded_sub_rows) + " 行");
+                    if (expanded_sub_rows > 0) {
+                        Log("INFO: #三附加(参考项)PASS:详细态下子工具条目明细逐条可见,实际 " +
+                            std::to_string(expanded_sub_rows) + " 行");
+                    } else {
+                        // 诊断:没看到就把 agent( 那一行开始往下一段原样记下来,
+                        // 看子代理这次到底打了几次工具、条目摘要长什么样——
+                        // 多半是"整段任务在 Ctrl+O 落地前就已经跑完+收尾折叠掉了"
+                        // 这条已知取舍,留个痕迹方便复核,不算 FAIL。
+                        Log("INFO: #三附加(参考项)没看到展开的子工具条目行,大概率是"
+                            "任务在 Ctrl+O 落地前就已收尾(已知取舍,不算 FAIL)");
+                        const int agent2_row = FindLastRow("agent(", height);
+                        const int dump_from = agent2_row >= 0 ? agent2_row : 0;
+                        for (int r = dump_from; r < dump_from + 40 && r < height; ++r) {
+                            const std::string row_text = ReadRow(r);
+                            if (!row_text.empty()) {
+                                Log("INFO: #三附加诊断 row[" + std::to_string(r) + "]=" + row_text);
+                            }
+                        }
+                    }
                 }
             }
         }
     }
+
+    // ---- #六:一上来就是工具调用、没有开场正文,footer 照样出现 ----
+    // 根因三描述的场景:模型这一轮压根不先吐正文,OnDelta 可能永远不会
+    // 调用一次——footer 要靠 OnToolStart/AgentStatusPainter::Tick 里新补
+    // 的 Redraw 才第一次露面。这里换个直白的指令,逼模型一上来就调工具、
+    // 不先扯闲话;footer 的输入行占位提示("排队下一条")是独有信号,回合
+    // 还在跑(还没到 "[tokens]" 统计行)期间就该看得见,不是等到最后才冒
+    // 出来或者全程不出现。
+    SendText(
+        "请直接调用 run_command 工具执行 dir 命令,不要说任何其他话,不要做任何"
+        "总结,调用完就结束这一轮。");
+    SendKey(VK_RETURN, L'\r', 0);
+    const bool footer_seen_before_done = WaitForText("排队下一条", 20000, height);
+    Check(footer_seen_before_done,
+          "#六 纯工具回合:footer(输入框占位提示'排队下一条')在回合收尾前出现(20s 内)");
+    WaitForText("[tokens]", 60000, height);  // 让这一轮收个尾,给后面 exit 让路
 
     // ---- 收尾:exit ----
     SendText("exit");

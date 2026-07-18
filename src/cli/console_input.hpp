@@ -175,7 +175,19 @@ void RedrawStreamFooterLocked();
 // 类形同虚设,是刻意的、跟 ReadLine() 的管道回退逻辑对齐的设计。
 class TurnInputListener {
 public:
-    TurnInputListener(std::atomic<bool>& cancel_flag, const Theme& theme);
+    // transcript_expanded:UI-D(0.16.0)紧凑/详细全局开关的地址,跟
+    // ToolDisplay::expanded_ 共享同一份存储(main.cpp InteractiveLoop 那个
+    // 局部变量)——回合执行期间按 Ctrl+O 也能翻这个开关,让"紧凑/详细"
+    // 不再局限于两轮之间的 composer 主循环才能切。留空(nullptr,AskOnce
+    // 单发模式/管道场景)时监听线程读到 CtrlO 直接忽略,行为跟没这个参数
+    // 一样。atomic<bool>:这里写(监听线程)、ToolDisplay/TranscriptPainter
+    // 那边读(Run() 所在的主线程)分处两个线程——真机驱动器实测踩到过用
+    // 普通 bool 时的可见性问题(翻转了,但另一线程这一拍还没读到新值,
+    // 一次仅有的子工具调用刚好卡在这个窗口),换成 atomic<bool> 用
+    // load/store 的 acquire/release 语义堵上,不是"反正是显示态、错一帧
+    // 也无所谓"能糊弄过去的。
+    TurnInputListener(std::atomic<bool>& cancel_flag, const Theme& theme,
+                       std::atomic<bool>* transcript_expanded = nullptr);
     ~TurnInputListener();
 
     TurnInputListener(const TurnInputListener&) = delete;
@@ -196,6 +208,7 @@ private:
 
     std::atomic<bool>& cancel_flag_;
     const Theme& theme_;
+    std::atomic<bool>* transcript_expanded_ = nullptr;
     std::thread thread_;
     std::atomic<bool> stop_requested_{false};
     bool enabled_ = false;
