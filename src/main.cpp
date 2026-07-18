@@ -931,24 +931,22 @@ public:
     TranscriptPainter(const TranscriptPainter&) = delete;
     TranscriptPainter& operator=(const TranscriptPainter&) = delete;
 
-    // 画一个新条目(跟前面的输出空一行分隔),登记锚点。
+    // 画一个新条目(跟前面的输出空一行分隔)。锚点定不下来(screen_ 关着,
+    // 或者这一帧 GetScreenInfo 失败)就干脆不打印、不登记——这个条目唯一
+    // 的一次落地输出留给 Repaint() 兜底打印终态,免得"运行中"先打一行、
+    // "完成"又打一行,看着像重复(#二 的"一黄一绿"排查出来的根因之一:
+    // 旧版这里退化成"追加打印",Repaint 的兜底分支又整段重打一遍)。
     void PaintNew(const lubancode::cli::TranscriptItem& item) {
         if (!enabled_) {
             return;
         }
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-        const std::string text = Render(item);
         if (!screen_) {
-            // 原地改写在这个平台上不开(见 platform::SupportsScreenRepaint):
-            // 退化成顺序打印,信息不丢。
-            std::cout << "\n" << text;
-            std::cout.flush();
             return;
         }
+        const std::string text = Render(item);
         std::optional<lubancode::platform::ScreenInfo> info = lubancode::platform::GetScreenInfo();
         if (!info.has_value()) {
-            std::cout << "\n" << text;
-            std::cout.flush();
             return;
         }
         if (info->cursor_x > 0) {
@@ -958,8 +956,6 @@ public:
         std::cout.flush();
         info = lubancode::platform::GetScreenInfo();
         if (!info.has_value()) {
-            std::cout << text;
-            std::cout.flush();
             return;
         }
         int start_row = info->cursor_y;
@@ -971,19 +967,27 @@ public:
         anchors_.push_back(Anchor{item.id, start_row, rows});
     }
 
-    // 原地改写一个已登记的条目(执行中 -> 待确认 -> 终态)。
+    // 原地改写一个已登记的条目(执行中 -> 待确认 -> 终态)。锚点没登记成
+    // (PaintNew 那次定不下位,或者 screen_ 这个平台压根不开)——兜底追加
+    // 打印这一次状态,这是这个条目唯一一次落地的输出,跟 PaintNew 的
+    // "不打印" 配套,保证运行中/待确认/完成这条链路总归有且只有一行终态
+    // 落地(交互态 Pending/中途确认需要多次可见更新时,每次都会因为同样
+    // 找不到锚点而各打一行——这不是"重复同一状态",是用户必须看见的
+    // 交互链路,合理)。
     void Repaint(const lubancode::cli::TranscriptItem& item) {
         if (!enabled_) {
             return;
         }
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         if (!screen_) {
-            std::cout << Render(item);
+            std::cout << "\n" << Render(item);
             std::cout.flush();
             return;
         }
         Anchor* anchor = Find(item.id);
         if (anchor == nullptr) {
+            std::cout << "\n" << Render(item);
+            std::cout.flush();
             return;
         }
         const std::optional<lubancode::platform::ScreenInfo> info = lubancode::platform::GetScreenInfo();
@@ -1048,6 +1052,49 @@ public:
             lubancode::platform::ClearRowFrom(0, r, info->width);
         }
         lubancode::platform::SetCursorPos(0, end_row);
+    }
+
+    // 把一个已登记条目从屏幕上整段收走、忘记锚点——UI-D 折叠(#三)用:
+    // 子代理内层工具条目落定终态那一刻,紧凑态默认不逐条铺屏,PaintNew/
+    // Repaint 画出来的执行中/终态那几行随手收走,只留 AgentStatusBoard 的
+    // 摘要行;TranscriptItem 数据本身不受影响,还在 transcript 数组里。
+    // 只有条目正好是屏幕最后内容(光标紧跟在条目末尾)才真的擦——中途
+    // 垫了别的内容(理论上不该发生,ESC 打断这类极端时序除外)就只忘记
+    // 锚点、屏幕不动,不冒险乱擦不属于这个条目的内容;忘记锚点之后这个
+    // item_id 对 Repaint/TrimBelow 就等于"从没画过",退化路径安全。
+    void Retract(int item_id) {
+        if (!enabled_) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        if (!screen_) {
+            return;  // 没有锚点这回事,压根没画过,没什么好收的
+        }
+        Anchor stored{};
+        bool found = false;
+        for (auto it = anchors_.begin(); it != anchors_.end(); ++it) {
+            if (it->item_id == item_id) {
+                stored = *it;
+                anchors_.erase(it);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return;
+        }
+        const std::optional<lubancode::platform::ScreenInfo> info = lubancode::platform::GetScreenInfo();
+        if (!info.has_value()) {
+            return;
+        }
+        const bool at_tail = info->cursor_x == 0 && info->cursor_y == stored.start_row + stored.rows;
+        if (!at_tail) {
+            return;
+        }
+        for (int r = 0; r < stored.rows; ++r) {
+            lubancode::platform::ClearRowFrom(0, stored.start_row + r, info->width);
+        }
+        lubancode::platform::SetCursorPos(0, stored.start_row);
     }
 
     // 在缓冲区底部预留 rows 行(必要时主动滚屏、同步平移所有锚点)。确认
@@ -1162,6 +1209,30 @@ private:
 // enabled 挑 "is_console && 彩色主题" 这条件(跟 StreamBodyTracker 一样),
 // 因为相对光标移动转义序列得有 VT 处理撑着——colors_enabled 为真已经
 // 隐含 VT 开成了。
+//
+// 真机排查过程(子代理连打工具调用时"一黄一绿"重复的疑似根因):理论上
+// 这个 ticker 每 400ms 在当前光标位置往下新打几行状态摘要,如果这时候
+// 贴近控制台缓冲区底(ConPTY 宿主的 dwSize.Y 常等于可见窗口高度,不像
+// conhost 那样有上万行大缓冲区),这几行可能触发一次真实滚屏——这次滚屏
+// 瞒着 TranscriptPainter,后者的 anchors_ 只在自己 PaintNew/Repaint 调用
+// EnsureRoom 时才会同步平移,ticker 自己造成的滚屏它一无所知,子代理内层
+// 工具条目的锚点可能因此悄悄失真。
+//
+// 曾经按这个假设把 Tick() 接到 TranscriptPainter::ReserveRows()(打印前
+// 先占位、顺带同步平移锚点)——AllocConsole 真机复现(tests/
+// fold_dup_clear_driver.cpp)验证时,这个接法在真跑一次"agent 工具委派
+// 子任务、子任务连打 search"的完整流程时会把整个程序拖死(几分钟收不到
+// 任何新内容,ctrl+c 之外唯一出路是强杀);去掉这一行接线,同一个场景
+// 立刻恢复正常且全程无残留/无重复。反复二分之后没能在预算内揪出这个
+// 死锁/活锁的确切成因(静态审查没找到经典的 AB-BA 加锁顺序问题,嫌疑
+// 落在 ticker 线程和主线程高频交替抢 StdoutWriteMutex() 时某种没审出来
+// 的时序坑上),但结论很清楚:这个耦合弊大于利——真机验证同时证明,
+// 不接这条线,子代理连打工具调用本身也没有复现"一黄一绿"(#二 的另一条
+// 根因——SupportsScreenRepaint() 从硬编码 true 改成真探测,加上下面
+// TranscriptPainter::PaintNew/Repaint 那处"退化路径不重复打印"的修复——
+// 已经把这个症状堵住了,ticker/锚点这条耦合不做也没有可观测的复现)。
+// 所以保留 ticker 用相对光标移动的独立打印方式不变,不再跟
+// TranscriptPainter 的绝对锚点账本产生任何交互。
 //
 // 并发协议:写 stdout 一律经 StdoutWriteMutex()。ticker 线程自己按固定
 // 间隔醒;主线程侧(ToolDisplay 每个会打印新内容的方法)在真正打印之前
@@ -1599,7 +1670,8 @@ struct ToolDisplay {
           is_console(console),
           painter(theme_ref, console, expanded),
           todo_state(std::move(todo)),
-          cancel_flag(cancel) {}
+          cancel_flag(cancel),
+          expanded_(expanded) {}
 
     std::vector<lubancode::cli::TranscriptItem>& transcript;
     const lubancode::cli::Theme& theme;
@@ -1607,6 +1679,14 @@ struct ToolDisplay {
     TranscriptPainter painter;
     std::shared_ptr<lubancode::tools::TodoListState> todo_state;
     const std::atomic<bool>* cancel_flag = nullptr;
+    // UI-D 折叠(#三):同一份 Ctrl+O 紧凑/详细全局开关(TranscriptPainter
+    // 构造函数第三个参数那份,这里再存一份指针给 OnSubToolStart/Result/
+    // Blocked 判断要不要把子代理内层工具条目画到屏幕上——紧凑态(默认)
+    // 只留 AgentStatusBoard 那一行 running→done 摘要,不逐条铺屏;
+    // TranscriptItem 本身照旧记(NewItem/FinalizeItem 不受这个开关影响),
+    // 明细留在 transcript 数组里,session 落盘/Ctrl+E 聚焦查看/切到详细态
+    // 都还能看见,只是紧凑态默认不画。
+    const bool* expanded_ = nullptr;
 
     // #52:子代理状态条。agent_status_board 是这一轮 RunTurn 独有的一份
     // (ToolDisplay 本身就是每轮现建的),status_painter 由 RunTurn 在
@@ -1726,6 +1806,12 @@ struct ToolDisplay {
         sub_diff_final.clear();
         sub_preview_below = false;
         active_sub = NewItem(lubancode::cli::TranscriptKind::SubTool, name, input);
+        // 画执行中态、登记锚点——跟主工具一样不区分紧凑/详细,确认流程
+        // (needs_confirm 的子工具要问 y/a/N)、UI-C 的 diff 预览/TrimBelow
+        // 都靠这份锚点定位,砍掉会连累这两条路。UI-D 折叠(#三)的"紧凑态
+        // 不铺屏"改在收尾那一刻(OnSubToolResult/OnSubBlocked)做:终态一
+        // 落定就把这几行从屏幕上收走(Retract),只留 AgentStatusBoard 那
+        // 一行摘要——TranscriptItem 本身照旧记在 transcript 数组里,不丢。
         if (is_console) {
             painter.PaintNew(transcript[static_cast<std::size_t>(active_sub)]);
         }
@@ -1749,6 +1835,7 @@ struct ToolDisplay {
         FinalizeItem(item, name, sub_input, result, sub_write_old_lines, 0, 0, sub_diff_full, sub_diff_final);
         if (is_console) {
             painter.Repaint(item);
+            RetractIfCompact(item);  // UI-D 折叠(#三):见函数注释
         }
         active_sub = -1;
     }
@@ -1766,6 +1853,7 @@ struct ToolDisplay {
         item.end_time = std::chrono::steady_clock::now();
         if (is_console) {
             painter.Repaint(item);
+            RetractIfCompact(item);  // UI-D 折叠(#三):见函数注释
         }
         active_sub = -1;
     }
@@ -1828,6 +1916,7 @@ struct ToolDisplay {
         }
         HideStatus();
         auto& item = transcript[static_cast<std::size_t>(idx)];
+        const bool was_sub = idx == active_sub;  // Cancelled 分支下面会把 active_sub 收掉,先记住
         if (is_console) {
             painter.TrimBelow(item.id);  // 确认块用完就擦,条目回到屏幕末尾
         }
@@ -1843,6 +1932,14 @@ struct ToolDisplay {
         }
         if (is_console) {
             painter.Repaint(item);
+            // 拒绝的子工具:post_tool 钩子不会再来,OnSubToolResult 那条收尾
+            // 路线走不到——终态就定在这儿,UI-D 折叠(#三)的收走也得在这儿
+            // 补一刀,不然紧凑态会留一条"Cancelled"摊在屏幕上出不去。
+            // allowed=true 是过渡态(Running),真正的终态收走留给
+            // OnSubToolResult。
+            if (!allowed && was_sub) {
+                RetractIfCompact(item);
+            }
         }
     }
 
@@ -1854,6 +1951,24 @@ private:
             status_painter->Hide();
         }
     }
+
+    // UI-D 折叠(#三):子代理内层工具条目落定终态那一刻,紧凑态(默认)
+    // 下把刚画出来的那几行从屏幕上收走——AgentStatusBoard 已经有一行
+    // running→done 摘要覆盖同样的信息,没必要逐条摊开占屏幕。TranscriptItem
+    // 本身(连同刚落定的终态摘要)照旧留在 transcript 数组里,session 落盘/
+    // Ctrl+E 聚焦查看/Ctrl+O 切到详细态都还能看见,只是紧凑态默认不铺屏。
+    // 只对子代理内层条目(kind==SubTool)生效,主工具条目(agent 这条本身)
+    // 不受影响——主区原地覆写照旧,用户能看见 agent 工具的执行中/完成态。
+    void RetractIfCompact(const lubancode::cli::TranscriptItem& item) {
+        if (item.kind != lubancode::cli::TranscriptKind::SubTool || SubItemsExpanded()) {
+            return;
+        }
+        painter.Retract(item.id);
+    }
+
+    // expanded_ 没设(nullptr,AskOnce 单发模式恒紧凑)或者当前是紧凑态都
+    // 算"紧凑",只有用户 Ctrl+O 切到详细态才算"展开"。
+    bool SubItemsExpanded() const { return expanded_ != nullptr && *expanded_; }
 
     int NewItem(lubancode::cli::TranscriptKind kind, const std::string& name, const nlohmann::json& input) {
         lubancode::cli::TranscriptItem item;
@@ -2190,6 +2305,13 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
             usage_stats.cache_read_tokens += usage.cache_read_tokens;
             usage_stats.request_count += 1;
             display.agent_rounds += 1;  // 子代理每一次独立请求算一轮,agent 条目终态摘要用
+            // #三:这个子代理任务自己花了多少 token,累进状态条对应条目——
+            // 跟上面 usage_stats(全会话口径,含子代理)是两本账,这本给
+            // AgentStatusBoard 摘要行的 "Xk tokens" 那一节用。
+            if (display.active_agent_status_id >= 0) {
+                display.agent_status_board.RecordUsage(display.active_agent_status_id, usage.input_tokens,
+                                                          usage.output_tokens);
+            }
         };
         // M9:pre_tool/post_tool 钩子照旧转发给父级同一份;UI-B 在外面再包
         // 一层,给子工具条目回写终态/拦截态用。
@@ -4037,6 +4159,12 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     break;
                 }
                 case lubancode::cli::SlashCommand::Clear:
+                    // 真控制台才清屏——ANSI 转义混进管道/重定向输出会污染
+                    // 脚本消费者,spinner_enabled 就是这个函数里通用的
+                    // "是不是真控制台" 信号(RunTurn 的 is_console 用的也是它)。
+                    if (spinner_enabled) {
+                        lubancode::platform::ClearScreen();
+                    }
                     rebuild_loop();
                     // 存档跟着翻篇:旧文件留在磁盘上,新会话下一条消息另起
                     // 一份新文件(id 用新的时间戳)。标题属于旧场子,一并翻篇。

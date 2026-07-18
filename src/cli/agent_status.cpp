@@ -11,7 +11,8 @@ namespace lubancode::cli {
 
 namespace {
 
-constexpr const char* kDot = "\xE2\x97\x8F";  // ● U+25CF,跟 transcript.cpp 同一个字符,视觉统一
+constexpr const char* kDot = "\xE2\x97\x8F";    // ● U+25CF,跟 transcript.cpp 同一个字符,视觉统一
+constexpr const char* kElbow = "\xE2\x8E\xBF";  // ⎿ U+23BF,跟 transcript.cpp 同一个字符
 
 std::string FormatSeconds(double seconds) {
     if (seconds < 0.0) {
@@ -19,6 +20,21 @@ std::string FormatSeconds(double seconds) {
     }
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%.1fs", seconds);
+    return std::string(buf);
+}
+
+// token 数超过 1000 折成 "X.Xk",不到 1000 就是原数——跟 Claude Code 的
+// "27.9k tokens" 一个路数,数太大不刷屏。
+std::string FormatTokenCount(std::int64_t tokens) {
+    if (tokens < 0) {
+        tokens = 0;
+    }
+    char buf[32];
+    if (tokens >= 1000) {
+        std::snprintf(buf, sizeof(buf), "%.1fk", static_cast<double>(tokens) / 1000.0);
+    } else {
+        std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(tokens));
+    }
     return std::string(buf);
 }
 
@@ -84,6 +100,19 @@ void AgentStatusBoard::RecordToolCall(int id) {
     }
 }
 
+void AgentStatusBoard::RecordUsage(int id, std::int64_t input_tokens, std::int64_t output_tokens) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& entry : entries_) {
+        if (entry.id == id) {
+            if (entry.state == AgentStatusState::Running) {
+                entry.input_tokens += input_tokens;
+                entry.output_tokens += output_tokens;
+            }
+            return;
+        }
+    }
+}
+
 void AgentStatusBoard::Finish(int id, bool success) {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto& entry : entries_) {
@@ -128,31 +157,50 @@ std::vector<std::string> FormatAgentStatusLines(const std::vector<AgentStatusEnt
                                                   const Theme& theme) {
     const bool plain = theme.reset.empty();
     std::vector<std::string> lines;
-    lines.reserve(entries.size());
+    lines.reserve(entries.size() * 3);
     for (const auto& entry : entries) {
         const auto end = entry.state == AgentStatusState::Running ? now : entry.end_time;
         const double seconds = std::chrono::duration<double>(end - entry.start_time).count();
+        const std::string tokens = FormatTokenCount(entry.input_tokens + entry.output_tokens);
 
-        std::string prefix;
+        // 首行:状态灯(或 plain 方括号词)+ 任务摘要——跟旧版单行开头
+        // 逐字一致,只是尾巴的耗时/工具次数挪到第二行去了。
         if (plain) {
-            prefix = StatusWord(entry.state) + std::string(" ");
+            lines.push_back(StatusWord(entry.state) + " " + entry.label);
         } else {
-            prefix = StatusColor(entry.state, theme) + kDot + theme.reset + " ";
+            lines.push_back(StatusColor(entry.state, theme) + kDot + theme.reset + " " + entry.label);
         }
 
-        std::string key;
+        // 第二行:"⎿  <状态词>(N 次工具调用 · Xk tokens · Ys)",三个数字
+        // 一次凑齐,骨架照 Claude Code 的 "Done (N tool uses · Xk tokens ·
+        // Ys)" 靠。
+        std::string state_key;
         switch (entry.state) {
             case AgentStatusState::Running:
-                key = "agent_status.running";
+                state_key = "agent_status.state_running";
                 break;
             case AgentStatusState::Ok:
-                key = "agent_status.done_ok";
+                state_key = "agent_status.state_done";
                 break;
             case AgentStatusState::Error:
-                key = "agent_status.done_error";
+                state_key = "agent_status.state_failed";
                 break;
         }
-        lines.push_back(prefix + trf(key, entry.label, FormatSeconds(seconds), entry.tool_calls));
+        const std::string summary =
+            trf("agent_status.summary", tr(state_key), entry.tool_calls, tokens, FormatSeconds(seconds));
+        if (plain) {
+            lines.push_back(std::string("  ") + kElbow + "  " + summary);
+        } else {
+            lines.push_back(std::string("  ") + theme.stats + kElbow + "  " + summary + theme.reset);
+        }
+
+        // 第三行:折叠提示,提醒用户 Ctrl+O 能展开明细(#三:紧凑模式默认
+        // 只留这三行摘要,子代理内层工具调用不逐条铺屏)。
+        if (plain) {
+            lines.push_back(std::string("  ") + tr("agent_status.expand_hint"));
+        } else {
+            lines.push_back(std::string("  ") + theme.stats + tr("agent_status.expand_hint") + theme.reset);
+        }
     }
     return lines;
 }
