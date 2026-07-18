@@ -452,6 +452,30 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
         }
         config.tool_search_threshold = static_cast<int>(value);
     }
+    if (parsed.contains("connect_timeout_ms")) {
+        const auto& field = parsed["connect_timeout_ms"];
+        if ((!field.is_number_integer() && !field.is_number_unsigned()) || field.get<long long>() <= 0) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                    " 里的 connect_timeout_ms 字段必须是正整数(单位毫秒)");
+        }
+        config.connect_timeout_ms = static_cast<int>(field.get<long long>());
+    }
+    if (parsed.contains("stream_idle_timeout_secs")) {
+        const auto& field = parsed["stream_idle_timeout_secs"];
+        if ((!field.is_number_integer() && !field.is_number_unsigned()) || field.get<long long>() <= 0) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                    " 里的 stream_idle_timeout_secs 字段必须是正整数(单位秒)");
+        }
+        config.stream_idle_timeout_secs = static_cast<int>(field.get<long long>());
+    }
+    if (parsed.contains("request_timeout_secs")) {
+        const auto& field = parsed["request_timeout_secs"];
+        if ((!field.is_number_integer() && !field.is_number_unsigned()) || field.get<long long>() <= 0) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                    " 里的 request_timeout_secs 字段必须是正整数(单位秒)");
+        }
+        config.request_timeout_secs = static_cast<int>(field.get<long long>());
+    }
     if (parsed.contains("hooks")) {
         auto hooks_result = ParseHooksConfig(parsed["hooks"], file_path_for_error);
         if (!hooks_result.has_value()) {
@@ -875,6 +899,43 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     } else {
         result.config.tool_search_threshold = kDefaultToolSearchThreshold;
         result.sources.tool_search_threshold = Source::Default;
+    }
+
+    // ---- M11(网络超时):connect_timeout_ms / stream_idle_timeout_secs /
+    // request_timeout_secs 三个字段都是"项目级 > 全局 > 默认值",没有环境
+    // 变量这一级(跟 tool_search_threshold 同样待遇)。取值校验在
+    // ParseFileConfigJson 里做过了。 ----
+    if (project_file.has_value() && project_file->connect_timeout_ms.has_value()) {
+        result.config.connect_timeout_ms = *project_file->connect_timeout_ms;
+        result.sources.connect_timeout_ms = Source::ProjectConfigFile;
+    } else if (global_file.has_value() && global_file->connect_timeout_ms.has_value()) {
+        result.config.connect_timeout_ms = *global_file->connect_timeout_ms;
+        result.sources.connect_timeout_ms = Source::GlobalConfigFile;
+    } else {
+        result.config.connect_timeout_ms = kDefaultConnectTimeoutMs;
+        result.sources.connect_timeout_ms = Source::Default;
+    }
+
+    if (project_file.has_value() && project_file->stream_idle_timeout_secs.has_value()) {
+        result.config.stream_idle_timeout_secs = *project_file->stream_idle_timeout_secs;
+        result.sources.stream_idle_timeout_secs = Source::ProjectConfigFile;
+    } else if (global_file.has_value() && global_file->stream_idle_timeout_secs.has_value()) {
+        result.config.stream_idle_timeout_secs = *global_file->stream_idle_timeout_secs;
+        result.sources.stream_idle_timeout_secs = Source::GlobalConfigFile;
+    } else {
+        result.config.stream_idle_timeout_secs = kDefaultStreamIdleTimeoutSecs;
+        result.sources.stream_idle_timeout_secs = Source::Default;
+    }
+
+    if (project_file.has_value() && project_file->request_timeout_secs.has_value()) {
+        result.config.request_timeout_secs = *project_file->request_timeout_secs;
+        result.sources.request_timeout_secs = Source::ProjectConfigFile;
+    } else if (global_file.has_value() && global_file->request_timeout_secs.has_value()) {
+        result.config.request_timeout_secs = *global_file->request_timeout_secs;
+        result.sources.request_timeout_secs = Source::GlobalConfigFile;
+    } else {
+        result.config.request_timeout_secs = kDefaultRequestTimeoutSecs;
+        result.sources.request_timeout_secs = Source::Default;
     }
 
     // ---- 对象型整段(hooks/mcpServers/search/lsp):只从配置文件来,没有

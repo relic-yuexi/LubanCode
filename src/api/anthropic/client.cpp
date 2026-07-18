@@ -14,6 +14,7 @@
 
 #include "api/anthropic/events.hpp"
 #include "api/sse_framing.hpp"
+#include "cli/i18n.hpp"
 
 namespace lubancode::api::anthropic {
 
@@ -167,10 +168,37 @@ int ExtractStatusCode(std::string_view header_line) {
     return code;
 }
 
+// 把 cpr 的网络错误翻成人话。OPERATION_TIMEDOUT 是 CURLOPT_CONNECTTIMEOUT
+// 和 CURLOPT_LOW_SPEED_TIME/LIMIT 共用的错误码(libcurl 底层就是同一个
+// CURLE_OPERATION_TIMEDOUT),没法直接从错误码分清"连接没建立起来"还是
+// "连上了半路断流"——靠 received_any_bytes(有没有收到过响应体的第一个
+// 字节)这个旁证区分:一个字节都没收到,大概率是连接/握手阶段卡死;收到
+// 过数据又停了,是流中途假死。COULDNT_CONNECT/COULDNT_RESOLVE_HOST/
+// COULDNT_RESOLVE_PROXY 是明确的"连不上"类错误,原始 curl 错误信息拼进去
+// 不丢细节。别的错误码原样透传 curl 的 message(留着排查用,不做过度包装)。
+std::string ClassifyNetworkError(const cpr::Error& error, bool received_any_bytes, int connect_timeout_ms,
+                                  int stream_idle_timeout_secs) {
+    if (error.code == cpr::ErrorCode::OPERATION_TIMEDOUT) {
+        if (received_any_bytes) {
+            return cli::trf("error.network.stream_idle_timeout", stream_idle_timeout_secs);
+        }
+        return cli::trf("error.network.connect_timeout", connect_timeout_ms / 1000);
+    }
+    if (error.code == cpr::ErrorCode::COULDNT_CONNECT || error.code == cpr::ErrorCode::COULDNT_RESOLVE_HOST ||
+        error.code == cpr::ErrorCode::COULDNT_RESOLVE_PROXY) {
+        return cli::trf("error.network.connect_failed", error.message);
+    }
+    return error.message;
+}
+
 }  // namespace
 
-AnthropicBackend::AnthropicBackend(std::string base_url, std::string auth_token)
-    : base_url_(std::move(base_url)), auth_token_(std::move(auth_token)) {}
+AnthropicBackend::AnthropicBackend(std::string base_url, std::string auth_token, int connect_timeout_ms,
+                                    int stream_idle_timeout_secs)
+    : base_url_(std::move(base_url)),
+      auth_token_(std::move(auth_token)),
+      connect_timeout_ms_(connect_timeout_ms),
+      stream_idle_timeout_secs_(stream_idle_timeout_secs) {}
 
 std::expected<void, Error> AnthropicBackend::send_stream(
     const Request& request,
@@ -187,6 +215,9 @@ std::expected<void, Error> AnthropicBackend::send_stream(
     bool frame_overflow = false;
     bool saw_message_done = false;
     bool saw_stream_error = false;
+    // M11:有没有收到过响应体的第一个字节——网络错误发生时靠这个旁证分清
+    // 是连接阶段就卡死了,还是流中途假死(见 ClassifyNetworkError 注释)。
+    bool received_any_bytes = false;
 
     cpr::HeaderCallback header_cb(
         [&](const std::string_view& header, intptr_t) -> bool {
@@ -199,6 +230,7 @@ std::expected<void, Error> AnthropicBackend::send_stream(
 
     cpr::WriteCallback write_cb(
         [&](const std::string_view& data, intptr_t) -> bool {
+            received_any_bytes = true;
             if (cancel != nullptr && cancel->load()) {
                 // 返回 false 让 cpr/libcurl 就地掐断这次传输;response.error
                 // 会因此被置位,靠上面这个 cancelled 标志把"用户主动打断"
@@ -234,7 +266,7 @@ std::expected<void, Error> AnthropicBackend::send_stream(
     // ProgressCallback 在连接/TLS 握手阶段(还没有响应体)也会被周期性调用,
     // 返回 false 即中止——WriteCallback 只有数据到达才触发,光靠它,ESC 在
     // 连不上的服务器面前毫无办法。总超时不设死(流式回复可以很长),连接
-    // 阶段单独给 15s 上限。
+    // 阶段单独给 connect_timeout_ms_ 上限(M11:可配,默认 15s)。
     cpr::ProgressCallback progress_cb(
         [&](cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, intptr_t) -> bool {
             if (cancel != nullptr && cancel->load()) {
@@ -246,6 +278,10 @@ std::expected<void, Error> AnthropicBackend::send_stream(
 
     const std::string url = base_url_ + "/v1/messages";
 
+    // M11:LowSpeed{1, stream_idle_timeout_secs_} 是"空闲读超时",不是总时长
+    // 上限——libcurl 语义是"持续 stream_idle_timeout_secs_ 秒平均速率低于
+    // 1 字节/秒就判超时",拿它当"连续 N 秒一个字节没收到"的等价检测(流式
+    // 回答本身可以很长,故意不设总 Timeout)。
     cpr::Response response = cpr::Post(
         cpr::Url{url},
         cpr::Header{
@@ -253,7 +289,8 @@ std::expected<void, Error> AnthropicBackend::send_stream(
             {"Authorization", "Bearer " + auth_token_},
         },
         cpr::Body{body_str},
-        cpr::ConnectTimeout{std::chrono::milliseconds(15000)},
+        cpr::ConnectTimeout{std::chrono::milliseconds(connect_timeout_ms_)},
+        cpr::LowSpeed{1, stream_idle_timeout_secs_},
         header_cb,
         write_cb,
         progress_cb);
@@ -267,7 +304,9 @@ std::expected<void, Error> AnthropicBackend::send_stream(
     }
 
     if (response.error) {
-        return std::unexpected(Error{ErrorKind::Network, response.error.message, 0});
+        const std::string message =
+            ClassifyNetworkError(response.error, received_any_bytes, connect_timeout_ms_, stream_idle_timeout_secs_);
+        return std::unexpected(Error{ErrorKind::Network, message, 0});
     }
 
     const int final_status = static_cast<int>(response.status_code);
