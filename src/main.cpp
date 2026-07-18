@@ -124,7 +124,8 @@ std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::C
             config.native_web_search);
     }
     return std::make_unique<lubancode::api::anthropic::AnthropicBackend>(
-        config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs);
+        config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs,
+        config.native_web_search);
 }
 
 // 会话里切 provider 时，外层 Model/Think/Soul 等包装器、AgentLoop 和工具

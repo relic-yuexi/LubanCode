@@ -86,11 +86,14 @@ struct ProviderConfig {
     std::string model;
     std::string model_reasoning_effort;  // 可选，切到该端时应用的推理档位
     std::size_t context_window_tokens = kDefaultContextWindowTokens;
-    // native_web_search:responses 协议端点若原生支持联网搜索(请求 tools
-    // 数组里塞 {"type":"web_search"},服务端自己查、把结果编排进回复文本
-    // 里),开这个开关就在请求里带上声明。默认 false(不是所有 responses
-    // 兼容端都支持,乱开可能把请求搞坏);只对 wire==Responses 的端有意义,
-    // anthropic 协议端读了也用不上。按 provider 各自开关,不搞全局唯一开关。
+    // native_web_search:该端若原生支持联网搜索(服务端自己查、把结果编排
+    // 进回复文本里,客户端不用实现任何执行逻辑),开这个开关就在请求里带上
+    // 声明。默认 false(不是所有兼容端都支持,乱开可能把请求搞坏)。两种
+    // wire 都读这个开关,但各自翻译成自己协议的形状——responses 协议塞
+    // {"type":"web_search"}(BuildRequestJson,src/api/responses/request.cpp),
+    // anthropic 协议塞 {"type":"web_search_日期版本号","name":"web_search"}
+    // (BuildRequestJson,src/api/anthropic/client.cpp)。按 provider 各自
+    // 开关,不搞全局唯一开关。
     bool native_web_search = false;
 };
 
@@ -181,11 +184,13 @@ struct Config {
     std::string base_url;
     std::string auth_token;  // 即 api_key
     std::string model;
-    // native_web_search:当前生效端(wire==Responses 时才有意义)是否声明
-    // 原生联网搜索。跟 wire/base_url/auth_token/model 一样,是"当前激活端"
-    // 的运行期状态——只在 /provider switch 时从 ProviderConfig::
-    // native_web_search 镜像过来,不走独立的配置文件/环境变量四级合并
-    // (provider 才是唯一来源),默认 false。
+    // native_web_search:当前生效端是否声明原生联网搜索,anthropic/
+    // responses 两种 wire 都读这个字段(各自翻译成自己协议的 tools 数组
+    // 形状,见 ProviderConfig::native_web_search 的注释)。跟 wire/
+    // base_url/auth_token/model 一样,是"当前激活端"的运行期状态——只在
+    // /provider switch 时从 ProviderConfig::native_web_search 镜像过来,
+    // 不走独立的配置文件/环境变量四级合并(provider 才是唯一来源),默认
+    // false。
     bool native_web_search = false;
     std::size_t max_context_chars = kDefaultMaxContextChars;
     std::string theme = kDefaultTheme;   // dark / light / plain,没配到就是 kDefaultTheme

@@ -108,7 +108,7 @@ std::optional<json> BuildThinkingJson(const Request& request) {
 
 // 拼出 Anthropic Messages API 的请求体(stream: true 恒开,M1 只走流式)。
 // 声明在 client.hpp 里,单测用;线上代码路径(send_stream)也是调这个函数。
-json BuildRequestJson(const Request& request) {
+json BuildRequestJson(const Request& request, bool native_web_search) {
     json body;
     body["model"] = request.model;
     body["max_tokens"] = request.max_tokens;
@@ -132,7 +132,11 @@ json BuildRequestJson(const Request& request) {
     }
     body["messages"] = messages;
 
-    if (!request.tools.empty()) {
+    // native_web_search 是服务端原生能力声明,跟 request.tools(本地函数
+    // 工具)是两码事——就算本地工具表是空的,只要开关开着也要能声明,所以
+    // 这里不能再用 "!request.tools.empty()" 当建不建 tools 字段的唯一门槛
+    // (跟 Responses 那边 M12 的改法同一个道理)。
+    if (!request.tools.empty() || native_web_search) {
         json tools = json::array();
         for (const auto& tool : request.tools) {
             tools.push_back(json{
@@ -140,6 +144,16 @@ json BuildRequestJson(const Request& request) {
                 {"description", tool.description},
                 {"input_schema", tool.input_schema},
             });
+        }
+        if (native_web_search) {
+            // Anthropic 的 server tool 声明形状跟本地函数工具不一样:只有
+            // type + name 两个字段,没有 description/input_schema。type 里
+            // 那串数字是日期版本号——web_search_20260209 是 2026-02-09
+            // 随 Claude 4.6 发布的当前 GA 版本(支持 dynamic filtering),
+            // 官方文档确认基础用法(不启用 code execution 动态过滤)不需要
+            // 额外 beta header,直接可用;旧版本 web_search_20250305 仍受
+            // 支持,但新请求没有理由不用当前版本。
+            tools.push_back(json{{"type", "web_search_20260209"}, {"name", "web_search"}});
         }
         body["tools"] = tools;
     }
@@ -194,17 +208,18 @@ std::string ClassifyNetworkError(const cpr::Error& error, bool received_any_byte
 }  // namespace
 
 AnthropicBackend::AnthropicBackend(std::string base_url, std::string auth_token, int connect_timeout_ms,
-                                    int stream_idle_timeout_secs)
+                                    int stream_idle_timeout_secs, bool native_web_search)
     : base_url_(std::move(base_url)),
       auth_token_(std::move(auth_token)),
       connect_timeout_ms_(connect_timeout_ms),
-      stream_idle_timeout_secs_(stream_idle_timeout_secs) {}
+      stream_idle_timeout_secs_(stream_idle_timeout_secs),
+      native_web_search_(native_web_search) {}
 
 std::expected<void, Error> AnthropicBackend::send_stream(
     const Request& request,
     const std::function<void(const StreamEvent&)>& on_event,
     const std::atomic<bool>* cancel) {
-    const json body = BuildRequestJson(request);
+    const json body = BuildRequestJson(request, native_web_search_);
     const std::string body_str = body.dump();
 
     SseFramer framer;

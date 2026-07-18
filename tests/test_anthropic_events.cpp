@@ -177,6 +177,86 @@ TEST_CASE("完整的一轮流式响应,按顺序喂给分帧器再解析,事件�
     CHECK(std::get<MessageDone>(events[3]).stop_reason == "end_turn");
 }
 
+// ---------------------------------------------------------------------------
+// M12(anthropic 协议接原生 web_search):server tool 完全在服务端跑完,
+// 客户端不需要执行任何东西——响应里会多出 server_tool_use(工具调用本身)
+// 和 web_search_tool_result(搜索结果)两种 content_block 类型,都不等于
+// "tool_use",HandleContentBlockStart 现有的 `if (type != "tool_use")` 分支
+// 天然把它们当成"text/thinking 同类"静默跳过,不会被误当成需要客户端执行
+// 的本地工具调用、也不会崩。这里用一段带 server_tool_use/
+// web_search_tool_result 块的模拟完整流实锤验证:解析不崩,且不产生
+// ToolUseStart 事件(不会被上层当成待执行的本地函数工具),文本正常拼出。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("content_block_start 类型是 server_tool_use 时静默跳过,不产生 ToolUseStart") {
+    auto event = parse_event(Frame(
+        R"({"type":"content_block_start","index":1,"content_block":{"type":"server_tool_use","id":"srvtoolu_01","name":"web_search","input":{}}})"));
+    CHECK_FALSE(event.has_value());
+}
+
+TEST_CASE("content_block_start 类型是 web_search_tool_result 时静默跳过") {
+    auto event = parse_event(Frame(
+        R"({"type":"content_block_start","index":2,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_01","content":[{"type":"web_search_result","url":"https://example.com","title":"示例","encrypted_content":"abc","page_age":"2026-01-01"}]}})"));
+    CHECK_FALSE(event.has_value());
+}
+
+TEST_CASE("完整一轮夹带 server_tool_use/web_search_tool_result 的流式响应:不崩,不产生 ToolUseStart,文本正常拼出") {
+    SseFramer framer;
+    const std::string raw =
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_xxx\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet\",\"content\":[],\"usage\":{\"input_tokens\":20,\"output_tokens\":0}}}\n\n"
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"我查一下最新消息。\"}}\n\n"
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+        "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"srvtoolu_01\",\"name\":\"web_search\",\"input\":{}}}\n\n"
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"query\\\":\\\"今天天气\\\"}\"}}\n\n"
+        "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n"
+        "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"web_search_tool_result\",\"tool_use_id\":\"srvtoolu_01\",\"content\":[{\"type\":\"web_search_result\",\"url\":\"https://example.com\",\"title\":\"示例\",\"encrypted_content\":\"abc\",\"page_age\":\"2026-01-01\"}]}}\n\n"
+        "data: {\"type\":\"content_block_stop\",\"index\":2}\n\n"
+        "data: {\"type\":\"content_block_start\",\"index\":3,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+        "data: {\"type\":\"content_block_delta\",\"index\":3,\"delta\":{\"type\":\"text_delta\",\"text\":\"根据搜索结果,今天晴。\"}}\n\n"
+        "data: {\"type\":\"content_block_stop\",\"index\":3}\n\n"
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":20,\"output_tokens\":30,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0}}\n\n"
+        "data: {\"type\":\"message_stop\"}\n\n";
+
+    std::vector<StreamEvent> events;
+    CHECK_NOTHROW({
+        for (const SseFrame& frame : framer.feed(raw)) {
+            if (auto event = parse_event(frame); event.has_value()) {
+                events.push_back(*event);
+            }
+        }
+    });
+
+    // server_tool_use / web_search_tool_result 两个块的 start/delta/stop
+    // 全部被静默吞掉(server_tool_use 的 content_block_stop 例外——那条
+    // ContentBlockDone 不区分块类型,始终会发,上层按 index 匹配,匹配不到
+    // 对应的 ToolUseStart 时是安全的空操作)。真正需要断言的是:不出现
+    // ToolUseStart(不会被误当成待执行的本地工具),TextDelta 正常拼出
+    // 两段文本。
+    for (const StreamEvent& event : events) {
+        CHECK_FALSE(std::holds_alternative<ToolUseStart>(event));
+    }
+
+    std::string assembled_text;
+    for (const StreamEvent& event : events) {
+        if (std::holds_alternative<TextDelta>(event)) {
+            assembled_text += std::get<TextDelta>(event).text;
+        }
+    }
+    CHECK(assembled_text == "我查一下最新消息。根据搜索结果,今天晴。");
+
+    // message_delta 仍然正常映射出 MessageDone,流没有因为中间夹了 server
+    // tool 块就被打断。
+    bool saw_message_done = false;
+    for (const StreamEvent& event : events) {
+        if (std::holds_alternative<MessageDone>(event)) {
+            saw_message_done = true;
+            CHECK(std::get<MessageDone>(event).stop_reason == "end_turn");
+        }
+    }
+    CHECK(saw_message_done);
+}
+
 TEST_CASE("未知事件类型静默跳过,不崩") {
     auto event = parse_event(Frame(R"({"type":"some_future_event","foo":"bar"})"));
     CHECK_FALSE(event.has_value());

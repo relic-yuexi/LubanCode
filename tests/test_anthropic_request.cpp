@@ -125,6 +125,51 @@ TEST_CASE("reasoning_effort 是映射表之外的字符串:不写 thinking 字�
     CHECK(captured.str().find("警告") != std::string::npos);
 }
 
+// ---------------------------------------------------------------------------
+// M12(anthropic 协议接原生 web_search):跟 Responses 那边 M12 是同一个配置
+// 开关(ProviderConfig::native_web_search / Config::native_web_search),只
+// 是这里翻译成 anthropic 协议自己的 server tool 声明形状——
+// {"type":"web_search_20260209","name":"web_search"},没有 description/
+// input_schema 这两个字段(跟本地函数工具的形状不一样)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("native_web_search=false(默认)时不写 web_search 声明,行为跟现状一致") {
+    Request request;
+    const auto body = BuildRequestJson(request);
+    CHECK_FALSE(body.contains("tools"));
+
+    const auto body_explicit_false = BuildRequestJson(request, /*native_web_search=*/false);
+    CHECK_FALSE(body_explicit_false.contains("tools"));
+}
+
+TEST_CASE("native_web_search=true 且本地工具表为空时,tools 数组只有 web_search 一项") {
+    Request request;
+    const auto body = BuildRequestJson(request, /*native_web_search=*/true);
+    REQUIRE(body.contains("tools"));
+    REQUIRE(body.at("tools").size() == 1);
+    CHECK(body.at("tools")[0].at("type") == "web_search_20260209");
+    CHECK(body.at("tools")[0].at("name") == "web_search");
+    CHECK_FALSE(body.at("tools")[0].contains("description"));
+    CHECK_FALSE(body.at("tools")[0].contains("input_schema"));
+}
+
+TEST_CASE("native_web_search=true 且本地工具表非空时,web_search 追加在本地工具后面") {
+    Request request;
+    ToolDefinition def;
+    def.name = "read_file";
+    def.description = "读一个文件的内容";
+    def.input_schema = nlohmann::json{{"type", "object"}};
+    request.tools.push_back(def);
+
+    const auto body = BuildRequestJson(request, /*native_web_search=*/true);
+    REQUIRE(body.contains("tools"));
+    REQUIRE(body.at("tools").size() == 2);
+    CHECK(body.at("tools")[0].at("name") == "read_file");
+    CHECK(body.at("tools")[0].contains("input_schema"));
+    CHECK(body.at("tools")[1].at("type") == "web_search_20260209");
+    CHECK(body.at("tools")[1].at("name") == "web_search");
+}
+
 TEST_CASE("用户图片映射成 Anthropic image/base64 block") {
     Request request;
     Message user;
