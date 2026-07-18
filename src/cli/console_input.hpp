@@ -123,19 +123,25 @@ std::mutex& StdoutWriteMutex();
 void SetStreamScreenPrintHook(std::function<void()> hook);
 
 // -----------------------------------------------------------------------
-// 0.21.x 流式脚注(footer):流式期间在正文下方常驻一行淡色提示,让用户看见
-// "能按 ESC 打断、能键入并回车排队下一条"——回归前用户实测"流式期间屏上
-// 啥提示都没有,以为程序坏了"。用户真键入排队消息时,这行实时回显
-// "排队中: <已键入>";Enter 落队后复位回提示、下面另起一行 "[已排队] ..."。
+// 0.21.x 流式脚注(footer),0.22.x 升级成跟 composer 视觉一致的完整框:
+// 流式期间正文下方常驻上横线 + `> ` 输入行 + 下横线 + 状态行,一共 4 行,
+// 让用户看见"能按 ESC 打断、能键入并回车排队下一条"——回归前用户实测
+// "流式期间屏上啥提示都没有,以为程序坏了"。空闲时输入行显示淡色占位提示
+// (取代老版本单独一行 hint);用户真键入排队消息时,输入行实时回显已键入
+// 内容;Enter 落队后输入行复位回占位提示、上面另起一行 "[已排队] ..."。
+// 上下横线/状态行分别复用 composer 输入框那节的 BoxRuleLine/PrintStatusLine,
+// 不重写一份画法(见 console_input.cpp)。
 //
 // 归属与协调:footer 的状态(显示/回显文本)由 RunTurn / 监听线程设置,但
 // 真正落笔由 StreamBodyTracker::OnDelta 每笔正文前后带一手——正文落笔前
-// EraseStreamFooterLocked() 把 footer 那行擦掉(免得跟正文抢行),正文落笔后
-// RedrawStreamFooterLocked() 把 footer 重画在正文光标的下一行、光标再拨回
-// 正文末尾。这样 footer 永远紧贴"正文当前底部"的下一行,正文往下长它就跟着
-// 挪,绝不跟正文重叠,也绝不自己触发滚屏(没地方就这一笔不画、下一笔再来),
-// 正文块的锚点账/markdown 收束重画一概不受牵连(footer 落在块区间之外,不
-// 挪动块内任何一行,故不必作废块锚)。全程在 StdoutWriteMutex 之内。
+// EraseStreamFooterLocked() 把整个框擦掉(免得跟正文抢行),正文落笔后
+// RedrawStreamFooterLocked() 把框重画在正文光标的下一行起、光标再拨回
+// 正文末尾。这样框永远紧贴"正文当前底部"的下一行,正文往下长它就跟着挪,
+// 绝不跟正文重叠,也绝不自己触发滚屏(没地方整框落地就这一笔不画、下一笔
+// 再来),正文块的锚点账/markdown 收束重画一概不受牵连(框落在块区间之外,
+// 不挪动块内任何一行,故不必作废块锚)。全程在 StdoutWriteMutex 之内,每次
+// 重画都拿 synchronized output(DEC 2026,`\x1b[?2026h`/`l`)包一层,避免
+// 终端半途刷出擦了一半/画了一半的框。
 //
 // enabled:只在 is_console && platform::SupportsScreenRepaint()(即 Windows
 // 真控制台)下为真——footer 要随时查光标位定位,POSIX 走 DSR 6n 会跟监听

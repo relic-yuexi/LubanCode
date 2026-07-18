@@ -112,15 +112,47 @@ StatusLineData& StatusDataSlot() {
 // 拿锁再碰它,故字段本身不用再套原子。
 struct StreamFooterState {
     bool enabled = false;   // 只有 Windows 真控制台 + 开了重画才为真
-    std::string hint;       // 空闲提示(BeginStreamFooter 按主题 plain 与否建好)
-    std::string echo;       // 排队实时回显文本;空串 = 显示 hint
+    std::string hint;       // 空闲占位提示(BeginStreamFooter 按主题 plain 与否建好)
+    std::string echo;       // 排队实时回显文本;空串 = 输入行显示占位提示
     std::string color;      // 淡色前缀(theme.stats);plain 主题为空串
     std::string reset;      // theme.reset;plain 主题为空串
-    int row = -1;           // 此刻画在哪一绝对行,-1 = 没画
+    Theme theme;             // 完整主题:画框(BoxRuleLine)、状态行(PrintStatusLine)
+                             // 直接复用 composer 那两个画法,得传整个 Theme,不能只传片段。
+    int row = -1;            // 框顶(上横线)此刻画在哪一绝对行,-1 = 没画
 };
 StreamFooterState& FooterSlot() {
     static StreamFooterState f;
     return f;
+}
+
+// 0.22.x 流式脚注框化:跟 composer 视觉一致的完整框——上横线 + 输入行
+// (`> ` + 已键入内容 / 空闲占位提示) + 下横线 + 状态行,共 4 行,取代老版本
+// 光杆一行提示。上下横线复用 BoxRuleLine、状态行复用 PrintStatusLine(定义
+// 见下面 composer 输入框那节),不重写一份画法。
+constexpr int kStreamFooterBoxRows = 4;
+// synchronized output(DEC 私有模式 2026):写之前 h、写完 l,把一次重画钉成
+// 一帧提交,避免终端半途刷出"擦了一半/画了一半"的画面。已用 web 检索核实过
+// 假设:ECMA-48/xterm 的通用约定是私有模式号不认得就直接吞掉、不报错也不
+// 触发别的动作(iTerm2 Feature Reporting Spec、xterm ctlseqs 文档都明确要求
+// "未知但格式合法的 CSI 私有模式必须被正确解析后安全忽略");Windows
+// Terminal 从 1.24 Preview 起已经原生实现 DECSET 2026(conhost 共用同一套
+// VT 引擎),老版本 Windows Terminal/conhost 不认这个模式号,按上面的约定
+// 静默吞掉,不会有副作用——不是"想当然",是查过 xterm 规范原文 + Windows
+// Terminal 官方 PR 说明后的结论。
+constexpr const char* kSyncOutputBegin = "\x1b[?2026h";
+constexpr const char* kSyncOutputEnd = "\x1b[?2026l";
+
+// 把 top_row 起 kStreamFooterBoxRows 行清空(连字符属性一起还原,不留主题色
+// 残底,同 CollapseBoxOnSubmit 的取舍)——越界的行(贴着缓冲区顶/底)直接
+// 跳过,不是错误。
+void ClearStreamFooterBoxAt(int top_row, int width, int height) {
+    for (int i = 0; i < kStreamFooterBoxRows; ++i) {
+        const int y = top_row + i;
+        if (y < 0 || y >= height) {
+            continue;
+        }
+        platform::ClearRowHardFrom(0, y, width);
+    }
 }
 
 // M10:谁在真的逐键读键盘,谁就得先拿到这把锁——ReadLineKeyByKey() 整个
@@ -648,10 +680,13 @@ void EraseStreamFooterLocked() {
         return;  // 没画,不用擦
     }
     if (const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo(); info.has_value()) {
-        // 存下正文光标(擦 footer 那一行不该动正文的落笔位),擦完拨回去。
+        // 存下正文光标(擦框这几行不该动正文的落笔位),擦完拨回去。
         const int bx = info->cursor_x;
         const int by = info->cursor_y;
-        platform::ClearRowHardFrom(0, f.row, info->width);
+        std::cout << kSyncOutputBegin;
+        ClearStreamFooterBoxAt(f.row, info->width, info->height);
+        std::cout << kSyncOutputEnd;
+        std::cout.flush();
         platform::SetCursorPos(bx, by);
     }
     f.row = -1;
@@ -668,28 +703,70 @@ void RedrawStreamFooterLocked() {
     }
     const int bx = info->cursor_x;  // 正文当前落笔位
     const int by = info->cursor_y;
-    // 先擦掉旧 footer 行(正文可能已把它顶走 / 回显文本变了)。
+
+    std::cout << kSyncOutputBegin;  // 擦旧框 + 画新框整个当一帧提交,别让半路的画面露出来
+
+    // 先擦掉旧框(正文可能已把它顶走 / 输入行内容变了)。
     if (f.row >= 0) {
-        platform::ClearRowHardFrom(0, f.row, info->width);
+        ClearStreamFooterBoxAt(f.row, info->width, info->height);
         f.row = -1;
     }
-    const std::string& text = f.echo.empty() ? f.hint : f.echo;
-    if (text.empty()) {
+
+    if (f.hint.empty() && f.echo.empty()) {
+        // 没启用 / 还没准备好文案:跟老逻辑一样,这一笔不画。
+        std::cout << kSyncOutputEnd;
+        std::cout.flush();
         platform::SetCursorPos(bx, by);
         return;
     }
-    // footer 落在正文光标的下一行:正文停在行中(bx>0)就 by+1,正文刚换行
+
+    // 框落在正文光标的下一行:正文停在行中(bx>0)就 by+1,正文刚换行
     // 停在行首(bx==0)就落在 by 这空行上——两种都是"正文当前底部的下一行"。
     const int target = by + (bx > 0 ? 1 : 0);
-    if (target < 0 || target >= info->height) {
-        // 正文贴着缓冲区底、footer 没地方落:这一笔不画,绝不自己滚屏(滚屏
-        // 会打乱正文块的锚点账),下一笔正文推着往下时再画。
+    // 框比老光杆一行高(上横线 + 输入行 + 下横线 + 状态行,共
+    // kStreamFooterBoxRows 行),但绝不自己触发滚屏——理由跟老版一致:滚屏
+    // 会打乱正文块(main.cpp StreamBodyTracker)的锚点账,这轮明确不碰它,
+    // 也没有复用 RedrawEditArea/EnsureRoomForRows(那套是给 LineEditorCore
+    // 的多行编辑区记账的,这里没有那个状态,硬凑反而画蛇添足)。没地方
+    // 整框落地就这一笔不画,下一笔正文把光标推着往下挪、腾出空间时再画;
+    // 而 GetScreenInfo 的 height 是缓冲区总高(含回滚,常年是几千行),这个
+    // "没地方"分支实际只在贴着缓冲区真正末尾时才会触发,极少见。
+    if (target < 0 || target + kStreamFooterBoxRows - 1 >= info->height) {
+        std::cout << kSyncOutputEnd;
+        std::cout.flush();
         platform::SetCursorPos(bx, by);
         return;
     }
-    platform::ClearRowHardFrom(0, target, info->width);
+
+    const int width = info->width;
+    const BoxChrome chrome{true, &f.theme, SharedEditor().confirm_mode()};
+
     platform::SetCursorPos(0, target);
-    std::cout << f.color << TruncateUtf8ToDisplayWidth(text, info->width - 1) << f.reset;
+    std::cout << BoxRuleLine(f.theme, width);
+
+    // 输入行:"> " + 已键入内容(纯文本,照真实输入的样子);空闲时 "> " +
+    // 淡色占位提示,充当"这里能打字"的可发现性提示(取代老版本单独一行
+    // hint)。截断跟 PrintStatusLine 一个道理——夹着 ANSI 的整行不能整个截,
+    // 先截纯文本内容,颜色包在截完的文本外头。
+    platform::SetCursorPos(0, target + 1);
+    const std::string prefix = "> ";
+    const int content_width = width - 1 - static_cast<int>(DisplayWidthUtf8(prefix));
+    std::cout << prefix;
+    if (content_width > 0) {
+        if (!f.echo.empty()) {
+            std::cout << TruncateUtf8ToDisplayWidth(f.echo, content_width);
+        } else {
+            std::cout << f.color << TruncateUtf8ToDisplayWidth(f.hint, content_width) << f.reset;
+        }
+    }
+
+    platform::SetCursorPos(0, target + 2);
+    std::cout << BoxRuleLine(f.theme, width);
+
+    platform::SetCursorPos(0, target + 3);
+    PrintStatusLine(chrome, width - 1);
+
+    std::cout << kSyncOutputEnd;
     std::cout.flush();
     platform::SetCursorPos(bx, by);  // 拨回正文末尾,下一笔正文接着往下打
     f.row = target;
@@ -701,12 +778,13 @@ void BeginStreamFooter(const Theme& theme, bool enabled) {
     f.enabled = enabled;
     f.row = -1;
     f.echo.clear();
+    f.theme = theme;
     f.color = theme.stats;
     f.reset = theme.reset;
     f.hint = enabled ? StreamHintText(theme.reset.empty()) : std::string();
-    // 开场不主动画:此刻正文还没吐,"思考中"转轮正占着这一行(跟 footer 同
-    // 一行会打架)。等第一笔正文经 OnDelta 落地,RedrawStreamFooterLocked 自然
-    // 把 footer 摆到正文下方;之后每笔正文都续着重画,一直常驻到收束。
+    // 开场不主动画:此刻正文还没吐,"思考中"转轮正占着这一行(跟框同一行会
+    // 打架)。等第一笔正文经 OnDelta 落地,RedrawStreamFooterLocked 自然把
+    // 框摆到正文下方;之后每笔正文都续着重画,一直常驻到收束。
 }
 
 void EndStreamFooter() {

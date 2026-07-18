@@ -103,4 +103,11 @@ if(WIN32)
   # 集成验证时手动跑:markdown_screen_driver <lubancode.exe> <工作目录> <报告文件>
   add_executable(markdown_screen_driver markdown_screen_driver.cpp)
   target_compile_features(markdown_screen_driver PRIVATE cxx_std_23)
+
+  # 流式脚注框化(0.22.x):验流式期间正文下方那个跟 composer 视觉一致的框
+  # (上横线/输入行/下横线/状态行)、排队回显、ESC 打断、可视区域自然滚屏时
+  # 框还贴得住,同样不进 ctest,集成验证时手动跑:
+  #   stream_footer_driver <lubancode.exe> <工作目录> <报告文件>
+  add_executable(stream_footer_driver stream_footer_driver.cpp)
+  target_compile_features(stream_footer_driver PRIVATE cxx_std_23)
 endif()
