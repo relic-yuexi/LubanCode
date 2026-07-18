@@ -20,6 +20,7 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <iostream>
 #include <iterator>
 
 namespace lubancode::platform {
@@ -66,7 +67,13 @@ std::optional<int> ConsoleWidth() {
 }
 
 bool SupportsScreenRepaint() {
-    return true;
+    // 真探测,跟 TranscriptPainter 实际用来定锚点的 API 同一把尺——之前
+    // 写死 true,mintty/ConPTY 之类 GetConsoleScreenBufferInfo 靠不住的
+    // 环境里 TranscriptPainter 会以为自己能原地改写,实际锚点全程拿不到
+    // 准确坐标,子代理连打工具调用时会画出"一黄一绿"的重复行(旧状态没
+    // 擦掉、新状态又在别处新起一行)。别再无条件 true,也别另立一套
+    // is_console 标准。
+    return GetScreenInfo().has_value();
 }
 
 std::optional<ScreenInfo> GetScreenInfo() {
@@ -86,6 +93,14 @@ std::optional<ScreenInfo> GetScreenInfo() {
 void SetCursorPos(int x, int y) {
     const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
     SetConsoleCursorPosition(h_out, COORD{static_cast<SHORT>(x), static_cast<SHORT>(y)});
+}
+
+void ClearScreen() {
+    // 光标归位 + 清可见区 + 清回滚缓冲。VT 序列走 std::cout(main.cpp 那份
+    // 调用点已经用 is_console 判断过要不要调这个函数),不碰 Win32
+    // FillConsoleOutputCharacterW 那套——ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    // 在真控制台/现代终端下开着,ProbeStdoutConsole 已经保证过。
+    std::cout << "\x1b[H\x1b[2J\x1b[3J" << std::flush;
 }
 
 void ClearRowFrom(int x, int y, int count) {

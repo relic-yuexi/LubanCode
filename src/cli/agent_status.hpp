@@ -17,6 +17,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -32,6 +33,11 @@ struct AgentStatusEntry {
     std::string label;  // 任务摘要,BuildToolTitle 同款 40 码点截断规矩
     AgentStatusState state = AgentStatusState::Running;
     int tool_calls = 0;
+    // 这个子代理自己发出的请求的 token 用量(输入+输出)累计——跟父级
+    // usage_stats 是两本账,父级那本连子代理的量一起算总花费,这本只认
+    // "这一个子代理任务花了多少",摘要行 "Xk tokens" 那一节用。
+    std::int64_t input_tokens = 0;
+    std::int64_t output_tokens = 0;
     std::chrono::steady_clock::time_point start_time{};
     std::chrono::steady_clock::time_point end_time{};  // state != Running 才有意义
 };
@@ -50,6 +56,11 @@ public:
     // 或者条目已经收尾(Clear() 之后晚到的回调、或 Finish 之后的孤儿事件)
     // 时安静地什么也不做。
     void RecordToolCall(int id);
+
+    // 子代理这一次独立请求的 token 用量累进对应条目——每次 on_usage 触发
+    // 都调一次,累计口径同 tool_calls(id 认不出/条目已收尾安静地什么也
+    // 不做)。摘要行的 "Xk tokens" 那一节数据来源。
+    void RecordUsage(int id, std::int64_t input_tokens, std::int64_t output_tokens);
 
     // 子代理跑完,收成终态(success 决定 Ok/Error),end_time 记现在;id
     // 认不出或已经收尾过同样安静地什么也不做。
@@ -71,14 +82,21 @@ private:
     int next_id_ = 1;
 };
 
-// 纯渲染:把 entries 排成要打印的那几行(一条一行,不带尾随 \n)。now 只用
-// 于 Running 态条目现算耗时;Ok/Error 态用各自的 end_time,ticker 多久没
-// 醒都不影响收尾行的耗时数字(一旦 Finish() 过就定住了)。
+// 纯渲染:把 entries 排成要打印的那几行(不带尾随 \n)。骨架照 Claude Code
+// 的子代理摘要块靠(三行一组):
+//   ● <任务摘要>
+//     ⎿  <状态词>(<N> 次工具调用 · <X>k tokens · <耗时>s)
+//     (ctrl+o 展开明细)
+// 每条 entry 固定占 3 行(entries.size() * 3),第三行是折叠提示,跑动中/
+// 收尾态都带着——Ctrl+O 随时能展开,不必等跑完才提示。now 只用于 Running
+// 态条目现算耗时;Ok/Error 态用各自的 end_time,ticker 多久没醒都不影响
+// 收尾行的耗时数字(一旦 Finish() 过就定住了);token 数同理,Running 态
+// 现算到目前为止的累计,Ok/Error 态定住 Finish() 那一刻的累计值。
 //
-// theme.reset 为空(plain 主题)时不着色,状态灯换成方括号文字
+// theme.reset 为空(plain 主题)时首行状态灯换成方括号文字
 // ([RUNNING]/[OK]/[ERROR]),跟 cli::TranscriptStatusWord 的 plain 规矩
-// 一致;彩色主题下状态灯是跟 transcript 同一个圆点字符,配色也复用同一
-// 套语义色(运行中 tool_line、成功 prompt、失败 error)。
+// 一致,摘要行/提示行不着色;彩色主题下首行状态灯是跟 transcript 同一个
+// 圆点字符,摘要行/提示行统一用 theme.stats 那个淡色。
 std::vector<std::string> FormatAgentStatusLines(const std::vector<AgentStatusEntry>& entries,
                                                   std::chrono::steady_clock::time_point now,
                                                   const Theme& theme);

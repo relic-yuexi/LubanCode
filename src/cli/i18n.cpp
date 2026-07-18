@@ -208,10 +208,12 @@ const Entry kZhCN[] = {
     {"stream.queueing.plain", "ESC 打断 · 排队中: "},
     {"spinner.thinking", "思考中"},
 
-    // ---- 子代理状态条(#52) ----
-    {"agent_status.running", "{0} · 运行中 · {1} · 已调用 {2} 次工具"},
-    {"agent_status.done_ok", "{0} · 完成 · {1} · {2} 次工具"},
-    {"agent_status.done_error", "{0} · 失败 · {1} · {2} 次工具"},
+    // ---- 子代理状态条(#52,#三:凑齐工具次数/token/耗时三个数字) ----
+    {"agent_status.state_running", "运行中"},
+    {"agent_status.state_done", "完成"},
+    {"agent_status.state_failed", "失败"},
+    {"agent_status.summary", "{0}({1} 次工具调用 · {2} tokens · {3})"},
+    {"agent_status.expand_hint", "(ctrl+o 展开明细)"},
 
     // ---- 确认提示 ----
     {"confirm.prompt", "[y] 本次允许  [a] 本会话总是允许(该工具)  [N] 拒绝: "},
@@ -865,10 +867,12 @@ const Entry kEn[] = {
     {"stream.queueing.plain", "ESC interrupt \xc2\xb7 queueing: "},
     {"spinner.thinking", "thinking"},
 
-    // ---- subagent status board (#52) ----
-    {"agent_status.running", "{0} · running · {1} · {2} tool calls"},
-    {"agent_status.done_ok", "{0} · done · {1} · {2} tool calls"},
-    {"agent_status.done_error", "{0} · failed · {1} · {2} tool calls"},
+    // ---- subagent status board (#52, #three: tool calls/tokens/duration) ----
+    {"agent_status.state_running", "Running"},
+    {"agent_status.state_done", "Done"},
+    {"agent_status.state_failed", "Failed"},
+    {"agent_status.summary", "{0} ({1} tool uses · {2} tokens · {3})"},
+    {"agent_status.expand_hint", "(ctrl+o to expand)"},
 
     // ---- confirm prompt ----
     {"confirm.prompt", "[y] allow once  [a] always allow this tool (this session)  [N] deny: "},

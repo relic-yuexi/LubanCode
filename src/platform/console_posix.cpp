@@ -318,6 +318,12 @@ void SetCursorPos(int x, int y) {
     std::cout << "\x1b[" << (y + 1) << ";" << (x + 1) << "H" << std::flush;
 }
 
+void ClearScreen() {
+    // 光标归位 + 清可见区 + 清回滚缓冲——POSIX 终端天然认这三段 VT 序列,
+    // 不用另外探测。main.cpp 调用点已经拿 is_console 判断过要不要调。
+    std::cout << "\x1b[H\x1b[2J\x1b[3J" << std::flush;
+}
+
 void ClearRowFrom(int x, int y, int count) {
     if (count <= 0) {
         return;

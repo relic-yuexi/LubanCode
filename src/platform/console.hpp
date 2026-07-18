@@ -66,6 +66,12 @@ std::optional<ScreenInfo> GetScreenInfo();
 
 void SetCursorPos(int x, int y);
 
+// 清屏 + 清回滚缓冲(VT `\x1b[H\x1b[2J\x1b[3J`):光标归位、可见区清空、
+// 历史回滚一并抹掉——对齐 Claude Code /clear 的"真清屏"体验。不探测
+// is_console/VT 支持,调用方(main.cpp)自己判断要不要在非真终端/管道场景
+// 跳过(ANSI 转义混进管道输出会污染脚本消费者)。
+void ClearScreen();
+
 // 从 (x, y) 起把 count 个单元格清成空格(不动光标语义:调用方随后总会
 // SetCursorPos,不依赖清行后的光标位置)。
 void ClearRowFrom(int x, int y, int count);

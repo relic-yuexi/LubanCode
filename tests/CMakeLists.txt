@@ -103,4 +103,10 @@ if(WIN32)
   # 集成验证时手动跑:markdown_screen_driver <lubancode.exe> <工作目录> <报告文件>
   add_executable(markdown_screen_driver markdown_screen_driver.cpp)
   target_compile_features(markdown_screen_driver PRIVATE cxx_std_23)
+
+  # /clear 清屏 + 子代理内层工具展示(重复行/紧凑折叠)三条修复专用的刮屏
+  # 驱动器,同样不进 ctest,集成验证时手动跑:
+  #   fold_dup_clear_driver <lubancode.exe> <工作目录> <报告文件>
+  add_executable(fold_dup_clear_driver fold_dup_clear_driver.cpp)
+  target_compile_features(fold_dup_clear_driver PRIVATE cxx_std_23)
 endif()
