@@ -2065,18 +2065,25 @@ std::size_t EstimateHistoryChars(const std::vector<lubancode::api::Message>& his
 
 std::size_t EstimateTokens(std::size_t chars) { return (chars + 1) / 2; }
 
-// /context 命令:不带参数看当前占用,带参数(256k/512k/1m/裸数字)临时改
-// 窗口大小,只本会话生效,不改配置文件。
-void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracker& context_tracker) {
+// /context 命令:不带参数打分类占用分析(系统提示/工具定义/对话历史三类
+// 字符数估 token + 条形图,拼装规则全在 FormatContextBreakdown,这里只管
+// 收集与打印);带参数(256k/512k/1m/裸数字)临时改窗口大小,只本会话
+// 生效,不改配置文件。sys_chars/tools_chars/history_chars 由调用方在会话
+// 现场收集(裸敲才用得上,带参数分支忽略),缓存命中/窗口/实测占用都从
+// context_tracker 拿。
+void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracker& context_tracker,
+                           std::size_t sys_chars, std::size_t tools_chars, std::size_t history_chars,
+                           const lubancode::cli::Theme& theme) {
     if (args.empty()) {
-        std::cout << trf("cmd.context.usage",
-                          lubancode::cli::FormatTokenCount(static_cast<std::int64_t>(context_tracker.current_tokens())),
-                          lubancode::cli::FormatTokenCount(static_cast<std::int64_t>(context_tracker.window_tokens())),
-                          context_tracker.UsagePercent());
-        if (context_tracker.ShouldAutoCompact()) {
-            std::cout << tr("cmd.context.compact_hint");
+        const auto lines = lubancode::cli::FormatContextBreakdown(
+            sys_chars, tools_chars, history_chars, context_tracker.last_cache_read_tokens(),
+            context_tracker.window_tokens(), context_tracker.current_tokens(), theme);
+        for (const auto& line : lines) {
+            std::cout << line << "\n";
         }
-        std::cout << "\n";
+        if (context_tracker.ShouldAutoCompact()) {
+            std::cout << tr("cmd.context.compact_hint") << "\n";
+        }
         return;
     }
     const auto parsed = lubancode::config::ParseContextWindowTokens(args);
@@ -3142,9 +3149,38 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     session_title_pending = false;
                     std::cout << tr("cmd.clear.done") << "\n";
                     break;
-                case lubancode::cli::SlashCommand::Context:
-                    HandleContextCommand(parsed.args, context_tracker);
+                case lubancode::cli::SlashCommand::Context: {
+                    // 裸敲才收集三类字符数(带参数走切窗口分支,收了也白收)。
+                    // 口径对齐"实际发出的请求":
+                    //   系统提示 = AgentLoop 那份拼装结果 + 目录 base_instructions
+                    //              + 魂(几层 Backend 包装发请求前拼进 system 的);
+                    //   工具定义 = registry 里"会真进 tools 数组"的工具(延迟
+                    //              机制开着就按谓词过滤成核心+已挂载)的
+                    //              名字+描述+schema,外加延迟索引段;
+                    //   对话历史 = loop.History() 全量(文本/工具调用/工具结果)。
+                    std::size_t sys_chars = 0;
+                    std::size_t tools_chars = 0;
+                    std::size_t history_chars = 0;
+                    if (parsed.args.empty()) {
+                        sys_chars = lubancode::agent::AssembleSystemPrompt(prompt_options).size() +
+                                    current_model_instructions->size() + current_soul->size();
+                        for (const auto& tool : registry.All()) {
+                            if (main_deferral && tool_filter && !tool_filter(*tool)) {
+                                continue;  // 延迟未挂载:不在 tools 数组里,不算
+                            }
+                            tools_chars += tool->name().size() + tool->description().size() +
+                                           tool->input_schema().dump().size();
+                        }
+                        if (main_deferral) {
+                            tools_chars +=
+                                lubancode::tools::BuildDeferredToolsIndexSegment(registry, *loaded_tools).size();
+                        }
+                        history_chars = EstimateHistoryChars(loop->History());
+                    }
+                    HandleContextCommand(parsed.args, context_tracker, sys_chars, tools_chars, history_chars,
+                                          theme);
                     break;
+                }
                 case lubancode::cli::SlashCommand::Compact: {
                     const std::string compact_model = config.compact_model.empty() ? *current_model : config.compact_model;
                     const auto compact_event =
