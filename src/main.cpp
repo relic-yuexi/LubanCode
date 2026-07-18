@@ -57,6 +57,7 @@
 #include "mcp/client.hpp"
 #include "mcp/mcp_tool.hpp"
 #include "tools/agent_tool.hpp"
+#include "tools/command_safety.hpp"
 #include "tools/edit_file.hpp"
 #include "tools/hooks.hpp"
 #include "tools/lua_tool.hpp"
@@ -1741,12 +1742,28 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         //   yolo  —— 全自动放行(auto_confirm 本来就是这个语义,这里再查一遍
         //             CurrentConfirmMode() 是为了让 Shift+Tab 中途切到 yolo
         //             也立刻生效,不用等下一轮 --yes)
-        //   auto  —— write_file/edit_file 自动放行,run_command 之类仍然要问
+        //   auto  —— write_file/edit_file 自动放行;run_command 过一遍
+        //             ClassifyCommand(tools/command_safety.hpp)自动分析,
+        //             安全命令(只读/探查、无重定向、链上每段都安全)直接
+        //             放行,危险/不认识的照旧问;MCP/插件等外挂工具仍然问
         //   confirm(默认)—— 老规矩,needs_confirm 的工具逐个问
         const lubancode::cli::ConfirmMode mode = lubancode::cli::CurrentConfirmMode();
         const bool file_tool = name == "write_file" || name == "edit_file";
+        bool safe_command = false;
+        if (mode == lubancode::cli::ConfirmMode::Auto && name == "run_command") {
+            std::string command;
+            std::string shell = "powershell";  // run_command 的默认 shell,语义同 execute()
+            if (const auto it = input.find("command"); it != input.end() && it->is_string()) {
+                command = it->get<std::string>();
+            }
+            if (const auto it = input.find("shell"); it != input.end() && it->is_string()) {
+                shell = it->get<std::string>();
+            }
+            safe_command = lubancode::tools::ClassifyCommand(command, shell) ==
+                           lubancode::tools::CommandSafety::Safe;
+        }
         const bool auto_pass = auto_confirm || mode == lubancode::cli::ConfirmMode::Yolo ||
-                               (mode == lubancode::cli::ConfirmMode::Auto && file_tool) ||
+                               (mode == lubancode::cli::ConfirmMode::Auto && (file_tool || safe_command)) ||
                                always_allowed_tools.count(name) != 0;
         if (auto_pass) {
             // UI-C:自动放行(--yes/yolo/auto 档的文件工具/选过 a)也把统一
@@ -3619,8 +3636,22 @@ int RunCli(const std::vector<std::string>& args) {
     // 的工具一概放行)——单发模式(AskOnce)也一起设,虽然单发模式走不到
     // Shift+Tab 那条路,但 on_tool_confirm 统一查 CurrentConfirmMode(),
     // 这里设了才对得上。
-    lubancode::cli::SetConfirmMode(auto_confirm ? lubancode::cli::ConfirmMode::Yolo
-                                                 : lubancode::cli::ConfirmMode::Confirm);
+    // LUBANCODE_CONFIRM_MODE 环境变量(auto/yolo/confirm)可指定起手档位——
+    // 管道模式敲不了 Shift+Tab,自动化验证 auto 档全靠它;--yes 优先级更高,
+    // 认不出的值一律按默认 confirm 档走,不报错不拦人。
+    lubancode::cli::ConfirmMode initial_mode =
+        auto_confirm ? lubancode::cli::ConfirmMode::Yolo : lubancode::cli::ConfirmMode::Confirm;
+    if (!auto_confirm) {
+        if (const char* env_mode = std::getenv("LUBANCODE_CONFIRM_MODE"); env_mode != nullptr) {
+            const std::string mode_str(env_mode);
+            if (mode_str == "auto") {
+                initial_mode = lubancode::cli::ConfirmMode::Auto;
+            } else if (mode_str == "yolo") {
+                initial_mode = lubancode::cli::ConfirmMode::Yolo;
+            }
+        }
+    }
+    lubancode::cli::SetConfirmMode(initial_mode);
 
     // M9:真正要进一次会话了(单发问答也算一次会话)——session_start 在这里
     // 跑,session_end 在这个作用域结束(RunCli 返回、或者中途抛异常被下面

@@ -104,7 +104,8 @@ const Entry kZhCN[] = {
      "                  并选中最近一条工具条目;焦点态内 Tab 往旧走、Shift+Tab 往新走,\n"
      "                  ESC/Enter 退出焦点态回编辑\n"
      "  Shift+Tab       循环切确认档(confirm/auto/yolo)——任何时候都是,跟状态行提示\n"
-     "                  一致;只有焦点态内例外(那里是焦点往新走)\n"
+     "                  一致;只有焦点态内例外(那里是焦点往新走)。auto:文件与安全命令\n"
+     "                  放行,危险命令与外挂工具确认;yolo:全部放行\n"
      "  流式期间打字回车  不会打断当前流,而是排进队列,本轮结束后按顺序自动发出\n"
      "  /exit           退出(裸词 exit/quit 也认)\n"},
     {"help.config",
@@ -177,7 +178,8 @@ const Entry kZhCN[] = {
      "候选菜单:/ 开头时按 ↓ 进入直选(↓↑ 循环移动,Enter 执行选中命令、已敲的参数尾巴\n"
      "原样保留;打字/退格/ESC 回普通编辑);Tab 补全/轮转照旧。\n"
      "条目查看:Ctrl+O 紧凑/详细全局切换(详细 = 完整参数 + 输出/diff 全文,整块重打);\n"
-     "Shift+Tab 任何时候都是切确认档(confirm/auto/yolo,状态行实时显示);输入框为空时\n"
+     "Shift+Tab 任何时候都是切确认档(confirm/auto/yolo,状态行实时显示;auto 档文件与\n"
+     "安全命令放行,危险命令与外挂工具确认);输入框为空时\n"
      "Tab 进入焦点态选最近一条,焦点态内 Tab 往旧走、Shift+Tab 往新走(这时不切档),\n"
      "ESC/Enter 退出焦点态回编辑,有内容时 Tab 维持补全现职;Ctrl+E 聚焦查看焦点条目\n"
      "全文(无焦点则最近一条),再按 Ctrl+E 或 ESC 返回;流式输出期间这些键不响应。\n"},
@@ -610,7 +612,9 @@ const Entry kEn[] = {
      "                  mode on the latest tool item; in focus mode Tab moves older, Shift+Tab newer,\n"
      "                  ESC/Enter exits back to editing\n"
      "  Shift+Tab       cycle the confirmation mode (confirm/auto/yolo) - anytime, matching the\n"
-     "                  status line; the only exception is focus mode (there it moves focus newer)\n"
+     "                  status line; the only exception is focus mode (there it moves focus newer).\n"
+     "                  auto: file edits and safe commands run freely, dangerous commands and\n"
+     "                  external tools still ask; yolo: everything runs freely\n"
      "  typing+Enter during streaming  does not interrupt the stream; the line is queued and sent\n"
      "                  in order after this turn ends\n"
      "  /exit           quit (bare exit/quit work too)\n"},
@@ -685,7 +689,8 @@ const Entry kEn[] = {
      "Candidate menu: with a leading /, Down enters the menu (Down/Up cycle, Enter runs the\n"
      "selection, typed argument tail kept; typing/Backspace/ESC returns to editing); Tab completes.\n"
      "Item view: Ctrl+O toggles compact/detailed globally; Shift+Tab always cycles the confirmation\n"
-     "mode (confirm/auto/yolo, shown live in the status line); with empty input Tab enters focus\n"
+     "mode (confirm/auto/yolo, shown live in the status line; auto passes file edits and safe\n"
+     "commands, asks for dangerous commands and external tools); with empty input Tab enters focus\n"
      "mode on the latest item (Tab older, Shift+Tab newer, ESC/Enter exits); Ctrl+E focus-views the\n"
      "focused item (or the latest), Ctrl+E or ESC returns; these keys are inactive while streaming.\n"},
 
