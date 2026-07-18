@@ -38,6 +38,7 @@
 #include "api/backend.hpp"
 #include "api/models.hpp"
 #include "api/responses/client.hpp"
+#include "cli/agent_status.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/diff.hpp"
@@ -1050,6 +1051,110 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// #52:子代理状态条——RunTurn 期间常驻在输出末尾的一块浮动展示,ticker
+// 线程按固定间隔(400ms)醒一次现刷,子代理内部长时间"闷头想"(没有任何
+// tool_start 事件的空窗期,agent_tool.cpp 里子代理自己的文本流被静音,见
+// AgentTool::execute 的 on_text_delta 留空)照样能看见耗时在跳,不会让人
+// 以为程序卡死。
+//
+// 跟 TranscriptPainter 不是一回事:后者管"原地改写一个已登记的条目",这个
+// 只管"屏幕最下面挂一块随时可能整体重画的浮动区",用相对光标移动
+// (\x1b[{n}F 光标上移 n 行到行首 + \x1b[J 擦到屏幕底)实现,不依赖 Win32
+// GetScreenInfo/SetCursorPos 那套绝对锚点——天然不受缓冲区滚动影响,
+// POSIX 一样能用(TranscriptPainter 的绝对锚点目前只在 Windows 开)。
+// enabled 挑 "is_console && 彩色主题" 这条件(跟 StreamBodyTracker 一样),
+// 因为相对光标移动转义序列得有 VT 处理撑着——colors_enabled 为真已经
+// 隐含 VT 开成了。
+//
+// 并发协议:写 stdout 一律经 StdoutWriteMutex()。ticker 线程自己按固定
+// 间隔醒;主线程侧(ToolDisplay 每个会打印新内容的方法)在真正打印之前
+// 先调 Hide() 把状态块从屏幕上擦掉——不用显式"打印完再 Show()",ticker
+// 线程最多等一个间隔就会自己重画,新内容不会被状态块盖住,状态块的
+// 残影也不会污染新内容。
+class AgentStatusPainter {
+public:
+    AgentStatusPainter(lubancode::cli::AgentStatusBoard& board, const lubancode::cli::Theme& theme, bool enabled)
+        : board_(board), theme_(theme), enabled_(enabled), stopped_(!enabled) {
+        if (!enabled_) {
+            return;
+        }
+        thread_ = std::thread([this] {
+            while (!stop_flag_.load(std::memory_order_relaxed)) {
+                Tick();
+                std::this_thread::sleep_for(std::chrono::milliseconds(400));
+            }
+        });
+    }
+
+    // 没显式 Stop() 过的话,析构时自动停(RAII 兜底,不会泄漏线程)。
+    ~AgentStatusPainter() { Stop(); }
+
+    AgentStatusPainter(const AgentStatusPainter&) = delete;
+    AgentStatusPainter& operator=(const AgentStatusPainter&) = delete;
+
+    // 停 ticker 线程、把状态块从屏幕上擦掉。重复调用安全,enabled=false
+    // 时天然是空操作。RunTurn 里 loop.Run() 一返回就调,状态块不会跟收尾
+    // 的统计行/分界线打架。
+    void Stop() {
+        if (stopped_) {
+            return;
+        }
+        stop_flag_.store(true, std::memory_order_relaxed);
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+        Hide();
+        stopped_ = true;
+    }
+
+    // 把状态块从屏幕上擦掉(当前有画着才擦),内部行数清零。任何要在状态块
+    // 原本位置打印新内容的地方,打印之前先调这个。
+    void Hide() {
+        if (!enabled_) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        HideLocked();
+    }
+
+private:
+    void Tick() {
+        const auto entries = board_.Snapshot();
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        if (entries.empty()) {
+            HideLocked();
+            return;
+        }
+        const auto lines =
+            lubancode::cli::FormatAgentStatusLines(entries, std::chrono::steady_clock::now(), theme_);
+        HideLocked();
+        for (const auto& line : lines) {
+            std::cout << line << "\n";
+        }
+        std::cout.flush();
+        shown_rows_ = static_cast<int>(lines.size());
+    }
+
+    // 调用方已经持有 StdoutWriteMutex()。
+    void HideLocked() {
+        if (shown_rows_ <= 0) {
+            return;
+        }
+        std::cout << "\x1b[" << shown_rows_ << "F\x1b[J";
+        std::cout.flush();
+        shown_rows_ = 0;
+    }
+
+    lubancode::cli::AgentStatusBoard& board_;
+    const lubancode::cli::Theme& theme_;
+    bool enabled_;
+    bool stopped_;
+    std::thread thread_;
+    std::atomic<bool> stop_flag_{false};
+    int shown_rows_ = 0;  // 当前屏幕上画着几行(Hide 靠这个决定要不要擦、擦几行)
+};
+
+// ---------------------------------------------------------------------------
 // markdown(0.18.x):模型正文的两段式渲染记账员。
 //
 // 前一段:流式期间正文照旧逐字原样打(OnDelta 就是 on_text_delta 的唯一
@@ -1406,6 +1511,14 @@ struct ToolDisplay {
     std::shared_ptr<lubancode::tools::TodoListState> todo_state;
     const std::atomic<bool>* cancel_flag = nullptr;
 
+    // #52:子代理状态条。agent_status_board 是这一轮 RunTurn 独有的一份
+    // (ToolDisplay 本身就是每轮现建的),status_painter 由 RunTurn 在
+    // loop.Run() 前设进来(RunTurn 那边先建 AgentStatusPainter 再把地址
+    // 灌进来),不设(nullptr)= 没有 ticker(管道模式/非真控制台)。
+    lubancode::cli::AgentStatusBoard agent_status_board;
+    AgentStatusPainter* status_painter = nullptr;
+    int active_agent_status_id = -1;  // 当前进行中的子代理在 agent_status_board 里的 id
+
     // 主工具、子代理内层工具都是严格串行的,各留一个"进行中"槽位就够
     // (agent 工具执行期间 active_main 指着 agent 条目,active_sub 指着
     // 它肚子里正在跑的那个)。
@@ -1430,6 +1543,7 @@ struct ToolDisplay {
     bool sub_preview_below = false;
 
     void OnToolStart(const std::string& name, const nlohmann::json& input) {
+        HideStatus();  // 马上要在状态块原本的位置打印新条目,先擦
         if (!is_console) {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
             std::cout << "\n" << theme.tool_line << tr("pipe.tool_start") << name << " " << input.dump() << theme.reset
@@ -1445,6 +1559,11 @@ struct ToolDisplay {
         if (name == "agent") {
             agent_rounds = 0;
             agent_sub_tools = 0;
+            // #52:状态条起一条 Running 记录,label 用子代理任务原文(未截断
+            // 的 prompt),AgentStatusBoard::Start 内部按 40 码点截断——跟
+            // BuildToolTitle 给 "agent(...)" 条目首行用的那份摘要同一条规矩,
+            // 两处看着是同一个任务。
+            active_agent_status_id = agent_status_board.Start(input.value("prompt", std::string()));
         }
         active_main = NewItem(lubancode::cli::TranscriptKind::Tool, name, input);
         if (is_console) {
@@ -1456,6 +1575,7 @@ struct ToolDisplay {
         if (active_main < 0) {
             return;
         }
+        HideStatus();
         auto& item = transcript[static_cast<std::size_t>(active_main)];
         // UI-C:自动放行时垫在条目下面的 diff 预览,执行完了就擦——终态只
         // 留 "新增 N 行,删除 M 行" 简短摘要,不铺屏(确认路子的预览已被
@@ -1466,6 +1586,14 @@ struct ToolDisplay {
         main_preview_below = false;
         FinalizeItem(item, name, main_input, result, main_write_old_lines, agent_rounds, agent_sub_tools,
                       main_diff_full, main_diff_final);
+        if (name == "agent" && active_agent_status_id >= 0) {
+            // #52:收成终态——失败包含"结果本身报错"和"被 ESC 打断"两种,
+            // 状态条没有单独的 Interrupted 档,统一归到失败态(耗时/工具
+            // 次数照样如实留着,人能看见跑到哪儿被打断的)。
+            const bool interrupted = cancel_flag != nullptr && cancel_flag->load();
+            agent_status_board.Finish(active_agent_status_id, !result.is_error && !interrupted);
+            active_agent_status_id = -1;
+        }
         if (is_console) {
             painter.Repaint(item);
         } else {
@@ -1482,7 +1610,11 @@ struct ToolDisplay {
     }
 
     void OnSubToolStart(const std::string& name, const nlohmann::json& input) {
+        HideStatus();  // 马上要在状态块原本的位置打印新条目,先擦
         agent_sub_tools += 1;
+        if (active_agent_status_id >= 0) {
+            agent_status_board.RecordToolCall(active_agent_status_id);  // #52:子代理调了一次工具,计数
+        }
         if (!is_console) {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
             std::cout << "\n"
@@ -1511,6 +1643,7 @@ struct ToolDisplay {
         if (active_sub < 0) {
             return;
         }
+        HideStatus();
         auto& item = transcript[static_cast<std::size_t>(active_sub)];
         if (sub_preview_below && is_console) {
             painter.TrimBelow(item.id);  // 理由同 OnToolDone
@@ -1528,6 +1661,7 @@ struct ToolDisplay {
         if (active_sub < 0) {
             return;
         }
+        HideStatus();
         auto& item = transcript[static_cast<std::size_t>(active_sub)];
         item.status = lubancode::cli::TranscriptStatus::Error;
         item.summary_lines = lubancode::cli::ErrorSummaryLines(item.tool_name, message);
@@ -1549,6 +1683,7 @@ struct ToolDisplay {
         if (!is_console) {
             return;
         }
+        HideStatus();
         const auto preview = BuildFileDiffPreview(name, input, theme);
         if (!preview.has_value()) {
             return;
@@ -1574,6 +1709,7 @@ struct ToolDisplay {
     // 确认块(参数详情 + [y/a/N])跟在条目下面打。返回该条目的 transcript
     // 下标,答完交回 OnConfirmAnswered。
     int OnConfirmRequest() {
+        HideStatus();
         const int idx = active_sub >= 0 ? active_sub : active_main;
         if (idx >= 0) {
             auto& item = transcript[static_cast<std::size_t>(idx)];
@@ -1593,6 +1729,7 @@ struct ToolDisplay {
         if (idx < 0) {
             return;
         }
+        HideStatus();
         auto& item = transcript[static_cast<std::size_t>(idx)];
         if (is_console) {
             painter.TrimBelow(item.id);  // 确认块用完就擦,条目回到屏幕末尾
@@ -1613,6 +1750,14 @@ struct ToolDisplay {
     }
 
 private:
+    // #52:马上要打印状态块原本位置上的新内容之前先调这个——status_painter
+    // 没设(nullptr,管道模式/非真控制台)时安静地什么也不做。
+    void HideStatus() {
+        if (status_painter != nullptr) {
+            status_painter->Hide();
+        }
+    }
+
     int NewItem(lubancode::cli::TranscriptKind kind, const std::string& name, const nlohmann::json& input) {
         lubancode::cli::TranscriptItem item;
         item.id = static_cast<int>(transcript.size()) + 1;
@@ -2072,7 +2217,17 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     // 线程抢 stdin,跟 StreamBodyTracker 的重画一样诚实关掉。
     lubancode::cli::BeginStreamFooter(theme, is_console && lubancode::platform::SupportsScreenRepaint());
 
+    // #52:子代理状态条的 ticker,只活在 loop.Run() 这一段——construct 在
+    // Run() 之前,Run() 一返回立刻 Stop()(停线程 + 把状态块从屏幕上擦
+    // 掉),不会跟收尾的统计行/分界线打架。enabled 条件跟 body_tracker 一样
+    // (真控制台 + 彩色主题——相对光标移动转义序列得有 VT 处理撑着)。
+    AgentStatusPainter status_painter(display.agent_status_board, theme, is_console && !theme.reset.empty());
+    display.status_painter = &status_painter;
+
     const auto result = loop.Run(std::move(prepared_input->message), callbacks, &cancel_flag);
+
+    status_painter.Stop();
+    display.status_painter = nullptr;
 
     // Run() 已经返回,不管是不是被打断——立刻收线程,保证下一次 ReadLine()
     // (排队回显的 "> " 或者下一轮主提示符)开始之前监听线程已经彻底退出。

@@ -40,6 +40,7 @@ add_executable(lubancode_tests
   test_divider.cpp
   test_format_utils.cpp
   test_transcript.cpp
+  test_agent_status.cpp
   test_markdown.cpp
   test_latex_math.cpp
   test_diff.cpp
