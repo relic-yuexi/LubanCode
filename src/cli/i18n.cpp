@@ -273,7 +273,7 @@ const Entry kZhCN[] = {
     // ---- slash 命令描述表 ----
     {"slash.desc.help", "列出所有命令"},
     {"slash.desc.model", "拉模型列表选,或 /model 名字 直接切"},
-    {"slash.desc.provider", "列、添、切、删模型服务端;/provider add|list|switch|remove"},
+    {"slash.desc.provider", "列、添、切、删、改模型服务端;/provider add|list|switch|remove|set"},
     {"slash.desc.config", "打印当前生效配置和本会话在用的 model"},
     {"slash.desc.language", "列可选界面语言并切换;/language 语言码 直接切"},
     {"slash.desc.image", "附本地图片;/image 路径 或在消息里写 @路径"},
@@ -557,7 +557,8 @@ const Entry kZhCN[] = {
      "  /provider add <名字> <base_url> <anthropic|responses> [--key-env 环境变量名] [--key 明文key] "
      "[--model 默认模型] [--effort 推理档位] [--window 大小]\n"
      "  /provider switch <名字> [模型]\n"
-     "  /provider remove <名字>"},
+     "  /provider remove <名字>\n"
+     "  /provider set <名字> native_web_search on|off   开关服务端原生联网搜索(也认 true/false、1/0)"},
     {"cmd.provider.empty", "还没有配 provider。用 /provider add 添一个。"},
     {"cmd.provider.header", "已配 provider:"},
     {"cmd.provider.line", "  - {0} [{1}] {2}; model={3}; window={4}; key_env={5}{6}{7}"},
@@ -577,6 +578,10 @@ const Entry kZhCN[] = {
     {"cmd.provider.removed", "已删 provider {0},全局配置在 {1}。"},
     {"cmd.provider.remove_active", "provider {0} 正在用，先切到别处再删。"},
     {"cmd.provider.remove_failed", "删 provider 失败: {0}"},
+    {"cmd.provider.set_ok", "已把 provider {0} 的 {1} 设为 {2},写进全局配置 {3}。"},
+    {"cmd.provider.set_failed", "设置 provider 失败: {0}"},
+    {"cmd.provider.set_unknown_field", "不认得的字段: {0}(眼下只认 native_web_search)"},
+    {"cmd.provider.set_active_applied", "provider {0} 正在用，已立即生效，不用再 /provider switch。"},
 
     // ---- /soul、/prompt ----
     {"soul.unavailable", "[soul] 无法读取 {0},已按无魂运行。"},
@@ -934,7 +939,8 @@ const Entry kEn[] = {
     // ---- slash command descriptions ----
     {"slash.desc.help", "list all commands"},
     {"slash.desc.model", "pick from the model list, or /model <name> to switch directly"},
-    {"slash.desc.provider", "list, add, switch, or remove model providers; /provider add|list|switch|remove"},
+    {"slash.desc.provider",
+     "list, add, switch, remove, or set fields on model providers; /provider add|list|switch|remove|set"},
     {"slash.desc.config", "print the effective configuration and the session model"},
     {"slash.desc.language", "list available UI languages and switch; /language <code> switches directly"},
     {"slash.desc.image", "attach local images; /image <path> or @path in a message"},
@@ -1128,7 +1134,9 @@ const Entry kEn[] = {
      "  /provider add <name> <base_url> <anthropic|responses> [--key-env ENV] [--key API_KEY] [--model MODEL] "
      "[--effort LEVEL] [--window SIZE]\n"
      "  /provider switch <name> [model]\n"
-     "  /provider remove <name>"},
+     "  /provider remove <name>\n"
+     "  /provider set <name> native_web_search on|off   toggle server-side native web search "
+     "(also accepts true/false, 1/0)"},
     {"cmd.provider.empty", "No providers are configured. Use /provider add to add one."},
     {"cmd.provider.header", "Configured providers:"},
     {"cmd.provider.line", "  - {0} [{1}] {2}; model={3}; window={4}; key_env={5}{6}{7}"},
@@ -1148,6 +1156,11 @@ const Entry kEn[] = {
     {"cmd.provider.removed", "Removed provider {0}; global config is {1}."},
     {"cmd.provider.remove_active", "Provider {0} is in use. Switch away before removing it."},
     {"cmd.provider.remove_failed", "Could not remove provider: {0}"},
+    {"cmd.provider.set_ok", "Set {1} of provider {0} to {2}; saved to global config {3}."},
+    {"cmd.provider.set_failed", "Could not set provider field: {0}"},
+    {"cmd.provider.set_unknown_field", "Unknown field: {0} (only native_web_search is supported for now)"},
+    {"cmd.provider.set_active_applied",
+     "Provider {0} is currently active; the change took effect immediately, no need to /provider switch."},
 
     // TODO(P1):以下 zh-CN 键暂缺英文翻译,tr 回退 zh-CN——诚实回退,不机翻凑数:
     //   mcp.* / plugin.* / tool_search.* / catalog.* / cmd.tools.* / cmd.plugins.* /

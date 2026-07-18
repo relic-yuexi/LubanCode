@@ -70,6 +70,20 @@ std::string ProviderWireName(Wire wire) {
     return wire == Wire::Responses ? "responses" : "anthropic";
 }
 
+std::expected<bool, std::string> ParseBoolToggle(const std::string& raw) {
+    std::string lower = raw;
+    for (char& c : lower) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (lower == "on" || lower == "true" || lower == "1") {
+        return true;
+    }
+    if (lower == "off" || lower == "false" || lower == "0") {
+        return false;
+    }
+    return std::unexpected("只认得 on/off、true/false、1/0,写的是: " + raw);
+}
+
 std::expected<void, std::string> ValidateProviderConfig(const ProviderConfig& provider) {
     if (provider.name.empty()) {
         return std::unexpected("provider 名字不能为空");
@@ -117,6 +131,16 @@ const ProviderConfig* FindProvider(const std::vector<ProviderConfig>& providers,
         }
     }
     return nullptr;
+}
+
+bool SetProviderNativeWebSearch(std::vector<ProviderConfig>& providers, const std::string& name, bool enabled) {
+    for (ProviderConfig& provider : providers) {
+        if (provider.name == name) {
+            provider.native_web_search = enabled;
+            return true;
+        }
+    }
+    return false;
 }
 
 std::string ToString(Source source) {
@@ -1460,6 +1484,31 @@ std::expected<std::string, std::string> RemoveProviderFromGlobalConfig(const std
         return std::unexpected("provider 不存在: " + name);
     }
     providers->erase(it);
+    const auto written = UpdateProvidersInConfigFile(path, *providers);
+    if (!written.has_value()) {
+        return std::unexpected(written.error());
+    }
+    return path;
+}
+
+std::expected<std::string, std::string> SetProviderNativeWebSearchInGlobalConfig(const std::string& name,
+                                                                                   bool enabled) {
+    const auto home = HomeDir();
+    if (!home.has_value()) {
+        return std::unexpected("找不到用户主目录,没法更新 provider 配置");
+    }
+    const std::string path = NewConfigPathFor(std::filesystem::path(*home)).string();
+    auto root = ReadConfigObjectForUpdate(path);
+    if (!root.has_value()) {
+        return std::unexpected(root.error());
+    }
+    auto providers = ProvidersInConfigObject(*root, path);
+    if (!providers.has_value()) {
+        return std::unexpected(providers.error());
+    }
+    if (!SetProviderNativeWebSearch(*providers, name, enabled)) {
+        return std::unexpected("provider 不存在: " + name);
+    }
     const auto written = UpdateProvidersInConfigFile(path, *providers);
     if (!written.has_value()) {
         return std::unexpected(written.error());

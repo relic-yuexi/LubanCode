@@ -353,3 +353,26 @@ TEST_CASE("CanRemoveProvider: 当前在用端不许删") {
     CHECK(cli::CanRemoveProvider("glm", "minimax"));
     CHECK(cli::CanRemoveProvider("", "glm"));
 }
+
+TEST_CASE("ParseProviderCommand: set 拆出名字/字段/值,字段值原样小写化") {
+    const auto parsed = cli::ParseProviderCommand("set glm native_web_search on");
+    CHECK(parsed.action == cli::ProviderCommandAction::Set);
+    CHECK(parsed.name == "glm");
+    CHECK(parsed.field == "native_web_search");
+    CHECK(parsed.value == "on");
+
+    // 命令词、字段名、值都不区分大小写——解析层只管拆词、转小写,认不认得
+    // 字段/值留给 main.cpp 去判断。
+    const auto mixed_case = cli::ParseProviderCommand("Set GLM Native_Web_Search OFF");
+    CHECK(mixed_case.action == cli::ProviderCommandAction::Set);
+    CHECK(mixed_case.name == "GLM");  // 名字本身不转小写,跟 add/switch/remove 一致
+    CHECK(mixed_case.field == "native_web_search");
+    CHECK(mixed_case.value == "off");
+}
+
+TEST_CASE("ParseProviderCommand: set 词数不对(多或少)一律 Invalid") {
+    CHECK(cli::ParseProviderCommand("set glm").action == cli::ProviderCommandAction::Invalid);
+    CHECK(cli::ParseProviderCommand("set glm native_web_search").action == cli::ProviderCommandAction::Invalid);
+    CHECK(cli::ParseProviderCommand("set glm native_web_search on extra").action ==
+          cli::ProviderCommandAction::Invalid);
+}

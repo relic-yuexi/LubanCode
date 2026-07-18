@@ -1855,6 +1855,99 @@ TEST_CASE("UpdateProvidersInConfigFile: native_web_search=true 落盘,回读原�
     CHECK_FALSE(reparsed->providers->at(1).native_web_search);
 }
 
+// ---------------------------------------------------------------------------
+// /provider set native_web_search on|off:ParseBoolToggle 解开关值,
+// SetProviderNativeWebSearch 在内存里改字段,两个凑一块再落盘就是
+// HandleProviderCommand 的 Set 分支实际干的事。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseBoolToggle: on/off、true/false、1/0 都认,大小写不敏感") {
+    for (const std::string& truthy : {"on", "On", "ON", "true", "True", "1"}) {
+        const auto parsed = config::ParseBoolToggle(truthy);
+        REQUIRE(parsed.has_value());
+        CHECK(*parsed);
+    }
+    for (const std::string& falsy : {"off", "Off", "OFF", "false", "False", "0"}) {
+        const auto parsed = config::ParseBoolToggle(falsy);
+        REQUIRE(parsed.has_value());
+        CHECK_FALSE(*parsed);
+    }
+}
+
+TEST_CASE("ParseBoolToggle: 认不出的写法报错,不崩") {
+    const auto parsed = config::ParseBoolToggle("yes");
+    CHECK_FALSE(parsed.has_value());
+    CHECK(parsed.error().find("yes") != std::string::npos);
+}
+
+TEST_CASE("SetProviderNativeWebSearch: 找得到就地改字段,返回 true") {
+    std::vector<config::ProviderConfig> providers{
+        {.name = "glm", .base_url = "https://open.bigmodel.cn/api/paas/v4", .wire = config::Wire::Responses},
+        {.name = "minimax", .base_url = "https://api.minimax.io/anthropic", .wire = config::Wire::Anthropic},
+    };
+    CHECK(config::SetProviderNativeWebSearch(providers, "glm", true));
+    CHECK(providers[0].native_web_search);
+    CHECK_FALSE(providers[1].native_web_search);  // 没点名的那条不受影响
+
+    CHECK(config::SetProviderNativeWebSearch(providers, "glm", false));
+    CHECK_FALSE(providers[0].native_web_search);
+}
+
+TEST_CASE("SetProviderNativeWebSearch: 名字不存在返回 false,列表原样不动") {
+    std::vector<config::ProviderConfig> providers{
+        {.name = "glm", .base_url = "https://open.bigmodel.cn/api/paas/v4", .wire = config::Wire::Responses},
+    };
+    CHECK_FALSE(config::SetProviderNativeWebSearch(providers, "no-such-provider", true));
+    // 没找到就没改;列表大小、字段都原样,证明不会误伤别的条目。
+    REQUIRE(providers.size() == 1);
+    CHECK_FALSE(providers[0].native_web_search);
+}
+
+TEST_CASE("/provider set 落盘路径:SetProviderNativeWebSearch 改完再 UpdateProvidersInConfigFile,临时文件回读原样") {
+    TempCwdDir cwd;
+    const std::filesystem::path path = std::filesystem::path(cwd.Path()) / ".lubancode" / "config.json";
+    cwd.WriteFile(".lubancode/config.json", R"({"providers":[]})");
+
+    std::vector<config::ProviderConfig> providers{
+        {.name = "sub-openai", .base_url = "https://cc.moontidef.work", .wire = config::Wire::Responses,
+         .model = "gpt-5.5"},
+    };
+    REQUIRE(config::SetProviderNativeWebSearch(providers, "sub-openai", true));
+    REQUIRE(config::UpdateProvidersInConfigFile(path.string(), providers).has_value());
+
+    const nlohmann::json written = nlohmann::json::parse(cwd.ReadFile(".lubancode/config.json"));
+    REQUIRE(written["providers"].size() == 1);
+    CHECK(written["providers"][0]["native_web_search"] == true);
+
+    // 再关一次,落盘应该原样把键去掉(native_web_search=false 不落盘,跟
+    // UpdateProvidersInConfigFile 既有约定一致)。
+    REQUIRE(config::SetProviderNativeWebSearch(providers, "sub-openai", false));
+    REQUIRE(config::UpdateProvidersInConfigFile(path.string(), providers).has_value());
+    const nlohmann::json written_off = nlohmann::json::parse(cwd.ReadFile(".lubancode/config.json"));
+    CHECK_FALSE(written_off["providers"][0].contains("native_web_search"));
+}
+
+TEST_CASE("/provider set 名字不存在:不该调 UpdateProvidersInConfigFile,配置文件原样不动") {
+    TempCwdDir cwd;
+    const std::filesystem::path path = std::filesystem::path(cwd.Path()) / ".lubancode" / "config.json";
+    const std::string original = R"({"providers":[{"name":"glm","base_url":"https://a.test","wire":"anthropic"}]})";
+    cwd.WriteFile(".lubancode/config.json", original);
+
+    std::vector<config::ProviderConfig> providers{
+        {.name = "glm", .base_url = "https://a.test", .wire = config::Wire::Anthropic},
+    };
+    // 跟 main.cpp HandleProviderCommand 的 Set 分支一样:SetProviderNativeWebSearch
+    // 返回 false 就直接报错返回,不往下调 UpdateProvidersInConfigFile。
+    const bool found = config::SetProviderNativeWebSearch(providers, "no-such-provider", true);
+    CHECK_FALSE(found);
+    if (found) {
+        FAIL("不该走到这一步:名字没找到时不许落盘");
+    }
+
+    // 配置文件字节应该原样不动(没被误写)。
+    CHECK(cwd.ReadFile(".lubancode/config.json") == original);
+}
+
 TEST_CASE("ProviderApiKey: api_key 非空时优先于 key_env,不管环境变量有没有设置") {
     config::ProviderConfig provider;
     provider.key_env = "LUBANCODE_TEST_PROVIDER_KEY_ENV_DOES_NOT_EXIST_XYZ";
