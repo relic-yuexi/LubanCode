@@ -90,7 +90,7 @@
 
 namespace {
 
-constexpr std::string_view kVersion = "0.22.4";
+constexpr std::string_view kVersion = "0.22.5";
 
 // i18n:tr/trf 在本文件里到处用,拉进匿名命名空间省得每处全限定。
 using lubancode::cli::tr;
