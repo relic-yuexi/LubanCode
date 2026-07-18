@@ -53,6 +53,7 @@
 #include "config/config.hpp"
 #include "config/model_catalog.hpp"
 #include "config/prompt_files.hpp"
+#include "config/skill_store.hpp"
 #include "lsp/manager.hpp"
 #include "mcp/client.hpp"
 #include "mcp/mcp_tool.hpp"
@@ -61,6 +62,7 @@
 #include "tools/edit_file.hpp"
 #include "tools/hooks.hpp"
 #include "tools/lua_tool.hpp"
+#include "tools/path_utils.hpp"
 #include "tools/plugin_loader.hpp"
 #include "tools/lsp_tool.hpp"
 #include "tools/read_file.hpp"
@@ -2130,6 +2132,145 @@ void PrintSkillsCommand(const std::vector<lubancode::tools::SkillMeta>& skills, 
     }
 }
 
+// /skill 的参数只认第一个单词作动词,余下整段留给 URL 或技能名。命令
+// 本身住 main.cpp,文件落盘与网络都压进 config::skill_store,这里不碰细节。
+std::pair<std::string, std::string> SplitSkillCommandArgs(const std::string& args) {
+    std::size_t begin = 0;
+    while (begin < args.size() && std::isspace(static_cast<unsigned char>(args[begin])) != 0) {
+        ++begin;
+    }
+    std::size_t word_end = begin;
+    while (word_end < args.size() && std::isspace(static_cast<unsigned char>(args[word_end])) == 0) {
+        ++word_end;
+    }
+    std::string word = args.substr(begin, word_end - begin);
+    for (char& ch : word) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    std::size_t rest_begin = word_end;
+    while (rest_begin < args.size() && std::isspace(static_cast<unsigned char>(args[rest_begin])) != 0) {
+        ++rest_begin;
+    }
+    std::size_t rest_end = args.size();
+    while (rest_end > rest_begin && std::isspace(static_cast<unsigned char>(args[rest_end - 1])) != 0) {
+        --rest_end;
+    }
+    return {std::move(word), args.substr(rest_begin, rest_end - rest_begin)};
+}
+
+std::string JoinSkillNames(const std::vector<std::string>& names) {
+    std::string out;
+    for (const std::string& name : names) {
+        if (!out.empty()) {
+            out += ", ";
+        }
+        out += name;
+    }
+    return out;
+}
+
+bool HandleSkillCommand(const std::string& args, const std::filesystem::path& global_skills_root,
+                        const std::filesystem::path& project_skills_root) {
+    if (global_skills_root.empty()) {
+        std::cout << tr("cmd.skill.no_home") << "\n";
+        return false;
+    }
+    const auto [verb, value] = SplitSkillCommandArgs(args);
+    if (verb == "list") {
+        const auto global = lubancode::config::ListStoredSkills(global_skills_root);
+        const auto project = lubancode::config::ListStoredSkills(project_skills_root);
+        if (!global.has_value()) {
+            std::cout << trf("cmd.skill.error", "/skill list", global.error()) << "\n";
+            return false;
+        }
+        if (!project.has_value()) {
+            std::cout << trf("cmd.skill.error", "/skill list", project.error()) << "\n";
+            return false;
+        }
+        if (global->empty() && project->empty()) {
+            std::cout << tr("cmd.skill.list_empty") << "\n";
+            return false;
+        }
+
+        std::cout << tr("cmd.skill.list_header") << "\n";
+        const auto print_entries = [](const std::vector<lubancode::config::StoredSkill>& entries,
+                                      const std::string& scope) {
+            for (const auto& skill : entries) {
+                const std::string source =
+                    skill.source_url.has_value() ? trf("cmd.skill.remote", *skill.source_url,
+                                                       skill.installed_at.value_or(std::string()))
+                                                 : tr("cmd.skill.local");
+                std::cout << "  - " << skill.name << " [" << scope << "; " << source << "]\n"
+                          << "      " << skill.dir_path << "\n";
+            }
+        };
+        print_entries(*project, tr("cmd.skill.scope_project"));
+        print_entries(*global, tr("cmd.skill.scope_global"));
+        return false;
+    }
+    if (verb == "install") {
+        if (value.empty()) {
+            std::cout << tr("cmd.skill.usage") << "\n";
+            return false;
+        }
+        const auto installed = lubancode::config::InstallRemoteSkills(
+            global_skills_root, value, lubancode::config::FetchRemoteSkillUrl);
+        if (!installed.has_value()) {
+            std::cout << trf("cmd.skill.error", "/skill install", installed.error()) << "\n";
+            return false;
+        }
+        std::cout << trf("cmd.skill.install_done", JoinSkillNames(installed->installed_names)) << "\n";
+        return true;
+    }
+    if (verb == "update") {
+        const auto records = lubancode::config::LoadRemoteSkillRecords(global_skills_root);
+        if (!records.has_value()) {
+            std::cout << trf("cmd.skill.error", "/skill update", records.error()) << "\n";
+            return false;
+        }
+        std::vector<lubancode::config::RemoteSkillRecord> chosen;
+        for (const auto& record : *records) {
+            if (value.empty() || record.name == value) {
+                chosen.push_back(record);
+            }
+        }
+        if (chosen.empty()) {
+            std::cout << tr("cmd.skill.update_none") << "\n";
+            return false;
+        }
+
+        bool changed = false;
+        for (const auto& record : chosen) {
+            lubancode::config::SkillInstallOptions options;
+            options.overwrite = true;
+            options.only_names = {record.name};
+            const auto updated = lubancode::config::InstallRemoteSkills(
+                global_skills_root, record.source_url, lubancode::config::FetchRemoteSkillUrl, options);
+            if (!updated.has_value()) {
+                std::cout << trf("cmd.skill.error", "/skill update " + record.name, updated.error()) << "\n";
+                continue;
+            }
+            std::cout << trf("cmd.skill.update_done", JoinSkillNames(updated->installed_names)) << "\n";
+            changed = true;
+        }
+        return changed;
+    }
+    if (verb == "remove") {
+        if (value.empty()) {
+            std::cout << tr("cmd.skill.usage") << "\n";
+            return false;
+        }
+        const auto removed = lubancode::config::RemoveStoredSkill(global_skills_root, value);
+        if (!removed.has_value()) {
+            std::cout << trf("cmd.skill.error", "/skill remove", removed.error()) << "\n";
+            return false;
+        }
+        std::cout << trf("cmd.skill.remove_done", value) << "\n";
+        return true;
+    }
+    std::cout << tr("cmd.skill.usage") << "\n";
+    return false;
+}
 // 粗略估算一段历史占用了多少"token"——不真调分词器,按字符数打个折扣
 // (中英文混排,经验上大致两个字符算一个 token),仅供 /compact 报告
 // "压缩前后省了多少"用,数字前带 ~ 提醒这是估算值,不是真实用量(真实
@@ -2861,8 +3002,8 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     // M9:技能扫描一次,主代理、子代理、系统提示词、/skills 命令共用同一份
     // 结果——扫描本身只在启动时做一次,不在每轮对话里重复读磁盘。
     const std::optional<std::string> home_dir = lubancode::config::HomeDir();
-    const std::vector<lubancode::tools::SkillMeta> skills = lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir);
-    const std::string skills_segment = lubancode::tools::BuildSkillsPromptSegment(skills);
+    std::vector<lubancode::tools::SkillMeta> skills = lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir);
+    std::string skills_segment = lubancode::tools::BuildSkillsPromptSegment(skills);
 
     // 提示词运行时化(0.21.x):用户模块目录(~/.lubancode/prompts)。
     // AssembleSystemPrompt 每次拼装(启动构建 AgentLoop、/clear 重建)都
@@ -2870,6 +3011,11 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     const auto home_lubancode = lubancode::config::HomeLubancodeDir();
     const std::string prompts_dir =
         home_lubancode.has_value() ? (*home_lubancode + "/prompts") : std::string();
+    const std::filesystem::path global_skills_root =
+        home_lubancode.has_value() ? lubancode::tools::Utf8ToPath(*home_lubancode) / "skills"
+                                   : std::filesystem::path();
+    const std::filesystem::path project_skills_root =
+        lubancode::tools::Utf8ToPath(CurrentDirUtf8()) / ".lubancode" / "skills";
 
     std::unique_ptr<lubancode::api::Backend> real_backend = BuildBackend(config);
     auto current_model = std::make_shared<std::string>(config.model);
@@ -3136,7 +3282,11 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     prompt_options.prompts_dir = prompts_dir;  // 运行时模块:拼装时现读现拼
 
     std::optional<lubancode::agent::AgentLoop> loop;
-    const auto rebuild_loop = [&]() {
+    const auto rebuild_loop = [&](bool preserve_history = false) {
+        std::vector<lubancode::api::Message> old_history;
+        if (preserve_history && loop.has_value()) {
+            old_history = loop->History();
+        }
         // max_tokens=4096、max_turns=25 是 AgentLoop 自己的默认值,这里显式
         // 传出来是为了能把 config.max_context_chars 一起传进去。
         // tool_search:backend 换成 index_backend(索引段包装,未启用时纯
@@ -3148,8 +3298,27 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         if (main_deferral) {
             loop->SetToolFilter(tool_filter);
         }
+        if (preserve_history) {
+            loop->ReplaceHistory(std::move(old_history));
+        }
     };
     rebuild_loop();
+
+    const auto refresh_skills = [&]() {
+        skills = lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir);
+        skills_segment = lubancode::tools::BuildSkillsPromptSegment(skills);
+        if (auto* tool = dynamic_cast<lubancode::tools::SkillTool*>(registry.Find("skill")); tool != nullptr) {
+            tool->SetSkills(skills);
+        }
+        if (auto* tool = dynamic_cast<lubancode::tools::SkillTool*>(sub_registry.Find("skill")); tool != nullptr) {
+            tool->SetSkills(skills);
+        }
+        if (auto* tool = dynamic_cast<lubancode::tools::AgentTool*>(registry.Find("agent")); tool != nullptr) {
+            tool->SetSkillsSegment(skills_segment);
+        }
+        prompt_options.skills_segment = skills_segment;
+        rebuild_loop(/*preserve_history=*/true);
+    };
 
     std::set<std::string> always_allowed_tools;
     // settings.local.json 的 allow_tools:启动即注入会话"总是允许"集合,这些
@@ -3335,6 +3504,12 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     break;
                 case lubancode::cli::SlashCommand::Skills:
                     PrintSkillsCommand(skills, CurrentDirUtf8(), home_dir);
+                    break;
+                case lubancode::cli::SlashCommand::Skill:
+                    if (HandleSkillCommand(parsed.args, global_skills_root, project_skills_root)) {
+                        refresh_skills();
+                        std::cout << tr("cmd.skill.refreshed") << "\n";
+                    }
                     break;
                 case lubancode::cli::SlashCommand::Mcp:
                     PrintMcpCommand(mcp_servers);

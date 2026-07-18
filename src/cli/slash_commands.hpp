@@ -21,6 +21,7 @@ enum class SlashCommand {
     Compact,  // /compact [重点说明]:手动触发一次历史压缩
     Think,    // /think [档位]:看/改推理强度
     Skills,   // /skills:列出扫描到的技能(M9)
+    Skill,    // /skill install|list|update|remove:远端技能分发
     Mcp,      // /mcp:列出挂载的 MCP 服务器状态、工具清单(M8)
     Lsp,      // /lsp:列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)
     Todos,    // /todos:查看当前待办清单(M11/0.10.0)

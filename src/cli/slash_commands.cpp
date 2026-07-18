@@ -67,6 +67,8 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Think;
     } else if (lower == "/skills") {
         parsed.command = SlashCommand::Skills;
+    } else if (lower == "/skill") {
+        parsed.command = SlashCommand::Skill;
     } else if (lower == "/mcp") {
         parsed.command = SlashCommand::Mcp;
     } else if (lower == "/lsp") {
@@ -118,6 +120,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/think", tr("slash.desc.think")},
             {"/effort", tr("slash.desc.effort")},
             {"/skills", tr("slash.desc.skills")},
+            {"/skill", tr("slash.desc.skill")},
             {"/mcp", tr("slash.desc.mcp")},
             {"/lsp", tr("slash.desc.lsp")},
             {"/todos", tr("slash.desc.todos")},

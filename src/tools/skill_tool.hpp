@@ -17,6 +17,8 @@ class SkillTool : public Tool {
 public:
     explicit SkillTool(std::vector<SkillMeta> skills) : skills_(std::move(skills)) {}
 
+    void SetSkills(std::vector<SkillMeta> skills) { skills_ = std::move(skills); }
+
     std::string name() const override;
     std::string description() const override;
     nlohmann::json input_schema() const override;

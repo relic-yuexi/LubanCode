@@ -91,6 +91,7 @@ public:
     // 行为跟从前完全一样。
     void SetPromptsDir(std::string prompts_dir) { prompts_dir_ = std::move(prompts_dir); }
 
+    void SetSkillsSegment(std::string skills_segment) { skills_segment_ = std::move(skills_segment); }
     std::string name() const override;
     std::string description() const override;
     nlohmann::json input_schema() const override;
