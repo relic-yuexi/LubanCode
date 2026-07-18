@@ -195,3 +195,17 @@ TEST_CASE("命令分类:不认识的首词一律问") {
     CHECK(Asks("cmake --build build"));
     CHECK(Asks("msbuild all.sln", "cmd"));
 }
+
+TEST_CASE("git branch/remote 收紧:裸命令与只读旗标放行,可变参数照问") {
+    using lubancode::tools::ClassifyCommand;
+    using lubancode::tools::CommandSafety;
+    CHECK(ClassifyCommand("git branch", "cmd") == CommandSafety::Safe);
+    CHECK(ClassifyCommand("git branch -a", "cmd") == CommandSafety::Safe);
+    CHECK(ClassifyCommand("git branch --list", "powershell") == CommandSafety::Safe);
+    CHECK(ClassifyCommand("git remote -v", "cmd") == CommandSafety::Safe);
+    CHECK(ClassifyCommand("git remote show", "cmd") == CommandSafety::Safe);
+    CHECK(ClassifyCommand("git branch -D topic", "cmd") == CommandSafety::NeedsConfirm);
+    CHECK(ClassifyCommand("git branch newbranch", "cmd") == CommandSafety::NeedsConfirm);
+    CHECK(ClassifyCommand("git remote add origin x", "powershell") == CommandSafety::NeedsConfirm);
+    CHECK(ClassifyCommand("git remote set-url origin x", "cmd") == CommandSafety::NeedsConfirm);
+}

@@ -251,8 +251,20 @@ CommandSafety ClassifySegment(const std::string& segment, bool is_powershell, bo
     }
 
     // git 特判:看第二词。裸 git、带全局选项(git -C ...)一律问,保守。
+    // branch/remote 两个子命令能改状态(git branch -D、git remote add),
+    // 只放裸命令与只读旗标,带其余参数照问。
     if (first == "git") {
         if (tokens.size() >= 2 && InList(kGitSafeSubcommands, ToLower(tokens[1]))) {
+            const std::string sub = ToLower(tokens[1]);
+            if (sub == "branch" || sub == "remote") {
+                static constexpr std::array<std::string_view, 6> kGitReadOnlyFlags = {
+                    "-v", "-vv", "-a", "--list", "--all", "show"};
+                for (std::size_t i = 2; i < tokens.size(); ++i) {
+                    if (!InList(kGitReadOnlyFlags, ToLower(tokens[i]))) {
+                        return CommandSafety::NeedsConfirm;
+                    }
+                }
+            }
             return CommandSafety::Safe;
         }
         return CommandSafety::NeedsConfirm;
