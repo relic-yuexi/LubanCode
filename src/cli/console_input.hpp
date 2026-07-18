@@ -157,6 +157,12 @@ void RedrawStreamFooterLocked();
 // 淡色 "[已打断]";其余可打印字符进内部排队缓冲(Backspace 能退格),遇
 // Enter 就把整行（非空才算）落进队列、打一行淡色 "[已排队] <内容>"。
 //
+// Ctrl+C(补于排查"ESC/Ctrl+C 都停不掉子代理"那次)语义对齐 bash/Python/
+// Node REPL、Claude Code 官方文档确认过的通用约定:单击效果等同
+// ESC(打断当前轮,cancel_flag 置位,不退出程序);1.2 秒内连按两次才是
+// "强制退出整个进程"(std::exit,不走 cancel_flag 那套可能被挂起工具/子
+// 代理拖住的收场流程)。双击计时只在这一个实例的生命周期内有效,不跨轮。
+//
 // 跟 SharedEditor() 那条"真正在读一行"的路径靠一把互斥锁
 // (ConsoleReadMutex,console_input.cpp 内部静态,两边共用同一份)自动错开
 // ——监听线程只在抢到锁的间隙才调 ReadConsoleInputW,ReadLineKeyByKey()

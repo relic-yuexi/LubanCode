@@ -113,7 +113,10 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
     sub_callbacks.on_pre_tool_hook = hooks_.on_pre_tool_hook;
     sub_callbacks.on_post_tool_hook = hooks_.on_post_tool_hook;
 
-    const auto result = sub_loop.Run(prompt, sub_callbacks);
+    // 打断信号透传:hooks_.cancel 是 main.cpp 那份 cancel_flag 的地址,
+    // 没设(nullptr)时 AgentLoop::Run 内部判断照旧短路成"没被打断",
+    // 行为跟原来一样;设了之后子代理的工具循环才会真的看见 ESC/Ctrl+C。
+    const auto result = sub_loop.Run(prompt, sub_callbacks, hooks_.cancel);
     if (!result.has_value()) {
         return {"子代理执行失败: " + result.error(), true};
     }

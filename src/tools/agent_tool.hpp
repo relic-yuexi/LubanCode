@@ -18,6 +18,7 @@
 // Hooks 转发,不设(默认构造的空 Hooks)也不会崩,只是不转发/不打印。
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <optional>
 #include <string>
@@ -54,6 +55,12 @@ public:
             on_pre_tool_hook;
         std::function<void(const std::string& name, const nlohmann::json& input, const Tool::Result& result)>
             on_post_tool_hook;
+
+        // ESC/Ctrl+C 打断信号(main.cpp 那份 cancel_flag 的地址)——子代理
+        // 内部的 AgentLoop::Run() 原样收这根指针,工具循环里就能跟顶层同一套
+        // "cancel != nullptr && cancel->load()"判断打断,不用重新实现打断
+        // 语义。不设(默认 nullptr)= 子代理收不到外部打断,行为跟从前一样。
+        const std::atomic<bool>* cancel = nullptr;
     };
 
     // backend:子代理发请求用的后端。main.cpp 传进来的通常是跟主循环共用
