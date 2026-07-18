@@ -1203,6 +1203,76 @@ TEST_CASE("MergeConfig: tool_search_threshold 配置文件压过默认值,没写
 }
 
 // ---------------------------------------------------------------------------
+// M11(网络超时):connect_timeout_ms / stream_idle_timeout_secs /
+// request_timeout_secs 三个字段,待遇跟 tool_search_threshold 一样——只有
+// 配置文件(项目级 > 全局)和内置默认值两级,没有环境变量这一级。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseFileConfigJson: 三个超时字段正常解析,负数/零/非整数都报错") {
+    const auto ok = config::ParseFileConfigJson(
+        R"({"connect_timeout_ms": 5000, "stream_idle_timeout_secs": 30, "request_timeout_secs": 10})", "x.json");
+    REQUIRE(ok.has_value());
+    REQUIRE(ok->connect_timeout_ms.has_value());
+    REQUIRE(ok->stream_idle_timeout_secs.has_value());
+    REQUIRE(ok->request_timeout_secs.has_value());
+    CHECK(*ok->connect_timeout_ms == 5000);
+    CHECK(*ok->stream_idle_timeout_secs == 30);
+    CHECK(*ok->request_timeout_secs == 10);
+
+    const auto missing = config::ParseFileConfigJson(R"({})", "x.json");
+    REQUIRE(missing.has_value());
+    CHECK_FALSE(missing->connect_timeout_ms.has_value());
+    CHECK_FALSE(missing->stream_idle_timeout_secs.has_value());
+    CHECK_FALSE(missing->request_timeout_secs.has_value());
+
+    // 三个字段都是"正整数"(跟 tool_search_threshold 不一样,0 不合法——
+    // 0 毫秒/0 秒的超时没有意义)。
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"connect_timeout_ms": 0})", "x.json").has_value());
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"connect_timeout_ms": -1})", "x.json").has_value());
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"connect_timeout_ms": "5000"})", "x.json").has_value());
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"stream_idle_timeout_secs": 0})", "x.json").has_value());
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"stream_idle_timeout_secs": 2.5})", "x.json").has_value());
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"request_timeout_secs": -5})", "x.json").has_value());
+}
+
+TEST_CASE("MergeConfig: 三个超时字段配置文件压过默认值,没写走内置默认") {
+    const auto defaulted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    REQUIRE(defaulted.has_value());
+    CHECK(defaulted->config.connect_timeout_ms == config::kDefaultConnectTimeoutMs);
+    CHECK(defaulted->config.stream_idle_timeout_secs == config::kDefaultStreamIdleTimeoutSecs);
+    CHECK(defaulted->config.request_timeout_secs == config::kDefaultRequestTimeoutSecs);
+    CHECK(defaulted->sources.connect_timeout_ms == config::Source::Default);
+    CHECK(defaulted->sources.stream_idle_timeout_secs == config::Source::Default);
+    CHECK(defaulted->sources.request_timeout_secs == config::Source::Default);
+
+    config::FileConfig file;
+    file.connect_timeout_ms = 8000;
+    file.stream_idle_timeout_secs = 45;
+    file.request_timeout_secs = 20;
+    const auto from_file = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE(from_file.has_value());
+    CHECK(from_file->config.connect_timeout_ms == 8000);
+    CHECK(from_file->config.stream_idle_timeout_secs == 45);
+    CHECK(from_file->config.request_timeout_secs == 20);
+    CHECK(from_file->sources.connect_timeout_ms == config::Source::ProjectConfigFile);
+    CHECK(from_file->sources.stream_idle_timeout_secs == config::Source::ProjectConfigFile);
+    CHECK(from_file->sources.request_timeout_secs == config::Source::ProjectConfigFile);
+}
+
+TEST_CASE("MergeConfig: 三个超时字段项目级缺时回退全局") {
+    config::FileConfig global_file;
+    global_file.connect_timeout_ms = 9000;
+
+    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global_file, EmptyGenericEnv());
+    REQUIRE(merged.has_value());
+    CHECK(merged->config.connect_timeout_ms == 9000);
+    CHECK(merged->sources.connect_timeout_ms == config::Source::GlobalConfigFile);
+    // 项目级、全局都没写的另外两个字段,回退到内置默认值。
+    CHECK(merged->config.stream_idle_timeout_secs == config::kDefaultStreamIdleTimeoutSecs);
+    CHECK(merged->config.request_timeout_secs == config::kDefaultRequestTimeoutSecs);
+}
+
+// ---------------------------------------------------------------------------
 // 分层合并(项目级 + 全局 config.json,逐字段):项目级压全局,项目级缺的
 // 字段回退全局,两级都无回退 env/默认。来源细分成 ProjectConfigFile /
 // GlobalConfigFile。

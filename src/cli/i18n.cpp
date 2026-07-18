@@ -319,6 +319,14 @@ const Entry kZhCN[] = {
     {"error.system_prompt_arg", "--system-prompt 后面要跟一个文件路径"},
     {"i18n.pack_warning", "[语言包警告] {0}"},
 
+    // ---- M11:网络超时报错(api 层用,client.cpp/models.cpp 调 cli::trf) ----
+    {"error.network.connect_timeout",
+     "连接超时:{0} 秒内没能连上服务器,请检查网络、代理设置,或者 base_url 是否正确"},
+    {"error.network.stream_idle_timeout",
+     "网络读超时:连续 {0} 秒没收到新数据,连接可能已经断了,请重试"},
+    {"error.network.request_timeout", "请求超时:{0} 秒内没有完成,请检查网络后重试"},
+    {"error.network.connect_failed", "连接失败: {0}"},
+
     // ---- transcript 摘要词(彩色主题;plain 的 [RUNNING] 等不进表) ----
     {"transcript.pending", "待确认"},
     {"transcript.read_lines", "读取 {0} 行"},
@@ -855,6 +863,14 @@ const Entry kEn[] = {
     {"error.wizard_incomplete", "Setup wizard not completed; exiting."},
     {"error.system_prompt_arg", "--system-prompt requires a file path"},
     {"i18n.pack_warning", "[language pack warning] {0}"},
+
+    // ---- M11: network timeout errors (used by the api layer, client.cpp/models.cpp) ----
+    {"error.network.connect_timeout",
+     "connection timed out: couldn't connect within {0}s; check your network, proxy settings, or base_url"},
+    {"error.network.stream_idle_timeout",
+     "network read timed out: no new data for {0}s straight; the connection may have dropped, please retry"},
+    {"error.network.request_timeout", "request timed out: did not finish within {0}s; check your network and retry"},
+    {"error.network.connect_failed", "connection failed: {0}"},
 
     // ---- transcript summary words ----
     {"transcript.pending", "Awaiting confirmation"},

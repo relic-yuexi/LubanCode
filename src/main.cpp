@@ -109,10 +109,14 @@ void PrintHelp() {
 // 按 wire 造对应的后端实现。agent 层只认 Backend 这个抽象接口,不关心
 // 背后具体是哪个协议在干活。
 std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::Config& config) {
+    // M11:连接超时 / 流式空闲读超时用 Config 里实际生效的值(四级合并结果,
+    // 没配就是内置默认值),不是每次都硬编码默认值。
     if (config.wire == lubancode::config::Wire::Responses) {
-        return std::make_unique<lubancode::api::responses::ResponsesBackend>(config.base_url, config.auth_token);
+        return std::make_unique<lubancode::api::responses::ResponsesBackend>(
+            config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs);
     }
-    return std::make_unique<lubancode::api::anthropic::AnthropicBackend>(config.base_url, config.auth_token);
+    return std::make_unique<lubancode::api::anthropic::AnthropicBackend>(
+        config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs);
 }
 
 // 包一层 Backend:真正发请求前,把 Request.model 换成"当前会话实际在用的
@@ -2304,7 +2308,8 @@ void HandleModelCommand(const std::string& args, const lubancode::config::Config
     if (!args.empty()) {
         chosen = args;
     } else {
-        const auto list_result = lubancode::api::ListModels(config.wire, config.base_url, config.auth_token);
+        const auto list_result = lubancode::api::ListModels(config.wire, config.base_url, config.auth_token,
+                                                              config.connect_timeout_ms, config.request_timeout_secs);
         if (!list_result.has_value()) {
             std::cout << trf("cmd.model.fetch_failed", list_result.error().message) << "\n";
             return;

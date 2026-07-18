@@ -40,7 +40,14 @@ std::expected<std::vector<ModelInfo>, std::string> ParseResponsesModelsResponse(
 // 真正发请求:按 wire 挑端点和解析函数,GET 请求带
 // `Authorization: Bearer {api_key}`。网络错、HTTP 非 2xx、响应体解析失败,
 // 统一走 Error 返回(跟 Backend::send_stream 用同一套 Error 类型)。
+// M11(网络超时):这是个非流式请求(响应体就是一个模型列表,不会很大),
+// 没有"回复很长"的顾虑,直接给连接超时 + 整体超时两道上限,都有默认值
+// (来自 config::kDefault*),两个调用点(初次配置向导、/model)目前都用
+// 默认值——向导阶段还没有 Config 对象,/model 命令懒得为这一个次要路径
+// 多传一个字段,默认值本身已经够用。
 std::expected<std::vector<ModelInfo>, Error> ListModels(config::Wire wire, const std::string& base_url,
-                                                          const std::string& api_key);
+                                                          const std::string& api_key,
+                                                          int connect_timeout_ms = config::kDefaultConnectTimeoutMs,
+                                                          int request_timeout_secs = config::kDefaultRequestTimeoutSecs);
 
 }  // namespace lubancode::api

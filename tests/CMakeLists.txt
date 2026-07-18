@@ -49,9 +49,16 @@ add_executable(lubancode_tests
   test_session_store.cpp
   test_prompt_files.cpp
   test_i18n.cpp
+  test_network_timeout.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_core doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)
+
+# M11:test_network_timeout.cpp 手写了个原始 socket 假服务器(模拟连不上/
+# 半路断流),要链 Winsock。
+if(WIN32)
+  target_link_libraries(lubancode_tests PRIVATE ws2_32)
+endif()
 
 # M8:真实 Python 夹具(mcp_test_server.py)测试要知道 tests/fixtures/ 的绝对
 # 路径——ctest 跑的时候工作目录不一定是 tests/ 源码目录,不能瞎猜相对路径。

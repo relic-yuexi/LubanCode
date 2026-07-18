@@ -76,6 +76,26 @@ constexpr std::size_t kDefaultContextWindowTokens = 256000;
 // 外挂工具的用户永远走不到延迟这条路,现状行为零变化。
 constexpr int kDefaultToolSearchThreshold = 20;
 
+// M11(网络超时):两个 API 客户端(anthropic/responses)以及 ListModels 共用
+// 的超时默认值,毫秒/秒两种单位混用是因为对应的 cpr 选项本身单位不同
+// (ConnectTimeout 认毫秒,LowSpeed::time 和 cpr::Timeout 的语义按秒/毫秒
+// 分别处理更直观,这里 idle/request 两个字段存"秒",内部换算成毫秒喂给 cpr)。
+//
+// - kDefaultConnectTimeoutMs:TCP+TLS 握手阶段的上限。连不上时(DNS 解析
+//   不动、服务器不回包)靠这个及时报错,不干等。15 秒是"网络稍差也能连上,
+//   真连不上也不用等太久"的折中。
+// - kDefaultStreamIdleTimeoutSecs:流式(SSE)读空闲超时——不是总时长上限
+//   (流式回答本可以很长),是"连续这么多秒一个字节都没收到"就判定连接
+//   假死。60 秒给足模型长时间思考/工具调用间隙的余量,又不至于真断线时
+//   干等太久。
+// - kDefaultRequestTimeoutSecs:非流式请求(目前只有 ListModels 拉模型
+//   列表)的整体超时——这类请求响应体小,没有"回复很长"的顾虑,直接给
+//   总时长上限。30 秒跟 tools/web_search.cpp、tools/web_fetch.cpp 里已有的
+//   cpr::Timeout{30000} 保持一致的量级。
+constexpr int kDefaultConnectTimeoutMs = 15000;
+constexpr int kDefaultStreamIdleTimeoutSecs = 60;
+constexpr int kDefaultRequestTimeoutSecs = 30;
+
 // M9:一条钩子。matcher 只有 pre_tool/post_tool 才有意义——工具名精确匹配,
 // 或者 "*" 匹配所有工具;session_start/session_end 没有这个概念,解析时留
 // 空串,执行时也不看这个字段。command 是要跑的一整条命令行,直接交给
@@ -163,6 +183,12 @@ struct Config {
     // tool_search:延迟挂载的启用阈值,0 = 永不延迟。只从配置文件读
     // (没有环境变量这一级),没配就是默认 20。
     int tool_search_threshold = kDefaultToolSearchThreshold;
+    // M11(网络超时):三个字段只从配置文件读(项目级 > 全局,跟
+    // tool_search_threshold 同样待遇,没有环境变量这一级),没配就是上面
+    // 那三个内置默认值。connect_timeout_ms 单位毫秒,另外两个单位秒。
+    int connect_timeout_ms = kDefaultConnectTimeoutMs;
+    int stream_idle_timeout_secs = kDefaultStreamIdleTimeoutSecs;
+    int request_timeout_secs = kDefaultRequestTimeoutSecs;
 };
 
 // 每个字段最终来自哪一级,跟 Config 里的字段一一对应。
@@ -180,6 +206,9 @@ struct ConfigSources {
     Source think = Source::Default;
     Source soul = Source::Default;
     Source tool_search_threshold = Source::Default;  // tool_search:配置文件或默认,只有这两级
+    Source connect_timeout_ms = Source::Default;        // M11:配置文件或默认,只有这两级
+    Source stream_idle_timeout_secs = Source::Default;   // 同上
+    Source request_timeout_secs = Source::Default;       // 同上
 };
 
 // settings.local.json 里的 permissions 段,项目级本地权限(不进版本库)。
@@ -251,6 +280,11 @@ struct FileConfig {
     std::optional<std::map<std::string, LspServerConfig>> lsp_servers;
     // tool_search:延迟挂载阈值,非负整数(0 = 永不延迟)。
     std::optional<int> tool_search_threshold;
+    // M11(网络超时):三个字段都是正整数,没写就是 std::nullopt(往下一级
+    // 找,最终落到内置默认值)。connect_timeout_ms 单位毫秒,另外两个单位秒。
+    std::optional<int> connect_timeout_ms;
+    std::optional<int> stream_idle_timeout_secs;
+    std::optional<int> request_timeout_secs;
     std::string source_path;
     // 这份 FileConfig 是不是从"旧位置迁移到新位置"这个动作里读出来的;
     // 有值就是要打印给用户看的那一行通知(LoadFileConfig 填,LoadFromEnv

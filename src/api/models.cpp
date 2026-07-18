@@ -1,7 +1,11 @@
 #include "api/models.hpp"
 
+#include <chrono>
+
 #include <cpr/cpr.h>
 #include <nlohmann/json.hpp>
+
+#include "cli/i18n.hpp"
 
 namespace lubancode::api {
 
@@ -59,14 +63,31 @@ std::expected<std::vector<ModelInfo>, std::string> ParseResponsesModelsResponse(
 }
 
 std::expected<std::vector<ModelInfo>, Error> ListModels(config::Wire wire, const std::string& base_url,
-                                                          const std::string& api_key) {
+                                                          const std::string& api_key, int connect_timeout_ms,
+                                                          int request_timeout_secs) {
     const bool is_anthropic = (wire == config::Wire::Anthropic);
     const std::string url = base_url + (is_anthropic ? "/v1/models" : "/models");
 
-    cpr::Response response = cpr::Get(cpr::Url{url}, cpr::Header{{"Authorization", "Bearer " + api_key}});
+    // M11:非流式请求,直接给连接超时 + 整体超时(cpr::Timeout 是总时长上限,
+    // 跟 send_stream 那条"不设总超时,只设空闲读超时"的路数不一样——这里
+    // 响应体小,回复"很长"的顾虑不存在)。
+    cpr::Response response =
+        cpr::Get(cpr::Url{url}, cpr::Header{{"Authorization", "Bearer " + api_key}},
+                 cpr::ConnectTimeout{std::chrono::milliseconds(connect_timeout_ms)},
+                 cpr::Timeout{std::chrono::seconds(request_timeout_secs)});
 
     if (response.error) {
-        return std::unexpected(Error{ErrorKind::Network, response.error.message, 0});
+        std::string message;
+        if (response.error.code == cpr::ErrorCode::OPERATION_TIMEDOUT) {
+            message = cli::trf("error.network.request_timeout", request_timeout_secs);
+        } else if (response.error.code == cpr::ErrorCode::COULDNT_CONNECT ||
+                   response.error.code == cpr::ErrorCode::COULDNT_RESOLVE_HOST ||
+                   response.error.code == cpr::ErrorCode::COULDNT_RESOLVE_PROXY) {
+            message = cli::trf("error.network.connect_failed", response.error.message);
+        } else {
+            message = response.error.message;
+        }
+        return std::unexpected(Error{ErrorKind::Network, message, 0});
     }
 
     const int status = static_cast<int>(response.status_code);
