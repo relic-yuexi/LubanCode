@@ -296,7 +296,8 @@ void PrintToolsCommand(const lubancode::tools::ToolRegistry& registry, const std
 // 以及"当前模型(会话在用的那个,没有就看 config.model)命没命中目录"。
 void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
                              const std::optional<std::string>& session_model = std::nullopt,
-                             const lubancode::config::ModelCatalog* catalog = nullptr) {
+                             const lubancode::config::ModelCatalog* catalog = nullptr,
+                             const lubancode::config::SettingsLocal* settings = nullptr) {
     const auto& config = result.config;
     const auto& sources = result.sources;
     const std::string wire_str = config.wire == lubancode::config::Wire::Responses ? "responses" : "anthropic";
@@ -333,7 +334,16 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
     std::cout << "  tool_search_threshold = " << config.tool_search_threshold
               << (config.tool_search_threshold == 0 ? tr("config.threshold.never") : "") << "  ["
               << lubancode::config::ToString(sources.tool_search_threshold) << "]\n";
-    if (result.config_file_path.has_value()) {
+    // 分层:项目级、全局各自的配置文件路径分开列(有哪个列哪个,标清是
+    // 哪一级),都没有就沿用老的单行 config.label.file(通常也不会走到)。
+    if (result.project_config_file_path.has_value() || result.global_config_file_path.has_value()) {
+        if (result.project_config_file_path.has_value()) {
+            std::cout << "  项目级配置       = " << *result.project_config_file_path << "\n";
+        }
+        if (result.global_config_file_path.has_value()) {
+            std::cout << "  全局配置         = " << *result.global_config_file_path << "\n";
+        }
+    } else if (result.config_file_path.has_value()) {
         std::cout << trf("config.label.file", *result.config_file_path) << "\n";
     }
     // M9:hooks 只从配置文件来,没有来源分级可打,只打个数——四类都是空的
@@ -387,6 +397,35 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
         } else {
             std::cout << config.search.provider
                       << " (api_key " << lubancode::config::MaskApiKey(config.search.api_key) << ")";
+        }
+        std::cout << "\n";
+    }
+    // permissions(settings.local.json):项目级本地权限摘要——allow_tools
+    // 几个、allow/deny_commands 几条、起手确认档。没有这份文件就说"未配置"。
+    {
+        std::cout << "  permissions        = ";
+        if (settings == nullptr || settings->Empty()) {
+            std::cout << tr("config.hooks.none");
+        } else {
+            std::vector<std::string> parts;
+            if (!settings->allow_tools.empty()) {
+                parts.push_back("allow_tools×" + std::to_string(settings->allow_tools.size()));
+            }
+            if (!settings->allow_commands.empty()) {
+                parts.push_back("allow_commands×" + std::to_string(settings->allow_commands.size()));
+            }
+            if (!settings->deny_commands.empty()) {
+                parts.push_back("deny_commands×" + std::to_string(settings->deny_commands.size()));
+            }
+            if (settings->default_confirm_mode.has_value()) {
+                parts.push_back("default_confirm_mode=" + *settings->default_confirm_mode);
+            }
+            for (std::size_t i = 0; i < parts.size(); ++i) {
+                if (i > 0) {
+                    std::cout << ", ";
+                }
+                std::cout << parts[i];
+            }
         }
         std::cout << "\n";
     }
@@ -1702,7 +1741,9 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                             lubancode::cli::ContextTracker& context_tracker,
                                             lubancode::tools::ToolRegistry& registry,
                                             const lubancode::config::HooksConfig& hooks_config,
-                                            ToolDisplay& display, StreamBodyTracker& body_tracker) {
+                                            ToolDisplay& display, StreamBodyTracker& body_tracker,
+                                            const std::vector<std::string>& allow_commands,
+                                            const std::vector<std::string>& deny_commands) {
     lubancode::agent::Callbacks callbacks;
 
     // M9:hooks_config 四个数组全空是常态(没配 hooks 的用户占多数),这时候
@@ -1736,8 +1777,8 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         display.OnToolStart(name, input);
     };
 
-    callbacks.on_tool_confirm = [auto_confirm, &always_allowed_tools, &theme,
-                                  &display](const std::string& name, const nlohmann::json& input) -> bool {
+    callbacks.on_tool_confirm = [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands,
+                                  &deny_commands](const std::string& name, const nlohmann::json& input) -> bool {
         // 会话级确认模式(Shift+Tab 循环切),跟 --yes/auto_confirm 叠加:
         //   yolo  —— 全自动放行(auto_confirm 本来就是这个语义,这里再查一遍
         //             CurrentConfirmMode() 是为了让 Shift+Tab 中途切到 yolo
@@ -1747,24 +1788,45 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         //             安全命令(只读/探查、无重定向、链上每段都安全)直接
         //             放行,危险/不认识的照旧问;MCP/插件等外挂工具仍然问
         //   confirm(默认)—— 老规矩,needs_confirm 的工具逐个问
+        // settings.local.json 的 permissions 叠加在这一层(不改 command_safety):
+        //   deny_commands 前缀命中 run_command → 永远问一句(压过 allow、压过
+        //     会话"总是允许");但 yolo/--yes 是显式全放,deny 不拦(只在
+        //     confirm/auto 档生效)。
+        //   allow_commands 前缀命中 → auto 档里等价 command_safety 判成 Safe。
         const lubancode::cli::ConfirmMode mode = lubancode::cli::CurrentConfirmMode();
         const bool file_tool = name == "write_file" || name == "edit_file";
-        bool safe_command = false;
-        if (mode == lubancode::cli::ConfirmMode::Auto && name == "run_command") {
-            std::string command;
-            std::string shell = "powershell";  // run_command 的默认 shell,语义同 execute()
+
+        std::string command;
+        std::string shell = "powershell";  // run_command 的默认 shell,语义同 execute()
+        if (name == "run_command") {
             if (const auto it = input.find("command"); it != input.end() && it->is_string()) {
                 command = it->get<std::string>();
             }
             if (const auto it = input.find("shell"); it != input.end() && it->is_string()) {
                 shell = it->get<std::string>();
             }
-            safe_command = lubancode::tools::ClassifyCommand(command, shell) ==
-                           lubancode::tools::CommandSafety::Safe;
         }
-        const bool auto_pass = auto_confirm || mode == lubancode::cli::ConfirmMode::Yolo ||
-                               (mode == lubancode::cli::ConfirmMode::Auto && (file_tool || safe_command)) ||
-                               always_allowed_tools.count(name) != 0;
+
+        // permissions 裁定(deny 压 allow,纯函数,见 config 层):
+        const lubancode::config::CommandPermission perm =
+            name == "run_command"
+                ? lubancode::config::ClassifyCommandByPermissions(command, allow_commands, deny_commands)
+                : lubancode::config::CommandPermission::None;
+        // deny:只在 confirm/auto 档生效(yolo/--yes 显式全放不拦)。
+        const bool deny_hit = perm == lubancode::config::CommandPermission::Deny && !auto_confirm &&
+                              mode != lubancode::cli::ConfirmMode::Yolo;
+
+        bool safe_command = false;
+        if (mode == lubancode::cli::ConfirmMode::Auto && name == "run_command" && !deny_hit) {
+            // allow_commands 命中 → auto 档等价 command_safety 的 Safe(补白名单)。
+            safe_command = lubancode::tools::ClassifyCommand(command, shell) ==
+                               lubancode::tools::CommandSafety::Safe ||
+                           perm == lubancode::config::CommandPermission::Allow;
+        }
+        const bool auto_pass = !deny_hit &&
+                               (auto_confirm || mode == lubancode::cli::ConfirmMode::Yolo ||
+                                (mode == lubancode::cli::ConfirmMode::Auto && (file_tool || safe_command)) ||
+                                always_allowed_tools.count(name) != 0);
         if (auto_pass) {
             // UI-C:自动放行(--yes/yolo/auto 档的文件工具/选过 a)也把统一
             // diff 预览打出来——用户看得见将要发生什么,但不停下等确认,
@@ -1794,15 +1856,41 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
             theme.confirm + tr("confirm.prompt") + theme.reset, theme,
             /*esc_rejects=*/true);
         bool allowed = false;
+        bool chose_always = false;
         if (answer.has_value()) {  // 读到 EOF 按拒绝处理,不要在这儿卡住
             if (*answer == "a" || *answer == "A") {
                 always_allowed_tools.insert(name);
                 allowed = true;
+                chose_always = true;
             } else {
                 allowed = (*answer == "y" || *answer == "Y");
             }
         }
         display.OnConfirmAnswered(pending_idx, allowed);
+
+        // 按 a 之后多问一句:也永久写进项目 settings.local.json?管道/--yes 下
+        // 跳过(只进会话集合)——那些场景没法交互再问一遍。真控制台才追问。
+        if (chose_always && display.is_console && !auto_confirm) {
+            const std::optional<std::string> persist = lubancode::cli::ReadLine(
+                theme.confirm + tr("settings.local.persist_prompt") + theme.reset, theme,
+                /*esc_rejects=*/true);
+            if (persist.has_value() && (*persist == "y" || *persist == "Y")) {
+                const std::string cwd = CurrentDirUtf8();
+                const auto written = lubancode::config::AddAllowedToolToSettingsLocal(cwd, name);
+                std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+                if (written.has_value()) {
+                    std::cout << trf("settings.local.persisted", name) << "\n";
+                    // 首次落地 settings.local.json 时,顺带保证 .gitignore 挡住它
+                    // (追加了/已挡住/教用户手动加,都是一行反馈;空串 = 无需打)。
+                    const std::string gi = lubancode::config::EnsureGitignoreCoversSettingsLocal(cwd);
+                    if (!gi.empty()) {
+                        std::cout << gi << "\n";
+                    }
+                } else {
+                    std::cout << trf("settings.local.persist_failed", written.error()) << "\n";
+                }
+            }
+        }
         return allowed;
     };
 
@@ -1901,13 +1989,17 @@ struct RunTurnResult {
 // transcript_expanded:UI-D(0.16.0)紧凑/详细会话级开关(Ctrl+O 翻转,
 // InteractiveLoop 持有),详细态下这一轮新画的条目直接按展开版画;AskOnce
 // 不传(nullptr),恒紧凑。
+// allow_commands/deny_commands:settings.local.json 的 run_command 前缀白/黑
+// 名单,原样递给 BuildCallbacks 的确认回调叠加判定(缺省空表 = 无叠加)。
 RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bool auto_confirm,
                        std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
                        lubancode::cli::ContextTracker& context_tracker, lubancode::tools::ToolRegistry& registry,
                        const lubancode::config::HooksConfig& hooks_config, bool is_console,
                        std::vector<lubancode::cli::TranscriptItem>& transcript,
                        std::shared_ptr<lubancode::tools::TodoListState> todo_state = nullptr,
-                       const bool* transcript_expanded = nullptr) {
+                       const bool* transcript_expanded = nullptr,
+                       const std::vector<std::string>& allow_commands = {},
+                       const std::vector<std::string>& deny_commands = {}) {
     UsageStats usage_stats;
     // cancel_flag 先于 display/callbacks 建:ToolDisplay 要拿它判断"这一轮
     // 是不是被 ESC 打断的"(打断态条目标 Interrupted)。
@@ -1919,7 +2011,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     StreamBodyTracker body_tracker(theme, is_console && !theme.reset.empty());
     const lubancode::agent::Callbacks callbacks =
         BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker, registry,
-                        hooks_config, display, body_tracker);
+                        hooks_config, display, body_tracker, allow_commands, deny_commands);
 
     lubancode::cli::TurnInputListener listener(cancel_flag, theme);
     // markdown × M10:监听线程随时可能在流式正文当中插打 [已排队]/[已打断]
@@ -2761,7 +2853,8 @@ void HandleExportCommand(const std::string& args, const lubancode::agent::AgentL
 // (CLI 参数/文件/内置),/prompt 裸敲展示用,不参与任何逻辑。
 void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_confirm,
                       const lubancode::cli::Theme& theme, const std::string& persona, bool spinner_enabled,
-                      const lubancode::config::ModelCatalog& model_catalog, bool continue_last = false,
+                      const lubancode::config::ModelCatalog& model_catalog,
+                      const lubancode::config::SettingsLocal& settings_local, bool continue_last = false,
                       const std::string& law_source = "内置默认") {
     const lubancode::config::Config& config = config_result.config;
 
@@ -3059,6 +3152,11 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     rebuild_loop();
 
     std::set<std::string> always_allowed_tools;
+    // settings.local.json 的 allow_tools:启动即注入会话"总是允许"集合,这些
+    // 工具本会话直接免确认(跟按 a 落进来的是同一个集合)。
+    for (const std::string& tool_name : settings_local.allow_tools) {
+        always_allowed_tools.insert(tool_name);
+    }
     std::optional<std::string> config_file_path = config_result.config_file_path;
 
     // -----------------------------------------------------------------------
@@ -3163,7 +3261,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                                         current_think, context_tracker, current_model_instructions);
                     break;
                 case lubancode::cli::SlashCommand::Config:
-                    PrintConfigDiagnostics(config_result, *current_model, &model_catalog);
+                    PrintConfigDiagnostics(config_result, *current_model, &model_catalog, &settings_local);
                     break;
                 case lubancode::cli::SlashCommand::Language:
                     HandleLanguageCommand(parsed.args, config_file_path);
@@ -3344,7 +3442,8 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         focus_view_active = false;
         const RunTurnResult turn_result =
             RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry,
-                    config.hooks, spinner_enabled, transcript, todo_state, &transcript_expanded);
+                    config.hooks, spinner_enabled, transcript, todo_state, &transcript_expanded,
+                    settings_local.allow_commands, settings_local.deny_commands);
         // 每轮结束(成功/出错/ESC 打断都算)把新增消息逐条追加落盘。
         persist_new_messages();
         for (auto& queued : turn_result.queued_lines) {
@@ -3407,6 +3506,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
 // 空串 = 不叠加。
 int AskOnce(const lubancode::config::Config& config, const std::string& question, bool auto_confirm,
             const lubancode::cli::Theme& theme, const std::string& persona, bool spinner_enabled,
+            const lubancode::config::SettingsLocal& settings_local,
             const std::string& model_instructions = std::string(), const std::string& soul_content = std::string()) {
     // M9:技能扫描,理由同 InteractiveLoop——单发模式也该能用技能。
     const std::optional<std::string> home_dir = lubancode::config::HomeDir();
@@ -3523,6 +3623,10 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         loop.SetToolFilter(tool_filter);
     }
     std::set<std::string> always_allowed_tools;
+    // settings.local.json 的 allow_tools:单发模式同样注入(免确认)。
+    for (const std::string& tool_name : settings_local.allow_tools) {
+        always_allowed_tools.insert(tool_name);
+    }
     lubancode::cli::ContextTracker context_tracker(config.context_window_tokens);
 
     // 单发模式没有下一轮循环好把排队消息接着发出去——AskOnce 只问这一句就
@@ -3530,7 +3634,8 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     // 的手测清单),这里只取 status,忽略 queued_lines/cancelled。
     std::vector<lubancode::cli::TranscriptItem> transcript;
     return RunTurn(loop, question, auto_confirm, always_allowed_tools, theme, context_tracker, registry,
-                    config.hooks, spinner_enabled, transcript, todo_state)
+                    config.hooks, spinner_enabled, transcript, todo_state, /*transcript_expanded=*/nullptr,
+                    settings_local.allow_commands, settings_local.deny_commands)
         .status;
 }
 
@@ -3674,8 +3779,20 @@ int RunCli(const std::vector<std::string>& args) {
         std::cout << trf("catalog.warning", warning) << "\n";
     }
 
+    // settings.local.json(项目级本地权限):启动读一次,坏 JSON 只告警跳过
+    // (当没配置),不拦人。allow_tools/allow_commands/deny_commands/
+    // default_confirm_mode 之后各处应用。cwd 基准。
+    lubancode::config::SettingsLocal settings_local;
+    if (auto loaded = lubancode::config::LoadSettingsLocal(CurrentDirUtf8()); loaded.has_value()) {
+        if (loaded->has_value()) {
+            settings_local = **loaded;
+        }
+    } else {
+        std::cout << trf("settings.local.warning", loaded.error()) << "\n";
+    }
+
     if (print_config) {
-        PrintConfigDiagnostics(*config_result, std::nullopt, &model_catalog);
+        PrintConfigDiagnostics(*config_result, std::nullopt, &model_catalog, &settings_local);
         return 0;
     }
 
@@ -3740,16 +3857,36 @@ int RunCli(const std::vector<std::string>& args) {
     // LUBANCODE_CONFIRM_MODE 环境变量(auto/yolo/confirm)可指定起手档位——
     // 管道模式敲不了 Shift+Tab,自动化验证 auto 档全靠它;--yes 优先级更高,
     // 认不出的值一律按默认 confirm 档走,不报错不拦人。
+    // 起手档位优先级(高到低):--yes/LUBANCODE_CONFIRM_MODE >
+    // settings.local.json 的 default_confirm_mode > 内置默认 confirm。
     lubancode::cli::ConfirmMode initial_mode =
         auto_confirm ? lubancode::cli::ConfirmMode::Yolo : lubancode::cli::ConfirmMode::Confirm;
+    bool mode_from_explicit = auto_confirm;  // --yes 或 env 显式指定过,settings 不再插手
     if (!auto_confirm) {
         if (const char* env_mode = std::getenv("LUBANCODE_CONFIRM_MODE"); env_mode != nullptr) {
             const std::string mode_str(env_mode);
             if (mode_str == "auto") {
                 initial_mode = lubancode::cli::ConfirmMode::Auto;
+                mode_from_explicit = true;
             } else if (mode_str == "yolo") {
                 initial_mode = lubancode::cli::ConfirmMode::Yolo;
+                mode_from_explicit = true;
+            } else if (mode_str == "confirm") {
+                initial_mode = lubancode::cli::ConfirmMode::Confirm;
+                mode_from_explicit = true;
             }
+        }
+    }
+    // settings.local.json 的 default_confirm_mode:只在没被 --yes/env 显式压过
+    // 时才生效(认不出的值一律忽略,不拦人)。
+    if (!mode_from_explicit && settings_local.default_confirm_mode.has_value()) {
+        const std::string& mode_str = *settings_local.default_confirm_mode;
+        if (mode_str == "auto") {
+            initial_mode = lubancode::cli::ConfirmMode::Auto;
+        } else if (mode_str == "yolo") {
+            initial_mode = lubancode::cli::ConfirmMode::Yolo;
+        } else if (mode_str == "confirm") {
+            initial_mode = lubancode::cli::ConfirmMode::Confirm;
         }
     }
     lubancode::cli::SetConfirmMode(initial_mode);
@@ -3791,7 +3928,7 @@ int RunCli(const std::vector<std::string>& args) {
             const std::string soul_content =
                 LoadSoulContentByName(once_config.soul.empty() ? "default" : once_config.soul, /*warn=*/false);
             return AskOnce(once_config, positional, auto_confirm, theme, persona, spinner_enabled,
-                            catalog_apply.base_instructions, soul_content);
+                            settings_local, catalog_apply.base_instructions, soul_content);
         }
 
         // 交互模式:base_url/api_key/model 有一个解不出来,就先走一遍初次
@@ -3808,19 +3945,20 @@ int RunCli(const std::vector<std::string>& args) {
                 return 1;
             }
             effective.config = *wizard_config;
-            // 向导给出的这份配置,来源标记简化成两种:保存了就算"配置文件"
-            // 来源,没保存就算"内置默认值"(最接近"临时值,没有更合适的
-            // 持久来源"这个语义)——/config 展示用,不影响实际发请求。
+            // 向导给出的这份配置,来源标记简化成两种:保存了就算"全局配置
+            // 文件"来源(向导写的是主目录 ~/.lubancode/config.json),没保存
+            // 就算"内置默认值"(最接近"临时值,没有更合适的持久来源"这个
+            // 语义)——/config 展示用,不影响实际发请求。
             const lubancode::config::Source marked = effective.config_file_path.has_value()
-                                                          ? lubancode::config::Source::ConfigFile
+                                                          ? lubancode::config::Source::GlobalConfigFile
                                                           : lubancode::config::Source::Default;
             effective.sources.wire = marked;
             effective.sources.base_url = marked;
             effective.sources.auth_token = marked;
             effective.sources.model = marked;
         }
-        InteractiveLoop(effective, auto_confirm, theme, persona, spinner_enabled, model_catalog, continue_last,
-                         law_source);
+        InteractiveLoop(effective, auto_confirm, theme, persona, spinner_enabled, model_catalog, settings_local,
+                         continue_last, law_source);
     } catch (const std::exception& e) {
         std::cerr << tr("error.prefix") << trf("error.unexpected", e.what()) << "\n";
         return 1;

@@ -290,6 +290,8 @@ const Entry kZhCN[] = {
     // ---- 配置来源 / 常见错误(config 层) ----
     {"config.source.lubancode_env", "LUBANCODE_ 专属环境变量"},
     {"config.source.config_file", "配置文件(.lubancode/config.json)"},
+    {"config.source.project_config_file", "项目级配置(.lubancode/config.json)"},
+    {"config.source.global_config_file", "全局配置(~/.lubancode/config.json)"},
     {"config.source.generic_env", "通用环境变量(ANTHROPIC_*/OPENAI_*)"},
     {"config.source.default", "内置默认值"},
     {"config.source.unknown", "未知来源"},
@@ -356,6 +358,10 @@ const Entry kZhCN[] = {
     {"plugin.mounted_line", "[plugin] {0}: {1} 个工具"},
     {"tool_search.enabled", "[tool_search] 工具超过阈值 {0},MCP/插件等外挂工具改为延迟挂载(/tools 看三态)"},
     {"catalog.warning", "[models.json 警告] {0}"},
+    {"settings.local.warning", "[settings.local.json 警告] {0}"},
+    {"settings.local.persist_prompt", "也永久写进项目 settings.local.json?[y/N] "},
+    {"settings.local.persisted", "已永久允许 {0}(项目级)"},
+    {"settings.local.persist_failed", "写 settings.local.json 失败:{0}"},
 
     // ---- /tools ----
     {"cmd.tools.no_deferral", "工具共 {0} 个,{1},全量直挂,tool_search 延迟机制未启用。"},
@@ -817,6 +823,8 @@ const Entry kEn[] = {
     // ---- config sources / common errors ----
     {"config.source.lubancode_env", "LUBANCODE_ environment variable"},
     {"config.source.config_file", "config file (.lubancode/config.json)"},
+    {"config.source.project_config_file", "project config (.lubancode/config.json)"},
+    {"config.source.global_config_file", "global config (~/.lubancode/config.json)"},
     {"config.source.generic_env", "generic environment variable (ANTHROPIC_*/OPENAI_*)"},
     {"config.source.default", "built-in default"},
     {"config.source.unknown", "unknown source"},
@@ -878,7 +886,7 @@ const Entry kEn[] = {
     //   cmd.mcp.* / cmd.lsp.* / cmd.skills.* / cmd.context.* / cmd.compact.* / compact.* /
     //   cmd.think.* / cmd.model.* / cmd.write_config* / cmd.session_only / soul.* / cmd.soul.* /
     //   cmd.prompt.* / law.* / resetprompt.* / session.* / cmd.sessions.* / cmd.resume.* /
-    //   cmd.export.* / cmd.title.* / cmd.clear.* / ui.* / diff.*
+    //   cmd.export.* / cmd.title.* / cmd.clear.* / ui.* / diff.* / settings.local.*
 };
 
 std::map<std::string, std::string, std::less<>> BuildMap(const Entry* entries, std::size_t count) {

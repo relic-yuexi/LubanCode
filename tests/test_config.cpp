@@ -87,9 +87,9 @@ TEST_CASE("MergeConfig: 配置文件压过通用环境变量") {
     CHECK(result->config.auth_token == "file-key");
     CHECK(result->config.model == "file-model");
 
-    CHECK(result->sources.base_url == config::Source::ConfigFile);
-    CHECK(result->sources.auth_token == config::Source::ConfigFile);
-    CHECK(result->sources.model == config::Source::ConfigFile);
+    CHECK(result->sources.base_url == config::Source::ProjectConfigFile);
+    CHECK(result->sources.auth_token == config::Source::ProjectConfigFile);
+    CHECK(result->sources.model == config::Source::ProjectConfigFile);
 }
 
 TEST_CASE("MergeConfig: 专属 env 压过配置文件") {
@@ -163,10 +163,10 @@ TEST_CASE("MergeConfig: 配置文件只写了 base_url 和 api_key,model 从通�
     REQUIRE(result.has_value());
 
     CHECK(result->config.base_url == "https://file.example.com");
-    CHECK(result->sources.base_url == config::Source::ConfigFile);
+    CHECK(result->sources.base_url == config::Source::ProjectConfigFile);
 
     CHECK(result->config.auth_token == "file-key");
-    CHECK(result->sources.auth_token == config::Source::ConfigFile);
+    CHECK(result->sources.auth_token == config::Source::ProjectConfigFile);
 
     CHECK(result->config.model == "generic-model");
     CHECK(result->sources.model == config::Source::GenericEnv);
@@ -184,7 +184,7 @@ TEST_CASE("MergeConfig: 配置文件只写了 model,base_url/api_key 没有默�
     REQUIRE(result.has_value());
 
     CHECK(result->config.model == "only-model-from-file");
-    CHECK(result->sources.model == config::Source::ConfigFile);
+    CHECK(result->sources.model == config::Source::ProjectConfigFile);
 
     CHECK(result->config.base_url.empty());
     CHECK(result->sources.base_url == config::Source::Default);
@@ -236,7 +236,7 @@ TEST_CASE("MergeConfig: 配置文件里的 wire 压过默认值,专属 env 的 w
     const auto file_only = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
     REQUIRE(file_only.has_value());
     CHECK(file_only->config.wire == config::Wire::Responses);
-    CHECK(file_only->sources.wire == config::Source::ConfigFile);
+    CHECK(file_only->sources.wire == config::Source::ProjectConfigFile);
 
     config::LubancodeEnvValues lubancode_env;
     lubancode_env.wire = "anthropic";
@@ -319,7 +319,7 @@ TEST_CASE("MergeConfig: max_context_chars 配置文件压过默认值") {
     const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
     REQUIRE(result.has_value());
     CHECK(result->config.max_context_chars == 777);
-    CHECK(result->sources.max_context_chars == config::Source::ConfigFile);
+    CHECK(result->sources.max_context_chars == config::Source::ProjectConfigFile);
 }
 
 TEST_CASE("MergeConfig: max_context_chars 专属 env 压过配置文件") {
@@ -494,7 +494,7 @@ TEST_CASE("MergeConfig: context_window_tokens 配置文件压过默认值") {
     const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
     REQUIRE(result.has_value());
     CHECK(result->config.context_window_tokens == 512000);
-    CHECK(result->sources.context_window_tokens == config::Source::ConfigFile);
+    CHECK(result->sources.context_window_tokens == config::Source::ProjectConfigFile);
 }
 
 TEST_CASE("MergeConfig: context_window_tokens 专属 env 压过配置文件") {
@@ -550,7 +550,7 @@ TEST_CASE("MergeConfig: compact_model 配置文件压过默认值") {
     const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
     REQUIRE(result.has_value());
     CHECK(result->config.compact_model == "MiniMax-M3-mini");
-    CHECK(result->sources.compact_model == config::Source::ConfigFile);
+    CHECK(result->sources.compact_model == config::Source::ProjectConfigFile);
 }
 
 TEST_CASE("MergeConfig: compact_model 专属 env 压过配置文件") {
@@ -588,7 +588,7 @@ TEST_CASE("MergeConfig: think 配置文件压过默认值") {
     const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
     REQUIRE(result.has_value());
     CHECK(result->config.think == "medium");
-    CHECK(result->sources.think == config::Source::ConfigFile);
+    CHECK(result->sources.think == config::Source::ProjectConfigFile);
 }
 
 TEST_CASE("MergeConfig: think 专属 env 压过配置文件") {
@@ -654,7 +654,7 @@ TEST_CASE("MergeConfig: soul 配置文件压过默认值") {
     const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
     REQUIRE(result.has_value());
     CHECK(result->config.soul == "wenyan");
-    CHECK(result->sources.soul == config::Source::ConfigFile);
+    CHECK(result->sources.soul == config::Source::ProjectConfigFile);
 }
 
 TEST_CASE("MergeConfig: soul 专属 env(LUBANCODE_SOUL)压过配置文件") {
@@ -734,14 +734,19 @@ TEST_CASE("ParseFileConfigJson: think 类型不对报错") {
 }
 
 // ---------------------------------------------------------------------------
-// ToString(Source):--config 诊断输出用的中文说法,四种来源都要有说法。
+// ToString(Source):--config 诊断输出用的中文说法,每种来源都要有说法。
+// 配置文件拆成项目级/全局两级,两条都得有独立、非空、彼此不同的说法。
 // ---------------------------------------------------------------------------
 
-TEST_CASE("ToString(Source): 四种来源都有非空的中文说法") {
+TEST_CASE("ToString(Source): 每种来源都有非空的中文说法,项目级/全局各自区分") {
     CHECK_FALSE(config::ToString(config::Source::LubancodeEnv).empty());
-    CHECK_FALSE(config::ToString(config::Source::ConfigFile).empty());
+    CHECK_FALSE(config::ToString(config::Source::ProjectConfigFile).empty());
+    CHECK_FALSE(config::ToString(config::Source::GlobalConfigFile).empty());
     CHECK_FALSE(config::ToString(config::Source::GenericEnv).empty());
     CHECK_FALSE(config::ToString(config::Source::Default).empty());
+    // 项目级与全局的说法不能一样,不然 /config 看不出这字段到底来自哪一级。
+    CHECK(config::ToString(config::Source::ProjectConfigFile) !=
+          config::ToString(config::Source::GlobalConfigFile));
 }
 
 // ---------------------------------------------------------------------------
@@ -836,7 +841,7 @@ TEST_CASE("MergeConfig: theme 配置文件压过默认值") {
     const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
     REQUIRE(result.has_value());
     CHECK(result->config.theme == "light");
-    CHECK(result->sources.theme == config::Source::ConfigFile);
+    CHECK(result->sources.theme == config::Source::ProjectConfigFile);
 }
 
 TEST_CASE("MergeConfig: theme 专属 env 压过配置文件") {
@@ -873,7 +878,7 @@ TEST_CASE("MergeConfig: system_prompt_file 配置文件压过默认值") {
     const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
     REQUIRE(result.has_value());
     CHECK(result->config.system_prompt_file == "./persona.md");
-    CHECK(result->sources.system_prompt_file == config::Source::ConfigFile);
+    CHECK(result->sources.system_prompt_file == config::Source::ProjectConfigFile);
 }
 
 TEST_CASE("MergeConfig: system_prompt_file 专属 env 压过配置文件") {
@@ -1063,7 +1068,7 @@ TEST_CASE("MigrateConfigFileIfNeeded: 新旧都没有,什么都不做,也不报�
 }
 
 TEST_CASE("MigrateConfigFileIfNeeded: 建目录、搬文件之后,内容能正常喂给 ParseFileConfigJson") {
-    // LoadFileConfig() 本身不吃路径参数(内部直接用 HomeDir()/cwd,没法在
+    // LoadFileConfigs() 本身不吃路径参数(内部直接用 HomeDir()/cwd,没法在
     // 单测里安全地借真实用户主目录摆弄),迁移这一步的文件系统逻辑已经在
     // 上面几条用例里用 MigrateConfigFileIfNeeded 单独测过了;这里补一条端
     // 到端一点的:搬完之后,新位置的文件内容依然是合法配置,能正常解析
@@ -1194,5 +1199,359 @@ TEST_CASE("MergeConfig: tool_search_threshold 配置文件压过默认值,没写
     const auto from_file = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
     REQUIRE(from_file.has_value());
     CHECK(from_file->config.tool_search_threshold == 5);
-    CHECK(from_file->sources.tool_search_threshold == config::Source::ConfigFile);
+    CHECK(from_file->sources.tool_search_threshold == config::Source::ProjectConfigFile);
+}
+
+// ---------------------------------------------------------------------------
+// 分层合并(项目级 + 全局 config.json,逐字段):项目级压全局,项目级缺的
+// 字段回退全局,两级都无回退 env/默认。来源细分成 ProjectConfigFile /
+// GlobalConfigFile。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("MergeConfig 分层: 项目级压过全局(同一字段两级都写)") {
+    config::FileConfig project;
+    project.theme = "light";
+    project.source_path = "/proj/.lubancode/config.json";
+    config::FileConfig global;
+    global.theme = "dark";
+    global.source_path = "/home/.lubancode/config.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.theme == "light");
+    CHECK(result->sources.theme == config::Source::ProjectConfigFile);
+}
+
+TEST_CASE("MergeConfig 分层: 项目级缺的字段回退全局") {
+    // 项目级只写 model,全局写 theme + base_url;各归各的来源。
+    config::FileConfig project;
+    project.model = "proj-model";
+    project.source_path = "/proj/.lubancode/config.json";
+    config::FileConfig global;
+    global.theme = "light";
+    global.base_url = "https://global.example.com";
+    global.source_path = "/home/.lubancode/config.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+
+    CHECK(result->config.model == "proj-model");
+    CHECK(result->sources.model == config::Source::ProjectConfigFile);
+
+    CHECK(result->config.theme == "light");
+    CHECK(result->sources.theme == config::Source::GlobalConfigFile);
+
+    CHECK(result->config.base_url == "https://global.example.com");
+    CHECK(result->sources.base_url == config::Source::GlobalConfigFile);
+}
+
+TEST_CASE("MergeConfig 分层: 只有全局有这份文件,字段来源记全局") {
+    config::FileConfig global;
+    global.theme = "plain";
+    global.max_context_chars = 4242;
+    global.source_path = "/home/.lubancode/config.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.theme == "plain");
+    CHECK(result->sources.theme == config::Source::GlobalConfigFile);
+    CHECK(result->config.max_context_chars == 4242);
+    CHECK(result->sources.max_context_chars == config::Source::GlobalConfigFile);
+}
+
+TEST_CASE("MergeConfig 分层: 两级都没这字段,回退 env / 默认") {
+    config::FileConfig project;
+    project.model = "proj-model";  // 只写 model
+    project.source_path = "/proj/.lubancode/config.json";
+    config::FileConfig global;
+    global.source_path = "/home/.lubancode/config.json";  // 空全局
+
+    config::GenericEnvValues generic;
+    generic.anthropic_base_url = "https://generic.example.com";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), project, global, generic);
+    REQUIRE(result.has_value());
+    // base_url 两级配置文件都没有,落到通用 env。
+    CHECK(result->config.base_url == "https://generic.example.com");
+    CHECK(result->sources.base_url == config::Source::GenericEnv);
+    // theme 两级都没有,落到内置默认。
+    CHECK(result->config.theme == config::kDefaultTheme);
+    CHECK(result->sources.theme == config::Source::Default);
+}
+
+TEST_CASE("MergeConfig 分层: 专属 env 压过项目级与全局") {
+    config::LubancodeEnvValues env;
+    env.theme = "plain";
+    config::FileConfig project;
+    project.theme = "light";
+    project.source_path = "/proj/.lubancode/config.json";
+    config::FileConfig global;
+    global.theme = "dark";
+    global.source_path = "/home/.lubancode/config.json";
+
+    const auto result = config::MergeConfig(env, project, global, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.theme == "plain");
+    CHECK(result->sources.theme == config::Source::LubancodeEnv);
+}
+
+TEST_CASE("MergeConfig 分层: 对象整段(search)项目级压全局,项目级没有才回退全局") {
+    config::SearchConfig proj_search;
+    proj_search.provider = "tavily";
+    proj_search.api_key = "proj-key";
+    config::SearchConfig glob_search;
+    glob_search.provider = "brave";
+    glob_search.api_key = "glob-key";
+
+    // 两级都写:用项目级那一整段。
+    config::FileConfig project;
+    project.search = proj_search;
+    project.source_path = "/proj/.lubancode/config.json";
+    config::FileConfig global;
+    global.search = glob_search;
+    global.source_path = "/home/.lubancode/config.json";
+    const auto both = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    REQUIRE(both.has_value());
+    CHECK(both->config.search.provider == "tavily");
+    CHECK(both->config.search.api_key == "proj-key");
+
+    // 只有全局写:回退全局那一整段。
+    config::FileConfig project_empty;
+    project_empty.source_path = "/proj/.lubancode/config.json";
+    const auto only_global = config::MergeConfig(EmptyLubancodeEnv(), project_empty, global, EmptyGenericEnv());
+    REQUIRE(only_global.has_value());
+    CHECK(only_global->config.search.provider == "brave");
+    CHECK(only_global->config.search.api_key == "glob-key");
+}
+
+TEST_CASE("MergeConfig 分层: wire 坏值报错时,带上写了这个坏值的那一级文件路径") {
+    config::FileConfig global;
+    global.wire = "bogus";
+    global.source_path = "/home/.lubancode/config.json";
+    // 项目级没写 wire,坏值来自全局——报错要指向全局那份文件。
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global, EmptyGenericEnv());
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().find("/home/.lubancode/config.json") != std::string::npos);
+    CHECK(result.error().find("bogus") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// ParseSettingsLocal:纯函数,项目级本地权限。完整/部分/坏 JSON/空/没有
+// permissions 段各测一遍。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseSettingsLocal: 完整字段都解出来") {
+    const std::string json = R"({
+        "permissions": {
+            "allow_tools": ["write_file", "run_command"],
+            "allow_commands": ["npm test", "git status"],
+            "deny_commands": ["rm -rf"],
+            "default_confirm_mode": "auto"
+        }
+    })";
+    const auto result = config::ParseSettingsLocal(json, "/p/settings.local.json");
+    REQUIRE(result.has_value());
+    REQUIRE(result->allow_tools.size() == 2);
+    CHECK(result->allow_tools[0] == "write_file");
+    CHECK(result->allow_tools[1] == "run_command");
+    REQUIRE(result->allow_commands.size() == 2);
+    CHECK(result->allow_commands[0] == "npm test");
+    REQUIRE(result->deny_commands.size() == 1);
+    CHECK(result->deny_commands[0] == "rm -rf");
+    REQUIRE(result->default_confirm_mode.has_value());
+    CHECK(*result->default_confirm_mode == "auto");
+    CHECK_FALSE(result->Empty());
+}
+
+TEST_CASE("ParseSettingsLocal: 部分字段,缺的留空/nullopt") {
+    const auto result = config::ParseSettingsLocal(
+        R"({"permissions": {"allow_tools": ["write_file"]}})", "/p/settings.local.json");
+    REQUIRE(result.has_value());
+    REQUIRE(result->allow_tools.size() == 1);
+    CHECK(result->allow_commands.empty());
+    CHECK(result->deny_commands.empty());
+    CHECK_FALSE(result->default_confirm_mode.has_value());
+}
+
+TEST_CASE("ParseSettingsLocal: 没有 permissions 段,返回空 SettingsLocal(不算错)") {
+    const auto result = config::ParseSettingsLocal(R"({"其他字段": 1})", "/p/settings.local.json");
+    REQUIRE(result.has_value());
+    CHECK(result->Empty());
+}
+
+TEST_CASE("ParseSettingsLocal: 空 object 就是空 SettingsLocal") {
+    const auto result = config::ParseSettingsLocal("{}", "/p/settings.local.json");
+    REQUIRE(result.has_value());
+    CHECK(result->Empty());
+}
+
+TEST_CASE("ParseSettingsLocal: 坏 JSON 报错,带上路径") {
+    const auto result = config::ParseSettingsLocal("{ not json ", "/home/u/settings.local.json");
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().find("/home/u/settings.local.json") != std::string::npos);
+}
+
+TEST_CASE("ParseSettingsLocal: 顶层不是 object 报错") {
+    const auto result = config::ParseSettingsLocal("[1,2,3]", "/p/settings.local.json");
+    REQUIRE_FALSE(result.has_value());
+}
+
+TEST_CASE("ParseSettingsLocal: permissions 不是 object 报错;数组里混进非字符串元素跳过") {
+    CHECK_FALSE(config::ParseSettingsLocal(R"({"permissions": 42})", "p").has_value());
+
+    const auto mixed = config::ParseSettingsLocal(
+        R"({"permissions": {"allow_tools": ["ok", 5, "also_ok"]}})", "p");
+    REQUIRE(mixed.has_value());
+    REQUIRE(mixed->allow_tools.size() == 2);
+    CHECK(mixed->allow_tools[0] == "ok");
+    CHECK(mixed->allow_tools[1] == "also_ok");
+}
+
+TEST_CASE("ParseSettingsLocal: default_confirm_mode 空串当没设,别的字符串原样留着") {
+    const auto empty_mode = config::ParseSettingsLocal(
+        R"({"permissions": {"default_confirm_mode": ""}})", "p");
+    REQUIRE(empty_mode.has_value());
+    CHECK_FALSE(empty_mode->default_confirm_mode.has_value());
+
+    const auto weird = config::ParseSettingsLocal(
+        R"({"permissions": {"default_confirm_mode": "wat"}})", "p");
+    REQUIRE(weird.has_value());
+    REQUIRE(weird->default_confirm_mode.has_value());
+    CHECK(*weird->default_confirm_mode == "wat");  // 认不认得交给调用方判
+}
+
+// ---------------------------------------------------------------------------
+// ClassifyCommandByPermissions:deny 压 allow、allow 命中、都没命中,前缀
+// 判定去前导空白。这是 main 的 auto 分流叠加判定的纯函数内核。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ClassifyCommandByPermissions: allow 前缀命中 → Allow") {
+    const std::vector<std::string> allow = {"npm test", "git status"};
+    const std::vector<std::string> deny;
+    CHECK(config::ClassifyCommandByPermissions("npm test --watch", allow, deny) ==
+          config::CommandPermission::Allow);
+    CHECK(config::ClassifyCommandByPermissions("git status", allow, deny) ==
+          config::CommandPermission::Allow);
+}
+
+TEST_CASE("ClassifyCommandByPermissions: deny 前缀命中 → Deny") {
+    const std::vector<std::string> allow;
+    const std::vector<std::string> deny = {"rm -rf"};
+    CHECK(config::ClassifyCommandByPermissions("rm -rf /tmp/x", allow, deny) ==
+          config::CommandPermission::Deny);
+}
+
+TEST_CASE("ClassifyCommandByPermissions: deny 压过 allow(两边都命中算 Deny)") {
+    const std::vector<std::string> allow = {"git"};
+    const std::vector<std::string> deny = {"git push"};
+    CHECK(config::ClassifyCommandByPermissions("git push origin main", allow, deny) ==
+          config::CommandPermission::Deny);
+}
+
+TEST_CASE("ClassifyCommandByPermissions: 都没命中 → None;前缀判定去前导空白") {
+    const std::vector<std::string> allow = {"npm test"};
+    const std::vector<std::string> deny = {"rm -rf"};
+    CHECK(config::ClassifyCommandByPermissions("echo hi", allow, deny) == config::CommandPermission::None);
+    // 前导空白不影响命中。
+    CHECK(config::ClassifyCommandByPermissions("   npm test", allow, deny) ==
+          config::CommandPermission::Allow);
+    // 空名单恒不命中。
+    CHECK(config::ClassifyCommandByPermissions("npm test", {}, {}) == config::CommandPermission::None);
+}
+
+// ---------------------------------------------------------------------------
+// AddAllowedToolToSettingsLocal + LoadSettingsLocal + EnsureGitignore:真在
+// 临时 cwd 目录里读写(用完删),按需建 .lubancode/、去重、保留别的字段。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+class TempCwdDir {
+public:
+    TempCwdDir() {
+        dir_ = std::filesystem::temp_directory_path() /
+               ("lubancode_settings_local_test_" + std::to_string(reinterpret_cast<std::uintptr_t>(this)));
+        std::error_code ec;
+        std::filesystem::remove_all(dir_, ec);
+        std::filesystem::create_directories(dir_, ec);
+    }
+    ~TempCwdDir() {
+        std::error_code ec;
+        std::filesystem::remove_all(dir_, ec);
+    }
+    std::string Path() const { return dir_.string(); }
+    std::string ReadFile(const std::string& rel) const {
+        std::ifstream in(dir_ / std::filesystem::path(rel), std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    }
+    void WriteFile(const std::string& rel, const std::string& content) const {
+        const auto path = dir_ / std::filesystem::path(rel);
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream out(path, std::ios::binary);
+        out << content;
+    }
+
+private:
+    std::filesystem::path dir_;
+};
+
+}  // namespace
+
+TEST_CASE("AddAllowedToolToSettingsLocal: 文件/目录不存在时按需创建,LoadSettingsLocal 读得回来") {
+    TempCwdDir cwd;
+    // 一开始没有 .lubancode/,LoadSettingsLocal 返回 nullopt(不算错)。
+    const auto before = config::LoadSettingsLocal(cwd.Path());
+    REQUIRE(before.has_value());
+    CHECK_FALSE(before->has_value());
+
+    const auto written = config::AddAllowedToolToSettingsLocal(cwd.Path(), "write_file");
+    REQUIRE(written.has_value());
+    CHECK(std::filesystem::exists(*written));
+
+    const auto loaded = config::LoadSettingsLocal(cwd.Path());
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->has_value());
+    REQUIRE((*loaded)->allow_tools.size() == 1);
+    CHECK((*loaded)->allow_tools[0] == "write_file");
+}
+
+TEST_CASE("AddAllowedToolToSettingsLocal: 幂等去重,保留别的字段") {
+    TempCwdDir cwd;
+    cwd.WriteFile(".lubancode/settings.local.json",
+                  R"({"permissions": {"allow_tools": ["write_file"], "deny_commands": ["rm -rf"]}, "自定义": 7})");
+
+    // 已在的工具不重复写。
+    REQUIRE(config::AddAllowedToolToSettingsLocal(cwd.Path(), "write_file").has_value());
+    // 新工具追加。
+    REQUIRE(config::AddAllowedToolToSettingsLocal(cwd.Path(), "run_command").has_value());
+
+    const auto loaded = config::LoadSettingsLocal(cwd.Path());
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->has_value());
+    REQUIRE((*loaded)->allow_tools.size() == 2);
+    CHECK((*loaded)->deny_commands.size() == 1);  // 别的字段没被冲掉
+
+    const std::string raw = cwd.ReadFile(".lubancode/settings.local.json");
+    CHECK(raw.find("自定义") != std::string::npos);  // 不认得的顶层字段也保留
+}
+
+TEST_CASE("EnsureGitignoreCoversSettingsLocal: 有 .gitignore 没挡就追加;已挡住不动;没有则给提示") {
+    {
+        TempCwdDir cwd;
+        cwd.WriteFile(".gitignore", "build/\n");
+        const std::string notice = config::EnsureGitignoreCoversSettingsLocal(cwd.Path());
+        CHECK(notice.find(".gitignore") != std::string::npos);
+        CHECK(cwd.ReadFile(".gitignore").find(".lubancode/settings.local.json") != std::string::npos);
+    }
+    {
+        TempCwdDir cwd;
+        cwd.WriteFile(".gitignore", ".lubancode/\n");  // 整个目录已忽略
+        const std::string notice = config::EnsureGitignoreCoversSettingsLocal(cwd.Path());
+        CHECK(notice.empty());  // 已挡住,什么都不做
+    }
+    {
+        TempCwdDir cwd;  // 没有 .gitignore
+        const std::string notice = config::EnsureGitignoreCoversSettingsLocal(cwd.Path());
+        CHECK(notice.find("提示") != std::string::npos);
+    }
 }

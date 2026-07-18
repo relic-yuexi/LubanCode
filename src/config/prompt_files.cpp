@@ -31,25 +31,28 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
 
 用户问起或要改 lubancode 自身(配置、soul、主题、模型、MCP、技能、会话……),先看这份手册。改配置先分清放在哪，再只改眼下要改的字段。`config.json` 顶层须是 JSON object；字段可只写一部分，缺的往下一级找。
 
-## 配置文件与优先级
+## 配置文件分层与优先级
 
-`config.json` 的查找次序如下：
+`config.json` 分两级，两级都读、按字段合并（不是整份谁盖谁）：
 
-1. 当前项目 `.lubancode/config.json`
-2. 主目录 `~/.lubancode/config.json`
-3. 当前项目旧位置 `.lubancode.json`
-4. 主目录旧位置 `~/.lubancode.json`
+- **项目级**：当前目录 `<cwd>/.lubancode/config.json`。
+- **全局**：主目录 `~/.lubancode/config.json`。
 
-命中旧位置，且对应新位置尚无文件时，lubancode 会尝试迁移过去。
+每一级各自还认旧位置 `<目录>/.lubancode.json`（读到且对应新位置尚无文件时，lubancode 会把它迁移到新位置）。
 
-字段按四级逐个决，不是整份配置谁盖谁：
+字段按五级逐个决，高到低：
 
 1. `LUBANCODE_*` 专属环境变量。
-2. 找到的 `config.json`。
-3. 通用环境变量。`wire=anthropic` 读 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_MODEL`；`wire=responses` 读 `OPENAI_BASE_URL`、`OPENAI_API_KEY`、`OPENAI_MODEL`。
-4. 内置默认值。
+2. **项目级** `config.json`。
+3. **全局** `config.json`。
+4. 通用环境变量。`wire=anthropic` 读 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_MODEL`；`wire=responses` 读 `OPENAI_BASE_URL`、`OPENAI_API_KEY`、`OPENAI_MODEL`。
+5. 内置默认值。
 
-`hooks`、`mcpServers`、`search`、`lsp` 只从配置文件读。`tool_search_threshold` 只从配置文件或内置默认值来。其余字段依上面四级找；没有通用环境变量的字段，直接略过第三级。
+逐字段合并：项目级写了某字段就用项目级那一份，项目级缺的字段回退全局，全局也缺再往下找。`/config` 会标出每个字段到底来自「项目级配置」还是「全局配置」。
+
+`hooks`、`mcpServers`、`search`、`lsp` 只从配置文件读，按「整段」回退——项目级写了就用项目级那一整段，否则用全局那一整段。`tool_search_threshold` 只从配置文件或内置默认值来。其余字段依上面五级找；没有通用环境变量的字段，直接略过第四级。
+
+只在主目录里跑（`cwd` 就是主目录）时，只当项目级一份读，不重复。
 
 ## config.json 字段
 
@@ -141,6 +144,36 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
 }
 ```
 
+## settings.local.json：项目级本地权限（不进版本库）
+
+`<cwd>/.lubancode/settings.local.json` 存本项目的权限约定，照 Claude Code / Codex 的路数——这是**本地文件，不该提交**（首次落地时 lubancode 会尽力在 `<cwd>/.gitignore` 补一行 `.lubancode/settings.local.json`；没有 `.gitignore` 就只给一句提示，请手动加）。结构：
+
+```json
+{
+  "permissions": {
+    "allow_tools": ["write_file"],
+    "allow_commands": ["npm test", "git status"],
+    "deny_commands": ["rm -rf"],
+    "default_confirm_mode": "auto"
+  }
+}
+```
+
+全部字段可选；坏 JSON 只告警跳过、不崩。各字段用途：
+
+- `allow_tools`：这些工具启动即进会话「总是允许」集合，本会话直接免确认（跟按 `a` 落进来的是同一个集合）。
+- `allow_commands`：`run_command` 命令前缀白名单。auto 档里命中前缀等价 `command_safety` 判成 Safe（补充白名单，不改内置判定）。
+- `deny_commands`：`run_command` 命令前缀黑名单。命中前缀就**永远问一句**，压过 `allow_commands`、压过会话「总是允许」。只在 confirm / auto 档生效；`--yes` / yolo 是显式全放，`deny` 不拦。
+- `default_confirm_mode`：起手确认档 `auto` / `yolo` / `confirm`。优先级低于 `--yes` / `LUBANCODE_CONFIRM_MODE`，高于内置默认 `confirm`。
+
+前缀判定：命令去掉前导空白后，以某条前缀打头就算命中（原始命令串直接比，不做 shell 解析）。
+
+### 按 a 持久化
+
+确认某个工具时按 `a`（本会话总是允许）之后，真控制台里会多问一句「也永久写进项目 settings.local.json?[y/N]」。选 `y` 就把工具名写进 `permissions.allow_tools`（去重，项目级 `.lubancode/` 目录按需创建），下次进这个项目即免确认。管道 / `--yes` 下不追问，只进本会话集合。
+
+`/config` 会打一行 `permissions` 摘要：`allow_tools` 几个、`allow_commands` / `deny_commands` 几条、`default_confirm_mode` 是什么。
+
 ## LUBANCODE_* 环境变量
 
 | 环境变量 | 对应字段 | 值 |
@@ -207,7 +240,7 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
   languages/                          预留
 ```
 
-`sessions/`、`plugins/`、`skills/`、`languages/` 都可按需出现。项目级的 `.lubancode/` 也能放 `config.json` 与 `skills/`；同名技能时项目级压过主目录级。
+`sessions/`、`plugins/`、`skills/`、`languages/` 都可按需出现。项目级的 `.lubancode/`（在 `<cwd>` 下）能放 `config.json`（按字段压过全局）、`settings.local.json`（本地权限，不进版本库）与 `skills/`；同名技能时项目级压过主目录级。
 
 ## 魂(soul):风格叠加层与 souls/ 目录
 

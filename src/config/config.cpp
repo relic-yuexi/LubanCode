@@ -54,8 +54,10 @@ std::string ToString(Source source) {
     switch (source) {
         case Source::LubancodeEnv:
             return cli::tr("config.source.lubancode_env");
-        case Source::ConfigFile:
-            return cli::tr("config.source.config_file");
+        case Source::ProjectConfigFile:
+            return cli::tr("config.source.project_config_file");
+        case Source::GlobalConfigFile:
+            return cli::tr("config.source.global_config_file");
         case Source::GenericEnv:
             return cli::tr("config.source.generic_env");
         case Source::Default:
@@ -537,57 +539,128 @@ std::expected<FileConfig, std::string> ReadAndParseConfigFile(const std::filesys
 
 }  // namespace
 
-std::expected<std::optional<FileConfig>, std::string> LoadFileConfig() {
+namespace {
+
+// 在一个 base 目录里找配置:先新位置,没有再旧位置(命中就迁移到新位置)。
+// 都没有返回 std::optional<FileConfig>(std::nullopt)(不算错);解析失败
+// 返回错误(带路径)。迁移通知(若有)写在 FileConfig::migration_notice 上。
+std::expected<std::optional<FileConfig>, std::string> LoadConfigFromBaseDir(const std::filesystem::path& base) {
     namespace fs = std::filesystem;
-
-    std::vector<fs::path> base_dirs;
-    base_dirs.push_back(fs::current_path());
-    if (const auto home = HomeDir(); home.has_value()) {
-        base_dirs.push_back(fs::path(*home));
-    }
-
-    // 第一遍:新位置优先,cwd 新位置 -> 主目录新位置。
-    for (const auto& base : base_dirs) {
-        const fs::path new_path = NewConfigPathFor(base);
-        std::error_code ec;
-        if (fs::exists(new_path, ec) && !ec) {
-            const auto parsed = ReadAndParseConfigFile(new_path);
-            if (!parsed.has_value()) {
-                return std::unexpected(parsed.error());
-            }
-            return std::optional<FileConfig>(*parsed);
-        }
-    }
-
-    // 第二遍:旧位置,cwd 旧位置 -> 主目录旧位置,命中就顺手迁移。
-    for (const auto& base : base_dirs) {
-        const fs::path old_path = OldConfigPathFor(base);
-        std::error_code ec;
-        if (!fs::exists(old_path, ec) || ec) {
-            continue;
-        }
-        const fs::path new_path = NewConfigPathFor(base);
-        const ConfigMigrationOutcome outcome = MigrateConfigFileIfNeeded(old_path.string(), new_path.string());
-        const fs::path effective = outcome.effective_path.empty() ? old_path : fs::path(outcome.effective_path);
-
-        auto parsed = ReadAndParseConfigFile(effective);
+    const fs::path new_path = NewConfigPathFor(base);
+    std::error_code ec;
+    if (fs::exists(new_path, ec) && !ec) {
+        const auto parsed = ReadAndParseConfigFile(new_path);
         if (!parsed.has_value()) {
             return std::unexpected(parsed.error());
         }
-        parsed->migration_notice = outcome.notice;
         return std::optional<FileConfig>(*parsed);
     }
 
-    return std::optional<FileConfig>(std::nullopt);
+    ec.clear();
+    const fs::path old_path = OldConfigPathFor(base);
+    if (!fs::exists(old_path, ec) || ec) {
+        return std::optional<FileConfig>(std::nullopt);
+    }
+    const ConfigMigrationOutcome outcome = MigrateConfigFileIfNeeded(old_path.string(), new_path.string());
+    const fs::path effective = outcome.effective_path.empty() ? old_path : fs::path(outcome.effective_path);
+    auto parsed = ReadAndParseConfigFile(effective);
+    if (!parsed.has_value()) {
+        return std::unexpected(parsed.error());
+    }
+    parsed->migration_notice = outcome.notice;
+    return std::optional<FileConfig>(*parsed);
 }
 
+}  // namespace
+
+std::expected<LoadedFileConfigs, std::string> LoadFileConfigs() {
+    namespace fs = std::filesystem;
+    LoadedFileConfigs out;
+
+    const fs::path cwd = fs::current_path();
+    const auto home = HomeDir();
+
+    // 项目级:<cwd>/.lubancode/...
+    auto project = LoadConfigFromBaseDir(cwd);
+    if (!project.has_value()) {
+        return std::unexpected(project.error());
+    }
+    out.project = *project;
+
+    // 全局:<主目录>/.lubancode/...,但 cwd 就是主目录时不重复读(否则同一份
+    // 文件读两遍、来源标记打架)——那种情形只当项目级一份。
+    bool cwd_is_home = false;
+    if (home.has_value()) {
+        std::error_code ec;
+        cwd_is_home = fs::equivalent(cwd, fs::path(*home), ec) && !ec;
+    }
+    if (home.has_value() && !cwd_is_home) {
+        auto global = LoadConfigFromBaseDir(fs::path(*home));
+        if (!global.has_value()) {
+            return std::unexpected(global.error());
+        }
+        out.global = *global;
+    }
+
+    // 迁移通知合并:项目级、全局各自可能有一行,拼一起(都没有就 nullopt)。
+    std::vector<std::string> notices;
+    if (out.project.has_value() && out.project->migration_notice.has_value()) {
+        notices.push_back(*out.project->migration_notice);
+    }
+    if (out.global.has_value() && out.global->migration_notice.has_value()) {
+        notices.push_back(*out.global->migration_notice);
+    }
+    if (!notices.empty()) {
+        std::string joined;
+        for (std::size_t i = 0; i < notices.size(); ++i) {
+            if (i != 0) {
+                joined += "\n";
+            }
+            joined += notices[i];
+        }
+        out.migration_notice = joined;
+    }
+    return out;
+}
+
+namespace {
+
+// 配置文件那一级的取值(项目级优先,回退全局)。value 指向命中的值(没命中
+// 是 nullptr),source 记是项目级还是全局,path 指向命中那份文件的 source_path
+// (拼 wire/context_window 报错时用)。
+struct FileStrPick {
+    const std::string* value = nullptr;
+    Source source = Source::Default;
+    const std::string* path = nullptr;
+};
+
+FileStrPick PickFileStr(const std::optional<FileConfig>& project_file,
+                        const std::optional<FileConfig>& global_file,
+                        std::optional<std::string> FileConfig::* field) {
+    if (project_file.has_value() && ((*project_file).*field).has_value()) {
+        return {&*((*project_file).*field), Source::ProjectConfigFile, &project_file->source_path};
+    }
+    if (global_file.has_value() && ((*global_file).*field).has_value()) {
+        return {&*((*global_file).*field), Source::GlobalConfigFile, &global_file->source_path};
+    }
+    return {};
+}
+
+}  // namespace
+
 std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& lubancode_env,
-                                                       const std::optional<FileConfig>& file_config,
+                                                       const std::optional<FileConfig>& project_file,
+                                                       const std::optional<FileConfig>& global_file,
                                                        const GenericEnvValues& generic_env) {
     ConfigResult result;
 
-    // ---- 第一步:解出 wire。只看专属 env(1 级)、配置文件(2 级)、
-    // 默认值(4 级)——通用环境变量里没有"wire"这一说,tier 3 跳过。 ----
+    // 配置文件那一级统一走这个:项目级优先,回退全局(见 PickFileStr)。
+    const auto pick = [&](std::optional<std::string> FileConfig::* field) {
+        return PickFileStr(project_file, global_file, field);
+    };
+
+    // ---- 第一步:解出 wire。专属 env(1 级)> 项目级(2 级)> 全局(3 级)>
+    // 默认值——通用环境变量里没有"wire"这一说。 ----
     std::string wire_str;
     Source wire_source = Source::Default;
     std::string wire_error_origin;  // 报错时说清楚这个坏值是从哪儿来的
@@ -596,10 +669,10 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         wire_str = *lubancode_env.wire;
         wire_source = Source::LubancodeEnv;
         wire_error_origin = "环境变量 LUBANCODE_WIRE";
-    } else if (file_config.has_value() && file_config->wire.has_value()) {
-        wire_str = *file_config->wire;
-        wire_source = Source::ConfigFile;
-        wire_error_origin = "配置文件 " + file_config->source_path + " 里的 wire 字段";
+    } else if (const auto p = pick(&FileConfig::wire); p.value != nullptr) {
+        wire_str = *p.value;
+        wire_source = p.source;
+        wire_error_origin = "配置文件 " + *p.path + " 里的 wire 字段";
     } else {
         wire_str = "anthropic";
         wire_source = Source::Default;
@@ -618,7 +691,7 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
 
     const bool is_anthropic = (wire == Wire::Anthropic);
     // base_url、model 没有内置默认值(lubancode 不绑死哪一家模型服务)——
-    // 四级都没配到时就是空串,来源记 Default,留给上层(初次配置向导 /
+    // 各级都没配到时就是空串,来源记 Default,留给上层(初次配置向导 /
     // RequireConfigured)去拦。
     const std::string default_base_url;
     const std::string default_model;
@@ -629,13 +702,13 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     const std::optional<std::string>& generic_model =
         is_anthropic ? generic_env.anthropic_model : generic_env.openai_model;
 
-    // ---- base_url:1 级 > 2 级 > 3 级(按 wire 挑对应变量)> 4 级默认值 ----
+    // ---- base_url:env > 项目级 > 全局 > 通用 env(按 wire 挑)> 默认值 ----
     if (lubancode_env.base_url.has_value()) {
         result.config.base_url = *lubancode_env.base_url;
         result.sources.base_url = Source::LubancodeEnv;
-    } else if (file_config.has_value() && file_config->base_url.has_value()) {
-        result.config.base_url = *file_config->base_url;
-        result.sources.base_url = Source::ConfigFile;
+    } else if (const auto p = pick(&FileConfig::base_url); p.value != nullptr) {
+        result.config.base_url = *p.value;
+        result.sources.base_url = p.source;
     } else if (generic_base_url.has_value()) {
         result.config.base_url = *generic_base_url;
         result.sources.base_url = Source::GenericEnv;
@@ -648,9 +721,9 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     if (lubancode_env.model.has_value()) {
         result.config.model = *lubancode_env.model;
         result.sources.model = Source::LubancodeEnv;
-    } else if (file_config.has_value() && file_config->model.has_value()) {
-        result.config.model = *file_config->model;
-        result.sources.model = Source::ConfigFile;
+    } else if (const auto p = pick(&FileConfig::model); p.value != nullptr) {
+        result.config.model = *p.value;
+        result.sources.model = p.source;
     } else if (generic_model.has_value()) {
         result.config.model = *generic_model;
         result.sources.model = Source::GenericEnv;
@@ -659,14 +732,14 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.sources.model = Source::Default;
     }
 
-    // ---- api_key:同上,但没有内置默认值——四级都没有时留空,来源记成
-    // Default,不在这里报错(报错交给 RequireApiKey,见该函数注释)。 ----
+    // ---- api_key:同上,但没有内置默认值——都没有时留空,来源记成 Default,
+    // 不在这里报错(报错交给 RequireApiKey,见该函数注释)。 ----
     if (lubancode_env.api_key.has_value()) {
         result.config.auth_token = *lubancode_env.api_key;
         result.sources.auth_token = Source::LubancodeEnv;
-    } else if (file_config.has_value() && file_config->api_key.has_value()) {
-        result.config.auth_token = *file_config->api_key;
-        result.sources.auth_token = Source::ConfigFile;
+    } else if (const auto p = pick(&FileConfig::api_key); p.value != nullptr) {
+        result.config.auth_token = *p.value;
+        result.sources.auth_token = p.source;
     } else if (generic_api_key.has_value()) {
         result.config.auth_token = *generic_api_key;
         result.sources.auth_token = Source::GenericEnv;
@@ -675,70 +748,70 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.sources.auth_token = Source::Default;
     }
 
-    // ---- max_context_chars:1 级 > 2 级 > 4 级默认值,没有通用 env 这一级 ----
+    // ---- max_context_chars:env > 项目级 > 全局 > 默认值,没有通用 env 这一级 ----
     if (lubancode_env.max_context_chars.has_value()) {
         result.config.max_context_chars = *lubancode_env.max_context_chars;
         result.sources.max_context_chars = Source::LubancodeEnv;
-    } else if (file_config.has_value() && file_config->max_context_chars.has_value()) {
-        result.config.max_context_chars = *file_config->max_context_chars;
-        result.sources.max_context_chars = Source::ConfigFile;
+    } else if (project_file.has_value() && project_file->max_context_chars.has_value()) {
+        result.config.max_context_chars = *project_file->max_context_chars;
+        result.sources.max_context_chars = Source::ProjectConfigFile;
+    } else if (global_file.has_value() && global_file->max_context_chars.has_value()) {
+        result.config.max_context_chars = *global_file->max_context_chars;
+        result.sources.max_context_chars = Source::GlobalConfigFile;
     } else {
         result.config.max_context_chars = kDefaultMaxContextChars;
         result.sources.max_context_chars = Source::Default;
     }
 
-    // ---- theme:1 级 > 2 级 > 4 级默认值,没有通用 env 这一级(跟 wire 一样,
-    // "主题名字"这种事通用环境变量 ANTHROPIC_*/OPENAI_* 压根没这个概念) ----
+    // ---- theme:env > 项目级 > 全局 > 默认值,没有通用 env 这一级 ----
     if (lubancode_env.theme.has_value()) {
         result.config.theme = *lubancode_env.theme;
         result.sources.theme = Source::LubancodeEnv;
-    } else if (file_config.has_value() && file_config->theme.has_value()) {
-        result.config.theme = *file_config->theme;
-        result.sources.theme = Source::ConfigFile;
+    } else if (const auto p = pick(&FileConfig::theme); p.value != nullptr) {
+        result.config.theme = *p.value;
+        result.sources.theme = p.source;
     } else {
         result.config.theme = kDefaultTheme;
         result.sources.theme = Source::Default;
     }
 
-    // ---- language(i18n):1 级(LUBANCODE_LANG)> 2 级 > 4 级默认值(空串
-    // = 跟系统),没有通用 env 这一级。语言码对不对得上可选列表这里不校验——
-    // 启动时按码找表,找不到 tr 自然回退 zh-CN,不拦人。 ----
+    // ---- language(i18n):env(LUBANCODE_LANG)> 项目级 > 全局 > 默认值(空串
+    // = 跟系统),没有通用 env 这一级。 ----
     if (lubancode_env.language.has_value()) {
         result.config.language = *lubancode_env.language;
         result.sources.language = Source::LubancodeEnv;
-    } else if (file_config.has_value() && file_config->language.has_value()) {
-        result.config.language = *file_config->language;
-        result.sources.language = Source::ConfigFile;
+    } else if (const auto p = pick(&FileConfig::language); p.value != nullptr) {
+        result.config.language = *p.value;
+        result.sources.language = p.source;
     } else {
         result.config.language.clear();
         result.sources.language = Source::Default;
     }
 
-    // ---- system_prompt_file:同上,1 级 > 2 级 > 4 级默认值(空串) ----
+    // ---- system_prompt_file:同上,env > 项目级 > 全局 > 默认值(空串) ----
     if (lubancode_env.system_prompt_file.has_value()) {
         result.config.system_prompt_file = *lubancode_env.system_prompt_file;
         result.sources.system_prompt_file = Source::LubancodeEnv;
-    } else if (file_config.has_value() && file_config->system_prompt_file.has_value()) {
-        result.config.system_prompt_file = *file_config->system_prompt_file;
-        result.sources.system_prompt_file = Source::ConfigFile;
+    } else if (const auto p = pick(&FileConfig::system_prompt_file); p.value != nullptr) {
+        result.config.system_prompt_file = *p.value;
+        result.sources.system_prompt_file = p.source;
     } else {
         result.config.system_prompt_file.clear();
         result.sources.system_prompt_file = Source::Default;
     }
 
-    // ---- context_window:1 级 > 2 级 > 4 级默认值,没有通用 env 这一级。
-    // 取值要过 ParseContextWindowTokens 校验,坏值直接报错(没法糊弄一个
-    // "留空当默认"的语义——用户显式写了却写错,该让他知道)。 ----
+    // ---- context_window:env > 项目级 > 全局 > 默认值,没有通用 env 这一级。
+    // 取值要过 ParseContextWindowTokens 校验,坏值直接报错。 ----
     std::string context_window_error_origin;
     std::optional<std::string> context_window_raw;
     if (lubancode_env.context_window.has_value()) {
         context_window_raw = *lubancode_env.context_window;
         context_window_error_origin = "环境变量 LUBANCODE_CONTEXT_WINDOW";
         result.sources.context_window_tokens = Source::LubancodeEnv;
-    } else if (file_config.has_value() && file_config->context_window.has_value()) {
-        context_window_raw = *file_config->context_window;
-        context_window_error_origin = "配置文件 " + file_config->source_path + " 里的 context_window 字段";
-        result.sources.context_window_tokens = Source::ConfigFile;
+    } else if (const auto p = pick(&FileConfig::context_window); p.value != nullptr) {
+        context_window_raw = *p.value;
+        context_window_error_origin = "配置文件 " + *p.path + " 里的 context_window 字段";
+        result.sources.context_window_tokens = p.source;
     }
     if (context_window_raw.has_value()) {
         const auto parsed_window = ParseContextWindowTokens(*context_window_raw);
@@ -751,91 +824,94 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.sources.context_window_tokens = Source::Default;
     }
 
-    // ---- compact_model:1 级 > 2 级 > 4 级默认值(空串 = 跟当前会话模型
-    // 一致),没有通用 env 这一级、没有校验(留给真正压缩时用,压不动
-    // 由那时候的请求自然报错)。 ----
+    // ---- compact_model:env > 项目级 > 全局 > 默认值(空串 = 跟当前会话模型
+    // 一致),没有通用 env 这一级、没有校验。 ----
     if (lubancode_env.compact_model.has_value()) {
         result.config.compact_model = *lubancode_env.compact_model;
         result.sources.compact_model = Source::LubancodeEnv;
-    } else if (file_config.has_value() && file_config->compact_model.has_value()) {
-        result.config.compact_model = *file_config->compact_model;
-        result.sources.compact_model = Source::ConfigFile;
+    } else if (const auto p = pick(&FileConfig::compact_model); p.value != nullptr) {
+        result.config.compact_model = *p.value;
+        result.sources.compact_model = p.source;
     } else {
         result.config.compact_model.clear();
         result.sources.compact_model = Source::Default;
     }
 
-    // ---- think:1 级 > 2 级 > 4 级默认值(空串 = 不发这个参数),没有通用
-    // env 这一级。M10 把档位放开成任意字符串——档位这东西两边协议长得不一样:
-    // responses 这边原样把字符串递给 API,档位是服务商定的,lubancode 没资格
-    // 拦在半路先报错;anthropic 那边自己有一张映射表(见
-    // api/anthropic/client.cpp 的 BuildThinkingJson),映射不上会在真正发请求
-    // 那一刻打警告、当没设,不在这儿提前拦。这里只原样存,不做大小写归一化
-    // ——responses 要"原样递",硬转小写会破坏这条承诺;anthropic 那张映射表
-    // 自己内部做了大小写不敏感匹配,不依赖这里转不转小写。 ----
+    // ---- think:env > 项目级 > 全局 > 默认值(空串 = 不发这个参数),没有
+    // 通用 env 这一级。M10 放开成任意字符串,原样存不做大小写归一化(理由见
+    // api/anthropic/client.cpp 的 BuildThinkingJson)。 ----
     if (lubancode_env.think.has_value()) {
         result.config.think = *lubancode_env.think;
         result.sources.think = Source::LubancodeEnv;
-    } else if (file_config.has_value() && file_config->think.has_value()) {
-        result.config.think = *file_config->think;
-        result.sources.think = Source::ConfigFile;
+    } else if (const auto p = pick(&FileConfig::think); p.value != nullptr) {
+        result.config.think = *p.value;
+        result.sources.think = p.source;
     } else {
         result.config.think.clear();
         result.sources.think = Source::Default;
     }
 
-    // ---- soul:1 级(LUBANCODE_SOUL)> 2 级 > 4 级默认值(空串 = 用主目录
-    // SOUL.md),没有通用 env 这一级。名字对不对得上 souls/ 里的文件,这里
-    // 不校验——启动时按名字找文件,找不到打警告、魂不生效,不拦人。 ----
+    // ---- soul:env(LUBANCODE_SOUL)> 项目级 > 全局 > 默认值(空串 = 用主目录
+    // SOUL.md),没有通用 env 这一级。 ----
     if (lubancode_env.soul.has_value()) {
         result.config.soul = *lubancode_env.soul;
         result.sources.soul = Source::LubancodeEnv;
-    } else if (file_config.has_value() && file_config->soul.has_value()) {
-        result.config.soul = *file_config->soul;
-        result.sources.soul = Source::ConfigFile;
+    } else if (const auto p = pick(&FileConfig::soul); p.value != nullptr) {
+        result.config.soul = *p.value;
+        result.sources.soul = p.source;
     } else {
         result.config.soul.clear();
         result.sources.soul = Source::Default;
     }
 
-    // ---- tool_search_threshold:2 级 > 4 级默认值(20),没有环境变量这
-    // 一级(跟 hooks/mcpServers 同待遇,但有内置默认值)。取值校验在
-    // ParseFileConfigJson 里做过了(非负整数),这里直接用。 ----
-    if (file_config.has_value() && file_config->tool_search_threshold.has_value()) {
-        result.config.tool_search_threshold = *file_config->tool_search_threshold;
-        result.sources.tool_search_threshold = Source::ConfigFile;
+    // ---- tool_search_threshold:项目级 > 全局 > 默认值(20),没有环境变量
+    // 这一级。取值校验在 ParseFileConfigJson 里做过了。 ----
+    if (project_file.has_value() && project_file->tool_search_threshold.has_value()) {
+        result.config.tool_search_threshold = *project_file->tool_search_threshold;
+        result.sources.tool_search_threshold = Source::ProjectConfigFile;
+    } else if (global_file.has_value() && global_file->tool_search_threshold.has_value()) {
+        result.config.tool_search_threshold = *global_file->tool_search_threshold;
+        result.sources.tool_search_threshold = Source::GlobalConfigFile;
     } else {
         result.config.tool_search_threshold = kDefaultToolSearchThreshold;
         result.sources.tool_search_threshold = Source::Default;
     }
 
-    // ---- hooks:M9 新增,只从配置文件来,没有环境变量、没有内置默认值这
-    // 两级(HooksConfig 的 ConfigSources 也不需要——只有一个来源,没什么好
-    // 追踪的)。配置文件没写 hooks 字段,就是默认构造的空 HooksConfig
-    // (四个数组都是空的)。 ----
-    if (file_config.has_value() && file_config->hooks.has_value()) {
-        result.config.hooks = *file_config->hooks;
+    // ---- 对象型整段(hooks/mcpServers/search/lsp):只从配置文件来,没有
+    // 环境变量、没有内置默认值这两级。按"整段"回退——项目级写了就用项目级
+    // 那一整段,否则用全局那一整段(不做键级混合,语义清楚)。 ----
+    if (project_file.has_value() && project_file->hooks.has_value()) {
+        result.config.hooks = *project_file->hooks;
+    } else if (global_file.has_value() && global_file->hooks.has_value()) {
+        result.config.hooks = *global_file->hooks;
     }
 
-    // ---- mcpServers:M8 新增,只从配置文件来,没有环境变量、没有内置
-    // 默认值这两级(跟 hooks 一样)。配置文件没写这字段,就是空 map。 ----
-    if (file_config.has_value() && file_config->mcp_servers.has_value()) {
-        result.config.mcp_servers = *file_config->mcp_servers;
+    if (project_file.has_value() && project_file->mcp_servers.has_value()) {
+        result.config.mcp_servers = *project_file->mcp_servers;
+    } else if (global_file.has_value() && global_file->mcp_servers.has_value()) {
+        result.config.mcp_servers = *global_file->mcp_servers;
     }
 
-    // ---- search:websearch 用,只从配置文件来(跟 hooks/mcpServers 一样)。
-    // 没写这一段就是空的 SearchConfig,web_search 工具不注册。 ----
-    if (file_config.has_value() && file_config->search.has_value()) {
-        result.config.search = *file_config->search;
+    if (project_file.has_value() && project_file->search.has_value()) {
+        result.config.search = *project_file->search;
+    } else if (global_file.has_value() && global_file->search.has_value()) {
+        result.config.search = *global_file->search;
     }
 
-    // ---- lsp:待遇同 mcpServers,只从配置文件来。没配 = 空 map = lsp 工具
-    // 不注册。 ----
-    if (file_config.has_value() && file_config->lsp_servers.has_value()) {
-        result.config.lsp_servers = *file_config->lsp_servers;
+    if (project_file.has_value() && project_file->lsp_servers.has_value()) {
+        result.config.lsp_servers = *project_file->lsp_servers;
+    } else if (global_file.has_value() && global_file->lsp_servers.has_value()) {
+        result.config.lsp_servers = *global_file->lsp_servers;
     }
 
     return result;
+}
+
+std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& lubancode_env,
+                                                       const std::optional<FileConfig>& file_config,
+                                                       const GenericEnvValues& generic_env) {
+    // 只有一份配置文件时当项目级看待(全局留空),来源统一记 ProjectConfigFile。
+    return MergeConfig(lubancode_env, file_config, std::nullopt, generic_env);
 }
 
 std::expected<void, std::string> RequireApiKey(const ConfigResult& result) {
@@ -1000,9 +1076,9 @@ std::expected<ConfigResult, std::string> LoadFromEnv() {
         }
     }
 
-    const auto file_config = LoadFileConfig();
-    if (!file_config.has_value()) {
-        return std::unexpected(file_config.error());
+    const auto loaded = LoadFileConfigs();
+    if (!loaded.has_value()) {
+        return std::unexpected(loaded.error());
     }
 
     GenericEnvValues generic_env;
@@ -1013,10 +1089,19 @@ std::expected<ConfigResult, std::string> LoadFromEnv() {
     generic_env.openai_api_key = GetEnv("OPENAI_API_KEY");
     generic_env.openai_model = GetEnv("OPENAI_MODEL");
 
-    auto merged = MergeConfig(lubancode_env, *file_config, generic_env);
-    if (merged.has_value() && file_config->has_value()) {
-        merged->config_file_path = (*file_config)->source_path;
-        merged->migration_notice = (*file_config)->migration_notice;
+    auto merged = MergeConfig(lubancode_env, loaded->project, loaded->global, generic_env);
+    if (merged.has_value()) {
+        if (loaded->project.has_value()) {
+            merged->project_config_file_path = loaded->project->source_path;
+        }
+        if (loaded->global.has_value()) {
+            merged->global_config_file_path = loaded->global->source_path;
+        }
+        // 写回优先目标:项目级在就写项目级,否则写全局(都没有就空)。
+        merged->config_file_path = merged->project_config_file_path.has_value()
+                                       ? merged->project_config_file_path
+                                       : merged->global_config_file_path;
+        merged->migration_notice = loaded->migration_notice;
     }
     return merged;
 }
@@ -1033,6 +1118,212 @@ std::expected<std::string, std::string> ReadSystemPromptFile(const std::string& 
         return std::unexpected("--system-prompt 指定的文件是空的: " + path);
     }
     return content;
+}
+
+// ---------------------------------------------------------------------------
+// settings.local.json:项目级本地权限(不进版本库)。
+// ---------------------------------------------------------------------------
+
+std::string SettingsLocalPath(const std::string& cwd_dir) {
+    return (std::filesystem::path(cwd_dir) / ".lubancode" / "settings.local.json").string();
+}
+
+std::expected<SettingsLocal, std::string> ParseSettingsLocal(const std::string& json_text,
+                                                              const std::string& path_for_error) {
+    nlohmann::json parsed;
+    try {
+        parsed = nlohmann::json::parse(json_text);
+    } catch (const nlohmann::json::parse_error& e) {
+        return std::unexpected("settings.local.json " + path_for_error + " 不是合法 JSON: " + e.what());
+    }
+    if (!parsed.is_object()) {
+        return std::unexpected("settings.local.json " + path_for_error + " 顶层必须是一个 JSON object");
+    }
+
+    SettingsLocal out;
+    if (!parsed.contains("permissions")) {
+        return out;  // 没有 permissions 段就是空的,不算错
+    }
+    const auto& perms = parsed["permissions"];
+    if (!perms.is_object()) {
+        return std::unexpected("settings.local.json " + path_for_error + " 里的 permissions 字段必须是 JSON object");
+    }
+
+    // 字符串数组:非字符串元素跳过(宽容),不因为夹了个坏元素就整份作废。
+    const auto read_str_array = [&](const char* key, std::vector<std::string>& into) {
+        if (!perms.contains(key) || !perms[key].is_array()) {
+            return;
+        }
+        for (const auto& item : perms[key]) {
+            if (item.is_string()) {
+                into.push_back(item.get<std::string>());
+            }
+        }
+    };
+    read_str_array("allow_tools", out.allow_tools);
+    read_str_array("allow_commands", out.allow_commands);
+    read_str_array("deny_commands", out.deny_commands);
+
+    if (perms.contains("default_confirm_mode") && perms["default_confirm_mode"].is_string()) {
+        std::string mode = perms["default_confirm_mode"].get<std::string>();
+        if (!mode.empty()) {
+            out.default_confirm_mode = std::move(mode);  // auto/yolo/confirm,别的值交给调用方判
+        }
+    }
+    return out;
+}
+
+std::expected<std::optional<SettingsLocal>, std::string> LoadSettingsLocal(const std::string& cwd_dir) {
+    const std::string path = SettingsLocalPath(cwd_dir);
+    std::error_code ec;
+    if (!std::filesystem::exists(std::filesystem::path(path), ec) || ec) {
+        return std::optional<SettingsLocal>(std::nullopt);  // 没这文件不算错
+    }
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+        return std::unexpected("settings.local.json " + path + " 存在,但打不开(检查一下权限)");
+    }
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    auto parsed = ParseSettingsLocal(buffer.str(), path);
+    if (!parsed.has_value()) {
+        return std::unexpected(parsed.error());
+    }
+    return std::optional<SettingsLocal>(*parsed);
+}
+
+std::expected<std::string, std::string> AddAllowedToolToSettingsLocal(const std::string& cwd_dir,
+                                                                       const std::string& tool_name) {
+    namespace fs = std::filesystem;
+    const std::string path = SettingsLocalPath(cwd_dir);
+
+    // 已有内容原样读进来(保留不认得的字段);读不到/坏 JSON 就从空 object 起。
+    nlohmann::json root = nlohmann::json::object();
+    {
+        std::error_code ec;
+        if (fs::exists(fs::path(path), ec) && !ec) {
+            std::ifstream in(path, std::ios::binary);
+            if (in.is_open()) {
+                std::ostringstream buffer;
+                buffer << in.rdbuf();
+                try {
+                    auto existing = nlohmann::json::parse(buffer.str());
+                    if (existing.is_object()) {
+                        root = std::move(existing);
+                    }
+                } catch (const nlohmann::json::parse_error&) {
+                    // 坏 JSON:不覆盖用户手写的东西,报错让人自己看一眼。
+                    return std::unexpected("settings.local.json " + path +
+                                            " 不是合法 JSON,没敢覆盖;请手动检查后再试");
+                }
+            }
+        }
+    }
+
+    if (!root.contains("permissions") || !root["permissions"].is_object()) {
+        root["permissions"] = nlohmann::json::object();
+    }
+    auto& perms = root["permissions"];
+    if (!perms.contains("allow_tools") || !perms["allow_tools"].is_array()) {
+        perms["allow_tools"] = nlohmann::json::array();
+    }
+    auto& allow = perms["allow_tools"];
+    for (const auto& item : allow) {
+        if (item.is_string() && item.get<std::string>() == tool_name) {
+            return path;  // 已经在了,幂等,不重复写
+        }
+    }
+    allow.push_back(tool_name);
+
+    // 项目级 .lubancode/ 只在这一刻按需落地。
+    std::error_code ec;
+    fs::create_directories(fs::path(path).parent_path(), ec);
+    if (ec) {
+        return std::unexpected("建目录 " + fs::path(path).parent_path().string() + " 失败: " + ec.message());
+    }
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+        return std::unexpected("settings.local.json " + path + " 打不开写入(检查一下权限)");
+    }
+    out << root.dump(2);
+    if (!out.good()) {
+        return std::unexpected("settings.local.json " + path + " 写入失败(检查一下磁盘/权限)");
+    }
+    return path;
+}
+
+namespace {
+
+// 命令去掉前导空白后,以某条(非空)前缀打头就算命中。
+bool CommandHasPrefix(const std::string& command, const std::vector<std::string>& prefixes) {
+    if (prefixes.empty()) {
+        return false;
+    }
+    const std::size_t start = command.find_first_not_of(" \t");
+    if (start == std::string::npos) {
+        return false;
+    }
+    const std::string trimmed = command.substr(start);
+    for (const std::string& prefix : prefixes) {
+        if (!prefix.empty() && trimmed.rfind(prefix, 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+CommandPermission ClassifyCommandByPermissions(const std::string& command,
+                                               const std::vector<std::string>& allow_commands,
+                                               const std::vector<std::string>& deny_commands) {
+    if (CommandHasPrefix(command, deny_commands)) {
+        return CommandPermission::Deny;  // deny 压过 allow
+    }
+    if (CommandHasPrefix(command, allow_commands)) {
+        return CommandPermission::Allow;
+    }
+    return CommandPermission::None;
+}
+
+std::string EnsureGitignoreCoversSettingsLocal(const std::string& cwd_dir) {
+    namespace fs = std::filesystem;
+    const fs::path gitignore = fs::path(cwd_dir) / ".gitignore";
+    const std::string kIgnoreLine = ".lubancode/settings.local.json";
+
+    std::error_code ec;
+    if (!fs::exists(gitignore, ec) || ec) {
+        // 没有 .gitignore,别硬塞——打一行提示教用户手动加。
+        return "提示:本目录没有 .gitignore;要不进版本库,请手动加一行 " + kIgnoreLine;
+    }
+
+    std::string content;
+    {
+        std::ifstream in(gitignore, std::ios::binary);
+        if (!in.is_open()) {
+            return "提示:.gitignore 打不开;请手动加一行 " + kIgnoreLine;
+        }
+        std::ostringstream buffer;
+        buffer << in.rdbuf();
+        content = buffer.str();
+    }
+
+    // 已经挡住?整个 .lubancode/ 目录被忽略、或者精确忽略了这个文件,都算。
+    if (content.find(".lubancode/") != std::string::npos ||
+        content.find("settings.local.json") != std::string::npos) {
+        return "";  // 已经挡住,什么都不必做
+    }
+
+    std::ofstream out(gitignore, std::ios::binary | std::ios::app);
+    if (!out.is_open()) {
+        return "提示:.gitignore 追加不了;请手动加一行 " + kIgnoreLine;
+    }
+    if (!content.empty() && content.back() != '\n') {
+        out << "\n";
+    }
+    out << kIgnoreLine << "\n";
+    return "已在 .gitignore 追加一行 " + kIgnoreLine;
 }
 
 }  // namespace lubancode::config

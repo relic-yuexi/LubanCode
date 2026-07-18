@@ -229,7 +229,7 @@ TEST_CASE("MergeConfig: language 四级合并——env 压配置文件,配置文
     auto result = config::MergeConfig(env, file, config::GenericEnvValues{});
     REQUIRE(result.has_value());
     CHECK(result->config.language == "en");
-    CHECK(result->sources.language == config::Source::ConfigFile);
+    CHECK(result->sources.language == config::Source::ProjectConfigFile);
 
     // env 压过配置文件。
     env.language = "ja";

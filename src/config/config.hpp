@@ -40,11 +40,16 @@ namespace lubancode::config {
 enum class Wire { Anthropic, Responses };
 
 // 一个字段的值最终是从哪一级配置来的,--config 诊断输出用。
+// 配置文件分两级:项目级 <cwd>/.lubancode/config.json 压过全局
+// <主目录>/.lubancode/config.json。老的笼统 ConfigFile 拆成这两级——旧断言
+// 里凡是"单文件 = 配置文件来源"的,一律映射成 ProjectConfigFile(3 参
+// MergeConfig 便捷包装把那一份当项目级看待,见下)。
 enum class Source {
-    LubancodeEnv,  // LUBANCODE_ 专属环境变量
-    ConfigFile,    // .lubancode.json
-    GenericEnv,    // ANTHROPIC_*/OPENAI_* 通用环境变量
-    Default,       // 内置默认值
+    LubancodeEnv,       // LUBANCODE_ 专属环境变量
+    ProjectConfigFile,  // <cwd>/.lubancode/config.json(项目级,压过全局)
+    GlobalConfigFile,   // <主目录>/.lubancode/config.json(全局)
+    GenericEnv,         // ANTHROPIC_*/OPENAI_* 通用环境变量
+    Default,            // 内置默认值
 };
 
 // 中文说法,--config 打印用。
@@ -177,6 +182,30 @@ struct ConfigSources {
     Source tool_search_threshold = Source::Default;  // tool_search:配置文件或默认,只有这两级
 };
 
+// settings.local.json 里的 permissions 段,项目级本地权限(不进版本库)。
+// 位置 <cwd>/.lubancode/settings.local.json,照 Claude Code / Codex 的路数:
+//   - allow_tools:这些工具启动即注入会话"总是允许"集合,直接免确认;
+//   - allow_commands:run_command 命令前缀白名单,auto 档里等价 command_safety
+//     判成 Safe(补充白名单,不改 command_safety.cpp,在 main 的 auto 分流处
+//     叠加判定);
+//   - deny_commands:run_command 命令前缀黑名单,confirm/auto 档里前缀命中就
+//     永远问一句(压过 allow_commands、压过会话"总是允许";yolo/--yes 是显式
+//     全放,deny 不拦);
+//   - default_confirm_mode:起手确认档(auto/yolo/confirm),优先级低于
+//     --yes/LUBANCODE_CONFIRM_MODE,高于内置默认 confirm。
+// 全部字段可选;坏 JSON 只告警跳过,不崩。
+struct SettingsLocal {
+    std::vector<std::string> allow_tools;
+    std::vector<std::string> allow_commands;
+    std::vector<std::string> deny_commands;
+    std::optional<std::string> default_confirm_mode;  // auto / yolo / confirm
+
+    bool Empty() const {
+        return allow_tools.empty() && allow_commands.empty() && deny_commands.empty() &&
+               !default_confirm_mode.has_value();
+    }
+};
+
 struct ConfigResult {
     Config config;
     ConfigSources sources;
@@ -185,7 +214,12 @@ struct ConfigResult {
     // 文件就是 std::nullopt。跟 sources 不完全一样——sources 是"每个字段最终用了
     // 哪一级",这个字段单纯记"读到的配置文件在哪",供 /model 之类想更新配置
     // 文件的场景用(LoadFromEnv 里填;MergeConfig 本身是纯函数,不碰路径)。
+    // 分层之后可能有两份配置文件(项目级 + 全局):config_file_path 是"写回
+    // 优先目标"——项目级在就是项目级,否则全局;下面两个字段把两级各自的
+    // 路径分开记,/config 展示"这份来自项目级/全局"时用(都没有就都空)。
     std::optional<std::string> config_file_path;
+    std::optional<std::string> project_config_file_path;  // <cwd>/.lubancode/config.json
+    std::optional<std::string> global_config_file_path;   // <主目录>/.lubancode/config.json
     // 本次加载时如果发生了"旧位置 .lubancode.json 挪到新位置
     // .lubancode/config.json"这件事,这里是要打印给用户看的那一行通知
     // (成功或失败都会有一行);没发生迁移就是 std::nullopt。LoadFromEnv 里填。
@@ -253,14 +287,25 @@ struct GenericEnvValues {
     std::optional<std::string> openai_model;
 };
 
-// 纯函数,不碰任何 IO:按四级优先级(专属 env > 配置文件 > 通用 env > 内置
-// 默认)逐字段合并出最终配置,并记录每个字段的来源。
-// 注意:api_key 四级都没有时,这里不报错,只是把 auth_token 留空、来源记成
+// 纯函数,不碰任何 IO:按优先级逐字段合并出最终配置,并记录每个字段的
+// 来源。分层之后配置文件拆成两级——优先级(高到低):
+//   专属 env > 项目级 config.json > 全局 config.json > 通用 env > 内置默认。
+// 按"字段"逐个决:项目级缺的字段回退全局,全局也缺再往下一级找。对象型
+// 整段(hooks/mcpServers/search/lsp)按"整段"回退——项目级写了就用项目级
+// 那一整段,否则用全局那一整段(不做键级混合,语义清楚)。
+// 注意:api_key 各级都没有时,这里不报错,只是把 auth_token 留空、来源记成
 // Default——校验交给下面的 RequireApiKey,好让 --config 在 api_key 没配好
 // 时也能把已经解出来的其它字段和"缺在哪一级"一并打印出来,而不是直接崩掉
 // 什么都看不到。
 // wire 字段(专属 env 或配置文件)写了不认得的值(不是 anthropic/responses)
 // 时才会报错——这个没法留空糊弄过去,下游没法决定用哪个默认端点。
+std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& lubancode_env,
+                                                       const std::optional<FileConfig>& project_file,
+                                                       const std::optional<FileConfig>& global_file,
+                                                       const GenericEnvValues& generic_env);
+
+// 便捷包装(旧签名):只有一份配置文件时,当项目级看待(全局留空)。
+// 老调用方/老单测沿用这个,来源统一记成 ProjectConfigFile。
 std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& lubancode_env,
                                                        const std::optional<FileConfig>& file_config,
                                                        const GenericEnvValues& generic_env);
@@ -386,16 +431,22 @@ std::expected<SearchConfig, std::string> ParseSearchConfig(const nlohmann::json&
 std::expected<std::map<std::string, LspServerConfig>, std::string> ParseLspServersConfig(
     const nlohmann::json& lsp_json, const std::string& file_path_for_error);
 
-// 找配置文件,查找顺序:
-//   1) cwd 的新位置  <cwd>/.lubancode/config.json
-//   2) 主目录的新位置 <主目录>/.lubancode/config.json
-//   3) cwd 的旧位置  <cwd>/.lubancode.json          (存在就顺手迁移到 1)
-//   4) 主目录的旧位置 <主目录>/.lubancode.json        (存在就顺手迁移到 2)
-// 命中旧位置时,自动挪到对应的新位置(见 MigrateConfigFileIfNeeded),
-// 迁移的通知记在返回值的 FileConfig::migration_notice 里。四处都没有,
-// 返回 std::optional<FileConfig>(std::nullopt)(不算错)。找到了但解析
-// 失败,返回错误(带路径)。
-std::expected<std::optional<FileConfig>, std::string> LoadFileConfig();
+// 分层加载的结果:项目级(<cwd>)、全局(<主目录>)各一份,都可能缺。
+// 两级都读、按字段合并交给 MergeConfig。migration_notice 是两级迁移通知
+// 合并成的一段(哪一级发生了旧位置→新位置迁移就记上,都没有就 nullopt)。
+struct LoadedFileConfigs {
+    std::optional<FileConfig> project;  // <cwd>/.lubancode/config.json
+    std::optional<FileConfig> global;   // <主目录>/.lubancode/config.json
+    std::optional<std::string> migration_notice;
+};
+
+// 找配置文件,项目级与全局各自独立地找一遍:
+//   每一级:先看新位置 <目录>/.lubancode/config.json;没有再看旧位置
+//   <目录>/.lubancode.json(存在就顺手迁移到新位置,见
+//   MigrateConfigFileIfNeeded)。都没有就那一级留 std::nullopt(不算错)。
+// cwd 与主目录是同一个目录时(在主目录里跑),只当项目级读一份,全局留空,
+// 免得同一份文件读两遍、来源标记打架。找到了但解析失败,返回错误(带路径)。
+std::expected<LoadedFileConfigs, std::string> LoadFileConfigs();
 
 // 真正的入口:读 LUBANCODE_ 专属环境变量、找并读配置文件、读通用环境变量,
 // 按四级优先级合并出最终配置。
@@ -405,5 +456,53 @@ std::expected<ConfigResult, std::string> LoadFromEnv();
 // 整篇作为字符串返回。文件打不开(不存在、没权限……)或者内容是空的,
 // 都返回带路径的可读错误——语义上这两种情况都没法拿来当人格段用。
 std::expected<std::string, std::string> ReadSystemPromptFile(const std::string& path);
+
+// -------- settings.local.json:项目级本地权限(不进版本库) --------
+
+// <cwd>/.lubancode/settings.local.json 的路径(cwd_dir 传 CurrentDirUtf8())。
+std::string SettingsLocalPath(const std::string& cwd_dir);
+
+// 纯函数,不碰 IO:解析 settings.local.json 文本。顶层要有 "permissions"
+// object(没有就返回空 SettingsLocal,不算错);其中 allow_tools /
+// allow_commands / deny_commands 是字符串数组(非字符串元素跳过),
+// default_confirm_mode 是字符串(auto/yolo/confirm,别的值原样留着交给
+// 调用方判)。全部字段可选。坏 JSON、顶层不是 object 才返回错误(调用方
+// 打一行警告后当没配置,不崩)。
+std::expected<SettingsLocal, std::string> ParseSettingsLocal(const std::string& json_text,
+                                                              const std::string& path_for_error);
+
+// 读 <cwd>/.lubancode/settings.local.json。文件不存在返回 std::nullopt
+// (不算错);读到了就解析。坏 JSON 把可读错误往上抛(调用方告警跳过)。
+std::expected<std::optional<SettingsLocal>, std::string> LoadSettingsLocal(const std::string& cwd_dir);
+
+// 把一个工具名永久写进 <cwd>/.lubancode/settings.local.json 的
+// permissions.allow_tools(去重)。目录/文件不存在则按需创建(项目级
+// .lubancode/ 只在这"首次持久化 permissions"时才落地),已有的别的字段
+// (含不认得的)原样保留。成功返回写入的完整路径;建目录/写文件失败返回
+// 可读错误。gitignore 由调用方另行处理(EnsureGitignoreCoversSettingsLocal),
+// 好把"追加了一行 / 提示手动加"的反馈打给用户看。
+std::expected<std::string, std::string> AddAllowedToolToSettingsLocal(const std::string& cwd_dir,
+                                                                       const std::string& tool_name);
+
+// 一条命令过 settings.local 的 permissions 前缀判定后的裁定。deny 压过 allow
+// (两边都命中时算 Deny)。None = 两个名单都没命中,交给别处(command_safety /
+// 逐个问)决定。
+enum class CommandPermission { None, Allow, Deny };
+
+// 纯函数:命令去掉前导空白后,先看 deny_commands 有没有前缀命中(命中即
+// Deny,压过一切),再看 allow_commands(命中即 Allow),都没命中 None。
+// 空前缀跳过;原始命令串直接比,不做 shell 解析(前缀白/黑名单本就是"这几条
+// 命令开头"的朴素约定,跟 command_safety 的保守解析各管一摊)。main 的 auto
+// 分流处叠加用:Deny → 永远问(mode 门槛在 main 那边),Allow → auto 档等价
+// command_safety 的 Safe。
+CommandPermission ClassifyCommandByPermissions(const std::string& command,
+                                               const std::vector<std::string>& allow_commands,
+                                               const std::vector<std::string>& deny_commands);
+
+// 保证 <cwd>/.gitignore 挡住 .lubancode/settings.local.json:.gitignore 存在
+// 且没挡就追加一行(返回 "appended");已经挡住返回 "already";.gitignore
+// 压根不存在就不硬塞,返回一行给用户看的提示("hint:...",教他手动加)。
+// 纯做文件这一件事,不抛错(读写失败也只是不动 .gitignore)。
+std::string EnsureGitignoreCoversSettingsLocal(const std::string& cwd_dir);
 
 }  // namespace lubancode::config
