@@ -62,6 +62,14 @@ std::string BuildStatusLineText(ConfirmMode mode, const std::string& model, int 
     return StatusLineModeSegment(mode) + StatusLineInfoSegment(model, context_percent, used_tokens, window_tokens);
 }
 
+std::string StreamHintText(bool plain) {
+    return tr(plain ? "stream.hint.plain" : "stream.hint");
+}
+
+std::string StreamQueueEchoText(const std::string& typed, bool plain) {
+    return tr(plain ? "stream.queueing.plain" : "stream.queueing") + typed;
+}
+
 namespace {
 
 // 显示列宽:ASCII 一列,非 ASCII(这里的用途只有 CJK 标签,按全角)两列;

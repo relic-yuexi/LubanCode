@@ -49,6 +49,14 @@ TEST_CASE("BuildDividerLine: max_width 参数放宽上限(0.17.0 输入框横线
     CHECK(BuildDividerLine(0, /*plain=*/true, /*max_width=*/100).size() == 100);  // 探测失败按 max_width 兜底
 }
 
+TEST_CASE("BuildDividerLine: 0.21.x max_width 传终端宽即满宽(console_width - 1)") {
+    // 宽终端:传终端宽自身当上限,min(w-1, w) = w-1,满宽随终端、不再卡 80。
+    CHECK(BuildDividerLine(120, /*plain=*/false, /*max_width=*/120).size() == kUnitBytes * 119);
+    CHECK(BuildDividerLine(200, /*plain=*/true, /*max_width=*/200).size() == 199);
+    // 窄终端:截断行为不变,还是 console_width - 1。
+    CHECK(BuildDividerLine(50, /*plain=*/false, /*max_width=*/50).size() == kUnitBytes * 49);
+}
+
 TEST_CASE("BuildDividerLine: 非 plain 时,内容确实是重复的 U+2500 字符") {
     const std::string line = BuildDividerLine(6, /*plain=*/false);
     REQUIRE(line.size() == kUnitBytes * 5);

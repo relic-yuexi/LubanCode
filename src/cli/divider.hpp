@@ -15,8 +15,11 @@ namespace lubancode::cli {
 // 留一列安全边界,同时不管控制台多宽都不铺满一整行。plain 为真(plain
 // 主题,或者干脆不支持 ANSI/不是真控制台)时用半角 "-",否则用整宽字符
 // "─"(U+2500)。宽度算出来 <= 0 时返回空串。
-// max_width 默认 80(输入/输出分界线的老规矩);0.17.0 的 composer 输入框
-// 上下横线传 100,别的调用点一个不改。
+// max_width 是宽度上限;探测失败(console_width <= 0)时也拿它兜底。
+// 0.21.x:输入框上下横线与输入/输出分界线都要满终端宽,调用点把
+// max_width 传成 console_width 自身——min(console_width - 1, console_width)
+// 恒等于 console_width - 1,即满宽随终端(留一列安全边界)。默认 80 只是
+// 给不关心上限的老调用点兜底。
 std::string BuildDividerLine(int console_width, bool plain, int max_width = 80);
 
 }  // namespace lubancode::cli

@@ -106,6 +106,23 @@ StatusLineData& StatusDataSlot() {
     return data;
 }
 
+// 0.21.x 流式脚注状态(见 console_input.hpp 里 BeginStreamFooter 一带的注释)。
+// 全部读写都在 StdoutWriteMutex 之内:RunTurn(Begin/End)、监听线程(键入
+// 回显)、StreamBodyTracker::OnDelta(每笔正文前后 Erase/Redraw)三处都先
+// 拿锁再碰它,故字段本身不用再套原子。
+struct StreamFooterState {
+    bool enabled = false;   // 只有 Windows 真控制台 + 开了重画才为真
+    std::string hint;       // 空闲提示(BeginStreamFooter 按主题 plain 与否建好)
+    std::string echo;       // 排队实时回显文本;空串 = 显示 hint
+    std::string color;      // 淡色前缀(theme.stats);plain 主题为空串
+    std::string reset;      // theme.reset;plain 主题为空串
+    int row = -1;           // 此刻画在哪一绝对行,-1 = 没画
+};
+StreamFooterState& FooterSlot() {
+    static StreamFooterState f;
+    return f;
+}
+
 // M10:谁在真的逐键读键盘,谁就得先拿到这把锁——ReadLineKeyByKey() 整个
 // 调用期间(从进函数到返回)一直攥着它,TurnInputListener 的监听线程只在
 // 抢到锁的间隙才读一次。这样"监听只活在编辑器不在读的窗口期"这条要求
@@ -193,10 +210,6 @@ void EnsureRoomForRows(int& start_row, int buffer_height, int total_rows) {
 // 无框无状态行。
 // -----------------------------------------------------------------------
 
-// 输入框上下横线的宽度上限:min(控制台宽 - 1, 100)。比输入/输出分界线的
-// 80 宽——框是常驻画面的主角,略宽一点撑住版式;分界线那条老规矩不动。
-constexpr int kComposerBoxMaxWidth = 100;
-
 struct BoxChrome {
     bool enabled = false;
     const Theme* theme = nullptr;
@@ -204,14 +217,16 @@ struct BoxChrome {
 };
 
 // 一根框线(带主题淡色;plain 主题 theme.stats/reset 都是空串,自动退化成
-// 无色 '-' 线,不用另判断)。
+// 无色 '-' 线,不用另判断)。0.21.x:去掉旧的 100 列上限,框线满终端宽
+// (console_width - 1)随终端跑——max_width 传 console_width 自身,
+// min(console_width - 1, console_width) 恒等于 console_width - 1。
 std::string BoxRuleLine(const Theme& theme, int console_width) {
     const bool plain = theme.reset.empty();
-    return theme.stats + BuildDividerLine(console_width, plain, kComposerBoxMaxWidth) + theme.reset;
+    return theme.stats + BuildDividerLine(console_width, plain, console_width) + theme.reset;
 }
 
-// 状态行:模式段按档配色(确认=默认色、auto=stats、yolo=error,跟提示符
-// 前缀 ColoredConfirmPrefix 同一套语义),信息段恒 stats 淡色。文本拼装是
+// 状态行:模式段按档配色(确认=默认色、auto=stats、yolo=error),信息段
+// 恒 stats 淡色。0.21.x 起状态行是档位的唯一去处(提示符不再带前缀)。文本拼装是
 // cli/format_utils 的纯函数,这里只管配色和按控制台宽度分段截断(截断得
 // 按段做——夹着 ANSI 的整行没法安全截)。
 void PrintStatusLine(const BoxChrome& chrome, int max_width) {
@@ -355,27 +370,6 @@ void RedrawEditArea(int& start_row, int& prompt_end_col, const RenderState& stat
     platform::SetCursorPos(final_cursor_x, final_cursor_y);
 }
 
-// M11(0.10.0):切确认档位时提示符前缀该套什么颜色——auto 用
-// theme.stats(跟别的淡色提示一致),yolo 用 theme.error(全放行,得扎眼
-// 一点),confirm(默认档)不着色。ConfirmModePromptPrefix() 本身保持纯
-// 文本、不夹 ANSI(line_editor 的单测直接断言它的返回值是 "" / "[auto] " /
-// "[yolo] ",不能把颜色码焊死在里头),颜色只在这个终端层的打印点包一层。
-std::string ColoredConfirmPrefix(ConfirmMode mode, const Theme& theme) {
-    const std::string prefix = ConfirmModePromptPrefix(mode);
-    if (prefix.empty()) {
-        return prefix;
-    }
-    switch (mode) {
-        case ConfirmMode::Auto:
-            return theme.stats + prefix + theme.reset;
-        case ConfirmMode::Yolo:
-            return theme.error + prefix + theme.reset;
-        case ConfirmMode::Confirm:
-            return prefix;
-    }
-    return prefix;
-}
-
 // 0.17.0 输入框化的提交收尾:横线擦掉、提交行保留。取舍:两个方案里选了
 // "只留 `> 内容`"这条——框连横线留在滚动历史的话,每一问上下各一根 100 列
 // 横线,再加 RunTurn 紧接着打的输入/输出分界线,三根线叠一块,滚动历史
@@ -387,7 +381,7 @@ std::string ColoredConfirmPrefix(ConfirmMode mode, const Theme& theme) {
 // 每行按宽截断防折行——完整内容反正在历史/存档里),光标停在末行末尾,
 // 调用方接着换行。内容整体上移一行,不留空行。
 void CollapseBoxOnSubmit(int start_row, int prev_body_row_count, const RenderState& state,
-                          const Theme& theme, const std::string& prompt) {
+                          const std::string& prompt) {
     const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
     if (!info.has_value()) {
         return;  // 拿不到屏幕信息就不收尾了,提交帧画面已经在屏上,不算坏
@@ -402,7 +396,7 @@ void CollapseBoxOnSubmit(int start_row, int prev_body_row_count, const RenderSta
         platform::ClearRowHardFrom(0, r, buffer_width);
     }
     platform::SetCursorPos(0, top);
-    std::cout << ColoredConfirmPrefix(state.mode, theme) << prompt;
+    std::cout << prompt;
     std::cout.flush();
     int first_width = buffer_width - 3;
     if (const std::optional<platform::ScreenInfo> after = platform::GetScreenInfo(); after.has_value()) {
@@ -451,8 +445,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         std::cout << BoxRuleLine(theme, console_width) << "\n";
     }
 
-    const std::string full_prompt = ColoredConfirmPrefix(editor.confirm_mode(), theme) + prompt;
-    std::cout << full_prompt;
+    // 0.21.x:提示符统一回归 `> `,不再冠 [auto]/[yolo] 档位前缀——档位改
+    // 由常驻状态行(颜色 + 文字)承载,提示符不再重复一遍。
+    std::cout << prompt;
     std::cout.flush();
 
     const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
@@ -519,7 +514,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                         const int console_width = rule_info.has_value() ? rule_info->width : 80;
                         std::cout << BoxRuleLine(theme, console_width) << "\n";
                     }
-                    std::cout << ColoredConfirmPrefix(editor.confirm_mode(), theme) << prompt;
+                    std::cout << prompt;
                     std::cout.flush();
                     if (const std::optional<platform::ScreenInfo> after_info = platform::GetScreenInfo();
                         after_info.has_value()) {
@@ -541,30 +536,15 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         }
 
         // M11(0.10.0):切档原地更新,不打印任何新行——用户反馈过"连按几轮
-        // Shift+Tab,'已切换到 X 模式' 通知行滚出一屏残骸"。档位只体现在
-        // 提示符前缀的颜色/文字上(ColoredConfirmPrefix)和常驻状态行上
-        // (0.17.0,紧接着的 RedrawEditArea 每帧都重画状态行,chrome.mode
-        // 下面刚同步过,自然带上新档),这里原地清掉 start_row 这一整行、
-        // 换上新前缀,起始行号不变,不往下挪一行——切档只动状态行和提示符
-        // 前缀,屏上零新增行。
-        if (state.mode_changed) {
-            if (const std::optional<platform::ScreenInfo> row_info = platform::GetScreenInfo();
-                row_info.has_value()) {
-                platform::ClearRowFrom(0, start_row, row_info->width);
-                platform::SetCursorPos(0, start_row);
-                std::cout << ColoredConfirmPrefix(state.mode, theme) << prompt;
-                std::cout.flush();
-                if (const std::optional<platform::ScreenInfo> after_info = platform::GetScreenInfo();
-                    after_info.has_value()) {
-                    prompt_end_col = after_info->cursor_x;
-                }
-            }
-        }
+        // Shift+Tab,'已切换到 X 模式' 通知行滚出一屏残骸"。0.21.x 起提示符
+        // 不再带档位前缀,切档不动提示符那一行;档位只体现在常驻状态行上
+        // (下面 chrome.mode 刚同步过,紧接着的 RedrawEditArea 每帧重画状态行,
+        // 自然带上新档),屏上零新增行。
 
         if (box && state.submitted) {
             // 0.17.0 输入框化的提交收尾:横线/状态行擦掉,只留 `> 内容`,
             // 换行收尾——取舍见 CollapseBoxOnSubmit 注释。
-            CollapseBoxOnSubmit(start_row, prev_body_row_count, state, theme, prompt);
+            CollapseBoxOnSubmit(start_row, prev_body_row_count, state, prompt);
             std::cout << "\n";
             return Utf32ToUtf8(state.line);
         }
@@ -662,6 +642,82 @@ void SetStreamScreenPrintHook(std::function<void()> hook) {
     StreamScreenPrintHookSlot() = std::move(hook);
 }
 
+void EraseStreamFooterLocked() {
+    StreamFooterState& f = FooterSlot();
+    if (f.row < 0) {
+        return;  // 没画,不用擦
+    }
+    if (const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo(); info.has_value()) {
+        // 存下正文光标(擦 footer 那一行不该动正文的落笔位),擦完拨回去。
+        const int bx = info->cursor_x;
+        const int by = info->cursor_y;
+        platform::ClearRowHardFrom(0, f.row, info->width);
+        platform::SetCursorPos(bx, by);
+    }
+    f.row = -1;
+}
+
+void RedrawStreamFooterLocked() {
+    StreamFooterState& f = FooterSlot();
+    if (!f.enabled) {
+        return;
+    }
+    const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
+    if (!info.has_value()) {
+        return;  // 拿不到屏幕信息这一笔就不画,下一笔再来
+    }
+    const int bx = info->cursor_x;  // 正文当前落笔位
+    const int by = info->cursor_y;
+    // 先擦掉旧 footer 行(正文可能已把它顶走 / 回显文本变了)。
+    if (f.row >= 0) {
+        platform::ClearRowHardFrom(0, f.row, info->width);
+        f.row = -1;
+    }
+    const std::string& text = f.echo.empty() ? f.hint : f.echo;
+    if (text.empty()) {
+        platform::SetCursorPos(bx, by);
+        return;
+    }
+    // footer 落在正文光标的下一行:正文停在行中(bx>0)就 by+1,正文刚换行
+    // 停在行首(bx==0)就落在 by 这空行上——两种都是"正文当前底部的下一行"。
+    const int target = by + (bx > 0 ? 1 : 0);
+    if (target < 0 || target >= info->height) {
+        // 正文贴着缓冲区底、footer 没地方落:这一笔不画,绝不自己滚屏(滚屏
+        // 会打乱正文块的锚点账),下一笔正文推着往下时再画。
+        platform::SetCursorPos(bx, by);
+        return;
+    }
+    platform::ClearRowHardFrom(0, target, info->width);
+    platform::SetCursorPos(0, target);
+    std::cout << f.color << TruncateUtf8ToDisplayWidth(text, info->width - 1) << f.reset;
+    std::cout.flush();
+    platform::SetCursorPos(bx, by);  // 拨回正文末尾,下一笔正文接着往下打
+    f.row = target;
+}
+
+void BeginStreamFooter(const Theme& theme, bool enabled) {
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    StreamFooterState& f = FooterSlot();
+    f.enabled = enabled;
+    f.row = -1;
+    f.echo.clear();
+    f.color = theme.stats;
+    f.reset = theme.reset;
+    f.hint = enabled ? StreamHintText(theme.reset.empty()) : std::string();
+    // 开场不主动画:此刻正文还没吐,"思考中"转轮正占着这一行(跟 footer 同
+    // 一行会打架)。等第一笔正文经 OnDelta 落地,RedrawStreamFooterLocked 自然
+    // 把 footer 摆到正文下方;之后每笔正文都续着重画,一直常驻到收束。
+}
+
+void EndStreamFooter() {
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    StreamFooterState& f = FooterSlot();
+    EraseStreamFooterLocked();  // 擦掉常驻那行,免得残留在 markdown 收束重画区之外
+    f.enabled = false;
+    f.echo.clear();
+    f.hint.clear();
+}
+
 TurnInputListener::TurnInputListener(std::atomic<bool>& cancel_flag, const Theme& theme)
     : cancel_flag_(cancel_flag), theme_(theme) {
     if (platform::StdinIsInteractive()) {
@@ -699,6 +755,17 @@ void TurnInputListener::ThreadMain() {
     // 完整编辑器的光标移动/历史/补全,故意从简。
     std::u32string buffer;
     platform::KeyReader key_reader;  // 跨事件状态(代理对配对)整条线程存活
+    const bool plain = theme_.reset.empty();
+
+    // 排队实时回显:把此刻已键入的内容塞进流式脚注的 echo 段(空就复位回
+    // 提示),立刻重画一帧。footer 落在正文下方、不挪正文,故不作废块锚。
+    // Windows 真控制台之外(footer.enabled 为假)这两句是空操作,退回老的
+    // "不回显、只 Enter 时整条显示"。
+    auto refresh_echo = [&] {
+        std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+        FooterSlot().echo = buffer.empty() ? std::string() : StreamQueueEchoText(Utf32ToUtf8(buffer), plain);
+        RedrawStreamFooterLocked();
+    };
 
     while (!stop_requested_.load()) {
         // try_lock:抢不到就说明编辑器(ReadLineKeyByKey,含工具确认提示)
@@ -728,11 +795,14 @@ void TurnInputListener::ThreadMain() {
         if (key->kind == PK::Esc) {
             cancel_flag_.store(true);
             std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+            EraseStreamFooterLocked();  // 先把脚注那行擦掉,[已打断] 才打得干净
             std::cout << "\n" << theme_.stats << tr("input.interrupted") << theme_.reset << "\n";
             std::cout.flush();
             if (const auto& hook = StreamScreenPrintHookSlot()) {
                 hook();  // 插打了整行,正文块的行数账作废(锁还攥着,见头文件约定)
             }
+            // ESC 后本轮就要收场:关掉脚注,别让残余正文再把提示行重画回来。
+            FooterSlot().enabled = false;
             continue;
         }
         if (key->kind == PK::Enter || key->kind == PK::NewLine) {
@@ -740,11 +810,15 @@ void TurnInputListener::ThreadMain() {
                 const std::string line = Utf32ToUtf8(buffer);
                 {
                     std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+                    EraseStreamFooterLocked();  // 擦掉"排队中: ..."回显行,腾给 [已排队] 落队行
                     std::cout << "\n" << theme_.stats << tr("input.queued") << theme_.reset << line << "\n";
                     std::cout.flush();
                     if (const auto& hook = StreamScreenPrintHookSlot()) {
                         hook();  // 同 ESC 分支:回显插了行,通知正文块作废锚点
                     }
+                    // 提示行复位回可发现性提示,重画到落队行下方。
+                    FooterSlot().echo.clear();
+                    RedrawStreamFooterLocked();
                 }
                 {
                     std::lock_guard<std::mutex> lock(queue_mutex_);
@@ -757,11 +831,14 @@ void TurnInputListener::ThreadMain() {
         if (key->kind == PK::Backspace) {
             if (!buffer.empty()) {
                 buffer.pop_back();
+                refresh_echo();  // 退格后实时更新回显
             }
             continue;
         }
         if (key->kind == PK::Char) {
             buffer.push_back(key->ch);
+            refresh_echo();  // 每敲一个字符实时回显到提示行
+            continue;
         }
         // 其余按键(Tab/方向键/Ctrl 组合……)监听期间不理会,跟老逻辑一致。
     }

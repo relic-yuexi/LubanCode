@@ -164,18 +164,6 @@ std::string ConfirmModeLabel(ConfirmMode mode) {
     return tr("mode.confirm");
 }
 
-std::string ConfirmModePromptPrefix(ConfirmMode mode) {
-    switch (mode) {
-        case ConfirmMode::Confirm:
-            return "";
-        case ConfirmMode::Auto:
-            return "[auto] ";
-        case ConfirmMode::Yolo:
-            return "[yolo] ";
-    }
-    return "";
-}
-
 int CharDisplayWidth(char32_t cp) {
     // 见头文件注释:简易 East Asian Width 判定,不是完整的 Unicode 表,
     // 覆盖最常用的 CJK 统一表意文字、假名、韩文音节、全角标点这些区段。

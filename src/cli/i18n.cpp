@@ -192,6 +192,10 @@ const Entry kZhCN[] = {
     {"ui.menu_more", "  … 共 {0} 个命令"},
     {"input.interrupted", "[已打断]"},
     {"input.queued", "[已排队] "},
+    {"stream.hint", "\xe2\x8e\x8b 打断  ·  键入并回车 排队下一条"},
+    {"stream.hint.plain", "ESC 打断 · 键入排队"},
+    {"stream.queueing", "\xe2\x8e\x8b 打断  ·  排队中: "},
+    {"stream.queueing.plain", "ESC 打断 · 排队中: "},
     {"spinner.thinking", "思考中"},
 
     // ---- 确认提示 ----
@@ -727,6 +731,10 @@ const Entry kEn[] = {
     {"ui.menu_more", "  … {0} commands total"},
     {"input.interrupted", "[interrupted]"},
     {"input.queued", "[queued] "},
+    {"stream.hint", "\xe2\x8e\x8b interrupt  \xc2\xb7  type + Enter to queue next"},
+    {"stream.hint.plain", "ESC interrupt \xc2\xb7 type to queue next"},
+    {"stream.queueing", "\xe2\x8e\x8b interrupt  \xc2\xb7  queueing: "},
+    {"stream.queueing.plain", "ESC interrupt \xc2\xb7 queueing: "},
     {"spinner.thinking", "thinking"},
 
     // ---- confirm prompt ----

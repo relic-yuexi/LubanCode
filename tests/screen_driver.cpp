@@ -217,6 +217,25 @@ bool IsRuleRow(int row) {
     return false;
 }
 
+// 一行横线的可视列宽(─ 记 1 列、- 记 1 列;ReadRow 已剪掉行尾空白)。
+// 0.21.x 验"横线满终端宽":满宽 = BufferWidth() - 1。
+int RuleGlyphWidth(int row) {
+    const std::string text = ReadRow(row);
+    int cols = 0;
+    for (std::size_t i = 0; i < text.size();) {
+        if (text.compare(i, 3, "\xe2\x94\x80") == 0) {
+            ++cols;
+            i += 3;
+        } else if (text[i] == '-') {
+            ++cols;
+            ++i;
+        } else {
+            ++i;  // 混入的别的字符不计(正常满宽横线整行只有 ─)
+        }
+    }
+    return cols;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -289,6 +308,12 @@ int wmain(int argc, wchar_t** argv) {
         Check(status.find("context ") != std::string::npos, "F1 状态行显示 context 占比");
         Check(IsRuleRow(prompt_row - 1), "F1 上横线在提示行上一行");
         Check(IsRuleRow(prompt_row + 1), "F1 下横线在提示行下一行");
+        // 0.21.x:框线满终端宽(BufferWidth - 1),不再卡 100 列上限。
+        const int full = BufferWidth() - 1;
+        Check(RuleGlyphWidth(prompt_row - 1) == full,
+              "F1 上横线满终端宽(" + std::to_string(RuleGlyphWidth(prompt_row - 1)) + "==" +
+                  std::to_string(full) + ")");
+        Check(RuleGlyphWidth(prompt_row + 1) == full, "F1 下横线满终端宽");
         // 空 composer 的提示行只剩 "> ",行尾空白被 ReadRow 剪掉,按裸 ">" 认。
         const std::string prompt_text = ReadRow(prompt_row);
         Check(!prompt_text.empty() && prompt_text.back() == '>', "F1 提示行有 '> '");
@@ -303,7 +328,13 @@ int wmain(int argc, wchar_t** argv) {
     // ---- F3 切档帧:Shift+Tab 三连,状态行原地变档、屏上零新增行 ----
     SendKey(VK_TAB, 0, SHIFT_PRESSED);
     Check(WaitForRowText(status_row, "auto", 5000), "F3 切档:状态行变 auto");
-    Check(ReadRow(prompt_row).find("[auto]") != std::string::npos, "F3 切档:提示符前缀变 [auto]");
+    // 0.21.x:提示符不再冠 [auto]/[yolo] 前缀,档位只在状态行体现;提示行
+    // 恒是 "> abc"(F2 打的内容),既不含 [auto] 前缀,也不被切档动过。
+    {
+        const std::string prompt_after = ReadRow(prompt_row);
+        Check(prompt_after.find("[auto]") == std::string::npos, "F3 切档:提示符不带 [auto] 前缀");
+        Check(prompt_after.find("> abc") != std::string::npos, "F3 切档:提示行恒 '> abc'");
+    }
     Check(FindLastRow("shift+tab") == status_row, "F3 切档:auto 档零新增行");
     SendKey(VK_TAB, 0, SHIFT_PRESSED);
     Check(WaitForRowText(status_row, "yolo", 5000), "F3 切档:状态行变 yolo");
@@ -356,6 +387,9 @@ int wmain(int argc, wchar_t** argv) {
     // ---- F6 提交帧:横线擦掉、提交行保留;一轮问答后统计行 + 新框 ----
     SendText("请用 read_file 工具读取 hello.txt,然后原样告诉我文件内容。");
     SendKey(VK_RETURN, L'\r', 0);
+    // 0.21.x:流式期间正文下方常驻 "⎋ 打断 · 键入并回车 排队下一条" 提示行
+    // (footer)。整段流式里都在,收束才擦——180s 内应能刮到一帧。
+    Check(WaitForText("排队下一条", 180000), "F6 流式期间:输出下方出现 ESC/排队提示行(footer)");
     Sleep(600);
     {
         // 收尾后 "> 请用..." 上移到原上横线那一行,原提示行现在是别的内容。

@@ -388,12 +388,6 @@ TEST_CASE("NextConfirmMode: 三档顺序循环,不依赖 LineEditorCore") {
     CHECK(NextConfirmMode(ConfirmMode::Yolo) == ConfirmMode::Confirm);
 }
 
-TEST_CASE("ConfirmModePromptPrefix: 三档对应三种提示符前缀") {
-    CHECK(ConfirmModePromptPrefix(ConfirmMode::Confirm).empty());
-    CHECK(ConfirmModePromptPrefix(ConfirmMode::Auto) == "[auto] ");
-    CHECK(ConfirmModePromptPrefix(ConfirmMode::Yolo) == "[yolo] ");
-}
-
 TEST_CASE("LineEditorCore: Ctrl+C 在非空行清空当前行,继续编辑") {
     LineEditorCore editor;
     editor.BeginLine();

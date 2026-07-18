@@ -70,10 +70,10 @@ enum class ConfirmMode { Confirm, Auto, Yolo };
 // 方便不经过 LineEditorCore 也能测这一条轮转规则。
 ConfirmMode NextConfirmMode(ConfirmMode mode);
 
-// 中文说法(切换通知用)、提示符前缀(`> ` 前面加的那截)。都是纯函数,
-// 终端层拼提示符/通知文字用,不用各处各写一份。
+// 中文说法(切换通知用):档位的展示词,状态行(StatusLineModeSegment)、
+// 切换通知共用,纯函数。0.21.x 起提示符不再带 [auto]/[yolo] 前缀,档位
+// 全交给常驻状态行,原来的 ConfirmModePromptPrefix 随之废除。
 std::string ConfirmModeLabel(ConfirmMode mode);
-std::string ConfirmModePromptPrefix(ConfirmMode mode);
 
 // 补全候选:slash 命令名 + 一句话说明,由调用方(console_input.cpp)从
 // cli::slash_commands 现有的命令定义转换而来,核心层自己不认得任何具体

@@ -522,7 +522,11 @@ void PrintDivider(const lubancode::cli::Theme& theme, bool is_console) {
     }
     const std::optional<int> width = lubancode::cli::DetectConsoleWidth();
     const bool plain = theme.reset.empty();
-    const std::string line = lubancode::cli::BuildDividerLine(width.value_or(80), plain);
+    // 0.21.x:分界线满终端宽——max_width 传终端宽自身,
+    // min(console_width - 1, console_width) 恒等于 console_width - 1,去掉旧的
+    // 80 列上限;探测失败按 80 兜底不变。
+    const int detected = width.value_or(80);
+    const std::string line = lubancode::cli::BuildDividerLine(detected, plain, detected);
     if (line.empty()) {
         return;
     }
@@ -1087,9 +1091,14 @@ public:
     // 错开。
     void OnDelta(const std::string& text) {
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        // 0.21.x 流式脚注:正文落笔前先把脚注那行擦掉(免得跟正文抢行/被正文
+        // 顶到中间),落笔后再重画到正文下方——见 console_input.hpp 注释。
+        // footer 没启用(非 Windows 真控制台)时这两句是空操作。
+        lubancode::cli::EraseStreamFooterLocked();
         if (!enabled_) {
             std::cout << text;
             std::cout.flush();
+            lubancode::cli::RedrawStreamFooterLocked();
             return;
         }
         if (!in_block_) {
@@ -1140,6 +1149,7 @@ public:
         std::cout << text;
         std::cout.flush();
         buffer_ += text;
+        lubancode::cli::RedrawStreamFooterLocked();  // 脚注重画到正文当前底部下方
     }
 
     // 监听线程在流式正文当中插打了整行提示([已排队]/[已打断]):这几行
@@ -1152,10 +1162,14 @@ public:
 
     // 工具条目要开画了:当前块到此为止,屏上保持原样。
     void OnBlockBreak() {
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        // 工具条目要开画/换请求了:脚注这行先擦掉,免得它残留在工具输出或
+        // 下一轮"思考中"转轮当中(转轮跟 footer 同处一行会打架)。下一块
+        // 正文到来时 OnDelta 会重新把脚注摆到正文下方。footer 没启用时空操作。
+        lubancode::cli::EraseStreamFooterLocked();
         if (!enabled_) {
             return;
         }
-        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         in_block_ = false;
         buffer_.clear();
     }
@@ -2025,12 +2039,22 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     // 提示符那一行之后、模型正文开始打字机输出之前。
     PrintDivider(theme, is_console);
 
+    // 0.21.x 流式脚注:流式期间在正文下方常驻一行"⎋ 打断 · 键入并回车 排队
+    // 下一条",让用户看见能 ESC 打断、能键入排队(回归前屏上啥都没有)。只在
+    // Windows 真控制台开——footer 要随时查光标位,POSIX 走 DSR 6n 会跟监听
+    // 线程抢 stdin,跟 StreamBodyTracker 的重画一样诚实关掉。
+    lubancode::cli::BeginStreamFooter(theme, is_console && lubancode::platform::SupportsScreenRepaint());
+
     const auto result = loop.Run(user_input, callbacks, &cancel_flag);
 
     // Run() 已经返回,不管是不是被打断——立刻收线程,保证下一次 ReadLine()
     // (排队回显的 "> " 或者下一轮主提示符)开始之前监听线程已经彻底退出。
     listener.Stop();
     lubancode::cli::SetStreamScreenPrintHook(nullptr);  // 线程已 join,摘钩,别让它抓着局部引用过夜
+    // 脚注在 markdown 收束重画之前擦掉、关停:它常驻在正文块区间之外,不擦
+    // 的话会残留在重画区下方;关停后 FinalizeRepaint 按"块首到光标"记账,
+    // 光标此刻正停在正文末尾(最后一笔 OnDelta 已把它拨回),账目干净。
+    lubancode::cli::EndStreamFooter();
 
     RunTurnResult out;
     out.queued_lines = listener.TakeQueuedLines();

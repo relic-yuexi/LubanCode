@@ -17,6 +17,8 @@ using lubancode::cli::FormatContextBreakdown;
 using lubancode::cli::FormatTokenCount;
 using lubancode::cli::StatusLineInfoSegment;
 using lubancode::cli::StatusLineModeSegment;
+using lubancode::cli::StreamHintText;
+using lubancode::cli::StreamQueueEchoText;
 
 namespace {
 // needle 在 s 里出现几次(█/░ 是多字节 UTF-8,按子串数)。
@@ -88,6 +90,30 @@ TEST_CASE("StatusLineInfoSegment: 模型名为空就跳过那一节") {
     const std::string seg = StatusLineInfoSegment("", 3, 0, 0);
     CHECK(seg.find(" ·  · ") == std::string::npos);
     CHECK(seg.find("context 3%") != std::string::npos);
+}
+
+TEST_CASE("StreamHintText: 富主题带 ⎋ 符号,plain 回退纯 ESC 文字") {
+    const std::string rich = StreamHintText(/*plain=*/false);
+    // ⎋ = U+238B, UTF-8 = E2 8E 8B。
+    CHECK(rich.find("\xe2\x8e\x8b") != std::string::npos);
+    CHECK(rich.find("排队") != std::string::npos);
+    const std::string plain = StreamHintText(/*plain=*/true);
+    CHECK(plain.find("\xe2\x8e\x8b") == std::string::npos);  // plain 不夹 ⎋
+    CHECK(plain.find("ESC") != std::string::npos);
+}
+
+TEST_CASE("StreamQueueEchoText: 尾巴接上已键入内容,plain 去 ⎋") {
+    const std::string rich = StreamQueueEchoText("你好", /*plain=*/false);
+    CHECK(rich.find("\xe2\x8e\x8b") != std::string::npos);
+    CHECK(rich.find("排队中") != std::string::npos);
+    CHECK(rich.size() >= std::string("你好").size());
+    CHECK(rich.find("你好") != std::string::npos);  // 已键入内容原样接在末尾
+    const std::string plain = StreamQueueEchoText("abc", /*plain=*/true);
+    CHECK(plain.find("\xe2\x8e\x8b") == std::string::npos);
+    CHECK(plain.find("ESC") != std::string::npos);
+    CHECK(plain.find("abc") != std::string::npos);
+    // 空输入:只剩前缀,不崩、不多余。
+    CHECK(StreamQueueEchoText("", /*plain=*/false).find("排队中") != std::string::npos);
 }
 
 TEST_CASE("BuildStatusLineText: 整行 = 模式段 + 信息段") {
