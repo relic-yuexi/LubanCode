@@ -74,6 +74,9 @@ public:
 
     void SetHooks(Hooks hooks) { hooks_ = std::move(hooks); }
 
+    // 主会话切进 /worktree 后，子代理也得看见同一处工作目录。
+    void SetWorkingDirectory(std::string cwd) { cwd_ = std::move(cwd); }
+
     // tool_search(延迟挂载):子代理注册表同机制。filter 原样灌给每次
     // execute() 新建的 sub_loop(loaded 集合与主会话共享,挂载一次两边
     // 可用);index_provider 每次 execute() 现算"延迟未加载"索引段,拼进

@@ -16,6 +16,7 @@ add_executable(lubancode_tests
   test_models.cpp
   test_setup_wizard.cpp
   test_slash_commands.cpp
+  test_worktree.cpp
   test_theme.cpp
   test_prompts.cpp
   test_prompt_assembler.cpp

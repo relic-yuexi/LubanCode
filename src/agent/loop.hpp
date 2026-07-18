@@ -102,6 +102,10 @@ public:
     // loaded 集合,下一轮请求就得看到新挂载的工具。
     void SetToolFilter(std::function<bool(const tools::Tool&)> filter) { tool_filter_ = std::move(filter); }
 
+    // /worktree 切换目录后只换运行环境段，已有聊天史要照留。主循环在下一
+    // 次请求前换掉系统提示，文件工具则由进程 CWD 即刻接管。
+    void SetSystemPrompt(std::string system_prompt) { system_prompt_ = std::move(system_prompt); }
+
     // M6.6:/compact 用。跟 history() 是同一份数据,单独起个大写名字是为了
     // 跟任务规矩"只许新增两个方法,不许改现有的"对齐——不改名、不改签名、
     // 不复用 history(),原样再加一份。

@@ -258,3 +258,19 @@ TEST_CASE("AllSlashCommands: /tools 在列表里") {
     }
     CHECK(has_tools);
 }
+
+TEST_CASE("ParseSlashCommand: /worktree 与参数") {
+    const auto parsed = cli::ParseSlashCommand("/Worktree new fix_54");
+    CHECK(parsed.command == cli::SlashCommand::Worktree);
+    CHECK(parsed.args == "new fix_54");
+}
+
+TEST_CASE("AllSlashCommands: /worktree 在列表里") {
+    bool found = false;
+    for (const auto& command : cli::AllSlashCommands()) {
+        if (command.name == "/worktree") {
+            found = true;
+        }
+    }
+    CHECK(found);
+}

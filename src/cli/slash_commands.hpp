@@ -33,6 +33,7 @@ enum class SlashCommand {
     Soul,      // /soul [名字|off|default]:魂(风格叠加层)查看/切换(0.16.x 魂法分家)
     Prompt,    // /prompt [reset]:看法(系统提示词)的来源,或还原 system_prompt.md
     Language,  // /language [语言码]:列可选界面语言/切换(i18n)
+    Worktree,  // /worktree new|list|exit:隔离工作树会话
     Unknown,  // 以 / 开头,但不认得这个命令
 };
 

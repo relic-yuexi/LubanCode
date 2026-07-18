@@ -43,6 +43,7 @@
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
+#include "cli/worktree.hpp"
 #include "cli/markdown.hpp"
 #include "cli/setup_wizard.hpp"
 #include "cli/slash_commands.hpp"
@@ -289,6 +290,65 @@ void PrintToolsCommand(const lubancode::tools::ToolRegistry& registry, const std
     }
 }
 
+std::string PathToUtf8(const std::filesystem::path& path);
+bool SameFilesystemPath(const std::filesystem::path& left, const std::filesystem::path& right);
+
+// /worktree 的显示层只拿 i18n 键说话。Git 调用和目录状态都在 cli/worktree
+// 里，main 只管给交互会话报结果、在脏树删除前收一声确认。
+void PrintWorktreeResult(const lubancode::cli::WorktreeResult& result) {
+    namespace worktree = lubancode::cli;
+    switch (result.code) {
+        case worktree::WorktreeResultCode::Created:
+            std::cout << trf("cmd.worktree.created", PathToUtf8(result.path), result.branch) << "\n";
+            break;
+        case worktree::WorktreeResultCode::Listed:
+            std::cout << tr("cmd.worktree.list_header") << "\n";
+            for (const auto& entry : result.entries) {
+                const bool current = SameFilesystemPath(entry.path, result.path);
+                std::cout << "  " << (current ? "* " : "- ") << PathToUtf8(entry.path);
+                if (!entry.branch.empty()) {
+                    std::cout << " [" << entry.branch << "]";
+                } else if (entry.detached) {
+                    std::cout << " " << tr("cmd.worktree.detached");
+                }
+                if (current) {
+                    std::cout << " " << tr("cmd.worktree.current");
+                }
+                std::cout << "\n";
+            }
+            break;
+        case worktree::WorktreeResultCode::Kept:
+            std::cout << trf("cmd.worktree.kept", PathToUtf8(result.path)) << "\n";
+            break;
+        case worktree::WorktreeResultCode::Removed:
+            std::cout << trf("cmd.worktree.removed", result.branch) << "\n";
+            break;
+        case worktree::WorktreeResultCode::NeedsRemoveConfirmation:
+            std::cout << trf("cmd.worktree.dirty", PathToUtf8(result.path)) << "\n";
+            break;
+        case worktree::WorktreeResultCode::NotRepository:
+            std::cout << tr("cmd.worktree.not_repo") << "\n";
+            break;
+        case worktree::WorktreeResultCode::InvalidArgument:
+            std::cout << tr("cmd.worktree.usage") << "\n";
+            break;
+        case worktree::WorktreeResultCode::InvalidName:
+            std::cout << tr("cmd.worktree.invalid_name") << "\n";
+            break;
+        case worktree::WorktreeResultCode::AlreadyActive:
+            std::cout << tr("cmd.worktree.already_active") << "\n";
+            break;
+        case worktree::WorktreeResultCode::NoActiveWorktree:
+            std::cout << tr("cmd.worktree.no_active") << "\n";
+            break;
+        case worktree::WorktreeResultCode::GitError:
+            std::cout << trf("cmd.worktree.git_failed", result.detail) << "\n";
+            break;
+        case worktree::WorktreeResultCode::FilesystemError:
+            std::cout << trf("cmd.worktree.filesystem_failed", result.detail) << "\n";
+            break;
+    }
+}
 // --config、/config 共用:打印最终生效的配置和每个字段的来源。session_model
 // 有值时(/config 场景)额外打一行"本会话实际在用的 model"——/model 切换
 // 只影响会话内存,不一定跟 config.model(四级合并出来的那份)一致。
@@ -470,6 +530,16 @@ std::string CurrentDirUtf8() {
     const std::filesystem::path cwd = std::filesystem::current_path();
     const std::u8string u8 = cwd.u8string();
     return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+}
+
+std::string PathToUtf8(const std::filesystem::path& path) {
+    const std::u8string u8 = path.u8string();
+    return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+}
+
+bool SameFilesystemPath(const std::filesystem::path& left, const std::filesystem::path& right) {
+    std::error_code ec;
+    return std::filesystem::equivalent(left, right, ec) && !ec;
 }
 
 // 包一层 Backend:发起真正的网络请求前起一个"思考中"转轮(cli::Spinner),
@@ -3244,6 +3314,16 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     // 保留、照样发,跟"是不是被打断"完全解耦。
     std::deque<std::string> pending_queue;
 
+    lubancode::cli::WorktreeSession worktree_session;
+    const auto sync_worktree_directory = [&]() {
+        prompt_options.cwd = CurrentDirUtf8();
+        loop->SetSystemPrompt(lubancode::agent::AssembleSystemPrompt(prompt_options));
+        if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry.Find("agent"));
+            agent_tool != nullptr) {
+            agent_tool->SetWorkingDirectory(prompt_options.cwd);
+        }
+    };
+
     // 处理"确定不是空行、不是裸词 exit/quit"的一行输入,不管这行是刚
     // ReadLine() 读到的、还是从 pending_queue 里取出来的自动发送的——两条
     // 路径共用这一份 slash 分支 + 自动 compact 检查 + RunTurn 调用,行为
@@ -3266,6 +3346,41 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                 case lubancode::cli::SlashCommand::Language:
                     HandleLanguageCommand(parsed.args, config_file_path);
                     break;
+                case lubancode::cli::SlashCommand::Worktree: {
+                    const lubancode::cli::ParsedWorktreeCommand command =
+                        lubancode::cli::ParseWorktreeCommand(parsed.args);
+                    lubancode::cli::WorktreeResult result;
+                    switch (command.action) {
+                        case lubancode::cli::WorktreeAction::New:
+                            result = worktree_session.Create(command.name);
+                            break;
+                        case lubancode::cli::WorktreeAction::List:
+                            result = worktree_session.List();
+                            break;
+                        case lubancode::cli::WorktreeAction::Exit:
+                            result = worktree_session.Exit(command.exit_mode);
+                            break;
+                        case lubancode::cli::WorktreeAction::Invalid:
+                            result.code = lubancode::cli::WorktreeResultCode::InvalidArgument;
+                            break;
+                    }
+                    PrintWorktreeResult(result);
+                    if (result.code == lubancode::cli::WorktreeResultCode::NeedsRemoveConfirmation) {
+                        const std::optional<std::string> answer = lubancode::cli::ReadLine(
+                            theme.confirm + tr("cmd.worktree.remove_confirm") + theme.reset, theme,
+                            /*esc_rejects=*/true);
+                        if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
+                            result = worktree_session.ConfirmRemove();
+                            PrintWorktreeResult(result);
+                        } else {
+                            std::cout << tr("cmd.worktree.remove_cancelled") << "\n";
+                        }
+                    }
+                    // std::filesystem::current_path 是工具层共同的相对路径基准。
+                    // 同步提示词和子代理那份 cwd，历史则原样保留。
+                    sync_worktree_directory();
+                    break;
+                }
                 case lubancode::cli::SlashCommand::Clear:
                     rebuild_loop();
                     // 存档跟着翻篇:旧文件留在磁盘上,新会话下一条消息另起
