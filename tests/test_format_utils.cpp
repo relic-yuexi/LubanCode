@@ -159,24 +159,68 @@ TEST_CASE("FormatContextBreakdown: 某类为 0 打 ~0、0%、全空条") {
 }
 
 TEST_CASE("FormatContextBreakdown: 历史带缓存命中就在行尾括注") {
-    const auto lines = FormatContextBreakdown(30000, 15000, 60000, /*cache_read=*/4600, 256000, 0,
-                                               BuiltinTheme("dark"), 16);
+    // 缓存命中意味着发过请求,配一份实测 100000。
+    const auto lines = FormatContextBreakdown(30000, 15000, 60000, /*cache_read=*/4600, 256000,
+                                               /*measured=*/100000, BuiltinTheme("dark"), 16);
     CHECK(lines[3].find("(缓存命中 4600)") != std::string::npos);
+    // 反推口径与缓存括注同挂对话历史那一行。
+    CHECK(lines[3].find("=实测总量−系统−工具") != std::string::npos);
     // 缓存只挂在对话历史那一行,别的行不沾。
     CHECK(lines[1].find("缓存命中") == std::string::npos);
     CHECK(lines[5].find("缓存命中") == std::string::npos);
 }
 
-TEST_CASE("FormatContextBreakdown: tracker 实测比估算大就用实测并标注") {
-    // 估算合计 35000,实测 100000 → 已用行用 100k、带 (实测)、不带 ~。
-    const auto lines = FormatContextBreakdown(30000, 15000, 60000, 0, 256000, /*measured=*/100000,
-                                               BuiltinTheme("dark"), 16);
+TEST_CASE("FormatContextBreakdown: 有实测——总量用实测不带~、历史反推、三项和=实测") {
+    // sys=30000/3=10000、tools=15000/3=5000(仍字符估带 ~);实测 100000。
+    // 历史反推 = 100000-10000-5000 = 85000(不带 ~,行尾注反推口径)。
+    const auto lines = FormatContextBreakdown(30000, 15000, 60000, /*cache_read=*/0,
+                                               /*window=*/256000, /*measured=*/100000, BuiltinTheme("dark"), 16);
+    REQUIRE(lines.size() == 9);
+    // 系统/工具照旧字符估带 ~。
+    CHECK(lines[1].find("~10k") != std::string::npos);
+    CHECK(lines[2].find("~5000") != std::string::npos);
+    // 历史 = 实测 - 系统 - 工具 = 85000,不带 ~,行尾注明反推。
+    CHECK(lines[3].find("85k") != std::string::npos);
+    CHECK(lines[3].find("~85k") == std::string::npos);
+    CHECK(lines[3].find("=实测总量−系统−工具") != std::string::npos);
+    // 已用 = 实测 100000,不带 ~,标 (实测);100000/256000 ≈ 39%。
     CHECK(lines[5].find("100k") != std::string::npos);
     CHECK(lines[5].find("~100k") == std::string::npos);
     CHECK(lines[5].find("(实测)") != std::string::npos);
-    // 100000/256000 ≈ 39%;剩余按实测扣:256000-100000=156000。
     CHECK(lines[5].find(" 39%") != std::string::npos);
+    // 剩余按实测扣:256000-100000=156000,不带 ~。
     CHECK(lines[7].find("156k") != std::string::npos);
+    CHECK(lines[7].find("~") == std::string::npos);
+    // 末行口径说明走"实测"支。
+    CHECK(lines[8].find("上一轮实测") != std::string::npos);
+    // 三分项之和 == 实测总量:10000+5000+85000 = 100000。
+    CHECK(10000 + 5000 + 85000 == 100000);
+}
+
+TEST_CASE("FormatContextBreakdown: 无实测——三项纯字符估、整体带~、注明启动估算") {
+    // 30000/3=10000、15000/3=5000、60000/3=20000;实测 0。
+    const auto lines = FormatContextBreakdown(30000, 15000, 60000, /*cache_read=*/0,
+                                               /*window=*/256000, /*measured=*/0, BuiltinTheme("dark"), 16);
+    REQUIRE(lines.size() == 9);
+    CHECK(lines[3].find("~20k") != std::string::npos);
+    CHECK(lines[3].find("=实测总量") == std::string::npos);  // 无实测不注反推
+    // 已用 = 三类之和 35000,带 ~、不标 (实测)。
+    CHECK(lines[5].find("~35k") != std::string::npos);
+    CHECK(lines[5].find("(实测)") == std::string::npos);
+    CHECK(lines[8].find("尚无实测") != std::string::npos);
+}
+
+TEST_CASE("FormatContextBreakdown: 实测 < 系统+工具,历史钉 0") {
+    // sys=30000/3=10000、tools=15000/3=5000,合计 15000;实测 9000 < 15000。
+    const auto lines = FormatContextBreakdown(30000, 15000, 60000, /*cache_read=*/0,
+                                               /*window=*/256000, /*measured=*/9000, BuiltinTheme("dark"), 16);
+    // 历史反推下限钉 0,不带 ~,仍注反推口径。
+    CHECK(lines[3].find(" 0") != std::string::npos);
+    CHECK(lines[3].find("=实测总量−系统−工具") != std::string::npos);
+    CHECK(CountOccurrences(lines[3], "█") == 0);
+    // 已用 = 实测 9000,不带 ~。
+    CHECK(lines[5].find("9000") != std::string::npos);
+    CHECK(lines[5].find("~9000") == std::string::npos);
 }
 
 TEST_CASE("FormatContextBreakdown: 超窗口截断——条形打满、百分比钉 100、剩余 0") {

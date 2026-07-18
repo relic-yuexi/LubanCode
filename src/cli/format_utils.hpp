@@ -36,16 +36,22 @@ std::string StatusLineInfoSegment(const std::string& model, int context_percent,
 std::string BuildStatusLineText(ConfirmMode mode, const std::string& model, int context_percent,
                                  std::int64_t used_tokens, std::int64_t window_tokens);
 
-// /context 裸敲的分类占用分析:系统提示/工具定义/对话历史三类,各拿字符数
-// 估 token(字符数/3,数字前带 ~),配一条按"占窗口比例"取整的条形图
-// (默认 16 格,█ 实 ░ 空;plain 主题回退 # 和 -,拿 theme.reset 是不是
-// 空串当探针——plain 全字段空串,真主题 reset 恒非空),之后是合计、自动
-// 压缩线(kAutoCompactThresholdPercent)、剩余,末尾一行估算口径说明。
-// 已用取"三类估算之和"与 measured_used_tokens(tracker 实测,通常更准)
-// 中较大者,用实测时行尾标"(实测)"、数字不带 ~。cache_read_tokens > 0
-// 时对话历史行尾括注缓存命中量。window_tokens 为 0 不除零,百分比一律 0;
-// 占比超 100% 截断(条形打满、百分比钉在 100)。数字全走 FormatTokenCount。
-// 返回逐行文本(行内不带换行符),打印由调用方管。
+// /context 裸敲的分类占用分析:系统提示/工具定义/对话历史三类,配一条按
+// "占窗口比例"取整的条形图(默认 16 格,█ 实 ░ 空;plain 主题回退 # 和 -,
+// 拿 theme.reset 是不是空串当探针——plain 全字段空串,真主题 reset 恒非空),
+// 之后是已用、自动压缩线(kAutoCompactThresholdPercent)、剩余,末尾一行口径
+// 说明。
+// measured_used_tokens 是 tracker 实测(最近一次请求的 usage 精确 token),
+// 是唯一该信的数,分两支:
+//   实测 > 0(至少发过一轮请求)——已用/剩余/压缩百分比一律用实测,不带 ~;
+//     系统提示、工具仍按字符数/3 估(带 ~,可单独算的确定部分),历史 =
+//     max(0, 实测总量 - 系统 - 工具)反推(不带 ~,行尾注"=实测总量−系统−
+//     工具"),三分项之和恒等于实测总量;已用行尾标"(实测)"。
+//   实测 == 0(如刚启动)——三项全用字符估(字符数/3),整体带 ~,末行注明
+//     "尚无实测,启动估算"。
+// cache_read_tokens > 0 时对话历史行尾括注缓存命中量。window_tokens 为 0
+// 不除零,百分比一律 0;占比超 100% 截断(条形打满、百分比钉在 100)。数字
+// 全走 FormatTokenCount。返回逐行文本(行内不带换行符),打印由调用方管。
 std::vector<std::string> FormatContextBreakdown(std::size_t sys_chars, std::size_t tools_chars,
                                                  std::size_t history_chars, std::int64_t cache_read_tokens,
                                                  std::size_t window_tokens, std::size_t measured_used_tokens,
