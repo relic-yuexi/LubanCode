@@ -31,6 +31,9 @@ json ContentBlockToJson(const ContentBlock& block) {
             using T = std::decay_t<decltype(b)>;
             if constexpr (std::is_same_v<T, TextBlock>) {
                 return json{{"type", "text"}, {"text", b.text}};
+            } else if constexpr (std::is_same_v<T, ImageBlock>) {
+                return json{{"type", "image"},
+                            {"source", json{{"type", "base64"}, {"media_type", b.media_type}, {"data", b.data}}}};
             } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
                 return json{{"type", "tool_use"}, {"id", b.id}, {"name", b.name}, {"input", b.input}};
             } else if constexpr (std::is_same_v<T, ToolResultBlock>) {

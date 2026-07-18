@@ -15,6 +15,8 @@ std::size_t BlockChars(const api::ContentBlock& block) {
             using T = std::decay_t<decltype(b)>;
             if constexpr (std::is_same_v<T, api::TextBlock>) {
                 return b.text.size();
+            } else if constexpr (std::is_same_v<T, api::ImageBlock>) {
+                return b.media_type.size() + b.data.size() + b.filename.size();
             } else if constexpr (std::is_same_v<T, api::ToolUseBlock>) {
                 return b.name.size() + b.id.size() + b.input.dump().size();
             } else if constexpr (std::is_same_v<T, api::ToolResultBlock>) {
@@ -45,7 +47,7 @@ bool IsUserTurnStart(const api::Message& message) {
         return true;  // 理论上不会出现,防御性地当成一轮开始
     }
     for (const auto& block : message.content) {
-        if (std::holds_alternative<api::TextBlock>(block)) {
+        if (std::holds_alternative<api::TextBlock>(block) || std::holds_alternative<api::ImageBlock>(block)) {
             return true;
         }
     }

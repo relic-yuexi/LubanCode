@@ -471,3 +471,24 @@ TEST_CASE("上下文硬上限:裁剪与截断后仍超限(单条用户输入就�
     CHECK(result.error().find("上下文") != std::string::npos);
     CHECK(backend.captured_requests.empty());  // 一次请求都没发出去
 }
+
+TEST_CASE("图片用户消息入历史，下一轮请求仍带着") {
+    FakeBackend backend;
+    backend.scripts = {TextOnlyScript("看到了"), TextOnlyScript("还在")};
+    tools::ToolRegistry registry;
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    agent::Callbacks callbacks;
+
+    api::Message image_message;
+    image_message.role = api::Role::User;
+    image_message.content.push_back(api::ImageBlock{"image/png", "aW1hZ2U=", "error.png", 100, 50});
+    REQUIRE(loop.Run(std::move(image_message), callbacks).has_value());
+    REQUIRE(loop.Run("再说一句", callbacks).has_value());
+
+    REQUIRE(backend.captured_requests.size() == 2);
+    REQUIRE(backend.captured_requests[1].messages.size() >= 3);
+    const auto* image = std::get_if<api::ImageBlock>(&backend.captured_requests[1].messages[0].content[0]);
+    REQUIRE(image != nullptr);
+    CHECK(image->filename == "error.png");
+    CHECK(image->data == "aW1hZ2U=");
+}

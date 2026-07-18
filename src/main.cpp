@@ -24,6 +24,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -43,6 +44,7 @@
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
+#include "cli/image_input.hpp"
 #include "cli/markdown.hpp"
 #include "cli/setup_wizard.hpp"
 #include "cli/slash_commands.hpp"
@@ -1984,6 +1986,20 @@ struct RunTurnResult {
     std::vector<std::string> queued_lines;
 };
 
+std::string ImageInputErrorText(const lubancode::cli::ImageInputError& error) {
+    using Kind = lubancode::cli::ImageInputErrorKind;
+    switch (error.kind) {
+        case Kind::MissingPath: return tr("error.image.missing_path");
+        case Kind::NotFound: return trf("error.image.not_found", error.path);
+        case Kind::NotRegularFile: return trf("error.image.not_regular", error.path);
+        case Kind::UnsupportedType: return trf("error.image.unsupported", error.path);
+        case Kind::TooLarge: return trf("error.image.too_large", error.path);
+        case Kind::ReadFailed: return trf("error.image.read_failed", error.path);
+        case Kind::InvalidImage: return trf("error.image.invalid", error.path);
+    }
+    return trf("error.image.read_failed", error.path);
+}
+
 // 发一轮用户输入,走 agent loop(可能会有若干次工具调用来回),流式打字机
 // 打印回复,结束后打一行 token 用量统计(暗色/淡色,plain 主题下就是空
 // 前后缀)。always_allowed_tools 由调用方持有,记录本会话内选过"总是允许"
@@ -2014,6 +2030,17 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                        const bool* transcript_expanded = nullptr,
                        const std::vector<std::string>& allow_commands = {},
                        const std::vector<std::string>& deny_commands = {}) {
+    auto prepared_input = lubancode::cli::PrepareImageInput(user_input);
+    if (!prepared_input.has_value()) {
+        std::cerr << theme.error << tr("error.prefix") << ImageInputErrorText(prepared_input.error())
+                  << theme.reset << "\n";
+        return RunTurnResult{1};
+    }
+    for (const auto& image : prepared_input->attachments) {
+        std::cout << theme.stats << trf("image.attached", image.filename, image.width, image.height)
+                  << theme.reset << "\n";
+    }
+
     UsageStats usage_stats;
     // cancel_flag 先于 display/callbacks 建:ToolDisplay 要拿它判断"这一轮
     // 是不是被 ESC 打断的"(打断态条目标 Interrupted)。
@@ -2045,7 +2072,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     // 线程抢 stdin,跟 StreamBodyTracker 的重画一样诚实关掉。
     lubancode::cli::BeginStreamFooter(theme, is_console && lubancode::platform::SupportsScreenRepaint());
 
-    const auto result = loop.Run(user_input, callbacks, &cancel_flag);
+    const auto result = loop.Run(std::move(prepared_input->message), callbacks, &cancel_flag);
 
     // Run() 已经返回,不管是不是被打断——立刻收线程,保证下一次 ReadLine()
     // (排队回显的 "> " 或者下一轮主提示符)开始之前监听线程已经彻底退出。
@@ -2167,6 +2194,8 @@ std::size_t EstimateHistoryChars(const std::vector<lubancode::api::Message>& his
                     using T = std::decay_t<decltype(b)>;
                     if constexpr (std::is_same_v<T, lubancode::api::TextBlock>) {
                         total += b.text.size();
+                    } else if constexpr (std::is_same_v<T, lubancode::api::ImageBlock>) {
+                        total += b.media_type.size() + b.data.size() + b.filename.size();
                     } else if constexpr (std::is_same_v<T, lubancode::api::ToolUseBlock>) {
                         total += b.name.size() + b.input.dump().size();
                     } else if constexpr (std::is_same_v<T, lubancode::api::ToolResultBlock>) {
@@ -3261,6 +3290,10 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                         first_text = tb->text;
                         break;
                     }
+                    if (const auto* image = std::get_if<lubancode::api::ImageBlock>(&block)) {
+                        first_text = image->filename;
+                        break;
+                    }
                 }
                 break;
             }
@@ -3312,7 +3345,8 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     // 触发了 /exit,外层循环该退出了。
     const auto process_line = [&](const std::string& content) -> bool {
         const lubancode::cli::ParsedSlashCommand parsed = lubancode::cli::ParseSlashCommand(content);
-        if (parsed.command != lubancode::cli::SlashCommand::NotSlash) {
+        if (parsed.command != lubancode::cli::SlashCommand::NotSlash &&
+            parsed.command != lubancode::cli::SlashCommand::Image) {
             switch (parsed.command) {
                 case lubancode::cli::SlashCommand::Help:
                     PrintSlashHelp();

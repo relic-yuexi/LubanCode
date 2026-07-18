@@ -337,3 +337,14 @@ TEST_CASE("向导语言步: 直接回车按默认(当前语言),后续文案维�
     CHECK(outcome->config.language == "zh-CN");
     CHECK(scripted.AnyPrintedContains("接口格式:"));
 }
+
+TEST_CASE("图片界面文案中英都有") {
+    LangGuard guard;
+    cli::SetLanguage("zh-CN");
+    CHECK(cli::trf("image.attached", "err.png", 12, 34) == "[图片] 已附 err.png (12x34)");
+    CHECK(cli::tr("error.image.too_large").find("5MB") != std::string::npos);
+
+    cli::SetLanguage("en");
+    CHECK(cli::trf("image.attached", "err.png", 12, 34) == "[image] attached err.png (12x34)");
+    CHECK(cli::tr("error.image.too_large").find("5MB") != std::string::npos);
+}

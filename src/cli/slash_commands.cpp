@@ -92,6 +92,8 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
     } else if (lower == "/language" || lower == "/lang") {
         // /lang 是 /language 的省事别名,跟 LUBANCODE_LANG 环境变量对得上口。
         parsed.command = SlashCommand::Language;
+    } else if (lower == "/image") {
+        parsed.command = SlashCommand::Image;
     } else {
         parsed.command = SlashCommand::Unknown;
     }
@@ -111,6 +113,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/model", tr("slash.desc.model")},
             {"/config", tr("slash.desc.config")},
             {"/language", tr("slash.desc.language")},
+            {"/image", tr("slash.desc.image")},
             {"/clear", tr("slash.desc.clear")},
             {"/exit", tr("slash.desc.exit")},
             {"/context", tr("slash.desc.context")},

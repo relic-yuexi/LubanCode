@@ -124,3 +124,20 @@ TEST_CASE("reasoning_effort 是映射表之外的字符串:不写 thinking 字�
     CHECK(captured.str().find("extreme") != std::string::npos);
     CHECK(captured.str().find("警告") != std::string::npos);
 }
+
+TEST_CASE("用户图片映射成 Anthropic image/base64 block") {
+    Request request;
+    Message user;
+    user.role = Role::User;
+    user.content.push_back(TextBlock{"看看报错"});
+    user.content.push_back(ImageBlock{"image/png", "aGVsbG8=", "error.png", 640, 480});
+    request.messages.push_back(user);
+
+    const auto body = BuildRequestJson(request);
+    const auto& content = body.at("messages").at(0).at("content");
+    REQUIRE(content.size() == 2);
+    CHECK(content.at(1).at("type") == "image");
+    CHECK(content.at(1).at("source").at("type") == "base64");
+    CHECK(content.at(1).at("source").at("media_type") == "image/png");
+    CHECK(content.at(1).at("source").at("data") == "aGVsbG8=");
+}

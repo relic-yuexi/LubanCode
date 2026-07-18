@@ -33,6 +33,7 @@ enum class SlashCommand {
     Soul,      // /soul [内容|clear|名字|off|default]:魂(风格叠加层)查看/设置
     Prompt,    // /prompt [reset]:看法(系统提示词)的来源,或还原 system_prompt.md
     Language,  // /language [语言码]:列可选界面语言/切换(i18n)
+    Image,     // /image <路径...>:附一张或多张本地图片
     Unknown,  // 以 / 开头,但不认得这个命令
 };
 

@@ -225,3 +225,20 @@ TEST_CASE("reasoning_effort 是任意字符串(含 anthropic 专属档位名、�
         CHECK(body.at("reasoning").at("effort") == level);
     }
 }
+
+TEST_CASE("用户图片映射成 Responses input_image data URL") {
+    Request request;
+    Message user;
+    user.role = Role::User;
+    user.content.push_back(TextBlock{"看看报错"});
+    user.content.push_back(ImageBlock{"image/png", "aGVsbG8=", "error.png", 640, 480});
+    request.messages.push_back(user);
+
+    const auto body = BuildRequestJson(request);
+    REQUIRE(body.at("input").size() == 1);
+    const auto& content = body.at("input").at(0).at("content");
+    REQUIRE(content.size() == 2);
+    CHECK(content.at(0).at("type") == "input_text");
+    CHECK(content.at(1).at("type") == "input_image");
+    CHECK(content.at(1).at("image_url") == "data:image/png;base64,aGVsbG8=");
+}

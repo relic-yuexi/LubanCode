@@ -91,6 +91,11 @@ public:
     std::expected<RunOutcome, std::string> Run(const std::string& user_input, const Callbacks& callbacks,
                                                 const std::atomic<bool>* cancel = nullptr);
 
+    // 跟字符串入口同义，只是调用方已经把本地图片装进 user_message 了。图片
+    // 也须原样入 history，下一轮、重发、会话恢复才能带得上。
+    std::expected<RunOutcome, std::string> Run(api::Message user_message, const Callbacks& callbacks,
+                                                const std::atomic<bool>* cancel = nullptr);
+
     const std::vector<api::Message>& history() const { return history_; }
 
     // tool_search(延迟挂载):工具过滤谓词。设了之后,每轮请求的 tools

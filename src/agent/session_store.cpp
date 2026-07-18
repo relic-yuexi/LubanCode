@@ -44,6 +44,13 @@ nlohmann::json BlockToJson(const api::ContentBlock& block) {
             if constexpr (std::is_same_v<T, api::TextBlock>) {
                 j["type"] = "text";
                 j["text"] = b.text;
+            } else if constexpr (std::is_same_v<T, api::ImageBlock>) {
+                j["type"] = "image";
+                j["media_type"] = b.media_type;
+                j["data"] = b.data;
+                j["filename"] = b.filename;
+                j["width"] = b.width;
+                j["height"] = b.height;
             } else if constexpr (std::is_same_v<T, api::ToolUseBlock>) {
                 j["type"] = "tool_use";
                 j["id"] = b.id;
@@ -68,6 +75,18 @@ std::optional<api::ContentBlock> BlockFromJson(const nlohmann::json& j) {
     if (type == "text") {
         api::TextBlock b;
         b.text = j.value("text", std::string());
+        return api::ContentBlock{std::move(b)};
+    }
+    if (type == "image") {
+        api::ImageBlock b;
+        b.media_type = j.value("media_type", std::string());
+        b.data = j.value("data", std::string());
+        b.filename = j.value("filename", std::string());
+        b.width = j.value("width", 0U);
+        b.height = j.value("height", 0U);
+        if (b.media_type.empty() || b.data.empty()) {
+            return std::nullopt;
+        }
         return api::ContentBlock{std::move(b)};
     }
     if (type == "tool_use") {
@@ -609,6 +628,12 @@ std::string ExportSessionMarkdown(const SessionMeta& meta, const std::vector<api
                     text += "\n";
                 }
                 text += tb->text;
+            } else if (const auto* image = std::get_if<api::ImageBlock>(&block)) {
+                if (!text.empty()) {
+                    text += "\n";
+                }
+                text += "[图片] " + image->filename + " (" + std::to_string(image->width) + "x" +
+                        std::to_string(image->height) + ")";
             }
         }
         const bool assistant = message.role == api::Role::Assistant;
@@ -836,6 +861,10 @@ std::vector<SessionListEntry> ListSessions(const std::string& sessions_dir, std:
                     for (const auto& block : message->content) {
                         if (const auto* tb = std::get_if<api::TextBlock>(&block); tb != nullptr && !tb->text.empty()) {
                             entry.first_user_text = tb->text.substr(0, tb->text.find('\n'));
+                            break;
+                        }
+                        if (const auto* image = std::get_if<api::ImageBlock>(&block); image != nullptr) {
+                            entry.first_user_text = "[图片] " + image->filename;
                             break;
                         }
                     }
