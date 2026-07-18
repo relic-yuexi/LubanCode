@@ -2412,7 +2412,7 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
     if (args == "off") {
         current_soul->clear();
         current_soul_name = "off";
-        std::cout << tr("cmd.soul.off") << "\n";
+        std::cout << tr("cmd.soul.off") << "\n" << tr("cmd.soul.switch_hint") << "\n";
         return;
     }
 
@@ -2423,7 +2423,7 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
         if (lubancode::agent::StripPromptComments(*current_soul).empty()) {
             std::cout << tr("cmd.soul.empty_note");
         }
-        std::cout << "。\n";
+        std::cout << "。\n" << tr("cmd.soul.switch_hint") << "\n";
         return;
     }
 
@@ -2435,7 +2435,7 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
     }
     *current_soul = *content;
     current_soul_name = args;
-    std::cout << trf("cmd.soul.switched", args) << "\n";
+    std::cout << trf("cmd.soul.switched", args) << "\n" << tr("cmd.soul.switch_hint") << "\n";
 
     if (config_file_path.has_value()) {
         const std::optional<std::string> answer = lubancode::cli::ReadLine(tr("cmd.soul.write_prompt"));
@@ -2452,14 +2452,34 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
     }
 }
 
-// /prompt 命令:裸敲显示当前法(人格段)的来源和字数;/prompt reset 带
-// 二次确认,把 system_prompt.md 还原成内置默认(旧文件挪成 .bak)。
+// /prompt 命令:裸敲显示当前法(人格段)的来源和字数,外加各提示词模块
+// 的来源统计(用户文件/内置,0.21.x 运行时化);/prompt reset 带二次确认,
+// 把 system_prompt.md 还原成内置默认(旧文件挪成 .bak)。
 // persona 是本会话实际在用的人格段(空串 = 内置默认);law_source 是启动时
-// 算好的来源说明(CLI 参数/文件/内置)。
-void HandlePromptCommand(const std::string& args, const std::string& law_source, const std::string& persona) {
+// 算好的来源说明(CLI 参数/文件/内置);prompts_dir 是用户模块目录
+// (~/.lubancode/prompts,找不到主目录时空串)。
+void HandlePromptCommand(const std::string& args, const std::string& law_source, const std::string& persona,
+                          const std::string& prompts_dir) {
     if (args.empty()) {
-        const std::string& effective = persona.empty() ? lubancode::agent::DefaultPersona() : persona;
+        const std::string effective =
+            persona.empty() ? lubancode::agent::AssembledCorePersona(prompts_dir) : persona;
         std::cout << trf("cmd.prompt.info", law_source, CountUtf8Chars(effective)) << "\n";
+        if (!prompts_dir.empty()) {
+            const auto sources = lubancode::agent::PromptModuleSources(prompts_dir);
+            std::size_t modified_count = 0;
+            for (const auto& source : sources) {
+                if (source.from_user_file && source.differs_from_embedded) {
+                    ++modified_count;
+                }
+            }
+            std::cout << trf("cmd.prompt.modules_header", prompts_dir, modified_count, sources.size()) << "\n";
+            for (const auto& source : sources) {
+                const char* tag = !source.from_user_file          ? "cmd.prompt.module_builtin"
+                                  : source.differs_from_embedded ? "cmd.prompt.module_user_modified"
+                                                                  : "cmd.prompt.module_user_same";
+                std::cout << "  - " << source.rel_path << "  [" << tr(tag) << "]\n";
+            }
+        }
         return;
     }
     if (args != "reset") {
@@ -2744,6 +2764,13 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     const std::vector<lubancode::tools::SkillMeta> skills = lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir);
     const std::string skills_segment = lubancode::tools::BuildSkillsPromptSegment(skills);
 
+    // 提示词运行时化(0.21.x):用户模块目录(~/.lubancode/prompts)。
+    // AssembleSystemPrompt 每次拼装(启动构建 AgentLoop、/clear 重建)都
+    // 现读现拼——用户改了模块,开新会话即生效,不用重编不用重启。
+    const auto home_lubancode = lubancode::config::HomeLubancodeDir();
+    const std::string prompts_dir =
+        home_lubancode.has_value() ? (*home_lubancode + "/prompts") : std::string();
+
     std::unique_ptr<lubancode::api::Backend> real_backend = BuildBackend(config);
     auto current_model = std::make_shared<std::string>(config.model);
     auto current_think = std::make_shared<std::string>(config.think);
@@ -2862,11 +2889,15 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         };
     }
     if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry.Find("agent"));
-        agent_tool != nullptr && sub_deferral) {
-        agent_tool->SetToolFilter(tool_filter);
-        agent_tool->SetDeferredIndexProvider([&sub_registry, loaded_tools]() {
-            return lubancode::tools::BuildDeferredToolsIndexSegment(sub_registry, *loaded_tools);
-        });
+        agent_tool != nullptr) {
+        // 提示词运行时化:子代理系统提示同机制(features 模块用户文件优先)。
+        agent_tool->SetPromptsDir(prompts_dir);
+        if (sub_deferral) {
+            agent_tool->SetToolFilter(tool_filter);
+            agent_tool->SetDeferredIndexProvider([&sub_registry, loaded_tools]() {
+                return lubancode::tools::BuildDeferredToolsIndexSegment(sub_registry, *loaded_tools);
+            });
+        }
     }
     if (main_deferral) {
         std::cout << theme.stats << trf("tool_search.enabled", tool_search_threshold) << theme.reset << "\n";
@@ -3002,6 +3033,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     prompt_options.web = config.search.Configured();
     prompt_options.lsp = !config.lsp_servers.empty();
     prompt_options.wire = config.wire == lubancode::config::Wire::Responses ? "responses" : "anthropic";
+    prompt_options.prompts_dir = prompts_dir;  // 运行时模块:拼装时现读现拼
 
     std::optional<lubancode::agent::AgentLoop> loop;
     const auto rebuild_loop = [&]() {
@@ -3030,7 +3062,6 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     // 单发模式(AskOnce)不走这里,天然不落盘。
     // -----------------------------------------------------------------------
     const std::string wire_str = config.wire == lubancode::config::Wire::Responses ? "responses" : "anthropic";
-    const auto home_lubancode = lubancode::config::HomeLubancodeDir();
     const std::string sessions_dir =
         home_lubancode.has_value() ? (*home_lubancode + "/sessions") : std::string();
     lubancode::agent::SessionStore session_store(sessions_dir);
@@ -3155,7 +3186,11 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     // 全量,不丢内容。
                     persisted_count = (std::min)(persisted_count, loop->History().size());
                     if (compact_event.has_value() && session_store.active() && !session_store_broken) {
-                        session_store.AppendCompactEvent(*compact_event);
+                        // 写盘校验:compact 事件没落盘,存档里就没有压缩记录,
+                        // /resume 会按全量流水回放到压缩前状态——打警告说明白。
+                        if (!session_store.AppendCompactEvent(*compact_event)) {
+                            std::cout << theme.error << tr("session.compact_event_failed") << theme.reset << "\n";
+                        }
                     }
                     break;
                 }
@@ -3225,7 +3260,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     HandleSoulCommand(parsed.args, current_soul, current_soul_name, config_file_path);
                     break;
                 case lubancode::cli::SlashCommand::Prompt:
-                    HandlePromptCommand(parsed.args, law_source, persona);
+                    HandlePromptCommand(parsed.args, law_source, persona, prompts_dir);
                     break;
                 case lubancode::cli::SlashCommand::Exit:
                     return false;
@@ -3255,7 +3290,10 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                 // 落盘基线收到新长度,补写 compact 事件,理由同 /compact 分支。
                 persisted_count = (std::min)(persisted_count, loop->History().size());
                 if (session_store.active() && !session_store_broken) {
-                    session_store.AppendCompactEvent(compact_event);
+                    // 写盘校验,理由同 /compact 分支。
+                    if (!session_store.AppendCompactEvent(compact_event)) {
+                        std::cout << theme.error << tr("session.compact_event_failed") << theme.reset << "\n";
+                    }
                 }
                 std::cout << tr("compact.auto_done") << "\n";
             } else {
@@ -3339,6 +3377,11 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     const std::vector<lubancode::tools::SkillMeta> skills = lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir);
     const std::string skills_segment = lubancode::tools::BuildSkillsPromptSegment(skills);
 
+    // 提示词运行时化:单发模式同走用户模块目录,拼出去的结构跟交互模式一致。
+    const auto home_lubancode = lubancode::config::HomeLubancodeDir();
+    const std::string prompts_dir =
+        home_lubancode.has_value() ? (*home_lubancode + "/prompts") : std::string();
+
     std::unique_ptr<lubancode::api::Backend> backend = BuildBackend(config);
     // 单发模式没有 /think 命令,current_think 构造后不会再变,等价于直接
     // 按配置里的 think 发一次。
@@ -3406,11 +3449,14 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         };
     }
     if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry.Find("agent"));
-        agent_tool != nullptr && sub_deferral) {
-        agent_tool->SetToolFilter(tool_filter);
-        agent_tool->SetDeferredIndexProvider([&sub_registry, loaded_tools]() {
-            return lubancode::tools::BuildDeferredToolsIndexSegment(sub_registry, *loaded_tools);
-        });
+        agent_tool != nullptr) {
+        agent_tool->SetPromptsDir(prompts_dir);  // 子代理系统提示同机制
+        if (sub_deferral) {
+            agent_tool->SetToolFilter(tool_filter);
+            agent_tool->SetDeferredIndexProvider([&sub_registry, loaded_tools]() {
+                return lubancode::tools::BuildDeferredToolsIndexSegment(sub_registry, *loaded_tools);
+            });
+        }
     }
     DeferredIndexBackend index_backend(
         wrapped_backend, [&registry, loaded_tools, main_deferral]() {
@@ -3428,6 +3474,7 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     prompt_options.web = config.search.Configured();
     prompt_options.lsp = !config.lsp_servers.empty();
     prompt_options.wire = config.wire == lubancode::config::Wire::Responses ? "responses" : "anthropic";
+    prompt_options.prompts_dir = prompts_dir;  // 运行时模块:构造时现读现拼
 
     lubancode::agent::AgentLoop loop(
         index_backend, registry, config.model,
@@ -3573,12 +3620,15 @@ int RunCli(const std::vector<std::string>& args) {
         std::cout << trf("i18n.pack_warning", warning) << "\n";
     }
 
-    // 魂法分家(0.16.x):每次启动查漏补缺——~/.lubancode/ 下的
-    // system_prompt.md(法)/ SOUL.md(魂)/ souls/wenyan.md(示例)缺哪样
-    // 补哪样,已存在的绝不覆盖。首启就是"三样全补"。静默做,不打输出
-    // (单发/管道模式的输出常被重定向,不该混进这些话)。
+    // 魂法分家(0.16.x)+ 提示词运行时化(0.21.x):每次启动查漏补缺——
+    // ~/.lubancode/ 下的 system_prompt.md(法)/ SOUL.md(魂)/ souls/
+    // wenyan.md(示例)/ prompts/{core,features,platforms}/*.md(运行时
+    // 模块,内容播种自嵌入版)缺哪样补哪样,已存在的绝不覆盖(唯一例外:
+    // 带管理标记的 lubancode-config/SKILL.md 随版本刷新)。静默做,不打
+    // 输出(单发/管道模式的输出常被重定向,不该混进这些话)。
     if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
-        lubancode::config::EnsurePromptScaffold(*luban_dir, lubancode::agent::DefaultPersona());
+        lubancode::config::EnsurePromptScaffold(*luban_dir, lubancode::agent::DefaultPersona(),
+                                                 lubancode::agent::PromptModuleSeeds());
     }
 
     // 模型目录(models.json):启动时读一次,坏 JSON/坏条目只打警告跳过,
@@ -3619,7 +3669,22 @@ int RunCli(const std::vector<std::string>& args) {
         const auto law_content = lubancode::config::ReadTextFileIfExists(law_path);
         persona = lubancode::agent::ResolvePersona(std::string(), law_content.value_or(std::string()));
         if (!persona.empty()) {
-            law_source = trf("law.file", law_path);
+            // 提示词运行时化(0.21.x):播种的法文件本来就是内置默认人格的
+            // 原样副本——CRLF 归一后跟嵌入默认逐字节相同,就当"用户没改过
+            // 法",人格留空,core 走运行时模块(prompts/core/*.md 用户文件
+            // 优先);真被用户改出内容差异,才整段替换 core,语义不变。
+            std::string normalized;
+            normalized.reserve(persona.size());
+            for (const char c : persona) {
+                if (c != '\r') {
+                    normalized += c;
+                }
+            }
+            if (normalized == lubancode::agent::DefaultPersona()) {
+                persona.clear();
+            } else {
+                law_source = trf("law.file", law_path);
+            }
         }
     }
 

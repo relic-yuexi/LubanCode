@@ -21,14 +21,15 @@ namespace {
 
 namespace fs = std::filesystem;
 
-constexpr const char* kDefaultLubancodeConfigSkillContent = R"SKILL(---
+constexpr const char* kLubancodeConfigSkillContent = R"SKILL(---
 name: lubancode-config
-description: lubancode 自身配置的完整说明,用户要求修改 lubancode 配置时先加载本技能
+description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/钩子/技能/语言/快捷键/会话),用户问及或要改 lubancode 自身时先加载本技能
 ---
+<!-- lubancode 系统维护,随版本自动更新;自定义请另建技能 -->
 
 # lubancode 配置手册
 
-用户要改 lubancode 配置，先看这份手册。先分清配置放在哪，再只改眼下要改的字段。`config.json` 顶层须是 JSON object；字段可只写一部分，缺的往下一级找。
+用户问起或要改 lubancode 自身(配置、soul、主题、模型、MCP、技能、会话……),先看这份手册。改配置先分清放在哪，再只改眼下要改的字段。`config.json` 顶层须是 JSON object；字段可只写一部分，缺的往下一级找。
 
 ## 配置文件与优先级
 
@@ -193,16 +194,47 @@ description: lubancode 自身配置的完整说明,用户要求修改 lubancode 
 ~/.lubancode/
   config.json                         主配置
   models.json                         模型目录，可选
-  system_prompt.md                    人格段，首启脚手架生成
-  SOUL.md                             默认风格叠加层，首启脚手架生成
+  system_prompt.md                    人格段(法)，首启脚手架生成
+  SOUL.md                             默认风格叠加层(魂)，首启脚手架生成
   souls/                              备选魂；首启附 wenyan.md
+  prompts/                            提示词运行时模块，首启播种自内置版
+    core/                             身份/干活方式/答话风格(默认人格)
+    features/                         各工具方针段
+    platforms/                        协议平台段
   sessions/                           会话存档
   plugins/                            DLL 与 Lua 插件
-  skills/lubancode-config/SKILL.md    本配置手册，首启脚手架生成
+  skills/lubancode-config/SKILL.md    本配置手册，随版本自动更新
   languages/                          预留
 ```
 
 `sessions/`、`plugins/`、`skills/`、`languages/` 都可按需出现。项目级的 `.lubancode/` 也能放 `config.json` 与 `skills/`；同名技能时项目级压过主目录级。
+
+## 魂(soul):风格叠加层与 souls/ 目录
+
+魂只影响答话的语气风格，注入在系统提示最后；工具照常调用，内容照常准确。
+
+- 默认魂是 `~/.lubancode/SOUL.md`。它默认只有一行注释、内容空白（空白 = 无效果）；写上风格指令就生效。
+- 添加一个新魂：在 `~/.lubancode/souls/` 下建 `<名字>.md`，正文写风格指令。例如加"猫娘"魂就写 `souls/catgirl.md`，正文写清语气规则（顶部可用 `<!-- 注释 -->` 写给人看的说明，注入前会剥掉）。
+- 切换：交互里 `/soul <名字>`（即时生效，下一轮请求换新系统提示）；`/soul off` 本会话关魂；`/soul default` 回 SOUL.md；`/soul` 裸敲列全部可用魂。
+- 持久化：配置 `soul` 字段或 `LUBANCODE_SOUL` 环境变量填魂名（不带 `.md`）。
+- 切魂后历史里的旧风格回答可能带偏几轮，`/clear` 立净。
+
+## 提示词运行时模块(prompts/)
+
+系统提示按模块拼装。`~/.lubancode/prompts/{core,features,platforms}/*.md` 首启播种自内置版；逐模块看：用户文件存在且非空就用文件，否则回退内置。
+
+- 改 `prompts/core/*.md` 可定制默认人格（身份/干活方式/答话风格）；改 `prompts/features/*.md` 可定制各工具方针段。
+- 改完开新会话即生效（`/clear` 或重启），不用重编不用重启进程。
+- 想回退内置：删掉对应文件或清空内容即可。
+- `system_prompt.md`（法）被用户改过且非空时整段替换 core 模块；`/prompt` 裸敲能看法的来源与各模块来源统计，`/prompt reset` 还原法文件。
+
+## 常用会话命令与快捷键
+
+- `/context` 看上下文占用；`/context 512k` 临时改窗口（只本会话）。
+- `/compact [重点]` 手动压缩历史成存档；占用超 80% 会自动压缩。
+- `/clear` 清空历史开新会话；`/resume`、`/sessions` 续聊与列存档；`/export` 导出 Markdown。
+- `/model`、`/think`、`/language`、`/soul`、`/prompt`、`/skills`、`/tools`、`/mcp`、`/lsp`、`/todos`、`/config` 各管一摊，`/help` 有全表。
+- 快捷键：Ctrl+O 切换紧凑/详细；Tab/Shift+Tab 在工具条目间移焦点；Ctrl+E 聚焦查看全文;ESC 打断当前轮。
 
 ## 常见任务
 
@@ -394,7 +426,13 @@ std::string DefaultWenyanSoulFileContent() {
            "工具照常调用,义理为先,辞章为后。\n";
 }
 
-std::vector<std::string> EnsurePromptScaffold(const std::string& lubancode_dir, const std::string& default_persona) {
+std::string DefaultLubancodeConfigSkillContent() {
+    return kLubancodeConfigSkillContent;
+}
+
+std::vector<std::string> EnsurePromptScaffold(
+    const std::string& lubancode_dir, const std::string& default_persona,
+    const std::vector<std::pair<std::string, std::string>>& prompt_modules) {
     std::vector<std::string> created;
     if (lubancode_dir.empty()) {
         return created;
@@ -424,7 +462,35 @@ std::vector<std::string> EnsurePromptScaffold(const std::string& lubancode_dir, 
     ensure_file(base / "system_prompt.md", DefaultSystemPromptFileContent(default_persona));
     ensure_file(base / "SOUL.md", DefaultSoulFileContent());
     ensure_file(souls_dir / "wenyan.md", DefaultWenyanSoulFileContent());
-    ensure_file(skills_dir / "lubancode-config" / "SKILL.md", kDefaultLubancodeConfigSkillContent);
+
+    // lubancode-config/SKILL.md:系统维护件。缺了排他新建;已存在时,带
+    // 管理标记(kManagedSkillMarker)且内容不等于当前内置版 → 覆盖刷新
+    // (随版本自动更新,不算新建不记账);无标记(用户自建、或改过删了
+    // 标记)→ 一个字不动。
+    const fs::path skill_path = skills_dir / "lubancode-config" / "SKILL.md";
+    if (CreateNewFileWithContent(skill_path, kLubancodeConfigSkillContent)) {
+        created.push_back(PathToUtf8(skill_path));
+    } else if (const auto existing = ReadTextFileIfExists(PathToUtf8(skill_path));
+               existing.has_value() && existing->find(kManagedSkillMarker) != std::string::npos &&
+               *existing != kLubancodeConfigSkillContent) {
+        WriteWholeFile(skill_path, kLubancodeConfigSkillContent);  // 写失败不吭声,下次启动再试
+    }
+
+    // 提示词运行时模块(0.21.x):~/.lubancode/prompts/<相对路径> 缺哪补哪,
+    // 内容 = 嵌入版(调用方递来的清单);已存在的绝不覆盖——用户改过的
+    // 模块就是要压过内置版,这正是运行时化的意义。
+    if (!prompt_modules.empty()) {
+        const fs::path prompts_dir = base / "prompts";
+        for (const auto& [rel_path, content] : prompt_modules) {
+            const fs::path module_path = prompts_dir / Utf8Path(rel_path);
+            std::error_code dir_ec;
+            fs::create_directories(module_path.parent_path(), dir_ec);
+            if (dir_ec) {
+                continue;
+            }
+            ensure_file(module_path, content + "\n");
+        }
+    }
     return created;
 }
 

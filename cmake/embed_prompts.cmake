@@ -1,6 +1,8 @@
 # 提示词模块编译期嵌入:把 src/prompts/{core,features,platforms}/*.md 读进
 # 一个生成头文件,每个模块一个 constexpr 字符串常量(raw string,定界符
-# LUBAN_MD),core 另给一个按文件名排序的指针数组(拼默认人格用)。
+# LUBAN_MD),core 另给一个按文件名排序的指针数组(拼默认人格用);另生成
+# 全模块的 {相对路径, 正文} 总表 kAllModules——运行时化(0.21.x)靠它:
+# 播种 ~/.lubancode/prompts/ 用户模块、拼装时逐模块判"用户文件还是内置"。
 # 构建期由 add_custom_command 调:
 #   cmake -DPROMPTS_DIR=<src/prompts> -DOUTPUT=<hpp> -P embed_prompts.cmake
 # 选"构建期生成"而非 configure 期 file(READ):.md 改一字,靠时间戳就能触发
@@ -40,6 +42,7 @@ function(embed_group group_prefix subdir array_name)
     list(APPEND _names "${_name}")
     string(APPEND _local "// ${subdir}/${_stem}.md\n")
     string(APPEND _local "inline constexpr const char ${_name}[] = R\"LUBAN_MD(${_content})LUBAN_MD\";\n\n")
+    string(APPEND _local_entries "    {\"${subdir}/${_stem}.md\", ${_name}},\n")
   endforeach()
   if(NOT _names)
     message(FATAL_ERROR "目录里一个可嵌入的 .md 都没有: ${PROMPTS_DIR}/${subdir}")
@@ -50,14 +53,24 @@ function(embed_group group_prefix subdir array_name)
     string(APPEND _local "inline constexpr const char* ${array_name}[] = {${_joined}};\n\n")
   endif()
   set(_body "${_body}${_local}" PARENT_SCOPE)
+  set(_entries "${_entries}${_local_entries}" PARENT_SCOPE)
 endfunction()
 
 set(_body "")
+set(_entries "")
 embed_group(kCore core kCoreModules)
 embed_group(kFeature features "")
 embed_group(kPlatform platforms "")
 
 string(APPEND _header "${_body}")
+string(APPEND _header "// 全部模块的 {相对路径, 嵌入正文} 总表,分组内按文件名排序、组序\n")
+string(APPEND _header "// core -> features -> platforms。播种用户目录模块、运行时逐模块判\n")
+string(APPEND _header "// \"用户文件还是内置\"都以这张表为准。\n")
+string(APPEND _header "struct EmbeddedModule {\n")
+string(APPEND _header "    const char* rel_path;\n")
+string(APPEND _header "    const char* content;\n")
+string(APPEND _header "};\n")
+string(APPEND _header "inline constexpr EmbeddedModule kAllModules[] = {\n${_entries}};\n\n")
 string(APPEND _header "}  // namespace lubancode::agent::embedded\n")
 
 # 内容没变就不动文件(时间戳不变,免得下游无谓重编)。

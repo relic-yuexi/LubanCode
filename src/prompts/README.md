@@ -1,10 +1,22 @@
-# 提示词模块(编译期嵌入)
+# 提示词模块(编译期嵌入 + 运行时用户覆盖)
 
 这个目录是系统提示词的**源码**。没有外部拼装脚本,没有生成产物落在这儿——
 构建时 `cmake/embed_prompts.cmake` 把各 .md 读进
-`<build>/generated/embedded_prompts.hpp`(每个模块一个 `constexpr` 字符串常量),
+`<build>/generated/embedded_prompts.hpp`(每个模块一个 `constexpr` 字符串常量,
+外加 `kAllModules` 的 `{相对路径, 正文}` 总表),
 运行时由 `src/agent/prompt_assembler.cpp` 的 `AssembleSystemPrompt()` 按条件拼装。
 改任何一个 .md,重新构建即生效,不用重新跑 cmake configure。
+
+## 运行时用户覆盖(0.21.x)
+
+嵌入版的角色是**默认值、播种源、回退源**。每次启动,`EnsurePromptScaffold`
+把全部模块播种到 `~/.lubancode/prompts/{core,features,platforms}/*.md`
+(缺哪补哪,已存在的绝不覆盖);拼装时(启动构建 AgentLoop、每次 /clear
+重建、子代理每次启动)逐模块现读现拼:用户文件存在且剥空白后非空就用文件,
+否则回退嵌入常量。用户改了模块,开新会话即生效,不用重编不用重启;删掉
+文件或清空内容即回退内置。`/prompt` 裸敲能看各模块来源(用户文件/内置)
+统计。注意:法(`~/.lubancode/system_prompt.md`)被用户改出内容差异时仍
+整段替换 core 模块;播种原样未改的法文件视同"内置默认",core 走运行时模块。
 
 ## 目录与拼装规则
 

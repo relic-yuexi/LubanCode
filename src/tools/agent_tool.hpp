@@ -85,6 +85,12 @@ public:
         deferred_index_provider_ = std::move(provider);
     }
 
+    // 提示词运行时化(0.21.x):用户模块目录(~/.lubancode/prompts)。设了
+    // 之后每次 execute() 新建子代理时,系统提示的 features 模块同走"用户
+    // 文件优先、嵌入回退"——跟主循环同机制。不设(默认空)= 只用嵌入版,
+    // 行为跟从前完全一样。
+    void SetPromptsDir(std::string prompts_dir) { prompts_dir_ = std::move(prompts_dir); }
+
     std::string name() const override;
     std::string description() const override;
     nlohmann::json input_schema() const override;
@@ -98,6 +104,7 @@ private:
     std::string model_;
     int default_max_turns_;
     std::string skills_segment_;
+    std::string prompts_dir_;  // 提示词运行时化:空 = 只用嵌入版
     Hooks hooks_;
     std::function<bool(const Tool&)> tool_filter_;            // tool_search:空 = 不过滤
     std::function<std::string()> deferred_index_provider_;    // tool_search:空 = 不注索引段

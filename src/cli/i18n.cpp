@@ -448,6 +448,7 @@ const Entry kZhCN[] = {
     {"cmd.soul.back_default", "已切回 SOUL.md"},
     {"cmd.soul.missing", "找不到魂 {0}({1})。/soul 裸敲能看可用列表。"},
     {"cmd.soul.switched", "已切换魂: {0}(本会话即时生效,下一轮请求换新系统提示)"},
+    {"cmd.soul.switch_hint", "提示:历史里的旧风格回答可能带偏几轮,/clear 立净。"},
     {"cmd.soul.write_prompt", "写进配置? [y/N]: "},
     {"cmd.prompt.info",
      "当前的法(系统提示词人格段):\n"
@@ -462,7 +463,11 @@ const Entry kZhCN[] = {
     {"cmd.prompt.reset_done", "已把 {0} 还原成内置默认"},
     {"cmd.prompt.old_file", ",旧文件在 {0}"},
     {"cmd.prompt.reset_tail", "本会话的法不变,下次启动按新文件生效。"},
-    {"law.builtin", "内置默认(编译期嵌入的 core 模块)"},
+    {"cmd.prompt.modules_header", "提示词模块({0};用户改过 {1}/{2} 个,改完开新会话生效):"},
+    {"cmd.prompt.module_user_modified", "用户文件·已改"},
+    {"cmd.prompt.module_user_same", "用户文件·同内置"},
+    {"cmd.prompt.module_builtin", "内置"},
+    {"law.builtin", "内置默认(core 模块拼装;~/.lubancode/prompts/core/ 可运行时覆盖)"},
     {"law.cli_arg", "CLI 参数 --system-prompt({0})"},
     {"law.config_file", "配置指定的人格文件({0})"},
     {"law.file", "文件 {0}"},
@@ -506,6 +511,7 @@ const Entry kZhCN[] = {
     {"cmd.clear.done", "已清空对话历史。"},
     {"session.create_failed", "[会话存档] 在 {0} 建档失败,本场对话不落盘(不影响继续聊)。"},
     {"session.append_failed", "[会话存档] 追加写入失败,后续不再落盘(不影响继续聊)。"},
+    {"session.compact_event_failed", "[会话存档] 存档事件写盘失败,/resume 将回放到压缩前状态。"},
 
     // ---- UI-D 画面提示 ----
     {"ui.expanded", "—— 详细模式(Ctrl+O 切回紧凑)——"},

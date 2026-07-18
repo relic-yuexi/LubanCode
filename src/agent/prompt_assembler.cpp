@@ -1,6 +1,12 @@
 #include "agent/prompt_assembler.hpp"
 
 #include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <optional>
+#include <sstream>
+#include <string_view>
+#include <system_error>
 
 #include "embedded_prompts.hpp"  // 构建期生成:<build>/generated/embedded_prompts.hpp
 
@@ -32,17 +38,124 @@ constexpr const char* kOsLabel =
     "Linux";
 #endif
 
+// UTF-8 字符串 -> fs::path,不走系统 ANSI 代码页(跟 config/tools 各处同一
+// 套写法;agent 层不依赖 config 层,这里自备一份小的)。
+std::filesystem::path Utf8Path(const std::string& utf8) {
+    return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(utf8.data()), utf8.size()));
+}
+
+// CRLF 归一 + 剥两端空白——跟 embed_prompts.cmake 嵌入时做的同一套归一,
+// 用户文件"没改内容只换了行尾"也能跟嵌入版逐字节对上。
+std::string NormalizeModuleText(const std::string& raw) {
+    std::string out;
+    out.reserve(raw.size());
+    for (const char c : raw) {
+        if (c != '\r') {
+            out += c;
+        }
+    }
+    std::size_t begin = 0;
+    while (begin < out.size() && (out[begin] == ' ' || out[begin] == '\t' || out[begin] == '\n')) {
+        ++begin;
+    }
+    std::size_t end = out.size();
+    while (end > begin && (out[end - 1] == ' ' || out[end - 1] == '\t' || out[end - 1] == '\n')) {
+        --end;
+    }
+    return out.substr(begin, end - begin);
+}
+
+// 读用户目录里的一个模块文件:存在、可读、归一后非空才算数,否则 nullopt
+// (= 回退嵌入版)。读盘失败不吭声——运行期永远有嵌入回退,不拦人。
+std::optional<std::string> ReadUserModule(const std::string& prompts_dir, const char* rel_path) {
+    if (prompts_dir.empty()) {
+        return std::nullopt;
+    }
+    const std::filesystem::path path = Utf8Path(prompts_dir) / Utf8Path(rel_path);
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec) || ec || std::filesystem::is_directory(path, ec)) {
+        return std::nullopt;
+    }
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+        return std::nullopt;
+    }
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    std::string content = NormalizeModuleText(buffer.str());
+    if (content.empty()) {
+        return std::nullopt;
+    }
+    return content;
+}
+
+// 按相对路径取模块正文:用户文件优先,嵌入版回退。
+std::string ModuleText(const std::string& prompts_dir, const embedded::EmbeddedModule& module) {
+    if (auto user = ReadUserModule(prompts_dir, module.rel_path); user.has_value()) {
+        return std::move(*user);
+    }
+    return module.content;
+}
+
+// kAllModules 里按相对路径找一条(找不到回退空——总表跟拼装代码同一次
+// 构建生成,正常永远找得到,防御而已)。
+const embedded::EmbeddedModule* FindModule(std::string_view rel_path) {
+    for (const auto& module : embedded::kAllModules) {
+        if (rel_path == module.rel_path) {
+            return &module;
+        }
+    }
+    return nullptr;
+}
+
+std::string ModuleByPath(const std::string& prompts_dir, std::string_view rel_path) {
+    const embedded::EmbeddedModule* module = FindModule(rel_path);
+    if (module == nullptr) {
+        return std::string();
+    }
+    return ModuleText(prompts_dir, *module);
+}
+
 }  // namespace
 
-std::string AssembledDefaultPersona() {
+std::string AssembledCorePersona(const std::string& prompts_dir) {
     std::string out;
-    for (const char* module : embedded::kCoreModules) {
+    for (const auto& module : embedded::kAllModules) {
+        if (std::string_view(module.rel_path).substr(0, 5) != "core/") {
+            continue;
+        }
         if (!out.empty()) {
             out += "\n\n";
         }
-        out += module;
+        out += ModuleText(prompts_dir, module);
     }
     return out;
+}
+
+std::string AssembledDefaultPersona() {
+    return AssembledCorePersona(std::string());
+}
+
+std::vector<std::pair<std::string, std::string>> PromptModuleSeeds() {
+    std::vector<std::pair<std::string, std::string>> seeds;
+    for (const auto& module : embedded::kAllModules) {
+        seeds.emplace_back(module.rel_path, module.content);
+    }
+    return seeds;
+}
+
+std::vector<PromptModuleSource> PromptModuleSources(const std::string& prompts_dir) {
+    std::vector<PromptModuleSource> sources;
+    for (const auto& module : embedded::kAllModules) {
+        PromptModuleSource source;
+        source.rel_path = module.rel_path;
+        if (const auto user = ReadUserModule(prompts_dir, module.rel_path); user.has_value()) {
+            source.from_user_file = true;
+            source.differs_from_embedded = *user != module.content;
+        }
+        sources.push_back(std::move(source));
+    }
+    return sources;
 }
 
 std::string BuildEnvironmentSegment(const std::string& cwd, const std::string& current_date) {
@@ -53,8 +166,9 @@ std::string BuildEnvironmentSegment(const std::string& cwd, const std::string& c
 }
 
 std::string AssembleSystemPrompt(const PromptOptions& options) {
-    // 人格:法/CLI 非空整段替换 core;空串回退嵌入的 core 模块。
-    std::string prompt = options.persona.empty() ? AssembledDefaultPersona() : options.persona;
+    // 人格:法/CLI 非空整段替换 core;空串走 core 模块(用户文件优先,
+    // 嵌入回退)。
+    std::string prompt = options.persona.empty() ? AssembledCorePersona(options.prompts_dir) : options.persona;
     const auto append = [&prompt](const std::string& segment) {
         prompt += "\n\n";
         prompt += segment;
@@ -63,31 +177,31 @@ std::string AssembleSystemPrompt(const PromptOptions& options) {
     append(BuildEnvironmentSegment(options.cwd, options.current_date));
 
     // 恒在的四件套:基础工具的方针跟着工具走,不跟人格走。
-    append(embedded::kFeature_files);
-    append(embedded::kFeature_shell);
-    append(embedded::kFeature_delegation);
-    append(embedded::kFeature_todo);
+    append(ModuleByPath(options.prompts_dir, "features/files.md"));
+    append(ModuleByPath(options.prompts_dir, "features/shell.md"));
+    append(ModuleByPath(options.prompts_dir, "features/delegation.md"));
+    append(ModuleByPath(options.prompts_dir, "features/todo.md"));
 
     // 条件注入:没启用的能力一个字不占。
     if (!options.skills_segment.empty()) {
-        append(embedded::kFeature_skills);
+        append(ModuleByPath(options.prompts_dir, "features/skills.md"));
         append(options.skills_segment);  // 模块讲规矩,清单紧随其后
     }
     if (options.web) {
-        append(embedded::kFeature_web);
+        append(ModuleByPath(options.prompts_dir, "features/web.md"));
     }
     if (options.mcp) {
-        append(embedded::kFeature_mcp);
+        append(ModuleByPath(options.prompts_dir, "features/mcp.md"));
     }
     if (options.lsp) {
-        append(embedded::kFeature_lsp);
+        append(ModuleByPath(options.prompts_dir, "features/lsp.md"));
     }
 
     // 平台段按 wire 注一个;认不出的 wire 不注,不瞎猜。
     if (options.wire == "anthropic") {
-        append(embedded::kPlatform_anthropic);
+        append(ModuleByPath(options.prompts_dir, "platforms/anthropic.md"));
     } else if (options.wire == "responses") {
-        append(embedded::kPlatform_responses);
+        append(ModuleByPath(options.prompts_dir, "platforms/responses.md"));
     }
     return prompt;
 }

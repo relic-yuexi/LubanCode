@@ -72,12 +72,17 @@ inline std::string WithDeferredToolsIndex(const std::string& system_prompt, cons
 // 0.19.x 起是 AssembleSystemPrompt 的薄壳(旧签名兼容:tools/agent_tool 和
 // 既有测试照旧调):mcp/web/lsp/wire 这些会话级开关走默认值(不注入),
 // 主循环(main.cpp)要按实际配置条件拼装时直接用 AssembleSystemPrompt。
+// prompts_dir(0.21.x 运行时化):用户模块目录(~/.lubancode/prompts),
+// 非空时逐模块"用户文件优先、嵌入回退";留空 = 只用嵌入版,旧调用方
+// (tools/agent_tool 不设时、既有测试)行为不变。
 inline std::string BuildSystemPrompt(const std::string& cwd, const std::string& custom_persona = std::string(),
-                                      const std::string& skills_segment = std::string()) {
+                                      const std::string& skills_segment = std::string(),
+                                      const std::string& prompts_dir = std::string()) {
     PromptOptions options;
     options.cwd = cwd;
     options.persona = custom_persona;
     options.skills_segment = skills_segment;
+    options.prompts_dir = prompts_dir;
     return AssembleSystemPrompt(options);
 }
 

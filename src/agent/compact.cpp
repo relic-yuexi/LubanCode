@@ -26,6 +26,39 @@ bool IsUserTurnStart(const api::Message& message) {
     return false;
 }
 
+// 剥两端空白(空格/制表/回车/换行)。空摘要拒收的判定用。
+std::string TrimWhitespace(const std::string& text) {
+    std::size_t begin = 0;
+    while (begin < text.size() &&
+           (text[begin] == ' ' || text[begin] == '\t' || text[begin] == '\r' || text[begin] == '\n')) {
+        ++begin;
+    }
+    std::size_t end = text.size();
+    while (end > begin &&
+           (text[end - 1] == ' ' || text[end - 1] == '\t' || text[end - 1] == '\r' || text[end - 1] == '\n')) {
+        --end;
+    }
+    return text.substr(begin, end - begin);
+}
+
+// 数 UTF-8 字符数(码点)——"过短"的门槛按字数算,字节数对中文没意义
+// (main.cpp 的 /prompt 有一份同样写法,那边在匿名命名空间里,不导出)。
+std::size_t CountUtf8Chars(const std::string& text) {
+    std::size_t count = 0;
+    for (const char c : text) {
+        if ((static_cast<unsigned char>(c) & 0xC0) != 0x80) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// 空/短摘要拒收的门槛:剥空白后不足 40 字,当压缩失败处理,历史不动。
+// 踩过的坑:模型有时把压缩请求当"续写"处理,只回一两个字(见下面
+// Compact() 里 prefill continuation 那段注释),这种残次摘要一旦顶替历史,
+// 记住的事实就全丢了——宁可失败保历史,不吞残次品。
+constexpr std::size_t kMinSummaryChars = 40;
+
 }  // namespace
 
 std::vector<api::Message> BuildCompactedHistory(const std::vector<api::Message>& history,
@@ -79,12 +112,20 @@ std::vector<api::Message> BuildCompactedHistory(const std::vector<api::Message>&
 std::expected<api::Message, api::Error> Compact(api::Backend& backend, const std::string& model,
                                                    const std::vector<api::Message>& history,
                                                    const std::string& focus) {
+    // 固定栏目的结构化存档:栏目头钉死,模型没得发挥——自由发挥的摘要
+    // 常把"猜的"和"证实的"搅在一起,回放时最坑人。
     std::string instruction =
-        "以上是到目前为止的对话历史。请把它压缩成一份存档:保留任务目标、关键决策、涉及的文件路径、"
-        "代码要点、尚未完成的事项;闲聊和过程细节(工具调用的中间试错、无关寒暄)可以舍弃。直接给出"
-        "压缩后的正文,不要加任何解释性的前后缀。";
+        "以上是到目前为止的对话历史。请把它压缩成一份存档,按以下栏目输出,栏目头逐字照写:\n"
+        "## 任务目标\n"
+        "## 已证实的事实\n"
+        "## 关键决策\n"
+        "## 涉及文件与符号\n"
+        "## 关键命令与结果\n"
+        "## 未完成事项\n"
+        "只写对话里确证过的内容,不许猜补;某栏没有内容就写\"(无)\"。闲聊和过程细节"
+        "(工具调用的中间试错、无关寒暄)可以舍弃。直接给出存档正文,不要加任何解释性的前后缀。";
     if (!focus.empty()) {
-        instruction += "重点保留:" + focus;
+        instruction += "另加一栏\"## 重点保留\",重点保留:" + focus;
     }
 
     api::Request request;
@@ -141,6 +182,13 @@ std::expected<api::Message, api::Error> Compact(api::Backend& backend, const std
         if (std::holds_alternative<api::TextBlock>(block)) {
             summary_text += std::get<api::TextBlock>(block).text;
         }
+    }
+
+    // 空/短摘要拒收:剥空白后为空、或不足 40 字,一律当失败——返回错误,
+    // 调用方不替换历史。宁可这次白压,不拿残次摘要顶掉真历史。
+    if (CountUtf8Chars(TrimWhitespace(summary_text)) < kMinSummaryChars) {
+        return std::unexpected(api::Error{
+            api::ErrorKind::Api, "摘要为空/过短(不足 40 字),历史未动", 0});
     }
 
     api::Message archive;
