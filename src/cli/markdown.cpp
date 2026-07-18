@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 
+#include "cli/latex_math.hpp"
 #include "cli/line_editor.hpp"  // DisplayWidthUtf8 / TruncateUtf8ToDisplayWidth
 
 namespace lubancode::cli {
@@ -53,6 +54,131 @@ std::string Trim(const std::string& s) {
     return s.substr(b, e - b);
 }
 
+// $ 定界符若先带反斜线，便只是正文里的美元号。找闭合符时也跳过转义。
+std::size_t FindClosingDollar(const std::string& text, std::size_t opening, bool block) {
+    const std::size_t step = block ? 2 : 1;
+    for (std::size_t pos = opening + step; pos < text.size();) {
+        if (text[pos] == '\\' && pos + 1 < text.size()) {
+            pos += 2;
+            continue;
+        }
+        if (text[pos] == '$' && (!block || pos + 1 < text.size() && text[pos + 1] == '$')) {
+            return pos;
+        }
+        ++pos;
+    }
+    return std::string::npos;
+}
+
+std::size_t FindBlockClose(const std::string& text, std::size_t first) {
+    for (std::size_t pos = first; pos + 1 < text.size();) {
+        if (text[pos] == '\\' && pos + 1 < text.size()) {
+            pos += 2;
+            continue;
+        }
+        if (text[pos] == '$' && text[pos + 1] == '$') {
+            return pos;
+        }
+        ++pos;
+    }
+    return std::string::npos;
+}
+
+bool IsInlineDollar(const std::string& text, std::size_t pos) {
+    return text[pos] == '$' && (pos == 0 || text[pos - 1] != '$') &&
+           (pos + 1 == text.size() || text[pos + 1] != '$');
+}
+
+std::string RenderInlineMathOnly(const std::string& text) {
+    std::string out;
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+        if (text[pos] == '\\' && pos + 1 < text.size() && text[pos + 1] == '$') {
+            out += '$';
+            pos += 2;
+            continue;
+        }
+        // 行内码里的字样原样放回，不能在其中认数学。
+        if (text[pos] == '`') {
+            const std::size_t close = text.find('`', pos + 1);
+            if (close != std::string::npos) {
+                out += text.substr(pos, close - pos + 1);
+                pos = close + 1;
+                continue;
+            }
+        }
+        if (IsInlineDollar(text, pos)) {
+            const std::size_t close = FindClosingDollar(text, pos, false);
+            if (close != std::string::npos && close > pos + 1) {
+                const auto rendered = RenderLatexInline(text.substr(pos + 1, close - pos - 1));
+                if (rendered) {
+                    out += *rendered;
+                    pos = close + 1;
+                    continue;
+                }
+            }
+        }
+        out += text[pos++];
+    }
+    return out;
+}
+
+struct MathBlock {
+    std::string latex;
+    std::vector<std::string> raw_lines;
+    std::size_t last_line = 0;
+};
+
+// 块级 $$ 只认从一行第一个非空白处起笔的写法；这是 Markdown 的常见形状，
+// 也免得把行中两枚美元号错当成整块公式。
+std::optional<MathBlock> ReadMathBlock(const std::vector<std::string>& lines, std::size_t first_line) {
+    const std::string& first = lines[first_line];
+    const std::size_t indent = LeadingSpaces(first);
+    if (first.compare(indent, 2, "$$") != 0) {
+        return std::nullopt;
+    }
+
+    MathBlock block;
+    block.raw_lines.push_back(first);
+    std::size_t content = indent + 2;
+    for (std::size_t line = first_line; line < lines.size(); ++line) {
+        const std::string& raw = lines[line];
+        if (line != first_line) {
+            block.raw_lines.push_back(raw);
+            content = 0;
+        }
+        const std::size_t close = FindBlockClose(raw, content);
+        if (close != std::string::npos) {
+            if (!Trim(raw.substr(close + 2)).empty()) {
+                return std::nullopt;
+            }
+            block.latex += raw.substr(content, close - content);
+            block.last_line = line;
+            return block;
+        }
+        block.latex += raw.substr(content);
+        block.latex += '\n';
+    }
+    return std::nullopt;
+}
+
+bool HasLatexDelimiter(const std::string& text) {
+    for (std::size_t pos = 0; pos < text.size(); ++pos) {
+        if (text[pos] == '\\') {
+            ++pos;
+            continue;
+        }
+        if (text[pos] != '$') {
+            continue;
+        }
+        const bool block = pos + 1 < text.size() && text[pos + 1] == '$';
+        const std::size_t close = FindClosingDollar(text, pos, block);
+        if (close != std::string::npos && close > pos + (block ? 2U : 1U)) {
+            return true;
+        }
+    }
+    return false;
+}
 // ---- 行首结构判定(检测与渲染共用一份,不写两遍) -------------------------
 
 // "# 标题":1~6 个 # 后面跟一个空格。返回级数,不是标题给 0。
@@ -141,6 +267,22 @@ std::vector<Run> ParseInline(const std::string& s, bool plain) {
     };
     std::size_t i = 0;
     while (i < s.size()) {
+        if (s[i] == '\\' && i + 1 < s.size() && s[i + 1] == '$') {
+            cur += '$';
+            i += 2;
+            continue;
+        }
+        if (IsInlineDollar(s, i)) {
+            const std::size_t close = FindClosingDollar(s, i, false);
+            if (close != std::string::npos && close > i + 1) {
+                const auto rendered = RenderLatexInline(s.substr(i + 1, close - i - 1));
+                if (rendered) {
+                    cur += *rendered;
+                    i = close + 1;
+                    continue;
+                }
+            }
+        }
         if (s[i] == '`') {
             const std::size_t close = s.find('`', i + 1);
             if (close != std::string::npos && close > i + 1) {
@@ -154,7 +296,7 @@ std::vector<Run> ParseInline(const std::string& s, bool plain) {
             const std::size_t close = s.find("**", i + 2);
             if (close != std::string::npos && close > i + 2) {
                 flush_cur();
-                const std::string inner = s.substr(i + 2, close - i - 2);
+                const std::string inner = RenderInlineMathOnly(s.substr(i + 2, close - i - 2));
                 runs.push_back(plain ? Run{"", inner, ""} : Run{"\x1b[1m", inner, "\x1b[22m"});
                 i = close + 2;
                 continue;
@@ -164,7 +306,7 @@ std::vector<Run> ParseInline(const std::string& s, bool plain) {
             // 斜体的门槛收紧一点:内容非空、首尾不是空格——"3 * 4 * 5" 这种
             // 乘号不该被吞成斜体(宁可漏渲染,不可错渲染)。
             if (close != std::string::npos && close > i + 1) {
-                const std::string inner = s.substr(i + 1, close - i - 1);
+                const std::string inner = RenderInlineMathOnly(s.substr(i + 1, close - i - 1));
                 if (inner.front() != ' ' && inner.back() != ' ') {
                     flush_cur();
                     runs.push_back(plain ? Run{"", inner, ""} : Run{"\x1b[3m", inner, "\x1b[23m"});
@@ -395,6 +537,9 @@ void FlushTable(std::vector<std::string>& table_buf, std::vector<std::string>& o
 // ---- 结构检测 -------------------------------------------------------------
 
 bool DetectMarkdownStructure(const std::string& text) {
+    if (HasLatexDelimiter(text)) {
+        return true;
+    }
     int consecutive_table = 0;
     for (const std::string& line : SplitLines(text)) {
         const std::string trimmed = line.substr(LeadingSpaces(line));
@@ -451,7 +596,9 @@ std::vector<std::string> RenderMarkdown(const std::string& text, const Theme& th
         }
     };
 
-    for (const std::string& line : SplitLines(text)) {
+    const std::vector<std::string> source_lines = SplitLines(text);
+    for (std::size_t line_index = 0; line_index < source_lines.size(); ++line_index) {
+        const std::string& line = source_lines[line_index];
         const std::size_t indent_spaces = LeadingSpaces(line);
         const std::string trimmed = line.substr(indent_spaces);
 
@@ -487,6 +634,22 @@ std::vector<std::string> RenderMarkdown(const std::string& text, const Theme& th
             continue;
         }
 
+        if (const auto math = ReadMathBlock(source_lines, line_index)) {
+            FlushTable(table_buf, out, theme, content_limit);
+            const auto rendered = RenderLatexBlock(math->latex);
+            if (rendered) {
+                for (const std::string& math_line : *rendered) {
+                    out.push_back(TruncatePlain(math_line, content_limit));
+                }
+            } else {
+                for (const std::string& raw : math->raw_lines) {
+                    out.push_back(TruncatePlain(raw, content_limit));
+                }
+            }
+            line_index = math->last_line;
+            continue;
+        }
+
         if (IsTableLine(trimmed)) {
             table_buf.push_back(line);
             continue;
@@ -497,7 +660,7 @@ std::vector<std::string> RenderMarkdown(const std::string& text, const Theme& th
             const std::string content = Trim(trimmed.substr(static_cast<std::size_t>(level) + 1));
             push_blank();
             if (plain) {
-                out.push_back(TruncatePlain(content, content_limit));
+                out.push_back(TruncatePlain(RenderInlineMathOnly(content), content_limit));
             } else {
                 std::string prefix = "\x1b[1m";
                 if (level <= 2) {
@@ -506,7 +669,7 @@ std::vector<std::string> RenderMarkdown(const std::string& text, const Theme& th
                 if (level == 1) {
                     prefix += "\x1b[4m";
                 }
-                out.push_back(prefix + TruncatePlain(content, content_limit) + theme.reset);
+                out.push_back(prefix + TruncatePlain(RenderInlineMathOnly(content), content_limit) + theme.reset);
             }
             out.push_back(std::string());
             continue;
