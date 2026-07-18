@@ -226,6 +226,44 @@ TEST_CASE("reasoning_effort 是任意字符串(含 anthropic 专属档位名、�
     }
 }
 
+// M12(原生 web_search):provider 开了 native_web_search 时,tools 数组里
+// 要追加 {"type":"web_search"} 一项——服务端原生联网搜索声明,跟本地
+// function 工具是两码事。
+
+TEST_CASE("native_web_search=false(默认)时不写 web_search 声明,行为跟现状一致") {
+    Request request;
+    const auto body = BuildRequestJson(request);
+    CHECK_FALSE(body.contains("tools"));
+
+    const auto body_explicit_false = BuildRequestJson(request, /*native_web_search=*/false);
+    CHECK_FALSE(body_explicit_false.contains("tools"));
+}
+
+TEST_CASE("native_web_search=true 且本地工具表为空时,tools 数组只有 web_search 一项") {
+    Request request;
+    const auto body = BuildRequestJson(request, /*native_web_search=*/true);
+    REQUIRE(body.contains("tools"));
+    REQUIRE(body.at("tools").size() == 1);
+    CHECK(body.at("tools")[0].at("type") == "web_search");
+    CHECK_FALSE(body.at("tools")[0].contains("name"));
+}
+
+TEST_CASE("native_web_search=true 且本地工具表非空时,web_search 追加在本地工具后面") {
+    Request request;
+    ToolDefinition def;
+    def.name = "read_file";
+    def.description = "读一个文件的内容";
+    def.input_schema = nlohmann::json{{"type", "object"}};
+    request.tools.push_back(def);
+
+    const auto body = BuildRequestJson(request, /*native_web_search=*/true);
+    REQUIRE(body.contains("tools"));
+    REQUIRE(body.at("tools").size() == 2);
+    CHECK(body.at("tools")[0].at("type") == "function");
+    CHECK(body.at("tools")[0].at("name") == "read_file");
+    CHECK(body.at("tools")[1].at("type") == "web_search");
+}
+
 TEST_CASE("用户图片映射成 Responses input_image data URL") {
     Request request;
     Message user;

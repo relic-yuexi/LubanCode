@@ -21,9 +21,12 @@ public:
     // M11(网络超时):connect_timeout_ms(连接超时,毫秒)、
     // stream_idle_timeout_secs(SSE 读空闲超时,秒,不是总时长上限)两个都有
     // 默认值,来自 config::kDefault*,main.cpp 用 Config 里实际生效的值调用。
+    // native_web_search:该端(ProviderConfig::native_web_search 镜像到
+    // Config::native_web_search)是否声明协议原生联网搜索,默认 false。
     ResponsesBackend(std::string base_url, std::string auth_token,
                       int connect_timeout_ms = config::kDefaultConnectTimeoutMs,
-                      int stream_idle_timeout_secs = config::kDefaultStreamIdleTimeoutSecs);
+                      int stream_idle_timeout_secs = config::kDefaultStreamIdleTimeoutSecs,
+                      bool native_web_search = false);
 
     std::expected<void, Error> send_stream(
         const Request& request,
@@ -35,6 +38,7 @@ private:
     std::string auth_token_;
     int connect_timeout_ms_;
     int stream_idle_timeout_secs_;
+    bool native_web_search_;
 };
 
 }  // namespace lubancode::api::responses

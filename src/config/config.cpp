@@ -493,6 +493,12 @@ std::expected<std::vector<ProviderConfig>, std::string> ParseProvidersConfig(
             }
             provider.context_window_tokens = *parsed_window;
         }
+        if (item.contains("native_web_search")) {
+            if (!item["native_web_search"].is_boolean()) {
+                return std::unexpected(prefix + " 里的 native_web_search 字段必须是布尔值");
+            }
+            provider.native_web_search = item["native_web_search"].get<bool>();
+        }
 
         const auto valid = ValidateProviderConfig(provider);
         if (!valid.has_value()) {
@@ -1314,6 +1320,11 @@ nlohmann::json ProvidersToJson(const std::vector<ProviderConfig>& providers) {
         }
         if (!provider.model_reasoning_effort.empty()) {
             item["model_reasoning_effort"] = provider.model_reasoning_effort;
+        }
+        // native_web_search 同理：默认 false，开了才落盘，没开的旧配置写
+        // 回后不多出这个键。
+        if (provider.native_web_search) {
+            item["native_web_search"] = provider.native_web_search;
         }
         out.push_back(std::move(item));
     }

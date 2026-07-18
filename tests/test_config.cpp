@@ -1784,6 +1784,77 @@ TEST_CASE("UpdateProvidersInConfigFile: api_key/model_reasoning_effort 设置了
     CHECK(reparsed->providers->front().model_reasoning_effort == "xhigh");
 }
 
+// ---------------------------------------------------------------------------
+// providers 新字段:native_web_search(可选,默认 false)。M12 原生 web_search
+// 声明,每个 provider 各自开关。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseFileConfigJson: providers 没写 native_web_search 时默认 false,旧配置读进来不报错") {
+    const auto parsed = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"minimax","base_url":"https://api.minimax.io/anthropic","wire":"anthropic"}]})",
+        "/tmp/config.json");
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->providers.has_value());
+    REQUIRE(parsed->providers->size() == 1);
+    CHECK_FALSE(parsed->providers->front().native_web_search);
+}
+
+TEST_CASE("ParseFileConfigJson: providers 写 native_web_search:true 时解出 true") {
+    const auto parsed = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"sub-openai","base_url":"https://cc.moontidef.work","wire":"responses",)"
+        R"("model":"gpt-5.5","native_web_search":true}]})",
+        "/tmp/config.json");
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->providers.has_value());
+    REQUIRE(parsed->providers->size() == 1);
+    CHECK(parsed->providers->front().native_web_search);
+}
+
+TEST_CASE("ParseFileConfigJson: providers 的 native_web_search 类型不对就报错") {
+    const auto bad = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"x","base_url":"https://a.test","wire":"anthropic","native_web_search":"yes"}]})",
+        "/tmp/config.json");
+    CHECK_FALSE(bad.has_value());
+    CHECK(bad.error().find("native_web_search") != std::string::npos);
+}
+
+TEST_CASE("UpdateProvidersInConfigFile: native_web_search=true 落盘,回读原样;=false 不落这个键") {
+    TempCwdDir cwd;
+    const std::filesystem::path path = std::filesystem::path(cwd.Path()) / ".lubancode" / "config.json";
+    cwd.WriteFile(".lubancode/config.json", R"({"providers":[]})");
+
+    const std::vector<config::ProviderConfig> providers{
+        {
+            .name = "sub-openai",
+            .base_url = "https://cc.moontidef.work",
+            .wire = config::Wire::Responses,
+            .model = "gpt-5.5",
+            .native_web_search = true,
+        },
+        {
+            .name = "minimax",
+            .base_url = "https://api.minimax.io/anthropic",
+            .wire = config::Wire::Anthropic,
+            .model = "MiniMax-M2",
+            .native_web_search = false,
+        },
+    };
+    REQUIRE(config::UpdateProvidersInConfigFile(path.string(), providers).has_value());
+
+    const nlohmann::json written = nlohmann::json::parse(cwd.ReadFile(".lubancode/config.json"));
+    REQUIRE(written["providers"].size() == 2);
+    CHECK(written["providers"][0]["native_web_search"] == true);
+    CHECK_FALSE(written["providers"][1].contains("native_web_search"));
+
+    // 回读能解析出同样的值(往返不丢字段)。
+    const auto reparsed = config::ParseFileConfigJson(written.dump(), path.string());
+    REQUIRE(reparsed.has_value());
+    REQUIRE(reparsed->providers.has_value());
+    REQUIRE(reparsed->providers->size() == 2);
+    CHECK(reparsed->providers->at(0).native_web_search);
+    CHECK_FALSE(reparsed->providers->at(1).native_web_search);
+}
+
 TEST_CASE("ProviderApiKey: api_key 非空时优先于 key_env,不管环境变量有没有设置") {
     config::ProviderConfig provider;
     provider.key_env = "LUBANCODE_TEST_PROVIDER_KEY_ENV_DOES_NOT_EXIST_XYZ";

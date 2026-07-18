@@ -15,7 +15,12 @@ namespace lubancode::api::responses {
 //               块变 function_call item;user 的 tool_result 块变
 //               function_call_output item)
 //   tools   -> [{"type":"function","name":...,"description":...,"parameters":input_schema}]
+//              request.tools 非空时,每个本地函数工具映射成一项;
+//              native_web_search=true 时额外追加 {"type":"web_search"} 一项
+//              (哪怕 request.tools 是空的也照样追加,声明的是服务端原生
+//              联网搜索,不是本地函数工具)
 //   max_tokens -> max_output_tokens
-nlohmann::json BuildRequestJson(const Request& request);
+// native_web_search 默认 false,不传就是现状行为零变化。
+nlohmann::json BuildRequestJson(const Request& request, bool native_web_search = false);
 
 }  // namespace lubancode::api::responses

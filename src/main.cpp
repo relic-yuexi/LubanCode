@@ -120,7 +120,8 @@ std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::C
     // 没配就是内置默认值),不是每次都硬编码默认值。
     if (config.wire == lubancode::config::Wire::Responses) {
         return std::make_unique<lubancode::api::responses::ResponsesBackend>(
-            config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs);
+            config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs,
+            config.native_web_search);
     }
     return std::make_unique<lubancode::api::anthropic::AnthropicBackend>(
         config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs);
@@ -2964,6 +2965,9 @@ void PrintProviderList(const std::vector<lubancode::config::ProviderConfig>& pro
         if (!provider.model_reasoning_effort.empty()) {
             extra += trf("cmd.provider.extra_effort", provider.model_reasoning_effort);
         }
+        if (provider.native_web_search) {
+            extra += tr("cmd.provider.extra_web_search");
+        }
         std::cout << trf("cmd.provider.line", provider.name, lubancode::config::ProviderWireName(provider.wire),
                           provider.base_url, model, provider.context_window_tokens, provider.key_env, extra, current)
                   << "\n";
@@ -3086,6 +3090,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             config.auth_token = *api_key;
             config.model = command.model.empty() ? provider->model : command.model;
             config.context_window_tokens = provider->context_window_tokens;
+            config.native_web_search = provider->native_web_search;
             *current_model = config.model;
             active_provider = provider->name;
             session_wire = lubancode::config::ProviderWireName(config.wire);

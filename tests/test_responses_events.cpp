@@ -192,6 +192,63 @@ TEST_CASE("未知事件类型静默跳过,不崩") {
     CHECK_FALSE(event.has_value());
 }
 
+// M12(原生 web_search):模型自己联网搜索时,output 里会多出一个
+// type:"web_search_call" 的条目(带 status/id/action,可选 results/
+// sources)。真正的搜索结果由模型消化后写进最终 message 的 output_text
+// 里(带 url_citation 标注),web_search_call 条目本身没有对应的 lubancode
+// 语义事件——跟 reasoning 一样静默跳过,不崩、不影响文本正常拼出来。
+TEST_CASE("response.output_item.added 类型是 web_search_call 时静默跳过") {
+    auto event = parse_event(Frame(
+        R"({"item":{"id":"ws_1","status":"in_progress","type":"web_search_call","action":{"type":"search","query":"今天天气"}},"output_index":0,"sequence_number":2,"type":"response.output_item.added"})"));
+    CHECK_FALSE(event.has_value());
+}
+
+TEST_CASE("response.output_item.done 类型是 web_search_call 时静默跳过(没有对应的开块)") {
+    auto event = parse_event(Frame(
+        R"({"item":{"id":"ws_1","status":"completed","type":"web_search_call","action":{"type":"search","query":"今天天气"},"results":[{"url":"https://example.com","title":"今天天气预报"}]},"output_index":0,"sequence_number":5,"type":"response.output_item.done"})"));
+    CHECK_FALSE(event.has_value());
+}
+
+TEST_CASE("完整的原生 web_search 流式响应:web_search_call 条目穿插在文本前后,不崩,最终文本正常拼出") {
+    SseFramer framer;
+    const std::string raw =
+        "data: {\"type\":\"response.created\",\"response\":{\"status\":\"queued\"},\"sequence_number\":0}\n\n"
+        "data: {\"type\":\"response.in_progress\",\"response\":{\"status\":\"in_progress\"},\"sequence_number\":1}\n\n"
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"ws_1\",\"status\":\"in_progress\",\"type\":\"web_search_call\",\"action\":{\"type\":\"search\",\"query\":\"今天天气\"}},\"output_index\":0,\"sequence_number\":2}\n\n"
+        "data: {\"type\":\"response.web_search_call.in_progress\",\"output_index\":0,\"item_id\":\"ws_1\",\"sequence_number\":3}\n\n"
+        "data: {\"type\":\"response.web_search_call.searching\",\"output_index\":0,\"item_id\":\"ws_1\",\"sequence_number\":4}\n\n"
+        "data: {\"type\":\"response.web_search_call.completed\",\"output_index\":0,\"item_id\":\"ws_1\",\"sequence_number\":5}\n\n"
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"ws_1\",\"status\":\"completed\",\"type\":\"web_search_call\",\"action\":{\"type\":\"search\",\"query\":\"今天天气\"}},\"output_index\":0,\"sequence_number\":6}\n\n"
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"msg_1\",\"content\":[],\"role\":\"assistant\",\"status\":\"in_progress\",\"type\":\"message\"},\"output_index\":1,\"sequence_number\":7}\n\n"
+        "data: {\"type\":\"response.output_text.delta\",\"content_index\":0,\"delta\":\"今天\",\"item_id\":\"msg_1\",\"output_index\":1,\"sequence_number\":8}\n\n"
+        "data: {\"type\":\"response.output_text.delta\",\"content_index\":0,\"delta\":\"晴,25度\",\"item_id\":\"msg_1\",\"output_index\":1,\"sequence_number\":9}\n\n"
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"msg_1\",\"content\":[{\"annotations\":[{\"type\":\"url_citation\",\"url\":\"https://example.com\",\"title\":\"今天天气预报\"}],\"text\":\"今天晴,25度\",\"type\":\"output_text\"}],\"role\":\"assistant\",\"status\":\"completed\",\"type\":\"message\"},\"output_index\":1,\"sequence_number\":10}\n\n"
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ws\",\"status\":\"completed\",\"output\":[{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"completed\"},{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"今天晴,25度\"}]}],\"usage\":{\"input_tokens\":30,\"output_tokens\":8,\"total_tokens\":38}},\"sequence_number\":11}\n\n";
+
+    std::vector<StreamEvent> events;
+    for (const SseFrame& frame : framer.feed(raw)) {
+        if (auto event = parse_event(frame); event.has_value()) {
+            events.push_back(*event);
+        }
+    }
+
+    // web_search_call 的 added/done、以及三个 response.web_search_call.*
+    // 子事件都静默跳过,不产生语义事件;只剩文本消息的 delta*2、
+    // output_item.done、response.completed 四个。
+    REQUIRE(events.size() == 4);
+    REQUIRE(std::holds_alternative<TextDelta>(events[0]));
+    CHECK(std::get<TextDelta>(events[0]).text == "今天");
+    REQUIRE(std::holds_alternative<TextDelta>(events[1]));
+    CHECK(std::get<TextDelta>(events[1]).text == "晴,25度");
+    REQUIRE(std::holds_alternative<ContentBlockDone>(events[2]));
+    CHECK(std::get<ContentBlockDone>(events[2]).index == 1);
+    REQUIRE(std::holds_alternative<MessageDone>(events[3]));
+    const auto& done = std::get<MessageDone>(events[3]);
+    CHECK(done.stop_reason == "end_turn");  // output 里 web_search_call 不是 function_call,不当 tool_use
+    CHECK(done.usage.input_tokens == 30);
+    CHECK(done.usage.output_tokens == 8);
+}
+
 TEST_CASE("坏掉的 JSON 不会崩,只是跳过") {
     auto event = parse_event(Frame("{not valid json"));
     CHECK_FALSE(event.has_value());

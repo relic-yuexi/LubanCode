@@ -62,17 +62,18 @@ std::string ClassifyNetworkError(const cpr::Error& error, bool received_any_byte
 }  // namespace
 
 ResponsesBackend::ResponsesBackend(std::string base_url, std::string auth_token, int connect_timeout_ms,
-                                    int stream_idle_timeout_secs)
+                                    int stream_idle_timeout_secs, bool native_web_search)
     : base_url_(std::move(base_url)),
       auth_token_(std::move(auth_token)),
       connect_timeout_ms_(connect_timeout_ms),
-      stream_idle_timeout_secs_(stream_idle_timeout_secs) {}
+      stream_idle_timeout_secs_(stream_idle_timeout_secs),
+      native_web_search_(native_web_search) {}
 
 std::expected<void, Error> ResponsesBackend::send_stream(
     const Request& request,
     const std::function<void(const StreamEvent&)>& on_event,
     const std::atomic<bool>* cancel) {
-    const json body = BuildRequestJson(request);
+    const json body = BuildRequestJson(request, native_web_search_);
     const std::string body_str = body.dump();
 
     SseFramer framer;

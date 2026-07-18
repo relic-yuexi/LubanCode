@@ -45,7 +45,7 @@ json ContentBlockToItem(const ContentBlock& block, Role role) {
 
 }  // namespace
 
-nlohmann::json BuildRequestJson(const Request& request) {
+nlohmann::json BuildRequestJson(const Request& request, bool native_web_search) {
     json body;
     body["model"] = request.model;
     body["max_output_tokens"] = request.max_tokens;
@@ -113,7 +113,10 @@ nlohmann::json BuildRequestJson(const Request& request) {
     }
     body["input"] = input;
 
-    if (!request.tools.empty()) {
+    // native_web_search 是服务端原生能力声明,跟 request.tools(本地函数
+    // 工具)是两码事——就算本地工具表是空的,只要开关开着也要能声明,所以
+    // 这里不能再用 "!request.tools.empty()" 当建不建 tools 字段的唯一门槛。
+    if (!request.tools.empty() || native_web_search) {
         json tools = json::array();
         for (const auto& tool : request.tools) {
             tools.push_back(json{
@@ -122,6 +125,9 @@ nlohmann::json BuildRequestJson(const Request& request) {
                 {"description", tool.description},
                 {"parameters", tool.input_schema},
             });
+        }
+        if (native_web_search) {
+            tools.push_back(json{{"type", "web_search"}});
         }
         body["tools"] = tools;
     }
