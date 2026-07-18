@@ -258,3 +258,9 @@ TEST_CASE("AllSlashCommands: /tools 在列表里") {
     }
     CHECK(has_tools);
 }
+
+TEST_CASE("ParseSlashCommand: /image 识别为附图命令") {
+    const auto parsed = cli::ParseSlashCommand("/image screenshots/err.png");
+    CHECK(parsed.command == cli::SlashCommand::Image);
+    CHECK(parsed.args == "screenshots/err.png");
+}

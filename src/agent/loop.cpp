@@ -106,6 +106,14 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(const std::string& user_in
     api::Message user_message;
     user_message.role = api::Role::User;
     user_message.content.push_back(api::TextBlock{user_input});
+    return Run(std::move(user_message), callbacks, cancel);
+}
+
+std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message, const Callbacks& callbacks,
+                                                        const std::atomic<bool>* cancel) {
+    if (user_message.role != api::Role::User || user_message.content.empty()) {
+        return std::unexpected("用户消息为空，无法发送。");
+    }
     history_.push_back(std::move(user_message));
 
     for (int turn = 0; turn < max_turns_; ++turn) {

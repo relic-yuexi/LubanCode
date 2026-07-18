@@ -22,6 +22,16 @@ struct TextBlock {
     std::string text;
 };
 
+// 用户附上的图片。data 存不带 data URL 前缀的 base64，方便两套 wire 各按
+// 自家的格式包一层；filename/宽高只给本地界面、会话存档和导出展示用。
+struct ImageBlock {
+    std::string media_type;
+    std::string data;
+    std::string filename;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+};
+
 // 模型发起的一次工具调用请求。
 struct ToolUseBlock {
     std::string id;
@@ -36,7 +46,7 @@ struct ToolResultBlock {
     bool is_error = false;
 };
 
-using ContentBlock = std::variant<TextBlock, ToolUseBlock, ToolResultBlock>;
+using ContentBlock = std::variant<TextBlock, ImageBlock, ToolUseBlock, ToolResultBlock>;
 
 // ---------------------------------------------------------------------------
 // 消息

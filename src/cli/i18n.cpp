@@ -89,6 +89,7 @@ const Entry kZhCN[] = {
      "  /soul           列出可用的魂;/soul 名字 切换风格叠加层(即时生效),/soul off 关,\n"
      "                  /soul default 回 SOUL.md\n"
      "  /prompt         看当前法(系统提示词)的来源和字数;/prompt reset 还原 system_prompt.md\n"
+     "  /image 路径     附本地图片(也可在消息里写 @路径；支持 png/jpg/jpeg/gif/webp，每张不超过 5MB)\n"
      "  Shift+Enter     输入框里插一个换行,写多行消息(Alt+Enter 同义;注意 Windows Terminal\n"
      "                  默认把 Alt+Enter 绑成全屏切换、会吞掉这个键,用 Shift+Enter 最稳);\n"
      "                  Enter 把整段(多行拼换行)一次发出,空白内容按 Enter 原地不动\n"
@@ -172,6 +173,7 @@ const Entry kZhCN[] = {
      "  /soul           列出可用的魂;/soul 名字 切换(即时生效),/soul off 关,\n"
      "                  /soul default 回 SOUL.md\n"
      "  /prompt         看当前法(系统提示词)的来源和字数;/prompt reset 还原 system_prompt.md\n"
+     "  /image 路径     附本地图片(也可在消息里写 @路径；支持 png/jpg/jpeg/gif/webp，每张不超过 5MB)\n"
      "  /exit           退出(裸词 exit/quit 也认)\n"
      "多行输入:Shift+Enter 插换行(Alt+Enter 同义,但 Windows Terminal 默认把它绑成全屏\n"
      "切换、会吞掉,推荐 Shift+Enter);Enter 发送整段;多行时首行的 / 是正文,不当命令。\n"
@@ -236,6 +238,7 @@ const Entry kZhCN[] = {
     {"slash.desc.model", "拉模型列表选,或 /model 名字 直接切"},
     {"slash.desc.config", "打印当前生效配置和本会话在用的 model"},
     {"slash.desc.language", "列可选界面语言并切换;/language 语言码 直接切"},
+    {"slash.desc.image", "附本地图片;/image 路径 或在消息里写 @路径"},
     {"slash.desc.clear", "清空对话历史"},
     {"slash.desc.exit", "退出(裸词 exit/quit 也认)"},
     {"slash.desc.context", "看当前上下文占用;/context 256k|512k|1m 临时改窗口大小"},
@@ -317,6 +320,14 @@ const Entry kZhCN[] = {
     {"error.unknown_command", "不认得命令 {0},试试 /help"},
     {"error.wizard_incomplete", "配置向导未完成,退出。"},
     {"error.system_prompt_arg", "--system-prompt 后面要跟一个文件路径"},
+    {"image.attached", "[图片] 已附 {0} ({1}x{2})"},
+    {"error.image.missing_path", "图片路径空着。用 /image <路径>，或在消息里写 @路径。"},
+    {"error.image.not_found", "找不到图片文件: {0}"},
+    {"error.image.not_regular", "这不是普通文件，不能当图片传: {0}"},
+    {"error.image.unsupported", "不认得图片格式: {0}(只收 png/jpg/jpeg/gif/webp)。"},
+    {"error.image.too_large", "图片太大: {0}(上限 5MB，请先压缩再传)。"},
+    {"error.image.read_failed", "图片没读出来: {0}"},
+    {"error.image.invalid", "图片内容不对，没法读取尺寸: {0}"},
     {"i18n.pack_warning", "[语言包警告] {0}"},
 
     // ---- transcript 摘要词(彩色主题;plain 的 [RUNNING] 等不进表) ----
@@ -621,6 +632,7 @@ const Entry kEn[] = {
      "                  /soul default returns to SOUL.md\n"
      "  /prompt         show the source and length of the current system prompt persona;\n"
      "                  /prompt reset restores system_prompt.md\n"
+     "  /image <path>   attach a local image (or use @path in a message; png/jpg/jpeg/gif/webp, 5MB each)\n"
      "  Shift+Enter     insert a newline in the input box (Alt+Enter works too, but Windows Terminal\n"
      "                  binds it to fullscreen by default; Shift+Enter is safest); Enter sends the\n"
      "                  whole message; Enter on blank input does nothing\n"
@@ -771,6 +783,7 @@ const Entry kEn[] = {
     {"slash.desc.model", "pick from the model list, or /model <name> to switch directly"},
     {"slash.desc.config", "print the effective configuration and the session model"},
     {"slash.desc.language", "list available UI languages and switch; /language <code> switches directly"},
+    {"slash.desc.image", "attach local images; /image <path> or @path in a message"},
     {"slash.desc.clear", "clear the conversation history"},
     {"slash.desc.exit", "quit (bare exit/quit work too)"},
     {"slash.desc.context", "show context usage; /context 256k|512k|1m changes the window temporarily"},
@@ -854,6 +867,14 @@ const Entry kEn[] = {
     {"error.unknown_command", "Unknown command {0}; try /help"},
     {"error.wizard_incomplete", "Setup wizard not completed; exiting."},
     {"error.system_prompt_arg", "--system-prompt requires a file path"},
+    {"image.attached", "[image] attached {0} ({1}x{2})"},
+    {"error.image.missing_path", "Image path is empty. Use /image <path>, or @path in a message."},
+    {"error.image.not_found", "Image file not found: {0}"},
+    {"error.image.not_regular", "This is not a regular file and cannot be attached: {0}"},
+    {"error.image.unsupported", "Unsupported image type: {0} (png/jpg/jpeg/gif/webp only)."},
+    {"error.image.too_large", "Image is too large: {0} (5MB limit; compress it first)."},
+    {"error.image.read_failed", "Could not read image: {0}"},
+    {"error.image.invalid", "Image data is invalid; could not read its dimensions: {0}"},
     {"i18n.pack_warning", "[language pack warning] {0}"},
 
     // ---- transcript summary words ----

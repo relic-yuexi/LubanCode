@@ -69,6 +69,22 @@ TEST_CASE("消息序列化往返: 纯文本(中文)") {
     CHECK(tb->text == "我的暗号是青龙,记住了。");
 }
 
+TEST_CASE("消息序列化往返: user 带图片") {
+    api::Message original;
+    original.role = api::Role::User;
+    original.content.push_back(api::ImageBlock{"image/webp", "cGl4ZWxz", "截图.webp", 800, 600});
+
+    const auto parsed = agent::DeserializeSessionMessage(agent::SerializeSessionMessage(original, "ts"));
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->content.size() == 1);
+    const auto* image = std::get_if<api::ImageBlock>(&parsed->content[0]);
+    REQUIRE(image != nullptr);
+    CHECK(image->media_type == "image/webp");
+    CHECK(image->data == "cGl4ZWxz");
+    CHECK(image->filename == "截图.webp");
+    CHECK(image->width == 800);
+    CHECK(image->height == 600);
+}
 TEST_CASE("消息序列化往返: assistant 带 tool_use") {
     api::Message original;
     original.role = api::Role::Assistant;

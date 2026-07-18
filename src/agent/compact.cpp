@@ -11,7 +11,7 @@ namespace lubancode::agent {
 namespace {
 
 // 跟 agent/context.cpp 里的同名私有 helper 语义一模一样(角色是 user、
-// 且至少带一个 TextBlock 才算"一轮的开头"),但那边是匿名命名空间里的
+// 且至少带一个 TextBlock 或 ImageBlock 才算"一轮的开头"),但那边是匿名命名空间里的
 // 私有函数、没导出,agent/context.hpp/.cpp 又不许改动,所以这里原样再写
 // 一份,不去碰那个文件。
 bool IsUserTurnStart(const api::Message& message) {
@@ -19,7 +19,7 @@ bool IsUserTurnStart(const api::Message& message) {
         return false;
     }
     for (const auto& block : message.content) {
-        if (std::holds_alternative<api::TextBlock>(block)) {
+        if (std::holds_alternative<api::TextBlock>(block) || std::holds_alternative<api::ImageBlock>(block)) {
             return true;
         }
     }

@@ -13,35 +13,31 @@ std::string RoleToString(Role role) {
     return role == Role::User ? "user" : "assistant";
 }
 
-// 一个内容块翻译成一个 input item。text 块变成一条 message item(user 用
-// input_text,assistant 用 output_text);assistant 发起的 tool_use 变成
-// function_call item;user 侧回传的 tool_result 变成 function_call_output
-// item。call_id 原样透传 —— Anthropic 的 toolu_xxx、Responses 的 call_xxx
-// 中立层都只当字符串存,不用区分。
+// 没有图片的旧消息继续沿用逐块转 item 的写法，避免把既有请求形状悄悄
+// 合并。含图片时另走下面的成组分支，input_text 和 input_image 才能同框。
 json ContentBlockToItem(const ContentBlock& block, Role role) {
     return std::visit(
         [role](const auto& b) -> json {
             using T = std::decay_t<decltype(b)>;
             if constexpr (std::is_same_v<T, TextBlock>) {
                 const char* text_type = role == Role::User ? "input_text" : "output_text";
-                return json{
-                    {"type", "message"},
-                    {"role", RoleToString(role)},
-                    {"content", json::array({json{{"type", text_type}, {"text", b.text}}})},
-                };
+                return json{{"type", "message"},
+                            {"role", RoleToString(role)},
+                            {"content", json::array({json{{"type", text_type}, {"text", b.text}}})}};
+            } else if constexpr (std::is_same_v<T, ImageBlock>) {
+                return json{{"type", "message"},
+                            {"role", RoleToString(role)},
+                            {"content", json::array({json{{"type", "input_image"},
+                                                       {"image_url", "data:" + b.media_type + ";base64," + b.data}}})}};
             } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
-                return json{
-                    {"type", "function_call"},
-                    {"call_id", b.id},
-                    {"name", b.name},
-                    {"arguments", b.input.dump()},
-                };
-            } else if constexpr (std::is_same_v<T, ToolResultBlock>) {
-                return json{
-                    {"type", "function_call_output"},
-                    {"call_id", b.tool_use_id},
-                    {"output", b.content},
-                };
+                return json{{"type", "function_call"},
+                            {"call_id", b.id},
+                            {"name", b.name},
+                            {"arguments", b.input.dump()}};
+            } else {
+                return json{{"type", "function_call_output"},
+                            {"call_id", b.tool_use_id},
+                            {"output", b.content}};
             }
         },
         block);
@@ -69,9 +65,51 @@ nlohmann::json BuildRequestJson(const Request& request) {
 
     json input = json::array();
     for (const auto& message : request.messages) {
+        bool has_image = false;
         for (const auto& block : message.content) {
-            input.push_back(ContentBlockToItem(block, message.role));
+            if (std::holds_alternative<ImageBlock>(block)) {
+                has_image = true;
+                break;
+            }
         }
+        if (!has_image) {
+            for (const auto& block : message.content) {
+                input.push_back(ContentBlockToItem(block, message.role));
+            }
+            continue;
+        }
+
+        // Responses 的 input_image 必须跟 input_text 一样塞进 message.content。
+        // 遇到工具块才把已经攒着的普通内容吐成一条 message，守住块顺序。
+        json content = json::array();
+        const auto flush_content = [&] {
+            if (content.empty()) {
+                return;
+            }
+            input.push_back(json{{"type", "message"}, {"role", RoleToString(message.role)}, {"content", content}});
+            content = json::array();
+        };
+        for (const auto& block : message.content) {
+            std::visit(
+                [&](const auto& b) {
+                    using T = std::decay_t<decltype(b)>;
+                    if constexpr (std::is_same_v<T, TextBlock>) {
+                        content.push_back(json{{"type", message.role == Role::User ? "input_text" : "output_text"},
+                                               {"text", b.text}});
+                    } else if constexpr (std::is_same_v<T, ImageBlock>) {
+                        content.push_back(json{{"type", "input_image"},
+                                               {"image_url", "data:" + b.media_type + ";base64," + b.data}});
+                    } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
+                        flush_content();
+                        input.push_back(ContentBlockToItem(block, message.role));
+                    } else {
+                        flush_content();
+                        input.push_back(ContentBlockToItem(block, message.role));
+                    }
+                },
+                block);
+        }
+        flush_content();
     }
     body["input"] = input;
 
