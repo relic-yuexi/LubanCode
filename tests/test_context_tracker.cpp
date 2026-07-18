@@ -60,6 +60,18 @@ TEST_CASE("ContextTracker: set_window_tokens 会话级临时改窗口大小") {
     CHECK(tracker.UsagePercent() == 10);
 }
 
+TEST_CASE("ContextTracker: last_cache_read_tokens 覆盖式记最近一次缓存命中") {
+    cli::ContextTracker tracker(1000);
+    CHECK(tracker.last_cache_read_tokens() == 0);  // 还没发过请求
+
+    tracker.Update(api::Usage{144, 0, 1472, 0});
+    CHECK(tracker.last_cache_read_tokens() == 1472);
+
+    // 新一次 Update 整个覆盖,不累加;没命中就归 0。
+    tracker.Update(api::Usage{300, 50});
+    CHECK(tracker.last_cache_read_tokens() == 0);
+}
+
 TEST_CASE("ContextTracker: 窗口大小是 0 时不除零,百分比按 0 处理") {
     cli::ContextTracker tracker(0);
     tracker.Update(api::Usage{100, 0});

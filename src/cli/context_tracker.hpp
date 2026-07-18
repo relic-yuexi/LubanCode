@@ -16,6 +16,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 #include "api/types.hpp"
 
@@ -35,6 +36,11 @@ public:
     std::size_t current_tokens() const { return current_tokens_; }
     std::size_t window_tokens() const { return window_tokens_; }
 
+    // 最近一次请求的缓存命中量(usage.cache_read_tokens),跟 current_tokens
+    // 一样是覆盖式,不累加;/context 分类明细在"对话历史"行尾括注用。
+    // 厂商没给(或还没发过请求)就是 0。
+    std::int64_t last_cache_read_tokens() const { return last_cache_read_tokens_; }
+
     // /context <档位> 用:会话级临时改窗口大小,不改配置文件。
     void set_window_tokens(std::size_t window_tokens) { window_tokens_ = window_tokens; }
 
@@ -48,6 +54,7 @@ public:
 private:
     std::size_t current_tokens_ = 0;
     std::size_t window_tokens_;
+    std::int64_t last_cache_read_tokens_ = 0;
 };
 
 }  // namespace lubancode::cli

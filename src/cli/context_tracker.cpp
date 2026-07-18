@@ -15,6 +15,8 @@ void ContextTracker::Update(const api::Usage& usage) {
     const std::int64_t total =
         usage.input_tokens + usage.cache_read_tokens + usage.cache_creation_tokens + usage.output_tokens;
     current_tokens_ = total > 0 ? static_cast<std::size_t>(total) : 0;
+    // 缓存命中量同样覆盖式记一份,/context 分类明细用;负数(不该出现)按 0。
+    last_cache_read_tokens_ = usage.cache_read_tokens > 0 ? usage.cache_read_tokens : 0;
 }
 
 int ContextTracker::UsagePercent() const {

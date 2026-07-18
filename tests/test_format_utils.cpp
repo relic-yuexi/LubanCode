@@ -1,15 +1,35 @@
-// cli/format_utils:FormatTokenCount 的 k/M 化边界、状态行文本拼装。全是
-// 纯函数,断言直接钉字符串。
+// cli/format_utils:FormatTokenCount 的 k/M 化边界、状态行文本拼装、
+// /context 分类占用分析(FormatContextBreakdown)。全是纯函数,断言直接
+// 钉字符串。
 
 #include <doctest/doctest.h>
 
+#include <string>
+#include <vector>
+
 #include "cli/format_utils.hpp"
+#include "cli/theme.hpp"
 
 using lubancode::cli::BuildStatusLineText;
+using lubancode::cli::BuiltinTheme;
 using lubancode::cli::ConfirmMode;
+using lubancode::cli::FormatContextBreakdown;
 using lubancode::cli::FormatTokenCount;
 using lubancode::cli::StatusLineInfoSegment;
 using lubancode::cli::StatusLineModeSegment;
+
+namespace {
+// needle 在 s 里出现几次(█/░ 是多字节 UTF-8,按子串数)。
+std::size_t CountOccurrences(const std::string& s, const std::string& needle) {
+    std::size_t count = 0;
+    std::size_t pos = 0;
+    while ((pos = s.find(needle, pos)) != std::string::npos) {
+        ++count;
+        pos += needle.size();
+    }
+    return count;
+}
+}  // namespace
 
 TEST_CASE("FormatTokenCount: 10000 以下原样十进制") {
     CHECK(FormatTokenCount(0) == "0");
@@ -75,4 +95,130 @@ TEST_CASE("BuildStatusLineText: 整行 = 模式段 + 信息段") {
     CHECK(line ==
           StatusLineModeSegment(ConfirmMode::Confirm) + StatusLineInfoSegment("MiniMax-M3", 8, 16400, 200000));
     CHECK(line.find("⏵⏵") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// FormatContextBreakdown:/context 裸敲的分类占用分析。
+// 行序固定:header / 系统提示 / 工具定义 / 对话历史 / 分隔线 / 已用 /
+// 自动压缩线 / 剩余 / 估算口径说明,共 9 行。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("FormatContextBreakdown: 三类正常,估算 token=字符数/3,占比与条形按窗口取") {
+    // 30000/3=10000、15000/3=5000、60000/3=20000;窗口 256000。
+    const auto lines = FormatContextBreakdown(30000, 15000, 60000, /*cache_read=*/0,
+                                               /*window=*/256000, /*measured=*/0, BuiltinTheme("dark"), 16);
+    REQUIRE(lines.size() == 9);
+    CHECK(lines[0].find("上下文占用分析") != std::string::npos);
+    CHECK(lines[0].find("256k") != std::string::npos);
+
+    // 系统提示:10000/256000 ≈ 3.9% → 4%;条形 0.625 格 → 1 实心 15 空。
+    CHECK(lines[1].find("系统提示") != std::string::npos);
+    CHECK(lines[1].find("~10k") != std::string::npos);
+    CHECK(lines[1].find(" 4%") != std::string::npos);
+    CHECK(CountOccurrences(lines[1], "█") == 1);
+    CHECK(CountOccurrences(lines[1], "░") == 15);
+
+    // 工具定义:5000/256000 ≈ 2%;0.3125 格 → 0 实心。
+    CHECK(lines[2].find("工具定义") != std::string::npos);
+    CHECK(lines[2].find("~5000") != std::string::npos);
+    CHECK(lines[2].find(" 2%") != std::string::npos);
+    CHECK(CountOccurrences(lines[2], "█") == 0);
+
+    // 对话历史:20000/256000 ≈ 7.8% → 8%;缓存 0 就不摆括号。
+    CHECK(lines[3].find("对话历史") != std::string::npos);
+    CHECK(lines[3].find("~20k") != std::string::npos);
+    CHECK(lines[3].find(" 8%") != std::string::npos);
+    CHECK(lines[3].find("缓存命中") == std::string::npos);
+
+    CHECK(lines[4].find("─") != std::string::npos);
+
+    // 已用 = 三类之和 35000(实测 0 更小,用估算带 ~):35000/256000 ≈ 14%。
+    CHECK(lines[5].find("已用") != std::string::npos);
+    CHECK(lines[5].find("~35k") != std::string::npos);
+    CHECK(lines[5].find(" 14%") != std::string::npos);
+    CHECK(lines[5].find("实测") == std::string::npos);
+
+    // 自动压缩线 = 256000 * 80% = 204800。
+    CHECK(lines[6].find("自动压缩线") != std::string::npos);
+    CHECK(lines[6].find("204.8k(80%)") != std::string::npos);
+
+    // 剩余 = 256000 - 35000 = 221000。
+    CHECK(lines[7].find("剩余") != std::string::npos);
+    CHECK(lines[7].find("221k") != std::string::npos);
+
+    CHECK(lines[8].find("粗估") != std::string::npos);
+}
+
+TEST_CASE("FormatContextBreakdown: 某类为 0 打 ~0、0%、全空条") {
+    const auto lines = FormatContextBreakdown(30000, 0, 60000, 0, 256000, 0, BuiltinTheme("dark"), 16);
+    REQUIRE(lines.size() == 9);
+    CHECK(lines[2].find("~0") != std::string::npos);
+    CHECK(lines[2].find(" 0%") != std::string::npos);
+    CHECK(CountOccurrences(lines[2], "█") == 0);
+    CHECK(CountOccurrences(lines[2], "░") == 16);
+}
+
+TEST_CASE("FormatContextBreakdown: 历史带缓存命中就在行尾括注") {
+    const auto lines = FormatContextBreakdown(30000, 15000, 60000, /*cache_read=*/4600, 256000, 0,
+                                               BuiltinTheme("dark"), 16);
+    CHECK(lines[3].find("(缓存命中 4600)") != std::string::npos);
+    // 缓存只挂在对话历史那一行,别的行不沾。
+    CHECK(lines[1].find("缓存命中") == std::string::npos);
+    CHECK(lines[5].find("缓存命中") == std::string::npos);
+}
+
+TEST_CASE("FormatContextBreakdown: tracker 实测比估算大就用实测并标注") {
+    // 估算合计 35000,实测 100000 → 已用行用 100k、带 (实测)、不带 ~。
+    const auto lines = FormatContextBreakdown(30000, 15000, 60000, 0, 256000, /*measured=*/100000,
+                                               BuiltinTheme("dark"), 16);
+    CHECK(lines[5].find("100k") != std::string::npos);
+    CHECK(lines[5].find("~100k") == std::string::npos);
+    CHECK(lines[5].find("(实测)") != std::string::npos);
+    // 100000/256000 ≈ 39%;剩余按实测扣:256000-100000=156000。
+    CHECK(lines[5].find(" 39%") != std::string::npos);
+    CHECK(lines[7].find("156k") != std::string::npos);
+}
+
+TEST_CASE("FormatContextBreakdown: 超窗口截断——条形打满、百分比钉 100、剩余 0") {
+    // 900000/3=300000 tokens > 窗口 256000。
+    const auto lines = FormatContextBreakdown(900000, 0, 0, 0, 256000, 0, BuiltinTheme("dark"), 16);
+    CHECK(lines[1].find("100%") != std::string::npos);
+    CHECK(CountOccurrences(lines[1], "█") == 16);
+    CHECK(CountOccurrences(lines[1], "░") == 0);
+    CHECK(lines[5].find("100%") != std::string::npos);
+    // 剩余行:窗口已被吃穿,0。
+    CHECK(lines[7].find("剩余") != std::string::npos);
+    CHECK(lines[7].find("0") != std::string::npos);
+    CHECK(lines[7].find("256") == std::string::npos);
+}
+
+TEST_CASE("FormatContextBreakdown: plain 主题回退 # 和 -,不掺 Unicode 条形") {
+    const auto lines = FormatContextBreakdown(30000, 15000, 60000, 0, 256000, 0, BuiltinTheme("plain"), 16);
+    CHECK(CountOccurrences(lines[1], "#") == 1);
+    CHECK(CountOccurrences(lines[1], "-") == 15);
+    CHECK(lines[1].find("█") == std::string::npos);
+    CHECK(lines[1].find("░") == std::string::npos);
+    // 分隔线同样回退 ASCII。
+    CHECK(lines[4].find("─") == std::string::npos);
+    CHECK(lines[4].find("-") != std::string::npos);
+}
+
+TEST_CASE("FormatContextBreakdown: 窄宽度条形照比例取整") {
+    // 150/3=50 tokens,窗口 100 → 50%,宽度 4 → 2 实 2 空。
+    const auto lines = FormatContextBreakdown(150, 0, 0, 0, 100, 0, BuiltinTheme("dark"), 4);
+    CHECK(CountOccurrences(lines[1], "█") == 2);
+    CHECK(CountOccurrences(lines[1], "░") == 2);
+    CHECK(lines[1].find(" 50%") != std::string::npos);
+}
+
+TEST_CASE("FormatContextBreakdown: 窗口为 0 不除零,百分比一律 0、条形全空") {
+    const auto lines = FormatContextBreakdown(30000, 15000, 60000, 0, /*window=*/0, 0,
+                                               BuiltinTheme("dark"), 16);
+    REQUIRE(lines.size() == 9);
+    CHECK(lines[1].find(" 0%") != std::string::npos);
+    CHECK(CountOccurrences(lines[1], "█") == 0);
+    CHECK(CountOccurrences(lines[1], "░") == 16);
+    CHECK(lines[5].find(" 0%") != std::string::npos);
+    // 压缩线 0(80%)、剩余 0,不炸就是胜利。
+    CHECK(lines[6].find("0(80%)") != std::string::npos);
 }

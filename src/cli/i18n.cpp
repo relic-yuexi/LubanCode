@@ -68,7 +68,7 @@ const Entry kZhCN[] = {
      "  /config         打印当前生效配置(复用 --config 的逻辑),外加本会话实际在用的 model\n"
      "  /language       列可选界面语言并切换(内置 zh-CN/en,languages/*.json 可扩展)\n"
      "  /clear          清空对话历史\n"
-     "  /context        看当前上下文占用(token 数/窗口大小/百分比)\n"
+     "  /context        看当前上下文占用分析(系统提示/工具定义/对话历史分类明细 + 条形图)\n"
      "  /context 512k   临时改窗口大小(256k/512k/1m/裸数字都认),只本会话生效\n"
      "  /compact [重点说明]  手动触发一次历史压缩,可选指定这次额外保留什么\n"
      "  /think          看当前推理强度(/effort 同义)\n"
@@ -408,6 +408,17 @@ const Entry kZhCN[] = {
     {"cmd.context.usage", "上下文占用: {0} / {1} tokens ({2}%)"},
     {"cmd.context.compact_hint", "  —— 接近上限了,建议 /compact 一下"},
     {"cmd.context.window_changed", "上下文窗口已改成 {0} tokens(只本会话生效,没改配置文件)。"},
+    // /context 裸敲的分类占用分析(拼装规则见 FormatContextBreakdown)。
+    {"cmd.context.bd.header", "上下文占用分析(窗口 {0})"},
+    {"cmd.context.bd.system", "系统提示"},
+    {"cmd.context.bd.tools", "工具定义"},
+    {"cmd.context.bd.history", "对话历史"},
+    {"cmd.context.bd.used", "已用"},
+    {"cmd.context.bd.threshold", "自动压缩线"},
+    {"cmd.context.bd.remaining", "剩余"},
+    {"cmd.context.bd.cache", "(缓存命中 {0})"},
+    {"cmd.context.bd.measured", "(实测)"},
+    {"cmd.context.bd.note", "(token 为字符数/3 粗估,实际以模型返回为准)"},
     {"cmd.compact.empty", "当前没有对话历史,不用压缩。"},
     {"cmd.compact.failed", "压缩失败: {0}"},
     {"cmd.compact.result", "压缩前 ~{0} tokens → 压缩后 ~{1} tokens"},
@@ -580,7 +591,7 @@ const Entry kEn[] = {
      "  /language       list available UI languages and switch (built-in zh-CN/en, extendable via\n"
      "                  languages/*.json)\n"
      "  /clear          clear the conversation history\n"
-     "  /context        show current context usage (tokens / window size / percent)\n"
+     "  /context        show context usage breakdown (system prompt / tools / history + bars)\n"
      "  /context 512k   temporarily change the window size (256k/512k/1m or a plain number)\n"
      "  /compact [note] manually compact the history; the note tells what to keep extra\n"
      "  /think          show the reasoning effort (/effort is an alias)\n"
