@@ -63,6 +63,14 @@ std::vector<std::string> EnsurePromptScaffold(
 // 不算错,缺失的语义(法回退内置、魂无效果)由调用方决定。
 std::optional<std::string> ReadTextFileIfExists(const std::string& path);
 
+// SOUL.md 的专用读写口。ReadSoulFile 只收有效 UTF-8；文件缺失、打不开、
+// 是目录或内容已坏都回 nullopt——启动方把它当"无魂"继续跑,不让一份坏
+// 配置卡死整个会话。WriteSoulFile 会按需建 ~/.lubancode/，写入失败给可读
+// 的错；ClearSoulFile 重写内置默认内容(只有说明注释,实际等于无魂)。
+std::optional<std::string> ReadSoulFile(const std::string& lubancode_dir);
+std::expected<void, std::string> WriteSoulFile(const std::string& lubancode_dir, const std::string& content);
+std::expected<void, std::string> ClearSoulFile(const std::string& lubancode_dir);
+
 // /prompt reset、--reset-system-prompt 共用:旧 system_prompt.md 先挪成
 // system_prompt.md.bak(已有 .bak 就覆盖),再把 system_prompt.md 重写成
 // 内置默认。成功返回 .bak 的路径(原文件本来就不存在时没有 .bak 可留,
