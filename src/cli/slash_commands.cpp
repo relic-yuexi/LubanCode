@@ -94,6 +94,8 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Language;
     } else if (lower == "/image") {
         parsed.command = SlashCommand::Image;
+    } else if (lower == "/worktree") {
+        parsed.command = SlashCommand::Worktree;
     } else {
         parsed.command = SlashCommand::Unknown;
     }
@@ -111,6 +113,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
         commands = {
             {"/help", tr("slash.desc.help")},
             {"/model", tr("slash.desc.model")},
+            {"/worktree", tr("slash.desc.worktree")},
             {"/config", tr("slash.desc.config")},
             {"/language", tr("slash.desc.language")},
             {"/image", tr("slash.desc.image")},

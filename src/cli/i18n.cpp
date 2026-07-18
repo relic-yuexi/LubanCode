@@ -67,6 +67,7 @@ const Entry kZhCN[] = {
      "  /model 名字     直接切到指定模型名,不用拉列表\n"
      "  /config         打印当前生效配置(复用 --config 的逻辑),外加本会话实际在用的 model\n"
      "  /language       列可选界面语言并切换(内置 zh-CN/en,languages/*.json 可扩展)\n"
+     "  /worktree       新建/列出/退出隔离工作树;/worktree new [名字] | list | exit keep|remove\n"
      "  /clear          清空对话历史\n"
      "  /context        看当前上下文占用分析(系统提示/工具定义/对话历史分类明细 + 条形图)\n"
      "  /context 512k   临时改窗口大小(256k/512k/1m/裸数字都认),只本会话生效\n"
@@ -156,6 +157,7 @@ const Entry kZhCN[] = {
      "  /model 名字     直接切到指定模型名,不用拉列表\n"
      "  /config         打印当前生效配置(api_key 打码),外加本会话实际在用的 model\n"
      "  /language       列可选界面语言并切换;/language 语言码 直接切(会话级,可写回配置)\n"
+     "  /worktree       新建/列出/退出隔离工作树;/worktree new [名字] | list | exit keep|remove\n"
      "  /clear          清空对话历史\n"
      "  /context        看当前上下文占用;/context 256k|512k|1m 临时改窗口大小\n"
      "  /compact        手动压缩历史;/compact 重点说明 可指定这次额外保留什么\n"
@@ -248,6 +250,7 @@ const Entry kZhCN[] = {
     {"slash.desc.config", "打印当前生效配置和本会话在用的 model"},
     {"slash.desc.language", "列可选界面语言并切换;/language 语言码 直接切"},
     {"slash.desc.image", "附本地图片;/image 路径 或在消息里写 @路径"},
+    {"slash.desc.worktree", "新建、列出或退出隔离工作树;/worktree new [名字] | list | exit keep|remove"},
     {"slash.desc.clear", "清空对话历史"},
     {"slash.desc.exit", "退出(裸词 exit/quit 也认)"},
     {"slash.desc.context", "看当前上下文占用;/context 256k|512k|1m 临时改窗口大小"},
@@ -274,6 +277,24 @@ const Entry kZhCN[] = {
     {"cmd.language.switched", "已切换语言: {0}(本会话即时生效)"},
     {"cmd.language.unknown", "不认得语言 {0}(/language 裸敲看可选列表)。"},
     {"cmd.language.bad_number", "编号不对,取消切换。"},
+
+    // ---- /worktree ----
+    {"cmd.worktree.usage", "用法:/worktree new [名字] | list | exit keep|remove"},
+    {"cmd.worktree.created", "已建隔离工作树:{0}\n分支:{1}\n会话目录已切过去。"},
+    {"cmd.worktree.list_header", "本仓库的 worktree:"},
+    {"cmd.worktree.current", "(当前)"},
+    {"cmd.worktree.detached", "(游离 HEAD)"},
+    {"cmd.worktree.kept", "已回原目录，工作树留下:{0}"},
+    {"cmd.worktree.removed", "已删工作树与分支:{0}"},
+    {"cmd.worktree.dirty", "工作树有未提交改动:{0}"},
+    {"cmd.worktree.remove_confirm", "仍要强删这棵工作树和分支? [y/N]: "},
+    {"cmd.worktree.remove_cancelled", "不删，仍留在这棵工作树。"},
+    {"cmd.worktree.not_repo", "这里不在 Git 仓库里，/worktree 用不了。"},
+    {"cmd.worktree.invalid_name", "名字只收字母、数字、-、_，且不超过 64 个字符。"},
+    {"cmd.worktree.already_active", "这场会话已在一棵新工作树里，先 /worktree exit keep|remove。"},
+    {"cmd.worktree.no_active", "这场会话没有可退出的 /worktree 新树。"},
+    {"cmd.worktree.git_failed", "Git 没办成:{0}"},
+    {"cmd.worktree.filesystem_failed", "目录没办成:{0}"},
 
     // ---- /config 诊断 ----
     {"config.header", "lubancode 最终生效的配置:"},
@@ -621,6 +642,7 @@ const Entry kEn[] = {
      "  /config         print the effective configuration plus the model in use this session\n"
      "  /language       list available UI languages and switch (built-in zh-CN/en, extendable via\n"
      "                  languages/*.json)\n"
+     "  /worktree       create, list, or leave isolated trees; /worktree new [name] | list | exit keep|remove\n"
      "  /clear          clear the conversation history\n"
      "  /context        show context usage breakdown (system prompt / tools / history + bars)\n"
      "  /context 512k   temporarily change the window size (256k/512k/1m or a plain number)\n"
@@ -714,6 +736,7 @@ const Entry kEn[] = {
      "  /model <name>   switch directly to a model name\n"
      "  /config         print the effective configuration (api_key masked) plus the session model\n"
      "  /language       list available UI languages and switch; /language <code> switches directly\n"
+     "  /worktree       create, list, or leave isolated trees; /worktree new [name] | list | exit keep|remove\n"
      "  /clear          clear the conversation history\n"
      "  /context        show context usage; /context 256k|512k|1m changes the window for this session\n"
      "  /compact        compact the history; /compact <note> tells what to keep extra\n"
@@ -805,6 +828,7 @@ const Entry kEn[] = {
     {"slash.desc.config", "print the effective configuration and the session model"},
     {"slash.desc.language", "list available UI languages and switch; /language <code> switches directly"},
     {"slash.desc.image", "attach local images; /image <path> or @path in a message"},
+    {"slash.desc.worktree", "create, list, or leave isolated worktrees; /worktree new [name] | list | exit keep|remove"},
     {"slash.desc.clear", "clear the conversation history"},
     {"slash.desc.exit", "quit (bare exit/quit work too)"},
     {"slash.desc.context", "show context usage; /context 256k|512k|1m changes the window temporarily"},
@@ -849,6 +873,23 @@ const Entry kEn[] = {
     {"cmd.soul.default_config_failed", "SOUL.md was written, but the config could not switch back to default: {0}"},
     {"cmd.soul.switch_hint", "Earlier replies may keep the old style for a few turns; /clear removes that history."},
     {"cmd.soul.write_prompt", "Save to config? [y/N]: "},
+    // ---- /worktree ----
+    {"cmd.worktree.usage", "Usage: /worktree new [name] | list | exit keep|remove"},
+    {"cmd.worktree.created", "Created isolated worktree: {0}\nBranch: {1}\nThe session directory has switched."},
+    {"cmd.worktree.list_header", "Worktrees in this repository:"},
+    {"cmd.worktree.current", "(current)"},
+    {"cmd.worktree.detached", "(detached HEAD)"},
+    {"cmd.worktree.kept", "Returned to the original directory; kept: {0}"},
+    {"cmd.worktree.removed", "Removed worktree and branch: {0}"},
+    {"cmd.worktree.dirty", "This worktree has uncommitted changes: {0}"},
+    {"cmd.worktree.remove_confirm", "Still force-remove this worktree and branch? [y/N]: "},
+    {"cmd.worktree.remove_cancelled", "Not removed; still in this worktree."},
+    {"cmd.worktree.not_repo", "This directory is not inside a Git repository; /worktree is unavailable."},
+    {"cmd.worktree.invalid_name", "Names allow letters, digits, - and _ only, up to 64 characters."},
+    {"cmd.worktree.already_active", "This session is already in a new worktree; run /worktree exit keep|remove first."},
+    {"cmd.worktree.no_active", "This session has no /worktree-created tree to leave."},
+    {"cmd.worktree.git_failed", "Git failed: {0}"},
+    {"cmd.worktree.filesystem_failed", "Filesystem operation failed: {0}"},
 
     // ---- /config diagnostics ----
     {"config.header", "Effective lubancode configuration:"},

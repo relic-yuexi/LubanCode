@@ -266,3 +266,19 @@ TEST_CASE("ParseSlashCommand: /image 识别为附图命令") {
     CHECK(parsed.command == cli::SlashCommand::Image);
     CHECK(parsed.args == "screenshots/err.png");
 }
+
+TEST_CASE("ParseSlashCommand: /worktree 与参数") {
+    const auto parsed = cli::ParseSlashCommand("/Worktree new fix_54");
+    CHECK(parsed.command == cli::SlashCommand::Worktree);
+    CHECK(parsed.args == "new fix_54");
+}
+
+TEST_CASE("AllSlashCommands: /worktree 在列表里") {
+    bool found = false;
+    for (const auto& command : cli::AllSlashCommands()) {
+        if (command.name == "/worktree") {
+            found = true;
+        }
+    }
+    CHECK(found);
+}

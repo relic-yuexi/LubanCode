@@ -255,6 +255,7 @@ add_library(lubancode_core STATIC
   src/cli/image_input.cpp
   src/cli/setup_wizard.cpp
   src/cli/slash_commands.cpp
+  src/cli/worktree.cpp
   src/cli/theme.cpp
   src/cli/line_editor.cpp
   src/cli/context_tracker.cpp
