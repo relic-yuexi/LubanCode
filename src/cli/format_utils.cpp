@@ -134,14 +134,22 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_chars, std::size
         bar_width = 0;
     }
 
-    // 估算口径:字符数/3(中英混排的粗折算),数字前带 ~ 提醒是估的。
+    // 系统提示、工具定义每轮固定,能单独按字符数粗估(字符数/3,中英混排的
+    // 粗折算),数字前带 ~ 提醒是估的——这两块是"可单独算的确定部分"。
     const std::size_t sys_tokens = sys_chars / 3;
     const std::size_t tools_tokens = tools_chars / 3;
-    const std::size_t history_tokens = history_chars / 3;
-    const std::size_t est_used = sys_tokens + tools_tokens + history_tokens;
-    // tracker 实测(最近一次请求 usage)比字符估算准;实测更大就用实测并标注。
-    const bool use_measured = measured_used_tokens > est_used;
-    const std::size_t used = use_measured ? measured_used_tokens : est_used;
+
+    // measured_used_tokens 是 tracker 实测(最近一次请求的 input+cache_read+
+    // cache_creation+output),只要发过一轮请求就是精确值,是唯一该信的数。
+    // 有实测:总量直接用实测(不带 ~),历史 = max(0, 实测总量 - 系统 - 工具)
+    //   反推——这样三分项之和恒等于实测总量,不再各估各的打架。
+    // 没实测(实测=0,如刚启动):三项全退回字符估,整体标 ~。
+    const bool have_measured = measured_used_tokens > 0;
+    const std::size_t sys_plus_tools = sys_tokens + tools_tokens;
+    const std::size_t history_tokens =
+        have_measured ? (measured_used_tokens > sys_plus_tools ? measured_used_tokens - sys_plus_tools : 0)
+                      : history_chars / 3;
+    const std::size_t used = have_measured ? measured_used_tokens : sys_plus_tools + history_tokens;
 
     const std::string label_sys = tr("cmd.context.bd.system");
     const std::string label_tools = tr("cmd.context.bd.tools");
@@ -158,18 +166,27 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_chars, std::size
     label_cols += 2;                    // 标签与数字之间至少两个空格
     const std::size_t tok_cols = 9;     // "~204.8k" 这类数字列的宽度
 
-    const auto category_row = [&](const std::string& label, std::size_t tokens) {
-        return "  " + PadRightCols(label, label_cols) + PadRightCols("~" + TokenText(tokens), tok_cols) +
+    // estimated=true 时数字前带 ~(字符估);false 是实测/反推的确定值。
+    const auto tok_cell = [&](std::size_t tokens, bool estimated) {
+        return PadRightCols(estimated ? "~" + TokenText(tokens) : TokenText(tokens), tok_cols);
+    };
+    const auto category_row = [&](const std::string& label, std::size_t tokens, bool estimated) {
+        return "  " + PadRightCols(label, label_cols) + tok_cell(tokens, estimated) +
                BuildBar(tokens, window_tokens, bar_width, plain) + "  " +
                PadLeftCols(std::to_string(PercentOfWindow(tokens, window_tokens)), 3) + "%";
     };
 
     std::vector<std::string> lines;
     lines.push_back(trf("cmd.context.bd.header", TokenText(window_tokens)));
-    lines.push_back(category_row(label_sys, sys_tokens));
-    lines.push_back(category_row(label_tools, tools_tokens));
+    // 系统提示/工具永远是字符估(可单独算,但口径仍是字符/3),带 ~。
+    lines.push_back(category_row(label_sys, sys_tokens, /*estimated=*/true));
+    lines.push_back(category_row(label_tools, tools_tokens, /*estimated=*/true));
     {
-        std::string history_row = category_row(label_history, history_tokens);
+        // 历史:有实测是反推的确定值(不带 ~,行尾注明反推口径),无实测退字符估。
+        std::string history_row = category_row(label_history, history_tokens, /*estimated=*/!have_measured);
+        if (have_measured) {
+            history_row += "  " + tr("cmd.context.bd.history_derived");
+        }
         if (cache_read_tokens > 0) {
             history_row += "   " + trf("cmd.context.bd.cache", FormatTokenCount(cache_read_tokens));
         }
@@ -180,10 +197,10 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_chars, std::size
     lines.push_back("  " + RepeatGlyph(plain ? "-" : "─", sep_cols));
     {
         std::string used_row = "  " + PadRightCols(label_used, label_cols) +
-                               PadRightCols(use_measured ? TokenText(used) : "~" + TokenText(used), tok_cols) +
+                               tok_cell(used, /*estimated=*/!have_measured) +
                                std::string(static_cast<std::size_t>(bar_width), ' ') + "  " +
                                PadLeftCols(std::to_string(PercentOfWindow(used, window_tokens)), 3) + "%";
-        if (use_measured) {
+        if (have_measured) {
             used_row += "   " + tr("cmd.context.bd.measured");
         }
         lines.push_back(std::move(used_row));
@@ -193,7 +210,7 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_chars, std::size
                     std::to_string(kAutoCompactThresholdPercent) + "%)");
     const std::size_t remaining = window_tokens > used ? window_tokens - used : 0;
     lines.push_back("  " + PadRightCols(label_remaining, label_cols) + TokenText(remaining));
-    lines.push_back("  " + tr("cmd.context.bd.note"));
+    lines.push_back("  " + tr(have_measured ? "cmd.context.bd.note.measured" : "cmd.context.bd.note.est"));
     return lines;
 }
 
