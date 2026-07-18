@@ -194,6 +194,11 @@ const Entry kZhCN[] = {
     {"input.queued", "[已排队] "},
     {"spinner.thinking", "思考中"},
 
+    // ---- 子代理状态条(#52) ----
+    {"agent_status.running", "{0} · 运行中 · {1} · 已调用 {2} 次工具"},
+    {"agent_status.done_ok", "{0} · 完成 · {1} · {2} 次工具"},
+    {"agent_status.done_error", "{0} · 失败 · {1} · {2} 次工具"},
+
     // ---- 确认提示 ----
     {"confirm.prompt", "[y] 本次允许  [a] 本会话总是允许(该工具)  [N] 拒绝: "},
     {"confirm.detail.path", "    路径: {0}"},
@@ -728,6 +733,11 @@ const Entry kEn[] = {
     {"input.interrupted", "[interrupted]"},
     {"input.queued", "[queued] "},
     {"spinner.thinking", "thinking"},
+
+    // ---- subagent status board (#52) ----
+    {"agent_status.running", "{0} · running · {1} · {2} tool calls"},
+    {"agent_status.done_ok", "{0} · done · {1} · {2} tool calls"},
+    {"agent_status.done_error", "{0} · failed · {1} · {2} tool calls"},
 
     // ---- confirm prompt ----
     {"confirm.prompt", "[y] allow once  [a] always allow this tool (this session)  [N] deny: "},
