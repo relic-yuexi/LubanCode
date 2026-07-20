@@ -152,6 +152,41 @@ void EndStreamFooter();
 void EraseStreamFooterLocked();
 void RedrawStreamFooterLocked();
 
+// 0.22.5:工具确认交互(main.cpp 的 PrintConfirmDetails/ShowDiffPreview 到
+// ReadLine([y/a/N] 提示)那一整段)期间,流式脚注框必须让路——真机实测
+// 报过两条病:1) 确认详情文字直接盖写在框的横线上,不清行尾,横线残留;
+// 2) [y/a/N] 提示整个看不见。根子不是"没打印",是打印完之后被后续某次
+// RedrawStreamFooterLocked() 覆盖掉了——最典型的是 AgentStatusPainter 的
+// 400ms 一次 ticker(main.cpp),不管是不是在等确认,只要 enabled 就无条件
+// 重画一次框;PrintConfirmDetails/ReadLine 落笔时又都不清场,两边一撞,
+// 框把确认文字整个盖掉,或者反过来在确认文字尾巴上留下没清干净的横线。
+//
+// 光擦一次(EraseStreamFooterLocked)堵不住——擦完 ticker 下一拍照样画
+// 回来。得再加一层"挂起":构造时(拿锁)先把框彻底擦干净、标记挂起,
+// 挂起期间 RedrawStreamFooterLocked() 直接空操作,不管是谁调的(ticker、
+// StreamBodyTracker::OnDelta、监听线程的键入回显……全部一并压住,不用
+// 逐个调用点接管)。析构时(拿锁)摘掉挂起标记,不主动补画——确认答完
+// 之后下一笔正文 OnDelta 或者下一次 ticker(至多 400ms)自然把框画回来,
+// 抢着画反而要操心"这一刻光标该在哪"这种时序细节,没必要。
+//
+// 用 RAII 是为了把"挂起期覆盖两条确认路径(run_command 等走
+// PrintConfirmDetails,edit_file/write_file 走 ShowDiffPreview)+ 确认提示
+// 打印前的空窗期(详情打印完、ReadLine 还没抢到 ConsoleReadMutex 那一段,
+// 监听线程理论上能插进来读一次键)"这几处一次性堵严实,不用在每个可能
+// 触发重画的调用点分别加判断——作用域对象存活多久,挂起就持续多久,
+// main.cpp 只需要在"确定要真问一句"的那一刻建一个局部变量。
+// 构造/析构各自只在临界区里逗留一瞬(拿锁——干活——放锁),不会跨越整个
+// 确认交互一直攥着 StdoutWriteMutex,PrintConfirmDetails/ShowDiffPreview/
+// ReadLine 自己该拿锁还是拿得到,不会自锁。
+class StreamFooterSuspendScope {
+public:
+    StreamFooterSuspendScope();
+    ~StreamFooterSuspendScope();
+
+    StreamFooterSuspendScope(const StreamFooterSuspendScope&) = delete;
+    StreamFooterSuspendScope& operator=(const StreamFooterSuspendScope&) = delete;
+};
+
 // M10:ESC 打断当前轮 + 消息排队用的监听器。main.cpp 在"发出请求到本轮
 // Run() 结束"这段窗口期起一个实例:ESC 键按下就把 cancel_flag 置位、打一行
 // 淡色 "[已打断]";其余可打印字符进内部排队缓冲(Backspace 能退格),遇

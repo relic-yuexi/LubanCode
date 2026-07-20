@@ -120,6 +120,11 @@ struct StreamFooterState {
     Theme theme;             // 完整主题:画框(BoxRuleLine)、状态行(PrintStatusLine)
                              // 直接复用 composer 那两个画法,得传整个 Theme,不能只传片段。
     int row = -1;            // 框顶(上横线)此刻画在哪一绝对行,-1 = 没画
+    // 0.22.5:工具确认交互期间为真——见 console_input.hpp
+    // StreamFooterSuspendScope 注释。挂起期 RedrawStreamFooterLocked() 直接
+    // 空操作,不管调用方是谁(ticker/OnDelta/监听线程键入回显),不用逐个
+    // 调用点接管。
+    bool suspended = false;
 };
 StreamFooterState& FooterSlot() {
     static StreamFooterState f;
@@ -695,8 +700,8 @@ void EraseStreamFooterLocked() {
 
 void RedrawStreamFooterLocked() {
     StreamFooterState& f = FooterSlot();
-    if (!f.enabled) {
-        return;
+    if (!f.enabled || f.suspended) {
+        return;  // 挂起期间(工具确认交互中)一律不画,见 StreamFooterSuspendScope 注释
     }
     const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
     if (!info.has_value()) {
@@ -795,6 +800,19 @@ void EndStreamFooter() {
     f.enabled = false;
     f.echo.clear();
     f.hint.clear();
+}
+
+// 见 console_input.hpp StreamFooterSuspendScope 的注释。构造/析构各自只在
+// 临界区里拿一下 StdoutWriteMutex,不会跨整个确认交互一直攥着锁。
+StreamFooterSuspendScope::StreamFooterSuspendScope() {
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    EraseStreamFooterLocked();       // 落笔前先把框彻底擦干净(整行清,不留旧字符残留)
+    FooterSlot().suspended = true;   // 挂起后续所有 RedrawStreamFooterLocked() 调用
+}
+
+StreamFooterSuspendScope::~StreamFooterSuspendScope() {
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    FooterSlot().suspended = false;  // 摘挂起标记,不主动补画——下一笔正文/ticker 自然画回来
 }
 
 TurnInputListener::TurnInputListener(std::atomic<bool>& cancel_flag, const Theme& theme,

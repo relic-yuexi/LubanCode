@@ -2282,6 +2282,16 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         // UI-C:edit_file/write_file 在真控制台下,参数详情换成统一 diff
         // 预览(路径 + 行级 diff,- 红底 + 绿底),answered 后随确认块一起擦;
         // 管道模式沿用老的参数摘要,不打 diff。
+        //
+        // v0.22.5 修复:确认交互落笔前必须先把流式脚注框挂起——不挂起的话
+        // 有两条真机实测过的病:1) 详情文字盖写在框的横线上,行尾旧字符不
+        // 清、横线残留;2) [y/a/N] 提示打出来之后,被 AgentStatusPainter 那
+        // 条 400ms 一次的 ticker(不管是不是在等确认都无条件重画脚注框)盖
+        // 没了,屏上只剩流式期的输入框。用 RAII 作用域,一次性盖住
+        // PrintConfirmDetails/ShowDiffPreview 两条路径 + 后面的 ReadLine +
+        // 下面 "chose_always" 那次追加确认,答完(或提前 return)自动摘挂起
+        // ——详见 cli/console_input.hpp StreamFooterSuspendScope 注释。
+        const lubancode::cli::StreamFooterSuspendScope footer_suspend;
         const int pending_idx = display.OnConfirmRequest();
         if (file_tool && display.is_console) {
             display.ShowDiffPreview(name, input, /*trim_on_done=*/false);
