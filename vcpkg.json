@@ -1,6 +1,6 @@
 {
   "name": "lubancode",
-  "version": "0.1.0",
+  "version": "0.23.0",
   "description": "lubancode - a C++ AI coding CLI",
   "homepage": "https://github.com/",
   "dependencies": [

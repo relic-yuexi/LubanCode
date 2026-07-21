@@ -1,436 +1,182 @@
 # lubancode
 
-一个用 C++ 写的 AI 编程 CLI。眼下还是骨架阶段(M0):能编译、能跑、`--version` 有输出。
+一个用 C++ 写的 AI 编程 CLI。双协议接多家模型服务,读写编辑、命令执行、搜索、子代理、技能、MCP、LSP、钩子一应俱全,配一副真控制台交互的皮囊——流式渲染、diff 预览、确认档、逐键编辑,不比图形界面差。
 
-## 依赖
+当前版本 v0.23.0。
 
-- CMake ≥ 3.21
-- 一个支持 C++23 的编译器(见下方"这台机器上的实际情况")
-- [cpr](https://github.com/libcpr/cpr)(HTTP 客户端)、[nlohmann-json](https://github.com/nlohmann/json)——两个都会自动拉取,不用手装
+## 特性
 
-## 构建
+### 多模型
 
-本机(Windows,Git Bash)已验证过的构建方式,用 CMakePresets:
+- **双协议**:Anthropic Messages API(`wire=anthropic`)与 OpenAI Responses API(`wire=responses`)都能说,底层实现分目录隔离,互不干扰。
+- **多 provider**:`/provider add|list|switch|remove|set` 一族命令管理多个模型服务端,配置落盘持久,一行切换。
+- **万能参数口**:`extra_body`/`extra_headers` 每个 provider 各自可配,模型服务商的私有开关(思考模式、分级推理强度……)不用等 lubancode 内置支持,自己往请求上加。
+- **推理强度**:`/think`(`/effort` 同义)切 `none`/`low`/`medium`/`high` 等档位,Anthropic 协议映射 `thinking`,Responses 协议映射 `reasoning.effort`。
+- **模型目录**:主目录放一份 `models.json`,给每个模型定制默认推理档、上下文窗口、专属指令,借鉴 Codex 的 model-catalog 思路。
+- **原生联网搜索**:支持服务端自带 web_search 的模型,按 provider 开关声明,两种协议各自翻译。
+
+### 工具全家桶
+
+- 文件读写编辑(`read_file`/`write_file`/`edit_file`),带 diff 预览确认。
+- 命令执行(`run_command`),支持 `run_in_background` 后台起长命进程、跨命令存活。
+- 网络搜索与抓取(`web_search`/`web_fetch`),搜索需配置 tavily/brave/serper 之一。
+- 子代理(`agent` 工具):派生独立上下文的子任务,主对话上方常驻进度条。
+- 技能(`/skill` 联网分发):`install`/`list`/`update`/`remove`,远端技能装进本地,项目级技能可覆盖全局同名技能。
+- MCP:配置 stdio 服务器,工具自动挂载,`/mcp` 看状态。
+- LSP:配置语言服务器(如 clangd),提供 definition/references/symbols/diagnostics 语义查询,懒启动、闲置自动关停。
+- 钩子(hooks):`pre_tool`/`post_tool`/`session_start`/`session_end` 四类外部命令钩子。
+- 插件:C ABI DLL 与 Lua 两条路自行扩展工具,详见下方插件说明。
+
+### 交互体验
+
+- 真终端交互:流式吐字、markdown 渲染(标题/列表/表格/代码块)、LaTeX 公式转 Unicode。
+- 工具调用前 diff 预览 + 逐条确认,三档确认模式(`confirm`/`auto`/`yolo`)Shift+Tab 循环切换。
+- 输入框逐键编辑:历史翻页、Tab 补全 slash 命令、宽字符光标定位、多行输入(Shift+Enter)。
+- 紧凑/详细双态折叠(Ctrl+O 切换)、聚焦查看全文(Ctrl+E)、ESC 打断当前轮。
+- 会话管理:`/sessions`/`/resume`/`/export`/`/title`,`--continue` 自动续上次会话。
+- 隔离工作树:`/worktree new|list|exit`,独立分支干活不脏主树。
+- 上下文管理:`/context` 分类占用分析(系统提示/工具定义/历史明细 + 条形图),超 80% 自动 `/compact` 压缩,可指定 `compact_model` 单独跑压缩。
+
+### 可扩展 / 可定制
+
+- **soul(魂)**:风格叠加层,`/soul` 切换或直接写内容,注入系统提示末尾,只改语气不改工具调用能力。内置文言文示例魂。
+- **system_prompt(法)**:`--system-prompt` 或配置文件替换人格段,环境段(工作目录、工具调用规矩)原样保留。
+- **i18n 双语**:界面文案中英内置,`languages/*.json` 可扩展第三种语言;`/language` 会话内切换。
+- **主题**:`dark`/`light`/`plain` 三套终端配色,管道/重定向自动降级纯文本。
+
+## 安装
+
+三条路,任选其一。
+
+### 方式一:下载 Release 包
+
+前往 [Releases](https://github.com/OWNER/lubancode/releases) <!-- TODO: 仓库推上 GitHub 后替换 OWNER --> 下载对应平台的压缩包:
+
+- Windows:`lubancode-vX.Y.Z-windows-x64.zip`(内含 exe、README、`install.ps1`、`uninstall.ps1`)
+- Linux:`lubancode-vX.Y.Z-linux-x64.tar.gz`(内含 exe、README、`install.sh`)
+- macOS:`lubancode-vX.Y.Z-macos-arm64.tar.gz`(内含 exe、README、`install.sh`)
+
+**Windows**:解压后,右键 `install.ps1` → "使用 PowerShell 运行";或在终端里执行:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+装到 `%LOCALAPPDATA%\Programs\lubancode`,自动加进用户 PATH,不需要管理员权限。卸载执行 `uninstall.ps1`,原样反向清干净。
+
+**Linux / macOS**:
 
 ```bash
-# Debug
-cmake --preset debug
-cmake --build --preset debug
-./build/debug/Debug/lubancode.exe --version
+./install.sh
+```
 
-# Release
+优先装到 `~/.local/bin`(已在 PATH 里就直接用);没有就装 `/usr/local/bin`,会提示 `sudo`。
+
+### 方式二:Windows 一行式
+
+仓库推上 GitHub 后可用(URL 里的 `OWNER` 是占位符,替换成实际仓库所有者):
+
+```powershell
+irm https://raw.githubusercontent.com/OWNER/lubancode/main/scripts/install.ps1 | iex
+```
+
+### 方式三:源码构建
+
+依赖:CMake ≥ 3.21,支持 C++23 的编译器(MSVC 19.44+ / g++ 13+ / clang 15+),[cpr](https://github.com/libcpr/cpr) 与 [nlohmann-json](https://github.com/nlohmann/json)——两个都会自动拉取(vcpkg manifest 优先,探测不到就 `FetchContent` 拉源码构建),不用手装。
+
+Windows(用 CMakePresets):
+
+```bash
 cmake --preset release
 cmake --build --preset release
 ./build/release/Release/lubancode.exe --version
 ```
 
-预期输出:
-
-```
-lubancode 0.1.0
-```
-
-不传参数直接跑,会顺带跑一遍 `cpr`、`nlohmann-json` 的最小示例,证明两个依赖都链接、能用:
-
-```
-lubancode 0.1.0
-[demo] nlohmann::json -> {"deps":["cpr","nlohmann-json"],"name":"lubancode","version":"0.1.0"}
-[demo] cpr 链接成功, CPR_VERSION = 1.11.1
-```
-
-## Linux / macOS 构建(v0.20.x 跨平台单)
-
-状态先说清楚:
-
-- **平台抽象层已就位**:进程(fork/execvp + 进程组杀树)、终端(termios 逐键 + ANSI 光标)、路径(`$HOME`、UTF-8 直通)都有 POSIX 实现,在 `src/platform/*_posix.cpp`。
-- **Linux**:在 WSL Ubuntu(g++)真机编译、跑过单测(结果见各文件头注释与 CI)。
-- **macOS**:代码按 POSIX 通用写法就位,未经真机验证,待 CI(macos-latest, clang)亮灯。
-- CI 里 ubuntu/macos 两腿暂标 `continue-on-error`(观察中),Windows 腿必须绿。
-
-构建方式(需要 g++ 13+/clang 15+ 支持 C++23,以及 OpenSSL 开发包):
+Linux / macOS:
 
 ```bash
-# Debian/Ubuntu 先装依赖
-sudo apt-get install -y build-essential cmake ninja-build libssl-dev
-
-cmake -B build/linux -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build/linux
-ctest --test-dir build/linux
-./build/linux/lubancode --version
+sudo apt-get install -y build-essential cmake ninja-build libssl-dev   # Debian/Ubuntu 示例
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build
+./build/lubancode --version
 ```
 
-依赖地址开关:`CMakeLists.txt` 默认走 `codeload.github.com` 镜像(本机网络 github 主站不通的对策);网络正常的环境(比如 CI)加 `-DLUBANCODE_USE_CODELOAD=OFF` 走 github 官方地址。
+跨平台细节(平台抽象层、POSIX 实现现状、CI 矩阵)见下方"CI 与发布现状"一节。
 
-POSIX 侧的几点已知差异:
+## 快速上手
 
-- `run_command` 工具走 `/bin/sh -c`,schema 里 shell 只有 `sh`;`powershell`/`cmd` 是 Windows 专属,传了会明说不支持。
-- 超时/关停杀进程树:Windows 用 Job Object,POSIX 用进程组(`SIGTERM` 客气两秒再 `SIGKILL`)。
-- 流式期间的工具条目原地改写、markdown 收束重画暂不开(POSIX 查光标位的 DSR 应答会跟后台按键监听抢 stdin,赛点没堵之前退化成顺序打印,信息不丢);逐键行编辑、历史、Tab 补全照常。
-
-## 这台机器上的实际情况
-
-写这份骨架时探测过的工具链,如实记一笔:
-
-- **CMake** 4.2.3,**Ninja** 1.13.2 都有。
-- **MSVC**:没装在 PATH 里能直接调用的 `cl.exe`,但 Visual Studio 2022 BuildTools(17.14,VC 工具集 14.44)装在机器上,CMake 用 `Visual Studio 17 2022` 生成器能自动找到、能编译、能跑通 `std::expected`。所以 `CMakePresets.json` 里用的就是这个生成器。
-- **g++**(MSYS2 mingw64,15.2.0)也在 PATH 里,同样支持 C++23 与 `std::expected`,留作备选,没有用在默认 preset 里。
-- **vcpkg**:这台机器上没装(`where vcpkg` 找不到,`VCPKG_ROOT` 没设,`C:\vcpkg` 不存在)。`vcpkg.json` 照样写好留给 CI/装了 vcpkg 的机器用;`CMakeLists.txt` 里会先探测 `VCPKG_ROOT` / vcpkg 工具链,探测到就走 `find_package`,探测不到就自动回退到 `FetchContent` 直接拉 cpr、nlohmann-json 的源码来构建——本机走的就是这条路。
-
-C++ 标准用的是 **C++23**(MSVC 19.44 与 mingw g++ 15.2 都完整支持 `std::expected`,不用降级到 C++20)。
-
-## 依赖拉取的坑(如实记录)
-
-本机网络环境下,`github.com` 主站(不管是 `git clone` 还是 `github.com/.../releases/download/...` 这类直链)连接经常被重置、连不上;但 `codeload.github.com` 的归档包下载(`https://codeload.github.com/<owner>/<repo>/tar.gz/refs/tags/<tag>`)是通的。所以 `CMakeLists.txt` 里所有 `FetchContent_Declare` 都改成了走 `codeload.github.com` 的 tarball URL,没有用 `GIT_REPOSITORY`。
-
-cpr 默认会自己再拉一份 `curl`(默认地址在 `github.com/curl/curl/releases/download/...`,同样连不上)和 `zlib-ng`(`git clone` 到 `github.com`,也连不上)。这里的处理是:
-
-- `curl` 源码提前用 `codeload.github.com` 下载解压好,通过 `FETCHCONTENT_SOURCE_DIR_CURL` 让 cpr 直接复用,不用它自己再下载一次。
-- `zlib-ng` 直接关掉(`CURL_ZLIB OFF`),M0 骨架用不上压缩支持。
-
-另外,这台机器上 MSYS2/mingw64 的 `include` 目录里装着 `nghttp2`、`libidn2`、`libpsl`、`libssh2` 的开发头文件。用 MSVC 编译 curl 时,CMake 的 `find_package` 会把这些"顺手"找出来当系统库用——但那是给 MinGW/GCC 用的头文件,MSVC 编译器读不懂,会直接报语法错误(`C2061`/`C2059` 之类)。处理办法是显式关掉这几个可选特性,并用 `CMAKE_DISABLE_FIND_PACKAGE_<Pkg>` 禁止 `find_package` 再去找它们(见 `CMakeLists.txt` 里的注释)。
-
-依赖默认编译成静态库(`BUILD_SHARED_LIBS OFF`),这样 `lubancode.exe` 自己就能跑,不用把 `cpr.dll`、`libcurl-*.dll` 之类的运行时依赖到处放、还得操心 PATH。
-
-## 配置
-
-lubancode 要跟大模型对话,得知道 wire(协议)、base_url、api_key、model 这几件事。配置分四级,优先级从高到低,按**字段**逐个决——不是整套配置一刀切:
-
-1. **LUBANCODE_ 专属环境变量**:`LUBANCODE_WIRE`、`LUBANCODE_BASE_URL`、`LUBANCODE_API_KEY`、`LUBANCODE_MODEL`、`LUBANCODE_MAX_CONTEXT`、`LUBANCODE_THEME`、`LUBANCODE_LANG`、`LUBANCODE_SYSTEM_PROMPT_FILE`、`LUBANCODE_CONTEXT_WINDOW`、`LUBANCODE_COMPACT_MODEL`、`LUBANCODE_THINK`
-2. **配置文件**:`.lubancode/` 是 lubancode 的"家",往后 `plugins/`、`skills/` 也会住这儿,配置只是先搬进去的第一样东西。查找顺序四级:当前目录的 `.lubancode/config.json` → 用户主目录(Windows 是 `%USERPROFILE%`)下的 `.lubancode/config.json` → 当前目录的旧位置 `.lubancode.json` → 用户主目录的旧位置 `.lubancode.json`。命中旧位置且新位置还没有文件时,会自动把文件搬过去(建好 `.lubancode/` 目录,原地挪一份,搬不动就复制再删旧的),屏幕上打一行"配置已迁移到 ..."通知;搬家失败也不会中断程序,照旧用回那份旧文件,只是提示一句。字段除了 `wire`/`base_url`/`api_key`/`model`/`max_context_chars`,还可以写 `theme`、`language`、`system_prompt_file`、`context_window`、`compact_model`、`think`
-3. **通用环境变量**(向后兼容):`wire=anthropic` 时读 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_MODEL`;`wire=responses` 时读 `OPENAI_BASE_URL`/`OPENAI_API_KEY`/`OPENAI_MODEL`
-4. **内置默认值**:`wire=anthropic`、`max_context_chars=600000`、`theme=dark`、`context_window=256000`。`base_url`/`api_key`/`model`/`system_prompt_file`/`compact_model`/`think` **没有内置默认值**——lubancode 是通用工具,不绑死哪一家模型服务,`base_url`/`api_key`/`model` 这三项四级都没配到,交互模式会自动走一遍初次配置向导,单发模式/管道模式会直接报错并提示三条配置途径;`system_prompt_file` 没配到就用内置的默认人格;`compact_model` 没配到,`/compact` 就跟正常对话用同一个模型;`think` 没配到就不往请求里带推理强度这个参数,跟旧版本行为一致。
-
-### 为什么要有专属环境变量
-
-不少人机器上已经装了 Claude Code、Codex 之类的工具,全局环境变量里早就设好了 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`——这些变量是给那些工具专用的中转服务配的,lubancode 要是也去读它们,轻则连错服务,重则被中转拒之门外(比如报 `this group only allows Claude Code clients`)。所以 lubancode 才自立门户,推荐直接用 `LUBANCODE_*` 专属变量,或者干脆放一份配置文件,不跟别的工具打架。
-
-### 最快上手:交互模式的初次配置向导
-
-第一次用、还没配过 `base_url`/`api_key`/`model` 的话,什么都不用提前准备,直接不带参数运行 `lubancode`,会自动进初次配置向导:
+第一次运行,不带参数直接敲 `lubancode`,没配过 `base_url`/`api_key`/`model` 会自动进初次配置向导:
 
 ```
 $ lubancode
 === lubancode 初次配置向导 ===
-(base_url / api_key 没读到,先配一遍,配完直接进入会话)
-
-界面语言 / Language:
-  1) 中文(zh-CN)
-  2) English (en)
-选择 / Select [1]: 1
-
-接口格式:
-  1) anthropic (Claude 系)
-  2) responses (OpenAI 系)
-选择 [1]: 1
-
-base_url(必填),例如:
-  https://api.minimaxi.com/anthropic
+界面语言 / Language: 1) 中文  2) English
+接口格式: 1) anthropic (Claude 系)  2) responses (OpenAI 系)
 base_url: https://api.minimaxi.com/anthropic
+api_key: sk-...
+model: (回车拉列表选,或直接输入模型名)
 
-api_key(必填): sk-...
-
-model:回车自动从接口获取列表,或者直接输入模型名。
-model: 
-  1) MiniMax-M3
-  2) MiniMax-M2.7
-  ...
-选择模型编号 [1]: 1
-
-配置汇总:
-  wire     = anthropic
-  base_url = https://api.minimaxi.com/anthropic
-  api_key  = sk-xxxxxx...
-  model    = MiniMax-M3
-
-保存到 C:/Users/你的用户名/.lubancode/config.json? [Y/n]: 
-已保存到 C:/Users/你的用户名/.lubancode/config.json
-lubancode 0.6.0  [anthropic] MiniMax-M3
-cwd: D:/your/project  ·  输入问题回车发送,exit 退出,/help 看命令
+保存到 ~/.lubancode/config.json? [Y/n]:
+lubancode 0.23.0  [anthropic] MiniMax-M3
 > 
 ```
 
-model 那一步回车不填,会真的去接口拉一份模型列表(`GET {base_url}/v1/models` 或 `{base_url}/models`,看 wire),编号选;拉取失败(网络问题、404 之类)会如实报错,然后回落到手输模型名,不会卡住。选 `Y`(默认)会把这份配置存进主目录的 `.lubancode/config.json`,下次直接进会话,不用再配一遍;选 `n` 只在这一次会话生效。
+也可以跳过向导,直接单发一句:
 
-如果机器上还留着老版本的旧配置(`~/.lubancode.json`),不用手动搬——启动时读到旧文件、新位置又还没有,会自动挪过去,打一行"配置已迁移到 C:/Users/你的用户名/.lubancode/config.json",接着照常进会话,内容一字不改,旧文件搬完就没了。
-
-### 手动配置:主目录放一份 .lubancode/config.json
-
-也可以不走向导,自己在用户主目录(Windows 是 `%USERPROFILE%`,即 `C:\Users\你的用户名\`)下建一个 `.lubancode` 目录,里面放一个 `config.json`,下面拿 MiniMax 举例(换成你自己在用的模型服务地址、密钥、模型名即可,lubancode 不绑定任何一家):
-
-```json
-{
-  "wire": "anthropic",
-  "base_url": "https://api.minimaxi.com/anthropic",
-  "api_key": "sk-替换成你自己的密钥",
-  "model": "MiniMax-M3",
-  "max_context_chars": 600000,
-  "context_window": "256k",
-  "compact_model": "",
-  "think": ""
-}
+```bash
+lubancode "帮我看看这个项目的目录结构"
 ```
 
-字段全部可选,缺的自动往下一级找(通用环境变量,再往下是内置默认值——但 `base_url`/`api_key`/`model` 这三项没有内置默认值)。这份文件带着密钥,别提交进任何仓库——`.gitignore` 里已经排除了整个 `.lubancode/` 目录(连带旧位置的 `.lubancode.json` 一并排除,免得漏网)。
+或者管道喂问题:
 
-也可以只在某个项目目录下放一份 `.lubancode/config.json`,cwd 那份优先级比主目录那份高,适合某个项目要连别的模型服务的场景。
+```bash
+echo "这段代码有什么问题" | lubancode
+```
 
-### 交互模式里的命令
+### 常用 slash 命令
 
-交互模式下,输入以 `/` 开头的一行走命令,不发给模型:
+交互模式下,`/` 开头的一行走命令,不发给模型:
 
 | 命令 | 作用 |
 | --- | --- |
 | `/help` | 列出所有命令 |
-| `/model` | 拉取模型列表,编号选择切换(不带参数) |
-| `/model 名字` | 直接切到指定模型名,不用拉列表 |
-| `/config` | 打印当前生效配置(`api_key` 打码)和本会话实际在用的 model |
+| `/model` / `/model 名字` | 拉模型列表选,或直接切到指定模型名 |
+| `/provider` | 列、添、切、删、改模型服务端(`add`/`list`/`switch`/`remove`/`set`) |
+| `/config` | 打印当前生效配置(密钥打码)和本会话在用的模型 |
+| `/context` / `/context 512k` | 看上下文占用分析,或临时改窗口大小 |
+| `/compact [重点说明]` | 手动压缩历史,超 80% 占用会自动触发 |
+| `/think 档位` / `/effort 档位` | 切推理强度,档位以服务商为准 |
+| `/soul` | 看/改/切风格叠加层(魂) |
+| `/prompt` | 看当前系统提示词(法)来源;`/prompt reset` 还原默认 |
+| `/skills` / `/skill install <url>` | 列已装技能 / 联网安装远端技能 |
+| `/mcp` / `/lsp` / `/plugins` | 看 MCP 服务器 / LSP 服务器 / 插件工具挂载状态 |
+| `/tools` | 列工具三态:核心 / 已加载 / 延迟未加载 |
+| `/sessions` / `/resume <编号>` / `/export` | 列会话存档 / 续聊 / 导出 Markdown |
+| `/worktree new\|list\|exit` | 新建/列出/退出隔离工作树 |
+| `/language` | 列可选界面语言并切换 |
+| `/image 路径` | 附本地图片(或消息里写 `@路径`) |
 | `/clear` | 清空对话历史 |
-| `/context` | 看当前上下文占用(占了多少 token / 窗口多大 / 百分比) |
-| `/context 512k` | 本会话把上下文窗口档位改成 512k(不改配置文件,只影响这一次会话) |
-| `/compact` | 手动把当前对话历史压缩成一份存档,腾出窗口空间 |
-| `/compact 重点说明` | 压缩时额外叮嘱模型多留意哪块(比如"重点保留数据库配置") |
-| `/think` | 看当前推理强度档位 |
-| `/think high` | 切推理强度档位(`none`/`low`/`medium`/`high`,本会话生效) |
-| `/plugins` | 列出挂载的插件工具(DLL + lua)和加载警告 |
 | `/exit` | 退出(裸词 `exit`/`quit` 也认) |
 
-`/model` 切换只影响当前会话;如果当前有生效的配置文件,切完会问一句要不要顺手写进去,不写就只是这一次会话用新模型,下次启动还是原来配的那个。
+Shift+Tab 循环切换确认档(`confirm`/`auto`/`yolo`);Ctrl+O 切紧凑/详细;Ctrl+E 聚焦查看全文;ESC 打断当前轮。完整命令表与快捷键说明,交互模式里敲 `/help` 或跑 `lubancode --help` 看最新版。
 
-### 上下文管理:`/context` 与 `/compact`
+## 配置速览
 
-对话越聊越长,迟早会顶到模型的上下文窗口。lubancode 按**真实用量**记账——每次请求结束,拿这一次 `usage.input_tokens + usage.output_tokens` 直接覆盖(不是累加历史每一轮),跟"窗口大小"一除,就是当前占用百分比:
+配置来源按字段分五级合并,优先级从高到低:`LUBANCODE_*` 专属环境变量 → 项目级 `.lubancode/config.json` → 全局(主目录)`.lubancode/config.json` → 通用环境变量(`ANTHROPIC_*`/`OPENAI_*`,向后兼容)→ 内置默认值。
 
-```
-> /context
-上下文占用: 45230 / 256000 tokens (17%)
-```
+字段表、`LUBANCODE_*` 环境变量表、provider 实战示例(MiniMax、GLM 思考参数)、hooks/mcpServers/search/lsp 各段写法,见 [docs/configuration.md](docs/configuration.md)。
 
-窗口大小来自 `context_window` 配置(支持 `"256k"`/`"512k"`/`"1m"` 这种带单位写法,也能直接写数字,默认 256000),`/context 512k` 可以在当前会话临时改档位,不动配置文件。
+架构说明(分层依赖、api 双后端设计、工具层)见 [docs/architecture.md](docs/architecture.md)。
 
-占用一旦超过窗口的 80%,发下一条消息前会自动先压缩一次:
+## CI 与发布现状
 
-```
-> 继续往下写
-[compact] 上下文接近上限,自动压缩中...
-[compact] 自动压缩完成。
-好的,接着上次的思路……
-```
+<!-- 仓库尚未推上 GitHub,下面两个徽章的 OWNER/REPO 是占位符,推送后替换成实际路径 -->
+[![CI](https://github.com/OWNER/lubancode/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/lubancode/actions/workflows/ci.yml)
+[![Release](https://github.com/OWNER/lubancode/actions/workflows/release.yml/badge.svg)](https://github.com/OWNER/lubancode/actions/workflows/release.yml)
 
-也可以用 `/compact` 手动触发,想让这次压缩额外留意某个点,可以带一句话:
+CI 矩阵三平台:`windows-latest`(MSVC,主平台,必须绿)、`ubuntu-latest`(g++)、`macos-latest`(clang)。POSIX 两腿 `continue-on-error`,观察中(Linux 已在 WSL 真机验证,macOS 尚未真机验证)。推 `v*` tag 触发 release 工作流,三平台各打一个包挂上 GitHub Release。
 
-```
-> /compact 重点保留数据库连接字符串
-压缩前 ~48000 tokens → 压缩后 ~6200 tokens
-```
+## 许可
 
-压缩的做法是把当前整段历史连同一条"总结存档"的指令发给模型(可以用 `compact_model` 配置单独指定一个更便宜/更快的模型专门干这活,不设就跟主对话用同一个模型),模型给出的摘要顶在新历史最前面,后面接上"最近一次真正的用户输入"开始的完整最后一轮(工具调用和工具结果不会被这刀切开)。这是**语义压缩**,跟 `max_context_chars` 那道按字符数硬切的兜底安全网是两条独立防线,互不依赖——`agent::Compact` 失败(网络问题等)只会打一行警告,不影响继续对话,旧历史原样保留。
-
-### 推理强度:`/think`
-
-支持"思考"/推理强度这个参数的模型(比如打开了 extended thinking 的 Claude 系,或者 Responses 协议里的 `reasoning.effort`),可以用 `think` 配置字段或 `/think` 命令挑档位:`none`/`low`/`medium`/`high`。不设(默认空)就完全不往请求里带这个参数,行为跟没有这个功能的旧版本一样。
-
-```
-> /think high
-推理强度已切到 high(本会话生效)。
-```
-
-Anthropic 协议这边映射成 `thinking.type`(`none` → `disabled`,其余三档 → `enabled` + 按档位递增的 `budget_tokens`,并且永远夹在 `max_tokens` 以内不越界);Responses 协议这边映射成 `reasoning.effort` 原样透传。实测跑过 MiniMax-M3 真实的 anthropic 兼容端点和 responses 端点:两条协议、`none`/`low`/`medium`/`high` 四档都能用,HTTP 200,`high` 档明显比 `none` 档耗更多输出 token(说明真的在"多想"),没有任何一档报错。
-
-### 排查配置问题
-
-`lubancode --config` 能打印出当前实际生效的配置,以及每个字段是从哪一级来的(`api_key` 会打码,只显示前 8 位):
-
-```
-lubancode 最终生效的配置:
-
-  wire               = anthropic  [配置文件(.lubancode/config.json)]
-  base_url           = https://api.minimaxi.com/anthropic  [配置文件(.lubancode/config.json)]
-  api_key            = sk-xxxxxx...  [配置文件(.lubancode/config.json)]
-  model              = MiniMax-M3  [配置文件(.lubancode/config.json)]
-  max_context_chars  = 600000  [内置默认值]
-```
-
-配置文件坏了(不是合法 JSON)、`api_key` 四级都没配到,都会报错,错误信息里带着文件路径或者提示去哪几个地方配。
-
-## 模型目录(models.json)
-
-除了四级配置,还可以在**主目录**放一份模型目录:`<主目录>/.lubancode/models.json`,给每个模型写一条详细配置(思路借鉴 Codex 的 model-catalog)。目录是锦上添花,不是硬依赖:文件不存在就是空目录,一切行为跟没有这个功能时一模一样;整份 JSON 坏了、或者某一条写坏了,启动时打一行警告跳过,绝不报错拦人。
-
-当前会话模型的 slug 命中目录条目时:
-
-- **启动**和 **`/model` 切换**后,自动应用条目里的 `default_think`(打一行 `think→high(目录默认)`)、`context_window`(更新会话窗口,`/context` 立刻能看到)、`base_instructions`(作为独立段注入系统提示,下一轮请求生效)。启动时用户显式配过的字段(环境变量/配置文件里写了 `think`/`context_window`)不动——目录只是"该模型的出厂默认",压不过用户自己的配置。
-- **`/think`(`/effort`)裸敲**时列出条目声明的真实档位和描述;设一个表外档位只提示"目录未声明该档,仍会发送",不拦。
-- **`/model`** 列表里优先显示条目的 `display_name`(括号带 slug)。
-- **`/config`** 里能看到目录路径、条目数、当前模型命没命中。
-- 切到目录外的模型名,上面这些全部回退现状,旧模型注入的 `base_instructions` 也一并清掉。
-
-MiniMax-M3 的完整示例:
-
-```json
-{
-  "models": [
-    {
-      "slug": "MiniMax-M3",
-      "display_name": "MiniMax M3",
-      "description": "MiniMax 旗舰模型,anthropic 兼容端点,支持 Adaptive Thinking",
-      "default_think": "high",
-      "supported_think_levels": [
-        { "effort": "none", "description": "关闭思考,直答,最快" },
-        { "effort": "high", "description": "开启 Adaptive Thinking,想多深由模型自己定" }
-      ],
-      "base_instructions": "工具调用要果断,能并行读文件就并行读;回答用中文,简洁准确。",
-      "context_window": "1m",
-      "supports_parallel_tool_calls": true,
-      "input_modalities": ["text"],
-      "truncation_policy": "auto"
-    }
-  ]
-}
-```
-
-各字段含义(除 `slug` 全部可选,没写就不应用):
-
-| 字段 | 含义 |
-|------|------|
-| `slug` | **必填**,就是发请求用的 API 模型名,按它查条目 |
-| `display_name` | 展示名,`/model` 列表用 |
-| `description` | 一句话说明,给人看的 |
-| `default_think` | 切到该模型时自动应用的推理强度档位 |
-| `supported_think_levels` | 该模型真实支持的档位表,每档 `effort` + `description`,`/think` 裸敲时列出来;设表外档位只提示不拦 |
-| `base_instructions` | 模型专属指令,作为独立段注入系统提示——不碰 `--system-prompt` 的人格段,两者互不覆盖,切走模型就撤掉 |
-| `context_window` | 上下文窗口,`"1m"`/`"512k"`/裸数字都认(十进制,k=1000、m=1000000) |
-| `supports_parallel_tool_calls` | 是否支持并行工具调用(先解析存储,暂不启用) |
-| `input_modalities` | 输入模态,如 `["text", "image"]`(先解析存储,暂不启用) |
-| `truncation_policy` | 截断策略(先解析存储,暂不启用) |
-
-M3 的档位设计是"**非 `none` 即开 Adaptive Thinking**"——只要档位不是 `none`,就打开自适应思考,想多深由模型自己定,所以目录里只声明 `none`/`high` 两档就够了。
-
-## 界面语言(i18n)
-
-界面文案分中英两套,编译进程序;还能用语言包扩展别的语言。**只译界面**——发给模型的一切(系统提示、工具描述、tool_result)不在范围内,那是模型的事。日志/管道模式的输出同样跟随所选语言(表驱动,天然如此)。
-
-### 怎么选语言
-
-- **config 字段 `language`**(四级合并,env 是 `LUBANCODE_LANG`):`zh-CN` / `en` / 语言包里的语言码。空 = 跟系统(Windows 按 `GetUserDefaultUILanguage`:zh 前缀 → `zh-CN`,en 前缀 → `en`,认不出 → `zh-CN`)。
-- **`/language`**:交互模式列可选语言、即时切换(会话级),有配置文件会问一句要不要写回(跟 `/model` 一个套路);`/language en` 直接切,`/lang` 是别名。
-- **初次配置向导**:第一问就是选语言,选完向导后续文案立刻换。
-
-### 语言包
-
-`<主目录>/.lubancode/languages/*.json`,文件名即语言码(`ja.json` → `ja`),内容是平面键值对:
-
-```json
-{
-  "language.name": "日本語 (ja)",
-  "banner.hint": "質問を入力して Enter で送信",
-  "slash.desc.help": "コマンド一覧"
-}
-```
-
-启动扫一遍,可选语言 = 内置两种 + 扫到的。文件名撞内置语言码(`zh-CN.json` / `en.json`)就按键**覆盖**内置同键——想改个别措辞不用改源码。坏 JSON(解析失败/顶层不是 object/值不是字符串)打一行警告、整个文件跳过,不拦人。`language.name` 是可选键,包自报家门用(`/language` 列表里的展示名)。
-
-### 键名与回退
-
-键名分层小写点号:`help.slash`、`status.mode.confirm`、`confirm.prompt`、`error.api_key_missing`、`cmd.model.switched` 这类。占位符 `{0}` `{1}` 按序填。查表顺序:**当前语言(用户包盖内置)→ zh-CN → 键名本身**。
-
-覆盖度:**zh-CN 全量;en 是 P0 全量、P1 渐进**——P0(帮助、横幅、状态行、确认提示、向导、slash 描述表、`/language`/`/config` 输出、transcript 摘要词、常见错误)中英齐备;P1(各命令的详细输出、罕见错误)已键化进 zh-CN 表、en 暂缺的键诚实回退中文,不机翻凑数(缺哪些见 `src/cli/i18n.cpp` en 表末尾的 TODO 注释,语言包也能补)。plain 主题的 `[RUNNING]`/`[OK]` 状态词本来就是英文,不进表、不随语言变。
-
-## 终端体验
-
-### 配色主题
-
-交互模式默认按 `dark` 主题给启动横幅、`> ` 提示符、`[工具]` 行、确认提示、`[错误]`、token 统计行上色,模型回复正文本身**不**上色(保持原样,不干扰阅读)。可选三套:
-
-- `dark`(默认):适合深色背景终端
-- `light`:适合浅色背景终端
-- `plain`:完全不上色,等同于纯文本
-
-切换方式跟别的字段一样,按四级优先级:`LUBANCODE_THEME` 环境变量,或者配置文件里的 `"theme"` 字段(`"dark"`/`"light"`/`"plain"`)。
-
-程序启动时会自动探测 stdout 是不是一个真终端:管道/重定向到文件时,不管配的哪个主题,一律自动降级成 `plain`,不会往文件里混进 ANSI 转义序列;Windows 下还会尝试给控制台开 `ENABLE_VIRTUAL_TERMINAL_PROCESSING`,开不开得成也会影响是否真正上色。想在管道模式下也强制看到颜色(比如拿 `grep` 校验 ANSI 序列),设 `LUBANCODE_FORCE_COLOR=1` 可以绕开这个自动降级。
-
-### 思考中转轮 & token 统计
-
-交互模式下,发出请求到模型开始吐第一个字之间,会在原地转一个 ASCII 字符(`-\|/`,不用 Unicode 盲文块,避免某些控制台字体下显示成方块),旁边跟着"思考中"字样;模型一旦开始出字或者在跑工具,转轮就停了,不会跟输出混在一起。管道/非真终端模式下转轮完全不开,不会往输出里混入任何转轮字符。
-
-每次问答(哪怕中间因为工具调用来回了好几轮)结束后,会打一行暗色的 token 用量统计,累计这一次问答里所有请求的输入/输出 token 数和请求次数,末尾还带一项本次问答结束时的上下文占用百分比(跟 `/context` 算法一致,按最近一次请求的真实用量算,不是累加),例如:
-
-```
-[tokens] 输入 1024 · 输出 256 · 请求 3 次 · context 12%
-```
-
-命中了 prompt cache 的话(Anthropic 后端看 `cache_read_input_tokens`,Responses 后端看 `usage.input_tokens_details.cached_tokens`),输入这一项后面会带一个括号,注明缓存命中了多少 token;没命中就照旧不带括号,不多打空括号:
-
-```
-[tokens] 输入 1578(缓存命中 128) · 输出 83 · 请求 2 次 · context 34%
-```
-
-### 逐键编辑、历史、Tab 补全、确认模式
-
-真实控制台下(不是管道/重定向进来的输入),`> ` 提示符这一行是逐键编辑的,不是敲完整行回车才生效:
-
-- 方向键左右移动光标,Home/End 跳到行首/行尾,Backspace 删字符;中日韩文字按显示宽度算,光标定位不会因为宽字符错位。
-- 上下方向键翻历史(本次会话里敲过的每一行,回车非空才记一条);翻到一半又开始敲字符,就地当成编辑这条历史,历史索引落回"底部"——再按一次 Up 是重新从最新一条开始翻,不接着刚才那条继续走。
-- 一行以 `/` 开头时,下面会实时跟一行淡色提示,列出当下匹配的命令名和一句话说明;按 Tab 补全公共前缀,唯一匹配直接补全命令全名(带一个尾随空格);还有多个匹配,再按一次 Tab 依次轮着候选走。
-- Shift+Tab 循环切换会话级"确认模式",切一次打一行提示,提示符前缀跟着变:
-  - `> `(默认,`确认`档):`write_file`/`edit_file`/`run_command` 等需要确认的工具照旧逐条问
-  - `[auto] > `(`auto` 档):`write_file`/`edit_file` 自动放行,`run_command` 仍然要问
-  - `[yolo] > `(`yolo` 档):全自动,什么都不问——跟命令行传 `--yes` 效果一样,`--yes` 直接从 `yolo` 档起手
-- Ctrl+C:行里有内容就清空、留在同一次输入里接着编辑;行是空的按 Ctrl+C 才当退出处理。Ctrl+D 一律当 EOF。
-
-输入是从管道/文件重定向进来的(比如 `printf "...\n" | lubancode`),不会走这条逐键编辑的路,原样按行读取,行为跟没有这套编辑器之前一样。
-
-### `--system-prompt`:自定义人格
-
-lubancode 的系统提示词拆成两段:**人格段**(定义"模型是谁、该用什么语气说话")和**环境段**(工作目录、"该用工具时就用工具"这条硬规矩)。`--system-prompt` 换的只是人格段,环境段不管怎么换人格都会原样追加,所以自定义人格哪怕定得很出格(比如"只用文言文回答"),工具照样能正常调用。
-
-```bash
-lubancode --system-prompt ./persona.md "帮我看看这个项目的结构"
-```
-
-- 文件要求 UTF-8 编码的 `.md` 或 `.txt`,内容整篇原样当人格段用
-- 文件不存在、打不开、或者内容是空的,启动时就会报可读的错误,不会打到一半才发现
-- 也可以写进配置文件的 `"system_prompt_file"` 字段(或者 `LUBANCODE_SYSTEM_PROMPT_FILE` 环境变量),`--system-prompt` 命令行参数会压过配置文件里的这个字段
-
-## 插件(M7):C ABI DLL 和 Lua 两条路
-
-想给模型添工具,又不想改 lubancode 源码,把插件丢进主目录的 `.lubancode/plugins/` 就行,下次启动自动扫描挂载,启动时每个插件打一行 `[plugin] 名: N 个工具`,交互模式里 `/plugins` 看清单。两类插件的工具挂载后名字统一带前缀 `plugin__<文件名>__<工具名>`,执行前一律先问用户(`--yes` / yolo 模式照旧放行);坏插件(加载不了、格式不对、`api_version` 不合)只换来一行警告,不影响启动。插件只挂主会话的工具表,子代理用不上。
-
-### C ABI DLL 插件
-
-对外头文件是 [`include/luban_plugin.h`](include/luban_plugin.h),纯 C,任何能编 DLL 的语言都能写。插件唯一导出一个 `luban_plugin_entry`,返回工具清单;每个工具给出 name / description / JSON Schema / execute 函数指针。内存规矩:execute 返回的文本由插件分配,宿主拷贝完立刻回调 `free_result` 交还插件释放——两边 CRT 可能不同,谁分配谁释放,绝不跨堆。完整示例(reverse_text,文本按字符倒序)在 [`examples/plugins/hello_plugin/`](examples/plugins/hello_plugin/),一个 `.c` 文件加一份独立小 CMakeLists,照着抄就能起步。
-
-**风险自担**:DLL 插件跟 lubancode 同进程跑,插件里崩了(野指针、除零……)宿主兜不住,整个程序一起完蛋。只装信得过的插件。
-
-### Lua 插件
-
-不想碰编译器,写个 `.lua` 文件也行。每个文件是一个工具,脚本返回一张表:
-
-```lua
-return {
-    name = "word_count",
-    description = "统计文本里的词数。",
-    input_schema = [[{"type":"object","properties":{"text":{"type":"string"}}}]],  -- JSON 字符串或 lua 表都认
-    execute = function(input)   -- input 是入参 JSON 转好的 lua 表
-        return "词数: " .. ...  -- 返回字符串(数字/布尔/表也认,表会转回 JSON)
-    end,
-}
-```
-
-每个 Lua 工具一个独立的 `lua_State`,互相隔离;脚本里 `error()` 会被接住报给模型,不会带崩宿主。示例在 [`examples/plugins/word_count.lua`](examples/plugins/word_count.lua)。
-
-## 目录结构
-
-```
-src/
-├── main.cpp   # 入口:解析 --version / --help
-├── cli/       # 命令行交互层
-├── agent/     # agent 核心循环
-├── api/       # 与大模型对话的通路(Anthropic / Responses 两个后端)
-├── tools/     # 模型可调用的工具(read_file、run_command……)
-└── config/    # 配置
-docs/
-└── architecture.md   # 架构说明,详见此文档
-```
-
-架构细节(分层依赖、api 双后端设计、工具层、错误处理、里程碑规划)见 [`docs/architecture.md`](docs/architecture.md)。
+仓库目前未附许可证文件。正式对外发布前需要补一份 `LICENSE`。
