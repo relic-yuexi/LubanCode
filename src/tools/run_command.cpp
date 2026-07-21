@@ -4,6 +4,7 @@
 #include <string>
 
 #include "platform/process.hpp"
+#include "platform/text_encoding.hpp"  // SanitizeUtf8:捕获侧治本,见 execute() 里的调用点注释
 
 #ifdef _WIN32
 #include "platform/paths.hpp"  // Utf8ToWide:PowerShell -EncodedCommand 拼接用
@@ -205,6 +206,15 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
     }
     platform::ProcessResult proc = platform::RunShellCommand(command, timeout_ms);
 #endif
+
+    // 捕获侧治本:cmd 分支已经在 platform 层按 CP_ACP 转过一遍,理论上到手
+    // 就是合法 UTF-8;但 PowerShell 分支只有脚本真正跑到
+    // [Console]::OutputEncoding=UTF8 那一行之后才靠得住——脚本解析期报错
+    // (比如用户命令里带 PS 5.1 不认的 `&&`)会绕过那一行,直接吐系统 ANSI
+    // 代码页字节。不管走哪条分支,拿到手先原地清洗一遍,保证 proc.output
+    // 从这里往后一定是合法 UTF-8,不会把坏字节带进 Tool::Result 再带进
+    // 对话历史。
+    proc.output = platform::SanitizeUtf8(proc.output);
 
     if (proc.spawn_failed) {
         return {proc.spawn_error, true};

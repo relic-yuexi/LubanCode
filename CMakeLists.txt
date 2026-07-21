@@ -210,6 +210,7 @@ endif()
 
 add_library(lubancode_core STATIC
   ${_lubancode_platform_sources}
+  src/platform/text_encoding.cpp
   src/api/sse_framing.cpp
   src/api/anthropic/client.cpp
   src/api/anthropic/events.cpp

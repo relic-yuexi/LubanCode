@@ -5,6 +5,7 @@
 #include <variant>
 
 #include "api/assembler.hpp"
+#include "platform/text_encoding.hpp"  // SanitizeUtf8:工具结果入历史前的编码兜底
 
 namespace lubancode::agent {
 
@@ -238,7 +239,14 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
                 continue;
             }
             const tools::Tool::Result result = RunOneTool(registry_, call, callbacks, tool_filter_);
-            tool_results.push_back(api::ToolResultBlock{call.id, result.content, result.is_error});
+            // 边界兜底:不管工具(含 MCP、hooks 加工过的结果、读到二进制的
+            // 文件工具……)自己有没有做好编码,进历史前一律过一遍
+            // SanitizeUtf8——一坨坏字节不该把整轮对话崩掉(下次
+            // nlohmann::json 序列化历史时,非法 UTF-8 会直接抛
+            // type_error.316,异常穿透到顶层)。run_command.cpp 已经在捕获侧
+            // 治过一次本,这里是最后一道拦网,双保险不重复不冲突。
+            tool_results.push_back(
+                api::ToolResultBlock{call.id, platform::SanitizeUtf8(result.content), result.is_error});
             if (cancel != nullptr && cancel->load()) {
                 interrupted = true;
             }

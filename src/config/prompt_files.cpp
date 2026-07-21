@@ -7,6 +7,8 @@
 #include <sstream>
 #include <system_error>
 
+#include "platform/text_encoding.hpp"  // IsValidUtf8
+
 #ifdef _WIN32
 // CreateFileW(CREATE_NEW) 排他创建脚手架文件用。max/min 宏与 <algorithm>
 // 撞车的老坑,照例 NOMINMAX 关掉(跟 console_input.cpp 一套写法)。
@@ -425,53 +427,6 @@ bool CreateNewFileWithContent(const fs::path& path, const std::string& content) 
 #endif
 }
 
-// SOUL.md 是给人写的 UTF-8 提示词。流读取并不检验编码,坏字节若直塞进
-// 请求有的后端会拒绝;这里收口,让调用方安静回退成无魂。
-bool IsValidUtf8(const std::string& text) {
-    for (std::size_t i = 0; i < text.size();) {
-        const unsigned char first = static_cast<unsigned char>(text[i]);
-        if (first <= 0x7f) {
-            ++i;
-            continue;
-        }
-
-        std::size_t tail_count = 0;
-        unsigned int code_point = 0;
-        unsigned int minimum = 0;
-        if ((first & 0xe0) == 0xc0) {
-            tail_count = 1;
-            code_point = first & 0x1f;
-            minimum = 0x80;
-        } else if ((first & 0xf0) == 0xe0) {
-            tail_count = 2;
-            code_point = first & 0x0f;
-            minimum = 0x800;
-        } else if ((first & 0xf8) == 0xf0) {
-            tail_count = 3;
-            code_point = first & 0x07;
-            minimum = 0x10000;
-        } else {
-            return false;
-        }
-        if (i + tail_count >= text.size()) {
-            return false;
-        }
-        for (std::size_t j = 1; j <= tail_count; ++j) {
-            const unsigned char tail = static_cast<unsigned char>(text[i + j]);
-            if ((tail & 0xc0) != 0x80) {
-                return false;
-            }
-            code_point = (code_point << 6) | (tail & 0x3f);
-        }
-        if (code_point < minimum || code_point > 0x10ffff ||
-            (code_point >= 0xd800 && code_point <= 0xdfff)) {
-            return false;
-        }
-        i += tail_count + 1;
-    }
-    return true;
-}
-
 }  // namespace
 
 std::string SystemPromptFilePath(const std::string& lubancode_dir) {
@@ -595,7 +550,7 @@ std::optional<std::string> ReadSoulFile(const std::string& lubancode_dir) {
         return std::nullopt;
     }
     const auto content = ReadTextFileIfExists(SoulFilePath(lubancode_dir));
-    if (!content.has_value() || !IsValidUtf8(*content)) {
+    if (!content.has_value() || !platform::IsValidUtf8(*content)) {
         return std::nullopt;
     }
     return content;
@@ -605,7 +560,7 @@ std::expected<void, std::string> WriteSoulFile(const std::string& lubancode_dir,
     if (lubancode_dir.empty()) {
         return std::unexpected(std::string("找不到 .lubancode 目录,没法写 SOUL.md"));
     }
-    if (!IsValidUtf8(content)) {
+    if (!platform::IsValidUtf8(content)) {
         return std::unexpected(std::string("SOUL.md 内容不是有效 UTF-8"));
     }
 
