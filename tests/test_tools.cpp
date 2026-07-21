@@ -8,8 +8,15 @@
 #include <fstream>
 #include <string>
 
+#include "platform/text_encoding.hpp"
 #include "tools/read_file.hpp"
 #include "tools/run_command.hpp"
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>  // ::GetACP(),GBK 样本转换那条测试用来判断本机代码页是不是 936
+#endif
 
 using lubancode::tools::ReadFileTool;
 using lubancode::tools::RunCommandTool;
@@ -374,3 +381,110 @@ TEST_CASE("run_command: 海量输出被截断并标注,不吃光内存") {
     // 截断在 2MB 上限附近,不会整整 6MB 全吞进来。
     CHECK(result.content.size() <= 2 * 1024 * 1024 + 4096);
 }
+
+// ---------------------------------------------------------------------------
+// 0.22.6 修复:PowerShell 5.1 遇到解析错误(比如命令里带 `&&`,PS 5.1 根本
+// 不认这个语法)会在真正执行到 [Console]::OutputEncoding=UTF8 之前就把
+// 错误文本吐出来,走的是系统 ANSI 代码页(国内机器是 GBK)。这坨非法
+// UTF-8 字节一旦被当 UTF-8 塞进 nlohmann::json,序列化时就是
+// type_error.316,异常穿透到顶层,整个会话崩掉。见
+// platform/text_encoding.hpp 的 IsValidUtf8/SanitizeUtf8。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SanitizeUtf8: 合法 UTF-8 原样通过") {
+    using lubancode::platform::SanitizeUtf8;
+    const std::string legal = "hello 你好世界 123";
+    CHECK(SanitizeUtf8(legal) == legal);
+}
+
+TEST_CASE("SanitizeUtf8: 空串原样返回") {
+    using lubancode::platform::SanitizeUtf8;
+    CHECK(SanitizeUtf8("") == "");
+}
+
+TEST_CASE("IsValidUtf8: 合法/非法字节串判定") {
+    using lubancode::platform::IsValidUtf8;
+    CHECK(IsValidUtf8(""));
+    CHECK(IsValidUtf8("hello 你好世界"));
+    // "你好" 的 GBK 字节(C4 E3 BA C3):C4 起头按 UTF-8 该是 2 字节序列,
+    // 后随字节 E3 的高两位是 11 不是 10,不是合法延续字节。
+    CHECK_FALSE(IsValidUtf8(std::string("\xC4\xE3\xBA\xC3", 4)));
+    // 截断的多字节序列(E4 BD 是"你" E4 BD A0 的前两字节,缺最后一个)。
+    CHECK_FALSE(IsValidUtf8(std::string("\xE4\xBD", 2)));
+    // 单独一个延续字节,不是任何序列的开头。
+    CHECK_FALSE(IsValidUtf8(std::string("\x80", 1)));
+}
+
+TEST_CASE("SanitizeUtf8: GBK 样本转换正确") {
+    using lubancode::platform::IsValidUtf8;
+    using lubancode::platform::SanitizeUtf8;
+
+    // "你好" 的 GBK/CP936 字节:你=C4 E3,好=BA C3。
+    const std::string gbk_bytes("\xC4\xE3\xBA\xC3", 4);
+    REQUIRE_FALSE(IsValidUtf8(gbk_bytes));  // 先确认样本本身确实不是合法 UTF-8
+
+    const std::string sanitized = SanitizeUtf8(gbk_bytes);
+    CHECK(IsValidUtf8(sanitized));  // 不管走哪条分支,出口必须合法
+
+#ifdef _WIN32
+    // 本机(以及绝大多数国内 Windows 机器)系统 ANSI 代码页就是 936/GBK,
+    // AcpBytesToUtf8 应该能把这 4 个字节精确解回"你好"。代码页不是 936 的
+    // 机器上(海外机器)按 ACP 转出来的东西不可预测,退化成只断言合法。
+    if (::GetACP() == 936) {
+        CHECK(sanitized == "\xE4\xBD\xA0\xE5\xA5\xBD");  // "你好" 的 UTF-8 字节
+    }
+#endif
+}
+
+TEST_CASE("SanitizeUtf8: 垃圾字节保底替换,出口一定合法 UTF-8") {
+    using lubancode::platform::IsValidUtf8;
+    using lubancode::platform::SanitizeUtf8;
+
+    // 0xF9(bug 现场里那个越界字节)混在正常 ASCII 中间。
+    const std::string garbage = "A\xF9matched...\x80\xFFZ";
+    REQUIRE_FALSE(IsValidUtf8(garbage));
+
+    const std::string sanitized = SanitizeUtf8(garbage);
+    CHECK(IsValidUtf8(sanitized));
+    // 合法的 ASCII 片段原样保留,不该被误伤。
+    CHECK(sanitized.find('A') != std::string::npos);
+    CHECK(sanitized.find('Z') != std::string::npos);
+
+#ifndef _WIN32
+    // 非 Windows 平台没有 ACP 兜底那一层,直接走"逐段替换成 U+FFFD"的
+    // 纯逻辑,行为可以精确断言。
+    CHECK(sanitized.find("\xEF\xBF\xBD") != std::string::npos);
+#endif
+}
+
+TEST_CASE("nlohmann::json: SanitizeUtf8 清洗过的坏字节,序列化不会再抛 type_error.316") {
+    using lubancode::platform::SanitizeUtf8;
+    const std::string garbage = "bad\xF9" "byte";  // 拆成两段字面量,免得 \xF9b 被解成一个越界的三位十六进制转义
+    const std::string sanitized = SanitizeUtf8(garbage);
+    nlohmann::json content_only_json;
+    CHECK_NOTHROW(content_only_json = sanitized);
+    CHECK_NOTHROW(content_only_json.dump());
+}
+
+#ifdef _WIN32
+
+TEST_CASE("run_command: PowerShell 解析错误(&&)吐出的坏字节,清洗后是合法 UTF-8,json 不炸") {
+    // 复现真实 bug 现场:用户命令里带 `&&`,PowerShell 5.1 根本不认这个
+    // 语法,脚本解析期就报错——报错文本走系统 ANSI 代码页(GBK),在
+    // [Console]::OutputEncoding=UTF8 那行生效之前就吐出来了。
+    RunCommandTool tool;
+    nlohmann::json input;
+    input["command"] = "cd C:\\ && dir";
+    const Tool::Result result = tool.execute(input);
+
+    // 不同 PowerShell 版本/环境对这条命令的具体反应可能有差异(比如装了
+    // PowerShell 7 且被优先命中就不会报解析错误),这里不强行断言
+    // is_error;真正要保证的是不管吐出什么,content 必须是合法 UTF-8,且
+    // 塞进 nlohmann::json 序列化不能抛异常——这正是本次要修的 bug。
+    CHECK(lubancode::platform::IsValidUtf8(result.content));
+    nlohmann::json wrapped;
+    CHECK_NOTHROW(wrapped = result.content);
+    CHECK_NOTHROW(wrapped.dump());
+}
+
+#endif  // _WIN32
