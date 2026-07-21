@@ -249,8 +249,8 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
 - 默认魂是 `~/.lubancode/SOUL.md`。它默认只有一行注释、内容空白（空白 = 无效果）；写上风格指令就生效。
 - 添加一个新魂：在 `~/.lubancode/souls/` 下建 `<名字>.md`，正文写风格指令。例如加"猫娘"魂就写 `souls/catgirl.md`，正文写清语气规则（顶部可用 `<!-- 注释 -->` 写给人看的说明，注入前会剥掉）。
 - 看/设：`/soul` 看当前正文；`/soul <内容>` 会把内容写进 `SOUL.md`，当场生效，下次启动也会读回来；`/soul clear` 把它还原成默认空魂。
-- 切换：`/soul <名字>` 若恰好命中 `souls/` 下已有文件，仍会切到那一魂；`/soul off` 本会话关魂；`/soul default` 回 SOUL.md。
-- 持久化选魂：配置 `soul` 字段或 `LUBANCODE_SOUL` 环境变量可填魂名（不带 `.md`）。直接写/清 SOUL.md 时，已有配置文件会自动切回 `default`；环境变量仍按优先级压过配置。
+- 切换：`/soul <名字>` 若恰好命中 `souls/` 下已有文件，仍会切到那一魂；`/soul off` 本会话关魂；`/soul default` 回 SOUL.md。三者当场生效外，若已有配置文件，还会问一句要不要写进去持久化（答 y 才落盘，`off`/`default` 都是合法持久值），免得下次启动被配置里的旧魂名盖过去。
+- 持久化选魂：配置 `soul` 字段或 `LUBANCODE_SOUL` 环境变量可填魂名（不带 `.md`）、`default` 或 `off`。直接写/清 SOUL.md 时，已有配置文件会自动切回 `default`；环境变量仍按优先级压过配置。
 - 切魂后历史里的旧风格回答可能带偏几轮，`/clear` 立净。
 
 ## 提示词运行时模块(prompts/)

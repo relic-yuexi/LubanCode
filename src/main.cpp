@@ -3376,9 +3376,11 @@ std::string LoadSoulContentByName(const std::string& name, bool warn) {
 
 // /soul 命令:裸敲看当前正文和可选旧魂;/soul clear 把 SOUL.md 还原成
 // 默认空魂;/soul <内容> 直接写 SOUL.md、立刻生效,下回启动也会读回来。
-// 兼容旧用法:参数恰好命中 souls/<名字>.md 时仍是选魂,off/default 也仍只
-// 管本会话。直接写/clear 后若已有配置文件,顺手把选魂项改回 default,
-// 免得下次启动又被旧的名字盖过去。
+// 兼容旧用法:参数恰好命中 souls/<名字>.md 时仍是选魂。off/default/
+// <名字> 三条路都当场生效,并在有配置文件时问一句要不要持久化——答 y
+// 才落盘,免得下次启动被配置里的旧值悄悄盖过去(或者悄悄留着没改)。
+// clear 语义不同,是把 SOUL.md 本身还原成空魂,所以自动把配置里的选魂
+// 项归位 default,不用问。
 void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::string>& current_soul,
                         std::string& current_soul_name, const std::optional<std::string>& config_file_path) {
     const auto luban_dir = lubancode::config::HomeLubancodeDir();
@@ -3409,6 +3411,22 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
         current_soul->clear();
         current_soul_name = "off";
         std::cout << tr("cmd.soul.off") << "\n" << tr("cmd.soul.switch_hint") << "\n";
+
+        // 跟 /soul <名字> 一路的持久化问法对齐:配置里原先若存着旧魂名,
+        // 不问清楚就不动它,免得下次启动又被旧值盖过去。
+        if (config_file_path.has_value()) {
+            const std::optional<std::string> answer = lubancode::cli::ReadLine(tr("cmd.soul.write_prompt"));
+            if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
+                const auto updated = lubancode::config::UpdateSoulInConfigFile(*config_file_path, "off");
+                if (updated.has_value()) {
+                    std::cout << trf("cmd.write_config.updated", *config_file_path) << "\n";
+                } else {
+                    std::cout << trf("cmd.write_config.failed", updated.error()) << "\n";
+                }
+            }
+        } else {
+            std::cout << tr("cmd.session_only") << "\n";
+        }
         return;
     }
 
@@ -3420,6 +3438,22 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
             std::cout << tr("cmd.soul.empty_note");
         }
         std::cout << "。\n" << tr("cmd.soul.switch_hint") << "\n";
+
+        // 同上:配置里原先若存着旧魂名,问清楚了才改,不然下次启动照旧
+        // 被旧值盖过去(这就是本函数要修的那个 bug)。
+        if (config_file_path.has_value()) {
+            const std::optional<std::string> answer = lubancode::cli::ReadLine(tr("cmd.soul.write_prompt"));
+            if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
+                const auto updated = lubancode::config::UpdateSoulInConfigFile(*config_file_path, "default");
+                if (updated.has_value()) {
+                    std::cout << trf("cmd.write_config.updated", *config_file_path) << "\n";
+                } else {
+                    std::cout << trf("cmd.write_config.failed", updated.error()) << "\n";
+                }
+            }
+        } else {
+            std::cout << tr("cmd.session_only") << "\n";
+        }
         return;
     }
 

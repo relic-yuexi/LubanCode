@@ -970,6 +970,19 @@ TEST_CASE("UpdateSoulInConfigFile: 只改 soul 字段,别的字段(含不认得�
     CHECK(content.find("自定义字段") != std::string::npos);
 }
 
+TEST_CASE("UpdateSoulInConfigFile: 能把 soul 字段改成 off,覆盖掉旧的魂名") {
+    // 对应 /soul off 持久化那条路:配置里原先存着旧魂名(比如 catgirl),
+    // 答 y 之后要能真把它改成 off,而不是原样留着(这正是本单要修的 bug)。
+    TempPromptFile file(R"({"soul": "catgirl"})");
+    const auto updated = config::UpdateSoulInConfigFile(file.Utf8Path(), "off");
+    REQUIRE(updated.has_value());
+
+    std::ifstream in(file.Utf8Path(), std::ios::binary);
+    const std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(content.find("\"soul\": \"off\"") != std::string::npos);
+    CHECK(content.find("catgirl") == std::string::npos);
+}
+
 TEST_CASE("UpdateSoulInConfigFile: 文件不是合法 JSON,报错不写") {
     TempPromptFile file("这不是 JSON");
     const auto updated = config::UpdateSoulInConfigFile(file.Utf8Path(), "wenyan");
