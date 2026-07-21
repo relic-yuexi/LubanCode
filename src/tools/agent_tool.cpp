@@ -51,7 +51,7 @@ nlohmann::json AgentTool::input_schema() const {
 
     nlohmann::json max_turns_prop = nlohmann::json::object();
     max_turns_prop["type"] = "integer";
-    max_turns_prop["description"] = "子代理最多跑几轮(每轮一次工具调用来回算一轮),不填默认 15。";
+    max_turns_prop["description"] = "子代理最多跑几轮(每轮一次工具调用来回算一轮),不填默认 40。";
     properties["max_turns"] = max_turns_prop;
 
     schema["properties"] = properties;

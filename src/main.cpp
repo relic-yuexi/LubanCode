@@ -4017,8 +4017,10 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         sub_registry.Register(std::make_unique<lubancode::tools::LspTool>(*lsp_manager));
         registry.Register(std::make_unique<lubancode::tools::LspTool>(*lsp_manager));
     }
+    // default_max_turns 从 15 提到 40:子代理干的是真活(委托它翻找文件、
+    // 通读多份文件这类任务,实测一单能有 30~190 次工具调用),15 轮远远不够。
     registry.Register(std::make_unique<lubancode::tools::AgentTool>(
-        wrapped_backend, sub_registry, CurrentDirUtf8(), config.model, /*default_max_turns=*/15, skills_segment));
+        wrapped_backend, sub_registry, CurrentDirUtf8(), config.model, /*default_max_turns=*/40, skills_segment));
 
     // M11(0.10.0):todo_write 只挂主注册表(registry),绝不挂 sub_registry——
     // 子代理是短命的一次性跑腿,不该有权限乱写主会话的待办清单。todo_state
@@ -4214,14 +4216,17 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         if (preserve_history && loop.has_value()) {
             old_history = loop->History();
         }
-        // max_tokens=4096、max_turns=25 是 AgentLoop 自己的默认值,这里显式
-        // 传出来是为了能把 config.max_context_chars 一起传进去。
+        // max_tokens=4096 是 AgentLoop 自己的默认值,这里显式传出来是为了能
+        // 把 config.max_context_chars 一起传进去。max_turns 改用
+        // config.max_turns(可经配置文件/LUBANCODE_MAX_TURNS 调整,默认
+        // kDefaultMaxTurns=100),不再硬编码 25——旧默认值在真实多步骤开发
+        // 任务里太容易见顶。
         // tool_search:backend 换成 index_backend(索引段包装,未启用时纯
         // 透传);/clear 重建后过滤谓词要重新灌一遍——loaded 集合不清,
         // 已挂载的工具跨 /clear 仍然可用。
         loop.emplace(index_backend, registry, config.model,
                      lubancode::agent::AssembleSystemPrompt(prompt_options),
-                     /*max_tokens=*/4096, /*max_turns=*/25, config.max_context_chars);
+                     /*max_tokens=*/4096, config.max_turns, config.max_context_chars);
         if (main_deferral) {
             loop->SetToolFilter(tool_filter);
         }
@@ -4725,8 +4730,10 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         sub_registry.Register(std::make_unique<lubancode::tools::LspTool>(*lsp_manager));
         registry.Register(std::make_unique<lubancode::tools::LspTool>(*lsp_manager));
     }
+    // default_max_turns 从 15 提到 40:子代理干的是真活(委托它翻找文件、
+    // 通读多份文件这类任务,实测一单能有 30~190 次工具调用),15 轮远远不够。
     registry.Register(std::make_unique<lubancode::tools::AgentTool>(
-        wrapped_backend, sub_registry, CurrentDirUtf8(), config.model, /*default_max_turns=*/15, skills_segment));
+        wrapped_backend, sub_registry, CurrentDirUtf8(), config.model, /*default_max_turns=*/40, skills_segment));
     // M11(0.10.0):单发模式也挂 todo_write(只挂主 registry,不挂 sub_registry,
     // 理由同 InteractiveLoop)——单发问答一样可能是"先列计划再分步做"这种
     // 多步骤任务,没道理只有交互模式能用这个工具。没有 /todos 命令可看
@@ -4788,7 +4795,8 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
             lubancode::agent::WithModelInstructions(
                 lubancode::agent::AssembleSystemPrompt(prompt_options), model_instructions),
             soul_content),
-        /*max_tokens=*/4096, /*max_turns=*/25, config.max_context_chars);
+        // max_turns 同上,改用 config.max_turns,不再硬编码 25。
+        /*max_tokens=*/4096, config.max_turns, config.max_context_chars);
     if (main_deferral) {
         loop.SetToolFilter(tool_filter);
     }

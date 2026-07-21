@@ -76,7 +76,25 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     return result;
 }
 
+// 轮数将尽提醒的正文。remaining_turns 是"从当轮(含)到硬上限还能来回几趟"
+// (ShouldNudgeMaxTurns 判断为真时才会调这个,所以 remaining_turns 必然
+// <= kMaxTurnsNudgeThreshold)。附在 system 尾部而不是塞进 history——只影响
+// 当轮请求怎么发,不污染对话历史(下一轮 remaining_turns 变了,提示文本也
+// 该跟着变,history 里留一份旧提示没有意义)。
+std::string BuildMaxTurnsNudgeText(int remaining_turns) {
+    return "\n\n[系统提醒] 轮数将尽,含本轮在内最多还能跟你来回 " + std::to_string(remaining_turns) +
+           " 轮就会被强制停止(这是防死循环的硬上限,不是真的不让你干了)。"
+           "请收敛任务范围,尽快把手头这一步收尾,汇报当前进度与下一步该做什么,别把话说到一半。";
+}
+
 }  // namespace
+
+bool ShouldNudgeMaxTurns(int turn, int max_turns) {
+    // turn 是 for 循环里"即将发起的这一轮"的 0-based 下标,max_turns - turn
+    // 就是含当轮在内还能跑几轮。<= 阈值时该提醒——max_turns 本来就配得很小
+    // (比如 <= 3)时,从第一轮起就一直提醒,也没问题:反正确实快到頂。
+    return (max_turns - turn) <= kMaxTurnsNudgeThreshold;
+}
 
 AgentLoop::AgentLoop(api::Backend& backend, tools::ToolRegistry& registry, std::string model,
                       std::string system_prompt, int max_tokens, int max_turns, std::size_t max_context_chars)
@@ -121,6 +139,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         api::Request request;
         request.model = model_;
         request.system = system_prompt_;
+        // 轮数将尽提醒:只追加进这一轮实际发出去的 system,不改 system_prompt_
+        // 本身、也不进 history_——下一轮 turn 变了,剩余轮数跟着变,提示该
+        // 有就有、该消失就消失,没有"提示搭便车永久赖在历史里"的问题。
+        if (ShouldNudgeMaxTurns(turn, max_turns_)) {
+            request.system += BuildMaxTurnsNudgeText(max_turns_ - turn);
+        }
         request.messages = TrimHistory(history_, max_context_chars_);
         request.max_tokens = max_tokens_;
         // 每轮现拼,不在 Run() 开头拼一次复用:tool_search 命中会在一次

@@ -472,6 +472,51 @@ TEST_CASE("上下文硬上限:裁剪与截断后仍超限(单条用户输入就�
     CHECK(backend.captured_requests.empty());  // 一次请求都没发出去
 }
 
+// ---------------------------------------------------------------------------
+// 轮数将尽提醒:ShouldNudgeMaxTurns 是纯函数,直接测触发时机;再用一个真跑
+// AgentLoop 的用例确认提醒文本真的被附到了发出去的 request.system 尾部。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ShouldNudgeMaxTurns: 剩 3 轮(含当轮)触发,剩 4 轮不触发") {
+    // max_turns=100:turn=96 时剩余 100-96=4 轮,不该提醒;turn=97 时剩余 3 轮,
+    // 该提醒。
+    CHECK_FALSE(agent::ShouldNudgeMaxTurns(96, 100));
+    CHECK(agent::ShouldNudgeMaxTurns(97, 100));
+    CHECK(agent::ShouldNudgeMaxTurns(98, 100));
+    CHECK(agent::ShouldNudgeMaxTurns(99, 100));  // 最后一轮(turn=max_turns-1)
+}
+
+TEST_CASE("ShouldNudgeMaxTurns: max_turns 本来就很小时从第一轮就触发") {
+    CHECK(agent::ShouldNudgeMaxTurns(0, 3));
+    CHECK(agent::ShouldNudgeMaxTurns(0, 1));
+    CHECK_FALSE(agent::ShouldNudgeMaxTurns(1, 5));  // 剩 4 轮,还不该
+    CHECK_FALSE(agent::ShouldNudgeMaxTurns(0, 5));  // 剩 5 轮,更不该
+}
+
+TEST_CASE("轮数将尽提醒:剩 3 轮时,发出去的请求 system 尾部带上提醒;平时不带") {
+    FakeBackend backend;
+    // max_turns=4:第 0、1 轮(剩 4、3 轮)平时/触发各一次,第 1 轮开始应该带提醒。
+    backend.scripts = {
+        ToolUseScript("toolu_1", "fake_tool"),  // turn=0,剩余 4 轮,不该带提醒
+        ToolUseScript("toolu_2", "fake_tool"),  // turn=1,剩余 3 轮,该带提醒
+        TextOnlyScript("收尾了"),                // turn=2,剩余 2 轮,该带提醒
+    };
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"ok", false}, false));
+
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt", 4096, /*max_turns=*/4);
+    agent::Callbacks callbacks;
+    const auto result = loop.Run("跑吧", callbacks);
+
+    REQUIRE(result.has_value());
+    REQUIRE(backend.captured_requests.size() == 3);
+    CHECK(backend.captured_requests[0].system.find("轮数将尽") == std::string::npos);
+    CHECK(backend.captured_requests[1].system.find("轮数将尽") != std::string::npos);
+    CHECK(backend.captured_requests[2].system.find("轮数将尽") != std::string::npos);
+    // system prompt 本体没被永久改掉——每次都是从原样的 "system prompt" 长出来的。
+    CHECK(backend.captured_requests[1].system.find("system prompt") == 0);
+}
+
 TEST_CASE("图片用户消息入历史，下一轮请求仍带着") {
     FakeBackend backend;
     backend.scripts = {TextOnlyScript("看到了"), TextOnlyScript("还在")};

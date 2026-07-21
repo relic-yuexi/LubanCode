@@ -337,6 +337,76 @@ TEST_CASE("MergeConfig: max_context_chars 专属 env 压过配置文件") {
 }
 
 // ---------------------------------------------------------------------------
+// max_turns:待遇跟 max_context_chars 一样(专属 env / 配置文件 / 默认值三级,
+// 没有通用 env),但取值语义不同——非正整数/非法值不报错,静默忽略落到
+// 下一级。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("MergeConfig: 什么都没设置时,max_turns 走内置默认值 100") {
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.max_turns == config::kDefaultMaxTurns);
+    CHECK(result->config.max_turns == 100);
+    CHECK(result->sources.max_turns == config::Source::Default);
+}
+
+TEST_CASE("MergeConfig: max_turns 配置文件压过默认值") {
+    config::FileConfig file;
+    file.max_turns = 50;
+    file.source_path = "/tmp/.lubancode.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.max_turns == 50);
+    CHECK(result->sources.max_turns == config::Source::ProjectConfigFile);
+}
+
+TEST_CASE("MergeConfig: max_turns 专属 env(LUBANCODE_MAX_TURNS)压过配置文件") {
+    config::LubancodeEnvValues lubancode_env;
+    lubancode_env.max_turns = 30;
+
+    config::FileConfig file;
+    file.max_turns = 50;
+    file.source_path = "/tmp/.lubancode.json";
+
+    const auto result = config::MergeConfig(lubancode_env, file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.max_turns == 30);
+    CHECK(result->sources.max_turns == config::Source::LubancodeEnv);
+}
+
+TEST_CASE("ParseFileConfigJson: max_turns 正整数正常解析") {
+    const auto ok = config::ParseFileConfigJson(R"({"max_turns": 50})", "x.json");
+    REQUIRE(ok.has_value());
+    REQUIRE(ok->max_turns.has_value());
+    CHECK(*ok->max_turns == 50);
+}
+
+TEST_CASE("ParseFileConfigJson: max_turns 缺省时是 nullopt") {
+    const auto missing = config::ParseFileConfigJson("{}", "x.json");
+    REQUIRE(missing.has_value());
+    CHECK_FALSE(missing->max_turns.has_value());
+}
+
+TEST_CASE("ParseFileConfigJson: max_turns <= 0 或类型不对时静默忽略(留 nullopt),不报错") {
+    const auto zero = config::ParseFileConfigJson(R"({"max_turns": 0})", "x.json");
+    REQUIRE(zero.has_value());  // 不报错
+    CHECK_FALSE(zero->max_turns.has_value());  // 但也没落进去,当没设
+
+    const auto negative = config::ParseFileConfigJson(R"({"max_turns": -5})", "x.json");
+    REQUIRE(negative.has_value());
+    CHECK_FALSE(negative->max_turns.has_value());
+
+    const auto wrong_type = config::ParseFileConfigJson(R"({"max_turns": "50"})", "x.json");
+    REQUIRE(wrong_type.has_value());
+    CHECK_FALSE(wrong_type->max_turns.has_value());
+
+    const auto float_value = config::ParseFileConfigJson(R"({"max_turns": 2.5})", "x.json");
+    REQUIRE(float_value.has_value());
+    CHECK_FALSE(float_value->max_turns.has_value());
+}
+
+// ---------------------------------------------------------------------------
 // ParseFileConfigJson:纯函数,给定 JSON 文本直接测,不碰磁盘。
 // ---------------------------------------------------------------------------
 

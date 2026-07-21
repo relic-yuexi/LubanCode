@@ -69,14 +69,29 @@ struct RunOutcome {
     bool cancelled = false;
 };
 
+// 轮数将尽提醒:剩余轮数(max_turns - turn)不超过这个阈值时,当轮请求要在
+// system 尾部附一句"收尾"提示,让模型别把话说到一半就被硬掐断。阈值定死
+// 为 3,不做成可配置——任务要求实现侵入要小,3 轮的提前量对"体面收场"够用,
+// 没必要再加一层配置项。
+constexpr int kMaxTurnsNudgeThreshold = 3;
+
+// 纯函数,可单测:第 turn 轮(0-based,对应 Run() 里 for 循环的循环变量)、
+// 总共 max_turns 轮,判断这一轮该不该在请求里附加"轮数将尽"的提示。
+bool ShouldNudgeMaxTurns(int turn, int max_turns);
+
 class AgentLoop {
 public:
     // max_turns:一次 Run() 里最多跟模型来回几趟(每趟一次工具调用算一趟),
-    // 超过这个数还没到 end_turn 就报错退出,防止死循环。默认 25。
+    // 超过这个数还没到 end_turn 就报错退出,防止死循环。默认 100——25 的老
+    // 默认值在真实多步骤开发任务里(装依赖、跑测试、修错这类正常节奏)太
+    // 容易见顶,把模型正在修的错硬掐断;上限本身要留(管道模式没有 ESC 可
+    // 打断,防真死循环),但不该矮到拦腰截断正常开发。main.cpp 里这个值改由
+    // config.max_turns 传入(可经配置文件/环境变量调整),这里的默认参数只
+    // 服务不经过 main.cpp 配置流程的调用方(单测、未来的其它入口)。
     // max_context_chars:发给模型前 history 裁剪的阈值(字符数),默认读
     // 环境变量 LUBANCODE_MAX_CONTEXT(没设置就是 kDefaultMaxContextChars)。
     AgentLoop(api::Backend& backend, tools::ToolRegistry& registry, std::string model,
-              std::string system_prompt, int max_tokens = 4096, int max_turns = 25,
+              std::string system_prompt, int max_tokens = 4096, int max_turns = 100,
               std::size_t max_context_chars = MaxContextCharsFromEnv());
 
     // 发一轮用户输入。内部可能会跑好几个来回(工具调用),直到模型给出

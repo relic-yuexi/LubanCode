@@ -72,6 +72,14 @@ constexpr const char* kDefaultTheme = "dark";
 // (字符数、老的硬安全网,单位不同、语义也不同)是两回事。
 constexpr std::size_t kDefaultContextWindowTokens = 256000;
 
+// max_turns(agent 主循环/子代理跟模型来回的轮数上限)的内置默认值。数值上
+// 跟 agent::AgentLoop 构造函数的默认参数保持一致,但 config 层不依赖 agent
+// 层(同 kDefaultMaxContextChars 的理由,依赖只许单向)。旧默认值 25 在真实
+// 多步骤开发任务里(装依赖、跑测试、修错这类正常节奏)太容易见顶,把模型
+// 正在修的错硬掐断,故提到 100;上限本身要留(管道模式没有 ESC 可打断,
+// 防真死循环),但不该矮到拦腰截断正常开发。
+constexpr int kDefaultMaxTurns = 100;
+
 // 一家模型服务端的会话配置。默认走 key_env(只记密钥所在环境变量的名字，
 // 不落明文)；/provider add 向导允许直接贴 key 落盘到 api_key 字段，取值
 // 优先级 api_key（非空）> 环境变量 key_env（见 ProviderApiKey）。api_key
@@ -215,6 +223,12 @@ struct Config {
     nlohmann::json extra_body = nlohmann::json::object();
     std::map<std::string, std::string> extra_headers;
     std::size_t max_context_chars = kDefaultMaxContextChars;
+    // max_turns:agent 主循环一次 Run() 最多跟模型来回几轮(超过就报错停止,
+    // 防死循环)。只从"专属 env / 配置文件 / 默认值"三级来,没有通用 env
+    // 这一级(待遇同 max_context_chars)。正整数才认;≤0 或非法值在解析阶段
+    // 就被忽略,落到下一级/默认值,不报错——这是条"救命阀"字段,配置写错
+    // 不该拦住用户开工。
+    int max_turns = kDefaultMaxTurns;
     std::string theme = kDefaultTheme;   // dark / light / plain,没配到就是 kDefaultTheme
     // i18n:界面语言(zh-CN / en / languages/ 里的语言码)。空串 = 跟系统
     // (启动时 DetectSystemLanguage 探测)。四级合并,env 是 LUBANCODE_LANG。
@@ -258,6 +272,7 @@ struct ConfigSources {
     Source auth_token = Source::Default;
     Source model = Source::Default;
     Source max_context_chars = Source::Default;
+    Source max_turns = Source::Default;
     Source theme = Source::Default;
     Source language = Source::Default;  // i18n:界面语言
     Source system_prompt_file = Source::Default;
@@ -324,6 +339,9 @@ struct FileConfig {
     std::optional<std::string> api_key;
     std::optional<std::string> model;
     std::optional<std::size_t> max_context_chars;
+    // max_turns:正整数才落进这个字段;≤0 或者字段类型不对,ParseFileConfigJson
+    // 静默跳过(留 nullopt),不报错——见 Config::max_turns 注释。
+    std::optional<int> max_turns;
     std::optional<std::string> theme;               // dark / light / plain
     std::optional<std::string> language;             // i18n:界面语言码
     std::optional<std::string> system_prompt_file;   // 人格文件路径
@@ -367,6 +385,7 @@ struct LubancodeEnvValues {
     std::optional<std::string> api_key;
     std::optional<std::string> model;
     std::optional<std::size_t> max_context_chars;
+    std::optional<int> max_turns;                    // LUBANCODE_MAX_TURNS,同样只认正整数
     std::optional<std::string> theme;               // LUBANCODE_THEME
     std::optional<std::string> language;             // LUBANCODE_LANG(i18n 界面语言)
     std::optional<std::string> system_prompt_file;   // LUBANCODE_SYSTEM_PROMPT_FILE

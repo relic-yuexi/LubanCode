@@ -704,6 +704,16 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
         }
         config.max_context_chars = static_cast<std::size_t>(value);
     }
+    if (parsed.contains("max_turns")) {
+        // 跟其余字段(比如上面的 max_context_chars)不一样:这里不报错,
+        // 类型不对或者不是正整数都静默跳过(留 nullopt,MergeConfig 那一级
+        // 就当没写,往下一级/默认值找)。max_turns 是条防死循环的"救命阀",
+        // 配置文件手滑写错一个值,不该把整个启动拦下来。
+        const auto& field = parsed["max_turns"];
+        if ((field.is_number_integer() || field.is_number_unsigned()) && field.get<long long>() > 0) {
+            config.max_turns = static_cast<int>(field.get<long long>());
+        }
+    }
     if (parsed.contains("tool_search_threshold")) {
         const auto& field = parsed["tool_search_threshold"];
         if (!field.is_number_integer() && !field.is_number_unsigned()) {
@@ -1071,6 +1081,23 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     } else {
         result.config.max_context_chars = kDefaultMaxContextChars;
         result.sources.max_context_chars = Source::Default;
+    }
+
+    // ---- max_turns:env > 项目级 > 全局 > 默认值,没有通用 env 这一级(待遇
+    // 同 max_context_chars)。非正整数/非法值已经在解析阶段被过滤(不会落进
+    // FileConfig/LubancodeEnvValues),这里只管按优先级挑。 ----
+    if (lubancode_env.max_turns.has_value()) {
+        result.config.max_turns = *lubancode_env.max_turns;
+        result.sources.max_turns = Source::LubancodeEnv;
+    } else if (project_file.has_value() && project_file->max_turns.has_value()) {
+        result.config.max_turns = *project_file->max_turns;
+        result.sources.max_turns = Source::ProjectConfigFile;
+    } else if (global_file.has_value() && global_file->max_turns.has_value()) {
+        result.config.max_turns = *global_file->max_turns;
+        result.sources.max_turns = Source::GlobalConfigFile;
+    } else {
+        result.config.max_turns = kDefaultMaxTurns;
+        result.sources.max_turns = Source::Default;
     }
 
     // ---- theme:env > 项目级 > 全局 > 默认值,没有通用 env 这一级 ----
@@ -1698,6 +1725,17 @@ std::expected<ConfigResult, std::string> LoadFromEnv() {
         } catch (...) {
             // 不是合法数字:同样当没设置处理,不报错(跟原来的
             // agent::MaxContextCharsFromEnv 行为保持一致)。
+        }
+    }
+    if (const auto raw = GetEnv("LUBANCODE_MAX_TURNS"); raw.has_value()) {
+        try {
+            const long long parsed = std::stoll(*raw);
+            if (parsed > 0) {
+                lubancode_env.max_turns = static_cast<int>(parsed);
+            }
+            // <= 0:当没设置处理,往下一级找,不报错。
+        } catch (...) {
+            // 不是合法数字:同样当没设置处理,不报错。
         }
     }
 
