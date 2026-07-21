@@ -1,6 +1,9 @@
 # 发布流水线(v0.20.x 跨平台单):推 v* tag 时三平台各打一个包挂上
 # GitHub Release。构建走 FetchContent(-DLUBANCODE_USE_CODELOAD=OFF,CI 网络
-# 直通 github 官方地址),静态链接,产物就是单个可执行文件 + README。
+# 直通 github 官方地址),静态链接。产物包结构(都跟 exe 平级,包根目录):
+#   windows-x64.zip  ->  lubancode.exe、README.md、install.ps1、uninstall.ps1
+#   linux/macos.tar.gz -> lubancode、README.md、install.sh
+# 装/卸载脚本源码在仓库 scripts/ 目录,详见脚本内注释。
 #
 # 注意:ubuntu/macos 两腿的 POSIX 实现验证状态见 ci.yml 的注释——发布产物
 # 以 Windows 包为准,POSIX 包在 CI 两腿转绿之前按"预览"看待。
@@ -52,6 +55,17 @@ jobs:
           mkdir -p dist/lubancode
           cp "${{ matrix.exe }}" dist/lubancode/
           cp README.md dist/lubancode/
+          # 装/卸载脚本跟 exe 平级放进包根,Windows 走 ps1 一对,Linux/macOS 走 install.sh
+          case "${{ matrix.name }}" in
+            windows-x64)
+              cp scripts/install.ps1 dist/lubancode/
+              cp scripts/uninstall.ps1 dist/lubancode/
+              ;;
+            *)
+              cp scripts/install.sh dist/lubancode/
+              chmod +x dist/lubancode/install.sh
+              ;;
+          esac
           cd dist
           case "${{ matrix.archive }}" in
             *.zip)    7z a "../${{ matrix.archive }}" lubancode ;;
