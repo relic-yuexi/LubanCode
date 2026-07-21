@@ -198,6 +198,45 @@ TEST_CASE("agent 工具:超过 max_turns 报 is_error,说明里带上原因") {
     CHECK(backend2.captured_requests.size() == 2);
 }
 
+TEST_CASE("agent 工具:入参 max_turns=0 透传给子代理,子代理循环按无上限跑,不会被截断") {
+    FakeBackend backend;
+    for (int i = 0; i < 8; ++i) {
+        backend.scripts.push_back(ToolUseScript("toolu_many", "fake_tool"));
+    }
+    backend.scripts.push_back(TextOnlyScript("跑完了"));
+    tools::ToolRegistry sub_registry;
+    sub_registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"ok", false}, false));
+
+    // 构造时的默认值是个有限数(3),证明"无上限"确实是入参 max_turns=0
+    // 生效,不是构造默认值恰好够用。
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir", /*model=*/"", /*default_max_turns=*/3);
+
+    nlohmann::json input;
+    input["prompt"] = "跑很多轮";
+    input["max_turns"] = 0;
+    const tools::Tool::Result result = agent_tool.execute(input);
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content == "跑完了");
+    CHECK(backend.captured_requests.size() == 9);  // 8 次工具轮 + 1 次收尾,没被截断
+}
+
+TEST_CASE("agent 工具:入参 max_turns 是负数直接报错,不透传给子代理") {
+    FakeBackend backend;
+    tools::ToolRegistry sub_registry;
+
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+
+    nlohmann::json input;
+    input["prompt"] = "随便";
+    input["max_turns"] = -1;
+    const tools::Tool::Result result = agent_tool.execute(input);
+
+    CHECK(result.is_error);
+    CHECK(result.content.find("负数") != std::string::npos);
+    CHECK(backend.captured_requests.empty());  // 校验没过,压根没发出请求
+}
+
 TEST_CASE("agent 工具:确认回调转发——父拒绝,子内工具收到拒绝,不真的执行") {
     FakeBackend backend;
     backend.scripts = {

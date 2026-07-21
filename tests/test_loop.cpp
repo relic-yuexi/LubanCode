@@ -212,7 +212,7 @@ TEST_CASE("用户拒绝确认:工具不执行,tool_result 是 is_error") {
     CHECK(tool_result.content.find("拒绝") != std::string::npos);
 }
 
-TEST_CASE("超过最大轮数报错") {
+TEST_CASE("超过最大轮数报错(max_turns 显式设成正整数,硬上限才会生效)") {
     FakeBackend backend;
     // 永远回 tool_use,模型一直要工具,逼近轮数上限。
     for (int i = 0; i < 5; ++i) {
@@ -229,6 +229,45 @@ TEST_CASE("超过最大轮数报错") {
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().find("轮数") != std::string::npos);
     CHECK(backend.captured_requests.size() == 3);  // 正好用满 max_turns 次请求
+}
+
+TEST_CASE("max_turns=0(无上限):来回轮数不受硬顶限制,跑到 end_turn 才停") {
+    FakeBackend backend;
+    // 10 轮工具调用,早就超过老默认值(25/100)里"该被拦下"的量级,但
+    // max_turns=0 时压根没有硬顶,该一路跑到最后一句 end_turn 才停。
+    for (int i = 0; i < 10; ++i) {
+        backend.scripts.push_back(ToolUseScript("toolu_" + std::to_string(i), "fake_tool"));
+    }
+    backend.scripts.push_back(TextOnlyScript("终于收尾了"));
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"ok", false}, false));
+
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt", 4096, /*max_turns=*/0);
+    agent::Callbacks callbacks;
+    const auto result = loop.Run("跑很多轮", callbacks);
+
+    REQUIRE(result.has_value());
+    CHECK(backend.captured_requests.size() == 11);  // 10 次工具轮 + 1 次收尾,没被硬顶掐断
+}
+
+TEST_CASE("默认 max_turns(不传参数)= 无上限:多轮工具调用不报错,system 里也不会出现轮数将尽提醒") {
+    FakeBackend backend;
+    for (int i = 0; i < 5; ++i) {
+        backend.scripts.push_back(ToolUseScript("toolu_d" + std::to_string(i), "fake_tool"));
+    }
+    backend.scripts.push_back(TextOnlyScript("收尾"));
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"ok", false}, false));
+
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");  // 不传 max_turns,用默认值
+    agent::Callbacks callbacks;
+    const auto result = loop.Run("跑几轮", callbacks);
+
+    REQUIRE(result.has_value());
+    REQUIRE(backend.captured_requests.size() == 6);
+    for (const auto& req : backend.captured_requests) {
+        CHECK(req.system.find("轮数将尽") == std::string::npos);
+    }
 }
 
 TEST_CASE("on_usage: 一次 Run() 内多次请求(工具调用来回),每次 MessageDone 都触发一次回调,可累计") {
@@ -491,6 +530,13 @@ TEST_CASE("ShouldNudgeMaxTurns: max_turns 本来就很小时从第一轮就触�
     CHECK(agent::ShouldNudgeMaxTurns(0, 1));
     CHECK_FALSE(agent::ShouldNudgeMaxTurns(1, 5));  // 剩 4 轮,还不该
     CHECK_FALSE(agent::ShouldNudgeMaxTurns(0, 5));  // 剩 5 轮,更不该
+}
+
+TEST_CASE("ShouldNudgeMaxTurns: max_turns <= 0(无上限)永不触发,不管 turn 是多少") {
+    CHECK_FALSE(agent::ShouldNudgeMaxTurns(0, 0));
+    CHECK_FALSE(agent::ShouldNudgeMaxTurns(1000, 0));
+    CHECK_FALSE(agent::ShouldNudgeMaxTurns(0, -1));
+    CHECK_FALSE(agent::ShouldNudgeMaxTurns(5, -5));
 }
 
 TEST_CASE("轮数将尽提醒:剩 3 轮时,发出去的请求 system 尾部带上提醒;平时不带") {

@@ -706,11 +706,13 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
     }
     if (parsed.contains("max_turns")) {
         // 跟其余字段(比如上面的 max_context_chars)不一样:这里不报错,
-        // 类型不对或者不是正整数都静默跳过(留 nullopt,MergeConfig 那一级
-        // 就当没写,往下一级/默认值找)。max_turns 是条防死循环的"救命阀",
-        // 配置文件手滑写错一个值,不该把整个启动拦下来。
+        // 类型不对或者是负数都静默跳过(留 nullopt,MergeConfig 那一级就当
+        // 没写,往下一级/默认值找)。0 是合法值——显式声明"无上限"(跟不写
+        // 这个字段效果一样,但用户可能想在配置里明写出来);只有负数才当
+        // 手滑写错。max_turns 是条"救命阀"字段,配置文件写错不该把整个
+        // 启动拦下来。
         const auto& field = parsed["max_turns"];
-        if ((field.is_number_integer() || field.is_number_unsigned()) && field.get<long long>() > 0) {
+        if ((field.is_number_integer() || field.is_number_unsigned()) && field.get<long long>() >= 0) {
             config.max_turns = static_cast<int>(field.get<long long>());
         }
     }
@@ -1084,8 +1086,9 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     }
 
     // ---- max_turns:env > 项目级 > 全局 > 默认值,没有通用 env 这一级(待遇
-    // 同 max_context_chars)。非正整数/非法值已经在解析阶段被过滤(不会落进
-    // FileConfig/LubancodeEnvValues),这里只管按优先级挑。 ----
+    // 同 max_context_chars)。负数/非法值已经在解析阶段被过滤(不会落进
+    // FileConfig/LubancodeEnvValues),0(显式无上限)是合法值,这里只管按
+    // 优先级挑;都没配到时默认值 kDefaultMaxTurns 本身也是 0(无上限)。 ----
     if (lubancode_env.max_turns.has_value()) {
         result.config.max_turns = *lubancode_env.max_turns;
         result.sources.max_turns = Source::LubancodeEnv;
@@ -1730,10 +1733,10 @@ std::expected<ConfigResult, std::string> LoadFromEnv() {
     if (const auto raw = GetEnv("LUBANCODE_MAX_TURNS"); raw.has_value()) {
         try {
             const long long parsed = std::stoll(*raw);
-            if (parsed > 0) {
+            if (parsed >= 0) {
                 lubancode_env.max_turns = static_cast<int>(parsed);
             }
-            // <= 0:当没设置处理,往下一级找,不报错。
+            // 负数:当没设置处理,往下一级找,不报错。0 是合法值(显式无上限)。
         } catch (...) {
             // 不是合法数字:同样当没设置处理,不报错。
         }

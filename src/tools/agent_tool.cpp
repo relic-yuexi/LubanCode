@@ -51,7 +51,8 @@ nlohmann::json AgentTool::input_schema() const {
 
     nlohmann::json max_turns_prop = nlohmann::json::object();
     max_turns_prop["type"] = "integer";
-    max_turns_prop["description"] = "子代理最多跑几轮(每轮一次工具调用来回算一轮),不填默认 40。";
+    max_turns_prop["description"] =
+        "子代理最多跑几轮(每轮一次工具调用来回算一轮),不填默认 40;传 0 = 不设上限。";
     properties["max_turns"] = max_turns_prop;
 
     schema["properties"] = properties;
@@ -75,8 +76,8 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
             return {"max_turns 得是整数", true};
         }
         max_turns = it->get<int>();
-        if (max_turns < 1) {
-            return {"max_turns 得是正整数", true};
+        if (max_turns < 0) {
+            return {"max_turns 不能是负数(0 = 不设上限)", true};
         }
     }
 

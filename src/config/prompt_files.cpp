@@ -70,7 +70,7 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
 | `context_window` | 字符串或整数；正数，认 `256k`、`512k`、`1m` 或裸数字 | `256000` | 会话上下文窗口，单位 token。`k=1000`，`m=1000000`。 |
 | `compact_model` | 字符串，可留空 | 空串 | `/compact` 专用模型；空串时沿用会话模型。 |
 | `max_context_chars` | 正整数 | `600000` | 旧的按字符硬切安全网，和 `context_window` 不是一回事。 |
-| `max_turns` | 正整数 | `100` | agent 主循环一次来回最多几轮，超过就报错停止（防死循环）；非正整数或非法值静默忽略，落到下一级或默认值。 |
+| `max_turns` | 非负整数 | `0`（无上限） | agent 主循环一次来回最多几轮；不配或配 `0` = 不设上限，防跑飞靠 ESC/Ctrl+C；配正整数才是硬上限，超过就报错停止。负数或非法值静默忽略，落到下一级或默认值。 |
 | `system_prompt_file` | 字符串，UTF-8 文本路径 | 无 | 人格段文件。没配时用内置人格；`--system-prompt` 会压过它。 |
 | `tool_search_threshold` | 非负整数 | `20` | 注册工具总数超过此数才启用延迟挂载；`0` 永不延迟。 |
 | `hooks` | JSON object | 四类数组都空 | 外部命令钩子，详见下节。 |
@@ -226,7 +226,7 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
 | `LUBANCODE_API_KEY` | `api_key` | 模型服务认证值。 |
 | `LUBANCODE_MODEL` | `model` | 模型名。 |
 | `LUBANCODE_MAX_CONTEXT` | `max_context_chars` | 正整数；无效或不大于零时当作没设。 |
-| `LUBANCODE_MAX_TURNS` | `max_turns` | 正整数；无效或不大于零时当作没设。 |
+| `LUBANCODE_MAX_TURNS` | `max_turns` | 非负整数；`0` = 不设上限，负数或无效值当作没设。 |
 | `LUBANCODE_THEME` | `theme` | `dark`、`light` 或 `plain`。 |
 | `LUBANCODE_SYSTEM_PROMPT_FILE` | `system_prompt_file` | UTF-8 人格文件路径。 |
 | `LUBANCODE_CONTEXT_WINDOW` | `context_window` | `256k`、`512k`、`1m` 或正整数。 |

@@ -4219,8 +4219,8 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         // max_tokens=4096 是 AgentLoop 自己的默认值,这里显式传出来是为了能
         // 把 config.max_context_chars 一起传进去。max_turns 改用
         // config.max_turns(可经配置文件/LUBANCODE_MAX_TURNS 调整,默认
-        // kDefaultMaxTurns=100),不再硬编码 25——旧默认值在真实多步骤开发
-        // 任务里太容易见顶。
+        // kDefaultMaxTurns=0=无上限)——防跑飞靠用户 ESC/Ctrl+C,不再靠硬闸
+        // 拦腰截断正常开发;想要硬上限的人自己配一个正整数。
         // tool_search:backend 换成 index_backend(索引段包装,未启用时纯
         // 透传);/clear 重建后过滤谓词要重新灌一遍——loaded 集合不清,
         // 已挂载的工具跨 /clear 仍然可用。
@@ -4795,7 +4795,7 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
             lubancode::agent::WithModelInstructions(
                 lubancode::agent::AssembleSystemPrompt(prompt_options), model_instructions),
             soul_content),
-        // max_turns 同上,改用 config.max_turns,不再硬编码 25。
+        // max_turns 同上,改用 config.max_turns(默认 0=无上限)。
         /*max_tokens=*/4096, config.max_turns, config.max_context_chars);
     if (main_deferral) {
         loop.SetToolFilter(tool_filter);

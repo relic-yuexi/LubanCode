@@ -90,6 +90,10 @@ std::string BuildMaxTurnsNudgeText(int remaining_turns) {
 }  // namespace
 
 bool ShouldNudgeMaxTurns(int turn, int max_turns) {
+    // max_turns <= 0 = 无上限,压根没有"轮数将尽"这回事,永不触发。
+    if (max_turns <= 0) {
+        return false;
+    }
     // turn 是 for 循环里"即将发起的这一轮"的 0-based 下标,max_turns - turn
     // 就是含当轮在内还能跑几轮。<= 阈值时该提醒——max_turns 本来就配得很小
     // (比如 <= 3)时,从第一轮起就一直提醒,也没问题:反正确实快到頂。
@@ -135,7 +139,11 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
     }
     history_.push_back(std::move(user_message));
 
-    for (int turn = 0; turn < max_turns_; ++turn) {
+    // max_turns_ <= 0 = 无上限:循环条件里第一个子句恒真,第二个子句(轮数
+    // 比较)压根不会被求值,turn 就一直往上涨,靠 end_turn 或者用户 ESC/
+    // Ctrl+C(cancel)收场,不靠这里的硬闸。max_turns_ > 0 时才是"到点就停"
+    // 的老行为。
+    for (int turn = 0; max_turns_ <= 0 || turn < max_turns_; ++turn) {
         api::Request request;
         request.model = model_;
         request.system = system_prompt_;
@@ -286,7 +294,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         }
     }
 
-    return std::unexpected("超过最大轮数(" + std::to_string(max_turns_) + "),已停止,避免死循环。");
+    // 只有 max_turns_ > 0(用户显式设了硬上限)才可能走到这里——无上限时
+    // for 循环条件恒真,永远不会正常退出到这一行。
+    return std::unexpected("已达配置的轮数上限(max_turns=" + std::to_string(max_turns_) +
+                            "),可调大或设 0 解除。");
 }
 
 }  // namespace lubancode::agent
