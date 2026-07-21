@@ -12,7 +12,9 @@
 #include <jobapi2.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <optional>
 
 #include "platform/paths.hpp"
@@ -99,6 +101,45 @@ std::wstring BuildProcessCommandLine(const std::string& command, const std::vect
         cmdline += QuoteArgW(Utf8ToWide(arg));
     }
     return cmdline;
+}
+
+// ---------------------------------------------------------------------------
+// 后台模式(run_command 的 run_in_background)专用小工具。
+// ---------------------------------------------------------------------------
+
+// 会话级 Job Object:进程级单例,懒创建,句柄一直攥在主进程手里不主动关。
+// 跟 RunProcess/ChildProcess 里那种"一条命令/一条长连接一个 job、用完就关
+// 掉杀全家"的临时 job 是两码事——这个 job 只在 lubancode 进程终止时才失效
+// (Windows 内核在进程退出时自动关闭它没显式关掉的全部句柄,包括这个),
+// KILL_ON_JOB_CLOSE 那一下顺带把挂在上面的所有后台子进程一次杀光,不留
+// 孤儿。也正因为靠内核这条强保证,不需要额外注册 atexit/信号处理钩子。
+// C++11 起 static 局部变量的初始化本身是线程安全的(magic statics),多个
+// 线程并发起后台命令不会重复创建。
+HANDLE GetBackgroundSessionJob() {
+    static HANDLE job = [] {
+        HANDLE j = CreateJobObjectW(nullptr, nullptr);
+        if (j != nullptr) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION limit{};
+            limit.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(j, JobObjectExtendedLimitInformation, &limit, sizeof(limit));
+        }
+        return j;
+    }();
+    return job;
+}
+
+// 后台日志文件路径:系统临时目录下,文件名带毫秒时间戳 + 单调计数器,
+// 两者叠加保证同一毫秒内并发起多个后台命令也不会撞名。
+std::wstring BuildBackgroundLogPathW() {
+    static std::atomic<unsigned long long> counter{0};
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count();
+    const unsigned long long seq = counter.fetch_add(1);
+    const std::filesystem::path dir = std::filesystem::temp_directory_path();
+    const std::wstring filename =
+        L"lubancode_bg_" + std::to_wstring(ms) + L"_" + std::to_wstring(seq) + L".log";
+    return (dir / filename).wstring();
 }
 
 }  // namespace
@@ -291,6 +332,90 @@ ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, c
     // 捕获回来的原始字节要单独转一道才是合法 UTF-8。
     result.output = AcpBytesToUtf8(result.output);
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// 后台模式:spawn 立刻返回,不等待、不捕获进内存,stdout/stderr 直接指到
+// 日志文件的句柄上(CreateProcessW 层面重定向,不经过管道/读线程)。
+// ---------------------------------------------------------------------------
+
+BackgroundSpawnResult RunProcessBackground(const std::wstring& cmdline, const EnvPairs& extra_env) {
+    BackgroundSpawnResult result;
+
+    const std::vector<EnvBackup> backups = ApplyEnv(extra_env);
+
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = nullptr;
+
+    const std::wstring log_path_w = BuildBackgroundLogPathW();
+    // FILE_SHARE_READ:日志还在写的时候,模型那边"用普通命令看日志"
+    // (Get-Content 之类)要能同时打开读,不能被这里的写句柄独占锁死。
+    HANDLE log_file = CreateFileW(log_path_w.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS,
+                                   FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (log_file == INVALID_HANDLE_VALUE) {
+        result.error = "创建日志文件失败(错误码 " + std::to_string(GetLastError()) + ")";
+        RestoreEnv(backups);
+        return result;
+    }
+
+    HANDLE stdin_null = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ, &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = log_file;
+    si.hStdError = log_file;
+    si.hStdInput = stdin_null;
+
+    PROCESS_INFORMATION pi{};
+    std::vector<wchar_t> cmdline_buf(cmdline.begin(), cmdline.end());
+    cmdline_buf.push_back(L'\0');
+
+    const BOOL ok = CreateProcessW(nullptr, cmdline_buf.data(), nullptr, nullptr, TRUE,
+                                    CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
+
+    RestoreEnv(backups);
+    CloseHandle(log_file);
+    if (stdin_null != nullptr && stdin_null != INVALID_HANDLE_VALUE) {
+        CloseHandle(stdin_null);
+    }
+
+    if (!ok) {
+        result.error = "启动子进程失败(错误码 " + std::to_string(GetLastError()) + ")";
+        return result;
+    }
+
+    // 挂进会话级 job(懒创建的进程级单例,句柄不主动关,见其定义处注释),
+    // 不是命令级"用完就杀"的临时 job——这个子进程要活到模型自己收掉,或者
+    // lubancode 进程终止为止。AssignProcessToJobObject 失败也不致命,顶多
+    // 这个子进程逃逸出会话级收尾(比如它自己又被套进了别的 job),不影响
+    // 正常起停流程。
+    AssignProcessToJobObject(GetBackgroundSessionJob(), pi.hProcess);
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
+
+    result.success = true;
+    result.pid = pi.dwProcessId;
+    result.log_path = WideToUtf8(log_path_w);
+    // 会话级 job 已经接管这个子进程的生死,父进程这份进程句柄不需要留着。
+    CloseHandle(pi.hProcess);
+    return result;
+}
+
+BackgroundSpawnResult RunProcessBackground(const std::vector<std::string>& argv, const EnvPairs& extra_env) {
+    if (argv.empty()) {
+        BackgroundSpawnResult result;
+        result.error = "argv 不能为空";
+        return result;
+    }
+    return RunProcessBackground(
+        BuildProcessCommandLine(argv[0], std::vector<std::string>(argv.begin() + 1, argv.end())), extra_env);
+}
+
+BackgroundSpawnResult RunShellCommandBackground(const std::string& command_utf8, const EnvPairs& extra_env) {
+    return RunProcessBackground(BuildCmdCommandLine(command_utf8), extra_env);
 }
 
 // ---------------------------------------------------------------------------

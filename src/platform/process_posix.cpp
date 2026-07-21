@@ -20,10 +20,15 @@
 #include "platform/process.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <mutex>
+#include <vector>
 
 #include <fcntl.h>
 #include <poll.h>
@@ -155,6 +160,70 @@ unsigned long ExitCodeFromStatus(int status) {
         return static_cast<unsigned long>(128 + WTERMSIG(status));
     }
     return 1;
+}
+
+// ---------------------------------------------------------------------------
+// 后台模式(run_command 的 run_in_background)专用小工具:会话级 PID 注册表
+// + 退出钩子。语义对齐 process_win.cpp 的会话级 Job Object,但 POSIX 没有
+// "关句柄连带杀光"这种内核机制,只能自己记账、自己在退出时补杀——
+// atexit 覆盖正常退出(main 返回、std::exit)那条路径,覆盖不了被信号杀死
+// 之类的异常终止,这是跟 Windows 那边唯一的语义差(Windows 靠内核收句柄
+// 是更强的保证)。
+// ---------------------------------------------------------------------------
+
+std::mutex& BackgroundRegistryMutex() {
+    static std::mutex m;
+    return m;
+}
+
+std::vector<pid_t>& BackgroundRegistry() {
+    static std::vector<pid_t> pids;
+    return pids;
+}
+
+// atexit 钩子:逐个把会话级注册表里还没被摘掉(即还没被收尸线程 waitpid
+// 收走)的后台子进程杀干净。SIGTERM 客气一下——但 atexit 阶段不适合像
+// KillProcessGroup 那样阻塞等 grace period,直接紧跟着补一记 SIGKILL,
+// 反正 lubancode 马上就要退出了,没有谁还等着这些子进程体面退出的机会。
+// kill(-pid, ...) 打的是整个会话/进程组(子进程 fork 后 setsid() 了,
+// pid == 会话首进程 pid == 进程组 pid)。
+void KillAllBackgroundOnExit() {
+    std::lock_guard<std::mutex> lock(BackgroundRegistryMutex());
+    for (const pid_t pid : BackgroundRegistry()) {
+        kill(-pid, SIGTERM);
+    }
+    for (const pid_t pid : BackgroundRegistry()) {
+        kill(-pid, SIGKILL);
+    }
+}
+
+void RegisterBackgroundPid(pid_t pid) {
+    static const bool registered = [] {
+        std::atexit(KillAllBackgroundOnExit);
+        return true;
+    }();
+    (void)registered;
+    std::lock_guard<std::mutex> lock(BackgroundRegistryMutex());
+    BackgroundRegistry().push_back(pid);
+}
+
+void UnregisterBackgroundPid(pid_t pid) {
+    std::lock_guard<std::mutex> lock(BackgroundRegistryMutex());
+    std::vector<pid_t>& pids = BackgroundRegistry();
+    pids.erase(std::remove(pids.begin(), pids.end(), pid), pids.end());
+}
+
+// 后台日志文件路径:系统临时目录下,文件名带毫秒时间戳 + 单调计数器,
+// 两者叠加保证同一毫秒内并发起多个后台命令也不会撞名。
+std::string BuildBackgroundLogPath() {
+    static std::atomic<unsigned long long> counter{0};
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count();
+    const unsigned long long seq = counter.fetch_add(1);
+    const std::filesystem::path dir = std::filesystem::temp_directory_path();
+    const std::string filename = "lubancode_bg_" + std::to_string(ms) + "_" + std::to_string(seq) + ".log";
+    return (dir / filename).string();
 }
 
 struct SpawnedMerged {
@@ -361,6 +430,106 @@ ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, c
     // POSIX 的 shell 一律 /bin/sh -c;输出天然 UTF-8,不需要 Windows 那道
     // ANSI 代码页转换。
     return RunProcess({"/bin/sh", "-c", command_utf8}, timeout_ms, extra_env, max_output_bytes);
+}
+
+// ---------------------------------------------------------------------------
+// 后台模式:spawn 立刻返回,不等待、不捕获进内存,stdout/stderr 直接 dup2
+// 到日志文件描述符上。
+// ---------------------------------------------------------------------------
+
+BackgroundSpawnResult RunProcessBackground(const std::vector<std::string>& argv, const EnvPairs& extra_env) {
+    BackgroundSpawnResult result;
+    if (argv.empty()) {
+        result.error = "argv 不能为空";
+        return result;
+    }
+    IgnoreSigpipeOnce();
+
+    const std::string log_path = BuildBackgroundLogPath();
+    const int log_fd = open(log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (log_fd < 0) {
+        result.error = std::string("创建日志文件失败: ") + std::strerror(errno);
+        return result;
+    }
+
+    int exec_pipe[2] = {-1, -1};
+    if (pipe(exec_pipe) != 0) {
+        result.error = std::string("创建管道失败: ") + std::strerror(errno);
+        close(log_fd);
+        return result;
+    }
+    fcntl(exec_pipe[0], F_SETFD, FD_CLOEXEC);
+    fcntl(exec_pipe[1], F_SETFD, FD_CLOEXEC);
+
+    EnvBlock env_block = BuildEnvBlock(extra_env);
+    std::vector<std::string> argv_copy = argv;
+    std::vector<char*> argv_ptrs = BuildArgvPtrs(argv_copy);
+
+    const pid_t pid = fork();
+    if (pid < 0) {
+        result.error = std::string("fork 失败: ") + std::strerror(errno);
+        close(log_fd);
+        close(exec_pipe[0]);
+        close(exec_pipe[1]);
+        return result;
+    }
+    if (pid == 0) {
+        // 子进程:setsid() 脱离 lubancode 所在的会话/进程组/控制终端,
+        // 自成一个新会话(pid 同时成了新会话的会话首 = 新进程组的组长)。
+        // 这样 lubancode 退出/它所在终端挂断,不会顺带给这个后台子进程
+        // 发 SIGHUP,也不会被"杀当前进程组"这类操作连坐。
+        setsid();
+        const int devnull = open("/dev/null", O_RDONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            if (devnull > STDERR_FILENO) {
+                close(devnull);
+            }
+        }
+        dup2(log_fd, STDOUT_FILENO);
+        dup2(log_fd, STDERR_FILENO);
+        if (log_fd > STDERR_FILENO) {
+            close(log_fd);
+        }
+        environ = env_block.ptrs.data();
+        execvp(argv_ptrs[0], argv_ptrs.data());
+        const int err = errno;
+        (void)!write(exec_pipe[1], &err, sizeof(err));
+        _exit(127);
+    }
+
+    // 父进程:子进程该拿到的 fd 已经拿到了(继承来的),这两个可以关了。
+    close(log_fd);
+    close(exec_pipe[1]);
+
+    const std::optional<int> exec_err = ReadExecErrno(exec_pipe[0]);
+    close(exec_pipe[0]);
+    if (exec_err.has_value()) {
+        int status = 0;
+        waitpid(pid, &status, 0);  // 子进程 _exit(127) 了,收尸
+        result.error = "启动子进程失败(" + std::string(std::strerror(*exec_err)) + "): " + argv[0];
+        return result;
+    }
+
+    RegisterBackgroundPid(pid);
+    // 收尸线程:一次性 detach 的 waitpid,防止子进程结束后没人收尸变成
+    // 僵尸(lubancode 还没退出、atexit 钩子还没跑之前,子进程可能早就
+    // 退出了)。退出时把自己从会话级注册表摘掉,免得 atexit 钩子对着一个
+    // 早就死透、pid 可能已被系统回收复用的号码瞎杀。
+    std::thread([pid] {
+        int status = 0;
+        waitpid(pid, &status, 0);
+        UnregisterBackgroundPid(pid);
+    }).detach();
+
+    result.success = true;
+    result.pid = static_cast<unsigned long>(pid);
+    result.log_path = log_path;
+    return result;
+}
+
+BackgroundSpawnResult RunShellCommandBackground(const std::string& command_utf8, const EnvPairs& extra_env) {
+    return RunProcessBackground({"/bin/sh", "-c", command_utf8}, extra_env);
 }
 
 // ---------------------------------------------------------------------------

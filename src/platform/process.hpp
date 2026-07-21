@@ -48,6 +48,25 @@ constexpr std::size_t kDefaultMaxOutputBytes = 2 * 1024 * 1024;
 
 using EnvPairs = std::vector<std::pair<std::string, std::string>>;
 
+// 后台模式(v0.22.x,run_command 的 run_in_background):spawn 成功立刻
+// 返回,不等命令跑完、不捕获输出进内存——stdout/stderr 直接重定向到磁盘上
+// 的日志文件。子进程挂进"会话级"存活域(跟一次性捕获那种"命令收尾就
+// 杀全家"的临时 job/进程组不是一回事):
+//   - Windows:懒创建一个进程级单例的会话级 Job Object,句柄由主进程一直
+//     攥着不关;lubancode 退出(正常退出或崩溃)时系统自动关掉未显式关闭
+//     的句柄,KILL_ON_JOB_CLOSE 顺带把挂在这个 job 上的所有后台子进程全部
+//     杀光,不留孤儿,不需要额外的退出钩子。
+//   - POSIX:子进程 setsid() 脱离 lubancode 的会话/进程组/控制终端,PID
+//     记进进程内的会话级注册表;atexit 钩子在 lubancode 退出时逐个
+//     SIGTERM→SIGKILL 收尾(atexit 不覆盖被信号杀死等异常终止路径,这点
+//     跟 Windows 靠内核收句柄的强保证不同,是两平台唯一的语义差)。
+struct BackgroundSpawnResult {
+    bool success = false;
+    std::string error;
+    unsigned long pid = 0;    // 子进程 PID,给模型回填进结果文本,方便之后 kill/Stop-Process
+    std::string log_path;     // 合并 stdout/stderr 写入的日志文件路径(UTF-8,临时目录下)
+};
+
 // 可移植入口:按 argv 数组起一个子进程(argv[0] 是可执行文件,按 PATH 查
 // 找;不经过 shell,参数原样传递),合并捕获 stdout/stderr,超时杀树。
 //
@@ -84,7 +103,20 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms,
 // 代码页预处理。搬自 tools/process_exec.hpp。
 std::wstring BuildCmdCommandLine(const std::string& user_command_utf8);
 
+// Windows 专属重载:cmdline 是完整命令行(调用方拼好,run_command 的
+// PowerShell -EncodedCommand 后台路径要用,跟前台的 RunProcess(wstring, ...)
+// 重载对称)。
+BackgroundSpawnResult RunProcessBackground(const std::wstring& cmdline, const EnvPairs& extra_env = {});
+
 #endif
+
+// 可移植入口:按 argv 数组后台起一个子进程,不经过 shell,不等待完成。
+// extra_env 语义同 RunProcess。
+BackgroundSpawnResult RunProcessBackground(const std::vector<std::string>& argv, const EnvPairs& extra_env = {});
+
+// 按平台默认 shell 后台跑一条命令,语义同 RunShellCommand 但不等待完成:
+// Windows 是 `cmd.exe /d /s /c "<command>"`,POSIX 是 `/bin/sh -c '<command>'`。
+BackgroundSpawnResult RunShellCommandBackground(const std::string& command_utf8, const EnvPairs& extra_env = {});
 
 // 一次启动长命子进程的结果。
 struct SpawnResult {

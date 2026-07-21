@@ -168,6 +168,8 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
 - `deny_commands`：`run_command` 命令前缀黑名单。命中前缀就**永远问一句**，压过 `allow_commands`、压过会话「总是允许」。只在 confirm / auto 档生效；`--yes` / yolo 是显式全放，`deny` 不拦。
 - `default_confirm_mode`：起手确认档 `auto` / `yolo` / `confirm`。优先级低于 `--yes` / `LUBANCODE_CONFIRM_MODE`，高于内置默认 `confirm`。
 
+`run_command` 传 `run_in_background: true` 起的后台命令，安全判定/确认流程跟前台命令一模一样——`allow_commands` / `deny_commands` / `command_safety` 照样按 `command` + `shell` 两个字段判，不会因为放后台就绕过确认。
+
 前缀判定：命令去掉前导空白后，以某条前缀打头就算命中（原始命令串直接比，不做 shell 解析）。
 
 ### 按 a 持久化
@@ -176,7 +178,13 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
 
 `/config` 会打一行 `permissions` 摘要：`allow_tools` 几个、`allow_commands` / `deny_commands` 几条、`default_confirm_mode` 是什么。
 
-## LUBANCODE_* 环境变量
+)SKILL"
+    // MSVC 单条字符串字面量(含原始字符串)超过约 16KB 就 C2026 截断报错,
+    // 这份手册文本早晚要越写越长——干脆一开始就在这里拆成相邻两段字面量
+    // (C++ 自动拼接相邻字符串字面量,运行时看到的还是同一个 const char*
+    // 常量,内容完全无缝)。往后再往手册里加内容,哪段就近加到哪半段;
+    // 真写到某一半又逼近上限了,照这个套路再拆一刀即可。
+    R"SKILL2(## LUBANCODE_* 环境变量
 
 | 环境变量 | 对应字段 | 值 |
 | --- | --- | --- |
@@ -365,7 +373,7 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
 ```
 
 改 `command` 为本机语言服务器命令，`extensions` 填它该接手的扩展名。`extensions` 不能空；`idle_minutes` 必须大于零。
-)SKILL";
+)SKILL2";
 
 // UTF-8 字符串 -> fs::path,不走系统 ANSI 代码页那条错路(跟 main.cpp 的
 // 插件目录、tools 层各处同一套写法)。

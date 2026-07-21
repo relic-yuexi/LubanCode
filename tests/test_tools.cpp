@@ -6,7 +6,9 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
+#include <thread>
 
 #include "platform/text_encoding.hpp"
 #include "tools/read_file.hpp"
@@ -15,7 +17,11 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
-#include <windows.h>  // ::GetACP(),GBK 样本转换那条测试用来判断本机代码页是不是 936
+#include <windows.h>  // ::GetACP(),GBK 样本转换那条测试用来判断本机代码页是不是 936;
+                       // OpenProcess/GetExitCodeProcess/TerminateProcess,run_in_background 探活用
+#else
+#include <csignal>
+#include <sys/types.h>
 #endif
 
 using lubancode::tools::ReadFileTool;
@@ -23,6 +29,74 @@ using lubancode::tools::RunCommandTool;
 using lubancode::tools::Tool;
 
 namespace {
+
+// run_in_background 那几条测试的小工具:从工具返回的结果文本里抠出 PID
+// 和日志文件路径("已在后台启动(PID 12345)...\n日志文件: <path>\n..."这个
+// 格式,见 run_command.cpp execute() 里拼的那段)。
+unsigned long ExtractPid(const std::string& content) {
+    const std::string marker = "PID ";
+    const auto pos = content.find(marker);
+    REQUIRE(pos != std::string::npos);
+    std::size_t i = pos + marker.size();
+    unsigned long pid = 0;
+    while (i < content.size() && content[i] >= '0' && content[i] <= '9') {
+        pid = pid * 10 + static_cast<unsigned long>(content[i] - '0');
+        ++i;
+    }
+    return pid;
+}
+
+std::string ExtractLogPath(const std::string& content) {
+    const std::string marker = "日志文件: ";
+    const auto pos = content.find(marker);
+    REQUIRE(pos != std::string::npos);
+    const auto start = pos + marker.size();
+    const auto end = content.find('\n', start);
+    return content.substr(start, end == std::string::npos ? std::string::npos : end - start);
+}
+
+#ifdef _WIN32
+bool IsPidAlive(unsigned long pid) {
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
+    if (h == nullptr) {
+        return false;
+    }
+    DWORD exit_code = 0;
+    const bool alive = GetExitCodeProcess(h, &exit_code) != 0 && exit_code == STILL_ACTIVE;
+    CloseHandle(h);
+    return alive;
+}
+
+void KillPidForTest(unsigned long pid) {
+    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid));
+    if (h != nullptr) {
+        TerminateProcess(h, 1);
+        CloseHandle(h);
+    }
+}
+#else
+bool IsPidAlive(unsigned long pid) {
+    // 带 0 信号的 kill:不真发信号,只探测这个 pid 存不存在/是否有权限杀。
+    return kill(static_cast<pid_t>(pid), 0) == 0;
+}
+
+void KillPidForTest(unsigned long pid) {
+    kill(static_cast<pid_t>(pid), SIGKILL);
+}
+#endif
+
+// 轮询等一个条件成立,最多等 timeout_ms 毫秒,每次间隔 poll_ms 毫秒。
+template <typename Predicate>
+bool WaitUntil(Predicate pred, int timeout_ms, int poll_ms = 100) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(poll_ms));
+    }
+    return pred();
+}
 
 // 在系统临时目录下建一个用完即删的临时文件,内容按 UTF-8 原样写入。
 class TempFile {
@@ -160,6 +234,103 @@ TEST_CASE("run_command: 超时会被强制终止,不会真的等满") {
     CHECK(result.content.find("超时") != std::string::npos);
     // 给足够的余量(杀进程、收尾都要时间),但远小于 20 秒的睡眠时长。
     CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() < 8000);
+}
+
+// ---------------------------------------------------------------------------
+// run_in_background:秒级返回、PID 存活可收、日志文件真写了东西。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("run_command: run_in_background=true 秒级返回,PID 存活,收掉后确认已死") {
+    RunCommandTool tool;
+    nlohmann::json input;
+#ifdef _WIN32
+    input["command"] = "ping -n 30 127.0.0.1";
+    input["shell"] = "cmd";
+#else
+    input["command"] = "sleep 30";
+#endif
+    input["run_in_background"] = true;
+
+    const auto started = std::chrono::steady_clock::now();
+    const Tool::Result result = tool.execute(input);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("PID") != std::string::npos);
+    CHECK(result.content.find("日志文件") != std::string::npos);
+    // spawn 不等待,秒级就该返回——远小于 30 秒的命令时长。
+    CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() < 5000);
+
+    const unsigned long pid = ExtractPid(result.content);
+    CHECK(pid != 0);
+    CHECK(IsPidAlive(pid));
+
+    KillPidForTest(pid);
+    const bool dead = WaitUntil([pid] { return !IsPidAlive(pid); }, /*timeout_ms=*/5000);
+    CHECK(dead);
+}
+
+TEST_CASE("run_command: run_in_background 的输出确实写进了日志文件") {
+    RunCommandTool tool;
+    nlohmann::json input;
+#ifdef _WIN32
+    input["command"] = "echo hello-from-bg-log";
+    input["shell"] = "cmd";
+#else
+    input["command"] = "echo hello-from-bg-log";
+#endif
+    input["run_in_background"] = true;
+
+    const Tool::Result result = tool.execute(input);
+    CHECK_FALSE(result.is_error);
+    const std::string log_path = ExtractLogPath(result.content);
+    REQUIRE_FALSE(log_path.empty());
+
+    std::string log_content;
+    const bool got_it = WaitUntil(
+        [&] {
+            std::ifstream log_file(log_path, std::ios::binary);
+            if (!log_file) {
+                return false;
+            }
+            std::ostringstream ss;
+            ss << log_file.rdbuf();
+            log_content = ss.str();
+            return log_content.find("hello-from-bg-log") != std::string::npos;
+        },
+        /*timeout_ms=*/5000);
+
+    CHECK(got_it);
+    CHECK(log_content.find("hello-from-bg-log") != std::string::npos);
+}
+
+TEST_CASE("run_command: run_in_background=true 时 timeout_ms 传垃圾值也不报错(忽略)") {
+    RunCommandTool tool;
+    nlohmann::json input;
+#ifdef _WIN32
+    input["command"] = "cmd /c exit 0";
+    input["shell"] = "cmd";
+#else
+    input["command"] = "true";
+#endif
+    input["run_in_background"] = true;
+    input["timeout_ms"] = "不是数字";
+
+    const Tool::Result result = tool.execute(input);
+    CHECK_FALSE(result.is_error);
+    const unsigned long pid = ExtractPid(result.content);
+    CHECK(pid != 0);
+}
+
+TEST_CASE("run_command: run_in_background 参数不是布尔值,报错不崩") {
+    RunCommandTool tool;
+    nlohmann::json input;
+    input["command"] = "echo hi";
+    input["run_in_background"] = "yes";
+    Tool::Result result{"", false};
+    CHECK_NOTHROW(result = tool.execute(input));
+    CHECK(result.is_error);
+    CHECK(result.content.find("run_in_background") != std::string::npos);
 }
 
 TEST_CASE("run_command: 缺少必填参数 command,报错不崩") {
@@ -361,6 +532,40 @@ TEST_CASE("RunProcess: 输出超上限被截断,进程连进程树一起被杀,�
     CHECK_FALSE(proc.output.empty());
     // 远小于 60s 的超时:说明确实是靠上限提前掐掉的,读线程也没吊死。
     CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() < 15000);
+}
+
+TEST_CASE("RunProcessBackground/RunShellCommandBackground: 平台层直接调,spawn 立刻返回、日志真写了东西") {
+    using lubancode::platform::BackgroundSpawnResult;
+    using lubancode::platform::RunShellCommandBackground;
+
+    const auto started = std::chrono::steady_clock::now();
+    const BackgroundSpawnResult bg = RunShellCommandBackground("echo hello-from-platform-bg");
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    CHECK(bg.success);
+    CHECK(bg.pid != 0);
+    CHECK_FALSE(bg.log_path.empty());
+    // spawn 不等待 —— echo 这么快的命令,平台层调用本身也该是毫秒级返回。
+    CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() < 3000);
+
+    std::string log_content;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::ifstream log_file(bg.log_path, std::ios::binary);
+        if (log_file) {
+            std::ostringstream ss;
+            ss << log_file.rdbuf();
+            log_content = ss.str();
+            if (log_content.find("hello-from-platform-bg") != std::string::npos) {
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    CHECK(log_content.find("hello-from-platform-bg") != std::string::npos);
+
+    std::error_code ec;
+    std::filesystem::remove(bg.log_path, ec);
 }
 
 TEST_CASE("run_command: 海量输出被截断并标注,不吃光内存") {
