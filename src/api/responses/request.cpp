@@ -45,7 +45,7 @@ json ContentBlockToItem(const ContentBlock& block, Role role) {
 
 }  // namespace
 
-nlohmann::json BuildRequestJson(const Request& request, bool native_web_search) {
+nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, const json& extra_body) {
     json body;
     body["model"] = request.model;
     body["max_output_tokens"] = request.max_tokens;
@@ -130,6 +130,14 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search) 
             tools.push_back(json{{"type", "web_search"}});
         }
         body["tools"] = tools;
+    }
+
+    // extra_body 永远在最后合并(见 client.hpp 里 BuildRequestJson 的注释):
+    // 键冲突时整个覆盖前面算出来的值,只做顶层浅合并,不做深合并。
+    if (extra_body.is_object()) {
+        for (auto it = extra_body.begin(); it != extra_body.end(); ++it) {
+            body[it.key()] = it.value();
+        }
     }
 
     return body;

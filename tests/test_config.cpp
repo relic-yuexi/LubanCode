@@ -1988,3 +1988,213 @@ TEST_CASE("ValidateProviderName: 空名字、非法字符、重名都拦下") {
 
     CHECK(config::ValidateProviderName("sub-openai_1.0", existing).has_value());
 }
+
+// ---------------------------------------------------------------------------
+// extra_body / extra_headers:"任意模型特殊参数"扩展口子。每次请求把
+// extra_body 浅合并进请求体顶层(同名覆盖内置字段)、把 extra_headers 加/
+// 覆盖到 HTTP 头上——这两个字段本身的解析、合并、落盘,跟 native_web_search
+// 系出同门,但 extra_body/extra_headers 是"顶层单 provider 配置"也认的
+// (走 hooks/mcp/search/lsp 那套整段替换,不逐键 Source 追踪),这里补全
+// 对应测试。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseExtraBodyConfig: 合法 object 原样返回") {
+    const auto j = nlohmann::json::parse(R"({"thinking":{"type":"enabled"},"reasoning_effort":"max"})");
+    const auto result = config::ParseExtraBodyConfig(j, "test.json");
+    REQUIRE(result.has_value());
+    CHECK(result->at("reasoning_effort") == "max");
+    CHECK(result->at("thinking").at("type") == "enabled");
+}
+
+TEST_CASE("ParseExtraBodyConfig: 不是 object(数组/字符串/数字)都报错,带上文件路径") {
+    for (const nlohmann::json& bad : {nlohmann::json::array({1, 2}), nlohmann::json("x"), nlohmann::json(1)}) {
+        const auto result = config::ParseExtraBodyConfig(bad, "my_config.json");
+        REQUIRE_FALSE(result.has_value());
+        CHECK(result.error().find("my_config.json") != std::string::npos);
+        CHECK(result.error().find("extra_body") != std::string::npos);
+    }
+}
+
+TEST_CASE("ParseExtraHeadersConfig: 合法字符串键值对解析正确") {
+    const auto j = nlohmann::json::parse(R"({"X-Api-Version":"2024","Authorization":"Bearer xyz"})");
+    const auto result = config::ParseExtraHeadersConfig(j, "test.json");
+    REQUIRE(result.has_value());
+    CHECK(result->at("X-Api-Version") == "2024");
+    CHECK(result->at("Authorization") == "Bearer xyz");
+}
+
+TEST_CASE("ParseExtraHeadersConfig: 顶层不是 object,或者某个值不是字符串,都报错") {
+    const auto not_object = config::ParseExtraHeadersConfig(nlohmann::json::array(), "test.json");
+    REQUIRE_FALSE(not_object.has_value());
+    CHECK(not_object.error().find("extra_headers") != std::string::npos);
+
+    const auto bad_value = config::ParseExtraHeadersConfig(nlohmann::json::parse(R"({"X-Foo":123})"), "test.json");
+    REQUIRE_FALSE(bad_value.has_value());
+    CHECK(bad_value.error().find("extra_headers.X-Foo") != std::string::npos);
+}
+
+TEST_CASE("ParseFileConfigJson: providers 里 extra_body/extra_headers 缺省时是空") {
+    const auto parsed = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"glm","base_url":"https://a.test","wire":"anthropic"}]})", "/tmp/config.json");
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->providers.has_value());
+    CHECK(parsed->providers->front().extra_body.empty());
+    CHECK(parsed->providers->front().extra_headers.empty());
+}
+
+TEST_CASE("ParseFileConfigJson: providers 里 extra_body 空 object、带键两种情况都解得出") {
+    const auto empty = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"glm","base_url":"https://a.test","wire":"anthropic","extra_body":{}}]})",
+        "/tmp/config.json");
+    REQUIRE(empty.has_value());
+    CHECK(empty->providers->front().extra_body.empty());
+
+    const auto with_keys = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"glm","base_url":"https://a.test","wire":"anthropic",)"
+        R"("extra_body":{"thinking":{"type":"enabled"},"reasoning_effort":"max"}}]})",
+        "/tmp/config.json");
+    REQUIRE(with_keys.has_value());
+    const auto& body = with_keys->providers->front().extra_body;
+    CHECK(body.at("reasoning_effort") == "max");
+    CHECK(body.at("thinking").at("type") == "enabled");
+}
+
+TEST_CASE("ParseFileConfigJson: providers 里 extra_body/extra_headers 类型不对就报错,不复述两遍路径") {
+    const auto bad_body = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"x","base_url":"https://a.test","wire":"anthropic","extra_body":[1,2]}]})",
+        "/tmp/config.json");
+    CHECK_FALSE(bad_body.has_value());
+    CHECK(bad_body.error().find("extra_body") != std::string::npos);
+    // 报错信息里 "配置文件 " 只能出现一次——不能因为 providers[i] 内联校验跟
+    // 顶层共用函数没对齐,把路径念重复了。
+    CHECK(bad_body.error().find("配置文件") == bad_body.error().rfind("配置文件"));
+
+    const auto bad_headers = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"x","base_url":"https://a.test","wire":"anthropic",)"
+        R"("extra_headers":{"X-Foo":123}}]})",
+        "/tmp/config.json");
+    CHECK_FALSE(bad_headers.has_value());
+    CHECK(bad_headers.error().find("extra_headers.X-Foo") != std::string::npos);
+}
+
+TEST_CASE("ParseFileConfigJson: 顶层(单 provider 扁平配置)也认 extra_body/extra_headers") {
+    const auto parsed = config::ParseFileConfigJson(
+        R"({"extra_body":{"reasoning_effort":"max"},"extra_headers":{"X-Foo":"bar"}})", "/tmp/config.json");
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->extra_body.has_value());
+    CHECK(parsed->extra_body->at("reasoning_effort") == "max");
+    REQUIRE(parsed->extra_headers.has_value());
+    CHECK(parsed->extra_headers->at("X-Foo") == "bar");
+}
+
+TEST_CASE("MergeConfig: 顶层 extra_body/extra_headers 没配,最终是空(不启用)") {
+    const auto file_config = config::ParseFileConfigJson("{}", "test.json");
+    REQUIRE(file_config.has_value());
+    const auto merged = config::MergeConfig(config::LubancodeEnvValues{}, *file_config, config::GenericEnvValues{});
+    REQUIRE(merged.has_value());
+    CHECK(merged->config.extra_body.empty());
+    CHECK(merged->config.extra_headers.empty());
+}
+
+TEST_CASE("MergeConfig: 顶层 extra_body/extra_headers 配了就整段进最终 Config") {
+    const auto file_config = config::ParseFileConfigJson(
+        R"({"extra_body":{"reasoning_effort":"max"},"extra_headers":{"X-Foo":"bar"}})", "test.json");
+    REQUIRE(file_config.has_value());
+    const auto merged = config::MergeConfig(config::LubancodeEnvValues{}, *file_config, config::GenericEnvValues{});
+    REQUIRE(merged.has_value());
+    CHECK(merged->config.extra_body.at("reasoning_effort") == "max");
+    CHECK(merged->config.extra_headers.at("X-Foo") == "bar");
+}
+
+TEST_CASE("ProvidersToJson: extra_body/extra_headers 非空才落盘,空的旧配置不长出这两个键") {
+    const std::vector<config::ProviderConfig> providers{
+        {
+            .name = "glm",
+            .base_url = "https://open.bigmodel.cn/api/paas/v4",
+            .wire = config::Wire::Responses,
+            .extra_body = nlohmann::json::parse(R"({"thinking":{"type":"enabled"}})"),
+            .extra_headers = {{"X-Foo", "bar"}},
+        },
+        {
+            .name = "minimax",
+            .base_url = "https://api.minimax.io/anthropic",
+            .wire = config::Wire::Anthropic,
+        },
+    };
+    TempCwdDir cwd;
+    const std::filesystem::path path = std::filesystem::path(cwd.Path()) / ".lubancode" / "config.json";
+    cwd.WriteFile(".lubancode/config.json", R"({"providers":[]})");
+    REQUIRE(config::UpdateProvidersInConfigFile(path.string(), providers).has_value());
+
+    const nlohmann::json written = nlohmann::json::parse(cwd.ReadFile(".lubancode/config.json"));
+    CHECK(written["providers"][0]["extra_body"]["thinking"]["type"] == "enabled");
+    CHECK(written["providers"][0]["extra_headers"]["X-Foo"] == "bar");
+    CHECK_FALSE(written["providers"][1].contains("extra_body"));
+    CHECK_FALSE(written["providers"][1].contains("extra_headers"));
+
+    const auto reparsed = config::ParseFileConfigJson(written.dump(), path.string());
+    REQUIRE(reparsed.has_value());
+    CHECK(reparsed->providers->at(0).extra_body.at("thinking").at("type") == "enabled");
+    CHECK(reparsed->providers->at(0).extra_headers.at("X-Foo") == "bar");
+    CHECK(reparsed->providers->at(1).extra_body.empty());
+    CHECK(reparsed->providers->at(1).extra_headers.empty());
+}
+
+TEST_CASE("SetProviderExtraBody: 找得到就整段替换,找不到返回 false 原样不动") {
+    std::vector<config::ProviderConfig> providers{
+        {.name = "glm", .base_url = "https://open.bigmodel.cn/api/paas/v4", .wire = config::Wire::Responses},
+    };
+    const auto body = nlohmann::json::parse(R"({"reasoning_effort":"max"})");
+    CHECK(config::SetProviderExtraBody(providers, "glm", body));
+    CHECK(providers[0].extra_body.at("reasoning_effort") == "max");
+
+    // 再设一次,验证是"整段替换"而不是"合并"——旧键应该消失。
+    const auto body2 = nlohmann::json::parse(R"({"other_key":"v"})");
+    CHECK(config::SetProviderExtraBody(providers, "glm", body2));
+    CHECK_FALSE(providers[0].extra_body.contains("reasoning_effort"));
+    CHECK(providers[0].extra_body.at("other_key") == "v");
+
+    CHECK_FALSE(config::SetProviderExtraBody(providers, "no-such-provider", body));
+    CHECK(providers[0].extra_body.at("other_key") == "v");  // 原样不动
+}
+
+TEST_CASE("SetProviderExtraHeader: 设置/覆盖/删除,找不到名字返回 false") {
+    std::vector<config::ProviderConfig> providers{
+        {.name = "glm", .base_url = "https://open.bigmodel.cn/api/paas/v4", .wire = config::Wire::Responses},
+    };
+    CHECK(config::SetProviderExtraHeader(providers, "glm", "X-Foo", "bar"));
+    CHECK(providers[0].extra_headers.at("X-Foo") == "bar");
+
+    // 同名覆盖。
+    CHECK(config::SetProviderExtraHeader(providers, "glm", "X-Foo", "baz"));
+    CHECK(providers[0].extra_headers.at("X-Foo") == "baz");
+
+    // value 空串 = 删除这一条。
+    CHECK(config::SetProviderExtraHeader(providers, "glm", "X-Foo", ""));
+    CHECK_FALSE(providers[0].extra_headers.contains("X-Foo"));
+
+    CHECK_FALSE(config::SetProviderExtraHeader(providers, "no-such-provider", "X-Foo", "bar"));
+}
+
+TEST_CASE("/provider set extra_body 落盘路径:SetProviderExtraBody 改完再 UpdateProvidersInConfigFile,回读原样") {
+    TempCwdDir cwd;
+    const std::filesystem::path path = std::filesystem::path(cwd.Path()) / ".lubancode" / "config.json";
+    cwd.WriteFile(".lubancode/config.json", R"({"providers":[]})");
+
+    std::vector<config::ProviderConfig> providers{
+        {.name = "glm", .base_url = "https://open.bigmodel.cn/api/paas/v4", .wire = config::Wire::Responses},
+    };
+    const auto body = nlohmann::json::parse(R"({"thinking":{"type":"enabled"},"reasoning_effort":"max"})");
+    REQUIRE(config::SetProviderExtraBody(providers, "glm", body));
+    REQUIRE(config::UpdateProvidersInConfigFile(path.string(), providers).has_value());
+
+    const nlohmann::json written = nlohmann::json::parse(cwd.ReadFile(".lubancode/config.json"));
+    CHECK(written["providers"][0]["extra_body"]["reasoning_effort"] == "max");
+
+    // 清空(设成 {}),落盘应该把这个键去掉,跟 native_web_search=false 不落盘
+    // 同一个规矩(空 extra_body 不该占地方)。
+    REQUIRE(config::SetProviderExtraBody(providers, "glm", nlohmann::json::object()));
+    REQUIRE(config::UpdateProvidersInConfigFile(path.string(), providers).has_value());
+    const nlohmann::json cleared = nlohmann::json::parse(cwd.ReadFile(".lubancode/config.json"));
+    CHECK_FALSE(cleared["providers"][0].contains("extra_body"));
+}

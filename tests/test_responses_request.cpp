@@ -3,6 +3,7 @@
 
 #include <doctest/doctest.h>
 
+#include "api/responses/client.hpp"
 #include "api/responses/request.hpp"
 #include "api/types.hpp"
 
@@ -262,6 +263,62 @@ TEST_CASE("native_web_search=true 且本地工具表非空时,web_search 追加�
     CHECK(body.at("tools")[0].at("type") == "function");
     CHECK(body.at("tools")[0].at("name") == "read_file");
     CHECK(body.at("tools")[1].at("type") == "web_search");
+}
+
+// ---------------------------------------------------------------------------
+// extra_body:同 anthropic 那边的规则,merge 点在所有内置逻辑拼完之后、
+// 返回之前,浅合并、键冲突整段覆盖,不做深合并。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("extra_body 缺省(默认空 object)时,请求体跟不传这个参数一模一样") {
+    Request request;
+    request.reasoning_effort = "medium";
+    const auto body_default = BuildRequestJson(request);
+    const auto body_explicit_empty = BuildRequestJson(request, /*native_web_search=*/false, nlohmann::json::object());
+    CHECK(body_default == body_explicit_empty);
+}
+
+TEST_CASE("extra_body 里的新键原样加到请求体顶层") {
+    Request request;
+    const auto extra_body = nlohmann::json::parse(R"({"reasoning_effort":"max"})");
+    const auto body = BuildRequestJson(request, /*native_web_search=*/false, extra_body);
+    CHECK(body.at("reasoning_effort") == "max");
+}
+
+TEST_CASE("extra_body 跟内置字段(reasoning)同名时,extra_body 的值整个覆盖内置算出来的值") {
+    Request request;
+    request.reasoning_effort = "high";  // 内置逻辑会算出 reasoning.effort=high
+    const auto extra_body = nlohmann::json::parse(R"({"reasoning":{"effort":"max"}})");
+    const auto body = BuildRequestJson(request, /*native_web_search=*/false, extra_body);
+    CHECK(body.at("reasoning").at("effort") == "max");
+}
+
+TEST_CASE("extra_body 也能覆盖 native_web_search 拼出来的 tools 数组") {
+    Request request;
+    const auto extra_body = nlohmann::json::parse(R"({"tools":[]})");
+    const auto body = BuildRequestJson(request, /*native_web_search=*/true, extra_body);
+    CHECK(body.at("tools").empty());  // 内置拼出来的 web_search 声明被整段覆盖掉了
+}
+
+// ---------------------------------------------------------------------------
+// ApplyExtraHeaders(responses 协议自己那份,逻辑跟 anthropic 那份一样,各自
+// 小巧不共用):同名覆盖(含 Authorization),不同名追加。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("responses::ApplyExtraHeaders: 为空时基础头原样不变,新头追加,同名覆盖") {
+    const std::map<std::string, std::string> base{{"Content-Type", "application/json"},
+                                                    {"Authorization", "Bearer old-token"}};
+
+    const auto unchanged = lubancode::api::responses::ApplyExtraHeaders(base, {});
+    CHECK(unchanged == base);
+
+    const auto appended = lubancode::api::responses::ApplyExtraHeaders(base, {{"X-Api-Version", "2024-06-01"}});
+    CHECK(appended.at("Content-Type") == "application/json");
+    CHECK(appended.at("X-Api-Version") == "2024-06-01");
+
+    const auto overridden = lubancode::api::responses::ApplyExtraHeaders(base, {{"Authorization", "Bearer new-token"}});
+    CHECK(overridden.at("Authorization") == "Bearer new-token");
+    CHECK(overridden.at("Content-Type") == "application/json");
 }
 
 TEST_CASE("用户图片映射成 Responses input_image data URL") {

@@ -170,6 +170,73 @@ TEST_CASE("native_web_search=true 且本地工具表非空时,web_search 追加�
     CHECK(body.at("tools")[1].at("name") == "web_search");
 }
 
+// ---------------------------------------------------------------------------
+// extra_body:"任意模型特殊参数"扩展口子。浅合并进请求体顶层,merge 点在
+// thinking/native_web_search/messages/tools 都拼完之后、返回之前;键冲突时
+// extra_body 整个覆盖掉内置算出来的值,不做深合并——这是明确写进文档的
+// 简化规则,这里验证覆盖顺序对不对。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("extra_body 缺省(默认空 object)时,请求体跟不传这个参数一模一样") {
+    Request request;
+    request.reasoning_effort = "medium";
+    const auto body_default = BuildRequestJson(request);
+    const auto body_explicit_empty = BuildRequestJson(request, /*native_web_search=*/false, nlohmann::json::object());
+    CHECK(body_default == body_explicit_empty);
+}
+
+TEST_CASE("extra_body 里的新键原样加到请求体顶层") {
+    Request request;
+    const auto extra_body = nlohmann::json::parse(R"({"reasoning_effort":"max"})");
+    const auto body = BuildRequestJson(request, /*native_web_search=*/false, extra_body);
+    CHECK(body.at("reasoning_effort") == "max");
+}
+
+TEST_CASE("extra_body 跟内置字段(thinking)同名时,extra_body 的值整个覆盖内置算出来的值") {
+    Request request;
+    request.reasoning_effort = "high";  // 内置逻辑会算出 thinking.type=enabled + budget_tokens
+    const auto extra_body = nlohmann::json::parse(R"({"thinking":{"type":"enabled"}})");
+    const auto body = BuildRequestJson(request, /*native_web_search=*/false, extra_body);
+    // 整段替换,不是深合并——内置算出来的 budget_tokens 应该消失了。
+    CHECK(body.at("thinking") == nlohmann::json::parse(R"({"type":"enabled"})"));
+    CHECK_FALSE(body.at("thinking").contains("budget_tokens"));
+}
+
+TEST_CASE("extra_body 也能覆盖 native_web_search 拼出来的 tools 数组") {
+    Request request;
+    const auto extra_body = nlohmann::json::parse(R"({"tools":[]})");
+    const auto body = BuildRequestJson(request, /*native_web_search=*/true, extra_body);
+    CHECK(body.at("tools").empty());  // 内置拼出来的 web_search 声明被整段覆盖掉了
+}
+
+// ---------------------------------------------------------------------------
+// ApplyExtraHeaders:extra_headers 覆盖/追加进基础 HTTP 头表,同名覆盖
+// (含 Authorization),不同名追加。key 精确匹配(大小写敏感——真正发送前
+// cpr::Header 自己还会再做一层大小写不敏感的去重,这里只测这一层本身)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ApplyExtraHeaders: extra_headers 为空时,基础头原样不变") {
+    const std::map<std::string, std::string> base{{"Content-Type", "application/json"},
+                                                    {"Authorization", "Bearer token"}};
+    const auto merged = lubancode::api::anthropic::ApplyExtraHeaders(base, {});
+    CHECK(merged == base);
+}
+
+TEST_CASE("ApplyExtraHeaders: 新头名字追加,不影响原有的") {
+    const std::map<std::string, std::string> base{{"Content-Type", "application/json"}};
+    const auto merged = lubancode::api::anthropic::ApplyExtraHeaders(base, {{"X-Api-Version", "2024-06-01"}});
+    CHECK(merged.at("Content-Type") == "application/json");
+    CHECK(merged.at("X-Api-Version") == "2024-06-01");
+}
+
+TEST_CASE("ApplyExtraHeaders: 同名(含 Authorization)整条覆盖,用户对自己配的头负责") {
+    const std::map<std::string, std::string> base{{"Content-Type", "application/json"},
+                                                    {"Authorization", "Bearer old-token"}};
+    const auto merged = lubancode::api::anthropic::ApplyExtraHeaders(base, {{"Authorization", "Bearer new-token"}});
+    CHECK(merged.at("Authorization") == "Bearer new-token");
+    CHECK(merged.at("Content-Type") == "application/json");  // 没点名的那条不受影响
+}
+
 TEST_CASE("用户图片映射成 Anthropic image/base64 block") {
     Request request;
     Message user;

@@ -6,6 +6,7 @@
 #include <atomic>
 #include <expected>
 #include <functional>
+#include <map>
 #include <string>
 
 #include <nlohmann/json.hpp>
@@ -25,7 +26,20 @@ namespace lubancode::api::anthropic {
 // Config::native_web_search)是否声明协议原生联网搜索,默认 false,跟
 // Responses 那边的同名开关是同一个配置字段,这里各协议自己翻译成各自的
 // tools 数组形状。
-nlohmann::json BuildRequestJson(const Request& request, bool native_web_search = false);
+// extra_body:Config::extra_body(顶层单 provider 配置,或者切 provider 时
+// 从 ProviderConfig::extra_body 镜像过来)——浅合并进请求体顶层,merge 点
+// 在所有内置逻辑(thinking/native_web_search/messages/tools)拼完之后、
+// 返回之前,键冲突时 extra_body 的值整个覆盖掉前面算出来的值,不做深合并。
+// 默认空 object,等于不合并任何东西,现状行为零变化。
+nlohmann::json BuildRequestJson(const Request& request, bool native_web_search = false,
+                                 const nlohmann::json& extra_body = nlohmann::json::object());
+
+// 纯函数:把 extra_headers 覆盖/追加到一份基础 HTTP 头表里(key 精确匹配
+// 大小写;真正发送时 cpr::Header 自身还会再做一层大小写不敏感的去重,这
+// 里只管"配置里写的头名对不对得上基础头哪一条"这一步)。单独拆出来给
+// 单测直接调用,不用真的发一次 HTTP 请求。
+std::map<std::string, std::string> ApplyExtraHeaders(std::map<std::string, std::string> base,
+                                                        const std::map<std::string, std::string>& extra_headers);
 
 class AnthropicBackend : public Backend {
 public:
@@ -36,10 +50,14 @@ public:
     // 默认值,来自 config::kDefault*,main.cpp 用 Config 里实际生效的值调用。
     // native_web_search:该端(ProviderConfig::native_web_search 镜像到
     // Config::native_web_search)是否声明协议原生联网搜索,默认 false。
+    // extra_body/extra_headers:同上,从 Config 同名字段传进来,默认都是
+    // 空(不合并/不加任何东西)。
     AnthropicBackend(std::string base_url, std::string auth_token,
                       int connect_timeout_ms = config::kDefaultConnectTimeoutMs,
                       int stream_idle_timeout_secs = config::kDefaultStreamIdleTimeoutSecs,
-                      bool native_web_search = false);
+                      bool native_web_search = false,
+                      nlohmann::json extra_body = nlohmann::json::object(),
+                      std::map<std::string, std::string> extra_headers = {});
 
     std::expected<void, Error> send_stream(
         const Request& request,
@@ -52,6 +70,8 @@ private:
     int connect_timeout_ms_;
     int stream_idle_timeout_secs_;
     bool native_web_search_;
+    nlohmann::json extra_body_;
+    std::map<std::string, std::string> extra_headers_;
 };
 
 }  // namespace lubancode::api::anthropic

@@ -266,6 +266,14 @@ const Entry kZhCN[] = {
      "none/low/medium/high/xhigh/max,留空跳过):"},
     {"provider_wizard.effort.prompt", "effort: "},
     {"provider_wizard.effort.unset", "(未设置)"},
+    {"provider_wizard.extra_body.hint",
+     "额外请求参数(JSON object,直接回车跳过。例如 GLM 的思考开关加分级 effort:"
+     " {\"thinking\":{\"type\":\"enabled\"},\"reasoning_effort\":\"max\"}):"},
+    {"provider_wizard.extra_body.prompt", "extra_body: "},
+    {"provider_wizard.extra_body.invalid_json", "不是合法 JSON: {0},再输一遍(直接回车跳过)。"},
+    {"provider_wizard.extra_body.not_object", "得是一个 JSON object(花括号包着的键值对),再输一遍(直接回车跳过)。"},
+    {"provider_wizard.extra_body.unset", "(未设置)"},
+    {"provider_wizard.extra_body.summary", "{0}键"},
     {"provider_wizard.summary.title", "provider 配置汇总:"},
     {"provider_wizard.confirm.prompt", "确认写入全局配置? [Y/n]: "},
     {"provider_wizard.cancelled", "已取消,没有写入任何配置。"},
@@ -558,7 +566,11 @@ const Entry kZhCN[] = {
      "[--model 默认模型] [--effort 推理档位] [--window 大小]\n"
      "  /provider switch <名字> [模型]\n"
      "  /provider remove <名字>\n"
-     "  /provider set <名字> native_web_search on|off   开关服务端原生联网搜索(也认 true/false、1/0)"},
+     "  /provider set <名字> native_web_search on|off   开关服务端原生联网搜索(也认 true/false、1/0)\n"
+     "  /provider set <名字> extra_body <JSON object>   设置该端每次请求要附带的额外顶层字段(浅合并,"
+     "覆盖内置字段;传 {} 或空清掉)\n"
+     "  /provider set <名字> extra_header <头名> <值>    设置该端每次请求要附带的额外 HTTP 头(同名覆盖"
+     "内置头;值留空删掉这条)"},
     {"cmd.provider.empty", "还没有配 provider。用 /provider add 添一个。"},
     {"cmd.provider.header", "已配 provider:"},
     {"cmd.provider.line", "  - {0} [{1}] {2}; model={3}; window={4}; key_env={5}{6}{7}"},
@@ -567,6 +579,8 @@ const Entry kZhCN[] = {
     {"cmd.provider.extra_api_key", "; api_key={0}"},
     {"cmd.provider.extra_effort", "; effort={0}"},
     {"cmd.provider.extra_web_search", "; native_web_search=on"},
+    {"cmd.provider.extra_body_hint", "; extra_body={0}键"},
+    {"cmd.provider.extra_headers_hint", "; extra_headers={0}条"},
     {"cmd.provider.added", "已添 provider {0},写进全局配置 {1}。"},
     {"cmd.provider.add_cancelled", "已取消,没有添加 provider。"},
     {"cmd.provider.add_failed", "添 provider 失败: {0}"},
@@ -580,8 +594,11 @@ const Entry kZhCN[] = {
     {"cmd.provider.remove_failed", "删 provider 失败: {0}"},
     {"cmd.provider.set_ok", "已把 provider {0} 的 {1} 设为 {2},写进全局配置 {3}。"},
     {"cmd.provider.set_failed", "设置 provider 失败: {0}"},
-    {"cmd.provider.set_unknown_field", "不认得的字段: {0}(眼下只认 native_web_search)"},
+    {"cmd.provider.set_unknown_field", "不认得的字段: {0}(眼下只认 native_web_search、extra_body、extra_header)"},
     {"cmd.provider.set_active_applied", "provider {0} 正在用，已立即生效，不用再 /provider switch。"},
+    {"cmd.provider.extra_body_invalid_json", "extra_body 不是合法 JSON: {0}"},
+    {"cmd.provider.extra_body_not_object", "extra_body 得是一个 JSON object(花括号包着的键值对),不是别的类型。"},
+    {"cmd.provider.extra_header_name_missing", "extra_header 得跟一个头名字,不能光给值。"},
 
     // ---- /soul、/prompt ----
     {"soul.unavailable", "[soul] 无法读取 {0},已按无魂运行。"},
@@ -932,6 +949,15 @@ const Entry kEn[] = {
      "/think: none/low/medium/high/xhigh/max; leave blank to skip):"},
     {"provider_wizard.effort.prompt", "effort: "},
     {"provider_wizard.effort.unset", "(not set)"},
+    {"provider_wizard.extra_body.hint",
+     "Extra request parameters (JSON object, leave blank to skip; e.g. GLM's thinking toggle plus a tiered "
+     "effort: {\"thinking\":{\"type\":\"enabled\"},\"reasoning_effort\":\"max\"}):"},
+    {"provider_wizard.extra_body.prompt", "extra_body: "},
+    {"provider_wizard.extra_body.invalid_json", "Not valid JSON: {0}; try again (leave blank to skip)."},
+    {"provider_wizard.extra_body.not_object",
+     "Must be a JSON object (key-value pairs in braces); try again (leave blank to skip)."},
+    {"provider_wizard.extra_body.unset", "(not set)"},
+    {"provider_wizard.extra_body.summary", "{0} key(s)"},
     {"provider_wizard.summary.title", "Provider configuration summary:"},
     {"provider_wizard.confirm.prompt", "Confirm writing to the global config? [Y/n]: "},
     {"provider_wizard.cancelled", "Cancelled; nothing was written."},
@@ -1136,7 +1162,11 @@ const Entry kEn[] = {
      "  /provider switch <name> [model]\n"
      "  /provider remove <name>\n"
      "  /provider set <name> native_web_search on|off   toggle server-side native web search "
-     "(also accepts true/false, 1/0)"},
+     "(also accepts true/false, 1/0)\n"
+     "  /provider set <name> extra_body <JSON object>   extra top-level request fields to attach on every "
+     "request (shallow merge, overrides built-in fields; pass {} or empty to clear)\n"
+     "  /provider set <name> extra_header <Header-Name> <value>   extra HTTP header to attach on every request "
+     "(same name overrides a built-in header; empty value deletes it)"},
     {"cmd.provider.empty", "No providers are configured. Use /provider add to add one."},
     {"cmd.provider.header", "Configured providers:"},
     {"cmd.provider.line", "  - {0} [{1}] {2}; model={3}; window={4}; key_env={5}{6}{7}"},
@@ -1145,6 +1175,8 @@ const Entry kEn[] = {
     {"cmd.provider.extra_api_key", "; api_key={0}"},
     {"cmd.provider.extra_effort", "; effort={0}"},
     {"cmd.provider.extra_web_search", "; native_web_search=on"},
+    {"cmd.provider.extra_body_hint", "; extra_body={0} key(s)"},
+    {"cmd.provider.extra_headers_hint", "; extra_headers={0} entr(y/ies)"},
     {"cmd.provider.added", "Added provider {0} and saved it to global config {1}."},
     {"cmd.provider.add_cancelled", "Cancelled; no provider was added."},
     {"cmd.provider.add_failed", "Could not add provider: {0}"},
@@ -1158,9 +1190,14 @@ const Entry kEn[] = {
     {"cmd.provider.remove_failed", "Could not remove provider: {0}"},
     {"cmd.provider.set_ok", "Set {1} of provider {0} to {2}; saved to global config {3}."},
     {"cmd.provider.set_failed", "Could not set provider field: {0}"},
-    {"cmd.provider.set_unknown_field", "Unknown field: {0} (only native_web_search is supported for now)"},
+    {"cmd.provider.set_unknown_field", "Unknown field: {0} (only native_web_search, extra_body, extra_header "
+                                        "are supported for now)"},
     {"cmd.provider.set_active_applied",
      "Provider {0} is currently active; the change took effect immediately, no need to /provider switch."},
+    {"cmd.provider.extra_body_invalid_json", "extra_body is not valid JSON: {0}"},
+    {"cmd.provider.extra_body_not_object", "extra_body must be a JSON object (key-value pairs in braces), not "
+                                             "some other type."},
+    {"cmd.provider.extra_header_name_missing", "extra_header needs a header name, not just a value."},
 
     // TODO(P1):以下 zh-CN 键暂缺英文翻译,tr 回退 zh-CN——诚实回退,不机翻凑数:
     //   mcp.* / plugin.* / tool_search.* / catalog.* / cmd.tools.* / cmd.plugins.* /

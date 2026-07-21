@@ -61,19 +61,30 @@ std::string ClassifyNetworkError(const cpr::Error& error, bool received_any_byte
 
 }  // namespace
 
+std::map<std::string, std::string> ApplyExtraHeaders(std::map<std::string, std::string> base,
+                                                        const std::map<std::string, std::string>& extra_headers) {
+    for (const auto& [name, value] : extra_headers) {
+        base[name] = value;
+    }
+    return base;
+}
+
 ResponsesBackend::ResponsesBackend(std::string base_url, std::string auth_token, int connect_timeout_ms,
-                                    int stream_idle_timeout_secs, bool native_web_search)
+                                    int stream_idle_timeout_secs, bool native_web_search,
+                                    nlohmann::json extra_body, std::map<std::string, std::string> extra_headers)
     : base_url_(std::move(base_url)),
       auth_token_(std::move(auth_token)),
       connect_timeout_ms_(connect_timeout_ms),
       stream_idle_timeout_secs_(stream_idle_timeout_secs),
-      native_web_search_(native_web_search) {}
+      native_web_search_(native_web_search),
+      extra_body_(std::move(extra_body)),
+      extra_headers_(std::move(extra_headers)) {}
 
 std::expected<void, Error> ResponsesBackend::send_stream(
     const Request& request,
     const std::function<void(const StreamEvent&)>& on_event,
     const std::atomic<bool>* cancel) {
-    const json body = BuildRequestJson(request, native_web_search_);
+    const json body = BuildRequestJson(request, native_web_search_, extra_body_);
     const std::string body_str = body.dump();
 
     SseFramer framer;
@@ -144,16 +155,22 @@ std::expected<void, Error> ResponsesBackend::send_stream(
 
     const std::string url = base_url_ + "/responses";
 
+    // extra_headers 覆盖/追加到内置两个头上,同名覆盖(含 Authorization)。
+    const std::map<std::string, std::string> merged_headers =
+        ApplyExtraHeaders({{"Content-Type", "application/json"}, {"Authorization", "Bearer " + auth_token_}},
+                          extra_headers_);
+    cpr::Header cpr_headers;
+    for (const auto& [name, value] : merged_headers) {
+        cpr_headers[name] = value;
+    }
+
     // M11:LowSpeed{1, stream_idle_timeout_secs_} 是"空闲读超时",不是总时长
     // 上限——libcurl 语义是"持续 stream_idle_timeout_secs_ 秒平均速率低于
     // 1 字节/秒就判超时",拿它当"连续 N 秒一个字节没收到"的等价检测(流式
     // 回答本身可以很长,故意不设总 Timeout)。
     cpr::Response response = cpr::Post(
         cpr::Url{url},
-        cpr::Header{
-            {"Content-Type", "application/json"},
-            {"Authorization", "Bearer " + auth_token_},
-        },
+        cpr_headers,
         cpr::Body{body_str},
         cpr::ConnectTimeout{std::chrono::milliseconds(connect_timeout_ms_)},
         cpr::LowSpeed{1, stream_idle_timeout_secs_},

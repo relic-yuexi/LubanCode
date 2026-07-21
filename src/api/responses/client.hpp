@@ -6,13 +6,22 @@
 #include <atomic>
 #include <expected>
 #include <functional>
+#include <map>
 #include <string>
+
+#include <nlohmann/json.hpp>
 
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "config/config.hpp"
 
 namespace lubancode::api::responses {
+
+// 纯函数:把 extra_headers 覆盖/追加到一份基础 HTTP 头表里。(跟
+// anthropic/client.hpp 里的同名函数逻辑一样,两边各自小巧,没必要为了
+// 共用几行代码搭一个新的公共头——理由同 ExtractStatusCode。)
+std::map<std::string, std::string> ApplyExtraHeaders(std::map<std::string, std::string> base,
+                                                        const std::map<std::string, std::string>& extra_headers);
 
 class ResponsesBackend : public Backend {
 public:
@@ -23,10 +32,14 @@ public:
     // 默认值,来自 config::kDefault*,main.cpp 用 Config 里实际生效的值调用。
     // native_web_search:该端(ProviderConfig::native_web_search 镜像到
     // Config::native_web_search)是否声明协议原生联网搜索,默认 false。
+    // extra_body/extra_headers:同上,从 Config 同名字段传进来,默认都是
+    // 空(不合并/不加任何东西)。
     ResponsesBackend(std::string base_url, std::string auth_token,
                       int connect_timeout_ms = config::kDefaultConnectTimeoutMs,
                       int stream_idle_timeout_secs = config::kDefaultStreamIdleTimeoutSecs,
-                      bool native_web_search = false);
+                      bool native_web_search = false,
+                      nlohmann::json extra_body = nlohmann::json::object(),
+                      std::map<std::string, std::string> extra_headers = {});
 
     std::expected<void, Error> send_stream(
         const Request& request,
@@ -39,6 +52,8 @@ private:
     int connect_timeout_ms_;
     int stream_idle_timeout_secs_;
     bool native_web_search_;
+    nlohmann::json extra_body_;
+    std::map<std::string, std::string> extra_headers_;
 };
 
 }  // namespace lubancode::api::responses

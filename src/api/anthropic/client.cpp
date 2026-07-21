@@ -108,7 +108,7 @@ std::optional<json> BuildThinkingJson(const Request& request) {
 
 // 拼出 Anthropic Messages API 的请求体(stream: true 恒开,M1 只走流式)。
 // 声明在 client.hpp 里,单测用;线上代码路径(send_stream)也是调这个函数。
-json BuildRequestJson(const Request& request, bool native_web_search) {
+json BuildRequestJson(const Request& request, bool native_web_search, const json& extra_body) {
     json body;
     body["model"] = request.model;
     body["max_tokens"] = request.max_tokens;
@@ -158,7 +158,27 @@ json BuildRequestJson(const Request& request, bool native_web_search) {
         body["tools"] = tools;
     }
 
+    // extra_body 永远在最后合并:所有内置逻辑(thinking/native_web_search/
+    // messages/tools)都拼完了,extra_body 里的值才浅合并进来、键冲突时
+    // 整个覆盖掉前面算出来的值——这样用户才能靠它压过内置的 thinking 字段
+    // (比如 GLM 那种既要 thinking.type 又要自定义 reasoning_effort 档位的
+    // 写法)。只做顶层浅合并,不做深合并(嵌套 object 整个替换,不逐键钻
+    // 进去比),保持行为简单、可预期。
+    if (extra_body.is_object()) {
+        for (auto it = extra_body.begin(); it != extra_body.end(); ++it) {
+            body[it.key()] = it.value();
+        }
+    }
+
     return body;
+}
+
+std::map<std::string, std::string> ApplyExtraHeaders(std::map<std::string, std::string> base,
+                                                        const std::map<std::string, std::string>& extra_headers) {
+    for (const auto& [name, value] : extra_headers) {
+        base[name] = value;
+    }
+    return base;
 }
 
 namespace {
@@ -208,18 +228,21 @@ std::string ClassifyNetworkError(const cpr::Error& error, bool received_any_byte
 }  // namespace
 
 AnthropicBackend::AnthropicBackend(std::string base_url, std::string auth_token, int connect_timeout_ms,
-                                    int stream_idle_timeout_secs, bool native_web_search)
+                                    int stream_idle_timeout_secs, bool native_web_search,
+                                    nlohmann::json extra_body, std::map<std::string, std::string> extra_headers)
     : base_url_(std::move(base_url)),
       auth_token_(std::move(auth_token)),
       connect_timeout_ms_(connect_timeout_ms),
       stream_idle_timeout_secs_(stream_idle_timeout_secs),
-      native_web_search_(native_web_search) {}
+      native_web_search_(native_web_search),
+      extra_body_(std::move(extra_body)),
+      extra_headers_(std::move(extra_headers)) {}
 
 std::expected<void, Error> AnthropicBackend::send_stream(
     const Request& request,
     const std::function<void(const StreamEvent&)>& on_event,
     const std::atomic<bool>* cancel) {
-    const json body = BuildRequestJson(request, native_web_search_);
+    const json body = BuildRequestJson(request, native_web_search_, extra_body_);
     const std::string body_str = body.dump();
 
     SseFramer framer;
@@ -293,16 +316,24 @@ std::expected<void, Error> AnthropicBackend::send_stream(
 
     const std::string url = base_url_ + "/v1/messages";
 
+    // extra_headers 覆盖/追加到内置两个头上(ApplyExtraHeaders 是纯函数,
+    // 单测直接调);cpr::Header 本身大小写不敏感,同名 key 再赋值一次就是
+    // 覆盖,包括 Authorization——用户自己对后果负责。
+    const std::map<std::string, std::string> merged_headers =
+        ApplyExtraHeaders({{"Content-Type", "application/json"}, {"Authorization", "Bearer " + auth_token_}},
+                          extra_headers_);
+    cpr::Header cpr_headers;
+    for (const auto& [name, value] : merged_headers) {
+        cpr_headers[name] = value;
+    }
+
     // M11:LowSpeed{1, stream_idle_timeout_secs_} 是"空闲读超时",不是总时长
     // 上限——libcurl 语义是"持续 stream_idle_timeout_secs_ 秒平均速率低于
     // 1 字节/秒就判超时",拿它当"连续 N 秒一个字节没收到"的等价检测(流式
     // 回答本身可以很长,故意不设总 Timeout)。
     cpr::Response response = cpr::Post(
         cpr::Url{url},
-        cpr::Header{
-            {"Content-Type", "application/json"},
-            {"Authorization", "Bearer " + auth_token_},
-        },
+        cpr_headers,
         cpr::Body{body_str},
         cpr::ConnectTimeout{std::chrono::milliseconds(connect_timeout_ms_)},
         cpr::LowSpeed{1, stream_idle_timeout_secs_},

@@ -76,6 +76,8 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
 | `mcpServers` | JSON object | 空 object | MCP stdio 服务器表，详见下节。 |
 | `search` | JSON object | 未配置 | 搜索服务；不写时 `web_search` 工具不注册。 |
 | `lsp` | JSON object | 空 object | 语言服务器表；不写时 `lsp` 工具不注册。 |
+| `extra_body` | JSON object | 空 object | 每次请求浅合并进请求体顶层的额外字段，详见下节。 |
+| `extra_headers` | JSON object（字符串到字符串） | 空 | 每次请求附带的额外 HTTP 头，详见下节。 |
 
 `base_url`、`api_key`、`model` 没有内置值。交互模式会走初次配置向导；单发和管道模式会报缺项。
 
@@ -145,6 +147,36 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
   }
 }
 ```
+
+### extra_body / extra_headers：任意模型特殊参数
+
+有的模型服务藏着些自家专属开关——GLM 的 `thinking` 思考开关、别家的分级 `reasoning_effort`、某个厂商才认的顶层字段——lubancode 不会挨个内置，靠这两个字段自己往请求上加。顶层单 provider 那份配置、`providers` 数组里的每一条，都认这两个字段。
+
+- `extra_body`：JSON object。每次请求都浅合并进请求体顶层——同名键**整个覆盖**内置逻辑（`thinking`、`native_web_search` 的 `tools` 声明等）算出来的值，不做深合并，改个内层键也得把外层整个键重写一遍。合并发生在所有内置逻辑拼完之后、发送之前，覆盖顺序上 `extra_body` 永远最后拍板。
+- `extra_headers`：JSON object，值必须是字符串。每次请求追加/覆盖 HTTP 头，同名覆盖内置头（包括 `Authorization`——自己配自己认）；值留空表示删掉这条头。
+
+```json
+{
+  "providers": [
+    {
+      "name": "glm",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "wire": "responses",
+      "extra_body": { "thinking": { "type": "enabled" }, "reasoning_effort": "max" },
+      "extra_headers": { "X-Api-Version": "2024-06-01" }
+    }
+  ]
+}
+```
+
+不想手改 JSON，用 `/provider set` 也能改（改的是全局配置里 `providers` 数组对应那条,`extra_body` 是整段替换语义,不是往里加键；设成 `{}` 或留空清掉）：
+
+```
+/provider set glm extra_body {"thinking":{"type":"enabled"},"reasoning_effort":"max"}
+/provider set glm extra_header X-Api-Version 2024-06-01
+```
+
+`/provider list` 只提示配了几个键/几条头（如 `extra_body=2键`），不会把 JSON 原文糊到屏幕上。
 
 ## settings.local.json：项目级本地权限（不进版本库）
 

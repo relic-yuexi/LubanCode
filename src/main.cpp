@@ -121,11 +121,11 @@ std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::C
     if (config.wire == lubancode::config::Wire::Responses) {
         return std::make_unique<lubancode::api::responses::ResponsesBackend>(
             config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs,
-            config.native_web_search);
+            config.native_web_search, config.extra_body, config.extra_headers);
     }
     return std::make_unique<lubancode::api::anthropic::AnthropicBackend>(
         config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs,
-        config.native_web_search);
+        config.native_web_search, config.extra_body, config.extra_headers);
 }
 
 // 会话里切 provider 时，外层 Model/Think/Soul 等包装器、AgentLoop 和工具
@@ -3056,6 +3056,14 @@ void PrintProviderList(const std::vector<lubancode::config::ProviderConfig>& pro
         if (provider.native_web_search) {
             extra += tr("cmd.provider.extra_web_search");
         }
+        // extra_body/extra_headers 只提示"配了几键",绝不把 JSON 原文糊到
+        // 屏幕上——那玩意可能一大坨,也可能藏着不方便随手示人的字段值。
+        if (!provider.extra_body.empty()) {
+            extra += trf("cmd.provider.extra_body_hint", provider.extra_body.size());
+        }
+        if (!provider.extra_headers.empty()) {
+            extra += trf("cmd.provider.extra_headers_hint", provider.extra_headers.size());
+        }
         std::cout << trf("cmd.provider.line", provider.name, lubancode::config::ProviderWireName(provider.wire),
                           provider.base_url, model, provider.context_window_tokens, provider.key_env, extra, current)
                   << "\n";
@@ -3179,6 +3187,8 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             config.model = command.model.empty() ? provider->model : command.model;
             config.context_window_tokens = provider->context_window_tokens;
             config.native_web_search = provider->native_web_search;
+            config.extra_body = provider->extra_body;
+            config.extra_headers = provider->extra_headers;
             *current_model = config.model;
             active_provider = provider->name;
             session_wire = lubancode::config::ProviderWireName(config.wire);
@@ -3201,40 +3211,116 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             return;
         }
         case lubancode::cli::ProviderCommandAction::Set: {
-            // 目前只认 native_web_search 这一个可设字段;字段名不对、开关值
-            // 不认得,都跟 Add 分支同一个套路——套 set_failed 报个更具体的
-            // 原因,不写盘、不改内存。
-            if (command.field != "native_web_search") {
-                std::cout << trf("cmd.provider.set_failed", trf("cmd.provider.set_unknown_field", command.field))
+            // 认三个可设字段:native_web_search(开关)、extra_body(整段
+            // JSON,替换语义)、extra_header(单条 HTTP 头,替换/删除)。
+            // 字段名不对、值不合法,都跟 Add 分支同一个套路——套 set_failed
+            // 报个更具体的原因,不写盘、不改内存。
+            if (command.field == "native_web_search") {
+                const auto enabled = lubancode::config::ParseBoolToggle(command.value);
+                if (!enabled.has_value()) {
+                    std::cout << trf("cmd.provider.set_failed", enabled.error()) << "\n";
+                    return;
+                }
+                // 先改内存里这份:SetProviderNativeWebSearch 顺带当"名字存不存在"
+                // 的判断——找不到就原样不动、返回 false,不往下走落盘那一步。
+                if (!lubancode::config::SetProviderNativeWebSearch(config.providers, command.name, *enabled)) {
+                    std::cout << trf("cmd.provider.not_found", command.name) << "\n";
+                    return;
+                }
+                const auto saved =
+                    lubancode::config::SetProviderNativeWebSearchInGlobalConfig(command.name, *enabled);
+                if (!saved.has_value()) {
+                    std::cout << trf("cmd.provider.set_failed", saved.error()) << "\n";
+                    return;
+                }
+                std::cout << trf("cmd.provider.set_ok", command.name, command.field, *enabled ? "on" : "off", *saved)
                           << "\n";
+                // 改的正好是当前活跃端:顶层镜像字段跟着同步、重建 backend,别让
+                // "刚改完当前端却要等下次 /provider switch 才生效"这种反直觉
+                // 体验发生——跟 Switch 分支改完就 Rebuild 是同一个道理。
+                if (active_provider == command.name) {
+                    config.native_web_search = *enabled;
+                    real_backend.Rebuild(config);
+                    std::cout << trf("cmd.provider.set_active_applied", command.name) << "\n";
+                }
                 return;
             }
-            const auto enabled = lubancode::config::ParseBoolToggle(command.value);
-            if (!enabled.has_value()) {
-                std::cout << trf("cmd.provider.set_failed", enabled.error()) << "\n";
+            if (command.field == "extra_body") {
+                // command.value 是原始文本;空串或者 "{}" 都当"清空"处理——
+                // 跟 native_web_search 不一样,这里没有"合不合法的值"这一说,
+                // 只有"合不合法的 JSON"。
+                nlohmann::json parsed = nlohmann::json::object();
+                const std::string trimmed_value = command.value;
+                if (!trimmed_value.empty() && trimmed_value != "{}") {
+                    nlohmann::json candidate;
+                    try {
+                        candidate = nlohmann::json::parse(trimmed_value);
+                    } catch (const nlohmann::json::parse_error& e) {
+                        std::cout << trf("cmd.provider.set_failed",
+                                          trf("cmd.provider.extra_body_invalid_json", e.what()))
+                                  << "\n";
+                        return;
+                    }
+                    if (!candidate.is_object()) {
+                        std::cout << trf("cmd.provider.set_failed", tr("cmd.provider.extra_body_not_object")) << "\n";
+                        return;
+                    }
+                    parsed = std::move(candidate);
+                }
+                if (!lubancode::config::SetProviderExtraBody(config.providers, command.name, parsed)) {
+                    std::cout << trf("cmd.provider.not_found", command.name) << "\n";
+                    return;
+                }
+                const auto saved = lubancode::config::SetProviderExtraBodyInGlobalConfig(command.name, parsed);
+                if (!saved.has_value()) {
+                    std::cout << trf("cmd.provider.set_failed", saved.error()) << "\n";
+                    return;
+                }
+                std::cout << trf("cmd.provider.set_ok", command.name, command.field,
+                                  parsed.empty() ? tr("provider_wizard.extra_body.unset")
+                                                  : trf("provider_wizard.extra_body.summary", parsed.size()),
+                                  *saved)
+                          << "\n";
+                if (active_provider == command.name) {
+                    config.extra_body = parsed;
+                    real_backend.Rebuild(config);
+                    std::cout << trf("cmd.provider.set_active_applied", command.name) << "\n";
+                }
                 return;
             }
-            // 先改内存里这份:SetProviderNativeWebSearch 顺带当"名字存不存在"
-            // 的判断——找不到就原样不动、返回 false,不往下走落盘那一步。
-            if (!lubancode::config::SetProviderNativeWebSearch(config.providers, command.name, *enabled)) {
-                std::cout << trf("cmd.provider.not_found", command.name) << "\n";
+            if (command.field == "extra_header") {
+                if (command.header_name.empty()) {
+                    std::cout << trf("cmd.provider.set_failed", tr("cmd.provider.extra_header_name_missing")) << "\n";
+                    return;
+                }
+                if (!lubancode::config::SetProviderExtraHeader(config.providers, command.name, command.header_name,
+                                                                command.value)) {
+                    std::cout << trf("cmd.provider.not_found", command.name) << "\n";
+                    return;
+                }
+                const auto saved = lubancode::config::SetProviderExtraHeaderInGlobalConfig(
+                    command.name, command.header_name, command.value);
+                if (!saved.has_value()) {
+                    std::cout << trf("cmd.provider.set_failed", saved.error()) << "\n";
+                    return;
+                }
+                std::cout << trf("cmd.provider.set_ok", command.name, command.header_name,
+                                  command.value.empty() ? tr("provider_wizard.extra_body.unset") : command.value,
+                                  *saved)
+                          << "\n";
+                if (active_provider == command.name) {
+                    if (command.value.empty()) {
+                        config.extra_headers.erase(command.header_name);
+                    } else {
+                        config.extra_headers[command.header_name] = command.value;
+                    }
+                    real_backend.Rebuild(config);
+                    std::cout << trf("cmd.provider.set_active_applied", command.name) << "\n";
+                }
                 return;
             }
-            const auto saved = lubancode::config::SetProviderNativeWebSearchInGlobalConfig(command.name, *enabled);
-            if (!saved.has_value()) {
-                std::cout << trf("cmd.provider.set_failed", saved.error()) << "\n";
-                return;
-            }
-            std::cout << trf("cmd.provider.set_ok", command.name, command.field, *enabled ? "on" : "off", *saved)
+            std::cout << trf("cmd.provider.set_failed", trf("cmd.provider.set_unknown_field", command.field))
                       << "\n";
-            // 改的正好是当前活跃端:顶层镜像字段跟着同步、重建 backend,别让
-            // "刚改完当前端却要等下次 /provider switch 才生效"这种反直觉
-            // 体验发生——跟 Switch 分支改完就 Rebuild 是同一个道理。
-            if (active_provider == command.name) {
-                config.native_web_search = *enabled;
-                real_backend.Rebuild(config);
-                std::cout << trf("cmd.provider.set_active_applied", command.name) << "\n";
-            }
             return;
         }
         case lubancode::cli::ProviderCommandAction::Remove:

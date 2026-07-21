@@ -1,6 +1,7 @@
 #include "cli/slash_commands.hpp"
 
 #include <cctype>
+#include <optional>
 #include <sstream>
 #include <utility>
 
@@ -28,6 +29,27 @@ std::string ToLower(const std::string& s) {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
     return out;
+}
+
+// 从 pos 开始跳过前导空白,取一个"非空白游程"当一个词,pos 挪到词结束后
+// 的位置(可能是空白,也可能是字符串末尾)。取不到词(到头了)返回
+// std::nullopt,pos 保持不变。跟 istringstream 的 >> 效果一样,但不用忍受
+// streampos/tellg() 的边界怪癖,而且用完之后 s.substr(pos) 就是"剩下的
+// 原始文本"——extra_body/extra_header 的值就靠这个拿。
+std::optional<std::string> NextToken(const std::string& s, std::size_t& pos) {
+    std::size_t i = pos;
+    while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i])) != 0) {
+        ++i;
+    }
+    if (i >= s.size()) {
+        return std::nullopt;
+    }
+    std::size_t j = i;
+    while (j < s.size() && std::isspace(static_cast<unsigned char>(s[j])) == 0) {
+        ++j;
+    }
+    pos = j;
+    return s.substr(i, j - i);
 }
 
 }  // namespace
@@ -141,15 +163,58 @@ ParsedProviderCommand ParseProviderCommand(const std::string& args) {
         return parsed;
     }
     if (action == "set") {
-        // /provider set <名字> <字段> <值>,固定四个词,字段名和值都不认得
-        // 也照单全收(留给 main.cpp 报"不认得的字段"/"不认得的值"这种更
-        // 具体的错误),这里只管词数对不对。
-        if (words.size() == 4) {
-            parsed.action = ProviderCommandAction::Set;
-            parsed.name = words[1];
-            parsed.field = ToLower(words[2]);
-            parsed.value = ToLower(words[3]);
+        // /provider set <名字> <字段> <值...>。字段名不认得也照单全收(留给
+        // main.cpp 报"不认得的字段"这种更具体的错误),这里只管拆词——但
+        // extra_body/extra_header 这两个字段的"值"不能按空格切词(一坨
+        // JSON、或者带空格的头值),得从原始 args 里按位置抠剩下的原文,
+        // 所以这里不能只用前面 istringstream 切好的 words,得重新按位置扫
+        // 一遍 args。
+        std::size_t pos = 0;
+        NextToken(args, pos);  // "set" 本身(words[0]),这里只是把 pos 往前挪
+        const auto name_tok = NextToken(args, pos);
+        const auto field_tok = NextToken(args, pos);
+        if (!name_tok.has_value() || !field_tok.has_value()) {
+            return parsed;
         }
+        const std::string field_lower = ToLower(*field_tok);
+
+        if (field_lower == "extra_body") {
+            parsed.action = ProviderCommandAction::Set;
+            parsed.name = *name_tok;
+            parsed.field = field_lower;
+            parsed.value = Trim(args.substr(pos));
+            return parsed;
+        }
+        if (field_lower == "extra_header") {
+            // header 名字保留原始大小写——HTTP 头名字大小写是用户自己敲的
+            // 原样,这一层不该悄悄改掉。
+            const auto header_tok = NextToken(args, pos);
+            if (!header_tok.has_value()) {
+                return parsed;  // 缺 header 名字,词数不够,Invalid
+            }
+            parsed.action = ProviderCommandAction::Set;
+            parsed.name = *name_tok;
+            parsed.field = field_lower;
+            parsed.header_name = *header_tok;
+            parsed.value = Trim(args.substr(pos));
+            return parsed;
+        }
+
+        // 老字段(目前只有 native_web_search):固定四个词,字段名和值都
+        // 小写化,第四个词之后不许再冒出别的词——跟改造前逐字一样,不能
+        // 破坏既有单测。
+        const auto value_tok = NextToken(args, pos);
+        if (!value_tok.has_value()) {
+            return parsed;
+        }
+        std::size_t trailing_pos = pos;
+        if (NextToken(args, trailing_pos).has_value()) {
+            return parsed;  // 冒出第五个词,词数超了
+        }
+        parsed.action = ProviderCommandAction::Set;
+        parsed.name = *name_tok;
+        parsed.field = field_lower;
+        parsed.value = ToLower(*value_tok);
         return parsed;
     }
     if (action != "add") {

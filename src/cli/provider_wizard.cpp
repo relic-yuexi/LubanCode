@@ -82,6 +82,35 @@ std::optional<std::string> ResolveReasoningEffort(WizardIO& io) {
     return ReadTrimmed(io, tr("provider_wizard.effort.prompt"));
 }
 
+// 额外请求参数这一步:可选,直接回车跳过(= 不设置 extra_body,留空
+// object)。跟 effort 那种"随便留个字符串,错了发请求时才炸"不一样——
+// 这里输了东西就当场校验:必须能解析成 JSON object,解析失败或者不是
+// object 都打一行错误重问,不把坏配置放过去。
+std::optional<nlohmann::json> ResolveExtraBody(WizardIO& io) {
+    io.print(tr("provider_wizard.extra_body.hint"));
+    while (true) {
+        const auto answer = ReadTrimmed(io, tr("provider_wizard.extra_body.prompt"));
+        if (!answer.has_value()) {
+            return std::nullopt;
+        }
+        if (answer->empty()) {
+            return nlohmann::json::object();
+        }
+        nlohmann::json parsed;
+        try {
+            parsed = nlohmann::json::parse(*answer);
+        } catch (const nlohmann::json::parse_error& e) {
+            io.print(trf("provider_wizard.extra_body.invalid_json", e.what()));
+            continue;
+        }
+        if (!parsed.is_object()) {
+            io.print(tr("provider_wizard.extra_body.not_object"));
+            continue;
+        }
+        return parsed;
+    }
+}
+
 }  // namespace
 
 std::optional<ProviderWizardOutcome> RunProviderAddWizard(WizardIO& io, const std::string& name_prefill,
@@ -157,7 +186,17 @@ std::optional<ProviderWizardOutcome> RunProviderAddWizard(WizardIO& io, const st
     }
     io.print("");
 
-    // ---- 7) 汇总 + 确认 ----
+    // ---- 7) 额外请求参数(可选) ----
+    {
+        const auto answer = ResolveExtraBody(io);
+        if (!answer.has_value()) {
+            return std::nullopt;
+        }
+        provider.extra_body = *answer;
+    }
+    io.print("");
+
+    // ---- 8) 汇总 + 确认 ----
     io.print(tr("provider_wizard.summary.title"));
     io.print("  name     = " + provider.name);
     io.print("  wire     = " + config::ProviderWireName(provider.wire));
@@ -171,6 +210,9 @@ std::optional<ProviderWizardOutcome> RunProviderAddWizard(WizardIO& io, const st
     io.print("  effort   = " +
               (provider.model_reasoning_effort.empty() ? tr("provider_wizard.effort.unset")
                                                         : provider.model_reasoning_effort));
+    io.print("  extra_body = " + (provider.extra_body.empty()
+                                      ? tr("provider_wizard.extra_body.unset")
+                                      : trf("provider_wizard.extra_body.summary", provider.extra_body.size())));
     io.print("");
 
     bool save = true;  // 默认确认

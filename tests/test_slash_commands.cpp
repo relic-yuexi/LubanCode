@@ -376,3 +376,52 @@ TEST_CASE("ParseProviderCommand: set 词数不对(多或少)一律 Invalid") {
     CHECK(cli::ParseProviderCommand("set glm native_web_search on extra").action ==
           cli::ProviderCommandAction::Invalid);
 }
+
+TEST_CASE("ParseProviderCommand: set extra_body 取字段名之后到行尾的原始文本,不按空格切词") {
+    const auto parsed = cli::ParseProviderCommand(
+        R"(set glm extra_body {"thinking":{"type":"enabled"},"reasoning_effort":"max"})");
+    CHECK(parsed.action == cli::ProviderCommandAction::Set);
+    CHECK(parsed.name == "glm");
+    CHECK(parsed.field == "extra_body");
+    CHECK(parsed.value == R"({"thinking":{"type":"enabled"},"reasoning_effort":"max"})");
+    CHECK(parsed.header_name.empty());
+
+    // 字段名本身不区分大小写,但 JSON 原文的大小写、空格必须原样保留——
+    // 拿到手上再去解析合不合法是 main.cpp/config 层的事,这层只管抠原文。
+    const auto mixed_case = cli::ParseProviderCommand(R"(set GLM Extra_Body {"A": 1, "b": 2})");
+    CHECK(mixed_case.name == "GLM");
+    CHECK(mixed_case.field == "extra_body");
+    CHECK(mixed_case.value == R"({"A": 1, "b": 2})");
+}
+
+TEST_CASE("ParseProviderCommand: set extra_body 清空(空 object 或空文本)也解得出,值原样传下去") {
+    const auto cleared_braces = cli::ParseProviderCommand("set glm extra_body {}");
+    CHECK(cleared_braces.action == cli::ProviderCommandAction::Set);
+    CHECK(cleared_braces.value == "{}");
+
+    // 字段名之后什么都没有——"到行尾的原始文本"就是空串,不该判成词数不够
+    // 的 Invalid(这跟 native_web_search 那种固定词数的字段不是一个规矩)。
+    const auto cleared_empty = cli::ParseProviderCommand("set glm extra_body");
+    CHECK(cleared_empty.action == cli::ProviderCommandAction::Set);
+    CHECK(cleared_empty.value.empty());
+}
+
+TEST_CASE("ParseProviderCommand: set extra_header 拆出头名字(保留大小写)和值(保留空格)") {
+    const auto parsed = cli::ParseProviderCommand("set glm extra_header X-Api-Version 2024-06-01 beta");
+    CHECK(parsed.action == cli::ProviderCommandAction::Set);
+    CHECK(parsed.name == "glm");
+    CHECK(parsed.field == "extra_header");
+    CHECK(parsed.header_name == "X-Api-Version");   // 头名字原样大小写,不转小写
+    CHECK(parsed.value == "2024-06-01 beta");        // 值可以带空格,原样保留
+
+    // 值留空 = 删除这一条头;头名字之后没有值文本也该解出来,而不是 Invalid。
+    const auto deleted = cli::ParseProviderCommand("set glm extra_header X-Api-Version");
+    CHECK(deleted.action == cli::ProviderCommandAction::Set);
+    CHECK(deleted.header_name == "X-Api-Version");
+    CHECK(deleted.value.empty());
+}
+
+TEST_CASE("ParseProviderCommand: set extra_header 缺头名字(只给了字段名,没有紧跟的词)是 Invalid") {
+    const auto parsed = cli::ParseProviderCommand("set glm extra_header");
+    CHECK(parsed.action == cli::ProviderCommandAction::Invalid);
+}

@@ -31,7 +31,9 @@
 #include <utility>
 #include <vector>
 
-#include <nlohmann/json_fwd.hpp>
+// extra_body 要在 ProviderConfig/Config 里存一份实打实的 nlohmann::json
+// object(不是指针/引用),json_fwd.hpp 那种前向声明不够用,得换成全量头。
+#include <nlohmann/json.hpp>
 
 namespace lubancode::config {
 
@@ -95,6 +97,17 @@ struct ProviderConfig {
     // (BuildRequestJson,src/api/anthropic/client.cpp)。按 provider 各自
     // 开关,不搞全局唯一开关。
     bool native_web_search = false;
+    // extra_body:任意厂商私有请求参数(比如 GLM 的 thinking.type + 一个
+    // 自定义 reasoning_effort 档位),每次请求前浅合并进请求体顶层——键
+    // 冲突时 extra_body 里的值整个覆盖掉内置逻辑算出来的值(不做深合并,
+    // 图个简单、行为可预期)。默认空 object,表示"不合并任何东西",跟
+    // native_web_search 默认关一个道理:不想让 lubancode 为每家服务商的
+    // 偏门参数单独写一段翻译代码,交给用户自己在配置里加。
+    nlohmann::json extra_body = nlohmann::json::object();
+    // extra_headers:任意"头名 -> 值"表,每次请求追加/覆盖到 HTTP 头里
+    // (包括 Authorization——想用自定义鉴权头,用户自己对后果负责)。默认
+    // 空,表示不加任何额外头。
+    std::map<std::string, std::string> extra_headers;
 };
 
 // tool_search(延迟挂载)的阈值默认值:注册表总工具数超过这个数才启用
@@ -192,6 +205,15 @@ struct Config {
     // 不走独立的配置文件/环境变量四级合并(provider 才是唯一来源),默认
     // false。
     bool native_web_search = false;
+    // extra_body/extra_headers:跟 native_web_search 同一套待遇——切
+    // provider 时从 ProviderConfig 同名字段镜像过来;但这两个字段还多一条
+    // 路:配置文件顶层(不进 providers 数组的"单 provider 配置"写法)也能
+    // 直接写 extra_body/extra_headers,那种场景走的是下面 FileConfig 那两
+    // 个同名字段、按 hooks/mcpServers 那套"整段回退"合并进来的(见
+    // MergeConfig),不是从某个 ProviderConfig 镜像。默认都是空(不合并/
+    // 不加任何东西)。
+    nlohmann::json extra_body = nlohmann::json::object();
+    std::map<std::string, std::string> extra_headers;
     std::size_t max_context_chars = kDefaultMaxContextChars;
     std::string theme = kDefaultTheme;   // dark / light / plain,没配到就是 kDefaultTheme
     // i18n:界面语言(zh-CN / en / languages/ 里的语言码)。空串 = 跟系统
@@ -317,6 +339,11 @@ struct FileConfig {
     std::optional<SearchConfig> search;
     // LSP:lsp 段,整段有没有出现在 JSON 里(待遇同 mcpServers)。
     std::optional<std::map<std::string, LspServerConfig>> lsp_servers;
+    // extra_body/extra_headers:顶层"单 provider 配置"写法专用(不进
+    // providers 数组的场景),整段有没有出现在 JSON 里(待遇同 hooks/
+    // mcpServers——只从配置文件来,没有环境变量、没有内置默认值这两级)。
+    std::optional<nlohmann::json> extra_body;
+    std::optional<std::map<std::string, std::string>> extra_headers;
     // tool_search:延迟挂载阈值,非负整数(0 = 永不延迟)。
     std::optional<int> tool_search_threshold;
     // M11(网络超时):三个字段都是正整数,没写就是 std::nullopt(往下一级
@@ -427,6 +454,19 @@ const ProviderConfig* FindProvider(const std::vector<ProviderConfig>& providers,
 // 改成传字段名 + 一个 mutate 回调都行。
 bool SetProviderNativeWebSearch(std::vector<ProviderConfig>& providers, const std::string& name, bool enabled);
 
+// 纯函数,不摸文件:跟 SetProviderNativeWebSearch 同一个套路,把 name 对应
+// 那条 provider 的 extra_body 整个替换成 body(不是合并——/provider set
+// extra_body 这条命令本来就是"整段替换"语义,不是往里加键)。找不到 name
+// 返回 false、原样不动。
+bool SetProviderExtraBody(std::vector<ProviderConfig>& providers, const std::string& name,
+                           const nlohmann::json& body);
+
+// 纯函数,不摸文件:把 name 对应那条 provider 的 extra_headers 里
+// header_name 这一条设成 value;value 是空串就删掉这一条(不是"设成空
+// 值"的头,而是压根不发)。找不到 name 返回 false、原样不动。
+bool SetProviderExtraHeader(std::vector<ProviderConfig>& providers, const std::string& name,
+                             const std::string& header_name, const std::string& value);
+
 // 纯函数:检查合并结果里的 api_key 是不是空的。空的话报错,错误信息里把
 // 四级来源都提一遍(按 result.config.wire 挑出对应的通用环境变量名),
 // 让人知道去哪儿配。真正要跟模型对话之前(AskOnce/InteractiveLoop 之前)
@@ -516,6 +556,18 @@ std::expected<std::string, std::string> RemoveProviderFromGlobalConfig(const std
 std::expected<std::string, std::string> SetProviderNativeWebSearchInGlobalConfig(const std::string& name,
                                                                                    bool enabled);
 
+// /provider set extra_body 用:整段替换全局配置里对应 provider 的
+// extra_body 再落盘。找不到这个 provider 名字就报错、不碰文件。
+std::expected<std::string, std::string> SetProviderExtraBodyInGlobalConfig(const std::string& name,
+                                                                             const nlohmann::json& body);
+
+// /provider set extra_header 用:设置(或者 value 为空串时删除)全局配置里
+// 对应 provider 的某一条 extra_headers,再落盘。找不到这个 provider 名字就
+// 报错、不碰文件。
+std::expected<std::string, std::string> SetProviderExtraHeaderInGlobalConfig(const std::string& name,
+                                                                               const std::string& header_name,
+                                                                               const std::string& value);
+
 // 把一段 JSON 文本解析成 FileConfig。file_path_for_error 只用来拼错误信息,
 // 不影响解析本身。JSON 坏了、或者顶层不是一个 object,都返回带路径的错误。
 std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& json_text,
@@ -557,6 +609,17 @@ std::expected<SearchConfig, std::string> ParseSearchConfig(const nlohmann::json&
 // file_path_for_error 和具体是哪个语言的哪个字段,方便定位。
 std::expected<std::map<std::string, LspServerConfig>, std::string> ParseLspServersConfig(
     const nlohmann::json& lsp_json, const std::string& file_path_for_error);
+
+// 纯函数,不碰 IO:校验 config.json 里的 "extra_body" 字段——必须是一个
+// JSON object(允许任意嵌套值,具体每个键怎么用是各家服务商自己的事,这里
+// 只挡"顶层压根不是 object"这种明显写错的情况)。
+std::expected<nlohmann::json, std::string> ParseExtraBodyConfig(const nlohmann::json& extra_body_json,
+                                                                  const std::string& file_path_for_error);
+
+// 纯函数,不碰 IO:校验 config.json 里的 "extra_headers" 字段——必须是一个
+// 字符串到字符串的 JSON object(HTTP 头名 -> 值),某个值不是字符串就报错。
+std::expected<std::map<std::string, std::string>, std::string> ParseExtraHeadersConfig(
+    const nlohmann::json& extra_headers_json, const std::string& file_path_for_error);
 
 // 分层加载的结果:项目级(<cwd>)、全局(<主目录>)各一份,都可能缺。
 // 两级都读、按字段合并交给 MergeConfig。migration_notice 是两级迁移通知

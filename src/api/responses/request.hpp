@@ -21,6 +21,11 @@ namespace lubancode::api::responses {
 //              联网搜索,不是本地函数工具)
 //   max_tokens -> max_output_tokens
 // native_web_search 默认 false,不传就是现状行为零变化。
-nlohmann::json BuildRequestJson(const Request& request, bool native_web_search = false);
+// extra_body:Config::extra_body(顶层单 provider 配置,或者切 provider 时
+// 从 ProviderConfig::extra_body 镜像过来)——浅合并进请求体顶层,merge 点
+// 在所有内置逻辑拼完之后、返回之前,键冲突时 extra_body 的值整个覆盖掉
+// 前面算出来的值,不做深合并。默认空 object,等于不合并任何东西。
+nlohmann::json BuildRequestJson(const Request& request, bool native_web_search = false,
+                                 const nlohmann::json& extra_body = nlohmann::json::object());
 
 }  // namespace lubancode::api::responses

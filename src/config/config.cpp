@@ -143,6 +143,32 @@ bool SetProviderNativeWebSearch(std::vector<ProviderConfig>& providers, const st
     return false;
 }
 
+bool SetProviderExtraBody(std::vector<ProviderConfig>& providers, const std::string& name,
+                           const nlohmann::json& body) {
+    for (ProviderConfig& provider : providers) {
+        if (provider.name == name) {
+            provider.extra_body = body;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool SetProviderExtraHeader(std::vector<ProviderConfig>& providers, const std::string& name,
+                             const std::string& header_name, const std::string& value) {
+    for (ProviderConfig& provider : providers) {
+        if (provider.name == name) {
+            if (value.empty()) {
+                provider.extra_headers.erase(header_name);
+            } else {
+                provider.extra_headers[header_name] = value;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
 std::string ToString(Source source) {
     switch (source) {
         case Source::LubancodeEnv:
@@ -397,6 +423,30 @@ std::expected<std::map<std::string, LspServerConfig>, std::string> ParseLspServe
     return out;
 }
 
+std::expected<nlohmann::json, std::string> ParseExtraBodyConfig(const nlohmann::json& extra_body_json,
+                                                                  const std::string& file_path_for_error) {
+    if (!extra_body_json.is_object()) {
+        return std::unexpected("配置文件 " + file_path_for_error + " 里的 extra_body 字段必须是一个 JSON object");
+    }
+    return extra_body_json;
+}
+
+std::expected<std::map<std::string, std::string>, std::string> ParseExtraHeadersConfig(
+    const nlohmann::json& extra_headers_json, const std::string& file_path_for_error) {
+    if (!extra_headers_json.is_object()) {
+        return std::unexpected("配置文件 " + file_path_for_error + " 里的 extra_headers 字段必须是一个 JSON object");
+    }
+    std::map<std::string, std::string> out;
+    for (auto it = extra_headers_json.begin(); it != extra_headers_json.end(); ++it) {
+        if (!it.value().is_string()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 extra_headers." + it.key() +
+                                    " 的值必须是字符串");
+        }
+        out.emplace(it.key(), it.value().get<std::string>());
+    }
+    return out;
+}
+
 std::expected<HooksConfig, std::string> ParseHooksConfig(const nlohmann::json& hooks_json,
                                                            const std::string& file_path_for_error) {
     if (!hooks_json.is_object()) {
@@ -522,6 +572,27 @@ std::expected<std::vector<ProviderConfig>, std::string> ParseProvidersConfig(
                 return std::unexpected(prefix + " 里的 native_web_search 字段必须是布尔值");
             }
             provider.native_web_search = item["native_web_search"].get<bool>();
+        }
+        if (item.contains("extra_body")) {
+            // 不直接复用 ParseExtraBodyConfig——那个函数的报错信息自己拼了
+            // 一遍"配置文件 xxx 里的",这里的 prefix 已经是
+            // "配置文件 xxx 里的 providers[i]",直接套上去会把路径重复念
+            // 两遍,不如就地判一下。
+            if (!item["extra_body"].is_object()) {
+                return std::unexpected(prefix + " 里的 extra_body 字段必须是一个 JSON object");
+            }
+            provider.extra_body = item["extra_body"];
+        }
+        if (item.contains("extra_headers")) {
+            if (!item["extra_headers"].is_object()) {
+                return std::unexpected(prefix + " 里的 extra_headers 字段必须是一个 JSON object");
+            }
+            for (auto it = item["extra_headers"].begin(); it != item["extra_headers"].end(); ++it) {
+                if (!it.value().is_string()) {
+                    return std::unexpected(prefix + " 里的 extra_headers." + it.key() + " 的值必须是字符串");
+                }
+                provider.extra_headers.emplace(it.key(), it.value().get<std::string>());
+            }
         }
 
         const auto valid = ValidateProviderConfig(provider);
@@ -697,6 +768,20 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
             return std::unexpected(lsp_result.error());
         }
         config.lsp_servers = std::move(*lsp_result);
+    }
+    if (parsed.contains("extra_body")) {
+        auto extra_body_result = ParseExtraBodyConfig(parsed["extra_body"], file_path_for_error);
+        if (!extra_body_result.has_value()) {
+            return std::unexpected(extra_body_result.error());
+        }
+        config.extra_body = std::move(*extra_body_result);
+    }
+    if (parsed.contains("extra_headers")) {
+        auto extra_headers_result = ParseExtraHeadersConfig(parsed["extra_headers"], file_path_for_error);
+        if (!extra_headers_result.has_value()) {
+            return std::unexpected(extra_headers_result.error());
+        }
+        config.extra_headers = std::move(*extra_headers_result);
     }
     if (parsed.contains("providers")) {
         auto providers_result = ParseProvidersConfig(parsed["providers"], file_path_for_error);
@@ -1166,6 +1251,21 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.config.lsp_servers = *global_file->lsp_servers;
     }
 
+    // extra_body/extra_headers:顶层"单 provider 配置"写法专用,跟 hooks/
+    // mcpServers/search/lsp 同一套"整段回退"——项目级写了就用项目级那一整
+    // 段,否则用全局那一整段,都没写就是默认空(result.config 本来就是新建
+    // 出来的,default 状态已经是空 object/空 map,不需要额外 else 清空)。
+    if (project_file.has_value() && project_file->extra_body.has_value()) {
+        result.config.extra_body = *project_file->extra_body;
+    } else if (global_file.has_value() && global_file->extra_body.has_value()) {
+        result.config.extra_body = *global_file->extra_body;
+    }
+    if (project_file.has_value() && project_file->extra_headers.has_value()) {
+        result.config.extra_headers = *project_file->extra_headers;
+    } else if (global_file.has_value() && global_file->extra_headers.has_value()) {
+        result.config.extra_headers = *global_file->extra_headers;
+    }
+
     if (project_file.has_value() && project_file->providers.has_value()) {
         result.config.providers = *project_file->providers;
         result.sources.providers = Source::ProjectConfigFile;
@@ -1350,6 +1450,14 @@ nlohmann::json ProvidersToJson(const std::vector<ProviderConfig>& providers) {
         if (provider.native_web_search) {
             item["native_web_search"] = provider.native_web_search;
         }
+        // extra_body/extra_headers 同理:默认空,非空才落盘,没设置的旧
+        // 配置写回后不多出这两个键。
+        if (!provider.extra_body.empty()) {
+            item["extra_body"] = provider.extra_body;
+        }
+        if (!provider.extra_headers.empty()) {
+            item["extra_headers"] = provider.extra_headers;
+        }
         out.push_back(std::move(item));
     }
     return out;
@@ -1507,6 +1615,57 @@ std::expected<std::string, std::string> SetProviderNativeWebSearchInGlobalConfig
         return std::unexpected(providers.error());
     }
     if (!SetProviderNativeWebSearch(*providers, name, enabled)) {
+        return std::unexpected("provider 不存在: " + name);
+    }
+    const auto written = UpdateProvidersInConfigFile(path, *providers);
+    if (!written.has_value()) {
+        return std::unexpected(written.error());
+    }
+    return path;
+}
+
+std::expected<std::string, std::string> SetProviderExtraBodyInGlobalConfig(const std::string& name,
+                                                                             const nlohmann::json& body) {
+    const auto home = HomeDir();
+    if (!home.has_value()) {
+        return std::unexpected("找不到用户主目录,没法更新 provider 配置");
+    }
+    const std::string path = NewConfigPathFor(std::filesystem::path(*home)).string();
+    auto root = ReadConfigObjectForUpdate(path);
+    if (!root.has_value()) {
+        return std::unexpected(root.error());
+    }
+    auto providers = ProvidersInConfigObject(*root, path);
+    if (!providers.has_value()) {
+        return std::unexpected(providers.error());
+    }
+    if (!SetProviderExtraBody(*providers, name, body)) {
+        return std::unexpected("provider 不存在: " + name);
+    }
+    const auto written = UpdateProvidersInConfigFile(path, *providers);
+    if (!written.has_value()) {
+        return std::unexpected(written.error());
+    }
+    return path;
+}
+
+std::expected<std::string, std::string> SetProviderExtraHeaderInGlobalConfig(const std::string& name,
+                                                                               const std::string& header_name,
+                                                                               const std::string& value) {
+    const auto home = HomeDir();
+    if (!home.has_value()) {
+        return std::unexpected("找不到用户主目录,没法更新 provider 配置");
+    }
+    const std::string path = NewConfigPathFor(std::filesystem::path(*home)).string();
+    auto root = ReadConfigObjectForUpdate(path);
+    if (!root.has_value()) {
+        return std::unexpected(root.error());
+    }
+    auto providers = ProvidersInConfigObject(*root, path);
+    if (!providers.has_value()) {
+        return std::unexpected(providers.error());
+    }
+    if (!SetProviderExtraHeader(*providers, name, header_name, value)) {
         return std::unexpected("provider 不存在: " + name);
     }
     const auto written = UpdateProvidersInConfigFile(path, *providers);

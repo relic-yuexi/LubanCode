@@ -70,12 +70,22 @@ struct ParsedProviderCommand {
     // "/provider add 名字"这两种触发分步向导的写法(words.size() <= 2),
     // main.cpp 据此走 RunProviderAddWizard 而不是一行式解析结果。
     bool wizard = false;
-    // action == Set 时才有意义:field 是要设的字段名(已小写化,目前只认
-    // native_web_search),value 是原始值token(已小写化,on/off/true/false/
-    // 1/0 这类写法留给 main.cpp 调 config::ParseBoolToggle 去解读)——这层
-    // 只管拆词,不管字段认不认得、值合不合法,跟 wire/window 那两个字段
-    // 同一个分工路数。
+    // action == Set 时才有意义:field 是要设的字段名(已小写化,认
+    // native_web_search / extra_body / extra_header 三种)。
+    //   - native_web_search:固定四个词,value 是第四个词(已小写化,on/
+    //     off/true/false/1/0 这类写法留给 main.cpp 调
+    //     config::ParseBoolToggle 去解读)。
+    //   - extra_body:value 是"字段名之后、到这一行结尾"的原始文本(保留
+    //     大小写、空白、花括号里的一切——一坨 JSON 不能按空格切词),合不
+    //     合法留给 main.cpp/config 层解析。
+    //   - extra_header:header_name 是紧跟 extra_body/extra_header 后面
+    //     那一个词(保留原始大小写,HTTP 头名字大小写有意义,不替用户
+    //     改掉);value 是 header_name 之后、到行尾的原始文本(可以有
+    //     空格),空串表示删除这一条头。
+    // 这层只管拆词,不管字段认不认得、值合不合法,跟 wire/window 那两个
+    // 字段同一个分工路数。
     std::string field;
+    std::string header_name;
     std::string value;
 };
 

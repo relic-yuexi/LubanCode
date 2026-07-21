@@ -53,6 +53,7 @@ TEST_CASE("RunProviderAddWizard: 全部手填,直接贴 key、手输模型、设
         "sk-test-key-1234567890",               // api_key 直贴
         "gpt-5.5",                               // model 手输
         "xhigh",                                 // effort
+        "{\"thinking\":{\"type\":\"enabled\"},\"reasoning_effort\":\"max\"}",  // extra_body
         "",                                       // 确认:回车 -> 默认 Y
     };
     auto io = scripted.Build();
@@ -65,6 +66,8 @@ TEST_CASE("RunProviderAddWizard: 全部手填,直接贴 key、手输模型、设
     CHECK(outcome->provider.api_key == "sk-test-key-1234567890");
     CHECK(outcome->provider.model == "gpt-5.5");
     CHECK(outcome->provider.model_reasoning_effort == "xhigh");
+    CHECK(outcome->provider.extra_body.at("reasoning_effort") == "max");
+    CHECK(outcome->provider.extra_body.at("thinking").at("type") == "enabled");
     CHECK(outcome->save_requested == true);
     CHECK(scripted.AnyPrintedContains("sk-test-..."));  // 汇总展示时 api_key 打码,不落明文
     CHECK_FALSE(scripted.AnyPrintedContains("sk-test-key-1234567890"));
@@ -79,6 +82,7 @@ TEST_CASE("RunProviderAddWizard: 命令行给了合法名字就跳过名字这�
         "the-key",        // api_key 直贴
         "MyModel",        // model
         "",                // effort:留空跳过
+        "",                // extra_body:留空跳过
         "n",               // 不确认
     };
     auto io = scripted.Build();
@@ -87,6 +91,7 @@ TEST_CASE("RunProviderAddWizard: 命令行给了合法名字就跳过名字这�
     REQUIRE(outcome.has_value());
     CHECK(outcome->provider.name == "myprovider");
     CHECK(outcome->provider.model_reasoning_effort.empty());
+    CHECK(outcome->provider.extra_body.empty());
     CHECK(outcome->save_requested == false);
 }
 
@@ -100,6 +105,7 @@ TEST_CASE("RunProviderAddWizard: 命令行给的名字重名或非法字符,回�
         "1",
         "the-key",
         "MyModel",
+        "",
         "",
         "Y",
     };
@@ -122,6 +128,7 @@ TEST_CASE("RunProviderAddWizard: base_url 没有 http(s) 前缀会被拒绝,重�
         "the-key",
         "MyModel",
         "",
+        "",
         "Y",
     };
     auto io = scripted.Build();
@@ -140,6 +147,7 @@ TEST_CASE("RunProviderAddWizard: api_key 留空改问 key_env,留空按默认 AN
         "",   // api_key 留空
         "",   // key_env 留空 -> 默认
         "MyModel",
+        "",
         "",
         "Y",
     };
@@ -171,6 +179,7 @@ TEST_CASE("RunProviderAddWizard: api_key 留空、key_env 自定义,拉模型列
         "",                    // model:回车走列表
         "1",                    // 选第一个
         "",
+        "",
         "Y",
     };
     auto io = scripted.Build();
@@ -184,7 +193,7 @@ TEST_CASE("RunProviderAddWizard: api_key 留空、key_env 自定义,拉模型列
 TEST_CASE("RunProviderAddWizard: effort 留空 = 不设置,汇总展示未设置") {
     ScriptedIO scripted;
     scripted.inputs = {
-        "p1", "https://api.example.test", "1", "the-key", "MyModel", "", "Y",
+        "p1", "https://api.example.test", "1", "the-key", "MyModel", "", "", "Y",
     };
     auto io = scripted.Build();
     const auto outcome = cli::RunProviderAddWizard(io, "", {});
@@ -196,13 +205,42 @@ TEST_CASE("RunProviderAddWizard: effort 留空 = 不设置,汇总展示未设置
 TEST_CASE("RunProviderAddWizard: 最后一问答 n,save_requested 为 false") {
     ScriptedIO scripted;
     scripted.inputs = {
-        "p1", "https://api.example.test", "1", "the-key", "MyModel", "high", "n",
+        "p1", "https://api.example.test", "1", "the-key", "MyModel", "high", "", "n",
     };
     auto io = scripted.Build();
     const auto outcome = cli::RunProviderAddWizard(io, "", {});
 
     REQUIRE(outcome.has_value());
     CHECK(outcome->save_requested == false);
+}
+
+TEST_CASE("RunProviderAddWizard: extra_body 不合法 JSON 会重问,合法 object 才通过") {
+    ScriptedIO scripted;
+    scripted.inputs = {
+        "p1", "https://api.example.test", "1", "the-key", "MyModel", "",
+        "{not json",           // 解析失败,重问
+        "[1,2,3]",             // 解析成功但不是 object,重问
+        "{\"a\":1}",           // 合法 object,通过
+        "Y",
+    };
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderAddWizard(io, "", {});
+
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->provider.extra_body.at("a") == 1);
+    CHECK(scripted.AnyPrintedContains("不是合法 JSON"));       // 解析失败那次提示过
+    CHECK(scripted.AnyPrintedContains("JSON object"));         // 不是 object 那次提示过
+}
+
+TEST_CASE("RunProviderAddWizard: extra_body 中途 EOF 返回 std::nullopt") {
+    ScriptedIO scripted;
+    scripted.inputs = {
+        "p1", "https://api.example.test", "1", "the-key", "MyModel", "high",
+        // extra_body 这一步之后没有更多输入了 -> EOF
+    };
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderAddWizard(io, "", {});
+    CHECK_FALSE(outcome.has_value());
 }
 
 TEST_CASE("RunProviderAddWizard: 中途 EOF 返回 std::nullopt") {
