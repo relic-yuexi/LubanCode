@@ -21,8 +21,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# ------- 占位变量:仓库推上 GitHub 后改成真实 owner/repo,例如 'moontidef/lubancode' -------
-$Repo = 'OWNER/lubancode'
+$Repo = 'relic-yuexi/LubanCode'
 
 $AppName = 'lubancode'
 $ExeName = 'lubancode.exe'
@@ -184,9 +183,6 @@ function Find-LocalExe {
 
 function Get-LatestReleaseDownloadUrl {
     param([string]$Repo)
-    if ($Repo -eq 'OWNER/lubancode') {
-        throw "仓库未发布,请用压缩包内的本地模式(脚本同目录放 $ExeName,或用 -SourceExe 指定)。"
-    }
     $api = "https://api.github.com/repos/$Repo/releases/latest"
     try {
         $resp = Invoke-RestMethod -Uri $api -UseBasicParsing -Headers @{ 'User-Agent' = 'lubancode-installer' }

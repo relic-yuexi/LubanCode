@@ -4,11 +4,8 @@
 # 源码构建。CI 网络直通 github.com,统一传 -DLUBANCODE_USE_CODELOAD=OFF 走
 # 官方地址(codeload 镜像是开发机网络环境的本地对策,见顶层 CMakeLists)。
 #
-# 腿的地位:
-#   - Windows 腿必须绿(开发主平台,804+ 单测在本机全量验证过)。
-#   - ubuntu / macos 两腿 continue-on-error: true —— POSIX 实现已在
-#     WSL Ubuntu(g++)真机编译测试过,但 CI 环境/macOS(clang)尚未亮过
-#     灯,观察中;亮灯稳定后摘掉这个标记。
+# 三条腿都须通过。v0.23.0 已在三套 runner 完成 Build + Test；往后平台
+# 回归直接拦住合并，不再把 POSIX 标成观察项。
 name: ci
 
 on:
@@ -20,20 +17,16 @@ jobs:
   build-test:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: windows-msvc
             os: windows-latest
-            experimental: false
           - name: ubuntu-gcc
             os: ubuntu-latest
-            experimental: true   # POSIX 腿观察中(WSL 已验,CI 首航)
           - name: macos-clang
             os: macos-latest
-            experimental: true   # POSIX 腿观察中(macOS 未经真机验证)
 
     steps:
       - uses: actions/checkout@v7

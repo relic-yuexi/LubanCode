@@ -1,12 +1,9 @@
 # 发布流水线(v0.20.x 跨平台单):推 v* tag 时三平台各打一个包挂上
 # GitHub Release。构建走 FetchContent(-DLUBANCODE_USE_CODELOAD=OFF,CI 网络
 # 直通 github 官方地址),静态链接。产物包结构(都跟 exe 平级,包根目录):
-#   windows-x64.zip  ->  lubancode.exe、README.md、install.ps1、uninstall.ps1
-#   linux/macos.tar.gz -> lubancode、README.md、install.sh
+#   windows-x64.zip  ->  lubancode.exe、双语 README、docs/、安装/卸载脚本
+#   linux/macos.tar.gz -> lubancode、双语 README、docs/、install.sh
 # 装/卸载脚本源码在仓库 scripts/ 目录,详见脚本内注释。
-#
-# 注意:ubuntu/macos 两腿的 POSIX 实现验证状态见 ci.yml 的注释——发布产物
-# 以 Windows 包为准,POSIX 包在 CI 两腿转绿之前按"预览"看待。
 name: release
 
 on:
@@ -55,6 +52,8 @@ jobs:
           mkdir -p dist/lubancode
           cp "${{ matrix.exe }}" dist/lubancode/
           cp README.md dist/lubancode/
+          cp README.en.md dist/lubancode/
+          cp -R docs dist/lubancode/
           # 装/卸载脚本跟 exe 平级放进包根,Windows 走 ps1 一对,Linux/macOS 走 install.sh
           case "${{ matrix.name }}" in
             windows-x64)
@@ -76,3 +75,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.archive }}
+          generate_release_notes: true

@@ -13,7 +13,8 @@
 #   脚本同目录下找可执行文件,依次探测 lubancode 和 lubancode.exe(后者是为了兼容
 #   Windows 下 Git Bash/WSL 场景——正式的 Linux/macOS 发行包里不会有 .exe 后缀,
 #   这里只是不因为后缀而找不到文件)。目标文件名跟源文件名保持一致。
-#   远程下载模式(GitHub release)本机还没配 remote,占位等仓库推上去后再补。
+#   这份脚本随 Linux/macOS Release 包分发，只装同目录可执行文件；远程下载
+#   由用户先在 Releases 页面选对平台包，脚本不在本机猜架构。
 #
 # 幂等:重复跑 = 直接覆盖安装。
 
@@ -21,8 +22,7 @@ set -eu
 
 APP_NAME="lubancode"
 
-# ------- 占位变量:仓库推上 GitHub 后改成真实 owner/repo,例如 'moontidef/lubancode' -------
-REPO="OWNER/lubancode"
+REPO="relic-yuexi/LubanCode"
 
 err() {
     echo "错误:$1" >&2
@@ -44,7 +44,7 @@ elif [ -x "$SCRIPT_DIR/$APP_NAME.exe" ]; then
 fi
 
 if [ -z "$SRC_EXE" ]; then
-    err "本地没找到 $APP_NAME 可执行文件(脚本同目录下应该有 $APP_NAME 或 $APP_NAME.exe)。仓库($REPO)还没推上 GitHub,远程下载模式暂时用不了,请用发行包里自带的这份脚本。"
+    err "本地没找到 $APP_NAME 可执行文件(脚本同目录下应该有 $APP_NAME 或 $APP_NAME.exe)。请从 https://github.com/$REPO/releases 下载对应平台的发行包，再运行包内这份脚本。"
 fi
 
 info "找到可执行文件:$SRC_EXE"

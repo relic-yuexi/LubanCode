@@ -1,182 +1,213 @@
-# lubancode
+<p align="center">
+  <img src="docs/assets/lubancode-banner.png" alt="LubanCode" width="100%">
+</p>
 
-一个用 C++ 写的 AI 编程 CLI。双协议接多家模型服务,读写编辑、命令执行、搜索、子代理、技能、MCP、LSP、钩子一应俱全,配一副真控制台交互的皮囊——流式渲染、diff 预览、确认档、逐键编辑,不比图形界面差。
+<h1 align="center">LubanCode</h1>
 
-当前版本 v0.23.0。
+<p align="center"><strong>一把装在终端里的 AI 编程工具。C++23 写成，双协议接入，能读代码，也能动手干活。</strong></p>
 
-## 特性
+<p align="center">
+  <strong>简体中文</strong> · <a href="README.en.md">English</a>
+</p>
 
-### 多模型
+<p align="center">
+  <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml/badge.svg" alt="Release"></a>
+  <img src="https://img.shields.io/badge/C%2B%2B-23-00599C?logo=cplusplus&logoColor=white" alt="C++23">
+  <img src="https://img.shields.io/badge/version-0.23.0-CB2C31" alt="v0.23.0">
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-444444" alt="Windows, Linux and macOS">
+</p>
 
-- **双协议**:Anthropic Messages API(`wire=anthropic`)与 OpenAI Responses API(`wire=responses`)都能说,底层实现分目录隔离,互不干扰。
-- **多 provider**:`/provider add|list|switch|remove|set` 一族命令管理多个模型服务端,配置落盘持久,一行切换。
-- **万能参数口**:`extra_body`/`extra_headers` 每个 provider 各自可配,模型服务商的私有开关(思考模式、分级推理强度……)不用等 lubancode 内置支持,自己往请求上加。
-- **推理强度**:`/think`(`/effort` 同义)切 `none`/`low`/`medium`/`high` 等档位,Anthropic 协议映射 `thinking`,Responses 协议映射 `reasoning.effort`。
-- **模型目录**:主目录放一份 `models.json`,给每个模型定制默认推理档、上下文窗口、专属指令,借鉴 Codex 的 model-catalog 思路。
-- **原生联网搜索**:支持服务端自带 web_search 的模型,按 provider 开关声明,两种协议各自翻译。
+LubanCode 原生支持 Anthropic Messages API 与 OpenAI Responses API。模型能读文件、改代码、跑命令、查资料，也能调度子代理、MCP 与 LSP。界面不只是几行日志。流式正文、Markdown、diff、确认档、会话存档、上下文压缩，都在终端里铺开。
 
-### 工具全家桶
+鲁班造物，先正绳墨，再下斧凿。LubanCode 也守这条规矩：先看清，再动手；改了什么，明明白白摆给你看。
 
-- 文件读写编辑(`read_file`/`write_file`/`edit_file`),带 diff 预览确认。
-- 命令执行(`run_command`),支持 `run_in_background` 后台起长命进程、跨命令存活。
-- 网络搜索与抓取(`web_search`/`web_fetch`),搜索需配置 tavily/brave/serper 之一。
-- 子代理(`agent` 工具):派生独立上下文的子任务,主对话上方常驻进度条。
-- 技能(`/skill` 联网分发):`install`/`list`/`update`/`remove`,远端技能装进本地,项目级技能可覆盖全局同名技能。
-- MCP:配置 stdio 服务器,工具自动挂载,`/mcp` 看状态。
-- LSP:配置语言服务器(如 clangd),提供 definition/references/symbols/diagnostics 语义查询,懒启动、闲置自动关停。
-- 钩子(hooks):`pre_tool`/`post_tool`/`session_start`/`session_end` 四类外部命令钩子。
-- 插件:C ABI DLL 与 Lua 两条路自行扩展工具,详见下方插件说明。
+> 当前版本：`v0.23.0`。Windows、Ubuntu、macOS 三路 CI 均已编译并跑过全量测试。
 
-### 交互体验
+## 一眼看懂
 
-- 真终端交互:流式吐字、markdown 渲染(标题/列表/表格/代码块)、LaTeX 公式转 Unicode。
-- 工具调用前 diff 预览 + 逐条确认,三档确认模式(`confirm`/`auto`/`yolo`)Shift+Tab 循环切换。
-- 输入框逐键编辑:历史翻页、Tab 补全 slash 命令、宽字符光标定位、多行输入(Shift+Enter)。
-- 紧凑/详细双态折叠(Ctrl+O 切换)、聚焦查看全文(Ctrl+E)、ESC 打断当前轮。
-- 会话管理:`/sessions`/`/resume`/`/export`/`/title`,`--continue` 自动续上次会话。
-- 隔离工作树:`/worktree new|list|exit`,独立分支干活不脏主树。
-- 上下文管理:`/context` 分类占用分析(系统提示/工具定义/历史明细 + 条形图),超 80% 自动 `/compact` 压缩,可指定 `compact_model` 单独跑压缩。
-
-### 可扩展 / 可定制
-
-- **soul(魂)**:风格叠加层,`/soul` 切换或直接写内容,注入系统提示末尾,只改语气不改工具调用能力。内置文言文示例魂。
-- **system_prompt(法)**:`--system-prompt` 或配置文件替换人格段,环境段(工作目录、工具调用规矩)原样保留。
-- **i18n 双语**:界面文案中英内置,`languages/*.json` 可扩展第三种语言;`/language` 会话内切换。
-- **主题**:`dark`/`light`/`plain` 三套终端配色,管道/重定向自动降级纯文本。
+| | 能力 |
+| --- | --- |
+| **模型接入** | Anthropic / Responses 双协议；多 provider 随时切换；`extra_body`、`extra_headers` 可透传厂商私有参数。 |
+| **代码工具** | 读、写、精确编辑、搜索文件；前台或后台跑命令；改动先看 diff，再落盘。 |
+| **语义与外接工具** | LSP 定义、引用、符号、诊断；MCP stdio；联网搜索与网页抓取。 |
+| **代理工作流** | 子代理、待办清单、工具延迟挂载、隔离 worktree、项目级权限。 |
+| **终端体验** | 流式渲染、Markdown、LaTeX、逐键编辑、多行输入、折叠与聚焦、三档确认。 |
+| **上下文与存档** | token 占用分析、自动压缩、独立压缩模型、会话恢复、标题、Markdown 导出。 |
+| **扩展与定制** | Skills、Lua 工具、C ABI DLL 插件、hooks、主题、i18n、soul 与 system prompt。 |
 
 ## 安装
 
-三条路,任选其一。
+### Windows：一行安装
 
-### 方式一:下载 Release 包
-
-前往 [Releases](https://github.com/OWNER/lubancode/releases) <!-- TODO: 仓库推上 GitHub 后替换 OWNER --> 下载对应平台的压缩包:
-
-- Windows:`lubancode-vX.Y.Z-windows-x64.zip`(内含 exe、README、`install.ps1`、`uninstall.ps1`)
-- Linux:`lubancode-vX.Y.Z-linux-x64.tar.gz`(内含 exe、README、`install.sh`)
-- macOS:`lubancode-vX.Y.Z-macos-arm64.tar.gz`(内含 exe、README、`install.sh`)
-
-**Windows**:解压后,右键 `install.ps1` → "使用 PowerShell 运行";或在终端里执行:
+PowerShell 5.1 及以上可直接拉取最新 Release：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1
+irm https://raw.githubusercontent.com/relic-yuexi/LubanCode/main/scripts/install.ps1 | iex
 ```
 
-装到 `%LOCALAPPDATA%\Programs\lubancode`,自动加进用户 PATH,不需要管理员权限。卸载执行 `uninstall.ps1`,原样反向清干净。
+程序会装到 `%LOCALAPPDATA%\Programs\lubancode`，并写入当前用户 PATH。无需管理员权限。重复执行便是覆盖升级。
 
-**Linux / macOS**:
+手工安装也成。到 [Releases](https://github.com/relic-yuexi/LubanCode/releases) 下载 `lubancode-vX.Y.Z-windows-x64.zip`，解压后运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+卸载时运行包里的 `uninstall.ps1`。
+
+### Linux / macOS
+
+从 [Releases](https://github.com/relic-yuexi/LubanCode/releases) 下载对应压缩包，解开，进入目录：
 
 ```bash
 ./install.sh
 ```
 
-优先装到 `~/.local/bin`(已在 PATH 里就直接用);没有就装 `/usr/local/bin`,会提示 `sudo`。
+若 `~/.local/bin` 已在 PATH，脚本便装到那里；否则转去 `/usr/local/bin`，需要时会提示 `sudo`。
 
-### 方式二:Windows 一行式
+| 平台 | 发行包 |
+| --- | --- |
+| Windows x64 | `lubancode-vX.Y.Z-windows-x64.zip` |
+| Linux x64 | `lubancode-vX.Y.Z-linux-x64.tar.gz` |
+| macOS arm64 | `lubancode-vX.Y.Z-macos-arm64.tar.gz` |
 
-仓库推上 GitHub 后可用(URL 里的 `OWNER` 是占位符,替换成实际仓库所有者):
+### 从源码构建
+
+需要 CMake 3.21 以上，以及支持 C++23 的编译器。依赖先走 vcpkg manifest；找不到 vcpkg，CMake 会改用 FetchContent。
+
+Windows：
 
 ```powershell
-irm https://raw.githubusercontent.com/OWNER/lubancode/main/scripts/install.ps1 | iex
-```
-
-### 方式三:源码构建
-
-依赖:CMake ≥ 3.21,支持 C++23 的编译器(MSVC 19.44+ / g++ 13+ / clang 15+),[cpr](https://github.com/libcpr/cpr) 与 [nlohmann-json](https://github.com/nlohmann/json)——两个都会自动拉取(vcpkg manifest 优先,探测不到就 `FetchContent` 拉源码构建),不用手装。
-
-Windows(用 CMakePresets):
-
-```bash
 cmake --preset release
 cmake --build --preset release
-./build/release/Release/lubancode.exe --version
+.\build\release\Release\lubancode.exe --version
 ```
 
-Linux / macOS:
+Linux / macOS：
 
 ```bash
-sudo apt-get install -y build-essential cmake ninja-build libssl-dev   # Debian/Ubuntu 示例
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build
+ctest --test-dir build --output-on-failure
 ./build/lubancode --version
 ```
 
-跨平台细节(平台抽象层、POSIX 实现现状、CI 矩阵)见下方"CI 与发布现状"一节。
+Debian / Ubuntu 缺编译环境时，先装：
+
+```bash
+sudo apt-get install -y build-essential cmake ninja-build libssl-dev
+```
 
 ## 快速上手
 
-第一次运行,不带参数直接敲 `lubancode`,没配过 `base_url`/`api_key`/`model` 会自动进初次配置向导:
+第一次运行，不带参数即可。缺少模型配置时，向导会问语言、协议、地址、密钥与模型，写好配置后径直进会话。
 
-```
+```text
 $ lubancode
 === lubancode 初次配置向导 ===
 界面语言 / Language: 1) 中文  2) English
-接口格式: 1) anthropic (Claude 系)  2) responses (OpenAI 系)
-base_url: https://api.minimaxi.com/anthropic
+接口格式: 1) anthropic  2) responses
+base_url: https://your-provider.example/v1
 api_key: sk-...
-model: (回车拉列表选,或直接输入模型名)
-
-保存到 ~/.lubancode/config.json? [Y/n]:
-lubancode 0.23.0  [anthropic] MiniMax-M3
-> 
+model: your-model
 ```
 
-也可以跳过向导,直接单发一句:
+往后可这样用：
 
 ```bash
-lubancode "帮我看看这个项目的目录结构"
+# 交互会话
+lubancode
+
+# 单发任务，工具照常可用
+lubancode "先读项目，再找出最该修的三个问题"
+
+# 接管本目录最近一场会话
+lubancode --continue
+
+# 管道模式
+git diff --cached | lubancode "替我审一遍这份改动"
 ```
 
-或者管道喂问题:
+若你管着多家模型服务，用 `providers` 更省事。密钥只记环境变量名，不必写进 JSON：
 
-```bash
-echo "这段代码有什么问题" | lubancode
+```json
+{
+  "providers": [
+    {
+      "name": "work",
+      "wire": "responses",
+      "base_url": "https://your-provider.example/v1",
+      "key_env": "WORK_MODEL_API_KEY",
+      "model": "your-model",
+      "context_window": "256k"
+    }
+  ]
+}
 ```
 
-### 常用 slash 命令
+把它存到 `~/.lubancode/config.json`，再设好 `WORK_MODEL_API_KEY`。完整字段、优先级与厂商参数透传，见 [配置手册](docs/configuration.md)。
 
-交互模式下,`/` 开头的一行走命令,不发给模型:
+## 常用命令
 
-| 命令 | 作用 |
+| 命令 | 用处 |
 | --- | --- |
-| `/help` | 列出所有命令 |
-| `/model` / `/model 名字` | 拉模型列表选,或直接切到指定模型名 |
-| `/provider` | 列、添、切、删、改模型服务端(`add`/`list`/`switch`/`remove`/`set`) |
-| `/config` | 打印当前生效配置(密钥打码)和本会话在用的模型 |
-| `/context` / `/context 512k` | 看上下文占用分析,或临时改窗口大小 |
-| `/compact [重点说明]` | 手动压缩历史,超 80% 占用会自动触发 |
-| `/think 档位` / `/effort 档位` | 切推理强度,档位以服务商为准 |
-| `/soul` | 看/改/切风格叠加层(魂) |
-| `/prompt` | 看当前系统提示词(法)来源;`/prompt reset` 还原默认 |
-| `/skills` / `/skill install <url>` | 列已装技能 / 联网安装远端技能 |
-| `/mcp` / `/lsp` / `/plugins` | 看 MCP 服务器 / LSP 服务器 / 插件工具挂载状态 |
-| `/tools` | 列工具三态:核心 / 已加载 / 延迟未加载 |
-| `/sessions` / `/resume <编号>` / `/export` | 列会话存档 / 续聊 / 导出 Markdown |
-| `/worktree new\|list\|exit` | 新建/列出/退出隔离工作树 |
-| `/language` | 列可选界面语言并切换 |
-| `/image 路径` | 附本地图片(或消息里写 `@路径`) |
-| `/clear` | 清空对话历史 |
-| `/exit` | 退出(裸词 `exit`/`quit` 也认) |
+| `/provider` | 添加、列出、切换、删除模型服务。 |
+| `/model` · `/think` | 切模型与推理强度。 |
+| `/context` · `/compact` | 看上下文占用，手工压缩历史。 |
+| `/skills` · `/skill install <url>` | 管理本地与远端技能。 |
+| `/mcp` · `/lsp` · `/plugins` | 看外接工具与语言服务器状态。 |
+| `/tools` · `/todos` | 看工具挂载状态与待办清单。 |
+| `/sessions` · `/resume` · `/export` | 列存档、续聊、导出 Markdown。 |
+| `/worktree new\|list\|exit` | 在隔离工作树里干活。 |
+| `/soul` · `/prompt` | 调风格，或替换系统提示人格段。 |
+| `/language` · `/image` | 切界面语言，附本地图片。 |
+| `/help` | 在程序里看完整命令表。 |
 
-Shift+Tab 循环切换确认档(`confirm`/`auto`/`yolo`);Ctrl+O 切紧凑/详细;Ctrl+E 聚焦查看全文;ESC 打断当前轮。完整命令表与快捷键说明,交互模式里敲 `/help` 或跑 `lubancode --help` 看最新版。
+几个键也常用：
 
-## 配置速览
+- `Shift+Tab`：循环切换 `confirm`、`auto`、`yolo`。
+- `Ctrl+O`：工具输出在紧凑与详细之间切换。
+- `Ctrl+E`：聚焦查看当前工具条目全文。
+- `Shift+Enter`：输入框里换行。
+- `Esc`：打断当前轮，或退出聚焦画面。
 
-配置来源按字段分五级合并,优先级从高到低:`LUBANCODE_*` 专属环境变量 → 项目级 `.lubancode/config.json` → 全局(主目录)`.lubancode/config.json` → 通用环境变量(`ANTHROPIC_*`/`OPENAI_*`,向后兼容)→ 内置默认值。
+## 扩展
 
-字段表、`LUBANCODE_*` 环境变量表、provider 实战示例(MiniMax、GLM 思考参数)、hooks/mcpServers/search/lsp 各段写法,见 [docs/configuration.md](docs/configuration.md)。
+LubanCode 留了四扇门：
 
-架构说明(分层依赖、api 双后端设计、工具层)见 [docs/architecture.md](docs/architecture.md)。
+1. **Skills**：一份带 frontmatter 的 `SKILL.md`，可放主目录，也可随项目走。
+2. **MCP / LSP**：在配置里挂 stdio 服务与语言服务器。
+3. **Lua 插件**：一个 `.lua` 文件就是一件工具，适合轻量扩展。
+4. **C ABI 插件**：Windows DLL 同进程加载，适合原生能力与已有 C/C++ 库。
 
-## CI 与发布现状
+写法、目录、示例与安全边界，见 [扩展指南](docs/extensions.md)。
 
-<!-- 仓库尚未推上 GitHub,下面两个徽章的 OWNER/REPO 是占位符,推送后替换成实际路径 -->
-[![CI](https://github.com/OWNER/lubancode/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/lubancode/actions/workflows/ci.yml)
-[![Release](https://github.com/OWNER/lubancode/actions/workflows/release.yml/badge.svg)](https://github.com/OWNER/lubancode/actions/workflows/release.yml)
+## 文档
 
-CI 矩阵三平台:`windows-latest`(MSVC,主平台,必须绿)、`ubuntu-latest`(g++)、`macos-latest`(clang)。POSIX 两腿 `continue-on-error`,观察中(Linux 已在 WSL 真机验证,macOS 尚未真机验证)。推 `v*` tag 触发 release 工作流,三平台各打一个包挂上 GitHub Release。
+| 文档 | 讲什么 |
+| --- | --- |
+| [文档首页](docs/README.md) | 阅读路线、版本状态、各页入口。 |
+| [配置手册](docs/configuration.md) | 配置优先级、providers、hooks、MCP、搜索、LSP、models.json。 |
+| [扩展指南](docs/extensions.md) | Skills、Lua、C ABI 插件、MCP 与 LSP。 |
+| [架构说明](docs/architecture.md) | 分层、请求链、双后端、工具与平台边界。 |
+| [提示词模块](src/prompts/README.md) | 内置 prompt 如何拆分、嵌入与覆盖。 |
+
+## CI 与发布
+
+每次 push 与 pull request 都会在下列环境编译、测试：
+
+- Windows + MSVC
+- Ubuntu + GCC
+- macOS + Clang
+
+推送 `v*` 标签会触发发布流水线。三平台分别打包，随后自动创建 GitHub Release、生成发布说明并上传产物：
+
+```bash
+git tag -a v0.23.0 -m "v0.23.0"
+git push origin v0.23.0
+```
 
 ## 许可
 
-仓库目前未附许可证文件。正式对外发布前需要补一份 `LICENSE`。
+仓库尚未附开源许可证。在 `LICENSE` 落地之前，代码版权仍归作者保留。

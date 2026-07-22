@@ -1,6 +1,23 @@
-# 配置
+# LubanCode 配置
+
+[文档首页](README.md) · [扩展指南](extensions.md) · [架构说明](architecture.md) · [中文 README](../README.md) · [English README](../README.en.md)
 
 lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key`、`model` 这几件事。本文档核实自 `src/config/config.hpp`、`src/config/prompt_files.cpp`(内置的 `lubancode-config` 技能手册)与 `lubancode --help` 的真实输出,字段名与语义以代码为准。
+
+## 先跑起来
+
+最省事的路，是直接运行 `lubancode`，跟着初次向导走。若要手写一份最小配置，可放在 `~/.lubancode/config.json`：
+
+```json
+{
+  "wire": "responses",
+  "base_url": "https://your-provider.example/v1",
+  "api_key": "sk-...",
+  "model": "your-model"
+}
+```
+
+不想让密钥落盘，就把 `api_key` 换成环境变量 `LUBANCODE_API_KEY`。要管多家服务，优先用下文 `providers` 数组与 `key_env`。
 
 ## 一、配置分层与优先级
 

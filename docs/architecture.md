@@ -1,77 +1,147 @@
-# lubancode 架构说明
+# LubanCode 架构
 
-## 一、分层与依赖方向
+[文档首页](README.md) · [配置手册](configuration.md) · [扩展指南](extensions.md) · [中文 README](../README.md) · [English README](../README.en.md)
 
-lubancode 分层,依赖只许单向,从上往下:
+LubanCode 是一支 C++23 命令行程序。上层管交互，中层管代理循环，下层管协议、工具与平台。依赖只往下走，不能倒灌。
 
+> 本页对应 `v0.23.0`。Windows/MSVC、Ubuntu/GCC、macOS/Clang 都在 CI 中编译并跑测试。
+
+## 分层
+
+```mermaid
+flowchart LR
+    CLI[cli<br/>参数、输入、渲染] --> Agent[agent<br/>循环、上下文、会话]
+    Agent --> API[api<br/>Anthropic / Responses]
+    Agent --> Tools[tools<br/>文件、命令、搜索、扩展]
+    Tools --> MCP[mcp<br/>stdio client]
+    Tools --> LSP[lsp<br/>semantic client]
+    Infra[config / platform / prompts] --> CLI
+    Infra --> Agent
+    Infra --> API
+    Infra --> Tools
 ```
-cli  →  agent  →  api / tools / mcp / lsp
-                          ↑
-                       config / platform / prompts(基础设施,各层可用)
+
+| 层 | 目录 | 责任 |
+| --- | --- | --- |
+| CLI | `src/cli/` | 参数、输入编辑器、流式渲染、Markdown、diff、主题、i18n、slash 命令。 |
+| Agent | `src/agent/` | 对话循环、工具回填、上下文压缩、会话存档、系统提示拼装。 |
+| API | `src/api/` | 中立消息类型、SSE 分帧、Anthropic 与 Responses 两套后端。 |
+| Tools | `src/tools/` | 文件、命令、搜索、子代理、Skill、插件、MCP/LSP 适配。 |
+| MCP | `src/mcp/` | JSON-RPC、stdio 传输、工具发现与调用。 |
+| LSP | `src/lsp/` | JSON-RPC、文档同步、语义查询、懒启动与闲置回收。 |
+| Config | `src/config/` | 配置读取、分层合并、模型目录、prompt 与技能脚手架。 |
+| Platform | `src/platform/` | 进程、终端、路径、编码；Windows 与 POSIX 分开实现。 |
+| Prompts | `src/prompts/` | 内置人格、工作方式、工具方针与协议段。 |
+
+上层认得下层，下层不认得上层。`tools` 不知道 `agent` 存在，`api` 不知道 `cli` 存在。这样换协议不必重写界面，添工具也不必去碰请求客户端。
+
+## 一轮请求怎么走
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant C as CLI
+    participant A as Agent loop
+    participant B as API backend
+    participant T as Tool registry
+
+    U->>C: input
+    C->>A: message + callbacks
+    A->>B: neutral messages + tool schemas
+    B-->>A: streaming events
+    alt text delta
+        A-->>C: render text
+    else tool call
+        A->>T: validate and execute
+        T-->>A: tool result
+        A->>B: continue with result
+    end
+    A-->>C: usage and session state
 ```
 
-- **cli**(`src/cli/`):命令行入口,解析参数、渲染输出(流式、markdown、diff、slash 命令、输入编辑器、i18n),只管人机交互,不碰业务逻辑。
-- **agent**(`src/agent/`):核心循环。接收用户输入,调用 api 层与模型对话,按需调用 tools 层执行动作,再把结果喂回模型,如此往复;另外管上下文压缩(`compact`)、会话存档(`session_store`)、系统提示拼装(`prompt_assembler`)。
-- **api**(`src/api/`):与大模型对话的通路。只认得"发消息、收流式事件"这一件事,不关心 agent 怎么用它。
-- **tools**(`src/tools/`):模型可调用的具体能力(读文件、跑命令、搜索、子代理、技能、插件……),只管把一件事做好,不关心是谁在调它。
-- **mcp**(`src/mcp/`):MCP stdio 客户端与传输层,给 tools 层的 MCP 工具适配器用。
-- **lsp**(`src/lsp/`):语言服务器客户端、传输层与懒启动管理,给 tools 层的 `lsp` 工具用。
-- **config**(`src/config/`):配置分层加载与合并、内置手册文本、prompt 脚手架文件。
-- **platform**(`src/platform/`):进程、终端、路径的平台抽象,Windows 与 POSIX 各一份实现。
-- **prompts**(`src/prompts/`):内置系统提示词的模块化源文本(`core`/`features`/`platforms`/`models`),编译期嵌入,首启播种到 `~/.lubancode/prompts/`。
+API 后端只把协议事件翻成中立事件。工具只收 JSON 参数，吐统一结果。CLI 靠回调画屏，不插手模型协议。
 
-上层认得下层,下层不认得上层。tools 不知道 agent 存在,api 不知道 cli 存在。这样改起来才不会牵一发动全身。
+## 双后端
 
-## 二、api 层:双后端设计
+LubanCode 同时支持 Anthropic Messages 与 OpenAI Responses。两套协议语义不同，代码分目录放：
 
-lubancode 要同时说两种"方言":Anthropic 的 Messages API,和 OpenAI 的 Responses API。早期开发主要拿 MiniMax 的兼容端点验证(参见仓库根目录 `Anthropic兼容-Messages.md`、`OpenAI兼容-Responses.md` 等文档),但协议本身与厂商无关——`config` 层的 `providers` 数组可以配任意多家服务端,各自选 `wire: anthropic` 或 `wire: responses`,`/provider switch` 切换。两种协议语义各不相同,不能混着写。
+```text
+src/api/
+  backend.hpp            中立后端接口
+  types.hpp              Message / ContentBlock / ToolCall / StreamEvent
+  sse_framing.*          通用 SSE 分帧
+  anthropic/             Messages 请求、事件与客户端
+  responses/             Responses 请求、事件与客户端
+```
 
-### 1. 中立类型 + 抽象接口
+分两层处理流式响应：
 
-api 层对上只暴露一套与厂商无关的中立类型:
+1. **分帧**只管 `event:`、`data:` 与断行，不懂厂商字段。
+2. **语义解析**各写各的，把原始 JSON 翻成 `StreamEvent`。
 
-- `Message`——一轮对话里的一条消息(角色 + 内容块)。
-- `ContentBlock`——文本、工具调用、工具结果等内容的载体。
-- `ToolCall`——模型发起的一次工具调用请求。
-- `StreamEvent`——流式响应中的一个事件(增量文本、工具调用片段、结束标记……)。
+Agent 只认中立类型。`wire` 切换时，重建后端即可。provider 的 `extra_body` 与 `extra_headers` 在内置请求拼完后再合并，给厂商私有字段留出口。
 
-再加一个 `backend.hpp`,定义抽象接口(大致是"发一轮消息,拿到一串 StreamEvent"),agent 层只认这个接口,不关心背后是 Anthropic 还是 Responses 在干活。
+## 工具系统
 
-### 2. 两层分开:分帧 vs 语义
+`Tool` 接口约定几件事：名称、说明、JSON Schema、是否确认、是否延迟挂载，以及执行函数。`ToolRegistry` 管注册与查找。
 
-流式响应的处理拆成两层,不要揉在一起:
+工具分三层：
 
-- **SSE 分帧(通用)**:负责把 HTTP 响应体按 `data:` / `event:` 这类前缀切成一行一行的原始帧,这一层与厂商无关,谁都能复用。
-- **事件语义(各后端各写)**:拿到一帧原始数据之后,怎么解析成 `StreamEvent`,每家协议字段不同,各自实现,互不干扰。
+- **核心工具**：读写、编辑、命令、搜索等，启动即在。
+- **条件工具**：MCP、LSP、web search，配了才注册。
+- **外挂工具**：Skill、Lua、DLL。数量多时可延迟挂载，先靠 `tool_search` 找。
 
-### 3. 目录划分
+所有写盘与命令动作都走确认体系。`confirm` 每次问，`auto` 放安全动作，`yolo` 全放。项目级 `settings.local.json` 再叠黑白名单。
 
-- `api/anthropic/`——对接 Anthropic Messages API 的实现。
-- `api/responses/`——对接 OpenAI Responses API 的实现。
+## 进程与平台
 
-两边各自把厂商私有的 JSON 结构翻译成中立类型,翻译完的东西对 agent 层长得一模一样。
+Windows 与 POSIX 共用 `process.hpp`，各自实现：
 
-## 三、工具层
+- 一次性命令：合并 stdout/stderr，限时，超量截断，退出时收整棵进程树。
+- 后台命令：立即返回 PID 与日志路径，跨工具调用存活，会话退出时清理。
+- 长命子进程：MCP/LSP 共用双向管道与读线程。
 
-- `Tool` 基类:约定 `name`(工具名)、`schema`(参数 JSON Schema)、`execute`(执行逻辑)、`needs_confirm`(是否要先问用户)四件事。
-- `registry`:工具注册表,agent 启动时把所有工具注册进去,按名字查找、按 schema 交给模型。
-- 一个工具一个文件,新增能力只管加文件、注册,不用动别处。
+Windows 用 `CreateProcessW`、Job Object 与宽字符路径。POSIX 用 `fork/exec`、进程组、`poll` 与信号。平台判断收在 `src/platform/`，业务层不散落系统调用。
 
-## 四、错误处理
+## Prompt 与运行时覆盖
 
-- 正常的、预期内的失败(网络错、参数错、工具执行失败……)一律用 `std::expected` 往上传,调用方自己判断、自己处理。
-- 异常只留给"程序本身写错了"这种事(断言失败、不可能到达的分支),不拿异常当业务错误的传话筒。
+`src/prompts/` 的 Markdown 在构建时嵌进可执行文件。首次启动又会播种到 `~/.lubancode/prompts/`：
 
-## 五、里程碑(历史)
+```text
+core/        身份、工作方式、答话风格
+features/    文件、命令、Skill、MCP、LSP 等工具方针
+platforms/   Anthropic / Responses 协议段
+```
 
-早期按里程碑推进,M0~M5 早已走完,此后不再逐一编号,按功能分支合并、定版打 tag(见 `git log`)。留一笔存档:
+运行时逐模块判断：用户文件非空便优先，否则退回嵌入版。`system_prompt.md` 替换人格段；`SOUL.md` 只叠风格。两者不该混作一件事。
 
-- **M0**——骨架搭起来:能编译、能跑、`--version` 有输出,依赖能拉、能链接。
-- **M1**——打通 Anthropic 通路,能流式问答。
-- **M2**——agent 循环跑起来,补上 `read_file`、`run_command` 两个工具。
-- **M3**——打通 Responses 后端,双通路都能用。
-- **M4**——工具补齐,加上执行前的权限确认。
-- **M5**——像样的 TUI(多行 composer、条目化 transcript、diff 预览)。
-- **M6~M9 及之后**——`~/.lubancode/` 安家、上下文管理(`/context`/`/compact`/`/think`)、终端体验(主题/转轮/token 统计)、MCP、插件(DLL+Lua)、websearch/webfetch、模型目录、会话存档、LSP、魂法分家(soul/system_prompt)、i18n、跨平台(POSIX 实现)、多 provider(`/provider` 族)、`extra_body`/`extra_headers` 万能参数口、后台命令执行(`run_in_background`)。
+## 配置边界
 
-当前版本 v0.23.0 是功能完整的 AI 编程 CLI,不再是"骨架阶段"。最新特性脉络看 `git log --oneline`。
+配置按字段合并：
+
+```text
+LUBANCODE_* 环境变量
+    > 项目 .lubancode/config.json
+    > 用户 ~/.lubancode/config.json
+    > ANTHROPIC_* / OPENAI_* 兼容变量
+    > 内置默认值
+```
+
+对象段如 `hooks`、`mcpServers`、`search`、`lsp` 走整段回退，不做深合并。这样来源说得清，`lubancode --config` 也能逐项报来路。
+
+## 错误与线程
+
+- 网络错、参数错、工具失败等预期分支用 `std::expected` 往上传。
+- 异常留给程序自身失约，不拿它传业务错误。
+- 子进程读线程都要 join 或有清楚的进程寿命状态；不能让线程在静态对象析构后再碰锁。
+- 输出进 JSON 或会话前先保证 UTF-8 合法，Windows 代码页字节另走转换。
+
+## 测试与交付
+
+单元与集成测试由 doctest 汇成 `lubancode_tests`，CTest 负责调用。平台专属夹具覆盖进程、socket、DLL 与真控制台路径。
+
+CI 有三条腿：MSVC、GCC、Clang。Release 工作流不用本机构建物，收到 `v*` 标签后从干净 runner 重编，再打 Windows、Linux、macOS 三份包。
+
+## 历史
+
+早期按 M0 到 M9 推进：骨架、双协议、代理循环、工具、TUI、配置、上下文、MCP/LSP、插件。此后按功能提交，版本由 tag 划线。细脉络看 `git log --oneline`，对外变化看 GitHub Releases。
