@@ -15,7 +15,7 @@
 //   3. 紧凑模式(默认)下子代理内层工具明细不再逐条铺屏——收尾之后全屏
 //      找不到 4 空格缩进 + ● 圆点的子工具条目行(SubTool 专属缩进规矩)。
 //
-// 本单新增三件(显示体验四单落地之后的回归/深化):
+// 本单新增四件(显示体验四单落地之后的回归/深化):
 //   4. 图标:启动打一次,/clear 之后重打一次(不是清成一片空白)——用
 //      图标独有的 "匠心运斤" 四个字当签名,数它在整块缓冲区里出现几次:
 //      /clear 前 1 次(启动打的那次),/clear 之后仍然是 1 次(旧的被真清屏
@@ -28,8 +28,11 @@
 //   6. 一上来就是工具调用、没有开场正文的回合,流式脚注(输入框:上横线+
 //      `> ` 输入行+下横线+状态行)照样在第一次工具调用打印之前正常出现——
 //      用状态行的 "shift+tab" / 输入行占位提示"排队下一条" 当信号。
+//   7. /provider switch 成功后真清一次屏,按新配置重画图标与横幅,切换
+//      提示留在屏上；失败、管道输出不清。
 //
 // 用法: fold_dup_clear_driver <lubancode.exe 路径> <子进程工作目录> <报告文件路径>
+//                             [要验证清屏的 provider 名] [--provider-only]
 // 环境变量(LUBANCODE_BASE_URL/LUBANCODE_API_KEY/LUBANCODE_MODEL 或者走
 // 子进程工作目录/USERPROFILE 下现成的 config.json)由调用方设好,子进程
 // 原样继承。
@@ -217,6 +220,8 @@ int wmain(int argc, wchar_t** argv) {
     }
     const std::wstring exe_path = argv[1];
     const std::wstring workdir = argv[2];
+    const std::string provider_name = argc >= 5 ? WideToUtf8(argv[4]) : std::string();
+    const bool provider_only = argc >= 6 && std::wstring(argv[5]) == L"--provider-only";
     g_report.open(argv[3], std::ios::binary | std::ios::trunc);
     if (!g_report.is_open()) {
         return 2;
@@ -266,6 +271,18 @@ int wmain(int argc, wchar_t** argv) {
     }
     CloseHandle(pi.hThread);
 
+    const auto finish = [&]() {
+        SendText("exit");
+        SendKey(VK_RETURN, L'\r', 0);
+        if (WaitForSingleObject(pi.hProcess, 15000) != WAIT_OBJECT_0) {
+            Log("INFO: exit 超时,强杀子进程");
+            TerminateProcess(pi.hProcess, 9);
+        }
+        CloseHandle(pi.hProcess);
+        Log(g_failures == 0 ? "RESULT: ALL PASS" : "RESULT: " + std::to_string(g_failures) + " FAIL");
+        return g_failures == 0 ? 0 : 1;
+    };
+
     // ---- 开场:等状态行出现 ----
     int status_row = -1;
     const bool opened = WaitForText("shift+tab", 30000, height, &status_row);
@@ -282,6 +299,33 @@ int wmain(int argc, wchar_t** argv) {
     const auto icon_rows_at_start = FindAllRows("\xe5\x8c\xa0\xe5\xbf\x83\xe8\xbf\x90\xe6\x96\xa4", height);  // "匠心运斤"
     Check(icon_rows_at_start.size() == 1,
           "#四 启动:图标出现且只出现一次(实际 " + std::to_string(icon_rows_at_start.size()) + " 次)");
+
+    // ---- #七:/provider switch 成功后刷新屏面 ----
+    // provider 名由调用方传入,免得把某个私有配置硬编码进回归驱动。切换
+    // 成功后该真清一次,再重画图标和新配置横幅:图标签名仍只出现一次,
+    // 输入命令则该从整块回滚缓冲里消失。对话历史是否保留由 AgentLoop
+    // 单测兜底,这里只验肉眼能见的屏面。
+    if (!provider_name.empty()) {
+        const std::string switch_command = "/provider switch " + provider_name;
+        SendText(switch_command);
+        SendKey(VK_RETURN, L'\r', 0);
+        const std::string switched_text = "provider " + provider_name;
+        Check(WaitForText(switched_text, 10000, height),
+              "#七 /provider switch:成功提示出现(10s 内)");
+        Sleep(200);
+        const auto icon_rows_after_switch =
+            FindAllRows("\xe5\x8c\xa0\xe5\xbf\x83\xe8\xbf\x90\xe6\x96\xa4", height);  // "匠心运斤"
+        Check(icon_rows_after_switch.size() == 1,
+              "#七 /provider switch:清屏后图标重画且只有一份(实际 " +
+                  std::to_string(icon_rows_after_switch.size()) + " 次)");
+        Check(FindLastRow(switch_command, height) < 0,
+              "#七 /provider switch:输入命令已从回滚缓冲清掉");
+        Check(FindLastRow("cwd:", height) >= 0,
+              "#七 /provider switch:新配置横幅重新出现");
+        if (provider_only) {
+            return finish();
+        }
+    }
 
     // ---- #一:/clear 清屏 ----
     // 横幅上必有的一句提示("banner.hint" 键)先确认在屏,再 /clear,再确认
@@ -482,14 +526,5 @@ int wmain(int argc, wchar_t** argv) {
     WaitForText("[tokens]", 60000, height);  // 让这一轮收个尾,给后面 exit 让路
 
     // ---- 收尾:exit ----
-    SendText("exit");
-    SendKey(VK_RETURN, L'\r', 0);
-    if (WaitForSingleObject(pi.hProcess, 15000) != WAIT_OBJECT_0) {
-        Log("INFO: exit 超时,强杀子进程");
-        TerminateProcess(pi.hProcess, 9);
-    }
-    CloseHandle(pi.hProcess);
-
-    Log(g_failures == 0 ? "RESULT: ALL PASS" : "RESULT: " + std::to_string(g_failures) + " FAIL");
-    return g_failures == 0 ? 0 : 1;
+    return finish();
 }

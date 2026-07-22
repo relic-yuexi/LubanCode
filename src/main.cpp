@@ -657,6 +657,14 @@ void PrintBanner(const lubancode::config::Config& config, const lubancode::cli::
     std::cout << theme.stats << "cwd: " << CurrentDirUtf8() << "  ·  " << tr("banner.hint") << theme.reset << "\n";
 }
 
+// 换会话边界或 provider 后重开一张干净屏面。调用方先判定真控制台，
+// 免得 ANSI 清屏序列混进管道输出。
+void ClearAndPrintBanner(const lubancode::config::Config& config, const lubancode::cli::Theme& theme) {
+    lubancode::platform::ClearScreen();
+    PrintLubanIcon(theme);
+    PrintBanner(config, theme);
+}
+
 // 基础工具集(不含 "agent" 自己)。子代理的工具表就是这一份原样一份——
 // 防递归:子代理没法再委托一个孙代理,深度硬限 1。主循环的工具表在这份
 // 基础上再多注册一个 "agent" 工具,两份各自独立构建(调用方各自新建一份,
@@ -3103,7 +3111,7 @@ void RunProviderAddWizardInteractive(const std::string& name_prefill, lubancode:
 
 // /provider:添端只写全局配置；项目级若自行写了 providers，加载时仍按既有
 // "整段压过"规则优先。切端只改本会话：换 client、换提示词平台段、换模型
-// 列表所用的连接，旧历史保留不动。
+// 列表所用的连接，旧历史保留不动；成功切换时只刷新屏面。
 void HandleProviderCommand(const std::string& args, lubancode::config::Config& config,
                            std::string& active_provider, RebuildableBackend& real_backend,
                            std::string& session_wire,
@@ -3113,7 +3121,8 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                            const std::shared_ptr<std::string>& current_model_instructions,
                            const lubancode::config::ModelCatalog& catalog,
                            lubancode::agent::PromptOptions& prompt_options,
-                           const std::function<void(bool)>& rebuild_loop) {
+                           const std::function<void(bool)>& rebuild_loop, bool is_console,
+                           const lubancode::cli::Theme& theme) {
     const lubancode::cli::ParsedProviderCommand command = lubancode::cli::ParseProviderCommand(args);
     switch (command.action) {
         case lubancode::cli::ProviderCommandAction::List:
@@ -3195,6 +3204,11 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             real_backend.Rebuild(config);
             prompt_options.wire = lubancode::config::ProviderWireName(config.wire);
             context_tracker.set_window_tokens(config.context_window_tokens);
+            // 校验、取 key、重建后端都成功了才清。清完先按新配置重画横幅，
+            // 随后的目录应用与切换提示仍留在屏上；Agent 历史照旧保留。
+            if (is_console) {
+                ClearAndPrintBanner(config, theme);
+            }
             ApplyModelCatalog(catalog, *current_model, /*think_explicit=*/false, /*window_explicit=*/true,
                               current_think, context_tracker, current_model_instructions);
             // provider 配了 model_reasoning_effort 就按 /think 同一套机制应用
@@ -4380,7 +4394,8 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                 case lubancode::cli::SlashCommand::Provider:
                     HandleProviderCommand(parsed.args, config, active_provider, real_backend, wire_str,
                                           current_model, current_think, context_tracker,
-                                          current_model_instructions, model_catalog, prompt_options, rebuild_loop);
+                                          current_model_instructions, model_catalog, prompt_options, rebuild_loop,
+                                          spinner_enabled, theme);
                     break;
                 case lubancode::cli::SlashCommand::Config:
                     PrintConfigDiagnostics(config_result, *current_model, &model_catalog, &settings_local);
@@ -4432,9 +4447,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     // 什么模型都看不见了,用户反馈"清得太狠"。重打这两行,
                     // 清屏后至少留得住这几条身份信息,不是一片空白。
                     if (spinner_enabled) {
-                        lubancode::platform::ClearScreen();
-                        PrintLubanIcon(theme);
-                        PrintBanner(config, theme);
+                        ClearAndPrintBanner(config, theme);
                     }
                     rebuild_loop();
                     // 存档跟着翻篇:旧文件留在磁盘上,新会话下一条消息另起
