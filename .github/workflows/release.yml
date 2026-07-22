@@ -1,4 +1,4 @@
-# 发布流水线(v0.20.x 跨平台单):推 v* tag 时三平台各打一个包挂上
+# 发布流水线:推 v* tag 时三平台各打一个包挂上
 # GitHub Release。构建走 FetchContent(-DLUBANCODE_USE_CODELOAD=OFF,CI 网络
 # 直通 github 官方地址),静态链接。产物包结构(都跟 exe 平级,包根目录):
 #   windows-x64.zip  ->  lubancode.exe、双语 README、docs/、安装/卸载脚本
