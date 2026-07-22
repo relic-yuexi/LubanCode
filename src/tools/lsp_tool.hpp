@@ -41,6 +41,7 @@ std::string FormatLspSymbols(const nlohmann::json& result);
 
 // 诊断缓存 -> 严重度 + 行 + 消息。nullopt(等了 2s 服务器也没推)->
 // "暂无诊断...";空数组 -> 没有问题。
+std::string FormatLspDiagnostics(const nlohmann::json& diagnostics);
 std::string FormatLspDiagnostics(const std::optional<nlohmann::json>& diagnostics);
 
 class LspTool : public Tool {

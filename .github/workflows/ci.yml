@@ -36,7 +36,7 @@ jobs:
             experimental: true   # POSIX 腿观察中(macOS 未经真机验证)
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # vcpkg manifest 优先:runner 自带的 vcpkg 在 VCPKG_INSTALLATION_ROOT。
       # configure 失败(vcpkg 缺包/版本冲突等)就清掉构建目录、去掉工具链

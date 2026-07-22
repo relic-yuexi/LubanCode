@@ -254,15 +254,12 @@ std::string FormatLspSymbols(const nlohmann::json& result) {
     return out;
 }
 
-std::string FormatLspDiagnostics(const std::optional<nlohmann::json>& diagnostics) {
-    if (!diagnostics.has_value()) {
-        return "暂无诊断(等了 2 秒服务器还没推送;稍后再查一次,或者这个文件确实没被诊断)。";
-    }
-    if (!diagnostics->is_array() || diagnostics->empty()) {
+std::string FormatLspDiagnostics(const nlohmann::json& diagnostics) {
+    if (!diagnostics.is_array() || diagnostics.empty()) {
         return "没有诊断问题。";
     }
-    std::string out = "共 " + std::to_string(diagnostics->size()) + " 条诊断:\n";
-    for (const auto& item : *diagnostics) {
+    std::string out = "共 " + std::to_string(diagnostics.size()) + " 条诊断:\n";
+    for (const auto& item : diagnostics) {
         if (!item.is_object()) {
             continue;
         }
@@ -276,6 +273,13 @@ std::string FormatLspDiagnostics(const std::optional<nlohmann::json>& diagnostic
                "\n";
     }
     return out;
+}
+
+std::string FormatLspDiagnostics(const std::optional<nlohmann::json>& diagnostics) {
+    if (!diagnostics.has_value()) {
+        return "暂无诊断(等了 2 秒服务器还没推送;稍后再查一次,或者这个文件确实没被诊断)。";
+    }
+    return FormatLspDiagnostics(*diagnostics);
 }
 
 LspTool::LspTool(lsp::Manager& manager) : manager_(manager) {}
