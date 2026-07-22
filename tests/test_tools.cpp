@@ -74,6 +74,16 @@ void KillPidForTest(unsigned long pid) {
         CloseHandle(h);
     }
 }
+
+bool CanEncodeInAcp(const wchar_t* text) {
+    if (::GetACP() == CP_UTF8) {
+        return true;
+    }
+    BOOL used_default = FALSE;
+    const int size =
+        ::WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, text, -1, nullptr, 0, nullptr, &used_default);
+    return size > 0 && used_default == FALSE;
+}
 #else
 bool IsPidAlive(unsigned long pid) {
     // 带 0 信号的 kill:不真发信号,只探测这个 pid 存不存在/是否有权限杀。
@@ -401,7 +411,15 @@ TEST_CASE("run_command: shell=cmd,中文输出不乱码") {
     const Tool::Result result = tool.execute(input);
 
     CHECK_FALSE(result.is_error);
-    CHECK(result.content.find("你好世界") != std::string::npos);
+    // cmd 内置命令往重定向管道写系统 ACP 字节。代码页装得下中文时验
+    // 原文；英文 Windows 的 ACP 装不下，cmd 出口处已经替换成问号，只能
+    // 验证宿主仍交回合法 UTF-8，不能凭空还原丢掉的字符。
+    if (CanEncodeInAcp(L"你好世界")) {
+        CHECK(result.content.find("你好世界") != std::string::npos);
+    } else {
+        CHECK(lubancode::platform::IsValidUtf8(result.content));
+        CHECK_FALSE(result.content.empty());
+    }
 }
 
 TEST_CASE("run_command: shell=cmd,非零退出码,is_error 置位") {

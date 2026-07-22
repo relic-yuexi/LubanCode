@@ -124,8 +124,8 @@ std::vector<std::string> PluginHost::LoadDirectory(const std::filesystem::path& 
         const auto entry_fn =
             reinterpret_cast<EntryFn>(GetProcAddress(module, "luban_plugin_entry"));
         if (entry_fn == nullptr) {
-            warnings.push_back("[plugin] " + file_name +
-                               ": 找不到导出函数 luban_plugin_entry,不是 lubancode 插件,跳过");
+            // 插件常把自己的依赖 DLL 跟主 DLL 放在同一目录。没有入口的库
+            // 只是依赖，不算坏插件，静默略过；真坏 PE 仍在 LoadLibrary 处告警。
             FreeLibrary(module);
             continue;
         }

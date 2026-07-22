@@ -73,10 +73,10 @@ public:
     PluginHost(const PluginHost&) = delete;
     PluginHost& operator=(const PluginHost&) = delete;
 
-    // 扫描 dir 下的 *.dll(不递归),逐个加载。坏 DLL / 没有入口 / api_version
-    // 不合 / manifest 不像话,统统跳过,往 warnings 里写一条人话,不崩。
-    // 目录不存在时什么都不做(插件本来就是可选的)。返回本次新增的警告。
-    // 非 Windows 平台是空操作。
+    // 扫描 dir 下的 *.dll(不递归),逐个加载。没有 luban_plugin_entry 的依赖
+    // DLL 静默略过；坏 DLL / api_version 不合 / manifest 不像话会写一条
+    // 警告再跳过。目录不存在时什么都不做(插件本来就是可选的)。返回本次
+    // 新增的警告。非 Windows 平台是空操作。
     std::vector<std::string> LoadDirectory(const std::filesystem::path& dir);
 
     const std::vector<LoadedPlugin>& plugins() const { return plugins_; }

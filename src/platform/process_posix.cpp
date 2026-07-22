@@ -171,14 +171,16 @@ unsigned long ExitCodeFromStatus(int status) {
 // 是更强的保证)。
 // ---------------------------------------------------------------------------
 
-std::mutex& BackgroundRegistryMutex() {
-    static std::mutex m;
-    return m;
-}
+struct BackgroundRegistryState {
+    std::mutex mutex;
+    std::vector<pid_t> pids;
+};
 
-std::vector<pid_t>& BackgroundRegistry() {
-    static std::vector<pid_t> pids;
-    return pids;
+BackgroundRegistryState& BackgroundRegistry() {
+    // atexit 回调和 detach 的收尸线程都可能活到普通静态对象析构之后。
+    // 这份进程级状态故意留到操作系统收走，免得退出途中碰到已析构的锁。
+    static auto* state = new BackgroundRegistryState;
+    return *state;
 }
 
 // atexit 钩子:逐个把会话级注册表里还没被摘掉(即还没被收尸线程 waitpid
@@ -188,11 +190,12 @@ std::vector<pid_t>& BackgroundRegistry() {
 // kill(-pid, ...) 打的是整个会话/进程组(子进程 fork 后 setsid() 了,
 // pid == 会话首进程 pid == 进程组 pid)。
 void KillAllBackgroundOnExit() {
-    std::lock_guard<std::mutex> lock(BackgroundRegistryMutex());
-    for (const pid_t pid : BackgroundRegistry()) {
+    BackgroundRegistryState& state = BackgroundRegistry();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    for (const pid_t pid : state.pids) {
         kill(-pid, SIGTERM);
     }
-    for (const pid_t pid : BackgroundRegistry()) {
+    for (const pid_t pid : state.pids) {
         kill(-pid, SIGKILL);
     }
 }
@@ -203,14 +206,15 @@ void RegisterBackgroundPid(pid_t pid) {
         return true;
     }();
     (void)registered;
-    std::lock_guard<std::mutex> lock(BackgroundRegistryMutex());
-    BackgroundRegistry().push_back(pid);
+    BackgroundRegistryState& state = BackgroundRegistry();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.pids.push_back(pid);
 }
 
 void UnregisterBackgroundPid(pid_t pid) {
-    std::lock_guard<std::mutex> lock(BackgroundRegistryMutex());
-    std::vector<pid_t>& pids = BackgroundRegistry();
-    pids.erase(std::remove(pids.begin(), pids.end(), pid), pids.end());
+    BackgroundRegistryState& state = BackgroundRegistry();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.pids.erase(std::remove(state.pids.begin(), state.pids.end(), pid), state.pids.end());
 }
 
 // 后台日志文件路径:系统临时目录下,文件名带毫秒时间戳 + 单调计数器,
