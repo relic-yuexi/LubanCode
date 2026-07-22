@@ -133,6 +133,62 @@ const ProviderConfig* FindProvider(const std::vector<ProviderConfig>& providers,
     return nullptr;
 }
 
+bool ApplyConfiguredActiveProvider(ConfigResult& result) {
+    if (result.config.active_provider.empty()) {
+        return false;
+    }
+    const ProviderConfig* provider = FindProvider(result.config.providers, result.config.active_provider);
+    if (provider == nullptr) {
+        result.config.active_provider.clear();
+        result.sources.active_provider = Source::Default;
+        return false;
+    }
+
+    // Source 枚举按优先级从高到低排列。选择名与 provider 条目两者谁
+    // 层级更高就按谁算；只覆盖同级或更低字段。
+    const Source source = static_cast<int>(result.sources.active_provider) <
+                                  static_cast<int>(result.sources.providers)
+                              ? result.sources.active_provider
+                              : result.sources.providers;
+    const auto can_override = [source](Source current) {
+        return static_cast<int>(current) >= static_cast<int>(source);
+    };
+    if (can_override(result.sources.wire)) {
+        result.config.wire = provider->wire;
+        result.sources.wire = source;
+    }
+    if (can_override(result.sources.base_url)) {
+        result.config.base_url = provider->base_url;
+        result.sources.base_url = source;
+    }
+    if (can_override(result.sources.auth_token)) {
+        result.config.auth_token = ProviderApiKey(*provider).value_or(std::string());
+        result.sources.auth_token = source;
+    }
+    if (can_override(result.sources.model)) {
+        result.config.model = provider->model;
+        result.sources.model = source;
+    }
+    if (can_override(result.sources.context_window_tokens)) {
+        result.config.context_window_tokens = provider->context_window_tokens;
+        result.sources.context_window_tokens = source;
+    }
+    if (!provider->model_reasoning_effort.empty() && can_override(result.sources.think)) {
+        result.config.think = provider->model_reasoning_effort;
+        result.sources.think = source;
+    }
+    if (can_override(result.sources.extra_body)) {
+        result.config.extra_body = provider->extra_body;
+        result.sources.extra_body = source;
+    }
+    if (can_override(result.sources.extra_headers)) {
+        result.config.extra_headers = provider->extra_headers;
+        result.sources.extra_headers = source;
+    }
+    result.config.native_web_search = provider->native_web_search;
+    return true;
+}
+
 bool SetProviderNativeWebSearch(std::vector<ProviderConfig>& providers, const std::string& name, bool enabled) {
     for (ProviderConfig& provider : providers) {
         if (provider.name == name) {
@@ -646,6 +702,13 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
             return std::unexpected("配置文件 " + file_path_for_error + " 里的 model 字段必须是字符串");
         }
         config.model = parsed["model"].get<std::string>();
+    }
+    if (parsed.contains("active_provider")) {
+        if (!parsed["active_provider"].is_string()) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                    " 里的 active_provider 字段必须是字符串");
+        }
+        config.active_provider = parsed["active_provider"].get<std::string>();
     }
     if (parsed.contains("theme")) {
         if (!parsed["theme"].is_string()) {
@@ -1287,13 +1350,17 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     // 出来的,default 状态已经是空 object/空 map,不需要额外 else 清空)。
     if (project_file.has_value() && project_file->extra_body.has_value()) {
         result.config.extra_body = *project_file->extra_body;
+        result.sources.extra_body = Source::ProjectConfigFile;
     } else if (global_file.has_value() && global_file->extra_body.has_value()) {
         result.config.extra_body = *global_file->extra_body;
+        result.sources.extra_body = Source::GlobalConfigFile;
     }
     if (project_file.has_value() && project_file->extra_headers.has_value()) {
         result.config.extra_headers = *project_file->extra_headers;
+        result.sources.extra_headers = Source::ProjectConfigFile;
     } else if (global_file.has_value() && global_file->extra_headers.has_value()) {
         result.config.extra_headers = *global_file->extra_headers;
+        result.sources.extra_headers = Source::GlobalConfigFile;
     }
 
     if (project_file.has_value() && project_file->providers.has_value()) {
@@ -1305,6 +1372,14 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     } else {
         result.config.providers.clear();
         result.sources.providers = Source::Default;
+    }
+
+    // active_provider 是一枚名字指针，项目级可钉住，没写就回退全局。
+    // 真正展开 provider 放在 LoadFromEnv：那一步才能按 key_env 读取任意
+    // 环境变量，同时让 MergeConfig 继续保持纯函数。
+    if (const auto p = pick(&FileConfig::active_provider); p.value != nullptr) {
+        result.config.active_provider = *p.value;
+        result.sources.active_provider = p.source;
     }
 
     return result;
@@ -1391,6 +1466,9 @@ std::expected<std::string, std::string> SaveConfigFile(const Config& config) {
     j["api_key"] = config.auth_token;
     j["model"] = config.model;
     j["max_context_chars"] = config.max_context_chars;
+    if (!config.active_provider.empty()) {
+        j["active_provider"] = config.active_provider;
+    }
     if (!config.providers.empty()) {
         j["providers"] = ProvidersToJson(config.providers);
     }
@@ -1570,6 +1648,35 @@ std::expected<void, std::string> UpdateProvidersInConfigFile(const std::string& 
     }
     (*root)["providers"] = ProvidersToJson(providers);
     return WriteConfigObject(file_path, *root);
+}
+
+std::expected<void, std::string> UpdateActiveProviderInConfigFile(const std::string& file_path,
+                                                                    const std::string& name) {
+    if (name.empty()) {
+        return std::unexpected("active_provider 不能为空");
+    }
+    return UpdateStringFieldInConfigFile(file_path, "active_provider", name);
+}
+
+std::expected<std::string, std::string> SetActiveProviderInGlobalConfig(const std::string& name) {
+    if (name.empty()) {
+        return std::unexpected("active_provider 不能为空");
+    }
+    const auto home = HomeDir();
+    if (!home.has_value()) {
+        return std::unexpected("找不到用户主目录,没法记住当前 provider");
+    }
+    const std::string path = NewConfigPathFor(std::filesystem::path(*home)).string();
+    auto root = ReadConfigObjectForUpdate(path);
+    if (!root.has_value()) {
+        return std::unexpected(root.error());
+    }
+    (*root)["active_provider"] = name;
+    const auto written = WriteConfigObject(path, *root);
+    if (!written.has_value()) {
+        return std::unexpected(written.error());
+    }
+    return path;
 }
 
 std::expected<std::string, std::string> AddProviderToGlobalConfig(const ProviderConfig& provider) {
@@ -1757,6 +1864,7 @@ std::expected<ConfigResult, std::string> LoadFromEnv() {
 
     auto merged = MergeConfig(lubancode_env, loaded->project, loaded->global, generic_env);
     if (merged.has_value()) {
+        ApplyConfiguredActiveProvider(*merged);
         if (loaded->project.has_value()) {
             merged->project_config_file_path = loaded->project->source_path;
         }

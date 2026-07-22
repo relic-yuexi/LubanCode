@@ -1,7 +1,8 @@
 // 0.22.x 流式脚注框化专用的"刮屏驱动器":跟 tests/screen_driver.cpp 同一套
 // 手艺(AllocConsole + WriteConsoleInputW + ReadConsoleOutputW),验的是这轮
 // 新加的东西——流式期间正文下方常驻的框(上横线/输入行/下横线/状态行)、
-// 排队回显、ESC 打断、长输出滚屏时框还贴得住。不进 ctest,集成验证时手动跑:
+// Working 动态着色、输入光标、常驻队列、ESC 打断、长输出滚屏时框还贴得住。
+// 不进 ctest,集成验证时手动跑:
 //   stream_footer_driver <lubancode.exe 路径> <子进程工作目录> <报告文件路径>
 
 #define WIN32_LEAN_AND_MEAN
@@ -9,6 +10,7 @@
 #include <windows.h>
 
 #include <fstream>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -65,6 +67,12 @@ int CursorRow() {
     return info.dwCursorPosition.Y;
 }
 
+int CursorColumn() {
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    GetConsoleScreenBufferInfo(g_conout, &info);
+    return info.dwCursorPosition.X;
+}
+
 std::string ReadRow(int row) {
     const int width = BufferWidth();
     if (row < 0) {
@@ -88,6 +96,23 @@ std::string ReadRow(int row) {
     return WideToUtf8(text);
 }
 
+std::string ReadAttributeSignature(int row) {
+    const int width = BufferWidth();
+    std::vector<CHAR_INFO> cells(static_cast<std::size_t>(width));
+    SMALL_RECT region{0, static_cast<SHORT>(row), static_cast<SHORT>(width - 1), static_cast<SHORT>(row)};
+    if (row < 0 ||
+        !ReadConsoleOutputW(g_conout, cells.data(), COORD{static_cast<SHORT>(width), 1}, COORD{0, 0}, &region)) {
+        return {};
+    }
+    std::string signature;
+    signature.reserve(cells.size() * 2);
+    for (const CHAR_INFO& cell : cells) {
+        signature.push_back(static_cast<char>(cell.Attributes & 0xff));
+        signature.push_back(static_cast<char>((cell.Attributes >> 8) & 0xff));
+    }
+    return signature;
+}
+
 int FindLastRow(const std::string& needle, int max_rows = 400) {
     for (int row = max_rows - 1; row >= 0; --row) {
         if (ReadRow(row).find(needle) != std::string::npos) {
@@ -105,6 +130,27 @@ bool WaitForText(const std::string& needle, int timeout_ms, int* found_row = nul
             if (found_row != nullptr) {
                 *found_row = row;
             }
+            return true;
+        }
+        Sleep(100);
+    }
+    return false;
+}
+
+int CountRowsWithText(const std::string& needle, int max_rows = 400) {
+    int count = 0;
+    for (int row = 0; row < max_rows; ++row) {
+        if (ReadRow(row).find(needle) != std::string::npos) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+bool WaitForTextCount(const std::string& needle, int wanted, int timeout_ms) {
+    const DWORD deadline = GetTickCount() + static_cast<DWORD>(timeout_ms);
+    while (GetTickCount() < deadline) {
+        if (CountRowsWithText(needle) >= wanted) {
             return true;
         }
         Sleep(100);
@@ -215,13 +261,27 @@ int wmain(int argc, wchar_t** argv) {
     // ---- G1 流式框化:发一句会触发较长回复的问题,等流式脚注框出现 ----
     SendText("请用大约 200 字介绍一下你自己能做什么,分两三段说,不用标题。");
     SendKey(VK_RETURN, L'\r', 0);
+    // Working/思考中:首个流事件前亮色须沿文字移动。刮同一行的字符属性
+    // 签名，至少见到两帧不同分布才算真动画，不只换了文案。
+    std::set<std::string> spinner_frames;
+    const DWORD spinner_deadline = GetTickCount() + 10000;
+    while (GetTickCount() < spinner_deadline) {
+        const int spinner_row = FindLastRow("思考中");
+        if (spinner_row >= 0) {
+            spinner_frames.insert(ReadAttributeSignature(spinner_row));
+        }
+        if (FindLastRow("排队下一条") >= 0) {
+            break;
+        }
+        Sleep(50);
+    }
+    Check(spinner_frames.size() >= 2,
+          "G0 Working:亮色扫过文字,捕获到 " + std::to_string(spinner_frames.size()) + " 帧不同配色");
     // "排队下一条" 只出现在输入行的占位提示里(状态行是模式/模型/context 那
     // 一段,不含这句话),所以搜到的这一行本身就是输入行,不是状态行——
     // 版式:上横线(matched-1) / 输入行(matched) / 下横线(matched+1) / 状态行(matched+2)。
     int input_row = -1;
     Check(WaitForText("排队下一条", 60000, &input_row), "G1 流式期间:框出现(60s 内,靠占位提示定位输入行)");
-    Sleep(400);
-    input_row = FindLastRow("排队下一条");
     if (input_row >= 0) {
         const int top_rule_row = input_row - 1;
         const int bottom_rule_row = input_row + 1;
@@ -231,6 +291,8 @@ int wmain(int argc, wchar_t** argv) {
         const std::string input_text = ReadRow(input_row);
         Check(!input_text.empty() && input_text[0] == '>', "G1 输入行以 '> ' 开头(跟 composer 一个样式)");
         Check(ReadRow(status_row).find("shift+tab") != std::string::npos, "G1 状态行有 shift+tab 提示(复用 PrintStatusLine)");
+        Check(CursorRow() == input_row && CursorColumn() >= 2,
+              "G1 物理光标停在输入行 '> ' 后面,不再钉在正文末尾");
         Log("INFO: G1 框位置 top_rule=" + std::to_string(top_rule_row) + " input=" + std::to_string(input_row) +
             " bottom_rule=" + std::to_string(bottom_rule_row) + " status=" + std::to_string(status_row));
     } else {
@@ -241,6 +303,11 @@ int wmain(int argc, wchar_t** argv) {
     SendText("你好排队");
     const bool g2_echo_seen = WaitForText("你好排队", 8000);
     Check(g2_echo_seen, "G2 排队回显:输入行实时显示已键入内容(8s 内出现 '你好排队')");
+    if (g2_echo_seen) {
+        const int echo_row = FindLastRow("你好排队");
+        Check(CursorRow() == echo_row && CursorColumn() > 2,
+              "G2 键入时:光标跟在输入文字末尾");
+    }
     if (!g2_echo_seen) {
         // 诊断:没等到就把此刻缓冲区靠下的十几行原样记下来,看文字到底
         // 落在哪儿(比如落进了下一轮 composer 的编辑行,说明流式已经先
@@ -255,7 +322,7 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
     SendKey(VK_RETURN, L'\r', 0);
-    Check(WaitForText("[已排队]", 5000) || WaitForText("已排队", 1), "G2 落队:出现 '[已排队]' 整行回显(或已提交为普通消息)");
+    Check(WaitForText("待发送消息 1 条", 5000), "G2 落队:常驻队列区显示 1 条待发送消息");
     Sleep(300);
     // 落队之后框应该重新出现在新位置(占位提示复位),再验一次上下横线还在。
     {
@@ -268,7 +335,8 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     // 等第一轮问答彻底收束(统计行落定),避免跟下面的 ESC 测试撞车。
-    Check(WaitForText("[tokens]", 180000), "G1 一轮问答:统计行出现(180s 内,含刚才排队那条追加消息)");
+    Check(WaitForTextCount("[tokens]", 2, 180000),
+          "G1 主消息与排队消息:两轮统计行都出现(180s 内)");
     Sleep(1000);
 
     // ---- G3 ESC 打断:再发一句,几乎立刻按 ESC,验证打断提示 + 程序继续可用 ----

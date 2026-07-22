@@ -102,18 +102,17 @@ void SetStatusLineData(const std::string& model, int context_percent, long long 
 std::optional<int> DetectConsoleWidth();
 
 // M10:main.cpp 的流式回调(打字机输出 on_text_delta、on_tool_start……)在
-// 主线程上打印;TurnInputListener 的 "[已打断]"/"[已排队] ..." 提示在监听
-// 线程上打印——两边都写 std::cout,不加锁会在真终端上偶发交错、把画面
+// 主线程上打印;TurnInputListener 的打断提示与排队脚注在监听线程上打印——
+// 两边都写 std::cout,不加锁会在真终端上偶发交错、把画面
 // 弄花。main.cpp 里凡是"流式期间"(Run() 还没返回)可能触发的 std::cout
 // 写,都拿这把锁包一下,跟监听线程互斥。管道模式下监听线程压根不会起,
 // 锁永远拿得到,不影响非交互路径的性能/行为。
 std::mutex& StdoutWriteMutex();
 
 // markdown 收束重画 × M10 监听线程的对账口子:TurnInputListener 在流式
-// 当口打完 "[已打断]"/"[已排队] ..." 整行之后(此刻它正持着
-// StdoutWriteMutex)调这个钩子。正文重画的行数账按"块首行号 + 光标位移"
-// 记,监听线程插进来的这几行不在账上——不通气的话,收束重画会把排队回显
-// 整行擦掉,恰逢贴着缓冲区底滚屏时锚点还会错行。main.cpp 的 RunTurn 把
+// 当口改动打断提示或排队脚注后(此刻它正持着 StdoutWriteMutex)调这个钩子。
+// 正文重画的行数账按"块首行号 + 光标位移"记；监听线程动过屏面却不通气，
+// 收束重画便可能错行。main.cpp 的 RunTurn 把
 // 钩子接到 StreamBodyTracker 上:作废当前块锚点,这一块保持原样不重画
 // (宁可漏渲染,不擦用户的回显)。
 // 约定:钩子在持有 StdoutWriteMutex 的前提下被调,钩子实现不得再去锁它;
@@ -128,7 +127,8 @@ void SetStreamScreenPrintHook(std::function<void()> hook);
 // 让用户看见"能按 ESC 打断、能键入并回车排队下一条"——回归前用户实测
 // "流式期间屏上啥提示都没有,以为程序坏了"。空闲时输入行显示淡色占位提示
 // (取代老版本单独一行 hint);用户真键入排队消息时,输入行实时回显已键入
-// 内容;Enter 落队后输入行复位回占位提示、上面另起一行 "[已排队] ..."。
+// 内容;Enter 落队后输入行复位,上方常驻最近几条待发送消息。物理光标留
+// 在输入行,正文续写坐标另存,下一笔正文来时先回正文、写完再回来。
 // 上下横线/状态行分别复用 composer 输入框那节的 BoxRuleLine/PrintStatusLine,
 // 不重写一份画法(见 console_input.cpp)。
 //
@@ -190,7 +190,7 @@ public:
 // M10:ESC 打断当前轮 + 消息排队用的监听器。main.cpp 在"发出请求到本轮
 // Run() 结束"这段窗口期起一个实例:ESC 键按下就把 cancel_flag 置位、打一行
 // 淡色 "[已打断]";其余可打印字符进内部排队缓冲(Backspace 能退格),遇
-// Enter 就把整行（非空才算）落进队列、打一行淡色 "[已排队] <内容>"。
+// Enter 就把整行（非空才算）落进队列，并刷新 footer 上方的常驻队列区。
 //
 // Ctrl+C(补于排查"ESC/Ctrl+C 都停不掉子代理"那次)语义对齐 bash/Python/
 // Node REPL、Claude Code 官方文档确认过的通用约定:单击效果等同

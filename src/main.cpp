@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
+#include <expected>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -63,6 +64,7 @@
 #include "mcp/client.hpp"
 #include "mcp/mcp_tool.hpp"
 #include "tools/agent_tool.hpp"
+#include "tools/ask_user.hpp"
 #include "tools/command_safety.hpp"
 #include "tools/edit_file.hpp"
 #include "tools/hooks.hpp"
@@ -402,6 +404,9 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
               << lubancode::config::ToString(sources.auth_token) << "]\n";
     std::cout << "  model              = " << (config.model.empty() ? tr("config.not_set") : config.model) << "  ["
               << lubancode::config::ToString(sources.model) << "]\n";
+    std::cout << "  active_provider    = "
+              << (config.active_provider.empty() ? tr("config.not_set") : config.active_provider) << "  ["
+              << lubancode::config::ToString(sources.active_provider) << "]\n";
     std::cout << "  max_context_chars  = " << config.max_context_chars << "  ["
               << lubancode::config::ToString(sources.max_context_chars) << "]\n";
     std::cout << "  theme              = " << config.theme << "  [" << lubancode::config::ToString(sources.theme)
@@ -925,6 +930,109 @@ void PrintConfirmDetails(const std::string& name, const nlohmann::json& input) {
     std::cout.flush();
 }
 
+std::string TrimAscii(std::string value) {
+    const auto not_space = [](unsigned char c) { return !std::isspace(c); };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
+    value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
+    return value;
+}
+
+std::expected<std::vector<std::string>, std::string> PromptAskUser(
+    const lubancode::tools::AskUserQuestion& question, const lubancode::cli::Theme& theme) {
+    const lubancode::cli::StreamFooterSuspendScope footer_suspend;
+    {
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        std::cout << "\n";
+        if (!question.header.empty()) {
+            std::cout << theme.banner << question.header << theme.reset << "\n";
+        }
+        std::cout << question.question << "\n";
+        for (std::size_t i = 0; i < question.options.size(); ++i) {
+            std::cout << "  " << (i + 1) << ". " << question.options[i].label;
+            if (!question.options[i].description.empty()) {
+                std::cout << theme.stats << " - " << question.options[i].description << theme.reset;
+            }
+            std::cout << "\n";
+        }
+        std::cout << "  " << (question.options.size() + 1) << ". " << tr("ask_user.other") << "\n";
+        std::cout.flush();
+    }
+
+    std::vector<int> indexes;
+    for (;;) {
+        const std::optional<std::string> raw = lubancode::cli::ReadLine(
+            theme.confirm + tr(question.multi_select ? "ask_user.multi_prompt" : "ask_user.select_prompt") +
+                theme.reset,
+            theme, /*esc_rejects=*/true);
+        if (!raw.has_value() || TrimAscii(*raw).empty()) {
+            return std::unexpected(tr("ask_user.cancelled"));
+        }
+
+        indexes.clear();
+        std::stringstream parts(*raw);
+        std::string part;
+        bool valid = true;
+        while (std::getline(parts, part, ',')) {
+            part = TrimAscii(std::move(part));
+            try {
+                std::size_t consumed = 0;
+                const int index = std::stoi(part, &consumed);
+                if (consumed != part.size() || index < 1 ||
+                    index > static_cast<int>(question.options.size() + 1) ||
+                    std::find(indexes.begin(), indexes.end(), index) != indexes.end()) {
+                    valid = false;
+                    break;
+                }
+                indexes.push_back(index);
+            } catch (...) {
+                valid = false;
+                break;
+            }
+        }
+        if (!question.multi_select && indexes.size() != 1) {
+            valid = false;
+        }
+        if (valid && !indexes.empty()) {
+            break;
+        }
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        std::cout << theme.error << tr("ask_user.invalid") << theme.reset << "\n";
+    }
+
+    std::vector<std::string> answers;
+    for (const int index : indexes) {
+        if (index <= static_cast<int>(question.options.size())) {
+            answers.push_back(question.options[static_cast<std::size_t>(index - 1)].label);
+            continue;
+        }
+        for (;;) {
+            const std::optional<std::string> custom = lubancode::cli::ReadLine(
+                theme.confirm + tr("ask_user.custom_prompt") + theme.reset, theme,
+                /*esc_rejects=*/true);
+            if (!custom.has_value()) {
+                return std::unexpected(tr("ask_user.cancelled"));
+            }
+            const std::string value = TrimAscii(*custom);
+            if (!value.empty()) {
+                answers.push_back(value);
+                break;
+            }
+            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+            std::cout << theme.error << tr("ask_user.custom_empty") << theme.reset << "\n";
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        std::cout << theme.stats << tr("ask_user.recorded") << theme.reset;
+        for (std::size_t i = 0; i < answers.size(); ++i) {
+            std::cout << (i == 0 ? " " : ", ") << answers[i];
+        }
+        std::cout << "\n";
+    }
+    return answers;
+}
+
 // ---------------------------------------------------------------------------
 // UI-B(0.12.0):工具条目的控制台原地改写。
 //
@@ -1078,7 +1186,9 @@ public:
             return;
         }
         for (int r = end_row; r <= info->cursor_y; ++r) {
-            lubancode::platform::ClearRowFrom(0, r, info->width);
+            // diff 预览带整行背景色；只擦字符会留下成片红绿底，须连
+            // 字符属性一道归零。
+            lubancode::platform::ClearRowHardFrom(0, r, info->width);
         }
         lubancode::platform::SetCursorPos(0, end_row);
     }
@@ -1121,7 +1231,8 @@ public:
             return;
         }
         for (int r = 0; r < stored.rows; ++r) {
-            lubancode::platform::ClearRowFrom(0, stored.start_row + r, info->width);
+            // 收走的子工具可能带彩色 diff 摘要，连背景属性一起清。
+            lubancode::platform::ClearRowHardFrom(0, stored.start_row + r, info->width);
         }
         lubancode::platform::SetCursorPos(0, stored.start_row);
     }
@@ -3110,8 +3221,8 @@ void RunProviderAddWizardInteractive(const std::string& name_prefill, lubancode:
 }
 
 // /provider:添端只写全局配置；项目级若自行写了 providers，加载时仍按既有
-// "整段压过"规则优先。切端只改本会话：换 client、换提示词平台段、换模型
-// 列表所用的连接，旧历史保留不动；成功切换时只刷新屏面。
+// "整段压过"规则优先。切端时换 client、提示词平台段与模型连接，旧历史
+// 保留不动；成功后把端名写回配置，下次启动照旧选中。
 void HandleProviderCommand(const std::string& args, lubancode::config::Config& config,
                            std::string& active_provider, RebuildableBackend& real_backend,
                            std::string& session_wire,
@@ -3122,7 +3233,9 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                            const lubancode::config::ModelCatalog& catalog,
                            lubancode::agent::PromptOptions& prompt_options,
                            const std::function<void(bool)>& rebuild_loop, bool is_console,
-                           const lubancode::cli::Theme& theme) {
+                           const lubancode::cli::Theme& theme,
+                           const std::optional<std::string>& active_provider_write_path,
+                           lubancode::config::Source& active_provider_source) {
     const lubancode::cli::ParsedProviderCommand command = lubancode::cli::ParseProviderCommand(args);
     switch (command.action) {
         case lubancode::cli::ProviderCommandAction::List:
@@ -3190,6 +3303,20 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                 return;
             }
 
+            // 项目配置显式写了 active_provider 就继续写回项目；其余场景
+            // 记到用户全局配置。只存名字，不复制密钥或 endpoint。
+            const auto remembered = [&]() -> std::expected<std::string, std::string> {
+                if (active_provider_write_path.has_value()) {
+                    const auto written = lubancode::config::UpdateActiveProviderInConfigFile(
+                        *active_provider_write_path, provider->name);
+                    if (!written.has_value()) {
+                        return std::unexpected(written.error());
+                    }
+                    return *active_provider_write_path;
+                }
+                return lubancode::config::SetActiveProviderInGlobalConfig(provider->name);
+            }();
+
             config.wire = provider->wire;
             config.base_url = provider->base_url;
             config.auth_token = *api_key;
@@ -3199,6 +3326,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             config.extra_body = provider->extra_body;
             config.extra_headers = provider->extra_headers;
             *current_model = config.model;
+            config.active_provider = provider->name;
             active_provider = provider->name;
             session_wire = lubancode::config::ProviderWireName(config.wire);
             real_backend.Rebuild(config);
@@ -3222,6 +3350,14 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             }
             rebuild_loop(/*preserve_history=*/true);
             std::cout << trf("cmd.provider.switched", provider->name, provider->base_url) << "\n";
+            if (remembered.has_value()) {
+                active_provider_source = active_provider_write_path.has_value()
+                                             ? lubancode::config::Source::ProjectConfigFile
+                                             : lubancode::config::Source::GlobalConfigFile;
+                std::cout << trf("cmd.provider.remembered", provider->name) << "\n";
+            } else {
+                std::cout << trf("cmd.provider.remember_failed", remembered.error()) << "\n";
+            }
             return;
         }
         case lubancode::cli::ProviderCommandAction::Set: {
@@ -3944,11 +4080,14 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     auto current_think = std::make_shared<std::string>(config.think);
     // 旧单端字段和某条 provider 完全对上时，起手就把它认作当前端。这样
     // /provider list 的标记和“当前端不能删”都不留空档。
-    std::string active_provider;
-    for (const auto& provider : config.providers) {
-        if (provider.wire == config.wire && provider.base_url == config.base_url && provider.model == config.model) {
-            active_provider = provider.name;
-            break;
+    std::string active_provider = config.active_provider;
+    if (active_provider.empty()) {
+        for (const auto& provider : config.providers) {
+            if (provider.wire == config.wire && provider.base_url == config.base_url &&
+                provider.model == config.model) {
+                active_provider = provider.name;
+                break;
+            }
         }
     }
     // 模型目录 base_instructions 的会话级状态:启动/切换模型时由
@@ -4041,6 +4180,14 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     // 这份 shared_ptr 同时交给 /todos 命令、RunTurn(转给 on_tool_done 渲染)。
     auto todo_state = std::make_shared<lubancode::tools::TodoListState>();
     registry.Register(std::make_unique<lubancode::tools::TodoWriteTool>(todo_state));
+    // ask_user 只挂主交互会话。子代理没有独立用户，单发/管道也没有可
+    // 安稳停下读一行的交互面，故不注册一枚注定会卡住的空工具。
+    if (spinner_enabled) {
+        registry.Register(std::make_unique<lubancode::tools::AskUserTool>(
+            [&theme](const lubancode::tools::AskUserQuestion& question) {
+                return PromptAskUser(question, theme);
+            }));
+    }
 
     // M7:插件工具只挂主 registry(不挂 sub_registry,短命跑腿不用外挂),
     // 挂载行紧跟 [mcp] 那几行打出来。
@@ -4373,6 +4520,13 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         }
     };
 
+    // 项目配置若显式钉了 active_provider，后续切换继续写回项目；没钉就
+    // 记全局“上次使用”，跨目录也能沿用。
+    const std::optional<std::string> active_provider_write_path =
+        config_result.sources.active_provider == lubancode::config::Source::ProjectConfigFile
+            ? config_result.project_config_file_path
+            : std::nullopt;
+
     // 处理"确定不是空行、不是裸词 exit/quit"的一行输入,不管这行是刚
     // ReadLine() 读到的、还是从 pending_queue 里取出来的自动发送的——两条
     // 路径共用这一份 slash 分支 + 自动 compact 检查 + RunTurn 调用,行为
@@ -4395,7 +4549,8 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     HandleProviderCommand(parsed.args, config, active_provider, real_backend, wire_str,
                                           current_model, current_think, context_tracker,
                                           current_model_instructions, model_catalog, prompt_options, rebuild_loop,
-                                          spinner_enabled, theme);
+                                          spinner_enabled, theme, active_provider_write_path,
+                                          config_result.sources.active_provider);
                     break;
                 case lubancode::cli::SlashCommand::Config:
                     PrintConfigDiagnostics(config_result, *current_model, &model_catalog, &settings_local);

@@ -19,6 +19,7 @@
 | 配 hooks、MCP、搜索或 LSP | [配置手册：外接服务](configuration.md#四hooks--mcpservers--search--lsp) |
 | 写 Skill、Lua 工具或原生插件 | [扩展指南](extensions.md) |
 | 看模块怎么分、请求怎么走 | [架构说明](architecture.md) |
+| 看工作动画、排队、提问与确认 | [终端交互](terminal-ui.md) |
 | 改系统提示词模块 | [提示词模块说明](../src/prompts/README.md) |
 | 查全部命令与按键 | 运行 `lubancode --help`，或在会话里输入 `/help` |
 
@@ -53,4 +54,3 @@
 | macOS arm64 | Clang | Build + Test | `.tar.gz` |
 
 推送 `v*` 标签后，发布流水线会创建 Release、生成说明，并挂上三份包。
-

@@ -4,9 +4,8 @@
 
 namespace lubancode::tools {
 
-// 对已有文件做精确字符串替换:old_string 必须在文件里逐字唯一出现
-// (除非 replace_all 置真),找不到、或者出现多次但没开 replace_all,
-// 都报错并说清楚原因(比如出现了几次)。执行前需要用户确认。
+// 对已有文件做字符串替换:先逐字精确找；失败后有限度兼容换行、统一
+// 缩进与行尾空白。任何一层出现多处且没开 replace_all 都拒绝猜测。
 class EditFileTool : public Tool {
 public:
     std::string name() const override;

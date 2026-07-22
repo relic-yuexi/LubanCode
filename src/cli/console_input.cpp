@@ -119,7 +119,11 @@ struct StreamFooterState {
     std::string reset;      // theme.reset;plain 主题为空串
     Theme theme;             // 完整主题:画框(BoxRuleLine)、状态行(PrintStatusLine)
                              // 直接复用 composer 那两个画法,得传整个 Theme,不能只传片段。
-    int row = -1;            // 框顶(上横线)此刻画在哪一绝对行,-1 = 没画
+    std::vector<std::string> queued;  // 已落队、等本轮结束后发送的消息
+    int row = -1;             // 整块 footer 顶行,-1 = 没画
+    int rows = 0;             // 上次实际画了几行(队列区会让高度变化)
+    int body_x = -1;          // footer 下方藏着的正文续写位置
+    int body_y = -1;
     // 0.22.5:工具确认交互期间为真——见 console_input.hpp
     // StreamFooterSuspendScope 注释。挂起期 RedrawStreamFooterLocked() 直接
     // 空操作,不管调用方是谁(ticker/OnDelta/监听线程键入回显),不用逐个
@@ -132,10 +136,11 @@ StreamFooterState& FooterSlot() {
 }
 
 // 0.22.x 流式脚注框化:跟 composer 视觉一致的完整框——上横线 + 输入行
-// (`> ` + 已键入内容 / 空闲占位提示) + 下横线 + 状态行,共 4 行,取代老版本
-// 光杆一行提示。上下横线复用 BoxRuleLine、状态行复用 PrintStatusLine(定义
-// 见下面 composer 输入框那节),不重写一份画法。
+// (`> ` + 已键入内容 / 空闲占位提示) + 下横线 + 状态行,基础 4 行；有
+// 排队消息时再在上方加常驻队列区。上下横线复用 BoxRuleLine、状态行复用
+// PrintStatusLine(定义见下面 composer 输入框那节),不重写一份画法。
 constexpr int kStreamFooterBoxRows = 4;
+constexpr std::size_t kMaxVisibleQueuedLines = 3;
 // synchronized output(DEC 私有模式 2026):写之前 h、写完 l,把一次重画钉成
 // 一帧提交,避免终端半途刷出"擦了一半/画了一半"的画面。已用 web 检索核实过
 // 假设:ECMA-48/xterm 的通用约定是私有模式号不认得就直接吞掉、不报错也不
@@ -151,8 +156,8 @@ constexpr const char* kSyncOutputEnd = "\x1b[?2026l";
 // 把 top_row 起 kStreamFooterBoxRows 行清空(连字符属性一起还原,不留主题色
 // 残底,同 CollapseBoxOnSubmit 的取舍)——越界的行(贴着缓冲区顶/底)直接
 // 跳过,不是错误。
-void ClearStreamFooterBoxAt(int top_row, int width, int height) {
-    for (int i = 0; i < kStreamFooterBoxRows; ++i) {
+void ClearStreamFooterRowsAt(int top_row, int rows, int width, int height) {
+    for (int i = 0; i < rows; ++i) {
         const int y = top_row + i;
         if (y < 0 || y >= height) {
             continue;
@@ -686,16 +691,20 @@ void EraseStreamFooterLocked() {
         return;  // 没画,不用擦
     }
     if (const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo(); info.has_value()) {
-        // 存下正文光标(擦框这几行不该动正文的落笔位),擦完拨回去。
-        const int bx = info->cursor_x;
-        const int by = info->cursor_y;
+        // 屏上光标停在输入行；正文续写点另存在 state 里。擦完须拨回
+        // 正文，下一笔流式文字才能接对地方。
+        const int bx = f.body_x >= 0 ? f.body_x : info->cursor_x;
+        const int by = f.body_y >= 0 ? f.body_y : info->cursor_y;
         std::cout << kSyncOutputBegin;
-        ClearStreamFooterBoxAt(f.row, info->width, info->height);
+        ClearStreamFooterRowsAt(f.row, f.rows, info->width, info->height);
         std::cout << kSyncOutputEnd;
         std::cout.flush();
         platform::SetCursorPos(bx, by);
     }
     f.row = -1;
+    f.rows = 0;
+    f.body_x = -1;
+    f.body_y = -1;
 }
 
 void RedrawStreamFooterLocked() {
@@ -707,15 +716,18 @@ void RedrawStreamFooterLocked() {
     if (!info.has_value()) {
         return;  // 拿不到屏幕信息这一笔就不画,下一笔再来
     }
-    const int bx = info->cursor_x;  // 正文当前落笔位
-    const int by = info->cursor_y;
+    // footer 已在屏上时，物理光标位于输入行；正文落笔位要从 state 取。
+    // 第一次画才从当前光标认领正文位置。
+    const int bx = f.row >= 0 && f.body_x >= 0 ? f.body_x : info->cursor_x;
+    const int by = f.row >= 0 && f.body_y >= 0 ? f.body_y : info->cursor_y;
 
     std::cout << kSyncOutputBegin;  // 擦旧框 + 画新框整个当一帧提交,别让半路的画面露出来
 
     // 先擦掉旧框(正文可能已把它顶走 / 输入行内容变了)。
     if (f.row >= 0) {
-        ClearStreamFooterBoxAt(f.row, info->width, info->height);
+        ClearStreamFooterRowsAt(f.row, f.rows, info->width, info->height);
         f.row = -1;
+        f.rows = 0;
     }
 
     if (f.hint.empty() && f.echo.empty()) {
@@ -725,6 +737,10 @@ void RedrawStreamFooterLocked() {
         platform::SetCursorPos(bx, by);
         return;
     }
+
+    const std::size_t visible_queued = (std::min)(f.queued.size(), kMaxVisibleQueuedLines);
+    const int queue_rows = f.queued.empty() ? 0 : 1 + static_cast<int>(visible_queued);
+    const int total_rows = queue_rows + kStreamFooterBoxRows;
 
     // 框落在正文光标的下一行:正文停在行中(bx>0)就 by+1,正文刚换行
     // 停在行首(bx==0)就落在 by 这空行上——两种都是"正文当前底部的下一行"。
@@ -737,7 +753,7 @@ void RedrawStreamFooterLocked() {
     // 整框落地就这一笔不画,下一笔正文把光标推着往下挪、腾出空间时再画;
     // 而 GetScreenInfo 的 height 是缓冲区总高(含回滚,常年是几千行),这个
     // "没地方"分支实际只在贴着缓冲区真正末尾时才会触发,极少见。
-    if (target < 0 || target + kStreamFooterBoxRows - 1 >= info->height) {
+    if (target < 0 || target + total_rows - 1 >= info->height) {
         std::cout << kSyncOutputEnd;
         std::cout.flush();
         platform::SetCursorPos(bx, by);
@@ -746,15 +762,30 @@ void RedrawStreamFooterLocked() {
 
     const int width = info->width;
     const BoxChrome chrome{true, &f.theme, SharedEditor().confirm_mode()};
+    int box_top = target;
 
-    platform::SetCursorPos(0, target);
+    if (!f.queued.empty()) {
+        platform::SetCursorPos(0, target);
+        std::cout << f.color << trf("input.queue_header", f.queued.size()) << f.reset;
+        const std::size_t first = f.queued.size() - visible_queued;
+        for (std::size_t i = 0; i < visible_queued; ++i) {
+            platform::SetCursorPos(0, target + 1 + static_cast<int>(i));
+            const std::string prefix = "  ↳ ";
+            const int room = (std::max)(0, width - static_cast<int>(DisplayWidthUtf8(prefix)) - 1);
+            std::cout << f.color << prefix
+                      << TruncateUtf8ToDisplayWidth(f.queued[first + i], room) << f.reset;
+        }
+        box_top += queue_rows;
+    }
+
+    platform::SetCursorPos(0, box_top);
     std::cout << BoxRuleLine(f.theme, width);
 
     // 输入行:"> " + 已键入内容(纯文本,照真实输入的样子);空闲时 "> " +
     // 淡色占位提示,充当"这里能打字"的可发现性提示(取代老版本单独一行
     // hint)。截断跟 PrintStatusLine 一个道理——夹着 ANSI 的整行不能整个截,
     // 先截纯文本内容,颜色包在截完的文本外头。
-    platform::SetCursorPos(0, target + 1);
+    platform::SetCursorPos(0, box_top + 1);
     const std::string prefix = "> ";
     const int content_width = width - 1 - static_cast<int>(DisplayWidthUtf8(prefix));
     std::cout << prefix;
@@ -766,16 +797,22 @@ void RedrawStreamFooterLocked() {
         }
     }
 
-    platform::SetCursorPos(0, target + 2);
+    platform::SetCursorPos(0, box_top + 2);
     std::cout << BoxRuleLine(f.theme, width);
 
-    platform::SetCursorPos(0, target + 3);
+    platform::SetCursorPos(0, box_top + 3);
     PrintStatusLine(chrome, width - 1);
 
     std::cout << kSyncOutputEnd;
     std::cout.flush();
-    platform::SetCursorPos(bx, by);  // 拨回正文末尾,下一笔正文接着往下打
+    // 正文位置藏起来，肉眼所见的光标留在输入框。下一笔正文来时
+    // EraseStreamFooterLocked 会先拨回 bx/by。
+    const int typed_width = f.echo.empty() ? 0 : static_cast<int>(DisplayWidthUtf8(f.echo));
+    platform::SetCursorPos((std::min)(width - 1, 2 + typed_width), box_top + 1);
     f.row = target;
+    f.rows = total_rows;
+    f.body_x = bx;
+    f.body_y = by;
 }
 
 void BeginStreamFooter(const Theme& theme, bool enabled) {
@@ -783,7 +820,11 @@ void BeginStreamFooter(const Theme& theme, bool enabled) {
     StreamFooterState& f = FooterSlot();
     f.enabled = enabled;
     f.row = -1;
+    f.rows = 0;
+    f.body_x = -1;
+    f.body_y = -1;
     f.echo.clear();
+    f.queued.clear();
     f.theme = theme;
     f.color = theme.stats;
     f.reset = theme.reset;
@@ -799,6 +840,7 @@ void EndStreamFooter() {
     EraseStreamFooterLocked();  // 擦掉常驻那行,免得残留在 markdown 收束重画区之外
     f.enabled = false;
     f.echo.clear();
+    f.queued.clear();
     f.hint.clear();
 }
 
@@ -975,22 +1017,16 @@ void TurnInputListener::ThreadMain() {
             if (!buffer.empty()) {
                 const std::string line = Utf32ToUtf8(buffer);
                 {
-                    std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
-                    EraseStreamFooterLocked();  // 擦掉"排队中: ..."回显行,腾给 [已排队] 落队行
-                    std::cout << "\n" << theme_.stats << tr("input.queued") << theme_.reset << line << "\n";
-                    std::cout.flush();
-                    if (const auto& hook = StreamScreenPrintHookSlot()) {
-                        hook();  // 同 ESC 分支:回显插了行,通知正文块作废锚点
-                    }
-                    // 提示行复位回可发现性提示,重画到落队行下方。
-                    FooterSlot().echo.clear();
-                    RedrawStreamFooterLocked();
-                }
-                {
                     std::lock_guard<std::mutex> lock(queue_mutex_);
                     queued_lines_.push_back(line);
                 }
                 buffer.clear();
+                {
+                    std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+                    FooterSlot().queued.push_back(line);
+                    FooterSlot().echo.clear();
+                    RedrawStreamFooterLocked();
+                }
             }
             continue;
         }

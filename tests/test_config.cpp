@@ -1786,6 +1786,111 @@ TEST_CASE("MergeConfig: 项目级 providers 整段压过全局") {
     CHECK(merged->sources.providers == config::Source::ProjectConfigFile);
 }
 
+TEST_CASE("active_provider: 解析、分层并展开对应 provider") {
+    const auto parsed = config::ParseFileConfigJson(R"({"active_provider":"sub-openai"})", "/tmp/config.json");
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->active_provider.has_value());
+    CHECK(*parsed->active_provider == "sub-openai");
+
+    const auto bad = config::ParseFileConfigJson(R"({"active_provider":7})", "/tmp/config.json");
+    CHECK_FALSE(bad.has_value());
+    CHECK(bad.error().find("active_provider") != std::string::npos);
+
+    config::FileConfig global;
+    global.source_path = "/global/config.json";
+    global.active_provider = "sub-openai";
+    global.providers = std::vector<config::ProviderConfig>{{
+        .name = "sub-openai",
+        .base_url = "https://api.example.test",
+        .wire = config::Wire::Responses,
+        .api_key = "sk-provider",
+        .model = "gpt-test",
+        .model_reasoning_effort = "xhigh",
+        .context_window_tokens = 512000,
+        .native_web_search = true,
+        .extra_body = nlohmann::json{{"reasoning", "high"}},
+        .extra_headers = {{"X-Test", "yes"}},
+    }};
+    auto merged = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global, EmptyGenericEnv());
+    REQUIRE(merged.has_value());
+    CHECK(merged->config.active_provider == "sub-openai");
+    CHECK(merged->sources.active_provider == config::Source::GlobalConfigFile);
+    REQUIRE(config::ApplyConfiguredActiveProvider(*merged));
+    CHECK(merged->config.wire == config::Wire::Responses);
+    CHECK(merged->config.base_url == "https://api.example.test");
+    CHECK(merged->config.auth_token == "sk-provider");
+    CHECK(merged->config.model == "gpt-test");
+    CHECK(merged->config.think == "xhigh");
+    CHECK(merged->config.context_window_tokens == 512000);
+    CHECK(merged->config.native_web_search);
+    CHECK(merged->config.extra_body.at("reasoning") == "high");
+    CHECK(merged->config.extra_headers.at("X-Test") == "yes");
+}
+
+TEST_CASE("active_provider: LUBANCODE 专属环境变量仍压过 provider,旧名字不拦启动") {
+    config::FileConfig global;
+    global.source_path = "/global/config.json";
+    global.active_provider = "sub";
+    global.providers = std::vector<config::ProviderConfig>{{
+        .name = "sub",
+        .base_url = "https://provider.test",
+        .wire = config::Wire::Responses,
+        .api_key = "provider-key",
+        .model = "provider-model",
+    }};
+    config::LubancodeEnvValues env;
+    env.base_url = "https://env.test";
+    env.api_key = "env-key";
+    env.model = "env-model";
+    auto merged = config::MergeConfig(env, std::nullopt, global, EmptyGenericEnv());
+    REQUIRE(merged.has_value());
+    REQUIRE(config::ApplyConfiguredActiveProvider(*merged));
+    CHECK(merged->config.base_url == "https://env.test");
+    CHECK(merged->config.auth_token == "env-key");
+    CHECK(merged->config.model == "env-model");
+
+    merged->config.active_provider = "removed";
+    CHECK_FALSE(config::ApplyConfiguredActiveProvider(*merged));
+    CHECK(merged->config.active_provider.empty());
+    CHECK(merged->sources.active_provider == config::Source::Default);
+}
+
+TEST_CASE("active_provider: 项目级选择可钉住全局 providers") {
+    config::FileConfig project;
+    project.source_path = "/project/config.json";
+    project.active_provider = "work";
+    project.base_url = "https://stale-project-value.test";
+    config::FileConfig global;
+    global.source_path = "/global/config.json";
+    global.providers = std::vector<config::ProviderConfig>{{
+        .name = "work",
+        .base_url = "https://selected.test",
+        .wire = config::Wire::Responses,
+        .api_key = "key",
+        .model = "selected-model",
+    }};
+
+    auto merged = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    REQUIRE(merged.has_value());
+    REQUIRE(config::ApplyConfiguredActiveProvider(*merged));
+    CHECK(merged->config.base_url == "https://selected.test");
+    CHECK(merged->sources.base_url == config::Source::ProjectConfigFile);
+    CHECK(merged->sources.active_provider == config::Source::ProjectConfigFile);
+}
+
+TEST_CASE("UpdateActiveProviderInConfigFile: 只改选择名,其余字段原样保留") {
+    TempCwdDir cwd;
+    const std::filesystem::path path = std::filesystem::path(cwd.Path()) / ".lubancode" / "config.json";
+    cwd.WriteFile(".lubancode/config.json", R"({"theme":"plain","自定义":7,"providers":[]})");
+
+    REQUIRE(config::UpdateActiveProviderInConfigFile(path.string(), "sub-openai").has_value());
+    const nlohmann::json written = nlohmann::json::parse(cwd.ReadFile(".lubancode/config.json"));
+    CHECK(written["active_provider"] == "sub-openai");
+    CHECK(written["theme"] == "plain");
+    CHECK(written["自定义"] == 7);
+    CHECK(written["providers"].empty());
+}
+
 TEST_CASE("UpdateProvidersInConfigFile: 回写保留旁字段且不落明文密钥") {
     TempCwdDir cwd;
     const std::filesystem::path path = std::filesystem::path(cwd.Path()) / ".lubancode" / "config.json";

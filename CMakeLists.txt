@@ -229,6 +229,7 @@ add_library(lubancode_core STATIC
   src/tools/command_safety.cpp
   src/tools/write_file.cpp
   src/tools/edit_file.cpp
+  src/tools/ask_user.cpp
   src/tools/search.cpp
   src/tools/agent_tool.cpp
   src/tools/hooks.cpp

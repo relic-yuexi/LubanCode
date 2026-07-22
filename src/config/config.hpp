@@ -264,6 +264,9 @@ struct Config {
     int connect_timeout_ms = kDefaultConnectTimeoutMs;
     int stream_idle_timeout_secs = kDefaultStreamIdleTimeoutSecs;
     int request_timeout_secs = kDefaultRequestTimeoutSecs;
+    // 上次成功切换的 provider 名。只记名字，不复制 URL、模型或密钥；
+    // LoadFromEnv 合并完配置后再从 providers 里展开成当前运行配置。
+    std::string active_provider;
     // 多端配置是配置文件里一个完整段：项目级写了 providers 就压全局那一
     // 段，跟 hooks/mcpServers/lsp 的既有合并法一致。
     std::vector<ProviderConfig> providers;
@@ -288,6 +291,9 @@ struct ConfigSources {
     Source connect_timeout_ms = Source::Default;        // M11:配置文件或默认,只有这两级
     Source stream_idle_timeout_secs = Source::Default;   // 同上
     Source request_timeout_secs = Source::Default;       // 同上
+    Source active_provider = Source::Default;
+    Source extra_body = Source::Default;
+    Source extra_headers = Source::Default;
     Source providers = Source::Default;
 };
 
@@ -374,6 +380,7 @@ struct FileConfig {
     std::optional<int> connect_timeout_ms;
     std::optional<int> stream_idle_timeout_secs;
     std::optional<int> request_timeout_secs;
+    std::optional<std::string> active_provider;
     std::optional<std::vector<ProviderConfig>> providers;
     std::string source_path;
     // 这份 FileConfig 是不是从"旧位置迁移到新位置"这个动作里读出来的;
@@ -469,6 +476,11 @@ std::expected<void, std::string> ValidateProviderName(const std::string& name,
 std::optional<std::string> ProviderApiKey(const ProviderConfig& provider);
 
 const ProviderConfig* FindProvider(const std::vector<ProviderConfig>& providers, const std::string& name);
+
+// 把 Config::active_provider 指向的条目展开到当前运行配置。provider 条目
+// 所在配置层级只压过同级或更低字段；LUBANCODE_* 仍居最上。找不到名字
+// 时清掉本次运行态选择并返回 false，不让一条旧记录拦住启动。
+bool ApplyConfiguredActiveProvider(ConfigResult& result);
 
 // 纯函数,不摸文件:在内存里的 providers 列表找 name 对应那条,把
 // native_web_search 改成 enabled。找到就改完返回 true;找不到原样不动、
@@ -568,6 +580,12 @@ std::expected<std::vector<ProviderConfig>, std::string> ParseProvidersConfig(
     const nlohmann::json& providers_json, const std::string& file_path_for_error);
 std::expected<void, std::string> UpdateProvidersInConfigFile(const std::string& file_path,
                                                                const std::vector<ProviderConfig>& providers);
+
+// 只改 active_provider 字段，其余 JSON 原样保留。前者供项目级固定选择，
+// 后者供 /provider switch 记住全局的上次选择。
+std::expected<void, std::string> UpdateActiveProviderInConfigFile(const std::string& file_path,
+                                                                    const std::string& name);
+std::expected<std::string, std::string> SetActiveProviderInGlobalConfig(const std::string& name);
 
 // /provider add/remove/set 永远改用户主目录的全局 config.json，不碰项目配置。
 // 成功时返回实际写入路径；删除/设置找不到名字时报错，不碰文件。

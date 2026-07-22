@@ -28,11 +28,11 @@ The name comes from Lu Ban, the traditional Chinese master craftsman. The idea i
 
 | Area | What is included |
 | --- | --- |
-| **Model access** | Anthropic and Responses protocols, multiple providers, native reasoning controls, custom body fields and headers. |
-| **Coding tools** | Read, write, precise edit, file search, foreground and background commands, diff-first approval. |
+| **Model access** | Anthropic and Responses protocols, remembered provider switching, native reasoning controls, custom body fields and headers. |
+| **Coding tools** | Read, write, tolerant block editing, file search, foreground and background commands, diff-first approval. |
 | **Semantic tools** | LSP definitions, references, symbols and diagnostics; MCP stdio; web search and fetch. |
-| **Agent workflow** | Sub-agents, todo tracking, deferred tool loading, isolated Git worktrees, project permissions. |
-| **Terminal UX** | Streaming Markdown, LaTeX rendering, multiline input, history, focused views, compact and detailed output. |
+| **Agent workflow** | Sub-agents, todo tracking, `ask_user` questions, deferred tool loading, isolated Git worktrees, project permissions. |
+| **Terminal UX** | Streaming Markdown, animated work status, a persistent message queue, multiline input, focused views, compact and detailed output. |
 | **Context and sessions** | Token breakdowns, automatic compaction, a dedicated compaction model, resume, titles and Markdown export. |
 | **Extensibility** | Skills, Lua tools, C ABI DLL plugins, hooks, themes, i18n, souls and system prompt overrides. |
 
@@ -133,6 +133,7 @@ For multiple model endpoints, use the `providers` array and keep secrets in envi
 
 ```json
 {
+  "active_provider": "work",
   "providers": [
     {
       "name": "work",
@@ -146,7 +147,7 @@ For multiple model endpoints, use the `providers` array and keep secrets in envi
 }
 ```
 
-Save it as `~/.lubancode/config.json`, then set `WORK_MODEL_API_KEY`. The detailed [configuration guide](docs/configuration.md) is currently written in Chinese, but all field names and examples are language-neutral.
+Save it as `~/.lubancode/config.json`, then set `WORK_MODEL_API_KEY`. A successful `/provider switch work` also writes `active_provider`, so the next launch uses the same endpoint. The detailed [configuration guide](docs/configuration.md) is currently written in Chinese, but all field names and examples are language-neutral.
 
 ## Everyday commands
 
@@ -172,6 +173,8 @@ Useful keys:
 - `Shift+Enter`: insert a newline in the composer.
 - `Esc`: interrupt the current turn or leave a focused view.
 
+While the model is working, type the next message and press Enter. It remains visible above the composer and is sent when the current turn finishes.
+
 ## Extending LubanCode
 
 There are four extension paths:
@@ -191,6 +194,7 @@ See the [extension guide](docs/extensions.md) for layouts, examples, namespacing
 | [Configuration](docs/configuration.md) | Providers, precedence, hooks, MCP, web search, LSP and model catalogs. Chinese. |
 | [Extensions](docs/extensions.md) | Skills, Lua, C ABI plugins, MCP and LSP. Chinese. |
 | [Architecture](docs/architecture.md) | Layers, request flow, API backends, tools and platform boundaries. Chinese. |
+| [Terminal UX](docs/terminal-ui.md) | Work animation, queued input, `ask_user`, approvals and edit matching. Chinese. |
 | [Prompt modules](src/prompts/README.md) | How built-in prompts are split, embedded, seeded and overridden. Chinese. |
 
 ## CI and releases

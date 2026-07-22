@@ -64,6 +64,7 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
 | `base_url` | 字符串 | 无 | 模型服务根地址。 |
 | `api_key` | 字符串 | 无 | 模型服务认证值。不要把真实值写进仓库。 |
 | `model` | 字符串 | 无 | 发请求所用模型名。 |
+| `active_provider` | 字符串 | 空 | 上次选中的 provider 名；启动时从 `providers` 展开。项目级可钉住，否则回退全局。 |
 | `theme` | 字符串：`dark`、`light`、`plain` | `dark` | 终端配色；管道或重定向时会降为 `plain`。 |
 | `think` | 字符串：`none`、`low`、`medium`、`high`，也可留空 | 空串 | 推理强度；空串时不向请求带推理参数。 |
 | `soul` | 字符串：空串、`default`、`off`，或 `souls/` 下文件名（不带 `.md`） | 空串 | 选风格叠加层。空串和 `default` 读 `SOUL.md`；`off` 不叠加。 |
@@ -79,6 +80,7 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
 | `lsp` | JSON object | 空 object | 语言服务器表；不写时 `lsp` 工具不注册。 |
 | `extra_body` | JSON object | 空 object | 每次请求浅合并进请求体顶层的额外字段，详见下节。 |
 | `extra_headers` | JSON object（字符串到字符串） | 空 | 每次请求附带的额外 HTTP 头，详见下节。 |
+| `providers` | 数组 | 空 | 多端模型配置；`/provider switch` 会记住选中的名字。 |
 
 `base_url`、`api_key`、`model` 没有内置值。交互模式会走初次配置向导；单发和管道模式会报缺项。
 
@@ -176,6 +178,8 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
 /provider set glm extra_body {"thinking":{"type":"enabled"},"reasoning_effort":"max"}
 /provider set glm extra_header X-Api-Version 2024-06-01
 ```
+
+`/provider switch <名字>` 成功后会写入 `active_provider`，下次启动仍用它。只存名字，不复制密钥；`LUBANCODE_*` 专属环境变量仍可临时压过。
 
 `/provider list` 只提示配了几个键/几条头（如 `extra_body=2键`），不会把 JSON 原文糊到屏幕上。
 
@@ -313,6 +317,7 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
 - `/clear` 清空历史开新会话；`/resume`、`/sessions` 续聊与列存档；`/export` 导出 Markdown。
 - `/model`、`/think`、`/language`、`/soul`、`/prompt`、`/skills`、`/tools`、`/mcp`、`/lsp`、`/todos`、`/config` 各管一摊，`/help` 有全表。
 - 快捷键：Ctrl+O 切换紧凑/详细；Tab/Shift+Tab 在工具条目间移焦点；Ctrl+E 聚焦查看全文;ESC 打断当前轮。
+- 模型工作时可直接键入下一条并回车；消息留在常驻队列区，本轮收尾后依次发送。模型遇到会改变方向的选择时，可用 `ask_user` 摆出选项，末项由用户自行填写。
 
 ## 常见任务
 

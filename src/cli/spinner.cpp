@@ -1,9 +1,11 @@
 #include "cli/spinner.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <iostream>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "cli/console_input.hpp"
 #include "cli/i18n.hpp"
@@ -12,11 +14,26 @@ namespace lubancode::cli {
 
 namespace {
 
-// Windows 控制台字体保险起见用纯 ASCII 转轮,不用 ⠋⠙⠹ 这类 Unicode
-// 盲文块字符(部分控制台字体/代码页下会显示成方块或问号)。
-constexpr char kFrames[] = {'-', '\\', '|', '/'};
-constexpr int kFrameCount = 4;
-constexpr auto kFrameInterval = std::chrono::milliseconds(120);
+constexpr auto kFrameInterval = std::chrono::milliseconds(140);
+
+std::vector<std::string> Utf8Glyphs(const std::string& text) {
+    std::vector<std::string> out;
+    for (std::size_t i = 0; i < text.size();) {
+        const unsigned char lead = static_cast<unsigned char>(text[i]);
+        std::size_t bytes = 1;
+        if ((lead & 0xE0U) == 0xC0U) {
+            bytes = 2;
+        } else if ((lead & 0xF0U) == 0xE0U) {
+            bytes = 3;
+        } else if ((lead & 0xF8U) == 0xF0U) {
+            bytes = 4;
+        }
+        bytes = (std::min)(bytes, text.size() - i);
+        out.push_back(text.substr(i, bytes));
+        i += bytes;
+    }
+    return out;
+}
 
 }  // namespace
 
@@ -24,15 +41,28 @@ Spinner::Spinner(const Theme& theme, bool enabled) : enabled_(enabled), stopped_
     if (!enabled_) {
         return;
     }
+    // 后续工具回合再请求模型时，物理光标可能正停在流式输入框。先把
+    // footer 收起、光标送回正文，Working 才不会盖住输入行。
+    footer_suspend_ = std::make_unique<StreamFooterSuspendScope>();
     thread_ = std::thread([this, theme] {
-        int frame = 0;
+        std::size_t frame = 0;
+        const auto started = std::chrono::steady_clock::now();
+        const std::vector<std::string> glyphs = Utf8Glyphs(tr("spinner.thinking"));
         while (!stop_flag_.load(std::memory_order_relaxed)) {
             {
                 // 跟 ESC 监听线程的"已打断/已排队"提示共用一个 stdout 锁,
                 // 不持锁的话转轮帧会跟那些提示交错,花屏。
                 std::lock_guard<std::mutex> lock(StdoutWriteMutex());
-                std::cout << "\r" << theme.spinner << kFrames[frame % kFrameCount] << theme.reset << " "
-                          << tr("spinner.thinking") << std::flush;
+                const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                                         std::chrono::steady_clock::now() - started)
+                                         .count();
+                std::cout << "\r\x1b[2K" << theme.spinner << "• " << theme.reset;
+                for (std::size_t i = 0; i < glyphs.size(); ++i) {
+                    const bool lit = !theme.reset.empty() && i == frame % glyphs.size();
+                    std::cout << (lit ? theme.spinner : theme.stats) << glyphs[i];
+                }
+                std::cout << theme.stats << " (" << seconds << "s · " << tr("spinner.interrupt_hint") << ")"
+                          << theme.reset << std::flush;
             }
             ++frame;
             std::this_thread::sleep_for(kFrameInterval);
@@ -52,11 +82,12 @@ void Spinner::Stop() {
     if (thread_.joinable()) {
         thread_.join();
     }
-    // 擦掉这一行:回车 + 足够宽的空格盖掉 "- 思考中" 之类的内容 + 再回车。
+    // 整行擦净，免得耗时数字变长后留下尾巴。
     {
         std::lock_guard<std::mutex> lock(StdoutWriteMutex());
-        std::cout << "\r" << std::string(16, ' ') << "\r" << std::flush;
+        std::cout << "\r\x1b[2K\r" << std::flush;
     }
+    footer_suspend_.reset();
     stopped_ = true;
 }
 

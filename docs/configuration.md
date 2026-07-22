@@ -56,6 +56,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 | `base_url` | 字符串 | 无内置默认值 | 模型服务根地址。 |
 | `api_key` | 字符串 | 无内置默认值 | 模型服务认证值,别提交进仓库。 |
 | `model` | 字符串 | 无内置默认值 | 发请求所用模型名。 |
+| `active_provider` | 字符串 | 空 | 上次选中的 provider 名；启动时从 `providers` 展开连接、密钥来源、模型与私有参数。项目级可钉住选择，否则回退全局。 |
 | `theme` | `dark` / `light` / `plain` | `dark` | 终端配色;管道或重定向到文件时自动降为 `plain`。 |
 | `think` | `none`/`low`/`medium`/`high`,可留空 | 空串 | 推理强度;空串时不往请求里带推理参数(跟无此功能的旧版本行为一致)。 |
 | `soul` | 空串 / `default` / `off` / `souls/` 下文件名(不带 `.md`) | 空串 | 风格叠加层。空串和 `default` 读 `SOUL.md`;`off` 不叠加。 |
@@ -110,6 +111,8 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 /provider set <名字> extra_body <JSON object>
 /provider set <名字> extra_header <头名> <值>
 ```
+
+`/provider switch` 校验成功便记住选择。项目配置已写 `active_provider` 时继续写回项目；其余场景写入全局 `~/.lubancode/config.json`。这里只存名字，密钥仍留在 provider 的 `api_key` 或 `key_env`。`LUBANCODE_*` 专属环境变量照旧压在最上。
 
 ## 三、LUBANCODE_* 环境变量表
 

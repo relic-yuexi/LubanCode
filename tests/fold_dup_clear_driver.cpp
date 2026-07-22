@@ -15,7 +15,7 @@
 //   3. 紧凑模式(默认)下子代理内层工具明细不再逐条铺屏——收尾之后全屏
 //      找不到 4 空格缩进 + ● 圆点的子工具条目行(SubTool 专属缩进规矩)。
 //
-// 本单新增四件(显示体验四单落地之后的回归/深化):
+// 本单新增六件(显示体验四单落地之后的回归/深化):
 //   4. 图标:启动打一次,/clear 之后重打一次(不是清成一片空白)——用
 //      图标独有的 "匠心运斤" 四个字当签名,数它在整块缓冲区里出现几次:
 //      /clear 前 1 次(启动打的那次),/clear 之后仍然是 1 次(旧的被真清屏
@@ -30,9 +30,12 @@
 //      用状态行的 "shift+tab" / 输入行占位提示"排队下一条" 当信号。
 //   7. /provider switch 成功后真清一次屏,按新配置重画图标与横幅,切换
 //      提示留在屏上；失败、管道输出不清。
+//   8. ask_user 真由模型调用，编号选择与末项自由填写都能回传。
+//   9. 彩色 diff 确认块收起后，空白区不留下长条背景色块。
 //
 // 用法: fold_dup_clear_driver <lubancode.exe 路径> <子进程工作目录> <报告文件路径>
-//                             [要验证清屏的 provider 名] [--provider-only]
+//                             [要验证清屏的 provider 名]
+//                             [--provider-only|--ask-user-only|--edit-color-only]
 // 环境变量(LUBANCODE_BASE_URL/LUBANCODE_API_KEY/LUBANCODE_MODEL 或者走
 // 子进程工作目录/USERPROFILE 下现成的 config.json)由调用方设好,子进程
 // 原样继承。
@@ -41,6 +44,7 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <algorithm>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -96,6 +100,27 @@ int BufferHeight() {
     CONSOLE_SCREEN_BUFFER_INFO info{};
     GetConsoleScreenBufferInfo(g_conout, &info);
     return info.dwSize.Y;
+}
+
+int MaxBlankColoredRun(WORD default_background, int height) {
+    const int width = BufferWidth();
+    constexpr WORD kBackgroundMask = BACKGROUND_BLUE | BACKGROUND_GREEN | BACKGROUND_RED | BACKGROUND_INTENSITY;
+    int longest = 0;
+    for (int row = 0; row < height; ++row) {
+        std::vector<CHAR_INFO> cells(static_cast<std::size_t>(width));
+        SMALL_RECT region{0, static_cast<SHORT>(row), static_cast<SHORT>(width - 1), static_cast<SHORT>(row)};
+        if (!ReadConsoleOutputW(g_conout, cells.data(), COORD{static_cast<SHORT>(width), 1}, COORD{0, 0}, &region)) {
+            continue;
+        }
+        int run = 0;
+        for (const CHAR_INFO& cell : cells) {
+            const bool blank = cell.Char.UnicodeChar == L' ' || cell.Char.UnicodeChar == L'\0';
+            const bool colored = (cell.Attributes & kBackgroundMask) != default_background;
+            run = blank && colored ? run + 1 : 0;
+            longest = (std::max)(longest, run);
+        }
+    }
+    return longest;
 }
 
 std::string ReadRow(int row) {
@@ -222,6 +247,8 @@ int wmain(int argc, wchar_t** argv) {
     const std::wstring workdir = argv[2];
     const std::string provider_name = argc >= 5 ? WideToUtf8(argv[4]) : std::string();
     const bool provider_only = argc >= 6 && std::wstring(argv[5]) == L"--provider-only";
+    const bool ask_user_only = argc >= 6 && std::wstring(argv[5]) == L"--ask-user-only";
+    const bool edit_color_only = argc >= 6 && std::wstring(argv[5]) == L"--edit-color-only";
     g_report.open(argv[3], std::ios::binary | std::ios::trunc);
     if (!g_report.is_open()) {
         return 2;
@@ -254,6 +281,10 @@ int wmain(int argc, wchar_t** argv) {
     SetConsoleWindowInfo(g_conout, TRUE, &window);
     FlushConsoleInputBuffer(g_conin);
     const int height = BufferHeight();
+    CONSOLE_SCREEN_BUFFER_INFO initial_info{};
+    GetConsoleScreenBufferInfo(g_conout, &initial_info);
+    constexpr WORD kBackgroundMask = BACKGROUND_BLUE | BACKGROUND_GREEN | BACKGROUND_RED | BACKGROUND_INTENSITY;
+    const WORD default_background = initial_info.wAttributes & kBackgroundMask;
     Log("INFO: console buffer " + std::to_string(BufferWidth()) + "x" + std::to_string(height));
 
     STARTUPINFOW si{};
@@ -325,6 +356,52 @@ int wmain(int argc, wchar_t** argv) {
         if (provider_only) {
             return finish();
         }
+    }
+
+    // ---- #八:ask_user 选择 + 自填 ----
+    if (ask_user_only) {
+        SendText("请必须调用 ask_user 工具问我一个单选题:题目是'采用哪种发布方式?',"
+                 "选项只给'正式版'和'预发布'两项。不要直接在正文里问。");
+        SendKey(VK_RETURN, L'\r', 0);
+        Check(WaitForText("请选择编号", 60000, height),
+              "#八 ask_user:模型调用工具并出现编号提示(60s 内)");
+        SendText("3");  // 两个模型选项之后,第三项是程序自动补的“自己填写”
+        SendKey(VK_RETURN, L'\r', 0);
+        Check(WaitForText("请输入你的答案", 10000, height),
+              "#八 ask_user:末项进入自由填写");
+        SendText("灰度发布");
+        SendKey(VK_RETURN, L'\r', 0);
+        Check(WaitForText("已选择", 10000, height) && WaitForText("灰度发布", 10000, height),
+              "#八 ask_user:自填答案留在屏上并回传工具");
+        Check(WaitForText("[tokens]", 90000, height),
+              "#八 ask_user:模型拿到答案后完成本轮");
+        return finish();
+    }
+
+    // ---- #九:彩色 diff 收起后不留背景色块 ----
+    if (edit_color_only) {
+        const std::wstring probe_path = workdir + L"\\build\\ui-color-probe.txt";
+        {
+            std::ofstream probe(probe_path, std::ios::binary | std::ios::trunc);
+            probe << "alpha\nbeta\ngamma\n";
+        }
+        const std::string probe_utf8 = WideToUtf8(probe_path);
+        SendText("请直接调用 edit_file,把文件 " + probe_utf8 +
+                 " 里的 beta 改成 BETA。不要改别处,不要用其他写文件工具。");
+        SendKey(VK_RETURN, L'\r', 0);
+        Check(WaitForText("[y] 本次允许", 60000, height),
+              "#九 edit_file:彩色 diff 确认提示出现(60s 内)");
+        SendText("y");
+        SendKey(VK_RETURN, L'\r', 0);
+        Check(WaitForText("[tokens]", 90000, height),
+              "#九 edit_file:工具执行并完成本轮");
+        Sleep(500);
+        const int blank_color_run = MaxBlankColoredRun(default_background, height);
+        Check(blank_color_run < 20,
+              "#九 diff 收起:空白区没有长条背景残色(最长 " +
+                  std::to_string(blank_color_run) + " 格)");
+        DeleteFileW(probe_path.c_str());
+        return finish();
     }
 
     // ---- #一:/clear 清屏 ----

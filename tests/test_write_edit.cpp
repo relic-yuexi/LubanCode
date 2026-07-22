@@ -163,7 +163,55 @@ TEST_CASE("edit_file: 找不到 old_string,报错") {
     const Tool::Result result = tool.execute(input);
 
     CHECK(result.is_error);
-    CHECK_FALSE(result.content.empty());
+    CHECK(result.content.find("read_file") != std::string::npos);
+    CHECK(result.content.find("不要原样重复调用") != std::string::npos);
+}
+
+TEST_CASE("edit_file: CRLF 文件可用 LF old_string 命中,并保持 CRLF") {
+    TempDir dir;
+    const std::string path = dir.Utf8Path("crlf.txt");
+    WriteFileRaw(path, "alpha\r\nbeta\r\ngamma\r\n");
+
+    EditFileTool tool;
+    nlohmann::json input{{"path", path}, {"old_string", "alpha\nbeta"}, {"new_string", "one\ntwo"}};
+    const Tool::Result result = tool.execute(input);
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("换行归一") != std::string::npos);
+    CHECK(ReadFileRaw(path) == "one\r\ntwo\r\ngamma\r\n");
+}
+
+TEST_CASE("edit_file: 统一缩进和行尾空白不同仍可唯一命中") {
+    TempDir dir;
+    const std::string path = dir.Utf8Path("indent.txt");
+    WriteFileRaw(path, "void f() {\n    if (ready) {   \n        run();\t\n    }\n}\n");
+
+    EditFileTool tool;
+    nlohmann::json input{{"path", path},
+                         {"old_string", "if (ready) {\n    run();\n}"},
+                         {"new_string", "if (ready) {\n    finish();\n}"}};
+    const Tool::Result result = tool.execute(input);
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("缩进/行尾空白归一") != std::string::npos);
+    CHECK(ReadFileRaw(path) == "void f() {\n    if (ready) {\n        finish();\n    }\n}\n");
+}
+
+TEST_CASE("edit_file: 宽松匹配多处时拒绝猜测并报起始行") {
+    TempDir dir;
+    const std::string path = dir.Utf8Path("ambiguous.txt");
+    WriteFileRaw(path, "  call();  \n  next();\n\n    call();\t\n    next();\n");
+
+    EditFileTool tool;
+    nlohmann::json input{{"path", path},
+                         {"old_string", "call();\nnext();"},
+                         {"new_string", "done();\nnext();"}};
+    const Tool::Result result = tool.execute(input);
+
+    CHECK(result.is_error);
+    CHECK(result.content.find("2 处") != std::string::npos);
+    CHECK(result.content.find("起始行") != std::string::npos);
+    CHECK(ReadFileRaw(path) == "  call();  \n  next();\n\n    call();\t\n    next();\n");
 }
 
 TEST_CASE("edit_file: replace_all 全部替换") {

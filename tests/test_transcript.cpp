@@ -164,6 +164,14 @@ TEST_CASE("BuildToolTitle: agent 显示任务前 40 个码点") {
     CHECK(cjk_title.size() == std::string("agent(").size() + 40 * 3 + 3 + 1);
 }
 
+TEST_CASE("BuildToolTitle: ask_user 显示第一道问题,不把整份参数糊上屏") {
+    const nlohmann::json input = {
+        {"questions", nlohmann::json::array({{{"question", "你想选哪一种实现?"},
+                                               {"options", nlohmann::json::array()}}})},
+    };
+    CHECK(BuildToolTitle("ask_user", input) == "ask_user(你想选哪一种实现?)");
+}
+
 TEST_CASE("BuildToolTitle: MCP 工具显示参数紧凑 JSON,换行压成空格") {
     const nlohmann::json input = {{"a", 17}, {"b", 25}};
     CHECK(BuildToolTitle("mcp__test__add", input) == "mcp__test__add(" + input.dump() + ")");

@@ -174,6 +174,11 @@ std::string BuildToolTitle(const std::string& name, const nlohmann::json& input)
         arg = input.value("path", std::string());
     } else if (name == "agent") {
         arg = TruncateUtf8Codepoints(input.value("prompt", std::string()), 40);
+    } else if (name == "ask_user") {
+        if (const auto questions = input.find("questions"); questions != input.end() && questions->is_array() &&
+            !questions->empty() && (*questions)[0].is_object()) {
+            arg = TruncateUtf8Codepoints((*questions)[0].value("question", std::string()), 40);
+        }
     } else if (name == "todo_write") {
         std::size_t count = 0;
         if (const auto it = input.find("todos"); it != input.end() && it->is_array()) {
