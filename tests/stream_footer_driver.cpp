@@ -374,6 +374,10 @@ int wmain(int argc, wchar_t** argv) {
     // 等第一轮问答彻底收束(统计行落定),避免跟下面的 ESC 测试撞车。
     Check(WaitForTextCount("[tokens]", 2, 180000),
           "G1 主消息与排队消息:两轮统计行都出现(180s 内)");
+    const int read_file_title_rows = CountRowsWithText("read_file(");
+    Check(read_file_title_rows == 1,
+          "G2 工具终态原位覆写:read_file 标题只剩一行(实际 " +
+              std::to_string(read_file_title_rows) + " 行)");
     Sleep(1000);
 
     // ---- G3 ESC 打断:再发一句,几乎立刻按 ESC,验证打断提示 + 程序继续可用 ----

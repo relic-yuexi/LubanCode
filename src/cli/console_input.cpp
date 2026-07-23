@@ -128,11 +128,11 @@ struct StreamFooterState {
     int rows = 0;             // 上次实际画了几行(队列区会让高度变化)
     int body_x = -1;          // footer 下方藏着的正文续写位置
     int body_y = -1;
-    // 0.22.5:工具确认交互期间为真——见 console_input.hpp
-    // StreamFooterSuspendScope 注释。挂起期 RedrawStreamFooterLocked() 直接
-    // 空操作,不管调用方是谁(ticker/OnDelta/监听线程键入回显),不用逐个
-    // 调用点接管。
-    bool suspended = false;
+    // 两枚深度都只在 StdoutWriteMutex 内改。确认/ask_user 可嵌套挂起；
+    // 工具条目重画也可套着状态块重画。任何一层尚未退完，Redraw 都只记
+    // 状态不落笔，最外层析构负责补回完整帧。
+    int suspend_depth = 0;
+    int paint_depth = 0;
 };
 StreamFooterState& FooterSlot() {
     static StreamFooterState f;
@@ -727,11 +727,49 @@ std::function<void()>& StreamScreenPrintHookSlot() {
     return hook;
 }
 
+std::function<void(int)>& StreamScreenScrollHookSlot() {
+    static std::function<void(int)> hook;
+    return hook;
+}
+
 }  // namespace
 
 void SetStreamScreenPrintHook(std::function<void()> hook) {
     std::lock_guard<std::mutex> lock(StdoutWriteMutex());
     StreamScreenPrintHookSlot() = std::move(hook);
+}
+
+void SetStreamScreenScrollHook(std::function<void(int)> hook) {
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    StreamScreenScrollHookSlot() = std::move(hook);
+}
+
+bool EnsureStreamScreenRowsLocked(int rows_needed) {
+    if (rows_needed <= 0) {
+        return true;
+    }
+    const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
+    if (!info.has_value() || info->height <= 0) {
+        return false;
+    }
+    const int needed_bottom = info->cursor_y + rows_needed - 1;
+    if (needed_bottom < info->height) {
+        return true;
+    }
+    const int overflow = needed_bottom - info->height + 1;
+    if (overflow > info->cursor_y) {
+        return false;
+    }
+    platform::SetCursorPos(0, info->height - 1);
+    for (int i = 0; i < overflow; ++i) {
+        std::cout << "\n";
+    }
+    std::cout.flush();
+    if (const auto& hook = StreamScreenScrollHookSlot()) {
+        hook(overflow);
+    }
+    platform::SetCursorPos(info->cursor_x, info->cursor_y - overflow);
+    return true;
 }
 
 void EraseStreamFooterLocked() {
@@ -758,7 +796,7 @@ void EraseStreamFooterLocked() {
 
 void RedrawStreamFooterLocked() {
     StreamFooterState& f = FooterSlot();
-    if (!f.enabled || f.suspended) {
+    if (!f.enabled || f.suspend_depth > 0 || f.paint_depth > 0) {
         return;  // 挂起期间(工具确认交互中)一律不画,见 StreamFooterSuspendScope 注释
     }
     const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
@@ -767,8 +805,8 @@ void RedrawStreamFooterLocked() {
     }
     // footer 已在屏上时，物理光标位于输入行；正文落笔位要从 state 取。
     // 第一次画才从当前光标认领正文位置。
-    const int bx = f.row >= 0 && f.body_x >= 0 ? f.body_x : info->cursor_x;
-    const int by = f.row >= 0 && f.body_y >= 0 ? f.body_y : info->cursor_y;
+    int bx = f.row >= 0 && f.body_x >= 0 ? f.body_x : info->cursor_x;
+    int by = f.row >= 0 && f.body_y >= 0 ? f.body_y : info->cursor_y;
 
     std::cout << kSyncOutputBegin;  // 擦旧框 + 画新框整个当一帧提交,别让半路的画面露出来
 
@@ -794,21 +832,22 @@ void RedrawStreamFooterLocked() {
 
     // 框落在正文光标的下一行:正文停在行中(bx>0)就 by+1,正文刚换行
     // 停在行首(bx==0)就落在 by 这空行上——两种都是"正文当前底部的下一行"。
-    const int target = by + (bx > 0 ? 1 : 0);
-    // 框比老光杆一行高(上横线 + 输入行 + 下横线 + 状态行,共
-    // kStreamFooterBoxRows 行),但绝不自己触发滚屏——理由跟老版一致:滚屏
-    // 会打乱正文块(main.cpp StreamBodyTracker)的锚点账,这轮明确不碰它,
-    // 也没有复用 RedrawEditArea/EnsureRoomForRows(那套是给 LineEditorCore
-    // 的多行编辑区记账的,这里没有那个状态,硬凑反而画蛇添足)。没地方
-    // 整框落地就这一笔不画,下一笔正文把光标推着往下挪、腾出空间时再画;
-    // 而 GetScreenInfo 的 height 是缓冲区总高(含回滚,常年是几千行),这个
-    // "没地方"分支实际只在贴着缓冲区真正末尾时才会触发,极少见。
-    if (target < 0 || target + total_rows - 1 >= info->height) {
+    // ConPTY 常把缓冲区高度报成窗口高度，正文一长，框很快便贴底。旧版
+    // 这时干脆不画，正是“Working 还在，输入框忽然没了”的根子。如今先
+    // 主动滚够行数，再由 scroll hook 把正文/工具锚点一同上移。
+    platform::SetCursorPos(bx, by);
+    const int body_offset = bx > 0 ? 1 : 0;
+    if (!EnsureStreamScreenRowsLocked(body_offset + total_rows)) {
         std::cout << kSyncOutputEnd;
         std::cout.flush();
         platform::SetCursorPos(bx, by);
         return;
     }
+    if (const std::optional<platform::ScreenInfo> after_scroll = platform::GetScreenInfo(); after_scroll.has_value()) {
+        bx = after_scroll->cursor_x;
+        by = after_scroll->cursor_y;
+    }
+    const int target = by + (bx > 0 ? 1 : 0);
 
     const int width = info->width;
     const BoxChrome chrome{true, &f.theme, SharedEditor().confirm_mode()};
@@ -885,6 +924,8 @@ void BeginStreamFooter(const Theme& theme, bool enabled) {
     f.working_label.clear();
     f.working_highlight = 0;
     f.working_seconds = 0;
+    f.suspend_depth = 0;
+    f.paint_depth = 0;
     f.theme = theme;
     f.color = theme.stats;
     f.reset = theme.reset;
@@ -903,6 +944,8 @@ void EndStreamFooter() {
     f.hint.clear();
     f.working = false;
     f.working_label.clear();
+    f.suspend_depth = 0;
+    f.paint_depth = 0;
 }
 
 bool StartStreamFooterWorking(const std::string& label) {
@@ -949,13 +992,48 @@ void StopStreamFooterWorking() {
 // 临界区里拿一下 StdoutWriteMutex,不会跨整个确认交互一直攥着锁。
 StreamFooterSuspendScope::StreamFooterSuspendScope() {
     std::lock_guard<std::mutex> lock(StdoutWriteMutex());
-    EraseStreamFooterLocked();       // 落笔前先把框彻底擦干净(整行清,不留旧字符残留)
-    FooterSlot().suspended = true;   // 挂起后续所有 RedrawStreamFooterLocked() 调用
+    StreamFooterState& f = FooterSlot();
+    if (f.suspend_depth == 0) {
+        EraseStreamFooterLocked();  // 最外层落笔前把框彻底擦净
+    }
+    ++f.suspend_depth;
 }
 
 StreamFooterSuspendScope::~StreamFooterSuspendScope() {
     std::lock_guard<std::mutex> lock(StdoutWriteMutex());
-    FooterSlot().suspended = false;  // 摘挂起标记,不主动补画——下一笔正文/ticker 自然画回来
+    StreamFooterState& f = FooterSlot();
+    if (f.suspend_depth > 0) {
+        --f.suspend_depth;
+    }
+    if (f.suspend_depth == 0) {
+        RedrawStreamFooterLocked();  // 不再赌“后面总还有一笔事件”
+    }
+}
+
+StreamFooterPaintScope::StreamFooterPaintScope(bool enabled) : active_(enabled) {
+    if (!active_) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    StreamFooterState& f = FooterSlot();
+    if (f.paint_depth == 0) {
+        EraseStreamFooterLocked();
+    }
+    ++f.paint_depth;
+}
+
+StreamFooterPaintScope::~StreamFooterPaintScope() {
+    if (!active_) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    StreamFooterState& f = FooterSlot();
+    if (f.paint_depth > 0) {
+        --f.paint_depth;
+    }
+    if (f.paint_depth == 0) {
+        RedrawStreamFooterLocked();
+    }
 }
 
 TurnInputListener::TurnInputListener(std::atomic<bool>& cancel_flag, const Theme& theme,

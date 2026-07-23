@@ -92,7 +92,7 @@
 
 namespace {
 
-constexpr std::string_view kVersion = "0.23.2";
+constexpr std::string_view kVersion = "0.23.3";
 
 // i18n:tr/trf 在本文件里到处用,拉进匿名命名空间省得每处全限定。
 using lubancode::cli::tr;
@@ -1097,7 +1097,10 @@ public:
         }
         int start_row = info->cursor_y;
         const int rows = lubancode::cli::CountLines(text);
-        EnsureRoom(start_row, rows);
+        // Render 末尾带换行；除内容行外还得给换行后的光标留一格。少这
+        // 一格，条目贴底时会暗滚一行，锚点便比真标题低一行，终态重画
+        // 只能在旧黄行下面另起绿行。
+        EnsureRoom(start_row, rows + 1);
         lubancode::platform::SetCursorPos(0, start_row);
         std::cout << text;
         std::cout.flush();
@@ -1148,7 +1151,7 @@ public:
         const int rows_to_clear = (std::max)(anchor->rows, new_rows);
         if (at_tail) {
             int start_row = anchor->start_row;
-            EnsureRoom(start_row, rows_to_clear);  // 里头会同步平移所有锚点
+            EnsureRoom(start_row, rows_to_clear + 1);  // Render 末尾带换行，须多留一行
         }
         for (int r = 0; r < rows_to_clear; ++r) {
             lubancode::platform::ClearRowFrom(0, anchor->start_row + r, buffer_width);
@@ -1260,6 +1263,21 @@ public:
         }
     }
 
+    // footer / 状态块主动滚屏后同步绝对锚点。调用方已持有 stdout 锁。
+    void OnScreenScrolledLocked(int rows) {
+        if (!enabled_ || rows <= 0) {
+            return;
+        }
+        anchors_.erase(std::remove_if(anchors_.begin(), anchors_.end(), [rows](Anchor& anchor) {
+                           if (anchor.start_row < rows) {
+                               return true;  // 整块已经滚出缓冲区，锚点作废
+                           }
+                           anchor.start_row -= rows;
+                           return false;
+                       }),
+                       anchors_.end());
+    }
+
 private:
     struct Anchor {
         int item_id = 0;
@@ -1341,38 +1359,11 @@ private:
 // AgentTool::execute 的 on_text_delta 留空)照样能看见耗时在跳,不会让人
 // 以为程序卡死。
 //
-// 跟 TranscriptPainter 不是一回事:后者管"原地改写一个已登记的条目",这个
-// 只管"屏幕最下面挂一块随时可能整体重画的浮动区",用相对光标移动
-// (\x1b[{n}F 光标上移 n 行到行首 + \x1b[J 擦到屏幕底)实现,不依赖 Win32
-// GetScreenInfo/SetCursorPos 那套绝对锚点——天然不受缓冲区滚动影响,
-// POSIX 一样能用(TranscriptPainter 的绝对锚点目前只在 Windows 开)。
-// enabled 挑 "is_console && 彩色主题" 这条件(跟 StreamBodyTracker 一样),
-// 因为相对光标移动转义序列得有 VT 处理撑着——colors_enabled 为真已经
-// 隐含 VT 开成了。
-//
-// 真机排查过程(子代理连打工具调用时"一黄一绿"重复的疑似根因):理论上
-// 这个 ticker 每 400ms 在当前光标位置往下新打几行状态摘要,如果这时候
-// 贴近控制台缓冲区底(ConPTY 宿主的 dwSize.Y 常等于可见窗口高度,不像
-// conhost 那样有上万行大缓冲区),这几行可能触发一次真实滚屏——这次滚屏
-// 瞒着 TranscriptPainter,后者的 anchors_ 只在自己 PaintNew/Repaint 调用
-// EnsureRoom 时才会同步平移,ticker 自己造成的滚屏它一无所知,子代理内层
-// 工具条目的锚点可能因此悄悄失真。
-//
-// 曾经按这个假设把 Tick() 接到 TranscriptPainter::ReserveRows()(打印前
-// 先占位、顺带同步平移锚点)——AllocConsole 真机复现(tests/
-// fold_dup_clear_driver.cpp)验证时,这个接法在真跑一次"agent 工具委派
-// 子任务、子任务连打 search"的完整流程时会把整个程序拖死(几分钟收不到
-// 任何新内容,ctrl+c 之外唯一出路是强杀);去掉这一行接线,同一个场景
-// 立刻恢复正常且全程无残留/无重复。反复二分之后没能在预算内揪出这个
-// 死锁/活锁的确切成因(静态审查没找到经典的 AB-BA 加锁顺序问题,嫌疑
-// 落在 ticker 线程和主线程高频交替抢 StdoutWriteMutex() 时某种没审出来
-// 的时序坑上),但结论很清楚:这个耦合弊大于利——真机验证同时证明,
-// 不接这条线,子代理连打工具调用本身也没有复现"一黄一绿"(#二 的另一条
-// 根因——SupportsScreenRepaint() 从硬编码 true 改成真探测,加上下面
-// TranscriptPainter::PaintNew/Repaint 那处"退化路径不重复打印"的修复——
-// 已经把这个症状堵住了,ticker/锚点这条耦合不做也没有可观测的复现)。
-// 所以保留 ticker 用相对光标移动的独立打印方式不变,不再跟
-// TranscriptPainter 的绝对锚点账本产生任何交互。
+// 跟 TranscriptPainter 不是一回事:后者改写一个已登记条目,这个管屏幕
+// 末尾那块浮动状态。每帧先收起 footer,回到正文续写点,再用相对光标移动
+// 擦旧状态。若新状态贴底，EnsureStreamScreenRowsLocked 会先滚够位置，
+// 再把滚动量报给 TranscriptPainter 与 StreamBodyTracker；三本账一同挪。
+// enabled 仍取 "is_console && 彩色主题"，相对光标移动须有 VT 支持。
 //
 // 并发协议:写 stdout 一律经 StdoutWriteMutex()。ticker 线程自己按固定
 // 间隔醒;主线程侧(ToolDisplay 每个会打印新内容的方法)在真正打印之前
@@ -1422,35 +1413,34 @@ public:
             return;
         }
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        // 物理光标常驻 footer 输入行，不能直接按 shown_rows_ 相对上移。
+        // 先正规收框，把光标送回状态块末尾，再按旧账擦状态块。
+        lubancode::cli::EraseStreamFooterLocked();
         HideLocked();
+        lubancode::cli::RedrawStreamFooterLocked();
     }
 
 private:
     void Tick() {
         const auto entries = board_.Snapshot();
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        // footer 把正文/状态块续写点另存着；每个 ticker 帧先回到那一点，
+        // 随后的相对光标移动才有可靠基准。
+        lubancode::cli::EraseStreamFooterLocked();
         if (entries.empty()) {
             HideLocked();
-            // 交付说明 #三:HideLocked 用 "\x1b[J"(擦到屏幕底)收尾——footer
-            // 这时候如果垫在状态块下面,会被这一下连带擦掉。这里补一次
-            // Redraw,状态块清空(agent 工具刚收尾)那一刻输入框不会跟着
-            // 消失,直到下一次事件才想起来重画。
             lubancode::cli::RedrawStreamFooterLocked();
             return;
         }
         const auto lines =
             lubancode::cli::FormatAgentStatusLines(entries, std::chrono::steady_clock::now(), theme_);
         HideLocked();
+        lubancode::cli::EnsureStreamScreenRowsLocked(static_cast<int>(lines.size()) + 1);
         for (const auto& line : lines) {
             std::cout << line << "\n";
         }
         std::cout.flush();
         shown_rows_ = static_cast<int>(lines.size());
-        // 同上:状态条每 400ms 刷新一次,HideLocked 的 "\x1b[J" 会把垫在它
-        // 下面的 footer 一并擦掉——这里跟着重画一次,footer 才不会在 agent
-        // 工具跑着的整段时间里凭空消失,只在两次 tick 之间的极短窗口不可见
-        // (子工具的 HideStatus() 也会顺带擦掉 footer,靠这里的周期性重画兜底
-        // 补回来,不用每个子工具事件都各自去补一次)。
         lubancode::cli::RedrawStreamFooterLocked();
     }
 
@@ -1585,6 +1575,18 @@ public:
     // 线程调,调用方彼时正持有 StdoutWriteMutex(跟 OnDelta 里读写 unsafe_
     // 的锁是同一把),这里不再锁、也不能再锁(非递归)。
     void InvalidateBlockAnchor() { unsafe_ = true; }
+
+    // footer / 状态块主动滚屏后的对账口子。调用方已持有 stdout 锁。
+    void OnScreenScrolledLocked(int rows) {
+        if (!enabled_ || !in_block_ || unsafe_ || rows <= 0) {
+            return;
+        }
+        if (rows > start_row_) {
+            unsafe_ = true;
+            return;
+        }
+        start_row_ -= rows;
+    }
 
     // 工具条目要开画了:当前块到此为止,屏上保持原样。
     void OnBlockBreak() {
@@ -1873,6 +1875,7 @@ struct ToolDisplay {
     bool sub_preview_below = false;
 
     void OnToolStart(const std::string& name, const nlohmann::json& input) {
+        const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
         HideStatus();  // 马上要在状态块原本的位置打印新条目,先擦
         if (!is_console) {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
@@ -1898,17 +1901,6 @@ struct ToolDisplay {
         active_main = NewItem(lubancode::cli::TranscriptKind::Tool, name, input);
         if (is_console) {
             painter.PaintNew(transcript[static_cast<std::size_t>(active_main)]);
-            // 根因(输入框缺失,交付说明 #三):BeginStreamFooter 只标"启用",
-            // 真正第一次落笔一直靠 OnDelta——如果这一回合模型压根没吐开场
-            // 正文(一上来就调工具、连打好几次工具调用),OnDelta 可能永远
-            // 不会调用一次,footer 就停在"启用但从没画出来"的状态,用户全程
-            // 看不见输入框。这里补一个跟 OnDelta 对称的动作:Erase 已经在
-            // callbacks.on_tool_start 里由 body_tracker.OnBlockBreak() 做过
-            // 一次(哪怕没画过也是安全空操作),这里紧跟着 PaintNew 落笔之后
-            // Redraw 一次——footer 第一次真正出现在屏幕上,稳稳落在刚画的
-            // 这条工具条目下方,不管这一回合是先吐正文还是一上来就调工具。
-            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-            lubancode::cli::RedrawStreamFooterLocked();
         }
     }
 
@@ -1916,6 +1908,7 @@ struct ToolDisplay {
         if (active_main < 0) {
             return;
         }
+        const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
         HideStatus();
         auto& item = transcript[static_cast<std::size_t>(active_main)];
         // UI-C:自动放行时垫在条目下面的 diff 预览,执行完了就擦——终态只
@@ -1951,6 +1944,7 @@ struct ToolDisplay {
     }
 
     void OnSubToolStart(const std::string& name, const nlohmann::json& input) {
+        const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
         HideStatus();  // 马上要在状态块原本的位置打印新条目,先擦
         agent_sub_tools += 1;
         if (active_agent_status_id >= 0) {
@@ -1997,6 +1991,7 @@ struct ToolDisplay {
         if (active_sub < 0) {
             return;
         }
+        const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
         HideStatus();
         auto& item = transcript[static_cast<std::size_t>(active_sub)];
         if (sub_preview_below && is_console) {
@@ -2025,6 +2020,7 @@ struct ToolDisplay {
         if (active_sub < 0) {
             return;
         }
+        const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
         HideStatus();
         auto& item = transcript[static_cast<std::size_t>(active_sub)];
         item.status = lubancode::cli::TranscriptStatus::Error;
@@ -2052,6 +2048,7 @@ struct ToolDisplay {
         if (!is_console) {
             return;
         }
+        const lubancode::cli::StreamFooterPaintScope footer_paint;
         HideStatus();
         const auto preview = BuildFileDiffPreview(name, input, theme);
         if (!preview.has_value()) {
@@ -2078,6 +2075,7 @@ struct ToolDisplay {
     // 确认块(参数详情 + [y/a/N])跟在条目下面打。返回该条目的 transcript
     // 下标,答完交回 OnConfirmAnswered。
     int OnConfirmRequest() {
+        const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
         HideStatus();
         const int idx = active_sub >= 0 ? active_sub : active_main;
         if (idx >= 0) {
@@ -2098,6 +2096,7 @@ struct ToolDisplay {
         if (idx < 0) {
             return;
         }
+        const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
         HideStatus();
         auto& item = transcript[static_cast<std::size_t>(idx)];
         const bool was_sub = idx == active_sub;  // Cancelled 分支下面会把 active_sub 收掉,先记住
@@ -2153,6 +2152,12 @@ private:
     // expanded_ 没设(nullptr,AskOnce 单发模式恒紧凑)或者当前是紧凑态都
     // 算"紧凑",只有用户 Ctrl+O 切到详细态才算"展开"。
     bool SubItemsExpanded() const { return expanded_ != nullptr && *expanded_; }
+
+public:
+    // cli 层滚屏钩子调用；彼时 stdout 锁已在外层拿住。
+    void OnScreenScrolledLocked(int rows) { painter.OnScreenScrolledLocked(rows); }
+
+private:
 
     int NewItem(lubancode::cli::TranscriptKind kind, const std::string& name, const nlohmann::json& input) {
         lubancode::cli::TranscriptItem item;
@@ -2633,6 +2638,10 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     // StdoutWriteMutex 时被调(跟 OnDelta 同一把锁),Stop()(join 完)之后
     // 立刻摘掉,绝不活过 body_tracker。
     lubancode::cli::SetStreamScreenPrintHook([&body_tracker] { body_tracker.InvalidateBlockAnchor(); });
+    lubancode::cli::SetStreamScreenScrollHook([&display, &body_tracker](int rows) {
+        display.OnScreenScrolledLocked(rows);
+        body_tracker.OnScreenScrolledLocked(rows);
+    });
 
     // 用户这一行已经提交、真要开始等模型作答了——分界线打在这儿,紧跟在
     // 提示符那一行之后、模型正文开始打字机输出之前。
@@ -2664,6 +2673,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     // 的话会残留在重画区下方;关停后 FinalizeRepaint 按"块首到光标"记账,
     // 光标此刻正停在正文末尾(最后一笔 OnDelta 已把它拨回),账目干净。
     lubancode::cli::EndStreamFooter();
+    lubancode::cli::SetStreamScreenScrollHook(nullptr);
 
     RunTurnResult out;
     out.queued_lines = listener.TakeQueuedLines();

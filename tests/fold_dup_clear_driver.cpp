@@ -493,9 +493,16 @@ int wmain(int argc, wchar_t** argv) {
                   "#三 紧凑模式:全屏无子工具条目行(4 空格缩进+●),实际 " +
                       std::to_string(sub_item_rows) + " 行");
 
-            // 反向抽样:agent 条目本身(顶层,不缩进)理应看得见,顺手确认
-            // 没有连带把主区也一起吞了——只是子代理内层被折叠。
-            Check(FindLastRow("agent(", height) >= 0, "#三 佐证:顶层 agent(...) 条目仍然可见(只折叠子层)");
+            // 反向抽样:终态摘要上一行应是顶层 agent(...) 标题。若摘要已经
+            // 滚到缓冲区第 0 行，标题自然在回滚区外，不拿滚屏误判成折叠。
+            const int final_agent_summary_row =
+                FindLastRow("\xE5\xAD\x90\xE4\xBB\xA3\xE7\x90\x86 ", height);  // "子代理 "
+            if (final_agent_summary_row > 0) {
+                Check(ReadRow(final_agent_summary_row - 1).find("agent(") != std::string::npos,
+                      "#三 佐证:终态摘要上一行仍是顶层 agent(...) 条目");
+            } else {
+                Log("INFO: #三 佐证跳过:agent 终态摘要已滚到缓冲区顶,标题在可见范围外");
+            }
 
             // ---- #三附加 + #五:回合执行期间按 Ctrl+O 也要有反应 ----
             // 不在两轮之间按(composer 主循环那条路本来就通,老版本已经验
@@ -520,6 +527,7 @@ int wmain(int argc, wchar_t** argv) {
             // 中",子工具调用压根没开始,后面的 0 行断言完全是误判)。
             const int baseline_agent_row = FindLastRow("agent(", height);
             const int baseline_done_row = FindLastRow("\xE5\xAD\x90\xE4\xBB\xA3\xE7\x90\x86 ", height);  // "子代理 "
+            const int baseline_agent_token_row = FindLastRow("[tokens]", height);
             SendText(
                 "请你必须再调用一次内置的 agent 工具,委派一个子任务代理去完成:"
                 "依次读取这两个文件——D:\\lubancode\\src\\platform\\console_posix.cpp"
@@ -583,6 +591,10 @@ int wmain(int argc, wchar_t** argv) {
                     }
                 }
             }
+            const bool agent2_turn_done =
+                WaitForTextAfter("[tokens]", baseline_agent_token_row, 300000, height);
+            Check(agent2_turn_done,
+                  "#五 第二轮子代理:统计行真正落定后才继续,不把下一条测试误塞进执行中队列");
         }
     }
 
@@ -593,14 +605,39 @@ int wmain(int argc, wchar_t** argv) {
     // 不先扯闲话;footer 的输入行占位提示("排队下一条")是独有信号,回合
     // 还在跑(还没到 "[tokens]" 统计行)期间就该看得见,不是等到最后才冒
     // 出来或者全程不出现。
+    // run_command 会弹确认框，确认期间 footer 按设计必须让路，不能拿它测
+    // “无交互纯工具回合”。这里换成无需确认的 read_file。
+    const int token_row_before_tool_turn = FindLastRow("[tokens]", height);
     SendText(
-        "请直接调用 run_command 工具执行 dir 命令,不要说任何其他话,不要做任何"
-        "总结,调用完就结束这一轮。");
+        "请直接调用 read_file 工具读取 D:\\lubancode\\README.md 的前 5 行,"
+        "不要说任何其他话,不要做任何总结,调用完就结束这一轮。");
     SendKey(VK_RETURN, L'\r', 0);
     const bool footer_seen_before_done = WaitForText("排队下一条", 20000, height);
     Check(footer_seen_before_done,
           "#六 纯工具回合:footer(输入框占位提示'排队下一条')在回合收尾前出现(20s 内)");
-    WaitForText("[tokens]", 60000, height);  // 让这一轮收个尾,给后面 exit 让路
+    if (!footer_seen_before_done) {
+        for (int r = 0; r < height; ++r) {
+            const std::string row_text = ReadRow(r);
+            if (!row_text.empty()) {
+                Log("INFO: #六诊断 row[" + std::to_string(r) + "]=" + row_text);
+            }
+        }
+    }
+    const bool tool_turn_done =
+        WaitForTextAfter("[tokens]", token_row_before_tool_turn, 60000, height);
+    Check(tool_turn_done, "#六 纯工具回合:本轮统计行落定(不是误认上一轮统计行)");
+    const auto readme_tool_rows = FindAllRows("read_file(D:\\lubancode\\README.md)", height);
+    Check(readme_tool_rows.size() == 1,
+          "#六 工具终态原位覆写:README.md 的黄色开始行已换成绿色终态,标题只剩一行(实际 " +
+              std::to_string(readme_tool_rows.size()) + " 行)");
+    if (readme_tool_rows.size() != 1) {
+        for (int r = 0; r < height; ++r) {
+            const std::string row_text = ReadRow(r);
+            if (!row_text.empty()) {
+                Log("INFO: #六标题诊断 row[" + std::to_string(r) + "]=" + row_text);
+            }
+        }
+    }
 
     // ---- 收尾:exit ----
     return finish();

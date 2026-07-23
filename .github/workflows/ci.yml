@@ -4,7 +4,7 @@
 # 源码构建。CI 网络直通 github.com,统一传 -DLUBANCODE_USE_CODELOAD=OFF 走
 # 官方地址(codeload 镜像是开发机网络环境的本地对策,见顶层 CMakeLists)。
 #
-# 三条腿都须通过。v0.23.2 已在三套 runner 完成 Build + Test；往后平台
+# 三条腿都须通过。v0.23.3 已在三套 runner 完成 Build + Test；往后平台
 # 回归直接拦住合并，不再把 POSIX 标成观察项。
 name: ci
 

@@ -121,6 +121,10 @@ std::mutex& StdoutWriteMutex();
 // 活过它抓引用的对象。
 void SetStreamScreenPrintHook(std::function<void()> hook);
 
+// footer / 状态块贴到缓冲区底时会主动滚屏。滚了几行，须让正文块与工具
+// 条目的绝对锚点一同上移。钩子在持有 StdoutWriteMutex 时调用，不得重锁。
+void SetStreamScreenScrollHook(std::function<void(int)> hook);
+
 // -----------------------------------------------------------------------
 // 0.21.x 流式脚注(footer),0.22.x 升级成跟 composer 视觉一致的完整框:
 // 流式期间正文下方常驻上横线 + `> ` 输入行 + 下横线 + 状态行,一共 4 行,
@@ -137,11 +141,10 @@ void SetStreamScreenPrintHook(std::function<void()> hook);
 // EraseStreamFooterLocked() 把整个框擦掉(免得跟正文抢行),正文落笔后
 // RedrawStreamFooterLocked() 把框重画在正文光标的下一行起、光标再拨回
 // 正文末尾。这样框永远紧贴"正文当前底部"的下一行,正文往下长它就跟着挪,
-// 绝不跟正文重叠,也绝不自己触发滚屏(没地方整框落地就这一笔不画、下一笔
-// 再来),正文块的锚点账/markdown 收束重画一概不受牵连(框落在块区间之外,
-// 不挪动块内任何一行,故不必作废块锚)。全程在 StdoutWriteMutex 之内,每次
-// 重画都拿 synchronized output(DEC 2026,`\x1b[?2026h`/`l`)包一层,避免
-// 终端半途刷出擦了一半/画了一半的框。
+// 绝不跟正文重叠。贴到 ConPTY 缓冲区底时会主动滚屏，并经 scroll hook 把
+// 正文块与工具条目锚点一同上移；输入框不再因“底下没四行空位”而消失。
+// 全程在 StdoutWriteMutex 之内,每次重画都拿 synchronized output
+// (DEC 2026,`\x1b[?2026h`/`l`)包一层,避免终端半途刷出半帧。
 //
 // enabled:只在 is_console && platform::SupportsScreenRepaint()(即 Windows
 // 真控制台)下为真——footer 要随时查光标位定位,POSIX 走 DSR 6n 会跟监听
@@ -151,6 +154,9 @@ void EndStreamFooter();
 // 下面两个要求调用方已持有 StdoutWriteMutex(OnDelta/OnBlockBreak 正持着)。
 void EraseStreamFooterLocked();
 void RedrawStreamFooterLocked();
+// 从当前光标起为 rows_needed 行腾出位置；必要时滚屏并通知上面的钩子。
+// 调用方须已持有 StdoutWriteMutex。末尾带换行的 N 行文字应传 N + 1。
+bool EnsureStreamScreenRowsLocked(int rows_needed);
 
 // 流式回合里的 Working 不另占一套 stdout 绘制权。Spinner 只把当前帧
 // 塞进 footer 状态，由 RedrawStreamFooterLocked 把 Working、队列、输入框
@@ -174,9 +180,8 @@ void StopStreamFooterWorking();
 // 回来。得再加一层"挂起":构造时(拿锁)先把框彻底擦干净、标记挂起,
 // 挂起期间 RedrawStreamFooterLocked() 直接空操作,不管是谁调的(ticker、
 // StreamBodyTracker::OnDelta、监听线程的键入回显……全部一并压住,不用
-// 逐个调用点接管)。析构时(拿锁)摘掉挂起标记,不主动补画——确认答完
-// 之后下一笔正文 OnDelta 或者下一次 ticker(至多 400ms)自然把框画回来,
-// 抢着画反而要操心"这一刻光标该在哪"这种时序细节,没必要。
+// 逐个调用点接管)。析构时(拿锁)摘掉一层挂起；最外层退场便立即补画，
+// 不再假定确认答完之后必定还有正文或 ticker 来救场。
 //
 // 用 RAII 是为了把"挂起期覆盖两条确认路径(run_command 等走
 // PrintConfirmDetails,edit_file/write_file 走 ShowDiffPreview)+ 确认提示
@@ -194,6 +199,21 @@ public:
 
     StreamFooterSuspendScope(const StreamFooterSuspendScope&) = delete;
     StreamFooterSuspendScope& operator=(const StreamFooterSuspendScope&) = delete;
+};
+
+// 工具条目、diff、状态块要改写正文末尾时用的屏幕事务。构造时先擦 footer，
+// 事务内所有 Redraw 请求只记状态、不落笔；最外层析构时再把 footer 一次
+// 画回。与 SuspendScope 不同，它不等用户输入，只围住一小段同步重画。
+class StreamFooterPaintScope {
+public:
+    explicit StreamFooterPaintScope(bool enabled = true);
+    ~StreamFooterPaintScope();
+
+    StreamFooterPaintScope(const StreamFooterPaintScope&) = delete;
+    StreamFooterPaintScope& operator=(const StreamFooterPaintScope&) = delete;
+
+private:
+    bool active_ = false;
 };
 
 // M10:ESC 打断当前轮 + 消息排队用的监听器。main.cpp 在"发出请求到本轮
