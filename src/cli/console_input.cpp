@@ -694,6 +694,117 @@ std::optional<std::string> ReadLine(const std::string& prompt, const Theme& them
     return line;
 }
 
+std::optional<std::vector<std::size_t>> ReadChoiceMenu(const std::vector<ChoiceMenuItem>& items,
+                                                        bool multi_select, const Theme& theme) {
+    if (items.empty() || !platform::StdinIsInteractive()) {
+        return std::nullopt;
+    }
+    std::lock_guard<std::mutex> console_read_lock(ConsoleReadMutex());
+    platform::RawInputScope raw_scope;
+    if (!raw_scope.ok()) {
+        return std::nullopt;
+    }
+
+    int start_row = 0;
+    const int menu_rows = static_cast<int>(items.size()) + 1;
+    {
+        std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+        if (!EnsureStreamScreenRowsLocked(menu_rows)) {
+            return std::nullopt;
+        }
+        const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
+        if (!info.has_value()) {
+            return std::nullopt;
+        }
+        start_row = info->cursor_y;
+    }
+
+    ChoiceMenuCore menu(items.size(), multi_select);
+    auto draw = [&] {
+        std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+        const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
+        if (!info.has_value()) {
+            return false;
+        }
+        const int width = info->width;
+        std::cout << kSyncOutputBegin << "\x1b[?25l";
+        for (std::size_t i = 0; i < items.size(); ++i) {
+            const bool active = i == menu.state().cursor;
+            std::string prefix = active ? "> " : "  ";
+            if (multi_select) {
+                prefix += menu.state().selected[i] ? "[x] " : "[ ] ";
+            }
+            const int room = (std::max)(0, width - static_cast<int>(DisplayWidthUtf8(prefix)) - 1);
+            const std::string label = TruncateUtf8ToDisplayWidth(items[i].label, room);
+            int description_room = room - static_cast<int>(DisplayWidthUtf8(label)) - 3;
+
+            platform::ClearRowHardFrom(0, start_row + static_cast<int>(i), width);
+            platform::SetCursorPos(0, start_row + static_cast<int>(i));
+            if (active) {
+                std::cout << theme.confirm;
+            }
+            std::cout << prefix << label << theme.reset;
+            if (!items[i].description.empty() && description_room > 0) {
+                std::cout << theme.stats << " - "
+                          << TruncateUtf8ToDisplayWidth(items[i].description, description_room)
+                          << theme.reset;
+            }
+        }
+        platform::ClearRowHardFrom(0, start_row + static_cast<int>(items.size()), width);
+        platform::SetCursorPos(0, start_row + static_cast<int>(items.size()));
+        const std::string hint = menu.state().invalid
+                                     ? tr("ask_user.menu_select_one")
+                                     : tr(multi_select ? "ask_user.menu_multi_hint" : "ask_user.menu_hint");
+        std::cout << (menu.state().invalid ? theme.error : theme.stats)
+                  << TruncateUtf8ToDisplayWidth(hint, width - 1) << theme.reset << kSyncOutputEnd;
+        std::cout.flush();
+        return true;
+    };
+
+    auto clear = [&] {
+        std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+        const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
+        if (info.has_value()) {
+            std::cout << kSyncOutputBegin;
+            for (int r = 0; r < menu_rows; ++r) {
+                platform::ClearRowHardFrom(0, start_row + r, info->width);
+            }
+            platform::SetCursorPos(0, start_row);
+            std::cout << "\x1b[?25h" << kSyncOutputEnd;
+            std::cout.flush();
+        } else {
+            std::cout << "\x1b[?25h" << std::flush;
+        }
+    };
+
+    if (!draw()) {
+        return std::nullopt;
+    }
+    platform::KeyReader key_reader;
+    while (!menu.state().submitted && !menu.state().cancelled) {
+        const std::optional<platform::KeyInput> raw_key = key_reader.ReadOne();
+        if (!raw_key.has_value()) {
+            clear();
+            return std::nullopt;
+        }
+        const std::optional<KeyEvent> mapped = MapKey(*raw_key);
+        if (!mapped.has_value()) {
+            continue;
+        }
+        menu.HandleKey(*mapped);
+        if (!menu.state().submitted && !menu.state().cancelled) {
+            if (!draw()) {
+                clear();
+                return std::nullopt;
+            }
+        }
+    }
+    const bool cancelled = menu.state().cancelled;
+    const std::vector<std::size_t> selected = menu.SelectedIndices();
+    clear();
+    return cancelled ? std::nullopt : std::optional<std::vector<std::size_t>>(selected);
+}
+
 ConfirmMode CurrentConfirmMode() { return SharedEditor().confirm_mode(); }
 
 void SetConfirmMode(ConfirmMode mode) { SharedEditor().set_confirm_mode(mode); }

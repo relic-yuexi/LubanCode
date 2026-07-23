@@ -30,7 +30,7 @@
 //      用状态行的 "shift+tab" / 输入行占位提示"排队下一条" 当信号。
 //   7. /provider switch 成功后真清一次屏,按新配置重画图标与横幅,切换
 //      提示留在屏上；失败、管道输出不清。
-//   8. ask_user 真由模型调用，编号选择与末项自由填写都能回传。
+//   8. ask_user 真由模型调用，上下键选择与末项自由填写都能回传。
 //   9. 彩色 diff 确认块收起后，空白区不留下长条背景色块。
 //
 // 用法: fold_dup_clear_driver <lubancode.exe 路径> <子进程工作目录> <报告文件路径>
@@ -363,9 +363,14 @@ int wmain(int argc, wchar_t** argv) {
         SendText("请必须调用 ask_user 工具问我一个单选题:题目是'采用哪种发布方式?',"
                  "选项只给'正式版'和'预发布'两项。不要直接在正文里问。");
         SendKey(VK_RETURN, L'\r', 0);
-        Check(WaitForText("请选择编号", 60000, height),
-              "#八 ask_user:模型调用工具并出现编号提示(60s 内)");
-        SendText("3");  // 两个模型选项之后,第三项是程序自动补的“自己填写”
+        Check(WaitForText("Enter 确认", 60000, height),
+              "#八 ask_user:模型调用工具并出现方向键菜单(60s 内)");
+        Check(WaitForText("> 正式版", 5000, height),
+              "#八 ask_user:首项默认获得选择光标");
+        SendKey(VK_DOWN, 0, 0);
+        SendKey(VK_DOWN, 0, 0);
+        Check(WaitForText("> 自己填写", 5000, height),
+              "#八 ask_user:Down 键把光标移到末项");
         SendKey(VK_RETURN, L'\r', 0);
         Check(WaitForText("请输入你的答案", 10000, height),
               "#八 ask_user:末项进入自由填写");

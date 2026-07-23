@@ -14,7 +14,7 @@
   <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml/badge.svg" alt="Release"></a>
   <img src="https://img.shields.io/badge/C%2B%2B-23-00599C?logo=cplusplus&logoColor=white" alt="C++23">
-  <img src="https://img.shields.io/badge/version-0.23.3-CB2C31" alt="v0.23.3">
+  <img src="https://img.shields.io/badge/version-0.23.4-CB2C31" alt="v0.23.4">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-444444" alt="Windows, Linux and macOS">
 </p>
 
@@ -22,7 +22,7 @@ LubanCode 原生支持 Anthropic Messages API 与 OpenAI Responses API。模型�
 
 鲁班造物，先正绳墨，再下斧凿。LubanCode 也守这条规矩：先看清，再动手；改了什么，明明白白摆给你看。
 
-> 当前版本：`v0.23.3`。Windows、Ubuntu、macOS 三路 CI 均已编译并跑过全量测试。
+> 当前版本：`v0.23.4`。Windows、Ubuntu、macOS 三路 CI 均已编译并跑过全量测试。
 
 ## 一眼看懂
 
@@ -208,8 +208,8 @@ LubanCode 留了四扇门：
 推送 `v*` 标签会触发发布流水线。三平台分别打包，随后自动创建 GitHub Release、生成发布说明并上传产物：
 
 ```bash
-git tag -a v0.23.3 -m "v0.23.3"
-git push origin v0.23.3
+git tag -a v0.23.4 -m "v0.23.4"
+git push origin v0.23.4
 ```
 
 ## 许可

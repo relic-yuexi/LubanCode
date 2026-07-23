@@ -14,7 +14,7 @@
   <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml/badge.svg" alt="Release"></a>
   <img src="https://img.shields.io/badge/C%2B%2B-23-00599C?logo=cplusplus&logoColor=white" alt="C++23">
-  <img src="https://img.shields.io/badge/version-0.23.3-CB2C31" alt="v0.23.3">
+  <img src="https://img.shields.io/badge/version-0.23.4-CB2C31" alt="v0.23.4">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-444444" alt="Windows, Linux and macOS">
 </p>
 
@@ -22,7 +22,7 @@ LubanCode connects natively to both the Anthropic Messages API and the OpenAI Re
 
 The name comes from Lu Ban, the traditional Chinese master craftsman. The idea is simple: measure first, cut second, and always show the work.
 
-> Current release line: `v0.23.3`. The full suite builds and passes on Windows, Ubuntu, and macOS.
+> Current release line: `v0.23.4`. The full suite builds and passes on Windows, Ubuntu, and macOS.
 
 ## At a glance
 
@@ -208,8 +208,8 @@ Every push and pull request is built and tested on:
 Pushing a `v*` tag builds all three release archives, creates a GitHub Release, generates release notes, and uploads the binaries:
 
 ```bash
-git tag -a v0.23.3 -m "v0.23.3"
-git push origin v0.23.3
+git tag -a v0.23.4 -m "v0.23.4"
+git push origin v0.23.4
 ```
 
 ## License

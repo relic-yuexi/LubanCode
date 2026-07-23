@@ -92,7 +92,7 @@
 
 namespace {
 
-constexpr std::string_view kVersion = "0.23.3";
+constexpr std::string_view kVersion = "0.23.4";
 
 // i18n:tr/trf 在本文件里到处用,拉进匿名命名空间省得每处全限定。
 using lubancode::cli::tr;
@@ -940,6 +940,8 @@ std::string TrimAscii(std::string value) {
 std::expected<std::vector<std::string>, std::string> PromptAskUser(
     const lubancode::tools::AskUserQuestion& question, const lubancode::cli::Theme& theme) {
     const lubancode::cli::StreamFooterSuspendScope footer_suspend;
+    const bool interactive_menu = lubancode::platform::StdinIsInteractive() &&
+                                  lubancode::platform::ProbeStdoutConsole().is_console;
     {
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         std::cout << "\n";
@@ -947,62 +949,82 @@ std::expected<std::vector<std::string>, std::string> PromptAskUser(
             std::cout << theme.banner << question.header << theme.reset << "\n";
         }
         std::cout << question.question << "\n";
-        for (std::size_t i = 0; i < question.options.size(); ++i) {
-            std::cout << "  " << (i + 1) << ". " << question.options[i].label;
-            if (!question.options[i].description.empty()) {
-                std::cout << theme.stats << " - " << question.options[i].description << theme.reset;
+        if (!interactive_menu) {
+            for (std::size_t i = 0; i < question.options.size(); ++i) {
+                std::cout << "  " << (i + 1) << ". " << question.options[i].label;
+                if (!question.options[i].description.empty()) {
+                    std::cout << theme.stats << " - " << question.options[i].description << theme.reset;
+                }
+                std::cout << "\n";
             }
-            std::cout << "\n";
+            std::cout << "  " << (question.options.size() + 1) << ". " << tr("ask_user.other") << "\n";
         }
-        std::cout << "  " << (question.options.size() + 1) << ". " << tr("ask_user.other") << "\n";
         std::cout.flush();
     }
 
-    std::vector<int> indexes;
-    for (;;) {
-        const std::optional<std::string> raw = lubancode::cli::ReadLine(
-            theme.confirm + tr(question.multi_select ? "ask_user.multi_prompt" : "ask_user.select_prompt") +
-                theme.reset,
-            theme, /*esc_rejects=*/true);
-        if (!raw.has_value() || TrimAscii(*raw).empty()) {
+    std::vector<std::size_t> indexes;
+    if (interactive_menu) {
+        std::vector<lubancode::cli::ChoiceMenuItem> items;
+        items.reserve(question.options.size() + 1);
+        for (const auto& option : question.options) {
+            items.push_back({option.label, option.description});
+        }
+        items.push_back({tr("ask_user.other"), {}});
+        const auto selected = lubancode::cli::ReadChoiceMenu(items, question.multi_select, theme);
+        if (!selected.has_value()) {
             return std::unexpected(tr("ask_user.cancelled"));
         }
+        indexes = *selected;
+    } else {
+        for (;;) {
+            const std::optional<std::string> raw = lubancode::cli::ReadLine(
+                theme.confirm + tr(question.multi_select ? "ask_user.multi_prompt" : "ask_user.select_prompt") +
+                    theme.reset,
+                theme, /*esc_rejects=*/true);
+            if (!raw.has_value() || TrimAscii(*raw).empty()) {
+                return std::unexpected(tr("ask_user.cancelled"));
+            }
 
-        indexes.clear();
-        std::stringstream parts(*raw);
-        std::string part;
-        bool valid = true;
-        while (std::getline(parts, part, ',')) {
-            part = TrimAscii(std::move(part));
-            try {
-                std::size_t consumed = 0;
-                const int index = std::stoi(part, &consumed);
-                if (consumed != part.size() || index < 1 ||
-                    index > static_cast<int>(question.options.size() + 1) ||
-                    std::find(indexes.begin(), indexes.end(), index) != indexes.end()) {
+            indexes.clear();
+            std::stringstream parts(*raw);
+            std::string part;
+            bool valid = true;
+            while (std::getline(parts, part, ',')) {
+                part = TrimAscii(std::move(part));
+                try {
+                    std::size_t consumed = 0;
+                    const int index = std::stoi(part, &consumed);
+                    if (consumed != part.size() || index < 1 ||
+                        index > static_cast<int>(question.options.size() + 1)) {
+                        valid = false;
+                        break;
+                    }
+                    const std::size_t zero_based = static_cast<std::size_t>(index - 1);
+                    if (std::find(indexes.begin(), indexes.end(), zero_based) != indexes.end()) {
+                        valid = false;
+                        break;
+                    }
+                    indexes.push_back(zero_based);
+                } catch (...) {
                     valid = false;
                     break;
                 }
-                indexes.push_back(index);
-            } catch (...) {
+            }
+            if (!question.multi_select && indexes.size() != 1) {
                 valid = false;
+            }
+            if (valid && !indexes.empty()) {
                 break;
             }
+            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+            std::cout << theme.error << tr("ask_user.invalid") << theme.reset << "\n";
         }
-        if (!question.multi_select && indexes.size() != 1) {
-            valid = false;
-        }
-        if (valid && !indexes.empty()) {
-            break;
-        }
-        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-        std::cout << theme.error << tr("ask_user.invalid") << theme.reset << "\n";
     }
 
     std::vector<std::string> answers;
-    for (const int index : indexes) {
-        if (index <= static_cast<int>(question.options.size())) {
-            answers.push_back(question.options[static_cast<std::size_t>(index - 1)].label);
+    for (const std::size_t index : indexes) {
+        if (index < question.options.size()) {
+            answers.push_back(question.options[index].label);
             continue;
         }
         for (;;) {

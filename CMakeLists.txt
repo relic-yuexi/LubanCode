@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(lubancode VERSION 0.23.3 LANGUAGES CXX)
+project(lubancode VERSION 0.23.4 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -261,6 +261,7 @@ add_library(lubancode_core STATIC
   src/cli/slash_commands.cpp
   src/cli/worktree.cpp
   src/cli/theme.cpp
+  src/cli/choice_menu.cpp
   src/cli/line_editor.cpp
   src/cli/context_tracker.cpp
   src/cli/divider.cpp

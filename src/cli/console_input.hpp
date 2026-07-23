@@ -15,6 +15,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -22,6 +23,7 @@
 #include <thread>
 #include <vector>
 
+#include "cli/choice_menu.hpp"
 #include "cli/line_editor.hpp"
 #include "cli/theme.hpp"
 
@@ -54,6 +56,18 @@ namespace lubancode::cli {
 // 模式没有 composer 概念,这个参数完全没作用,照旧逐行 getline。
 std::optional<std::string> ReadLine(const std::string& prompt, const Theme& theme = Theme{},
                                      bool esc_rejects = false, bool composer = false);
+
+// ask_user 的逐键选择菜单。单选用上下键移动、Enter 确认；多选用空格
+// 勾选、Enter 提交。核心状态与终端绘制分开，方向键/多选规则可直接单测。
+struct ChoiceMenuItem {
+    std::string label;
+    std::string description;
+};
+
+// 真终端绘制原地选择菜单；返回选中项的 0 基下标。Esc/Ctrl+C/EOF 返回
+// nullopt。调用方负责在 items 末尾补“自己填写”。
+std::optional<std::vector<std::size_t>> ReadChoiceMenu(const std::vector<ChoiceMenuItem>& items,
+                                                        bool multi_select, const Theme& theme);
 
 // 会话级确认模式的查询/设置。真控制台下 Shift+Tab 会改这个状态(存在
 // ReadLine() 内部维护的、贯穿整条交互会话的 LineEditorCore 实例里,见

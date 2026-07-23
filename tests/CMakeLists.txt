@@ -23,6 +23,7 @@ add_executable(lubancode_tests
   test_prompts.cpp
   test_prompt_assembler.cpp
   test_line_editor.cpp
+  test_choice_menu.cpp
   test_compact.cpp
   test_context_tracker.cpp
   test_anthropic_request.cpp
