@@ -67,6 +67,7 @@ const Entry kZhCN[] = {
      "  /model 名字     直接切到指定模型名,不用拉列表\n"
      "  /provider       列已配服务端;/provider add|switch|remove 管多端模型\n"
      "  /config         打印当前生效配置(复用 --config 的逻辑),外加本会话实际在用的 model\n"
+     "  /init           在项目根生成 AGENTS.md,并让主代理、子代理立即采用\n"
      "  /language       列可选界面语言并切换(内置 zh-CN/en,languages/*.json 可扩展)\n"
      "  /worktree       新建/列出/退出隔离工作树;/worktree new [名字] | list | exit keep|remove\n"
      "  /clear          清空对话历史\n"
@@ -97,6 +98,7 @@ const Entry kZhCN[] = {
      "  Shift+Enter     输入框里插一个换行,写多行消息(Alt+Enter 同义;注意 Windows Terminal\n"
      "                  默认把 Alt+Enter 绑成全屏切换、会吞掉这个键,用 Shift+Enter 最稳);\n"
      "                  Enter 把整段(多行拼换行)一次发出,空白内容按 Enter 原地不动\n"
+     "  多行粘贴        自动折成 [粘贴内容 N 字符],回车时按原文完整发送\n"
      "  ESC             流式回复期间按下:打断当前这轮回答,已出的半截话保留、下一轮能接着聊;\n"
      "                  空闲时按下:清空正在编辑的整段输入;确认提示 [y/a/N] 下按下:等同拒绝;\n"
      "                  聚焦查看(Ctrl+E)画面里按下:返回会话\n"
@@ -160,6 +162,7 @@ const Entry kZhCN[] = {
      "  /model          拉取模型列表,编号选择切换(默认第一个)\n"
      "  /model 名字     直接切到指定模型名,不用拉列表\n"
      "  /config         打印当前生效配置(api_key 打码),外加本会话实际在用的 model\n"
+     "  /init           在项目根生成 AGENTS.md,并让本会话立即采用\n"
      "  /language       列可选界面语言并切换;/language 语言码 直接切(会话级,可写回配置)\n"
      "  /worktree       新建/列出/退出隔离工作树;/worktree new [名字] | list | exit keep|remove\n"
      "  /clear          清空对话历史\n"
@@ -185,6 +188,7 @@ const Entry kZhCN[] = {
      "  /exit           退出(裸词 exit/quit 也认)\n"
      "多行输入:Shift+Enter 插换行(Alt+Enter 同义,但 Windows Terminal 默认把它绑成全屏\n"
      "切换、会吞掉,推荐 Shift+Enter);Enter 发送整段;多行时首行的 / 是正文,不当命令。\n"
+     "多行粘贴会折成 [粘贴内容 N 字符],提交时仍按原文完整发送。\n"
      "候选菜单:/ 开头时按 ↓ 进入直选(↓↑ 循环移动,Enter 执行选中命令、已敲的参数尾巴\n"
      "原样保留;打字/退格/ESC 回普通编辑);Tab 补全/轮转照旧。\n"
      "条目查看:Ctrl+O 紧凑/详细全局切换(详细 = 完整参数 + 输出/diff 全文,整块重打);\n"
@@ -203,6 +207,7 @@ const Entry kZhCN[] = {
     {"input.interrupted", "[已打断]"},
     {"input.queued", "[已排队] "},
     {"input.queue_header", "待发送消息 {0} 条（本轮结束后依次发送）"},
+    {"input.pasted_content", "[粘贴内容 {0} 字符]"},
     {"input.ctrlc_exit", "[已退出]"},
     {"stream.hint", "\xe2\x8e\x8b 打断  ·  键入并回车 排队下一条"},
     {"stream.hint.plain", "ESC 打断 · 键入排队"},
@@ -285,6 +290,7 @@ const Entry kZhCN[] = {
     {"slash.desc.model", "拉模型列表选,或 /model 名字 直接切"},
     {"slash.desc.provider", "列、添、切、删、改模型服务端;/provider add|list|switch|remove|set"},
     {"slash.desc.config", "打印当前生效配置和本会话在用的 model"},
+    {"slash.desc.init", "在项目根生成 AGENTS.md，并让本会话立即采用"},
     {"slash.desc.language", "列可选界面语言并切换;/language 语言码 直接切"},
     {"slash.desc.image", "附本地图片;/image 路径 或在消息里写 @路径"},
     {"slash.desc.worktree", "新建、列出或退出隔离工作树;/worktree new [名字] | list | exit keep|remove"},
@@ -691,6 +697,9 @@ const Entry kZhCN[] = {
     {"cmd.title.set_pending", "标题已设为: {0}(首条消息落盘后写入存档)"},
     {"cmd.title.write_failed", "[会话存档] 标题写入失败,只在本次会话内存里生效。"},
     {"cmd.clear.done", "已清空对话历史。"},
+    {"cmd.init.created", "已生成 {0}，本会话已载入。"},
+    {"cmd.init.exists", "已有项目指令 {0}，没有覆盖；本会话已重新载入。"},
+    {"cmd.init.failed", "生成 AGENTS.md 失败：{0}（{1}）"},
     {"session.create_failed", "[会话存档] 在 {0} 建档失败,本场对话不落盘(不影响继续聊)。"},
     {"session.append_failed", "[会话存档] 追加写入失败,后续不再落盘(不影响继续聊)。"},
     {"session.compact_event_failed", "[会话存档] 存档事件写盘失败,/resume 将回放到压缩前状态。"},
@@ -760,6 +769,7 @@ const Entry kEn[] = {
      "  /model <name>   switch directly to a model name without fetching the list\n"
      "  /provider       list configured providers; /provider add|switch|remove manages endpoints\n"
      "  /config         print the effective configuration plus the model in use this session\n"
+     "  /init           create AGENTS.md at the project root and load it for main/sub-agents now\n"
      "  /language       list available UI languages and switch (built-in zh-CN/en, extendable via\n"
      "                  languages/*.json)\n"
      "  /worktree       create, list, or leave isolated trees; /worktree new [name] | list | exit keep|remove\n"
@@ -792,6 +802,7 @@ const Entry kEn[] = {
      "  Shift+Enter     insert a newline in the input box (Alt+Enter works too, but Windows Terminal\n"
      "                  binds it to fullscreen by default; Shift+Enter is safest); Enter sends the\n"
      "                  whole message; Enter on blank input does nothing\n"
+     "  Multi-line paste collapses to [Pasted Content N chars] and expands on submit\n"
      "  ESC             during streaming: interrupt this turn (partial output is kept); when idle:\n"
      "                  clear the input; at a [y/a/N] confirm prompt: deny; in focus view (Ctrl+E):\n"
      "                  return to the session\n"
@@ -859,6 +870,7 @@ const Entry kEn[] = {
      "  /model          fetch the model list and switch by number (default: first)\n"
      "  /model <name>   switch directly to a model name\n"
      "  /config         print the effective configuration (api_key masked) plus the session model\n"
+     "  /init           create AGENTS.md at the project root and load it now\n"
      "  /language       list available UI languages and switch; /language <code> switches directly\n"
      "  /worktree       create, list, or leave isolated trees; /worktree new [name] | list | exit keep|remove\n"
      "  /clear          clear the conversation history\n"
@@ -884,6 +896,7 @@ const Entry kEn[] = {
      "Multi-line input: Shift+Enter inserts a newline (Alt+Enter too, but Windows Terminal may\n"
      "swallow it; Shift+Enter is recommended); Enter sends the whole message; on multi-line input\n"
      "a leading / is treated as text, not a command.\n"
+     "Multi-line paste collapses to [Pasted Content N chars] and expands on submit.\n"
      "Candidate menu: with a leading /, Down enters the menu (Down/Up cycle, Enter runs the\n"
      "selection, typed argument tail kept; typing/Backspace/ESC returns to editing); Tab completes.\n"
      "Item view: Ctrl+O toggles compact/detailed globally; Shift+Tab always cycles the confirmation\n"
@@ -901,6 +914,7 @@ const Entry kEn[] = {
     {"input.interrupted", "[interrupted]"},
     {"input.queued", "[queued] "},
     {"input.queue_header", "{0} message(s) queued for the end of this turn"},
+    {"input.pasted_content", "[Pasted Content {0} chars]"},
     {"input.ctrlc_exit", "[exited]"},
     {"stream.hint", "\xe2\x8e\x8b interrupt  \xc2\xb7  type + Enter to queue next"},
     {"stream.hint.plain", "ESC interrupt \xc2\xb7 type to queue next"},
@@ -996,6 +1010,7 @@ const Entry kEn[] = {
     {"slash.desc.provider",
      "list, add, switch, remove, or set fields on model providers; /provider add|list|switch|remove|set"},
     {"slash.desc.config", "print the effective configuration and the session model"},
+    {"slash.desc.init", "create AGENTS.md at the project root and load it now"},
     {"slash.desc.language", "list available UI languages and switch; /language <code> switches directly"},
     {"slash.desc.image", "attach local images; /image <path> or @path in a message"},
     {"slash.desc.worktree", "create, list, or leave isolated worktrees; /worktree new [name] | list | exit keep|remove"},
@@ -1018,6 +1033,10 @@ const Entry kEn[] = {
     {"slash.desc.title", "show the session title; /title <title> names this session"},
     {"slash.desc.soul", "show the current soul; /soul <text> writes SOUL.md; /soul clear restores default"},
     {"slash.desc.prompt", "show the persona source/length; /prompt reset restores system_prompt.md"},
+
+    {"cmd.init.created", "Created {0} and loaded it for this session."},
+    {"cmd.init.exists", "Project instructions already exist at {0}; left them untouched and reloaded them."},
+    {"cmd.init.failed", "Could not create AGENTS.md: {0} ({1})"},
 
     // ---- /language ----
     {"cmd.language.list_header", "Available languages (built-in zh-CN/en + <home>/.lubancode/languages/*.json):"},

@@ -20,10 +20,123 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <algorithm>
 #include <iostream>
 #include <iterator>
+#include <deque>
+#include <string_view>
+#include <vector>
 
 namespace lubancode::platform {
+
+namespace {
+
+std::deque<INPUT_RECORD>& PendingInputRecords() {
+    static std::deque<INPUT_RECORD> records;
+    return records;
+}
+
+bool ReadInputRecord(INPUT_RECORD& record, DWORD timeout_ms = INFINITE) {
+    auto& pending = PendingInputRecords();
+    if (!pending.empty()) {
+        record = pending.front();
+        pending.pop_front();
+        return true;
+    }
+    const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+    if (timeout_ms != INFINITE && WaitForSingleObject(input, timeout_ms) != WAIT_OBJECT_0) {
+        return false;
+    }
+    DWORD read = 0;
+    return ReadConsoleInputW(input, &record, 1, &read) != 0 && read == 1;
+}
+
+void RestoreInputRecords(const std::vector<INPUT_RECORD>& records) {
+    auto& pending = PendingInputRecords();
+    for (auto it = records.rbegin(); it != records.rend(); ++it) {
+        pending.push_front(*it);
+    }
+}
+
+std::optional<wchar_t> ReadKeyChar(DWORD timeout_ms, std::vector<INPUT_RECORD>& consumed) {
+    while (true) {
+        INPUT_RECORD record{};
+        if (!ReadInputRecord(record, timeout_ms)) {
+            return std::nullopt;
+        }
+        consumed.push_back(record);
+        if (record.EventType == KEY_EVENT && record.Event.KeyEvent.bKeyDown != FALSE &&
+            record.Event.KeyEvent.uChar.UnicodeChar != 0) {
+            return record.Event.KeyEvent.uChar.UnicodeChar;
+        }
+    }
+}
+
+std::string WideToUtf8(const std::wstring& wide) {
+    const int size = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0,
+                                         nullptr, nullptr);
+    std::string out;
+    if (size > 0) {
+        out.resize(static_cast<std::size_t>(size));
+        WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), out.data(), size, nullptr,
+                            nullptr);
+    }
+    return out;
+}
+
+std::optional<KeyInput> TryReadBracketedPaste() {
+    constexpr std::wstring_view kStart = L"[200~";
+    std::vector<INPUT_RECORD> probe;
+    for (const wchar_t expected : kStart) {
+        const std::optional<wchar_t> actual = ReadKeyChar(30, probe);
+        if (!actual.has_value() || *actual != expected) {
+            RestoreInputRecords(probe);
+            return std::nullopt;
+        }
+    }
+
+    constexpr std::wstring_view kEnd = L"\x1b[201~";
+    std::wstring pasted;
+    while (true) {
+        INPUT_RECORD record{};
+        if (!ReadInputRecord(record)) {
+            break;
+        }
+        if (record.EventType != KEY_EVENT || record.Event.KeyEvent.bKeyDown == FALSE ||
+            record.Event.KeyEvent.uChar.UnicodeChar == 0) {
+            continue;
+        }
+        const KEY_EVENT_RECORD& key = record.Event.KeyEvent;
+        const unsigned repeat = (std::max)(1U, static_cast<unsigned>(key.wRepeatCount));
+        for (unsigned i = 0; i < repeat; ++i) {
+            pasted.push_back(key.uChar.UnicodeChar);
+        }
+        if (pasted.size() >= kEnd.size() &&
+            pasted.compare(pasted.size() - kEnd.size(), kEnd.size(), kEnd) == 0) {
+            pasted.resize(pasted.size() - kEnd.size());
+            break;
+        }
+    }
+
+    std::wstring normalized;
+    normalized.reserve(pasted.size());
+    for (std::size_t i = 0; i < pasted.size(); ++i) {
+        if (pasted[i] == L'\r') {
+            normalized.push_back(L'\n');
+            if (i + 1 < pasted.size() && pasted[i + 1] == L'\n') {
+                ++i;
+            }
+        } else {
+            normalized.push_back(pasted[i]);
+        }
+    }
+    KeyInput out;
+    out.kind = KeyInput::Kind::Paste;
+    out.text = WideToUtf8(normalized);
+    return out;
+}
+
+}  // namespace
 
 bool StdinIsInteractive() {
     const HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
@@ -154,10 +267,8 @@ RawInputScope::~RawInputScope() {
 }
 
 std::optional<KeyInput> KeyReader::ReadOne() {
-    const HANDLE h_in = GetStdHandle(STD_INPUT_HANDLE);
     INPUT_RECORD record{};
-    DWORD read = 0;
-    if (!ReadConsoleInputW(h_in, &record, 1, &read) || read == 0) {
+    if (!ReadInputRecord(record)) {
         return std::nullopt;
     }
     if (record.EventType != KEY_EVENT || record.Event.KeyEvent.bKeyDown == FALSE) {
@@ -202,6 +313,9 @@ std::optional<KeyInput> KeyReader::ReadOne() {
         // 确认提示那些单行场景语义不变。
         out.kind = (shift || alt) ? KeyInput::Kind::NewLine : KeyInput::Kind::Enter;
     } else if (ke.wVirtualKeyCode == VK_ESCAPE) {
+        if (auto paste = TryReadBracketedPaste(); paste.has_value()) {
+            return paste;
+        }
         out.kind = KeyInput::Kind::Esc;
     } else if (ke.uChar.UnicodeChar != 0 && !ctrl) {
         const wchar_t wc = ke.uChar.UnicodeChar;

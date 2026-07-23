@@ -87,7 +87,7 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
     // 提示构造后定死)——但 tools 数组每轮现拼(见 AgentLoop 注释),挂载
     // 照样生效,索引段只是稍显陈旧,无害。
     const std::string system_prompt = agent::WithDeferredToolsIndex(
-        agent::BuildSystemPrompt(cwd_, SubAgentPersona(), skills_segment_, prompts_dir_),
+        agent::BuildSystemPrompt(cwd_, SubAgentPersona(), skills_segment_, prompts_dir_, project_instructions_),
         deferred_index_provider_ ? deferred_index_provider_() : std::string());
     // 每次 execute() 都是全新的、空历史的子代理——没有跨调用的状态,
     // 子代理内部也不做自动 compact(短命任务用不上),AgentLoop 自带的

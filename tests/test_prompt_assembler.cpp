@@ -356,3 +356,12 @@ TEST_CASE("PromptModuleSources: 用户文件/内置来源统计") {
         CHECK_FALSE(source.from_user_file);
     }
 }
+
+TEST_CASE("项目 AGENTS 指令作为独立段注入") {
+    PromptOptions options = BaseOptions();
+    options.project_instructions = "# Project Instructions\n\n- run the focused tests";
+    const std::string prompt = AssembleSystemPrompt(options);
+    CHECK(prompt.find(options.project_instructions) != std::string::npos);
+    CHECK(prompt.find(options.project_instructions) > prompt.find("# 运行环境"));
+    CHECK(prompt.find(options.project_instructions) < prompt.find("# 文件读写"));
+}

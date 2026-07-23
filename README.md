@@ -14,7 +14,7 @@
   <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml/badge.svg" alt="Release"></a>
   <img src="https://img.shields.io/badge/C%2B%2B-23-00599C?logo=cplusplus&logoColor=white" alt="C++23">
-  <img src="https://img.shields.io/badge/version-0.23.4-CB2C31" alt="v0.23.4">
+  <img src="https://img.shields.io/badge/version-0.23.5-CB2C31" alt="v0.23.5">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-444444" alt="Windows, Linux and macOS">
 </p>
 
@@ -22,7 +22,7 @@ LubanCode 原生支持 Anthropic Messages API 与 OpenAI Responses API。模型�
 
 鲁班造物，先正绳墨，再下斧凿。LubanCode 也守这条规矩：先看清，再动手；改了什么，明明白白摆给你看。
 
-> 当前版本：`v0.23.4`。Windows、Ubuntu、macOS 三路 CI 均已编译并跑过全量测试。
+> 当前版本：`v0.23.5`。Windows、Ubuntu、macOS 三路 CI 均会编译并跑全量测试。
 
 ## 一眼看懂
 
@@ -31,8 +31,8 @@ LubanCode 原生支持 Anthropic Messages API 与 OpenAI Responses API。模型�
 | **模型接入** | Anthropic / Responses 双协议；多 provider 随时切换并记住上次选择；`extra_body`、`extra_headers` 可透传厂商私有参数。 |
 | **代码工具** | 读、写、容错编辑、搜索文件；前台或后台跑命令；改动先看 diff，再落盘。 |
 | **语义与外接工具** | LSP 定义、引用、符号、诊断；MCP stdio；联网搜索与网页抓取。 |
-| **代理工作流** | 子代理、待办清单、`ask_user` 选择题、工具延迟挂载、隔离 worktree、项目级权限。 |
-| **终端体验** | 流式渲染、动态工作状态、常驻消息队列、逐键编辑、多行输入、折叠与聚焦、三档确认。 |
+| **代理工作流** | 子代理、待办清单、`ask_user` 选择题、`AGENTS.md` 项目指令、工具延迟挂载、隔离 worktree、项目级权限。 |
+| **终端体验** | 分段 Markdown 渲染、动态工作状态、常驻消息队列、折叠式多行粘贴、逐键编辑、折叠与聚焦、三档确认。 |
 | **上下文与存档** | token 占用分析、自动压缩、独立压缩模型、会话恢复、标题、Markdown 导出。 |
 | **扩展与定制** | Skills、Lua 工具、C ABI DLL 插件、hooks、主题、i18n、soul 与 system prompt。 |
 
@@ -149,11 +149,18 @@ git diff --cached | lubancode "替我审一遍这份改动"
 
 把它存到 `~/.lubancode/config.json`，再设好 `WORK_MODEL_API_KEY`。`/provider switch work` 成功后也会自动写入 `active_provider`，下次启动仍走这一路。完整字段、优先级与厂商参数透传，见 [配置手册](docs/configuration.md)。
 
+## 项目指令
+
+进入仓库，敲一声 `/init`。LubanCode 会在 Git 根生成 `AGENTS.md`，填入项目布局、构建测试与改动规矩。已有文件便只读不改。文件写成后，当前会话立刻重载，主代理、子代理一并照办。
+
+启动时，LubanCode 从 Git 根一路走到当前目录。每层先看 `AGENTS.override.md`，再看 `AGENTS.md`；近处内容排在后头，能压过远处。空文件跳过，总量封顶 32 KiB。细则见 [项目指令](docs/project-instructions.md)。
+
 ## 常用命令
 
 | 命令 | 用处 |
 | --- | --- |
 | `/provider` | 添加、列出、切换、删除模型服务。 |
+| `/init` | 生成并载入项目级 `AGENTS.md`。 |
 | `/model` · `/think` | 切模型与推理强度。 |
 | `/context` · `/compact` | 看上下文占用，手工压缩历史。 |
 | `/skills` · `/skill install <url>` | 管理本地与远端技能。 |
@@ -171,6 +178,7 @@ git diff --cached | lubancode "替我审一遍这份改动"
 - `Ctrl+O`：工具输出在紧凑与详细之间切换。
 - `Ctrl+E`：聚焦查看当前工具条目全文。
 - `Shift+Enter`：输入框里换行。
+- 多行粘贴：自动折成 `[粘贴内容 N 字符]`，发送时仍交付完整原文。
 - `Esc`：打断当前轮，或退出聚焦画面。
 
 模型作答时可直接键入下一条并回车。消息会留在输入框上方，当前回合收尾后依次发送。
@@ -195,6 +203,7 @@ LubanCode 留了四扇门：
 | [扩展指南](docs/extensions.md) | Skills、Lua、C ABI 插件、MCP 与 LSP。 |
 | [架构说明](docs/architecture.md) | 分层、请求链、双后端、工具与平台边界。 |
 | [终端交互](docs/terminal-ui.md) | 工作动画、消息队列、`ask_user`、确认与编辑匹配。 |
+| [项目指令](docs/project-instructions.md) | `/init`、`AGENTS.md` 层级、覆盖与大小边界。 |
 | [提示词模块](src/prompts/README.md) | 内置 prompt 如何拆分、嵌入与覆盖。 |
 
 ## CI 与发布
@@ -208,8 +217,8 @@ LubanCode 留了四扇门：
 推送 `v*` 标签会触发发布流水线。三平台分别打包，随后自动创建 GitHub Release、生成发布说明并上传产物：
 
 ```bash
-git tag -a v0.23.4 -m "v0.23.4"
-git push origin v0.23.4
+git tag -a v0.23.5 -m "v0.23.5"
+git push origin v0.23.5
 ```
 
 ## 许可

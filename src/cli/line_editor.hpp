@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace lubancode::cli {
@@ -28,6 +29,7 @@ namespace lubancode::cli {
 // 翻译成这个,核心层只认这个,不知道底下是 Win32 API。
 enum class KeyKind {
     Char,  // 可打印字符,ch 有效(按 Unicode 码点算,不是字节、也不是 UTF-16 code unit)
+    Paste,  // 多行粘贴,text 保存完整 UTF-8 内容
     Backspace,
     Left,
     Right,
@@ -52,9 +54,11 @@ enum class KeyKind {
 struct KeyEvent {
     KeyKind kind;
     char32_t ch = 0;  // 只有 kind == Char 时有意义
+    std::string text;  // 只有 kind == Paste 时有意义
 
-    static KeyEvent Char(char32_t c) { return KeyEvent{KeyKind::Char, c}; }
-    static KeyEvent Simple(KeyKind k) { return KeyEvent{k, 0}; }
+    static KeyEvent Char(char32_t c) { return KeyEvent{KeyKind::Char, c, {}}; }
+    static KeyEvent Paste(std::string value) { return KeyEvent{KeyKind::Paste, 0, std::move(value)}; }
+    static KeyEvent Simple(KeyKind k) { return KeyEvent{k, 0, {}}; }
 };
 
 // Shift+Tab 循环切换的三档会话级确认模式,main.cpp 的工具确认回调按这个
@@ -245,6 +249,7 @@ private:
 
     void ResetHistoryBrowsing();  // "翻到一半又编辑" -> 落回底部,但保留当前(已编辑的)内容
     void InsertChar(char32_t ch);
+    void InsertPaste(const std::string& text);
     void InsertNewLine();   // 光标处劈开当前行,插入新行,光标落到新行行首
     void DeleteBackward();  // 行内退格删一个字符;行首退格把这一行并进上一行
     void ClearBuffer();     // 整个 composer 清空回"单个空行"
@@ -261,6 +266,10 @@ private:
     // 真正选中任何一个)。0.16.0 起:选中项落到第 6 行之外时,展示窗口往下
     // 挪,保证 "> " 标记永远看得见(窗口起点 = 选中下标 - 5)。
     std::vector<std::string> BuildHintLines(const std::vector<std::string>& matches, int selected_index) const;
+
+    std::vector<std::u32string> pasted_contents_;
+    std::u32string ExpandPasteTokens(const std::u32string& text) const;
+    std::u32string DisplayPasteTokens(const std::u32string& text) const;
 };
 
 }  // namespace lubancode::cli

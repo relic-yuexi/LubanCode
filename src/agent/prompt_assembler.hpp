@@ -27,6 +27,7 @@ struct PromptOptions {
     std::string cwd;             // 运行环境段现填
     std::string persona;         // 非空 = 法/CLI 人格,整段替换 core 模块
     std::string skills_segment;  // 技能清单段;非空才注 skills 模块 + 清单本身
+    std::string project_instructions;  // AGENTS.md 分层内容;非空才注入
     bool mcp = false;            // 配置了 mcpServers
     bool web = false;            // 配置了 search 段(web_search 注册了)
     bool lsp = false;            // 配置了 lsp 段

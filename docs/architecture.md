@@ -4,7 +4,7 @@
 
 LubanCode 是一支 C++23 命令行程序。上层管交互，中层管代理循环，下层管协议、工具与平台。依赖只往下走，不能倒灌。
 
-> 本页对应 `v0.23.4`。Windows/MSVC、Ubuntu/GCC、macOS/Clang 都在 CI 中编译并跑测试。
+> 本页对应 `v0.23.5`。Windows/MSVC、Ubuntu/GCC、macOS/Clang 都在 CI 中编译并跑测试。
 
 ## 分层
 
@@ -114,6 +114,8 @@ platforms/   Anthropic / Responses 协议段
 ```
 
 运行时逐模块判断：用户文件非空便优先，否则退回嵌入版。`system_prompt.md` 替换人格段；`SOUL.md` 只叠风格。两者不该混作一件事。
+
+项目指令另走 `src/config/project_instructions.cpp`。它从 Git 根走到当前目录，逐层读 `AGENTS.override.md` / `AGENTS.md`，拼进主代理与子代理系统提示。`/init` 写好脚手架后会保留历史、重建提示词，当前会话当场生效。
 
 ## 配置边界
 

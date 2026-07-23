@@ -59,6 +59,7 @@
 #include "config/config.hpp"
 #include "config/model_catalog.hpp"
 #include "config/prompt_files.hpp"
+#include "config/project_instructions.hpp"
 #include "config/skill_store.hpp"
 #include "lsp/manager.hpp"
 #include "mcp/client.hpp"
@@ -92,7 +93,7 @@
 
 namespace {
 
-constexpr std::string_view kVersion = "0.23.4";
+constexpr std::string_view kVersion = "0.23.5";
 
 // i18n:tr/trf 在本文件里到处用,拉进匿名命名空间省得每处全限定。
 using lubancode::cli::tr;
@@ -1488,18 +1489,13 @@ private:
 // ---------------------------------------------------------------------------
 // markdown(0.18.x):模型正文的两段式渲染记账员。
 //
-// 前一段:流式期间正文照旧逐字原样打(OnDelta 就是 on_text_delta 的唯一
-// 打印出口,现状零改动),顺带攒全文、记块首行号——流式里判 markdown
-// 结构不可靠,不赌。后一段:回合收束(RunTurn 里 Run() 正常返回、没被
-// ESC 打断)后,FinalizeRepaint 拿攒下的完整正文过 DetectMarkdownStructure,
-// 检测到结构才把刚打的原样正文整块擦掉、按 RenderMarkdown 重画——擦与画
-// 走 TranscriptPainter 同一套"记行数、擦、重打"的 Win32 锚点手艺;没有
-// 结构就一字不动,不重画不闪。
+// 正文仍逐字原样打，同时按空行切成小段；一段收齐、代码围栏闭合，便过
+// DetectMarkdownStructure，命中后原地换成 RenderMarkdown 结果。最后没以
+// 空行收尾的一段由 FinalizeRepaint 收账。长回答不再攒到整轮末尾才重画，
+// 免得块首滚出屏幕后整篇放弃渲染。
 //
-// 块的边界:工具条目要开画时(on_tool_start)当前块作罢、保持原样——
-// 重画只做回合收束时的最后一块,中途的过场白一两句话没有重画的价值,也
-// 免得跟条目锚点的账搅在一起;最后一块正好是"最后一次请求的完整正文"
-// (assembler 攒出的那条 assistant 文本,工具调用不会插在它中间)。
+// 工具条目要开画时(on_tool_start)，尚未收束的小段作罢、保持原样；下一段
+// 重新取锚。已在段落边界画好的 Markdown 不受影响。
 //
 // 行数记账不猜折行:块首记起始行号,收束时按光标位移算物理行数——原样
 // 流式的长行由控制台自然折行,逐字模拟折行规则(延迟 EOL 那套)不可靠。
@@ -1539,54 +1535,33 @@ public:
             lubancode::cli::RedrawStreamFooterLocked();
             return;
         }
-        if (!in_block_) {
-            in_block_ = true;
-            unsafe_ = false;
-            buffer_.clear();
-            const std::optional<lubancode::platform::ScreenInfo> info = lubancode::platform::GetScreenInfo();
-            if (info.has_value() && info->cursor_x == 0) {
-                start_row_ = info->cursor_y;
-            } else {
-                unsafe_ = true;  // 块首不在行首/探测失败:账算不清,这块不动
+
+        // 长回答不能等到整轮结束才重画：那时块首多半早滚出屏幕。按空行
+        // 切成小段，逐段记锚、逐段收束；代码围栏没闭合时不切，免得把块内
+        // 空行错当段落边界。这样前一段失去锚点，后一段仍能重新起账。
+        std::string piece;
+        for (const char c : text) {
+            piece += c;
+            if (c != '\n') {
+                line_probe_ += c;
+                continue;
+            }
+            std::size_t first = 0;
+            while (first < line_probe_.size() && (line_probe_[first] == ' ' || line_probe_[first] == '\t')) {
+                ++first;
+            }
+            if (line_probe_.compare(first, 3, "```") == 0) {
+                fence_open_ = !fence_open_;
+            }
+            const bool blank = first == line_probe_.size();
+            line_probe_.clear();
+            if (blank && !fence_open_) {
+                PrintPieceLocked(piece);
+                piece.clear();
+                RepaintBlockLocked();
             }
         }
-        // 落笔前先估这一笔要占几行(换行数 + 折行上限 + 余量),快撞缓冲区
-        // 底就自己先滚够、start_row_ 同步上移——滚动出自自己之手,行号
-        // 不失真;块首都得滚出顶(块比整个缓冲区还高)才认输。
-        if (!unsafe_) {
-            const std::optional<lubancode::platform::ScreenInfo> info = lubancode::platform::GetScreenInfo();
-            if (info.has_value()) {
-                int rows_needed = 2;
-                for (const char c : text) {
-                    if (c == '\n') {
-                        ++rows_needed;
-                    }
-                }
-                rows_needed += static_cast<int>(lubancode::cli::DisplayWidthUtf8(text)) /
-                               (std::max)(1, info->width);
-                const int overflow = info->cursor_y + rows_needed - info->height + 1;
-                if (overflow > 0) {
-                    if (overflow > start_row_) {
-                        unsafe_ = true;
-                    } else {
-                        const int saved_x = info->cursor_x;
-                        const int saved_y = info->cursor_y;
-                        lubancode::platform::SetCursorPos(0, info->height - 1);
-                        for (int i = 0; i < overflow; ++i) {
-                            std::cout << "\n";
-                        }
-                        std::cout.flush();
-                        start_row_ -= overflow;
-                        lubancode::platform::SetCursorPos(saved_x, saved_y - overflow);
-                    }
-                }
-            } else {
-                unsafe_ = true;
-            }
-        }
-        std::cout << text;
-        std::cout.flush();
-        buffer_ += text;
+        PrintPieceLocked(piece);
         lubancode::cli::RedrawStreamFooterLocked();  // 脚注重画到正文当前底部下方
     }
 
@@ -1622,6 +1597,8 @@ public:
         }
         in_block_ = false;
         buffer_.clear();
+        line_probe_.clear();
+        fence_open_ = false;
     }
 
     // 回合收束:最后一块正文已完整——检测到 markdown 结构就整块擦掉重画
@@ -1630,12 +1607,75 @@ public:
         if (!enabled_ || !in_block_) {
             return;
         }
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        RepaintBlockLocked();
+        line_probe_.clear();
+        fence_open_ = false;
+    }
+
+private:
+    void StartBlockLocked() {
+        in_block_ = true;
+        unsafe_ = false;
+        buffer_.clear();
+        const std::optional<lubancode::platform::ScreenInfo> info = lubancode::platform::GetScreenInfo();
+        if (info.has_value() && info->cursor_x == 0) {
+            start_row_ = info->cursor_y;
+        } else {
+            unsafe_ = true;
+        }
+    }
+
+    void PrintPieceLocked(const std::string& text) {
+        if (text.empty()) {
+            return;
+        }
+        if (!in_block_) {
+            StartBlockLocked();
+        }
+        if (!unsafe_) {
+            const std::optional<lubancode::platform::ScreenInfo> info = lubancode::platform::GetScreenInfo();
+            if (info.has_value()) {
+                int rows_needed = 2;
+                for (const char c : text) {
+                    rows_needed += c == '\n' ? 1 : 0;
+                }
+                rows_needed += static_cast<int>(lubancode::cli::DisplayWidthUtf8(text)) /
+                               (std::max)(1, info->width);
+                const int overflow = info->cursor_y + rows_needed - info->height + 1;
+                if (overflow > 0) {
+                    if (overflow > start_row_) {
+                        unsafe_ = true;
+                    } else {
+                        const int saved_x = info->cursor_x;
+                        const int saved_y = info->cursor_y;
+                        lubancode::platform::SetCursorPos(0, info->height - 1);
+                        for (int i = 0; i < overflow; ++i) {
+                            std::cout << "\n";
+                        }
+                        std::cout.flush();
+                        start_row_ -= overflow;
+                        lubancode::platform::SetCursorPos(saved_x, saved_y - overflow);
+                    }
+                }
+            } else {
+                unsafe_ = true;
+            }
+        }
+        std::cout << text;
+        std::cout.flush();
+        buffer_ += text;
+    }
+
+    void RepaintBlockLocked() {
+        if (!in_block_) {
+            return;
+        }
         in_block_ = false;
         if (unsafe_ || buffer_.empty() || !lubancode::cli::DetectMarkdownStructure(buffer_)) {
             buffer_.clear();
             return;
         }
-        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         const std::optional<lubancode::platform::ScreenInfo> info = lubancode::platform::GetScreenInfo();
         if (!info.has_value()) {
             buffer_.clear();
@@ -1650,6 +1690,7 @@ public:
             buffer_.clear();
             return;
         }
+        const bool ended_with_newline = !buffer_.empty() && buffer_.back() == '\n';
         const int width = lubancode::cli::DetectConsoleWidth().value_or(80);
         const std::vector<std::string> lines = lubancode::cli::RenderMarkdown(buffer_, theme_, width);
         buffer_.clear();
@@ -1683,18 +1724,22 @@ public:
                 std::cout << "\n";
             }
         }
+        if (ended_with_newline) {
+            std::cout << "\n";
+        }
         std::cout.flush();
         // 渲染版每行都截到 width-1,绝不物理折行;末行不带换行收梢,跟原样
         // 流式一致——RunTurn 随后那个 "\n" 照常把行关上,下游行为分毫不差。
     }
 
-private:
     const lubancode::cli::Theme& theme_;
     bool enabled_;
     bool in_block_ = false;
     bool unsafe_ = false;
     int start_row_ = 0;
     std::string buffer_;
+    std::string line_probe_;
+    bool fence_open_ = false;
 };
 
 // 统计一个磁盘文件现在有多少行(write_file 覆盖前掐一下旧行数,给 +N -M
@@ -4101,6 +4146,8 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     const auto home_lubancode = lubancode::config::HomeLubancodeDir();
     const std::string prompts_dir =
         home_lubancode.has_value() ? (*home_lubancode + "/prompts") : std::string();
+    std::string project_instructions =
+        lubancode::config::LoadProjectInstructions(std::filesystem::current_path()).content;
     const std::filesystem::path global_skills_root =
         home_lubancode.has_value() ? lubancode::tools::Utf8ToPath(*home_lubancode) / "skills"
                                    : std::filesystem::path();
@@ -4256,6 +4303,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         agent_tool != nullptr) {
         // 提示词运行时化:子代理系统提示同机制(features 模块用户文件优先)。
         agent_tool->SetPromptsDir(prompts_dir);
+        agent_tool->SetProjectInstructions(project_instructions);
         if (sub_deferral) {
             agent_tool->SetToolFilter(tool_filter);
             agent_tool->SetDeferredIndexProvider([&sub_registry, loaded_tools]() {
@@ -4397,6 +4445,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     prompt_options.cwd = CurrentDirUtf8();
     prompt_options.persona = persona;
     prompt_options.skills_segment = skills_segment;
+    prompt_options.project_instructions = project_instructions;
     prompt_options.mcp = !config.mcp_servers.empty();
     prompt_options.web = config.search.Configured();
     prompt_options.lsp = !config.lsp_servers.empty();
@@ -4405,6 +4454,15 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
 
     std::optional<lubancode::agent::AgentLoop> loop;
     const auto rebuild_loop = [&](bool preserve_history = false) {
+        // 每次真正重建会话都重读项目指令。用户手改 AGENTS.md 后敲 /clear，
+        // 不必退出进程；provider/技能触发的保历史重建也顺手吃到新内容。
+        project_instructions =
+            lubancode::config::LoadProjectInstructions(std::filesystem::current_path()).content;
+        prompt_options.project_instructions = project_instructions;
+        if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry.Find("agent"));
+            agent_tool != nullptr) {
+            agent_tool->SetProjectInstructions(project_instructions);
+        }
         std::vector<lubancode::api::Message> old_history;
         if (preserve_history && loop.has_value()) {
             old_history = loop->History();
@@ -4442,6 +4500,10 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
             tool->SetSkillsSegment(skills_segment);
         }
         prompt_options.skills_segment = skills_segment;
+        rebuild_loop(/*preserve_history=*/true);
+    };
+
+    const auto refresh_project_instructions = [&]() {
         rebuild_loop(/*preserve_history=*/true);
     };
 
@@ -4545,10 +4607,14 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     lubancode::cli::WorktreeSession worktree_session;
     const auto sync_worktree_directory = [&]() {
         prompt_options.cwd = CurrentDirUtf8();
+        project_instructions =
+            lubancode::config::LoadProjectInstructions(std::filesystem::current_path()).content;
+        prompt_options.project_instructions = project_instructions;
         loop->SetSystemPrompt(lubancode::agent::AssembleSystemPrompt(prompt_options));
         if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry.Find("agent"));
             agent_tool != nullptr) {
             agent_tool->SetWorkingDirectory(prompt_options.cwd);
+            agent_tool->SetProjectInstructions(project_instructions);
         }
     };
 
@@ -4587,6 +4653,22 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                 case lubancode::cli::SlashCommand::Config:
                     PrintConfigDiagnostics(config_result, *current_model, &model_catalog, &settings_local);
                     break;
+                case lubancode::cli::SlashCommand::Init: {
+                    const auto result =
+                        lubancode::config::InitializeProjectInstructions(std::filesystem::current_path());
+                    if (result.status == lubancode::config::InitProjectInstructionsStatus::Error) {
+                        std::cout << theme.error
+                                  << trf("cmd.init.failed", PathToUtf8(result.path), result.error)
+                                  << theme.reset << "\n";
+                        break;
+                    }
+                    refresh_project_instructions();
+                    const char* key = result.status == lubancode::config::InitProjectInstructionsStatus::Created
+                                          ? "cmd.init.created"
+                                          : "cmd.init.exists";
+                    std::cout << trf(key, PathToUtf8(result.path)) << "\n";
+                    break;
+                }
                 case lubancode::cli::SlashCommand::Language:
                     HandleLanguageCommand(parsed.args, config_file_path);
                     break;
@@ -4892,6 +4974,8 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     const auto home_lubancode = lubancode::config::HomeLubancodeDir();
     const std::string prompts_dir =
         home_lubancode.has_value() ? (*home_lubancode + "/prompts") : std::string();
+    const std::string project_instructions =
+        lubancode::config::LoadProjectInstructions(std::filesystem::current_path()).content;
 
     std::unique_ptr<lubancode::api::Backend> backend = BuildBackend(config);
     // 单发模式没有 /think 命令,current_think 构造后不会再变,等价于直接
@@ -4964,6 +5048,7 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry.Find("agent"));
         agent_tool != nullptr) {
         agent_tool->SetPromptsDir(prompts_dir);  // 子代理系统提示同机制
+        agent_tool->SetProjectInstructions(project_instructions);
         if (sub_deferral) {
             agent_tool->SetToolFilter(tool_filter);
             agent_tool->SetDeferredIndexProvider([&sub_registry, loaded_tools]() {
@@ -4983,6 +5068,7 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     prompt_options.cwd = CurrentDirUtf8();
     prompt_options.persona = persona;
     prompt_options.skills_segment = skills_segment;
+    prompt_options.project_instructions = project_instructions;
     prompt_options.mcp = !config.mcp_servers.empty();
     prompt_options.web = config.search.Configured();
     prompt_options.lsp = !config.lsp_servers.empty();

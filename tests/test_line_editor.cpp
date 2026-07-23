@@ -28,6 +28,36 @@ void TypeString(LineEditorCore& editor, const std::string& ascii_text) {
 
 }  // namespace
 
+TEST_CASE("LineEditorCore: 多行粘贴折叠显示,提交时展开原文") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+
+    const auto pasted = editor.HandleKey(KeyEvent::Paste("first\nsecond"));
+    REQUIRE(pasted.lines.size() == 1);
+    CHECK(Utf32ToUtf8(pasted.lines[0]).find("12") != std::string::npos);
+    CHECK(Utf32ToUtf8(pasted.line) == "first\nsecond");
+
+    const auto submitted = editor.HandleKey(KeyEvent::Simple(KeyKind::Enter));
+    CHECK(submitted.submitted);
+    CHECK(Utf32ToUtf8(submitted.line) == "first\nsecond");
+    REQUIRE(submitted.lines.size() == 1);
+
+    editor.BeginLine(true);
+    const auto history = editor.HandleKey(KeyEvent::Simple(KeyKind::Up));
+    REQUIRE(history.lines.size() == 2);
+    CHECK(Utf32ToUtf8(history.lines[0]) == "first");
+    CHECK(Utf32ToUtf8(history.lines[1]) == "second");
+}
+
+TEST_CASE("LineEditorCore: 单行 bracketed paste 仍按普通文本编辑") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    const auto state = editor.HandleKey(KeyEvent::Paste("plain text"));
+    REQUIRE(state.lines.size() == 1);
+    CHECK(Utf32ToUtf8(state.lines[0]) == "plain text");
+    CHECK(Utf32ToUtf8(state.line) == "plain text");
+}
+
 TEST_CASE("LineEditorCore: 敲字符会插到光标位置,光标跟着往后走") {
     LineEditorCore editor;
     editor.BeginLine();

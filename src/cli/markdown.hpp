@@ -1,7 +1,6 @@
 // 终端 markdown 渲染(0.18.x):模型正文回合收束后的"重画版"长什么样,
-// 全在这两个纯函数里。机制是两段式:流式期间正文照旧逐字原样打(流式里
-// 判结构不可靠,不赌);回合收束后,main.cpp 拿攒下的完整正文先过
-// DetectMarkdownStructure,检测到结构才把刚打的原样正文整块擦掉、按
+// 全在这两个纯函数里。流式期间正文照旧逐字原样打；main.cpp 在段落边界
+// 和回合收束时，把收齐的小段先过 DetectMarkdownStructure，命中才按
 // RenderMarkdown 的结果重画——擦与画的 Win32 锚点记账在 main.cpp
 // (StreamBodyTracker),这个文件不碰 IO,单测主战场。
 //

@@ -176,6 +176,10 @@ std::string AssembleSystemPrompt(const PromptOptions& options) {
 
     append(BuildEnvironmentSegment(options.cwd, options.current_date));
 
+    if (!options.project_instructions.empty()) {
+        append(options.project_instructions);
+    }
+
     // 恒在的四件套:基础工具的方针跟着工具走,不跟人格走。
     append(ModuleByPath(options.prompts_dir, "features/files.md"));
     append(ModuleByPath(options.prompts_dir, "features/shell.md"));

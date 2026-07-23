@@ -77,12 +77,14 @@ inline std::string WithDeferredToolsIndex(const std::string& system_prompt, cons
 // (tools/agent_tool 不设时、既有测试)行为不变。
 inline std::string BuildSystemPrompt(const std::string& cwd, const std::string& custom_persona = std::string(),
                                       const std::string& skills_segment = std::string(),
-                                      const std::string& prompts_dir = std::string()) {
+                                      const std::string& prompts_dir = std::string(),
+                                      const std::string& project_instructions = std::string()) {
     PromptOptions options;
     options.cwd = cwd;
     options.persona = custom_persona;
     options.skills_segment = skills_segment;
     options.prompts_dir = prompts_dir;
+    options.project_instructions = project_instructions;
     return AssembleSystemPrompt(options);
 }
 

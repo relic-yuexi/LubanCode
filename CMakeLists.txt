@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(lubancode VERSION 0.23.4 LANGUAGES CXX)
+project(lubancode VERSION 0.23.5 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -222,6 +222,7 @@ add_library(lubancode_core STATIC
   src/config/config.cpp
   src/config/model_catalog.cpp
   src/config/prompt_files.cpp
+  src/config/project_instructions.cpp
   src/config/skill_store.cpp
   src/tools/registry.cpp
   src/tools/read_file.cpp

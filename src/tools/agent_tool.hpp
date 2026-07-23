@@ -102,6 +102,7 @@ public:
     void SetPromptsDir(std::string prompts_dir) { prompts_dir_ = std::move(prompts_dir); }
 
     void SetSkillsSegment(std::string skills_segment) { skills_segment_ = std::move(skills_segment); }
+    void SetProjectInstructions(std::string instructions) { project_instructions_ = std::move(instructions); }
     std::string name() const override;
     std::string description() const override;
     nlohmann::json input_schema() const override;
@@ -116,6 +117,7 @@ private:
     int default_max_turns_;
     std::string skills_segment_;
     std::string prompts_dir_;  // 提示词运行时化:空 = 只用嵌入版
+    std::string project_instructions_;  // 当前工作目录的 AGENTS.md 分层内容
     Hooks hooks_;
     std::function<bool(const Tool&)> tool_filter_;            // tool_search:空 = 不过滤
     std::function<std::string()> deferred_index_provider_;    // tool_search:空 = 不注索引段

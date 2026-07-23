@@ -14,7 +14,7 @@
   <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml/badge.svg" alt="Release"></a>
   <img src="https://img.shields.io/badge/C%2B%2B-23-00599C?logo=cplusplus&logoColor=white" alt="C++23">
-  <img src="https://img.shields.io/badge/version-0.23.4-CB2C31" alt="v0.23.4">
+  <img src="https://img.shields.io/badge/version-0.23.5-CB2C31" alt="v0.23.5">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-444444" alt="Windows, Linux and macOS">
 </p>
 
@@ -22,7 +22,7 @@ LubanCode connects natively to both the Anthropic Messages API and the OpenAI Re
 
 The name comes from Lu Ban, the traditional Chinese master craftsman. The idea is simple: measure first, cut second, and always show the work.
 
-> Current release line: `v0.23.4`. The full suite builds and passes on Windows, Ubuntu, and macOS.
+> Current release line: `v0.23.5`. The full suite builds and runs on Windows, Ubuntu, and macOS.
 
 ## At a glance
 
@@ -31,8 +31,8 @@ The name comes from Lu Ban, the traditional Chinese master craftsman. The idea i
 | **Model access** | Anthropic and Responses protocols, remembered provider switching, native reasoning controls, custom body fields and headers. |
 | **Coding tools** | Read, write, tolerant block editing, file search, foreground and background commands, diff-first approval. |
 | **Semantic tools** | LSP definitions, references, symbols and diagnostics; MCP stdio; web search and fetch. |
-| **Agent workflow** | Sub-agents, todo tracking, `ask_user` questions, deferred tool loading, isolated Git worktrees, project permissions. |
-| **Terminal UX** | Streaming Markdown, animated work status, a persistent message queue, multiline input, focused views, compact and detailed output. |
+| **Agent workflow** | Sub-agents, todo tracking, `ask_user` questions, `AGENTS.md` project instructions, deferred tools, worktrees and project permissions. |
+| **Terminal UX** | Incremental Markdown rendering, animated work status, a persistent queue, collapsed multiline paste, focused views and compact output. |
 | **Context and sessions** | Token breakdowns, automatic compaction, a dedicated compaction model, resume, titles and Markdown export. |
 | **Extensibility** | Skills, Lua tools, C ABI DLL plugins, hooks, themes, i18n, souls and system prompt overrides. |
 
@@ -149,11 +149,18 @@ For multiple model endpoints, use the `providers` array and keep secrets in envi
 
 Save it as `~/.lubancode/config.json`, then set `WORK_MODEL_API_KEY`. A successful `/provider switch work` also writes `active_provider`, so the next launch uses the same endpoint. The detailed [configuration guide](docs/configuration.md) is currently written in Chinese, but all field names and examples are language-neutral.
 
+## Project instructions
+
+Run `/init` inside a repository. LubanCode creates `AGENTS.md` at the Git root with a practical scaffold for layout, build, tests, and working rules. Existing instructions are never overwritten. The current main agent and sub-agents reload the file immediately.
+
+At startup, LubanCode walks from the Git root to the working directory. Each directory prefers `AGENTS.override.md`, then `AGENTS.md`; nearer files appear later and take precedence. Empty files are skipped, and combined instruction content is capped at 32 KiB. See [Project instructions](docs/project-instructions.md).
+
 ## Everyday commands
 
 | Command | Purpose |
 | --- | --- |
 | `/provider` | Add, list, switch, edit, or remove model endpoints. |
+| `/init` | Create and load project-level `AGENTS.md`. |
 | `/model` · `/think` | Change the active model and reasoning effort. |
 | `/context` · `/compact` | Inspect context use and compact conversation history. |
 | `/skills` · `/skill install <url>` | Manage local and remotely installed skills. |
@@ -171,6 +178,7 @@ Useful keys:
 - `Ctrl+O`: toggle compact and detailed tool output.
 - `Ctrl+E`: focus the full content of the selected tool item.
 - `Shift+Enter`: insert a newline in the composer.
+- Multiline paste: collapse to `[Pasted Content N chars]` while preserving the full submitted text.
 - `Esc`: interrupt the current turn or leave a focused view.
 
 While the model is working, type the next message and press Enter. It remains visible above the composer and is sent when the current turn finishes.
@@ -195,6 +203,7 @@ See the [extension guide](docs/extensions.md) for layouts, examples, namespacing
 | [Extensions](docs/extensions.md) | Skills, Lua, C ABI plugins, MCP and LSP. Chinese. |
 | [Architecture](docs/architecture.md) | Layers, request flow, API backends, tools and platform boundaries. Chinese. |
 | [Terminal UX](docs/terminal-ui.md) | Work animation, queued input, `ask_user`, approvals and edit matching. Chinese. |
+| [Project instructions](docs/project-instructions.md) | `/init`, `AGENTS.md` layering, overrides and size limits. Chinese. |
 | [Prompt modules](src/prompts/README.md) | How built-in prompts are split, embedded, seeded and overridden. Chinese. |
 
 ## CI and releases
@@ -208,8 +217,8 @@ Every push and pull request is built and tested on:
 Pushing a `v*` tag builds all three release archives, creates a GitHub Release, generates release notes, and uploads the binaries:
 
 ```bash
-git tag -a v0.23.4 -m "v0.23.4"
-git push origin v0.23.4
+git tag -a v0.23.5 -m "v0.23.5"
+git push origin v0.23.5
 ```
 
 ## License

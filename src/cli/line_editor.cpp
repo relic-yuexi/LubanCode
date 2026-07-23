@@ -9,6 +9,8 @@ namespace lubancode::cli {
 
 namespace {
 
+constexpr char32_t kPasteTokenBase = 0xF0000;
+
 // 手写 UTF-8 -> UTF-32 解码,只给 TruncateUtf8ToDisplayWidth 内部用。非法
 // 起始字节、序列被截断、续字节不是 10xxxxxx 这几种情况一律跳过一个字节
 // 继续——这是给自己代码拼出来的字符串(候选名 + 中文说明)截断用,不是
@@ -312,6 +314,7 @@ void LineEditorCore::ClearBuffer() {
     lines_.assign(1, std::u32string());
     row_ = 0;
     col_ = 0;
+    pasted_contents_.clear();
 }
 
 void LineEditorCore::LoadJoined(const std::u32string& joined) {
@@ -324,6 +327,69 @@ void LineEditorCore::InsertChar(char32_t ch) {
     lines_[row_].insert(col_, 1, ch);
     ++col_;
     ResetHistoryBrowsing();
+}
+
+void LineEditorCore::InsertPaste(const std::string& text) {
+    std::string normalized;
+    normalized.reserve(text.size());
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '\r') {
+            if (i + 1 < text.size() && text[i + 1] == '\n') {
+                continue;
+            }
+            normalized += '\n';
+        } else {
+            normalized += text[i];
+        }
+    }
+    const std::u32string decoded = Utf8ToUtf32(normalized);
+    if (decoded.find(U'\n') == std::u32string::npos) {
+        for (const char32_t c : decoded) {
+            InsertChar(c);
+        }
+        return;
+    }
+    if (pasted_contents_.size() >= 0xFFFE) {
+        for (const char32_t c : decoded) {
+            if (c == U'\n') {
+                InsertNewLine();
+            } else {
+                InsertChar(c);
+            }
+        }
+        return;
+    }
+    const char32_t token = kPasteTokenBase + static_cast<char32_t>(pasted_contents_.size());
+    pasted_contents_.push_back(decoded);
+    InsertChar(token);
+}
+
+std::u32string LineEditorCore::ExpandPasteTokens(const std::u32string& text) const {
+    std::u32string out;
+    for (const char32_t c : text) {
+        const std::size_t index = c >= kPasteTokenBase ? static_cast<std::size_t>(c - kPasteTokenBase)
+                                                       : pasted_contents_.size();
+        if (index < pasted_contents_.size()) {
+            out += pasted_contents_[index];
+        } else {
+            out += c;
+        }
+    }
+    return out;
+}
+
+std::u32string LineEditorCore::DisplayPasteTokens(const std::u32string& text) const {
+    std::u32string out;
+    for (const char32_t c : text) {
+        const std::size_t index = c >= kPasteTokenBase ? static_cast<std::size_t>(c - kPasteTokenBase)
+                                                       : pasted_contents_.size();
+        if (index < pasted_contents_.size()) {
+            out += Utf8ToUtf32(trf("input.pasted_content", pasted_contents_[index].size()));
+        } else {
+            out += c;
+        }
+    }
+    return out;
 }
 
 void LineEditorCore::InsertNewLine() {
@@ -459,18 +525,22 @@ void LineEditorCore::HandleTab() {
 RenderState LineEditorCore::BuildRenderState(bool submitted, bool cleared, bool eof_requested,
                                               bool mode_changed) const {
     RenderState state;
-    state.lines = lines_;
+    state.lines.clear();
+    state.lines.reserve(lines_.size());
+    for (const std::u32string& line : lines_) {
+        state.lines.push_back(DisplayPasteTokens(line));
+    }
     state.cursor_row = row_;
-    state.cursor_col = col_;
-    state.line = JoinLines(lines_);
+    state.cursor_col = DisplayPasteTokens(lines_[row_].substr(0, col_)).size();
+    state.line = ExpandPasteTokens(JoinLines(lines_));
     // 兼容字段 cursor:光标在拼接串里的码点位置——前面每行占"行长 + 1 个
     // '\n'",再加行内偏移。单行场景就是 col_,跟升级前一模一样。
-    std::size_t joined_cursor = col_;
+    std::size_t joined_cursor = ExpandPasteTokens(lines_[row_].substr(0, col_)).size();
     for (std::size_t i = 0; i < row_; ++i) {
-        joined_cursor += lines_[i].size() + 1;
+        joined_cursor += ExpandPasteTokens(lines_[i]).size() + 1;
     }
     state.cursor = joined_cursor;
-    state.cursor_display_col = DisplayWidth(lines_[row_].substr(0, col_));
+    state.cursor_display_col = DisplayWidth(DisplayPasteTokens(lines_[row_].substr(0, col_)));
     state.submitted = submitted;
     state.cleared = cleared;
     state.eof_requested = eof_requested;
@@ -630,6 +700,9 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
         case KeyKind::Char:
             InsertChar(effective.ch);
             break;
+        case KeyKind::Paste:
+            InsertPaste(effective.text);
+            break;
         case KeyKind::NewLine:
             InsertNewLine();
             break;
@@ -714,13 +787,18 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
             return BuildRenderState(false, false, false, true);
         case KeyKind::Enter: {
             const std::u32string joined = JoinLines(lines_);
-            if (composer_ && AllWhitespace(joined)) {
+            const std::u32string expanded = ExpandPasteTokens(joined);
+            if (composer_ && AllWhitespace(expanded)) {
                 break;  // UI-A:空 composer(全空白)不发送,原地不动
             }
-            if (!joined.empty()) {
-                history_.push_back(joined);
+            if (!expanded.empty()) {
+                history_.push_back(expanded);
             }
-            const std::vector<std::u32string> submitted_lines = lines_;
+            std::vector<std::u32string> submitted_lines;
+            submitted_lines.reserve(lines_.size());
+            for (const std::u32string& line : lines_) {
+                submitted_lines.push_back(DisplayPasteTokens(line));
+            }
             ClearBuffer();
             ResetHistoryBrowsing();
             RenderState state = BuildRenderState(true, false, false, false);
@@ -729,8 +807,8 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
             state.lines = submitted_lines;
             state.cursor_row = submitted_lines.size() - 1;
             state.cursor_col = submitted_lines.back().size();
-            state.line = joined;
-            state.cursor = joined.size();
+            state.line = expanded;
+            state.cursor = expanded.size();
             state.cursor_display_col = DisplayWidth(submitted_lines.back());
             state.hint_lines.clear();
             return state;

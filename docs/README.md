@@ -8,7 +8,7 @@
   <a href="../README.md">中文首页</a> · <a href="../README.en.md">English README</a> · <a href="https://github.com/relic-yuexi/LubanCode/releases">Releases</a>
 </p>
 
-这里不摆宣传话，只收能拿来做事的说明。当前文档对应 `v0.23.4`。字段名、命令名若与程序输出冲突，以 `lubancode --help`、`lubancode --config` 与源码为准。
+这里不摆宣传话，只收能拿来做事的说明。当前文档对应 `v0.23.5`。字段名、命令名若与程序输出冲突，以 `lubancode --help`、`lubancode --config` 与源码为准。
 
 ## 从哪一页读起
 
@@ -20,6 +20,7 @@
 | 写 Skill、Lua 工具或原生插件 | [扩展指南](extensions.md) |
 | 看模块怎么分、请求怎么走 | [架构说明](architecture.md) |
 | 看工作动画、排队、提问与确认 | [终端交互](terminal-ui.md) |
+| 用 `/init` 写项目级规矩 | [项目指令](project-instructions.md) |
 | 改系统提示词模块 | [提示词模块说明](../src/prompts/README.md) |
 | 查全部命令与按键 | 运行 `lubancode --help`，或在会话里输入 `/help` |
 
@@ -42,6 +43,7 @@
 - `README.md` 与 `README.en.md` 管入口、安装与常用工作流。
 - `docs/` 管稳定接口与设计边界。
 - `src/prompts/README.md` 管提示词源文件。
+- `AGENTS.md` 管随仓库走的项目指令，层级与覆盖见 [项目指令](project-instructions.md)。
 - 根目录三份协议笔记是开发参考，不等同于 LubanCode 的公开配置接口。
 - `git log --oneline` 记功能来路；GitHub Releases 记对外版本。
 

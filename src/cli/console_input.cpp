@@ -234,6 +234,8 @@ std::optional<KeyEvent> MapKey(const platform::KeyInput& key) {
             return std::nullopt;
         case PK::Char:
             return KeyEvent::Char(key.ch);
+        case PK::Paste:
+            return KeyEvent::Paste(key.text);
         case PK::Backspace:
             return KeyEvent::Simple(KeyKind::Backspace);
         case PK::Left:
@@ -509,6 +511,23 @@ void CollapseBoxOnSubmit(int start_row, int prev_body_row_count, const RenderSta
 // 喂 SharedEditor(),按吐出来的 RenderState 重画。
 //
 // esc_rejects/composer:见 console_input.hpp 里 ReadLine() 的同名参数注释。
+class BracketedPasteScope {
+public:
+    explicit BracketedPasteScope(bool enabled) : enabled_(enabled) {
+        if (enabled_) {
+            std::cout << "\x1b[?2004h" << std::flush;
+        }
+    }
+    ~BracketedPasteScope() {
+        if (enabled_) {
+            std::cout << "\x1b[?2004l" << std::flush;
+        }
+    }
+
+private:
+    bool enabled_;
+};
+
 std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const Theme& theme, bool esc_rejects,
                                              bool composer) {
     // 整个函数体都攥着这把锁:M10 的 TurnInputListener 监听线程只在抢到锁
@@ -521,6 +540,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     if (!raw_scope.ok()) {
         return platform::ReadLineCooked();
     }
+    BracketedPasteScope paste_scope(composer && !theme.reset.empty());
 
     LineEditorCore& editor = SharedEditor();
     editor.BeginLine(composer);

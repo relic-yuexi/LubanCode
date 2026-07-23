@@ -53,6 +53,7 @@ add_executable(lubancode_tests
   test_web_search.cpp
   test_session_store.cpp
   test_prompt_files.cpp
+  test_project_instructions.cpp
   test_i18n.cpp
   test_image_input.cpp
   test_network_timeout.cpp
@@ -105,6 +106,10 @@ if(WIN32)
   # 集成验证时手动跑:markdown_screen_driver <lubancode.exe> <工作目录> <报告文件>
   add_executable(markdown_screen_driver markdown_screen_driver.cpp)
   target_compile_features(markdown_screen_driver PRIVATE cxx_std_23)
+
+  # bracketed paste:整段多行内容折成一枚占位符，提交时才展开。
+  add_executable(paste_screen_driver paste_screen_driver.cpp)
+  target_compile_features(paste_screen_driver PRIVATE cxx_std_23)
 
   # 流式脚注框化(0.22.x):验流式期间正文下方那个跟 composer 视觉一致的框
   # (上横线/输入行/下横线/状态行)、排队回显、ESC 打断、可视区域自然滚屏时

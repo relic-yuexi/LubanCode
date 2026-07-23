@@ -24,6 +24,8 @@
 #include <cstdio>
 #include <deque>
 #include <iostream>
+#include <string_view>
+#include <utility>
 
 #include <poll.h>
 #include <sys/ioctl.h>
@@ -107,6 +109,27 @@ void RestoreTermios(const struct termios* saved) {
 
 // CSI 序列解析:ESC [ 已读掉,收集参数字节直到终止字节(0x40~0x7e),翻成
 // 语义按键。认不出的序列整个吃掉、返回 None,不让参数字节漏成正文字符。
+KeyInput ReadBracketedPaste() {
+    constexpr std::string_view kEnd = "\x1b[201~";
+    std::string text;
+    while (true) {
+        const int byte = ReadByteBlocking();
+        if (byte < 0) {
+            break;
+        }
+        text.push_back(static_cast<char>(byte));
+        if (text.size() >= kEnd.size() &&
+            text.compare(text.size() - kEnd.size(), kEnd.size(), kEnd) == 0) {
+            text.resize(text.size() - kEnd.size());
+            break;
+        }
+    }
+    KeyInput out;
+    out.kind = KeyInput::Kind::Paste;
+    out.text = std::move(text);
+    return out;
+}
+
 KeyInput ParseCsi() {
     std::string params;
     while (true) {
@@ -142,6 +165,9 @@ KeyInput ParseCsi() {
                 case '~':
                     // VT 风格:1~/7~ = Home,4~/8~ = End,其余(3~ Delete、
                     // 5~/6~ 翻页……)暂不映射。
+                    if (params == "200") {
+                        return ReadBracketedPaste();
+                    }
                     if (params == "1" || params == "7") {
                         out.kind = KeyInput::Kind::Home;
                     } else if (params == "4" || params == "8") {

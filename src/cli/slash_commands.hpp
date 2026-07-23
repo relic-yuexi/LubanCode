@@ -16,6 +16,7 @@ enum class SlashCommand {
     Model,
     Provider,  // /provider add|list|switch|remove:多端模型服务配置
     Config,
+    Init,      // /init:在项目根创建 AGENTS.md 并立刻载入
     Clear,
     Exit,
     Context,  // /context [档位]:看当前上下文占用,或临时改窗口大小

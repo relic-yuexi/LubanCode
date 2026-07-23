@@ -91,6 +91,7 @@ struct KeyInput {
     enum class Kind {
         None,
         Char,  // ch 有效(Unicode 码点)
+        Paste,  // text 是 bracketed paste 捕获的完整 UTF-8 内容
         Backspace,
         Left,
         Right,
@@ -110,6 +111,7 @@ struct KeyInput {
     };
     Kind kind = Kind::None;
     char32_t ch = 0;
+    std::string text;
 };
 
 // 原始逐键模式的进入/退出(RAII)。Windows: SetConsoleMode 关掉
