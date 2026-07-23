@@ -1,5 +1,7 @@
 #include "tools/todo_tool.hpp"
 
+#include <algorithm>
+
 namespace lubancode::tools {
 
 std::optional<TodoStatus> ParseTodoStatus(const std::string& text) {
@@ -101,7 +103,30 @@ Tool::Result TodoWriteTool::execute(const nlohmann::json& input) {
     }
 
     // 校验全过了才真的替换——半路校验失败绝不能留一份"改了一半"的清单。
+    // 顺手记下哪些位置真变了。工具协议仍是全量覆盖；这点元数据只让
+    // 终端能把首次创建、后续更新和无变化三种结果分开画。
+    const bool had_previous_write = state_->revision > 0;
+    std::vector<std::size_t> changed;
+    const std::size_t compared = (std::max)(state_->items.size(), parsed.size());
+    changed.reserve(compared);
+    for (std::size_t i = 0; i < compared; ++i) {
+        if (i >= state_->items.size() || i >= parsed.size() || state_->items[i].content != parsed[i].content ||
+            state_->items[i].status != parsed[i].status) {
+            changed.push_back(i);
+        }
+    }
     state_->items = std::move(parsed);
+    state_->last_changed_indices = std::move(changed);
+    if (!had_previous_write) {
+        state_->last_write_kind = TodoWriteKind::Created;
+    } else if (state_->items.empty()) {
+        state_->last_write_kind = TodoWriteKind::Cleared;
+    } else if (state_->last_changed_indices.empty()) {
+        state_->last_write_kind = TodoWriteKind::Unchanged;
+    } else {
+        state_->last_write_kind = TodoWriteKind::Updated;
+    }
+    ++state_->revision;
 
     std::size_t completed = 0;
     for (const auto& it : state_->items) {
@@ -109,7 +134,23 @@ Tool::Result TodoWriteTool::execute(const nlohmann::json& input) {
             ++completed;
         }
     }
-    return {"已更新,共 " + std::to_string(state_->items.size()) + " 项," + std::to_string(completed) + " 项已完成",
+    std::string action;
+    switch (state_->last_write_kind) {
+        case TodoWriteKind::Created:
+            action = "已创建";
+            break;
+        case TodoWriteKind::Updated:
+            action = "已更新 " + std::to_string(state_->last_changed_indices.size()) + " 项";
+            break;
+        case TodoWriteKind::Unchanged:
+            action = "清单没有变化";
+            break;
+        case TodoWriteKind::Cleared:
+            action = "已清空";
+            break;
+    }
+    return {action + ",共 " + std::to_string(state_->items.size()) + " 项," + std::to_string(completed) +
+                " 项已完成",
             false};
 }
 

@@ -82,3 +82,17 @@ TEST_CASE("FormatTodoList: 多项时逐行输出,顺序跟输入一致") {
     CHECK(pos1 < pos2);
     CHECK(pos2 < pos3);
 }
+
+TEST_CASE("FormatTodoList: 更新项点亮正文,其余项不额外着色") {
+    const auto theme = BuiltinTheme("dark");
+    const std::vector<TodoItem> items = {
+        TodoItem{"刚完成", TodoStatus::Completed},
+        TodoItem{"没有变化", TodoStatus::Pending},
+    };
+    const std::string out = FormatTodoList(items, theme, {0});
+    CHECK(out.find(theme.prompt + std::string("刚完成") + theme.reset) != std::string::npos);
+    CHECK(out.find(theme.prompt + std::string("没有变化") + theme.reset) == std::string::npos);
+
+    const auto plain = BuiltinTheme("plain");
+    CHECK(FormatTodoList(items, plain, {0}).find('\x1b') == std::string::npos);
+}

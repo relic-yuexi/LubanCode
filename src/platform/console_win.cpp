@@ -136,6 +136,71 @@ std::optional<KeyInput> TryReadBracketedPaste() {
     return out;
 }
 
+bool AppendNativePasteKey(const INPUT_RECORD& record, std::wstring& text, bool& saw_newline,
+                          bool& saw_text_after_newline) {
+    if (record.EventType != KEY_EVENT) {
+        return false;
+    }
+    const KEY_EVENT_RECORD& key = record.Event.KeyEvent;
+    if (key.bKeyDown == FALSE) {
+        return true;  // key-up 是同一批输入的一半，不进正文
+    }
+    const bool ctrl = (key.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0;
+    const bool alt = (key.dwControlKeyState & (LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED)) != 0;
+    if (ctrl || alt) {
+        return false;
+    }
+
+    wchar_t ch = key.uChar.UnicodeChar;
+    if (key.wVirtualKeyCode == VK_RETURN || ch == L'\r' || ch == L'\n') {
+        ch = L'\n';
+        saw_newline = true;
+    } else if (ch != L'\t' && ch < L' ') {
+        return false;
+    } else if (saw_newline) {
+        saw_text_after_newline = true;
+    }
+
+    const unsigned repeat = (std::max)(1U, static_cast<unsigned>(key.wRepeatCount));
+    text.append(repeat, ch);
+    return true;
+}
+
+// VS Code/ConPTY 并不保证 bracketed paste 会以一条完整 VT 序列出现在
+// ReadConsoleInputW 里；有些组合只把整段文字压成一批 KEY_EVENT。若照逐键
+// 翻译，其中第一枚 VK_RETURN 会直接提交，余下各行便散成多条消息。
+//
+// 这里只认“当前已排队的一批按键中，换行后还有正文”的形状。普通打字后按
+// Enter 没有后续正文，不会被吞；方向键、Ctrl/Alt 等编辑键一混进来也整批
+// 原样放回。调用方再按旧规矩逐枚读取。
+std::optional<KeyInput> TryReadNativePasteBurst(const INPUT_RECORD& first) {
+    std::vector<INPUT_RECORD> tail;
+    INPUT_RECORD record{};
+    while (ReadInputRecord(record, 0)) {
+        tail.push_back(record);
+    }
+
+    std::wstring text;
+    bool saw_newline = false;
+    bool saw_text_after_newline = false;
+    bool valid = AppendNativePasteKey(first, text, saw_newline, saw_text_after_newline);
+    for (const INPUT_RECORD& item : tail) {
+        if (!AppendNativePasteKey(item, text, saw_newline, saw_text_after_newline)) {
+            valid = false;
+            break;
+        }
+    }
+    if (!valid || !saw_newline || !saw_text_after_newline) {
+        RestoreInputRecords(tail);
+        return std::nullopt;
+    }
+
+    KeyInput out;
+    out.kind = KeyInput::Kind::Paste;
+    out.text = WideToUtf8(text);
+    return out;
+}
+
 }  // namespace
 
 bool StdinIsInteractive() {
@@ -273,6 +338,9 @@ std::optional<KeyInput> KeyReader::ReadOne() {
     }
     if (record.EventType != KEY_EVENT || record.Event.KeyEvent.bKeyDown == FALSE) {
         return KeyInput{};  // None
+    }
+    if (auto paste = TryReadNativePasteBurst(record); paste.has_value()) {
+        return paste;
     }
     const KEY_EVENT_RECORD& ke = record.Event.KeyEvent;
     const bool ctrl = (ke.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0;

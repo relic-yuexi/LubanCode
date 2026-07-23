@@ -25,6 +25,13 @@ TEST_CASE("BuiltinTheme: dark 是默认主题,着色字段非空") {
     CHECK_FALSE(t.diff_add_bg.empty());
     CHECK_FALSE(t.diff_del_bg.empty());
     CHECK_FALSE(t.diff_line_no.empty());
+    CHECK_FALSE(t.diff_syntax_plain.empty());
+    CHECK_FALSE(t.diff_syntax_keyword.empty());
+    CHECK_FALSE(t.diff_syntax_string.empty());
+    CHECK_FALSE(t.diff_syntax_number.empty());
+    CHECK_FALSE(t.diff_syntax_comment.empty());
+    CHECK_FALSE(t.diff_syntax_type.empty());
+    CHECK_FALSE(t.diff_syntax_function.empty());
 }
 
 TEST_CASE("BuiltinTheme: light 主题着色字段非空,且跟 dark 不完全一样") {
@@ -54,6 +61,13 @@ TEST_CASE("BuiltinTheme: plain 主题所有字段都是空串") {
     CHECK(t.diff_add_bg.empty());
     CHECK(t.diff_del_bg.empty());
     CHECK(t.diff_line_no.empty());
+    CHECK(t.diff_syntax_plain.empty());
+    CHECK(t.diff_syntax_keyword.empty());
+    CHECK(t.diff_syntax_string.empty());
+    CHECK(t.diff_syntax_number.empty());
+    CHECK(t.diff_syntax_comment.empty());
+    CHECK(t.diff_syntax_type.empty());
+    CHECK(t.diff_syntax_function.empty());
 }
 
 TEST_CASE("BuiltinTheme: 不认得的名字兜底成 dark") {

@@ -80,6 +80,24 @@ void SendText(const std::wstring& text) {
     }
 }
 
+void SendTextBatch(const std::wstring& text) {
+    std::vector<INPUT_RECORD> records;
+    records.reserve(text.size() * 2);
+    for (const wchar_t ch : text) {
+        INPUT_RECORD down{};
+        down.EventType = KEY_EVENT;
+        down.Event.KeyEvent.bKeyDown = TRUE;
+        down.Event.KeyEvent.wRepeatCount = 1;
+        down.Event.KeyEvent.wVirtualKeyCode = ch == L'\n' ? VK_RETURN : 0;
+        down.Event.KeyEvent.uChar.UnicodeChar = ch == L'\n' ? L'\r' : ch;
+        records.push_back(down);
+        down.Event.KeyEvent.bKeyDown = FALSE;
+        records.push_back(down);
+    }
+    DWORD written = 0;
+    WriteConsoleInputW(g_in, records.data(), static_cast<DWORD>(records.size()), &written);
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -125,6 +143,15 @@ int wmain(int argc, wchar_t** argv) {
     const bool placeholder = WaitForAny({L"[Pasted Content 11 chars]", L"[粘贴内容 11 字符]"}, 5000);
     Check(placeholder, "multiline paste is collapsed to one placeholder");
     Check(!ScreenContains(L"alpha") && !ScreenContains(L"beta"), "raw pasted lines stay out of the composer");
+
+    SendKey('C', 0x03, LEFT_CTRL_PRESSED);
+    Sleep(200);
+    SendTextBatch(L"native\nburst");
+    const bool native_placeholder =
+        WaitForAny({L"[Pasted Content 12 chars]", L"[粘贴内容 12 字符]"}, 5000);
+    Check(native_placeholder, "unmarked Windows KEY_EVENT paste burst is collapsed to one placeholder");
+    Check(!ScreenContains(L"native") && !ScreenContains(L"burst"),
+          "unmarked paste burst does not leak raw lines into the composer");
 
     SendKey('C', 0x03, LEFT_CTRL_PRESSED);
     Sleep(200);

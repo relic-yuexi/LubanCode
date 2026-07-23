@@ -315,9 +315,11 @@ void LineEditorCore::ClearBuffer() {
     row_ = 0;
     col_ = 0;
     pasted_contents_.clear();
+    paste_run_.reset();
 }
 
 void LineEditorCore::LoadJoined(const std::u32string& joined) {
+    paste_run_.reset();
     lines_ = SplitJoined(joined);
     row_ = lines_.size() - 1;
     col_ = lines_[row_].size();
@@ -343,10 +345,46 @@ void LineEditorCore::InsertPaste(const std::string& text) {
         }
     }
     const std::u32string decoded = Utf8ToUtf32(normalized);
+    if (decoded.empty()) {
+        return;
+    }
+
+    if (paste_run_.has_value()) {
+        PasteRunState& run = *paste_run_;
+        run.content += decoded;
+        if (run.token_index.has_value()) {
+            pasted_contents_[*run.token_index] = run.content;
+            ResetHistoryBrowsing();
+            return;
+        }
+        if (run.content.find(U'\n') == std::u32string::npos) {
+            for (const char32_t c : decoded) {
+                InsertChar(c);
+            }
+            run.stored_length += decoded.size();
+            return;
+        }
+
+        // 头一段是单行，后一段才带换行：撤下已经露在输入框里的明文，
+        // 原位换成一枚附件 token。这样终端分几批送，用户都只见一枚占位。
+        lines_[run.row].erase(run.start_col, run.stored_length);
+        row_ = run.row;
+        col_ = run.start_col;
+        const char32_t token = kPasteTokenBase + static_cast<char32_t>(pasted_contents_.size());
+        run.token_index = pasted_contents_.size();
+        pasted_contents_.push_back(run.content);
+        InsertChar(token);
+        run.stored_length = 1;
+        return;
+    }
+
+    const std::size_t start_row = row_;
+    const std::size_t start_col = col_;
     if (decoded.find(U'\n') == std::u32string::npos) {
         for (const char32_t c : decoded) {
             InsertChar(c);
         }
+        paste_run_ = PasteRunState{start_row, start_col, decoded.size(), std::nullopt, decoded};
         return;
     }
     if (pasted_contents_.size() >= 0xFFFE) {
@@ -360,8 +398,10 @@ void LineEditorCore::InsertPaste(const std::string& text) {
         return;
     }
     const char32_t token = kPasteTokenBase + static_cast<char32_t>(pasted_contents_.size());
+    const std::size_t token_index = pasted_contents_.size();
     pasted_contents_.push_back(decoded);
     InsertChar(token);
+    paste_run_ = PasteRunState{start_row, start_col, 1, token_index, decoded};
 }
 
 std::u32string LineEditorCore::ExpandPasteTokens(const std::u32string& text) const {
@@ -623,6 +663,12 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
     KeyEvent effective = event;
     if (effective.kind == KeyKind::NewLine && !composer_) {
         effective.kind = KeyKind::Enter;
+    }
+
+    // 连续 Paste 才能并成同一枚附件。任一真实编辑键都会截断这趟粘贴，
+    // 免得用户先粘一段、移动光标后再粘一段，却被隔空并回旧附件。
+    if (effective.kind != KeyKind::Paste) {
+        paste_run_.reset();
     }
 
     if (effective.kind != KeyKind::Tab) {

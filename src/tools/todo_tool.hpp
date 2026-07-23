@@ -20,14 +20,22 @@ namespace lubancode::tools {
 
 enum class TodoStatus { Pending, InProgress, Completed };
 
+// 最近一次成功写入相对旧清单做了什么。工具 API 仍是整表替换；这份
+// 元数据只供 TUI 把“新建计划”和“更新计划”讲清楚。
+enum class TodoWriteKind { Created, Updated, Unchanged, Cleared };
+
 struct TodoItem {
     std::string content;
     TodoStatus status = TodoStatus::Pending;
 };
 
-// 会话级待办清单状态。田字段只有一个 vector——整表替换语义下不需要更多。
+// 会话级待办清单状态。items 存当前全表，其余字段只记最近一次改动，
+// 供终端区分 create/update 并点亮变化项。
 struct TodoListState {
     std::vector<TodoItem> items;
+    std::size_t revision = 0;
+    TodoWriteKind last_write_kind = TodoWriteKind::Created;
+    std::vector<std::size_t> last_changed_indices;
 };
 
 // "pending"/"in_progress"/"completed" 三选一,不认得的字符串返回

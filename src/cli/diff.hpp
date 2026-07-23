@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "cli/theme.hpp"
@@ -56,7 +57,7 @@ std::vector<DiffLine> ComputeLineDiff(const std::vector<std::string>& old_lines,
 // 变更行前后各 3 行上下文,更远的未变段折叠成 "…(N 行未变)"。没有任何
 // 变更时给 "(无变化)"。
 std::string FormatDiff(const std::vector<DiffLine>& diff, const Theme& theme, int width, int max_lines,
-                        std::size_t max_bytes);
+                        std::size_t max_bytes, std::string_view file_path = {});
 
 // edit_file 的 diff 输入。located 为真:old_string 在文件里找到了,lines
 // 是"整份旧文件 vs 替换后全文"的 diff(FormatDiff 折叠后自然只剩变更处

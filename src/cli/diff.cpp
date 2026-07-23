@@ -2,6 +2,7 @@
 
 #include <cstdio>
 
+#include "cli/diff_syntax.hpp"
 #include "cli/line_editor.hpp"  // TruncateUtf8ToDisplayWidth
 
 namespace lubancode::cli {
@@ -177,7 +178,7 @@ std::vector<DiffLine> ComputeLineDiff(const std::vector<std::string>& old_lines,
 }
 
 std::string FormatDiff(const std::vector<DiffLine>& diff, const Theme& theme, int width, int max_lines,
-                        std::size_t max_bytes) {
+                        std::size_t max_bytes, std::string_view file_path) {
     bool has_change = false;
     for (const auto& line : diff) {
         if (line.kind != DiffLineKind::Context) {
@@ -260,6 +261,7 @@ std::string FormatDiff(const std::vector<DiffLine>& diff, const Theme& theme, in
     std::string out;
     std::size_t bytes = 0;
     int emitted = 0;
+    const DiffSyntaxLanguage syntax_language = DetectDiffSyntaxLanguage(file_path);
     for (std::size_t r = 0; r < rows.size(); ++r) {
         std::string plain = rows[r].plain;
         if (width > 0) {
@@ -276,21 +278,30 @@ std::string FormatDiff(const std::vector<DiffLine>& diff, const Theme& theme, in
         // 不填充到终端宽,拖选复制不带大片色块;截宽在上头已做完,reset
         // 永远落在行尾。上下文行行号栏染淡色、正文原色;折叠标注走淡色,
         // 不上底。plain 主题各字段全是空串,天然退化成纯文本,靠前缀辨认。
-        if (rows[r].kind == DiffLineKind::Del) {
-            out += theme.diff_del_bg + plain + theme.reset;
-        } else if (rows[r].kind == DiffLineKind::Add) {
-            out += theme.diff_add_bg + plain + theme.reset;
-        } else if (rows[r].folded) {
+        if (rows[r].folded) {
             out += theme.stats + plain + theme.reset;
-        } else if (!theme.diff_line_no.empty()) {
+        } else {
             // 行号栏(数字 + 空格 + 符号位 + 空格)全是 ASCII,按字节切安全;
             // 宽度掐得极窄时行可能比栏还短,取短的那头。
             const std::size_t gutter = static_cast<std::size_t>(num_w) + 3 < plain.size()
                                             ? static_cast<std::size_t>(num_w) + 3
                                             : plain.size();
-            out += theme.diff_line_no + plain.substr(0, gutter) + theme.reset + plain.substr(gutter);
-        } else {
-            out += plain;
+            if (rows[r].kind == DiffLineKind::Del) {
+                out += theme.diff_del_bg;
+            } else if (rows[r].kind == DiffLineKind::Add) {
+                out += theme.diff_add_bg;
+            }
+            if (!theme.diff_line_no.empty()) {
+                // diff_syntax_plain 只复原前景/dim,不复原背景;变更行的底色
+                // 因而不会在行号与代码交界处断开。
+                out += theme.diff_line_no + plain.substr(0, gutter) + theme.diff_syntax_plain;
+            } else {
+                out += plain.substr(0, gutter);
+            }
+            out += HighlightDiffCodeLine(plain.substr(gutter), syntax_language, theme);
+            if (rows[r].kind != DiffLineKind::Context || !theme.reset.empty()) {
+                out += theme.reset;
+            }
         }
         out += "\n";
         bytes += line_bytes;

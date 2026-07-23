@@ -48,6 +48,7 @@ add_executable(lubancode_tests
   test_markdown.cpp
   test_latex_math.cpp
   test_diff.cpp
+  test_diff_syntax.cpp
   test_plugins.cpp
   test_web_fetch.cpp
   test_web_search.cpp
