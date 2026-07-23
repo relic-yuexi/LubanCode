@@ -4,7 +4,7 @@
 
 LubanCode 是一支 C++23 命令行程序。上层管交互，中层管代理循环，下层管协议、工具与平台。依赖只往下走，不能倒灌。
 
-> 本页对应 `v0.23.1`。Windows/MSVC、Ubuntu/GCC、macOS/Clang 都在 CI 中编译并跑测试。
+> 本页对应 `v0.23.2`。Windows/MSVC、Ubuntu/GCC、macOS/Clang 都在 CI 中编译并跑测试。
 
 ## 分层
 
