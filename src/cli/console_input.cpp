@@ -120,6 +120,10 @@ struct StreamFooterState {
     Theme theme;             // 完整主题:画框(BoxRuleLine)、状态行(PrintStatusLine)
                              // 直接复用 composer 那两个画法,得传整个 Theme,不能只传片段。
     std::vector<std::string> queued;  // 已落队、等本轮结束后发送的消息
+    bool working = false;             // true 时在输入框上方合成 Working 动画
+    std::string working_label;
+    std::size_t working_highlight = 0;
+    long long working_seconds = 0;
     int row = -1;             // 整块 footer 顶行,-1 = 没画
     int rows = 0;             // 上次实际画了几行(队列区会让高度变化)
     int body_x = -1;          // footer 下方藏着的正文续写位置
@@ -164,6 +168,51 @@ void ClearStreamFooterRowsAt(int top_row, int rows, int width, int height) {
         }
         platform::ClearRowHardFrom(0, y, width);
     }
+}
+
+std::vector<std::string> FooterUtf8Glyphs(const std::string& text) {
+    std::vector<std::string> out;
+    for (std::size_t i = 0; i < text.size();) {
+        const unsigned char lead = static_cast<unsigned char>(text[i]);
+        std::size_t bytes = 1;
+        if ((lead & 0xE0U) == 0xC0U) {
+            bytes = 2;
+        } else if ((lead & 0xF0U) == 0xE0U) {
+            bytes = 3;
+        } else if ((lead & 0xF8U) == 0xF0U) {
+            bytes = 4;
+        }
+        bytes = (std::min)(bytes, text.size() - i);
+        out.push_back(text.substr(i, bytes));
+        i += bytes;
+    }
+    return out;
+}
+
+void PrintFooterWorkingLine(const StreamFooterState& f, int width) {
+    const std::vector<std::string> glyphs = FooterUtf8Glyphs(f.working_label);
+    const std::string prefix = "• ";
+    const std::string suffix = " (" + std::to_string(f.working_seconds) + "s · " +
+                               tr("spinner.interrupt_hint") + ")";
+    const int prefix_width = static_cast<int>(DisplayWidthUtf8(prefix));
+    const int suffix_width = static_cast<int>(DisplayWidthUtf8(suffix));
+    const int label_room = (std::max)(0, width - 1 - prefix_width - suffix_width);
+
+    std::cout << f.theme.spinner << prefix << f.reset;
+    int used = 0;
+    for (std::size_t i = 0; i < glyphs.size(); ++i) {
+        const int glyph_width = static_cast<int>(DisplayWidthUtf8(glyphs[i]));
+        if (used + glyph_width > label_room) {
+            break;
+        }
+        const bool highlighted = !f.reset.empty() && i == f.working_highlight % glyphs.size();
+        std::cout << (highlighted ? f.theme.spinner : f.theme.stats) << glyphs[i];
+        used += glyph_width;
+    }
+    if (prefix_width + used + suffix_width < width) {
+        std::cout << f.theme.stats << suffix;
+    }
+    std::cout << f.reset;
 }
 
 // M10:谁在真的逐键读键盘,谁就得先拿到这把锁——ReadLineKeyByKey() 整个
@@ -739,8 +788,9 @@ void RedrawStreamFooterLocked() {
     }
 
     const std::size_t visible_queued = (std::min)(f.queued.size(), kMaxVisibleQueuedLines);
+    const int working_rows = f.working ? 1 : 0;
     const int queue_rows = f.queued.empty() ? 0 : 1 + static_cast<int>(visible_queued);
-    const int total_rows = queue_rows + kStreamFooterBoxRows;
+    const int total_rows = working_rows + queue_rows + kStreamFooterBoxRows;
 
     // 框落在正文光标的下一行:正文停在行中(bx>0)就 by+1,正文刚换行
     // 停在行首(bx==0)就落在 by 这空行上——两种都是"正文当前底部的下一行"。
@@ -764,12 +814,18 @@ void RedrawStreamFooterLocked() {
     const BoxChrome chrome{true, &f.theme, SharedEditor().confirm_mode()};
     int box_top = target;
 
+    if (f.working) {
+        platform::SetCursorPos(0, box_top);
+        PrintFooterWorkingLine(f, width);
+        box_top += working_rows;
+    }
+
     if (!f.queued.empty()) {
-        platform::SetCursorPos(0, target);
+        platform::SetCursorPos(0, box_top);
         std::cout << f.color << trf("input.queue_header", f.queued.size()) << f.reset;
         const std::size_t first = f.queued.size() - visible_queued;
         for (std::size_t i = 0; i < visible_queued; ++i) {
-            platform::SetCursorPos(0, target + 1 + static_cast<int>(i));
+            platform::SetCursorPos(0, box_top + 1 + static_cast<int>(i));
             const std::string prefix = "  ↳ ";
             const int room = (std::max)(0, width - static_cast<int>(DisplayWidthUtf8(prefix)) - 1);
             std::cout << f.color << prefix
@@ -825,13 +881,16 @@ void BeginStreamFooter(const Theme& theme, bool enabled) {
     f.body_y = -1;
     f.echo.clear();
     f.queued.clear();
+    f.working = false;
+    f.working_label.clear();
+    f.working_highlight = 0;
+    f.working_seconds = 0;
     f.theme = theme;
     f.color = theme.stats;
     f.reset = theme.reset;
     f.hint = enabled ? StreamHintText(theme.reset.empty()) : std::string();
-    // 开场不主动画:此刻正文还没吐,"思考中"转轮正占着这一行(跟框同一行会
-    // 打架)。等第一笔正文经 OnDelta 落地,RedrawStreamFooterLocked 自然把
-    // 框摆到正文下方;之后每笔正文都续着重画,一直常驻到收束。
+    // 开场不在这里画。紧随其后的 Spinner 会调用 StartStreamFooterWorking，
+    // 由那一笔把 Working 与输入框合成首帧；首个流事件之后则由 OnDelta 接棒。
 }
 
 void EndStreamFooter() {
@@ -842,6 +901,48 @@ void EndStreamFooter() {
     f.echo.clear();
     f.queued.clear();
     f.hint.clear();
+    f.working = false;
+    f.working_label.clear();
+}
+
+bool StartStreamFooterWorking(const std::string& label) {
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    StreamFooterState& f = FooterSlot();
+    if (!f.enabled) {
+        return false;
+    }
+    f.working = true;
+    f.working_label = label;
+    f.working_highlight = 0;
+    f.working_seconds = 0;
+    RedrawStreamFooterLocked();
+    return true;
+}
+
+void UpdateStreamFooterWorking(const std::string& label, std::size_t highlighted_glyph,
+                               long long elapsed_seconds) {
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    StreamFooterState& f = FooterSlot();
+    if (!f.enabled || !f.working) {
+        return;
+    }
+    f.working_label = label;
+    f.working_highlight = highlighted_glyph;
+    f.working_seconds = elapsed_seconds;
+    RedrawStreamFooterLocked();
+}
+
+void StopStreamFooterWorking() {
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    StreamFooterState& f = FooterSlot();
+    if (!f.working) {
+        return;
+    }
+    f.working = false;
+    f.working_label.clear();
+    f.working_highlight = 0;
+    f.working_seconds = 0;
+    RedrawStreamFooterLocked();
 }
 
 // 见 console_input.hpp StreamFooterSuspendScope 的注释。构造/析构各自只在

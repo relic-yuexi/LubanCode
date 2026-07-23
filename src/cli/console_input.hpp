@@ -152,6 +152,15 @@ void EndStreamFooter();
 void EraseStreamFooterLocked();
 void RedrawStreamFooterLocked();
 
+// 流式回合里的 Working 不另占一套 stdout 绘制权。Spinner 只把当前帧
+// 塞进 footer 状态，由 RedrawStreamFooterLocked 把 Working、队列、输入框
+// 一气画完。Start 返回 false 表示当前没有 footer（如 /compact），调用方
+// 可退回原来的独立单行 spinner。
+bool StartStreamFooterWorking(const std::string& label);
+void UpdateStreamFooterWorking(const std::string& label, std::size_t highlighted_glyph,
+                               long long elapsed_seconds);
+void StopStreamFooterWorking();
+
 // 0.22.5:工具确认交互(main.cpp 的 PrintConfirmDetails/ShowDiffPreview 到
 // ReadLine([y/a/N] 提示)那一整段)期间,流式脚注框必须让路——真机实测
 // 报过两条病:1) 确认详情文字直接盖写在框的横线上,不清行尾,横线残留;

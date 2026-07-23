@@ -41,21 +41,24 @@ Spinner::Spinner(const Theme& theme, bool enabled) : enabled_(enabled), stopped_
     if (!enabled_) {
         return;
     }
-    // 后续工具回合再请求模型时，物理光标可能正停在流式输入框。先把
-    // footer 收起、光标送回正文，Working 才不会盖住输入行。
-    footer_suspend_ = std::make_unique<StreamFooterSuspendScope>();
-    thread_ = std::thread([this, theme] {
+    const std::string label = tr("spinner.thinking");
+    // RunTurn 已启用 footer 时，Working 是同一帧里的状态行；/compact 等
+    // 独立场景没有 footer，才沿用原地单行 spinner。
+    footer_mode_ = StartStreamFooterWorking(label);
+    thread_ = std::thread([this, theme, label] {
         std::size_t frame = 0;
         const auto started = std::chrono::steady_clock::now();
-        const std::vector<std::string> glyphs = Utf8Glyphs(tr("spinner.thinking"));
+        const std::vector<std::string> glyphs = Utf8Glyphs(label);
         while (!stop_flag_.load(std::memory_order_relaxed)) {
-            {
+            const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                                     std::chrono::steady_clock::now() - started)
+                                     .count();
+            if (footer_mode_) {
+                UpdateStreamFooterWorking(label, frame, seconds);
+            } else {
                 // 跟 ESC 监听线程的"已打断/已排队"提示共用一个 stdout 锁,
                 // 不持锁的话转轮帧会跟那些提示交错,花屏。
                 std::lock_guard<std::mutex> lock(StdoutWriteMutex());
-                const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
-                                         std::chrono::steady_clock::now() - started)
-                                         .count();
                 std::cout << "\r\x1b[2K" << theme.spinner << "• " << theme.reset;
                 for (std::size_t i = 0; i < glyphs.size(); ++i) {
                     const bool lit = !theme.reset.empty() && i == frame % glyphs.size();
@@ -82,12 +85,13 @@ void Spinner::Stop() {
     if (thread_.joinable()) {
         thread_.join();
     }
-    // 整行擦净，免得耗时数字变长后留下尾巴。
-    {
+    if (footer_mode_) {
+        StopStreamFooterWorking();
+    } else {
+        // 独立单行模式整行擦净，免得耗时数字变长后留下尾巴。
         std::lock_guard<std::mutex> lock(StdoutWriteMutex());
         std::cout << "\r\x1b[2K\r" << std::flush;
     }
-    footer_suspend_.reset();
     stopped_ = true;
 }
 

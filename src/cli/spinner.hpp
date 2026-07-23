@@ -5,14 +5,11 @@
 #pragma once
 
 #include <atomic>
-#include <memory>
 #include <thread>
 
 #include "cli/theme.hpp"
 
 namespace lubancode::cli {
-
-class StreamFooterSuspendScope;
 
 class Spinner {
 public:
@@ -37,7 +34,7 @@ private:
     std::atomic<bool> stop_flag_{false};
     bool enabled_;
     bool stopped_;
-    std::unique_ptr<StreamFooterSuspendScope> footer_suspend_;
+    bool footer_mode_ = false;
 };
 
 }  // namespace lubancode::cli

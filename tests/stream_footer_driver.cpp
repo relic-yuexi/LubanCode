@@ -259,24 +259,36 @@ int wmain(int argc, wchar_t** argv) {
     Sleep(300);
 
     // ---- G1 流式框化:发一句会触发较长回复的问题,等流式脚注框出现 ----
-    SendText("请用大约 200 字介绍一下你自己能做什么,分两三段说,不用标题。");
+    SendText("请务必先调用 read_file 读取 README.md 的前 20 行,再用大约 200 字介绍一下这个项目,"
+             "分两三段说,不用标题。");
     SendKey(VK_RETURN, L'\r', 0);
     // Working/思考中:首个流事件前亮色须沿文字移动。刮同一行的字符属性
     // 签名，至少见到两帧不同分布才算真动画，不只换了文案。
     std::set<std::string> spinner_frames;
+    bool working_and_composer_visible = false;
+    bool working_cursor_in_composer = false;
     const DWORD spinner_deadline = GetTickCount() + 10000;
     while (GetTickCount() < spinner_deadline) {
         const int spinner_row = FindLastRow("思考中");
+        const int composer_row = FindLastRow("排队下一条");
         if (spinner_row >= 0) {
             spinner_frames.insert(ReadAttributeSignature(spinner_row));
         }
-        if (FindLastRow("排队下一条") >= 0) {
+        if (spinner_row >= 0 && composer_row > spinner_row) {
+            working_and_composer_visible = true;
+            working_cursor_in_composer = CursorRow() == composer_row && CursorColumn() >= 2;
+        }
+        if (spinner_frames.size() >= 2 && working_and_composer_visible && working_cursor_in_composer) {
             break;
         }
         Sleep(50);
     }
     Check(spinner_frames.size() >= 2,
           "G0 Working:亮色扫过文字,捕获到 " + std::to_string(spinner_frames.size()) + " 帧不同配色");
+    Check(working_and_composer_visible,
+          "G0 Working 与输入框同帧可见,输入框不再被 spinner 挂起");
+    Check(working_cursor_in_composer,
+          "G0 Working 动画期间物理光标仍停在输入框");
     // "排队下一条" 只出现在输入行的占位提示里(状态行是模式/模型/context 那
     // 一段,不含这句话),所以搜到的这一行本身就是输入行,不是状态行——
     // 版式:上横线(matched-1) / 输入行(matched) / 下横线(matched+1) / 状态行(matched+2)。
@@ -333,6 +345,31 @@ int wmain(int argc, wchar_t** argv) {
             Check(IsRuleRow(status_row2 - 3), "G2 落队后:上横线还在(框结构完整,没有残影/错位)");
         }
     }
+
+    // 用户反馈的原始现场:read_file 做完后，AgentLoop 会发起第二次模型请求。
+    // 旧实现此时由新 Spinner 构造出的 SuspendScope 把整个 footer 藏掉，只剩
+    // “思考中”。这里必须在第二个 Working 周期再次抓到 composer 与光标。
+    Check(WaitForText("read_file(", 60000), "G2 工具续轮:read_file 已执行(60s 内)");
+    bool post_tool_working_and_composer = false;
+    bool post_tool_cursor_in_composer = false;
+    const DWORD post_tool_deadline = GetTickCount() + 15000;
+    while (GetTickCount() < post_tool_deadline) {
+        const int tool_row = FindLastRow("read_file(");
+        const int spinner_row = FindLastRow("思考中");
+        const int composer_row = FindLastRow("排队下一条");
+        if (tool_row >= 0 && spinner_row > tool_row && composer_row > spinner_row) {
+            post_tool_working_and_composer = true;
+            post_tool_cursor_in_composer = CursorRow() == composer_row && CursorColumn() >= 2;
+            if (post_tool_cursor_in_composer) {
+                break;
+            }
+        }
+        Sleep(50);
+    }
+    Check(post_tool_working_and_composer,
+          "G2 工具续轮:第二个 Working 与输入框同帧可见");
+    Check(post_tool_cursor_in_composer,
+          "G2 工具续轮:第二个 Working 期间光标仍在输入框");
 
     // 等第一轮问答彻底收束(统计行落定),避免跟下面的 ESC 测试撞车。
     Check(WaitForTextCount("[tokens]", 2, 180000),
