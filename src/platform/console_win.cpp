@@ -153,6 +153,9 @@ bool AppendNativePasteKey(const INPUT_RECORD& record, std::wstring& text, bool& 
 
     wchar_t ch = key.uChar.UnicodeChar;
     if (key.wVirtualKeyCode == VK_RETURN || ch == L'\r' || ch == L'\n') {
+        if (saw_newline) {
+            saw_text_after_newline = true;  // 第二枚换行本身也说明这是多行内容
+        }
         ch = L'\n';
         saw_newline = true;
     } else if (ch != L'\t' && ch < L' ') {
@@ -170,9 +173,10 @@ bool AppendNativePasteKey(const INPUT_RECORD& record, std::wstring& text, bool& 
 // ReadConsoleInputW 里；有些组合只把整段文字压成一批 KEY_EVENT。若照逐键
 // 翻译，其中第一枚 VK_RETURN 会直接提交，余下各行便散成多条消息。
 //
-// 这里只认“当前已排队的一批按键中，换行后还有正文”的形状。普通打字后按
-// Enter 没有后续正文，不会被吞；方向键、Ctrl/Alt 等编辑键一混进来也整批
-// 原样放回。调用方再按旧规矩逐枚读取。
+// 这里只认“一批连续文本里，换行后还有正文”的形状。ConPTY 可能把一次
+// paste 拆成几批，第一批还偏生停在换行上；一见换行便留 60ms 的空闲窗口
+// 续收，直到整批安静下来。普通打字只在按 Enter 时多等这一小拍，换行后
+// 没正文仍按提交处理；方向键、Ctrl/Alt 等编辑键一混进来也整批原样放回。
 std::optional<KeyInput> TryReadNativePasteBurst(const INPUT_RECORD& first) {
     std::vector<INPUT_RECORD> tail;
     INPUT_RECORD record{};
@@ -188,6 +192,33 @@ std::optional<KeyInput> TryReadNativePasteBurst(const INPUT_RECORD& first) {
         if (!AppendNativePasteKey(item, text, saw_newline, saw_text_after_newline)) {
             valid = false;
             break;
+        }
+    }
+
+    if (valid && saw_newline) {
+        constexpr DWORD kContinuationIdleMs = 60;
+        constexpr ULONGLONG kMaxContinuationMs = 1000;
+        const ULONGLONG deadline = GetTickCount64() + kMaxContinuationMs;
+        while (GetTickCount64() < deadline) {
+            if (!ReadInputRecord(record, kContinuationIdleMs)) {
+                break;  // 连续 60ms 没新字，这趟 paste 收口
+            }
+            tail.push_back(record);
+            if (!AppendNativePasteKey(record, text, saw_newline, saw_text_after_newline)) {
+                valid = false;
+                break;
+            }
+            // 一枚到手后，把同一刻已经排队的也全吸进来；下一圈再等后续批。
+            while (ReadInputRecord(record, 0)) {
+                tail.push_back(record);
+                if (!AppendNativePasteKey(record, text, saw_newline, saw_text_after_newline)) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (!valid) {
+                break;
+            }
         }
     }
     if (!valid || !saw_newline || !saw_text_after_newline) {

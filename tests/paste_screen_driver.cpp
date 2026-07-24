@@ -175,6 +175,17 @@ int wmain(int argc, wchar_t** argv) {
     Check(!ScreenContains(L"native") && !ScreenContains(L"burst"),
           "unmarked paste burst does not leak raw lines into the composer");
 
+    // VS Code/ConPTY 会把一次 paste 拆批；第一批可能恰好只到换行。用 /help
+    // 作首行，旧实现若误提交也只打印帮助，不会发起真实模型请求。
+    SendKey('C', 0x03, LEFT_CTRL_PRESSED);
+    Sleep(200);
+    SendTextBatch(L"/help\n");
+    Sleep(25);
+    SendTextBatch(L"delayed");
+    const bool delayed_placeholder =
+        WaitForAny({L"[Pasted Content 13 chars]", L"[粘贴内容 13 字符]"}, 5000);
+    Check(delayed_placeholder, "delayed Windows KEY_EVENT paste batches merge into one placeholder");
+
     SendKey('C', 0x03, LEFT_CTRL_PRESSED);
     Sleep(200);
     SendText(L"exit");
