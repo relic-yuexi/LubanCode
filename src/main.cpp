@@ -412,6 +412,14 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
               << lubancode::config::ToString(sources.max_context_chars) << "]\n";
     std::cout << "  theme              = " << config.theme << "  [" << lubancode::config::ToString(sources.theme)
               << "]\n";
+    std::cout << "  status_panel       = ";
+    for (std::size_t i = 0; i < config.status_panel.items.size(); ++i) {
+        if (i > 0) {
+            std::cout << ",";
+        }
+        std::cout << config.status_panel.items[i];
+    }
+    std::cout << "  [" << lubancode::config::ToString(sources.status_panel) << "]\n";
     // i18n:language 空 = 跟系统,顺带亮出此刻实际生效的语言码。
     std::cout << "  language           = "
               << (config.language.empty() ? trf("config.language.follow_system", lubancode::cli::CurrentLanguage())
@@ -4973,6 +4981,21 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     };
 
     while (true) {
+        // status panel 每圈都重取 cwd 与 Git 分支。/worktree、run_command
+        // 切目录/分支，或队列紧接着发下一条时，都不会挂着上一帧的旧值。
+        lubancode::cli::StatusPanelData status_data;
+        status_data.model = *current_model;
+        status_data.cwd = CurrentDirUtf8();
+        status_data.git_branch =
+            lubancode::cli::CurrentGitBranch(std::filesystem::current_path());
+        status_data.provider = active_provider;
+        status_data.effort = *current_think;
+        status_data.context_percent = context_tracker.UsagePercent();
+        status_data.used_tokens = static_cast<long long>(context_tracker.current_tokens());
+        status_data.window_tokens = static_cast<long long>(context_tracker.window_tokens());
+        lubancode::cli::SetStatusLineData(status_data, config.status_panel.items,
+                                           config.status_panel.separator);
+
         std::string content;
         if (!pending_queue.empty()) {
             // 队列非空:先把队列里排在最前面的这条自动发出去,不再等
@@ -4981,13 +5004,6 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
             pending_queue.pop_front();
             std::cout << theme.prompt << "> " << theme.reset << content << "\n";
         } else {
-            // 0.17.0:每次给主提示符之前刷新常驻状态行数据——模型名跟着
-            // /model 实时变,context 百分比每轮结束后就是新的,反正循环每圈
-            // 都路过这里,不用另找刷新点。
-            lubancode::cli::SetStatusLineData(
-                *current_model, context_tracker.UsagePercent(),
-                static_cast<long long>(context_tracker.current_tokens()),
-                static_cast<long long>(context_tracker.window_tokens()));
             // UI-A:主提示符是唯一开 composer 的读取点——Alt/Shift+Enter 插
             // 换行、Enter 全发、全空白不发送。别的 ReadLine 调用点(确认提示、
             // /model 编号选择、向导)保持单行语义。

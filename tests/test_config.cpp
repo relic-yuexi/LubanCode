@@ -492,6 +492,50 @@ TEST_CASE("ParseFileConfigJson: 字段类型不对(比如 base_url 写成数字)
     CHECK(result.error().find("base_url") != std::string::npos);
 }
 
+TEST_CASE("status_panel: 解析字段顺序与自定义分隔符") {
+    const auto parsed = config::ParseFileConfigJson(
+        R"({"status_panel":{"items":["model","cwd","git_branch","provider","effort"],"separator":" | "}})",
+        "/tmp/config.json");
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->status_panel.has_value());
+    CHECK(parsed->status_panel->items ==
+          std::vector<std::string>{"model", "cwd", "git_branch", "provider", "effort"});
+    CHECK(parsed->status_panel->separator == " | ");
+}
+
+TEST_CASE("status_panel: 坏字段、重复字段与换行分隔符都拦下") {
+    CHECK_FALSE(config::ParseFileConfigJson(
+                    R"({"status_panel":{"items":["model","no_such_field"]}})", "bad.json")
+                    .has_value());
+    CHECK_FALSE(config::ParseFileConfigJson(
+                    R"({"status_panel":{"items":["cwd","cwd"]}})", "bad.json")
+                    .has_value());
+    CHECK_FALSE(config::ParseFileConfigJson(
+                    "{\"status_panel\":{\"separator\":\"\\n\"}}", "bad.json")
+                    .has_value());
+}
+
+TEST_CASE("status_panel: 项目级整段压过全局，没配置走内置字段") {
+    config::FileConfig project;
+    project.source_path = "project.json";
+    project.status_panel = config::StatusPanelConfig{{"cwd", "git_branch"}, " / "};
+    config::FileConfig global;
+    global.source_path = "global.json";
+    global.status_panel = config::StatusPanelConfig{{"model"}, " | "};
+
+    const auto merged = config::MergeConfig({}, project, global, {});
+    REQUIRE(merged.has_value());
+    CHECK(merged->config.status_panel.items == std::vector<std::string>{"cwd", "git_branch"});
+    CHECK(merged->config.status_panel.separator == " / ");
+    CHECK(merged->sources.status_panel == config::Source::ProjectConfigFile);
+
+    const auto defaults = config::MergeConfig({}, std::nullopt, std::nullopt, {});
+    REQUIRE(defaults.has_value());
+    CHECK(defaults->config.status_panel.items ==
+          std::vector<std::string>{"permission_mode", "model", "cwd", "git_branch", "context", "tokens"});
+    CHECK(defaults->sources.status_panel == config::Source::Default);
+}
+
 TEST_CASE("ParseFileConfigJson: max_context_chars 不是正整数时报错") {
     const std::string json = R"({"max_context_chars": -5})";
     const auto result = config::ParseFileConfigJson(json, "/tmp/.lubancode.json");

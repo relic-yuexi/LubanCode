@@ -204,6 +204,15 @@ struct LspServerConfig {
     int idle_minutes = 10;
 };
 
+// 常驻 status panel 的内置字段编排。字段只负责“摆什么、按什么顺序摆”，
+// 具体值由交互会话逐帧补入；项目级 config.json 写了这一整段，就压过
+// 全局同名段。内置字段不执行 shell，刷新时不会卡住输入框。
+struct StatusPanelConfig {
+    std::vector<std::string> items{
+        "permission_mode", "model", "cwd", "git_branch", "context", "tokens"};
+    std::string separator = " · ";
+};
+
 struct Config {
     Wire wire = Wire::Anthropic;
     std::string base_url;
@@ -255,6 +264,7 @@ struct Config {
     // LSP:语言服务器,键是语言名,只从配置文件来(待遇同 hooks/
     // mcpServers),没配就是空 map——空 map 意味着 lsp 工具不注册。
     std::map<std::string, LspServerConfig> lsp_servers;
+    StatusPanelConfig status_panel;
     // tool_search:延迟挂载的启用阈值,0 = 永不延迟。只从配置文件读
     // (没有环境变量这一级),没配就是默认 20。
     int tool_search_threshold = kDefaultToolSearchThreshold;
@@ -295,6 +305,7 @@ struct ConfigSources {
     Source extra_body = Source::Default;
     Source extra_headers = Source::Default;
     Source providers = Source::Default;
+    Source status_panel = Source::Default;
 };
 
 // settings.local.json 里的 permissions 段,项目级本地权限(不进版本库)。
@@ -368,6 +379,8 @@ struct FileConfig {
     std::optional<SearchConfig> search;
     // LSP:lsp 段,整段有没有出现在 JSON 里(待遇同 mcpServers)。
     std::optional<std::map<std::string, LspServerConfig>> lsp_servers;
+    // status_panel 整段回退；items 的顺序就是终端展示顺序。
+    std::optional<StatusPanelConfig> status_panel;
     // extra_body/extra_headers:顶层"单 provider 配置"写法专用(不进
     // providers 数组的场景),整段有没有出现在 JSON 里(待遇同 hooks/
     // mcpServers——只从配置文件来,没有环境变量、没有内置默认值这两级)。

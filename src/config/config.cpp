@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -503,6 +504,60 @@ std::expected<std::map<std::string, std::string>, std::string> ParseExtraHeaders
     return out;
 }
 
+std::expected<StatusPanelConfig, std::string> ParseStatusPanelConfig(
+    const nlohmann::json& panel_json, const std::string& file_path_for_error) {
+    if (!panel_json.is_object()) {
+        return std::unexpected("配置文件 " + file_path_for_error +
+                               " 里的 status_panel 字段必须是一个 JSON object");
+    }
+
+    StatusPanelConfig out;
+    if (panel_json.contains("items")) {
+        const auto& items = panel_json["items"];
+        if (!items.is_array()) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                   " 里的 status_panel.items 字段必须是字符串数组");
+        }
+        out.items.clear();
+        static constexpr std::string_view kAllowed[] = {
+            "permission_mode", "model", "cwd", "git_branch",
+            "context", "tokens", "provider", "effort"};
+        for (std::size_t i = 0; i < items.size(); ++i) {
+            if (!items[i].is_string()) {
+                return std::unexpected("配置文件 " + file_path_for_error +
+                                       " 里的 status_panel.items[" + std::to_string(i) +
+                                       "] 必须是字符串");
+            }
+            const std::string item = items[i].get<std::string>();
+            const bool known = std::find(std::begin(kAllowed), std::end(kAllowed), item) != std::end(kAllowed);
+            if (!known) {
+                return std::unexpected("配置文件 " + file_path_for_error +
+                                       " 里的 status_panel.items 不认识字段: " + item);
+            }
+            if (std::find(out.items.begin(), out.items.end(), item) != out.items.end()) {
+                return std::unexpected("配置文件 " + file_path_for_error +
+                                       " 里的 status_panel.items 字段重复: " + item);
+            }
+            out.items.push_back(item);
+        }
+    }
+    if (panel_json.contains("separator")) {
+        if (!panel_json["separator"].is_string()) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                   " 里的 status_panel.separator 字段必须是字符串");
+        }
+        out.separator = panel_json["separator"].get<std::string>();
+        const bool has_control = std::any_of(out.separator.begin(), out.separator.end(), [](unsigned char ch) {
+            return ch < 0x20U || ch == 0x7fU;
+        });
+        if (has_control) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                   " 里的 status_panel.separator 不能带控制字符");
+        }
+    }
+    return out;
+}
+
 std::expected<HooksConfig, std::string> ParseHooksConfig(const nlohmann::json& hooks_json,
                                                            const std::string& file_path_for_error) {
     if (!hooks_json.is_object()) {
@@ -843,6 +898,13 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
             return std::unexpected(lsp_result.error());
         }
         config.lsp_servers = std::move(*lsp_result);
+    }
+    if (parsed.contains("status_panel")) {
+        auto panel_result = ParseStatusPanelConfig(parsed["status_panel"], file_path_for_error);
+        if (!panel_result.has_value()) {
+            return std::unexpected(panel_result.error());
+        }
+        config.status_panel = std::move(*panel_result);
     }
     if (parsed.contains("extra_body")) {
         auto extra_body_result = ParseExtraBodyConfig(parsed["extra_body"], file_path_for_error);
@@ -1342,6 +1404,17 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.config.lsp_servers = *project_file->lsp_servers;
     } else if (global_file.has_value() && global_file->lsp_servers.has_value()) {
         result.config.lsp_servers = *global_file->lsp_servers;
+    }
+
+    if (project_file.has_value() && project_file->status_panel.has_value()) {
+        result.config.status_panel = *project_file->status_panel;
+        result.sources.status_panel = Source::ProjectConfigFile;
+    } else if (global_file.has_value() && global_file->status_panel.has_value()) {
+        result.config.status_panel = *global_file->status_panel;
+        result.sources.status_panel = Source::GlobalConfigFile;
+    } else {
+        result.config.status_panel = StatusPanelConfig{};
+        result.sources.status_panel = Source::Default;
     }
 
     // extra_body/extra_headers:顶层"单 provider 配置"写法专用,跟 hooks/

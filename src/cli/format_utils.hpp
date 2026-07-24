@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "cli/line_editor.hpp"  // ConfirmMode
@@ -35,6 +36,34 @@ std::string StatusLineInfoSegment(const std::string& model, int context_percent,
 // 整行状态行文本 = 模式段 + 信息段。单测钉这一个就把拼装规则全钉住了。
 std::string BuildStatusLineText(ConfirmMode mode, const std::string& model, int context_percent,
                                  std::int64_t used_tokens, std::int64_t window_tokens);
+
+// 可定制 status panel 的动态值。items 决定哪些字段出现、按什么顺序出现；
+// 空值字段自动跳过，不留下两个连着的分隔符。
+struct StatusPanelData {
+    std::string model;
+    std::string cwd;
+    std::string git_branch;
+    std::string provider;
+    std::string effort;
+    int context_percent = 0;
+    std::int64_t used_tokens = 0;
+    std::int64_t window_tokens = 0;
+};
+
+struct StatusPanelSegment {
+    std::string key;
+    std::string text;
+};
+
+std::vector<StatusPanelSegment> BuildStatusPanelSegments(
+    const std::vector<std::string>& items, ConfirmMode mode, const StatusPanelData& data);
+std::string BuildStatusPanelText(const std::vector<std::string>& items,
+                                 std::string_view separator, ConfirmMode mode,
+                                 const StatusPanelData& data);
+
+// 状态栏挤不下完整路径时保住盘符/根标记与末级目录，例如
+// D:\very\long\project -> D:\…\project。max_width 按终端显示列算。
+std::string CompactStatusPath(std::string_view path, int max_width);
 
 // 0.21.x 流式脚注文本(纯函数,i18n 驱动,不夹 ANSI/不认 IO)。流式期间在
 // 正文下方常驻一行,让用户看见"能按 ESC 打断、能键入并回车排队下一条"。

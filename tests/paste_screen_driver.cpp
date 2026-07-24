@@ -60,6 +60,24 @@ bool WaitForAny(const std::vector<std::wstring>& needles, int timeout_ms) {
     return false;
 }
 
+bool WaitForStatusPanel(const std::wstring& cwd, const std::wstring& branch, int timeout_ms) {
+    const DWORD deadline = GetTickCount() + static_cast<DWORD>(timeout_ms);
+    while (GetTickCount() < deadline) {
+        for (int row = 0; row < 200; ++row) {
+            const std::wstring line = ReadRow(row);
+            if (line.find(L"shift+tab") == std::wstring::npos) {
+                continue;
+            }
+            if (line.find(cwd) != std::wstring::npos &&
+                (branch.empty() || line.find(branch) != std::wstring::npos)) {
+                return true;
+            }
+        }
+        Sleep(50);
+    }
+    return false;
+}
+
 void SendKey(WORD vk, wchar_t ch, DWORD state = 0) {
     INPUT_RECORD records[2]{};
     for (int i = 0; i < 2; ++i) {
@@ -135,6 +153,10 @@ int wmain(int argc, wchar_t** argv) {
     CloseHandle(process.hThread);
 
     Check(WaitForAny({L"shift+tab"}, 30000), "composer ready");
+    if (argc >= 5) {
+        Check(WaitForStatusPanel(argv[2], argv[4], 5000),
+              "status panel shows current working directory and git branch on one row");
+    }
     SendKey(VK_ESCAPE, 0x1b);
     SendText(L"[200~alpha\nbeta\n");
     SendKey(VK_ESCAPE, 0x1b);

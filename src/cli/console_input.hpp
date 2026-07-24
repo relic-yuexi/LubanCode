@@ -29,6 +29,8 @@
 
 namespace lubancode::cli {
 
+struct StatusPanelData;
+
 // 打印 prompt(不含换行,可传空串跳过打印),读一行输入。
 // Windows 下 stdin 是真控制台(GetFileType == FILE_TYPE_CHAR)时,走逐键
 // 输入编辑器(方向键/历史/Tab 补全/Shift+Tab 切模式都在这条路上);
@@ -105,8 +107,8 @@ void SetTranscriptUiHandler(TranscriptUiHandler handler);
 // 此刻的确认档(SharedEditor 里那份)拼整行文本(拼装规则是
 // cli/format_utils 的纯函数,单测钉在那边)。管道/重定向模式画不出状态行,
 // 设不设都无感。
-void SetStatusLineData(const std::string& model, int context_percent, long long used_tokens,
-                        long long window_tokens);
+void SetStatusLineData(const StatusPanelData& values, const std::vector<std::string>& items,
+                       const std::string& separator);
 
 // M11(0.10.0):真控制台此刻的显示宽度(列数),给分界线(cli::BuildDividerLine)
 // 探测用。查的是 stdout 那个句柄(跟 DetectConsoleCapability 一致)——分界线

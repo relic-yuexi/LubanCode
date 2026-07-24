@@ -47,6 +47,12 @@ struct GitCommand {
 // 让 Git 调用可替身：生产路径走 git -C，测试只需喂返回值。
 using GitRunner = std::function<GitCommandResult(const GitCommand&)>;
 
+// status panel 用的轻量 Git 摘要。普通分支返回短名；游离 HEAD 返回
+// "detached@<短哈希>"；不在仓库、git 不可用或查询失败时返回空串。
+// runner 可替换，单测不必真的起 git。
+std::string CurrentGitBranch(const std::filesystem::path& working_directory,
+                             GitRunner runner = {});
+
 struct WorktreeEntry {
     std::filesystem::path path;
     std::string branch;

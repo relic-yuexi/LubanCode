@@ -11,12 +11,16 @@
 #include "cli/theme.hpp"
 
 using lubancode::cli::BuildStatusLineText;
+using lubancode::cli::BuildStatusPanelSegments;
+using lubancode::cli::BuildStatusPanelText;
 using lubancode::cli::BuiltinTheme;
 using lubancode::cli::ConfirmMode;
+using lubancode::cli::CompactStatusPath;
 using lubancode::cli::FormatContextBreakdown;
 using lubancode::cli::FormatTokenCount;
 using lubancode::cli::StatusLineInfoSegment;
 using lubancode::cli::StatusLineModeSegment;
+using lubancode::cli::StatusPanelData;
 using lubancode::cli::StreamHintText;
 using lubancode::cli::StreamQueueEchoText;
 
@@ -121,6 +125,42 @@ TEST_CASE("BuildStatusLineText: 整行 = 模式段 + 信息段") {
     CHECK(line ==
           StatusLineModeSegment(ConfirmMode::Confirm) + StatusLineInfoSegment("MiniMax-M3", 8, 16400, 200000));
     CHECK(line.find("⏵⏵") != std::string::npos);
+}
+
+TEST_CASE("StatusPanel: items 控制字段顺序，空值字段自动跳过") {
+    StatusPanelData data;
+    data.model = "gpt-test";
+    data.cwd = "D:\\work\\demo";
+    data.git_branch = "feature/ui";
+    data.context_percent = 12;
+    data.used_tokens = 24000;
+    data.window_tokens = 256000;
+
+    const std::vector<std::string> items{"cwd", "git_branch", "model", "provider", "context", "tokens"};
+    CHECK(BuildStatusPanelText(items, " | ", ConfirmMode::Confirm, data) ==
+          "D:\\work\\demo | feature/ui | gpt-test | context 12% | 24k/256k");
+
+    const auto segments = BuildStatusPanelSegments(items, ConfirmMode::Confirm, data);
+    REQUIRE(segments.size() == 5);
+    CHECK(segments[0].key == "cwd");
+    CHECK(segments[1].key == "git_branch");
+}
+
+TEST_CASE("StatusPanel: provider、effort 与 permission mode 可按需启用") {
+    StatusPanelData data;
+    data.provider = "sub-openai";
+    data.effort = "xhigh";
+    const std::string text = BuildStatusPanelText(
+        {"provider", "effort", "permission_mode"}, " · ", ConfirmMode::Auto, data);
+    CHECK(text.find("provider sub-openai") != std::string::npos);
+    CHECK(text.find("effort xhigh") != std::string::npos);
+    CHECK(text.find("auto") != std::string::npos);
+}
+
+TEST_CASE("CompactStatusPath: 长路径从左收起，保住盘符和末级目录") {
+    CHECK(CompactStatusPath("D:\\very\\long\\folder\\project", 15) == "D:\\…\\project");
+    CHECK(CompactStatusPath("/home/user/very/long/project", 12) == "/…/project");
+    CHECK(CompactStatusPath("D:\\short", 40) == "D:\\short");
 }
 
 // ---------------------------------------------------------------------------
