@@ -208,6 +208,18 @@ bool AppendNativePasteKey(const INPUT_RECORD& record, std::wstring& text, bool& 
     if (key.bKeyDown == FALSE) {
         return true;  // key-up 是同一批输入的一半，不进正文
     }
+    const bool modifier_only = key.uChar.UnicodeChar == 0 &&
+                               (key.wVirtualKeyCode == VK_SHIFT || key.wVirtualKeyCode == VK_LSHIFT ||
+                                key.wVirtualKeyCode == VK_RSHIFT || key.wVirtualKeyCode == VK_CONTROL ||
+                                key.wVirtualKeyCode == VK_LCONTROL || key.wVirtualKeyCode == VK_RCONTROL ||
+                                key.wVirtualKeyCode == VK_MENU || key.wVirtualKeyCode == VK_LMENU ||
+                                key.wVirtualKeyCode == VK_RMENU);
+    if (modifier_only) {
+        // Windows Terminal 把 paste 还原成一串逼真的 KEY_EVENT：括号、下划线
+        // 前后会夹 Shift down/up，快捷键本身也会漏进 Ctrl/Shift down。它们
+        // 没有正文字符，只是这趟 paste 的骨架，跳过即可。
+        return true;
+    }
     const bool ctrl = (key.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0;
     const bool alt = (key.dwControlKeyState & (LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED)) != 0;
     if (ctrl || alt) {

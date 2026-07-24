@@ -117,6 +117,43 @@ void SendTextBatch(const std::wstring& text) {
     WriteConsoleInputW(g_in, records.data(), static_cast<DWORD>(records.size()), &written);
 }
 
+void AppendKeyRecord(std::vector<INPUT_RECORD>& records, bool down, WORD vk, wchar_t ch, DWORD state = 0) {
+    INPUT_RECORD record{};
+    record.EventType = KEY_EVENT;
+    record.Event.KeyEvent.bKeyDown = down ? TRUE : FALSE;
+    record.Event.KeyEvent.wRepeatCount = 1;
+    record.Event.KeyEvent.wVirtualKeyCode = vk;
+    record.Event.KeyEvent.uChar.UnicodeChar = ch;
+    record.Event.KeyEvent.dwControlKeyState = state;
+    records.push_back(record);
+}
+
+void SendTerminalPasteBatch(const std::wstring& text) {
+    // Windows Terminal 的真事件形状：快捷键 Ctrl/Shift down 会漏进输入流；
+    // 正文里为符号合成出的 Shift down/up 也夹在字符之间。旧解析器正是
+    // 碰到这类“有修饰键、没正文字符”的记录后，把整批 paste 判废。
+    std::vector<INPUT_RECORD> records;
+    records.reserve(text.size() * 2 + 8);
+    AppendKeyRecord(records, true, VK_CONTROL, 0, LEFT_CTRL_PRESSED);
+    AppendKeyRecord(records, true, VK_SHIFT, 0, LEFT_CTRL_PRESSED | SHIFT_PRESSED);
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (i == 3) {
+            AppendKeyRecord(records, true, VK_SHIFT, 0, SHIFT_PRESSED);
+            AppendKeyRecord(records, false, VK_SHIFT, 0, 0);
+        }
+        const wchar_t ch = text[i];
+        const WORD vk = ch == L'\n' ? VK_RETURN : (ch == L' ' ? VK_SPACE : L'A');
+        const wchar_t emitted = ch == L'\n' ? L'\r' : ch;
+        AppendKeyRecord(records, true, vk, emitted);
+        AppendKeyRecord(records, false, vk, emitted);
+    }
+    AppendKeyRecord(records, false, 'V', 0x16, LEFT_CTRL_PRESSED | SHIFT_PRESSED);
+    AppendKeyRecord(records, false, VK_SHIFT, 0, LEFT_CTRL_PRESSED);
+    AppendKeyRecord(records, false, VK_CONTROL, 0, 0);
+    DWORD written = 0;
+    WriteConsoleInputW(g_in, records.data(), static_cast<DWORD>(records.size()), &written);
+}
+
 std::optional<std::wstring> ReadClipboardText() {
     if (OpenClipboard(nullptr) == FALSE) {
         return std::nullopt;
@@ -219,7 +256,7 @@ int wmain(int argc, wchar_t** argv) {
 
     SendKey('C', 0x03, LEFT_CTRL_PRESSED);
     Sleep(200);
-    SendTextBatch(L"native\nburst");
+    SendTerminalPasteBatch(L"native\nburst");
     const bool native_placeholder =
         WaitForAny({L"[Pasted Content 12 chars]", L"[粘贴内容 12 字符]"}, 5000);
     Check(native_placeholder, "unmarked Windows KEY_EVENT paste burst is collapsed to one placeholder");
