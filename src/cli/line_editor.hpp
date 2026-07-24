@@ -55,10 +55,13 @@ struct KeyEvent {
     KeyKind kind;
     char32_t ch = 0;  // 只有 kind == Char 时有意义
     std::string text;  // 只有 kind == Paste 时有意义
+    std::size_t replace_before = 0;  // Paste:撤掉已逐字露出的 paste 前缀
 
-    static KeyEvent Char(char32_t c) { return KeyEvent{KeyKind::Char, c, {}}; }
-    static KeyEvent Paste(std::string value) { return KeyEvent{KeyKind::Paste, 0, std::move(value)}; }
-    static KeyEvent Simple(KeyKind k) { return KeyEvent{k, 0, {}}; }
+    static KeyEvent Char(char32_t c) { return KeyEvent{KeyKind::Char, c, {}, 0}; }
+    static KeyEvent Paste(std::string value, std::size_t replace = 0) {
+        return KeyEvent{KeyKind::Paste, 0, std::move(value), replace};
+    }
+    static KeyEvent Simple(KeyKind k) { return KeyEvent{k, 0, {}, 0}; }
 };
 
 // Shift+Tab 循环切换的三档会话级确认模式,main.cpp 的工具确认回调按这个
@@ -260,7 +263,7 @@ private:
 
     void ResetHistoryBrowsing();  // "翻到一半又编辑" -> 落回底部,但保留当前(已编辑的)内容
     void InsertChar(char32_t ch);
-    void InsertPaste(const std::string& text);
+    void InsertPaste(const std::string& text, std::size_t replace_before = 0);
     void InsertNewLine();   // 光标处劈开当前行,插入新行,光标落到新行行首
     void DeleteBackward();  // 行内退格删一个字符;行首退格把这一行并进上一行
     void ClearBuffer();     // 整个 composer 清空回"单个空行"

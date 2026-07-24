@@ -84,6 +84,81 @@ std::string WideToUtf8(const std::wstring& wide) {
     return out;
 }
 
+std::wstring Utf8ToWide(std::string_view text) {
+    const int size = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    std::wstring out;
+    if (size > 0) {
+        out.resize(static_cast<std::size_t>(size));
+        MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), size);
+    }
+    return out;
+}
+
+std::wstring NormalizeNewlines(std::wstring_view text) {
+    std::wstring normalized;
+    normalized.reserve(text.size());
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == L'\r') {
+            normalized.push_back(L'\n');
+            if (i + 1 < text.size() && text[i + 1] == L'\n') {
+                ++i;
+            }
+        } else {
+            normalized.push_back(text[i]);
+        }
+    }
+    return normalized;
+}
+
+std::optional<std::wstring> ReadClipboardText() {
+    // VS Code 刚把正文写进剪贴板时，别的进程偶尔还攥着 clipboard 锁。
+    // 略试几次便走；拿不到就退回原先的事件批探测，不耽误普通输入。
+    bool opened = false;
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        if (OpenClipboard(nullptr) != FALSE) {
+            opened = true;
+            break;
+        }
+        Sleep(5);
+    }
+    if (!opened) {
+        return std::nullopt;
+    }
+
+    const HANDLE data = GetClipboardData(CF_UNICODETEXT);
+    if (data == nullptr) {
+        CloseClipboard();
+        return std::nullopt;
+    }
+    const auto* chars = static_cast<const wchar_t*>(GlobalLock(data));
+    if (chars == nullptr) {
+        CloseClipboard();
+        return std::nullopt;
+    }
+    const std::size_t capacity = GlobalSize(data) / sizeof(wchar_t);
+    std::size_t length = 0;
+    while (length < capacity && chars[length] != L'\0') {
+        ++length;
+    }
+    std::wstring text(chars, length);
+    GlobalUnlock(data);
+    CloseClipboard();
+    return text;
+}
+
+std::optional<std::wstring> MatchingMultilineClipboard(const std::wstring& prefix) {
+    const std::optional<std::wstring> raw = ReadClipboardText();
+    if (!raw.has_value()) {
+        return std::nullopt;
+    }
+    std::wstring clipboard = NormalizeNewlines(*raw);
+    if (clipboard.find(L'\n') == std::wstring::npos || prefix.size() > clipboard.size() ||
+        clipboard.compare(0, prefix.size(), prefix) != 0) {
+        return std::nullopt;
+    }
+    return clipboard;
+}
+
 std::optional<KeyInput> TryReadBracketedPaste() {
     constexpr std::wstring_view kStart = L"[200~";
     std::vector<INPUT_RECORD> probe;
@@ -118,21 +193,9 @@ std::optional<KeyInput> TryReadBracketedPaste() {
         }
     }
 
-    std::wstring normalized;
-    normalized.reserve(pasted.size());
-    for (std::size_t i = 0; i < pasted.size(); ++i) {
-        if (pasted[i] == L'\r') {
-            normalized.push_back(L'\n');
-            if (i + 1 < pasted.size() && pasted[i + 1] == L'\n') {
-                ++i;
-            }
-        } else {
-            normalized.push_back(pasted[i]);
-        }
-    }
     KeyInput out;
     out.kind = KeyInput::Kind::Paste;
-    out.text = WideToUtf8(normalized);
+    out.text = WideToUtf8(NormalizeNewlines(pasted));
     return out;
 }
 
@@ -195,6 +258,37 @@ std::optional<KeyInput> TryReadNativePasteBurst(const INPUT_RECORD& first) {
         }
     }
 
+    // ConPTY 有时按“每行一批”投递。一批之间能隔上百毫秒，靠空闲窗口
+    // 猜边界终究会漏。首批若已含换行，就同 Windows 剪贴板逐字核对；
+    // 对上后按剪贴板的确切长度收齐，既不误吞手敲 Enter，也不怕批间停顿。
+    if (valid && saw_newline) {
+        if (const std::optional<std::wstring> clipboard = MatchingMultilineClipboard(text);
+            clipboard.has_value()) {
+            constexpr ULONGLONG kClipboardCompletionMs = 2000;
+            const ULONGLONG deadline = GetTickCount64() + kClipboardCompletionMs;
+            while (valid && text.size() < clipboard->size()) {
+                const ULONGLONG now = GetTickCount64();
+                if (now >= deadline || !ReadInputRecord(record, static_cast<DWORD>(deadline - now))) {
+                    break;
+                }
+                tail.push_back(record);
+                if (record.EventType != KEY_EVENT || record.Event.KeyEvent.bKeyDown == FALSE) {
+                    continue;
+                }
+                if (!AppendNativePasteKey(record, text, saw_newline, saw_text_after_newline) ||
+                    text.size() > clipboard->size() || clipboard->compare(0, text.size(), text) != 0) {
+                    valid = false;
+                }
+            }
+            if (valid && text == *clipboard) {
+                KeyInput out;
+                out.kind = KeyInput::Kind::Paste;
+                out.text = WideToUtf8(text);
+                return out;
+            }
+        }
+    }
+
     if (valid && saw_newline) {
         constexpr DWORD kContinuationIdleMs = 60;
         constexpr ULONGLONG kMaxContinuationMs = 1000;
@@ -229,6 +323,42 @@ std::optional<KeyInput> TryReadNativePasteBurst(const INPUT_RECORD& first) {
     KeyInput out;
     out.kind = KeyInput::Kind::Paste;
     out.text = WideToUtf8(text);
+    return out;
+}
+
+std::optional<KeyInput> TryFinishClipboardPaste(std::wstring received, std::size_t replace_before) {
+    const std::optional<std::wstring> clipboard = MatchingMultilineClipboard(received);
+    if (!clipboard.has_value()) {
+        return std::nullopt;
+    }
+
+    std::vector<INPUT_RECORD> consumed;
+    bool saw_newline = received.find(L'\n') != std::wstring::npos;
+    bool saw_text_after_newline = false;
+    constexpr ULONGLONG kCompletionMs = 2000;
+    const ULONGLONG deadline = GetTickCount64() + kCompletionMs;
+    while (received.size() < clipboard->size()) {
+        const ULONGLONG now = GetTickCount64();
+        INPUT_RECORD record{};
+        if (now >= deadline || !ReadInputRecord(record, static_cast<DWORD>(deadline - now))) {
+            RestoreInputRecords(consumed);
+            return std::nullopt;
+        }
+        consumed.push_back(record);
+        if (record.EventType != KEY_EVENT || record.Event.KeyEvent.bKeyDown == FALSE) {
+            continue;
+        }
+        if (!AppendNativePasteKey(record, received, saw_newline, saw_text_after_newline) ||
+            received.size() > clipboard->size() || clipboard->compare(0, received.size(), received) != 0) {
+            RestoreInputRecords(consumed);
+            return std::nullopt;
+        }
+    }
+
+    KeyInput out;
+    out.kind = KeyInput::Kind::Paste;
+    out.text = WideToUtf8(received);
+    out.replace_before = replace_before;
     return out;
 }
 
@@ -363,6 +493,11 @@ RawInputScope::~RawInputScope() {
 }
 
 std::optional<KeyInput> KeyReader::ReadOne() {
+    const auto reset_text_run = [this]() {
+        rapid_text_run_.clear();
+        rapid_char_count_ = 0;
+        last_text_tick_ = 0;
+    };
     INPUT_RECORD record{};
     if (!ReadInputRecord(record)) {
         return std::nullopt;
@@ -371,6 +506,17 @@ std::optional<KeyInput> KeyReader::ReadOne() {
         return KeyInput{};  // None
     }
     if (auto paste = TryReadNativePasteBurst(record); paste.has_value()) {
+        if (!rapid_text_run_.empty()) {
+            std::wstring combined = rapid_text_run_ + Utf8ToWide(paste->text);
+            if (combined.find(L'\n') != std::wstring::npos) {
+                if (auto completed = TryFinishClipboardPaste(std::move(combined), rapid_char_count_);
+                    completed.has_value()) {
+                    reset_text_run();
+                    return completed;
+                }
+            }
+        }
+        reset_text_run();
         return paste;
     }
     const KEY_EVENT_RECORD& ke = record.Event.KeyEvent;
@@ -380,28 +526,40 @@ std::optional<KeyInput> KeyReader::ReadOne() {
 
     KeyInput out;
     if (ctrl && ke.wVirtualKeyCode == 'C') {
+        reset_text_run();
         out.kind = KeyInput::Kind::CtrlC;
     } else if (ctrl && ke.wVirtualKeyCode == 'D') {
+        reset_text_run();
         out.kind = KeyInput::Kind::CtrlD;
     } else if (ctrl && ke.wVirtualKeyCode == 'O') {
+        reset_text_run();
         out.kind = KeyInput::Kind::CtrlO;  // UI-D:紧凑/详细切换
     } else if (ctrl && ke.wVirtualKeyCode == 'E') {
+        reset_text_run();
         out.kind = KeyInput::Kind::CtrlE;  // UI-D:聚焦查看
     } else if (ke.wVirtualKeyCode == VK_BACK) {
+        reset_text_run();
         out.kind = KeyInput::Kind::Backspace;
     } else if (ke.wVirtualKeyCode == VK_LEFT) {
+        reset_text_run();
         out.kind = KeyInput::Kind::Left;
     } else if (ke.wVirtualKeyCode == VK_RIGHT) {
+        reset_text_run();
         out.kind = KeyInput::Kind::Right;
     } else if (ke.wVirtualKeyCode == VK_HOME) {
+        reset_text_run();
         out.kind = KeyInput::Kind::Home;
     } else if (ke.wVirtualKeyCode == VK_END) {
+        reset_text_run();
         out.kind = KeyInput::Kind::End;
     } else if (ke.wVirtualKeyCode == VK_UP) {
+        reset_text_run();
         out.kind = KeyInput::Kind::Up;
     } else if (ke.wVirtualKeyCode == VK_DOWN) {
+        reset_text_run();
         out.kind = KeyInput::Kind::Down;
     } else if (ke.wVirtualKeyCode == VK_TAB) {
+        reset_text_run();
         out.kind = shift ? KeyInput::Kind::ShiftTab : KeyInput::Kind::Tab;
     } else if (ke.wVirtualKeyCode == VK_RETURN) {
         // UI-A:Alt+Enter / Shift+Enter 都翻成 NewLine(插换行)。实测这台
@@ -410,14 +568,33 @@ std::optional<KeyInput> KeyReader::ReadOne() {
         // 等于天然收不到;conhost 下两个组合都完好。所以两个都认,文档里
         // 推荐 Shift+Enter。非 composer 读取里 NewLine 会被核心层当 Enter,
         // 确认提示那些单行场景语义不变。
+        if (!shift && !alt && !rapid_text_run_.empty()) {
+            std::wstring received = rapid_text_run_;
+            received.push_back(L'\n');  // 当前 VK_RETURN 已从输入队列取走
+            if (auto paste = TryFinishClipboardPaste(std::move(received), rapid_char_count_);
+                paste.has_value()) {
+                reset_text_run();
+                return paste;
+            }
+        }
+        reset_text_run();
         out.kind = (shift || alt) ? KeyInput::Kind::NewLine : KeyInput::Kind::Enter;
     } else if (ke.wVirtualKeyCode == VK_ESCAPE) {
         if (auto paste = TryReadBracketedPaste(); paste.has_value()) {
+            reset_text_run();
             return paste;
         }
+        reset_text_run();
         out.kind = KeyInput::Kind::Esc;
     } else if (ke.uChar.UnicodeChar != 0 && !ctrl) {
         const wchar_t wc = ke.uChar.UnicodeChar;
+        constexpr ULONGLONG kRapidTextGapMs = 50;
+        const ULONGLONG now = GetTickCount64();
+        if (!rapid_text_run_.empty() && now - last_text_tick_ > kRapidTextGapMs) {
+            reset_text_run();
+        }
+        rapid_text_run_.push_back(wc);
+        last_text_tick_ = now;
         if (wc >= 0xD800 && wc <= 0xDBFF) {
             pending_high_surrogate_ = static_cast<char32_t>(wc);
             return KeyInput{};  // 高代理项,等低代理项凑成一个完整码点再交
@@ -429,6 +606,7 @@ std::optional<KeyInput> KeyReader::ReadOne() {
             cp = 0x10000 + ((high - 0xD800) << 10) + (static_cast<char32_t>(wc) - 0xDC00);
         }
         if (cp >= 0x20) {  // 过滤掉控制字符(Esc、独立的 Tab 已经在上面单独处理)
+            ++rapid_char_count_;
             out.kind = KeyInput::Kind::Char;
             out.ch = cp;
         }

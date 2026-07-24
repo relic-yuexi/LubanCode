@@ -331,7 +331,14 @@ void LineEditorCore::InsertChar(char32_t ch) {
     ResetHistoryBrowsing();
 }
 
-void LineEditorCore::InsertPaste(const std::string& text) {
+void LineEditorCore::InsertPaste(const std::string& text, std::size_t replace_before) {
+    if (replace_before > 0) {
+        // ConPTY 已把 paste 首行逐字送进编辑器，直到回车才露出它是粘贴。
+        // 这些字都在当前行、紧贴光标；先原位撤下，再换成完整附件 token。
+        const std::size_t erase_count = std::min(replace_before, col_);
+        lines_[row_].erase(col_ - erase_count, erase_count);
+        col_ -= erase_count;
+    }
     std::string normalized;
     normalized.reserve(text.size());
     for (std::size_t i = 0; i < text.size(); ++i) {
@@ -747,7 +754,7 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
             InsertChar(effective.ch);
             break;
         case KeyKind::Paste:
-            InsertPaste(effective.text);
+            InsertPaste(effective.text, effective.replace_before);
             break;
         case KeyKind::NewLine:
             InsertNewLine();

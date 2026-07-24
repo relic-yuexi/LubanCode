@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -116,6 +117,56 @@ void SendTextBatch(const std::wstring& text) {
     WriteConsoleInputW(g_in, records.data(), static_cast<DWORD>(records.size()), &written);
 }
 
+std::optional<std::wstring> ReadClipboardText() {
+    if (OpenClipboard(nullptr) == FALSE) {
+        return std::nullopt;
+    }
+    const HANDLE data = GetClipboardData(CF_UNICODETEXT);
+    const auto* chars = data == nullptr ? nullptr : static_cast<const wchar_t*>(GlobalLock(data));
+    if (chars == nullptr) {
+        CloseClipboard();
+        return std::nullopt;
+    }
+    const std::size_t capacity = GlobalSize(data) / sizeof(wchar_t);
+    std::size_t length = 0;
+    while (length < capacity && chars[length] != L'\0') {
+        ++length;
+    }
+    std::wstring text(chars, length);
+    GlobalUnlock(data);
+    CloseClipboard();
+    return text;
+}
+
+bool SetClipboardText(const std::wstring& text) {
+    if (OpenClipboard(nullptr) == FALSE) {
+        return false;
+    }
+    if (EmptyClipboard() == FALSE) {
+        CloseClipboard();
+        return false;
+    }
+    const std::size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    auto* chars = memory == nullptr ? nullptr : static_cast<wchar_t*>(GlobalLock(memory));
+    if (chars == nullptr) {
+        if (memory != nullptr) {
+            GlobalFree(memory);
+        }
+        CloseClipboard();
+        return false;
+    }
+    std::copy(text.c_str(), text.c_str() + text.size() + 1, chars);
+    GlobalUnlock(memory);
+    if (SetClipboardData(CF_UNICODETEXT, memory) == nullptr) {
+        GlobalFree(memory);
+        CloseClipboard();
+        return false;
+    }
+    CloseClipboard();
+    return true;  // SetClipboardData 成功后由系统接管 memory
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -175,16 +226,39 @@ int wmain(int argc, wchar_t** argv) {
     Check(!ScreenContains(L"native") && !ScreenContains(L"burst"),
           "unmarked paste burst does not leak raw lines into the composer");
 
-    // VS Code/ConPTY 会把一次 paste 拆批；第一批可能恰好只到换行。用 /help
-    // 作首行，旧实现若误提交也只打印帮助，不会发起真实模型请求。
+    // VS Code/ConPTY 会把一次 paste 拆成逐行批次，批间停顿可远超旧实现的
+    // 60ms。首行用 /help，旧实现若误提交也只打印帮助，不会请求真实模型；
+    // 其余三行照用户报告里的 Python 形状投递。
     SendKey('C', 0x03, LEFT_CTRL_PRESSED);
     Sleep(200);
-    SendTextBatch(L"/help\n");
-    Sleep(25);
-    SendTextBatch(L"delayed");
-    const bool delayed_placeholder =
-        WaitForAny({L"[Pasted Content 13 chars]", L"[粘贴内容 13 字符]"}, 5000);
-    Check(delayed_placeholder, "delayed Windows KEY_EVENT paste batches merge into one placeholder");
+    const std::optional<std::wstring> saved_clipboard = ReadClipboardText();
+    const std::wstring slow_paste =
+        L"/help\n"
+        L"    for j in range(i+1,len(nums)):\n"
+        L"        if nums[i] + nums[j] == target:\n"
+        L"            return [i,j]";
+    Check(SetClipboardText(slow_paste), "test multiline content is present in the Windows clipboard");
+    // 首行逐字投递，保证子进程在回车前已经把它画进 composer；这正是
+    // VS Code 实机里旧回归没罩住的路径。虚拟键码故意填非零，兼测
+    // ConPTY 不采用“合成键码 0”时仍能辨认。
+    for (const wchar_t ch : std::wstring(L"/help")) {
+        SendKey('A', ch);
+        Sleep(15);
+    }
+    SendKey(VK_RETURN, L'\r');
+    Sleep(150);
+    SendTextBatch(L"    for j in range(i+1,len(nums)):\n");
+    Sleep(150);
+    SendTextBatch(L"        if nums[i] + nums[j] == target:\n");
+    Sleep(150);
+    SendTextBatch(L"            return [i,j]");
+    const std::wstring pasted_chars = std::to_wstring(slow_paste.size());
+    const bool delayed_placeholder = WaitForAny(
+        {L"[Pasted Content " + pasted_chars + L" chars]", L"[粘贴内容 " + pasted_chars + L" 字符]"}, 5000);
+    Check(delayed_placeholder, "slow line-split Windows paste merges into one placeholder");
+    if (saved_clipboard.has_value()) {
+        Check(SetClipboardText(*saved_clipboard), "test restores the previous Windows clipboard text");
+    }
 
     SendKey('C', 0x03, LEFT_CTRL_PRESSED);
     Sleep(200);
@@ -194,6 +268,10 @@ int wmain(int argc, wchar_t** argv) {
     DWORD exit_code = STILL_ACTIVE;
     GetExitCodeProcess(process.hProcess, &exit_code);
     Check(exit_code == 0, "process exits cleanly after clearing the paste");
+    if (exit_code == STILL_ACTIVE) {
+        TerminateProcess(process.hProcess, 3);
+        WaitForSingleObject(process.hProcess, 5000);
+    }
     CloseHandle(process.hProcess);
     g_report << "RESULT: " << (g_failures == 0 ? "ALL PASS" : "FAIL") << "\n";
     return g_failures == 0 ? 0 : 1;

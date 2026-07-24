@@ -103,6 +103,25 @@ TEST_CASE("LineEditorCore: paste 头一段无换行时也能随后一段折成�
     CHECK(Utf32ToUtf8(submitted.line) == "alpha\nbeta");
 }
 
+TEST_CASE("LineEditorCore: ConPTY 已露出的 paste 首行可原位换成完整附件") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    TypeString(editor, "for i in range(len(nums)):");
+
+    const std::string full =
+        "for i in range(len(nums)):\n"
+        "    for j in range(i+1,len(nums)):\n"
+        "        return [i,j]";
+    const auto state = editor.HandleKey(KeyEvent::Paste(full, 26));
+    REQUIRE(state.lines.size() == 1);
+    CHECK(Utf32ToUtf8(state.lines[0]).find("for i") == std::string::npos);
+    CHECK(Utf32ToUtf8(state.line) == full);
+
+    const auto submitted = editor.HandleKey(KeyEvent::Simple(KeyKind::Enter));
+    CHECK(submitted.submitted);
+    CHECK(Utf32ToUtf8(submitted.line) == full);
+}
+
 TEST_CASE("LineEditorCore: 编辑键截断 paste 合并且退格整枚删除占位") {
     LineEditorCore editor;
     editor.BeginLine(true);

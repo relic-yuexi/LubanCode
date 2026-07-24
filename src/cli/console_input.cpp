@@ -235,7 +235,7 @@ std::optional<KeyEvent> MapKey(const platform::KeyInput& key) {
         case PK::Char:
             return KeyEvent::Char(key.ch);
         case PK::Paste:
-            return KeyEvent::Paste(key.text);
+            return KeyEvent::Paste(key.text, key.replace_before);
         case PK::Backspace:
             return KeyEvent::Simple(KeyKind::Backspace);
         case PK::Left:
