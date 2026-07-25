@@ -23,7 +23,7 @@ enum class SlashCommand {
     Compact,  // /compact [重点说明]:手动触发一次历史压缩
     Think,    // /think [档位]:看/改推理强度
     Skills,   // /skills:列出扫描到的技能(M9)
-    Skill,    // /skill install|list|update|remove:远端技能分发
+    Skill,    // /skill install|list|update|remove:本地/远端技能分发
     Mcp,      // /mcp:列出挂载的 MCP 服务器状态、工具清单(M8)
     Lsp,      // /lsp:列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)
     Todos,    // /todos:查看当前待办清单(M11/0.10.0)
@@ -56,7 +56,7 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input);
 // /provider 的二级参数也收在 cli 层做纯解析，main.cpp 只接收已拆好的
 // 字段、做写盘和切会话。model / window 选项都只认一个值；少参数、重复
 // 选项、夹生子命令一律 Invalid，由调用方统一打印用法。
-enum class ProviderCommandAction { Invalid, List, Add, Switch, Remove, Set };
+enum class ProviderCommandAction { Invalid, List, Refresh, Add, Switch, Remove, Set };
 
 struct ParsedProviderCommand {
     ProviderCommandAction action = ProviderCommandAction::Invalid;

@@ -18,7 +18,7 @@
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-444444" alt="Windows, Linux and macOS">
 </p>
 
-LubanCode connects natively to both the Anthropic Messages API and the OpenAI Responses API. It can inspect a repository, edit files, run commands, search the web, delegate work, and use MCP or LSP tools. Its terminal UI includes streaming Markdown, diff previews, approval modes, session history, and context compaction.
+LubanCode connects natively to Anthropic Messages, OpenAI Responses, and OpenAI-compatible Chat Completions. It can inspect a repository, edit files, run commands, search the web, delegate work, and use MCP or LSP tools. Its terminal UI includes streaming Markdown, diff previews, approval modes, session history, and context compaction.
 
 The name comes from Lu Ban, the traditional Chinese master craftsman. The idea is simple: measure first, cut second, and always show the work.
 
@@ -28,7 +28,7 @@ The name comes from Lu Ban, the traditional Chinese master craftsman. The idea i
 
 | Area | What is included |
 | --- | --- |
-| **Model access** | Anthropic and Responses protocols, remembered provider switching, native reasoning controls, custom body fields and headers. |
+| **Model access** | Anthropic, Responses, and Chat Completions; a bundled provider catalog; remembered endpoint switching. |
 | **Coding tools** | Read, write, tolerant block editing, file search, foreground and background commands, diff-first approval. |
 | **Semantic tools** | LSP definitions, references, symbols and diagnostics; MCP stdio; web search and fetch. |
 | **Agent workflow** | Sub-agents, todo tracking, `ask_user` questions, `AGENTS.md` project instructions, deferred tools, worktrees and project permissions. |
@@ -107,7 +107,7 @@ Run `lubancode` without arguments. When no provider has been configured, the set
 $ lubancode
 === lubancode first-run setup ===
 Language: 1) 中文  2) English
-Wire protocol: 1) anthropic  2) responses
+Wire protocol: 1) anthropic  2) responses  3) chat_completions
 base_url: https://your-provider.example/v1
 api_key: sk-...
 model: your-model
@@ -129,7 +129,7 @@ lubancode --continue
 git diff --cached | lubancode "Review this change"
 ```
 
-For multiple model endpoints, use the `providers` array and keep secrets in environment variables:
+For multiple endpoints, run `/provider add`. Pick OpenAI, Anthropic, MiniMax, GLM, Qwen, DeepSeek, Kimi, or Grok, then enter the key; the repository catalog supplies the URL, wire, default model, limits, and provider options. The final menu item keeps the fully custom wizard. Hand-written configuration remains supported:
 
 ```json
 {
@@ -149,6 +149,8 @@ For multiple model endpoints, use the `providers` array and keep secrets in envi
 
 Save it as `~/.lubancode/config.json`, then set `WORK_MODEL_API_KEY`. A successful `/provider switch work` also writes `active_provider`, so the next launch uses the same endpoint. The detailed [configuration guide](docs/configuration.md) is currently written in Chinese, but all field names and examples are language-neutral.
 
+The catalog source lives in [`catalog/providers.json`](catalog/providers.json), with its schema in [`catalog/providers.schema.json`](catalog/providers.schema.json). The executable embeds a snapshot and caches validated updates under `~/.lubancode/cache/`.
+
 ## Project instructions
 
 Run `/init` inside a repository. LubanCode creates `AGENTS.md` at the Git root with a practical scaffold for layout, build, tests, and working rules. Existing instructions are never overwritten. The current main agent and sub-agents reload the file immediately.
@@ -159,15 +161,15 @@ At startup, LubanCode walks from the Git root to the working directory. Each dir
 
 | Command | Purpose |
 | --- | --- |
-| `/provider` | Add, list, switch, edit, or remove model endpoints. |
+| `/provider` | Add from the catalog, refresh it, list, switch, edit, or remove endpoints. |
 | `/init` | Create and load project-level `AGENTS.md`. |
 | `/model` · `/think` | Change the active model and reasoning effort. |
 | `/context` · `/compact` | Inspect context use and compact conversation history. |
-| `/skills` · `/skill install <url>` | Manage local and remotely installed skills. |
+| `/skills` · `/skill` | Manage skills under `~/.lubancode/skills`; run `/skill` bare for install examples. |
 | `/mcp` · `/lsp` · `/plugins` | Inspect external tools and language servers. |
 | `/tools` · `/todos` | Inspect tool loading state and the current task list. |
 | `/memory` | Manage per-session project memory, synchronous retrieval, and background writes. |
-| `/sessions` · `/resume` · `/export` | Browse, resume, and export sessions. |
+| `/sessions` · `/resume` · `/export` | Pick an older session, replay it, continue, or export it. |
 | `/worktree new\|list\|exit` | Work in isolated Git worktrees. |
 | `/soul` · `/prompt` | Change response style or the system prompt persona. |
 | `/language` · `/image` | Switch UI language or attach a local image. |

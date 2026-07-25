@@ -351,6 +351,8 @@ TEST_CASE("ParseProviderCommand: add 解出必填项与可选项") {
 TEST_CASE("ParseProviderCommand: list/switch/remove 与错参") {
     CHECK(cli::ParseProviderCommand("").action == cli::ProviderCommandAction::List);
     CHECK(cli::ParseProviderCommand("list").action == cli::ProviderCommandAction::List);
+    CHECK(cli::ParseProviderCommand("refresh").action == cli::ProviderCommandAction::Refresh);
+    CHECK(cli::ParseProviderCommand("refresh now").action == cli::ProviderCommandAction::Invalid);
 
     const auto switched = cli::ParseProviderCommand("switch glm glm-4.5-air");
     CHECK(switched.action == cli::ProviderCommandAction::Switch);

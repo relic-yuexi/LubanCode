@@ -4,7 +4,7 @@
 
 <h1 align="center">LubanCode</h1>
 
-<p align="center"><strong>一把装在终端里的 AI 编程工具。C++23 写成，双协议接入，能读代码，也能动手干活。</strong></p>
+<p align="center"><strong>一把装在终端里的 AI 编程工具。C++23 写成，三协议接入，能读代码，也能动手干活。</strong></p>
 
 <p align="center">
   <strong>简体中文</strong> · <a href="README.en.md">English</a>
@@ -18,7 +18,7 @@
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-444444" alt="Windows, Linux and macOS">
 </p>
 
-LubanCode 原生支持 Anthropic Messages API 与 OpenAI Responses API。模型能读文件、改代码、跑命令、查资料，也能调度子代理、MCP 与 LSP。界面不只是几行日志。流式正文、Markdown、diff、确认档、会话存档、上下文压缩，都在终端里铺开。
+LubanCode 原生支持 Anthropic Messages、OpenAI Responses 与 Chat Completions 兼容接口。模型能读文件、改代码、跑命令、查资料，也能调度子代理、MCP 与 LSP。界面不只是几行日志。流式正文、Markdown、diff、确认档、会话存档、上下文压缩，都在终端里铺开。
 
 鲁班造物，先正绳墨，再下斧凿。LubanCode 也守这条规矩：先看清，再动手；改了什么，明明白白摆给你看。
 
@@ -28,7 +28,7 @@ LubanCode 原生支持 Anthropic Messages API 与 OpenAI Responses API。模型�
 
 | | 能力 |
 | --- | --- |
-| **模型接入** | Anthropic / Responses 双协议；多 provider 随时切换并记住上次选择；`extra_body`、`extra_headers` 可透传厂商私有参数。 |
+| **模型接入** | Anthropic / Responses / Chat Completions 三协议；内置常见厂家目录；多 provider 随时切换并记住上次选择。 |
 | **代码工具** | 读、写、容错编辑、搜索文件；前台或后台跑命令；改动先看 diff，再落盘。 |
 | **语义与外接工具** | LSP 定义、引用、符号、诊断；MCP stdio；联网搜索与网页抓取。 |
 | **代理工作流** | 子代理、待办清单、`ask_user` 选择题、`AGENTS.md` 项目指令、工具延迟挂载、隔离 worktree、项目级权限。 |
@@ -107,7 +107,7 @@ sudo apt-get install -y build-essential cmake ninja-build libssl-dev
 $ lubancode
 === lubancode 初次配置向导 ===
 界面语言 / Language: 1) 中文  2) English
-接口格式: 1) anthropic  2) responses
+接口格式: 1) anthropic  2) responses  3) chat_completions
 base_url: https://your-provider.example/v1
 api_key: sk-...
 model: your-model
@@ -129,7 +129,7 @@ lubancode --continue
 git diff --cached | lubancode "替我审一遍这份改动"
 ```
 
-若你管着多家模型服务，用 `providers` 更省事。密钥只记环境变量名，不必写进 JSON：
+若你管着多家模型服务，直接敲 `/provider add`。先选 OpenAI、Anthropic、MiniMax、GLM、Qwen、DeepSeek、Kimi 或 Grok，再填 Key；地址、协议、默认模型和推理参数由仓库目录带上。全手填仍留在最后一项。手写配置也照旧可用：
 
 ```json
 {
@@ -159,15 +159,15 @@ git diff --cached | lubancode "替我审一遍这份改动"
 
 | 命令 | 用处 |
 | --- | --- |
-| `/provider` | 添加、列出、切换、删除模型服务。 |
+| `/provider` | 从厂家目录添加、更新目录、列出、切换、删除模型服务。 |
 | `/init` | 生成并载入项目级 `AGENTS.md`。 |
 | `/model` · `/think` | 切模型与推理强度。 |
 | `/context` · `/compact` | 看上下文占用，手工压缩历史。 |
-| `/skills` · `/skill install <url>` | 管理本地与远端技能。 |
+| `/skills` · `/skill` | 管理 `~/.lubancode/skills` 里的技能；裸敲 `/skill` 看完整安装示例。 |
 | `/mcp` · `/lsp` · `/plugins` | 看外接工具与语言服务器状态。 |
 | `/tools` · `/todos` | 看工具挂载状态与待办清单。 |
 | `/memory` | 管本场项目记忆、同步召回与后台写入。 |
-| `/sessions` · `/resume` · `/export` | 列存档、续聊、导出 Markdown。 |
+| `/sessions` · `/resume` · `/export` | 上下选择旧会话，重放历史后续聊或导出。 |
 | `/worktree new\|list\|exit` | 在隔离工作树里干活。 |
 | `/soul` · `/prompt` | 调风格，或替换系统提示人格段。 |
 | `/language` · `/image` | 切界面语言，附本地图片。 |
@@ -201,6 +201,7 @@ LubanCode 留了四扇门：
 | --- | --- |
 | [文档首页](docs/README.md) | 阅读路线、版本状态、各页入口。 |
 | [配置手册](docs/configuration.md) | 配置优先级、项目记忆、providers、hooks、MCP、搜索、LSP、models.json。 |
+| [Provider 目录](docs/provider-catalog.md) | 常见厂家预设、在线更新、缓存、Schema 与安全边界。 |
 | [项目记忆设计](docs/memory-system-design.md) | 目录、召回、后台更新、安全边界与后续路数。 |
 | [扩展指南](docs/extensions.md) | Skills、Lua、C ABI 插件、MCP 与 LSP。 |
 | [架构说明](docs/architecture.md) | 分层、请求链、双后端、工具与平台边界。 |

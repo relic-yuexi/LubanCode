@@ -78,8 +78,7 @@ const Entry kZhCN[] = {
      "  /think 档位     切推理强度,档位以服务商为准(anthropic 内置 none/low/medium/high/xhigh/max\n"
      "                  映射,responses 原样递给 API)\n"
      "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
-     "  /skill list     列本机技能,标本地/远端来源;/skill install <url> 安装,/skill update [名字] 更新,\n"
-     "                  /skill remove <名字> 删除主目录级远端技能\n"
+     "  /skill          管技能;裸敲看安装网址、本地目录、更新与删除示例\n"
      "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
      "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
      "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
@@ -89,7 +88,7 @@ const Entry kZhCN[] = {
      "                  延迟挂载,模型用 tool_search 检索后方可调用)\n"
      "  /memory        管项目记忆开关、召回、后台写入、列表、遗忘与索引重建\n"
      "  /sessions       列本目录最近 20 场会话存档(时间倒序编号);/sessions all 列全部目录\n"
-     "  /resume 编号或id  载入该场存档历史续聊(编号按本目录列表数)\n"
+     "  /resume         上下选择本目录会话并恢复历史;也可跟编号或 id\n"
      "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md;全量流水,压缩点带标注)\n"
      "  /title [标题]   看/设本场会话标题,/sessions 列表和 /export 大标题都用它\n"
      "  /soul           看当前魂;/soul 内容 写进 SOUL.md 并即时生效,/soul clear 清空还原默认\n"
@@ -119,7 +118,7 @@ const Entry kZhCN[] = {
     {"help.config",
      "配置优先级(从高到低,按字段逐个决,不是整套配置一刀切):\n"
      "  1) LUBANCODE_ 专属环境变量\n"
-     "       LUBANCODE_WIRE          协议选择,anthropic 或 responses\n"
+     "       LUBANCODE_WIRE          协议选择,anthropic / responses / chat_completions\n"
      "       LUBANCODE_BASE_URL      API 地址\n"
      "       LUBANCODE_API_KEY       认证令牌\n"
      "       LUBANCODE_MODEL         模型名\n"
@@ -171,8 +170,7 @@ const Entry kZhCN[] = {
      "  /compact        手动压缩历史;/compact 重点说明 可指定这次额外保留什么\n"
      "  /think          看当前推理强度;/think 档位 切档位,档位以服务商为准(/effort 同义)\n"
      "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
-     "  /skill list     列本机技能,标本地/远端来源;/skill install <url> 安装,/skill update [名字] 更新,\n"
-     "                  /skill remove <名字> 删除主目录级远端技能\n"
+     "  /skill          管技能;裸敲看安装网址、本地目录、更新与删除示例\n"
      "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
      "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
      "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
@@ -180,7 +178,7 @@ const Entry kZhCN[] = {
      "  /tools          列工具三态:核心(恒在)/已加载/延迟未加载(tool_search 延迟挂载)\n"
      "  /memory        管项目记忆;/memory on|off|use|learn|list|remember|forget|rebuild\n"
      "  /sessions       列本目录最近 20 场会话存档(时间倒序编号);/sessions all 列全部目录\n"
-     "  /resume 编号或id  载入该场存档历史续聊(编号按本目录列表数),后续消息追加写回同一文件\n"
+     "  /resume         上下选择本目录会话并恢复历史;也可跟编号或 id,后续消息写回原文件\n"
      "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md;全量流水,压缩点带标注)\n"
      "  /title [标题]   看/设本场会话标题,/sessions 列表和 /export 大标题都用它\n"
      "  /soul           看当前魂;/soul 内容 写进 SOUL.md 并即时生效,/soul clear 清空还原默认\n"
@@ -244,6 +242,7 @@ const Entry kZhCN[] = {
     {"wizard.wire.title", "接口格式:"},
     {"wizard.wire.opt1", "  1) anthropic (Claude 系)"},
     {"wizard.wire.opt2", "  2) responses (OpenAI 系)"},
+    {"wizard.wire.opt3", "  3) chat_completions (OpenAI 兼容)"},
     {"wizard.choose_prompt", "选择 [1]: "},
     {"wizard.base_url.title", "base_url(必填),例如:"},
     {"wizard.base_url.empty", "base_url 不能为空,再输一遍。"},
@@ -264,6 +263,14 @@ const Entry kZhCN[] = {
 
     // ---- /provider add 向导(裸敲 /provider add 或 /provider add 名字 触发) ----
     {"provider_wizard.title", "=== 添 provider 向导 ==="},
+    {"provider_catalog.choose.title", "选一家模型服务（目录来自 LubanCode 仓库）:"},
+    {"provider_catalog.choose.custom", "自定义（全手填）"},
+    {"provider_catalog.selected", "已选 {0}；协议 {1}，默认模型 {2}。"},
+    {"provider_catalog.refreshing", "正在更新 provider 目录……"},
+    {"provider_catalog.refresh_failed", "provider 目录更新失败，改用本地快照：{0}"},
+    {"provider_catalog.refresh_current", "provider 目录已是最新。"},
+    {"provider_catalog.refresh_ok", "provider 目录已更新到 {0}，缓存写在 {1}。"},
+    {"provider_catalog.warning", "[provider 目录警告] {0}"},
     {"provider_wizard.name.prompt", "名字: "},
     {"provider_wizard.name.empty", "名字不能为空,再输一遍。"},
     {"provider_wizard.name.prefill_invalid", "命令行给的名字 {0} 不能用: {1},改问一遍。"},
@@ -303,7 +310,7 @@ const Entry kZhCN[] = {
     {"slash.desc.think", "看当前推理强度;/think 档位 切档位,档位以服务商为准(/effort 同义)"},
     {"slash.desc.effort", "同 /think(推理强度别名)"},
     {"slash.desc.skills", "列出扫描到的技能(主目录级 + 项目级)"},
-    {"slash.desc.skill", "安装、查看、更新或删除主目录里的远端技能"},
+    {"slash.desc.skill", "管理技能(裸敲查看安装网址、本地目录等完整示例)"},
     {"slash.desc.mcp", "列出挂载的 MCP 服务器状态和工具清单"},
     {"slash.desc.lsp", "列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)"},
     {"slash.desc.todos", "查看当前待办清单"},
@@ -311,7 +318,7 @@ const Entry kZhCN[] = {
     {"slash.desc.tools", "列工具三态:核心(恒在)/已加载/延迟未加载(tool_search 延迟挂载)"},
     {"slash.desc.memory", "管理项目记忆;/memory on|off|use|learn|list|remember|forget|rebuild"},
     {"slash.desc.sessions", "列本目录最近 20 场会话存档,倒序编号;/sessions all 列全部目录"},
-    {"slash.desc.resume", "/resume 编号或id 载入该场存档历史续聊"},
+    {"slash.desc.resume", "上下选择会话并恢复历史(也可跟编号或 id)"},
     {"slash.desc.export", "当前会话导出 Markdown;/export 路径 可指定输出文件"},
     {"slash.desc.title", "看当前会话标题;/title 标题 给本场起名,/sessions 列表和导出都用它"},
     {"slash.desc.soul", "看当前魂;/soul 内容 写进 SOUL.md,/soul clear 还原默认；名字仍可切换备选魂"},
@@ -491,9 +498,10 @@ const Entry kZhCN[] = {
     {"ask_user.other", "自己填写"},
     {"ask_user.select_prompt", "请选择编号(Esc 取消): "},
     {"ask_user.multi_prompt", "请选择编号,多项用逗号分隔(Esc 取消): "},
-    {"ask_user.menu_hint", "↑/↓ 移动 · Enter 确认 · Esc 取消"},
-    {"ask_user.menu_multi_hint", "↑/↓ 移动 · 空格勾选 · Enter 确认 · Esc 取消"},
+    {"ask_user.menu_hint", "↑/↓ 移动 · 末项可直接输入 · Enter 确认 · Esc 取消"},
+    {"ask_user.menu_multi_hint", "↑/↓ 移动 · 空格勾选 · 末项可输入 · Enter 确认 · Esc 取消"},
     {"ask_user.menu_select_one", "请至少勾选一项"},
+    {"ask_user.menu_edit_hint", "直接输入答案 · Backspace 删除 · Enter 提交 · Esc 取消"},
     {"ask_user.custom_prompt", "请输入你的答案: "},
     {"ask_user.cancelled", "用户取消了选择"},
     {"ask_user.invalid", "选项无效,请重新输入。"},
@@ -548,9 +556,24 @@ const Entry kZhCN[] = {
     {"cmd.skills.no_desc", "(没写说明)"},
 
     // ---- /skill ----
-    {"cmd.skill.usage", "用法:/skill list | install <url> | update [名字] | remove <名字>"},
-    {"cmd.skill.no_home", "找不到用户主目录，远端技能没处安放。"},
-    {"cmd.skill.list_empty", "这里还没有技能。用 /skill install <url> 装一份。"},
+    {"cmd.skill.usage",
+     "技能管理(用户级安装后,本会话立即可用):\n"
+     "  /skill list\n"
+     "      列出用户级与项目级技能,并标明本地/远端来源。\n"
+     "  /skill install https://example.com/my-skill.md\n"
+     "  /skill install https://github.com/owner/repo\n"
+     "      从 Markdown 直链或 GitHub 技能仓库安装。\n"
+     "  /skill install C:\\path\\to\\my-skill\n"
+     "  /skill install C:\\path\\to\\my-skill\\SKILL.md\n"
+     "      从本地目录或 SKILL.md 安装;路径带空格也认。\n"
+     "  /skill update [名字]\n"
+     "      更新装过且记有网址来源的技能;不写名字则更新全部。\n"
+     "  /skill remove <名字>\n"
+     "      删除用户级技能。\n"
+     "用户级落盘: ~/.lubancode/skills/<名字>/SKILL.md\n"
+     "项目级手工放置: <cwd>/.lubancode/skills/<名字>/SKILL.md"},
+    {"cmd.skill.no_home", "找不到用户主目录，技能没处安放。"},
+    {"cmd.skill.list_empty", "这里还没有技能。用 /skill install <网址或本地路径> 装一份。"},
     {"cmd.skill.list_header", "本机技能:"},
     {"cmd.skill.local", "本地自建"},
     {"cmd.skill.remote", "远端 {0}，安装于 {1}"},
@@ -612,9 +635,10 @@ const Entry kZhCN[] = {
     {"cmd.provider.usage",
      "用法:\n"
      "  /provider list\n"
+     "  /provider refresh                       从 LubanCode 仓库更新常见厂家目录\n"
      "  /provider add                          进分步向导(裸敲)\n"
      "  /provider add <名字>                    进分步向导(名字先给上,跳过第一问)\n"
-     "  /provider add <名字> <base_url> <anthropic|responses> [--key-env 环境变量名] [--key 明文key] "
+     "  /provider add <名字> <base_url> <anthropic|responses|chat_completions> [--key-env 环境变量名] [--key 明文key] "
      "[--model 默认模型] [--effort 推理档位] [--window 大小]\n"
      "  /provider switch <名字> [模型]\n"
      "  /provider remove <名字>\n"
@@ -707,7 +731,11 @@ const Entry kZhCN[] = {
     {"cmd.sessions.no_text", "(没有用户文本)"},
     {"cmd.sessions.dir_line", "      目录: {0}"},
     {"cmd.sessions.dir_unknown", "(未知)"},
-    {"cmd.resume.usage", "用法:/resume 编号或id(/sessions 看列表)"},
+    {"cmd.resume.usage", "用法:/resume(上下选择) | /resume 编号 | /resume id"},
+    {"cmd.resume.menu_title", "恢复哪一场会话?"},
+    {"cmd.resume.menu_description", "{0} · {1} 条 · {2}"},
+    {"cmd.resume.menu_hint", "↑/↓ 移动 · Enter 恢复 · Esc 取消"},
+    {"cmd.resume.cancelled", "已取消恢复。"},
     {"cmd.resume.none", "本目录还没有会话存档,没什么可恢复(/sessions all 看全部目录)。"},
     {"cmd.resume.out_of_range", "编号 {0} 超出范围(本目录现有 {1} 场,/sessions 看列表)。"},
     {"cmd.resume.read_failed", "读不到存档 {0}。"},
@@ -720,6 +748,16 @@ const Entry kZhCN[] = {
     {"cmd.resume.estimate", "上下文占用(按字符粗估): ~{0} tokens,首轮请求后以真实用量为准。"},
     {"cmd.resume.model_mismatch", "[提醒] 存档时用的 model 是 {0},当前是 {1},继续聊没问题,风格可能有差。"},
     {"cmd.resume.wire_mismatch", "[提醒] 存档时用的 wire 是 {0},当前是 {1}。"},
+    {"cmd.resume.history.header", "恢复历史 · {0}"},
+    {"cmd.resume.history.end", "── 历史到此,可接着聊 ──"},
+    {"cmd.resume.history.user", "你"},
+    {"cmd.resume.history.assistant", "助手"},
+    {"cmd.resume.history.image", "[图片] {0} ({1}x{2})"},
+    {"cmd.resume.history.compact", "── 此处发生过一次上下文压缩 ──"},
+    {"cmd.resume.history.tool_missing", "恢复时找不到工具结果"},
+    {"cmd.resume.history.tool_error", "工具执行出错"},
+    {"cmd.resume.history.tool_done", "工具执行完成"},
+    {"cmd.resume.history.tool_more", " · 另有 {0} 行"},
     {"cmd.export.empty", "当前会话还没有内容,没什么可导出。"},
     {"cmd.export.need_path", "找不到用户主目录,请显式给个路径:/export 路径"},
     {"cmd.export.write_failed", "写不进 {0}。"},
@@ -814,8 +852,7 @@ const Entry kEn[] = {
      "  /think <level>  set the reasoning effort; levels are provider-defined (anthropic maps\n"
      "                  none/low/medium/high/xhigh/max; responses passes it through)\n"
      "  /skills         list discovered skills (home-level + project-level)\n"
-     "  /skill list     list local skills and their source; /skill install <url> installs, /skill update [name]\n"
-     "                  updates, and /skill remove <name> removes a home-level remote skill\n"
+     "  /skill          manage skills; run it bare for URL/local install, update, and remove examples\n"
      "  /mcp            list mounted MCP servers and their tools\n"
      "  /lsp            list LSP server status per language\n"
      "  /todos          show the current todo list (maintained by the todo_write tool)\n"
@@ -825,7 +862,7 @@ const Entry kEn[] = {
      "  /memory        manage project memory, retrieval, background writes, forgetting and rebuilds\n"
      "  /sessions       list the 20 most recent session archives of this directory; /sessions all\n"
      "                  lists every directory\n"
-     "  /resume <n|id>  load a session archive and continue chatting\n"
+     "  /resume         choose a local session with arrow keys and replay it; also accepts a number or id\n"
      "  /export [path]  export the current session as Markdown (default sessions/<id>.md)\n"
      "  /title [title]  show/set the session title, used by /sessions and /export\n"
      "  /soul           show the current soul; /soul <text> writes SOUL.md and takes effect now;\n"
@@ -859,7 +896,7 @@ const Entry kEn[] = {
     {"help.config",
      "Configuration priority (high to low, decided per field, not as a whole):\n"
      "  1) LUBANCODE_ dedicated environment variables\n"
-     "       LUBANCODE_WIRE          protocol, anthropic or responses\n"
+     "       LUBANCODE_WIRE          protocol: anthropic / responses / chat_completions\n"
      "       LUBANCODE_BASE_URL      API address\n"
      "       LUBANCODE_API_KEY       auth token\n"
      "       LUBANCODE_MODEL         model name\n"
@@ -912,8 +949,7 @@ const Entry kEn[] = {
      "  /compact        compact the history; /compact <note> tells what to keep extra\n"
      "  /think          show reasoning effort; /think <level> sets it (provider-defined; /effort alias)\n"
      "  /skills         list discovered skills (home-level + project-level)\n"
-     "  /skill list     list local skills and their source; /skill install <url> installs, /skill update [name]\n"
-     "                  updates, and /skill remove <name> removes a home-level remote skill\n"
+     "  /skill          manage skills; run it bare for URL/local install, update, and remove examples\n"
      "  /mcp            list mounted MCP servers and their tools\n"
      "  /lsp            list LSP server status per language\n"
      "  /todos          show the current todo list\n"
@@ -921,7 +957,7 @@ const Entry kEn[] = {
      "  /tools          list tool states: core / loaded / deferred (tool_search)\n"
      "  /memory        manage project memory; /memory on|off|use|learn|list|remember|forget|rebuild\n"
      "  /sessions       list the 20 most recent session archives here; /sessions all for every dir\n"
-     "  /resume <n|id>  load a session archive and continue; new messages append to the same file\n"
+     "  /resume         choose and replay a local session; also accepts a number or id; new messages append there\n"
      "  /export [path]  export this session as Markdown (default sessions/<id>.md)\n"
      "  /title [title]  show/set the session title, used by /sessions and /export\n"
      "  /soul           show the current soul; /soul <text> writes SOUL.md and takes effect now;\n"
@@ -960,9 +996,10 @@ const Entry kEn[] = {
     {"ask_user.other", "Other (type your own answer)"},
     {"ask_user.select_prompt", "Choose a number (Esc to cancel): "},
     {"ask_user.multi_prompt", "Choose numbers separated by commas (Esc to cancel): "},
-    {"ask_user.menu_hint", "↑/↓ move · Enter confirm · Esc cancel"},
-    {"ask_user.menu_multi_hint", "↑/↓ move · Space toggle · Enter confirm · Esc cancel"},
+    {"ask_user.menu_hint", "↑/↓ move · type directly on the last row · Enter confirm · Esc cancel"},
+    {"ask_user.menu_multi_hint", "↑/↓ move · Space toggle · last row accepts text · Enter confirm · Esc cancel"},
     {"ask_user.menu_select_one", "Select at least one option"},
+    {"ask_user.menu_edit_hint", "Type your answer · Backspace deletes · Enter submits · Esc cancels"},
     {"ask_user.custom_prompt", "Enter your answer: "},
     {"ask_user.cancelled", "The user cancelled the question"},
     {"ask_user.invalid", "Invalid choice; try again."},
@@ -995,6 +1032,7 @@ const Entry kEn[] = {
     {"wizard.wire.title", "Wire protocol:"},
     {"wizard.wire.opt1", "  1) anthropic (Claude-style)"},
     {"wizard.wire.opt2", "  2) responses (OpenAI-style)"},
+    {"wizard.wire.opt3", "  3) chat_completions (OpenAI-compatible)"},
     {"wizard.choose_prompt", "Select [1]: "},
     {"wizard.base_url.title", "base_url (required), e.g.:"},
     {"wizard.base_url.empty", "base_url cannot be empty; try again."},
@@ -1015,6 +1053,14 @@ const Entry kEn[] = {
 
     // ---- /provider add wizard (triggered by a bare /provider add, or /provider add <name>) ----
     {"provider_wizard.title", "=== Add provider wizard ==="},
+    {"provider_catalog.choose.title", "Choose a model provider (catalog from the LubanCode repository):"},
+    {"provider_catalog.choose.custom", "Custom (enter every field)"},
+    {"provider_catalog.selected", "Selected {0}; wire {1}, default model {2}."},
+    {"provider_catalog.refreshing", "Refreshing the provider catalog..."},
+    {"provider_catalog.refresh_failed", "Could not refresh the provider catalog; using the local snapshot: {0}"},
+    {"provider_catalog.refresh_current", "The provider catalog is already current."},
+    {"provider_catalog.refresh_ok", "Updated the provider catalog to {0}; cache: {1}."},
+    {"provider_catalog.warning", "[provider catalog warning] {0}"},
     {"provider_wizard.name.prompt", "name: "},
     {"provider_wizard.name.empty", "name cannot be empty; try again."},
     {"provider_wizard.name.prefill_invalid", "The name {0} given on the command line cannot be used: {1}; asking again."},
@@ -1056,7 +1102,7 @@ const Entry kEn[] = {
     {"slash.desc.think", "show/set reasoning effort; levels are provider-defined (/effort alias)"},
     {"slash.desc.effort", "same as /think (reasoning effort alias)"},
     {"slash.desc.skills", "list discovered skills (home-level + project-level)"},
-    {"slash.desc.skill", "install, list, update, or remove remote skills in the home directory"},
+    {"slash.desc.skill", "manage skills (run bare for URL and local-path examples)"},
     {"slash.desc.mcp", "list mounted MCP servers and their tools"},
     {"slash.desc.lsp", "list LSP server status per language"},
     {"slash.desc.todos", "show the current todo list"},
@@ -1064,7 +1110,7 @@ const Entry kEn[] = {
     {"slash.desc.tools", "list tool states: core / loaded / deferred (tool_search)"},
     {"slash.desc.memory", "manage project memory; /memory on|off|use|learn|list|remember|forget|rebuild"},
     {"slash.desc.sessions", "list the 20 most recent session archives here; /sessions all for every dir"},
-    {"slash.desc.resume", "/resume <n|id> loads a session archive and continues"},
+    {"slash.desc.resume", "choose and replay a session (or pass a number/id)"},
     {"slash.desc.export", "export this session as Markdown; /export <path> picks the output file"},
     {"slash.desc.title", "show the session title; /title <title> names this session"},
     {"slash.desc.soul", "show the current soul; /soul <text> writes SOUL.md; /soul clear restores default"},
@@ -1249,9 +1295,39 @@ const Entry kEn[] = {
     {"pipe.todo_updated", "todo list updated ({0} items)"},
 
     // ---- /skill ----
-    {"cmd.skill.usage", "Usage: /skill list | install <url> | update [name] | remove <name>"},
-    {"cmd.skill.no_home", "Cannot find the home directory; nowhere to store remote skills."},
-    {"cmd.skill.list_empty", "There are no skills here yet. Run /skill install <url> to add one."},
+    {"cmd.skill.usage",
+     "Skill management (home-level installs are available immediately):\n"
+     "  /skill list\n"
+     "      List home/project skills and their local or remote source.\n"
+     "  /skill install https://example.com/my-skill.md\n"
+     "  /skill install https://github.com/owner/repo\n"
+     "      Install from a Markdown URL or GitHub skill repository.\n"
+     "  /skill install C:\\path\\to\\my-skill\n"
+     "  /skill install C:\\path\\to\\my-skill\\SKILL.md\n"
+     "      Install a local directory or SKILL.md; spaces in paths are supported.\n"
+     "  /skill update [name]\n"
+     "      Update one or all installed skills that have a saved remote source.\n"
+     "  /skill remove <name>\n"
+     "      Remove a home-level skill.\n"
+     "Home path: ~/.lubancode/skills/<name>/SKILL.md\n"
+     "Project path (manual): <cwd>/.lubancode/skills/<name>/SKILL.md"},
+    {"cmd.resume.usage", "Usage: /resume (arrow-key menu) | /resume <number> | /resume <id>"},
+    {"cmd.resume.menu_title", "Which session should be restored?"},
+    {"cmd.resume.menu_description", "{0} · {1} messages · {2}"},
+    {"cmd.resume.menu_hint", "↑/↓ move · Enter restore · Esc cancel"},
+    {"cmd.resume.cancelled", "Resume cancelled."},
+    {"cmd.resume.history.header", "Restored history · {0}"},
+    {"cmd.resume.history.end", "── End of history; continue below ──"},
+    {"cmd.resume.history.user", "You"},
+    {"cmd.resume.history.assistant", "Assistant"},
+    {"cmd.resume.history.image", "[Image] {0} ({1}x{2})"},
+    {"cmd.resume.history.compact", "── Context was compacted here ──"},
+    {"cmd.resume.history.tool_missing", "tool result missing during restore"},
+    {"cmd.resume.history.tool_error", "tool failed"},
+    {"cmd.resume.history.tool_done", "tool completed"},
+    {"cmd.resume.history.tool_more", " · {0} more lines"},
+    {"cmd.skill.no_home", "Cannot find the home directory; nowhere to store skills."},
+    {"cmd.skill.list_empty", "There are no skills here yet. Run /skill install <URL or local path> to add one."},
     {"cmd.skill.list_header", "Local skills:"},
     {"cmd.skill.local", "local"},
     {"cmd.skill.remote", "remote {0}, installed {1}"},
@@ -1268,9 +1344,10 @@ const Entry kEn[] = {
     {"cmd.provider.usage",
      "Usage:\n"
      "  /provider list\n"
+     "  /provider refresh                       update common providers from the LubanCode repository\n"
      "  /provider add                          step-by-step wizard (bare)\n"
      "  /provider add <name>                    step-by-step wizard (name given up front, skips the first question)\n"
-     "  /provider add <name> <base_url> <anthropic|responses> [--key-env ENV] [--key API_KEY] [--model MODEL] "
+     "  /provider add <name> <base_url> <anthropic|responses|chat_completions> [--key-env ENV] [--key API_KEY] [--model MODEL] "
      "[--effort LEVEL] [--window SIZE]\n"
      "  /provider switch <name> [model]\n"
      "  /provider remove <name>\n"

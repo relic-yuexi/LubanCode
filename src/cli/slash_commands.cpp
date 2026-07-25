@@ -149,6 +149,10 @@ ParsedProviderCommand ParseProviderCommand(const std::string& args) {
     }
 
     const std::string action = ToLower(words[0]);
+    if (action == "refresh") {
+        if (words.size() == 1) parsed.action = ProviderCommandAction::Refresh;
+        return parsed;
+    }
     if (action == "switch") {
         if (words.size() == 2 || words.size() == 3) {
             parsed.action = ProviderCommandAction::Switch;

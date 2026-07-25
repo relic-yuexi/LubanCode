@@ -37,6 +37,7 @@
 #include "agent/session_store.hpp"
 #include "api/anthropic/client.hpp"
 #include "api/backend.hpp"
+#include "api/chat/client.hpp"
 #include "api/models.hpp"
 #include "api/responses/client.hpp"
 #include "cli/agent_status.hpp"
@@ -58,6 +59,7 @@
 #include "cli/transcript.hpp"
 #include "config/config.hpp"
 #include "config/model_catalog.hpp"
+#include "config/provider_catalog.hpp"
 #include "config/prompt_files.hpp"
 #include "config/project_instructions.hpp"
 #include "config/skill_store.hpp"
@@ -123,14 +125,21 @@ void PrintHelp() {
 std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::Config& config) {
     // M11:连接超时 / 流式空闲读超时用 Config 里实际生效的值(四级合并结果,
     // 没配就是内置默认值),不是每次都硬编码默认值。
+    const auto headers = lubancode::config::ResolveProviderHeaderTemplates(config.extra_headers,
+                                                                            config.auth_token);
     if (config.wire == lubancode::config::Wire::Responses) {
         return std::make_unique<lubancode::api::responses::ResponsesBackend>(
             config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs,
-            config.native_web_search, config.extra_body, config.extra_headers);
+            config.native_web_search, config.extra_body, headers);
+    }
+    if (config.wire == lubancode::config::Wire::ChatCompletions) {
+        return std::make_unique<lubancode::api::chat::ChatCompletionsBackend>(
+            config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs,
+            config.extra_body, headers);
     }
     return std::make_unique<lubancode::api::anthropic::AnthropicBackend>(
         config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs,
-        config.native_web_search, config.extra_body, config.extra_headers);
+        config.native_web_search, config.extra_body, headers);
 }
 
 // 会话里切 provider 时，外层 Model/Think/Soul 等包装器、AgentLoop 和工具
@@ -186,8 +195,13 @@ private:
 // current_think 构造后就不再变,等价于"直接按配置发一次"。
 class ThinkOverrideBackend : public lubancode::api::Backend {
 public:
-    ThinkOverrideBackend(lubancode::api::Backend& inner, std::shared_ptr<std::string> current_think)
-        : inner_(inner), current_think_(std::move(current_think)) {}
+    ThinkOverrideBackend(lubancode::api::Backend& inner, std::shared_ptr<std::string> current_think,
+                         std::shared_ptr<std::string> current_model,
+                         const lubancode::config::ModelCatalog* catalog)
+        : inner_(inner),
+          current_think_(std::move(current_think)),
+          current_model_(std::move(current_model)),
+          catalog_(catalog) {}
 
     std::expected<void, lubancode::api::Error> send_stream(
         const lubancode::api::Request& request,
@@ -195,12 +209,21 @@ public:
         const std::atomic<bool>* cancel = nullptr) override {
         lubancode::api::Request patched = request;
         patched.reasoning_effort = *current_think_;
+        if (catalog_ != nullptr) {
+            const auto body = lubancode::config::ThinkLevelExtraBody(
+                catalog_->FindBySlug(*current_model_), *current_think_);
+            for (auto it = body.begin(); it != body.end(); ++it) {
+                patched.extra_body[it.key()] = it.value();
+            }
+        }
         return inner_.send_stream(patched, on_event, cancel);
     }
 
 private:
     lubancode::api::Backend& inner_;
     std::shared_ptr<std::string> current_think_;
+    std::shared_ptr<std::string> current_model_;
+    const lubancode::config::ModelCatalog* catalog_ = nullptr;
 };
 
 // 包一层 Backend:真正发请求前,把模型目录(models.json)里当前模型的
@@ -397,7 +420,7 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
                              const lubancode::config::SettingsLocal* settings = nullptr) {
     const auto& config = result.config;
     const auto& sources = result.sources;
-    const std::string wire_str = config.wire == lubancode::config::Wire::Responses ? "responses" : "anthropic";
+    const std::string wire_str = lubancode::config::ProviderWireName(config.wire);
 
     std::cout << tr("config.header") << "\n\n";
     std::cout << "  wire               = " << wire_str << "  [" << lubancode::config::ToString(sources.wire) << "]\n";
@@ -671,7 +694,7 @@ void PrintLubanIcon(const lubancode::cli::Theme& theme) {
 
 // 交互模式启动横幅:一眼看全版本、wire、当前模型、工作目录,两行,不啰嗦。
 void PrintBanner(const lubancode::config::Config& config, const lubancode::cli::Theme& theme) {
-    const std::string wire_str = config.wire == lubancode::config::Wire::Responses ? "responses" : "anthropic";
+    const std::string wire_str = lubancode::config::ProviderWireName(config.wire);
     std::cout << theme.banner << "lubancode " << kVersion << "  [" << wire_str << "] " << config.model << theme.reset
               << "\n";
     std::cout << theme.stats << "cwd: " << CurrentDirUtf8() << "  ·  " << tr("banner.hint") << theme.reset << "\n";
@@ -989,6 +1012,7 @@ std::expected<std::vector<std::string>, std::string> PromptAskUser(
     }
 
     std::vector<std::size_t> indexes;
+    std::optional<std::string> inline_custom_answer;
     if (interactive_menu) {
         std::vector<lubancode::cli::ChoiceMenuItem> items;
         items.reserve(question.options.size() + 1);
@@ -996,11 +1020,20 @@ std::expected<std::vector<std::string>, std::string> PromptAskUser(
             items.push_back({option.label, option.description});
         }
         items.push_back({tr("ask_user.other"), {}});
-        const auto selected = lubancode::cli::ReadChoiceMenu(items, question.multi_select, theme);
+        lubancode::cli::ChoiceMenuOptions menu_options;
+        menu_options.multi_select = question.multi_select;
+        menu_options.editable_index = items.size() - 1;
+        menu_options.hint = tr(question.multi_select ? "ask_user.menu_multi_hint" : "ask_user.menu_hint");
+        menu_options.invalid_hint = tr("ask_user.menu_select_one");
+        menu_options.editable_hint = tr("ask_user.menu_edit_hint");
+        const auto selected = lubancode::cli::ReadChoiceMenu(items, menu_options, theme);
         if (!selected.has_value()) {
             return std::unexpected(tr("ask_user.cancelled"));
         }
-        indexes = *selected;
+        indexes = selected->selected_indices;
+        if (selected->custom_text.has_value()) {
+            inline_custom_answer = TrimAscii(*selected->custom_text);
+        }
     } else {
         for (;;) {
             const std::optional<std::string> raw = lubancode::cli::ReadLine(
@@ -1068,6 +1101,9 @@ std::expected<std::vector<std::string>, std::string> PromptAskUser(
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
             std::cout << theme.error << tr("ask_user.custom_empty") << theme.reset << "\n";
         }
+    }
+    if (inline_custom_answer.has_value() && !inline_custom_answer->empty()) {
+        answers.push_back(*inline_custom_answer);
     }
 
     {
@@ -1564,6 +1600,14 @@ public:
         // 顶到中间),落笔后再重画到正文下方——见 console_input.hpp 注释。
         // footer 没启用(非 Windows 真控制台)时这两句是空操作。
         lubancode::cli::EraseStreamFooterLocked();
+        // 工具终态行本身以换行收尾。下一段正文若直接落笔，视觉上便会
+        // 贴住最后一条工具；这里另起一空行，且不把它塞进 Markdown 缓冲，
+        // 免得收束重画时被 RenderMarkdown 的头尾裁剪吃掉。
+        if (separate_next_body_) {
+            std::cout << "\n";
+            std::cout.flush();
+            separate_next_body_ = false;
+        }
         if (!enabled_) {
             std::cout << text;
             std::cout.flush();
@@ -1627,6 +1671,9 @@ public:
         // 下一轮"思考中"转轮当中(转轮跟 footer 同处一行会打架)。下一块
         // 正文到来时 OnDelta 会重新把脚注摆到正文下方。footer 没启用时空操作。
         lubancode::cli::EraseStreamFooterLocked();
+        // 若上一个工具后接的仍是工具，TranscriptPainter::PaintNew 自会
+        // 留一空行；别把这枚标志带到更后面的正文，再多垫一层。
+        separate_next_body_ = false;
         if (!enabled_) {
             return;
         }
@@ -1635,6 +1682,10 @@ public:
         line_probe_.clear();
         fence_open_ = false;
     }
+
+    // 工具终态已经画完。暂不落笔，等正文真来了再补分隔；若没有后续
+    // 正文，回合末尾也不会凭空多出空白。
+    void OnToolBlockDone() { separate_next_body_ = true; }
 
     // 回合收束:最后一块正文已完整——检测到 markdown 结构就整块擦掉重画
     // 渲染版,否则一字不动。只在 Run() 正常返回且没被打断时由 RunTurn 调。
@@ -1775,6 +1826,7 @@ private:
     std::string buffer_;
     std::string line_probe_;
     bool fence_open_ = false;
+    bool separate_next_body_ = false;
 };
 
 // 统计一个磁盘文件现在有多少行(write_file 覆盖前掐一下旧行数,给 +N -M
@@ -2092,6 +2144,19 @@ struct ToolDisplay {
             std::cout.flush();
         }
         active_main = -1;
+    }
+
+    void OnBuiltinToolDone(const std::string& name, const nlohmann::json& final_input,
+                           const lubancode::tools::Tool::Result& result) {
+        // Responses 兼容端常在 output_item.added 只给空 action，到 done
+        // 才补 query。用终态参数回填同一条记录，免得绿灯后标题仍是 {}。
+        if (active_main >= 0 && final_input.is_object() && !final_input.empty()) {
+            main_input = final_input;
+            auto& item = transcript[static_cast<std::size_t>(active_main)];
+            item.title = lubancode::cli::BuildToolTitle(name, final_input);
+            item.input_json = final_input.dump();
+        }
+        OnToolDone(name, result);
     }
 
     void OnSubToolStart(const std::string& name, const nlohmann::json& input) {
@@ -2622,8 +2687,22 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         return allowed;
     };
 
-    callbacks.on_tool_done = [&display](const std::string& name, const lubancode::tools::Tool::Result& result) {
+    callbacks.on_tool_done = [&display, &body_tracker](const std::string& name,
+                                                       const lubancode::tools::Tool::Result& result) {
         display.OnToolDone(name, result);
+        body_tracker.OnToolBlockDone();
+    };
+
+    callbacks.on_builtin_tool_start = [&display, &body_tracker](const std::string& name,
+                                                                 const nlohmann::json& input) {
+        body_tracker.OnBlockBreak();
+        display.OnToolStart(name, input);
+    };
+    callbacks.on_builtin_tool_done = [&display, &body_tracker](const std::string& name,
+                                                                const nlohmann::json& input,
+                                                                const std::string& summary, bool is_error) {
+        display.OnBuiltinToolDone(name, input, lubancode::tools::Tool::Result{summary, is_error});
+        body_tracker.OnToolBlockDone();
     };
 
     callbacks.on_usage = [&usage_stats, &context_tracker](const lubancode::api::Usage& usage) {
@@ -2928,7 +3007,7 @@ void PrintSkillsCommand(const std::vector<lubancode::tools::SkillMeta>& skills, 
     }
 }
 
-// /skill 的参数只认第一个单词作动词,余下整段留给 URL 或技能名。命令
+// /skill 的参数只认第一个单词作动词,余下整段留给 URL、本地路径或技能名。命令
 // 本身住 main.cpp,文件落盘与网络都压进 config::skill_store,这里不碰细节。
 std::pair<std::string, std::string> SplitSkillCommandArgs(const std::string& args) {
     std::size_t begin = 0;
@@ -3009,7 +3088,7 @@ bool HandleSkillCommand(const std::string& args, const std::filesystem::path& gl
             std::cout << tr("cmd.skill.usage") << "\n";
             return false;
         }
-        const auto installed = lubancode::config::InstallRemoteSkills(
+        const auto installed = lubancode::config::InstallSkillSource(
             global_skills_root, value, lubancode::config::FetchRemoteSkillUrl);
         if (!installed.has_value()) {
             std::cout << trf("cmd.skill.error", "/skill install", installed.error()) << "\n";
@@ -3244,8 +3323,11 @@ void HandleModelCommand(const std::string& args, lubancode::config::Config& conf
     if (!args.empty()) {
         chosen = args;
     } else {
-        const auto list_result = lubancode::api::ListModels(config.wire, config.base_url, config.auth_token,
-                                                              config.connect_timeout_ms, config.request_timeout_secs);
+        const auto headers = lubancode::config::ResolveProviderHeaderTemplates(config.extra_headers,
+                                                                                config.auth_token);
+        const auto list_result = lubancode::api::ListModels(
+            config.wire, config.base_url, config.auth_token, config.connect_timeout_ms,
+            config.request_timeout_secs, headers);
         if (!list_result.has_value()) {
             std::cout << trf("cmd.model.fetch_failed", list_result.error().message) << "\n";
             return;
@@ -3370,7 +3452,19 @@ void RunProviderAddWizardInteractive(const std::string& name_prefill, lubancode:
         return lubancode::api::ListModels(wire, base_url, api_key);
     };
 
-    const auto outcome = lubancode::cli::RunProviderAddWizard(io, name_prefill, config.providers);
+    if (lubancode::config::ProviderCatalogCacheIsStale()) {
+        std::cout << tr("provider_catalog.refreshing") << "\n";
+        const auto refreshed = lubancode::config::RefreshProviderCatalog();
+        if (!refreshed.has_value()) {
+            std::cout << trf("provider_catalog.refresh_failed", refreshed.error()) << "\n";
+        }
+    }
+    const lubancode::config::ProviderCatalog provider_catalog = lubancode::config::LoadProviderCatalog();
+    for (const auto& warning : provider_catalog.warnings) {
+        std::cout << trf("provider_catalog.warning", warning) << "\n";
+    }
+    const auto outcome =
+        lubancode::cli::RunProviderPresetWizard(io, provider_catalog, name_prefill, config.providers);
     if (!outcome.has_value() || !outcome->save_requested) {
         std::cout << tr("cmd.provider.add_cancelled") << "\n";
         return;
@@ -3406,6 +3500,18 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
         case lubancode::cli::ProviderCommandAction::List:
             PrintProviderList(config.providers, config, active_provider);
             return;
+        case lubancode::cli::ProviderCommandAction::Refresh: {
+            std::cout << tr("provider_catalog.refreshing") << "\n";
+            const auto refreshed = lubancode::config::RefreshProviderCatalog();
+            if (!refreshed.has_value()) {
+                std::cout << trf("provider_catalog.refresh_failed", refreshed.error()) << "\n";
+            } else if (refreshed->not_modified) {
+                std::cout << tr("provider_catalog.refresh_current") << "\n";
+            } else {
+                std::cout << trf("provider_catalog.refresh_ok", refreshed->revision, refreshed->cache_path) << "\n";
+            }
+            return;
+        }
         case lubancode::cli::ProviderCommandAction::Add: {
             if (command.wizard) {
                 // 裸敲 /provider add,或者 /provider add <名字>(名字先给上,
@@ -4025,6 +4131,48 @@ void PrintSessionsCommand(const std::string& sessions_dir, const std::string& ar
     }
 }
 
+// /resume 裸敲:本目录最近 20 场直接做成方向键菜单。显式编号/id 仍由
+// ResumeSession 解析，脚本和熟手用法不变。
+std::optional<std::string> PromptResumeTarget(const std::string& sessions_dir,
+                                              const lubancode::cli::Theme& theme) {
+    if (sessions_dir.empty()) {
+        std::cout << tr("session.no_home") << "\n";
+        return std::nullopt;
+    }
+    const auto entries = lubancode::agent::ListSessions(sessions_dir, 20, CurrentDirUtf8());
+    if (entries.empty()) {
+        std::cout << tr("cmd.resume.none") << "\n";
+        return std::nullopt;
+    }
+    if (!lubancode::platform::StdinIsInteractive() || !lubancode::platform::ProbeStdoutConsole().is_console) {
+        std::cout << tr("cmd.resume.usage") << "\n";
+        return std::nullopt;
+    }
+
+    std::cout << "\n" << theme.banner << tr("cmd.resume.menu_title") << theme.reset << "\n";
+    std::vector<lubancode::cli::ChoiceMenuItem> items;
+    items.reserve(entries.size());
+    for (const auto& entry : entries) {
+        const std::string& raw_label = !entry.title.empty() ? entry.title : entry.first_user_text;
+        const std::string label = raw_label.empty() ? tr("cmd.sessions.no_text")
+                                                    : lubancode::agent::TruncateUtf8Chars(raw_label, 56);
+        items.push_back({label,
+                         trf("cmd.resume.menu_description",
+                             entry.started_at.empty() ? tr("cmd.sessions.unknown_time") : entry.started_at,
+                             entry.message_count, entry.id)});
+    }
+    lubancode::cli::ChoiceMenuOptions options;
+    options.hint = tr("cmd.resume.menu_hint");
+    options.invalid_hint = tr("cmd.resume.menu_hint");
+    options.editable_hint = tr("cmd.resume.menu_hint");
+    const auto selected = lubancode::cli::ReadChoiceMenu(items, options, theme);
+    if (!selected.has_value() || selected->selected_indices.empty()) {
+        std::cout << theme.stats << tr("cmd.resume.cancelled") << theme.reset << "\n";
+        return std::nullopt;
+    }
+    return entries[selected->selected_indices.front()].id;
+}
+
 // /resume <编号或id> 和 --continue 共用的执行逻辑。target 是编号(按
 // ListSessions 的倒序编号)、会话 id、或空串(--continue:最近一场)。
 // 编号和"最近一场"都只在**本目录**(meta.cwd == 当前 cwd)的场子里数;
@@ -4108,6 +4256,14 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
     }
     session_meta = session->meta;
     session_title = session->title;
+
+    const std::string restored_history = lubancode::cli::FormatRestoredHistory(
+        session->all_messages, theme, lubancode::cli::DetectConsoleWidth().value_or(80),
+        session->compact_positions);
+    if (!restored_history.empty()) {
+        std::cout << "\n" << theme.banner << trf("cmd.resume.history.header", id) << theme.reset << "\n\n"
+                  << restored_history << theme.stats << tr("cmd.resume.history.end") << theme.reset << "\n\n";
+    }
 
     if (session->compact_count > 0) {
         // 经过压缩的场子:恢复的是回放出来的有效态,不是全量流水。
@@ -4285,7 +4441,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     std::string current_soul_name = config.soul.empty() ? "default" : config.soul;
     auto current_soul = std::make_shared<std::string>(LoadSoulContentByName(current_soul_name, /*warn=*/true));
     ModelOverrideBackend model_backend(real_backend, current_model);
-    ThinkOverrideBackend think_backend(model_backend, current_think);
+    ThinkOverrideBackend think_backend(model_backend, current_think, current_model, &model_catalog);
     SoulOverlayBackend soul_backend(think_backend, current_soul);
     ModelInstructionsBackend instructions_backend(soul_backend, current_model_instructions);
     // SpinnerBackend 包最外层:每次 send_stream 起转轮,收到第一个流事件就
@@ -4561,7 +4717,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     prompt_options.mcp = !config.mcp_servers.empty();
     prompt_options.web = config.search.Configured();
     prompt_options.lsp = !config.lsp_servers.empty();
-    prompt_options.wire = config.wire == lubancode::config::Wire::Responses ? "responses" : "anthropic";
+    prompt_options.wire = lubancode::config::ProviderWireName(config.wire);
     prompt_options.prompts_dir = prompts_dir;  // 运行时模块:拼装时现读现拼
 
     std::optional<lubancode::agent::AgentLoop> loop;
@@ -5067,14 +5223,21 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     PrintSessionsCommand(sessions_dir, parsed.args);
                     break;
                 case lubancode::cli::SlashCommand::Resume:
-                    if (parsed.args.empty()) {
-                        std::cout << tr("cmd.resume.usage") << "\n";
-                    } else {
-                        ResumeSession(parsed.args, sessions_dir, *loop, session_store, persisted_count,
-                                       session_meta, session_title, wire_str, *current_model, theme,
-                                       /*quiet_if_none=*/false);
-                        session_store_broken = false;  // 换了场,存档失败的旧账翻篇
-                        session_title_pending = false;
+                    {
+                        std::string target = parsed.args;
+                        if (target.empty()) {
+                            const auto selected = PromptResumeTarget(sessions_dir, theme);
+                            if (!selected.has_value()) {
+                                break;
+                            }
+                            target = *selected;
+                        }
+                        if (ResumeSession(target, sessions_dir, *loop, session_store, persisted_count,
+                                          session_meta, session_title, wire_str, *current_model, theme,
+                                          /*quiet_if_none=*/false)) {
+                            session_store_broken = false;  // 换了场,存档失败的旧账翻篇
+                            session_title_pending = false;
+                        }
                     }
                     break;
                 case lubancode::cli::SlashCommand::Export:
@@ -5259,7 +5422,9 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     // 单发模式没有 /think 命令,current_think 构造后不会再变,等价于直接
     // 按配置里的 think 发一次。
     auto current_think = std::make_shared<std::string>(config.think);
-    ThinkOverrideBackend think_backend(*backend, current_think);
+    const lubancode::config::ModelCatalog once_catalog = lubancode::config::LoadModelCatalog();
+    auto once_model = std::make_shared<std::string>(config.model);
+    ThinkOverrideBackend think_backend(*backend, current_think, once_model, &once_catalog);
     SpinnerBackend wrapped_backend(think_backend, theme, spinner_enabled);
 
     // M8:mcp_servers 声明在 sub_registry/registry 之前,理由同
@@ -5350,7 +5515,7 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     prompt_options.mcp = !config.mcp_servers.empty();
     prompt_options.web = config.search.Configured();
     prompt_options.lsp = !config.lsp_servers.empty();
-    prompt_options.wire = config.wire == lubancode::config::Wire::Responses ? "responses" : "anthropic";
+    prompt_options.wire = lubancode::config::ProviderWireName(config.wire);
     prompt_options.prompts_dir = prompts_dir;  // 运行时模块:构造时现读现拼
 
     lubancode::agent::AgentLoop loop(
