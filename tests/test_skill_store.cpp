@@ -34,6 +34,7 @@ public:
     }
 
     fs::path SkillsRoot() const { return root_ / "skills"; }
+    fs::path Root() const { return root_; }
 
 private:
     fs::path root_;
@@ -168,4 +169,75 @@ TEST_CASE("InstallRemoteSkills: 空内容和超限内容不落盘") {
     const auto large = [&](const std::string&) { return SkillHttpResponse{200, too_large, {}}; };
     CHECK_FALSE(lubancode::config::InstallRemoteSkills(temp.SkillsRoot(), url, large).has_value());
     CHECK_FALSE(fs::exists(temp.SkillsRoot() / "big"));
+}
+
+TEST_CASE("InstallLocalSkill: 带空格目录整包复制到技能根") {
+    TempSkillStore temp;
+    const fs::path source = temp.Root() / "source with spaces" / "anysearch";
+    fs::create_directories(source / "scripts");
+    std::ofstream(source / "SKILL.md", std::ios::binary)
+        << "---\nname: anysearch\ndescription: search\n---\n正文\n";
+    std::ofstream(source / "scripts" / "search.py", std::ios::binary) << "print('ok')\n";
+    std::ofstream(source / ".env", std::ios::binary) << "KEY=test-only\n";
+
+    const auto installed = lubancode::config::InstallSkillSource(
+        temp.SkillsRoot(), "\"" + source.string() + "\"",
+        [](const std::string&) -> SkillHttpResponse {
+            FAIL("本地路径不该发 HTTP 请求");
+            return {};
+        });
+
+    REQUIRE(installed.has_value());
+    CHECK(installed->installed_names == std::vector<std::string>{"anysearch"});
+    CHECK(fs::exists(temp.SkillsRoot() / "anysearch" / "SKILL.md"));
+    CHECK(fs::exists(temp.SkillsRoot() / "anysearch" / "scripts" / "search.py"));
+    CHECK(ReadFile(temp.SkillsRoot() / "anysearch" / ".env") == "KEY=test-only\n");
+
+    const auto listed = lubancode::config::ListStoredSkills(temp.SkillsRoot());
+    REQUIRE(listed.has_value());
+    REQUIRE(listed->size() == 1);
+    CHECK_FALSE((*listed)[0].source_url.has_value());
+    CHECK_FALSE(lubancode::config::InstallLocalSkill(temp.SkillsRoot(), source.string()).has_value());
+}
+
+TEST_CASE("InstallLocalSkill: SKILL.md 路径复制整包，独立 Markdown 改名落盘") {
+    TempSkillStore temp;
+    const fs::path package = temp.Root() / "local-skill";
+    fs::create_directories(package);
+    std::ofstream(package / "SKILL.md", std::ios::binary) << "整包正文\n";
+    std::ofstream(package / "note.txt", std::ios::binary) << "辅助文件\n";
+
+    const auto package_result =
+        lubancode::config::InstallLocalSkill(temp.SkillsRoot(), (package / "SKILL.md").string());
+    REQUIRE(package_result.has_value());
+    CHECK(fs::exists(temp.SkillsRoot() / "local-skill" / "note.txt"));
+
+    const fs::path standalone = temp.Root() / "single.md";
+    std::ofstream(standalone, std::ios::binary) << "独立正文\n";
+    const auto standalone_result = lubancode::config::InstallLocalSkill(temp.SkillsRoot(), standalone.string());
+    REQUIRE(standalone_result.has_value());
+    CHECK(ReadFile(temp.SkillsRoot() / "single" / "SKILL.md") == "独立正文\n");
+}
+
+TEST_CASE("InstallLocalSkill: 没有根 SKILL.md 的目录不落盘") {
+    TempSkillStore temp;
+    const fs::path source = temp.Root() / "broken";
+    fs::create_directories(source);
+    std::ofstream(source / "README.md") << "不是技能清单\n";
+
+    const auto result = lubancode::config::InstallLocalSkill(temp.SkillsRoot(), source.string());
+    CHECK_FALSE(result.has_value());
+    CHECK_FALSE(fs::exists(temp.SkillsRoot() / "broken"));
+}
+
+TEST_CASE("InstallSkillSource: 带引号 HTTP 地址仍走远端安装") {
+    TempSkillStore temp;
+    const std::string url = "https://example.test/quoted.md";
+    const auto installed = lubancode::config::InstallSkillSource(
+        temp.SkillsRoot(), "\"" + url + "\"", [&](const std::string& requested) {
+            CHECK(requested == url);
+            return SkillHttpResponse{200, "---\nname: quoted\ndescription: test\n---\n正文\n", {}};
+        });
+    REQUIRE(installed.has_value());
+    CHECK(installed->installed_names == std::vector<std::string>{"quoted"});
 }

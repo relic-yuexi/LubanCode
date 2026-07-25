@@ -67,6 +67,13 @@ std::expected<std::vector<StoredSkill>, std::string> ListStoredSkills(const std:
 std::expected<SkillInstallResult, std::string> InstallRemoteSkills(
     const std::filesystem::path& skills_root, const std::string& source_url, const SkillHttpGet& http_get,
     const SkillInstallOptions& options = {});
+// 安装本机已有技能。source_path 可指向技能目录、目录里的 SKILL.md，
+// 或一份独立 Markdown；整包落进 skills_root/<技能名>，不记远端来源。
+std::expected<SkillInstallResult, std::string> InstallLocalSkill(
+    const std::filesystem::path& skills_root, const std::string& source_path);
+// /skill install 的统一入口：http(s) 走远端，其余一概按本地路径办。
+std::expected<SkillInstallResult, std::string> InstallSkillSource(
+    const std::filesystem::path& skills_root, const std::string& source, const SkillHttpGet& http_get);
 std::expected<void, std::string> RemoveStoredSkill(const std::filesystem::path& skills_root,
                                                     const std::string& name);
 

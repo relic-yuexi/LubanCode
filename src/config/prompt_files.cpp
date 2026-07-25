@@ -47,7 +47,7 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
 1. `LUBANCODE_*` 专属环境变量。
 2. **项目级** `config.json`。
 3. **全局** `config.json`。
-4. 通用环境变量。`wire=anthropic` 读 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_MODEL`；`wire=responses` 读 `OPENAI_BASE_URL`、`OPENAI_API_KEY`、`OPENAI_MODEL`。
+4. 通用环境变量。`wire=anthropic` 读 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_MODEL`；`wire=responses` 或 `chat_completions` 读 `OPENAI_BASE_URL`、`OPENAI_API_KEY`、`OPENAI_MODEL`。
 5. 内置默认值。
 
 逐字段合并：项目级写了某字段就用项目级那一份，项目级缺的字段回退全局，全局也缺再往下找。`/config` 会标出每个字段到底来自「项目级配置」还是「全局配置」。
@@ -60,7 +60,7 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
 
 | 字段 | 类型与取值 | 默认值 | 用处 |
 | --- | --- | --- |
-| `wire` | 字符串：`anthropic` 或 `responses` | `anthropic` | 选 Anthropic Messages API 或 OpenAI Responses API。 |
+| `wire` | `anthropic` / `responses` / `chat_completions` | `anthropic` | 选 Anthropic Messages、OpenAI Responses 或 Chat Completions 兼容接口。 |
 | `base_url` | 字符串 | 无 | 模型服务根地址。 |
 | `api_key` | 字符串 | 无 | 模型服务认证值。不要把真实值写进仓库。 |
 | `model` | 字符串 | 无 | 发请求所用模型名。 |
@@ -83,6 +83,8 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
 | `providers` | 数组 | 空 | 多端模型配置；`/provider switch` 会记住选中的名字。 |
 
 `base_url`、`api_key`、`model` 没有内置值。交互模式会走初次配置向导；单发和管道模式会报缺项。
+
+管理多端时先用 `/provider add` 从内置厂家目录选；`/provider refresh` 从 LubanCode 仓库更新目录。最后一项仍可全手填。
 
 ### hooks
 
@@ -164,8 +166,10 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
     {
       "name": "glm",
       "base_url": "https://open.bigmodel.cn/api/paas/v4",
-      "wire": "responses",
-      "extra_body": { "thinking": { "type": "enabled" }, "reasoning_effort": "max" },
+      "wire": "chat_completions",
+      "model": "glm-5.2",
+      "model_reasoning_effort": "max",
+      "extra_body": { "thinking": { "type": "enabled" }, "tool_stream": true },
       "extra_headers": { "X-Api-Version": "2024-06-01" }
     }
   ]
@@ -225,7 +229,7 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
 
 | 环境变量 | 对应字段 | 值 |
 | --- | --- | --- |
-| `LUBANCODE_WIRE` | `wire` | `anthropic` 或 `responses`。 |
+| `LUBANCODE_WIRE` | `wire` | `anthropic`、`responses` 或 `chat_completions`。 |
 | `LUBANCODE_BASE_URL` | `base_url` | 模型服务根地址。 |
 | `LUBANCODE_API_KEY` | `api_key` | 模型服务认证值。 |
 | `LUBANCODE_MODEL` | `model` | 模型名。 |
@@ -289,6 +293,17 @@ description: lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/�
 ```
 
 `sessions/`、`plugins/`、`skills/`、`languages/` 都可按需出现。项目级的 `.lubancode/`（在 `<cwd>` 下）能放 `config.json`（按字段压过全局）、`settings.local.json`（本地权限，不进版本库）与 `skills/`；同名技能时项目级压过主目录级。
+
+## 技能安装
+
+LubanCode **只认**下面两处，不扫描 Codex、Claude 或其他代理的技能目录：
+
+- 用户级：`~/.lubancode/skills/<技能名>/SKILL.md`。
+- 项目级：`<cwd>/.lubancode/skills/<技能名>/SKILL.md`。
+
+用 `/skill install <来源>` 安装到用户级目录。来源既可写 HTTP(S) 地址，也可写本机技能目录、目录里的 `SKILL.md`，或一份独立 `.md`。Windows 路径带空格也可直接放在命令余下部分；外层引号会自动剥掉。安装成功后技能清单当场刷新，不必重启。`/skill list` 查位置与来源，`/skill update [名字]` 更新有远端来源记录的技能，`/skill remove <名字>` 删除。
+
+用户若指着 `.codex/skills`、`.claude/skills` 或 `.agents/skills` 里的现成技能叫你“复制过去”，目标仍须是 `~/.lubancode/skills/<技能名>`，不可在这些外部目录之间互抄。复制整包，且让 `SKILL.md` 直接落在目标根部，不能多套一层同名目录。
 
 ## 魂(soul):风格叠加层与 souls/ 目录
 

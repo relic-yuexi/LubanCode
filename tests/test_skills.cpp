@@ -198,6 +198,8 @@ TEST_CASE("BuildSkillsPromptSegment: 有技能时按格式列出") {
     CHECK(segment.find("可用技能") != std::string::npos);
     CHECK(segment.find("skill 工具") != std::string::npos);
     CHECK(segment.find("- poem-style: 五言绝句写作规范") != std::string::npos);
+    CHECK(segment.find("~/.lubancode/skills") != std::string::npos);
+    CHECK(segment.find(".agents/skills") != std::string::npos);
 }
 
 // ---------------------------------------------------------------------------

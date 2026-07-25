@@ -47,11 +47,14 @@ description: 发版前核对版本、测试、变更记录与产物。
 /skills
 /skill list
 /skill install https://github.com/owner/repo/tree/main/my-skill
+/skill install C:\Users\me\.codex\skills\my-skill
 /skill update my-skill
 /skill remove my-skill
 ```
 
-远端技能会落进用户目录。安装前先读内容。Skill 能引导模型调用工具，来路不明的一样有风险。
+不知道从哪下手，直接裸敲 `/skill`。终端会列出网址、本地目录、`SKILL.md` 三种安装例子，以及更新、删除和实际落盘目录。
+
+`/skill install` 既收 HTTP(S) 地址，也收本地技能目录、`SKILL.md` 或独立 `.md` 文件。它们一律落进 `~/.lubancode/skills/<skill-name>`；安装成功后，本会话立刻刷新技能清单。LubanCode 不扫描 `.codex/skills`、`.claude/skills` 或 `.agents/skills`。安装前先读内容。Skill 能引导模型调用工具，来路不明的一样有风险。
 
 ## MCP
 
@@ -173,4 +176,3 @@ plugin__hello_plugin__reverse_text
 - Lua 插件一文件一工具，文件名保持稳定；改名会改工具前缀。
 - DLL 主文件与依赖库可放同一目录。LubanCode 会略过没有 `luban_plugin_entry` 的依赖 DLL。
 - 不要把 API key 写进 Skill、Lua、DLL、示例或日志。MCP 密钥走配置里的 `env`，模型服务密钥走 `key_env`。
-

@@ -185,7 +185,12 @@ std::string BuildSkillsPromptSegment(const std::vector<SkillMeta>& skills) {
     if (skills.empty()) {
         return std::string();
     }
-    std::string out = "可用技能(用 skill 工具按名加载):\n";
+    std::string out =
+        "技能目录铁则:LubanCode 只认 ~/.lubancode/skills/<技能名>/SKILL.md 与 "
+        "<cwd>/.lubancode/skills/<技能名>/SKILL.md;绝不可把给 LubanCode 的技能装进 "
+        ".codex/skills、.claude/skills 或 .agents/skills。本机来源可用 /skill install <目录或 SKILL.md> "
+        "装进用户级目录。\n"
+        "可用技能(用 skill 工具按名加载):\n";
     for (const auto& meta : skills) {
         out += "- " + meta.name + ": " + meta.description + "\n";
     }
