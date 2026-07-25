@@ -250,18 +250,18 @@ int wmain(int argc, wchar_t** argv) {
     SendKey(VK_ESCAPE, 0x1b);
     SendText(L"[201~");
 
-    const bool placeholder = WaitForAny({L"[Pasted Content 11 chars]", L"[粘贴内容 11 字符]"}, 5000);
-    Check(placeholder, "multiline paste is collapsed to one placeholder");
-    Check(!ScreenContains(L"alpha") && !ScreenContains(L"beta"), "raw pasted lines stay out of the composer");
+    Check(WaitForAny({L"beta"}, 5000) && ScreenContains(L"alpha"),
+          "short multiline paste stays visible in the composer");
+    Check(!ScreenContains(L"[Pasted Content 11 chars]") && !ScreenContains(L"[粘贴内容 11 字符]"),
+          "short multiline paste does not use a placeholder");
 
     SendKey('C', 0x03, LEFT_CTRL_PRESSED);
     Sleep(200);
     SendTerminalPasteBatch(L"native\nburst");
-    const bool native_placeholder =
-        WaitForAny({L"[Pasted Content 12 chars]", L"[粘贴内容 12 字符]"}, 5000);
-    Check(native_placeholder, "unmarked Windows KEY_EVENT paste burst is collapsed to one placeholder");
-    Check(!ScreenContains(L"native") && !ScreenContains(L"burst"),
-          "unmarked paste burst does not leak raw lines into the composer");
+    Check(WaitForAny({L"burst"}, 5000) && ScreenContains(L"native"),
+          "modifier-wrapped Windows paste stays visible when short");
+    Check(!ScreenContains(L"[Pasted Content 12 chars]") && !ScreenContains(L"[粘贴内容 12 字符]"),
+          "short Windows paste burst does not use a placeholder");
 
     // VS Code/ConPTY 会把一次 paste 拆成逐行批次，批间停顿可远超旧实现的
     // 60ms。首行用 /help，旧实现若误提交也只打印帮助，不会请求真实模型；
@@ -289,13 +289,26 @@ int wmain(int argc, wchar_t** argv) {
     SendTextBatch(L"        if nums[i] + nums[j] == target:\n");
     Sleep(150);
     SendTextBatch(L"            return [i,j]");
+    Check(WaitForAny({L"return [i,j]"}, 5000) && ScreenContains(L"for j in range"),
+          "slow line-split Windows paste is recovered as visible multiline text");
     const std::wstring pasted_chars = std::to_wstring(slow_paste.size());
-    const bool delayed_placeholder = WaitForAny(
-        {L"[Pasted Content " + pasted_chars + L" chars]", L"[粘贴内容 " + pasted_chars + L" 字符]"}, 5000);
-    Check(delayed_placeholder, "slow line-split Windows paste merges into one placeholder");
+    Check(!ScreenContains(L"[Pasted Content " + pasted_chars + L" chars]") &&
+              !ScreenContains(L"[粘贴内容 " + pasted_chars + L" 字符]"),
+          "recovered short Windows paste does not use a placeholder");
     if (saved_clipboard.has_value()) {
         Check(SetClipboardText(*saved_clipboard), "test restores the previous Windows clipboard text");
     }
+
+    SendKey('C', 0x03, LEFT_CTRL_PRESSED);
+    Sleep(200);
+    const std::wstring large_paste(1001, L'x');
+    SendKey(VK_ESCAPE, 0x1b);
+    SendText(L"[200~");
+    SendText(large_paste);
+    SendKey(VK_ESCAPE, 0x1b);
+    SendText(L"[201~");
+    Check(WaitForAny({L"[Pasted Content 1001 chars]", L"[粘贴内容 1001 字符]"}, 5000),
+          "paste over 1000 characters collapses to one placeholder");
 
     SendKey('C', 0x03, LEFT_CTRL_PRESSED);
     Sleep(200);

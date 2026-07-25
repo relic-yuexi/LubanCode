@@ -178,7 +178,7 @@ Useful keys:
 - `Ctrl+O`: toggle compact and detailed tool output.
 - `Ctrl+E`: focus the full content of the selected tool item.
 - `Shift+Enter`: insert a newline in the composer.
-- Multiline paste: collapse to `[Pasted Content N chars]` while preserving the full submitted text.
+- Paste content: keep up to 1000 characters visible; collapse larger pastes to `[Pasted Content N chars]` and expand them on submit.
 - `Esc`: interrupt the current turn or leave a focused view.
 
 While the model is working, type the next message and press Enter. It remains visible above the composer and is sent when the current turn finishes.

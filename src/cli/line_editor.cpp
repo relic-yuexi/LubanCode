@@ -359,42 +359,12 @@ void LineEditorCore::InsertPaste(const std::string& text, std::size_t replace_be
     if (paste_run_.has_value()) {
         PasteRunState& run = *paste_run_;
         run.content += decoded;
-        if (run.token_index.has_value()) {
-            pasted_contents_[*run.token_index] = run.content;
-            ResetHistoryBrowsing();
-            return;
-        }
-        if (run.content.find(U'\n') == std::u32string::npos) {
-            for (const char32_t c : decoded) {
-                InsertChar(c);
-            }
-            run.stored_length += decoded.size();
-            return;
-        }
-
-        // 头一段是单行，后一段才带换行：撤下已经露在输入框里的明文，
-        // 原位换成一枚附件 token。这样终端分几批送，用户都只见一枚占位。
-        lines_[run.row].erase(run.start_col, run.stored_length);
-        row_ = run.row;
-        col_ = run.start_col;
-        const char32_t token = kPasteTokenBase + static_cast<char32_t>(pasted_contents_.size());
-        run.token_index = pasted_contents_.size();
-        pasted_contents_.push_back(run.content);
-        InsertChar(token);
-        run.stored_length = 1;
+        pasted_contents_[run.token_index] = run.content;
+        ResetHistoryBrowsing();
         return;
     }
 
-    const std::size_t start_row = row_;
-    const std::size_t start_col = col_;
-    if (decoded.find(U'\n') == std::u32string::npos) {
-        for (const char32_t c : decoded) {
-            InsertChar(c);
-        }
-        paste_run_ = PasteRunState{start_row, start_col, decoded.size(), std::nullopt, decoded};
-        return;
-    }
-    if (pasted_contents_.size() >= 0xFFFE) {
+    if (decoded.size() <= kLargePasteCharThreshold || pasted_contents_.size() >= 0xFFFE) {
         for (const char32_t c : decoded) {
             if (c == U'\n') {
                 InsertNewLine();
@@ -408,7 +378,7 @@ void LineEditorCore::InsertPaste(const std::string& text, std::size_t replace_be
     const std::size_t token_index = pasted_contents_.size();
     pasted_contents_.push_back(decoded);
     InsertChar(token);
-    paste_run_ = PasteRunState{start_row, start_col, 1, token_index, decoded};
+    paste_run_ = PasteRunState{token_index, decoded};
 }
 
 std::u32string LineEditorCore::ExpandPasteTokens(const std::u32string& text) const {
@@ -847,11 +817,9 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
             if (!expanded.empty()) {
                 history_.push_back(expanded);
             }
-            std::vector<std::u32string> submitted_lines;
-            submitted_lines.reserve(lines_.size());
-            for (const std::u32string& line : lines_) {
-                submitted_lines.push_back(DisplayPasteTokens(line));
-            }
+            // Codex 的占位符只活在 composer：提交时展开，历史回显也留下
+            // 全文。短 paste 本来就是明文；大 paste 到这里才从 token 还原。
+            std::vector<std::u32string> submitted_lines = SplitJoined(expanded);
             ClearBuffer();
             ResetHistoryBrowsing();
             RenderState state = BuildRenderState(true, false, false, false);

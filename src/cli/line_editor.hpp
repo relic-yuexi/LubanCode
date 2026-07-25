@@ -25,6 +25,9 @@
 
 namespace lubancode::cli {
 
+// 与 Codex TUI 一致：1000 字符及以下直接显示，超过才折成 paste 附件。
+inline constexpr std::size_t kLargePasteCharThreshold = 1000;
+
 // 抽象按键事件,终端层负责把真实的 ReadConsoleInputW KEY_EVENT_RECORD
 // 翻译成这个,核心层只认这个,不知道底下是 Win32 API。
 enum class KeyKind {
@@ -231,14 +234,10 @@ private:
         std::u32string suffix;
     };
 
-    // Windows Terminal / ConPTY 偶尔会把一趟 bracketed paste 拆成几个紧邻
-    // 的 Paste 事件。编辑器把这几个事件看作同一枚附件；中间只要来了别的
-    // 按键，这一趟就收口，下一次 Paste 另起一枚。
+    // 大段 paste 已折成附件后，紧邻的 Paste 事件仍并进同一枚；中间只要
+    // 来了别的按键，这一趟就收口，下一次 Paste 另起一枚。
     struct PasteRunState {
-        std::size_t row = 0;
-        std::size_t start_col = 0;
-        std::size_t stored_length = 0;  // lines_ 中占几枚码点：明文 N 枚，占位 1 枚
-        std::optional<std::size_t> token_index;
+        std::size_t token_index = 0;
         std::u32string content;
     };
 
