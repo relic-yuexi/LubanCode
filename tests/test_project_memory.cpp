@@ -1,13 +1,19 @@
 #include <doctest/doctest.h>
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <string>
+#include <vector>
 
+#include "agent/loop.hpp"
+#include "api/backend.hpp"
+#include "api/types.hpp"
 #include "memory/memory_tool.hpp"
 #include "memory/project_memory.hpp"
+#include "tools/registry.hpp"
 
 using namespace lubancode;
 
@@ -37,6 +43,23 @@ std::string Read(const fs::path& path) {
     std::ifstream file(path, std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
 }
+
+class CaptureBackend : public api::Backend {
+public:
+    std::expected<void, api::Error> send_stream(
+        const api::Request& request,
+        const std::function<void(const api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* /*cancel*/ = nullptr) override {
+        requests.push_back(request);
+        on_event(api::MessageStart{"memory-test", "test-model"});
+        on_event(api::TextDelta{"ok"});
+        on_event(api::ContentBlockDone{0});
+        on_event(api::MessageDone{"end_turn", api::Usage{}});
+        return {};
+    }
+
+    std::vector<api::Request> requests;
+};
 
 }  // namespace
 
@@ -140,6 +163,67 @@ TEST_CASE("ProjectMemory: 文件指纹变化后不注入旧正文") {
     const std::string context = store.BuildTurnContext("feature 在哪里", repo);
     CHECK(context.find("相关文件已变化") != std::string::npos);
     CHECK(context.find("旧正文不该在漂移后注入") == std::string::npos);
+}
+
+TEST_CASE("ProjectMemory: uv 与 yarn 偏好按问题召回并注入完整请求") {
+    const fs::path root = TempRoot("package-preferences");
+    const fs::path repo = root / "repo";
+    fs::create_directories(repo / ".git");
+    Write(repo / "pyproject.toml", "[project]\nname = \"memory-scenario\"\n");
+    Write(repo / "package.json", "{\"name\":\"memory-scenario\"}\n");
+
+    const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
+    REQUIRE(identity.has_value());
+    memory::Options options;
+    options.enabled = true;
+    options.max_results = 1;
+    memory::ProjectMemory store(*identity, root / "home", options);
+
+    memory::SaveRequest python;
+    python.kind = memory::MemoryKind::Preference;
+    python.id = "preference.python-package-manager";
+    python.title = "Python 包管理器";
+    python.summary = "本项目添加 Python 依赖只用 uv add，不用 pip install";
+    python.content = "用户明确要求：添加 Python 依赖时使用 `uv add <package>`，不要使用 `pip install`。";
+    python.keywords = {"Python", "pyproject.toml", "uv", "pip", "dependency"};
+    REQUIRE(store.EnqueueSave(python).has_value());
+
+    memory::SaveRequest node;
+    node.kind = memory::MemoryKind::Preference;
+    node.id = "preference.node-package-manager";
+    node.title = "Node 包管理器";
+    node.summary = "本项目添加前端依赖只用 yarn，不用 npm";
+    node.content = "用户明确要求：添加 Node 依赖时使用 `yarn add <package>`，不要使用 `npm install`。";
+    node.keywords = {"Node", "JavaScript", "package.json", "yarn", "npm", "dependency"};
+    REQUIRE(store.EnqueueSave(node).has_value());
+
+    const auto processed = memory::RunPendingMemoryJobs(root / "home");
+    REQUIRE(processed.has_value());
+    CHECK(*processed == 2);
+    CHECK(store.ListEntries().size() == 2);
+
+    const std::string python_query = "请给 pyproject.toml 添加 requests 这个 Python 依赖";
+    const std::string python_context = store.BuildTurnContext(python_query, repo);
+    CHECK(python_context.find("## 召回: preference.python-package-manager") != std::string::npos);
+    CHECK(python_context.find("## 召回: preference.node-package-manager") == std::string::npos);
+    CHECK(python_context.find("`uv add <package>`") != std::string::npos);
+
+    const std::string node_context = store.BuildTurnContext(
+        "请给 package.json 添加 react 这个 JavaScript 依赖", repo);
+    CHECK(node_context.find("## 召回: preference.node-package-manager") != std::string::npos);
+    CHECK(node_context.find("## 召回: preference.python-package-manager") == std::string::npos);
+    CHECK(node_context.find("`yarn add <package>`") != std::string::npos);
+
+    CaptureBackend backend;
+    tools::ToolRegistry registry;
+    agent::AgentLoop loop(backend, registry, "test-model", "stable system");
+    loop.SetTurnSystemSuffix(python_context);
+    const auto outcome = loop.Run(python_query, agent::Callbacks{});
+    REQUIRE(outcome.has_value());
+    REQUIRE(backend.requests.size() == 1);
+    CHECK(backend.requests[0].system.find("stable system\n\n# 项目记忆") == 0);
+    CHECK(backend.requests[0].system.find("preference.python-package-manager") != std::string::npos);
+    CHECK(backend.requests[0].system.find("`uv add <package>`") != std::string::npos);
 }
 
 TEST_CASE("ProjectMemory: forget 归档主题并重建索引") {
