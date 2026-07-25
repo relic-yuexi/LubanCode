@@ -174,6 +174,17 @@ TEST_CASE("ParseSlashCommand: /todos") {
     CHECK(parsed.args.empty());
 }
 
+TEST_CASE("ParseSlashCommand: /memory 在解析和候选表里") {
+    const auto parsed = cli::ParseSlashCommand("/Memory remember fact AgentLoop 入口");
+    CHECK(parsed.command == cli::SlashCommand::Memory);
+    CHECK(parsed.args == "remember fact AgentLoop 入口");
+    bool found = false;
+    for (const auto& command : cli::AllSlashCommands()) {
+        if (command.name == "/memory") found = true;
+    }
+    CHECK(found);
+}
+
 TEST_CASE("ParseSlashCommand: /Todos 大小写不敏感") {
     CHECK(cli::ParseSlashCommand("/Todos").command == cli::SlashCommand::Todos);
 }

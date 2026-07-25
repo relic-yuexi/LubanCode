@@ -29,6 +29,7 @@ enum class SlashCommand {
     Todos,    // /todos:查看当前待办清单(M11/0.10.0)
     Plugins,  // /plugins:列出挂载的插件工具(DLL + lua)和加载警告(M7)
     Tools,    // /tools:列工具三态——核心(恒在)/已加载/延迟未加载(tool_search)
+    Memory,   // /memory:项目记忆开关、查看、显式记忆、遗忘与重建
     Sessions,  // /sessions:列最近的会话存档(本目录;/sessions all 列全部目录)
     Resume,    // /resume <编号或id>:载入某场存档历史续聊
     Export,    // /export [路径]:当前会话导出 Markdown

@@ -6,6 +6,7 @@
 #include "platform/paths.hpp"
 
 #include <cstdlib>
+#include <system_error>
 
 namespace lubancode::platform {
 
@@ -19,6 +20,16 @@ std::optional<std::string> GetEnvVar(const char* name) {
 
 std::optional<std::string> HomeDir() {
     return GetEnvVar("HOME");
+}
+
+std::expected<void, std::string> ReplaceFileAtomically(const std::filesystem::path& source,
+                                                        const std::filesystem::path& destination) {
+    std::error_code ec;
+    std::filesystem::rename(source, destination, ec);
+    if (!ec) {
+        return {};
+    }
+    return std::unexpected("原子替换文件失败: " + ec.message());
 }
 
 }  // namespace lubancode::platform

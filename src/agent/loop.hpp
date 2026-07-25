@@ -129,6 +129,11 @@ public:
     // 次请求前换掉系统提示，文件工具则由进程 CWD 即刻接管。
     void SetSystemPrompt(std::string system_prompt) { system_prompt_ = std::move(system_prompt); }
 
+    // 请求级上下文尾段。一次外层 Run 内的工具来回共用，下一条用户消息
+    // 到来前由调用方重算。它不进 history，也不改稳定 system_prompt_；项目
+    // 记忆这类按查询变化、又须经得住 /compact 的上下文走这里。
+    void SetTurnSystemSuffix(std::string suffix) { turn_system_suffix_ = std::move(suffix); }
+
     // M6.6:/compact 用。跟 history() 是同一份数据,单独起个大写名字是为了
     // 跟任务规矩"只许新增两个方法,不许改现有的"对齐——不改名、不改签名、
     // 不复用 history(),原样再加一份。
@@ -146,6 +151,7 @@ private:
     tools::ToolRegistry& registry_;
     std::string model_;
     std::string system_prompt_;
+    std::string turn_system_suffix_;
     int max_tokens_;
     int max_turns_;
     std::size_t max_context_chars_;

@@ -394,6 +394,63 @@ TEST_CASE("ParseFileConfigJson: max_turns 正整数正常解析") {
     CHECK(*ok->max_turns == 50);
 }
 
+TEST_CASE("ParseFileConfigJson: memory 对象能解析，坏类型会报错") {
+    const auto parsed = config::ParseFileConfigJson(
+        R"({"memory":{"enabled":true,"use":false,"generate":true,"max_index_bytes":1000,"max_retrieval_bytes":2000,"max_results":3}})",
+        "x.json");
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->memory.has_value());
+    CHECK(parsed->memory->enabled == true);
+    CHECK(parsed->memory->use == false);
+    CHECK(parsed->memory->max_results == 3);
+
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"memory":true})", "x.json").has_value());
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"memory":{"max_results":0}})", "x.json").has_value());
+}
+
+TEST_CASE("MergeConfig: memory 默认关闭，项目配置不能自行开启") {
+    const auto defaults = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, std::nullopt,
+                                               EmptyGenericEnv());
+    REQUIRE(defaults.has_value());
+    CHECK_FALSE(defaults->config.memory.enabled);
+
+    config::FileConfig project;
+    project.source_path = "project.json";
+    config::MemoryFileConfig project_memory;
+    project_memory.enabled = true;
+    project.memory = project_memory;
+    const auto project_only = config::MergeConfig(EmptyLubancodeEnv(), project, std::nullopt,
+                                                   EmptyGenericEnv());
+    REQUIRE(project_only.has_value());
+    CHECK_FALSE(project_only->config.memory.enabled);
+}
+
+TEST_CASE("MergeConfig: 全局打开 memory，项目可以收窄并关闭") {
+    config::FileConfig global;
+    global.source_path = "global.json";
+    config::MemoryFileConfig global_memory;
+    global_memory.enabled = true;
+    global_memory.max_results = 6;
+    global.memory = global_memory;
+
+    config::FileConfig project;
+    project.source_path = "project.json";
+    config::MemoryFileConfig project_memory;
+    project_memory.use = false;
+    project_memory.max_results = 2;
+    project.memory = project_memory;
+    const auto narrowed = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    REQUIRE(narrowed.has_value());
+    CHECK(narrowed->config.memory.enabled);
+    CHECK_FALSE(narrowed->config.memory.use);
+    CHECK(narrowed->config.memory.max_results == 2);
+
+    project.memory->enabled = false;
+    const auto disabled = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    REQUIRE(disabled.has_value());
+    CHECK_FALSE(disabled->config.memory.enabled);
+}
+
 TEST_CASE("ParseFileConfigJson: max_turns 缺省时是 nullopt") {
     const auto missing = config::ParseFileConfigJson("{}", "x.json");
     REQUIRE(missing.has_value());

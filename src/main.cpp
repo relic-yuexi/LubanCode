@@ -62,6 +62,8 @@
 #include "config/project_instructions.hpp"
 #include "config/skill_store.hpp"
 #include "lsp/manager.hpp"
+#include "memory/memory_tool.hpp"
+#include "memory/project_memory.hpp"
 #include "mcp/client.hpp"
 #include "mcp/mcp_tool.hpp"
 #include "tools/agent_tool.hpp"
@@ -432,6 +434,10 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
     std::cout << "  tool_search_threshold = " << config.tool_search_threshold
               << (config.tool_search_threshold == 0 ? tr("config.threshold.never") : "") << "  ["
               << lubancode::config::ToString(sources.tool_search_threshold) << "]\n";
+    std::cout << "  memory            = " << (config.memory.enabled ? "on" : "off")
+              << " (use=" << (config.memory.use ? "on" : "off")
+              << ", generate=" << (config.memory.generate ? "on" : "off") << ")  ["
+              << lubancode::config::ToString(sources.memory) << "]\n";
     // 分层:项目级、全局各自的配置文件路径分开列(有哪个列哪个,标清是
     // 哪一级),都没有就沿用老的单行 config.label.file(通常也不会走到)。
     if (result.project_config_file_path.has_value() || result.global_config_file_path.has_value()) {
@@ -936,6 +942,17 @@ std::string TrimAscii(std::string value) {
     value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
     value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
     return value;
+}
+
+lubancode::memory::Options MemoryOptionsFromConfig(const lubancode::config::MemoryConfig& config) {
+    lubancode::memory::Options options;
+    options.enabled = config.enabled;
+    options.use = config.use;
+    options.generate = config.generate;
+    options.max_index_bytes = config.max_index_bytes;
+    options.max_retrieval_bytes = config.max_retrieval_bytes;
+    options.max_results = config.max_results;
+    return options;
 }
 
 std::expected<std::vector<std::string>, std::string> PromptAskUser(
@@ -4131,7 +4148,8 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                       const lubancode::cli::Theme& theme, const std::string& persona, bool spinner_enabled,
                       const lubancode::config::ModelCatalog& model_catalog,
                       const lubancode::config::SettingsLocal& settings_local, bool continue_last = false,
-                      const std::string& law_source = "内置默认") {
+                      const std::string& law_source = "内置默认",
+                      const std::string& executable = std::string()) {
     lubancode::config::Config& config = config_result.config;
 
     // M9:技能扫描一次,主代理、子代理、系统提示词、/skills 命令共用同一份
@@ -4146,6 +4164,23 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     const auto home_lubancode = lubancode::config::HomeLubancodeDir();
     const std::string prompts_dir =
         home_lubancode.has_value() ? (*home_lubancode + "/prompts") : std::string();
+    std::shared_ptr<lubancode::memory::ProjectMemory> project_memory;
+    if (home_lubancode.has_value()) {
+        auto identity = lubancode::memory::ResolveProjectIdentity(
+            std::filesystem::current_path(), lubancode::tools::Utf8ToPath(*home_lubancode));
+        if (identity.has_value()) {
+            project_memory = std::make_shared<lubancode::memory::ProjectMemory>(
+                std::move(*identity), lubancode::tools::Utf8ToPath(*home_lubancode),
+                MemoryOptionsFromConfig(config.memory), executable);
+            if (project_memory->generate_enabled()) {
+                if (const auto launched = project_memory->LaunchWorker(); !launched.has_value()) {
+                    std::cout << trf("cmd.memory.worker_failed", launched.error()) << "\n";
+                }
+            }
+        } else if (config.memory.enabled) {
+            std::cout << trf("cmd.memory.project_failed", identity.error()) << "\n";
+        }
+    }
     std::string project_instructions =
         lubancode::config::LoadProjectInstructions(std::filesystem::current_path()).content;
     const std::filesystem::path global_skills_root =
@@ -4267,6 +4302,9 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                 return PromptAskUser(question, theme);
             }));
     }
+    if (project_memory != nullptr && project_memory->generate_enabled()) {
+        registry.Register(std::make_unique<lubancode::memory::MemorySaveTool>(project_memory));
+    }
 
     // M7:插件工具只挂主 registry(不挂 sub_registry,短命跑腿不用外挂),
     // 挂载行紧跟 [mcp] 那几行打出来。
@@ -4292,20 +4330,23 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     if (sub_deferral) {
         sub_registry.Register(std::make_unique<lubancode::tools::ToolSearchTool>(sub_registry, loaded_tools));
     }
-    std::function<bool(const lubancode::tools::Tool&)> tool_filter;
-    if (main_deferral || sub_deferral) {
-        // 谓词本身不区分主表/子表——放行"非延迟"或"已挂载",两边通用。
-        tool_filter = [loaded_tools](const lubancode::tools::Tool& tool) {
-            return !tool.deferred() || loaded_tools->count(tool.name()) != 0;
-        };
-    }
+    const auto main_tool_filter = [loaded_tools, main_deferral, project_memory](
+                                      const lubancode::tools::Tool& tool) {
+        if (tool.name() == "memory_save") {
+            return project_memory != nullptr && project_memory->generate_enabled();
+        }
+        return !main_deferral || !tool.deferred() || loaded_tools->count(tool.name()) != 0;
+    };
+    const auto sub_tool_filter = [loaded_tools, sub_deferral](const lubancode::tools::Tool& tool) {
+        return !sub_deferral || !tool.deferred() || loaded_tools->count(tool.name()) != 0;
+    };
     if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry.Find("agent"));
         agent_tool != nullptr) {
         // 提示词运行时化:子代理系统提示同机制(features 模块用户文件优先)。
         agent_tool->SetPromptsDir(prompts_dir);
         agent_tool->SetProjectInstructions(project_instructions);
         if (sub_deferral) {
-            agent_tool->SetToolFilter(tool_filter);
+            agent_tool->SetToolFilter(sub_tool_filter);
             agent_tool->SetDeferredIndexProvider([&sub_registry, loaded_tools]() {
                 return lubancode::tools::BuildDeferredToolsIndexSegment(sub_registry, *loaded_tools);
             });
@@ -4478,9 +4519,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         loop.emplace(index_backend, registry, config.model,
                      lubancode::agent::AssembleSystemPrompt(prompt_options),
                      /*max_tokens=*/4096, config.max_turns, config.max_context_chars);
-        if (main_deferral) {
-            loop->SetToolFilter(tool_filter);
-        }
+        loop->SetToolFilter(main_tool_filter);
         if (preserve_history) {
             loop->ReplaceHistory(std::move(old_history));
         }
@@ -4528,6 +4567,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     lubancode::agent::SessionStore session_store(sessions_dir);
     lubancode::agent::SessionMeta session_meta;  // /export 用;Begin/resume 时填
     std::string session_start_ts = lubancode::agent::NowIdTimestamp();
+    if (project_memory != nullptr) project_memory->set_source_session(session_start_ts);
     std::size_t persisted_count = 0;   // history 里前多少条已经落过盘
     bool session_store_broken = false;  // 建档失败过,别每轮都再撞一次
     std::string session_title;          // /title 设的标题;resume 时取存档里最后一条
@@ -4604,9 +4644,149 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     // 保留、照样发,跟"是不是被打断"完全解耦。
     std::deque<std::string> pending_queue;
 
+    const auto ensure_memory_tool = [&]() {
+        if (project_memory != nullptr && registry.Find("memory_save") == nullptr) {
+            registry.Register(std::make_unique<lubancode::memory::MemorySaveTool>(project_memory));
+        }
+    };
+
+    const auto print_memory_usage = []() { std::cout << tr("cmd.memory.usage"); };
+
+    const auto handle_memory_command = [&](const std::string& raw_args) {
+        if (project_memory == nullptr) {
+            std::cout << tr("cmd.memory.unavailable") << "\n";
+            return;
+        }
+
+        std::istringstream words(raw_args);
+        std::string action;
+        words >> action;
+        std::transform(action.begin(), action.end(), action.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        if (action.empty() || action == "status") {
+            const auto status = project_memory->Status();
+            const auto toggle_word = [](bool enabled) {
+                return enabled ? tr("cmd.memory.on") : tr("cmd.memory.off");
+            };
+            std::cout << trf("cmd.memory.status", toggle_word(status.enabled), toggle_word(status.use),
+                              toggle_word(status.generate))
+                      << "\n"
+                      << trf("cmd.memory.project", status.project_key) << "\n"
+                      << trf("cmd.memory.directory", PathToUtf8(status.memory_dir)) << "\n"
+                      << trf("cmd.memory.counts", status.entry_count, status.pending_jobs) << "\n";
+            return;
+        }
+        if (action == "on" || action == "off") {
+            project_memory->set_enabled(action == "on");
+            if (action == "on" && project_memory->generate_enabled()) ensure_memory_tool();
+            std::cout << trf("cmd.memory.master",
+                             action == "on" ? tr("cmd.memory.on") : tr("cmd.memory.off"))
+                      << "\n";
+            return;
+        }
+        if (action == "use" || action == "learn") {
+            std::string value;
+            words >> value;
+            std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            if (value != "on" && value != "off") {
+                print_memory_usage();
+                return;
+            }
+            const bool enabled = value == "on";
+            if (action == "use") {
+                project_memory->set_use(enabled);
+            } else {
+                project_memory->set_generate(enabled);
+                if (enabled) ensure_memory_tool();
+            }
+            std::cout << trf("cmd.memory.toggle",
+                             action == "use" ? tr("cmd.memory.retrieval") : tr("cmd.memory.write"),
+                             enabled ? tr("cmd.memory.on") : tr("cmd.memory.off"))
+                      << "\n";
+            return;
+        }
+        if (action == "list") {
+            std::string error;
+            const auto entries = project_memory->ListEntries(&error);
+            if (!error.empty()) std::cout << trf("cmd.memory.catalog_warning", error) << "\n";
+            if (entries.empty()) {
+                std::cout << tr("cmd.memory.empty") << "\n";
+                return;
+            }
+            for (const auto& entry : entries) {
+                std::cout << "- " << entry.id << " [" << lubancode::memory::MemoryKindName(entry.kind)
+                          << "] " << entry.title;
+                if (!entry.summary.empty() && entry.summary != entry.title) {
+                    std::cout << " - " << entry.summary;
+                }
+                std::cout << "\n";
+            }
+            return;
+        }
+        if (action == "remember") {
+            std::string kind_text;
+            words >> kind_text;
+            auto kind = lubancode::memory::ParseMemoryKind(kind_text);
+            std::string remainder;
+            std::getline(words, remainder);
+            remainder = TrimAscii(std::move(remainder));
+            if (!kind.has_value() || remainder.empty()) {
+                print_memory_usage();
+                return;
+            }
+            const std::size_t separator = remainder.find("::");
+            lubancode::memory::SaveRequest request;
+            request.kind = *kind;
+            request.title = TrimAscii(remainder.substr(0, separator));
+            request.content = separator == std::string::npos
+                                  ? request.title
+                                  : TrimAscii(remainder.substr(separator + 2));
+            request.summary = request.content;
+            if (request.title.empty() || request.content.empty()) {
+                print_memory_usage();
+                return;
+            }
+            const auto queued = project_memory->EnqueueSave(request);
+            std::cout << (queued.has_value() ? trf("cmd.memory.queued", *queued)
+                                             : trf("cmd.memory.queue_failed", queued.error()))
+                      << "\n";
+            return;
+        }
+        if (action == "forget") {
+            std::string id;
+            words >> id;
+            if (id.empty()) {
+                print_memory_usage();
+                return;
+            }
+            const auto queued = project_memory->EnqueueForget(id);
+            std::cout << (queued.has_value() ? trf("cmd.memory.queued", *queued)
+                                             : trf("cmd.memory.queue_failed", queued.error()))
+                      << "\n";
+            return;
+        }
+        if (action == "rebuild") {
+            const auto queued = project_memory->EnqueueRebuild();
+            std::cout << (queued.has_value() ? trf("cmd.memory.queued", *queued)
+                                             : trf("cmd.memory.queue_failed", queued.error()))
+                      << "\n";
+            return;
+        }
+        print_memory_usage();
+    };
+
     lubancode::cli::WorktreeSession worktree_session;
     const auto sync_worktree_directory = [&]() {
         prompt_options.cwd = CurrentDirUtf8();
+        if (project_memory != nullptr) {
+            if (const auto updated = project_memory->SetWorkingDirectory(std::filesystem::current_path());
+                !updated.has_value()) {
+                std::cout << trf("cmd.memory.switch_failed", updated.error()) << "\n";
+            }
+        }
         project_instructions =
             lubancode::config::LoadProjectInstructions(std::filesystem::current_path()).content;
         prompt_options.project_instructions = project_instructions;
@@ -4723,6 +4903,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     // 一份新文件(id 用新的时间戳)。标题属于旧场子,一并翻篇。
                     session_store.Reset();
                     session_start_ts = lubancode::agent::NowIdTimestamp();
+                    if (project_memory != nullptr) project_memory->set_source_session(session_start_ts);
                     persisted_count = 0;
                     session_store_broken = false;
                     session_title.clear();
@@ -4745,7 +4926,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                         sys_chars = lubancode::agent::AssembleSystemPrompt(prompt_options).size() +
                                     current_model_instructions->size() + current_soul->size();
                         for (const auto& tool : registry.All()) {
-                            if (main_deferral && tool_filter && !tool_filter(*tool)) {
+                            if (!main_tool_filter(*tool)) {
                                 continue;  // 延迟未挂载:不在 tools 数组里,不算
                             }
                             tools_chars += tool->name().size() + tool->description().size() +
@@ -4807,6 +4988,9 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     break;
                 case lubancode::cli::SlashCommand::Tools:
                     PrintToolsCommand(registry, *loaded_tools, main_deferral, tool_search_threshold);
+                    break;
+                case lubancode::cli::SlashCommand::Memory:
+                    handle_memory_command(parsed.args);
                     break;
                 case lubancode::cli::SlashCommand::Sessions:
                     PrintSessionsCommand(sessions_dir, parsed.args);
@@ -4897,6 +5081,10 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         // 马上往下铺,聚焦画面已经不是"当前画面"了),下次 Ctrl+E 是重新
         // 聚焦,不是"返回"。
         focus_view_active = false;
+        loop->SetTurnSystemSuffix(
+            project_memory != nullptr
+                ? project_memory->BuildTurnContext(content, std::filesystem::current_path())
+                : std::string());
         const RunTurnResult turn_result =
             RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry,
                     config.hooks, spinner_enabled, transcript, todo_state, &transcript_expanded,
@@ -4976,6 +5164,17 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         home_lubancode.has_value() ? (*home_lubancode + "/prompts") : std::string();
     const std::string project_instructions =
         lubancode::config::LoadProjectInstructions(std::filesystem::current_path()).content;
+    std::shared_ptr<lubancode::memory::ProjectMemory> project_memory;
+    if (home_lubancode.has_value() && config.memory.enabled) {
+        auto identity = lubancode::memory::ResolveProjectIdentity(
+            std::filesystem::current_path(), lubancode::tools::Utf8ToPath(*home_lubancode));
+        if (identity.has_value()) {
+            auto options = MemoryOptionsFromConfig(config.memory);
+            options.generate = false;
+            project_memory = std::make_shared<lubancode::memory::ProjectMemory>(
+                std::move(*identity), lubancode::tools::Utf8ToPath(*home_lubancode), options);
+        }
+    }
 
     std::unique_ptr<lubancode::api::Backend> backend = BuildBackend(config);
     // 单发模式没有 /think 命令,current_think 构造后不会再变,等价于直接
@@ -5086,6 +5285,10 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     if (main_deferral) {
         loop.SetToolFilter(tool_filter);
     }
+    if (project_memory != nullptr) {
+        loop.SetTurnSystemSuffix(
+            project_memory->BuildTurnContext(question, std::filesystem::current_path()));
+    }
     std::set<std::string> always_allowed_tools;
     // settings.local.json 的 allow_tools:单发模式同样注入(免确认)。
     for (const std::string& tool_name : settings_local.allow_tools) {
@@ -5130,6 +5333,16 @@ private:
 // 一旦经这条路转一圈,就会被拆成不合法的 UTF-8 字节,喂给 nlohmann::json
 // 的 dump() 时直接抛 type_error(316: invalid UTF-8 byte)崩掉。
 int RunCli(const std::vector<std::string>& args) {
+    if (args.size() == 3 && args[1] == "--memory-worker") {
+        const auto result = lubancode::memory::RunPendingMemoryJobs(
+            lubancode::tools::Utf8ToPath(args[2]));
+        if (!result.has_value()) {
+            std::cerr << "memory worker: " << result.error() << "\n";
+            return 1;
+        }
+        return 0;
+    }
+
     // i18n 早初始化:--help/--version 在读配置之前就要打印,先扫语言包、按
     // LUBANCODE_LANG(空 = 系统探测)定一版语言;配置加载成功后按四级合并的
     // language 字段再定一次(env 仍是最高级,两次结果一致;差别只在"语言写
@@ -5408,7 +5621,9 @@ int RunCli(const std::vector<std::string>& args) {
                 std::cerr << tr("error.wizard_incomplete") << "\n";
                 return 1;
             }
+            const auto memory_config = effective.config.memory;
             effective.config = *wizard_config;
+            effective.config.memory = memory_config;
             // 向导给出的这份配置,来源标记简化成两种:保存了就算"全局配置
             // 文件"来源(向导写的是主目录 ~/.lubancode/config.json),没保存
             // 就算"内置默认值"(最接近"临时值,没有更合适的持久来源"这个
@@ -5421,8 +5636,14 @@ int RunCli(const std::vector<std::string>& args) {
             effective.sources.auth_token = marked;
             effective.sources.model = marked;
         }
+        std::string executable;
+        if (!args.empty()) {
+            std::error_code ec;
+            const auto absolute = std::filesystem::absolute(lubancode::tools::Utf8ToPath(args[0]), ec);
+            executable = PathToUtf8(ec ? lubancode::tools::Utf8ToPath(args[0]) : absolute);
+        }
         InteractiveLoop(effective, auto_confirm, theme, persona, spinner_enabled, model_catalog, settings_local,
-                         continue_last, law_source);
+                         continue_last, law_source, executable);
     } catch (const std::exception& e) {
         std::cerr << tr("error.prefix") << trf("error.unexpected", e.what()) << "\n";
         return 1;

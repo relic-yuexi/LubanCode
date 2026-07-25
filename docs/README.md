@@ -21,6 +21,7 @@
 | 看模块怎么分、请求怎么走 | [架构说明](architecture.md) |
 | 看工作动画、排队、提问与确认 | [终端交互](terminal-ui.md) |
 | 用 `/init` 写项目级规矩 | [项目指令](project-instructions.md) |
+| 看项目记忆怎样存、取、更新 | [项目记忆设计](memory-system-design.md) |
 | 改系统提示词模块 | [提示词模块说明](../src/prompts/README.md) |
 | 查全部命令与按键 | 运行 `lubancode --help`，或在会话里输入 `/help` |
 

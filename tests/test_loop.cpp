@@ -563,6 +563,27 @@ TEST_CASE("轮数将尽提醒:剩 3 轮时,发出去的请求 system 尾部带�
     CHECK(backend.captured_requests[1].system.find("system prompt") == 0);
 }
 
+TEST_CASE("本轮 system suffix:同一次 Run 的工具往返都带，history 不带") {
+    FakeBackend backend;
+    backend.scripts = {ToolUseScript("tool-1", "fake"), TextOnlyScript("done")};
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<FakeTool>("fake", tools::Tool::Result{"ok", false}, false));
+    agent::AgentLoop loop(backend, registry, "test-model", "stable system");
+    loop.SetTurnSystemSuffix("project memory suffix");
+
+    REQUIRE(loop.Run("go", agent::Callbacks{}).has_value());
+    REQUIRE(backend.captured_requests.size() == 2);
+    CHECK(backend.captured_requests[0].system == "stable system\n\nproject memory suffix");
+    CHECK(backend.captured_requests[1].system == "stable system\n\nproject memory suffix");
+    for (const auto& message : loop.History()) {
+        for (const auto& block : message.content) {
+            if (const auto* text = std::get_if<api::TextBlock>(&block)) {
+                CHECK(text->text.find("project memory suffix") == std::string::npos);
+            }
+        }
+    }
+}
+
 TEST_CASE("图片用户消息入历史，下一轮请求仍带着") {
     FakeBackend backend;
     backend.scripts = {TextOnlyScript("看到了"), TextOnlyScript("还在")};

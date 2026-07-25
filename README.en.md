@@ -33,7 +33,7 @@ The name comes from Lu Ban, the traditional Chinese master craftsman. The idea i
 | **Semantic tools** | LSP definitions, references, symbols and diagnostics; MCP stdio; web search and fetch. |
 | **Agent workflow** | Sub-agents, todo tracking, `ask_user` questions, `AGENTS.md` project instructions, deferred tools, worktrees and project permissions. |
 | **Terminal UX** | Incremental Markdown rendering, animated work status, a persistent queue, collapsed multiline paste, focused views and compact output. |
-| **Context and sessions** | Token breakdowns, automatic compaction, a dedicated compaction model, resume, titles and Markdown export. |
+| **Context and sessions** | Token breakdowns, automatic compaction, a dedicated compaction model, resume, titles, Markdown export, and opt-in project memory. |
 | **Extensibility** | Skills, Lua tools, C ABI DLL plugins, hooks, themes, i18n, souls and system prompt overrides. |
 
 ## Installation
@@ -166,6 +166,7 @@ At startup, LubanCode walks from the Git root to the working directory. Each dir
 | `/skills` · `/skill install <url>` | Manage local and remotely installed skills. |
 | `/mcp` · `/lsp` · `/plugins` | Inspect external tools and language servers. |
 | `/tools` · `/todos` | Inspect tool loading state and the current task list. |
+| `/memory` | Manage per-session project memory, synchronous retrieval, and background writes. |
 | `/sessions` · `/resume` · `/export` | Browse, resume, and export sessions. |
 | `/worktree new\|list\|exit` | Work in isolated Git worktrees. |
 | `/soul` · `/prompt` | Change response style or the system prompt persona. |

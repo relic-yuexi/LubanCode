@@ -147,6 +147,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         api::Request request;
         request.model = model_;
         request.system = system_prompt_;
+        if (!turn_system_suffix_.empty()) {
+            request.system += "\n\n" + turn_system_suffix_;
+        }
         // 轮数将尽提醒:只追加进这一轮实际发出去的 system,不改 system_prompt_
         // 本身、也不进 history_——下一轮 turn 变了,剩余轮数跟着变,提示该
         // 有就有、该消失就消失,没有"提示搭便车永久赖在历史里"的问题。

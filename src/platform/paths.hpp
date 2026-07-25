@@ -10,6 +10,8 @@
 // 分支里(拼 CreateProcessW 命令行之类)。
 #pragma once
 
+#include <expected>
+#include <filesystem>
 #include <optional>
 #include <string>
 
@@ -22,6 +24,13 @@ std::optional<std::string> GetEnvVar(const char* name);
 // 用户主目录:Windows 取 %USERPROFILE%,别的平台取 $HOME。找不到返回
 // std::nullopt。
 std::optional<std::string> HomeDir();
+
+// 把 source 原子换到 destination。两条路径须在同一文件系统；成功后
+// source 不复存在。memory/index 这类“先写临时文件，再整份替换”的路径
+// 共用它，免得 Windows 的 rename 不能覆盖目标、POSIX 却能覆盖，业务层
+// 各写一套分叉。
+std::expected<void, std::string> ReplaceFileAtomically(const std::filesystem::path& source,
+                                                        const std::filesystem::path& destination);
 
 #ifdef _WIN32
 

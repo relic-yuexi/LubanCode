@@ -54,6 +54,7 @@ add_executable(lubancode_tests
   test_session_store.cpp
   test_prompt_files.cpp
   test_project_instructions.cpp
+  test_project_memory.cpp
   test_i18n.cpp
   test_image_input.cpp
   test_network_timeout.cpp
@@ -61,6 +62,9 @@ add_executable(lubancode_tests
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_core doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)
+if(MSVC)
+  target_compile_options(lubancode_tests PRIVATE /FS)
+endif()
 
 # M11:test_network_timeout.cpp 手写了个原始 socket 假服务器(模拟连不上/
 # 半路断流),要链 Winsock。

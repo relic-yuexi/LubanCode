@@ -33,7 +33,7 @@ LubanCode 原生支持 Anthropic Messages API 与 OpenAI Responses API。模型�
 | **语义与外接工具** | LSP 定义、引用、符号、诊断；MCP stdio；联网搜索与网页抓取。 |
 | **代理工作流** | 子代理、待办清单、`ask_user` 选择题、`AGENTS.md` 项目指令、工具延迟挂载、隔离 worktree、项目级权限。 |
 | **终端体验** | 分段 Markdown 渲染、动态工作状态、常驻消息队列、折叠式多行粘贴、逐键编辑、折叠与聚焦、三档确认。 |
-| **上下文与存档** | token 占用分析、自动压缩、独立压缩模型、会话恢复、标题、Markdown 导出。 |
+| **上下文与存档** | token 占用分析、自动压缩、独立压缩模型、会话恢复、标题、Markdown 导出、默认关闭的项目记忆。 |
 | **扩展与定制** | Skills、Lua 工具、C ABI DLL 插件、hooks、主题、i18n、soul 与 system prompt。 |
 
 ## 安装
@@ -166,6 +166,7 @@ git diff --cached | lubancode "替我审一遍这份改动"
 | `/skills` · `/skill install <url>` | 管理本地与远端技能。 |
 | `/mcp` · `/lsp` · `/plugins` | 看外接工具与语言服务器状态。 |
 | `/tools` · `/todos` | 看工具挂载状态与待办清单。 |
+| `/memory` | 管本场项目记忆、同步召回与后台写入。 |
 | `/sessions` · `/resume` · `/export` | 列存档、续聊、导出 Markdown。 |
 | `/worktree new\|list\|exit` | 在隔离工作树里干活。 |
 | `/soul` · `/prompt` | 调风格，或替换系统提示人格段。 |
@@ -199,7 +200,8 @@ LubanCode 留了四扇门：
 | 文档 | 讲什么 |
 | --- | --- |
 | [文档首页](docs/README.md) | 阅读路线、版本状态、各页入口。 |
-| [配置手册](docs/configuration.md) | 配置优先级、providers、hooks、MCP、搜索、LSP、models.json。 |
+| [配置手册](docs/configuration.md) | 配置优先级、项目记忆、providers、hooks、MCP、搜索、LSP、models.json。 |
+| [项目记忆设计](docs/memory-system-design.md) | 目录、召回、后台更新、安全边界与后续路数。 |
 | [扩展指南](docs/extensions.md) | Skills、Lua、C ABI 插件、MCP 与 LSP。 |
 | [架构说明](docs/architecture.md) | 分层、请求链、双后端、工具与平台边界。 |
 | [终端交互](docs/terminal-ui.md) | 工作动画、消息队列、`ask_user`、确认与编辑匹配。 |

@@ -87,6 +87,7 @@ const Entry kZhCN[] = {
      "  /tools          列工具三态:核心(恒在)/已加载/延迟未加载(工具总数超过配置文件\n"
      "                  tool_search_threshold(默认 20,0=永不延迟)时,MCP/插件等外挂工具\n"
      "                  延迟挂载,模型用 tool_search 检索后方可调用)\n"
+     "  /memory        管项目记忆开关、召回、后台写入、列表、遗忘与索引重建\n"
      "  /sessions       列本目录最近 20 场会话存档(时间倒序编号);/sessions all 列全部目录\n"
      "  /resume 编号或id  载入该场存档历史续聊(编号按本目录列表数)\n"
      "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md;全量流水,压缩点带标注)\n"
@@ -177,6 +178,7 @@ const Entry kZhCN[] = {
      "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
      "  /plugins        列出挂载的插件工具(DLL + lua)和加载警告\n"
      "  /tools          列工具三态:核心(恒在)/已加载/延迟未加载(tool_search 延迟挂载)\n"
+     "  /memory        管项目记忆;/memory on|off|use|learn|list|remember|forget|rebuild\n"
      "  /sessions       列本目录最近 20 场会话存档(时间倒序编号);/sessions all 列全部目录\n"
      "  /resume 编号或id  载入该场存档历史续聊(编号按本目录列表数),后续消息追加写回同一文件\n"
      "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md;全量流水,压缩点带标注)\n"
@@ -307,12 +309,43 @@ const Entry kZhCN[] = {
     {"slash.desc.todos", "查看当前待办清单"},
     {"slash.desc.plugins", "列出挂载的插件工具(DLL + lua)和加载警告"},
     {"slash.desc.tools", "列工具三态:核心(恒在)/已加载/延迟未加载(tool_search 延迟挂载)"},
+    {"slash.desc.memory", "管理项目记忆;/memory on|off|use|learn|list|remember|forget|rebuild"},
     {"slash.desc.sessions", "列本目录最近 20 场会话存档,倒序编号;/sessions all 列全部目录"},
     {"slash.desc.resume", "/resume 编号或id 载入该场存档历史续聊"},
     {"slash.desc.export", "当前会话导出 Markdown;/export 路径 可指定输出文件"},
     {"slash.desc.title", "看当前会话标题;/title 标题 给本场起名,/sessions 列表和导出都用它"},
     {"slash.desc.soul", "看当前魂;/soul 内容 写进 SOUL.md,/soul clear 还原默认；名字仍可切换备选魂"},
     {"slash.desc.prompt", "看当前法(系统提示词)的来源和字数;/prompt reset 还原 system_prompt.md"},
+
+    // ---- /memory ----
+    {"cmd.memory.usage",
+     "用法:\n"
+     "  /memory                         看本场状态\n"
+     "  /memory on|off                  开关本场项目记忆\n"
+     "  /memory use on|off              开关同步召回\n"
+     "  /memory learn on|off            开关后台写入\n"
+     "  /memory list                     列出项目记忆\n"
+     "  /memory remember fact|preference 标题 [:: 正文]\n"
+     "  /memory forget <id>              归档一条记忆\n"
+     "  /memory rebuild                  后台重建索引\n"},
+    {"cmd.memory.unavailable", "[memory] 找不到主目录，项目记忆不可用。"},
+    {"cmd.memory.on", "开"},
+    {"cmd.memory.off", "关"},
+    {"cmd.memory.status", "项目记忆: {0}；召回 {1}；写入 {2}"},
+    {"cmd.memory.project", "项目: {0}"},
+    {"cmd.memory.directory", "目录: {0}"},
+    {"cmd.memory.counts", "条目: {0}；待办: {1}"},
+    {"cmd.memory.master", "[memory] 本场已{0}。"},
+    {"cmd.memory.toggle", "[memory] {0}子开关已{1}。"},
+    {"cmd.memory.retrieval", "召回"},
+    {"cmd.memory.write", "写入"},
+    {"cmd.memory.catalog_warning", "[memory] 索引有误，已改扫主题文件: {0}"},
+    {"cmd.memory.empty", "项目记忆还是空的。"},
+    {"cmd.memory.queued", "[memory] 已排进后台队列: {0}"},
+    {"cmd.memory.queue_failed", "[memory] 排队失败: {0}"},
+    {"cmd.memory.worker_failed", "[memory] 后台任务暂未启动: {0}"},
+    {"cmd.memory.project_failed", "[memory] 项目身份解析失败: {0}"},
+    {"cmd.memory.switch_failed", "[memory] 切换项目失败: {0}"},
 
     // ---- /language ----
     {"cmd.language.list_header", "可选语言(内置 zh-CN/en + <主目录>/.lubancode/languages/*.json):"},
@@ -789,6 +822,7 @@ const Entry kEn[] = {
      "  /plugins        list mounted plugin tools (*.dll and *.lua under .lubancode/plugins)\n"
      "  /tools          list tool states: core / loaded / deferred (tool_search deferral kicks in\n"
      "                  when the tool count exceeds tool_search_threshold, default 20, 0 = never)\n"
+     "  /memory        manage project memory, retrieval, background writes, forgetting and rebuilds\n"
      "  /sessions       list the 20 most recent session archives of this directory; /sessions all\n"
      "                  lists every directory\n"
      "  /resume <n|id>  load a session archive and continue chatting\n"
@@ -885,6 +919,7 @@ const Entry kEn[] = {
      "  /todos          show the current todo list\n"
      "  /plugins        list mounted plugin tools (DLL + lua) and load warnings\n"
      "  /tools          list tool states: core / loaded / deferred (tool_search)\n"
+     "  /memory        manage project memory; /memory on|off|use|learn|list|remember|forget|rebuild\n"
      "  /sessions       list the 20 most recent session archives here; /sessions all for every dir\n"
      "  /resume <n|id>  load a session archive and continue; new messages append to the same file\n"
      "  /export [path]  export this session as Markdown (default sessions/<id>.md)\n"
@@ -1027,12 +1062,43 @@ const Entry kEn[] = {
     {"slash.desc.todos", "show the current todo list"},
     {"slash.desc.plugins", "list mounted plugin tools (DLL + lua) and load warnings"},
     {"slash.desc.tools", "list tool states: core / loaded / deferred (tool_search)"},
+    {"slash.desc.memory", "manage project memory; /memory on|off|use|learn|list|remember|forget|rebuild"},
     {"slash.desc.sessions", "list the 20 most recent session archives here; /sessions all for every dir"},
     {"slash.desc.resume", "/resume <n|id> loads a session archive and continues"},
     {"slash.desc.export", "export this session as Markdown; /export <path> picks the output file"},
     {"slash.desc.title", "show the session title; /title <title> names this session"},
     {"slash.desc.soul", "show the current soul; /soul <text> writes SOUL.md; /soul clear restores default"},
     {"slash.desc.prompt", "show the persona source/length; /prompt reset restores system_prompt.md"},
+
+    // ---- /memory ----
+    {"cmd.memory.usage",
+     "Usage:\n"
+     "  /memory                                  show session status\n"
+     "  /memory on|off                           toggle project memory\n"
+     "  /memory use on|off                       toggle synchronous retrieval\n"
+     "  /memory learn on|off                     toggle background writes\n"
+     "  /memory list                              list project memories\n"
+     "  /memory remember fact|preference title [:: body]\n"
+     "  /memory forget <id>                       archive one memory\n"
+     "  /memory rebuild                           rebuild the index in background\n"},
+    {"cmd.memory.unavailable", "[memory] The home directory is unavailable; project memory cannot run."},
+    {"cmd.memory.on", "on"},
+    {"cmd.memory.off", "off"},
+    {"cmd.memory.status", "Project memory: {0}; retrieval {1}; writes {2}"},
+    {"cmd.memory.project", "Project: {0}"},
+    {"cmd.memory.directory", "Directory: {0}"},
+    {"cmd.memory.counts", "Entries: {0}; pending: {1}"},
+    {"cmd.memory.master", "[memory] Project memory is now {0} for this session."},
+    {"cmd.memory.toggle", "[memory] The {0} sub-switch is now {1}."},
+    {"cmd.memory.retrieval", "retrieval"},
+    {"cmd.memory.write", "write"},
+    {"cmd.memory.catalog_warning", "[memory] The catalog is invalid; scanned topic files instead: {0}"},
+    {"cmd.memory.empty", "Project memory is empty."},
+    {"cmd.memory.queued", "[memory] Queued for background processing: {0}"},
+    {"cmd.memory.queue_failed", "[memory] Could not queue the job: {0}"},
+    {"cmd.memory.worker_failed", "[memory] Could not start pending background work: {0}"},
+    {"cmd.memory.project_failed", "[memory] Could not resolve project identity: {0}"},
+    {"cmd.memory.switch_failed", "[memory] Could not switch the memory project: {0}"},
 
     {"cmd.init.created", "Created {0} and loaded it for this session."},
     {"cmd.init.exists", "Project instructions already exist at {0}; left them untouched and reloaded them."},

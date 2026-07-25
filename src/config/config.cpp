@@ -792,6 +792,48 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
         }
         config.tool_search_threshold = static_cast<int>(value);
     }
+    if (parsed.contains("memory")) {
+        const auto& field = parsed["memory"];
+        if (!field.is_object()) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                   " 里的 memory 字段必须是 JSON object");
+        }
+        MemoryFileConfig memory;
+        const auto parse_bool = [&](const char* name, std::optional<bool>& target)
+            -> std::expected<void, std::string> {
+            if (!field.contains(name)) return {};
+            if (!field[name].is_boolean()) {
+                return std::unexpected("配置文件 " + file_path_for_error + " 里的 memory." + name +
+                                       " 必须是布尔值");
+            }
+            target = field[name].get<bool>();
+            return {};
+        };
+        const auto parse_positive = [&](const char* name, std::optional<std::size_t>& target)
+            -> std::expected<void, std::string> {
+            if (!field.contains(name)) return {};
+            if ((!field[name].is_number_integer() && !field[name].is_number_unsigned()) ||
+                field[name].get<long long>() <= 0) {
+                return std::unexpected("配置文件 " + file_path_for_error + " 里的 memory." + name +
+                                       " 必须是正整数");
+            }
+            target = static_cast<std::size_t>(field[name].get<long long>());
+            return {};
+        };
+        if (auto result = parse_bool("enabled", memory.enabled); !result.has_value())
+            return std::unexpected(result.error());
+        if (auto result = parse_bool("use", memory.use); !result.has_value())
+            return std::unexpected(result.error());
+        if (auto result = parse_bool("generate", memory.generate); !result.has_value())
+            return std::unexpected(result.error());
+        if (auto result = parse_positive("max_index_bytes", memory.max_index_bytes); !result.has_value())
+            return std::unexpected(result.error());
+        if (auto result = parse_positive("max_retrieval_bytes", memory.max_retrieval_bytes); !result.has_value())
+            return std::unexpected(result.error());
+        if (auto result = parse_positive("max_results", memory.max_results); !result.has_value())
+            return std::unexpected(result.error());
+        config.memory = std::move(memory);
+    }
     if (parsed.contains("connect_timeout_ms")) {
         const auto& field = parsed["connect_timeout_ms"];
         if ((!field.is_number_integer() && !field.is_number_unsigned()) || field.get<long long>() <= 0) {
@@ -1278,6 +1320,34 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     } else {
         result.config.tool_search_threshold = kDefaultToolSearchThreshold;
         result.sources.tool_search_threshold = Source::Default;
+    }
+
+    // ---- memory:默认关闭。只有用户主目录的全局配置能打开；受版本控制的
+    // 项目 config.json 只能在全局已打开之后收窄 use/generate/预算，或显式
+    // 关闭。陌生仓库不能替用户开启聊天提取。 ----
+    const auto apply_memory_fields = [](MemoryConfig& target, const MemoryFileConfig& source,
+                                        bool allow_enable) {
+        if (source.enabled.has_value()) {
+            if (!*source.enabled) target.enabled = false;
+            else if (allow_enable) target.enabled = true;
+        }
+        if (source.use.has_value()) target.use = *source.use;
+        if (source.generate.has_value()) target.generate = *source.generate;
+        if (source.max_index_bytes.has_value()) target.max_index_bytes = *source.max_index_bytes;
+        if (source.max_retrieval_bytes.has_value()) target.max_retrieval_bytes = *source.max_retrieval_bytes;
+        if (source.max_results.has_value()) target.max_results = *source.max_results;
+    };
+    result.config.memory = MemoryConfig{};
+    if (global_file.has_value() && global_file->memory.has_value()) {
+        apply_memory_fields(result.config.memory, *global_file->memory, /*allow_enable=*/true);
+        result.sources.memory = Source::GlobalConfigFile;
+    }
+    if (project_file.has_value() && project_file->memory.has_value()) {
+        if (result.config.memory.enabled) {
+            apply_memory_fields(result.config.memory, *project_file->memory, /*allow_enable=*/false);
+        }
+        // 全局没开时，项目 enabled=true 不生效；enabled=false 仍如实保持关闭。
+        result.sources.memory = Source::ProjectConfigFile;
     }
 
     // ---- M11(网络超时):connect_timeout_ms / stream_idle_timeout_secs /

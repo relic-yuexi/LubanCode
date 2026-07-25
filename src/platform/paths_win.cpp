@@ -30,6 +30,15 @@ std::optional<std::string> HomeDir() {
     return GetEnvVar("USERPROFILE");
 }
 
+std::expected<void, std::string> ReplaceFileAtomically(const std::filesystem::path& source,
+                                                        const std::filesystem::path& destination) {
+    if (MoveFileExW(source.c_str(), destination.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0) {
+        return {};
+    }
+    return std::unexpected("原子替换文件失败，Windows 错误码 " + std::to_string(GetLastError()));
+}
+
 std::wstring Utf8ToWide(const std::string& utf8) {
     if (utf8.empty()) {
         return std::wstring();

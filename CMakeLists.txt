@@ -242,6 +242,8 @@ add_library(lubancode_core STATIC
   src/tools/lua_tool.cpp
   src/tools/web_fetch.cpp
   src/tools/web_search.cpp
+  src/memory/project_memory.cpp
+  src/memory/memory_tool.cpp
   src/mcp/transport.cpp
   src/mcp/client.cpp
   src/mcp/mcp_tool.cpp

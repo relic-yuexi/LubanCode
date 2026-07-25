@@ -84,6 +84,29 @@ constexpr std::size_t kDefaultContextWindowTokens = 256000;
 // 显式配一个正整数就是——闸只在"确实想要"的时候存在。
 constexpr int kDefaultMaxTurns = 0;
 
+constexpr std::size_t kDefaultMemoryMaxIndexBytes = 16 * 1024;
+constexpr std::size_t kDefaultMemoryMaxRetrievalBytes = 24 * 1024;
+constexpr std::size_t kDefaultMemoryMaxResults = 4;
+
+struct MemoryConfig {
+    bool enabled = false;
+    bool use = true;
+    bool generate = true;
+    std::size_t max_index_bytes = kDefaultMemoryMaxIndexBytes;
+    std::size_t max_retrieval_bytes = kDefaultMemoryMaxRetrievalBytes;
+    std::size_t max_results = kDefaultMemoryMaxResults;
+};
+
+// 文件层保留“字段有没有写”的区别，才能让项目配置只收窄全局开关。
+struct MemoryFileConfig {
+    std::optional<bool> enabled;
+    std::optional<bool> use;
+    std::optional<bool> generate;
+    std::optional<std::size_t> max_index_bytes;
+    std::optional<std::size_t> max_retrieval_bytes;
+    std::optional<std::size_t> max_results;
+};
+
 // 一家模型服务端的会话配置。默认走 key_env(只记密钥所在环境变量的名字，
 // 不落明文)；/provider add 向导允许直接贴 key 落盘到 api_key 字段，取值
 // 优先级 api_key（非空）> 环境变量 key_env（见 ProviderApiKey）。api_key
@@ -270,6 +293,7 @@ struct Config {
     // 多端配置是配置文件里一个完整段：项目级写了 providers 就压全局那一
     // 段，跟 hooks/mcpServers/lsp 的既有合并法一致。
     std::vector<ProviderConfig> providers;
+    MemoryConfig memory;
 };
 
 // 每个字段最终来自哪一级,跟 Config 里的字段一一对应。
@@ -295,6 +319,7 @@ struct ConfigSources {
     Source extra_body = Source::Default;
     Source extra_headers = Source::Default;
     Source providers = Source::Default;
+    Source memory = Source::Default;
 };
 
 // settings.local.json 里的 permissions 段,项目级本地权限(不进版本库)。
@@ -382,6 +407,7 @@ struct FileConfig {
     std::optional<int> request_timeout_secs;
     std::optional<std::string> active_provider;
     std::optional<std::vector<ProviderConfig>> providers;
+    std::optional<MemoryFileConfig> memory;
     std::string source_path;
     // 这份 FileConfig 是不是从"旧位置迁移到新位置"这个动作里读出来的;
     // 有值就是要打印给用户看的那一行通知(LoadFileConfig 填,LoadFromEnv
