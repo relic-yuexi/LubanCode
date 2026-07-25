@@ -8,7 +8,7 @@
   <a href="../README.md">中文首页</a> · <a href="../README.en.md">English README</a> · <a href="https://github.com/relic-yuexi/LubanCode/releases">Releases</a>
 </p>
 
-这里不摆宣传话，只收能拿来做事的说明。当前文档对应 `v0.23.5`。字段名、命令名若与程序输出冲突，以 `lubancode --help`、`lubancode --config` 与源码为准。
+这里不摆宣传话，只收能拿来做事的说明。当前文档对应 `v0.24.0`。字段名、命令名若与程序输出冲突，以 `lubancode --help`、`lubancode --config` 与源码为准。
 
 ## 从哪一页读起
 
