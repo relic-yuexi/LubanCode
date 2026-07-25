@@ -23,6 +23,7 @@
 
 #include "cli/setup_wizard.hpp"
 #include "config/config.hpp"
+#include "config/provider_catalog.hpp"
 
 namespace lubancode::cli {
 
@@ -43,5 +44,11 @@ struct ProviderWizardOutcome {
 // providers 列表。
 std::optional<ProviderWizardOutcome> RunProviderAddWizard(WizardIO& io, const std::string& name_prefill,
                                                             const std::vector<config::ProviderConfig>& existing);
+
+// 带在线目录的入口：先选常见厂家，最后一项仍可走全手填旧向导。选中预设后
+// base_url/wire/model/窗口/私有参数全带上，只问密钥并确认。
+std::optional<ProviderWizardOutcome> RunProviderPresetWizard(
+    WizardIO& io, const config::ProviderCatalog& catalog, const std::string& name_prefill,
+    const std::vector<config::ProviderConfig>& existing);
 
 }  // namespace lubancode::cli

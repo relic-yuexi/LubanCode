@@ -10,6 +10,7 @@
 #include <nlohmann/json.hpp>
 
 #include "config/config.hpp"
+#include "config/provider_catalog.hpp"
 
 namespace lubancode::config {
 
@@ -92,6 +93,13 @@ std::optional<ModelCatalogEntry> ParseEntry(const nlohmann::json& item, std::str
                 error_out = "supported_think_levels[" + std::to_string(i) + "] 的 description 字段必须是字符串";
                 return std::nullopt;
             }
+            if (level.contains("extra_body")) {
+                if (!level["extra_body"].is_object()) {
+                    error_out = "supported_think_levels[" + std::to_string(i) + "] 的 extra_body 字段必须是 object";
+                    return std::nullopt;
+                }
+                parsed_level.extra_body = level["extra_body"];
+            }
             entry.supported_think_levels.push_back(std::move(parsed_level));
         }
     }
@@ -139,6 +147,37 @@ std::optional<ModelCatalogEntry> ParseEntry(const nlohmann::json& item, std::str
     }
 
     return entry;
+}
+
+ModelCatalog BuiltinModelsFromProviderCatalog() {
+    const ProviderCatalog providers = LoadProviderCatalog();
+    ModelCatalog catalog;
+    catalog.source_path = providers.source_path;
+    catalog.warnings = providers.warnings;
+    for (const auto& provider : providers.providers) {
+        for (const auto& model : provider.models) {
+            bool duplicate = false;
+            for (const auto& existing : catalog.models) {
+                if (existing.slug == model.id) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) continue;
+            ModelCatalogEntry entry;
+            entry.slug = model.id;
+            entry.display_name = model.name;
+            entry.description = model.description;
+            entry.default_think = model.default_think;
+            entry.context_window_tokens = model.context_window_tokens;
+            for (const auto& variant : model.variants) {
+                entry.supported_think_levels.push_back(
+                    ThinkLevel{variant.id, variant.description, variant.extra_body});
+            }
+            catalog.models.push_back(std::move(entry));
+        }
+    }
+    return catalog;
 }
 
 }  // namespace
@@ -197,25 +236,31 @@ ModelCatalog ParseModelCatalogJson(const std::string& json_text, const std::stri
 }
 
 ModelCatalog LoadModelCatalog() {
+    ModelCatalog builtin = BuiltinModelsFromProviderCatalog();
     const auto path = ModelCatalogPath();
     if (!path.has_value()) {
-        return ModelCatalog{};  // 找不到主目录:空目录,不算错
+        return builtin;
     }
 
     std::error_code ec;
     if (!std::filesystem::exists(std::filesystem::path(*path), ec) || ec) {
-        return ModelCatalog{};  // 文件不存在 = 空目录,一切回退现状
+        return builtin;
     }
 
     std::ifstream file(std::filesystem::path(*path), std::ios::binary);
     if (!file.is_open()) {
-        ModelCatalog catalog;
-        catalog.warnings.push_back("模型目录 " + *path + " 存在但打不开(检查权限),当作空目录");
-        return catalog;
+        builtin.warnings.push_back("模型目录 " + *path + " 存在但打不开(检查权限),改用内置目录");
+        return builtin;
     }
     std::ostringstream buffer;
     buffer << file.rdbuf();
-    return ParseModelCatalogJson(buffer.str(), *path);
+    ModelCatalog user = ParseModelCatalogJson(buffer.str(), *path);
+    // 用户 models.json 优先；只把没被用户同 slug 覆盖的内置条目补在后头。
+    for (const auto& entry : builtin.models) {
+        if (user.FindBySlug(entry.slug) == nullptr) user.models.push_back(entry);
+    }
+    user.warnings.insert(user.warnings.end(), builtin.warnings.begin(), builtin.warnings.end());
+    return user;
 }
 
 std::vector<std::string> ThinkLevelHintLines(const ModelCatalogEntry* entry) {
@@ -241,6 +286,15 @@ bool ThinkLevelDeclared(const ModelCatalogEntry& entry, const std::string& level
         }
     }
     return false;
+}
+
+nlohmann::json ThinkLevelExtraBody(const ModelCatalogEntry* entry, const std::string& level) {
+    if (entry == nullptr) return nlohmann::json::object();
+    const std::string wanted = ToLowerAscii(level);
+    for (const auto& declared : entry->supported_think_levels) {
+        if (ToLowerAscii(declared.effort) == wanted) return declared.extra_body;
+    }
+    return nlohmann::json::object();
 }
 
 CatalogApplication ComputeCatalogApplication(const ModelCatalog& catalog, const std::string& slug,

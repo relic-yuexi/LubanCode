@@ -64,15 +64,21 @@ std::expected<std::vector<ModelInfo>, std::string> ParseResponsesModelsResponse(
 
 std::expected<std::vector<ModelInfo>, Error> ListModels(config::Wire wire, const std::string& base_url,
                                                           const std::string& api_key, int connect_timeout_ms,
-                                                          int request_timeout_secs) {
+                                                          int request_timeout_secs,
+                                                          const std::map<std::string, std::string>& extra_headers) {
     const bool is_anthropic = (wire == config::Wire::Anthropic);
     const std::string url = base_url + (is_anthropic ? "/v1/models" : "/models");
 
     // M11:非流式请求,直接给连接超时 + 整体超时(cpr::Timeout 是总时长上限,
     // 跟 send_stream 那条"不设总超时,只设空闲读超时"的路数不一样——这里
     // 响应体小,回复"很长"的顾虑不存在)。
+    cpr::Header headers{{"Authorization", "Bearer " + api_key}};
+    for (const auto& [name, value] : extra_headers) {
+        if (value.empty()) headers.erase(name);
+        else headers[name] = value;
+    }
     cpr::Response response =
-        cpr::Get(cpr::Url{url}, cpr::Header{{"Authorization", "Bearer " + api_key}},
+        cpr::Get(cpr::Url{url}, headers,
                  cpr::ConnectTimeout{std::chrono::milliseconds(connect_timeout_ms)},
                  cpr::Timeout{std::chrono::seconds(request_timeout_secs)});
 

@@ -11,7 +11,7 @@ LubanCode 是一支 C++23 命令行程序。上层管交互，中层管代理循
 ```mermaid
 flowchart LR
     CLI[cli<br/>参数、输入、渲染] --> Agent[agent<br/>循环、上下文、会话]
-    Agent --> API[api<br/>Anthropic / Responses]
+    Agent --> API[api<br/>Anthropic / Responses / Chat]
     Agent --> Tools[tools<br/>文件、命令、搜索、扩展]
     Tools --> MCP[mcp<br/>stdio client]
     Tools --> LSP[lsp<br/>semantic client]
@@ -25,7 +25,7 @@ flowchart LR
 | --- | --- | --- |
 | CLI | `src/cli/` | 参数、输入编辑器、流式渲染、Markdown、diff、主题、i18n、slash 命令。 |
 | Agent | `src/agent/` | 对话循环、工具回填、上下文压缩、会话存档、系统提示拼装。 |
-| API | `src/api/` | 中立消息类型、SSE 分帧、Anthropic 与 Responses 两套后端。 |
+| API | `src/api/` | 中立消息类型、SSE 分帧、Anthropic、Responses 与 Chat 三套后端。 |
 | Tools | `src/tools/` | 文件、命令、搜索、子代理、Skill、插件、MCP/LSP 适配。 |
 | MCP | `src/mcp/` | JSON-RPC、stdio 传输、工具发现与调用。 |
 | LSP | `src/lsp/` | JSON-RPC、文档同步、语义查询、懒启动与闲置回收。 |
@@ -63,7 +63,7 @@ API 后端只把协议事件翻成中立事件。工具只收 JSON 参数，吐�
 
 ## 双后端
 
-LubanCode 同时支持 Anthropic Messages 与 OpenAI Responses。两套协议语义不同，代码分目录放：
+LubanCode 同时支持 Anthropic Messages、OpenAI Responses 与 Chat Completions。三套协议语义不同，代码分目录放：
 
 ```text
 src/api/
@@ -71,6 +71,7 @@ src/api/
   types.hpp              Message / ContentBlock / ToolCall / StreamEvent
   sse_framing.*          通用 SSE 分帧
   anthropic/             Messages 请求、事件与客户端
+  chat/                  Chat Completions 请求、事件与客户端
   responses/             Responses 请求、事件与客户端
 ```
 
@@ -79,7 +80,7 @@ src/api/
 1. **分帧**只管 `event:`、`data:` 与断行，不懂厂商字段。
 2. **语义解析**各写各的，把原始 JSON 翻成 `StreamEvent`。
 
-Agent 只认中立类型。`wire` 切换时，重建后端即可。provider 的 `extra_body` 与 `extra_headers` 在内置请求拼完后再合并，给厂商私有字段留出口。
+Agent 只认中立类型。`wire` 切换时，重建后端即可。provider 的 `extra_body` 先合并，当前模型 variant 的 `extra_body` 最后压上；厂商私有字段无需写死在协议层。常见厂家资料来自 `catalog/providers.json`，构建时嵌进程序，运行时可从 GitHub 更新缓存。
 
 ## 工具系统
 
@@ -110,7 +111,7 @@ Windows 用 `CreateProcessW`、Job Object 与宽字符路径。POSIX 用 `fork/e
 ```text
 core/        身份、工作方式、答话风格
 features/    文件、命令、Skill、MCP、LSP 等工具方针
-platforms/   Anthropic / Responses 协议段
+platforms/   Anthropic / Responses / Chat 协议段
 ```
 
 运行时逐模块判断：用户文件非空便优先，否则退回嵌入版。`system_prompt.md` 替换人格段；`SOUL.md` 只叠风格。两者不该混作一件事。

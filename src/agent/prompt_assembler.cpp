@@ -206,6 +206,8 @@ std::string AssembleSystemPrompt(const PromptOptions& options) {
         append(ModuleByPath(options.prompts_dir, "platforms/anthropic.md"));
     } else if (options.wire == "responses") {
         append(ModuleByPath(options.prompts_dir, "platforms/responses.md"));
+    } else if (options.wire == "chat_completions") {
+        append(ModuleByPath(options.prompts_dir, "platforms/chat_completions.md"));
     }
     return prompt;
 }

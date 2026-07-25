@@ -21,7 +21,7 @@ std::string Trim(const std::string& s) {
 }
 
 std::string WireToString(config::Wire wire) {
-    return wire == config::Wire::Responses ? "responses" : "anthropic";
+    return config::ProviderWireName(wire);
 }
 
 }  // namespace
@@ -171,13 +171,15 @@ std::optional<WizardOutcome> RunSetupWizard(WizardIO& io) {
     io.print(tr("wizard.wire.title"));
     io.print(tr("wizard.wire.opt1"));
     io.print(tr("wizard.wire.opt2"));
+    io.print(tr("wizard.wire.opt3"));
     config::Wire wire = config::Wire::Anthropic;
     {
-        const auto choice = ReadChoice(io, tr("wizard.choose_prompt"), 2, 1);
+        const auto choice = ReadChoice(io, tr("wizard.choose_prompt"), 3, 1);
         if (!choice.has_value()) {
             return std::nullopt;
         }
-        wire = (*choice == 2) ? config::Wire::Responses : config::Wire::Anthropic;
+        wire = *choice == 2 ? config::Wire::Responses
+                            : (*choice == 3 ? config::Wire::ChatCompletions : config::Wire::Anthropic);
     }
     io.print("");
 

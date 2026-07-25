@@ -38,8 +38,8 @@
 namespace lubancode::config {
 
 // 说哪种"方言"跟模型对话:Anthropic 的 Messages API,还是 OpenAI 的
-// Responses API。默认 anthropic。
-enum class Wire { Anthropic, Responses };
+// Responses API，还是兼容面最广的 OpenAI Chat Completions。默认 anthropic。
+enum class Wire { Anthropic, Responses, ChatCompletions };
 
 // 一个字段的值最终是从哪一级配置来的,--config 诊断输出用。
 // 配置文件分两级:项目级 <cwd>/.lubancode/config.json 压过全局
@@ -125,12 +125,12 @@ struct ProviderConfig {
     std::size_t context_window_tokens = kDefaultContextWindowTokens;
     // native_web_search:该端若原生支持联网搜索(服务端自己查、把结果编排
     // 进回复文本里,客户端不用实现任何执行逻辑),开这个开关就在请求里带上
-    // 声明。默认 false(不是所有兼容端都支持,乱开可能把请求搞坏)。两种
-    // wire 都读这个开关,但各自翻译成自己协议的形状——responses 协议塞
+    // 声明。默认 false(不是所有兼容端都支持,乱开可能把请求搞坏)。
+    // responses 协议塞
     // {"type":"web_search"}(BuildRequestJson,src/api/responses/request.cpp),
     // anthropic 协议塞 {"type":"web_search_日期版本号","name":"web_search"}
-    // (BuildRequestJson,src/api/anthropic/client.cpp)。按 provider 各自
-    // 开关,不搞全局唯一开关。
+    // (BuildRequestJson,src/api/anthropic/client.cpp)。chat_completions 没有
+    // 统一的内置搜索形状,靠 extra_body。按 provider 各自开关。
     bool native_web_search = false;
     // extra_body:任意厂商私有请求参数(比如 GLM 的 thinking.type + 一个
     // 自定义 reasoning_effort 档位),每次请求前浅合并进请求体顶层——键
@@ -241,9 +241,9 @@ struct Config {
     std::string base_url;
     std::string auth_token;  // 即 api_key
     std::string model;
-    // native_web_search:当前生效端是否声明原生联网搜索,anthropic/
-    // responses 两种 wire 都读这个字段(各自翻译成自己协议的 tools 数组
-    // 形状,见 ProviderConfig::native_web_search 的注释)。跟 wire/
+    // native_web_search:当前生效端是否声明原生联网搜索。anthropic/
+    // responses 各自翻译成协议工具；chat_completions 没有统一形状，靠
+    // extra_body。见 ProviderConfig::native_web_search。跟 wire/
     // base_url/auth_token/model 一样,是"当前激活端"的运行期状态——只在
     // /provider switch 时从 ProviderConfig::native_web_search 镜像过来,
     // 不走独立的配置文件/环境变量四级合并(provider 才是唯一来源),默认
@@ -490,7 +490,7 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
 // "环境变量 LUBANCODE_CONTEXT_WINDOW 里的" 这类前缀)。
 std::expected<std::size_t, std::string> ParseContextWindowTokens(const std::string& raw);
 
-// provider 的 wire 写法沿用既有配置字段：anthropic / responses。
+// provider 的 wire 写法沿用既有配置字段：anthropic / responses / chat_completions。
 std::expected<Wire, std::string> ParseProviderWire(const std::string& raw);
 std::string ProviderWireName(Wire wire);
 

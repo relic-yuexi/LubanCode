@@ -293,6 +293,14 @@ TEST_CASE("extra_body 跟内置字段(reasoning)同名时,extra_body 的值整�
     CHECK(body.at("reasoning").at("effort") == "max");
 }
 
+TEST_CASE("模型 variant 的 request.extra_body 最后压过 provider extra_body") {
+    Request request;
+    request.extra_body = nlohmann::json{{"thinking", nlohmann::json{{"type", "disabled"}}}};
+    const auto body = BuildRequestJson(
+        request, false, nlohmann::json{{"thinking", nlohmann::json{{"type", "enabled"}}}});
+    CHECK(body["thinking"]["type"] == "disabled");
+}
+
 TEST_CASE("extra_body 也能覆盖 native_web_search 拼出来的 tools 数组") {
     Request request;
     const auto extra_body = nlohmann::json::parse(R"({"tools":[]})");
@@ -319,6 +327,9 @@ TEST_CASE("responses::ApplyExtraHeaders: 为空时基础头原样不变,新头�
     const auto overridden = lubancode::api::responses::ApplyExtraHeaders(base, {{"Authorization", "Bearer new-token"}});
     CHECK(overridden.at("Authorization") == "Bearer new-token");
     CHECK(overridden.at("Content-Type") == "application/json");
+
+    const auto removed = lubancode::api::responses::ApplyExtraHeaders(base, {{"Authorization", ""}});
+    CHECK_FALSE(removed.contains("Authorization"));
 }
 
 TEST_CASE("用户图片映射成 Responses input_image data URL") {

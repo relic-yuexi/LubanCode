@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/relic-yuexi/LubanCode/main/catalog/providers.schema.json",
+  "title": "LubanCode provider catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "revision", "providers"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "revision": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+    "providers": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/provider" }
+    }
+  },
+  "$defs": {
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "wire", "base_url", "key_env", "default_model", "models"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "wire": { "enum": ["anthropic", "responses", "chat_completions"] },
+        "base_url": { "type": "string", "pattern": "^https://" },
+        "key_env": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" },
+        "default_model": { "type": "string", "minLength": 1 },
+        "model_reasoning_effort": { "type": "string" },
+        "native_web_search": { "type": "boolean" },
+        "docs_url": { "type": "string", "pattern": "^https://" },
+        "extra_body": { "type": "object" },
+        "extra_headers": { "type": "object", "additionalProperties": { "type": "string" } },
+        "models": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/model" }
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "context_window": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "string" }] },
+        "max_output": { "type": "integer", "minimum": 1 },
+        "default_think": { "type": "string" },
+        "capabilities": { "type": "object", "additionalProperties": { "type": "boolean" } },
+        "variants": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "description": { "type": "string" },
+              "extra_body": { "type": "object" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

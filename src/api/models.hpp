@@ -3,15 +3,16 @@
 // 是配置阶段(初次配置向导、/model 命令)用得上的另一件事,没必要塞进
 // send_stream 那套接口里搅在一起。
 //
-// 两种 wire 的端点、响应体格式都不一样:
+// Anthropic 与 OpenAI 兼容 wire 的端点、响应体格式不一样:
 //   - anthropic wire:GET {base_url}/v1/models,响应 {"data":[{"id","display_name",...}]}
-//   - responses wire:GET {base_url}/models,响应 {"object":"list","data":[{"id",...}]}
+//   - responses/chat_completions wire:GET {base_url}/models,响应 {"object":"list","data":[{"id",...}]}
 // JSON 解析拆成两个纯函数(ParseAnthropicModelsResponse / ParseResponsesModelsResponse),
 // 不碰网络,好单测;ListModels 才是真正发 HTTP GET 的地方。
 
 #pragma once
 
 #include <expected>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -48,6 +49,7 @@ std::expected<std::vector<ModelInfo>, std::string> ParseResponsesModelsResponse(
 std::expected<std::vector<ModelInfo>, Error> ListModels(config::Wire wire, const std::string& base_url,
                                                           const std::string& api_key,
                                                           int connect_timeout_ms = config::kDefaultConnectTimeoutMs,
-                                                          int request_timeout_secs = config::kDefaultRequestTimeoutSecs);
+                                                          int request_timeout_secs = config::kDefaultRequestTimeoutSecs,
+                                                          const std::map<std::string, std::string>& extra_headers = {});
 
 }  // namespace lubancode::api

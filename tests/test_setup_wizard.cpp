@@ -99,6 +99,16 @@ TEST_CASE("RunSetupWizard: wire 选 2 (responses),回车走 model 列表选号")
     CHECK(outcome->save_requested == false);
 }
 
+TEST_CASE("RunSetupWizard: wire 选 3 是 chat_completions") {
+    ScriptedIO scripted;
+    scripted.inputs = {"", "3", "https://api.example.com/v1", "key", "chat-model", "n"};
+    auto io = scripted.Build();
+    const auto outcome = cli::RunSetupWizard(io);
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->config.wire == config::Wire::ChatCompletions);
+    CHECK(outcome->config.model == "chat-model");
+}
+
 TEST_CASE("RunSetupWizard: model 列表拉取失败,回落到手输模型名") {
     ScriptedIO scripted;
     scripted.fetch = [](config::Wire, const std::string&,

@@ -16,6 +16,7 @@
 | --- | --- |
 | 十分钟内装好、跑起来 | [中文 README：安装与快速上手](../README.md#安装) |
 | 接模型服务，管多个 provider | [配置手册](configuration.md) |
+| 维护在线厂家与模型预设 | [Provider 目录](provider-catalog.md) |
 | 配 hooks、MCP、搜索或 LSP | [配置手册：外接服务](configuration.md#四hooks--mcpservers--search--lsp) |
 | 写 Skill、Lua 工具或原生插件 | [扩展指南](extensions.md) |
 | 看模块怎么分、请求怎么走 | [架构说明](architecture.md) |

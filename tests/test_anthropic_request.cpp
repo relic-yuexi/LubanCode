@@ -202,6 +202,14 @@ TEST_CASE("extra_body 跟内置字段(thinking)同名时,extra_body 的值整个
     CHECK_FALSE(body.at("thinking").contains("budget_tokens"));
 }
 
+TEST_CASE("模型 variant 的 request.extra_body 最后压过 provider extra_body") {
+    Request request;
+    request.extra_body = nlohmann::json{{"thinking", nlohmann::json{{"type", "disabled"}}}};
+    const auto body = BuildRequestJson(
+        request, false, nlohmann::json{{"thinking", nlohmann::json{{"type", "enabled"}}}});
+    CHECK(body["thinking"]["type"] == "disabled");
+}
+
 TEST_CASE("extra_body 也能覆盖 native_web_search 拼出来的 tools 数组") {
     Request request;
     const auto extra_body = nlohmann::json::parse(R"({"tools":[]})");
@@ -235,6 +243,13 @@ TEST_CASE("ApplyExtraHeaders: 同名(含 Authorization)整条覆盖,用户对自
     const auto merged = lubancode::api::anthropic::ApplyExtraHeaders(base, {{"Authorization", "Bearer new-token"}});
     CHECK(merged.at("Authorization") == "Bearer new-token");
     CHECK(merged.at("Content-Type") == "application/json");  // 没点名的那条不受影响
+}
+
+TEST_CASE("ApplyExtraHeaders: 空值删除基础头") {
+    const std::map<std::string, std::string> base{{"Authorization", "Bearer old"}, {"X-Keep", "yes"}};
+    const auto merged = lubancode::api::anthropic::ApplyExtraHeaders(base, {{"Authorization", ""}});
+    CHECK_FALSE(merged.contains("Authorization"));
+    CHECK(merged.at("X-Keep") == "yes");
 }
 
 TEST_CASE("用户图片映射成 Anthropic image/base64 block") {

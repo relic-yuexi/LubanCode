@@ -64,11 +64,22 @@ std::expected<Wire, std::string> ParseProviderWire(const std::string& raw) {
     if (raw == "responses") {
         return Wire::Responses;
     }
-    return std::unexpected("只认得 anthropic 或 responses,写的是: " + raw);
+    if (raw == "chat_completions" || raw == "chat") {
+        return Wire::ChatCompletions;
+    }
+    return std::unexpected("只认得 anthropic、responses 或 chat_completions,写的是: " + raw);
 }
 
 std::string ProviderWireName(Wire wire) {
-    return wire == Wire::Responses ? "responses" : "anthropic";
+    switch (wire) {
+        case Wire::Anthropic:
+            return "anthropic";
+        case Wire::Responses:
+            return "responses";
+        case Wire::ChatCompletions:
+            return "chat_completions";
+    }
+    return "anthropic";
 }
 
 std::expected<bool, std::string> ParseBoolToggle(const std::string& raw) {
@@ -1167,14 +1178,11 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         wire_source = Source::Default;
     }
 
-    Wire wire;
-    if (wire_str == "anthropic") {
-        wire = Wire::Anthropic;
-    } else if (wire_str == "responses") {
-        wire = Wire::Responses;
-    } else {
-        return std::unexpected(wire_error_origin + " 只认得 anthropic 或 responses,写的是: " + wire_str);
+    const auto parsed_wire = ParseProviderWire(wire_str);
+    if (!parsed_wire.has_value()) {
+        return std::unexpected(wire_error_origin + " " + parsed_wire.error());
     }
+    const Wire wire = *parsed_wire;
     result.config.wire = wire;
     result.sources.wire = wire_source;
 
@@ -1604,7 +1612,7 @@ std::expected<std::string, std::string> SaveConfigFile(const Config& config) {
     }
 
     nlohmann::json j;
-    j["wire"] = (config.wire == Wire::Responses) ? "responses" : "anthropic";
+    j["wire"] = ProviderWireName(config.wire);
     j["base_url"] = config.base_url;
     j["api_key"] = config.auth_token;
     j["model"] = config.model;

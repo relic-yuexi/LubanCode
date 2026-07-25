@@ -1844,6 +1844,13 @@ TEST_CASE("ParseFileConfigJson: providers 解出默认 key_env 与上下文窗�
     CHECK(provider.context_window_tokens == 1000000);
 }
 
+TEST_CASE("ParseProviderWire: chat_completions 是正式名，chat 是兼容别名") {
+    REQUIRE(config::ParseProviderWire("chat_completions").has_value());
+    CHECK(*config::ParseProviderWire("chat_completions") == config::Wire::ChatCompletions);
+    CHECK(*config::ParseProviderWire("chat") == config::Wire::ChatCompletions);
+    CHECK(config::ProviderWireName(config::Wire::ChatCompletions) == "chat_completions");
+}
+
 TEST_CASE("ParseFileConfigJson: providers 坏地址、坏协议与重名都拦下") {
     const auto bad_url = config::ParseFileConfigJson(
         R"({"providers":[{"name":"x","base_url":"api.example.test","wire":"anthropic"}]})", "/tmp/config.json");
@@ -1851,7 +1858,7 @@ TEST_CASE("ParseFileConfigJson: providers 坏地址、坏协议与重名都拦�
     CHECK(bad_url.error().find("http") != std::string::npos);
 
     const auto bad_wire = config::ParseFileConfigJson(
-        R"({"providers":[{"name":"x","base_url":"https://api.example.test","wire":"chat"}]})", "/tmp/config.json");
+        R"({"providers":[{"name":"x","base_url":"https://api.example.test","wire":"unknown"}]})", "/tmp/config.json");
     CHECK_FALSE(bad_wire.has_value());
     CHECK(bad_wire.error().find("wire") != std::string::npos);
 

@@ -1,0 +1,22 @@
+if(NOT DEFINED INPUT OR NOT DEFINED OUTPUT)
+  message(FATAL_ERROR "embed_provider_catalog.cmake 需要 -DINPUT=... -DOUTPUT=...")
+endif()
+
+file(READ "${INPUT}" _content)
+string(REPLACE "\r\n" "\n" _content "${_content}")
+if(_content MATCHES "\\)LUBAN_CATALOG\"")
+  message(FATAL_ERROR "provider catalog 撞上 raw string 定界符")
+endif()
+
+set(_header "// 自动生成，源头是 catalog/providers.json。\n#pragma once\n\n")
+string(APPEND _header "namespace lubancode::config::embedded {\n")
+string(APPEND _header "inline constexpr const char kProviderCatalogJson[] = R\"LUBAN_CATALOG(${_content})LUBAN_CATALOG\";\n")
+string(APPEND _header "}  // namespace lubancode::config::embedded\n")
+
+set(_old "")
+if(EXISTS "${OUTPUT}")
+  file(READ "${OUTPUT}" _old)
+endif()
+if(NOT _old STREQUAL _header)
+  file(WRITE "${OUTPUT}" "${_header}")
+endif()

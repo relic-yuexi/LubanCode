@@ -183,6 +183,15 @@ TEST_CASE("ThinkLevelDeclared: 表内档位认(大小写不敏感),表外不认"
     CHECK_FALSE(config::ThinkLevelDeclared(*entry, ""));
 }
 
+TEST_CASE("ThinkLevelExtraBody: 按档位取模型私有参数，大小写不敏感") {
+    const auto catalog = config::ParseModelCatalogJson(
+        R"({"models":[{"slug":"m","supported_think_levels":[{"effort":"high","extra_body":{"thinking":{"type":"enabled"}}}]}]})",
+        "p");
+    const auto body = config::ThinkLevelExtraBody(catalog.FindBySlug("m"), "HIGH");
+    CHECK(body["thinking"]["type"] == "enabled");
+    CHECK(config::ThinkLevelExtraBody(catalog.FindBySlug("m"), "none").empty());
+}
+
 // ---------------------------------------------------------------------------
 // ComputeCatalogApplication:启动/切换时应用什么
 // ---------------------------------------------------------------------------

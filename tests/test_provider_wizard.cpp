@@ -253,3 +253,38 @@ TEST_CASE("RunProviderAddWizard: 中途 EOF 返回 std::nullopt") {
     const auto outcome = cli::RunProviderAddWizard(io, "", {});
     CHECK_FALSE(outcome.has_value());
 }
+
+TEST_CASE("RunProviderPresetWizard: 选预设只问 key 和确认，默认模型参数全带上") {
+    const auto catalog = config::ParseProviderCatalogJson(
+        R"({"schema_version":1,"revision":"2026-07-25","providers":{"glm":{"name":"GLM","description":"Chat","wire":"chat_completions","base_url":"https://api.test/v1","key_env":"GLM_KEY","default_model":"glm-x","model_reasoning_effort":"max","extra_body":{"tool_stream":true},"models":{"glm-x":{"name":"GLM X","context_window":"1m"}}}}})",
+        "p");
+    REQUIRE(catalog.has_value());
+    ScriptedIO scripted;
+    scripted.inputs = {"1", "sk-demo", ""};
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderPresetWizard(io, *catalog, "", {});
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->save_requested);
+    CHECK(outcome->provider.name == "glm");
+    CHECK(outcome->provider.wire == config::Wire::ChatCompletions);
+    CHECK(outcome->provider.model == "glm-x");
+    CHECK(outcome->provider.context_window_tokens == 1000000);
+    CHECK(outcome->provider.api_key == "sk-demo");
+    CHECK(outcome->provider.extra_body["tool_stream"] == true);
+}
+
+TEST_CASE("RunProviderPresetWizard: 最后一项仍回到全手填旧向导") {
+    const auto catalog = config::ParseProviderCatalogJson(
+        R"({"schema_version":1,"revision":"2026-07-25","providers":{"p":{"name":"P","wire":"responses","base_url":"https://api.test/v1","key_env":"P_KEY","default_model":"m","models":{"m":{"name":"M"}}}}})",
+        "p");
+    REQUIRE(catalog.has_value());
+    ScriptedIO scripted;
+    scripted.inputs = {
+        "2", "custom", "https://custom.test/v1", "3", "key", "model", "", "", "Y"
+    };
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderPresetWizard(io, *catalog, "", {});
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->provider.name == "custom");
+    CHECK(outcome->provider.wire == config::Wire::ChatCompletions);
+}

@@ -169,6 +169,11 @@ json BuildRequestJson(const Request& request, bool native_web_search, const json
             body[it.key()] = it.value();
         }
     }
+    if (request.extra_body.is_object()) {
+        for (auto it = request.extra_body.begin(); it != request.extra_body.end(); ++it) {
+            body[it.key()] = it.value();
+        }
+    }
 
     return body;
 }
@@ -176,7 +181,8 @@ json BuildRequestJson(const Request& request, bool native_web_search, const json
 std::map<std::string, std::string> ApplyExtraHeaders(std::map<std::string, std::string> base,
                                                         const std::map<std::string, std::string>& extra_headers) {
     for (const auto& [name, value] : extra_headers) {
-        base[name] = value;
+        if (value.empty()) base.erase(name);
+        else base[name] = value;
     }
     return base;
 }

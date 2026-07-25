@@ -35,7 +35,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 1. **`LUBANCODE_*` 专属环境变量**。
 2. **项目级** `config.json`。
 3. **全局** `config.json`。
-4. **通用环境变量**(向后兼容,跟 Claude Code、Codex 等工具共用同名变量容易撞车,建议改用第 1 级):`wire=anthropic` 时读 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_MODEL`;`wire=responses` 时读 `OPENAI_BASE_URL`/`OPENAI_API_KEY`/`OPENAI_MODEL`。
+4. **通用环境变量**(向后兼容,跟 Claude Code、Codex 等工具共用同名变量容易撞车,建议改用第 1 级):`wire=anthropic` 时读 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_MODEL`;`wire=responses` 或 `chat_completions` 时读 `OPENAI_BASE_URL`/`OPENAI_API_KEY`/`OPENAI_MODEL`。
 5. **内置默认值**。
 
 逐字段合并:项目级写了某字段就用项目级那一份,项目级缺的字段回退全局,全局也缺再往下一级找。`hooks`、`mcpServers`、`search`、`lsp`、`status_panel` 这几段是**整段回退**(不做键级混合)——项目级写了 `hooks` 就用项目级那一整段 `hooks`,否则用全局那一整段。`tool_search_threshold`、`connect_timeout_ms`、`stream_idle_timeout_secs`、`request_timeout_secs` 只从配置文件(项目级 > 全局)或内置默认值来,没有环境变量这一级。
@@ -52,7 +52,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 
 | 字段 | 类型与取值 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `wire` | `anthropic` / `responses` | `anthropic` | 选 Anthropic Messages API 还是 OpenAI Responses API。 |
+| `wire` | `anthropic` / `responses` / `chat_completions` | `anthropic` | 选择 Anthropic Messages、OpenAI Responses 或 OpenAI Chat Completions 兼容接口。`chat` 也认，写回时统一成 `chat_completions`。 |
 | `base_url` | 字符串 | 无内置默认值 | 模型服务根地址。 |
 | `api_key` | 字符串 | 无内置默认值 | 模型服务认证值,别提交进仓库。 |
 | `model` | 字符串 | 无内置默认值 | 发请求所用模型名。 |
@@ -146,7 +146,7 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 | --- | --- | --- |
 | `name` | 字符串,必填 | provider 名字,`/provider switch <名字>` 用。 |
 | `base_url` | 字符串,必填 | 服务根地址。 |
-| `wire` | `anthropic` / `responses` | 协议。 |
+| `wire` | `anthropic` / `responses` / `chat_completions` | 协议。 |
 | `key_env` | 字符串 | 密钥所在环境变量名(默认只记名字,不落明文密钥)。 |
 | `api_key` | 字符串,可选 | 非空时优先于 `key_env`(`/provider add` 向导贴明文密钥走这条,展示/日志一律打码)。 |
 | `model` | 字符串,可选 | 默认模型,留空仍可 `/model` 选。 |
@@ -160,9 +160,10 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 
 ```
 /provider list
-/provider add                          进分步向导(裸敲)
-/provider add <名字>                    进分步向导(名字先给上)
-/provider add <名字> <base_url> <anthropic|responses> [--key-env 变量名] [--key 明文key] [--model 模型] [--effort 档位] [--window 大小]
+/provider refresh                       从 GitHub 更新常见厂家目录
+/provider add                          从常见厂家目录选择；末项为全手填
+/provider add <名字>                    同上，预填本地 provider 名
+/provider add <名字> <base_url> <anthropic|responses|chat_completions> [--key-env 变量名] [--key 明文key] [--model 模型] [--effort 档位] [--window 大小]
 /provider switch <名字> [模型]
 /provider remove <名字>
 /provider set <名字> native_web_search on|off
@@ -176,7 +177,7 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 
 | 环境变量 | 对应字段 | 取值 |
 | --- | --- | --- |
-| `LUBANCODE_WIRE` | `wire` | `anthropic` 或 `responses`。 |
+| `LUBANCODE_WIRE` | `wire` | `anthropic`、`responses` 或 `chat_completions`。 |
 | `LUBANCODE_BASE_URL` | `base_url` | 模型服务根地址。 |
 | `LUBANCODE_API_KEY` | `api_key` | 模型服务认证值。 |
 | `LUBANCODE_MODEL` | `model` | 模型名。 |
@@ -268,7 +269,7 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 
 有的模型服务藏着自家专属开关——GLM 的 `thinking` 思考开关、别家的分级 `reasoning_effort`、某个厂商才认的顶层字段——lubancode 不会挨个内置,靠这两个字段自己往请求上加。顶层单 provider 配置、`providers` 数组里的每一条,都认这两个字段。
 
-- **`extra_body`**:JSON object。每次请求都浅合并进请求体顶层——同名键**整个覆盖**内置逻辑(`thinking`、`native_web_search` 的 `tools` 声明等)算出来的值,不做深合并。合并发生在所有内置逻辑拼完之后、发送之前,`extra_body` 永远最后拍板。
+- **`extra_body`**:JSON object。每次请求都浅合并进请求体顶层——同名键**整个覆盖**内置逻辑(`thinking`、`native_web_search` 的 `tools` 声明等)算出来的值,不做深合并。provider 配置先合并，模型目录当前 variant 的 `extra_body` 最后拍板。
 - **`extra_headers`**:JSON object,值必须是字符串。每次请求追加/覆盖 HTTP 头,同名覆盖内置头(包括 `Authorization`——自己配自己认);值留空表示删掉这条头。
 
 不想手改 JSON,`/provider set` 也能改(`extra_body` 是整段替换语义,不是往里加键;设成 `{}` 或留空清掉):
@@ -304,7 +305,7 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 /provider add minimax https://api.minimaxi.com/anthropic anthropic --key-env MINIMAX_API_KEY --model MiniMax-M3
 ```
 
-### 例二:GLM,responses 协议 + extra_body 思考参数
+### 例二:GLM,Chat Completions + extra_body 思考参数
 
 GLM 系模型用 `thinking.type` 开关思考模式,外加一个自定义分级 `reasoning_effort`,两者都不是 lubancode 内置字段,走 `extra_body` 透传:
 
@@ -314,16 +315,18 @@ GLM 系模型用 `thinking.type` 开关思考模式,外加一个自定义分级 
     {
       "name": "glm",
       "base_url": "https://open.bigmodel.cn/api/paas/v4",
-      "wire": "responses",
+      "wire": "chat_completions",
       "key_env": "GLM_API_KEY",
-      "extra_body": { "thinking": { "type": "enabled" }, "reasoning_effort": "max" },
+      "model": "glm-5.2",
+      "model_reasoning_effort": "max",
+      "extra_body": { "thinking": { "type": "enabled" }, "tool_stream": true },
       "extra_headers": { "X-Api-Version": "2024-06-01" }
     }
   ]
 }
 ```
 
-合并顺序上 `extra_body` 最后拍板,不会被内置的 `reasoning.effort` 翻译逻辑覆盖回去。
+这份手写例子与内置 GLM 预设走同一路。平日直接 `/provider add` 选“智谱 GLM”即可。
 
 ## 七、settings.local.json:项目级本地权限
 
@@ -351,7 +354,7 @@ GLM 系模型用 `thinking.type` 开关思考模式,外加一个自定义分级 
 
 ## 八、模型目录 models.json
 
-除了上面的分级配置,还可以在**主目录**放一份模型目录:`~/.lubancode/models.json`,给每个模型写一条详细配置(思路借鉴 Codex 的 model-catalog)。目录是锦上添花,不是硬依赖:文件不存在就是空目录;整份 JSON 坏了或某条写坏,启动时告警跳过,不拦启动。
+程序先从内置 `catalog/providers.json` 取得常见模型资料；还可以在**主目录**放一份 `~/.lubancode/models.json` 覆盖或补充。用户文件同 `slug` 优先。整份 JSON 坏了或某条写坏，只告警跳过，仍可退回内置目录。
 
 ```json
 {
@@ -362,8 +365,8 @@ GLM 系模型用 `thinking.type` 开关思考模式,外加一个自定义分级 
       "description": "MiniMax 旗舰模型,anthropic 兼容端点,支持 Adaptive Thinking",
       "default_think": "high",
       "supported_think_levels": [
-        { "effort": "none", "description": "关闭思考,直答,最快" },
-        { "effort": "high", "description": "开启 Adaptive Thinking,想多深由模型自己定" }
+        { "effort": "none", "description": "关闭思考,直答,最快", "extra_body": { "thinking": { "type": "disabled" } } },
+        { "effort": "high", "description": "开启 Adaptive Thinking,想多深由模型自己定", "extra_body": { "thinking": { "type": "adaptive" } } }
       ],
       "base_instructions": "工具调用要果断,能并行读文件就并行读;回答用中文,简洁准确。",
       "context_window": "1m",
@@ -383,6 +386,7 @@ GLM 系模型用 `thinking.type` 开关思考模式,外加一个自定义分级 
 ~/.lubancode/
   config.json                         主配置
   models.json                         模型目录,可选
+  cache/provider-catalog.json         从 GitHub 更新的厂家目录缓存
   system_prompt.md                    人格段(法),首启脚手架生成
   SOUL.md                             默认风格叠加层(魂),首启脚手架生成
   souls/                              备选魂;首启附 wenyan.md(文言文示例)

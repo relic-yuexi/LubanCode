@@ -8,12 +8,15 @@ add_executable(lubancode_tests
   test_loop.cpp
   test_responses_request.cpp
   test_responses_events.cpp
+  test_chat_request.cpp
+  test_chat_events.cpp
   test_write_edit.cpp
   test_ask_user.cpp
   test_search.cpp
   test_context.cpp
   test_config.cpp
   test_model_catalog.cpp
+  test_provider_catalog.cpp
   test_models.cpp
   test_setup_wizard.cpp
   test_provider_wizard.cpp

@@ -10,7 +10,7 @@
 //   运行环境段(工作目录、当天日期、操作系统 + 工具调用硬规矩)恒在,现填;
 //   features:files/shell/delegation/todo 恒在;skills 有技能才注(后面紧跟
 //   技能清单);web/mcp/lsp 配了对应能力才注;
-//   platform 按 wire 注一个(anthropic / responses)。
+//   platform 按 wire 注一个(anthropic / responses / chat_completions)。
 // 模型专属指令、魂、延迟工具索引仍走 prompts.hpp 的 With* 包装层往后叠,
 // 不归这里管。prompts.hpp 的 DefaultPersona()/BuildSystemPrompt() 是这里的
 // 薄壳,旧签名照用。
@@ -31,7 +31,7 @@ struct PromptOptions {
     bool mcp = false;            // 配置了 mcpServers
     bool web = false;            // 配置了 search 段(web_search 注册了)
     bool lsp = false;            // 配置了 lsp 段
-    std::string wire;            // "anthropic" / "responses" / 空(不注平台段)
+    std::string wire;            // 三种正式 wire 名 / 空(不注平台段)
     std::string current_date;    // 空 = 拼装时取本机日期(YYYY-MM-DD);测试注入用
     std::string prompts_dir;     // 用户模块目录(~/.lubancode/prompts);空 = 只用嵌入版
 };

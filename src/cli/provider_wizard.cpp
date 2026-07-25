@@ -57,20 +57,21 @@ struct ApiKeyStep {
     std::string key_env;
 };
 
-std::optional<ApiKeyStep> ResolveApiKeyStep(WizardIO& io) {
+std::optional<ApiKeyStep> ResolveApiKeyStep(WizardIO& io,
+                                             const std::string& default_key_env = "ANTHROPIC_AUTH_TOKEN") {
     const auto pasted = ReadTrimmed(io, tr("provider_wizard.api_key.prompt"));
     if (!pasted.has_value()) {
         return std::nullopt;
     }
     if (!pasted->empty()) {
-        return ApiKeyStep{*pasted, "ANTHROPIC_AUTH_TOKEN"};
+        return ApiKeyStep{*pasted, default_key_env};
     }
 
     const auto key_env = ReadTrimmed(io, tr("provider_wizard.key_env.prompt"));
     if (!key_env.has_value()) {
         return std::nullopt;
     }
-    return ApiKeyStep{"", key_env->empty() ? "ANTHROPIC_AUTH_TOKEN" : *key_env};
+    return ApiKeyStep{"", key_env->empty() ? default_key_env : *key_env};
 }
 
 // 推理档位这一步:可选,留空跳过(空串 = 不设置)。候选跟 /think 的内置
@@ -144,18 +145,22 @@ std::optional<ProviderWizardOutcome> RunProviderAddWizard(WizardIO& io, const st
     io.print(tr("wizard.wire.title"));
     io.print(tr("wizard.wire.opt1"));
     io.print(tr("wizard.wire.opt2"));
+    io.print(tr("wizard.wire.opt3"));
     {
-        const auto choice = ReadChoice(io, tr("wizard.choose_prompt"), 2, 1);
+        const auto choice = ReadChoice(io, tr("wizard.choose_prompt"), 3, 1);
         if (!choice.has_value()) {
             return std::nullopt;
         }
-        provider.wire = (*choice == 2) ? config::Wire::Responses : config::Wire::Anthropic;
+        provider.wire = *choice == 2 ? config::Wire::Responses
+                                     : (*choice == 3 ? config::Wire::ChatCompletions
+                                                     : config::Wire::Anthropic);
     }
     io.print("");
 
     // ---- 4) api_key / key_env ----
     {
-        const auto answer = ResolveApiKeyStep(io);
+        const auto answer = ResolveApiKeyStep(
+            io, provider.wire == config::Wire::Anthropic ? "ANTHROPIC_AUTH_TOKEN" : "OPENAI_API_KEY");
         if (!answer.has_value()) {
             return std::nullopt;
         }
@@ -227,6 +232,62 @@ std::optional<ProviderWizardOutcome> RunProviderAddWizard(WizardIO& io, const st
     }
 
     return ProviderWizardOutcome{provider, save};
+}
+
+std::optional<ProviderWizardOutcome> RunProviderPresetWizard(
+    WizardIO& io, const config::ProviderCatalog& catalog, const std::string& name_prefill,
+    const std::vector<config::ProviderConfig>& existing) {
+    if (catalog.providers.empty()) {
+        return RunProviderAddWizard(io, name_prefill, existing);
+    }
+
+    io.print(tr("provider_catalog.choose.title"));
+    for (std::size_t i = 0; i < catalog.providers.size(); ++i) {
+        const auto& preset = catalog.providers[i];
+        std::string line = "  " + std::to_string(i + 1) + ") " + preset.name;
+        if (!preset.description.empty()) line += " - " + preset.description;
+        io.print(line);
+    }
+    io.print("  " + std::to_string(catalog.providers.size() + 1) + ") " +
+             tr("provider_catalog.choose.custom"));
+    const auto choice = ReadChoice(io, tr("wizard.choose_prompt"), catalog.providers.size() + 1, 1);
+    if (!choice.has_value()) return std::nullopt;
+    if (*choice == catalog.providers.size() + 1) {
+        io.print("");
+        return RunProviderAddWizard(io, name_prefill, existing);
+    }
+
+    const config::ProviderPreset& preset = catalog.providers[*choice - 1];
+    config::ProviderConfig provider = config::ProviderConfigFromPreset(preset);
+    const std::string proposed_name = name_prefill.empty() ? preset.id : name_prefill;
+    const auto name = ResolveProviderName(io, proposed_name, existing);
+    if (!name.has_value()) return std::nullopt;
+    provider.name = *name;
+
+    io.print("");
+    io.print(trf("provider_catalog.selected", preset.name, config::ProviderWireName(preset.wire),
+                 preset.default_model));
+    const auto key = ResolveApiKeyStep(io, preset.key_env);
+    if (!key.has_value()) return std::nullopt;
+    provider.api_key = key->api_key;
+    provider.key_env = key->key_env;
+
+    io.print("");
+    io.print(tr("provider_wizard.summary.title"));
+    io.print("  name     = " + provider.name);
+    io.print("  wire     = " + config::ProviderWireName(provider.wire));
+    io.print("  base_url = " + provider.base_url);
+    if (provider.api_key.empty()) io.print("  key_env  = " + provider.key_env);
+    else io.print("  api_key  = " + config::MaskApiKey(provider.api_key));
+    io.print("  model    = " + provider.model);
+    io.print("  window   = " + std::to_string(provider.context_window_tokens));
+    if (!provider.model_reasoning_effort.empty()) {
+        io.print("  effort   = " + provider.model_reasoning_effort);
+    }
+    io.print("");
+    const auto confirm = ReadTrimmed(io, tr("provider_wizard.confirm.prompt"));
+    if (!confirm.has_value()) return std::nullopt;
+    return ProviderWizardOutcome{provider, *confirm != "n" && *confirm != "N"};
 }
 
 }  // namespace lubancode::cli

@@ -64,7 +64,8 @@ std::string ClassifyNetworkError(const cpr::Error& error, bool received_any_byte
 std::map<std::string, std::string> ApplyExtraHeaders(std::map<std::string, std::string> base,
                                                         const std::map<std::string, std::string>& extra_headers) {
     for (const auto& [name, value] : extra_headers) {
-        base[name] = value;
+        if (value.empty()) base.erase(name);
+        else base[name] = value;
     }
     return base;
 }

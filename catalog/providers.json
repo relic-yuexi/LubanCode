@@ -1,0 +1,280 @@
+{
+  "schema_version": 1,
+  "revision": "2026-07-25",
+  "providers": {
+    "openai": {
+      "name": "OpenAI",
+      "description": "OpenAI Responses API",
+      "wire": "responses",
+      "base_url": "https://api.openai.com/v1",
+      "key_env": "OPENAI_API_KEY",
+      "default_model": "gpt-5.4",
+      "docs_url": "https://developers.openai.com/api/docs/guides/migrate-to-responses",
+      "models": {
+        "gpt-5.4": {
+          "name": "GPT-5.4",
+          "context_window": 1050000,
+          "max_output": 128000,
+          "default_think": "high",
+          "capabilities": { "reasoning": true, "tools": true, "image": true, "structured_output": true },
+          "variants": {
+            "low": { "description": "较快" },
+            "medium": { "description": "均衡" },
+            "high": { "description": "较深" },
+            "xhigh": { "description": "最深" }
+          }
+        }
+      }
+    },
+    "anthropic": {
+      "name": "Anthropic",
+      "description": "Claude Messages API",
+      "wire": "anthropic",
+      "base_url": "https://api.anthropic.com",
+      "key_env": "ANTHROPIC_API_KEY",
+      "default_model": "claude-sonnet-5",
+      "docs_url": "https://platform.claude.com/docs/en/api/messages",
+      "extra_headers": {
+        "Authorization": "",
+        "x-api-key": "${LUBANCODE_API_KEY}",
+        "anthropic-version": "2023-06-01"
+      },
+      "extra_body": {
+        "thinking": { "type": "adaptive" }
+      },
+      "models": {
+        "claude-sonnet-5": {
+          "name": "Claude Sonnet 5",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "default_think": "medium",
+          "capabilities": { "reasoning": true, "tools": true, "image": true },
+          "variants": {
+            "low": { "description": "较快", "extra_body": { "output_config": { "effort": "low" } } },
+            "medium": { "description": "默认", "extra_body": { "output_config": { "effort": "medium" } } },
+            "high": { "description": "较深", "extra_body": { "output_config": { "effort": "high" } } },
+            "extra": { "description": "更深", "extra_body": { "output_config": { "effort": "extra" } } },
+            "max": { "description": "最大思考", "extra_body": { "output_config": { "effort": "max" } } }
+          }
+        },
+        "claude-opus-5": {
+          "name": "Claude Opus 5",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "default_think": "high",
+          "capabilities": { "reasoning": true, "tools": true, "image": true },
+          "variants": {
+            "low": { "description": "较快", "extra_body": { "output_config": { "effort": "low" } } },
+            "medium": { "description": "均衡", "extra_body": { "output_config": { "effort": "medium" } } },
+            "high": { "description": "默认", "extra_body": { "output_config": { "effort": "high" } } },
+            "extra": { "description": "更深", "extra_body": { "output_config": { "effort": "extra" } } },
+            "max": { "description": "最大思考", "extra_body": { "output_config": { "effort": "max" } } }
+          }
+        }
+      }
+    },
+    "minimax": {
+      "name": "MiniMax",
+      "description": "MiniMax OpenAI-compatible Chat API",
+      "wire": "chat_completions",
+      "base_url": "https://api.minimax.io/v1",
+      "key_env": "MINIMAX_API_KEY",
+      "default_model": "MiniMax-M3",
+      "model_reasoning_effort": "high",
+      "docs_url": "https://platform.minimax.io/docs/api-reference/text-openai-api",
+      "extra_body": {
+        "thinking": { "type": "adaptive" },
+        "reasoning_split": true
+      },
+      "models": {
+        "MiniMax-M3": {
+          "name": "MiniMax M3",
+          "context_window": 1000000,
+          "max_output": 131072,
+          "default_think": "high",
+          "capabilities": { "reasoning": true, "tools": true, "image": true, "video": true },
+          "variants": {
+            "none": {
+              "description": "关闭思考",
+              "extra_body": { "thinking": { "type": "disabled" } }
+            },
+            "high": {
+              "description": "自适应思考",
+              "extra_body": { "thinking": { "type": "adaptive" } }
+            }
+          }
+        }
+      }
+    },
+    "glm": {
+      "name": "智谱 GLM",
+      "description": "Z.AI OpenAI-compatible Chat API",
+      "wire": "chat_completions",
+      "base_url": "https://api.z.ai/api/paas/v4",
+      "key_env": "ZAI_API_KEY",
+      "default_model": "glm-5.2",
+      "model_reasoning_effort": "max",
+      "docs_url": "https://docs.z.ai/api-reference/llm/chat-completion",
+      "extra_body": {
+        "thinking": { "type": "enabled" },
+        "tool_stream": true
+      },
+      "models": {
+        "glm-5.2": {
+          "name": "GLM-5.2",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "default_think": "max",
+          "capabilities": { "reasoning": true, "tools": true, "structured_output": true },
+          "variants": {
+            "high": { "description": "增强推理" },
+            "max": { "description": "深度推理" }
+          }
+        }
+      }
+    },
+    "glm-cn": {
+      "name": "智谱开放平台（国内）",
+      "description": "智谱 BigModel OpenAI-compatible Chat API",
+      "wire": "chat_completions",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "key_env": "ZHIPUAI_API_KEY",
+      "default_model": "glm-5",
+      "docs_url": "https://open.bigmodel.cn/dev/api",
+      "extra_body": {
+        "thinking": { "type": "enabled" },
+        "tool_stream": true
+      },
+      "models": {
+        "glm-5": {
+          "name": "GLM-5",
+          "context_window": 202752,
+          "default_think": "high",
+          "capabilities": { "reasoning": true, "tools": true },
+          "variants": {
+            "high": { "description": "深度思考" }
+          }
+        }
+      }
+    },
+    "qwen": {
+      "name": "阿里云百炼 Qwen",
+      "description": "DashScope OpenAI-compatible Responses API",
+      "wire": "responses",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "key_env": "DASHSCOPE_API_KEY",
+      "default_model": "qwen3.7-plus",
+      "model_reasoning_effort": "high",
+      "native_web_search": true,
+      "docs_url": "https://help.aliyun.com/en/model-studio/qwen-api-via-openai-responses",
+      "models": {
+        "qwen3.7-plus": {
+          "name": "Qwen3.7 Plus",
+          "context_window": 1000000,
+          "default_think": "high",
+          "capabilities": { "reasoning": true, "tools": true, "built_in_tools": true, "structured_output": true },
+          "variants": {
+            "low": { "description": "较快" },
+            "medium": { "description": "均衡" },
+            "high": { "description": "较深" }
+          }
+        },
+        "qwen3.7-max": {
+          "name": "Qwen3.7 Max",
+          "context_window": 1000000,
+          "default_think": "high",
+          "capabilities": { "reasoning": true, "tools": true, "built_in_tools": true, "structured_output": true },
+          "variants": {
+            "low": { "description": "较快" },
+            "medium": { "description": "均衡" },
+            "high": { "description": "较深" }
+          }
+        }
+      }
+    },
+    "deepseek": {
+      "name": "DeepSeek",
+      "description": "DeepSeek OpenAI-compatible Chat API",
+      "wire": "chat_completions",
+      "base_url": "https://api.deepseek.com",
+      "key_env": "DEEPSEEK_API_KEY",
+      "default_model": "deepseek-v4-pro",
+      "model_reasoning_effort": "high",
+      "docs_url": "https://api-docs.deepseek.com/",
+      "extra_body": {
+        "thinking": { "type": "enabled" }
+      },
+      "models": {
+        "deepseek-v4-pro": {
+          "name": "DeepSeek V4 Pro",
+          "context_window": 1000000,
+          "default_think": "high",
+          "capabilities": { "reasoning": true, "tools": true, "structured_output": true },
+          "variants": {
+            "low": { "description": "较快", "extra_body": { "thinking": { "type": "enabled" } } },
+            "medium": { "description": "均衡", "extra_body": { "thinking": { "type": "enabled" } } },
+            "high": { "description": "较深", "extra_body": { "thinking": { "type": "enabled" } } }
+          }
+        },
+        "deepseek-v4-flash": {
+          "name": "DeepSeek V4 Flash",
+          "context_window": 1000000,
+          "default_think": "medium",
+          "capabilities": { "reasoning": true, "tools": true, "structured_output": true },
+          "variants": {
+            "none": { "description": "关闭思考", "extra_body": { "thinking": { "type": "disabled" } } },
+            "medium": { "description": "均衡", "extra_body": { "thinking": { "type": "enabled" } } },
+            "high": { "description": "较深", "extra_body": { "thinking": { "type": "enabled" } } }
+          }
+        }
+      }
+    },
+    "kimi": {
+      "name": "Kimi（国内）",
+      "description": "Moonshot OpenAI-compatible Chat API",
+      "wire": "chat_completions",
+      "base_url": "https://api.moonshot.cn/v1",
+      "key_env": "MOONSHOT_API_KEY",
+      "default_model": "kimi-k2.6",
+      "docs_url": "https://platform.kimi.com/docs/guide/kimi-k2-6",
+      "models": {
+        "kimi-k2.6": {
+          "name": "Kimi K2.6",
+          "context_window": 256000,
+          "max_output": 65536,
+          "default_think": "high",
+          "capabilities": { "reasoning": true, "tools": true, "image": true, "video": true },
+          "variants": {
+            "none": { "description": "关闭思考", "extra_body": { "thinking": { "type": "disabled" } } },
+            "high": { "description": "开启思考", "extra_body": { "thinking": { "type": "enabled" } } }
+          }
+        }
+      }
+    },
+    "grok": {
+      "name": "xAI Grok",
+      "description": "xAI Responses API",
+      "wire": "responses",
+      "base_url": "https://api.x.ai/v1",
+      "key_env": "XAI_API_KEY",
+      "default_model": "grok-4.5",
+      "model_reasoning_effort": "high",
+      "native_web_search": true,
+      "docs_url": "https://docs.x.ai/developers/grok-4-5",
+      "models": {
+        "grok-4.5": {
+          "name": "Grok 4.5",
+          "context_window": 500000,
+          "max_output": 128000,
+          "default_think": "high",
+          "capabilities": { "reasoning": true, "tools": true, "image": true, "structured_output": true },
+          "variants": {
+            "low": { "description": "较快" },
+            "medium": { "description": "均衡" },
+            "high": { "description": "较深" }
+          }
+        }
+      }
+    }
+  }
+}

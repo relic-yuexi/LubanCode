@@ -184,6 +184,20 @@ add_custom_command(
   COMMENT "lubancode: 生成 embedded_prompts.hpp(提示词模块编译期嵌入)"
   VERBATIM)
 
+# 常见 provider / 模型目录也随 exe 带一份快照。运行时可从 GitHub 更新，
+# 断网或缓存损坏时仍回退这份构建时内容。
+set(_lubancode_provider_catalog "${CMAKE_CURRENT_SOURCE_DIR}/catalog/providers.json")
+set(_lubancode_embedded_provider_catalog "${CMAKE_BINARY_DIR}/generated/embedded_provider_catalog.hpp")
+add_custom_command(
+  OUTPUT "${_lubancode_embedded_provider_catalog}"
+  COMMAND ${CMAKE_COMMAND}
+          -DINPUT=${_lubancode_provider_catalog}
+          -DOUTPUT=${_lubancode_embedded_provider_catalog}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_provider_catalog.cmake
+  DEPENDS ${_lubancode_provider_catalog} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_provider_catalog.cmake
+  COMMENT "lubancode: 嵌入 provider 目录快照"
+  VERBATIM)
+
 # ---------------------------------------------------------------------------
 # 核心库:api / config 这些不碰命令行交互的代码,单独编成静态库,
 # 好让可执行文件和测试程序都能链接同一份实现,不用测试再编一遍。
@@ -214,6 +228,9 @@ add_library(lubancode_core STATIC
   src/api/sse_framing.cpp
   src/api/anthropic/client.cpp
   src/api/anthropic/events.cpp
+  src/api/chat/client.cpp
+  src/api/chat/events.cpp
+  src/api/chat/request.cpp
   src/api/responses/client.cpp
   src/api/responses/events.cpp
   src/api/responses/request.cpp
@@ -221,6 +238,7 @@ add_library(lubancode_core STATIC
   src/api/models.cpp
   src/config/config.cpp
   src/config/model_catalog.cpp
+  src/config/provider_catalog.cpp
   src/config/prompt_files.cpp
   src/config/project_instructions.cpp
   src/config/skill_store.cpp
@@ -254,6 +272,7 @@ add_library(lubancode_core STATIC
   src/agent/loop.cpp
   src/agent/prompt_assembler.cpp
   "${_lubancode_embedded_prompts}"
+  "${_lubancode_embedded_provider_catalog}"
   src/agent/context.cpp
   src/agent/compact.cpp
   src/agent/session_store.cpp

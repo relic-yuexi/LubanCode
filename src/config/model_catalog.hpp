@@ -6,7 +6,8 @@
 //   display_name                展示名,/model 列表用
 //   description                 一句话说明
 //   default_think               切到该模型时自动应用的推理强度档位
-//   supported_think_levels      [{"effort":"high","description":"..."}, ...],
+//   supported_think_levels      [{"effort":"high","description":"...",
+//                                  "extra_body":{...}}, ...],
 //                               /think 裸敲时列出来;设了表外档位只提示不拦
 //   base_instructions           注入系统提示的模型专属指令(独立段,不碰人格段)
 //   context_window              "1m"/"512k"/裸数字,切到该模型时更新会话窗口
@@ -26,12 +27,15 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 namespace lubancode::config {
 
 // 一个推理强度档位的声明:effort 是发出去的档位串,description 给人看。
 struct ThinkLevel {
     std::string effort;
     std::string description;
+    nlohmann::json extra_body = nlohmann::json::object();
 };
 
 // 目录里的一个模型条目。context_window 在解析时就换算成 token 数
@@ -82,6 +86,9 @@ std::vector<std::string> ThinkLevelHintLines(const ModelCatalogEntry* entry);
 // 某档位是不是在条目声明的档位表里。ASCII 大小写不敏感——跟 anthropic
 // 那张 think 映射表一个待遇,免得 High/high 被当成两个档。
 bool ThinkLevelDeclared(const ModelCatalogEntry& entry, const std::string& level);
+
+// 档位声明里的请求参数；没有该档或没配 extra_body 返回空 object。
+nlohmann::json ThinkLevelExtraBody(const ModelCatalogEntry* entry, const std::string& level);
 
 // 启动 / /model 切换时,按目录条目算出"要应用什么"。纯函数,好单测:
 //   think / context_window_tokens 有值才应用(条目声明了、且用户没显式

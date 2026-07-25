@@ -139,6 +139,11 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
             body[it.key()] = it.value();
         }
     }
+    if (request.extra_body.is_object()) {
+        for (auto it = request.extra_body.begin(); it != request.extra_body.end(); ++it) {
+            body[it.key()] = it.value();
+        }
+    }
 
     return body;
 }

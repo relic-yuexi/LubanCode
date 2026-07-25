@@ -28,7 +28,7 @@
 | `features/web.md` | `kFeature_web` | 配置了 `search` 段(web_search 注册了)才注 |
 | `features/mcp.md` | `kFeature_mcp` | 配置了 `mcpServers` 才注 |
 | `features/lsp.md` | `kFeature_lsp` | 配置了 `lsp` 段才注 |
-| `platforms/` | `kPlatform_*` | 按 wire 注一个:`anthropic.md` 或 `responses.md` |
+| `platforms/` | `kPlatform_*` | 按 wire 注一个:`anthropic.md`、`responses.md` 或 `chat_completions.md` |
 | `models/` | 不嵌入 | 模型专属指令走 `models.json` 的 `base_instructions`,见 `models/README.md` |
 
 拼装顺序:人格(core 或法)→ 运行环境段(工作目录、当天日期、操作系统,运行时现填)
