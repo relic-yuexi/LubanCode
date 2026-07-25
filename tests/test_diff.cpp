@@ -50,6 +50,24 @@ std::vector<std::string> Lines(const std::string& text) {
     return out;
 }
 
+std::string StripAnsi(const std::string& text) {
+    std::string out;
+    for (std::size_t i = 0; i < text.size();) {
+        if (text[i] == '\x1b' && i + 1 < text.size() && text[i + 1] == '[') {
+            i += 2;
+            while (i < text.size() && text[i] != 'm') {
+                ++i;
+            }
+            if (i < text.size()) {
+                ++i;
+            }
+            continue;
+        }
+        out.push_back(text[i++]);
+    }
+    return out;
+}
+
 }  // namespace
 
 // ---- SplitDiffLines --------------------------------------------------------
@@ -175,13 +193,14 @@ TEST_CASE("FormatDiff: 彩色主题——删除行红底、新增行绿底,整�
     bool saw_del = false;
     bool saw_add = false;
     for (const auto& line : lines) {
-        if (line.find(" - b") != std::string::npos) {
+        const std::string visible = StripAnsi(line);
+        if (visible.find(" - b") != std::string::npos) {
             // 整行(行号 + '- ' + 内容)以红底起头,行尾紧跟 reset——底色
             // 只铺到内容实际结尾,不填充到终端宽。
             CHECK(line.find(theme.diff_del_bg) == 0);
             CHECK(line.rfind(theme.reset) == line.size() - theme.reset.size());
             saw_del = true;
-        } else if (line.find(" + x") != std::string::npos) {
+        } else if (visible.find(" + x") != std::string::npos) {
             CHECK(line.find(theme.diff_add_bg) == 0);
             CHECK(line.rfind(theme.reset) == line.size() - theme.reset.size());
             saw_add = true;
@@ -196,7 +215,8 @@ TEST_CASE("FormatDiff: 彩色主题——上下文行行号栏淡色、正文原
     const auto diff = ComputeLineDiff({"a", "b", "c"}, {"a", "x", "c"});
     const std::string text = FormatDiff(diff, theme, 0, 0, 0);
     for (const auto& line : Lines(text)) {
-        if (line.find("  a") == std::string::npos && line.find("  c") == std::string::npos) {
+        const std::string visible = StripAnsi(line);
+        if (visible.find("  a") == std::string::npos && visible.find("  c") == std::string::npos) {
             continue;
         }
         CHECK(line.find(theme.diff_line_no) == 0);  // 行号栏淡色起头
@@ -239,8 +259,7 @@ TEST_CASE("FormatDiff: 彩色主题——生成时截宽,截断后 reset 仍在�
     CHECK(line.rfind(theme.reset) == line.size() - theme.reset.size());  // 截断点在 reset 之前
     CHECK(line.find("...") != std::string::npos);
     // 去掉 ANSI 后正文不超宽(全 ASCII,字节数即显示宽)。
-    const std::string plain =
-        line.substr(theme.diff_add_bg.size(), line.size() - theme.diff_add_bg.size() - theme.reset.size());
+    const std::string plain = StripAnsi(line);
     CHECK(plain.size() <= 40);
     CHECK(plain.find('\x1b') == std::string::npos);
 }

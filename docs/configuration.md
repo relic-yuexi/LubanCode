@@ -38,7 +38,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 4. **通用环境变量**(向后兼容,跟 Claude Code、Codex 等工具共用同名变量容易撞车,建议改用第 1 级):`wire=anthropic` 时读 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_MODEL`;`wire=responses` 时读 `OPENAI_BASE_URL`/`OPENAI_API_KEY`/`OPENAI_MODEL`。
 5. **内置默认值**。
 
-逐字段合并:项目级写了某字段就用项目级那一份,项目级缺的字段回退全局,全局也缺再往下一级找。`hooks`、`mcpServers`、`search`、`lsp` 这几段是**整段回退**(不做键级混合)——项目级写了 `hooks` 就用项目级那一整段 `hooks`,否则用全局那一整段。`tool_search_threshold`、`connect_timeout_ms`、`stream_idle_timeout_secs`、`request_timeout_secs` 只从配置文件(项目级 > 全局)或内置默认值来,没有环境变量这一级。
+逐字段合并:项目级写了某字段就用项目级那一份,项目级缺的字段回退全局,全局也缺再往下一级找。`hooks`、`mcpServers`、`search`、`lsp`、`status_panel` 这几段是**整段回退**(不做键级混合)——项目级写了 `hooks` 就用项目级那一整段 `hooks`,否则用全局那一整段。`tool_search_threshold`、`connect_timeout_ms`、`stream_idle_timeout_secs`、`request_timeout_secs` 只从配置文件(项目级 > 全局)或内置默认值来,没有环境变量这一级。
 
 `/config`(或 `lubancode --config`)会打出每个字段最终来自哪一级,排查配置问题用。
 
@@ -58,6 +58,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 | `model` | 字符串 | 无内置默认值 | 发请求所用模型名。 |
 | `active_provider` | 字符串 | 空 | 上次选中的 provider 名；启动时从 `providers` 展开连接、密钥来源、模型与私有参数。项目级可钉住选择，否则回退全局。 |
 | `theme` | `dark` / `light` / `plain` | `dark` | 终端配色;管道或重定向到文件时自动降为 `plain`。 |
+| `status_panel` | JSON object | 见下文 | 定制输入框下方常驻状态栏的字段、顺序与分隔符；项目级整段压过全局。 |
 | `think` | `none`/`low`/`medium`/`high`,可留空 | 空串 | 推理强度;空串时不往请求里带推理参数(跟无此功能的旧版本行为一致)。 |
 | `soul` | 空串 / `default` / `off` / `souls/` 下文件名(不带 `.md`) | 空串 | 风格叠加层。空串和 `default` 读 `SOUL.md`;`off` 不叠加。 |
 | `context_window` | 字符串或整数,支持 `256k`/`512k`/`1m` 或裸数字 | `256000` | 会话上下文窗口(token),`k=1000`、`m=1000000`(十进制)。 |
@@ -80,6 +81,34 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 | `request_timeout_secs` | 正整数(秒) | `30` | 非流式请求(如拉模型列表)的整体超时。 |
 
 `base_url`/`api_key`/`model` 没有内置默认值——lubancode 不绑死哪一家模型服务,三项都没配到:交互模式会自动走一遍初次配置向导;单发模式/管道模式会直接报错,提示三条配置途径。
+
+### status_panel
+
+输入框下方的状态栏默认依次显示确认档、模型、工作目录、Git 分支、context 百分比与 token 用量。`status_panel.items` 可重排或隐藏字段，`separator` 可换分隔符：
+
+```json
+{
+  "status_panel": {
+    "items": ["model", "cwd", "git_branch", "context", "effort"],
+    "separator": " · "
+  }
+}
+```
+
+认得的字段如下：
+
+| 字段 | 内容 |
+| --- | --- |
+| `permission_mode` | 当前 confirm / auto / yolo 档及 Shift+Tab 提示。 |
+| `model` | 当前会话模型。 |
+| `cwd` | 当前工作目录；太长时从左侧收起，保住末级目录。 |
+| `git_branch` | 当前 Git 分支；不在仓库时自动跳过，游离 HEAD 显示短哈希。 |
+| `context` | 当前上下文占用百分比。 |
+| `tokens` | 已用 token / 窗口 token；尚无实测用量时自动跳过。 |
+| `provider` | 当前 provider；没有名字时自动跳过。 |
+| `effort` | 当前推理档位；未设置时自动跳过。 |
+
+数组顺序就是展示顺序。写空数组会留下空状态行；想保住 Shift+Tab 的可发现性，别删 `permission_mode`。这套字段在程序内拼装，不起 shell，不会因脚本迟滞拖住输入框。
 
 ### 项目记忆
 

@@ -13,6 +13,7 @@ using lubancode::tools::TodoItem;
 using lubancode::tools::TodoListState;
 using lubancode::tools::TodoStatus;
 using lubancode::tools::TodoStatusToString;
+using lubancode::tools::TodoWriteKind;
 using lubancode::tools::TodoWriteTool;
 
 TEST_CASE("ParseTodoStatus: 三个合法值 + 不认得的字符串") {
@@ -46,6 +47,10 @@ TEST_CASE("todo_write: 首次写入,整表落进 state") {
     CHECK(state->items[0].content == "数 cpp 文件");
     CHECK(state->items[0].status == TodoStatus::Pending);
     CHECK(state->items[1].content == "读 vcpkg.json");
+    CHECK(state->revision == 1);
+    CHECK(state->last_write_kind == TodoWriteKind::Created);
+    CHECK(state->last_changed_indices == std::vector<std::size_t>({0, 1}));
+    CHECK(result.content.find("已创建") != std::string::npos);
 }
 
 TEST_CASE("todo_write: 二次调用整表覆盖,不是增量合并") {
@@ -74,6 +79,26 @@ TEST_CASE("todo_write: 二次调用整表覆盖,不是增量合并") {
     REQUIRE(state->items.size() == 2);
     CHECK(state->items[0].status == TodoStatus::Completed);
     CHECK(state->items[1].status == TodoStatus::InProgress);
+    CHECK(state->revision == 2);
+    CHECK(state->last_write_kind == TodoWriteKind::Updated);
+    CHECK(state->last_changed_indices == std::vector<std::size_t>({0, 1, 2}));
+    CHECK(result.content.find("已更新 3 项") != std::string::npos);
+}
+
+TEST_CASE("todo_write: 重复写入同一份清单,标成无变化") {
+    auto state = std::make_shared<TodoListState>();
+    TodoWriteTool tool(state);
+    const nlohmann::json input = {
+        {"items", nlohmann::json::array({{{"content", "步骤一"}, {"status", "in_progress"}}})},
+    };
+    tool.execute(input);
+    const auto result = tool.execute(input);
+
+    CHECK_FALSE(result.is_error);
+    CHECK(state->revision == 2);
+    CHECK(state->last_write_kind == TodoWriteKind::Unchanged);
+    CHECK(state->last_changed_indices.empty());
+    CHECK(result.content.find("没有变化") != std::string::npos);
 }
 
 TEST_CASE("todo_write: 空数组清空清单") {
@@ -91,7 +116,10 @@ TEST_CASE("todo_write: 空数组清空清单") {
 
     CHECK_FALSE(result.is_error);
     CHECK(state->items.empty());
+    CHECK(state->revision == 2);
+    CHECK(state->last_write_kind == TodoWriteKind::Cleared);
     CHECK(result.content.find("0 项") != std::string::npos);
+    CHECK(result.content.find("已清空") != std::string::npos);
 }
 
 TEST_CASE("todo_write: status 传非法值,报 is_error,且不改动原有状态") {
@@ -115,6 +143,7 @@ TEST_CASE("todo_write: status 传非法值,报 is_error,且不改动原有状态
     // 半路校验失败,原有清单原封不动,不能留一份"改了一半"的状态。
     REQUIRE(state->items.size() == 1);
     CHECK(state->items[0].content == "原有项");
+    CHECK(state->revision == 1);
 }
 
 TEST_CASE("todo_write: 缺 items 字段,或 items 不是数组,报 is_error") {

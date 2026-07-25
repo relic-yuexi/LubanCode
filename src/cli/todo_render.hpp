@@ -19,6 +19,7 @@ namespace lubancode::cli {
 //   pending     -> "☐ " + 内容,不着色
 // plain 主题(theme.reset 为空,视作"不着色")下,三个符号退化成
 // "[x]"/"[>]"/"[ ]"。结尾统一带换行,调用方直接 std::cout 打出来就行。
-std::string FormatTodoList(const std::vector<tools::TodoItem>& items, const Theme& theme);
+std::string FormatTodoList(const std::vector<tools::TodoItem>& items, const Theme& theme,
+                           const std::vector<std::size_t>& highlighted_indices = {});
 
 }  // namespace lubancode::cli

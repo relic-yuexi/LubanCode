@@ -123,6 +123,26 @@ std::string GenerateWorktreeName() {
     return name;
 }
 
+std::string CurrentGitBranch(const std::filesystem::path& working_directory, GitRunner runner) {
+    if (!runner) {
+        runner = DefaultGitRunner;
+    }
+    const GitCommandResult branch =
+        runner({working_directory, {"symbolic-ref", "--quiet", "--short", "HEAD"}});
+    if (branch.exit_code == 0) {
+        return Trim(branch.output);
+    }
+    const GitCommandResult detached =
+        runner({working_directory, {"rev-parse", "--short", "HEAD"}});
+    if (detached.exit_code == 0) {
+        const std::string hash = Trim(detached.output);
+        if (!hash.empty()) {
+            return "detached@" + hash;
+        }
+    }
+    return {};
+}
+
 std::filesystem::path WorktreePath(const std::filesystem::path& repository_root, std::string_view name) {
     return repository_root / ".lubancode" / "worktrees" / std::string(name);
 }

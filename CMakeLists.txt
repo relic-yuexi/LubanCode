@@ -275,6 +275,7 @@ add_library(lubancode_core STATIC
   src/cli/markdown.cpp
   src/cli/latex_math.cpp
   src/cli/diff.cpp
+  src/cli/diff_syntax.cpp
 )
 target_include_directories(lubancode_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src

@@ -4,6 +4,8 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
+
 #include "cli/line_editor.hpp"
 
 using namespace lubancode::cli;
@@ -28,19 +30,22 @@ void TypeString(LineEditorCore& editor, const std::string& ascii_text) {
 
 }  // namespace
 
-TEST_CASE("LineEditorCore: 多行粘贴折叠显示,提交时展开原文") {
+TEST_CASE("LineEditorCore: 千字以内多行 paste 直接显示并按原文提交") {
     LineEditorCore editor;
     editor.BeginLine(true);
 
     const auto pasted = editor.HandleKey(KeyEvent::Paste("first\nsecond"));
-    REQUIRE(pasted.lines.size() == 1);
-    CHECK(Utf32ToUtf8(pasted.lines[0]).find("12") != std::string::npos);
+    REQUIRE(pasted.lines.size() == 2);
+    CHECK(Utf32ToUtf8(pasted.lines[0]) == "first");
+    CHECK(Utf32ToUtf8(pasted.lines[1]) == "second");
     CHECK(Utf32ToUtf8(pasted.line) == "first\nsecond");
 
     const auto submitted = editor.HandleKey(KeyEvent::Simple(KeyKind::Enter));
     CHECK(submitted.submitted);
     CHECK(Utf32ToUtf8(submitted.line) == "first\nsecond");
-    REQUIRE(submitted.lines.size() == 1);
+    REQUIRE(submitted.lines.size() == 2);
+    CHECK(Utf32ToUtf8(submitted.lines[0]) == "first");
+    CHECK(Utf32ToUtf8(submitted.lines[1]) == "second");
 
     editor.BeginLine(true);
     const auto history = editor.HandleKey(KeyEvent::Simple(KeyKind::Up));
@@ -56,6 +61,113 @@ TEST_CASE("LineEditorCore: 单行 bracketed paste 仍按普通文本编辑") {
     REQUIRE(state.lines.size() == 1);
     CHECK(Utf32ToUtf8(state.lines[0]) == "plain text");
     CHECK(Utf32ToUtf8(state.line) == "plain text");
+}
+
+TEST_CASE("LineEditorCore: 超过千字才折叠且提交回显展开全文") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+
+    const std::string large(kLargePasteCharThreshold + 1, 'x');
+    auto state = editor.HandleKey(KeyEvent::Paste(large));
+    REQUIRE(state.lines.size() == 1);
+    const std::string placeholder = Utf32ToUtf8(state.lines[0]);
+    CHECK(placeholder.find("1001") != std::string::npos);
+    CHECK(placeholder.find("xxx") == std::string::npos);
+
+    const auto submitted = editor.HandleKey(KeyEvent::Simple(KeyKind::Enter));
+    CHECK(submitted.submitted);
+    CHECK(Utf32ToUtf8(submitted.line) == large);
+    REQUIRE(submitted.lines.size() == 1);
+    CHECK(Utf32ToUtf8(submitted.lines[0]) == large);
+}
+
+TEST_CASE("LineEditorCore: 一千字边界直接显示,一千零一字折叠") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+
+    const std::string boundary(kLargePasteCharThreshold, 'a');
+    auto state = editor.HandleKey(KeyEvent::Paste(boundary));
+    CHECK(Utf32ToUtf8(state.lines[0]) == boundary);
+
+    editor.BeginLine(true);
+    const std::string over(kLargePasteCharThreshold + 1, 'b');
+    state = editor.HandleKey(KeyEvent::Paste(over));
+    CHECK(Utf32ToUtf8(state.lines[0]).find("1001") != std::string::npos);
+}
+
+TEST_CASE("LineEditorCore: 紧邻的大 paste 片段合成一枚占位且提交原文不乱") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+
+    const std::string first(kLargePasteCharThreshold + 1, 'x');
+    auto state = editor.HandleKey(KeyEvent::Paste(first));
+    state = editor.HandleKey(KeyEvent::Paste("tail"));
+    REQUIRE(state.lines.size() == 1);
+    const std::string merged_placeholder = Utf32ToUtf8(state.lines[0]);
+    CHECK(merged_placeholder.find("1005") != std::string::npos);
+    CHECK(std::count(merged_placeholder.begin(), merged_placeholder.end(), '[') == 1);
+    CHECK(Utf32ToUtf8(state.line) == first + "tail");
+
+    const auto submitted = editor.HandleKey(KeyEvent::Simple(KeyKind::Enter));
+    CHECK(submitted.submitted);
+    CHECK(Utf32ToUtf8(submitted.line) == first + "tail");
+    REQUIRE(submitted.lines.size() == 1);
+    CHECK(Utf32ToUtf8(submitted.lines[0]) == first + "tail");
+}
+
+TEST_CASE("LineEditorCore: 紧邻的短 paste 片段仍按多行明文显示") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+
+    auto state = editor.HandleKey(KeyEvent::Paste("alpha"));
+    CHECK(Utf32ToUtf8(state.lines[0]) == "alpha");
+
+    state = editor.HandleKey(KeyEvent::Paste("\nbeta"));
+    REQUIRE(state.lines.size() == 2);
+    CHECK(Utf32ToUtf8(state.lines[0]) == "alpha");
+    CHECK(Utf32ToUtf8(state.lines[1]) == "beta");
+    CHECK(Utf32ToUtf8(state.line) == "alpha\nbeta");
+
+    const auto submitted = editor.HandleKey(KeyEvent::Simple(KeyKind::Enter));
+    CHECK(Utf32ToUtf8(submitted.line) == "alpha\nbeta");
+}
+
+TEST_CASE("LineEditorCore: ConPTY 已露出的 paste 首行可原位换成完整明文") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    TypeString(editor, "for i in range(len(nums)):");
+
+    const std::string full =
+        "for i in range(len(nums)):\n"
+        "    for j in range(i+1,len(nums)):\n"
+        "        return [i,j]";
+    const auto state = editor.HandleKey(KeyEvent::Paste(full, 26));
+    REQUIRE(state.lines.size() == 3);
+    CHECK(Utf32ToUtf8(state.lines[0]) == "for i in range(len(nums)):");
+    CHECK(Utf32ToUtf8(state.line) == full);
+
+    const auto submitted = editor.HandleKey(KeyEvent::Simple(KeyKind::Enter));
+    CHECK(submitted.submitted);
+    CHECK(Utf32ToUtf8(submitted.line) == full);
+}
+
+TEST_CASE("LineEditorCore: 编辑键截断 paste 合并且退格整枚删除占位") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+
+    const std::string large(kLargePasteCharThreshold + 1, 'x');
+    const std::string other(kLargePasteCharThreshold + 2, 'y');
+    editor.HandleKey(KeyEvent::Paste(large));
+    auto state = editor.HandleKey(KeyEvent::Simple(KeyKind::Backspace));
+    CHECK(Utf32ToUtf8(state.lines[0]).empty());
+    CHECK(Utf32ToUtf8(state.line).empty());
+
+    editor.HandleKey(KeyEvent::Paste(large));
+    editor.HandleKey(KeyEvent::Char(U' '));
+    state = editor.HandleKey(KeyEvent::Paste(other));
+    const std::string display = Utf32ToUtf8(state.lines[0]);
+    CHECK(std::count(display.begin(), display.end(), '[') == 2);
+    CHECK(Utf32ToUtf8(state.line) == large + " " + other);
 }
 
 TEST_CASE("LineEditorCore: 敲字符会插到光标位置,光标跟着往后走") {

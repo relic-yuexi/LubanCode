@@ -28,11 +28,22 @@ struct Theme {
     std::string spinner;    // "思考中" 转轮字符本身的颜色
     std::string reset;      // 恢复默认颜色;plain 主题这个也是空串
 
-    // diff 预览(Claude Code Update 样式)专用三色。前缀 diff_ 是跟兄弟
+    // diff 预览(Claude Code Update 样式)专用色。前缀 diff_ 是跟兄弟
     // 分支(markdown 渲染)约好的命名空间,别撞名。
     std::string diff_add_bg;   // 新增行整行背景(256 色绿底);plain 空串
     std::string diff_del_bg;   // 删除行整行背景(256 色红底);plain 空串
     std::string diff_line_no;  // 上下文行的行号栏淡色;plain 空串
+
+    // diff 正文的轻量语法色。每一枚只改前景色;diff_syntax_plain 恢复
+    // 默认前景并关掉 dim,却不碰背景。如此 token 换色时,外层新增/删除
+    // 行的绿底/红底还能一直铺到行尾。
+    std::string diff_syntax_plain;
+    std::string diff_syntax_keyword;
+    std::string diff_syntax_string;
+    std::string diff_syntax_number;
+    std::string diff_syntax_comment;
+    std::string diff_syntax_type;
+    std::string diff_syntax_function;
 };
 
 // 按名字取内置主题;不认得的名字(不是 dark/light/plain)按 dark 处理,

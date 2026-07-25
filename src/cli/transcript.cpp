@@ -179,9 +179,9 @@ std::string BuildToolTitle(const std::string& name, const nlohmann::json& input)
             !questions->empty() && (*questions)[0].is_object()) {
             arg = TruncateUtf8Codepoints((*questions)[0].value("question", std::string()), 40);
         }
-    } else if (name == "todo_write") {
+    } else if (name == "todo_write" || name == "todo_update") {
         std::size_t count = 0;
-        if (const auto it = input.find("todos"); it != input.end() && it->is_array()) {
+        if (const auto it = input.find("items"); it != input.end() && it->is_array()) {
             count = it->size();
         }
         arg = trf("transcript.todo_count", count);

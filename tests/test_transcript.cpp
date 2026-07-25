@@ -180,8 +180,9 @@ TEST_CASE("BuildToolTitle: MCP 工具显示参数紧凑 JSON,换行压成空格"
 }
 
 TEST_CASE("BuildToolTitle: todo_write 显示几项") {
-    const nlohmann::json input = {{"todos", nlohmann::json::array({{{"content", "a"}}, {{"content", "b"}}})}};
+    const nlohmann::json input = {{"items", nlohmann::json::array({{{"content", "a"}}, {{"content", "b"}}})}};
     CHECK(BuildToolTitle("todo_write", input) == "todo_write(2 项)");
+    CHECK(BuildToolTitle("todo_update", input) == "todo_update(2 项)");
 }
 
 // ---- 行统计、退出码解析 ----------------------------------------------------

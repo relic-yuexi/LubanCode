@@ -25,6 +25,9 @@
 
 namespace lubancode::cli {
 
+// 与 Codex TUI 一致：1000 字符及以下直接显示，超过才折成 paste 附件。
+inline constexpr std::size_t kLargePasteCharThreshold = 1000;
+
 // 抽象按键事件,终端层负责把真实的 ReadConsoleInputW KEY_EVENT_RECORD
 // 翻译成这个,核心层只认这个,不知道底下是 Win32 API。
 enum class KeyKind {
@@ -55,10 +58,13 @@ struct KeyEvent {
     KeyKind kind;
     char32_t ch = 0;  // 只有 kind == Char 时有意义
     std::string text;  // 只有 kind == Paste 时有意义
+    std::size_t replace_before = 0;  // Paste:撤掉已逐字露出的 paste 前缀
 
-    static KeyEvent Char(char32_t c) { return KeyEvent{KeyKind::Char, c, {}}; }
-    static KeyEvent Paste(std::string value) { return KeyEvent{KeyKind::Paste, 0, std::move(value)}; }
-    static KeyEvent Simple(KeyKind k) { return KeyEvent{k, 0, {}}; }
+    static KeyEvent Char(char32_t c) { return KeyEvent{KeyKind::Char, c, {}, 0}; }
+    static KeyEvent Paste(std::string value, std::size_t replace = 0) {
+        return KeyEvent{KeyKind::Paste, 0, std::move(value), replace};
+    }
+    static KeyEvent Simple(KeyKind k) { return KeyEvent{k, 0, {}, 0}; }
 };
 
 // Shift+Tab 循环切换的三档会话级确认模式,main.cpp 的工具确认回调按这个
@@ -228,6 +234,13 @@ private:
         std::u32string suffix;
     };
 
+    // 大段 paste 已折成附件后，紧邻的 Paste 事件仍并进同一枚；中间只要
+    // 来了别的按键，这一趟就收口，下一次 Paste 另起一枚。
+    struct PasteRunState {
+        std::size_t token_index = 0;
+        std::u32string content;
+    };
+
     std::vector<CompletionCandidate> slash_candidates_;
 
     // UI-A:行缓冲从单 u32string 升级成 vector<u32string> + (row, col) 光标。
@@ -249,7 +262,7 @@ private:
 
     void ResetHistoryBrowsing();  // "翻到一半又编辑" -> 落回底部,但保留当前(已编辑的)内容
     void InsertChar(char32_t ch);
-    void InsertPaste(const std::string& text);
+    void InsertPaste(const std::string& text, std::size_t replace_before = 0);
     void InsertNewLine();   // 光标处劈开当前行,插入新行,光标落到新行行首
     void DeleteBackward();  // 行内退格删一个字符;行首退格把这一行并进上一行
     void ClearBuffer();     // 整个 composer 清空回"单个空行"
@@ -268,6 +281,7 @@ private:
     std::vector<std::string> BuildHintLines(const std::vector<std::string>& matches, int selected_index) const;
 
     std::vector<std::u32string> pasted_contents_;
+    std::optional<PasteRunState> paste_run_;
     std::u32string ExpandPasteTokens(const std::u32string& text) const;
     std::u32string DisplayPasteTokens(const std::u32string& text) const;
 };

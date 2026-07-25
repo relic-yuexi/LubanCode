@@ -315,9 +315,11 @@ void LineEditorCore::ClearBuffer() {
     row_ = 0;
     col_ = 0;
     pasted_contents_.clear();
+    paste_run_.reset();
 }
 
 void LineEditorCore::LoadJoined(const std::u32string& joined) {
+    paste_run_.reset();
     lines_ = SplitJoined(joined);
     row_ = lines_.size() - 1;
     col_ = lines_[row_].size();
@@ -329,7 +331,14 @@ void LineEditorCore::InsertChar(char32_t ch) {
     ResetHistoryBrowsing();
 }
 
-void LineEditorCore::InsertPaste(const std::string& text) {
+void LineEditorCore::InsertPaste(const std::string& text, std::size_t replace_before) {
+    if (replace_before > 0) {
+        // ConPTY 已把 paste 首行逐字送进编辑器，直到回车才露出它是粘贴。
+        // 这些字都在当前行、紧贴光标；先原位撤下，再换成完整附件 token。
+        const std::size_t erase_count = std::min(replace_before, col_);
+        lines_[row_].erase(col_ - erase_count, erase_count);
+        col_ -= erase_count;
+    }
     std::string normalized;
     normalized.reserve(text.size());
     for (std::size_t i = 0; i < text.size(); ++i) {
@@ -343,13 +352,19 @@ void LineEditorCore::InsertPaste(const std::string& text) {
         }
     }
     const std::u32string decoded = Utf8ToUtf32(normalized);
-    if (decoded.find(U'\n') == std::u32string::npos) {
-        for (const char32_t c : decoded) {
-            InsertChar(c);
-        }
+    if (decoded.empty()) {
         return;
     }
-    if (pasted_contents_.size() >= 0xFFFE) {
+
+    if (paste_run_.has_value()) {
+        PasteRunState& run = *paste_run_;
+        run.content += decoded;
+        pasted_contents_[run.token_index] = run.content;
+        ResetHistoryBrowsing();
+        return;
+    }
+
+    if (decoded.size() <= kLargePasteCharThreshold || pasted_contents_.size() >= 0xFFFE) {
         for (const char32_t c : decoded) {
             if (c == U'\n') {
                 InsertNewLine();
@@ -360,8 +375,10 @@ void LineEditorCore::InsertPaste(const std::string& text) {
         return;
     }
     const char32_t token = kPasteTokenBase + static_cast<char32_t>(pasted_contents_.size());
+    const std::size_t token_index = pasted_contents_.size();
     pasted_contents_.push_back(decoded);
     InsertChar(token);
+    paste_run_ = PasteRunState{token_index, decoded};
 }
 
 std::u32string LineEditorCore::ExpandPasteTokens(const std::u32string& text) const {
@@ -625,6 +642,12 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
         effective.kind = KeyKind::Enter;
     }
 
+    // 连续 Paste 才能并成同一枚附件。任一真实编辑键都会截断这趟粘贴，
+    // 免得用户先粘一段、移动光标后再粘一段，却被隔空并回旧附件。
+    if (effective.kind != KeyKind::Paste) {
+        paste_run_.reset();
+    }
+
     if (effective.kind != KeyKind::Tab) {
         tab_cycle_.reset();
     }
@@ -701,7 +724,7 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
             InsertChar(effective.ch);
             break;
         case KeyKind::Paste:
-            InsertPaste(effective.text);
+            InsertPaste(effective.text, effective.replace_before);
             break;
         case KeyKind::NewLine:
             InsertNewLine();
@@ -794,11 +817,9 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
             if (!expanded.empty()) {
                 history_.push_back(expanded);
             }
-            std::vector<std::u32string> submitted_lines;
-            submitted_lines.reserve(lines_.size());
-            for (const std::u32string& line : lines_) {
-                submitted_lines.push_back(DisplayPasteTokens(line));
-            }
+            // Codex 的占位符只活在 composer：提交时展开，历史回显也留下
+            // 全文。短 paste 本来就是明文；大 paste 到这里才从 token 还原。
+            std::vector<std::u32string> submitted_lines = SplitJoined(expanded);
             ClearBuffer();
             ResetHistoryBrowsing();
             RenderState state = BuildRenderState(true, false, false, false);

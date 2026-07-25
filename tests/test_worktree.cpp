@@ -49,3 +49,28 @@ TEST_CASE("WorktreeSession: 非 Git 仓库经 mock 给清楚结果") {
     REQUIRE(commands.size() == 1);
     CHECK((commands.front().args == std::vector<std::string>{"rev-parse", "--show-toplevel"}));
 }
+
+TEST_CASE("CurrentGitBranch: 普通分支取短名") {
+    std::vector<cli::GitCommand> commands;
+    const std::string branch = cli::CurrentGitBranch("D:/repo", [&commands](const cli::GitCommand& command) {
+        commands.push_back(command);
+        return cli::GitCommandResult{0, "feature/status-panel\n", {}};
+    });
+    CHECK(branch == "feature/status-panel");
+    REQUIRE(commands.size() == 1);
+    CHECK((commands[0].args == std::vector<std::string>{"symbolic-ref", "--quiet", "--short", "HEAD"}));
+}
+
+TEST_CASE("CurrentGitBranch: 游离 HEAD 回退短哈希，不在仓库返回空") {
+    int calls = 0;
+    const std::string detached = cli::CurrentGitBranch("D:/repo", [&calls](const cli::GitCommand&) {
+        ++calls;
+        return calls == 1 ? cli::GitCommandResult{1, {}, {}}
+                          : cli::GitCommandResult{0, "abc1234\n", {}};
+    });
+    CHECK(detached == "detached@abc1234");
+
+    CHECK(cli::CurrentGitBranch("D:/plain", [](const cli::GitCommand&) {
+              return cli::GitCommandResult{128, {}, {}};
+          }).empty());
+}

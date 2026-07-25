@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 #include "cli/context_tracker.hpp"  // kAutoCompactThresholdPercent
 #include "cli/i18n.hpp"
@@ -60,6 +61,83 @@ std::string StatusLineInfoSegment(const std::string& model, int context_percent,
 std::string BuildStatusLineText(ConfirmMode mode, const std::string& model, int context_percent,
                                  std::int64_t used_tokens, std::int64_t window_tokens) {
     return StatusLineModeSegment(mode) + StatusLineInfoSegment(model, context_percent, used_tokens, window_tokens);
+}
+
+std::vector<StatusPanelSegment> BuildStatusPanelSegments(
+    const std::vector<std::string>& items, ConfirmMode mode, const StatusPanelData& data) {
+    std::vector<StatusPanelSegment> out;
+    out.reserve(items.size());
+    for (const std::string& key : items) {
+        std::string text;
+        if (key == "permission_mode") {
+            text = StatusLineModeSegment(mode);
+        } else if (key == "model") {
+            text = data.model;
+        } else if (key == "cwd") {
+            text = data.cwd;
+        } else if (key == "git_branch") {
+            text = data.git_branch;
+        } else if (key == "context") {
+            text = "context " + std::to_string(data.context_percent) + "%";
+        } else if (key == "tokens") {
+            if (data.used_tokens > 0) {
+                text = FormatTokenCount(data.used_tokens) + "/" + FormatTokenCount(data.window_tokens);
+            }
+        } else if (key == "provider") {
+            if (!data.provider.empty()) {
+                text = "provider " + data.provider;
+            }
+        } else if (key == "effort") {
+            if (!data.effort.empty()) {
+                text = "effort " + data.effort;
+            }
+        }
+        if (!text.empty()) {
+            out.push_back({key, std::move(text)});
+        }
+    }
+    return out;
+}
+
+std::string BuildStatusPanelText(const std::vector<std::string>& items,
+                                 std::string_view separator, ConfirmMode mode,
+                                 const StatusPanelData& data) {
+    const auto segments = BuildStatusPanelSegments(items, mode, data);
+    std::string out;
+    for (std::size_t i = 0; i < segments.size(); ++i) {
+        if (i > 0) {
+            out += separator;
+        }
+        out += segments[i].text;
+    }
+    return out;
+}
+
+std::string CompactStatusPath(std::string_view path, int max_width) {
+    if (max_width <= 0) {
+        return {};
+    }
+    const std::string full(path);
+    if (static_cast<int>(DisplayWidthUtf8(full)) <= max_width) {
+        return full;
+    }
+
+    const std::size_t slash = path.find_last_of("/\\");
+    const std::string_view leaf = slash == std::string_view::npos ? path : path.substr(slash + 1);
+    const char separator = path.find('\\') != std::string_view::npos ? '\\' : '/';
+    std::string root;
+    if (path.size() >= 3 && path[1] == ':' && (path[2] == '/' || path[2] == '\\')) {
+        root = std::string(path.substr(0, 3));
+    } else if (!path.empty() && (path.front() == '/' || path.front() == '\\')) {
+        root.assign(1, path.front());
+    }
+
+    std::string compact = root + "…" + separator + std::string(leaf);
+    if (static_cast<int>(DisplayWidthUtf8(compact)) <= max_width) {
+        return compact;
+    }
+    compact = "…" + std::string(1, separator) + std::string(leaf);
+    return TruncateUtf8ToDisplayWidth(compact, max_width);
 }
 
 std::string StreamHintText(bool plain) {

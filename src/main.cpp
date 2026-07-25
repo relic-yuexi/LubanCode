@@ -414,6 +414,14 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
               << lubancode::config::ToString(sources.max_context_chars) << "]\n";
     std::cout << "  theme              = " << config.theme << "  [" << lubancode::config::ToString(sources.theme)
               << "]\n";
+    std::cout << "  status_panel       = ";
+    for (std::size_t i = 0; i < config.status_panel.items.size(); ++i) {
+        if (i > 0) {
+            std::cout << ",";
+        }
+        std::cout << config.status_panel.items[i];
+    }
+    std::cout << "  [" << lubancode::config::ToString(sources.status_panel) << "]\n";
     // i18n:language 空 = 跟系统,顺带亮出此刻实际生效的语言码。
     std::cout << "  language           = "
               << (config.language.empty() ? trf("config.language.follow_system", lubancode::cli::CurrentLanguage())
@@ -1205,6 +1213,16 @@ public:
         }
     }
 
+    // 状态型条目(todo 计划)会跨多次工具调用复用。锚点还在，便原地
+    // 改；已经滚出屏幕，则重新 PaintNew，给这一轮留一枚新锚点。
+    bool HasAnchor(int item_id) {
+        if (!enabled_ || !screen_) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        return Find(item_id) != nullptr;
+    }
+
     // 把条目末尾到当前光标之间的行全部擦掉、光标回到条目末尾——确认交互块
     // (参数详情 + [y/a/N] 提示)答完之后收尾用,让条目重新成为屏幕最后的
     // 内容,后续原地改写不受它牵连。
@@ -1851,7 +1869,8 @@ std::optional<FileDiffPreview> BuildFileDiffPreview(const std::string& name, con
     const int width = cli::DetectConsoleWidth().value_or(80);
     // 每行缩四空格,diff 行本身的宽度上限就得让出这四列(再留一列,免得
     // 顶格写到最后一格触发控制台自动换行、毁掉行数记账)。
-    const std::string body = cli::FormatDiff(diff, theme, width - 5, kDiffPreviewMaxLines, kDiffPreviewMaxBytes);
+    const std::string body =
+        cli::FormatDiff(diff, theme, width - 5, kDiffPreviewMaxLines, kDiffPreviewMaxBytes, path);
 
     FileDiffPreview out;
     out.full = header + "\n" +
@@ -1861,7 +1880,7 @@ std::optional<FileDiffPreview> BuildFileDiffPreview(const std::string& name, con
     // 再缩四格也够用)。
     {
         const std::string final_body =
-            cli::FormatDiff(diff, theme, width - 10, kDiffFinalMaxLines, kDiffFinalMaxBytes);
+            cli::FormatDiff(diff, theme, width - 10, kDiffFinalMaxLines, kDiffFinalMaxBytes, path);
         std::size_t p = 0;
         while (p < final_body.size()) {
             std::size_t nl = final_body.find('\n', p);
@@ -1940,6 +1959,9 @@ struct ToolDisplay {
     // 它肚子里正在跑的那个)。
     int active_main = -1;  // transcript 下标,-1 = 没有进行中的主工具
     int active_sub = -1;
+    // todo_write 是一块“当前计划”，不是流水账。同一轮后续调用复用这
+    // 个 transcript 条目和屏幕锚点；工具消息本身仍由 AgentLoop 完整保存。
+    int reusable_todo_item = -1;
     nlohmann::json main_input;
     nlohmann::json sub_input;
     std::optional<int> main_write_old_lines;
@@ -1982,9 +2004,54 @@ struct ToolDisplay {
             // 两处看着是同一个任务。
             active_agent_status_id = agent_status_board.Start(input.value("prompt", std::string()));
         }
-        active_main = NewItem(lubancode::cli::TranscriptKind::Tool, name, input);
-        if (is_console) {
-            painter.PaintNew(transcript[static_cast<std::size_t>(active_main)]);
+        const bool is_todo = name == "todo_write" && todo_state;
+        std::size_t todo_item_count = 0;
+        if (is_todo) {
+            if (const auto it = input.find("items"); it != input.end() && it->is_array()) {
+                todo_item_count = it->size();
+            }
+        }
+        // 中间夹着别的工具输出时，计划块不能凭空长高，否则会盖住下面
+        // 的条目。项数不变才原位换状态；计划增删项时另起一块 update。
+        const bool can_reuse_todo =
+            is_todo && reusable_todo_item >= 0 &&
+            transcript[static_cast<std::size_t>(reusable_todo_item)].summary_lines.size() ==
+                (std::max<std::size_t>)(1, todo_item_count);
+        if (can_reuse_todo) {
+            active_main = reusable_todo_item;
+            auto& item = transcript[static_cast<std::size_t>(active_main)];
+            // 旧计划下面可能早已垫着别的工具输出。此时若先把 N 行清单
+            // 缩成一行 Running，完成时便不能向下长回去，会盖住后文。
+            // 保住原摘要的行数，只换标题、圆点和状态色；结果回来后再
+            // 在同样高的块里替换各项状态。
+            const std::vector<std::string> previous_summary = item.summary_lines;
+            item.tool_name = name;
+            item.title = lubancode::cli::BuildToolTitle(todo_state->revision > 0 ? "todo_update" : name, input);
+            item.input_json = input.is_null() ? std::string() : input.dump();
+            item.status = lubancode::cli::TranscriptStatus::Running;
+            item.summary_lines = previous_summary;
+            item.full_output.clear();
+            item.start_time = std::chrono::steady_clock::now();
+            item.end_time = {};
+            if (is_console) {
+                if (painter.HasAnchor(item.id)) {
+                    painter.Repaint(item);
+                } else {
+                    painter.PaintNew(item);
+                }
+            }
+        } else {
+            active_main = NewItem(lubancode::cli::TranscriptKind::Tool, name, input);
+            auto& item = transcript[static_cast<std::size_t>(active_main)];
+            if (is_todo) {
+                reusable_todo_item = active_main;
+                if (todo_state->revision > 0) {
+                    item.title = lubancode::cli::BuildToolTitle("todo_update", input);
+                }
+            }
+            if (is_console) {
+                painter.PaintNew(item);
+            }
         }
     }
 
@@ -2321,7 +2388,11 @@ private:
             // 沿用现有清单渲染,清单接在 ⎿ 之后(FormatTodoList 每行自带的
             // 两空格缩进剥掉,条目渲染自己管缩进)。
             item.summary_lines.clear();
-            const std::string rendered = cli::FormatTodoList(todo_state->items, theme);
+            const std::vector<std::size_t> highlights =
+                todo_state->last_write_kind == lubancode::tools::TodoWriteKind::Updated
+                    ? todo_state->last_changed_indices
+                    : std::vector<std::size_t>{};
+            const std::string rendered = cli::FormatTodoList(todo_state->items, theme, highlights);
             std::size_t pos = 0;
             while (pos < rendered.size()) {
                 std::size_t nl = rendered.find('\n', pos);
@@ -5098,6 +5169,21 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     };
 
     while (true) {
+        // status panel 每圈都重取 cwd 与 Git 分支。/worktree、run_command
+        // 切目录/分支，或队列紧接着发下一条时，都不会挂着上一帧的旧值。
+        lubancode::cli::StatusPanelData status_data;
+        status_data.model = *current_model;
+        status_data.cwd = CurrentDirUtf8();
+        status_data.git_branch =
+            lubancode::cli::CurrentGitBranch(std::filesystem::current_path());
+        status_data.provider = active_provider;
+        status_data.effort = *current_think;
+        status_data.context_percent = context_tracker.UsagePercent();
+        status_data.used_tokens = static_cast<long long>(context_tracker.current_tokens());
+        status_data.window_tokens = static_cast<long long>(context_tracker.window_tokens());
+        lubancode::cli::SetStatusLineData(status_data, config.status_panel.items,
+                                           config.status_panel.separator);
+
         std::string content;
         if (!pending_queue.empty()) {
             // 队列非空:先把队列里排在最前面的这条自动发出去,不再等
@@ -5106,13 +5192,6 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
             pending_queue.pop_front();
             std::cout << theme.prompt << "> " << theme.reset << content << "\n";
         } else {
-            // 0.17.0:每次给主提示符之前刷新常驻状态行数据——模型名跟着
-            // /model 实时变,context 百分比每轮结束后就是新的,反正循环每圈
-            // 都路过这里,不用另找刷新点。
-            lubancode::cli::SetStatusLineData(
-                *current_model, context_tracker.UsagePercent(),
-                static_cast<long long>(context_tracker.current_tokens()),
-                static_cast<long long>(context_tracker.window_tokens()));
             // UI-A:主提示符是唯一开 composer 的读取点——Alt/Shift+Enter 插
             // 换行、Enter 全发、全空白不发送。别的 ReadLine 调用点(确认提示、
             // /model 编号选择、向导)保持单行语义。

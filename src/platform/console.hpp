@@ -13,6 +13,7 @@
 // 上滚,调用方(EnsureRoomForRows 那套账)自己滚够、自己修正锚点。
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 
@@ -112,6 +113,7 @@ struct KeyInput {
     Kind kind = Kind::None;
     char32_t ch = 0;
     std::string text;
+    std::size_t replace_before = 0;  // Paste:先撤掉光标前多少个码点，再放附件
 };
 
 // 原始逐键模式的进入/退出(RAII)。Windows: SetConsoleMode 关掉
@@ -150,6 +152,9 @@ public:
 
 private:
     std::optional<char32_t> pending_high_surrogate_;  // 仅 Windows 用;POSIX 下闲置无害
+    std::wstring rapid_text_run_;                     // Windows:高速到达、尚未遇到编辑键的正文
+    std::size_t rapid_char_count_ = 0;
+    std::uint64_t last_text_tick_ = 0;
 };
 
 // 监听线程探测:timeout_ms 内 stdin 有没有输入事件可读(只问不消费)。

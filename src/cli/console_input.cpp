@@ -93,14 +93,14 @@ TranscriptUiHandler& UiHandlerSlot() {
     return handler;
 }
 
-// 0.17.0:常驻状态行数据(模型名/context 百分比/token 数)。main.cpp 每轮
+// 0.17.0:常驻状态行数据。main.cpp 每轮
 // 更新,ReadLineKeyByKey 每帧重画状态行时读——都在主线程上,不用加锁
 // (监听线程从不碰状态行)。
 struct StatusLineData {
-    std::string model;
-    int percent = 0;
-    long long used_tokens = 0;
-    long long window_tokens = 0;
+    StatusPanelData values;
+    std::vector<std::string> items{
+        "permission_mode", "model", "cwd", "git_branch", "context", "tokens"};
+    std::string separator = " · ";
 };
 StatusLineData& StatusDataSlot() {
     static StatusLineData data;
@@ -235,7 +235,7 @@ std::optional<KeyEvent> MapKey(const platform::KeyInput& key) {
         case PK::Char:
             return KeyEvent::Char(key.ch);
         case PK::Paste:
-            return KeyEvent::Paste(key.text);
+            return KeyEvent::Paste(key.text, key.replace_before);
         case PK::Backspace:
             return KeyEvent::Simple(KeyKind::Backspace);
         case PK::Left:
@@ -326,26 +326,62 @@ std::string BoxRuleLine(const Theme& theme, int console_width) {
 void PrintStatusLine(const BoxChrome& chrome, int max_width) {
     const Theme& theme = *chrome.theme;
     const StatusLineData& data = StatusDataSlot();
-    std::string seg_mode = StatusLineModeSegment(chrome.mode);
-    std::string seg_info =
-        StatusLineInfoSegment(data.model, data.percent, data.used_tokens, data.window_tokens);
-    seg_mode = TruncateUtf8ToDisplayWidth(seg_mode, max_width);
-    const int rest = max_width - static_cast<int>(DisplayWidthUtf8(seg_mode));
-    seg_info = rest > 0 ? TruncateUtf8ToDisplayWidth(seg_info, rest) : std::string();
+    auto segments = BuildStatusPanelSegments(data.items, chrome.mode, data.values);
 
-    std::string mode_color;
-    switch (chrome.mode) {
-        case ConfirmMode::Auto:
-            mode_color = theme.stats;
-            break;
-        case ConfirmMode::Yolo:
-            mode_color = theme.error;
-            break;
-        case ConfirmMode::Confirm:
-            break;  // 默认色
+    // 宽度不够时先从左边收工作目录，保住项目末级目录与它后面的分支；
+    // 还不够才按用户给的字段顺序从行尾截。
+    int total_width = 0;
+    for (std::size_t i = 0; i < segments.size(); ++i) {
+        if (i > 0) {
+            total_width += static_cast<int>(DisplayWidthUtf8(data.separator));
+        }
+        total_width += static_cast<int>(DisplayWidthUtf8(segments[i].text));
     }
-    std::cout << mode_color << seg_mode << (mode_color.empty() ? std::string() : theme.reset)
-              << theme.stats << seg_info << theme.reset;
+    if (total_width > max_width) {
+        for (auto& segment : segments) {
+            if (segment.key != "cwd") {
+                continue;
+            }
+            const int old_width = static_cast<int>(DisplayWidthUtf8(segment.text));
+            const int room = (std::max)(6, old_width - (total_width - max_width));
+            segment.text = CompactStatusPath(segment.text, room);
+            break;
+        }
+    }
+
+    int remaining = max_width;
+    bool emitted = false;
+    for (const auto& segment : segments) {
+        if (remaining <= 0) {
+            break;
+        }
+        if (emitted) {
+            const std::string separator = TruncateUtf8ToDisplayWidth(data.separator, remaining);
+            std::cout << theme.stats << separator << theme.reset;
+            remaining -= static_cast<int>(DisplayWidthUtf8(separator));
+            if (remaining <= 0) {
+                break;
+            }
+        }
+        const std::string text = TruncateUtf8ToDisplayWidth(segment.text, remaining);
+        std::string color = theme.stats;
+        if (segment.key == "permission_mode") {
+            if (chrome.mode == ConfirmMode::Confirm) {
+                color.clear();
+            } else if (chrome.mode == ConfirmMode::Yolo) {
+                color = theme.error;
+            }
+        } else if (segment.key == "model") {
+            color = theme.tool_line;
+        } else if (segment.key == "cwd") {
+            color = theme.prompt;
+        } else if (segment.key == "git_branch") {
+            color = theme.banner;
+        }
+        std::cout << color << text << (color.empty() ? std::string() : theme.reset);
+        remaining -= static_cast<int>(DisplayWidthUtf8(text));
+        emitted = true;
+    }
 }
 
 // 按 RenderState 重画"编辑区域"。UI-A(0.11.0)起编辑区不止一行:第一行是
@@ -831,13 +867,12 @@ void SetConfirmMode(ConfirmMode mode) { SharedEditor().set_confirm_mode(mode); }
 
 void SetTranscriptUiHandler(TranscriptUiHandler handler) { UiHandlerSlot() = std::move(handler); }
 
-void SetStatusLineData(const std::string& model, int context_percent, long long used_tokens,
-                        long long window_tokens) {
+void SetStatusLineData(const StatusPanelData& values, const std::vector<std::string>& items,
+                       const std::string& separator) {
     StatusLineData& data = StatusDataSlot();
-    data.model = model;
-    data.percent = context_percent;
-    data.used_tokens = used_tokens;
-    data.window_tokens = window_tokens;
+    data.values = values;
+    data.items = items;
+    data.separator = separator;
 }
 
 std::optional<int> DetectConsoleWidth() {

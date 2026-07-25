@@ -22,6 +22,13 @@ Theme DarkTheme() {
     t.diff_add_bg = "\x1b[48;5;22m";   // 深绿底(默认前景在深色终端上看得清)
     t.diff_del_bg = "\x1b[48;5;52m";   // 深红底
     t.diff_line_no = "\x1b[2;37m";     // 行号栏淡灰
+    t.diff_syntax_plain = "\x1b[22;39m";     // 只复原前景/dim,保住 diff 背景
+    t.diff_syntax_keyword = "\x1b[38;5;213m";  // 紫红
+    t.diff_syntax_string = "\x1b[38;5;114m";   // 绿
+    t.diff_syntax_number = "\x1b[38;5;215m";   // 橙
+    t.diff_syntax_comment = "\x1b[38;5;244m";  // 灰
+    t.diff_syntax_type = "\x1b[38;5;81m";      // 青
+    t.diff_syntax_function = "\x1b[38;5;75m";  // 蓝
     return t;
 }
 
@@ -38,6 +45,13 @@ Theme LightTheme() {
     t.diff_add_bg = "\x1b[48;5;194m";  // 浅绿底(浅色终端下深色前景照样清楚)
     t.diff_del_bg = "\x1b[48;5;224m";  // 浅红底
     t.diff_line_no = "\x1b[2;30m";     // 行号栏浅灰
+    t.diff_syntax_plain = "\x1b[22;39m";
+    t.diff_syntax_keyword = "\x1b[38;5;127m";
+    t.diff_syntax_string = "\x1b[38;5;28m";
+    t.diff_syntax_number = "\x1b[38;5;130m";
+    t.diff_syntax_comment = "\x1b[38;5;102m";
+    t.diff_syntax_type = "\x1b[38;5;25m";
+    t.diff_syntax_function = "\x1b[38;5;27m";
     return t;
 }
 
