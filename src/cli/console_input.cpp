@@ -750,8 +750,8 @@ std::optional<std::string> ReadLine(const std::string& prompt, const Theme& them
     return line;
 }
 
-std::optional<std::vector<std::size_t>> ReadChoiceMenu(const std::vector<ChoiceMenuItem>& items,
-                                                        bool multi_select, const Theme& theme) {
+std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>& items,
+                                                const ChoiceMenuOptions& options, const Theme& theme) {
     if (items.empty() || !platform::StdinIsInteractive()) {
         return std::nullopt;
     }
@@ -775,7 +775,7 @@ std::optional<std::vector<std::size_t>> ReadChoiceMenu(const std::vector<ChoiceM
         start_row = info->cursor_y;
     }
 
-    ChoiceMenuCore menu(items.size(), multi_select);
+    ChoiceMenuCore menu(items.size(), options.multi_select, options.editable_index);
     auto draw = [&] {
         std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
         const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
@@ -786,12 +786,21 @@ std::optional<std::vector<std::size_t>> ReadChoiceMenu(const std::vector<ChoiceM
         std::cout << kSyncOutputBegin << "\x1b[?25l";
         for (std::size_t i = 0; i < items.size(); ++i) {
             const bool active = i == menu.state().cursor;
+            const bool editable = options.editable_index.has_value() && i == *options.editable_index;
             std::string prefix = active ? "> " : "  ";
-            if (multi_select) {
+            if (options.multi_select && !editable) {
                 prefix += menu.state().selected[i] ? "[x] " : "[ ] ";
+            } else if (options.multi_select) {
+                prefix += "    ";
             }
             const int room = (std::max)(0, width - static_cast<int>(DisplayWidthUtf8(prefix)) - 1);
-            const std::string label = TruncateUtf8ToDisplayWidth(items[i].label, room);
+            std::string raw_label = items[i].label;
+            if (editable) {
+                raw_label += ": ";
+                raw_label += menu.state().custom_text.empty() ? options.editable_placeholder
+                                                               : menu.state().custom_text + (active ? "_" : "");
+            }
+            const std::string label = TruncateUtf8ToDisplayWidth(raw_label, room);
             int description_room = room - static_cast<int>(DisplayWidthUtf8(label)) - 3;
 
             platform::ClearRowHardFrom(0, start_row + static_cast<int>(i), width);
@@ -808,9 +817,14 @@ std::optional<std::vector<std::size_t>> ReadChoiceMenu(const std::vector<ChoiceM
         }
         platform::ClearRowHardFrom(0, start_row + static_cast<int>(items.size()), width);
         platform::SetCursorPos(0, start_row + static_cast<int>(items.size()));
-        const std::string hint = menu.state().invalid
-                                     ? tr("ask_user.menu_select_one")
-                                     : tr(multi_select ? "ask_user.menu_multi_hint" : "ask_user.menu_hint");
+        std::string hint;
+        if (menu.state().invalid) {
+            hint = options.invalid_hint;
+        } else if (options.editable_index.has_value() && menu.state().cursor == *options.editable_index) {
+            hint = options.editable_hint;
+        } else {
+            hint = options.hint;
+        }
         std::cout << (menu.state().invalid ? theme.error : theme.stats)
                   << TruncateUtf8ToDisplayWidth(hint, width - 1) << theme.reset << kSyncOutputEnd;
         std::cout.flush();
@@ -856,9 +870,13 @@ std::optional<std::vector<std::size_t>> ReadChoiceMenu(const std::vector<ChoiceM
         }
     }
     const bool cancelled = menu.state().cancelled;
-    const std::vector<std::size_t> selected = menu.SelectedIndices();
+    ChoiceMenuResult result;
+    result.selected_indices = menu.SelectedIndices();
+    if (menu.state().custom_submitted) {
+        result.custom_text = menu.state().custom_text;
+    }
     clear();
-    return cancelled ? std::nullopt : std::optional<std::vector<std::size_t>>(selected);
+    return cancelled ? std::nullopt : std::optional<ChoiceMenuResult>(std::move(result));
 }
 
 ConfirmMode CurrentConfirmMode() { return SharedEditor().confirm_mode(); }

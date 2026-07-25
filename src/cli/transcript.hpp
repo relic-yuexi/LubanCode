@@ -25,6 +25,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "api/types.hpp"
 #include "cli/theme.hpp"
 
 namespace lubancode::cli {
@@ -76,10 +77,15 @@ std::string TranscriptStatusWord(TranscriptStatus status);
 // ---- 首行参数摘要 ------------------------------------------------------
 
 // 按工具名挑关键参数拼首行:run_command 显示命令;read/write/edit 显示
-// 路径;agent 显示任务前 40 个码点;todo_write 显示几项;MCP(mcp__ 前缀)
-// 和其余工具显示入参紧凑 JSON。只拼 "name(摘要)",宽度截断交给
+// 路径;agent 显示任务前 40 个码点;web_search 显示查询词;todo_write
+// 显示几项;MCP(mcp__ 前缀)和其余工具显示入参紧凑 JSON。只拼 "name(摘要)",宽度截断交给
 // FormatTranscriptItem。
 std::string BuildToolTitle(const std::string& name, const nlohmann::json& input);
+
+// /resume 的历史重放。用户/助手正文按当前主题渲染，tool_use 与随后
+// tool_result 配成终态工具条目；只含工具结果的 user 消息不另画一轮用户。
+std::string FormatRestoredHistory(const std::vector<api::Message>& messages, const Theme& theme,
+                                  int width, const std::vector<std::size_t>& compact_positions = {});
 
 // ---- 结果摘要小函数(每个都可单测) ------------------------------------
 

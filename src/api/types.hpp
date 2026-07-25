@@ -83,6 +83,9 @@ struct Request {
     // "type":"disabled"),映射关系见 anthropic/client.cpp 里的
     // BuildThinkingJson 注释。
     std::string reasoning_effort;
+    // 当前模型 variant 的请求级私有参数。provider 级 extra_body 先合并，
+    // 这里后合并；同名顶层键由 variant 覆盖。
+    nlohmann::json extra_body = nlohmann::json::object();
 };
 
 // ---------------------------------------------------------------------------
@@ -130,6 +133,22 @@ struct ContentBlockDone {
     int index = 0;
 };
 
+// Responses 等协议的服务端内置工具。它已由模型服务执行，客户端只展示
+// 轨迹，绝不能塞进 ToolUseBlock 再本地执行一遍。
+struct BuiltinToolStart {
+    std::string id;
+    std::string name;
+    nlohmann::json input = nlohmann::json::object();
+};
+
+struct BuiltinToolDone {
+    std::string id;
+    std::string name;
+    nlohmann::json input = nlohmann::json::object();
+    std::string summary;
+    bool is_error = false;
+};
+
 // 流的最后一个语义事件:消息结束,带上停止原因和用量统计。
 struct MessageDone {
     std::string stop_reason;
@@ -141,7 +160,8 @@ struct StreamError {
     std::string message;
 };
 
-using StreamEvent = std::variant<MessageStart, TextDelta, ToolUseStart, ToolUseInputDelta, ContentBlockDone, MessageDone, StreamError>;
+using StreamEvent = std::variant<MessageStart, TextDelta, ToolUseStart, ToolUseInputDelta, ContentBlockDone,
+                                 BuiltinToolStart, BuiltinToolDone, MessageDone, StreamError>;
 
 // ---------------------------------------------------------------------------
 // 错误

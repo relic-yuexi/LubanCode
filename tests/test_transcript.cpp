@@ -19,6 +19,7 @@ using lubancode::cli::BuiltinTheme;
 using lubancode::cli::CountLines;
 using lubancode::cli::ErrorSummaryLines;
 using lubancode::cli::FormatTranscriptItem;
+using lubancode::cli::FormatRestoredHistory;
 using lubancode::cli::ParseRunCommandExitCode;
 using lubancode::cli::ReadFileDoneSummary;
 using lubancode::cli::RunCommandDoneSummary;
@@ -170,6 +171,46 @@ TEST_CASE("BuildToolTitle: ask_user 显示第一道问题,不把整份参数糊�
                                                {"options", nlohmann::json::array()}}})},
     };
     CHECK(BuildToolTitle("ask_user", input) == "ask_user(你想选哪一种实现?)");
+}
+
+TEST_CASE("BuildToolTitle: web_search 显示查询词，起点参数未到时不画空对象") {
+    CHECK(BuildToolTitle("web_search", nlohmann::json::object()) == "web_search()");
+    CHECK(BuildToolTitle("web_search", {{"type", "search"}, {"query", "LLM 强化学习 OPD"}}) ==
+          "web_search(LLM 强化学习 OPD)");
+    CHECK(BuildToolTitle("web_search", {{"queries", nlohmann::json::array({"a", "b"})}}) ==
+          "web_search(2 queries)");
+}
+
+TEST_CASE("FormatRestoredHistory: 重放用户、助手 Markdown 与配对工具，不把结果消息画成用户") {
+    std::vector<lubancode::api::Message> messages;
+    messages.push_back({lubancode::api::Role::User, {lubancode::api::TextBlock{"帮我读文件"}}});
+    lubancode::api::Message assistant;
+    assistant.role = lubancode::api::Role::Assistant;
+    assistant.content.push_back(lubancode::api::TextBlock{"**正在查看**"});
+    assistant.content.push_back(
+        lubancode::api::ToolUseBlock{"call_1", "read_file", nlohmann::json{{"path", "a.txt"}}});
+    messages.push_back(assistant);
+    messages.push_back({lubancode::api::Role::User,
+                        {lubancode::api::ToolResultBlock{"call_1", "第一行\n第二行\n", false}}});
+    messages.push_back(
+        {lubancode::api::Role::Assistant, {lubancode::api::TextBlock{"看完了。"}}});
+
+    const std::string out = FormatRestoredHistory(messages, BuiltinTheme("plain"), 120, {2});
+    CHECK(out.find("> 你") != std::string::npos);
+    CHECK(out.find("帮我读文件") != std::string::npos);
+    CHECK(out.find("● 助手") != std::string::npos);
+    CHECK(out.find("正在查看") != std::string::npos);
+    CHECK(out.find("read_file(a.txt)") != std::string::npos);
+    CHECK(out.find("第一行") != std::string::npos);
+    CHECK(out.find("另有 1 行") != std::string::npos);
+    CHECK(out.find("上下文压缩") != std::string::npos);
+    CHECK(out.find("看完了") != std::string::npos);
+
+    std::size_t user_headers = 0;
+    for (std::size_t pos = out.find("> 你"); pos != std::string::npos; pos = out.find("> 你", pos + 1)) {
+        ++user_headers;
+    }
+    CHECK(user_headers == 1);
 }
 
 TEST_CASE("BuildToolTitle: MCP 工具显示参数紧凑 JSON,换行压成空格") {

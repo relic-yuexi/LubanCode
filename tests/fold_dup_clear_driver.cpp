@@ -35,7 +35,7 @@
 //
 // 用法: fold_dup_clear_driver <lubancode.exe 路径> <子进程工作目录> <报告文件路径>
 //                             [要验证清屏的 provider 名]
-//                             [--provider-only|--ask-user-only|--edit-color-only]
+//                             [--provider-only|--ask-user-only|--resume-only|--skill-help-only|--edit-color-only]
 // 环境变量(LUBANCODE_BASE_URL/LUBANCODE_API_KEY/LUBANCODE_MODEL 或者走
 // 子进程工作目录/USERPROFILE 下现成的 config.json)由调用方设好,子进程
 // 原样继承。
@@ -248,6 +248,8 @@ int wmain(int argc, wchar_t** argv) {
     const std::string provider_name = argc >= 5 ? WideToUtf8(argv[4]) : std::string();
     const bool provider_only = argc >= 6 && std::wstring(argv[5]) == L"--provider-only";
     const bool ask_user_only = argc >= 6 && std::wstring(argv[5]) == L"--ask-user-only";
+    const bool resume_only = argc >= 6 && std::wstring(argv[5]) == L"--resume-only";
+    const bool skill_help_only = argc >= 6 && std::wstring(argv[5]) == L"--skill-help-only";
     const bool edit_color_only = argc >= 6 && std::wstring(argv[5]) == L"--edit-color-only";
     g_report.open(argv[3], std::ios::binary | std::ios::trunc);
     if (!g_report.is_open()) {
@@ -331,6 +333,49 @@ int wmain(int argc, wchar_t** argv) {
     Check(icon_rows_at_start.size() == 1,
           "#四 启动:图标出现且只出现一次(实际 " + std::to_string(icon_rows_at_start.size()) + " 次)");
 
+    // ---- #十:/resume 裸敲菜单 + 历史重放 ----
+    if (resume_only) {
+        SendText("/resume");
+        SendKey(VK_RETURN, L'\r', 0);
+        Check(WaitForText("恢复哪一场会话", 10000, height),
+              "#十 /resume:裸敲出现会话方向键菜单");
+        Check(WaitForText("Enter 恢复", 5000, height),
+              "#十 /resume:菜单给出方向键与 Enter 提示");
+        // 本机最新一场可能是几十行长回答，40 行控制台会把历史开头卷走。
+        // 往下挑第三场短会话，才能在同一帧里同时验头、角色与收尾。
+        SendKey(VK_DOWN, 0, 0);
+        SendKey(VK_DOWN, 0, 0);
+        SendKey(VK_RETURN, L'\r', 0);
+        Check(WaitForText("恢复历史", 10000, height),
+              "#十 /resume:选中后开始重放历史");
+        Check(WaitForText("> 你", 10000, height),
+              "#十 /resume:用户正文重新显示");
+        Check(WaitForText("助手", 10000, height),
+              "#十 /resume:助手正文重新显示");
+        Check(WaitForText("历史到此", 10000, height),
+              "#十 /resume:历史边界与续聊提示出现");
+        return finish();
+    }
+
+    // ---- #十一:/skill 裸敲完整帮助 ----
+    if (skill_help_only) {
+        SendText("/skill");
+        SendKey(VK_RETURN, L'\r', 0);
+        Check(WaitForText("技能管理", 5000, height),
+              "#十一 /skill:裸敲给出完整帮助标题");
+        Check(WaitForText("https://example.com/my-skill.md", 5000, height),
+              "#十一 /skill:给出 Markdown 网址安装示例");
+        Check(WaitForText("C:\\path\\to\\my-skill", 5000, height),
+              "#十一 /skill:给出本地目录安装示例");
+        Check(WaitForText("/skill update", 5000, height),
+              "#十一 /skill:说明远端更新命令");
+        Check(WaitForText("/skill remove", 5000, height),
+              "#十一 /skill:说明删除命令");
+        Check(WaitForText("~/.lubancode/skills", 5000, height),
+              "#十一 /skill:说明实际落盘目录");
+        return finish();
+    }
+
     // ---- #七:/provider switch 成功后刷新屏面 ----
     // provider 名由调用方传入,免得把某个私有配置硬编码进回归驱动。切换
     // 成功后该真清一次,再重画图标和新配置横幅:图标签名仍只出现一次,
@@ -371,10 +416,9 @@ int wmain(int argc, wchar_t** argv) {
         SendKey(VK_DOWN, 0, 0);
         Check(WaitForText("> 自己填写", 5000, height),
               "#八 ask_user:Down 键把光标移到末项");
-        SendKey(VK_RETURN, L'\r', 0);
-        Check(WaitForText("请输入你的答案", 10000, height),
-              "#八 ask_user:末项进入自由填写");
         SendText("灰度发布");
+        Check(WaitForText("自己填写: 灰度发布_", 10000, height),
+              "#八 ask_user:末项原地编辑自填答案");
         SendKey(VK_RETURN, L'\r', 0);
         Check(WaitForText("已选择", 10000, height) && WaitForText("灰度发布", 10000, height),
               "#八 ask_user:自填答案留在屏上并回传工具");

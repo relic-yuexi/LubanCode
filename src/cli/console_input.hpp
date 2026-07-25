@@ -66,10 +66,24 @@ struct ChoiceMenuItem {
     std::string description;
 };
 
-// 真终端绘制原地选择菜单；返回选中项的 0 基下标。Esc/Ctrl+C/EOF 返回
-// nullopt。调用方负责在 items 末尾补“自己填写”。
-std::optional<std::vector<std::size_t>> ReadChoiceMenu(const std::vector<ChoiceMenuItem>& items,
-                                                        bool multi_select, const Theme& theme);
+struct ChoiceMenuOptions {
+    bool multi_select = false;
+    std::optional<std::size_t> editable_index;
+    std::string hint;
+    std::string invalid_hint;
+    std::string editable_hint;
+    std::string editable_placeholder = "____________";
+};
+
+struct ChoiceMenuResult {
+    std::vector<std::size_t> selected_indices;
+    std::optional<std::string> custom_text;
+};
+
+// 真终端绘制原地选择菜单。editable_index 指向的末项可直接键入文字，
+// 返回普通选中项与行内文本；Esc/Ctrl+C/EOF 返回 nullopt。
+std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>& items,
+                                                const ChoiceMenuOptions& options, const Theme& theme);
 
 // 会话级确认模式的查询/设置。真控制台下 Shift+Tab 会改这个状态(存在
 // ReadLine() 内部维护的、贯穿整条交互会话的 LineEditorCore 实例里,见

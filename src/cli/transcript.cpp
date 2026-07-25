@@ -1,10 +1,12 @@
 #include "cli/transcript.hpp"
 
 #include <cstdio>
+#include <map>
 #include <string_view>
 
 #include "cli/i18n.hpp"
 #include "cli/line_editor.hpp"  // TruncateUtf8ToDisplayWidth
+#include "cli/markdown.hpp"
 
 namespace lubancode::cli {
 
@@ -179,6 +181,13 @@ std::string BuildToolTitle(const std::string& name, const nlohmann::json& input)
             !questions->empty() && (*questions)[0].is_object()) {
             arg = TruncateUtf8Codepoints((*questions)[0].value("question", std::string()), 40);
         }
+    } else if (name == "web_search") {
+        arg = input.value("query", std::string());
+        if (arg.empty()) {
+            if (const auto queries = input.find("queries"); queries != input.end() && queries->is_array()) {
+                arg = std::to_string(queries->size()) + " queries";
+            }
+        }
     } else if (name == "todo_write" || name == "todo_update") {
         std::size_t count = 0;
         if (const auto it = input.find("items"); it != input.end() && it->is_array()) {
@@ -196,6 +205,103 @@ std::string BuildToolTitle(const std::string& name, const nlohmann::json& input)
         }
     }
     return name + "(" + arg + ")";
+}
+
+std::string FormatRestoredHistory(const std::vector<api::Message>& messages, const Theme& theme,
+                                  int width, const std::vector<std::size_t>& compact_positions) {
+    std::map<std::string, const api::ToolResultBlock*> results;
+    for (const auto& message : messages) {
+        for (const auto& block : message.content) {
+            if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) {
+                results[result->tool_use_id] = result;
+            }
+        }
+    }
+
+    std::string out;
+    const auto separate = [&out] {
+        if (!out.empty() && out.back() != '\n') {
+            out += '\n';
+        }
+        if (!out.empty() && (out.size() < 2 || out[out.size() - 2] != '\n')) {
+            out += '\n';
+        }
+    };
+    const auto append_markdown = [&](const std::string& text) {
+        const auto lines = RenderMarkdown(text, theme, width);
+        for (const std::string& line : lines) {
+            out += line + "\n";
+        }
+    };
+
+    std::size_t next_compact = 0;
+    const auto emit_compact_notes = [&](std::size_t message_index) {
+        while (next_compact < compact_positions.size() && compact_positions[next_compact] <= message_index) {
+            separate();
+            out += theme.stats + tr("cmd.resume.history.compact") + theme.reset + "\n";
+            ++next_compact;
+        }
+    };
+
+    for (std::size_t mi = 0; mi < messages.size(); ++mi) {
+        const auto& message = messages[mi];
+        emit_compact_notes(mi);
+        bool has_visible_content = false;
+        for (const auto& block : message.content) {
+            has_visible_content = has_visible_content || std::holds_alternative<api::TextBlock>(block) ||
+                                  std::holds_alternative<api::ImageBlock>(block) ||
+                                  std::holds_alternative<api::ToolUseBlock>(block);
+        }
+        if (!has_visible_content) {
+            continue;
+        }
+
+        separate();
+        const bool assistant = message.role == api::Role::Assistant;
+        out += (assistant ? theme.banner + "● " + tr("cmd.resume.history.assistant")
+                          : theme.confirm + "> " + tr("cmd.resume.history.user")) +
+               theme.reset + "\n";
+        for (const auto& block : message.content) {
+            if (const auto* text = std::get_if<api::TextBlock>(&block)) {
+                append_markdown(text->text);
+                continue;
+            }
+            if (const auto* image = std::get_if<api::ImageBlock>(&block)) {
+                out += trf("cmd.resume.history.image", image->filename, image->width, image->height) + "\n";
+                continue;
+            }
+            const auto* use = std::get_if<api::ToolUseBlock>(&block);
+            if (use == nullptr) {
+                continue;
+            }
+            TranscriptItem item;
+            item.tool_name = use->name;
+            item.title = BuildToolTitle(use->name, use->input);
+            item.input_json = use->input.dump();
+            const auto found = results.find(use->id);
+            if (found == results.end()) {
+                item.status = TranscriptStatus::Error;
+                item.summary_lines = {tr("cmd.resume.history.tool_missing")};
+            } else {
+                const api::ToolResultBlock& result = *found->second;
+                item.status = result.is_error ? TranscriptStatus::Error : TranscriptStatus::Ok;
+                std::string first_line = result.content.substr(0, result.content.find('\n'));
+                if (first_line.empty()) {
+                    first_line = result.is_error ? tr("cmd.resume.history.tool_error")
+                                                 : tr("cmd.resume.history.tool_done");
+                }
+                const int line_count = CountLines(result.content);
+                if (line_count > 1) {
+                    first_line += trf("cmd.resume.history.tool_more", line_count - 1);
+                }
+                item.summary_lines = {std::move(first_line)};
+                item.full_output = TruncateUtf8Bytes(result.content, kFullOutputCapBytes);
+            }
+            out += FormatTranscriptItem(item, theme, width);
+        }
+    }
+    emit_compact_notes(messages.size());
+    return out;
 }
 
 int CountLines(const std::string& text) {

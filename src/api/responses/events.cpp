@@ -20,10 +20,19 @@ std::optional<StreamEvent> HandleOutputItemAdded(const json& data) {
         return std::nullopt;
     }
     const std::string type = it->value("type", "");
+    if (type == "web_search_call") {
+        BuiltinToolStart event;
+        event.id = it->value("id", "");
+        event.name = "web_search";
+        if (auto action = it->find("action"); action != it->end() && action->is_object()) {
+            event.input = *action;
+        }
+        return event;
+    }
     if (type != "function_call") {
         // message 类型的起始不单独发事件,文本内容靠后续
-        // response.output_text.delta 一段段拼出来;reasoning / 内置工具
-        // 调用等类型 M3 不消费,静默跳过。
+        // response.output_text.delta 一段段拼出来；reasoning 与尚未接线的
+        // 其它内置工具静默跳过。web_search_call 已在上面单独发展示事件。
         return std::nullopt;
     }
     ToolUseStart event;
@@ -46,6 +55,21 @@ std::optional<StreamEvent> HandleOutputItemDone(const json& data) {
         return std::nullopt;
     }
     const std::string type = it->value("type", "");
+    if (type == "web_search_call") {
+        BuiltinToolDone event;
+        event.id = it->value("id", "");
+        event.name = "web_search";
+        event.summary = "服务端搜索完成";
+        if (auto action = it->find("action"); action != it->end() && action->is_object()) {
+            event.input = *action;
+            if (auto query = action->find("query"); query != action->end() && query->is_string()) {
+                event.summary = "查询: " + query->get<std::string>();
+            } else if (auto queries = action->find("queries"); queries != action->end() && queries->is_array()) {
+                event.summary = "服务端完成 " + std::to_string(queries->size()) + " 条搜索";
+            }
+        }
+        return event;
+    }
     if (type != "message" && type != "function_call") {
         // 没有对应的 ToolUseStart/文本块起始(reasoning、内置工具调用……),
         // 没什么可收尾的,跳过。
@@ -165,7 +189,7 @@ std::optional<StreamEvent> parse_event(const SseFrame& frame) try {
 
     // 没见过的、或者语义上不需要单独发事件的类型(response.created、
     // response.in_progress、response.content_part.*、response.output_text.done、
-    // response.function_call_arguments.done、reasoning 相关、内置工具/MCP
+    // response.function_call_arguments.done、reasoning 相关、其它内置工具/MCP
     // 相关……):静默跳过,别崩。
     return std::nullopt;
 } catch (const json::exception&) {

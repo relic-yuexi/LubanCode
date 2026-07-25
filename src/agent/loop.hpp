@@ -37,6 +37,13 @@ struct Callbacks {
     // 工具跑完了(不管成功、失败、被拒绝、还是压根没找到这个工具),都会调用一次。
     std::function<void(const std::string& name, const tools::Tool::Result& result)> on_tool_done;
 
+    // 服务端内置工具只展示，不经本地 registry 执行。比如 Responses 的
+    // web_search_call；两枚回调保证界面也有 running -> done 轨迹。
+    std::function<void(const std::string& name, const nlohmann::json& input)> on_builtin_tool_start;
+    std::function<void(const std::string& name, const nlohmann::json& input, const std::string& summary,
+                       bool is_error)>
+        on_builtin_tool_done;
+
     // 每一次到模型的独立请求结束时(MessageDone 到达那一刻)都会调用一次,
     // 把这一次的 usage 报出来。一次 Run() 内部可能因为工具调用来回好几趟,
     // 也就是好几次独立请求——这个回调按请求粒度触发,不是按 Run() 粒度,

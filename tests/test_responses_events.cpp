@@ -195,18 +195,20 @@ TEST_CASE("未知事件类型静默跳过,不崩") {
 // M12(原生 web_search):模型自己联网搜索时,output 里会多出一个
 // type:"web_search_call" 的条目(带 status/id/action,可选 results/
 // sources)。真正的搜索结果由模型消化后写进最终 message 的 output_text
-// 里(带 url_citation 标注),web_search_call 条目本身没有对应的 lubancode
-// 语义事件——跟 reasoning 一样静默跳过,不崩、不影响文本正常拼出来。
-TEST_CASE("response.output_item.added 类型是 web_search_call 时静默跳过") {
+// 里(带 url_citation 标注)。客户端不再把轨迹吞掉，而是翻成只展示、不执行
+// 的 BuiltinToolStart/Done；正文仍照旧从 output_text 拼。
+TEST_CASE("response.output_item.added 类型是 web_search_call 时发展示起点") {
     auto event = parse_event(Frame(
         R"({"item":{"id":"ws_1","status":"in_progress","type":"web_search_call","action":{"type":"search","query":"今天天气"}},"output_index":0,"sequence_number":2,"type":"response.output_item.added"})"));
-    CHECK_FALSE(event.has_value());
+    REQUIRE(event.has_value());
+    CHECK(std::holds_alternative<BuiltinToolStart>(*event));
 }
 
-TEST_CASE("response.output_item.done 类型是 web_search_call 时静默跳过(没有对应的开块)") {
+TEST_CASE("response.output_item.done 类型是 web_search_call 时发展示终点") {
     auto event = parse_event(Frame(
         R"({"item":{"id":"ws_1","status":"completed","type":"web_search_call","action":{"type":"search","query":"今天天气"},"results":[{"url":"https://example.com","title":"今天天气预报"}]},"output_index":0,"sequence_number":5,"type":"response.output_item.done"})"));
-    CHECK_FALSE(event.has_value());
+    REQUIRE(event.has_value());
+    CHECK(std::holds_alternative<BuiltinToolDone>(*event));
 }
 
 TEST_CASE("完整的原生 web_search 流式响应:web_search_call 条目穿插在文本前后,不崩,最终文本正常拼出") {
@@ -232,18 +234,18 @@ TEST_CASE("完整的原生 web_search 流式响应:web_search_call 条目穿插�
         }
     }
 
-    // web_search_call 的 added/done、以及三个 response.web_search_call.*
-    // 子事件都静默跳过,不产生语义事件;只剩文本消息的 delta*2、
-    // output_item.done、response.completed 四个。
-    REQUIRE(events.size() == 4);
-    REQUIRE(std::holds_alternative<TextDelta>(events[0]));
-    CHECK(std::get<TextDelta>(events[0]).text == "今天");
-    REQUIRE(std::holds_alternative<TextDelta>(events[1]));
-    CHECK(std::get<TextDelta>(events[1]).text == "晴,25度");
-    REQUIRE(std::holds_alternative<ContentBlockDone>(events[2]));
-    CHECK(std::get<ContentBlockDone>(events[2]).index == 1);
-    REQUIRE(std::holds_alternative<MessageDone>(events[3]));
-    const auto& done = std::get<MessageDone>(events[3]);
+    // added/done 各产一枚展示事件；三个过程子事件仍跳过。
+    REQUIRE(events.size() == 6);
+    REQUIRE(std::holds_alternative<BuiltinToolStart>(events[0]));
+    REQUIRE(std::holds_alternative<BuiltinToolDone>(events[1]));
+    REQUIRE(std::holds_alternative<TextDelta>(events[2]));
+    CHECK(std::get<TextDelta>(events[2]).text == "今天");
+    REQUIRE(std::holds_alternative<TextDelta>(events[3]));
+    CHECK(std::get<TextDelta>(events[3]).text == "晴,25度");
+    REQUIRE(std::holds_alternative<ContentBlockDone>(events[4]));
+    CHECK(std::get<ContentBlockDone>(events[4]).index == 1);
+    REQUIRE(std::holds_alternative<MessageDone>(events[5]));
+    const auto& done = std::get<MessageDone>(events[5]);
     CHECK(done.stop_reason == "end_turn");  // output 里 web_search_call 不是 function_call,不当 tool_use
     CHECK(done.usage.input_tokens == 30);
     CHECK(done.usage.output_tokens == 8);
@@ -336,4 +338,34 @@ TEST_CASE("字段类型不对(type_error 一族)不抛异常、不崩,当坏帧�
 
     auto bad = parse_event(Frame(R"({"type":"response.output_text.delta","delta":42})"));
     CHECK_FALSE(bad.has_value());
+}
+
+TEST_CASE("Responses 内置 web_search_call 翻成只展示、不本地执行的起止事件") {
+    const auto start = parse_event(Frame(
+        R"({"type":"response.output_item.added","output_index":0,"item":{"type":"web_search_call","id":"ws_1","status":"in_progress","action":{"type":"search","query":"台风"}}})"));
+    REQUIRE(start.has_value());
+    REQUIRE(std::holds_alternative<BuiltinToolStart>(*start));
+    CHECK(std::get<BuiltinToolStart>(*start).name == "web_search");
+    CHECK(std::get<BuiltinToolStart>(*start).input["query"] == "台风");
+
+    const auto done = parse_event(Frame(
+        R"({"type":"response.output_item.done","output_index":0,"item":{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"台风"}}})"));
+    REQUIRE(done.has_value());
+    REQUIRE(std::holds_alternative<BuiltinToolDone>(*done));
+    CHECK(std::get<BuiltinToolDone>(*done).summary.find("台风") != std::string::npos);
+    CHECK(std::get<BuiltinToolDone>(*done).input["query"] == "台风");
+}
+
+TEST_CASE("Responses 内置搜索起点缺 action 时，终点参数仍可回填标题") {
+    const auto start = parse_event(Frame(
+        R"({"type":"response.output_item.added","output_index":0,"item":{"type":"web_search_call","id":"ws_sparse","status":"in_progress"}})"));
+    REQUIRE(start.has_value());
+    REQUIRE(std::holds_alternative<BuiltinToolStart>(*start));
+    CHECK(std::get<BuiltinToolStart>(*start).input.empty());
+
+    const auto done = parse_event(Frame(
+        R"({"type":"response.output_item.done","output_index":0,"item":{"type":"web_search_call","id":"ws_sparse","status":"completed","action":{"type":"search","query":"OPD 强化学习"}}})"));
+    REQUIRE(done.has_value());
+    REQUIRE(std::holds_alternative<BuiltinToolDone>(*done));
+    CHECK(std::get<BuiltinToolDone>(*done).input["query"] == "OPD 强化学习");
 }

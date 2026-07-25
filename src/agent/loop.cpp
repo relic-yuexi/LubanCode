@@ -189,6 +189,14 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
                         } else if constexpr (std::is_same_v<T, api::StreamError>) {
                             stream_error = true;
                             stream_error_message = e.message;
+                        } else if constexpr (std::is_same_v<T, api::BuiltinToolStart>) {
+                            if (callbacks.on_builtin_tool_start) {
+                                callbacks.on_builtin_tool_start(e.name, e.input);
+                            }
+                        } else if constexpr (std::is_same_v<T, api::BuiltinToolDone>) {
+                            if (callbacks.on_builtin_tool_done) {
+                                callbacks.on_builtin_tool_done(e.name, e.input, e.summary, e.is_error);
+                            }
                         }
                     },
                     event);
