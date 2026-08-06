@@ -102,6 +102,11 @@ endif()
 
 add_test(NAME lubancode_tests COMMAND lubancode_tests)
 
+# 多行字符公式的视觉小样：直连正式渲染器，不进 ctest。
+add_executable(latex_box_experiment latex_box_experiment.cpp)
+target_link_libraries(latex_box_experiment PRIVATE lubancode_core)
+target_compile_features(latex_box_experiment PRIVATE cxx_std_23)
+
 # 0.17.0:集成验证用的刮屏驱动器(AllocConsole + WriteConsoleInput +
 # ReadConsoleOutput,真控制台专用),不进 ctest——要真钥匙、要弹控制台
 # 窗口,只在集成验证时手动跑:
