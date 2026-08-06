@@ -1,8 +1,8 @@
 # LubanCode 配置
 
-[文档首页](README.md) · [扩展指南](extensions.md) · [架构说明](architecture.md) · [中文 README](../README.md) · [English README](../README.en.md)
+[文档首页](README.md) · [功能总览](feature-reference.md) · [命令手册](commands.md) · [Provider 目录](provider-catalog.md) · [扩展指南](extensions.md) · [架构说明](architecture.md)
 
-lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key`、`model` 这几件事。本文档核实自 `src/config/config.hpp`、`src/config/prompt_files.cpp`(内置的 `lubancode-config` 技能手册)与 `lubancode --help` 的真实输出,字段名与语义以代码为准。
+lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key`、`model` 这几件事。本文档核实自 `src/config/config.hpp`、发行包 `skills/lubancode-config/SKILL.md` 与 `lubancode --help` 的真实输出,字段名与语义以代码为准。
 
 ## 先跑起来
 
@@ -18,6 +18,59 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 ```
 
 不想让密钥落盘，就把 `api_key` 换成环境变量 `LUBANCODE_API_KEY`。要管多家服务，优先用下文 `providers` 数组与 `key_env`。
+
+### 一份较完整的例子
+
+下面这份把常用块摆在一处。它不是必抄模板。用到哪段，留哪段。
+
+```json
+{
+  "active_provider": "openai",
+  "theme": "dark",
+  "language": "zh-CN",
+  "think": "medium",
+  "context_window": "256k",
+  "compact_model": "",
+  "max_context_chars": 600000,
+  "max_turns": 0,
+  "tool_search_threshold": 20,
+  "connect_timeout_ms": 15000,
+  "stream_idle_timeout_secs": 60,
+  "request_timeout_secs": 30,
+  "status_panel": {
+    "items": ["permission_mode", "provider", "model", "cwd", "git_branch", "context", "tokens"],
+    "separator": " · "
+  },
+  "providers": [
+    {
+      "name": "openai",
+      "base_url": "https://api.openai.com/v1",
+      "wire": "responses",
+      "key_env": "OPENAI_API_KEY",
+      "model": "gpt-5.4",
+      "context_window": "256k"
+    }
+  ],
+  "memory": {
+    "enabled": false,
+    "use": true,
+    "generate": true,
+    "max_index_bytes": 16384,
+    "max_retrieval_bytes": 24576,
+    "max_results": 4
+  },
+  "hooks": {
+    "pre_tool": [],
+    "post_tool": [],
+    "session_start": [],
+    "session_end": []
+  },
+  "mcpServers": {},
+  "lsp": {}
+}
+```
+
+密钥由 `OPENAI_API_KEY` 提供，不写进 JSON。`memory.enabled` 此处故意保持 `false`；看清数据边界后再开。
 
 ## 一、配置分层与优先级
 
@@ -191,8 +244,11 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 | `LUBANCODE_THINK` | `think` | `none`/`low`/`medium`/`high`。 |
 | `LUBANCODE_SOUL` | `soul` | `default`、`off` 或 `souls/` 下魂名。 |
 | `LUBANCODE_FORCE_COLOR` | 终端颜色开关 | 设为 `1` 时,管道/重定向也强制尝试输出颜色;不写入 `config.json`。 |
+| `LUBANCODE_CONFIRM_MODE` | 会话起手确认档 | `confirm`、`auto` 或 `yolo`；不写入 `config.json`，优先级低于 `--yes`，高于 `settings.local.json`。 |
 
 环境变量设为空串,按没设处理。`hooks`、`mcpServers`、`search`、`lsp`、`tool_search_threshold`、`connect_timeout_ms`、`stream_idle_timeout_secs`、`request_timeout_secs` 没有对应的 `LUBANCODE_*` 变量,只能写配置文件。
+
+交互命令 `/update` 使用当前配置的 `connect_timeout_ms` 与 `request_timeout_secs`。启动参数 `--check-update` 在加载配置前执行，故用内置默认超时。两者都只访问 GitHub Release API，不带模型密钥。
 
 ## 四、hooks / mcpServers / search / lsp
 
@@ -200,7 +256,7 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 
 ### hooks
 
-`hooks` 可有 `pre_tool`、`post_tool`、`session_start`、`session_end` 四个数组,每项须有字符串 `command`(交给 `cmd.exe` 执行)。`pre_tool`/`post_tool` 可再写字符串 `matcher`:精确工具名,或 `"*"` 匹配全部工具;省略/空串也当 `"*"`。`session_start`/`session_end` 不看 `matcher`。
+`hooks` 可有 `pre_tool`、`post_tool`、`session_start`、`session_end` 四个数组,每项须有字符串 `command`。命令交给平台默认 shell：Windows 用 `cmd.exe`，POSIX 用 `/bin/sh`。`pre_tool`/`post_tool` 可再写字符串 `matcher`:精确工具名,或 `"*"` 匹配全部工具;省略/空串也当 `"*"`。`session_start`/`session_end` 不看 `matcher`。
 
 ```json
 {
@@ -398,8 +454,78 @@ GLM 系模型用 `thinking.type` 开关思考模式,外加一个自定义分级 
   projects/<项目key>/memory/          项目记忆正文、index 与可重建 catalog
   memory-jobs/                        后台记忆任务的 pending/failed 队列
   plugins/                            DLL 与 Lua 插件
-  skills/lubancode-config/SKILL.md    lubancode 自身配置手册,随版本自动更新
+  skills/                            用户自装 Skill；同名时压过官方级
   languages/                          语言包,预留扩展
 ```
 
 项目级的 `.lubancode/`(在 `<cwd>` 下)能放 `config.json`(按字段压过全局)、`settings.local.json`(本地权限,不进版本库)与 `skills/`(同名技能时项目级压过主目录级)。
+
+官方 Skill 不再播种进主目录。便携包、Windows 安装与开发构建从 `<exe-dir>/skills/` 读取；POSIX 前缀安装还会找 `<prefix>/share/lubancode/skills/`。同名优先级是项目级 > 主目录级 > 官方级。旧版主目录里带系统维护标记的 `lubancode-config` 副本会自动让位给发行包新版。
+
+## 十、命令会改哪份文件
+
+有些 slash 命令只改本场，有些会落盘。分清这层，排错省一半工夫。
+
+| 动作 | 本场生效 | 默认落点 |
+| --- | --- | --- |
+| `/model` | 是 | 当前 Provider 的模型选择；按命令交互决定是否写回配置 |
+| `/provider add/remove/set` | 是 | `~/.lubancode/config.json` 的 `providers` |
+| `/provider switch` | 是 | 若项目已钉 `active_provider`，写项目配置；否则写全局配置 |
+| `/think` | 是 | 可按交互选择写回配置；只切本场时不落盘 |
+| `/soul` | 是 | 可写全局配置的 `soul` |
+| `/language` | 是 | 可写全局配置的 `language` |
+| `/prompt` | 是 | 管理主目录 prompt 文件；重建系统提示 |
+| `/memory use on|off` | 是 | 不落盘，只改本场 |
+| `/memory learn on|off` | 是 | 不落盘，只改本场 |
+| 确认提示按 `a` | 是 | 用户同意后，可写项目 `settings.local.json` |
+| `Shift+Tab` | 是 | 不落盘，只轮换本场确认档 |
+| `/init` | 是 | 项目根 `AGENTS.md`；已有文件不覆盖 |
+
+`/clear` 清对话，不重置配置。`/compact` 改会话历史，不改 `config.json`。`--reset-system-prompt` 只处理系统 prompt 文件。
+
+## 十一、配置排错
+
+### 先看最终值
+
+```powershell
+lubancode --config
+```
+
+它会列字段值与来源。别只盯某一份 JSON；上头可能还有环境变量，脚下也可能有项目配置。
+
+### JSON 读不进来
+
+配置须是 UTF-8 JSON object，不能写注释、尾逗号或裸反斜杠。路径在 JSON 里用 `/`，或把 `\` 写成 `\\`。
+
+### 改了全局配置却没生效
+
+依次查：
+
+1. `LUBANCODE_*` 是否压在最上。
+2. 当前目录 `.lubancode/config.json` 是否写了同字段。
+3. `active_provider` 是否把连接参数展开成另一套值。
+4. 是否只改了旧 `.lubancode.json`，而新 `config.json` 已存在。
+
+### Provider 有 key，仍报未认证
+
+若写 `key_env`，它存的是环境变量名，不是密钥。确认启动 LubanCode 的同一进程环境里真有该变量。明文 `api_key` 优先于 `key_env`，空串则按没设处理。
+
+### MCP、LSP、Hooks 改了却不生效
+
+这些段在启动时建运行对象。改完重启。项目段是整段覆盖；项目里哪怕只写一台 MCP，也会盖住全局整张 `mcpServers` 表。
+
+### `web_search` 不见了
+
+`search.provider` 只认 `tavily`、`brave`、`serper`，且 `api_key` 必须非空。缺一项就不注册。`web_fetch` 不受这段影响。
+
+### 自动压缩太早或太晚
+
+`context_window` 管 token 百分比；`max_context_chars` 是独立字符安全网。前者按服务端 usage 或估算触发，后者防极端大历史。两项都要看。
+
+### 项目记忆开不起来
+
+项目配置不能把全局关闭的记忆自行打开。先在 `~/.lubancode/config.json` 设 `memory.enabled=true`，再由项目配置收窄。
+
+### 终端仍有颜色或完全没颜色
+
+先看 `theme`，再看 stdout 是否为真终端，最后看 `LUBANCODE_FORCE_COLOR`。`plain` 主动禁色；强制颜色主要供集成测试和明确知道终端能力的场景。
