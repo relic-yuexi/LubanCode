@@ -168,6 +168,19 @@ std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme,
     return out;
 }
 
+std::string FormatTranscriptItems(const std::vector<TranscriptItem>& items, const Theme& theme,
+                                  int width, bool expanded, int focus_index) {
+    std::string out;
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        if (!expanded && items[i].kind == TranscriptKind::SubTool) {
+            continue;
+        }
+        out += FormatTranscriptItem(items[i], theme, width, expanded,
+                                    static_cast<int>(i) == focus_index);
+    }
+    return out;
+}
+
 std::string BuildToolTitle(const std::string& name, const nlohmann::json& input) {
     std::string arg;
     if (name == "run_command") {

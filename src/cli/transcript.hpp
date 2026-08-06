@@ -71,6 +71,11 @@ struct TranscriptItem {
 std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme, int width,
                                   bool expanded = false, bool focused = false);
 
+// Ctrl+O 整组重打用。详细档逐条铺出(含子代理内层工具)，紧凑档只留
+// 顶层工具；focus_index 是原 items 下标，-1 表示不标焦点。
+std::string FormatTranscriptItems(const std::vector<TranscriptItem>& items, const Theme& theme,
+                                  int width, bool expanded, int focus_index = -1);
+
 // plain 主题下的状态文字([RUNNING]/[OK]/…),渲染和单测共用一份映射。
 std::string TranscriptStatusWord(TranscriptStatus status);
 

@@ -54,6 +54,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <mutex>
+#include <utility>
 
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
@@ -701,11 +702,10 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         RedrawEditArea(start_row, prompt_end_col, state, prev_body_row_count, chrome);
 
         if (state.esc_pressed && esc_rejects) {
-            // 确认提示 [y/a/N] 场景:Esc 不留在循环里继续等,直接当这次
-            // 读取交了个空串——main.cpp 的确认回调本来就把"不是 y/Y/a/A"
-            // 都当拒绝,空串天然就是拒绝。
+            // 确认与可取消选择场景:Esc 不留在循环里继续等，直接交回
+            // nullopt。不能拿空串代替——/model 明明把空串当默认第一项。
             std::cout << "\n";
-            return std::string();
+            return std::nullopt;
         }
         if (state.eof_requested) {
             // Ctrl+D/Ctrl+Z 可能按在多行 composer 中间某一行,框下面还垫着
@@ -1221,8 +1221,12 @@ StreamFooterPaintScope::~StreamFooterPaintScope() {
 }
 
 TurnInputListener::TurnInputListener(std::atomic<bool>& cancel_flag, const Theme& theme,
-                                      std::atomic<bool>* transcript_expanded)
-    : cancel_flag_(cancel_flag), theme_(theme), transcript_expanded_(transcript_expanded) {
+                                      std::atomic<bool>* transcript_expanded,
+                                      ExpandRenderer expand_renderer)
+    : cancel_flag_(cancel_flag),
+      theme_(theme),
+      transcript_expanded_(transcript_expanded),
+      expand_renderer_(std::move(expand_renderer)) {
     if (platform::StdinIsInteractive()) {
         enabled_ = true;
         thread_ = std::thread([this] { ThreadMain(); });
@@ -1352,25 +1356,19 @@ void TurnInputListener::ThreadMain() {
             continue;
         }
         if (key->kind == PK::CtrlO) {
-            // 根因三:回合执行期间(ThreadMain 这条监听线程活着的这段窗口)
-            // 以前完全没有 CtrlO 分支,按了直接被吞——两轮之间的 composer
-            // 主循环(SetTranscriptUiHandler 那条链路)才处理得了,回合跑着
-            // 的时候按 Ctrl+O 没有任何反应。这里跟那边共用同一份 i18n 文案
-            // (ui.expanded/ui.compact),让用户至少能看见"按了确实有反应"。
-            // 取舍:这一刻已经收尾、被紧凑折叠收走的历史子工具条目不补画
-            // (风险/代价配不上收益,详情见交付说明)——只影响切换那一刻
-            // 之后新发生的子工具调用是否按展开画,不回溯改写屏幕上已经
-            // 定格的旧条目。
             if (transcript_expanded_ != nullptr) {
-                *transcript_expanded_ = !*transcript_expanded_;
+                const bool expanded = !transcript_expanded_->load(std::memory_order_acquire);
+                transcript_expanded_->store(expanded, std::memory_order_release);
                 std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
                 EraseStreamFooterLocked();
                 std::cout << "\n" << theme_.stats
-                          << (*transcript_expanded_ ? tr("ui.expanded") : tr("ui.compact")) << theme_.reset
-                          << "\n";
+                          << (expanded ? tr("ui.expanded") : tr("ui.compact")) << theme_.reset << "\n";
+                if (expand_renderer_) {
+                    std::cout << expand_renderer_(expanded);
+                }
                 std::cout.flush();
                 if (const auto& hook = StreamScreenPrintHookSlot()) {
-                    hook();  // 同 Esc/Enter 分支:插了整行,正文块的行数账作废
+                    hook();  // 模式行和转录快照都不在正文行数账里,旧锚点作废
                 }
                 RedrawStreamFooterLocked();
             }

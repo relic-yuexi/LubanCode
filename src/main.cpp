@@ -1334,6 +1334,11 @@ public:
         lubancode::platform::SetCursorPos(0, stored.start_row);
     }
 
+    // Ctrl+O 在回合中会从光标处追加一份完整转录。旧锚点的绝对行号经过
+    // 这次大段滚屏已不可信；调用方正持有 stdout 锁，直接全数作废。后续
+    // 工具收尾找不到锚点时会走安全的追加打印，不会回头盖错旧内容。
+    void ForgetAnchorsLocked() { anchors_.clear(); }
+
     // 在缓冲区底部预留 rows 行(必要时主动滚屏、同步平移所有锚点)。确认
     // 交互开始前调一次,免得交互期间的自然滚屏让锚点失效。
     void ReserveRows(int rows) {
@@ -1512,6 +1517,14 @@ public:
         lubancode::cli::EraseStreamFooterLocked();
         HideLocked();
         lubancode::cli::RedrawStreamFooterLocked();
+    }
+
+    // Ctrl+O 的监听线程已经拿住 stdout 锁、也擦过 footer，不能再走 Hide()
+    // 重拿同一把锁。这里只收状态块；下一拍 ticker 会在新转录后面重画。
+    void HideForExternalPaintLocked() {
+        if (enabled_) {
+            HideLocked();
+        }
     }
 
 private:
@@ -1979,7 +1992,8 @@ struct ToolDisplay {
           painter(theme_ref, console, expanded),
           todo_state(std::move(todo)),
           cancel_flag(cancel),
-          expanded_(expanded) {}
+          expanded_(expanded),
+          transcript_snapshot_(transcript_ref) {}
 
     std::vector<lubancode::cli::TranscriptItem>& transcript;
     const lubancode::cli::Theme& theme;
@@ -1997,6 +2011,11 @@ struct ToolDisplay {
     // TurnInputListener 的监听线程跨线程翻转,见 TranscriptPainter 构造
     // 函数注释里记的那次真机实测教训。
     const std::atomic<bool>* expanded_ = nullptr;
+
+    // TurnInputListener 在另一线程响应 Ctrl+O。它不能直接读主线程正在改的
+    // transcript；这里留一份只在事件收账后更新的快照，锁内只做单项复制。
+    mutable std::mutex transcript_snapshot_mutex_;
+    std::vector<lubancode::cli::TranscriptItem> transcript_snapshot_;
 
     // #52:子代理状态条。agent_status_board 是这一轮 RunTurn 独有的一份
     // (ToolDisplay 本身就是每轮现建的),status_painter 由 RunTurn 在
@@ -2085,6 +2104,7 @@ struct ToolDisplay {
             item.full_output.clear();
             item.start_time = std::chrono::steady_clock::now();
             item.end_time = {};
+            UpdateSnapshotItem(active_main);
             if (is_console) {
                 if (painter.HasAnchor(item.id)) {
                     painter.Repaint(item);
@@ -2101,6 +2121,7 @@ struct ToolDisplay {
                     item.title = lubancode::cli::BuildToolTitle("todo_update", input);
                 }
             }
+            UpdateSnapshotItem(active_main);
             if (is_console) {
                 painter.PaintNew(item);
             }
@@ -2123,6 +2144,7 @@ struct ToolDisplay {
         main_preview_below = false;
         FinalizeItem(item, name, main_input, result, main_write_old_lines, agent_rounds, agent_sub_tools,
                       main_diff_full, main_diff_final);
+        UpdateSnapshotItem(active_main);
         if (name == "agent" && active_agent_status_id >= 0) {
             // #52:收成终态——失败包含"结果本身报错"和"被 ESC 打断"两种,
             // 状态条没有单独的 Interrupted 档,统一归到失败态(耗时/工具
@@ -2215,6 +2237,7 @@ struct ToolDisplay {
         }
         sub_preview_below = false;
         FinalizeItem(item, name, sub_input, result, sub_write_old_lines, 0, 0, sub_diff_full, sub_diff_final);
+        UpdateSnapshotItem(active_sub);
         if (is_console) {
             // 紧凑态下 OnSubToolStart 压根没画(没有 PaintNew、没有锚点)——
             // 这里若无脑调 Repaint,会撞进 TranscriptPainter::Repaint 的
@@ -2243,6 +2266,7 @@ struct ToolDisplay {
         item.summary_lines = lubancode::cli::ErrorSummaryLines(item.tool_name, message);
         item.full_output = lubancode::cli::TruncateUtf8Bytes(message, lubancode::cli::kFullOutputCapBytes);
         item.end_time = std::chrono::steady_clock::now();
+        UpdateSnapshotItem(active_sub);
         if (is_console) {
             // 理由同 OnSubToolResult:紧凑态下开头没画、没锚点,Repaint 会
             // 掉进兜底追加打印分支,得跳过。
@@ -2298,6 +2322,7 @@ struct ToolDisplay {
             auto& item = transcript[static_cast<std::size_t>(idx)];
             item.status = lubancode::cli::TranscriptStatus::Pending;
             item.summary_lines = {tr("transcript.pending")};
+            UpdateSnapshotItem(idx);
             if (is_console) {
                 painter.Repaint(item);
                 // 确认块 + 编辑器提示行撑死二十来行,先在缓冲区底部预留好,
@@ -2329,6 +2354,7 @@ struct ToolDisplay {
                 active_sub = -1;  // 子工具拒绝后 post_tool 钩子不会再来,槽位在这儿收掉
             }
         }
+        UpdateSnapshotItem(idx);
         if (is_console) {
             painter.Repaint(item);
             // 拒绝的子工具:post_tool 钩子不会再来,OnSubToolResult 那条收尾
@@ -2373,7 +2399,40 @@ public:
     // cli 层滚屏钩子调用；彼时 stdout 锁已在外层拿住。
     void OnScreenScrolledLocked(int rows) { painter.OnScreenScrolledLocked(rows); }
 
+    // TurnInputListener 的 Ctrl+O 回调。调用方已持有 stdout 锁、footer 已
+    // 擦掉：先收状态块、废掉旧锚点，再从线程安全快照生成真正的详细/紧凑
+    // 转录。这里只返回文本，落笔仍由 console_input 统一完成。
+    std::string FormatSnapshotForToggleLocked(bool expanded) {
+        if (status_painter != nullptr) {
+            status_painter->HideForExternalPaintLocked();
+        }
+        painter.ForgetAnchorsLocked();
+
+        std::vector<lubancode::cli::TranscriptItem> snapshot;
+        {
+            std::lock_guard<std::mutex> lock(transcript_snapshot_mutex_);
+            snapshot = transcript_snapshot_;
+        }
+        if (snapshot.empty()) {
+            return tr("ui.no_items") + "\n";
+        }
+
+        const int width = lubancode::cli::DetectConsoleWidth().value_or(80);
+        return lubancode::cli::FormatTranscriptItems(snapshot, theme, width, expanded);
+    }
+
 private:
+
+    void UpdateSnapshotItem(int index) {
+        if (index < 0 || static_cast<std::size_t>(index) >= transcript.size()) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(transcript_snapshot_mutex_);
+        if (transcript_snapshot_.size() < transcript.size()) {
+            transcript_snapshot_.resize(transcript.size());
+        }
+        transcript_snapshot_[static_cast<std::size_t>(index)] = transcript[static_cast<std::size_t>(index)];
+    }
 
     int NewItem(lubancode::cli::TranscriptKind kind, const std::string& name, const nlohmann::json& input) {
         lubancode::cli::TranscriptItem item;
@@ -2387,7 +2446,9 @@ private:
         item.summary_lines = {"Running..."};
         item.start_time = std::chrono::steady_clock::now();
         transcript.push_back(std::move(item));
-        return static_cast<int>(transcript.size()) - 1;
+        const int index = static_cast<int>(transcript.size()) - 1;
+        UpdateSnapshotItem(index);
+        return index;
     }
 
     // 终态归档:状态 + 摘要 + full_output + 计时,一处算完。摘要规则:
@@ -2643,8 +2704,8 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
             PrintConfirmDetails(name, input);
         }
-        // M10:esc_rejects=true——按 Esc 直接当这次确认提交了一个空串,
-        // 走到下面 "不是 y/Y/a/A 就算拒绝" 那条老路,不用另加判断分支。
+        // M10:esc_rejects=true——按 Esc 直接返回 nullopt，走到下面拒绝
+        // 分支，不留在输入行里继续等。
         const std::optional<std::string> answer = lubancode::cli::ReadLine(
             theme.confirm + tr("confirm.prompt") + theme.reset, theme,
             /*esc_rejects=*/true);
@@ -2819,10 +2880,9 @@ std::string ImageInputErrorText(const lubancode::cli::ImageInputError& error) {
 // transcript:UI-B(0.12.0)新增,会话级工具条目存档(InteractiveLoop/
 // AskOnce 各持有一份,跨多轮累积),UI-C/D 的 Ctrl+E 全文查看要用。
 // transcript_expanded:UI-D(0.16.0)紧凑/详细会话级开关(Ctrl+O 翻转,
-// InteractiveLoop 持有),详细态下这一轮新画的条目直接按展开版画;AskOnce
-// 不传(nullptr),恒紧凑。根因三修复:非 const——这一轮跑着的时候也要能被
-// 翻转(TurnInputListener 收到 Ctrl+O 直接改这个地址指向的值),下面传给
-// ToolDisplay 时隐式转回 const 指针,只读语义不变。atomic<bool>:回合执行
+// InteractiveLoop 持有),详细态下新条目直接按展开版画;回合中切档还会
+// 从线程安全快照把现有条目整组重打。AskOnce 不传(nullptr),恒紧凑。
+// atomic<bool>:回合执行
 // 期间监听线程(另一个线程)会写、Run() 所在的这个线程会读,真机驱动器
 // 实测踩到过普通 bool 在这条跨线程路径上的可见性问题(写了但读的那一刻
 // 还没看见),换成 atomic<bool> 用 load/store 的 acquire/release 语义堵上。
@@ -2861,11 +2921,6 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
         BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker, registry,
                         hooks_config, display, body_tracker, allow_commands, deny_commands, &cancel_flag);
 
-    // 根因三:transcript_expanded 原样递给监听线程——回合执行期间按
-    // Ctrl+O 也能翻这个开关,不再局限于两轮之间的 composer 主循环才处理
-    // 得了(TurnInputListener 构造函数注释、ThreadMain 的 CtrlO 分支见
-    // console_input.cpp/hpp)。
-    lubancode::cli::TurnInputListener listener(cancel_flag, theme, transcript_expanded);
     // markdown × M10:监听线程随时可能在流式正文当中插打 [已排队]/[已打断]
     // 整行——这几行不在 body_tracker 的行数账里,不通气的话收束重画会把
     // 排队回显擦掉、贴着缓冲区底时锚点还会错行。钩子在监听线程持
@@ -2894,14 +2949,20 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     AgentStatusPainter status_painter(display.agent_status_board, theme, is_console && !theme.reset.empty());
     display.status_painter = &status_painter;
 
+    // 状态画板挂好后再起监听线程。回合中按 Ctrl+O 不只翻原子开关，还会
+    // 回调 ToolDisplay，把当下快照按新档铺出来；监听线程收尾时先于画板
+    // 停下，status_painter 指针整段存活期清楚，不留并发悬空窗口。
+    lubancode::cli::TurnInputListener listener(
+        cancel_flag, theme, transcript_expanded,
+        [&display](bool expanded) { return display.FormatSnapshotForToggleLocked(expanded); });
+
     const auto result = loop.Run(std::move(prepared_input->message), callbacks, &cancel_flag);
 
+    // Run() 已经返回,不管是不是被打断——先收输入线程，保证它不再碰状态
+    // 画板或转录快照；也保证下一次 ReadLine() 前不再抢控制台输入。
+    listener.Stop();
     status_painter.Stop();
     display.status_painter = nullptr;
-
-    // Run() 已经返回,不管是不是被打断——立刻收线程,保证下一次 ReadLine()
-    // (排队回显的 "> " 或者下一轮主提示符)开始之前监听线程已经彻底退出。
-    listener.Stop();
     lubancode::cli::SetStreamScreenPrintHook(nullptr);  // 线程已 join,摘钩,别让它抓着局部引用过夜
     // 脚注在 markdown 收束重画之前擦掉、关停:它常驻在正文块区间之外,不擦
     // 的话会残留在重画区下方;关停后 FinalizeRepaint 按"块首到光标"记账,
@@ -3336,8 +3397,13 @@ void HandleModelCommand(const std::string& args, lubancode::config::Config& conf
             std::cout << tr("cmd.model.list_empty") << "\n";
             return;
         }
+        std::size_t default_idx = 0;
         for (std::size_t i = 0; i < list_result->size(); ++i) {
             const auto& m = (*list_result)[i];
+            const bool current = m.id == *current_model;
+            if (current) {
+                default_idx = i;
+            }
             const auto* entry = catalog.FindBySlug(m.id);
             std::string label;
             if (entry != nullptr && !entry->display_name.empty()) {
@@ -3347,13 +3413,16 @@ void HandleModelCommand(const std::string& args, lubancode::config::Config& conf
             } else {
                 label = m.display_name.empty() ? m.id : m.display_name;
             }
-            std::cout << "  " << (i + 1) << ") " << label << "\n";
+            std::cout << "  " << (i + 1) << ") " << label
+                      << (current ? tr("cmd.model.current") : std::string()) << "\n";
         }
-        const std::optional<std::string> selection = lubancode::cli::ReadLine(tr("cmd.model.choose"));
+        const std::optional<std::string> selection = lubancode::cli::ReadLine(
+            trf("cmd.model.choose", default_idx + 1), {}, /*esc_rejects=*/true);
         if (!selection.has_value()) {
+            std::cout << tr("cmd.model.cancelled") << "\n";
             return;
         }
-        std::size_t idx = 0;
+        std::size_t idx = default_idx;
         if (!selection->empty()) {
             try {
                 std::size_t consumed = 0;
@@ -4639,10 +4708,8 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     std::cout << tr("ui.no_items") << "\n";
                     return true;
                 }
-                for (std::size_t i = 0; i < transcript.size(); ++i) {
-                    std::cout << cli::FormatTranscriptItem(transcript[i], theme, width, transcript_expanded,
-                                                            static_cast<int>(i) == focus_index);
-                }
+                std::cout << cli::FormatTranscriptItems(transcript, theme, width, transcript_expanded,
+                                                        focus_index);
                 return true;
             }
             case cli::UiKeyAction::FocusOlder:

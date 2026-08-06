@@ -420,3 +420,29 @@ TEST_CASE("FormatTranscriptItem focused+expanded: 子代理条目缩进不乱") 
     CHECK(out.find("\n      参数: ") != std::string::npos);  // 4 + 2 缩进
     CHECK(out.find("\n      内容\n") != std::string::npos);
 }
+
+TEST_CASE("FormatTranscriptItems: Ctrl+O 详细档铺子工具全文,紧凑档收掉子工具") {
+    const auto theme = BuiltinTheme("plain");
+    TranscriptItem parent = MakeItem(TranscriptStatus::Running);
+    parent.tool_name = "agent";
+    parent.title = "agent(查文件)";
+    parent.input_json = R"({"prompt":"查文件"})";
+
+    TranscriptItem child = MakeItem(TranscriptStatus::Ok, TranscriptKind::SubTool);
+    child.tool_name = "read_file";
+    child.title = "read_file(a.txt)";
+    child.input_json = R"({"path":"a.txt"})";
+    child.full_output = "第一行\n第二行";
+
+    const std::vector<TranscriptItem> items{parent, child};
+    const std::string compact = FormatTranscriptItems(items, theme, 120, /*expanded=*/false);
+    CHECK(compact.find("agent(查文件)") != std::string::npos);
+    CHECK(compact.find("read_file(a.txt)") == std::string::npos);
+    CHECK(compact.find("第一行") == std::string::npos);
+
+    const std::string expanded = FormatTranscriptItems(items, theme, 120, /*expanded=*/true);
+    CHECK(expanded.find("参数: {\"prompt\":\"查文件\"}") != std::string::npos);
+    CHECK(expanded.find("read_file(a.txt)") != std::string::npos);
+    CHECK(expanded.find("参数: {\"path\":\"a.txt\"}") != std::string::npos);
+    CHECK(expanded.find("第一行") != std::string::npos);
+}

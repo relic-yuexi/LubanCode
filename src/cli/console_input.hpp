@@ -42,11 +42,10 @@ struct StatusPanelData;
 // theme 只用来给 slash 补全提示行、Shift+Tab 模式切换通知上色;不传就是
 // 默认构造的空 Theme(没有颜色转义,不影响功能,只是没有颜色)。
 //
-// esc_rejects:M10 新增,给 [y/a/N] 确认提示用。true 时,按下 Esc 不再走
-// "清空当前行、留在同一次读取里继续等"那条空闲编辑态的路,而是立刻当这一次
-// 读取提交了一个空串返回——main.cpp 的确认回调本来就把"不是 y/Y/a/A"的
-// 任何答案都当拒绝,空串自然而然就是拒绝,不用另外加一条判断分支。默认
-// false,不影响其余调用点(主提示符、/model 选择……)的行为。
+// esc_rejects:M10 新增,给确认提示和可取消的编号选择用。true 时,按下 Esc
+// 不再走"清空当前行、留在同一次读取里继续等"那条空闲编辑态的路,而是立刻
+// 返回 nullopt。确认回调把它当拒绝；/model 把它当取消，故空行仍能选默认
+// 第一项，Esc 却不会误选。默认 false，不影响主提示符与普通向导。
 //
 // composer:UI-A(0.11.0)多行 composer 开关,只有 main.cpp 的 `> ` 主提示符
 // 传 true。真控制台下开了它:Alt+Enter / Shift+Enter 在光标处插换行(实测
@@ -280,8 +279,13 @@ public:
     // 一次仅有的子工具调用刚好卡在这个窗口),换成 atomic<bool> 用
     // load/store 的 acquire/release 语义堵上,不是"反正是显示态、错一帧
     // 也无所谓"能糊弄过去的。
+    // expand_renderer 在 Ctrl+O 翻档后调用。调用时 stdout 锁已经拿住、
+    // 流式 footer 已擦掉；回调不得再拿 stdout 锁。它可趁此收掉别的浮动
+    // 状态、作废旧屏幕锚点，并返回要紧跟模式提示打印的转录文本。
+    using ExpandRenderer = std::function<std::string(bool expanded)>;
     TurnInputListener(std::atomic<bool>& cancel_flag, const Theme& theme,
-                       std::atomic<bool>* transcript_expanded = nullptr);
+                       std::atomic<bool>* transcript_expanded = nullptr,
+                       ExpandRenderer expand_renderer = {});
     ~TurnInputListener();
 
     TurnInputListener(const TurnInputListener&) = delete;
@@ -303,6 +307,7 @@ private:
     std::atomic<bool>& cancel_flag_;
     const Theme& theme_;
     std::atomic<bool>* transcript_expanded_ = nullptr;
+    ExpandRenderer expand_renderer_;
     std::thread thread_;
     std::atomic<bool> stop_requested_{false};
     bool enabled_ = false;

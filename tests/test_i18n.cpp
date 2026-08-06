@@ -77,6 +77,14 @@ TEST_CASE("TrFormat: {0}/{1} 按序替换,JSON 花括号不受牵连,缺实参�
     CHECK(cli::trf("transcript.added_removed", 3) == "新增 3 行,删除 {1} 行");
 }
 
+TEST_CASE("/model 编号提示写明 Esc 可取消") {
+    LangGuard guard;
+    cli::SetLanguage("zh-CN");
+    CHECK(cli::trf("cmd.model.choose", 16) == "选择模型编号 [16]（Esc 取消）: ");
+    CHECK(cli::tr("cmd.model.current") == "  ← 当前");
+    CHECK(cli::tr("cmd.model.cancelled") == "已取消模型切换。");
+}
+
 TEST_CASE("语言包: ja.json 生效,盖到的键出日文,其余回退 zh-CN,列表出现 ja") {
     LangGuard guard;
     const auto dir = MakeTempLangDir("ja");
