@@ -63,6 +63,7 @@
 #include "config/prompt_files.hpp"
 #include "config/project_instructions.hpp"
 #include "config/skill_store.hpp"
+#include "config/update_checker.hpp"
 #include "lsp/manager.hpp"
 #include "memory/memory_tool.hpp"
 #include "memory/project_memory.hpp"
@@ -97,7 +98,7 @@
 
 namespace {
 
-constexpr std::string_view kVersion = "0.24.0";
+constexpr std::string_view kVersion = "0.24.1";
 
 // i18n:tr/trf 在本文件里到处用,拉进匿名命名空间省得每处全限定。
 using lubancode::cli::tr;
@@ -3050,6 +3051,35 @@ void PrintSlashHelp() {
     std::cout << tr("slash_help.body");
 }
 
+bool HandleUpdateCommand(const std::string& args, int connect_timeout_ms, int request_timeout_secs) {
+    std::string action = TrimAscii(args);
+    for (char& ch : action) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    if (!action.empty() && action != "check") {
+        std::cout << tr("cmd.update.usage") << "\n";
+        return false;
+    }
+
+    std::cout << tr("cmd.update.checking") << "\n";
+    std::cout.flush();
+    const auto checked = lubancode::config::CheckForUpdate(
+        std::string(kVersion), connect_timeout_ms, request_timeout_secs);
+    if (!checked.has_value()) {
+        std::cout << trf("cmd.update.failed", checked.error()) << "\n";
+        return false;
+    }
+    if (!checked->update_available) {
+        std::cout << trf("cmd.update.current", checked->current_version, checked->latest_version) << "\n";
+        return true;
+    }
+
+    std::cout << trf("cmd.update.available", checked->current_version, checked->latest_version) << "\n"
+              << trf("cmd.update.release", checked->release_url) << "\n"
+              << tr("cmd.update.install_hint") << "\n";
+    return true;
+}
+
 // /skills 命令:列出扫描到的技能;一个都没有时打印两处目录路径,顺带说明
 // 怎么造一份(SKILL.md 起手 frontmatter 的最小样例)。
 void PrintSkillsCommand(const std::vector<lubancode::tools::SkillMeta>& skills, const std::string& project_dir,
@@ -4448,10 +4478,13 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                       const std::string& executable = std::string()) {
     lubancode::config::Config& config = config_result.config;
 
-    // M9:技能扫描一次,主代理、子代理、系统提示词、/skills 命令共用同一份
+    // 技能扫描一次:官方发行包、主目录、项目目录三层合并；主代理、子代理、
+    // 系统提示词、/skills 命令共用同一份结果。
     // 结果——扫描本身只在启动时做一次,不在每轮对话里重复读磁盘。
     const std::optional<std::string> home_dir = lubancode::config::HomeDir();
-    std::vector<lubancode::tools::SkillMeta> skills = lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir);
+    const std::optional<std::string> official_skills_dir = lubancode::platform::OfficialSkillsDir();
+    std::vector<lubancode::tools::SkillMeta> skills =
+        lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir, official_skills_dir);
     std::string skills_segment = lubancode::tools::BuildSkillsPromptSegment(skills);
 
     // 提示词运行时化(0.21.x):用户模块目录(~/.lubancode/prompts)。
@@ -4821,7 +4854,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     rebuild_loop();
 
     const auto refresh_skills = [&]() {
-        skills = lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir);
+        skills = lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir, official_skills_dir);
         skills_segment = lubancode::tools::BuildSkillsPromptSegment(skills);
         if (auto* tool = dynamic_cast<lubancode::tools::SkillTool*>(registry.Find("skill")); tool != nullptr) {
             tool->SetSkills(skills);
@@ -5126,6 +5159,9 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                     break;
                 case lubancode::cli::SlashCommand::Config:
                     PrintConfigDiagnostics(config_result, *current_model, &model_catalog, &settings_local);
+                    break;
+                case lubancode::cli::SlashCommand::Update:
+                    HandleUpdateCommand(parsed.args, config.connect_timeout_ms, config.request_timeout_secs);
                     break;
                 case lubancode::cli::SlashCommand::Init: {
                     const auto result =
@@ -5464,7 +5500,8 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
             const std::string& model_instructions = std::string(), const std::string& soul_content = std::string()) {
     // M9:技能扫描,理由同 InteractiveLoop——单发模式也该能用技能。
     const std::optional<std::string> home_dir = lubancode::config::HomeDir();
-    const std::vector<lubancode::tools::SkillMeta> skills = lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir);
+    const std::vector<lubancode::tools::SkillMeta> skills =
+        lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir, lubancode::platform::OfficialSkillsDir());
     const std::string skills_segment = lubancode::tools::BuildSkillsPromptSegment(skills);
 
     // 提示词运行时化:单发模式同走用户模块目录,拼出去的结构跟交互模式一致。
@@ -5684,6 +5721,12 @@ int RunCli(const std::vector<std::string>& args) {
             PrintVersion();
             return 0;
         }
+        if (arg == "--check-update") {
+            return HandleUpdateCommand(std::string(), lubancode::config::kDefaultConnectTimeoutMs,
+                                       lubancode::config::kDefaultRequestTimeoutSecs)
+                       ? 0
+                       : 1;
+        }
         if (arg == "--help") {
             PrintHelp();
             return 0;
@@ -5752,8 +5795,8 @@ int RunCli(const std::vector<std::string>& args) {
     // 魂法分家(0.16.x)+ 提示词运行时化(0.21.x):每次启动查漏补缺——
     // ~/.lubancode/ 下的 system_prompt.md(法)/ SOUL.md(魂)/ souls/
     // wenyan.md(示例)/ prompts/{core,features,platforms}/*.md(运行时
-    // 模块,内容播种自嵌入版)缺哪样补哪样,已存在的绝不覆盖(唯一例外:
-    // 带管理标记的 lubancode-config/SKILL.md 随版本刷新)。静默做,不打
+    // 模块,内容播种自嵌入版)缺哪样补哪样,已存在的绝不覆盖。官方 skills
+    // 从发行包资源目录直接读取,不再往主目录播种。静默做,不打
     // 输出(单发/管道模式的输出常被重定向,不该混进这些话)。
     if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
         lubancode::config::EnsurePromptScaffold(*luban_dir, lubancode::agent::DefaultPersona(),

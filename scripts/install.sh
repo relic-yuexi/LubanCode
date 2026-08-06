@@ -17,6 +17,7 @@
 #   由用户先在 Releases 页面选对平台包，脚本不在本机猜架构。
 #
 # 幂等:重复跑 = 直接覆盖安装。
+# 官方 skills 随包同行；重复安装时整包同步，不碰 ~/.lubancode/skills。
 
 set -eu
 
@@ -89,6 +90,34 @@ fi
 
 if ! chmod +x "$DEST"; then
     err "chmod +x $DEST 失败。"
+fi
+
+# bin 目录按常见前缀布局把数据放到 ../share/lubancode/skills；自定义目录
+# 若不叫 bin，则把 skills 放在可执行文件旁，程序两处都认。
+if [ -d "$SCRIPT_DIR/skills" ]; then
+    if [ "$(basename -- "$INSTALL_DIR")" = "bin" ]; then
+        SKILLS_DEST="$(dirname -- "$INSTALL_DIR")/share/lubancode/skills"
+    else
+        SKILLS_DEST="$INSTALL_DIR/skills"
+    fi
+    SKILLS_PARENT=$(dirname -- "$SKILLS_DEST")
+    SKILLS_STAGE="$SKILLS_PARENT/.skills-new-$$"
+    if ! mkdir -p "$SKILLS_PARENT"; then
+        err "创建官方技能目录 $SKILLS_PARENT 失败。"
+    fi
+    rm -rf "$SKILLS_STAGE"
+    if ! cp -R "$SCRIPT_DIR/skills" "$SKILLS_STAGE"; then
+        rm -rf "$SKILLS_STAGE"
+        err "复制官方技能失败。"
+    fi
+    rm -rf "$SKILLS_DEST"
+    if ! mv "$SKILLS_STAGE" "$SKILLS_DEST"; then
+        rm -rf "$SKILLS_STAGE"
+        err "替换官方技能目录 $SKILLS_DEST 失败。"
+    fi
+    info "已同步官方技能:$SKILLS_DEST"
+else
+    info "安装包里没有 skills 目录,保留已有官方技能不动。"
 fi
 
 info "安装完成:$DEST"

@@ -1,16 +1,43 @@
 #include "tools/skill_loader.hpp"
 
 #include <cctype>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <map>
 #include <sstream>
+#include <string_view>
 
 #include "tools/path_utils.hpp"
 
 namespace lubancode::tools {
 
 namespace {
+
+constexpr std::string_view kManagedOfficialMarker =
+    "<!-- lubancode 系统维护,随版本自动更新;自定义请另建技能 -->";
+
+// 0.20.x 只发过这一份无管理标记的内置配置技能。按完整字节指纹认旧件，
+// 不拿一句 description 猜，免得把用户碰巧同名的技能当成旧副本。
+constexpr std::size_t kLegacyConfigSkillBytes = 10482;
+constexpr std::uint64_t kLegacyConfigSkillFnv1a = 0xAD1BC701FAB01B9FULL;
+
+std::uint64_t Fnv1a(const std::string& content) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    for (const unsigned char byte : content) {
+        hash ^= byte;
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+bool IsManagedOfficialCopy(const std::string& content, const ParsedSkillFile& parsed) {
+    if (content.find(kManagedOfficialMarker) != std::string::npos) {
+        return true;
+    }
+    return parsed.name == "lubancode-config" && content.size() == kLegacyConfigSkillBytes &&
+           Fnv1a(content) == kLegacyConfigSkillFnv1a;
+}
 
 std::string Trim(const std::string& s) {
     std::size_t begin = 0;
@@ -151,18 +178,29 @@ std::vector<SkillMeta> ScanSkillsDir(const std::filesystem::path& skills_root, c
         meta.description = parsed->description.value_or(std::string());
         meta.dir_path = PathToUtf8(entry.path());
         meta.source_level = source_level;
+        meta.managed_official_copy = IsManagedOfficialCopy(content, *parsed);
         metas.push_back(std::move(meta));
     }
 
     return metas;
 }
 
-std::vector<SkillMeta> LoadSkills(const std::string& project_dir, const std::optional<std::string>& home_dir) {
+std::vector<SkillMeta> LoadSkills(const std::string& project_dir, const std::optional<std::string>& home_dir,
+                                  const std::optional<std::string>& official_skills_dir) {
     std::map<std::string, SkillMeta> merged;  // std::map 天然按 key 排序,输出顺序稳定
+
+    if (official_skills_dir.has_value()) {
+        for (auto& meta : ScanSkillsDir(Utf8ToPath(*official_skills_dir), "官方")) {
+            merged[meta.name] = std::move(meta);
+        }
+    }
 
     if (home_dir.has_value()) {
         const std::filesystem::path home_skills_root = Utf8ToPath(*home_dir) / ".lubancode" / "skills";
         for (auto& meta : ScanSkillsDir(home_skills_root, "主目录级")) {
+            if (meta.managed_official_copy && merged.contains(meta.name)) {
+                continue;
+            }
             merged[meta.name] = std::move(meta);
         }
     }
@@ -186,7 +224,7 @@ std::string BuildSkillsPromptSegment(const std::vector<SkillMeta>& skills) {
         return std::string();
     }
     std::string out =
-        "技能目录铁则:LubanCode 只认 ~/.lubancode/skills/<技能名>/SKILL.md 与 "
+        "技能目录铁则:LubanCode 扫发行包官方 skills、~/.lubancode/skills/<技能名>/SKILL.md 与 "
         "<cwd>/.lubancode/skills/<技能名>/SKILL.md;绝不可把给 LubanCode 的技能装进 "
         ".codex/skills、.claude/skills 或 .agents/skills。本机来源可用 /skill install <目录或 SKILL.md> "
         "装进用户级目录。\n"

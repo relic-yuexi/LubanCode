@@ -43,6 +43,7 @@ const Entry kZhCN[] = {
     {"help.options",
      "选项:\n"
      "  --version              打印版本号\n"
+     "  --check-update         检查 GitHub 最新 Release，打印结果后退出\n"
      "  --help                 打印本帮助\n"
      "  --yes                  自动确认所有需要确认的工具调用(比如 run_command),不再逐条询问\n"
      "  --continue             交互模式启动时自动恢复本目录最近一场会话存档(等价开场 /resume\n"
@@ -67,6 +68,7 @@ const Entry kZhCN[] = {
      "  /model 名字     直接切到指定模型名,不用拉列表\n"
      "  /provider       列已配服务端;/provider add|switch|remove 管多端模型\n"
      "  /config         打印当前生效配置(复用 --config 的逻辑),外加本会话实际在用的 model\n"
+     "  /update         检查 GitHub 最新 Release；升级安装时一并同步官方技能\n"
      "  /init           在项目根生成 AGENTS.md,并让主代理、子代理立即采用\n"
      "  /language       列可选界面语言并切换(内置 zh-CN/en,languages/*.json 可扩展)\n"
      "  /worktree       新建/列出/退出隔离工作树;/worktree new [名字] | list | exit keep|remove\n"
@@ -77,7 +79,7 @@ const Entry kZhCN[] = {
      "  /think          看当前推理强度(/effort 同义)\n"
      "  /think 档位     切推理强度,档位以服务商为准(anthropic 内置 none/low/medium/high/xhigh/max\n"
      "                  映射,responses 原样递给 API)\n"
-     "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
+     "  /skills         列出扫描到的技能(官方 + 主目录级 + 项目级)\n"
      "  /skill          管技能;裸敲看安装网址、本地目录、更新与删除示例\n"
      "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
      "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
@@ -162,6 +164,7 @@ const Entry kZhCN[] = {
      "  /model          拉取模型列表,编号选择切换(默认第一个)\n"
      "  /model 名字     直接切到指定模型名,不用拉列表\n"
      "  /config         打印当前生效配置(api_key 打码),外加本会话实际在用的 model\n"
+     "  /update         检查 GitHub 最新 Release；升级安装时一并同步官方技能\n"
      "  /init           在项目根生成 AGENTS.md,并让本会话立即采用\n"
      "  /language       列可选界面语言并切换;/language 语言码 直接切(会话级,可写回配置)\n"
      "  /worktree       新建/列出/退出隔离工作树;/worktree new [名字] | list | exit keep|remove\n"
@@ -169,7 +172,7 @@ const Entry kZhCN[] = {
      "  /context        看当前上下文占用;/context 256k|512k|1m 临时改窗口大小\n"
      "  /compact        手动压缩历史;/compact 重点说明 可指定这次额外保留什么\n"
      "  /think          看当前推理强度;/think 档位 切档位,档位以服务商为准(/effort 同义)\n"
-     "  /skills         列出扫描到的技能(主目录级 + 项目级)\n"
+     "  /skills         列出扫描到的技能(官方 + 主目录级 + 项目级)\n"
      "  /skill          管技能;裸敲看安装网址、本地目录、更新与删除示例\n"
      "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
      "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
@@ -299,6 +302,7 @@ const Entry kZhCN[] = {
     {"slash.desc.model", "拉模型列表选,或 /model 名字 直接切"},
     {"slash.desc.provider", "列、添、切、删、改模型服务端;/provider add|list|switch|remove|set"},
     {"slash.desc.config", "打印当前生效配置和本会话在用的 model"},
+    {"slash.desc.update", "检查 GitHub 最新 Release；升级时同步程序与官方技能"},
     {"slash.desc.init", "在项目根生成 AGENTS.md，并让本会话立即采用"},
     {"slash.desc.language", "列可选界面语言并切换;/language 语言码 直接切"},
     {"slash.desc.image", "附本地图片;/image 路径 或在消息里写 @路径"},
@@ -309,7 +313,7 @@ const Entry kZhCN[] = {
     {"slash.desc.compact", "手动压缩历史;/compact 重点说明 可指定这次额外保留什么"},
     {"slash.desc.think", "看当前推理强度;/think 档位 切档位,档位以服务商为准(/effort 同义)"},
     {"slash.desc.effort", "同 /think(推理强度别名)"},
-    {"slash.desc.skills", "列出扫描到的技能(主目录级 + 项目级)"},
+    {"slash.desc.skills", "列出扫描到的技能(官方 + 主目录级 + 项目级)"},
     {"slash.desc.skill", "管理技能(裸敲查看安装网址、本地目录等完整示例)"},
     {"slash.desc.mcp", "列出挂载的 MCP 服务器状态和工具清单"},
     {"slash.desc.lsp", "列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)"},
@@ -323,6 +327,15 @@ const Entry kZhCN[] = {
     {"slash.desc.title", "看当前会话标题;/title 标题 给本场起名,/sessions 列表和导出都用它"},
     {"slash.desc.soul", "看当前魂;/soul 内容 写进 SOUL.md,/soul clear 还原默认；名字仍可切换备选魂"},
     {"slash.desc.prompt", "看当前法(系统提示词)的来源和字数;/prompt reset 还原 system_prompt.md"},
+
+    // ---- /update ----
+    {"cmd.update.usage", "用法: /update 或 /update check"},
+    {"cmd.update.checking", "正在检查 GitHub 最新 Release……"},
+    {"cmd.update.failed", "检查更新失败: {0}"},
+    {"cmd.update.current", "没有发现更新。当前 {0}，远端 {1}。"},
+    {"cmd.update.available", "有新版可用。当前 {0}，最新 {1}。"},
+    {"cmd.update.release", "发布页: {0}"},
+    {"cmd.update.install_hint", "下载新版发行包并运行包内安装脚本；程序与官方 skills 会一并更新，用户技能不动。"},
 
     // ---- /memory ----
     {"cmd.memory.usage",
@@ -813,6 +826,7 @@ const Entry kEn[] = {
     {"help.options",
      "Options:\n"
      "  --version              print the version\n"
+     "  --check-update         check the latest GitHub Release, print the result, and exit\n"
      "  --help                 print this help\n"
      "  --yes                  auto-approve all tool calls that need confirmation (e.g. run_command)\n"
      "  --continue             on interactive startup, resume the most recent session archive of this\n"
@@ -842,6 +856,7 @@ const Entry kEn[] = {
      "  /model <name>   switch directly to a model name without fetching the list\n"
      "  /provider       list configured providers; /provider add|switch|remove manages endpoints\n"
      "  /config         print the effective configuration plus the model in use this session\n"
+     "  /update         check the latest GitHub Release; installs also sync official skills\n"
      "  /init           create AGENTS.md at the project root and load it for main/sub-agents now\n"
      "  /language       list available UI languages and switch (built-in zh-CN/en, extendable via\n"
      "                  languages/*.json)\n"
@@ -853,7 +868,7 @@ const Entry kEn[] = {
      "  /think          show the reasoning effort (/effort is an alias)\n"
      "  /think <level>  set the reasoning effort; levels are provider-defined (anthropic maps\n"
      "                  none/low/medium/high/xhigh/max; responses passes it through)\n"
-     "  /skills         list discovered skills (home-level + project-level)\n"
+     "  /skills         list discovered skills (official + home-level + project-level)\n"
      "  /skill          manage skills; run it bare for URL/local install, update, and remove examples\n"
      "  /mcp            list mounted MCP servers and their tools\n"
      "  /lsp            list LSP server status per language\n"
@@ -943,6 +958,7 @@ const Entry kEn[] = {
      "  /model          fetch the model list and switch by number (default: first)\n"
      "  /model <name>   switch directly to a model name\n"
      "  /config         print the effective configuration (api_key masked) plus the session model\n"
+     "  /update         check the latest GitHub Release; installs also sync official skills\n"
      "  /init           create AGENTS.md at the project root and load it now\n"
      "  /language       list available UI languages and switch; /language <code> switches directly\n"
      "  /worktree       create, list, or leave isolated trees; /worktree new [name] | list | exit keep|remove\n"
@@ -950,7 +966,7 @@ const Entry kEn[] = {
      "  /context        show context usage; /context 256k|512k|1m changes the window for this session\n"
      "  /compact        compact the history; /compact <note> tells what to keep extra\n"
      "  /think          show reasoning effort; /think <level> sets it (provider-defined; /effort alias)\n"
-     "  /skills         list discovered skills (home-level + project-level)\n"
+     "  /skills         list discovered skills (official + home-level + project-level)\n"
      "  /skill          manage skills; run it bare for URL/local install, update, and remove examples\n"
      "  /mcp            list mounted MCP servers and their tools\n"
      "  /lsp            list LSP server status per language\n"
@@ -1093,6 +1109,7 @@ const Entry kEn[] = {
     {"slash.desc.provider",
      "list, add, switch, remove, or set fields on model providers; /provider add|list|switch|remove|set"},
     {"slash.desc.config", "print the effective configuration and the session model"},
+    {"slash.desc.update", "check the latest GitHub Release; upgrades sync the program and official skills"},
     {"slash.desc.init", "create AGENTS.md at the project root and load it now"},
     {"slash.desc.language", "list available UI languages and switch; /language <code> switches directly"},
     {"slash.desc.image", "attach local images; /image <path> or @path in a message"},
@@ -1103,7 +1120,7 @@ const Entry kEn[] = {
     {"slash.desc.compact", "compact the history; /compact <note> tells what to keep extra"},
     {"slash.desc.think", "show/set reasoning effort; levels are provider-defined (/effort alias)"},
     {"slash.desc.effort", "same as /think (reasoning effort alias)"},
-    {"slash.desc.skills", "list discovered skills (home-level + project-level)"},
+    {"slash.desc.skills", "list discovered skills (official + home-level + project-level)"},
     {"slash.desc.skill", "manage skills (run bare for URL and local-path examples)"},
     {"slash.desc.mcp", "list mounted MCP servers and their tools"},
     {"slash.desc.lsp", "list LSP server status per language"},
@@ -1117,6 +1134,15 @@ const Entry kEn[] = {
     {"slash.desc.title", "show the session title; /title <title> names this session"},
     {"slash.desc.soul", "show the current soul; /soul <text> writes SOUL.md; /soul clear restores default"},
     {"slash.desc.prompt", "show the persona source/length; /prompt reset restores system_prompt.md"},
+
+    // ---- /update ----
+    {"cmd.update.usage", "Usage: /update or /update check"},
+    {"cmd.update.checking", "Checking the latest GitHub Release..."},
+    {"cmd.update.failed", "Update check failed: {0}"},
+    {"cmd.update.current", "No update found. Current: {0}; latest: {1}."},
+    {"cmd.update.available", "An update is available. Current: {0}; latest: {1}."},
+    {"cmd.update.release", "Release page: {0}"},
+    {"cmd.update.install_hint", "Download the new release and run its installer. The program and official skills update together; user skills stay untouched."},
 
     // ---- /memory ----
     {"cmd.memory.usage",

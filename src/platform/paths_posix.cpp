@@ -5,8 +5,16 @@
 // 相关用例全绿);macOS 未经真机验证,待 CI 亮灯。
 #include "platform/paths.hpp"
 
+#include <cstdint>
 #include <cstdlib>
 #include <system_error>
+#include <vector>
+
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace lubancode::platform {
 
@@ -20,6 +28,56 @@ std::optional<std::string> GetEnvVar(const char* name) {
 
 std::optional<std::string> HomeDir() {
     return GetEnvVar("HOME");
+}
+
+std::optional<std::filesystem::path> ExecutablePath() {
+#if defined(__APPLE__)
+    std::uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    if (size == 0) {
+        return std::nullopt;
+    }
+    std::vector<char> buffer(size);
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+        return std::nullopt;
+    }
+    std::error_code ec;
+    const std::filesystem::path resolved = std::filesystem::weakly_canonical(buffer.data(), ec);
+    return ec ? std::optional<std::filesystem::path>(std::filesystem::path(buffer.data()))
+              : std::optional<std::filesystem::path>(resolved);
+#else
+    std::vector<char> buffer(1024);
+    for (;;) {
+        const ssize_t length = ::readlink("/proc/self/exe", buffer.data(), buffer.size());
+        if (length < 0) {
+            return std::nullopt;
+        }
+        if (static_cast<std::size_t>(length) < buffer.size()) {
+            return std::filesystem::path(std::string(buffer.data(), static_cast<std::size_t>(length)));
+        }
+        buffer.resize(buffer.size() * 2);
+    }
+#endif
+}
+
+std::optional<std::string> OfficialSkillsDir() {
+    const auto executable = ExecutablePath();
+    if (!executable.has_value()) {
+        return std::nullopt;
+    }
+    const std::filesystem::path exe_dir = executable->parent_path();
+    const std::filesystem::path candidates[] = {
+        exe_dir / "skills",
+        exe_dir.parent_path() / "share" / "lubancode" / "skills",
+    };
+    for (const auto& candidate : candidates) {
+        std::error_code ec;
+        if (std::filesystem::is_directory(candidate, ec) && !ec) {
+            const std::u8string value = candidate.u8string();
+            return std::string(reinterpret_cast<const char*>(value.data()), value.size());
+        }
+    }
+    return std::nullopt;
 }
 
 std::expected<void, std::string> ReplaceFileAtomically(const std::filesystem::path& source,

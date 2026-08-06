@@ -25,6 +25,14 @@ std::optional<std::string> GetEnvVar(const char* name);
 // std::nullopt。
 std::optional<std::string> HomeDir();
 
+// 当前可执行文件的绝对路径。官方 skills 要跟发行包/安装前缀走，不能拿
+// cwd 猜；找不到时返回 nullopt，主程序照常运行，只是没有官方技能层。
+std::optional<std::filesystem::path> ExecutablePath();
+
+// 官方技能目录：先找 <exe-dir>/skills（便携包、Windows 安装与开发构建），
+// 再找 <prefix>/share/lubancode/skills（POSIX install.sh/CMake install）。
+std::optional<std::string> OfficialSkillsDir();
+
 // 把 source 原子换到 destination。两条路径须在同一文件系统；成功后
 // source 不复存在。memory/index 这类“先写临时文件，再整份替换”的路径
 // 共用它，免得 Windows 的 rename 不能覆盖目标、POSIX 却能覆盖，业务层

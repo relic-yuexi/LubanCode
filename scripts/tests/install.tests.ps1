@@ -42,6 +42,14 @@ function Assert-Equal {
     }
 }
 
+function Assert-True {
+    param(
+        [string]$Name,
+        [bool]$Actual
+    )
+    Assert-Equal -Name $Name -Expected $true -Actual $Actual
+}
+
 Write-Host "==== Get-UpdatedPathForAdd ====" -ForegroundColor Cyan
 
 # 空 PATH 加一个目录 -> 直接就是那个目录
@@ -108,6 +116,37 @@ Write-Host "==== Get-DefaultInstallDir ====" -ForegroundColor Cyan
 Assert-Equal -Name '默认安装目录拼接正确' `
     -Expected (Join-Path $env:LOCALAPPDATA 'Programs\lubancode') `
     -Actual (Get-DefaultInstallDir)
+
+Write-Host ""
+Write-Host "==== Sync-OfficialSkills ====" -ForegroundColor Cyan
+
+$syncRoot = Join-Path $env:TEMP ("lubancode-skills-test-" + [Guid]::NewGuid().ToString('N'))
+try {
+    $sourceDir = Join-Path $syncRoot 'source'
+    $sourceSkills = Join-Path $sourceDir 'skills\lubancode-config\references'
+    $installDir = Join-Path $syncRoot 'install'
+    $oldSkills = Join-Path $installDir 'skills\lubancode-config'
+    New-Item -ItemType Directory -Path $sourceSkills -Force | Out-Null
+    New-Item -ItemType Directory -Path $oldSkills -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $sourceDir 'lubancode.exe') -Value 'fake exe' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $sourceDir 'skills\lubancode-config\SKILL.md') -Value 'new router' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $sourceSkills 'soul-and-prompts.md') -Value 'new reference' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $oldSkills 'old.md') -Value 'old reference' -Encoding UTF8
+
+    Sync-OfficialSkills -SourceExe (Join-Path $sourceDir 'lubancode.exe') -InstallDir $installDir
+
+    Assert-True -Name '同步后入口技能存在' `
+        -Actual (Test-Path -LiteralPath (Join-Path $installDir 'skills\lubancode-config\SKILL.md') -PathType Leaf)
+    Assert-True -Name '同步后 reference 跟着过去' `
+        -Actual (Test-Path -LiteralPath (Join-Path $installDir 'skills\lubancode-config\references\soul-and-prompts.md') -PathType Leaf)
+    Assert-Equal -Name '旧官方技能文件已清掉' `
+        -Expected $false `
+        -Actual (Test-Path -LiteralPath (Join-Path $installDir 'skills\lubancode-config\old.md'))
+} finally {
+    if (Test-Path -LiteralPath $syncRoot) {
+        Remove-Item -LiteralPath $syncRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
 
 Write-Host ""
 Write-Host "共 $($script:passCount + $script:failCount) 项,通过 $($script:passCount),失败 $($script:failCount)" -ForegroundColor $(if ($script:failCount -eq 0) { 'Green' } else { 'Red' })

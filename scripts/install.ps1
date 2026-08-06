@@ -219,6 +219,38 @@ function Get-RemoteExe {
     return $exe.FullName
 }
 
+function Sync-OfficialSkills {
+    param(
+        [string]$SourceExe,
+        [string]$InstallDir
+    )
+    $sourceSkills = Join-Path (Split-Path -Parent $SourceExe) 'skills'
+    if (-not (Test-Path -LiteralPath $sourceSkills -PathType Container)) {
+        Write-Host "提示:安装来源里没有 skills 目录,保留现有官方技能不动。" -ForegroundColor Yellow
+        return
+    }
+
+    $installRoot = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
+    $destSkills = [IO.Path]::GetFullPath((Join-Path $installRoot 'skills'))
+    if (-not $destSkills.StartsWith($installRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "官方技能目标越出安装目录:$destSkills"
+    }
+
+    $staging = Join-Path $installRoot ('.skills-new-' + [Guid]::NewGuid().ToString('N'))
+    try {
+        Copy-Item -LiteralPath $sourceSkills -Destination $staging -Recurse -Force
+        if (Test-Path -LiteralPath $destSkills) {
+            Remove-Item -LiteralPath $destSkills -Recurse -Force
+        }
+        Move-Item -LiteralPath $staging -Destination $destSkills
+    } finally {
+        if (Test-Path -LiteralPath $staging) {
+            Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Write-Step "已同步官方技能:$destSkills"
+}
+
 # ===================== 主流程 =====================
 
 function Invoke-Install {
@@ -266,9 +298,14 @@ function Invoke-Install {
 
     $destExe = Join-Path $InstallDir $ExeName
     try {
-        Copy-Item -LiteralPath $exeToInstall -Destination $destExe -Force
+        $sourceFull = [IO.Path]::GetFullPath($exeToInstall)
+        $destFull = [IO.Path]::GetFullPath($destExe)
+        if (-not $sourceFull.Equals($destFull, [StringComparison]::OrdinalIgnoreCase)) {
+            Copy-Item -LiteralPath $exeToInstall -Destination $destExe -Force
+        }
+        Sync-OfficialSkills -SourceExe $exeToInstall -InstallDir $InstallDir
     } catch {
-        Write-ErrStep "拷贝可执行文件到 $destExe 失败(是不是有旧的 lubancode 进程占着文件?先关掉再重试):$($_.Exception.Message)"
+        Write-ErrStep "同步程序或官方技能失败(是不是有旧的 lubancode 进程占着文件?先关掉再重试):$($_.Exception.Message)"
         exit 1
     }
 

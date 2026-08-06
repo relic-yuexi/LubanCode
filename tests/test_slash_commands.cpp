@@ -49,6 +49,19 @@ TEST_CASE("ParseSlashCommand: /config") {
     CHECK(cli::ParseSlashCommand("/config").command == cli::SlashCommand::Config);
 }
 
+TEST_CASE("ParseSlashCommand: /update 与 check 参数") {
+    CHECK(cli::ParseSlashCommand("/update").command == cli::SlashCommand::Update);
+    const auto parsed = cli::ParseSlashCommand("/UPDATE check");
+    CHECK(parsed.command == cli::SlashCommand::Update);
+    CHECK(parsed.args == "check");
+
+    bool listed = false;
+    for (const auto& command : cli::AllSlashCommands()) {
+        if (command.name == "/update") listed = true;
+    }
+    CHECK(listed);
+}
+
 TEST_CASE("ParseSlashCommand: /init 大小写不敏感,出现在候选里") {
     CHECK(cli::ParseSlashCommand("/init").command == cli::SlashCommand::Init);
     CHECK(cli::ParseSlashCommand("/INIT").command == cli::SlashCommand::Init);

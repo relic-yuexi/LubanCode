@@ -3,9 +3,11 @@
 // hooks(外部命令钩子)是两回事。
 //
 // 目录约定:
+//   <程序资源目录>/skills/<技能名>/SKILL.md       (官方级,随发行包更新)
 //   <主目录>/.lubancode/skills/<技能名>/SKILL.md   (主目录级,所有项目都能用)
 //   <cwd>/.lubancode/skills/<技能名>/SKILL.md       (项目级,只在当前项目生效)
-// 同名时项目级覆盖主目录级。
+// 同名时项目级覆盖主目录级,主目录级覆盖官方级。旧版曾播种到主目录的
+// 官方维护副本不算用户覆盖,加载时会让位给发行包里的新版本。
 //
 // 放在 tools/ 而不是 cli/ 的理由:skill 工具本身(下面的 SkillTool,见
 // skill_tool.hpp)执行时要读取已扫描到的清单,是 tools 层的东西;main.cpp
@@ -28,7 +30,8 @@ struct SkillMeta {
     std::string name;
     std::string description;
     std::string dir_path;      // 技能目录的绝对路径(UTF-8),SKILL.md 就在这个目录下
-    std::string source_level;  // "项目级" 或 "主目录级",/skills 展示用
+    std::string source_level;  // "官方"、"项目级" 或 "主目录级",/skills 展示用
+    bool managed_official_copy = false;  // 旧版播种进主目录的官方维护副本
 };
 
 // SKILL.md 的 frontmatter 解析结果。name/description 缺失时是
@@ -54,10 +57,11 @@ std::optional<ParsedSkillFile> ParseSkillMarkdown(const std::string& content);
 // (std::cerr),不影响其余技能、不崩。
 std::vector<SkillMeta> ScanSkillsDir(const std::filesystem::path& skills_root, const std::string& source_level);
 
-// 主入口:project_dir(cwd)的 <project_dir>/.lubancode/skills,home_dir(主
-// 目录,可能没有)的 <home_dir>/.lubancode/skills。两处同名技能时项目级
-// 覆盖主目录级。返回结果按名字排序,顺序稳定、方便测试断言。
-std::vector<SkillMeta> LoadSkills(const std::string& project_dir, const std::optional<std::string>& home_dir);
+// 主入口:official_skills_dir(发行包官方技能,可能没有)、home_dir(主目录,
+// 可能没有)与 project_dir(cwd)三层合并。优先级:项目 > 主目录 > 官方。
+// 旧版落在主目录的官方维护副本会自动让位。返回结果按名字排序。
+std::vector<SkillMeta> LoadSkills(const std::string& project_dir, const std::optional<std::string>& home_dir,
+                                  const std::optional<std::string>& official_skills_dir = std::nullopt);
 
 // 系统提示词里"可用技能"这一段。skills 为空时返回空串——一个字都不注入,
 // 不影响没配技能的既有场景。

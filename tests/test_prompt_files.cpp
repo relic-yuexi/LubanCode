@@ -1,4 +1,4 @@
-// 魂法分家(0.16.x)文件侧:EnsurePromptScaffold 首启生成四样、已存在不
+// 魂法分家(0.16.x)文件侧:EnsurePromptScaffold 首启生成三样、已存在不
 // 覆盖;ResetSystemPromptFile 备份 .bak 与重写;ListSouls 扫描列表。全部
 // 在临时目录里做,不碰真实用户主目录。
 
@@ -12,7 +12,6 @@
 
 #include "agent/prompts.hpp"
 #include "config/prompt_files.hpp"
-#include "tools/skill_loader.hpp"
 
 using namespace lubancode::config;
 
@@ -60,12 +59,12 @@ const std::string kPersona = "测试人格段:你是一只测试用的木鸢。"
 
 }  // namespace
 
-TEST_CASE("EnsurePromptScaffold: 首启四样落地——法、魂、文言魂、配置技能") {
+TEST_CASE("EnsurePromptScaffold: 首启三样落地——法、魂、文言魂") {
     TempDir dir;
     const std::string base = (dir.Path() / ".lubancode").string();
 
     const auto created = EnsurePromptScaffold(base, kPersona);
-    CHECK(created.size() == 4);
+    CHECK(created.size() == 3);
 
     // system_prompt.md:顶部注释 + 内置默认人格段原样副本。
     const std::string law = ReadAll(dir.Path() / ".lubancode" / "system_prompt.md");
@@ -88,37 +87,19 @@ TEST_CASE("EnsurePromptScaffold: 首启四样落地——法、魂、文言魂�
     const std::string wenyan = ReadAll(dir.Path() / ".lubancode" / "souls" / "wenyan.md");
     CHECK(wenyan.find("文言") != std::string::npos);
 
-    // skills/lubancode-config/SKILL.md:首启生成,frontmatter 能被正式解析器认出。
-    const std::string skill = ReadAll(dir.Path() / ".lubancode" / "skills" / "lubancode-config" / "SKILL.md");
-    REQUIRE_FALSE(skill.empty());
-    const auto parsed = lubancode::tools::ParseSkillMarkdown(skill);
-    REQUIRE(parsed.has_value());
-    REQUIRE(parsed->name.has_value());
-    CHECK(*parsed->name == "lubancode-config");
-    REQUIRE(parsed->description.has_value());
-    // 0.21.x:description 扩了关键词(soul/主题/模型/MCP/快捷键……),旧断言
-    // "lubancode 自身配置的完整说明"整句替换。
-    CHECK(*parsed->description ==
-          "lubancode 自身配置与功能说明(soul/魂/主题/模型/MCP/钩子/技能/语言/快捷键/会话),"
-          "用户问及或要改 lubancode 自身时先加载本技能");
-    // 系统维护标记在正文里(frontmatter 之后),启动刷新机制认它。
-    CHECK(skill.find(kManagedSkillMarker) != std::string::npos);
-    CHECK(skill == DefaultLubancodeConfigSkillContent());
 }
 
 TEST_CASE("EnsurePromptScaffold: 已存在不覆盖,缺哪样只补哪样") {
     TempDir dir;
     const std::string base = (dir.Path() / ".lubancode").string();
-    REQUIRE(EnsurePromptScaffold(base, kPersona).size() == 4);
+    REQUIRE(EnsurePromptScaffold(base, kPersona).size() == 3);
 
-    // 用户改了法、魂和配置技能——再跑一遍,一个字都不能动。
+    // 用户改了法和魂——再跑一遍,一个字都不能动。
     WriteAll(dir.Path() / ".lubancode" / "system_prompt.md", "用户自定义的法");
     WriteAll(dir.Path() / ".lubancode" / "SOUL.md", "用户自定义的魂");
-    WriteAll(dir.Path() / ".lubancode" / "skills" / "lubancode-config" / "SKILL.md", "用户自定义的配置技能");
     CHECK(EnsurePromptScaffold(base, kPersona).empty());
     CHECK(ReadAll(dir.Path() / ".lubancode" / "system_prompt.md") == "用户自定义的法");
     CHECK(ReadAll(dir.Path() / ".lubancode" / "SOUL.md") == "用户自定义的魂");
-    CHECK(ReadAll(dir.Path() / ".lubancode" / "skills" / "lubancode-config" / "SKILL.md") == "用户自定义的配置技能");
 
     // 删掉 wenyan.md——只补这一样。
     std::filesystem::remove(dir.Path() / ".lubancode" / "souls" / "wenyan.md");
@@ -126,7 +107,6 @@ TEST_CASE("EnsurePromptScaffold: 已存在不覆盖,缺哪样只补哪样") {
     REQUIRE(created.size() == 1);
     CHECK(created[0].find("wenyan.md") != std::string::npos);
     CHECK(ReadAll(dir.Path() / ".lubancode" / "system_prompt.md") == "用户自定义的法");
-    CHECK(ReadAll(dir.Path() / ".lubancode" / "skills" / "lubancode-config" / "SKILL.md") == "用户自定义的配置技能");
 }
 
 TEST_CASE("EnsurePromptScaffold: 排他创建——抢先落地的用户文件一字不动,也不计入 created") {
@@ -142,7 +122,7 @@ TEST_CASE("EnsurePromptScaffold: 排他创建——抢先落地的用户文件�
     WriteAll(dir.Path() / ".lubancode" / "SOUL.md", "");  // 空文件也算存在
 
     const auto created = EnsurePromptScaffold(base, kPersona);
-    CHECK(created.size() == 2);  // 只补 wenyan.md 和 SKILL.md
+    CHECK(created.size() == 1);  // 只补 wenyan.md
     for (const auto& path : created) {
         CHECK(path.find("system_prompt.md") == std::string::npos);
         CHECK(path.find("SOUL.md") == std::string::npos);
@@ -154,7 +134,7 @@ TEST_CASE("EnsurePromptScaffold: 排他创建——抢先落地的用户文件�
 TEST_CASE("ResetSystemPromptFile: 旧文件挪成 .bak,重写内置默认") {
     TempDir dir;
     const std::string base = (dir.Path() / ".lubancode").string();
-    REQUIRE(EnsurePromptScaffold(base, kPersona).size() == 4);
+    REQUIRE(EnsurePromptScaffold(base, kPersona).size() == 3);
     WriteAll(dir.Path() / ".lubancode" / "system_prompt.md", "每句话末尾加【鲁班】");
 
     const auto result = ResetSystemPromptFile(base, kPersona);
@@ -170,7 +150,7 @@ TEST_CASE("ResetSystemPromptFile: 旧文件挪成 .bak,重写内置默认") {
 TEST_CASE("ResetSystemPromptFile: 已有 .bak 就覆盖") {
     TempDir dir;
     const std::string base = (dir.Path() / ".lubancode").string();
-    REQUIRE(EnsurePromptScaffold(base, kPersona).size() == 4);
+    REQUIRE(EnsurePromptScaffold(base, kPersona).size() == 3);
     WriteAll(dir.Path() / ".lubancode" / "system_prompt.md.bak", "旧备份");
     WriteAll(dir.Path() / ".lubancode" / "system_prompt.md", "新的怪规矩");
 
@@ -193,7 +173,7 @@ TEST_CASE("ResetSystemPromptFile: 原文件不存在,直接写默认,没有 .bak
 TEST_CASE("ListSouls: 扫 souls/*.md,名字去扩展名,字典序;非 .md 不算") {
     TempDir dir;
     const std::string base = (dir.Path() / ".lubancode").string();
-    REQUIRE(EnsurePromptScaffold(base, kPersona).size() == 4);
+    REQUIRE(EnsurePromptScaffold(base, kPersona).size() == 3);
     WriteAll(dir.Path() / ".lubancode" / "souls" / "pirate.md", "海盗腔");
     WriteAll(dir.Path() / ".lubancode" / "souls" / "notes.txt", "不是魂");
 
@@ -266,8 +246,7 @@ TEST_CASE("SoulPathByName / 各路径拼接") {
 }
 
 // ---------------------------------------------------------------------------
-// 0.21.x 提示词运行时化:prompts/ 模块播种 + lubancode-config/SKILL.md
-// 系统维护件刷新。
+// 0.21.x 提示词运行时化:prompts/ 模块播种。
 // ---------------------------------------------------------------------------
 
 TEST_CASE("EnsurePromptScaffold: prompts/ 模块播种——缺哪补哪,已存在不覆盖") {
@@ -279,9 +258,9 @@ TEST_CASE("EnsurePromptScaffold: prompts/ 模块播种——缺哪补哪,已存�
         {"platforms/anthropic.md", "平台模块正文"},
     };
 
-    // 首启:老四样 + 三个模块。
+    // 首启:老三样 + 三个模块。
     const auto created = EnsurePromptScaffold(base, kPersona, modules);
-    CHECK(created.size() == 7);
+    CHECK(created.size() == 6);
     CHECK(ReadAll(dir.Path() / ".lubancode" / "prompts" / "core" / "10-identity.md") == "身份模块正文\n");
     CHECK(ReadAll(dir.Path() / ".lubancode" / "prompts" / "features" / "files.md") == "文件模块正文\n");
     CHECK(ReadAll(dir.Path() / ".lubancode" / "prompts" / "platforms" / "anthropic.md") == "平台模块正文\n");
@@ -293,44 +272,4 @@ TEST_CASE("EnsurePromptScaffold: prompts/ 模块播种——缺哪补哪,已存�
     REQUIRE(again.size() == 1);
     CHECK(again[0].find("files.md") != std::string::npos);
     CHECK(ReadAll(dir.Path() / ".lubancode" / "prompts" / "core" / "10-identity.md") == "用户改过的身份");
-}
-
-TEST_CASE("EnsurePromptScaffold: 带管理标记的 SKILL.md 内容过期 → 覆盖刷新(不算新建)") {
-    TempDir dir;
-    const std::string base = (dir.Path() / ".lubancode").string();
-    REQUIRE(EnsurePromptScaffold(base, kPersona).size() == 4);
-
-    // 模拟旧版本落下的维护件:带标记,但内容跟当前内置版不一样。
-    const std::filesystem::path skill_path =
-        dir.Path() / ".lubancode" / "skills" / "lubancode-config" / "SKILL.md";
-    WriteAll(skill_path, std::string("---\nname: lubancode-config\ndescription: 旧版说明\n---\n") +
-                              kManagedSkillMarker + "\n\n旧版正文\n");
-
-    const auto created = EnsurePromptScaffold(base, kPersona);
-    CHECK(created.empty());  // 刷新不算新建
-    CHECK(ReadAll(skill_path) == DefaultLubancodeConfigSkillContent());
-}
-
-TEST_CASE("EnsurePromptScaffold: 无标记的 SKILL.md(用户自建/删了标记)一个字不动") {
-    TempDir dir;
-    const std::string base = (dir.Path() / ".lubancode").string();
-    REQUIRE(EnsurePromptScaffold(base, kPersona).size() == 4);
-
-    const std::filesystem::path skill_path =
-        dir.Path() / ".lubancode" / "skills" / "lubancode-config" / "SKILL.md";
-    WriteAll(skill_path, "---\nname: lubancode-config\ndescription: 用户自己的手册\n---\n用户正文\n");
-
-    CHECK(EnsurePromptScaffold(base, kPersona).empty());
-    CHECK(ReadAll(skill_path) == "---\nname: lubancode-config\ndescription: 用户自己的手册\n---\n用户正文\n");
-}
-
-TEST_CASE("EnsurePromptScaffold: 内容已是当前内置版的 SKILL.md 不重写(时间戳不折腾)") {
-    TempDir dir;
-    const std::string base = (dir.Path() / ".lubancode").string();
-    REQUIRE(EnsurePromptScaffold(base, kPersona).size() == 4);
-    // 再跑一遍:内容一致,不新建也不刷新。
-    CHECK(EnsurePromptScaffold(base, kPersona).empty());
-    const std::filesystem::path skill_path =
-        dir.Path() / ".lubancode" / "skills" / "lubancode-config" / "SKILL.md";
-    CHECK(ReadAll(skill_path) == DefaultLubancodeConfigSkillContent());
 }

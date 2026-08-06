@@ -4,6 +4,7 @@
 #include "platform/paths.hpp"
 
 #include <cstdlib>
+#include <vector>
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -28,6 +29,34 @@ std::optional<std::string> GetEnvVar(const char* name) {
 
 std::optional<std::string> HomeDir() {
     return GetEnvVar("USERPROFILE");
+}
+
+std::optional<std::filesystem::path> ExecutablePath() {
+    std::vector<wchar_t> buffer(1024);
+    for (;;) {
+        const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (length == 0) {
+            return std::nullopt;
+        }
+        if (static_cast<std::size_t>(length) < buffer.size() - 1) {
+            return std::filesystem::path(std::wstring(buffer.data(), length));
+        }
+        buffer.resize(buffer.size() * 2);
+    }
+}
+
+std::optional<std::string> OfficialSkillsDir() {
+    const auto executable = ExecutablePath();
+    if (!executable.has_value()) {
+        return std::nullopt;
+    }
+    const std::filesystem::path candidate = executable->parent_path() / "skills";
+    std::error_code ec;
+    if (!std::filesystem::is_directory(candidate, ec) || ec) {
+        return std::nullopt;
+    }
+    const std::u8string value = candidate.u8string();
+    return std::string(reinterpret_cast<const char*>(value.data()), value.size());
 }
 
 std::expected<void, std::string> ReplaceFileAtomically(const std::filesystem::path& source,

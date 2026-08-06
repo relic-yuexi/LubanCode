@@ -16,6 +16,7 @@ enum class SlashCommand {
     Model,
     Provider,  // /provider add|list|switch|remove:多端模型服务配置
     Config,
+    Update,    // /update [check]:查 GitHub 最新 Release，不暗中改文件
     Init,      // /init:在项目根创建 AGENTS.md 并立刻载入
     Clear,
     Exit,

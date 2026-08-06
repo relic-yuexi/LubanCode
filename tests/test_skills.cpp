@@ -129,6 +129,14 @@ public:
         file << content;
     }
 
+    void WriteOfficialSkill(const std::string& skill_name, const std::string& content) const {
+        const std::filesystem::path skill_dir = dir_ / "official" / skill_name;
+        std::error_code ec;
+        std::filesystem::create_directories(skill_dir, ec);
+        std::ofstream file(skill_dir / "SKILL.md", std::ios::binary);
+        file << content;
+    }
+
     std::string BaseDir(const std::string& base_subdir) const { return (dir_ / base_subdir).string(); }
 
 private:
@@ -178,6 +186,67 @@ TEST_CASE("LoadSkills: 同名技能,项目级覆盖主目录级") {
                                             [](const tools::SkillMeta& m) { return m.name == "home-only"; });
     REQUIRE(home_only_it != skills.end());
     CHECK(home_only_it->source_level == "主目录级");
+}
+
+TEST_CASE("LoadSkills: 官方、主目录、项目三级按顺序覆盖") {
+    TempSkillsRoot root;
+    root.WriteOfficialSkill("shared-skill", SkillContent("shared-skill", "官方说明", "官方正文\n"));
+    root.WriteOfficialSkill("official-only", SkillContent("official-only", "官方独有", "官方正文\n"));
+    root.WriteSkill("home", "shared-skill", SkillContent("shared-skill", "主目录说明", "主目录正文\n"));
+    root.WriteSkill("proj", "shared-skill", SkillContent("shared-skill", "项目说明", "项目正文\n"));
+
+    const auto skills =
+        tools::LoadSkills(root.BaseDir("proj"), root.BaseDir("home"), root.BaseDir("official"));
+    REQUIRE(skills.size() == 2);
+    const auto shared = std::find_if(skills.begin(), skills.end(),
+                                     [](const tools::SkillMeta& meta) { return meta.name == "shared-skill"; });
+    REQUIRE(shared != skills.end());
+    CHECK(shared->description == "项目说明");
+    CHECK(shared->source_level == "项目级");
+    const auto official = std::find_if(skills.begin(), skills.end(),
+                                       [](const tools::SkillMeta& meta) { return meta.name == "official-only"; });
+    REQUIRE(official != skills.end());
+    CHECK(official->source_level == "官方");
+}
+
+TEST_CASE("LoadSkills: 旧版播种的官方维护副本让位给发行包新版") {
+    TempSkillsRoot root;
+    root.WriteOfficialSkill("lubancode-config",
+                            SkillContent("lubancode-config", "发行包新版", "官方正文\n"));
+    root.WriteSkill("home", "lubancode-config",
+                    SkillContent("lubancode-config", "主目录旧版",
+                                 "<!-- lubancode 系统维护,随版本自动更新;自定义请另建技能 -->\n旧正文\n"));
+
+    const auto skills =
+        tools::LoadSkills(root.BaseDir("proj"), root.BaseDir("home"), root.BaseDir("official"));
+    REQUIRE(skills.size() == 1);
+    CHECK(skills[0].description == "发行包新版");
+    CHECK(skills[0].source_level == "官方");
+}
+
+TEST_CASE("官方 lubancode-config SKILL.md 可解析且路由词齐全") {
+    const std::filesystem::path root = std::filesystem::path(LUBANCODE_TEST_OFFICIAL_SKILLS_DIR);
+    const auto skills = tools::ScanSkillsDir(root, "官方");
+    const auto config = std::find_if(skills.begin(), skills.end(),
+                                     [](const tools::SkillMeta& meta) { return meta.name == "lubancode-config"; });
+    REQUIRE(config != skills.end());
+    CHECK(config->description.find("MCP") != std::string::npos);
+    CHECK(config->description.find("技能") != std::string::npos);
+    CHECK(config->source_level == "官方");
+
+    tools::SkillTool tool({*config});
+    const auto loaded = tool.execute(nlohmann::json{{"name", "lubancode-config"}});
+    REQUIRE_FALSE(loaded.is_error);
+    CHECK(loaded.content.size() < 3000);
+    CHECK(loaded.content.find("references/soul-and-prompts.md") != std::string::npos);
+    CHECK(loaded.content.find("`mcpServers` 的键是服务器名") == std::string::npos);
+
+    for (const char* reference : {
+             "configuration.md", "providers-and-models.md", "mcp.md",
+             "hooks-and-permissions.md", "search.md", "lsp.md", "skills.md",
+             "soul-and-prompts.md", "sessions-and-ui.md", "update.md"}) {
+        CHECK(std::filesystem::is_regular_file(root / "lubancode-config" / "references" / reference));
+    }
 }
 
 TEST_CASE("LoadSkills: 一个技能都没有,返回空 vector") {

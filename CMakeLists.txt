@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(lubancode VERSION 0.24.0 LANGUAGES CXX)
+project(lubancode VERSION 0.24.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -239,6 +239,7 @@ add_library(lubancode_core STATIC
   src/config/config.cpp
   src/config/model_catalog.cpp
   src/config/provider_catalog.cpp
+  src/config/update_checker.cpp
   src/config/prompt_files.cpp
   src/config/project_instructions.cpp
   src/config/skill_store.cpp
@@ -309,6 +310,22 @@ target_link_libraries(lubancode PRIVATE lubancode_core)
 target_compile_features(lubancode PRIVATE cxx_std_23)
 
 install(TARGETS lubancode RUNTIME DESTINATION bin)
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/skills/" DESTINATION share/lubancode/skills)
+
+# 官方技能不再编进 C++。开发构建每次把源码树 skills/ 镜到可执行文件旁；
+# 只改 Markdown 再跑 cmake --build 就会同步，不触发 C++ 重编。发行包也沿用
+# 同一目录形状，便携运行直接读 <exe-dir>/skills。
+file(GLOB_RECURSE _lubancode_official_skill_files CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/skills/*")
+add_custom_target(lubancode_official_skills ALL
+  COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:lubancode>/skills"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${CMAKE_CURRENT_SOURCE_DIR}/skills"
+          "$<TARGET_FILE_DIR:lubancode>/skills"
+  DEPENDS ${_lubancode_official_skill_files}
+  COMMENT "lubancode: 同步官方 skills 到程序目录"
+  VERBATIM)
+add_dependencies(lubancode_official_skills lubancode)
 
 # ---------------------------------------------------------------------------
 # 测试:doctest 单头文件,同样走 FetchContent,走 codeload.github.com 镜像

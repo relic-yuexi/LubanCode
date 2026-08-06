@@ -79,6 +79,8 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Provider;
     } else if (lower == "/config") {
         parsed.command = SlashCommand::Config;
+    } else if (lower == "/update") {
+        parsed.command = SlashCommand::Update;
     } else if (lower == "/init") {
         parsed.command = SlashCommand::Init;
     } else if (lower == "/clear") {
@@ -303,6 +305,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/provider", tr("slash.desc.provider")},
             {"/worktree", tr("slash.desc.worktree")},
             {"/config", tr("slash.desc.config")},
+            {"/update", tr("slash.desc.update")},
             {"/init", tr("slash.desc.init")},
             {"/language", tr("slash.desc.language")},
             {"/image", tr("slash.desc.image")},
