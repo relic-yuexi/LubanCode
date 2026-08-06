@@ -2,7 +2,7 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
-## [v0.24.1] - 待发布
+## [v0.24.1] - 2026-08-06
 
 - **模型接入更全。** 新增 Chat Completions 协议与内置 Provider 目录；可从常见厂家预设中添加服务，也能在会话里更新目录、切换 Provider 与模型。
 - **项目知识能接着用。** 新增默认关闭的项目记忆，可召回稳定事实与偏好；本地 Skill 支持安装和管理，会话恢复、续聊与导出也补齐了交互细节。
@@ -44,7 +44,7 @@
 - **模型与扩展接成一体。** 接入 Anthropic Messages 与 OpenAI Responses，并提供上下文压缩、会话恢复、MCP、LSP、Skills、Lua、C ABI 插件和联网工具。
 - **三平台可以直接安装。** Windows、Linux 与 macOS 均有自动构建的发行包和安装脚本，CI 分别用 MSVC、GCC 与 Clang 编译测试。
 
-[v0.24.1]: https://github.com/relic-yuexi/LubanCode/compare/v0.23.5...HEAD
+[v0.24.1]: https://github.com/relic-yuexi/LubanCode/compare/v0.23.5...v0.24.1
 [v0.23.5]: https://github.com/relic-yuexi/LubanCode/compare/v0.23.4...v0.23.5
 [v0.23.4]: https://github.com/relic-yuexi/LubanCode/compare/v0.23.3...v0.23.4
 [v0.23.3]: https://github.com/relic-yuexi/LubanCode/compare/v0.23.2...v0.23.3

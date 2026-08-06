@@ -4,7 +4,7 @@
 
 <h1 align="center">LubanCode</h1>
 
-<p align="center"><strong>A native AI coding CLI built with C++23. Dual API protocols, real tools, and a terminal interface made for sustained work.</strong></p>
+<p align="center"><strong>A native AI coding CLI built with C++23. Three API protocols, real tools, and a terminal interface made for sustained work.</strong></p>
 
 <p align="center">
   <a href="README.md">简体中文</a> · <strong>English</strong>
