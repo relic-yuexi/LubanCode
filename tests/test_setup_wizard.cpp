@@ -223,3 +223,44 @@ TEST_CASE("RunSetupWizard: wire 编号不认得时重问,直到给出合法值")
     REQUIRE(outcome.has_value());
     CHECK(outcome->config.wire == config::Wire::Responses);
 }
+
+TEST_CASE("RunSetupWizard: 注入 io.choose 时走方向键选择路径") {
+    ScriptedIO scripted;
+    std::vector<std::size_t> choose_returns = {0, 1, 0};  // 语言 / wire=responses / model 列表第 1 个
+    std::size_t choose_next = 0;
+    scripted.fetch = [](config::Wire, const std::string&, const std::string&)
+        -> std::expected<std::vector<api::ModelInfo>, api::Error> {
+        return std::vector<api::ModelInfo>{{"m-a", ""}, {"m-b", ""}};
+    };
+    auto io = scripted.Build();
+    io.interactive = true;
+    io.choose = [&](const std::vector<cli::WizardChoiceItem>&, std::size_t,
+                    const std::string&) -> std::optional<std::size_t> {
+        if (choose_next >= choose_returns.size()) return std::nullopt;
+        return choose_returns[choose_next++];
+    };
+    scripted.inputs = {
+        "https://api.example.com/v1",  // base_url
+        "the-key",                      // api_key
+        "",                             // model: 回车 -> 走列表,再由 choose 选
+        "n",                            // 不保存
+    };
+    const auto outcome = cli::RunSetupWizard(io);
+
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->config.wire == config::Wire::Responses);  // choose_returns[1] = 1
+    CHECK(outcome->config.model == "m-a");                    // choose_returns[2] = 0 -> models[0]
+}
+
+TEST_CASE("RunSetupWizard: io.choose 返回 nullopt 时向导放弃") {
+    ScriptedIO scripted;
+    auto io = scripted.Build();
+    io.interactive = true;
+    io.choose = [](const std::vector<cli::WizardChoiceItem>&, std::size_t,
+                   const std::string&) -> std::optional<std::size_t> {
+        return std::nullopt;  // 模拟 Esc
+    };
+    scripted.inputs = {};
+    const auto outcome = cli::RunSetupWizard(io);
+    CHECK_FALSE(outcome.has_value());
+}

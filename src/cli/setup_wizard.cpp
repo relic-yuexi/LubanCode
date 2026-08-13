@@ -61,36 +61,59 @@ std::optional<std::string> ReadRequired(WizardIO& io, const std::string& prompt,
     }
 }
 
-// 编号选择,空输入按默认(1-based default_choice)处理,超范围/非数字重问。
-// EOF 返回 std::nullopt。
-std::optional<std::size_t> ReadChoice(WizardIO& io, const std::string& prompt, std::size_t count,
-                                       std::size_t default_choice) {
+namespace {
+
+// 编号回落版单选:打印"1) label / 2) label ..."编号列表,读一行数字,空输入走
+// default_index(0-based),超范围/非数字重问。EOF 返回 std::nullopt。返回选中
+// 下标(0-based)。io.choose 未注入时 ReadChoice 走这条;单测也靠它跑编号路径。
+std::optional<std::size_t> ChooseByNumber(WizardIO& io, const std::vector<WizardChoiceItem>& items,
+                                          std::size_t default_index) {
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        std::string line = "  " + std::to_string(i + 1) + ") " + items[i].label;
+        if (!items[i].description.empty()) {
+            line += " - " + items[i].description;
+        }
+        io.print(line);
+    }
     while (true) {
-        const auto answer = ReadTrimmed(io, prompt);
+        const auto answer = ReadTrimmed(io, trf("wizard.choose_prompt_n", default_index + 1));
         if (!answer.has_value()) {
             return std::nullopt;
         }
         if (answer->empty()) {
-            return default_choice;
+            return default_index;
         }
         try {
             std::size_t consumed = 0;
             const int n = std::stoi(*answer, &consumed);
-            if (consumed != answer->size() || n < 1 || static_cast<std::size_t>(n) > count) {
+            if (consumed != answer->size() || n < 1 || static_cast<std::size_t>(n) > items.size()) {
                 io.print(tr("wizard.choice.bad_range"));
                 continue;
             }
-            return static_cast<std::size_t>(n);
+            return static_cast<std::size_t>(n - 1);  // 转 0-based
         } catch (...) {
             io.print(tr("wizard.choice.not_number"));
         }
     }
 }
 
+}  // namespace
+
+// 单选:优先走注入点 io.choose(生产 = 方向键菜单);未注入时回落到 ChooseByNumber
+// (编号列表 + read_line)。空输入按 default_index(0-based),超范围/非数字重问,
+// EOF 返回 std::nullopt。返回选中下标(0-based)。
+std::optional<std::size_t> ReadChoice(WizardIO& io, const std::vector<WizardChoiceItem>& items,
+                                      std::size_t default_index, const std::string& hint) {
+    if (io.interactive && io.choose) {
+        return io.choose(items, default_index, hint);
+    }
+    return ChooseByNumber(io, items, default_index);
+}
+
 // model 这一步:输入非空就直接用;输入空就拉列表、编号选;拉取失败/列表为空
 // 都回落到"手动输入,必须非空"。返回值为空表示 EOF,调用方原样往上传。
 std::optional<std::string> ResolveModel(WizardIO& io, config::Wire wire, const std::string& base_url,
-                                         const std::string& api_key) {
+                                        const std::string& api_key) {
     io.print(tr("wizard.model.hint"));
     const auto first = ReadTrimmed(io, "model: ");
     if (!first.has_value()) {
@@ -114,38 +137,42 @@ std::optional<std::string> ResolveModel(WizardIO& io, config::Wire wire, const s
         return ReadRequired(io, "model: ", tr("wizard.model.empty"));
     }
 
-    for (std::size_t i = 0; i < models.size(); ++i) {
-        const std::string& label = models[i].display_name.empty() ? models[i].id : models[i].display_name;
-        io.print("  " + std::to_string(i + 1) + ") " + label);
+    std::vector<WizardChoiceItem> items;
+    items.reserve(models.size());
+    for (const auto& m : models) {
+        const std::string& label = m.display_name.empty() ? m.id : m.display_name;
+        items.push_back({label, std::string{}});
     }
-    const auto choice = ReadChoice(io, tr("wizard.model.choose"), models.size(), 1);
+    const auto choice = ReadChoice(io, items, 0, tr("wizard.choose.hint"));
     if (!choice.has_value()) {
         return std::nullopt;
     }
-    return models[*choice - 1].id;
+    return models[*choice].id;  // 0-based
 }
 
 namespace {
 
 // i18n:第一问选界面语言——选完立即 SetLanguage,向导后续文案(包括
 // 存进配置的 language 字段)即用所选语言。列表 = 内置两种 + 语言包;
-// 默认编号落在"当前语言"(启动时按 env/系统探测出来的那个)上,直接
+// 默认高亮落在"当前语言"(启动时按 env/系统探测出来的那个)上,直接
 // 回车 = 保持现状。EOF 返回 std::nullopt。
 std::optional<std::string> ResolveLanguage(WizardIO& io) {
     const std::vector<std::string> langs = AvailableLanguages();
     io.print(tr("wizard.lang.title"));
-    std::size_t default_choice = 1;
+    std::vector<WizardChoiceItem> items;
+    items.reserve(langs.size());
+    std::size_t default_index = 0;
     for (std::size_t i = 0; i < langs.size(); ++i) {
-        io.print("  " + std::to_string(i + 1) + ") " + LanguageDisplayName(langs[i]));
+        items.push_back({LanguageDisplayName(langs[i]), std::string{}});
         if (langs[i] == CurrentLanguage()) {
-            default_choice = i + 1;
+            default_index = i;
         }
     }
-    const auto choice = ReadChoice(io, trf("wizard.lang.prompt", default_choice), langs.size(), default_choice);
+    const auto choice = ReadChoice(io, items, default_index, tr("wizard.choose.hint"));
     if (!choice.has_value()) {
         return std::nullopt;
     }
-    return langs[*choice - 1];
+    return langs[*choice];  // 0-based
 }
 
 }  // namespace
@@ -169,17 +196,19 @@ std::optional<WizardOutcome> RunSetupWizard(WizardIO& io) {
 
     // ---- 1) wire ----
     io.print(tr("wizard.wire.title"));
-    io.print(tr("wizard.wire.opt1"));
-    io.print(tr("wizard.wire.opt2"));
-    io.print(tr("wizard.wire.opt3"));
+    std::vector<WizardChoiceItem> wire_items = {
+        {tr("wizard.wire.opt1"), {}},
+        {tr("wizard.wire.opt2"), {}},
+        {tr("wizard.wire.opt3"), {}},
+    };
     config::Wire wire = config::Wire::Anthropic;
     {
-        const auto choice = ReadChoice(io, tr("wizard.choose_prompt"), 3, 1);
+        const auto choice = ReadChoice(io, wire_items, 0, tr("wizard.choose.hint"));
         if (!choice.has_value()) {
             return std::nullopt;
         }
-        wire = *choice == 2 ? config::Wire::Responses
-                            : (*choice == 3 ? config::Wire::ChatCompletions : config::Wire::Anthropic);
+        wire = *choice == 1 ? config::Wire::Responses
+                            : (*choice == 2 ? config::Wire::ChatCompletions : config::Wire::Anthropic);
     }
     io.print("");
 

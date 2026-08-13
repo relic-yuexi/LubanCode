@@ -775,7 +775,8 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
         start_row = info->cursor_y;
     }
 
-    ChoiceMenuCore menu(items.size(), options.multi_select, options.editable_index);
+    ChoiceMenuCore menu(items.size(), options.multi_select, options.editable_index,
+                        options.initial_cursor.value_or(0));
     auto draw = [&] {
         std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
         const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();

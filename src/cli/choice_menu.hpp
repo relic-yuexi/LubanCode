@@ -22,7 +22,8 @@ struct ChoiceMenuState {
 class ChoiceMenuCore {
 public:
     ChoiceMenuCore(std::size_t item_count, bool multi_select,
-                   std::optional<std::size_t> editable_index = std::nullopt);
+                   std::optional<std::size_t> editable_index = std::nullopt,
+                   std::size_t initial_cursor = 0);
 
     const ChoiceMenuState& state() const { return state_; }
     const ChoiceMenuState& HandleKey(const KeyEvent& event);

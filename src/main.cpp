@@ -3013,7 +3013,10 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
 // 做模型列表拉取。用户中途 EOF(Ctrl+Z / 管道读尽)放弃时返回 std::nullopt。
 // 用户选择保存时,把保存后的路径写进 out_config_file_path,好让接下来的
 // /model 命令知道"有配置文件"。
-std::optional<lubancode::config::Config> RunInitialSetupWizard(std::optional<std::string>& out_config_file_path) {
+// 给向导(初次配置 / provider add)造一份完整 WizardIO:print/read_line/fetch_models
+// 接真实 IO,choose 接 ReadChoiceMenu(↑↓ 方向键,初始高亮落在默认项,回车即选中),
+// interactive 让 ReadChoice 在管道/重定向时回落编号。两处向导共用,免得注入逻辑漂移。
+lubancode::cli::WizardIO MakeInteractiveWizardIO(const lubancode::cli::Theme& theme) {
     lubancode::cli::WizardIO io;
     io.print = [](const std::string& line) {
         std::cout << line << "\n";
@@ -3024,6 +3027,30 @@ std::optional<lubancode::config::Config> RunInitialSetupWizard(std::optional<std
     io.fetch_models = [](lubancode::config::Wire wire, const std::string& base_url, const std::string& api_key) {
         return lubancode::api::ListModels(wire, base_url, api_key);
     };
+    io.interactive = lubancode::platform::StdinIsInteractive() &&
+                     lubancode::platform::ProbeStdoutConsole().is_console;
+    io.choose = [&theme](const std::vector<lubancode::cli::WizardChoiceItem>& items,
+                         std::size_t default_index, const std::string& hint) -> std::optional<std::size_t> {
+        std::vector<lubancode::cli::ChoiceMenuItem> menu_items;
+        menu_items.reserve(items.size());
+        for (const auto& it : items) {
+            menu_items.push_back({it.label, it.description});
+        }
+        lubancode::cli::ChoiceMenuOptions opts;
+        opts.hint = hint;
+        opts.initial_cursor = default_index;  // 初始高亮落在默认项,回车即选中默认
+        const auto selected = lubancode::cli::ReadChoiceMenu(menu_items, opts, theme);
+        if (!selected.has_value() || selected->selected_indices.empty()) {
+            return std::nullopt;  // Esc/Ctrl+C/EOF
+        }
+        return selected->selected_indices.front();
+    };
+    return io;
+}
+
+std::optional<lubancode::config::Config> RunInitialSetupWizard(std::optional<std::string>& out_config_file_path,
+                                                                const lubancode::cli::Theme& theme) {
+    lubancode::cli::WizardIO io = MakeInteractiveWizardIO(theme);
 
     const auto home_lubancode_dir = lubancode::config::HomeLubancodeDir();
     io.home_config_display_path =
@@ -3540,16 +3567,9 @@ void PrintProviderList(const std::vector<lubancode::config::ProviderConfig>& pro
 // 任何东西。问出来的是一条 ProviderConfig,写盘复用一行式旧用法同一条路径
 // (AddProviderToGlobalConfig)。用户中途 EOF、或者最后一问回答 n,都当"整个
 // 添加动作被取消"处理:不改 config.providers、不写盘。
-void RunProviderAddWizardInteractive(const std::string& name_prefill, lubancode::config::Config& config) {
-    lubancode::cli::WizardIO io;
-    io.print = [](const std::string& line) {
-        std::cout << line << "\n";
-        std::cout.flush();
-    };
-    io.read_line = []() -> std::optional<std::string> { return lubancode::cli::ReadLine(""); };
-    io.fetch_models = [](lubancode::config::Wire wire, const std::string& base_url, const std::string& api_key) {
-        return lubancode::api::ListModels(wire, base_url, api_key);
-    };
+void RunProviderAddWizardInteractive(const std::string& name_prefill, lubancode::config::Config& config,
+                                     const lubancode::cli::Theme& theme) {
+    lubancode::cli::WizardIO io = MakeInteractiveWizardIO(theme);
 
     if (lubancode::config::ProviderCatalogCacheIsStale()) {
         std::cout << tr("provider_catalog.refreshing") << "\n";
@@ -3615,7 +3635,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             if (command.wizard) {
                 // 裸敲 /provider add,或者 /provider add <名字>(名字先给上,
                 // 跳过向导第一问)——走分步向导,不进下面的一行式解析路径。
-                RunProviderAddWizardInteractive(command.name, config);
+                RunProviderAddWizardInteractive(command.name, config, theme);
                 return;
             }
             const auto wire = lubancode::config::ParseProviderWire(command.wire);
@@ -5970,7 +5990,7 @@ int RunCli(const std::vector<std::string>& args) {
         lubancode::config::ConfigResult effective = *config_result;
         if (effective.config.base_url.empty() || effective.config.auth_token.empty() ||
             effective.config.model.empty()) {
-            const auto wizard_config = RunInitialSetupWizard(effective.config_file_path);
+            const auto wizard_config = RunInitialSetupWizard(effective.config_file_path, theme);
             if (!wizard_config.has_value()) {
                 std::cerr << tr("error.wizard_incomplete") << "\n";
                 return 1;

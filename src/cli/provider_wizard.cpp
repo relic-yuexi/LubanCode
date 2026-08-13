@@ -143,16 +143,18 @@ std::optional<ProviderWizardOutcome> RunProviderAddWizard(WizardIO& io, const st
 
     // ---- 3) wire(跟初次配置向导同一套文案,复用现成的两个选项) ----
     io.print(tr("wizard.wire.title"));
-    io.print(tr("wizard.wire.opt1"));
-    io.print(tr("wizard.wire.opt2"));
-    io.print(tr("wizard.wire.opt3"));
+    std::vector<WizardChoiceItem> wire_items = {
+        {tr("wizard.wire.opt1"), {}},
+        {tr("wizard.wire.opt2"), {}},
+        {tr("wizard.wire.opt3"), {}},
+    };
     {
-        const auto choice = ReadChoice(io, tr("wizard.choose_prompt"), 3, 1);
+        const auto choice = ReadChoice(io, wire_items, 0, tr("wizard.choose.hint"));
         if (!choice.has_value()) {
             return std::nullopt;
         }
-        provider.wire = *choice == 2 ? config::Wire::Responses
-                                     : (*choice == 3 ? config::Wire::ChatCompletions
+        provider.wire = *choice == 1 ? config::Wire::Responses
+                                     : (*choice == 2 ? config::Wire::ChatCompletions
                                                      : config::Wire::Anthropic);
     }
     io.print("");
@@ -242,22 +244,20 @@ std::optional<ProviderWizardOutcome> RunProviderPresetWizard(
     }
 
     io.print(tr("provider_catalog.choose.title"));
-    for (std::size_t i = 0; i < catalog.providers.size(); ++i) {
-        const auto& preset = catalog.providers[i];
-        std::string line = "  " + std::to_string(i + 1) + ") " + preset.name;
-        if (!preset.description.empty()) line += " - " + preset.description;
-        io.print(line);
+    std::vector<WizardChoiceItem> items;
+    items.reserve(catalog.providers.size() + 1);
+    for (const auto& preset : catalog.providers) {
+        items.push_back({preset.name, preset.description});
     }
-    io.print("  " + std::to_string(catalog.providers.size() + 1) + ") " +
-             tr("provider_catalog.choose.custom"));
-    const auto choice = ReadChoice(io, tr("wizard.choose_prompt"), catalog.providers.size() + 1, 1);
+    items.push_back({tr("provider_catalog.choose.custom"), {}});
+    const auto choice = ReadChoice(io, items, 0, tr("wizard.choose.hint"));
     if (!choice.has_value()) return std::nullopt;
-    if (*choice == catalog.providers.size() + 1) {
+    if (*choice == catalog.providers.size()) {  // 末项 = 自定义
         io.print("");
         return RunProviderAddWizard(io, name_prefill, existing);
     }
 
-    const config::ProviderPreset& preset = catalog.providers[*choice - 1];
+    const config::ProviderPreset& preset = catalog.providers[*choice];  // 0-based
     config::ProviderConfig provider = config::ProviderConfigFromPreset(preset);
     const std::string proposed_name = name_prefill.empty() ? preset.id : name_prefill;
     const auto name = ResolveProviderName(io, proposed_name, existing);

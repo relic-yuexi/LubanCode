@@ -68,6 +68,7 @@ struct ChoiceMenuItem {
 struct ChoiceMenuOptions {
     bool multi_select = false;
     std::optional<std::size_t> editable_index;
+    std::optional<std::size_t> initial_cursor;  // 初始高亮项(0-based);不设则从首项起
     std::string hint;
     std::string invalid_hint;
     std::string editable_hint;

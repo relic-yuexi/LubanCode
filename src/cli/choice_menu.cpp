@@ -52,12 +52,15 @@ void AppendPastedText(std::string& out, const std::string& pasted) {
 }  // namespace
 
 ChoiceMenuCore::ChoiceMenuCore(std::size_t item_count, bool multi_select,
-                               std::optional<std::size_t> editable_index)
+                               std::optional<std::size_t> editable_index,
+                               std::size_t initial_cursor)
     : multi_select_(multi_select), editable_index_(editable_index) {
     state_.selected.assign(item_count, false);
     if (editable_index_.has_value() && *editable_index_ >= item_count) {
         editable_index_.reset();
     }
+    // 初始高亮:超出范围就钳到首项,免得越界。
+    state_.cursor = (item_count > 0 && initial_cursor < item_count) ? initial_cursor : 0;
 }
 
 const ChoiceMenuState& ChoiceMenuCore::HandleKey(const KeyEvent& event) {
