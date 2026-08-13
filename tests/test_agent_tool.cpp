@@ -6,8 +6,12 @@
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "api/backend.hpp"
@@ -47,6 +51,52 @@ public:
         }
         return {};
     }
+};
+
+struct BlockingBackendState {
+    std::mutex mutex;
+    std::condition_variable ready;
+    bool started = false;
+    bool release = false;
+    std::vector<api::Request> captured_requests;
+};
+
+// 后台回归用。请求进来后先挂住，直到测试放闸；若 AgentTool 错把它跑在
+// 前台，execute() 就会跟着等，耗时断言会当场抓住。
+class BlockingBackend : public api::Backend {
+public:
+    explicit BlockingBackend(std::shared_ptr<BlockingBackendState> state) : state_(std::move(state)) {}
+
+    std::expected<void, api::Error> send_stream(
+        const api::Request& request,
+        const std::function<void(const api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* cancel = nullptr) override {
+        {
+            std::unique_lock<std::mutex> lock(state_->mutex);
+            state_->captured_requests.push_back(request);
+            state_->started = true;
+            state_->ready.notify_all();
+            state_->ready.wait_for(lock, std::chrono::seconds(2), [&]() {
+                return state_->release || (cancel != nullptr && cancel->load(std::memory_order_acquire));
+            });
+        }
+        if (cancel != nullptr && cancel->load(std::memory_order_acquire)) {
+            return std::unexpected(api::Error{api::ErrorKind::Cancelled, "cancelled", 0});
+        }
+        const std::vector<api::StreamEvent> events = {
+            api::MessageStart{"msg", "model"},
+            api::TextDelta{"后台摸排完毕"},
+            api::ContentBlockDone{0},
+            api::MessageDone{"end_turn", api::Usage{120, 30, 0, 0}},
+        };
+        for (const auto& event : events) {
+            on_event(event);
+        }
+        return {};
+    }
+
+private:
+    std::shared_ptr<BlockingBackendState> state_;
 };
 
 // 固定返回一个结果的假工具,记下被调用了几次、needs_confirm 能配置。
@@ -128,6 +178,16 @@ TEST_CASE("agent 工具:缺 prompt / 空 prompt 报 is_error,不发请求") {
         nlohmann::json input;
         input["prompt"] = "";
         const tools::Tool::Result result = agent_tool.execute(input);
+        CHECK(result.is_error);
+    }
+    {
+        const tools::Tool::Result result =
+            agent_tool.execute(nlohmann::json{{"prompt", "查一查"}, {"agent_type", 7}});
+        CHECK(result.is_error);
+    }
+    {
+        const tools::Tool::Result result =
+            agent_tool.execute(nlohmann::json{{"prompt", "查一查"}, {"run_in_background", "yes"}});
         CHECK(result.is_error);
     }
     CHECK(backend.captured_requests.empty());
@@ -363,4 +423,80 @@ TEST_CASE("注册表排除:子代理工具表不含 agent 自己,主表含 agent
     CHECK(sub_registry.Find("agent") == nullptr);
     CHECK(main_registry.Find("agent") != nullptr);
     CHECK(main_registry.Find("agent")->name() == "agent");
+}
+
+TEST_CASE("Explore 子代理只把只读白名单工具交给模型") {
+    FakeBackend backend;
+    backend.scripts = {TextOnlyScript("只读摸排完成")};
+    tools::ToolRegistry sub_registry;
+    sub_registry.Register(std::make_unique<FakeTool>("read_file", tools::Tool::Result{"read", false}, false));
+    sub_registry.Register(std::make_unique<FakeTool>("search", tools::Tool::Result{"search", false}, false));
+    sub_registry.Register(std::make_unique<FakeTool>("skill", tools::Tool::Result{"skill", false}, false));
+    sub_registry.Register(std::make_unique<FakeTool>("write_file", tools::Tool::Result{"write", false}, true));
+
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+    const auto result = agent_tool.execute(
+        nlohmann::json{{"prompt", "查清调用链"}, {"agent_type", "Explore"}, {"run_in_background", false}});
+
+    CHECK_FALSE(result.is_error);
+    REQUIRE(backend.captured_requests.size() == 1);
+    CHECK(backend.captured_requests[0].system.find("Explore") != std::string::npos);
+    REQUIRE(backend.captured_requests[0].tools.size() == 2);
+    CHECK(backend.captured_requests[0].tools[0].name == "read_file");
+    CHECK(backend.captured_requests[0].tools[1].name == "search");
+}
+
+TEST_CASE("后台子代理立即交回任务号,独立跑完,结果只投递一次") {
+    FakeBackend foreground_backend;
+    tools::ToolRegistry sub_registry;
+    auto state = std::make_shared<BlockingBackendState>();
+    tools::AgentTool agent_tool(foreground_backend, sub_registry, "/work/dir");
+    agent_tool.SetDetachedBackendFactory([state]() {
+        tools::DetachedAgentBackend detached;
+        detached.backend = std::make_unique<BlockingBackend>(state);
+        detached.model = "detached-model";
+        detached.reasoning_effort = "high";
+        detached.request_extra_body["temperature"] = 0;
+        return detached;
+    });
+
+    const auto begin = std::chrono::steady_clock::now();
+    const auto launch = agent_tool.execute(
+        nlohmann::json{{"prompt", "在后台查清楚"}, {"agent_type", "Explore"}, {"run_in_background", true}});
+    const auto launch_time = std::chrono::steady_clock::now() - begin;
+
+    CHECK_FALSE(launch.is_error);
+    CHECK(launch.content.find("#1") != std::string::npos);
+    CHECK(launch_time < std::chrono::milliseconds(500));
+    REQUIRE(agent_tool.TaskSnapshots().size() == 1);
+    CHECK(agent_tool.TaskSnapshots()[0].state == tools::AgentTaskState::Running);
+
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->release = true;
+    }
+    state->ready.notify_all();
+
+    for (int i = 0; i < 100 && agent_tool.HasRunningTasks(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE_FALSE(agent_tool.HasRunningTasks());
+    const auto snapshots = agent_tool.TaskSnapshots();
+    REQUIRE(snapshots.size() == 1);
+    CHECK(snapshots[0].state == tools::AgentTaskState::Done);
+    CHECK(snapshots[0].result == "后台摸排完毕");
+    CHECK(snapshots[0].input_tokens == 120);
+    CHECK(snapshots[0].output_tokens == 30);
+
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        REQUIRE(state->captured_requests.size() == 1);
+        CHECK(state->captured_requests[0].model == "detached-model");
+        CHECK(state->captured_requests[0].reasoning_effort == "high");
+        CHECK(state->captured_requests[0].extra_body["temperature"] == 0);
+    }
+
+    const std::string first_notice = agent_tool.DrainCompletionNotices();
+    CHECK(first_notice.find("后台摸排完毕") != std::string::npos);
+    CHECK(agent_tool.DrainCompletionNotices().empty());
 }

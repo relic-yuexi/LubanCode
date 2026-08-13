@@ -115,6 +115,20 @@ using TranscriptUiHandler = std::function<bool(UiKeyAction)>;
 // 走不到逐键路径,注册了也永远不会被调,天然无感。
 void SetTranscriptUiHandler(TranscriptUiHandler handler);
 
+// 会话内后台子代理面板。数据由应用层给，终端层只管选择与绘制：空
+// composer 按 ↑/↓ 进入代理焦点，Enter 展开详情，Esc 收起/退出。主会话
+// 固定算第 0 项，provider 只返回后台子代理项。
+struct AgentPanelEntry {
+    std::string name;
+    std::string description;
+    std::string state;
+    std::vector<std::string> detail_lines;
+    bool running = false;
+    bool failed = false;
+};
+using AgentPanelProvider = std::function<std::vector<AgentPanelEntry>()>;
+void SetAgentPanelProvider(AgentPanelProvider provider);
+
 // 0.17.0:常驻状态行(composer 输入框下横线之下那一行)要展示的会话数据。
 // main.cpp 在每轮给主提示符之前更新一次(/model 切换、context 百分比刷新
 // 全走这一条路,反正每轮循环都会路过);终端层每帧重画状态行时读它,配上

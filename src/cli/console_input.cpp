@@ -94,6 +94,58 @@ TranscriptUiHandler& UiHandlerSlot() {
     return handler;
 }
 
+AgentPanelProvider& AgentPanelProviderSlot() {
+    static AgentPanelProvider provider;
+    return provider;
+}
+
+std::vector<std::string> FormatAgentPanel(const std::vector<AgentPanelEntry>& agents, int selected,
+                                          bool detail) {
+    if (agents.empty()) {
+        return {};
+    }
+    std::vector<std::string> lines;
+    lines.push_back(tr("agent_panel.hint"));
+
+    const int total = static_cast<int>(agents.size()) + 1;
+    const int safe_selected = selected >= 0 && selected < total ? selected : 0;
+    const auto add_row = [&](int index, const std::string& name, const std::string& description,
+                             const std::string& state, bool running, bool failed) {
+        const bool active = index == safe_selected;
+        std::string marker = active ? "\xE2\x9D\xAF " : "  ";  // ❯
+        std::string lamp;
+        if (index == 0) {
+            lamp = "\xE2\x97\x8F ";  // ●
+        } else if (running) {
+            lamp = "\xE2\x97\x8C ";  // ◌
+        } else {
+            lamp = failed ? "\xC3\x97 " : "\xE2\x97\x8F ";  // × / ●
+        }
+        lines.push_back(marker + lamp + name +
+                        (description.empty() ? std::string() : "  " + description) +
+                        (state.empty() ? std::string() : "  " + state));
+    };
+
+    add_row(0, "main", tr("agent_panel.main"), std::string(), true, false);
+    for (std::size_t i = 0; i < agents.size(); ++i) {
+        const auto& agent = agents[i];
+        add_row(static_cast<int>(i) + 1, agent.name, agent.description, agent.state,
+                agent.running, agent.failed);
+    }
+    if (detail) {
+        lines.push_back(tr("agent_panel.detail_hint"));
+        if (safe_selected == 0) {
+            lines.push_back("  " + tr("agent_panel.main_detail"));
+        } else {
+            const auto& selected_agent = agents[static_cast<std::size_t>(safe_selected - 1)];
+            for (const auto& line : selected_agent.detail_lines) {
+                lines.push_back("  " + line);
+            }
+        }
+    }
+    return lines;
+}
+
 // 0.17.0:常驻状态行数据。main.cpp 每轮
 // 更新,ReadLineKeyByKey 每帧重画状态行时读——都在主线程上,不用加锁
 // (监听线程从不碰状态行)。
@@ -607,24 +659,118 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     int prompt_end_col = info->cursor_x;
     int prev_body_row_count = 0;  // 上一帧第一行之外画了几行(composer 续行 + 框线/状态行 + 提示行)
 
+    platform::KeyReader key_reader;
+    int agent_panel_selected = 0;
+    bool agent_panel_focus = false;
+    bool agent_panel_detail = false;
+    std::string agent_panel_fingerprint;
+
+    auto panel_entries = [&]() -> std::vector<AgentPanelEntry> {
+        if (!composer || !AgentPanelProviderSlot()) {
+            return {};
+        }
+        return AgentPanelProviderSlot()();
+    };
+    auto with_agent_panel = [&](RenderState state, const std::vector<AgentPanelEntry>& entries) {
+        if (!entries.empty()) {
+            const int total = static_cast<int>(entries.size()) + 1;
+            if (agent_panel_selected >= total) {
+                agent_panel_selected = total - 1;
+            }
+            auto panel = FormatAgentPanel(entries, agent_panel_focus ? agent_panel_selected : 0,
+                                          agent_panel_detail);
+            state.hint_lines.insert(state.hint_lines.end(), panel.begin(), panel.end());
+        } else {
+            agent_panel_selected = 0;
+            agent_panel_focus = false;
+            agent_panel_detail = false;
+        }
+        return state;
+    };
+    const auto panel_fingerprint = [](const std::vector<AgentPanelEntry>& entries) {
+        std::string value;
+        for (const auto& entry : entries) {
+            value += entry.name + "\n" + entry.description + "\n" + entry.state + "\n";
+            for (const auto& line : entry.detail_lines) {
+                value += line + "\n";
+            }
+        }
+        return value;
+    };
+
     if (box) {
-        // 开场帧:下横线 + 状态行立刻就位,不等第一个按键。
-        RedrawEditArea(start_row, prompt_end_col, editor.CurrentRenderState(), prev_body_row_count, chrome);
+        const auto entries = panel_entries();
+        agent_panel_fingerprint = panel_fingerprint(entries);
+        RedrawEditArea(start_row, prompt_end_col, with_agent_panel(editor.CurrentRenderState(), entries),
+                       prev_body_row_count, chrome);
     }
 
-    platform::KeyReader key_reader;
-
     while (true) {
+        // ReadOne 原本会一直堵到下一枚按键，后台代理即便完成，面板也只会
+        // 在用户敲键后才变。100ms 探一次队列；没键就只重画这一帧。
+        if (!platform::WaitForKeyEvent(100)) {
+            const auto entries = panel_entries();
+            const std::string fingerprint = panel_fingerprint(entries);
+            if (fingerprint != agent_panel_fingerprint) {
+                agent_panel_fingerprint = fingerprint;
+                RedrawEditArea(start_row, prompt_end_col,
+                               with_agent_panel(editor.CurrentRenderState(), entries),
+                               prev_body_row_count, chrome);
+            }
+            continue;
+        }
         const std::optional<platform::KeyInput> raw_key = key_reader.ReadOne();
         if (!raw_key.has_value()) {
             return std::nullopt;  // EOF/读失败
         }
+        const auto entries_before_key = panel_entries();
+        const bool empty_composer = composer && editor.CurrentRenderState().line.empty();
+        using PK = platform::KeyInput::Kind;
+        if (empty_composer && !entries_before_key.empty()) {
+            const int total = static_cast<int>(entries_before_key.size()) + 1;
+            if (raw_key->kind == PK::Up || raw_key->kind == PK::Down) {
+                agent_panel_focus = true;
+                agent_panel_detail = false;
+                const int delta = raw_key->kind == PK::Up ? -1 : 1;
+                agent_panel_selected = (agent_panel_selected + delta + total) % total;
+                RedrawEditArea(start_row, prompt_end_col,
+                               with_agent_panel(editor.CurrentRenderState(), entries_before_key),
+                               prev_body_row_count, chrome);
+                continue;
+            }
+            if (raw_key->kind == PK::Enter && agent_panel_focus) {
+                agent_panel_detail = !agent_panel_detail;
+                RedrawEditArea(start_row, prompt_end_col,
+                               with_agent_panel(editor.CurrentRenderState(), entries_before_key),
+                               prev_body_row_count, chrome);
+                continue;
+            }
+            if (raw_key->kind == PK::Esc && (agent_panel_focus || agent_panel_detail)) {
+                if (agent_panel_detail) {
+                    agent_panel_detail = false;
+                } else {
+                    agent_panel_focus = false;
+                    agent_panel_selected = 0;
+                }
+                RedrawEditArea(start_row, prompt_end_col,
+                               with_agent_panel(editor.CurrentRenderState(), entries_before_key),
+                               prev_body_row_count, chrome);
+                continue;
+            }
+        }
+
         const std::optional<KeyEvent> mapped = MapKey(*raw_key);
         if (!mapped.has_value()) {
             continue;  // 修饰键、没映射到的键、半个组合序列,跳过
         }
 
-        const RenderState state = editor.HandleKey(*mapped);
+        RenderState state = editor.HandleKey(*mapped);
+        if (!state.line.empty()) {
+            agent_panel_focus = false;
+            agent_panel_detail = false;
+            agent_panel_selected = 0;
+        }
+        state = with_agent_panel(std::move(state), entries_before_key);
 
         // UI-D(0.16.0):composer 读取里,把核心层翻好的 UI 按键语义转发给
         // 应用层回调。流程:光标先挪到编辑区最后一行、换行(回调的输出从
@@ -885,6 +1031,8 @@ ConfirmMode CurrentConfirmMode() { return SharedEditor().confirm_mode(); }
 void SetConfirmMode(ConfirmMode mode) { SharedEditor().set_confirm_mode(mode); }
 
 void SetTranscriptUiHandler(TranscriptUiHandler handler) { UiHandlerSlot() = std::move(handler); }
+
+void SetAgentPanelProvider(AgentPanelProvider provider) { AgentPanelProviderSlot() = std::move(provider); }
 
 void SetStatusLineData(const StatusPanelData& values, const std::vector<std::string>& items,
                        const std::string& separator) {

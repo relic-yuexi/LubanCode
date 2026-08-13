@@ -225,6 +225,10 @@ const Entry kZhCN[] = {
     {"agent_status.state_failed", "失败"},
     {"agent_status.summary", "{0}({1} 次工具调用 · {2} tokens · {3})"},
     {"agent_status.expand_hint", "(ctrl+o 展开明细)"},
+    {"agent_panel.hint", "↑/↓ 选择 · Enter 查看"},
+    {"agent_panel.main", "主会话"},
+    {"agent_panel.detail_hint", "Enter 收起 · Esc 返回列表"},
+    {"agent_panel.main_detail", "主会话仍可继续收发消息。"},
 
     // ---- 确认提示 ----
     {"confirm.prompt", "[y] 本次允许  [a] 本会话总是允许(该工具)  [N] 拒绝: "},
@@ -1041,6 +1045,10 @@ const Entry kEn[] = {
     {"agent_status.state_failed", "Failed"},
     {"agent_status.summary", "{0} ({1} tool uses · {2} tokens · {3})"},
     {"agent_status.expand_hint", "(ctrl+o to expand)"},
+    {"agent_panel.hint", "↑/↓ to select · Enter to view"},
+    {"agent_panel.main", "main session"},
+    {"agent_panel.detail_hint", "Enter to collapse · Esc to return"},
+    {"agent_panel.main_detail", "The main session remains interactive."},
 
     // ---- confirm prompt ----
     {"confirm.prompt", "[y] allow once  [a] always allow this tool (this session)  [N] deny: "},

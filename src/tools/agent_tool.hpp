@@ -19,9 +19,15 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -31,6 +37,43 @@
 #include "tools/tool.hpp"
 
 namespace lubancode::tools {
+
+enum class AgentTaskState { Running, Done, Failed, Cancelled };
+
+struct AgentTaskToolCall {
+    std::string name;
+    std::string input_json;
+    std::string result;
+    bool done = false;
+    bool is_error = false;
+};
+
+struct AgentTaskSnapshot {
+    int id = 0;
+    std::string agent_type;
+    std::string prompt;
+    AgentTaskState state = AgentTaskState::Running;
+    std::int64_t input_tokens = 0;
+    std::int64_t output_tokens = 0;
+    std::chrono::steady_clock::time_point start_time{};
+    std::chrono::steady_clock::time_point end_time{};
+    std::vector<AgentTaskToolCall> tool_calls;
+    std::string live_output;
+    std::string result;
+    bool delivered = false;
+};
+
+// 后台子代理不能借主回合那条 Backend：主回合会重画 spinner，切 provider
+// 时还会替换内部 client。工厂在 launch 当口造一份独立快照，线程随后只
+// 握自己的 client、模型和提示词叠加层。
+struct DetachedAgentBackend {
+    std::unique_ptr<api::Backend> backend;
+    std::string model;
+    std::string reasoning_effort;
+    std::string model_instructions;
+    std::string soul;
+    nlohmann::json request_extra_body = nlohmann::json::object();
+};
 
 class AgentTool : public Tool {
 public:
@@ -79,7 +122,29 @@ public:
     AgentTool(api::Backend& backend, ToolRegistry& sub_registry, std::string cwd, std::string model = std::string(),
               int default_max_turns = 15, std::string skills_segment = std::string());
 
+    ~AgentTool() override;
+
     void SetHooks(Hooks hooks) { hooks_ = std::move(hooks); }
+
+    // Explore 是内置只读代理。调用方另建一张只读工具表塞进来；不设时
+    // Explore 仍能启动，只是沿用普通子表再由过滤器挡掉写入工具。
+    void SetExploreRegistry(ToolRegistry* registry) { explore_registry_ = registry; }
+
+    // 交互会话开、单发/单测关。入参显式给 run_in_background 时压过它。
+    void SetBackgroundByDefault(bool enabled) { background_by_default_ = enabled; }
+    void SetDetachedBackendFactory(std::function<DetachedAgentBackend()> factory) {
+        detached_backend_factory_ = std::move(factory);
+    }
+    void SetDetachedRegistryFactory(std::function<std::unique_ptr<ToolRegistry>()> factory) {
+        detached_registry_factory_ = std::move(factory);
+    }
+
+    // max_entries=0 取全量；给正数时保留全部运行中任务，再从新到旧补齐
+    // 最近的终态任务。面板用限量快照，长会话不会越画越长。
+    std::vector<AgentTaskSnapshot> TaskSnapshots(std::size_t max_entries = 0) const;
+    std::uint64_t TaskRevision() const { return task_revision_.load(std::memory_order_acquire); }
+    std::string DrainCompletionNotices();
+    bool HasRunningTasks() const;
 
     // 主会话切进 /worktree 后，子代理也得看见同一处工作目录。
     void SetWorkingDirectory(std::string cwd) { cwd_ = std::move(cwd); }
@@ -110,8 +175,25 @@ public:
     Result execute(const nlohmann::json& input) override;
 
 private:
+    struct TaskRecord {
+        AgentTaskSnapshot snapshot;
+        std::atomic<bool> cancel{false};
+    };
+
+    Result ExecuteForeground(const nlohmann::json& input, const std::string& agent_type,
+                             ToolRegistry& task_registry, int max_turns);
+    Result LaunchBackground(const nlohmann::json& input, const std::string& agent_type,
+                            ToolRegistry& task_registry, int max_turns);
+    Result RunTask(api::Backend& backend, ToolRegistry& task_registry, const std::string& prompt,
+                   const std::string& agent_type, int max_turns, const Hooks* foreground_hooks,
+                   const std::shared_ptr<TaskRecord>& background_task,
+                   const DetachedAgentBackend* detached = nullptr,
+                   const std::string* prepared_system_prompt = nullptr);
+    void TouchTasks() { task_revision_.fetch_add(1, std::memory_order_release); }
+
     api::Backend& backend_;
     ToolRegistry& sub_registry_;
+    ToolRegistry* explore_registry_ = nullptr;
     std::string cwd_;
     std::string model_;
     int default_max_turns_;
@@ -119,6 +201,14 @@ private:
     std::string prompts_dir_;  // 提示词运行时化:空 = 只用嵌入版
     std::string project_instructions_;  // 当前工作目录的 AGENTS.md 分层内容
     Hooks hooks_;
+    bool background_by_default_ = false;
+    std::function<DetachedAgentBackend()> detached_backend_factory_;
+    std::function<std::unique_ptr<ToolRegistry>()> detached_registry_factory_;
+    mutable std::mutex tasks_mutex_;
+    std::vector<std::shared_ptr<TaskRecord>> tasks_;
+    std::vector<std::thread> task_threads_;
+    int next_task_id_ = 1;
+    std::atomic<std::uint64_t> task_revision_{0};
     std::function<bool(const Tool&)> tool_filter_;            // tool_search:空 = 不过滤
     std::function<std::string()> deferred_index_provider_;    // tool_search:空 = 不注索引段
 };
