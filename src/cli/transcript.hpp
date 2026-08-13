@@ -72,9 +72,12 @@ std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme,
                                   bool expanded = false, bool focused = false);
 
 // Ctrl+O 整组重打用。详细档逐条铺出(含子代理内层工具)，紧凑档只留
-// 顶层工具；focus_index 是原 items 下标，-1 表示不标焦点。
+// 顶层工具；focus_index 是原 items 下标，-1 表示不标焦点；expanded_index
+// 是单独展开的那一条下标(-1 = 无),该条 expanded=true、其余照 expanded——
+// Ctrl+O 用它只展开最近一条,不再全局全展开。
 std::string FormatTranscriptItems(const std::vector<TranscriptItem>& items, const Theme& theme,
-                                  int width, bool expanded, int focus_index = -1);
+                                  int width, bool expanded, int focus_index = -1,
+                                  int expanded_index = -1);
 
 // plain 主题下的状态文字([RUNNING]/[OK]/…),渲染和单测共用一份映射。
 std::string TranscriptStatusWord(TranscriptStatus status);

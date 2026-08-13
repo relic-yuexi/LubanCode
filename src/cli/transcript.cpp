@@ -169,13 +169,14 @@ std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme,
 }
 
 std::string FormatTranscriptItems(const std::vector<TranscriptItem>& items, const Theme& theme,
-                                  int width, bool expanded, int focus_index) {
+                                  int width, bool expanded, int focus_index, int expanded_index) {
     std::string out;
     for (std::size_t i = 0; i < items.size(); ++i) {
-        if (!expanded && items[i].kind == TranscriptKind::SubTool) {
+        const bool item_expanded = expanded || static_cast<int>(i) == expanded_index;
+        if (!item_expanded && items[i].kind == TranscriptKind::SubTool) {
             continue;
         }
-        out += FormatTranscriptItem(items[i], theme, width, expanded,
+        out += FormatTranscriptItem(items[i], theme, width, item_expanded,
                                     static_cast<int>(i) == focus_index);
     }
     return out;

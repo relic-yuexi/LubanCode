@@ -3497,12 +3497,12 @@ void HandleModelCommand(const std::string& args, lubancode::config::Config& conf
             return;
         }
         std::size_t default_idx = 0;
+        std::vector<lubancode::cli::ChoiceMenuItem> items;
+        items.reserve(list_result->size());
         for (std::size_t i = 0; i < list_result->size(); ++i) {
             const auto& m = (*list_result)[i];
             const bool current = m.id == *current_model;
-            if (current) {
-                default_idx = i;
-            }
+            if (current) default_idx = i;
             const auto* entry = catalog.FindBySlug(m.id);
             std::string label;
             if (entry != nullptr && !entry->display_name.empty()) {
@@ -3512,28 +3512,45 @@ void HandleModelCommand(const std::string& args, lubancode::config::Config& conf
             } else {
                 label = m.display_name.empty() ? m.id : m.display_name;
             }
-            std::cout << "  " << (i + 1) << ") " << label
-                      << (current ? tr("cmd.model.current") : std::string()) << "\n";
-        }
-        const std::optional<std::string> selection = lubancode::cli::ReadLine(
-            trf("cmd.model.choose", default_idx + 1), {}, /*esc_rejects=*/true);
-        if (!selection.has_value()) {
-            std::cout << tr("cmd.model.cancelled") << "\n";
-            return;
+            items.push_back({label, current ? tr("cmd.model.current") : std::string{}});
         }
         std::size_t idx = default_idx;
-        if (!selection->empty()) {
-            try {
-                std::size_t consumed = 0;
-                const int n = std::stoi(*selection, &consumed);
-                if (consumed != selection->size() || n < 1 || static_cast<std::size_t>(n) > list_result->size()) {
-                    std::cout << tr("cmd.model.bad_number") << "\n";
+        const bool interactive_menu = lubancode::platform::StdinIsInteractive() &&
+                                      lubancode::platform::ProbeStdoutConsole().is_console;
+        if (interactive_menu) {
+            lubancode::cli::ChoiceMenuOptions opts;
+            opts.hint = tr("confirm.menu.hint");
+            opts.initial_cursor = default_idx;
+            const auto sel = lubancode::cli::ReadChoiceMenu(items, opts, lubancode::cli::Theme{});
+            if (!sel.has_value()) {
+                std::cout << tr("cmd.model.cancelled") << "\n";
+                return;
+            }
+            idx = sel->selected_indices.empty() ? default_idx : sel->selected_indices.front();
+        } else {
+            for (std::size_t i = 0; i < items.size(); ++i) {
+                std::cout << "  " << (i + 1) << ") " << items[i].label
+                          << (items[i].description.empty() ? "" : "  " + items[i].description) << "\n";
+            }
+            const std::optional<std::string> selection = lubancode::cli::ReadLine(
+                trf("cmd.model.choose", default_idx + 1), {}, /*esc_rejects=*/true);
+            if (!selection.has_value()) {
+                std::cout << tr("cmd.model.cancelled") << "\n";
+                return;
+            }
+            if (!selection->empty()) {
+                try {
+                    std::size_t consumed = 0;
+                    const int n = std::stoi(*selection, &consumed);
+                    if (consumed != selection->size() || n < 1 || static_cast<std::size_t>(n) > list_result->size()) {
+                        std::cout << tr("cmd.model.bad_number") << "\n";
+                        return;
+                    }
+                    idx = static_cast<std::size_t>(n - 1);
+                } catch (...) {
+                    std::cout << tr("cmd.model.not_number") << "\n";
                     return;
                 }
-                idx = static_cast<std::size_t>(n - 1);
-            } catch (...) {
-                std::cout << tr("cmd.model.not_number") << "\n";
-                return;
             }
         }
         chosen = (*list_result)[idx].id;
@@ -3947,33 +3964,50 @@ void HandleLanguageCommand(const std::string& args, std::optional<std::string>& 
         chosen = args;
     } else {
         const std::vector<std::string> langs = cli::AvailableLanguages();
-        std::cout << tr("cmd.language.list_header") << "\n";
-        std::size_t current_idx = 1;
+        std::size_t current_idx = 0;
+        std::vector<lubancode::cli::ChoiceMenuItem> items;
+        items.reserve(langs.size());
         for (std::size_t i = 0; i < langs.size(); ++i) {
             const bool is_current = langs[i] == cli::CurrentLanguage();
-            if (is_current) {
-                current_idx = i + 1;
+            if (is_current) current_idx = i;
+            items.push_back({cli::LanguageDisplayName(langs[i]),
+                             is_current ? tr("cmd.language.current_mark") : std::string{}});
+        }
+        std::size_t idx = current_idx;
+        std::cout << tr("cmd.language.list_header") << "\n";
+        const bool interactive_menu = lubancode::platform::StdinIsInteractive() &&
+                                      lubancode::platform::ProbeStdoutConsole().is_console;
+        if (interactive_menu) {
+            lubancode::cli::ChoiceMenuOptions opts;
+            opts.hint = tr("confirm.menu.hint");
+            opts.initial_cursor = current_idx;
+            const auto sel = lubancode::cli::ReadChoiceMenu(items, opts, lubancode::cli::Theme{});
+            if (!sel.has_value()) {
+                return;
             }
-            std::cout << "  " << (i + 1) << ") " << cli::LanguageDisplayName(langs[i])
-                      << (is_current ? "  " + tr("cmd.language.current_mark") : "") << "\n";
-        }
-        const std::optional<std::string> selection = cli::ReadLine(trf("cmd.language.choose", current_idx));
-        if (!selection.has_value()) {
-            return;
-        }
-        std::size_t idx = current_idx - 1;
-        if (!selection->empty()) {
-            try {
-                std::size_t consumed = 0;
-                const int n = std::stoi(*selection, &consumed);
-                if (consumed != selection->size() || n < 1 || static_cast<std::size_t>(n) > langs.size()) {
+            idx = sel->selected_indices.empty() ? current_idx : sel->selected_indices.front();
+        } else {
+            for (std::size_t i = 0; i < items.size(); ++i) {
+                std::cout << "  " << (i + 1) << ") " << items[i].label
+                          << (items[i].description.empty() ? "" : "  " + items[i].description) << "\n";
+            }
+            const std::optional<std::string> selection = cli::ReadLine(trf("cmd.language.choose", current_idx + 1));
+            if (!selection.has_value()) {
+                return;
+            }
+            if (!selection->empty()) {
+                try {
+                    std::size_t consumed = 0;
+                    const int n = std::stoi(*selection, &consumed);
+                    if (consumed != selection->size() || n < 1 || static_cast<std::size_t>(n) > langs.size()) {
+                        std::cout << tr("cmd.language.bad_number") << "\n";
+                        return;
+                    }
+                    idx = static_cast<std::size_t>(n - 1);
+                } catch (...) {
                     std::cout << tr("cmd.language.bad_number") << "\n";
                     return;
                 }
-                idx = static_cast<std::size_t>(n - 1);
-            } catch (...) {
-                std::cout << tr("cmd.language.bad_number") << "\n";
-                return;
             }
         }
         chosen = langs[idx];
@@ -4772,6 +4806,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     std::atomic<bool> transcript_expanded{false};
     int focus_index = -1;              // 焦点条目的 transcript 下标,-1 = 无焦点
     bool focus_view_active = false;    // 正在聚焦查看
+    std::atomic<bool> expand_latest{false};  // Ctrl+O:inline 展开最近一条(Claude Code 风格),不再全局翻
 
     // 聚焦查看返回时的"简化重画":最近几条紧凑摘要(焦点标记照带)。
     const auto print_recent_items = [&transcript, &theme, &focus_index](std::size_t count) {
@@ -4789,22 +4824,20 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         const int count = static_cast<int>(transcript.size());
         switch (action) {
             case cli::UiKeyAction::ToggleExpand: {
-                // Ctrl+O:全局切换。简化方案:从当前光标处把全部条目按新档
-                // 重打一遍,旧画面留在滚动历史里——跨轮条目的逐条锚点早就
-                // 失效(TranscriptPainter 一轮一个),原地整体重排要重建
-                // 全部行号记账,代价配不上收益,取舍见报告。聚焦查看态顺带
-                // 退出,免得两种"整块铺屏"叠一块。
-                transcript_expanded = !transcript_expanded;
+                // Ctrl+O:展开/收起最近一条(Claude Code 风格),不再全局全展开。
+                // expanded_index 落在最近一条,FormatTranscriptItems 只展开它。
                 focus_view_active = false;
-                std::cout << "\n" << theme.stats
-                          << (transcript_expanded ? tr("ui.expanded") : tr("ui.compact"))
-                          << theme.reset << "\n";
                 if (count == 0) {
-                    std::cout << tr("ui.no_items") << "\n";
+                    expand_latest = false;
+                    std::cout << "\n" << theme.stats << tr("ui.no_items") << theme.reset << "\n";
                     return true;
                 }
+                expand_latest = !expand_latest;
+                std::cout << "\n" << theme.stats
+                          << (expand_latest ? tr("ui.expanded") : tr("ui.compact"))
+                          << theme.reset << "\n";
                 std::cout << cli::FormatTranscriptItems(transcript, theme, width, transcript_expanded,
-                                                        focus_index);
+                                                        focus_index, expand_latest ? count - 1 : -1);
                 return true;
             }
             case cli::UiKeyAction::FocusOlder:
