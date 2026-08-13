@@ -76,7 +76,7 @@
 | 聚焦查看 | 空输入时 Tab 选条目，`Ctrl+E` 看全文，Esc/Enter 返回。 |
 | 三档确认 | `confirm / auto / yolo` 用 `Shift+Tab` 切换；状态栏实时显示。 |
 | 图片输入 | `/image` 或消息里的 `@路径`；PNG/JPEG/GIF/WebP，每张最多 5 MiB。 |
-| 主题与语言 | dark/light/plain；内置中英文，外部 JSON 语言包可扩展。 |
+| 主题与语言 | dark/light/plain；内置中英文，外部 JSON 语言包可扩展，见[界面多语言](i18n.md)。 |
 
 详见[终端交互](terminal-ui.md)与[命令参考](commands.md)。
 

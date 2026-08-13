@@ -226,6 +226,17 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 
 `/provider switch` 校验成功便记住选择。项目配置已写 `active_provider` 时继续写回项目；其余场景写入全局 `~/.lubancode/config.json`。这里只存名字，密钥仍留在 provider 的 `api_key` 或 `key_env`。`LUBANCODE_*` 专属环境变量照旧压在最上。
 
+### 界面语言与语言包
+
+`language` 字段(及 `LUBANCODE_LANG` 环境变量)取 `zh-CN` / `en` / 语言包语言码,空 = 跟系统。内置中英文编译进程序;其余语言靠 `~/.lubancode/languages/*.json` 外部语言包扩展——文件名即语言码(`ja.json` → `ja`),内容是平面键值对,没翻到的键自动回退中文。坏语言包警告跳过,不阻断启动。
+
+```json
+// ~/.lubancode/languages/ja.json
+{ "language.name": "日本語 (ja)", "cmd.clear.done": "会話履歴をクリアしました" }
+```
+
+会话内 `/language` 即时切换。机制、回退链、键名规矩详见[界面多语言](i18n.md)。
+
 ## 三、LUBANCODE_* 环境变量表
 
 | 环境变量 | 对应字段 | 取值 |
@@ -455,7 +466,7 @@ GLM 系模型用 `thinking.type` 开关思考模式,外加一个自定义分级 
   memory-jobs/                        后台记忆任务的 pending/failed 队列
   plugins/                            DLL 与 Lua 插件
   skills/                            用户自装 Skill；同名时压过官方级
-  languages/                          语言包,预留扩展
+  languages/                          外部语言包(见 i18n.md)
 ```
 
 项目级的 `.lubancode/`(在 `<cwd>` 下)能放 `config.json`(按字段压过全局)、`settings.local.json`(本地权限,不进版本库)与 `skills/`(同名技能时项目级压过主目录级)。

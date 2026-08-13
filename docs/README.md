@@ -45,6 +45,7 @@
 | [Provider 目录](provider-catalog.md) | 内置/在线目录、缓存、预设、模型 variant、合并优先级与维护办法。 |
 | [项目指令](project-instructions.md) | `/init`、层级加载、override、32 KiB 上限、写法与排错。 |
 | [项目记忆](memory-system-design.md) | 已实现路径、检索、后台写入、命令、安全，以及仍未实现的后续阶段。 |
+| [界面多语言](i18n.md) | 语言包格式、回退链、添加新语言、覆盖内置措辞与排错。 |
 
 ### 扩展与开发
 
