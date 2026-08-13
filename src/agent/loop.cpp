@@ -186,6 +186,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
                             if (callbacks.on_text_delta) {
                                 callbacks.on_text_delta(e.text);
                             }
+                        } else if constexpr (std::is_same_v<T, api::ThinkingDelta>) {
+                            if (callbacks.on_thinking_delta) {
+                                callbacks.on_thinking_delta(e.text);
+                            }
                         } else if constexpr (std::is_same_v<T, api::StreamError>) {
                             stream_error = true;
                             stream_error_message = e.message;

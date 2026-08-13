@@ -47,3 +47,24 @@ TEST_CASE("Chat events: API error 翻成 StreamError") {
     REQUIRE(events.size() == 1);
     CHECK(std::get<api::StreamError>(events[0]).message == "bad key");
 }
+
+TEST_CASE("Chat events: reasoning_content 流式映射成 ThinkingDelta") {
+    api::chat::EventParser parser;
+    auto events = parser.Consume(Frame(
+        R"({"id":"chatcmpl_2","model":"deepseek","choices":[{"delta":{"reasoning_content":"先想"},"finish_reason":null}]})"));
+    REQUIRE(events.size() == 2);
+    CHECK(std::holds_alternative<api::MessageStart>(events[0]));
+    REQUIRE(std::holds_alternative<api::ThinkingDelta>(events[1]));
+    CHECK(std::get<api::ThinkingDelta>(events[1]).text == "先想");
+
+    events = parser.Consume(Frame(
+        R"({"choices":[{"delta":{"reasoning_content":"想完"},"finish_reason":null}]})"));
+    REQUIRE(events.size() == 1);
+    CHECK(std::get<api::ThinkingDelta>(events[0]).text == "想完");
+
+    // reasoning_content 过渡到 content:text 走 TextDelta
+    events = parser.Consume(Frame(
+        R"({"choices":[{"delta":{"content":"答案是"},"finish_reason":"stop"}]})"));
+    REQUIRE(events.size() == 1);
+    CHECK(std::holds_alternative<api::TextDelta>(events[0]));
+}

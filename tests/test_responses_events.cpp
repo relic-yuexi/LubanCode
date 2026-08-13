@@ -108,10 +108,12 @@ TEST_CASE("response.output_item.done 类型是 reasoning 时静默跳过(没有�
     CHECK_FALSE(event.has_value());
 }
 
-TEST_CASE("response.reasoning_summary_text.delta / done 静默跳过") {
+TEST_CASE("response.reasoning_summary_text.delta 映射出 ThinkingDelta,done 静默跳过") {
     auto delta_event = parse_event(Frame(
         R"({"delta":"用户想要...","sequence_number":3,"output_index":0,"type":"response.reasoning_summary_text.delta","item_id":"msg_xxx","summary_index":0})"));
-    CHECK_FALSE(delta_event.has_value());
+    REQUIRE(delta_event.has_value());
+    REQUIRE(std::holds_alternative<ThinkingDelta>(*delta_event));
+    CHECK(std::get<ThinkingDelta>(*delta_event).text == "用户想要...");
 
     auto done_event = parse_event(Frame(
         R"({"sequence_number":13,"text":"用户想要...","output_index":0,"type":"response.reasoning_summary_text.done","item_id":"msg_xxx","summary_index":0})"));

@@ -61,14 +61,23 @@ TEST_CASE("content_block_delta 的 text_delta 映射出 TextDelta") {
     CHECK(std::get<TextDelta>(*event).text == "人工智能");
 }
 
-TEST_CASE("content_block_delta 的 thinking_delta 静默跳过") {
+TEST_CASE("content_block_delta 的 thinking_delta 映射出 ThinkingDelta") {
     auto event = parse_event(Frame(R"({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"分析一下"}})"));
-    CHECK_FALSE(event.has_value());
+
+    REQUIRE(event.has_value());
+    REQUIRE(std::holds_alternative<ThinkingDelta>(*event));
+    CHECK(std::get<ThinkingDelta>(*event).text == "分析一下");
+    CHECK(std::get<ThinkingDelta>(*event).signature.empty());
 }
 
-TEST_CASE("content_block_delta 的 signature_delta 静默跳过") {
-    auto event = parse_event(Frame(R"({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":""}})"));
-    CHECK_FALSE(event.has_value());
+TEST_CASE("content_block_delta 的 signature_delta 映射出 ThinkingDelta(只带 signature)") {
+    auto event = parse_event(Frame(R"({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_abc"}})"));
+
+    REQUIRE(event.has_value());
+    REQUIRE(std::holds_alternative<ThinkingDelta>(*event));
+    const auto& delta = std::get<ThinkingDelta>(*event);
+    CHECK(delta.text.empty());
+    CHECK(delta.signature == "sig_abc");
 }
 
 TEST_CASE("content_block_delta 的 input_json_delta 映射出 ToolUseInputDelta") {

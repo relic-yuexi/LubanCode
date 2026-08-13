@@ -14,6 +14,17 @@ std::optional<StreamEvent> HandleOutputTextDelta(const json& data) {
     return event;
 }
 
+// response.reasoning_summary_text.delta:推理摘要的流式增量(OpenAI o-series
+// / 兼容端的 reasoning 事件)。翻成 ThinkingDelta 让界面即时展示"思考中"。
+std::optional<StreamEvent> HandleReasoningDelta(const json& data) {
+    ThinkingDelta event;
+    event.text = data.value("delta", "");
+    if (event.text.empty()) {
+        return std::nullopt;
+    }
+    return event;
+}
+
 std::optional<StreamEvent> HandleOutputItemAdded(const json& data) {
     auto it = data.find("item");
     if (it == data.end() || !it->is_object()) {
@@ -167,6 +178,9 @@ std::optional<StreamEvent> parse_event(const SseFrame& frame) try {
 
     if (type == "response.output_text.delta") {
         return HandleOutputTextDelta(data);
+    }
+    if (type == "response.reasoning_summary_text.delta") {
+        return HandleReasoningDelta(data);
     }
     if (type == "response.output_item.added") {
         return HandleOutputItemAdded(data);

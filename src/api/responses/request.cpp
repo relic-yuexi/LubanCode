@@ -34,6 +34,10 @@ json ContentBlockToItem(const ContentBlock& block, Role role) {
                             {"call_id", b.id},
                             {"name", b.name},
                             {"arguments", b.input.dump()}};
+            } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
+                // responses wire 的 reasoning 是一次性的,不参与续会话重放。
+                // 这里给一个 reasoning 占位,调用方(BuildRequestJson)会跳过。
+                return json{{"type", "__thinking_skip__"}};
             } else {
                 return json{{"type", "function_call_output"},
                             {"call_id", b.tool_use_id},
@@ -74,6 +78,9 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
         }
         if (!has_image) {
             for (const auto& block : message.content) {
+                if (std::holds_alternative<ThinkingBlock>(block)) {
+                    continue;  // 思考块不回传:responses wire 的 reasoning 是一次性的
+                }
                 input.push_back(ContentBlockToItem(block, message.role));
             }
             continue;
@@ -99,6 +106,8 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
                     } else if constexpr (std::is_same_v<T, ImageBlock>) {
                         content.push_back(json{{"type", "input_image"},
                                                {"image_url", "data:" + b.media_type + ";base64," + b.data}});
+                    } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
+                        // 思考块不回传:responses wire 的 reasoning 是一次性的
                     } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
                         flush_content();
                         input.push_back(ContentBlockToItem(block, message.role));

@@ -35,7 +35,8 @@ namespace lubancode::cli {
 enum class TranscriptStatus { Pending, Running, Ok, Error, Cancelled, Interrupted };
 
 // 主循环的工具是 Tool,子代理内层的工具是 SubTool(渲染时整体再缩四空格)。
-enum class TranscriptKind { Tool, SubTool };
+// Thinking 是模型思考过程折叠块("思考 Xs",Ctrl+O 展开看正文)。
+enum class TranscriptKind { Tool, SubTool, Thinking };
 
 // full_output 的截断上限:64KB。UI-C/D 的 Ctrl+E 全文查看用,别让一次
 // 超大输出把会话内存吃穿。
@@ -106,6 +107,9 @@ std::optional<int> ParseRunCommandExitCode(const std::string& content);
 // "Done · 退出码 0 · 1.2s"。耗时由 cli 层在 on_tool_start/on_tool_done
 // 之间掐出来传进(秒),退出码从结果文本解析,解析不出就省掉那一节。
 std::string RunCommandDoneSummary(const std::string& content, double seconds);
+
+// "3.2s"。思考折叠块标题用,跟工具摘要的耗时格式一致。
+std::string FormatSeconds(double seconds);
 
 // "读取 N 行"。
 std::string ReadFileDoneSummary(const std::string& content);

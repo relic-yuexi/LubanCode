@@ -21,6 +21,8 @@ std::size_t BlockChars(const api::ContentBlock& block) {
                 return b.name.size() + b.id.size() + b.input.dump().size();
             } else if constexpr (std::is_same_v<T, api::ToolResultBlock>) {
                 return b.tool_use_id.size() + b.content.size();
+            } else if constexpr (std::is_same_v<T, api::ThinkingBlock>) {
+                return b.text.size() + b.signature.size();
             } else {
                 return 0;
             }

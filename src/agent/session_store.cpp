@@ -61,6 +61,10 @@ nlohmann::json BlockToJson(const api::ContentBlock& block) {
                 j["tool_use_id"] = b.tool_use_id;
                 j["content"] = b.content;
                 j["is_error"] = b.is_error;
+            } else if constexpr (std::is_same_v<T, api::ThinkingBlock>) {
+                j["type"] = "thinking";
+                j["text"] = b.text;
+                j["signature"] = b.signature;
             }
         },
         block);
@@ -101,6 +105,12 @@ std::optional<api::ContentBlock> BlockFromJson(const nlohmann::json& j) {
         b.tool_use_id = j.value("tool_use_id", std::string());
         b.content = j.value("content", std::string());
         b.is_error = j.value("is_error", false);
+        return api::ContentBlock{std::move(b)};
+    }
+    if (type == "thinking") {
+        api::ThinkingBlock b;
+        b.text = j.value("text", std::string());
+        b.signature = j.value("signature", std::string());
         return api::ContentBlock{std::move(b)};
     }
     return std::nullopt;  // 认不得的块类型

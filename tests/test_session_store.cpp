@@ -125,6 +125,27 @@ TEST_CASE("消息序列化往返: user 带 tool_result(含 is_error)") {
     CHECK(got->is_error);
 }
 
+TEST_CASE("消息序列化往返: assistant 带 thinking(signature 也要往返)") {
+    api::Message original;
+    original.role = api::Role::Assistant;
+    api::ThinkingBlock thinking;
+    thinking.text = "让我分析一下这个问题。";
+    thinking.signature = "sig_abc123";
+    original.content.push_back(thinking);
+    original.content.push_back(api::TextBlock{"答案是 42"});
+
+    const auto parsed = agent::DeserializeSessionMessage(agent::SerializeSessionMessage(original, "ts"));
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->content.size() == 2);
+    const auto* got_thinking = std::get_if<api::ThinkingBlock>(&parsed->content[0]);
+    REQUIRE(got_thinking != nullptr);
+    CHECK(got_thinking->text == "让我分析一下这个问题。");
+    CHECK(got_thinking->signature == "sig_abc123");
+    const auto* got_text = std::get_if<api::TextBlock>(&parsed->content[1]);
+    REQUIRE(got_text != nullptr);
+    CHECK(got_text->text == "答案是 42");
+}
+
 TEST_CASE("反序列化: 坏行给 nullopt,不抛异常") {
     CHECK_FALSE(agent::DeserializeSessionMessage("").has_value());
     CHECK_FALSE(agent::DeserializeSessionMessage("不是 JSON").has_value());

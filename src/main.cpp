@@ -2040,6 +2040,11 @@ struct ToolDisplay {
     std::optional<int> sub_write_old_lines;
     int agent_rounds = 0;
     int agent_sub_tools = 0;
+    // 思考折叠块("思考 Xs")。active_thinking 是 transcript 下标,
+    // -1 = 没有正在展示的思考块。thinking_buffer 攒完整思考正文,结束时
+    // 灌进 full_output 供 Ctrl+O 展开。
+    int active_thinking = -1;
+    std::string thinking_buffer;
     // UI-C:确认前 diff 预览的记账。*_diff_full 存 plain 全量,终态并进
     // full_output;*_diff_final 是终态条目摘要里留存的 diff 行(git 那种
     // 效果,成功后 diff 挂在 ⎿ 块底下不消失);*_preview_below 标记"自动
@@ -2181,6 +2186,64 @@ struct ToolDisplay {
         }
         OnToolDone(name, result);
     }
+
+    // ---- 思考折叠块 -------------------------------------------------------
+    // 首 delta 到来:建一条 Thinking 条目(title="思考中…", Running),PaintNew
+    // 画出来。后续 delta 攒进 thinking_buffer,不逐条刷屏(思考正文本身不往
+    // 屏幕上铺,只等结束时把耗时和时间放进标题)。body_tracker 的断开由
+    // BuildCallbacks 在调本方法之前做。
+    void OnThinkingDelta(const std::string& text) {
+        if (active_thinking < 0) {
+            thinking_buffer.clear();
+            lubancode::cli::TranscriptItem item;
+            item.id = static_cast<int>(transcript.size()) + 1;
+            item.kind = lubancode::cli::TranscriptKind::Thinking;
+            item.tool_name = "thinking";
+            item.title = lubancode::cli::tr("transcript.thinking_running");
+            item.status = lubancode::cli::TranscriptStatus::Running;
+            item.start_time = std::chrono::steady_clock::now();
+            transcript.push_back(std::move(item));
+            active_thinking = static_cast<int>(transcript.size()) - 1;
+            UpdateSnapshotItem(active_thinking);
+            if (is_console) {
+                painter.PaintNew(transcript[static_cast<std::size_t>(active_thinking)]);
+            } else {
+                std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+                std::cout << "\n" << theme.tool_line
+                          << lubancode::cli::tr("transcript.thinking_running") << theme.reset << "\n";
+                std::cout.flush();
+            }
+        }
+        thinking_buffer += text;
+        // 截断保护:别让超长思考把内存吃穿。
+        if (thinking_buffer.size() > lubancode::cli::kFullOutputCapBytes) {
+            thinking_buffer = lubancode::cli::TruncateUtf8Bytes(thinking_buffer, lubancode::cli::kFullOutputCapBytes);
+        }
+    }
+
+    // 思考结束:算耗时,标题换成 "思考 Xs",full_output 灌入完整正文,Repaint。
+    // 幂等:没开着思考块时直接返回。首个 TextDelta / 工具开始 / on_usage
+    // 都会调它。body_tracker 的分隔由 BuildCallbacks 在调本方法之后做。
+    void OnThinkingDone() {
+        if (active_thinking < 0) {
+            return;
+        }
+        const int idx = active_thinking;
+        active_thinking = -1;
+        auto& item = transcript[static_cast<std::size_t>(idx)];
+        item.end_time = std::chrono::steady_clock::now();
+        const double seconds = std::chrono::duration<double>(item.end_time - item.start_time).count();
+        item.title = lubancode::cli::trf("transcript.thinking_done", lubancode::cli::FormatSeconds(seconds));
+        item.full_output = std::move(thinking_buffer);
+        thinking_buffer.clear();
+        item.status = lubancode::cli::TranscriptStatus::Ok;
+        UpdateSnapshotItem(idx);
+        if (is_console) {
+            painter.Repaint(item);
+        }
+    }
+
+    bool HasActiveThinking() const { return active_thinking >= 0; }
 
     void OnSubToolStart(const std::string& name, const nlohmann::json& input) {
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
@@ -2613,11 +2676,28 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
     // 这条规矩没变,只是打印挪进了 StreamBodyTracker::OnDelta(锁在它里面
     // 拿):正文照旧逐字原样打,顺带给回合收束后的 markdown 重画记账;
     // 管道模式/plain 主题下 tracker 不启用,OnDelta 就是原来那三行。
-    callbacks.on_text_delta = [&body_tracker](const std::string& text) { body_tracker.OnDelta(text); };
+    // 先收掉正在展示的思考折叠块(如果有),再加分隔,最后打正文。
+    callbacks.on_text_delta = [&display, &body_tracker](const std::string& text) {
+        if (display.HasActiveThinking()) {
+            display.OnThinkingDone();
+            body_tracker.OnToolBlockDone();  // 下一段正文前垫一空行,别粘在思考条目上
+        }
+        body_tracker.OnDelta(text);
+    };
+
+    // 思考增量(thinking/reasoning):首 delta 断开正文块 + PaintNew "思考中…",
+    // 后续 delta 只攒正文不刷屏。结束时标题换成 "思考 Xs"。
+    callbacks.on_thinking_delta = [&display, &body_tracker](const std::string& text) {
+        if (!display.HasActiveThinking()) {
+            body_tracker.OnBlockBreak();
+        }
+        display.OnThinkingDelta(text);
+    };
 
     // UI-B:工具条目化渲染,建条目/画条目/管道行全在 ToolDisplay 里。
     // markdown:条目要开画了,正文当前块到此为止(保持原样,不重画)。
     callbacks.on_tool_start = [&display, &body_tracker](const std::string& name, const nlohmann::json& input) {
+        display.OnThinkingDone();  // 思考块若有,先收尾
         body_tracker.OnBlockBreak();
         display.OnToolStart(name, input);
     };
@@ -2799,6 +2879,7 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
 
     callbacks.on_builtin_tool_start = [&display, &body_tracker](const std::string& name,
                                                                  const nlohmann::json& input) {
+        display.OnThinkingDone();  // 思考块若有,先收尾
         body_tracker.OnBlockBreak();
         display.OnToolStart(name, input);
     };
@@ -2809,7 +2890,10 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         body_tracker.OnToolBlockDone();
     };
 
-    callbacks.on_usage = [&usage_stats, &context_tracker](const lubancode::api::Usage& usage) {
+    callbacks.on_usage = [&display, &usage_stats, &context_tracker](const lubancode::api::Usage& usage) {
+        // 请求结束:思考块若无后续文本/工具接上(只思考不回答的极端情况),
+        // 在这里收尾。有后续时 OnThinkingDone 是幂等空操作。
+        display.OnThinkingDone();
         usage_stats.input_tokens += usage.input_tokens;
         usage_stats.output_tokens += usage.output_tokens;
         usage_stats.cache_read_tokens += usage.cache_read_tokens;

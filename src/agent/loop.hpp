@@ -26,6 +26,10 @@ struct Callbacks {
     // 流式文本增量,打字机效果打印用。
     std::function<void(const std::string& text)> on_text_delta;
 
+    // 流式思考增量(thinking/reasoning):界面用来画"思考 Xs"折叠块。
+    // 不设就静默跳过,不影响其余行为。
+    std::function<void(const std::string& text)> on_thinking_delta;
+
     // 模型发起了一次工具调用,还没执行,给上层显示用(比如打印
     // `[工具] read_file {"path":...}`)。
     std::function<void(const std::string& name, const nlohmann::json& input)> on_tool_start;

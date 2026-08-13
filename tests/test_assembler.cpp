@@ -124,3 +124,38 @@ TEST_CASE("空的 tool_use(没有任何 ToolUseInputDelta)攒出空对象 input,
     CHECK(block.input.is_object());
     CHECK(block.input.empty());
 }
+
+TEST_CASE("thinking + text:ThinkingDelta 攒成 ThinkingBlock(signature 也拼上)") {
+    MessageAssembler assembler;
+    assembler.Feed(ThinkingDelta{"分析", ""});
+    assembler.Feed(ThinkingDelta{"一下", ""});
+    assembler.Feed(ThinkingDelta{"", "sig_abc"});
+    assembler.Feed(ContentBlockDone{0});
+    assembler.Feed(TextDelta{"答案是 42"});
+    assembler.Feed(ContentBlockDone{1});
+    assembler.Feed(MessageDone{"end_turn", Usage{}});
+
+    const Message message = assembler.BuildMessage();
+    REQUIRE(message.content.size() == 2);
+    REQUIRE(std::holds_alternative<ThinkingBlock>(message.content[0]));
+    const auto& thinking = std::get<ThinkingBlock>(message.content[0]);
+    CHECK(thinking.text == "分析一下");
+    CHECK(thinking.signature == "sig_abc");
+    REQUIRE(std::holds_alternative<TextBlock>(message.content[1]));
+    CHECK(std::get<TextBlock>(message.content[1]).text == "答案是 42");
+}
+
+TEST_CASE("chat wire 过渡:thinking 后接 text,没有 ContentBlockDone 也能自动收尾") {
+    MessageAssembler assembler;
+    assembler.Feed(ThinkingDelta{"先想想", ""});
+    assembler.Feed(TextDelta{"再回答"});
+    assembler.Feed(ContentBlockDone{0});
+    assembler.Feed(MessageDone{"end_turn", Usage{}});
+
+    const Message message = assembler.BuildMessage();
+    REQUIRE(message.content.size() == 2);
+    REQUIRE(std::holds_alternative<ThinkingBlock>(message.content[0]));
+    CHECK(std::get<ThinkingBlock>(message.content[0]).text == "先想想");
+    REQUIRE(std::holds_alternative<TextBlock>(message.content[1]));
+    CHECK(std::get<TextBlock>(message.content[1]).text == "再回答");
+}

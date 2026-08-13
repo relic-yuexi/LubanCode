@@ -16,6 +16,7 @@ class MessageAssembler {
 public:
     // 喂一个事件:
     //   TextDelta         —— 拼进当前正在累积的文本块
+    //   ThinkingDelta     —— 拼进当前正在累积的思考块(text + signature)
     //   ToolUseStart      —— 上一个块(多半是文本)先收尾,开一个新的 tool_use 块
     //   ToolUseInputDelta —— 拼进当前 tool_use 块的 input JSON 残片
     //   ContentBlockDone  —— 当前块收尾,追加进 content_
@@ -53,10 +54,15 @@ private:
         std::string name;
         std::string partial_json;
     };
+    struct OpenThinking {
+        std::string text;
+        std::string signature;
+    };
 
     std::vector<ContentBlock> content_;
     std::optional<OpenText> open_text_;
     std::optional<OpenToolUse> open_tool_;
+    std::optional<OpenThinking> open_thinking_;
     std::string stop_reason_;
     Usage usage_;
     std::string parse_error_;

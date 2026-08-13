@@ -22,6 +22,9 @@ void MessageAssembler::FinalizeCurrent() {
         }
         content_.push_back(ToolUseBlock{open_tool_->id, open_tool_->name, std::move(input)});
         open_tool_.reset();
+    } else if (open_thinking_.has_value()) {
+        content_.push_back(ThinkingBlock{std::move(open_thinking_->text), std::move(open_thinking_->signature)});
+        open_thinking_.reset();
     } else if (open_text_.has_value()) {
         content_.push_back(TextBlock{std::move(open_text_->text)});
         open_text_.reset();
@@ -33,10 +36,21 @@ void MessageAssembler::Feed(const StreamEvent& event) {
         [this](const auto& e) {
             using T = std::decay_t<decltype(e)>;
             if constexpr (std::is_same_v<T, TextDelta>) {
+                // chat wire 的 reasoning_content → content 过渡没有
+                // ContentBlockDone,这里手动收掉开着的思考块。
+                if (open_thinking_.has_value()) {
+                    FinalizeCurrent();
+                }
                 if (!open_text_.has_value()) {
                     open_text_ = OpenText{};
                 }
                 open_text_->text += e.text;
+            } else if constexpr (std::is_same_v<T, ThinkingDelta>) {
+                if (!open_thinking_.has_value()) {
+                    open_thinking_ = OpenThinking{};
+                }
+                open_thinking_->text += e.text;
+                open_thinking_->signature += e.signature;
             } else if constexpr (std::is_same_v<T, ToolUseStart>) {
                 FinalizeCurrent();  // 上一个块(多半是文本)先收尾
                 open_tool_ = OpenToolUse{e.id, e.name, std::string{}};

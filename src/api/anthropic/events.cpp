@@ -52,8 +52,18 @@ std::optional<StreamEvent> HandleContentBlockDelta(const json& data) {
         event.partial_json = it->value("partial_json", "");
         return event;
     }
-    // thinking_delta / signature_delta:M1 中立类型里没有"思考"这一档,
-    // 静默跳过。
+    // thinking_delta:思考正文的一段流式增量。
+    if (type == "thinking_delta") {
+        ThinkingDelta event;
+        event.text = it->value("thinking", "");
+        return event;
+    }
+    // signature_delta:思考块的签名片段,续会话重放历史时必须带。
+    if (type == "signature_delta") {
+        ThinkingDelta event;
+        event.signature = it->value("signature", "");
+        return event;
+    }
     return std::nullopt;
 }
 

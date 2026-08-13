@@ -14,15 +14,6 @@ namespace {
 constexpr const char* kDot = "\xE2\x97\x8F";    // ● U+25CF,跟 transcript.cpp 同一个字符,视觉统一
 constexpr const char* kElbow = "\xE2\x8E\xBF";  // ⎿ U+23BF,跟 transcript.cpp 同一个字符
 
-std::string FormatSeconds(double seconds) {
-    if (seconds < 0.0) {
-        seconds = 0.0;
-    }
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%.1fs", seconds);
-    return std::string(buf);
-}
-
 // token 数超过 1000 折成 "X.Xk",不到 1000 就是原数——跟 Claude Code 的
 // "27.9k tokens" 一个路数,数太大不刷屏。
 std::string FormatTokenCount(std::int64_t tokens) {

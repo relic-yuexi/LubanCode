@@ -46,7 +46,15 @@ struct ToolResultBlock {
     bool is_error = false;
 };
 
-using ContentBlock = std::variant<TextBlock, ImageBlock, ToolUseBlock, ToolResultBlock>;
+// 模型的思考过程(extended thinking / reasoning)。text 是思考正文,
+// signature 是 Anthropic extended thinking 的签名——续会话重放历史时
+// thinking 块必须带 signature,否则第二轮会被服务端以 400 拒掉。
+struct ThinkingBlock {
+    std::string text;
+    std::string signature;
+};
+
+using ContentBlock = std::variant<TextBlock, ImageBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock>;
 
 // ---------------------------------------------------------------------------
 // 消息
@@ -115,6 +123,15 @@ struct TextDelta {
     std::string text;
 };
 
+// 思考过程的增量片段。text 是思考正文的一段,signature 是 Anthropic
+// extended thinking 签名的一段(signature_delta)。chat/responses wire
+// 没有 signature,signature 字段恒空。流式拼 + 复用 ContentBlockDone 收尾,
+// 不加 ThinkingStart。
+struct ThinkingDelta {
+    std::string text;
+    std::string signature;
+};
+
 // 一次工具调用开始:拿到 id 和工具名,入参还没填。
 struct ToolUseStart {
     int index = 0;
@@ -160,8 +177,8 @@ struct StreamError {
     std::string message;
 };
 
-using StreamEvent = std::variant<MessageStart, TextDelta, ToolUseStart, ToolUseInputDelta, ContentBlockDone,
-                                 BuiltinToolStart, BuiltinToolDone, MessageDone, StreamError>;
+using StreamEvent = std::variant<MessageStart, TextDelta, ThinkingDelta, ToolUseStart, ToolUseInputDelta,
+                                 ContentBlockDone, BuiltinToolStart, BuiltinToolDone, MessageDone, StreamError>;
 
 // ---------------------------------------------------------------------------
 // 错误

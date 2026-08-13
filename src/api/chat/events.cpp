@@ -73,6 +73,13 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
                 events.push_back(TextDelta{text});
             }
         }
+        // reasoning_content(DeepSeek 等模型的思考过程):流式立即吐,不攒。
+        if (auto reasoning = delta->find("reasoning_content"); reasoning != delta->end() && reasoning->is_string()) {
+            const std::string text = reasoning->get<std::string>();
+            if (!text.empty()) {
+                events.push_back(ThinkingDelta{text, ""});
+            }
+        }
         auto calls = delta->find("tool_calls");
         if (calls == delta->end() || !calls->is_array()) {
             continue;

@@ -489,6 +489,8 @@ const Entry kZhCN[] = {
     {"transcript.no_full_output", "(无完整输出)"},
     {"transcript.full_output_header", "── 完整输出({0} 行)──"},
     {"transcript.todo_count", "{0} 项"},
+    {"transcript.thinking_running", "思考中…"},
+    {"transcript.thinking_done", "思考 {0}"},
     {"todo.empty", "没有待办。"},
 
     // ---- 统计行 ----
@@ -1328,6 +1330,8 @@ const Entry kEn[] = {
     {"transcript.no_full_output", "(no full output)"},
     {"transcript.full_output_header", "── full output ({0} lines) ──"},
     {"transcript.todo_count", "{0} items"},
+    {"transcript.thinking_running", "Thinking…"},
+    {"transcript.thinking_done", "Thought {0}"},
     {"todo.empty", "No todos."},
 
     // ---- stats line ----

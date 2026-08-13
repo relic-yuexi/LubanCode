@@ -43,6 +43,10 @@ json ContentBlockToJson(const ContentBlock& block) {
                     j["is_error"] = true;
                 }
                 return j;
+            } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
+                // 续会话重放历史时 thinking 块必须带 signature,否则第二轮
+                // 会被服务端以 400 拒掉。
+                return json{{"type", "thinking"}, {"thinking", b.text}, {"signature", b.signature}};
             }
         },
         block);

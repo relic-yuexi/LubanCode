@@ -66,6 +66,8 @@ std::string TruncateWithEllipsis(const std::string& utf8, int max_width) {
     return TruncateUtf8ToDisplayWidth(utf8, max_width - 3) + "...";
 }
 
+}  // namespace
+
 std::string FormatSeconds(double seconds) {
     if (seconds < 0.0) {
         seconds = 0.0;
@@ -74,8 +76,6 @@ std::string FormatSeconds(double seconds) {
     std::snprintf(buf, sizeof(buf), "%.1fs", seconds);
     return std::string(buf);
 }
-
-}  // namespace
 
 std::string TranscriptStatusWord(TranscriptStatus status) {
     switch (status) {
