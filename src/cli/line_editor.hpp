@@ -124,6 +124,19 @@ std::u32string TruncateToDisplayWidth(const std::u32string& text, int max_width)
 // 的字符串够用,不是给外部不可信输入准备的严格校验器。
 std::string TruncateUtf8ToDisplayWidth(const std::string& utf8, int max_width);
 
+// 按显示宽度折行(软换行):逐字累加显示宽(复用 CharDisplayWidth),下一个
+// 字会让本行累计宽超过 max_width 就断开另起一行——绝不切半个宽字(同
+// TruncateToDisplayWidth 的规矩);遇到 '\n' 强制断。字符级断(CJK 友好),
+// 不做英文单词边界这类启发式。返回的每段显示宽度都 <= max_width;唯一例外
+// 是单个字符本身就比 max_width 宽(比如 max_width=1 碰上个 CJK 字),那种
+// 情形该字独占一行(宽度可能略超 max_width),已是保内容不丢的最小代价。
+// max_width <= 0 给空 vector。空文本也给空 vector(不产空行)。
+std::vector<std::u32string> WrapToDisplayWidth(const std::u32string& text, int max_width);
+
+// UTF-8 版本:内部解码成码点、折行、再编码回 UTF-8。非法字节按"跳过一个
+// 字节"处理,同 TruncateUtf8ToDisplayWidth。
+std::vector<std::string> WrapUtf8ToDisplayWidth(const std::string& utf8, int max_width);
+
 // 编辑行超宽时的可视窗口:保证光标所在列落在窗口内,绝不让编辑行折行。
 // content_width <= 0 时给空窗口。取舍见 console_input.cpp 里调用处的注释——
 // 每帧独立按当前光标位置重算窗口,不跨帧持久化滚动偏移。

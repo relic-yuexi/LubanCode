@@ -247,6 +247,48 @@ std::string TruncateUtf8ToDisplayWidth(const std::string& utf8, int max_width) {
     return Utf32ToUtf8(TruncateToDisplayWidth(Utf8ToUtf32(utf8), max_width));
 }
 
+std::vector<std::u32string> WrapToDisplayWidth(const std::u32string& text, int max_width) {
+    std::vector<std::u32string> lines;
+    if (max_width <= 0) {
+        return lines;
+    }
+    std::u32string cur;
+    int width = 0;
+    const auto flush = [&] {
+        lines.push_back(cur);
+        cur.clear();
+        width = 0;
+    };
+    for (char32_t c : text) {
+        if (c == U'\n') {
+            flush();  // 显式换行:原样尊重,断开一行
+            continue;
+        }
+        const int w = CharDisplayWidth(c);
+        // 下一个字加进来会超宽、且当前行非空:先把当前行交出去,再开新行装它。
+        // 当前行为空时即便这个字比 max_width 还宽也照收(独占一行,不丢内容)。
+        if (width + w > max_width && !cur.empty()) {
+            flush();
+        }
+        cur.push_back(c);
+        width += w;
+    }
+    if (!cur.empty()) {
+        flush();
+    }
+    return lines;
+}
+
+std::vector<std::string> WrapUtf8ToDisplayWidth(const std::string& utf8, int max_width) {
+    const std::vector<std::u32string> wrapped = WrapToDisplayWidth(Utf8ToUtf32(utf8), max_width);
+    std::vector<std::string> out;
+    out.reserve(wrapped.size());
+    for (const std::u32string& line : wrapped) {
+        out.push_back(Utf32ToUtf8(line));
+    }
+    return out;
+}
+
 std::size_t DisplayWidthUtf8(const std::string& utf8) { return DisplayWidth(Utf8ToUtf32(utf8)); }
 
 EditLineWindow ComputeEditLineWindow(const std::u32string& line, std::size_t cursor, int content_width) {

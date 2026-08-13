@@ -381,3 +381,105 @@ TEST_CASE("RenderMarkdown: 混合文档各元素齐活,顺序不乱") {
     // 整篇检测自然为真。
     CHECK(DetectMarkdownStructure("## 自我介绍\n- 会调工具"));
 }
+
+// ---- 软换行(视觉折行,不再截断丢内容) --------------------------------------
+
+// 把渲染结果去掉 ANSI 后逐行拼回(不留分隔),用来核对内容是否被完整保留。
+std::string JoinStripped(const std::vector<std::string>& lines) {
+    std::string out;
+    for (const std::string& line : lines) {
+        out += StripAnsi(line);
+    }
+    return out;
+}
+
+TEST_CASE("RenderMarkdown: 长段落软换行铺满,内容一字不丢,各段不破 width-1") {
+    const int width = 20;
+    const std::string para = "abcdefghijklmnopqrstuvwxyz";  // 26 个 ASCII
+    const auto lines = RenderMarkdown(para, BuiltinTheme("dark"), width);
+    // 短宽必然折成多行(不会再是 1 行 + 省略号)。
+    CHECK(lines.size() > 1);
+    // 内容完整保留(拼回去等于原文)。
+    CHECK(JoinStripped(lines) == para);
+    // 没有省略号(软换行不截断)。
+    for (const std::string& line : lines) {
+        CHECK_FALSE(Contains(line, kEllipsis));
+        CHECK(DisplayWidthUtf8(StripAnsi(line)) <= static_cast<std::size_t>(width - 1));
+    }
+}
+
+TEST_CASE("RenderMarkdown: 长标题软换行,每段都带标题样式") {
+    const int width = 12;
+    const auto lines = RenderMarkdown("# 标题文字特别长要折行", BuiltinTheme("dark"), width);
+    CHECK(lines.size() > 1);
+    bool first = true;
+    for (const std::string& line : lines) {
+        if (first) {
+            first = false;
+            continue;  // 标题前留的空行
+        }
+        if (line.empty()) {
+            continue;  // 标题后留的空行
+        }
+        // 每段标题都该带 bold。
+        CHECK(Contains(line, "\x1b[1m"));
+        CHECK(DisplayWidthUtf8(StripAnsi(line)) <= static_cast<std::size_t>(width - 1));
+    }
+}
+
+TEST_CASE("RenderMarkdown: 长列表项软换行,续行对齐内容起点") {
+    const int width = 14;
+    const auto lines = RenderMarkdown("- 一条特别特别长的列表项内容在此", BuiltinTheme("dark"), width);
+    CHECK(lines.size() > 1);
+    // 第一行带圆点。
+    CHECK(Contains(lines[0], kBullet));
+    // 续行以两空格缩进开头(对齐内容),不带圆点。
+    for (std::size_t i = 1; i < lines.size(); ++i) {
+        CHECK(StripAnsi(lines[i]).substr(0, 2) == "  ");
+        CHECK_FALSE(Contains(lines[i], kBullet));
+        CHECK(DisplayWidthUtf8(StripAnsi(lines[i])) <= static_cast<std::size_t>(width - 1));
+    }
+}
+
+TEST_CASE("RenderMarkdown: 长引用软换行,每段重复引用竖线") {
+    const int width = 14;
+    const auto lines = RenderMarkdown("> 一句特别特别长的引用文字在此", BuiltinTheme("dark"), width);
+    CHECK(lines.size() > 1);
+    // 折出来的每一段都该带引用竖线(贯通的引用观感)。
+    for (const std::string& line : lines) {
+        CHECK(Contains(line, kVBar));
+        CHECK(DisplayWidthUtf8(StripAnsi(line)) <= static_cast<std::size_t>(width - 1));
+    }
+}
+
+TEST_CASE("RenderMarkdown: 长代码块软换行,续行对齐前缀宽度") {
+    const int width = 16;
+    const auto lines = RenderMarkdown("```\nauto very_long_identifier_name = 42;\n```", BuiltinTheme("dark"), width);
+    CHECK(lines.size() > 2);  // 围栏行 + 多行折行内容
+    bool saw_code_line = false;
+    for (const std::string& line : lines) {
+        if (Contains(line, kVBar)) {
+            saw_code_line = true;
+        }
+        CHECK(DisplayWidthUtf8(StripAnsi(line)) <= static_cast<std::size_t>(width - 1));
+    }
+    CHECK(saw_code_line);
+}
+
+TEST_CASE("RenderMarkdown: 表格超宽仍按列截断加省略号,不软换行") {
+    const int width = 30;
+    const auto lines = RenderMarkdown(
+        "| 键 | 值 |\n"
+        "| --- | --- |\n"
+        "| 一个特别特别特别长的键 | 一段特别特别特别长的值 |",
+        BuiltinTheme("dark"), width);
+    bool truncated = false;
+    for (const std::string& line : lines) {
+        CHECK(DisplayWidthUtf8(StripAnsi(line)) <= static_cast<std::size_t>(width - 1));
+        if (Contains(line, kEllipsis)) {
+            truncated = true;
+        }
+    }
+    CHECK(truncated);  // 表格靠列对齐,折行会毁对齐——仍截断
+}
+

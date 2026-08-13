@@ -643,6 +643,78 @@ TEST_CASE("TruncateUtf8ToDisplayWidth: UTF-8 版本,纯 ASCII、中英混排、�
     CHECK(TruncateUtf8ToDisplayWidth(mixed, 2) == Utf32ToUtf8(U"a"));
 }
 
+// ---- 软换行 WrapToDisplayWidth / WrapUtf8ToDisplayWidth -------------------
+
+TEST_CASE("WrapToDisplayWidth: 短文本不折,原样一段返回") {
+    CHECK(WrapToDisplayWidth(U"hello", 10).size() == 1);
+    CHECK(WrapToDisplayWidth(U"hello", 10)[0] == U"hello");
+    CHECK(WrapToDisplayWidth(U"hello", 5)[0] == U"hello");  // 恰好等宽,不折
+}
+
+TEST_CASE("WrapToDisplayWidth: 纯 ASCII 按宽折行,每段不超过 max_width") {
+    const std::vector<std::u32string> w = WrapToDisplayWidth(U"abcdefghij", 4);
+    REQUIRE(w.size() == 3);
+    CHECK(w[0] == U"abcd");
+    CHECK(w[1] == U"efgh");
+    CHECK(w[2] == U"ij");
+    for (const std::u32string& seg : w) {
+        CHECK(DisplayWidth(seg) <= 4);
+    }
+}
+
+TEST_CASE("WrapToDisplayWidth: CJK 宽字不切半个,断在整字边界") {
+    // "中文测试" 四个汉字各占 2 列,max_width=4 恰好两字一行。
+    const std::vector<std::u32string> w = WrapToDisplayWidth(U"中文测试", 4);
+    REQUIRE(w.size() == 2);
+    CHECK(w[0] == U"中文");
+    CHECK(w[1] == U"测试");
+}
+
+TEST_CASE("WrapToDisplayWidth: 宽字凑不下一整列时独占一行,不丢内容") {
+    // max_width=3:一个汉字 2 列放得下,第二个会让累计到 4 超宽——各占一行。
+    // 每段 2 列,不超过 3。
+    const std::vector<std::u32string> w = WrapToDisplayWidth(U"中文测试", 3);
+    REQUIRE(w.size() == 4);
+    CHECK(w[0] == U"中");
+    CHECK(w[1] == U"文");
+    CHECK(w[2] == U"测");
+    CHECK(w[3] == U"试");
+}
+
+TEST_CASE("WrapToDisplayWidth: 中英混排按显示宽累加折行") {
+    // "a中b":a=1,中=2,b=1,总 4。max_width=3 → "a中"(3) | "b"(1)。
+    const std::vector<std::u32string> w = WrapToDisplayWidth(U"a中b", 3);
+    REQUIRE(w.size() == 2);
+    CHECK(w[0] == U"a中");
+    CHECK(w[1] == U"b");
+}
+
+TEST_CASE("WrapToDisplayWidth: 换行符强制断行") {
+    const std::vector<std::u32string> w = WrapToDisplayWidth(U"ab\ncd", 10);
+    REQUIRE(w.size() == 2);
+    CHECK(w[0] == U"ab");
+    CHECK(w[1] == U"cd");
+}
+
+TEST_CASE("WrapToDisplayWidth: 连续换行产生空段,空文本/非正宽给空 vector") {
+    const std::vector<std::u32string> w = WrapToDisplayWidth(U"a\n\nb", 10);
+    REQUIRE(w.size() == 3);
+    CHECK(w[1].empty());  // 中间空行保留
+    CHECK(WrapToDisplayWidth(U"", 5).empty());
+    CHECK(WrapToDisplayWidth(U"hello", 0).empty());
+    CHECK(WrapToDisplayWidth(U"hello", -1).empty());
+}
+
+TEST_CASE("WrapUtf8ToDisplayWidth: UTF-8 版本与 u32 版本结果一致") {
+    const std::string text = Utf32ToUtf8(U"中文测试a");
+    const std::vector<std::string> w = WrapUtf8ToDisplayWidth(text, 4);
+    REQUIRE(w.size() == 3);
+    CHECK(w[0] == Utf32ToUtf8(U"中文"));
+    CHECK(w[1] == Utf32ToUtf8(U"测试"));
+    CHECK(w[2] == "a");
+}
+
+
 TEST_CASE("ComputeEditLineWindow: 整行放得下时,窗口就是整行,光标列不变") {
     const EditLineWindow window = ComputeEditLineWindow(U"hello", 3, 20);
     CHECK(window.text == U"hello");

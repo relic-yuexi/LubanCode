@@ -4,7 +4,7 @@
 #include <cstddef>
 
 #include "cli/latex_math.hpp"
-#include "cli/line_editor.hpp"  // DisplayWidthUtf8 / TruncateUtf8ToDisplayWidth
+#include "cli/line_editor.hpp"  // DisplayWidthUtf8 / TruncateUtf8ToDisplayWidth / WrapUtf8ToDisplayWidth
 
 namespace lubancode::cli {
 
@@ -375,6 +375,75 @@ std::string TruncatePlain(const std::string& text, int max_width) {
     return TruncateUtf8ToDisplayWidth(text, max_width - 1) + "\xE2\x80\xA6";
 }
 
+// 把一段 UTF-8 切成逐码点子串(同 console_input 里 FooterUtf8Glyphs 的思路):
+// 按首字节判定序列长,不校验续字节——给内部自己拼出来的字符串量宽/折行用,
+// 不是严格解码器。折行要逐字量宽,得先把多字节字拆成独立小块。
+std::vector<std::string> SplitUtf8Glyphs(const std::string& text) {
+    std::vector<std::string> out;
+    for (std::size_t i = 0; i < text.size();) {
+        const unsigned char lead = static_cast<unsigned char>(text[i]);
+        std::size_t bytes = 1;
+        if ((lead & 0xE0U) == 0xC0U) {
+            bytes = 2;
+        } else if ((lead & 0xF0U) == 0xE0U) {
+            bytes = 3;
+        } else if ((lead & 0xF8U) == 0xF0U) {
+            bytes = 4;
+        }
+        bytes = (std::min)(bytes, text.size() - i);
+        out.push_back(text.substr(i, bytes));
+        i += bytes;
+    }
+    return out;
+}
+
+// 把带行内样式(粗体/斜体/行内码)的一行 runs 按显示宽度折成多行。逐字
+// 累加,下一个字超 max_width 就断;断点落在一个 run 中间时,折出来的各段
+// 各自重新包好该 run 的 ANSI 开关(同一行内独立上色,跨行样式不串)。当前
+// 行空时即便单字比 max_width 宽也照收(独占一行,不丢内容)。max_width<=0
+// 或 runs 全空给空 vector。
+std::vector<std::string> WrapRuns(const std::vector<Run>& runs, int max_width) {
+    std::vector<std::string> lines;
+    if (max_width <= 0) {
+        return lines;
+    }
+    // 当前折行里已经攒下的各 run 片段:每段记它属哪个 run、该 run 的子串。
+    // flush 时按顺序把每段 prefix+text+suffix 拼起来。
+    struct Seg {
+        std::size_t run;
+        std::string text;
+    };
+    std::vector<Seg> segs;
+    int width = 0;
+    const auto flush = [&] {
+        std::string line;
+        for (const Seg& seg : segs) {
+            line += runs[seg.run].prefix + seg.text + runs[seg.run].suffix;
+        }
+        lines.push_back(std::move(line));
+        segs.clear();
+        width = 0;
+    };
+    for (std::size_t r = 0; r < runs.size(); ++r) {
+        for (const std::string& g : SplitUtf8Glyphs(runs[r].text)) {
+            const int gw = static_cast<int>(DisplayWidthUtf8(g));
+            if (width + gw > max_width && !segs.empty()) {
+                flush();
+            }
+            if (!segs.empty() && segs.back().run == r) {
+                segs.back().text += g;
+            } else {
+                segs.push_back({r, g});
+            }
+            width += gw;
+        }
+    }
+    if (!segs.empty()) {
+        flush();
+    }
+    return lines;
+}
+
 // ---- 表格 -----------------------------------------------------------------
 
 std::vector<std::string> SplitTableCells(const std::string& trimmed) {
@@ -608,13 +677,23 @@ std::vector<std::string> RenderMarkdown(const std::string& text, const Theme& th
                 in_code = false;
                 continue;
             }
-            // "  │ " 前缀占 4 列;极窄终端连前缀都盛不下时,挂上去必物理
-            // 折行(破 width-1 铁律、重画行数失准)——退回裸截,不挂前缀。
-            if (content_limit < 4) {
-                out.push_back(TruncatePlain(line, content_limit));
+            // "  │ " 前缀占 4 列。前缀 + 续行缩进各自都吃列;内容区(content_limit-4)
+            // 不足 2 列时连一个宽字都盛不下,挂前缀必让该字撑破 width-1——退回裸折。
+            const std::string prefix = "  " + theme.stats + "\xE2\x94\x82" + theme.reset + " ";
+            if (content_limit < 4 + 2) {
+                for (const std::string& w : WrapUtf8ToDisplayWidth(line, content_limit)) {
+                    out.push_back(w);
+                }
             } else {
-                out.push_back("  " + theme.stats + "\xE2\x94\x82" + theme.reset + " " +
-                              TruncatePlain(line, content_limit - 4));
+                const std::vector<std::string> wraps = WrapUtf8ToDisplayWidth(line, content_limit - 4);
+                if (wraps.empty()) {
+                    out.push_back(prefix);
+                } else {
+                    out.push_back(prefix + wraps[0]);
+                    for (std::size_t i = 1; i < wraps.size(); ++i) {
+                        out.push_back("    " + wraps[i]);  // 续行缩进 4 列,对齐前缀后的内容起点
+                    }
+                }
             }
             continue;
         }
@@ -639,11 +718,15 @@ std::vector<std::string> RenderMarkdown(const std::string& text, const Theme& th
             const auto rendered = RenderLatexBlock(math->latex);
             if (rendered) {
                 for (const std::string& math_line : *rendered) {
-                    out.push_back(TruncatePlain(math_line, content_limit));
+                    for (const std::string& w : WrapUtf8ToDisplayWidth(math_line, content_limit)) {
+                        out.push_back(w);
+                    }
                 }
             } else {
                 for (const std::string& raw : math->raw_lines) {
-                    out.push_back(TruncatePlain(raw, content_limit));
+                    for (const std::string& w : WrapUtf8ToDisplayWidth(raw, content_limit)) {
+                        out.push_back(w);
+                    }
                 }
             }
             line_index = math->last_line;
@@ -659,17 +742,23 @@ std::vector<std::string> RenderMarkdown(const std::string& text, const Theme& th
         if (const int level = HeadingLevel(trimmed); level > 0) {
             const std::string content = Trim(trimmed.substr(static_cast<std::size_t>(level) + 1));
             push_blank();
-            if (plain) {
-                out.push_back(TruncatePlain(RenderInlineMathOnly(content), content_limit));
-            } else {
-                std::string prefix = "\x1b[1m";
+            std::string prefix;
+            if (!plain) {
+                prefix = "\x1b[1m";
                 if (level <= 2) {
                     prefix = theme.banner + prefix;
                 }
                 if (level == 1) {
                     prefix += "\x1b[4m";
                 }
-                out.push_back(prefix + TruncatePlain(RenderInlineMathOnly(content), content_limit) + theme.reset);
+            }
+            const std::vector<std::string> wraps = WrapUtf8ToDisplayWidth(RenderInlineMathOnly(content), content_limit);
+            if (wraps.empty()) {
+                out.push_back(prefix + (plain ? std::string() : theme.reset));
+            } else {
+                for (const std::string& w : wraps) {
+                    out.push_back(prefix + w + (plain ? std::string() : theme.reset));
+                }
             }
             out.push_back(std::string());
             continue;
@@ -677,12 +766,22 @@ std::vector<std::string> RenderMarkdown(const std::string& text, const Theme& th
 
         if (IsQuoteLine(trimmed)) {
             const std::string content = trimmed.size() > 2 ? trimmed.substr(2) : std::string();
-            if (content_limit < 2) {  // "│ " 前缀 2 列都盛不下(width<=2):裸截保铁律
-                out.push_back(TruncatePlain(trimmed, content_limit));
+            if (content_limit < 2 + 2) {  // "│ " 前缀后内容区不足 2 列:裸折保铁律
+                for (const std::string& w : WrapUtf8ToDisplayWidth(trimmed, content_limit)) {
+                    out.push_back(w);
+                }
                 continue;
             }
-            out.push_back(theme.stats + "\xE2\x94\x82" + theme.reset + " " +
-                          AssembleRuns(ParseInline(content, plain), content_limit - 2).text);
+            // 折出来的每一段都重复 "│ " 前缀——视觉上是一根贯通的引用竖线,
+            // 跟 markdown 里多行 "> " 引用块一个观感。
+            const std::vector<std::string> wraps = WrapRuns(ParseInline(content, plain), content_limit - 2);
+            if (wraps.empty()) {
+                out.push_back(theme.stats + "\xE2\x94\x82" + theme.reset + " ");
+            } else {
+                for (const std::string& w : wraps) {
+                    out.push_back(theme.stats + "\xE2\x94\x82" + theme.reset + " " + w);
+                }
+            }
             continue;
         }
 
@@ -690,12 +789,23 @@ std::vector<std::string> RenderMarkdown(const std::string& text, const Theme& th
             const std::size_t level = indent_spaces / 2;
             const std::string pad(2 * (level + 1), ' ');
             const int prefix_cols = static_cast<int>(pad.size()) + 2;
-            if (prefix_cols > content_limit) {  // 缩进 + 圆点都放不下(极窄/嵌套过深):裸截
-                out.push_back(TruncatePlain(trimmed, content_limit));
+            const std::string marker = pad + "\xE2\x80\xA2 ";  // •
+            if (content_limit < prefix_cols + 2) {  // 内容区不足 2 列(极窄/嵌套过深):裸折
+                for (const std::string& w : WrapUtf8ToDisplayWidth(trimmed, content_limit)) {
+                    out.push_back(w);
+                }
                 continue;
             }
-            out.push_back(pad + "\xE2\x80\xA2 " +  // •
-                          AssembleRuns(ParseInline(trimmed.substr(pos), plain), content_limit - prefix_cols).text);
+            const std::vector<std::string> wraps = WrapRuns(ParseInline(trimmed.substr(pos), plain),
+                                                             content_limit - prefix_cols);
+            if (wraps.empty()) {
+                out.push_back(marker);
+            } else {
+                out.push_back(marker + wraps[0]);
+                for (std::size_t i = 1; i < wraps.size(); ++i) {
+                    out.push_back(std::string(prefix_cols, ' ') + wraps[i]);  // 续行对齐内容起点
+                }
+            }
             continue;
         }
         if (const OrderedMarker marker = OrderedListMarker(trimmed); marker.content_pos != std::string::npos) {
@@ -703,14 +813,23 @@ std::vector<std::string> RenderMarkdown(const std::string& text, const Theme& th
             const std::string pad(2 * (level + 1), ' ');
             const std::string number = trimmed.substr(0, marker.digits) + ". ";
             const int prefix_cols = static_cast<int>(pad.size() + number.size());
-            if (prefix_cols > content_limit) {  // 同上:固定前缀超限就裸截
-                out.push_back(TruncatePlain(trimmed, content_limit));
+            const std::string prefix = pad + number;
+            if (content_limit < prefix_cols + 2) {  // 同上:内容区不足 2 列就裸折
+                for (const std::string& w : WrapUtf8ToDisplayWidth(trimmed, content_limit)) {
+                    out.push_back(w);
+                }
                 continue;
             }
-            out.push_back(pad + number +
-                          AssembleRuns(ParseInline(trimmed.substr(marker.content_pos), plain),
-                                       content_limit - prefix_cols)
-                              .text);
+            const std::vector<std::string> wraps = WrapRuns(ParseInline(trimmed.substr(marker.content_pos), plain),
+                                                             content_limit - prefix_cols);
+            if (wraps.empty()) {
+                out.push_back(prefix);
+            } else {
+                out.push_back(prefix + wraps[0]);
+                for (std::size_t i = 1; i < wraps.size(); ++i) {
+                    out.push_back(std::string(prefix_cols, ' ') + wraps[i]);  // 续行对齐内容起点
+                }
+            }
             continue;
         }
 
@@ -720,9 +839,11 @@ std::vector<std::string> RenderMarkdown(const std::string& text, const Theme& th
             continue;
         }
 
-        // 普通段落:只做行内样式;没有任何行内标记时,AssembleRuns 给回
-        // 原文(截宽以内),原样过。
-        out.push_back(AssembleRuns(ParseInline(line, plain), content_limit).text);
+        // 普通段落:做行内样式后按显示宽度折行;没有任何行内标记时,WrapRuns
+        // 给回原文分段(宽以内原样、超宽折),原样过。短行不折,一字不动。
+        for (const std::string& w : WrapRuns(ParseInline(line, plain), content_limit)) {
+            out.push_back(w);
+        }
     }
     FlushTable(table_buf, out, theme, content_limit);
 
