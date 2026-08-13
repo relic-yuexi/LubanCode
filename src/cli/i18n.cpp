@@ -228,6 +228,13 @@ const Entry kZhCN[] = {
 
     // ---- 确认提示 ----
     {"confirm.prompt", "[y] 本次允许  [a] 本会话总是允许(该工具)  [N] 拒绝: "},
+    {"confirm.opt.allow_once", "本次允许"},
+    {"confirm.opt.always", "本会话总是允许"},
+    {"confirm.opt.deny", "拒绝"},
+    {"confirm.menu.hint", "↑/↓ 选择 · Enter 确认 · Esc 拒绝"},
+    {"confirm.persist.yes", "是,写进项目设置"},
+    {"confirm.persist.no", "否,仅本会话"},
+    {"confirm.persist.menu.hint", "↑/↓ 选择 · Enter 确认"},
     {"confirm.detail.path", "    路径: {0}"},
     {"confirm.detail.replace_all", "  (replace_all=true,全部替换)"},
     {"confirm.detail.content", "    内容({0} 字节),前几行:"},
@@ -1035,6 +1042,13 @@ const Entry kEn[] = {
 
     // ---- confirm prompt ----
     {"confirm.prompt", "[y] allow once  [a] always allow this tool (this session)  [N] deny: "},
+    {"confirm.opt.allow_once", "Allow once"},
+    {"confirm.opt.always", "Always allow (this session)"},
+    {"confirm.opt.deny", "Deny"},
+    {"confirm.menu.hint", "↑/↓ to select · Enter to confirm · Esc to deny"},
+    {"confirm.persist.yes", "Yes, save to project settings"},
+    {"confirm.persist.no", "No, just this session"},
+    {"confirm.persist.menu.hint", "↑/↓ to select · Enter to confirm"},
     {"confirm.detail.path", "    path: {0}"},
     {"confirm.detail.replace_all", "  (replace_all=true)"},
     {"confirm.detail.content", "    content ({0} bytes), first lines:"},

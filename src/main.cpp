@@ -2707,18 +2707,45 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         }
         // M10:esc_rejects=true——按 Esc 直接返回 nullopt，走到下面拒绝
         // 分支，不留在输入行里继续等。
-        const std::optional<std::string> answer = lubancode::cli::ReadLine(
-            theme.confirm + tr("confirm.prompt") + theme.reset, theme,
-            /*esc_rejects=*/true);
         bool allowed = false;
         bool chose_always = false;
-        if (answer.has_value()) {  // 读到 EOF 按拒绝处理,不要在这儿卡住
-            if (*answer == "a" || *answer == "A") {
-                always_allowed_tools.insert(name);
-                allowed = true;
-                chose_always = true;
-            } else {
-                allowed = (*answer == "y" || *answer == "Y");
+        const bool interactive_menu = lubancode::platform::StdinIsInteractive() &&
+                                      lubancode::platform::ProbeStdoutConsole().is_console;
+        if (interactive_menu) {
+            // 方向键选择:本次允许 / 本会话总允许 / 拒绝。默认高亮"拒绝"
+            // (安全,等同原 [y/a/N] 回车=N)。Esc/Ctrl+C/EOF 也按拒绝。
+            std::vector<lubancode::cli::ChoiceMenuItem> items = {
+                {tr("confirm.opt.allow_once"), {}},
+                {tr("confirm.opt.always"), {}},
+                {tr("confirm.opt.deny"), {}},
+            };
+            lubancode::cli::ChoiceMenuOptions opts;
+            opts.hint = tr("confirm.menu.hint");
+            opts.initial_cursor = 2;  // 默认"拒绝"
+            const auto selected = lubancode::cli::ReadChoiceMenu(items, opts, theme);
+            if (selected.has_value() && !selected->selected_indices.empty()) {
+                const std::size_t idx = selected->selected_indices.front();
+                if (idx == 0) {
+                    allowed = true;
+                } else if (idx == 1) {
+                    always_allowed_tools.insert(name);
+                    allowed = true;
+                    chose_always = true;
+                }
+            }
+        } else {
+            // 管道/非交互:沿用 [y/a/N] 读一行(自动化场景照旧)。
+            const std::optional<std::string> answer = lubancode::cli::ReadLine(
+                theme.confirm + tr("confirm.prompt") + theme.reset, theme,
+                /*esc_rejects=*/true);
+            if (answer.has_value()) {
+                if (*answer == "a" || *answer == "A") {
+                    always_allowed_tools.insert(name);
+                    allowed = true;
+                    chose_always = true;
+                } else {
+                    allowed = (*answer == "y" || *answer == "Y");
+                }
             }
         }
         display.OnConfirmAnswered(pending_idx, allowed);
@@ -2726,10 +2753,25 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         // 按 a 之后多问一句:也永久写进项目 settings.local.json?管道/--yes 下
         // 跳过(只进会话集合)——那些场景没法交互再问一遍。真控制台才追问。
         if (chose_always && display.is_console && !auto_confirm) {
-            const std::optional<std::string> persist = lubancode::cli::ReadLine(
-                theme.confirm + tr("settings.local.persist_prompt") + theme.reset, theme,
-                /*esc_rejects=*/true);
-            if (persist.has_value() && (*persist == "y" || *persist == "Y")) {
+            bool persist_yes = false;
+            if (interactive_menu) {
+                std::vector<lubancode::cli::ChoiceMenuItem> p_items = {
+                    {tr("confirm.persist.no"), {}},
+                    {tr("confirm.persist.yes"), {}},
+                };
+                lubancode::cli::ChoiceMenuOptions p_opts;
+                p_opts.hint = tr("confirm.persist.menu.hint");
+                p_opts.initial_cursor = 0;  // 默认"否"
+                const auto p_sel = lubancode::cli::ReadChoiceMenu(p_items, p_opts, theme);
+                persist_yes = p_sel.has_value() && !p_sel->selected_indices.empty() &&
+                              p_sel->selected_indices.front() == 1;
+            } else {
+                const std::optional<std::string> persist = lubancode::cli::ReadLine(
+                    theme.confirm + tr("settings.local.persist_prompt") + theme.reset, theme,
+                    /*esc_rejects=*/true);
+                persist_yes = persist.has_value() && (*persist == "y" || *persist == "Y");
+            }
+            if (persist_yes) {
                 const std::string cwd = CurrentDirUtf8();
                 const auto written = lubancode::config::AddAllowedToolToSettingsLocal(cwd, name);
                 std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
