@@ -71,6 +71,8 @@
 #include "mcp/mcp_tool.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/ask_user.hpp"
+#include "tools/background_output.hpp"
+#include "tools/background_tasks.hpp"
 #include "tools/command_safety.hpp"
 #include "tools/edit_file.hpp"
 #include "tools/hooks.hpp"
@@ -733,6 +735,11 @@ lubancode::tools::ToolRegistry BuildBaseToolRegistry(const std::vector<lubancode
     lubancode::tools::ToolRegistry registry;
     registry.Register(std::make_unique<lubancode::tools::ReadFileTool>());
     registry.Register(std::make_unique<lubancode::tools::RunCommandTool>());
+    // 后台命令三件套:run_command 起后台(background_tasks 登记 task_id + watcher
+    // 探活),background_output 查状态/读输出,stop_background 收尾。两个新工具
+    // 是纯进程内单例查询/控制,无外部依赖,直接进基础表(子代理也能用)。
+    registry.Register(std::make_unique<lubancode::tools::BackgroundOutputTool>());
+    registry.Register(std::make_unique<lubancode::tools::StopBackgroundTool>());
     registry.Register(std::make_unique<lubancode::tools::WriteFileTool>());
     registry.Register(std::make_unique<lubancode::tools::EditFileTool>());
     registry.Register(std::make_unique<lubancode::tools::SearchTool>());
@@ -5613,6 +5620,33 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                 case lubancode::cli::SlashCommand::Tools:
                     PrintToolsCommand(registry, *loaded_tools, main_deferral, tool_search_threshold);
                     break;
+                case lubancode::cli::SlashCommand::Background: {
+                    // /background:列后台命令任务清单。文案直接用字面量(跟
+                    // background_output 工具的返回文本一个路数),不经 i18n——
+                    // 这条命令是给开发者的运维视图,新功能先不铺多语言。
+                    const auto tasks = lubancode::tools::BackgroundTaskRegistry::Instance().List();
+                    if (tasks.empty()) {
+                        std::cout << "当前没有后台任务。\n";
+                        break;
+                    }
+                    std::cout << "后台任务共 " << tasks.size() << " 个:\n\n";
+                    for (const auto& t : tasks) {
+                        const char* label = "未知";
+                        switch (t.status) {
+                            case lubancode::tools::BackgroundTaskStatus::Running: label = "运行中"; break;
+                            case lubancode::tools::BackgroundTaskStatus::Completed: label = "完成"; break;
+                            case lubancode::tools::BackgroundTaskStatus::Failed: label = "失败"; break;
+                            case lubancode::tools::BackgroundTaskStatus::Stopped: label = "已停止"; break;
+                        }
+                        std::cout << theme.tool_line << "[#" << t.task_id << "] " << label;
+                        if (t.status != lubancode::tools::BackgroundTaskStatus::Running) {
+                            std::cout << " (exit " << t.exit_code << ")";
+                        }
+                        std::cout << theme.reset << "  PID=" << t.pid << "\n"
+                                  << theme.stats << "  命令: " << t.command << "\n  日志: " << t.log_path
+                                  << theme.reset << "\n\n";
+                    }
+                } break;
                 case lubancode::cli::SlashCommand::Memory:
                     handle_memory_command(parsed.args);
                     break;
@@ -5744,6 +5778,30 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         status_data.window_tokens = static_cast<long long>(context_tracker.window_tokens());
         lubancode::cli::SetStatusLineData(status_data, config.status_panel.items,
                                            config.status_panel.separator);
+
+        // 后台命令完成通知:每圈开头取一次"新进入终态"的任务,有就打一行淡色
+        // 通知给用户。不插进对话流(不发给模型、不消耗 token)——只让人看见
+        // "后台那条命令跑完了";模型要是需要细节,自己调 background_output 工具查。
+        // 跟 pending_queue 那条路分开:排队消息是用户自己键入的正文,要发给模型;
+        // 后台通知是系统侧的状态播报,只给人看。
+        if (const auto finished = lubancode::tools::BackgroundTaskRegistry::Instance().DrainCompleted();
+            !finished.empty()) {
+            std::lock_guard<std::mutex> stdout_lock(lubancode::cli::StdoutWriteMutex());
+            for (const auto& t : finished) {
+                const char* label = "已结束";
+                switch (t.status) {
+                    case lubancode::tools::BackgroundTaskStatus::Completed: label = "完成(退出码 0)"; break;
+                    case lubancode::tools::BackgroundTaskStatus::Failed: label = "失败"; break;
+                    case lubancode::tools::BackgroundTaskStatus::Stopped: label = "已停止"; break;
+                    default: break;
+                }
+                std::cout << theme.stats << "[后台任务 #" << t.task_id << " " << label << "]";
+                if (t.status != lubancode::tools::BackgroundTaskStatus::Completed) {
+                    std::cout << " (exit " << t.exit_code << ")";
+                }
+                std::cout << " " << t.command << theme.reset << "\n";
+            }
+        }
 
         std::string content;
         if (!pending_queue.empty()) {

@@ -130,6 +130,9 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Image;
     } else if (lower == "/worktree") {
         parsed.command = SlashCommand::Worktree;
+    } else if (lower == "/background" || lower == "/bg") {
+        // /bg 是省事别名,跟 /background 同义。
+        parsed.command = SlashCommand::Background;
     } else {
         parsed.command = SlashCommand::Unknown;
     }
@@ -329,6 +332,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/title", tr("slash.desc.title")},
             {"/soul", tr("slash.desc.soul")},
             {"/prompt", tr("slash.desc.prompt")},
+            {"/background", tr("slash.desc.background")},
         };
     }
     return commands;

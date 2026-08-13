@@ -4,6 +4,7 @@
 #include <string>
 
 #include "platform/process.hpp"
+#include "tools/background_tasks.hpp"  // BackgroundTaskRegistry:后台模式登记 task_id + 起 watcher 探活
 #include "platform/text_encoding.hpp"  // SanitizeUtf8:捕获侧治本,见 execute() 里的调用点注释
 
 #ifdef _WIN32
@@ -27,13 +28,17 @@ std::string RunCommandTool::description() const {
     return "在 shell 里执行一条命令,拿到合并后的标准输出/标准错误,以及退出码。"
            "shell 参数可选 powershell(默认)或 cmd,分别按对应语法写命令。执行前要经用户确认。"
            "超时会被强制杀掉。"
-           "起 dev server、watch 进程这类要跨命令、跨调用存活的长命进程,传 run_in_background=true:"
-           "不等它跑完,spawn 成功立刻返回 PID 和日志文件路径,之后用普通命令探活/看日志/收尾。";
+           "起 dev server、watch 进程这类要跨命令、跨调用存活的长命进程,或者想后台跑完不阻塞对话的短任务,"
+           "传 run_in_background=true:不等它跑完,spawn 成功立刻返回 task_id、PID 和日志文件路径;"
+           "命令跑完时下一次给提示符会打一行完成通知。之后用 background_output 工具(传 task_id)"
+           "查状态/读输出,stop_background 工具收尾。";
 #else
     return "在 shell(/bin/sh)里执行一条命令,拿到合并后的标准输出/标准错误,以及退出码。"
            "按 POSIX sh 语法写命令。执行前要经用户确认。超时会被强制杀掉。"
-           "起 dev server、watch 进程这类要跨命令、跨调用存活的长命进程,传 run_in_background=true:"
-           "不等它跑完,spawn 成功立刻返回 PID 和日志文件路径,之后用普通命令探活/看日志/收尾。";
+           "起 dev server、watch 进程这类要跨命令、跨调用存活的长命进程,或者想后台跑完不阻塞对话的短任务,"
+           "传 run_in_background=true:不等它跑完,spawn 成功立刻返回 task_id、PID 和日志文件路径;"
+           "命令跑完时下一次给提示符会打一行完成通知。之后用 background_output 工具(传 task_id)"
+           "查状态/读输出,stop_background 工具收尾。";
 #endif
 }
 
@@ -73,19 +78,23 @@ nlohmann::json RunCommandTool::input_schema() const {
 #ifdef _WIN32
     background_prop["description"] =
         "true = 后台运行,不等命令跑完就返回。用于起 dev server、watch 进程这类要跨命令、"
-        "跨多轮调用继续存活的长命进程——起完之后你还要接着用别的命令(比如 curl)去验证它。"
-        "spawn 成功后立刻返回结果,内含子进程 PID 和一个日志文件路径(该进程的标准输出/"
-        "标准错误合并写在这个文件里);之后想看它是否还活着、看它吐了什么,用普通 run_command "
-        "跑 Get-Content -Tail 之类的命令读日志文件,要收掉它就 Stop-Process -Id <PID> -Force。"
+        "跨多轮调用继续存活的长命进程——起完之后你还要接着用别的命令(比如 curl)去验证它;"
+        "也用于后台跑一个短任务,不想阻塞当前对话、跑完通知你即可。"
+        "spawn 成功后立刻返回结果,内含 task_id、子进程 PID 和一个日志文件路径(该进程的标准"
+        "输出/标准错误合并写在这个文件里);命令跑完时,下一次给提示符会打一行完成通知。"
+        "之后想看它是否还活着、看它吐了什么,用 background_output 工具(传 task_id)查状态读输出,"
+        "要收掉它就用 stop_background 工具。"
         "timeout_ms 参数对这个模式没有意义,会被忽略。不填默认 false(前台执行,等命令跑完拿"
         "完整输出和退出码)。";
 #else
     background_prop["description"] =
         "true = 后台运行,不等命令跑完就返回。用于起 dev server、watch 进程这类要跨命令、"
-        "跨多轮调用继续存活的长命进程——起完之后你还要接着用别的命令(比如 curl)去验证它。"
-        "spawn 成功后立刻返回结果,内含子进程 PID 和一个日志文件路径(该进程的标准输出/"
-        "标准错误合并写在这个文件里);之后想看它是否还活着、看它吐了什么,用普通 run_command "
-        "跑 tail 之类的命令读日志文件,要收掉它就 kill <PID>。"
+        "跨多轮调用继续存活的长命进程——起完之后你还要接着用别的命令(比如 curl)去验证它;"
+        "也用于后台跑一个短任务,不想阻塞当前对话、跑完通知你即可。"
+        "spawn 成功后立刻返回结果,内含 task_id、子进程 PID 和一个日志文件路径(该进程的标准"
+        "输出/标准错误合并写在这个文件里);命令跑完时,下一次给提示符会打一行完成通知。"
+        "之后想看它是否还活着、看它吐了什么,用 background_output 工具(传 task_id)查状态读输出,"
+        "要收掉它就用 stop_background 工具。"
         "timeout_ms 参数对这个模式没有意义,会被忽略。不填默认 false(前台执行,等命令跑完拿"
         "完整输出和退出码)。";
 #endif
@@ -231,11 +240,15 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
         if (!bg.success) {
             return {bg.error, true};
         }
+        // 登记进后台任务台账:拿一个 task_id,起 watcher 线程探活——
+        // 完成时主循环会收到通知,模型也能用 background_output 工具查输出。
+        const std::string task_id =
+            BackgroundTaskRegistry::Instance().Register(command, shell, bg.pid, bg.log_path);
         std::ostringstream oss;
-        oss << "已在后台启动(PID " << bg.pid << "),不等它跑完,以上是 spawn 结果。\n"
+        oss << "已在后台启动(task #" << task_id << ", PID " << bg.pid << "),不等它跑完。\n"
             << "日志文件: " << bg.log_path << "\n"
-            << "看日志: Get-Content -Tail 50 \"" << bg.log_path << "\"(加 -Wait 实时跟随,Ctrl+C 退出)。\n"
-            << "收掉它: Stop-Process -Id " << bg.pid << " -Force";
+            << "查状态/输出: 用 background_output 工具(传 task_id=" << task_id << ")。\n"
+            << "收掉它: 用 stop_background 工具,或 Stop-Process -Id " << bg.pid << " -Force";
         return {oss.str(), false};
     }
 
@@ -271,11 +284,14 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
         if (!bg.success) {
             return {bg.error, true};
         }
+        // 登记进后台任务台账(同 Windows 分支):task_id + watcher 探活,完成时通知。
+        const std::string task_id =
+            BackgroundTaskRegistry::Instance().Register(command, "sh", bg.pid, bg.log_path);
         std::ostringstream oss;
-        oss << "已在后台启动(PID " << bg.pid << "),不等它跑完,以上是 spawn 结果。\n"
+        oss << "已在后台启动(task #" << task_id << ", PID " << bg.pid << "),不等它跑完。\n"
             << "日志文件: " << bg.log_path << "\n"
-            << "看日志: tail -n 50 \"" << bg.log_path << "\"(加 -f 实时跟随,Ctrl+C 退出)。\n"
-            << "收掉它: kill " << bg.pid << "(不行就 kill -9 " << bg.pid << ")";
+            << "查状态/输出: 用 background_output 工具(传 task_id=" << task_id << ")。\n"
+            << "收掉它: 用 stop_background 工具,或 kill " << bg.pid << "(不行就 kill -9 " << bg.pid << ")";
         return {oss.str(), false};
     }
 

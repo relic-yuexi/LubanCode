@@ -40,6 +40,7 @@ enum class SlashCommand {
     Language,  // /language [语言码]:列可选界面语言/切换(i18n)
     Image,     // /image <路径...>:附一张或多张本地图片
     Worktree,  // /worktree new|list|exit:隔离工作树会话
+    Background,  // /background:列后台任务清单(run_command run_in_background 起的)
     Unknown,  // 以 / 开头,但不认得这个命令
 };
 

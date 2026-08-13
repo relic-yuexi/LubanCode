@@ -4,6 +4,7 @@ add_executable(lubancode_tests
   test_anthropic_events.cpp
   test_assembler.cpp
   test_tools.cpp
+  test_background_tasks.cpp
   test_command_safety.cpp
   test_loop.cpp
   test_responses_request.cpp
