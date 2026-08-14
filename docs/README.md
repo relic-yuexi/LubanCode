@@ -19,6 +19,7 @@
 | 接一家或多家模型服务 | [配置手册](configuration.md) | [Provider 目录](provider-catalog.md) |
 | 查所有 slash 命令、启动参数和快捷键 | [命令与按键](commands.md) | [终端交互](terminal-ui.md) |
 | 查某件模型工具的参数与上限 | [工具参考](tools.md) | [配置手册](configuration.md) |
+| 看一句话怎样拼成请求、调用工具、再收成回答 | [Query 数据流](query-data-flow.md) | [架构说明](architecture.md) |
 | 恢复、压缩或导出会话 | [会话与上下文](sessions-and-context.md) | [项目记忆](memory-system-design.md) |
 | 写 Skill、接 MCP/LSP 或做插件 | [扩展指南](extensions.md) | [工具参考](tools.md) |
 | 用 `/init` 给仓库立规矩 | [项目指令](project-instructions.md) | [配置手册](configuration.md) |
@@ -53,6 +54,7 @@
 | --- | --- |
 | [扩展指南](extensions.md) | Skill、MCP、LSP、Lua、C ABI、hooks、延迟挂载、命名和信任边界。 |
 | [架构说明](architecture.md) | 组件分层、三协议、请求链、工具表、提示词、会话、终端并发、平台抽象与测试。 |
+| [Query 数据流](query-data-flow.md) | 用“帮我看一下当前项目”追一遍 system、history、tools、三种 wire、流式回包与子代理。 |
 | [提示词模块](../src/prompts/README.md) | 内置 prompt 怎样拆分、构建嵌入、运行时播种和覆盖。 |
 | [求职项目手册](job-portfolio.md) | 项目数据、架构讲法、面试故事、演示脚本与源码证据。 |
 
