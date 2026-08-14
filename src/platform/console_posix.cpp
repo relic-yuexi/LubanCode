@@ -163,8 +163,8 @@ KeyInput ParseCsi() {
                     out.kind = KeyInput::Kind::ShiftTab;
                     return out;
                 case '~':
-                    // VT 风格:1~/7~ = Home,4~/8~ = End,其余(3~ Delete、
-                    // 5~/6~ 翻页……)暂不映射。
+                    // VT 风格:1~/7~ = Home,4~/8~ = End,3~ = Delete,
+                    // 其余(5~/6~ 翻页……)暂不映射。
                     if (params == "200") {
                         return ReadBracketedPaste();
                     }
@@ -172,6 +172,8 @@ KeyInput ParseCsi() {
                         out.kind = KeyInput::Kind::Home;
                     } else if (params == "4" || params == "8") {
                         out.kind = KeyInput::Kind::End;
+                    } else if (params == "3") {
+                        out.kind = KeyInput::Kind::Delete;
                     }
                     return out;
                 default:

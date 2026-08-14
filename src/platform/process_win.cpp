@@ -669,4 +669,25 @@ bool ChildProcess::IsAlive() const {
     return exit_code == STILL_ACTIVE;
 }
 
+bool IsProcessAlive(unsigned long pid) {
+    if (pid == 0) {
+        return false;
+    }
+    if (pid == GetCurrentProcessId()) {
+        return true;
+    }
+    const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
+    if (process == nullptr) {
+        // 打不开可能是权限不够(别的会话/提权进程),按"活着"算,交给心跳
+        // 过期那条路,不误删。
+        return true;
+    }
+    DWORD exit_code = 0;
+    const bool got = GetExitCodeProcess(process, &exit_code) != FALSE;
+    CloseHandle(process);
+    return got && exit_code == STILL_ACTIVE;
+}
+
+unsigned long CurrentProcessId() { return static_cast<unsigned long>(GetCurrentProcessId()); }
+
 }  // namespace lubancode::platform

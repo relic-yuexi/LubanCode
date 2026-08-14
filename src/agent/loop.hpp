@@ -92,6 +92,18 @@ constexpr int kMaxTurnsNudgeThreshold = 3;
 // max_turns <= 0 表示无上限,永远不触发(压根没有"将尽"这回事)。
 bool ShouldNudgeMaxTurns(int turn, int max_turns);
 
+// 跨会话传话(0.25.x)的安全收件点:Run() 的工具循环每次"下一次请求尚未
+// 发出"的边界(循环顶)会调一次 inbox;有信就注进 history,再发请求——
+// 工具跑着不打断,正文收口后才收。注入规则(纯函数,单测钉):
+//   - history 末条是 user(比如刚攒完的 tool_result 消息):把来信的文本块
+//     追加到那条消息的末尾(保持 user/assistant 交替,三种 wire 都安全);
+//   - 否则(末条是 assistant 等罕见边界):新起一条 user 消息。
+// 来信的"来历"由调用方在文本里带清来源标识(不装成用户手敲),这里只管
+// 结构;来信绝不会被当成确认、权限或命令——这条路由里根本没有那些口子。
+void InjectIncomingMessage(std::vector<api::Message>& history, api::Message incoming);
+
+using InboxPoll = std::function<std::optional<api::Message>()>;
+
 class AgentLoop {
 public:
     // max_turns:一次 Run() 里最多跟模型来回几趟(每趟一次工具调用算一趟)。
@@ -140,6 +152,12 @@ public:
     // 次请求前换掉系统提示，文件工具则由进程 CWD 即刻接管。
     void SetSystemPrompt(std::string system_prompt) { system_prompt_ = std::move(system_prompt); }
 
+    // 跨会话传话的安全收件点(见上 InjectIncomingMessage 注释):每次调
+    // 最多交出一封信;循环边界反复调到交空为止。回调只在主线程(Run 所在
+    // 线程)的工具往返边界被调,绝不与流式回调、确认回调并发——"卡在权限
+    // 确认时来信不能作答"由这一点天然保证。传空清除。
+    void SetInbox(InboxPoll inbox) { inbox_ = std::move(inbox); }
+
     // 请求级上下文尾段。一次外层 Run 内的工具来回共用，下一条用户消息
     // 到来前由调用方重算。它不进 history，也不改稳定 system_prompt_；项目
     // 记忆这类按查询变化、又须经得住 /compact 的上下文走这里。
@@ -168,6 +186,7 @@ private:
     std::size_t max_context_chars_;
     std::vector<api::Message> history_;
     std::function<bool(const tools::Tool&)> tool_filter_;  // tool_search:空 = 不过滤,全量直挂
+    InboxPoll inbox_;  // 跨会话收件点:空 = 没有来信要收,行为跟从前一致
 
     std::vector<api::ToolDefinition> BuildToolDefinitions() const;
 };

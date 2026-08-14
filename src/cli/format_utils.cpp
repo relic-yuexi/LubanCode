@@ -148,8 +148,8 @@ std::string StreamHintText(bool plain) {
     return tr(plain ? "stream.hint.plain" : "stream.hint");
 }
 
-std::string StreamQueueEchoText(const std::string& typed, bool plain) {
-    return tr(plain ? "stream.queueing.plain" : "stream.queueing") + typed;
+std::string StreamFooterInterruptText(bool plain) {
+    return tr(plain ? "stream.interrupt.plain" : "stream.interrupt");
 }
 
 namespace {

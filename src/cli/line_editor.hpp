@@ -48,6 +48,8 @@ enum class KeyKind {
               // 语义一个字都不变
     CtrlC,
     CtrlD,
+    Delete,  // Del 键:composer 编辑里暂不理会(排队待发消息浏览才用);枚举
+             // 与 platform::KeyInput::Kind 保持平行,终端层好搬运
     Esc,   // M10:ESC 打断/清行。终端层只在真控制台下(VK_ESCAPE)产出这个
     CtrlO,  // UI-D:紧凑/详细全局切换。核心层只在 composer 模式下置
             // toggle_expand_requested,真正重画 transcript 是 main.cpp 的事

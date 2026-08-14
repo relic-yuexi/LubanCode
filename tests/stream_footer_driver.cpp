@@ -199,6 +199,36 @@ bool IsRuleRow(int row) {
     return false;
 }
 
+// 结构化找 footer 的输入行(0.25.x 起排队界面定位不靠文案——文案一改便全
+// 倒,规矩是"按结构认框"):上横线(r) / 以 '>' 起的输入行(r+1) / 下横线
+// (r+2) / 非横线的状态行(r+3),四行连成框才算数。从底往上扫,命中最近
+// 的一个(流式期间最底下那个框就是 footer,不是上面滚动历史里的旧框)。
+int FindFooterInputRow(int max_rows = 400) {
+    for (int r = max_rows - 5; r >= 0; --r) {
+        const std::string input_text = ReadRow(r + 1);
+        if (IsRuleRow(r) && !input_text.empty() && input_text[0] == '>' && IsRuleRow(r + 2) &&
+            !IsRuleRow(r + 3)) {
+            return r + 1;
+        }
+    }
+    return -1;
+}
+
+bool WaitForFooterInputRow(int timeout_ms, int* found_row = nullptr) {
+    const DWORD deadline = GetTickCount() + static_cast<DWORD>(timeout_ms);
+    while (GetTickCount() < deadline) {
+        const int row = FindFooterInputRow();
+        if (row >= 0) {
+            if (found_row != nullptr) {
+                *found_row = row;
+            }
+            return true;
+        }
+        Sleep(100);
+    }
+    return false;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -270,7 +300,7 @@ int wmain(int argc, wchar_t** argv) {
     const DWORD spinner_deadline = GetTickCount() + 10000;
     while (GetTickCount() < spinner_deadline) {
         const int spinner_row = FindLastRow("思考中");
-        const int composer_row = FindLastRow("排队下一条");
+        const int composer_row = FindFooterInputRow();
         if (spinner_row >= 0) {
             spinner_frames.insert(ReadAttributeSignature(spinner_row));
         }
@@ -289,11 +319,10 @@ int wmain(int argc, wchar_t** argv) {
           "G0 Working 与输入框同帧可见,输入框不再被 spinner 挂起");
     Check(working_cursor_in_composer,
           "G0 Working 动画期间物理光标仍停在输入框");
-    // "排队下一条" 只出现在输入行的占位提示里(状态行是模式/模型/context 那
-    // 一段,不含这句话),所以搜到的这一行本身就是输入行,不是状态行——
-    // 版式:上横线(matched-1) / 输入行(matched) / 下横线(matched+1) / 状态行(matched+2)。
+    // 输入行靠结构定位(上横线/`> `输入行/下横线/状态行四连),不靠占位
+    // 提示文案——文案改版不再连坐。
     int input_row = -1;
-    Check(WaitForText("排队下一条", 60000, &input_row), "G1 流式期间:框出现(60s 内,靠占位提示定位输入行)");
+    Check(WaitForFooterInputRow(60000, &input_row), "G1 流式期间:框出现(60s 内,结构定位输入行)");
     if (input_row >= 0) {
         const int top_rule_row = input_row - 1;
         const int bottom_rule_row = input_row + 1;
@@ -334,7 +363,23 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
     SendKey(VK_RETURN, L'\r', 0);
-    Check(WaitForText("待发送消息 1 条", 5000), "G2 落队:常驻队列区显示 1 条待发送消息");
+    // 落队后:正文挪进输入框上方的待发区(紧贴上横线那一行),输入行清空
+    // 回占位提示;只有一条时不写"待发消息 1 条"汇总头(结构:待发行 =
+    // 上横线行 - 1,上横线行 = 输入行 - 1)。
+    bool g2_queued_row_seen = false;
+    const DWORD g2_queue_deadline = GetTickCount() + 8000;
+    while (GetTickCount() < g2_queue_deadline) {
+        const int row = FindFooterInputRow();
+        if (row >= 2 && ReadRow(row - 2).find("你好排队") != std::string::npos &&
+            ReadRow(row - 1).empty() == false && IsRuleRow(row - 1) && ReadRow(row).find("你好排队") == std::string::npos) {
+            g2_queued_row_seen = true;
+            break;
+        }
+        Sleep(100);
+    }
+    Check(g2_queued_row_seen, "G2 落队:正文挪到输入框上方待发区,输入行清空");
+    Check(FindLastRow("待发送消息") == -1, "G2 落队:一条不写'待发送消息 1 条'汇总头");
+    Check(FindLastRow("另有") == -1, "G2 落队:未超可见上限,不出现'另有 N 条'");
     Sleep(300);
     // 落队之后框应该重新出现在新位置(占位提示复位),再验一次上下横线还在。
     {
@@ -356,7 +401,7 @@ int wmain(int argc, wchar_t** argv) {
     while (GetTickCount() < post_tool_deadline) {
         const int tool_row = FindLastRow("read_file(");
         const int spinner_row = FindLastRow("思考中");
-        const int composer_row = FindLastRow("排队下一条");
+        const int composer_row = FindFooterInputRow();
         if (tool_row >= 0 && spinner_row > tool_row && composer_row > spinner_row) {
             post_tool_working_and_composer = true;
             post_tool_cursor_in_composer = CursorRow() == composer_row && CursorColumn() >= 2;

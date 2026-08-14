@@ -887,6 +887,10 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
         }
         case KeyKind::CtrlD:
             return BuildRenderState(false, false, true, false);
+        case KeyKind::Delete:
+            // Del 键:composer 编辑暂不理会(队列浏览的"删当前项"在
+            // TurnInputListener 那条路上,不经过这里),显式空操作。
+            return BuildRenderState(false, false, false, false);
         case KeyKind::Esc: {
             // M10:空闲编辑态清空整个 composer 和提示区,跟非空 Ctrl+C 是同
             // 一个效果(cleared=true,留在同一次 ReadLine 里继续等下一下按

@@ -42,6 +42,9 @@ enum class SlashCommand {
     Worktree,  // /worktree new|list|exit:隔离工作树会话
     Background,  // /background:列后台任务清单(run_command run_in_background 起的)
     Record,   // /record start|note|pause|resume|stop|cancel|status|list|install|discard:录一遍生成技能
+    Peers,   // /peers:列同机可见的其它会话(跨会话传话),方向键菜单
+    Send,    // /send <名字或 peer_id> <话>:给另一场会话递一张字条
+    Peerperm,  // /peerperm auto|accept|hold|refuse:跨会话来信的权限档
     Unknown,  // 以 / 开头,但不认得这个命令
 };
 

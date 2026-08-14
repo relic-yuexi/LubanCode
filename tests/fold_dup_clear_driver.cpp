@@ -26,7 +26,7 @@
 //      现有 agent 条目的完整参数也须马上铺出。
 //   6. 一上来就是工具调用、没有开场正文的回合,流式脚注(输入框:上横线+
 //      `> ` 输入行+下横线+状态行)照样在第一次工具调用打印之前正常出现——
-//      用状态行的 "shift+tab" / 输入行占位提示"排队下一条" 当信号。
+//      靠框的结构(横线/`> ` 输入行)认,不靠占位文案。
 //   7. /provider switch 成功后真清一次屏,按新配置重画图标与横幅,切换
 //      提示留在屏上；失败、管道输出不清。
 //   8. ask_user 真由模型调用，上下键选择与末项自由填写都能回传。
@@ -149,6 +149,52 @@ int FindLastRow(const std::string& needle, int max_rows) {
         }
     }
     return -1;
+}
+
+// 一行里是不是一根框横线(至少 40 个 '─' 或 '-' 连排)。跟
+// stream_footer_driver.cpp 同一份手艺。
+bool IsRuleRow(int row) {
+    const std::string text = ReadRow(row);
+    int run = 0;
+    for (std::size_t i = 0; i < text.size();) {
+        const bool box_char = text.compare(i, 3, "\xe2\x94\x80") == 0;
+        if (box_char || text[i] == '-') {
+            ++run;
+            if (run >= 40) {
+                return true;
+            }
+            i += box_char ? 3 : 1;
+        } else {
+            run = 0;
+            ++i;
+        }
+    }
+    return false;
+}
+
+// 结构化找流式 footer 的输入行(0.25.x 起 footer 定位不再靠占位文案):
+// 上横线(r) / 以 "> " 起的输入行(r+1) / 下横线(r+2) / 非横线的状态行
+// (r+3),四行连成框才算。从底部往上扫,命中最近的一个。
+int FindFooterInputRow(int max_rows) {
+    for (int r = max_rows - 5; r >= 0; --r) {
+        const std::string input_text = ReadRow(r + 1);
+        if (IsRuleRow(r) && !input_text.empty() && input_text[0] == '>' && IsRuleRow(r + 2) &&
+            !IsRuleRow(r + 3)) {
+            return r + 1;
+        }
+    }
+    return -1;
+}
+
+bool WaitForFooterInputRow(int timeout_ms, int max_rows) {
+    const DWORD deadline = GetTickCount() + static_cast<DWORD>(timeout_ms);
+    while (GetTickCount() < deadline) {
+        if (FindFooterInputRow(max_rows) >= 0) {
+            return true;
+        }
+        Sleep(100);
+    }
+    return false;
 }
 
 // 只在 from_row_exclusive 之后(不含)找——同一轮会话里同一句签名文字
@@ -639,9 +685,9 @@ int wmain(int argc, wchar_t** argv) {
     // 根因三描述的场景:模型这一轮压根不先吐正文,OnDelta 可能永远不会
     // 调用一次——footer 要靠 OnToolStart/AgentStatusPainter::Tick 里新补
     // 的 Redraw 才第一次露面。这里换个直白的指令,逼模型一上来就调工具、
-    // 不先扯闲话;footer 的输入行占位提示("排队下一条")是独有信号,回合
-    // 还在跑(还没到 "[tokens]" 统计行)期间就该看得见,不是等到最后才冒
-    // 出来或者全程不出现。
+    // 不先扯闲话;footer 的框(上横线/`> ` 输入行/下横线/状态行)是独有
+    // 结构信号(不靠占位文案),回合还在跑(还没到 "[tokens]" 统计行)期间
+    // 就该看得见,不是等到最后才冒出来或者全程不出现。
     // run_command 会弹确认框，确认期间 footer 按设计必须让路，不能拿它测
     // “无交互纯工具回合”。这里换成无需确认的 read_file。
     const int token_row_before_tool_turn = FindLastRow("[tokens]", height);
@@ -649,9 +695,9 @@ int wmain(int argc, wchar_t** argv) {
         "请直接调用 read_file 工具读取 D:\\lubancode\\README.md 的前 5 行,"
         "不要说任何其他话,不要做任何总结,调用完就结束这一轮。");
     SendKey(VK_RETURN, L'\r', 0);
-    const bool footer_seen_before_done = WaitForText("排队下一条", 20000, height);
+    const bool footer_seen_before_done = WaitForFooterInputRow(20000, height);
     Check(footer_seen_before_done,
-          "#六 纯工具回合:footer(输入框占位提示'排队下一条')在回合收尾前出现(20s 内)");
+          "#六 纯工具回合:footer 框(上横线/> 输入行/下横线/状态行)在回合收尾前出现(20s 内)");
     if (!footer_seen_before_done) {
         for (int r = 0; r < height; ++r) {
             const std::string row_text = ReadRow(r);

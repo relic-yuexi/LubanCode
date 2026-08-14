@@ -59,6 +59,7 @@
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
+#include "cli/queue_model.hpp"
 #include "cli/slash_commands.hpp"
 #include "cli/terminal_frame.hpp"
 #include "platform/console.hpp"
@@ -174,7 +175,7 @@ struct StreamFooterState {
     std::string reset;      // theme.reset;plain 主题为空串
     Theme theme;             // 完整主题:画框(BoxRuleLine)、状态行(PrintStatusLine)
                              // 直接复用 composer 那两个画法,得传整个 Theme,不能只传片段。
-    std::vector<std::string> queued;  // 已落队、等本轮结束后发送的消息
+    std::vector<std::string> queued;  // 已落队、等本轮结束后发送的消息(编辑中那条除外)
     bool working = false;             // true 时在输入框上方合成 Working 动画
     std::string working_label;
     std::size_t working_highlight = 0;
@@ -329,6 +330,8 @@ std::optional<KeyEvent> MapKey(const platform::KeyInput& key) {
             return KeyEvent::Simple(KeyKind::CtrlE);
         case PK::Esc:
             return KeyEvent::Simple(KeyKind::Esc);
+        case PK::Delete:
+            return KeyEvent::Simple(KeyKind::Delete);
     }
     return std::nullopt;
 }
@@ -1190,9 +1193,13 @@ void RedrawStreamFooterLocked() {
         return;
     }
 
-    const std::size_t visible_queued = (std::min)(f.queued.size(), kMaxVisibleQueuedLines);
     const int working_rows = f.working ? 1 : 0;
-    const int queue_rows = f.queued.empty() ? 0 : 1 + static_cast<int>(visible_queued);
+    // 待发区行(规格:三条以内逐条摆,不写"待发消息 N 条"汇总头;超上限
+    // 只添一行"另有 N 条")。f.queued 存的是还没格式化的消息正文,行怎么
+    // 摆是 BuildPendingQueueRows 的纯逻辑,单测钉在那边。
+    const std::vector<std::string> queue_rows_text =
+        f.queued.empty() ? std::vector<std::string>{} : BuildPendingQueueRows(f.queued, kMaxVisibleQueuedLines);
+    const int queue_rows = static_cast<int>(queue_rows_text.size());
     const int total_rows = working_rows + queue_rows + kStreamFooterBoxRows;
 
     // 框落在正文光标的下一行:正文停在行中(bx>0)就 by+1,正文刚换行
@@ -1224,17 +1231,12 @@ void RedrawStreamFooterLocked() {
         box_top += working_rows;
     }
 
-    if (!f.queued.empty()) {
-        platform::SetCursorPos(0, box_top);
-        std::cout << f.color << trf("input.queue_header", f.queued.size()) << f.reset;
-        const std::size_t first = f.queued.size() - visible_queued;
-        for (std::size_t i = 0; i < visible_queued; ++i) {
-            platform::SetCursorPos(0, box_top + 1 + static_cast<int>(i));
-            const std::string prefix = "  ↳ ";
-            const int room = (std::max)(0, width - static_cast<int>(DisplayWidthUtf8(prefix)) - 1);
-            std::cout << f.color << prefix
-                      << TruncateUtf8ToDisplayWidth(f.queued[first + i], room) << f.reset;
-        }
+    for (std::size_t i = 0; i < queue_rows_text.size(); ++i) {
+        platform::SetCursorPos(0, box_top + static_cast<int>(i));
+        const int room = (std::max)(0, width - 1);
+        std::cout << f.color << TruncateUtf8ToDisplayWidth(queue_rows_text[i], room) << f.reset;
+    }
+    if (!queue_rows_text.empty()) {
         box_top += queue_rows;
     }
 
@@ -1261,7 +1263,16 @@ void RedrawStreamFooterLocked() {
     std::cout << BoxRuleLine(f.theme, width);
 
     platform::SetCursorPos(0, box_top + 3);
-    PrintStatusLine(chrome, width - 1);
+    // 状态行 = 常规状态段 + "Esc 打断"提示(规格:打断提示进状态行,不许
+    // 挤进输入行)。先按留出的余量截常规段,再以纯文本段追加——两段各自
+    // 包色,不做整行截断,跟 PrintStatusLine 的分段截断一个路数。plain 主题
+    // f.color/f.reset 均为空串,自然无 ANSI。
+    {
+        const std::string interrupt = StreamFooterInterruptText(f.reset.empty());
+        const int interrupt_cols = 3 + static_cast<int>(DisplayWidthUtf8(interrupt));  // " · " + 提示
+        PrintStatusLine(chrome, (std::max)(20, width - 1 - interrupt_cols));
+        std::cout << f.color << " · " << interrupt << f.reset;
+    }
 
     std::cout << kSyncOutputEnd;
     std::cout.flush();
@@ -1429,29 +1440,23 @@ void TurnInputListener::Stop() {
 
 std::vector<std::string> TurnInputListener::TakeQueuedLines() {
     std::lock_guard<std::mutex> lock(queue_mutex_);
-    std::vector<std::string> out = std::move(queued_lines_);
-    queued_lines_.clear();
-    return out;
+    return queue_.TakeAll();
 }
 
 void TurnInputListener::ThreadMain() {
     // POSIX 下监听期间要进 termios 原始模式才能逐键拿到(Windows 的
     // ReadConsoleInputW 不用改模式,这个 scope 在那边是空操作)。
     platform::KeyListenScope listen_scope;
-    // 排队缓冲按码点存(不是 UTF-8 字节),Backspace 才不会把一个多字节字符
-    // 切成半个、写出乱码——跟 line_editor 那套一个思路,只是这里不需要
-    // 完整编辑器的光标移动/历史/补全,故意从简。
-    std::u32string buffer;
     platform::KeyReader key_reader;  // 跨事件状态(代理对配对)整条线程存活
-    const bool plain = theme_.reset.empty();
 
-    // 排队实时回显:把此刻已键入的内容塞进流式脚注的 echo 段(空就复位回
-    // 提示),立刻重画一帧。footer 落在正文下方、不挪正文,故不作废块锚。
-    // Windows 真控制台之外(footer.enabled 为假)这两句是空操作,退回老的
-    // "不回显、只 Enter 时整条显示"。
-    auto refresh_echo = [&] {
+    // footer 快照:输入行回显(只画正在键入的字,不拼任何前缀)+ 待发区
+    // (display_items 已把取出来编辑的那条挪进输入行,不重复摆)。Windows
+    // 真控制台之外(footer.enabled 为假)这两句是空操作,退回老的
+    // "不回显、只 Enter 时整条落队"。
+    auto refresh_footer = [&] {
         std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
-        FooterSlot().echo = buffer.empty() ? std::string() : StreamQueueEchoText(Utf32ToUtf8(buffer), plain);
+        FooterSlot().echo = queue_.echo_text();
+        FooterSlot().queued = queue_.display_items();
         RedrawStreamFooterLocked();
     };
 
@@ -1507,6 +1512,14 @@ void TurnInputListener::ThreadMain() {
         }
         using PK = platform::KeyInput::Kind;
         if (key->kind == PK::Esc) {
+            // 编辑态(取回待发消息改写中)的 Esc 是"放回队列",不打断当前轮;
+            // 空闲态的 Esc 才是打断。
+            if (queue_.editing()) {
+                if (queue_.CancelEdit() != PendingQueueCore::Event::None) {
+                    refresh_footer();
+                }
+                continue;
+            }
             interrupt_turn();
             continue;
         }
@@ -1556,35 +1569,39 @@ void TurnInputListener::ThreadMain() {
             continue;
         }
         if (key->kind == PK::Enter || key->kind == PK::NewLine) {
-            if (!buffer.empty()) {
-                const std::string line = Utf32ToUtf8(buffer);
-                {
-                    std::lock_guard<std::mutex> lock(queue_mutex_);
-                    queued_lines_.push_back(line);
-                }
-                buffer.clear();
-                {
-                    std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
-                    FooterSlot().queued.push_back(line);
-                    FooterSlot().echo.clear();
-                    RedrawStreamFooterLocked();
-                }
+            // 落队(编辑态 = 原位替换),footer 复位:正文挪进上方待发区,
+            // 输入行清空回占位提示。
+            if (queue_.Submit() != PendingQueueCore::Event::None) {
+                refresh_footer();
             }
             continue;
         }
         if (key->kind == PK::Backspace) {
-            if (!buffer.empty()) {
-                buffer.pop_back();
-                refresh_echo();  // 退格后实时更新回显
+            if (queue_.Backspace() != PendingQueueCore::Event::None) {
+                refresh_footer();  // 退格后实时更新回显
             }
             continue;
         }
         if (key->kind == PK::Char) {
-            buffer.push_back(key->ch);
-            refresh_echo();  // 每敲一个字符实时回显到提示行
+            if (queue_.TypeChar(key->ch) != PendingQueueCore::Event::None) {
+                refresh_footer();  // 每敲一个字符实时回显到输入行
+            }
             continue;
         }
-        // 其余按键(Tab/方向键/Ctrl 组合……)监听期间不理会,跟老逻辑一致。
+        if (key->kind == PK::Up || key->kind == PK::Down) {
+            const auto event = key->kind == PK::Up ? queue_.MoveUp() : queue_.MoveDown();
+            if (event != PendingQueueCore::Event::None) {
+                refresh_footer();  // 取回/浏览待发消息
+            }
+            continue;
+        }
+        if (key->kind == PK::Delete) {
+            if (queue_.DeleteCurrent() != PendingQueueCore::Event::None) {
+                refresh_footer();  // 删掉当前浏览的待发消息
+            }
+            continue;
+        }
+        // 其余按键(Tab/Ctrl 组合……)监听期间不理会,跟老逻辑一致。
     }
 }
 

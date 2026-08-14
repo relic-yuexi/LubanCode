@@ -69,13 +69,13 @@ std::string BuildStatusPanelText(const std::vector<std::string>& items,
 // D:\very\long\project -> D:\…\project。max_width 按终端显示列算。
 std::string CompactStatusPath(std::string_view path, int max_width);
 
-// 0.21.x 流式脚注文本(纯函数,i18n 驱动,不夹 ANSI/不认 IO)。流式期间在
-// 正文下方常驻一行,让用户看见"能按 ESC 打断、能键入并回车排队下一条"。
-// StreamHintText:空闲(没在键入)时的可发现性提示。
-// StreamQueueEchoText:用户正键入排队消息时的实时回显,尾巴接上已键入内容。
-// plain 为真(plain 主题/不支持 ANSI)时去掉 ⎋ 符号、退回纯 "ESC" 文字。
+// 0.21.x 流式脚注文本(纯函数,i18n 驱动,不夹 ANSI/不认 IO)。
+// StreamHintText:输入行空闲(没在键入)时的淡色占位提示——只提"键入并
+// 回车排队",不再捎带打断说明(0.25.x 起"Esc 打断"挪进状态行)。
+// StreamFooterInterruptText:状态行末尾追加的打断提示。plain 为真(plain
+// 主题/不支持 ANSI)时两者都去掉 ⎋ 符号、退回纯 "ESC" 文字。
 std::string StreamHintText(bool plain);
-std::string StreamQueueEchoText(const std::string& typed, bool plain);
+std::string StreamFooterInterruptText(bool plain);
 
 // /context 裸敲的分类占用分析:系统提示/工具定义/对话历史三类,配一条按
 // "占窗口比例"取整的条形图(默认 16 格,█ 实 ░ 空;plain 主题回退 # 和 -,

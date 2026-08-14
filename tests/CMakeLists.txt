@@ -28,6 +28,12 @@ add_executable(lubancode_tests
   test_prompts.cpp
   test_prompt_assembler.cpp
   test_line_editor.cpp
+  test_queue_model.cpp
+  test_peer_mailbox.cpp
+  test_peer_registry.cpp
+  test_peer_loop.cpp
+  test_peer_transport.cpp
+  test_peer_tools.cpp
   test_terminal_frame.cpp
   test_choice_menu.cpp
   test_compact.cpp

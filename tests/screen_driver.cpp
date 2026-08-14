@@ -223,6 +223,20 @@ bool IsRuleRow(int row) {
     return false;
 }
 
+// 结构化找流式 footer 的输入行:上横线(r) / 以 '>' 起的输入行(r+1) /
+// 下横线(r+2) / 非横线的状态行(r+3),四行连成框才算,不靠占位文案
+// (0.25.x 起文案改版不再连坐)。
+int FindFooterInputRow(int max_rows = 400) {
+    for (int r = max_rows - 5; r >= 0; --r) {
+        const std::string input_text = ReadRow(r + 1);
+        if (IsRuleRow(r) && !input_text.empty() && input_text[0] == '>' && IsRuleRow(r + 2) &&
+            !IsRuleRow(r + 3)) {
+            return r + 1;
+        }
+    }
+    return -1;
+}
+
 // 一行横线的可视列宽(─ 记 1 列、- 记 1 列;ReadRow 已剪掉行尾空白)。
 // 0.21.x 验"横线满终端宽":满宽 = BufferWidth() - 1。
 int RuleGlyphWidth(int row) {
@@ -424,9 +438,21 @@ int wmain(int argc, wchar_t** argv) {
     // ---- F6 提交帧:横线擦掉、提交行保留;一轮问答后统计行 + 新框 ----
     SendText("请用 read_file 工具读取 hello.txt,然后原样告诉我文件内容。");
     SendKey(VK_RETURN, L'\r', 0);
-    // 0.21.x:流式期间正文下方常驻 "⎋ 打断 · 键入并回车 排队下一条" 提示行
-    // (footer)。整段流式里都在,收束才擦——180s 内应能刮到一帧。
-    Check(WaitForText("排队下一条", 180000), "F6 流式期间:输出下方出现 ESC/排队提示行(footer)");
+    // 0.21.x:流式期间正文下方常驻 footer 框(上横线/`> ` 输入行/下横线/
+    // 状态行)。整段流式里都在,收束才擦——180s 内应能刮到一帧;定位靠
+    // 框的结构,不靠占位提示文案。
+    {
+        const DWORD footer_deadline = GetTickCount() + 180000;
+        bool footer_seen = false;
+        while (GetTickCount() < footer_deadline) {
+            if (FindFooterInputRow() >= 0) {
+                footer_seen = true;
+                break;
+            }
+            Sleep(100);
+        }
+        Check(footer_seen, "F6 流式期间:输出下方出现 footer 输入框(结构定位)");
+    }
     Sleep(600);
     {
         // 收尾后 "> 请用..." 上移到原上横线那一行,原提示行现在是别的内容。

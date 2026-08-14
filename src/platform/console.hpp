@@ -111,6 +111,7 @@ struct KeyInput {
         CtrlO,
         CtrlE,
         Esc,
+        Delete,  // Del 键(排队待发消息浏览里"删当前项"用;两平台键序都认)
     };
     Kind kind = Kind::None;
     char32_t ch = 0;
