@@ -1385,3 +1385,32 @@ TEST_CASE("UI-D: Ctrl+O/Ctrl+E 不动行内容、不打断编辑") {
     state = editor.HandleKey(KeyEvent::Simple(KeyKind::CtrlE));
     CHECK(state.line == U"abc");
 }
+
+TEST_CASE("0.28.x LoadText:整段正文装进编辑区,光标落末尾,可继续完整编辑") {
+    LineEditorCore editor;
+    editor.BeginLine(true);
+    // 多行正文:按 '\n' 拆行,光标落在末行末尾。
+    editor.LoadText(U"第一行\n第二行");
+    RenderState state = editor.CurrentRenderState();
+    CHECK(state.line == U"第一行\n第二行");
+    CHECK(state.lines.size() == 2);
+    CHECK(state.cursor_row == 1);
+    CHECK(state.cursor_col == 3);  // "第二行" 三个码点
+
+    // 取回后是在真正的编辑器里:左右挪光标、中间插字、行首退格并线,全部
+    // 与手敲的 composer 一个待遇。
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Left));
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Left));
+    state = editor.HandleKey(KeyEvent::Char(U'!'));
+    CHECK(state.line == U"第一行\n第!二行");
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Home));
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Backspace));  // 行首退格:并进上一行
+    CHECK(state.line == U"第一行第!二行");
+    CHECK(state.lines.size() == 1);
+
+    // LoadText 顺带清掉历史浏览位:取回的不是历史,内容就是所载正文。
+    editor.LoadText(U"再来一段");
+    state = editor.CurrentRenderState();
+    CHECK(state.line == U"再来一段");
+    CHECK(state.cursor_col == 4);
+}

@@ -106,6 +106,13 @@ struct KeyInput {
         ShiftTab,
         Enter,
         NewLine,  // Alt+Enter / Shift+Enter(POSIX: ESC+CR;裸终端分不出 Shift+Enter,认 Alt+Enter)
+        // 0.28.x 排队消息"取回编辑":Shift+Left(VK_LEFT+SHIFT_PRESSED / CSI 1;2D)
+        // 与备用的 Ctrl+Left(CSI 1;5D)。编辑器本身没有"按词选择"语义,别处
+        // 收到这两个键一律当普通 Left 处理(console 层 MapKey 的缺省映射),
+        // 只有"composer 空、队列非空、非编辑态"那一处才当取回键(纯函数
+        // ShouldRecallQueuedMessage 钉规矩,见 cli/queue_model.hpp)。
+        ShiftLeft,
+        CtrlLeft,
         CtrlC,
         CtrlD,
         CtrlO,

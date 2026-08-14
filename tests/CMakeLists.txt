@@ -32,6 +32,8 @@ add_executable(lubancode_tests
   test_prompt_assembler.cpp
   test_line_editor.cpp
   test_queue_model.cpp
+  # 0.28.x 排队消息取回键:CSI 参数表(纯函数)、取回判定、备用键开关。
+  test_queue_keys.cpp
   test_peer_mailbox.cpp
   test_peer_registry.cpp
   test_peer_loop.cpp

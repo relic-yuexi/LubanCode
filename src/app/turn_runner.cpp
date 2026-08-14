@@ -743,7 +743,8 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     lubancode::cli::SetStreamScreenScrollHook(nullptr);
 
     RunTurnResult out;
-    out.queued_lines = listener.TakeQueuedLines();
+    // 0.28.x:流式期间排队的消息不在这里搬运了——监听线程直接写会话层
+    // SteeringQueue,投递由 InteractiveSession 的会话泵在安全点接手。
 
     // markdown 两段式的后一段:回合正常收束(没报错、没被 ESC 打断)才把
     // 最后一块正文按渲染版重画;半截话/报错现场保持原样,不赌。

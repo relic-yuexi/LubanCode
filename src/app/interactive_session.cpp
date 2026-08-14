@@ -125,6 +125,8 @@ using lubancode::app::kVersion;
 using lubancode::platform::CurrentDirUtf8;
 using lubancode::cli::tr;
 using lubancode::cli::trf;
+// 会话层排队消息账本(0.28.x):流式监听线程落队、会话泵投递,共用这一只。
+using lubancode::cli::SessionSteeringQueue;
 
 namespace {
 
@@ -214,6 +216,7 @@ private:
     void RefillPeerPool();
     void CollectPeerMessages();
     void RunPeerTurn(const std::string& text);
+    void PumpSteeringToSubagents();
     void EnsureMemoryTool();
     void PrintMemoryUsage() const;
     void HandleMemoryCommand(const std::string& raw_args);
@@ -312,7 +315,9 @@ private:
     const std::filesystem::path recordings_root;
 
     // ---- 排队消息与跨会话传话 ----
-    std::deque<std::string> pending_queue;
+    // 0.28.x:排队消息住会话层 SteeringQueue(cli/queue_model.hpp 的
+    // SessionSteeringQueue)——流式监听线程只提交编辑动作,投递由会话泵
+    // (PumpSteeringQueue,循环顶/轮次边界)执行。这里不再另留一份副本。
     std::optional<lubancode::agent::PeerRuntime> peer_runtime;
     bool peer_started = false;
     // 轮内收件池:只被主线程碰(loop 的收件点与空闲收件都在主线程)。
@@ -638,6 +643,7 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
             std::cout << theme.error << trf("cmd.peers.start_failed", peer_error) << theme.reset << "\n";
         }
     }
+    std::function<std::optional<lubancode::api::Message>()> peer_inbox_poll;
     if (peer_started) {
         registry().Register(std::make_unique<lubancode::tools::ListSessionsTool>(
             [this]() { return peer_runtime->ListPeers(); }, peer_runtime->self().peer_id));
@@ -646,24 +652,50 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
             [this](const lubancode::agent::PeerCard& target, const std::string& text) {
                 return peer_runtime->Send(target, text);
             }));
-        reapply_peer_inbox = [this]() {
-            loop->SetInbox([this]() -> std::optional<lubancode::api::Message> {
-                if (peer_ready_messages.empty()) {
-                    RefillPeerPool();  // 轮次边界现掏信箱(工具刚回结果、下一请求未发)
-                }
-                if (peer_ready_messages.empty()) {
-                    return std::nullopt;
-                }
-                lubancode::api::Message message;
-                message.role = lubancode::api::Role::User;
-                message.content.push_back(
-                    lubancode::api::TextBlock{FormatPeerText(peer_ready_messages.front())});
-                peer_ready_messages.erase(peer_ready_messages.begin());
-                return message;
-            });
+        peer_inbox_poll = [this]() -> std::optional<lubancode::api::Message> {
+            if (peer_ready_messages.empty()) {
+                RefillPeerPool();  // 轮次边界现掏信箱(工具刚回结果、下一请求未发)
+            }
+            if (peer_ready_messages.empty()) {
+                return std::nullopt;
+            }
+            lubancode::api::Message message;
+            message.role = lubancode::api::Role::User;
+            message.content.push_back(
+                lubancode::api::TextBlock{FormatPeerText(peer_ready_messages.front())});
+            peer_ready_messages.erase(peer_ready_messages.begin());
+            return message;
         };
-        reapply_peer_inbox();
     }
+    // 0.28.x:轮次边界收件点改为常驻(不再依赖 peer 是否启动)。收件链两段,
+    // 排队消息在前(用户自己的话优先)、peer 来信在后,来源文案分清:
+    //   - 子代理目标:当场转投任务 inbox(PumpSteeringToSubagents,与面板
+    //     定向介入同一条通道),不混进 main 的注入批次;
+    //   - main 目标:一次边界攒下的多条合成一条 user 消息(一块一条
+    //     TextBlock,顺序保留),InjectIncomingMessage 会追加在刚入 history 的
+    //     tool_result 之后——tool result 在前、介入消息在后、下一 request 最后,
+    //     钉死的正是这个次序。危险工具执行中途没有任何调用点,天然插不进话。
+    reapply_peer_inbox = [this, peer_inbox_poll]() {
+        loop->SetInbox([this, peer_inbox_poll]() -> std::optional<lubancode::api::Message> {
+            PumpSteeringToSubagents();
+            const auto queued = SessionSteeringQueue().TakeDeliverable(lubancode::cli::MessageTarget::Main());
+            if (!queued.empty()) {
+                lubancode::api::Message inject;
+                inject.role = lubancode::api::Role::User;
+                for (const auto& item : queued) {
+                    inject.content.push_back(lubancode::api::TextBlock{
+                        "[用户排队消息] 用户在上一只工具执行期间补了话,按排队顺序接上,不另起新任务:\n" +
+                        item.text});
+                }
+                return inject;
+            }
+            if (peer_inbox_poll) {
+                return peer_inbox_poll();
+            }
+            return std::nullopt;
+        });
+    };
+    reapply_peer_inbox();
     // loop 已就位,把 worktree 工具 enter/exit 的善后接到这条 sync 上。
     after_worktree_moved = [this]() { SyncWorktreeDirectory(); };
     // --continue 若把会话搬回了存档里的房,提示词与子代理 cwd 跟着同步。
@@ -1060,11 +1092,37 @@ void InteractiveSession::RunPeerTurn(const std::string& text) {
                 config.hooks, spinner_enabled, transcript, todo_state(), &transcript_expanded,
                 settings_local.allow_commands, settings_local.deny_commands, session_agent_tool());
     PersistNewMessages();
-    for (auto& queued : turn_result.queued_lines) {
-        pending_queue.push_back(std::move(queued));
-    }
     if (peer_started) {
         peer_runtime->SetStatus("idle");
+    }
+}
+
+// 子代理目标的排队消息转投任务 inbox(与面板定向介入同一条通道:
+// AgentTool::SendTaskMessage——那只子代理自己的 AgentLoop 会在"当前工具
+// 收尾、下一次请求未发"的边界收信)。终态明确拒收:标 TargetGone 留在
+// 队列原位(屏上带"[目标已结束]"标记),等用户取回改目标或删掉,不改投
+// main。只在主线程调(会话泵/轮次边界)。
+void InteractiveSession::PumpSteeringToSubagents() {
+    for (const auto& item : SessionSteeringQueue().Snapshot()) {
+        if (item.target.kind != lubancode::cli::MessageTarget::Kind::Subagent ||
+            item.state != lubancode::cli::QueueItemState::Queued || item.edit_open) {
+            continue;
+        }
+        lubancode::tools::AgentTool* agent_tool = session_agent_tool();
+        if (agent_tool == nullptr) {
+            SessionSteeringQueue().MarkFailed(item.id, "当前会话没有可用的子代理通道");
+            continue;
+        }
+        const lubancode::tools::TaskMessageStatus status =
+            agent_tool->SendTaskMessage(item.target.task_id, item.text);
+        if (status == lubancode::tools::TaskMessageStatus::Queued) {
+            // 已进任务 inbox,活队列退场(那边轮次边界自会送达)。
+            SessionSteeringQueue().Remove(item.id);
+        } else {
+            // 终态(Finished)或任务号认不出(NotFound):一律按"目标已结束"
+            // 标注,原文留队,绝不改投 main(规格"队列按目标分账")。
+            SessionSteeringQueue().MarkTargetGone(item.id, "目标子代理已结束");
+        }
     }
 }
 
@@ -1467,16 +1525,12 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
             ? project_memory->BuildTurnContext(content, std::filesystem::current_path())
             : std::string();
     loop->SetTurnSystemSuffix(std::move(turn_suffix));
-    const RunTurnResult turn_result =
-        RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
-                config.hooks, spinner_enabled, transcript, todo_state(), &transcript_expanded,
-                settings_local.allow_commands, settings_local.deny_commands, session_agent_tool(),
-                recorder.has_value() ? &*recorder : nullptr);
+    RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
+            config.hooks, spinner_enabled, transcript, todo_state(), &transcript_expanded,
+            settings_local.allow_commands, settings_local.deny_commands, session_agent_tool(),
+            recorder.has_value() ? &*recorder : nullptr);
     // 每轮结束(成功/出错/ESC 打断都算)把新增消息逐条追加落盘。
     PersistNewMessages();
-    for (auto& queued : turn_result.queued_lines) {
-        pending_queue.push_back(std::move(queued));
-    }
     return CommandFlow::Continue;
 }
 
@@ -1509,8 +1563,24 @@ SessionCommandState InteractiveSession::MakeSessionCommandState() {
         current_model};
 }
 
-// /clear 与退出共用的子代理清场:停全部、报未送达,不无声遗失。
+// /clear 与退出共用的清场:停全部子代理、报未送达,排队消息明确处置——
+// 一样不无声遗失(规格"数据与线程"节)。
 void InteractiveSession::CleanupBackgroundAgents() {
+    // 会话层排队消息:逐条列出后丢弃(目标短名 + 首行原文),处置看得见。
+    const auto discarded = SessionSteeringQueue().TakeAllForDisposal();
+    if (!discarded.empty()) {
+        std::cout << theme.stats << trf("queue.disposal_head", discarded.size()) << theme.reset << "\n";
+        for (const auto& item : discarded) {
+            std::string first_line = item.text;
+            first_line.erase(0, first_line.find_first_not_of("\r\n\t "));
+            const std::size_t cut = first_line.find('\n');
+            if (cut != std::string::npos) {
+                first_line.resize(cut);
+            }
+            std::cout << theme.stats << "  [" << item.target.short_label() << "] " << first_line << theme.reset
+                      << "\n";
+        }
+    }
     if (session_agent_tool() == nullptr) {
         return;
     }
@@ -1566,10 +1636,36 @@ void InteractiveSession::Run() {
             }
         }
 
+        // 0.28.x 会话泵:把流式期间排下的消息送上路。子代理目标先转投任务
+        // inbox(SendTaskMessage 那套,共用面板定向介入的通道);main 目标取
+        // 队头自动发送——本轮没再调工具自然收尾的场合,队列紧接着成为下一
+        // 次请求的用户消息,不等用户再敲一下(规格)。用户自己的排队消息
+        // 优先于 peer 来信与子代理完成回流,所以泵挂在它们前头。
+        PumpSteeringToSubagents();
+        if (auto head = SessionSteeringQueue().TakeFirstDeliverable(lubancode::cli::MessageTarget::Main())) {
+            std::cout << theme.prompt << "> " << theme.reset << head->text << "\n";
+            if (peer_started) {
+                peer_runtime->SetStatus("busy");
+            }
+            const CommandFlow flow = ProcessLine(head->text);
+            if (peer_started) {
+                peer_runtime->SetStatus("idle");
+            }
+            if (flow == CommandFlow::Exit) {
+                break;
+            }
+            continue;
+        }
+        // main 目标都送空了:"打断并立即送"的状态旗收掉(队列区标题复位;
+        // TargetGone/失败条目留在原位等用户处置,不算"没送完")。
+        if (!SessionSteeringQueue().HasDeliverable(lubancode::cli::MessageTarget::Main())) {
+            SessionSteeringQueue().ClearImmediateDelivery();
+        }
+
         // 跨会话来信:空闲当口(不在 Run 里)收进来的信,经确认后直接
         // 另起一轮外来消息,不等用户再敲一行。用户自己的排队消息优先。
         CollectPeerMessages();
-        if (!peer_ready_messages.empty() && pending_queue.empty()) {
+        if (!peer_ready_messages.empty() && !SessionSteeringQueue().HasDeliverable(lubancode::cli::MessageTarget::Main())) {
             const lubancode::agent::PeerEnvelope envelope = std::move(peer_ready_messages.front());
             peer_ready_messages.erase(peer_ready_messages.begin());
             std::cout << theme.stats
@@ -1585,7 +1681,8 @@ void InteractiveSession::Run() {
         // 开头会把 DrainCompletionNotices 拿到的结果原文附带进消息。用户自己
         // 排队的消息优先:队列非空时先让队头那条走,它起 RunTurn 一样能把
         // 结果捎上。
-        if (session_agent_tool() != nullptr && pending_queue.empty() &&
+        if (session_agent_tool() != nullptr &&
+            !SessionSteeringQueue().HasDeliverable(lubancode::cli::MessageTarget::Main()) &&
             session_agent_tool()->HasUndeliveredCompletions()) {
             std::cout << theme.stats << "[后台子代理完成,结果交回主会话继续]" << theme.reset << "\n";
             RunPeerTurn("后台子代理有新结果送达(资料附在本条消息里)。请阅读后继续推进手头任务;"
@@ -1595,30 +1692,21 @@ void InteractiveSession::Run() {
 
         std::string content;
         std::optional<int> composer_target;  // 这条话若出自查看态 composer,收件人是那只子代理
-        if (!pending_queue.empty()) {
-            // 队列非空:先把队列里排在最前面的这条自动发出去,不再等
-            // ReadLine()——跟手输的视觉一致,打一行 "> <内容>" 再处理。
-            // 队列是流式期间排下的,收件人天然是 main,不带查看态目标。
-            content = std::move(pending_queue.front());
-            pending_queue.pop_front();
-            std::cout << theme.prompt << "> " << theme.reset << content << "\n";
-        } else {
-            // UI-A:主提示符是唯一开 composer 的读取点——Alt/Shift+Enter 插
-            // 换行、Enter 全发、全空白不发送。别的 ReadLine 调用点(确认提示、
-            // /model 编号选择、向导)保持单行语义。查看态里提交的话,收件
-            // 目标由面板控制器记着(输入框上横线右端的短标题就是它)。
-            const std::optional<std::string> line =
-                lubancode::cli::ReadLine(theme.prompt + "> " + theme.reset, theme,
-                                          /*esc_rejects=*/false, /*composer=*/true);
-            if (!line.has_value()) {
-                break;  // EOF:Ctrl+Z 或管道读尽
-            }
-            if (line->empty()) {
-                continue;  // 空行不退出,重新给提示符
-            }
-            content = *line;
-            composer_target = lubancode::cli::CurrentComposerAgentTarget();
+        // UI-A:主提示符是唯一开 composer 的读取点——Alt/Shift+Enter 插
+        // 换行、Enter 全发、全空白不发送。别的 ReadLine 调用点(确认提示、
+        // /model 编号选择、向导)保持单行语义。查看态里提交的话,收件
+        // 目标由面板控制器记着(输入框上横线右端的短标题就是它)。
+        const std::optional<std::string> line =
+            lubancode::cli::ReadLine(theme.prompt + "> " + theme.reset, theme,
+                                      /*esc_rejects=*/false, /*composer=*/true);
+        if (!line.has_value()) {
+            break;  // EOF:Ctrl+Z 或管道读尽
         }
+        if (line->empty()) {
+            continue;  // 空行不退出,重新给提示符
+        }
+        content = *line;
+        composer_target = lubancode::cli::CurrentComposerAgentTarget();
 
         if (content == "exit" || content == "quit") {
             break;

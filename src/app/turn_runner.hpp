@@ -98,13 +98,13 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                             lubancode::agent::WorkflowRecorder* recorder = nullptr);
 
 // RunTurn() 的结果:status 沿用老语义(0 成功、非 0 出错);cancelled 标记
-// 这一轮是不是被 ESC 打断的(打断不算错误,status 照样是 0);queued_lines
-// 是这一轮"流式期间"(监听线程存活的窗口)攒下的排队消息,按落队顺序,
-// 交给交互循环追加进它自己的队列,下一轮循环逐条自动发出。
+// 这一轮是不是被 ESC 打断的(打断不算错误,status 照样是 0)。
+// 0.28.x 起,流式期间排下的消息不再经这里事后搬运——监听线程直接落进会话层
+// SteeringQueue(cli/queue_model.hpp),由会话泵在安全点(工具边界/收场)
+// 投递,queued_lines 字段随之废除。
 struct RunTurnResult {
     int status = 0;
     bool cancelled = false;
-    std::vector<std::string> queued_lines;
 };
 
 std::string ImageInputErrorText(const lubancode::cli::ImageInputError& error);

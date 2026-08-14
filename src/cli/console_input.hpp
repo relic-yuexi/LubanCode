@@ -350,11 +350,14 @@ private:
 // SharedEditor 档位与同一个 NextConfirmMode 轮转,切完 footer 状态行按新档
 // 重画;Tab 不引入补全交互,维持不理会。
 //
-// 0.25.x 排队输入自然化:队列本身是 PendingQueueCore(见 queue_model.hpp),
-// 输入行只画 `> ` 和正在键入的字;Enter 落队后正文挪进上方待发区(逐条摆,
-// 超上限只添一行"另有 N 条");空输入按上键取回最后一条待发消息改写,
-// 上下键在待发消息间走,Delete 删当前项,Esc 放回队列——编辑态的 Esc 不
-// 再打断当前轮。
+// 0.25.x 排队输入自然化升级,0.28.x 移库:队列本身是会话层的
+// SteeringQueue(见 queue_model.hpp),监听线程只提交编辑动作(Enter 落队
+// 带目标、Shift+←/上键 取回、Enter 原位替换、Esc 还原、Del 两段删除、
+// 上下键在条目间走),不拥有最终数据——投递由会话泵在安全点(工具边界/
+// 打断收场)执行,Enter 是排队而不是另开一轮。取回的正文装进一只真正的
+// LineEditorCore(composer 模式,光标/退格/粘贴/多行软换行与空闲 composer
+// 同一套),不是只会尾删的临时 buffer。两层 Esc:编辑态第一下只取消编辑、
+// 还原原文;退出编辑态后再按 Esc 才打断当前轮。
 //
 // Ctrl+C(补于排查"ESC/Ctrl+C 都停不掉子代理"那次)语义对齐 bash/Python/
 // Node REPL、Claude Code 官方文档确认过的通用约定:单击效果等同
@@ -373,9 +376,9 @@ private:
 // WaitForKeyEvent 都不碰——"问题打印完、菜单还没抢到读权"的空窗期也
 // 不消费按键,Esc 只取消当前菜单,不会落进流式待发队列或误打断整轮。
 //
-// stdin 不是真控制台(管道/重定向)时,构造函数直接不起线程,Stop()/
-// TakeQueuedLines() 都是安全的空操作——管道场景本来就读不到"按键",这整个
-// 类形同虚设,是刻意的、跟 ReadLine() 的管道回退逻辑对齐的设计。
+// stdin 不是真控制台(管道/重定向)时,构造函数直接不起线程,Stop()
+// 是安全的空操作——管道场景本来就读不到"按键",这整个类形同虚设,
+// 是刻意的、跟 ReadLine() 的管道回退逻辑对齐的设计。
 class TurnInputListener {
 public:
     // transcript_expanded:UI-D(0.16.0)紧凑/详细全局开关的地址,跟
@@ -402,14 +405,11 @@ public:
     TurnInputListener& operator=(const TurnInputListener&) = delete;
 
     // 停止监听、join 线程。main.cpp 在本轮 Run() 返回之后立刻调一次,保证
-    // 下一次 ReadLine()(排队消息回显那个 "> " 提示,或者下一轮主提示符)
-    // 开始之前,监听线程已经彻底退出——不依赖两边抢互斥锁的运气,干净收尾。
-    // 幂等,重复调用/析构时再调都安全。
+    // 下一次 ReadLine()(下一轮主提示符)开始之前,监听线程已经彻底退出
+    // ——不依赖两边抢互斥锁的运气,干净收尾。若用户此刻还停在队列编辑态
+    // 半途,未提交的修改按 Esc 同款处置:原文还原、解冻,不把冻结条目
+    // 留给投递泵。幂等,重复调用/析构时再调都安全。
     void Stop();
-
-    // 取走这次监听期间排队攒下的整行输入,按落队的原始顺序。Stop() 之后
-    // 调,取完队列内部清空,不会重复吐给下一轮。
-    std::vector<std::string> TakeQueuedLines();
 
 private:
     void ThreadMain();
@@ -421,8 +421,9 @@ private:
     std::thread thread_;
     std::atomic<bool> stop_requested_{false};
     bool enabled_ = false;
-    std::mutex queue_mutex_;
-    PendingQueueCore queue_;  // 待发消息队列(键入/落队/取回/编辑/删除),见 queue_model.hpp
+    // 监听线程在 Stop()(join 完)之后由主线程读:还没了结的编辑事务在
+    // 这里收尾(CancelEdit 还原原文,解冻)。
+    std::optional<SteeringQueue::EditHandle> open_edit_;
 };
 
 }  // namespace lubancode::cli

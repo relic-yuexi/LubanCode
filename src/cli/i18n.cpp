@@ -120,7 +120,10 @@ const Entry kZhCN[] = {
      "  Shift+Tab       循环切确认档(confirm/auto/yolo)——任何时候都是,跟状态行提示\n"
      "                  一致;只有焦点态内例外(那里是焦点往新走)。auto:文件与安全命令\n"
      "                  放行,危险命令与外挂工具确认;yolo:全部放行\n"
-     "  流式期间打字回车  不会打断当前流,而是排进队列,本轮结束后按顺序自动发出\n"
+     "  流式期间打字回车  不会打断当前流,而是排进输入框上方的待发队列;当前工具收尾、\n"
+     "                  结果入账后、下一次请求发出前,按排队顺序送进同一轮对话(队列区\n"
+     "                  标题写明送达时机)。Esc 打断并立即送;Shift+← 把最新一条取回编辑\n"
+     "                  (Enter 原位替换、Esc 还原、Del 再按一次删除;上键取回保留作别名)\n"
      "  /exit           退出(裸词 exit/quit 也认)\n"},
     {"help.config",
      "配置优先级(从高到低,按字段逐个决,不是整套配置一刀切):\n"
@@ -202,6 +205,9 @@ const Entry kZhCN[] = {
      "  /exit           退出(裸词 exit/quit 也认)\n"
      "多行输入:Shift+Enter 插换行(Alt+Enter 同义,但 Windows Terminal 默认把它绑成全屏\n"
      "切换、会吞掉,推荐 Shift+Enter);Enter 发送整段;多行时首行的 / 是正文,不当命令。\n"
+     "排队消息:流式期间打字回车不另开一轮,排进输入框上方的待发队列,当前工具收尾后\n"
+     "送进同一轮(队列区标题写明时机);Esc 打断并立即送;Shift+← 取回编辑(Enter 原位\n"
+     "替换、Esc 还原、Del 再按一次删除)。\n"
      "粘贴内容在 1000 字符内直接显示;超过后折成 [粘贴内容 N 字符],提交时展开原文。\n"
      "候选菜单:/ 开头时按 ↓ 进入直选(↓↑ 循环移动,Enter 执行选中命令、已敲的参数尾巴\n"
      "原样保留;打字/退格/ESC 回普通编辑);Tab 补全/轮转照旧。\n"
@@ -221,6 +227,22 @@ const Entry kZhCN[] = {
     {"input.interrupted", "[已打断]"},
     {"input.queued", "[已排队] "},
     {"input.queue_more", "另有 {0} 条"},
+    // ---- 0.28.x 排队消息(工具边界送达 + Shift+左键取回编辑) ----
+    {"queue.key_hint", "Shift+←"},
+    {"queue.key_hint_fallback", "Shift+← / Ctrl+←"},
+    {"queue.title.boundary", "待送消息:下一次工具调用后送出 · Esc 打断并立即送 · {0} 取回编辑"},
+    {"queue.title.end_of_turn", "待送消息:本轮收尾后送出 · {0} 取回编辑"},
+    {"queue.title.immediate", "正在打断并送达……"},
+    {"queue.title.editing", "正在编辑排队消息 · Enter 原位替换 · Esc 还原 · Del 再按一次删除"},
+    {"queue.mark.editing", "[编辑中] "},
+    {"queue.mark.target", "[#{0}] "},
+    {"queue.mark.target_gone", "[目标已结束] "},
+    {"queue.mark.failed", "[发送失败] "},
+    {"queue.commit_conflict", "这条消息已送达或已变动,修改未保存;编辑器里的正文保留为新消息。"},
+    {"queue.echo_more_lines", " …(还有 {0} 行)"},
+    {"queue.edit_blocks_panel", "先 Enter/Esc 了结排队消息的编辑,再操作面板。"},
+    {"queue.delete_armed", "再按一次 Del 删除这条排队消息(Esc/超时取消)"},
+    {"queue.disposal_head", "未送出的排队消息 {0} 条,已随本次退出/清场一并丢弃:"},
     {"input.pasted_content", "[粘贴内容 {0} 字符]"},
     {"input.ctrlc_exit", "[已退出]"},
     {"stream.hint", "键入并回车 排队下一条"},
@@ -1043,8 +1065,12 @@ const Entry kEn[] = {
      "                  status line; the only exception is focus mode (there it moves focus newer).\n"
      "                  auto: file edits and safe commands run freely, dangerous commands and\n"
      "                  external tools still ask; yolo: everything runs freely\n"
-     "  typing+Enter during streaming  does not interrupt the stream; the line is queued and sent\n"
-     "                  in order after this turn ends\n"
+     "  typing+Enter during streaming  does not interrupt the stream; the line joins the queue shown\n"
+     "                  above the input box and is delivered, in order, into the same conversation\n"
+     "                  right after the current tool call finishes (the queue title states the\n"
+     "                  timing). Esc interrupts and sends immediately; Shift+Left recalls the latest\n"
+     "                  message for editing (Enter replaces in place, Esc restores, Del twice\n"
+     "                  deletes; the Up key still works as an alias)\n"
      "  /exit           quit (bare exit/quit work too)\n"},
     {"help.config",
      "Configuration priority (high to low, decided per field, not as a whole):\n"
@@ -1129,6 +1155,10 @@ const Entry kEn[] = {
      "Multi-line input: Shift+Enter inserts a newline (Alt+Enter too, but Windows Terminal may\n"
      "swallow it; Shift+Enter is recommended); Enter sends the whole message; on multi-line input\n"
      "a leading / is treated as text, not a command.\n"
+     "Queued messages: typing+Enter during streaming queues the line above the input box and it\n"
+     "is delivered into the same turn after the current tool call (the queue title states the\n"
+     "timing); Esc interrupts and sends immediately; Shift+Left recalls it for editing (Enter\n"
+     "replaces in place, Esc restores, Del twice deletes).\n"
      "Paste content up to 1000 chars stays visible; larger pastes collapse and expand on submit.\n"
      "Candidate menu: with a leading /, Down enters the menu (Down/Up cycle, Enter runs the\n"
      "selection, typed argument tail kept; typing/Backspace/ESC returns to editing); Tab completes.\n"
@@ -1147,6 +1177,22 @@ const Entry kEn[] = {
     {"input.interrupted", "[interrupted]"},
     {"input.queued", "[queued] "},
     {"input.queue_more", "{0} more queued"},
+    // ---- 0.28.x queued messages (delivered at tool boundary, Shift+Left to edit) ----
+    {"queue.key_hint", "Shift+Left"},
+    {"queue.key_hint_fallback", "Shift+Left / Ctrl+Left"},
+    {"queue.title.boundary", "Queued: sent after the next tool call · Esc interrupts and sends now · {0} to edit"},
+    {"queue.title.end_of_turn", "Queued: sent when this turn ends · {0} to edit"},
+    {"queue.title.immediate", "Interrupting and sending now..."},
+    {"queue.title.editing", "Editing a queued message · Enter replaces in place · Esc restores · Del twice deletes"},
+    {"queue.mark.editing", "[editing] "},
+    {"queue.mark.target", "[#{0}] "},
+    {"queue.mark.target_gone", "[target finished] "},
+    {"queue.mark.failed", "[send failed] "},
+    {"queue.commit_conflict", "This message was already delivered or changed; your edit was not saved. The text stays as a new message."},
+    {"queue.echo_more_lines", " …({0} more lines)"},
+    {"queue.edit_blocks_panel", "Finish or cancel the queued-message edit (Enter/Esc) before using the panel."},
+    {"queue.delete_armed", "Press Del again to delete this queued message (Esc/timeout cancels)"},
+    {"queue.disposal_head", "{0} queued message(s) never sent; discarded on exit/clear:"},
     {"input.pasted_content", "[Pasted Content {0} chars]"},
     {"input.ctrlc_exit", "[exited]"},
     {"stream.hint", "type + Enter to queue next"},

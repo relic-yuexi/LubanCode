@@ -233,7 +233,8 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
 
     // 单发模式没有下一轮循环好把排队消息接着发出去——AskOnce 只问这一句就
     // 退出,ESC/排队这套机制天生只对交互循环有意义(spec 也只要求交互模式
-    // 的手测清单),这里只取 status,忽略 queued_lines/cancelled。
+    // 的手测清单),这里只取 status,忽略 cancelled。管道/重定向下监听线程
+    // 压根不起,会话层队列天然为空。
     std::vector<lubancode::cli::TranscriptItem> transcript;
     return RunTurn(loop, question, auto_confirm, always_allowed_tools, theme, context_tracker, registry,
                     config.hooks, spinner_enabled, transcript, todo_state, /*transcript_expanded=*/nullptr,
