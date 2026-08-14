@@ -40,6 +40,14 @@ std::optional<std::string> OfficialSkillsDir();
 std::expected<void, std::string> ReplaceFileAtomically(const std::filesystem::path& source,
                                                         const std::filesystem::path& destination);
 
+// 当前工作目录的 UTF-8 写法。两平台同一套 std::filesystem,内联在此,
+// 不再各写一份。原本住在 main.cpp 的匿名命名空间里,app 层要用,先搬来。
+inline std::string CurrentDirUtf8() {
+    const std::filesystem::path cwd = std::filesystem::current_path();
+    const std::u8string u8 = cwd.u8string();
+    return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+}
+
 #ifdef _WIN32
 
 std::wstring Utf8ToWide(const std::string& utf8);
