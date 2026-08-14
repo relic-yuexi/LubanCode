@@ -117,6 +117,13 @@ AgentPanelProvider& AgentPanelProviderSlot() {
     return provider;
 }
 
+// 空闲唤醒钩子的存取点(跟 AgentPanelProvider 同一套会话级静态槽)。只在
+// ReadLineKeyByKey 的 100ms 面板刷新一拍里被读,主线程独占,不用加锁。
+std::function<bool()>& IdleWakeHookSlot() {
+    static std::function<bool()> hook;
+    return hook;
+}
+
 std::vector<std::string> FormatAgentPanel(const std::vector<AgentPanelEntry>& agents, int selected,
                                           bool detail) {
     if (agents.empty()) {
@@ -765,6 +772,19 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                                with_agent_panel(editor.CurrentRenderState(), entries),
                                prev_body_row_count, previous_frame, vt_enabled, chrome);
             }
+            // 空闲唤醒:系统侧有事件(后台子代理跑完等)要在会话空闲时处理。
+            // composer 空着才让位——用户敲了一半的正文不抢;空串返回,调用方
+            // 循环顶自会去办,办完回来重新给提示符。
+            if (composer && editor.CurrentRenderState().line.empty()) {
+                const auto& wake = IdleWakeHookSlot();
+                if (wake && wake()) {
+                    if (prev_body_row_count > 0) {
+                        platform::SetCursorPos(0, start_row + prev_body_row_count);
+                    }
+                    std::cout << "\n";
+                    return std::string();
+                }
+            }
             continue;
         }
         const std::optional<platform::KeyInput> raw_key = key_reader.ReadOne();
@@ -1085,6 +1105,8 @@ void SetConfirmMode(ConfirmMode mode) { SharedEditor().set_confirm_mode(mode); }
 void SetTranscriptUiHandler(TranscriptUiHandler handler) { UiHandlerSlot() = std::move(handler); }
 
 void SetAgentPanelProvider(AgentPanelProvider provider) { AgentPanelProviderSlot() = std::move(provider); }
+
+void SetIdleWakeHook(std::function<bool()> hook) { IdleWakeHookSlot() = std::move(hook); }
 
 void SetStatusLineData(const StatusPanelData& values, const std::vector<std::string>& items,
                        const std::string& separator) {

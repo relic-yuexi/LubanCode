@@ -5099,6 +5099,14 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         return out;
     });
 
+    // 后台子代理结果回流(空闲唤醒):任务在会话空闲时跑完的,不能干等用户
+    // 再敲一行才送达。ReadLine 等键的 100ms 面板刷新一拍里问这里,有未投递
+    // 的完成结果就让位,InteractiveLoop 循环顶(下面 while 里)另起一轮把
+    // 结果交回主代理。回调只读任务台账的快照字段,开销可以忽略。
+    lubancode::cli::SetIdleWakeHook([session_agent_tool]() {
+        return session_agent_tool != nullptr && session_agent_tool->HasUndeliveredCompletions();
+    });
+
     // -----------------------------------------------------------------------
     // UI-D(0.16.0):Ctrl+O 紧凑/详细 + 焦点导航 + Ctrl+E 聚焦查看。
     // 三样会话级状态都在这儿;按键语义翻译在 LineEditorCore(composer 空不空、
@@ -5208,6 +5216,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         ~UiHandlerGuard() {
             lubancode::cli::SetTranscriptUiHandler(nullptr);
             lubancode::cli::SetAgentPanelProvider(nullptr);
+            lubancode::cli::SetIdleWakeHook(nullptr);
         }
     } ui_handler_guard;
 
@@ -6204,6 +6213,20 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                       << trf("cmd.peers.incoming_notice", envelope.sender_name, envelope.sender_id) << theme.reset
                       << "\n";
             run_peer_turn(format_peer_text(envelope));
+            continue;
+        }
+
+        // 后台子代理结果回流:任务在会话空闲时跑完的,结果不能干等用户再敲
+        // 一行才送达——面板只画"完成",真正让主循环动起来的是这里。检测到
+        // 未投递的完成结果就另起一轮(同外来消息那条路,不落 slash),RunTurn
+        // 开头会把 DrainCompletionNotices 拿到的结果原文附带进消息。用户自己
+        // 排队的消息优先:队列非空时先让队头那条走,它起 RunTurn 一样能把
+        // 结果捎上。
+        if (session_agent_tool != nullptr && pending_queue.empty() &&
+            session_agent_tool->HasUndeliveredCompletions()) {
+            std::cout << theme.stats << "[后台子代理完成,结果交回主会话继续]" << theme.reset << "\n";
+            run_peer_turn("后台子代理有新结果送达(资料附在本条消息里)。请阅读后继续推进手头任务;"
+                          "若结论已够用,向用户简要汇报要点,不要重新摸排。");
             continue;
         }
 
