@@ -54,6 +54,7 @@
 #include "cli/setup_wizard.hpp"
 #include "cli/slash_commands.hpp"
 #include "cli/spinner.hpp"
+#include "cli/terminal_frame.hpp"
 #include "cli/theme.hpp"
 #include "cli/todo_render.hpp"
 #include "cli/transcript.hpp"
@@ -96,6 +97,7 @@
 // 光标/清行/UTF-8 代码页)、宽窄转换全走 platform/,#ifdef 只剩文件末尾
 // wmain/main 入口那一处。
 #include "platform/console.hpp"
+#include "platform/terminal_batch.hpp"
 #include "platform/paths.hpp"
 
 namespace {
@@ -105,6 +107,11 @@ constexpr std::string_view kVersion = "0.24.1";
 // i18n:tr/trf 在本文件里到处用,拉进匿名命名空间省得每处全限定。
 using lubancode::cli::tr;
 using lubancode::cli::trf;
+
+bool SupportsVtBatch() {
+    static const bool enabled = lubancode::platform::ProbeStdoutConsole().vt_enabled;
+    return enabled;
+}
 
 void PrintVersion() {
     std::cout << "lubancode " << kVersion << "\n";
@@ -1210,7 +1217,7 @@ public:
         lubancode::platform::SetCursorPos(0, start_row);
         std::cout << text;
         std::cout.flush();
-        anchors_.push_back(Anchor{item.id, start_row, rows});
+        anchors_.push_back(Anchor{item.id, start_row, rows, BuildFrame(text, info->width)});
     }
 
     // 原地改写一个已登记的条目(执行中 -> 待确认 -> 终态)。锚点没登记成
@@ -1255,20 +1262,44 @@ public:
         }
 
         const int rows_to_clear = (std::max)(anchor->rows, new_rows);
+        int viewport_x = info->viewport_x;
+        int viewport_y = info->viewport_y;
         if (at_tail) {
             int start_row = anchor->start_row;
+            const int before_start_row = start_row;
             EnsureRoom(start_row, rows_to_clear + 1);  // Render 末尾带换行，须多留一行
+            if (start_row != before_start_row) {
+                if (const auto after_scroll = lubancode::platform::GetScreenInfo();
+                    after_scroll.has_value()) {
+                    viewport_x = after_scroll->viewport_x;
+                    viewport_y = after_scroll->viewport_y;
+                }
+            }
         }
-        for (int r = 0; r < rows_to_clear; ++r) {
-            lubancode::platform::ClearRowFrom(0, anchor->start_row + r, buffer_width);
+        lubancode::cli::InlineFrame next_frame = BuildFrame(text, buffer_width);
+        if (SupportsVtBatch()) {
+            lubancode::cli::InlineFrame paint_frame = next_frame;
+            if (!at_tail) {
+                paint_frame.cursor_x = saved_cursor_x;
+                paint_frame.cursor_row = saved_cursor_y - anchor->start_row;
+            }
+            lubancode::platform::TerminalBatch batch(viewport_x, viewport_y);
+            lubancode::cli::QueueInlineFrameDiff(batch, &anchor->frame, paint_frame,
+                                                  anchor->start_row);
+            batch.Flush();
+        } else {
+            for (int r = 0; r < rows_to_clear; ++r) {
+                lubancode::platform::ClearRowFrom(0, anchor->start_row + r, buffer_width);
+            }
+            lubancode::platform::SetCursorPos(0, anchor->start_row);
+            std::cout << text;
+            std::cout.flush();
+            if (!at_tail) {
+                lubancode::platform::SetCursorPos(saved_cursor_x, saved_cursor_y);
+            }
         }
-        lubancode::platform::SetCursorPos(0, anchor->start_row);
-        std::cout << text;
-        std::cout.flush();
         anchor->rows = new_rows;
-        if (!at_tail) {
-            lubancode::platform::SetCursorPos(saved_cursor_x, saved_cursor_y);  // 下面还垫着别的内容,光标放回去
-        }
+        anchor->frame = std::move(next_frame);
     }
 
     // 状态型条目(todo 计划)会跨多次工具调用复用。锚点还在，便原地
@@ -1304,12 +1335,21 @@ public:
         if (info->cursor_y < end_row) {
             return;
         }
-        for (int r = end_row; r <= info->cursor_y; ++r) {
-            // diff 预览带整行背景色；只擦字符会留下成片红绿底，须连
-            // 字符属性一道归零。
-            lubancode::platform::ClearRowHardFrom(0, r, info->width);
+        if (SupportsVtBatch()) {
+            lubancode::platform::TerminalBatch batch(info->viewport_x, info->viewport_y);
+            for (int r = end_row; r <= info->cursor_y; ++r) {
+                batch.ClearRowHardFrom(0, r, info->width);
+            }
+            batch.MoveTo(0, end_row);
+            batch.Flush();
+        } else {
+            for (int r = end_row; r <= info->cursor_y; ++r) {
+                // diff 预览带整行背景色；只擦字符会留下成片红绿底，须连
+                // 字符属性一道归零。
+                lubancode::platform::ClearRowHardFrom(0, r, info->width);
+            }
+            lubancode::platform::SetCursorPos(0, end_row);
         }
-        lubancode::platform::SetCursorPos(0, end_row);
     }
 
     // 把一个已登记条目从屏幕上整段收走、忘记锚点——UI-D 折叠(#三)用:
@@ -1349,11 +1389,20 @@ public:
         if (!at_tail) {
             return;
         }
-        for (int r = 0; r < stored.rows; ++r) {
-            // 收走的子工具可能带彩色 diff 摘要，连背景属性一起清。
-            lubancode::platform::ClearRowHardFrom(0, stored.start_row + r, info->width);
+        if (SupportsVtBatch()) {
+            lubancode::platform::TerminalBatch batch(info->viewport_x, info->viewport_y);
+            for (int r = 0; r < stored.rows; ++r) {
+                batch.ClearRowHardFrom(0, stored.start_row + r, info->width);
+            }
+            batch.MoveTo(0, stored.start_row);
+            batch.Flush();
+        } else {
+            for (int r = 0; r < stored.rows; ++r) {
+                // 收走的子工具可能带彩色 diff 摘要，连背景属性一起清。
+                lubancode::platform::ClearRowHardFrom(0, stored.start_row + r, info->width);
+            }
+            lubancode::platform::SetCursorPos(0, stored.start_row);
         }
-        lubancode::platform::SetCursorPos(0, stored.start_row);
     }
 
     // Ctrl+O 在回合中会从光标处追加一份完整转录。旧锚点的绝对行号经过
@@ -1404,7 +1453,25 @@ private:
         int item_id = 0;
         int start_row = 0;
         int rows = 0;
+        lubancode::cli::InlineFrame frame;
     };
+
+    static lubancode::cli::InlineFrame BuildFrame(const std::string& text, int width) {
+        lubancode::cli::InlineFrame frame;
+        std::size_t pos = 0;
+        while (pos < text.size()) {
+            const std::size_t newline = text.find('\n', pos);
+            const std::size_t end = newline == std::string::npos ? text.size() : newline;
+            frame.rows.push_back(lubancode::cli::InlineFrameRow{
+                0, width, false, text.substr(pos, end - pos)});
+            if (newline == std::string::npos) {
+                break;
+            }
+            pos = newline + 1;
+        }
+        frame.cursor_row = static_cast<int>(frame.rows.size());
+        return frame;
+    }
 
     std::string Render(const lubancode::cli::TranscriptItem& item) const {
         const int width = lubancode::cli::DetectConsoleWidth().value_or(80);
@@ -1804,6 +1871,8 @@ private:
         }
         const int buffer_height = info->height;
         const int buffer_width = info->width;
+        int viewport_x = info->viewport_x;
+        int viewport_y = info->viewport_y;
         // 原样块占的物理行数按光标位移算(末行没换行、光标停在行中时也算
         // 一行),不逐字模拟折行。
         const int old_rows = info->cursor_y - start_row_ + (info->cursor_x > 0 ? 1 : 0);
@@ -1833,22 +1902,40 @@ private:
             }
             std::cout.flush();
             start_row_ -= overflow;
+            if (const auto after_scroll = lubancode::platform::GetScreenInfo();
+                after_scroll.has_value()) {
+                viewport_x = after_scroll->viewport_x;
+                viewport_y = after_scroll->viewport_y;
+            }
         }
         const int rows_to_clear = (std::max)(old_rows, new_rows);
-        for (int r = 0; r < rows_to_clear && start_row_ + r < buffer_height; ++r) {
-            lubancode::platform::ClearRowFrom(0, start_row_ + r, buffer_width);
-        }
-        lubancode::platform::SetCursorPos(0, start_row_);
+        std::string rendered;
         for (int i = 0; i < new_rows; ++i) {
-            std::cout << lines[static_cast<std::size_t>(i)];
+            rendered += lines[static_cast<std::size_t>(i)];
             if (i + 1 < new_rows) {
-                std::cout << "\n";
+                rendered += '\n';
             }
         }
         if (ended_with_newline) {
-            std::cout << "\n";
+            rendered += '\n';
         }
-        std::cout.flush();
+
+        if (SupportsVtBatch()) {
+            lubancode::platform::TerminalBatch batch(viewport_x, viewport_y);
+            for (int r = 0; r < rows_to_clear && start_row_ + r < buffer_height; ++r) {
+                batch.ClearRowFrom(0, start_row_ + r, buffer_width);
+            }
+            batch.MoveTo(0, start_row_);
+            batch.Write(rendered);
+            batch.Flush();
+        } else {
+            for (int r = 0; r < rows_to_clear && start_row_ + r < buffer_height; ++r) {
+                lubancode::platform::ClearRowFrom(0, start_row_ + r, buffer_width);
+            }
+            lubancode::platform::SetCursorPos(0, start_row_);
+            std::cout << rendered;
+            std::cout.flush();
+        }
         // 渲染版每行都截到 width-1,绝不物理折行;末行不带换行收梢,跟原样
         // 流式一致——RunTurn 随后那个 "\n" 照常把行关上,下游行为分毫不差。
     }

@@ -60,6 +60,8 @@ struct ScreenInfo {
     int height = 0;    // Windows: 缓冲区总高;POSIX: 窗口行数(见文件头坐标约定)
     int cursor_x = 0;  // 光标列,0 基
     int cursor_y = 0;  // 光标行,0 基
+    int viewport_x = 0;  // Windows 可视窗口左上角在缓冲区里的坐标;POSIX 恒 0
+    int viewport_y = 0;
 };
 
 // 拿不到(非真控制台、查询失败)返回 std::nullopt,调用方这一帧放弃定位。

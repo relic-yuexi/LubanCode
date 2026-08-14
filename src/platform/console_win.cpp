@@ -438,6 +438,8 @@ std::optional<ScreenInfo> GetScreenInfo() {
     out.height = static_cast<int>(info.dwSize.Y);
     out.cursor_x = static_cast<int>(info.dwCursorPosition.X);
     out.cursor_y = static_cast<int>(info.dwCursorPosition.Y);
+    out.viewport_x = static_cast<int>(info.srWindow.Left);
+    out.viewport_y = static_cast<int>(info.srWindow.Top);
     return out;
 }
 

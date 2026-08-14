@@ -224,6 +224,7 @@ endif()
 
 add_library(lubancode_core STATIC
   ${_lubancode_platform_sources}
+  src/platform/terminal_batch.cpp
   src/platform/text_encoding.cpp
   src/api/sse_framing.cpp
   src/api/anthropic/client.cpp
@@ -288,6 +289,7 @@ add_library(lubancode_core STATIC
   src/cli/theme.cpp
   src/cli/choice_menu.cpp
   src/cli/line_editor.cpp
+  src/cli/terminal_frame.cpp
   src/cli/context_tracker.cpp
   src/cli/divider.cpp
   src/cli/format_utils.cpp

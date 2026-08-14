@@ -65,6 +65,12 @@ int BufferWidth() {
     return info.dwSize.X;
 }
 
+COORD CursorPosition() {
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    GetConsoleScreenBufferInfo(g_conout, &info);
+    return info.dwCursorPosition;
+}
+
 // 刮一行:CHAR_INFO 逐格读,宽字符的 TRAILING 半格跳过,行尾空白剪掉。
 // attrs 非空时顺带带出每一格的属性(按可见字符的顺序,不含跳过的半格)。
 std::string ReadRow(int row, std::vector<WORD>* attrs = nullptr) {
@@ -244,6 +250,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     const std::wstring exe_path = argv[1];
     const std::wstring workdir = argv[2];
+    const bool composer_only = argc >= 5 && std::wstring(argv[4]) == L"--composer-only";
     g_report.open(argv[3], std::ios::binary | std::ios::trunc);
     if (!g_report.is_open()) {
         return 2;
@@ -304,7 +311,9 @@ int wmain(int argc, wchar_t** argv) {
         const std::string status = ReadRow(status_row);
         Check(status.find("\xe2\x8f\xb5\xe2\x8f\xb5") != std::string::npos, "F1 状态行有 ⏵⏵ 前缀");
         Check(status.find("确认模式") != std::string::npos, "F1 状态行显示确认档");
-        Check(status.find("MiniMax-M3") != std::string::npos, "F1 状态行显示模型名");
+        if (!composer_only) {
+            Check(status.find("MiniMax-M3") != std::string::npos, "F1 状态行显示模型名");
+        }
         Check(status.find("context ") != std::string::npos, "F1 状态行显示 context 占比");
         Check(IsRuleRow(prompt_row - 1), "F1 上横线在提示行上一行");
         Check(IsRuleRow(prompt_row + 1), "F1 下横线在提示行下一行");
@@ -372,6 +381,20 @@ int wmain(int argc, wchar_t** argv) {
     SendText("def");
     Check(WaitForRowText(prompt_row + 1, "def", 5000), "F4 多行:续行显示 def(两空格缩进)");
 
+    // ---- F4b 软换行:长逻辑行铺成两行，光标、下横线一同下移 ----
+    SendKey('C', 3, LEFT_CTRL_PRESSED);
+    Sleep(400);
+    const std::string long_line(140, 'w');
+    SendText(long_line);
+    Sleep(400);
+    Check(ReadRow(prompt_row).size() == 119, "F4b 软换行:首行吃满提示符后的 117 列");
+    Check(ReadRow(prompt_row + 1) == "  " + std::string(23, 'w'),
+          "F4b 软换行:余下 23 字落到带两格缩进的续行");
+    Check(IsRuleRow(prompt_row + 2), "F4b 软换行:下横线随物理行下移");
+    const COORD wrapped_cursor = CursorPosition();
+    Check(wrapped_cursor.Y == prompt_row + 1 && wrapped_cursor.X == 25,
+          "F4b 软换行:光标落在续行末尾");
+
     // ---- F5 键位矫正:Ctrl+C 清空,Tab(空框)进焦点态无条目退回,Shift+Tab 仍切档 ----
     SendKey('C', 3, LEFT_CTRL_PRESSED);
     Sleep(400);
@@ -381,8 +404,22 @@ int wmain(int argc, wchar_t** argv) {
     SendKey(VK_TAB, 0, SHIFT_PRESSED);
     Check(WaitForRowText(status_row, "auto", 5000), "F5 键位:无条目时 Tab 后 Shift+Tab 仍切档(焦点态已退)");
     SendKey(VK_TAB, 0, SHIFT_PRESSED);
+    Check(WaitForRowText(status_row, "yolo", 5000), "F5 键位:切到 yolo 档");
     SendKey(VK_TAB, 0, SHIFT_PRESSED);
     Check(WaitForRowText(status_row, "确认模式", 5000), "F5 键位:切回确认档");
+
+    if (composer_only) {
+        SendText("exit");
+        SendKey(VK_RETURN, L'\r', 0);
+        if (WaitForSingleObject(pi.hProcess, 15000) != WAIT_OBJECT_0) {
+            Log("INFO: composer-only exit 超时,强杀子进程");
+            TerminateProcess(pi.hProcess, 9);
+        }
+        CloseHandle(pi.hProcess);
+        Log(g_failures == 0 ? "RESULT: ALL PASS" :
+                              "RESULT: " + std::to_string(g_failures) + " FAIL");
+        return g_failures == 0 ? 0 : 1;
+    }
 
     // ---- F6 提交帧:横线擦掉、提交行保留;一轮问答后统计行 + 新框 ----
     SendText("请用 read_file 工具读取 hello.txt,然后原样告诉我文件内容。");

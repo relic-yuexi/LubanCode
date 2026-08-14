@@ -28,6 +28,7 @@ add_executable(lubancode_tests
   test_prompts.cpp
   test_prompt_assembler.cpp
   test_line_editor.cpp
+  test_terminal_frame.cpp
   test_choice_menu.cpp
   test_compact.cpp
   test_context_tracker.cpp
@@ -113,7 +114,7 @@ target_compile_features(latex_box_experiment PRIVATE cxx_std_23)
 # 0.17.0:集成验证用的刮屏驱动器(AllocConsole + WriteConsoleInput +
 # ReadConsoleOutput,真控制台专用),不进 ctest——要真钥匙、要弹控制台
 # 窗口,只在集成验证时手动跑:
-#   screen_driver <lubancode.exe> <子进程工作目录> <报告文件>
+#   screen_driver <lubancode.exe> <子进程工作目录> <报告文件> [--composer-only]
 if(WIN32)
   add_executable(screen_driver screen_driver.cpp)
   target_compile_features(screen_driver PRIVATE cxx_std_23)

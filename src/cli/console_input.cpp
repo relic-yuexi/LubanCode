@@ -60,7 +60,9 @@
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
 #include "cli/slash_commands.hpp"
+#include "cli/terminal_frame.hpp"
 #include "platform/console.hpp"
+#include "platform/terminal_batch.hpp"
 
 namespace lubancode::cli {
 
@@ -242,7 +244,7 @@ std::vector<std::string> FooterUtf8Glyphs(const std::string& text) {
     return out;
 }
 
-void PrintFooterWorkingLine(const StreamFooterState& f, int width) {
+std::string BuildFooterWorkingLine(const StreamFooterState& f, int width) {
     const std::vector<std::string> glyphs = FooterUtf8Glyphs(f.working_label);
     const std::string prefix = "• ";
     const std::string suffix = " (" + std::to_string(f.working_seconds) + "s · " +
@@ -251,7 +253,7 @@ void PrintFooterWorkingLine(const StreamFooterState& f, int width) {
     const int suffix_width = static_cast<int>(DisplayWidthUtf8(suffix));
     const int label_room = (std::max)(0, width - 1 - prefix_width - suffix_width);
 
-    std::cout << f.theme.spinner << prefix << f.reset;
+    std::string line = f.theme.spinner + prefix + f.reset;
     int used = 0;
     for (std::size_t i = 0; i < glyphs.size(); ++i) {
         const int glyph_width = static_cast<int>(DisplayWidthUtf8(glyphs[i]));
@@ -259,13 +261,19 @@ void PrintFooterWorkingLine(const StreamFooterState& f, int width) {
             break;
         }
         const bool highlighted = !f.reset.empty() && i == f.working_highlight % glyphs.size();
-        std::cout << (highlighted ? f.theme.spinner : f.theme.stats) << glyphs[i];
+        line += highlighted ? f.theme.spinner : f.theme.stats;
+        line += glyphs[i];
         used += glyph_width;
     }
     if (prefix_width + used + suffix_width < width) {
-        std::cout << f.theme.stats << suffix;
+        line += f.theme.stats + suffix;
     }
-    std::cout << f.reset;
+    line += f.reset;
+    return line;
+}
+
+void PrintFooterWorkingLine(const StreamFooterState& f, int width) {
+    std::cout << BuildFooterWorkingLine(f, width);
 }
 
 // M10:谁在真的逐键读键盘,谁就得先拿到这把锁——ReadLineKeyByKey() 整个
@@ -376,7 +384,7 @@ std::string BoxRuleLine(const Theme& theme, int console_width) {
 // 恒 stats 淡色。0.21.x 起状态行是档位的唯一去处(提示符不再带前缀)。文本拼装是
 // cli/format_utils 的纯函数,这里只管配色和按控制台宽度分段截断(截断得
 // 按段做——夹着 ANSI 的整行没法安全截)。
-void PrintStatusLine(const BoxChrome& chrome, int max_width) {
+std::string BuildStatusLine(const BoxChrome& chrome, int max_width) {
     const Theme& theme = *chrome.theme;
     const StatusLineData& data = StatusDataSlot();
     auto segments = BuildStatusPanelSegments(data.items, chrome.mode, data.values);
@@ -404,13 +412,14 @@ void PrintStatusLine(const BoxChrome& chrome, int max_width) {
 
     int remaining = max_width;
     bool emitted = false;
+    std::string line;
     for (const auto& segment : segments) {
         if (remaining <= 0) {
             break;
         }
         if (emitted) {
             const std::string separator = TruncateUtf8ToDisplayWidth(data.separator, remaining);
-            std::cout << theme.stats << separator << theme.reset;
+            line += theme.stats + separator + theme.reset;
             remaining -= static_cast<int>(DisplayWidthUtf8(separator));
             if (remaining <= 0) {
                 break;
@@ -431,33 +440,55 @@ void PrintStatusLine(const BoxChrome& chrome, int max_width) {
         } else if (segment.key == "git_branch") {
             color = theme.banner;
         }
-        std::cout << color << text << (color.empty() ? std::string() : theme.reset);
+        line += color + text + (color.empty() ? std::string() : theme.reset);
         remaining -= static_cast<int>(DisplayWidthUtf8(text));
         emitted = true;
     }
+    return line;
 }
 
-// 按 RenderState 重画"编辑区域"。UI-A(0.11.0)起编辑区不止一行:第一行是
-// 提示符前缀 + prompt + composer 第一行,composer 后续行各占一个物理行、
-// 行首两空格续行缩进(提示符只在第一行),再往下紧跟 0~N 行 hint_lines
-// (每个元素一个逻辑行,列出匹配的 slash 命令——多行 composer 下核心层
-// 保证 hint_lines 恒空)。start_row/prompt_end_col 是这次 ReadLine() 调用
-// 一开始(或者 Shift+Tab 切模式重打提示符之后)测出来的,之后的每次重画
-// 都锚定在这个位置上。
-//
-// 记账规则沿用修"提示堆残骸"那次立下的两条,只是从"提示行数"扩成"第一行
-// 之外的全部行数"(composer 续行 + 提示行统一算):
-//   1. 每行落笔之前按控制台此刻的实际宽度截断,物理上绝不折行——折行会让
-//      "起始行/光标位"这两个锚点失效,是清不干净的根子。每一行 composer
-//      内容都各自按可视窗口截断(ComputeEditLineWindow 按行应用,光标所在
-//      行给真光标位、其余行从行首截),绝不折行。
-//   2. 上一帧第一行之外到底画了几行得记账(prev_body_row_count):这一帧
-//      行数比上一帧少(删行、清空、提示消失),多出来的旧行要显式清空,
-//      不能只清"新内容覆盖到的那部分"。
-// 顺带用 EnsureRoomForRows 按总行数探底滚屏,把"离缓冲区底部太近导致自动
-// 滚屏、坐标跟着失效"这条已知限制堵住(增删行时锚点账目同步修正)。
+void PrintStatusLine(const BoxChrome& chrome, int max_width) {
+    std::cout << BuildStatusLine(chrome, max_width);
+}
+
+void PaintInlineFrameLegacy(const InlineFrame* previous, const InlineFrame& next,
+                            int origin_y) {
+    const std::size_t old_size = previous == nullptr ? 0 : previous->rows.size();
+    const std::size_t row_count = (std::max)(old_size, next.rows.size());
+    for (std::size_t i = 0; i < row_count; ++i) {
+        const InlineFrameRow* old_row = i < old_size ? &previous->rows[i] : nullptr;
+        const InlineFrameRow* new_row = i < next.rows.size() ? &next.rows[i] : nullptr;
+        if (old_row != nullptr && new_row != nullptr && *old_row == *new_row) {
+            continue;
+        }
+        int x = new_row != nullptr ? new_row->x : old_row->x;
+        int end = x + (new_row != nullptr ? new_row->clear_width : old_row->clear_width);
+        if (old_row != nullptr) {
+            x = (std::min)(x, old_row->x);
+            end = (std::max)(end, old_row->x + old_row->clear_width);
+        }
+        const bool hard = (new_row != nullptr && new_row->hard_clear) ||
+                          (old_row != nullptr && old_row->hard_clear);
+        if (hard) {
+            platform::ClearRowHardFrom(x, origin_y + static_cast<int>(i), end - x);
+        } else {
+            platform::ClearRowFrom(x, origin_y + static_cast<int>(i), end - x);
+        }
+        if (new_row != nullptr && !new_row->text.empty()) {
+            platform::SetCursorPos(new_row->x, origin_y + static_cast<int>(i));
+            std::cout << new_row->text;
+            std::cout.flush();
+        }
+    }
+    platform::SetCursorPos(next.cursor_x, origin_y + next.cursor_row);
+}
+
+// composer 先排成物理行，再拿新旧两帧逐行比较。提示符后的第一行窄些，
+// 续行留两格缩进；正文软换行，不再水平滚。VT 终端把擦行、落字、归光标
+// 攒进一段字节，一次 write + flush。老终端仍走 Console API 兼容路。
 void RedrawEditArea(int& start_row, int& prompt_end_col, const RenderState& state,
-                     int& prev_body_row_count, const BoxChrome& chrome = BoxChrome{}) {
+                    int& prev_body_row_count, std::optional<InlineFrame>& previous_frame,
+                    bool vt_enabled, const BoxChrome& chrome = BoxChrome{}) {
     const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
     if (!info.has_value()) {
         return;  // 拿不到屏幕信息就没法定位,这一帧放弃重画,下一帧再试
@@ -465,92 +496,69 @@ void RedrawEditArea(int& start_row, int& prompt_end_col, const RenderState& stat
     const int buffer_width = info->width;
     const int buffer_height = info->height;
 
-    constexpr int kContinuationIndent = 2;  // composer 续行的两空格缩进
-
-    // 核心层保证 state.lines 至少一个元素,这里再兜一手,免得空 vector 把
-    // 下标访问带崩。
+    constexpr int kContinuationIndent = 2;
     const std::vector<std::u32string> fallback_lines{std::u32string()};
     const std::vector<std::u32string>& edit_lines = state.lines.empty() ? fallback_lines : state.lines;
-    const int edit_row_count = static_cast<int>(edit_lines.size());
+    const WrappedComposerLayout layout = LayoutComposerRows(
+        edit_lines, state.cursor_row, state.cursor_col,
+        buffer_width - prompt_end_col - 1, buffer_width - kContinuationIndent - 1);
+
+    InlineFrame next;
+    next.rows.reserve(layout.rows.size() + (chrome.enabled ? 2U : 0U) + state.hint_lines.size());
+    for (std::size_t i = 0; i < layout.rows.size(); ++i) {
+        const bool first = i == 0;
+        InlineFrameRow row;
+        row.x = first ? prompt_end_col : 0;
+        row.clear_width = buffer_width - row.x;
+        row.text = first ? Utf32ToUtf8(layout.rows[i].text)
+                         : std::string(kContinuationIndent, ' ') + Utf32ToUtf8(layout.rows[i].text);
+        next.rows.push_back(std::move(row));
+    }
+
+    if (chrome.enabled) {
+        next.rows.push_back(InlineFrameRow{0, buffer_width, true,
+                                           BoxRuleLine(*chrome.theme, buffer_width)});
+        next.rows.push_back(InlineFrameRow{0, buffer_width, true,
+                                           BuildStatusLine(chrome, buffer_width - 1)});
+    }
+    for (const auto& hint : state.hint_lines) {
+        next.rows.push_back(InlineFrameRow{
+            0, buffer_width, false, TruncateUtf8ToDisplayWidth(hint, buffer_width - 1)});
+    }
+
+    next.cursor_x = layout.cursor_row == 0
+                        ? prompt_end_col + layout.cursor_col
+                        : kContinuationIndent + layout.cursor_col;
+    next.cursor_row = static_cast<int>(layout.cursor_row);
+
     const int hint_count = static_cast<int>(state.hint_lines.size());
-    // 0.17.0 输入框化:开框时最后一个编辑行下面再垫两行——下横线 + 状态行,
-    // 提示行(hint_lines)排在状态行之下。锚点记账原样扩展:这两行也算进
-    // body_rows,多退少补、EnsureRoomForRows 探底,全套现成机制照走。
     const int box_rows = chrome.enabled ? 2 : 0;
-    // "第一行之外"这一帧要占的行数(composer 续行 + 框线/状态行 + 提示行),
-    // 跟上一帧取较大值,保证旧帧多出来的行(删行、清 composer、提示消失)
-    // 不漏清。
-    const int body_rows = (edit_row_count - 1) + box_rows + hint_count;
+    const int body_rows = static_cast<int>(layout.rows.size()) - 1 + box_rows + hint_count;
     const int rows_to_touch = std::max(body_rows, prev_body_row_count);
-
+    const int old_start_row = start_row;
     EnsureRoomForRows(start_row, buffer_height, 1 + rows_to_touch);
-
-    // 光标最终该落的位置,画完统一挪过去(先给个兜底值:第一行提示符后)。
-    int final_cursor_x = prompt_end_col;
-    int final_cursor_y = start_row;
-
-    // 第一行:只清"提示符之后"这一段(从 prompt_end_col 到行尾),提示符
-    // 本身那几列一个字符都不碰——清整行会把 "> "/"[auto] > " 盖没,是修过
-    // 的老 bug,别再犯。
-    {
-        const int content_width = buffer_width - prompt_end_col - 1;
-        const std::size_t cursor_in_row = state.cursor_row == 0 ? state.cursor_col : 0;
-        const EditLineWindow window = ComputeEditLineWindow(edit_lines[0], cursor_in_row, content_width);
-        const int clear_width = buffer_width - prompt_end_col;
-        if (clear_width > 0) {
-            platform::ClearRowFrom(prompt_end_col, start_row, clear_width);
-        }
-        platform::SetCursorPos(prompt_end_col, start_row);
-        std::cout << Utf32ToUtf8(window.text);
-        std::cout.flush();
-        if (state.cursor_row == 0) {
-            final_cursor_x = prompt_end_col + static_cast<int>(window.cursor_display_col);
-            final_cursor_y = start_row;
+    int viewport_x = info->viewport_x;
+    int viewport_y = info->viewport_y;
+    if (old_start_row != start_row) {
+        if (const auto after_scroll = platform::GetScreenInfo(); after_scroll.has_value()) {
+            viewport_x = after_scroll->viewport_x;
+            viewport_y = after_scroll->viewport_y;
         }
     }
 
-    // 第一行之外:逐行先整行清、再按行的身份画——composer 续行(两空格
-    // 缩进 + 窗口截断)、下横线/状态行(开框时)、提示行(截宽),或者
-    // 旧帧残行(只清不画)。
-    for (int i = 1; i <= rows_to_touch; ++i) {
-        const int row_y = start_row + i;
-        platform::ClearRowFrom(0, row_y, buffer_width);
-        if (i < edit_row_count) {
-            const int content_width = buffer_width - kContinuationIndent - 1;
-            const std::size_t row_index = static_cast<std::size_t>(i);
-            const std::size_t cursor_in_row = state.cursor_row == row_index ? state.cursor_col : 0;
-            const EditLineWindow window = ComputeEditLineWindow(edit_lines[row_index], cursor_in_row, content_width);
-            platform::SetCursorPos(kContinuationIndent, row_y);
-            std::cout << Utf32ToUtf8(window.text);
-            std::cout.flush();
-            if (state.cursor_row == row_index) {
-                final_cursor_x = kContinuationIndent + static_cast<int>(window.cursor_display_col);
-                final_cursor_y = row_y;
-            }
-        } else if (chrome.enabled && i == edit_row_count) {
-            // 下横线,紧贴最后一个编辑行。
-            platform::SetCursorPos(0, row_y);
-            std::cout << BoxRuleLine(*chrome.theme, buffer_width);
-            std::cout.flush();
-        } else if (chrome.enabled && i == edit_row_count + 1) {
-            // 常驻状态行。
-            platform::SetCursorPos(0, row_y);
-            PrintStatusLine(chrome, buffer_width - 1);
-            std::cout.flush();
-        } else if (i - edit_row_count - box_rows >= 0 && i - edit_row_count - box_rows < hint_count) {
-            const int hint_width = buffer_width - 1;
-            const std::string truncated = TruncateUtf8ToDisplayWidth(
-                state.hint_lines[static_cast<std::size_t>(i - edit_row_count - box_rows)], hint_width);
-            platform::SetCursorPos(0, row_y);
-            std::cout << truncated;
-            std::cout.flush();
-        }
+    // 探底若触发滚屏，旧画面也跟着挪了。此时全画一遍，顺手重立锚点。
+    const InlineFrame* previous = old_start_row == start_row && previous_frame.has_value()
+                                      ? &*previous_frame
+                                      : nullptr;
+    if (vt_enabled) {
+        platform::TerminalBatch batch(viewport_x, viewport_y);
+        QueueInlineFrameDiff(batch, previous, next, start_row);
+        batch.Flush();
+    } else {
+        PaintInlineFrameLegacy(previous, next, start_row);
     }
+    previous_frame = std::move(next);
     prev_body_row_count = body_rows;
-
-    // 画完把光标挪回它该在的那一行那一列——不管画没画续行/提示行,这一步
-    // 都得做,不然光标就停在最后一行上了。
-    platform::SetCursorPos(final_cursor_x, final_cursor_y);
 }
 
 // 0.17.0 输入框化的提交收尾:横线擦掉、提交行保留。取舍:两个方案里选了
@@ -561,10 +569,10 @@ void RedrawEditArea(int& start_row, int& prompt_end_col, const RenderState& stat
 //
 // 做法:把整个框(上横线在 start_row - 1,下横线/状态行/提示行在编辑行
 // 之下)统统清掉,从上横线那一行起重打提交内容(`> ` 第一行、两空格续行,
-// 每行按宽截断防折行——完整内容反正在历史/存档里),光标停在末行末尾,
-// 调用方接着换行。内容整体上移一行,不留空行。
-void CollapseBoxOnSubmit(int start_row, int prev_body_row_count, const RenderState& state,
-                          const std::string& prompt) {
+// 每个逻辑行照 composer 的宽度铺成物理行),光标停在末行末尾,调用方接着
+// 换行。内容整体上移一行,不留空行,长输入也完整留在滚动历史里。
+void CollapseBoxOnSubmit(int start_row, int prompt_width, int prev_body_row_count,
+                         const RenderState& state, const std::string& prompt, bool vt_enabled) {
     const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
     if (!info.has_value()) {
         return;  // 拿不到屏幕信息就不收尾了,提交帧画面已经在屏上,不算坏
@@ -575,24 +583,42 @@ void CollapseBoxOnSubmit(int start_row, int prev_body_row_count, const RenderSta
     if (bottom >= info->height) {
         bottom = info->height - 1;
     }
+    constexpr int kContinuationIndent = 2;
+    const WrappedComposerLayout layout = LayoutComposerRows(
+        state.lines, state.cursor_row, state.cursor_col, buffer_width - prompt_width - 1,
+        buffer_width - kContinuationIndent - 1);
+    const auto row_text = [&](std::size_t i) {
+        return i == 0 ? prompt + Utf32ToUtf8(layout.rows[i].text)
+                      : std::string(kContinuationIndent, ' ') + Utf32ToUtf8(layout.rows[i].text);
+    };
+    const std::size_t last = layout.rows.empty() ? 0 : layout.rows.size() - 1;
+    const int final_x = (last == 0 ? prompt_width : kContinuationIndent) +
+                        (layout.rows.empty() ? 0 : layout.rows[last].display_width);
+    const int final_y = top + static_cast<int>(last);
+
+    if (vt_enabled) {
+        platform::TerminalBatch batch(info->viewport_x, info->viewport_y);
+        for (int r = top; r <= bottom; ++r) {
+            batch.ClearRowHardFrom(0, r, buffer_width);
+        }
+        for (std::size_t i = 0; i < layout.rows.size(); ++i) {
+            batch.MoveTo(0, top + static_cast<int>(i));
+            batch.Write(row_text(i));
+        }
+        batch.MoveTo(final_x, final_y);
+        batch.Flush();
+        return;
+    }
+
     for (int r = top; r <= bottom; ++r) {
         platform::ClearRowHardFrom(0, r, buffer_width);
     }
-    platform::SetCursorPos(0, top);
-    std::cout << prompt;
-    std::cout.flush();
-    int first_width = buffer_width - 3;
-    if (const std::optional<platform::ScreenInfo> after = platform::GetScreenInfo(); after.has_value()) {
-        first_width = buffer_width - after->cursor_x - 1;
+    for (std::size_t i = 0; i < layout.rows.size(); ++i) {
+        platform::SetCursorPos(0, top + static_cast<int>(i));
+        std::cout << row_text(i);
+        std::cout.flush();
     }
-    if (!state.lines.empty()) {
-        std::cout << Utf32ToUtf8(TruncateToDisplayWidth(state.lines[0], first_width));
-        for (std::size_t i = 1; i < state.lines.size(); ++i) {
-            std::cout << "\n  "
-                      << Utf32ToUtf8(TruncateToDisplayWidth(state.lines[i], buffer_width - 3));
-        }
-    }
-    std::cout.flush();
+    platform::SetCursorPos(final_x, final_y);
 }
 
 // 逐键读入这一次输入(UI-A 起,composer 模式下可能是多行),真控制台专用。
@@ -658,6 +684,8 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     int start_row = info->cursor_y;
     int prompt_end_col = info->cursor_x;
     int prev_body_row_count = 0;  // 上一帧第一行之外画了几行(composer 续行 + 框线/状态行 + 提示行)
+    std::optional<InlineFrame> previous_frame;
+    const bool vt_enabled = platform::ProbeStdoutConsole().vt_enabled;
 
     platform::KeyReader key_reader;
     int agent_panel_selected = 0;
@@ -702,7 +730,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         const auto entries = panel_entries();
         agent_panel_fingerprint = panel_fingerprint(entries);
         RedrawEditArea(start_row, prompt_end_col, with_agent_panel(editor.CurrentRenderState(), entries),
-                       prev_body_row_count, chrome);
+                       prev_body_row_count, previous_frame, vt_enabled, chrome);
     }
 
     while (true) {
@@ -715,7 +743,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 agent_panel_fingerprint = fingerprint;
                 RedrawEditArea(start_row, prompt_end_col,
                                with_agent_panel(editor.CurrentRenderState(), entries),
-                               prev_body_row_count, chrome);
+                               prev_body_row_count, previous_frame, vt_enabled, chrome);
             }
             continue;
         }
@@ -735,14 +763,14 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 agent_panel_selected = (agent_panel_selected + delta + total) % total;
                 RedrawEditArea(start_row, prompt_end_col,
                                with_agent_panel(editor.CurrentRenderState(), entries_before_key),
-                               prev_body_row_count, chrome);
+                               prev_body_row_count, previous_frame, vt_enabled, chrome);
                 continue;
             }
             if (raw_key->kind == PK::Enter && agent_panel_focus) {
                 agent_panel_detail = !agent_panel_detail;
                 RedrawEditArea(start_row, prompt_end_col,
                                with_agent_panel(editor.CurrentRenderState(), entries_before_key),
-                               prev_body_row_count, chrome);
+                               prev_body_row_count, previous_frame, vt_enabled, chrome);
                 continue;
             }
             if (raw_key->kind == PK::Esc && (agent_panel_focus || agent_panel_detail)) {
@@ -754,7 +782,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 }
                 RedrawEditArea(start_row, prompt_end_col,
                                with_agent_panel(editor.CurrentRenderState(), entries_before_key),
-                               prev_body_row_count, chrome);
+                               prev_body_row_count, previous_frame, vt_enabled, chrome);
                 continue;
             }
         }
@@ -817,8 +845,10 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                         prompt_end_col = after_info->cursor_x;
                     }
                     prev_body_row_count = 0;
+                    previous_frame.reset();
                     chrome.mode = editor.confirm_mode();
-                    RedrawEditArea(start_row, prompt_end_col, state, prev_body_row_count, chrome);
+                    RedrawEditArea(start_row, prompt_end_col, state, prev_body_row_count,
+                                   previous_frame, vt_enabled, chrome);
                     continue;
                 }
                 // 0.17.0:焦点导航请求没被消费(比如 transcript 还是空的)——
@@ -839,13 +869,15 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         if (box && state.submitted) {
             // 0.17.0 输入框化的提交收尾:横线/状态行擦掉,只留 `> 内容`,
             // 换行收尾——取舍见 CollapseBoxOnSubmit 注释。
-            CollapseBoxOnSubmit(start_row, prev_body_row_count, state, prompt);
+            CollapseBoxOnSubmit(start_row, prompt_end_col, prev_body_row_count, state, prompt,
+                                vt_enabled);
             std::cout << "\n";
             return Utf32ToUtf8(state.line);
         }
 
         chrome.mode = editor.confirm_mode();
-        RedrawEditArea(start_row, prompt_end_col, state, prev_body_row_count, chrome);
+        RedrawEditArea(start_row, prompt_end_col, state, prev_body_row_count, previous_frame,
+                       vt_enabled, chrome);
 
         if (state.esc_pressed && esc_rejects) {
             // 确认与可取消选择场景:Esc 不留在循环里继续等，直接交回
