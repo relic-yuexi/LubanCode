@@ -91,6 +91,16 @@ if(MSVC)
   target_compile_options(lubancode_tests PRIVATE /FS)
 endif()
 
+# test_transcript 的 ToolDisplay 用例(思考进行中快照的锁规约)用到
+# cli/tool_display.hpp 的 ToolDisplay——纯头文件,但它牵着的
+# StdoutWriteMutex/DetectConsoleWidth 分别住在 cli/console_input.cpp 和
+# cli/spinner.cpp 里,而这两个文件按分层注释(根 CMakeLists 205 行一带)
+# 只编进主可执行文件,不进 lubancode_core。测试程序单独再编这一份,核心
+# 库的分层不动。
+target_sources(lubancode_tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/cli/console_input.cpp
+  ${CMAKE_SOURCE_DIR}/src/cli/spinner.cpp)
+
 # M11:test_network_timeout.cpp 手写了个原始 socket 假服务器(模拟连不上/
 # 半路断流),要链 Winsock。
 if(WIN32)

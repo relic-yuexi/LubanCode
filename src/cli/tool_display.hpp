@@ -11,6 +11,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -408,6 +409,19 @@ struct ToolDisplay {
         // 截断保护:别让超长思考把内存吃穿。
         if (thinking_buffer.size() > lubancode::cli::kFullOutputCapBytes) {
             thinking_buffer = lubancode::cli::TruncateUtf8Bytes(thinking_buffer, lubancode::cli::kFullOutputCapBytes);
+        }
+        // 思考进行中 Ctrl+O 展开:已到的正文回填进 transcript_snapshot_ 这条
+        // 既有数据通道(锁内复制一份 full_output 副本),监听线程的
+        // FormatSnapshotForToggleLocked 原样读走——不开第二条数据路,也不让
+        // 它无锁直读 thinking_buffer。每笔 delta 都同步:buffer 有 64KB 上限,
+        // 单笔复制量封顶,流式期间这点拷贝不值一提。屏幕上那块折叠头不跟着
+        // 刷新,保持"不打断流式";展开态下看到的是按 Ctrl+O 那一刻的快门,
+        // 思考收定时 OnThinkingDone 的 Repaint 会按展开档铺全文。
+        {
+            std::lock_guard<std::mutex> lock(transcript_snapshot_mutex_);
+            if (transcript_snapshot_.size() > static_cast<std::size_t>(active_thinking)) {
+                transcript_snapshot_[static_cast<std::size_t>(active_thinking)].full_output = thinking_buffer;
+            }
         }
     }
 

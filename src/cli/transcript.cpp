@@ -120,6 +120,11 @@ std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme,
             prefix_cols += 2;  // ● 一列 + 空格一列
         }
         std::string title = item.title;
+        // 思考条目展开档:标题补「· N 字」,正文多长一眼有数。紧凑档不
+        // 加,收定时保持一行「思考 Xs」。
+        if (expanded && item.kind == TranscriptKind::Thinking && !item.full_output.empty()) {
+            title += trf("transcript.thinking_chars", CountUtf8Codepoints(item.full_output));
+        }
         if (width > 0) {
             title = TruncateWithEllipsis(title, width - prefix_cols - 1);
         }
@@ -152,15 +157,34 @@ std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme,
             }
             out += body_indent + param_line + "\n";
         }
-        if (item.full_output.empty()) {
+        // 思考进行中(Running):已到正文随 Ctrl+O 快照摊开,但只铺约一屏,
+        // 超了截断收口「共 N 行,结束后 Ctrl+O 看全文」——思考收定后条目
+        // 变非 Running,再 Ctrl+O 就是全文。正文一个字没到时连占位行都
+        // 不铺,免得刚起头的思考块顶着一行"(无完整输出)"。
+        const bool thinking_live =
+            item.kind == TranscriptKind::Thinking && item.status == TranscriptStatus::Running;
+        if (thinking_live && item.full_output.empty()) {
+            // 什么都不铺:标题行("思考中…")就是这块的全部。
+        } else if (item.full_output.empty()) {
             out += body_indent + tr("transcript.no_full_output") + "\n";
         } else {
+            const std::vector<std::string> lines = SplitLines(item.full_output);
+            const bool truncated =
+                thinking_live && static_cast<int>(lines.size()) > kThinkingStreamExpandedMaxLines;
+            const std::size_t print_upto =
+                truncated ? static_cast<std::size_t>(kThinkingStreamExpandedMaxLines) : lines.size();
             out += body_indent + trf("transcript.full_output_header", CountLines(item.full_output)) + "\n";
-            for (std::string& line : SplitLines(item.full_output)) {
+            for (std::size_t i = 0; i < print_upto; ++i) {
+                std::string line = lines[i];
                 if (width > 0 && line.find('\x1b') == std::string::npos) {
                     line = TruncateWithEllipsis(line, width - body_cols - 1);
                 }
                 out += body_indent + line + "\n";
+            }
+            if (truncated) {
+                out += body_indent + trf("transcript.thinking_stream_more",
+                                         static_cast<int>(lines.size())) +
+                       "\n";
             }
         }
     }
@@ -464,6 +488,25 @@ std::string TruncateUtf8Codepoints(const std::string& text, std::size_t max_code
         return text;
     }
     return text.substr(0, pos) + "...";
+}
+
+int CountUtf8Codepoints(const std::string& text) {
+    int count = 0;
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+        const unsigned char byte = static_cast<unsigned char>(text[pos]);
+        if ((byte & 0xF8) == 0xF0) {
+            pos += 4;
+        } else if ((byte & 0xF0) == 0xE0) {
+            pos += 3;
+        } else if ((byte & 0xE0) == 0xC0) {
+            pos += 2;
+        } else {
+            pos += 1;
+        }
+        ++count;
+    }
+    return count;
 }
 
 }  // namespace lubancode::cli
