@@ -66,10 +66,15 @@ std::string BuildStatusLineText(ConfirmMode mode, const std::string& model, int 
 std::vector<StatusPanelSegment> BuildStatusPanelSegments(
     const std::vector<std::string>& items, ConfirmMode mode, const StatusPanelData& data) {
     std::vector<StatusPanelSegment> out;
-    out.reserve(items.size() + 1);
+    out.reserve(items.size() + 2);
     // REC 标记:录制中恒挂第一段,不进 items 配置(见 StatusPanelData::rec 注释)。
     if (!data.rec.empty()) {
         out.push_back({"rec", data.rec});
+    }
+    // WT 房名:住在隔离 worktree 里恒挂一段,不进 items 配置(理由见
+    // StatusPanelData::worktree 注释)。纯文本 "WT <名字>"。
+    if (!data.worktree.empty()) {
+        out.push_back({"worktree", "WT " + data.worktree});
     }
     for (const std::string& key : items) {
         std::string text;

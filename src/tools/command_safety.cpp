@@ -308,4 +308,112 @@ CommandSafety ClassifyCommand(const std::string& command, const std::string& she
     return any_segment ? CommandSafety::Safe : CommandSafety::NeedsConfirm;
 }
 
+// ---------------------------------------------------------------------------
+// 隔离的 git 改道闸(纯静态识别,详见 command_safety.hpp 尾部注释)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 词形是不是 --opt=value 里那个 value(--git-dir=D:\repo\.git 这种)。
+std::optional<std::string> OptionValue(const std::string& token, std::string_view option) {
+    if (token.starts_with(option) && token.size() > option.size() && token[option.size()] == '=') {
+        return token.substr(option.size() + 1);  // 跳过 '=' 本身
+    }
+    return std::nullopt;
+}
+
+// 一个词(可能是路径)是否落进隔离的禁写根。相对路径按房基准解析——
+// `git -C ../../..` 这种从房里往外爬的写法会正确解析回主树。
+bool TokenHitsMainRoot(const std::string& token, const IsolationScope& scope) {
+    return PathBlockedByIsolation(token, scope);
+}
+
+}  // namespace
+
+std::optional<std::string> FindIsolationGitRedirect(const std::string& command, const std::string& shell,
+                                                    const IsolationScope& scope) {
+    const bool is_powershell = (shell == "powershell");
+    if (!is_powershell && shell != "cmd" && shell != "sh") {
+        // 认不得的 shell 不猜——但这里不是安全分类,是隔离识别;run_command
+        // 层已经按 shell 白名单拦过,走到这儿的只有这三种。
+        return std::nullopt;
+    }
+    const bool single_quotes = is_powershell || shell == "sh";
+    const std::vector<std::string> segments = SplitSegments(command, single_quotes);
+
+    // 先把每段切成词,顺便记下"这段首词是不是 git / cd"。
+    struct SegmentTokens {
+        std::vector<std::string> tokens;
+        bool is_git = false;
+    };
+    std::vector<SegmentTokens> parsed;
+    for (const std::string& segment : segments) {
+        const bool blank = std::all_of(segment.begin(), segment.end(),
+                                       [](unsigned char c) { return std::isspace(c) != 0; });
+        if (blank) {
+            continue;
+        }
+        SegmentTokens entry;
+        entry.tokens = Tokenize(segment, single_quotes);
+        if (entry.tokens.empty()) {
+            continue;
+        }
+        entry.is_git = NormalizeWord(entry.tokens.front()) == "git";
+        parsed.push_back(std::move(entry));
+    }
+
+    // cd_into_main_segment:第一个"cd 进主树"的段号(size_t 上限 = 没见过)。
+    std::size_t cd_into_main_segment = static_cast<std::size_t>(-1);
+    for (std::size_t si = 0; si < parsed.size(); ++si) {
+        const auto& tokens = parsed[si].tokens;
+        for (std::size_t i = 0; i < tokens.size(); ++i) {
+            const std::string word = NormalizeWord(tokens[i]);
+
+            // 环境变量赋值把 git 改道的:GIT_DIR=... / GIT_WORK_TREE=... /
+            // $env:GIT_DIR=... / set GIT_DIR=...。赋了就是改道,不管值指哪
+            // (静态层证明不了它无害,一律拦)。
+            const std::string lowered = ToLower(tokens[i]);
+            if (lowered.starts_with("git_dir=") || lowered.starts_with("git_work_tree=") ||
+                lowered.starts_with("$env:git_dir=") || lowered.starts_with("$env:git_work_tree=") ||
+                lowered.starts_with("set git_dir=") || lowered.starts_with("set git_work_tree=")) {
+                return "命令给 GIT_DIR/GIT_WORK_TREE 赋值,会把 git 改道出隔离工作树 " + scope.name;
+            }
+
+            // git -C <主树>(-C 区分大小写,-c 是别的选项)/ --git-dir <或=
+            // 主树\.git> / --work-tree <或=主树>。
+            if (parsed[si].is_git) {
+                if ((tokens[i] == "-C" || word == "--git-dir" || word == "--work-tree") &&
+                    i + 1 < tokens.size() && TokenHitsMainRoot(tokens[i + 1], scope)) {
+                    return "命令把 git 指回主 checkout(" + tokens[i] + " " + tokens[i + 1] +
+                           "),已隔离在工作树 " + scope.name + " 里,请在房内用 git";
+                }
+                if (auto value = OptionValue(tokens[i], "--git-dir"); value.has_value()) {
+                    if (TokenHitsMainRoot(*value, scope)) {
+                        return "命令用 --git-dir 指回主 checkout,已隔离在工作树 " + scope.name + " 里";
+                    }
+                }
+                if (auto value = OptionValue(tokens[i], "--work-tree"); value.has_value()) {
+                    if (TokenHitsMainRoot(*value, scope)) {
+                        return "命令用 --work-tree 指回主 checkout,已隔离在工作树 " + scope.name + " 里";
+                    }
+                }
+            }
+
+            // cd / Set-Location 进主树:记下段号,后面段里再有 git 就算改道。
+            if ((word == "cd" || word == "set-location") && i + 1 < tokens.size() &&
+                TokenHitsMainRoot(tokens[i + 1], scope)) {
+                cd_into_main_segment = (std::min)(cd_into_main_segment, si);
+            }
+        }
+    }
+    if (cd_into_main_segment != static_cast<std::size_t>(-1)) {
+        for (std::size_t si = cd_into_main_segment + 1; si < parsed.size(); ++si) {
+            if (parsed[si].is_git) {
+                return "命令先 cd 进主 checkout 再跑 git,已隔离在工作树 " + scope.name + " 里,请在房内操作";
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 }  // namespace lubancode::tools

@@ -311,6 +311,13 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     // 的装配全收进 ToolRuntime(引用寿命由成员声明顺序保住),Interactive
     // 与单发共用一套;会话可变的钩子(detached factory、prompts、过滤)
     // 在下面接着灌。
+    // 模型侧 worktree 工具与 /worktree 共这一个会话实例(账只有一本,一边
+    // active 另一边回 AlreadyActive)。声明必须早于 ToolRuntime:注册进主表
+    // 的 worktree 工具握它的引用。
+    lubancode::cli::WorktreeSession worktree_session;
+    // enter/exit 搬了 cwd 之后的善后(重拼系统提示、同步子代理 cwd)要在
+    // loop 建好之后才齐活——先立一个晚绑定的槽,ToolRuntime 只拿槽。
+    std::function<void()> after_worktree_moved;
     lubancode::app::ToolRuntime::Options runtime_options;
     runtime_options.with_explore = true;
     runtime_options.with_ask_user = spinner_enabled;
@@ -318,6 +325,24 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         return PromptAskUser(question, theme);
     };
     runtime_options.memory = project_memory;
+    runtime_options.worktree_session = &worktree_session;
+    // worktree 工具的两道硬确认(进园外的房、脏房强删)走自己的问话通道,
+    // 不经三档确认——确认档压不住这一问,管道模式没人可问就拒。
+    runtime_options.worktree_confirm = [&theme](const std::string& question) -> std::optional<bool> {
+        if (!lubancode::platform::StdinIsInteractive() ||
+            !lubancode::platform::ProbeStdoutConsole().is_console) {
+            return std::nullopt;
+        }
+        const lubancode::cli::StreamFooterSuspendScope footer_suspend;
+        const auto answer = lubancode::cli::ReadLine(theme.confirm + question + theme.reset, theme,
+                                                     /*esc_rejects=*/true);
+        return answer.has_value() && (*answer == "y" || *answer == "Y");
+    };
+    runtime_options.on_worktree_moved = [&after_worktree_moved]() {
+        if (after_worktree_moved) {
+            after_worktree_moved();
+        }
+    };
     lubancode::app::ToolRuntime tool_runtime(config, theme, wrapped_backend, skills, skills_segment,
                                              CurrentDirUtf8(), std::move(runtime_options));
     // 别名接住:后面千行装配引用的名字不变。
@@ -1016,7 +1041,6 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         print_memory_usage();
     };
 
-    lubancode::cli::WorktreeSession worktree_session;
     const auto sync_worktree_directory = [&]() {
         prompt_options.cwd = CurrentDirUtf8();
         if (project_memory != nullptr) {
@@ -1035,6 +1059,8 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
             agent_tool->SetProjectInstructions(project_instructions);
         }
     };
+    // loop 已就位,把 worktree 工具 enter/exit 的善后接到这条 sync 上。
+    after_worktree_moved = sync_worktree_directory;
 
     // 项目配置若显式钉了 active_provider，后续切换继续写回项目；没钉就
     // 记全局“上次使用”，跨目录也能沿用。
@@ -1121,6 +1147,17 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                             PrintWorktreeResult(result);
                         } else {
                             std::cout << tr("cmd.worktree.remove_cancelled") << "\n";
+                        }
+                    }
+                    // /worktree new 撞上园子外的已有房:跟模型工具同一道硬确认。
+                    if (result.code == lubancode::cli::WorktreeResultCode::NeedsUserConfirmation) {
+                        const std::optional<std::string> answer = lubancode::cli::ReadLine(
+                            theme.confirm + tr("cmd.worktree.outside_prompt") + theme.reset, theme,
+                            /*esc_rejects=*/true);
+                        if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
+                            result = worktree_session.Enter(command.name, /*base=*/"head",
+                                                            /*confirmed_outside=*/true);
+                            PrintWorktreeResult(result);
                         }
                     }
                     // std::filesystem::current_path 是工具层共同的相对路径基准。
@@ -1515,6 +1552,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         status_data.cwd = CurrentDirUtf8();
         status_data.git_branch =
             lubancode::cli::CurrentGitBranch(std::filesystem::current_path());
+        status_data.worktree = worktree_session.active_name();
         status_data.provider = active_provider;
         status_data.effort = *current_think;
         status_data.context_percent = context_tracker.UsagePercent();

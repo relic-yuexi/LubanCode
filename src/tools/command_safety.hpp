@@ -12,7 +12,10 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
+
+#include "tools/isolation.hpp"
 
 namespace lubancode::tools {
 
@@ -21,5 +24,14 @@ enum class CommandSafety { Safe, NeedsConfirm };
 // command:要执行的命令原文;shell:"powershell" 或 "cmd"(跟 run_command
 // 工具的 shell 参数同一套语义)。别的 shell 值一律 NeedsConfirm。
 CommandSafety ClassifyCommand(const std::string& command, const std::string& shell);
+
+// 隔离的 git 改道闸(纯静态,单测直接钉):住在 worktree 房里的会话,命令串
+// 若把 git 指回主 checkout——git -C <主树> / --git-dir=<主树\.git> /
+// --work-tree=<主树> / GIT_DIR、GIT_WORK_TREE 环境变量赋值 / cd <主树> 后
+// 接 git——返回违规说明(直接当工具错误回给模型);识别不出违例给
+// nullopt(识别不出的组合由 cwd 闸兜底,不在这里猜)。command/shell 语义
+// 同 ClassifyCommand;scope 是当前隔离范围(见 tools/isolation.hpp)。
+std::optional<std::string> FindIsolationGitRedirect(const std::string& command, const std::string& shell,
+                                                    const IsolationScope& scope);
 
 }  // namespace lubancode::tools

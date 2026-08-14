@@ -473,6 +473,9 @@ const Entry kZhCN[] = {
     {"cmd.worktree.no_active", "这场会话没有可退出的 /worktree 新树。"},
     {"cmd.worktree.git_failed", "Git 没办成:{0}"},
     {"cmd.worktree.filesystem_failed", "目录没办成:{0}"},
+    {"cmd.worktree.outside_confirm", "要进的房在 .lubancode/worktrees 之外:{0}\n需先经你确认(y)才进。"},
+    {"cmd.worktree.outside_prompt", "进这间园外的房?(会话目录、写权限与项目配置都会搬过去) [y/N]: "},
+    {"cmd.worktree.verify_failed", "验明正身没过,拒绝进房:{0}"},
 
     // ---- /config 诊断 ----
     {"config.header", "lubancode 最终生效的配置:"},
@@ -1436,6 +1439,9 @@ const Entry kEn[] = {
     {"cmd.worktree.no_active", "This session has no /worktree-created tree to leave."},
     {"cmd.worktree.git_failed", "Git failed: {0}"},
     {"cmd.worktree.filesystem_failed", "Filesystem operation failed: {0}"},
+    {"cmd.worktree.outside_confirm", "The worktree is outside .lubancode/worktrees: {0}\nYour confirmation (y) is required before entering."},
+    {"cmd.worktree.outside_prompt", "Enter this worktree outside the managed yard? (session cwd, write access and project config move with it) [y/N]: "},
+    {"cmd.worktree.verify_failed", "Identity check failed; refusing to enter: {0}"},
 
     // ---- /config diagnostics ----
     {"config.header", "Effective lubancode configuration:"},

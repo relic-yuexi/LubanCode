@@ -45,6 +45,10 @@ struct StatusPanelData {
     std::string git_branch;
     std::string provider;
     std::string effort;
+    // worktree 房名(0.27.x):非空时会话住在隔离 worktree 里,状态行恒亮
+    // "WT <名字>" 一段(纯文本,不进 items 配置,跟 REC 同理——在不在房里
+    // 是安全相关的状态,用户没配也得看得见)。空串 = 没住房,零影响。
+    std::string worktree;
     // 录制标记(0.25.x"录一遍生成技能"):"REC · 名字"/"REC 已停",非空
     // 时恒显示为第一段——密钥这道门要求录制中始终看得见 REC,不受 items
     // 配置影响(用户没配 "rec" 也得挂出来)。空串 = 没在录,零影响。

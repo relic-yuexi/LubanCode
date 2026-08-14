@@ -104,6 +104,12 @@ void PrintWorktreeResult(const lubancode::cli::WorktreeResult& result) {
         case worktree::WorktreeResultCode::NeedsRemoveConfirmation:
             std::cout << trf("cmd.worktree.dirty", PathToUtf8(result.path)) << "\n";
             break;
+        case worktree::WorktreeResultCode::NeedsUserConfirmation:
+            std::cout << trf("cmd.worktree.outside_confirm", PathToUtf8(result.path)) << "\n";
+            break;
+        case worktree::WorktreeResultCode::VerificationFailed:
+            std::cout << trf("cmd.worktree.verify_failed", result.detail) << "\n";
+            break;
         case worktree::WorktreeResultCode::NotRepository:
             std::cout << tr("cmd.worktree.not_repo") << "\n";
             break;

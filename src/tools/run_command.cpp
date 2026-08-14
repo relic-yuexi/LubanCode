@@ -1,11 +1,16 @@
 #include "tools/run_command.hpp"
 
+#include <filesystem>
 #include <sstream>
 #include <string>
+#include <system_error>
 
 #include "platform/process.hpp"
 #include "tools/background_tasks.hpp"  // BackgroundTaskRegistry:后台模式登记 task_id + 起 watcher 探活
 #include "platform/text_encoding.hpp"  // SanitizeUtf8:捕获侧治本,见 execute() 里的调用点注释
+#include "tools/command_safety.hpp"    // 隔离的 git 改道闸
+#include "tools/isolation.hpp"
+#include "tools/path_utils.hpp"
 
 #ifdef _WIN32
 #include "platform/paths.hpp"  // Utf8ToWide:PowerShell -EncodedCommand 拼接用
@@ -16,6 +21,39 @@ namespace lubancode::tools {
 namespace {
 
 constexpr int kDefaultTimeoutMs = 120000;
+
+// 把"命令跑在哪个目录"翻译进各 shell 的命令串:起手先 cd 到位,再跑原命令。
+// 隔离子代理靠这层把自己的命令钉在自己的房里(进程 cwd 全进程一份,不能
+// chdir);主代理也可显式传 cwd。引号各按各家语法转义。
+std::string QuotePowerShellSingle(const std::string& path) {
+    std::string out = path;
+    for (std::size_t pos = 0; pos < out.size(); ++pos) {
+        if (out[pos] == '\'') {
+            out.insert(pos, 1, '\'');
+            ++pos;
+        }
+    }
+    return out;
+}
+
+std::string QuotePosixSingle(const std::string& path) {
+    return QuotePowerShellSingle(path);  // 单引号转义规则同 PowerShell:翻倍
+}
+
+std::string ApplyWorkingDirectory(const std::string& command, const std::string& cwd_utf8,
+                                  const std::string& shell) {
+    if (cwd_utf8.empty()) {
+        return command;
+    }
+    if (shell == "cmd") {
+        return "cd /d \"" + cwd_utf8 + "\" && " + command;
+    }
+    if (shell == "sh") {
+        return "cd -- '" + QuotePosixSingle(cwd_utf8) + "' && " + command;
+    }
+    // PowerShell:Set-Location 在 & { ... } 外面先跑,后面的命令都在新目录里。
+    return "Set-Location -LiteralPath '" + QuotePowerShellSingle(cwd_utf8) + "' ; " + command;
+}
 
 }  // namespace
 
@@ -99,6 +137,13 @@ nlohmann::json RunCommandTool::input_schema() const {
         "完整输出和退出码)。";
 #endif
     properties["run_in_background"] = background_prop;
+
+    nlohmann::json cwd_prop = nlohmann::json::object();
+    cwd_prop["type"] = "string";
+    cwd_prop["description"] =
+        "命令的工作目录,相对或绝对均可;不填用当前会话工作目录。目录必须真实存在。"
+        "住隔离 worktree 的会话里,指向主 checkout 的目录会被拒绝";
+    properties["cwd"] = cwd_prop;
 
     schema["properties"] = properties;
     schema["required"] = nlohmann::json::array({"command"});
@@ -214,6 +259,56 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
         }
     }
 
+    // 工作目录(0.27.x):不填用当前会话工作目录。shell 先取个值(完整的
+    // 合法性校验在各平台分支里做),隔离两道闸要用。
+#ifdef _WIN32
+    std::string shell_value = "powershell";
+#else
+    std::string shell_value = "sh";
+#endif
+    if (auto it = input.find("shell"); it != input.end() && it->is_string()) {
+        shell_value = it->get<std::string>();
+    }
+
+    std::string effective_cwd;
+    if (auto it = input.find("cwd"); it != input.end() && !it->is_null()) {
+        if (!it->is_string()) {
+            return {"cwd 得是字符串(目录路径)", true};
+        }
+        effective_cwd = it->get<std::string>();
+    }
+
+    // 隔离的 cwd 闸 + git 改道闸:住在 worktree 房里的会话/子代理,命令不得
+    // 绕回主 checkout。
+    const IsolationScope* isolation = IsolationGuard::Current();
+    if (!effective_cwd.empty()) {
+        std::filesystem::path cwd_path = Utf8ToPath(effective_cwd);
+        if (cwd_path.is_relative()) {
+            const std::filesystem::path base = isolation != nullptr
+                                                   ? Utf8ToPath(isolation->base_dir)
+                                                   : std::filesystem::current_path();
+            cwd_path = base / cwd_path;
+        }
+        std::error_code cwd_ec;
+        if (!std::filesystem::is_directory(cwd_path, cwd_ec)) {
+            return {"cwd 不是真实存在的目录: " + effective_cwd, true};
+        }
+        effective_cwd = PathToUtf8(cwd_path);
+    }
+    if (isolation != nullptr) {
+        if (!effective_cwd.empty() && PathBlockedByIsolation(effective_cwd, *isolation)) {
+            return {"[隔离] 命令工作目录指回主 checkout,已拦: " + effective_cwd +
+                        "(会话住在 worktree " + isolation->name + " 里)。请在房内跑命令。",
+                    true};
+        }
+        if (auto violation = FindIsolationGitRedirect(command, shell_value, *isolation);
+            violation.has_value()) {
+            return {"[隔离] " + *violation, true};
+        }
+    }
+    // 起手 cd 到位,再跑原命令(不传 cwd 时是原样透传)。
+    const std::string command_with_cwd = ApplyWorkingDirectory(command, effective_cwd, shell_value);
+
 #ifdef _WIN32
     std::string shell = "powershell";
     if (auto it = input.find("shell"); it != input.end() && !it->is_null()) {
@@ -231,7 +326,7 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
     if (run_in_background) {
         platform::BackgroundSpawnResult bg;
         if (is_cmd) {
-            bg = platform::RunShellCommandBackground(command);
+            bg = platform::RunShellCommandBackground(command_with_cwd);
         } else {
             const std::wstring cmdline = L"powershell.exe -NoProfile -NonInteractive -EncodedCommand " +
                                           platform::Utf8ToWide(BuildEncodedCommand(command));
@@ -257,10 +352,10 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
         // RunShellCommand 内部已把 cmd.exe 的系统 ANSI 代码页输出转成 UTF-8
         // (跟 PowerShell 路径不一样,那边脚本里显式设了
         // [Console]::OutputEncoding=UTF8),这里拿到手就是合法 UTF-8。
-        proc = platform::RunShellCommand(command, timeout_ms);
+        proc = platform::RunShellCommand(command_with_cwd, timeout_ms);
     } else {
         const std::wstring cmdline = L"powershell.exe -NoProfile -NonInteractive -EncodedCommand " +
-                                      platform::Utf8ToWide(BuildEncodedCommand(command));
+                                      platform::Utf8ToWide(BuildEncodedCommand(command_with_cwd));
         proc = platform::RunProcess(cmdline, timeout_ms);
     }
 #else
@@ -280,7 +375,7 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
     }
 
     if (run_in_background) {
-        const platform::BackgroundSpawnResult bg = platform::RunShellCommandBackground(command);
+        const platform::BackgroundSpawnResult bg = platform::RunShellCommandBackground(command_with_cwd);
         if (!bg.success) {
             return {bg.error, true};
         }
@@ -295,7 +390,7 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
         return {oss.str(), false};
     }
 
-    platform::ProcessResult proc = platform::RunShellCommand(command, timeout_ms);
+    platform::ProcessResult proc = platform::RunShellCommand(command_with_cwd, timeout_ms);
 #endif
 
     // 捕获侧治本:cmd 分支已经在 platform 层按 CP_ACP 转过一遍,理论上到手

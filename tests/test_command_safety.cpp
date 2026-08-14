@@ -209,3 +209,52 @@ TEST_CASE("git branch/remote 收紧:裸命令与只读旗标放行,可变参数�
     CHECK(ClassifyCommand("git remote add origin x", "powershell") == CommandSafety::NeedsConfirm);
     CHECK(ClassifyCommand("git remote set-url origin x", "cmd") == CommandSafety::NeedsConfirm);
 }
+
+// ---------------------------------------------------------------------------
+// 隔离的 git 改道闸(0.27.x)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("隔离改道闸:git -C 指回主 checkout 拦,指房内放行") {
+    using lubancode::tools::FindIsolationGitRedirect;
+    using lubancode::tools::IsolationScope;
+    const IsolationScope scope{"fix-1", "D:/repo/.lubancode/worktrees/fix-1", "D:/repo"};
+
+    CHECK(FindIsolationGitRedirect("git -C D:/repo status", "powershell", scope).has_value());
+    CHECK(FindIsolationGitRedirect("git -C D:\\repo status", "cmd", scope).has_value());
+    // 从房里往外爬的相对路径也解析得回主树
+    CHECK(FindIsolationGitRedirect("git -C ../../.. status", "powershell", scope).has_value());
+    // 指自己房里:放行
+    CHECK_FALSE(
+        FindIsolationGitRedirect("git -C D:/repo/.lubancode/worktrees/fix-1 log", "powershell", scope).has_value());
+    // 无关目录:放行
+    CHECK_FALSE(FindIsolationGitRedirect("git -C D:/tmp status", "powershell", scope).has_value());
+    // 裸 git(在房内跑):放行
+    CHECK_FALSE(FindIsolationGitRedirect("git status", "cmd", scope).has_value());
+}
+
+TEST_CASE("隔离改道闸:--git-dir/--work-tree 与 GIT_DIR 环境变量拦") {
+    using lubancode::tools::FindIsolationGitRedirect;
+    using lubancode::tools::IsolationScope;
+    const IsolationScope scope{"fix-1", "D:/repo/.lubancode/worktrees/fix-1", "D:/repo"};
+
+    CHECK(FindIsolationGitRedirect("git --git-dir D:/repo/.git status", "powershell", scope).has_value());
+    CHECK(FindIsolationGitRedirect("git --git-dir=D:/repo/.git status", "powershell", scope).has_value());
+    CHECK(FindIsolationGitRedirect("git --work-tree D:/repo status", "cmd", scope).has_value());
+    CHECK(FindIsolationGitRedirect("git --work-tree=D:/repo status", "powershell", scope).has_value());
+    CHECK(FindIsolationGitRedirect("$env:GIT_DIR='D:/repo/.git'; git status", "powershell", scope).has_value());
+    CHECK(FindIsolationGitRedirect("set GIT_WORK_TREE=D:\\repo&& git status", "cmd", scope).has_value());
+    // 指向别处的 git-dir:不归这道闸管
+    CHECK_FALSE(FindIsolationGitRedirect("git --git-dir D:/tmp/x/.git status", "powershell", scope).has_value());
+}
+
+TEST_CASE("隔离改道闸:cd 进主树再跑 git 拦,房内 cd 或无 git 放行") {
+    using lubancode::tools::FindIsolationGitRedirect;
+    using lubancode::tools::IsolationScope;
+    const IsolationScope scope{"fix-1", "D:/repo/.lubancode/worktrees/fix-1", "D:/repo"};
+
+    CHECK(FindIsolationGitRedirect("cd D:\\repo && git status", "cmd", scope).has_value());
+    CHECK(FindIsolationGitRedirect("Set-Location D:/repo; git status", "powershell", scope).has_value());
+    CHECK_FALSE(FindIsolationGitRedirect("cd D:\\repo && dir", "cmd", scope).has_value());
+    CHECK_FALSE(FindIsolationGitRedirect("git status && cd D:/repo", "cmd", scope).has_value());  // git 在前不算
+    CHECK_FALSE(FindIsolationGitRedirect("cd D:/tmp && git status", "powershell", scope).has_value());
+}
