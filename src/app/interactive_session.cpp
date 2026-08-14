@@ -643,6 +643,7 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
             std::cout << theme.error << trf("cmd.peers.start_failed", peer_error) << theme.reset << "\n";
         }
     }
+    std::function<std::optional<lubancode::api::Message>()> peer_inbox_poll;
     if (peer_started) {
         registry().Register(std::make_unique<lubancode::tools::ListSessionsTool>(
             [this]() { return peer_runtime->ListPeers(); }, peer_runtime->self().peer_id));
@@ -651,24 +652,50 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
             [this](const lubancode::agent::PeerCard& target, const std::string& text) {
                 return peer_runtime->Send(target, text);
             }));
-        reapply_peer_inbox = [this]() {
-            loop->SetInbox([this]() -> std::optional<lubancode::api::Message> {
-                if (peer_ready_messages.empty()) {
-                    RefillPeerPool();  // 轮次边界现掏信箱(工具刚回结果、下一请求未发)
-                }
-                if (peer_ready_messages.empty()) {
-                    return std::nullopt;
-                }
-                lubancode::api::Message message;
-                message.role = lubancode::api::Role::User;
-                message.content.push_back(
-                    lubancode::api::TextBlock{FormatPeerText(peer_ready_messages.front())});
-                peer_ready_messages.erase(peer_ready_messages.begin());
-                return message;
-            });
+        peer_inbox_poll = [this]() -> std::optional<lubancode::api::Message> {
+            if (peer_ready_messages.empty()) {
+                RefillPeerPool();  // 轮次边界现掏信箱(工具刚回结果、下一请求未发)
+            }
+            if (peer_ready_messages.empty()) {
+                return std::nullopt;
+            }
+            lubancode::api::Message message;
+            message.role = lubancode::api::Role::User;
+            message.content.push_back(
+                lubancode::api::TextBlock{FormatPeerText(peer_ready_messages.front())});
+            peer_ready_messages.erase(peer_ready_messages.begin());
+            return message;
         };
-        reapply_peer_inbox();
     }
+    // 0.28.x:轮次边界收件点改为常驻(不再依赖 peer 是否启动)。收件链两段,
+    // 排队消息在前(用户自己的话优先)、peer 来信在后,来源文案分清:
+    //   - 子代理目标:当场转投任务 inbox(PumpSteeringToSubagents,与面板
+    //     定向介入同一条通道),不混进 main 的注入批次;
+    //   - main 目标:一次边界攒下的多条合成一条 user 消息(一块一条
+    //     TextBlock,顺序保留),InjectIncomingMessage 会追加在刚入 history 的
+    //     tool_result 之后——tool result 在前、介入消息在后、下一 request 最后,
+    //     钉死的正是这个次序。危险工具执行中途没有任何调用点,天然插不进话。
+    reapply_peer_inbox = [this, peer_inbox_poll]() {
+        loop->SetInbox([this, peer_inbox_poll]() -> std::optional<lubancode::api::Message> {
+            PumpSteeringToSubagents();
+            const auto queued = SessionSteeringQueue().TakeDeliverable(lubancode::cli::MessageTarget::Main());
+            if (!queued.empty()) {
+                lubancode::api::Message inject;
+                inject.role = lubancode::api::Role::User;
+                for (const auto& item : queued) {
+                    inject.content.push_back(lubancode::api::TextBlock{
+                        "[用户排队消息] 用户在上一只工具执行期间补了话,按排队顺序接上,不另起新任务:\n" +
+                        item.text});
+                }
+                return inject;
+            }
+            if (peer_inbox_poll) {
+                return peer_inbox_poll();
+            }
+            return std::nullopt;
+        });
+    };
+    reapply_peer_inbox();
     // loop 已就位,把 worktree 工具 enter/exit 的善后接到这条 sync 上。
     after_worktree_moved = [this]() { SyncWorktreeDirectory(); };
     // --continue 若把会话搬回了存档里的房,提示词与子代理 cwd 跟着同步。

@@ -229,3 +229,72 @@ TEST_CASE("收件点:不设或交空,行为跟从前完全一致") {
     REQUIRE(loop.Run("问", agent::Callbacks{}).has_value());
     REQUIRE(loop.history().size() == 2);
 }
+
+TEST_CASE("收件点:同一边界多条排队消息,按落队顺序一并注入下一请求") {
+    // 0.28.x 排队消息:一次工具边界可能攒下好几条,收件点把多条合成一条
+    // user 消息(一块一条 TextBlock),InjectIncomingMessage 追加在 tool_result
+    // 之后——顺序不可倒,不可丢。
+    FakeBackend backend;
+    backend.scripts = {
+        ToolUseScript("toolu_q", "fake_tool"),
+        TextOnlyScript("都收到了。"),
+    };
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<FakeTool>());
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    loop.SetInbox([&]() -> std::optional<api::Message> {
+        api::Message batch;
+        batch.role = api::Role::User;
+        batch.content.push_back(api::TextBlock{"[用户排队消息] 第一条:只看只读"});
+        batch.content.push_back(api::TextBlock{"[用户排队消息] 第二条:证据列全"});
+        batch.content.push_back(api::TextBlock{"[用户排队消息] 第三条:收尾报数"});
+        static bool drained = false;
+        if (!drained) {
+            drained = true;
+            return batch;
+        }
+        return std::nullopt;
+    });
+
+    REQUIRE(loop.Run("去查", agent::Callbacks{}).has_value());
+    REQUIRE(backend.captured_requests.size() == 2);
+    const auto& last = backend.captured_requests[1].messages.back();
+    REQUIRE(last.content.size() == 4);  // tool_result + 三块排队消息
+    CHECK(std::holds_alternative<api::ToolResultBlock>(last.content[0]));  // 工具结果在前
+    const auto text_of = [](const api::ContentBlock& block) {
+        return std::get<api::TextBlock>(block).text;
+    };
+    const std::size_t first_pos = text_of(last.content[1]).find("第一条");
+    const std::size_t second_pos = text_of(last.content[2]).find("第二条");
+    const std::size_t third_pos = text_of(last.content[3]).find("第三条");
+    REQUIRE(first_pos != std::string::npos);
+    REQUIRE(second_pos != std::string::npos);
+    REQUIRE(third_pos != std::string::npos);
+}
+
+TEST_CASE("收件点:无工具自然收尾,本轮不注入——排队消息留给收场后的会话泵") {
+    // 规格:turn==0 不收件(这一轮的用户消息刚落下);模型没调工具直接
+    // end_turn 时,Run 在第一个请求后就返回,收件点一次都不被调。排队消息
+    // 不抢跑、不落在本轮,由调用方在收场后当下一轮用户消息发出。
+    FakeBackend backend;
+    backend.scripts = {TextOnlyScript("答完了")};
+    tools::ToolRegistry registry;
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    int inbox_calls = 0;
+    loop.SetInbox([&]() -> std::optional<api::Message> {
+        ++inbox_calls;
+        return IncomingText("[用户排队消息] 不该出现在本轮");
+    });
+
+    REQUIRE(loop.Run("普通一问", agent::Callbacks{}).has_value());
+    CHECK(inbox_calls == 0);  // 没有工具边界,收件点压根没被调
+    REQUIRE(backend.captured_requests.size() == 1);
+    for (const auto& message : backend.captured_requests[0].messages) {
+        for (const auto& block : message.content) {
+            if (const auto* text = std::get_if<api::TextBlock>(&block)) {
+                CHECK(text->text.find("不该出现在本轮") == std::string::npos);
+            }
+        }
+    }
+    REQUIRE(loop.history().size() == 2);  // user + assistant,干干净净
+}
