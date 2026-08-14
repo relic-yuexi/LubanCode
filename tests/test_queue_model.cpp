@@ -8,10 +8,12 @@
 #include <string>
 #include <vector>
 
+#include "cli/line_editor.hpp"
 #include "cli/queue_model.hpp"
 
 using lubancode::cli::BuildPendingQueueRows;
 using lubancode::cli::PendingQueueCore;
+using lubancode::cli::StreamSlashHintLines;
 using Event = PendingQueueCore::Event;
 
 namespace {
@@ -225,4 +227,78 @@ TEST_CASE("BuildPendingQueueRows:超上限只添一行'另有 N 条',摆最近�
     const auto single = BuildPendingQueueRows({"a", "b"}, 1);
     REQUIRE(single.size() == 2);
     CHECK(single[1] == "  \xE2\x80\xBA b");
+}
+
+// ---------------------------------------------------------------------------
+// StreamSlashHintLines(流式输入行的 slash 提示,接线层纯函数):门槛、前缀
+// 过滤、封顶 6 行 + 汇总行,规则照规格逐条钉。候选表是自造的,不依赖
+// AllSlashCommands 的真实清单(那份会随版本长,断言数字会飘)。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::vector<lubancode::cli::CompletionCandidate> HintCandidates() {
+    using lubancode::cli::CompletionCandidate;
+    return {
+        {"/help", "看帮助"},
+        {"/model", "换模型"},
+        {"/record", "录制技能"},
+        {"/retry", "重试一轮"},
+        {"/read", "读文件"},
+        {"/refresh", "刷新"},
+        {"/remove", "删掉"},
+        {"/recordx", "多一个凑数"},
+    };
+}
+
+}  // namespace
+
+TEST_CASE("StreamSlashHintLines:'/':全列,封顶 6 行 + 一行汇总,不带选中标记") {
+    const auto lines = StreamSlashHintLines(HintCandidates(), "/");
+    REQUIRE(lines.size() == 7);  // 6 行候选 + 1 行"共 8 个命令"
+    for (std::size_t i = 0; i < 6; ++i) {
+        CHECK(lines[i].rfind("  ", 0) == 0);   // 没有选中态,一律两空格起头
+        CHECK(lines[i].rfind("> ", 0) != 0);
+    }
+    CHECK(lines[0].find("/help") != std::string::npos);
+    CHECK(lines[5].find("/refresh") != std::string::npos);  // 第 7、8 个不逐条摆
+    CHECK(lines[5].find("/remove") == std::string::npos);
+    CHECK(lines[6].find("8") != std::string::npos);         // 汇总行带总数
+    // 说明跟着命令行走
+    CHECK(lines[0].find("看帮助") != std::string::npos);
+}
+
+TEST_CASE("StreamSlashHintLines:恰好 6 个命中,正好 6 行,不加汇总行") {
+    using lubancode::cli::CompletionCandidate;
+    std::vector<CompletionCandidate> six;
+    for (int i = 0; i < 6; ++i) {
+        six.push_back(CompletionCandidate{"/a" + std::to_string(i), "说明"});
+    }
+    const auto lines = StreamSlashHintLines(six, "/");
+    REQUIRE(lines.size() == 6);
+    CHECK(lines[5].find("/a5") != std::string::npos);
+}
+
+TEST_CASE("StreamSlashHintLines:'/re' 前缀过滤,大小写不敏感") {
+    const auto lines = StreamSlashHintLines(HintCandidates(), "/re");
+    // 命中 /record /retry /read /refresh /remove /recordx,恰好 6 个,不加汇总行
+    REQUIRE(lines.size() == 6);
+    CHECK(lines[0].find("/record") != std::string::npos);
+    for (const auto& line : lines) {
+        CHECK(line.find("/help") == std::string::npos);
+        CHECK(line.find("/model") == std::string::npos);
+    }
+
+    const auto upper = StreamSlashHintLines(HintCandidates(), "/RE");
+    REQUIRE(upper.size() == lines.size());
+    CHECK(upper[0].find("/record") != std::string::npos);  // 命令名照原样摆
+}
+
+TEST_CASE("StreamSlashHintLines:无匹配、含空格、非 slash、空 buffer 一律为空") {
+    const auto cands = HintCandidates();
+    CHECK(StreamSlashHintLines(cands, "/xyz").empty());        // 无匹配
+    CHECK(StreamSlashHintLines(cands, "/record start").empty());  // 敲了空格,进了参数区
+    CHECK(StreamSlashHintLines(cands, "hello").empty());       // 非 slash 正文
+    CHECK(StreamSlashHintLines(cands, "").empty());            // 空 buffer
+    CHECK(StreamSlashHintLines({}, "/re").empty());            // 没有候选表也是空
 }

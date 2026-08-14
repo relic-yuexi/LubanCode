@@ -90,6 +90,21 @@ LineEditorCore& SharedEditor() {
     return editor;
 }
 
+// 流式输入行 slash 提示的候选表:跟 SharedEditor 同一份来源(AllSlashCommands
+// 转候选),但单独建一份静态表——监听线程只拿它喂纯函数
+// StreamSlashHintLines 现算提示行,不碰 SharedEditor 的编辑状态/历史,两边的
+// 键盘路径互不知晓。命令清单仍只有 slash_commands 那一份,不抄第二遍。
+const std::vector<CompletionCandidate>& StreamHintCandidates() {
+    static const std::vector<CompletionCandidate> candidates = [] {
+        std::vector<CompletionCandidate> out;
+        for (const auto& cmd : AllSlashCommands()) {
+            out.push_back(CompletionCandidate{cmd.name, cmd.description});
+        }
+        return out;
+    }();
+    return candidates;
+}
+
 // UI-D(0.16.0):会话级 UI 按键回调(Ctrl+O/Ctrl+E/焦点导航)。存这儿、
 // 由 SetTranscriptUiHandler 装卸;ReadLineKeyByKey 只在 composer 读取里查它。
 TranscriptUiHandler& UiHandlerSlot() {
@@ -176,6 +191,8 @@ struct StreamFooterState {
     Theme theme;             // 完整主题:画框(BoxRuleLine)、状态行(PrintStatusLine)
                              // 直接复用 composer 那两个画法,得传整个 Theme,不能只传片段。
     std::vector<std::string> queued;  // 已落队、等本轮结束后发送的消息(编辑中那条除外)
+    std::vector<std::string> hints;   // 流式输入行的 slash 命令提示行(画在状态行
+                                      // 之下,跟空闲 composer 同一层级),空 = 没有提示
     bool working = false;             // true 时在输入框上方合成 Working 动画
     std::string working_label;
     std::size_t working_highlight = 0;
@@ -1200,7 +1217,10 @@ void RedrawStreamFooterLocked() {
     const std::vector<std::string> queue_rows_text =
         f.queued.empty() ? std::vector<std::string>{} : BuildPendingQueueRows(f.queued, kMaxVisibleQueuedLines);
     const int queue_rows = static_cast<int>(queue_rows_text.size());
-    const int total_rows = working_rows + queue_rows + kStreamFooterBoxRows;
+    // slash 提示行画在状态行之下(跟空闲 composer 的视觉层级一致),高度一并
+    // 记进 total_rows——探底滚屏、旧框擦除(都按 f.rows 报账)随之生效。
+    const int hint_rows = static_cast<int>(f.hints.size());
+    const int total_rows = working_rows + queue_rows + kStreamFooterBoxRows + hint_rows;
 
     // 框落在正文光标的下一行:正文停在行中(bx>0)就 by+1,正文刚换行
     // 停在行首(bx==0)就落在 by 这空行上——两种都是"正文当前底部的下一行"。
@@ -1274,6 +1294,14 @@ void RedrawStreamFooterLocked() {
         std::cout << f.color << " · " << interrupt << f.reset;
     }
 
+    // slash 提示行:状态行之下逐行摆(空闲 composer 同一层级),纯文本、按屏
+    // 宽截断(跟 ReadLineKeyByKey 画 hint_lines 一个路数);plain 主题不夹
+    // ANSI,天然无色。待发队列区在上横线之上,与提示行同屏共存、互不挤占。
+    for (std::size_t i = 0; i < f.hints.size(); ++i) {
+        platform::SetCursorPos(0, box_top + 4 + static_cast<int>(i));
+        std::cout << TruncateUtf8ToDisplayWidth(f.hints[i], (std::max)(0, width - 1));
+    }
+
     std::cout << kSyncOutputEnd;
     std::cout.flush();
     // 正文位置藏起来，肉眼所见的光标留在输入框。下一笔正文来时
@@ -1296,6 +1324,7 @@ void BeginStreamFooter(const Theme& theme, bool enabled) {
     f.body_y = -1;
     f.echo.clear();
     f.queued.clear();
+    f.hints.clear();
     f.working = false;
     f.working_label.clear();
     f.working_highlight = 0;
@@ -1317,6 +1346,7 @@ void EndStreamFooter() {
     f.enabled = false;
     f.echo.clear();
     f.queued.clear();
+    f.hints.clear();
     f.hint.clear();
     f.working = false;
     f.working_label.clear();
@@ -1457,6 +1487,10 @@ void TurnInputListener::ThreadMain() {
         std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
         FooterSlot().echo = queue_.echo_text();
         FooterSlot().queued = queue_.display_items();
+        // slash 提示:编辑态(上键取回改写)和敲字态同一条规则——buffer 以
+        // '/' 开头、还没敲空格就实时列出匹配命令,纯函数现算,不碰任何
+        // 编辑器状态。
+        FooterSlot().hints = StreamSlashHintLines(StreamHintCandidates(), queue_.echo_text());
         RedrawStreamFooterLocked();
     };
 

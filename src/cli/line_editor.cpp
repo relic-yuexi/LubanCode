@@ -926,4 +926,50 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
     return BuildRenderState(false, false, false, false);
 }
 
+std::vector<std::string> StreamSlashHintLines(const std::vector<CompletionCandidate>& candidates,
+                                              const std::string& buffer_utf8) {
+    // 出提示的门槛建在码点层:首字符是 '/'、整段没有空格。空串自然不过门。
+    const std::u32string buffer = Utf8ToUtf32(buffer_utf8);
+    if (buffer.empty() || buffer.front() != U'/' ||
+        buffer.find(U' ') != std::u32string::npos) {
+        return {};
+    }
+
+    // 匹配与 LineEditorCore::MatchingCandidateNames 同一规矩:ASCII 命令名
+    // 大小写不敏感前缀匹配,命中按候选表原顺序摆。
+    const std::string word_lower = ToLowerAscii(buffer_utf8);
+    std::vector<std::string> matches;
+    for (const auto& cand : candidates) {
+        const std::string cand_lower = ToLowerAscii(cand.name);
+        if (cand_lower.size() >= word_lower.size() &&
+            cand_lower.compare(0, word_lower.size(), word_lower) == 0) {
+            matches.push_back(cand.name);
+        }
+    }
+    if (matches.empty()) {
+        return {};
+    }
+
+    // 摆法跟 LineEditorCore::BuildHintLines(selected_index = -1) 一致:一行
+    // "  /name  说明",封顶 6 行,超出加一行汇总;没有选中态,不出 "> " 行。
+    constexpr std::size_t kMaxLines = 6;
+    std::vector<std::string> lines;
+    for (std::size_t i = 0; i < matches.size() && i < kMaxLines; ++i) {
+        std::string line = "  ";
+        line += matches[i];
+        line += "  ";
+        for (const auto& cand : candidates) {
+            if (cand.name == matches[i]) {
+                line += cand.description;
+                break;
+            }
+        }
+        lines.push_back(std::move(line));
+    }
+    if (matches.size() > kMaxLines) {
+        lines.push_back(trf("ui.menu_more", matches.size()));
+    }
+    return lines;
+}
+
 }  // namespace lubancode::cli
