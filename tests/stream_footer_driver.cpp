@@ -363,23 +363,68 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
     SendKey(VK_RETURN, L'\r', 0);
-    // 落队后:正文挪进输入框上方的待发区(紧贴上横线那一行),输入行清空
-    // 回占位提示;只有一条时不写"待发消息 1 条"汇总头(结构:待发行 =
-    // 上横线行 - 1,上横线行 = 输入行 - 1)。
+    // 落队后:正文挪进输入框上方的队列区。0.28.x 起队列区带标题行,行序
+    // (自上而下)= 消息行、标题行、上横线、输入行;输入行清空回占位提示。
+    // 只有一条时不写"另有 N 条"(结构:消息行 = 输入行-3,标题行 = 输入行-2,
+    // 上横线行 = 输入行-1)。
     bool g2_queued_row_seen = false;
     const DWORD g2_queue_deadline = GetTickCount() + 8000;
     while (GetTickCount() < g2_queue_deadline) {
         const int row = FindFooterInputRow();
-        if (row >= 2 && ReadRow(row - 2).find("你好排队") != std::string::npos &&
-            ReadRow(row - 1).empty() == false && IsRuleRow(row - 1) && ReadRow(row).find("你好排队") == std::string::npos) {
+        if (row >= 3 && ReadRow(row - 3).find("你好排队") != std::string::npos &&
+            ReadRow(row - 2).find("送出") != std::string::npos && IsRuleRow(row - 1) &&
+            ReadRow(row).find("你好排队") == std::string::npos) {
             g2_queued_row_seen = true;
             break;
         }
         Sleep(100);
     }
-    Check(g2_queued_row_seen, "G2 落队:正文挪到输入框上方待发区,输入行清空");
+    Check(g2_queued_row_seen, "G2 落队:正文挪到输入框上方队列区(消息行在标题行之上),输入行清空");
     Check(FindLastRow("待发送消息") == -1, "G2 落队:一条不写'待发送消息 1 条'汇总头");
     Check(FindLastRow("另有") == -1, "G2 落队:未超可见上限,不出现'另有 N 条'");
+    if (g2_queued_row_seen) {
+        // 标题说清送达时机与操作(规格"标题"节):工具边界送出、Esc 立即送、
+        // Shift+← 取回编辑,三样都得在。
+        const std::string title = ReadRow(FindLastRow("送出"));
+        Check(title.find("Esc") != std::string::npos, "G2 队列标题:写明 Esc 打断并立即送");
+        Check(title.find("Shift") != std::string::npos, "G2 队列标题:写明取回编辑键");
+    }
+
+    // ---- G4 Shift+← 取回编辑:正文空 + 队列非空,按 Shift+Left 取回最新
+    // 一条;队列区该条标"编辑中",正文装进真编辑器(可挪光标/改字),Enter
+    // 原位替换。 ----
+    {
+        SendKey(VK_LEFT, 0, SHIFT_PRESSED);
+        bool recalled = false;
+        const DWORD recall_deadline = GetTickCount() + 6000;
+        while (GetTickCount() < recall_deadline) {
+            const int row = FindFooterInputRow();
+            if (row >= 3 && ReadRow(row).find("你好排队") != std::string::npos &&
+                ReadRow(row - 3).find("编辑中") != std::string::npos) {
+                recalled = true;
+                break;
+            }
+            Sleep(100);
+        }
+        Check(recalled, "G4 Shift+← 取回:正文进输入行,队列条目标'编辑中'");
+        if (recalled) {
+            // 光标落在末尾:补一个字再原位替换,队列行跟着换新,位置不动。
+            SendText("过");
+            bool replaced = false;
+            const DWORD replace_deadline = GetTickCount() + 6000;
+            while (GetTickCount() < replace_deadline) {
+                const int row = FindFooterInputRow();
+                if (row >= 3 && ReadRow(row - 3).find("你好排队过") != std::string::npos &&
+                    ReadRow(row - 3).find("编辑中") == std::string::npos &&
+                    ReadRow(row).find("你好排队过") == std::string::npos) {
+                    replaced = true;
+                    break;
+                }
+                Sleep(100);
+            }
+            Check(replaced, "G4 Enter 原位替换:队列行换新文,id/位置不动,输入行清空");
+        }
+    }
     Sleep(300);
     // 落队之后框应该重新出现在新位置(占位提示复位),再验一次上下横线还在。
     {
@@ -403,7 +448,7 @@ int wmain(int argc, wchar_t** argv) {
         const DWORD hint_deadline = GetTickCount() + 15000;
         while (GetTickCount() < hint_deadline) {
             const int row = FindFooterInputRow();
-            if (row >= 2 && ReadRow(row - 2).find("你好排队") != std::string::npos) {
+            if (row >= 3 && ReadRow(row - 3).find("你好排队") != std::string::npos) {
                 const std::string input_text = ReadRow(row);  // 输入行 "> /"(打了一个 '/')
                 int hint_count = 0;
                 for (int r = row + 3; r < row + 11 && r < 400; ++r) {
@@ -515,6 +560,34 @@ int wmain(int argc, wchar_t** argv) {
             }
         }
         (void)prev_tokens_row;
+    }
+
+    // ---- G5 Esc 打断并立即送:队列非空时 Esc 不再只打断——收场后队列消息
+    // 立即自动发出(pump 打一行 "> 内容");多条同批、超可见上限时队列区
+    // 出现"另有 N 条"(30 行窄窗下输入框与状态行仍看得见,前面各步已经顺
+    // 带验过窄窗共存)。 ----
+    {
+        SendText("再讲讲 C++ 模块的历史。");
+        SendKey(VK_RETURN, L'\r', 0);
+        Sleep(1500);  // 让流式起步,确认排队的消息真落在"流式期间"
+        for (const char* line : {"第一条:先讲 export", "第二条:再讲 import", "第三条:收个尾", "第四条:别超时"}) {
+            SendText(line);
+            SendKey(VK_RETURN, L'\r', 0);
+            Sleep(120);
+        }
+        // 四条排队(可见上限 3):队列区出现"另有 1 条"。
+        Check(WaitForText("另有", 8000), "G5 多条排队:超可见上限出现'另有 N 条'");
+        SendKey(VK_ESCAPE, 0, 0);
+        Check(WaitForText("[\xe5\xb7\xb2\xe6\x89\x93\xe6\x96\xad]", 15000), "G5 Esc:出现 '[已打断]'");
+        // 打断收场后,会话泵立即把排队消息发出:屏上出现 pump 打的
+        // "> 第一条:先讲 export"(流式期间排队,收场即送,不等用户再敲)。
+        Check(WaitForText("> \xe7\xac\xac\xe4\xb8\x80\xe6\x9d\xa1", 30000),
+              "G5 Esc 立即送:收场后第一条排队消息自动发出('> 第一条')");
+        // 剩余三条也逐条跟上(会话泵一条一轮),给足时间;不逐条断言文案,
+        // 只验第四条最终也发了出去——四条一个不丢。
+        Check(WaitForText("> \xe7\xac\xac\xe5\x9b\x9b\xe6\x9d\xa1", 300000),
+              "G5 Esc 立即送:四条排队消息逐条全部送出");
+        Sleep(1000);
     }
 
     // ---- 收尾:exit ----

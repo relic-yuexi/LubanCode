@@ -907,7 +907,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         }
         QueueViewOptions view;
         view.visible_cap = kMaxVisibleQueuedLines;
-        view.title_mode = queue_edit.has_value() ? QueueTitleMode::Editing : QueueTitleMode::EndOfTurn;
+        view.title_mode = steering.immediate_delivery_requested() ? QueueTitleMode::Immediate
+                              : queue_edit.has_value() ? QueueTitleMode::Editing
+                                                       : QueueTitleMode::EndOfTurn;
         return BuildSteeringQueueRows(snapshot, view);
     };
 
@@ -2041,12 +2043,17 @@ void TurnInputListener::ThreadMain() {
 
         if (key->kind == PK::Esc) {
             // 两层 Esc(规格):编辑态第一下只取消编辑、还原原文(不打断当前
-            // 轮);退出编辑态后的 Esc 才是打断。
+            // 轮);退出编辑态后的 Esc 才是打断。队列里还有可送的:打断之外
+            // 还要"立即送"——收场泵会在最近安全点把消息送进原目标,送达前
+            // 队列区标题显示"正在打断并送达"。队列为空:Esc 仍只打断。
             if (edit.has_value()) {
                 steering.CancelEdit(*edit);
                 close_edit_clear();
                 refresh_footer();
                 continue;
+            }
+            if (steering.HasAnyDeliverable()) {
+                steering.RequestImmediateDelivery();
             }
             interrupt_turn();
             continue;
@@ -2074,12 +2081,16 @@ void TurnInputListener::ThreadMain() {
                 }  // 退出前先放锁——std::exit 会跑静态对象析构,别让它们卡死在这把锁上。
                 std::exit(130);  // 130 = 128+SIGINT,"被 Ctrl+C 中断"的约定退出码
             }
-            // 单击对齐 Esc 的两层语义:编辑态先取消编辑。
+            // 单击对齐 Esc 的两层语义:编辑态先取消编辑;队列非空时同样
+            // "打断 + 立即送"。
             if (edit.has_value()) {
                 steering.CancelEdit(*edit);
                 close_edit_clear();
                 refresh_footer();
                 continue;
+            }
+            if (steering.HasAnyDeliverable()) {
+                steering.RequestImmediateDelivery();
             }
             interrupt_turn();
             continue;

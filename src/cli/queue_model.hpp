@@ -129,6 +129,8 @@ public:
     std::optional<QueuedMessage> TakeFirstDeliverable(MessageTarget target);
     // 只问有没有,不动账(判"有没有可等的事"用)。
     bool HasDeliverable(MessageTarget target) const;
+    // 任意目标还有没有可投递的(Esc"打断并立即送"要不要翻旗用)。
+    bool HasAnyDeliverable() const;
 
     // ---- 编辑事务 ----
     // 取最新一条可编辑的(TargetGone/Failed 也给取:用户要改目标或删掉)。

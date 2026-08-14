@@ -145,7 +145,7 @@ TEST_CASE("版本冲突:凭据过期后提交失败,原文不被覆盖") {
 
 TEST_CASE("Esc 还原:取消编辑放回原文;Del 删除;Remove 兜底") {
     SteeringQueue q;
-    const auto id = q.Enqueue(MessageTarget::Main(), "要还原的");
+    q.Enqueue(MessageTarget::Main(), "要还原的");
     auto handle = q.BeginEditLatest();
     REQUIRE(handle.has_value());
     CHECK(q.CancelEdit(*handle) == Status::Ok);
@@ -196,7 +196,9 @@ TEST_CASE("终态目标:MarkTargetGone/MarkFailed 留原位标错,不参与投�
 TEST_CASE("立即送状态旗:Esc 翻旗、送空后收旗;落队消息记下策略") {
     SteeringQueue q;
     CHECK_FALSE(q.immediate_delivery_requested());
+    CHECK_FALSE(q.HasAnyDeliverable());
     q.Enqueue(MessageTarget::Main(), "等着送的");
+    CHECK(q.HasAnyDeliverable());  // 有可送的,Esc 才翻"立即送"旗
     q.RequestImmediateDelivery();
     CHECK(q.immediate_delivery_requested());
     // 旗子翻过后落队的消息策略记 Immediate(信息性字段,投递仍只在安全点)。
@@ -204,8 +206,13 @@ TEST_CASE("立即送状态旗:Esc 翻旗、送空后收旗;落队消息记下策
     CHECK(Find(q.Snapshot(), late).delivery == DeliveryMode::Immediate);
 
     q.TakeDeliverable(MessageTarget::Main());
+    CHECK_FALSE(q.HasAnyDeliverable());  // 都送走了:没有可"立即送"的东西
     q.ClearImmediateDelivery();
     CHECK_FALSE(q.immediate_delivery_requested());
+    // 终态条目不算可送:只有 TargetGone 时 Esc 不翻立即送旗(打断归打断)。
+    const auto gone = q.Enqueue(MessageTarget::Agent(1), "目标没了");
+    q.MarkTargetGone(gone, "gone");
+    CHECK_FALSE(q.HasAnyDeliverable());
 }
 
 TEST_CASE("收场处置:TakeAllForDisposal 一次交出全部并清空") {

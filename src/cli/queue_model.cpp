@@ -145,6 +145,14 @@ bool SteeringQueue::HasDeliverable(MessageTarget target) const {
     });
 }
 
+bool SteeringQueue::HasAnyDeliverable() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return std::any_of(items_.begin(), items_.end(),
+                       [](const QueuedMessage& item) {
+                           return item.state == QueueItemState::Queued && !item.edit_open;
+                       });
+}
+
 std::optional<SteeringQueue::EditHandle> SteeringQueue::BeginEditLatest() {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto it = items_.rbegin(); it != items_.rend(); ++it) {
