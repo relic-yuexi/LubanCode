@@ -203,6 +203,8 @@ private:
 
     // ---- 原先的大 lambda,逐只升成方法 ----
     std::vector<lubancode::cli::AgentPanelEntry> BuildAgentPanelEntries();
+    std::vector<std::string> BuildAgentTaskDetail(int task_id);
+    void CleanupBackgroundAgents();
     bool HandleTranscriptUi(lubancode::cli::UiKeyAction action);
     void PrintRecentItems(std::size_t count);
     void RebuildLoop(bool preserve_history = false);
@@ -277,7 +279,7 @@ private:
     // ---- UI 状态 ----
     std::vector<lubancode::cli::TranscriptItem> transcript;
     std::uint64_t agent_panel_revision_ = 0;  // SetAgentPanelProvider 的缓存
-    std::vector<lubancode::tools::AgentTaskSnapshot> agent_panel_tasks_;
+    std::vector<lubancode::tools::AgentTaskSummary> agent_panel_tasks_;  // 轻量全量(不截 8 只)
     // Ctrl+O 全局开关,RunTurn 里新条目也按它画。atomic<bool>:回合执行期间
     // TurnInputListener 的监听线程也会翻它,真机驱动器实测踩到过普通 bool
     // 在这条跨线程路径上的可见性问题。
@@ -505,8 +507,46 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
                              : std::string();
     });
 
-    // 后台子代理面板的数据源(缓存 + 修订号,面板每 100ms 拉一次)。
+    // 后台子代理面板的数据源(缓存 + 修订号,面板每 100ms 拉一次)。列表走
+    // 轻量全量(TaskSummaries,不截 8 只);详情按需(只有查看态打开的那只
+    // 才拉),别让每拍刷新复制全部工具输出。
     lubancode::cli::SetAgentPanelProvider([this]() { return BuildAgentPanelEntries(); });
+    lubancode::cli::SetAgentPanelDetailProvider([this](int task_id) { return BuildAgentTaskDetail(task_id); });
+
+    // 面板动作接线(x 停止/清除、Ctrl+X Ctrl+K 两段确认停全部):只发信号/
+    // 清台账,面板等任务线程报终态的那一拍自己改灯。
+    lubancode::cli::AgentPanelActions panel_actions;
+    panel_actions.cancel_task = [this](int task_id) {
+        return session_agent_tool() != nullptr && session_agent_tool()->CancelTask(task_id);
+    };
+    panel_actions.clear_task = [this](int task_id) {
+        return session_agent_tool() != nullptr && session_agent_tool()->ClearFinishedTask(task_id);
+    };
+    panel_actions.cancel_all = [this]() {
+        return session_agent_tool() != nullptr ? session_agent_tool()->CancelAllTasks() : 0;
+    };
+    lubancode::cli::SetAgentPanelActions(panel_actions);
+
+    // 刮屏驱动器专用(tests/agent_panel_driver.cpp,不进 ctest):设
+    // LUBANCODE_AGENT_PANEL_DEMO=N 时面板显示 N 只假代理,便于真控制台断言
+    // "代理行在上横线之上"。正常启动不设这个变量,provider 还是真数据。
+    if (const auto demo = lubancode::platform::GetEnvVar("LUBANCODE_AGENT_PANEL_DEMO");
+        demo.has_value() && !demo->empty()) {
+        const int demo_count = std::max(1, std::atoi(demo->c_str()));
+        lubancode::cli::SetAgentPanelProvider([demo_count]() {
+            std::vector<lubancode::cli::AgentPanelEntry> fake;
+            for (int i = 1; i <= demo_count; ++i) {
+                lubancode::cli::AgentPanelEntry entry;
+                entry.task_id = i;
+                entry.name = "general-purpose #" + std::to_string(i);
+                entry.description = "演示任务 " + std::to_string(i);
+                entry.state = "运行中(2 次工具调用 · 1.2k tokens · 12s)";
+                entry.running = true;
+                fake.push_back(std::move(entry));
+            }
+            return fake;
+        });
+    }
 
     // 后台子代理结果回流(空闲唤醒):任务在会话空闲时跑完的,不能干等用户
     // 再敲一行才送达。ReadLine 等键的 100ms 面板刷新一拍里问这里,有未投递
@@ -633,6 +673,9 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
 }
 
 InteractiveSession::~InteractiveSession() {
+    // 定向介入收场(规格:退出/清场不能无声遗失):停全部、报未送达。任务
+    // 线程由 AgentTool 析构统一 join(此刻 tool_runtime_ 还活着,先于成员析构)。
+    CleanupBackgroundAgents();
     // 跨会话传话收尾:摘掉收件点(别让重建钩子再碰已停的 runtime),写
     // closing、摘名片、停 pipe——此后递来的信连不上,发送方拿 unavailable。
     reapply_peer_inbox = nullptr;
@@ -646,9 +689,14 @@ InteractiveSession::~InteractiveSession() {
     // 异常退场也走这条。
     lubancode::cli::SetTranscriptUiHandler(nullptr);
     lubancode::cli::SetAgentPanelProvider(nullptr);
+    lubancode::cli::SetAgentPanelDetailProvider(nullptr);
+    lubancode::cli::SetAgentPanelActions(lubancode::cli::AgentPanelActions{});
     lubancode::cli::SetIdleWakeHook(nullptr);
 }
 
+// 后台子代理面板:轻量全量列表(0.28.x 起不截 8 只,详情另走 BuildAgentTaskDetail)。
+// 摘要行的口径与流式回合的子代理状态条(AgentStatusBoard/FormatAgentStatusLines)
+// 同一套 i18n(agent_status.*):两块 painter 一个格式,合流布局规约的文本侧。
 std::vector<lubancode::cli::AgentPanelEntry> InteractiveSession::BuildAgentPanelEntries() {
     std::vector<lubancode::cli::AgentPanelEntry> out;
     lubancode::tools::AgentTool* agent_tool = session_agent_tool();
@@ -657,14 +705,14 @@ std::vector<lubancode::cli::AgentPanelEntry> InteractiveSession::BuildAgentPanel
     }
     const std::uint64_t revision = agent_tool->TaskRevision();
     if (revision != agent_panel_revision_) {
-        agent_panel_tasks_ = agent_tool->TaskSnapshots(8);
+        agent_panel_tasks_ = agent_tool->TaskSummaries();
         agent_panel_revision_ = revision;
     }
     const auto now = std::chrono::steady_clock::now();
     for (const auto& task : agent_panel_tasks_) {
         lubancode::cli::AgentPanelEntry entry;
+        entry.task_id = task.id;
         entry.name = task.agent_type + " #" + std::to_string(task.id);
-        entry.description = lubancode::cli::TruncateUtf8Codepoints(task.prompt, 34);
         entry.running = task.state == lubancode::tools::AgentTaskState::Running;
         entry.failed = task.state == lubancode::tools::AgentTaskState::Failed ||
                        task.state == lubancode::tools::AgentTaskState::Cancelled;
@@ -679,7 +727,7 @@ std::vector<lubancode::cli::AgentPanelEntry> InteractiveSession::BuildAgentPanel
         } else {
             state_key = "agent_status.state_done";
         }
-        entry.state = trf("agent_status.summary", tr(state_key), task.tool_calls.size(),
+        entry.state = trf("agent_status.summary", tr(state_key), task.tool_call_count,
                           lubancode::cli::FormatTokenCount(tokens), lubancode::cli::FormatSeconds(seconds));
         const auto one_line = [](std::string text) {
             for (char& c : text) {
@@ -689,26 +737,62 @@ std::vector<lubancode::cli::AgentPanelEntry> InteractiveSession::BuildAgentPanel
             }
             return text;
         };
-        entry.description = one_line(entry.description);
-        entry.detail_lines.push_back(one_line(task.prompt));
-        constexpr std::size_t kVisibleToolCalls = 8;
-        const std::size_t first =
-            task.tool_calls.size() > kVisibleToolCalls ? task.tool_calls.size() - kVisibleToolCalls : 0;
-        if (first > 0) {
-            entry.detail_lines.push_back("... " + std::to_string(first) + " earlier tool calls");
-        }
-        for (std::size_t i = first; i < task.tool_calls.size(); ++i) {
-            const auto& call = task.tool_calls[i];
-            entry.detail_lines.push_back(std::string(call.done ? "● " : "◌ ") + call.name + " " +
-                                         one_line(call.input_json));
-        }
-        const std::string& result = task.result.empty() ? task.live_output : task.result;
-        if (!result.empty()) {
-            entry.detail_lines.push_back(lubancode::cli::TruncateUtf8Codepoints(one_line(result), 160));
+        entry.description = one_line(lubancode::cli::TruncateUtf8Codepoints(task.prompt, 34));
+        if (task.pending_message_count > 0) {
+            // 有话已排给这只代理、还没在轮次边界送达——列表行尾巴明写,
+            // 详情里再列原文,不让"已排给 subagent #N"只活在提交那一瞬。
+            entry.state += " · " + trf("agent_panel.pending_note", task.pending_message_count);
         }
         out.push_back(std::move(entry));
     }
     return out;
+}
+
+// 查看态详情(按需取,每 100ms 那拍只在查看态开着时才会来问这一只):
+// 完整任务说明、全部工具调用流水(不截"最近 8 次")、未送达介入消息、
+// 结论/实时输出尾巴。
+std::vector<std::string> InteractiveSession::BuildAgentTaskDetail(int task_id) {
+    std::vector<std::string> lines;
+    lubancode::tools::AgentTool* agent_tool = session_agent_tool();
+    if (agent_tool == nullptr) {
+        return lines;
+    }
+    const auto snapshot = agent_tool->TaskDetail(task_id);
+    if (!snapshot.has_value()) {
+        lines.push_back(tr("agent_panel.detail_gone"));
+        return lines;
+    }
+    const auto one_line = [](std::string text) {
+        for (char& c : text) {
+            if (c == '\n' || c == '\r' || c == '\t') {
+                c = ' ';
+            }
+        }
+        return text;
+    };
+    lines.push_back(tr("agent_panel.detail_prompt"));
+    lines.push_back("  " + one_line(snapshot->prompt));
+    const auto pending = agent_tool->PendingTaskMessages(task_id);
+    if (!pending.empty()) {
+        lines.push_back(trf("agent_panel.detail_pending_head", pending.size()));
+        for (const auto& message : pending) {
+            lines.push_back("  * " + one_line(message));
+        }
+    }
+    if (!snapshot->tool_calls.empty()) {
+        lines.push_back(trf("agent_panel.detail_tools_head", snapshot->tool_calls.size()));
+        for (std::size_t i = 0; i < snapshot->tool_calls.size(); ++i) {
+            const auto& call = snapshot->tool_calls[i];
+            lines.push_back(std::string(call.done ? "● " : "◌ ") + std::to_string(i + 1) + ". " + call.name +
+                            " " + lubancode::cli::TruncateUtf8Codepoints(one_line(call.input_json), 120));
+        }
+    }
+    const std::string& result = snapshot->result.empty() ? snapshot->live_output : snapshot->result;
+    if (!result.empty()) {
+        lines.push_back(tr("agent_panel.detail_result_head"));
+        lines.push_back("  " + lubancode::cli::TruncateUtf8Codepoints(one_line(result), 400));
+    }
+    return lines;
 }
 
 // 聚焦查看返回时的"简化重画":最近几条紧凑摘要(焦点标记照带)。
@@ -1418,10 +1502,22 @@ SessionCommandState InteractiveSession::MakeSessionCommandState() {
             }
         },
         [this]() { SyncWorktreeDirectory(); },
+        [this]() { CleanupBackgroundAgents(); },
         &worktree_session,
         sessions_dir,
         wire_str,
         current_model};
+}
+
+// /clear 与退出共用的子代理清场:停全部、报未送达,不无声遗失。
+void InteractiveSession::CleanupBackgroundAgents() {
+    if (session_agent_tool() == nullptr) {
+        return;
+    }
+    session_agent_tool()->CancelAllTasks();
+    for (const auto& line : session_agent_tool()->TakeUndeliveredInboxReport()) {
+        std::cout << theme.stats << line << theme.reset << "\n";
+    }
 }
 
 void InteractiveSession::Run() {
@@ -1498,16 +1594,19 @@ void InteractiveSession::Run() {
         }
 
         std::string content;
+        std::optional<int> composer_target;  // 这条话若出自查看态 composer,收件人是那只子代理
         if (!pending_queue.empty()) {
             // 队列非空:先把队列里排在最前面的这条自动发出去,不再等
             // ReadLine()——跟手输的视觉一致,打一行 "> <内容>" 再处理。
+            // 队列是流式期间排下的,收件人天然是 main,不带查看态目标。
             content = std::move(pending_queue.front());
             pending_queue.pop_front();
             std::cout << theme.prompt << "> " << theme.reset << content << "\n";
         } else {
             // UI-A:主提示符是唯一开 composer 的读取点——Alt/Shift+Enter 插
             // 换行、Enter 全发、全空白不发送。别的 ReadLine 调用点(确认提示、
-            // /model 编号选择、向导)保持单行语义。
+            // /model 编号选择、向导)保持单行语义。查看态里提交的话,收件
+            // 目标由面板控制器记着(输入框上横线右端的短标题就是它)。
             const std::optional<std::string> line =
                 lubancode::cli::ReadLine(theme.prompt + "> " + theme.reset, theme,
                                           /*esc_rejects=*/false, /*composer=*/true);
@@ -1518,10 +1617,26 @@ void InteractiveSession::Run() {
                 continue;  // 空行不退出,重新给提示符
             }
             content = *line;
+            composer_target = lubancode::cli::CurrentComposerAgentTarget();
         }
 
         if (content == "exit" || content == "quit") {
             break;
+        }
+        // 定向介入(规格第七节):查看态 composer 提交的话直接进那只子代理
+        // 自己的 inbox,在"当前工具收尾、下一次请求未发"的边界注入它的
+        // history——不经 main,不串台。slash 命令仍走会话主路(/exit 这类
+        // 会话级动作不该被子代理视角扣下)。终态明确拒收,不改投 main。
+        if (composer_target.has_value() && !content.empty() && content.front() != '/' &&
+            session_agent_tool() != nullptr) {
+            const lubancode::tools::TaskMessageStatus status =
+                session_agent_tool()->SendTaskMessage(*composer_target, content);
+            std::cout << theme.stats
+                      << (status == lubancode::tools::TaskMessageStatus::Queued
+                              ? trf("agent_panel.target_queued", *composer_target)
+                              : trf("agent_panel.target_rejected", *composer_target))
+                      << theme.reset << "\n";
+            continue;
         }
         if (peer_started) {
             peer_runtime->SetStatus("busy");  // 名册上亮"忙",对端知道别指望立刻回话

@@ -435,6 +435,11 @@ CommandFlow HandleClearCommand(SessionCommandState& state, const lubancode::conf
     if (spinner_enabled) {
         ClearAndPrintBanner(config, theme);
     }
+    // 后台子代理清场(0.28.x 面板规格):停掉全部任务、未送达的介入消息
+    // 列给人看——新会话不该带着旧场子的代理与排着的话。
+    if (state.on_agents_cleanup) {
+        state.on_agents_cleanup();
+    }
     state.rebuild_loop(false);
     // 存档跟着翻篇:旧文件留在磁盘上,新会话下一条消息另起一份新文件
     // (id 用新的时间戳)。标题属于旧场子,一并翻篇。
