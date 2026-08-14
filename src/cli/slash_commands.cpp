@@ -133,6 +133,8 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
     } else if (lower == "/background" || lower == "/bg") {
         // /bg 是省事别名,跟 /background 同义。
         parsed.command = SlashCommand::Background;
+    } else if (lower == "/record") {
+        parsed.command = SlashCommand::Record;
     } else {
         parsed.command = SlashCommand::Unknown;
     }
@@ -294,6 +296,94 @@ bool CanRemoveProvider(const std::string& active_provider, const std::string& na
     return active_provider != name;
 }
 
+ParsedRecordCommand ParseRecordCommand(const std::string& args) {
+    ParsedRecordCommand parsed;
+    std::size_t pos = 0;
+    const auto action = NextToken(args, pos);
+    if (!action.has_value()) {
+        parsed.action = RecordCommandAction::Status;  // 裸敲 /record 看状态
+        return parsed;
+    }
+    const std::string verb = ToLower(*action);
+
+    const auto rest = [&]() { return Trim(args.substr(pos)); };
+
+    if (verb == "status") {
+        parsed.action = RecordCommandAction::Status;
+        return parsed;
+    }
+    if (verb == "start") {
+        const auto name = NextToken(args, pos);
+        if (!name.has_value() || NextToken(args, pos).has_value()) {
+            return parsed;  // 没名字/名字多于一个词,Invalid
+        }
+        parsed.action = RecordCommandAction::Start;
+        parsed.name = *name;
+        return parsed;
+    }
+    if (verb == "note") {
+        // 备注原文整段保留(可以有空格);没正文就 Invalid。
+        const std::string text = rest();
+        if (!text.empty()) {
+            parsed.action = RecordCommandAction::Note;
+            parsed.text = text;
+        }
+        return parsed;
+    }
+    if (verb == "pause") {
+        parsed.action = RecordCommandAction::Pause;
+        return parsed;
+    }
+    if (verb == "resume") {
+        parsed.action = RecordCommandAction::Resume;
+        return parsed;
+    }
+    if (verb == "stop") {
+        parsed.action = RecordCommandAction::Stop;
+        return parsed;
+    }
+    if (verb == "cancel") {
+        parsed.action = RecordCommandAction::Cancel;
+        return parsed;
+    }
+    if (verb == "list") {
+        parsed.action = RecordCommandAction::List;
+        return parsed;
+    }
+    if (verb == "discard") {
+        const auto id = NextToken(args, pos);
+        if (id.has_value() && !NextToken(args, pos).has_value()) {
+            parsed.action = RecordCommandAction::Discard;
+            parsed.name = *id;
+        }
+        return parsed;
+    }
+    if (verb == "install") {
+        const auto id = NextToken(args, pos);
+        if (!id.has_value()) {
+            return parsed;
+        }
+        parsed.action = RecordCommandAction::Install;
+        parsed.name = *id;
+        if (const auto where = NextToken(args, pos); where.has_value()) {
+            const std::string level = ToLower(*where);
+            if (level == "project" || level == "p") {
+                parsed.to_project = true;
+            } else if (level == "home" || level == "h") {
+                parsed.to_project = false;
+            } else {
+                parsed.action = RecordCommandAction::Invalid;  // 认不得的层级词
+                return parsed;
+            }
+            if (NextToken(args, pos).has_value()) {
+                parsed.action = RecordCommandAction::Invalid;  // 冒出第四个词
+            }
+        }
+        return parsed;
+    }
+    return parsed;  // 认不得的动作,保持 Invalid
+}
+
 const std::vector<SlashCommandInfo>& AllSlashCommands() {
     // i18n:说明文字按当前语言现查(tr),语言切换后惰性重建——静态表 +
     // 记住"上次是按哪种语言建的",不一致就重来一遍。交互循环是单线程消费
@@ -333,6 +423,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/soul", tr("slash.desc.soul")},
             {"/prompt", tr("slash.desc.prompt")},
             {"/background", tr("slash.desc.background")},
+            {"/record", tr("slash.desc.record")},
         };
     }
     return commands;

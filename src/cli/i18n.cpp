@@ -341,6 +341,59 @@ const Entry kZhCN[] = {
     {"slash.desc.soul", "看当前魂;/soul 内容 写进 SOUL.md,/soul clear 还原默认；名字仍可切换备选魂"},
     {"slash.desc.prompt", "看当前法(系统提示词)的来源和字数;/prompt reset 还原 system_prompt.md"},
     {"slash.desc.background", "列后台命令任务清单(状态/PID/命令);run_command run_in_background 起的那些"},
+    {"slash.desc.record", "录一遍生成技能;/record start 名字 开录,stop 出草稿,确认后安装"},
+
+    // ---- /record(录一遍生成技能) ----
+    {"record.usage",
+     "用法:\n"
+     "  /record start <名字>      开录(先问目标、可变输入、成事标准三句)\n"
+     "  /record note <为何这样做>  补一条用户备注\n"
+     "  /record pause             暂停(状态栏挂 REC 已停)\n"
+     "  /record resume            续录\n"
+     "  /record stop              停止并起草 SKILL.md,预览后可选择安装\n"
+     "  /record cancel            取消,删掉本场录制件(已装好的技能不动)\n"
+     "  /record status            看当前录制状态\n"
+     "  /record list              列录制件(含崩溃留下的半截件)\n"
+     "  /record install <编号> [project|home]  安装某场录制件的草稿\n"
+     "  /record discard <编号>    丢弃一场录制件\n"},
+    {"record.unavailable", "[record] 找不到主目录,录制功能不可用。"},
+    {"record.status.idle", "当前没有在录。/record start <名字> 开录。"},
+    {"record.status.recording", "录制中({0}):{1}\n录制件:{2}"},
+    {"record.status.recording_word", "进行中"},
+    {"record.status.paused_word", "已暂停"},
+    {"record.status.paused_marker", "REC 已停"},
+    {"record.already_active", "[record] 已在录制中:{0}。先 /record stop 或 /record cancel。"},
+    {"record.not_active", "[record] 没有在录。/record start <名字> 开录。"},
+    {"record.ask.goal", "这桩活最后要得什么?"},
+    {"record.ask.variables", "哪些值每回都会变?(没有就回车跳过)"},
+    {"record.ask.acceptance", "看见什么才算做成?"},
+    {"record.ask.verification", "最后一次验证结果?(没有就回车跳过)"},
+    {"record.started", "[record] 开录:{0}\n录制件目录:{1}\n状态栏挂 REC 标记;/record stop 起草。"},
+    {"record.start.failed", "[record] 开录失败: {0}"},
+    {"record.op_failed", "[record] {0}"},
+    {"record.note_saved", "[record] 备注已记下。"},
+    {"record.paused_msg", "[record] 已暂停,状态栏挂 REC 已停;/record resume 续录。"},
+    {"record.resumed_msg", "[record] 已续录。"},
+    {"record.stop_done", "[record] 已停止。录制件: {0} ({1})"},
+    {"record.stop.draft_failed", "[record] 起草失败: {0}"},
+    {"record.draft.header", "草稿已生成({0} 个文件),全文如下: ----"},
+    {"record.install.prompt", "装到哪一级? [p]项目级 / [h]主目录级 / 其余不装: "},
+    {"record.install.files", "确认后将写入 {0}:"},
+    {"record.skill_name_placeholder", "技能名"},
+    {"record.install.confirm", "确认安装? [y/N]: "},
+    {"record.install.cancelled", "[record] 未安装。草稿留在录制件里,之后 /record install <编号> 仍可装。"},
+    {"record.install.done", "[record] 已安装技能 {0} 到 {1},本场技能清单已刷新,立刻可用。"},
+    {"record.install.failed", "[record] 安装失败: {0}"},
+    {"record.install.not_found", "[record] 找不到录制件 {0}。/record list 看编号。"},
+    {"record.install.no_draft", "[record] 录制件 {0} 没有草稿(半截录制件装不进 skills;先 /record stop 生成草稿)。"},
+    {"record.list.header", "录制件(倒序):"},
+    {"record.list.empty", "还没有录制件。/record start <名字> 开录。"},
+    {"record.list.entry", "[{0}] {1}  {2}  {3}  {4}"},
+    {"record.list.finished", "已停止"},
+    {"record.list.unfinished", "未完成(崩溃或未 stop,装不进 skills)"},
+    {"record.list.has_draft", "有草稿"},
+    {"record.list.no_draft", "无草稿"},
+    {"record.discard_done", "[record] 已丢弃 {0}。"},
 
     // ---- /update ----
     {"cmd.update.usage", "用法: /update 或 /update check"},
@@ -1164,6 +1217,59 @@ const Entry kEn[] = {
     {"slash.desc.soul", "show the current soul; /soul <text> writes SOUL.md; /soul clear restores default"},
     {"slash.desc.prompt", "show the persona source/length; /prompt reset restores system_prompt.md"},
     {"slash.desc.background", "list background command tasks (status/PID/command); from run_command run_in_background"},
+    {"slash.desc.record", "record a workflow into a skill; /record start <name> to begin, stop drafts SKILL.md, install after review"},
+
+    // ---- /record (record & replay) ----
+    {"record.usage",
+     "Usage:\n"
+     "  /record start <name>      start recording (asks goal, variable inputs, done criteria)\n"
+     "  /record note <why>        append a user note\n"
+     "  /record pause             pause (status line shows REC paused)\n"
+     "  /record resume            resume recording\n"
+     "  /record stop              stop and draft SKILL.md, preview, optionally install\n"
+     "  /record cancel            cancel and delete this recording (installed skills untouched)\n"
+     "  /record status            show current recording state\n"
+     "  /record list              list recordings (including leftovers from crashes)\n"
+     "  /record install <id> [project|home]  install the draft of a recording\n"
+     "  /record discard <id>      discard a recording\n"},
+    {"record.unavailable", "[record] home directory not found; recording unavailable."},
+    {"record.status.idle", "Not recording. Start with /record start <name>."},
+    {"record.status.recording", "Recording ({0}): {1}\nRecording dir: {2}"},
+    {"record.status.recording_word", "active"},
+    {"record.status.paused_word", "paused"},
+    {"record.status.paused_marker", "REC paused"},
+    {"record.already_active", "[record] already recording: {0}. /record stop or /record cancel first."},
+    {"record.not_active", "[record] not recording. Start with /record start <name>."},
+    {"record.ask.goal", "What should this workflow produce?"},
+    {"record.ask.variables", "Which values change every run? (Enter to skip)"},
+    {"record.ask.acceptance", "What tells you it succeeded?"},
+    {"record.ask.verification", "Result of the final verification? (Enter to skip)"},
+    {"record.started", "[record] started: {0}\nRecording dir: {1}\nStatus line shows REC; /record stop drafts the skill."},
+    {"record.start.failed", "[record] failed to start: {0}"},
+    {"record.op_failed", "[record] {0}"},
+    {"record.note_saved", "[record] note recorded."},
+    {"record.paused_msg", "[record] paused; /record resume to continue."},
+    {"record.resumed_msg", "[record] resumed."},
+    {"record.stop_done", "[record] stopped. Recording: {0} ({1})"},
+    {"record.stop.draft_failed", "[record] drafting failed: {0}"},
+    {"record.draft.header", "Draft generated ({0} file(s)), full text below: ----"},
+    {"record.install.prompt", "Install to which level? [p]roject / [h]ome / anything else skips: "},
+    {"record.install.files", "The following will be written under {0}:"},
+    {"record.skill_name_placeholder", "skill-name"},
+    {"record.install.confirm", "Install? [y/N]: "},
+    {"record.install.cancelled", "[record] not installed. The draft stays in the recording; /record install <id> works later."},
+    {"record.install.done", "[record] skill {0} installed under {1}; skill list refreshed, usable right away."},
+    {"record.install.failed", "[record] install failed: {0}"},
+    {"record.install.not_found", "[record] recording {0} not found. See /record list."},
+    {"record.install.no_draft", "[record] recording {0} has no draft (half recordings never reach skills; run /record stop first)."},
+    {"record.list.header", "Recordings (newest first):"},
+    {"record.list.empty", "No recordings yet. Start with /record start <name>."},
+    {"record.list.entry", "[{0}] {1}  {2}  {3}  {4}"},
+    {"record.list.finished", "stopped"},
+    {"record.list.unfinished", "unfinished (crashed or not stopped; cannot install)"},
+    {"record.list.has_draft", "has draft"},
+    {"record.list.no_draft", "no draft"},
+    {"record.discard_done", "[record] discarded {0}."},
 
     // ---- /update ----
     {"cmd.update.usage", "Usage: /update or /update check"},

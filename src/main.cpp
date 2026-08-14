@@ -35,6 +35,7 @@
 #include "agent/loop.hpp"
 #include "agent/prompts.hpp"
 #include "agent/session_store.hpp"
+#include "agent/workflow_recorder.hpp"
 #include "api/anthropic/client.hpp"
 #include "api/backend.hpp"
 #include "api/chat/client.hpp"
@@ -51,6 +52,7 @@
 #include "cli/worktree.hpp"
 #include "cli/markdown.hpp"
 #include "cli/provider_wizard.hpp"
+#include "cli/record_command.hpp"
 #include "cli/setup_wizard.hpp"
 #include "cli/slash_commands.hpp"
 #include "cli/spinner.hpp"
@@ -2759,7 +2761,8 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                             ToolDisplay& display, StreamBodyTracker& body_tracker,
                                             const std::vector<std::string>& allow_commands,
                                             const std::vector<std::string>& deny_commands,
-                                            const std::atomic<bool>* cancel_flag = nullptr) {
+                                            const std::atomic<bool>* cancel_flag = nullptr,
+                                            lubancode::agent::WorkflowRecorder* recorder = nullptr) {
     lubancode::agent::Callbacks callbacks;
 
     // M9:hooks_config 四个数组全空是常态(没配 hooks 的用户占多数),这时候
@@ -2804,7 +2807,13 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
 
     // UI-B:工具条目化渲染,建条目/画条目/管道行全在 ToolDisplay 里。
     // markdown:条目要开画了,正文当前块到此为止(保持原样,不重画)。
-    callbacks.on_tool_start = [&display, &body_tracker](const std::string& name, const nlohmann::json& input) {
+    // recorder:录一遍生成技能(0.25.x)的监听挂点——只在这里旁听事件,
+    // 不改工具本身的执行路径;没在录(nullptr)零影响。
+    callbacks.on_tool_start = [&display, &body_tracker, recorder](const std::string& name,
+                                                                  const nlohmann::json& input) {
+        if (recorder != nullptr) {
+            recorder->RecordToolCall(name, input);
+        }
         display.OnThinkingDone();  // 思考块若有,先收尾
         body_tracker.OnBlockBreak();
         display.OnToolStart(name, input);
@@ -2979,8 +2988,11 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         return allowed;
     };
 
-    callbacks.on_tool_done = [&display, &body_tracker](const std::string& name,
-                                                       const lubancode::tools::Tool::Result& result) {
+    callbacks.on_tool_done = [&display, &body_tracker, recorder](const std::string& name,
+                                                                 const lubancode::tools::Tool::Result& result) {
+        if (recorder != nullptr) {
+            recorder->RecordToolResult(name, result.is_error, result.content);
+        }
         display.OnToolDone(name, result);
         body_tracker.OnToolBlockDone();
     };
@@ -3132,7 +3144,8 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                        std::atomic<bool>* transcript_expanded = nullptr,
                        const std::vector<std::string>& allow_commands = {},
                        const std::vector<std::string>& deny_commands = {},
-                       lubancode::tools::AgentTool* completion_agent = nullptr) {
+                       lubancode::tools::AgentTool* completion_agent = nullptr,
+                       lubancode::agent::WorkflowRecorder* recorder = nullptr) {
     auto prepared_input = lubancode::cli::PrepareImageInput(user_input);
     if (!prepared_input.has_value()) {
         std::cerr << theme.error << tr("error.prefix") << ImageInputErrorText(prepared_input.error())
@@ -3162,7 +3175,8 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     StreamBodyTracker body_tracker(theme, is_console && !theme.reset.empty());
     const lubancode::agent::Callbacks callbacks =
         BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker, registry,
-                        hooks_config, display, body_tracker, allow_commands, deny_commands, &cancel_flag);
+                        hooks_config, display, body_tracker, allow_commands, deny_commands, &cancel_flag,
+                        recorder);
 
     // markdown × M10:监听线程随时可能在流式正文当中插打 [已排队]/[已打断]
     // 整行——这几行不在 body_tracker 的行数账里,不通气的话收束重画会把
@@ -5288,6 +5302,18 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     std::string session_title;          // /title 设的标题;resume 时取存档里最后一条
     bool session_title_pending = false;  // 建档前设了标题,建档成功后补写事件行
 
+    // -----------------------------------------------------------------------
+    // 录一遍生成技能(0.25.x):会话里至多一场录制,/record 命令组驱动,
+    // 工具事件经 RunTurn -> BuildCallbacks 旁听进录制件。必须用户明着开录
+    // ——这里没有自动续录入口,/resume、--continue 都不会碰它;进程重启后
+    // 旧录制件只能被 list/discard/install,不会被悄悄接着录。录制件落在
+    // <主目录>/.lubancode/recordings/,与会话存档分开。
+    // -----------------------------------------------------------------------
+    std::optional<lubancode::agent::WorkflowRecorder> recorder;
+    const std::filesystem::path recordings_root =
+        home_lubancode.has_value() ? lubancode::tools::Utf8ToPath(*home_lubancode) / "recordings"
+                                   : std::filesystem::path();
+
     // 把 history 里 persisted_count 之后的消息逐条追加落盘(append+flush,
     // 崩溃安全)。history 被 ReplaceHistory 换短(/compact)的场合由调用处
     // 先把 persisted_count 收到新长度,这里只管"只增不减"的常态。
@@ -5737,6 +5763,15 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                 case lubancode::cli::SlashCommand::Memory:
                     handle_memory_command(parsed.args);
                     break;
+                case lubancode::cli::SlashCommand::Record: {
+                    // 只做接线:解析/问话/起草/安装全在 cli/record_command.cpp。
+                    lubancode::cli::RecordCommandContext record_ctx{recorder,
+                                                                    recordings_root,
+                                                                    project_skills_root,
+                                                                    global_skills_root,
+                                                                    refresh_skills};
+                    lubancode::cli::HandleRecordCommand(parsed.args, record_ctx, theme);
+                } break;
                 case lubancode::cli::SlashCommand::Sessions:
                     PrintSessionsCommand(sessions_dir, parsed.args);
                     break;
@@ -5841,7 +5876,8 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         const RunTurnResult turn_result =
             RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry,
                     config.hooks, spinner_enabled, transcript, todo_state, &transcript_expanded,
-                    settings_local.allow_commands, settings_local.deny_commands, session_agent_tool);
+                    settings_local.allow_commands, settings_local.deny_commands, session_agent_tool,
+                    recorder.has_value() ? &*recorder : nullptr);
         // 每轮结束(成功/出错/ESC 打断都算)把新增消息逐条追加落盘。
         persist_new_messages();
         for (auto& queued : turn_result.queued_lines) {
@@ -5863,6 +5899,8 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         status_data.context_percent = context_tracker.UsagePercent();
         status_data.used_tokens = static_cast<long long>(context_tracker.current_tokens());
         status_data.window_tokens = static_cast<long long>(context_tracker.window_tokens());
+        // REC 标记:录制中恒挂状态行第一段(见 StatusPanelData::rec)。
+        status_data.rec = lubancode::cli::RecorderStatusMarker(recorder);
         lubancode::cli::SetStatusLineData(status_data, config.status_panel.items,
                                            config.status_panel.separator);
 

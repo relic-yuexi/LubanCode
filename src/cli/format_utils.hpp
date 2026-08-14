@@ -45,6 +45,10 @@ struct StatusPanelData {
     std::string git_branch;
     std::string provider;
     std::string effort;
+    // 录制标记(0.25.x"录一遍生成技能"):"REC · 名字"/"REC 已停",非空
+    // 时恒显示为第一段——密钥这道门要求录制中始终看得见 REC,不受 items
+    // 配置影响(用户没配 "rec" 也得挂出来)。空串 = 没在录,零影响。
+    std::string rec;
     int context_percent = 0;
     std::int64_t used_tokens = 0;
     std::int64_t window_tokens = 0;
