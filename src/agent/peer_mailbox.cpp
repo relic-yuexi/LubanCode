@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <mutex>
+#include <optional>
 #include <utility>
 
 namespace lubancode::agent {

@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
+#include <optional>
 #include <random>
 #include <sstream>
 

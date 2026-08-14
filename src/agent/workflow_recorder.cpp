@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <cctype>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
+#include <string_view>
 #include <system_error>
 #include <utility>
 

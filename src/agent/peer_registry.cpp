@@ -4,7 +4,9 @@
 
 #include <atomic>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <string_view>
