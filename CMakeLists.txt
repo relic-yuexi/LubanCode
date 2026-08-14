@@ -214,12 +214,14 @@ if(WIN32)
   set(_lubancode_platform_sources
     src/platform/paths_win.cpp
     src/platform/process_win.cpp
-    src/platform/console_win.cpp)
+    src/platform/console_win.cpp
+    src/platform/peer_transport_win.cpp)
 else()
   set(_lubancode_platform_sources
     src/platform/paths_posix.cpp
     src/platform/process_posix.cpp
-    src/platform/console_posix.cpp)
+    src/platform/console_posix.cpp
+    src/platform/peer_transport_posix.cpp)
 endif()
 
 add_library(lubancode_core STATIC
@@ -273,7 +275,12 @@ add_library(lubancode_core STATIC
   src/lsp/client.cpp
   src/lsp/manager.cpp
   src/tools/lsp_tool.cpp
+  src/tools/list_sessions_tool.cpp
+  src/tools/send_session_message_tool.cpp
   src/agent/loop.cpp
+  src/agent/peer_registry.cpp
+  src/agent/peer_mailbox.cpp
+  src/agent/peer_session.cpp
   src/agent/prompt_assembler.cpp
   "${_lubancode_embedded_prompts}"
   "${_lubancode_embedded_provider_catalog}"

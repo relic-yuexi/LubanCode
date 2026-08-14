@@ -133,6 +133,12 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
     } else if (lower == "/background" || lower == "/bg") {
         // /bg 是省事别名,跟 /background 同义。
         parsed.command = SlashCommand::Background;
+    } else if (lower == "/peers") {
+        parsed.command = SlashCommand::Peers;
+    } else if (lower == "/send") {
+        parsed.command = SlashCommand::Send;
+    } else if (lower == "/peerperm") {
+        parsed.command = SlashCommand::Peerperm;
     } else {
         parsed.command = SlashCommand::Unknown;
     }
@@ -333,6 +339,9 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/soul", tr("slash.desc.soul")},
             {"/prompt", tr("slash.desc.prompt")},
             {"/background", tr("slash.desc.background")},
+            {"/peers", tr("slash.desc.peers")},
+            {"/send", tr("slash.desc.send")},
+            {"/peerperm", tr("slash.desc.peerperm")},
         };
     }
     return commands;

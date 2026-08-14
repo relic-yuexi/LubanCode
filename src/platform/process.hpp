@@ -90,6 +90,15 @@ ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms,
                                const EnvPairs& extra_env = {},
                                std::size_t max_output_bytes = kDefaultMaxOutputBytes);
 
+// 一个 PID 的进程还活着吗。给跨会话名册清陈条用(会话崩了,名片得清)。
+// Windows: OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) + GetExitCodeProcess;
+// POSIX: kill(pid, 0)。自己这个 pid 恒算活着。探测不到权限/出错按"活着"
+// 算——宁可多留一张名片走心跳过期那条路,不误删活会话。
+bool IsProcessAlive(unsigned long pid);
+
+// 本进程的 pid(名册名片用)。Windows: GetCurrentProcessId;POSIX: getpid。
+unsigned long CurrentProcessId();
+
 #ifdef _WIN32
 
 // Windows 专属重载:cmdline 是完整的"可执行文件 + 参数"命令行,调用方

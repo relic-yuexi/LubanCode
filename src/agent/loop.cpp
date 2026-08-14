@@ -89,6 +89,21 @@ std::string BuildMaxTurnsNudgeText(int remaining_turns) {
 
 }  // namespace
 
+void InjectIncomingMessage(std::vector<api::Message>& history, api::Message incoming) {
+    if (incoming.role != api::Role::User || incoming.content.empty()) {
+        return;
+    }
+    if (!history.empty() && history.back().role == api::Role::User) {
+        // 末条是 user(最常见:刚攒完的 tool_result 消息)——文本块追加进
+        // 去即可,不起第二条连排的 user 消息,三种 wire 协议都安全。
+        for (auto& block : incoming.content) {
+            history.back().content.push_back(std::move(block));
+        }
+        return;
+    }
+    history.push_back(std::move(incoming));
+}
+
 bool ShouldNudgeMaxTurns(int turn, int max_turns) {
     // max_turns <= 0 = 无上限,压根没有"轮数将尽"这回事,永不触发。
     if (max_turns <= 0) {
@@ -144,6 +159,18 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
     // Ctrl+C(cancel)收场,不靠这里的硬闸。max_turns_ > 0 时才是"到点就停"
     // 的老行为。
     for (int turn = 0; max_turns_ <= 0 || turn < max_turns_; ++turn) {
+        // 跨会话传话的安全收件点:工具结果已攒完、下一次请求尚未发出——
+        // 正是"不打断工具、轮次边界收信"的那个缝。turn==0 不收:这一轮
+        // 的用户消息刚落下,空闲路径(main.cpp)在起 Run 之前已经收过一趟,
+        // 纯文本轮的信该"先排住,本轮收口后再起一轮"(规格),不抢跑。
+        // 回调只在主线程这里被调,流式/确认当口绝不会碰它,来信自然
+        // 不可能替用户答确认。
+        if (inbox_ && turn > 0) {
+            while (auto incoming = inbox_()) {
+                InjectIncomingMessage(history_, std::move(*incoming));
+            }
+        }
+
         api::Request request;
         request.model = model_;
         request.system = system_prompt_;

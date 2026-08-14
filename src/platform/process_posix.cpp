@@ -794,4 +794,17 @@ bool ChildProcess::IsAlive() const {
     return r == 0;  // 0 = 还活着;-1 = 查不到,当死了算
 }
 
+bool IsProcessAlive(unsigned long pid) {
+    if (pid == 0) {
+        return false;
+    }
+    if (static_cast<pid_t>(pid) == ::getpid()) {
+        return true;
+    }
+    // kill(pid, 0):0 = 活着;EPERM = 活着但没权限;ESRCH = 不在了。
+    return ::kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM;
+}
+
+unsigned long CurrentProcessId() { return static_cast<unsigned long>(::getpid()); }
+
 }  // namespace lubancode::platform
