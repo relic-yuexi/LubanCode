@@ -292,92 +292,226 @@ handler 吃 `CommandContext&`。Context 只列命令真正能碰的状态，别�
 
 命令都出去后，再把 switch 收进 dispatcher。
 
-### 第六步：收 InteractiveSession
+### 第六步：收口命令派发，再收 InteractiveSession
 
-先把 `InteractiveLoop` 整段搬进新文件，跑通。
+前五步落地后，`main.cpp` 已从 6476 行降到约 2200 行。眼下最大的整块是 `InteractiveLoop()`；其中 `process_line` 里的 slash `switch` 仍有约四百行、三十多个 `case`。
 
-再把局部状态收成成员，把大 lambda 改成私有方法。一次只改一类状态：存档、skills、memory、prompt、queue。别同时改所有捕获列表。
+别先把它换成 `unordered_map<Command, std::function<...>>`。命令全是编译期枚举，显式 `switch` 能让编译器查漏项，读起来也直。真正该治的是肥 `case` 与散落状态。
 
-这一阶段不改 `/clear` 的语义，不改队列 UI，不添跨会话消息。那些另有 TODO，免得回归时分不清是谁惹的祸。
+#### 第六步甲：把肥 `case` 收成 handler
 
-### 第七步：复用 OneShot，瘦 RunCli
+已经只有一两行转发的 `Help`、`Model`、`Think`、`Skills`、`Mcp`、`Lsp`、`Tools` 等分支，原样留着。
 
-让 AskOnce 复用同一套 backend/tool/turn 装配。
+先搬仍在 `process_line` 里亲手改状态的分支：
 
-随后搬 RunCli 与 hooks。最后 `main.cpp` 只留 main/wmain 和参数转码。
+1. session：`/clear`、`/sessions`、`/resume`、`/export`、`/title`、`/compact`。
+2. workspace/runtime：`/worktree`、`/background`、`/memory`、`/record`。
+3. peer：`/peers`、`/send`、`/peerperm`。
+4. settings 收尾：缩掉 `/provider` handler 那串 backend、model、catalog、prompt 参数。
 
-### 第八步：清旧债
+不要造一只万能 `CommandContext`。按所有权给窄状态：
+
+```text
+SessionCommandState   -> loop / store / meta / title / persisted_count
+WorkspaceCommandState -> worktree / tool runtime / recorder / background tasks
+PeerCommandState      -> peer runtime / ready queue / permission tier
+SettingsCommandState  -> config / backend stack / model state / catalog
+```
+
+这些结构只借引用，不持有资源，也不往 `agent/`、`cli/` 倒灌 `app/` 类型。handler 要问人时再拿一份小 `CommandIO`；不必为了几条打印命令重写全套终端。
+
+`WorktreeAction`、`BackgroundTaskStatus`、`PeerDelivery`、`PeerPermissionTier` 那几只短 `switch` 留着。它们只做稳定枚举映射，拆了反倒绕。
+
+#### 第六步乙：让 dispatcher 只管路由
+
+在 `InteractiveSession` 里设 `DispatchSlashCommand()`。顶层 `switch` 暂留，每个 `case` 只许解析后转发，不能再亲手清 history、换 cwd、写 session 或停 peer。
+
+派发结果别再拿裸 `bool` 猜意思：
+
+```cpp
+enum class CommandFlow {
+    Continue,
+    Exit,
+};
+```
+
+普通文本不进 dispatcher。外来 peer 消息也仍按正文走，不能当 slash 执行。
+
+验收：给每个 `SlashCommand` 做一颗路由测试；再单测 `/clear`、`/provider`、`/resume`、`/send` 的状态变化。这里测的是派给谁、哪些状态留住，不测终端颜色。
+
+#### 第六步丙：落下 InteractiveSession
+
+新增：
+
+```text
+app/interactive_session.hpp
+app/interactive_session.cpp
+```
+
+头文件只露 `InteractiveSessionOptions` 与 `RunInteractiveSession()`。具体类藏在 `.cpp`，免得 backend、MCP、LSP、终端大头全漏进调用方。若构造次序实在拧，可用私有 `Impl`；不要把一千多行实现塞进头文件。
+
+第一只 commit 只把 `InteractiveLoop()` 原样搬过去。第二只 commit 再把局部状态收成成员，把 lambda 一只只升成私有方法：
+
+```text
+RebuildLoop
+EnsureSessionStarted
+PersistNewMessages
+DispatchSlashCommand
+RunUserTurn
+DrainPeerInbox
+DrainBackgroundResults
+RefreshStatus
+```
+
+一次只收一簇：
+
+1. backend、model、think、prompt 与 loop。
+2. ToolRuntime、transcript、todo 与 UI 回调。
+3. session store、title、persisted count 与 project memory。
+4. pending queue、peer runtime 与后台结果。
+5. recorder 与退出清场。
+
+成员声明顺序要按反向析构验一遍。UI 回调注册、`loop->SetInbox()`、peer `Start()` 这类“开门后要关门”的事，交给 RAII guard 或析构函数收尾。别再靠 `InteractiveLoop()` 尾巴上几行手工清理。
+
+最后把主循环压成看得完的六步：刷新状态、取输入、分 slash、跑普通轮次、收队列、落存档。
+
+这一阶段不改 `/clear` 语义，不改排队画法，也不改跨会话协议。对应 TODO 另做，免得出了回归找不着账主。
+
+### 第七步：搬 OneShot，收掉双份装配
+
+新增 `app/one_shot.*`，把 `AskOnce()` 原样搬出。它继续复用已经落地的 BackendStack、ToolRuntime、TurnRunner。
+
+这一步只消掉真正重复的材料：
+
+- system prompt 拼接次序。
+- model instructions、soul、skills 与 project instructions 的组装。
+- ToolRuntime options 的共同底稿。
+- ContextTracker 与 `RunTurn` 接线。
+
+交互独有的 ask_user、session store、pending queue、peer、recorder 不准塞进 OneShot。OneShot 也别为了“复用”去构造半残的 InteractiveSession。
+
+验收：拿同一份配置分别构造 Interactive 与 OneShot，断言最终 system prompt 次序一致；再断言工具清单只差设计上允许的交互工具。保住现有管道输入、位置参数、图片输入与退出码。
+
+### 第八步：搬 CliApp，削平 main.cpp
+
+新增：
+
+```text
+app/cli_options.*
+app/cli_app.*
+```
+
+`ParseCliArgs()` 做纯函数：输入 `vector<string>`，返回 `CliOptions` 或一条错误。它不读配置，不探终端，不打印。
+
+`RunCli()` 搬进 `cli_app`，只管：
+
+1. 解析参数。
+2. 处理 version、help、config、update 这些早退分支。
+3. 加载配置、模型目录、persona、soul 与 project instructions。
+4. 挂 session hooks。
+5. 选择 `RunInteractiveSession()` 或 `RunOneShot()`。
+
+hooks 也用 scope 对象关门。中途 `return`、抛异常、向导退出，都须发对称的 session_end 或按既定规矩不发，不能靠人肉数出口。
+
+收尾后 `main.cpp` 只留平台入口：Windows 做 UTF-16 -> UTF-8，两边都调 `lubancode::app::RunCli(args)`。目标守在 80 行以内；150 行仍是硬上限。
+
+### 第九步：把 app 实现赶出头文件
+
+眼下 `backend_stack.hpp`、`tool_runtime.hpp`、`turn_runner.hpp` 与四组 command header 都带着大段实现；`settings_commands.hpp` 已有五万多字节。搬出 `main.cpp` 后若仍全塞头文件，只是把编译负担换了门牌。
+
+按模块逐一拆成 `.hpp + .cpp`：
+
+- `.hpp` 留 options、状态结构、公开函数与必要类型。
+- `.cpp` 收 nlohmann、具体 backend、终端 painter、文件系统等重 include。
+- 能前置声明便前置声明；值成员与模板所需类型才进头文件。
+- 测试只准 include 公共头，不准为摸实现 include `.cpp`。
+
+这一步可以跟第六至第八步逐件同行，不必最后一口气大搬。每只 commit 只拆一组，免得 linker 报错铺满全树。
+
+### 第十步：清债与封口
 
 结构站稳后再做：
 
-- 收走路径杂务。`CurrentDirUtf8`、`PathToUtf8`、`SameFilesystemPath` 不该继续住在入口层，应归 `tools/path_utils` 或 `platform/paths`。
-- 去掉“旧任务不许改 agent 层”留下的绕路。先评估 AgentLoop 是否该接会话级 request mutator，别永远背五层 wrapper。
-- 把直接 `std::cout` 的命令逐步换成可注入 CommandIO。
-- 精简搬家后已经失效的长注释。留下“为何如此”，删掉“当年从哪儿搬来”。
-- 给 app 层头文件做 include hygiene，能前置声明便不拉大头。
+- 删掉 `main.cpp` 搬空后留下的 using、include 与旧年代注释。
+- 复查 `app/commands` 分组；某组若仍过千行，再按真实状态所有权拆，不按“一条命令一对文件”机械切碎。
+- 逐步把需要单测的直接 `std::cout` 换成 `CommandIO`。
+- 评估多层 request wrapper 是否合进 `SessionRequestBackend`。这另起行为 commit，不同搬家混做。
+- 跑 include hygiene，查环依赖与意外的 `app -> main`、底层 `-> app`。
+- 更新这份 TODO 的行数、文件表与完成状态。
 
-清债必须另起 commit。若一处简化改了行为，能单独撤。
+路径杂务已有一部分先走了：`CurrentDirUtf8` 已归 `platform/paths`。余下 `PathToUtf8`、`SameFilesystemPath` 按定义归位，别在 app 层再留同名转发壳。
 
 ## CMake 怎么放
 
-眼下 `lubancode_core` 放可复用逻辑；`main.cpp`、`console_input.cpp`、`spinner.cpp` 直接编进可执行文件。
+眼下新 app 模块多为 header-only，靠 `main.cpp` 那一条编译单元带进可执行文件。第六步起，新增的 `.cpp` 明列进 `lubancode` executable sources。
 
 先守这条边界：
 
 - 不碰真实终端的纯逻辑，进 `lubancode_core`，方便 doctest 直测。
-- `app/*`、`cli/live_*`、`cli/tool_display.*` 这类终端编排，先列进 `lubancode` executable sources。
-- 不为拆文件急着新造 `lubancode_app` 静态库。
+- `interactive_session.cpp`、`one_shot.cpp`、`cli_app.cpp` 这类终端编排，先编进 `lubancode`。
+- 命令 handler 若只依赖 core 接口，可进 `lubancode_core`；若仍直接读终端，先留 executable 一侧。
+- 不为“看着整齐”急造 `lubancode_app` 静态库。
 
-待 app 层有了稳定接口，又确实需要直接链接测试，再考虑建内部 `lubancode_app`。别让 build target 先于代码边界长出来。
+待 app 公共接口站稳，又确实有多只测试 executable 要链接，再建内部 app library。build target 跟着依赖走，不抢在代码前头。
 
 ## 每个 commit 的规矩
 
-- 一只 commit 只搬一个职责块。
-- 搬家 commit 不改算法，不重命名大批符号，不顺手格式化全文件。
-- 源文件删多少，目标文件便能对上多少；审 diff 时以“代码原样移动”为主。
+- 一只 commit 只搬一块，或只改一种所有权。
+- 搬家 commit 不改算法、不改文案、不批量重命名、不顺手格式化。
+- 源文件删多少，目标文件便能对上多少；审 diff 先看是否原样移动。
 - 每只 commit 至少过 Release 编译与 `ctest`。
-- 动到 live UI、TurnRunner、InteractiveSession，补跑对应 screen driver。
-- 更新 CMake 与 include 跟代码同 commit，不留半截树。
+- 动到 live UI、TurnRunner、InteractiveSession，补跑 composer、stream footer、markdown、fold/clear screen driver。
+- 动到命令派发，跑 slash 路由测试与相关状态测试。
+- CMake、include 与代码同 commit，不留半截树。
+- 用户工作区里无关的未跟踪 TODO 不准捎进 commit。
 
 ## 风险账
 
-### 引用寿命
+### 构造与析构次序
 
-MCP Tool 抓 Client 引用，PluginTool 抓 DLL 数据，LspTool 抓 Manager，AgentTool 抓子 registry。搬进类后，成员析构次序仍按声明反序。要写一条测试真构造、真调用、真析构，不能只看能否编译。
+InteractiveSession 会同时持有 BackendStack、ToolRuntime、AgentLoop、UI 回调、peer runtime 与 recorder。谁借谁的引用，须写在成员旁，并用成员反向析构次序验。至少做一颗真构造、真启动可用部件、真析构的测试。
 
-### Backend 次序
+### lambda 升成员方法
 
-Model instructions 与 soul 谁先追加，决定系统提示最后长什么样。Spinner 又只能包在网络调用外头。搬完要按最终 Request 做断言，不只测返回成功。
+眼下 lambda 靠捕获表借到状态。升成方法后，最容易把“每轮临时量”误升成“整场成员”，或把调用当时的值变成陈旧缓存。每搬一只，先列它读、写、拥有、借用四张小账。
 
-### UI 时序
+### `/clear`、`/provider`、`/resume`
 
-footer、spinner、markdown 重画、agent ticker 共用 stdout 锁和锚点。函数挪了，锁的边界不能悄悄缩，也不能把 flush 次序打乱。
+这三条会重建 loop 或 backend，又只替换一部分会话状态。逐项断言 history、approval、loaded tools、transcript、queue、title、context、memory、session id、peer inbox 各留还是各清。
 
-### `/clear` 与 `/provider`
+### UI 回调与线程退场
 
-这两条会重建 AgentLoop 或 backend，却保留另一部分会话状态。拆状态时最易多清或少清。要列清单逐项断言：history、tool approvals、loaded tools、transcript、queue、title、context、memory 各留还是各清。
+footer、spinner、markdown、agent ticker、peer/background 完成通知共用终端与锁。对象搬家不能缩掉锁域，也不能让回调活得比 InteractiveSession 久。退出、异常、Ctrl+C、EOF 四条路都要跑一遍清场。
 
 ### Interactive / OneShot 漂移
 
-共用 ToolRuntime 后，别把交互独有的 ask_user、queue、session store 带进单发；也别让单发少了 MCP、LSP、skills、agent、tool_search。
+两边应共用 backend、tools、prompt、turn runner，却不能共用交互状态。用构造结果测试钉住共同点与差异，别只看两边都能答一句。
+
+### header 拆 cpp 的 ODR 与链接风险
+
+当前实现多在头文件里。挪进 `.cpp` 时要查 inline、匿名命名空间、模板与测试引用。一次只拆一组，Windows Release 与测试配置都要链接一遍。
 
 ## 做成的样子
 
 收尾时应满足：
 
-- `main.cpp` 只管平台入口和 argv 转码。
+- `main.cpp` 只管平台入口和 argv 转码，80 行为目标，150 行为硬上限。
 - `RunCli` 可单测参数分派，不起真终端。
-- Interactive 与 OneShot 共用 backend、tools、turn runner。
-- ToolRuntime 自己守住资源寿命，不靠调用者背声明顺序口诀。
-- slash 执行离开 InteractiveSession 主循环；主循环一眼能读完。
+- Interactive 与 OneShot 共用 backend、tools、prompt 与 turn runner。
+- InteractiveSession 自己守住会话状态、资源寿命与退场清理。
+- slash 顶层 `switch` 仍可保留，却只剩清楚的领域转发；肥 `case` 全数退场。
+- 短小枚举 `switch` 留在所属 handler，不为消灭语法而绕路。
 - live UI 不知道 session store，session command 不知道光标锚点。
+- app 公开头文件不再驮着数万字节实现。
 - 全套单测、Release 编译、Windows screen drivers 都过。
 - `git diff` 看不见无关格式 churn。
 
 ## 不做
 
-- 不趁机改排队样式、跨会话消息或 Record & Replay。
+- 不趁机改排队样式、跨会话协议、Record 语义或子代理 UI。
 - 不改外部 CLI 参数和 slash 命令。
 - 不改 JSONL、配置文件、skill、plugin ABI。
-- 不为了“面向对象”给每个自由函数套一只类。
-- 不把匿名命名空间整段原样挪进 `app/app.cpp`，那只是换了门牌。
+- 不上动态命令注册表；除非插件真要在运行时添 slash 命令，再另立设计单。
+- 不造一只包揽全场的 `CommandContext`。
+- 不为了“面向对象”给每个自由函数套类。
+- 不把 `InteractiveLoop` 原样搬成另一只长期存活的两千行文件。
