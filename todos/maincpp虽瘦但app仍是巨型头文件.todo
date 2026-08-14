@@ -1,6 +1,6 @@
 # main.cpp 虽瘦，app 仍是一只藏起来的巨型编译单元
 
-状态：待做（重构收尾）
+状态：已完成（2026-08-15 五步收尾；行数账与遗留见文末）
 
 ## 结论
 
@@ -228,6 +228,58 @@ handler 借引用，不持有整场资源。顶层 `switch` 每个 case 只做�
 ## 验收
 
 - `src/main.cpp` 不超过 80 行；只 include `app/cli_app.hpp` 与平台入口所需小头。
+
+## 最终实账(2026-08-15,五步收尾,插在验收前留档)
+
+```text
+src/main.cpp                          39 行(未动,守住 80 行红线)
+src/app 总计                       7054 行 / 六组实现 + 5 组 commands
+src/app/*.cpp                       14 只(拆分前 0 只)
+src/app/interactive_session.hpp       47 行(原 1626 行;不 include
+                                       MCP/LSP/具体 backend/painter/nlohmann,
+                                       config 重类型只以前置声明借引用)
+src/app/interactive_session.cpp     1545 行(InteractiveSession 真对象:
+                                       局部状态收成员、大 lambda 收方法、
+                                       构造开门/析构关门)
+src/app/commands/settings_commands.*  163 hpp / 1103 cpp(原 1105 行头)
+src/app/cli_app.hpp/.cpp          36 /  502(RunCli 只管早退与分派)
+src/app/cli_options.hpp/.cpp      40 /   59(ParseCliArgs 纯函数)
+src/app/one_shot.hpp/.cpp         31 /  243(不 include interactive_session)
+```
+
+规格五步的落点:
+
+1. 编译边界:backend_stack/tool_runtime/turn_runner/四组 commands/
+   one_shot+cli_app/interactive_session 七刀,每刀一只 commit,公开头
+   只放声明;tests 加 test_app_boundary_a/b 两只 TU 同 include 全部公共头
+   并取符号地址,专钉 ODR 与漏符号。
+2. InteractiveSession 真对象:头只露 Options+RunInteractiveSession;
+   RebuildLoop/PersistNewMessages/RunPeerTurn/Run/HandleTranscriptUi 等大
+   lambda 全升方法;退出收尾(摘收件点/停 peer/摘 UI 回调)归析构。
+   新增 test_interactive_session:真构造、stdin EOF 退场、真析构。
+3. slash 收瘦:CommandFlow::Continue/Exit 取代裸 bool;ProcessLine 拆
+   DispatchSlashCommand(顶层 switch 只路由)/RunUserTurn;肥 case 退场到
+   领域窄状态(SessionCommandState/WorkspaceCommandState/PeerCommandState,
+   新建 peer_commands)。/clear /title /send /peerperm 状态账有
+   test_app_commands 钉住;dispatcher 的"枚举→handler"路由本身仍内联在
+   switch 里,没抽成可独立喂桩的路由表(刻意:不上动态注册表)。
+4. CLI 纯化:ParseCliArgs 纯函数 + test_cli_options 参数矩阵;OneShot 与
+   interactive_session.hpp 彻底解 include。
+5. 清债:one_shot/cli_app 搬家期的死 using 删净(110 行);分 cpp 时现形的
+   传递依赖逐一补直 include。
+
+### 遗留(如实)
+
+- interactive_session.cpp 1545 行,超出 700-1000 目标:memory 命令(~130 行)
+  与转录 UI 聚焦/重画(~110 行)还粘在会话里,可再各立门户;主循环本身
+  60 行内可看完(Run 的 while 体)。
+- settings_commands.cpp 1103 行,未按"向导/供应商切换/普通设置"再分。
+- PathToUtf8/SameFilesystemPath 仍在 workspace_commands,未归
+  platform/tools 路径层。
+- Interactive/OneShot 最终 system prompt 与工具清单的"共同点/差异点"
+  测试没补(两边材料分头装配,结构上一致,断言缺)。
+- Windows screen drivers(fold_dup_clear/markdown/stream 等)编译全过,
+  交互回归留手测清单。
 - `src/app` 有真实 `.cpp`，CMake 明列；不再靠 main 那一只 translation unit 吞完 app 实现。
 - `interactive_session.hpp` 不超过 200 行，不 include MCP、LSP、具体 backend、终端 painter、nlohmann。
 - `interactive_session.cpp` 没有千行自由函数；主循环 60 行内能看完。

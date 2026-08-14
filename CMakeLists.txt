@@ -322,7 +322,24 @@ target_link_libraries(lubancode_core PUBLIC cpr::cpr nlohmann_json::nlohmann_jso
 target_link_libraries(lubancode_core PRIVATE lubancode_lua)  # M7:Lua 插件运行时
 target_compile_features(lubancode_core PUBLIC cxx_std_23)
 
-add_executable(lubancode src/main.cpp src/cli/console_input.cpp src/cli/spinner.cpp src/cli/record_command.cpp)
+# app 编排层:实现逐组从 .hpp 搬进 .cpp(编译边界),源文件在这里明列。
+add_executable(lubancode
+  src/main.cpp
+  src/app/backend_stack.cpp
+  src/app/tool_runtime.cpp
+  src/app/turn_runner.cpp
+  src/app/commands/prompt_commands.cpp
+  src/app/commands/session_commands.cpp
+  src/app/commands/settings_commands.cpp
+  src/app/commands/workspace_commands.cpp
+  src/app/commands/peer_commands.cpp
+  src/app/interactive_session.cpp
+  src/app/one_shot.cpp
+  src/app/cli_options.cpp
+  src/app/cli_app.cpp
+  src/cli/console_input.cpp
+  src/cli/spinner.cpp
+  src/cli/record_command.cpp)
 target_link_libraries(lubancode PRIVATE lubancode_core)
 target_compile_features(lubancode PRIVATE cxx_std_23)
 

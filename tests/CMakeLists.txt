@@ -80,6 +80,29 @@ add_executable(lubancode_tests
   test_backend_stack.cpp
   test_tool_runtime.cpp
   test_status_refresh.cpp
+  # app 编译边界钉子:两只 TU 同 include app 公共头,专查 ODR 与漏符号;
+  # 相应 app 实现源直接编进测试目标(不进 lubancode_core,分层不动)。
+  test_app_boundary_a.cpp
+  test_app_boundary_b.cpp
+  # InteractiveSession 真构造/EOF 退场/真析构的集成钉子。
+  test_interactive_session.cpp
+  # ParseCliArgs 参数矩阵(纯函数)。
+  test_cli_options.cpp
+  # 领域命令 handler 的状态账(/clear /title /send /peerperm)。
+  test_app_commands.cpp
+  ${CMAKE_SOURCE_DIR}/src/app/cli_options.cpp
+  ${CMAKE_SOURCE_DIR}/src/app/backend_stack.cpp
+  ${CMAKE_SOURCE_DIR}/src/app/tool_runtime.cpp
+  ${CMAKE_SOURCE_DIR}/src/app/turn_runner.cpp
+  ${CMAKE_SOURCE_DIR}/src/app/commands/prompt_commands.cpp
+  ${CMAKE_SOURCE_DIR}/src/app/commands/session_commands.cpp
+  ${CMAKE_SOURCE_DIR}/src/app/commands/settings_commands.cpp
+  ${CMAKE_SOURCE_DIR}/src/app/commands/workspace_commands.cpp
+  ${CMAKE_SOURCE_DIR}/src/app/commands/peer_commands.cpp
+  ${CMAKE_SOURCE_DIR}/src/app/interactive_session.cpp
+  ${CMAKE_SOURCE_DIR}/src/app/one_shot.cpp
+  ${CMAKE_SOURCE_DIR}/src/app/cli_app.cpp
+  ${CMAKE_SOURCE_DIR}/src/cli/record_command.cpp
   # 回归 BuildCallbacks::on_usage 接线(状态行局部发布)要走到终端层的
   # 状态数据源,console_input.cpp 平时只编进主程序,这里给测试目标单编一份
   # (不进 lubancode_core,免得 doctest 进程链进真控制台读取路径)。
