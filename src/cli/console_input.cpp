@@ -477,105 +477,70 @@ void RedrawEditArea(int& start_row, int& prompt_end_col, const RenderState& stat
     // 提示行(hint_lines)排在状态行之下。锚点记账原样扩展:这两行也算进
     // body_rows,多退少补、EnsureRoomForRows 探底,全套现成机制照走。
     const int box_rows = chrome.enabled ? 2 : 0;
-
-    // 软换行:每个逻辑行按各自内容宽折成若干物理行,不再水平滚动截断。
-    // 第一物理行(跟提示符共行)的内容宽跟续行不同。content_width<=0 折不
-    // 出行,兜底给一行空串,光标才有落处。
-    const int first_content_width = buffer_width - prompt_end_col - 1;
-    const int cont_content_width = buffer_width - kContinuationIndent - 1;
-    std::vector<std::vector<std::u32string>> physical(static_cast<std::size_t>(edit_row_count));
-    std::vector<std::u32string> flat_physical;  // 各逻辑行的物理行顺序摊平,下标即屏幕物理行号
-    flat_physical.reserve(static_cast<std::size_t>(edit_row_count));
-    for (int r = 0; r < edit_row_count; ++r) {
-        const int cw = r == 0 ? first_content_width : cont_content_width;
-        physical[static_cast<std::size_t>(r)] = WrapToDisplayWidth(edit_lines[static_cast<std::size_t>(r)], cw);
-        if (physical[static_cast<std::size_t>(r)].empty()) {
-            physical[static_cast<std::size_t>(r)].push_back(std::u32string());
-        }
-        for (const std::u32string& p : physical[static_cast<std::size_t>(r)]) {
-            flat_physical.push_back(p);
-        }
-    }
-    const int total_physical = static_cast<int>(flat_physical.size());
-
-    // "第一物理行之外"这一帧要占的行数(其余物理行 + 框线/状态行 + 提示行),
-    // 跟上一帧取较大值,保证旧帧多出来的行(删字、清 composer、提示消失)
+    // "第一行之外"这一帧要占的行数(composer 续行 + 框线/状态行 + 提示行),
+    // 跟上一帧取较大值,保证旧帧多出来的行(删行、清 composer、提示消失)
     // 不漏清。
-    const int body_rows = (total_physical - 1) + box_rows + hint_count;
+    const int body_rows = (edit_row_count - 1) + box_rows + hint_count;
     const int rows_to_touch = std::max(body_rows, prev_body_row_count);
 
     EnsureRoomForRows(start_row, buffer_height, 1 + rows_to_touch);
 
-    // 光标定位:把逻辑(cursor_row, cursor_col)翻成物理行号 + 行内显示列。
-    // 先累加光标所在逻辑行之前各逻辑行占的物理行数,再在当前逻辑行内按各
-    // 物理行的累计显示宽找光标落在第几段、段内第几列。
-    int cursor_phys_row = 0;
-    for (std::size_t r = 0; r < state.cursor_row && r < static_cast<std::size_t>(edit_row_count); ++r) {
-        cursor_phys_row += static_cast<int>(physical[r].size());
-    }
-    int cursor_intra_col = 0;
-    if (state.cursor_row < static_cast<std::size_t>(edit_row_count)) {
-        const std::size_t cc = std::min(state.cursor_col, edit_lines[state.cursor_row].size());
-        const int cursor_dc = static_cast<int>(DisplayWidth(edit_lines[state.cursor_row].substr(0, cc)));
-        const std::vector<std::u32string>& cur_phys = physical[state.cursor_row];
-        int accum = 0;
-        for (std::size_t j = 0; j < cur_phys.size(); ++j) {
-            const int pw = static_cast<int>(DisplayWidth(cur_phys[j]));
-            if (j + 1 < cur_phys.size()) {
-                if (cursor_dc < accum + pw) {  // 非末行:落在 [accum, accum+pw) 内
-                    cursor_phys_row += static_cast<int>(j);
-                    cursor_intra_col = cursor_dc - accum;
-                    break;
-                }
-            } else {  // 末行:一定落在这(含行末正好顶满)
-                cursor_phys_row += static_cast<int>(j);
-                cursor_intra_col = cursor_dc - accum;
-            }
-            accum += pw;
-        }
-    }
-    // 第一物理行(prompt 行)起于 prompt_end_col,其余起于两空格缩进。
-    int final_cursor_x = cursor_phys_row == 0 ? prompt_end_col + cursor_intra_col
-                                              : kContinuationIndent + cursor_intra_col;
-    int final_cursor_y = start_row + cursor_phys_row;
+    // 光标最终该落的位置,画完统一挪过去(先给个兜底值:第一行提示符后)。
+    int final_cursor_x = prompt_end_col;
+    int final_cursor_y = start_row;
 
-    // 第一物理行:只清"提示符之后"这一段(从 prompt_end_col 到行尾),提示符
+    // 第一行:只清"提示符之后"这一段(从 prompt_end_col 到行尾),提示符
     // 本身那几列一个字符都不碰——清整行会把 "> "/"[auto] > " 盖没,是修过
     // 的老 bug,别再犯。
     {
+        const int content_width = buffer_width - prompt_end_col - 1;
+        const std::size_t cursor_in_row = state.cursor_row == 0 ? state.cursor_col : 0;
+        const EditLineWindow window = ComputeEditLineWindow(edit_lines[0], cursor_in_row, content_width);
         const int clear_width = buffer_width - prompt_end_col;
         if (clear_width > 0) {
             platform::ClearRowFrom(prompt_end_col, start_row, clear_width);
         }
         platform::SetCursorPos(prompt_end_col, start_row);
-        std::cout << Utf32ToUtf8(flat_physical[0]);
+        std::cout << Utf32ToUtf8(window.text);
         std::cout.flush();
+        if (state.cursor_row == 0) {
+            final_cursor_x = prompt_end_col + static_cast<int>(window.cursor_display_col);
+            final_cursor_y = start_row;
+        }
     }
 
-    // 第一物理行之外:逐行先整行清、再按行的身份画——编辑续行(两空格缩进
-    // + 折出来的物理行内容)、下横线/状态行(开框时)、提示行(截宽),或者
+    // 第一行之外:逐行先整行清、再按行的身份画——composer 续行(两空格
+    // 缩进 + 窗口截断)、下横线/状态行(开框时)、提示行(截宽),或者
     // 旧帧残行(只清不画)。
     for (int i = 1; i <= rows_to_touch; ++i) {
         const int row_y = start_row + i;
         platform::ClearRowFrom(0, row_y, buffer_width);
-        if (i < total_physical) {
+        if (i < edit_row_count) {
+            const int content_width = buffer_width - kContinuationIndent - 1;
+            const std::size_t row_index = static_cast<std::size_t>(i);
+            const std::size_t cursor_in_row = state.cursor_row == row_index ? state.cursor_col : 0;
+            const EditLineWindow window = ComputeEditLineWindow(edit_lines[row_index], cursor_in_row, content_width);
             platform::SetCursorPos(kContinuationIndent, row_y);
-            std::cout << Utf32ToUtf8(flat_physical[static_cast<std::size_t>(i)]);
+            std::cout << Utf32ToUtf8(window.text);
             std::cout.flush();
-        } else if (chrome.enabled && i == total_physical) {
+            if (state.cursor_row == row_index) {
+                final_cursor_x = kContinuationIndent + static_cast<int>(window.cursor_display_col);
+                final_cursor_y = row_y;
+            }
+        } else if (chrome.enabled && i == edit_row_count) {
             // 下横线,紧贴最后一个编辑行。
             platform::SetCursorPos(0, row_y);
             std::cout << BoxRuleLine(*chrome.theme, buffer_width);
             std::cout.flush();
-        } else if (chrome.enabled && i == total_physical + 1) {
+        } else if (chrome.enabled && i == edit_row_count + 1) {
             // 常驻状态行。
             platform::SetCursorPos(0, row_y);
             PrintStatusLine(chrome, buffer_width - 1);
             std::cout.flush();
-        } else if (i - total_physical - box_rows >= 0 && i - total_physical - box_rows < hint_count) {
+        } else if (i - edit_row_count - box_rows >= 0 && i - edit_row_count - box_rows < hint_count) {
             const int hint_width = buffer_width - 1;
             const std::string truncated = TruncateUtf8ToDisplayWidth(
-                state.hint_lines[static_cast<std::size_t>(i - total_physical - box_rows)], hint_width);
+                state.hint_lines[static_cast<std::size_t>(i - edit_row_count - box_rows)], hint_width);
             platform::SetCursorPos(0, row_y);
             std::cout << truncated;
             std::cout.flush();
@@ -596,8 +561,8 @@ void RedrawEditArea(int& start_row, int& prompt_end_col, const RenderState& stat
 //
 // 做法:把整个框(上横线在 start_row - 1,下横线/状态行/提示行在编辑行
 // 之下)统统清掉,从上横线那一行起重打提交内容(`> ` 第一行、两空格续行,
-// 每个逻辑行按宽折行铺满——完整内容留在滚动历史里看得见),光标停在末行
-// 末尾,调用方接着换行。内容整体上移一行,不留空行。
+// 每行按宽截断防折行——完整内容反正在历史/存档里),光标停在末行末尾,
+// 调用方接着换行。内容整体上移一行,不留空行。
 void CollapseBoxOnSubmit(int start_row, int prev_body_row_count, const RenderState& state,
                           const std::string& prompt) {
     const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
@@ -621,24 +586,10 @@ void CollapseBoxOnSubmit(int start_row, int prev_body_row_count, const RenderSta
         first_width = buffer_width - after->cursor_x - 1;
     }
     if (!state.lines.empty()) {
-        // 第一逻辑行:第一段跟在提示符后,后续段两空格缩进续行。
-        const std::vector<std::u32string> w0 = WrapToDisplayWidth(state.lines[0], first_width);
-        if (!w0.empty()) {
-            std::cout << Utf32ToUtf8(w0[0]);
-            for (std::size_t k = 1; k < w0.size(); ++k) {
-                std::cout << "\n  " << Utf32ToUtf8(w0[k]);
-            }
-        }
-        // 其余逻辑行:各自折行,每段两空格缩进。
+        std::cout << Utf32ToUtf8(TruncateToDisplayWidth(state.lines[0], first_width));
         for (std::size_t i = 1; i < state.lines.size(); ++i) {
-            const std::vector<std::u32string> wi = WrapToDisplayWidth(state.lines[i], buffer_width - 3);
-            if (wi.empty()) {
-                std::cout << "\n  ";
-            } else {
-                for (const std::u32string& seg : wi) {
-                    std::cout << "\n  " << Utf32ToUtf8(seg);
-                }
-            }
+            std::cout << "\n  "
+                      << Utf32ToUtf8(TruncateToDisplayWidth(state.lines[i], buffer_width - 3));
         }
     }
     std::cout.flush();
