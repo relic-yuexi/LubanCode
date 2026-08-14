@@ -1,0 +1,165 @@
+# 录一遍，生成技能
+
+状态：待做
+
+## 先把名字认准
+
+Codex 的 Record & Replay 不是会话存档，也不是录屏留念。
+
+它让用户在 Mac 上亲手做一遍。Codex 看着窗口和动作，等用户停下，再把这套做法炼成一份 skill。往后换一组输入，便可照样重放。
+
+OpenAI 官文写得很明白：
+
+- 入口在 ChatGPT 桌面端的 Plugins -> `+` -> `Record a skill`。
+- 开录前先说目标、可变输入和成事标准。
+- 录制时会看完成这桩活所需的动作与窗口内容。
+- 停止后起草 skill。skill 要写明何时用、吃什么输入、分几步走、怎样验收。
+- 重放不靠一段死脚本。它把 skill 交给 Computer Use、浏览器和插件，临场照着做。
+- 眼下只支持 macOS。还要先开 Computer Use。欧洲经济区、英国、瑞士暂不开放。
+
+官文：<https://learn.chatgpt.com/docs/extend/record-and-replay>
+
+## Lubancode 眼下有什么
+
+已有的砖瓦不少：
+
+- `src/agent/session_store.*` 会把对话、工具调用、工具结果写成 JSONL。
+- `src/config/skill_store.*` 会安装、更新、删除 skill。
+- `src/tools/skill_loader.*` 会扫描 `SKILL.md`，本场刷新后便能用。
+- 插件宿主已有 DLL 和 Lua 两条路。
+
+缺的是一根专门的录制流水。会话存档能帮忙，却不能直接拿来当 skill。它夹着闲话、失败重试、长篇输出，也没把可变输入和成事标准分出来。
+
+## 先做哪一版
+
+先做“终端内示范”，别一上来就录整张桌面。
+
+用户开录后，在 Lubancode 里做一遍。录制器只收这些东西：
+
+- 用户给出的目标与补充说明。
+- 模型调用过的工具名、脱敏后的入参、成败和短摘要。
+- cwd、涉及的相对路径、命令退出码。
+- 用户手写的备注、转折点、验收标准。
+- 最后一次验证结果。
+
+这版已经能教会许多活计：发版、跑测试、整理报告、建项目、查日志、按固定规矩改文件。
+
+桌面动作另开后路。待 Computer Use 或 UI Automation 工具进了 Lubancode，再给录制器添适配器。核心事件格式不要绑死 Windows 鼠标钩子。
+
+## 用户怎么用
+
+拟添一组命令：
+
+```text
+/record start <名字>
+/record note <这一步为何这样做>
+/record pause
+/record resume
+/record stop
+/record cancel
+```
+
+开录时先问三句话：
+
+1. 这桩活最后要得什么？
+2. 哪些值每回都会变？
+3. 看见什么才算做成？
+
+录制中，状态栏只挂一枚短标记：`REC · 名字`。别另铺一张大框。暂停后改成 `REC 已停`。
+
+`/record stop` 不直接往 skills 目录里塞东西。先生成草稿，给用户看一遍：
+
+- skill 名与 description。
+- 要填的输入。
+- 正文步骤。
+- 风险动作与确认点。
+- 验收办法。
+- 需要随 skill 带走的脚本或模板。
+
+用户点头后，再装到项目级或主目录级。落盘后刷新 skill 清单，本场立刻可试。
+
+## 录制件怎么放
+
+另建目录，别污染会话 JSONL：
+
+```text
+~/.lubancode/recordings/<recording-id>/
+  manifest.json
+  events.jsonl
+  draft/SKILL.md
+  assets/
+```
+
+`events.jsonl` 至少认这些事件：
+
+```text
+record_start
+goal
+variable
+user_note
+tool_call
+tool_result
+verification
+pause
+resume
+record_stop
+```
+
+每条带时间、顺序号和来源。工具结果只留短摘要；原始大输出仍在会话存档里，录制件只存引用。这样一来，草稿小，泄密面也小。
+
+## 起草 skill 的规矩
+
+起草器要做的是归纳，不是照抄。
+
+- 把演示里的具体值提成变量。如仓库名、日期、分支、网址。
+- 把偶然的失败重试剔掉；若失败揭出一条真规矩，便写成分支。
+- 不把模型当时的长篇回答塞进 skill。
+- 能用脚本稳稳办成的步骤，写进 `scripts/`，正文只管何时调用。
+- 每份 skill 都要有验收。没有验收，草稿不许直接安装。
+- 生成后先跑现有 skill 解析器。frontmatter 不合法，便回炉。
+
+## 密钥这道门
+
+录制功能天生容易收进不该收的东西。这几条要钉死：
+
+- 必须由用户明着开录。进程启动、会话恢复都不能偷偷续录。
+- 录制中始终有 `REC` 标记。
+- 环境变量、Authorization、Cookie、token、密码输入一概打码。
+- 工具 schema 标成 secret 的字段，入盘前抹掉。
+- 大段剪贴板、图片、二进制文件，首版不收。
+- `/record cancel` 删除本次临时件；已经装好的 skill 不动。
+- 草稿安装前列出将要写入的文件，让用户确认。
+
+## 代码落点
+
+可按这几层拆：
+
+- `src/agent/workflow_recorder.*`：状态机、事件、JSONL、崩溃恢复。
+- `src/agent/skill_drafter.*`：把录制件拼成起草请求，校验产物。
+- `src/cli/slash_commands.*`：解析 `/record`。
+- `src/main.cpp`：接工具事件、刷新 skill。只留接线，别再堆大段逻辑。
+- `src/config/skill_store.*`：补“从草稿目录原子安装”这条窄接口。
+- `src/cli/i18n.cpp`：中英文文案。
+
+以后若录桌面，再添 `capture` 接口：
+
+- Windows 可接 UI Automation，鼠标键盘只作辅证。
+- macOS 可接系统辅助功能与屏幕录制权限。
+- 图片和 OCR 都由适配器产事件，起草器不认平台。
+
+## 验收
+
+- 开录、暂停、续录、停止、取消都能走通。
+- 中途崩掉，旧录制件能恢复或丢弃，不会半截装进 skills。
+- 一段含读文件、改文件、跑测试的演示，能产出合法 `SKILL.md`。
+- 草稿把具体路径、日期提成输入，不照抄成死值。
+- 工具入参里塞假 token，录制件和草稿里都找不到原文。
+- 安装后刷新清单，本场便能调用新 skill。
+- 会话存档、远端 skill 安装、普通工具调用不受牵连。
+
+## 不做
+
+- 首版不录整张桌面，不装全局键盘钩子。
+- 不拿会话 resume 冒充 replay。
+- 不承诺像素级重放。skill 写规矩，工具临场办事。
+- 不把录制件自动上传。
