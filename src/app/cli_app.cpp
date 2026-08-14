@@ -151,7 +151,6 @@ using lubancode::app::ClearAndPrintBanner;
 using lubancode::app::RunTurn;
 using lubancode::app::RunTurnResult;
 using lubancode::app::MemoryOptionsFromConfig;
-using lubancode::app::InteractiveLoop;
 using lubancode::cli::tr;
 using lubancode::cli::trf;
 using lubancode::app::BuildBaseToolRegistry;
@@ -572,8 +571,10 @@ int RunCli(const std::vector<std::string>& args) {
             const auto absolute = std::filesystem::absolute(lubancode::tools::Utf8ToPath(args[0]), ec);
             executable = PathToUtf8(ec ? lubancode::tools::Utf8ToPath(args[0]) : absolute);
         }
-        InteractiveLoop(effective, auto_confirm, theme, persona, spinner_enabled, model_catalog, settings_local,
-                         continue_last, law_source, executable);
+        const lubancode::app::InteractiveSessionOptions session_options{
+            effective, theme, model_catalog, settings_local,
+            auto_confirm, persona, spinner_enabled, continue_last, law_source, executable};
+        RunInteractiveSession(session_options);
     } catch (const std::exception& e) {
         std::cerr << tr("error.prefix") << trf("error.unexpected", e.what()) << "\n";
         return 1;

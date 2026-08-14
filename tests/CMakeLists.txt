@@ -84,6 +84,8 @@ add_executable(lubancode_tests
   # 相应 app 实现源直接编进测试目标(不进 lubancode_core,分层不动)。
   test_app_boundary_a.cpp
   test_app_boundary_b.cpp
+  # InteractiveSession 真构造/EOF 退场/真析构的集成钉子。
+  test_interactive_session.cpp
   ${CMAKE_SOURCE_DIR}/src/app/backend_stack.cpp
   ${CMAKE_SOURCE_DIR}/src/app/tool_runtime.cpp
   ${CMAKE_SOURCE_DIR}/src/app/turn_runner.cpp

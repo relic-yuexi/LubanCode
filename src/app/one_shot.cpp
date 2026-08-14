@@ -42,7 +42,6 @@
 #include "app/backend_stack.hpp"
 #include "app/tool_runtime.hpp"
 #include "app/turn_runner.hpp"
-#include "app/interactive_session.hpp"
 #include "app/commands/session_commands.hpp"
 #include "app/commands/prompt_commands.hpp"
 #include "app/commands/settings_commands.hpp"
@@ -152,7 +151,6 @@ using lubancode::app::ClearAndPrintBanner;
 using lubancode::app::RunTurn;
 using lubancode::app::RunTurnResult;
 using lubancode::app::MemoryOptionsFromConfig;
-using lubancode::app::InteractiveLoop;
 using lubancode::cli::tr;
 using lubancode::cli::trf;
 using lubancode::app::BuildBaseToolRegistry;

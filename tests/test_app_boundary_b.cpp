@@ -22,7 +22,7 @@ int BoundaryTuBProbe() {
             &lubancode::app::ResumeSession == nullptr ||
             &lubancode::app::HandleModelCommand == nullptr ||
             &lubancode::app::PrintToolsCommand == nullptr ||
-            &lubancode::app::InteractiveLoop == nullptr ||
+            &lubancode::app::RunInteractiveSession == nullptr ||
             &lubancode::app::AskOnce == nullptr ||
             &lubancode::app::RunCli == nullptr)
                ? 1

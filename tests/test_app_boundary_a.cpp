@@ -30,7 +30,7 @@ TEST_CASE("app 编译边界:两 TU 同 include 公共头可链接且符号存在
     CHECK(&lubancode::app::ResumeSession != nullptr);
     CHECK(&lubancode::app::HandleModelCommand != nullptr);
     CHECK(&lubancode::app::PrintToolsCommand != nullptr);
-    CHECK(&lubancode::app::InteractiveLoop != nullptr);
+    CHECK(&lubancode::app::RunInteractiveSession != nullptr);
     CHECK(&lubancode::app::AskOnce != nullptr);
     CHECK(&lubancode::app::RunCli != nullptr);
     CHECK(BoundaryTuBProbe() == 0);
