@@ -10,6 +10,7 @@
 #include "app/commands/workspace_commands.hpp"
 #include "app/interactive_session.hpp"
 #include "app/one_shot.hpp"
+#include "app/cli_options.hpp"
 #include "app/cli_app.hpp"
 
 int BoundaryTuBProbe() {
@@ -24,7 +25,8 @@ int BoundaryTuBProbe() {
             &lubancode::app::PrintToolsCommand == nullptr ||
             &lubancode::app::RunInteractiveSession == nullptr ||
             &lubancode::app::AskOnce == nullptr ||
-            &lubancode::app::RunCli == nullptr)
+            &lubancode::app::RunCli == nullptr ||
+            &lubancode::app::ParseCliArgs == nullptr)
                ? 1
                : 0;
 }

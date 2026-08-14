@@ -1,6 +1,7 @@
 // cli_app.hpp 的实现:PrintVersion/PrintHelp/向导/SessionHookScope/RunCli
 // 的函数体,原样搬自原头文件,行为一字未改。
 
+#include "app/cli_options.hpp"
 #include "app/interactive_session.hpp"
 #include "app/one_shot.hpp"
 
@@ -281,48 +282,26 @@ int RunCli(const std::vector<std::string>& args) {
         lubancode::cli::SetLanguage(early_lang.empty() ? lubancode::cli::DetectSystemLanguage() : early_lang);
     }
 
-    std::string positional;
-    bool auto_confirm = false;
-    bool print_config = false;
-    bool continue_last = false;
-    std::string system_prompt_file_arg;
-    for (std::size_t i = 1; i < args.size(); ++i) {
-        const std::string& arg = args[i];
-        if (arg == "--continue") {
-            continue_last = true;
-            continue;
-        }
-        if (arg == "--version") {
+    // 参数解析走纯函数(cli_options):这里只兑现早退动作,再按解析结果
+    // 继续启动。次序与旧的内联扫描一致——动作在 i18n 早初始化之后、配置
+    // 加载之前当场退出。
+    const ParsedCliArgs parsed_cli = ParseCliArgs(args);
+    switch (parsed_cli.action) {
+        case CliAction::PrintVersion:
             PrintVersion();
             return 0;
-        }
-        if (arg == "--check-update") {
+        case CliAction::PrintHelp:
+            PrintHelp();
+            return 0;
+        case CliAction::CheckUpdate:
             return HandleUpdateCommand(std::string(), lubancode::config::kDefaultConnectTimeoutMs,
                                        lubancode::config::kDefaultRequestTimeoutSecs)
                        ? 0
                        : 1;
-        }
-        if (arg == "--help") {
-            PrintHelp();
-            return 0;
-        }
-        if (arg == "--yes") {
-            auto_confirm = true;
-            continue;
-        }
-        if (arg == "--config") {
-            print_config = true;
-            continue;
-        }
-        if (arg == "--system-prompt") {
-            if (i + 1 >= args.size()) {
-                std::cerr << tr("error.system_prompt_arg") << "\n";
-                return 1;
-            }
-            system_prompt_file_arg = args[++i];
-            continue;
-        }
-        if (arg == "--reset-system-prompt") {
+        case CliAction::MissingSystemPromptValue:
+            std::cerr << tr("error.system_prompt_arg") << "\n";
+            return 1;
+        case CliAction::ResetSystemPrompt: {
             // 跟 /prompt reset 同效,只是不进交互、不二次确认(命令行参数
             // 本身就是明确意图),打结果就退。
             const auto luban_dir = lubancode::config::HomeLubancodeDir();
@@ -343,11 +322,10 @@ int RunCli(const std::vector<std::string>& args) {
             std::cout << "。\n";
             return 0;
         }
-        if (!positional.empty()) {
-            positional += " ";
-        }
-        positional += arg;
+        case CliAction::Proceed:
+            break;
     }
+    const CliOptions& cli_options = parsed_cli.options;
 
     const auto config_result = lubancode::config::LoadFromEnv();
     if (!config_result.has_value()) {
@@ -397,7 +375,7 @@ int RunCli(const std::vector<std::string>& args) {
         std::cout << trf("settings.local.warning", loaded.error()) << "\n";
     }
 
-    if (print_config) {
+    if (cli_options.print_config) {
         PrintConfigDiagnostics(*config_result, std::nullopt, &model_catalog, &settings_local);
         return 0;
     }
@@ -408,7 +386,8 @@ int RunCli(const std::vector<std::string>& args) {
     // (prompts.hpp 的 EnvironmentSegment)照样由 BuildSystemPrompt 追加,
     // 不受这里影响。
     const std::string effective_prompt_file =
-        !system_prompt_file_arg.empty() ? system_prompt_file_arg : config_result->config.system_prompt_file;
+        !cli_options.system_prompt_file_arg.empty() ? cli_options.system_prompt_file_arg
+                                                             : config_result->config.system_prompt_file;
     std::string persona;
     std::string law_source = tr("law.builtin");  // /prompt 裸敲展示用
     if (!effective_prompt_file.empty()) {
@@ -418,7 +397,7 @@ int RunCli(const std::vector<std::string>& args) {
             return 1;
         }
         persona = *persona_result;
-        law_source = !system_prompt_file_arg.empty() ? trf("law.cli_arg", effective_prompt_file)
+        law_source = !cli_options.system_prompt_file_arg.empty() ? trf("law.cli_arg", effective_prompt_file)
                                                       : trf("law.config_file", effective_prompt_file);
     } else if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
         // 魂法分家:没有 CLI/配置指定的人格文件时,法从 ~/.lubancode/
@@ -466,9 +445,9 @@ int RunCli(const std::vector<std::string>& args) {
     // 起手档位优先级(高到低):--yes/LUBANCODE_CONFIRM_MODE >
     // settings.local.json 的 default_confirm_mode > 内置默认 confirm。
     lubancode::cli::ConfirmMode initial_mode =
-        auto_confirm ? lubancode::cli::ConfirmMode::Yolo : lubancode::cli::ConfirmMode::Confirm;
-    bool mode_from_explicit = auto_confirm;  // --yes 或 env 显式指定过,settings 不再插手
-    if (!auto_confirm) {
+        cli_options.auto_confirm ? lubancode::cli::ConfirmMode::Yolo : lubancode::cli::ConfirmMode::Confirm;
+    bool mode_from_explicit = cli_options.auto_confirm;  // --yes 或 env 显式指定过,settings 不再插手
+    if (!cli_options.auto_confirm) {
         if (const auto env_mode = lubancode::platform::GetEnvVar("LUBANCODE_CONFIRM_MODE"); env_mode.has_value()) {
             const std::string& mode_str = *env_mode;
             if (mode_str == "auto") {
@@ -506,7 +485,7 @@ int RunCli(const std::vector<std::string>& args) {
     // 兜底:JSON 编码、网络库内部等地方万一抛出没接住的异常,也不能让
     // 整个进程崩掉(崩掉的话用户只会看到一个莫名其妙的退出码)。
     try {
-        if (!positional.empty()) {
+        if (!cli_options.positional.empty()) {
             // 单发模式/管道模式:不进向导(没有交互终端可问),缺配置直接
             // 报可读的错,指路三条配置途径。
             const auto configured_check = lubancode::config::RequireConfigured(*config_result);
@@ -533,7 +512,8 @@ int RunCli(const std::vector<std::string>& args) {
             // 拼在系统提示最后。
             const std::string soul_content =
                 LoadSoulContentByName(once_config.soul.empty() ? "default" : once_config.soul, /*warn=*/false);
-            return AskOnce(once_config, positional, auto_confirm, theme, persona, spinner_enabled,
+            return AskOnce(once_config, cli_options.positional, cli_options.auto_confirm, theme, persona,
+                            spinner_enabled,
                             settings_local, catalog_apply.base_instructions, soul_content);
         }
 
@@ -573,7 +553,8 @@ int RunCli(const std::vector<std::string>& args) {
         }
         const lubancode::app::InteractiveSessionOptions session_options{
             effective, theme, model_catalog, settings_local,
-            auto_confirm, persona, spinner_enabled, continue_last, law_source, executable};
+            cli_options.auto_confirm, persona, spinner_enabled, cli_options.continue_last, law_source,
+            executable};
         RunInteractiveSession(session_options);
     } catch (const std::exception& e) {
         std::cerr << tr("error.prefix") << trf("error.unexpected", e.what()) << "\n";

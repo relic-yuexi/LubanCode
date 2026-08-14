@@ -86,6 +86,9 @@ add_executable(lubancode_tests
   test_app_boundary_b.cpp
   # InteractiveSession 真构造/EOF 退场/真析构的集成钉子。
   test_interactive_session.cpp
+  # ParseCliArgs 参数矩阵(纯函数)。
+  test_cli_options.cpp
+  ${CMAKE_SOURCE_DIR}/src/app/cli_options.cpp
   ${CMAKE_SOURCE_DIR}/src/app/backend_stack.cpp
   ${CMAKE_SOURCE_DIR}/src/app/tool_runtime.cpp
   ${CMAKE_SOURCE_DIR}/src/app/turn_runner.cpp

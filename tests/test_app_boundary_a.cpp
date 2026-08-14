@@ -14,6 +14,7 @@
 #include "app/commands/workspace_commands.hpp"
 #include "app/interactive_session.hpp"
 #include "app/one_shot.hpp"
+#include "app/cli_options.hpp"
 #include "app/cli_app.hpp"
 
 // TU B 的探针(见 test_app_boundary_b.cpp):它引用同一批符号,链接器
@@ -33,5 +34,6 @@ TEST_CASE("app 编译边界:两 TU 同 include 公共头可链接且符号存在
     CHECK(&lubancode::app::RunInteractiveSession != nullptr);
     CHECK(&lubancode::app::AskOnce != nullptr);
     CHECK(&lubancode::app::RunCli != nullptr);
+    CHECK(&lubancode::app::ParseCliArgs != nullptr);
     CHECK(BoundaryTuBProbe() == 0);
 }
