@@ -113,6 +113,7 @@
 namespace {
 
 using lubancode::app::kVersion;
+using lubancode::platform::CurrentDirUtf8;
 
 // i18n:tr/trf 在本文件里到处用,拉进匿名命名空间省得每处全限定。
 using lubancode::cli::tr;
@@ -449,12 +450,6 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
 }
 
 // 当前工作目录,转成 UTF-8 字符串(拼进系统提示词里给模型看)。
-std::string CurrentDirUtf8() {
-    const std::filesystem::path cwd = std::filesystem::current_path();
-    const std::u8string u8 = cwd.u8string();
-    return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
-}
-
 std::string PathToUtf8(const std::filesystem::path& path) {
     const std::u8string u8 = path.u8string();
     return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
