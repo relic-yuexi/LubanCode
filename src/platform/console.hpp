@@ -110,6 +110,10 @@ struct KeyInput {
         CtrlD,
         CtrlO,
         CtrlE,
+        // 0.28.x 子代理面板:Ctrl+X -> Ctrl+K 两段确认"停止全部代理"。
+        // 只在面板这一处消费,别处按 Ctrl+X/Ctrl+K 仍是死键,跟升级前一样。
+        CtrlX,
+        CtrlK,
         Esc,
         Delete,  // Del 键(排队待发消息浏览里"删当前项"用;两平台键序都认)
     };

@@ -433,6 +433,14 @@ std::optional<KeyInput> KeyReader::ReadOne() {
         out.kind = KeyInput::Kind::CtrlE;
         return out;
     }
+    if (b0 == 0x18) {
+        out.kind = KeyInput::Kind::CtrlX;  // 子代理面板:停止全部(两段确认第一段)
+        return out;
+    }
+    if (b0 == 0x0b) {
+        out.kind = KeyInput::Kind::CtrlK;  // 子代理面板:停止全部(两段确认第二段)
+        return out;
+    }
     if (b0 < 0x20) {
         return KeyInput{};  // 其余控制字符不映射
     }

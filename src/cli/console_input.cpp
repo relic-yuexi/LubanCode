@@ -75,6 +75,9 @@ void StripTrailingCrLf(std::string& s) {
     }
 }
 
+// (FormatAgentPanel 已搬去 cli/agent_panel.cpp 的 LayoutAgentPanel:面板从
+// hint_lines 挪到输入框上方后,布局/窗口/状态机全在那边的纯逻辑层。)
+
 // 贯穿整条交互会话存活的编辑器实例:main.cpp 里 `> ` 主循环、工具确认
 // 提示、/model 选择、初次配置向导,全部经这一个 ReadLine() 入口,底下共用
 // 这一份 LineEditorCore——历史列表、确认模式才有地方跨多轮读取存住。
@@ -117,6 +120,23 @@ AgentPanelProvider& AgentPanelProviderSlot() {
     return provider;
 }
 
+// 详情按需取的槽(查看态打开的那只才被调,见 agent_panel.hpp)。
+std::function<std::vector<std::string>(int)>& AgentPanelDetailSlot() {
+    static std::function<std::vector<std::string>(int)> provider;
+    return provider;
+}
+
+AgentPanelActions& AgentPanelActionsSlot() {
+    static AgentPanelActions actions;
+    return actions;
+}
+
+// composer 这一次读取的收件目标(查看态那只子代理的任务号)。
+std::optional<int>& ComposerTargetSlot() {
+    static std::optional<int> target;
+    return target;
+}
+
 // 空闲唤醒钩子的存取点(跟 AgentPanelProvider 同一套会话级静态槽)。只在
 // ReadLineKeyByKey 的 100ms 面板刷新一拍里被读,主线程独占,不用加锁。
 std::function<bool()>& IdleWakeHookSlot() {
@@ -124,51 +144,31 @@ std::function<bool()>& IdleWakeHookSlot() {
     return hook;
 }
 
-std::vector<std::string> FormatAgentPanel(const std::vector<AgentPanelEntry>& agents, int selected,
-                                          bool detail) {
-    if (agents.empty()) {
-        return {};
-    }
-    std::vector<std::string> lines;
-    lines.push_back(tr("agent_panel.hint"));
-
-    const int total = static_cast<int>(agents.size()) + 1;
-    const int safe_selected = selected >= 0 && selected < total ? selected : 0;
-    const auto add_row = [&](int index, const std::string& name, const std::string& description,
-                             const std::string& state, bool running, bool failed) {
-        const bool active = index == safe_selected;
-        std::string marker = active ? "\xE2\x9D\xAF " : "  ";  // ❯
-        std::string lamp;
-        if (index == 0) {
-            lamp = "\xE2\x97\x8F ";  // ●
-        } else if (running) {
-            lamp = "\xE2\x97\x8C ";  // ◌
-        } else {
-            lamp = failed ? "\xC3\x97 " : "\xE2\x97\x8F ";  // × / ●
-        }
-        lines.push_back(marker + lamp + name +
-                        (description.empty() ? std::string() : "  " + description) +
-                        (state.empty() ? std::string() : "  " + state));
-    };
-
-    add_row(0, "main", tr("agent_panel.main"), std::string(), true, false);
-    for (std::size_t i = 0; i < agents.size(); ++i) {
-        const auto& agent = agents[i];
-        add_row(static_cast<int>(i) + 1, agent.name, agent.description, agent.state,
-                agent.running, agent.failed);
-    }
-    if (detail) {
-        lines.push_back(tr("agent_panel.detail_hint"));
-        if (safe_selected == 0) {
-            lines.push_back("  " + tr("agent_panel.main_detail"));
-        } else {
-            const auto& selected_agent = agents[static_cast<std::size_t>(safe_selected - 1)];
-            for (const auto& line : selected_agent.detail_lines) {
-                lines.push_back("  " + line);
+// 键位缝:platform 语义按键 -> 面板动作 id(PanelKey)。面板键位要换/要接
+// keymap,只动这一张小表;状态机与布局都在 cli/agent_panel(纯逻辑,单测钉)。
+std::optional<PanelKey> MapToPanelKey(const platform::KeyInput& key) {
+    using PK = platform::KeyInput::Kind;
+    switch (key.kind) {
+        case PK::Up:
+            return PanelKey::Up;
+        case PK::Down:
+            return PanelKey::Down;
+        case PK::Enter:
+            return PanelKey::EnterView;  // NewLine(Shift/Alt+Enter)不进面板,照旧插换行
+        case PK::Esc:
+            return PanelKey::Esc;
+        case PK::CtrlX:
+            return PanelKey::StopAllArm;
+        case PK::CtrlK:
+            return PanelKey::StopAllConfirm;
+        case PK::Char:
+            if (key.ch == U'x' || key.ch == U'X') {
+                return PanelKey::StopEntry;
             }
-        }
+            return std::nullopt;  // 其余字母只进 composer
+        default:
+            return std::nullopt;
     }
-    return lines;
 }
 
 // 0.17.0:常驻状态行数据。InteractiveLoop 每圈整份重建(SetStatusLineData,
@@ -353,6 +353,11 @@ std::optional<KeyEvent> MapKey(const platform::KeyInput& key) {
             return KeyEvent::Simple(KeyKind::CtrlO);
         case PK::CtrlE:
             return KeyEvent::Simple(KeyKind::CtrlE);
+        case PK::CtrlX:
+        case PK::CtrlK:
+            // 面板两段确认键:只在 ReadLineKeyByKey 的面板缝里消费,不该进
+            // 编辑器(核心层也没有这两个语义)。
+            return std::nullopt;
         case PK::Esc:
             return KeyEvent::Simple(KeyKind::Esc);
         case PK::Delete:
@@ -514,8 +519,17 @@ void PaintInlineFrameLegacy(const InlineFrame* previous, const InlineFrame& next
 // composer 先排成物理行，再拿新旧两帧逐行比较。提示符后的第一行窄些，
 // 续行留两格缩进；正文软换行，不再水平滚。VT 终端把擦行、落字、归光标
 // 攒进一段字节，一次 write + flush。老终端仍走 Console API 兼容路。
-void RedrawEditArea(int& start_row, int& prompt_end_col, const RenderState& state,
-                    int& prev_body_row_count, std::optional<InlineFrame>& previous_frame,
+//
+// 0.28.x:编辑帧从"提示符行 + 下面的框"扩成整帧记账——代理面板
+// (rows_above)在上横线之上,上横线(带查看态的右端短标签 rule_tag)进帧,
+// 下横线/状态行/普通 slash 提示在下。锚点 start_row 仍是 composer 首行
+// (提示符行),帧顶 = start_row - rows_above - 1 由这里推;上一帧的绝对
+// 帧顶记在 prev_frame_origin,面板增减/终端缩放/滚屏挪了位就对不上,整帧
+// 重画。提示符并进首行文本(x=0),不再靠进函数前那一次 std::cout 存活。
+void RedrawEditArea(int& start_row, int& prompt_end_col, const std::string& prompt,
+                    const RenderState& state, const std::vector<std::string>& rows_above,
+                    const std::string& rule_tag, int& prev_body_row_count,
+                    std::optional<InlineFrame>& previous_frame, int& prev_frame_origin,
                     bool vt_enabled, const BoxChrome& chrome = BoxChrome{}) {
     const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
     if (!info.has_value()) {
@@ -531,14 +545,39 @@ void RedrawEditArea(int& start_row, int& prompt_end_col, const RenderState& stat
         edit_lines, state.cursor_row, state.cursor_col,
         buffer_width - prompt_end_col - 1, buffer_width - kContinuationIndent - 1);
 
+    // 上方行(代理面板)从头上收:锚点以上放不下(光标贴着缓冲区顶)就少
+    // 摆几行,保住横线与 composer。极端情形在真机上几乎碰不着,兜底而已。
+    const bool with_rule = chrome.enabled;
+    int above_count = static_cast<int>(rows_above.size());
+    if (above_count + (with_rule ? 1 : 0) > start_row) {
+        above_count = std::max(0, start_row - (with_rule ? 1 : 0));
+    }
+    const int first_above = static_cast<int>(rows_above.size()) - above_count;
+    int frame_top = start_row - above_count - (with_rule ? 1 : 0);
+    if (frame_top < 0) {
+        frame_top = 0;  // 理论到不了(box 模式提示符行上方至少有一行),防越界
+    }
+
     InlineFrame next;
-    next.rows.reserve(layout.rows.size() + (chrome.enabled ? 2U : 0U) + state.hint_lines.size());
+    next.rows.reserve(above_count + layout.rows.size() + (chrome.enabled ? 3U : 0U) +
+                      state.hint_lines.size());
+    for (int i = first_above; i < static_cast<int>(rows_above.size()); ++i) {
+        next.rows.push_back(InlineFrameRow{
+            0, buffer_width, false, TruncateUtf8ToDisplayWidth(rows_above[i], buffer_width - 1)});
+    }
+    if (with_rule) {
+        const std::string rule =
+            rule_tag.empty()
+                ? BoxRuleLine(*chrome.theme, buffer_width)
+                : BuildRuleWithTag(chrome.theme->stats, chrome.theme->reset, rule_tag, buffer_width);
+        next.rows.push_back(InlineFrameRow{0, buffer_width, true, rule});
+    }
     for (std::size_t i = 0; i < layout.rows.size(); ++i) {
         const bool first = i == 0;
         InlineFrameRow row;
-        row.x = first ? prompt_end_col : 0;
+        row.x = first ? 0 : kContinuationIndent;
         row.clear_width = buffer_width - row.x;
-        row.text = first ? Utf32ToUtf8(layout.rows[i].text)
+        row.text = first ? prompt + Utf32ToUtf8(layout.rows[i].text)
                          : std::string(kContinuationIndent, ' ') + Utf32ToUtf8(layout.rows[i].text);
         next.rows.push_back(std::move(row));
     }
@@ -554,38 +593,44 @@ void RedrawEditArea(int& start_row, int& prompt_end_col, const RenderState& stat
             0, buffer_width, false, TruncateUtf8ToDisplayWidth(hint, buffer_width - 1)});
     }
 
+    const int above_total = above_count + (with_rule ? 1 : 0);
     next.cursor_x = layout.cursor_row == 0
                         ? prompt_end_col + layout.cursor_col
                         : kContinuationIndent + layout.cursor_col;
-    next.cursor_row = static_cast<int>(layout.cursor_row);
+    next.cursor_row = above_total + static_cast<int>(layout.cursor_row);
 
     const int hint_count = static_cast<int>(state.hint_lines.size());
     const int box_rows = chrome.enabled ? 2 : 0;
-    const int body_rows = static_cast<int>(layout.rows.size()) - 1 + box_rows + hint_count;
+    const int body_rows = static_cast<int>(layout.rows.size()) - 1 + box_rows + hint_count + above_total;
     const int rows_to_touch = std::max(body_rows, prev_body_row_count);
-    const int old_start_row = start_row;
-    EnsureRoomForRows(start_row, buffer_height, 1 + rows_to_touch);
+    const int total_rows = std::max(1, static_cast<int>(next.rows.size()));
+    int frame_origin = frame_top;
+    EnsureRoomForRows(frame_origin, buffer_height, std::max(total_rows, 1 + rows_to_touch));
+    if (frame_origin != frame_top) {
+        // 探底滚屏:帧顶与锚点(提示符行)一起上移,账目对平。
+        const int delta = frame_origin - frame_top;
+        start_row += delta;
+        frame_top = frame_origin;
+    }
     int viewport_x = info->viewport_x;
     int viewport_y = info->viewport_y;
-    if (old_start_row != start_row) {
-        if (const auto after_scroll = platform::GetScreenInfo(); after_scroll.has_value()) {
-            viewport_x = after_scroll->viewport_x;
-            viewport_y = after_scroll->viewport_y;
-        }
+    if (const auto after_scroll = platform::GetScreenInfo(); after_scroll.has_value()) {
+        viewport_x = after_scroll->viewport_x;
+        viewport_y = after_scroll->viewport_y;
     }
 
-    // 探底若触发滚屏，旧画面也跟着挪了。此时全画一遍，顺手重立锚点。
-    const InlineFrame* previous = old_start_row == start_row && previous_frame.has_value()
-                                      ? &*previous_frame
-                                      : nullptr;
+    // 上一帧的绝对帧顶对不上(面板增减/滚屏/换锚)就不比了,整帧重画。
+    const InlineFrame* previous =
+        previous_frame.has_value() && prev_frame_origin == frame_top ? &*previous_frame : nullptr;
     if (vt_enabled) {
         platform::TerminalBatch batch(viewport_x, viewport_y);
-        QueueInlineFrameDiff(batch, previous, next, start_row);
+        QueueInlineFrameDiff(batch, previous, next, frame_top);
         batch.Flush();
     } else {
-        PaintInlineFrameLegacy(previous, next, start_row);
+        PaintInlineFrameLegacy(previous, next, frame_top);
     }
     previous_frame = std::move(next);
+    prev_frame_origin = frame_top;
     prev_body_row_count = body_rows;
 }
 
@@ -595,19 +640,20 @@ void RedrawEditArea(int& start_row, int& prompt_end_col, const RenderState& stat
 // 全是线;擦掉横线后历史里就是干干净净的 `> 问题` + 分界线 + 回答,跟
 // 0.16.0 的历史观感一致,框只属于"正在输入"这一刻。
 //
-// 做法:把整个框(上横线在 start_row - 1,下横线/状态行/提示行在编辑行
-// 之下)统统清掉,从上横线那一行起重打提交内容(`> ` 第一行、两空格续行,
-// 每个逻辑行照 composer 的宽度铺成物理行),光标停在末行末尾,调用方接着
-// 换行。内容整体上移一行,不留空行,长输入也完整留在滚动历史里。
-void CollapseBoxOnSubmit(int start_row, int prompt_width, int prev_body_row_count,
+// 做法:把整个框(0.28.x 起含上横线之上的代理面板行,帧顶即 frame_top =
+// prev_frame_origin)统统清掉,从帧顶起重打提交内容(`> ` 第一行、两空格
+// 续行,每个逻辑行照 composer 的宽度铺成物理行),光标停在末行末尾,调用
+// 方接着换行。面板行随提交收走,滚动历史里只留干净的问题,代理的最终
+// 结论照旧走 transcript,不在面板里留残骸。
+void CollapseBoxOnSubmit(int frame_top, int prompt_width, int prev_body_row_count,
                          const RenderState& state, const std::string& prompt, bool vt_enabled) {
     const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
     if (!info.has_value()) {
         return;  // 拿不到屏幕信息就不收尾了,提交帧画面已经在屏上,不算坏
     }
     const int buffer_width = info->width;
-    const int top = start_row > 0 ? start_row - 1 : start_row;
-    int bottom = start_row + prev_body_row_count;
+    const int top = frame_top > 0 ? frame_top : 0;
+    int bottom = frame_top + prev_body_row_count;
     if (bottom >= info->height) {
         bottom = info->height - 1;
     }
@@ -689,11 +735,31 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     editor.BeginLine(composer);
 
     // 0.17.0:composer 读取开输入框(上横线 + `> ` 输入行 + 下横线 + 状态
-    // 行)。上横线打在提示符上一行,不进重画账(锚点 start_row 是提示符
-    // 行,横线在 start_row - 1,重画从不碰它;EnsureRoomForRows 逼滚屏时
-    // 整个缓冲区内容连横线一起上移,start_row 同步修正,账目还是平的)。
+    // 行)。0.28.x 起上横线之上还有代理面板(整帧记账,见 RedrawEditArea)。
     const bool box = composer;
     BoxChrome chrome{box, &theme, editor.confirm_mode()};
+    // 面板预留:开框前锚点上方至少留出"面板预算 + 框线"的行数,不够就先
+    // 换行把提示符压下去(缓冲区没到底时只是挪光标,不滚内容;到底了自然
+    // 滚走旧 transcript,输入框仍钉在视口下部)。新会话开场光标贴着缓冲区
+    // 顶,没有这一步,面板只能开个两三条的小窗。
+    const auto reserve_panel_room = [&]() {
+        if (!box) {
+            return;
+        }
+        const std::optional<platform::ScreenInfo> now = platform::GetScreenInfo();
+        if (!now.has_value()) {
+            return;
+        }
+        const int entry_cap = std::max(3, std::min(now->height / 2 - 1, 16));
+        const int wanted = entry_cap + 5;  // 提示/计数/上下横线/详情几行
+        if (now->cursor_y < wanted && wanted < now->height - 1) {
+            for (int i = 0; i < wanted - now->cursor_y; ++i) {
+                std::cout << "\n";
+            }
+            std::cout.flush();
+        }
+    };
+    reserve_panel_room();
     if (box) {
         const std::optional<platform::ScreenInfo> pre_info = platform::GetScreenInfo();
         const int console_width = pre_info.has_value() ? pre_info->width : 80;
@@ -716,10 +782,17 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     const bool vt_enabled = platform::ProbeStdoutConsole().vt_enabled;
 
     platform::KeyReader key_reader;
-    int agent_panel_selected = 0;
-    bool agent_panel_focus = false;
-    bool agent_panel_detail = false;
-    std::string agent_panel_fingerprint;
+    // 面板状态机(纯逻辑,键位缝在 MapToPanelKey:选择/查看/x 停止清除/
+    // Ctrl+X Ctrl+K 两段确认全在里面,单测钉在 tests/test_agent_panel.cpp)。
+    AgentPanelController panel_controller;
+    std::string panel_fingerprint;  // 上一帧面板指纹(条目+状态机+成行),变了才重画
+    std::string panel_notice;       // 停全部的回执,挂在提示行下面两秒就收
+    std::chrono::steady_clock::time_point panel_notice_until{};
+    int prev_frame_origin = -1;  // 上一帧的绝对帧顶;面板增减/滚屏后对不上就整帧重画
+
+    if (composer) {
+        ComposerTargetSlot().reset();  // 每次读取开始,收件目标先归 main
+    }
 
     auto panel_entries = [&]() -> std::vector<AgentPanelEntry> {
         if (!composer || !AgentPanelProviderSlot()) {
@@ -727,38 +800,87 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         }
         return AgentPanelProviderSlot()();
     };
-    auto with_agent_panel = [&](RenderState state, const std::vector<AgentPanelEntry>& entries) {
-        if (!entries.empty()) {
-            const int total = static_cast<int>(entries.size()) + 1;
-            if (agent_panel_selected >= total) {
-                agent_panel_selected = total - 1;
-            }
-            auto panel = FormatAgentPanel(entries, agent_panel_focus ? agent_panel_selected : 0,
-                                          agent_panel_detail);
-            state.hint_lines.insert(state.hint_lines.end(), panel.begin(), panel.end());
-        } else {
-            agent_panel_selected = 0;
-            agent_panel_focus = false;
-            agent_panel_detail = false;
+
+    // 面板帧:窗口化布局(纯函数)+ 查看态详情(按需取,只有打开的那只才
+    // 拉)+ 输入框上横线右端短标签 + composer 收件目标。面板画在输入框
+    // 上方(rows_above),不再借 hint_lines 落脚。
+    const auto build_panel = [&](const std::vector<AgentPanelEntry>& entries,
+                                 std::string& tag_out) -> std::vector<std::string> {
+        const int total = static_cast<int>(entries.size()) + 1;
+        panel_controller.OnEntriesChanged(total);
+        if (entries.empty()) {
+            ComposerTargetSlot().reset();
+            tag_out.clear();
+            return {};
         }
-        return state;
+        // 查看态目标条目被清掉(x 清除/任务全没了):收起查看态,标签摘掉。
+        if (const auto target = panel_controller.target_index();
+            target.has_value() && *target >= total) {
+            panel_controller.CloseView();
+        }
+        std::vector<std::string> detail_lines;
+        if (panel_controller.detail_open() && panel_controller.selected() > 0 && AgentPanelDetailSlot()) {
+            detail_lines = AgentPanelDetailSlot()(entries[static_cast<std::size_t>(
+                                                      panel_controller.selected()) - 1]
+                                                      .task_id);
+        }
+        // 窗口预算有两道:条目数至多半屏上下(下限 3 条,上限 16 条);整块
+        // 面板(提示/计数/条目/详情)不得越过锚点上方的空间——空间不够就在
+        // 布局函数里开窗/截详情,首行操作提示永不丢。宽度用进函数时的屏幕
+        // 信息,RedrawEditArea 还会按当前屏宽再截一道,缩放不会裂边。
+        int max_entries = 0;
+        if (info.has_value()) {
+            max_entries = std::max(3, std::min(info->height / 2 - 1, 16));
+        }
+        const int rows_above_budget = std::max(0, start_row - 1);
+        auto layout = LayoutAgentPanel(entries, panel_controller.selected(), panel_controller.focused(),
+                                       panel_controller.detail_open(), detail_lines, max_entries,
+                                       rows_above_budget, info.has_value() ? info->width : 80,
+                                       panel_controller.stop_all_armed());
+        tag_out.clear();
+        if (const auto target = panel_controller.target_index(); target.has_value()) {
+            const AgentPanelEntry& entry = entries[static_cast<std::size_t>(*target) - 1];
+            ComposerTargetSlot() = entry.task_id;  // composer 此刻以它为收件人
+            tag_out = entry.description;           // 短标题取任务短述,不取代理类型
+        } else {
+            ComposerTargetSlot().reset();
+        }
+        if (!panel_notice.empty()) {
+            if (std::chrono::steady_clock::now() < panel_notice_until) {
+                layout.lines.insert(layout.lines.begin() + 1, panel_notice);
+            } else {
+                panel_notice.clear();
+            }
+        }
+        return layout.lines;
     };
-    const auto panel_fingerprint = [](const std::vector<AgentPanelEntry>& entries) {
+    const auto fingerprint_of = [](const std::vector<AgentPanelEntry>& entries,
+                                   const std::vector<std::string>& above,
+                                   const AgentPanelController& controller) {
         std::string value;
         for (const auto& entry : entries) {
-            value += entry.name + "\n" + entry.description + "\n" + entry.state + "\n";
-            for (const auto& line : entry.detail_lines) {
-                value += line + "\n";
-            }
+            value += std::to_string(entry.task_id) + "\x1f" + entry.name + "\x1f" + entry.description +
+                     "\x1f" + entry.state + "\x1f" + (entry.running ? "R" : entry.failed ? "F" : "D") +
+                     "\n";
+        }
+        value += "#" + std::to_string(controller.selected()) + (controller.focused() ? "f" : "-") +
+                 (controller.detail_open() ? "d" : "-") + (controller.stop_all_armed() ? "a" : "-") + "\n";
+        for (const auto& line : above) {
+            value += line + "\n";
         }
         return value;
     };
+    auto redraw_with_panel = [&](const RenderState& state, const std::vector<AgentPanelEntry>& entries) {
+        std::string tag;
+        const std::vector<std::string> above = build_panel(entries, tag);
+        chrome.mode = editor.confirm_mode();
+        RedrawEditArea(start_row, prompt_end_col, prompt, state, above, tag, prev_body_row_count,
+                       previous_frame, prev_frame_origin, vt_enabled, chrome);
+        panel_fingerprint = fingerprint_of(entries, above, panel_controller);
+    };
 
     if (box) {
-        const auto entries = panel_entries();
-        agent_panel_fingerprint = panel_fingerprint(entries);
-        RedrawEditArea(start_row, prompt_end_col, with_agent_panel(editor.CurrentRenderState(), entries),
-                       prev_body_row_count, previous_frame, vt_enabled, chrome);
+        redraw_with_panel(editor.CurrentRenderState(), panel_entries());
     }
 
     while (true) {
@@ -766,12 +888,11 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         // 在用户敲键后才变。100ms 探一次队列；没键就只重画这一帧。
         if (!platform::WaitForKeyEvent(100)) {
             const auto entries = panel_entries();
-            const std::string fingerprint = panel_fingerprint(entries);
-            if (fingerprint != agent_panel_fingerprint) {
-                agent_panel_fingerprint = fingerprint;
-                RedrawEditArea(start_row, prompt_end_col,
-                               with_agent_panel(editor.CurrentRenderState(), entries),
-                               prev_body_row_count, previous_frame, vt_enabled, chrome);
+            const bool armed_expired = panel_controller.ExpireArmed(std::chrono::steady_clock::now());
+            std::string tag;
+            const std::vector<std::string> above = build_panel(entries, tag);
+            if (armed_expired || fingerprint_of(entries, above, panel_controller) != panel_fingerprint) {
+                redraw_with_panel(editor.CurrentRenderState(), entries);
             }
             // 空闲唤醒:系统侧有事件(后台子代理跑完等)要在会话空闲时处理。
             // composer 空着才让位——用户敲了一半的正文不抢;空串返回,调用方
@@ -793,38 +914,44 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             return std::nullopt;  // EOF/读失败
         }
         const auto entries_before_key = panel_entries();
-        const bool empty_composer = composer && editor.CurrentRenderState().line.empty();
-        using PK = platform::KeyInput::Kind;
-        if (empty_composer && !entries_before_key.empty()) {
-            const int total = static_cast<int>(entries_before_key.size()) + 1;
-            if (raw_key->kind == PK::Up || raw_key->kind == PK::Down) {
-                agent_panel_focus = true;
-                agent_panel_detail = false;
-                const int delta = raw_key->kind == PK::Up ? -1 : 1;
-                agent_panel_selected = (agent_panel_selected + delta + total) % total;
-                RedrawEditArea(start_row, prompt_end_col,
-                               with_agent_panel(editor.CurrentRenderState(), entries_before_key),
-                               prev_body_row_count, previous_frame, vt_enabled, chrome);
-                continue;
-            }
-            if (raw_key->kind == PK::Enter && agent_panel_focus) {
-                agent_panel_detail = !agent_panel_detail;
-                RedrawEditArea(start_row, prompt_end_col,
-                               with_agent_panel(editor.CurrentRenderState(), entries_before_key),
-                               prev_body_row_count, previous_frame, vt_enabled, chrome);
-                continue;
-            }
-            if (raw_key->kind == PK::Esc && (agent_panel_focus || agent_panel_detail)) {
-                if (agent_panel_detail) {
-                    agent_panel_detail = false;
-                } else {
-                    agent_panel_focus = false;
-                    agent_panel_selected = 0;
+        // 面板按键(键位缝 MapToPanelKey):上下选择、Enter 查看、Esc 逐层退、
+        // x 停止/清除、Ctrl+X Ctrl+K 两段确认停全部。正文非空时状态机自己
+        // 放行——上下归 composer 历史,普通字母 x 只进 composer,Enter 照旧
+        // 提交给当前收件目标。停止走应用层接好的正式取消接口;面板只等任务
+        // 线程报出终态的那一拍改灯,不先抹行。
+        if (composer) {
+            if (const std::optional<PanelKey> panel_key = MapToPanelKey(*raw_key);
+                panel_key.has_value()) {
+                const bool empty_now = editor.CurrentRenderState().line.empty();
+                const auto outcome = panel_controller.HandleKey(
+                    *panel_key, static_cast<int>(entries_before_key.size()) + 1, empty_now,
+                    std::chrono::steady_clock::now());
+                if (outcome.stop_all) {
+                    const AgentPanelActions& actions = AgentPanelActionsSlot();
+                    if (actions.cancel_all) {
+                        const int stopped = actions.cancel_all();
+                        panel_notice = trf("agent_panel.stop_all_notice", stopped);
+                        panel_notice_until =
+                            std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                    }
                 }
-                RedrawEditArea(start_row, prompt_end_col,
-                               with_agent_panel(editor.CurrentRenderState(), entries_before_key),
-                               prev_body_row_count, previous_frame, vt_enabled, chrome);
-                continue;
+                if (outcome.stop_current && !entries_before_key.empty() &&
+                    panel_controller.selected() > 0) {
+                    const AgentPanelEntry& entry =
+                        entries_before_key[static_cast<std::size_t>(panel_controller.selected()) - 1];
+                    const AgentPanelActions& actions = AgentPanelActionsSlot();
+                    if (entry.running && actions.cancel_task) {
+                        actions.cancel_task(entry.task_id);
+                    } else if (!entry.running && actions.clear_task) {
+                        actions.clear_task(entry.task_id);
+                    }
+                }
+                if (outcome.consumed || outcome.redraw) {
+                    redraw_with_panel(editor.CurrentRenderState(), panel_entries());
+                    if (outcome.consumed) {
+                        continue;
+                    }
+                }
             }
         }
 
@@ -834,12 +961,11 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         }
 
         RenderState state = editor.HandleKey(*mapped);
-        if (!state.line.empty()) {
-            agent_panel_focus = false;
-            agent_panel_detail = false;
-            agent_panel_selected = 0;
+        if (!state.line.empty() && !panel_controller.detail_open()) {
+            // 敲了正文即离开面板焦点(上下键归历史);查看态(收件目标)例外
+            // ——那只标签还挂着,话要送去那只子代理。
+            panel_controller.Reset();
         }
-        state = with_agent_panel(std::move(state), entries_before_key);
 
         // UI-D(0.16.0):composer 读取里,把核心层翻好的 UI 按键语义转发给
         // 应用层回调。流程:光标先挪到编辑区最后一行、换行(回调的输出从
@@ -872,7 +998,8 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 }
                 const bool handled = UiHandlerSlot()(*action);
                 if (handled) {
-                    // 回调铺完内容,整个框(上横线起)重打一遍、重测锚点。
+                    // 回调铺完内容,整个框(上横线起,含面板行)重打一遍、重测锚点。
+                    reserve_panel_room();
                     if (box) {
                         const std::optional<platform::ScreenInfo> rule_info = platform::GetScreenInfo();
                         const int console_width = rule_info.has_value() ? rule_info->width : 80;
@@ -887,9 +1014,8 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                     }
                     prev_body_row_count = 0;
                     previous_frame.reset();
-                    chrome.mode = editor.confirm_mode();
-                    RedrawEditArea(start_row, prompt_end_col, state, prev_body_row_count,
-                                   previous_frame, vt_enabled, chrome);
+                    prev_frame_origin = -1;
+                    redraw_with_panel(state, panel_entries());
                     continue;
                 }
                 // 0.17.0:焦点导航请求没被消费(比如 transcript 还是空的)——
@@ -908,17 +1034,16 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         // 自然带上新档),屏上零新增行。
 
         if (box && state.submitted) {
-            // 0.17.0 输入框化的提交收尾:横线/状态行擦掉,只留 `> 内容`,
-            // 换行收尾——取舍见 CollapseBoxOnSubmit 注释。
-            CollapseBoxOnSubmit(start_row, prompt_end_col, prev_body_row_count, state, prompt,
+            // 0.17.0 输入框化的提交收尾:横线/状态行/面板行擦掉,只留
+            // `> 内容`,换行收尾——取舍见 CollapseBoxOnSubmit 注释。帧顶用
+            // 上一帧记的绝对帧顶(含面板行与上横线)。
+            CollapseBoxOnSubmit(prev_frame_origin, prompt_end_col, prev_body_row_count, state, prompt,
                                 vt_enabled);
             std::cout << "\n";
             return Utf32ToUtf8(state.line);
         }
 
-        chrome.mode = editor.confirm_mode();
-        RedrawEditArea(start_row, prompt_end_col, state, prev_body_row_count, previous_frame,
-                       vt_enabled, chrome);
+        redraw_with_panel(state, entries_before_key);
 
         if (state.esc_pressed && esc_rejects) {
             // 确认与可取消选择场景:Esc 不留在循环里继续等，直接交回
@@ -1106,6 +1231,14 @@ void SetConfirmMode(ConfirmMode mode) { SharedEditor().set_confirm_mode(mode); }
 void SetTranscriptUiHandler(TranscriptUiHandler handler) { UiHandlerSlot() = std::move(handler); }
 
 void SetAgentPanelProvider(AgentPanelProvider provider) { AgentPanelProviderSlot() = std::move(provider); }
+
+void SetAgentPanelDetailProvider(std::function<std::vector<std::string>(int task_id)> provider) {
+    AgentPanelDetailSlot() = std::move(provider);
+}
+
+void SetAgentPanelActions(AgentPanelActions actions) { AgentPanelActionsSlot() = std::move(actions); }
+
+std::optional<int> CurrentComposerAgentTarget() { return ComposerTargetSlot(); }
 
 void SetIdleWakeHook(std::function<bool()> hook) { IdleWakeHookSlot() = std::move(hook); }
 

@@ -23,6 +23,7 @@
 #include <thread>
 #include <vector>
 
+#include "cli/agent_panel.hpp"  // AgentPanelEntry/Actions(面板纯逻辑层)
 #include "cli/choice_menu.hpp"
 #include "cli/format_utils.hpp"  // StatusPanelData(状态行数据源)
 #include "cli/line_editor.hpp"
@@ -115,19 +116,29 @@ using TranscriptUiHandler = std::function<bool(UiKeyAction)>;
 // 走不到逐键路径,注册了也永远不会被调,天然无感。
 void SetTranscriptUiHandler(TranscriptUiHandler handler);
 
-// 会话内后台子代理面板。数据由应用层给，终端层只管选择与绘制：空
-// composer 按 ↑/↓ 进入代理焦点，Enter 展开详情，Esc 收起/退出。主会话
-// 固定算第 0 项，provider 只返回后台子代理项。
-struct AgentPanelEntry {
-    std::string name;
-    std::string description;
-    std::string state;
-    std::vector<std::string> detail_lines;
-    bool running = false;
-    bool failed = false;
-};
+// 会话内后台子代理面板(0.28.x 起画在输入框上方,不再借 hint_lines)。
+// 数据由应用层给,终端层只管选择与绘制:空 composer 按 ↑/↓ 进入代理焦点,
+// Enter 进查看态(同时把 composer 收件目标切到这只子代理),Esc 逐层退出,
+// x 停止/清除当前条目,Ctrl+X Ctrl+K 两段确认停止全部。主会话固定算第 0 项,
+// provider 只返回后台子代理项。条目结构/动作/按键状态机在 cli/agent_panel.hpp。
 using AgentPanelProvider = std::function<std::vector<AgentPanelEntry>()>;
 void SetAgentPanelProvider(AgentPanelProvider provider);
+
+// 详情按需取:列表每 100ms 刷新只拉轻量条目;查看态打开的那只才调这个,
+// 把完整任务说明、工具调用流水、未送达介入消息交出来——别让每拍刷新都
+// 复制全部工具输出。task_id 认不出返回空。
+void SetAgentPanelDetailProvider(std::function<std::vector<std::string>(int task_id)> provider);
+
+// 面板动作(x 停止/清除、两段确认停全部)的接线口。终端层不直接碰
+// AgentTool;停止必须走正式取消接口,等任务线程报终态再改灯。
+void SetAgentPanelActions(AgentPanelActions actions);
+
+// 这一次 composer 读取的"收件目标":进入某只后台子代理查看态后,面板
+// 控制器记着它的任务号;ReadLine 返回后应用层取这个,把提交的消息定向送
+// 进那只子代理的 inbox(不经 main history)。nullopt = 归 main。每次
+// ReadLine(composer) 开头清零;Esc 退查看态/切回 main/条目被清理时也随之
+// 清零。管道/重定向模式走不到逐键路径,恒 nullopt。
+std::optional<int> CurrentComposerAgentTarget();
 
 // 空闲唤醒钩子:composer 主提示符在逐键等待期间,每 100ms 的面板刷新一拍
 // 顺带问一次;返回 true 表示应用层有系统侧事件要在会话空闲时处理(比如
