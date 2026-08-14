@@ -311,6 +311,25 @@ std::optional<std::string> ParseTitleEvent(const std::string& line) {
     return j["title"].get<std::string>();
 }
 
+std::string SerializeCwdEvent(const std::string& cwd, const std::string& ts) {
+    nlohmann::json j;
+    j["type"] = "cwd";
+    j["cwd"] = cwd;
+    j["ts"] = ts;
+    return j.dump();
+}
+
+std::optional<std::string> ParseCwdEvent(const std::string& line) {
+    const nlohmann::json j = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+    if (!j.is_object() || j.value("type", std::string()) != "cwd") {
+        return std::nullopt;
+    }
+    if (!j.contains("cwd") || !j["cwd"].is_string()) {
+        return std::nullopt;
+    }
+    return j["cwd"].get<std::string>();
+}
+
 // ---------------------------------------------------------------------------
 // 会话 id
 // ---------------------------------------------------------------------------
@@ -570,6 +589,15 @@ std::optional<LoadedSession> ParseSessionFile(const std::string& content) {
                 }
                 continue;
             }
+            if (type == "cwd") {
+                auto cwd = ParseCwdEvent(line);
+                if (cwd.has_value()) {
+                    session.meta.cwd = std::move(*cwd);  // append-only,最后一条胜
+                } else {
+                    session.skipped_lines += 1;
+                }
+                continue;
+            }
             session.skipped_lines += 1;  // 认不得的事件类型,跳过
             continue;
         }
@@ -754,6 +782,15 @@ bool SessionStore::AppendTitleEvent(const std::string& title) {
     return out_.good();
 }
 
+bool SessionStore::AppendCwdEvent(const std::string& cwd) {
+    if (!out_.is_open()) {
+        return false;
+    }
+    out_ << SerializeCwdEvent(cwd, NowTimestamp()) << "\n";
+    out_.flush();
+    return out_.good();
+}
+
 void SessionStore::Reset() {
     if (out_.is_open()) {
         out_.close();
@@ -862,6 +899,11 @@ std::vector<SessionListEntry> ListSessions(const std::string& sessions_dir, std:
             if (line.find("\"type\":\"compact\"") != std::string::npos) {
                 if (ParseCompactEvent(line).has_value()) {
                     continue;
+                }
+            }
+            if (line.find("\"type\":\"cwd\"") != std::string::npos) {
+                if (ParseCwdEvent(line).has_value()) {
+                    continue;  // 事件行不算消息
                 }
             }
             entry.message_count += 1;

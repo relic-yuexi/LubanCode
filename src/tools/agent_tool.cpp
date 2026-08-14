@@ -2,12 +2,15 @@
 
 #include <algorithm>
 #include <exception>
+#include <filesystem>
+#include <memory>
 #include <sstream>
 #include <utility>
 #include <variant>
 
 #include "agent/loop.hpp"
 #include "agent/prompts.hpp"
+#include "tools/path_utils.hpp"
 
 namespace lubancode::tools {
 
@@ -63,6 +66,61 @@ bool ExploreAllows(const Tool& tool) {
     const std::string name = tool.name();
     return name == "read_file" || name == "search" || name == "web_fetch" || name == "web_search" ||
            name == "lsp";
+}
+
+// ---------------------------------------------------------------------------
+// isolation=worktree 的 base_dir 包装层(0.27.x)
+//
+// 子代理是进程内线程,共享进程 cwd——绝不能 chdir(会把主会话的读写全带
+// 进沟里,多个隔离子代理并行时更互相踩脚)。做法是不动各工具内部,在建
+// 子代理工具表时套一层装饰:路径入参按房解析成绝对路径,run_command 注入
+// 房作为工作目录;三道闸(文件/cwd/git 改道)由工具自身按线程本地的隔离
+// 范围栈(IsolationGuard,AgentLoop 跑动前压入)执行。
+// ---------------------------------------------------------------------------
+
+class BaseDirTool : public Tool {
+public:
+    BaseDirTool(Tool& inner, IsolationScope scope) : inner_(inner), scope_(std::move(scope)) {}
+
+    std::string name() const override { return inner_.name(); }
+    std::string description() const override { return inner_.description(); }
+    nlohmann::json input_schema() const override { return inner_.input_schema(); }
+    bool needs_confirm() const override { return inner_.needs_confirm(); }
+    bool deferred() const override { return inner_.deferred(); }
+
+    Result execute(const nlohmann::json& input) override {
+        nlohmann::json patched = input;
+        const std::string inner_name = inner_.name();
+        if (inner_name == "read_file" || inner_name == "write_file" || inner_name == "edit_file" ||
+            inner_name == "search") {
+            const auto it = patched.find("path");
+            if (it != patched.end() && it->is_string()) {
+                const std::string path = it->get<std::string>();
+                if (!path.empty() && !Utf8ToPath(path).is_absolute()) {
+                    patched["path"] = scope_.base_dir + "/" + path;
+                }
+            }
+        } else if (inner_name == "run_command") {
+            if (patched.find("cwd") == patched.end()) {
+                patched["cwd"] = scope_.base_dir;
+            }
+        }
+        return inner_.execute(patched);
+    }
+
+private:
+    Tool& inner_;
+    IsolationScope scope_;
+};
+
+// 把一张工具表整体包成"落在房里"的表。包装件按引用持内层工具,源表必须
+// 活得比返回的表久(前台是会话级子表;后台是线程 lambda 里的局部序)。
+std::unique_ptr<ToolRegistry> BuildIsolatedRegistry(ToolRegistry& source, const IsolationScope& scope) {
+    auto out = std::make_unique<ToolRegistry>();
+    for (const auto& tool : source.All()) {
+        out->Register(std::make_unique<BaseDirTool>(*tool, scope));
+    }
+    return out;
 }
 
 }  // namespace
@@ -131,6 +189,15 @@ nlohmann::json AgentTool::input_schema() const {
     background_prop["description"] = "是否放到会话后台运行。独立摸排用 true;当前回答离不开结果时用 false。";
     properties["run_in_background"] = background_prop;
 
+    nlohmann::json isolation_prop = nlohmann::json::object();
+    isolation_prop["type"] = "string";
+    isolation_prop["enum"] = nlohmann::json::array({"none", "worktree"});
+    isolation_prop["description"] =
+        "worktree = 给子代理单独开一间 git worktree 隔离房干活:写不碰主 checkout(文件/命令/git 三道闸拦),"
+        "干完没改动房自动删,有改动则保留并在结果里附房路径与分支,由主代理或用户收尾。"
+        "改代码的多步任务建议带上;只读摸排不必。缺省 none。";
+    properties["isolation"] = isolation_prop;
+
     schema["properties"] = properties;
     schema["required"] = nlohmann::json::array({"prompt"});
 
@@ -160,6 +227,15 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
         return {"agent_type 只认 general-purpose 或 Explore", true};
     }
 
+    std::string isolation = input.value("isolation", std::string("none"));
+    if (isolation != "none" && isolation != "worktree") {
+        return {"isolation 只认 none 或 worktree", true};
+    }
+    if (isolation == "worktree" && agent_type == "Explore") {
+        return {"Explore 是只读代理,用不上 worktree 隔离(isolation 去掉或换 general-purpose)", true};
+    }
+    const bool isolate = isolation == "worktree";
+
     int max_turns = default_max_turns_;
     if (const auto it = input.find("max_turns"); it != input.end() && !it->is_null()) {
         if (!it->is_number_integer()) {
@@ -175,22 +251,80 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
         agent_type == "Explore" && explore_registry_ != nullptr ? *explore_registry_ : sub_registry_;
     const bool background = input.value("run_in_background", background_by_default_);
     if (background) {
-        return LaunchBackground(input, agent_type, task_registry, max_turns);
+        return LaunchBackground(input, agent_type, task_registry, max_turns, isolate);
     }
-    return ExecuteForeground(input, agent_type, task_registry, max_turns);
+    return ExecuteForeground(input, agent_type, task_registry, max_turns, isolate);
+}
+
+std::optional<cli::AgentWorktree> AgentTool::SetupIsolationRoom(Result& error_out) {
+    const std::filesystem::path cwd = Utf8ToPath(cwd_);
+    const auto repo_root = cli::FindRepositoryRoot(cwd, git_runner_);
+    if (!repo_root.has_value()) {
+        error_out = {"isolation=worktree 需要在 git 仓库里给子代理建房,当前目录不是仓库: " + cwd_, true};
+        return std::nullopt;
+    }
+    cli::AgentWorktree room = cli::CreateAgentWorktree(*repo_root, git_runner_);
+    if (!room.ok) {
+        error_out = {"给隔离子代理建 worktree 失败: " + room.error, true};
+        // 半拉子房收拾掉,不留垃圾。
+        if (!room.room_path.empty()) {
+            std::error_code ec;
+            std::filesystem::remove_all(room.room_path, ec);
+        }
+        return std::nullopt;
+    }
+    return room;
+}
+
+std::string AgentTool::FinishIsolationRoom(const cli::AgentWorktree& room, const cli::GitRunner& runner) {
+    return cli::FinishAgentWorktree(room.repo_root, room.room_path, room.branch, runner).note;
 }
 
 Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std::string& agent_type,
-                                          ToolRegistry& task_registry, int max_turns) {
+                                          ToolRegistry& task_registry, int max_turns, bool isolate) {
+    // isolation=worktree:建房、锁房、工具表套 base_dir 包装、隔离范围压栈,
+    // 跑完收工(干净删房,有活留房附路径)。cwd 一根指头都不动。
+    std::optional<cli::AgentWorktree> room;
+    std::unique_ptr<ToolRegistry> isolated_registry;
+    std::optional<ScopedIsolation> scope_guard;
+    std::optional<IsolationScope> scope_storage;
+    if (isolate) {
+        Result setup_error;
+        room = SetupIsolationRoom(setup_error);
+        if (!room.has_value()) {
+            return setup_error;
+        }
+        scope_storage = IsolationScope{room->name, PathToUtf8(room->room_path), PathToUtf8(room->repo_root)};
+        isolated_registry = BuildIsolatedRegistry(task_registry, *scope_storage);
+        scope_guard.emplace(*scope_storage);
+    }
+    ToolRegistry& effective_registry = isolated_registry != nullptr ? *isolated_registry : task_registry;
+
     const Hooks hooks = hooks_;
-    return RunTask(backend_, task_registry, input.at("prompt").get<std::string>(), agent_type, max_turns,
-                   &hooks, nullptr);
+    Result result = RunTask(backend_, effective_registry, input.at("prompt").get<std::string>(), agent_type,
+                            max_turns, &hooks, nullptr, /*detached=*/nullptr,
+                            /*prepared_system_prompt=*/nullptr,
+                            scope_storage.has_value() ? &*scope_storage : nullptr);
+    if (room.has_value()) {
+        result.content += FinishIsolationRoom(*room, git_runner_);
+    }
+    return result;
 }
 
 Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std::string& agent_type,
-                                         ToolRegistry& task_registry, int max_turns) {
+                                         ToolRegistry& task_registry, int max_turns, bool isolate) {
     if (!detached_backend_factory_) {
         return {"当前入口没有配置后台子代理后端,请把 run_in_background 设为 false", true};
+    }
+    // isolation=worktree:主线程里把房建好、锁上,建不成同步报错——后台
+    // 任务没人可问,失败要立刻回给模型。房信息带进线程,收工清理。
+    std::optional<cli::AgentWorktree> room;
+    if (isolate) {
+        Result setup_error;
+        room = SetupIsolationRoom(setup_error);
+        if (!room.has_value()) {
+            return setup_error;
+        }
     }
 
     // 已收尾的 std::thread 若一直不 join，系统线程句柄会跟着会话一路攒。
@@ -255,17 +389,33 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
     task_threads_.emplace_back([this, task, registry, prompt, agent_type, max_turns,
                                 detached = std::move(detached),
                                 system_prompt = std::move(system_prompt),
-                                detached_registry = std::move(detached_registry)]() mutable {
+                                detached_registry = std::move(detached_registry),
+                                room = std::move(room)]() mutable {
         (void)detached_registry;  // 让独立工具表活到线程收尾
+        // isolation=worktree:线程里包表、压隔离范围,收工清理。包装表按
+        // 引用持源表工具,声明在源表之后,析构反序先亡,引用不悬垂。
+        std::unique_ptr<ToolRegistry> isolated_registry;
+        std::optional<ScopedIsolation> scope_guard;
+        std::optional<IsolationScope> scope_storage;
+        if (room.has_value()) {
+            scope_storage = IsolationScope{room->name, PathToUtf8(room->room_path), PathToUtf8(room->repo_root)};
+            isolated_registry = BuildIsolatedRegistry(*registry, *scope_storage);
+            scope_guard.emplace(*scope_storage);
+        }
+        ToolRegistry& effective_registry =
+            isolated_registry != nullptr ? *isolated_registry : *registry;
         DetachedRequestBackend backend(detached);
         Result result;
         try {
-            result =
-                RunTask(backend, *registry, prompt, agent_type, max_turns, nullptr, task, &detached, &system_prompt);
+            result = RunTask(backend, effective_registry, prompt, agent_type, max_turns, nullptr, task, &detached,
+                             &system_prompt, scope_storage.has_value() ? &*scope_storage : nullptr);
         } catch (const std::exception& error) {
             result = {"子代理执行失败: " + std::string(error.what()), true};
         } catch (...) {
             result = {"子代理执行失败: 未知错误", true};
+        }
+        if (room.has_value()) {
+            result.content += FinishIsolationRoom(*room, git_runner_);
         }
         {
             std::lock_guard<std::mutex> lock(tasks_mutex_);
@@ -288,7 +438,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                                 const std::string& agent_type, int max_turns, const Hooks* foreground_hooks,
                                 const std::shared_ptr<TaskRecord>& background_task,
                                 const DetachedAgentBackend* detached,
-                                const std::string* prepared_system_prompt) {
+                                const std::string* prepared_system_prompt,
+                                const IsolationScope* isolation_scope) {
     // tool_search:延迟工具索引段按"此刻的 loaded 集合"现算(provider 里
     // 闭包着 main.cpp 那份 shared_ptr),拼在子代理系统提示末尾。子代理
     // 运行中途自己 tool_search 挂载了新工具,这段索引不会跟着刷新(系统
@@ -308,6 +459,11 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     if (detached != nullptr && prepared_system_prompt == nullptr) {
         system_prompt = agent::WithModelInstructions(system_prompt, detached->model_instructions);
         system_prompt = agent::WithSoul(system_prompt, detached->soul);
+    }
+    if (isolation_scope != nullptr) {
+        system_prompt += "\n\n本次任务运行在隔离的 git worktree 里: " + isolation_scope->base_dir +
+                         "。相对路径一律以这间房为基准(包装层会自动解析);主 checkout 只读——写入、命令"
+                         "工作目录、git 改道指回主树的操作都会被拦。改动留在房内,收工自会处置。";
     }
     // 每次 execute() 都是全新的、空历史的子代理——没有跨调用的状态,
     // 子代理内部也不做自动 compact(短命任务用不上),AgentLoop 自带的

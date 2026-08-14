@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <random>
 #include <sstream>
@@ -877,6 +878,185 @@ WorktreeResult WorktreeSession::RemoveNow() {
         }
     }
     return {WorktreeResultCode::Removed, worktree_path_, branch_, {}, {}};
+}
+
+// ---------------------------------------------------------------------------
+// 子代理的房与陈房清扫
+// ---------------------------------------------------------------------------
+
+std::optional<std::filesystem::path> FindRepositoryRoot(const std::filesystem::path& from, GitRunner runner) {
+    if (!runner) {
+        runner = DefaultGitRunner;
+    }
+    const GitCommandResult git = runner({from, {"rev-parse", "--show-toplevel"}});
+    if (git.exit_code != 0) {
+        return std::nullopt;
+    }
+    const std::string root = Trim(git.output);
+    if (root.empty()) {
+        return std::nullopt;
+    }
+    return Utf8ToPath(root);
+}
+
+namespace {
+
+// agent-<随机> 的房名,撞了重摇(房区里同名目录还在就换一个)。
+std::string FreshAgentWorktreeName(const std::filesystem::path& repository_root) {
+    static constexpr char kAlphabet[] = "abcdefghijklmnopqrstuvwxyz0123456789";
+    std::random_device seed;
+    std::mt19937_64 generator((static_cast<std::uint64_t>(seed()) << 32U) ^ seed());
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        std::uniform_int_distribution<std::size_t> pick(0, sizeof(kAlphabet) - 2);
+        std::string name = "agent-";
+        for (int i = 0; i < 10; ++i) {
+            name += kAlphabet[pick(generator)];
+        }
+        std::error_code ec;
+        if (!std::filesystem::exists(WorktreePath(repository_root, name), ec)) {
+            return name;
+        }
+    }
+    return "agent-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+}
+
+// 房分支上有没有别的本地分支不含的提交(自有提交)。没有别的本地分支
+// (刚 init 的仓)就当没有自有提交——干净即删。
+bool RoomHasOwnCommits(const std::filesystem::path& repository_root, const std::string& branch, GitRunner runner) {
+    const GitCommandResult refs =
+        runner({repository_root, {"for-each-ref", "refs/heads", "--format=%(refname:short)"}});
+    if (refs.exit_code != 0) {
+        return true;  // 认不出,保守当有活
+    }
+    std::vector<std::string> others;
+    std::istringstream input(refs.output);
+    std::string line;
+    while (std::getline(input, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        line = Trim(line);
+        if (!line.empty() && line != branch && line.rfind("worktree/", 0) != 0) {
+            others.push_back(line);
+        }
+    }
+    if (others.empty()) {
+        return false;
+    }
+    std::vector<std::string> args = {"rev-list", "--count", branch, "--not"};
+    args.insert(args.end(), others.begin(), others.end());
+    const GitCommandResult count = runner({repository_root, std::move(args)});
+    if (count.exit_code != 0) {
+        return true;  // 认不出,保守当有活
+    }
+    const long long parsed = std::strtoll(Trim(count.output).c_str(), nullptr, 10);
+    return parsed > 0;
+}
+
+}  // namespace
+
+AgentWorktree CreateAgentWorktree(const std::filesystem::path& repository_root, GitRunner runner) {
+    if (!runner) {
+        runner = DefaultGitRunner;
+    }
+    AgentWorktree out;
+    const std::string name = FreshAgentWorktreeName(repository_root);
+    const std::filesystem::path room = WorktreePath(repository_root, name);
+    const std::string branch = "worktree/" + name;
+    const std::string base_ref = ResolveFreshBaseRef(repository_root, runner);
+
+    std::error_code ec;
+    std::filesystem::create_directories(room.parent_path(), ec);
+    if (ec) {
+        out.error = ec.message();
+        return out;
+    }
+    const GitCommandResult git = runner(
+        {repository_root, {"worktree", "add", "-b", branch, PathToUtf8(room), base_ref}});
+    if (git.exit_code != 0) {
+        out.error = git.error.empty() ? Trim(git.output) : git.error;
+        return out;
+    }
+    CopyWorktreeInclude(repository_root, room, runner);
+    LockWorktree(room, "lubancode agent " + name, runner);
+    out.ok = true;
+    out.repo_root = repository_root;
+    out.room_path = room;
+    out.name = name;
+    out.branch = branch;
+    return out;
+}
+
+AgentWorktreeFinish FinishAgentWorktree(const std::filesystem::path& repository_root,
+                                        const std::filesystem::path& room_path, const std::string& branch,
+                                        GitRunner runner) {
+    if (!runner) {
+        runner = DefaultGitRunner;
+    }
+    AgentWorktreeFinish out;
+    UnlockWorktree(room_path, runner);
+    std::error_code ec;
+    if (!std::filesystem::exists(room_path, ec)) {
+        out.removed = true;
+        return out;
+    }
+    if (!WorktreeClean(room_path, runner)) {
+        out.note = "\n\n隔离子代理的工作树有未提交改动,已保留:\n路径: " + PathToUtf8(room_path) +
+                   "\n分支: " + branch + "\n需要后续收尾(提交/合并/清理)。";
+        return out;
+    }
+    if (const auto failure = SafeRemoveTree(room_path); failure.has_value()) {
+        out.note = "\n\n隔离子代理的工作树删除失败(" + *failure + "),已保留: " + PathToUtf8(room_path);
+        return out;
+    }
+    runner({repository_root, {"worktree", "prune"}});
+    if (branch.rfind("worktree/", 0) == 0) {
+        runner({repository_root, {"branch", "-D", branch}});
+    }
+    out.removed = true;
+    return out;
+}
+
+StaleAgentWorktreeCleanup CleanStaleAgentWorktrees(const std::filesystem::path& repository_root,
+                                                   std::chrono::hours max_age, GitRunner runner) {
+    if (!runner) {
+        runner = DefaultGitRunner;
+    }
+    StaleAgentWorktreeCleanup out;
+    const std::filesystem::path rooms_root = repository_root / ".lubancode" / "worktrees";
+    std::error_code ec;
+    if (!std::filesystem::is_directory(rooms_root, ec)) {
+        return out;
+    }
+    const auto cutoff = std::filesystem::file_time_type::clock::now() - max_age;
+    for (std::filesystem::directory_iterator it(rooms_root, ec), end; !ec && it != end; ++it) {
+        const std::string name = PathToUtf8(it->path().filename());
+        if (!name.starts_with("agent-")) {
+            continue;  // 只清自家命名规约的房,用户手起的永不碰
+        }
+        std::error_code mtime_ec;
+        const auto mtime = std::filesystem::last_write_time(it->path(), mtime_ec);
+        if (mtime_ec || mtime >= cutoff) {
+            out.kept_fresh += 1;
+            continue;
+        }
+        // 被杀会话留下的锁先放掉(跑着的代理不该轮到清扫:锁 + 岁数双条件,
+        // 真跑着的房 mtime 通常新;即便误放,下面有活检查还会兜住)。
+        UnlockWorktree(it->path(), runner);
+        const std::string branch = "worktree/" + name;
+        if (!WorktreeClean(it->path(), runner) || RoomHasOwnCommits(repository_root, branch, runner)) {
+            out.kept_dirty += 1;
+            continue;
+        }
+        if (const auto failure = SafeRemoveTree(it->path()); failure.has_value()) {
+            out.kept_dirty += 1;
+            continue;
+        }
+        runner({repository_root, {"worktree", "prune"}});
+        runner({repository_root, {"branch", "-D", branch}});
+        out.removed += 1;
+    }
+    return out;
 }
 
 }  // namespace lubancode::cli

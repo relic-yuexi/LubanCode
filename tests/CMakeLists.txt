@@ -26,6 +26,7 @@ add_executable(lubancode_tests
   test_worktree.cpp
   test_worktree_tool.cpp
   test_isolation.cpp
+  test_agent_isolation.cpp
   test_theme.cpp
   test_prompts.cpp
   test_prompt_assembler.cpp

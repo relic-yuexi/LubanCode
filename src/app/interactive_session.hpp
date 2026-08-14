@@ -307,6 +307,16 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                            lubancode::config::Source::Default,
                        current_think, context_tracker, current_model_instructions);
 
+    // 陈房清扫(0.27.x):只清 agent- 前缀、超过 3 天没动静的隔离子代理房;
+    // 有活(改动/自有提交)的跳过,锁着的先放(被杀会话留下的),用户
+    // 手起的房永不碰。
+    if (const auto stale_root = lubancode::cli::FindRepositoryRoot(std::filesystem::current_path())) {
+        const auto cleanup = lubancode::cli::CleanStaleAgentWorktrees(*stale_root, std::chrono::hours(72));
+        if (cleanup.removed > 0) {
+            std::cout << theme.stats << trf("cmd.worktree.cleaned", cleanup.removed) << theme.reset << "\n";
+        }
+    }
+
     // 工具全栈:三表 + MCP/插件/LSP/agent/todo/ask_user/memory/tool_search
     // 的装配全收进 ToolRuntime(引用寿命由成员声明顺序保住),Interactive
     // 与单发共用一套;会话可变的钩子(detached factory、prompts、过滤)
@@ -763,10 +773,14 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     };
 
     // --continue:等价开场自动 /resume 本目录最近一场;本目录没有存档就
-    // 安静开新会话。
+    // 安静开新会话。resume 可能把会话搬回存档里的 worktree 房,搬没搬记
+    // 一笔,后面 sync 定义好了再善后。
+    bool resume_moved_into_worktree = false;
     if (continue_last) {
-        ResumeSession("", sessions_dir, *loop, session_store, persisted_count, session_meta, session_title,
-                       wire_str, *current_model, theme, /*quiet_if_none=*/true);
+        if (ResumeSession("", sessions_dir, *loop, session_store, persisted_count, session_meta, session_title,
+                          wire_str, *current_model, theme, /*quiet_if_none=*/true, &worktree_session)) {
+            resume_moved_into_worktree = worktree_session.active();
+        }
     }
 
     // M10:排队消息队列——某一轮流式期间(RunTurn 内 TurnInputListener 存活
@@ -1058,9 +1072,18 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
             agent_tool->SetWorkingDirectory(prompt_options.cwd);
             agent_tool->SetProjectInstructions(project_instructions);
         }
+        // 会话档跟 cwd 走(0.27.x):目录动了就追加一条 cwd 事件,
+        // /resume 靠它把会话送回原房。
+        if (session_store.active()) {
+            session_store.AppendCwdEvent(prompt_options.cwd);
+        }
     };
     // loop 已就位,把 worktree 工具 enter/exit 的善后接到这条 sync 上。
     after_worktree_moved = sync_worktree_directory;
+    // --continue 若把会话搬回了存档里的房,提示词与子代理 cwd 跟着同步。
+    if (resume_moved_into_worktree) {
+        sync_worktree_directory();
+    }
 
     // 项目配置若显式钉了 active_provider，后续切换继续写回项目；没钉就
     // 记全局“上次使用”，跨目录也能沿用。
@@ -1321,9 +1344,13 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                         }
                         if (ResumeSession(target, sessions_dir, *loop, session_store, persisted_count,
                                           session_meta, session_title, wire_str, *current_model, theme,
-                                          /*quiet_if_none=*/false)) {
+                                          /*quiet_if_none=*/false, &worktree_session)) {
                             session_store_broken = false;  // 换了场,存档失败的旧账翻篇
                             session_title_pending = false;
+                            if (worktree_session.active()) {
+                                // resume 把会话搬回了房:提示词与子代理 cwd 同步。
+                                sync_worktree_directory();
+                            }
                         }
                     }
                     break;

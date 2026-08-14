@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <filesystem>
 #include <optional>
 #include <string>
 
@@ -13,6 +14,7 @@
 #include "cli/console_input.hpp"
 #include "cli/i18n.hpp"
 #include "cli/theme.hpp"
+#include "cli/worktree.hpp"
 #include "platform/paths.hpp"
 
 namespace lubancode::app {
@@ -206,11 +208,16 @@ std::optional<std::string> PromptResumeTarget(const std::string& sessions_dir,
 // 成功:回放事件 + 成对修补 + ReplaceHistory + 接管文件继续追加,返回 true;
 // session_title 同步成存档里最后一条 title 事件(没有就清空)。
 // quiet_if_none:--continue 本目录找不到任何存档时不报错、安静开新会话。
+// worktree_session(0.27.x,可空):会话档 meta.cwd(含 cwd 事件回放)若指向
+// 一间还在的 worktree 房,验明正身后把会话搬回去;房没了回落启动目录并
+// 说一声;马甲房(.git 指回主仓那类)拒进并报原因。非空时成功恢复后由
+// 调用方做一次目录善后同步(重拼系统提示那条路)。
 bool ResumeSession(const std::string& target, const std::string& sessions_dir,
                     lubancode::agent::AgentLoop& loop, lubancode::agent::SessionStore& store,
                     std::size_t& persisted_count, lubancode::agent::SessionMeta& session_meta,
                     std::string& session_title, const std::string& wire_str, const std::string& current_model,
-                    const lubancode::cli::Theme& theme, bool quiet_if_none) {
+                    const lubancode::cli::Theme& theme, bool quiet_if_none,
+                    lubancode::cli::WorktreeSession* worktree_session = nullptr) {
     if (sessions_dir.empty()) {
         std::cout << tr("session.no_home") << "\n";
         return false;
@@ -315,6 +322,29 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
     if (!session->meta.wire.empty() && session->meta.wire != wire_str) {
         std::cout << theme.stats << trf("cmd.resume.wire_mismatch", session->meta.wire, wire_str) << theme.reset
                   << "\n";
+    }
+
+    // 会话跟 cwd 走(0.27.x):存档记录的 cwd 是一间房就验明正身搬回去。
+    if (worktree_session != nullptr) {
+        const std::string saved = session->meta.cwd;
+        const std::string now = CurrentDirUtf8();
+        if (!saved.empty() &&
+            lubancode::agent::NormalizePathForCompare(saved) != lubancode::agent::NormalizePathForCompare(now)) {
+            const std::filesystem::path saved_path(
+                std::u8string(reinterpret_cast<const char8_t*>(saved.data()), saved.size()));
+            std::error_code path_ec;
+            if (!std::filesystem::exists(saved_path, path_ec)) {
+                std::cout << theme.stats << trf("cmd.resume.worktree_gone", saved) << theme.reset << "\n";
+            } else {
+                const auto entered = worktree_session->EnterByPath(saved_path);
+                if (entered.code == lubancode::cli::WorktreeResultCode::VerificationFailed) {
+                    std::cout << theme.error << trf("cmd.resume.worktree_refused", saved, entered.detail)
+                              << theme.reset << "\n";
+                } else if (entered.code == lubancode::cli::WorktreeResultCode::Created) {
+                    std::cout << theme.stats << trf("cmd.resume.worktree_back", saved) << theme.reset << "\n";
+                }
+            }
+        }
     }
     return true;
 }

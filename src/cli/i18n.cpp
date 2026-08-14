@@ -476,6 +476,7 @@ const Entry kZhCN[] = {
     {"cmd.worktree.outside_confirm", "要进的房在 .lubancode/worktrees 之外:{0}\n需先经你确认(y)才进。"},
     {"cmd.worktree.outside_prompt", "进这间园外的房?(会话目录、写权限与项目配置都会搬过去) [y/N]: "},
     {"cmd.worktree.verify_failed", "验明正身没过,拒绝进房:{0}"},
+    {"cmd.worktree.cleaned", "顺手清扫了 {0} 间隔离子代理的陈工作树(只清 agent- 前缀且有活已跳过的)。"},
 
     // ---- /config 诊断 ----
     {"config.header", "lubancode 最终生效的配置:"},
@@ -847,6 +848,9 @@ const Entry kZhCN[] = {
     {"cmd.resume.repaired", "(补了 {0} 条缺失的工具结果)"},
     {"cmd.resume.skipped", "(跳过 {0} 行解析不动的存档)"},
     {"cmd.resume.estimate", "上下文占用(按字符粗估): ~{0} tokens,首轮请求后以真实用量为准。"},
+    {"cmd.resume.worktree_gone", "会话原先住的 worktree 已不在:{0}。回落到当前目录继续,与房的绑定解除。"},
+    {"cmd.resume.worktree_refused", "拒绝进 {0}:验明正身没过({1})。留在当前目录;可检查该路径的 .git 指针后再试。"},
+    {"cmd.resume.worktree_back", "已搬回会话原来的 worktree:{0}"},
     {"cmd.resume.model_mismatch", "[提醒] 存档时用的 model 是 {0},当前是 {1},继续聊没问题,风格可能有差。"},
     {"cmd.resume.wire_mismatch", "[提醒] 存档时用的 wire 是 {0},当前是 {1}。"},
     {"cmd.resume.history.header", "恢复历史 · {0}"},
@@ -1442,6 +1446,7 @@ const Entry kEn[] = {
     {"cmd.worktree.outside_confirm", "The worktree is outside .lubancode/worktrees: {0}\nYour confirmation (y) is required before entering."},
     {"cmd.worktree.outside_prompt", "Enter this worktree outside the managed yard? (session cwd, write access and project config move with it) [y/N]: "},
     {"cmd.worktree.verify_failed", "Identity check failed; refusing to enter: {0}"},
+    {"cmd.worktree.cleaned", "Cleaned up {0} stale subagent worktrees (agent- prefix only; ones with pending work were skipped)."},
 
     // ---- /config diagnostics ----
     {"config.header", "Effective lubancode configuration:"},
@@ -1568,6 +1573,9 @@ const Entry kEn[] = {
     {"cmd.resume.menu_description", "{0} · {1} messages · {2}"},
     {"cmd.resume.menu_hint", "↑/↓ move · Enter restore · Esc cancel"},
     {"cmd.resume.cancelled", "Resume cancelled."},
+    {"cmd.resume.worktree_gone", "The worktree this session lived in is gone: {0}. Staying in the current directory; binding to the worktree cleared."},
+    {"cmd.resume.worktree_refused", "Refusing to enter {0}: identity check failed ({1}). Staying in the current directory; inspect its .git pointer and retry."},
+    {"cmd.resume.worktree_back", "Moved back into the session worktree: {0}"},
     {"cmd.resume.history.header", "Restored history · {0}"},
     {"cmd.resume.history.end", "── End of history; continue below ──"},
     {"cmd.resume.history.user", "You"},

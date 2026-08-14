@@ -33,6 +33,8 @@
 
 #include "api/backend.hpp"
 #include "api/types.hpp"
+#include "cli/worktree.hpp"
+#include "tools/isolation.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
 
@@ -171,6 +173,10 @@ public:
     // 行为跟从前完全一样。
     void SetPromptsDir(std::string prompts_dir) { prompts_dir_ = std::move(prompts_dir); }
 
+    // isolation=worktree 的房务 Git 调用可替身(测试注入假 runner);
+    // 不设走真 git。
+    void SetGitRunner(lubancode::cli::GitRunner runner) { git_runner_ = std::move(runner); }
+
     void SetSkillsSegment(std::string skills_segment) { skills_segment_ = std::move(skills_segment); }
     void SetProjectInstructions(std::string instructions) { project_instructions_ = std::move(instructions); }
     std::string name() const override;
@@ -185,15 +191,23 @@ private:
         std::atomic<bool> cancel{false};
     };
 
+    // isolation=worktree 的一站式准备:从 cwd_ 找仓库根、建房(agent- 前缀,
+    // fresh 基准)、上锁。失败给 Result 错误,成功返回房信息。
+    std::optional<lubancode::cli::AgentWorktree> SetupIsolationRoom(Result& error_out);
+    // 收工房务:解锁;干净删房,有活留房并返回给结果文本的附言。
+    static std::string FinishIsolationRoom(const lubancode::cli::AgentWorktree& room,
+                                           const lubancode::cli::GitRunner& runner);
+
     Result ExecuteForeground(const nlohmann::json& input, const std::string& agent_type,
-                             ToolRegistry& task_registry, int max_turns);
+                             ToolRegistry& task_registry, int max_turns, bool isolate);
     Result LaunchBackground(const nlohmann::json& input, const std::string& agent_type,
-                            ToolRegistry& task_registry, int max_turns);
+                            ToolRegistry& task_registry, int max_turns, bool isolate);
     Result RunTask(api::Backend& backend, ToolRegistry& task_registry, const std::string& prompt,
                    const std::string& agent_type, int max_turns, const Hooks* foreground_hooks,
                    const std::shared_ptr<TaskRecord>& background_task,
                    const DetachedAgentBackend* detached = nullptr,
-                   const std::string* prepared_system_prompt = nullptr);
+                   const std::string* prepared_system_prompt = nullptr,
+                   const IsolationScope* isolation_scope = nullptr);
     void TouchTasks() { task_revision_.fetch_add(1, std::memory_order_release); }
 
     api::Backend& backend_;
@@ -216,6 +230,7 @@ private:
     std::atomic<std::uint64_t> task_revision_{0};
     std::function<bool(const Tool&)> tool_filter_;            // tool_search:空 = 不过滤
     std::function<std::string()> deferred_index_provider_;    // tool_search:空 = 不注索引段
+    lubancode::cli::GitRunner git_runner_;                    // isolation 房务;空 = 真 git
 };
 
 }  // namespace lubancode::tools

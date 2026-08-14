@@ -374,8 +374,7 @@ TEST_CASE("WorktreeSession::EnterByPath: 马甲房(无登记)拒进") {
 }
 
 #ifdef _WIN32
-TEST_CASE("SafeRemoveTree: junction 只删链接,不追删指向的目录") {
-    const auto base = std::filesystem::temp_directory_path() /
+TEST_CASE("SafeRemoveTree: junction 只删链接,不追删指向的目录") {    const auto base = std::filesystem::temp_directory_path() /
                       ("lubancode_junction_" +
                        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     const std::filesystem::path room = base / "room";
@@ -403,3 +402,132 @@ TEST_CASE("SafeRemoveTree: junction 只删链接,不追删指向的目录") {
     std::filesystem::remove_all(base, ec);
 }
 #endif
+
+// ---------------------------------------------------------------------------
+// 子代理房务:CreateAgentWorktree / FinishAgentWorktree / CleanStaleAgentWorktrees
+// (真 git 临时仓库)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+platform::ProcessResult RunGitAt(const std::filesystem::path& root, std::vector<std::string> args) {
+    std::vector<std::string> argv = {"git", "-C", PathToUtf8(root)};
+    argv.insert(argv.end(), std::make_move_iterator(args.begin()), std::make_move_iterator(args.end()));
+    return platform::RunProcess(argv, 60000);
+}
+
+// 真 git 临时仓库(init + 一次提交),给 worktree add 一个能用的基准。
+struct RealGitRepo {
+    std::filesystem::path root;
+
+    RealGitRepo() {
+        const auto base = std::filesystem::temp_directory_path() /
+                          ("lubancode_room_" +
+                           std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        root = base / "repo";
+        std::filesystem::create_directories(root);
+        RunGitAt(root, {"init", "-q", "-b", "main"});
+        RunGitAt(root, {"config", "user.email", "test@example.com"});
+        RunGitAt(root, {"config", "user.name", "Test"});
+        std::ofstream(root / "seed.txt") << "seed\n";
+        RunGitAt(root, {"add", "."});
+        RunGitAt(root, {"commit", "-q", "-m", "init"});
+    }
+    ~RealGitRepo() {
+        std::error_code ec;
+        std::filesystem::remove_all(root.parent_path(), ec);
+    }
+
+    void MakeOld(const std::filesystem::path& path) const {
+        std::error_code ec;
+        const auto old = std::filesystem::file_time_type::clock::now() - std::chrono::hours(100);
+        std::filesystem::last_write_time(path, old, ec);
+    }
+};
+
+}  // namespace
+
+TEST_CASE("CreateAgentWorktree/FinishAgentWorktree: 建房上锁,收工干净删、有活留") {
+    RealGitRepo repo;
+
+    // 建房:agent- 前缀、上锁
+    const cli::AgentWorktree room = cli::CreateAgentWorktree(repo.root);
+    REQUIRE(room.ok);
+    CHECK(room.name.starts_with("agent-"));
+    CHECK(room.branch == "worktree/" + room.name);
+    CHECK(std::filesystem::exists(room.room_path / "seed.txt"));  // checkout 出来了
+    bool locked = false;
+    for (const auto& entry : cli::ListWorktrees(repo.root)) {
+        // git 输出的路径斜杠/大小写跟本地拼的未必逐字相同,按末级房名对。
+        if (PathToUtf8(entry.path.filename()) == room.name) {
+            locked = entry.locked;
+        }
+    }
+    CHECK(locked);
+
+    // 干净收工:房与分支都删
+    const cli::AgentWorktreeFinish clean_finish =
+        cli::FinishAgentWorktree(repo.root, room.room_path, room.branch);
+    CHECK(clean_finish.removed);
+    CHECK(clean_finish.note.empty());
+    CHECK_FALSE(std::filesystem::exists(room.room_path));
+    CHECK(RunGitAt(repo.root, {"branch", "--list", room.branch}).output.empty());
+
+    // 有活收工:解锁留房,note 带路径
+    const cli::AgentWorktree dirty = cli::CreateAgentWorktree(repo.root);
+    REQUIRE(dirty.ok);
+    std::ofstream(dirty.room_path / "change.txt") << "work\n";
+    const cli::AgentWorktreeFinish dirty_finish =
+        cli::FinishAgentWorktree(repo.root, dirty.room_path, dirty.branch);
+    CHECK_FALSE(dirty_finish.removed);
+    CHECK(dirty_finish.note.find(PathToUtf8(dirty.room_path)) != std::string::npos);
+    CHECK(dirty_finish.note.find(dirty.branch) != std::string::npos);
+    CHECK(std::filesystem::exists(dirty.room_path));
+    // 收尾:删分支留着没关系,把房删掉免得挡后面的测试
+    cli::FinishAgentWorktree(repo.root, dirty.room_path, dirty.branch);  // 二次:房还在但仍有活
+}
+
+TEST_CASE("CleanStaleAgentWorktrees: 只清 agent- 陈房,有活/新近/用户的房不碰") {
+    RealGitRepo repo;
+
+    // 陈而干净:删
+    const cli::AgentWorktree stale_clean = cli::CreateAgentWorktree(repo.root);
+    REQUIRE(stale_clean.ok);
+    repo.MakeOld(stale_clean.room_path);
+    // 干净房直接 Finish 掉分支? 不——清扫要自己处理分支,先手动解锁让清扫动手
+    REQUIRE(cli::UnlockWorktree(stale_clean.room_path));
+
+    // 陈而有活:留
+    const cli::AgentWorktree stale_dirty = cli::CreateAgentWorktree(repo.root);
+    REQUIRE(stale_dirty.ok);
+    std::ofstream(stale_dirty.room_path / "wip.txt") << "wip\n";
+    repo.MakeOld(stale_dirty.room_path);
+    REQUIRE(cli::UnlockWorktree(stale_dirty.room_path));
+
+    // 陈但锁着(被杀会话留下的锁):放锁后删
+    const cli::AgentWorktree stale_locked = cli::CreateAgentWorktree(repo.root);
+    REQUIRE(stale_locked.ok);
+    repo.MakeOld(stale_locked.room_path);
+
+    // 新近的 agent 房:不碰
+    const cli::AgentWorktree fresh = cli::CreateAgentWorktree(repo.root);
+    REQUIRE(fresh.ok);
+    REQUIRE(cli::UnlockWorktree(fresh.room_path));
+
+    // 用户手起的房(worktree/ 前缀但目录名不带 agent-):再陈也不碰
+    const std::filesystem::path user_room = repo.root / ".lubancode" / "worktrees" / "user-keep";
+    REQUIRE(RunGitAt(repo.root, {"worktree", "add", "-q", "-b", "worktree/user-keep",
+                                 PathToUtf8(user_room)})
+                .exit_code == 0);
+    repo.MakeOld(user_room);
+
+    const cli::StaleAgentWorktreeCleanup report = cli::CleanStaleAgentWorktrees(repo.root, std::chrono::hours(72));
+    CHECK(report.removed == 2);  // stale_clean + stale_locked
+    CHECK(report.kept_dirty == 1);
+    CHECK(report.kept_fresh >= 1);
+    CHECK_FALSE(std::filesystem::exists(stale_clean.room_path));
+    CHECK_FALSE(std::filesystem::exists(stale_locked.room_path));
+    CHECK(std::filesystem::exists(stale_dirty.room_path));  // 有活
+    CHECK(std::filesystem::exists(fresh.room_path));        // 新近
+    CHECK(std::filesystem::exists(user_room));              // 用户手起
+}

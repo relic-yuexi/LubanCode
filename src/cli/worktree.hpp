@@ -143,6 +143,51 @@ std::optional<std::string> SafeRemoveTree(const std::filesystem::path& path);
 // 主仓名下全部 worktree(porcelain 解析,含 locked 标记)。
 std::vector<WorktreeEntry> ListWorktrees(const std::filesystem::path& repository_root, GitRunner runner = {});
 
+// from 所在仓库的根(rev-parse --show-toplevel);不在仓库/查询失败给
+// nullopt。启动时的陈房清扫用。
+std::optional<std::filesystem::path> FindRepositoryRoot(const std::filesystem::path& from, GitRunner runner = {});
+
+// ---------------------------------------------------------------------------
+// 子代理的房(agent- 前缀,命名规约是清扫的边界:只清 agent- 的房,
+// 用户手起的房永不碰)
+// ---------------------------------------------------------------------------
+
+struct AgentWorktree {
+    bool ok = false;
+    std::string error;                    // !ok 时的原因
+    std::filesystem::path repo_root;      // 主 checkout 根
+    std::filesystem::path room_path;      // 房路径
+    std::string name;                     // 房名(agent-xxxx)
+    std::string branch;                   // worktree/agent-xxxx
+};
+
+// 给隔离子代理建房:名字 agent-<随机>,基准与主代理同规(fresh,失败回落
+// HEAD),建成后拷 .worktreeinclude 并上锁(reason 记来源,跑着的房不怕
+// 并发清扫误删)。房区固定在 .lubancode/worktrees 之下,无须用户确认。
+AgentWorktree CreateAgentWorktree(const std::filesystem::path& repository_root, GitRunner runner = {});
+
+// 收工房务:解锁;房干净 → 删房删分支(removed=true);有改动 → 留着,
+// note 给模型看的附言(房路径与分支,让主代理或用户后续去收)。
+struct AgentWorktreeFinish {
+    bool removed = false;
+    std::string note;
+};
+AgentWorktreeFinish FinishAgentWorktree(const std::filesystem::path& repository_root,
+                                        const std::filesystem::path& room_path, const std::string& branch,
+                                        GitRunner runner = {});
+
+// 陈房清扫:只扫 .lubancode/worktrees 下 agent- 前缀、修改时间早于
+// now - max_age 的房。锁着的先解锁(被杀会话留下的;用户手上的锁只在
+// 非 agent 房上,永不碰);有活(未提交改动,或分支上有别的本地分支
+// 没有的提交)的跳过;干净且无自有提交的删房删分支。
+struct StaleAgentWorktreeCleanup {
+    int removed = 0;
+    int kept_dirty = 0;   // 有活留下的
+    int kept_fresh = 0;   // 还没到岁数的
+};
+StaleAgentWorktreeCleanup CleanStaleAgentWorktrees(const std::filesystem::path& repository_root,
+                                                   std::chrono::hours max_age, GitRunner runner = {});
+
 // 一场交互会话只管理自己经手的一棵树(/worktree new 或模型 worktree
 // enter)。这样 /exit remove 不会误删用户原本已有的 worktree;keep/remove
 // 后都会回到进房前的目录。主代理 enter 走 chdir(整场会话一起搬,跟
