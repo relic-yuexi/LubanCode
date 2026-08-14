@@ -417,6 +417,18 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
         if (room.has_value()) {
             result.content += FinishIsolationRoom(*room, git_runner_);
         }
+        // 收尾前点一遍没送达的介入消息:任务都要结束了,排着的信没有下一
+        // 个轮次边界可等——记进结果文本,面板详情/结果回流都能看见,不无声
+        // 遗失。
+        std::size_t undelivered_messages = 0;
+        {
+            std::lock_guard<std::mutex> inbox_lock(task->inbox_mutex);
+            for (const auto& item : task->inbox) {
+                if (!item.delivered) {
+                    ++undelivered_messages;
+                }
+            }
+        }
         {
             std::lock_guard<std::mutex> lock(tasks_mutex_);
             task->snapshot.result = result.content;
@@ -425,6 +437,10 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
                 task->snapshot.state = AgentTaskState::Cancelled;
             } else {
                 task->snapshot.state = result.is_error ? AgentTaskState::Failed : AgentTaskState::Done;
+            }
+            if (undelivered_messages > 0) {
+                task->snapshot.result += "\n[" + std::to_string(undelivered_messages) +
+                                         " 条介入消息未送达(任务已收尾)]";
             }
         }
         TouchTasks();
@@ -474,6 +490,37 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         sub_loop.SetToolFilter([](const Tool& tool) { return ExploreAllows(tool); });
     } else if (detached == nullptr && tool_filter_) {
         sub_loop.SetToolFilter(tool_filter_);
+    }
+
+    // 定向介入收件口:后台任务自己的 inbox。AgentLoop 在"工具结果攒完、
+    // 下一次请求未发"的轮次边界来取(InjectIncomingMessage 的注入规矩),
+    // 工具跑着不打断、刚产出的 tool result 不丢。每只任务的 sub_loop 只接
+    // 自己这只 TaskRecord,与主会话的 peer 收件点(跨会话传话)是两码事,
+    // 文案也分开——这边明写"主会话用户介入"。
+    if (background_task != nullptr) {
+        sub_loop.SetInbox([background_task]() -> std::optional<api::Message> {
+            std::string text;
+            {
+                std::lock_guard<std::mutex> inbox_lock(background_task->inbox_mutex);
+                for (auto& item : background_task->inbox) {
+                    if (!item.delivered) {
+                        text = item.text;
+                        item.delivered = true;
+                        break;
+                    }
+                }
+            }
+            if (text.empty()) {
+                return std::nullopt;
+            }
+            api::Message message;
+            message.role = api::Role::User;
+            message.content.push_back(api::TextBlock{
+                "[主会话用户介入] 用户在查看这只子代理时补了话,内容如下。结合手头任务继续,"
+                "不必重新汇报已知内容:\n" +
+                text});
+            return message;
+        });
     }
 
     agent::Callbacks sub_callbacks;
@@ -583,6 +630,150 @@ std::vector<AgentTaskSnapshot> AgentTool::TaskSnapshots(std::size_t max_entries)
     for (std::size_t i = 0; i < tasks_.size(); ++i) {
         if (selected[i]) {
             out.push_back(tasks_[i]->snapshot);
+        }
+    }
+    return out;
+}
+
+std::vector<AgentTaskSummary> AgentTool::TaskSummaries() const {
+    std::vector<AgentTaskSummary> out;
+    std::lock_guard<std::mutex> lock(tasks_mutex_);
+    out.reserve(tasks_.size());
+    for (const auto& task : tasks_) {
+        AgentTaskSummary summary;
+        summary.id = task->snapshot.id;
+        summary.agent_type = task->snapshot.agent_type;
+        summary.prompt = task->snapshot.prompt;
+        summary.state = task->snapshot.state;
+        summary.input_tokens = task->snapshot.input_tokens;
+        summary.output_tokens = task->snapshot.output_tokens;
+        summary.start_time = task->snapshot.start_time;
+        summary.end_time = task->snapshot.end_time;
+        summary.tool_call_count = task->snapshot.tool_calls.size();
+        std::lock_guard<std::mutex> inbox_lock(task->inbox_mutex);
+        for (const auto& item : task->inbox) {
+            if (!item.delivered) {
+                ++summary.pending_message_count;
+            }
+        }
+        out.push_back(std::move(summary));
+    }
+    return out;
+}
+
+std::optional<AgentTaskSnapshot> AgentTool::TaskDetail(int task_id) const {
+    std::lock_guard<std::mutex> lock(tasks_mutex_);
+    for (const auto& task : tasks_) {
+        if (task->snapshot.id == task_id) {
+            return task->snapshot;
+        }
+    }
+    return std::nullopt;
+}
+
+std::vector<std::string> AgentTool::PendingTaskMessages(int task_id) const {
+    std::vector<std::string> out;
+    std::lock_guard<std::mutex> lock(tasks_mutex_);
+    for (const auto& task : tasks_) {
+        if (task->snapshot.id != task_id) {
+            continue;
+        }
+        std::lock_guard<std::mutex> inbox_lock(task->inbox_mutex);
+        for (const auto& item : task->inbox) {
+            if (!item.delivered) {
+                out.push_back(item.text);
+            }
+        }
+        break;
+    }
+    return out;
+}
+
+TaskMessageStatus AgentTool::SendTaskMessage(int task_id, const std::string& text) {
+    if (text.empty()) {
+        return TaskMessageStatus::NotFound;
+    }
+    std::lock_guard<std::mutex> lock(tasks_mutex_);
+    for (auto& task : tasks_) {
+        if (task->snapshot.id != task_id) {
+            continue;
+        }
+        // 终态判定与入队同在 tasks_mutex_ 里成对完成:任务线程收尾也在
+        // 这把锁下改状态,不存在"刚判完 Running、转脸就终态"的缝。
+        if (task->snapshot.state != AgentTaskState::Running) {
+            return TaskMessageStatus::Finished;
+        }
+        {
+            std::lock_guard<std::mutex> inbox_lock(task->inbox_mutex);
+            task->inbox.push_back(TaskRecord::InboxItem{text, false});
+        }
+        return TaskMessageStatus::Queued;
+    }
+    return TaskMessageStatus::NotFound;
+}
+
+bool AgentTool::CancelTask(int task_id) {
+    std::lock_guard<std::mutex> lock(tasks_mutex_);
+    for (auto& task : tasks_) {
+        if (task->snapshot.id == task_id && task->snapshot.state == AgentTaskState::Running) {
+            task->cancel.store(true, std::memory_order_release);
+            TouchTasks();
+            return true;
+        }
+    }
+    return false;
+}
+
+int AgentTool::CancelAllTasks() {
+    std::lock_guard<std::mutex> lock(tasks_mutex_);
+    int stopped = 0;
+    for (auto& task : tasks_) {
+        if (task->snapshot.state == AgentTaskState::Running) {
+            task->cancel.store(true, std::memory_order_release);
+            ++stopped;
+        }
+    }
+    if (stopped > 0) {
+        TouchTasks();
+    }
+    return stopped;
+}
+
+bool AgentTool::ClearFinishedTask(int task_id) {
+    std::lock_guard<std::mutex> lock(tasks_mutex_);
+    for (auto it = tasks_.begin(); it != tasks_.end(); ++it) {
+        if ((*it)->snapshot.id != task_id) {
+            continue;
+        }
+        if ((*it)->snapshot.state == AgentTaskState::Running) {
+            return false;  // 运行中不给清,得先停(x 在运行态发的是停止)
+        }
+        // 结果还没投递的主会话要不要知道?清行是用户显式动作,视为"我不
+        // 再关心这条";介入消息一并清掉,不留在台账里。
+        tasks_.erase(it);
+        TouchTasks();
+        return true;
+    }
+    return false;
+}
+
+std::vector<std::string> AgentTool::TakeUndeliveredInboxReport() {
+    std::vector<std::string> out;
+    std::lock_guard<std::mutex> lock(tasks_mutex_);
+    for (auto& task : tasks_) {
+        std::vector<std::string> pending;
+        {
+            std::lock_guard<std::mutex> inbox_lock(task->inbox_mutex);
+            for (auto& item : task->inbox) {
+                if (!item.delivered) {
+                    pending.push_back(std::move(item.text));
+                    item.delivered = true;  // 收场报告已出,不再重复报
+                }
+            }
+        }
+        for (auto& text : pending) {
+            out.push_back("[子代理 #" + std::to_string(task->snapshot.id) + " 有 1 条介入消息未送达: " +
+                          text + "]");
         }
     }
     return out;
