@@ -75,6 +75,7 @@ add_executable(lubancode_tests
   test_workflow_recorder.cpp
   test_skill_drafter.cpp
   test_backend_stack.cpp
+  test_tool_runtime.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_core doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)

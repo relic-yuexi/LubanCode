@@ -2930,53 +2930,35 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                            lubancode::config::Source::Default,
                        current_think, context_tracker, current_model_instructions);
 
-    // M8:mcp_servers 声明在 sub_registry/registry 之前——函数退出时按声明的
-    // 反序析构,sub_registry/registry(里头的 McpTool 持有 mcp::Client& 引用)
-    // 会先于 mcp_servers(真正拥有 Client/子进程)析构,不会有悬垂引用。
-    // 起服务器放在 PrintBanner 之后、第一次给提示符之前,"[mcp] xxx: N 个
-    // 工具已挂载" 这行紧跟着横幅打出来。
-    std::vector<McpServerRuntime> mcp_servers = StartMcpServers(config.mcp_servers, theme);
-
-    // M7:插件宿主声明在 sub_registry/registry 之前(析构反序,PluginTool
-    // 引用的 DLL 静态数据才不会先没),真正扫描挂载在 registry 建好之后。
-    lubancode::tools::PluginHost plugin_host;
-    std::vector<PluginMountInfo> plugin_mounted;
-    std::vector<std::string> plugin_warnings;
-    // LSP:lsp_manager 声明在两份 registry 之前(析构反序,LspTool 持有的
-    // Manager& 不会悬垂,理由同上面的 mcp_servers)。配置了 lsp 段才构造,
-    // 构造本身不起任何进程(懒启动,首次用到某语言才拉),析构时把还活着
-    // 的服务器按 shutdown/exit + 2s 兜底的规矩全关掉。
-    std::optional<lubancode::lsp::Manager> lsp_manager;
-    if (!config.lsp_servers.empty()) {
-        lsp_manager.emplace(config.lsp_servers, CurrentDirUtf8());
-    }
-
-    // 两份工具表:sub_registry 只有基础工具,喂给 agent 工具当"子代理能用
-    // 什么"(不含 agent 自己,防递归);registry 是主循环真正用的那份,
-    // 基础工具之外多注册了 agent 工具本身。两者都是这个函数的局部变量,
-    // sub_registry 声明在前、registry 在后,函数退出时按声明的反序析构,
-    // agent 工具持有的 sub_registry 引用不会悬垂。MCP 工具同样注册进两份
-    // (子代理也能用外部工具)。
-    lubancode::tools::ToolRegistry explore_registry = BuildExploreToolRegistry(config.search);
-    lubancode::tools::ToolRegistry sub_registry = BuildBaseToolRegistry(skills, config.search);
-    lubancode::tools::ToolRegistry registry = BuildBaseToolRegistry(skills, config.search);
-    RegisterMcpTools(mcp_servers, sub_registry);
-    RegisterMcpTools(mcp_servers, registry);
-    // lsp 工具:主表 + 子代理表都挂(语义查询对子代理同样有用),两份
-    // LspTool 实例共享同一个 Manager(背后同一批服务器进程,不会因为注册
-    // 两份就多起进程)。没配 lsp 段就完全不注册——不配置 = 不启用。
-    if (lsp_manager.has_value()) {
-        explore_registry.Register(std::make_unique<lubancode::tools::LspTool>(*lsp_manager));
-        sub_registry.Register(std::make_unique<lubancode::tools::LspTool>(*lsp_manager));
-        registry.Register(std::make_unique<lubancode::tools::LspTool>(*lsp_manager));
-    }
-    // default_max_turns 从 15 提到 40:子代理干的是真活(委托它翻找文件、
-    // 通读多份文件这类任务,实测一单能有 30~190 次工具调用),15 轮远远不够。
-    registry.Register(std::make_unique<lubancode::tools::AgentTool>(
-        wrapped_backend, sub_registry, CurrentDirUtf8(), config.model, /*default_max_turns=*/40, skills_segment));
-    auto* session_agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry.Find("agent"));
+    // 工具全栈:三表 + MCP/插件/LSP/agent/todo/ask_user/memory/tool_search
+    // 的装配全收进 ToolRuntime(引用寿命由成员声明顺序保住),Interactive
+    // 与单发共用一套;会话可变的钩子(detached factory、prompts、过滤)
+    // 在下面接着灌。
+    lubancode::app::ToolRuntime::Options runtime_options;
+    runtime_options.with_explore = true;
+    runtime_options.with_ask_user = spinner_enabled;
+    runtime_options.ask_user_handler = [&theme](const lubancode::tools::AskUserQuestion& question) {
+        return PromptAskUser(question, theme);
+    };
+    runtime_options.memory = project_memory;
+    lubancode::app::ToolRuntime tool_runtime(config, theme, wrapped_backend, skills, skills_segment,
+                                             CurrentDirUtf8(), std::move(runtime_options));
+    // 别名接住:后面千行装配引用的名字不变。
+    auto& registry = tool_runtime.main_registry();
+    auto& sub_registry = tool_runtime.sub_registry();
+    auto* session_agent_tool = tool_runtime.agent_tool();
+    const auto todo_state = tool_runtime.todo_state();
+    const auto loaded_tools = tool_runtime.loaded_tools();
+    auto& mcp_servers = tool_runtime.mcp_servers();
+    auto& lsp_manager = tool_runtime.lsp_manager();
+    auto& plugin_mounted = tool_runtime.plugin_mounted();
+    auto& plugin_warnings = tool_runtime.plugin_warnings();
+    const bool main_deferral = tool_runtime.main_deferral();
+    const bool sub_deferral = tool_runtime.sub_deferral();
+    const auto main_tool_filter = tool_runtime.main_tool_filter();
+    const auto sub_tool_filter = tool_runtime.sub_tool_filter();
+    const int tool_search_threshold = config.tool_search_threshold;
     if (session_agent_tool != nullptr) {
-        session_agent_tool->SetExploreRegistry(&explore_registry);
         // 每个后台任务各造一份 HTTP client 与基础工具表。取配置/模型/魂时
         // 正在主线程的 agent 工具调用里，拷贝完才起线程，不跨线程读这些
         // 会话可变字段。
@@ -2996,67 +2978,12 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         session_agent_tool->SetDetachedRegistryFactory([skills, search = config.search]() mutable {
             return std::make_unique<lubancode::tools::ToolRegistry>(BuildBaseToolRegistry(skills, search));
         });
-    }
-
-    // M11(0.10.0):todo_write 只挂主注册表(registry),绝不挂 sub_registry——
-    // 子代理是短命的一次性跑腿,不该有权限乱写主会话的待办清单。todo_state
-    // 这份 shared_ptr 同时交给 /todos 命令、RunTurn(转给 on_tool_done 渲染)。
-    auto todo_state = std::make_shared<lubancode::tools::TodoListState>();
-    registry.Register(std::make_unique<lubancode::tools::TodoWriteTool>(todo_state));
-    // ask_user 只挂主交互会话。子代理没有独立用户，单发/管道也没有可
-    // 安稳停下读一行的交互面，故不注册一枚注定会卡住的空工具。
-    if (spinner_enabled) {
-        registry.Register(std::make_unique<lubancode::tools::AskUserTool>(
-            [&theme](const lubancode::tools::AskUserQuestion& question) {
-                return PromptAskUser(question, theme);
-            }));
-    }
-    if (project_memory != nullptr && project_memory->generate_enabled()) {
-        registry.Register(std::make_unique<lubancode::memory::MemorySaveTool>(project_memory));
-    }
-
-    // M7:插件工具只挂主 registry(不挂 sub_registry,短命跑腿不用外挂),
-    // 挂载行紧跟 [mcp] 那几行打出来。
-    MountPlugins(plugin_host, registry, theme, plugin_mounted, plugin_warnings);
-
-    // -----------------------------------------------------------------------
-    // tool_search(延迟挂载):全部工具(MCP/插件/LSP/agent/todo)都注册完了
-    // 才数总数、定启停——阈值判定看的是"这一场会话工具表实际多大"。
-    // loaded 集合是会话级的(/clear 不清:工具挂载与对话历史无关),主会话
-    // 与子代理共享同一份(挂载一次两边可用)。主表/子表各自按各自的总数
-    // 判定,同一个阈值;启用的那张表才注册 tool_search 自身(注册前先数,
-    // tool_search 不算在阈值账里)。没启用(默认阈值 20,不挂一堆外挂
-    // 工具到不了)时:不注册 tool_search、不设过滤谓词、索引段恒空——
-    // 跟 0.16.0 现状完全一致。
-    // -----------------------------------------------------------------------
-    auto loaded_tools = std::make_shared<std::set<std::string>>();
-    const int tool_search_threshold = config.tool_search_threshold;
-    const bool main_deferral = lubancode::tools::DeferralEnabled(registry.All().size(), tool_search_threshold);
-    const bool sub_deferral = lubancode::tools::DeferralEnabled(sub_registry.All().size(), tool_search_threshold);
-    if (main_deferral) {
-        registry.Register(std::make_unique<lubancode::tools::ToolSearchTool>(registry, loaded_tools));
-    }
-    if (sub_deferral) {
-        sub_registry.Register(std::make_unique<lubancode::tools::ToolSearchTool>(sub_registry, loaded_tools));
-    }
-    const auto main_tool_filter = [loaded_tools, main_deferral, project_memory](
-                                      const lubancode::tools::Tool& tool) {
-        if (tool.name() == "memory_save") {
-            return project_memory != nullptr && project_memory->generate_enabled();
-        }
-        return !main_deferral || !tool.deferred() || loaded_tools->count(tool.name()) != 0;
-    };
-    const auto sub_tool_filter = [loaded_tools, sub_deferral](const lubancode::tools::Tool& tool) {
-        return !sub_deferral || !tool.deferred() || loaded_tools->count(tool.name()) != 0;
-    };
-    if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry.Find("agent"));
-        agent_tool != nullptr) {
         // 提示词运行时化:子代理系统提示同机制(features 模块用户文件优先)。
-        agent_tool->SetPromptsDir(prompts_dir);
-        agent_tool->SetProjectInstructions(project_instructions);
+        session_agent_tool->SetPromptsDir(prompts_dir);
+        session_agent_tool->SetProjectInstructions(project_instructions);
         if (sub_deferral) {
-            agent_tool->SetToolFilter(sub_tool_filter);
-            agent_tool->SetDeferredIndexProvider([&sub_registry, loaded_tools]() {
+            session_agent_tool->SetToolFilter(sub_tool_filter);
+            session_agent_tool->SetDeferredIndexProvider([&sub_registry, loaded_tools]() {
                 return lubancode::tools::BuildDeferredToolsIndexSegment(sub_registry, *loaded_tools);
             });
         }
@@ -4368,73 +4295,24 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     ThinkOverrideBackend think_backend(*backend, current_think, once_model, &once_catalog);
     SpinnerBackend wrapped_backend(think_backend, theme, spinner_enabled);
 
-    // M8:mcp_servers 声明在 sub_registry/registry 之前,理由同
-    // InteractiveLoop(析构反序,MCP 工具持有的 Client& 不会悬垂)。单发
-    // 模式没有横幅、没有 /mcp 命令,起服务器就在构建工具表之前干净利落地做。
-    std::vector<McpServerRuntime> mcp_servers = StartMcpServers(config.mcp_servers, theme);
-
-    // M7:插件宿主同样声明在 registry 之前(析构反序,理由见 MountPlugins
-    // 注释)。单发模式没有 /plugins 命令,mounted/warnings 只是占位。
-    lubancode::tools::PluginHost plugin_host;
-    std::vector<PluginMountInfo> plugin_mounted;
-    std::vector<std::string> plugin_warnings;
-    // LSP:声明在两份 registry 之前,理由同 InteractiveLoop(析构反序,
-    // LspTool 持有的 Manager& 不会悬垂)。单发模式没有 /lsp 命令可看,但
-    // 工具本身照样能用;AskOnce 返回时 Manager 析构,起过的服务器全关。
-    std::optional<lubancode::lsp::Manager> lsp_manager;
-    if (!config.lsp_servers.empty()) {
-        lsp_manager.emplace(config.lsp_servers, CurrentDirUtf8());
-    }
-
-    // 两份工具表,理由同 InteractiveLoop:sub_registry 喂给 agent 工具当
-    // "子代理能用什么"(不含 agent 自己,防递归),registry 是主循环真正
-    // 用的那份,基础工具之外多注册了 agent 工具本身。MCP 工具同样注册进
-    // 两份。
-    lubancode::tools::ToolRegistry sub_registry = BuildBaseToolRegistry(skills, config.search);
-    lubancode::tools::ToolRegistry registry = BuildBaseToolRegistry(skills, config.search);
-    RegisterMcpTools(mcp_servers, sub_registry);
-    RegisterMcpTools(mcp_servers, registry);
-    if (lsp_manager.has_value()) {
-        sub_registry.Register(std::make_unique<lubancode::tools::LspTool>(*lsp_manager));
-        registry.Register(std::make_unique<lubancode::tools::LspTool>(*lsp_manager));
-    }
-    // default_max_turns 从 15 提到 40:子代理干的是真活(委托它翻找文件、
-    // 通读多份文件这类任务,实测一单能有 30~190 次工具调用),15 轮远远不够。
-    registry.Register(std::make_unique<lubancode::tools::AgentTool>(
-        wrapped_backend, sub_registry, CurrentDirUtf8(), config.model, /*default_max_turns=*/40, skills_segment));
-    // M11(0.10.0):单发模式也挂 todo_write(只挂主 registry,不挂 sub_registry,
-    // 理由同 InteractiveLoop)——单发问答一样可能是"先列计划再分步做"这种
-    // 多步骤任务,没道理只有交互模式能用这个工具。没有 /todos 命令可看
-    // (单发模式压根没有下一轮循环),但 on_tool_done 该渲染的时候照样渲染。
-    auto todo_state = std::make_shared<lubancode::tools::TodoListState>();
-    registry.Register(std::make_unique<lubancode::tools::TodoWriteTool>(todo_state));
-    // M7:插件同样只挂主 registry,不挂 sub_registry。
-    MountPlugins(plugin_host, registry, theme, plugin_mounted, plugin_warnings);
-
-    // tool_search(延迟挂载):跟 InteractiveLoop 同一套接线,理由见那边的
-    // 大段注释。单发模式没有 /tools 命令可看,机制本身照常生效。
-    auto loaded_tools = std::make_shared<std::set<std::string>>();
-    const int tool_search_threshold = config.tool_search_threshold;
-    const bool main_deferral = lubancode::tools::DeferralEnabled(registry.All().size(), tool_search_threshold);
-    const bool sub_deferral = lubancode::tools::DeferralEnabled(sub_registry.All().size(), tool_search_threshold);
-    if (main_deferral) {
-        registry.Register(std::make_unique<lubancode::tools::ToolSearchTool>(registry, loaded_tools));
-    }
-    if (sub_deferral) {
-        sub_registry.Register(std::make_unique<lubancode::tools::ToolSearchTool>(sub_registry, loaded_tools));
-    }
-    std::function<bool(const lubancode::tools::Tool&)> tool_filter;
-    if (main_deferral || sub_deferral) {
-        tool_filter = [loaded_tools](const lubancode::tools::Tool& tool) {
-            return !tool.deferred() || loaded_tools->count(tool.name()) != 0;
-        };
-    }
-    if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry.Find("agent"));
-        agent_tool != nullptr) {
+    // 工具全栈与 InteractiveLoop 共用一套 ToolRuntime 装配(差异收在
+    // options 里:单发无 explore、无 ask_user、不挂 memory_save)。单发
+    // 没有横幅与 /mcp、/plugins、/lsp、/tools 命令,挂载行/机制照旧。
+    lubancode::app::ToolRuntime::Options runtime_options;
+    lubancode::app::ToolRuntime tool_runtime(config, theme, wrapped_backend, skills, skills_segment,
+                                             CurrentDirUtf8(), std::move(runtime_options));
+    auto& registry = tool_runtime.main_registry();
+    auto& sub_registry = tool_runtime.sub_registry();
+    const auto todo_state = tool_runtime.todo_state();
+    const auto loaded_tools = tool_runtime.loaded_tools();
+    const bool main_deferral = tool_runtime.main_deferral();
+    const bool sub_deferral = tool_runtime.sub_deferral();
+    const auto sub_tool_filter = tool_runtime.sub_tool_filter();
+    if (auto* agent_tool = tool_runtime.agent_tool(); agent_tool != nullptr) {
         agent_tool->SetPromptsDir(prompts_dir);  // 子代理系统提示同机制
         agent_tool->SetProjectInstructions(project_instructions);
         if (sub_deferral) {
-            agent_tool->SetToolFilter(tool_filter);
+            agent_tool->SetToolFilter(sub_tool_filter);
             agent_tool->SetDeferredIndexProvider([&sub_registry, loaded_tools]() {
                 return lubancode::tools::BuildDeferredToolsIndexSegment(sub_registry, *loaded_tools);
             });
@@ -4468,7 +4346,7 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         // max_turns 同上,改用 config.max_turns(默认 0=无上限)。
         /*max_tokens=*/4096, config.max_turns, config.max_context_chars);
     if (main_deferral) {
-        loop.SetToolFilter(tool_filter);
+        loop.SetToolFilter(tool_runtime.main_tool_filter());
     }
     if (project_memory != nullptr) {
         loop.SetTurnSystemSuffix(
