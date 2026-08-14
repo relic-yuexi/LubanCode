@@ -5,12 +5,16 @@
 
 #include <doctest/doctest.h>
 
+#include <atomic>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
 #include "cli/theme.hpp"
+#include "cli/tool_display.hpp"
 #include "cli/transcript.hpp"
 
 using lubancode::cli::AgentDoneSummary;
@@ -445,4 +449,148 @@ TEST_CASE("FormatTranscriptItems: Ctrl+O 详细档铺子工具全文,紧凑档�
     CHECK(expanded.find("read_file(a.txt)") != std::string::npos);
     CHECK(expanded.find("参数: {\"path\":\"a.txt\"}") != std::string::npos);
     CHECK(expanded.find("第一行") != std::string::npos);
+}
+
+// ---- 思考折叠块:Ctrl+O 就地展开(收定全文 + 进行中快照) --------------------
+
+TEST_CASE("CountUtf8Codepoints: ASCII/汉字/emoji 各按码点计") {
+    using lubancode::cli::CountUtf8Codepoints;
+    CHECK(CountUtf8Codepoints("") == 0);
+    CHECK(CountUtf8Codepoints("abc") == 3);
+    CHECK(CountUtf8Codepoints("汉字") == 2);
+    CHECK(CountUtf8Codepoints("a汉\xF0\x9F\x9A\x80") == 3);  // 🚀 算一个码点
+}
+
+TEST_CASE("FormatTranscriptItem 思考条目:紧凑档一行「思考 Xs」,正文不露") {
+    const auto theme = BuiltinTheme("plain");
+    TranscriptItem item = MakeItem(TranscriptStatus::Ok, TranscriptKind::Thinking);
+    item.tool_name = "thinking";
+    item.title = "思考 3.2s";
+    item.summary_lines.clear();
+    item.full_output = "先想第一步\n再想第二步";
+    const std::string out = FormatTranscriptItem(item, theme, 120);
+    CHECK(out.find("思考 3.2s\n") != std::string::npos);
+    CHECK(out.find("先想第一步") == std::string::npos);
+    CHECK(out.find("· ") == std::string::npos);  // 字数标注只在展开档出现
+}
+
+TEST_CASE("FormatTranscriptItem 思考条目展开(收定):标题带「· N 字」,正文全文铺,不限行") {
+    const auto theme = BuiltinTheme("plain");
+    TranscriptItem item = MakeItem(TranscriptStatus::Ok, TranscriptKind::Thinking);
+    item.tool_name = "thinking";
+    item.title = "思考 3.2s";
+    item.summary_lines.clear();
+    item.full_output = "line1\nline2";
+    const std::string out = FormatTranscriptItem(item, theme, 120, /*expanded=*/true);
+    CHECK(out.find("思考 3.2s · 11 字") != std::string::npos);  // 换行也算一个码点
+    CHECK(out.find("完整输出(2 行)") != std::string::npos);
+    CHECK(out.find("\n  line1\n") != std::string::npos);
+    CHECK(out.find("\n  line2\n") != std::string::npos);
+    CHECK(out.find("看全文") == std::string::npos);  // 收定后不截断,无需收口行
+}
+
+TEST_CASE("FormatTranscriptItem 思考条目展开(进行中,短):已到正文全铺,无收口行") {
+    const auto theme = BuiltinTheme("plain");
+    TranscriptItem item = MakeItem(TranscriptStatus::Running, TranscriptKind::Thinking);
+    item.tool_name = "thinking";
+    item.title = "思考中…";
+    item.summary_lines.clear();
+    item.full_output = "abc";
+    const std::string out = FormatTranscriptItem(item, theme, 120, /*expanded=*/true);
+    CHECK(out.find("思考中… · 3 字") != std::string::npos);
+    CHECK(out.find("\n  abc\n") != std::string::npos);
+    CHECK(out.find("看全文") == std::string::npos);
+}
+
+TEST_CASE("FormatTranscriptItem 思考条目展开(进行中,空):正文没到,占位行也不铺") {
+    const auto theme = BuiltinTheme("plain");
+    TranscriptItem item = MakeItem(TranscriptStatus::Running, TranscriptKind::Thinking);
+    item.tool_name = "thinking";
+    item.title = "思考中…";
+    item.summary_lines.clear();
+    const std::string out = FormatTranscriptItem(item, theme, 120, /*expanded=*/true);
+    CHECK(out.find("(无完整输出)") == std::string::npos);
+    CHECK(out.find("· ") == std::string::npos);
+}
+
+TEST_CASE("FormatTranscriptItem 思考条目展开(进行中,超长):截到一屏,补「共 N 行」收口") {
+    const auto theme = BuiltinTheme("plain");
+    TranscriptItem item = MakeItem(TranscriptStatus::Running, TranscriptKind::Thinking);
+    item.tool_name = "thinking";
+    item.title = "思考中…";
+    item.summary_lines.clear();
+    std::string body;
+    for (int i = 1; i <= 40; ++i) {
+        body += "L" + std::string(i < 10 ? "0" : "") + std::to_string(i) + "\n";
+    }
+    item.full_output = body;
+    const std::string out = FormatTranscriptItem(item, theme, 120, /*expanded=*/true);
+    CHECK(out.find("完整输出(40 行)") != std::string::npos);
+    CHECK(out.find("\n  L01\n") != std::string::npos);
+    CHECK(out.find("\n  L30\n") != std::string::npos);  // 帽是 30 行
+    CHECK(out.find("L31") == std::string::npos);        // 第 31 行起不铺
+    CHECK(out.find("共 40 行,思考结束后 Ctrl+O 看全文") != std::string::npos);
+    // 同一条目收定后再展开:全文铺,没有帽。
+    item.status = TranscriptStatus::Ok;
+    item.title = "思考 9.9s";
+    const std::string done = FormatTranscriptItem(item, theme, 120, /*expanded=*/true);
+    CHECK(done.find("\n  L31\n") != std::string::npos);
+    CHECK(done.find("\n  L40\n") != std::string::npos);
+    CHECK(done.find("看全文") == std::string::npos);
+}
+
+// ---- ToolDisplay 思考快照通道:进行中 Ctrl+O 能看到已到正文 ------------------
+
+TEST_CASE("ToolDisplay 思考进行中:已到正文走 transcript_snapshot_ 通道,Ctrl+O 文本可见") {
+    std::vector<TranscriptItem> transcript;
+    const auto theme = BuiltinTheme("plain");
+    lubancode::cli::ToolDisplay display(transcript, theme, /*console=*/false,
+                                         /*todo=*/nullptr, /*cancel=*/nullptr);
+    display.OnThinkingDelta("思路第一段\n");
+    display.OnThinkingDelta("思路第二段\n");
+    REQUIRE(display.HasActiveThinking());
+    std::string live;
+    {
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        live = display.FormatSnapshotForToggleLocked(/*expanded=*/true);
+    }
+    CHECK(live.find("思路第一段") != std::string::npos);
+    CHECK(live.find("思路第二段") != std::string::npos);
+
+    // 收定:标题换「思考 Xs」,快照带全文;紧凑档一行,正文不露。
+    display.OnThinkingDone();
+    std::string done_expanded;
+    std::string done_compact;
+    {
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        done_expanded = display.FormatSnapshotForToggleLocked(/*expanded=*/true);
+        done_compact = display.FormatSnapshotForToggleLocked(/*expanded=*/false);
+    }
+    CHECK(done_expanded.find("思考 ") != std::string::npos);
+    CHECK(done_expanded.find("思路第二段") != std::string::npos);
+    CHECK(done_compact.find("思路第二段") == std::string::npos);
+}
+
+TEST_CASE("ToolDisplay 思考快照:并发收 delta 与读快照,锁规约下不崩不串") {
+    std::vector<TranscriptItem> transcript;
+    const auto theme = BuiltinTheme("plain");
+    lubancode::cli::ToolDisplay display(transcript, theme, /*console=*/false,
+                                         /*todo=*/nullptr, /*cancel=*/nullptr);
+    display.OnThinkingDelta("起头\n");  // 条目在主线程建好,后台只追加
+    std::atomic<bool> stop{false};
+    std::thread writer([&] {
+        while (!stop.load()) {
+            display.OnThinkingDelta("流水行\n");
+        }
+    });
+    for (int i = 0; i < 200; ++i) {
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        const std::string out = display.FormatSnapshotForToggleLocked(/*expanded=*/true);
+        CHECK(!out.empty());
+    }
+    stop.store(true);
+    writer.join();
+    CHECK(display.thinking_buffer.empty() == false);  // 攒着的正文还在
+    display.OnThinkingDone();
+    CHECK(display.HasActiveThinking() == false);
 }

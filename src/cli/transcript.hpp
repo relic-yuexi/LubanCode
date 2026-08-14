@@ -42,6 +42,11 @@ enum class TranscriptKind { Tool, SubTool, Thinking };
 // 超大输出把会话内存吃穿。
 inline constexpr std::size_t kFullOutputCapBytes = 64 * 1024;
 
+// 思考进行中 Ctrl+O 展开的行数上限(约一屏)。思考收定后照工具条目的
+// 规矩全文铺,不设这个帽——帽只管"边流边看"的快门,免得一次展开把
+// 滚动历史刷飞。
+inline constexpr int kThinkingStreamExpandedMaxLines = 30;
+
 struct TranscriptItem {
     int id = 0;
     TranscriptKind kind = TranscriptKind::Tool;
@@ -68,6 +73,11 @@ struct TranscriptItem {
 //     重打走 TranscriptPainter 之外的裸打印也不许物理折行,免得铺屏乱套);
 //     width <= 0 不截(Ctrl+E 聚焦查看给 0,全文如实铺,终端自然折行/滚动)。
 //     夹 ANSI 的行照旧不截。
+//     思考条目(Thinking)两处特例:标题追加 "· N 字"(full_output 的
+//     码点数,紧凑档不加,保持一行「思考 Xs」);进行中(Running)的思考
+//     只铺前 kThinkingStreamExpandedMaxLines 行、末尾补一行「共 N 行,
+//     结束后 Ctrl+O 看全文」收口——正文一个字没到时连占位行也不铺。
+//     收定(非 Running)的思考跟工具一样全文铺,不限行。
 //   focused —— 焦点条目:首行行首加 "► " 醒目标记(占两列,宽度记账让位)。
 std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme, int width,
                                   bool expanded = false, bool focused = false);
@@ -136,5 +146,8 @@ std::string TruncateUtf8Bytes(const std::string& text, std::size_t max_bytes);
 
 // UTF-8 按码点截断,超长加 "..."(agent 任务摘要"前 40 字"用)。
 std::string TruncateUtf8Codepoints(const std::string& text, std::size_t max_codepoints);
+
+// 数一段 UTF-8 文本有几个码点(思考条目展开档标题的「· N 字」用)。
+int CountUtf8Codepoints(const std::string& text);
 
 }  // namespace lubancode::cli

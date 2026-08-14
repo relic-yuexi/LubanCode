@@ -563,6 +563,8 @@ const Entry kZhCN[] = {
     {"transcript.todo_count", "{0} 项"},
     {"transcript.thinking_running", "思考中…"},
     {"transcript.thinking_done", "思考 {0}"},
+    {"transcript.thinking_chars", " · {0} 字"},
+    {"transcript.thinking_stream_more", "……共 {0} 行,思考结束后 Ctrl+O 看全文"},
     {"todo.empty", "没有待办。"},
 
     // ---- 统计行 ----
@@ -1528,6 +1530,8 @@ const Entry kEn[] = {
     {"transcript.todo_count", "{0} items"},
     {"transcript.thinking_running", "Thinking…"},
     {"transcript.thinking_done", "Thought {0}"},
+    {"transcript.thinking_chars", " · {0} chars"},
+    {"transcript.thinking_stream_more", "… {0} lines so far — press Ctrl+O again after thinking finishes for the full text"},
     {"todo.empty", "No todos."},
 
     // ---- stats line ----
