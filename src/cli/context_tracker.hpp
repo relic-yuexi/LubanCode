@@ -33,6 +33,20 @@ public:
     // cache_creation_tokens + output_tokens),不是累加——理由见文件头注释。
     void Update(const api::Usage& usage);
 
+    // 回合内 on_usage 的统一入口:usage 带回有效实测(四项 token 不全为
+    // 零)就按 Update 覆盖占用、清掉旧值标记;四项全零(provider 没在流末
+    // 给 usage——现有 Usage 的全零默认值分不出"真实为零"与"字段缺失",
+    // 而真实请求四项不可能全为零,按"没给"处理)时不清零、不覆盖,只把
+    // 现有数字标成旧值。状态栏/状态行据 usage_stale() 带 ~ 提醒,别让人把
+    // 上一次的实测当成这一次的新数;ESC/HTTP 错误路径压根不会走到
+    // on_usage,自然也不会把旧数伪装成本次新值。
+    void ApplyUsage(const api::Usage& usage);
+
+    // 最近一次"请求结束"是否没有带回实测 usage(旧值标记)。一次实测都没
+    // 发生过(刚启动,current_tokens 还是 0)时为 false——那时也没有数字
+    // 可标旧。/context 与常驻状态行读同一只 tracker,两处口径一致。
+    bool usage_stale() const { return usage_stale_; }
+
     std::size_t current_tokens() const { return current_tokens_; }
     std::size_t window_tokens() const { return window_tokens_; }
 
@@ -55,6 +69,7 @@ private:
     std::size_t current_tokens_ = 0;
     std::size_t window_tokens_;
     std::int64_t last_cache_read_tokens_ = 0;
+    bool usage_stale_ = false;
 };
 
 }  // namespace lubancode::cli

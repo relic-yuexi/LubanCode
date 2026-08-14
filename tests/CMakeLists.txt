@@ -76,6 +76,11 @@ add_executable(lubancode_tests
   test_skill_drafter.cpp
   test_backend_stack.cpp
   test_tool_runtime.cpp
+  test_status_refresh.cpp
+  # 回归 BuildCallbacks::on_usage 接线(状态行局部发布)要走到终端层的
+  # 状态数据源,console_input.cpp 平时只编进主程序,这里给测试目标单编一份
+  # (不进 lubancode_core,免得 doctest 进程链进真控制台读取路径)。
+  ${CMAKE_SOURCE_DIR}/src/cli/console_input.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_core doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)

@@ -566,15 +566,28 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         usage_stats.request_count += 1;
         // ContextTracker 只认"最近一次请求"的真实用量,整个覆盖,不跟着
         // usage_stats 一起累加——语义区别见 cli/context_tracker.hpp 文件头。
-        context_tracker.Update(usage);
+        // ApplyUsage 兼管"provider 没回 usage"(四项全零)的语义:不清零、
+        // 只把现有数字标成旧值;ESC/HTTP 错误路径压根走不到 on_usage,不会
+        // 把旧数伪装成本次新值。
+        context_tracker.ApplyUsage(usage);
+        // usage 一到就把 context/tokens 两段发布给状态行数据源——只改数据
+        // 不落笔(锁与重画事务在 cli::UpdateStatusLineContext 里),回合内
+        // 状态栏跟着前进,不必等整轮收口回外层循环重建快照;外层重建与这里
+        // 读的是同一只 tracker,同一笔数,不存在先新后旧。子代理的 usage 走
+        // agent_tool 那份钩子(见下),不进这里、不碰 tracker——主 context
+        // 不被独立子代理的上下文虚抬。
+        lubancode::cli::UpdateStatusLineContext(
+            context_tracker.UsagePercent(), static_cast<std::int64_t>(context_tracker.current_tokens()),
+            static_cast<std::int64_t>(context_tracker.window_tokens()), !context_tracker.usage_stale());
     };
 
     // agent 工具(注册了的话)需要这一轮现算好的转发逻辑:确认回调直接
     // 转发父级那份(三档确认模式照管子代理);usage 累进 usage_stats(统计
     // 行的请求次数、输入输出 token 都要算上子代理那几次请求)但不动
-    // context_tracker——子代理是完全独立的上下文,它的用量跟"主对话历史
-    // 占用多大"是两回事,冲进去反而会把 /context 的数字带偏成子代理那次
-    // 请求的大小,而不是主对话真实占用。
+    // context_tracker、也不发布状态行——子代理是完全独立的上下文,它的
+    // 用量跟"主对话历史占用多大"是两回事,冲进去反而会把 /context 的数字
+    // 带偏成子代理那次请求的大小,而不是主对话真实占用;子代理结束后主
+    // 模型带着它的结论发下一次请求,按那次的 usage 再更新。
     if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry.Find("agent"));
         agent_tool != nullptr) {
         lubancode::tools::AgentTool::Hooks hooks;

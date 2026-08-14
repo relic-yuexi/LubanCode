@@ -1520,6 +1520,10 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         status_data.context_percent = context_tracker.UsagePercent();
         status_data.used_tokens = static_cast<long long>(context_tracker.current_tokens());
         status_data.window_tokens = static_cast<long long>(context_tracker.window_tokens());
+        // 旧值标记同样出自 tracker:回合内 on_usage 局部发布的快照与这里整份
+        // 重建读同一只 ContextTracker,数字与 ~ 标记完全一致,收口后的第一只
+        // composer 不会先新后旧。
+        status_data.context_stale = context_tracker.usage_stale();
         // REC 标记:录制中恒挂状态行第一段(见 StatusPanelData::rec)。
         status_data.rec = lubancode::cli::RecorderStatusMarker(recorder);
         lubancode::cli::SetStatusLineData(status_data, config.status_panel.items,

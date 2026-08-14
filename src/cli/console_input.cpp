@@ -171,9 +171,12 @@ std::vector<std::string> FormatAgentPanel(const std::vector<AgentPanelEntry>& ag
     return lines;
 }
 
-// 0.17.0:常驻状态行数据。main.cpp 每轮
-// 更新,ReadLineKeyByKey 每帧重画状态行时读——都在主线程上,不用加锁
-// (监听线程从不碰状态行)。
+// 0.17.0:常驻状态行数据。InteractiveLoop 每圈整份重建(SetStatusLineData,
+// 主线程,圈边界没有别的线程碰它,不用加锁);回合内 on_usage 局部更新
+// (UpdateStatusLineContext,自己拿 StdoutWriteMutex——流式期间 footer 由
+// ticker/监听线程在同一把锁内重画读这份表)。BuildStatusLine 的读取:空闲
+// composer 路径只在主线程(此时 worker 线程都已收掉);footer 路径在
+// StdoutWriteMutex 内,与局部更新天然互斥。
 struct StatusLineData {
     StatusPanelData values;
     std::vector<std::string> items{
@@ -1116,6 +1119,21 @@ void SetStatusLineData(const StatusPanelData& values, const std::vector<std::str
     data.separator = separator;
 }
 
+void UpdateStatusLineContext(int context_percent, std::int64_t used_tokens, std::int64_t window_tokens,
+                             bool measured) {
+    // 见 console_input.hpp 的注释:只改数据、不落笔,footer 的重画事务在
+    // 安全时机(下一笔正文/ticker 一拍/挂起恢复)取新值。锁跟 footer 重画
+    // 读的是同一把,发布与重画互不越界。
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    StatusLineData& data = StatusDataSlot();
+    data.values = WithContextUpdate(data.values, context_percent, used_tokens, window_tokens, measured);
+}
+
+StatusPanelData SnapshotStatusLineValues() {
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    return StatusDataSlot().values;
+}
+
 std::optional<int> DetectConsoleWidth() {
     return platform::ConsoleWidth();
 }
@@ -1622,6 +1640,30 @@ void TurnInputListener::ThreadMain() {
                 }
                 RedrawStreamFooterLocked();
             }
+            continue;
+        }
+        if (key->kind == PK::ShiftTab) {
+            // 流式期间 Shift+Tab 切确认档——跟空闲路(ReadLineKeyByKey ->
+            // LineEditorCore::HandleKey)同一套语义:同一枚 SharedEditor 状态、
+            // 同一个 NextConfirmMode 纯函数,不抄第二份档序。档位来源也只有
+            // 这一处:RedrawStreamFooterLocked 画状态行时现查
+            // SharedEditor().confirm_mode(),切完下一帧自然带出新档,不用另
+            // 记账。改档拿 ConsoleReadMutex(try_lock):前台真在读一行
+            // (工具确认/ask_user)时说明那条路自己会处理按键,这里让路、
+            // 不抢。重画走 stdout 锁:footer 挂起期间(确认菜单里)自动只记
+            // 不画,退场第一帧带出;连切只原地换状态行,不铺提示行残骸
+            // (对齐空闲路 M11 的取舍)。Tab 不跟着做:流式输入行不引入补全
+            // 交互,维持不理会。
+            {
+                std::unique_lock<std::mutex> mode_lock(ConsoleReadMutex(), std::try_to_lock);
+                if (!mode_lock.owns_lock()) {
+                    continue;
+                }
+                LineEditorCore& editor = SharedEditor();
+                editor.set_confirm_mode(NextConfirmMode(editor.confirm_mode()));
+            }
+            std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+            RedrawStreamFooterLocked();
             continue;
         }
         if (key->kind == PK::Enter || key->kind == PK::NewLine) {

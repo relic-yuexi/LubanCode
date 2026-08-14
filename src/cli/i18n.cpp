@@ -699,6 +699,8 @@ const Entry kZhCN[] = {
     {"cmd.context.bd.history_derived", "(=实测总量−系统−工具)"},
     {"cmd.context.bd.note.measured", "(总量为上一轮实测 token;系统提示/工具为字符估,历史为实测总量反推)"},
     {"cmd.context.bd.note.est", "(尚无实测,启动估算:token 为字符数/3 粗估,实际以模型返回为准)"},
+    {"cmd.context.note.semantics", "(context = 主会话最近一次请求的占用,不是累计花销,不含独立子代理的 token)"},
+    {"cmd.context.note.stale", "(最近一次请求未返回 usage,以上为再上一次的实测值;状态栏同款数字带 ~ 前缀)"},
     {"cmd.compact.empty", "当前没有对话历史,不用压缩。"},
     {"cmd.compact.failed", "压缩失败: {0}"},
     {"cmd.compact.result", "压缩前 ~{0} tokens → 压缩后 ~{1} tokens"},
@@ -1636,6 +1638,15 @@ const Entry kEn[] = {
     {"cmd.provider.extra_body_not_object", "extra_body must be a JSON object (key-value pairs in braces), not "
                                              "some other type."},
     {"cmd.provider.extra_header_name_missing", "extra_header needs a header name, not just a value."},
+
+    // cmd.context.* 大族仍按下面的 P1 清单回退 zh-CN,这两个口径说明键随
+    // "context 状态栏回合内刷新"一起先补上英文,中英成对。
+    {"cmd.context.note.semantics",
+     "(context = usage of the most recent main-session request; not cumulative spend, sub-agent tokens "
+     "not included)"},
+    {"cmd.context.note.stale",
+     "(the most recent request returned no usage; figures above are from the last measured request. The "
+     "status bar shows the same numbers with a ~ prefix)"},
 
     // TODO(P1):以下 zh-CN 键暂缺英文翻译,tr 回退 zh-CN——诚实回退,不机翻凑数:
     //   mcp.* / plugin.* / tool_search.* / catalog.* / cmd.tools.* / cmd.plugins.* /
