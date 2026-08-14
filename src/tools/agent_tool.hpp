@@ -21,6 +21,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -63,6 +64,29 @@ struct AgentTaskSnapshot {
     std::string live_output;
     std::string result;
     bool delivered = false;
+};
+
+// 轻量列表条目(0.28.x 面板全量化):列表每 100ms 刷新一次,不再复制
+// tool_calls/live_output 这些大块——面板列表行只要这几个字段;详情(完整
+// 任务说明、工具流水、介入消息)另走 TaskDetail(task_id) 按需取。
+struct AgentTaskSummary {
+    int id = 0;
+    std::string agent_type;
+    std::string prompt;
+    AgentTaskState state = AgentTaskState::Running;
+    std::int64_t input_tokens = 0;
+    std::int64_t output_tokens = 0;
+    std::chrono::steady_clock::time_point start_time{};
+    std::chrono::steady_clock::time_point end_time{};
+    std::size_t tool_call_count = 0;
+    std::size_t pending_message_count = 0;  // 已排队未送达的介入消息数
+};
+
+// SendTaskMessage 的收信结果。
+enum class TaskMessageStatus {
+    Queued,    // 已排进该任务的 inbox,轮次边界注入
+    NotFound,  // 没有这个任务号(已被清理/从未存在)
+    Finished,  // 任务已进终态,明确拒收——绝不改投 main
 };
 
 // 后台子代理不能借主回合那条 Backend：主回合会重画 spinner，切 provider
@@ -148,6 +172,34 @@ public:
     std::string DrainCompletionNotices();
     bool HasRunningTasks() const;
 
+    // ---- 0.28.x 面板全量 + 定向介入 ----
+
+    // 轻量全量列表(运行中、完成、失败、取消都在,不截 8 只)。面板 provider
+    // 每 100ms 拉这个;开销只有 id/类型/短述/计数,不复制工具流水。
+    std::vector<AgentTaskSummary> TaskSummaries() const;
+    // 某只任务的详情快照(查看态按需取):完整 prompt、全部工具调用流水、
+    // live_output/result。task_id 认不出返回 nullopt。
+    std::optional<AgentTaskSnapshot> TaskDetail(int task_id) const;
+    // 某只任务已排队未送达的介入消息原文(详情展示/测试用)。
+    std::vector<std::string> PendingTaskMessages(int task_id) const;
+
+    // 定向介入:把用户在查看态提交的话排进该任务自己的 inbox,在"当前
+    // 工具调用收尾、下一次模型请求发出之前"注进那只子代理的 history——
+    // 不经 main history,不串到别只代理。终态明确拒收(不改投 main)。
+    TaskMessageStatus SendTaskMessage(int task_id, const std::string& text);
+
+    // 正式取消接口(面板 x / Ctrl+X Ctrl+K 接这里):只发停止信号,等任务
+    // 线程报出终态,快照里的灯才会变——不从面板侧抹行。
+    bool CancelTask(int task_id);
+    // 停全部运行中任务,返回发了停止信号的任务数。
+    int CancelAllTasks();
+    // 把一条终态任务从面板/台账清掉(顺带清它的介入消息)。运行中不给清。
+    bool ClearFinishedTask(int task_id);
+
+    // 会话收场(/clear、退出)用:把所有还没送达的介入消息按任务列成人话
+    // 报告并清掉——"不能无声遗失"的最低限;调用方负责打给人看。
+    std::vector<std::string> TakeUndeliveredInboxReport();
+
     // 有没有"已经进终态、结果还没投递给主会话"的后台任务。面板轮询靠
     // TaskRevision 画状态,主循环靠这个知道"该把结果送回主代理了"——
     // DrainCompletionNotices 投递完之后这里就翻回 false。
@@ -187,8 +239,18 @@ public:
 
 private:
     struct TaskRecord {
+        // 定向介入的收件口。推(SendTaskMessage,主线程)与取(子代理线程的
+        // inbox 轮询)都拿 inbox_mutex;终态判定+投递在 tasks_mutex_ 内成对
+        // 完成,任务收尾后不可能再排进新信。delivered 标记:轮次边界取走的
+        // 那条不再重发;未送达的留给详情展示与收场报告。
+        struct InboxItem {
+            std::string text;
+            bool delivered = false;
+        };
         AgentTaskSnapshot snapshot;
         std::atomic<bool> cancel{false};
+        mutable std::mutex inbox_mutex;
+        std::deque<InboxItem> inbox;
     };
 
     // isolation=worktree 的一站式准备:从 cwd_ 找仓库根、建房(agent- 前缀,

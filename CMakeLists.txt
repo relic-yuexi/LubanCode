@@ -309,6 +309,7 @@ add_library(lubancode_core STATIC
   src/cli/todo_render.cpp
   src/cli/transcript.cpp
   src/cli/agent_status.cpp
+  src/cli/agent_panel.cpp
   src/cli/markdown.cpp
   src/cli/latex_math.cpp
   src/cli/diff.cpp

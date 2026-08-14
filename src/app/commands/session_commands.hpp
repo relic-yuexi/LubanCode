@@ -114,6 +114,9 @@ struct SessionCommandState {
     std::function<void()> on_session_restarted;  // /clear 善后(project memory 源)
     std::function<void(const std::string&)> on_title_changed;  // peer 名册改名,可空
     std::function<void()> sync_worktree_directory;  // resume 搬房后的善后
+    // /clear 的子代理清场(0.28.x):停掉全部后台任务、把未送达的介入消息
+    // 报给人看——面板规格"清场不能无声遗失"的一条。可空(单测不接)。
+    std::function<void()> on_agents_cleanup;
     lubancode::cli::WorktreeSession* worktree_session = nullptr;  // 可空
     const std::string& sessions_dir;
     const std::string& wire_str;

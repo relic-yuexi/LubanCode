@@ -67,8 +67,8 @@ TEST_CASE("/title 状态账:建档前挂起,建档后补写,再设当场落事�
     std::vector<lubancode::agent::PeerEnvelope> held;
 
     SessionCommandState state{[](bool) {}, loop, store,  persisted, meta, title, title_pending,
-                               broken,       start_ts, nullptr, nullptr, nullptr, &worktree,
-                               sessions_dir, wire,     model};
+                               broken,       start_ts, nullptr, nullptr, nullptr, nullptr,
+                               &worktree,    sessions_dir, wire, model};
     const lubancode::cli::Theme theme;
 
     // 建档前:/title 名字 只挂起,不写文件。
@@ -134,6 +134,7 @@ TEST_CASE("/clear 状态账:重建不带历史、存档翻篇、标题清空") {
         broken,
         start_ts,
         [&] { restarted = true; },
+        nullptr,
         nullptr,
         nullptr,
         &worktree,
