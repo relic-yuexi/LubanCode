@@ -6,6 +6,8 @@
 #include <sstream>
 #include <system_error>
 
+#include "platform/text_encoding.hpp"  // IsValidUtf8:文件编码的明规矩,见 execute 尾部
+
 namespace lubancode::tools {
 
 namespace {
@@ -29,7 +31,9 @@ std::string ReadFileTool::name() const {
 std::string ReadFileTool::description() const {
     return "读取文件内容,每行前面带上行号(类似 cat -n)。参数 offset/limit 可以只读文件的一部分;"
            "limit 省略时默认最多读 2000 行,单次输出至多约 1MB,超出会截断并标注,可以用 offset "
-           "从截断处继续翻页。路径可以是相对路径,也可以是绝对路径。";
+           "从截断处继续翻页。路径可以是相对路径,也可以是绝对路径。只收 UTF-8 文本(带不带 BOM "
+           "都行,BOM 不会混进正文);二进制文件或不是合法 UTF-8 的文件(比如 GBK 编码)会明确报错,"
+           "请先转存成 UTF-8 再读。";
 }
 
 nlohmann::json ReadFileTool::input_schema() const {
@@ -114,17 +118,44 @@ Tool::Result ReadFileTool::execute(const nlohmann::json& input) {
     long long emitted = 0;
     long long last_emitted_line = 0;
     bool truncated_by_bytes = false;
+    bool first_line = true;
+    // 编码三查,查的都是"真要进输出"的行(offset/limit 窗口之外的坏字节
+    // 不关本工具的事):
+    //   has_nul      —— 输出里夹了 NUL 字节,按二进制拒绝;
+    //   bad_utf8     —— 有行解不成合法 UTF-8(GBK、残缺多字节序列都会撞上);
+    //   first_bad_line —— 第一处坏字节在第几行,报错指个准地方。
+    // 合法 UTF-8 的多字节字符不会跨行(\n 是 ASCII,当不了续字节),逐行
+    // 校验和整段校验等价,还顺手把定位省了。
+    bool has_nul = false;
+    bool bad_utf8 = false;
+    long long first_bad_line = 0;
     std::size_t out_bytes = 0;
     while (std::getline(file, line)) {
         ++line_no;
         if (!line.empty() && line.back() == '\r') {
             line.pop_back();  // Windows 换行(\r\n)留下的尾巴
         }
+        if (first_line) {
+            first_line = false;
+            // UTF-8 BOM:剥掉,不混进正文(行号前缀后面顶个 BOM,首行内容
+            // 就被顶歪了)。
+            if (line.size() >= 3 && static_cast<unsigned char>(line[0]) == 0xEF &&
+                static_cast<unsigned char>(line[1]) == 0xBB && static_cast<unsigned char>(line[2]) == 0xBF) {
+                line.erase(0, 3);
+            }
+        }
         if (line_no < offset) {
             continue;
         }
         if (emitted >= limit) {
             break;
+        }
+        if (!has_nul && line.find('\0') != std::string::npos) {
+            has_nul = true;
+        }
+        if (!bad_utf8 && !platform::IsValidUtf8(line)) {
+            bad_utf8 = true;
+            first_bad_line = line_no;
         }
         out << std::setw(6) << line_no << "\t" << line << "\n";
         out_bytes += 7 + line.size() + 1;
@@ -141,6 +172,22 @@ Tool::Result ReadFileTool::execute(const nlohmann::json& input) {
             return {"(空文件)", false};
         }
         return {"(offset 超过了文件总行数 " + std::to_string(line_no) + ")", false};
+    }
+
+    // 编码处置(明规矩,不猜):
+    //   - 合法 UTF-8(含剥过 BOM 的)照常返回,逐字节保真;
+    //   - 二进制(NUL)拒绝;
+    //   - 非法 UTF-8 返回明确工具错误,指明第一个坏字节在哪一行——绝不肯
+    //     把坏字节原样塞进 Result.content(那会一路捅崩 JSON 序列化),也不
+    //     猜个本机编码悄悄强转,把源码转得面目全非。
+    if (has_nul) {
+        return {"文件里有 NUL 字节,像是二进制文件,read_file 不读: " + path_str, true};
+    }
+    if (bad_utf8) {
+        return {"文件不是合法 UTF-8(第 " + std::to_string(first_bad_line) +
+                    " 行起有坏字节,可能是 GBK 等本机编码): 已拒绝原样读取,免得坏字节带崩会话。"
+                    "请先把文件转存成 UTF-8 再读: " + path_str,
+                true};
     }
 
     // 行数/字节任一上限触发,且文件后头确实还有内容,就标注截断并告知翻页办法。

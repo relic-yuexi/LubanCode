@@ -11,6 +11,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "platform/json_safe.hpp"  // DumpJsonSanitized:落盘行的编码窄边界
+
 namespace lubancode::agent {
 
 namespace {
@@ -223,7 +225,9 @@ std::optional<SessionMeta> ParseSessionMeta(const std::string& line) {
 std::string SerializeSessionMessage(const api::Message& message, const std::string& ts) {
     nlohmann::json j = MessageToJson(message);
     j["ts"] = ts;
-    return j.dump();
+    // 窄边界兜底:万一有坏串漏到这里(工具结果本该在 RunOneTool 就规范
+    // 化过),清洗后落盘,保证每一行都能重新解析,/resume 不吃半行。
+    return platform::DumpJsonSanitized(j);
 }
 
 std::optional<api::Message> DeserializeSessionMessage(const std::string& line) {
@@ -241,7 +245,7 @@ std::string SerializeCompactEvent(const CompactEvent& event, const std::string& 
     j["archive"] = MessageToJson(event.archive);
     j["kept_from"] = event.kept_from;
     j["ts"] = ts;
-    return j.dump();
+    return platform::DumpJsonSanitized(j);  // 坏串窄边界,同 SerializeSessionMessage
 }
 
 std::optional<CompactEvent> ParseCompactEvent(const std::string& line) {
@@ -297,7 +301,7 @@ std::string SerializeTitleEvent(const std::string& title, const std::string& ts)
     j["type"] = "title";
     j["title"] = title;
     j["ts"] = ts;
-    return j.dump();
+    return platform::DumpJsonSanitized(j);  // 坏串窄边界,同 SerializeSessionMessage
 }
 
 std::optional<std::string> ParseTitleEvent(const std::string& line) {

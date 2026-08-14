@@ -1,5 +1,7 @@
 #include "agent/workflow_recorder.hpp"
 
+#include "platform/json_safe.hpp"  // DumpJsonSanitized:事件行落盘的编码窄边界
+
 #include <algorithm>
 #include <cctype>
 #include <ctime>
@@ -134,7 +136,9 @@ std::string SerializeRecordEvent(const RecordEvent& event) {
     root["source"] = event.source;
     root["type"] = event.type;
     root["data"] = event.data.is_object() ? event.data : nlohmann::json::object();
-    return root.dump();
+    // 窄边界兜底:工具结果摘要万一带着坏字节漏进来,清洗后再落盘,录制件
+    // 每行仍是合法 JSON,起草器读得回来(见 platform/json_safe.hpp)。
+    return platform::DumpJsonSanitized(root);
 }
 
 std::optional<RecordEvent> ParseRecordEvent(const std::string& line) {

@@ -1,5 +1,7 @@
 #include "platform/text_encoding.hpp"
 
+#include <algorithm>  // std::min(诊断窗口的尾部夹取)
+
 #ifdef _WIN32
 #include "platform/paths.hpp"  // AcpBytesToUtf8
 #endif
@@ -79,15 +81,19 @@ std::string ReplaceInvalidWithFFFD(const std::string& text) {
 }  // namespace
 
 bool IsValidUtf8(const std::string& text) {
+    return FirstInvalidUtf8Offset(text) == std::string::npos;
+}
+
+std::size_t FirstInvalidUtf8Offset(const std::string& text) {
     std::size_t i = 0;
     while (i < text.size()) {
         const DecodedSequence seq = DecodeAt(text, i);
         if (seq.length == 0) {
-            return false;
+            return i;
         }
         i += seq.length;
     }
-    return true;
+    return std::string::npos;
 }
 
 std::string SanitizeUtf8(const std::string& text) {
@@ -105,6 +111,78 @@ std::string SanitizeUtf8(const std::string& text) {
 #endif
 
     return ReplaceInvalidWithFFFD(text);
+}
+
+namespace {
+
+// 一段文本的成分清点:合法多字节序列几处、非法首字节几个。判定跟
+// IsValidUtf8 同一套 DecodeAt,别写第二份解码器。
+struct Utf8ScanStats {
+    std::size_t valid_multibyte = 0;  // 合法的 2~4 字节序列(中文这类)
+    std::size_t invalid_bytes = 0;    // 解不出合法序列的坏字节
+};
+
+Utf8ScanStats ScanUtf8Stats(const std::string& text) {
+    Utf8ScanStats stats;
+    std::size_t i = 0;
+    while (i < text.size()) {
+        const DecodedSequence seq = DecodeAt(text, i);
+        if (seq.length == 0) {
+            ++stats.invalid_bytes;
+            ++i;
+            continue;
+        }
+        if (seq.length > 1) {
+            ++stats.valid_multibyte;
+        }
+        i += seq.length;
+    }
+    return stats;
+}
+
+}  // namespace
+
+std::string SanitizeExternalText(const std::string& text) {
+    if (IsValidUtf8(text)) {
+        return text;
+    }
+
+#ifdef _WIN32
+    // 成分判定:坏字节占大头(或压根没有合法多字节序列)才试 ACP——整段
+    // GBK 报错文本那类。零星坏字节混在一堆合法中文里的是混合内容,强转
+    // 只会把好的一起转坏,走下面的逐段替换。
+    const Utf8ScanStats stats = ScanUtf8Stats(text);
+    if (stats.invalid_bytes > stats.valid_multibyte) {
+        const std::string acp_converted = AcpBytesToUtf8(text);
+        if (IsValidUtf8(acp_converted)) {
+            return acp_converted;
+        }
+    }
+#endif
+
+    return ReplaceInvalidWithFFFD(text);
+}
+
+std::string DescribeUtf8Issue(const std::string& field, const std::string& text) {
+    std::string out = "utf8 field=" + field + " len=" + std::to_string(text.size());
+    const std::size_t first_bad = FirstInvalidUtf8Offset(text);
+    if (first_bad == std::string::npos) {
+        out += " valid=yes";
+        return out;
+    }
+    out += " valid=no first_bad@" + std::to_string(first_bad) + " ctx=";
+    const std::size_t begin = first_bad > 6 ? first_bad - 6 : 0;
+    const std::size_t end = (std::min)(first_bad + 7, text.size());
+    constexpr char kHex[] = "0123456789ABCDEF";
+    for (std::size_t i = begin; i < end; ++i) {
+        const unsigned char byte = static_cast<unsigned char>(text[i]);
+        if (i != begin) {
+            out += ' ';
+        }
+        out += kHex[byte >> 4];
+        out += kHex[byte & 0x0F];
+    }
+    return out;
 }
 
 }  // namespace lubancode::platform
