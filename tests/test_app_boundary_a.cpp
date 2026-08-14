@@ -13,6 +13,8 @@
 #include "app/commands/settings_commands.hpp"
 #include "app/commands/workspace_commands.hpp"
 #include "app/interactive_session.hpp"
+#include "app/one_shot.hpp"
+#include "app/cli_app.hpp"
 
 // TU B 的探针(见 test_app_boundary_b.cpp):它引用同一批符号,链接器
 // 必须把 TU B 的引用也接上,两 TU 谁也跑不掉。
@@ -29,5 +31,7 @@ TEST_CASE("app 编译边界:两 TU 同 include 公共头可链接且符号存在
     CHECK(&lubancode::app::HandleModelCommand != nullptr);
     CHECK(&lubancode::app::PrintToolsCommand != nullptr);
     CHECK(&lubancode::app::InteractiveLoop != nullptr);
+    CHECK(&lubancode::app::AskOnce != nullptr);
+    CHECK(&lubancode::app::RunCli != nullptr);
     CHECK(BoundaryTuBProbe() == 0);
 }

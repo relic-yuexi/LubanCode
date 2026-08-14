@@ -9,6 +9,8 @@
 #include "app/commands/settings_commands.hpp"
 #include "app/commands/workspace_commands.hpp"
 #include "app/interactive_session.hpp"
+#include "app/one_shot.hpp"
+#include "app/cli_app.hpp"
 
 int BoundaryTuBProbe() {
     return (&lubancode::app::BuildBackend == nullptr ||
@@ -20,7 +22,9 @@ int BoundaryTuBProbe() {
             &lubancode::app::ResumeSession == nullptr ||
             &lubancode::app::HandleModelCommand == nullptr ||
             &lubancode::app::PrintToolsCommand == nullptr ||
-            &lubancode::app::InteractiveLoop == nullptr)
+            &lubancode::app::InteractiveLoop == nullptr ||
+            &lubancode::app::AskOnce == nullptr ||
+            &lubancode::app::RunCli == nullptr)
                ? 1
                : 0;
 }

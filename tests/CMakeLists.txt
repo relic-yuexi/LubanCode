@@ -92,6 +92,8 @@ add_executable(lubancode_tests
   ${CMAKE_SOURCE_DIR}/src/app/commands/settings_commands.cpp
   ${CMAKE_SOURCE_DIR}/src/app/commands/workspace_commands.cpp
   ${CMAKE_SOURCE_DIR}/src/app/interactive_session.cpp
+  ${CMAKE_SOURCE_DIR}/src/app/one_shot.cpp
+  ${CMAKE_SOURCE_DIR}/src/app/cli_app.cpp
   ${CMAKE_SOURCE_DIR}/src/cli/record_command.cpp
   # 回归 BuildCallbacks::on_usage 接线(状态行局部发布)要走到终端层的
   # 状态数据源,console_input.cpp 平时只编进主程序,这里给测试目标单编一份

@@ -333,6 +333,8 @@ add_executable(lubancode
   src/app/commands/settings_commands.cpp
   src/app/commands/workspace_commands.cpp
   src/app/interactive_session.cpp
+  src/app/one_shot.cpp
+  src/app/cli_app.cpp
   src/cli/console_input.cpp
   src/cli/spinner.cpp
   src/cli/record_command.cpp)
