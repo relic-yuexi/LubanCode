@@ -19,6 +19,19 @@ void ContextTracker::Update(const api::Usage& usage) {
     last_cache_read_tokens_ = usage.cache_read_tokens > 0 ? usage.cache_read_tokens : 0;
 }
 
+void ContextTracker::ApplyUsage(const api::Usage& usage) {
+    // 四项全零 = provider 没在流末给 usage(见头文件注释):不清零、不
+    // 覆盖,现有数字原样保住,只标旧值。
+    const bool measured = usage.input_tokens > 0 || usage.output_tokens > 0 ||
+                          usage.cache_read_tokens > 0 || usage.cache_creation_tokens > 0;
+    if (measured) {
+        Update(usage);
+        usage_stale_ = false;
+        return;
+    }
+    usage_stale_ = true;
+}
+
 int ContextTracker::UsagePercent() const {
     if (window_tokens_ == 0) {
         return 0;

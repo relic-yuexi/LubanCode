@@ -63,6 +63,15 @@ std::string BuildStatusLineText(ConfirmMode mode, const std::string& model, int 
     return StatusLineModeSegment(mode) + StatusLineInfoSegment(model, context_percent, used_tokens, window_tokens);
 }
 
+StatusPanelData WithContextUpdate(StatusPanelData data, int context_percent, std::int64_t used_tokens,
+                                  std::int64_t window_tokens, bool measured) {
+    data.context_percent = context_percent;
+    data.used_tokens = used_tokens;
+    data.window_tokens = window_tokens;
+    data.context_stale = !measured;
+    return data;
+}
+
 std::vector<StatusPanelSegment> BuildStatusPanelSegments(
     const std::vector<std::string>& items, ConfirmMode mode, const StatusPanelData& data) {
     std::vector<StatusPanelSegment> out;
@@ -71,6 +80,9 @@ std::vector<StatusPanelSegment> BuildStatusPanelSegments(
     if (!data.rec.empty()) {
         out.push_back({"rec", data.rec});
     }
+    // 旧值前缀:最近一次请求没带回 usage 时,context/tokens 两段的数字还是
+    // 上一次的实测,前缀 ~ 提醒"不是本次新数"(见 StatusPanelData::context_stale)。
+    const char* stale_mark = data.context_stale ? "~" : "";
     for (const std::string& key : items) {
         std::string text;
         if (key == "permission_mode") {
@@ -82,10 +94,11 @@ std::vector<StatusPanelSegment> BuildStatusPanelSegments(
         } else if (key == "git_branch") {
             text = data.git_branch;
         } else if (key == "context") {
-            text = "context " + std::to_string(data.context_percent) + "%";
+            text = std::string(stale_mark) + "context " + std::to_string(data.context_percent) + "%";
         } else if (key == "tokens") {
             if (data.used_tokens > 0) {
-                text = FormatTokenCount(data.used_tokens) + "/" + FormatTokenCount(data.window_tokens);
+                text = std::string(stale_mark) + FormatTokenCount(data.used_tokens) + "/" +
+                       FormatTokenCount(data.window_tokens);
             }
         } else if (key == "provider") {
             if (!data.provider.empty()) {

@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -284,7 +285,12 @@ private:
 
     std::optional<TabCycleState> tab_cycle_;
     std::optional<MenuSelectionState> menu_selection_;
-    ConfirmMode confirm_mode_ = ConfirmMode::Confirm;
+    // atomic:确认档是会话级状态,跨线程读写——流式期间监听线程
+    // (TurnInputListener)会切档,主线程的确认回调/peer 名册回调随时在读
+    // CurrentConfirmMode()。普通枚举在这条跨线程路径上没有可见性保证
+    // (真机驱动器在 transcript_expanded 上踩过同款坑),换成 atomic 的
+    // load/store 堵上。
+    std::atomic<ConfirmMode> confirm_mode_{ConfirmMode::Confirm};
     bool focus_mode_ = false;  // 0.17.0 焦点态,见 RenderState::focus_active 注释
 
     void ResetHistoryBrowsing();  // "翻到一半又编辑" -> 落回底部,但保留当前(已编辑的)内容

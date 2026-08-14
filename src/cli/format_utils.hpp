@@ -52,7 +52,20 @@ struct StatusPanelData {
     int context_percent = 0;
     std::int64_t used_tokens = 0;
     std::int64_t window_tokens = 0;
+    // 最近一次"请求结束"没带回实测 usage(provider 没给):context/tokens
+    // 两段显示的是上一次的实测值,渲染时前缀 ~ 标旧,别让人当成本次新数。
+    // 数据来源是 ContextTracker::usage_stale(),空闲重建与回合内局部更新
+    // 两条路都带同一份。
+    bool context_stale = false;
 };
+
+// 状态行数据的局部更新:只改 context/tokens 两段的数字与旧值标记,其余
+// 字段(model/cwd/git_branch/provider/effort/rec)原样保住——回合内主请求
+// usage 到达时发布新快照用,不另造一份残缺 StatusPanelData。纯函数,单测
+// 钉"其他段保住"这一条。measured=false 把数字标成旧值(见
+// StatusPanelData::context_stale)。
+StatusPanelData WithContextUpdate(StatusPanelData data, int context_percent, std::int64_t used_tokens,
+                                  std::int64_t window_tokens, bool measured);
 
 struct StatusPanelSegment {
     std::string key;

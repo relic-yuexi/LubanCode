@@ -65,6 +65,13 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
         for (const auto& line : lines) {
             std::cout << line << "\n";
         }
+        // 口径说明:状态栏与这里读的是同一只 tracker,都是"最近一次主请求
+        // 的占用",不是会话累计花销,也不含独立子代理的 token。最近一次请求
+        // 没带回 usage 时再补一行旧值提醒(状态栏同款 ~ 前缀的完整说法)。
+        std::cout << tr("cmd.context.note.semantics") << "\n";
+        if (context_tracker.usage_stale()) {
+            std::cout << tr("cmd.context.note.stale") << "\n";
+        }
         if (context_tracker.ShouldAutoCompact()) {
             std::cout << tr("cmd.context.compact_hint") << "\n";
         }

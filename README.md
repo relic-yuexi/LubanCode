@@ -202,7 +202,7 @@ git diff --cached | lubancode "替我审一遍这份改动"
 | `/provider` | 从厂家目录添加、更新目录、列出、切换、删除模型服务。 |
 | `/init` | 生成并载入项目级 `AGENTS.md`。 |
 | `/model` · `/think` | 切模型与推理强度。 |
-| `/context` · `/compact` | 看上下文占用，手工压缩历史。 |
+| `/context` · `/compact` | 看上下文占用（最近一次主请求的占用，不含子代理累计），手工压缩历史。 |
 | `/skills` · `/skill` | 管理 `~/.lubancode/skills` 里的技能；裸敲 `/skill` 看完整安装示例。 |
 | `/mcp` · `/lsp` · `/plugins` | 看外接工具与语言服务器状态。 |
 | `/tools` · `/todos` | 看工具挂载状态与待办清单。 |

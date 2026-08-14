@@ -24,13 +24,12 @@
 #include <vector>
 
 #include "cli/choice_menu.hpp"
+#include "cli/format_utils.hpp"  // StatusPanelData(状态行数据源)
 #include "cli/line_editor.hpp"
 #include "cli/queue_model.hpp"
 #include "cli/theme.hpp"
 
 namespace lubancode::cli {
-
-struct StatusPanelData;
 
 // 打印 prompt(不含换行,可传空串跳过打印),读一行输入。
 // Windows 下 stdin 是真控制台(GetFileType == FILE_TYPE_CHAR)时,走逐键
@@ -145,6 +144,24 @@ void SetIdleWakeHook(std::function<bool()> hook);
 // 设不设都无感。
 void SetStatusLineData(const StatusPanelData& values, const std::vector<std::string>& items,
                        const std::string& separator);
+
+// 状态行的局部更新:主请求 usage 一到(BuildCallbacks::on_usage 更新
+// ContextTracker 之后)把 context 百分比/已用/窗口发布进来——只改
+// context/tokens 两段的数字与旧值标记,model、cwd、git_branch、provider、
+// effort、REC 等其余字段原样保住,不在回调里另造一份残缺 StatusPanelData
+// (拷贝语义是 cli::WithContextMeasured 纯函数,单测钉在那边)。
+// 发布与重画分开:这里只拿 StdoutWriteMutex 线程安全地改数据,一个字节
+// 都不往终端写;流式 footer 的现有重画事务(正文 OnDelta、子代理状态条
+// 的 400ms ticker、挂起恢复的第一帧)在安全时机取新值——footer 挂起在
+// ask_user/确认菜单里时不抢屏,菜单退出后的下一帧自然带出新数。
+// measured=false 把数字标成旧值(ContextTracker::usage_stale,渲染带 ~)。
+// 管道/重定向模式没有状态行,设了也无感。
+void UpdateStatusLineContext(int context_percent, std::int64_t used_tokens, std::int64_t window_tokens,
+                             bool measured);
+
+// 状态行数据源此刻的快照(拿 StdoutWriteMutex 拷贝):测试/诊断用,常规
+// 渲染路径不走这个(每帧重画在 BuildStatusLine 里现读)。
+StatusPanelData SnapshotStatusLineValues();
 
 // M11(0.10.0):真控制台此刻的显示宽度(列数),给分界线(cli::BuildDividerLine)
 // 探测用。查的是 stdout 那个句柄(跟 DetectConsoleCapability 一致)——分界线
@@ -272,6 +289,9 @@ private:
 // Run() 结束"这段窗口期起一个实例:ESC 键按下就把 cancel_flag 置位、打一行
 // 淡色 "[已打断]";其余可打印字符进内部排队缓冲(Backspace 能退格),遇
 // Enter 就把整行（非空才算）落进队列，并刷新 footer 上方的常驻队列区。
+// Shift+Tab 循环切确认档——跟空闲路(ReadLineKeyByKey)共用同一枚
+// SharedEditor 档位与同一个 NextConfirmMode 轮转,切完 footer 状态行按新档
+// 重画;Tab 不引入补全交互,维持不理会。
 //
 // 0.25.x 排队输入自然化:队列本身是 PendingQueueCore(见 queue_model.hpp),
 // 输入行只画 `> ` 和正在键入的字;Enter 落队后正文挪进上方待发区(逐条摆,
