@@ -242,7 +242,20 @@ PeerSendResult PeerPipeSend(const std::string& endpoint, const std::string& payl
     (void)timeout_ms;
     PeerSendResult result;
     const std::wstring wide = Utf8ToWide(endpoint);
-    HANDLE pipe = CreateFileW(wide.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    // 单实例管道:服务端 DisconnectNamedPipe 之后、回到 ConnectNamedPipe
+    // 之前有一小段窗口没有监听实例,这个窗口里 CreateFileW 回
+    // ERROR_PIPE_BUSY。规范写法是 WaitNamedPipe 等实例就绪再试——慢机器
+    // 上窗口不小,连发两帧(坏帧测试、连递两张字条)都会撞上。
+    HANDLE pipe = INVALID_HANDLE_VALUE;
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        pipe = CreateFileW(wide.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (pipe != INVALID_HANDLE_VALUE || GetLastError() != ERROR_PIPE_BUSY) {
+            break;  // 连上了,或不是忙(不在了/权限不对),都按真实结果收场
+        }
+        if (!WaitNamedPipeW(wide.c_str(), 50)) {
+            continue;  // 这 50ms 内没等到实例,再试一轮,次数用尽便带着末次错误收场
+        }
+    }
     if (pipe == INVALID_HANDLE_VALUE) {
         result.error = LastErrorText("CreateFileW(pipe)");
         return result;
