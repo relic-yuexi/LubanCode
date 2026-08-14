@@ -304,15 +304,13 @@ void PrintFooterWorkingLine(const StreamFooterState& f, int width) {
     std::cout << BuildFooterWorkingLine(f, width);
 }
 
-// M10:谁在真的逐键读键盘,谁就得先拿到这把锁——ReadLineKeyByKey() 整个
-// 调用期间(从进函数到返回)一直攥着它,TurnInputListener 的监听线程只在
-// 抢到锁的间隙才读一次。这样"监听只活在编辑器不在读的窗口期"这条要求
-// 不用靠回调层层传参去手动维护,两边天然靠锁互斥错开——工具确认提示
-// [y/a/N] 走的也是 ReadLineKeyByKey(),天然一并受益,不用另外接管。
-std::mutex& ConsoleReadMutex() {
-    static std::mutex m;
-    return m;
-}
+// M10:谁在真的逐键读键盘,谁就得先拿到这把锁——ReadLineKeyByKey()/
+// ReadChoiceMenu() 整个调用期间(从进函数到返回)一直攥着它,
+// TurnInputListener 的监听线程只在抢到锁的间隙才读一次。这样"监听只活在
+// 编辑器/菜单不在读的窗口期"这条要求不用靠回调层层传参去手动维护,两边
+// 天然靠锁互斥错开——工具确认提示 [y/a/N] 与 ask_user 选择菜单走的也是
+// 这条路,天然一并受益,不用另外接管。定义在下面公共区(声明在
+// console_input.hpp),规约由 tests/test_repaint_coord.cpp 钉死。
 
 // platform 层的语义按键 -> 核心层 KeyEvent。两个枚举一一平行(platform 不
 // 依赖 cli,镜像了一份),这里只是搬运;None 翻成 nullopt,调用方 continue。
@@ -1143,6 +1141,48 @@ std::mutex& StdoutWriteMutex() {
     return m;
 }
 
+std::mutex& ConsoleReadMutex() {
+    static std::mutex m;
+    return m;
+}
+
+// -----------------------------------------------------------------------
+// "ask_user 被子代理状态遮挡"的 repaint 协调层,见 console_input.hpp 同名
+// 一节的注释。suspend/paint 两枚深度都在 StreamFooterState 里(写点全在
+// StdoutWriteMutex 之内),这里只做读口与登记槽。
+// -----------------------------------------------------------------------
+
+namespace {
+
+// 交互菜单开屏时"收走浮动状态块"的钩子(AgentStatusPainter 自登记)。
+// 登记槽的读写全在 StdoutWriteMutex 之内,不再套锁。
+std::function<void()>& RepaintSuspendHideHookSlot() {
+    static std::function<void()> hook;
+    return hook;
+}
+
+}  // namespace
+
+void SetRepaintSuspendHideHook(std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    RepaintSuspendHideHookSlot() = std::move(hook);
+}
+
+bool RepaintSuspendedLocked() {
+    const StreamFooterState& f = FooterSlot();
+    return f.suspend_depth > 0 || f.paint_depth > 0;
+}
+
+bool RepaintSuspendActive() {
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    return FooterSlot().suspend_depth > 0;
+}
+
+int StreamFooterSuspendDepthForTest() {
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    return FooterSlot().suspend_depth;
+}
+
 namespace {
 
 // 见头文件 SetStreamScreenPrintHook 注释。读与写全在 StdoutWriteMutex
@@ -1441,6 +1481,14 @@ StreamFooterSuspendScope::StreamFooterSuspendScope() {
     StreamFooterState& f = FooterSlot();
     if (f.suspend_depth == 0) {
         EraseStreamFooterLocked();  // 最外层落笔前把框彻底擦净
+        // 再把子代理浮动状态块整块收走:菜单要从正文末尾一次铺到底,状态
+        // 块留着就会插进标题/问题/选项中间。钩子由 AgentStatusPainter 构造
+        // 时自登记,此刻锁在我们手里,实现不得重锁(见头文件约定)。之后
+        // ticker 每拍都先查 RepaintSuspendedLocked(),挂起期间零输出——比
+        // "手调一次 Hide"可靠,不存在下一拍又画回来的口子。
+        if (const auto& hook = RepaintSuspendHideHookSlot()) {
+            hook();
+        }
     }
     ++f.suspend_depth;
 }
@@ -1566,6 +1614,16 @@ void TurnInputListener::ThreadMain() {
         // 控制台输入。
         std::unique_lock<std::mutex> read_lock(ConsoleReadMutex(), std::try_to_lock);
         if (!read_lock.owns_lock()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+        }
+        // 阻塞式交互菜单(ask_user 选择菜单、工具确认……)开屏期间,键盘
+        // 全归菜单一处:挂起计数>0 就算这一拍抢到了读权也不碰输入——
+        // WaitForKeyEvent/ReadOne 一律不做,连"问题刚打印完、菜单还没抢到
+        // 读权"的空窗期也不留给监听线程消费一枚键。菜单退出(计数归零)
+        // 后流式排队输入、ESC 打断恢复原语义。
+        if (RepaintSuspendActive()) {
+            read_lock.unlock();
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             continue;
         }

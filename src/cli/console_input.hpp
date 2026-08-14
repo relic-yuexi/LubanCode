@@ -195,6 +195,38 @@ void SetStreamScreenPrintHook(std::function<void()> hook);
 void SetStreamScreenScrollHook(std::function<void(int)> hook);
 
 // -----------------------------------------------------------------------
+// "ask_user 被子代理状态遮挡"一单的 repaint 协调层:阻塞式交互菜单
+// (StreamFooterSuspendScope 存活期)取得整块屏面所有权,期间——脚注框不
+// 重画、子代理浮动状态块零输出、控制台输入不归监听线程。规约全部钉在
+// 这几个入口上,单测见 tests/test_repaint_coord.cpp:
+// -----------------------------------------------------------------------
+
+// 全局 repaint 挂起计数(footer 的 suspend_depth / paint_depth 合起来看)。
+// 挂起 = 交互菜单占屏(suspend_depth>0)或屏幕事务进行中(paint_depth>0)。
+// 调用方必须已持有 StdoutWriteMutex(两枚深度的写点全在这把锁内);
+// AgentStatusPainter::Tick 拿到锁后第一件事就是查它。
+bool RepaintSuspendedLocked();
+
+// 挂起计数>0(即阻塞式交互菜单开着)。自带 StdoutWriteMutex,给
+// TurnInputListener 的监听线程当"让出读权"的判断用——菜单等输入期间
+// 键盘全归菜单一处。
+bool RepaintSuspendActive();
+
+// 测试/诊断用:suspend 计数现状(嵌套/重复恢复/异常早退析构对账的观测口)。
+int StreamFooterSuspendDepthForTest();
+
+// 交互菜单开屏(最外层 StreamFooterSuspendScope 进入)时收走浮动状态块的
+// 钩子。AgentStatusPainter 构造时自登记、Stop 时撤销;调用时已持有
+// StdoutWriteMutex,实现不得再拿这把锁,也不得读控制台输入。传空即撤销。
+void SetRepaintSuspendHideHook(std::function<void()> hook);
+
+// M10:"谁在真的逐键读键盘,谁先拿这把锁"。ReadLineKeyByKey()/ReadChoiceMenu
+// 整个调用期间攥着它,TurnInputListener 的监听线程只在 try_lock 抢到的
+// 间隙才读一次——阻塞式菜单持锁等输入时,监听线程绝不消费方向键/Enter/
+// Esc/普通字符,这条规约靠它保证(单测钉死:tests/test_repaint_coord.cpp)。
+std::mutex& ConsoleReadMutex();
+
+// -----------------------------------------------------------------------
 // 0.21.x 流式脚注(footer),0.22.x 升级成跟 composer 视觉一致的完整框:
 // 流式期间正文下方常驻上横线 + `> ` 输入行 + 下横线 + 状态行,一共 4 行,
 // 让用户看见"能按 ESC 打断、能键入并回车排队下一条"——回归前用户实测
@@ -261,6 +293,20 @@ void StopStreamFooterWorking();
 // 构造/析构各自只在临界区里逗留一瞬(拿锁——干活——放锁),不会跨越整个
 // 确认交互一直攥着 StdoutWriteMutex,PrintConfirmDetails/ShowDiffPreview/
 // ReadLine 自己该拿锁还是拿得到,不会自锁。
+//
+// "ask_user 被子代理状态遮挡"一单把这块挂起从"只管脚注框"升格成全局
+// repaint 挂起计数:作用域存活期间(嵌套时计数没退干净前),不止
+// RedrawStreamFooterLocked() 空操作——
+//   1. 构造最外层时经 SetRepaintSuspendHideHook 登记的钩子(AgentStatusPainter
+//      构造时自登记)把子代理状态块整块收走,菜单的标题/问题/选项从正文
+//      末尾一次铺到底,中间没有浮动块插队;
+//   2. AgentStatusPainter 的 ticker 每拍先查 RepaintSuspendedLocked(),挂起
+//      期间零输出——单次 Hide() 堵不住的那个"下一拍又画回来"从根上没了;
+//   3. TurnInputListener 查 RepaintSuspendActive(),挂起期间不碰控制台输入,
+//      连"问题打印完、菜单还没抢到 ConsoleReadMutex"的空窗也不留——键盘
+//      全归菜单一处。
+// 析构最外层退一层挂起并补画脚注框(恢复点在菜单结果之后);状态块由
+// ticker 下一拍自己找回来,落笔位置自然在菜单结果之下,盖不住任何东西。
 class StreamFooterSuspendScope {
 public:
     StreamFooterSuspendScope();
@@ -306,11 +352,15 @@ private:
 // 代理拖住的收场流程)。双击计时只在这一个实例的生命周期内有效,不跨轮。
 //
 // 跟 SharedEditor() 那条"真正在读一行"的路径靠一把互斥锁
-// (ConsoleReadMutex,console_input.cpp 内部静态,两边共用同一份)自动错开
-// ——监听线程只在抢到锁的间隙才调 ReadConsoleInputW,ReadLineKeyByKey()
-// 整个调用期间一直攥着锁,监听线程那段时间只能干等,绝不会跟"编辑器正在
-// 读"的窗口期抢同一份控制台输入(工具确认提示 [y/a/N] 走的也是
-// ReadLineKeyByKey,天然享受同样的互斥,不用另外接管)。
+// (ConsoleReadMutex,console_input.cpp 持有、头文件有公开声明,两边共用
+// 同一份)自动错开——监听线程只在抢到锁的间隙才调 ReadConsoleInputW,
+// ReadLineKeyByKey()/ReadChoiceMenu() 整个调用期间一直攥着锁,监听线程
+// 那段时间只能干等,绝不会跟"编辑器/菜单正在读"的窗口期抢同一份控制台
+// 输入(工具确认提示 [y/a/N] 与 ask_user 的选择菜单走的也是这条路,
+// 天然享受同样的互斥,不用另外接管)。在这之上,监听线程抢到锁后还会查
+// 一眼 RepaintSuspendActive():阻塞式菜单开屏(挂起计数>0)期间干脆连
+// WaitForKeyEvent 都不碰——"问题打印完、菜单还没抢到读权"的空窗期也
+// 不消费按键,Esc 只取消当前菜单,不会落进流式待发队列或误打断整轮。
 //
 // stdin 不是真控制台(管道/重定向)时,构造函数直接不起线程,Stop()/
 // TakeQueuedLines() 都是安全的空操作——管道场景本来就读不到"按键",这整个

@@ -80,6 +80,9 @@ add_executable(lubancode_tests
   # 回归 BuildCallbacks::on_usage 接线(状态行局部发布)要走到终端层的
   # 状态数据源,console_input.cpp 平时只编进主程序,这里给测试目标单编一份
   # (不进 lubancode_core,免得 doctest 进程链进真控制台读取路径)。
+  test_repaint_coord.cpp
+  # repaint 协调层测试要链真实现:console_input.cpp 平时只进 lubancode
+  # 可执行文件(根 CMakeLists 刻意不挪进 core),这里直接编进测试目标。
   ${CMAKE_SOURCE_DIR}/src/cli/console_input.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_core doctest::doctest)
