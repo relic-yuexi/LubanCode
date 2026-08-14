@@ -127,6 +127,11 @@ std::size_t DisplayWidthUtf8(const std::string& utf8);
 // 结果时需要转回 UTF-8)。
 std::string Utf32ToUtf8(const std::u32string& text);
 
+// UTF-8 -> UTF-32 解码(0.28.x 取回排队消息装回编辑 buffer 用)。输入都
+// 是本程序自己拼的 UTF-8,非法序列按"跳过一个字节"处理,与
+// TruncateUtf8ToDisplayWidth 的取舍一致。
+std::u32string Utf8ToUtf32(const std::string& text);
+
 // 按显示宽度截断:从头开始累加每个字符的显示宽度,一旦下一个字符会让
 // 累计宽度超过 max_width 就整个不要那个字符——绝不会把一个占 2 列的宽字符
 // 切成半个字宽。max_width <= 0 给空串。终端层"保证物理上永不折行"的截断

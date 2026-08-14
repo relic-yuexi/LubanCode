@@ -131,10 +131,24 @@ AgentPanelActions& AgentPanelActionsSlot() {
     return actions;
 }
 
-// composer 这一次读取的收件目标(查看态那只子代理的任务号)。
+// composer 这一次读取的收件目标(查看态那只子代理的任务号)。0.28.x 起
+// 流式监听线程落队时也要读它(排队的消息要带目标),读写都过一把小锁
+// ——两个线程碰同一份 optional,不能光靠"通常错不开"的运气。
 std::optional<int>& ComposerTargetSlot() {
     static std::optional<int> target;
     return target;
+}
+std::mutex& ComposerTargetMutex() {
+    static std::mutex m;
+    return m;
+}
+void SetComposerTarget(std::optional<int> target) {
+    std::lock_guard<std::mutex> lock(ComposerTargetMutex());
+    ComposerTargetSlot() = std::move(target);
+}
+std::optional<int> GetComposerTarget() {
+    std::lock_guard<std::mutex> lock(ComposerTargetMutex());
+    return ComposerTargetSlot();
 }
 
 // 空闲唤醒钩子的存取点(跟 AgentPanelProvider 同一套会话级静态槽)。只在
@@ -200,7 +214,9 @@ struct StreamFooterState {
     std::string reset;      // theme.reset;plain 主题为空串
     Theme theme;             // 完整主题:画框(BoxRuleLine)、状态行(PrintStatusLine)
                              // 直接复用 composer 那两个画法,得传整个 Theme,不能只传片段。
-    std::vector<std::string> queued;  // 已落队、等本轮结束后发送的消息(编辑中那条除外)
+    // 0.28.x:队列区不再在 footer 里存副本——每帧重画时现拉
+    // SessionSteeringQueue() 的轻量快照(锁内拷贝、用完即放),工具边界
+    // 送达/打断收场动了账,下一帧自然对上,不会挂着旧条目。
     std::vector<std::string> hints;   // 流式输入行的 slash 命令提示行(画在状态行
                                       // 之下,跟空闲 composer 同一层级),空 = 没有提示
     bool working = false;             // true 时在输入框上方合成 Working 动画
@@ -798,7 +814,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     int prev_frame_origin = -1;  // 上一帧的绝对帧顶;面板增减/滚屏后对不上就整帧重画
 
     if (composer) {
-        ComposerTargetSlot().reset();  // 每次读取开始,收件目标先归 main
+        SetComposerTarget(std::nullopt);  // 每次读取开始,收件目标先归 main
     }
 
     auto panel_entries = [&]() -> std::vector<AgentPanelEntry> {
@@ -816,7 +832,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         const int total = static_cast<int>(entries.size()) + 1;
         panel_controller.OnEntriesChanged(total);
         if (entries.empty()) {
-            ComposerTargetSlot().reset();
+            SetComposerTarget(std::nullopt);
             tag_out.clear();
             return {};
         }
@@ -847,10 +863,10 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         tag_out.clear();
         if (const auto target = panel_controller.target_index(); target.has_value()) {
             const AgentPanelEntry& entry = entries[static_cast<std::size_t>(*target) - 1];
-            ComposerTargetSlot() = entry.task_id;  // composer 此刻以它为收件人
+            SetComposerTarget(entry.task_id);  // composer 此刻以它为收件人
             tag_out = entry.description;           // 短标题取任务短述,不取代理类型
         } else {
-            ComposerTargetSlot().reset();
+            SetComposerTarget(std::nullopt);
         }
         if (!panel_notice.empty()) {
             if (std::chrono::steady_clock::now() < panel_notice_until) {
@@ -877,9 +893,29 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         }
         return value;
     };
+    // 0.28.x 排队消息区:画在代理面板之下、composer 上横线之上(规格"显示"
+    // 节的次序)。空队列连标题都不画;标题随状态变(编辑中/本轮收尾后送出)。
+    // 空闲时没有工具边界可等,标题写"本轮收尾后送出"。
+    SteeringQueue& steering = SessionSteeringQueue();
+    std::optional<SteeringQueue::EditHandle> queue_edit;  // 正在取回编辑的凭据
+    bool queue_delete_armed = false;
+    std::chrono::steady_clock::time_point queue_delete_armed_until{};
+    const auto queue_rows_now = [&]() -> std::vector<std::string> {
+        const auto snapshot = steering.Snapshot();
+        if (snapshot.empty()) {
+            return {};
+        }
+        QueueViewOptions view;
+        view.visible_cap = kMaxVisibleQueuedLines;
+        view.title_mode = queue_edit.has_value() ? QueueTitleMode::Editing : QueueTitleMode::EndOfTurn;
+        return BuildSteeringQueueRows(snapshot, view);
+    };
+
     auto redraw_with_panel = [&](const RenderState& state, const std::vector<AgentPanelEntry>& entries) {
         std::string tag;
-        const std::vector<std::string> above = build_panel(entries, tag);
+        std::vector<std::string> above = build_panel(entries, tag);
+        const std::vector<std::string> queue_rows = queue_rows_now();
+        above.insert(above.end(), queue_rows.begin(), queue_rows.end());
         chrome.mode = editor.confirm_mode();
         RedrawEditArea(start_row, prompt_end_col, prompt, state, above, tag, prev_body_row_count,
                        previous_frame, prev_frame_origin, vt_enabled, chrome);
@@ -907,6 +943,10 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             if (composer && editor.CurrentRenderState().line.empty()) {
                 const auto& wake = IdleWakeHookSlot();
                 if (wake && wake()) {
+                    if (queue_edit.has_value()) {
+                        steering.CancelEdit(*queue_edit);
+                        queue_edit.reset();
+                    }
                     if (prev_body_row_count > 0) {
                         platform::SetCursorPos(0, start_row + prev_body_row_count);
                     }
@@ -918,9 +958,120 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         }
         const std::optional<platform::KeyInput> raw_key = key_reader.ReadOne();
         if (!raw_key.has_value()) {
+            if (queue_edit.has_value()) {
+                steering.CancelEdit(*queue_edit);
+                queue_edit.reset();
+            }
             return std::nullopt;  // EOF/读失败
         }
         const auto entries_before_key = panel_entries();
+
+        // ---- 0.28.x 排队消息的取回/编辑(只作用于 composer 读取) ----
+        // 取回键:正文空、非编辑态、队列有可取条目,三者齐备才取最新一条
+        // (ShouldRecallQueuedMessage 钉规矩);正文非空时 Shift+Left 仍是
+        // composer 的光标键,不抢。
+        if (composer && IsQueueRecallKey(raw_key->kind) &&
+            ShouldRecallQueuedMessage(editor.CurrentRenderState().line.empty(), queue_edit.has_value(),
+                                      steering.editable_size())) {
+            if (auto handle = steering.BeginEditLatest(); handle.has_value()) {
+                queue_edit = std::move(*handle);
+                editor.LoadText(Utf8ToUtf32(queue_edit->text));
+                queue_delete_armed = false;
+                redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
+            }
+            continue;
+        }
+        if (composer && queue_edit.has_value()) {
+            using PK = platform::KeyInput::Kind;
+            const auto finish_edit_clear = [&]() {
+                queue_edit.reset();
+                queue_delete_armed = false;
+                editor.BeginLine(/*composer=*/true);
+            };
+            const auto redraw_queue_frame = [&]() {
+                redraw_with_panel(editor.CurrentRenderState(), panel_entries());
+            };
+            if (raw_key->kind == PK::Enter) {
+                // 原位替换:保 id、目标、排队次序;版本冲突 = 那条已变动,
+                // 提示并保留正文(下一次 Enter 就是普通提交,走会话主路)。
+                const auto status = steering.CommitEdit(*queue_edit, Utf32ToUtf8(editor.CurrentRenderState().line));
+                if (status == SteeringQueue::CommitStatus::Ok) {
+                    finish_edit_clear();
+                } else {
+                    queue_edit.reset();
+                    queue_delete_armed = false;
+                    panel_notice = tr("queue.commit_conflict");
+                    panel_notice_until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+                }
+                redraw_queue_frame();
+                continue;
+            }
+            if (raw_key->kind == PK::NewLine) {
+                editor.HandleKey(KeyEvent::Simple(KeyKind::NewLine));
+                redraw_queue_frame();
+                continue;
+            }
+            if (raw_key->kind == PK::Esc || raw_key->kind == PK::CtrlC) {
+                // 第一层 Esc:只取消编辑、还原原文,不打断任何东西。
+                steering.CancelEdit(*queue_edit);
+                finish_edit_clear();
+                redraw_queue_frame();
+                continue;
+            }
+            if (raw_key->kind == PK::Delete) {
+                // 两段删除:第一下亮提示(编辑态标题自带"Del 再按一次删除"),
+                // 第二下 2 秒窗口内真删。
+                const auto now = std::chrono::steady_clock::now();
+                if (queue_delete_armed && now < queue_delete_armed_until) {
+                    steering.DeleteMessage(*queue_edit);
+                    finish_edit_clear();
+                } else {
+                    queue_delete_armed = true;
+                    queue_delete_armed_until = now + std::chrono::seconds(2);
+                }
+                redraw_queue_frame();
+                continue;
+            }
+            if (raw_key->kind == PK::Up || raw_key->kind == PK::Down) {
+                // 在队列条目间走:先把改到一半的正文写回当前位,再取相邻。
+                const bool up = raw_key->kind == PK::Up;
+                const auto snapshot = steering.Snapshot();
+                std::size_t index = 0;
+                for (std::size_t i = 0; i < snapshot.size(); ++i) {
+                    if (snapshot[i].id == queue_edit->id) {
+                        index = i;
+                    }
+                }
+                const auto status =
+                    steering.CommitEdit(*queue_edit, Utf32ToUtf8(editor.CurrentRenderState().line));
+                if (status == SteeringQueue::CommitStatus::Ok) {
+                    finish_edit_clear();
+                } else {
+                    queue_edit.reset();
+                    queue_delete_armed = false;
+                }
+                const bool go_prev = up && index > 0;
+                const bool go_next = !up && index + 1 < snapshot.size();
+                if (go_prev || go_next) {
+                    const std::size_t next = go_prev ? index - 1 : index + 1;
+                    if (auto handle = steering.BeginEdit(snapshot[next].id); handle.has_value()) {
+                        queue_edit = std::move(*handle);
+                        editor.LoadText(Utf8ToUtf32(queue_edit->text));
+                        queue_delete_armed = false;
+                    }
+                }
+                redraw_queue_frame();
+                continue;
+            }
+            // 编辑态拦下面板键(切 main/subagent、进查看前先了结编辑,不串
+            // 目标);其余键照常进编辑器。
+            if (MapToPanelKey(*raw_key).has_value()) {
+                panel_notice = tr("queue.edit_blocks_panel");
+                panel_notice_until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                redraw_queue_frame();
+                continue;
+            }
+        }
         // 面板按键(键位缝 MapToPanelKey):上下选择、Enter 查看、Esc 逐层退、
         // x 停止/清除、Ctrl+X Ctrl+K 两段确认停全部。正文非空时状态机自己
         // 放行——上下归 composer 历史,普通字母 x 只进 composer,Enter 照旧
@@ -1063,6 +1214,11 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             // 横线/状态行:先把光标挪到编辑区(含框)最下面一行再换行,免得
             // 接下来的输出打在残留画面身上。prev_body_row_count 刚被
             // RedrawEditArea 更新过,就是"第一行之外"的总行数。
+            if (queue_edit.has_value()) {
+                // 整次读取要退场了:未提交的编辑按 Esc 同款还原,不留冻结条目。
+                steering.CancelEdit(*queue_edit);
+                queue_edit.reset();
+            }
             if (prev_body_row_count > 0) {
                 platform::SetCursorPos(0, start_row + prev_body_row_count);
             }
@@ -1245,7 +1401,7 @@ void SetAgentPanelDetailProvider(std::function<std::vector<std::string>(int task
 
 void SetAgentPanelActions(AgentPanelActions actions) { AgentPanelActionsSlot() = std::move(actions); }
 
-std::optional<int> CurrentComposerAgentTarget() { return ComposerTargetSlot(); }
+std::optional<int> CurrentComposerAgentTarget() { return GetComposerTarget(); }
 
 void SetIdleWakeHook(std::function<bool()> hook) { IdleWakeHookSlot() = std::move(hook); }
 
@@ -1431,11 +1587,22 @@ void RedrawStreamFooterLocked() {
     }
 
     const int working_rows = f.working ? 1 : 0;
-    // 待发区行(规格:三条以内逐条摆,不写"待发消息 N 条"汇总头;超上限
-    // 只添一行"另有 N 条")。f.queued 存的是还没格式化的消息正文,行怎么
-    // 摆是 BuildPendingQueueRows 的纯逻辑,单测钉在那边。
+    // 待发区行:现拉会话层队列的轻量快照(标题模式随状态变:Esc 立即送/
+    // 编辑中/等下一个工具边界),行怎么摆是 BuildSteeringQueueRows 的纯逻辑,
+    // 单测钉在那边。空队列连标题都不画(规格)。
+    SteeringQueue& steering = SessionSteeringQueue();
+    const std::vector<QueuedMessage> steering_snapshot = steering.Snapshot();
+    QueueViewOptions queue_view;
+    queue_view.visible_cap = kMaxVisibleQueuedLines;
+    queue_view.title_mode = steering.immediate_delivery_requested() ? QueueTitleMode::Immediate
+                                : std::any_of(steering_snapshot.begin(), steering_snapshot.end(),
+                                              [](const QueuedMessage& item) { return item.edit_open; })
+                                      ? QueueTitleMode::Editing
+                                      : QueueTitleMode::Boundary;
     const std::vector<std::string> queue_rows_text =
-        f.queued.empty() ? std::vector<std::string>{} : BuildPendingQueueRows(f.queued, kMaxVisibleQueuedLines);
+        steering_snapshot.empty()
+            ? std::vector<std::string>{}
+            : BuildSteeringQueueRows(steering_snapshot, queue_view);
     const int queue_rows = static_cast<int>(queue_rows_text.size());
     // slash 提示行画在状态行之下(跟空闲 composer 的视觉层级一致),高度一并
     // 记进 total_rows——探底滚屏、旧框擦除(都按 f.rows 报账)随之生效。
@@ -1543,7 +1710,6 @@ void BeginStreamFooter(const Theme& theme, bool enabled) {
     f.body_x = -1;
     f.body_y = -1;
     f.echo.clear();
-    f.queued.clear();
     f.hints.clear();
     f.working = false;
     f.working_label.clear();
@@ -1565,7 +1731,6 @@ void EndStreamFooter() {
     EraseStreamFooterLocked();  // 擦掉常驻那行,免得残留在 markdown 收束重画区之外
     f.enabled = false;
     f.echo.clear();
-    f.queued.clear();
     f.hints.clear();
     f.hint.clear();
     f.working = false;
@@ -1694,11 +1859,13 @@ void TurnInputListener::Stop() {
         thread_.join();
     }
     enabled_ = false;  // 幂等:重复调用/析构再调都不会再 join 一次已经空了的 thread_
-}
-
-std::vector<std::string> TurnInputListener::TakeQueuedLines() {
-    std::lock_guard<std::mutex> lock(queue_mutex_);
-    return queue_.TakeAll();
+    // 线程已 join,没人再动账:还挂在半途的编辑事务按 Esc 同款收尾——
+    // 原文还原、解冻。不收的话那条会一直冻着,投递泵跳过它,editable_size
+    // 也数不到它,像"丢了一条"。
+    if (open_edit_.has_value()) {
+        SessionSteeringQueue().CancelEdit(*open_edit_);
+        open_edit_.reset();
+    }
 }
 
 void TurnInputListener::ThreadMain() {
@@ -1707,19 +1874,96 @@ void TurnInputListener::ThreadMain() {
     platform::KeyListenScope listen_scope;
     platform::KeyReader key_reader;  // 跨事件状态(代理对配对)整条线程存活
 
-    // footer 快照:输入行回显(只画正在键入的字,不拼任何前缀)+ 待发区
-    // (display_items 已把取出来编辑的那条挪进输入行,不重复摆)。Windows
-    // 真控制台之外(footer.enabled 为假)这两句是空操作,退回老的
-    // "不回显、只 Enter 时整条落队"。
+    // 会话层队列:监听线程只提交编辑动作,不拥有最终数据(见 queue_model.hpp)。
+    SteeringQueue& steering = SessionSteeringQueue();
+
+    // 排队输入/取回编辑共用一只真正的 LineEditorCore(composer 模式)。不用
+    // SharedEditor():那份是前台"真正在读一行"的编辑器,历史/档位是会话级
+    // 状态,监听线程不能去碰;这里只要光标/退格/粘贴/多行软换行这些纯编辑
+    // 能力,补全候选给空表(流式输入行的 slash 提示由 StreamSlashHintLines
+    // 现算,不碰编辑器状态)。
+    LineEditorCore editor;
+    editor.BeginLine(/*composer=*/true);
+
+    // 正在编辑的排队消息(编辑事务凭据)。空 = 在敲新消息。
+    std::optional<SteeringQueue::EditHandle> edit;
+    // Del 两段删除的计时(规格:经明确提示后删掉——第一下亮提示,第二下
+    // 2 秒窗口内才真删;提示就写在队列区标题的编辑态文案里)。
+    bool delete_armed = false;
+    std::chrono::steady_clock::time_point delete_armed_until{};
+
+    // 输入行回显:多行正文只摆首行,尾巴带行数提示(完整正文在取回编辑器
+    // 里看/改;footer 的输入行是单行会计,不能塞换行)。
+    auto echo_text = [&] {
+        const RenderState state = editor.CurrentRenderState();
+        const std::string first = Utf32ToUtf8(state.lines.empty() ? std::u32string() : state.lines[0]);
+        if (state.lines.size() <= 1) {
+            return first;
+        }
+        return first + trf("queue.echo_more_lines", state.lines.size() - 1);
+    };
+
+    // footer 快照:输入行回显 + slash 提示(队列区在 RedrawStreamFooterLocked
+    // 里现拉 SteeringQueue 快照,这里不用搬)。Windows 真控制台之外
+    // (footer.enabled 为假)这些都是空操作,退回老的"不回显、只 Enter 时
+    // 整条落队"。
     auto refresh_footer = [&] {
         std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
-        FooterSlot().echo = queue_.echo_text();
-        FooterSlot().queued = queue_.display_items();
-        // slash 提示:编辑态(上键取回改写)和敲字态同一条规则——buffer 以
-        // '/' 开头、还没敲空格就实时列出匹配命令,纯函数现算,不碰任何
-        // 编辑器状态。
-        FooterSlot().hints = StreamSlashHintLines(StreamHintCandidates(), queue_.echo_text());
+        FooterSlot().echo = echo_text();
+        // slash 提示:编辑态(取回改写)和敲字态同一条规则——buffer 以 '/'
+        // 开头、还没敲空格就实时列出匹配命令,纯函数现算,不碰任何编辑器状态。
+        FooterSlot().hints = StreamSlashHintLines(StreamHintCandidates(), FooterSlot().echo);
         RedrawStreamFooterLocked();
+    };
+
+    // 取回一条排队消息进编辑器(光标落末尾),Del 待确认解除。
+    auto begin_edit = [&](SteeringQueue::EditHandle handle) {
+        editor.LoadText(Utf8ToUtf32(handle.text));
+        delete_armed = false;
+        edit = std::move(handle);
+        refresh_footer();
+    };
+    auto close_edit_clear = [&]() {
+        edit.reset();
+        delete_armed = false;
+        editor.BeginLine(/*composer=*/true);
+    };
+    auto editor_text_utf8 = [&] { return Utf32ToUtf8(editor.CurrentRenderState().line); };
+
+    // 编辑态里上下键在队列条目间走:先把改到一半的正文按 Esc 语义提交到
+    // 当前位(原位替换;提交失败说明那条已被边界送走,正文留在编辑器里
+    // 继续当草稿),再取相邻一条。过末条往下 = 退出编辑态回"敲新消息"。
+    auto browse_edit = [&](bool up) {
+        if (!edit.has_value()) {
+            return;
+        }
+        std::size_t index = 0;
+        const auto snapshot = steering.Snapshot();
+        for (std::size_t i = 0; i < snapshot.size(); ++i) {
+            if (snapshot[i].id == edit->id) {
+                index = i;
+            }
+        }
+        const auto commit_status = steering.CommitEdit(*edit, editor_text_utf8());
+        if (commit_status == SteeringQueue::CommitStatus::Ok) {
+            close_edit_clear();
+        } else {
+            // 版本冲突:那条已变动。编辑器正文保留,事务就此了结。
+            edit.reset();
+            delete_armed = false;
+        }
+        // 相邻一条(方向钳住;正常情况下只有刚才那条冻着,BeginEdit 认不出
+        // 冻结条目自然返回空,防御到位)。
+        const bool go_prev = up && index > 0;
+        const bool go_next = !up && index + 1 < snapshot.size();
+        if (go_prev || go_next) {
+            const std::size_t next = go_prev ? index - 1 : index + 1;
+            if (auto handle = steering.BeginEdit(snapshot[next].id); handle.has_value()) {
+                begin_edit(std::move(*handle));
+                return;
+            }
+        }
+        refresh_footer();
     };
 
     // Esc 和单击 Ctrl+C 打断当前轮的收场动作完全一致,抽成一个共用 lambda——
@@ -1783,13 +2027,25 @@ void TurnInputListener::ThreadMain() {
             continue;  // 读失败/EOF:跟老逻辑一样跳过,循环靠 stop_requested_ 退出
         }
         using PK = platform::KeyInput::Kind;
+
+        // 取回键(Shift+←,备用 Ctrl+←):正文空、非编辑态、队列里有可取的
+        // 条目,三者齐备才取最新一条;其余场合 Shift+Left 落到 MapKey 的缺省
+        // 映射,仍是普通光标移动,不抢输入。
+        if (IsQueueRecallKey(key->kind) && ShouldRecallQueuedMessage(editor.CurrentRenderState().line.empty(),
+                                                                     edit.has_value(), steering.editable_size())) {
+            if (auto handle = steering.BeginEditLatest(); handle.has_value()) {
+                begin_edit(std::move(*handle));
+            }
+            continue;
+        }
+
         if (key->kind == PK::Esc) {
-            // 编辑态(取回待发消息改写中)的 Esc 是"放回队列",不打断当前轮;
-            // 空闲态的 Esc 才是打断。
-            if (queue_.editing()) {
-                if (queue_.CancelEdit() != PendingQueueCore::Event::None) {
-                    refresh_footer();
-                }
+            // 两层 Esc(规格):编辑态第一下只取消编辑、还原原文(不打断当前
+            // 轮);退出编辑态后的 Esc 才是打断。
+            if (edit.has_value()) {
+                steering.CancelEdit(*edit);
+                close_edit_clear();
+                refresh_footer();
                 continue;
             }
             interrupt_turn();
@@ -1817,6 +2073,13 @@ void TurnInputListener::ThreadMain() {
                     std::cout.flush();
                 }  // 退出前先放锁——std::exit 会跑静态对象析构,别让它们卡死在这把锁上。
                 std::exit(130);  // 130 = 128+SIGINT,"被 Ctrl+C 中断"的约定退出码
+            }
+            // 单击对齐 Esc 的两层语义:编辑态先取消编辑。
+            if (edit.has_value()) {
+                steering.CancelEdit(*edit);
+                close_edit_clear();
+                refresh_footer();
+                continue;
             }
             interrupt_turn();
             continue;
@@ -1857,48 +2120,105 @@ void TurnInputListener::ThreadMain() {
                 if (!mode_lock.owns_lock()) {
                     continue;
                 }
-                LineEditorCore& editor = SharedEditor();
-                editor.set_confirm_mode(NextConfirmMode(editor.confirm_mode()));
+                LineEditorCore& shared_editor = SharedEditor();
+                shared_editor.set_confirm_mode(NextConfirmMode(shared_editor.confirm_mode()));
             }
             std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
             RedrawStreamFooterLocked();
             continue;
         }
-        if (key->kind == PK::Enter || key->kind == PK::NewLine) {
-            // 落队(编辑态 = 原位替换),footer 复位:正文挪进上方待发区,
-            // 输入行清空回占位提示。
-            if (queue_.Submit() != PendingQueueCore::Event::None) {
+        if (key->kind == PK::Up || key->kind == PK::Down) {
+            if (edit.has_value()) {
+                // 编辑态:在队列条目间走(先把改到一半的正文写回当前位)。
+                browse_edit(key->kind == PK::Up);
+                continue;
+            }
+            if (editor.CurrentRenderState().line.empty() && steering.editable_size() > 0) {
+                // 旧"空输入按上键取回最后一条"入口,保留作别名;帮助文案与
+                // 队列标题只写 Shift+← 这一套主键(规格第四步)。
+                if (auto handle = steering.BeginEditLatest(); handle.has_value()) {
+                    begin_edit(std::move(*handle));
+                }
+                continue;
+            }
+            // 队列空/正文非空:进编辑器(翻历史,composer 里上下键的老现职)。
+            editor.HandleKey(KeyEvent::Simple(key->kind == PK::Up ? KeyKind::Up : KeyKind::Down));
+            refresh_footer();
+            continue;
+        }
+
+        if (key->kind == PK::Delete) {
+            // 编辑态:两段删除——第一下亮提示(编辑态标题自带"Del 再按一次
+            // 删除"),第二下 2 秒窗口内真删。
+            if (edit.has_value()) {
+                const auto now = std::chrono::steady_clock::now();
+                if (delete_armed && now < delete_armed_until) {
+                    steering.DeleteMessage(*edit);
+                    close_edit_clear();
+                } else {
+                    delete_armed = true;
+                    delete_armed_until = now + std::chrono::seconds(2);
+                }
                 refresh_footer();
             }
+            continue;  // 非编辑态的 Del 维持不理会(老行为)
+        }
+
+        if (key->kind == PK::NewLine) {
+            // Shift/Alt+Enter:光标处插换行(编辑排队消息也享受多行能力)。
+            editor.HandleKey(KeyEvent::Simple(KeyKind::NewLine));
+            refresh_footer();
             continue;
         }
-        if (key->kind == PK::Backspace) {
-            if (queue_.Backspace() != PendingQueueCore::Event::None) {
-                refresh_footer();  // 退格后实时更新回显
+
+        if (key->kind == PK::Enter) {
+            if (edit.has_value()) {
+                // 原位替换:保 id、目标、排队次序。版本对不上 = 那条已在工具
+                // 边界送走/被别处改过——提交失败,打一行提示,编辑器正文保留
+                // 当新草稿(再 Enter 即落新队),绝不"一边送旧文一边显示已保存"。
+                const auto status = steering.CommitEdit(*edit, editor_text_utf8());
+                if (status == SteeringQueue::CommitStatus::Ok) {
+                    close_edit_clear();
+                } else {
+                    edit.reset();
+                    delete_armed = false;
+                    {
+                        std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+                        EraseStreamFooterLocked();
+                        std::cout << "\n" << theme_.stats << tr("queue.commit_conflict") << theme_.reset << "\n";
+                        std::cout.flush();
+                        if (const auto& hook = StreamScreenPrintHookSlot()) {
+                            hook();  // 插打了整行,正文块的行数账作废(锁还攥着)
+                        }
+                    }
+                }
+                refresh_footer();
+                continue;
             }
-            continue;
-        }
-        if (key->kind == PK::Char) {
-            if (queue_.TypeChar(key->ch) != PendingQueueCore::Event::None) {
-                refresh_footer();  // 每敲一个字符实时回显到输入行
+            // 落队:带目标的 QueuedMessage 进会话层队列,正文挪进上方队列区,
+            // 输入行清空回占位提示。全空白不落。
+            const std::string text = editor_text_utf8();
+            if (!text.empty()) {
+                const std::optional<int> agent_target = GetComposerTarget();
+                steering.Enqueue(agent_target.has_value() ? MessageTarget::Agent(*agent_target)
+                                                          : MessageTarget::Main(),
+                                 text);
+                editor.BeginLine(/*composer=*/true);
             }
+            refresh_footer();
             continue;
         }
-        if (key->kind == PK::Up || key->kind == PK::Down) {
-            const auto event = key->kind == PK::Up ? queue_.MoveUp() : queue_.MoveDown();
-            if (event != PendingQueueCore::Event::None) {
-                refresh_footer();  // 取回/浏览待发消息
-            }
-            continue;
+
+        // 其余按键统一喂编辑器(字符/粘贴/退格/左右/Home/End;Tab 等 MapKey
+        // 不认的维持不理会,跟老逻辑一致)。任意编辑动作解除 Del 待确认。
+        if (const std::optional<KeyEvent> mapped = MapKey(*key); mapped.has_value()) {
+            delete_armed = false;
+            editor.HandleKey(*mapped);
+            refresh_footer();
         }
-        if (key->kind == PK::Delete) {
-            if (queue_.DeleteCurrent() != PendingQueueCore::Event::None) {
-                refresh_footer();  // 删掉当前浏览的待发消息
-            }
-            continue;
-        }
-        // 其余按键(Tab/Ctrl 组合……)监听期间不理会,跟老逻辑一致。
     }
+    // 交出还没了结的编辑事务:Stop() 在 join 之后读它并按 Esc 同款收尾。
+    open_edit_ = edit;
 }
 
 }  // namespace lubancode::cli

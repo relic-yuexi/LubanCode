@@ -1,7 +1,9 @@
-// 待发消息队列的纯逻辑核(0.25.x 排队输入自然化)。键位规则照规格
-// (todo"排队输入要改得自然"一节)逐条钉:空输入按上键取回最后一条、
-// 上下键在待发消息间走、Enter 原位替换、Delete 删当前项、Esc 放回队列;
-// 待发区摆法:一条不写汇总头、三条以内逐条摆、超上限只添一行"另有 N 条"。
+// 会话层排队队列 SteeringQueue(0.28.x"排队消息在工具边界送达并可
+// Shift+左键编辑")的纯逻辑测试:落队顺序与目标、投递按目标分账、编辑事务
+// (版本冲突/冻结/删除)、终态目标标注、立即送状态旗、显示成行(标题随
+// 状态变、三条窗口、编辑中标记)。全部走局部实例,不碰全局
+// SessionSteeringQueue;StreamSlashHintLines(流式输入行 slash 提示)的
+// 用例沿用旧文件(接线层纯函数,仍钉在这边)。
 
 #include <doctest/doctest.h>
 
@@ -11,228 +13,285 @@
 #include "cli/line_editor.hpp"
 #include "cli/queue_model.hpp"
 
-using lubancode::cli::BuildPendingQueueRows;
-using lubancode::cli::PendingQueueCore;
+using lubancode::cli::BuildSteeringQueueRows;
+using lubancode::cli::DeliveryMode;
+using lubancode::cli::MessageTarget;
+using lubancode::cli::QueueItemState;
+using lubancode::cli::QueueTitleMode;
+using lubancode::cli::QueueViewOptions;
+using lubancode::cli::QueuedMessage;
+using lubancode::cli::SteeringQueue;
 using lubancode::cli::StreamSlashHintLines;
-using Event = PendingQueueCore::Event;
+using Status = SteeringQueue::CommitStatus;
 
 namespace {
 
-// 把 UTF-8 解成码点逐个喂(真键盘路径上 TypeChar 收的就是码点,不是字节)。
-void Type(PendingQueueCore& q, const std::string& utf8) {
-    std::size_t i = 0;
-    while (i < utf8.size()) {
-        const unsigned char c0 = static_cast<unsigned char>(utf8[i]);
-        char32_t cp = c0;
-        std::size_t extra = 0;
-        if (c0 >= 0xF0) {
-            cp = c0 & 0x07;
-            extra = 3;
-        } else if (c0 >= 0xE0) {
-            cp = c0 & 0x0F;
-            extra = 2;
-        } else if (c0 >= 0xC0) {
-            cp = c0 & 0x1F;
-            extra = 1;
+// 按 id 找条目(测试断言用;找不到就给个带 id=0 的哑条目)。
+QueuedMessage Find(const std::vector<QueuedMessage>& items, lubancode::cli::QueueId id) {
+    for (const auto& item : items) {
+        if (item.id == id) {
+            return item;
         }
-        for (std::size_t k = 0; k < extra && i + 1 + k < utf8.size(); ++k) {
-            cp = (cp << 6) | (static_cast<unsigned char>(utf8[i + 1 + k]) & 0x3F);
-        }
-        q.TypeChar(cp);
-        i += extra + 1;
     }
+    return QueuedMessage{};
 }
 
 }  // namespace
 
-TEST_CASE("落队:敲字、Enter 追加,顺序保持;空 Enter 不落") {
-    PendingQueueCore q;
-    Type(q, "first");
-    CHECK(q.Submit() == Event::Submitted);
-    Type(q, "second");
-    CHECK(q.Submit() == Event::Submitted);
-    REQUIRE(q.size() == 2);
-    CHECK(q.items()[0] == "first");
-    CHECK(q.items()[1] == "second");
-    CHECK(q.echo_text().empty());
+TEST_CASE("落队:顺序保持、目标分账;空文本拒收") {
+    SteeringQueue q;
+    const auto main_id = q.Enqueue(MessageTarget::Main(), "第一句");
+    const auto agent_id = q.Enqueue(MessageTarget::Agent(3), "给三号的");
+    const auto empty_id = q.Enqueue(MessageTarget::Main(), "");
+    CHECK(main_id != 0);
+    CHECK(agent_id != 0);
+    CHECK(main_id != agent_id);
+    CHECK(empty_id == 0);  // 空文本不落队
 
-    CHECK(q.Submit() == Event::None);  // 空 buffer 按 Enter:什么都不发生
+    const auto snapshot = q.Snapshot();
+    REQUIRE(snapshot.size() == 2);
+    CHECK(snapshot[0].text == "第一句");        // 顺序 = 落队顺序
+    CHECK(snapshot[0].target == MessageTarget::Main());
+    CHECK(snapshot[1].target == MessageTarget::Agent(3));
+    CHECK(snapshot[1].target.task_id == 3);
+    CHECK(snapshot[0].state == QueueItemState::Queued);
     CHECK(q.size() == 2);
 }
 
-TEST_CASE("退格:退掉一个字符,空了再退不动") {
-    PendingQueueCore q;
-    Type(q, "abc");
-    CHECK(q.Backspace() == Event::Edited);
-    CHECK(q.echo_text() == "ab");
-    q.Backspace();
-    q.Backspace();
-    CHECK(q.echo_text().empty());
-    CHECK(q.Backspace() == Event::None);
-}
+TEST_CASE("投递按目标分账:main 的取件不带走子代理的,反之亦然") {
+    SteeringQueue q;
+    const auto m1 = q.Enqueue(MessageTarget::Main(), "m1");
+    const auto a1 = q.Enqueue(MessageTarget::Agent(2), "a1");
+    const auto m2 = q.Enqueue(MessageTarget::Main(), "m2");
+    const auto a2 = q.Enqueue(MessageTarget::Agent(5), "a2");
+    const auto other = q.Enqueue(MessageTarget::Agent(2), "another");
 
-TEST_CASE("取回:空输入按上键装进最后一条,待发区不再重复摆它") {
-    PendingQueueCore q;
-    Type(q, "one");
-    q.Submit();
-    Type(q, "two");
-    q.Submit();
+    auto main_items = q.TakeDeliverable(MessageTarget::Main());
+    REQUIRE(main_items.size() == 2);
+    CHECK(main_items[0].id == m1);  // main 目标内部保持落队顺序
+    CHECK(main_items[1].id == m2);
 
-    CHECK(q.MoveUp() == Event::Edited);
-    REQUIRE(q.editing());
-    CHECK(q.echo_text() == "two");                       // 取回的是最新落队那条
-    CHECK(q.display_items().size() == 1);                // 待发区只剩 one
-    CHECK(q.display_items()[0] == "one");
+    auto agent2_items = q.TakeDeliverable(MessageTarget::Agent(2));
+    REQUIRE(agent2_items.size() == 2);
+    CHECK(agent2_items[0].id == a1);
+    CHECK(agent2_items[1].id == other);
 
-    // 有字时按上键不取回(不误触)。
-    q.CancelEdit();
-    Type(q, "x");
-    CHECK(q.MoveUp() == Event::None);
-    CHECK_FALSE(q.editing());
-}
-
-TEST_CASE("改写:取回后改好按 Enter,原位替换") {
-    PendingQueueCore q;
-    Type(q, "aaa");
-    q.Submit();
-    Type(q, "bbb");
-    q.Submit();
-    Type(q, "ccc");
-    q.Submit();
-
-    q.MoveUp();                    // 取回 ccc(下标 2)
-    q.Backspace();
-    q.Backspace();
-    q.Backspace();
-    Type(q, "CCC");
-    CHECK(q.Submit() == Event::Submitted);
-    CHECK_FALSE(q.editing());
-    REQUIRE(q.size() == 3);
-    CHECK(q.items()[2] == "CCC");
-    CHECK(q.items()[0] == "aaa");  // 其余两条原样,位置不动
-    CHECK(q.items()[1] == "bbb");
-}
-
-TEST_CASE("浏览:上下键在待发消息间走,走到头钳住;改到一半的字不丢") {
-    PendingQueueCore q;
-    Type(q, "m1");
-    q.Submit();
-    Type(q, "m2");
-    q.Submit();
-    Type(q, "m3");
-    q.Submit();
-
-    q.MoveUp();          // -> m3(下标 2)
-    CHECK(q.echo_text() == "m3");
-    q.MoveUp();          // -> m2
-    CHECK(q.echo_text() == "m2");
-    q.MoveUp();          // -> m1(下标 0)
-    CHECK(q.echo_text() == "m1");
-    q.MoveUp();          // 到头钳住
-    CHECK(q.echo_text() == "m1");
-    CHECK(q.editing());
-
-    q.Backspace();
-    q.Backspace();       // 退成 ""
-    Type(q, "M1");
-    q.MoveDown();        // 挪走前先把 buffer 写回当前位
-    CHECK(q.items()[0] == "M1");
-    CHECK(q.echo_text() == "m2");
-    q.MoveDown();
-    CHECK(q.echo_text() == "m3");
-    CHECK(q.MoveDown() == Event::Edited);  // 过了最后一条:退出编辑态
-    CHECK_FALSE(q.editing());
-    CHECK(q.echo_text().empty());
-    CHECK(q.display_items().size() == 3);  // 三条都在队列里
-}
-
-TEST_CASE("Esc 放回队列:未提交的修改丢弃,原文还原") {
-    PendingQueueCore q;
-    Type(q, "keep");
-    q.Submit();
-    q.MoveUp();
-    q.Backspace();
-    q.Backspace();
-    q.Backspace();
-    q.Backspace();
-    Type(q, "changed");
-    CHECK(q.CancelEdit() == Event::Restored);
-    CHECK_FALSE(q.editing());
-    REQUIRE(q.size() == 1);
-    CHECK(q.items()[0] == "keep");  // 原文放回
-    CHECK(q.echo_text().empty());
-    CHECK(q.CancelEdit() == Event::None);  // 非编辑态不管
-}
-
-TEST_CASE("Delete:删掉当前浏览的那条") {
-    PendingQueueCore q;
-    Type(q, "a");
-    q.Submit();
-    Type(q, "b");
-    q.Submit();
-    q.MoveUp();                    // 取回 b
-    CHECK(q.DeleteCurrent() == Event::Deleted);
-    CHECK_FALSE(q.editing());
-    REQUIRE(q.size() == 1);
-    CHECK(q.items()[0] == "a");
-    CHECK(q.DeleteCurrent() == Event::None);  // 非编辑态不管
-}
-
-TEST_CASE("TakeAll:取走全部并清空,再取是空") {
-    PendingQueueCore q;
-    Type(q, "x");
-    q.Submit();
-    Type(q, "y");
-    q.Submit();
-    const std::vector<std::string> taken = q.TakeAll();
-    CHECK(taken.size() == 2);
-    CHECK(taken[0] == "x");
+    // 只剩五号那条;取空后 HasDeliverable 对所有目标都是假。
+    CHECK(q.size() == 1);
+    CHECK(q.HasDeliverable(MessageTarget::Agent(5)));
+    CHECK_FALSE(q.HasDeliverable(MessageTarget::Main()));
+    CHECK_FALSE(q.HasDeliverable(MessageTarget::Agent(2)));
+    CHECK(q.TakeFirstDeliverable(MessageTarget::Main()) == std::nullopt);
+    const auto head = q.TakeFirstDeliverable(MessageTarget::Agent(5));
+    REQUIRE(head.has_value());
+    CHECK(head->id == a2);
     CHECK(q.empty());
-    CHECK(q.TakeAll().empty());
 }
 
-TEST_CASE("中文取回改写:码点级退格不切半个字") {
-    PendingQueueCore q;
-    Type(q, "\xe4\xbd\xa0\xe5\xa5\xbd");  // "你好"(按字节喂,码点完整)
-    q.Submit();
-    q.MoveUp();
-    CHECK(q.echo_text() == "\xe4\xbd\xa0\xe5\xa5\xbd");
-    q.Backspace();  // 退掉 "好"(一个码点,不是三个字节)
-    CHECK(q.echo_text() == "\xe4\xbd\xa0");
+TEST_CASE("编辑事务:取回装原文、Enter 原位替换保 id/目标/次序") {
+    SteeringQueue q;
+    const auto id1 = q.Enqueue(MessageTarget::Main(), "旧话一");
+    const auto id2 = q.Enqueue(MessageTarget::Agent(4), "旧话二");
+
+    auto handle = q.BeginEditLatest();
+    REQUIRE(handle.has_value());
+    CHECK(handle->id == id2);                    // 默认取最新落队那条
+    CHECK(handle->text == "旧话二");
+    CHECK(handle->target == MessageTarget::Agent(4));
+
+    // 冻结中的条目:不可再开编辑、也不可投递。
+    CHECK(q.BeginEdit(id2) == std::nullopt);
+    CHECK(q.TakeDeliverable(MessageTarget::Agent(4)).empty());
+    CHECK_FALSE(q.HasDeliverable(MessageTarget::Agent(4)));
+    CHECK(q.editable_size() == 1);  // 冻结的不算可编辑
+    CHECK(q.HasDeliverable(MessageTarget::Main()));  // 别的目标不受牵连
+
+    CHECK(q.CommitEdit(*handle, "新话二") == Status::Ok);
+    const auto snapshot = q.Snapshot();
+    REQUIRE(snapshot.size() == 2);
+    CHECK(snapshot[1].id == id2);  // id 保住
+    CHECK(snapshot[1].text == "新话二");
+    CHECK(snapshot[1].target == MessageTarget::Agent(4));  // 目标保住
+    CHECK(snapshot[1].version == 2);
+    CHECK_FALSE(snapshot[1].edit_open);  // 解冻,可投递了
+    CHECK(q.HasDeliverable(MessageTarget::Agent(4)));
+    CHECK(snapshot[0].id == id1);
+    CHECK(snapshot[0].text == "旧话一");  // 其余条目原样,位置不动
 }
 
-TEST_CASE("BuildPendingQueueRows:一条不写汇总头,三条以内逐条摆") {
-    CHECK(BuildPendingQueueRows({}, 3).empty());
+TEST_CASE("版本冲突:凭据过期后提交失败,原文不被覆盖") {
+    SteeringQueue q;
+    const auto id = q.Enqueue(MessageTarget::Main(), "原文");
 
-    const auto one = BuildPendingQueueRows({"hello"}, 3);
-    REQUIRE(one.size() == 1);
-    CHECK(one[0] == "  \xE2\x80\xBA hello");
-    CHECK(one[0].find("1") == std::string::npos);  // 不写"待发消息 1 条"
+    auto stale = q.BeginEditLatest();
+    REQUIRE(stale.has_value());
 
-    const auto three = BuildPendingQueueRows({"a", "b", "c"}, 3);
-    REQUIRE(three.size() == 3);
-    CHECK(three[0] == "  \xE2\x80\xBA a");
-    CHECK(three[2] == "  \xE2\x80\xBA c");
+    // 同一条被另一只事务改过(先取消,再开新事务提交,旧凭据变过期)。
+    REQUIRE(q.CancelEdit(*stale) == Status::Ok);
+    auto fresh = q.BeginEditLatest();
+    REQUIRE(fresh.has_value());
+    REQUIRE(q.CommitEdit(*fresh, "新文") == Status::Ok);
+
+    CHECK(q.CommitEdit(*stale, "拿旧凭据改") == Status::Conflict);
+    CHECK(Find(q.Snapshot(), id).text == "新文");  // 原文(新文)没被旧凭据覆盖
+
+    // 已出队(送达)的条目:提交按 NotFound 报,不复活。
+    auto doomed = q.BeginEditLatest();
+    REQUIRE(doomed.has_value());
+    REQUIRE(q.CancelEdit(*doomed) == Status::Ok);
+    REQUIRE_FALSE(q.TakeDeliverable(MessageTarget::Main()).empty());
+    CHECK(q.CommitEdit(*doomed, "送达后想改") == Status::NotFound);
 }
 
-TEST_CASE("BuildPendingQueueRows:超上限只添一行'另有 N 条',摆最近的") {
-    const auto rows = BuildPendingQueueRows({"1", "2", "3", "4", "5"}, 3);
-    REQUIRE(rows.size() == 4);
-    CHECK(rows[0].find("2") != std::string::npos);       // "另有 2 条"
-    CHECK(rows[1] == "  \xE2\x80\xBA 3");                // 最近的 3 条
-    CHECK(rows[2] == "  \xE2\x80\xBA 4");
-    CHECK(rows[3] == "  \xE2\x80\xBA 5");
+TEST_CASE("Esc 还原:取消编辑放回原文;Del 删除;Remove 兜底") {
+    SteeringQueue q;
+    const auto id = q.Enqueue(MessageTarget::Main(), "要还原的");
+    auto handle = q.BeginEditLatest();
+    REQUIRE(handle.has_value());
+    CHECK(q.CancelEdit(*handle) == Status::Ok);
+    const auto snapshot = q.Snapshot();
+    REQUIRE(snapshot.size() == 1);
+    CHECK(snapshot[0].text == "要还原的");
+    CHECK_FALSE(snapshot[0].edit_open);
+    CHECK(q.CancelEdit(*handle) == Status::Conflict);  // 已解冻再取消 = 冲突
 
-    // 上限 1:只摆最新一条。
-    const auto single = BuildPendingQueueRows({"a", "b"}, 1);
-    REQUIRE(single.size() == 2);
-    CHECK(single[1] == "  \xE2\x80\xBA b");
+    // 删除走编辑事务。
+    auto del_handle = q.BeginEditLatest();
+    REQUIRE(del_handle.has_value());
+    CHECK(q.DeleteMessage(*del_handle) == Status::Ok);
+    CHECK(q.empty());
+    CHECK(q.DeleteMessage(*del_handle) == Status::NotFound);
+
+    const auto id2 = q.Enqueue(MessageTarget::Agent(1), "直接删");
+    CHECK(q.Remove(id2));
+    CHECK(q.empty());
+    CHECK_FALSE(q.Remove(id2));
+}
+
+TEST_CASE("终态目标:MarkTargetGone/MarkFailed 留原位标错,不参与投递") {
+    SteeringQueue q;
+    const auto gone = q.Enqueue(MessageTarget::Agent(9), "给已结束代理的");
+    const auto ok = q.Enqueue(MessageTarget::Agent(9), "还给机会的");
+    const auto failed = q.Enqueue(MessageTarget::Main(), "投错了的");
+
+    q.MarkTargetGone(gone, "目标子代理已结束");
+    q.MarkFailed(failed, "发送通道断了");
+
+    auto deliverable = q.TakeDeliverable(MessageTarget::Agent(9));
+    REQUIRE(deliverable.size() == 1);
+    CHECK(deliverable[0].id == ok);  // 只有健康的条目参与投递
+
+    const auto snapshot = q.Snapshot();
+    REQUIRE(snapshot.size() == 2);
+    CHECK(Find(snapshot, gone).state == QueueItemState::TargetGone);
+    CHECK(Find(snapshot, gone).note == "目标子代理已结束");
+    CHECK(Find(snapshot, failed).state == QueueItemState::Failed);
+
+    // TargetGone 的条目还能取回编辑(用户要改目标或删掉)。
+    auto handle = q.BeginEdit(gone);
+    REQUIRE(handle.has_value());
+    CHECK(handle->text == "给已结束代理的");
+}
+
+TEST_CASE("立即送状态旗:Esc 翻旗、送空后收旗;落队消息记下策略") {
+    SteeringQueue q;
+    CHECK_FALSE(q.immediate_delivery_requested());
+    q.Enqueue(MessageTarget::Main(), "等着送的");
+    q.RequestImmediateDelivery();
+    CHECK(q.immediate_delivery_requested());
+    // 旗子翻过后落队的消息策略记 Immediate(信息性字段,投递仍只在安全点)。
+    const auto late = q.Enqueue(MessageTarget::Main(), "打断后补的");
+    CHECK(Find(q.Snapshot(), late).delivery == DeliveryMode::Immediate);
+
+    q.TakeDeliverable(MessageTarget::Main());
+    q.ClearImmediateDelivery();
+    CHECK_FALSE(q.immediate_delivery_requested());
+}
+
+TEST_CASE("收场处置:TakeAllForDisposal 一次交出全部并清空") {
+    SteeringQueue q;
+    q.Enqueue(MessageTarget::Main(), "没送出的");
+    q.Enqueue(MessageTarget::Agent(2), "也没送出");
+    q.MarkTargetGone(q.Enqueue(MessageTarget::Agent(3), "目标没了的"), "gone");
+    const auto discarded = q.TakeAllForDisposal();
+    CHECK(discarded.size() == 3);
+    CHECK(q.empty());
+    CHECK(q.TakeAllForDisposal().empty());
+    CHECK_FALSE(q.immediate_delivery_requested());
+}
+
+TEST_CASE("BuildSteeringQueueRows:空队列不画标题;标题随模式变") {
+    CHECK(BuildSteeringQueueRows({}, QueueViewOptions{}).empty());
+
+    const std::vector<QueuedMessage> one{QueuedMessage{1, MessageTarget::Main(), "hi"}};
+    QueueViewOptions opt;
+    opt.title_mode = QueueTitleMode::Boundary;
+    const auto rows = BuildSteeringQueueRows(one, opt);
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[1] == "  \xE2\x86\xB3 hi");  // "  ↳ hi"
+    CHECK(rows[0].find("工具调用后送出") != std::string::npos);
+    CHECK(rows[0].find("Esc") != std::string::npos);
+
+    opt.title_mode = QueueTitleMode::EndOfTurn;
+    CHECK(BuildSteeringQueueRows(one, opt)[0].find("收尾后送出") != std::string::npos);
+    opt.title_mode = QueueTitleMode::Immediate;
+    CHECK(BuildSteeringQueueRows(one, opt)[0].find("打断") != std::string::npos);
+    opt.title_mode = QueueTitleMode::Editing;
+    CHECK(BuildSteeringQueueRows(one, opt)[0].find("编辑") != std::string::npos);
+}
+
+TEST_CASE("BuildSteeringQueueRows:目标短名、状态标记、多行正文只摆首行") {
+    std::vector<QueuedMessage> items;
+    items.push_back(QueuedMessage{1, MessageTarget::Main(), "第一行\n第二行"});
+    items.push_back(QueuedMessage{2, MessageTarget::Agent(3), "给三号"});
+    items.push_back(QueuedMessage{3, MessageTarget::Agent(9), "目标没了"});
+    items.back().state = QueueItemState::TargetGone;
+    items.push_back(QueuedMessage{4, MessageTarget::Main(), "投错了"});
+    items.back().state = QueueItemState::Failed;
+
+    QueueViewOptions opt;
+    opt.visible_cap = 8;  // 全摆
+    const auto rows = BuildSteeringQueueRows(items, opt);
+    REQUIRE(rows.size() == 5);
+    CHECK(rows[1].find("第一行") != std::string::npos);
+    CHECK(rows[1].find("第二行") == std::string::npos);      // 只摆首行
+    CHECK(rows[2].find("[#3]") != std::string::npos);         // 子代理目标短名
+    CHECK(rows[2].find("给三号") != std::string::npos);
+    CHECK(rows[3].find("目标已结束") != std::string::npos);
+    CHECK(rows[4].find("发送失败") != std::string::npos);
+    // main 目标不带短名标签(不吵)。
+    CHECK(rows[1].find("main") == std::string::npos);
+}
+
+TEST_CASE("BuildSteeringQueueRows:超上限加'另有 N 条',围着编辑条目开窗") {
+    std::vector<QueuedMessage> items;
+    for (int i = 1; i <= 6; ++i) {
+        items.push_back(QueuedMessage{static_cast<lubancode::cli::QueueId>(i), MessageTarget::Main(),
+                                      "话" + std::to_string(i)});
+    }
+    QueueViewOptions opt;
+    opt.visible_cap = 3;
+    // 没在编辑:摆最新 3 条(话4-话6);行序 = 标题、"另有 3 条"、条目。
+    auto rows = BuildSteeringQueueRows(items, opt);
+    REQUIRE(rows.size() == 5);
+    CHECK(rows[1].find("3") != std::string::npos);
+    CHECK(rows[2].find("话4") != std::string::npos);
+    CHECK(rows[4].find("话6") != std::string::npos);
+
+    // 编辑第 2 条(index 1):窗口围着它开,话1-话3 在窗里。
+    items[1].edit_open = true;
+    rows = BuildSteeringQueueRows(items, opt);
+    REQUIRE(rows.size() == 5);
+    CHECK(rows[2].find("话1") != std::string::npos);
+    CHECK(rows[3].find("话2") != std::string::npos);
+    CHECK(rows[3].find("编辑中") != std::string::npos);  // 编辑条目带标记
+    CHECK(rows[4].find("话3") != std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
 // StreamSlashHintLines(流式输入行的 slash 提示,接线层纯函数):门槛、前缀
-// 过滤、封顶 6 行 + 汇总行,规则照规格逐条钉。候选表是自造的,不依赖
-// AllSlashCommands 的真实清单(那份会随版本长,断言数字会飘)。
+// 过滤、封顶 6 行 + 汇总行。候选表是自造的,不依赖 AllSlashCommands 的
+// 真实清单(那份会随版本长,断言数字会飘)。
 // ---------------------------------------------------------------------------
 
 namespace {

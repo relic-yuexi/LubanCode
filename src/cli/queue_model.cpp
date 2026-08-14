@@ -1,17 +1,22 @@
-// 待发消息队列的纯逻辑核。设计说明见 queue_model.hpp 文件头;键位规则与
-// 规格(todo"排队输入要改得自然"一节)逐条对齐,单测钉在
-// tests/test_queue_model.cpp。
+// 会话层排队队列(SteeringQueue)与队列区成行(BuildSteeringQueueRows)。
+// 设计说明见 queue_model.hpp 文件头;键位/编辑事务/窗口化的规则全在这里,
+// 不认终端、不认线程,单测钉在 tests/test_queue_model.cpp。
 
 #include "cli/queue_model.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <utility>
 
 #include "cli/i18n.hpp"
-#include "cli/line_editor.hpp"  // Utf32ToUtf8
+#include "cli/line_editor.hpp"  // DisplayWidthUtf8 等纯函数(标题不走宽度,这里其实只借声明)
 #include "platform/paths.hpp"   // GetEnvVar
 
 namespace lubancode::cli {
+
+// -----------------------------------------------------------------------
+// 取回键判定
+// -----------------------------------------------------------------------
 
 bool ShouldRecallQueuedMessage(bool composer_empty, bool editing, std::size_t queue_size) {
     return composer_empty && !editing && queue_size > 0;
@@ -37,192 +42,347 @@ bool IsQueueRecallKey(platform::KeyInput::Kind kind) {
     return kind == K::CtrlLeft && QueueRecallFallbackEnabled();
 }
 
+// 屏上提示的取回键写法(规格:按实际能力显示)。Windows 的键事件恒带修饰
+// 键状态,Shift+← 稳;POSIX 有终端不报 Shift 修饰,备用键 Ctrl+← 一并写上
+// ——备用键被环境变量关掉时只写主键。
+std::string QueueRecallHint() {
+    const bool with_fallback =
+#ifdef _WIN32
+        false;  // VK_LEFT+SHIFT_PRESSED 恒可判,不必推备用键
+#else
+        QueueRecallFallbackEnabled();
+#endif
+    return tr(with_fallback ? "queue.key_hint_fallback" : "queue.key_hint");
+}
+
+// -----------------------------------------------------------------------
+// MessageTarget
+// -----------------------------------------------------------------------
+
+bool operator==(const MessageTarget& a, const MessageTarget& b) {
+    return a.kind == b.kind && (a.kind != MessageTarget::Kind::Subagent || a.task_id == b.task_id);
+}
+
+bool operator!=(const MessageTarget& a, const MessageTarget& b) { return !(a == b); }
+
+std::string MessageTarget::short_label() const {
+    if (kind == Kind::Subagent) {
+        return "#" + std::to_string(task_id);
+    }
+    return "main";
+}
+
+// -----------------------------------------------------------------------
+// SteeringQueue
+// -----------------------------------------------------------------------
+
+QueueId SteeringQueue::Enqueue(MessageTarget target, std::string text) {
+    if (text.empty()) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    const QueueId id = next_id_++;
+    QueuedMessage item;
+    item.id = id;
+    item.target = target;
+    item.text = std::move(text);
+    item.delivery = immediate_ ? DeliveryMode::Immediate : DeliveryMode::AfterNextToolBoundary;
+    items_.push_back(std::move(item));
+    return id;
+}
+
+std::vector<QueuedMessage> SteeringQueue::Snapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return items_;
+}
+
+bool SteeringQueue::empty() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return items_.empty();
+}
+
+std::size_t SteeringQueue::size() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return items_.size();
+}
+
+std::size_t SteeringQueue::editable_size() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return static_cast<std::size_t>(
+        std::count_if(items_.begin(), items_.end(), [](const QueuedMessage& item) { return !item.edit_open; }));
+}
+
+std::vector<QueuedMessage> SteeringQueue::TakeDeliverable(MessageTarget target) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<QueuedMessage> out;
+    for (auto it = items_.begin(); it != items_.end();) {
+        if (it->target == target && it->state == QueueItemState::Queued && !it->edit_open) {
+            out.push_back(std::move(*it));
+            it = items_.erase(it);
+            continue;
+        }
+        ++it;
+    }
+    return out;
+}
+
+std::optional<QueuedMessage> SteeringQueue::TakeFirstDeliverable(MessageTarget target) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto it = items_.begin(); it != items_.end(); ++it) {
+        if (it->target == target && it->state == QueueItemState::Queued && !it->edit_open) {
+            std::optional<QueuedMessage> out = std::move(*it);
+            items_.erase(it);
+            return out;
+        }
+    }
+    return std::nullopt;
+}
+
+bool SteeringQueue::HasDeliverable(MessageTarget target) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return std::any_of(items_.begin(), items_.end(), [&](const QueuedMessage& item) {
+        return item.target == target && item.state == QueueItemState::Queued && !item.edit_open;
+    });
+}
+
+std::optional<SteeringQueue::EditHandle> SteeringQueue::BeginEditLatest() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto it = items_.rbegin(); it != items_.rend(); ++it) {
+        if (!it->edit_open) {
+            it->edit_open = true;
+            EditHandle handle;
+            handle.id = it->id;
+            handle.version = it->version;
+            handle.target = it->target;
+            handle.text = it->text;
+            return handle;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<SteeringQueue::EditHandle> SteeringQueue::BeginEdit(QueueId id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& item : items_) {
+        if (item.id == id && !item.edit_open) {
+            item.edit_open = true;
+            EditHandle handle;
+            handle.id = item.id;
+            handle.version = item.version;
+            handle.target = item.target;
+            handle.text = item.text;
+            return handle;
+        }
+    }
+    return std::nullopt;
+}
+
+SteeringQueue::CommitStatus SteeringQueue::CommitEdit(const EditHandle& handle, std::string new_text) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& item : items_) {
+        if (item.id != handle.id) {
+            continue;
+        }
+        // 版本对不上 = 取出之后账被人动过(别的编辑事务已改写)。规格钉死:
+        // 不可一边送旧文一边显示已保存——提交失败,调用方提示。
+        if (!item.edit_open || item.version != handle.version) {
+            return CommitStatus::Conflict;
+        }
+        item.text = std::move(new_text);
+        ++item.version;
+        item.edit_open = false;
+        return CommitStatus::Ok;
+    }
+    return CommitStatus::NotFound;
+}
+
+SteeringQueue::CommitStatus SteeringQueue::CancelEdit(const EditHandle& handle) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& item : items_) {
+        if (item.id != handle.id) {
+            continue;
+        }
+        if (!item.edit_open) {
+            return CommitStatus::Conflict;
+        }
+        item.edit_open = false;  // 原文从未被动过,解冻即还原
+        return CommitStatus::Ok;
+    }
+    return CommitStatus::NotFound;
+}
+
+SteeringQueue::CommitStatus SteeringQueue::DeleteMessage(const EditHandle& handle) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto it = items_.begin(); it != items_.end(); ++it) {
+        if (it->id != handle.id) {
+            continue;
+        }
+        if (!it->edit_open) {
+            return CommitStatus::Conflict;
+        }
+        items_.erase(it);
+        return CommitStatus::Ok;
+    }
+    return CommitStatus::NotFound;
+}
+
+bool SteeringQueue::Remove(QueueId id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto it = items_.begin(); it != items_.end(); ++it) {
+        if (it->id == id) {
+            items_.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
+
+void SteeringQueue::MarkTargetGone(QueueId id, std::string note) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& item : items_) {
+        if (item.id == id) {
+            item.state = QueueItemState::TargetGone;
+            item.note = std::move(note);
+            return;
+        }
+    }
+}
+
+void SteeringQueue::MarkFailed(QueueId id, std::string note) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& item : items_) {
+        if (item.id == id) {
+            item.state = QueueItemState::Failed;
+            item.note = std::move(note);
+            return;
+        }
+    }
+}
+
+void SteeringQueue::RequestImmediateDelivery() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    immediate_ = true;
+    for (auto& item : items_) {
+        if (item.state == QueueItemState::Queued) {
+            item.delivery = DeliveryMode::Immediate;
+        }
+    }
+}
+
+bool SteeringQueue::immediate_delivery_requested() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return immediate_;
+}
+
+void SteeringQueue::ClearImmediateDelivery() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    immediate_ = false;
+}
+
+std::vector<QueuedMessage> SteeringQueue::TakeAllForDisposal() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<QueuedMessage> out = std::move(items_);
+    items_.clear();
+    immediate_ = false;
+    return out;
+}
+
+SteeringQueue& SessionSteeringQueue() {
+    static SteeringQueue queue;
+    return queue;
+}
+
+// -----------------------------------------------------------------------
+// 显示成行
+// -----------------------------------------------------------------------
 
 namespace {
 
-// UTF-8 -> UTF-32 解码。line_editor.cpp 里那份是匿名命名空间的,这里自备
-// 一份小的(取出来的待发消息装回编辑 buffer 用)。输入都是本程序自己拼的
-// UTF-8,非法序列按"跳过一个字节"处理,同 line_editor 的取舍。
-std::u32string DecodeUtf8(const std::string& text) {
-    std::u32string out;
-    std::size_t i = 0;
-    const std::size_t n = text.size();
-    while (i < n) {
-        const unsigned char c0 = static_cast<unsigned char>(text[i]);
-        char32_t cp = 0;
-        std::size_t extra = 0;
-        if (c0 < 0x80) {
-            cp = c0;
-        } else if ((c0 & 0xE0) == 0xC0) {
-            cp = c0 & 0x1F;
-            extra = 1;
-        } else if ((c0 & 0xF0) == 0xE0) {
-            cp = c0 & 0x0F;
-            extra = 2;
-        } else if ((c0 & 0xF8) == 0xF0) {
-            cp = c0 & 0x07;
-            extra = 3;
-        } else {
-            ++i;
-            continue;
+// 正文首行:截到第一个换行;多行正文尾巴补一枚省略号(全文在取回编辑器里
+// 看,队列区只摆首行——可折叠,不丢数据)。
+std::string FirstLineOf(const std::string& text) {
+    const std::size_t cut = text.find('\n');
+    std::string line = text.substr(0, cut);
+    for (char& c : line) {
+        if (c == '\r' || c == '\t') {
+            c = ' ';
         }
-        bool ok = true;
-        for (std::size_t k = 0; k < extra; ++k) {
-            if (i + 1 + k >= n) {
-                ok = false;
-                break;
-            }
-            const unsigned char ck = static_cast<unsigned char>(text[i + 1 + k]);
-            if ((ck & 0xC0) != 0x80) {
-                ok = false;
-                break;
-            }
-            cp = (cp << 6) | (ck & 0x3F);
-        }
-        if (!ok) {
-            ++i;
-            continue;
-        }
-        out.push_back(cp);
-        i += extra + 1;
     }
-    return out;
+    if (cut != std::string::npos) {
+        line += "\xe2\x80\xa6";  // "…"
+    }
+    return line;
 }
 
 }  // namespace
 
-std::vector<std::string> PendingQueueCore::display_items() const {
-    if (!editing_) {
-        return items_;
-    }
-    std::vector<std::string> out;
-    out.reserve(items_.empty() ? 0 : items_.size() - 1);
-    for (std::size_t i = 0; i < items_.size(); ++i) {
-        if (i != edit_index_) {
-            out.push_back(items_[i]);
-        }
-    }
-    return out;
-}
-
-std::string PendingQueueCore::echo_text() const { return Utf32ToUtf8(buffer_); }
-
-PendingQueueCore::Event PendingQueueCore::TypeChar(char32_t ch) {
-    if (ch < 0x20) {
-        return Event::None;  // 控制字符不进 buffer(调用方也只会喂可打印键)
-    }
-    buffer_.push_back(ch);
-    return Event::Edited;
-}
-
-PendingQueueCore::Event PendingQueueCore::Backspace() {
-    if (buffer_.empty()) {
-        return Event::None;
-    }
-    buffer_.pop_back();
-    return Event::Edited;
-}
-
-void PendingQueueCore::EnterEditAt(std::size_t index) {
-    editing_ = true;
-    edit_index_ = index;
-    restore_text_ = items_[index];
-    buffer_ = DecodeUtf8(restore_text_);
-}
-
-PendingQueueCore::Event PendingQueueCore::MoveUp() {
-    if (editing_) {
-        // 先把改到一半的 buffer 写回当前位,再往旧走;到头钳住。
-        items_[edit_index_] = Utf32ToUtf8(buffer_);
-        if (edit_index_ == 0) {
-            return Event::Edited;
-        }
-        EnterEditAt(edit_index_ - 1);
-        return Event::Edited;
-    }
-    if (!buffer_.empty() || items_.empty()) {
-        return Event::None;  // 只有"空输入"才取回待发消息(规格)
-    }
-    EnterEditAt(items_.size() - 1);
-    return Event::Edited;
-}
-
-PendingQueueCore::Event PendingQueueCore::MoveDown() {
-    if (!editing_) {
-        return Event::None;
-    }
-    items_[edit_index_] = Utf32ToUtf8(buffer_);
-    if (edit_index_ + 1 < items_.size()) {
-        EnterEditAt(edit_index_ + 1);
-        return Event::Edited;
-    }
-    // 已经是最后(最新)一条:退出编辑态,回到"敲新消息"的起点。
-    editing_ = false;
-    buffer_.clear();
-    restore_text_.clear();
-    return Event::Edited;
-}
-
-PendingQueueCore::Event PendingQueueCore::Submit() {
-    if (editing_) {
-        items_[edit_index_] = Utf32ToUtf8(buffer_);  // 原位替换
-        editing_ = false;
-        buffer_.clear();
-        restore_text_.clear();
-        return Event::Submitted;
-    }
-    if (buffer_.empty()) {
-        return Event::None;
-    }
-    items_.push_back(Utf32ToUtf8(buffer_));
-    buffer_.clear();
-    return Event::Submitted;
-}
-
-PendingQueueCore::Event PendingQueueCore::CancelEdit() {
-    if (!editing_) {
-        return Event::None;
-    }
-    items_[edit_index_] = restore_text_;  // 原文放回,未提交的修改丢弃
-    editing_ = false;
-    buffer_.clear();
-    restore_text_.clear();
-    return Event::Restored;
-}
-
-PendingQueueCore::Event PendingQueueCore::DeleteCurrent() {
-    if (!editing_) {
-        return Event::None;
-    }
-    items_.erase(items_.begin() + static_cast<std::ptrdiff_t>(edit_index_));
-    editing_ = false;
-    buffer_.clear();
-    restore_text_.clear();
-    return Event::Deleted;
-}
-
-std::vector<std::string> PendingQueueCore::TakeAll() {
-    std::vector<std::string> out = std::move(items_);
-    items_.clear();
-    editing_ = false;
-    buffer_.clear();
-    restore_text_.clear();
-    return out;
-}
-
-std::vector<std::string> BuildPendingQueueRows(const std::vector<std::string>& items, std::size_t visible_cap) {
+std::vector<std::string> BuildSteeringQueueRows(const std::vector<QueuedMessage>& items,
+                                                const QueueViewOptions& options) {
     std::vector<std::string> rows;
     if (items.empty()) {
-        return rows;
+        return rows;  // 规格明确:没队列连标题都不画
     }
-    const std::size_t visible = items.size() < visible_cap ? items.size() : visible_cap;
-    if (items.size() > visible_cap) {
-        // 只添一行汇总,不逐条摆最旧的多余项(规格:超过可见上限,只添一行)。
-        rows.push_back(trf("input.queue_more", items.size() - visible_cap));
+    const std::string key_hint = options.key_hint.empty() ? QueueRecallHint() : options.key_hint;
+    switch (options.title_mode) {
+        case QueueTitleMode::Boundary:
+            rows.push_back(trf("queue.title.boundary", key_hint));
+            break;
+        case QueueTitleMode::EndOfTurn:
+            rows.push_back(trf("queue.title.end_of_turn", key_hint));
+            break;
+        case QueueTitleMode::Immediate:
+            rows.push_back(tr("queue.title.immediate"));
+            break;
+        case QueueTitleMode::Editing:
+            rows.push_back(tr("queue.title.editing"));
+            break;
     }
-    const std::size_t first = items.size() - visible;
-    for (std::size_t i = 0; i < visible; ++i) {
-        rows.push_back("  \xE2\x80\xBA " + items[first + i]);  // "  › "
+
+    const std::size_t count = items.size();
+    const std::size_t cap = options.visible_cap == 0 ? count : options.visible_cap;
+    std::size_t first = 0;
+    std::size_t visible = count;
+    if (count > cap) {
+        visible = cap;
+        // 超上限:围着正在编辑的条目开窗(没在编辑就摆最新的 cap 条)。
+        std::size_t edit_index = count;  // "无"
+        for (std::size_t i = 0; i < count; ++i) {
+            if (items[i].edit_open) {
+                edit_index = i;
+                break;
+            }
+        }
+        if (edit_index < count) {
+            first = edit_index > cap / 2 ? edit_index - cap / 2 : 0;
+            if (first + visible > count) {
+                first = count - visible;
+            }
+        } else {
+            first = count - visible;
+        }
+        rows.push_back(trf("input.queue_more", count - visible));
+    }
+
+    for (std::size_t i = first; i < first + visible; ++i) {
+        const QueuedMessage& item = items[i];
+        std::string prefix;
+        switch (item.state) {
+            case QueueItemState::TargetGone:
+                prefix += tr("queue.mark.target_gone");
+                break;
+            case QueueItemState::Failed:
+                prefix += tr("queue.mark.failed");
+                break;
+            case QueueItemState::Queued:
+                break;
+        }
+        if (!item.target.is_main()) {
+            prefix += trf("queue.mark.target", item.target.task_id);
+        }
+        if (item.edit_open) {
+            prefix += tr("queue.mark.editing");
+        }
+        rows.push_back("  \xE2\x86\xB3 " + prefix + FirstLineOf(item.text));  // "  ↳ "
     }
     return rows;
 }

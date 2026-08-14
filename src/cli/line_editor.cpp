@@ -11,56 +11,10 @@ namespace {
 
 constexpr char32_t kPasteTokenBase = 0xF0000;
 
-// 手写 UTF-8 -> UTF-32 解码,只给 TruncateUtf8ToDisplayWidth 内部用。非法
-// 起始字节、序列被截断、续字节不是 10xxxxxx 这几种情况一律跳过一个字节
-// 继续——这是给自己代码拼出来的字符串(候选名 + 中文说明)截断用,不是
-// 拿来校验外部不可信输入的严格解码器。
-std::u32string Utf8ToUtf32(const std::string& text) {
-    std::u32string out;
-    std::size_t i = 0;
-    const std::size_t n = text.size();
-    while (i < n) {
-        const unsigned char c0 = static_cast<unsigned char>(text[i]);
-        char32_t cp = 0;
-        std::size_t extra = 0;
-        if (c0 < 0x80) {
-            cp = c0;
-            extra = 0;
-        } else if ((c0 & 0xE0) == 0xC0) {
-            cp = c0 & 0x1F;
-            extra = 1;
-        } else if ((c0 & 0xF0) == 0xE0) {
-            cp = c0 & 0x0F;
-            extra = 2;
-        } else if ((c0 & 0xF8) == 0xF0) {
-            cp = c0 & 0x07;
-            extra = 3;
-        } else {
-            ++i;
-            continue;
-        }
-        if (i + extra >= n) {
-            break;  // 序列被截断,到此为止
-        }
-        bool ok = true;
-        char32_t decoded = cp;
-        for (std::size_t k = 1; k <= extra; ++k) {
-            const unsigned char ck = static_cast<unsigned char>(text[i + k]);
-            if ((ck & 0xC0) != 0x80) {
-                ok = false;
-                break;
-            }
-            decoded = (decoded << 6) | (ck & 0x3F);
-        }
-        if (!ok) {
-            ++i;
-            continue;
-        }
-        out.push_back(decoded);
-        i += extra + 1;
-    }
-    return out;
-}
+// 手写 UTF-8 -> UTF-32 解码已升为公开函数 Utf8ToUtf32(0.28.x 取回排队
+// 消息装回编辑 buffer 也要用),本体搬去下面的公开区;非法起始字节、序列
+// 被截断、续字节不是 10xxxxxx 一律跳过一个字节继续——这是给自己代码拼
+// 出来的字符串用的,不是校验外部不可信输入的严格解码器。
 
 std::u32string CurrentWord(const std::u32string& line) {
     const std::size_t space_pos = line.find(U' ');
@@ -222,6 +176,52 @@ std::string Utf32ToUtf8(const std::u32string& text) {
             out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
             out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
         }
+    }
+    return out;
+}
+
+std::u32string Utf8ToUtf32(const std::string& text) {
+    std::u32string out;
+    std::size_t i = 0;
+    const std::size_t n = text.size();
+    while (i < n) {
+        const unsigned char c0 = static_cast<unsigned char>(text[i]);
+        char32_t cp = 0;
+        std::size_t extra = 0;
+        if (c0 < 0x80) {
+            cp = c0;
+        } else if ((c0 & 0xE0) == 0xC0) {
+            cp = c0 & 0x1F;
+            extra = 1;
+        } else if ((c0 & 0xF0) == 0xE0) {
+            cp = c0 & 0x0F;
+            extra = 2;
+        } else if ((c0 & 0xF8) == 0xF0) {
+            cp = c0 & 0x07;
+            extra = 3;
+        } else {
+            ++i;  // 非法首字节,跳过一个
+            continue;
+        }
+        bool ok = true;
+        for (std::size_t k = 0; k < extra; ++k) {
+            if (i + 1 + k >= n) {
+                ok = false;
+                break;
+            }
+            const unsigned char ck = static_cast<unsigned char>(text[i + 1 + k]);
+            if ((ck & 0xC0) != 0x80) {
+                ok = false;
+                break;
+            }
+            cp = (cp << 6) | (ck & 0x3F);
+        }
+        if (!ok) {
+            ++i;
+            continue;
+        }
+        out.push_back(cp);
+        i += extra + 1;
     }
     return out;
 }
