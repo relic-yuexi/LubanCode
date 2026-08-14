@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "api/models.hpp"
+#include "app/version.hpp"
 #include "cli/console_input.hpp"
 #include "platform/console.hpp"
 #include "cli/context_tracker.hpp"

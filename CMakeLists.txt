@@ -326,6 +326,7 @@ target_compile_features(lubancode_core PUBLIC cxx_std_23)
 add_executable(lubancode
   src/main.cpp
   src/app/backend_stack.cpp
+  src/app/tool_runtime.cpp
   src/cli/console_input.cpp
   src/cli/spinner.cpp
   src/cli/record_command.cpp)
