@@ -439,6 +439,13 @@ bool AgentTool::HasRunningTasks() const {
     });
 }
 
+bool AgentTool::HasUndeliveredCompletions() const {
+    std::lock_guard<std::mutex> lock(tasks_mutex_);
+    return std::any_of(tasks_.begin(), tasks_.end(), [](const auto& task) {
+        return task->snapshot.state != AgentTaskState::Running && !task->snapshot.delivered;
+    });
+}
+
 std::string AgentTool::DrainCompletionNotices() {
     std::lock_guard<std::mutex> lock(tasks_mutex_);
     std::ostringstream out;

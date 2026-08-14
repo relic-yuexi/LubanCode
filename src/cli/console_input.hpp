@@ -130,6 +130,13 @@ struct AgentPanelEntry {
 using AgentPanelProvider = std::function<std::vector<AgentPanelEntry>()>;
 void SetAgentPanelProvider(AgentPanelProvider provider);
 
+// 空闲唤醒钩子:composer 主提示符在逐键等待期间,每 100ms 的面板刷新一拍
+// 顺带问一次;返回 true 表示应用层有系统侧事件要在会话空闲时处理(比如
+// 后台子代理跑完、结果等着交回主代理),ReadLine 以空串返回让调用方的循环
+// 顶去办自己的事。只在 composer 为空时问——用户敲了一半的正文不抢,等
+// 提交后再说。传空钩子即清除;管道/重定向走不到逐键路径,设了也永不触发。
+void SetIdleWakeHook(std::function<bool()> hook);
+
 // 0.17.0:常驻状态行(composer 输入框下横线之下那一行)要展示的会话数据。
 // main.cpp 在每轮给主提示符之前更新一次(/model 切换、context 百分比刷新
 // 全走这一条路,反正每轮循环都会路过);终端层每帧重画状态行时读它,配上

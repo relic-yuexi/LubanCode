@@ -146,6 +146,11 @@ public:
     std::string DrainCompletionNotices();
     bool HasRunningTasks() const;
 
+    // 有没有"已经进终态、结果还没投递给主会话"的后台任务。面板轮询靠
+    // TaskRevision 画状态,主循环靠这个知道"该把结果送回主代理了"——
+    // DrainCompletionNotices 投递完之后这里就翻回 false。
+    bool HasUndeliveredCompletions() const;
+
     // 主会话切进 /worktree 后，子代理也得看见同一处工作目录。
     void SetWorkingDirectory(std::string cwd) { cwd_ = std::move(cwd); }
 

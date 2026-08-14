@@ -470,6 +470,8 @@ TEST_CASE("后台子代理立即交回任务号,独立跑完,结果只投递一�
     CHECK(launch_time < std::chrono::milliseconds(500));
     REQUIRE(agent_tool.TaskSnapshots().size() == 1);
     CHECK(agent_tool.TaskSnapshots()[0].state == tools::AgentTaskState::Running);
+    // 跑着的时候没有"未投递的完成结果"——主循环不该被唤醒。
+    CHECK_FALSE(agent_tool.HasUndeliveredCompletions());
 
     {
         std::lock_guard<std::mutex> lock(state->mutex);
@@ -499,4 +501,42 @@ TEST_CASE("后台子代理立即交回任务号,独立跑完,结果只投递一�
     const std::string first_notice = agent_tool.DrainCompletionNotices();
     CHECK(first_notice.find("后台摸排完毕") != std::string::npos);
     CHECK(agent_tool.DrainCompletionNotices().empty());
+}
+
+// 回流回归(2026-08-14 死机会话):后台子代理在会话空闲时跑完,主循环正
+// 阻塞在等键输入上。面板轮询看得见"完成"(TaskRevision 变了),但结果
+// 只在下一个 RunTurn 开头才被 Drain 走——没有"有货待投递"的信号,主循环
+// 就永远不会醒,会话冻死在代理面板。HasUndeliveredCompletions 就是那条
+// 缺掉的信号:进终态而未投递时为真,投递一次后翻回假。
+TEST_CASE("agent 工具:空闲时跑完的后台子代理,HasUndeliveredCompletions 翻真直到被投递") {
+    tools::ToolRegistry sub_registry;
+    auto state = std::make_shared<BlockingBackendState>();
+    FakeBackend foreground_backend;  // 前台路径不触发,挂着只为构造
+    tools::AgentTool agent_tool(foreground_backend, sub_registry, "/work/dir");
+    agent_tool.SetDetachedBackendFactory([state]() {
+        tools::DetachedAgentBackend detached;
+        detached.backend = std::make_unique<BlockingBackend>(state);
+        return detached;
+    });
+
+    CHECK_FALSE(agent_tool.HasUndeliveredCompletions());  // 一个任务都没有:别唤醒
+    CHECK(agent_tool.execute(nlohmann::json{{"prompt", "后台摸排"}, {"run_in_background", true}}).content.find(
+              "#1") != std::string::npos);
+    CHECK_FALSE(agent_tool.HasUndeliveredCompletions());  // 跑着:也别唤醒
+
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->release = true;
+    }
+    state->ready.notify_all();
+    for (int i = 0; i < 100 && agent_tool.HasRunningTasks(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE_FALSE(agent_tool.HasRunningTasks());
+
+    // 任务已进终态、结果还没投递——这正是主循环该被唤醒的窗口。
+    REQUIRE(agent_tool.HasUndeliveredCompletions());
+    const std::string notice = agent_tool.DrainCompletionNotices();
+    CHECK(notice.find("后台摸排完毕") != std::string::npos);
+    CHECK_FALSE(agent_tool.HasUndeliveredCompletions());  // 投递过就翻回假,不会反复唤醒
 }
