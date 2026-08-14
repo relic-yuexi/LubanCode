@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "revision": "2026-07-25",
+  "revision": "2026-08-14",
   "providers": {
     "openai": {
       "name": "OpenAI",
@@ -120,6 +120,17 @@
         "tool_stream": true
       },
       "models": {
+        "glm-5.3": {
+          "name": "GLM-5.3",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "default_think": "max",
+          "capabilities": { "reasoning": true, "tools": true, "structured_output": true },
+          "variants": {
+            "high": { "description": "增强推理" },
+            "max": { "description": "深度推理" }
+          }
+        },
         "glm-5.2": {
           "name": "GLM-5.2",
           "context_window": 1000000,
@@ -146,6 +157,17 @@
         "tool_stream": true
       },
       "models": {
+        "glm-5.3": {
+          "name": "GLM-5.3",
+          "context_window": 1000000,
+          "max_output": 128000,
+          "default_think": "max",
+          "capabilities": { "reasoning": true, "tools": true, "structured_output": true },
+          "variants": {
+            "high": { "description": "增强推理" },
+            "max": { "description": "深度推理" }
+          }
+        },
         "glm-5": {
           "name": "GLM-5",
           "context_window": 202752,
