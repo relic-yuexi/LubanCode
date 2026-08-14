@@ -56,6 +56,7 @@
 #include "app/commands/prompt_commands.hpp"
 #include "app/commands/settings_commands.hpp"
 #include "app/commands/workspace_commands.hpp"
+#include "app/commands/peer_commands.hpp"
 #include "app/version.hpp"
 #include "cli/agent_status.hpp"
 #include "cli/console_input.hpp"
@@ -215,7 +216,10 @@ private:
     void PrintMemoryUsage() const;
     void HandleMemoryCommand(const std::string& raw_args);
     void SyncWorktreeDirectory();
-    bool ProcessLine(const std::string& content);
+    CommandFlow ProcessLine(const std::string& content);
+    CommandFlow DispatchSlashCommand(const lubancode::cli::ParsedSlashCommand& parsed);
+    CommandFlow RunUserTurn(const std::string& content);
+    SessionCommandState MakeSessionCommandState();
     lubancode::tools::DetachedAgentBackend BuildDetachedBackend() const;
     std::unique_ptr<lubancode::tools::ToolRegistry> BuildDetachedRegistry() const;
 
@@ -1139,11 +1143,20 @@ void InteractiveSession::SyncWorktreeDirectory() {
 // 路径共用这一份 slash 分支 + 自动 compact 检查 + RunTurn 调用,行为
 // 完全一致(spec 要求"队列里是 slash 命令也认")。返回 false 表示这一行
 // 触发了 /exit,外层循环该退出了。
-bool InteractiveSession::ProcessLine(const std::string& content) {
+CommandFlow InteractiveSession::ProcessLine(const std::string& content) {
     const lubancode::cli::ParsedSlashCommand parsed = lubancode::cli::ParseSlashCommand(content);
     if (parsed.command != lubancode::cli::SlashCommand::NotSlash &&
         parsed.command != lubancode::cli::SlashCommand::Image) {
-        switch (parsed.command) {
+        return DispatchSlashCommand(parsed);
+    }
+    // 普通正文(含 peer 来信组包后的文字):自动压缩检查 + 发一轮。
+    return RunUserTurn(content);
+}
+
+// slash 分派:顶层 switch 只做路由,肥 case 全在各领域 handler
+// (commands/ 下按窄状态接活)。返回 Exit 表示触发 /exit,外层循环该退。
+CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::ParsedSlashCommand& parsed) {
+    switch (parsed.command) {
             case lubancode::cli::SlashCommand::Help:
                 PrintSlashHelp();
                 break;
@@ -1184,73 +1197,14 @@ bool InteractiveSession::ProcessLine(const std::string& content) {
                 HandleLanguageCommand(parsed.args, config_file_path);
                 break;
             case lubancode::cli::SlashCommand::Worktree: {
-                const lubancode::cli::ParsedWorktreeCommand command = lubancode::cli::ParseWorktreeCommand(parsed.args);
-                lubancode::cli::WorktreeResult result;
-                switch (command.action) {
-                    case lubancode::cli::WorktreeAction::New:
-                        result = worktree_session.Create(command.name);
-                        break;
-                    case lubancode::cli::WorktreeAction::List:
-                        result = worktree_session.List();
-                        break;
-                    case lubancode::cli::WorktreeAction::Exit:
-                        result = worktree_session.Exit(command.exit_mode);
-                        break;
-                    case lubancode::cli::WorktreeAction::Invalid:
-                        result.code = lubancode::cli::WorktreeResultCode::InvalidArgument;
-                        break;
-                }
-                PrintWorktreeResult(result);
-                if (result.code == lubancode::cli::WorktreeResultCode::NeedsRemoveConfirmation) {
-                    const std::optional<std::string> answer = lubancode::cli::ReadLine(
-                        theme.confirm + tr("cmd.worktree.remove_confirm") + theme.reset, theme,
-                        /*esc_rejects=*/true);
-                    if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
-                        result = worktree_session.ConfirmRemove();
-                        PrintWorktreeResult(result);
-                    } else {
-                        std::cout << tr("cmd.worktree.remove_cancelled") << "\n";
-                    }
-                }
-                // /worktree new 撞上园子外的已有房:跟模型工具同一道硬确认。
-                if (result.code == lubancode::cli::WorktreeResultCode::NeedsUserConfirmation) {
-                    const std::optional<std::string> answer = lubancode::cli::ReadLine(
-                        theme.confirm + tr("cmd.worktree.outside_prompt") + theme.reset, theme,
-                        /*esc_rejects=*/true);
-                    if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
-                        result = worktree_session.Enter(command.name, /*base=*/"head",
-                                                        /*confirmed_outside=*/true);
-                        PrintWorktreeResult(result);
-                    }
-                }
-                // std::filesystem::current_path 是工具层共同的相对路径基准。
-                // 同步提示词和子代理那份 cwd，历史则原样保留。
-                SyncWorktreeDirectory();
-                break;
+                WorkspaceCommandState worktree_state{worktree_session,
+                                                     [this]() { SyncWorktreeDirectory(); }};
+                return HandleWorktreeCommand(worktree_state, parsed.args, theme);
             }
-            case lubancode::cli::SlashCommand::Clear:
-                // 真控制台才清屏——ANSI 转义混进管道/重定向输出会污染
-                // 脚本消费者,spinner_enabled 就是这个函数里通用的
-                // "是不是真控制台" 信号(RunTurn 的 is_console 用的也是它)。
-                // 清完屏紧接着重打图标 + 横幅——回归修复:此前清屏后屏幕
-                // 只剩"已清空对话历史"一句,连自己是谁、在哪个目录、
-                // 什么模型都看不见了,用户反馈"清得太狠"。重打这两行,
-                // 清屏后至少留得住这几条身份信息,不是一片空白。
-                if (spinner_enabled) {
-                    ClearAndPrintBanner(config, theme);
-                }
-                RebuildLoop();
-                // 存档跟着翻篇:旧文件留在磁盘上,新会话下一条消息另起
-                // 一份新文件(id 用新的时间戳)。标题属于旧场子,一并翻篇。
-                session_store.Reset();
-                session_start_ts = lubancode::agent::NowIdTimestamp();
-                if (project_memory != nullptr) project_memory->set_source_session(session_start_ts);
-                persisted_count = 0;
-                session_store_broken = false;
-                session_title.clear();
-                session_title_pending = false;
-                std::cout << tr("cmd.clear.done") << "\n";
-                break;
+            case lubancode::cli::SlashCommand::Clear: {
+                SessionCommandState session_state = MakeSessionCommandState();
+                return HandleClearCommand(session_state, config, theme, spinner_enabled);
+            }
             case lubancode::cli::SlashCommand::Context: {
                 // 裸敲才收集三类字符数(带参数走切窗口分支,收了也白收)。
                 // 口径对齐"实际发出的请求":
@@ -1329,33 +1283,8 @@ bool InteractiveSession::ProcessLine(const std::string& content) {
             case lubancode::cli::SlashCommand::Tools:
                 PrintToolsCommand(registry(), *loaded_tools(), main_deferral, tool_search_threshold);
                 break;
-            case lubancode::cli::SlashCommand::Background: {
-                // /background:列后台命令任务清单。文案直接用字面量(跟
-                // background_output 工具的返回文本一个路数),不经 i18n——
-                // 这条命令是给开发者的运维视图,新功能先不铺多语言。
-                const auto tasks = lubancode::tools::BackgroundTaskRegistry::Instance().List();
-                if (tasks.empty()) {
-                    std::cout << "当前没有后台任务。\n";
-                    break;
-                }
-                std::cout << "后台任务共 " << tasks.size() << " 个:\n\n";
-                for (const auto& t : tasks) {
-                    const char* label = "未知";
-                    switch (t.status) {
-                        case lubancode::tools::BackgroundTaskStatus::Running: label = "运行中"; break;
-                        case lubancode::tools::BackgroundTaskStatus::Completed: label = "完成"; break;
-                        case lubancode::tools::BackgroundTaskStatus::Failed: label = "失败"; break;
-                        case lubancode::tools::BackgroundTaskStatus::Stopped: label = "已停止"; break;
-                    }
-                    std::cout << theme.tool_line << "[#" << t.task_id << "] " << label;
-                    if (t.status != lubancode::tools::BackgroundTaskStatus::Running) {
-                        std::cout << " (exit " << t.exit_code << ")";
-                    }
-                    std::cout << theme.reset << "  PID=" << t.pid << "\n"
-                              << theme.stats << "  命令: " << t.command << "\n  日志: " << t.log_path
-                              << theme.reset << "\n\n";
-                }
-            } break;
+            case lubancode::cli::SlashCommand::Background:
+                return HandleBackgroundCommand(theme);
             case lubancode::cli::SlashCommand::Memory:
                 HandleMemoryCommand(parsed.args);
                 break;
@@ -1372,53 +1301,16 @@ bool InteractiveSession::ProcessLine(const std::string& content) {
                 PrintSessionsCommand(sessions_dir, parsed.args);
                 break;
             case lubancode::cli::SlashCommand::Resume: {
-                std::string target = parsed.args;
-                if (target.empty()) {
-                    const auto selected = PromptResumeTarget(sessions_dir, theme);
-                    if (!selected.has_value()) {
-                        break;
-                    }
-                    target = *selected;
-                }
-                if (ResumeSession(target, sessions_dir, *loop, session_store, persisted_count, session_meta,
-                                  session_title, wire_str, *current_model, theme, /*quiet_if_none=*/false,
-                                  &worktree_session)) {
-                    session_store_broken = false;  // 换了场,存档失败的旧账翻篇
-                    session_title_pending = false;
-                    if (worktree_session.active()) {
-                        // resume 把会话搬回了房:提示词与子代理 cwd 同步。
-                        SyncWorktreeDirectory();
-                    }
-                }
-            } break;
+                SessionCommandState session_state = MakeSessionCommandState();
+                return HandleResumeCommand(session_state, parsed.args, theme);
+            }
             case lubancode::cli::SlashCommand::Export:
                 HandleExportCommand(parsed.args, *loop, session_store, sessions_dir, session_meta, session_title);
                 break;
-            case lubancode::cli::SlashCommand::Title:
-                if (parsed.args.empty()) {
-                    std::cout << (session_title.empty() ? tr("cmd.title.none")
-                                                         : trf("cmd.title.current", session_title))
-                              << "\n";
-                } else {
-                    session_title = parsed.args;
-                    if (session_store.active() && !session_store_broken) {
-                        if (session_store.AppendTitleEvent(session_title)) {
-                            std::cout << trf("cmd.title.set", session_title) << "\n";
-                        } else {
-                            std::cout << theme.error << tr("cmd.title.write_failed") << theme.reset << "\n";
-                        }
-                    } else {
-                        // 还没建档(首条消息才落盘):先记着,建档成功后
-                        // 由 PersistNewMessages 补写事件行。
-                        session_title_pending = true;
-                        std::cout << trf("cmd.title.set_pending", session_title) << "\n";
-                    }
-                    // 跨会话名册跟着改名(重名仍用短 peer_id 定人)。
-                    if (peer_started) {
-                        peer_runtime->SetName(session_title);
-                    }
-                }
-                break;
+            case lubancode::cli::SlashCommand::Title: {
+                SessionCommandState session_state = MakeSessionCommandState();
+                return HandleTitleCommand(session_state, parsed.args, theme);
+            }
             case lubancode::cli::SlashCommand::Soul:
                 HandleSoulCommand(parsed.args, current_soul, current_soul_name, config_file_path);
                 break;
@@ -1426,136 +1318,33 @@ bool InteractiveSession::ProcessLine(const std::string& content) {
                 HandlePromptCommand(parsed.args, opts_.law_source, persona, prompts_dir);
                 break;
             case lubancode::cli::SlashCommand::Peers: {
-                if (!peer_started) {
-                    std::cout << theme.stats << tr("cmd.peers.off") << theme.reset << "\n";
-                    break;
-                }
-                const auto peers = peer_runtime->ListPeers();
-                if (peers.empty()) {
-                    std::cout << tr("cmd.peers.empty") << "\n";
-                    break;
-                }
-                const auto status_label = [](const std::string& status) {
-                    if (status == "busy") return tr("cmd.peers.status.busy");
-                    if (status == "waiting") return tr("cmd.peers.status.waiting");
-                    if (status == "closing") return tr("cmd.peers.status.closing");
-                    return tr("cmd.peers.status.idle");
-                };
-                if (spinner_enabled) {
-                    std::vector<lubancode::cli::ChoiceMenuItem> items;
-                    for (const auto& card : peers) {
-                        lubancode::cli::ChoiceMenuItem item;
-                        item.label = card.name + " (" + card.peer_id + ")";
-                        item.description = std::string(status_label(card.status)) + " · " + card.cwd;
-                        items.push_back(std::move(item));
-                    }
-                    lubancode::cli::ChoiceMenuOptions options;
-                    options.hint = tr("cmd.peers.hint");
-                    if (const auto selected = lubancode::cli::ReadChoiceMenu(items, options, theme);
-                        selected.has_value() && !selected->selected_indices.empty()) {
-                        const auto& card = peers[selected->selected_indices.front()];
-                        std::cout << theme.tool_line << card.name << " (" << card.peer_id << ")" << theme.reset
-                                  << "\n"
-                                  << theme.stats << "  " << status_label(card.status) << " · cwd " << card.cwd
-                                  << "\n"
-                                  << "  pid " << card.pid
-                                  << (card.session_id.empty() ? std::string()
-                                                               : " · session " + card.session_id)
-                                  << theme.reset << "\n";
-                    }
-                } else {
-                    for (const auto& card : peers) {
-                        std::cout << "- " << card.name << " (" << card.peer_id << ") · "
-                                  << status_label(card.status) << " · " << card.cwd << "\n";
-                    }
-                }
-            } break;
+                PeerCommandState peer_state{peer_runtime, peer_started, peer_ready_messages,
+                                            peer_held_stash};
+                return HandlePeersCommand(peer_state, theme, spinner_enabled);
+            }
             case lubancode::cli::SlashCommand::Send: {
-                if (!peer_started) {
-                    std::cout << theme.stats << tr("cmd.peers.off") << theme.reset << "\n";
-                    break;
-                }
-                const std::size_t space = parsed.args.find_first_of(" \t");
-                if (space == std::string::npos) {
-                    std::cout << tr("cmd.send.usage") << "\n";
-                    break;
-                }
-                const std::string target = parsed.args.substr(0, space);
-                const std::string text = parsed.args.substr(space + 1);
-                if (target.empty() || text.empty()) {
-                    std::cout << tr("cmd.send.usage") << "\n";
-                    break;
-                }
-                const auto peers = peer_runtime->ListPeers();
-                const auto* found = static_cast<const lubancode::agent::PeerCard*>(nullptr);
-                for (const auto& card : peers) {
-                    if (card.peer_id == target || card.name == target) {
-                        found = &card;
-                        break;
-                    }
-                }
-                if (found == nullptr) {
-                    std::cout << theme.error << trf("cmd.send.unknown_target", target) << theme.reset << "\n";
-                    break;
-                }
-                const lubancode::agent::PeerDelivery delivery = peer_runtime->Send(*found, text);
-                const char* delivery_key = "cmd.send.label.unavailable";
-                switch (delivery) {
-                    case lubancode::agent::PeerDelivery::Delivered: delivery_key = "cmd.send.label.delivered"; break;
-                    case lubancode::agent::PeerDelivery::Held: delivery_key = "cmd.send.label.held"; break;
-                    case lubancode::agent::PeerDelivery::Refused: delivery_key = "cmd.send.label.refused"; break;
-                    case lubancode::agent::PeerDelivery::Expired: delivery_key = "cmd.send.label.expired"; break;
-                    case lubancode::agent::PeerDelivery::Unavailable: break;
-                }
-                const bool failed = delivery == lubancode::agent::PeerDelivery::Refused ||
-                                    delivery == lubancode::agent::PeerDelivery::Expired ||
-                                    delivery == lubancode::agent::PeerDelivery::Unavailable;
-                std::cout << (failed ? theme.error : theme.stats)
-                          << trf("cmd.send.result", found->name, found->peer_id, tr(delivery_key)) << theme.reset
-                          << "\n";
-            } break;
+                PeerCommandState peer_state{peer_runtime, peer_started, peer_ready_messages,
+                                            peer_held_stash};
+                return HandleSendCommand(peer_state, parsed.args, theme);
+            }
             case lubancode::cli::SlashCommand::Peerperm: {
-                if (!peer_started) {
-                    std::cout << theme.stats << tr("cmd.peers.off") << theme.reset << "\n";
-                    break;
-                }
-                lubancode::agent::PeerPermissionTier tier = peer_runtime->tier();
-                if (parsed.args == "auto") {
-                    tier = lubancode::agent::PeerPermissionTier::Auto;
-                } else if (parsed.args == "accept") {
-                    tier = lubancode::agent::PeerPermissionTier::Accept;
-                } else if (parsed.args == "hold") {
-                    tier = lubancode::agent::PeerPermissionTier::Hold;
-                } else if (parsed.args == "refuse") {
-                    tier = lubancode::agent::PeerPermissionTier::Refuse;
-                } else if (parsed.args.empty()) {
-                    const char* name = "auto";
-                    switch (tier) {
-                        case lubancode::agent::PeerPermissionTier::Accept: name = "accept"; break;
-                        case lubancode::agent::PeerPermissionTier::Hold: name = "hold"; break;
-                        case lubancode::agent::PeerPermissionTier::Refuse: name = "refuse"; break;
-                        case lubancode::agent::PeerPermissionTier::Auto: break;
-                    }
-                    std::cout << trf("cmd.peerperm.current", name) << "\n";
-                    break;
-                } else {
-                    std::cout << tr("cmd.peerperm.usage") << "\n";
-                    break;
-                }
-                peer_runtime->SetTier(tier);
-                std::cout << trf("cmd.peerperm.set", parsed.args) << "\n";
-            } break;
+                PeerCommandState peer_state{peer_runtime, peer_started, peer_ready_messages,
+                                            peer_held_stash};
+                return HandlePeerpermCommand(peer_state, parsed.args);
+            }
             case lubancode::cli::SlashCommand::Exit:
-                return false;
+                return CommandFlow::Exit;
             case lubancode::cli::SlashCommand::Unknown:
                 std::cout << trf("error.unknown_command", parsed.raw_word) << "\n";
                 break;
             case lubancode::cli::SlashCommand::NotSlash:
-                break;  // 走不到这里,switch 外层已经排除了
+                break;  // 走不到这里,ProcessLine 已经分流
         }
-        return true;
-    }
+        return CommandFlow::Continue;  // switch 完备性兜底
+}
 
+// 发一轮用户正文:自动压缩检查 + 轮次材料 + RunTurn + 落盘 + 收排队。
+CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
     // 自动压缩:发真正的用户输入前,占用超过阈值(80%)就先压一压。
     // 用裸的 real_backend(理由同 /compact),失败只警告不拦——字符数
     // 硬安全网(TrimHistory)还在,不会真的爆掉。
@@ -1604,7 +1393,35 @@ bool InteractiveSession::ProcessLine(const std::string& content) {
     for (auto& queued : turn_result.queued_lines) {
         pending_queue.push_back(std::move(queued));
     }
-    return true;
+    return CommandFlow::Continue;
+}
+
+SessionCommandState InteractiveSession::MakeSessionCommandState() {
+    return SessionCommandState{
+        [this](bool preserve_history) { RebuildLoop(preserve_history); },
+        *loop,
+        session_store,
+        persisted_count,
+        session_meta,
+        session_title,
+        session_title_pending,
+        session_store_broken,
+        session_start_ts,
+        [this]() {
+            if (project_memory != nullptr) {
+                project_memory->set_source_session(session_start_ts);
+            }
+        },
+        [this](const std::string& title) {
+            if (peer_started) {
+                peer_runtime->SetName(title);
+            }
+        },
+        [this]() { SyncWorktreeDirectory(); },
+        &worktree_session,
+        sessions_dir,
+        wire_str,
+        current_model};
 }
 
 void InteractiveSession::Run() {
@@ -1709,11 +1526,11 @@ void InteractiveSession::Run() {
         if (peer_started) {
             peer_runtime->SetStatus("busy");  // 名册上亮"忙",对端知道别指望立刻回话
         }
-        const bool keep_going = ProcessLine(content);
+        const CommandFlow flow = ProcessLine(content);
         if (peer_started) {
             peer_runtime->SetStatus("idle");
         }
-        if (!keep_going) {
+        if (flow == CommandFlow::Exit) {
             break;
         }
     }

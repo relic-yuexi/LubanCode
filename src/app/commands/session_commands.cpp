@@ -15,6 +15,7 @@
 
 #include "agent/loop.hpp"
 #include "agent/session_store.hpp"
+#include "app/commands/settings_commands.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/i18n.hpp"
@@ -420,4 +421,87 @@ void HandleExportCommand(const std::string& args, const lubancode::agent::AgentL
     std::cout << trf("cmd.export.done", out_path) << "\n";
 }
 
+// ---------------------------------------------------------------------------
+// 会话命令 handler:原样搬自会话主循环的 slash case,行为一字未改。
+// ---------------------------------------------------------------------------
+
+CommandFlow HandleClearCommand(SessionCommandState& state, const lubancode::config::Config& config,
+                               const lubancode::cli::Theme& theme, bool spinner_enabled) {
+    // 真控制台才清屏——ANSI 转义混进管道/重定向输出会污染脚本消费者,
+    // spinner_enabled 就是通用的"是不是真控制台"信号。清完屏紧接着重打
+    // 图标 + 横幅——回归修复:此前清屏后屏幕只剩"已清空对话历史"一句,
+    // 连自己是谁、在哪个目录、什么模型都看不见了,用户反馈"清得太狠"。
+    // 重打这两行,清屏后至少留得住这几条身份信息,不是一片空白。
+    if (spinner_enabled) {
+        ClearAndPrintBanner(config, theme);
+    }
+    state.rebuild_loop(false);
+    // 存档跟着翻篇:旧文件留在磁盘上,新会话下一条消息另起一份新文件
+    // (id 用新的时间戳)。标题属于旧场子,一并翻篇。
+    state.store.Reset();
+    state.start_ts = lubancode::agent::NowIdTimestamp();
+    if (state.on_session_restarted) {
+        state.on_session_restarted();  // project memory 的会话源跟着换新场
+    }
+    state.persisted_count = 0;
+    state.store_broken = false;
+    state.title.clear();
+    state.title_pending = false;
+    std::cout << tr("cmd.clear.done") << "\n";
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleTitleCommand(SessionCommandState& state, const std::string& args,
+                               const lubancode::cli::Theme& theme) {
+    if (args.empty()) {
+        std::cout << (state.title.empty() ? tr("cmd.title.none") : trf("cmd.title.current", state.title))
+                  << "\n";
+        return CommandFlow::Continue;
+    }
+    state.title = args;
+    if (state.store.active() && !state.store_broken) {
+        if (state.store.AppendTitleEvent(state.title)) {
+            std::cout << trf("cmd.title.set", state.title) << "\n";
+        } else {
+            std::cout << theme.error << tr("cmd.title.write_failed") << theme.reset << "\n";
+        }
+    } else {
+        // 还没建档(首条消息才落盘):先记着,建档成功后由落盘路径补写
+        // 事件行。
+        state.title_pending = true;
+        std::cout << trf("cmd.title.set_pending", state.title) << "\n";
+    }
+    // 跨会话名册跟着改名(重名仍用短 peer_id 定人)。
+    if (state.on_title_changed) {
+        state.on_title_changed(state.title);
+    }
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleResumeCommand(SessionCommandState& state, const std::string& args,
+                                const lubancode::cli::Theme& theme) {
+    std::string target = args;
+    if (target.empty()) {
+        const auto selected = PromptResumeTarget(state.sessions_dir, theme);
+        if (!selected.has_value()) {
+            return CommandFlow::Continue;
+        }
+        target = *selected;
+    }
+    if (ResumeSession(target, state.sessions_dir, state.loop, state.store, state.persisted_count, state.meta,
+                      state.title, state.wire_str, *state.current_model, theme, /*quiet_if_none=*/false,
+                      state.worktree_session)) {
+        state.store_broken = false;  // 换了场,存档失败的旧账翻篇
+        state.title_pending = false;
+        if (state.worktree_session != nullptr && state.worktree_session->active()) {
+            // resume 把会话搬回了房:提示词与子代理 cwd 同步。
+            if (state.sync_worktree_directory) {
+                state.sync_worktree_directory();
+            }
+        }
+    }
+    return CommandFlow::Continue;
+}
+
 }  // namespace lubancode::app
+

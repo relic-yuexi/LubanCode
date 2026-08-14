@@ -7,12 +7,15 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 
 #include "agent/loop.hpp"
-#include "api/backend.hpp"
 #include "agent/session_store.hpp"
+#include "api/backend.hpp"
+#include "app/commands/command_flow.hpp"
+#include "config/config.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/i18n.hpp"
@@ -90,5 +93,43 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
 void HandleExportCommand(const std::string& args, const lubancode::agent::AgentLoop& loop,
                           const lubancode::agent::SessionStore& store, const std::string& sessions_dir,
                           const lubancode::agent::SessionMeta& session_meta, const std::string& session_title);
+
+
+// ---------------------------------------------------------------------------
+// 会话命令的窄状态:handler 只借引用干活,不拥有会话资源。
+// ---------------------------------------------------------------------------
+
+// /clear /title /resume 共用的会话侧状态。全部借用:会话
+// (InteractiveSession)在命令执行期间保证存活。
+struct SessionCommandState {
+    std::function<void(bool)> rebuild_loop;  // /clear 传 false = 丢历史重建
+    lubancode::agent::AgentLoop& loop;        // /compact /resume /export 用
+    lubancode::agent::SessionStore& store;
+    std::size_t& persisted_count;             // 落盘基线
+    lubancode::agent::SessionMeta& meta;
+    std::string& title;
+    bool& title_pending;
+    bool& store_broken;
+    std::string& start_ts;                   // /clear 翻新会话 id 时间戳
+    std::function<void()> on_session_restarted;  // /clear 善后(project memory 源)
+    std::function<void(const std::string&)> on_title_changed;  // peer 名册改名,可空
+    std::function<void()> sync_worktree_directory;  // resume 搬房后的善后
+    lubancode::cli::WorktreeSession* worktree_session = nullptr;  // 可空
+    const std::string& sessions_dir;
+    const std::string& wire_str;
+    const std::shared_ptr<std::string>& current_model;
+};
+
+// /clear:丢历史重建、存档翻篇、标题翻篇。
+CommandFlow HandleClearCommand(SessionCommandState& state, const lubancode::config::Config& config,
+                               const lubancode::cli::Theme& theme, bool spinner_enabled);
+
+// /title [标题]:看/设标题;建档前设的先挂起,建档成功由落盘路径补写事件行。
+CommandFlow HandleTitleCommand(SessionCommandState& state, const std::string& args,
+                               const lubancode::cli::Theme& theme);
+
+// /resume [编号或id]:裸敲弹最近 20 场菜单;成功后接管存档继续追加。
+CommandFlow HandleResumeCommand(SessionCommandState& state, const std::string& args,
+                                const lubancode::cli::Theme& theme);
 
 }  // namespace lubancode::app

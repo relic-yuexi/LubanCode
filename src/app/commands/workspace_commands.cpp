@@ -3,6 +3,9 @@
 
 #include <iostream>
 
+#include "cli/console_input.hpp"
+#include "tools/background_tasks.hpp"
+
 #include <optional>
 #include <set>
 #include <string>
@@ -200,4 +203,86 @@ void PrintLspCommand(std::optional<lubancode::lsp::Manager>& lsp_manager) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 工作区命令 handler:原样搬自会话主循环的 slash case,行为一字未改。
+// ---------------------------------------------------------------------------
+
+CommandFlow HandleWorktreeCommand(WorkspaceCommandState& state, const std::string& args,
+                                  const lubancode::cli::Theme& theme) {
+    const lubancode::cli::ParsedWorktreeCommand command = lubancode::cli::ParseWorktreeCommand(args);
+    lubancode::cli::WorktreeResult result;
+    switch (command.action) {
+        case lubancode::cli::WorktreeAction::New:
+            result = state.worktree.Create(command.name);
+            break;
+        case lubancode::cli::WorktreeAction::List:
+            result = state.worktree.List();
+            break;
+        case lubancode::cli::WorktreeAction::Exit:
+            result = state.worktree.Exit(command.exit_mode);
+            break;
+        case lubancode::cli::WorktreeAction::Invalid:
+            result.code = lubancode::cli::WorktreeResultCode::InvalidArgument;
+            break;
+    }
+    PrintWorktreeResult(result);
+    if (result.code == lubancode::cli::WorktreeResultCode::NeedsRemoveConfirmation) {
+        const std::optional<std::string> answer = lubancode::cli::ReadLine(
+            theme.confirm + tr("cmd.worktree.remove_confirm") + theme.reset, theme,
+            /*esc_rejects=*/true);
+        if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
+            result = state.worktree.ConfirmRemove();
+            PrintWorktreeResult(result);
+        } else {
+            std::cout << tr("cmd.worktree.remove_cancelled") << "\n";
+        }
+    }
+    // /worktree new 撞上园子外的已有房:跟模型工具同一道硬确认。
+    if (result.code == lubancode::cli::WorktreeResultCode::NeedsUserConfirmation) {
+        const std::optional<std::string> answer = lubancode::cli::ReadLine(
+            theme.confirm + tr("cmd.worktree.outside_prompt") + theme.reset, theme,
+            /*esc_rejects=*/true);
+        if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
+            result = state.worktree.Enter(command.name, /*base=*/"head", /*confirmed_outside=*/true);
+            PrintWorktreeResult(result);
+        }
+    }
+    // std::filesystem::current_path 是工具层共同的相对路径基准。同步提示词
+    // 和子代理那份 cwd,历史则原样保留。
+    if (state.sync_worktree_directory) {
+        state.sync_worktree_directory();
+    }
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleBackgroundCommand(const lubancode::cli::Theme& theme) {
+    // /background:列后台命令任务清单。文案直接用字面量(跟
+    // background_output 工具的返回文本一个路数),不经 i18n——这条命令是
+    // 给开发者的运维视图,新功能先不铺多语言。
+    const auto tasks = lubancode::tools::BackgroundTaskRegistry::Instance().List();
+    if (tasks.empty()) {
+        std::cout << "当前没有后台任务。" << "\n";
+        return CommandFlow::Continue;
+    }
+    std::cout << "后台任务共 " << tasks.size() << " 个:" << "\n" << "\n";
+    for (const auto& t : tasks) {
+        const char* label = "未知";
+        switch (t.status) {
+            case lubancode::tools::BackgroundTaskStatus::Running: label = "运行中"; break;
+            case lubancode::tools::BackgroundTaskStatus::Completed: label = "完成"; break;
+            case lubancode::tools::BackgroundTaskStatus::Failed: label = "失败"; break;
+            case lubancode::tools::BackgroundTaskStatus::Stopped: label = "已停止"; break;
+        }
+        std::cout << theme.tool_line << "[#" << t.task_id << "] " << label;
+        if (t.status != lubancode::tools::BackgroundTaskStatus::Running) {
+            std::cout << " (exit " << t.exit_code << ")";
+        }
+        std::cout << theme.reset << "  PID=" << t.pid << "\n"
+                  << theme.stats << "  命令: " << t.command << "  日志: " << t.log_path << theme.reset
+                  << "\n" << "\n";
+    }
+    return CommandFlow::Continue;
+}
+
 }  // namespace lubancode::app
+

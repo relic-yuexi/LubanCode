@@ -8,11 +8,13 @@
 
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
+#include "app/commands/command_flow.hpp"
 #include "app/tool_runtime.hpp"
 #include "cli/i18n.hpp"
 #include "cli/theme.hpp"
@@ -60,5 +62,24 @@ void PrintMcpCommand(const std::vector<McpServerRuntime>& mcp_servers);
 // StatusList() 要顺手收割闲置进程(改内部状态),所以入参是可变引用,
 // 不装 const。
 void PrintLspCommand(std::optional<lubancode::lsp::Manager>& lsp_manager);
+
+
+// ---------------------------------------------------------------------------
+// 工作区命令的窄状态
+// ---------------------------------------------------------------------------
+
+// /worktree 借用的会话侧状态:WorktreeSession 是会话与模型侧工具共用的
+// 那一只,sync 在 enter/exit 搬了 cwd 之后由会话做提示词/子代理善后。
+struct WorkspaceCommandState {
+    lubancode::cli::WorktreeSession& worktree;
+    std::function<void()> sync_worktree_directory;
+};
+
+// /worktree new|list|exit:两道硬确认(脏房强删、园子外的房)就地收。
+CommandFlow HandleWorktreeCommand(WorkspaceCommandState& state, const std::string& args,
+                                  const lubancode::cli::Theme& theme);
+
+// /background:列后台命令任务清单(运维视图,字面量文案不经 i18n)。
+CommandFlow HandleBackgroundCommand(const lubancode::cli::Theme& theme);
 
 }  // namespace lubancode::app

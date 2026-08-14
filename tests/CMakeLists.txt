@@ -88,6 +88,8 @@ add_executable(lubancode_tests
   test_interactive_session.cpp
   # ParseCliArgs 参数矩阵(纯函数)。
   test_cli_options.cpp
+  # 领域命令 handler 的状态账(/clear /title /send /peerperm)。
+  test_app_commands.cpp
   ${CMAKE_SOURCE_DIR}/src/app/cli_options.cpp
   ${CMAKE_SOURCE_DIR}/src/app/backend_stack.cpp
   ${CMAKE_SOURCE_DIR}/src/app/tool_runtime.cpp
@@ -96,6 +98,7 @@ add_executable(lubancode_tests
   ${CMAKE_SOURCE_DIR}/src/app/commands/session_commands.cpp
   ${CMAKE_SOURCE_DIR}/src/app/commands/settings_commands.cpp
   ${CMAKE_SOURCE_DIR}/src/app/commands/workspace_commands.cpp
+  ${CMAKE_SOURCE_DIR}/src/app/commands/peer_commands.cpp
   ${CMAKE_SOURCE_DIR}/src/app/interactive_session.cpp
   ${CMAKE_SOURCE_DIR}/src/app/one_shot.cpp
   ${CMAKE_SOURCE_DIR}/src/app/cli_app.cpp
