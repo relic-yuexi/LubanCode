@@ -2,6 +2,12 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.0] - 2026-08-15
+
+- **终端交互大修。** 子代理面板移到输入框上方：任务全量列示可选，`x` 停止/清除，`Ctrl+X Ctrl+K` 两段确认停全部，Enter 进查看态后可直接给那只代理递话；排队消息在工具边界按序送达，`Esc` 打断并立即送，`Shift+←` 取回编辑；流式打 `/` 出补全，context 状态栏回合内实时刷新（`~` 标旧值），流式 Shift+Tab 切档，思考可 Ctrl+O 展开，ask_user 不再被子代理状态遮挡。
+- **模型侧 worktree 全套。** 新增 `worktree` 工具（enter/status/list/exit），大改动住进隔离分支，写主树/命令 cwd/git 改道三道闸拦截；子代理可带 `isolation: worktree` 各住各的隔离房，干净自动清、有活留房；`/resume` 验明正身后回搬住房会话；`.worktreeinclude` 把 `.env` 一类带进新房。
+- **更结实也更清爽。** 工具输出含非法 UTF-8 不再杀整场会话（清洗前移到公共信任边界，`read_file` 对编码明规矩）；后台子代理完成后结果自动回流，空闲会话不再冻死；main.cpp 从六千余行拆到 39 行，app 层分件立编译边界，改一条命令不再重编整个程序；GLM-5.3 进厂家目录。
+
 ## [v0.25.1] - 2026-08-14
 
 - **录一遍，生成技能。** `/record` 开录后在 LubanCode 里做一遍活计，工具调用、备注、验收一路记下；停录起草 SKILL.md，预览点头后装进项目级或主目录级，本场立刻可用。入参密钥全程打码，必须明着开录，状态栏常挂 REC 标记。
@@ -56,6 +62,7 @@
 - **模型与扩展接成一体。** 接入 Anthropic Messages 与 OpenAI Responses，并提供上下文压缩、会话恢复、MCP、LSP、Skills、Lua、C ABI 插件和联网工具。
 - **三平台可以直接安装。** Windows、Linux 与 macOS 均有自动构建的发行包和安装脚本，CI 分别用 MSVC、GCC 与 Clang 编译测试。
 
+[v0.26.0]: https://github.com/relic-yuexi/LubanCode/compare/v0.25.1...v0.26.0
 [v0.25.1]: https://github.com/relic-yuexi/LubanCode/compare/v0.25.0...v0.25.1
 [v0.25.0]: https://github.com/relic-yuexi/LubanCode/compare/v0.24.1...v0.25.0
 [v0.24.1]: https://github.com/relic-yuexi/LubanCode/compare/v0.23.5...v0.24.1
