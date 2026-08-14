@@ -52,6 +52,17 @@
 
 namespace lubancode::app {
 
+lubancode::memory::Options MemoryOptionsFromConfig(const lubancode::config::MemoryConfig& config) {
+    lubancode::memory::Options options;
+    options.enabled = config.enabled;
+    options.use = config.use;
+    options.generate = config.generate;
+    options.max_index_bytes = config.max_index_bytes;
+    options.max_retrieval_bytes = config.max_retrieval_bytes;
+    options.max_results = config.max_results;
+    return options;
+}
+
 // i18n:装配函数里到处用 tr/trf,拉进来省得每处全限定。
 using lubancode::cli::tr;
 using lubancode::cli::trf;
