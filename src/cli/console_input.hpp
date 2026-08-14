@@ -25,6 +25,7 @@
 
 #include "cli/choice_menu.hpp"
 #include "cli/line_editor.hpp"
+#include "cli/queue_model.hpp"
 #include "cli/theme.hpp"
 
 namespace lubancode::cli {
@@ -265,6 +266,12 @@ private:
 // 淡色 "[已打断]";其余可打印字符进内部排队缓冲(Backspace 能退格),遇
 // Enter 就把整行（非空才算）落进队列，并刷新 footer 上方的常驻队列区。
 //
+// 0.25.x 排队输入自然化:队列本身是 PendingQueueCore(见 queue_model.hpp),
+// 输入行只画 `> ` 和正在键入的字;Enter 落队后正文挪进上方待发区(逐条摆,
+// 超上限只添一行"另有 N 条");空输入按上键取回最后一条待发消息改写,
+// 上下键在待发消息间走,Delete 删当前项,Esc 放回队列——编辑态的 Esc 不
+// 再打断当前轮。
+//
 // Ctrl+C(补于排查"ESC/Ctrl+C 都停不掉子代理"那次)语义对齐 bash/Python/
 // Node REPL、Claude Code 官方文档确认过的通用约定:单击效果等同
 // ESC(打断当前轮,cancel_flag 置位,不退出程序);1.2 秒内连按两次才是
@@ -327,7 +334,7 @@ private:
     std::atomic<bool> stop_requested_{false};
     bool enabled_ = false;
     std::mutex queue_mutex_;
-    std::vector<std::string> queued_lines_;
+    PendingQueueCore queue_;  // 待发消息队列(键入/落队/取回/编辑/删除),见 queue_model.hpp
 };
 
 }  // namespace lubancode::cli

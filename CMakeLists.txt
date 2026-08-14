@@ -289,6 +289,7 @@ add_library(lubancode_core STATIC
   src/cli/theme.cpp
   src/cli/choice_menu.cpp
   src/cli/line_editor.cpp
+  src/cli/queue_model.cpp
   src/cli/terminal_frame.cpp
   src/cli/context_tracker.cpp
   src/cli/divider.cpp

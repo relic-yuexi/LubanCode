@@ -572,6 +572,9 @@ std::optional<KeyInput> KeyReader::ReadOne() {
     } else if (ke.wVirtualKeyCode == VK_DOWN) {
         reset_text_run();
         out.kind = KeyInput::Kind::Down;
+    } else if (ke.wVirtualKeyCode == VK_DELETE) {
+        reset_text_run();
+        out.kind = KeyInput::Kind::Delete;
     } else if (ke.wVirtualKeyCode == VK_TAB) {
         reset_text_run();
         out.kind = shift ? KeyInput::Kind::ShiftTab : KeyInput::Kind::Tab;

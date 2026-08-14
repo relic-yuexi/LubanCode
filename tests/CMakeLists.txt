@@ -28,6 +28,7 @@ add_executable(lubancode_tests
   test_prompts.cpp
   test_prompt_assembler.cpp
   test_line_editor.cpp
+  test_queue_model.cpp
   test_terminal_frame.cpp
   test_choice_menu.cpp
   test_compact.cpp
