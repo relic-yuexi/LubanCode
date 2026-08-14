@@ -1,0 +1,98 @@
+# ask_user 被子代理状态遮挡
+
+状态：待做（bug）
+
+## 现象
+
+主会话调用 `ask_user` 时，标题与问题已经画出来，选项菜单却被子代理状态块插进中间。状态块每隔一拍又重画一次，选项忽隐忽现，用户不知该按方向键还是输入文字。
+
+截图里的次序很清楚：
+
+```text
+下一步
+前五只 commit 已落地，接下来怎么走？
+● 在 D:/lubancode/.lubancode/worktrees/...
+  └ 完成(...)
+继续第四步 TurnRunner ...
+● 在 D:/lubancode/.lubancode/worktrees/...
+  └ 完成(...)
+```
+
+本该连在问题下面的选项，被同一批子代理状态行切成几截。交互虽未必真的死锁，屏面已经不能用。
+
+## 已查到的冲突
+
+- `PromptAskUser`（`src/main.cpp:1023`）只建立 `StreamFooterSuspendScope`。它能收起流式输入框，管不到 `AgentStatusPainter`。
+- `AgentStatusPainter`（`src/main.cpp:1566`）另起 ticker 线程，每 400ms 调一次 `Tick()`。只要 `AgentStatusBoard::Snapshot()` 还有条目，它便拿 `StdoutWriteMutex`，擦旧块，再画新块。
+- `ask_user` 的 `ReadChoiceMenu` 会停着等用户。等候期间，ticker 仍活着。两边虽共用 stdout 锁，锁只防同一瞬间交错，防不住“菜单画完，400ms 后又被状态块盖掉”。
+- 普通工具确认已有同类防护注释（`src/main.cpp:2892` 一带），可那层同样只挂起 footer。`ask_user` 与确认菜单都缺一枚“独占交互画面”的总闸。
+- `TurnInputListener` 在整个 `AgentLoop::Run` 期间都活着。它会不会与 `ReadChoiceMenu` 抢方向键、Enter、Esc，也须一并实测。不能只修 stdout，留下 stdin 争抢。
+
+## 触发条件
+
+高概率复现路：
+
+1. 真 Windows 控制台，启用原地重画。
+2. 本轮跑过一个或多个 `agent` 工具，`AgentStatusBoard` 中留有运行态或完成态条目。
+3. 模型随后调用主会话 `ask_user`。
+4. 菜单停着等输入超过 400ms。
+5. ticker 在问题、选项或提示行之间重画状态块。
+
+完成态条目也会触发，不必恰好有子代理仍在跑。截图正是“完成”状态反复压进菜单。
+
+## 需求
+
+### 1. 交互菜单取得整块屏面所有权
+
+做一枚统一的交互作用域。进入 `ask_user`、工具确认、持久授权追问这类阻塞式菜单时：
+
+- 擦掉 footer 与子代理浮动状态块。
+- 暂停所有 ticker 原地重画，不只是让它们等 stdout 锁。
+- 作废或冻结相关屏幕锚点，免得退出菜单后按旧行号擦错。
+- 菜单从标题、问题、选项到提示行一次铺好；等待期间无人改写这片区域。
+- 退出作用域后再恢复浮动状态。恢复点须落在菜单结果之后，不能盖住“已记录选择”。
+
+可扩展现有 `StreamFooterSuspendScope`，把它升成全局 repaint suspend counter；也可另做 `InteractivePromptScope`，同时管 footer、`AgentStatusPainter` 与输入监听。选哪条都成，不能只在 `PromptAskUser` 前手调一次 `Hide()`：单次 Hide 之后，ticker 下一拍仍会回来。
+
+### 2. 输入只归菜单一处
+
+进入阻塞式菜单后，`TurnInputListener` 不得吞方向键、Enter、Esc、普通字符。
+
+- 若现有 `ConsoleReadMutex` 已能保证这一点，补测试与注释，把规约钉死。
+- 若监听线程仍会抢键，交互作用域须暂停它，或令它在菜单占用期间让出读权。
+- `Esc` 只取消当前 `ask_user`，不该同时打断整个模型回合。
+- 菜单结束后，流式排队输入与 ESC 打断恢复原语义。
+
+### 3. 完成态状态条别死缠菜单
+
+查清 `AgentStatusBoard` 完成条目的留存期。
+
+- 完成摘要可以留在普通转录里。
+- 阻塞菜单打开时，完成态浮动块不得继续每 400ms 重画。
+- 若整块没有运行中任务，可考虑让 ticker 安静，不必不停重画一份不会再变的完成摘要。
+
+这条是体验优化，不可代替交互作用域。即使仍有运行中的后台子代理，菜单也得稳。
+
+## 验收
+
+- 先跑一个前台 `agent`，完成后立刻调用 `ask_user`：标题、问题、全部选项、帮助行连在一起，停 10 秒不被状态块插入。
+- 后台子代理仍在运行时调用 `ask_user`：状态动画暂停，菜单可选；提交或取消后，状态块在安全位置恢复。
+- 连续调用两次 `ask_user`，无残影、无旧行被擦、无菜单重复铺屏。
+- 方向键、Enter、Esc、自定义文字、多选均可用；按键不落进流式待发队列。
+- 工具确认菜单与“是否写入 settings.local.json”追问同样不被 ticker 遮挡。
+- `Ctrl+O`、流式 footer、排队输入、ESC 打断在菜单结束后照常工作。
+- 管道、重定向、plain 主题不添 ANSI，不改变原有降级输出。
+
+## 测试
+
+- 给 repaint 协调层做纯状态测试：嵌套 suspend、重复恢复、异常/早退析构都能对账。
+- 用可控 ticker 模拟“问题画完后恰逢下一拍”，断言 suspend 期间没有状态输出。
+- 做输入所有权测试：菜单持有读权时，listener 不消费按键；菜单退出后 listener 恢复。
+- Windows Terminal、VS Code Terminal、传统 conhost 各手测一次。
+
+## 不做
+
+- 不重画 `ask_user` 的视觉样式。
+- 不改子代理任务调度、历史与结果回流。
+- 不靠拉长 ticker 间隔掩盖竞争。
+- 不用一把 stdout 锁横跨整个用户等待期；那会堵死旁路收尾，还可能自锁。

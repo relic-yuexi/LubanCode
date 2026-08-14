@@ -1,0 +1,122 @@
+# 工具输出含非法 UTF-8 时整场退出
+
+状态：待做（bug）
+
+## 现象
+
+`read_file` 读完 `D:\lubancode\.lubancode\worktrees\split-main\src\main.cpp`，界面已经显示“读取 286 行”，程序随后直接退出，回到 PowerShell：
+
+```text
+[错误] 未预料的异常: [json.exception.type_error.316]
+invalid UTF-8 byte at index 1024: 0x0A
+```
+
+这不是一次工具失败，而是异常穿过主循环，落到 `RunCli` 最外层 `catch`（`src/main.cpp:6796`），整场会话被掐断。用户正在跑的 agent、排队输入与尚未落盘的状态也一并没了。
+
+## 先别误判
+
+截图只能证明“某段将要交给 nlohmann::json 的字符串不是合法 UTF-8”。`0x0A` 是换行，本身合法。它多半紧跟在一段没收完整的多字节序列之后，库在换行处才认出前头坏了。
+
+`index 1024` 又恰好落在整边界上，值得查分块、截断或文件改写；眼下还不能直接断言就是 1024 字节 buffer 劈开了汉字。
+
+须先抓出两样东西：
+
+1. 哪个字段坏了：工具结果、tool input、assistant 文本、thinking、hook/MCP 输出、转录，还是 session 行。
+2. 哪一次 `.dump()` 抛了：下一轮请求、转录/录制、会话落盘，还是别处。
+
+日志只记字段名、长度、首个坏字节位置与前后十来个十六进制字节，不准把整份源码、密钥或模型正文倒进日志。
+
+## 现有防线的缺口
+
+- `read_file` 用二进制方式读文件，原样拼进 `Result.content`，不校验编码。
+- `RunOneTool` 执行完工具后，先把原始 `result` 交给 `on_post_tool_hook` 与 `on_tool_done`（`src/agent/loop.cpp:69-74`）。
+- `on_tool_done` 会把原文送进 recorder、`ToolDisplay::FinalizeItem`、`TranscriptItem.full_output` 与快照。
+- 直到回调全走完，`AgentLoop` 才在 `src/agent/loop.cpp:315-323` 调 `SanitizeUtf8(result.content)`，并把清洗版塞进 history。
+- 这道防线只护住 history。更早拿到原文的 hook、录制器、转录与重画仍站在门外。
+- `TruncateUtf8Bytes` 只负责别在截断点劈开续字节，前提是输入本来合法。它不是编码清洗器，救不了已经混入的 GBK、残缺序列或二进制字节。
+
+即使这次最终查出异常来自别的字段，上述顺序仍是实打实的信任边界漏洞，须一并收口。
+
+## 需求
+
+### 1. 先做可重复样本
+
+- 保留触发文件副本或构造一份最小 fixture，不要把整个 worktree 当测试依赖。
+- 记录文件字节长度、BOM、严格 UTF-8 校验结果、首个坏字节位置，以及 1024 左右的十六进制窗口。
+- 查触发前那条 PowerShell `ReadAllLines/WriteAllLines` 命令是否改过编码。
+- 分别直接跑 `read_file`、经主 AgentLoop 跑、经子代理跑，找出最小崩溃路径。
+
+### 2. 清洗前移到工具信任边界
+
+工具、post hook 或 MCP 返回后，先产出一份规范化 `Tool::Result`，再把同一份结果交给所有消费者：
+
+```text
+tool.execute / post hook
+-> 校验并清洗 UTF-8
+-> on_tool_done / recorder / transcript
+-> history
+-> request JSON / session JSONL
+```
+
+不能再让 UI 看原文、history 看清洗版。两份内容不同，既会崩，也会令 Ctrl+E、录制件与模型上下文对不上。
+
+清洗应放在 `RunOneTool` 内 post hook 之后、`on_tool_done` 之前，或放在一枚所有结果必经的更低层入口。现有 history 兜底可保留，作最后一道断言式防线。
+
+### 3. `read_file` 明说编码处置
+
+定一条清楚规矩：
+
+- UTF-8 与 UTF-8 BOM 文件正常读取，BOM 不混进正文。
+- 非法 UTF-8 不得把坏字节原样交给 JSON。
+- 可安全识别的本机文本编码，可转换后回传，并在结果尾部标注“已从某编码转换”。
+- 无法可靠识别时，返回工具错误，写明文件不是合法 UTF-8；不要猜编码后悄悄把源码改得面目全非。
+- 二进制文件须拒绝或走专门路径，不能借 `read_file` 混进文本历史。
+
+Windows 下可否沿用 `AcpBytesToUtf8`，要看最小样本。整段“混合 UTF-8 + 少量坏字节”若一股脑按 ACP 转，会把原本正常的中文转成乱码。宁可逐段替换并报警，也别把合法段一起误解码。
+
+### 4. JSON 边界不得再杀进程
+
+- 请求序列化、session 序列化、录制序列化各加窄边界错误处理。
+- 若漏网字符串仍触发 `type_error.316`，报出字段类别与坏字节位置，把当前工具结果转成可回传的错误；交互会话继续活着。
+- 不得只在最外层 catch 换一行友好文案。那仍会退出，病根没动。
+- 修复后写盘的 JSONL 每行都须能重新解析，`/resume` 不得吃到半行。
+
+### 5. 审一遍其他入口
+
+同样的外来文本不只来自 `read_file`：
+
+- `run_command` stdout/stderr
+- hooks
+- MCP 与插件
+- web 抓取
+- LSP
+- 后台子代理结果
+- 模型流式 text/thinking/tool arguments
+
+不要求这张单顺手重构全项目，却要列清每条入口由谁保证 UTF-8。凡是没人管的，统一收进公共规范化边界。
+
+## 验收
+
+- 用截图对应文件或最小 fixture 复现，`read_file` 后能继续发下一次模型请求，进程不退出。
+- 合法 UTF-8 中文源码逐字节保真；UTF-8 BOM 不出现在首行。
+- GBK、残缺三字节序列、孤立续字节、夹杂 NUL、在 1024/65536 边界断开的多字节序列，都不会触发 `type_error.316`。
+- 清洗后内容通过 `IsValidUtf8`，且能塞进 Chat、Responses、Anthropic 三种请求 JSON 并 `.dump()`。
+- `on_tool_done`、Ctrl+E 全文、workflow recorder、history、session JSONL 拿到同一份规范化结果。
+- 前台工具、前台子代理、后台子代理三条路都不崩。
+- 出现不可识别编码时，工具条目变成可读的 Error，主会话仍可继续输入。
+
+## 测试
+
+- `read_file` fixture：UTF-8、UTF-8 BOM、GBK、混合编码、随机坏字节、二进制。
+- 边界表：坏序列或中文字符横跨 1023/1024、4095/4096、65535/65536。
+- `RunOneTool` 回调次序测试：`on_tool_done` 收到的内容已通过 `IsValidUtf8`，并与入 history 的内容相同。
+- recorder 开启时跑坏输出，录制件仍是合法 JSON。
+- session append + `/resume` 回归。
+- 真机用截图路径手测一次，确认 PowerShell 不再被直接弹回。
+
+## 不做
+
+- 不吞掉错误，假装文件读成功。
+- 不把所有非 ASCII 文件都按系统 ACP 强转。
+- 不在日志里打印整段工具输出。
+- 不靠 catch 顶层异常后自动重启程序冒充修好。

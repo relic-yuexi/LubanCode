@@ -1,0 +1,119 @@
+# context 状态栏在回合内不刷新
+
+状态：待做（bug）
+
+## 现象
+
+长回合里已经跑过多次模型请求、23 次子工具，子代理摘要也显示 `45.0k tokens`，底部状态栏却一直挂着：
+
+```text
+context 1% · 5152/1M
+```
+
+直到本轮因 UTF-8 异常退出，这个数字都没动。用户自然会把它看成“本轮用了多少 token”，进而以为记账坏了。
+
+## 先分清两本账
+
+这里有两种数字，不能相加：
+
+| 数字 | 含义 | 记法 |
+| --- | --- | --- |
+| 子代理 `45.0k tokens` | 独立子代理这项任务累计花销 | 子代理每次请求累加 |
+| 状态栏 `5152/1M` | 主会话最近一次请求占了多大上下文 | 新 usage 整个覆盖旧值 |
+
+子代理有自己的 system、history 与窗口。源码在 `src/main.cpp:3029-3034` 明写：子代理 usage 进本轮花销统计，不进主 `ContextTracker`。这条语义是对的。若把 45k 硬加到主 context，主窗口会被一只独立子代理虚抬，自动 compact 也会误触发。
+
+真正的问题是：**主会话 context 已更新，状态栏仍拿旧快照画。**
+
+## 已查到的数据路
+
+```text
+模型主请求结束
+-> BuildCallbacks::on_usage
+-> context_tracker.Update(usage)             src/main.cpp:3016-3026
+-> 没有更新 StatusLineData
+-> footer 继续拿旧 StatusLineData 重画
+
+本轮 RunTurn 完全结束
+-> 回到 InteractiveLoop 外层 while
+-> 重新构造 StatusPanelData                 src/main.cpp:6164-6179
+-> SetStatusLineData
+-> 下一只输入框才看见新数
+```
+
+`ContextTracker` 本身不是累加器。它用最近一次主请求的：
+
+```text
+input_tokens + cache_read_tokens + cache_creation_tokens + output_tokens
+```
+
+覆盖当前占用。这正合“每次都重发完整 history”的语义，也给 `/context` 与自动 compact 使用。
+
+状态栏却只在外层准备读下一条输入前取一次值。一只 `AgentLoop::Run` 中间若走十次“模型 -> 工具 -> 模型”，tracker 会变十次，footer 仍守着起跑前那份 `StatusPanelData`。若本轮崩溃或被打断，连最后一次外层刷新也走不到，截图便永远留下旧数。
+
+## 需求
+
+### 1. 主请求 usage 到达即发布新快照
+
+`callbacks.on_usage` 更新 `ContextTracker` 后，立刻把 context 百分比、已用 token 与窗口 token 发布给状态行数据源。
+
+- 只更新 context/tokens 两段，model、cwd、branch、provider、effort、REC 等字段不得丢。
+- 发布与终端重画分开：先线程安全地改状态，再由 footer 现有重画事务在安全时机取新值。
+- 若 footer 此刻挂起在 `ask_user` 或确认菜单里，只改数据，不抢屏；菜单退出后的第一帧自然带出新数。
+- 主请求一轮中有多次工具往返，每次 `MessageDone` 都可更新。末次值才是眼下完整主 history 的真实占用。
+
+不宜在 `BuildCallbacks` 里另造一份残缺 `StatusPanelData`。应给状态数据源加局部更新接口，或把“重建完整状态快照”的回调从 `InteractiveLoop` 传进来。
+
+### 2. 空闲态与流式态须一致
+
+- 流式 footer 在 usage 到达后的下一帧显示新数。
+- `RunTurn` 正常收口，下一只 composer 状态行仍是同一个数，不得先新后旧。
+- ESC 打断若服务端没来最终 usage，保留最近一次已确认值，并标明没有本次新实测；不能凭空猜一份精确数。
+- `/context` 裸敲与状态栏须读同一只 `ContextTracker`，两处不能各记一本。
+- 自动 compact 仍按 tracker 判断，不按 UI 文本反推。
+
+### 3. provider 不回 usage 时别装作更新过
+
+三种 wire 或兼容端未必都在流末给 usage。须给状态加“是否有本次实测”的语义：
+
+- 本次收到合法 usage：显示精确值。
+- 本次没有 usage：可保留上次值，但要标成旧值；或退回字符估算并带 `~`。
+- usage 全零须区分“真实为零”与“字段缺失”。现有 `Usage` 全零默认值抹平了两者，必要时给 `MessageDone` 或 tracker 加 `has_usage`。
+- 不允许每次缺 usage 都把 tracker 清成 0%，也不允许静悄悄沿用旧数，让用户以为它属于当前回合。
+
+### 4. 文案说清 context 不是累计花销
+
+状态栏仍可保留 `context` 与 `<used>/<window>`。文档和 `/context` 说明须补一句：
+
+```text
+context = 主会话最近一次请求占用，不含独立子代理累计 token
+```
+
+若以后要常驻展示成本，另加 `turn tokens` 或 `session tokens` 字段。不能拿 context 一栏兼任花销表。
+
+## 验收
+
+- 新会话首个主请求结束，footer 从 0/旧值换成该请求实测值，不必等整轮收口。
+- 同一条用户输入连续走三轮 `assistant tool_use -> tool_result`：每次主请求结束状态栏都前进，末次与 `/context` 已用量相同。
+- 前台子代理耗费 45k tokens，主 context 不因此跳 45k；子代理结束后，主模型接收其结论并完成下一次请求，context 才按这次主请求更新。
+- 后台子代理独自运行时，主 context 不变；其结果注入后触发主请求，再按主 usage 更新。
+- 回合中打开 `ask_user`/确认菜单，usage 数据可更新，菜单不被重画盖住；菜单结束后状态栏显示新数。
+- ESC、HTTP 错误、UTF-8 工具错误都不把旧数伪装成本次新值。
+- `/context`、状态栏、自动 compact 三处口径一致。
+- Chat、Responses、Anthropic 各测一家会回 usage 的端点；再测一家不回 usage 的兼容端。
+
+## 测试
+
+- 给状态数据源做局部更新测试：只改 context/tokens，其他 segment 原样保住。
+- 给 `on_usage` 接线做回归：主 usage 更新 tracker 并发布状态；子代理 usage 只进累计花销，不碰 tracker。
+- 脚本化两次主请求：第二次 usage 覆盖第一次，不累加。
+- 缺 usage、全零 usage、带 cache_read/cache_creation usage 各一组。
+- footer 挂起期间发布新值：不落笔；恢复后第一帧取到新值。
+- 真机看一次长工具循环，确认数字在本轮当中可见地变化。
+
+## 不做
+
+- 不把子代理累计 token 并进主 context。
+- 不把 `ContextTracker` 改成会话累计花销器。
+- 不为刷新数字另起一条绕过 footer 锁与批量重画的 stdout 路。
+- 不拿字符估算冒充 provider 实测值。
