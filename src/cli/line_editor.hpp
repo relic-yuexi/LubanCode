@@ -229,6 +229,12 @@ public:
     // 时,终端层用这个画出空行 + 提示符)。
     RenderState CurrentRenderState() const;
 
+    // 0.28.x 排队消息取回编辑:把一段完整正文(多行按 '\n' 拼接)装进编辑
+    // 区,光标落到末尾,补全/菜单/粘贴续跑状态一并清零——"取回排队消息"
+    // 与"手敲新消息"从这一刻起走同一套光标/退格/粘贴/软换行能力,而不是
+    // 塞进一只只会尾删的临时 buffer。历史浏览位也复位(取回的不是历史)。
+    void LoadText(const std::u32string& joined);
+
     ConfirmMode confirm_mode() const { return confirm_mode_; }
 
     // 0.17.0:终端层在"焦点导航请求没被应用层消费"(比如 transcript 是空

@@ -367,6 +367,13 @@ void LineEditorCore::LoadJoined(const std::u32string& joined) {
     col_ = lines_[row_].size();
 }
 
+void LineEditorCore::LoadText(const std::u32string& joined) {
+    LoadJoined(joined);
+    tab_cycle_.reset();
+    menu_selection_.reset();
+    ResetHistoryBrowsing();
+}
+
 void LineEditorCore::InsertChar(char32_t ch) {
     lines_[row_].insert(col_, 1, ch);
     ++col_;

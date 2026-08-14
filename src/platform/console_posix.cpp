@@ -20,6 +20,7 @@
 // pty_probe.py:答 \x1b[6n、敲 CJK/退格/ESC/exit,逐键重画与体面退出全
 // 过)。真实终端模拟器上的长期交互体验、macOS 未经真机验证,待 CI 亮灯。
 #include "platform/console.hpp"
+#include "platform/csi_keys.hpp"
 
 #include <cstdio>
 #include <deque>
@@ -138,47 +139,12 @@ KeyInput ParseCsi() {
             return KeyInput{};  // 序列断在半路,丢弃
         }
         if (b >= 0x40 && b <= 0x7e) {
-            const char final_byte = static_cast<char>(b);
-            KeyInput out;
-            switch (final_byte) {
-                case 'A':
-                    out.kind = KeyInput::Kind::Up;
-                    return out;
-                case 'B':
-                    out.kind = KeyInput::Kind::Down;
-                    return out;
-                case 'C':
-                    out.kind = KeyInput::Kind::Right;
-                    return out;
-                case 'D':
-                    out.kind = KeyInput::Kind::Left;
-                    return out;
-                case 'H':
-                    out.kind = KeyInput::Kind::Home;
-                    return out;
-                case 'F':
-                    out.kind = KeyInput::Kind::End;
-                    return out;
-                case 'Z':
-                    out.kind = KeyInput::Kind::ShiftTab;
-                    return out;
-                case '~':
-                    // VT 风格:1~/7~ = Home,4~/8~ = End,3~ = Delete,
-                    // 其余(5~/6~ 翻页……)暂不映射。
-                    if (params == "200") {
-                        return ReadBracketedPaste();
-                    }
-                    if (params == "1" || params == "7") {
-                        out.kind = KeyInput::Kind::Home;
-                    } else if (params == "4" || params == "8") {
-                        out.kind = KeyInput::Kind::End;
-                    } else if (params == "3") {
-                        out.kind = KeyInput::Kind::Delete;
-                    }
-                    return out;
-                default:
-                    return KeyInput{};  // 认不出,整个吃掉
+            // bracketed paste 要继续读后续字节,先拦;其余交给纯映射
+            // (csi_keys.hpp,参数表在 Windows 上也能单测)。
+            if (params == "200" && b == '~') {
+                return ReadBracketedPaste();
             }
+            return MapCsiToKey(params, static_cast<char>(b));
         }
         params.push_back(static_cast<char>(b));
         if (params.size() > 16) {

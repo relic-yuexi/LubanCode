@@ -561,8 +561,16 @@ std::optional<KeyInput> KeyReader::ReadOne() {
         reset_text_run();
         out.kind = KeyInput::Kind::Backspace;
     } else if (ke.wVirtualKeyCode == VK_LEFT) {
+        // Shift+Left / Ctrl+Left 单独翻出来(排队消息取回键与可配置备用键)。
+        // 纯 Shift/Ctrl 不叠别的修饰才认;Alt+Left 这类"历史后退"键照旧当 Left。
         reset_text_run();
-        out.kind = KeyInput::Kind::Left;
+        if (shift && !ctrl && !alt) {
+            out.kind = KeyInput::Kind::ShiftLeft;
+        } else if (ctrl && !shift && !alt) {
+            out.kind = KeyInput::Kind::CtrlLeft;
+        } else {
+            out.kind = KeyInput::Kind::Left;
+        }
     } else if (ke.wVirtualKeyCode == VK_RIGHT) {
         reset_text_run();
         out.kind = KeyInput::Kind::Right;

@@ -327,6 +327,13 @@ std::optional<KeyEvent> MapKey(const platform::KeyInput& key) {
             return KeyEvent::Simple(KeyKind::Backspace);
         case PK::Left:
             return KeyEvent::Simple(KeyKind::Left);
+        case PK::ShiftLeft:
+        case PK::CtrlLeft:
+            // 取回键的缺省语义就是普通光标移动(编辑器没有按词选择)。真正的
+            // "取回排队消息"由 ReadLineKeyByKey/TurnInputListener 在喂编辑器
+            // 之前拦(ShouldRecallQueuedMessage 那一套),拦不到的场合——正文
+            // 非空、队列为空、确认提示这类单行读取——行为与升级前的 Left 分毫不差。
+            return KeyEvent::Simple(KeyKind::Left);
         case PK::Right:
             return KeyEvent::Simple(KeyKind::Right);
         case PK::Home:

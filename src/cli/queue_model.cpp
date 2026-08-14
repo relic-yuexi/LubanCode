@@ -4,12 +4,39 @@
 
 #include "cli/queue_model.hpp"
 
+#include <cctype>
 #include <utility>
 
 #include "cli/i18n.hpp"
 #include "cli/line_editor.hpp"  // Utf32ToUtf8
+#include "platform/paths.hpp"   // GetEnvVar
 
 namespace lubancode::cli {
+
+bool ShouldRecallQueuedMessage(bool composer_empty, bool editing, std::size_t queue_size) {
+    return composer_empty && !editing && queue_size > 0;
+}
+
+bool QueueRecallFallbackEnabled() {
+    const auto value = lubancode::platform::GetEnvVar("LUBANCODE_QUEUE_RECALL_FALLBACK");
+    if (!value.has_value()) {
+        return true;  // 默认开:终端不报 Shift 修饰时至少有 Ctrl+Left 可用
+    }
+    std::string normalized = *value;
+    for (char& c : normalized) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return !(normalized == "none" || normalized == "off" || normalized == "0" || normalized == "false");
+}
+
+bool IsQueueRecallKey(platform::KeyInput::Kind kind) {
+    using K = platform::KeyInput::Kind;
+    if (kind == K::ShiftLeft) {
+        return true;
+    }
+    return kind == K::CtrlLeft && QueueRecallFallbackEnabled();
+}
+
 
 namespace {
 

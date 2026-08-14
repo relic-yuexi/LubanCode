@@ -26,7 +26,29 @@
 #include <string>
 #include <vector>
 
+#include "platform/console.hpp"  // KeyInput::Kind(取回键判定)
+
 namespace lubancode::cli {
+
+// -----------------------------------------------------------------------
+// 取回键的判定(0.28.x"排队消息在工具边界送达并可 Shift+左键编辑")。
+// 纯函数,不认终端、不认线程,单测直接钉。
+// -----------------------------------------------------------------------
+
+// Shift+Left/Ctrl+Left 这一下该不该触发"取回排队消息"。规矩(规格"进入
+// 编辑态"一节):composer 为空、当前不在队列编辑态、队列里还有条目,三者
+// 齐了才取。正文非空时 Shift+Left 保持 composer 既有的光标语义,不抢输入
+// ——这条也顺带堵死 IME 组合期:组合中的半个词会先以正文形式落在 composer
+// 里,正文空是取回的硬前提,组合没提交就永远取不走队列。
+bool ShouldRecallQueuedMessage(bool composer_empty, bool editing, std::size_t queue_size);
+
+// 这枚 platform 按键算不算"取回键"。Shift+Left 恒认;Ctrl+Left 是"终端
+// 不报 Shift 修饰"时的备用键,可经环境变量 LUBANCODE_QUEUE_RECALL_FALLBACK
+// (none/off/0/false)关掉,屏上提示按实际能力显示。
+bool IsQueueRecallKey(platform::KeyInput::Kind kind);
+// 备用键此刻开没开(环境变量现读,测试可直接改环境钉行为)。
+bool QueueRecallFallbackEnabled();
+
 
 class PendingQueueCore {
 public:
