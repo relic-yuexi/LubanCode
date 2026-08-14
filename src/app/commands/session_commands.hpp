@@ -13,6 +13,7 @@
 #include "agent/session_store.hpp"
 #include "cli/console_input.hpp"
 #include "cli/i18n.hpp"
+#include "cli/spinner.hpp"
 #include "cli/theme.hpp"
 #include "cli/worktree.hpp"
 #include "platform/paths.hpp"

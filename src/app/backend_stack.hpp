@@ -7,6 +7,9 @@
 // 这一层只认 api/config/agent/cli 的既有抽象,不 include 交互会话的东西;
 // SpinnerBackend 依赖真终端的 cli::Spinner(实现编在可执行文件一侧),
 // 链接 lubancode_core 的单测不要构造它,其余各层可直测。
+//
+// 实现在 backend_stack.cpp(编译边界:头文件只放类形状与函数声明,具体
+// client、prompts、Spinner 的依赖都留在 .cpp 一侧)。
 
 #pragma once
 
@@ -16,56 +19,30 @@
 #include <memory>
 #include <string>
 
-#include "agent/prompts.hpp"
-#include "api/anthropic/client.hpp"
 #include "api/backend.hpp"
-#include "api/chat/client.hpp"
-#include "api/responses/client.hpp"
-#include "cli/spinner.hpp"
 #include "cli/theme.hpp"
 #include "config/config.hpp"
 #include "config/model_catalog.hpp"
-#include "config/provider_catalog.hpp"
 
 namespace lubancode::app {
 
 // 按 wire 造对应的后端实现。agent 层只认 Backend 这个抽象接口,不关心
 // 背后具体是哪个协议在干活。
-inline std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::Config& config) {
-    // M11:连接超时 / 流式空闲读超时用 Config 里实际生效的值(四级合并结果,
-    // 没配就是内置默认值),不是每次都硬编码默认值。
-    const auto headers = lubancode::config::ResolveProviderHeaderTemplates(config.extra_headers,
-                                                                            config.auth_token);
-    if (config.wire == lubancode::config::Wire::Responses) {
-        return std::make_unique<lubancode::api::responses::ResponsesBackend>(
-            config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs,
-            config.native_web_search, config.extra_body, headers);
-    }
-    if (config.wire == lubancode::config::Wire::ChatCompletions) {
-        return std::make_unique<lubancode::api::chat::ChatCompletionsBackend>(
-            config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs,
-            config.extra_body, headers);
-    }
-    return std::make_unique<lubancode::api::anthropic::AnthropicBackend>(
-        config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs,
-        config.native_web_search, config.extra_body, headers);
-}
+std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::Config& config);
 
 // 会话里切 provider 时，外层 Model/Think/Soul 等包装器、AgentLoop 和工具
 // 都还握着 Backend&。这一层把真正的 client 藏起来并按需替换，引用地址
 // 不变；下一次请求自然落到新 base_url/wire/key 上。
 class RebuildableBackend : public lubancode::api::Backend {
 public:
-    explicit RebuildableBackend(const lubancode::config::Config& config) { Rebuild(config); }
+    explicit RebuildableBackend(const lubancode::config::Config& config);
 
-    void Rebuild(const lubancode::config::Config& config) { inner_ = BuildBackend(config); }
+    void Rebuild(const lubancode::config::Config& config);
 
     std::expected<void, lubancode::api::Error> send_stream(
         const lubancode::api::Request& request,
         const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
-        const std::atomic<bool>* cancel = nullptr) override {
-        return inner_->send_stream(request, on_event, cancel);
-    }
+        const std::atomic<bool>* cancel = nullptr) override;
 
 private:
     std::unique_ptr<lubancode::api::Backend> inner_;
@@ -79,17 +56,12 @@ private:
 // 只认引用、包装器要跨多轮 Run() 存活。
 class ModelOverrideBackend : public lubancode::api::Backend {
 public:
-    ModelOverrideBackend(lubancode::api::Backend& inner, std::shared_ptr<std::string> current_model)
-        : inner_(inner), current_model_(std::move(current_model)) {}
+    ModelOverrideBackend(lubancode::api::Backend& inner, std::shared_ptr<std::string> current_model);
 
     std::expected<void, lubancode::api::Error> send_stream(
         const lubancode::api::Request& request,
         const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
-        const std::atomic<bool>* cancel = nullptr) override {
-        lubancode::api::Request patched = request;
-        patched.model = *current_model_;
-        return inner_.send_stream(patched, on_event, cancel);
-    }
+        const std::atomic<bool>* cancel = nullptr) override;
 
 private:
     lubancode::api::Backend& inner_;
@@ -99,34 +71,19 @@ private:
 // 包一层 Backend:真正发请求前,把 Request.reasoning_effort 换成"当前会话
 // 实际在用的推理强度"。跟 ModelOverrideBackend 是同一个套路,同样的理由
 // (AgentLoop 没有 setter,agent 层现有文件不让动)——current_think 为空串
-// 就是"不发这个参数",维持原有行为不变。/think 命令改的和这里读的是
-// 同一块 shared_ptr<string> 内存,单发模式(AskOnce)没有 /think 命令,
+// 就是"不发这个参数",维持原有行为不变。/think 命令改的和这里读的是同一
+// 块 shared_ptr<string> 内存,单发模式(AskOnce)没有 /think 命令,
 // current_think 构造后就不再变,等价于"直接按配置发一次"。
 class ThinkOverrideBackend : public lubancode::api::Backend {
 public:
     ThinkOverrideBackend(lubancode::api::Backend& inner, std::shared_ptr<std::string> current_think,
                          std::shared_ptr<std::string> current_model,
-                         const lubancode::config::ModelCatalog* catalog)
-        : inner_(inner),
-          current_think_(std::move(current_think)),
-          current_model_(std::move(current_model)),
-          catalog_(catalog) {}
+                         const lubancode::config::ModelCatalog* catalog);
 
     std::expected<void, lubancode::api::Error> send_stream(
         const lubancode::api::Request& request,
         const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
-        const std::atomic<bool>* cancel = nullptr) override {
-        lubancode::api::Request patched = request;
-        patched.reasoning_effort = *current_think_;
-        if (catalog_ != nullptr) {
-            const auto body = lubancode::config::ThinkLevelExtraBody(
-                catalog_->FindBySlug(*current_model_), *current_think_);
-            for (auto it = body.begin(); it != body.end(); ++it) {
-                patched.extra_body[it.key()] = it.value();
-            }
-        }
-        return inner_.send_stream(patched, on_event, cancel);
-    }
+        const std::atomic<bool>* cancel = nullptr) override;
 
 private:
     lubancode::api::Backend& inner_;
@@ -143,17 +100,12 @@ private:
 // 内存,切到目录外模型时上层把它清空,旧模型的指令自然不再发。
 class ModelInstructionsBackend : public lubancode::api::Backend {
 public:
-    ModelInstructionsBackend(lubancode::api::Backend& inner, std::shared_ptr<std::string> current_instructions)
-        : inner_(inner), current_instructions_(std::move(current_instructions)) {}
+    ModelInstructionsBackend(lubancode::api::Backend& inner, std::shared_ptr<std::string> current_instructions);
 
     std::expected<void, lubancode::api::Error> send_stream(
         const lubancode::api::Request& request,
         const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
-        const std::atomic<bool>* cancel = nullptr) override {
-        lubancode::api::Request patched = request;
-        patched.system = lubancode::agent::WithModelInstructions(request.system, *current_instructions_);
-        return inner_.send_stream(patched, on_event, cancel);
-    }
+        const std::atomic<bool>* cancel = nullptr) override;
 
 private:
     lubancode::api::Backend& inner_;
@@ -169,17 +121,12 @@ private:
 // 下一轮请求即时生效;空串(SOUL.md 默认、或 /soul off)= 不追加,零破坏。
 class SoulOverlayBackend : public lubancode::api::Backend {
 public:
-    SoulOverlayBackend(lubancode::api::Backend& inner, std::shared_ptr<std::string> current_soul)
-        : inner_(inner), current_soul_(std::move(current_soul)) {}
+    SoulOverlayBackend(lubancode::api::Backend& inner, std::shared_ptr<std::string> current_soul);
 
     std::expected<void, lubancode::api::Error> send_stream(
         const lubancode::api::Request& request,
         const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
-        const std::atomic<bool>* cancel = nullptr) override {
-        lubancode::api::Request patched = request;
-        patched.system = lubancode::agent::WithSoul(request.system, *current_soul_);
-        return inner_.send_stream(patched, on_event, cancel);
-    }
+        const std::atomic<bool>* cancel = nullptr) override;
 
 private:
     lubancode::api::Backend& inner_;
@@ -196,18 +143,12 @@ private:
 // 两边各管各的,不会重复追加。
 class DeferredIndexBackend : public lubancode::api::Backend {
 public:
-    DeferredIndexBackend(lubancode::api::Backend& inner, std::function<std::string()> index_provider)
-        : inner_(inner), index_provider_(std::move(index_provider)) {}
+    DeferredIndexBackend(lubancode::api::Backend& inner, std::function<std::string()> index_provider);
 
     std::expected<void, lubancode::api::Error> send_stream(
         const lubancode::api::Request& request,
         const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
-        const std::atomic<bool>* cancel = nullptr) override {
-        lubancode::api::Request patched = request;
-        patched.system = lubancode::agent::WithDeferredToolsIndex(
-            request.system, index_provider_ ? index_provider_() : std::string());
-        return inner_.send_stream(patched, on_event, cancel);
-    }
+        const std::atomic<bool>* cancel = nullptr) override;
 
 private:
     lubancode::api::Backend& inner_;
@@ -223,27 +164,12 @@ private:
 // 算好传进来——管道模式下这层直接透传,不起线程、不输出任何转轮字符。
 class SpinnerBackend : public lubancode::api::Backend {
 public:
-    SpinnerBackend(lubancode::api::Backend& inner, const lubancode::cli::Theme& theme, bool spinner_enabled)
-        : inner_(inner), theme_(theme), spinner_enabled_(spinner_enabled) {}
+    SpinnerBackend(lubancode::api::Backend& inner, const lubancode::cli::Theme& theme, bool spinner_enabled);
 
     std::expected<void, lubancode::api::Error> send_stream(
         const lubancode::api::Request& request,
         const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
-        const std::atomic<bool>* cancel = nullptr) override {
-        lubancode::cli::Spinner spinner(theme_, spinner_enabled_);
-        bool stopped = false;
-        const auto wrapped = [&](const lubancode::api::StreamEvent& event) {
-            if (!stopped) {
-                spinner.Stop();
-                stopped = true;
-            }
-            on_event(event);
-        };
-        return inner_.send_stream(request, wrapped, cancel);
-        // spinner 在这里析构,Stop() 兜底再调一次也是安全的(空操作)——
-        // 万一 send_stream 直接失败、一个事件都没吐(比如连都没连上),
-        // 转轮不会一直转着。
-    }
+        const std::atomic<bool>* cancel = nullptr) override;
 
 private:
     lubancode::api::Backend& inner_;
@@ -252,4 +178,3 @@ private:
 };
 
 }  // namespace lubancode::app
-

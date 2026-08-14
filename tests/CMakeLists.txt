@@ -80,6 +80,11 @@ add_executable(lubancode_tests
   test_backend_stack.cpp
   test_tool_runtime.cpp
   test_status_refresh.cpp
+  # app 编译边界钉子:两只 TU 同 include app 公共头,专查 ODR 与漏符号;
+  # 相应 app 实现源直接编进测试目标(不进 lubancode_core,分层不动)。
+  test_app_boundary_a.cpp
+  test_app_boundary_b.cpp
+  ${CMAKE_SOURCE_DIR}/src/app/backend_stack.cpp
   # 回归 BuildCallbacks::on_usage 接线(状态行局部发布)要走到终端层的
   # 状态数据源,console_input.cpp 平时只编进主程序,这里给测试目标单编一份
   # (不进 lubancode_core,免得 doctest 进程链进真控制台读取路径)。
