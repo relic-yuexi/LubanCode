@@ -60,6 +60,8 @@ add_executable(lubancode_tests
   test_format_utils.cpp
   test_transcript.cpp
   test_agent_status.cpp
+  test_agent_panel.cpp
+  test_agent_inbox.cpp
   test_markdown.cpp
   test_latex_math.cpp
   test_diff.cpp
@@ -195,4 +197,11 @@ if(WIN32)
   #   fold_dup_clear_driver <lubancode.exe> <工作目录> <报告文件>
   add_executable(fold_dup_clear_driver fold_dup_clear_driver.cpp)
   target_compile_features(fold_dup_clear_driver PRIVATE cxx_std_23)
+
+  # 子代理面板移到输入框上方(0.28.x):验面板在上横线之上、输入框/状态行
+  # 钉底、焦点/查看态短标题/两段确认。数据走 LUBANCODE_AGENT_PANEL_DEMO
+  # 假代理钩子,不碰网络:
+  #   agent_panel_driver <lubancode.exe> <工作目录> <报告文件>
+  add_executable(agent_panel_driver agent_panel_driver.cpp)
+  target_compile_features(agent_panel_driver PRIVATE cxx_std_23)
 endif()
