@@ -111,70 +111,12 @@
 
 namespace lubancode::app {
 
-using lubancode::app::kVersion;
 using lubancode::platform::CurrentDirUtf8;
-using lubancode::app::PromptAskUser;
-using lubancode::app::TrimAscii;
-using lubancode::app::PrintSessionsCommand;
-using lubancode::app::PromptResumeTarget;
-using lubancode::app::ResumeSession;
-using lubancode::app::HandleExportCommand;
-using lubancode::app::EstimateHistoryChars;
-using lubancode::app::EstimateTokens;
-using lubancode::app::HandleContextCommand;
-using lubancode::app::HandleCompactCommand;
 using lubancode::app::LoadSoulContentByName;
-using lubancode::app::HandleSoulCommand;
-using lubancode::app::HandlePromptCommand;
-using lubancode::app::PrintConfigDiagnostics;
 using lubancode::app::HandleUpdateCommand;
-using lubancode::app::PrintSkillsCommand;
-using lubancode::app::JoinSkillNames;
-using lubancode::app::HandleSkillCommand;
-using lubancode::app::HandleThinkCommand;
-using lubancode::app::ApplyModelCatalog;
-using lubancode::app::HandleModelCommand;
-using lubancode::app::PrintProviderList;
-using lubancode::app::RunProviderAddWizardInteractive;
-using lubancode::app::HandleProviderCommand;
-using lubancode::app::HandleLanguageCommand;
-using lubancode::app::MakeInteractiveWizardIO;
-using lubancode::app::PrintBanner;
-using lubancode::app::PrintLubanIcon;
-using lubancode::app::PrintToolsCommand;
-using lubancode::app::PrintWorktreeResult;
-using lubancode::app::PrintPluginsCommand;
-using lubancode::app::PrintMcpCommand;
-using lubancode::app::PrintLspCommand;
 using lubancode::app::PathToUtf8;
-using lubancode::app::SameFilesystemPath;
-using lubancode::app::ClearAndPrintBanner;
-using lubancode::app::RunTurn;
-using lubancode::app::RunTurnResult;
-using lubancode::app::MemoryOptionsFromConfig;
 using lubancode::cli::tr;
 using lubancode::cli::trf;
-using lubancode::app::BuildBaseToolRegistry;
-using lubancode::app::BuildExploreToolRegistry;
-using lubancode::app::McpServerRuntime;
-using lubancode::app::StartMcpServers;
-using lubancode::app::RegisterMcpTools;
-using lubancode::app::PluginMountInfo;
-using lubancode::app::MountPlugins;
-using lubancode::app::BuildBackend;
-using lubancode::app::RebuildableBackend;
-using lubancode::app::ModelOverrideBackend;
-using lubancode::app::ThinkOverrideBackend;
-using lubancode::app::ModelInstructionsBackend;
-using lubancode::app::SoulOverlayBackend;
-using lubancode::app::DeferredIndexBackend;
-using lubancode::app::SpinnerBackend;
-using lubancode::cli::AgentStatusPainter;
-using lubancode::cli::StreamBodyTracker;
-using lubancode::cli::ToolDisplay;
-
-using lubancode::cli::StreamBodyTracker;
-using lubancode::cli::ToolDisplay;
 
 void PrintVersion() {
     std::cout << "lubancode " << kVersion << "\n";
@@ -192,12 +134,7 @@ void PrintHelp() {
                       lubancode::config::kDefaultTheme, lubancode::config::kDefaultContextWindowTokens);
 }
 
-
 // /tools 命令:列工具三态——核心(恒在)/已加载的延迟工具/延迟未加载,
-
-
-
-
 
 // 初次配置向导:接 cli::ReadLine 做输入、std::cout 做输出、api::ListModels
 // 做模型列表拉取。用户中途 EOF(Ctrl+Z / 管道读尽)放弃时返回 std::nullopt。

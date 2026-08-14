@@ -1,7 +1,6 @@
 // one_shot.hpp 的实现:AskOnce 的全套装配。原样搬自原头文件,行为一字
 // 未改;对 interactive_session.hpp 的依赖在后续 commit 里解。
 
-
 #include "app/one_shot.hpp"
 
 #include <algorithm>
@@ -110,67 +109,14 @@
 
 namespace lubancode::app {
 
-using lubancode::app::kVersion;
 using lubancode::platform::CurrentDirUtf8;
-using lubancode::app::PromptAskUser;
-using lubancode::app::TrimAscii;
-using lubancode::app::PrintSessionsCommand;
-using lubancode::app::PromptResumeTarget;
-using lubancode::app::ResumeSession;
-using lubancode::app::HandleExportCommand;
-using lubancode::app::EstimateHistoryChars;
-using lubancode::app::EstimateTokens;
-using lubancode::app::HandleContextCommand;
-using lubancode::app::HandleCompactCommand;
-using lubancode::app::LoadSoulContentByName;
-using lubancode::app::HandleSoulCommand;
-using lubancode::app::HandlePromptCommand;
-using lubancode::app::PrintConfigDiagnostics;
-using lubancode::app::HandleUpdateCommand;
-using lubancode::app::PrintSkillsCommand;
-using lubancode::app::JoinSkillNames;
-using lubancode::app::HandleSkillCommand;
-using lubancode::app::HandleThinkCommand;
-using lubancode::app::ApplyModelCatalog;
-using lubancode::app::HandleModelCommand;
-using lubancode::app::PrintProviderList;
-using lubancode::app::RunProviderAddWizardInteractive;
-using lubancode::app::HandleProviderCommand;
-using lubancode::app::HandleLanguageCommand;
-using lubancode::app::MakeInteractiveWizardIO;
-using lubancode::app::PrintBanner;
-using lubancode::app::PrintLubanIcon;
-using lubancode::app::PrintToolsCommand;
-using lubancode::app::PrintWorktreeResult;
-using lubancode::app::PrintPluginsCommand;
-using lubancode::app::PrintMcpCommand;
-using lubancode::app::PrintLspCommand;
-using lubancode::app::PathToUtf8;
-using lubancode::app::SameFilesystemPath;
-using lubancode::app::ClearAndPrintBanner;
 using lubancode::app::RunTurn;
-using lubancode::app::RunTurnResult;
 using lubancode::app::MemoryOptionsFromConfig;
-using lubancode::cli::tr;
-using lubancode::cli::trf;
 using lubancode::app::BuildBaseToolRegistry;
-using lubancode::app::BuildExploreToolRegistry;
-using lubancode::app::McpServerRuntime;
-using lubancode::app::StartMcpServers;
-using lubancode::app::RegisterMcpTools;
-using lubancode::app::PluginMountInfo;
-using lubancode::app::MountPlugins;
 using lubancode::app::BuildBackend;
-using lubancode::app::RebuildableBackend;
-using lubancode::app::ModelOverrideBackend;
 using lubancode::app::ThinkOverrideBackend;
-using lubancode::app::ModelInstructionsBackend;
-using lubancode::app::SoulOverlayBackend;
 using lubancode::app::DeferredIndexBackend;
 using lubancode::app::SpinnerBackend;
-using lubancode::cli::AgentStatusPainter;
-using lubancode::cli::StreamBodyTracker;
-using lubancode::cli::ToolDisplay;
 
 // 单发模式(位置参数):也走 agent loop,同样支持工具,只是只问这一句。
 // 管道/单发场景下 spinner_enabled 传进来的必然是 false(RunCli 里按

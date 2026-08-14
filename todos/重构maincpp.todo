@@ -1,8 +1,39 @@
 # 拆开 `src/main.cpp`
 
-状态：待做
+状态：已完成
 
-## 眼下是什么样
+## 最终实账(2026-08-15 收尾)
+
+`src/main.cpp` 39 行:只剩 wmain 的 UTF-16→UTF-8 与 `lubancode::app::RunCli(args)`。
+`src/app/` 已立真实编译边界——每只公开头只放声明,实现全在各 `.cpp`,
+CMake 在 lubancode 可执行文件与测试目标两侧明列;测试侧有两只 TU 同
+include 全部公共头的边界钉子(test_app_boundary_a/b)专查 ODR 与漏符号。
+
+```text
+src/main.cpp                          39 行
+src/app/interactive_session.hpp       47 行(只露 Options+RunInteractiveSession)
+src/app/interactive_session.cpp     1545 行(InteractiveSession 真对象,详见下)
+src/app/cli_app.hpp/.cpp          36 / 502 行(RunCli+向导)
+src/app/cli_options.hpp/.cpp      40 /  59 行(ParseCliArgs 纯函数)
+src/app/one_shot.hpp/.cpp         31 / 243 行(AskOnce,不 include 交互头)
+src/app/backend_stack.hpp/.cpp   180 / 148 行
+src/app/tool_runtime.hpp/.cpp    192 / 250 行
+src/app/turn_runner.hpp/.cpp     149 / 783 行
+src/app/commands/settings_commands.*  163 / 1103 行
+src/app/commands/session_commands.*   135 /  507 行
+src/app/commands/prompt_commands.*     62 / 266 行
+src/app/commands/workspace_commands.*  85 /  288 行
+src/app/commands/peer_commands.*       37 / 140 行
+src/app/commands/command_flow.hpp      12 行
+```
+
+收尾遗留(2026-08-15 app 编译边界一单交接):interactive_session.cpp
+1545 行、settings_commands.cpp 1103 行,均超出"700-1000/不过千"目标,
+还没按"向导/供应商切换/普通设置"与"memory 命令/转录 UI 聚焦"再分;
+PathToUtf8/SameFilesystemPath 仍住在 workspace_commands,没归
+platform/tools 路径层。行为、文案、CLI/slash/JSONL/配置格式零改动。
+
+## 眼下是什么样(拆分前的旧账,留档)
 
 `src/main.cpp` 已有 6476 行，约 340 KB。
 
