@@ -95,6 +95,18 @@ struct CompletionCandidate {
     std::string description;  // 一句话说明,提示行展示用
 };
 
+// 流式输入行的 slash 命令提示(用户反馈"流式打 / 也要像空闲输入框一样出补全
+// 提示")。规则:buffer 非空、首字符是 '/'、且还没敲空格(还在敲命令词)才
+// 出提示,以整段 buffer 作命令词做大小写不敏感前缀匹配;其余情形一律给空
+// vector。行文本跟 LineEditorCore 提示区同一套摆法:一行 "  /name  说明",
+// 最多 6 行,超出加一行"共 N 个命令"(i18n key ui.menu_more,文案沿用现有
+// 机制,不重写);这里没有选中态,永不出 "> " 标记行。纯函数、不碰任何编辑
+// 状态/历史,流式 footer 的监听线程每次按键现算一遍,单测直接钉
+// (tests/test_queue_model.cpp)。buffer 收 UTF-8(echo_text 那份原样进来),
+// 内部自己解码。
+std::vector<std::string> StreamSlashHintLines(const std::vector<CompletionCandidate>& candidates,
+                                              const std::string& buffer_utf8);
+
 // 简易 East Asian Width 判定:>= 0x1100 起,常用的 CJK 统一表意文字、
 // 假名、韩文音节、全角标点这些区段按显示宽度 2 算,其余按 1 算。UI-A
 // (0.11.0)补上了常用 emoji 区段(U+1F300 起那几段,终端都按两列画)。

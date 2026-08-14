@@ -391,6 +391,61 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
 
+    // ---- G2b 流式 slash 提示:流式期间在输入行打 '/',状态行之下实时列出
+    // 匹配命令(跟空闲 composer 一致)。判据不靠文案:结构上认"待发行(上
+    // 横线上方) + 输入行'/' + 状态行之下出现若干以两空格起头的提示行"——
+    // 这套组合只有流式 footer 才有(空闲 composer 没有待发区),不会误认。
+    // 退格清掉 '/' 后提示行须跟着消失。
+    {
+        SendText("/");  // 流式输入行打一个 '/',提示应实时出现
+        bool hint_seen = false;
+        int hint_count_seen = 0;
+        const DWORD hint_deadline = GetTickCount() + 15000;
+        while (GetTickCount() < hint_deadline) {
+            const int row = FindFooterInputRow();
+            if (row >= 2 && ReadRow(row - 2).find("你好排队") != std::string::npos) {
+                const std::string input_text = ReadRow(row);  // 输入行 "> /"(打了一个 '/')
+                int hint_count = 0;
+                for (int r = row + 3; r < row + 11 && r < 400; ++r) {
+                    const std::string t = ReadRow(r);
+                    if (t.size() >= 3 && t[0] == ' ' && t[1] == ' ' && t[2] == '/') {
+                        ++hint_count;
+                    }
+                }
+                if (input_text.size() >= 3 && input_text[0] == '>' && input_text[2] == '/' &&
+                    hint_count >= 3) {
+                    hint_seen = true;
+                    hint_count_seen = hint_count;
+                    break;
+                }
+            }
+            Sleep(100);
+        }
+        Check(hint_seen, "G2b 流式 slash 提示:'/' 实时列出命令(状态行之下),队列区同屏共存");
+        Log("INFO: G2b 提示行数 " + std::to_string(hint_count_seen));
+        SendKey(VK_BACK, L'\b', 0);
+        bool hint_gone = false;
+        const DWORD hint_gone_deadline = GetTickCount() + 8000;
+        while (GetTickCount() < hint_gone_deadline) {
+            const int row = FindFooterInputRow();
+            if (row >= 0) {
+                int hint_count = 0;
+                for (int r = row + 3; r < row + 11 && r < 400; ++r) {
+                    const std::string t = ReadRow(r);
+                    if (t.size() >= 3 && t[0] == ' ' && t[1] == ' ' && t[2] == '/') {
+                        ++hint_count;
+                    }
+                }
+                if (hint_count == 0) {
+                    hint_gone = true;
+                    break;
+                }
+            }
+            Sleep(100);
+        }
+        Check(hint_gone, "G2b 退格清空后,提示行跟着消失(高度账对平,无残影)");
+    }
+
     // 用户反馈的原始现场:read_file 做完后，AgentLoop 会发起第二次模型请求。
     // 旧实现此时由新 Spinner 构造出的 SuspendScope 把整个 footer 藏掉，只剩
     // “思考中”。这里必须在第二个 Working 周期再次抓到 composer 与光标。
