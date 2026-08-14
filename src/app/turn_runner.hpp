@@ -148,6 +148,11 @@ std::string TrimAscii(std::string value) {
 
 std::expected<std::vector<std::string>, std::string> PromptAskUser(
     const lubancode::tools::AskUserQuestion& question, const lubancode::cli::Theme& theme) {
+    // 交互菜单取得整块屏面所有权:脚注框收起 + 子代理状态块整块收走 +
+    // ticker 挂起(零输出)+ 监听线程让出读权,全程一个作用域管到底;
+    // 标题/问题/选项/提示行从正文末尾连着铺,等待期间无人改写这片区域。
+    // 恢复点在函数末尾(菜单结果/取消提示之后),见 console_input.hpp
+    // StreamFooterSuspendScope 注释。
     const lubancode::cli::StreamFooterSuspendScope footer_suspend;
     const bool interactive_menu = lubancode::platform::StdinIsInteractive() &&
                                   lubancode::platform::ProbeStdoutConsole().is_console;
@@ -440,6 +445,9 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         // PrintConfirmDetails/ShowDiffPreview 两条路径 + 后面的 ReadLine +
         // 下面 "chose_always" 那次追加确认,答完(或提前 return)自动摘挂起
         // ——详见 cli/console_input.hpp StreamFooterSuspendScope 注释。
+        // ("ask_user 被子代理状态遮挡"一单起,这枚作用域同时收走子代理
+        // 状态块、挂起 ticker、让监听线程交出读权——确认菜单与 ask_user
+        // 菜单同一套屏面所有权,不另开第二条路。)
         const lubancode::cli::StreamFooterSuspendScope footer_suspend;
         const int pending_idx = display.OnConfirmRequest();
         if (file_tool && display.is_console) {

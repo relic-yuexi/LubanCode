@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <iostream>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -448,6 +449,16 @@ private:
 // 先调 Hide() 把状态块从屏幕上擦掉——不用显式"打印完再 Show()",ticker
 // 线程最多等一个间隔就会自己重画,新内容不会被状态块盖住,状态块的
 // 残影也不会污染新内容。
+//
+// "ask_user 被子代理状态遮挡"补的两条:
+//   1. 构造时往 SetRepaintSuspendHideHook 自登记、Stop 时撤销。阻塞式
+//      交互菜单(ask_user/工具确认,StreamFooterSuspendScope)开屏那一刻
+//      状态块整块收走;且 Tick() 拿到锁先查 RepaintSuspendedLocked(),
+//      挂起期间零输出——菜单等输入再久,状态块也插不进来(单次 Hide 堵
+//      不住"下一拍又画回来",这里是计数层面的作用域)。
+//   2. 完成态静默:板上没有 Running 条目时,渲染结果不会再变(耗时/token
+//      都定在 Finish 那一刻),与上一帧完全相同就跳过整拍重画——完成
+//      摘要不每 400ms 死缠屏幕;条目有变(新收尾一条)照常画。
 class AgentStatusPainter {
 public:
     AgentStatusPainter(lubancode::cli::AgentStatusBoard& board, const lubancode::cli::Theme& theme, bool enabled)
@@ -455,6 +466,7 @@ public:
         if (!enabled_) {
             return;
         }
+        lubancode::cli::SetRepaintSuspendHideHook([this] { HideLocked(); });
         thread_ = std::thread([this] {
             while (!stop_flag_.load(std::memory_order_relaxed)) {
                 Tick();
@@ -469,13 +481,53 @@ public:
     AgentStatusPainter(const AgentStatusPainter&) = delete;
     AgentStatusPainter& operator=(const AgentStatusPainter&) = delete;
 
+    // 单拍重画。公开不是给业务代码随手调的——ticker 线程靠它刷新,
+    // tests/test_repaint_coord.cpp 拿它当"可控 ticker"手工泵一拍,断言
+    // 挂起期间零输出、完成态静默。线程安全:内部自拿 StdoutWriteMutex。
+    void Tick() {
+        const auto entries = board_.Snapshot();
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        // 交互菜单占屏 / 屏幕事务进行中:这一拍什么都不画、什么都不擦。
+        // 必须在 EraseStreamFooterLocked 之前查——不然擦了脚注又不补画。
+        if (lubancode::cli::RepaintSuspendedLocked()) {
+            return;
+        }
+        if (entries.empty()) {
+            // footer 把正文/状态块续写点另存着；每个 ticker 帧先回到那一点，
+            // 随后的相对光标移动才有可靠基准。
+            lubancode::cli::EraseStreamFooterLocked();
+            HideLocked();
+            lubancode::cli::RedrawStreamFooterLocked();
+            return;
+        }
+        const auto lines =
+            lubancode::cli::FormatAgentStatusLines(entries, std::chrono::steady_clock::now(), theme_);
+        // 完成态静默:没有运行中条目、屏上已画着、内容与上一帧逐字相同
+        // ——不会再变的完成摘要不值得每拍重画一遍。
+        if (shown_rows_ > 0 && !board_.HasRunning() && lines == last_lines_) {
+            return;
+        }
+        last_lines_ = lines;
+        lubancode::cli::EraseStreamFooterLocked();
+        HideLocked();
+        lubancode::cli::EnsureStreamScreenRowsLocked(static_cast<int>(lines.size()) + 1);
+        for (const auto& line : lines) {
+            std::cout << line << "\n";
+        }
+        std::cout.flush();
+        shown_rows_ = static_cast<int>(lines.size());
+        lubancode::cli::RedrawStreamFooterLocked();
+    }
+
     // 停 ticker 线程、把状态块从屏幕上擦掉。重复调用安全,enabled=false
     // 时天然是空操作。RunTurn 里 loop.Run() 一返回就调,状态块不会跟收尾
-    // 的统计行/分界线打架。
+    // 的统计行/分界线打架。头一件事是摘掉挂起钩子——之后哪怕还有残余的
+    // 交互作用域进出,也不会再摸到这个已经要收场的实例。
     void Stop() {
         if (stopped_) {
             return;
         }
+        lubancode::cli::SetRepaintSuspendHideHook({});
         stop_flag_.store(true, std::memory_order_relaxed);
         if (thread_.joinable()) {
             thread_.join();
@@ -507,29 +559,6 @@ public:
     }
 
 private:
-    void Tick() {
-        const auto entries = board_.Snapshot();
-        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-        // footer 把正文/状态块续写点另存着；每个 ticker 帧先回到那一点，
-        // 随后的相对光标移动才有可靠基准。
-        lubancode::cli::EraseStreamFooterLocked();
-        if (entries.empty()) {
-            HideLocked();
-            lubancode::cli::RedrawStreamFooterLocked();
-            return;
-        }
-        const auto lines =
-            lubancode::cli::FormatAgentStatusLines(entries, std::chrono::steady_clock::now(), theme_);
-        HideLocked();
-        lubancode::cli::EnsureStreamScreenRowsLocked(static_cast<int>(lines.size()) + 1);
-        for (const auto& line : lines) {
-            std::cout << line << "\n";
-        }
-        std::cout.flush();
-        shown_rows_ = static_cast<int>(lines.size());
-        lubancode::cli::RedrawStreamFooterLocked();
-    }
-
     // 调用方已经持有 StdoutWriteMutex()。
     void HideLocked() {
         if (shown_rows_ <= 0) {
@@ -547,6 +576,9 @@ private:
     std::thread thread_;
     std::atomic<bool> stop_flag_{false};
     int shown_rows_ = 0;  // 当前屏幕上画着几行(Hide 靠这个决定要不要擦、擦几行)
+    // 上一帧实际画出的行(完成态静默的比对基准)。只在持有
+    // StdoutWriteMutex 的 Tick 里读写。
+    std::vector<std::string> last_lines_;
 };
 
 // ---------------------------------------------------------------------------

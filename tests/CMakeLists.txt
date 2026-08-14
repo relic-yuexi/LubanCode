@@ -76,6 +76,10 @@ add_executable(lubancode_tests
   test_skill_drafter.cpp
   test_backend_stack.cpp
   test_tool_runtime.cpp
+  test_repaint_coord.cpp
+  # repaint 协调层测试要链真实现:console_input.cpp 平时只进 lubancode
+  # 可执行文件(根 CMakeLists 刻意不挪进 core),这里直接编进测试目标。
+  ${CMAKE_SOURCE_DIR}/src/cli/console_input.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_core doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)
