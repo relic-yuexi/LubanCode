@@ -1,0 +1,207 @@
+# 排队消息在工具边界送达，并可用 Shift+左键取回编辑
+
+状态：待做（交互与轮次控制）
+
+## 想要的样子
+
+模型、主代理或子代理还在跑时，用户照常在 composer 里敲下一句。按 Enter 后，这句话不消失，也不粗暴打断当前工具。它排在输入框上方：
+
+```text
+Messages to be submitted after next tool call (press esc to interrupt and send immediately)
+  ↳ 就 subagent 是可以介入的，你知道这个意思吗
+
+> Use /skills to list available skills
+```
+
+`Shift+←` 把排队消息取回 composer。用户挪光标、改字、粘贴、换行，再按 Enter，原位置换成新内容。
+
+这不是一块只看的历史。它是一张活队列：能看、能改、能删、能催它立刻送。
+
+## 眼下已有多少
+
+lubancode 已有 `PendingQueueCore` 与流式 footer，也能把消息画在输入行上方。可语义还差三截：
+
+1. `TurnInputListener` 把队列攥在自己手里，直到整轮 `RunTurn()` 结束才 `TakeQueuedLines()`。
+2. `InteractiveLoop` 收到这些字符串后，塞进 `pending_queue`，下一圈再当全新的用户轮次逐条发送。
+3. 编辑入口是“空 buffer 按 Up”，不是 `Shift+←`；编辑器只有尾部追加与 Backspace，没有复用 composer 的光标、选区、粘贴和多行能力。
+
+源码落点：
+
+- `src/cli/queue_model.*`：待发队列纯状态。
+- `src/cli/console_input.*`：流式输入、待发区绘制、按键翻译。
+- `src/app/turn_runner.hpp`：本轮结束才取出 `queued_lines`。
+- `src/app/interactive_session.hpp`：把 `queued_lines` 变成下一轮输入。
+- `src/agent/loop.cpp`：已有“工具结果收齐、下一次请求未发”的 inbox 安全点，目前主要接跨会话来信。
+
+平台按键层也得补账。`KeyInput::Kind` 眼下只有 `Left`，Windows 映射时丢掉 Shift 修饰；POSIX 能认 `CSI 1;2D` 的终端也尚未翻成独立事件。
+
+## 语义先定死
+
+### 1. Enter 是排队，不是另开一轮
+
+代理正忙时，用户按 Enter：
+
+- 生成一条有 id 的 `QueuedMessage`，保住正文、目标、创建顺序和送达策略。
+- 默认策略是 `AfterNextToolBoundary`。
+- 当前工具调用收尾、tool result 已进 history 后，在下一次模型请求发出前，把队列消息注进同一只 AgentLoop。
+- 一次边界有多条，照排队顺序送。不可倒序，不可合并后丢掉各自目标与时间。
+- 若这一轮没再调工具便自然结束，队列紧接着成为下一次请求的用户消息，不等用户再敲一下。
+
+“下一工具边界”须按真实事件算，不能按画面上出现一行工具摘要便算。危险工具还没落盘，绝不能半途插话。
+
+### 2. Esc 是打断并立即送
+
+队列非空时按 Esc：
+
+- 请求中止当前流式响应。
+- 已完成的 tool result 保住；正在执行的副作用工具先走既定取消与收尾规矩。
+- 到最近安全点后，立刻把待发消息送进原目标，不再等下一工具调用。
+- 屏上把提示从“等待下一工具调用”改成“正在打断并送达”，成功后移除队列行。
+
+队列为空时，Esc 仍按原义只打断当前轮。正在编辑一条排队消息时，第一次 Esc 只取消编辑、还原原文；退出编辑态后再按 Esc，才触发立即送达。两层不能混。
+
+### 3. 队列按目标分账
+
+每条消息须带目标：
+
+```text
+MainSession
+Subagent(task_id)
+```
+
+- composer 在 main 时排给 main。
+- composer 已切进某只 subagent 时，排给该任务 inbox。
+- 面板行或队列标题显出目标短名；多目标同时有队列时，不能把它们混成一团看不出归谁。
+- 子代理先结束，消息不得改投 main。标成“目标已结束”，让用户取回改目标或删掉。
+- 切换焦点不改已经落队消息的目标。
+
+这条与 `todos/子代理面板移到输入框上方.todo` 的“直接介入子代理”共用投递通道与右上角目标标签。
+
+## 显示
+
+### 1. 队列区常驻在 composer 上方
+
+顺序定为：
+
+```text
+transcript
+subagent panel / detail
+queued messages
+composer top rule
+composer
+composer bottom rule
+status line
+```
+
+流式 footer 也守这顺序。队列向上长，不能把输入框与状态栏推出视口。
+
+### 2. 标题说清送达时机与操作
+
+有队列才画标题。文案可本地化，意思须齐：
+
+```text
+下一次工具调用后送出 · Esc 打断并立即送 · Shift+← 取回编辑
+```
+
+若当前没有工具边界可等，改成“本轮收尾后送出”。若正在编辑、目标已结束、正在立即送，标题也跟着变，不能永远挂一句假话。
+
+### 3. 多条消息可辨认
+
+- 每条一枚稳定序号或短 id。
+- 显示目标短名与正文首行；多行正文可折叠，展开后看全。
+- 数量超过可用高度时，围着当前编辑项开窗口，并写“另有 N 条”。
+- 已送达便从活队列退场；发送失败留在原处，标错，不得吞掉。
+
+## Shift+左键编辑
+
+### 1. 进入编辑态
+
+composer 为空且队列非空时，按 `Shift+←`：
+
+- 默认取回最新一条可编辑消息。
+- 该行在队列区标成“编辑中”，正文装进真正的 `LineEditorCore`，光标落在末尾。
+- 不是把字符串塞进一只只会尾删的临时 buffer。左右移动、Home/End、中文退格、粘贴、多行软换行都须与普通 composer 一样。
+
+若先在队列区选中某条，再按 `Shift+←`，取回所选条。没有显式选择时才取最新一条。这样每条都能改，不只最后一条。
+
+### 2. 编辑结果
+
+- Enter：原位替换，保住 id、目标和排队次序，退出编辑态。
+- Esc：丢掉这次修改，还原原文，退出编辑态，不打断当前代理。
+- Delete：经明确提示后删掉当前排队消息。
+- 切 main/subagent、切确认档、进入代理详情前，若有未提交修改，先保存草稿或阻止切换。不能串目标。
+
+正文非空且不在队列编辑态时，`Shift+←` 仍按 composer 既定文字选择/光标语义处理；不可突然抢走输入。若当前编辑器尚无“按词选择”能力，至少不得丢字或误取队列。
+
+### 3. 跨平台按键
+
+- `platform::KeyInput` 加能保住 Shift 修饰的 Left 事件，不在 console 层猜字符。
+- Windows Terminal、VS Code Terminal、conhost 都测 `VK_LEFT + SHIFT_PRESSED`。
+- POSIX 识别常见 `CSI 1;2D`；终端不报告 Shift 时保留一个可配置替代键，屏上提示按实际能力显示。
+- IME 组合输入期间不响应队列快捷键。
+
+## 数据与线程
+
+队列不能继续只住在 `TurnInputListener` 线程里。建议给当前会话一只线程安全的 `SteeringQueue`：
+
+```cpp
+struct QueuedMessage {
+    QueueId id;
+    MessageTarget target;
+    std::string text;
+    DeliveryMode delivery;
+    QueueState state;
+};
+```
+
+- listener 只提交编辑动作，不拥有最终数据。
+- main AgentLoop 与每只 subagent 从各自目标队列轮询。
+- UI 拿轻量快照，不长期持锁，不复制大段正文。
+- “取回编辑”做成带版本号的事务。编辑期间恰逢边界送达时，要么先冻结该条，要么让提交失败并提示；不可一边送旧文，一边显示新文已保存。
+- 会话退出、`/clear`、任务取消时，未送消息须明确丢弃、迁移或导出，不能静默消失。
+
+## 建议落刀
+
+### 第一步：键位与编辑事务
+
+先补 `Shift+Left` 映射，把队列编辑接到 `LineEditorCore`。仍沿用旧的“整轮后发送”，先把取回、替换、取消、删除做稳。
+
+### 第二步：队列提到会话层
+
+引入 `SteeringQueue`，让空闲 composer、stream footer、main 与 subagent 都看同一份有目标队列。收掉 `RunTurnResult::queued_lines` 这条事后搬运。
+
+### 第三步：工具边界投递
+
+把 main 与 subagent inbox 接到 `AgentLoop` 安全点。钉住 tool result 在前、介入消息在后、下一 request 最后的顺序。
+
+### 第四步：Esc 立即送与完整画面
+
+接中断状态机，补动态标题、目标标签、多条窗口与 screen driver。最后再删旧 Up 取回入口，或保留作别名；帮助文案只能留一套主键。
+
+## 验收
+
+- 模型流式输出时连排三条，三条都留在 composer 上方，顺序、目标、正文看得清。
+- 下一只工具执行完后，tool result 先入 history，三条消息随后进入同一 AgentLoop，下一次 captured request 全部带上。
+- 没有下一工具调用时，模型本轮结束便接着处理队列，不会回到空闲等用户。
+- 队列非空按 Esc，当前流在安全点收住，消息立即送达；队列为空按 Esc 仍只打断。
+- `Shift+←` 取回所选或最新消息，能在中间挪光标改中文、粘贴多行；Enter 原位替换，Esc 还原，Delete 删除。
+- main 与两只 subagent 各排一条，三条只进各自 history。某只先结束，它那条显错并可取回，不串给 main。
+- 终端缩放、长正文、十条队列、代理面板展开同时出现，输入框与状态栏仍看得见，无残影。
+- plain、管道、重定向保住旧降级行为；不支持 Shift+Left 的终端给可发现的替代键。
+
+## 测试
+
+- `SteeringQueue`：顺序、目标、编辑事务、版本冲突、删除、失败重试、终态目标。
+- `AgentLoop`：工具边界前后 message 顺序；无工具自然收尾；多条同边界送达。
+- subagent：两只阻塞代理定向收信，互不串台。
+- 按键：Windows Shift+Left、POSIX CSI、IME/修饰键抬起、正文非空不误触。
+- screen driver：标题、三条队列、编辑高亮、立即送状态、窄窗滚屏。
+
+## 不做
+
+- 不把排队消息伪装成新的独立会话轮次。
+- 不在副作用工具执行到一半时硬插 user message。
+- 不把给 subagent 的消息绕 main 转述。
+- 不因画面高度只保留最近三条而丢掉旧消息；可折叠，不可丢数据。
+- 不让 UI ticker 长期拿队列锁。
+- 不用“Esc 一律 cancel 全场”糊住编辑态、立即送与普通打断三种语义。
