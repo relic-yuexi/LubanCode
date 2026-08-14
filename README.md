@@ -14,7 +14,7 @@
   <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml/badge.svg" alt="Release"></a>
   <img src="https://img.shields.io/badge/C%2B%2B-23-00599C?logo=cplusplus&logoColor=white" alt="C++23">
-  <img src="https://img.shields.io/badge/version-0.24.1-CB2C31" alt="v0.24.1">
+  <img src="https://img.shields.io/badge/version-0.25.0-CB2C31" alt="v0.25.0">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-444444" alt="Windows, Linux and macOS">
 </p>
 
@@ -22,7 +22,47 @@ LubanCode 原生支持 Anthropic Messages、OpenAI Responses 与 Chat Completion
 
 鲁班造物，先正绳墨，再下斧凿。LubanCode 也守这条规矩：先看清，再动手；改了什么，明明白白摆给你看。
 
-> 当前版本：`v0.24.1`。Windows、Ubuntu、macOS 三路 CI 均会编译并跑全量测试。
+> 当前版本：`v0.25.0`。Windows、Ubuntu、macOS 三路 CI 均会编译并跑全量测试。
+
+## 为什么是 LubanCode
+
+五件事，做到别人做不到的地步。
+
+### 1. 下载即用，零运行时依赖
+
+不需要 Node.js。不需要 Python。不需要 `npm install`。静态链接 CRT，一个 3.3 MB 的可执行文件就是全部。Windows 一行命令拉下来直接跑，Linux / macOS 解压即用。没有 `node_modules`，没有依赖地狱，没有版本对不上。
+
+### 2. 极致轻量
+
+纯 C++23 原生编译，没有 Node.js 运行时，没有 Rust 编译器的臃肿产物。实测对比（Windows，相同 `--version` 路径，峰值内存密集采样）：
+
+| | LubanCode | Codex (Rust 二进制) | Codex (Node.js) |
+| --- | --- | --- | --- |
+| **安装体积** | **3.3 MB** | 342 MB | 353 MB |
+| **运行内存** | **0.8 MB** | 5.6 MB | 54.1 MB |
+
+3 MB 的可执行文件，不到 1 MB 的私有内存。装得快，跑得轻，老机器和远程盒子都不费劲。
+
+### 3. 魂/法分离的提示词系统
+
+两套提示词各管一段：
+
+- **法**（`~/.lubancode/system_prompt.md`）：行为骨架——工具调用、代码规范、工作流程的规矩。稳得住，不轻易动。
+- **魂**（`~/.lubancode/SOUL.md`）：风格叠加层——"只用文言文答话""回答控制在三句话内"。盖在法之上，随叫随切。
+
+`/soul` 一键切换，`~/.lubancode/souls/` 下放多个备选魂文件。改风格不必碰行为逻辑，改行为不必重写人格。别的工具系统提示是一整坨，LubanCode 把它拆开了。
+
+### 4. 项目记忆
+
+LubanCode 会记住你的项目事实与偏好——构建命令、代码风格、踩过的坑。`/memory` 管理召回，后台自动整理。
+
+一个细节：同一个 Git 仓库的主工作树和 linked worktree（`/worktree` 新建的隔离工作树）按 common git dir 归到同一身份，**共享同一份记忆**。你在主分支教过的东西，切到 worktree 里不用重教。
+
+### 5. 终端 Markdown 与 LaTeX 渲染
+
+模型回答里的 Markdown 表格、代码块、列表、引用，LubanCode 在终端里原地渲染——不是糊一堆纯文本。LaTeX 公式按行内 `$...$` 和独立 `$$...$$` 渲染成终端可显示的形式。diff 有着色，工具输出有折叠，长粘贴有智能收纳。
+
+终端不该是降级体验。
 
 ## 一眼看懂
 
@@ -220,8 +260,8 @@ LubanCode 留了四扇门：
 推送 `v*` 标签会触发发布流水线。三平台分别打包，随后自动创建 GitHub Release、生成发布说明并上传产物：
 
 ```bash
-git tag -a v0.24.1 -m "v0.24.1"
-git push origin v0.24.1
+git tag -a v0.25.0 -m "v0.25.0"
+git push origin v0.25.0
 ```
 
 ## 许可

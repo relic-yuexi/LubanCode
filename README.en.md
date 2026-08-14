@@ -14,7 +14,7 @@
   <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml/badge.svg" alt="Release"></a>
   <img src="https://img.shields.io/badge/C%2B%2B-23-00599C?logo=cplusplus&logoColor=white" alt="C++23">
-  <img src="https://img.shields.io/badge/version-0.24.1-CB2C31" alt="v0.24.1">
+  <img src="https://img.shields.io/badge/version-0.25.0-CB2C31" alt="v0.25.0">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-444444" alt="Windows, Linux and macOS">
 </p>
 
@@ -22,7 +22,47 @@ LubanCode connects natively to Anthropic Messages, OpenAI Responses, and OpenAI-
 
 The name comes from Lu Ban, the traditional Chinese master craftsman. The idea is simple: measure first, cut second, and always show the work.
 
-> Current release line: `v0.24.1`. The full suite builds and runs on Windows, Ubuntu, and macOS.
+> Current release line: `v0.25.0`. The full suite builds and runs on Windows, Ubuntu, and macOS.
+
+## Why LubanCode
+
+Five things we push further than anyone else.
+
+### 1. Download and run — zero runtime dependencies
+
+No Node.js. No Python. No `npm install`. Statically linked CRT — a single 3.3 MB executable is all there is. Windows pulls it with one command and runs immediately; Linux / macOS decompress and go. No `node_modules`, no dependency hell, no version mismatches.
+
+### 2. Radically lightweight
+
+Pure C++23, natively compiled — no Node.js runtime, no bloated Rust toolchain artifacts. Measured on Windows, same `--version` path, peak memory sampled at 5 ms intervals:
+
+| | LubanCode | Codex (Rust binary) | Codex (Node.js) |
+| --- | --- | --- | --- |
+| **Install size** | **3.3 MB** | 342 MB | 353 MB |
+| **Peak private memory** | **0.8 MB** | 5.6 MB | 54.1 MB |
+
+A 3 MB executable, under 1 MB of private memory. Installs in a flash, runs feather-light — on old hardware or a remote box alike.
+
+### 3. Soul / Law prompt separation
+
+Two prompt layers, each in charge of one thing:
+
+- **Law** (`~/.lubancode/system_prompt.md`): the behavioral skeleton — tool calls, coding conventions, workflow rules. Stable, rarely touched.
+- **Soul** (`~/.lubancode/SOUL.md`): a style overlay — "answer only in classical Chinese" or "keep every reply under three sentences." Layered on top of Law, swappable on demand.
+
+`/soul` switches instantly. Drop alternative souls in `~/.lubancode/souls/`. Change voice without touching behavior logic; change behavior without rewriting personality. Most tools bundle their system prompt into one monolith — LubanCode splits it apart.
+
+### 4. Project memory
+
+LubanCode remembers your project facts and preferences — build commands, code style, pitfalls encountered. `/memory` manages recall; a background pass organizes entries over time.
+
+One detail: the main worktree and linked worktrees created by `/worktree` share one project identity (keyed by common git dir), so they **share the same memory store**. What you teach in the main branch carries over — no re-education when you switch into an isolated worktree.
+
+### 5. Terminal Markdown & LaTeX rendering
+
+Markdown tables, code blocks, lists, blockquotes in model output — LubanCode renders them in place in the terminal, not dumped as raw text. LaTeX formulas render for both inline `$...$` and display `$$...$$` into terminal-displayable form. Diffs are colorized. Tool output folds. Long pastes compress.
+
+The terminal deserves more than plain text.
 
 ## At a glance
 
@@ -220,8 +260,8 @@ Every push and pull request is built and tested on:
 Pushing a `v*` tag builds all three release archives, creates a GitHub Release, generates release notes, and uploads the binaries:
 
 ```bash
-git tag -a v0.24.1 -m "v0.24.1"
-git push origin v0.24.1
+git tag -a v0.25.0 -m "v0.25.0"
+git push origin v0.25.0
 ```
 
 ## License

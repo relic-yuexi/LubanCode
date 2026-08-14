@@ -2,6 +2,12 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.25.0] - 2026-08-14
+
+- **思考与调度看得见。** 模型的 thinking/reasoning 过程实时上屏；异步子代理带常驻面板与 Explore 模式；后台命令有任务台账、完成通知、输出查询与停止。
+- **选择全用方向键。** 工具确认、配置向导、slash 补全改为方向键选择，Enter 确认；Ctrl+O 原地展开最近一条转录。
+- **长输入更稳更顺。** 正文与输入框软换行；终端重画按帧差只描变动行，长会话不卡不画偏；输入法整词提交与快打连击不再丢字迟到；安装后 Windows PATH 即时生效。
+
 ## [v0.24.1] - 2026-08-06
 
 - **模型接入更全。** 新增 Chat Completions 协议与内置 Provider 目录；可从常见厂家预设中添加服务，也能在会话里更新目录、切换 Provider 与模型。
@@ -44,6 +50,7 @@
 - **模型与扩展接成一体。** 接入 Anthropic Messages 与 OpenAI Responses，并提供上下文压缩、会话恢复、MCP、LSP、Skills、Lua、C ABI 插件和联网工具。
 - **三平台可以直接安装。** Windows、Linux 与 macOS 均有自动构建的发行包和安装脚本，CI 分别用 MSVC、GCC 与 Clang 编译测试。
 
+[v0.25.0]: https://github.com/relic-yuexi/LubanCode/compare/v0.24.1...v0.25.0
 [v0.24.1]: https://github.com/relic-yuexi/LubanCode/compare/v0.23.5...v0.24.1
 [v0.23.5]: https://github.com/relic-yuexi/LubanCode/compare/v0.23.4...v0.23.5
 [v0.23.4]: https://github.com/relic-yuexi/LubanCode/compare/v0.23.3...v0.23.4
