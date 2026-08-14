@@ -83,6 +83,29 @@ Assert-Equal -Name '保留旧值里未展开的 %VAR% 字面量' `
     -Actual (Get-UpdatedPathForAdd -OldValue '%SystemRoot%\system32' -NewDir 'C:\Tools\lubancode')
 
 Write-Host ""
+Write-Host "==== Add-DirToProcessPath ====" -ForegroundColor Cyan
+
+$savedProcessPath = $env:Path
+try {
+    $env:Path = 'C:\A;C:\B'
+
+    Assert-Equal -Name '当前进程缺目录时追加并报告改动' `
+        -Expected $true `
+        -Actual (Add-DirToProcessPath -Dir 'C:\Tools\lubancode')
+    Assert-Equal -Name '当前进程 PATH 已立即更新' `
+        -Expected 'C:\A;C:\B;C:\Tools\lubancode' `
+        -Actual $env:Path
+    Assert-Equal -Name '当前进程已有目录时不重复追加' `
+        -Expected $false `
+        -Actual (Add-DirToProcessPath -Dir 'c:\tools\lubancode\')
+    Assert-Equal -Name '重复追加后 PATH 保持不变' `
+        -Expected 'C:\A;C:\B;C:\Tools\lubancode' `
+        -Actual $env:Path
+} finally {
+    $env:Path = $savedProcessPath
+}
+
+Write-Host ""
 Write-Host "==== Get-UpdatedPathForRemove ====" -ForegroundColor Cyan
 
 # 目录在中间 -> 摘除后两边保留,不留双分号

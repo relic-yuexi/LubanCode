@@ -99,6 +99,21 @@ function Get-UpdatedPathForRemove {
     return ($kept -join ';')
 }
 
+function Add-DirToProcessPath {
+    <#
+        把目录补进当前 PowerShell 进程的 PATH。
+        写 HKCU 只管往后新生的进程；Windows Terminal 常从旧父进程开新标签，
+        仍会继承旧 PATH。安装脚本直接运行时补这一层，命令当场便能找到。
+    #>
+    param([string]$Dir)
+    $new = Get-UpdatedPathForAdd -OldValue $env:Path -NewDir $Dir
+    if ($null -eq $new) {
+        return $false
+    }
+    $env:Path = $new
+    return $true
+}
+
 # ===================== 注册表读写(REG_EXPAND_SZ 语义要小心) =====================
 #
 # 坑在这儿:HKCU\Environment\Path 的类型是 REG_EXPAND_SZ,里面可能含有
@@ -155,11 +170,15 @@ function Add-DirToUserPath {
     $new = Get-UpdatedPathForAdd -OldValue $old -NewDir $Dir
     if ($null -eq $new) {
         Write-Step "用户 PATH 里已经有 $Dir 了,跳过。"
-        return
+    } else {
+        Set-UserPathRaw -NewValue $new
+        Send-EnvironmentChangeBroadcast
+        Write-Step "已把 $Dir 加进用户 PATH。"
     }
-    Set-UserPathRaw -NewValue $new
-    Send-EnvironmentChangeBroadcast
-    Write-Step "已把 $Dir 加进用户 PATH。"
+
+    if (Add-DirToProcessPath -Dir $Dir) {
+        Write-Step "已刷新当前 PowerShell 的 PATH。"
+    }
 }
 
 # ===================== 查找/下载可执行文件 =====================
@@ -334,7 +353,7 @@ function Invoke-Install {
     }
 
     if (-not $SkipPath) {
-        Write-Host "重开一个新的终端窗口,PATH 才会生效。" -ForegroundColor Yellow
+        Write-Host "现在可以直接运行 lubancode。" -ForegroundColor Green
     }
 }
 
