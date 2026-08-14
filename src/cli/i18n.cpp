@@ -66,7 +66,7 @@ const Entry kZhCN[] = {
      "  /help           列出所有命令\n"
      "  /model          拉取模型列表,编号选择切换(默认第一个)\n"
      "  /model 名字     直接切到指定模型名,不用拉列表\n"
-     "  /provider       列已配服务端;/provider add|switch|remove 管多端模型\n"
+     "  /provider       列已配服务端;/provider add|switch|remove|set|refresh 管多端模型(refresh 刷厂家目录)\n"
      "  /config         打印当前生效配置(复用 --config 的逻辑),外加本会话实际在用的 model\n"
      "  /update         检查 GitHub 最新 Release；升级安装时一并同步官方技能\n"
      "  /init           在项目根生成 AGENTS.md,并让主代理、子代理立即采用\n"
@@ -88,7 +88,7 @@ const Entry kZhCN[] = {
      "  /tools          列工具三态:核心(恒在)/已加载/延迟未加载(工具总数超过配置文件\n"
      "                  tool_search_threshold(默认 20,0=永不延迟)时,MCP/插件等外挂工具\n"
      "                  延迟挂载,模型用 tool_search 检索后方可调用)\n"
-     "  /memory        管项目记忆开关、召回、后台写入、列表、遗忘与索引重建\n"
+     "  /memory         管项目记忆开关、召回、后台写入、列表、遗忘与索引重建\n"
      "  /sessions       列本目录最近 20 场会话存档(时间倒序编号);/sessions all 列全部目录\n"
      "  /resume         上下选择本目录会话并恢复历史;也可跟编号或 id\n"
      "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md;全量流水,压缩点带标注)\n"
@@ -96,6 +96,11 @@ const Entry kZhCN[] = {
      "  /soul           看当前魂;/soul 内容 写进 SOUL.md 并即时生效,/soul clear 清空还原默认\n"
      "                  /soul 名字 仍可切换已有备选魂,/soul off 关,/soul default 回 SOUL.md\n"
      "  /prompt         看当前法(系统提示词)的来源和字数;/prompt reset 还原 system_prompt.md\n"
+     "  /background     列后台命令任务清单(编号/状态/PID/命令/日志);/bg 同义\n"
+     "  /record         录一遍生成技能;/record start 名字 开录,stop 出草稿,裸敲看全部子命令\n"
+     "  /peers          列同机可见的其它 Lubancode 会话(名字/状态/目录);方向键选,Enter 看详情\n"
+     "  /send           /send <名字或短id> <话>:给另一场会话递一张纯文本字条\n"
+     "  /peerperm       /peerperm auto|accept|hold|refuse:设跨会话来信的收件档\n"
      "  /image 路径     附本地图片(也可在消息里写 @路径；支持 png/jpg/jpeg/gif/webp，每张不超过 5MB)\n"
      "  Shift+Enter     输入框里插一个换行,写多行消息(Alt+Enter 同义;注意 Windows Terminal\n"
      "                  默认把 Alt+Enter 绑成全屏切换、会吞掉这个键,用 Shift+Enter 最稳);\n"
@@ -163,6 +168,7 @@ const Entry kZhCN[] = {
      "  /help           列出所有命令\n"
      "  /model          拉取模型列表,编号选择切换(默认第一个)\n"
      "  /model 名字     直接切到指定模型名,不用拉列表\n"
+     "  /provider       列已配服务端;/provider add|switch|remove|set|refresh 管多端模型(refresh 刷厂家目录)\n"
      "  /config         打印当前生效配置(api_key 打码),外加本会话实际在用的 model\n"
      "  /update         检查 GitHub 最新 Release；升级安装时一并同步官方技能\n"
      "  /init           在项目根生成 AGENTS.md,并让本会话立即采用\n"
@@ -179,7 +185,7 @@ const Entry kZhCN[] = {
      "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
      "  /plugins        列出挂载的插件工具(DLL + lua)和加载警告\n"
      "  /tools          列工具三态:核心(恒在)/已加载/延迟未加载(tool_search 延迟挂载)\n"
-     "  /memory        管项目记忆;/memory on|off|use|learn|list|remember|forget|rebuild\n"
+     "  /memory         管项目记忆;/memory on|off|use|learn|list|remember|forget|rebuild\n"
      "  /sessions       列本目录最近 20 场会话存档(时间倒序编号);/sessions all 列全部目录\n"
      "  /resume         上下选择本目录会话并恢复历史;也可跟编号或 id,后续消息写回原文件\n"
      "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md;全量流水,压缩点带标注)\n"
@@ -187,6 +193,11 @@ const Entry kZhCN[] = {
      "  /soul           看当前魂;/soul 内容 写进 SOUL.md 并即时生效,/soul clear 清空还原默认\n"
      "                  /soul 名字 仍可切换已有备选魂,/soul off 关,/soul default 回 SOUL.md\n"
      "  /prompt         看当前法(系统提示词)的来源和字数;/prompt reset 还原 system_prompt.md\n"
+     "  /background     列后台命令任务清单(编号/状态/PID/命令/日志);/bg 同义\n"
+     "  /record         录一遍生成技能;/record start 名字 开录,stop 出草稿,裸敲看全部子命令\n"
+     "  /peers          列同机可见的其它 Lubancode 会话(名字/状态/目录);方向键选,Enter 看详情\n"
+     "  /send           /send <名字或短id> <话>:给另一场会话递一张纯文本字条\n"
+     "  /peerperm       /peerperm auto|accept|hold|refuse:设跨会话来信的收件档\n"
      "  /image 路径     附本地图片(也可在消息里写 @路径；支持 png/jpg/jpeg/gif/webp，每张不超过 5MB)\n"
      "  /exit           退出(裸词 exit/quit 也认)\n"
      "多行输入:Shift+Enter 插换行(Alt+Enter 同义,但 Windows Terminal 默认把它绑成全屏\n"
@@ -313,7 +324,7 @@ const Entry kZhCN[] = {
     // ---- slash 命令描述表 ----
     {"slash.desc.help", "列出所有命令"},
     {"slash.desc.model", "拉模型列表选,或 /model 名字 直接切"},
-    {"slash.desc.provider", "列、添、切、删、改模型服务端;/provider add|list|switch|remove|set"},
+    {"slash.desc.provider", "列、添、切、删、改、刷模型服务端;/provider add|list|switch|remove|set|refresh"},
     {"slash.desc.config", "打印当前生效配置和本会话在用的 model"},
     {"slash.desc.update", "检查 GitHub 最新 Release；升级时同步程序与官方技能"},
     {"slash.desc.init", "在项目根生成 AGENTS.md，并让本会话立即采用"},
@@ -772,7 +783,7 @@ const Entry kZhCN[] = {
     {"cmd.soul.default_item", "  - default(主目录 SOUL.md)"},
     {"cmd.soul.current", "当前生效: {0}"},
     {"cmd.soul.empty_note", "(内容空白,无效果)"},
-    {"cmd.soul.usage", "用法:/soul 看当前;/soul 内容 写进 SOUL.md;/soul clear 还原默认。"},
+    {"cmd.soul.usage", "用法:/soul 看当前;/soul 内容 写进 SOUL.md;/soul clear 还原默认;/soul 名字 切备选魂;/soul off 关;/soul default 回 SOUL.md。"},
     {"cmd.soul.off", "魂已关(本会话生效,下一轮请求换新系统提示)。"},
     {"cmd.soul.back_default", "已切回 SOUL.md"},
     {"cmd.soul.switched", "已切换魂: {0}(本会话即时生效,下一轮请求换新系统提示)"},
@@ -949,7 +960,7 @@ const Entry kEn[] = {
      "  /help           list all commands\n"
      "  /model          fetch the model list and switch by number (default: first)\n"
      "  /model <name>   switch directly to a model name without fetching the list\n"
-     "  /provider       list configured providers; /provider add|switch|remove manages endpoints\n"
+     "  /provider       list configured providers; /provider add|switch|remove|set|refresh manages endpoints (refresh updates the catalog)\n"
      "  /config         print the effective configuration plus the model in use this session\n"
      "  /update         check the latest GitHub Release; installs also sync official skills\n"
      "  /init           create AGENTS.md at the project root and load it for main/sub-agents now\n"
@@ -971,7 +982,7 @@ const Entry kEn[] = {
      "  /plugins        list mounted plugin tools (*.dll and *.lua under .lubancode/plugins)\n"
      "  /tools          list tool states: core / loaded / deferred (tool_search deferral kicks in\n"
      "                  when the tool count exceeds tool_search_threshold, default 20, 0 = never)\n"
-     "  /memory        manage project memory, retrieval, background writes, forgetting and rebuilds\n"
+     "  /memory         manage project memory, retrieval, background writes, forgetting and rebuilds\n"
      "  /sessions       list the 20 most recent session archives of this directory; /sessions all\n"
      "                  lists every directory\n"
      "  /resume         choose a local session with arrow keys and replay it; also accepts a number or id\n"
@@ -981,6 +992,13 @@ const Entry kEn[] = {
      "                  /soul clear restores its default; an existing soul name still switches it\n"
      "  /prompt         show the source and length of the current system prompt persona;\n"
      "                  /prompt reset restores system_prompt.md\n"
+     "  /background     list background command tasks (id/status/PID/command/log); /bg is an alias\n"
+     "  /record         record a workflow into a skill; /record start <name> begins, stop drafts,\n"
+     "                  run it bare for all subcommands\n"
+     "  /peers          list other Lubancode sessions on this machine (name/status/cwd); arrow keys,\n"
+     "                  Enter for details\n"
+     "  /send           /send <name-or-id> <text>: pass a plain-text note to another session\n"
+     "  /peerperm       /peerperm auto|accept|hold|refuse: set how incoming peer messages are received\n"
      "  /image <path>   attach a local image (or use @path in a message; png/jpg/jpeg/gif/webp, 5MB each)\n"
      "  Shift+Enter     insert a newline in the input box (Alt+Enter works too, but Windows Terminal\n"
      "                  binds it to fullscreen by default; Shift+Enter is safest); Enter sends the\n"
@@ -1052,6 +1070,7 @@ const Entry kEn[] = {
      "  /help           list all commands\n"
      "  /model          fetch the model list and switch by number (default: first)\n"
      "  /model <name>   switch directly to a model name\n"
+     "  /provider       list configured providers; /provider add|switch|remove|set|refresh manages endpoints (refresh updates the catalog)\n"
      "  /config         print the effective configuration (api_key masked) plus the session model\n"
      "  /update         check the latest GitHub Release; installs also sync official skills\n"
      "  /init           create AGENTS.md at the project root and load it now\n"
@@ -1068,7 +1087,7 @@ const Entry kEn[] = {
      "  /todos          show the current todo list\n"
      "  /plugins        list mounted plugin tools (DLL + lua) and load warnings\n"
      "  /tools          list tool states: core / loaded / deferred (tool_search)\n"
-     "  /memory        manage project memory; /memory on|off|use|learn|list|remember|forget|rebuild\n"
+     "  /memory         manage project memory; /memory on|off|use|learn|list|remember|forget|rebuild\n"
      "  /sessions       list the 20 most recent session archives here; /sessions all for every dir\n"
      "  /resume         choose and replay a local session; also accepts a number or id; new messages append there\n"
      "  /export [path]  export this session as Markdown (default sessions/<id>.md)\n"
@@ -1076,6 +1095,13 @@ const Entry kEn[] = {
      "  /soul           show the current soul; /soul <text> writes SOUL.md and takes effect now;\n"
      "                  /soul clear restores default; an existing soul name still switches it\n"
      "  /prompt         show the persona source and length; /prompt reset restores system_prompt.md\n"
+     "  /background     list background command tasks (id/status/PID/command/log); /bg is an alias\n"
+     "  /record         record a workflow into a skill; /record start <name> begins, stop drafts,\n"
+     "                  run it bare for all subcommands\n"
+     "  /peers          list other Lubancode sessions on this machine (name/status/cwd); arrow keys,\n"
+     "                  Enter for details\n"
+     "  /send           /send <name-or-id> <text>: pass a plain-text note to another session\n"
+     "  /peerperm       /peerperm auto|accept|hold|refuse: set how incoming peer messages are received\n"
      "  /exit           quit (bare exit/quit work too)\n"
      "Multi-line input: Shift+Enter inserts a newline (Alt+Enter too, but Windows Terminal may\n"
      "swallow it; Shift+Enter is recommended); Enter sends the whole message; on multi-line input\n"
@@ -1215,7 +1241,7 @@ const Entry kEn[] = {
     {"slash.desc.help", "list all commands"},
     {"slash.desc.model", "pick from the model list, or /model <name> to switch directly"},
     {"slash.desc.provider",
-     "list, add, switch, remove, or set fields on model providers; /provider add|list|switch|remove|set"},
+     "list, add, switch, remove, set, or refresh the provider catalog; /provider add|list|switch|remove|set|refresh"},
     {"slash.desc.config", "print the effective configuration and the session model"},
     {"slash.desc.update", "check the latest GitHub Release; upgrades sync the program and official skills"},
     {"slash.desc.init", "create AGENTS.md at the project root and load it now"},
@@ -1240,7 +1266,7 @@ const Entry kEn[] = {
     {"slash.desc.resume", "choose and replay a session (or pass a number/id)"},
     {"slash.desc.export", "export this session as Markdown; /export <path> picks the output file"},
     {"slash.desc.title", "show the session title; /title <title> names this session"},
-    {"slash.desc.soul", "show the current soul; /soul <text> writes SOUL.md; /soul clear restores default"},
+    {"slash.desc.soul", "show the current soul; /soul <text> writes SOUL.md; /soul clear restores default; a name switches souls"},
     {"slash.desc.prompt", "show the persona source/length; /prompt reset restores system_prompt.md"},
     {"slash.desc.background", "list background command tasks (status/PID/command); from run_command run_in_background"},
     {"slash.desc.record", "record a workflow into a skill; /record start <name> to begin, stop drafts SKILL.md, install after review"},
@@ -1383,7 +1409,7 @@ const Entry kEn[] = {
     {"cmd.soul.default_item", "  - default (home SOUL.md)"},
     {"cmd.soul.current", "Currently active: {0}"},
     {"cmd.soul.empty_note", "(empty; no effect)"},
-    {"cmd.soul.usage", "Usage: /soul shows it; /soul <text> writes SOUL.md; /soul clear restores default."},
+    {"cmd.soul.usage", "Usage: /soul shows it; /soul <text> writes SOUL.md; /soul clear restores default; /soul <name> switches souls; /soul off disables; /soul default returns to SOUL.md."},
     {"cmd.soul.off", "Soul disabled for this session; the next request uses the new system prompt."},
     {"cmd.soul.back_default", "Switched back to SOUL.md"},
     {"cmd.soul.switched", "Soul switched to {0}; the next request uses the new system prompt."},
