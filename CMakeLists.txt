@@ -328,6 +328,10 @@ add_executable(lubancode
   src/app/backend_stack.cpp
   src/app/tool_runtime.cpp
   src/app/turn_runner.cpp
+  src/app/commands/prompt_commands.cpp
+  src/app/commands/session_commands.cpp
+  src/app/commands/settings_commands.cpp
+  src/app/commands/workspace_commands.cpp
   src/cli/console_input.cpp
   src/cli/spinner.cpp
   src/cli/record_command.cpp)
