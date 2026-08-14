@@ -86,6 +86,7 @@ add_executable(lubancode_tests
   test_app_boundary_b.cpp
   ${CMAKE_SOURCE_DIR}/src/app/backend_stack.cpp
   ${CMAKE_SOURCE_DIR}/src/app/tool_runtime.cpp
+  ${CMAKE_SOURCE_DIR}/src/app/turn_runner.cpp
   # 回归 BuildCallbacks::on_usage 接线(状态行局部发布)要走到终端层的
   # 状态数据源,console_input.cpp 平时只编进主程序,这里给测试目标单编一份
   # (不进 lubancode_core,免得 doctest 进程链进真控制台读取路径)。

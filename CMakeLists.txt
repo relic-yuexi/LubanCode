@@ -327,6 +327,7 @@ add_executable(lubancode
   src/main.cpp
   src/app/backend_stack.cpp
   src/app/tool_runtime.cpp
+  src/app/turn_runner.cpp
   src/cli/console_input.cpp
   src/cli/spinner.cpp
   src/cli/record_command.cpp)

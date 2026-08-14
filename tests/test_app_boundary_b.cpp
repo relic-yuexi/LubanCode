@@ -3,11 +3,14 @@
 // TU 根本进不了测试程序,失败本身就是测试结果。
 #include "app/backend_stack.hpp"
 #include "app/tool_runtime.hpp"
+#include "app/turn_runner.hpp"
 
 int BoundaryTuBProbe() {
     return (&lubancode::app::BuildBackend == nullptr ||
             &lubancode::app::BuildBaseToolRegistry == nullptr ||
-            &lubancode::app::MemoryOptionsFromConfig == nullptr)
+            &lubancode::app::MemoryOptionsFromConfig == nullptr ||
+            &lubancode::app::PrintDivider == nullptr ||
+            &lubancode::app::RunTurn == nullptr)
                ? 1
                : 0;
 }
