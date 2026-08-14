@@ -103,6 +103,14 @@ std::string SerializeTitleEvent(const std::string& title, const std::string& ts)
 // 一行 JSON -> 标题。type 不是 "title" 或缺 title 字段给 nullopt。
 std::optional<std::string> ParseTitleEvent(const std::string& line);
 
+// cwd 事件(0.27.x):meta.cwd 是首行写死的,会话中途 /worktree 进房出房、
+// 换目录都追加一行 cwd 事件,append-only 最后一条胜。回放时覆盖 meta.cwd,
+// /resume 拿它把会话送回原房(验明正身那条路)。
+std::string SerializeCwdEvent(const std::string& cwd, const std::string& ts);
+
+// 一行 JSON -> cwd。type 不是 "cwd" 或缺 cwd 字段给 nullopt。
+std::optional<std::string> ParseCwdEvent(const std::string& line);
+
 // ---------------------------------------------------------------------------
 // 会话 id
 // ---------------------------------------------------------------------------
@@ -203,6 +211,10 @@ public:
 
     // 追加一条标题事件行(自动带 ts),append+flush。
     bool AppendTitleEvent(const std::string& title);
+
+    // 追加一条 cwd 事件行(自动带 ts),append+flush。/worktree 进出房、
+    // 会话目录搬迁时各追一条,/resume 回放取最后一条。
+    bool AppendCwdEvent(const std::string& cwd);
 
     // /clear:关掉当前文件(留在磁盘上),回到"没有活动会话"状态,下一条
     // 用户消息再 Begin 一场新的。

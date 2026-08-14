@@ -4,6 +4,7 @@
 #include <fstream>
 #include <system_error>
 
+#include "tools/isolation.hpp"
 #include "tools/path_utils.hpp"
 
 namespace lubancode::tools {
@@ -52,6 +53,14 @@ Tool::Result WriteFileTool::execute(const nlohmann::json& input) {
         return {"path 不能是空字符串", true};
     }
     const std::string content = input.at("content").get<std::string>();
+
+    // 隔离文件闸:住在 worktree 房里的会话/子代理,写主 checkout 的文件一律拦。
+    if (const IsolationScope* scope = IsolationGuard::Current();
+        scope != nullptr && PathBlockedByIsolation(path_str, *scope)) {
+        return {"[隔离] 会话正住在 worktree " + scope->name + " 里,不许写主 checkout 的文件: " + path_str +
+                    "。请在房内操作,或先 worktree exit 出房。",
+                true};
+    }
 
     const std::filesystem::path path = Utf8ToPath(path_str);
 

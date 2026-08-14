@@ -25,6 +25,7 @@
 #include "app/version.hpp"
 #include "cli/i18n.hpp"
 #include "cli/theme.hpp"
+#include "cli/worktree.hpp"
 #include "config/config.hpp"
 #include "lsp/manager.hpp"
 #include "mcp/client.hpp"
@@ -48,6 +49,7 @@
 #include "tools/tool_search.hpp"
 #include "tools/web_fetch.hpp"
 #include "tools/web_search.hpp"
+#include "tools/worktree_tool.hpp"
 #include "tools/write_file.hpp"
 
 namespace lubancode::app {
@@ -259,6 +261,14 @@ public:
         // 非空且 generate 启用时挂 memory_save 进主表;/memory on 的事后
         // 补挂走 AttachMemoryTool。
         std::shared_ptr<lubancode::memory::ProjectMemory> memory;
+        // 模型侧 worktree 工具(0.27.x):跟用户 /worktree 共用的会话实例。
+        // 非空才注册 "worktree" 工具(交互入口传;单发/管道模式没人可问
+        // 硬确认,不挂)。confirm 是工具自己的问话通道(进园子外的房、脏房
+        // 强删两道硬安全线,确认档压不住);on_session_moved 在 enter/exit
+        // 搬了 cwd 之后回调,交互入口用它重拼系统提示、同步子代理 cwd。
+        lubancode::cli::WorktreeSession* worktree_session = nullptr;
+        lubancode::tools::WorktreeTool::ConfirmHandler worktree_confirm;
+        std::function<void()> on_worktree_moved;
     };
 
     ToolRuntime(const lubancode::config::Config& config, const lubancode::cli::Theme& theme,
@@ -310,6 +320,12 @@ public:
         }
         if (options.memory != nullptr && options.memory->generate_enabled()) {
             main_registry_.Register(std::make_unique<lubancode::memory::MemorySaveTool>(options.memory));
+        }
+        // 模型侧 worktree 工具:只挂主表(子代理不起房,带 isolation 的
+        // 子代理由 agent_tool 另走 base_dir 包装那条路)。
+        if (options.worktree_session != nullptr) {
+            main_registry_.Register(std::make_unique<lubancode::tools::WorktreeTool>(
+                *options.worktree_session, options.worktree_confirm, options.on_worktree_moved));
         }
         // 插件工具只挂主表(短命跑腿不用外挂),挂载行紧跟 [mcp] 那几行。
         MountPlugins(plugin_host_, main_registry_, theme, plugin_mounted_, plugin_warnings_);

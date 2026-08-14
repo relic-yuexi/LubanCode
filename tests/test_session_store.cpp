@@ -671,6 +671,36 @@ TEST_CASE("回放: 没有 title 事件就是空,展示层回退首句摘要") {
 }
 
 // ---------------------------------------------------------------------------
+// cwd 事件(0.27.x:meta.cwd 首行写死,会话中途搬目录靠事件行,最后一条胜)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("cwd 事件序列化往返") {
+    const std::string line = agent::SerializeCwdEvent("D:/repo/.lubancode/worktrees/fix-1", "t");
+    CHECK(line.find('\n') == std::string::npos);
+    CHECK_FALSE(agent::DeserializeSessionMessage(line).has_value());  // 不是消息行
+    const auto cwd = agent::ParseCwdEvent(line);
+    REQUIRE(cwd.has_value());
+    CHECK(*cwd == "D:/repo/.lubancode/worktrees/fix-1");
+    CHECK_FALSE(agent::ParseCwdEvent("").has_value());
+    CHECK_FALSE(agent::ParseCwdEvent("{\"type\":\"cwd\"}").has_value());  // 缺 cwd
+    CHECK_FALSE(agent::ParseCwdEvent(agent::SerializeTitleEvent("x", "t")).has_value());
+}
+
+TEST_CASE("回放: cwd 事件追加,最后一条覆盖 meta.cwd") {
+    std::vector<std::string> lines;
+    lines.push_back(agent::SerializeSessionMessage(UserText("u1"), "t"));
+    lines.push_back(agent::SerializeCwdEvent("D:/repo/.lubancode/worktrees/fix-1", "t"));
+    lines.push_back(agent::SerializeSessionMessage(AssistantText("a1"), "t"));
+    lines.push_back(agent::SerializeCwdEvent("D:/repo", "t"));
+
+    const auto session = agent::ParseSessionFile(JoinLines(lines));
+    REQUIRE(session.has_value());
+    CHECK(session->meta.cwd == "D:/repo");  // meta 首行是 D:/场子,被最后一条 cwd 事件盖掉
+    CHECK(session->messages.size() == 2);   // 事件行不算消息
+    CHECK(session->skipped_lines == 0);
+}
+
+// ---------------------------------------------------------------------------
 // 路径归一化 / 中间缩略
 // ---------------------------------------------------------------------------
 

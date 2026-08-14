@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "tools/isolation.hpp"
 #include "tools/path_utils.hpp"
 
 namespace lubancode::tools {
@@ -290,6 +291,14 @@ Tool::Result EditFileTool::execute(const nlohmann::json& input) {
             return {"replace_all 得是布尔值(true/false)", true};
         }
         replace_all = it->get<bool>();
+    }
+
+    // 隔离文件闸:住在 worktree 房里的会话/子代理,写主 checkout 的文件一律拦。
+    if (const IsolationScope* scope = IsolationGuard::Current();
+        scope != nullptr && PathBlockedByIsolation(path_str, *scope)) {
+        return {"[隔离] 会话正住在 worktree " + scope->name + " 里,不许改主 checkout 的文件: " + path_str +
+                    "。请在房内操作,或先 worktree exit 出房。",
+                true};
     }
 
     const std::filesystem::path path = Utf8ToPath(path_str);

@@ -307,10 +307,27 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                            lubancode::config::Source::Default,
                        current_think, context_tracker, current_model_instructions);
 
+    // 陈房清扫(0.27.x):只清 agent- 前缀、超过 3 天没动静的隔离子代理房;
+    // 有活(改动/自有提交)的跳过,锁着的先放(被杀会话留下的),用户
+    // 手起的房永不碰。
+    if (const auto stale_root = lubancode::cli::FindRepositoryRoot(std::filesystem::current_path())) {
+        const auto cleanup = lubancode::cli::CleanStaleAgentWorktrees(*stale_root, std::chrono::hours(72));
+        if (cleanup.removed > 0) {
+            std::cout << theme.stats << trf("cmd.worktree.cleaned", cleanup.removed) << theme.reset << "\n";
+        }
+    }
+
     // 工具全栈:三表 + MCP/插件/LSP/agent/todo/ask_user/memory/tool_search
     // 的装配全收进 ToolRuntime(引用寿命由成员声明顺序保住),Interactive
     // 与单发共用一套;会话可变的钩子(detached factory、prompts、过滤)
     // 在下面接着灌。
+    // 模型侧 worktree 工具与 /worktree 共这一个会话实例(账只有一本,一边
+    // active 另一边回 AlreadyActive)。声明必须早于 ToolRuntime:注册进主表
+    // 的 worktree 工具握它的引用。
+    lubancode::cli::WorktreeSession worktree_session;
+    // enter/exit 搬了 cwd 之后的善后(重拼系统提示、同步子代理 cwd)要在
+    // loop 建好之后才齐活——先立一个晚绑定的槽,ToolRuntime 只拿槽。
+    std::function<void()> after_worktree_moved;
     lubancode::app::ToolRuntime::Options runtime_options;
     runtime_options.with_explore = true;
     runtime_options.with_ask_user = spinner_enabled;
@@ -318,6 +335,24 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         return PromptAskUser(question, theme);
     };
     runtime_options.memory = project_memory;
+    runtime_options.worktree_session = &worktree_session;
+    // worktree 工具的两道硬确认(进园外的房、脏房强删)走自己的问话通道,
+    // 不经三档确认——确认档压不住这一问,管道模式没人可问就拒。
+    runtime_options.worktree_confirm = [&theme](const std::string& question) -> std::optional<bool> {
+        if (!lubancode::platform::StdinIsInteractive() ||
+            !lubancode::platform::ProbeStdoutConsole().is_console) {
+            return std::nullopt;
+        }
+        const lubancode::cli::StreamFooterSuspendScope footer_suspend;
+        const auto answer = lubancode::cli::ReadLine(theme.confirm + question + theme.reset, theme,
+                                                     /*esc_rejects=*/true);
+        return answer.has_value() && (*answer == "y" || *answer == "Y");
+    };
+    runtime_options.on_worktree_moved = [&after_worktree_moved]() {
+        if (after_worktree_moved) {
+            after_worktree_moved();
+        }
+    };
     lubancode::app::ToolRuntime tool_runtime(config, theme, wrapped_backend, skills, skills_segment,
                                              CurrentDirUtf8(), std::move(runtime_options));
     // 别名接住:后面千行装配引用的名字不变。
@@ -738,10 +773,14 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
     };
 
     // --continue:等价开场自动 /resume 本目录最近一场;本目录没有存档就
-    // 安静开新会话。
+    // 安静开新会话。resume 可能把会话搬回存档里的 worktree 房,搬没搬记
+    // 一笔,后面 sync 定义好了再善后。
+    bool resume_moved_into_worktree = false;
     if (continue_last) {
-        ResumeSession("", sessions_dir, *loop, session_store, persisted_count, session_meta, session_title,
-                       wire_str, *current_model, theme, /*quiet_if_none=*/true);
+        if (ResumeSession("", sessions_dir, *loop, session_store, persisted_count, session_meta, session_title,
+                          wire_str, *current_model, theme, /*quiet_if_none=*/true, &worktree_session)) {
+            resume_moved_into_worktree = worktree_session.active();
+        }
     }
 
     // M10:排队消息队列——某一轮流式期间(RunTurn 内 TurnInputListener 存活
@@ -1016,7 +1055,6 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         print_memory_usage();
     };
 
-    lubancode::cli::WorktreeSession worktree_session;
     const auto sync_worktree_directory = [&]() {
         prompt_options.cwd = CurrentDirUtf8();
         if (project_memory != nullptr) {
@@ -1034,7 +1072,18 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
             agent_tool->SetWorkingDirectory(prompt_options.cwd);
             agent_tool->SetProjectInstructions(project_instructions);
         }
+        // 会话档跟 cwd 走(0.27.x):目录动了就追加一条 cwd 事件,
+        // /resume 靠它把会话送回原房。
+        if (session_store.active()) {
+            session_store.AppendCwdEvent(prompt_options.cwd);
+        }
     };
+    // loop 已就位,把 worktree 工具 enter/exit 的善后接到这条 sync 上。
+    after_worktree_moved = sync_worktree_directory;
+    // --continue 若把会话搬回了存档里的房,提示词与子代理 cwd 跟着同步。
+    if (resume_moved_into_worktree) {
+        sync_worktree_directory();
+    }
 
     // 项目配置若显式钉了 active_provider，后续切换继续写回项目；没钉就
     // 记全局“上次使用”，跨目录也能沿用。
@@ -1121,6 +1170,17 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                             PrintWorktreeResult(result);
                         } else {
                             std::cout << tr("cmd.worktree.remove_cancelled") << "\n";
+                        }
+                    }
+                    // /worktree new 撞上园子外的已有房:跟模型工具同一道硬确认。
+                    if (result.code == lubancode::cli::WorktreeResultCode::NeedsUserConfirmation) {
+                        const std::optional<std::string> answer = lubancode::cli::ReadLine(
+                            theme.confirm + tr("cmd.worktree.outside_prompt") + theme.reset, theme,
+                            /*esc_rejects=*/true);
+                        if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
+                            result = worktree_session.Enter(command.name, /*base=*/"head",
+                                                            /*confirmed_outside=*/true);
+                            PrintWorktreeResult(result);
                         }
                     }
                     // std::filesystem::current_path 是工具层共同的相对路径基准。
@@ -1284,9 +1344,13 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
                         }
                         if (ResumeSession(target, sessions_dir, *loop, session_store, persisted_count,
                                           session_meta, session_title, wire_str, *current_model, theme,
-                                          /*quiet_if_none=*/false)) {
+                                          /*quiet_if_none=*/false, &worktree_session)) {
                             session_store_broken = false;  // 换了场,存档失败的旧账翻篇
                             session_title_pending = false;
+                            if (worktree_session.active()) {
+                                // resume 把会话搬回了房:提示词与子代理 cwd 同步。
+                                sync_worktree_directory();
+                            }
                         }
                     }
                     break;
@@ -1515,6 +1579,7 @@ void InteractiveLoop(lubancode::config::ConfigResult config_result, bool auto_co
         status_data.cwd = CurrentDirUtf8();
         status_data.git_branch =
             lubancode::cli::CurrentGitBranch(std::filesystem::current_path());
+        status_data.worktree = worktree_session.active_name();
         status_data.provider = active_provider;
         status_data.effort = *current_think;
         status_data.context_percent = context_tracker.UsagePercent();
