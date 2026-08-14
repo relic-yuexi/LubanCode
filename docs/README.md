@@ -8,7 +8,7 @@
   <a href="../README.md">中文首页</a> · <a href="../README.en.md">English README</a> · <a href="https://github.com/relic-yuexi/LubanCode/releases">Releases</a>
 </p>
 
-这里收 `v0.25.0` 的使用手册与设计说明。当前 Release 测试为 `1185/1185`，共 `5575` 条断言。字段名、命令名若与文档冲突，以 `lubancode --help`、`lubancode --config` 和当前源码为准。
+这里收 `v0.25.1` 的使用手册与设计说明。当前 Release 测试为 `1244/1244`，共 `5999` 条断言。字段名、命令名若与文档冲突，以 `lubancode --help`、`lubancode --config` 和当前源码为准。
 
 ## 先找路
 

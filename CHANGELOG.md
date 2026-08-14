@@ -2,6 +2,12 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.25.1] - 2026-08-14
+
+- **录一遍，生成技能。** `/record` 开录后在 LubanCode 里做一遍活计，工具调用、备注、验收一路记下；停录起草 SKILL.md，预览点头后装进项目级或主目录级，本场立刻可用。入参密钥全程打码，必须明着开录，状态栏常挂 REC 标记。
+- **排队输入不再拧成一股。** 输入行只画你正打的字；落队后正文挪到输入框上方逐条摆，空输入按上键取回改写，Delete 删、Esc 放回；「Esc 打断」挪进状态行。
+- **同机跨会话能递话。** `/peers` 列出本机其它会话，`/send` 送一张字条；收件只挑轮次边界，不掐正在跑的工具，来信不能批工具、不能改配置，slash 只算文字。Windows 走具名管道，Linux 走 Unix socket，均限当前用户。
+
 ## [v0.25.0] - 2026-08-14
 
 - **思考与调度看得见。** 模型的 thinking/reasoning 过程实时上屏；异步子代理带常驻面板与 Explore 模式；后台命令有任务台账、完成通知、输出查询与停止。
@@ -50,6 +56,7 @@
 - **模型与扩展接成一体。** 接入 Anthropic Messages 与 OpenAI Responses，并提供上下文压缩、会话恢复、MCP、LSP、Skills、Lua、C ABI 插件和联网工具。
 - **三平台可以直接安装。** Windows、Linux 与 macOS 均有自动构建的发行包和安装脚本，CI 分别用 MSVC、GCC 与 Clang 编译测试。
 
+[v0.25.1]: https://github.com/relic-yuexi/LubanCode/compare/v0.25.0...v0.25.1
 [v0.25.0]: https://github.com/relic-yuexi/LubanCode/compare/v0.24.1...v0.25.0
 [v0.24.1]: https://github.com/relic-yuexi/LubanCode/compare/v0.23.5...v0.24.1
 [v0.23.5]: https://github.com/relic-yuexi/LubanCode/compare/v0.23.4...v0.23.5

@@ -4,7 +4,7 @@
 
 LubanCode 是一支 C++23 命令行程序。上层接人，下层接系统。中间摆一副代理循环，把模型、工具、会话串起来。
 
-> 本页对应 `v0.25.0`。Windows/MSVC、Ubuntu/GCC、macOS/Clang 都在 CI 中编译并跑测试。当前测试基线为 1185 个用例、5575 条断言。
+> 本页对应 `v0.25.1`。Windows/MSVC、Ubuntu/GCC、macOS/Clang 都在 CI 中编译并跑测试。当前测试基线为 1244 个用例、5999 条断言。
 
 ## 1. 总图
 
