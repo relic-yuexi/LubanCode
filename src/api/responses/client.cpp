@@ -13,6 +13,7 @@
 #include "api/responses/request.hpp"
 #include "api/sse_framing.hpp"
 #include "cli/i18n.hpp"
+#include "platform/json_safe.hpp"  // DescribeDumpFailure:请求体 dump 的窄边界
 
 namespace lubancode::api::responses {
 
@@ -86,7 +87,14 @@ std::expected<void, Error> ResponsesBackend::send_stream(
     const std::function<void(const StreamEvent&)>& on_event,
     const std::atomic<bool>* cancel) {
     const json body = BuildRequestJson(request, native_web_search_, extra_body_);
-    const std::string body_str = body.dump();
+    std::string body_str;
+    try {
+        body_str = body.dump();
+    } catch (const nlohmann::json::exception& e) {
+        // 请求序列化窄边界:历史里漏网的非法 UTF-8 在这里转成可回传的错误
+        // (AgentLoop 收到 unexpected 正常收场),不再穿透杀掉整场会话。
+        return std::unexpected(Error{ErrorKind::Parse, platform::DescribeDumpFailure(body, e), 0});
+    }
 
     SseFramer framer;
     std::string error_body;

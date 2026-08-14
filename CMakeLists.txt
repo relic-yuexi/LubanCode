@@ -228,6 +228,7 @@ add_library(lubancode_core STATIC
   ${_lubancode_platform_sources}
   src/platform/terminal_batch.cpp
   src/platform/text_encoding.cpp
+  src/platform/json_safe.cpp
   src/api/sse_framing.cpp
   src/api/anthropic/client.cpp
   src/api/anthropic/events.cpp

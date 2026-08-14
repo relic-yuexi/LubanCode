@@ -1,11 +1,12 @@
 #include "agent/loop.hpp"
 
+#include <iostream>
 #include <type_traits>
 #include <utility>
 #include <variant>
 
 #include "api/assembler.hpp"
-#include "platform/text_encoding.hpp"  // SanitizeUtf8:工具结果入历史前的编码兜底
+#include "platform/text_encoding.hpp"  // SanitizeExternalText:工具结果的第一道编码关口
 
 namespace lubancode::agent {
 
@@ -17,52 +18,58 @@ namespace {
 // 上层能看到完整的生命周期。工具真执行完之后再跑一遍 post_tool 钩子
 // (M9)——这是本次任务在 agent/ 里唯一的挂接点,函数本身不知道 hooks 具体
 // 怎么解析执行,只在两个该介入的地方各调一次回调。
+//
+// 编码信任边界:所有工具结果(内置工具、MCP、插件、post hook 加工过的)
+// 在交给任何消费者之前,先在这里过一遍 SanitizeExternalText——此前只有入
+// history 前清洗一次,on_tool_done 背后的 recorder/转录/Ctrl+E 拿到的还是
+// 原文,坏字节照样能把它们的 JSON 序列化打崩(见 todos/工具输出非法UTF8
+// 导致会话退出.todo)。规范化之后,recorder、转录、history、请求/会话
+// JSON 拿到的都是同一份内容。
 tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUseBlock& call, const Callbacks& callbacks,
                                 const std::function<bool(const tools::Tool&)>& tool_filter) {
+    // 每条收尾路共用的分发口:先清洗,再 on_tool_done,清洗版随返回值交给
+    // 调用方(进 history / 下一轮请求)。日志只记字段名、长度、坏字节位置
+    // 与前后几个十六进制字节,不倒正文。
+    const auto dispatch_done = [&callbacks](const std::string& name, tools::Tool::Result result) {
+        if (!platform::IsValidUtf8(result.content)) {
+            std::cerr << "[utf8] " << platform::DescribeUtf8Issue("tool_result:" + name, result.content) << "\n";
+            result.content = platform::SanitizeExternalText(result.content);
+        }
+        if (callbacks.on_tool_done) {
+            callbacks.on_tool_done(name, result);
+        }
+        return result;
+    };
+
     if (callbacks.on_tool_start) {
         callbacks.on_tool_start(call.name, call.input);
     }
 
     tools::Tool* tool = registry.Find(call.name);
     if (tool == nullptr) {
-        tools::Tool::Result result{"未知工具: " + call.name, true};
-        if (callbacks.on_tool_done) {
-            callbacks.on_tool_done(call.name, result);
-        }
-        return result;
+        return dispatch_done(call.name, tools::Tool::Result{"未知工具: " + call.name, true});
     }
 
     // tool_search(延迟挂载):注册表里查得到,但过滤谓词不放行——延迟工具
     // 还没挂载。不当"未知工具"糊弄,给一条指路的友好错误,模型下一步自然
     // 去调 tool_search。
     if (tool_filter && !tool_filter(*tool)) {
-        tools::Tool::Result result{"工具 " + call.name + " 存在但尚未挂载:请先用 tool_search 检索挂载,再调用。",
-                                    true};
-        if (callbacks.on_tool_done) {
-            callbacks.on_tool_done(call.name, result);
-        }
-        return result;
+        return dispatch_done(call.name, tools::Tool::Result{
+                                            "工具 " + call.name + " 存在但尚未挂载:请先用 tool_search 检索挂载,再调用。",
+                                            true});
     }
 
     if (callbacks.on_pre_tool_hook) {
         const std::optional<std::string> blocked = callbacks.on_pre_tool_hook(call.name, call.input);
         if (blocked.has_value()) {
-            tools::Tool::Result result{*blocked, true};
-            if (callbacks.on_tool_done) {
-                callbacks.on_tool_done(call.name, result);
-            }
-            return result;
+            return dispatch_done(call.name, tools::Tool::Result{*blocked, true});
         }
     }
 
     if (tool->needs_confirm()) {
         const bool allowed = callbacks.on_tool_confirm ? callbacks.on_tool_confirm(call.name, call.input) : true;
         if (!allowed) {
-            tools::Tool::Result result{"用户拒绝执行该工具", true};
-            if (callbacks.on_tool_done) {
-                callbacks.on_tool_done(call.name, result);
-            }
-            return result;
+            return dispatch_done(call.name, tools::Tool::Result{"用户拒绝执行该工具", true});
         }
     }
 
@@ -70,10 +77,7 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     if (callbacks.on_post_tool_hook) {
         callbacks.on_post_tool_hook(call.name, call.input, result);
     }
-    if (callbacks.on_tool_done) {
-        callbacks.on_tool_done(call.name, result);
-    }
-    return result;
+    return dispatch_done(call.name, std::move(result));
 }
 
 // 轮数将尽提醒的正文。remaining_turns 是"从当轮(含)到硬上限还能来回几趟"
@@ -313,12 +317,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
                 continue;
             }
             const tools::Tool::Result result = RunOneTool(registry_, call, callbacks, tool_filter_);
-            // 边界兜底:不管工具(含 MCP、hooks 加工过的结果、读到二进制的
-            // 文件工具……)自己有没有做好编码,进历史前一律过一遍
-            // SanitizeUtf8——一坨坏字节不该把整轮对话崩掉(下次
-            // nlohmann::json 序列化历史时,非法 UTF-8 会直接抛
-            // type_error.316,异常穿透到顶层)。run_command.cpp 已经在捕获侧
-            // 治过一次本,这里是最后一道拦网,双保险不重复不冲突。
+            // 断言式兜底:RunOneTool 出口已经规范化过(见它文件头的信任边界
+            // 注释),这里再过一遍 SanitizeUtf8 只为防将来有人在 Run() 之外
+            // 绕路改历史——已经合法的内容是原样穿透的空操作。
             tool_results.push_back(
                 api::ToolResultBlock{call.id, platform::SanitizeUtf8(result.content), result.is_error});
             if (cancel != nullptr && cancel->load()) {

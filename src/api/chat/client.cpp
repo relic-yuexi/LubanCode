@@ -12,6 +12,7 @@
 #include "api/chat/request.hpp"
 #include "api/sse_framing.hpp"
 #include "cli/i18n.hpp"
+#include "platform/json_safe.hpp"  // DescribeDumpFailure:请求体 dump 的窄边界
 
 namespace lubancode::api::chat {
 
@@ -57,7 +58,15 @@ ChatCompletionsBackend::ChatCompletionsBackend(std::string base_url, std::string
 std::expected<void, Error> ChatCompletionsBackend::send_stream(
     const Request& request, const std::function<void(const StreamEvent&)>& on_event,
     const std::atomic<bool>* cancel) {
-    const std::string body = BuildRequestJson(request, extra_body_).dump();
+    const nlohmann::json body_json = BuildRequestJson(request, extra_body_);
+    std::string body;
+    try {
+        body = body_json.dump();
+    } catch (const nlohmann::json::exception& e) {
+        // 请求序列化窄边界:历史里漏网的非法 UTF-8 在这里转成可回传的错误
+        // (AgentLoop 收到 unexpected 正常收场),不再穿透杀掉整场会话。
+        return std::unexpected(Error{ErrorKind::Parse, platform::DescribeDumpFailure(body_json, e), 0});
+    }
     SseFramer framer;
     EventParser parser;
     std::string error_body;
