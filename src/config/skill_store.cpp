@@ -438,6 +438,84 @@ std::string NewStagingName() {
     return ".remote-skill-staging-" + std::to_string(ticks) + "-" + std::to_string(++sequence);
 }
 
+// 整包原子落盘(InstallLocalSkill 与录制草稿安装共用):package_root 里的
+// 全部常规文件(拒收符号链接/特殊文件)先复制进 skills_root 下的 staging
+// 目录,再 rename 到 skills_root/<name>。调用方保证 name 已清洗、目标不
+// 存在(Windows rename 不肯覆盖)、package_root 根部有 SKILL.md。
+std::expected<void, std::string> AtomicInstallDirectory(const fs::path& skills_root,
+                                                         const fs::path& package_root, const std::string& name) {
+    std::error_code ec;
+    if (const auto dir = EnsureDir(skills_root); !dir.has_value()) {
+        return std::unexpected(dir.error());
+    }
+    const fs::path staging = skills_root / NewStagingName();
+    const fs::path staged_package = staging / name;
+    if (const auto dir = EnsureDir(staged_package); !dir.has_value()) {
+        return std::unexpected(dir.error());
+    }
+    const auto clean_staging = [&]() {
+        std::error_code ignored;
+        fs::remove_all(staging, ignored);
+    };
+    const auto copy_regular_file = [&](const fs::path& from, const fs::path& to) -> std::expected<void, std::string> {
+        const fs::file_status status = fs::symlink_status(from, ec);
+        if (ec || fs::is_symlink(status) || !fs::is_regular_file(status)) {
+            return std::unexpected("技能含符号链接或特殊文件，不予复制: " + PathToUtf8(from));
+        }
+        if (const auto dir = EnsureDir(to.parent_path()); !dir.has_value()) {
+            return std::unexpected(dir.error());
+        }
+        fs::copy_file(from, to, fs::copy_options::none, ec);
+        if (ec) {
+            return std::unexpected("复制技能文件失败: " + PathToUtf8(from) + ": " + ec.message());
+        }
+        return {};
+    };
+
+    fs::recursive_directory_iterator it(package_root, fs::directory_options::none, ec);
+    const fs::recursive_directory_iterator end;
+    if (ec) {
+        clean_staging();
+        return std::unexpected("扫描技能目录失败: " + ec.message());
+    }
+    for (; it != end; it.increment(ec)) {
+        if (ec) {
+            clean_staging();
+            return std::unexpected("扫描技能目录失败: " + ec.message());
+        }
+        const fs::file_status status = it->symlink_status(ec);
+        if (ec || fs::is_symlink(status)) {
+            clean_staging();
+            return std::unexpected("技能含符号链接，不予复制: " + PathToUtf8(it->path()));
+        }
+        const fs::path relative = it->path().lexically_relative(package_root);
+        const fs::path output = staged_package / relative;
+        if (fs::is_directory(status)) {
+            if (const auto dir = EnsureDir(output); !dir.has_value()) {
+                clean_staging();
+                return std::unexpected(dir.error());
+            }
+        } else if (fs::is_regular_file(status)) {
+            if (const auto copied = copy_regular_file(it->path(), output); !copied.has_value()) {
+                clean_staging();
+                return std::unexpected(copied.error());
+            }
+        } else {
+            clean_staging();
+            return std::unexpected("技能含特殊文件，不予复制: " + PathToUtf8(it->path()));
+        }
+    }
+
+    const fs::path target = skills_root / name;
+    fs::rename(staged_package, target, ec);
+    if (ec) {
+        clean_staging();
+        return std::unexpected("安装技能失败: " + PathToUtf8(target) + ": " + ec.message());
+    }
+    clean_staging();
+    return {};
+}
+
 }  // namespace
 
 std::expected<RemoteSkillSource, std::string> ParseRemoteSkillSource(const std::string& raw_url) {
@@ -798,78 +876,89 @@ std::expected<SkillInstallResult, std::string> InstallLocalSkill(const fs::path&
         return std::unexpected("检查目标目录失败: " + ec.message());
     }
 
-    const fs::path staging = skills_root / NewStagingName();
-    const fs::path staged_package = staging / *name;
-    if (const auto dir = EnsureDir(staged_package); !dir.has_value()) {
-        return std::unexpected(dir.error());
-    }
-    const auto clean_staging = [&]() {
-        std::error_code ignored;
-        fs::remove_all(staging, ignored);
-    };
-    const auto copy_regular_file = [&](const fs::path& from, const fs::path& to) -> std::expected<void, std::string> {
-        const fs::file_status status = fs::symlink_status(from, ec);
-        if (ec || fs::is_symlink(status) || !fs::is_regular_file(status)) {
-            return std::unexpected("本地技能含符号链接或特殊文件，不予复制: " + PathToUtf8(from));
-        }
-        if (const auto dir = EnsureDir(to.parent_path()); !dir.has_value()) {
-            return std::unexpected(dir.error());
-        }
-        fs::copy_file(from, to, fs::copy_options::none, ec);
-        if (ec) {
-            return std::unexpected("复制技能文件失败: " + PathToUtf8(from) + ": " + ec.message());
-        }
-        return {};
-    };
-
     if (!standalone_markdown.empty()) {
-        if (const auto copied = copy_regular_file(standalone_markdown, staged_package / "SKILL.md");
-            !copied.has_value()) {
-            clean_staging();
-            return std::unexpected(copied.error());
+        // 独立 .md:先staging 成目录形状再原子落位。
+        const fs::path staging_root = skills_root / NewStagingName();
+        const fs::path staged = staging_root / *name;
+        std::error_code copy_ec;
+        fs::create_directories(staged, copy_ec);
+        if (copy_ec) {
+            return std::unexpected("建暂存目录失败: " + copy_ec.message());
         }
-    } else {
-        fs::recursive_directory_iterator it(package_root, fs::directory_options::none, ec);
-        const fs::recursive_directory_iterator end;
-        if (ec) {
-            clean_staging();
-            return std::unexpected("扫描本地技能失败: " + ec.message());
+        fs::copy_file(standalone_markdown, staged / "SKILL.md", fs::copy_options::none, copy_ec);
+        if (copy_ec) {
+            std::error_code ignored;
+            fs::remove_all(staging_root, ignored);
+            return std::unexpected("复制技能文件失败: " + PathToUtf8(standalone_markdown) + ": " +
+                                   copy_ec.message());
         }
-        for (; it != end; it.increment(ec)) {
-            if (ec) {
-                clean_staging();
-                return std::unexpected("扫描本地技能失败: " + ec.message());
-            }
-            const fs::file_status status = it->symlink_status(ec);
-            if (ec || fs::is_symlink(status)) {
-                clean_staging();
-                return std::unexpected("本地技能含符号链接，不予复制: " + PathToUtf8(it->path()));
-            }
-            const fs::path relative = it->path().lexically_relative(package_root);
-            const fs::path output = staged_package / relative;
-            if (fs::is_directory(status)) {
-                if (const auto dir = EnsureDir(output); !dir.has_value()) {
-                    clean_staging();
-                    return std::unexpected(dir.error());
-                }
-            } else if (fs::is_regular_file(status)) {
-                if (const auto copied = copy_regular_file(it->path(), output); !copied.has_value()) {
-                    clean_staging();
-                    return std::unexpected(copied.error());
-                }
-            } else {
-                clean_staging();
-                return std::unexpected("本地技能含特殊文件，不予复制: " + PathToUtf8(it->path()));
-            }
+        fs::rename(staged, target, copy_ec);
+        std::error_code ignored;
+        fs::remove_all(staging_root, ignored);
+        if (copy_ec) {
+            return std::unexpected("安装本地技能失败: " + PathToUtf8(target) + ": " + copy_ec.message());
         }
+        return SkillInstallResult{{*name}};
     }
 
-    fs::rename(staged_package, target, ec);
-    if (ec) {
-        clean_staging();
-        return std::unexpected("安装本地技能失败: " + PathToUtf8(target) + ": " + ec.message());
+    if (const auto installed = AtomicInstallDirectory(skills_root, package_root, *name);
+        !installed.has_value()) {
+        return std::unexpected(installed.error());
     }
-    clean_staging();
+    return SkillInstallResult{{*name}};
+}
+
+std::expected<SkillInstallResult, std::string> InstallDraftSkill(
+    const fs::path& skills_root, const fs::path& draft_dir,
+    const std::function<std::expected<std::string, std::string>(const std::string&)>& validate) {
+    if (!validate) {
+        return std::unexpected("草稿校验器为空，不予安装");
+    }
+    std::error_code ec;
+    if (!fs::is_directory(draft_dir, ec) || ec) {
+        return std::unexpected("草稿目录不存在: " + PathToUtf8(draft_dir));
+    }
+    const fs::path skill_md = draft_dir / "SKILL.md";
+    const fs::file_status status = fs::symlink_status(skill_md, ec);
+    if (ec || !fs::is_regular_file(status) || fs::is_symlink(status)) {
+        return std::unexpected("草稿目录根部没有普通文件 SKILL.md: " + PathToUtf8(draft_dir));
+    }
+    std::string content;
+    {
+        std::ifstream file(skill_md, std::ios::binary);
+        if (!file.is_open()) {
+            return std::unexpected("打不开草稿: " + PathToUtf8(skill_md));
+        }
+        std::ostringstream buffer;
+        buffer << file.rdbuf();
+        content = buffer.str();
+    }
+    const auto checked = CheckSkillContent(content, "草稿 SKILL.md");
+    if (!checked.has_value()) {
+        return std::unexpected(checked.error());
+    }
+    const auto validated = validate(*checked);
+    if (!validated.has_value()) {
+        return std::unexpected(validated.error());
+    }
+    const auto name = SanitizeSkillDirectoryName(*validated);
+    if (!name.has_value()) {
+        return std::unexpected(name.error());
+    }
+    const fs::path target = skills_root / *name;
+    if (fs::exists(target, ec)) {
+        if (ec) {
+            return std::unexpected("检查目标目录失败: " + ec.message());
+        }
+        return std::unexpected("技能已存在，先 /skill remove " + *name + " 再装");
+    }
+    if (ec) {
+        return std::unexpected("检查目标目录失败: " + ec.message());
+    }
+    if (const auto installed = AtomicInstallDirectory(skills_root, draft_dir, *name);
+        !installed.has_value()) {
+        return std::unexpected(installed.error());
+    }
     return SkillInstallResult{{*name}};
 }
 

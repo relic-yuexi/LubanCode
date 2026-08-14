@@ -41,6 +41,7 @@ enum class SlashCommand {
     Image,     // /image <路径...>:附一张或多张本地图片
     Worktree,  // /worktree new|list|exit:隔离工作树会话
     Background,  // /background:列后台任务清单(run_command run_in_background 起的)
+    Record,   // /record start|note|pause|resume|stop|cancel|status|list|install|discard:录一遍生成技能
     Unknown,  // 以 / 开头,但不认得这个命令
 };
 
@@ -94,6 +95,22 @@ struct ParsedProviderCommand {
 };
 
 ParsedProviderCommand ParseProviderCommand(const std::string& args);
+
+// /record 的二级参数,同样收在 cli 层做纯解析:拆出动作、名字/编号、note
+// 的原文(install|discard 的第三个词管装到哪一级)。缺参数、认不得的动作
+// 一律 Invalid,由调用方统一打印用法。
+enum class RecordCommandAction {
+    Invalid, Status, Start, Note, Pause, Resume, Stop, Cancel, List, Install, Discard
+};
+
+struct ParsedRecordCommand {
+    RecordCommandAction action = RecordCommandAction::Invalid;
+    std::string name;   // start 的技能名 / install|discard 的录制件编号
+    std::string text;   // note 的备注原文(保留空格)
+    bool to_project = true;  // install 目标:默认项目级;第三词是 "home" 才装主目录级
+};
+
+ParsedRecordCommand ParseRecordCommand(const std::string& args);
 
 // /provider remove 的会话级护栏。拆成纯函数，命令处理与单测共用，免得
 // "当前端不许删"这条规矩散在 main 的 IO 分支里。

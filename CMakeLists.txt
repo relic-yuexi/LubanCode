@@ -280,6 +280,8 @@ add_library(lubancode_core STATIC
   src/agent/context.cpp
   src/agent/compact.cpp
   src/agent/session_store.cpp
+  src/agent/workflow_recorder.cpp
+  src/agent/skill_drafter.cpp
   src/cli/i18n.cpp
   src/cli/image_input.cpp
   src/cli/setup_wizard.cpp
@@ -309,7 +311,7 @@ target_link_libraries(lubancode_core PUBLIC cpr::cpr nlohmann_json::nlohmann_jso
 target_link_libraries(lubancode_core PRIVATE lubancode_lua)  # M7:Lua 插件运行时
 target_compile_features(lubancode_core PUBLIC cxx_std_23)
 
-add_executable(lubancode src/main.cpp src/cli/console_input.cpp src/cli/spinner.cpp)
+add_executable(lubancode src/main.cpp src/cli/console_input.cpp src/cli/spinner.cpp src/cli/record_command.cpp)
 target_link_libraries(lubancode PRIVATE lubancode_core)
 target_compile_features(lubancode PRIVATE cxx_std_23)
 

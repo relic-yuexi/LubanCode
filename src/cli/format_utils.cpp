@@ -66,7 +66,11 @@ std::string BuildStatusLineText(ConfirmMode mode, const std::string& model, int 
 std::vector<StatusPanelSegment> BuildStatusPanelSegments(
     const std::vector<std::string>& items, ConfirmMode mode, const StatusPanelData& data) {
     std::vector<StatusPanelSegment> out;
-    out.reserve(items.size());
+    out.reserve(items.size() + 1);
+    // REC 标记:录制中恒挂第一段,不进 items 配置(见 StatusPanelData::rec 注释)。
+    if (!data.rec.empty()) {
+        out.push_back({"rec", data.rec});
+    }
     for (const std::string& key : items) {
         std::string text;
         if (key == "permission_mode") {
