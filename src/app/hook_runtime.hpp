@@ -37,6 +37,12 @@ const std::vector<std::string>& HookStartupNotices();
 // 就空操作。
 void UpdateHookRuntimeContext(hooks::HookContext context);
 
+// 主会话安全点(轮起/轮收//hooks):把后台子代理投递的 hooks 运行记录归并
+// 进 dispatcher 账本。返回要给用户看的报信行——"落账 N 条"的信息行与
+// 后台明示降级的告警行;没东西可收就空。调用方决定打到哪里(交互模式打
+// 屏,管道模式不打)。
+std::vector<std::string> AdoptBackgroundHookRecordNotices();
+
 // 帮忙把当前确认档翻成协议字段值。
 std::string HookPermissionModeText();
 

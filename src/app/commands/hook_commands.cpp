@@ -4,6 +4,8 @@
 #include <sstream>
 #include <vector>
 
+#include "app/hook_runtime.hpp"
+
 namespace lubancode::app {
 
 namespace {
@@ -82,6 +84,18 @@ void PrintRunRecords(HookDispatcher& dispatcher, int limit) {
         std::cout << "  #" << record.definition_id << " [" << record.event_name << "] " << record.outcome
                   << " 退出码 " << record.exit_code << " 耗时 " << record.duration_ms << "ms"
                   << " 来自 " << record.source_label << "\n";
+        // stderr 首段单列一行:解码口径标清(utf-8/cp936/unknown),超上限带
+        // 截断标志;编码未定时那行本身就是原始字节摘要,不是替换符。
+        if (!record.stderr_head.empty()) {
+            std::string head = record.stderr_head;
+            if (!record.stderr_encoding.empty()) {
+                head = "(" + record.stderr_encoding + ") " + head;
+            }
+            if (record.stderr_truncated) {
+                head += " …(截断)";
+            }
+            std::cout << "      stderr: " << head << "\n";
+        }
         if (!record.detail.empty()) {
             std::string detail = record.detail;
             if (detail.size() > 160) {
@@ -112,6 +126,10 @@ void HandleHooksCommand(const std::string& args, lubancode::hooks::HookDispatche
     if (dispatcher == nullptr) {
         std::cout << "hooks 运行时未初始化(异常路径),本命令不可用。\n";
         return;
+    }
+    // 安全点:先把后台子代理投递的记录归并进来,列表与流水看到的才是全账。
+    for (const std::string& notice : AdoptBackgroundHookRecordNotices()) {
+        std::cout << "[hooks] " << notice << "\n";
     }
     if (dispatcher->Empty()) {
         PrintDefinitionList(*dispatcher);

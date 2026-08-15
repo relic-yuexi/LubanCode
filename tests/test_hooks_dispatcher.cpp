@@ -8,12 +8,17 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 
 #include <nlohmann/json.hpp>
 
 #include "config/config.hpp"
 #include "hooks/dispatcher.hpp"
 #include "hooks/loader.hpp"
+#include "hooks/protocol.hpp"
+#include "platform/paths.hpp"
+#include "platform/process.hpp"
+#include "platform/text_encoding.hpp"
 
 using namespace lubancode;
 
@@ -499,4 +504,376 @@ TEST_CASE("dispatcher: EmitWith 的上下文覆写进 stdin(子代理 agent_id �
     CHECK(parsed["parent_agent_id"].is_null());
     // 覆写不落账:主上下文(agent 字段 null)不受影响。
     CHECK(dispatcher.context().agent_id == std::nullopt);
+}
+
+// ---------------------------------------------------------------------------
+// 编码契约:宿主往 hook stdin 写 UTF-8 无 BOM 字节,Windows 管道不借
+// OEM/ANSI 代码页。中文、emoji、反斜杠、换行、32KB prompt 逐字节原样到。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// exec form 定义(command + args,不经 shell;Windows 引号转义由平台层做)。
+hooks::HookDefinition MakeExecDefinition(const std::string& command, std::vector<std::string> args) {
+    hooks::HookDefinition def;
+    def.event = hooks::HookEvent::UserPromptSubmit;
+    def.source_kind = hooks::HookSourceKind::User;
+    def.source_path = "test://user-config";
+    def.source_label = "user test://user-config";
+    def.matcher = "*";
+    def.handler.command = command;
+    def.handler.args = std::move(args);
+    def.handler.timeout_ms = 30000;
+    def.handler.failure_policy = "warn";
+    def.definition_hash = hooks::ComputeDefinitionHash(def.handler);
+    def.definition_hash_short = hooks::DefinitionHashShort(def.definition_hash);
+    def.trusted = true;
+    return def;
+}
+
+// 一段刁钻 prompt:中文 + 全角标点 + emoji(4 字节 UTF-8)+ 反斜杠路径 +
+// 引号 + 换行。够覆盖"过不了 ConvertFrom-Json"那类报告的全部成分。
+std::string TrickyPrompt() {
+    std::string prompt = "只回复 OK，不调用工具 🎉 路径 C:\\Users\\鲁班\\a\"b\r\n第二行\t带制表";
+    // 32KB 长档:中文重复铺到超 32768 字节(Windows 环境块单变量上限,stdin 通道不该有这道墙)。
+    while (prompt.size() < 32 * 1024) {
+        prompt += "中文内容与 emoji 🚀 混排、反斜杠 \\ 与引号 \" 交错;\n";
+    }
+    return prompt;
+}
+
+hooks::HookPayload MakePromptPayload(const std::string& prompt) {
+    hooks::HookPayload payload;
+    payload.event = hooks::HookEvent::UserPromptSubmit;
+    payload.fields["prompt"] = prompt;
+    return payload;
+}
+
+std::string ReadFileBytes(const std::string& path) {
+    std::ifstream in(std::filesystem::path(reinterpret_cast<const char8_t*>(path.c_str())), std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+std::string SinkPath(const char* name) {
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / "lubancode-hook-dispatch";
+    std::filesystem::create_directories(dir);
+    return (dir / name).string();
+}
+
+// JS 字符串里反斜杠是转义符且会丢( '\U' 趋近 'U' ),node 那支用正斜杠路径。
+std::string SinkForwardSlashes(const std::string& path) {
+    std::string out = path;
+    std::replace(out.begin(), out.end(), '\\', '/');
+    return out;
+}
+
+// 探一个解释器在不在(powershell/pwsh/python/node)。起不来或退出码非 0 都算不在,
+// 测试早退——单测不预设机器装了什么。
+bool InterpreterAvailable(const std::vector<std::string>& probe_args) {
+    const auto result = platform::RunProcess(probe_args, 15000);
+    return !result.spawn_failed && result.exit_code == 0;
+}
+
+// 字节级比对前把 hook_run_id 抹平:它带时间戳与进程内计数,两次构造不可能相等。
+std::string StripHookRunId(const std::string& wire) {
+    constexpr const char* kKey = "\"hook_run_id\":\"";
+    const std::size_t key = wire.find(kKey);
+    if (key == std::string::npos) {
+        return wire;
+    }
+    const std::size_t value_begin = key + std::string_view(kKey).size();
+    const std::size_t value_end = wire.find('"', value_begin);
+    std::string out = wire;
+    out.erase(value_begin, value_end - value_begin);
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("dispatcher: stdin JSON 是 UTF-8 无 BOM——中文/emoji/反斜杠/换行/32KB 原样往返") {
+    const std::string prompt = TrickyPrompt();
+    CHECK(prompt.size() >= 32 * 1024);
+
+    const nlohmann::json stdin_json =
+        hooks::BuildStdinPayload(MakePromptPayload(prompt), MakeDispatcher({}).context(), "hookrun_enc_test");
+    const std::string wire = stdin_json.dump();
+
+    // 无 BOM:头一个字节就是 '{',不是 EF BB BF。
+    REQUIRE(wire.size() >= 3);
+    CHECK(wire[0] == '{');
+    CHECK(static_cast<unsigned char>(wire[0]) != 0xEF);
+    CHECK(static_cast<unsigned char>(wire[1]) != 0xBB);
+    CHECK(static_cast<unsigned char>(wire[2]) != 0xBF);
+    // 整段是合法 UTF-8(不是 ANSI/GBK 字节,也不是被转义成 ASCII 的替身)。
+    CHECK(platform::IsValidUtf8(wire));
+    CHECK(wire.find("只回复 OK") != std::string::npos);
+    CHECK(wire.find("🎉") != std::string::npos);
+    // 回读:prompt 逐字节等值。
+    const nlohmann::json parsed = nlohmann::json::parse(wire);
+    CHECK(parsed["prompt"] == prompt);
+    CHECK(parsed["hook_event_name"] == "UserPromptSubmit");
+}
+
+#ifdef _WIN32
+TEST_CASE("dispatcher: Windows 管道逐字节忠实——PowerShell 5.1 按字节抄收 stdin") {
+    // 子进程完全不解码,OpenStandardInput 的字节流直接 CopyTo 进文件:文件内容
+    // 与宿主写的字节逐字节相等,证明管道没有借代码页倒一道手。
+    if (!InterpreterAvailable({"powershell", "-NoProfile", "-Command", "exit 0"})) {
+        return;
+    }
+    const std::string sink = SinkPath("stdin-bytes-ps5.txt");
+    const std::string ps =
+        "$in=[Console]::OpenStandardInput(); $fs=[IO.File]::Create('" + sink + "'); $in.CopyTo($fs); $fs.Close()";
+    hooks::HookDispatcher dispatcher = MakeDispatcher({MakeExecDefinition("powershell", {"-NoProfile", "-Command", ps})});
+
+    const std::string prompt = "只回复 OK，不调用工具 🎉 C:\\路径\\反斜杠";
+    const auto merged = dispatcher.Emit(hooks::HookEvent::UserPromptSubmit, MakePromptPayload(prompt));
+    CHECK(merged.executed == 1);
+    REQUIRE(merged.records.size() == 1);
+    CHECK(merged.records[0].outcome == "ok");
+
+    const std::string expected = StripHookRunId(
+        hooks::BuildStdinPayload(MakePromptPayload(prompt), MakeDispatcher({}).context(), "").dump());
+    const std::string got = StripHookRunId(ReadFileBytes(sink));
+    REQUIRE(got.size() == expected.size());
+    CHECK(got == expected);
+}
+#endif
+
+// 四种解释器按文档例子明示 UTF-8 读 stdin:中文与 emoji 原样到达。机器上
+// 没装的解释器早退跳过(powershell 5.1 在 Windows 上恒有)。
+TEST_CASE("dispatcher: 中文与 emoji 经各解释器明示 UTF-8 读原样到达") {
+    const std::string prompt = "只回复 OK，不调用工具 🎉\r\n换行与 C:\\反斜杠\\也在";
+    const std::string sink = SinkPath("stdin-utf8-roundtrip.txt");
+    std::error_code ec;
+    std::filesystem::remove(std::filesystem::path(reinterpret_cast<const char8_t*>(sink.c_str())), ec);
+
+    struct Interpreter {
+        const char* name;
+        std::vector<std::string> probe;  // 探活命令(退出码 0 = 在)
+        std::vector<std::string> argv;   // 真跑的命令:明示 UTF-8 读 stdin,取 prompt 落盘
+    };
+    const std::vector<Interpreter> cases = {
+#ifdef _WIN32
+        {"powershell",
+         {"powershell", "-NoProfile", "-Command", "exit 0"},
+         {"powershell", "-NoProfile", "-Command",
+          "$r = New-Object IO.StreamReader([Console]::OpenStandardInput(), (New-Object Text.UTF8Encoding $false)); "
+          "$o = $r.ReadToEnd() | ConvertFrom-Json; "
+          "[IO.File]::WriteAllText('" +
+              sink + "', $o.prompt, (New-Object Text.UTF8Encoding $false))"}},
+        {"pwsh",
+         {"pwsh", "-NoProfile", "-Command", "exit 0"},
+         {"pwsh", "-NoProfile", "-Command",
+          "$r = New-Object IO.StreamReader([Console]::OpenStandardInput(), (New-Object Text.UTF8Encoding $false)); "
+          "$o = $r.ReadToEnd() | ConvertFrom-Json; "
+          "[IO.File]::WriteAllText('" +
+              sink + "', $o.prompt, (New-Object Text.UTF8Encoding $false))"}},
+#else
+        {"sh", {"sh", "-c", "true"}, {"sh", "-c", "cat > '" + sink + "'"}},
+#endif
+        {"python",
+         {"python", "-c", "pass"},
+         {"python", "-c",
+          "import sys, json\n"
+          "payload = json.loads(sys.stdin.buffer.read().decode('utf-8'))\n"
+          "with open(r'" +
+              sink + "', 'w', encoding='utf-8', newline='') as f:\n"
+              "    f.write(payload['prompt'])"}},
+        {"node",
+         {"node", "-e", "0"},
+         {"node", "-e",
+          "let raw = []; process.stdin.on('data', c => raw.push(c)); "
+          "process.stdin.on('end', () => { const payload = JSON.parse(Buffer.concat(raw).toString('utf8')); "
+          "require('fs').writeFileSync('" +
+              SinkForwardSlashes(sink) + "', payload.prompt); });"}},
+    };
+
+    for (const auto& interp : cases) {
+        if (!InterpreterAvailable(interp.probe)) {
+            continue;
+        }
+        std::filesystem::remove(std::filesystem::path(reinterpret_cast<const char8_t*>(sink.c_str())), ec);
+        CAPTURE(interp.name);
+        hooks::HookDispatcher dispatcher =
+            MakeDispatcher({MakeExecDefinition(interp.argv[0], {interp.argv.begin() + 1, interp.argv.end()})});
+        const auto merged = dispatcher.Emit(hooks::HookEvent::UserPromptSubmit, MakePromptPayload(prompt));
+        REQUIRE(merged.records.size() == 1);
+        CHECK(merged.records[0].outcome == "ok");
+        const std::string got = ReadFileBytes(sink);
+        REQUIRE_FALSE(got.empty());
+        // 到达的内容与原 prompt 逐字节相等(POSIX sh 那支落盘的是整份 JSON,单独判)。
+        if (std::string_view(interp.name) != "sh") {
+            CHECK(got == prompt);
+        } else {
+            CHECK(got.find("只回复 OK") != std::string::npos);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// stdout/stderr 分开捕获 + 明示解码:stderr 噪声打不坏 stdout 的 JSON,
+// 中文 stderr 不乱码,超长 stderr 带截断标志。
+// ---------------------------------------------------------------------------
+
+#ifdef _WIN32
+TEST_CASE("dispatcher: stderr 分开捕获——stderr 噪声不污染 stdout JSON,中文不乱码") {
+    if (!InterpreterAvailable({"powershell", "-NoProfile", "-Command", "exit 0"})) {
+        return;
+    }
+    // 子进程:stderr 写一行中文噪声,stdout 写合法 JSON,退出码 0。合并捕获
+    // 的旧实现里 stderr 会混进 stdout,JSON 解析直接被打崩;分开后两不相扰。
+    const std::string ps = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
+                           "[Console]::Error.WriteLine('这是 stderr 的中文噪声,不该影响 stdout'); "
+                           "Write-Output '{\"continue\":true}'";
+    hooks::HookDispatcher dispatcher =
+        MakeDispatcher({MakeExecDefinition("powershell", {"-NoProfile", "-Command", ps})});
+    const auto merged = dispatcher.Emit(hooks::HookEvent::UserPromptSubmit, MakePromptPayload("查一下"));
+    REQUIRE(merged.records.size() == 1);
+    CHECK(merged.records[0].outcome == "ok");
+    CHECK(merged.records[0].stderr_encoding == "utf-8");
+    CHECK(merged.records[0].stderr_head.find("这是 stderr 的中文噪声") != std::string::npos);
+    CHECK_FALSE(merged.records[0].stderr_truncated);
+    // 无声替换是禁区:解码结果里不许冒出 U+FFFD。
+    CHECK(merged.records[0].stderr_head.find("\xEF\xBF\xBD") == std::string::npos);
+}
+
+TEST_CASE("dispatcher: PowerShell 默认编码的中文 stderr 按控制台代码页解出并标注") {
+    if (!InterpreterAvailable({"powershell", "-NoProfile", "-Command", "exit 0"})) {
+        return;
+    }
+    // PS 5.1 不设 OutputEncoding 时按控制台输出页写管道。控制台页不是 936 的
+    // 机器上中文在源头就变成了问号,无从复原——那种机器只断言"不乱码、有
+    // 标注",不断言内容。
+    const std::string ps = "[Console]::Error.WriteLine('中文报错内容回归')";
+    hooks::HookDispatcher dispatcher =
+        MakeDispatcher({MakeExecDefinition("powershell", {"-NoProfile", "-Command", ps})});
+    const auto merged = dispatcher.Emit(hooks::HookEvent::UserPromptSubmit, MakePromptPayload("查一下"));
+    REQUIRE(merged.records.size() == 1);
+    const auto& record = merged.records[0];
+    CHECK_FALSE(record.stderr_head.empty());
+    CHECK(record.stderr_encoding != "unknown");
+    CHECK(record.stderr_head.find("\xEF\xBF\xBD") == std::string::npos);
+    const std::vector<unsigned int> candidates = platform::ChildStreamCodePageCandidates();
+    if (!candidates.empty() && candidates.front() == 936) {
+        CHECK(record.stderr_encoding == "cp936");
+        CHECK(record.stderr_head.find("中文报错内容回归") != std::string::npos);
+    }
+}
+
+TEST_CASE("dispatcher: 超长 stderr 截断入账,带截断标志") {
+    if (!InterpreterAvailable({"powershell", "-NoProfile", "-Command", "exit 0"})) {
+        return;
+    }
+    const std::string ps = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
+                           "$line = 'x' * 200; "
+                           "for ($i = 0; $i -lt 5; $i++) { [Console]::Error.WriteLine($line) }";
+    hooks::HookDispatcher dispatcher =
+        MakeDispatcher({MakeExecDefinition("powershell", {"-NoProfile", "-Command", ps})});
+    const auto merged = dispatcher.Emit(hooks::HookEvent::UserPromptSubmit, MakePromptPayload("查一下"));
+    REQUIRE(merged.records.size() == 1);
+    const auto& record = merged.records[0];
+    CHECK(record.stderr_truncated);
+    CHECK(record.stderr_head.size() == hooks::HookRunRecord::kStderrHeadBytes);
+}
+#endif
+
+// ---------------------------------------------------------------------------
+// 后台(外挂)执行面:快照执行不落账,记录投递-归并闭环,信任闸门照过。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("dispatcher: EmitDetached 真跑钩子但不碰账本,投递后安全点归并") {
+    const std::string script = WriteHookScript("detached-ok", "exit 0");
+    hooks::HookDispatcher dispatcher = MakeDispatcher({MakeDefinition(RunScriptCommand(script))});
+    const std::vector<hooks::HookDefinition> snapshot = dispatcher.PolicySnapshot();
+    REQUIRE(snapshot.size() == 1);
+
+    const auto merged = hooks::HookDispatcher::EmitDetached(snapshot, hooks::HookEvent::PreToolUse,
+                                                            MakeToolPayload(), dispatcher.context());
+    CHECK(merged.executed == 1);
+    REQUIRE(merged.records.size() == 1);
+    CHECK(merged.records[0].outcome == "ok");
+
+    // 不落账:直接 Emit 的路才会进 recent_/last_record_,detached 跑完账本纹丝不动。
+    CHECK(dispatcher.RecentRecords(10).empty());
+    CHECK(dispatcher.LastRecordFor(1) == nullptr);
+
+    // 投递 -> 归并闭环:记录进账,告警随行,收编一次就干净。
+    CHECK_FALSE(dispatcher.HasExternalRecords());
+    dispatcher.PostExternalRecords(merged.records, "后台子代理的钩子降级了一票");
+    CHECK(dispatcher.HasExternalRecords());
+    const auto adoption = dispatcher.AdoptExternalRecords();
+    REQUIRE(adoption.records.size() == 1);
+    REQUIRE(adoption.warnings.size() == 1);
+    CHECK(adoption.warnings[0].find("降级") != std::string::npos);
+    CHECK(dispatcher.RecentRecords(10).size() == 1);
+    CHECK(dispatcher.LastRecordFor(1) != nullptr);
+    CHECK(dispatcher.LastRecordFor(1)->outcome == "ok");
+    CHECK_FALSE(dispatcher.HasExternalRecords());
+    CHECK(dispatcher.AdoptExternalRecords().records.empty());  // 收编一次即清
+}
+
+TEST_CASE("dispatcher: 后台投递按时间序归并,新在前的流水序不乱") {
+    hooks::HookDispatcher dispatcher = MakeDispatcher({});
+    hooks::HookRunRecord first;
+    first.definition_id = 1;
+    first.event_name = "PostToolUse";
+    first.outcome = "ok";
+    hooks::HookRunRecord second = first;
+    second.outcome = "blocked";
+    dispatcher.PostExternalRecords({first});
+    dispatcher.PostExternalRecords({second});
+    const auto adoption = dispatcher.AdoptExternalRecords();
+    REQUIRE(adoption.records.size() == 2);
+    const auto recent = dispatcher.RecentRecords(10);
+    REQUIRE(recent.size() == 2);
+    CHECK(recent[0].outcome == "blocked");  // 后投递的(更新的)在前
+    CHECK(recent[1].outcome == "ok");
+}
+
+TEST_CASE("dispatcher: 未信任/禁用照进快照——后台执行也过信任闸门") {
+    const std::string script = WriteHookScript("detached-untrusted", "echo PWNED > bg-pwned-marker.txt\nexit 0");
+    hooks::HookDefinition proj_def = MakeDefinition(RunScriptCommand(script));
+    proj_def.source_kind = hooks::HookSourceKind::Project;
+    proj_def.source_path = "test://project-config";
+    proj_def.trusted = false;  // 未信任
+    hooks::HookDispatcher dispatcher = MakeDispatcher({proj_def});
+
+    const auto merged = hooks::HookDispatcher::EmitDetached(dispatcher.PolicySnapshot(),
+                                                            hooks::HookEvent::PreToolUse, MakeToolPayload(),
+                                                            dispatcher.context());
+    REQUIRE(merged.records.size() == 1);
+    CHECK(merged.records[0].outcome == "skipped_untrusted");
+    CHECK(merged.executed == 0);
+    // 进程根本没起:标记文件不存在。
+    const std::filesystem::path marker =
+        std::filesystem::temp_directory_path() / "lubancode-hook-dispatch" / "bg-pwned-marker.txt";
+    CHECK_FALSE(std::filesystem::exists(marker));
+}
+
+TEST_CASE("dispatcher: 后台线程投递与主线程归并并发,一条不丢") {
+    hooks::HookDispatcher dispatcher = MakeDispatcher({});
+    constexpr int kBatches = 100;
+    std::thread poster([&dispatcher] {
+        for (int i = 0; i < kBatches; ++i) {
+            hooks::HookRunRecord record;
+            record.definition_id = 1;
+            record.event_name = "PostToolUse";
+            record.outcome = "ok";
+            dispatcher.PostExternalRecords({record});
+        }
+    });
+    int adopted = 0;
+    while (true) {
+        adopted += static_cast<int>(dispatcher.AdoptExternalRecords().records.size());
+        if (poster.joinable() && !dispatcher.HasExternalRecords()) {
+            // 队列此刻空且投递线程还能 join = 再等一小拍仍空才算收完(投递
+            // 线程可能正卡在锁上)。join 之后必有终局判断。
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    poster.join();
+    adopted += static_cast<int>(dispatcher.AdoptExternalRecords().records.size());
+    CHECK(adopted == kBatches);
 }

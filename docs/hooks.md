@@ -31,8 +31,8 @@ cli_app(会话起落)         HookRunRecord(全程留痕)
 | `PostToolUse` | 工具跑完、结果清洗后 | `tool_name` | 只许追加反馈;不能撤销副作用 |
 | `PreCompact` | 压缩前 | `trigger`:manual / auto | 可拦下这次压缩 |
 | `PostCompact` | 压缩后 | `trigger` | 审计;上下文重注入走 SessionStart(compact) |
-| `SubagentStart` | 前台子代理开跑 | 无 | 审计/记账 |
-| `SubagentStop` | 前台子代理收口 | 无 | continue=false 要求再收口一轮(最多一次) |
+| `SubagentStart` | 前台/后台子代理开跑 | 无 | 审计/记账 |
+| `SubagentStop` | 前台/后台子代理收口 | 无 | continue=false 要求再收口一轮(最多一次) |
 | `Stop` | 主回合正常收束 | 无 | continue=false 要求补跑一轮(最多一次) |
 
 ## 配置
@@ -97,6 +97,50 @@ cli_app(会话起落)         HookRunRecord(全程留痕)
 
 工具事件再带 `tool_input`(以及 PostToolUse 的 `tool_response`/`tool_succeeded`);SessionStart 带 `source`;SessionEnd 带 `reason`;Pre/PostCompact 带 `trigger`;SubagentStart/Stop 带 `agent_id`/`agent_type`/`parent_agent_id`(Stop 另带 `agent_transcript_path`/`last_assistant_message`/`stop_hook_active`);Stop 带 `stop_hook_active`/`last_assistant_message`;UserPromptSubmit 带 `prompt`。`agent_id` 非空 = 子代理触发(主代理为 null),主/子不会串账。
 
+工具事件再带 `tool_input`(以及 PostToolUse 的 `tool_response`/`tool_succeeded`);SessionStart 带 `source`;SessionEnd 带 `reason`;Pre/PostCompact 带 `trigger`;SubagentStart/Stop 带 `agent_id`/`agent_type`/`parent_agent_id`(Stop 另带 `agent_transcript_path`/`last_assistant_message`/`stop_hook_active`);Stop 带 `stop_hook_active`/`last_assistant_message`;UserPromptSubmit 带 `prompt`。`agent_id` 非空 = 子代理触发(主代理为 null),主/子不会串账。
+
+### 编码契约(Windows 必读):stdin 是 UTF-8 无 BOM 字节流
+
+宿主往 hook 的 stdin 写的是 **UTF-8、无 BOM** 的原始字节——不按当前 OEM/ANSI 代码页转换,也不猜。中文、emoji、反斜杠、换行、超长 prompt(32KB+)都按字节原样进管道。
+
+但 Windows 上的解释器**默认不按 UTF-8 读管道**:PowerShell 5.1 用 `[Console]::InputEncoding`(中文机器上是 gb2312/GBK)解码重定向的 stdin,直接 `$input` / `[Console]::In.ReadToEnd()` 会把中文读成乱码,`ConvertFrom-Json` 随之报错。hook 脚本必须**明示按 UTF-8 读**。四种写法的最小例子:
+
+**PowerShell 5.1**(拿 StreamReader 明示 UTF-8,不依赖控制台状态):
+
+```powershell
+$reader = New-Object IO.StreamReader([Console]::OpenStandardInput(), (New-Object Text.UTF8Encoding $false))
+$payload = $reader.ReadToEnd() | ConvertFrom-Json
+$payload.prompt   # 中文、emoji 原样到达
+```
+
+**pwsh 7**(重定向 stdin 默认就是 UTF-8;显式写法与上面同款,最稳):
+
+```powershell
+$payload = [Console]::In.ReadToEnd() | ConvertFrom-Json
+```
+
+**Python**(按字节读再解码,不碰 locale):
+
+```python
+import sys, json
+payload = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+print(payload["prompt"])   # 如需往 stdout 写中文/emoji:
+sys.stdout.reconfigure(encoding="utf-8")  # 先这一行,再 print
+```
+
+**Node**(块累积成 Buffer,按 UTF-8 转字符串):
+
+```javascript
+let raw = [];
+process.stdin.on("data", (chunk) => raw.push(chunk));
+process.stdin.on("end", () => {
+  const payload = JSON.parse(Buffer.concat(raw).toString("utf8"));
+  console.log(payload.prompt);
+});
+```
+
+反向同样成立:宿主按"先认 UTF-8"的明示策略解 hook 的 stdout/stderr(见下节)。hook 要往 stdout 写含中文的 JSON,也得按 UTF-8 写——PowerShell 先 `[Console]::OutputEncoding = [Text.Encoding]::UTF8` 再输出,或用 `[IO.File]`/`[Console]::OpenStandardOutput()` 写字节;Python 用 `sys.stdout.reconfigure(encoding="utf-8")` 或 `sys.stdout.buffer.write(...)`。
+
 ### 输出:stdout JSON + 退出码
 
 ```
@@ -139,6 +183,17 @@ cli_app(会话起落)         HookRunRecord(全程留痕)
 
 同事件命中的 handler **并发执行**(总耗时接近最慢一只);收齐后按定义序(来源 → 声明次序)归并,日志与记录顺序稳定,不按谁先跑完谁先说话。同事件下 definition hash 相同的多条定义只执行一次(来源账保留)。
 
+## 后台子代理的 hooks(快照执行 + 安全点归并)
+
+产品主路已是后台 agent,审计、策略、计费不能在最忙处断账。线程规矩:
+
+- **后台线程不碰 dispatcher 账本。** 起后台任务时(宿主主线程)从 dispatcher 拷一份**只读策略快照**(定义表含信任/禁用账)进 `DetachedHookSession`;后台线程在会话里真跑钩子(匹配、信任闸门、并发执行、归并与前台同一个核),跑完的 `HookRunRecord` 只**投递**进 dispatcher 的外部队列。主会话在安全点(轮起、轮收、`/hooks`)归并落账,打一行 `[hooks] 后台子代理 hooks 落账 N 条运行记录`,之后 `/hooks runs` 可查。
+- **快照是只读的。** 会话中途 `/hooks trust`、改配置重装,只影响之后新起的后台任务;在跑的那份不追改——信任闸门照过(未信任的照记 `skipped_untrusted`,绝不起进程),不会因为快照旧了就静默放行新命令(hash 对不上就不跑)。
+- **同步决策真执行,不静默绕过:**
+  - `PreToolUse`:deny 照拦(工具不执行,理由进 tool_result);allow 照放(带 `updatedInput`);**ask 在后台没有终端可问,明示降级为拒绝**——理由写进 tool_result,主会话安全点带一条告警,不装作问过了。
+  - `PermissionRequest`:后台本来的硬边界是"需要确认的操作一律拒绝"(无终端)。接上钩子后它成了唯一的策略口:deny 照拒(告警随行);**allow 替人工放行**;不表态维持拒绝——但现在这一票钩子看得见、账上有。
+- 触发面:`SubagentStart`/`SubagentStop`(含 continue=false 续跑一轮)与子代理内部工具事件(内置/插件/MCP)。后台任务自己的 prompt 不算用户输入,不发 `UserPromptSubmit`。后台里再派后台(嵌套子代理)那一层不接 hooks——它的工具表没有主会话的 hooks 通道,如实不装。
+
 ## 信任边界(供应链防线)
 
 1. **项目 hook 先审后跑。** 项目配置里的 hook 按定义哈希(SHA-256,覆盖 command/args/windows 变体/timeout/async/type)记信任账;**未信任的绝不启进程**,启动时打提示,`/hooks` 里可见。
@@ -163,6 +218,8 @@ cli_app(会话起落)         HookRunRecord(全程留痕)
 
 超时、起不来、坏 JSON、schema 不合、未知退出码,每一条都生成 `HookRunRecord`(outcome:ok/blocked/failure/timeout/spawn_failed/schema_error/skipped_*),`/hooks runs` 可查——**不只往 stderr 丢一行**。严禁把超时静默当放行:warn 策略也明报"这次门卫没起来"。`failure_policy: deny` 时,门卫没起来按拦截算(只在能拦的事件上生效)。
 
+每条 v2 运行记录还带 stderr 的明示解码账:事件、退出码、耗时之外,`stderr:` 一行列出解码口径(`utf-8` / `cp936` 这类)与 stderr 首段,超上限带 `…(截断)` 标志。宿主对子进程 stdout/stderr 都是"先认 UTF-8,次选控制台输出页/系统 ANSI 页,命中标注;都解不动就保留原始字节的十六进制摘要"——绝不把中文报错无声替换成替换符。
+
 退出码语义上,"未知退出码不一概当 deny,也不静默当成功":exit 1 = hook 自己坏了(failure,按 policy 走);只有 exit 2(v2)或任意非零(legacy pre_tool)才是真拦截。
 
 ## legacy adapter(旧四类)
@@ -185,7 +242,7 @@ cli_app(会话起落)         HookRunRecord(全程留痕)
 | MCP 工具(mcp__server__tool) | 全支持 |
 | Lua 工具 / C ABI 插件工具 | 全支持 |
 | agent(子代理本身作为工具) | 全支持(拦的是"启动子代理"这个动作) |
-| 子代理内部工具 | 前台子代理:全支持(带 agent_id/agent_type);**后台子代理:不触发**(见"不做") |
+| 子代理内部工具 | 前台子代理:全支持(带 agent_id/agent_type);后台子代理:全支持(只读快照执行,见"后台子代理的 hooks") |
 | hosted web/search(服务端内置,如 Responses 的 web_search_call) | **不走**本地执行链,三事件均不触发 |
 | transport poll(peer 传输) | 不触发(非工具调用) |
 
@@ -195,7 +252,7 @@ cli_app(会话起落)         HookRunRecord(全程留痕)
 
 - **async handler 本期不执行**(解析、展示、校验照常,执行记 skipped_async)。安全点投递(空闲不唤起模型、批次收口后送达、会话结束作废)是后续工作;不执行就不可能拿 async 做权限决定,也不假装支持。
 - **大输出 spill 未实现**:additionalContext 目前直接进上下文(超大时截断标注),落盘+头尾预览后续接。
-- **后台子代理不接 hooks**:dispatcher 的发射契约是"宿主主线程同步调用"(与确认回调同线程);后台子代理在独立线程,接上会有账本竞写。前台子代理(主线程内)全支持。
+- **嵌套后台(后台子代理再派后台子代理)不接 hooks**:那一层的工具表没有主会话的 hooks 通道。主会话直接派的后台子代理全支持(见"后台子代理的 hooks")。
 - **Stop/SubagentStop 续跑最多一次**,续跑轮没有输入监听(ESC 由外层兜底)。
 - **SessionEnd 非必达**:它是 advisory 收尾——正常退出、异常被接住时会发;进程被硬杀(taskkill / kill -9 / 断电)时析构不运行,事件不会发出。协议如实如此,不承诺必达。
 - **第二阶段事件**(PostToolUseFailure、PostToolBatch、StopFailure、Notification、TaskCreated/Completed、ConfigChange、InstructionsLoaded、WorktreeCreate/Remove 等)按真实产品能力补,先不造空壳。
@@ -212,3 +269,7 @@ cli_app(会话起落)         HookRunRecord(全程留痕)
 7. `/hooks runs` 看运行记录;`/hooks disable #N` 后该钩子记 skipped_disabled。
 8. /clear、/resume、/compact、自动压缩各走一遍,钩子(SessionStart matcher=resume/clear/compact、PreCompact manual/auto)各命中各的。
 9. 大 tool input(>32KB)经 stdin 到钩子,原样可达(环境变量路径早撑爆了)。
+10. 中文 prompt("只回复 OK，不调用工具")经 UserPromptSubmit 钩子原样到达:PowerShell 5.1 / pwsh 7 / Python 三支钩子各配一遍,照"编码契约"一节的例程读 stdin,`/hooks runs` 里该条 outcome=ok;故意用 `$input` 直读(不按契约)会看到乱码——那是脚本没按契约读,不是宿主写错。
+11. emoji(如 🎉)、反斜杠路径、带换行的 prompt 各试一遍;钩子 stderr 里打中文,`/hooks runs` 的 stderr 首段不乱码。
+12. 后台子代理(`run_in_background` 或交互会话默认后台)跑一单:任务收尾后等主会话下一轮起/收,屏上出现 `[hooks] 后台子代理 hooks 落账 N 条运行记录`,`/hooks runs` 里 SubagentStart/PreToolUse/PostToolUse/SubagentStop 各有流水,stdin JSON 的 agent_id 是这只后台任务的 id。
+13. 后台 + PreToolUse(deny 版):工具被拦、任务台账里那笔工具调用是 error 且理由说清;ask 版:工具被按"后台无终端,降级为拒"处理,主会话安全点带告警;PermissionRequest(allow 版)配一个 needs_confirm 工具:后台不再直接拒绝,钩子放行即执行,`/hooks runs` 有这一票。

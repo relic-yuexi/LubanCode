@@ -10,14 +10,23 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "api/backend.hpp"
 #include "api/types.hpp"
+#include "hooks/dispatcher.hpp"
+#include "hooks/hash.hpp"
+#include "hooks/loader.hpp"
+#include "hooks/trust.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
@@ -1223,4 +1232,210 @@ TEST_CASE("消息账:中途介入记 steering_message,落在收到它的那个�
     CHECK(events[5].kind == tools::AgentTaskEventKind::AssistantText);
     CHECK(events[5].text == "收尾:按补充意见办");
     CHECK(events[6].kind == tools::AgentTaskEventKind::Completion);
+}
+
+// ---------------------------------------------------------------------------
+// 后台子代理 hooks:只读快照执行 + 记录投递,主会话安全点归并落账。
+// 后台线程不碰 dispatcher 账本;PreToolUse deny 在后台真拦;没有快照时
+// 行为与从前一致(不触发)。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 写一只临时钩子脚本(与 test_hooks_dispatcher.cpp 同款套路),返回可直接
+// 当 handler.command 用的整条命令。
+std::string WriteAgentHookScript(const std::string& name, const std::string& body) {
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / "lubancode-agent-bg-hooks";
+    std::filesystem::create_directories(dir);
+#ifdef _WIN32
+    const std::filesystem::path file = dir / (name + ".cmd");
+    std::ofstream out(file, std::ios::binary | std::ios::trunc);
+    out << "@echo off\r\n" << body << "\r\n";
+    const std::u8string u8 = file.u8string();
+    return "cmd /d /s /c \"\"" + std::string(reinterpret_cast<const char*>(u8.data()), u8.size()) + "\"\"";
+#else
+    const std::filesystem::path file = dir / (name + ".sh");
+    std::ofstream out(file, std::ios::binary | std::ios::trunc);
+    out << "#!/bin/sh\n" << body << "\n";
+    return "sh \"" + file.string() + "\"";
+#endif
+}
+
+// 一枚用户级钩子定义(命令原样给定)。
+hooks::HookDefinition MakeBackgroundHookDef(hooks::HookEvent event, const std::string& command) {
+    hooks::HookDefinition def;
+    def.event = event;
+    def.source_kind = hooks::HookSourceKind::User;
+    def.source_path = "test://user-config";
+    def.source_label = "user test://user-config";
+    def.matcher = "*";
+    def.handler.command = command;
+    def.handler.timeout_ms = 15000;
+    def.handler.failure_policy = "warn";
+    def.definition_hash = hooks::ComputeDefinitionHash(def.handler);
+    def.definition_hash_short = hooks::DefinitionHashShort(def.definition_hash);
+    def.trusted = true;
+    return def;
+}
+
+// 等后台任务进终态(最多 20 秒),返回 false = 超时。
+bool WaitTaskFinished(tools::AgentTool& tool, int spins = 2000) {
+    for (int i = 0; i < spins && tool.HasRunningTasks(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return !tool.HasRunningTasks();
+}
+
+}  // namespace
+
+TEST_CASE("agent 后台 hooks:SubagentStart/工具事件/SubagentStop 真跑,记录经安全点归并") {
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / "lubancode-agent-bg-hooks";
+    std::filesystem::create_directories(dir);
+    const std::string marker =
+        (dir / "bg-hook-marker.txt").string();
+    std::error_code ec;
+    std::filesystem::remove(std::filesystem::path(reinterpret_cast<const char8_t*>(marker.c_str())), ec);
+#ifdef _WIN32
+    const std::string marker_command = "cmd /d /s /c \"echo fired>>\"" + marker + "\"\"";
+#else
+    const std::string marker_command = "sh -c 'echo fired >> " + marker + "'";
+#endif
+
+    // 四只钩子:SubagentStart、PreToolUse、PostToolUse、SubagentStop——都只
+    // 写标记文件,证明进程真起、记录真投。
+    hooks::HookDispatcher dispatcher;
+    {
+        hooks::LoadedHooks loaded;
+        loaded.definitions = {MakeBackgroundHookDef(hooks::HookEvent::SubagentStart, marker_command),
+                              MakeBackgroundHookDef(hooks::HookEvent::PreToolUse, marker_command),
+                              MakeBackgroundHookDef(hooks::HookEvent::PostToolUse, marker_command),
+                              MakeBackgroundHookDef(hooks::HookEvent::SubagentStop, marker_command)};
+        hooks::HookTrustStore trust = hooks::HookTrustStore::Load(std::nullopt).first;
+        hooks::HookContext ctx;
+        ctx.session_id = "test-session";
+        ctx.cwd = "/test";
+        dispatcher.Configure(std::move(loaded), std::move(trust), std::move(ctx));
+    }
+
+    auto detached_backend = std::make_unique<FakeBackend>();
+    detached_backend->scripts = {ToolUseScript("toolu_1", "fake_tool"), TextOnlyScript("后台结论")};
+    tools::ToolRegistry sub_registry;
+    auto* fake_tool_ptr = new FakeTool("fake_tool", tools::Tool::Result{"工具结果", false}, false);
+    sub_registry.Register(std::unique_ptr<FakeTool>(fake_tool_ptr));
+    tools::AgentTool bg_tool(*detached_backend, sub_registry, "/work/dir");
+    bg_tool.SetDetachedBackendFactory([&detached_backend]() {
+        tools::DetachedAgentBackend detached;
+        detached.backend = std::move(detached_backend);
+        return detached;
+    });
+    tools::AgentTool::Hooks hooks;
+    hooks.hook_dispatcher = &dispatcher;
+    bg_tool.SetHooks(std::move(hooks));
+
+    CHECK(bg_tool
+              .execute(nlohmann::json{{"title", "后台钩子回归"}, {"prompt", "查一查"}, {"run_in_background", true}})
+              .content.find("#") != std::string::npos);
+    REQUIRE(WaitTaskFinished(bg_tool));
+
+    // 标记文件被钩子写过——进程真起过。
+    CHECK(std::filesystem::exists(std::filesystem::path(reinterpret_cast<const char8_t*>(marker.c_str()))));
+
+    // 归并前账本是空的(后台线程只投递,不碰账本);主会话安全点收编后,
+    // 四种事件各有一条可查流水。
+    CHECK(dispatcher.RecentRecords(20).empty());
+    const auto adoption = dispatcher.AdoptExternalRecords();
+    std::set<std::string> seen_events;
+    for (const auto& record : adoption.records) {
+        seen_events.insert(record.event_name);
+        CHECK(record.outcome == "ok");
+    }
+    CHECK(seen_events.count("SubagentStart") == 1);
+    CHECK(seen_events.count("PreToolUse") == 1);
+    CHECK(seen_events.count("PostToolUse") == 1);
+    CHECK(seen_events.count("SubagentStop") == 1);
+    CHECK(dispatcher.RecentRecords(20).size() == 4);
+
+    // 工具真执行了(钩子没拦,后台结论照常带回)。
+    CHECK(fake_tool_ptr->call_count == 1);
+}
+
+TEST_CASE("agent 后台 hooks:PreToolUse deny 在后台真拦,工具不执行") {
+    // deny 版 PreToolUse:exit 2,stderr 给理由。
+#ifdef _WIN32
+    const std::string command = WriteAgentHookScript("bg-deny", "echo bg-policy-deny >&2\nexit 2");
+#else
+    const std::string command = WriteAgentHookScript("bg-deny", "echo bg-policy-deny >&2\nexit 2");
+#endif
+
+    hooks::HookDispatcher dispatcher;
+    {
+        hooks::LoadedHooks loaded;
+        loaded.definitions = {MakeBackgroundHookDef(hooks::HookEvent::PreToolUse, command)};
+        hooks::HookTrustStore trust = hooks::HookTrustStore::Load(std::nullopt).first;
+        hooks::HookContext ctx;
+        ctx.session_id = "test-session";
+        ctx.cwd = "/test";
+        dispatcher.Configure(std::move(loaded), std::move(trust), std::move(ctx));
+    }
+
+    auto detached_backend = std::make_unique<FakeBackend>();
+    detached_backend->scripts = {ToolUseScript("toolu_1", "fake_tool"), TextOnlyScript("工具被拦,结论改为报告")};
+    tools::ToolRegistry sub_registry;
+    auto* fake_tool_ptr = new FakeTool("fake_tool", tools::Tool::Result{"不该执行到", false}, false);
+    sub_registry.Register(std::unique_ptr<FakeTool>(fake_tool_ptr));
+    tools::AgentTool bg_tool(*detached_backend, sub_registry, "/work/dir");
+    bg_tool.SetDetachedBackendFactory([&detached_backend]() {
+        tools::DetachedAgentBackend detached;
+        detached.backend = std::move(detached_backend);
+        return detached;
+    });
+    tools::AgentTool::Hooks hooks;
+    hooks.hook_dispatcher = &dispatcher;
+    bg_tool.SetHooks(std::move(hooks));
+
+    CHECK_FALSE(
+        bg_tool.execute(nlohmann::json{{"title", "后台 deny 回归"}, {"prompt", "查一查"}, {"run_in_background", true}})
+            .is_error);
+    REQUIRE(WaitTaskFinished(bg_tool));
+
+    // 工具被拦:一次都没执行,任务台账里那笔工具调用是 error,理由说清。
+    CHECK(fake_tool_ptr->call_count == 0);
+    const auto summaries = bg_tool.TaskSummaries();
+    REQUIRE(summaries.size() == 1);
+    const auto detail = bg_tool.TaskDetail(summaries[0].id);
+    REQUIRE(detail.has_value());
+    REQUIRE(detail->tool_calls.size() == 1);
+    CHECK(detail->tool_calls[0].is_error);
+    CHECK(detail->tool_calls[0].result.find("被 PreToolUse 钩子拦截") != std::string::npos);
+
+    // 钩子的拦截记录在案(经安全点归并)。
+    const auto adoption = dispatcher.AdoptExternalRecords();
+    bool saw_blocked = false;
+    for (const auto& record : adoption.records) {
+        if (record.event_name == "PreToolUse" && record.outcome == "blocked") {
+            saw_blocked = true;
+        }
+    }
+    CHECK(saw_blocked);
+}
+
+TEST_CASE("agent 后台 hooks:没配 hooks 时后台路径不触发,行为与从前一致") {
+    auto detached_backend = std::make_unique<FakeBackend>();
+    detached_backend->scripts = {ToolUseScript("toolu_1", "fake_tool"), TextOnlyScript("无钩子结论")};
+    tools::ToolRegistry sub_registry;
+    auto* fake_tool_ptr = new FakeTool("fake_tool", tools::Tool::Result{"工具结果", false}, false);
+    sub_registry.Register(std::unique_ptr<FakeTool>(fake_tool_ptr));
+    tools::AgentTool bg_tool(*detached_backend, sub_registry, "/work/dir");
+    bg_tool.SetDetachedBackendFactory([&detached_backend]() {
+        tools::DetachedAgentBackend detached;
+        detached.backend = std::move(detached_backend);
+        return detached;
+    });
+    // 不 SetHooks(hook_dispatcher 为空)——后台照常跑完,无任何 hooks 参与。
+
+    CHECK_FALSE(bg_tool
+                    .execute(nlohmann::json{{"title", "无钩子后台"}, {"prompt", "查"}, {"run_in_background", true}})
+                    .is_error);
+    REQUIRE(WaitTaskFinished(bg_tool));
+    CHECK(fake_tool_ptr->call_count == 1);
 }

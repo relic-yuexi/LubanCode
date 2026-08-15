@@ -335,9 +335,10 @@ ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, c
 }
 
 // RunProcessWithStdin 的公共骨架:与上面 RunProcess(wstring) 同构,多一条
-// stdin 管道与一个写线程。写线程阻塞在 WriteFile 上而子进程不读时,靠
-// "超时杀树 → 子进程读端关闭 → WriteFile 以 ERROR_BROKEN_PIPE 失败"收场;
-// 兜底再 CancelSynchronousIo 一把,绝不吊死。
+// stdin 管道、一个写线程,并且 stdout/stderr 各走一条管道分开捕获(章法见
+// process.hpp 的 RunProcessWithStdin 注释)。写线程阻塞在 WriteFile 上而子
+// 进程不读时,靠"超时杀树 → 子进程读端关闭 → WriteFile 以 ERROR_BROKEN_PIPE
+// 失败"收场;兜底再 CancelSynchronousIo 一把,绝不吊死。
 static ProcessResult RunProcessWithStdinImpl(const std::wstring& cmdline, const std::string& stdin_data,
                                              int timeout_ms, const EnvPairs& extra_env,
                                              std::size_t max_output_bytes) {
@@ -349,17 +350,31 @@ static ProcessResult RunProcessWithStdinImpl(const std::wstring& cmdline, const 
     sa.bInheritHandle = TRUE;
     sa.lpSecurityDescriptor = nullptr;
 
-    HANDLE read_pipe = nullptr;
-    HANDLE write_pipe = nullptr;
-    if (!CreatePipe(&read_pipe, &write_pipe, &sa, 0)) {
+    // 一条读端句柄 + "是否已关"标记:读线程与收尾路径都要关它,谁先到谁关,
+    // 另一头 CloseHandle(nullptr) 是空操作,不会双关。
+    const auto make_pipe = [&](HANDLE& read_out, HANDLE& write_out) -> bool {
+        return CreatePipe(&read_out, &write_out, &sa, 0) != FALSE;
+    };
+
+    HANDLE out_read = nullptr;
+    HANDLE out_write = nullptr;
+    HANDLE err_read = nullptr;
+    HANDLE err_write = nullptr;
+    if (!make_pipe(out_read, out_write) || !make_pipe(err_read, err_write)) {
         result.spawn_failed = true;
         result.spawn_error = "创建管道失败(错误码 " + std::to_string(GetLastError()) + ")";
+        for (HANDLE h : {out_read, out_write, err_read, err_write}) {
+            if (h != nullptr) {
+                CloseHandle(h);
+            }
+        }
         RestoreEnv(backups);
         return result;
     }
     // 父进程这边留着的读端不能被子进程继承,不然子进程退出后管道写端还有一份
     // 在父进程手里,ReadFile 会一直等不到 EOF。
-    SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(out_read, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(err_read, HANDLE_FLAG_INHERIT, 0);
 
     // stdin:读端给子进程继承,写端留在父进程(不继承),写完就关。
     HANDLE stdin_read = nullptr;
@@ -367,8 +382,9 @@ static ProcessResult RunProcessWithStdinImpl(const std::wstring& cmdline, const 
     if (!CreatePipe(&stdin_read, &stdin_write, &sa, 0)) {
         result.spawn_failed = true;
         result.spawn_error = "创建 stdin 管道失败(错误码 " + std::to_string(GetLastError()) + ")";
-        CloseHandle(read_pipe);
-        CloseHandle(write_pipe);
+        for (HANDLE h : {out_read, out_write, err_read, err_write}) {
+            CloseHandle(h);
+        }
         RestoreEnv(backups);
         return result;
     }
@@ -377,8 +393,8 @@ static ProcessResult RunProcessWithStdinImpl(const std::wstring& cmdline, const 
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdOutput = write_pipe;
-    si.hStdError = write_pipe;
+    si.hStdOutput = out_write;
+    si.hStdError = err_write;
     si.hStdInput = stdin_read;
 
     PROCESS_INFORMATION pi{};
@@ -393,11 +409,13 @@ static ProcessResult RunProcessWithStdinImpl(const std::wstring& cmdline, const 
     RestoreEnv(backups);
 
     // 子进程已经拿到了自己那份继承来的句柄,这里可以关了。
-    CloseHandle(write_pipe);
+    CloseHandle(out_write);
+    CloseHandle(err_write);
     CloseHandle(stdin_read);
 
     if (!ok) {
-        CloseHandle(read_pipe);
+        CloseHandle(out_read);
+        CloseHandle(err_read);
         CloseHandle(stdin_write);
         result.spawn_failed = true;
         result.spawn_error = "启动子进程失败(错误码 " + std::to_string(GetLastError()) + ")";
@@ -441,27 +459,35 @@ static ProcessResult RunProcessWithStdinImpl(const std::wstring& cmdline, const 
         stdin_done.store(true);
     });
 
-    std::string output;
+    // 两条读线程:stdout 与 stderr 各自攒各自的原始字节。超限判定按两路
+    // 合计——一路刷屏也算刷屏,照旧杀树。
+    std::atomic<std::size_t> captured_total{0};
     std::atomic<bool> output_over_limit{false};
-    std::atomic<bool> reader_stop{false};
-    std::atomic<bool> reader_done{false};
-    std::thread reader([&] {
+    const auto stream_reader = [&](HANDLE read_end, std::string* sink, std::atomic<bool>* done) {
         char buf[4096];
         DWORD n = 0;
-        while (!reader_stop.load() && ReadFile(read_pipe, buf, sizeof(buf), &n, nullptr) && n > 0) {
-            if (output.size() < max_output_bytes) {
-                const std::size_t room = max_output_bytes - output.size();
-                output.append(buf, std::min<std::size_t>(n, room));
-                if (output.size() >= max_output_bytes && !output_over_limit.load()) {
+        while (ReadFile(read_end, buf, sizeof(buf), &n, nullptr) && n > 0) {
+            if (!output_over_limit.load()) {
+                sink->append(buf, n);
+                const std::size_t total = captured_total.fetch_add(n) + n;
+                if (total >= max_output_bytes) {
                     output_over_limit.store(true);
                     if (overflow_event != nullptr) {
                         SetEvent(overflow_event);
                     }
                 }
             }
+            // 超限之后继续读但直接丢弃——不读的话管道缓冲区一满,子进程会
+            // 卡在写上死不掉;反正马上就要被杀,读空到 EOF 为止。
         }
-        reader_done.store(true);
-    });
+        done->store(true);
+    };
+    std::string stdout_bytes;
+    std::string stderr_bytes;
+    std::atomic<bool> out_done{false};
+    std::atomic<bool> err_done{false};
+    std::thread out_reader([&] { stream_reader(out_read, &stdout_bytes, &out_done); });
+    std::thread err_reader([&] { stream_reader(err_read, &stderr_bytes, &err_done); });
 
     const DWORD wait_ms = timeout_ms > 0 ? static_cast<DWORD>(timeout_ms) : INFINITE;
     HANDLE wait_handles[2] = {pi.hProcess, overflow_event};
@@ -481,24 +507,22 @@ static ProcessResult RunProcessWithStdinImpl(const std::wstring& cmdline, const 
     }
 
     // 后代若继承了管道写端还活着,ReadFile 永远等不到 EOF——收掉 Job 连带
-    // 杀光可能残留的后代,写端才会全关、读线程才能收尾。
-    if (job != nullptr) {
-        CloseHandle(job);
-        job = nullptr;
-    }
-
-    const auto reader_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (!reader_done.load() && std::chrono::steady_clock::now() < reader_deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    if (!reader_done.load()) {
-        reader_stop.store(true);
-        while (!reader_done.load()) {
+    // 杀光可能残留的后代,写端才会全关、读线程才能收尾。兜底(Job 创建/绑定
+    // 失败过、杀不到后代):限时等读线程收尾,等不到就取消挂起的 ReadFile,
+    // 绝不无限期阻塞。
+    const auto join_reader = [](std::thread& reader, std::atomic<bool>& done) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!done.load() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        while (!done.load()) {
             CancelSynchronousIo(reader.native_handle());
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
-    }
-    reader.join();
+        reader.join();
+    };
+    join_reader(out_reader, out_done);
+    join_reader(err_reader, err_done);
 
     // stdin 写线程的收尾:子进程死后写端断裂,WriteFile 自然失败退出;万一
     // 还有谁挂着句柄不退,CancelSynchronousIo 取消挂起的写。
@@ -521,13 +545,16 @@ static ProcessResult RunProcessWithStdinImpl(const std::wstring& cmdline, const 
     DWORD exit_code = 0;
     GetExitCodeProcess(pi.hProcess, &exit_code);
     result.exit_code = exit_code;
-    result.output = std::move(output);
+    result.output = stdout_bytes + stderr_bytes;  // 合并账(stdout 在前,保序可用)
+    result.stdout_bytes = std::move(stdout_bytes);
+    result.stderr_bytes = std::move(stderr_bytes);
     result.output_truncated = output_over_limit.load();
 
     if (overflow_event != nullptr) {
         CloseHandle(overflow_event);
     }
-    CloseHandle(read_pipe);
+    CloseHandle(out_read);
+    CloseHandle(err_read);
     CloseHandle(pi.hProcess);
 
     return result;
@@ -547,10 +574,11 @@ ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const st
 
 ProcessResult RunShellCommandWithStdin(const std::string& command_utf8, const std::string& stdin_data,
                                        int timeout_ms, const EnvPairs& extra_env, std::size_t max_output_bytes) {
-    ProcessResult result =
-        RunProcessWithStdinImpl(BuildCmdCommandLine(command_utf8), stdin_data, timeout_ms, extra_env, max_output_bytes);
-    result.output = AcpBytesToUtf8(result.output);
-    return result;
+    // 不再做整段 AcpBytesToUtf8:stdout/stderr 已分开捕获为原始字节,cmd.exe
+    // 的 ANSI 输出由 hooks 解码层"先认 UTF-8、次选明示代码页"处理,命中哪
+    // 一档都有标注,不无声替换。
+    return RunProcessWithStdinImpl(BuildCmdCommandLine(command_utf8), stdin_data, timeout_ms, extra_env,
+                                   max_output_bytes);
 }
 
 // ---------------------------------------------------------------------------

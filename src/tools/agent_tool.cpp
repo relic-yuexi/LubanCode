@@ -680,11 +680,21 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
     system_prompt = agent::WithModelInstructions(system_prompt, detached.model_instructions);
     system_prompt = agent::WithSoul(system_prompt, detached.soul);
     ToolRegistry* registry = detached_registry != nullptr ? detached_registry.get() : &task_registry;
+    // 后台 hooks 会话:主线程里造好(拷一份只读策略快照,含信任/禁用账)再
+    // 带进线程——后台线程不碰 dispatcher 账本与定义表,记录只投递,主会话
+    // 安全点归并(hooks/detached.hpp 的线程规矩)。没配 hooks 时是空会话,
+    // 后台路径整个跳过,行为与从前一致。
+    std::shared_ptr<lubancode::hooks::DetachedHookSession> background_hooks;
+    if (hooks_.hook_dispatcher != nullptr && !hooks_.hook_dispatcher->Empty()) {
+        background_hooks = std::make_shared<lubancode::hooks::DetachedHookSession>(
+            hooks_.hook_dispatcher, hooks_.hook_dispatcher->context());
+    }
     task_threads_.emplace_back([this, task, registry, prompt, agent_type, max_steps_per_turn,
                                 detached = std::move(detached),
                                 system_prompt = std::move(system_prompt),
                                 detached_registry = std::move(detached_registry),
-                                room = std::move(room)]() mutable {
+                                room = std::move(room),
+                                background_hooks]() mutable {
         (void)detached_registry;  // 让独立工具表活到线程收尾
         // isolation=worktree:线程里包表、压隔离范围,收工清理。包装表按
         // 引用持源表工具,声明在源表之后,析构反序先亡,引用不悬垂。
@@ -701,8 +711,9 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
         DetachedRequestBackend backend(detached);
         Result result;
         try {
-            result = RunTask(backend, effective_registry, prompt, agent_type, max_steps_per_turn, nullptr, task, &detached,
-                             &system_prompt, scope_storage.has_value() ? &*scope_storage : nullptr);
+            result = RunTask(backend, effective_registry, prompt, agent_type, max_steps_per_turn, nullptr, task,
+                             &detached, &system_prompt, scope_storage.has_value() ? &*scope_storage : nullptr,
+                             background_hooks);
         } catch (const std::exception& error) {
             result = {"子代理执行失败: " + std::string(error.what()), true};
         } catch (...) {
@@ -742,7 +753,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                                 const std::shared_ptr<TaskRecord>& task,
                                 const DetachedAgentBackend* detached,
                                 const std::string* prepared_system_prompt,
-                                const IsolationScope* isolation_scope) {
+                                const IsolationScope* isolation_scope,
+                                const std::shared_ptr<lubancode::hooks::DetachedHookSession>& background_hooks) {
     // tool_search:延迟工具索引段按"此刻的 loaded 集合"现算(provider 里
     // 闭包着 main.cpp 那份 shared_ptr),拼在子代理系统提示末尾。子代理
     // 运行中途自己 tool_search 挂载了新工具,这段索引不会跟着刷新(系统
@@ -929,6 +941,29 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         };
         if (foreground_hooks != nullptr) {
             sub_callbacks.on_tool_confirm = foreground_hooks->on_tool_confirm;
+        } else if (background_hooks != nullptr && !background_hooks->Empty()) {
+            // PermissionRequest:后台没有终端可问,钩子是唯一的策略口。deny 拒
+            // (告警随行);allow 替人工放行;不表态维持后台硬边界——需要确认
+            // 的操作一律拒绝,跟没有 hooks 时的行为一致,但现在钩子看得见这
+            // 一票,审计账不断。
+            const std::shared_ptr<lubancode::hooks::DetachedHookSession> hooks_session = background_hooks;
+            sub_callbacks.on_tool_confirm = [hooks_session](const std::string& name, const nlohmann::json& input) {
+                lubancode::hooks::HookPayload payload;
+                payload.event = lubancode::hooks::HookEvent::PermissionRequest;
+                payload.fields["tool_name"] = name;
+                payload.fields["tool_input"] = input.is_null() ? nlohmann::json::object() : input;
+                payload.match_value = name;
+                const auto merged = hooks_session->Emit(lubancode::hooks::HookEvent::PermissionRequest, payload);
+                if (merged.permission == lubancode::hooks::HookEventResult::Permission::Allow) {
+                    return true;
+                }
+                if (merged.permission == lubancode::hooks::HookEventResult::Permission::Deny) {
+                    hooks_session->PostWarning(
+                        "后台子代理 #" + hooks_session->context().agent_id.value_or(std::string("?")) +
+                        " 的 PermissionRequest 钩子拒绝执行 " + name + ": " + merged.permission_reason);
+                }
+                return false;
+            };
         } else {
             sub_callbacks.on_tool_confirm = [](const std::string&, const nlohmann::json&) { return false; };
         }
@@ -955,6 +990,62 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             sub_callbacks.on_permission_request = foreground_hooks->on_permission_request;
             sub_callbacks.on_tool_phase = foreground_hooks->on_tool_phase;
             sub_callbacks.on_post_tool_use_hook = foreground_hooks->on_post_tool_use_hook;
+        } else if (background_hooks != nullptr && !background_hooks->Empty()) {
+            // 后台 hooks:同步决策用只读策略快照真跑,不静默绕过。
+            //   PreToolUse:deny 拒、allow 放(带 updatedInput);ask 在后台
+            //   没有终端可问——明示降级为拒,PostWarning 让主会话报信。
+            //   PermissionRequest 不在 on_permission_request 里发(RunOneTool
+            //   只在确认回调前叫它,后台那条路走 on_tool_confirm),这里只接
+            //   PreToolUse/PostToolUse 两个口。
+            const std::shared_ptr<lubancode::hooks::DetachedHookSession> hooks_session = background_hooks;
+            sub_callbacks.on_pre_tool_use_hook =
+                [hooks_session](const std::string& name, const nlohmann::json& input) {
+                    lubancode::hooks::HookPayload payload;
+                    payload.event = lubancode::hooks::HookEvent::PreToolUse;
+                    payload.fields["tool_name"] = name;
+                    payload.fields["tool_input"] = input.is_null() ? nlohmann::json::object() : input;
+                    payload.match_value = name;
+                    const auto merged = hooks_session->Emit(lubancode::hooks::HookEvent::PreToolUse, payload);
+
+                    lubancode::agent::ToolHookDecision decision;
+                    switch (merged.permission) {
+                        case lubancode::hooks::HookEventResult::Permission::Deny:
+                            decision.decision = lubancode::agent::ToolHookDecision::Decision::Deny;
+                            decision.reason = "被 PreToolUse 钩子拦截: " + merged.permission_reason;
+                            break;
+                        case lubancode::hooks::HookEventResult::Permission::Ask:
+                            // 后台无终端,ask 降级为拒——明说,不装问过了。
+                            decision.decision = lubancode::agent::ToolHookDecision::Decision::Deny;
+                            decision.reason = "后台任务没有终端可问,PreToolUse 钩子的 ask 已降级为拒绝: " +
+                                              merged.permission_reason;
+                            hooks_session->PostWarning("后台子代理 #" +
+                                                       hooks_session->context().agent_id.value_or(std::string("?")) +
+                                                       " 的 PreToolUse 钩子表态 ask,后台无终端,已按拒绝降级(" +
+                                                       name + ")");
+                            break;
+                        case lubancode::hooks::HookEventResult::Permission::Allow:
+                            decision.decision = lubancode::agent::ToolHookDecision::Decision::Allow;
+                            decision.reason = merged.permission_reason;
+                            break;
+                        case lubancode::hooks::HookEventResult::Permission::None:
+                            break;
+                    }
+                    decision.updated_input = merged.updated_input;
+                    decision.additional_context = merged.additional_context;
+                    return decision;
+                };
+            sub_callbacks.on_post_tool_use_hook =
+                [hooks_session](const std::string& name, const nlohmann::json& input, const Result& result) {
+                    lubancode::hooks::HookPayload payload;
+                    payload.event = lubancode::hooks::HookEvent::PostToolUse;
+                    payload.fields["tool_name"] = name;
+                    payload.fields["tool_input"] = input.is_null() ? nlohmann::json::object() : input;
+                    payload.fields["tool_response"] = result.content;
+                    payload.fields["tool_response_text"] = result.content;
+                    payload.fields["tool_succeeded"] = !result.is_error;
+                    payload.match_value = name;
+                    return hooks_session->Emit(lubancode::hooks::HookEvent::PostToolUse, payload).additional_context;
+                };
         }
     } else if (foreground_hooks != nullptr) {
         // 没进台账的旧路径(测试直调 RunTask 等边缘):沿用旧回调。
@@ -1001,8 +1092,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     // hooks 第四五步:SubagentStart + 上下文切换。前台子代理在宿主主线程
     // 里同步跑,dispatcher 上下文换成这只子代理的(agent_id/agent_type),
     // 转发过来的工具事件(PreToolUse 等)发的 stdin JSON 就带子代理身份;
-    // 跑完还原。后台子代理 hooks 为空(线程模型见 dispatcher.hpp 注释),
-    // 这一段整个跳过。
+    // 跑完还原。后台子代理走只读快照会话(background_hooks):线程里真跑
+    // 钩子、记录只投递,上下文是会话自己的,不碰 dispatcher。
     lubancode::hooks::HookDispatcher* sub_hook_dispatcher =
         foreground_hooks != nullptr ? foreground_hooks->hook_dispatcher : nullptr;
     std::optional<lubancode::hooks::HookContext> parent_hook_context;
@@ -1025,6 +1116,24 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             sub_hook_dispatcher->EmitWith(lubancode::hooks::HookEvent::SubagentStart, start, sub_context);
         }
         sub_hook_dispatcher->UpdateContext(std::move(sub_context));
+    }
+    // 后台子代理身份:写进快照会话自己的上下文(须在第一次 Emit 之前),
+    // turn_id 换成后台任务自己的——主会话的轮次号对不上号。
+    if (background_hooks != nullptr && !background_hooks->Empty()) {
+        lubancode::hooks::HookContext sub_context = background_hooks->context();
+        sub_context.agent_id = std::to_string(task != nullptr ? task->snapshot.id : 0);
+        sub_context.agent_type = agent_type;
+        sub_context.parent_agent_id = std::nullopt;  // 后台任务由主代理派出
+        sub_context.turn_id = "bgtask_" + sub_context.agent_id.value_or(std::string("0"));
+        background_hooks->context() = sub_context;
+        if (background_hooks->HasHandlersFor(lubancode::hooks::HookEvent::SubagentStart)) {
+            lubancode::hooks::HookPayload start;
+            start.event = lubancode::hooks::HookEvent::SubagentStart;
+            start.fields["agent_id"] = *sub_context.agent_id;
+            start.fields["agent_type"] = agent_type;
+            start.fields["parent_agent_id"] = nlohmann::json();
+            background_hooks->Emit(lubancode::hooks::HookEvent::SubagentStart, start);
+        }
     }
     // 上下文还原的 RAII 兜底:正常路径在 SubagentStop 之后手工还原;万一
     // 中途异常穿出,也不能把子代理身份留在主会话的钩子上下文里。
@@ -1128,9 +1237,15 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     // 钩子 continue=false = "再收口一轮":续跑理由带标识入账(不装用户
     // 输入),stop_hook_active 防咬尾,最多续一次;取消/撞预算/续跑出错
     // 就如实停。上下文还原交给 hook_context_restore 析构(含异常路径)。
-    if (sub_hook_dispatcher != nullptr && !sub_hook_dispatcher->Empty() &&
-        sub_hook_dispatcher->HasHandlersFor(lubancode::hooks::HookEvent::SubagentStop) && !run_cancelled) {
-        lubancode::hooks::HookContext sub_context = sub_hook_dispatcher->context();
+    // 后台路径同款语义,发射换成快照会话(记录照投递)。
+    const bool stop_hooks_on_foreground = sub_hook_dispatcher != nullptr && !sub_hook_dispatcher->Empty() &&
+                                          sub_hook_dispatcher->HasHandlersFor(lubancode::hooks::HookEvent::SubagentStop);
+    const bool stop_hooks_on_background =
+        background_hooks != nullptr && !background_hooks->Empty() &&
+        background_hooks->HasHandlersFor(lubancode::hooks::HookEvent::SubagentStop);
+    if ((stop_hooks_on_foreground || stop_hooks_on_background) && !run_cancelled) {
+        lubancode::hooks::HookContext sub_context =
+            stop_hooks_on_foreground ? sub_hook_dispatcher->context() : background_hooks->context();
         bool stop_hook_active = false;
         for (int round = 0; round < 2; ++round) {
             std::string last_text = ExtractLastText(sub_loop);
@@ -1141,8 +1256,10 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             stop.fields["agent_transcript_path"] = std::string();  // 子代理历史不落独立文件,如实留空
             stop.fields["last_assistant_message"] = last_text;
             stop.fields["stop_hook_active"] = stop_hook_active;
-            const auto merged =
-                sub_hook_dispatcher->EmitWith(lubancode::hooks::HookEvent::SubagentStop, stop, sub_context);
+            const auto merged = stop_hooks_on_foreground
+                                    ? sub_hook_dispatcher->EmitWith(lubancode::hooks::HookEvent::SubagentStop, stop,
+                                                                    sub_context)
+                                    : background_hooks->Emit(lubancode::hooks::HookEvent::SubagentStop, stop);
             if (!merged.blocked || stop_hook_active) {
                 break;  // 没人要求续,或已经续过一次(不许无限续)
             }

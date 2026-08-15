@@ -2,6 +2,12 @@
 
 #include <algorithm>
 
+#include "platform/text_encoding.hpp"
+
+#ifdef _WIN32
+#include "platform/paths.hpp"  // ChildStreamCodePageCandidates / CodePageBytesToUtf8
+#endif
+
 namespace lubancode::hooks {
 
 namespace {
@@ -258,6 +264,67 @@ SingleOutcome JudgeSingleRun(HookEvent event, unsigned long exit_code, bool time
     }
     (void)event;
     return out;
+}
+
+// 原始字节摘要:前 max_bytes 的十六进制,拿不准编码时的兜底——不替换成
+// U+FFFD,留人能对出来的原始证据。
+namespace {
+
+std::string RawByteDigest(const std::string& bytes, std::size_t max_bytes) {
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    std::string out;
+    const std::size_t shown = std::min(bytes.size(), max_bytes);
+    out.reserve(shown * 3);
+    for (std::size_t i = 0; i < shown; ++i) {
+        const unsigned char byte = static_cast<unsigned char>(bytes[i]);
+        if (i > 0) {
+            out += ' ';
+        }
+        out += kHex[byte >> 4];
+        out += kHex[byte & 0x0F];
+    }
+    if (bytes.size() > shown) {
+        out += " …";
+    }
+    return out;
+}
+
+}  // namespace
+
+DecodedHookText DecodeHookStreamBytes(const std::string& bytes, const std::vector<unsigned int>& code_pages) {
+    DecodedHookText out;
+    if (bytes.empty()) {
+        out.encoding = "utf-8";  // 空流无编码可言,按契约口径报
+        return out;
+    }
+    if (platform::IsValidUtf8(bytes)) {
+        out.text = bytes;
+        out.encoding = "utf-8";
+        return out;
+    }
+#ifdef _WIN32
+    for (const unsigned int cp : code_pages) {
+        if (const std::optional<std::string> converted = platform::CodePageBytesToUtf8(cp, bytes)) {
+            out.text = *converted;
+            out.encoding = "cp" + std::to_string(cp);
+            return out;
+        }
+    }
+#else
+    (void)code_pages;  // POSIX 不做代码页次选:非 UTF-8 即摘要,不猜
+#endif
+    out.text = RawByteDigest(bytes, 64);
+    out.encoding = "unknown";
+    out.from_raw_digest = true;
+    return out;
+}
+
+DecodedHookText DecodeHookStreamBytes(const std::string& bytes) {
+#ifdef _WIN32
+    return DecodeHookStreamBytes(bytes, platform::ChildStreamCodePageCandidates());
+#else
+    return DecodeHookStreamBytes(bytes, {});
+#endif
 }
 
 std::vector<std::pair<std::string, std::string>> BuildLegacyToolEnv(const std::string& tool_name,

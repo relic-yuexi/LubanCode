@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace lubancode::platform {
 
@@ -57,6 +58,17 @@ std::string WideToUtf8(const std::wstring& wide);
 // 转换只对"命令经 cmd.exe 跑"的路径需要——具体原因见 run_command.cpp 里
 // 原来那段注释(chcp 对重定向管道不起作用,实测过)。
 std::string AcpBytesToUtf8(const std::string& acp_bytes);
+
+// 按给定代码页把字节解成 UTF-8;字节在该代码页里解不动(非法序列)返回
+// std::nullopt。与 AcpBytesToUtf8 的差别:那份"尽力而为、失败原样退回",
+// 这份要明确成败——hooks 子进程流的解码拿它当"这一页解不解得动"的判定,
+// 不许闷头猜。
+std::optional<std::string> CodePageBytesToUtf8(unsigned int code_page, const std::string& bytes);
+
+// hooks 子进程 stdout/stderr 的候选代码页:控制台输出页在前(PowerShell
+// 5.1 重定向 stderr 走的就是它),系统 ANSI 页在后(cmd.exe 路径)。解码
+// 顺序仍是"先认 UTF-8",这两页只是明示的次选,命中即标注。
+std::vector<unsigned int> ChildStreamCodePageCandidates();
 
 #endif
 

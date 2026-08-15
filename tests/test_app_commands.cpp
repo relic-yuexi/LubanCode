@@ -7,9 +7,11 @@
 #include <expected>
 #include <filesystem>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -19,6 +21,7 @@
 #include "app/commands/command_flow.hpp"
 #include "app/commands/peer_commands.hpp"
 #include "app/commands/session_commands.hpp"
+#include "app/commands/settings_commands.hpp"
 #include "cli/theme.hpp"
 #include "tools/registry.hpp"
 
@@ -45,6 +48,84 @@ std::filesystem::path TempDir(const std::string& tag) {
 }  // namespace
 
 using namespace lubancode::app;
+
+// /config 的 hooks 摘要:旧四枚数组之外,schema 2 events 也得按事件名数出
+// 来,user/project 两层分开——数量与启动横幅、/hooks 的"已装载 N 条"对账
+// (schema 2 ×N 的 N = 装载后的定义数,即全部 handler 数)。
+TEST_CASE("/config hooks 摘要:schema 2 按事件名计数,分 user/project 两层") {
+    lubancode::config::ConfigResult result;
+    result.global_config_file_path = "C:/home/user/.lubancode/config.json";
+    result.project_config_file_path = "C:/work/proj/.lubancode/config.json";
+
+    auto group = [](const std::string& source_path, std::size_t handler_count) {
+        lubancode::config::HookMatcherGroupConfig g;
+        g.source_path = source_path;
+        for (std::size_t i = 0; i < handler_count; ++i) {
+            lubancode::config::HookHandlerConfig handler;
+            handler.command = "echo hook" + std::to_string(i);
+            g.hooks.push_back(handler);
+        }
+        return g;
+    };
+    // user 层:SessionStart×1、UserPromptSubmit×1;project 层:PreToolUse×1。
+    result.config.hooks.events[lubancode::hooks::HookEvent::SessionStart].push_back(
+        group(*result.global_config_file_path, 1));
+    result.config.hooks.events[lubancode::hooks::HookEvent::UserPromptSubmit].push_back(
+        group(*result.global_config_file_path, 1));
+    result.config.hooks.events[lubancode::hooks::HookEvent::PreToolUse].push_back(
+        group(*result.project_config_file_path, 1));
+
+    std::ostringstream captured;
+    std::streambuf* const old_buf = std::cout.rdbuf(captured.rdbuf());
+    PrintConfigDiagnostics(result, std::nullopt, nullptr, nullptr);
+    std::cout.rdbuf(old_buf);
+
+    const std::string out = captured.str();
+    const std::size_t hooks_line = out.find("hooks              = ");
+    REQUIRE(hooks_line != std::string::npos);
+    const std::string tail = out.substr(hooks_line, out.find('\n', hooks_line) - hooks_line);
+    CHECK(tail.find("schema 2 ×3 (user×2, project×1)") != std::string::npos);
+    CHECK(tail.find("SessionStart×1") != std::string::npos);
+    CHECK(tail.find("UserPromptSubmit×1") != std::string::npos);
+    CHECK(tail.find("PreToolUse×1") != std::string::npos);
+}
+
+TEST_CASE("/config hooks 摘要:只配旧四类时列 legacy,不冒出 schema 2 的 ×0") {
+    lubancode::config::ConfigResult result;
+    result.global_config_file_path = "C:/home/user/.lubancode/config.json";
+    lubancode::config::HookEntry legacy_entry;
+    legacy_entry.command = "echo old";
+    legacy_entry.source_path = *result.global_config_file_path;
+    result.config.hooks.pre_tool.push_back(legacy_entry);
+
+    std::ostringstream captured;
+    std::streambuf* const old_buf = std::cout.rdbuf(captured.rdbuf());
+    PrintConfigDiagnostics(result, std::nullopt, nullptr, nullptr);
+    std::cout.rdbuf(old_buf);
+
+    const std::string out = captured.str();
+    const std::size_t hooks_line = out.find("hooks              = ");
+    REQUIRE(hooks_line != std::string::npos);
+    const std::string tail = out.substr(hooks_line, out.find('\n', hooks_line) - hooks_line);
+    CHECK(tail.find("legacy pre_tool×1") != std::string::npos);
+    CHECK(tail.find("schema 2") == std::string::npos);
+}
+
+TEST_CASE("/config hooks 摘要:什么都没配时仍说未配置") {
+    lubancode::config::ConfigResult result;
+    std::ostringstream captured;
+    std::streambuf* const old_buf = std::cout.rdbuf(captured.rdbuf());
+    PrintConfigDiagnostics(result, std::nullopt, nullptr, nullptr);
+    std::cout.rdbuf(old_buf);
+
+    const std::string out = captured.str();
+    const std::size_t hooks_line = out.find("hooks              = ");
+    REQUIRE(hooks_line != std::string::npos);
+    const std::string tail = out.substr(hooks_line, out.find('\n', hooks_line) - hooks_line);
+    CHECK(tail.find("schema 2") == std::string::npos);
+    CHECK(tail.find("legacy") == std::string::npos);
+    CHECK(tail.find("未配置") != std::string::npos);
+}
 
 TEST_CASE("/title 状态账:建档前挂起,建档后补写,再设当场落事件行") {
     const auto dir = TempDir("title");

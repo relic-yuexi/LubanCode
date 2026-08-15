@@ -9,6 +9,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <wincon.h>  // GetConsoleOutputCP(LEAN_AND_MEAN 会裁掉它)
 
 namespace lubancode::platform {
 
@@ -103,6 +104,36 @@ std::string AcpBytesToUtf8(const std::string& acp_bytes) {
     std::wstring wide(static_cast<std::size_t>(wlen), L'\0');
     MultiByteToWideChar(CP_ACP, 0, acp_bytes.data(), static_cast<int>(acp_bytes.size()), wide.data(), wlen);
     return WideToUtf8(wide);
+}
+
+std::optional<std::string> CodePageBytesToUtf8(unsigned int code_page, const std::string& bytes) {
+    if (bytes.empty()) {
+        return std::string();
+    }
+    // MB_ERR_INVALID_CHARS:字节序列在该代码页里非法就报失败,不做"尽量解、
+    // 坏字节顶个问号"的静默替换——调用的 hooks 解码层要拿成败当判定。
+    const int wlen = MultiByteToWideChar(code_page, MB_ERR_INVALID_CHARS, bytes.data(),
+                                         static_cast<int>(bytes.size()), nullptr, 0);
+    if (wlen <= 0) {
+        return std::nullopt;
+    }
+    std::wstring wide(static_cast<std::size_t>(wlen), L'\0');
+    MultiByteToWideChar(code_page, MB_ERR_INVALID_CHARS, bytes.data(), static_cast<int>(bytes.size()), wide.data(),
+                        wlen);
+    return WideToUtf8(wide);
+}
+
+std::vector<unsigned int> ChildStreamCodePageCandidates() {
+    // 控制台输出页在前:PowerShell 5.1 往重定向管道写 stderr/stdout 用的就
+    // 是它(中文机器 936/GBK)。系统 ANSI 页在后:cmd.exe 一路。两页相同只
+    // 列一次。
+    const unsigned int console_cp = GetConsoleOutputCP();
+    std::vector<unsigned int> out;
+    out.push_back(console_cp);
+    if (GetACP() != console_cp) {
+        out.push_back(GetACP());
+    }
+    return out;
 }
 
 }  // namespace lubancode::platform

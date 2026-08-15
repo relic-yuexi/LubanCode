@@ -7,7 +7,6 @@
 #include <thread>
 
 #include "platform/process.hpp"
-#include "platform/text_encoding.hpp"
 
 namespace lubancode::hooks {
 
@@ -109,14 +108,49 @@ std::string HookDispatcher::NextHookRunId() {
     return "hookrun_" + std::to_string(ms) + "_" + std::to_string(counter.fetch_add(1));
 }
 
+// 拷贝语义见头文件注释:账照搬,锁与投递队列不跟。锁序恒为
+// definitions_mutex_ -> external_mutex_,与投递/归并路径不反。
+HookDispatcher::HookDispatcher(const HookDispatcher& other) {
+    const std::lock_guard<std::mutex> defs_lock(other.definitions_mutex_);
+    const std::lock_guard<std::mutex> ext_lock(other.external_mutex_);
+    definitions_ = other.definitions_;
+    trust_ = other.trust_;
+    context_ = other.context_;
+    recent_ = other.recent_;
+    last_record_ = other.last_record_;
+}
+
+HookDispatcher& HookDispatcher::operator=(const HookDispatcher& other) {
+    if (this == &other) {
+        return *this;
+    }
+    std::lock_guard<std::mutex> defs_lock(definitions_mutex_);
+    std::lock_guard<std::mutex> ext_lock(external_mutex_);
+    std::lock_guard<std::mutex> other_defs_lock(other.definitions_mutex_);
+    std::lock_guard<std::mutex> other_ext_lock(other.external_mutex_);
+    definitions_ = other.definitions_;
+    trust_ = other.trust_;
+    context_ = other.context_;
+    recent_ = other.recent_;
+    last_record_ = other.last_record_;
+    return *this;
+}
+
+HookDispatcher::HookDispatcher(HookDispatcher&& other) : HookDispatcher(other) {}
+
+HookDispatcher& HookDispatcher::operator=(HookDispatcher&& other) { return *this = other; }
+
 HookDispatcher::ConfigureResult HookDispatcher::Configure(LoadedHooks loaded, HookTrustStore trust,
                                                           HookContext base_context) {
     ConfigureResult out;
     out.has_untrusted_project = loaded.has_untrusted_project;
     out.has_disabled = loaded.has_disabled;
-    definitions_ = std::move(loaded.definitions);
-    for (std::size_t i = 0; i < definitions_.size(); ++i) {
-        definitions_[i].id = static_cast<int>(i) + 1;
+    {
+        const std::lock_guard<std::mutex> lock(definitions_mutex_);
+        definitions_ = std::move(loaded.definitions);
+        for (std::size_t i = 0; i < definitions_.size(); ++i) {
+            definitions_[i].id = static_cast<int>(i) + 1;
+        }
     }
     trust_ = std::move(trust);
     context_ = std::move(base_context);
@@ -133,7 +167,7 @@ bool HookDispatcher::HasHandlersFor(HookEvent event) const {
     return false;
 }
 
-bool HookDispatcher::MatcherHits(const HookDefinition& def, const std::string& match_value) const {
+bool HookDispatcher::MatcherHits(const HookDefinition& def, const std::string& match_value) {
     const std::string& matcher = def.matcher;
     if (matcher.empty() || matcher == "*") {
         return true;
@@ -175,6 +209,24 @@ HookEventResult HookDispatcher::EmitWith(HookEvent event, const HookPayload& pay
 
 HookEventResult HookDispatcher::EmitImpl(HookEvent event, const HookPayload& payload, const HookContext& ctx,
                                          bool /*context_override*/) {
+    HookEventResult merged = RunEventCore(definitions_, event, payload, ctx);
+    // ---- 落账:结果账(定义序)、每只定义的最近一次、会话级流水(新在头)。
+    // 失败不只往 cerr 丢一行——先落账,UI 怎么呈由调用方定。跳过项(未
+    // 信任/禁用/去重/async)同样入账:/hooks 的"最近结果"看得见它们。
+    for (const auto& record : merged.records) {
+        last_record_[record.definition_id] = record;
+        recent_.push_front(record);
+    }
+    while (recent_.size() > kRecentCap) {
+        recent_.pop_back();
+    }
+    return merged;
+}
+
+// Emit/EmitDetached 共用的执行核:定义表参数化,不碰成员。主线程的 Emit 传
+// definitions_,后台执行器(EmitDetached)传只读快照——账本写不写由外层定。
+HookEventResult HookDispatcher::RunEventCore(const std::vector<HookDefinition>& definitions, HookEvent event,
+                                              const HookPayload& payload, const HookContext& ctx) {
     HookEventResult merged;
     const std::string hook_run_id = NextHookRunId();
     const std::string event_name(ToString(event));
@@ -193,7 +245,7 @@ HookEventResult HookDispatcher::EmitImpl(HookEvent event, const HookPayload& pay
     std::set<std::string> scheduled_hashes;  // 本轮已排进执行的单(去重账)
 
     // ---- 第一遍:筛选与跳过记录。----
-    for (const auto& def : definitions_) {
+    for (const auto& def : definitions) {
         if (def.event != event || !MatcherHits(def, payload.match_value)) {
             continue;
         }
@@ -255,7 +307,7 @@ HookEventResult HookDispatcher::EmitImpl(HookEvent event, const HookPayload& pay
     std::vector<std::thread> workers;
     workers.reserve(to_run.size());
     for (std::size_t i = 0; i < to_run.size(); ++i) {
-        workers.emplace_back([this, i, &runs, &to_run, &payload, &hook_run_id, &ctx]() {
+        workers.emplace_back([i, &runs, &to_run, &payload, &hook_run_id, &ctx]() {
             HandlerRun& run = runs[i];
             run.def = to_run[i]->def;
             const auto start = std::chrono::steady_clock::now();
@@ -310,22 +362,38 @@ HookEventResult HookDispatcher::EmitImpl(HookEvent event, const HookPayload& pay
                 record.outcome = "ok";
             }
         } else {
-            // v2:退出码三分 + stdout 逐事件 schema。shell 串形式的 hook 在
-            // Windows 走 cmd.exe(系统 ANSI 代码页),转换后仍可能带坏字节——
-            // 先过 UTF-8 清洗再解析,不让一只钩子的乱码把 JSON 解析打崩。
-            std::string stdout_text = exec.output;
-            if (!platform::IsValidUtf8(stdout_text)) {
-                stdout_text = platform::SanitizeExternalText(stdout_text);
+            // v2:退出码三分 + stdout 逐事件 schema。stdout/stderr 分开按明示
+            // 编码解码(先认 UTF-8,次选控制台输出页/系统 ANSI 页,命中标注;
+            // 都解不动留原始字节摘要),不让一只钩子的乱码把 JSON 解析打崩,
+            // 也不把中文报错无声替换成替换符。
+            const DecodedHookText stdout_decoded = DecodeHookStreamBytes(exec.stdout_bytes);
+            const DecodedHookText stderr_decoded = DecodeHookStreamBytes(exec.stderr_bytes);
+            record.stderr_encoding = stderr_decoded.encoding;
+            record.stderr_head = stderr_decoded.text;
+            record.stderr_truncated = stderr_decoded.text.size() > HookRunRecord::kStderrHeadBytes;
+            if (record.stderr_truncated) {
+                record.stderr_head.resize(HookRunRecord::kStderrHeadBytes);
             }
-            parsed = ParseStdoutJson(event, stdout_text);
+            if (stdout_decoded.from_raw_digest) {
+                // stdout 既不是 UTF-8 也解不出任何候选页:契约要求 UTF-8 JSON,
+                // 这里如实记 schema_error 并附原始字节摘要,不拿清洗后的文本
+                // 硬解析(那是无声替换)。
+                parsed.error = "stdout 不是合法 UTF-8(契约要求 UTF-8 JSON),原始字节摘要: " +
+                               stdout_decoded.text;
+            } else {
+                parsed = ParseStdoutJson(event, stdout_decoded.text);
+            }
             parsed_valid = parsed.ok;
-            const SingleOutcome judged = JudgeSingleRun(
-                event, exec.exit_code, exec.timed_out, exec.spawn_failed, parsed, /*stderr_text=*/exec.output);
+            const SingleOutcome judged = JudgeSingleRun(event, exec.exit_code, exec.timed_out, exec.spawn_failed,
+                                                        parsed, /*stderr_text=*/stderr_decoded.text);
             record.outcome = judged.outcome;
             record.decision = judged.decision;
             record.detail = judged.detail;
             if (parsed_valid && !parsed.system_message.empty()) {
                 record.detail = parsed.system_message;
+            }
+            if (stderr_decoded.from_raw_digest && !record.stderr_head.empty()) {
+                record.detail += ";stderr 编码未定,已留原始字节摘要";
             }
         }
 
@@ -358,7 +426,7 @@ HookEventResult HookDispatcher::EmitImpl(HookEvent event, const HookPayload& pay
                     merged.permission = HookEventResult::Permission::Deny;
                     merged.permission_reason =
                           record.event_name + " 钩子阻断: " +
-                          (!parsed.permission_reason.empty()   ? parsed.permission_reason
+                          (!parsed.permission_reason.empty() ? parsed.permission_reason
                            : (record.detail.empty() ? std::string("未给理由") : record.detail));
                 }
             } else if (caps.can_block && (event == HookEvent::UserPromptSubmit || event == HookEvent::PreCompact)) {
@@ -372,8 +440,8 @@ HookEventResult HookDispatcher::EmitImpl(HookEvent event, const HookPayload& pay
                 // deny > ask > allow:已经 deny/ask 的不被 allow 拉回去。
                 if (merged.permission == HookEventResult::Permission::None ||
                     (record.decision == "ask" && merged.permission == HookEventResult::Permission::Allow)) {
-                    merged.permission = record.decision == "ask" ? HookEventResult::Permission::Ask
-                                                                 : HookEventResult::Permission::Allow;
+                    merged.permission =
+                          record.decision == "ask" ? HookEventResult::Permission::Ask : HookEventResult::Permission::Allow;
                     if (!parsed.permission_reason.empty()) {
                         merged.permission_reason = parsed.permission_reason;
                     }
@@ -406,16 +474,8 @@ HookEventResult HookDispatcher::EmitImpl(HookEvent event, const HookPayload& pay
         (void)def;
     }
 
-    // ---- 落账:结果账(定义序)、每只定义的最近一次、会话级流水(新在头)。
-    // 失败不只往 cerr 丢一行——先落账,UI 怎么呈由调用方定。跳过项(未
-    // 信任/禁用/去重/async)同样入账:/hooks 的"最近结果"看得见它们。
     for (auto& slot : slots) {
-        merged.records.push_back(slot.record);
-        last_record_[slot.def->id] = slot.record;
-        recent_.push_front(std::move(slot.record));
-        while (recent_.size() > kRecentCap) {
-            recent_.pop_back();
-        }
+        merged.records.push_back(std::move(slot.record));
     }
     return merged;
 }
@@ -447,6 +507,7 @@ std::vector<HookRunRecord> HookDispatcher::RecentRecords(std::size_t cap) const 
 }
 
 bool HookDispatcher::TrustDefinition(int id) {
+    const std::lock_guard<std::mutex> lock(definitions_mutex_);
     for (auto& def : definitions_) {
         if (def.id == id) {
             trust_.SetTrusted(def.source_path, def.definition_hash, HookCommandDisplay(def.handler));
@@ -458,6 +519,7 @@ bool HookDispatcher::TrustDefinition(int id) {
 }
 
 bool HookDispatcher::UntrustDefinition(int id) {
+    const std::lock_guard<std::mutex> lock(definitions_mutex_);
     for (auto& def : definitions_) {
         if (def.id == id) {
             trust_.Untrust(def.source_path, def.definition_hash);
@@ -470,6 +532,7 @@ bool HookDispatcher::UntrustDefinition(int id) {
 }
 
 bool HookDispatcher::SetDefinitionDisabled(int id, bool disabled) {
+    const std::lock_guard<std::mutex> lock(definitions_mutex_);
     for (auto& def : definitions_) {
         if (def.id == id) {
             if (def.source_kind == HookSourceKind::Managed) {
@@ -481,6 +544,56 @@ bool HookDispatcher::SetDefinitionDisabled(int id, bool disabled) {
         }
     }
     return false;
+}
+
+// ---- 后台(外挂)执行面 ---------------------------------------------------
+
+std::vector<HookDefinition> HookDispatcher::PolicySnapshot() const {
+    const std::lock_guard<std::mutex> lock(definitions_mutex_);
+    return definitions_;
+}
+
+HookEventResult HookDispatcher::EmitDetached(const std::vector<HookDefinition>& definitions, HookEvent event,
+                                             const HookPayload& payload, const HookContext& ctx) {
+    return RunEventCore(definitions, event, payload, ctx);
+}
+
+void HookDispatcher::PostExternalRecords(std::vector<HookRunRecord> records, const std::string& warning) {
+    const std::lock_guard<std::mutex> lock(external_mutex_);
+    ExternalPending pending;
+    pending.records = std::move(records);
+    if (!warning.empty()) {
+        pending.warnings.push_back(warning);
+    }
+    external_pending_.push_back(std::move(pending));
+}
+
+HookDispatcher::ExternalAdoption HookDispatcher::AdoptExternalRecords() {
+    std::deque<ExternalPending> incoming;
+    {
+        const std::lock_guard<std::mutex> lock(external_mutex_);
+        incoming.swap(external_pending_);
+    }
+    ExternalAdoption adoption;
+    for (auto& pending : incoming) {
+        for (auto& record : pending.records) {
+            last_record_[record.definition_id] = record;
+            recent_.push_front(record);
+            adoption.records.push_back(std::move(record));
+        }
+        for (auto& warning : pending.warnings) {
+            adoption.warnings.push_back(std::move(warning));
+        }
+    }
+    while (recent_.size() > kRecentCap) {
+        recent_.pop_back();
+    }
+    return adoption;
+}
+
+bool HookDispatcher::HasExternalRecords() const {
+    const std::lock_guard<std::mutex> lock(external_mutex_);
+    return !external_pending_.empty();
 }
 
 }  // namespace lubancode::hooks
