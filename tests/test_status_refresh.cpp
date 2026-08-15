@@ -351,7 +351,10 @@ TEST_CASE("UsageStats: 逐步流水账——三笔各有 step/request id,命中�
     // 第二步:工具往返,大命中(49k hit / 1k miss = 98%)。
     stats.Add(api::UsageReport{api::Usage{1000, 50, 49000, 0}, 1, "req_b", "deepseek-v4-pro"});
     // 第三步:工具表变了,冷 miss,带 epoch 断因。
-    stats.Add(api::UsageReport{api::Usage{51000, 60, 0, 0}, 2, "req_c", "deepseek-v4-pro"}, "tools_changed");
+    api::UsageReport third{api::Usage{51000, 60, 0, 0}, 2, "req_c", "deepseek-v4-pro"};
+    third.cache_epoch = 2;
+    third.epoch_break_reason = "tools_changed";
+    stats.Add(third);
 
     REQUIRE(stats.steps.size() == 3);
     CHECK(stats.steps[0].step_index == 0);

@@ -6,6 +6,7 @@
 #include <utility>
 #include <variant>
 
+#include "agent/prefix.hpp"
 #include "api/assembler.hpp"
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:工具结果的第一道编码关口
 
@@ -168,6 +169,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
     // 等,不再靠解析错误文案猜。
     int steps_used = 0;
     std::string last_stop_reason;
+    // 前缀记账(agent/prefix.hpp):本步请求与上一份的追加律判定结果,
+    // 发请求前算好,报 usage 时随 UsageReport 交出去。
+    bool step_prefix_append_only = true;
+    std::string step_epoch_break_reason;
 
     // max_steps_per_turn_ <= 0 = 无上限:循环条件里第一个子句恒真,第二个
     // 子句(步数比较)压根不会被求值,step_index 就一直往上涨,靠 end_turn
@@ -246,6 +251,13 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
             pressure.window_tokens = context_window_tokens_;
             on_context_pressure_(pressure);
         }
+        // 有损硬裁真出手了:下一份请求的工作视图换了裁剪形状,前缀记账给
+        // 它点名(指纹 diff 只能报 old_message_changed,这里的因更准)。
+        if (trim_report.trimmed_turns || trim_report.truncated_results) {
+            if (pending_epoch_break_reason_.empty()) {
+                pending_epoch_break_reason_ = "hard_trim";
+            }
+        }
         // 每轮现拼,不在 Run() 开头拼一次复用:tool_search 命中会在一次
         // Run() 中途把工具加进 loaded 集合(谓词的判定依据),下一轮请求
         // 就得带上新挂载工具的完整定义。没设谓词时,重拼出来的内容每轮
@@ -257,6 +269,27 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         if (EstimateHistoryBytes(request.messages) > max_context_chars_) {
             return std::unexpected("上下文超过上限(" + std::to_string(max_context_chars_) +
                                     " 字符),裁剪与截断后仍装不下,无法发送。请用 /compact 压缩历史,或开新会话。");
+        }
+
+        // 前缀记账:与上一份请求比追加律。断了就开新 cache epoch,并点名
+        // 断因——loop 自己知道的因(compact/hard trim)比指纹反推的准,
+        // 优先用它;没有显式因就按 diff 点名(model/system/tools/旧消息)。
+        // epoch 断不是失败,无名无姓地断才是失败(agent/prefix.hpp)。
+        {
+            const PrefixFingerprint fingerprint = FingerprintRequest(request);
+            step_prefix_append_only = true;
+            step_epoch_break_reason.clear();
+            if (last_prefix_.has_value()) {
+                const PrefixDiff diff = DiffFingerprints(*last_prefix_, fingerprint);
+                step_prefix_append_only = diff.append_only();
+                if (!step_prefix_append_only) {
+                    step_epoch_break_reason =
+                        pending_epoch_break_reason_.empty() ? diff.break_reason() : pending_epoch_break_reason_;
+                    ++cache_epoch_;
+                }
+            }
+            pending_epoch_break_reason_.clear();
+            last_prefix_ = std::move(fingerprint);
         }
 
         api::MessageAssembler assembler;
@@ -352,6 +385,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
             report.step_index = step_index;
             report.request_id = stream_request_id;
             report.model = stream_model;
+            report.cache_epoch = cache_epoch_;
+            report.epoch_break_reason = step_epoch_break_reason;
+            report.prefix_append_only = step_prefix_append_only;
             callbacks.on_usage(report);
         }
 

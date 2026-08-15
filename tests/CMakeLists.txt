@@ -16,6 +16,9 @@ add_executable(lubancode_tests
   test_search.cpp
   test_context.cpp
   test_context_events.cpp
+  # 请求前缀守恒(前缀缓存单第三期):DiffRequests/IsAppendOnlySuccessor
+  # 纯函数 + 捕获 backend 钉默认工具往返与六桩断裂源。
+  test_request_prefix.cpp
   test_config.cpp
   test_model_catalog.cpp
   test_provider_catalog.cpp

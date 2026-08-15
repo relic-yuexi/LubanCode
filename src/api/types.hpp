@@ -131,15 +131,22 @@ inline std::int64_t TotalInputTokens(const Usage& usage) {
     return usage.input_tokens + usage.cache_read_tokens + usage.cache_creation_tokens;
 }
 
-// 一次独立模型请求的 usage 报告:on_usage 的入参(前缀缓存守恒单第一期)。
-// usage 之外带上这笔账的身份——第几步、哪个请求、什么模型——逐步流水账
-// (StepUsageRecord)才有键可落,整轮汇总才能按 token 求和而不是拿百分比
-// 平均。request_id/model 取流里 MessageStart 的值,provider 不给就是空。
+// 一次独立模型请求的 usage 报告:on_usage 的入参(前缀缓存守恒单)。
+// usage 之外带上这笔账的身份——第几步、哪个请求、什么模型、哪个缓存
+// epoch、这一步前缀是不是上一份的原样追加版——逐步流水账(StepUsageRecord)
+// 才有键可落,整轮汇总才能按 token 求和而不是拿百分比平均。
+// request_id/model 取流里 MessageStart 的值,provider 不给就是空;
+// cache_epoch/epoch_break_reason/prefix_append_only 由 AgentLoop 的前缀
+// 记账(agent/prefix.hpp)在发请求前填:epoch 断不是失败,无名无姓地断
+// 才是失败。
 struct UsageReport {
     Usage usage;
-    int step_index = 0;      // Run() 内的步号(0-based,一步一次模型请求)
-    std::string request_id;  // 服务端消息 id(MessageStart.id),可空
-    std::string model;       // MessageStart.model,可空
+    int step_index = 0;              // Run() 内的步号(0-based,一步一次模型请求)
+    std::string request_id;          // 服务端消息 id(MessageStart.id),可空
+    std::string model;               // MessageStart.model,可空
+    int cache_epoch = 1;             // 请求落在哪个缓存 epoch(1 起)
+    std::string epoch_break_reason;  // 本步断了 epoch 时的点名(空 = 没断)
+    bool prefix_append_only = true;  // 本步请求是否上一份的原样追加版
 
     // provider 是否真回报了 usage(四项全零 = 没给,真实请求不可能全零)。
     // 没回报就记 unknown,不许拿 0 冒充"真未命中"。

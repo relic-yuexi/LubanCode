@@ -70,6 +70,7 @@ struct StepUsageRecord {
     int step_index = 0;
     std::string request_id;
     std::string model;
+    int cache_epoch = 1;            // 请求落在哪个缓存 epoch(1 起)
     std::int64_t input_tokens = 0;
     std::int64_t cache_read_tokens = 0;
     std::int64_t cache_creation_tokens = 0;
@@ -101,17 +102,18 @@ struct StepUsageRecord {
 struct UsageStats {
     std::vector<StepUsageRecord> steps;
 
-    void Add(const api::UsageReport& report, std::string epoch_break_reason = {}) {
+    void Add(const api::UsageReport& report) {
         StepUsageRecord record;
         record.step_index = report.step_index;
         record.request_id = report.request_id;
         record.model = report.model;
+        record.cache_epoch = report.cache_epoch;
         record.input_tokens = report.usage.input_tokens;
         record.cache_read_tokens = report.usage.cache_read_tokens;
         record.cache_creation_tokens = report.usage.cache_creation_tokens;
         record.output_tokens = report.usage.output_tokens;
         record.reported = report.reported();
-        record.epoch_break_reason = std::move(epoch_break_reason);
+        record.epoch_break_reason = report.epoch_break_reason;
         steps.push_back(std::move(record));
     }
 

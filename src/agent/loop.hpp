@@ -16,6 +16,7 @@
 
 #include "agent/context.hpp"
 #include "agent/context_events.hpp"
+#include "agent/prefix.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "tools/registry.hpp"
@@ -218,7 +219,19 @@ public:
     // history_ 的新入口,agent/compact.cpp 里的 Compact() 本身不碰
     // AgentLoop,只管算出新历史,真正替换由调用方(main.cpp)拿到新历史后
     // 调这个方法完成。
-    void ReplaceHistory(std::vector<api::Message> new_history) { history_ = std::move(new_history); }
+    // 前缀记账:这是有意改前缀,不装无事发生——显式开新 cache epoch
+    // (history_compacted),清掉上一份请求的指纹;压缩后第一份请求就是新
+    // epoch 的冷启动,后续再守追加律。
+    void ReplaceHistory(std::vector<api::Message> new_history) {
+        history_ = std::move(new_history);
+        ++cache_epoch_;
+        pending_epoch_break_reason_ = "history_compacted";
+        last_prefix_.reset();
+    }
+
+    // 当前 cache epoch(前缀记账,agent/prefix.hpp):1 起,每次断前缀 +1。
+    // /context 与调试展示用;epoch 断不是失败,是给"命中跌了"点名的那根梁。
+    int cache_epoch() const { return cache_epoch_; }
 
     // mid-turn 上下文安全点:有效上下文窗口(token)。0(默认)= 未知,
     // Run() 不做 projected 评估,行为与从前完全一致。上层(交互会话)在
@@ -255,6 +268,12 @@ private:
     StructuralCompressionOptions structural_options_{};
     StructuralCompressionStats structural_stats_{};  // 最近一次请求的结构压缩账(观测用)
     std::vector<api::Message> history_;
+    // 前缀记账(agent/prefix.hpp):上一份实际发出的请求指纹(没有 = 本
+    // turn 第一份请求,无从比较,天然算追加)、cache epoch 序号、loop 自己
+    // 先知道的断因(compact/hard trim,报出后即清)。
+    std::optional<PrefixFingerprint> last_prefix_;
+    int cache_epoch_ = 1;
+    std::string pending_epoch_break_reason_;
     OnContextPressure on_context_pressure_;
     std::function<bool(const tools::Tool&)> tool_filter_;  // tool_search:空 = 不过滤,全量直挂
     InboxPoll inbox_;  // 跨会话收件点:空 = 没有来信要收,行为跟从前一致
