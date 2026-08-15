@@ -82,15 +82,13 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     return dispatch_done(call.name, std::move(result));
 }
 
-// 步数将尽提醒的正文。remaining_steps 是"从当步(含)到硬上限还能走几步"
-// (ShouldNudgeStepLimit 判断为真时才会调这个,所以 remaining_steps 必然
-// <= kStepLimitNudgeThreshold)。附在 system 尾部而不是塞进 history——只影响
-// 当步请求怎么发,不污染对话历史(下一步 remaining_steps 变了,提示文本也
-// 该跟着变,history 里留一份旧提示没有意义)。
-std::string BuildStepLimitNudgeText(int remaining_steps) {
-    return "\n\n[系统提醒] 步数预算将尽,含本步在内最多还能再走 " + std::to_string(remaining_steps) +
-           " 步就会被强制停止(这是预算硬上限,不是真的不让你干了)。从现在起停止漫游式探索:"
-           "不要再开新的调查方向;把已经查到的事实、关键证据位置、排除掉的分支写成一个检查点,"
+// 步数将尽提醒的正文:固定文案,不带倒计时数字。前缀缓存守恒单第五期起
+// 不再改 system——提醒在"剩余步数第一次降到阈值"那一步,追加进当时尚未
+// 发出的尾部 user/tool-result 消息,随 history 留住:后头不改数字、不撤
+// 旧提醒,追加律不破。硬上限仍由循环计数执行,提示无需承担精确计数。
+std::string BuildStepLimitNudgeText() {
+    return "\n\n[系统提醒] 已进入轮数上限前的收尾区,请尽快收束:不要再开新的调查方向;"
+           "把已经查到的事实、关键证据位置、排除掉的分支写成一个检查点,"
            "并给出部分结论与下一步建议。到限后检查点就是交回主会话的全部,别把它带进坟墓。";
 }
 
@@ -163,6 +161,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         return std::unexpected("用户消息为空，无法发送。");
     }
     history_.push_back(std::move(user_message));
+    // 动态上下文(记忆召回/任务名册)随本轮 user 进请求视图:发过即钉住,
+    // 不再每回合改 system 制造分叉点。落在消息尾部——本条消息尚未发出,
+    // 追加不算追改(前缀缓存守恒单第五期)。
+    if (!turn_context_.empty()) {
+        history_.back().content.push_back(api::TextBlock{turn_context_});
+    }
 
     // 步数与 stop reason 的活账:每次模型请求(每个 step)各记一笔,收场时随
     // RunOutcome 交出去——上层(子代理)按它分型 budget_exhausted/no_final_text
@@ -194,14 +198,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         api::Request request;
         request.model = model_;
         request.system = system_prompt_;
-        if (!turn_system_suffix_.empty()) {
-            request.system += "\n\n" + turn_system_suffix_;
-        }
-        // 步数将尽提醒:只追加进这一步实际发出去的 system,不改 system_prompt_
-        // 本身、也不进 history_——下一步 step_index 变了,剩余步数跟着变,提示
-        // 该有就有、该消失就消失,没有"提示搭便车永久赖在历史里"的问题。
-        if (ShouldNudgeStepLimit(step_index, max_steps_per_turn_)) {
-            request.system += BuildStepLimitNudgeText(max_steps_per_turn_ - step_index);
+        // 步数将尽提醒(第五期):固定文案,在"剩余步数第一次降到阈值"那一步
+        // 追加进尚未发出的尾部消息(user 输入或刚攒完的 tool result),随
+        // history 留住——不改 system,不撤旧提醒,追加律不破。ShouldNudge-
+        // StepLimit 每次 Run 只真一次,天然只注一遍。
+        if (ShouldNudgeStepLimit(step_index, max_steps_per_turn_) && !history_.empty()) {
+            history_.back().content.push_back(api::TextBlock{BuildStepLimitNudgeText()});
         }
 
         // mid-turn 安全点:拼请求前先估 projected——system + 工具定义 + 全份

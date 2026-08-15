@@ -1293,9 +1293,9 @@ std::string AgentTool::RunningTasksRoster() const {
             continue;
         }
         if (out.empty()) {
-            out = "\n\n[运行中子代理名册] 以下子代理此刻仍在运行。名册每条用户消息到来时动态重算,"
-                  "以此为准,不要依赖历史记忆里的任务号。给某只转交增量用 agent_message 工具,"
-                  "task_id 用下面列出的号:\n";
+            out = "\n\n[运行中子代理名册] 以下子代理在附上本条消息的那一刻仍在运行。名册是随本条"
+                  "消息的快照,以最新一条消息所附的快照为准,不要依赖更早的快照。给某只转交增量用"
+                  " agent_message 工具,task_id 用下面列出的号:\n";
         }
         out += "#" + std::to_string(summary.id) + "  " +
                (summary.title.empty() ? "未命名子代理 #" + std::to_string(summary.id) : summary.title) +

@@ -204,10 +204,13 @@ public:
     // 确认时来信不能作答"由这一点天然保证。传空清除。
     void SetInbox(InboxPoll inbox) { inbox_ = std::move(inbox); }
 
-    // 请求级上下文尾段。一次外层 Run 内的工具来回共用，下一条用户消息
-    // 到来前由调用方重算。它不进 history，也不改稳定 system_prompt_；项目
-    // 记忆这类按查询变化、又须经得住 /compact 的上下文走这里。
-    void SetTurnSystemSuffix(std::string suffix) { turn_system_suffix_ = std::move(suffix); }
+    // 请求级动态上下文(项目记忆召回、运行中子代理名册)。前缀缓存守恒单
+    // 第五期起不再塞 system 尾巴——那会让分叉点落在全部旧历史之前,每条
+    // 外层用户消息都断一次前缀。现在它随本轮 user 消息进请求视图:Run()
+    // 落 user 消息时追加成尾部的 TextBlock,发过即钉住,后续请求原样重放;
+    // 下一轮来了再往新 user 消息尾部添新快照(旧快照留在旧消息里,标注
+    // "当时快照")。system 从此只留会话/epoch 内稳定材料。空串 = 不追加。
+    void SetTurnContext(std::string context) { turn_context_ = std::move(context); }
 
     // M6.6:/compact 用。跟 history() 是同一份数据,单独起个大写名字是为了
     // 跟任务规矩"只许新增两个方法,不许改现有的"对齐——不改名、不改签名、
@@ -259,7 +262,7 @@ private:
     tools::ToolRegistry& registry_;
     std::string model_;
     std::string system_prompt_;
-    std::string turn_system_suffix_;
+    std::string turn_context_;
     int max_tokens_;
     int max_steps_per_turn_;  // 0 = 不限步(硬上限只管本 turn 内的 step)
     std::size_t max_context_chars_;

@@ -230,12 +230,12 @@ TEST_CASE("前缀: 默认工具往返,后一份请求是前一份的原样追加
 }
 
 // ---------------------------------------------------------------------------
-// 断裂源一(钉案):记忆 suffix 与任务名册每个外层回合重算,改的是 system
-// 尾巴——分叉点落在全部旧历史之前,对话越长损失越大。
-// 断因必须被点名 system_changed,不许无声。
+// 断裂源一(已修):记忆 suffix 与任务名册不再改 system——第五期起随本轮
+// user 消息尾部进请求视图,发过即钉住,新一轮再往尾部添新快照。旧前缀
+// 逐字节不动。
 // ---------------------------------------------------------------------------
 
-TEST_CASE("前缀[钉案]: 轮间换 turn suffix 现行实现会改 system(第五期挪尾后翻绿)") {
+TEST_CASE("前缀: 轮间换动态上下文(记忆/名册)不改 system,旧前缀原样追加") {
     CaptureBackend backend;
     backend.scripts = {TextScript("答一"), TextScript("答二"), TextScript("答三")};
     tools::ToolRegistry registry;
@@ -243,31 +243,35 @@ TEST_CASE("前缀[钉案]: 轮间换 turn suffix 现行实现会改 system(第�
     agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
     agent::Callbacks callbacks;
 
-    loop.SetTurnSystemSuffix("项目记忆召回(甲)");
+    loop.SetTurnContext("项目记忆召回(甲)");
     REQUIRE(loop.Run("第一句", callbacks).has_value());
-    loop.SetTurnSystemSuffix("项目记忆召回(乙)");
+    loop.SetTurnContext("项目记忆召回(乙)");
     REQUIRE(loop.Run("第二句", callbacks).has_value());
-    loop.SetTurnSystemSuffix("项目记忆召回(丙)");
+    loop.SetTurnContext("项目记忆召回(丙)");
     REQUIRE(loop.Run("第三句", callbacks).has_value());
     REQUIRE(backend.captured.size() == 3);
 
-    // 同一 Run 内 suffix 固定,单轮内部不重算——P1->P2 只在轮间断。
-    // 轮间断:system 尾巴换了,分叉点在旧历史之前。
+    // system 三份一字不差:动态材料不再进头段。
+    CHECK(backend.captured[0].system == "system prompt");
+    CHECK(backend.captured[1].system == "system prompt");
+    CHECK(backend.captured[2].system == "system prompt");
+
+    // 上下文进了当轮 user 消息的尾部块,旧前缀原样追加。
     const agent::PrefixDiff diff_12 = agent::DiffRequests(backend.captured[0], backend.captured[1]);
     const agent::PrefixDiff diff_23 = agent::DiffRequests(backend.captured[1], backend.captured[2]);
-    CHECK_FALSE(diff_12.append_only());
-    CHECK(diff_12.system_changed);
-    CHECK_FALSE(diff_23.append_only());
-    CHECK(diff_23.system_changed);
+    CHECK(diff_12.append_only());
+    CHECK(diff_23.append_only());
+    CHECK(diff_12.appended_messages == 2);
+    CHECK(diff_23.appended_messages == 2);
 }
 
 // ---------------------------------------------------------------------------
-// 断裂源二(钉案):步数将尽 nudge 现在改 system。max_steps=5 时 nudge 落在
-// step2(剩余 3):P3 的 system 忽然多出一段,P2/P3 之间断。
-// (第五期改成"固定提醒只随消息尾部追加一次"后翻绿。)
+// 断裂源二(已修):步数将尽提醒不再改 system——第五期起改成固定文案,
+// 在"剩余步数第一次降到阈值"那一步追加进尚未发出的尾部消息,随 history
+// 留住;后头不改数字、不撤旧提醒,system 全程一字不动。
 // ---------------------------------------------------------------------------
 
-TEST_CASE("前缀[钉案]: 步数将尽 nudge 现行实现中途改 system(第五期挪尾后翻绿)") {
+TEST_CASE("前缀: 步数将尽提醒只随消息尾部追加一次,system 全程不动") {
     CaptureBackend backend;
     backend.scripts = {
         ToolUseScript("call_1", "read_file"),
@@ -286,23 +290,32 @@ TEST_CASE("前缀[钉案]: 步数将尽 nudge 现行实现中途改 system(第�
     REQUIRE(loop.Run("干活", callbacks).has_value());
     REQUIRE(backend.captured.size() == 3);
 
-    // nudge 只在"剩余步数第一次降到 3"那一步(step2)注入,且只注一次——
-    // 这两点现行实现已经守住。
-    CHECK(backend.captured[0].system.find("步数预算将尽") == std::string::npos);
-    CHECK(backend.captured[1].system.find("步数预算将尽") == std::string::npos);
-    CHECK(backend.captured[2].system.find("步数预算将尽") != std::string::npos);
+    // system 三份一字不差,提醒一个字都不进头段。
+    CHECK(backend.captured[0].system == "system prompt");
+    CHECK(backend.captured[1].system == "system prompt");
+    CHECK(backend.captured[2].system == "system prompt");
 
-    // 但它落在 system 里:P2 -> P3 断前缀,断因 system_changed。
+    // 提醒在"剩余 3 步"那一步(step2)随尾部消息(刚攒完的 tool result)
+    // 追加,只此一次;此前此后各步都没有。
+    CHECK(backend.captured[0].messages.back().content.size() == 1);
+    CHECK(backend.captured[1].messages.back().content.size() == 1);
+    REQUIRE(backend.captured[2].messages.back().content.size() == 2);
+    const auto* nudge = std::get_if<api::TextBlock>(&backend.captured[2].messages.back().content[1]);
+    REQUIRE(nudge != nullptr);
+    CHECK(nudge->text.find("收尾区") != std::string::npos);
+    CHECK(nudge->text.find("检查点") != std::string::npos);
+
+    // 三份请求两两原样追加——提醒落在"尚未发出的新消息"里,不追改旧前缀。
     CHECK(IsAppendOnlySuccessor(backend.captured[0], backend.captured[1]));
-    const agent::PrefixDiff diff = agent::DiffRequests(backend.captured[1], backend.captured[2]);
-    CHECK_FALSE(diff.append_only());
-    CHECK(diff.system_changed);
+    CHECK(IsAppendOnlySuccessor(backend.captured[1], backend.captured[2]));
 
-    // 台账照样点名:第三步记 system_changed 的 epoch 断。
+    // 台账:全程一个 epoch,没断。
     REQUIRE(reports.size() == 3);
-    CHECK(reports[2].cache_epoch == 2);
-    CHECK(reports[2].epoch_break_reason == "system_changed");
-    CHECK_FALSE(reports[2].prefix_append_only);
+    CHECK(reports[0].cache_epoch == 1);
+    CHECK(reports[1].cache_epoch == 1);
+    CHECK(reports[2].cache_epoch == 1);
+    CHECK(reports[2].epoch_break_reason.empty());
+    CHECK(reports[2].prefix_append_only);
 }
 
 // ---------------------------------------------------------------------------

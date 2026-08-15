@@ -222,7 +222,7 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         loop.SetToolFilter(tool_runtime.main_tool_filter());
     }
     if (project_memory != nullptr) {
-        loop.SetTurnSystemSuffix(
+        loop.SetTurnContext(
             project_memory->BuildTurnContext(question, std::filesystem::current_path()));
     }
     std::set<std::string> always_allowed_tools;

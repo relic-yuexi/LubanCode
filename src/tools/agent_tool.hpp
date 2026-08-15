@@ -276,10 +276,11 @@ public:
                                       TaskMessageSource source = TaskMessageSource::User);
 
     // 运行中子代理名册(给主模型的动态 context 用):每条外层用户消息到
-    // 来时现算一份,只列 task id/真标题/类型/待送数,不塞 prompt 与日志。
-    // 没有运行中任务时返回空串(不注入)。调用方把它拼进请求级 system 尾
-    // 段(AgentLoop::SetTurnSystemSuffix)——不进 history,compact 后照常
-    // 从台账重注入,不依赖摘要记任务号。
+    // 来时现算一份快照,只列 task id/真标题/类型/待送数,不塞 prompt 与
+    // 日志。没有运行中任务时返回空串(不注入)。调用方把它交给
+    // AgentLoop::SetTurnContext,随本轮 user 消息尾部进请求视图——发过
+    // 即钉住,不追改旧前缀;compact 后照常从台账重注入新快照,不依赖
+    // 摘要记任务号。
     std::string RunningTasksRoster() const;
 
     // 正式取消接口(面板 x / Ctrl+X Ctrl+K 接这里):只发停止信号,等任务

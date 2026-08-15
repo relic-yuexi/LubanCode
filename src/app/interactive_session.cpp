@@ -1248,7 +1248,7 @@ void InteractiveSession::RunPeerTurn(const std::string& text) {
     if (session_agent_tool() != nullptr) {
         turn_suffix += session_agent_tool()->RunningTasksRoster();
     }
-    loop->SetTurnSystemSuffix(std::move(turn_suffix));
+    loop->SetTurnContext(std::move(turn_suffix));
     // RunTurnResult 只剩 status/cancelled,peer 来信轮两边都不看;排队消息
     // 走会话层 SteeringQueue,不在这里收。直接调,不接没人用的返回值。
     RunTurn(*loop, text, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
@@ -1859,7 +1859,7 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
     if (session_agent_tool() != nullptr) {
         turn_suffix += session_agent_tool()->RunningTasksRoster();
     }
-    loop->SetTurnSystemSuffix(std::move(turn_suffix));
+    loop->SetTurnContext(std::move(turn_suffix));
     const std::size_t history_before = loop->History().size();
     RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
             config.hooks, spinner_enabled, transcript, todo_state(), &transcript_expanded,

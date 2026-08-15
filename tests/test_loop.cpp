@@ -602,7 +602,7 @@ TEST_CASE("ShouldNudgeStepLimit: 预算 <= 0(无上限)永不触发,不管 step_
     CHECK_FALSE(agent::ShouldNudgeStepLimit(5, -5));
 }
 
-TEST_CASE("步数将尽提醒:剩 3 步那一步带上一次收口提示;其余各步不带") {
+TEST_CASE("步数将尽提醒:剩 3 步那一步随尾部消息带一次固定收口提示;system 不动") {
     FakeBackend backend;
     // 预算 4 步:step_index=0(剩 4 步)不带;step_index=1(剩 3 步)带——唯一一次;
     // step_index=2(剩 2 步)不再重复。
@@ -620,33 +620,48 @@ TEST_CASE("步数将尽提醒:剩 3 步那一步带上一次收口提示;其余�
 
     REQUIRE(result.has_value());
     REQUIRE(backend.captured_requests.size() == 3);
-    CHECK(backend.captured_requests[0].system.find("步数预算将尽") == std::string::npos);
-    CHECK(backend.captured_requests[1].system.find("步数预算将尽") != std::string::npos);
-    CHECK(backend.captured_requests[1].system.find("检查点") != std::string::npos);  // 收口:写检查点
-    CHECK(backend.captured_requests[2].system.find("步数预算将尽") == std::string::npos);
-    // system prompt 本体没被永久改掉——每次都是从原样的 "system prompt" 长出来的。
-    CHECK(backend.captured_requests[1].system.find("system prompt") == 0);
+    // 提醒不进 system:三份请求的 system 都是原样的 "system prompt"。
+    for (const auto& req : backend.captured_requests) {
+        CHECK(req.system == "system prompt");
+    }
+    // 提醒在 step1 的尾部消息(刚攒完的 tool result)里,只此一次:step0
+    // 的尾部消息只有一枚 user 文本块,step1 的多出提醒文本块。
+    REQUIRE(backend.captured_requests[0].messages.size() == 1);
+    CHECK(backend.captured_requests[0].messages.back().content.size() == 1);
+    REQUIRE(backend.captured_requests[1].messages.size() == 3);
+    REQUIRE(backend.captured_requests[1].messages.back().content.size() == 2);
+    const auto* nudge = std::get_if<api::TextBlock>(&backend.captured_requests[1].messages.back().content[1]);
+    REQUIRE(nudge != nullptr);
+    CHECK(nudge->text.find("收尾区") != std::string::npos);
+    CHECK(nudge->text.find("检查点") != std::string::npos);  // 收口:写检查点
+    // 随 history 留住:step2 的请求里,同一条消息(下标 2)原样带着提醒,
+    // 不改不撤;step2 自己的尾部 tool result 不再重复提醒。
+    REQUIRE(backend.captured_requests[2].messages.size() == 5);
+    REQUIRE(backend.captured_requests[2].messages[2].content.size() == 2);
+    CHECK(backend.captured_requests[2].messages.back().content.size() == 1);
 }
 
-TEST_CASE("本轮 system suffix:同一次 Run 的工具往返都带，history 不带") {
+TEST_CASE("本轮动态上下文:随本轮 user 消息尾部进请求视图,发过即钉住") {
     FakeBackend backend;
     backend.scripts = {ToolUseScript("tool-1", "fake"), TextOnlyScript("done")};
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>("fake", tools::Tool::Result{"ok", false}, false));
     agent::AgentLoop loop(backend, registry, "test-model", "stable system");
-    loop.SetTurnSystemSuffix("project memory suffix");
+    loop.SetTurnContext("project memory context");
 
     REQUIRE(loop.Run("go", agent::Callbacks{}).has_value());
     REQUIRE(backend.captured_requests.size() == 2);
-    CHECK(backend.captured_requests[0].system == "stable system\n\nproject memory suffix");
-    CHECK(backend.captured_requests[1].system == "stable system\n\nproject memory suffix");
-    for (const auto& message : loop.History()) {
-        for (const auto& block : message.content) {
-            if (const auto* text = std::get_if<api::TextBlock>(&block)) {
-                CHECK(text->text.find("project memory suffix") == std::string::npos);
-            }
-        }
-    }
+    // system 不带动态上下文——那是会话稳定材料的地盘。
+    CHECK(backend.captured_requests[0].system == "stable system");
+    CHECK(backend.captured_requests[1].system == "stable system");
+    // 上下文在首轮 user 消息的尾部块里,两份请求原样重放。
+    REQUIRE(backend.captured_requests[0].messages.size() == 1);
+    REQUIRE(backend.captured_requests[0].messages[0].content.size() == 2);
+    const auto* context = std::get_if<api::TextBlock>(&backend.captured_requests[0].messages[0].content[1]);
+    REQUIRE(context != nullptr);
+    CHECK(context->text == "project memory context");
+    REQUIRE(backend.captured_requests[1].messages.size() == 3);
+    REQUIRE(backend.captured_requests[1].messages[0].content.size() == 2);
 }
 
 TEST_CASE("图片用户消息入历史，下一轮请求仍带着") {
