@@ -48,6 +48,8 @@
 
 #include "cli/console_input.hpp"
 
+#include "cli/bottom_chrome.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -911,7 +913,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         return lines;
     };
     const auto fingerprint_of = [](const std::vector<AgentPanelEntry>& entries,
-                                   const std::vector<std::string>& dock_lines,
+                                   const BottomChromeFrame& frame,
                                    const AgentPanelSession::Snapshot& snapshot) {
         std::string value;
         for (const auto& entry : entries) {
@@ -922,9 +924,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         value += "#" + std::to_string(snapshot.selected_task_id) + (snapshot.focused ? "f" : "-") +
                  (snapshot.detail_open ? "d" : "-") + (snapshot.stop_all_armed ? "a" : "-") +
                  (snapshot.idle_expanded ? "i" : "-") + "\n";
-        for (const auto& line : dock_lines) {
-            value += line + "\n";
-        }
+        value += BottomChromeFingerprint(frame);
         return value;
     };
     // 0.28.x 排队消息区:画在代理面板之下、composer 上横线之上(规格"显示"
@@ -947,18 +947,34 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         return BuildSteeringQueueRows(snapshot, view);
     };
 
+    // 一本帧账:待发队列在 composer 上横线之上,导航坞在状态栏之下贴底,
+    // slash 提示垫最底。空闲 composer 与流式 footer 认的是同一只
+    // BottomChromeFrame(同一套 LayoutAgentDock + BuildSteeringQueueRows),
+    // 两条路不许各拼一套行序。
+    const auto build_frame = [&](const std::vector<std::string>& queue_rows,
+                                 const std::vector<std::string>& dock, const RenderState& state,
+                                 int selected_task_id) {
+        BottomChromeFrame frame;
+        frame.queue_rows = queue_rows;
+        frame.agent_dock_rows = dock;
+        frame.transient_rows = state.hint_lines;
+        frame.composer_rows = std::max(1, static_cast<int>(state.lines.size()));
+        frame.selected_task_id = selected_task_id;
+        frame.revision = BottomChromeRevision(frame);
+        return frame;
+    };
+
     auto redraw_with_panel = [&](const RenderState& state, const std::vector<AgentPanelEntry>& entries) {
         std::string tag;
         const std::vector<std::string> dock = build_dock(entries, tag);
-        // 一本帧账:待发队列在 composer 上横线之上,导航坞在状态栏之下贴底。
-        // 空闲 composer 与流式 footer 认的是同一套纯逻辑(LayoutAgentDock +
-        // BuildSteeringQueueRows),两条路不许各拼一套行序。
         const std::vector<std::string> queue_rows = queue_rows_now();
+        const AgentPanelSession::Snapshot snapshot = panel_session.SnapshotFor(nav_ids_for(entries));
+        const BottomChromeFrame frame =
+            build_frame(queue_rows, dock, state, snapshot.selected_task_id);
         chrome.mode = editor.confirm_mode();
-        RedrawEditArea(start_row, prompt_end_col, prompt, state, queue_rows, dock, tag,
-                       prev_body_row_count, previous_frame, prev_frame_origin, vt_enabled, chrome);
-        panel_fingerprint =
-            fingerprint_of(entries, dock, panel_session.SnapshotFor(nav_ids_for(entries)));
+        RedrawEditArea(start_row, prompt_end_col, prompt, state, frame.queue_rows, frame.agent_dock_rows,
+                       tag, prev_body_row_count, previous_frame, prev_frame_origin, vt_enabled, chrome);
+        panel_fingerprint = fingerprint_of(entries, frame, snapshot);
     };
 
     if (box) {
@@ -1024,8 +1040,11 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             const bool armed_expired = panel_session.ExpireArmed(std::chrono::steady_clock::now());
             std::string tag;
             const std::vector<std::string> dock = build_dock(entries, tag);
-            if (armed_expired ||
-                fingerprint_of(entries, dock, panel_session.SnapshotFor(nav_ids_for(entries))) != panel_fingerprint) {
+            const std::vector<std::string> queue_rows = queue_rows_now();
+            const AgentPanelSession::Snapshot snapshot = panel_session.SnapshotFor(nav_ids_for(entries));
+            const BottomChromeFrame frame = build_frame(queue_rows, dock, editor.CurrentRenderState(),
+                                                         snapshot.selected_task_id);
+            if (armed_expired || fingerprint_of(entries, frame, snapshot) != panel_fingerprint) {
                 redraw_with_panel(editor.CurrentRenderState(), entries);
             }
             // 空闲唤醒:系统侧有事件(后台子代理跑完等)要在会话空闲时处理。
@@ -1697,6 +1716,7 @@ void RedrawStreamFooterLocked() {
     // 半屏以内,输入框与状态栏始终留在视口里。
     std::vector<std::string> dock_rows_text;
     std::string footer_rule_tag;
+    int dock_selected_task_id = 0;
     if (AgentPanelProviderSlot()) {
         const std::vector<AgentPanelEntry> panel_entries = AgentPanelProviderSlot()();
         const AgentPanelSession::Snapshot snap0 =
@@ -1718,6 +1738,7 @@ void RedrawStreamFooterLocked() {
                                 /*streaming=*/true, panel_snapshot.idle_expanded,
                                 panel_snapshot.target_task_id.value_or(0));
             dock_rows_text = RenderAgentDockLines(dock_layout, info->width);
+            dock_selected_task_id = panel_snapshot.selected_task_id;
             if (panel_snapshot.target_task_id.has_value()) {
                 for (const auto& entry : panel_entries) {
                     if (entry.task_id == *panel_snapshot.target_task_id) {
@@ -1750,10 +1771,17 @@ void RedrawStreamFooterLocked() {
             ? std::vector<std::string>{}
             : BuildSteeringQueueRows(steering_snapshot, queue_view);
     const int queue_rows = static_cast<int>(queue_rows_text.size());
-    // slash 提示行画在状态行之下(跟空闲 composer 的视觉层级一致),高度一并
-    // 记进 total_rows——探底滚屏、旧框擦除(都按 f.rows 报账)随之生效。
-    const int hint_rows = static_cast<int>(f.hints.size());
-    const int total_rows = working_rows + panel_rows + queue_rows + kStreamFooterBoxRows + hint_rows;
+    // 一本帧账(与空闲 composer 同一只 BottomChromeFrame):队列在上横线之
+    // 上、坞在状态栏之下、slash 提示垫最底。高度全部从 frame 报——探底滚
+    // 屏、旧框擦除(都按 f.rows 报账)随之生效。
+    BottomChromeFrame frame;
+    frame.queue_rows = queue_rows_text;
+    frame.agent_dock_rows = dock_rows_text;
+    frame.transient_rows = f.hints;
+    frame.composer_rows = 1;  // footer 输入行单行会计(多行尾巴只写行数提示)
+    frame.selected_task_id = dock_selected_task_id;
+    frame.revision = BottomChromeRevision(frame);
+    const int total_rows = working_rows + frame.TotalRows();
 
     // 框落在正文光标的下一行:正文停在行中(bx>0)就 by+1,正文刚换行
     // 停在行首(bx==0)就落在 by 这空行上——两种都是"正文当前底部的下一行"。
@@ -1785,12 +1813,12 @@ void RedrawStreamFooterLocked() {
     }
 
     // 待发队列:上横线之上、Working 之下(它是即将发送的内容,不属代理导航)。
-    for (std::size_t i = 0; i < queue_rows_text.size(); ++i) {
+    for (std::size_t i = 0; i < frame.queue_rows.size(); ++i) {
         platform::SetCursorPos(0, box_top + static_cast<int>(i));
         const int room = (std::max)(0, width - 1);
-        std::cout << f.color << TruncateUtf8ToDisplayWidth(queue_rows_text[i], room) << f.reset;
+        std::cout << f.color << TruncateUtf8ToDisplayWidth(frame.queue_rows[i], room) << f.reset;
     }
-    if (!queue_rows_text.empty()) {
+    if (!frame.queue_rows.empty()) {
         box_top += queue_rows;
     }
 
@@ -1837,17 +1865,17 @@ void RedrawStreamFooterLocked() {
     // 一次画完,擦除按上一帧 f.rows 报账——坞增高时旧帧整个先擦净,不留
     // 第二份提示或 main。
     int dock_top = box_top + 4;
-    for (std::size_t i = 0; i < dock_rows_text.size(); ++i) {
+    for (std::size_t i = 0; i < frame.agent_dock_rows.size(); ++i) {
         platform::SetCursorPos(0, dock_top + static_cast<int>(i));
         const int room = (std::max)(0, width - 1);
-        std::cout << f.color << TruncateUtf8ToDisplayWidth(dock_rows_text[i], room) << f.reset;
+        std::cout << f.color << TruncateUtf8ToDisplayWidth(frame.agent_dock_rows[i], room) << f.reset;
     }
 
     // slash 提示行:导航坞之下垫最底(短命 UI),纯文本、按屏宽截断(跟
     // ReadLineKeyByKey 画 hint_lines 一个路数);plain 主题不夹 ANSI。
-    for (std::size_t i = 0; i < f.hints.size(); ++i) {
+    for (std::size_t i = 0; i < frame.transient_rows.size(); ++i) {
         platform::SetCursorPos(0, dock_top + panel_rows + static_cast<int>(i));
-        std::cout << TruncateUtf8ToDisplayWidth(f.hints[i], (std::max)(0, width - 1));
+        std::cout << TruncateUtf8ToDisplayWidth(frame.transient_rows[i], (std::max)(0, width - 1));
     }
 
     std::cout << kSyncOutputEnd;

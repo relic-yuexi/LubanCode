@@ -66,6 +66,8 @@ add_executable(lubancode_tests
   test_format_utils.cpp
   test_transcript.cpp
   test_agent_panel.cpp
+  # 0.29.x 底栏一本帧账:行序/高度/指纹纯逻辑(空闲与流式共用)。
+  test_bottom_chrome.cpp
   test_agent_inbox.cpp
   test_markdown.cpp
   test_latex_math.cpp
