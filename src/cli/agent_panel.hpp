@@ -217,10 +217,11 @@ struct AgentDockLayout {
 // (完成)行最多单列三只,更多折成一行汇总;汇总行是导航哨兵,Enter 展开、
 // Esc 收起,展开/收起不改任何 task id。条目多于窗口时围着 selected 开窗,
 // 选中行永不因开窗消失;详情超预算保头部,末行写清未展示数。
-// 导航表(纯函数):条目经闲置折叠后的可导航 id 序列——main(0)固定首位,
-// 闲置(完成)条目最多单列三只,更多折成一行汇总哨兵(kIdleSummaryTaskId,
-// 插在首个被折条目的位置);活动/失败/正在查看(viewed_task_id)的行永不
-// 折叠。布局渲染与按键状态机共用这一份,选择永远落不进被折起来的区域。
+// 导航表(纯函数):条目经闲置折叠后的可导航 id 序列(不含 main——控制器
+// 契约与旧 PanelEntryIds 一致,main 隐式算第 0 项)。闲置(完成)条目最多
+// 单列三只,更多折成一行汇总哨兵(kIdleSummaryTaskId,插在首个被折条目的
+// 位置);活动/失败/正在查看(viewed_task_id)的行永不折叠。布局渲染与按键
+// 状态机共用这一份,选择永远落不进被折起来的区域。
 std::vector<int> DockNavigationIds(const std::vector<AgentPanelEntry>& agents, bool idle_expanded,
                                    int viewed_task_id);
 

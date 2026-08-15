@@ -243,6 +243,7 @@ struct StreamFooterState {
     int rows = 0;             // 上次实际画了几行(队列区会让高度变化)
     int body_x = -1;          // footer 下方藏着的正文续写位置
     int body_y = -1;
+    int last_width = -1;      // 上一帧的终端列宽;变了说明 resize 过,旧锚点作废
     // 两枚深度都只在 StdoutWriteMutex 内改。确认/ask_user 可嵌套挂起；
     // 工具条目重画也可套着状态块重画。任何一层尚未退完，Redraw 都只记
     // 状态不落笔，最外层析构负责补回完整帧。
@@ -964,10 +965,61 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         redraw_with_panel(editor.CurrentRenderState(), panel_entries());
     }
 
+    // Ctrl+L 与 resize 共用的整屏重建(规格"整屏重画"节):作废帧锚点、清
+    // 可视区(不清回滚历史)、请应用层重铺 transcript、重打提示符与底栏。
+    // composer 草稿、面板选择、查看态与收件目标全在状态里,一个都不丢;
+    // 重复行随整帧重画归零。resize 后 conhost 会把宽行重排成多行,旧锚点
+    // 全部失准,增量 diff 修不回来——只有整屏重建一条路干净。
+    const auto rebuild_screen = [&]() {
+        const std::optional<platform::ScreenInfo> clear_info = platform::GetScreenInfo();
+        if (!clear_info.has_value()) {
+            return;
+        }
+        const int vh = clear_info->viewport_height > 0 ? clear_info->viewport_height : clear_info->height;
+        const int top = clear_info->viewport_y;
+        for (int y = top; y < top + vh && y < clear_info->height; ++y) {
+            platform::ClearRowHardFrom(0, y, clear_info->width);
+        }
+        platform::SetCursorPos(0, top);
+        if (UiHandlerSlot()) {
+            (void)UiHandlerSlot()(UiKeyAction::RepaintScreen);  // 正文从 transcript 快照重铺
+        }
+        if (box) {
+            const std::optional<platform::ScreenInfo> rule_info = platform::GetScreenInfo();
+            const int console_width = rule_info.has_value() ? rule_info->width : 80;
+            std::cout << BoxRuleLine(theme, console_width) << "\n";
+        }
+        std::cout << prompt;
+        std::cout.flush();
+        if (const std::optional<platform::ScreenInfo> after_info = platform::GetScreenInfo();
+            after_info.has_value()) {
+            start_row = after_info->cursor_y;
+            prompt_end_col = after_info->cursor_x;
+        }
+        prev_body_row_count = 0;
+        previous_frame.reset();
+        prev_frame_origin = -1;
+        redraw_with_panel(editor.CurrentRenderState(), panel_entries());
+    };
+
+    // resize 探测:宽高一变就走整屏重建(下一拍内完成),不能等指纹——
+    // 尺寸不在指纹里,而 conhost 重排过的旧行靠增量 diff 擦不净。
+    int last_screen_width = -1;
+    int last_screen_height = -1;
+
     while (true) {
         // ReadOne 原本会一直堵到下一枚按键，后台代理即便完成，面板也只会
         // 在用户敲键后才变。100ms 探一次队列；没键就只重画这一帧。
         if (!platform::WaitForKeyEvent(100)) {
+            if (const std::optional<platform::ScreenInfo> size_info = platform::GetScreenInfo();
+                size_info.has_value()) {
+                if (last_screen_width != -1 &&
+                    (size_info->width != last_screen_width || size_info->height != last_screen_height)) {
+                    rebuild_screen();
+                }
+                last_screen_width = size_info->width;
+                last_screen_height = size_info->height;
+            }
             const auto entries = panel_entries();
             const bool armed_expired = panel_session.ExpireArmed(std::chrono::steady_clock::now());
             std::string tag;
@@ -1006,40 +1058,11 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         const auto entries_before_key = panel_entries();
 
         // ---- Ctrl+L 整屏重画(规格"整屏重画"节):从状态重建,不吞输入 ----
-        // 作废帧锚点、清可视区(不清回滚历史)、请应用层重铺 transcript、
-        // 重打提示符与底栏。composer 草稿、面板选择、查看态与收件目标全在
-        // 状态里,一个都不丢;重复行随整帧重画归零。管道/plain 场景走不到
-        // 逐键路径,天然无感。
+        // 与 resize 共用 rebuild_screen。composer 草稿、面板选择、查看态与
+        // 收件目标全在状态里,一个都不丢;重复行随整帧重画归零。管道/plain
+        // 场景走不到逐键路径,天然无感。
         if (composer && raw_key->kind == platform::KeyInput::Kind::CtrlL) {
-            const std::optional<platform::ScreenInfo> clear_info = platform::GetScreenInfo();
-            if (clear_info.has_value()) {
-                const int vh = clear_info->viewport_height > 0 ? clear_info->viewport_height
-                                                               : clear_info->height;
-                const int top = clear_info->viewport_y;
-                for (int y = top; y < top + vh && y < clear_info->height; ++y) {
-                    platform::ClearRowHardFrom(0, y, clear_info->width);
-                }
-                platform::SetCursorPos(0, top);
-                if (UiHandlerSlot()) {
-                    (void)UiHandlerSlot()(UiKeyAction::RepaintScreen);  // 正文从 transcript 快照重铺
-                }
-                if (box) {
-                    const std::optional<platform::ScreenInfo> rule_info = platform::GetScreenInfo();
-                    const int console_width = rule_info.has_value() ? rule_info->width : 80;
-                    std::cout << BoxRuleLine(theme, console_width) << "\n";
-                }
-                std::cout << prompt;
-                std::cout.flush();
-                if (const std::optional<platform::ScreenInfo> after_info = platform::GetScreenInfo();
-                    after_info.has_value()) {
-                    start_row = after_info->cursor_y;
-                    prompt_end_col = after_info->cursor_x;
-                }
-                prev_body_row_count = 0;
-                previous_frame.reset();
-                prev_frame_origin = -1;
-                redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
-            }
+            rebuild_screen();
             continue;
         }
 
@@ -1633,6 +1656,16 @@ void RedrawStreamFooterLocked() {
     if (!info.has_value()) {
         return;  // 拿不到屏幕信息这一笔就不画,下一笔再来
     }
+    if (f.last_width != -1 && f.last_width != info->width) {
+        // resize:conhost 把宽行重排成了多行,上一帧的绝对锚点(顶行/正文
+        // 续写位)全部失准——按旧 f.row/f.rows 擦会擦错行。当作没画过,
+        // 从当前光标重新认领正文位置,整帧重画。
+        f.row = -1;
+        f.rows = 0;
+        f.body_x = -1;
+        f.body_y = -1;
+    }
+    f.last_width = info->width;
     // footer 已在屏上时，物理光标位于输入行；正文落笔位要从 state 取。
     // 第一次画才从当前光标认领正文位置。
     int bx = f.row >= 0 && f.body_x >= 0 ? f.body_x : info->cursor_x;

@@ -108,27 +108,27 @@ TEST_CASE("坞布局:16 只不限窗口时全显,没有未展示计数") {
 TEST_CASE("坞布局:常态窗口最多单列 5 只,围着选中开,选中永不消失") {
     SetLanguage("zh");
     const auto agents = MakeAgents(16);
-    // 选中 0:窗口贴顶,下方写清还有几只。
+    // 选中 0:main + 窗口贴顶的 5 只代理。
     auto head = LayoutAgentDock(agents, 0, true, false, {}, 5, 0, 80, false, false, false);
     CHECK(head.visible_first == 0);
-    CHECK(head.visible_count == 5);
+    CHECK(head.visible_count == 6);  // main + 5 只代理
     CHECK(head.hidden_above == 0);
-    CHECK(head.hidden_below == 12);
+    CHECK(head.hidden_below == 11);
     const auto head_lines = RenderAgentDockLines(head, 80);
     REQUIRE(head_lines.size() >= 2);
     CHECK(Contains(head_lines[1], "17"));  // 总数写在窗口计数行
     // 选中 16(最后一只):窗口贴底。
     auto tail = LayoutAgentDock(agents, 16, true, false, {}, 5, 0, 80, false, false, false);
-    CHECK(tail.visible_first == 12);
-    CHECK(tail.hidden_above == 12);
+    CHECK(tail.visible_first == 0);  // main 恒在
+    CHECK(tail.hidden_above == 11);
     CHECK(tail.hidden_below == 0);
     // 选中 8:窗口居中跟着走,窗口里必含选中那条。
     auto middle = LayoutAgentDock(agents, 8, true, false, {}, 5, 0, 80, false, false, false);
-    CHECK(middle.visible_first == 6);
-    CHECK(middle.hidden_above == 6);
+    CHECK(middle.hidden_above == 5);
     CHECK(middle.hidden_below == 6);
     const auto middle_lines = RenderAgentDockLines(middle, 80);
-    CHECK(Contains(middle_lines[2 + (8 - 6)], "\xE2\x9D\xAF"));  // ❯ 选中标记
+    // 行序:提示(0)/计数(1)/main(2)/代理自 3 起,窗口自导航 6 到 10。
+    CHECK(Contains(middle_lines[3 + (8 - 6)], "\xE2\x9D\xAF"));  // ❯ 选中标记
 }
 
 TEST_CASE("坞布局:选中标记只在焦点态画;查看态详情行缀在树后面") {
@@ -242,12 +242,12 @@ TEST_CASE("导航表:闲置(完成)最多单列三只,更多折成汇总哨兵;�
     SetLanguage("zh");
     const auto agents = MakeIdleAgents(6);
     const auto collapsed = DockNavigationIds(agents, /*idle_expanded=*/false, 0);
-    // main + 前三只闲置 + 汇总哨兵。
-    CHECK(collapsed == Ids({0, 1, 2, 3, kIdleSummaryTaskId}));
+    // 前三只闲置 + 汇总哨兵(表不含 main,main 隐式算第 0 项)。
+    CHECK(collapsed == Ids({1, 2, 3, kIdleSummaryTaskId}));
     const auto expanded = DockNavigationIds(agents, /*idle_expanded=*/true, 0);
-    CHECK(expanded == Ids({0, 1, 2, 3, 4, 5, 6}));
+    CHECK(expanded == Ids({1, 2, 3, 4, 5, 6}));
     // 三只以内不折。
-    CHECK(DockNavigationIds(MakeIdleAgents(3), false, 0) == Ids({0, 1, 2, 3}));
+    CHECK(DockNavigationIds(MakeIdleAgents(3), false, 0) == Ids({1, 2, 3}));
 }
 
 TEST_CASE("导航表:运行中/失败/正在查看的行永不折叠") {
@@ -255,13 +255,13 @@ TEST_CASE("导航表:运行中/失败/正在查看的行永不折叠") {
     // 5 只闲置(本该只留 3 只 + 汇总),#5 正在查看:保住单列;折掉的只有 #4。
     std::vector<AgentPanelEntry> agents = MakeIdleAgents(5);
     const auto ids = DockNavigationIds(agents, false, /*viewed=*/5);
-    CHECK(ids == Ids({0, 1, 2, 3, kIdleSummaryTaskId, 5}));
-    // 运行中/失败同例:5 只里 #2 运行、#4 失败,它们之外的闲置仍只留前三。
+    CHECK(ids == Ids({1, 2, 3, kIdleSummaryTaskId, 5}));
+    // 运行中/失败同例:6 只里 #2 运行、#4 失败,它们之外的闲置仍只留前三。
     auto mixed = MakeIdleAgents(6);
     mixed[1].running = true;
     mixed[3].failed = true;
     const auto mixed_ids = DockNavigationIds(mixed, false, 0);
-    CHECK(mixed_ids == Ids({0, 1, 2, 3, 4, 5, kIdleSummaryTaskId}));
+    CHECK(mixed_ids == Ids({1, 2, 3, 4, 5, kIdleSummaryTaskId}));
 }
 
 TEST_CASE("坞布局:6 只闲置只列前三只与一行汇总,汇总不占 5 行窗口的代理位") {

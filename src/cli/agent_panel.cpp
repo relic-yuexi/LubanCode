@@ -260,9 +260,8 @@ bool AgentPanelController::ExpireArmed(std::chrono::steady_clock::time_point now
 
 std::vector<int> DockNavigationIds(const std::vector<AgentPanelEntry>& agents, bool idle_expanded,
                                    int viewed_task_id) {
-    std::vector<int> ids;
+    std::vector<int> ids;  // 不含 main:控制器契约里 main 隐式算第 0 项
     ids.reserve(agents.size() + 1);
-    ids.push_back(0);  // main 固定第 0 项
     int idle_rows = 0;
     bool summary_slot = false;
     for (const auto& entry : agents) {
@@ -298,9 +297,13 @@ AgentDockLayout LayoutAgentDock(const std::vector<AgentPanelEntry>& agents, int 
     }
 
     // ---- 折叠(规格"闲置与终态收纳") ----
-    // 导航表只有一份来源(DockNavigationIds),这里按它对齐出条目指针表,
-    // 折起来的数目用"总数 - 保留数"倒推——布局与按键状态机永远同一本账。
-    out.navigation_ids = DockNavigationIds(agents, idle_expanded, detail_open ? viewed_task_id : 0);
+    // 导航表只有一份来源(DockNavigationIds,不含 main),这里补上 main 后
+    // 按它对齐出条目指针表,折起来的数目用"总数 - 保留数"倒推——布局与
+    // 按键状态机永远同一本账。
+    {
+        const std::vector<int> folded = DockNavigationIds(agents, idle_expanded, detail_open ? viewed_task_id : 0);
+        out.navigation_ids.insert(out.navigation_ids.end(), folded.begin(), folded.end());
+    }
     std::vector<const AgentPanelEntry*> nav_entries;  // 与 navigation_ids 对齐(main/哨兵 = nullptr)
     nav_entries.reserve(out.navigation_ids.size());
     std::size_t agent_cursor = 0;
@@ -325,20 +328,22 @@ AgentDockLayout LayoutAgentDock(const std::vector<AgentPanelEntry>& agents, int 
 
     const int safe_selected = selected >= 0 && selected < out.total_count ? selected : 0;
 
-    // ---- 窗口化:常态最多单列 5 只代理,围着 selected 开窗,选中永不消失 ----
-    const int entry_cap = max_visible_entries > 0 ? max_visible_entries : out.total_count;
+    // ---- 窗口化:main 恒占一行,常态最多单列 5 只代理;窗口只在代理区
+    // 围着 selected 开,选中永不消失(仿 Claude Code 的密度) ----
+    const int agent_total = out.total_count - 1;
+    const int entry_cap = max_visible_entries > 0 ? max_visible_entries : agent_total;
     const int detail_size = detail_open && safe_selected != 0 ? static_cast<int>(detail_lines.size())
                         : (detail_open ? 1 : 0);  // main 详情固定 1 行
-    int visible_count = (std::min)(out.total_count, entry_cap);
+    int agents_visible = (std::min)(agent_total, entry_cap);
     int detail_shown = detail_size;
     bool detail_truncated = false;
     // ---- 矮屏预算:提示(永不丢)> 至少一条条目(含选中)> 详情 > 更多条目 ----
     if (max_total_rows > 0) {
         int chosen = -1;
-        for (int vis = visible_count; vis >= 1; --vis) {
-            const int note = vis < out.total_count ? 1 : 0;
+        for (int vis = agents_visible; vis >= 1; --vis) {
+            const int note = vis < agent_total ? 1 : 0;
             const int detail_hint = detail_open ? 1 : 0;
-            const int base = 1 + note + vis + detail_hint;
+            const int base = 1 + note + 1 + vis + detail_hint;  // 提示+计数+main+代理+详情提示
             if (base > max_total_rows) {
                 continue;
             }
@@ -364,22 +369,23 @@ AgentDockLayout LayoutAgentDock(const std::vector<AgentPanelEntry>& agents, int 
         if (chosen < 1) {
             return out;  // 连一条条目都摆不下:不出场
         }
-        visible_count = chosen;
+        agents_visible = chosen;
     }
-    int first = 0;
-    if (visible_count < out.total_count) {
-        first = safe_selected - visible_count / 2;  // 选中尽量落窗口中部
-        if (first < 0) {
-            first = 0;
+    int first = 1;  // 导航表里第一个代理的下标(main=0 恒在窗口)
+    if (agents_visible < agent_total) {
+        const int center = safe_selected > 0 ? safe_selected : 1;  // 选中尽量落窗口中部
+        first = center - agents_visible / 2;
+        if (first < 1) {
+            first = 1;
         }
-        if (first + visible_count > out.total_count) {
-            first = out.total_count - visible_count;
+        if (first + agents_visible > out.total_count) {
+            first = out.total_count - agents_visible;
         }
     }
-    out.visible_first = first;
-    out.visible_count = visible_count;
-    out.hidden_above = first;
-    out.hidden_below = out.total_count - first - visible_count;
+    out.visible_first = 0;
+    out.visible_count = agents_visible + 1;  // main 计入
+    out.hidden_above = first - 1;
+    out.hidden_below = agent_total - agents_visible - (first - 1);
 
     // ---- 提示行:随焦点/闲置展开态收放,窄屏(<90 列)摘掉低频长文案 ----
     const bool on_summary =
@@ -446,8 +452,9 @@ AgentDockLayout LayoutAgentDock(const std::vector<AgentPanelEntry>& agents, int 
         return row;
     };
     std::vector<AgentDockRow> entry_rows;
-    entry_rows.reserve(static_cast<std::size_t>(visible_count));
-    for (int nav_index = first; nav_index < first + visible_count; ++nav_index) {
+    entry_rows.reserve(static_cast<std::size_t>(agents_visible) + 1);
+    entry_rows.push_back(entry_row_at(0));  // main 恒在窗口首位
+    for (int nav_index = first; nav_index < first + agents_visible; ++nav_index) {
         entry_rows.push_back(entry_row_at(nav_index));
     }
     out.identity_width = (std::min)(kIdentityMaxCols, (std::max)(kIdentityMinCols, identity_max));
