@@ -58,7 +58,6 @@
 #include "app/commands/workspace_commands.hpp"
 #include "app/commands/peer_commands.hpp"
 #include "app/version.hpp"
-#include "cli/agent_status.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/diff.hpp"
@@ -487,6 +486,10 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
     sub_deferral = tool_runtime_->sub_deferral();
     tool_search_threshold = config.tool_search_threshold;
     if (session_agent_tool() != nullptr) {
+        // execution_mode=auto 的缺省走向:交互会话里独立探索型任务默认后台
+        // (结论稍后送达),模型非等结果不可时显式写 foreground。管道/单发
+        // 不设这个,auto 等价前台。
+        session_agent_tool()->SetBackgroundByDefault(true);
         // 每个后台任务各造一份 HTTP client 与基础工具表。取配置/模型/魂时
         // 正在主线程的 agent 工具调用里，拷贝完才起线程，不跨线程读这些
         // 会话可变字段。
@@ -544,7 +547,7 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
                 lubancode::cli::AgentPanelEntry entry;
                 entry.task_id = i;
                 entry.name = "general-purpose #" + std::to_string(i);
-                entry.description = "演示任务 " + std::to_string(i);
+                entry.title = "演示任务 " + std::to_string(i);
                 entry.state = "运行中(2 次工具调用 · 1.2k tokens · 12s)";
                 entry.running = true;
                 fake.push_back(std::move(entry));
@@ -726,9 +729,9 @@ InteractiveSession::~InteractiveSession() {
     lubancode::cli::SetIdleWakeHook(nullptr);
 }
 
-// 后台子代理面板:轻量全量列表(0.28.x 起不截 8 只,详情另走 BuildAgentTaskDetail)。
-// 摘要行的口径与流式回合的子代理状态条(AgentStatusBoard/FormatAgentStatusLines)
-// 同一套 i18n(agent_status.*):两块 painter 一个格式,合流布局规约的文本侧。
+// 后台子代理面板:轻量全量列表(0.28.x 起不截 8 只,详情另走 BuildAgentTaskDetail;
+// 统一台账后前台任务也在同一份列表里)。摘要行口径沿用 agent_status.* 那套
+// i18n,空闲与流式两处 painter 一个格式。
 std::vector<lubancode::cli::AgentPanelEntry> InteractiveSession::BuildAgentPanelEntries() {
     std::vector<lubancode::cli::AgentPanelEntry> out;
     lubancode::tools::AgentTool* agent_tool = session_agent_tool();
@@ -761,15 +764,9 @@ std::vector<lubancode::cli::AgentPanelEntry> InteractiveSession::BuildAgentPanel
         }
         entry.state = trf("agent_status.summary", tr(state_key), task.tool_call_count,
                           lubancode::cli::FormatTokenCount(tokens), lubancode::cli::FormatSeconds(seconds));
-        const auto one_line = [](std::string text) {
-            for (char& c : text) {
-                if (c == '\n' || c == '\r' || c == '\t') {
-                    c = ' ';
-                }
-            }
-            return text;
-        };
-        entry.description = one_line(lubancode::cli::TruncateUtf8Codepoints(task.prompt, 34));
+        // 列表行只认真正短 title;旧任务没有 title 就显示"未命名子代理 #N"
+        // ——绝不回退到 prompt 前若干字(prompt 只在详情里出现)。
+        entry.title = task.title.empty() ? trf("agent_panel.untitled", task.id) : task.title;
         if (task.pending_message_count > 0) {
             // 有话已排给这只代理、还没在轮次边界送达——列表行尾巴明写,
             // 详情里再列原文,不让"已排给 subagent #N"只活在提交那一瞬。
@@ -802,6 +799,13 @@ std::vector<std::string> InteractiveSession::BuildAgentTaskDetail(int task_id) {
         }
         return text;
     };
+    // 详情先给"任务标题"(真正短标题,可能退"未命名"),标明前台/后台来源,
+    // 完整 prompt 另起"任务说明"——两者分开,不混用。
+    lines.push_back(tr("agent_panel.detail_title") +
+                    (snapshot->title.empty() ? trf("agent_panel.untitled", snapshot->id) : snapshot->title));
+    lines.push_back(std::string("  [") +
+                    tr(snapshot->foreground ? "agent_panel.source_foreground" : "agent_panel.source_background") +
+                    "]");
     lines.push_back(tr("agent_panel.detail_prompt"));
     lines.push_back("  " + one_line(snapshot->prompt));
     const auto pending = agent_tool->PendingTaskMessages(task_id);
@@ -1259,6 +1263,8 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
 }
 
 void InteractiveSession::SyncWorktreeDirectory() {
+    // 切 worktree 收面板:查看态目标跟着旧房的任务走,别把消息投去旧目标。
+    lubancode::cli::ResetAgentPanelSession();
     prompt_options.cwd = CurrentDirUtf8();
     if (project_memory != nullptr) {
         if (const auto updated = project_memory->SetWorkingDirectory(std::filesystem::current_path());
@@ -1570,6 +1576,8 @@ SessionCommandState InteractiveSession::MakeSessionCommandState() {
 // /clear 与退出共用的清场:停全部子代理、报未送达,排队消息明确处置——
 // 一样不无声遗失(规格"数据与线程"节)。
 void InteractiveSession::CleanupBackgroundAgents() {
+    // 面板收场:查看态/收件目标整份收干净,不给已收场的任务留悬空目标。
+    lubancode::cli::ResetAgentPanelSession();
     // 会话层排队消息:逐条列出后丢弃(目标短名 + 首行原文),处置看得见。
     const auto discarded = SessionSteeringQueue().TakeAllForDisposal();
     if (!discarded.empty()) {

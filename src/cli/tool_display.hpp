@@ -21,7 +21,6 @@
 
 #include <nlohmann/json.hpp>
 
-#include "cli/agent_status.hpp"
 #include "cli/console_input.hpp"
 #include "cli/diff.hpp"
 #include "cli/i18n.hpp"
@@ -196,7 +195,7 @@ struct ToolDisplay {
     // UI-D 折叠(#三):同一份 Ctrl+O 紧凑/详细全局开关(TranscriptPainter
     // 构造函数第三个参数那份,这里再存一份指针给 OnSubToolStart/Result/
     // Blocked 判断要不要把子代理内层工具条目画到屏幕上——紧凑态(默认)
-    // 只留 AgentStatusBoard 那一行 running→done 摘要,不逐条铺屏;
+    // 紧凑态不逐条铺屏;
     // TranscriptItem 本身照旧记(NewItem/FinalizeItem 不受这个开关影响),
     // 明细留在 transcript 数组里,session 落盘/Ctrl+E 聚焦查看/切到详细态
     // 都还能看见,只是紧凑态默认不画。atomic<bool>:回合执行期间会被
@@ -209,13 +208,10 @@ struct ToolDisplay {
     mutable std::mutex transcript_snapshot_mutex_;
     std::vector<lubancode::cli::TranscriptItem> transcript_snapshot_;
 
-    // #52:子代理状态条。agent_status_board 是这一轮 RunTurn 独有的一份
-    // (ToolDisplay 本身就是每轮现建的),status_painter 由 RunTurn 在
-    // loop.Run() 前设进来(RunTurn 那边先建 AgentStatusPainter 再把地址
-    // 灌进来),不设(nullptr)= 没有 ticker(管道模式/非真控制台)。
-    lubancode::cli::AgentStatusBoard agent_status_board;
-    AgentStatusPainter* status_painter = nullptr;
-    int active_agent_status_id = -1;  // 当前进行中的子代理在 agent_status_board 里的 id
+    // #52 起家的子代理状态条已删:前台/后台子代理的状态、工具次数、token、
+    // 耗时全在 AgentTool 的统一台账(TaskRecord/TaskSummaries)里,由代理
+    // 面板(空闲 composer 上方 + 流式 footer)一处画,ToolDisplay 不再自
+    // 己另记一本账。
 
     // 主工具、子代理内层工具都是严格串行的,各留一个"进行中"槽位就够
     // (agent 工具执行期间 active_main 指着 agent 条目,active_sub 指着
@@ -250,7 +246,6 @@ struct ToolDisplay {
 
     void OnToolStart(const std::string& name, const nlohmann::json& input) {
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
-        HideStatus();  // 马上要在状态块原本的位置打印新条目,先擦
         if (!is_console) {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
             std::cout << "\n" << theme.tool_line << tr("pipe.tool_start") << name << " " << input.dump() << theme.reset
@@ -266,11 +261,6 @@ struct ToolDisplay {
         if (name == "agent") {
             agent_rounds = 0;
             agent_sub_tools = 0;
-            // #52:状态条起一条 Running 记录,label 用子代理任务原文(未截断
-            // 的 prompt),AgentStatusBoard::Start 内部按 40 码点截断——跟
-            // BuildToolTitle 给 "agent(...)" 条目首行用的那份摘要同一条规矩,
-            // 两处看着是同一个任务。
-            active_agent_status_id = agent_status_board.Start(input.value("prompt", std::string()));
         }
         const bool is_todo = name == "todo_write" && todo_state;
         std::size_t todo_item_count = 0;
@@ -330,7 +320,6 @@ struct ToolDisplay {
             return;
         }
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
-        HideStatus();
         auto& item = transcript[static_cast<std::size_t>(active_main)];
         // UI-C:自动放行时垫在条目下面的 diff 预览,执行完了就擦——终态只
         // 留 "新增 N 行,删除 M 行" 简短摘要,不铺屏(确认路子的预览已被
@@ -342,14 +331,6 @@ struct ToolDisplay {
         FinalizeItem(item, name, main_input, result, main_write_old_lines, agent_rounds, agent_sub_tools,
                       main_diff_full, main_diff_final);
         UpdateSnapshotItem(active_main);
-        if (name == "agent" && active_agent_status_id >= 0) {
-            // #52:收成终态——失败包含"结果本身报错"和"被 ESC 打断"两种,
-            // 状态条没有单独的 Interrupted 档,统一归到失败态(耗时/工具
-            // 次数照样如实留着,人能看见跑到哪儿被打断的)。
-            const bool interrupted = cancel_flag != nullptr && cancel_flag->load();
-            agent_status_board.Finish(active_agent_status_id, !result.is_error && !interrupted);
-            active_agent_status_id = -1;
-        }
         if (is_console) {
             painter.Repaint(item);
         } else {
@@ -451,11 +432,7 @@ struct ToolDisplay {
 
     void OnSubToolStart(const std::string& name, const nlohmann::json& input) {
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
-        HideStatus();  // 马上要在状态块原本的位置打印新条目,先擦
         agent_sub_tools += 1;
-        if (active_agent_status_id >= 0) {
-            agent_status_board.RecordToolCall(active_agent_status_id);  // #52:子代理调了一次工具,计数
-        }
         if (!is_console) {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
             std::cout << "\n"
@@ -473,7 +450,7 @@ struct ToolDisplay {
         // UI-D 折叠(#三,修订):紧凑态(默认)下,子工具"开始执行"这一刻
         // 就不画明细了——之前只在收尾(OnSubToolResult/OnSubBlocked)的
         // Retract 才把它收走,真机 dogfood 发现子工具执行慢时(比如
-        // web_fetch 卡几十秒)这段"运行中"的明细会跟 AgentStatusBoard 的
+        // web_fetch 卡几十秒)这段"运行中"的明细会跟代理面板的
         // 摘要行同屏铺一起,没达到"紧凑态从不铺明细"的预期。改成
         // 开头就按 SubItemsExpanded() 判断要不要画——只有详细态才画执行中
         // 态、登记锚点(确认流程 needs_confirm 的 y/a/N、UI-C 的 diff 预览/
@@ -498,7 +475,6 @@ struct ToolDisplay {
             return;
         }
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
-        HideStatus();
         auto& item = transcript[static_cast<std::size_t>(active_sub)];
         if (sub_preview_below && is_console) {
             painter.TrimBelow(item.id);  // 理由同 OnToolDone
@@ -528,7 +504,6 @@ struct ToolDisplay {
             return;
         }
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
-        HideStatus();
         auto& item = transcript[static_cast<std::size_t>(active_sub)];
         item.status = lubancode::cli::TranscriptStatus::Error;
         item.summary_lines = lubancode::cli::ErrorSummaryLines(item.tool_name, message);
@@ -557,7 +532,6 @@ struct ToolDisplay {
             return;
         }
         const lubancode::cli::StreamFooterPaintScope footer_paint;
-        HideStatus();
         const auto preview = BuildFileDiffPreview(name, input, theme);
         if (!preview.has_value()) {
             return;
@@ -584,7 +558,6 @@ struct ToolDisplay {
     // 下标,答完交回 OnConfirmAnswered。
     int OnConfirmRequest() {
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
-        HideStatus();
         const int idx = active_sub >= 0 ? active_sub : active_main;
         if (idx >= 0) {
             auto& item = transcript[static_cast<std::size_t>(idx)];
@@ -606,7 +579,6 @@ struct ToolDisplay {
             return;
         }
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
-        HideStatus();
         auto& item = transcript[static_cast<std::size_t>(idx)];
         const bool was_sub = idx == active_sub;  // Cancelled 分支下面会把 active_sub 收掉,先记住
         if (is_console) {
@@ -637,16 +609,8 @@ struct ToolDisplay {
     }
 
 private:
-    // #52:马上要打印状态块原本位置上的新内容之前先调这个——status_painter
-    // 没设(nullptr,管道模式/非真控制台)时安静地什么也不做。
-    void HideStatus() {
-        if (status_painter != nullptr) {
-            status_painter->Hide();
-        }
-    }
-
     // UI-D 折叠(#三):子代理内层工具条目落定终态那一刻,紧凑态(默认)
-    // 下把刚画出来的那几行从屏幕上收走——AgentStatusBoard 已经有一行
+    // 下把刚画出来的那几行从屏幕上收走——代理面板已经有一行
     // running→done 摘要覆盖同样的信息,没必要逐条摊开占屏幕。TranscriptItem
     // 本身(连同刚落定的终态摘要)照旧留在 transcript 数组里,session 落盘/
     // Ctrl+E 聚焦查看/Ctrl+O 切到详细态都还能看见,只是紧凑态默认不铺屏。
@@ -671,9 +635,6 @@ public:
     // 擦掉：先收状态块、废掉旧锚点，再从线程安全快照生成真正的详细/紧凑
     // 转录。这里只返回文本，落笔仍由 console_input 统一完成。
     std::string FormatSnapshotForToggleLocked(bool expanded) {
-        if (status_painter != nullptr) {
-            status_painter->HideForExternalPaintLocked();
-        }
         painter.ForgetAnchorsLocked();
 
         std::vector<lubancode::cli::TranscriptItem> snapshot;

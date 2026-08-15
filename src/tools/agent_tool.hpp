@@ -54,7 +54,12 @@ struct AgentTaskToolCall {
 struct AgentTaskSnapshot {
     int id = 0;
     std::string agent_type;
+    // 真正短标题(人看的语义字段,与 prompt 分家)。新建任务必填;旧任务
+    // 没有就空着,显示层退"未命名子代理 #N",绝不回退到 prompt 前若干字。
+    std::string title;
     std::string prompt;
+    // 前台(阻塞父级调用)还是后台(独立线程)。详情可看,列表不必铺。
+    bool foreground = false;
     AgentTaskState state = AgentTaskState::Running;
     std::int64_t input_tokens = 0;
     std::int64_t output_tokens = 0;
@@ -72,7 +77,9 @@ struct AgentTaskSnapshot {
 struct AgentTaskSummary {
     int id = 0;
     std::string agent_type;
+    std::string title;  // 真正短标题;空 = 旧任务,显示层退"未命名子代理 #N"
     std::string prompt;
+    bool foreground = false;
     AgentTaskState state = AgentTaskState::Running;
     std::int64_t input_tokens = 0;
     std::int64_t output_tokens = 0;
@@ -260,13 +267,13 @@ private:
     static std::string FinishIsolationRoom(const lubancode::cli::AgentWorktree& room,
                                            const lubancode::cli::GitRunner& runner);
 
-    Result ExecuteForeground(const nlohmann::json& input, const std::string& agent_type,
+    Result ExecuteForeground(const nlohmann::json& input, const std::string& title, const std::string& agent_type,
                              ToolRegistry& task_registry, int max_turns, bool isolate);
-    Result LaunchBackground(const nlohmann::json& input, const std::string& agent_type,
+    Result LaunchBackground(const nlohmann::json& input, const std::string& title, const std::string& agent_type,
                             ToolRegistry& task_registry, int max_turns, bool isolate);
     Result RunTask(api::Backend& backend, ToolRegistry& task_registry, const std::string& prompt,
                    const std::string& agent_type, int max_turns, const Hooks* foreground_hooks,
-                   const std::shared_ptr<TaskRecord>& background_task,
+                   const std::shared_ptr<TaskRecord>& task,
                    const DetachedAgentBackend* detached = nullptr,
                    const std::string* prepared_system_prompt = nullptr,
                    const IsolationScope* isolation_scope = nullptr);

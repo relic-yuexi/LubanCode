@@ -29,10 +29,12 @@ std::string BuildEntryRow(int index, const std::string& name, const std::string&
 
 }  // namespace
 
-AgentPanelController::Outcome AgentPanelController::HandleKey(PanelKey key, int total_entries,
+AgentPanelController::Outcome AgentPanelController::HandleKey(PanelKey key,
+                                                              const std::vector<int>& agent_task_ids,
                                                               bool composer_empty,
                                                               std::chrono::steady_clock::time_point now) {
     Outcome out;
+    const int total_entries = static_cast<int>(agent_task_ids.size()) + 1;
     const bool panel_alive = total_entries > 1;
     // 两段确认窗口内的任何别的键都撤销第一段(免得误杀),随后按原语义走。
     if (armed_ && key != PanelKey::StopAllArm && key != PanelKey::StopAllConfirm) {
@@ -40,13 +42,14 @@ AgentPanelController::Outcome AgentPanelController::HandleKey(PanelKey key, int 
         out.redraw = true;
     }
     if (!panel_alive) {
-        // 面板不存在(没有后台子代理):全部键还给 composer,状态收干净。
+        // 面板不存在(没有任何子代理):全部键还给 composer,状态收干净。
         if (focus_ || detail_) {
             Reset();
             out.redraw = true;
         }
         return out;
     }
+    const int index = selected_index(agent_task_ids);
 
     switch (key) {
         case PanelKey::Up:
@@ -57,7 +60,9 @@ AgentPanelController::Outcome AgentPanelController::HandleKey(PanelKey key, int 
             const int delta = key == PanelKey::Up ? -1 : 1;
             focus_ = true;
             detail_ = false;  // 换选择 = 离开旧查看态,标签跟着换
-            selected_ = (selected_ + delta + total_entries) % total_entries;
+            const int next = (index + delta + total_entries) % total_entries;
+            selected_ = next;
+            selected_task_id_ = next == 0 ? 0 : agent_task_ids[static_cast<std::size_t>(next - 1)];
             out.consumed = true;
             out.redraw = true;
             return out;
@@ -81,6 +86,7 @@ AgentPanelController::Outcome AgentPanelController::HandleKey(PanelKey key, int 
             if (focus_) {
                 focus_ = false;
                 selected_ = 0;
+                selected_task_id_ = 0;
                 out.consumed = true;
                 out.redraw = true;
                 return out;
@@ -89,12 +95,13 @@ AgentPanelController::Outcome AgentPanelController::HandleKey(PanelKey key, int 
         }
         case PanelKey::StopEntry: {
             // 正在输入正文时普通字母 x 绝不触发代理操作;main 行也不接停止。
-            if (!focus_ || !composer_empty || selected_ <= 0) {
+            if (!focus_ || !composer_empty || index <= 0) {
                 return out;
             }
             out.consumed = true;
             out.redraw = true;
             out.stop_current = true;
+            out.stop_current_task_id = selected_task_id_;
             return out;
         }
         case PanelKey::StopAllArm: {
@@ -125,21 +132,45 @@ AgentPanelController::Outcome AgentPanelController::HandleKey(PanelKey key, int 
     return out;
 }
 
-void AgentPanelController::OnEntriesChanged(int total_entries) {
-    if (total_entries <= 1) {
+int AgentPanelController::selected_index(const std::vector<int>& agent_task_ids) const {
+    if (selected_task_id_ == 0) {
+        return 0;
+    }
+    for (std::size_t i = 0; i < agent_task_ids.size(); ++i) {
+        if (agent_task_ids[i] == selected_task_id_) {
+            return static_cast<int>(i) + 1;
+        }
+    }
+    return 0;  // id 已不在表里(增删后的空档):按 main 算,下一拍 OnEntriesChanged 修正
+}
+
+void AgentPanelController::OnEntriesChanged(const std::vector<int>& agent_task_ids) {
+    if (agent_task_ids.empty()) {
         // 子代理全没了:面板消失,状态收干净(main 之外没有可聚焦的条目)。
         Reset();
         return;
     }
-    if (selected_ >= total_entries) {
-        selected_ = total_entries - 1;
+    // 查看态的目标被清掉:强制收起,收件目标回 main(规格七)。
+    if (detail_ && target_task_id().has_value() &&
+        std::find(agent_task_ids.begin(), agent_task_ids.end(), selected_task_id_) == agent_task_ids.end()) {
+        CloseView();
+        return;
     }
+    const int found = selected_index(agent_task_ids);
+    if (found > 0) {
+        selected_ = found;  // id 还在:选择原样保住(哪怕列表重排)
+        return;
+    }
+    // id 没了:落到相邻条目(旧下标钳回界内),没有相邻就回 main。
+    selected_ = (std::min)(selected_, static_cast<int>(agent_task_ids.size()));
+    selected_task_id_ = selected_ == 0 ? 0 : agent_task_ids[static_cast<std::size_t>(selected_ - 1)];
 }
 
 void AgentPanelController::CloseView() {
     detail_ = false;
     focus_ = false;
     selected_ = 0;
+    selected_task_id_ = 0;
     armed_ = false;
 }
 
@@ -147,14 +178,56 @@ void AgentPanelController::Reset() {
     focus_ = false;
     detail_ = false;
     selected_ = 0;
+    selected_task_id_ = 0;
     armed_ = false;
 }
 
-std::optional<int> AgentPanelController::target_index() const {
-    if (!detail_ || selected_ <= 0) {
+std::optional<int> AgentPanelController::target_task_id() const {
+    if (!detail_ || selected_task_id_ <= 0) {
         return std::nullopt;
     }
-    return selected_;
+    return selected_task_id_;
+}
+
+// ---- AgentPanelSession:会话级外壳,一把小锁把键处理与绘制快照隔开 ----
+
+AgentPanelController::Outcome AgentPanelSession::HandleKey(PanelKey key, const std::vector<int>& agent_task_ids,
+                                                           bool composer_empty,
+                                                           std::chrono::steady_clock::time_point now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return controller_.HandleKey(key, agent_task_ids, composer_empty, now);
+}
+
+void AgentPanelSession::OnEntriesChanged(const std::vector<int>& agent_task_ids) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    controller_.OnEntriesChanged(agent_task_ids);
+}
+
+void AgentPanelSession::CloseView() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    controller_.CloseView();
+}
+
+void AgentPanelSession::Reset() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    controller_.Reset();
+}
+
+bool AgentPanelSession::ExpireArmed(std::chrono::steady_clock::time_point now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return controller_.ExpireArmed(now);
+}
+
+AgentPanelSession::Snapshot AgentPanelSession::SnapshotFor(const std::vector<int>& agent_task_ids) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Snapshot out;
+    out.focused = controller_.focused();
+    out.detail_open = controller_.detail_open();
+    out.stop_all_armed = controller_.stop_all_armed();
+    out.selected_index = controller_.selected_index(agent_task_ids);
+    out.selected_task_id = controller_.selected_task_id();
+    out.target_task_id = controller_.target_task_id();
+    return out;
 }
 
 bool AgentPanelController::ExpireArmed(std::chrono::steady_clock::time_point now) {
@@ -170,7 +243,8 @@ bool AgentPanelController::ExpireArmed(std::chrono::steady_clock::time_point now
 
 AgentPanelLayout LayoutAgentPanel(const std::vector<AgentPanelEntry>& agents, int selected, bool focused,
                                   bool detail_open, const std::vector<std::string>& detail_lines,
-                                  int max_visible_entries, int max_total_rows, int width, bool armed_stop_all) {
+                                  int max_visible_entries, int max_total_rows, int width, bool armed_stop_all,
+                                  bool streaming) {
     AgentPanelLayout out;
     out.total_count = static_cast<int>(agents.size()) + 1;
     if (agents.empty() || width <= 0) {
@@ -242,7 +316,8 @@ AgentPanelLayout LayoutAgentPanel(const std::vector<AgentPanelEntry>& agents, in
     out.hidden_above = first;
     out.hidden_below = out.total_count - first - visible_count;
 
-    out.lines.push_back(armed_stop_all ? tr("agent_panel.hint_armed") : tr("agent_panel.hint"));
+    out.lines.push_back(armed_stop_all ? tr("agent_panel.hint_armed")
+                                       : tr(streaming ? "agent_panel.stream_hint" : "agent_panel.hint"));
     if (out.hidden_above > 0 || out.hidden_below > 0) {
         out.lines.push_back(trf("agent_panel.window_note", out.total_count, out.hidden_above, out.hidden_below));
     }
@@ -257,7 +332,7 @@ AgentPanelLayout LayoutAgentPanel(const std::vector<AgentPanelEntry>& agents, in
                                    focused && index == safe_selected, true, false));
         } else {
             const AgentPanelEntry& entry = agents[static_cast<std::size_t>(index - 1)];
-            push_row(BuildEntryRow(index, entry.name, entry.description, entry.state,
+            push_row(BuildEntryRow(index, entry.name, entry.title, entry.state,
                                    focused && index == safe_selected, entry.running, entry.failed));
         }
     }

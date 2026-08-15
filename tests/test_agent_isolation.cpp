@@ -130,7 +130,7 @@ TEST_CASE("agent isolation: 写进房、主 cwd 不动、有活房保留并附�
 
     tools::AgentTool agent_tool(backend, sub_registry, PathToUtf8(repo.root));
     const tools::Tool::Result result =
-        agent_tool.execute(nlohmann::json{{"prompt", "写个文件"}, {"isolation", "worktree"}});
+        agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "写个文件"}, {"isolation", "worktree"}});
 
     CHECK_FALSE(result.is_error);
     // 进程 cwd 分毫不动(子代理是线程,绝不能 chdir)
@@ -169,7 +169,7 @@ TEST_CASE("agent isolation: 干净房与分支自动删") {
 
     tools::AgentTool agent_tool(backend, sub_registry, PathToUtf8(repo.root));
     const tools::Tool::Result result =
-        agent_tool.execute(nlohmann::json{{"prompt", "看看"}, {"isolation", "worktree"}});
+        agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "看看"}, {"isolation", "worktree"}});
 
     CHECK_FALSE(result.is_error);
     CHECK(result.content.find("已保留") == std::string::npos);  // 没留房
@@ -193,7 +193,7 @@ TEST_CASE("agent isolation: 并行两个隔离子代理各住各的房,互不踩
         tools::ToolRegistry registry;
         registry.Register(std::make_unique<tools::WriteFileTool>());
         tools::AgentTool agent_tool(backend, registry, PathToUtf8(repo.root));
-        return agent_tool.execute(nlohmann::json{{"prompt", "写"}, {"isolation", "worktree"}});
+        return agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "写"}, {"isolation", "worktree"}});
     };
 
     tools::Tool::Result result_a;
@@ -268,7 +268,7 @@ TEST_CASE("agent isolation: 代理跑着时房上着锁,收工解锁") {
 
     tools::AgentTool agent_tool(backend, sub_registry, PathToUtf8(repo.root));
     const tools::Tool::Result result =
-        agent_tool.execute(nlohmann::json{{"prompt", "探"}, {"isolation", "worktree"}});
+        agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "探"}, {"isolation", "worktree"}});
 
     CHECK_FALSE(result.is_error);
     REQUIRE(probe_ptr->calls.load() == 1);
@@ -290,13 +290,13 @@ TEST_CASE("agent isolation: 入参校验") {
     tools::ToolRegistry sub_registry;
     tools::AgentTool agent_tool(backend, sub_registry, PathToUtf8(repo.root));
 
-    CHECK(agent_tool.execute(nlohmann::json{{"prompt", "x"}, {"isolation", "both"}}).is_error);
+    CHECK(agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "x"}, {"isolation", "both"}}).is_error);
     CHECK(agent_tool
-              .execute(nlohmann::json{{"prompt", "x"}, {"isolation", "worktree"}, {"agent_type", "Explore"}})
+              .execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "x"}, {"isolation", "worktree"}, {"agent_type", "Explore"}})
               .is_error);
     // 不在 git 仓库里:建不了房,报错而不是崩
     tools::AgentTool outside(backend, sub_registry, PathToUtf8(std::filesystem::temp_directory_path()));
-    const auto failed = outside.execute(nlohmann::json{{"prompt", "x"}, {"isolation", "worktree"}});
+    const auto failed = outside.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "x"}, {"isolation", "worktree"}});
     CHECK(failed.is_error);
     CHECK(failed.content.find("git 仓库") != std::string::npos);
 }

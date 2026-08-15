@@ -26,7 +26,7 @@ std::vector<AgentPanelEntry> MakeAgents(int count) {
         AgentPanelEntry entry;
         entry.task_id = i;
         entry.name = "general-purpose #" + std::to_string(i);
-        entry.description = "任务 " + std::to_string(i);
+        entry.title = "任务 " + std::to_string(i);
         entry.state = "运行中(0 次工具调用 · 0 tokens · 1s)";
         entry.running = true;
         out.push_back(std::move(entry));
@@ -39,6 +39,9 @@ PHalf Now() { return std::chrono::steady_clock::now(); }
 bool Contains(const std::string& haystack, const std::string& needle) {
     return haystack.find(needle) != std::string::npos;
 }
+
+// ids 表:task id 不必连续(清理/混排后常有空洞),按给定顺序就是列表顺序。
+std::vector<int> Ids(std::initializer_list<int> ids) { return std::vector<int>(ids); }
 
 }  // namespace
 
@@ -127,6 +130,36 @@ TEST_CASE("面板布局:两段确认第一段按下时,首行提示换成确认�
     CHECK(Contains(armed.lines[0], "Ctrl+K"));
 }
 
+TEST_CASE("面板布局:流式版首行提示带 Esc 逐层退出,与空闲版不同") {
+    SetLanguage("zh");
+    const auto agents = MakeAgents(1);
+    const auto idle = LayoutAgentPanel(agents, 0, false, false, {}, 0, 0, 80, false, /*streaming=*/false);
+    const auto stream = LayoutAgentPanel(agents, 0, false, false, {}, 0, 0, 80, false, /*streaming=*/true);
+    CHECK(idle.lines[0] != stream.lines[0]);
+    CHECK(Contains(stream.lines[0], "Esc"));
+    SetLanguage("en");
+    const auto stream_en = LayoutAgentPanel(agents, 0, false, false, {}, 0, 0, 80, false, /*streaming=*/true);
+    CHECK(Contains(stream_en.lines[0], "Esc"));
+    SetLanguage("zh");
+}
+
+TEST_CASE("面板布局:列表行只认真正 title,prompt 片段绝不出现(歪路封死)") {
+    SetLanguage("zh");
+    AgentPanelEntry entry;
+    entry.task_id = 1;
+    entry.name = "general-purpose #1";
+    entry.title = "项目记忆升级一期";
+    entry.state = "运行中(7 次工具调用 · 17.0k tokens · 43.4s)";
+    entry.running = true;
+    const auto layout = LayoutAgentPanel({entry}, 1, true, false, {}, 0, 0, 100, false);
+    std::string joined;
+    for (const auto& line : layout.lines) {
+        joined += line + "\n";
+    }
+    CHECK(Contains(joined, "项目记忆升级一期"));
+    CHECK(joined.find("你在一个 C++ 项目的隔离") == std::string::npos);
+}
+
 TEST_CASE("面板布局:锚点上方空间不够时开窗截详情,首行提示永不丢") {
     SetLanguage("zh");
     const auto agents = MakeAgents(6);
@@ -166,135 +199,173 @@ TEST_CASE("面板布局:锚点上方空间不够时开窗截详情,首行提示�
 TEST_CASE("状态机:上下进入焦点并环绕,Enter 进查看态,Esc 两层退出") {
     SetLanguage("zh");
     AgentPanelController c;
-    const int total = 4;  // main + 3 只
+    const auto ids = Ids({11, 22, 33});  // main + 3 只,task id 不连续
 
-    auto out = c.HandleKey(PanelKey::Down, total, true, Now());
+    auto out = c.HandleKey(PanelKey::Down, ids, true, Now());
     CHECK(out.consumed);
     CHECK(c.focused());
-    CHECK(c.selected() == 1);
+    CHECK(c.selected_index(ids) == 1);
+    CHECK(c.selected_task_id() == 11);
 
-    out = c.HandleKey(PanelKey::Up, total, true, Now());
-    CHECK(c.selected() == 0);  // 环绕回 main
-    out = c.HandleKey(PanelKey::Up, total, true, Now());
-    CHECK(c.selected() == total - 1);
+    out = c.HandleKey(PanelKey::Up, ids, true, Now());
+    CHECK(c.selected_index(ids) == 0);  // 环绕回 main
+    CHECK(c.selected_task_id() == 0);
+    out = c.HandleKey(PanelKey::Up, ids, true, Now());
+    CHECK(c.selected_index(ids) == 3);
+    CHECK(c.selected_task_id() == 33);
 
-    out = c.HandleKey(PanelKey::EnterView, total, true, Now());
+    out = c.HandleKey(PanelKey::EnterView, ids, true, Now());
     CHECK(out.consumed);
     CHECK(c.detail_open());
-    CHECK(c.target_index().has_value());
-    CHECK(*c.target_index() == total - 1);
+    REQUIRE(c.target_task_id().has_value());
+    CHECK(*c.target_task_id() == 33);
 
-    out = c.HandleKey(PanelKey::Esc, total, true, Now());  // 先退查看态
+    out = c.HandleKey(PanelKey::Esc, ids, true, Now());  // 先退查看态
     CHECK(out.consumed);
     CHECK_FALSE(c.detail_open());
-    CHECK_FALSE(c.target_index().has_value());
+    CHECK_FALSE(c.target_task_id().has_value());
     CHECK(c.focused());
 
-    out = c.HandleKey(PanelKey::Esc, total, true, Now());  // 再退焦点
+    out = c.HandleKey(PanelKey::Esc, ids, true, Now());  // 再退焦点
     CHECK(out.consumed);
     CHECK_FALSE(c.focused());
-    CHECK(c.selected() == 0);
+    CHECK(c.selected_task_id() == 0);
 }
 
 TEST_CASE("状态机:正文非空时上下/Enter 都还给 composer,字母 x 只进 composer") {
     SetLanguage("zh");
     AgentPanelController c;
-    const int total = 3;
-    c.HandleKey(PanelKey::Down, total, true, Now());  // 先正常进焦点、选中 1
+    const auto ids = Ids({1, 2});
+    c.HandleKey(PanelKey::Down, ids, true, Now());  // 先正常进焦点、选中 1
 
-    const auto up = c.HandleKey(PanelKey::Up, total, /*composer_empty=*/false, Now());
+    const auto up = c.HandleKey(PanelKey::Up, ids, /*composer_empty=*/false, Now());
     CHECK_FALSE(up.consumed);
-    const auto enter = c.HandleKey(PanelKey::EnterView, total, false, Now());
+    const auto enter = c.HandleKey(PanelKey::EnterView, ids, false, Now());
     CHECK_FALSE(enter.consumed);
-    const auto stop = c.HandleKey(PanelKey::StopEntry, total, false, Now());
+    const auto stop = c.HandleKey(PanelKey::StopEntry, ids, false, Now());
     CHECK_FALSE(stop.consumed);
     CHECK_FALSE(stop.stop_current);
-    // 没有后台子代理时(只有 main),面板任何键都不消费。
+    // 没有任何子代理时(只有 main),面板任何键都不消费。
     AgentPanelController alone;
-    CHECK_FALSE(alone.HandleKey(PanelKey::Down, 1, true, Now()).consumed);
+    CHECK_FALSE(alone.HandleKey(PanelKey::Down, Ids({}), true, Now()).consumed);
 }
 
 TEST_CASE("状态机:x 四分支——运行中停止、终态清除(应用层分派)、main 不接、打字不接") {
     SetLanguage("zh");
     AgentPanelController c;
-    const int total = 3;
+    const auto ids = Ids({7, 8});
     // main 行:x 不消费(落回 composer,变成打了一个 x)。
-    c.HandleKey(PanelKey::Down, total, true, Now());  // 选中 1
-    c.HandleKey(PanelKey::Up, total, true, Now());    // 回 main(0)
-    const auto on_main = c.HandleKey(PanelKey::StopEntry, total, true, Now());
+    c.HandleKey(PanelKey::Down, ids, true, Now());  // 选中 7
+    c.HandleKey(PanelKey::Up, ids, true, Now());    // 回 main(0)
+    const auto on_main = c.HandleKey(PanelKey::StopEntry, ids, true, Now());
     CHECK_FALSE(on_main.consumed);
-    // 子代理行:x 消费并要求停止/清除当前条目。
-    c.HandleKey(PanelKey::Down, total, true, Now());  // 选中 1
-    const auto on_agent = c.HandleKey(PanelKey::StopEntry, total, true, Now());
+    // 子代理行:x 消费,动作目标按稳定 task id 交出(不按下标)。
+    c.HandleKey(PanelKey::Down, ids, true, Now());  // 选中 7
+    const auto on_agent = c.HandleKey(PanelKey::StopEntry, ids, true, Now());
     CHECK(on_agent.consumed);
     CHECK(on_agent.stop_current);
-    CHECK(c.selected() == 1);  // 停止不清选中:等线程报终态再改灯
+    CHECK(on_agent.stop_current_task_id == 7);
+    CHECK(c.selected_task_id() == 7);  // 停止不清选中:等线程报终态再改灯
 }
 
 TEST_CASE("状态机:Ctrl+X Ctrl+K 两段确认——成功、超时、Esc 撤销、错键撤销") {
     SetLanguage("zh");
     // 成功。
     AgentPanelController c;
-    const int total = 2;
-    const auto arm = c.HandleKey(PanelKey::StopAllArm, total, true, Now());
+    const auto ids = Ids({5});
+    const auto arm = c.HandleKey(PanelKey::StopAllArm, ids, true, Now());
     CHECK(arm.consumed);
     CHECK(c.stop_all_armed());
-    const auto confirm = c.HandleKey(PanelKey::StopAllConfirm, total, true, Now());
+    const auto confirm = c.HandleKey(PanelKey::StopAllConfirm, ids, true, Now());
     CHECK(confirm.consumed);
     CHECK(confirm.stop_all);
     CHECK_FALSE(c.stop_all_armed());
 
     // 超时:2.5 秒后 Ctrl+K 不再是确认。
     AgentPanelController slow;
-    slow.HandleKey(PanelKey::StopAllArm, total, true, Now());
+    slow.HandleKey(PanelKey::StopAllArm, ids, true, Now());
     CHECK(slow.ExpireArmed(Now() + std::chrono::milliseconds(2500)));
     CHECK_FALSE(slow.stop_all_armed());
-    const auto late = slow.HandleKey(PanelKey::StopAllConfirm, total, true, Now());
+    const auto late = slow.HandleKey(PanelKey::StopAllConfirm, ids, true, Now());
     CHECK_FALSE(late.stop_all);
 
     // Esc 撤销第一段。
     AgentPanelController esc;
-    esc.HandleKey(PanelKey::StopAllArm, total, true, Now());
-    const auto esc_out = esc.HandleKey(PanelKey::Esc, total, true, Now());
+    esc.HandleKey(PanelKey::StopAllArm, ids, true, Now());
+    const auto esc_out = esc.HandleKey(PanelKey::Esc, ids, true, Now());
     CHECK_FALSE(esc.stop_all_armed());
     CHECK_FALSE(esc_out.stop_all);
 
     // 别键(比如上下)也撤销第一段,且那枚键按原语义走。
     AgentPanelController wrong;
-    wrong.HandleKey(PanelKey::StopAllArm, total, true, Now());
-    const auto wrong_out = wrong.HandleKey(PanelKey::Down, total, true, Now());
+    wrong.HandleKey(PanelKey::StopAllArm, ids, true, Now());
+    const auto wrong_out = wrong.HandleKey(PanelKey::Down, ids, true, Now());
     CHECK_FALSE(wrong.stop_all_armed());
     CHECK(wrong_out.consumed);  // Down 仍是选择
     CHECK_FALSE(wrong_out.stop_all);
 
     // 正文非空时第一段也不启(组合键只在面板可控制态生效)。
     AgentPanelController typing;
-    const auto typing_arm = typing.HandleKey(PanelKey::StopAllArm, total, false, Now());
+    const auto typing_arm = typing.HandleKey(PanelKey::StopAllArm, ids, false, Now());
     CHECK_FALSE(typing_arm.consumed);
     CHECK_FALSE(typing.stop_all_armed());
 }
 
-TEST_CASE("状态机:条目增减修正选中;目标被清理强制收起") {
+TEST_CASE("状态机:按稳定 task id 选择——任务重排不丢,选中项消失落相邻,目标被清强制收起") {
     SetLanguage("zh");
     AgentPanelController c;
-    c.HandleKey(PanelKey::Down, 5, true, Now());  // 选中 1
-    c.HandleKey(PanelKey::EnterView, 5, true, Now());
-    REQUIRE(c.target_index().has_value());
-    // 任务从 4 只收到 2 只(total=3):选中收回界内,查看态保得住(条目还在)。
-    c.OnEntriesChanged(3);
-    CHECK(c.selected() <= 2);
-    // 子代理全没了:面板消失,状态收干净。
-    c.OnEntriesChanged(1);
-    CHECK_FALSE(c.focused());
-    CHECK_FALSE(c.detail_open());
-    CHECK_FALSE(c.target_index().has_value());
-    // 目标条目被 x 清掉:CloseView 强制收起。
+    // 选中 22 并进查看态。
+    c.HandleKey(PanelKey::Down, Ids({11, 22, 33}), true, Now());
+    c.HandleKey(PanelKey::Down, Ids({11, 22, 33}), true, Now());
+    REQUIRE(c.selected_task_id() == 22);
+    c.HandleKey(PanelKey::EnterView, Ids({11, 22, 33}), true, Now());
+    REQUIRE(c.target_task_id().has_value());
+
+    // 列表重排(33 排到 22 前面):按 id 找回,选择/查看态都不丢。
+    c.OnEntriesChanged(Ids({33, 11, 22}));
+    CHECK(c.selected_task_id() == 22);
+    CHECK(c.selected_index(Ids({33, 11, 22})) == 3);
+    CHECK(c.target_task_id().has_value());
+
+    // 选中项(非查看目标)结束不清选择;被清掉才落相邻。
     AgentPanelController d;
-    d.HandleKey(PanelKey::Down, 3, true, Now());
-    d.HandleKey(PanelKey::EnterView, 3, true, Now());
-    d.CloseView();
-    CHECK_FALSE(d.detail_open());
-    CHECK_FALSE(d.target_index().has_value());
+    d.HandleKey(PanelKey::Down, Ids({11, 22, 33}), true, Now());  // 选中 11
+    REQUIRE(d.selected_task_id() == 11);
+    d.OnEntriesChanged(Ids({22, 33}));  // 11 被清:落相邻(旧下标 1 -> 22)
+    CHECK(d.selected_task_id() == 22);
+    // 全没了:状态收干净。
+    d.OnEntriesChanged(Ids({}));
+    CHECK_FALSE(d.focused());
+
+    // 查看态目标被清:强制收起,收件目标回 main。
+    AgentPanelController e;
+    e.HandleKey(PanelKey::Down, Ids({11, 22}), true, Now());
+    e.HandleKey(PanelKey::EnterView, Ids({11, 22}), true, Now());
+    REQUIRE(e.target_task_id().has_value());
+    e.OnEntriesChanged(Ids({22}));  // 11 被清
+    CHECK_FALSE(e.detail_open());
+    CHECK_FALSE(e.target_task_id().has_value());
+    CHECK(e.selected_task_id() == 0);
+}
+
+TEST_CASE("会话级 AgentPanelSession:快照与键处理共用同一份状态,线程安全外壳") {
+    SetLanguage("zh");
+    AgentPanelSession session;
+    const auto ids = Ids({9, 10});
+    const auto out = session.HandleKey(PanelKey::Down, ids, true, Now());
+    CHECK(out.consumed);
+    session.HandleKey(PanelKey::EnterView, ids, true, Now());
+    const auto snapshot = session.SnapshotFor(ids);
+    CHECK(snapshot.focused);
+    CHECK(snapshot.detail_open);
+    CHECK(snapshot.selected_task_id == 9);
+    REQUIRE(snapshot.target_task_id.has_value());
+    CHECK(*snapshot.target_task_id == 9);
+    CHECK(snapshot.selected_index == 1);
+    session.CloseView();
+    CHECK_FALSE(session.SnapshotFor(ids).detail_open);
+    session.Reset();
+    CHECK_FALSE(session.SnapshotFor(ids).focused);
 }
 
 // -----------------------------------------------------------------------

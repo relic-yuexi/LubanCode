@@ -213,7 +213,8 @@ std::string BuildToolTitle(const std::string& name, const nlohmann::json& input)
     } else if (name == "read_file" || name == "write_file" || name == "edit_file") {
         arg = input.value("path", std::string());
     } else if (name == "agent") {
-        arg = TruncateUtf8Codepoints(input.value("prompt", std::string()), 40);
+        // 工具条目标题只认真正短 title(入参必填);不拿 prompt 片段冒充。
+        arg = input.value("title", std::string());
     } else if (name == "ask_user") {
         if (const auto questions = input.find("questions"); questions != input.end() && questions->is_array() &&
             !questions->empty() && (*questions)[0].is_object()) {

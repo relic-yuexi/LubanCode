@@ -172,7 +172,7 @@ TEST_CASE("定向介入:消息排进指定任务的 inbox,按序在工具收尾�
         return detached;
     });
 
-    CHECK(agent_tool.execute(nlohmann::json{{"prompt", "后台摸排"}, {"run_in_background", true}}).content.find(
+    CHECK(agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "后台摸排"}, {"run_in_background", true}}).content.find(
               "#1") != std::string::npos);
     WaitStarted(gate);
 
@@ -221,7 +221,7 @@ TEST_CASE("定向介入:终态明确拒收,不改投 main;任务号不存在也�
         detached.backend = std::make_unique<GateBackend>(gate);
         return detached;
     });
-    agent_tool.execute(nlohmann::json{{"prompt", "后台摸排"}, {"run_in_background", true}});
+    agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "后台摸排"}, {"run_in_background", true}});
     WaitStarted(gate);
     OpenGate(gate);
     WaitIdle(agent_tool);
@@ -246,8 +246,8 @@ TEST_CASE("正式取消接口:CancelTask 只停那只;ClearFinishedTask 运行�
         detached.backend = std::make_unique<GateBackend>(factory_calls++ == 0 ? gate_a : gate_b);
         return detached;
     });
-    agent_tool.execute(nlohmann::json{{"prompt", "任务一"}, {"run_in_background", true}});
-    agent_tool.execute(nlohmann::json{{"prompt", "任务二"}, {"run_in_background", true}});
+    agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "任务一"}, {"run_in_background", true}});
+    agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "任务二"}, {"run_in_background", true}});
     WaitStarted(gate_a);
     WaitStarted(gate_b);
 
@@ -286,8 +286,8 @@ TEST_CASE("两只可阻塞 fake subagent 定向收信:给 #2 的话只进 #2,不
         detached.backend = std::make_unique<GateBackend>(factory_calls++ == 0 ? gate_a : gate_b);
         return detached;
     });
-    agent_tool.execute(nlohmann::json{{"prompt", "一号任务"}, {"run_in_background", true}});
-    agent_tool.execute(nlohmann::json{{"prompt", "二号任务"}, {"run_in_background", true}});
+    agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "一号任务"}, {"run_in_background", true}});
+    agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "二号任务"}, {"run_in_background", true}});
     WaitStarted(gate_a);
     WaitStarted(gate_b);
 
@@ -325,7 +325,7 @@ TEST_CASE("收场报告与未送达标注:打断后结果带标注;报告列原�
         detached.backend = std::make_unique<GateBackend>(gate);
         return detached;
     });
-    agent_tool.execute(nlohmann::json{{"prompt", "后台摸排"}, {"run_in_background", true}});
+    agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "后台摸排"}, {"run_in_background", true}});
     WaitStarted(gate);
     CHECK(agent_tool.SendTaskMessage(1, "来不及的话") == tools::TaskMessageStatus::Queued);
 
@@ -339,7 +339,7 @@ TEST_CASE("收场报告与未送达标注:打断后结果带标注;报告列原�
 
     // 收场报告(会话退出/清场那路):第二只任务上另排一条,报告把两只任务
     // 的未送达消息按任务各列一行、报过即清;随后取消收尾,不让线程挂着。
-    agent_tool.execute(nlohmann::json{{"prompt", "再来一只"}, {"run_in_background", true}});
+    agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "再来一只"}, {"run_in_background", true}});
     WaitStarted(gate);
     CHECK(agent_tool.SendTaskMessage(2, "也来不及") == tools::TaskMessageStatus::Queued);
     const auto report = agent_tool.TakeUndeliveredInboxReport();
@@ -380,7 +380,7 @@ TEST_CASE("TaskSummaries 轻量全量:完成与运行中一并列出,pending 计
         return detached;
     });
     for (int i = 0; i < 2; ++i) {
-        REQUIRE_FALSE(agent_tool.execute(nlohmann::json{{"prompt", "快任务" + std::to_string(i)},
+        REQUIRE_FALSE(agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "快任务" + std::to_string(i)},
                                                         {"run_in_background", true}})
                           .is_error);
     }
@@ -397,12 +397,12 @@ TEST_CASE("TaskSummaries 轻量全量:完成与运行中一并列出,pending 计
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     for (int i = 0; i < 8; ++i) {
-        REQUIRE_FALSE(agent_tool.execute(nlohmann::json{{"prompt", "慢任务" + std::to_string(i)},
+        REQUIRE_FALSE(agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "慢任务" + std::to_string(i)},
                                                         {"run_in_background", true}})
                           .is_error);
     }
     // 8 路运行中跑满:下一只进不来(上限按"运行中"计数,规矩不动)。
-    CHECK(agent_tool.execute(nlohmann::json{{"prompt", "第十只"}, {"run_in_background", true}}).is_error);
+    CHECK(agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "第十只"}, {"run_in_background", true}}).is_error);
 
     // 轻量列表不该因为"2 只已完成"就把运行中的挤出去:10 只全在
     // (旧 TaskSnapshots(8) 会把 8 只运行中之外的全挤掉,这里 2 只完成的
@@ -432,4 +432,43 @@ TEST_CASE("TaskSummaries 轻量全量:完成与运行中一并列出,pending 计
     CHECK(saw_pending);
     OpenGate(gate);
     WaitIdle(agent_tool);
+}
+
+// ---------------------------------------------------------------------------
+// 统一台账后的前台收信(规格二/七):前台任务的 sub_loop 也接自己的 inbox,
+// 用户进入该代理后发的话在下一工具边界送达;main 与别只均不受影响。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("定向介入:前台任务也收信——消息只进它自己的下一请求,不改投 main") {
+    tools::ToolRegistry sub_registry;
+    sub_registry.Register(std::make_unique<FakeTool>());
+    auto gate = std::make_shared<GateBackendState>();
+    GateBackend backend(gate);
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+
+    std::thread runner([&] {
+        (void)agent_tool.execute(
+            nlohmann::json{{"title", "前台收信"}, {"prompt", "摸排"}, {"run_in_background", false}});
+    });
+    WaitStarted(gate);  // 第一只请求已发出、正挂着(工具还没跑)
+    const auto summaries = agent_tool.TaskSummaries();
+    REQUIRE(summaries.size() == 1);
+    const int id = summaries[0].id;
+    CHECK(summaries[0].foreground);
+    CHECK(agent_tool.SendTaskMessage(id, "别先上向量库") == tools::TaskMessageStatus::Queued);
+    OpenGate(gate);
+    runner.join();
+
+    // 第二只请求(工具收尾后的下一请求)才带介入消息;第一只没有。
+    {
+        std::lock_guard<std::mutex> lock(gate->mutex);
+        REQUIRE(gate->captured.size() == 2);
+        std::string first = DumpMessageTexts(gate->captured[0].messages);
+        std::string second = DumpMessageTexts(gate->captured[1].messages);
+        CHECK(first.find("别先上向量库") == std::string::npos);
+        CHECK(second.find("别先上向量库") != std::string::npos);
+        CHECK(second.find("主会话用户介入") != std::string::npos);
+    }
+    // 跑完进终态,再发明确拒收。
+    CHECK(agent_tool.SendTaskMessage(id, "迟到的话") == tools::TaskMessageStatus::Finished);
 }

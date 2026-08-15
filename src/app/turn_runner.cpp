@@ -396,7 +396,7 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         //
         // v0.22.5 修复:确认交互落笔前必须先把流式脚注框挂起——不挂起的话
         // 有两条真机实测过的病:1) 详情文字盖写在框的横线上,行尾旧字符不
-        // 清、横线残留;2) [y/a/N] 提示打出来之后,被 AgentStatusPainter 那
+        // 清、横线残留;2) [y/a/N] 提示打出来之后,被 footer 心跳线程那
         // 条 400ms 一次的 ticker(不管是不是在等确认都无条件重画脚注框)盖
         // 没了,屏上只剩流式期的输入框。用 RAII 作用域,一次性盖住
         // PrintConfirmDetails/ShowDiffPreview 两条路径 + 后面的 ReadLine +
@@ -575,13 +575,8 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
             usage_stats.cache_read_tokens += usage.cache_read_tokens;
             usage_stats.request_count += 1;
             display.agent_rounds += 1;  // 子代理每一次独立请求算一轮,agent 条目终态摘要用
-            // #三:这个子代理任务自己花了多少 token,累进状态条对应条目——
-            // 跟上面 usage_stats(全会话口径,含子代理)是两本账,这本给
-            // AgentStatusBoard 摘要行的 "Xk tokens" 那一节用。
-            if (display.active_agent_status_id >= 0) {
-                display.agent_status_board.RecordUsage(display.active_agent_status_id, usage.input_tokens,
-                                                          usage.output_tokens);
-            }
+            // 子代理自己的 token/工具次数/耗时都记在 AgentTool 统一台账里,
+            // 代理面板(footer 里那块)按修订号自己刷新,这里不再另记一本。
         };
         // M9:pre_tool/post_tool 钩子照旧转发给父级同一份;UI-B 在外面再包
         // 一层,给子工具条目回写终态/拦截态用。
@@ -714,27 +709,56 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     // 线程抢 stdin,跟 StreamBodyTracker 的重画一样诚实关掉。
     lubancode::cli::BeginStreamFooter(theme, is_console && lubancode::platform::SupportsScreenRepaint());
 
-    // #52:子代理状态条的 ticker,只活在 loop.Run() 这一段——construct 在
-    // Run() 之前,Run() 一返回立刻 Stop()(停线程 + 把状态块从屏幕上擦
-    // 掉),不会跟收尾的统计行/分界线打架。enabled 条件跟 body_tracker 一样
-    // (真控制台 + 彩色主题——相对光标移动转义序列得有 VT 处理撑着)。
-    AgentStatusPainter status_painter(display.agent_status_board, theme, is_console && !theme.reset.empty());
-    display.status_painter = &status_painter;
+    // 子代理状态的心跳:旧 AgentStatusBoard/AgentStatusPainter 那套 400ms
+    // ticker 已删,前台/后台子代理状态全在 AgentTool 统一台账里、由 footer
+    // 的代理面板画。长工具调用期间没有正文增量、没有按键,footer 不会自己
+    // 醒——这里起一只轻量心跳线程,200ms 一拍调 RedrawStreamFooterLocked
+    // (内部自己看挂起/事务计数,菜单占屏时零输出),Running 的耗时与灯才
+    // 会走。只活 loop.Run() 这一段,Run() 一返回就停。
+    const class FooterHeartbeat {
+    public:
+        explicit FooterHeartbeat(bool enabled) {
+            if (!enabled) {
+                return;
+            }
+            thread_ = std::thread([this] {
+                while (!stop_.load(std::memory_order_acquire)) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    if (stop_.load(std::memory_order_acquire)) {
+                        return;
+                    }
+                    std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+                    if (!lubancode::cli::RepaintSuspendedLocked()) {
+                        lubancode::cli::RedrawStreamFooterLocked();
+                    }
+                }
+            });
+        }
+        ~FooterHeartbeat() {
+            stop_.store(true, std::memory_order_release);
+            if (thread_.joinable()) {
+                thread_.join();
+            }
+        }
+        FooterHeartbeat(const FooterHeartbeat&) = delete;
+        FooterHeartbeat& operator=(const FooterHeartbeat&) = delete;
 
-    // 状态画板挂好后再起监听线程。回合中按 Ctrl+O 不只翻原子开关，还会
-    // 回调 ToolDisplay，把当下快照按新档铺出来；监听线程收尾时先于画板
-    // 停下，status_painter 指针整段存活期清楚，不留并发悬空窗口。
+    private:
+        std::atomic<bool> stop_{false};
+        std::thread thread_;
+    } footer_heartbeat(is_console && lubancode::platform::SupportsScreenRepaint());
+
+    // 监听线程:流式期间的面板按键、排队/打断都在它手里(键位优先级见
+    // TurnInputListener::ThreadMain)。
     lubancode::cli::TurnInputListener listener(
         cancel_flag, theme, transcript_expanded,
         [&display](bool expanded) { return display.FormatSnapshotForToggleLocked(expanded); });
 
     const auto result = loop.Run(std::move(prepared_input->message), callbacks, &cancel_flag);
 
-    // Run() 已经返回,不管是不是被打断——先收输入线程，保证它不再碰状态
-    // 画板或转录快照；也保证下一次 ReadLine() 前不再抢控制台输入。
+    // Run() 已经返回,不管是不是被打断——先收输入线程，保证它不再碰转录
+    // 快照；也保证下一次 ReadLine() 前不再抢控制台输入。心跳线程随后收。
     listener.Stop();
-    status_painter.Stop();
-    display.status_painter = nullptr;
     lubancode::cli::SetStreamScreenPrintHook(nullptr);  // 线程已 join,摘钩,别让它抓着局部引用过夜
     // 脚注在 markdown 收束重画之前擦掉、关停:它常驻在正文块区间之外,不擦
     // 的话会残留在重画区下方;关停后 FinalizeRepaint 按"块首到光标"记账,

@@ -131,6 +131,22 @@ AgentPanelActions& AgentPanelActionsSlot() {
     return actions;
 }
 
+std::vector<int> PanelEntryIds(const std::vector<AgentPanelEntry>& entries) {
+    std::vector<int> ids;
+    ids.reserve(entries.size());
+    for (const auto& entry : entries) {
+        ids.push_back(entry.task_id);
+    }
+    return ids;
+}
+
+// 会话级面板状态机(规格三):空闲 composer 与流式监听线程共用同一份
+// 选择/焦点/详情/两段确认——流式转空闲状态不跳,不靠两边各自记账。
+AgentPanelSession& PanelSessionSlot() {
+    static AgentPanelSession session;
+    return session;
+}
+
 // composer 这一次读取的收件目标(查看态那只子代理的任务号)。0.28.x 起
 // 流式监听线程落队时也要读它(排队的消息要带目标),读写都过一把小锁
 // ——两个线程碰同一份 optional,不能光靠"通常错不开"的运气。
@@ -805,16 +821,18 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     const bool vt_enabled = platform::ProbeStdoutConsole().vt_enabled;
 
     platform::KeyReader key_reader;
-    // 面板状态机(纯逻辑,键位缝在 MapToPanelKey:选择/查看/x 停止清除/
-    // Ctrl+X Ctrl+K 两段确认全在里面,单测钉在 tests/test_agent_panel.cpp)。
-    AgentPanelController panel_controller;
+    // 面板状态机:会话级 AgentPanelSession(纯逻辑在 cli/agent_panel,键位缝在
+    // MapToPanelKey:选择/查看/x 停止清除/Ctrl+X Ctrl+K 两段确认全在里面,单测
+    // 钉在 tests/test_agent_panel.cpp)。空闲与流式监听共用同一份,选择按稳定
+    // task id 记。
+    AgentPanelSession& panel_session = PanelSessionSlot();
     std::string panel_fingerprint;  // 上一帧面板指纹(条目+状态机+成行),变了才重画
     std::string panel_notice;       // 停全部的回执,挂在提示行下面两秒就收
     std::chrono::steady_clock::time_point panel_notice_until{};
     int prev_frame_origin = -1;  // 上一帧的绝对帧顶;面板增减/滚屏后对不上就整帧重画
 
     if (composer) {
-        SetComposerTarget(std::nullopt);  // 每次读取开始,收件目标先归 main
+        SetComposerTarget(std::nullopt);  // 每次读取开始先归 main;首帧 build_panel 会按查看态再挂回去
     }
 
     auto panel_entries = [&]() -> std::vector<AgentPanelEntry> {
@@ -823,29 +841,31 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         }
         return AgentPanelProviderSlot()();
     };
+    const auto panel_ids = [](const std::vector<AgentPanelEntry>& entries) {
+        std::vector<int> ids;
+        ids.reserve(entries.size());
+        for (const auto& entry : entries) {
+            ids.push_back(entry.task_id);
+        }
+        return ids;
+    };
 
     // 面板帧:窗口化布局(纯函数)+ 查看态详情(按需取,只有打开的那只才
     // 拉)+ 输入框上横线右端短标签 + composer 收件目标。面板画在输入框
     // 上方(rows_above),不再借 hint_lines 落脚。
     const auto build_panel = [&](const std::vector<AgentPanelEntry>& entries,
                                  std::string& tag_out) -> std::vector<std::string> {
-        const int total = static_cast<int>(entries.size()) + 1;
-        panel_controller.OnEntriesChanged(total);
+        const std::vector<int> ids = panel_ids(entries);
+        panel_session.OnEntriesChanged(ids);
         if (entries.empty()) {
             SetComposerTarget(std::nullopt);
             tag_out.clear();
             return {};
         }
-        // 查看态目标条目被清掉(x 清除/任务全没了):收起查看态,标签摘掉。
-        if (const auto target = panel_controller.target_index();
-            target.has_value() && *target >= total) {
-            panel_controller.CloseView();
-        }
+        const AgentPanelSession::Snapshot snapshot = panel_session.SnapshotFor(ids);
         std::vector<std::string> detail_lines;
-        if (panel_controller.detail_open() && panel_controller.selected() > 0 && AgentPanelDetailSlot()) {
-            detail_lines = AgentPanelDetailSlot()(entries[static_cast<std::size_t>(
-                                                      panel_controller.selected()) - 1]
-                                                      .task_id);
+        if (snapshot.detail_open && snapshot.selected_task_id > 0 && AgentPanelDetailSlot()) {
+            detail_lines = AgentPanelDetailSlot()(snapshot.selected_task_id);
         }
         // 窗口预算有两道:条目数至多半屏上下(下限 3 条,上限 16 条);整块
         // 面板(提示/计数/条目/详情)不得越过锚点上方的空间——空间不够就在
@@ -856,16 +876,22 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             max_entries = std::max(3, std::min(info->height / 2 - 1, 16));
         }
         const int rows_above_budget = std::max(0, start_row - 1);
-        auto layout = LayoutAgentPanel(entries, panel_controller.selected(), panel_controller.focused(),
-                                       panel_controller.detail_open(), detail_lines, max_entries,
+        auto layout = LayoutAgentPanel(entries, snapshot.selected_index, snapshot.focused,
+                                       snapshot.detail_open, detail_lines, max_entries,
                                        rows_above_budget, info.has_value() ? info->width : 80,
-                                       panel_controller.stop_all_armed());
+                                       snapshot.stop_all_armed);
         tag_out.clear();
-        if (const auto target = panel_controller.target_index(); target.has_value()) {
-            const AgentPanelEntry& entry = entries[static_cast<std::size_t>(*target) - 1];
-            SetComposerTarget(entry.task_id);  // composer 此刻以它为收件人
-            tag_out = entry.description;           // 短标题取任务短述,不取代理类型
-        } else {
+        if (snapshot.target_task_id.has_value()) {
+            // composer 此刻以查看态那只子代理为收件人;上横线右端挂它的 title。
+            for (const auto& entry : entries) {
+                if (entry.task_id == *snapshot.target_task_id) {
+                    SetComposerTarget(entry.task_id);
+                    tag_out = entry.title;
+                    break;
+                }
+            }
+        }
+        if (!snapshot.target_task_id.has_value()) {
             SetComposerTarget(std::nullopt);
         }
         if (!panel_notice.empty()) {
@@ -882,15 +908,15 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     };
     const auto fingerprint_of = [](const std::vector<AgentPanelEntry>& entries,
                                    const std::vector<std::string>& above,
-                                   const AgentPanelController& controller) {
+                                   const AgentPanelSession::Snapshot& snapshot) {
         std::string value;
         for (const auto& entry : entries) {
-            value += std::to_string(entry.task_id) + "\x1f" + entry.name + "\x1f" + entry.description +
+            value += std::to_string(entry.task_id) + "\x1f" + entry.name + "\x1f" + entry.title +
                      "\x1f" + entry.state + "\x1f" + (entry.running ? "R" : entry.failed ? "F" : "D") +
                      "\n";
         }
-        value += "#" + std::to_string(controller.selected()) + (controller.focused() ? "f" : "-") +
-                 (controller.detail_open() ? "d" : "-") + (controller.stop_all_armed() ? "a" : "-") + "\n";
+        value += "#" + std::to_string(snapshot.selected_task_id) + (snapshot.focused ? "f" : "-") +
+                 (snapshot.detail_open ? "d" : "-") + (snapshot.stop_all_armed ? "a" : "-") + "\n";
         for (const auto& line : above) {
             value += line + "\n";
         }
@@ -924,7 +950,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         chrome.mode = editor.confirm_mode();
         RedrawEditArea(start_row, prompt_end_col, prompt, state, above, tag, prev_body_row_count,
                        previous_frame, prev_frame_origin, vt_enabled, chrome);
-        panel_fingerprint = fingerprint_of(entries, above, panel_controller);
+        panel_fingerprint = fingerprint_of(entries, above, panel_session.SnapshotFor(panel_ids(entries)));
     };
 
     if (box) {
@@ -936,10 +962,11 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         // 在用户敲键后才变。100ms 探一次队列；没键就只重画这一帧。
         if (!platform::WaitForKeyEvent(100)) {
             const auto entries = panel_entries();
-            const bool armed_expired = panel_controller.ExpireArmed(std::chrono::steady_clock::now());
+            const bool armed_expired = panel_session.ExpireArmed(std::chrono::steady_clock::now());
             std::string tag;
             const std::vector<std::string> above = build_panel(entries, tag);
-            if (armed_expired || fingerprint_of(entries, above, panel_controller) != panel_fingerprint) {
+            if (armed_expired ||
+                fingerprint_of(entries, above, panel_session.SnapshotFor(panel_ids(entries))) != panel_fingerprint) {
                 redraw_with_panel(editor.CurrentRenderState(), entries);
             }
             // 空闲唤醒:系统侧有事件(后台子代理跑完等)要在会话空闲时处理。
@@ -1086,9 +1113,8 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             if (const std::optional<PanelKey> panel_key = MapToPanelKey(*raw_key);
                 panel_key.has_value()) {
                 const bool empty_now = editor.CurrentRenderState().line.empty();
-                const auto outcome = panel_controller.HandleKey(
-                    *panel_key, static_cast<int>(entries_before_key.size()) + 1, empty_now,
-                    std::chrono::steady_clock::now());
+                const auto outcome = panel_session.HandleKey(*panel_key, panel_ids(entries_before_key),
+                                                             empty_now, std::chrono::steady_clock::now());
                 if (outcome.stop_all) {
                     const AgentPanelActions& actions = AgentPanelActionsSlot();
                     if (actions.cancel_all) {
@@ -1098,15 +1124,23 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                             std::chrono::steady_clock::now() + std::chrono::seconds(2);
                     }
                 }
-                if (outcome.stop_current && !entries_before_key.empty() &&
-                    panel_controller.selected() > 0) {
-                    const AgentPanelEntry& entry =
-                        entries_before_key[static_cast<std::size_t>(panel_controller.selected()) - 1];
+                if (outcome.stop_current && outcome.stop_current_task_id > 0) {
+                    // 动作目标按稳定 task id 分派(不按下标回查,列表重排也打不
+                    // 到邻居):运行中停止,终态清除。
+                    const AgentPanelEntry* selected_entry = nullptr;
+                    for (const auto& entry : entries_before_key) {
+                        if (entry.task_id == outcome.stop_current_task_id) {
+                            selected_entry = &entry;
+                            break;
+                        }
+                    }
                     const AgentPanelActions& actions = AgentPanelActionsSlot();
-                    if (entry.running && actions.cancel_task) {
-                        actions.cancel_task(entry.task_id);
-                    } else if (!entry.running && actions.clear_task) {
-                        actions.clear_task(entry.task_id);
+                    if (selected_entry != nullptr) {
+                        if (selected_entry->running && actions.cancel_task) {
+                            actions.cancel_task(selected_entry->task_id);
+                        } else if (!selected_entry->running && actions.clear_task) {
+                            actions.clear_task(selected_entry->task_id);
+                        }
                     }
                 }
                 if (outcome.consumed || outcome.redraw) {
@@ -1124,10 +1158,10 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         }
 
         RenderState state = editor.HandleKey(*mapped);
-        if (!state.line.empty() && !panel_controller.detail_open()) {
+        if (!state.line.empty() && !panel_session.SnapshotFor(panel_ids(panel_entries())).detail_open) {
             // 敲了正文即离开面板焦点(上下键归历史);查看态(收件目标)例外
             // ——那只标签还挂着,话要送去那只子代理。
-            panel_controller.Reset();
+            panel_session.Reset();
         }
 
         // UI-D(0.16.0):composer 读取里,把核心层翻好的 UI 按键语义转发给
@@ -1406,6 +1440,8 @@ void SetAgentPanelDetailProvider(std::function<std::vector<std::string>(int task
 
 void SetAgentPanelActions(AgentPanelActions actions) { AgentPanelActionsSlot() = std::move(actions); }
 
+void ResetAgentPanelSession() { PanelSessionSlot().Reset(); }
+
 std::optional<int> CurrentComposerAgentTarget() { return GetComposerTarget(); }
 
 void SetIdleWakeHook(std::function<bool()> hook) { IdleWakeHookSlot() = std::move(hook); }
@@ -1450,24 +1486,8 @@ std::mutex& ConsoleReadMutex() {
 // -----------------------------------------------------------------------
 // "ask_user 被子代理状态遮挡"的 repaint 协调层,见 console_input.hpp 同名
 // 一节的注释。suspend/paint 两枚深度都在 StreamFooterState 里(写点全在
-// StdoutWriteMutex 之内),这里只做读口与登记槽。
+// StdoutWriteMutex 之内),这里只做读口。
 // -----------------------------------------------------------------------
-
-namespace {
-
-// 交互菜单开屏时"收走浮动状态块"的钩子(AgentStatusPainter 自登记)。
-// 登记槽的读写全在 StdoutWriteMutex 之内,不再套锁。
-std::function<void()>& RepaintSuspendHideHookSlot() {
-    static std::function<void()> hook;
-    return hook;
-}
-
-}  // namespace
-
-void SetRepaintSuspendHideHook(std::function<void()> hook) {
-    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
-    RepaintSuspendHideHookSlot() = std::move(hook);
-}
 
 bool RepaintSuspendedLocked() {
     const StreamFooterState& f = FooterSlot();
@@ -1592,6 +1612,45 @@ void RedrawStreamFooterLocked() {
     }
 
     const int working_rows = f.working ? 1 : 0;
+    // 代理面板(规格五):正文 > 面板(含查看态详情)> 队列 > 上横线(右端挂
+    // 当前代理 title)> composer > 下横线 > 状态栏。数据与状态机跟空闲同源
+    // (AgentPanelProvider + 会话级 AgentPanelSession),不另开第二本账;流式
+    // 期间的选择/详情在这里原地重画,转空闲自然保得住。plain 主题行内无
+    // ANSI。面板预算封在半屏以内,输入框与状态栏始终留在视口里。
+    std::vector<std::string> panel_rows_text;
+    std::string footer_rule_tag;
+    if (AgentPanelProviderSlot()) {
+        const std::vector<AgentPanelEntry> panel_entries = AgentPanelProviderSlot()();
+        const std::vector<int> panel_ids = PanelEntryIds(panel_entries);
+        PanelSessionSlot().OnEntriesChanged(panel_ids);
+        if (!panel_entries.empty()) {
+            const AgentPanelSession::Snapshot panel_snapshot = PanelSessionSlot().SnapshotFor(panel_ids);
+            std::vector<std::string> detail_lines;
+            if (panel_snapshot.detail_open && panel_snapshot.selected_task_id > 0 && AgentPanelDetailSlot()) {
+                detail_lines = AgentPanelDetailSlot()(panel_snapshot.selected_task_id);
+            }
+            const int entry_cap = (std::max)(3, (std::min)(info->height / 2 - 1, 16));
+            const int panel_budget = (std::max)(2, (std::min)(info->height / 2, 24));
+            const AgentPanelLayout panel_layout =
+                LayoutAgentPanel(panel_entries, panel_snapshot.selected_index, panel_snapshot.focused,
+                                 panel_snapshot.detail_open, detail_lines, entry_cap, panel_budget, info->width,
+                                 panel_snapshot.stop_all_armed, /*streaming=*/true);
+            panel_rows_text = std::move(panel_layout.lines);
+            if (panel_snapshot.target_task_id.has_value()) {
+                for (const auto& entry : panel_entries) {
+                    if (entry.task_id == *panel_snapshot.target_task_id) {
+                        footer_rule_tag = entry.title;
+                        SetComposerTarget(entry.task_id);  // 流式 composer 的收件人 = 查看态那只子代理
+                        break;
+                    }
+                }
+            }
+        }
+        if (footer_rule_tag.empty()) {
+            SetComposerTarget(std::nullopt);
+        }
+    }
+    const int panel_rows = static_cast<int>(panel_rows_text.size());
     // 待发区行:现拉会话层队列的轻量快照(标题模式随状态变:Esc 立即送/
     // 编辑中/等下一个工具边界),行怎么摆是 BuildSteeringQueueRows 的纯逻辑,
     // 单测钉在那边。空队列连标题都不画(规格)。
@@ -1612,7 +1671,7 @@ void RedrawStreamFooterLocked() {
     // slash 提示行画在状态行之下(跟空闲 composer 的视觉层级一致),高度一并
     // 记进 total_rows——探底滚屏、旧框擦除(都按 f.rows 报账)随之生效。
     const int hint_rows = static_cast<int>(f.hints.size());
-    const int total_rows = working_rows + queue_rows + kStreamFooterBoxRows + hint_rows;
+    const int total_rows = working_rows + panel_rows + queue_rows + kStreamFooterBoxRows + hint_rows;
 
     // 框落在正文光标的下一行:正文停在行中(bx>0)就 by+1,正文刚换行
     // 停在行首(bx==0)就落在 by 这空行上——两种都是"正文当前底部的下一行"。
@@ -1643,6 +1702,17 @@ void RedrawStreamFooterLocked() {
         box_top += working_rows;
     }
 
+    // 代理面板:队列区之上、Working 之下,逐行摆、按屏宽截断(行内不带
+    // ANSI,plain 主题天然纯文本)。
+    for (std::size_t i = 0; i < panel_rows_text.size(); ++i) {
+        platform::SetCursorPos(0, box_top + static_cast<int>(i));
+        const int room = (std::max)(0, width - 1);
+        std::cout << f.color << TruncateUtf8ToDisplayWidth(panel_rows_text[i], room) << f.reset;
+    }
+    if (!panel_rows_text.empty()) {
+        box_top += panel_rows;
+    }
+
     for (std::size_t i = 0; i < queue_rows_text.size(); ++i) {
         platform::SetCursorPos(0, box_top + static_cast<int>(i));
         const int room = (std::max)(0, width - 1);
@@ -1653,7 +1723,11 @@ void RedrawStreamFooterLocked() {
     }
 
     platform::SetCursorPos(0, box_top);
-    std::cout << BoxRuleLine(f.theme, width);
+    // 上横线:查看态挂着子代理时右端挂它的 title(规格六),横线保底宽度、
+    // 塞不下退整线——BuildRuleWithTag 自己会算。
+    std::cout << (footer_rule_tag.empty() ? BoxRuleLine(f.theme, width)
+                                          : BuildRuleWithTag(f.theme.stats, f.theme.reset, footer_rule_tag,
+                                                             width));
 
     // 输入行:"> " + 已键入内容(纯文本,照真实输入的样子);空闲时 "> " +
     // 淡色占位提示,充当"这里能打字"的可发现性提示(取代老版本单独一行
@@ -1790,15 +1864,11 @@ StreamFooterSuspendScope::StreamFooterSuspendScope() {
     std::lock_guard<std::mutex> lock(StdoutWriteMutex());
     StreamFooterState& f = FooterSlot();
     if (f.suspend_depth == 0) {
-        EraseStreamFooterLocked();  // 最外层落笔前把框彻底擦净
-        // 再把子代理浮动状态块整块收走:菜单要从正文末尾一次铺到底,状态
-        // 块留着就会插进标题/问题/选项中间。钩子由 AgentStatusPainter 构造
-        // 时自登记,此刻锁在我们手里,实现不得重锁(见头文件约定)。之后
-        // ticker 每拍都先查 RepaintSuspendedLocked(),挂起期间零输出——比
-        // "手调一次 Hide"可靠,不存在下一拍又画回来的口子。
-        if (const auto& hook = RepaintSuspendHideHookSlot()) {
-            hook();
-        }
+        // 最外层落笔前把框(含框里的代理面板)彻底擦净:菜单要从正文末尾
+        // 一次铺到底,面板留着就会插进标题/问题/选项中间。挂起期间
+        // RedrawStreamFooterLocked 一律空操作,turn_runner 的心跳线程每拍
+        // 也先查 RepaintSuspendedLocked——菜单等输入再久,面板也插不进来。
+        EraseStreamFooterLocked();
     }
     ++f.suspend_depth;
 }
@@ -1889,6 +1959,51 @@ void TurnInputListener::ThreadMain() {
     // 现算,不碰编辑器状态)。
     LineEditorCore editor;
     editor.BeginLine(/*composer=*/true);
+
+    // 代理面板(规格三/四):流式期间与空闲 composer 共用同一枚会话级
+    // AgentPanelSession,选择按稳定 task id。面板交互只在 footer 真画得动的
+    // 场合(Windows 真控制台)承诺;plain/管道 footer 不开,键位照旧归队列
+    // 编辑与历史,不承诺交互切换。
+    auto panel_ids_now = [&]() -> std::vector<int> {
+        if (!FooterSlot().enabled) {
+            return {};
+        }
+        const AgentPanelProvider& provider = AgentPanelProviderSlot();
+        if (!provider) {
+            return {};
+        }
+        return PanelEntryIds(provider());
+    };
+    // 面板动作分派(x 停止/清除、两段确认停全部):按稳定 task id 找条目,
+    // 绝不按列表下标。停全部的回执插打一行,正文行数账由 print hook 作废。
+    auto dispatch_panel_outcome = [&](const AgentPanelController::Outcome& outcome) {
+        const AgentPanelActions& actions = AgentPanelActionsSlot();
+        if (outcome.stop_all && actions.cancel_all) {
+            const int stopped = actions.cancel_all();
+            std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+            EraseStreamFooterLocked();
+            std::cout << "\n" << theme_.stats << trf("agent_panel.stop_all_notice", stopped) << theme_.reset << "\n";
+            std::cout.flush();
+            if (const auto& hook = StreamScreenPrintHookSlot()) {
+                hook();
+            }
+        }
+        if (outcome.stop_current && outcome.stop_current_task_id > 0) {
+            const AgentPanelProvider& provider = AgentPanelProviderSlot();
+            const std::vector<AgentPanelEntry> entries = provider ? provider() : std::vector<AgentPanelEntry>{};
+            for (const auto& entry : entries) {
+                if (entry.task_id != outcome.stop_current_task_id) {
+                    continue;
+                }
+                if (entry.running && actions.cancel_task) {
+                    actions.cancel_task(entry.task_id);
+                } else if (!entry.running && actions.clear_task) {
+                    actions.clear_task(entry.task_id);
+                }
+                break;
+            }
+        }
+    };
 
     // 正在编辑的排队消息(编辑事务凭据)。空 = 在敲新消息。
     std::optional<SteeringQueue::EditHandle> edit;
@@ -2045,15 +2160,25 @@ void TurnInputListener::ThreadMain() {
         }
 
         if (key->kind == PK::Esc) {
-            // 两层 Esc(规格):编辑态第一下只取消编辑、还原原文(不打断当前
-            // 轮);退出编辑态后的 Esc 才是打断。队列里还有可送的:打断之外
-            // 还要"立即送"——收场泵会在最近安全点把消息送进原目标,送达前
-            // 队列区标题显示"正在打断并送达"。队列为空:Esc 仍只打断。
+            // Esc 逐层退(规格四):队列编辑态先取消编辑;面板层再依次退两段
+            // 确认/详情/代理焦点;三者都没有,这一下才打断当前流式响应——
+            // 不可第一下便掐掉整轮。
             if (edit.has_value()) {
                 steering.CancelEdit(*edit);
                 close_edit_clear();
                 refresh_footer();
                 continue;
+            }
+            if (FooterSlot().enabled) {
+                const std::vector<int> ids = panel_ids_now();
+                const AgentPanelSession::Snapshot snapshot = PanelSessionSlot().SnapshotFor(ids);
+                if (!ids.empty() && (snapshot.stop_all_armed || snapshot.detail_open || snapshot.focused)) {
+                    (void)PanelSessionSlot().HandleKey(PanelKey::Esc, ids,
+                                                       editor.CurrentRenderState().line.empty(),
+                                                       std::chrono::steady_clock::now());
+                    refresh_footer();
+                    continue;
+                }
             }
             if (steering.HasAnyDeliverable()) {
                 steering.RequestImmediateDelivery();
@@ -2143,19 +2268,40 @@ void TurnInputListener::ThreadMain() {
         }
         if (key->kind == PK::Up || key->kind == PK::Down) {
             if (edit.has_value()) {
-                // 编辑态:在队列条目间走(先把改到一半的正文写回当前位)。
+                // 优先级一:正在编辑排队消息,上下键只在队列条目间走。
                 browse_edit(key->kind == PK::Up);
                 continue;
             }
+            // 优先级二/三:面板已聚焦或详情开着,上下键只切 main/代理;composer
+            // 为空、面板有代理、未处于队列编辑,上下键进面板焦点并切换。
+            if (FooterSlot().enabled) {
+                const std::vector<int> ids = panel_ids_now();
+                if (!ids.empty()) {
+                    const bool empty_now = editor.CurrentRenderState().line.empty();
+                    const AgentPanelSession::Snapshot snapshot = PanelSessionSlot().SnapshotFor(ids);
+                    if (snapshot.focused || snapshot.detail_open || empty_now) {
+                        const auto outcome = PanelSessionSlot().HandleKey(
+                            key->kind == PK::Up ? PanelKey::Up : PanelKey::Down, ids, empty_now,
+                            std::chrono::steady_clock::now());
+                        if (outcome.consumed) {
+                            refresh_footer();
+                            continue;
+                        }
+                        // 未消费(正文非空):落回编辑器历史,不抢键。
+                    }
+                }
+            }
             if (editor.CurrentRenderState().line.empty() && steering.editable_size() > 0) {
-                // 旧"空输入按上键取回最后一条"入口,保留作别名;帮助文案与
-                // 队列标题只写 Shift+← 这一套主键(规格第四步)。
+                // 旧"空输入按上键取回最后一条"入口,保留作别名;有代理面板时
+                // 上面已经抢先把键给了面板,这里只在无面板场合生效(规格四:
+                // 主入口仍是 Shift+←)。
                 if (auto handle = steering.BeginEditLatest(); handle.has_value()) {
                     begin_edit(std::move(*handle));
                 }
                 continue;
             }
-            // 队列空/正文非空:进编辑器(翻历史,composer 里上下键的老现职)。
+            // 优先级四:队列空/正文非空,进编辑器(翻历史,composer 上下键的
+            // 老现职)。
             editor.HandleKey(KeyEvent::Simple(key->kind == PK::Up ? KeyKind::Up : KeyKind::Down));
             refresh_footer();
             continue;
@@ -2209,6 +2355,18 @@ void TurnInputListener::ThreadMain() {
                 refresh_footer();
                 continue;
             }
+            // 面板聚焦且 composer 空:Enter 进/收当前代理详情(与空闲同语义,
+            // 进入后 composer 收件目标切给该代理);否则 Enter 才落队。
+            if (FooterSlot().enabled && !edit.has_value()) {
+                const std::vector<int> ids = panel_ids_now();
+                const AgentPanelSession::Snapshot snapshot = PanelSessionSlot().SnapshotFor(ids);
+                if (!ids.empty() && snapshot.focused && editor.CurrentRenderState().line.empty()) {
+                    (void)PanelSessionSlot().HandleKey(PanelKey::EnterView, ids, /*composer_empty=*/true,
+                                                       std::chrono::steady_clock::now());
+                    refresh_footer();
+                    continue;
+                }
+            }
             // 落队:带目标的 QueuedMessage 进会话层队列,正文挪进上方队列区,
             // 输入行清空回占位提示。全空白不落。
             const std::string text = editor_text_utf8();
@@ -2221,6 +2379,26 @@ void TurnInputListener::ThreadMain() {
             }
             refresh_footer();
             continue;
+        }
+
+        // 面板其余键位(x 停止/清除、Ctrl+X Ctrl+K 两段确认):composer 空、
+        // 非队列编辑态时交给同一套状态机;打字中途状态机自己放行(字母 x 只
+        // 进 composer)。
+        if (FooterSlot().enabled && !edit.has_value() &&
+            (key->kind == PK::CtrlX || key->kind == PK::CtrlK ||
+             (key->kind == PK::Char && (key->ch == U'x' || key->ch == U'X')))) {
+            const std::optional<PanelKey> panel_key = MapToPanelKey(*key);
+            const std::vector<int> ids = panel_ids_now();
+            if (panel_key.has_value() && !ids.empty()) {
+                const bool empty_now = editor.CurrentRenderState().line.empty();
+                const auto outcome =
+                    PanelSessionSlot().HandleKey(*panel_key, ids, empty_now, std::chrono::steady_clock::now());
+                dispatch_panel_outcome(outcome);
+                if (outcome.consumed) {
+                    refresh_footer();
+                    continue;
+                }
+            }
         }
 
         // 其余按键统一喂编辑器(字符/粘贴/退格/左右/Home/End;Tab 等 MapKey

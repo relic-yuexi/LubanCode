@@ -133,6 +133,11 @@ void SetAgentPanelDetailProvider(std::function<std::vector<std::string>(int task
 // AgentTool;停止必须走正式取消接口,等任务线程报终态再改灯。
 void SetAgentPanelActions(AgentPanelActions actions);
 
+// 会话收场(/clear、退出、切 worktree)用:把面板状态机(焦点/查看态/
+// composer 收件目标)整份收干净——查看态那只任务已经没了,目标不能悬着。
+// 管道/重定向模式下面板本来就不存在,调了也是空操作。
+void ResetAgentPanelSession();
+
 // 这一次 composer 读取的"收件目标":进入某只后台子代理查看态后,面板
 // 控制器记着它的任务号;ReadLine 返回后应用层取这个,把提交的消息定向送
 // 进那只子代理的 inbox(不经 main history)。nullopt = 归 main。每次
@@ -207,15 +212,15 @@ void SetStreamScreenScrollHook(std::function<void(int)> hook);
 
 // -----------------------------------------------------------------------
 // "ask_user 被子代理状态遮挡"一单的 repaint 协调层:阻塞式交互菜单
-// (StreamFooterSuspendScope 存活期)取得整块屏面所有权,期间——脚注框不
-// 重画、子代理浮动状态块零输出、控制台输入不归监听线程。规约全部钉在
-// 这几个入口上,单测见 tests/test_repaint_coord.cpp:
+// (StreamFooterSuspendScope 存活期)取得整块屏面所有权,期间——脚注框
+// (含框里的代理面板)不重画、心跳线程零输出、控制台输入不归监听线程。
+// 规约全部钉在这几个入口上,单测见 tests/test_repaint_coord.cpp:
 // -----------------------------------------------------------------------
 
 // 全局 repaint 挂起计数(footer 的 suspend_depth / paint_depth 合起来看)。
 // 挂起 = 交互菜单占屏(suspend_depth>0)或屏幕事务进行中(paint_depth>0)。
 // 调用方必须已持有 StdoutWriteMutex(两枚深度的写点全在这把锁内);
-// AgentStatusPainter::Tick 拿到锁后第一件事就是查它。
+// turn_runner 的 footer 心跳线程拿到锁后第一件事就是查它。
 bool RepaintSuspendedLocked();
 
 // 挂起计数>0(即阻塞式交互菜单开着)。自带 StdoutWriteMutex,给
@@ -225,11 +230,6 @@ bool RepaintSuspendActive();
 
 // 测试/诊断用:suspend 计数现状(嵌套/重复恢复/异常早退析构对账的观测口)。
 int StreamFooterSuspendDepthForTest();
-
-// 交互菜单开屏(最外层 StreamFooterSuspendScope 进入)时收走浮动状态块的
-// 钩子。AgentStatusPainter 构造时自登记、Stop 时撤销;调用时已持有
-// StdoutWriteMutex,实现不得再拿这把锁,也不得读控制台输入。传空即撤销。
-void SetRepaintSuspendHideHook(std::function<void()> hook);
 
 // M10:"谁在真的逐键读键盘,谁先拿这把锁"。ReadLineKeyByKey()/ReadChoiceMenu
 // 整个调用期间攥着它,TurnInputListener 的监听线程只在 try_lock 抢到的
@@ -283,7 +283,7 @@ void StopStreamFooterWorking();
 // ReadLine([y/a/N] 提示)那一整段)期间,流式脚注框必须让路——真机实测
 // 报过两条病:1) 确认详情文字直接盖写在框的横线上,不清行尾,横线残留;
 // 2) [y/a/N] 提示整个看不见。根子不是"没打印",是打印完之后被后续某次
-// RedrawStreamFooterLocked() 覆盖掉了——最典型的是 AgentStatusPainter 的
+// RedrawStreamFooterLocked() 覆盖掉了——最典型的是 turn_runner 的 footer
 // 400ms 一次 ticker(main.cpp),不管是不是在等确认,只要 enabled 就无条件
 // 重画一次框;PrintConfirmDetails/ReadLine 落笔时又都不清场,两边一撞,
 // 框把确认文字整个盖掉,或者反过来在确认文字尾巴上留下没清干净的横线。
@@ -308,11 +308,10 @@ void StopStreamFooterWorking();
 // "ask_user 被子代理状态遮挡"一单把这块挂起从"只管脚注框"升格成全局
 // repaint 挂起计数:作用域存活期间(嵌套时计数没退干净前),不止
 // RedrawStreamFooterLocked() 空操作——
-//   1. 构造最外层时经 SetRepaintSuspendHideHook 登记的钩子(AgentStatusPainter
-//      构造时自登记)把子代理状态块整块收走,菜单的标题/问题/选项从正文
-//      末尾一次铺到底,中间没有浮动块插队;
-//   2. AgentStatusPainter 的 ticker 每拍先查 RepaintSuspendedLocked(),挂起
-//      期间零输出——单次 Hide() 堵不住的那个"下一拍又画回来"从根上没了;
+//   1. 构造最外层时把整个框(含框里的代理面板)彻底擦净,菜单的标题/
+//      问题/选项从正文末尾一次铺到底,中间没有浮动块插队;
+//   2. turn_runner 的 footer 心跳线程每拍先查 RepaintSuspendedLocked(),挂起
+//      期间零输出——单次擦除堵不住的那个"下一拍又画回来"从根上没了;
 //   3. TurnInputListener 查 RepaintSuspendActive(),挂起期间不碰控制台输入,
 //      连"问题打印完、菜单还没抢到 ConsoleReadMutex"的空窗也不留——键盘
 //      全归菜单一处。
