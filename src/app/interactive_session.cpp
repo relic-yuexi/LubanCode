@@ -1087,10 +1087,11 @@ void InteractiveSession::RunPeerTurn(const std::string& text) {
             ? project_memory->BuildTurnContext(text, std::filesystem::current_path())
             : std::string();
     loop->SetTurnSystemSuffix(std::move(turn_suffix));
-    const RunTurnResult turn_result =
-        RunTurn(*loop, text, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
-                config.hooks, spinner_enabled, transcript, todo_state(), &transcript_expanded,
-                settings_local.allow_commands, settings_local.deny_commands, session_agent_tool());
+    // RunTurnResult 只剩 status/cancelled,peer 来信轮两边都不看;排队消息
+    // 走会话层 SteeringQueue,不在这里收。直接调,不接没人用的返回值。
+    RunTurn(*loop, text, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
+            config.hooks, spinner_enabled, transcript, todo_state(), &transcript_expanded,
+            settings_local.allow_commands, settings_local.deny_commands, session_agent_tool());
     PersistNewMessages();
     if (peer_started) {
         peer_runtime->SetStatus("idle");
@@ -1299,6 +1300,9 @@ CommandFlow InteractiveSession::ProcessLine(const std::string& content) {
 // (commands/ 下按窄状态接活)。返回 Exit 表示触发 /exit,外层循环该退。
 CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::ParsedSlashCommand& parsed) {
     switch (parsed.command) {
+            case lubancode::cli::SlashCommand::Image:
+                // 进不来:ProcessLine 把 Image 截给图片路径,不进分派。
+                break;
             case lubancode::cli::SlashCommand::Help:
                 PrintSlashHelp();
                 break;
