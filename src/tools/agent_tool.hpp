@@ -50,15 +50,15 @@ enum class AgentTaskState { Running, Done, Failed, Cancelled, BudgetExhausted };
 // ---------------------------------------------------------------------------
 
 // 收场状态:completed = 正常交了结论;failed = 没交结论/出错;stopped =
-// 用户中止;budget_exhausted = 轮数预算用满(检查点/部分结果仍在)。
+// 用户中止;budget_exhausted = 步数预算用满(检查点/部分结果仍在)。
 enum class TaskOutcomeStatus { Completed, Failed, Stopped, BudgetExhausted };
 
 // 短因:面板与通知只放短因,完整错误进 transcript。
 enum class TaskOutcomeReason {
-    None,          // 无(还没收场/正常完成)
-    ApiError,      // 接口报错(请求失败/流中断)
-    MaxTurns,      // 轮数预算耗尽
-    MaxContext,    // 上下文装不下
+    None,              // 无(还没收场/正常完成)
+    ApiError,          // 接口报错(请求失败/流中断)
+    StepLimitExhausted,  // 步数预算耗尽(旧名 MaxTurns,口径已改按 step 记)
+    MaxContext,        // 上下文装不下
     NoFinalText,   // 最后一轮没有文本结论
     ToolError,     // 最后一次工具调用出错带崩了收尾
     UserStop,      // 用户中止
@@ -72,8 +72,8 @@ struct TaskOutcome {
     std::string partial_result;  // 已取得的事实或最后检查点(尽力保住)
     std::string stop_reason;     // 模型原始 stop reason(空 = 一个字都没回来)
     std::string last_tool;       // 最后一次工具名与结果摘要
-    int turns_used = 0;
-    int turn_limit = 0;          // 0 = 不限轮
+    int steps_used = 0;
+    int step_limit = 0;          // 0 = 不限步(一个 turn 内的模型请求数上限)
     std::int64_t input_tokens = 0;
     std::int64_t output_tokens = 0;
     double elapsed_seconds = 0;
@@ -97,9 +97,9 @@ struct AgentTaskSnapshot {
     // 前台(阻塞父级调用)还是后台(独立线程)。详情可看,列表不必铺。
     bool foreground = false;
     AgentTaskState state = AgentTaskState::Running;
-    // 派出时写死的预算(0 = 不限轮):面板可见,不等撞墙才揭晓(规格"现场四")。
-    int turn_limit = 0;
-    int turns_used = 0;  // 已发生的模型请求数(on_usage 记账)
+    // 派出时写死的预算(0 = 不限步):面板可见,不等撞墙才揭晓(规格"现场四")。
+    int step_limit = 0;
+    int steps_used = 0;  // 已发生的模型请求数(RunOutcome 直接记账,不靠 usage 回调猜)
     std::int64_t input_tokens = 0;
     std::int64_t output_tokens = 0;
     std::chrono::steady_clock::time_point start_time{};
@@ -123,8 +123,8 @@ struct AgentTaskSummary {
     std::string prompt;
     bool foreground = false;
     AgentTaskState state = AgentTaskState::Running;
-    int turn_limit = 0;
-    int turns_used = 0;
+    int step_limit = 0;
+    int steps_used = 0;
     TaskOutcomeReason outcome_reason = TaskOutcomeReason::None;  // 面板短因用
     std::int64_t input_tokens = 0;
     std::int64_t output_tokens = 0;
@@ -198,16 +198,16 @@ public:
     // model:子代理发请求用的 model 字段;如果 backend 链里有会覆盖 model
     // 的包装层(比如 main.cpp 的 ModelOverrideBackend),这里填什么都会被
     // 覆盖掉,留空也没关系。
-    // default_max_turns:入参没给 max_turns 时用的默认值。调用方必须从配置
-    // 传入(首选 subagent.max_turns,未设继承 config.max_turns;默认 0 =
-    // 不限轮)——这里不再暗藏魔数(旧版先后藏过 15 和 40,规格"现场四"点名
-    // 拆掉);仅测试直调时用参数默认 0。
+    // default_max_steps_per_turn:入参没给 max_steps_per_turn 时用的默认值。
+    // 调用方必须从配置传入(首选 subagent.max_steps_per_turn,未设继承
+    // config.max_steps_per_turn;默认 0 = 不限步)——这里不再暗藏魔数(旧版
+    // 先后藏过 15 和 40,规格"现场四"点名拆掉);仅测试直调时用参数默认 0。
     // skills_segment:M9 新增,系统提示词里"可用技能"那一段(见
     // agent::BuildSkillsPromptSegment),子代理跟主代理共用同一份扫描结果,
     // 空串表示没有技能(不注入)。main.cpp 扫描一次,主代理、子代理都传
     // 同一份。
     AgentTool(api::Backend& backend, ToolRegistry& sub_registry, std::string cwd, std::string model = std::string(),
-              int default_max_turns = 0, std::string skills_segment = std::string());
+              int default_max_steps_per_turn = 0, std::string skills_segment = std::string());
 
     ~AgentTool() override;
 
@@ -356,11 +356,11 @@ private:
                                            const lubancode::cli::GitRunner& runner);
 
     Result ExecuteForeground(const nlohmann::json& input, const std::string& title, const std::string& agent_type,
-                             ToolRegistry& task_registry, int max_turns, bool isolate);
+                             ToolRegistry& task_registry, int max_steps_per_turn, bool isolate);
     Result LaunchBackground(const nlohmann::json& input, const std::string& title, const std::string& agent_type,
-                            ToolRegistry& task_registry, int max_turns, bool isolate);
+                            ToolRegistry& task_registry, int max_steps_per_turn, bool isolate);
     Result RunTask(api::Backend& backend, ToolRegistry& task_registry, const std::string& prompt,
-                   const std::string& agent_type, int max_turns, const Hooks* foreground_hooks,
+                   const std::string& agent_type, int max_steps_per_turn, const Hooks* foreground_hooks,
                    const std::shared_ptr<TaskRecord>& task,
                    const DetachedAgentBackend* detached = nullptr,
                    const std::string* prepared_system_prompt = nullptr,
@@ -375,7 +375,7 @@ private:
     // 续跑失败时把取件批次退回未送(按下标回滚,不整箱回退)。
     void RestoreDrainedInbox(const std::shared_ptr<TaskRecord>& task, const DrainedInbox& drained);
     // 收尾账注:还有未送介入消息时,给结果文本追加"N 条未送达 + 逐条
-    // 首行原文"的附言(取消/max turns/provider 错误都不能无声遗失)。
+    // 首行原文"的附言(取消/步数耗尽/provider 错误都不能无声遗失)。
     static std::string UndeliveredInboxNote(const std::shared_ptr<TaskRecord>& task);
 
     api::Backend& backend_;
@@ -383,7 +383,7 @@ private:
     ToolRegistry* explore_registry_ = nullptr;
     std::string cwd_;
     std::string model_;
-    int default_max_turns_;
+    int default_max_steps_per_turn_;
     std::string skills_segment_;
     std::string prompts_dir_;  // 提示词运行时化:空 = 只用嵌入版
     std::string project_instructions_;  // 当前工作目录的 AGENTS.md 分层内容

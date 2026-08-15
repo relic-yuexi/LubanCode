@@ -271,6 +271,11 @@ int RunCli(const std::vector<std::string>& args) {
     if (config_result->migration_notice.has_value()) {
         std::cout << *config_result->migration_notice << "\n";
     }
+    // 兼容期提示(命名规范第二批):旧名 max_turns / LUBANCODE_MAX_TURNS 被
+    // 读入、或新旧同现冲突时逐条打给用户看。走 stderr,不污染管道输出。
+    for (const std::string& notice : config_result->deprecation_notices) {
+        std::cerr << notice << "\n";
+    }
 
     // i18n:配置读出来了,按四级合并的 language 字段定稿(空 = 跟系统)。
     // 语言包早在函数开头扫过,这里只是切码;坏包警告攒到现在,按定稿语言打。

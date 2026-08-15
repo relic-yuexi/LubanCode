@@ -225,7 +225,7 @@ struct ToolDisplay {
     nlohmann::json sub_input;
     std::optional<int> main_write_old_lines;
     std::optional<int> sub_write_old_lines;
-    int agent_rounds = 0;
+    int agent_step_count = 0;  // 子代理累计步数(每次模型请求一步)
     int agent_sub_tools = 0;
     // 思考折叠块("思考 Xs")。active_thinking 是 transcript 下标,
     // -1 = 没有正在展示的思考块。thinking_buffer 攒完整思考正文,结束时
@@ -259,7 +259,7 @@ struct ToolDisplay {
         main_diff_final.clear();
         main_preview_below = false;
         if (name == "agent") {
-            agent_rounds = 0;
+            agent_step_count = 0;
             agent_sub_tools = 0;
         }
         const bool is_todo = name == "todo_write" && todo_state;
@@ -328,7 +328,7 @@ struct ToolDisplay {
             painter.TrimBelow(item.id);
         }
         main_preview_below = false;
-        FinalizeItem(item, name, main_input, result, main_write_old_lines, agent_rounds, agent_sub_tools,
+        FinalizeItem(item, name, main_input, result, main_write_old_lines, agent_step_count, agent_sub_tools,
                       main_diff_full, main_diff_final);
         UpdateSnapshotItem(active_main);
         if (is_console) {
@@ -687,7 +687,7 @@ private:
     // (确认回调里已定格)不再覆盖,ESC 打断标成 Interrupted。
     void FinalizeItem(lubancode::cli::TranscriptItem& item, const std::string& name, const nlohmann::json& input,
                        const lubancode::tools::Tool::Result& result, std::optional<int> write_old_lines,
-                       int rounds, int sub_tools, const std::string& diff_full = std::string(),
+                       int step_count, int sub_tools, const std::string& diff_full = std::string(),
                        const std::vector<std::string>& diff_final = {}) {
         namespace cli = lubancode::cli;
         item.end_time = std::chrono::steady_clock::now();
@@ -738,7 +738,7 @@ private:
         } else if (name == "search") {
             item.summary_lines = {cli::SearchDoneSummary(result.content)};
         } else if (name == "agent") {
-            item.summary_lines = {cli::AgentDoneSummary(rounds, sub_tools)};
+            item.summary_lines = {cli::AgentDoneSummary(step_count, sub_tools)};
         } else if (name == "todo_write" && todo_state) {
             // 沿用现有清单渲染,清单接在 ⎿ 之后(FormatTodoList 每行自带的
             // 两空格缩进剥掉,条目渲染自己管缩进)。

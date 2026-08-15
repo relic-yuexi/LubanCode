@@ -178,8 +178,8 @@ std::string OutcomeReasonText(lubancode::tools::TaskOutcomeReason reason) {
     switch (reason) {
         case R::ApiError:
             return tr("agent_status.reason_api_error");
-        case R::MaxTurns:
-            return tr("agent_status.reason_max_turns");
+        case R::StepLimitExhausted:
+            return tr("agent_status.reason_step_limit");
         case R::MaxContext:
             return tr("agent_status.reason_max_context");
         case R::NoFinalText:
@@ -840,7 +840,7 @@ std::vector<lubancode::cli::AgentPanelEntry> InteractiveSession::BuildAgentPanel
                     state_word = trf("agent_status.state_stopped_reason", tr("agent_status.reason_user_stop"));
                     break;
                 case lubancode::tools::AgentTaskState::BudgetExhausted:
-                    state_word = trf("agent_status.state_exhausted", task.turns_used, task.turn_limit);
+                    state_word = trf("agent_status.state_exhausted", task.steps_used, task.step_limit);
                     break;
                 case lubancode::tools::AgentTaskState::Failed:
                 case lubancode::tools::AgentTaskState::Running:
@@ -848,8 +848,8 @@ std::vector<lubancode::cli::AgentPanelEntry> InteractiveSession::BuildAgentPanel
                     break;
             }
         }
-        if (entry.running && task.turn_limit > 0) {
-            state_word += trf("agent_status.budget_suffix", task.turns_used, task.turn_limit);
+        if (entry.running && task.step_limit > 0) {
+            state_word += trf("agent_status.budget_suffix", task.steps_used, task.step_limit);
         }
         entry.state = trf("agent_status.summary", state_word, task.tool_call_count,
                           lubancode::cli::FormatTokenCount(tokens), lubancode::cli::FormatSeconds(seconds));        // 列表行只认真正短 title;旧任务没有 title 就显示"未命名子代理 #N"
@@ -1096,16 +1096,16 @@ void InteractiveSession::RebuildLoop(bool preserve_history) {
         old_history = loop->History();
     }
     // max_tokens=4096 是 AgentLoop 自己的默认值,这里显式传出来是为了能
-    // 把 config.max_context_chars 一起传进去。max_turns 改用
-    // config.max_turns(可经配置文件/LUBANCODE_MAX_TURNS 调整,默认
-    // kDefaultMaxTurns=0=无上限)——防跑飞靠用户 ESC/Ctrl+C,不再靠硬闸
+    // 把 config.max_context_chars 一起传进去。步数上限改用
+    // config.max_steps_per_turn(可经配置文件/环境变量调整,默认
+    // 0=无上限)——防跑飞靠用户 ESC/Ctrl+C,不再靠硬闸
     // 拦腰截断正常开发;想要硬上限的人自己配一个正整数。
     // tool_search:backend 换成 index_backend(索引段包装,未启用时纯
     // 透传);/clear 重建后过滤谓词要重新灌一遍——loaded 集合不清,
     // 已挂载的工具跨 /clear 仍然可用。
     loop.emplace(*index_backend_, registry(), config.model,
                  lubancode::agent::AssembleSystemPrompt(prompt_options),
-                 /*max_tokens=*/4096, config.max_turns, config.max_context_chars);
+                 /*max_tokens=*/4096, config.max_steps_per_turn, config.max_context_chars);
     loop->SetToolFilter(main_tool_filter());
     // mid-turn 上下文安全点(0.27.x):窗口与压力通报随 loop 重建重灌;窗口
     // 的后续变化(/context、/model)由 RunUserTurn 发轮前再同步。

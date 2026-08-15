@@ -133,7 +133,7 @@ std::string WriteDiffSummary(int added_lines, std::optional<int> removed_lines);
 std::string SearchDoneSummary(const std::string& content);
 
 // "子代理 N 轮 · M 次工具"。
-std::string AgentDoneSummary(int rounds, int sub_tool_calls);
+std::string AgentDoneSummary(int step_count, int tool_call_count);
 
 // 失败态摘要:首行固定 "Error: <首行>",接错误输出的后续行,总共最多取
 // 前 5 行;更长的补一行截断标注 "(共 N 行,Ctrl+E 查看完整)"。

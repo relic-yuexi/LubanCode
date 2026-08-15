@@ -54,6 +54,7 @@
 | --- | --- |
 | [扩展指南](extensions.md) | Skill、MCP、LSP、Lua、C ABI、hooks、延迟挂载、命名和信任边界。 |
 | [架构说明](architecture.md) | 组件分层、三协议、请求链、工具表、提示词、会话、终端并发、平台抽象与测试。 |
+| [命名与计数规范](naming-conventions.md) | turn/step 词典、计数器单位、通用五条与 review 清单。 |
 | [Query 数据流](query-data-flow.md) | 用“帮我看一下当前项目”追一遍 system、history、tools、三种 wire、流式回包与子代理。 |
 | [提示词模块](../src/prompts/README.md) | 内置 prompt 怎样拆分、构建嵌入、运行时播种和覆盖。 |
 | [求职项目手册](job-portfolio.md) | 项目数据、架构讲法、面试故事、演示脚本与源码证据。 |

@@ -267,8 +267,8 @@ TEST_CASE("SearchDoneSummary: 命中数,没搜到算 0,截断提示行不计") {
           "命中 1 处");
 }
 
-TEST_CASE("AgentDoneSummary: 子代理轮数和子工具次数") {
-    CHECK(AgentDoneSummary(3, 5) == "子代理 3 轮 · 5 次工具");
+TEST_CASE("AgentDoneSummary: 子代理步数和工具次数") {
+    CHECK(AgentDoneSummary(3, 5) == "子代理 3 步 · 5 次工具");
 }
 
 TEST_CASE("ErrorSummaryLines: 首行固定 Error:,最多前 5 行,超长带截断标注") {

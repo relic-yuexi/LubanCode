@@ -423,8 +423,8 @@ std::string SearchDoneSummary(const std::string& content) {
     return trf("transcript.hits", hits);
 }
 
-std::string AgentDoneSummary(int rounds, int sub_tool_calls) {
-    return trf("transcript.agent", rounds, sub_tool_calls);
+std::string AgentDoneSummary(int step_count, int tool_call_count) {
+    return trf("transcript.agent", step_count, tool_call_count);
 }
 
 std::vector<std::string> ErrorSummaryLines(const std::string& tool_name, const std::string& content) {

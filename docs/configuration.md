@@ -32,7 +32,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
   "context_window": "256k",
   "compact_model": "",
   "max_context_chars": 600000,
-  "max_turns": 0,
+  "max_steps_per_turn": 0,
   "tool_search_threshold": 20,
   "connect_timeout_ms": 15000,
   "stream_idle_timeout_secs": 60,
@@ -117,7 +117,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 | `context_window` | 字符串或整数,支持 `256k`/`512k`/`1m` 或裸数字 | `256000` | 会话上下文窗口(token),`k=1000`、`m=1000000`(十进制)。 |
 | `compact_model` | 字符串,可留空 | 空串 | `/compact` 专用模型;空串就沿用会话模型。模型在目录里带 `context_window` 时,压缩输入按它单独算预算(窗口 − 输出预留 − 协议余量),装不下明确拒绝、不截史。 |
 | `max_context_chars` | 正整数 | `600000` | 旧的按字节硬切安全网,跟 `context_window` 不是一回事,两条防线互不依赖;真触发时终端打有损裁剪告警。 |
-| `max_turns` | 非负整数 | `0`(无上限) | agent 主循环一次来回的轮数上限。不配或配 `0` = 不设上限,防跑飞靠 ESC/Ctrl+C;配正整数才是硬上限,超过就报错停止。负数或非法值静默忽略。 |
+| `max_steps_per_turn` | 非负整数 | `0`(无上限) | agent 主循环一个 turn 内的步数上限:一步 = 一次模型请求,一步可含多枚工具调用。不配或配 `0` = 不设上限,防跑飞靠 ESC/Ctrl+C;配正整数才是硬上限,超过就按预算耗尽收场。负数或非法值静默忽略。旧名 `max_turns` 仍可读入(兼容期,读到会打弃用提示);两者同现且值不同会明报冲突并采用新名。 |
 | `system_prompt_file` | 字符串,UTF-8 文本路径 | 无 | 人格段文件路径;没配就用内置人格,`--system-prompt` 命令行参数会压过它。 |
 | `tool_search_threshold` | 非负整数 | `20` | 注册工具总数超过此数才启用延迟挂载(工具搜索);`0` 永不延迟。 |
 | `memory` | JSON object | `enabled=false` | 项目记忆开关、读写子开关与召回预算，见下节。只能由全局配置打开。 |
@@ -246,7 +246,7 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 | `LUBANCODE_API_KEY` | `api_key` | 模型服务认证值。 |
 | `LUBANCODE_MODEL` | `model` | 模型名。 |
 | `LUBANCODE_MAX_CONTEXT` | `max_context_chars` | 正整数;无效或不大于零时当没设。 |
-| `LUBANCODE_MAX_TURNS` | `max_turns` | 非负整数;`0` = 不设上限,负数或无效值当没设。 |
+| `LUBANCODE_MAX_STEPS_PER_TURN` | `max_steps_per_turn` | 非负整数;`0` = 不设上限,负数或无效值当没设。旧名 `LUBANCODE_MAX_TURNS` 仍可读入(兼容期);两者同设且值不同会明报冲突并采用新名。 |
 | `LUBANCODE_THEME` | `theme` | `dark`、`light` 或 `plain`。 |
 | `LUBANCODE_LANG` | `language` | `zh-CN`/`en`/语言包语言码;空 = 跟系统。 |
 | `LUBANCODE_SYSTEM_PROMPT_FILE` | `system_prompt_file` | UTF-8 人格文件路径。 |
