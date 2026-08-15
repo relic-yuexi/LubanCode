@@ -977,3 +977,107 @@ TEST_CASE("统一台账:一轮里先后多只前台代理,各自留终态,新一
     CHECK(summaries[0].foreground);
     CHECK(summaries[1].foreground);
 }
+
+// ---------------------------------------------------------------------------
+// 子代理消息账(规格"现场三"):每只任务独立的、按时间追加的事件流。
+// 事件类型与 main 对齐,查看态复用 main renderer——这里钉账本身:时序、
+// 中间文字不丢、工具配对、介入落点、终局事件。
+// ---------------------------------------------------------------------------
+
+// 一条 assistant 消息里"先说话再调工具"的脚本:正文块(block 0)在前,
+// tool_use 块(block 1)在后——钉"助手中间文字不能因后续工具调用而丢"。
+std::vector<api::StreamEvent> TextThenToolScript(const std::string& text, const std::string& tool_id,
+                                                 const std::string& tool_name) {
+    return {
+        api::MessageStart{"msg", "model"},
+        api::TextDelta{text},
+        api::ContentBlockDone{0},
+        api::ToolUseStart{1, tool_id, tool_name},
+        api::ToolUseInputDelta{1, "{}"},
+        api::ContentBlockDone{1},
+        api::MessageDone{"tool_use", api::Usage{}},
+    };
+}
+
+TEST_CASE("消息账:按次序 user -> 正文 -> 工具 -> 结果 -> 正文 -> 完成,顺序不乱") {
+    FakeBackend backend;
+    backend.scripts = {
+        TextThenToolScript("先看一眼目录", "toolu_1", "fake_tool"),
+        TextOnlyScript("结论:共三处入口"),
+    };
+    tools::ToolRegistry sub_registry;
+    sub_registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"工具结果全文", false}, false));
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+
+    REQUIRE_FALSE(agent_tool.execute(nlohmann::json{{"title", "查入口"}, {"prompt", "数一数入口"}}).is_error);
+    const auto summaries = agent_tool.TaskSummaries();
+    REQUIRE(summaries.size() == 1);
+    const auto events = agent_tool.TaskEvents(summaries[0].id);
+    REQUIRE(events.size() == 6);
+    CHECK(events[0].kind == tools::AgentTaskEventKind::UserMessage);
+    CHECK(events[0].text == "数一数入口");
+    CHECK(events[1].kind == tools::AgentTaskEventKind::AssistantText);
+    CHECK(events[1].text == "先看一眼目录");  // 中间文字不因后续工具调用丢掉
+    CHECK(events[2].kind == tools::AgentTaskEventKind::ToolStart);
+    CHECK(events[2].tool_name == "fake_tool");
+    CHECK(events[3].kind == tools::AgentTaskEventKind::ToolResult);
+    CHECK(events[3].tool_name == "fake_tool");
+    CHECK(events[3].result == "工具结果全文");
+    CHECK_FALSE(events[3].is_error);
+    CHECK(events[4].kind == tools::AgentTaskEventKind::AssistantText);
+    CHECK(events[4].text == "结论:共三处入口");
+    CHECK(events[5].kind == tools::AgentTaskEventKind::Completion);
+    CHECK(events[5].text == "结论:共三处入口");  // 完成事件带最终结论全文
+}
+
+TEST_CASE("消息账:思考入账、工具出错带错误标记;失败任务的终局是 Failure") {
+    FakeBackend backend;
+    // 第一轮:思考 + 出错的工具;第二轮:没有文本结论 -> NoFinalText 失败。
+    backend.scripts = {
+        {
+            api::MessageStart{"msg", "model"},
+            api::ThinkingDelta{"想一想从哪下手"},
+            api::ContentBlockDone{0},
+            api::ToolUseStart{1, "toolu_1", "fake_tool"},
+            api::ToolUseInputDelta{1, "{}"},
+            api::ContentBlockDone{1},
+            api::MessageDone{"tool_use", api::Usage{}},
+        },
+        {
+            api::MessageStart{"msg", "model"},
+            api::MessageDone{"end_turn", api::Usage{}},
+        },
+    };
+    tools::ToolRegistry sub_registry;
+    sub_registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"炸了", true}, false));
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+
+    agent_tool.execute(nlohmann::json{{"title", "试错"}, {"prompt", "试一下"}});
+    const auto summaries = agent_tool.TaskSummaries();
+    REQUIRE(summaries.size() == 1);
+    const auto events = agent_tool.TaskEvents(summaries[0].id);
+    REQUIRE(events.size() == 5);
+    CHECK(events[0].kind == tools::AgentTaskEventKind::UserMessage);
+    CHECK(events[1].kind == tools::AgentTaskEventKind::AssistantReasoning);
+    CHECK(events[1].text == "想一想从哪下手");
+    CHECK(events[2].kind == tools::AgentTaskEventKind::ToolStart);
+    CHECK(events[3].kind == tools::AgentTaskEventKind::ToolResult);
+    CHECK(events[3].is_error);  // 工具错误在账
+    CHECK(events[4].kind == tools::AgentTaskEventKind::Failure);  // 失败终局入账
+}
+
+TEST_CASE("消息账:终态任务事件账保留,投递与否不清账(台账与退场分离)") {
+    FakeBackend backend;
+    backend.scripts = {TextOnlyScript("完事")};
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+    REQUIRE_FALSE(agent_tool.execute(nlohmann::json{{"title", "小任务"}, {"prompt", "去"}}).is_error);
+    const auto summaries = agent_tool.TaskSummaries();
+    REQUIRE(summaries.size() == 1);
+    REQUIRE(summaries[0].state == tools::AgentTaskState::Done);
+    const auto events = agent_tool.TaskEvents(summaries[0].id);
+    REQUIRE(events.size() == 3);  // user + 正文 + completion
+    CHECK(events[0].kind == tools::AgentTaskEventKind::UserMessage);
+    CHECK(events[1].kind == tools::AgentTaskEventKind::AssistantText);
+    CHECK(events[2].kind == tools::AgentTaskEventKind::Completion);
+}

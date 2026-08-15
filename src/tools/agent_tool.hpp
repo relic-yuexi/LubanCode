@@ -113,6 +113,33 @@ struct AgentTaskSnapshot {
     bool delivered = false;
 };
 
+// ---------------------------------------------------------------------------
+// 子代理消息账(规格"现场三"):每只任务一份独立的、按时间追加的事件流,
+// 事件类型与 main 的 transcript 对齐。查看态复用 main 的 TranscriptItem/
+// 折叠规则/工具卡 renderer 渲染这份账——两边各有独立消息账,共用一套显示
+// 组件,绝不手搓第二套长文本。
+// ---------------------------------------------------------------------------
+enum class AgentTaskEventKind {
+    UserMessage,         // 任务说明(派出时的 prompt)或续投输入
+    AssistantText,       // 助手正文一段(工具/思考边界切段)
+    AssistantReasoning,  // 助手思考一段
+    ToolStart,           // 发起一次工具调用
+    ToolResult,          // 一次工具调用的结果
+    SteeringMessage,     // main/用户中途介入(轮次边界注入 inbox 的那条)
+    CompactCheckpoint,   // 上下文压缩边界(历史换轨,前情进存档)
+    Completion,          // 正常完成(带最终结论全文)
+    Failure,             // 失败/中止/耗尽(带短因与部分结果)
+};
+
+struct AgentTaskEvent {
+    AgentTaskEventKind kind = AgentTaskEventKind::UserMessage;
+    std::string text;        // 正文/结论/短因/检查点说明
+    std::string tool_name;   // ToolStart/ToolResult:工具名
+    std::string input_json;  // ToolStart:入参紧凑 JSON
+    std::string result;      // ToolResult:结果全文(截 kFullOutputCapBytes)
+    bool is_error = false;   // ToolResult:是否出错
+};
+
 // 轻量列表条目(0.28.x 面板全量化):列表每 100ms 刷新一次,不再复制
 // tool_calls/live_output 这些大块——面板列表行只要这几个字段;详情(完整
 // 任务说明、工具流水、介入消息)另走 TaskDetail(task_id) 按需取。
@@ -132,6 +159,9 @@ struct AgentTaskSummary {
     std::chrono::steady_clock::time_point end_time{};
     std::size_t tool_call_count = 0;
     std::size_t pending_message_count = 0;  // 已排队未送达的介入消息数
+    // 结果是否已交回主会话(DrainCompletionNotices 置位)。面板的"退场"账
+    // 用:done+delivered 的任务从活动导航坞退场,台账照查(规格"现场一")。
+    bool delivered = false;
 };
 
 // SendTaskMessage 的收信结果。
@@ -241,6 +271,10 @@ public:
     // 某只任务的详情快照(查看态按需取):完整 prompt、全部工具调用流水、
     // live_output/result。task_id 认不出返回 nullopt。
     std::optional<AgentTaskSnapshot> TaskDetail(int task_id) const;
+    // 某只任务的消息账(按时间序,查看态的会话视口用):事件流复用 main 的
+    // 渲染组件,不在这里拼显示文本。task_id 认不出返回空表。运行中也可调,
+    // 读到的是已封口事件 + 正在累积的正文/思考尾巴(各切一段带出)。
+    std::vector<AgentTaskEvent> TaskEvents(int task_id) const;
     // 某只任务已排队未送达的介入消息原文(详情展示/测试用)。
     std::vector<std::string> PendingTaskMessages(int task_id) const;
 
@@ -332,6 +366,14 @@ private:
         std::atomic<bool> cancel{false};
         mutable std::mutex inbox_mutex;
         std::deque<InboxItem> inbox;
+        // 消息账(规格"现场三"):按时间追加的事件流,写入全在任务线程
+        // (loop 回调 + RunTask 循环),读取(TaskEvents)在主线程——都拿
+        // tasks_mutex_,天然按发生次序。pending_* 是正在累积的助手正文/思考,
+        // 在事件边界(工具发起/轮次收口)切成正式事件,不让中间文字被后
+        // 续工具调用淹没。
+        std::vector<AgentTaskEvent> events;
+        std::string pending_text;
+        std::string pending_reasoning;
         // 封账闸(规格第五节"排到了却没送"):子代理准备从 Running 进终态
         // 时,在 tasks_mutex_ 里查一遍 inbox——空则置 true,此后
         // SendTaskMessage 明确拒收(Finished);非空则不封账,取走注入、
@@ -366,6 +408,13 @@ private:
                    const std::string* prepared_system_prompt = nullptr,
                    const IsolationScope* isolation_scope = nullptr);
     void TouchTasks() { task_revision_.fetch_add(1, std::memory_order_release); }
+
+    // 消息账的写入辅助(都假定调用方已持 tasks_mutex_ 或独占任务线程收口):
+    //   AppendTaskEventLocked —— 追加一枚事件(正文按 kLiveOutputCap 截尾);
+    //   FlushPendingTaskTextLocked —— 把正在累积的正文/思考切成正式事件
+    //   (工具发起/轮次收口等边界调用,保住"助手文字 -> 工具卡"的时序)。
+    void AppendTaskEventLocked(const std::shared_ptr<TaskRecord>& task, AgentTaskEvent event);
+    void FlushPendingTaskTextLocked(const std::shared_ptr<TaskRecord>& task);
 
     // 原子交接(规格第五节):子代理一轮 Run 正常收口后调。inbox 空 ->
     // 置 inbox_closed 封账(sealed=true,后续 SendTaskMessage 拒收);
