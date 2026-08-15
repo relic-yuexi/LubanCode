@@ -214,20 +214,44 @@ TEST_CASE("git branch/remote 收紧:裸命令与只读旗标放行,可变参数�
 // 隔离的 git 改道闸(0.27.x)
 // ---------------------------------------------------------------------------
 
+
+// 隔离改道闸的测试路径按平台给:POSIX 上没有盘符,写死 D:/repo 只是个
+// 怪相对名,TokenHitsMainRoot 解析回主树认不出(识别器没错,是测试的
+// 路径形制挑了平台)。反斜杠与 cmd 变体只在 Windows 有意义。
+#ifdef _WIN32
+const char* const kIsoMain = "D:/repo";
+const char* const kIsoRoom = "D:/repo/.lubancode/worktrees/fix-1";
+const char* const kIsoUnrelated = "D:/tmp";
+#else
+const char* const kIsoMain = "/repo";
+const char* const kIsoRoom = "/repo/.lubancode/worktrees/fix-1";
+const char* const kIsoUnrelated = "/tmp";
+#endif
+
+lubancode::tools::IsolationScope IsoScope() {
+    return {"fix-1", kIsoRoom, kIsoMain};
+}
+std::string IsoCmd(std::string_view a, std::string_view path, std::string_view b = {}) {
+    return std::string(a) + std::string(path) + std::string(b);
+}
+
 TEST_CASE("隔离改道闸:git -C 指回主 checkout 拦,指房内放行") {
     using lubancode::tools::FindIsolationGitRedirect;
     using lubancode::tools::IsolationScope;
-    const IsolationScope scope{"fix-1", "D:/repo/.lubancode/worktrees/fix-1", "D:/repo"};
+    const IsolationScope scope = IsoScope();
 
-    CHECK(FindIsolationGitRedirect("git -C D:/repo status", "powershell", scope).has_value());
+    CHECK(FindIsolationGitRedirect(IsoCmd("git -C ", kIsoMain, " status"), "powershell", scope).has_value());
+#ifdef _WIN32
+    // 反斜杠路径形制只在 Windows 有意义(POSIX 上 \\ 不是分隔符)
     CHECK(FindIsolationGitRedirect("git -C D:\\repo status", "cmd", scope).has_value());
+#endif
     // 从房里往外爬的相对路径也解析得回主树
     CHECK(FindIsolationGitRedirect("git -C ../../.. status", "powershell", scope).has_value());
     // 指自己房里:放行
     CHECK_FALSE(
-        FindIsolationGitRedirect("git -C D:/repo/.lubancode/worktrees/fix-1 log", "powershell", scope).has_value());
+        FindIsolationGitRedirect(IsoCmd("git -C ", kIsoRoom, " log"), "powershell", scope).has_value());
     // 无关目录:放行
-    CHECK_FALSE(FindIsolationGitRedirect("git -C D:/tmp status", "powershell", scope).has_value());
+    CHECK_FALSE(FindIsolationGitRedirect(IsoCmd("git -C ", kIsoUnrelated, " status"), "powershell", scope).has_value());
     // 裸 git(在房内跑):放行
     CHECK_FALSE(FindIsolationGitRedirect("git status", "cmd", scope).has_value());
 }
@@ -235,26 +259,32 @@ TEST_CASE("隔离改道闸:git -C 指回主 checkout 拦,指房内放行") {
 TEST_CASE("隔离改道闸:--git-dir/--work-tree 与 GIT_DIR 环境变量拦") {
     using lubancode::tools::FindIsolationGitRedirect;
     using lubancode::tools::IsolationScope;
-    const IsolationScope scope{"fix-1", "D:/repo/.lubancode/worktrees/fix-1", "D:/repo"};
+    const IsolationScope scope = IsoScope();
 
-    CHECK(FindIsolationGitRedirect("git --git-dir D:/repo/.git status", "powershell", scope).has_value());
-    CHECK(FindIsolationGitRedirect("git --git-dir=D:/repo/.git status", "powershell", scope).has_value());
-    CHECK(FindIsolationGitRedirect("git --work-tree D:/repo status", "cmd", scope).has_value());
-    CHECK(FindIsolationGitRedirect("git --work-tree=D:/repo status", "powershell", scope).has_value());
-    CHECK(FindIsolationGitRedirect("$env:GIT_DIR='D:/repo/.git'; git status", "powershell", scope).has_value());
-    CHECK(FindIsolationGitRedirect("set GIT_WORK_TREE=D:\\repo&& git status", "cmd", scope).has_value());
+    CHECK(FindIsolationGitRedirect(IsoCmd("git --git-dir ", std::string(kIsoMain) + "/.git", " status"), "powershell", scope).has_value());
+    CHECK(FindIsolationGitRedirect(IsoCmd("git --git-dir=", std::string(kIsoMain) + "/.git", " status"), "powershell", scope).has_value());
+    CHECK(FindIsolationGitRedirect(IsoCmd("git --work-tree ", kIsoMain, " status"), "cmd", scope).has_value());
+    CHECK(FindIsolationGitRedirect(IsoCmd("git --work-tree=", kIsoMain, " status"), "powershell", scope).has_value());
+    CHECK(FindIsolationGitRedirect(IsoCmd("$env:GIT_DIR='", std::string(kIsoMain) + "/.git", "'; git status"), "powershell", scope).has_value());
+    // 赋了就是改道,不管值指哪——cmd 的 set 形式换拼接一样验
+    CHECK(FindIsolationGitRedirect(IsoCmd("set GIT_WORK_TREE=", kIsoMain, "&& git status"), "cmd", scope).has_value());
     // 指向别处的 git-dir:不归这道闸管
-    CHECK_FALSE(FindIsolationGitRedirect("git --git-dir D:/tmp/x/.git status", "powershell", scope).has_value());
+    CHECK_FALSE(FindIsolationGitRedirect(IsoCmd("git --git-dir ", std::string(kIsoUnrelated) + "/x/.git", " status"), "powershell", scope).has_value());
 }
 
 TEST_CASE("隔离改道闸:cd 进主树再跑 git 拦,房内 cd 或无 git 放行") {
     using lubancode::tools::FindIsolationGitRedirect;
     using lubancode::tools::IsolationScope;
-    const IsolationScope scope{"fix-1", "D:/repo/.lubancode/worktrees/fix-1", "D:/repo"};
+    const IsolationScope scope = IsoScope();
 
+#ifdef _WIN32
     CHECK(FindIsolationGitRedirect("cd D:\\repo && git status", "cmd", scope).has_value());
-    CHECK(FindIsolationGitRedirect("Set-Location D:/repo; git status", "powershell", scope).has_value());
+#endif
+    CHECK(FindIsolationGitRedirect(IsoCmd("Set-Location ", kIsoMain, "; git status"), "powershell", scope).has_value());
+#ifdef _WIN32
     CHECK_FALSE(FindIsolationGitRedirect("cd D:\\repo && dir", "cmd", scope).has_value());
-    CHECK_FALSE(FindIsolationGitRedirect("git status && cd D:/repo", "cmd", scope).has_value());  // git 在前不算
-    CHECK_FALSE(FindIsolationGitRedirect("cd D:/tmp && git status", "powershell", scope).has_value());
+#endif
+    CHECK_FALSE(FindIsolationGitRedirect(IsoCmd("cd ", kIsoMain, " && dir"), "cmd", scope).has_value());
+    CHECK_FALSE(FindIsolationGitRedirect(IsoCmd("git status && cd ", kIsoMain), "cmd", scope).has_value());  // git 在前不算
+    CHECK_FALSE(FindIsolationGitRedirect(IsoCmd("cd ", kIsoUnrelated, " && git status"), "powershell", scope).has_value());
 }
