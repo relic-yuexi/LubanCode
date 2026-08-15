@@ -50,11 +50,11 @@ struct Callbacks {
         on_builtin_tool_done;
 
     // 每一次到模型的独立请求结束时(MessageDone 到达那一刻)都会调用一次,
-    // 把这一次的 usage 报出来。一次 Run() 内部可能因为工具调用来回好几趟,
-    // 也就是好几次独立请求——这个回调按请求粒度触发,不是按 Run() 粒度,
-    // 上层(main.cpp)自己决定要不要跨请求累计。可选;不设就跳过,不影响
-    // 其余行为。
-    std::function<void(const api::Usage& usage)> on_usage;
+    // 把这一次的 usage 连同身份(步号/请求 id/模型)报出来。一次 Run() 内部
+    // 可能因为工具调用来回好几趟,也就是好几次独立请求——这个回调按请求
+    // 粒度触发,不是按 Run() 粒度,上层(turn_runner 的逐步流水账)拿它落
+    // StepUsageRecord,整轮汇总从记录求和。可选;不设就跳过,不影响其余行为。
+    std::function<void(const api::UsageReport& report)> on_usage;
 
     // M9:hooks.pre_tool。工具已经找到、还没问确认、更没执行的时候调用一次;
     // 返回非空表示被拦截——值就是要塞进 tool_result 里的 is_error 说明文本,

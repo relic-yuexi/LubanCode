@@ -521,21 +521,17 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         body_tracker.OnToolBlockDone();
     };
 
-    callbacks.on_usage = [&display, &usage_stats, &context_tracker](const lubancode::api::Usage& usage) {
+    callbacks.on_usage = [&display, &usage_stats, &context_tracker](const lubancode::api::UsageReport& report) {
         // 请求结束:思考块若无后续文本/工具接上(只思考不回答的极端情况),
         // 在这里收尾。有后续时 OnThinkingDone 是幂等空操作。
         display.OnThinkingDone();
-        usage_stats.input_tokens += usage.input_tokens;
-        usage_stats.output_tokens += usage.output_tokens;
-        usage_stats.cache_read_tokens += usage.cache_read_tokens;
-        usage_stats.cache_creation_tokens += usage.cache_creation_tokens;
-        usage_stats.request_count += 1;
+        usage_stats.Add(report);
         // ContextTracker 只认"最近一次请求"的真实用量,整个覆盖,不跟着
         // usage_stats 一起累加——语义区别见 cli/context_tracker.hpp 文件头。
         // ApplyUsage 兼管"provider 没回 usage"(四项全零)的语义:不清零、
         // 只把现有数字标成旧值;ESC/HTTP 错误路径压根走不到 on_usage,不会
         // 把旧数伪装成本次新值。
-        context_tracker.ApplyUsage(usage);
+        context_tracker.ApplyUsage(report.usage);
         // usage 一到就把 context/tokens 两段发布给状态行数据源——只改数据
         // 不落笔(锁与重画事务在 cli::UpdateStatusLineContext 里),回合内
         // 状态栏跟着前进,不必等整轮收口回外层循环重建快照;外层重建与这里
@@ -570,12 +566,8 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         hooks.on_sub_tool_start = [&display](const std::string& name, const nlohmann::json& input) {
             display.OnSubToolStart(name, input);
         };
-        hooks.on_usage = [&usage_stats, &display](const lubancode::api::Usage& usage) {
-            usage_stats.input_tokens += usage.input_tokens;
-            usage_stats.output_tokens += usage.output_tokens;
-            usage_stats.cache_read_tokens += usage.cache_read_tokens;
-            usage_stats.cache_creation_tokens += usage.cache_creation_tokens;
-            usage_stats.request_count += 1;
+        hooks.on_usage = [&usage_stats, &display](const lubancode::api::UsageReport& report) {
+            usage_stats.Add(report);
             display.agent_step_count += 1;  // 子代理每一次独立请求算一步,agent 条目终态摘要用
             // 子代理自己的 token/工具次数/耗时都记在 AgentTool 统一台账里,
             // 代理面板(footer 里那块)按修订号自己刷新,这里不再另记一本。
@@ -796,7 +788,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     }
     out.cancelled = result->cancelled;
 
-    if (usage_stats.request_count > 0) {
+    if (usage_stats.request_count() > 0) {
         // 0.17.0:token 数字统一 k 化(cli::FormatTokenCount),超过 10k 的
         // 数字不再铺一长串数位。i18n:整行进表(stats.line),缓存命中那一节
         // 有则先按 stats.cache 拼好塞进 {1},没有就是空串。
@@ -806,14 +798,14 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
         // 回报 usage(总输入为 0)时只显示命中量,不伪造 0%。
         const int hit_percent = usage_stats.cache_hit_percent();
         const std::string cache_part =
-            usage_stats.cache_read_tokens > 0
-                ? trf("stats.cache", lubancode::cli::FormatTokenCount(usage_stats.cache_read_tokens),
+            usage_stats.cache_read_tokens() > 0
+                ? trf("stats.cache", lubancode::cli::FormatTokenCount(usage_stats.cache_read_tokens()),
                       hit_percent >= 0 ? std::to_string(hit_percent) : std::string("?"))
                 : std::string();
         std::cout << theme.stats
                   << trf("stats.line", lubancode::cli::FormatTokenCount(usage_stats.total_input_tokens()),
-                         cache_part, lubancode::cli::FormatTokenCount(usage_stats.output_tokens),
-                         usage_stats.request_count, context_tracker.UsagePercent())
+                         cache_part, lubancode::cli::FormatTokenCount(usage_stats.output_tokens()),
+                         usage_stats.request_count(), context_tracker.UsagePercent())
                   << theme.reset << "\n";
     }
     // 回合正常结束(不是上面那条 !result.has_value() 的报错早退)——统计行

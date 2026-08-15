@@ -262,6 +262,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         api::MessageAssembler assembler;
         bool stream_error = false;
         std::string stream_error_message;
+        // MessageStart 的身份(request id/model)单记一笔:usage 报告要带
+        // 它,哪一步是哪个请求才有账可查(前缀缓存守恒单第一期)。
+        std::string stream_request_id;
+        std::string stream_model;
 
         const auto send_result = backend_.send_stream(
             request,
@@ -270,7 +274,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
                 std::visit(
                     [&](const auto& e) {
                         using T = std::decay_t<decltype(e)>;
-                        if constexpr (std::is_same_v<T, api::TextDelta>) {
+                        if constexpr (std::is_same_v<T, api::MessageStart>) {
+                            stream_request_id = e.id;
+                            stream_model = e.model;
+                        } else if constexpr (std::is_same_v<T, api::TextDelta>) {
                             if (callbacks.on_text_delta) {
                                 callbacks.on_text_delta(e.text);
                             }
@@ -340,7 +347,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         history_.push_back(assistant_message);
 
         if (callbacks.on_usage) {
-            callbacks.on_usage(assembler.usage());
+            api::UsageReport report;
+            report.usage = assembler.usage();
+            report.step_index = step_index;
+            report.request_id = stream_request_id;
+            report.model = stream_model;
+            callbacks.on_usage(report);
         }
 
         // 防御:stop_reason 说的是 end_turn(或者干脆是空的——终止帧丢了),

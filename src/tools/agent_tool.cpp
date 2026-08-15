@@ -877,20 +877,20 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         } else {
             sub_callbacks.on_tool_confirm = [](const std::string&, const nlohmann::json&) { return false; };
         }
-        sub_callbacks.on_usage = [this, task, foreground_hooks](const api::Usage& usage) {
+        sub_callbacks.on_usage = [this, task, foreground_hooks](const api::UsageReport& report) {
             {
                 std::lock_guard<std::mutex> lock(tasks_mutex_);
-                task->snapshot.input_tokens += usage.input_tokens;
-                task->snapshot.cache_read_tokens += usage.cache_read_tokens;
-                task->snapshot.cache_creation_tokens += usage.cache_creation_tokens;
-                task->snapshot.output_tokens += usage.output_tokens;
+                task->snapshot.input_tokens += report.usage.input_tokens;
+                task->snapshot.cache_read_tokens += report.usage.cache_read_tokens;
+                task->snapshot.cache_creation_tokens += report.usage.cache_creation_tokens;
+                task->snapshot.output_tokens += report.usage.output_tokens;
                 // 步数不在这里记:usage 回调只是"一次请求结束"的时机,拿它
                 // 猜步数,provider 漏 usage 就会少算——直接账在 RunTask 循环
                 // 里按 RunOutcome::steps_used 累计(命名规范第三批)。
                 TouchTasks();
             }
             if (foreground_hooks != nullptr && foreground_hooks->on_usage) {
-                foreground_hooks->on_usage(usage);
+                foreground_hooks->on_usage(report);
             }
         };
         if (foreground_hooks != nullptr) {

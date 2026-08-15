@@ -348,24 +348,30 @@ TEST_CASE("on_usage: 一次 Run() 内多次请求(工具调用来回),每次 Mes
 
     agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
 
-    std::vector<api::Usage> usages;
+    std::vector<api::UsageReport> reports;
     agent::Callbacks callbacks;
-    callbacks.on_usage = [&](const api::Usage& usage) { usages.push_back(usage); };
+    callbacks.on_usage = [&](const api::UsageReport& report) { reports.push_back(report); };
 
     const auto result = loop.Run("帮我用一下工具", callbacks);
 
     REQUIRE(result.has_value());
-    REQUIRE(usages.size() == 2);
-    CHECK(usages[0].input_tokens == 100);
-    CHECK(usages[0].output_tokens == 20);
-    CHECK(usages[1].input_tokens == 50);
-    CHECK(usages[1].output_tokens == 30);
+    REQUIRE(reports.size() == 2);
+    // 逐笔带身份:步号、请求 id、模型——逐步流水账有键可落。
+    CHECK(reports[0].step_index == 0);
+    CHECK(reports[0].request_id == "msg");
+    CHECK(reports[0].model == "model");
+    CHECK(reports[1].step_index == 1);
+    CHECK(reports[1].request_id == "msg2");
+    CHECK(reports[0].usage.input_tokens == 100);
+    CHECK(reports[0].usage.output_tokens == 20);
+    CHECK(reports[1].usage.input_tokens == 50);
+    CHECK(reports[1].usage.output_tokens == 30);
 
     std::int64_t total_input = 0;
     std::int64_t total_output = 0;
-    for (const auto& u : usages) {
-        total_input += u.input_tokens;
-        total_output += u.output_tokens;
+    for (const auto& report : reports) {
+        total_input += report.usage.input_tokens;
+        total_output += report.usage.output_tokens;
     }
     CHECK(total_input == 150);
     CHECK(total_output == 50);

@@ -194,9 +194,10 @@ public:
         // 这个纯粹用于展示,没有返回值、不影响子代理是否真的执行。
         std::function<void(const std::string& name, const nlohmann::json& input)> on_sub_tool_start;
 
-        // 子代理每次独立请求结束的 usage,原样转发给父级 on_usage——累计
-        // 进本轮 token 统计,请求次数也算进去。
-        std::function<void(const api::Usage& usage)> on_usage;
+        // 子代理每次独立请求结束的 usage(连同步号/请求 id 身份),原样
+        // 转发给父级 on_usage——累计进本轮 token 统计与逐步流水账,请求
+        // 次数也算进去。
+        std::function<void(const api::UsageReport& report)> on_usage;
 
         // M9:子代理内部的工具调用也要受 pre_tool/post_tool 钩子管——原样
         // 转发给父级的同名回调,子代理这边不重复实现匹配/执行逻辑。
