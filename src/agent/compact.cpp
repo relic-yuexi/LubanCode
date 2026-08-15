@@ -842,6 +842,15 @@ std::expected<CompactSummary, api::Error> Compact(api::Backend& backend, const s
             api::ErrorKind::Api, "摘要守恒校验未过,历史未动: " + reasons, 0});
     }
 
+    // 第四道:压了反而更长就别换——省下的空间比摘要本身还小,替换不值。
+    // 短历史(估 X token)不比摘要(估 Y token)大时拒收,旧 history 原样。
+    if (const std::size_t history_tokens = EstimateHistoryTokens(history);
+        history_tokens <= EstimateUtf8Tokens(summary_text)) {
+        return std::unexpected(api::Error{
+            api::ErrorKind::Api,
+            "历史(估 " + std::to_string(history_tokens) + " token)不比摘要本身大,压了反而更长,历史未动", 0});
+    }
+
     api::Message archive;
     archive.role = api::Role::User;
     archive.content.push_back(api::TextBlock{"[对话存档,此前内容已压缩] " + summary_text});

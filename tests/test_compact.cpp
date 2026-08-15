@@ -226,7 +226,7 @@ TEST_CASE("Compact: 成功时返回 user 角色的存档消息与解析过的 ma
     backend.script = SummaryScript(kGoodSummary);
 
     std::vector<api::Message> history;
-    history.push_back(UserText("帮我实现上下文管理"));
+    history.push_back(UserText("帮我实现上下文管理 " + std::string(2400, 'x')));
     history.push_back(AssistantText("好的,开始"));
 
     const auto result = agent::Compact(backend, "test-model", history, PlainOptions());
@@ -254,7 +254,7 @@ TEST_CASE("Compact: history 最后一条已经是 user 角色时,不额外补收
     backend.script = SummaryScript(kGoodSummary);
 
     std::vector<api::Message> history;
-    history.push_back(UserText("问题一"));
+    history.push_back(UserText("问题一 " + std::string(2400, 'x')));
     history.push_back(AssistantText("回答一"));
     history.push_back(UserToolResult("tool_1", "工具结果"));
 
@@ -272,7 +272,7 @@ TEST_CASE("Compact: focus 非空时,请求的 system 指令里带上 重点保�
     options.focus = "数据库连接字符串";
 
     std::vector<api::Message> history;
-    history.push_back(UserText("问题"));
+    history.push_back(UserText("问题 " + std::string(2400, 'x')));
 
     const auto result = agent::Compact(backend, "test-model", history, options);
 
@@ -397,7 +397,7 @@ TEST_CASE("Compact: 守恒校验——活动待办漏一项 → 拒收,历史不
     backend.script = SummaryScript(LongSummaryWithManifest("", R"(["补齐单元测试"])"));
 
     std::vector<api::Message> history;
-    history.push_back(UserText("问题"));
+    history.push_back(UserText("问题 " + std::string(2400, 'x')));
     agent::CompactOptions options = PlainOptions();
     options.required_open_items = {"补齐单元测试", "写文档说明"};
 
@@ -415,7 +415,7 @@ TEST_CASE("Compact: 守恒校验——待办逐字都在(空白归一后) → �
         SummaryScript(LongSummaryWithManifest("", "[\"补齐 单元测试\", \"写 文档 说明\"]"));
 
     std::vector<api::Message> history;
-    history.push_back(UserText("问题"));
+    history.push_back(UserText("问题 " + std::string(2400, 'x')));
     agent::CompactOptions options = PlainOptions();
     options.required_open_items = {"补齐单元测试", "写文档说明"};
 
@@ -430,7 +430,7 @@ TEST_CASE("Compact: 指令把必须守恒的待办逐条列给模型") {
     backend.script = SummaryScript(LongSummaryWithManifest("", R"(["修分块预算","补测试"])"));
 
     std::vector<api::Message> history;
-    history.push_back(UserText("问题"));
+    history.push_back(UserText("问题 " + std::string(2400, 'x')));
     agent::CompactOptions options = PlainOptions();
     options.required_open_items = {"修分块预算", "补测试"};
 
@@ -472,7 +472,7 @@ TEST_CASE("Compact: 窗口装得下 → 照常发送") {
     backend.script = SummaryScript(kGoodSummary);
 
     std::vector<api::Message> history;
-    history.push_back(UserText("小问题"));
+    history.push_back(UserText("小问题 " + std::string(2400, 'x')));
 
     agent::CompactOptions options;
     options.budget.window_tokens = 32768;
@@ -510,6 +510,20 @@ TEST_CASE("ParseCompactManifest: 取末尾最后一个 json 围栏块,前面的�
     CHECK(manifest->open_items[0] == "新");
 }
 
+TEST_CASE("Compact: 历史不比摘要大 → 压了反而更长,拒收") {
+    FakeBackend backend;
+    backend.script = SummaryScript(kGoodSummary);  // 摘要正文数百字
+
+    std::vector<api::Message> history;
+    history.push_back(UserText("短"));  // 历史统共几个 token
+
+    const auto result = agent::Compact(backend, "test-model", history, PlainOptions());
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message.find("压了反而更长") != std::string::npos);
+    CHECK(result.error().message.find("历史未动") != std::string::npos);
+}
+
 // ---------------------------------------------------------------------------
 // 守护测试:压缩只动 history,绝不动 system
 // ---------------------------------------------------------------------------
@@ -523,7 +537,7 @@ TEST_CASE("守护:压缩前后 AgentLoop 发出的 system 逐字节不变") {
     tools::ToolRegistry registry;  // 空表:这轮不调工具
     agent::AgentLoop loop(loop_backend, registry, "test-model", system_prompt);
 
-    REQUIRE(loop.Run("第一问", agent::Callbacks{}).has_value());
+    REQUIRE(loop.Run("第一问 " + std::string(2400, 'x'), agent::Callbacks{}).has_value());
     REQUIRE_FALSE(loop_backend.captured_requests.empty());
     const std::string system_before = loop_backend.captured_requests.front().system;
     CHECK(system_before == system_prompt);
@@ -563,7 +577,7 @@ TEST_CASE("AgentLoop: 窗口未知或没设回调时,请求前不做任何通报
     agent::AgentLoop loop(backend, registry, "test-model", "sys");
     int calls = 0;
     loop.SetOnContextPressure([&calls](const agent::ContextPressure&) { ++calls; });
-    REQUIRE(loop.Run("第一问", agent::Callbacks{}).has_value());
+    REQUIRE(loop.Run("第一问 " + std::string(2400, 'x'), agent::Callbacks{}).has_value());
     CHECK(calls == 0);  // 窗口 0 = 未知,不评估
 }
 
@@ -746,7 +760,7 @@ TEST_CASE("CompactHierarchical: 装得下退化为单次,一条请求") {
     backend.scripts.push_back(SummaryScript(kGoodSummary));
 
     std::vector<api::Message> history;
-    history.push_back(UserText("小历史"));
+    history.push_back(UserText("小历史 " + std::string(2400, 'x')));
     history.push_back(AssistantText("小回答"));
 
     agent::CompactOptions options;  // 窗口未知 → 单次
@@ -890,7 +904,7 @@ TEST_CASE("观测钩子: source_digest 同史同值、改一字即变;implementa
         ScriptedBackend backend;
         backend.scripts.push_back(SummaryScript(kGoodSummary));
         std::vector<api::Message> history;
-        history.push_back(UserText("小历史"));
+        history.push_back(UserText("小历史 " + std::string(2400, 'x')));
         const auto result = agent::CompactHierarchical(backend, "test-model", history, agent::CompactOptions{});
         REQUIRE(result.has_value());
         CHECK(result->metrics.implementation == "local-single");
