@@ -1,6 +1,7 @@
 #include "agent/loop.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <iostream>
 #include <type_traits>
 #include <utility>
@@ -90,6 +91,26 @@ std::string BuildStepLimitNudgeText() {
     return "\n\n[系统提醒] 已进入轮数上限前的收尾区,请尽快收束:不要再开新的调查方向;"
            "把已经查到的事实、关键证据位置、排除掉的分支写成一个检查点,"
            "并给出部分结论与下一步建议。到限后检查点就是交回主会话的全部,别把它带进坟墓。";
+}
+
+// 前缀 debug 开关(环境变量 LUBANCODE_DEBUG_PREFIX 任意非空值打开):
+// 每次请求跟上一份比,打一行断因与追加律。只打断因、位置与 hash,不打
+// system 正文、工具参数、记忆正文(前缀缓存守恒单"不做"节)。
+bool PrefixDebugEnabled() {
+#ifdef _WIN32
+    char* buffer = nullptr;
+    std::size_t size = 0;
+    const errno_t err = _dupenv_s(&buffer, &size, "LUBANCODE_DEBUG_PREFIX");
+    if (err != 0 || buffer == nullptr) {
+        return false;
+    }
+    const bool enabled = buffer[0] != '\0';
+    std::free(buffer);
+    return enabled;
+#else
+    const char* raw = std::getenv("LUBANCODE_DEBUG_PREFIX");
+    return raw != nullptr && raw[0] != '\0';
+#endif
 }
 
 }  // namespace
@@ -318,6 +339,18 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
                     step_epoch_break_reason =
                         pending_epoch_break_reason_.empty() ? diff.break_reason() : pending_epoch_break_reason_;
                     ++cache_epoch_;
+                }
+                if (PrefixDebugEnabled()) {
+                    // 诊断行:只带断因/位置/条数,不带任何正文与 hash 以外的东西。
+                    std::cerr << "[prefix] epoch " << cache_epoch_ << " step " << step_index
+                              << " append_only=" << (step_prefix_append_only ? "true" : "false");
+                    if (!step_prefix_append_only) {
+                        std::cerr << " reason=" << step_epoch_break_reason << " old_message_changed_at="
+                                  << diff.old_message_changed_at;
+                    }
+                    std::cerr << " appended_messages=" << diff.appended_messages
+                              << " system_hash=" << fingerprint.system_hash.substr(0, 8)
+                              << " tools_hash=" << fingerprint.tools_hash.substr(0, 8) << "\n";
                 }
             }
             pending_epoch_break_reason_.clear();
