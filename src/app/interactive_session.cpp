@@ -1826,6 +1826,9 @@ void InteractiveSession::ExtractTurnMemory(const std::string& user_text, std::si
     }
     if (queued + written > 0) {
         std::cout << theme.stats << trf("memory.extract.done", queued, written) << theme.reset << "\n";
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 上下文压缩的会话现场路(0.27.x 分层压缩第一期)
 // ---------------------------------------------------------------------------
