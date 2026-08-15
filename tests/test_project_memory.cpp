@@ -229,6 +229,61 @@ TEST_CASE("ProjectMemory: uv 与 yarn 偏好按问题召回并注入完整请求
     CHECK(backend.requests[0].system.find("`uv add <package>`") != std::string::npos);
 }
 
+TEST_CASE("ProjectMemory: 端到端 captured request——无命中不含索引,命中不进 history") {
+    const fs::path root = TempRoot("captured");
+    const fs::path repo = root / "repo";
+    fs::create_directories(repo / ".git");
+    const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
+    REQUIRE(identity.has_value());
+    memory::Options options;
+    options.global_allowed = true;
+    options.enabled = true;
+    memory::ProjectMemory store(*identity, root / "home", options);
+
+    memory::SaveRequest request;
+    request.kind = memory::MemoryKind::Preference;
+    request.id = "preference.python-package-manager";
+    request.title = "Python 包管理器";
+    request.summary = "添加 Python 依赖只用 uv add";
+    request.content = "用户明确要求使用 `uv add <package>`。";
+    request.keywords = {"uv"};
+    REQUIRE(store.EnqueueSave(request).has_value());
+    REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
+
+    // 无命中:system 只有极短能力说明,不含 index.md,也不含任何主题正文。
+    {
+        CaptureBackend backend;
+        tools::ToolRegistry registry;
+        agent::AgentLoop loop(backend, registry, "test-model", "stable system");
+        loop.SetTurnSystemSuffix(store.BuildTurnContext("部署到树莓派怎么做", repo));
+        REQUIRE(loop.Run("部署到树莓派怎么做", agent::Callbacks{}).has_value());
+        REQUIRE(backend.requests.size() == 1);
+        CHECK(backend.requests[0].system.find("stable system\n\n# 项目记忆") == 0);
+        CHECK(backend.requests[0].system.find("## Facts") == std::string::npos);
+        CHECK(backend.requests[0].system.find("## Preferences") == std::string::npos);
+        CHECK(backend.requests[0].system.find("uv add") == std::string::npos);
+    }
+
+    // 命中:system 含主题正文,但记忆不进 history(不随会话存档/导出走)。
+    {
+        CaptureBackend backend;
+        tools::ToolRegistry registry;
+        agent::AgentLoop loop(backend, registry, "test-model", "stable system");
+        loop.SetTurnSystemSuffix(store.BuildTurnContext("用 uv 加依赖", repo));
+        REQUIRE(loop.Run("用 uv 加依赖", agent::Callbacks{}).has_value());
+        REQUIRE(backend.requests.size() >= 1);
+        CHECK(backend.requests[0].system.find("`uv add <package>`") != std::string::npos);
+        for (const auto& message : loop.History()) {
+            for (const auto& block : message.content) {
+                if (const auto* text = std::get_if<api::TextBlock>(&block)) {
+                    CHECK(text->text.find("`uv add <package>`") == std::string::npos);
+                    CHECK(text->text.find("# 项目记忆") == std::string::npos);
+                }
+            }
+        }
+    }
+}
+
 TEST_CASE("ProjectMemory: forget 归档主题并重建索引") {
     const fs::path root = TempRoot("forget");
     const fs::path repo = root / "repo";
