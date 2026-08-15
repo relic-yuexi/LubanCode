@@ -118,6 +118,22 @@ std::vector<api::StreamEvent> ToolUseScript(const std::string& tool_id, const st
     };
 }
 
+// 同一条 assistant 消息里带 N 枚 tool_use 块(并行工具调用):一次模型
+// 请求回来,块下标 0..N-1 各收一个 tool_use。计数语义测试用它钉"一个
+// step 可含多枚工具调用"。
+std::vector<api::StreamEvent> MultiToolUseScript(const std::vector<std::string>& tool_ids,
+                                                  const std::string& tool_name) {
+    std::vector<api::StreamEvent> events;
+    events.push_back(api::MessageStart{"msg", "model"});
+    for (std::size_t i = 0; i < tool_ids.size(); ++i) {
+        events.push_back(api::ToolUseStart{static_cast<int>(i), tool_ids[i], tool_name});
+        events.push_back(api::ToolUseInputDelta{static_cast<int>(i), "{}"});
+        events.push_back(api::ContentBlockDone{static_cast<int>(i)});
+    }
+    events.push_back(api::MessageDone{"tool_use", api::Usage{}});
+    return events;
+}
+
 }  // namespace
 
 TEST_CASE("一轮纯文本直接结束:一次请求,历史里 user+assistant 两条") {
@@ -136,6 +152,9 @@ TEST_CASE("一轮纯文本直接结束:一次请求,历史里 user+assistant 两
     REQUIRE(result.has_value());
     CHECK(accumulated_text == "你好呀");
     CHECK(backend.captured_requests.size() == 1);
+    // 计数语义(命名规范阶段 A):一条用户输入 = 一个 turn;纯文本直接
+    // 收口,turn 内只有一个 step(一次模型请求),零次工具调用。
+    CHECK(result->turns_used == 1);
     REQUIRE(loop.history().size() == 2);
     CHECK(loop.history()[0].role == api::Role::User);
     CHECK(loop.history()[1].role == api::Role::Assistant);
@@ -160,6 +179,8 @@ TEST_CASE("tool_use 一轮 -> 执行工具 -> 第二次请求历史带 tool_resu
 
     REQUIRE(result.has_value());
     CHECK(backend.captured_requests.size() == 2);
+    // 计数语义:工具回填后再请求收正文,turn 内走了两步(step)。
+    CHECK(result->turns_used == 2);
     REQUIRE(started_tools.size() == 1);
     CHECK(started_tools[0] == "fake_tool");
 
@@ -177,6 +198,35 @@ TEST_CASE("tool_use 一轮 -> 执行工具 -> 第二次请求历史带 tool_resu
     const auto& second_request_tool_result_msg = backend.captured_requests[1].messages[2];
     REQUIRE(second_request_tool_result_msg.content.size() == 1);
     CHECK(std::holds_alternative<api::ToolResultBlock>(second_request_tool_result_msg.content[0]));
+}
+
+TEST_CASE("计数语义:一次 assistant 并行叫三件工具,仍是一步;工具回填后再收口才是第二步") {
+    FakeBackend backend;
+    backend.scripts = {
+        MultiToolUseScript({"toolu_1", "toolu_2", "toolu_3"}, "fake_tool"),
+        TextOnlyScript("三件都办完了"),
+    };
+    tools::ToolRegistry registry;
+    auto* fake_tool_ptr = new FakeTool("fake_tool", tools::Tool::Result{"工具结果", false}, false);
+    registry.Register(std::unique_ptr<FakeTool>(fake_tool_ptr));
+
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+
+    agent::Callbacks callbacks;
+    const auto result = loop.Run("把三件事都办了", callbacks);
+
+    // 一个 turn、两步:第一步(一次模型请求)带回了三枚工具调用,第二步
+    // (回填后再请求)收正文。工具多开三枚不增步数,只增 tool_call_count。
+    REQUIRE(result.has_value());
+    CHECK(result->turns_used == 2);
+    CHECK(backend.captured_requests.size() == 2);
+    CHECK(fake_tool_ptr->call_count == 3);
+
+    // 三枚 tool_use 挂在同一条 assistant 消息上(不是三步)。
+    REQUIRE(loop.history().size() == 4);
+    REQUIRE(loop.history()[1].content.size() == 3);
+    // 回填的三枚 tool_result 也攒成同一条 user 消息。
+    REQUIRE(loop.history()[2].content.size() == 3);
 }
 
 TEST_CASE("用户拒绝确认:工具不执行,tool_result 是 is_error") {

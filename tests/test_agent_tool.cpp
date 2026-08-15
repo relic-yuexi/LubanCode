@@ -187,6 +187,21 @@ std::vector<api::StreamEvent> ToolUseScript(const std::string& tool_id, const st
     };
 }
 
+// 同一条 assistant 消息里带 N 枚 tool_use(并行工具调用):计数语义测试
+// 用它钉"一个 step 可含多枚工具调用,只发一次模型请求"。
+std::vector<api::StreamEvent> MultiToolUseScript(const std::vector<std::string>& tool_ids,
+                                                  const std::string& tool_name) {
+    std::vector<api::StreamEvent> events;
+    events.push_back(api::MessageStart{"msg", "model"});
+    for (std::size_t i = 0; i < tool_ids.size(); ++i) {
+        events.push_back(api::ToolUseStart{static_cast<int>(i), tool_ids[i], tool_name});
+        events.push_back(api::ToolUseInputDelta{static_cast<int>(i), "{}"});
+        events.push_back(api::ContentBlockDone{static_cast<int>(i)});
+    }
+    events.push_back(api::MessageDone{"tool_use", api::Usage{}});
+    return events;
+}
+
 }  // namespace
 
 TEST_CASE("agent 工具:子代理一轮文本直接返回,Result.content 就是那段文本") {
@@ -207,6 +222,37 @@ TEST_CASE("agent 工具:子代理一轮文本直接返回,Result.content 就是�
     // 子代理系统提示里带子代理人格,不是主代理默认人格。
     CHECK(backend.captured_requests[0].system.find("子代理") != std::string::npos);
     CHECK(backend.captured_requests[0].system.find("/work/dir") != std::string::npos);
+}
+
+// 计数语义(命名规范阶段 A):turn/step/tool_call 三本账分开。子代理台账
+// 里的 turns_used 记的是模型请求数(step);同一 assistant 消息里并行叫
+// 几件工具,只算一步,tool_calls 流水另记。
+TEST_CASE("agent 工具:计数账——一步并行三件工具 turns_used 仍记一步,工具流水记三笔") {
+    FakeBackend backend;
+    backend.scripts = {
+        MultiToolUseScript({"toolu_1", "toolu_2", "toolu_3"}, "fake_tool"),
+        TextOnlyScript("三件都办完了"),
+    };
+    tools::ToolRegistry sub_registry;
+    sub_registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"工具结果", false}, false));
+
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+
+    nlohmann::json input;
+    input["title"] = "测试任务";
+    input["prompt"] = "把三件事都办了";
+    const tools::Tool::Result result = agent_tool.execute(input);
+
+    CHECK_FALSE(result.is_error);
+    // 两次模型请求:第一步带回三枚工具调用,第二步收正文。
+    REQUIRE(backend.captured_requests.size() == 2);
+    // 台账:步数两笔,工具流水三笔。
+    const auto snapshots = agent_tool.TaskSnapshots();
+    REQUIRE(snapshots.size() == 1);
+    CHECK(snapshots[0].turns_used == 2);
+    CHECK(snapshots[0].tool_calls.size() == 3);
+    CHECK(snapshots[0].outcome.turns_used == 2);
+    CHECK(snapshots[0].outcome.status == tools::TaskOutcomeStatus::Completed);
 }
 
 TEST_CASE("agent 工具:缺 prompt / 空 prompt 报 is_error,不发请求") {

@@ -50,6 +50,19 @@ void AppendFullTurn(std::vector<api::Message>& out, const std::string& turn_tag,
     out.push_back(AssistantText("助手回复 " + turn_tag + std::string(padding_chars, 'a')));
 }
 
+// 造一轮带两步工具往返的用户轮(user turn):user -> asst(tool) ->
+// user(result) -> asst(tool) -> user(result) -> asst(正文)。TrimHistory
+// 按"用户消息"切段,一轮不管里头几步,要么整段留、要么整段裁——测试用
+// 它钉这层语义,不因 step 与 turn 分家而把一轮从中间劈开。
+void AppendMultiStepTurn(std::vector<api::Message>& out, const std::string& turn_tag, std::size_t padding_chars) {
+    out.push_back(UserText("用户输入 " + turn_tag + std::string(padding_chars, 'u')));
+    out.push_back(AssistantToolUse("tool_a_" + turn_tag, "some_tool"));
+    out.push_back(UserToolResult("tool_a_" + turn_tag, "第一步结果 " + turn_tag + std::string(padding_chars, 'r')));
+    out.push_back(AssistantToolUse("tool_b_" + turn_tag, "some_tool"));
+    out.push_back(UserToolResult("tool_b_" + turn_tag, "第二步结果 " + turn_tag + std::string(padding_chars, 'r')));
+    out.push_back(AssistantText("助手回复 " + turn_tag + std::string(padding_chars, 'a')));
+}
+
 }  // namespace
 
 TEST_CASE("EstimateChars: 累加所有文本/工具入参/工具结果的字节数") {
@@ -173,6 +186,56 @@ TEST_CASE("TrimHistory: tool_use 与 tool_result 永远成对,不会被从中间
                     }
                 }
                 CHECK(found_pair);
+            }
+        }
+    }
+}
+
+TEST_CASE("TrimHistory: 按 user turn 切段,一轮内多步工具往返回整段留或整段裁") {
+    // 一轮 = 一条用户输入到收口;一轮里可以有好几步(每次模型请求一步)。
+    // TrimHistory 的"轮"是用户轮,不是模型步:被裁的轮六条消息一起消失,
+    // 保留的轮六条消息一条不少,绝不把一轮从两步中间劈开。
+    std::vector<api::Message> history;
+    AppendMultiStepTurn(history, "turn0", 50);  // 第一轮(保留)
+    for (int i = 1; i <= 4; ++i) {
+        AppendMultiStepTurn(history, "mid" + std::to_string(i), 50);  // 中间轮(裁掉)
+    }
+    AppendMultiStepTurn(history, "recent1", 50);  // 最近一轮(保留)
+
+    const std::size_t full_chars = agent::EstimateHistoryBytes(history);
+    const auto trimmed = agent::TrimHistory(history, /*max_chars=*/full_chars / 3, /*keep_recent_turns=*/1);
+
+    CHECK(trimmed.size() < history.size());
+
+    // 保留的两轮各自完整:开头还是那条 user 文本;被保留轮的 tool_use 与
+    // tool_result 配对一条不缺(两步共四块,全在)。
+    REQUIRE_FALSE(trimmed.empty());
+    CHECK(trimmed[0].role == api::Role::User);
+
+    std::size_t kept_pairs = 0;
+    for (std::size_t i = 0; i + 1 < trimmed.size(); ++i) {
+        for (const auto& block : trimmed[i].content) {
+            if (!std::holds_alternative<api::ToolUseBlock>(block)) {
+                continue;
+            }
+            const auto& tool_use = std::get<api::ToolUseBlock>(block);
+            for (const auto& next_block : trimmed[i + 1].content) {
+                if (std::holds_alternative<api::ToolResultBlock>(next_block) &&
+                    std::get<api::ToolResultBlock>(next_block).tool_use_id == tool_use.id) {
+                    ++kept_pairs;
+                }
+            }
+        }
+    }
+    // 两轮 x 每轮两步 = 四对,中间被裁的轮不许留下落单的半截。
+    CHECK(kept_pairs == 4);
+
+    // 中间轮确实整段没了:它们的工具 id 不再出现。
+    for (const auto& message : trimmed) {
+        for (const auto& block : message.content) {
+            if (std::holds_alternative<api::ToolUseBlock>(block)) {
+                const std::string& id = std::get<api::ToolUseBlock>(block).id;
+                CHECK(id.find("mid") == std::string::npos);
             }
         }
     }
