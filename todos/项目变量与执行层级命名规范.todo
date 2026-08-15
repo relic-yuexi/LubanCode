@@ -1,0 +1,234 @@
+# 项目变量与执行层级命名规范
+
+状态：待做（先清执行层级，再立通用规矩）
+
+## 为何另开一单
+
+项目眼下不缺名字，缺的是一套共同口径。同一个“轮”，有时指用户问答，有时指一次模型请求，有时又指一组工具调用。代码还能跑，账却越记越乱。
+
+最扎眼的一处在 `src/agent/loop.cpp`：
+
+```cpp
+for (int turn = 0; max_turns_ <= 0 || turn < max_turns_; ++turn) {
+    backend_.send_stream(...);
+}
+```
+
+这里每转一次，模型只请求一次。同一条 assistant 就算叫了三件工具，也只转一格。故而 `turn` 实为 `step_index`，`max_turns_` 实为 `max_steps_per_turn_`。
+
+外层却已有正经 turn：`InteractiveSession::RunUserTurn()` 接住一条用户输入，调用 `RunTurn()`，等最终正文、报错或取消，再落盘、抽取记忆、送下一条队列消息。这才是一轮用户交互。
+
+若不先把层级钉住，往后再添重试、并行工具、子代理预算、step 日志，变量名会越发含混。届时一眼看见 `rounds == 3`，谁也说不准是三次提问、三次模型请求，还是三枚工具调用。
+
+本单只管命名与随名而来的计数语义。不借改名重写循环，不顺手搬模块，也不改协议行为。
+
+## 先定词典
+
+| 术语 | 唯一含义 | 起止边界 | 常用计数名 |
+| --- | --- | --- | --- |
+| `session` | 一份可恢复的会话账 | 建档到关闭、分叉或清空 | `session_id` |
+| `turn` | 一次用户轮次 | 接纳 user 消息，到最终 assistant 收口、报错或取消 | `turn_index`、`turn_count` |
+| `step` | turn 内一次模型推进 | 拼请求，到收齐一条 assistant 消息；有工具便执行并回填 | `step_index`、`step_count` |
+| `attempt` | 同一 step 的一次传输尝试 | 发起 HTTP/SSE，到成功、失败或取消 | `attempt_index`、`attempt_count` |
+| `request` | 交给 provider 的请求数据或一次已发请求 | `api::Request` 及对应流 | `request_count` |
+| `message` | history / session 中一条中立消息 | 一个 role 加若干 content block | `message_count` |
+| `tool_call` | assistant 发出的一枚工具调用 | `ToolUseBlock` 到配对 `ToolResultBlock` | `tool_call_count` |
+| `task` | 一只子代理或后台命令的任务实体 | 创建到终态、清理 | `task_id` |
+
+边界写死：
+
+```text
+session
+└─ turn 0
+   ├─ user message
+   ├─ step 0
+   │  ├─ request attempt 0
+   │  ├─ assistant message（0..N 个 tool_call）
+   │  └─ 0..N 个 tool_result
+   ├─ step 1
+   │  ├─ request attempt 0
+   │  └─ assistant 最终正文
+   └─ turn 收口
+```
+
+单只 `AgentLoop` 正常收口时，当前没有自动请求重试，故 `attempt_count == step_count == request_count`。以后若在同一 step 内重试，只准增加 `attempt_count` 与 `request_count`，不可增加 `step_count`。工具多开几枚，只增 `tool_call_count`。
+
+## 第一批：清掉 turn / step 混名
+
+先改内部 C++ 名。行为一字不动。
+
+| 现名 | 目标名 | 理由 |
+| --- | --- | --- |
+| `AgentLoop::Run` 内局部 `turn` | `step_index` | 循环一次便发一次模型请求 |
+| `max_turns_` | `max_steps_per_turn_` | 上限只管单个 turn 内的 step |
+| 构造参数 `max_turns` | `max_steps_per_turn` | 与成员同义 |
+| `ShouldNudgeMaxTurns` | `ShouldNudgeStepLimit` | 提醒的是 step 预算 |
+| `kMaxTurnsNudgeThreshold` | `kStepLimitNudgeThreshold` | 阈值单位是 step |
+| `BuildMaxTurnsNudgeText` | `BuildStepLimitNudgeText` | 文案与函数同口径 |
+| `remaining_turns` | `remaining_steps` | 余量单位是 step |
+| `default_max_turns_` | `default_max_steps_per_turn_` | 子代理默认预算同样按 step 算 |
+| `AgentDoneSummary(int rounds, ...)` | `AgentDoneSummary(int step_count, ...)` | UI 不能再露无单位的 `rounds` |
+
+下列名字反倒是对的，莫一锅换掉：
+
+- `InteractiveSession::RunUserTurn`：外层用户 turn。
+- `app::RunTurn`：承接一次用户 turn 的交互、渲染与统计。若嫌范围太宽，另单讨论职责，不在本单改成 step。
+- `turn_system_suffix_`、`SetTurnSystemSuffix`：一条用户输入算一次，整个 turn 共用。
+- `ExtractTurnMemory`：turn 收口后抽取一次。
+- `TrimHistory` 里的 recent turns：按用户消息切对话段，不按模型请求数切。先补测试把这层语义钉牢，再决定是否改成 `conversation_turn`。
+- provider 的 `stop_reason="end_turn"`：外部协议原词，原样保留，不拿本地术语强改 wire。
+
+`AgentLoop::Run` 本身可先不改。类名已经给出上下文，贸然叫 `RunStep` 反会撒谎：它包着整个 turn。若要把结构显出来，可在内部抽一枚私有 `RunStep()`，令外层 `Run()` 只管循环与收口。须等改名测试全绿后另评审，不同第一批绑在一起。
+
+## 第二批：迁移公开配置，不断旧用户的路
+
+`max_turns` 已露在配置文件、环境变量、`agent` 工具 schema、文档和报错里。它虽叫错，却已算公开接口。不能一刀删掉。
+
+新名字定为：
+
+```text
+配置键             max_steps_per_turn
+环境变量           LUBANCODE_MAX_STEPS_PER_TURN
+agent 工具入参      max_steps_per_turn
+终端文案           step 上限 / 步数上限
+```
+
+迁移分两期：
+
+1. 先认新旧两套名字。新名优先；两者同时出现且值不同，明报冲突，不暗取一边。
+2. 旧名读入后映射到同一内部字段，并打一条一次性弃用提示。配置来源账要记清究竟读了哪一项。
+3. 写回配置、帮助、示例、schema 只出新名。旧名只留在兼容解析与迁移测试里。
+4. 至少跨一个明确版本窗，再议删旧名。删前写 CHANGELOG，不靠用户猜。
+
+兼容期里，错误信息须同时点破旧名：
+
+```text
+已达 step 上限（max_steps_per_turn=40；旧名 max_turns）
+```
+
+`max_turns=0` 的旧语义要保住：`0` 仍是不设上限。新字段也照此办理。不可趁改名偷换默认值。
+
+## 第三批：计数器都带单位
+
+计数最怕“看着差不多”。立以下规矩：
+
+- `*_index`：当前第几项，代码里一律 0-based。给用户看时再加一。
+- `*_count`：已经发生多少项。空集为 0。
+- `max_*`：硬上限。若 `0` 另有“不限”含义，字段旁必须写清。
+- `*_remaining`：尚可消费多少，须在名字里带单位，如 `steps_remaining`。
+- 时间带单位：`timeout_ms`、`elapsed_seconds`。字节、字符、token 也各写后缀。
+- 标识用 `*_id`，位置用 `*_index`。`task_id` 不得拿来当数组下标。
+
+这一批须查：
+
+```text
+src/agent/loop.*
+src/app/turn_runner.*
+src/tools/agent_tool.*
+src/cli/transcript.*
+src/cli/tool_display.hpp
+src/config/config.*
+tests/test_loop.cpp
+tests/test_agent_tool.cpp
+tests/test_transcript.cpp
+docs/*.md
+```
+
+子代理摘要眼下写“子代理 N 轮”。先查 `N` 从哪里来，补一枚直接记账的 `step_count`。不可拿 token usage 回调次数猜：provider 若漏 usage，步数便会少算；父子请求混记时，又会多算。
+
+## 通用变量规矩
+
+执行层级清完，再把通用规矩落进项目开发文档。规矩不宜多，能守住便成。
+
+### 1. 名字先说领域，再说形态
+
+好：
+
+```cpp
+api::Message assistant_message;
+std::vector<api::ContentBlock> tool_results;
+std::size_t persisted_message_count;
+bool has_tool_use;
+```
+
+慎用：
+
+```cpp
+auto data;
+auto info;
+auto item;
+auto value;
+auto result;
+auto out;
+```
+
+短函数里的 `result`、`out` 可以留。变量一旦跨分支、跨回调、跨二十来行，就须补上领域名，如 `send_result`、`trim_report`、`tool_result_message`。不要机械追杀所有短名。
+
+### 2. 布尔名读起来像一句判断
+
+用 `is_`、`has_`、`can_`、`should_`、`needs_`。状态枚举不用再套布尔：已有 `TaskState::Running`，就别另存一枚容易走散的 `is_running`。
+
+### 3. 函数用动词，类型用名词
+
+- 动作：`BuildToolDefinitions`、`InjectIncomingMessage`、`PersistNewMessages`。
+- 判断：`ShouldNudgeStepLimit`、`HasUndeliveredCompletions`。
+- 数据：`RunOutcome`、`ContextPressure`、`TrimReport`。
+- 回调：`on_*` 表事件，`Set*` 只装配依赖或状态。
+
+现有 public API 用 PascalCase，局部与字段用 snake_case，成员末尾加 `_`。本单沿用，不另起一套风格。
+
+### 4. 外部原词与内部术语分账
+
+`tool_calls`、`finish_reason`、`end_turn` 属 provider 协议。adapter 边界可以照录。进了中立层，再用 `ToolUseBlock`、`stop_reason` 等项目词。不可为了“统一”改写外部 JSON 字段，也不可让某家 wire 的叫法漫进主循环。
+
+### 5. 缩写只留通行词
+
+`id`、`api`、`url`、`utf8`、`json` 可留。`req`、`resp`、`ctx`、`cnt` 只许待在极短局部；进成员、参数、公共接口便写全。
+
+## 怎么落刀
+
+### 阶段 A：先用测试钉语义
+
+- 一条纯文本 turn：`turn_count=1`，`step_count=1`，`tool_call_count=0`。
+- 一次 assistant 并行叫三件工具：仍是 `step_count=1`，`tool_call_count=3`。
+- 工具回填后再请求并收正文：`turn_count=1`，`step_count=2`。
+- 将来若加两次传输重试：`step_count` 不动，`attempt_count` 增加。
+- `TrimHistory` 仍按 user turn 保整段，不能因 step 改名拆散 tool use/result。
+
+### 阶段 B：只改内部符号
+
+用编译器领路，分模块改名。每改一批便编译、跑定向测试。注释、测试名、用户文案同批收净，不留“代码叫 step，注释还说轮”的夹生账。
+
+### 阶段 C：再做配置兼容
+
+先加双读与冲突测试，再换文档和 schema，最后补弃用提示。不要把内部 rename 与公开配置迁移塞进同一笔大提交。
+
+### 阶段 D：加轻量守门
+
+项目眼下只有 `.clang-format`，没有命名 lint。可给新代码启用一小段 `clang-tidy` `readability-identifier-naming`，先在改过的目录试跑。若误报太多，宁可留一页短规范加 review 清单，也不上一套人人绕开的假门禁。
+
+首期只拦这些高风险回归：
+
+- `AgentLoop` 内新添裸 `turn`，却实指模型请求。
+- 无单位的公共计数参数，如 `rounds`、`count`。
+- 同一结构同时存 `state` 与重复布尔状态。
+- 新公开配置沿用已弃用的 `max_turns`。
+
+## 验收
+
+- `docs/query-data-flow.md` 全文里，turn 只指用户轮次，step 只指模型步骤；章节不用“第 N 步”来抢词。
+- `src/agent/loop.*` 不再用 `turn` 指一次 `send_stream`。
+- 同一 step 多工具调用的计数测试通过。
+- 主代理、前台子代理、后台子代理都能报准 `step_count` 与 `tool_call_count`。
+- 新旧配置单独出现都能用；同现且冲突会报清楚；`0=不限` 不变。
+- 中文 UI 不再写含混的“N 轮”，英文也不用 `rounds` 糊过去。
+- 全量构建与测试通过，session JSONL、wire JSON、工具执行次序一字不变。
+
+## 不做
+
+- 不把一次工具调用叫 step。一个 step 可含多枚工具调用。
+- 不把一次请求重试叫 step。重试只增 attempt。
+- 不因改名改 JSONL 角色、content block 或 provider 字段。
+- 不全仓扫一遍，把每个 `i`、`it`、`out` 都拉成长名。
+- 不拿宏或 typedef 偷留两套内部术语。兼容只留在公开配置入口。
+- 不趁机重写 `AgentLoop`、并行化工具或改预算默认值。

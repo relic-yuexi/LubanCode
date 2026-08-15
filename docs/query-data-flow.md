@@ -1,4 +1,4 @@
-# 一条 Query 怎样流过 LubanCode
+# 一条 Query 怎样走完一个 Turn
 
 这篇只追一条输入：
 
@@ -8,19 +8,32 @@
 
 读者只须熟悉 OpenAI Chat Completions：`messages`、`system`、`assistant`、`tool_calls`、`role=tool`。下文拿它作底稿，再看 Anthropic Messages 与 OpenAI Responses 怎样换一身衣裳。
 
-先把结论说破：**底座仍是多轮对话。**
+先把结论说破：**底座仍是多轮对话，执行却分 `turn` 与 `step` 两层。**
 
-可它不是“一次回车，只发一次 HTTP”。用户看见一轮问答，`AgentLoop` 里头常转好几圈：
+这两个词不可混用：
+
+| 名字 | 从哪里起 | 到哪里止 | 当前源码入口 |
+| --- | --- | --- | --- |
+| `turn`（用户轮次） | 接纳一条用户输入 | 助手交出最终正文，或本轮报错、取消 | `RunUserTurn -> RunTurn -> AgentLoop::Run` |
+| `step`（模型步骤） | 拼请求并调用一次模型 | 收齐 assistant 消息；若含工具调用，再执行并回填结果 | `AgentLoop::Run` 内部循环 |
+| `tool call`（工具调用） | assistant 发出一枚调用块 | 本机产出对应结果块 | 一个 step 可有零到多枚 |
+| `request attempt`（请求尝试） | 一次 HTTP/SSE 尝试 | 成功、失败或取消 | 当前没有自动重试，故一次 step 恰有一次 attempt |
+
+一次回车，不等于只发一次 HTTP。正常收口的一次 turn，可这样记账：
 
 ```text
-一轮人机对话
-= 1 条真人 user 消息
-+ N 次模型请求（N >= 1）
+一次用户 turn
+= 1 条本轮接纳的 user 消息
++ M 个 step（M >= 1）
++ M 次模型请求
 + 0 到若干次本地工具执行
-+ 1 条最终 assistant 正文
++ M 条 assistant 消息
+  └─ 最后一条不含 ToolUseBlock，是交给用户的最终回复
 ```
 
-模型若先要读文件，LubanCode 便执行工具，把结果添进历史，立刻再问模型。这个过程不等用户再按回车。故而，**界面是一轮，协议上却可能已经走了两三轮 assistant/tool 来回。**
+当前实现不在同一 step 内自动重试，故模型请求数正好等于 step 数。日后若添请求重试，另记 `attempt`，那时才有 `attempt_count >= step_count`。不可把重试也算成新 step。
+
+模型若先要读文件，LubanCode 便执行工具，把结果添进历史，再开下一个 step。这个过程不等用户再按回车。用户眼里仍是一个 turn；内部却已走过两次模型请求。
 
 本文按当前源码写。JSON 里的字段、角色与拼接次序都是真实现；模型选哪个工具、流式分成几片，却没有定数。下文拿 `read_file("README.md")` 模拟一条常见支路，免得把随机输出冒充真实抓包。
 
@@ -53,6 +66,8 @@ sequenceDiagram
     User->>UI: 帮我看一下当前项目
     UI->>Loop: api::Message(User, TextBlock)
     Loop->>Loop: 追加到 history
+    Note over UI,Store: turn 开始
+    Note over Loop,Tools: step 1
     Loop->>Loop: 拼 system、裁 history、列 tools
     Loop->>Wire: 中立 api::Request
     Wire->>API: 第 1 次 HTTP + SSE
@@ -62,6 +77,7 @@ sequenceDiagram
     Loop->>Tools: read_file({path: README.md})
     Tools-->>Loop: 文件正文
     Loop->>Loop: 追加 User + ToolResultBlock
+    Note over Loop,Tools: step 2
     Loop->>Wire: 中立 api::Request（带完整新历史）
     Wire->>API: 第 2 次 HTTP + SSE
     API-->>Wire: 最终正文增量
@@ -69,6 +85,7 @@ sequenceDiagram
     Loop->>Loop: 追加最终 Assistant
     Loop-->>UI: Run 返回
     UI->>Store: 把本轮新增 history 逐条写进 JSONL
+    Note over UI,Store: turn 收口
 ```
 
 上图有两处容易看岔：
@@ -76,7 +93,7 @@ sequenceDiagram
 - 每次请求都带一份完整 `system`、当前 `history` 与可用 `tools`。不是只把“新增那一句”发过去。
 - 工具结果写进历史以后，第二次请求才发出。模型服务并不知道本机刚做过什么，全靠这条结果告诉它。
 
-## 第 0 步：输入先变成中立消息
+## 环节 0：输入先变成中立消息
 
 交互循环读到正文，先查 slash 命令。`帮我看一下当前项目` 不是 slash 命令，于是走普通消息支路。
 
@@ -106,7 +123,7 @@ history_[0]
    └─ TextBlock("帮我看一下当前项目")
 ```
 
-## 第 1 步：system 不是一块死文本
+## 环节 1：system 不是一块死文本
 
 请求里的 `system` 是层层接起来的。当前主会话按这一次序铺开：
 
@@ -135,7 +152,7 @@ platforms/<当前 wire>.md
 
 # 项目记忆 + 本轮召回内容                 （本轮开了记忆才添）
 
-轮数将尽提醒                             （设了硬上限且将用尽才添）
+step 预算将尽提醒                        （旧配置名为 max_turns；设了硬上限才添）
 
 延迟工具索引                             （工具太多、启用 tool_search 才添）
 
@@ -149,16 +166,16 @@ platforms/<当前 wire>.md
 | 内容 | 何时算 |
 | --- | --- |
 | 人格、环境、项目指令、feature、platform | 建立或重建 `AgentLoop` 时拼 |
-| 项目记忆、轮数提醒 | 每个外层用户回合或每个内部请求按需添 |
+| 项目记忆、step 预算提醒 | 每个外层 turn 或每个内部 step 按需添 |
 | 延迟工具索引、模型专属指令、魂、think/model override | 真发请求前由 backend 包装层现添 |
 
 项目记忆虽塞进 `system`，正文却明说它只是线索，不是新指令。它会随这条 query 一起用于本次 `AgentLoop::Run` 里的每个内部请求，不写进对话 `history_`。
 
-工具定义也不靠 prompt 里手写。`ToolRegistry` 每一圈现列一遍，再变成独立的 `request.tools`。这使 JSON Schema 真正受协议约束，也让 `tool_search` 新挂载的工具能在下一圈立刻出现。
+工具定义也不靠 prompt 里手写。`ToolRegistry` 每个 step 现列一遍，再变成独立的 `request.tools`。这使 JSON Schema 真正受协议约束，也让 `tool_search` 新挂载的工具能在下一个 step 立刻出现。
 
-## 第 2 步：先拼一份中立 Request
+## 环节 2：step 1 先拼一份中立 Request
 
-第一圈里，`AgentLoop` 拼出的意思如下。为看清骨架，只展开 `read_file`，其余工具以省略号代替：
+step 1 里，`AgentLoop` 拼出的意思如下。为看清骨架，只展开 `read_file`，其余工具以省略号代替：
 
 ```cpp
 api::Request{
@@ -199,11 +216,11 @@ api::Request{
 - 延迟工具索引、模型专属指令与魂接到 system 尾部。
 - provider `extra_body` 与模型 variant `extra_body` 最后做顶层浅合并；同名键以后者为准。
 
-历史若太长，`TrimHistory` 只裁“发给模型看的副本”。它保住最早一轮与最近三轮，整轮丢掉中段；工具调用与结果同进同退。单条工具结果仍太大，才截正文并加标记。`history_` 本身不因这道硬裁剪而缩短；真正改活历史的是 `/compact` 或自动 compact。
+历史若太长，`TrimHistory` 只裁“发给模型看的副本”。它保住最早一个用户 turn 与最近三个用户 turn，整段丢掉中间旧账；工具调用与结果同进同退。单条工具结果仍太大，才截正文并加标记。`history_` 本身不因这道硬裁剪而缩短；真正改活历史的是 `/compact` 或自动 compact。
 
-请求拼装前还有两道工序：先是**无损结构压缩**（agent/context_events）——从历史派生规范化事件账，冷区里同键同指纹的只读工具结果（重复读取、重复搜索）只留一份正文加引用计数，被新版本覆盖的旧读取保头部预览并标注，超长结果换 artifact 引用；这层只改"发给模型的视图"，活历史与 session JSONL 一字不动，副作用工具不判重、绝不因此跳执行。再是 mid-turn 评估：系统提示 + 工具定义 + 全份历史 + 输出预留（统一 token 口径：ASCII 4 字符约 1 token，非 ASCII 每字约 1.5 token）估过有效窗口的 80%，就在这个"工具结果已攒完、请求尚未发出"的安全点先做一次语义压缩，不再等下一条用户消息。轮级硬裁真丢了东西（丢轮或截结果）时，会向终端发一条显式告警——有损降级不许静默发生。
+请求拼装前还有两道工序：先是**无损结构压缩**（agent/context_events）——从历史派生规范化事件账，冷区里同键同指纹的只读工具结果（重复读取、重复搜索）只留一份正文加引用计数，被新版本覆盖的旧读取保头部预览并标注，超长结果换 artifact 引用；这层只改"发给模型的视图"，活历史与 session JSONL 一字不动，副作用工具不判重、绝不因此跳执行。再是 mid-turn 评估：系统提示 + 工具定义 + 全份历史 + 输出预留（统一 token 口径：ASCII 4 字符约 1 token，非 ASCII 每字约 1.5 token）估过有效窗口的 80%，就在这个"工具结果已攒完、请求尚未发出"的安全点先做一次语义压缩，不再等下一条用户消息。turn 级硬裁真丢了东西（丢 turn 或截结果）时，会向终端发一条显式告警——有损降级不许静默发生。
 
-## 第 3 步：翻成 OpenAI Chat JSON
+## 环节 3：翻成 OpenAI Chat JSON
 
 熟悉 Chat Completions 的读者，先看这一份。真实请求会带全部工具定义；这里仍只展开 `read_file`：
 
@@ -252,9 +269,9 @@ api::Request{
 
 到这里，与普通的 OpenAI Chat 调用并无玄虚。差别还没露头。
 
-## 第 4 步：模型先回工具调用
+## 环节 4：模型先回工具调用
 
-模型若肯直接答，流里只来文字，第一圈便收工。可“看一下当前项目”须读仓库。这里模拟它先要 `README.md`。
+模型若肯直接答，流里只来文字，step 1 便收工。可“看一下当前项目”须读仓库。这里模拟它先要 `README.md`。
 
 Chat SSE 可能分成下面几片。**分片边界不固定**，有时名字和参数会拆得更碎：
 
@@ -294,7 +311,7 @@ api::Message{
 
 这条 assistant 消息立刻写进 `history_`。此时还没有最终答话，`RunTurn` 也没有返回。
 
-## 第 5 步：本机执行工具，再把结果伪成下一条消息
+## 环节 5：本机执行工具，再把结果装成下一条消息
 
 `AgentLoop` 在本机 registry 里找 `read_file`。它先跑 hook 与权限判断，再执行工具。`read_file` 是只读工具，不须确认。
 
@@ -332,11 +349,11 @@ history_[2]  User       ToolResult(call_01, "README 正文……")
 
 这里的 `User` 不是说真人又发了一句话。它只是中立层借用 `User` 角色，装工具结果。协议 adapter 自会翻成各家的正规形状。
 
-同一条 assistant 若一次叫了三个工具，LubanCode 会依次执行，最后把三个 `ToolResultBlock` 装进同一条 `User` 消息，再发下一圈。
+同一条 assistant 若一次叫了三个工具，LubanCode 会依次执行，最后把三个 `ToolResultBlock` 装进同一条 `User` 消息，再开下一个 step。三次工具调用仍只属于一个 step。
 
-## 第 6 步：第二次请求把整段历史重发
+## 环节 6：step 2 把整段历史重发
 
-第二圈没有新的真人输入。`AgentLoop` 直接重建 request：同一份 system、更新后的完整 history、当下可用工具表。下面只展开 `messages`；`tools` 与第一份请求一样，仍带完整定义。
+step 2 没有新的真人输入。`AgentLoop` 直接重建 request：同一份 system、更新后的完整 history、当下可用工具表。下面只展开 `messages`；`tools` 与第一份请求一样，仍带完整定义。
 
 Chat wire 会把中立历史翻成大家熟悉的样子：
 
@@ -371,7 +388,7 @@ Chat wire 会把中立历史翻成大家熟悉的样子：
 }
 ```
 
-看明白这一段，Agent 主循环也就看明白七成了：**工具循环本身没有另造一种神秘协议，不过是程序自动替用户续了一轮 `assistant tool_call -> tool result`。**
+看明白这一段，Agent 主循环也就看明白七成了：**工具循环没有另造一种神秘协议。程序只是在同一个 turn 里接上 `assistant tool_call -> tool result`，再开一个 step。**
 
 ## 同一份历史，Anthropic 怎样穿
 
@@ -499,7 +516,7 @@ Responses API 不叫 `messages`，叫 `input`。函数调用与函数结果各�
 | 工具结果 | `role=tool` | user `tool_result` block | `function_call_output` item |
 | 会话状态 | 每次重发 history | 每次重发 history | `store:false`，每次重发 history |
 
-## 第 7 步：第二次流返回最终正文
+## 环节 7：step 2 返回最终正文
 
 模型读过 README，若资料够了，就开始吐正文。Chat SSE 大致如此：
 
@@ -532,7 +549,7 @@ api::Message{
 }
 ```
 
-没有 `ToolUseBlock`，stop reason 也是 `end_turn`，内部循环就停。`AgentLoop::Run` 返回 `RunTurn`，统计行会把这轮各次请求的 token 相加，并显示请求次数。这个例子会是 `2 requests`，不是 `1`。
+没有 `ToolUseBlock`，stop reason 也是 `end_turn`，这个 step 便宣告 turn 收口。`AgentLoop::Run` 返回 `RunTurn`，统计行会把本 turn 各次请求的 token 相加，并显示请求次数。这个例子会是 `2 requests`，不是 `1`。
 
 最终内存历史共有四条：
 
@@ -581,7 +598,7 @@ Assistant("这是个 C++20……")
 User("那它怎么切 provider？")
 ```
 
-这便是普通多轮对话。差别只在前一轮中间夹了工具往返。
+这便是普通多轮对话。差别只在上一个 turn 中间夹了工具往返。
 
 上下文涨到 80% 左右时，主循环会先调用 compact 模型，把老历史摘要成一条 archive（六栏存档 + 末尾 JSON manifest，活动待办漏一项就拒收、历史不动），再按 token 预算保留最近热区。压缩模型自己的窗口单独算预算，装不下就明确拒绝，不静默截史。若还没来得及 compact，`TrimHistory` 另有字符上限作最后拦网，触发时打醒目告警。
 
@@ -608,7 +625,7 @@ User("那它怎么切 provider？")
 
 `agent_type=Explore` 正是特定子代理类型，不是一条普通搜索命令。它有独立 persona，工具表也从代码上锁死为只读：`read_file`、`search`、`web_fetch`、可选 `web_search`、可选 `lsp`。它拿不到 `run_command`、写文件工具、`skill`，也拿不到 `agent`，不能再生孙代理。
 
-`general-purpose` 则能拿基础工具，做多步任务。前台子代理跑完才回主循环；后台子代理先回任务编号，另在线程里跑。后台结果完成后，会在后续外层用户消息里作为一段“不可信参考资料”附上，再交给主模型。故而后台 agent 更不像普通同步 tool call。
+`general-purpose` 则能拿基础工具，做长任务。前台子代理跑完才回主循环；后台子代理先回任务编号，另在线程里跑。后台结果完成后，会在后续外层用户消息里作为一段“不可信参考资料”附上，再交给主模型。故而后台 agent 更不像普通同步 tool call。
 
 ## 还有几条岔路
 
@@ -616,9 +633,9 @@ User("那它怎么切 provider？")
 
 只走一次 HTTP。历史是 `User -> Assistant Text`。这就是最朴素的多轮聊天。
 
-### 模型连续叫好几轮工具
+### 模型连续几个 step 都叫工具
 
-每轮都重复同一套动作：
+每个 step 都重复同一套动作：
 
 ```text
 发完整 history
@@ -628,7 +645,7 @@ User("那它怎么切 provider？")
 -> 再发完整 history
 ```
 
-默认主循环不设内部轮数上限，靠模型 `end_turn` 或用户 ESC 收口；配置了正数 `max_turns` 才有硬闸。
+默认主循环不设 step 上限，靠模型 `end_turn` 或用户 ESC 收口。旧配置项 `max_turns` 若设正数，限制的其实是一个 turn 内最多跑多少个 step，并非用户 turn 数；这笔命名债已记入 [`todos/项目变量与执行层级命名规范.todo`](../todos/项目变量与执行层级命名规范.todo)。
 
 ### 服务端内置 web search
 
@@ -644,7 +661,7 @@ Responses 与 Anthropic 还可声明 provider 自带的 web search。它在服�
 
 ### 跨会话来信
 
-跨会话 inbox 只在内部工具轮次的安全边界收信：上一个工具结果已经入历史，下一次模型请求还没发。它不在流式半截或权限确认当口抢话。纯文本轮没有这个内部缝，来信会排到本轮收口以后。
+跨会话 inbox 只在 step 边界收信：上一个工具结果已经入历史，下一次模型请求还没发。它不在流式半截或权限确认当口抢话。只有一个 step 的纯文本 turn 没有这道缝，来信会排到本 turn 收口以后。
 
 ## 所以，它到底算不算“只是多轮对话”
 
@@ -671,8 +688,8 @@ system + history + tools -> assistant -> tool result -> assistant
 
 | 想追什么 | 文件 |
 | --- | --- |
-| 外层输入、prompt 装配、工具注册、落盘 | [`src/main.cpp`](../src/main.cpp) |
-| 内部请求循环、history、工具回填 | [`src/agent/loop.cpp`](../src/agent/loop.cpp) |
+| 外层 turn、prompt 装配、落盘 | [`src/app/interactive_session.cpp`](../src/app/interactive_session.cpp)、[`turn_runner.cpp`](../src/app/turn_runner.cpp) |
+| 内部 step 循环、history、工具回填 | [`src/agent/loop.cpp`](../src/agent/loop.cpp) |
 | 中立消息、内容块、流事件 | [`src/api/types.hpp`](../src/api/types.hpp) |
 | 流事件拼成 assistant 消息 | [`src/api/assembler.cpp`](../src/api/assembler.cpp) |
 | system prompt 模块次序 | [`src/agent/prompt_assembler.cpp`](../src/agent/prompt_assembler.cpp) |
