@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 
+#include "cli/divider.hpp"
 #include "cli/latex_math.hpp"
 #include "cli/line_editor.hpp"  // DisplayWidthUtf8 / TruncateUtf8ToDisplayWidth / WrapUtf8ToDisplayWidth
 
@@ -671,29 +672,17 @@ std::vector<std::string> RenderMarkdown(const std::string& text, const Theme& th
         const std::size_t indent_spaces = LeadingSpaces(line);
         const std::string trimmed = line.substr(indent_spaces);
 
-        // 代码块内:除了收尾围栏,一切原样(不解析、不上样式),只挂前缀。
+        // 代码块内:除了收尾围栏,一切原样(不解析、不上样式)。行首不挂任何
+        // 前缀——用户复制代码要的是裸文本,旧的"  │ "毛边撤了;块首块尾各画
+        // 一根横线(三线表式),语言标记夹在头两线之间。
         if (in_code) {
             if (IsFenceLine(trimmed)) {
                 in_code = false;
+                out.push_back(theme.stats + BuildDividerLine(content_limit, /*plain=*/true, content_limit) + theme.reset);
                 continue;
             }
-            // "  │ " 前缀占 4 列。前缀 + 续行缩进各自都吃列;内容区(content_limit-4)
-            // 不足 2 列时连一个宽字都盛不下,挂前缀必让该字撑破 width-1——退回裸折。
-            const std::string prefix = "  " + theme.stats + "\xE2\x94\x82" + theme.reset + " ";
-            if (content_limit < 4 + 2) {
-                for (const std::string& w : WrapUtf8ToDisplayWidth(line, content_limit)) {
-                    out.push_back(w);
-                }
-            } else {
-                const std::vector<std::string> wraps = WrapUtf8ToDisplayWidth(line, content_limit - 4);
-                if (wraps.empty()) {
-                    out.push_back(prefix);
-                } else {
-                    out.push_back(prefix + wraps[0]);
-                    for (std::size_t i = 1; i < wraps.size(); ++i) {
-                        out.push_back("    " + wraps[i]);  // 续行缩进 4 列,对齐前缀后的内容起点
-                    }
-                }
+            for (const std::string& w : WrapUtf8ToDisplayWidth(line, content_limit)) {
+                out.push_back(w);
             }
             continue;
         }
@@ -701,14 +690,11 @@ std::vector<std::string> RenderMarkdown(const std::string& text, const Theme& th
         if (IsFenceLine(trimmed)) {
             FlushTable(table_buf, out, theme, content_limit);
             in_code = true;
+            out.push_back(theme.stats + BuildDividerLine(content_limit, /*plain=*/true, content_limit) + theme.reset);
             const std::string lang = Trim(trimmed.substr(3));
             if (!lang.empty()) {
-                if (content_limit < 4) {  // 同上:前缀 4 列放不下就裸截
-                    out.push_back(theme.stats + TruncatePlain(lang, content_limit) + theme.reset);
-                } else {
-                    out.push_back("  " + theme.stats + "\xE2\x94\x82 " + TruncatePlain(lang, content_limit - 4) +
-                                  theme.reset);
-                }
+                out.push_back(theme.stats + TruncatePlain(lang, content_limit) + theme.reset);
+                out.push_back(theme.stats + BuildDividerLine(content_limit, /*plain=*/true, content_limit) + theme.reset);
             }
             continue;
         }

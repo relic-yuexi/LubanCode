@@ -175,28 +175,32 @@ TEST_CASE("RenderMarkdown: 配不上对的标记原样保留") {
 
 // ---- 代码块 ---------------------------------------------------------------
 
-TEST_CASE("RenderMarkdown: 代码块竖线前缀,块内 markdown 不解析,语言标签淡色") {
+TEST_CASE("RenderMarkdown: 代码块三线表式,行首无前缀,块内 markdown 不解析") {
     const auto theme = BuiltinTheme("dark");
     const auto lines = RenderMarkdown("```cpp\nint main() { return 0; }\n# 不是标题\n**不是粗体**\n```", theme, 80);
-    REQUIRE(lines.size() == 4);
-    // 语言标签行:淡色。
-    CHECK(Contains(lines[0], theme.stats));
-    CHECK(Contains(lines[0], "cpp"));
-    // 内容行:两格 + 淡色竖线前缀,内容原样。
-    for (std::size_t i = 1; i < 4; ++i) {
-        CHECK(lines[i].compare(0, 2, "  ") == 0);
-        CHECK(Contains(lines[i], kVBar));
-    }
-    CHECK(Contains(lines[1], "int main() { return 0; }"));
-    CHECK(Contains(StripAnsi(lines[2]), "# 不是标题"));      // 井号原样在
-    CHECK(Contains(StripAnsi(lines[3]), "**不是粗体**"));    // 星号原样在
-    CHECK_FALSE(Contains(lines[3], "\x1b[1m\xE4\xB8\x8D"));  // 没被加粗
+    // 上线 + 语言 + 中线 + 三行裸码 + 下线 = 7 行。
+    REQUIRE(lines.size() == 7);
+    // 语言标签夹在头两线之间,淡色。
+    CHECK(Contains(StripAnsi(lines[0]), "----"));
+    CHECK(Contains(lines[1], theme.stats));
+    CHECK(Contains(lines[1], "cpp"));
+    CHECK(Contains(StripAnsi(lines[2]), "----"));
+    // 内容行:裸奔无前缀,内容原样、不被解析。
+    CHECK(Contains(lines[3], "int main() { return 0; }"));
+    CHECK(StripAnsi(lines[3]).compare(0, 2, "  ") != 0);  // 不再有两格前缀
+    CHECK_FALSE(Contains(StripAnsi(lines[3]), kVBar));    // 也没有竖线毛边
+    CHECK(Contains(StripAnsi(lines[4]), "# 不是标题"));      // 井号原样在
+    CHECK(Contains(StripAnsi(lines[5]), "**不是粗体**"));    // 星号原样在
+    CHECK_FALSE(Contains(lines[5], "\x1b[1m\xE4\xB8\x8D"));  // 没被加粗
 }
 
-TEST_CASE("RenderMarkdown: 没有语言标记的代码块,围栏行不产出内容") {
+TEST_CASE("RenderMarkdown: 没有语言标记的代码块,两线夹裸码,不产出语言行") {
     const auto lines = RenderMarkdown("```\nx = 1\n```", BuiltinTheme("dark"), 80);
-    REQUIRE(lines.size() == 1);
-    CHECK(Contains(lines[0], "x = 1"));
+    REQUIRE(lines.size() == 3);
+    CHECK(Contains(StripAnsi(lines[0]), "----"));
+    CHECK(Contains(lines[1], "x = 1"));
+    CHECK_FALSE(Contains(StripAnsi(lines[1]), kVBar));
+    CHECK(Contains(StripAnsi(lines[2]), "----"));
 }
 
 // ---- 表格 -----------------------------------------------------------------
@@ -376,7 +380,7 @@ TEST_CASE("RenderMarkdown: 混合文档各元素齐活,顺序不乱") {
     CHECK(Contains(lines[static_cast<std::size_t>(heading)], "\x1b[1m"));
     CHECK(Contains(lines[static_cast<std::size_t>(intro)], "\x1b[1mlubancode\x1b[22m"));
     CHECK(Contains(lines[static_cast<std::size_t>(item1)], kBullet));
-    CHECK(Contains(lines[static_cast<std::size_t>(code)], kVBar));
+    CHECK(Contains(lines[static_cast<std::size_t>(code)], "int x = 42;"));  // 三线表式:裸码无竖线
     CHECK(Contains(lines[static_cast<std::size_t>(quote)], kVBar));
     // 整篇检测自然为真。
     CHECK(DetectMarkdownStructure("## 自我介绍\n- 会调工具"));
@@ -452,13 +456,13 @@ TEST_CASE("RenderMarkdown: 长引用软换行,每段重复引用竖线") {
     }
 }
 
-TEST_CASE("RenderMarkdown: 长代码块软换行,续行对齐前缀宽度") {
+TEST_CASE("RenderMarkdown: 长代码块软换行,续行无前缀") {
     const int width = 16;
     const auto lines = RenderMarkdown("```\nauto very_long_identifier_name = 42;\n```", BuiltinTheme("dark"), width);
-    CHECK(lines.size() > 2);  // 围栏行 + 多行折行内容
+    CHECK(lines.size() > 2);  // 上下线 + 多行折行内容
     bool saw_code_line = false;
     for (const std::string& line : lines) {
-        if (Contains(line, kVBar)) {
+        if (Contains(StripAnsi(line), "auto") || Contains(StripAnsi(line), "identifier")) {
             saw_code_line = true;
         }
         CHECK(DisplayWidthUtf8(StripAnsi(line)) <= static_cast<std::size_t>(width - 1));

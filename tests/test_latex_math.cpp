@@ -287,9 +287,10 @@ TEST_CASE("LaTeX math Markdown: 未知命令原样保留定界符") {
 
 TEST_CASE("LaTeX math Markdown: 围栏和行内代码都不认美元号") {
     const auto fenced = RenderMarkdown("```\n$x^2$\n```", BuiltinTheme("plain"), 80);
-    REQUIRE(fenced.size() == 1);
-    CHECK(fenced[0].find("$x^2$") != std::string::npos);
-    CHECK(fenced[0].find("x²") == std::string::npos);
+    // 三线表式:上线 + 裸码 + 下线。
+    REQUIRE(fenced.size() == 3);
+    CHECK(fenced[1].find("$x^2$") != std::string::npos);
+    CHECK(fenced[1].find("x²") == std::string::npos);
 
     const auto inline_code = RenderMarkdown("`$x^2$`", BuiltinTheme("plain"), 80);
     REQUIRE(inline_code.size() == 1);
