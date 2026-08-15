@@ -51,11 +51,13 @@
 #include "api/responses/client.hpp"
 #include "app/backend_stack.hpp"
 #include "app/tool_runtime.hpp"
+#include "app/hook_runtime.hpp"
 #include "app/turn_runner.hpp"
 #include "app/commands/session_commands.hpp"
 #include "app/commands/prompt_commands.hpp"
 #include "app/commands/settings_commands.hpp"
 #include "app/commands/workspace_commands.hpp"
+#include "app/commands/hook_commands.hpp"
 #include "app/commands/peer_commands.hpp"
 #include "app/version.hpp"
 #include "cli/console_input.hpp"
@@ -1176,11 +1178,18 @@ void InteractiveSession::PersistNewMessages() {
         session_meta.model = *current_model;
         session_meta.cwd = CurrentDirUtf8();
         session_meta.started_at = lubancode::agent::NowTimestamp();
-        if (!session_store.Begin(session_meta,
-                                  lubancode::agent::MakeSessionId(session_start_ts, first_text))) {
+        const std::string session_id = lubancode::agent::MakeSessionId(session_start_ts, first_text);
+        if (!session_store.Begin(session_meta, session_id)) {
             session_store_broken = true;
             std::cout << theme.error << trf("session.create_failed", sessions_dir) << theme.reset << "\n";
             return;
+        }
+        // hooks 上下文补真 session id 与转录路径(建档这一刻才齐)。
+        if (lubancode::app::HookRuntime() != nullptr) {
+            lubancode::hooks::HookContext hook_context = lubancode::app::HookRuntime()->context();
+            hook_context.session_id = session_id;
+            hook_context.transcript_path = session_store.file_path();
+            lubancode::app::UpdateHookRuntimeContext(hook_context);
         }
         // 建档前 /title 设过标题:现在有文件了,把事件行补上。
         if (session_title_pending && !session_title.empty()) {
@@ -1252,7 +1261,7 @@ void InteractiveSession::RunPeerTurn(const std::string& text) {
     // RunTurnResult 只剩 status/cancelled,peer 来信轮两边都不看;排队消息
     // 走会话层 SteeringQueue,不在这里收。直接调,不接没人用的返回值。
     RunTurn(*loop, text, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
-            config.hooks, spinner_enabled, transcript, todo_state(), &transcript_expanded,
+            lubancode::app::HookRuntime(), spinner_enabled, transcript, todo_state(), &transcript_expanded,
             settings_local.allow_commands, settings_local.deny_commands, session_agent_tool());
     PersistNewMessages();
     if (peer_started) {
@@ -1771,6 +1780,9 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
             case lubancode::cli::SlashCommand::Tools:
                 PrintToolsCommand(registry(), *loaded_tools(), main_deferral, tool_search_threshold);
                 break;
+            case lubancode::cli::SlashCommand::Hooks:
+                HandleHooksCommand(parsed.args, lubancode::app::HookRuntime(), theme);
+                break;
             case lubancode::cli::SlashCommand::Background:
                 return HandleBackgroundCommand(theme);
             case lubancode::cli::SlashCommand::Memory:
@@ -1862,7 +1874,7 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
     loop->SetTurnSystemSuffix(std::move(turn_suffix));
     const std::size_t history_before = loop->History().size();
     RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
-            config.hooks, spinner_enabled, transcript, todo_state(), &transcript_expanded,
+            lubancode::app::HookRuntime(), spinner_enabled, transcript, todo_state(), &transcript_expanded,
             settings_local.allow_commands, settings_local.deny_commands, session_agent_tool(),
             recorder.has_value() ? &*recorder : nullptr);
     // 每轮结束(成功/出错/ESC 打断都算)把新增消息逐条追加落盘。

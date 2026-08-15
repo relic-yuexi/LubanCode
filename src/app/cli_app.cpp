@@ -86,6 +86,7 @@
 #include "tools/background_tasks.hpp"
 #include "tools/command_safety.hpp"
 #include "tools/edit_file.hpp"
+#include "app/hook_runtime.hpp"
 #include "tools/hooks.hpp"
 #include "tools/lua_tool.hpp"
 #include "tools/path_utils.hpp"
@@ -166,25 +167,43 @@ std::optional<lubancode::config::Config> RunInitialSetupWizard(std::optional<std
     return outcome->config;
 }
 
-// M9:session_start/session_end 钩子的生命周期跟"这一次 CLI 进程真正进入了
-// 一次会话"绑在一起——构造时跑 session_start,析构时跑 session_end。只在
-// RunCli 真正要进 AskOnce/InteractiveLoop 那条路时构造(--config/--version/
-// --help 这些提前 return 的路径不会走到这里,不该触发)。用的是最初
-// LoadFromEnv() 读出来的那份 hooks 配置,不是初次配置向导之后的
-// "effective"副本——向导只关心 wire/base_url/api_key/model 四个字段,压根
-// 不知道 hooks 这回事,拿它的副本反而会把用户配置文件里写的 hooks 弄丢。
+// M9 -> hooks 框架:session_start/session_end 钩子的生命周期跟"这一次 CLI
+// 进程真正进入了一次会话"绑在一起——构造时发 SessionStart(source=startup),
+// 析构时发 SessionEnd(reason=exit)。只在 RunCli 真正要进 AskOnce/
+// InteractiveLoop 那条路时构造(--config/--version/--help 这些提前 return 的
+// 路径不会走到这里,不该触发)。走进程级 dispatcher:来源相加、信任审查、
+// legacy adapter 都在那一层。SessionEnd 是 advisory 收尾——进程被硬杀
+// (taskkill/断电)时这个析构不会跑,协议文档里如实写明,不承诺必达。
 class SessionHookScope {
 public:
-    explicit SessionHookScope(const lubancode::config::HooksConfig& hooks) : hooks_(hooks) {
-        lubancode::tools::RunSessionStartHooks(hooks_);
+    explicit SessionHookScope(lubancode::hooks::HookDispatcher* dispatcher) : dispatcher_(dispatcher) {
+        if (dispatcher_ == nullptr || dispatcher_->Empty() ||
+            !dispatcher_->HasHandlersFor(lubancode::hooks::HookEvent::SessionStart)) {
+            return;
+        }
+        lubancode::hooks::HookPayload payload;
+        payload.event = lubancode::hooks::HookEvent::SessionStart;
+        payload.fields["source"] = "startup";
+        payload.match_value = "startup";
+        dispatcher_->Emit(lubancode::hooks::HookEvent::SessionStart, payload);
     }
-    ~SessionHookScope() { lubancode::tools::RunSessionEndHooks(hooks_); }
+    ~SessionHookScope() {
+        if (dispatcher_ == nullptr || dispatcher_->Empty() ||
+            !dispatcher_->HasHandlersFor(lubancode::hooks::HookEvent::SessionEnd)) {
+            return;
+        }
+        lubancode::hooks::HookPayload payload;
+        payload.event = lubancode::hooks::HookEvent::SessionEnd;
+        payload.fields["reason"] = "exit";
+        payload.match_value = "exit";
+        dispatcher_->Emit(lubancode::hooks::HookEvent::SessionEnd, payload);
+    }
 
     SessionHookScope(const SessionHookScope&) = delete;
     SessionHookScope& operator=(const SessionHookScope&) = delete;
 
 private:
-    lubancode::config::HooksConfig hooks_;
+    lubancode::hooks::HookDispatcher* dispatcher_;
 };
 
 // 真正的入口逻辑,跟平台无关:args[0] 是程序名,args[1..] 是实参。
@@ -417,11 +436,19 @@ int RunCli(const std::vector<std::string>& args) {
     }
     lubancode::cli::SetConfirmMode(initial_mode);
 
-    // M9:真正要进一次会话了(单发问答也算一次会话)——session_start 在这里
-    // 跑,session_end 在这个作用域结束(RunCli 返回、或者中途抛异常被下面
-    // catch 住之后自然析构)时跑。--config/--version/--help 提前 return,
-    // 走不到这里,不会触发。
-    const SessionHookScope session_hook_scope(config_result->config.hooks);
+    // hooks 运行时装载:来源分级 + definition hash 信任审查在这里完成。
+    // 未信任的项目 hook 从这一刻起就绝不起进程;提示打到 stderr(交互模式
+    // 用户看得见;单发/管道模式 stderr 也不污染 stdout 的重定向产物)。
+    const std::vector<std::string> hook_notices = lubancode::app::SetupHookRuntime(*config_result);
+    for (const std::string& notice : hook_notices) {
+        std::cerr << notice << "\n";
+    }
+
+    // M9 -> hooks 框架:真正要进一次会话了(单发问答也算一次会话)——
+    // SessionStart 在这里发,SessionEnd 在这个作用域结束(RunCli 返回、或者
+    // 中途抛异常被下面 catch 住之后自然析构)时发。--config/--version/--help
+    // 提前 return,走不到这里,不会触发。
+    const SessionHookScope session_hook_scope(lubancode::app::HookRuntime());
 
     // 兜底:JSON 编码、网络库内部等地方万一抛出没接住的异常,也不能让
     // 整个进程崩掉(崩掉的话用户只会看到一个莫名其妙的退出码)。

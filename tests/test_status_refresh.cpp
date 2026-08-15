@@ -193,10 +193,10 @@ TEST_CASE("BuildCallbacks::on_usage: 主请求 usage 更新 tracker 并发布状
     cli::StreamBodyTracker body(theme, /*enabled=*/false);
     tools::ToolRegistry registry;  // 没有 agent 工具:主回调路径
     std::set<std::string> always_allowed;
-    const config::HooksConfig hooks;
+    hooks::HookDispatcher hooks;  // 空 dispatcher:不挂 hook 回调,与"没配 hooks"同待遇
 
     const agent::Callbacks callbacks =
-        app::BuildCallbacks(/*auto_confirm=*/false, always_allowed, theme, stats, tracker, registry, hooks, display,
+        app::BuildCallbacks(/*auto_confirm=*/false, always_allowed, theme, stats, tracker, registry, &hooks, display,
                             body, /*allow_commands=*/{}, /*deny_commands=*/{});
 
     callbacks.on_usage(api::Usage{300, 50});
@@ -231,9 +231,9 @@ TEST_CASE("BuildCallbacks::on_usage: 第二次请求覆盖发布,不累加;缺 u
     cli::StreamBodyTracker body(theme, false);
     tools::ToolRegistry registry;
     std::set<std::string> always_allowed;
-    const config::HooksConfig hooks;
+    hooks::HookDispatcher hooks;  // 空 dispatcher:不挂 hook 回调,与"没配 hooks"同待遇
     const agent::Callbacks callbacks =
-        app::BuildCallbacks(false, always_allowed, theme, stats, tracker, registry, hooks, display, body,
+        app::BuildCallbacks(false, always_allowed, theme, stats, tracker, registry, &hooks, display, body,
                             /*allow_commands=*/{}, /*deny_commands=*/{});
 
     callbacks.on_usage(api::Usage{300, 50});
@@ -271,9 +271,9 @@ TEST_CASE("BuildCallbacks::on_usage: 子代理 usage 只进累计花销,不碰 t
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<tools::AgentTool>(backend, sub_registry, "/work/dir"));
     std::set<std::string> always_allowed;
-    const config::HooksConfig hooks;
+    hooks::HookDispatcher hooks;  // 空 dispatcher:不挂 hook 回调,与"没配 hooks"同待遇
     const agent::Callbacks callbacks =
-        app::BuildCallbacks(false, always_allowed, theme, stats, tracker, registry, hooks, display, body,
+        app::BuildCallbacks(false, always_allowed, theme, stats, tracker, registry, &hooks, display, body,
                             /*allow_commands=*/{}, /*deny_commands=*/{});
 
     // BuildCallbacks 内部给 agent 工具灌了转发钩子;跑一轮子代理(500+100

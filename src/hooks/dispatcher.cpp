@@ -7,6 +7,7 @@
 #include <thread>
 
 #include "platform/process.hpp"
+#include "platform/text_encoding.hpp"
 
 namespace lubancode::hooks {
 
@@ -169,50 +170,73 @@ HookEventResult HookDispatcher::Emit(HookEvent event, const HookPayload& payload
     const std::string event_name(ToString(event));
     const EventOutputCapabilities caps = OutputCapabilities(event);
 
-    // ---- 第一遍:筛选与跳过记录(定义序:来源 -> 声明次序)。----
-    std::vector<const HookDefinition*> to_run;
+    // 每条命中的定义一个账本槽(定义序:来源 -> 声明次序)。跳过项第一遍
+    // 就填好,执行项第三遍回填——merged.records 与运行流水都按这个序落账,
+    // 不按谁先跑完谁先说话。
+    struct Slot {
+        const HookDefinition* def = nullptr;
+        bool executed = false;
+        HookRunRecord record;
+    };
+    std::vector<Slot> slots;
+    std::vector<Slot*> to_run;
     std::set<std::string> scheduled_hashes;  // 本轮已排进执行的单(去重账)
+
+    // ---- 第一遍:筛选与跳过记录。----
     for (const auto& def : definitions_) {
         if (def.event != event || !MatcherHits(def, payload.match_value)) {
             continue;
         }
-        HookRunRecord record;
-        record.definition_id = def.id;
-        record.event_name = event_name;
-        record.definition_hash_short = def.definition_hash_short;
-        record.command_display = HookCommandDisplay(def.handler);
-        record.source_label = def.source_label;
-        record.timestamp_unix = UnixNow();
+        Slot slot;
+        slot.def = &def;
+        slot.record.definition_id = def.id;
+        slot.record.event_name = event_name;
+        slot.record.definition_hash_short = def.definition_hash_short;
+        slot.record.command_display = HookCommandDisplay(def.handler);
+        slot.record.source_label = def.source_label;
+        slot.record.timestamp_unix = UnixNow();
 
         if (def.disabled) {
-            record.outcome = "skipped_disabled";
-            record.detail = "已在 /hooks 里禁用";
-            merged.records.push_back(std::move(record));
+            slot.record.outcome = "skipped_disabled";
+            slot.record.detail = "已在 /hooks 里禁用";
+            slots.push_back(std::move(slot));
             continue;
         }
         if (!def.trusted) {
-            record.outcome = "skipped_untrusted";
-            record.detail =
+            slot.record.outcome = "skipped_untrusted";
+            slot.record.detail =
                 "项目 hook 未信任(hash " + def.definition_hash_short + "),不起进程;/hooks 审查后信任即生效";
-            merged.records.push_back(std::move(record));
+            slots.push_back(std::move(slot));
             continue;
         }
         if (scheduled_hashes.count(def.definition_hash) > 0) {
             // 同事件下 definition hash 相同的另一条(装载期已标 deduped,这里
             // 双保险):来源账保留,执行只跑一次。
-            record.outcome = "skipped_dedupe";
-            record.detail = "与本事件下另一条同命令定义去重,只执行一次";
-            merged.records.push_back(std::move(record));
+            slot.record.outcome = "skipped_dedupe";
+            slot.record.detail = "与本事件下另一条同命令定义去重,只执行一次";
+            slots.push_back(std::move(slot));
             continue;
         }
         if (def.handler.async) {
-            record.outcome = "skipped_async";
-            record.detail = "async handler 本期不执行(安全点投递未实现);不假装支持,也不拿它做决定";
-            merged.records.push_back(std::move(record));
+            slot.record.outcome = "skipped_async";
+            slot.record.detail = "async handler 本期不执行(安全点投递未实现);不假装支持,也不拿它做决定";
+            slots.push_back(std::move(slot));
             continue;
         }
         scheduled_hashes.insert(def.definition_hash);
-        to_run.push_back(&def);
+        slot.executed = true;
+        to_run.push_back(nullptr);  // 占位,第二遍前回填指针
+        slots.push_back(std::move(slot));
+    }
+
+    // to_run 填指针(slots 不会再到 moved-from 状态,取址稳定)。
+    {
+        std::size_t run_index = 0;
+        for (auto& slot : slots) {
+            if (slot.executed) {
+                to_run[run_index++] = &slot;
+            }
+        }
     }
 
     // ---- 第二遍:并发执行。每只同步 handler 一条线程,收齐再归并——一只
@@ -223,13 +247,13 @@ HookEventResult HookDispatcher::Emit(HookEvent event, const HookPayload& payload
     for (std::size_t i = 0; i < to_run.size(); ++i) {
         workers.emplace_back([this, i, &runs, &to_run, &payload, &hook_run_id]() {
             HandlerRun& run = runs[i];
-            run.def = to_run[i];
+            run.def = to_run[i]->def;
             const auto start = std::chrono::steady_clock::now();
-            if (to_run[i]->legacy) {
-                run.exec = ExecuteLegacy(*to_run[i], payload);
+            if (to_run[i]->def->legacy) {
+                run.exec = ExecuteLegacy(*to_run[i]->def, payload);
             } else {
                 const nlohmann::json stdin_json = BuildStdinPayload(payload, context_, hook_run_id);
-                run.exec = ExecuteV2(*to_run[i], stdin_json.dump());
+                run.exec = ExecuteV2(*to_run[i]->def, stdin_json.dump());
             }
             run.duration_ms = static_cast<int>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start)
@@ -240,17 +264,13 @@ HookEventResult HookDispatcher::Emit(HookEvent event, const HookPayload& payload
         worker.join();
     }
 
-    // ---- 第三遍:按定义序归并(不是完成序)。----
+    // ---- 第三遍:按定义序归并(不是完成序)。执行结果回填进各自槽位。----
     for (std::size_t i = 0; i < runs.size(); ++i) {
-        const HookDefinition& def = *runs[i].def;
+        Slot& slot = *to_run[i];
+        const HookDefinition& def = *slot.def;
         const ProcessResult& exec = runs[i].exec;
 
-        HookRunRecord record;
-        record.definition_id = def.id;
-        record.event_name = event_name;
-        record.definition_hash_short = def.definition_hash_short;
-        record.command_display = HookCommandDisplay(def.handler);
-        record.source_label = def.source_label;
+        HookRunRecord& record = slot.record;
         record.duration_ms = runs[i].duration_ms;
         record.exit_code = exec.exit_code;
         record.timestamp_unix = UnixNow();
@@ -280,8 +300,14 @@ HookEventResult HookDispatcher::Emit(HookEvent event, const HookPayload& payload
                 record.outcome = "ok";
             }
         } else {
-            // v2:退出码三分 + stdout 逐事件 schema。
-            parsed = ParseStdoutJson(event, exec.output);
+            // v2:退出码三分 + stdout 逐事件 schema。shell 串形式的 hook 在
+            // Windows 走 cmd.exe(系统 ANSI 代码页),转换后仍可能带坏字节——
+            // 先过 UTF-8 清洗再解析,不让一只钩子的乱码把 JSON 解析打崩。
+            std::string stdout_text = exec.output;
+            if (!platform::IsValidUtf8(stdout_text)) {
+                stdout_text = platform::SanitizeExternalText(stdout_text);
+            }
+            parsed = ParseStdoutJson(event, stdout_text);
             parsed_valid = parsed.ok;
             const SingleOutcome judged = JudgeSingleRun(
                 event, exec.exit_code, exec.timed_out, exec.spawn_failed, parsed, /*stderr_text=*/exec.output);
@@ -321,7 +347,9 @@ HookEventResult HookDispatcher::Emit(HookEvent event, const HookPayload& payload
                 if (merged.permission != HookEventResult::Permission::Deny) {
                     merged.permission = HookEventResult::Permission::Deny;
                     merged.permission_reason =
-                          record.event_name + " 钩子阻断: " + (record.detail.empty() ? "未给理由" : record.detail);
+                          record.event_name + " 钩子阻断: " +
+                          (!parsed.permission_reason.empty()   ? parsed.permission_reason
+                           : (record.detail.empty() ? std::string("未给理由") : record.detail));
                 }
             } else if (caps.can_block && (event == HookEvent::UserPromptSubmit || event == HookEvent::PreCompact)) {
                 merged.blocked = true;
@@ -364,15 +392,19 @@ HookEventResult HookDispatcher::Emit(HookEvent event, const HookPayload& payload
             }
         }
 
-        // 记账:每只定义的最近一次 + 会话级流水(新在头)。失败不只往 cerr
-        // 丢一行——这里先落账,cerr 由调用方(UI 层)决定怎么呈。
-        {
-            const int id = def.id;
-            last_record_[id] = record;
-            recent_.push_front(record);
-            while (recent_.size() > kRecentCap) {
-                recent_.pop_back();
-            }
+        // 记账在循环外统一做(见下):这里只填自己的槽。
+        (void)def;
+    }
+
+    // ---- 落账:结果账(定义序)、每只定义的最近一次、会话级流水(新在头)。
+    // 失败不只往 cerr 丢一行——先落账,UI 怎么呈由调用方定。跳过项(未
+    // 信任/禁用/去重/async)同样入账:/hooks 的"最近结果"看得见它们。
+    for (auto& slot : slots) {
+        merged.records.push_back(slot.record);
+        last_record_[slot.def->id] = slot.record;
+        recent_.push_front(std::move(slot.record));
+        while (recent_.size() > kRecentCap) {
+            recent_.pop_back();
         }
     }
     return merged;

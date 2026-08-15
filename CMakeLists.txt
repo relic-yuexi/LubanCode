@@ -350,10 +350,12 @@ add_library(lubancode_app STATIC
   src/app/memory_extract.cpp
   src/app/tool_runtime.cpp
   src/app/turn_runner.cpp
+  src/app/hook_runtime.cpp
   src/app/commands/prompt_commands.cpp
   src/app/commands/session_commands.cpp
   src/app/commands/settings_commands.cpp
   src/app/commands/workspace_commands.cpp
+  src/app/commands/hook_commands.cpp
   src/app/commands/peer_commands.cpp
   src/app/interactive_session.cpp
   src/app/one_shot.cpp

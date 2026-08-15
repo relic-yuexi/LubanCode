@@ -28,6 +28,7 @@
 #include "cli/tool_display.hpp"
 #include "cli/transcript.hpp"
 #include "config/config.hpp"
+#include "hooks/dispatcher.hpp"
 #include "platform/paths.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/ask_user.hpp"
@@ -88,7 +89,7 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                             const lubancode::cli::Theme& theme, UsageStats& usage_stats,
                                             lubancode::cli::ContextTracker& context_tracker,
                                             lubancode::tools::ToolRegistry& registry,
-                                            const lubancode::config::HooksConfig& hooks_config,
+                                            lubancode::hooks::HookDispatcher* hook_dispatcher,
                                             ToolDisplay& display, StreamBodyTracker& body_tracker,
                                             const std::vector<std::string>& allow_commands,
                                             const std::vector<std::string>& deny_commands,
@@ -135,7 +136,7 @@ std::string ImageInputErrorText(const lubancode::cli::ImageInputError& error);
 RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bool auto_confirm,
                        std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
                        lubancode::cli::ContextTracker& context_tracker, lubancode::tools::ToolRegistry& registry,
-                       const lubancode::config::HooksConfig& hooks_config, bool is_console,
+                       lubancode::hooks::HookDispatcher* hook_dispatcher, bool is_console,
                        std::vector<lubancode::cli::TranscriptItem>& transcript,
                        std::shared_ptr<lubancode::tools::TodoListState> todo_state = nullptr,
                        std::atomic<bool>* transcript_expanded = nullptr,

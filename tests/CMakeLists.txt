@@ -51,6 +51,7 @@ add_executable(lubancode_tests
   test_agent_message_tool.cpp
   test_hooks.cpp
   test_hooks_framework.cpp
+  test_hooks_dispatcher.cpp
   test_skills.cpp
   test_mcp_transport.cpp
   test_mcp_config.cpp

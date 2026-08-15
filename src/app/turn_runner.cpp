@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "agent/compact.hpp"
+#include "app/hook_runtime.hpp"
 #include "cli/console_input.hpp"
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
@@ -265,7 +266,7 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                             const lubancode::cli::Theme& theme, UsageStats& usage_stats,
                                             lubancode::cli::ContextTracker& context_tracker,
                                             lubancode::tools::ToolRegistry& registry,
-                                            const lubancode::config::HooksConfig& hooks_config,
+                                            lubancode::hooks::HookDispatcher* hook_dispatcher,
                                             ToolDisplay& display, StreamBodyTracker& body_tracker,
                                             const std::vector<std::string>& allow_commands,
                                             const std::vector<std::string>& deny_commands,
@@ -273,21 +274,39 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                             lubancode::agent::WorkflowRecorder* recorder) {
     lubancode::agent::Callbacks callbacks;
 
-    // M9:hooks_config 四个数组全空是常态(没配 hooks 的用户占多数),这时候
-    // 干脆不设这两个回调——跟"没有 hooks 系统"时行为完全一样,也省得每次
-    // 工具调用都白跑一趟"遍历空数组"。
-    if (!hooks_config.Empty()) {
-        callbacks.on_pre_tool_hook = [&hooks_config](const std::string& name,
+    // hooks:dispatcher 为空指针或没有工具事件的定义是常态(没配 hooks 的
+    // 用户占多数),这时候干脆不设这两个回调——跟"没有 hooks 系统"时行为
+    // 完全一样。配了就全走 dispatcher:来源相加、信任审查、并发归并都在
+    // 那一层,这里只发事件、领决策。
+    const bool has_tool_hooks =
+        hook_dispatcher != nullptr && !hook_dispatcher->Empty() &&
+        (hook_dispatcher->HasHandlersFor(lubancode::hooks::HookEvent::PreToolUse) ||
+         hook_dispatcher->HasHandlersFor(lubancode::hooks::HookEvent::PostToolUse));
+    if (has_tool_hooks) {
+        callbacks.on_pre_tool_hook = [hook_dispatcher](const std::string& name,
                                                        const nlohmann::json& input) -> std::optional<std::string> {
-            const auto outcome = lubancode::tools::RunPreToolHooks(hooks_config, name, input);
-            if (outcome.intercepted) {
-                return outcome.block_message;
+            lubancode::hooks::HookPayload payload;
+            payload.event = lubancode::hooks::HookEvent::PreToolUse;
+            payload.fields["tool_name"] = name;
+            payload.fields["tool_input"] = input.is_null() ? nlohmann::json::object() : input;
+            payload.match_value = name;
+            const auto merged = hook_dispatcher->Emit(lubancode::hooks::HookEvent::PreToolUse, payload);
+            if (merged.permission == lubancode::hooks::HookEventResult::Permission::Deny) {
+                return "被 PreToolUse 钩子拦截: " + merged.permission_reason;
             }
             return std::nullopt;
         };
-        callbacks.on_post_tool_hook = [&hooks_config](const std::string& name, const nlohmann::json& input,
+        callbacks.on_post_tool_hook = [hook_dispatcher](const std::string& name, const nlohmann::json& input,
                                                         const lubancode::tools::Tool::Result& result) {
-            lubancode::tools::RunPostToolHooks(hooks_config, name, input, result);
+            lubancode::hooks::HookPayload payload;
+            payload.event = lubancode::hooks::HookEvent::PostToolUse;
+            payload.fields["tool_name"] = name;
+            payload.fields["tool_input"] = input.is_null() ? nlohmann::json::object() : input;
+            payload.fields["tool_response"] = result.content;
+            payload.fields["tool_response_text"] = result.content;  // legacy 环境变量走纯文本
+            payload.fields["tool_succeeded"] = !result.is_error;
+            payload.match_value = name;
+            hook_dispatcher->Emit(lubancode::hooks::HookEvent::PostToolUse, payload);
         };
     }
 
@@ -648,7 +667,7 @@ std::string ImageInputErrorText(const lubancode::cli::ImageInputError& error) {
 RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bool auto_confirm,
                        std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
                        lubancode::cli::ContextTracker& context_tracker, lubancode::tools::ToolRegistry& registry,
-                       const lubancode::config::HooksConfig& hooks_config, bool is_console,
+                       lubancode::hooks::HookDispatcher* hook_dispatcher, bool is_console,
                        std::vector<lubancode::cli::TranscriptItem>& transcript,
                        std::shared_ptr<lubancode::tools::TodoListState> todo_state,
                        std::atomic<bool>* transcript_expanded,
@@ -683,9 +702,17 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     // 管道/重定向(is_console 为假)和 plain 主题(theme.reset 空)全部
     // enabled=false,正文原样输出,一个字节不动。
     StreamBodyTracker body_tracker(theme, is_console && !theme.reset.empty());
+    // hooks 上下文:这一轮的 turn_id 换新(session_id 等会话字段保持会话层
+    // 设好的值),确认档可能被 Shift+Tab 切过,按当前值报。
+    if (hook_dispatcher != nullptr && !hook_dispatcher->Empty()) {
+        lubancode::hooks::HookContext turn_context = hook_dispatcher->context();
+        turn_context.turn_id = lubancode::hooks::HookDispatcher::NextHookRunId();
+        turn_context.permission_mode = lubancode::app::HookPermissionModeText();
+        hook_dispatcher->UpdateContext(std::move(turn_context));
+    }
     const lubancode::agent::Callbacks callbacks =
         BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker, registry,
-                        hooks_config, display, body_tracker, allow_commands, deny_commands, &cancel_flag,
+                        hook_dispatcher, display, body_tracker, allow_commands, deny_commands, &cancel_flag,
                         recorder);
 
     // markdown × M10:监听线程随时可能在流式正文当中插打 [已排队]/[已打断]
