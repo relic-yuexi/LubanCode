@@ -211,6 +211,55 @@ int FindFooterInputRow(int max_rows = 400) {
     return -1;
 }
 
+// 坞区计数:只数 composer 上横线之下的行——上横线之上出现的同名文本是
+// 有归属的正文(查看态 transcript、agent 工具条目、完成通知),不算残帧。
+int CountDockRowsWith(const std::string& needle, int rule_row) {
+    int count = 0;
+    for (int row = rule_row + 1; row < 400; ++row) {
+        if (ReadRow(row).find(needle) != std::string::npos) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// 坞区里最后一次出现某文本的行号(找不到 -1):"贴底"断言用。
+int FindLastDockRow(const std::string& needle, int rule_row) {
+    for (int row = 399; row > rule_row; --row) {
+        if (ReadRow(row).find(needle) != std::string::npos) {
+            return row;
+        }
+    }
+    return -1;
+}
+
+// 全缓冲区按结构认出的 composer 框数(上横线/'>' 空输入行/下横线/状态行
+// 成套):完成唤醒后旧底栏该已退场,只剩一副。输入行须为空——"分界线+
+// > 已提交正文 + 分界线"是历史回显,不是 composer,不误计。
+int CountVisibleComposers() {
+    int count = 0;
+    for (int r = 396; r >= 0; --r) {
+        const std::string input_text = ReadRow(r + 1);
+        if (IsRuleRow(r) && input_text == ">" && IsRuleRow(r + 2) && !IsRuleRow(r + 3)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// 等空闲 composer 真画出来(回合收口到下一次 ReadLine 之间有空窗,不等的
+// 话按结构找框会找不到、坞区计数会把滚屏里的旧账也数进去)。
+bool WaitForIdleComposer(int timeout_ms) {
+    const DWORD deadline = GetTickCount() + static_cast<DWORD>(timeout_ms);
+    while (GetTickCount() < deadline) {
+        if (FindFooterInputRow() > 0) {
+            return true;
+        }
+        Sleep(200);
+    }
+    return FindFooterInputRow() > 0;
+}
+
 // 导航文本(操作提示/代理行)绝不许出现在 composer 上横线之上。
 bool NoDockTextAboveComposer(int rule_row) {
     for (int r = 0; r < rule_row; ++r) {
@@ -335,6 +384,8 @@ std::vector<std::string> ToolUseTurn(const std::string& tool_id, const std::stri
 }
 
 const char* kTitle = "\xe9\xa1\xb9\xe7\x9b\xae\xe8\xae\xb0\xe5\xbf\x86\xe5\x8d\x87\xe7\xba\xa7\xe4\xb8\x80\xe6\x9c\x9f";  // 项目记忆升级一期
+const char* kBgTitle =
+    "\xe5\x90\x8e\xe5\x8f\xb0\xe6\x91\xb8\xe6\x8e\x92\xe4\xba\x8b\xe5\xae\x9e";  // 后台摸排事实
 const char* kPromptHead =
     "\xe4\xbd\xa0\xe5\x9c\xa8\xe4\xb8\x80\xe4\xb8\xaa C++ \xe9\xa1\xb9\xe7\x9b\xae\xe7\x9a\x84\xe9\x9a\x94"
     "\xe7\xa6\xbb";  // 你在一个 C++ 项目的隔离
@@ -359,10 +410,14 @@ int StartFakeAnthropicServer() {
     const int port = ntohs(bound.sin_port);
     ::listen(listener, 8);
 
-    // 剧本按连接次序派发:1 主(tool_use agent)-> 2 子(run_command 卡 ~7s)->
-    // 3 子(结论)-> 4 主(收尾)。之后再来连接一律给一句文本兜底。
+    // 剧本按请求内容派发(第二幕起后台线程与主回合抢连接,按连接次序会被
+    // 抢跑):看 user 消息/工具结果里的特征串决定回什么。
+    //   第一幕:主(tool_use agent 前台)-> 子(run_command 卡 ~7s)-> 子(结论)
+    //          -> 主(收尾)。
+    //   第二幕:主派后台代理 -> 主收口 -> 后台子(读文件)-> 后台子(结论,
+    //          压 3 秒让空闲 composer 先画出来)-> 完成唤醒的主(收口)。
     std::thread([listener]() {
-        int connection = 0;
+        int bg_sub_turn = 0;
         while (true) {
             sockaddr_in client{};
             int client_len = sizeof(client);
@@ -371,11 +426,75 @@ int StartFakeAnthropicServer() {
             if (client_fd == kBadSocket) {
                 return;
             }
-            DrainHttpRequest(client_fd);
-            ++connection;
-            Log("SERVER connection #" + std::to_string(connection));
-            switch (connection) {
-                case 1:
+            const std::string raw = DrainHttpRequest(client_fd);
+            const std::size_t body_at = raw.find("\r\n\r\n");
+            const std::string body = body_at == std::string::npos ? std::string() : raw.substr(body_at + 4);
+            Log("SERVER request body_bytes=" + std::to_string(body.size()));
+            const auto has = [&body](const char* needle) {
+                return body.find(needle) != std::string::npos;
+            };
+            // 子代理请求的 system 带专用 persona(SubAgentPersona),主回合
+            // 不带——凭这个把两条会话的请求分账,不被后台线程抢跑打乱。
+            const bool sub_agent_request = has("\xe8\x83\xbd\xe6\x90\x9c\xe7\xb4\xa2"
+                                               "\xe3\x80\x81\xe5\x88\x86\xe6\x9e\x90"
+                                               "\xe5\xb9\xb6\xe5\xae\x8c\xe6\x88\x90"
+                                               "\xe5\xa4\x9a\xe6\xad\xa5\xe4\xbb\xbb"
+                                               "\xe5\x8a\xa1");  // 能搜索、分析并完成多步任务
+            if (has("\xe5\x90\x8e\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86\xe6\x9c\x89\xe6\x96\xb0\xe7\xbb\x93\xe6\x9e\x9c")) {
+                // 完成唤醒后 RunPeerTurn 起的那一轮主请求。
+                RespondSse(client_fd, TextTurn("\xe6\x94\xb6\xe5\x88\xb0\xe5\x90\x8e\xe5\x8f\xb0"
+                                                   "\xe7\xbb\x93\xe6\x9e\x9c"));  // 收到后台结果
+            } else if (sub_agent_request && has(kPromptHead)) {
+                // 第一幕:前台子代理。第一轮给真工具(ping ~7 秒),拿到工具
+                // 结果后给结论。
+                if (body.find("Ping") != std::string::npos ||
+                    body.find("Pinging") != std::string::npos) {
+                    RespondSse(client_fd, TextTurn("\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86\xe5\xb9\xb2"
+                                                       "\xe5\xae\x8c\xe4\xba\x86\xef\xbc\x9a\xe6\xa3\x80"
+                                                       "\xe7\xb4\xa2\xe9\x98\x88\xe5\x80\xbc\xe5\x9b\x9e"
+                                                       "\xe5\xbd\x92\xe5\x85\xa8\xe7\xbb\xbf"));  // 子代理干完了:检索阈值回归全绿
+                } else {
+                    RespondSse(client_fd,
+                               ToolUseTurn("toolu_sub", "run_command",
+                                           "{\"command\":\"ping -n 8 127.0.0.1\",\"shell\":\"cmd\"}"));
+                }
+            } else if (sub_agent_request && has("\xe5\x90\x8e\xe5\x8f\xb0\xe6\x91\xb8\xe6\x8e\x92\xe4\xb8\x80\xe4\xbb\xbd")) {
+                // 第二幕:后台子代理自己的来回。第一轮给读文件,第二轮压 3 秒
+                // 给结论——空闲 composer 先画出来,完成唤醒那条路真被走到。
+                ++bg_sub_turn;
+                if (bg_sub_turn == 1) {
+                    RespondSse(client_fd,
+                               ToolUseTurn("toolu_bg_sub", "read_file",
+                                           "{\"path\":\"C:/Windows/win.ini\"}"));
+                } else {
+                    Sleep(3000);
+                    RespondSse(client_fd, TextTurn("\xe5\x90\x8e\xe5\x8f\xb0\xe6\x91\xb8\xe6\x8e\x92"
+                                                       "\xe5\xae\x8c\xe6\xaf\x95\xef\xbc\x9a\xe4\xba\x8b"
+                                                       "\xe5\xae\x9e\xe6\xb8\x85\xe5\x8d\x95\xe5\x9c\xa8"
+                                                       "\xe6\x89\x8b"));  // 后台摸排完毕:事实清单在手
+                }
+            } else if (has("\xe5\x86\x8d\xe6\xb4\xbe\xe4\xb8\x80\xe5\x8f\xaa\xe5\x90\x8e\xe5\x8f\xb0")) {
+                // 第二幕:主回合。没派过后台(工具结果带"已启动")就派,派过
+                // 收口。
+                if (has("\xe5\xb7\xb2\xe5\x90\xaf\xe5\x8a\xa8")) {
+                    RespondSse(client_fd, TextTurn("\xe5\xb7\xb2\xe6\xb4\xbe\xe5\x87\xba\xe5\x90\x8e"
+                                                       "\xe5\x8f\xb0\xe4\xbb\xa3\xe7\x90\x86"));  // 已派出后台代理
+                } else {
+                    RespondSse(client_fd,
+                               ToolUseTurn("toolu_bg", "agent",
+                                           "{\"title\":\"" + std::string(kBgTitle) +
+                                               "\",\"prompt\":\"\xe5\x90\x8e\xe5\x8f\xb0\xe6\x91\xb8"
+                                               "\xe6\x8e\x92\xe4\xb8\x80\xe4\xbb\xbd\xe4\xba\x8b"
+                                               "\xe5\xae\x9e\xe6\xb8\x85\xe5\x8d\x95\",\"execution_mode\":"
+                                               "\"background\"}"));
+                }
+            } else if (has("\xe6\xb4\xbe\xe4\xb8\x80\xe5\x8f\xaa\xe5\x89\x8d\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86")) {
+                // 第一幕:主回合。收到子代理结论(工具结果带"检索阈值回归
+                // 全绿")就收尾,否则派前台子代理。
+                if (has("\xe6\xa3\x80\xe7\xb4\xa2\xe9\x98\x88\xe5\x80\xbc\xe5\x9b\x9e\xe5\xbd\x92\xe5\x85\xa8\xe7\xbb\xbf")) {
+                    RespondSse(client_fd, TextTurn("\xe4\xb8\xbb\xe4\xbb\xa3\xe7\x90\x86\xe6\xb1\x87"
+                                                       "\xe6\x80\xbb\xe5\xae\x8c\xe6\xaf\x95"));  // 主代理汇总完毕
+                } else {
                     RespondSse(client_fd,
                                ToolUseTurn("toolu_agent", "agent",
                                            "{\"title\":\"" + std::string(kTitle) + "\",\"prompt\":\"" +
@@ -386,27 +505,9 @@ int StartFakeAnthropicServer() {
                                                "\xe7\xba\xa7\xef\xbc\x8c\xe8\xbf\x99\xe6\xae\xb5\xe8\xaf\xb4"
                                                "\xe6\x98\x8e\xe5\xbe\x88\xe9\x95\xbf\xe5\xbe\x88\xe9\x95\xbf"
                                                "\xe3\x80\x82\",\"run_in_background\":false}"));
-                    break;
-                case 2:
-                    // 真工具、真耗时:ping -n 8 约 7 秒,坞的 Running 灯有
-                    // 东西可画;随后子代理带着工具结果回来。
-                    RespondSse(client_fd,
-                               ToolUseTurn("toolu_sub", "run_command",
-                                           "{\"command\":\"ping -n 8 127.0.0.1\",\"shell\":\"cmd\"}"));
-                    break;
-                case 3:
-                    RespondSse(client_fd, TextTurn("\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86\xe5\xb9\xb2"
-                                                   "\xe5\xae\x8c\xe4\xba\x86\xef\xbc\x9a\xe6\xa3\x80"
-                                                   "\xe7\xb4\xa2\xe9\x98\x88\xe5\x80\xbc\xe5\x9b\x9e"
-                                                   "\xe5\xbd\x92\xe5\x85\xa8\xe7\xbb\xbf"));  // 子代理干完了:检索阈值回归全绿
-                    break;
-                case 4:
-                    RespondSse(client_fd, TextTurn("\xe4\xb8\xbb\xe4\xbb\xa3\xe7\x90\x86\xe6\xb1\x87"
-                                                   "\xe6\x80\xbb\xe5\xae\x8c\xe6\xaf\x95"));  // 主代理汇总完毕
-                    break;
-                default:
-                    RespondSse(client_fd, TextTurn("ok"));
-                    break;
+                }
+            } else {
+                RespondSse(client_fd, TextTurn("ok"));
             }
             closesocket(client_fd);
         }
@@ -513,7 +614,26 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
     Check(rule_row > 0, "流式:composer 上横线定位到");
-    Check(title_row >= 0 && title_row > rule_row + 3, "流式:title 行在状态栏之下(导航坞贴底)");
+    // 位置断言同样不是原子快照:footer 重画挪位时首判可能失准,隔 300ms
+    // 把两个行号一起重测一次再定罪。
+    {
+        bool below = title_row >= 0 && title_row > rule_row + 3;
+        if (!below) {
+            Sleep(300);
+            title_row = FindLastRow(kTitle);
+            rule_row = -1;
+            for (int r = 398; r >= 0; --r) {
+                const std::string input_text = ReadRow(r + 1);
+                if (IsRuleRow(r) && !input_text.empty() && input_text[0] == '>' && IsRuleRow(r + 2) &&
+                    !IsRuleRow(r + 3)) {
+                    rule_row = r;
+                    break;
+                }
+            }
+            below = title_row >= 0 && rule_row > 0 && title_row > rule_row + 3;
+        }
+        Check(below, "流式:title 行在状态栏之下(导航坞贴底)");
+    }
     Check(NoDockTextAboveComposer(rule_row), "流式:composer 上横线之上没有任何导航文本");
     Check(FindLastRow(kPromptHead) < 0, "流式:prompt 开头整屏不出现(不冒充标题)");
     Check(FindLastRow("ctrl+o \xe5\xb1\x95\xe5\xbc\x80\xe6\x98\x8e\xe7\xbb\x86") < 0,
@@ -524,7 +644,17 @@ int wmain(int argc, wchar_t** argv) {
     Check(CountMainRows() == 1, "流式:main 行恰好一份");
     for (int sample = 0; sample < 3; ++sample) {
         Sleep(1500);  // 耗时 ~1s 一跳,采样跨多拍
-        Check(CountRowsWith("\xe2\x86\x91/\xe2\x86\x93") == 1,
+        // 逐行刮屏不是原子快照,footer 重画可能恰好落在两行读数之间——
+        // 首数不过时隔 300ms 复读一次,两次都不过才算真残帧。
+        const auto stable_count = [](const std::string& needle) {
+            const int first = CountRowsWith(needle);
+            if (first == 1 || first == 0) {
+                return first;
+            }
+            Sleep(300);
+            return CountRowsWith(needle);
+        };
+        Check(stable_count("\xe2\x86\x91/\xe2\x86\x93") == 1,
               "流式:耗时/token 刷新后操作提示仍恰好一份(第 " + std::to_string(sample + 1) + " 次采样)");
         Check(CountRowsWith("general-purpose") <= 1,
               "流式:坞行不随刷新复制(第 " + std::to_string(sample + 1) + " 次采样)");
@@ -536,11 +666,11 @@ int wmain(int argc, wchar_t** argv) {
     Check(WaitForText("\xe2\x9d\xaf", 3000, &marker_row), "流式:空输入按上键,焦点标记出现");
     Check(marker_row >= 0 && marker_row > rule_row + 3, "流式:焦点标记在导航坞里(状态栏之下)");
 
-    // ---- Enter 进详情:上横线右端挂 title,完整 prompt 只在详情里;
+    // ---- Enter 真切会话:上方视口换源成该代理 transcript,坞里无长正文;
     //      Enter 被导航消费,不顺手把 composer 的字提交落队 ----
     SendKey(VK_RETURN, L'\r', 0);
-    Check(WaitForText("\xe4\xbb\xbb\xe5\x8a\xa1\xe6\xa0\x87\xe9\xa2\x98", 3000),
-          "流式:Enter 展开,详情出现\"任务标题\"");  // 任务标题
+    Check(WaitForText("\xe6\x9f\xa5\xe7\x9c\x8b general-purpose", 3000),
+          "流式:Enter 后上方正文区出现该代理的查看头行");  // 查看 general-purpose
     {
         int rule_with_tag = -1;
         for (int r = 398; r >= 0; --r) {
@@ -552,8 +682,11 @@ int wmain(int argc, wchar_t** argv) {
             }
         }
         Check(rule_with_tag > 0 && ReadRow(rule_with_tag).find(kTitle) != std::string::npos,
-              "流式:详情态输入框上横线右端挂 title");
-        Check(FindLastRow(kPromptHead) >= 0, "流式:详情里能看到完整 prompt(只有详情能看)");
+              "流式:查看态输入框上横线右端挂 title");
+        Check(FindLastRow(kPromptHead) >= 0, "流式:查看视口里能看到完整 prompt(只有视口能看)");
+        Check(FindLastRow(kPromptHead) < rule_with_tag, "流式:完整 prompt 在视口里,不在导航坞");
+        Check(FindLastRow("\xe4\xbb\xbb\xe5\x8a\xa1\xe8\xaf\xb4\xe6\x98\x8e") < rule_with_tag,
+              "流式:'任务说明'只在视口,不向坞下方生长");  // 任务说明
     }
 
     // ---- Ctrl+C 有字先清字:敲半句,Ctrl+C 只清草稿,不打断、不退出 ----
@@ -570,14 +703,31 @@ int wmain(int argc, wchar_t** argv) {
     GetExitCodeProcess(pi.hProcess, &alive);
     Check(alive == STILL_ACTIVE, "流式 Ctrl+C 清字:进程仍活(没进双击退出)");
 
-    // ---- Esc 逐层退:先详情,再焦点;两下都不打断整轮 ----
+    // ---- Esc 逐层退:先退查看态(标签摘掉),再退焦点;两下都不打断整轮 ----
     SendKey(VK_ESCAPE, 0, 0);
-    Check(WaitForTextGone("\xe4\xbb\xbb\xe5\x8a\xa1\xe6\xa0\x87\xe9\xa2\x98", 3000), "流式:Esc 先退详情");
+    {
+        // 查看态退掉的标志:上横线右端的 title 标签摘掉(视口里铺过的
+        // transcript 行留在滚屏,那是有归属的正文,不算残帧)。
+        Sleep(600);
+        int rule_after_view = -1;
+        for (int r = 398; r >= 0; --r) {
+            const std::string input_text = ReadRow(r + 1);
+            if (IsRuleRow(r) && !input_text.empty() && input_text[0] == '>' && IsRuleRow(r + 2) &&
+                !IsRuleRow(r + 3)) {
+                rule_after_view = r;
+                break;
+            }
+        }
+        Check(rule_after_view > 0 && FindLastRow(kTitle) >= 0 &&
+                  ReadRow(rule_after_view).find(kTitle) == std::string::npos,
+              "流式:Esc 先退查看态(上横线 title 标签摘掉)");
+    }
     SendKey(VK_ESCAPE, 0, 0);
     Check(WaitForTextGone("\xe2\x9d\xaf", 3000), "流式:再 Esc 退代理焦点");
     Check(FindLastRow(kTitle) >= 0 && FindLastRow("\xe5\xb7\xb2\xe6\x89\x93\xe6\x96\xad") < 0,
           "流式:两下 Esc 都没有打断整轮(坞还在)");
-    Check(CountRowsWith("general-purpose") <= 1, "流式:退详情后坞行至多一份(标签已摘)");
+    Check(CountDockRowsWith("general-purpose", FindFooterInputRow() - 1) <= 1,
+          "流式:退查看态后坞行至多一份(标签已摘)");
 
     // ---- 放开子代理:ping 跑完,Running 原地变完成,回合收场回空闲 ----
     // 注:子代理结论文本只在工具结果里,屏上摘要行是"子代理 N 轮 · M 次工具";
@@ -588,12 +738,69 @@ int wmain(int argc, wchar_t** argv) {
     Check(WaitForText("\xe5\xae\x8c\xe6\x88\x90(", 15000), "收尾:坞 Running 原地变完成");
     // 回到空闲后:坞还挂着这条任务的终态,title 不跳、不重复、仍在下方。
     Check(WaitForText(kTitle, 10000), "空闲:坞保住终态任务的 title");
-    Check(CountRowsWith("general-purpose") == 1, "空闲:坞行恰好一份(残帧归零)");
-    Check(CountMainRows() == 1, "空闲:main 恰好一份");
+    Check(WaitForIdleComposer(15000), "空闲:composer 真画出来再数账");
+    Sleep(700);  // 等收尾的最后一帧整帧画稳(耗时/token 跳动的那一拍)
     {
-        const int idle_input = FindFooterInputRow();
-        Check(idle_input > 0 && FindLastRow(kTitle) > idle_input + 3, "空闲:终态 title 仍在状态栏之下贴底");
+        const int idle_rule = FindFooterInputRow() - 1;
+        Check(CountDockRowsWith("general-purpose", idle_rule) == 1, "空闲:坞行恰好一份(残帧归零)");
+        Check(CountDockRowsWith("\xe2\x97\x8f main", idle_rule) == 1, "空闲:main 恰好一份");
+        Check(FindLastDockRow(kTitle, idle_rule) > idle_rule + 3, "空闲:终态 title 仍在状态栏之下贴底");
     }
+
+    // ---- 第二幕:后台子代理在空闲时完成 → 旧底栏正式退场,通知归 transcript ----
+    SendText("\xe5\x86\x8d\xe6\xb4\xbe\xe4\xb8\x80\xe5\x8f\xaa\xe5\x90\x8e\xe5\x8f\xb0\xe4\xbb\xa3"
+             "\xe7\x90\x86\xe5\x8e\xbb\xe6\x91\xb8\xe6\x8e\x92");  // 再派一只后台代理去摸排
+    SendKey(VK_RETURN, L'\r', 0);
+    // 主回合收口后回空闲:坞里挂着第二只任务(运行中),空闲 composer 画出。
+    Check(WaitForText(kBgTitle, 15000), "后台幕:空闲后坞里出现第二只任务(运行中)");
+    Check(WaitForIdleComposer(15000), "后台幕:空闲 composer 画出");
+    Sleep(700);  // 等末帧画稳
+    Check(CountDockRowsWith("general-purpose", FindFooterInputRow() - 1) == 2,
+          "后台幕:坞里两只代理各一行");
+    {
+        bool bg_docked = false;
+        for (int attempt = 0; attempt < 3 && !bg_docked; ++attempt) {
+            const int idle_input2 = FindFooterInputRow();
+            bg_docked = idle_input2 > 0 && FindLastDockRow(kBgTitle, idle_input2 - 1) > idle_input2 + 3;
+            if (!bg_docked) {
+                Sleep(300);  // 重画挪位的空窗:重测一次再定罪
+            }
+        }
+        Check(bg_docked, "后台幕:第二只任务在状态栏之下贴底");
+    }
+    // 等后台子代理两轮来回(第二轮压 3 秒)触发空闲唤醒:旧 composer 整帧
+    // 退场,通知一行进 transcript,随后主回合收口回空闲。
+    Check(WaitForText("\xe6\x94\xb6\xe5\x88\xb0\xe5\x90\x8e\xe5\x8f\xb0\xe7\xbb\x93\xe6\x9e\x9c", 60000),
+          "后台幕:完成唤醒后的主回合收口");  // 收到后台结果
+    {
+        const DWORD idle_deadline = GetTickCount() + 30000;
+        bool idle_back = false;
+        while (GetTickCount() < idle_deadline) {
+            if (FindFooterInputRow() > 0) {
+                idle_back = true;
+                break;
+            }
+            Sleep(200);
+        }
+        Check(idle_back, "后台幕:收口后回到空闲 composer");
+    }
+    Sleep(800);  // 等末帧画稳
+    // 唤醒前后整个可视区及滚屏尾部:旧输入框/状态栏/导航坞不留副本——
+    // 旧帧在唤醒路被硬清,缓冲区里 composer 框结构只此一份。
+    Check(CountVisibleComposers() == 1,
+          "后台完成唤醒:composer 框全缓冲区恰好一份(旧底栏已退场)");
+    Check(CountMainRows() == 1, "后台完成唤醒:main 导航行恰好一份");
+    // 完成通知有且只有一条,归 main(在 transcript 区,composer 上横线之上)。
+    Check(CountRowsWith("\xe5\x90\x8e\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86\xe5\xae\x8c\xe6\x88\x90") == 1,
+          "后台完成唤醒:完成通知恰好一条");  // 后台子代理完成
+    {
+        const int notice_row = FindLastRow("\xe5\x90\x8e\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86"
+                                           "\xe5\xae\x8c\xe6\x88\x90");
+        const int rule_end = FindFooterInputRow() - 1;
+        Check(notice_row >= 0 && notice_row < rule_end, "后台完成唤醒:通知在 transcript 区(chrome 之上)");
+    }
+    Check(CountDockRowsWith(kBgTitle, FindFooterInputRow() - 1) == 1,
+          "后台完成唤醒:第二只任务的导航行恰好一份(通知/工具条目归 transcript)");
 
     // ---- 排查/留档:把当前屏面非空行倒进报告(不判定,只 INFO) ----
     {
