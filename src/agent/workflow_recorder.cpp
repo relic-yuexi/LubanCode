@@ -475,7 +475,9 @@ std::expected<WorkflowRecorder, std::string> WorkflowRecorder::Start(const fs::p
     if (recorder.broken_) {
         return std::unexpected("写录制事件失败: " + PathToUtf8(dir / "events.jsonl"));
     }
-    return std::move(recorder);
+    // 不写 std::move:C++23 下按名返回局部对象构造 expected 本就走隐式
+    // 移动,加了反而吃 GCC -Wredundant-move。
+    return recorder;
 }
 
 void WorkflowRecorder::AppendEvent(const char* source, const char* type, nlohmann::json data) {

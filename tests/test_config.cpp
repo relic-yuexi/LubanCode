@@ -2173,12 +2173,12 @@ TEST_CASE("UpdateProvidersInConfigFile: native_web_search=true 落盘,回读原�
 // ---------------------------------------------------------------------------
 
 TEST_CASE("ParseBoolToggle: on/off、true/false、1/0 都认,大小写不敏感") {
-    for (const std::string& truthy : {"on", "On", "ON", "true", "True", "1"}) {
+    for (const char* const truthy : {"on", "On", "ON", "true", "True", "1"}) {
         const auto parsed = config::ParseBoolToggle(truthy);
         REQUIRE(parsed.has_value());
         CHECK(*parsed);
     }
-    for (const std::string& falsy : {"off", "Off", "OFF", "false", "False", "0"}) {
+    for (const char* const falsy : {"off", "Off", "OFF", "false", "False", "0"}) {
         const auto parsed = config::ParseBoolToggle(falsy);
         REQUIRE(parsed.has_value());
         CHECK_FALSE(*parsed);

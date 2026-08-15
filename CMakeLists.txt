@@ -25,7 +25,7 @@ if(MSVC)
   # 链接时会报 LNK2038(RuntimeLibrary 不匹配)。
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 else()
-  add_compile_options(-Wall -Wextra)
+  add_compile_options(-Wall -Wextra -Wno-missing-field-initializers)
 endif()
 
 # ---------------------------------------------------------------------------

@@ -870,7 +870,10 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         }
         if (!panel_notice.empty()) {
             if (std::chrono::steady_clock::now() < panel_notice_until) {
-                layout.lines.insert(layout.lines.begin() + 1, panel_notice);
+                // move 版 insert:提示行打完就不再用 panel_notice(走 else 分支
+                // 才 clear),顺带绕开 GCC 13 对 const& 插入路径的
+                // -Warray-bounds 误报(把内联后的栈上 string 认成地址零)。
+                layout.lines.insert(layout.lines.begin() + 1, std::move(panel_notice));
             } else {
                 panel_notice.clear();
             }
