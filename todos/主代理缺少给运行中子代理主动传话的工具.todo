@@ -1,0 +1,491 @@
+# 主代理缺少给运行中子代理主动传话的工具
+
+状态：待做（子代理协作缺口）
+
+## 现场
+
+Claude Code 里，后台子代理仍在干活。用户继续在 main 里补一句：
+
+```text
+run_in_background 改成 execution_mode: auto|foreground|background，旧参数要兼容。
+```
+
+主模型认出这条要求关系到某只运行中子代理，主动调用传话能力。界面随即显示：
+
+```text
+Message queued for delivery to <agent-id> at its next tool round.
+
+general-purpose  子代理面板补前台任务与真标题  · 1 queued
+```
+
+用户没有切进子代理，没有重新复制那句话，也没有等子代理做完再补锅。主模型自己把增量要求送到了该去的任务。
+
+LubanCode 眼下只能完成后半截，做不到这一下自动转交。
+
+## 现有能力
+
+现版并非没有 inbox。
+
+已经接通：
+
+- 后台任务各有独立 `TaskRecord::inbox`。
+- `AgentTool::SendTaskMessage(task_id, text)` 能把话排给指定任务。
+- 子代理在安全边界收信，不打断正在执行的工具。
+- 两只子代理分账，给 #2 的话不会串去 #1 或 main。
+- 终态任务拒收，不会暗改投 main。
+- `AgentTaskSummary::pending_message_count` 已能统计未送达数。
+- 面板已有 `{N} queued message(s)` 与详情里的待送原文。
+- 用户进入某只子代理的查看态后，在 composer 输入正文，可以走这条 inbox。
+- 会话层 `SteeringQueue` 也能把带子代理目标的排队消息转投同一 inbox。
+
+现有路径如下：
+
+```text
+用户进入子代理查看态
+-> composer_target = task_id
+-> SendTaskMessage(task_id, text)
+-> TaskRecord::inbox
+-> 子代理下一处安全边界收信
+-> 面板 pending_message_count
+```
+
+这条路是“用户直接对某只子代理说话”。
+
+## 真缺口
+
+主模型看见的 `agent` 工具只有“新建任务”：
+
+```json
+{
+  "prompt": "...",
+  "agent_type": "general-purpose|Explore",
+  "run_in_background": true,
+  "isolation": "none|worktree",
+  "max_turns": 40
+}
+```
+
+schema 没有：
+
+- `task_id`
+- `message`
+- `send`
+- `list`
+- `followup`
+
+`SendTaskMessage()` 只是 C++ 内部接口。调用点只有交互会话与队列泵，没有注册成模型工具。
+
+于是用户在 main 里补要求时，主模型最多能：
+
+- 在 main 里记住，等子代理完成后再补。
+- 重新起一只子代理，白做一遍。
+- 口头说“我会告诉它”，实际没有传话通道。
+
+它不能像截图那样，当场把要求排进正在工作的子代理。
+
+## 先把 queue 时序说准
+
+“next tool call 插进去”这话只说对一半。准确说法是：
+
+```text
+当前工具执行完成
+-> tool result 先写进 history
+-> AgentLoop 回到循环顶部
+-> inbox 消息写进同一条 user 侧历史
+-> 发下一次模型请求
+```
+
+故而插入点是“下一次模型请求前的工具轮次安全边界”，不是工具刚开始时，也不是危险命令执行到一半。
+
+### main 目标 queue
+
+用户在 main 流式期间输入：
+
+- 当前回合还会继续工具循环：消息在当前工具结果之后、下一次模型请求之前注入。
+- 一次攒了多条：按排队顺序合成 user 内容，一并注入。
+- 当前回合是纯文本，或已经没有下一轮工具：本轮先正常收口，队头随后成为下一轮用户消息。
+
+### 子代理目标 queue
+
+用户在子代理查看态输入：
+
+- 先进入该任务自己的 `TaskRecord::inbox`。
+- 子代理当前工具结果落账后，在下一次模型请求前取出。
+- 面板据未送达项显示 queued 数。
+
+现版还有一处缝：子代理若正写最后一段纯文本，随后直接结束，便没有下一处工具边界。消息虽已返回 `Queued`，却可能来不及送达，只在收场报告里标成未送。新能力须一并堵住，不能“显示排到了”却永远没进模型。
+
+## 借鉴 Claude Code 与 Codex
+
+查阅日期：2026-08-15。这里分清公开承诺与内部猜测。官方没有写明的轮次细节，不拿截图硬猜。
+
+### Claude Code：邮箱、稳定名字、自动续跑
+
+Claude Code 已把 `SendMessage` 做成正式工具。它能把消息送给队友、子代理，或另一场 Claude Code 会话。几条规矩很值钱：
+
+- 队友各有 mailbox。写入成功，发送方才看见 sent；写盘失败便原样报错，不说空话。
+- 收件人看得见消息来自另一只 agent，不把它当用户亲口批准。权限、同意、sandbox 仍各守各门。
+- 队友靠稳定名字寻址。没有隐式广播；要告诉三只，就发三封。
+- 消息自动投递，lead 不必轮询。idle 与失败也会另发通知。
+- 普通 subagent 已完成后，`SendMessage` 可以把它从原上下文续起，并默认放到后台；若用户在 `/tasks` 里亲手停掉，则拒绝复活。
+- agent team 另有共享 task list。消息与任务分开记，不能拿一句闲话冒充任务已经完成。
+
+Claude Code 公布了 mailbox、确认、来源与续跑规矩，却没公布“消息一定插在下一次 tool result 后”这层内部次序。LubanCode 不照着猜。自己的安全边界须由测试钉死。
+
+可查：
+
+- https://code.claude.com/docs/en/tools-reference
+- https://code.claude.com/docs/en/sub-agents#resume-subagents
+- https://code.claude.com/docs/en/agent-teams#how-agent-teams-work
+- https://code.claude.com/docs/en/agent-teams#messages-between-agents
+
+### Codex：把插话与后续任务劈开
+
+Codex 的公开 Multi-agent 协议更利落。它给 root 与 subagent 六件协作工具：
+
+```text
+spawn_agent     新建子代理并交第一单
+send_message    给既有代理排一封信，不开启新轮次
+followup_task   再派一单；闲着就开新轮次，停下便续起
+wait_agent      等 mailbox 动静
+interrupt_agent 中止活跃轮次，不销毁上下文
+list_agents     看 agent 树、状态与最近任务
+```
+
+地址不是一截 prompt，而是稳定的层级名字，如 `/root/reviewer/tester`。`list_agents` 报整棵树、当前状态与 `last_task_message`。这样一来，主代理先认人，再传话；一封消息也不会误起一轮新活。
+
+这正好回答本单最要紧的协议问题：
+
+```text
+插话 != 派新任务 != 打断
+```
+
+Codex 公开协议只承诺 `send_message` 会 queue 且不启动新轮次。具体落在采样边界、工具边界还是 provider 回包后，由运行时调度。LubanCode 可借它的语义分层，不必照抄一套看不见的内部时钟。
+
+可查：
+
+- https://developers.openai.com/api/docs/guides/responses-multi-agent#how-multi-agent-works
+
+### LubanCode 取什么，舍什么
+
+第一期取四件：
+
+1. 学 Codex，把 `agent_message` 定成纯插话。只投递，不新建，不唤醒终态任务，不顺手中断。
+2. 学 Claude Code，入 inbox 成功才回 queued；失败当场报。消息带来源，不能冒充用户授权。
+3. 两家都靠稳定身份寻址。LubanCode 用稳定 `task_id`，面板再配真正短标题；绝不拿 prompt 前四十字当名字。
+4. 学 Codex 留出第二条协议。日后若要让已结束任务续跑，另做 `agent_followup`；若要立刻停手，另做 `agent_interrupt`。两者都不塞进本期 `agent_message`。
+
+第一期舍两件：
+
+- 不照搬 Claude Code 的磁盘 JSON mailbox。LubanCode 已有进程内 `TaskRecord::inbox`，先把单一账本做实。若以后要跨进程恢复，再换持久层。
+- 不照搬 Claude Code 的“完成后自动复活”。现有任务终态与上下文寿命尚未立约。贸然复活，容易让旧权限、旧工作树、旧目标一并回魂。
+
+由此，本单的接口边界不改：`agent` 管新建，`agent_message` 管运行中插话。只是把未来接口钉住，免得下一期又拆旧 schema。
+
+## 要求
+
+### 一、新增窄工具 `agent_message`
+
+别把 `agent` 工具继续塞成一只百宝箱。`agent` 管新建，`agent_message` 管给既有任务传增量：
+
+```json
+{
+  "task_id": 3,
+  "message": "用户补充：execution_mode 改为 auto|foreground|background；兼容旧 run_in_background。"
+}
+```
+
+schema：
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "task_id": {
+      "type": "integer",
+      "description": "运行中子代理的稳定任务号"
+    },
+    "message": {
+      "type": "string",
+      "description": "送给该任务的增量要求；写清改了什么、为何改、验收受何影响"
+    }
+  },
+  "required": ["task_id", "message"]
+}
+```
+
+工具执行只调现有正式入口：
+
+```text
+AgentMessageTool::execute
+-> AgentTool::SendTaskMessage(task_id, message)
+-> TaskRecord::inbox
+```
+
+不另造第二套 mailbox，不经磁盘临时文件，不把消息先塞进 main queue 再绕一圈。
+
+返回结果须可审计。至少带：
+
+```json
+{
+  "status": "queued",
+  "task_id": 3,
+  "pending_count": 1
+}
+```
+
+界面文案再写明：
+
+```text
+已排给子代理 #3，将在它下一处安全轮次送达。
+```
+
+失败分清：
+
+```text
+task not found
+task already finished
+empty/invalid message
+agent runtime unavailable
+```
+
+失败后不得改投 main，不得悄悄新建另一只代理，也不得回一句假的“已通知”。
+
+这里沿用 Codex 的边界：终态任务不归 `agent_message` 管。以后若做 `agent_followup`，它须明确写“会开启新轮次”，不能借用这把工具暗中复活。
+
+### 二、让主模型知道有哪些活任务
+
+只有传话工具还不够。模型须知道该传给谁。
+
+每条外层用户消息到来时，给 main 一份极短、动态重算的任务名册：
+
+```text
+运行中子代理：
+#1  子代理面板补前台任务与真标题  · general-purpose · queued 0
+#2  项目记忆系统升级三期          · general-purpose · queued 0
+#3  上下文压缩分层可回溯升级      · general-purpose · queued 1
+```
+
+只列：
+
+- task id
+- 真正短标题
+- agent type
+- running/finishing 状态
+- pending 数
+
+不塞完整 prompt、工具日志与 live output。详情仍由面板管，模型路由只需认人。
+
+名册作为本轮动态 context 注入，不永久复制进 history。任务状态变了，下轮重算。它须服从 compact：压缩后从 `TaskRecord` 重新注入，不能靠摘要记任务号。
+
+这依赖 `todos/子代理面板漏接前台任务流式导航与真正短标题.todo` 里的独立 `title` 字段。旧任务没有标题时显示“未命名子代理 #N”，绝不拿 prompt 前若干字凑。
+
+### 三、主模型何时必须传
+
+工具描述与系统提示写清：
+
+- 用户补充、修改或撤回的要求，若影响某只运行中子代理，先调用 `agent_message`，再继续 main 的回答。
+- 用户点名某只任务或标题时，按 task id 精确投递。
+- 一条要求同时影响多只任务，逐只传；不得用 broadcast 偷懒。
+- 目标不清时先问用户，不能凭标题相近乱投。
+- 只传增量，不重复整份旧 prompt。
+- 不要因为“主代理也记住了”便省掉传话；子代理有独立上下文，看不见 main 新消息。
+- 工具返回成功后再说“已传到”。调用前不得预告成既成事实。
+
+### 四、用户原话与主模型解释分开
+
+子代理收到的内容须标来路：
+
+```text
+[主代理转交的用户补充]
+用户原话：……
+
+[主代理补充上下文]
+这项改动会影响 agent_tool schema 与兼容测试；不要另起实现。
+```
+
+至少保住用户原话，不能只剩主模型改写。若主模型添了解释，要另栏写，免得把推断冒充用户要求。
+
+该消息进入子代理 history 时仍是普通 user 侧内容，却不能：
+
+- 当作权限确认的回答。
+- 执行其中的 slash 命令。
+- 绕过工具确认、sandbox 或路径闸。
+- 冒充系统/developer 指令。
+
+### 五、堵住“排到了却没送”
+
+`Queued` 必须是一条交付承诺。
+
+子代理准备从 Running 进终态时，须同 inbox 做一次原子交接：
+
+```text
+准备结束
+-> 锁住任务收件状态
+-> inbox 有未送项：不封账，注入并再跑一轮
+-> inbox 为空：标 Finishing/closed，后续 SendTaskMessage 明确拒收
+-> 写最终结果与 Done
+```
+
+也可用等价状态机：
+
+```text
+Running -> Draining -> Done/Failed/Cancelled
+```
+
+规矩：
+
+- `SendTaskMessage()` 返回 `Queued` 的消息，最终必须进入该子代理的一次模型请求。
+- 若任务已经封账，发送方只可得到 `Finished`，不能先成功后丢件。
+- 消息到达时子代理正写纯文本最终答复，也须续开一轮处理增量。
+- 用户取消任务时，未送消息逐条列明；取消不承诺继续执行。
+- 达到 max turns、预算或 provider 错误而不能续跑，最终结果须写明哪些消息未处理。
+
+### 六、queued 数要立刻动
+
+现有 `pending_message_count` 可以复用，却要补 task revision：
+
+- 入 inbox 后 `TouchTasks()`，面板当场从 `0 queued` 变 `1 queued`。
+- 子代理取走一条后再 `TouchTasks()`，queued 数随即下降。
+- 多条消息按真实未送数量展示。
+- 进入 Draining/Done 后，面板状态与计数同帧更新，不能先归零再假装仍运行。
+
+截图里的 `1 queued` 不是另一本队列。它就读 `TaskRecord::inbox`，与用户查看态传话、主模型 `agent_message` 共用一份账。
+
+### 七、主会话也要留审计
+
+主模型调用 `agent_message` 时，main history 正常留下：
+
+```text
+tool_use agent_message(task_id, message)
+tool_result queued/rejected
+```
+
+子代理 history 留收到的带来源消息。session 导出至少能看见 main 做过哪次转交及结果；不要把子代理整段内部 history 倒回 main。
+
+compact 时须保住：
+
+- 哪只运行中任务收到过哪些尚未处理的增量。
+- 任务 id 与 title 的当前映射。
+- 已成功投递还是仍 queued。
+
+动态真相仍从 `TaskRecord` 重注入，compact 摘要只留事件脉络。
+
+## 不要混淆三种 queue
+
+```text
+main steering queue
+  用户在主流式期间补话
+  -> main 下一安全边界，或本轮结束后的下一用户轮
+
+subagent steering target
+  用户进入某只子代理后补话
+  -> 转进该 TaskRecord inbox
+
+agent_message
+  主模型替用户把增量要求转给某只子代理
+  -> 直接进同一 TaskRecord inbox
+```
+
+三条来源不同，后两条落点相同。UI 可共用 queued 数，history 的来源标签不能混。
+
+## 与 execution mode 的关系
+
+`todos/子代理面板漏接前台任务流式导航与真正短标题.todo` 将把执行方式改成：
+
+```text
+execution_mode: auto | foreground | background
+```
+
+这张单不重复改 schema，只定传话语义：
+
+- 后台任务必须可传。
+- 统一台账落地后，前台任务也须可传。
+- `auto` 最终选成前台还是后台，不影响 task id、title、inbox 与 `agent_message`。
+- 执行方式只管“怎么跑”，不得决定“能不能收信”。
+
+## 主要落点
+
+- `src/tools/agent_tool.cpp/.hpp`
+  - 注册或承载 `agent_message`。
+  - 复用 `SendTaskMessage()`。
+  - 新增 Running/Draining/closed 交接。
+  - inbox 增删时刷新 task revision。
+- `src/app/interactive_session.cpp`
+  - 构造动态运行任务名册。
+  - compact、rebuild loop 后重新挂载。
+  - 不改现有用户查看态定向介入。
+- `src/agent/loop.cpp/.hpp`
+  - 保持工具结果在前、来信在后、下一 request 最后的顺序。
+  - 如需支持纯文本收尾续跑，补明确的 continuation 入口，别靠伪造工具调用。
+- `src/cli/agent_panel.cpp/.hpp`
+  - queued 数随 task revision 立即刷新。
+- `src/cli/i18n.cpp`
+  - queued、finished、not found、delivery failed 文案。
+- `tests/test_agent_inbox.cpp`
+  - 继续钉定向、次序、拒收与不串台。
+- 新增模型工具集成测试
+  - 假 main backend 发 `agent_message`，断言目标 inbox 收到。
+
+## 验收
+
+### 主模型主动转交
+
+1. 后台 #1 正在改 agent schema。
+2. 用户在 main 说“改成 execution_mode 三态，兼容旧参数”。
+3. 假 main 模型调用 `agent_message(task_id=1, ...)`。
+4. 工具返回 queued。
+5. 面板出现 `1 queued`。
+6. #1 下一次模型请求里出现用户原话与来源标签。
+7. main history 有完整 tool use/result。
+
+### 两只不串台
+
+- #1 做面板，#2 做 memory。
+- main 只给 #1 发“标题不得截 prompt”。
+- #1 收到，#2 与 main inbox 都没有这段话。
+- 面板只在 #1 行显示 queued。
+
+### 工具边界次序
+
+```text
+assistant tool_use
+user tool_result
+user [主代理转交的用户补充]
+next model request
+```
+
+三种 wire 都合法。不得把补充塞在 tool_use 与 tool_result 中间。
+
+### 没有下一次工具轮
+
+- #1 正在生成最终纯文本时收到消息。
+- `agent_message` 若返回 queued，#1 必须续开一轮处理。
+- 若封账已经完成，工具须返回 finished。
+- 不得成功入队后只在退出报告里说“没送到”。
+
+### 多条与竞态
+
+- 连发三条，按顺序送达，queued 依次 1、2、3，再归零。
+- 发送与任务结束同时发生，结果只能是“成功且必达”或“明确拒收”，没有第三种灰态。
+- 发送后立即取消，收场列明尚未处理原文。
+
+### compact 与恢复
+
+- main compact 后，运行任务名册仍从台账重注入。
+- 待送消息不因 compact 丢失或重复。
+- 子代理完成回流后，main 知道哪些补充已经处理。
+
+## 这期不做什么
+
+- 不做模糊标题自动匹配后静默投递。模型须用稳定 task id。
+- 不做一键 broadcast。
+- 不把传话当权限确认。
+- 不让已结束任务自动复活。若以后要 resume，另立 `agent_followup`，明确开新轮次、上下文来源与权限状态。
+- 不把 interrupt 塞进传话工具。若以后要停正在执行的活，另立 `agent_interrupt`。
+- 不复制子代理完整上下文回 main。
+- 不重做现有 SteeringQueue、AgentPanel 或 TaskRecord；这张单只把模型入口接到已有台账。
+
+## 收尾一句
+
+LubanCode 已有信箱，也有“queued”这盏灯。眼下只缺一名邮差：主模型听见用户改口，得真把信送出去，不能站在 main 门口点头说“知道了”。
