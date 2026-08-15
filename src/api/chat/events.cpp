@@ -31,6 +31,16 @@ Usage ParseUsage(const nlohmann::json& usage) {
     Usage out;
     out.output_tokens = usage.value("completion_tokens", static_cast<std::int64_t>(0));
     const std::int64_t prompt_total = usage.value("prompt_tokens", static_cast<std::int64_t>(0));
+    // reasoning 拆账(OpenAI/vLLM 兼容):completion_tokens_details.reasoning_tokens,
+    // 已含在 completion_tokens 总数里。Qwen 系有的版本顶层直接叫
+    // reasoning_tokens,一并认。没拆账就是 0(语义见 api::Usage 注释)。
+    if (auto details = usage.find("completion_tokens_details"); details != usage.end() && details->is_object()) {
+        out.output_reasoning_tokens =
+            details->value("reasoning_tokens", static_cast<std::int64_t>(0));
+    }
+    if (out.output_reasoning_tokens == 0) {
+        out.output_reasoning_tokens = usage.value("reasoning_tokens", static_cast<std::int64_t>(0));
+    }
     const bool has_deepseek_hit = usage.contains("prompt_cache_hit_tokens");
     const bool has_deepseek_miss = usage.contains("prompt_cache_miss_tokens");
     if (has_deepseek_hit || has_deepseek_miss) {

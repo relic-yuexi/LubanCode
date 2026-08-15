@@ -180,7 +180,11 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
     }
 
     if (!request.reasoning_effort.empty()) {
-        body["reasoning_effort"] = request.reasoning_effort;
+        // 参数名按 provider 声明走(默认 reasoning_effort);空档位仍然整个
+        // 缺席字段——"不填"就是真的不发,不偷偷塞默认档。
+        const std::string param = options.reasoning_param.empty() ? std::string("reasoning_effort")
+                                                                  : options.reasoning_param;
+        body[param] = request.reasoning_effort;
     }
 
     if (!request.tools.empty()) {

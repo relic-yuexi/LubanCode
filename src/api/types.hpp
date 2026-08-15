@@ -108,6 +108,11 @@ struct Request {
 //   cache_read_tokens     从缓存读取的输入 token(读命中)
 //   cache_creation_tokens 本次写缓存的输入 token(provider 有此概念才非 0)
 //   output_tokens         输出 token
+//   output_reasoning_tokens 输出 token 里属于 reasoning 的部分(含在
+//               output_tokens 里,不是另加的一笔;服务端拆了账才非 0——
+//               chat wire 的 completion_tokens_details.reasoning_tokens、
+//               responses wire 的 output_tokens_details.reasoning_tokens;
+//               没拆就是 0,不许拿 0 冒充"reasoning 为零")
 //
 // 各 wire 的映射(细节在各自 events.cpp):
 //   anthropic   input_tokens 本来就不含 cache read/creation,原样照抄;
@@ -122,6 +127,7 @@ struct Usage {
     std::int64_t output_tokens = 0;
     std::int64_t cache_read_tokens = 0;
     std::int64_t cache_creation_tokens = 0;
+    std::int64_t output_reasoning_tokens = 0;
 };
 
 // 完整输入(非缓存输入 + 缓存读 + 缓存写)的唯一算法。UI/统计/汇总一律
@@ -148,11 +154,11 @@ struct UsageReport {
     std::string epoch_break_reason;  // 本步断了 epoch 时的点名(空 = 没断)
     bool prefix_append_only = true;  // 本步请求是否上一份的原样追加版
 
-    // provider 是否真回报了 usage(四项全零 = 没给,真实请求不可能全零)。
+    // provider 是否真回报了 usage(五项全零 = 没给,真实请求不可能全零)。
     // 没回报就记 unknown,不许拿 0 冒充"真未命中"。
     bool reported() const {
         return usage.input_tokens > 0 || usage.output_tokens > 0 || usage.cache_read_tokens > 0 ||
-               usage.cache_creation_tokens > 0;
+               usage.cache_creation_tokens > 0 || usage.output_reasoning_tokens > 0;
     }
 };
 

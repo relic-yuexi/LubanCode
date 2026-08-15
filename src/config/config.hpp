@@ -155,6 +155,29 @@ struct ProviderConfig {
     // (语义见 api/chat/request.hpp)。待遇同 stream_usage:目录是唯一
     // 来源,切 provider 时镜像,默认空 = never。
     std::string reasoning_replay;
+    // ---- Effort 能力声明(本地兼容端诊断单,2026-08)----
+    // 服务端到底认哪些推理档位,客户端天生不知道——只能由配置声明。四件:
+    //   supported_think_levels  声明的档位表(low/medium/xhigh...);空 = 未
+    //                           声明,UI 一律写"未经能力验证",不猜。
+    //   think_param             请求参数名(默认空 = reasoning_effort;有的
+    //                           兼容端叫别的名字)。只影响 chat wire 的请求
+    //                           构造;anthropic/responses 各有定死的位置。
+    //   think_passthrough       档位值是否原样透传(默认 true)。声明 false
+    //                           表示服务端只认自家映射,UI 提示用户留意。
+    //   metrics_url             /doctor cache 读服务端指标(Prometheus 文本,
+    //                           vLLM /metrics 那套)的地址。空 = 不读——绝不
+    //                           擅自拿 base_url 猜一个 metrics 端点去探公网。
+    // 四件都是"声明了才生效":没写就是未声明,诊断按未知处理,请求构造维持
+    // 默认行为,一字不变。
+    std::vector<std::string> supported_think_levels;
+    std::string think_param;
+    bool think_passthrough = true;
+    std::string metrics_url;
+    // stream_usage_declared:JSON 里到底写没写 stream_usage 这个键。值本身
+    // 写了 false 也算"声明过"(那家确认不支持)——跟"压根没写"(能力未知,
+    // 启动诊断要提醒"统计可能恒为 0")是两回事。解析时置位,序列化时跟着
+    // 值一起落盘(declared 就落键,别让写回把"显式 false"降级成"未声明")。
+    bool stream_usage_declared = false;
     // extra_body:任意厂商私有请求参数(比如 GLM 的 thinking.type + 一个
     // 自定义 reasoning_effort 档位),每次请求前浅合并进请求体顶层——键
     // 冲突时 extra_body 里的值整个覆盖掉内置逻辑算出来的值(不做深合并,
@@ -328,6 +351,19 @@ struct Config {
     bool stream_usage = false;
     // reasoning_replay:同上,从 ProviderConfig 同名字段镜像,空 = never。
     std::string reasoning_replay;
+    // ---- Effort/缓存诊断的 provider 声明镜像(切换 provider 时同步)----
+    // provider_think_levels/think_param/think_passthrough:见 ProviderConfig
+    // 同名字段。/think、/doctor effort、状态栏"未经能力验证"提示都读这层,
+    // 不再回 providers 数组里翻(单 provider 顶层写法没有条目可翻,天然是
+    // "未声明")。think_param 额外喂给 BuildBackend(chat wire 请求构造)。
+    // metrics_url:/doctor cache 用;空 = 不读服务端指标。
+    std::vector<std::string> provider_think_levels;
+    std::string think_param;
+    bool think_passthrough = true;
+    std::string metrics_url;
+    // 当前活跃端是否显式声明过 stream_usage(写了键就算,值 false 也是)。
+    // 启动诊断靠它分"声明了不支持"与"压根没声明"。
+    bool stream_usage_declared = false;
     // extra_body/extra_headers:跟 native_web_search 同一套待遇——切
     // provider 时从 ProviderConfig 同名字段镜像过来;但这两个字段还多一条
     // 路:配置文件顶层(不进 providers 数组的"单 provider 配置"写法)也能
@@ -633,6 +669,11 @@ bool SetProviderNativeWebSearch(std::vector<ProviderConfig>& providers, const st
 bool SetProviderExtraBody(std::vector<ProviderConfig>& providers, const std::string& name,
                            const nlohmann::json& body);
 
+// 纯函数,不摸文件:把 name 对应那条 provider 的 stream_usage 改成 enabled,
+// 并把 stream_usage_declared 置真(探针写回 = 显式声明)。找不到 name 返回
+// false、原样不动。/doctor cache usage 的能力探针拿它落结论。
+bool SetProviderStreamUsage(std::vector<ProviderConfig>& providers, const std::string& name, bool enabled);
+
 // 纯函数,不摸文件:把 name 对应那条 provider 的 extra_headers 里
 // header_name 这一条设成 value;value 是空串就删掉这一条(不是"设成空
 // 值"的头,而是压根不发)。找不到 name 返回 false、原样不动。
@@ -738,6 +779,11 @@ std::expected<std::string, std::string> SetProviderNativeWebSearchInGlobalConfig
 // extra_body 再落盘。找不到这个 provider 名字就报错、不碰文件。
 std::expected<std::string, std::string> SetProviderExtraBodyInGlobalConfig(const std::string& name,
                                                                              const nlohmann::json& body);
+
+// /doctor cache usage 探针写回用:把全局配置里对应 provider 的 stream_usage
+// 连同"已声明"标记一起落盘。找不到名字报错、不碰文件。
+std::expected<std::string, std::string> SetProviderStreamUsageInGlobalConfig(const std::string& name,
+                                                                               bool enabled);
 
 // /provider set extra_header 用:设置(或者 value 为空串时删除)全局配置里
 // 对应 provider 的某一条 extra_headers,再落盘。找不到这个 provider 名字就

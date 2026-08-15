@@ -132,6 +132,13 @@ std::optional<StreamEvent> HandleCompleted(const json& data) {
         }
         event.usage.cache_read_tokens = cached;
         event.usage.input_tokens = input_total > cached ? input_total - cached : 0;
+        // reasoning 拆账:output_tokens_details.reasoning_tokens(已含在
+        // output_tokens 总数里)。没拆账就是 0(语义见 api::Usage 注释)。
+        if (auto out_details = usage_it->find("output_tokens_details");
+            out_details != usage_it->end() && out_details->is_object()) {
+            event.usage.output_reasoning_tokens =
+                out_details->value("reasoning_tokens", static_cast<std::int64_t>(0));
+        }
     }
 
     return event;
