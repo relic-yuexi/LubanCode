@@ -171,6 +171,31 @@ std::shared_ptr<lubancode::memory::ProjectMemory> BuildProjectMemory(
     return project_memory;
 }
 
+// 面板短因文案(规格"现场三"):失败须分得出接口错/工具错/空结论——导航
+// 坞只放短因,完整错误进 transcript(Enter 切进该会话再看)。
+std::string OutcomeReasonText(lubancode::tools::TaskOutcomeReason reason) {
+    using R = lubancode::tools::TaskOutcomeReason;
+    switch (reason) {
+        case R::ApiError:
+            return tr("agent_status.reason_api_error");
+        case R::MaxTurns:
+            return tr("agent_status.reason_max_turns");
+        case R::MaxContext:
+            return tr("agent_status.reason_max_context");
+        case R::NoFinalText:
+            return tr("agent_status.reason_no_final_text");
+        case R::ToolError:
+            return tr("agent_status.reason_tool_error");
+        case R::UserStop:
+            return tr("agent_status.reason_user_stop");
+        case R::ProtocolError:
+            return tr("agent_status.reason_protocol_error");
+        case R::None:
+            return tr("agent_status.reason_unknown");
+    }
+    return tr("agent_status.reason_unknown");
+}
+
 }  // namespace
 
 // 一场交互会话:整场可变状态按所有权收成成员。构造 = 原先
@@ -780,19 +805,38 @@ std::vector<lubancode::cli::AgentPanelEntry> InteractiveSession::BuildAgentPanel
         entry.name = task.agent_type + " #" + std::to_string(task.id);
         entry.running = task.state == lubancode::tools::AgentTaskState::Running;
         entry.failed = task.state == lubancode::tools::AgentTaskState::Failed ||
-                       task.state == lubancode::tools::AgentTaskState::Cancelled;
+                       task.state == lubancode::tools::AgentTaskState::Cancelled ||
+                       task.state == lubancode::tools::AgentTaskState::BudgetExhausted;
         const auto end = entry.running ? now : task.end_time;
         const double seconds = std::chrono::duration<double>(end - task.start_time).count();
         const std::int64_t tokens = task.input_tokens + task.output_tokens;
-        std::string state_key;
+        // 状态短话(规格"现场三/四"):导航坞只放短因——完成/失败 · 接口报错/
+        // 耗尽 · 40/40 轮/停下 · 用户中止;完整错误进 transcript(Enter 查看)。
+        // 正数预算派出即可见:运行中带"N/M 轮",不等撞墙才揭晓。
+        std::string state_word;
         if (entry.running) {
-            state_key = "agent_status.state_running";
-        } else if (entry.failed) {
-            state_key = "agent_status.state_failed";
+            state_word = tr("agent_status.state_running");
         } else {
-            state_key = "agent_status.state_done";
+            switch (task.state) {
+                case lubancode::tools::AgentTaskState::Done:
+                    state_word = tr("agent_status.state_done");
+                    break;
+                case lubancode::tools::AgentTaskState::Cancelled:
+                    state_word = trf("agent_status.state_stopped_reason", tr("agent_status.reason_user_stop"));
+                    break;
+                case lubancode::tools::AgentTaskState::BudgetExhausted:
+                    state_word = trf("agent_status.state_exhausted", task.turns_used, task.turn_limit);
+                    break;
+                case lubancode::tools::AgentTaskState::Failed:
+                case lubancode::tools::AgentTaskState::Running:
+                    state_word = trf("agent_status.state_failed_reason", OutcomeReasonText(task.outcome_reason));
+                    break;
+            }
         }
-        entry.state = trf("agent_status.summary", tr(state_key), task.tool_call_count,
+        if (entry.running && task.turn_limit > 0) {
+            state_word += trf("agent_status.budget_suffix", task.turns_used, task.turn_limit);
+        }
+        entry.state = trf("agent_status.summary", state_word, task.tool_call_count,
                           lubancode::cli::FormatTokenCount(tokens), lubancode::cli::FormatSeconds(seconds));        // 列表行只认真正短 title;旧任务没有 title 就显示"未命名子代理 #N"
         // ——绝不回退到 prompt 前若干字(prompt 只在详情里出现)。
         entry.title = task.title.empty() ? trf("agent_panel.untitled", task.id) : task.title;

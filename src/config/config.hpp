@@ -245,6 +245,15 @@ struct StatusPanelConfig {
     std::string separator = " · ";
 };
 
+// 子代理(subagent)段的运行配置。max_turns:nullopt = 未单独配置,运行时
+// 继承 config.max_turns(默认 0 = 不限轮);显式配了(含 0)就是子代理
+// 自己的预算,与主代理的 max_turns 分开管。待遇同 hooks:只从配置文件来
+// (项目级压全局),没有环境变量、没有内置默认值这两级——0 的语义全路
+// 一致,都是不限轮(规格"现场四":子代理不再暗藏轮数硬闸)。
+struct SubagentConfig {
+    std::optional<int> max_turns;
+};
+
 struct Config {
     Wire wire = Wire::Anthropic;
     std::string base_url;
@@ -297,6 +306,9 @@ struct Config {
     // mcpServers),没配就是空 map——空 map 意味着 lsp 工具不注册。
     std::map<std::string, LspServerConfig> lsp_servers;
     StatusPanelConfig status_panel;
+    // 子代理段:只从配置文件来(项目级压全局);max_turns 未设(nullopt)
+    // 时运行时继承 max_turns。
+    SubagentConfig subagent;
     // tool_search:延迟挂载的启用阈值,0 = 永不延迟。只从配置文件读
     // (没有环境变量这一级),没配就是默认 20。
     int tool_search_threshold = kDefaultToolSearchThreshold;
@@ -339,6 +351,7 @@ struct ConfigSources {
     Source extra_headers = Source::Default;
     Source providers = Source::Default;
     Source status_panel = Source::Default;
+    Source subagent = Source::Default;  // 子代理段:配置文件或默认
     Source memory = Source::Default;
 };
 
@@ -415,6 +428,9 @@ struct FileConfig {
     std::optional<std::map<std::string, LspServerConfig>> lsp_servers;
     // status_panel 整段回退；items 的顺序就是终端展示顺序。
     std::optional<StatusPanelConfig> status_panel;
+    // subagent 段:{"subagent": {"max_turns": N}}。非负整数(0 = 显式不
+    // 限轮);负数/类型不对静默跳过(待遇同 max_turns 的"救命阀"取舍)。
+    std::optional<int> subagent_max_turns;
     // extra_body/extra_headers:顶层"单 provider 配置"写法专用(不进
     // providers 数组的场景),整段有没有出现在 JSON 里(待遇同 hooks/
     // mcpServers——只从配置文件来,没有环境变量、没有内置默认值这两级)。

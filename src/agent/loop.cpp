@@ -1,5 +1,6 @@
 #include "agent/loop.hpp"
 
+#include <algorithm>
 #include <iostream>
 #include <type_traits>
 #include <utility>
@@ -86,9 +87,10 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
 // 当轮请求怎么发,不污染对话历史(下一轮 remaining_turns 变了,提示文本也
 // 该跟着变,history 里留一份旧提示没有意义)。
 std::string BuildMaxTurnsNudgeText(int remaining_turns) {
-    return "\n\n[系统提醒] 轮数将尽,含本轮在内最多还能跟你来回 " + std::to_string(remaining_turns) +
-           " 轮就会被强制停止(这是防死循环的硬上限,不是真的不让你干了)。"
-           "请收敛任务范围,尽快把手头这一步收尾,汇报当前进度与下一步该做什么,别把话说到一半。";
+    return "\n\n[系统提醒] 轮数预算将尽,含本轮在内最多还能跟你来回 " + std::to_string(remaining_turns) +
+           " 轮就会被强制停止(这是预算硬上限,不是真的不让你干了)。从现在起停止漫游式探索:"
+           "不要再开新的调查方向;把已经查到的事实、关键证据位置、排除掉的分支写成一个检查点,"
+           "并给出部分结论与下一步建议。到限后检查点就是交回主会话的全部,别把它带进坟墓。";
 }
 
 }  // namespace
@@ -114,9 +116,10 @@ bool ShouldNudgeMaxTurns(int turn, int max_turns) {
         return false;
     }
     // turn 是 for 循环里"即将发起的这一轮"的 0-based 下标,max_turns - turn
-    // 就是含当轮在内还能跑几轮。<= 阈值时该提醒——max_turns 本来就配得很小
-    // (比如 <= 3)时,从第一轮起就一直提醒,也没问题:反正确实快到頂。
-    return (max_turns - turn) <= kMaxTurnsNudgeThreshold;
+    // 就是含当轮在内还能跑几轮。收口提示只注入一次:落在"剩余轮数第一次
+    // 降到阈值(含)以下"的那一轮——即剩余数恰等于 min(max_turns, 阈值)。
+    // 预算本来就小于阈值时第一轮就提醒,之后各轮不再重复。
+    return (max_turns - turn) == (std::min)(max_turns, kMaxTurnsNudgeThreshold);
 }
 
 AgentLoop::AgentLoop(api::Backend& backend, tools::ToolRegistry& registry, std::string model,
@@ -157,6 +160,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         return std::unexpected("用户消息为空，无法发送。");
     }
     history_.push_back(std::move(user_message));
+
+    // 轮数与 stop reason 的活账:每次请求各记一笔,收场时随 RunOutcome
+    // 交出去——上层(子代理)按它分型 budget_exhausted/no_final_text 等,
+    // 不再靠解析错误文案猜。
+    int turns_used = 0;
+    std::string last_stop_reason;
 
     // max_turns_ <= 0 = 无上限:循环条件里第一个子句恒真,第二个子句(轮数
     // 比较)压根不会被求值,turn 就一直往上涨,靠 end_turn 或者用户 ESC/
@@ -314,7 +323,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
                     history_.push_back(std::move(orphan_message));
                 }
 
-                return RunOutcome{true};
+                return RunOutcome{true, false, last_stop_reason, turns_used};
             }
             return std::unexpected("请求失败: " + err.message);
         }
@@ -324,6 +333,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
 
         api::Message assistant_message = assembler.BuildMessage();
         const std::string stop_reason = assembler.stop_reason();
+        ++turns_used;
+        last_stop_reason = stop_reason;
         history_.push_back(assistant_message);
 
         if (callbacks.on_usage) {
@@ -343,7 +354,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         }
 
         if (stop_reason != "tool_use" && !has_tool_use) {
-            return RunOutcome{};
+            return RunOutcome{false, false, stop_reason, turns_used};
         }
 
         // 工具循环:逐个执行模型要的工具调用。cancel 中途被置位("工具已
@@ -379,14 +390,15 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         history_.push_back(std::move(tool_result_message));
 
         if (interrupted) {
-            return RunOutcome{true};
+            return RunOutcome{true, false, last_stop_reason, turns_used};
         }
     }
 
     // 只有 max_turns_ > 0(用户显式设了硬上限)才可能走到这里——无上限时
-    // for 循环条件恒真,永远不会正常退出到这一行。
-    return std::unexpected("已达配置的轮数上限(max_turns=" + std::to_string(max_turns_) +
-                            "),可调大或设 0 解除。");
+    // for 循环条件恒真,永远不会正常退出到这一行。预算耗尽不是错误:history
+    // 里留着到限为止的全部来回,部分结果由调用方(子代理按 budget_exhausted
+    // 收账)带走;主循环按老口径打一行"已达上限"。
+    return RunOutcome{false, true, last_stop_reason, turns_used};
 }
 
 }  // namespace lubancode::agent

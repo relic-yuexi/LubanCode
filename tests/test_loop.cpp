@@ -212,7 +212,7 @@ TEST_CASE("用户拒绝确认:工具不执行,tool_result 是 is_error") {
     CHECK(tool_result.content.find("拒绝") != std::string::npos);
 }
 
-TEST_CASE("超过最大轮数报错(max_turns 显式设成正整数,硬上限才会生效)") {
+TEST_CASE("超过最大轮数:预算耗尽不是错误,hit_turn_limit 带 turns/stop_reason 交回") {
     FakeBackend backend;
     // 永远回 tool_use,模型一直要工具,逼近轮数上限。
     for (int i = 0; i < 5; ++i) {
@@ -226,8 +226,14 @@ TEST_CASE("超过最大轮数报错(max_turns 显式设成正整数,硬上限才
     agent::Callbacks callbacks;
     const auto result = loop.Run("死循环吧", callbacks);
 
-    REQUIRE_FALSE(result.has_value());
-    CHECK(result.error().find("轮数") != std::string::npos);
+    // 0.30.x:轮数耗尽从"报错"改为"预算耗尽"——value 分支交回,history 里
+    // 留着到限为止的全部来回,调用方(子代理)按 budget_exhausted 收账、
+    // 带走部分结果(规格"现场四")。
+    REQUIRE(result.has_value());
+    CHECK_FALSE(result->cancelled);
+    CHECK(result->hit_turn_limit);
+    CHECK(result->turns_used == 3);
+    CHECK(result->stop_reason == "tool_use");  // 最后一次应答的原始 stop reason
     CHECK(backend.captured_requests.size() == 3);  // 正好用满 max_turns 次请求
 }
 
@@ -516,18 +522,19 @@ TEST_CASE("上下文硬上限:裁剪与截断后仍超限(单条用户输入就�
 // AgentLoop 的用例确认提醒文本真的被附到了发出去的 request.system 尾部。
 // ---------------------------------------------------------------------------
 
-TEST_CASE("ShouldNudgeMaxTurns: 剩 3 轮(含当轮)触发,剩 4 轮不触发") {
-    // max_turns=100:turn=96 时剩余 100-96=4 轮,不该提醒;turn=97 时剩余 3 轮,
-    // 该提醒。
+TEST_CASE("ShouldNudgeMaxTurns: 剩 3 轮那一轮触发一次,其余各轮不再重复") {
+    // max_turns=100:turn=96 时剩余 4 轮,不提醒;turn=97 时剩余 3 轮,提醒
+    // (唯一一次);turn=98、99 不再重复(规格"现场四":收口提示只注入一次)。
     CHECK_FALSE(agent::ShouldNudgeMaxTurns(96, 100));
     CHECK(agent::ShouldNudgeMaxTurns(97, 100));
-    CHECK(agent::ShouldNudgeMaxTurns(98, 100));
-    CHECK(agent::ShouldNudgeMaxTurns(99, 100));  // 最后一轮(turn=max_turns-1)
+    CHECK_FALSE(agent::ShouldNudgeMaxTurns(98, 100));
+    CHECK_FALSE(agent::ShouldNudgeMaxTurns(99, 100));  // 最后一轮(turn=max_turns-1)
 }
 
-TEST_CASE("ShouldNudgeMaxTurns: max_turns 本来就很小时从第一轮就触发") {
+TEST_CASE("ShouldNudgeMaxTurns: max_turns 本来就小于阈值时第一轮触发一次") {
     CHECK(agent::ShouldNudgeMaxTurns(0, 3));
     CHECK(agent::ShouldNudgeMaxTurns(0, 1));
+    CHECK_FALSE(agent::ShouldNudgeMaxTurns(1, 3));  // 剩 2 轮,但第一轮已提醒过
     CHECK_FALSE(agent::ShouldNudgeMaxTurns(1, 5));  // 剩 4 轮,还不该
     CHECK_FALSE(agent::ShouldNudgeMaxTurns(0, 5));  // 剩 5 轮,更不该
 }
@@ -539,13 +546,14 @@ TEST_CASE("ShouldNudgeMaxTurns: max_turns <= 0(无上限)永不触发,不管 tur
     CHECK_FALSE(agent::ShouldNudgeMaxTurns(5, -5));
 }
 
-TEST_CASE("轮数将尽提醒:剩 3 轮时,发出去的请求 system 尾部带上提醒;平时不带") {
+TEST_CASE("轮数将尽提醒:剩 3 轮那一轮带上一次收口提示;其余各轮不带") {
     FakeBackend backend;
-    // max_turns=4:第 0、1 轮(剩 4、3 轮)平时/触发各一次,第 1 轮开始应该带提醒。
+    // max_turns=4:turn=0(剩 4 轮)不带;turn=1(剩 3 轮)带——唯一一次;
+    // turn=2(剩 2 轮)不再重复。
     backend.scripts = {
         ToolUseScript("toolu_1", "fake_tool"),  // turn=0,剩余 4 轮,不该带提醒
         ToolUseScript("toolu_2", "fake_tool"),  // turn=1,剩余 3 轮,该带提醒
-        TextOnlyScript("收尾了"),                // turn=2,剩余 2 轮,该带提醒
+        TextOnlyScript("收尾了"),                // turn=2,剩余 2 轮,不再重复
     };
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"ok", false}, false));
@@ -556,9 +564,10 @@ TEST_CASE("轮数将尽提醒:剩 3 轮时,发出去的请求 system 尾部带�
 
     REQUIRE(result.has_value());
     REQUIRE(backend.captured_requests.size() == 3);
-    CHECK(backend.captured_requests[0].system.find("轮数将尽") == std::string::npos);
-    CHECK(backend.captured_requests[1].system.find("轮数将尽") != std::string::npos);
-    CHECK(backend.captured_requests[2].system.find("轮数将尽") != std::string::npos);
+    CHECK(backend.captured_requests[0].system.find("轮数预算将尽") == std::string::npos);
+    CHECK(backend.captured_requests[1].system.find("轮数预算将尽") != std::string::npos);
+    CHECK(backend.captured_requests[1].system.find("检查点") != std::string::npos);  // 收口:写检查点
+    CHECK(backend.captured_requests[2].system.find("轮数预算将尽") == std::string::npos);
     // system prompt 本体没被永久改掉——每次都是从原样的 "system prompt" 长出来的。
     CHECK(backend.captured_requests[1].system.find("system prompt") == 0);
 }

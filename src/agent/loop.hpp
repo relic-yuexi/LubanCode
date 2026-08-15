@@ -77,15 +77,22 @@ struct Callbacks {
 // 不是错误(std::expected 的 value 分支,不是 error 分支),半截 assistant
 // 文本已经照常带着打断标注入了历史,history() 状态完整、下一轮能正常接着
 // 聊,调用方(main.cpp)只需要照这个标志决定要不要额外打提示。
+// hit_turn_limit=true 表示轮数预算用满(max_turns>0 才可能):也不是错误,
+// history 里留着到限为止的全部来回——上层(子代理)据此按 budget_exhausted
+// 收账、带走部分结果,不许笼统当 failed。stop_reason/turns_used 把模型最后
+// 一次应答的原始 stop reason 与实际请求次数交出去,失败语义由调用方分型。
 struct RunOutcome {
     bool cancelled = false;
+    bool hit_turn_limit = false;
+    std::string stop_reason;  // 模型最后一次应答的原始 stop_reason(空 = 一个字都没回来)
+    int turns_used = 0;       // 本次 Run() 实际发出的模型请求数
 };
 
-// 轮数将尽提醒:剩余轮数(max_turns - turn)不超过这个阈值时,当轮请求要在
-// system 尾部附一句"收尾"提示,让模型别把话说到一半就被硬掐断。阈值定死
-// 为 3,不做成可配置——任务要求实现侵入要小,3 轮的提前量对"体面收场"够用,
-// 没必要再加一层配置项。max_turns <= 0(无上限)时压根没有"将尽"这回事,
-// 见 ShouldNudgeMaxTurns 实现——直接恒为 false。
+// 轮数将尽提醒:剩三轮时当轮请求在 system 尾部附一句"收口"提示——停止
+// 漫游、写检查点、交部分结论(规格"现场四")。只注入一次:提示落在"剩余
+// 轮数第一次降到阈值(含)以下"的那一轮,此后各轮不再重复(重复念叨只会
+// 把剩余轮数也烧掉)。阈值定死为 3。max_turns <= 0(无上限)时压根没有
+// "将尽"这回事,见 ShouldNudgeMaxTurns 实现——直接恒为 false。
 constexpr int kMaxTurnsNudgeThreshold = 3;
 
 // 纯函数,可单测:第 turn 轮(0-based,对应 Run() 里 for 循环的循环变量)、

@@ -394,6 +394,74 @@ TEST_CASE("ParseFileConfigJson: max_turns 正整数正常解析") {
     CHECK(*ok->max_turns == 50);
 }
 
+// ---------------------------------------------------------------------------
+// subagent.max_turns(0.30.x"失败预算"单):子代理不再暗藏 40 轮硬闸——预算
+// 从配置来,首选 subagent.max_turns,未设继承 config.max_turns;0 全路一致
+// 不限轮。待遇同 hooks:只从配置文件来(项目级压全局),没有 env/默认两级。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseFileConfigJson: subagent.max_turns 正常解析;坏段/坏值/负数静默跳过") {
+    const auto ok = config::ParseFileConfigJson(R"({"subagent": {"max_turns": 25}})", "x.json");
+    REQUIRE(ok.has_value());
+    REQUIRE(ok->subagent_max_turns.has_value());
+    CHECK(*ok->subagent_max_turns == 25);
+    // 显式 0 = 子代理不限轮,是合法值,不当没配。
+    const auto zero = config::ParseFileConfigJson(R"({"subagent": {"max_turns": 0}})", "x.json");
+    REQUIRE(zero.has_value());
+    REQUIRE(zero->subagent_max_turns.has_value());
+    CHECK(*zero->subagent_max_turns == 0);
+    // 段不是 object / 字段不是整数 / 负数:静默跳过(救命阀字段,写错不拦人)。
+    const auto bad_segment = config::ParseFileConfigJson(R"({"subagent": 3})", "x.json");
+    REQUIRE(bad_segment.has_value());
+    CHECK_FALSE(bad_segment->subagent_max_turns.has_value());
+    const auto bad_type = config::ParseFileConfigJson(R"({"subagent": {"max_turns": "40"}})", "x.json");
+    REQUIRE(bad_type.has_value());
+    CHECK_FALSE(bad_type->subagent_max_turns.has_value());
+    const auto negative = config::ParseFileConfigJson(R"({"subagent": {"max_turns": -4}})", "x.json");
+    REQUIRE(negative.has_value());
+    CHECK_FALSE(negative->subagent_max_turns.has_value());
+}
+
+TEST_CASE("MergeConfig: subagent.max_turns 未设时留 nullopt(运行时继承 max_turns)") {
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK_FALSE(result->config.subagent.max_turns.has_value());
+    CHECK(result->sources.subagent == config::Source::Default);
+}
+
+TEST_CASE("MergeConfig: subagent.max_turns 项目级压全局,与 max_turns 互不干扰") {
+    config::FileConfig global;
+    global.max_turns = 60;
+    global.subagent_max_turns = 12;
+    global.source_path = "/home/.lubancode/config.json";
+    config::FileConfig project;
+    project.max_turns = 50;
+    project.source_path = "/tmp/.lubancode/config.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    // 项目级只写了 max_turns:subagent 段回退全局的 12;max_turns 用项目级 50。
+    REQUIRE(result->config.subagent.max_turns.has_value());
+    CHECK(*result->config.subagent.max_turns == 12);
+    CHECK(result->sources.subagent == config::Source::GlobalConfigFile);
+    CHECK(result->config.max_turns == 50);
+    CHECK(result->sources.max_turns == config::Source::ProjectConfigFile);
+}
+
+TEST_CASE("MergeConfig: subagent.max_turns 显式 0 是显式不限轮,不当没配") {
+    config::FileConfig project;
+    project.max_turns = 40;
+    project.subagent_max_turns = 0;
+    project.source_path = "/tmp/.lubancode/config.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), project, std::nullopt, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    REQUIRE(result->config.subagent.max_turns.has_value());
+    CHECK(*result->config.subagent.max_turns == 0);  // 子代理不限轮,主代理仍 40
+    CHECK(result->config.max_turns == 40);
+    CHECK(result->sources.subagent == config::Source::ProjectConfigFile);
+}
+
 TEST_CASE("ParseFileConfigJson: memory 对象能解析，坏类型会报错") {
     const auto parsed = config::ParseFileConfigJson(
         R"({"memory":{"enabled":true,"use":false,"generate":true,"max_index_bytes":1000,"max_retrieval_bytes":2000,"max_results":3}})",
