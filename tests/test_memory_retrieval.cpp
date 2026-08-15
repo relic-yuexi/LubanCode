@@ -158,6 +158,78 @@ TEST_CASE("检索评测:标识符拆分与中英混排分词") {
     CHECK_FALSE(has("b"));  // 单字符不出词
 }
 
+TEST_CASE("检索评测:归一化与中文词+二元双路——标点不黏词,虚词降权") {
+    memory::MemoryEntry entry;
+    entry.id = "fact.release-codename";
+    entry.title = "发布代号";
+    entry.summary = "本项目发布代号是青瓷-47,对外文案统一用它";
+    entry.keywords = {"发布代号", "青瓷-47", "代号"};
+    entry.updated_at = "2026-01-01T00:00:00Z";
+    entry.last_verified_at = entry.updated_at;
+
+    std::vector<memory::TraceTerm> terms;
+    const auto ranked = memory::RankEntries(
+        {entry}, "这个项目的发布代号是什么？只回复代号，不要调用工具。", "", {}, &terms);
+    REQUIRE_FALSE(terms.empty());
+    REQUIRE_FALSE(ranked.empty());
+
+    const auto find_term = [&terms](const std::string& text) {
+        return std::find_if(terms.begin(), terms.end(),
+                            [&text](const memory::TraceTerm& term) { return term.text == text; });
+    };
+    // 词典整词保住:关键词/标题里的"发布代号"按整词进词表,满权。
+    const auto codename = find_term("发布代号");
+    REQUIRE(codename != terms.end());
+    CHECK(codename->kind == "word");
+    CHECK(codename->weight == 1.0);
+    CHECK(codename->source == "query");
+    // 标点不进词表:全角问号/逗号/句号以及任何半角标点都不许黏进 term。
+    for (const memory::TraceTerm& term : terms) {
+        CHECK(term.text.find("？") == std::string::npos);
+        CHECK(term.text.find("，") == std::string::npos);
+        CHECK(term.text.find("。") == std::string::npos);
+        CHECK(term.text.find('?') == std::string::npos);
+        CHECK(term.text.find(',') == std::string::npos);
+    }
+    // 虚词碎片降权:"什么"这类句式片段拿低权重,凑不了门槛。
+    const auto what = find_term("什么");
+    REQUIRE(what != terms.end());
+    CHECK(what->kind == "gram");
+    CHECK(what->weight <= 0.25);
+    // "个项"这类跨虚词的句式碎片同样低权重。
+    const auto fragment = find_term("个项");
+    if (fragment != terms.end()) CHECK(fragment->weight <= 0.25);
+
+    // 全半角归一:全角字母数字的关键词照常硬命中。
+    memory::MemoryEntry bm;
+    bm.id = "fact.bm25";
+    bm.title = "BM25 软分";
+    bm.keywords = {"BM25"};
+    bm.updated_at = entry.updated_at;
+    bm.last_verified_at = entry.updated_at;
+    const auto fullwidth = memory::RankEntries({bm}, "ＢＭ２５ 打分在哪", "", {});
+    REQUIRE_FALSE(fullwidth.empty());
+    CHECK(fullwidth[0].hard_hits >= 1);
+
+    // 路径分隔符归一:反斜杠路径与正斜杠路径互相认。
+    memory::MemoryEntry path_entry;
+    path_entry.id = "fact.loop-path";
+    path_entry.title = "主循环文件";
+    path_entry.paths = {"src/agent/loop.cpp"};
+    path_entry.updated_at = entry.updated_at;
+    path_entry.last_verified_at = entry.updated_at;
+    const auto backslash = memory::RankEntries({path_entry}, "src\\agent\\loop.cpp 在哪定义", "", {});
+    REQUIRE_FALSE(backslash.empty());
+    CHECK(backslash[0].hard_hits >= 1);
+
+    // 普通二元片段凑不成硬命中:纯句式问法在带关键词的条目上硬命中为零。
+    const auto soft_only = memory::RankEntries({entry}, "那接下来该怎么办呢", "", {});
+    for (const auto& hit : soft_only) {
+        CHECK(hit.hard_hits == 0);
+        CHECK_FALSE(hit.qualifies);
+    }
+}
+
 TEST_CASE("检索评测:archived/conflict 不参与,expired 与 scope 越区不注入") {
     const Fixture fixture = LoadFixture();
     std::vector<memory::MemoryEntry> all = fixture.entries;

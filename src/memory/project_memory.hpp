@@ -119,9 +119,9 @@ struct MemoryEntry {
 // 门槛值得注入",预算裁剪另算。
 struct ScoredEntry {
     const MemoryEntry* entry = nullptr;
-    int hard_hits = 0;     // 路径/关键词/标题硬命中次数
-    int token_hits = 0;    // 分词后命中的查询词项数
-    double bm25 = 0.0;     // 本地 BM25 软分
+    int hard_hits = 0;     // 稳定实体(路径/关键词/symbol/标题/id)硬命中次数
+    int token_hits = 0;    // 分词后命中的有效词项数(虚词碎片不计)
+    double bm25 = 0.0;     // 本地 BM25 软分(词项按来源权重折算)
     int score = 0;         // 硬命中分 + cwd 排位加分 + BM25 折算分(排序用)
     bool qualifies = false;       // 过最低门槛,值得注入(调用方据此判)
     bool stale_blocked = false;   // 指纹漂移,只提示不注正文(由调用方判)
@@ -129,19 +129,37 @@ struct ScoredEntry {
     bool scope_blocked = false;   // scope 不符当前 cwd,不注入
 };
 
+// 检索词的来源、词路与权重(trace 报账用):source 说词从哪来(query 本体
+// 还是回合总结的扩展词),kind 说走哪条词路(word=整词/标识符/词典实体,
+// gram=中文二元片段),weight 是进 BM25 与门槛判定的乘子——带虚词字符的
+// 句式碎片拿 kWeakGramWeight,凑不了门槛,也拉不动分数。
+struct TraceTerm {
+    std::string text;
+    std::string source = "query";  // query | hint
+    std::string kind = "gram";     // word | gram
+    double weight = 0.8;
+};
+
+// 归一化(查询与索引共用):NFKC 常用子集(全角 ASCII/全角空格/弯引号/
+// 长划/连字/半角片假名)、ASCII 小写、路径分隔符统一正斜杠。标点经这套
+// 之后要么归半角要么当分隔符,不再黏进中文二元词。
+std::string NormalizeForRetrieval(const std::string& text);
+
 // 标识符拆分 + 中英混排分词:camelCase/snake_case/kebab/路径段都拆
 // (BuildTurnContext -> build/turn/context),中文出双字片段;查询与
 // 索引共用同一套。
 std::vector<std::string> TokenizeForRetrieval(const std::string& text);
 
-// 纯函数排级:硬命中(路径/关键词/标题,词边界匹配)+ BM25 软分。返回
-// 有得分的条目(含没过门槛的,给 trace 用),qualifies 标记是否过最低
-// 门槛(至少一次硬命中或两个词项命中,且核心分过线)。archived/conflict
-// 不参与;过期/scope 越区打标记由调用方拦。指纹漂移要摸项目文件,也由
-// 调用方判。
+// 纯函数排级:硬命中(路径/关键词/symbol/标题/id 稳定实体,词边界匹配)
+// + BM25 软分(词项带权重)。返回有得分的条目(含没过门槛的,给 trace
+// 用),qualifies 标记是否过最低门槛(至少一次硬命中,或带整词的两次
+// 词项命中/三次纯二元命中,且核心分过线)。traced_terms 回填本轮查询词
+// 项(含来源与权重),供 trace 落盘。archived/conflict 不参与;过期/
+// scope 越区打标记由调用方拦。指纹漂移要摸项目文件,也由调用方判。
 std::vector<ScoredEntry> RankEntries(const std::vector<MemoryEntry>& entries, const std::string& query,
                                      const std::string& cwd_relative,
-                                     const std::vector<std::string>& hints = {});
+                                     const std::vector<std::string>& hints = {},
+                                     std::vector<TraceTerm>* traced_terms = nullptr);
 
 // 待审候选(规格"候选审阅箱")。回合收尾抽取产出,先住待审区,用户
 // /memory accept|edit|reject 之后才动正式库。按项目 key 分账,耐退出。
