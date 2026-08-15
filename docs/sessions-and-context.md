@@ -100,6 +100,12 @@ worktree 是独立路径，故 session 仍按各自 cwd 分开列；项目记忆
 
 压缩事件写 `compact_v2`：回放语义与旧 `compact` 事件完全同型（archive + kept_from），另记 manifest、压缩序号（epoch）与指标（块数、归并轮次、前后 token、触发来源）。`/resume` 读到 v2 与 v1 走同一条重建路；老存档、老 compact 事件照常读。
 
+## 观测账
+
+每次压缩的 `compact_v2` 事件里记：触发来源（manual / pre-turn / midturn）、实现路（local-single / local-hierarchical）、map 块数与 reduce 轮次、前后 token、终稿 manifest、以及本次输入的 `source_digest`（内容指纹）。每轮请求的结构压缩量（重复收敛、旧版覆盖、长结果外置）在 `AgentLoop` 内部记账，`/compact --dry-run` 可随时查看。
+
+近重复检索（MinHash/SimHash 找候选、再核关键差异行）与 embedding 召回证据是下一期的评估项：都只帮忙找候选、绝不判删除；`source_digest` 是将来"episode 关闭后台预计算局部摘要、正式触发按 digest 复用"的失效判据（同史同值、改一字即变，已有测试钉死）。达不到收益就关掉，不为算法名留功能。
+
 ## 压缩摘要的验收
 
 摘要不再只靠"不少于 40 字"防呆。模型必须同时给出六栏 Markdown 存档和末尾一枚 JSON manifest（goal / constraints / open_items / next_action）。提交前程序逐项核：

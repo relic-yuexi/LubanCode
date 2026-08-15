@@ -320,6 +320,21 @@ std::expected<LayeredCompactResult, api::Error> CompactHierarchical(api::Backend
                                                                      const std::vector<api::Message>& history,
                                                                      const CompactOptions& options) {
     LayeredCompactResult result;
+    // 观测钩子(第四期):本次压缩输入的内容指纹。将来"episode 关闭后台
+    // 预计算局部摘要、正式触发时按 digest 复用"靠它判失效;现在只记不用。
+    {
+        std::string buffer;
+        for (const auto& message : history) {
+            for (const auto& block : message.content) {
+                if (std::holds_alternative<api::TextBlock>(block)) {
+                    buffer += std::get<api::TextBlock>(block).text;
+                } else if (std::holds_alternative<api::ToolResultBlock>(block)) {
+                    buffer += std::get<api::ToolResultBlock>(block).content;
+                }
+            }
+        }
+        result.metrics.source_digest = Fingerprint64(buffer);
+    }
 
     // 预算未知 → 分不了块(没法判定块上限),退化为单次压缩(老行为)。
     const auto input_budget = CompactInputBudget(options.budget);
@@ -555,6 +570,7 @@ std::expected<LayeredCompactResult, api::Error> CompactHierarchical(api::Backend
     result.archive = std::move(archive);
     result.manifest = std::move(*final_manifest);
     result.metrics.hierarchical = true;
+    result.metrics.implementation = "local-hierarchical";
     result.metrics.chunks = static_cast<int>(chunks.size());
     result.metrics.reduce_passes = passes;
     return result;

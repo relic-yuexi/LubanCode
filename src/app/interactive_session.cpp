@@ -1613,6 +1613,8 @@ bool InteractiveSession::TryRunCompact(bool midturn) {
     metrics_json["chunks"] = result->metrics.chunks;
     metrics_json["reduce_passes"] = result->metrics.reduce_passes;
     metrics_json["hierarchical"] = result->metrics.hierarchical;
+    metrics_json["implementation"] = result->metrics.implementation;
+    metrics_json["source_digest"] = result->metrics.source_digest;  // 第四期预计算复用钩子
     metrics_json["pre_tokens"] = before_tokens;
     metrics_json["post_tokens"] = after_tokens;
     metrics_json["trigger"] = midturn ? "midturn" : "pre-turn";

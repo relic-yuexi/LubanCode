@@ -136,6 +136,14 @@ struct HierarchicalMetrics {
     int chunks = 1;             // map 块数;1 = 单次装下,没分层
     int reduce_passes = 0;      // 归并轮次(局部摘要仍超预算时的再归并)
     bool hierarchical = false;  // chunks > 1
+    // 观测账(第四期钩子,现在就记):
+    //   implementation——local-single(单次)/ local-hierarchical(分层),
+    //     对照观测账里的 implementation 口径;远端 compact 将来另加 "remote"。
+    //   source_digest——本次压缩输入(整份历史)的内容指纹:将来做"episode
+    //     关闭后后台预计算局部摘要、正式触发时按 digest 复用"(第四期)就靠
+    //     它判失效——digest 未变可复用,变了重算。现在只记不用。
+    std::string implementation = "local-single";
+    std::string source_digest;
 };
 
 // 一次压缩的完整产物:archive + manifest + 指标。

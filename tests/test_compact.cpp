@@ -875,3 +875,57 @@ TEST_CASE("CompactHierarchical: 整份历史都在热区(单轮巨型)→ 交给
     CHECK(result.error().message.find("装不下") != std::string::npos);
     CHECK(backend.captured_requests.empty());
 }
+
+// ---------------------------------------------------------------------------
+// 第四期观测钩子(只记不用):implementation 标注与 source_digest 指纹。
+// source_digest 是将来"episode 关闭后台预计算局部摘要、正式触发按 digest
+// 复用"的失效判据——同史必同值,改一字必变,这条钉死了才配当判据。
+// 近重复(MinHash/SimHash)与 embedding 召回按单子不做实现,只在
+// docs/sessions-and-context.md 观测账一节留了口。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("观测钩子: source_digest 同史同值、改一字即变;implementation 分层与否各标各的") {
+    // 单次路(local-single)。
+    {
+        ScriptedBackend backend;
+        backend.scripts.push_back(SummaryScript(kGoodSummary));
+        std::vector<api::Message> history;
+        history.push_back(UserText("小历史"));
+        const auto result = agent::CompactHierarchical(backend, "test-model", history, agent::CompactOptions{});
+        REQUIRE(result.has_value());
+        CHECK(result->metrics.implementation == "local-single");
+        CHECK_FALSE(result->metrics.source_digest.empty());
+        // 同一份历史再压一遍,digest 一致。
+        ScriptedBackend again;
+        again.scripts.push_back(SummaryScript(kGoodSummary));
+        const auto second = agent::CompactHierarchical(again, "test-model", history, agent::CompactOptions{});
+        REQUIRE(second.has_value());
+        CHECK(second->metrics.source_digest == result->metrics.source_digest);
+    }
+    // 分层路(local-hierarchical):digest 跟着历史内容走。
+    {
+        ScriptedBackend backend;
+        backend.scripts.push_back(TextScript(EpisodeText("壹")));
+        backend.scripts.push_back(TextScript(EpisodeText("贰")));
+        backend.scripts.push_back(TextScript(EpisodeText("叁")));
+        backend.scripts.push_back(TextScript(ReduceText()));
+        const auto history = BigHistory();
+        const auto result = agent::CompactHierarchical(backend, "test-model", history, SmallWindowOptions());
+        REQUIRE(result.has_value());
+        CHECK(result->metrics.implementation == "local-hierarchical");
+        const std::string digest_before = result->metrics.source_digest;
+        CHECK_FALSE(digest_before.empty());
+
+        // 改一字再压:digest 必变(复用判据的失效信号)。
+        std::vector<api::Message> changed = BigHistory();
+        std::get<api::TextBlock>(changed[0].content[0]).text += "X";
+        ScriptedBackend backend2;
+        backend2.scripts.push_back(TextScript(EpisodeText("壹")));
+        backend2.scripts.push_back(TextScript(EpisodeText("贰")));
+        backend2.scripts.push_back(TextScript(EpisodeText("叁")));
+        backend2.scripts.push_back(TextScript(ReduceText()));
+        const auto changed_result = agent::CompactHierarchical(backend2, "test-model", changed, SmallWindowOptions());
+        REQUIRE(changed_result.has_value());
+        CHECK(changed_result->metrics.source_digest != digest_before);
+    }
+}
