@@ -59,7 +59,8 @@ AgentPanelController::Outcome AgentPanelController::HandleKey(PanelKey key,
             }
             const int delta = key == PanelKey::Up ? -1 : 1;
             focus_ = true;
-            viewed_task_id_ = 0;  // 换选择 = 离开旧查看态,视口先回 main
+            // 只挪选择(❯),不碰查看态(◉):Up/Down 绝不偷换上方会话与
+            // composer 收件目标——Enter 才提交 viewed(规格"现场二"按键契约)。
             const int next = (index + delta + total_entries) % total_entries;
             selected_ = next;
             selected_task_id_ = next == 0 ? 0 : agent_task_ids[static_cast<std::size_t>(next - 1)];
@@ -87,22 +88,21 @@ AgentPanelController::Outcome AgentPanelController::HandleKey(PanelKey key,
             return out;
         }
         case PanelKey::Esc: {
-            if (viewed_task_id_ != 0) {
-                viewed_task_id_ = 0;  // 先退查看态:视口回 main,标签摘掉
+            if (viewed_task_id_ != 0 || focus_) {
+                // 一拍回 main(规格"现场二"按键契约):查看、选择、焦点一次
+                // 收干净,viewed=0、selected=0、收件目标必回 main——绝不留
+                // "屏上还在看代理、字却送给 main"的缝。
+                viewed_task_id_ = 0;
+                focus_ = false;
+                selected_ = 0;
+                selected_task_id_ = 0;
+                idle_expanded_ = false;
                 out.consumed = true;
                 out.redraw = true;
                 return out;
             }
             if (idle_expanded_) {
-                idle_expanded_ = false;  // 再收起闲置汇总(规格:Esc 收起)
-                out.consumed = true;
-                out.redraw = true;
-                return out;
-            }
-            if (focus_) {
-                focus_ = false;
-                selected_ = 0;
-                selected_task_id_ = 0;
+                idle_expanded_ = false;  // 只展开了闲置汇总:Esc 收起(规格:Esc 收起)
                 out.consumed = true;
                 out.redraw = true;
                 return out;
@@ -167,11 +167,12 @@ void AgentPanelController::OnEntriesChanged(const std::vector<int>& agent_task_i
         Reset();
         return;
     }
-    // 查看态的目标被清掉:强制收起,收件目标回 main(规格七)。
+    // 查看态的目标不在导航表里了(任务完成退场/被清理):只退查看态,视口
+    // 与 composer 收件目标回 main;选择不整份 Reset——落相邻运行项,没有
+    // 便落 main(规格"现场一"第 4 步)。
     if (viewed_task_id_ != 0 &&
         std::find(agent_task_ids.begin(), agent_task_ids.end(), viewed_task_id_) == agent_task_ids.end()) {
-        CloseView();
-        return;
+        viewed_task_id_ = 0;
     }
     const int found = selected_index(agent_task_ids);
     if (found > 0) {
@@ -262,6 +263,12 @@ bool AgentPanelController::ExpireArmed(std::chrono::steady_clock::time_point now
     return false;
 }
 
+// 活动坞退场判定(规格"现场一"新规矩):done 且结果已交回 main,或被用户
+// 中止——都退场。退场只关乎导航表,台账(TaskDetail/历史)照查,不清不删。
+bool DockEntryRetired(const AgentPanelEntry& entry) {
+    return entry.done_delivered || entry.cancelled;
+}
+
 std::vector<int> DockNavigationIds(const std::vector<AgentPanelEntry>& agents, bool idle_expanded,
                                    int viewed_task_id) {
     std::vector<int> ids;  // 不含 main:控制器契约里 main 隐式算第 0 项
@@ -269,7 +276,10 @@ std::vector<int> DockNavigationIds(const std::vector<AgentPanelEntry>& agents, b
     int idle_rows = 0;
     bool summary_slot = false;
     for (const auto& entry : agents) {
-        const bool idle = !entry.running && !entry.failed;
+        if (DockEntryRetired(entry)) {
+            continue;  // 退场条目根本不进导航表(结果交回 main 后底栏自动让位)
+        }
+        const bool idle = !entry.running && !entry.failed;  // 只剩 done 未投递的过渡行
         const bool viewed = viewed_task_id == entry.task_id;
         if (idle && !idle_expanded && idle_rows >= kMaxIdleRows && !viewed) {
             if (!summary_slot) {
@@ -310,22 +320,40 @@ AgentDockLayout LayoutAgentDock(const std::vector<AgentPanelEntry>& agents, int 
     std::vector<const AgentPanelEntry*> nav_entries;  // 与 navigation_ids 对齐(main/哨兵 = nullptr)
     nav_entries.reserve(out.navigation_ids.size());
     std::size_t agent_cursor = 0;
-    int kept_entries = 0;
     for (const int id : out.navigation_ids) {
         if (id == 0 || id == kIdleSummaryTaskId) {
             nav_entries.push_back(nullptr);
             continue;
         }
         while (agent_cursor < agents.size() && agents[agent_cursor].task_id != id) {
-            ++agent_cursor;  // 被折起来的条目:跳过
+            ++agent_cursor;  // 被折起来/退场的条目:跳过
         }
         nav_entries.push_back(agent_cursor < agents.size() ? &agents[agent_cursor] : nullptr);
         if (agent_cursor < agents.size()) {
             ++agent_cursor;
-            ++kept_entries;
         }
     }
-    out.hidden_idle = static_cast<int>(agents.size()) - kept_entries;
+    // 折进汇总行的闲置数单独数:退场条目(done+delivered/cancelled)没进
+    // 导航表,但绝不能被算成"折起来的闲置"——两本账分开(规格"现场一")。
+    {
+        int idle_rows = 0;
+        int folded = 0;
+        for (const auto& entry : agents) {
+            if (DockEntryRetired(entry)) {
+                continue;
+            }
+            const bool idle = !entry.running && !entry.failed;
+            const bool viewed = viewed_task_id == entry.task_id;
+            if (idle && !idle_expanded && idle_rows >= kMaxIdleRows && !viewed) {
+                ++folded;
+                continue;
+            }
+            if (idle) {
+                ++idle_rows;
+            }
+        }
+        out.hidden_idle = folded;
+    }
     out.idle_summary = out.hidden_idle > 0;
     out.total_count = static_cast<int>(out.navigation_ids.size());
 

@@ -30,8 +30,12 @@ struct AgentPanelEntry {
     std::string title;  // 真正短标题(AgentTaskSnapshot.title;旧任务空串,显示层退"未命名")
     std::string state;  // 状态摘要行("运行中(3 次工具调用 · …)")
     bool running = false;
-    bool failed = false;  // 失败或取消
+    bool failed = false;  // 失败或预算耗尽(留短错,等查看或清理)
     int task_id = 0;      // AgentTool 任务号;main/无 = 0
+    // 活动坞的退场账(规格"现场一"新规矩):done 且结果已交回 main,或被
+    // 用户中止——都从活动导航坞退场。退场只是不进导航表,台账与详情照查。
+    bool done_delivered = false;
+    bool cancelled = false;
 };
 
 // 面板动作,由应用层(InteractiveSession)接线到 AgentTool 的正式取消/清理
@@ -94,10 +98,11 @@ public:
     Outcome HandleKey(PanelKey key, const std::vector<int>& agent_task_ids, bool composer_empty,
                       std::chrono::steady_clock::time_point now);
 
-    // 条目增减(任务起停/清理/重排)后的修正:按 task id 找回选中;id 没了
-    // 就落到相邻条目(下标钳回界内),全没了收干净。查看态里目标条目还在
-    // 就保留(任务从 running 变终态不清标签——消息投递由 AgentTool 拒收);
-    // 目标被清掉则强制收起,收件目标回 main。
+    // 条目增减(任务起停/清理/重排/完成退场)后的修正:按 task id 找回选中;
+    // id 没了就落到相邻条目(下标钳回界内),全没了收干净。查看态里目标条目
+    // 还在就保留(任务从 running 变终态不清标签——消息投递由 AgentTool 拒
+    // 收);目标不在导航表里了(完成退场/被清)则只退查看态:视口与收件目
+    // 标回 main,选择落相邻运行项,不整份归零(规格"现场一")。
     void OnEntriesChanged(const std::vector<int>& agent_task_ids);
     // 查看态目标条目被清理/会话收场:强制收起,收件目标回 main。
     void CloseView();
@@ -206,6 +211,11 @@ struct AgentDockLayout {
     int hidden_idle = 0;        // 折进汇总行的闲置(完成)代理数
 };
 
+// 活动坞退场判定(纯函数,DockNavigationIds 与 LayoutAgentDock 共用一本账):
+// done+delivered 与 cancelled 退场——底栏只管正在干活的会话,任务坟场不归
+// 它管(规格"现场一"新规矩)。退场只是不进导航表,TaskDetail/历史台账照查。
+bool DockEntryRetired(const AgentPanelEntry& entry);
+
 // agents:后台子代理条目(main 由这里补成导航表第 0 项);selected:导航表
 // 下标(0 = main,可落在 kIdleSummaryTaskId 哨兵上);focused:未聚焦不画
 // 选中标记;max_visible_entries:窗口最多摆几条代理行(<=0 = 不限,
@@ -214,15 +224,14 @@ struct AgentDockLayout {
 // streaming:提示行用流式版文案;idle_expanded:闲置汇总是否展开;
 // viewed_task_id:正查看的任务号(0 = main),该行画 ◉ 且永不折叠。
 //
-// 折叠规矩(规格"闲置与终态收纳"):活动/失败/正在查看的行永不折叠;闲置
-// (完成)行最多单列三只,更多折成一行汇总;汇总行是导航哨兵,Enter 展开、
-// Esc 收起,展开/收起不改任何 task id。条目多于窗口时围着 selected 开窗,
-// 选中行永不因开窗消失。
-// 导航表(纯函数):条目经闲置折叠后的可导航 id 序列(不含 main——控制器
-// 契约与旧 PanelEntryIds 一致,main 隐式算第 0 项)。闲置(完成)条目最多
-// 单列三只,更多折成一行汇总哨兵(kIdleSummaryTaskId,插在首个被折条目的
-// 位置);活动/失败/正在查看(viewed_task_id)的行永不折叠。布局渲染与按键
-// 状态机共用这一份,选择永远落不进被折起来的区域。
+// 折叠与退场(规格"现场一"新规矩):退场条目(done+delivered/cancelled)
+// 根本不进导航表;其余条目里 running/failed/正在查看的行永不折叠,done
+// 未投递的过渡行最多单列三只,更多折成一行汇总哨兵(kIdleSummaryTaskId,
+// Enter 展开、Esc 收起,展开/收起不改任何 task id)。条目多于窗口时围着
+// selected 开窗,选中行永不因开窗消失。
+// 导航表(纯函数):退场过滤 + 闲置折叠后的可导航 id 序列(不含 main——
+// 控制器契约与旧 PanelEntryIds 一致,main 隐式算第 0 项)。布局渲染与按键
+// 状态机共用这一份,选择永远落不进被折起来/退场的区域。
 //
 // 导航坞只放导航:行、状态与提示。完整 prompt、工具调用流水、结论与错误
 // 全在上方会话视口里看(查看态由应用层的 transcript 换源负责,规格"现场

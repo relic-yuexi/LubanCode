@@ -914,7 +914,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         std::string value;
         for (const auto& entry : entries) {
             value += std::to_string(entry.task_id) + "\x1f" + entry.name + "\x1f" + entry.title +
-                     "\x1f" + entry.state + "\x1f" + (entry.running ? "R" : entry.failed ? "F" : "D") +
+                     "\x1f" + entry.state + "\x1f" +
+                     (entry.running ? "R" : entry.failed ? "F" : entry.cancelled ? "C"
+                                                        : entry.done_delivered ? "X" : "D") +
                      "\n";
         }
         value += "#" + std::to_string(snapshot.selected_task_id) + (snapshot.focused ? "f" : "-") +
@@ -1088,6 +1090,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 last_screen_height = size_info->height;
             }
             const auto entries = panel_entries();
+            const int viewed_before_tick = panel_session.SnapshotFor(nav_ids_for(entries)).viewed_task_id;
             const bool armed_expired = panel_session.ExpireArmed(std::chrono::steady_clock::now());
             std::string tag;
             const std::vector<std::string> dock = build_dock(entries, tag);
@@ -1095,6 +1098,20 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             const AgentPanelSession::Snapshot snapshot = panel_session.SnapshotFor(nav_ids_for(entries));
             const BottomChromeFrame frame = build_frame(queue_rows, dock, editor.CurrentRenderState(),
                                                          snapshot.selected_task_id);
+            if (viewed_before_tick != 0 && snapshot.viewed_task_id == 0) {
+                // 正在查看的任务完成退场(结果交回 main)/被清理:原子回
+                // main——上方视口换源、composer 目标回 main、选择落相邻运行
+                // 项,全在这一拍办完;旧代理正文不得继续躺在视口里冒充当前
+                // 会话(规格"现场一"五步)。完成结果的短行由主循环投递路
+                // 记一条有归属的 transcript 事件,这里不重复报。
+                retire_idle_chrome();
+                const auto& view_hook = AgentViewSwitchHookSlot();
+                if (view_hook) {
+                    view_hook(0);
+                }
+                reanchor_prompt_and_redraw();
+                continue;
+            }
             if (armed_expired || fingerprint_of(entries, frame, snapshot) != panel_fingerprint) {
                 redraw_with_panel(editor.CurrentRenderState(), entries);
             }
