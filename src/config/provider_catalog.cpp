@@ -143,7 +143,8 @@ std::expected<ProviderPreset, std::string> ParseProvider(const std::string& id, 
     if (!value.is_object()) return std::unexpected(where + " 必须是 JSON object");
     if (auto known = RejectUnknown(value, {"name", "description", "wire", "base_url", "key_env",
                                            "default_model", "model_reasoning_effort", "native_web_search",
-                                           "docs_url", "extra_body", "extra_headers", "models"}, where);
+                                           "stream_usage", "docs_url", "extra_body", "extra_headers", "models"},
+                                   where);
         !known.has_value()) return std::unexpected(known.error());
     ProviderPreset preset;
     preset.id = id;
@@ -176,6 +177,12 @@ std::expected<ProviderPreset, std::string> ParseProvider(const std::string& id, 
             return std::unexpected(where + ".native_web_search 必须是布尔值");
         }
         preset.native_web_search = value["native_web_search"].get<bool>();
+    }
+    if (value.contains("stream_usage")) {
+        if (!value["stream_usage"].is_boolean()) {
+            return std::unexpected(where + ".stream_usage 必须是布尔值");
+        }
+        preset.stream_usage = value["stream_usage"].get<bool>();
     }
     if (value.contains("docs_url")) {
         if (!value["docs_url"].is_string()) return std::unexpected(where + ".docs_url 必须是字符串");
@@ -425,6 +432,7 @@ ProviderConfig ProviderConfigFromPreset(const ProviderPreset& preset) {
     provider.model = preset.default_model;
     provider.model_reasoning_effort = preset.model_reasoning_effort;
     provider.native_web_search = preset.native_web_search;
+    provider.stream_usage = preset.stream_usage;
     provider.extra_body = preset.extra_body;
     provider.extra_headers = preset.extra_headers;
     if (const auto* model = preset.FindModel(preset.default_model); model != nullptr) {

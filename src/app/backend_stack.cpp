@@ -24,9 +24,13 @@ std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::C
             config.native_web_search, config.extra_body, headers);
     }
     if (config.wire == lubancode::config::Wire::ChatCompletions) {
+        // stream_usage 是 provider capability(DeepSeek 等家声明),请求体带
+        // stream_options.include_usage,见 chat/request.hpp。
+        lubancode::api::chat::ChatRequestOptions chat_options;
+        chat_options.stream_usage = config.stream_usage;
         return std::make_unique<lubancode::api::chat::ChatCompletionsBackend>(
             config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs,
-            config.extra_body, headers);
+            config.extra_body, headers, std::move(chat_options));
     }
     return std::make_unique<lubancode::api::anthropic::AnthropicBackend>(
         config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs,

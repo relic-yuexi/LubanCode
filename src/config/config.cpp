@@ -198,6 +198,7 @@ bool ApplyConfiguredActiveProvider(ConfigResult& result) {
         result.sources.extra_headers = source;
     }
     result.config.native_web_search = provider->native_web_search;
+    result.config.stream_usage = provider->stream_usage;
     return true;
 }
 
@@ -694,6 +695,12 @@ std::expected<std::vector<ProviderConfig>, std::string> ParseProvidersConfig(
                 return std::unexpected(prefix + " 里的 native_web_search 字段必须是布尔值");
             }
             provider.native_web_search = item["native_web_search"].get<bool>();
+        }
+        if (item.contains("stream_usage")) {
+            if (!item["stream_usage"].is_boolean()) {
+                return std::unexpected(prefix + " 里的 stream_usage 字段必须是布尔值");
+            }
+            provider.stream_usage = item["stream_usage"].get<bool>();
         }
         if (item.contains("extra_body")) {
             // 不直接复用 ParseExtraBodyConfig——那个函数的报错信息自己拼了
@@ -1847,6 +1854,10 @@ nlohmann::json ProvidersToJson(const std::vector<ProviderConfig>& providers) {
         // 回后不多出这个键。
         if (provider.native_web_search) {
             item["native_web_search"] = provider.native_web_search;
+        }
+        // stream_usage 同理(见 ProviderConfig::stream_usage)。
+        if (provider.stream_usage) {
+            item["stream_usage"] = provider.stream_usage;
         }
         // extra_body/extra_headers 同理:默认空,非空才落盘,没设置的旧
         // 配置写回后不多出这两个键。

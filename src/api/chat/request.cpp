@@ -43,7 +43,8 @@ std::string JoinedText(const Message& message) {
 
 }  // namespace
 
-nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& extra_body) {
+nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& extra_body,
+                                const ChatRequestOptions& options) {
     json body{{"model", request.model},
               {"stream", true},
               {"max_tokens", request.max_tokens}};
@@ -89,6 +90,13 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
         messages.push_back(std::move(assistant));
     }
     body["messages"] = std::move(messages);
+
+    // provider 声明了 stream_usage capability 才带 stream_options(有些兼容端
+    // 不认这个字段,乱发会被拒);extra_body 在最后浅合并,用户显式写的
+    // stream_options 整个压过这里的默认值。
+    if (options.stream_usage) {
+        body["stream_options"] = json{{"include_usage", true}};
+    }
 
     if (!request.reasoning_effort.empty()) {
         body["reasoning_effort"] = request.reasoning_effort;

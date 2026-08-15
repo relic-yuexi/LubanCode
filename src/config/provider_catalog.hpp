@@ -45,6 +45,10 @@ struct ProviderPreset {
     std::string default_model;
     std::string model_reasoning_effort;
     bool native_web_search = false;
+    // stream_usage:该端支持 Chat 流式的 stream_options.include_usage(在
+    // [DONE] 前多回一只完整 usage chunk)。有些兼容端不认 stream_options,
+    // 所以按 provider 声明,默认不发;DeepSeek 等家置真。
+    bool stream_usage = false;
     std::string docs_url;
     nlohmann::json extra_body = nlohmann::json::object();
     std::map<std::string, std::string> extra_headers;

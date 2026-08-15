@@ -49,3 +49,35 @@ TEST_CASE("Chat request: extra_body 最后覆盖内置字段") {
     CHECK(body["max_tokens"] == 77);  // 模型 variant 压过 provider 默认
     CHECK(body["stream_options"].is_null());
 }
+
+// ---------------------------------------------------------------------------
+// stream_options.include_usage:按 provider capability 发,默认不发;
+// 用户 extra_body 显式写了 stream_options 整个压过内置值。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Chat request: 默认不带 stream_options(兼容端未必认这个字段)") {
+    api::Request request;
+    request.model = "m";
+    const auto body = api::chat::BuildRequestJson(request);
+    CHECK(!body.contains("stream_options"));
+}
+
+TEST_CASE("Chat request: capability 开了就带 stream_options.include_usage") {
+    api::Request request;
+    request.model = "deepseek-v4-pro";
+    api::chat::ChatRequestOptions options;
+    options.stream_usage = true;
+    const auto body = api::chat::BuildRequestJson(request, nlohmann::json::object(), options);
+    CHECK(body["stream"] == true);
+    CHECK(body["stream_options"]["include_usage"] == true);
+}
+
+TEST_CASE("Chat request: 用户 extra_body 里的 stream_options 压过 capability 默认") {
+    api::Request request;
+    request.model = "m";
+    api::chat::ChatRequestOptions options;
+    options.stream_usage = true;
+    const auto body = api::chat::BuildRequestJson(
+        request, nlohmann::json{{"stream_options", nlohmann::json{{"include_usage", false}}}}, options);
+    CHECK(body["stream_options"]["include_usage"] == false);
+}
