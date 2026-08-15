@@ -7,7 +7,6 @@
 #include <thread>
 
 #include "platform/process.hpp"
-#include "platform/text_encoding.hpp"
 
 namespace lubancode::hooks {
 
@@ -310,22 +309,38 @@ HookEventResult HookDispatcher::EmitImpl(HookEvent event, const HookPayload& pay
                 record.outcome = "ok";
             }
         } else {
-            // v2:退出码三分 + stdout 逐事件 schema。shell 串形式的 hook 在
-            // Windows 走 cmd.exe(系统 ANSI 代码页),转换后仍可能带坏字节——
-            // 先过 UTF-8 清洗再解析,不让一只钩子的乱码把 JSON 解析打崩。
-            std::string stdout_text = exec.output;
-            if (!platform::IsValidUtf8(stdout_text)) {
-                stdout_text = platform::SanitizeExternalText(stdout_text);
+            // v2:退出码三分 + stdout 逐事件 schema。stdout/stderr 分开按明示
+            // 编码解码(先认 UTF-8,次选控制台输出页/系统 ANSI 页,命中标注;
+            // 都解不动留原始字节摘要),不让一只钩子的乱码把 JSON 解析打崩,
+            // 也不把中文报错无声替换成替换符。
+            const DecodedHookText stdout_decoded = DecodeHookStreamBytes(exec.stdout_bytes);
+            const DecodedHookText stderr_decoded = DecodeHookStreamBytes(exec.stderr_bytes);
+            record.stderr_encoding = stderr_decoded.encoding;
+            record.stderr_head = stderr_decoded.text;
+            record.stderr_truncated = stderr_decoded.text.size() > HookRunRecord::kStderrHeadBytes;
+            if (record.stderr_truncated) {
+                record.stderr_head.resize(HookRunRecord::kStderrHeadBytes);
             }
-            parsed = ParseStdoutJson(event, stdout_text);
+            if (stdout_decoded.from_raw_digest) {
+                // stdout 既不是 UTF-8 也解不出任何候选页:契约要求 UTF-8 JSON,
+                // 这里如实记 schema_error 并附原始字节摘要,不拿清洗后的文本
+                // 硬解析(那是无声替换)。
+                parsed.error = "stdout 不是合法 UTF-8(契约要求 UTF-8 JSON),原始字节摘要: " +
+                               stdout_decoded.text;
+            } else {
+                parsed = ParseStdoutJson(event, stdout_decoded.text);
+            }
             parsed_valid = parsed.ok;
-            const SingleOutcome judged = JudgeSingleRun(
-                event, exec.exit_code, exec.timed_out, exec.spawn_failed, parsed, /*stderr_text=*/exec.output);
+            const SingleOutcome judged = JudgeSingleRun(event, exec.exit_code, exec.timed_out, exec.spawn_failed,
+                                                        parsed, /*stderr_text=*/stderr_decoded.text);
             record.outcome = judged.outcome;
             record.decision = judged.decision;
             record.detail = judged.detail;
             if (parsed_valid && !parsed.system_message.empty()) {
                 record.detail = parsed.system_message;
+            }
+            if (stderr_decoded.from_raw_digest && !record.stderr_head.empty()) {
+                record.detail += ";stderr 编码未定,已留原始字节摘要";
             }
         }
 

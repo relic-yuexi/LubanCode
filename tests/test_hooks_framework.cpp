@@ -218,6 +218,47 @@ TEST_CASE("JudgeSingleRun: 退出码 0/2/1 三分矩阵") {
 }
 
 // ---------------------------------------------------------------------------
+// 子进程流的明示解码:UTF-8 优先,候选代码页命中要标注,拿不准留原始字节
+// 摘要,绝不无声替换。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("DecodeHookStreamBytes: UTF-8 直通,含中文与 emoji") {
+    const std::string bytes = "钩子报错:文件不存在 🎉";
+    const auto decoded = hooks::DecodeHookStreamBytes(bytes, {936});
+    CHECK(decoded.encoding == "utf-8");
+    CHECK_FALSE(decoded.from_raw_digest);
+    CHECK(decoded.text == bytes);
+}
+
+TEST_CASE("DecodeHookStreamBytes: GBK 字节按明示代码页解出并标注") {
+    // "中文" 的 GBK(cp936)编码:D6 D0 CE C4。不是合法 UTF-8。
+    const std::string gbk_bytes = std::string("\xD6\xD0\xCE\xC4", 4);
+    const auto decoded = hooks::DecodeHookStreamBytes(gbk_bytes, {936});
+    CHECK(decoded.encoding == "cp936");
+    CHECK_FALSE(decoded.from_raw_digest);
+    CHECK(decoded.text == "中文");
+}
+
+#ifdef _WIN32
+TEST_CASE("DecodeHookStreamBytes: 候选页也解不动 = 原始字节摘要,不替换") {
+    // 0xFF 0xFE 在 UTF-8 与 cp936 里都非法。
+    const std::string bad = std::string("\xFF\xFE", 2);
+    const auto decoded = hooks::DecodeHookStreamBytes(bad, {936});
+    CHECK(decoded.encoding == "unknown");
+    CHECK(decoded.from_raw_digest);
+    CHECK(decoded.text.find("FF FE") != std::string::npos);
+    // 摘要是证据,不是乱码替身:不得出现 U+FFFD。
+    CHECK(decoded.text.find("\xEF\xBF\xBD") == std::string::npos);
+}
+#endif
+
+TEST_CASE("DecodeHookStreamBytes: 空流按契约口径报 utf-8,文本为空") {
+    const auto decoded = hooks::DecodeHookStreamBytes("", {936});
+    CHECK(decoded.text.empty());
+    CHECK_FALSE(decoded.from_raw_digest);
+}
+
+// ---------------------------------------------------------------------------
 // 3) config:schema 2 解析 + 相加合并 + 迁移提示。
 // ---------------------------------------------------------------------------
 

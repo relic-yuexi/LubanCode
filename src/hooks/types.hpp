@@ -157,7 +157,16 @@ struct HookRunRecord {
     int duration_ms = 0;
     std::string detail;      // 阻断理由/stderr 摘要/错误说明
     std::string decision;    // 该 handler 单独表态:allow/deny/ask/none
+    // stderr 的明示解码账(v2 路径;legacy 走合并 output,不填):首段、截断
+    // 标志、解码口径。拿不准编码时 head 是原始字节摘要、encoding 为
+    // "unknown"——台账如实,不无声替换。
+    std::string stderr_head;         // stderr 首段(上限 kStderrHeadBytes,超出截断)
+    bool stderr_truncated = false;   // stderr 超首段上限被截
+    std::string stderr_encoding;     // "utf-8" / "cp936" / "unknown"
     std::int64_t timestamp_unix = 0;  // 落账时刻(秒)
+
+    // stderr 首段的展示上限(字节)。够放一段 PowerShell 报错,又不至于刷屏。
+    static constexpr std::size_t kStderrHeadBytes = 512;
 };
 
 // ---------------------------------------------------------------------------

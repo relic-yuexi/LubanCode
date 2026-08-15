@@ -207,6 +207,8 @@ process.stdin.on("end", () => {
 
 超时、起不来、坏 JSON、schema 不合、未知退出码,每一条都生成 `HookRunRecord`(outcome:ok/blocked/failure/timeout/spawn_failed/schema_error/skipped_*),`/hooks runs` 可查——**不只往 stderr 丢一行**。严禁把超时静默当放行:warn 策略也明报"这次门卫没起来"。`failure_policy: deny` 时,门卫没起来按拦截算(只在能拦的事件上生效)。
 
+每条 v2 运行记录还带 stderr 的明示解码账:事件、退出码、耗时之外,`stderr:` 一行列出解码口径(`utf-8` / `cp936` 这类)与 stderr 首段,超上限带 `…(截断)` 标志。宿主对子进程 stdout/stderr 都是"先认 UTF-8,次选控制台输出页/系统 ANSI 页,命中标注;都解不动就保留原始字节的十六进制摘要"——绝不把中文报错无声替换成替换符。
+
 退出码语义上,"未知退出码不一概当 deny,也不静默当成功":exit 1 = hook 自己坏了(failure,按 policy 走);只有 exit 2(v2)或任意非零(legacy pre_tool)才是真拦截。
 
 ## legacy adapter(旧四类)

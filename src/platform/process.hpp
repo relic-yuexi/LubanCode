@@ -35,6 +35,12 @@ namespace lubancode::platform {
 
 struct ProcessResult {
     std::string output;              // 合并捕获的 stdout/stderr,原始字节
+    // stdout/stderr 分开捕获的原始字节(RunProcessWithStdin 一族才有值;
+    // 其余入口两路本来就合一条管道,保持空串)。hooks 层拿它做"明示编码
+    // 解码"——stdout 按 UTF-8 契约解 JSON,stderr 解码后进台账,不与
+    // stdout 混作一锅。
+    std::string stdout_bytes;
+    std::string stderr_bytes;
     unsigned long exit_code = 0;
     bool timed_out = false;
     bool spawn_failed = false;
@@ -91,9 +97,11 @@ ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms,
                                std::size_t max_output_bytes = kDefaultMaxOutputBytes);
 
 // hooks schema 2 的 stdin JSON 通道(不经过 shell 的 exec form):起进程、
-// 把 stdin_data 一次性写进子进程 stdin 后关写端、合并捕获 stdout/stderr、
-// 等跑完或超时杀树。语义与 RunProcess 对齐(超时/超限杀整棵树、env 注入
-// UTF-8、Windows 输出按系统 ANSI 代码页转 UTF-8)。
+// 把 stdin_data 一次性写进子进程 stdin 后关写端、捕获 stdout/stderr、等跑完
+// 或超时杀树。与 RunProcess 的差别:stdout/stderr 各走一条管道分开捕获
+// (stdout_bytes/stderr_bytes,原始字节;合并账照旧写 output)。编码解码不
+// 在这里做——hooks 层按"先认 UTF-8、次选明示代码页"的契约解,cmd/PowerShell
+// 写出来的 ANSI/OEM 字节不至于被无声替换。
 //
 // stdin 的写入在独立线程:子进程不读 stdin(比如 `echo hi`)而数据大过
 // 管道缓冲时,写会阻塞——没关系,超时杀树后子进程的读端关闭,阻塞的写
@@ -104,7 +112,9 @@ ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const st
                                   std::size_t max_output_bytes = kDefaultMaxOutputBytes);
 
 // 同上,但按平台默认 shell 跑一条命令串(shell 字符串形式的 v2 hook 用;
-// legacy 钩子继续走 RunShellCommand,不吃 stdin)。
+// legacy 钩子继续走 RunShellCommand,不吃 stdin)。stdout/stderr 同样分开
+// 捕获为原始字节,不做代码页转换——cmd.exe 的 ANSI 输出由 hooks 解码层
+// 明示处理。
 ProcessResult RunShellCommandWithStdin(const std::string& command_utf8, const std::string& stdin_data,
                                        int timeout_ms, const EnvPairs& extra_env = {},
                                        std::size_t max_output_bytes = kDefaultMaxOutputBytes);

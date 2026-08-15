@@ -448,12 +448,14 @@ ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const st
     IgnoreSigpipeOnce();
 
     int out_pipe[2] = {-1, -1};
+    int err_pipe[2] = {-1, -1};
     int in_pipe[2] = {-1, -1};
     int exec_pipe[2] = {-1, -1};
-    if (pipe(out_pipe) != 0 || pipe(in_pipe) != 0 || pipe(exec_pipe) != 0) {
+    if (pipe(out_pipe) != 0 || pipe(err_pipe) != 0 || pipe(in_pipe) != 0 || pipe(exec_pipe) != 0) {
         result.spawn_failed = true;
         result.spawn_error = std::string("创建管道失败: ") + std::strerror(errno);
-        for (int fd : {out_pipe[0], out_pipe[1], in_pipe[0], in_pipe[1], exec_pipe[0], exec_pipe[1]}) {
+        for (int fd : {out_pipe[0], out_pipe[1], err_pipe[0], err_pipe[1], in_pipe[0], in_pipe[1], exec_pipe[0],
+                       exec_pipe[1]}) {
             if (fd >= 0) {
                 close(fd);
             }
@@ -463,6 +465,7 @@ ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const st
     fcntl(exec_pipe[1], F_SETFD, FD_CLOEXEC);
     // 父进程留的读端不给子进程继承(CLOEXEC),不然后代握着写端 EOF 等不到。
     fcntl(out_pipe[0], F_SETFD, FD_CLOEXEC);
+    fcntl(err_pipe[0], F_SETFD, FD_CLOEXEC);
     fcntl(exec_pipe[0], F_SETFD, FD_CLOEXEC);
     // stdin 写端留在父进程,不继承;读端给子进程。
     fcntl(in_pipe[1], F_SETFD, FD_CLOEXEC);
@@ -474,19 +477,21 @@ ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const st
     if (pid < 0) {
         result.spawn_failed = true;
         result.spawn_error = std::string("fork 失败: ") + std::strerror(errno);
-        for (int fd : {out_pipe[0], out_pipe[1], in_pipe[0], in_pipe[1], exec_pipe[0], exec_pipe[1]}) {
+        for (int fd : {out_pipe[0], out_pipe[1], err_pipe[0], err_pipe[1], in_pipe[0], in_pipe[1], exec_pipe[0],
+                       exec_pipe[1]}) {
             close(fd);
         }
         return result;
     }
     if (pid == 0) {
-        // 子进程:自立进程组,stdin 接管道读端,stdout/stderr 都指到输出管道
-        // 写端。只用 async-signal-safe 的调用。
+        // 子进程:自立进程组,stdin 接管道读端,stdout/stderr 各接各的管道
+        // 写端(hooks 层要分开解码,不混作一锅)。只用 async-signal-safe 的调用。
         setpgid(0, 0);
         dup2(in_pipe[0], STDIN_FILENO);
         dup2(out_pipe[1], STDOUT_FILENO);
-        dup2(out_pipe[1], STDERR_FILENO);
-        for (int fd : {in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1], exec_pipe[0], exec_pipe[1]}) {
+        dup2(err_pipe[1], STDERR_FILENO);
+        for (int fd : {in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1], err_pipe[0], err_pipe[1], exec_pipe[0],
+                       exec_pipe[1]}) {
             if (fd > STDERR_FILENO) {
                 close(fd);
             }
@@ -501,6 +506,7 @@ ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const st
     // 父进程:setpgid 两头都调,谁先跑到都不留窗口。
     setpgid(pid, pid);
     close(out_pipe[1]);
+    close(err_pipe[1]);
     close(in_pipe[0]);
     close(exec_pipe[1]);
 
@@ -510,6 +516,7 @@ ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const st
         int status = 0;
         waitpid(pid, &status, 0);  // 子进程 _exit(127) 了,收尸
         close(out_pipe[0]);
+        close(err_pipe[0]);
         close(in_pipe[1]);
         result.spawn_failed = true;
         result.spawn_error = "启动子进程失败(" + std::string(std::strerror(*exec_err)) + "): " + argv[0];
@@ -537,15 +544,20 @@ ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const st
         stdin_done.store(true);
     });
 
-    // 读线程:与 RunProcess 同款,poll + read,超限置 overflow 继续读空。
-    std::string output;
+    // 两条读线程:stdout 与 stderr 各自攒各自的原始字节(与 Windows 实现对
+    // 齐,hooks 层分开做明示解码)。超限判定按两路合计,超限后继续读空管道
+    // ——不读的话缓冲区一满子进程会卡在写上死不掉。
+    std::string stdout_bytes;
+    std::string stderr_bytes;
+    std::atomic<std::size_t> captured_total{0};
     std::atomic<bool> output_over_limit{false};
     std::atomic<bool> reader_stop{false};
-    std::atomic<bool> reader_done{false};
-    std::thread reader([&] {
+    std::atomic<bool> out_done{false};
+    std::atomic<bool> err_done{false};
+    const auto stream_reader = [&](int fd, std::string* sink, std::atomic<bool>* done) {
         char buf[4096];
         while (!reader_stop.load()) {
-            struct pollfd pfd{out_pipe[0], POLLIN, 0};
+            struct pollfd pfd{fd, POLLIN, 0};
             const int pr = poll(&pfd, 1, 100);
             if (pr < 0) {
                 if (errno == EINTR) {
@@ -556,23 +568,26 @@ ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const st
             if (pr == 0) {
                 continue;
             }
-            const ssize_t n = read(out_pipe[0], buf, sizeof(buf));
+            const ssize_t n = read(fd, buf, sizeof(buf));
             if (n < 0 && errno == EINTR) {
                 continue;
             }
             if (n <= 0) {
                 break;
             }
-            if (output.size() < max_output_bytes) {
-                const std::size_t room = max_output_bytes - output.size();
-                output.append(buf, std::min(static_cast<std::size_t>(n), room));
-                if (output.size() >= max_output_bytes) {
+            if (!output_over_limit.load()) {
+                sink->append(buf, static_cast<std::size_t>(n));
+                const std::size_t total = captured_total.fetch_add(static_cast<std::size_t>(n)) +
+                                          static_cast<std::size_t>(n);
+                if (total >= max_output_bytes) {
                     output_over_limit.store(true);
                 }
             }
         }
-        reader_done.store(true);
-    });
+        done->store(true);
+    };
+    std::thread out_reader([&] { stream_reader(out_pipe[0], &stdout_bytes, &out_done); });
+    std::thread err_reader([&] { stream_reader(err_pipe[0], &stderr_bytes, &err_done); });
 
     const bool has_timeout = timeout_ms > 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(has_timeout ? timeout_ms : 0);
@@ -607,11 +622,12 @@ ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const st
     killpg(pid, SIGKILL);
 
     const auto reader_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (!reader_done.load() && std::chrono::steady_clock::now() < reader_deadline) {
+    while ((!out_done.load() || !err_done.load()) && std::chrono::steady_clock::now() < reader_deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     reader_stop.store(true);
-    reader.join();
+    out_reader.join();
+    err_reader.join();
 
     // stdin 写线程:子进程死透了,write 早就 EPIPE 退出;限时兜底等一把。
     const auto stdin_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -636,12 +652,15 @@ ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const st
     }
 
     close(out_pipe[0]);
+    close(err_pipe[0]);
     if (in_pipe[1] >= 0) {
         close(in_pipe[1]);
     }
 
     result.exit_code = ExitCodeFromStatus(exit_status);
-    result.output = std::move(output);
+    result.output = stdout_bytes + stderr_bytes;  // 合并账(stdout 在前)
+    result.stdout_bytes = std::move(stdout_bytes);
+    result.stderr_bytes = std::move(stderr_bytes);
     result.output_truncated = output_over_limit.load();
     return result;
 }

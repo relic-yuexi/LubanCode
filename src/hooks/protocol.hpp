@@ -33,6 +33,23 @@ nlohmann::json BuildStdinPayload(const HookPayload& payload, const HookContext& 
                                  const std::string& hook_run_id);
 
 // ---------------------------------------------------------------------------
+// 子进程流的明示解码。契约:宿主写 stdin 用 UTF-8 无 BOM;hook 的
+// stdout/stderr 优先按 UTF-8 认,解不动时按候选代码页试(控制台输出页、
+// 系统 ANSI 页),命中哪一档都标注出来;全都解不动就保留原始字节的十六
+// 进制摘要——绝不无声替换成 U+FFFD。
+// ---------------------------------------------------------------------------
+struct DecodedHookText {
+    std::string text;              // 解码后的文本;拿不准时是原始字节摘要串
+    std::string encoding;          // "utf-8" / "cp936" 这类;拿不准时 "unknown"
+    bool from_raw_digest = false;  // true = 编码未定,text 只是原始字节摘要
+};
+
+// code_pages 显式给(单测用);缺省重载用平台候选(Windows:控制台输出页、
+// 系统 ANSI 页;POSIX:没有次选,非 UTF-8 即摘要)。空串进空串出。
+DecodedHookText DecodeHookStreamBytes(const std::string& bytes, const std::vector<unsigned int>& code_pages);
+DecodedHookText DecodeHookStreamBytes(const std::string& bytes);
+
+// ---------------------------------------------------------------------------
 // stdout 解析结果。一只 handler 的单份表态,归并之前的中间态。
 // ---------------------------------------------------------------------------
 struct HookOutput {

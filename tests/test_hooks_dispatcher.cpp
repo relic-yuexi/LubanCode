@@ -15,6 +15,7 @@
 #include "hooks/dispatcher.hpp"
 #include "hooks/loader.hpp"
 #include "hooks/protocol.hpp"
+#include "platform/paths.hpp"
 #include "platform/process.hpp"
 #include "platform/text_encoding.hpp"
 
@@ -558,6 +559,13 @@ std::string SinkPath(const char* name) {
     return (dir / name).string();
 }
 
+// JS 字符串里反斜杠是转义符且会丢( '\U' 趋近 'U' ),node 那支用正斜杠路径。
+std::string SinkForwardSlashes(const std::string& path) {
+    std::string out = path;
+    std::replace(out.begin(), out.end(), '\\', '/');
+    return out;
+}
+
 // 探一个解释器在不在(powershell/pwsh/python/node)。起不来或退出码非 0 都算不在,
 // 测试早退——单测不预设机器装了什么。
 bool InterpreterAvailable(const std::vector<std::string>& probe_args) {
@@ -669,7 +677,7 @@ TEST_CASE("dispatcher: 中文与 emoji 经各解释器明示 UTF-8 读原样到�
           "import sys, json\n"
           "payload = json.loads(sys.stdin.buffer.read().decode('utf-8'))\n"
           "with open(r'" +
-              sink + "', 'w', encoding='utf-8') as f:\n"
+              sink + "', 'w', encoding='utf-8', newline='') as f:\n"
               "    f.write(payload['prompt'])"}},
         {"node",
          {"node", "-e", "0"},
@@ -677,7 +685,7 @@ TEST_CASE("dispatcher: 中文与 emoji 经各解释器明示 UTF-8 读原样到�
           "let raw = []; process.stdin.on('data', c => raw.push(c)); "
           "process.stdin.on('end', () => { const payload = JSON.parse(Buffer.concat(raw).toString('utf8')); "
           "require('fs').writeFileSync('" +
-              sink + "', payload.prompt); });"}},
+              SinkForwardSlashes(sink) + "', payload.prompt); });"}},
     };
 
     for (const auto& interp : cases) {
@@ -701,3 +709,70 @@ TEST_CASE("dispatcher: 中文与 emoji 经各解释器明示 UTF-8 读原样到�
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// stdout/stderr 分开捕获 + 明示解码:stderr 噪声打不坏 stdout 的 JSON,
+// 中文 stderr 不乱码,超长 stderr 带截断标志。
+// ---------------------------------------------------------------------------
+
+#ifdef _WIN32
+TEST_CASE("dispatcher: stderr 分开捕获——stderr 噪声不污染 stdout JSON,中文不乱码") {
+    if (!InterpreterAvailable({"powershell", "-NoProfile", "-Command", "exit 0"})) {
+        return;
+    }
+    // 子进程:stderr 写一行中文噪声,stdout 写合法 JSON,退出码 0。合并捕获
+    // 的旧实现里 stderr 会混进 stdout,JSON 解析直接被打崩;分开后两不相扰。
+    const std::string ps = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
+                           "[Console]::Error.WriteLine('这是 stderr 的中文噪声,不该影响 stdout'); "
+                           "Write-Output '{\"continue\":true}'";
+    hooks::HookDispatcher dispatcher =
+        MakeDispatcher({MakeExecDefinition("powershell", {"-NoProfile", "-Command", ps})});
+    const auto merged = dispatcher.Emit(hooks::HookEvent::UserPromptSubmit, MakePromptPayload("查一下"));
+    REQUIRE(merged.records.size() == 1);
+    CHECK(merged.records[0].outcome == "ok");
+    CHECK(merged.records[0].stderr_encoding == "utf-8");
+    CHECK(merged.records[0].stderr_head.find("这是 stderr 的中文噪声") != std::string::npos);
+    CHECK_FALSE(merged.records[0].stderr_truncated);
+    // 无声替换是禁区:解码结果里不许冒出 U+FFFD。
+    CHECK(merged.records[0].stderr_head.find("\xEF\xBF\xBD") == std::string::npos);
+}
+
+TEST_CASE("dispatcher: PowerShell 默认编码的中文 stderr 按控制台代码页解出并标注") {
+    if (!InterpreterAvailable({"powershell", "-NoProfile", "-Command", "exit 0"})) {
+        return;
+    }
+    // PS 5.1 不设 OutputEncoding 时按控制台输出页写管道。控制台页不是 936 的
+    // 机器上中文在源头就变成了问号,无从复原——那种机器只断言"不乱码、有
+    // 标注",不断言内容。
+    const std::string ps = "[Console]::Error.WriteLine('中文报错内容回归')";
+    hooks::HookDispatcher dispatcher =
+        MakeDispatcher({MakeExecDefinition("powershell", {"-NoProfile", "-Command", ps})});
+    const auto merged = dispatcher.Emit(hooks::HookEvent::UserPromptSubmit, MakePromptPayload("查一下"));
+    REQUIRE(merged.records.size() == 1);
+    const auto& record = merged.records[0];
+    CHECK_FALSE(record.stderr_head.empty());
+    CHECK(record.stderr_encoding != "unknown");
+    CHECK(record.stderr_head.find("\xEF\xBF\xBD") == std::string::npos);
+    const std::vector<unsigned int> candidates = platform::ChildStreamCodePageCandidates();
+    if (!candidates.empty() && candidates.front() == 936) {
+        CHECK(record.stderr_encoding == "cp936");
+        CHECK(record.stderr_head.find("中文报错内容回归") != std::string::npos);
+    }
+}
+
+TEST_CASE("dispatcher: 超长 stderr 截断入账,带截断标志") {
+    if (!InterpreterAvailable({"powershell", "-NoProfile", "-Command", "exit 0"})) {
+        return;
+    }
+    const std::string ps = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
+                           "$line = 'x' * 200; "
+                           "for ($i = 0; $i -lt 5; $i++) { [Console]::Error.WriteLine($line) }";
+    hooks::HookDispatcher dispatcher =
+        MakeDispatcher({MakeExecDefinition("powershell", {"-NoProfile", "-Command", ps})});
+    const auto merged = dispatcher.Emit(hooks::HookEvent::UserPromptSubmit, MakePromptPayload("查一下"));
+    REQUIRE(merged.records.size() == 1);
+    const auto& record = merged.records[0];
+    CHECK(record.stderr_truncated);
+    CHECK(record.stderr_head.size() == hooks::HookRunRecord::kStderrHeadBytes);
+}
+#endif

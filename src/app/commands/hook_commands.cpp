@@ -82,6 +82,18 @@ void PrintRunRecords(HookDispatcher& dispatcher, int limit) {
         std::cout << "  #" << record.definition_id << " [" << record.event_name << "] " << record.outcome
                   << " 退出码 " << record.exit_code << " 耗时 " << record.duration_ms << "ms"
                   << " 来自 " << record.source_label << "\n";
+        // stderr 首段单列一行:解码口径标清(utf-8/cp936/unknown),超上限带
+        // 截断标志;编码未定时那行本身就是原始字节摘要,不是替换符。
+        if (!record.stderr_head.empty()) {
+            std::string head = record.stderr_head;
+            if (!record.stderr_encoding.empty()) {
+                head = "(" + record.stderr_encoding + ") " + head;
+            }
+            if (record.stderr_truncated) {
+                head += " …(截断)";
+            }
+            std::cout << "      stderr: " << head << "\n";
+        }
         if (!record.detail.empty()) {
             std::string detail = record.detail;
             if (detail.size() > 160) {
