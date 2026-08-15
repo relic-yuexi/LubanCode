@@ -236,6 +236,36 @@ std::expected<api::ImageBlock, ImageInputError> LoadImage(const std::string& inp
 
 }  // namespace
 
+// 内联 @词的判定规矩:扩展名属于 png/jpg/jpeg/gif/webp 才算图片候选;
+// @cache/@todo/@某人、邮箱、代码注解一类普通提及原样留在正文,不进图片
+// 入口(旧毛病:内联 @ 太宽、图片加载又太严,普通提及整条消息被格式错误
+// 截走)。明确图片模样但文件不存在/损坏的,仍照旧报错,不悄悄降成正文;
+// /image 是明确命令,继续走严格校验,不受这条收窄影响。
+namespace {
+
+bool LooksLikeImagePath(std::string_view path) {
+    std::size_t dot = path.find_last_of('.');
+    if (dot == std::string_view::npos) {
+        return false;
+    }
+    std::string_view extension = path.substr(dot);
+    auto equals = [&](std::string_view wanted) {
+        if (extension.size() != wanted.size()) {
+            return false;
+        }
+        for (std::size_t i = 0; i < extension.size(); ++i) {
+            const char left = static_cast<char>(std::tolower(static_cast<unsigned char>(extension[i])));
+            if (left != wanted[i]) {
+                return false;
+            }
+        }
+        return true;
+    };
+    return equals(".png") || equals(".jpg") || equals(".jpeg") || equals(".gif") || equals(".webp");
+}
+
+}  // namespace
+
 std::vector<std::string> ParseInlineImagePaths(std::string_view input) {
     std::vector<std::string> paths;
     for (std::size_t pos = 0; pos < input.size(); ++pos) {
@@ -252,6 +282,9 @@ std::vector<std::string> ParseInlineImagePaths(std::string_view input) {
             while (end < input.size() && input[end] != quote) {
                 ++end;
             }
+            if (end == input.size() || !LooksLikeImagePath(input.substr(begin, end - begin))) {
+                continue;  // 引号没闭合,或不是图片模样的提及:留在正文
+            }
             if (end == input.size()) {
                 continue;
             }
@@ -261,7 +294,7 @@ std::vector<std::string> ParseInlineImagePaths(std::string_view input) {
             while (end < input.size() && !IsSpace(input[end])) {
                 ++end;
             }
-            if (end > begin) {
+            if (end > begin && LooksLikeImagePath(input.substr(begin, end - begin))) {
                 paths.emplace_back(input.substr(begin, end - begin));
             }
             pos = end == 0 ? 0 : end - 1;

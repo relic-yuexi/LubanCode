@@ -46,6 +46,36 @@ TEST_CASE("图片路径识别: @路径和带空格的引号路径") {
     CHECK(paths[1] == "shots/last one.JPEG");
 }
 
+TEST_CASE("普通 @词不是图片:留在正文,不进图片入口") {
+    // 内联候选只认图片模样的扩展名;@cache/@todo/邮箱/代码注解原样留正文。
+    CHECK(cli::ParseInlineImagePaths("@cache").empty());
+    CHECK(cli::ParseInlineImagePaths("提到 @todo 再往下说").empty());
+    CHECK(cli::ParseInlineImagePaths("邮箱 foo@bar.com").empty());
+    CHECK(cli::ParseInlineImagePaths("代码 @decorator").empty());
+    CHECK(cli::ParseInlineImagePaths("@\"我的笔记\"").empty());
+    // 混合:普通提及留下,真图片只认那一枚。
+    const auto mixed = cli::ParseInlineImagePaths("先提 @cache,再看 @a.png");
+    REQUIRE(mixed.size() == 1);
+    CHECK(mixed[0] == "a.png");
+    // 大写后缀仍算图片候选(交给加载层判存在与格式)。
+    const auto upper = cli::ParseInlineImagePaths("看图 @shot.PNG");
+    REQUIRE(upper.size() == 1);
+    CHECK(upper[0] == "shot.PNG");
+
+    // 整条消息层面:正文逐字保留,零附件,不报错。
+    const auto plain = cli::PrepareImageInput("看到没有,@cache 里那句漂亮话,没交代答案怎么长出来的。");
+    REQUIRE(plain.has_value());
+    REQUIRE(plain->attachments.empty());
+    REQUIRE(plain->message.content.size() == 1);
+    CHECK(std::get<api::TextBlock>(plain->message.content[0]).text ==
+          "看到没有,@cache 里那句漂亮话,没交代答案怎么长出来的。");
+
+    // 明确图片模样但不存在:仍报文件不存在,不悄悄降成正文。
+    const auto absent = cli::PrepareImageInput("看图 @missing.png");
+    REQUIRE_FALSE(absent.has_value());
+    CHECK(absent.error().kind == cli::ImageInputErrorKind::NotFound);
+}
+
 TEST_CASE("图片 MIME 和 base64") {
     CHECK(cli::MediaTypeForPath("a.PNG") == "image/png");
     CHECK(cli::MediaTypeForPath("a.jpeg") == "image/jpeg");
@@ -122,7 +152,7 @@ TEST_CASE("图片入口报清楚的路径、类型、大小错误") {
     REQUIRE_FALSE(absent.has_value());
     CHECK(absent.error().kind == cli::ImageInputErrorKind::NotFound);
 
-    const auto unsupported = cli::PrepareImageInput("@notes.txt");
+    const auto unsupported = cli::PrepareImageInput("/image notes.txt");
     REQUIRE_FALSE(unsupported.has_value());
     CHECK(unsupported.error().kind == cli::ImageInputErrorKind::UnsupportedType);
 
