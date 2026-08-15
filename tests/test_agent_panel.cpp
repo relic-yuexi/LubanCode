@@ -1,7 +1,8 @@
-// 子代理面板纯逻辑(0.28.x"面板移到输入框上方"一单):窗口化布局、按键
-// 状态机(x 停止/清除四分支、Ctrl+X Ctrl+K 两段确认)、输入框上横线右端的
-// 代理短标签截断、上方行进帧后的 diff 行为。全部不碰终端——终端层的接线
-// 由 screen driver(手动)与 test_repaint_coord(协调层)各管各的。
+// 子代理导航坞纯逻辑(0.29.x"导航贴底并整帧去重"一单):折叠+窗口化布局、
+// 结构化行三列渲染(身份/中段/右状态)、按键状态机(x 停止/清除四分支、
+// Ctrl+X Ctrl+K 两段确认、闲置汇总展开/收起)、输入框上横线右端的代理短
+// 标签截断、上方行进帧后的 diff 行为。全部不碰终端——终端层的接线由
+// screen driver(手动)与 test_repaint_coord(协调层)各管各的。
 
 #include <doctest/doctest.h>
 
@@ -34,10 +35,34 @@ std::vector<AgentPanelEntry> MakeAgents(int count) {
     return out;
 }
 
+// 闲置(完成)条目:不 running、不 failed——折叠规矩只认这种。
+std::vector<AgentPanelEntry> MakeIdleAgents(int count) {
+    std::vector<AgentPanelEntry> out;
+    for (int i = 1; i <= count; ++i) {
+        AgentPanelEntry entry;
+        entry.task_id = i;
+        entry.name = "general-purpose #" + std::to_string(i);
+        entry.title = "任务 " + std::to_string(i);
+        entry.state = "完成(3 次工具调用 · 1k tokens · 5s)";
+        entry.running = false;
+        entry.failed = false;
+        out.push_back(std::move(entry));
+    }
+    return out;
+}
+
 PHalf Now() { return std::chrono::steady_clock::now(); }
 
 bool Contains(const std::string& haystack, const std::string& needle) {
     return haystack.find(needle) != std::string::npos;
+}
+
+std::string JoinLines(const std::vector<std::string>& lines) {
+    std::string joined;
+    for (const auto& line : lines) {
+        joined += line + "\n";
+    }
+    return joined;
 }
 
 // ids 表:task id 不必连续(清理/混排后常有空洞),按给定顺序就是列表顺序。
@@ -46,104 +71,126 @@ std::vector<int> Ids(std::initializer_list<int> ids) { return std::vector<int>(i
 }  // namespace
 
 // -----------------------------------------------------------------------
-// 布局:0/1/3/16 只、窗口化、计数行
+// 布局:0/1/3 只、窗口化、计数行
 // -----------------------------------------------------------------------
 
-TEST_CASE("面板布局:0 只子代理没有面板行") {
+TEST_CASE("坞布局:0 只子代理整坞消失,没有孤零零的操作提示") {
     SetLanguage("zh");
-    const auto layout = LayoutAgentPanel({}, 0, false, false, {}, 0, 0, 80, false);
-    CHECK(layout.lines.empty());
+    const auto layout = LayoutAgentDock({}, 0, false, false, {}, 0, 0, 80, false, false, false);
+    CHECK(layout.rows.empty());
+    CHECK(layout.navigation_ids.size() == 1);  // 只剩 main
 }
 
-TEST_CASE("面板布局:1/3 只全显,main 固定第 0 行") {
+TEST_CASE("坞布局:1/3 只全显,main 固定导航表第 0 项") {
     SetLanguage("zh");
-    const auto one = LayoutAgentPanel(MakeAgents(1), 0, false, false, {}, 0, 0, 80, false);
-    REQUIRE(one.lines.size() == 3);  // 提示行 + main + 1 只
-    CHECK(Contains(one.lines[1], "main"));
+    const auto one = LayoutAgentDock(MakeAgents(1), 0, false, false, {}, 0, 0, 80, false, false, false);
+    REQUIRE(one.rows.size() == 3);  // 提示行 + main + 1 只
+    CHECK(one.navigation_ids == Ids({0, 1}));
+    const auto one_lines = RenderAgentDockLines(one, 80);
+    CHECK(Contains(one_lines[1], "main"));
 
-    const auto three = LayoutAgentPanel(MakeAgents(3), 0, false, false, {}, 0, 0, 80, false);
-    REQUIRE(three.lines.size() == 5);  // 提示行 + main + 3 只
+    const auto three = LayoutAgentDock(MakeAgents(3), 0, false, false, {}, 0, 0, 80, false, false, false);
+    REQUIRE(three.rows.size() == 5);  // 提示行 + main + 3 只
     CHECK(three.total_count == 4);
     CHECK(three.hidden_above == 0);
     CHECK(three.hidden_below == 0);
 }
 
-TEST_CASE("面板布局:16 只不限高时全显,没有未展示计数") {
+TEST_CASE("坞布局:16 只不限窗口时全显,没有未展示计数") {
     SetLanguage("zh");
-    const auto layout = LayoutAgentPanel(MakeAgents(16), 0, false, false, {}, 0, 0, 80, false);
-    CHECK(layout.lines.size() == 1 + 17);
+    const auto layout = LayoutAgentDock(MakeAgents(16), 0, false, false, {}, 0, 0, 80, false, false, false);
+    CHECK(layout.rows.size() == 1 + 17);
     CHECK(layout.total_count == 17);
     CHECK(layout.hidden_above == 0);
     CHECK(layout.hidden_below == 0);
 }
 
-TEST_CASE("面板布局:窗口围着选中开,首尾都不丢") {
+TEST_CASE("坞布局:常态窗口最多单列 5 只,围着选中开,选中永不消失") {
     SetLanguage("zh");
     const auto agents = MakeAgents(16);
-    // 选中 0:窗口贴顶,下方写清还有几只。
-    auto head = LayoutAgentPanel(agents, 0, true, false, {}, 5, 0, 80, false);
+    // 选中 0:main + 窗口贴顶的 5 只代理。
+    auto head = LayoutAgentDock(agents, 0, true, false, {}, 5, 0, 80, false, false, false);
     CHECK(head.visible_first == 0);
-    CHECK(head.visible_count == 5);
+    CHECK(head.visible_count == 6);  // main + 5 只代理
     CHECK(head.hidden_above == 0);
-    CHECK(head.hidden_below == 12);
-    REQUIRE(head.lines.size() >= 2);
-    CHECK(Contains(head.lines[1], "17"));  // 总数写在窗口计数行
+    CHECK(head.hidden_below == 11);
+    const auto head_lines = RenderAgentDockLines(head, 80);
+    REQUIRE(head_lines.size() >= 2);
+    CHECK(Contains(head_lines[1], "17"));  // 总数写在窗口计数行
     // 选中 16(最后一只):窗口贴底。
-    auto tail = LayoutAgentPanel(agents, 16, true, false, {}, 5, 0, 80, false);
-    CHECK(tail.visible_first == 12);
-    CHECK(tail.hidden_above == 12);
+    auto tail = LayoutAgentDock(agents, 16, true, false, {}, 5, 0, 80, false, false, false);
+    CHECK(tail.visible_first == 0);  // main 恒在
+    CHECK(tail.hidden_above == 11);
     CHECK(tail.hidden_below == 0);
-    // 选中 8:窗口居中跟着走。
-    auto middle = LayoutAgentPanel(agents, 8, true, false, {}, 5, 0, 80, false);
-    CHECK(middle.visible_first == 6);
-    CHECK(middle.hidden_above == 6);
+    // 选中 8:窗口居中跟着走,窗口里必含选中那条。
+    auto middle = LayoutAgentDock(agents, 8, true, false, {}, 5, 0, 80, false, false, false);
+    CHECK(middle.hidden_above == 5);
     CHECK(middle.hidden_below == 6);
-    // 窗口里必含选中那条:第 0 行是提示、第 1 行是计数,列表从第 2 行起。
-    CHECK(Contains(middle.lines[2 + (8 - 6)], "\xE2\x9D\xAF"));  // ❯ 选中标记
+    const auto middle_lines = RenderAgentDockLines(middle, 80);
+    // 行序:提示(0)/计数(1)/main(2)/代理自 3 起,窗口自导航 6 到 10。
+    CHECK(Contains(middle_lines[3 + (8 - 6)], "\xE2\x9D\xAF"));  // ❯ 选中标记
 }
 
-TEST_CASE("面板布局:选中标记只在焦点态画;查看态详情行缀在列表后") {
+TEST_CASE("坞布局:选中标记只在焦点态画;查看态详情行缀在树后面") {
     SetLanguage("zh");
     const auto agents = MakeAgents(2);
-    const auto unfocused = LayoutAgentPanel(agents, 1, false, false, {}, 0, 0, 80, false);
-    for (const auto& line : unfocused.lines) {
+    const auto unfocused = LayoutAgentDock(agents, 1, false, false, {}, 0, 0, 80, false, false, false);
+    for (const auto& line : RenderAgentDockLines(unfocused, 80)) {
         CHECK_FALSE(Contains(line, "\xE2\x9D\xAF"));  // ❯
     }
     std::vector<std::string> detail{"任务说明: 查调用链", "工具 1: read_file"};
-    const auto viewing = LayoutAgentPanel(agents, 2, true, true, detail, 0, 0, 80, false);
-    bool saw_detail = false;
-    for (const auto& line : viewing.lines) {
-        if (Contains(line, "查调用链")) {
-            saw_detail = true;
-        }
-    }
-    CHECK(saw_detail);
-    CHECK(viewing.lines.size() == 1 + 3 + 1 + 2);  // 提示 + main/2 只 + 详情提示 + 2 行
+    const auto viewing = LayoutAgentDock(agents, 2, true, true, detail, 0, 0, 80, false, false, false, 2);
+    const auto viewing_lines = RenderAgentDockLines(viewing, 80);
+    CHECK(JoinLines(viewing_lines).find("查调用链") != std::string::npos);
+    CHECK(viewing_lines.size() == 1 + 3 + 1 + 2);  // 提示 + main/2 只 + 详情提示 + 2 行
 }
 
-TEST_CASE("面板布局:两段确认第一段按下时,首行提示换成确认话") {
+TEST_CASE("坞布局:正在查看的行换实心灯 ◉,不靠颜色") {
     SetLanguage("zh");
-    const auto agents = MakeAgents(1);
-    const auto calm = LayoutAgentPanel(agents, 0, false, false, {}, 0, 0, 80, false);
-    const auto armed = LayoutAgentPanel(agents, 0, false, false, {}, 0, 0, 80, true);
-    CHECK(calm.lines[0] != armed.lines[0]);
-    CHECK(Contains(armed.lines[0], "Ctrl+K"));
+    const auto agents = MakeAgents(2);
+    const auto viewing = LayoutAgentDock(agents, 2, true, true, {}, 0, 0, 80, false, false, false, 2);
+    const auto lines = RenderAgentDockLines(viewing, 80);
+    REQUIRE(lines.size() >= 3);
+    CHECK(Contains(lines[3], "\xE2\x97\x89"));  // ◉ 第 2 只正在查看
+    CHECK_FALSE(Contains(lines[2], "\xE2\x97\x89"));  // 第 1 只仍是 ◌ 运行中
 }
 
-TEST_CASE("面板布局:流式版首行提示带 Esc 逐层退出,与空闲版不同") {
+TEST_CASE("坞布局:两段确认第一段按下时,首行提示换成确认话") {
     SetLanguage("zh");
     const auto agents = MakeAgents(1);
-    const auto idle = LayoutAgentPanel(agents, 0, false, false, {}, 0, 0, 80, false, /*streaming=*/false);
-    const auto stream = LayoutAgentPanel(agents, 0, false, false, {}, 0, 0, 80, false, /*streaming=*/true);
-    CHECK(idle.lines[0] != stream.lines[0]);
-    CHECK(Contains(stream.lines[0], "Esc"));
+    const auto calm = LayoutAgentDock(agents, 0, false, false, {}, 0, 0, 80, false, false, false);
+    const auto armed = LayoutAgentDock(agents, 0, false, false, {}, 0, 0, 80, true, false, false);
+    const auto calm_lines = RenderAgentDockLines(calm, 80);
+    const auto armed_lines = RenderAgentDockLines(armed, 80);
+    CHECK(calm_lines[0] != armed_lines[0]);
+    CHECK(Contains(armed_lines[0], "Ctrl+K"));
+}
+
+TEST_CASE("坞布局:提示行随焦点收放;窄屏摘掉'停止全部'低频长文案") {
+    SetLanguage("zh");
+    const auto agents = MakeAgents(1);
+    const auto idle = LayoutAgentDock(agents, 0, false, false, {}, 0, 0, 100, false, false, false);
+    const auto idle_lines = RenderAgentDockLines(idle, 100);
+    CHECK(Contains(idle_lines[0], "Ctrl+X Ctrl+K"));  // 宽屏未聚焦:全套
+    const auto idle_narrow = RenderAgentDockLines(
+        LayoutAgentDock(agents, 0, false, false, {}, 0, 0, 60, false, false, false), 60);
+    CHECK_FALSE(Contains(idle_narrow[0], "Ctrl+X Ctrl+K"));
+    const auto focused = RenderAgentDockLines(
+        LayoutAgentDock(agents, 1, true, false, {}, 0, 0, 100, false, false, false), 100);
+    CHECK(Contains(focused[0], "Esc"));  // 已选中才添 Esc 返回
+    const auto stream = RenderAgentDockLines(
+        LayoutAgentDock(agents, 0, false, false, {}, 0, 0, 100, false, true, false), 100);
+    const auto idle_hint = RenderAgentDockLines(
+        LayoutAgentDock(agents, 0, false, false, {}, 0, 0, 100, false, false, false), 100);
+    CHECK(stream[0] != idle_hint[0]);  // 流式版提示与空闲版不同
     SetLanguage("en");
-    const auto stream_en = LayoutAgentPanel(agents, 0, false, false, {}, 0, 0, 80, false, /*streaming=*/true);
-    CHECK(Contains(stream_en.lines[0], "Esc"));
+    const auto stream_en = RenderAgentDockLines(
+        LayoutAgentDock(agents, 0, false, false, {}, 0, 0, 100, false, true, false), 100);
+    CHECK(Contains(stream_en[0], "Esc"));
     SetLanguage("zh");
 }
 
-TEST_CASE("面板布局:列表行只认真正 title,prompt 片段绝不出现(歪路封死)") {
+TEST_CASE("坞布局:列表行只认真正 title,prompt 片段绝不出现(歪路封死)") {
     SetLanguage("zh");
     AgentPanelEntry entry;
     entry.task_id = 1;
@@ -151,25 +198,23 @@ TEST_CASE("面板布局:列表行只认真正 title,prompt 片段绝不出现(�
     entry.title = "项目记忆升级一期";
     entry.state = "运行中(7 次工具调用 · 17.0k tokens · 43.4s)";
     entry.running = true;
-    const auto layout = LayoutAgentPanel({entry}, 1, true, false, {}, 0, 0, 100, false);
-    std::string joined;
-    for (const auto& line : layout.lines) {
-        joined += line + "\n";
-    }
+    const auto layout = LayoutAgentDock({entry}, 1, true, false, {}, 0, 0, 100, false, false, false);
+    const auto joined = JoinLines(RenderAgentDockLines(layout, 100));
     CHECK(Contains(joined, "项目记忆升级一期"));
     CHECK(joined.find("你在一个 C++ 项目的隔离") == std::string::npos);
 }
 
-TEST_CASE("面板布局:锚点上方空间不够时开窗截详情,首行提示永不丢") {
+TEST_CASE("坞布局:矮屏预算开窗截详情,首行提示永不丢") {
     SetLanguage("zh");
     const auto agents = MakeAgents(6);
     // 总预算 7 行:提示(1) + 条目(5) + 计数(1)——6 只代理放不满,数清就行。
-    const auto windowed = LayoutAgentPanel(agents, 0, false, false, {}, 0, 7, 80, false);
-    CHECK(windowed.lines.size() == 7);
-    CHECK(Contains(windowed.lines[0], "Ctrl+X Ctrl+K"));  // 提示行保住
+    const auto windowed = LayoutAgentDock(agents, 0, false, false, {}, 0, 7, 80, false, false, false);
+    CHECK(windowed.rows.size() == 7);
+    const auto windowed_lines = RenderAgentDockLines(windowed, 80);
+    CHECK(Contains(windowed_lines[0], "Enter"));  // 提示行保住
     CHECK(windowed.visible_count == 5);
     CHECK(windowed.hidden_below == 2);
-    CHECK(Contains(windowed.lines[1], "7"));  // 总数写明
+    CHECK(Contains(windowed_lines[1], "7"));  // 总数写明
 
     // 详情超预算:条目让位给详情,详情保头部(任务说明优先),末行写清
     // 未展示行数,整块不超预算。
@@ -177,19 +222,132 @@ TEST_CASE("面板布局:锚点上方空间不够时开窗截详情,首行提示�
     for (int i = 0; i < 10; ++i) {
         long_detail.push_back("详情行 " + std::to_string(i));
     }
-    const auto detail_view = LayoutAgentPanel(agents, 1, true, true, long_detail, 0, 12, 80, false);
-    CHECK(Contains(detail_view.lines[0], "Ctrl+X Ctrl+K"));  // 提示行还在
-    bool saw_head = false;
-    for (const auto& line : detail_view.lines) {
-        saw_head = saw_head || Contains(line, "详情行 0");
-    }
-    CHECK(saw_head);
-    CHECK(detail_view.lines.back().find("未展示") != std::string::npos);
-    CHECK(detail_view.lines.size() == 12);  // 不超预算
+    const auto detail_view = LayoutAgentDock(agents, 1, true, true, long_detail, 0, 12, 80, false, false, false);
+    const auto detail_lines = RenderAgentDockLines(detail_view, 80);
+    CHECK(Contains(detail_lines[0], "Enter"));  // 提示行还在
+    CHECK(JoinLines(detail_lines).find("详情行 0") != std::string::npos);
+    CHECK(detail_lines.back().find("未展示") != std::string::npos);
+    CHECK(detail_lines.size() == 12);  // 不超预算
 
     // 连提示行都摆不下(预算 < 2):整块不画,不挤输入框。
-    const auto none = LayoutAgentPanel(agents, 0, false, false, {}, 0, 1, 80, false);
-    CHECK(none.lines.empty());
+    const auto none = LayoutAgentDock(agents, 0, false, false, {}, 0, 1, 80, false, false, false);
+    CHECK(none.rows.empty());
+}
+
+// -----------------------------------------------------------------------
+// 闲置与终态收纳
+// -----------------------------------------------------------------------
+
+TEST_CASE("导航表:闲置(完成)最多单列三只,更多折成汇总哨兵;展开全回") {
+    SetLanguage("zh");
+    const auto agents = MakeIdleAgents(6);
+    const auto collapsed = DockNavigationIds(agents, /*idle_expanded=*/false, 0);
+    // 前三只闲置 + 汇总哨兵(表不含 main,main 隐式算第 0 项)。
+    CHECK(collapsed == Ids({1, 2, 3, kIdleSummaryTaskId}));
+    const auto expanded = DockNavigationIds(agents, /*idle_expanded=*/true, 0);
+    CHECK(expanded == Ids({1, 2, 3, 4, 5, 6}));
+    // 三只以内不折。
+    CHECK(DockNavigationIds(MakeIdleAgents(3), false, 0) == Ids({1, 2, 3}));
+}
+
+TEST_CASE("导航表:运行中/失败/正在查看的行永不折叠") {
+    SetLanguage("zh");
+    // 5 只闲置(本该只留 3 只 + 汇总),#5 正在查看:保住单列;折掉的只有 #4。
+    std::vector<AgentPanelEntry> agents = MakeIdleAgents(5);
+    const auto ids = DockNavigationIds(agents, false, /*viewed=*/5);
+    CHECK(ids == Ids({1, 2, 3, kIdleSummaryTaskId, 5}));
+    // 运行中/失败同例:6 只里 #2 运行、#4 失败,它们之外的闲置仍只留前三。
+    auto mixed = MakeIdleAgents(6);
+    mixed[1].running = true;
+    mixed[3].failed = true;
+    const auto mixed_ids = DockNavigationIds(mixed, false, 0);
+    CHECK(mixed_ids == Ids({1, 2, 3, 4, 5, kIdleSummaryTaskId}));
+}
+
+TEST_CASE("坞布局:6 只闲置只列前三只与一行汇总,汇总不占 5 行窗口的代理位") {
+    SetLanguage("zh");
+    const auto agents = MakeIdleAgents(6);
+    const auto layout = LayoutAgentDock(agents, 0, false, false, {}, 5, 0, 80, false, false, false);
+    CHECK(layout.idle_summary);
+    CHECK(layout.hidden_idle == 3);
+    const auto lines = RenderAgentDockLines(layout, 80);
+    int summary_count = 0;
+    for (const auto& line : lines) {
+        if (Contains(line, "另有 3 只闲置代理")) {
+            ++summary_count;
+        }
+    }
+    CHECK(summary_count == 1);  // 汇总行至多一份
+    CHECK(Contains(JoinLines(lines), "Enter 展开"));
+    // 展开后:全量在列,没有汇总行。
+    const auto open = LayoutAgentDock(agents, 0, false, false, {}, 0, 0, 80, false, false, true);
+    const auto open_lines = RenderAgentDockLines(open, 80);
+    CHECK(open_lines.size() == 1 + 1 + 6);
+    CHECK(JoinLines(open_lines).find("另有") == std::string::npos);
+}
+
+// -----------------------------------------------------------------------
+// 三列渲染:身份/中段/右状态
+// -----------------------------------------------------------------------
+
+TEST_CASE("渲染:三列起点稳定——耗时刷新不改身份列与标题起点") {
+    SetLanguage("zh");
+    auto agents = MakeAgents(3);
+    const auto before = LayoutAgentDock(agents, 0, false, false, {}, 0, 0, 120, false, false, false);
+    agents[1].state = "运行中(9 次工具调用 · 99.9k tokens · 512s)";
+    const auto after = LayoutAgentDock(agents, 0, false, false, {}, 0, 0, 120, false, false, false);
+    const auto lines_before = RenderAgentDockLines(before, 120);
+    const auto lines_after = RenderAgentDockLines(after, 120);
+    REQUIRE(lines_before.size() == lines_after.size());
+    for (std::size_t i = 0; i < lines_before.size(); ++i) {
+        // 每行里身份名字与标题的起点(字节位)不动——状态变长只往右顶状态列,
+        // 中段起点由 identity_width 定死,不随耗时抖动。
+        CHECK(lines_before[i].find("任务 " + std::to_string(static_cast<int>(i))) ==
+              lines_after[i].find("任务 " + std::to_string(static_cast<int>(i))));
+    }
+    CHECK(before.identity_width == after.identity_width);
+}
+
+TEST_CASE("渲染:右状态贴右,同行三段都在,整行不超屏宽") {
+    SetLanguage("zh");
+    const auto agents = MakeAgents(3);
+    const auto layout = LayoutAgentDock(agents, 1, true, false, {}, 0, 0, 100, false, false, false);
+    const auto lines = RenderAgentDockLines(layout, 100);
+    REQUIRE(lines.size() == 5);  // 提示 + main + 3 只
+    const std::string& row = lines[2];  // 第 1 只
+    CHECK(Contains(row, "general-purpose #1"));
+    CHECK(Contains(row, "任务 1"));
+    CHECK(Contains(row, "运行中"));
+    CHECK(DisplayWidthUtf8(row) <= 99);
+}
+
+TEST_CASE("渲染:超长短标题按显示宽截断,宽字符/窄屏不撑破") {
+    SetLanguage("zh");
+    AgentPanelEntry entry;
+    entry.task_id = 1;
+    entry.name = "general-purpose #1";
+    entry.title = "这一段任务说明写得特别长特别长,长得把整行都快挤没了还得继续写下去";
+    entry.state = "运行中(1 次工具调用 · 1k tokens · 2s)";
+    entry.running = true;
+    for (const int width : {30, 60, 100}) {
+        const auto layout = LayoutAgentDock({entry}, 1, true, false, {}, 0, 0, width, false, false, false);
+        for (const auto& line : RenderAgentDockLines(layout, width)) {
+            CHECK(DisplayWidthUtf8(line) <= width - 1);  // UTF-8 不截裂,宽度不破
+        }
+    }
+}
+
+TEST_CASE("渲染:身份列钳位 4~28,长名字吞不掉全屏") {
+    SetLanguage("zh");
+    AgentPanelEntry entry;
+    entry.task_id = 1;
+    entry.name = "general-purpose-with-a-very-long-name #1234567890";
+    entry.title = "标题";
+    entry.state = "运行中";
+    entry.running = true;
+    const auto layout = LayoutAgentDock({entry}, 1, true, false, {}, 0, 0, 120, false, false, false);
+    CHECK(layout.identity_width <= 28);
+    CHECK(layout.identity_width >= 4);
 }
 
 // -----------------------------------------------------------------------
@@ -241,7 +399,7 @@ TEST_CASE("状态机:正文非空时上下/Enter 都还给 composer,字母 x 只
     const auto up = c.HandleKey(PanelKey::Up, ids, /*composer_empty=*/false, Now());
     CHECK_FALSE(up.consumed);
     const auto enter = c.HandleKey(PanelKey::EnterView, ids, false, Now());
-    CHECK_FALSE(enter.consumed);
+    CHECK_FALSE(enter.consumed);  // Enter 切视图不得顺手提交 composer 正文(issue #24245)
     const auto stop = c.HandleKey(PanelKey::StopEntry, ids, false, Now());
     CHECK_FALSE(stop.consumed);
     CHECK_FALSE(stop.stop_current);
@@ -259,13 +417,42 @@ TEST_CASE("状态机:x 四分支——运行中停止、终态清除(应用层�
     c.HandleKey(PanelKey::Up, ids, true, Now());    // 回 main(0)
     const auto on_main = c.HandleKey(PanelKey::StopEntry, ids, true, Now());
     CHECK_FALSE(on_main.consumed);
-    // 子代理行:x 消费,动作目标按稳定 task id 交出(不按下标)。
+    // 子代理行:x 消费,动作目标按稳定 task id 交出(不按下标回查)。
     c.HandleKey(PanelKey::Down, ids, true, Now());  // 选中 7
     const auto on_agent = c.HandleKey(PanelKey::StopEntry, ids, true, Now());
     CHECK(on_agent.consumed);
     CHECK(on_agent.stop_current);
     CHECK(on_agent.stop_current_task_id == 7);
     CHECK(c.selected_task_id() == 7);  // 停止不清选中:等线程报终态再改灯
+}
+
+TEST_CASE("状态机:闲置汇总哨兵——Enter 展开、Esc 收起,不接停止/查看/收件") {
+    SetLanguage("zh");
+    AgentPanelController c;
+    const auto ids = Ids({0});  // 占位,下面用带哨兵的表
+    const auto nav = Ids({1, 2, 3, kIdleSummaryTaskId});
+    (void)ids;
+    c.HandleKey(PanelKey::Down, nav, true, Now());   // 选中 1
+    c.HandleKey(PanelKey::Down, nav, true, Now());   // 2
+    c.HandleKey(PanelKey::Down, nav, true, Now());   // 3
+    c.HandleKey(PanelKey::Down, nav, true, Now());   // 汇总哨兵
+    CHECK(c.selected_task_id() == kIdleSummaryTaskId);
+    // 哨兵不接停止/清除。
+    const auto stop = c.HandleKey(PanelKey::StopEntry, nav, true, Now());
+    CHECK_FALSE(stop.consumed);
+    CHECK_FALSE(stop.stop_current);
+    // Enter 只展开,不开查看态、不设收件目标。
+    const auto enter = c.HandleKey(PanelKey::EnterView, nav, true, Now());
+    CHECK(enter.consumed);
+    CHECK(c.idle_expanded());
+    CHECK_FALSE(c.detail_open());
+    CHECK_FALSE(c.target_task_id().has_value());
+    CHECK(c.selected_task_id() == kIdleSummaryTaskId);  // 展开不改选中
+    // Esc 收起汇总(还在焦点里)。
+    const auto esc = c.HandleKey(PanelKey::Esc, nav, true, Now());
+    CHECK(esc.consumed);
+    CHECK_FALSE(c.idle_expanded());
+    CHECK(c.focused());
 }
 
 TEST_CASE("状态机:Ctrl+X Ctrl+K 两段确认——成功、超时、Esc 撤销、错键撤销") {

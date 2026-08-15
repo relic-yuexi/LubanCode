@@ -1,9 +1,14 @@
-// 子代理面板的纯逻辑层(0.28.x"面板移到输入框上方"一单):条目数据、
-// 按键状态机(选择/查看/停止/两段确认)、窗口化布局、输入框上横线右端的
-// 代理短标签,全收在这一个不碰终端的模块里,单测钉在 tests/test_agent_panel.cpp。
+// 子代理导航坞的纯逻辑层(0.29.x"导航贴底并整帧去重"一单):条目数据、
+// 按键状态机(选择/查看/停止/两段确认/闲置汇总展开)、折叠与窗口化布局、
+// 结构化行渲染(身份/中段/右状态三列)、输入框上横线右端的代理短标签,
+// 全收在这一个不碰终端的模块里,单测钉在 tests/test_agent_panel.cpp。
 // 终端层(console_input.cpp)只做三件事:把 platform 按键翻成 PanelKey(唯一
-// 的键位缝,日后接 keymap 只动那一处)、每拍调 LayoutAgentPanel 拿行、把
+// 的键位缝,日后接 keymap 只动那一处)、每拍调 LayoutAgentDock 拿行、把
 // 状态机的动作转给应用层接好的 AgentTool 正式接口。
+//
+// 层级规矩(规格"固定布局"):导航坞画在 composer 下横线与状态栏之后、
+// 贴终端底部;待发队列仍属 composer 上方。布局层只产行与导航表,不知道
+// 自己被摆在哪——"向上长"的旧假设已删净,调用方决定底部次序。
 #pragma once
 
 #include <chrono>
@@ -57,8 +62,13 @@ enum class PanelKey {
     Other,
 };
 
+// 闲置汇总行的哨兵任务号:折叠后"另有 N 只闲置代理"占一个可导航位,Enter
+// 展开、Esc 收起。它不是真任务——x/停止/清除/收件目标对它一律无效。
+constexpr int kIdleSummaryTaskId = -1;
+
 // 空闲 composer 与流式监听共用的面板焦点/查看态/停止全部两段确认。纯逻辑,
-// 不知道终端。选择按稳定 task id 记(0 = main),任务增删/重排后按 id 修正,
+// 不知道终端。选择按稳定 task id 记(0 = main,-1 = 闲置汇总哨兵),任务
+// 增删/重排后按 id 修正,
 // 不靠易漂移的数组下标;取消/清除的动作目标也以 task id 交出(Outcome 里
 // 的 stop_current_task_id),绝不让调用方按下标回查。规矩(规格三、六节):
 //   - 正文非空时不抢上下/Enter,普通字母 x 只进 composer;
@@ -97,6 +107,9 @@ public:
     bool focused() const { return focus_; }
     bool detail_open() const { return detail_; }
     bool stop_all_armed() const { return armed_; }
+    // 闲置汇总行是否处于展开态(Enter 展开、Esc 收起;展开/收起不改任何
+    // 真任务的 task id 与消息目标)。
+    bool idle_expanded() const { return idle_expanded_; }
     // 当前选中的稳定任务号;0 = main。id 已不在表里时(增删后未修正的空档)
     // 按 main 算。
     int selected_task_id() const { return selected_task_id_; }
@@ -113,6 +126,7 @@ private:
     bool focus_ = false;
     bool detail_ = false;
     bool armed_ = false;
+    bool idle_expanded_ = false;
     int selected_task_id_ = 0;  // 稳定任务号;0 = main
     int selected_ = 0;          // 下标缓存(相邻回退与布局用),真实选择以 id 为准
     std::chrono::steady_clock::time_point arm_time_{};
@@ -139,6 +153,7 @@ public:
         bool focused = false;
         bool detail_open = false;
         bool stop_all_armed = false;
+        bool idle_expanded = false;
         int selected_index = 0;                 // main 计入的下标
         int selected_task_id = 0;               // 稳定任务号;0 = main
         std::optional<int> target_task_id;      // 查看态收件目标;nullopt = main
@@ -151,34 +166,76 @@ private:
 };
 
 // -----------------------------------------------------------------------
-// 窗口化布局(纯函数)
+// 导航坞布局(纯函数):折叠 + 窗口化 + 结构化行
 // -----------------------------------------------------------------------
 
-struct AgentPanelLayout {
-    std::vector<std::string> lines;  // 整块面板要画的行(首行是操作提示)
-    int visible_first = 0;           // 窗口里第一条的下标(0 = main)
-    int visible_count = 0;           // 窗口里摆了几条(main 计入)
-    int total_count = 0;             // 全表几条(main 计入)
-    int hidden_above = 0;
-    int hidden_below = 0;
+// 坞里的一行。先算好身份列宽/状态列宽,再把余宽交给中段——任务状态每秒
+// 跳一次,标题起点也不会左右乱晃(规格"整帧重画"一节)。
+struct AgentDockRow {
+    enum class Kind {
+        Hint,         // 首行操作提示(随焦点/宽度收放)
+        Note,         // 窗口计数行("共 N 只 · 上方未展示 …")
+        Entry,        // main 或一只子代理(三列结构)
+        IdleSummary,  // "另有 N 只闲置代理 · Enter 展开"(可导航哨兵)
+        DetailHint,   // 查看态提示行
+        DetailLine,   // 查看态详情正文行
+    };
+    Kind kind = Kind::Entry;
+    int task_id = 0;   // Entry:0=main/任务号;IdleSummary:kIdleSummaryTaskId
+    bool selected = false;  // pointer 标记(❯),未聚焦不画
+    std::string marker;     // "❯ " 或 "  "
+    std::string lamp;       // "● " main / "◌ " 运行 / "○ " 完成 / "× " 失败 / "◉ " 正在查看
+    std::string identity;   // 身份列:"main" / "general-purpose #2"
+    std::string middle;     // 中段:真正短标题(优先吃宽、优先截断)
+    std::string status;     // 右列:状态摘要(耗时/token/queued),右对齐
+    std::string text;       // Hint/Note/DetailHint/DetailLine 的整行文本
 };
 
-// agents:后台子代理条目(main 由这里补成第 0 项);selected:选中下标;
-// focused:未聚焦时不高亮(选中标记不画);detail_open/detail_lines:查看态
-// 详情行(调用方按需从 detail provider 取,这里不复制工具流水);
-// max_visible_entries:窗口最多摆几条条目(<=0 = 不限);
-// max_total_rows:整块面板(含首行提示/计数行/详情)最多占几行(<=0 = 不限)
-// ——锚点上方空间不够时在这里就开窗/截详情,首行操作提示永不丢;
-// width:终端列宽,每行按它截断;armed_stop_all:两段确认第一段已按下,
-// 首行提示换成确认话。
-// 条目多于窗口时围着 selected 开窗,顶上写清总数与上下未展示数;详情超
-// 预算保留头部(任务说明优先),末行写清未展示行数。
-// streaming=true 时首行操作提示用流式版文案(规格四:屏上提示跟当前层
-// 同步,流式里 Esc 的分层语义与空闲不同)。
-AgentPanelLayout LayoutAgentPanel(const std::vector<AgentPanelEntry>& agents, int selected, bool focused,
-                                  bool detail_open, const std::vector<std::string>& detail_lines,
-                                  int max_visible_entries, int max_total_rows, int width, bool armed_stop_all,
-                                  bool streaming = false);
+struct AgentDockLayout {
+    std::vector<AgentDockRow> rows;  // 渲染顺序:提示 →[计数]→ main+条目(+汇总)→[详情]
+    std::vector<int> navigation_ids;  // 导航表:[0(main), 任务号…, -1(汇总哨兵,若有)]
+    int visible_first = 0;           // 窗口里第一条的导航下标(0 = main)
+    int visible_count = 0;           // 窗口里摆了几条(main 计入)
+    int total_count = 0;             // 导航表几条(main 计入)
+    int hidden_above = 0;
+    int hidden_below = 0;
+    int identity_width = 0;  // 本帧身份列显示宽(4~28 钳位)
+    int status_width = 0;    // 本帧右状态列显示宽
+    bool idle_summary = false;  // 折叠中的闲置汇总行在导航表里
+    int hidden_idle = 0;        // 折进汇总行的闲置(完成)代理数
+};
+
+// agents:后台子代理条目(main 由这里补成导航表第 0 项);selected:导航表
+// 下标(0 = main,可落在 kIdleSummaryTaskId 哨兵上);focused:未聚焦不画
+// 选中标记;detail_open/detail_lines:查看态详情(调用方按需从 detail
+// provider 取);max_visible_entries:窗口最多摆几条代理行(<=0 = 不限,
+// 常态 5);max_total_rows:整坞(提示/计数/条目/详情)最多占几行(<=0 =
+// 不限,矮屏开窗预算);width:终端列宽;armed_stop_all:两段确认第一段;
+// streaming:提示行用流式版文案;idle_expanded:闲置汇总是否展开。
+//
+// 折叠规矩(规格"闲置与终态收纳"):活动/失败/正在查看的行永不折叠;闲置
+// (完成)行最多单列三只,更多折成一行汇总;汇总行是导航哨兵,Enter 展开、
+// Esc 收起,展开/收起不改任何 task id。条目多于窗口时围着 selected 开窗,
+// 选中行永不因开窗消失;详情超预算保头部,末行写清未展示数。
+// 导航表(纯函数):条目经闲置折叠后的可导航 id 序列(不含 main——控制器
+// 契约与旧 PanelEntryIds 一致,main 隐式算第 0 项)。闲置(完成)条目最多
+// 单列三只,更多折成一行汇总哨兵(kIdleSummaryTaskId,插在首个被折条目的
+// 位置);活动/失败/正在查看(viewed_task_id)的行永不折叠。布局渲染与按键
+// 状态机共用这一份,选择永远落不进被折起来的区域。
+std::vector<int> DockNavigationIds(const std::vector<AgentPanelEntry>& agents, bool idle_expanded,
+                                   int viewed_task_id);
+
+AgentDockLayout LayoutAgentDock(const std::vector<AgentPanelEntry>& agents, int selected, bool focused,
+                                bool detail_open, const std::vector<std::string>& detail_lines,
+                                int max_visible_entries, int max_total_rows, int width, bool armed_stop_all,
+                                bool streaming, bool idle_expanded, int viewed_task_id = 0);
+
+// 按本帧列宽把一行渲染成纯文本(不含 ANSI;宽度不够先截中段、再缩状态,
+// 绝不撑破 width)。三列起点由 layout.identity_width/status_width 定死。
+std::string RenderAgentDockRow(const AgentDockLayout& layout, const AgentDockRow& row, int width);
+
+// 整坞渲染成纯文本行(空闲 composer 与流式 footer 共用这一份)。
+std::vector<std::string> RenderAgentDockLines(const AgentDockLayout& layout, int width);
 
 // -----------------------------------------------------------------------
 // 输入框上横线右端的代理短标签(纯函数)

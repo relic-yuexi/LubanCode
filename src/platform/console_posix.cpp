@@ -285,6 +285,7 @@ std::optional<ScreenInfo> GetScreenInfo() {
             ScreenInfo info;
             info.width = static_cast<int>(ws.ws_col);
             info.height = static_cast<int>(ws.ws_row);
+            info.viewport_height = static_cast<int>(ws.ws_row);
             info.cursor_x = col - 1;
             info.cursor_y = row - 1;
             result = info;
@@ -401,6 +402,10 @@ std::optional<KeyInput> KeyReader::ReadOne() {
     }
     if (b0 == 0x18) {
         out.kind = KeyInput::Kind::CtrlX;  // 子代理面板:停止全部(两段确认第一段)
+        return out;
+    }
+    if (b0 == 0x0c) {
+        out.kind = KeyInput::Kind::CtrlL;  // 底栏自救:整屏重画
         return out;
     }
     if (b0 == 0x0b) {

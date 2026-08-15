@@ -108,6 +108,9 @@ enum class UiKeyAction {
     FocusNewer,    // 焦点往新走(0.17.0:焦点态内 Shift+Tab;态外 Shift+Tab 恒切确认档,不发这个)
     FocusView,     // Ctrl+E:聚焦查看当前焦点条目(已在聚焦态则返回)
     Escape,        // ESC:回调只在聚焦查看态消费它(返回会话画面),否则还给编辑器
+    // Ctrl+L 整屏重画:终端层已作废帧锚点、清了可视区,应用层把 transcript
+    // 快照重铺一遍(横幅+最近条目)。回调返回 true 表示真铺了正文。
+    RepaintScreen,
 };
 using TranscriptUiHandler = std::function<bool(UiKeyAction)>;
 
@@ -116,7 +119,7 @@ using TranscriptUiHandler = std::function<bool(UiKeyAction)>;
 // 走不到逐键路径,注册了也永远不会被调,天然无感。
 void SetTranscriptUiHandler(TranscriptUiHandler handler);
 
-// 会话内后台子代理面板(0.28.x 起画在输入框上方,不再借 hint_lines)。
+// 会话内后台子代理导航坞(0.29.x 起画在 composer 下横线与状态行之后贴底)。
 // 数据由应用层给,终端层只管选择与绘制:空 composer 按 ↑/↓ 进入代理焦点,
 // Enter 进查看态(同时把 composer 收件目标切到这只子代理),Esc 逐层退出,
 // x 停止/清除当前条目,Ctrl+X Ctrl+K 两段确认停止全部。主会话固定算第 0 项,

@@ -553,19 +553,27 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
 
     // 刮屏驱动器专用(tests/agent_panel_driver.cpp,不进 ctest):设
     // LUBANCODE_AGENT_PANEL_DEMO=N 时面板显示 N 只假代理,便于真控制台断言
-    // "代理行在上横线之上"。正常启动不设这个变量,provider 还是真数据。
+    // 导航坞贴底与残帧计数。正常启动不设这个变量,provider 还是真数据。
+    // LUBANCODE_AGENT_PANEL_DEMO_IDLE=K 让前 K 只处于完成态,驱动闲置折叠
+    // (完成行最多单列三只,更多折成一行汇总)。
     if (const auto demo = lubancode::platform::GetEnvVar("LUBANCODE_AGENT_PANEL_DEMO");
         demo.has_value() && !demo->empty()) {
         const int demo_count = std::max(1, std::atoi(demo->c_str()));
-        lubancode::cli::SetAgentPanelProvider([demo_count]() {
+        int demo_idle = 0;
+        if (const auto idle = lubancode::platform::GetEnvVar("LUBANCODE_AGENT_PANEL_DEMO_IDLE");
+            idle.has_value() && !idle->empty()) {
+            demo_idle = std::min(std::max(0, std::atoi(idle->c_str())), demo_count);
+        }
+        lubancode::cli::SetAgentPanelProvider([demo_count, demo_idle]() {
             std::vector<lubancode::cli::AgentPanelEntry> fake;
             for (int i = 1; i <= demo_count; ++i) {
                 lubancode::cli::AgentPanelEntry entry;
                 entry.task_id = i;
                 entry.name = "general-purpose #" + std::to_string(i);
                 entry.title = "演示任务 " + std::to_string(i);
-                entry.state = "运行中(2 次工具调用 · 1.2k tokens · 12s)";
-                entry.running = true;
+                entry.running = i > demo_idle;
+                entry.state = entry.running ? "运行中(2 次工具调用 · 1.2k tokens · 12s)"
+                                            : "完成(2 次工具调用 · 1.2k tokens · 12s)";
                 fake.push_back(std::move(entry));
             }
             return fake;
@@ -929,6 +937,14 @@ bool InteractiveSession::HandleTranscriptUi(lubancode::cli::UiKeyAction action) 
             std::cout << "\n" << theme.stats << tr("ui.back") << theme.reset << "\n";
             PrintBanner(config, theme);
             PrintRecentItems(5);
+            return true;
+        }
+        case cli::UiKeyAction::RepaintScreen: {
+            // Ctrl+L:终端层已清可视区、作废帧锚点;这里从 transcript 快照重铺
+            // 会话画面(横幅 + 最近条目),底栏由终端层随后画回。数据都在,
+            // 只是重铺——草稿/选择/收件目标在终端层状态里,不受影响。
+            PrintBanner(config, theme);
+            PrintRecentItems(count > 0 ? 10 : 0);
             return true;
         }
     }

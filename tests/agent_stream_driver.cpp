@@ -1,15 +1,15 @@
-// "真前台任务 + 真流式监听"专用刮屏驱动器(本单规格点名新增):与
-// agent_panel_driver 的差别——那只验空闲画面(假 provider),这只把真
-// lubancode.exe 连上进程内的假 anthropic 服务,跑一条真的前台 agent 工具
-// 调用,流式期间按 Up/Down/Enter/Esc 逐帧断言代理面板。不进 ctest,集成
-// 验证时手动跑:
+// "真前台任务 + 真流式监听"专用刮屏驱动器:与 agent_panel_driver 的差别
+// ——那只验空闲画面(假 provider),这只把真 lubancode.exe 连上进程内的
+// 假 anthropic 服务,跑一条真的前台 agent 工具调用,流式期间按 Up/Down/
+// Enter/Esc 逐帧断言代理导航坞:贴底层级(状态栏之下)、残帧计数(提示/
+// main/title 至多一份)、Ctrl+C 有字先清字。不进 ctest,集成验证时手动跑:
 //   agent_stream_driver <lubancode.exe 路径> <子进程工作目录> <报告文件路径>
 //
 // 剧本(请求按到达次序,假服务一次只收一条连接):
 //   1. 主模型:tool_use agent{title:"项目记忆升级一期", prompt:"你在一个
 //      C++ 项目的隔离 git worktree 里实施项目记忆系统升级……", run_in_background:false}
 //   2. 子代理:tool_use run_command(ping -n 8 127.0.0.1)——真工具、真耗时
-//      (~7s),面板的 Running 灯/工时/工具计数有东西可画;
+//      (~7s),坞的 Running 灯/工时/工具计数有东西可画;
 //   3. 子代理:文本结论"子代理干完了:检索阈值回归全绿";
 //   4. 主模型:文本收尾"主代理汇总完毕"。
 // 子进程用 --yes 起跑(run_command 不弹确认),env 全量指到假服务
@@ -110,6 +110,29 @@ int FindLastRow(const std::string& needle, int max_rows = 400) {
     return -1;
 }
 
+// 残帧计数(规格"测试"四):数遍整屏,不认"最后一次找到"。
+int CountRowsWith(const std::string& needle, int max_rows = 400) {
+    int count = 0;
+    for (int row = 0; row < max_rows; ++row) {
+        if (ReadRow(row).find(needle) != std::string::npos) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+int CountMainRows() {
+    int count = 0;
+    for (int row = 0; row < 400; ++row) {
+        const std::string text = ReadRow(row);
+        if (text.find("\xe2\x97\x8f main") != std::string::npos ||
+            text.find("\xe2\x97\x89 main") != std::string::npos) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 bool WaitForText(const std::string& needle, int timeout_ms, int* found_row = nullptr) {
     const DWORD deadline = GetTickCount() + static_cast<DWORD>(timeout_ms);
     while (GetTickCount() < deadline) {
@@ -186,6 +209,23 @@ int FindFooterInputRow(int max_rows = 400) {
         }
     }
     return -1;
+}
+
+// 导航文本(操作提示/代理行)绝不许出现在 composer 上横线之上。
+bool NoDockTextAboveComposer(int rule_row) {
+    for (int r = 0; r < rule_row; ++r) {
+        const std::string text = ReadRow(r);
+        if (text.find("\xe2\x86\x91/\xe2\x86\x93") != std::string::npos) {  // ↑/↓
+            return false;
+        }
+        if (text.find("general-purpose") != std::string::npos) {
+            return false;
+        }
+        if (text.find("\xe2\x97\x8f main") != std::string::npos) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // ------------------------- 进程内假 anthropic 服务 -------------------------
@@ -348,7 +388,7 @@ int StartFakeAnthropicServer() {
                                                "\xe3\x80\x82\",\"run_in_background\":false}"));
                     break;
                 case 2:
-                    // 真工具、真耗时:ping -n 8 约 7 秒,面板的 Running 灯有
+                    // 真工具、真耗时:ping -n 8 约 7 秒,坞的 Running 灯有
                     // 东西可画;随后子代理带着工具结果回来。
                     RespondSse(client_fd,
                                ToolUseTurn("toolu_sub", "run_command",
@@ -445,8 +485,9 @@ int wmain(int argc, wchar_t** argv) {
     CloseHandle(pi.hThread);
 
     // ---- 开场:空闲 composer 出来,程序活着 ----
-    Check(WaitForText("\xe2\x86\x91/\xe2\x86\x93", 30000) || FindFooterInputRow() >= 0,
-          "开场:空闲 composer(30s 内)出现");  // ↑/↓ 或任意框
+    Check(WaitForText("\xe9\x94\xae\xe5\x85\xa5\xe5\xb9\xb6\xe5\x9b\x9e\xe8\xbd\xa6", 30000) ||
+              FindFooterInputRow() >= 0,
+          "开场:空闲 composer(30s 内)出现");  // 键入并回车
     Sleep(500);
 
     // ---- 发一句正文:主模型(假)回 agent tool_use,前台子代理跑起来 ----
@@ -455,15 +496,14 @@ int wmain(int argc, wchar_t** argv) {
     SendKey(VK_RETURN, L'\r', 0);
 
     // 流式 footer 的输入框出现(分界线之后最底下的那个框)。
-    int footer_input = -1;
     Check(WaitForText("\xe9\x94\xae\xe5\x85\xa5\xe5\xb9\xb6\xe5\x9b\x9e\xe8\xbd\xa6", 30000),
           "流式:footer 输入行占位提示出现");  // 键入并回车
-    footer_input = FindFooterInputRow();
+    int footer_input = FindFooterInputRow();
     Check(footer_input > 0, "流式:按结构找到 footer 输入行");
 
-    // ---- 面板在 footer 输入框上方,title 可见,prompt 片段不在列表 ----
+    // ---- 导航坞在 footer 输入框与状态栏之下贴底(层级反转) ----
     int title_row = -1;
-    Check(WaitForText(kTitle, 15000, &title_row), "流式:面板行出现真正短 title");
+    Check(WaitForText(kTitle, 15000, &title_row), "流式:坞行出现真正短 title");
     int rule_row = -1;
     for (int r = 398; r >= 0; --r) {
         const std::string input_text = ReadRow(r + 1);
@@ -473,18 +513,31 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
     Check(rule_row > 0, "流式:composer 上横线定位到");
-    Check(title_row >= 0 && title_row < rule_row, "流式:title 行在输入框上横线之上(面板在 footer 里)");
+    Check(title_row >= 0 && title_row > rule_row + 3, "流式:title 行在状态栏之下(导航坞贴底)");
+    Check(NoDockTextAboveComposer(rule_row), "流式:composer 上横线之上没有任何导航文本");
     Check(FindLastRow(kPromptHead) < 0, "流式:prompt 开头整屏不出现(不冒充标题)");
     Check(FindLastRow("ctrl+o \xe5\xb1\x95\xe5\xbc\x80\xe6\x98\x8e\xe7\xbb\x86") < 0,
           "流式:旧三行状态块(ctrl+o 展开明细)不再出现");
 
-    // ---- Up 进面板焦点:选中标记出现在代理行 ----
+    // ---- 残帧计数:工具跑着、耗时/tokens 跳动,导航不复制 ----
+    Check(CountRowsWith("\xe2\x86\x91/\xe2\x86\x93") == 1, "流式:操作提示恰好一份");
+    Check(CountMainRows() == 1, "流式:main 行恰好一份");
+    for (int sample = 0; sample < 3; ++sample) {
+        Sleep(1500);  // 耗时 ~1s 一跳,采样跨多拍
+        Check(CountRowsWith("\xe2\x86\x91/\xe2\x86\x93") == 1,
+              "流式:耗时/token 刷新后操作提示仍恰好一份(第 " + std::to_string(sample + 1) + " 次采样)");
+        Check(CountRowsWith("general-purpose") <= 1,
+              "流式:坞行不随刷新复制(第 " + std::to_string(sample + 1) + " 次采样)");
+    }
+
+    // ---- Up 进坞焦点:选中标记出现在状态栏之下 ----
     SendKey(VK_UP, 0, 0);
     int marker_row = -1;
     Check(WaitForText("\xe2\x9d\xaf", 3000, &marker_row), "流式:空输入按上键,焦点标记出现");
-    Check(marker_row >= 0 && marker_row < rule_row, "流式:焦点标记在面板行,不在输入框里");
+    Check(marker_row >= 0 && marker_row > rule_row + 3, "流式:焦点标记在导航坞里(状态栏之下)");
 
-    // ---- Enter 进详情:上横线右端挂 title,完整 prompt 只在详情里 ----
+    // ---- Enter 进详情:上横线右端挂 title,完整 prompt 只在详情里;
+    //      Enter 被导航消费,不顺手把 composer 的字提交落队 ----
     SendKey(VK_RETURN, L'\r', 0);
     Check(WaitForText("\xe4\xbb\xbb\xe5\x8a\xa1\xe6\xa0\x87\xe9\xa2\x98", 3000),
           "流式:Enter 展开,详情出现\"任务标题\"");  // 任务标题
@@ -492,42 +545,54 @@ int wmain(int argc, wchar_t** argv) {
         int rule_with_tag = -1;
         for (int r = 398; r >= 0; --r) {
             const std::string input_text = ReadRow(r + 1);
-            if (IsRuleRow(r) && !input_text.empty() && input_text[0] == '>' && IsRuleRow(r + 2) && !IsRuleRow(r + 3)) {
+            if (IsRuleRow(r) && !input_text.empty() && input_text[0] == '>' && IsRuleRow(r + 2) &&
+                !IsRuleRow(r + 3)) {
                 rule_with_tag = r;
                 break;
             }
         }
-        Check(rule_with_tag > 0 &&
-                  ReadRow(rule_with_tag).find(kTitle) != std::string::npos,
+        Check(rule_with_tag > 0 && ReadRow(rule_with_tag).find(kTitle) != std::string::npos,
               "流式:详情态输入框上横线右端挂 title");
         Check(FindLastRow(kPromptHead) >= 0, "流式:详情里能看到完整 prompt(只有详情能看)");
     }
 
-    // ---- Esc 逐层退:先详情,再焦点,再按才是打断 ----
+    // ---- Ctrl+C 有字先清字:敲半句,Ctrl+C 只清草稿,不打断、不退出 ----
+    SendText("\xe5\x8d\x8a\xe5\x8f\xa5\xe8\xaf\x9d");  // 半句话
+    Sleep(400);
+    SendKey('C', 0, LEFT_CTRL_PRESSED);
+    Check(WaitForTextGone("\xe5\x8d\x8a\xe5\x8f\xa5\xe8\xaf\x9d", 3000), "流式 Ctrl+C:footer 草稿被清空");
+    Check(FindLastRow("\xe5\xb7\xb2\xe6\x89\x93\xe6\x96\xad") < 0,
+          "流式 Ctrl+C 清字:不打断当前轮(没有'[已打断]')");
+    Check(FindLastRow(kTitle) >= 0, "流式 Ctrl+C 清字:子代理还在跑(坞原样)");
+    Check(WaitForText("\xe9\x94\xae\xe5\x85\xa5\xe5\xb9\xb6\xe5\x9b\x9e\xe8\xbd\xa6", 3000),
+          "流式 Ctrl+C 清字:footer 占位提示回位");
+    DWORD alive = STILL_ACTIVE;
+    GetExitCodeProcess(pi.hProcess, &alive);
+    Check(alive == STILL_ACTIVE, "流式 Ctrl+C 清字:进程仍活(没进双击退出)");
+
+    // ---- Esc 逐层退:先详情,再焦点;两下都不打断整轮 ----
     SendKey(VK_ESCAPE, 0, 0);
     Check(WaitForTextGone("\xe4\xbb\xbb\xe5\x8a\xa1\xe6\xa0\x87\xe9\xa2\x98", 3000), "流式:Esc 先退详情");
     SendKey(VK_ESCAPE, 0, 0);
     Check(WaitForTextGone("\xe2\x9d\xaf", 3000), "流式:再 Esc 退代理焦点");
-    Check(WaitForText(kTitle, 3000) && FindLastRow("\xe5\xb7\xb2\xe6\x89\x93\xe6\x96\xad") < 0,
-          "流式:两下 Esc 都没有打断整轮(面板还在)");
+    Check(FindLastRow(kTitle) >= 0 && FindLastRow("\xe5\xb7\xb2\xe6\x89\x93\xe6\x96\xad") < 0,
+          "流式:两下 Esc 都没有打断整轮(坞还在)");
+    Check(CountRowsWith("general-purpose") <= 1, "流式:退详情后坞行至多一份(标签已摘)");
 
     // ---- 放开子代理:ping 跑完,Running 原地变完成,回合收场回空闲 ----
     // 注:子代理结论文本只在工具结果里,屏上摘要行是"子代理 N 轮 · M 次工具";
-    // 主代理收尾正文紧跟着被空闲 composer 的帧重画盖掉(面板钉在输入框上方,
-    // 矮窗里这是既有取舍)——所以这两条按"终态与回合收口"断言,不赌瞬时正文。
+    // 主代理收尾正文紧跟着被 footer 的整帧重画顶走——所以这两条按"终态与
+    // 回合收口"断言,不赌瞬时正文。
     Check(WaitForText("\xe6\xac\xa1\xe5\xb7\xa5\xe5\x85\xb7", 30000),
           "收尾:agent 条目终态摘要出现");  // "次工具"(⎿ 子代理 N 轮 · M 次工具)
-    Check(WaitForText("\xe5\xae\x8c\xe6\x88\x90(", 15000), "收尾:面板 Running 原地变完成");
-    // 回到空闲后:面板还挂着这条任务的终态,title 不跳、不重复。
-    Check(WaitForText(kTitle, 10000), "空闲:面板保住终态任务的 title");
+    Check(WaitForText("\xe5\xae\x8c\xe6\x88\x90(", 15000), "收尾:坞 Running 原地变完成");
+    // 回到空闲后:坞还挂着这条任务的终态,title 不跳、不重复、仍在下方。
+    Check(WaitForText(kTitle, 10000), "空闲:坞保住终态任务的 title");
+    Check(CountRowsWith("general-purpose") == 1, "空闲:坞行恰好一份(残帧归零)");
+    Check(CountMainRows() == 1, "空闲:main 恰好一份");
     {
-        int count = 0;
-        for (int r = 0; r < 400; ++r) {
-            if (ReadRow(r).find(kTitle) != std::string::npos) {
-                ++count;
-            }
-        }
-        Check(count >= 1 && count <= 2, "空闲:title 不重复铺屏(面板+详情之外无残骸)");
+        const int idle_input = FindFooterInputRow();
+        Check(idle_input > 0 && FindLastRow(kTitle) > idle_input + 3, "空闲:终态 title 仍在状态栏之下贴底");
     }
 
     // ---- 排查/留档:把当前屏面非空行倒进报告(不判定,只 INFO) ----
