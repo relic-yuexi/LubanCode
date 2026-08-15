@@ -932,18 +932,20 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         } else {
             sub_callbacks.on_tool_confirm = [](const std::string&, const nlohmann::json&) { return false; };
         }
-        sub_callbacks.on_usage = [this, task, foreground_hooks](const api::Usage& usage) {
+        sub_callbacks.on_usage = [this, task, foreground_hooks](const api::UsageReport& report) {
             {
                 std::lock_guard<std::mutex> lock(tasks_mutex_);
-                task->snapshot.input_tokens += usage.input_tokens;
-                task->snapshot.output_tokens += usage.output_tokens;
+                task->snapshot.input_tokens += report.usage.input_tokens;
+                task->snapshot.cache_read_tokens += report.usage.cache_read_tokens;
+                task->snapshot.cache_creation_tokens += report.usage.cache_creation_tokens;
+                task->snapshot.output_tokens += report.usage.output_tokens;
                 // 步数不在这里记:usage 回调只是"一次请求结束"的时机,拿它
                 // 猜步数,provider 漏 usage 就会少算——直接账在 RunTask 循环
                 // 里按 RunOutcome::steps_used 累计(命名规范第三批)。
                 TouchTasks();
             }
             if (foreground_hooks != nullptr && foreground_hooks->on_usage) {
-                foreground_hooks->on_usage(usage);
+                foreground_hooks->on_usage(report);
             }
         };
         if (foreground_hooks != nullptr) {
@@ -1169,6 +1171,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     if (task != nullptr) {
         std::lock_guard<std::mutex> lock(tasks_mutex_);
         task_outcome.input_tokens = task->snapshot.input_tokens;
+        task_outcome.cache_read_tokens = task->snapshot.cache_read_tokens;
+        task_outcome.cache_creation_tokens = task->snapshot.cache_creation_tokens;
         task_outcome.output_tokens = task->snapshot.output_tokens;
         task_outcome.elapsed_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - task->snapshot.start_time).count();
@@ -1297,6 +1301,8 @@ std::vector<AgentTaskSummary> AgentTool::TaskSummaries() const {
         summary.steps_used = task->snapshot.steps_used;
         summary.outcome_reason = task->snapshot.outcome.reason;
         summary.input_tokens = task->snapshot.input_tokens;
+        summary.cache_read_tokens = task->snapshot.cache_read_tokens;
+        summary.cache_creation_tokens = task->snapshot.cache_creation_tokens;
         summary.output_tokens = task->snapshot.output_tokens;
         summary.start_time = task->snapshot.start_time;
         summary.end_time = task->snapshot.end_time;
@@ -1522,9 +1528,9 @@ std::string AgentTool::RunningTasksRoster() const {
             continue;
         }
         if (out.empty()) {
-            out = "\n\n[运行中子代理名册] 以下子代理此刻仍在运行。名册每条用户消息到来时动态重算,"
-                  "以此为准,不要依赖历史记忆里的任务号。给某只转交增量用 agent_message 工具,"
-                  "task_id 用下面列出的号:\n";
+            out = "\n\n[运行中子代理名册] 以下子代理在附上本条消息的那一刻仍在运行。名册是随本条"
+                  "消息的快照,以最新一条消息所附的快照为准,不要依赖更早的快照。给某只转交增量用"
+                  " agent_message 工具,task_id 用下面列出的号:\n";
         }
         out += "#" + std::to_string(summary.id) + "  " +
                (summary.title.empty() ? "未命名子代理 #" + std::to_string(summary.id) : summary.title) +
@@ -1630,7 +1636,7 @@ std::vector<std::string> AgentTool::CompletionNoticeLines() const {
         if (snapshot.state == AgentTaskState::Running || snapshot.delivered) {
             continue;
         }
-        const std::int64_t tokens = snapshot.input_tokens + snapshot.output_tokens;
+        const std::int64_t tokens = snapshot.total_input_tokens() + snapshot.output_tokens;
         // 短因先行(规格"现场三"):耗尽/停下/失败·接口报错一眼分得开。
         std::string label = StateShortLabel(snapshot.state);
         const std::string reason = ReasonShortLabel(snapshot.outcome.reason);

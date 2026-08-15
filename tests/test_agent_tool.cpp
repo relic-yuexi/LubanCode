@@ -604,9 +604,9 @@ TEST_CASE("agent 工具:usage 累计到父回调,含请求次数") {
 
     tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
 
-    std::vector<api::Usage> usages;
+    std::vector<api::UsageReport> reports;
     tools::AgentTool::Hooks hooks;
-    hooks.on_usage = [&](const api::Usage& usage) { usages.push_back(usage); };
+    hooks.on_usage = [&](const api::UsageReport& report) { reports.push_back(report); };
     agent_tool.SetHooks(hooks);
 
     nlohmann::json input;
@@ -615,11 +615,14 @@ TEST_CASE("agent 工具:usage 累计到父回调,含请求次数") {
     const tools::Tool::Result result = agent_tool.execute(input);
 
     CHECK_FALSE(result.is_error);
-    REQUIRE(usages.size() == 2);  // 子代理内部两次独立请求,各触发一次
-    CHECK(usages[0].input_tokens == 100);
-    CHECK(usages[0].output_tokens == 20);
-    CHECK(usages[1].input_tokens == 50);
-    CHECK(usages[1].output_tokens == 30);
+    REQUIRE(reports.size() == 2);  // 子代理内部两次独立请求,各触发一次
+    CHECK(reports[0].usage.input_tokens == 100);
+    CHECK(reports[0].usage.output_tokens == 20);
+    CHECK(reports[1].usage.input_tokens == 50);
+    CHECK(reports[1].usage.output_tokens == 30);
+    // 子代理的逐步身份也跟着转上来(步号在子代理自己的 Run() 里数)。
+    CHECK(reports[0].step_index == 0);
+    CHECK(reports[1].step_index == 1);
 }
 
 TEST_CASE("agent 工具:不设 Hooks 也不崩(默认允许确认、不打印、不转发 usage)") {

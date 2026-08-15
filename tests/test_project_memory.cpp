@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "agent/loop.hpp"
+#include "agent/prefix.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "memory/memory_tool.hpp"
@@ -220,13 +221,18 @@ TEST_CASE("ProjectMemory: uv 与 yarn 偏好按问题召回并注入完整请求
     CaptureBackend backend;
     tools::ToolRegistry registry;
     agent::AgentLoop loop(backend, registry, "test-model", "stable system");
-    loop.SetTurnSystemSuffix(python_context);
+    loop.SetTurnContext(python_context);
     const auto outcome = loop.Run(python_query, agent::Callbacks{});
     REQUIRE(outcome.has_value());
     REQUIRE(backend.requests.size() == 1);
-    CHECK(backend.requests[0].system.find("stable system\n\n# 项目记忆") == 0);
-    CHECK(backend.requests[0].system.find("preference.python-package-manager") != std::string::npos);
-    CHECK(backend.requests[0].system.find("`uv add <package>`") != std::string::npos);
+    // 第五期起:记忆召回随本轮 user 消息尾部进请求,system 只留稳定材料。
+    CHECK(backend.requests[0].system == "stable system");
+    REQUIRE(backend.requests[0].messages[0].content.size() == 2);
+    const auto* recall = std::get_if<api::TextBlock>(&backend.requests[0].messages[0].content[1]);
+    REQUIRE(recall != nullptr);
+    CHECK(recall->text.find("# 项目记忆") == 0);
+    CHECK(recall->text.find("preference.python-package-manager") != std::string::npos);
+    CHECK(recall->text.find("`uv add <package>`") != std::string::npos);
 }
 
 TEST_CASE("ProjectMemory: 端到端 captured request——无命中不含索引,命中不进 history") {
@@ -250,36 +256,39 @@ TEST_CASE("ProjectMemory: 端到端 captured request——无命中不含索引,
     REQUIRE(store.EnqueueSave(request).has_value());
     REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
 
-    // 无命中:system 只有极短能力说明,不含 index.md,也不含任何主题正文。
+    // 无命中:本轮 user 消息只带极短能力说明,不含 index.md,也不含任何主题正文。
     {
         CaptureBackend backend;
         tools::ToolRegistry registry;
         agent::AgentLoop loop(backend, registry, "test-model", "stable system");
-        loop.SetTurnSystemSuffix(store.BuildTurnContext("部署到树莓派怎么做", repo));
+        loop.SetTurnContext(store.BuildTurnContext("部署到树莓派怎么做", repo));
         REQUIRE(loop.Run("部署到树莓派怎么做", agent::Callbacks{}).has_value());
         REQUIRE(backend.requests.size() == 1);
-        CHECK(backend.requests[0].system.find("stable system\n\n# 项目记忆") == 0);
-        CHECK(backend.requests[0].system.find("## Facts") == std::string::npos);
-        CHECK(backend.requests[0].system.find("## Preferences") == std::string::npos);
-        CHECK(backend.requests[0].system.find("uv add") == std::string::npos);
+        CHECK(backend.requests[0].system == "stable system");  // 动态上下文不进 system
+        CHECK(backend.requests[0].messages[0].content.size() == 2);
+        const auto* no_hit = std::get_if<api::TextBlock>(&backend.requests[0].messages[0].content[1]);
+        REQUIRE(no_hit != nullptr);
+        CHECK(no_hit->text.find("# 项目记忆") == 0);
+        CHECK(no_hit->text.find("## Facts") == std::string::npos);
+        CHECK(no_hit->text.find("## Preferences") == std::string::npos);
+        CHECK(no_hit->text.find("uv add") == std::string::npos);
     }
 
-    // 命中:system 含主题正文,但记忆不进 history(不随会话存档/导出走)。
+    // 命中:记忆正文随本轮 user 消息进请求视图(第五期起不再进 system),
+    // 后续请求原样重放——发过即钉住,不追改旧前缀。
     {
         CaptureBackend backend;
         tools::ToolRegistry registry;
         agent::AgentLoop loop(backend, registry, "test-model", "stable system");
-        loop.SetTurnSystemSuffix(store.BuildTurnContext("用 uv 加依赖", repo));
+        loop.SetTurnContext(store.BuildTurnContext("用 uv 加依赖", repo));
         REQUIRE(loop.Run("用 uv 加依赖", agent::Callbacks{}).has_value());
         REQUIRE(backend.requests.size() >= 1);
-        CHECK(backend.requests[0].system.find("`uv add <package>`") != std::string::npos);
-        for (const auto& message : loop.History()) {
-            for (const auto& block : message.content) {
-                if (const auto* text = std::get_if<api::TextBlock>(&block)) {
-                    CHECK(text->text.find("`uv add <package>`") == std::string::npos);
-                    CHECK(text->text.find("# 项目记忆") == std::string::npos);
-                }
-            }
+        CHECK(backend.requests[0].system == "stable system");
+        const auto* hit = std::get_if<api::TextBlock>(&backend.requests[0].messages[0].content[1]);
+        REQUIRE(hit != nullptr);
+        CHECK(hit->text.find("`uv add <package>`") != std::string::npos);
+        for (std::size_t i = 1; i < backend.requests.size(); ++i) {
+            CHECK(agent::IsAppendOnlySuccessor(backend.requests[i - 1], backend.requests[i]));
         }
     }
 }

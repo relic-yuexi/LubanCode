@@ -147,7 +147,7 @@ TEST_CASE("CompressWorkingView: 同文件同内容读三次,只留一份正文�
     CHECK(third.find("3 次") != std::string::npos);  // 看过三回
 }
 
-TEST_CASE("CompressWorkingView: 文件改版再读,不合并;旧版标 superseded 保头部") {
+TEST_CASE("CompressWorkingView: 文件改版再读不合并;新版自述替代,旧版表示不追改") {
     std::vector<api::Message> history;
     history.push_back(UserText("第一问"));
     AppendRead(history, "t1", "src/a.cpp", "旧版本内容:" + std::string(2000, 'O'));
@@ -162,16 +162,15 @@ TEST_CASE("CompressWorkingView: 文件改版再读,不合并;旧版标 supersede
     agent::StructuralCompressionStats stats;
     const auto view = agent::CompressWorkingView(history, options, stats);
 
-    // 两版指纹不同,绝不判重:新版正文原样。
-    CHECK(ResultTextAt(view, 6, "t2") == "新版本内容:" + std::string(2000, 'N'));
-    // 旧版标 superseded:保头部预览 + 指到新版事件(e4 是新版读取);
-    // 依赖旧版的决定(assistant 正文)原样未动。
-    const std::string old_view = ResultTextAt(view, 2, "t1");
-    CHECK(old_view.find("旧版本内容:") != std::string::npos);  // 头部预览在
-    CHECK(old_view.find("已改版") != std::string::npos);
-    CHECK(old_view.find("e4") != std::string::npos);  // 指到新版读取那枚事件
-    CHECK(old_view.size() < 2000);
-    CHECK(stats.superseded_observations == 1);
+    // 两版指纹不同,绝不判重:新版原文照发,自述"替代 e1"(e1 是旧版读取
+    // 那枚事件)——后来者只自述,绝不回头给 e1 补 superseded(前缀缓存
+    // 守恒单第六期:旧版表示在它首次进视图时已定形)。
+    const std::string new_view = ResultTextAt(view, 6, "t2");
+    CHECK(new_view.find("[此读取替代事件 e1 的旧版本]") == 0);
+    CHECK(new_view.find("新版本内容:" + std::string(2000, 'N')) != std::string::npos);
+    // 旧版全文钉死:一个字都不追改。
+    CHECK(ResultTextAt(view, 2, "t1") == "旧版本内容:" + std::string(2000, 'O'));
+    CHECK(stats.superseded_observations == 1);  // 换版本记了数,但不改旧账
     CHECK(std::get<api::TextBlock>(view[3].content[0]).text == "改一改");
 }
 
@@ -206,7 +205,7 @@ TEST_CASE("CompressWorkingView: 超长冷结果换 artifact 引用,头尾预览�
     CHECK(ResultTextAt(history, 2, "t1") == content);
 }
 
-TEST_CASE("CompressWorkingView: 热区(最后一轮)不碰,哪怕重复/超长") {
+TEST_CASE("CompressWorkingView: 热区不再豁免——首次定形,要么首次就预览要么一直全文") {
     std::vector<api::Message> history;
     history.push_back(UserText("第一问"));
     AppendRead(history, "t1", "src/a.cpp", std::string(2000, 'A'));
@@ -217,8 +216,40 @@ TEST_CASE("CompressWorkingView: 热区(最后一轮)不碰,哪怕重复/超长")
     agent::StructuralCompressionStats stats;
     const auto view = agent::CompressWorkingView(history, options, stats);
 
-    // 热区从"最后一问"起:t2 的正文原样保留。
-    CHECK(ResultTextAt(view, 5, "t2") == std::string(2000, 'A'));
+    // 第六期"首次定形":t2 在最后一轮(旧规矩的热区)也一样换引用——
+    // "热时全文、冷后换预览"正是追改来源,不再有热区豁免。
+    CHECK(stats.duplicate_groups == 1);
+    CHECK(ResultTextAt(view, 2, "t1") == std::string(2000, 'A'));  // 头一份全文钉死
+    CHECK(ResultTextAt(view, 5, "t2").find("e1") != std::string::npos);
+}
+
+TEST_CASE("CompressWorkingView: memo 钉死——同一枚结果两次渲染逐字节相同,由热转冷不追改") {
+    std::vector<api::Message> turn1;
+    turn1.push_back(UserText("第一问"));
+    AppendRead(turn1, "t1", "src/a.cpp", std::string(9000, 'A'));  // 超长
+
+    agent::StructuralCompressionOptions options;
+    agent::StructuralCompressionStats stats;
+    agent::ResultViewMemo memo;
+
+    // 首次进视图:超长,首次即 artifact(不带热区豁免),决策入 memo。
+    const auto view1 = agent::CompressWorkingView(turn1, options, stats, memo);
+    CHECK(ResultTextAt(view1, 2, "t1").find("[artifact") == 0);
+
+    // 下一轮外层用户消息来了,t1 跌进冷区——同一枚结果的表示一个字节
+    // 都不变(决策 memo 命中,原样重放)。这正是第六期要堵的追改源。
+    std::vector<api::Message> turn2 = turn1;
+    turn2.push_back(UserText("第二问"));
+    turn2.push_back(AssistantText("答"));
+    const auto view2 = agent::CompressWorkingView(turn2, options, stats, memo);
+    CHECK(ResultTextAt(view2, 2, "t1") == ResultTextAt(view1, 2, "t1"));
+
+    // 短结果同理:头一份全文钉死后,后续渲染不再改判。
+    std::vector<api::Message> turn3 = turn2;
+    AppendRead(turn3, "t2", "src/b.cpp", std::string(600, 'B'));
+    const auto view3 = agent::CompressWorkingView(turn3, options, stats, memo);
+    CHECK(ResultTextAt(view3, 2, "t1") == ResultTextAt(view1, 2, "t1"));
+    CHECK(ResultTextAt(view3, 6, "t2") == std::string(600, 'B'));
 }
 
 TEST_CASE("CompressWorkingView: 短结果不折腾(换标注反而更长)") {
@@ -237,7 +268,7 @@ TEST_CASE("CompressWorkingView: 短结果不折腾(换标注反而更长)") {
     CHECK(ResultTextAt(view, 5, "t2") == "short");
 }
 
-TEST_CASE("CompressWorkingView: 关掉热区保护后重复照收") {
+TEST_CASE("CompressWorkingView: protect_hot_zone 旧字段保留兼容,行为已由首次定形接管") {
     std::vector<api::Message> history;
     history.push_back(UserText("第一问"));
     AppendRead(history, "t1", "src/a.cpp", std::string(2000, 'A'));
@@ -245,7 +276,7 @@ TEST_CASE("CompressWorkingView: 关掉热区保护后重复照收") {
     AppendRead(history, "t2", "src/a.cpp", std::string(2000, 'A'));
 
     agent::StructuralCompressionOptions options;
-    options.protect_hot_zone = false;
+    options.protect_hot_zone = false;  // 解析照收,行为不再看它
     agent::StructuralCompressionStats stats;
     const auto view = agent::CompressWorkingView(history, options, stats);
     CHECK(stats.duplicate_groups == 1);

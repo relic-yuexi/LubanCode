@@ -649,6 +649,8 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             config.model = command.model.empty() ? provider->model : command.model;
             config.context_window_tokens = provider->context_window_tokens;
             config.native_web_search = provider->native_web_search;
+            config.stream_usage = provider->stream_usage;
+            config.reasoning_replay = provider->reasoning_replay;
             config.extra_body = provider->extra_body;
             config.extra_headers = provider->extra_headers;
             *current_model = config.model;

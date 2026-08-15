@@ -235,7 +235,7 @@ std::string TokenText(std::size_t tokens) { return FormatTokenCount(static_cast<
 std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::size_t tools_tokens_in,
                                                  std::size_t history_tokens_est, std::int64_t cache_read_tokens,
                                                  std::size_t window_tokens, std::size_t measured_used_tokens,
-                                                 const Theme& theme, int bar_width) {
+                                                 const Theme& theme, int bar_width, int cache_hit_percent) {
     // plain 主题全部字段是空串,拿 reset 当探针(真主题 reset 恒非空)。
     const bool plain = theme.reset.empty();
     if (bar_width < 0) {
@@ -297,7 +297,11 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
             history_row += "  " + tr("cmd.context.bd.history_derived");
         }
         if (cache_read_tokens > 0) {
-            history_row += "   " + trf("cmd.context.bd.cache", FormatTokenCount(cache_read_tokens));
+            // 命中率分母只取输入;没回报(-1)只摆命中量,不伪造 0%。
+            history_row += cache_hit_percent >= 0
+                               ? "   " + trf("cmd.context.bd.cache", FormatTokenCount(cache_read_tokens),
+                                            std::to_string(cache_hit_percent))
+                               : "   " + trf("cmd.context.bd.cache_no_ratio", FormatTokenCount(cache_read_tokens));
         }
         lines.push_back(std::move(history_row));
     }

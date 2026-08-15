@@ -48,13 +48,25 @@ std::size_t EstimateHistoryTokens(const std::vector<lubancode::api::Message>& hi
 // context_tracker 拿。
 void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracker& context_tracker,
                            std::size_t sys_tokens, std::size_t tools_tokens, std::size_t history_tokens,
-                           const lubancode::cli::Theme& theme) {
+                           const lubancode::cli::Theme& theme, int cache_epoch) {
     if (args.empty()) {
         const auto lines = lubancode::cli::FormatContextBreakdown(
             sys_tokens, tools_tokens, history_tokens, context_tracker.last_cache_read_tokens(),
-            context_tracker.window_tokens(), context_tracker.current_tokens(), theme);
+            context_tracker.window_tokens(), context_tracker.current_tokens(), theme,
+            /*bar_width=*/16, context_tracker.last_cache_hit_percent());
         for (const auto& line : lines) {
             std::cout << line << "\n";
+        }
+        // 前缀缓存账(前缀缓存守恒单):epoch 与最近一次请求的命中率一行
+        // 交代——命中跌下去时,用户看得出是主动换了哪根梁(epoch 断因在
+        // 回合统计行/逐步流水账里),不再笼统赖服务端。没实测过就明说。
+        if (context_tracker.last_total_input_tokens() > 0) {
+            const int hit_percent = context_tracker.last_cache_hit_percent();
+            std::cout << trf("cmd.context.epoch", cache_epoch,
+                             lubancode::cli::FormatTokenCount(context_tracker.last_cache_read_tokens()),
+                             lubancode::cli::FormatTokenCount(context_tracker.last_total_input_tokens()),
+                             hit_percent >= 0 ? std::to_string(hit_percent) : std::string("?"))
+                      << "\n";
         }
         // 口径说明:状态栏与这里读的是同一只 tracker,都是"最近一次主请求
         // 的占用",不是会话累计花销,也不含独立子代理的 token。最近一次请求

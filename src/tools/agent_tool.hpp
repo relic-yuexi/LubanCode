@@ -76,9 +76,17 @@ struct TaskOutcome {
     std::string last_tool;       // 最后一次工具名与结果摘要
     int steps_used = 0;
     int step_limit = 0;          // 0 = 不限步(一个 turn 内的模型请求数上限)
+    // api::Usage 统一口径:input 是"非缓存输入",完整输入 = 三项相加
+    // (见 TotalInputTokens)。展示一律用完整输入,别把缓存命中漏掉。
     std::int64_t input_tokens = 0;
+    std::int64_t cache_read_tokens = 0;
+    std::int64_t cache_creation_tokens = 0;
     std::int64_t output_tokens = 0;
     double elapsed_seconds = 0;
+
+    std::int64_t total_input_tokens() const {
+        return input_tokens + cache_read_tokens + cache_creation_tokens;
+    }
 };
 
 struct AgentTaskToolCall {
@@ -102,7 +110,10 @@ struct AgentTaskSnapshot {
     // 派出时写死的预算(0 = 不限步):面板可见,不等撞墙才揭晓(规格"现场四")。
     int step_limit = 0;
     int steps_used = 0;  // 已发生的模型请求数(RunOutcome 直接记账,不靠 usage 回调猜)
+    // api::Usage 统一口径(input=非缓存输入),完整输入 = 三项相加。
     std::int64_t input_tokens = 0;
+    std::int64_t cache_read_tokens = 0;
+    std::int64_t cache_creation_tokens = 0;
     std::int64_t output_tokens = 0;
     std::chrono::steady_clock::time_point start_time{};
     std::chrono::steady_clock::time_point end_time{};
@@ -113,6 +124,10 @@ struct AgentTaskSnapshot {
     // 消费方只看 state == Running 判"还在跑"。
     TaskOutcome outcome;
     bool delivered = false;
+
+    std::int64_t total_input_tokens() const {
+        return input_tokens + cache_read_tokens + cache_creation_tokens;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -155,7 +170,10 @@ struct AgentTaskSummary {
     int step_limit = 0;
     int steps_used = 0;
     TaskOutcomeReason outcome_reason = TaskOutcomeReason::None;  // 面板短因用
+    // api::Usage 统一口径(input=非缓存输入),完整输入 = 三项相加。
     std::int64_t input_tokens = 0;
+    std::int64_t cache_read_tokens = 0;
+    std::int64_t cache_creation_tokens = 0;
     std::int64_t output_tokens = 0;
     std::chrono::steady_clock::time_point start_time{};
     std::chrono::steady_clock::time_point end_time{};
@@ -164,6 +182,10 @@ struct AgentTaskSummary {
     // 结果是否已交回主会话(DrainCompletionNotices 置位)。面板的"退场"账
     // 用:done+delivered 的任务从活动导航坞退场,台账照查(规格"现场一")。
     bool delivered = false;
+
+    std::int64_t total_input_tokens() const {
+        return input_tokens + cache_read_tokens + cache_creation_tokens;
+    }
 };
 
 // SendTaskMessage 的收信结果。
@@ -204,9 +226,10 @@ public:
         // 这个纯粹用于展示,没有返回值、不影响子代理是否真的执行。
         std::function<void(const std::string& name, const nlohmann::json& input)> on_sub_tool_start;
 
-        // 子代理每次独立请求结束的 usage,原样转发给父级 on_usage——累计
-        // 进本轮 token 统计,请求次数也算进去。
-        std::function<void(const api::Usage& usage)> on_usage;
+        // 子代理每次独立请求结束的 usage(连同步号/请求 id 身份),原样
+        // 转发给父级 on_usage——累计进本轮 token 统计与逐步流水账,请求
+        // 次数也算进去。
+        std::function<void(const api::UsageReport& report)> on_usage;
 
         // M9:子代理内部的工具调用也要受 pre_tool/post_tool 钩子管——原样
         // 转发给父级的同名回调,子代理这边不重复实现匹配/执行逻辑。
@@ -309,10 +332,11 @@ public:
                                       TaskMessageSource source = TaskMessageSource::User);
 
     // 运行中子代理名册(给主模型的动态 context 用):每条外层用户消息到
-    // 来时现算一份,只列 task id/真标题/类型/待送数,不塞 prompt 与日志。
-    // 没有运行中任务时返回空串(不注入)。调用方把它拼进请求级 system 尾
-    // 段(AgentLoop::SetTurnSystemSuffix)——不进 history,compact 后照常
-    // 从台账重注入,不依赖摘要记任务号。
+    // 来时现算一份快照,只列 task id/真标题/类型/待送数,不塞 prompt 与
+    // 日志。没有运行中任务时返回空串(不注入)。调用方把它交给
+    // AgentLoop::SetTurnContext,随本轮 user 消息尾部进请求视图——发过
+    // 即钉住,不追改旧前缀;compact 后照常从台账重注入新快照,不依赖
+    // 摘要记任务号。
     std::string RunningTasksRoster() const;
 
     // 正式取消接口(面板 x / Ctrl+X Ctrl+K 接这里):只发停止信号,等任务

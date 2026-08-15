@@ -16,6 +16,9 @@ add_executable(lubancode_tests
   test_search.cpp
   test_context.cpp
   test_context_events.cpp
+  # 请求前缀守恒(前缀缓存单第三期):DiffRequests/IsAppendOnlySuccessor
+  # 纯函数 + 捕获 backend 钉默认工具往返与六桩断裂源。
+  test_request_prefix.cpp
   test_config.cpp
   test_model_catalog.cpp
   test_provider_catalog.cpp
@@ -153,6 +156,13 @@ if(WIN32)
 endif()
 
 add_test(NAME lubancode_tests COMMAND lubancode_tests)
+
+# DeepSeek 真机 e2e(前缀缓存守恒单):opt-in,不进 ctest——没设
+# DEEPSEEK_API_KEY 自己就跳过(exit 0),要跑先导钥匙:
+#   deepseek_e2e   (可配 DEEPSEEK_MODEL / DEEPSEEK_BASE_URL)
+add_executable(deepseek_e2e EXCLUDE_FROM_ALL deepseek_e2e.cpp)
+target_link_libraries(deepseek_e2e PRIVATE lubancode_core)
+target_compile_features(deepseek_e2e PRIVATE cxx_std_23)
 
 # 多行字符公式的视觉小样：直连正式渲染器，不进 ctest。
 add_executable(latex_box_experiment EXCLUDE_FROM_ALL latex_box_experiment.cpp)

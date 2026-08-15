@@ -1,11 +1,13 @@
 #include "agent/loop.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <iostream>
 #include <type_traits>
 #include <utility>
 #include <variant>
 
+#include "agent/prefix.hpp"
 #include "api/assembler.hpp"
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:工具结果的第一道编码关口
 #include "tools/schema_check.hpp"      // updatedInput 改写后的 schema 复检
@@ -141,16 +143,34 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     return dispatch_done(call.name, std::move(result));
 }
 
-// 步数将尽提醒的正文。remaining_steps 是"从当步(含)到硬上限还能走几步"
-// (ShouldNudgeStepLimit 判断为真时才会调这个,所以 remaining_steps 必然
-// <= kStepLimitNudgeThreshold)。附在 system 尾部而不是塞进 history——只影响
-// 当步请求怎么发,不污染对话历史(下一步 remaining_steps 变了,提示文本也
-// 该跟着变,history 里留一份旧提示没有意义)。
-std::string BuildStepLimitNudgeText(int remaining_steps) {
-    return "\n\n[系统提醒] 步数预算将尽,含本步在内最多还能再走 " + std::to_string(remaining_steps) +
-           " 步就会被强制停止(这是预算硬上限,不是真的不让你干了)。从现在起停止漫游式探索:"
-           "不要再开新的调查方向;把已经查到的事实、关键证据位置、排除掉的分支写成一个检查点,"
+// 步数将尽提醒的正文:固定文案,不带倒计时数字。前缀缓存守恒单第五期起
+// 不再改 system——提醒在"剩余步数第一次降到阈值"那一步,追加进当时尚未
+// 发出的尾部 user/tool-result 消息,随 history 留住:后头不改数字、不撤
+// 旧提醒,追加律不破。硬上限仍由循环计数执行,提示无需承担精确计数。
+std::string BuildStepLimitNudgeText() {
+    return "\n\n[系统提醒] 已进入轮数上限前的收尾区,请尽快收束:不要再开新的调查方向;"
+           "把已经查到的事实、关键证据位置、排除掉的分支写成一个检查点,"
            "并给出部分结论与下一步建议。到限后检查点就是交回主会话的全部,别把它带进坟墓。";
+}
+
+// 前缀 debug 开关(环境变量 LUBANCODE_DEBUG_PREFIX 任意非空值打开):
+// 每次请求跟上一份比,打一行断因与追加律。只打断因、位置与 hash,不打
+// system 正文、工具参数、记忆正文(前缀缓存守恒单"不做"节)。
+bool PrefixDebugEnabled() {
+#ifdef _WIN32
+    char* buffer = nullptr;
+    std::size_t size = 0;
+    const errno_t err = _dupenv_s(&buffer, &size, "LUBANCODE_DEBUG_PREFIX");
+    if (err != 0 || buffer == nullptr) {
+        return false;
+    }
+    const bool enabled = buffer[0] != '\0';
+    std::free(buffer);
+    return enabled;
+#else
+    const char* raw = std::getenv("LUBANCODE_DEBUG_PREFIX");
+    return raw != nullptr && raw[0] != '\0';
+#endif
 }
 
 }  // namespace
@@ -222,12 +242,22 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         return std::unexpected("用户消息为空，无法发送。");
     }
     history_.push_back(std::move(user_message));
+    // 动态上下文(记忆召回/任务名册)随本轮 user 进请求视图:发过即钉住,
+    // 不再每回合改 system 制造分叉点。落在消息尾部——本条消息尚未发出,
+    // 追加不算追改(前缀缓存守恒单第五期)。
+    if (!turn_context_.empty()) {
+        history_.back().content.push_back(api::TextBlock{turn_context_});
+    }
 
     // 步数与 stop reason 的活账:每次模型请求(每个 step)各记一笔,收场时随
     // RunOutcome 交出去——上层(子代理)按它分型 budget_exhausted/no_final_text
     // 等,不再靠解析错误文案猜。
     int steps_used = 0;
     std::string last_stop_reason;
+    // 前缀记账(agent/prefix.hpp):本步请求与上一份的追加律判定结果,
+    // 发请求前算好,报 usage 时随 UsageReport 交出去。
+    bool step_prefix_append_only = true;
+    std::string step_epoch_break_reason;
 
     // max_steps_per_turn_ <= 0 = 无上限:循环条件里第一个子句恒真,第二个
     // 子句(步数比较)压根不会被求值,step_index 就一直往上涨,靠 end_turn
@@ -249,14 +279,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         api::Request request;
         request.model = model_;
         request.system = system_prompt_;
-        if (!turn_system_suffix_.empty()) {
-            request.system += "\n\n" + turn_system_suffix_;
-        }
-        // 步数将尽提醒:只追加进这一步实际发出去的 system,不改 system_prompt_
-        // 本身、也不进 history_——下一步 step_index 变了,剩余步数跟着变,提示
-        // 该有就有、该消失就消失,没有"提示搭便车永久赖在历史里"的问题。
-        if (ShouldNudgeStepLimit(step_index, max_steps_per_turn_)) {
-            request.system += BuildStepLimitNudgeText(max_steps_per_turn_ - step_index);
+        // 步数将尽提醒(第五期):固定文案,在"剩余步数第一次降到阈值"那一步
+        // 追加进尚未发出的尾部消息(user 输入或刚攒完的 tool result),随
+        // history 留住——不改 system,不撤旧提醒,追加律不破。ShouldNudge-
+        // StepLimit 每次 Run 只真一次,天然只注一遍。
+        if (ShouldNudgeStepLimit(step_index, max_steps_per_turn_) && !history_.empty()) {
+            history_.back().content.push_back(api::TextBlock{BuildStepLimitNudgeText()});
         }
 
         // mid-turn 安全点:拼请求前先估 projected——system + 工具定义 + 全份
@@ -283,17 +311,47 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
             on_context_pressure_(pressure);
         }
 
-        // 无损结构压缩(第二期):只改发给模型的视图——冷区里重复的只读
-        // 工具结果换引用、被新版本覆盖的旧读取标 superseded、超长结果换
-        // artifact 引用(头尾预览)。活历史与 session JSONL 一字不动,
-        // tool use/result 配对天然不破(只重写 result 的 content 字符串)。
-        // 压完的视图更小,后面 TrimHistory 的字符安全网也更少真开刀。
-        const std::vector<api::Message>& view_source =
-            structural_compression_enabled_ ? CompressWorkingView(history_, structural_options_, structural_stats_)
-                                            : history_;
+        // 无损结构压缩(第六期"首次定形"):只改发给模型的视图——每枚
+        // tool result 第一次进请求视图时定形(短则全文、超长首次即 artifact
+        // 预览、重复自述指回、新版本自述替代),决策台账 epoch 内钉死,绝不
+        // 追改已经发过的表示。活历史与 session JSONL 一字不动,tool use/
+        // result 配对天然不破。压完的视图更小,后面字符安全网也更少真开刀。
+        std::vector<api::Message> view_source;
+        if (structural_compression_enabled_) {
+            view_source =
+                CompressWorkingView(history_, structural_options_, structural_stats_, result_view_memo_);
+        } else {
+            view_source = history_;
+        }
+
+        // 字符安全网 + sticky 视图:还没动手裁过,就按老规矩裁;真动手裁了
+        // (丢轮/截结果),把裁过的视图钉住,后续只往尾部追加新消息——不
+        // 再每请求重算"第一轮 + 最近 N 轮"让窗口一路滑(窗口滑就是追改
+        // 已发前缀)。全量 JSONL 照旧保留,sticky 只是模型眼下那本账。
         TrimReport trim_report;
-        request.messages =
-            TrimHistory(view_source, max_context_chars_, kDefaultKeepRecentTurns, &trim_report);
+        if (sticky_view_.has_value() && view_source.size() >= sticky_base_history_size_) {
+            std::vector<api::Message> pinned = *sticky_view_;
+            pinned.insert(pinned.end(), view_source.begin() + static_cast<std::ptrdiff_t>(sticky_base_history_size_),
+                          view_source.end());
+            if (EstimateHistoryBytes(pinned) > max_context_chars_) {
+                // 钉住的视图也装不下了(长会话总会到这一步):重裁一次,
+                // 换一副新形状并重新钉住——这是一次明确的 epoch break,
+                // 下面 trim_report 会把它记上(hard_trim)。
+                pinned = TrimHistory(std::move(pinned), max_context_chars_, kDefaultKeepRecentTurns, &trim_report);
+                sticky_view_ = pinned;
+                sticky_base_history_size_ = view_source.size();
+            }
+            request.messages = std::move(pinned);
+        } else {
+            std::vector<api::Message> trimmed =
+                TrimHistory(view_source, max_context_chars_, kDefaultKeepRecentTurns, &trim_report);
+            if (trim_report.trimmed_turns || trim_report.truncated_results) {
+                // 第一次真动手裁:钉住,开新 epoch 的账由下面的 hard_trim 记。
+                sticky_view_ = trimmed;
+                sticky_base_history_size_ = view_source.size();
+            }
+            request.messages = std::move(trimmed);
+        }
         request.max_tokens = max_tokens_;
         // 有损硬裁发生了(丢轮/截结果),显式通报——静默降级会让用户以为语
         // 义压缩已成功,模型其实已经看不到那段原文。
@@ -305,6 +363,13 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
             pressure.hard_truncated_results = trim_report.truncated_results;
             pressure.window_tokens = context_window_tokens_;
             on_context_pressure_(pressure);
+        }
+        // 有损硬裁真出手了:下一份请求的工作视图换了裁剪形状,前缀记账给
+        // 它点名(指纹 diff 只能报 old_message_changed,这里的因更准)。
+        if (trim_report.trimmed_turns || trim_report.truncated_results) {
+            if (pending_epoch_break_reason_.empty()) {
+                pending_epoch_break_reason_ = "hard_trim";
+            }
         }
         // 每轮现拼,不在 Run() 开头拼一次复用:tool_search 命中会在一次
         // Run() 中途把工具加进 loaded 集合(谓词的判定依据),下一轮请求
@@ -319,9 +384,46 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
                                     " 字符),裁剪与截断后仍装不下,无法发送。请用 /compact 压缩历史,或开新会话。");
         }
 
+        // 前缀记账:与上一份请求比追加律。断了就开新 cache epoch,并点名
+        // 断因——loop 自己知道的因(compact/hard trim)比指纹反推的准,
+        // 优先用它;没有显式因就按 diff 点名(model/system/tools/旧消息)。
+        // epoch 断不是失败,无名无姓地断才是失败(agent/prefix.hpp)。
+        {
+            const PrefixFingerprint fingerprint = FingerprintRequest(request);
+            step_prefix_append_only = true;
+            step_epoch_break_reason.clear();
+            if (last_prefix_.has_value()) {
+                const PrefixDiff diff = DiffFingerprints(*last_prefix_, fingerprint);
+                step_prefix_append_only = diff.append_only();
+                if (!step_prefix_append_only) {
+                    step_epoch_break_reason =
+                        pending_epoch_break_reason_.empty() ? diff.break_reason() : pending_epoch_break_reason_;
+                    ++cache_epoch_;
+                }
+                if (PrefixDebugEnabled()) {
+                    // 诊断行:只带断因/位置/条数,不带任何正文与 hash 以外的东西。
+                    std::cerr << "[prefix] epoch " << cache_epoch_ << " step " << step_index
+                              << " append_only=" << (step_prefix_append_only ? "true" : "false");
+                    if (!step_prefix_append_only) {
+                        std::cerr << " reason=" << step_epoch_break_reason << " old_message_changed_at="
+                                  << diff.old_message_changed_at;
+                    }
+                    std::cerr << " appended_messages=" << diff.appended_messages
+                              << " system_hash=" << fingerprint.system_hash.substr(0, 8)
+                              << " tools_hash=" << fingerprint.tools_hash.substr(0, 8) << "\n";
+                }
+            }
+            pending_epoch_break_reason_.clear();
+            last_prefix_ = std::move(fingerprint);
+        }
+
         api::MessageAssembler assembler;
         bool stream_error = false;
         std::string stream_error_message;
+        // MessageStart 的身份(request id/model)单记一笔:usage 报告要带
+        // 它,哪一步是哪个请求才有账可查(前缀缓存守恒单第一期)。
+        std::string stream_request_id;
+        std::string stream_model;
 
         const auto send_result = backend_.send_stream(
             request,
@@ -330,7 +432,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
                 std::visit(
                     [&](const auto& e) {
                         using T = std::decay_t<decltype(e)>;
-                        if constexpr (std::is_same_v<T, api::TextDelta>) {
+                        if constexpr (std::is_same_v<T, api::MessageStart>) {
+                            stream_request_id = e.id;
+                            stream_model = e.model;
+                        } else if constexpr (std::is_same_v<T, api::TextDelta>) {
                             if (callbacks.on_text_delta) {
                                 callbacks.on_text_delta(e.text);
                             }
@@ -400,7 +505,15 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         history_.push_back(assistant_message);
 
         if (callbacks.on_usage) {
-            callbacks.on_usage(assembler.usage());
+            api::UsageReport report;
+            report.usage = assembler.usage();
+            report.step_index = step_index;
+            report.request_id = stream_request_id;
+            report.model = stream_model;
+            report.cache_epoch = cache_epoch_;
+            report.epoch_break_reason = step_epoch_break_reason;
+            report.prefix_append_only = step_prefix_append_only;
+            callbacks.on_usage(report);
         }
 
         // 防御:stop_reason 说的是 end_turn(或者干脆是空的——终止帧丢了),

@@ -697,7 +697,7 @@ const Entry kZhCN[] = {
 
     // ---- 统计行 ----
     {"stats.line", "[tokens] 输入 {0}{1} · 输出 {2} · 请求 {3} 次 · context {4}%"},
-    {"stats.cache", "(缓存命中 {0})"},
+    {"stats.cache", "(缓存命中 {0},{1}%)"},
 
     // ---- 管道模式稳定输出 ----
     {"pipe.tool_start", "[工具] "},
@@ -824,7 +824,9 @@ const Entry kZhCN[] = {
     {"cmd.context.bd.used", "已用"},
     {"cmd.context.bd.threshold", "自动压缩线"},
     {"cmd.context.bd.remaining", "剩余"},
-    {"cmd.context.bd.cache", "(缓存命中 {0})"},
+    {"cmd.context.bd.cache", "(缓存命中 {0},{1}%)"},
+    {"cmd.context.bd.cache_no_ratio", "(缓存命中 {0})"},
+    {"cmd.context.epoch", "缓存前缀 epoch {0}:最近一次请求命中 {1} / 总输入 {2}({3}%)——epoch 断因(工具表/系统提示/历史改写等)见回合统计与逐步流水账"},
     {"cmd.context.bd.measured", "(实测)"},
     {"cmd.context.bd.history_derived", "(=实测总量−系统−工具)"},
     {"cmd.context.bd.note.measured", "(总量为上一轮实测 token;系统提示/工具为字符估,历史为实测总量反推)"},
@@ -1818,7 +1820,7 @@ const Entry kEn[] = {
 
     // ---- stats line ----
     {"stats.line", "[tokens] in {0}{1} · out {2} · {3} requests · context {4}%"},
-    {"stats.cache", " (cache hit {0})"},
+    {"stats.cache", " (cache hit {0}, {1}%)"},
 
     // ---- pipe mode stable output ----
     {"pipe.tool_start", "[tool] "},

@@ -19,6 +19,8 @@ constexpr const char* kCatalog = R"({
       "key_env": "DEMO_API_KEY",
       "default_model": "demo-1",
       "model_reasoning_effort": "high",
+      "stream_usage": true,
+      "reasoning_replay": "tool_episode",
       "extra_headers": {"X-Key": "${LUBANCODE_API_KEY}"},
       "extra_body": {"tool_stream": true},
       "models": {
@@ -46,6 +48,12 @@ TEST_CASE("provider catalog: 严格解析 provider、模型与 variants") {
     const auto* preset = catalog->FindProvider("demo");
     REQUIRE(preset != nullptr);
     CHECK(preset->wire == config::Wire::ChatCompletions);
+    CHECK(preset->stream_usage);  // Chat 流式 usage chunk 的 capability
+    CHECK(preset->reasoning_replay == "tool_episode");  // 工具段思考回传策略
+    // preset -> 本地 provider 配置镜像到位。
+    const auto provider = config::ProviderConfigFromPreset(*preset);
+    CHECK(provider.stream_usage);
+    CHECK(provider.reasoning_replay == "tool_episode");
     const auto* model = preset->FindModel("demo-1");
     REQUIRE(model != nullptr);
     CHECK(model->context_window_tokens == 1000000);

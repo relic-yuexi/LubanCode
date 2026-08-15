@@ -146,6 +146,15 @@ struct ProviderConfig {
     // (BuildRequestJson,src/api/anthropic/client.cpp)。chat_completions 没有
     // 统一的内置搜索形状,靠 extra_body。按 provider 各自开关。
     bool native_web_search = false;
+    // stream_usage:该端支持 Chat 流式 stream_options.include_usage(在
+    // [DONE] 前多回一只完整 usage chunk)。待遇同 native_web_search:切
+    // provider 时从目录镜像,默认 false(有些兼容端不认这个字段)。用户
+    // 在 extra_body 里显式写 stream_options 仍可压过它。
+    bool stream_usage = false;
+    // reasoning_replay:Chat wire 的思考回传策略,空/never/tool_episode
+    // (语义见 api/chat/request.hpp)。待遇同 stream_usage:目录是唯一
+    // 来源,切 provider 时镜像,默认空 = never。
+    std::string reasoning_replay;
     // extra_body:任意厂商私有请求参数(比如 GLM 的 thinking.type + 一个
     // 自定义 reasoning_effort 档位),每次请求前浅合并进请求体顶层——键
     // 冲突时 extra_body 里的值整个覆盖掉内置逻辑算出来的值(不做深合并,
@@ -314,6 +323,11 @@ struct Config {
     // 不走独立的配置文件/环境变量四级合并(provider 才是唯一来源),默认
     // false。
     bool native_web_search = false;
+    // stream_usage:同 native_web_search 的待遇——/provider switch 时从
+    // ProviderConfig::stream_usage 镜像,默认 false。见 ProviderConfig 注释。
+    bool stream_usage = false;
+    // reasoning_replay:同上,从 ProviderConfig 同名字段镜像,空 = never。
+    std::string reasoning_replay;
     // extra_body/extra_headers:跟 native_web_search 同一套待遇——切
     // provider 时从 ProviderConfig 同名字段镜像过来;但这两个字段还多一条
     // 路:配置文件顶层(不进 providers 数组的"单 provider 配置"写法)也能

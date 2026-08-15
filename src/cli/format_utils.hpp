@@ -109,12 +109,15 @@ std::string StreamFooterInterruptText(bool plain);
 //     "尚无实测,启动估算"。
 // 前三个参数是 token 估算值(统一口径,agent::EstimateUtf8Tokens),
 // 不是字符数——/3 与 /2 两把旧尺已并轨。
-// cache_read_tokens > 0 时对话历史行尾括注缓存命中量。window_tokens 为 0
+// cache_read_tokens > 0 时对话历史行尾括注缓存命中量;cache_hit_percent
+// >= 0(分母只取输入,不带 output)时括注里带命中率,-1 = 服务端没回报
+// usage,只摆命中量、不伪造 0%。window_tokens 为 0
 // 不除零,百分比一律 0;占比超 100% 截断(条形打满、百分比钉在 100)。数字
 // 全走 FormatTokenCount。返回逐行文本(行内不带换行符),打印由调用方管。
 std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens, std::size_t tools_tokens,
                                                  std::size_t history_tokens_est, std::int64_t cache_read_tokens,
                                                  std::size_t window_tokens, std::size_t measured_used_tokens,
-                                                 const Theme& theme, int bar_width = 16);
+                                                 const Theme& theme, int bar_width = 16,
+                                                 int cache_hit_percent = -1);
 
 }  // namespace lubancode::cli

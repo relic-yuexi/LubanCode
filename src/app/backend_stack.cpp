@@ -24,9 +24,17 @@ std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::C
             config.native_web_search, config.extra_body, headers);
     }
     if (config.wire == lubancode::config::Wire::ChatCompletions) {
+        // stream_usage/reasoning_replay 都是 provider capability(目录声明),
+        // 语义见 chat/request.hpp。
+        lubancode::api::chat::ChatRequestOptions chat_options;
+        chat_options.stream_usage = config.stream_usage;
+        chat_options.reasoning_replay =
+            config.reasoning_replay == "tool_episode"
+                ? lubancode::api::chat::ReasoningReplayPolicy::ToolEpisode
+                : lubancode::api::chat::ReasoningReplayPolicy::Never;
         return std::make_unique<lubancode::api::chat::ChatCompletionsBackend>(
             config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs,
-            config.extra_body, headers);
+            config.extra_body, headers, std::move(chat_options));
     }
     return std::make_unique<lubancode::api::anthropic::AnthropicBackend>(
         config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs,

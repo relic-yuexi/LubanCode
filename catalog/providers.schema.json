@@ -28,6 +28,8 @@
         "default_model": { "type": "string", "minLength": 1 },
         "model_reasoning_effort": { "type": "string" },
         "native_web_search": { "type": "boolean" },
+        "stream_usage": { "type": "boolean" },
+        "reasoning_replay": { "enum": ["never", "tool_episode"] },
         "docs_url": { "type": "string", "pattern": "^https://" },
         "extra_body": { "type": "object" },
         "extra_headers": { "type": "object", "additionalProperties": { "type": "string" } },

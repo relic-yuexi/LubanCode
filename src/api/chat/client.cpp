@@ -47,18 +47,20 @@ std::string NetworkError(const cpr::Error& error, bool received, int connect_ms,
 ChatCompletionsBackend::ChatCompletionsBackend(std::string base_url, std::string auth_token,
                                                int connect_timeout_ms, int stream_idle_timeout_secs,
                                                nlohmann::json extra_body,
-                                               std::map<std::string, std::string> extra_headers)
+                                               std::map<std::string, std::string> extra_headers,
+                                               ChatRequestOptions options)
     : base_url_(std::move(base_url)),
       auth_token_(std::move(auth_token)),
       connect_timeout_ms_(connect_timeout_ms),
       stream_idle_timeout_secs_(stream_idle_timeout_secs),
       extra_body_(std::move(extra_body)),
-      extra_headers_(std::move(extra_headers)) {}
+      extra_headers_(std::move(extra_headers)),
+      options_(std::move(options)) {}
 
 std::expected<void, Error> ChatCompletionsBackend::send_stream(
     const Request& request, const std::function<void(const StreamEvent&)>& on_event,
     const std::atomic<bool>* cancel) {
-    const nlohmann::json body_json = BuildRequestJson(request, extra_body_);
+    const nlohmann::json body_json = BuildRequestJson(request, extra_body_, options_);
     std::string body;
     try {
         body = body_json.dump();

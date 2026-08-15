@@ -16,6 +16,7 @@
 
 #include "agent/context.hpp"
 #include "agent/context_events.hpp"
+#include "agent/prefix.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "tools/registry.hpp"
@@ -70,11 +71,11 @@ struct Callbacks {
         on_builtin_tool_done;
 
     // 每一次到模型的独立请求结束时(MessageDone 到达那一刻)都会调用一次,
-    // 把这一次的 usage 报出来。一次 Run() 内部可能因为工具调用来回好几趟,
-    // 也就是好几次独立请求——这个回调按请求粒度触发,不是按 Run() 粒度,
-    // 上层(main.cpp)自己决定要不要跨请求累计。可选;不设就跳过,不影响
-    // 其余行为。
-    std::function<void(const api::Usage& usage)> on_usage;
+    // 把这一次的 usage 连同身份(步号/请求 id/模型)报出来。一次 Run() 内部
+    // 可能因为工具调用来回好几趟,也就是好几次独立请求——这个回调按请求
+    // 粒度触发,不是按 Run() 粒度,上层(turn_runner 的逐步流水账)拿它落
+    // StepUsageRecord,整轮汇总从记录求和。可选;不设就跳过,不影响其余行为。
+    std::function<void(const api::UsageReport& report)> on_usage;
 
     // M9:hooks.pre_tool。工具已经找到、还没问确认、更没执行的时候调用一次;
     // 返回非空表示被拦截——值就是要塞进 tool_result 里的 is_error 说明文本,
@@ -251,10 +252,13 @@ public:
     // 确认时来信不能作答"由这一点天然保证。传空清除。
     void SetInbox(InboxPoll inbox) { inbox_ = std::move(inbox); }
 
-    // 请求级上下文尾段。一次外层 Run 内的工具来回共用，下一条用户消息
-    // 到来前由调用方重算。它不进 history，也不改稳定 system_prompt_；项目
-    // 记忆这类按查询变化、又须经得住 /compact 的上下文走这里。
-    void SetTurnSystemSuffix(std::string suffix) { turn_system_suffix_ = std::move(suffix); }
+    // 请求级动态上下文(项目记忆召回、运行中子代理名册)。前缀缓存守恒单
+    // 第五期起不再塞 system 尾巴——那会让分叉点落在全部旧历史之前,每条
+    // 外层用户消息都断一次前缀。现在它随本轮 user 消息进请求视图:Run()
+    // 落 user 消息时追加成尾部的 TextBlock,发过即钉住,后续请求原样重放;
+    // 下一轮来了再往新 user 消息尾部添新快照(旧快照留在旧消息里,标注
+    // "当时快照")。system 从此只留会话/epoch 内稳定材料。空串 = 不追加。
+    void SetTurnContext(std::string context) { turn_context_ = std::move(context); }
 
     // M6.6:/compact 用。跟 history() 是同一份数据,单独起个大写名字是为了
     // 跟任务规矩"只许新增两个方法,不许改现有的"对齐——不改名、不改签名、
@@ -266,7 +270,24 @@ public:
     // history_ 的新入口,agent/compact.cpp 里的 Compact() 本身不碰
     // AgentLoop,只管算出新历史,真正替换由调用方(main.cpp)拿到新历史后
     // 调这个方法完成。
-    void ReplaceHistory(std::vector<api::Message> new_history) { history_ = std::move(new_history); }
+    // 前缀记账:这是有意改前缀,不装无事发生——显式开新 cache epoch
+    // (history_compacted),清掉上一份请求的指纹;压缩后第一份请求就是新
+    // epoch 的冷启动,后续再守追加律。
+    void ReplaceHistory(std::vector<api::Message> new_history) {
+        history_ = std::move(new_history);
+        ++cache_epoch_;
+        pending_epoch_break_reason_ = "history_compacted";
+        last_prefix_.reset();
+        // 新 epoch,压缩决策与 sticky 视图一并翻篇:compact 是唯一常规的
+        // 全量重写点,重写后的视图从头定形(前缀缓存守恒单第六期)。
+        result_view_memo_.decisions.clear();
+        sticky_view_.reset();
+        sticky_base_history_size_ = 0;
+    }
+
+    // 当前 cache epoch(前缀记账,agent/prefix.hpp):1 起,每次断前缀 +1。
+    // /context 与调试展示用;epoch 断不是失败,是给"命中跌了"点名的那根梁。
+    int cache_epoch() const { return cache_epoch_; }
 
     // mid-turn 上下文安全点:有效上下文窗口(token)。0(默认)= 未知,
     // Run() 不做 projected 评估,行为与从前完全一致。上层(交互会话)在
@@ -294,7 +315,7 @@ private:
     tools::ToolRegistry& registry_;
     std::string model_;
     std::string system_prompt_;
-    std::string turn_system_suffix_;
+    std::string turn_context_;
     int max_tokens_;
     int max_steps_per_turn_;  // 0 = 不限步(硬上限只管本 turn 内的 step)
     std::size_t max_context_chars_;
@@ -303,6 +324,21 @@ private:
     StructuralCompressionOptions structural_options_{};
     StructuralCompressionStats structural_stats_{};  // 最近一次请求的结构压缩账(观测用)
     std::vector<api::Message> history_;
+    // 前缀记账(agent/prefix.hpp):上一份实际发出的请求指纹(没有 = 本
+    // turn 第一份请求,无从比较,天然算追加)、cache epoch 序号、loop 自己
+    // 先知道的断因(compact/hard trim,报出后即清)。
+    std::optional<PrefixFingerprint> last_prefix_;
+    int cache_epoch_ = 1;
+    std::string pending_epoch_break_reason_;
+    // 结构压缩"首次定形"的决策台账(tool_use_id -> 决策),epoch 内跨请求
+    // 钉死;ReplaceHistory(开新 epoch)时清空(agent/context_events.hpp)。
+    ResultViewMemo result_view_memo_;
+    // hard trim 的 sticky 工作视图:第一次真动手裁(丢轮/截结果)后把裁过
+    // 的视图钉住,后续请求只往它尾部追加新消息——不再每请求拿全量 history
+    // 重算"第一轮 + 最近 N 轮",裁剪窗口一路滑。sticky_base_history_size_
+    // 记钉住那一刻全量视图的长度,追加时按它切尾。ReplaceHistory 时翻篇。
+    std::optional<std::vector<api::Message>> sticky_view_;
+    std::size_t sticky_base_history_size_ = 0;
     OnContextPressure on_context_pressure_;
     std::function<bool(const tools::Tool&)> tool_filter_;  // tool_search:空 = 不过滤,全量直挂
     InboxPoll inbox_;  // 跨会话收件点:空 = 没有来信要收,行为跟从前一致

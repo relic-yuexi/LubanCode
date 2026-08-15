@@ -1,5 +1,6 @@
 #include "tools/plugin_loader.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <utility>
 
@@ -93,6 +94,10 @@ std::vector<std::string> PluginHost::LoadDirectory(const std::filesystem::path& 
     if (!std::filesystem::is_directory(dir, ec)) {
         return warnings;  // 没有 plugins 目录是常态,不算错
     }
+    // 先按文件名排序再加载:目录枚举次序随文件系统心情,不钉死的话跨进程
+    // /resume 时插件工具的注册次序会换——schema 内容虽一样,请求前缀也对
+    // 不上(前缀缓存守恒单第七期)。Lua 插件那条路早就是这么干的。
+    std::vector<std::filesystem::path> dll_files;
     for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
         if (!entry.is_regular_file(ec)) {
             continue;
@@ -102,16 +107,21 @@ std::vector<std::string> PluginHost::LoadDirectory(const std::filesystem::path& 
         for (char& c : ext) {
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         }
-        if (ext != ".dll") {
-            continue;
+        if (ext == ".dll") {
+            dll_files.push_back(entry.path());
         }
-        const std::string file_name = PathToUtf8(entry.path().filename());
+    }
+    std::sort(dll_files.begin(), dll_files.end(), [](const auto& left, const auto& right) {
+        return left.filename().string() < right.filename().string();
+    });
+    for (const auto& path : dll_files) {
+        const std::string file_name = PathToUtf8(path.filename());
 
         // 坏 DLL(不是合法 PE)默认可能弹系统错误对话框,先把线程错误模式
         // 调成静默,加载完再还原——坏文件只该换来一行警告,不该卡个弹窗。
         DWORD old_error_mode = 0;
         SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX, &old_error_mode);
-        const HMODULE module = LoadLibraryW(entry.path().c_str());
+        const HMODULE module = LoadLibraryW(path.c_str());
         const DWORD load_error = module == nullptr ? GetLastError() : 0;
         SetThreadErrorMode(old_error_mode, nullptr);
         if (module == nullptr) {
@@ -150,8 +160,8 @@ std::vector<std::string> PluginHost::LoadDirectory(const std::filesystem::path& 
         }
 
         LoadedPlugin loaded;
-        loaded.stem = PathToUtf8(entry.path().stem());
-        loaded.path = PathToUtf8(entry.path());
+        loaded.stem = PathToUtf8(path.stem());
+        loaded.path = PathToUtf8(path);
         loaded.module = module;
         loaded.manifest = manifest;
         plugins_.push_back(std::move(loaded));

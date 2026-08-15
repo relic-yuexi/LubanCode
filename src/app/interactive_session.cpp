@@ -834,7 +834,7 @@ std::vector<lubancode::cli::AgentPanelEntry> InteractiveSession::BuildAgentPanel
         entry.done_delivered = task.state == lubancode::tools::AgentTaskState::Done && task.delivered;
         const auto end = entry.running ? now : task.end_time;
         const double seconds = std::chrono::duration<double>(end - task.start_time).count();
-        const std::int64_t tokens = task.input_tokens + task.output_tokens;
+        const std::int64_t tokens = task.total_input_tokens() + task.output_tokens;
         // 状态短话(规格"现场三/四"):导航坞只放短因——完成/失败 · 接口报错/
         // 耗尽 · 40/40 轮/停下 · 用户中止;完整错误进 transcript(Enter 查看)。
         // 正数预算派出即可见:运行中带"N/M 轮",不等撞墙才揭晓。
@@ -1370,7 +1370,7 @@ void InteractiveSession::RunPeerTurn(const std::string& text) {
     if (session_agent_tool() != nullptr) {
         turn_suffix += session_agent_tool()->RunningTasksRoster();
     }
-    loop->SetTurnSystemSuffix(std::move(turn_suffix));
+    loop->SetTurnContext(std::move(turn_suffix));
     // RunTurnResult 只剩 status/cancelled,peer 来信轮两边都不看;排队消息
     // 走会话层 SteeringQueue,不在这里收。直接调,不接没人用的返回值。
     RunTurn(*loop, text, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
@@ -1842,7 +1842,8 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                     }
                     history_tokens = lubancode::agent::EstimateHistoryTokens(loop->History());
                 }
-                HandleContextCommand(parsed.args, context_tracker, sys_tokens, tools_tokens, history_tokens, theme);
+                HandleContextCommand(parsed.args, context_tracker, sys_tokens, tools_tokens, history_tokens, theme,
+                                     loop->cache_epoch());
                 break;
             }
             case lubancode::cli::SlashCommand::Compact: {
@@ -2009,7 +2010,7 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
     if (session_agent_tool() != nullptr) {
         turn_suffix += session_agent_tool()->RunningTasksRoster();
     }
-    loop->SetTurnSystemSuffix(std::move(turn_suffix));
+    loop->SetTurnContext(std::move(turn_suffix));
     const std::size_t history_before = loop->History().size();
     RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
             lubancode::app::HookRuntime(), spinner_enabled, transcript, todo_state(), &transcript_expanded,

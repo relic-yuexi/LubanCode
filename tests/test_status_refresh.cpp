@@ -199,11 +199,17 @@ TEST_CASE("BuildCallbacks::on_usage: 主请求 usage 更新 tracker 并发布状
         app::BuildCallbacks(/*auto_confirm=*/false, always_allowed, theme, stats, tracker, registry, &hooks, display,
                             body, /*allow_commands=*/{}, /*deny_commands=*/{});
 
-    callbacks.on_usage(api::Usage{300, 50});
+    callbacks.on_usage(api::UsageReport{api::Usage{300, 50}, 0, "msg_1", "test-model"});
     CHECK(tracker.current_tokens() == 350);
-    CHECK(stats.input_tokens == 300);
-    CHECK(stats.output_tokens == 50);
-    CHECK(stats.request_count == 1);
+    CHECK(stats.input_tokens() == 300);
+    CHECK(stats.output_tokens() == 50);
+    CHECK(stats.request_count() == 1);
+    // 逐步流水账:on_usage 落的是一条 StepUsageRecord,身份齐。
+    REQUIRE(stats.steps.size() == 1);
+    CHECK(stats.steps[0].step_index == 0);
+    CHECK(stats.steps[0].request_id == "msg_1");
+    CHECK(stats.steps[0].model == "test-model");
+    CHECK(stats.steps[0].reported);
 
     const cli::StatusPanelData snapshot = cli::SnapshotStatusLineValues();
     CHECK(snapshot.context_percent == 35);
@@ -236,18 +242,18 @@ TEST_CASE("BuildCallbacks::on_usage: 第二次请求覆盖发布,不累加;缺 u
         app::BuildCallbacks(false, always_allowed, theme, stats, tracker, registry, &hooks, display, body,
                             /*allow_commands=*/{}, /*deny_commands=*/{});
 
-    callbacks.on_usage(api::Usage{300, 50});
-    callbacks.on_usage(api::Usage{100, 20});
+    callbacks.on_usage(api::UsageReport{api::Usage{300, 50}, 0, "m1", "test-model"});
+    callbacks.on_usage(api::UsageReport{api::Usage{100, 20}, 1, "m2", "test-model"});
     // tracker 覆盖式:120;花销统计累加式:400/70/2——两本账各归各。
     CHECK(tracker.current_tokens() == 120);
-    CHECK(stats.input_tokens == 400);
-    CHECK(stats.output_tokens == 70);
-    CHECK(stats.request_count == 2);
+    CHECK(stats.input_tokens() == 400);
+    CHECK(stats.output_tokens() == 70);
+    CHECK(stats.request_count() == 2);
     CHECK(cli::SnapshotStatusLineValues().used_tokens == 120);
 
-    callbacks.on_usage(api::Usage{});  // provider 没回 usage
+    callbacks.on_usage(api::UsageReport{api::Usage{}, 2, "m3", "test-model"});  // provider 没回 usage
     CHECK(tracker.current_tokens() == 120);  // 不清零
-    CHECK(stats.request_count == 3);         // 请求次数照记
+    CHECK(stats.request_count() == 3);       // 请求次数照记
     const cli::StatusPanelData snapshot = cli::SnapshotStatusLineValues();
     CHECK(snapshot.used_tokens == 120);
     CHECK(snapshot.context_stale);  // 状态行数据标旧,渲染带 ~
@@ -280,9 +286,9 @@ TEST_CASE("BuildCallbacks::on_usage: 子代理 usage 只进累计花销,不碰 t
     // tokens),花销统计要吃到,主 context 与状态行数据都不能动。
     const tools::Tool::Result result = registry.Find("agent")->execute(nlohmann::json{{"title", "干点活"}, {"prompt", "干点活"}});
     CHECK_FALSE(result.is_error);
-    CHECK(stats.input_tokens == 500);
-    CHECK(stats.output_tokens == 100);
-    CHECK(stats.request_count == 1);
+    CHECK(stats.input_tokens() == 500);
+    CHECK(stats.output_tokens() == 100);
+    CHECK(stats.request_count() == 1);
     CHECK(tracker.current_tokens() == 0);  // 子代理的上下文不并进主 context
     CHECK(tracker.usage_stale() == false);
     const cli::StatusPanelData snapshot = cli::SnapshotStatusLineValues();
@@ -331,4 +337,58 @@ TEST_CASE("切档与空闲路同源:CurrentConfirmMode/SetConfirmMode 读写同�
     CHECK(cli::CurrentConfirmMode() == cli::ConfirmMode::Confirm);  // 连切一圈回原点
     // 复位,别把会话级状态泄漏给别的测试。
     CHECK(cli::CurrentConfirmMode() == cli::ConfirmMode::Confirm);
+}
+
+// ---------------------------------------------------------------------------
+// 逐步 usage 流水账(前缀缓存守恒单第一期):三步台账各有身份,第二笔
+// 命中率单独可见,整轮按 token 总和重算,不回报记 unknown 不伪造 0%。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("UsageStats: 逐步流水账——三笔各有 step/request id,命中率按 token 总和重算") {
+    app::UsageStats stats;
+    // 第一步:冷启动全 miss。
+    stats.Add(api::UsageReport{api::Usage{50000, 80, 0, 0}, 0, "req_a", "deepseek-v4-pro"});
+    // 第二步:工具往返,大命中(49k hit / 1k miss = 98%)。
+    stats.Add(api::UsageReport{api::Usage{1000, 50, 49000, 0}, 1, "req_b", "deepseek-v4-pro"});
+    // 第三步:工具表变了,冷 miss,带 epoch 断因。
+    api::UsageReport third{api::Usage{51000, 60, 0, 0}, 2, "req_c", "deepseek-v4-pro"};
+    third.cache_epoch = 2;
+    third.epoch_break_reason = "tools_changed";
+    stats.Add(third);
+
+    REQUIRE(stats.steps.size() == 3);
+    CHECK(stats.steps[0].step_index == 0);
+    CHECK(stats.steps[1].step_index == 1);
+    CHECK(stats.steps[2].step_index == 2);
+    CHECK(stats.steps[0].request_id == "req_a");
+    CHECK(stats.steps[1].request_id == "req_b");
+    CHECK(stats.steps[2].request_id == "req_c");
+    CHECK(stats.steps[2].epoch_break_reason == "tools_changed");
+
+    // 第二笔命中率单独显示,不被整轮平均吞掉。
+    CHECK(stats.steps[1].cache_hit_percent() == 98);
+    CHECK(stats.steps[0].cache_hit_percent() == 0);  // 实测过,真 0%
+    CHECK(stats.steps[2].cache_hit_percent() == 0);
+
+    // 整轮命中率按 token 总和重算:hit=49000,total input=50000+50000+51000
+    // =151000,49000/151000≈32.45%→32。三只百分比平均是 (0+98+0)/3≈33,
+    // 两种算法的差正好被钉住。
+    CHECK(stats.total_input_tokens() == 151000);
+    CHECK(stats.cache_hit_percent() == 32);
+
+    CHECK(stats.input_tokens() == 102000);
+    CHECK(stats.cache_read_tokens() == 49000);
+    CHECK(stats.output_tokens() == 190);
+    CHECK(stats.request_count() == 3);
+}
+
+TEST_CASE("UsageStats: provider 不回 usage 记 unknown,不伪造 0%") {
+    app::UsageStats stats;
+    // 四项全零 = provider 没在流末给 usage。
+    stats.Add(api::UsageReport{api::Usage{}, 0, "", "m"});
+    REQUIRE(stats.steps.size() == 1);
+    CHECK_FALSE(stats.steps[0].reported);
+    CHECK(stats.steps[0].cache_hit_percent() == -1);  // unknown,不是 0
+    CHECK(stats.cache_hit_percent() == -1);           // 整轮一笔实测都没有
+    CHECK(stats.request_count() == 1);                // 请求照数
 }

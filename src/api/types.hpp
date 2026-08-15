@@ -100,16 +100,60 @@ struct Request {
 // 流式事件
 // ---------------------------------------------------------------------------
 
+// usage 的统一口径(前缀缓存守恒单,2026-08):三家 wire 翻到这层时必须
+// 摊成同一副语义,不许同一字段在一家表示"非缓存输入"、在另一家表示
+// "输入总数":
+//
+//   input_tokens          本次未从缓存读取、按普通输入处理的 token
+//   cache_read_tokens     从缓存读取的输入 token(读命中)
+//   cache_creation_tokens 本次写缓存的输入 token(provider 有此概念才非 0)
+//   output_tokens         输出 token
+//
+// 各 wire 的映射(细节在各自 events.cpp):
+//   anthropic   input_tokens 本来就不含 cache read/creation,原样照抄;
+//   chat        DeepSeek 顶层 prompt_cache_hit/miss_tokens:input=miss,
+//               cache_read=hit;OpenAI/Qwen 风格 prompt_tokens_details.
+//               cached_tokens:cache_read=cached,input=max(prompt-cached,0);
+//               都没有:input=prompt_tokens,cache_read=0;
+//   responses   cache_read=input_tokens_details.cached_tokens,
+//               input=max(input_tokens-cached_tokens,0)。
 struct Usage {
     std::int64_t input_tokens = 0;
     std::int64_t output_tokens = 0;
-    // 缓存命中/缓存写入的 token 数,不是所有厂商/wire 都会给,给不出来就是 0
-    // (M6.5 添加,anthropic wire 从 message_delta 的 usage 里读
-    // cache_read_input_tokens/cache_creation_input_tokens;responses wire 从
-    // response.completed 的 usage.input_tokens_details.cached_tokens 读
-    // cache_read_tokens,没有对应的 cache_creation 概念,恒为 0)。
     std::int64_t cache_read_tokens = 0;
     std::int64_t cache_creation_tokens = 0;
+};
+
+// 完整输入(非缓存输入 + 缓存读 + 缓存写)的唯一算法。UI/统计/汇总一律
+// 走这只 helper,不许各家各算——DeepSeek 49k hit + 1k miss 就该是 50k,
+// 不是 50k+49k,也不是 1k。
+inline std::int64_t TotalInputTokens(const Usage& usage) {
+    return usage.input_tokens + usage.cache_read_tokens + usage.cache_creation_tokens;
+}
+
+// 一次独立模型请求的 usage 报告:on_usage 的入参(前缀缓存守恒单)。
+// usage 之外带上这笔账的身份——第几步、哪个请求、什么模型、哪个缓存
+// epoch、这一步前缀是不是上一份的原样追加版——逐步流水账(StepUsageRecord)
+// 才有键可落,整轮汇总才能按 token 求和而不是拿百分比平均。
+// request_id/model 取流里 MessageStart 的值,provider 不给就是空;
+// cache_epoch/epoch_break_reason/prefix_append_only 由 AgentLoop 的前缀
+// 记账(agent/prefix.hpp)在发请求前填:epoch 断不是失败,无名无姓地断
+// 才是失败。
+struct UsageReport {
+    Usage usage;
+    int step_index = 0;              // Run() 内的步号(0-based,一步一次模型请求)
+    std::string request_id;          // 服务端消息 id(MessageStart.id),可空
+    std::string model;               // MessageStart.model,可空
+    int cache_epoch = 1;             // 请求落在哪个缓存 epoch(1 起)
+    std::string epoch_break_reason;  // 本步断了 epoch 时的点名(空 = 没断)
+    bool prefix_append_only = true;  // 本步请求是否上一份的原样追加版
+
+    // provider 是否真回报了 usage(四项全零 = 没给,真实请求不可能全零)。
+    // 没回报就记 unknown,不许拿 0 冒充"真未命中"。
+    bool reported() const {
+        return usage.input_tokens > 0 || usage.output_tokens > 0 || usage.cache_read_tokens > 0 ||
+               usage.cache_creation_tokens > 0;
+    }
 };
 
 // 流的第一个事件,标记消息开始。
