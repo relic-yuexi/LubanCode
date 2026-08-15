@@ -1094,6 +1094,11 @@ void InteractiveSession::RunPeerTurn(const std::string& text) {
         project_memory != nullptr
             ? project_memory->BuildTurnContext(text, std::filesystem::current_path())
             : std::string();
+    // 运行中子代理名册(动态 context):本轮重算,不进 history——compact
+    // 后下一条用户消息照常从 TaskRecord 重注入,不依赖摘要记任务号。
+    if (session_agent_tool() != nullptr) {
+        turn_suffix += session_agent_tool()->RunningTasksRoster();
+    }
     loop->SetTurnSystemSuffix(std::move(turn_suffix));
     // RunTurnResult 只剩 status/cancelled,peer 来信轮两边都不看;排队消息
     // 走会话层 SteeringQueue,不在这里收。直接调,不接没人用的返回值。
@@ -1710,6 +1715,14 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
         project_memory != nullptr
             ? project_memory->BuildTurnContext(content, std::filesystem::current_path())
             : std::string();
+    // 运行中子代理名册(规格第二节):每条外层用户消息到来时给 main 一份
+    // 动态重算的名册——task id + 真 title + 类型 + 待送数,不塞 prompt 与
+    // 日志。走请求级 system 尾段:不永久复制进 history,任务状态变了下轮
+    // 重算,compact 后照常从台账重注入。主模型认得 task id,才知道
+    // agent_message 该投给谁。
+    if (session_agent_tool() != nullptr) {
+        turn_suffix += session_agent_tool()->RunningTasksRoster();
+    }
     loop->SetTurnSystemSuffix(std::move(turn_suffix));
     const std::size_t history_before = loop->History().size();
     RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),

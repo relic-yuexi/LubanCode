@@ -268,6 +268,7 @@ add_library(lubancode_core STATIC
   src/tools/ask_user.cpp
   src/tools/search.cpp
   src/tools/agent_tool.cpp
+  src/tools/agent_message_tool.cpp
   src/tools/hooks.cpp
   src/tools/skill_loader.cpp
   src/tools/skill_tool.cpp

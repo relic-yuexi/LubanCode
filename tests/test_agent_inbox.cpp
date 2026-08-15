@@ -125,6 +125,53 @@ public:
     tools::Tool::Result execute(const nlohmann::json&) override { return {"probe ok", false}; }
 };
 
+// 第一只请求立刻吐 tool_use(工具当场跑完),之后的请求一律先挂住等放闸,
+// 放闸后吐纯文本——钉"子代理正写最终纯文本时收到消息,也须续开一轮处理"
+// 的续投路径:消息在第二只请求流式期间入 inbox,那一轮正常收口后没有下一
+// 处工具边界,全靠封账交接把消息续进第三只请求。
+class StallTextBackend : public api::Backend {
+public:
+    struct State {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::size_t started_requests = 0;
+        bool release = false;
+        std::vector<api::Request> captured;
+    };
+
+    explicit StallTextBackend(std::shared_ptr<State> state) : state_(std::move(state)) {}
+
+    std::expected<void, api::Error> send_stream(
+        const api::Request& request, const std::function<void(const api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* cancel = nullptr) override {
+        {
+            std::unique_lock<std::mutex> lock(state_->mutex);
+            state_->captured.push_back(request);
+            const std::size_t index = state_->captured.size() - 1;
+            state_->started_requests = state_->captured.size();
+            state_->cv.notify_all();
+            if (index > 0) {
+                state_->cv.wait_for(lock, std::chrono::seconds(5), [&]() {
+                    return state_->release || (cancel != nullptr && cancel->load(std::memory_order_acquire));
+                });
+            }
+        }
+        const std::size_t index = [&] {
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            return state_->captured.size() - 1;
+        }();
+        const std::vector<api::StreamEvent> events =
+            index == 0 ? ToolUseScript("t1", "probe") : TextOnlyScript("收尾文本");
+        for (const auto& event : events) {
+            on_event(event);
+        }
+        return {};
+    }
+
+private:
+    std::shared_ptr<State> state_;
+};
+
 std::string DumpMessageTexts(const std::vector<api::Message>& messages) {
     std::string out;
     for (const auto& message : messages) {
@@ -156,6 +203,19 @@ void WaitIdle(tools::AgentTool& agent_tool) {
     for (int i = 0; i < 300 && agent_tool.HasRunningTasks(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+}
+
+void WaitRequestCount(const std::shared_ptr<StallTextBackend::State>& state, std::size_t count) {
+    std::unique_lock<std::mutex> lock(state->mutex);
+    state->cv.wait_for(lock, std::chrono::seconds(2), [&]() { return state->started_requests >= count; });
+}
+
+void ReleaseStall(const std::shared_ptr<StallTextBackend::State>& state) {
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->release = true;
+    }
+    state->cv.notify_all();
 }
 
 }  // namespace
@@ -329,13 +389,15 @@ TEST_CASE("收场报告与未送达标注:打断后结果带标注;报告列原�
     WaitStarted(gate);
     CHECK(agent_tool.SendTaskMessage(1, "来不及的话") == tools::TaskMessageStatus::Queued);
 
-    // 取消打断收尾:排着的话没有下一个边界可等,结果文本带"未送达"标注。
+    // 取消打断收尾:排着的话没有下一个边界可等,结果文本带"未送达"标注,
+    // 且逐条列原文(规格:取消不承诺继续执行,但须列明)。
     CHECK(agent_tool.CancelTask(1));
     OpenGate(gate);
     WaitIdle(agent_tool);
     const auto snapshot = agent_tool.TaskDetail(1);
     REQUIRE(snapshot.has_value());
     CHECK(snapshot->result.find("介入消息未送达") != std::string::npos);
+    CHECK(snapshot->result.find("来不及的话") != std::string::npos);
 
     // 收场报告(会话退出/清场那路):第二只任务上另排一条,报告把两只任务
     // 的未送达消息按任务各列一行、报过即清;随后取消收尾,不让线程挂着。
@@ -471,4 +533,92 @@ TEST_CASE("定向介入:前台任务也收信——消息只进它自己的下�
     }
     // 跑完进终态,再发明确拒收。
     CHECK(agent_tool.SendTaskMessage(id, "迟到的话") == tools::TaskMessageStatus::Finished);
+}
+
+// ---------------------------------------------------------------------------
+// agent_message 那单补的两件事:来源标签分栏(用户直发 vs 主模型转交,
+// history 标签不混)与"排到了却没送"的封账交接(纯文本收尾也续开一轮)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("来源标签:主模型转交与用户直发共用 inbox,注入标签不混") {
+    tools::ToolRegistry sub_registry;
+    sub_registry.Register(std::make_unique<FakeTool>());
+    ScriptBackend foreground_backend;
+    auto gate = std::make_shared<GateBackendState>();
+    tools::AgentTool agent_tool(foreground_backend, sub_registry, "/work/dir");
+    agent_tool.SetDetachedBackendFactory([gate]() {
+        tools::DetachedAgentBackend detached;
+        detached.backend = std::make_unique<GateBackend>(gate);
+        return detached;
+    });
+    agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "后台摸排"}, {"run_in_background", true}});
+    WaitStarted(gate);
+
+    CHECK(agent_tool.SendTaskMessage(1, "改成 execution_mode 三态", tools::TaskMessageSource::MainAgent) ==
+          tools::TaskMessageStatus::Queued);
+    OpenGate(gate);
+    WaitIdle(agent_tool);
+
+    std::vector<api::Request> captured;
+    {
+        std::lock_guard<std::mutex> lock(gate->mutex);
+        captured = gate->captured;
+    }
+    REQUIRE(captured.size() == 2);
+    const std::string dump = DumpMessageTexts(captured[1].messages);
+    CHECK(dump.find("改成 execution_mode 三态") != std::string::npos);
+    CHECK(dump.find("[主代理转交的补充]") != std::string::npos);
+    CHECK(dump.find("用户原话逐字保留") != std::string::npos);   // 分栏:原话与解释分清
+    CHECK(dump.find("不是权限确认") != std::string::npos);       // 不当权限答复
+    CHECK(dump.find("[主会话用户介入]") == std::string::npos);   // 没混进用户直发的标签
+}
+
+TEST_CASE("封账交接:纯文本收尾后续开一轮处理增量;封账后只可拒收,不假报成功") {
+    tools::ToolRegistry sub_registry;
+    sub_registry.Register(std::make_unique<FakeTool>());
+    ScriptBackend foreground_backend;
+    auto stall = std::make_shared<StallTextBackend::State>();
+    tools::AgentTool agent_tool(foreground_backend, sub_registry, "/work/dir");
+    agent_tool.SetDetachedBackendFactory([stall]() {
+        tools::DetachedAgentBackend detached;
+        detached.backend = std::make_unique<StallTextBackend>(stall);
+        return detached;
+    });
+    agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "后台摸排"}, {"run_in_background", true}});
+    // 第二只请求(纯文本收尾那轮)已发出、正挂着——此刻入信,那一轮收口后
+    // 没有下一处工具边界,只能靠封账交接续进第三只请求。
+    WaitRequestCount(stall, 2);
+
+    // queued 数立刻动:入 inbox 当拍 task revision 就变(面板 0 -> 1 同帧)。
+    const std::uint64_t revision_before = agent_tool.TaskRevision();
+    CHECK(agent_tool.SendTaskMessage(1, "验收加一条:管道全绿", tools::TaskMessageSource::MainAgent) ==
+          tools::TaskMessageStatus::Queued);
+    CHECK(agent_tool.TaskRevision() != revision_before);
+    REQUIRE(agent_tool.PendingTaskMessages(1).size() == 1);
+
+    ReleaseStall(stall);
+    WaitIdle(agent_tool);
+    REQUIRE_FALSE(agent_tool.HasRunningTasks());
+
+    std::vector<api::Request> captured;
+    {
+        std::lock_guard<std::mutex> lock(stall->mutex);
+        captured = stall->captured;
+    }
+    // 三只请求:0=tool_use,1=纯文本(原本要收口),2=续投轮。
+    REQUIRE(captured.size() == 3);
+    const std::string second_dump = DumpMessageTexts(captured[1].messages);
+    const std::string third_dump = DumpMessageTexts(captured[2].messages);
+    CHECK(second_dump.find("验收加一条") == std::string::npos);  // 没抢跑进收口那轮
+    CHECK(third_dump.find("验收加一条:管道全绿") != std::string::npos);
+    CHECK(third_dump.find("[主代理转交的补充]") != std::string::npos);
+    CHECK(agent_tool.PendingTaskMessages(1).empty());  // 交付承诺兑现:进了模型请求
+    const auto snapshot = agent_tool.TaskDetail(1);
+    REQUIRE(snapshot.has_value());
+    CHECK(snapshot->state == tools::AgentTaskState::Done);
+    CHECK(snapshot->result.find("未送达") == std::string::npos);
+
+    // 封账已成:发送方只可得到 Finished,不能"先成功入队再丢件"。
+    CHECK(agent_tool.SendTaskMessage(1, "迟到的话", tools::TaskMessageSource::MainAgent) ==
+          tools::TaskMessageStatus::Finished);
 }
