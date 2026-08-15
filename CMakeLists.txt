@@ -7,6 +7,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# 先于第三方依赖读取标准测试开关。cpr 的子工程会把 BUILD_TESTING 设成
+# OFF 来关自己的测试；封存顶层选择，免得它顺手盖掉 LubanCode 的测试。
+include(CTest)
+set(LUBANCODE_BUILD_TESTING "${BUILD_TESTING}")
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
 endif()
@@ -324,10 +329,15 @@ target_include_directories(lubancode_core PUBLIC
 target_link_libraries(lubancode_core PUBLIC cpr::cpr nlohmann_json::nlohmann_json)
 target_link_libraries(lubancode_core PRIVATE lubancode_lua)  # M7:Lua 插件运行时
 target_compile_features(lubancode_core PUBLIC cxx_std_23)
+target_precompile_headers(lubancode_core PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
+if(MSVC)
+  target_compile_options(lubancode_core PRIVATE /MP)
+endif()
 
-# app 编排层:实现逐组从 .hpp 搬进 .cpp(编译边界),源文件在这里明列。
-add_executable(lubancode
-  src/main.cpp
+# app 编排层由主程序与测试共链。此前这些实现各编一遍，Windows 冷构建
+# 为同一批大 TU 付两回账；收成静态库后只编一次，main 只留平台入口。
+add_library(lubancode_app STATIC
   src/app/backend_stack.cpp
   src/app/memory_extract.cpp
   src/app/tool_runtime.cpp
@@ -344,7 +354,16 @@ add_executable(lubancode
   src/cli/console_input.cpp
   src/cli/spinner.cpp
   src/cli/record_command.cpp)
-target_link_libraries(lubancode PRIVATE lubancode_core)
+target_link_libraries(lubancode_app PUBLIC lubancode_core)
+target_compile_features(lubancode_app PUBLIC cxx_std_23)
+target_precompile_headers(lubancode_app PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
+if(MSVC)
+  target_compile_options(lubancode_app PRIVATE /MP)
+endif()
+
+add_executable(lubancode src/main.cpp)
+target_link_libraries(lubancode PRIVATE lubancode_app)
 target_compile_features(lubancode PRIVATE cxx_std_23)
 
 install(TARGETS lubancode RUNTIME DESTINATION bin)
@@ -369,13 +388,14 @@ add_dependencies(lubancode_official_skills lubancode)
 # 测试:doctest 单头文件,同样走 FetchContent,走 codeload.github.com 镜像
 # (原因同上:github.com 主站连不通,codeload.github.com 的归档包下载是通的)。
 # ---------------------------------------------------------------------------
-include(FetchContent)
-_lubancode_tarball(_lubancode_doctest_url "doctest/doctest" "v2.4.12")
-FetchContent_Declare(
-  doctest
-  URL ${_lubancode_doctest_url}
-)
-FetchContent_MakeAvailable(doctest)
-
-enable_testing()
-add_subdirectory(tests)
+set(BUILD_TESTING "${LUBANCODE_BUILD_TESTING}" CACHE BOOL "Build LubanCode tests" FORCE)
+if(LUBANCODE_BUILD_TESTING)
+  include(FetchContent)
+  _lubancode_tarball(_lubancode_doctest_url "doctest/doctest" "v2.4.12")
+  FetchContent_Declare(
+    doctest
+    URL ${_lubancode_doctest_url}
+  )
+  FetchContent_MakeAvailable(doctest)
+  add_subdirectory(tests)
+endif()

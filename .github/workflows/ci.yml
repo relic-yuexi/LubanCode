@@ -10,8 +10,22 @@ name: ci
 
 on:
   push:
-    branches: ["**"]
+    branches: [main]
+    paths-ignore:
+      - "todos/**"
+      - "docs/**"
+      - "README.md"
+      - "README.en.md"
   pull_request:
+    paths-ignore:
+      - "todos/**"
+      - "docs/**"
+      - "README.md"
+      - "README.en.md"
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-test:
@@ -38,7 +52,7 @@ jobs:
         shell: bash
         run: |
           set -x
-          COMMON_FLAGS="-DCMAKE_BUILD_TYPE=Release -DLUBANCODE_USE_CODELOAD=OFF"
+          COMMON_FLAGS="-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DLUBANCODE_USE_CODELOAD=OFF"
           if [ -n "${VCPKG_INSTALLATION_ROOT:-}" ] && cmake -B build -S . $COMMON_FLAGS \
                -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"; then
             echo "configured with vcpkg"
@@ -50,7 +64,9 @@ jobs:
 
       - name: Build
         shell: bash
-        run: cmake --build build --config Release -j 4
+        run: |
+          cmake --build build --config Release --target lubancode -j 4
+          cmake --build build --config Release --target lubancode_tests -j 4
 
       - name: Test
         shell: bash
