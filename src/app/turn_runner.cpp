@@ -574,7 +574,7 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
             usage_stats.output_tokens += usage.output_tokens;
             usage_stats.cache_read_tokens += usage.cache_read_tokens;
             usage_stats.request_count += 1;
-            display.agent_rounds += 1;  // 子代理每一次独立请求算一轮,agent 条目终态摘要用
+            display.agent_step_count += 1;  // 子代理每一次独立请求算一步,agent 条目终态摘要用
             // 子代理自己的 token/工具次数/耗时都记在 AgentTool 统一台账里,
             // 代理面板(footer 里那块)按修订号自己刷新,这里不再另记一本。
         };
@@ -783,12 +783,12 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
         out.status = 1;
         return out;
     }
-    if (result->hit_turn_limit) {
-        // 主循环的轮数硬闸(0.30.x 起从"报错"改为"预算耗尽"):loop 把它当
+    if (result->hit_step_limit) {
+        // 主循环的步数硬闸(0.30.x 起从"报错"改为"预算耗尽"):loop 把它当
         // RunOutcome 而不是 error 交回来,这里按老口径打一行、记 status,不
         // 影响子代理那边按 budget_exhausted 收账带走部分结果。
         std::cerr << theme.error << tr("error.prefix")
-                  << trf("error.turn_limit", result->turns_used) << theme.reset << "\n";
+                  << trf("error.step_limit", result->steps_used) << theme.reset << "\n";
         out.status = 1;
         return out;
     }

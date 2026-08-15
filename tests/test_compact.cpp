@@ -625,7 +625,7 @@ TEST_CASE("AgentLoop: TrimHistory 兜底真丢东西时,AfterHardTrim 通报") {
     // max_context_chars 设得很小:第五轮起(轮数盖过 keep_recent_turns+1)
     // 必触发轮级裁剪。
     agent::AgentLoop loop(backend, registry, "test-model", "sys", /*max_tokens=*/4096,
-                          /*max_turns=*/0, /*max_context_chars=*/2600);
+                          /*max_steps_per_turn=*/0, /*max_context_chars=*/2600);
     loop.SetContextWindowTokens(0);  // 不做 projected 评估,单测硬裁线
 
     std::vector<agent::ContextPressure> seen;

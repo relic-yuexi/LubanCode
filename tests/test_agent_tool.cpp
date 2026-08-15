@@ -1,6 +1,6 @@
 // tools::AgentTool:内置 "agent" 工具,用 FakeBackend 按脚本吐 StreamEvent
 // (不碰真网络),验证:一轮纯文本直接返回;子代理调工具(用假工具)后
-// 返回;超 max_turns 按 budget_exhausted 收账(带部分结果与轮数账);最后一轮
+// 返回;超步数预算按 budget_exhausted 收账(带部分结果与步数账);最后一步
 // 无文本结论/接口报错按结构化 TaskOutcome 分型;确认回调转发(父拒绝 ->
 // 子内工具收到拒绝);usage 累计到父回调;注册表排除(主表见 agent,子表
 // 不见,防递归)。
@@ -225,9 +225,9 @@ TEST_CASE("agent 工具:子代理一轮文本直接返回,Result.content 就是�
 }
 
 // 计数语义(命名规范阶段 A):turn/step/tool_call 三本账分开。子代理台账
-// 里的 turns_used 记的是模型请求数(step);同一 assistant 消息里并行叫
+// 里的 steps_used 记的是模型请求数(step);同一 assistant 消息里并行叫
 // 几件工具,只算一步,tool_calls 流水另记。
-TEST_CASE("agent 工具:计数账——一步并行三件工具 turns_used 仍记一步,工具流水记三笔") {
+TEST_CASE("agent 工具:计数账——一步并行三件工具 steps_used 仍记一步,工具流水记三笔") {
     FakeBackend backend;
     backend.scripts = {
         MultiToolUseScript({"toolu_1", "toolu_2", "toolu_3"}, "fake_tool"),
@@ -249,9 +249,9 @@ TEST_CASE("agent 工具:计数账——一步并行三件工具 turns_used 仍�
     // 台账:步数两笔,工具流水三笔。
     const auto snapshots = agent_tool.TaskSnapshots();
     REQUIRE(snapshots.size() == 1);
-    CHECK(snapshots[0].turns_used == 2);
+    CHECK(snapshots[0].steps_used == 2);
     CHECK(snapshots[0].tool_calls.size() == 3);
-    CHECK(snapshots[0].outcome.turns_used == 2);
+    CHECK(snapshots[0].outcome.steps_used == 2);
     CHECK(snapshots[0].outcome.status == tools::TaskOutcomeStatus::Completed);
 }
 
@@ -388,7 +388,7 @@ TEST_CASE("agent 工具:子代理调了个工具再返回,on_sub_tool_start 钩�
     CHECK(sub_tool_starts[0] == "fake_tool");
 }
 
-TEST_CASE("agent 工具:超过 max_turns 返回 budget_exhausted,带部分结果与轮数账") {
+TEST_CASE("agent 工具:超过步数预算返回 budget_exhausted,带部分结果与步数账") {
     FakeBackend backend;
     for (int i = 0; i < 5; ++i) {
         backend.scripts.push_back(ToolUseScript("toolu_loop", "fake_tool"));
@@ -396,7 +396,7 @@ TEST_CASE("agent 工具:超过 max_turns 返回 budget_exhausted,带部分结果
     tools::ToolRegistry sub_registry;
     sub_registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"ok", false}, false));
 
-    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir", /*model=*/"", /*default_max_turns=*/3);
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir", /*model=*/"", /*default_max_steps_per_turn=*/3);
 
     nlohmann::json input;
     input["title"] = "测试任务";
@@ -404,26 +404,26 @@ TEST_CASE("agent 工具:超过 max_turns 返回 budget_exhausted,带部分结果
     const tools::Tool::Result result = agent_tool.execute(input);
 
     // 0.30.x:预算耗尽不再是笼统 failed——结果以 [budget_exhausted] 打头,
-    // 带轮数账(3/3)、stop_reason 与检查点(最后取得的工具结果),四十轮
+    // 带步数账(3/3)、stop_reason 与检查点(最后取得的工具结果),几十步
     // 探索不许一笔勾销(规格"现场三/四")。
     CHECK(result.is_error);
     CHECK(result.content.find("[budget_exhausted]") == 0);
-    CHECK(result.content.find("3/3 轮") != std::string::npos);
+    CHECK(result.content.find("3/3 步") != std::string::npos);
     CHECK(result.content.find("stop_reason: tool_use") != std::string::npos);
     CHECK(result.content.find("fake_tool") != std::string::npos);  // 检查点带最后工具结果
-    CHECK(backend.captured_requests.size() == 3);  // 正好用满 max_turns 次请求
-    // 台账:终态 BudgetExhausted,轮数/预算/结构化 outcome 都在快照里。
+    CHECK(backend.captured_requests.size() == 3);  // 正好用满步数预算次请求
+    // 台账:终态 BudgetExhausted,步数/预算/结构化 outcome 都在快照里。
     const auto snapshots = agent_tool.TaskSnapshots();
     REQUIRE(snapshots.size() == 1);
     CHECK(snapshots[0].state == tools::AgentTaskState::BudgetExhausted);
-    CHECK(snapshots[0].turns_used == 3);
-    CHECK(snapshots[0].turn_limit == 3);
+    CHECK(snapshots[0].steps_used == 3);
+    CHECK(snapshots[0].step_limit == 3);
     CHECK(snapshots[0].outcome.status == tools::TaskOutcomeStatus::BudgetExhausted);
-    CHECK(snapshots[0].outcome.reason == tools::TaskOutcomeReason::MaxTurns);
+    CHECK(snapshots[0].outcome.reason == tools::TaskOutcomeReason::StepLimitExhausted);
     CHECK(snapshots[0].outcome.stop_reason == "tool_use");
-    CHECK(snapshots[0].outcome.turns_used == 3);
+    CHECK(snapshots[0].outcome.steps_used == 3);
 
-    // 入参给的 max_turns 能覆盖构造时的默认值。
+    // 入参给的步数预算能覆盖构造时的默认值。
     FakeBackend backend2;
     for (int i = 0; i < 5; ++i) {
         backend2.scripts.push_back(ToolUseScript("toolu_loop", "fake_tool"));
@@ -504,7 +504,7 @@ TEST_CASE("agent 工具:入参 max_turns=0 透传给子代理,子代理循环按
 
     // 构造时的默认值是个有限数(3),证明"无上限"确实是入参 max_turns=0
     // 生效,不是构造默认值恰好够用。
-    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir", /*model=*/"", /*default_max_turns=*/3);
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir", /*model=*/"", /*default_max_steps_per_turn=*/3);
 
     nlohmann::json input;
     input["title"] = "测试任务";

@@ -1,7 +1,7 @@
 // AgentLoop 的核心行为,用 FakeBackend 按脚本吐 StreamEvent,不碰真网络:
 // 一轮 text 直接结束;tool_use 一轮 -> 工具执行 -> 第二次请求历史里带
 // tool_result -> end_turn;用户拒绝确认 -> tool_result 是 is_error;
-// 超过轮数上限报错。
+// 超过步数上限报错。
 
 #include <doctest/doctest.h>
 
@@ -154,7 +154,7 @@ TEST_CASE("一轮纯文本直接结束:一次请求,历史里 user+assistant 两
     CHECK(backend.captured_requests.size() == 1);
     // 计数语义(命名规范阶段 A):一条用户输入 = 一个 turn;纯文本直接
     // 收口,turn 内只有一个 step(一次模型请求),零次工具调用。
-    CHECK(result->turns_used == 1);
+    CHECK(result->steps_used == 1);
     REQUIRE(loop.history().size() == 2);
     CHECK(loop.history()[0].role == api::Role::User);
     CHECK(loop.history()[1].role == api::Role::Assistant);
@@ -180,7 +180,7 @@ TEST_CASE("tool_use 一轮 -> 执行工具 -> 第二次请求历史带 tool_resu
     REQUIRE(result.has_value());
     CHECK(backend.captured_requests.size() == 2);
     // 计数语义:工具回填后再请求收正文,turn 内走了两步(step)。
-    CHECK(result->turns_used == 2);
+    CHECK(result->steps_used == 2);
     REQUIRE(started_tools.size() == 1);
     CHECK(started_tools[0] == "fake_tool");
 
@@ -218,7 +218,7 @@ TEST_CASE("计数语义:一次 assistant 并行叫三件工具,仍是一步;工�
     // 一个 turn、两步:第一步(一次模型请求)带回了三枚工具调用,第二步
     // (回填后再请求)收正文。工具多开三枚不增步数,只增 tool_call_count。
     REQUIRE(result.has_value());
-    CHECK(result->turns_used == 2);
+    CHECK(result->steps_used == 2);
     CHECK(backend.captured_requests.size() == 2);
     CHECK(fake_tool_ptr->call_count == 3);
 
@@ -262,35 +262,35 @@ TEST_CASE("用户拒绝确认:工具不执行,tool_result 是 is_error") {
     CHECK(tool_result.content.find("拒绝") != std::string::npos);
 }
 
-TEST_CASE("超过最大轮数:预算耗尽不是错误,hit_turn_limit 带 turns/stop_reason 交回") {
+TEST_CASE("超过步数上限:预算耗尽不是错误,hit_step_limit 带 steps/stop_reason 交回") {
     FakeBackend backend;
-    // 永远回 tool_use,模型一直要工具,逼近轮数上限。
+    // 永远回 tool_use,模型一直要工具,逼近步数上限。
     for (int i = 0; i < 5; ++i) {
         backend.scripts.push_back(ToolUseScript("toolu_loop", "fake_tool"));
     }
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"ok", false}, false));
 
-    agent::AgentLoop loop(backend, registry, "test-model", "system prompt", 4096, /*max_turns=*/3);
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt", 4096, /*max_steps_per_turn=*/3);
 
     agent::Callbacks callbacks;
     const auto result = loop.Run("死循环吧", callbacks);
 
-    // 0.30.x:轮数耗尽从"报错"改为"预算耗尽"——value 分支交回,history 里
+    // 0.30.x:步数耗尽从"报错"改为"预算耗尽"——value 分支交回,history 里
     // 留着到限为止的全部来回,调用方(子代理)按 budget_exhausted 收账、
     // 带走部分结果(规格"现场四")。
     REQUIRE(result.has_value());
     CHECK_FALSE(result->cancelled);
-    CHECK(result->hit_turn_limit);
-    CHECK(result->turns_used == 3);
+    CHECK(result->hit_step_limit);
+    CHECK(result->steps_used == 3);
     CHECK(result->stop_reason == "tool_use");  // 最后一次应答的原始 stop reason
-    CHECK(backend.captured_requests.size() == 3);  // 正好用满 max_turns 次请求
+    CHECK(backend.captured_requests.size() == 3);  // 正好用满步数预算次请求
 }
 
-TEST_CASE("max_turns=0(无上限):来回轮数不受硬顶限制,跑到 end_turn 才停") {
+TEST_CASE("max_steps_per_turn=0(无上限):来回步数不受硬顶限制,跑到 end_turn 才停") {
     FakeBackend backend;
     // 10 轮工具调用,早就超过老默认值(25/100)里"该被拦下"的量级,但
-    // max_turns=0 时压根没有硬顶,该一路跑到最后一句 end_turn 才停。
+    // 预算为 0 时压根没有硬顶,该一路跑到最后一句 end_turn 才停。
     for (int i = 0; i < 10; ++i) {
         backend.scripts.push_back(ToolUseScript("toolu_" + std::to_string(i), "fake_tool"));
     }
@@ -298,7 +298,7 @@ TEST_CASE("max_turns=0(无上限):来回轮数不受硬顶限制,跑到 end_turn
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"ok", false}, false));
 
-    agent::AgentLoop loop(backend, registry, "test-model", "system prompt", 4096, /*max_turns=*/0);
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt", 4096, /*max_steps_per_turn=*/0);
     agent::Callbacks callbacks;
     const auto result = loop.Run("跑很多轮", callbacks);
 
@@ -306,7 +306,7 @@ TEST_CASE("max_turns=0(无上限):来回轮数不受硬顶限制,跑到 end_turn
     CHECK(backend.captured_requests.size() == 11);  // 10 次工具轮 + 1 次收尾,没被硬顶掐断
 }
 
-TEST_CASE("默认 max_turns(不传参数)= 无上限:多轮工具调用不报错,system 里也不会出现轮数将尽提醒") {
+TEST_CASE("默认步数预算(不传参数)= 无上限:多步工具调用不报错,system 里也不会出现步数将尽提醒") {
     FakeBackend backend;
     for (int i = 0; i < 5; ++i) {
         backend.scripts.push_back(ToolUseScript("toolu_d" + std::to_string(i), "fake_tool"));
@@ -315,14 +315,14 @@ TEST_CASE("默认 max_turns(不传参数)= 无上限:多轮工具调用不报错
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"ok", false}, false));
 
-    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");  // 不传 max_turns,用默认值
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");  // 不传步数预算,用默认值
     agent::Callbacks callbacks;
     const auto result = loop.Run("跑几轮", callbacks);
 
     REQUIRE(result.has_value());
     REQUIRE(backend.captured_requests.size() == 6);
     for (const auto& req : backend.captured_requests) {
-        CHECK(req.system.find("轮数将尽") == std::string::npos);
+        CHECK(req.system.find("步数将尽") == std::string::npos);
     }
 }
 
@@ -568,56 +568,56 @@ TEST_CASE("上下文硬上限:裁剪与截断后仍超限(单条用户输入就�
 }
 
 // ---------------------------------------------------------------------------
-// 轮数将尽提醒:ShouldNudgeMaxTurns 是纯函数,直接测触发时机;再用一个真跑
+// 步数将尽提醒:ShouldNudgeStepLimit 是纯函数,直接测触发时机;再用一个真跑
 // AgentLoop 的用例确认提醒文本真的被附到了发出去的 request.system 尾部。
 // ---------------------------------------------------------------------------
 
-TEST_CASE("ShouldNudgeMaxTurns: 剩 3 轮那一轮触发一次,其余各轮不再重复") {
-    // max_turns=100:turn=96 时剩余 4 轮,不提醒;turn=97 时剩余 3 轮,提醒
+TEST_CASE("ShouldNudgeStepLimit: 剩 3 步那一步触发一次,其余各步不再重复") {
+    // 预算 100 步:step_index=96 时剩余 4 步,不提醒;step_index=97 时剩余 3 步,提醒
     // (唯一一次);turn=98、99 不再重复(规格"现场四":收口提示只注入一次)。
-    CHECK_FALSE(agent::ShouldNudgeMaxTurns(96, 100));
-    CHECK(agent::ShouldNudgeMaxTurns(97, 100));
-    CHECK_FALSE(agent::ShouldNudgeMaxTurns(98, 100));
-    CHECK_FALSE(agent::ShouldNudgeMaxTurns(99, 100));  // 最后一轮(turn=max_turns-1)
+    CHECK_FALSE(agent::ShouldNudgeStepLimit(96, 100));
+    CHECK(agent::ShouldNudgeStepLimit(97, 100));
+    CHECK_FALSE(agent::ShouldNudgeStepLimit(98, 100));
+    CHECK_FALSE(agent::ShouldNudgeStepLimit(99, 100));  // 最后一步(step_index=预算-1)
 }
 
-TEST_CASE("ShouldNudgeMaxTurns: max_turns 本来就小于阈值时第一轮触发一次") {
-    CHECK(agent::ShouldNudgeMaxTurns(0, 3));
-    CHECK(agent::ShouldNudgeMaxTurns(0, 1));
-    CHECK_FALSE(agent::ShouldNudgeMaxTurns(1, 3));  // 剩 2 轮,但第一轮已提醒过
-    CHECK_FALSE(agent::ShouldNudgeMaxTurns(1, 5));  // 剩 4 轮,还不该
-    CHECK_FALSE(agent::ShouldNudgeMaxTurns(0, 5));  // 剩 5 轮,更不该
+TEST_CASE("ShouldNudgeStepLimit: 预算本来就小于阈值时第一步触发一次") {
+    CHECK(agent::ShouldNudgeStepLimit(0, 3));
+    CHECK(agent::ShouldNudgeStepLimit(0, 1));
+    CHECK_FALSE(agent::ShouldNudgeStepLimit(1, 3));  // 剩 2 步,但第一步已提醒过
+    CHECK_FALSE(agent::ShouldNudgeStepLimit(1, 5));  // 剩 4 步,还不该
+    CHECK_FALSE(agent::ShouldNudgeStepLimit(0, 5));  // 剩 5 步,更不该
 }
 
-TEST_CASE("ShouldNudgeMaxTurns: max_turns <= 0(无上限)永不触发,不管 turn 是多少") {
-    CHECK_FALSE(agent::ShouldNudgeMaxTurns(0, 0));
-    CHECK_FALSE(agent::ShouldNudgeMaxTurns(1000, 0));
-    CHECK_FALSE(agent::ShouldNudgeMaxTurns(0, -1));
-    CHECK_FALSE(agent::ShouldNudgeMaxTurns(5, -5));
+TEST_CASE("ShouldNudgeStepLimit: 预算 <= 0(无上限)永不触发,不管 step_index 是多少") {
+    CHECK_FALSE(agent::ShouldNudgeStepLimit(0, 0));
+    CHECK_FALSE(agent::ShouldNudgeStepLimit(1000, 0));
+    CHECK_FALSE(agent::ShouldNudgeStepLimit(0, -1));
+    CHECK_FALSE(agent::ShouldNudgeStepLimit(5, -5));
 }
 
-TEST_CASE("轮数将尽提醒:剩 3 轮那一轮带上一次收口提示;其余各轮不带") {
+TEST_CASE("步数将尽提醒:剩 3 步那一步带上一次收口提示;其余各步不带") {
     FakeBackend backend;
-    // max_turns=4:turn=0(剩 4 轮)不带;turn=1(剩 3 轮)带——唯一一次;
-    // turn=2(剩 2 轮)不再重复。
+    // 预算 4 步:step_index=0(剩 4 步)不带;step_index=1(剩 3 步)带——唯一一次;
+    // step_index=2(剩 2 步)不再重复。
     backend.scripts = {
-        ToolUseScript("toolu_1", "fake_tool"),  // turn=0,剩余 4 轮,不该带提醒
-        ToolUseScript("toolu_2", "fake_tool"),  // turn=1,剩余 3 轮,该带提醒
-        TextOnlyScript("收尾了"),                // turn=2,剩余 2 轮,不再重复
+        ToolUseScript("toolu_1", "fake_tool"),  // step 0,剩余 4 步,不该带提醒
+        ToolUseScript("toolu_2", "fake_tool"),  // step 1,剩余 3 步,该带提醒
+        TextOnlyScript("收尾了"),                // step 2,剩余 2 步,不再重复
     };
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"ok", false}, false));
 
-    agent::AgentLoop loop(backend, registry, "test-model", "system prompt", 4096, /*max_turns=*/4);
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt", 4096, /*max_steps_per_turn=*/4);
     agent::Callbacks callbacks;
     const auto result = loop.Run("跑吧", callbacks);
 
     REQUIRE(result.has_value());
     REQUIRE(backend.captured_requests.size() == 3);
-    CHECK(backend.captured_requests[0].system.find("轮数预算将尽") == std::string::npos);
-    CHECK(backend.captured_requests[1].system.find("轮数预算将尽") != std::string::npos);
+    CHECK(backend.captured_requests[0].system.find("步数预算将尽") == std::string::npos);
+    CHECK(backend.captured_requests[1].system.find("步数预算将尽") != std::string::npos);
     CHECK(backend.captured_requests[1].system.find("检查点") != std::string::npos);  // 收口:写检查点
-    CHECK(backend.captured_requests[2].system.find("轮数预算将尽") == std::string::npos);
+    CHECK(backend.captured_requests[2].system.find("步数预算将尽") == std::string::npos);
     // system prompt 本体没被永久改掉——每次都是从原样的 "system prompt" 长出来的。
     CHECK(backend.captured_requests[1].system.find("system prompt") == 0);
 }

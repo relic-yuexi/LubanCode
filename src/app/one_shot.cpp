@@ -216,8 +216,8 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
             lubancode::agent::WithModelInstructions(
                 lubancode::agent::AssembleSystemPrompt(prompt_options), model_instructions),
             soul_content),
-        // max_turns 同上,改用 config.max_turns(默认 0=无上限)。
-        /*max_tokens=*/4096, config.max_turns, config.max_context_chars);
+        // 步数上限同上,改用 config 的 max_steps_per_turn(默认 0=无上限)。
+        /*max_tokens=*/4096, config.max_steps_per_turn, config.max_context_chars);
     if (main_deferral) {
         loop.SetToolFilter(tool_runtime.main_tool_filter());
     }

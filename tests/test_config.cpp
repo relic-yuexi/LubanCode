@@ -345,9 +345,9 @@ TEST_CASE("MergeConfig: max_context_chars 专属 env 压过配置文件") {
 TEST_CASE("MergeConfig: 什么都没设置时,max_turns 走内置默认值 0(无上限)") {
     const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
     REQUIRE(result.has_value());
-    CHECK(result->config.max_turns == config::kDefaultMaxTurns);
-    CHECK(result->config.max_turns == 0);
-    CHECK(result->sources.max_turns == config::Source::Default);
+    CHECK(result->config.max_steps_per_turn == config::kDefaultMaxStepsPerTurn);
+    CHECK(result->config.max_steps_per_turn == 0);
+    CHECK(result->sources.max_steps_per_turn == config::Source::Default);
 }
 
 TEST_CASE("MergeConfig: max_turns 配置文件压过默认值") {
@@ -357,8 +357,8 @@ TEST_CASE("MergeConfig: max_turns 配置文件压过默认值") {
 
     const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
     REQUIRE(result.has_value());
-    CHECK(result->config.max_turns == 50);
-    CHECK(result->sources.max_turns == config::Source::ProjectConfigFile);
+    CHECK(result->config.max_steps_per_turn == 50);
+    CHECK(result->sources.max_steps_per_turn == config::Source::ProjectConfigFile);
 }
 
 TEST_CASE("MergeConfig: max_turns 配置文件显式写 0,合并结果就是 0(无上限),不当没配") {
@@ -368,9 +368,9 @@ TEST_CASE("MergeConfig: max_turns 配置文件显式写 0,合并结果就是 0(�
 
     const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
     REQUIRE(result.has_value());
-    CHECK(result->config.max_turns == 0);
+    CHECK(result->config.max_steps_per_turn == 0);
     // 来源仍然记成配置文件那一级(不是 Default)——0 是显式配的值。
-    CHECK(result->sources.max_turns == config::Source::ProjectConfigFile);
+    CHECK(result->sources.max_steps_per_turn == config::Source::ProjectConfigFile);
 }
 
 TEST_CASE("MergeConfig: max_turns 专属 env(LUBANCODE_MAX_TURNS)压过配置文件") {
@@ -383,8 +383,8 @@ TEST_CASE("MergeConfig: max_turns 专属 env(LUBANCODE_MAX_TURNS)压过配置文
 
     const auto result = config::MergeConfig(lubancode_env, file, EmptyGenericEnv());
     REQUIRE(result.has_value());
-    CHECK(result->config.max_turns == 30);
-    CHECK(result->sources.max_turns == config::Source::LubancodeEnv);
+    CHECK(result->config.max_steps_per_turn == 30);
+    CHECK(result->sources.max_steps_per_turn == config::Source::LubancodeEnv);
 }
 
 TEST_CASE("ParseFileConfigJson: max_turns 正整数正常解析") {
@@ -425,7 +425,7 @@ TEST_CASE("ParseFileConfigJson: subagent.max_turns 正常解析;坏段/坏值/�
 TEST_CASE("MergeConfig: subagent.max_turns 未设时留 nullopt(运行时继承 max_turns)") {
     const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
     REQUIRE(result.has_value());
-    CHECK_FALSE(result->config.subagent.max_turns.has_value());
+    CHECK_FALSE(result->config.subagent.max_steps_per_turn.has_value());
     CHECK(result->sources.subagent == config::Source::Default);
 }
 
@@ -441,11 +441,11 @@ TEST_CASE("MergeConfig: subagent.max_turns 项目级压全局,与 max_turns 互�
     const auto result = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
     REQUIRE(result.has_value());
     // 项目级只写了 max_turns:subagent 段回退全局的 12;max_turns 用项目级 50。
-    REQUIRE(result->config.subagent.max_turns.has_value());
-    CHECK(*result->config.subagent.max_turns == 12);
+    REQUIRE(result->config.subagent.max_steps_per_turn.has_value());
+    CHECK(*result->config.subagent.max_steps_per_turn == 12);
     CHECK(result->sources.subagent == config::Source::GlobalConfigFile);
-    CHECK(result->config.max_turns == 50);
-    CHECK(result->sources.max_turns == config::Source::ProjectConfigFile);
+    CHECK(result->config.max_steps_per_turn == 50);
+    CHECK(result->sources.max_steps_per_turn == config::Source::ProjectConfigFile);
 }
 
 TEST_CASE("MergeConfig: subagent.max_turns 显式 0 是显式不限轮,不当没配") {
@@ -456,9 +456,9 @@ TEST_CASE("MergeConfig: subagent.max_turns 显式 0 是显式不限轮,不当没
 
     const auto result = config::MergeConfig(EmptyLubancodeEnv(), project, std::nullopt, EmptyGenericEnv());
     REQUIRE(result.has_value());
-    REQUIRE(result->config.subagent.max_turns.has_value());
-    CHECK(*result->config.subagent.max_turns == 0);  // 子代理不限轮,主代理仍 40
-    CHECK(result->config.max_turns == 40);
+    REQUIRE(result->config.subagent.max_steps_per_turn.has_value());
+    CHECK(*result->config.subagent.max_steps_per_turn == 0);  // 子代理不限轮,主代理仍 40
+    CHECK(result->config.max_steps_per_turn == 40);
     CHECK(result->sources.subagent == config::Source::ProjectConfigFile);
 }
 

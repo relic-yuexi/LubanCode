@@ -1282,22 +1282,23 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.sources.max_context_chars = Source::Default;
     }
 
-    // ---- max_turns:env > 项目级 > 全局 > 默认值,没有通用 env 这一级(待遇
-    // 同 max_context_chars)。负数/非法值已经在解析阶段被过滤(不会落进
-    // FileConfig/LubancodeEnvValues),0(显式无上限)是合法值,这里只管按
-    // 优先级挑;都没配到时默认值 kDefaultMaxTurns 本身也是 0(无上限)。 ----
+    // ---- max_steps_per_turn(旧名 max_turns):env > 项目级 > 全局 > 默认值,
+    // 没有通用 env 这一级(待遇同 max_context_chars)。负数/非法值已经在解析
+    // 阶段被过滤(不会落进 FileConfig/LubancodeEnvValues),0(显式无上限)是
+    // 合法值,这里只管按优先级挑;都没配到时默认值 kDefaultMaxStepsPerTurn
+    // 本身也是 0(无上限)。 ----
     if (lubancode_env.max_turns.has_value()) {
-        result.config.max_turns = *lubancode_env.max_turns;
-        result.sources.max_turns = Source::LubancodeEnv;
+        result.config.max_steps_per_turn = *lubancode_env.max_turns;
+        result.sources.max_steps_per_turn = Source::LubancodeEnv;
     } else if (project_file.has_value() && project_file->max_turns.has_value()) {
-        result.config.max_turns = *project_file->max_turns;
-        result.sources.max_turns = Source::ProjectConfigFile;
+        result.config.max_steps_per_turn = *project_file->max_turns;
+        result.sources.max_steps_per_turn = Source::ProjectConfigFile;
     } else if (global_file.has_value() && global_file->max_turns.has_value()) {
-        result.config.max_turns = *global_file->max_turns;
-        result.sources.max_turns = Source::GlobalConfigFile;
+        result.config.max_steps_per_turn = *global_file->max_turns;
+        result.sources.max_steps_per_turn = Source::GlobalConfigFile;
     } else {
-        result.config.max_turns = kDefaultMaxTurns;
-        result.sources.max_turns = Source::Default;
+        result.config.max_steps_per_turn = kDefaultMaxStepsPerTurn;
+        result.sources.max_steps_per_turn = Source::Default;
     }
 
     // ---- theme:env > 项目级 > 全局 > 默认值,没有通用 env 这一级 ----
@@ -1533,13 +1534,13 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     }
 
     if (project_file.has_value() && project_file->subagent_max_turns.has_value()) {
-        result.config.subagent.max_turns = *project_file->subagent_max_turns;
+        result.config.subagent.max_steps_per_turn = *project_file->subagent_max_turns;
         result.sources.subagent = Source::ProjectConfigFile;
     } else if (global_file.has_value() && global_file->subagent_max_turns.has_value()) {
-        result.config.subagent.max_turns = *global_file->subagent_max_turns;
+        result.config.subagent.max_steps_per_turn = *global_file->subagent_max_turns;
         result.sources.subagent = Source::GlobalConfigFile;
     } else {
-        result.config.subagent.max_turns = std::nullopt;  // 未单独配置:运行时继承 max_turns
+        result.config.subagent.max_steps_per_turn = std::nullopt;  // 未单独配置:运行时继承主代理预算
         result.sources.subagent = Source::Default;
     }
     if (project_file.has_value() && project_file->status_panel.has_value()) {

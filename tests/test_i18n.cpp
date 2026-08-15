@@ -222,7 +222,7 @@ TEST_CASE("transcript 摘要词: en 下出英文(彩色主题摘要进表)") {
     CHECK(cli::ReadFileDoneSummary("a\nb\n") == "Read 2 lines");
     CHECK(cli::WriteDiffSummary(3, 5) == "Added 3 lines, removed 5 lines");
     CHECK(cli::SearchDoneSummary("a.cpp:1:x\n") == "1 matches");
-    CHECK(cli::AgentDoneSummary(2, 4) == "Subagent 2 rounds · 4 tool calls");
+    CHECK(cli::AgentDoneSummary(2, 4) == "Subagent 2 steps · 4 tool calls");
     // plain 主题状态词不进表,保持英文常量,跟语言无关。
     CHECK(cli::TranscriptStatusWord(cli::TranscriptStatus::Running) == "[RUNNING]");
 }

@@ -1,7 +1,7 @@
 // agent 核心循环:user 消息入历史 -> 带工具发请求 -> 流式转发给上层(打字机
 // 输出)同时喂给 assembler 攒消息 -> stop_reason 是 tool_use 就把模型要的
 // 工具都执行一遍、结果攒成一条 user 消息喂回去 -> 再发请求 -> 如此往复,
-// 直到 end_turn,或者达到轮数上限。
+// 直到 end_turn,或者达到步数上限。
 
 #pragma once
 
@@ -77,28 +77,30 @@ struct Callbacks {
 // 不是错误(std::expected 的 value 分支,不是 error 分支),半截 assistant
 // 文本已经照常带着打断标注入了历史,history() 状态完整、下一轮能正常接着
 // 聊,调用方(main.cpp)只需要照这个标志决定要不要额外打提示。
-// hit_turn_limit=true 表示轮数预算用满(max_turns>0 才可能):也不是错误,
-// history 里留着到限为止的全部来回——上层(子代理)据此按 budget_exhausted
-// 收账、带走部分结果,不许笼统当 failed。stop_reason/turns_used 把模型最后
-// 一次应答的原始 stop reason 与实际请求次数交出去,失败语义由调用方分型。
+// hit_step_limit=true 表示步数预算用满(max_steps_per_turn>0 才可能):也不是
+// 错误,history 里留着到限为止的全部来回——上层(子代理)据此按
+// budget_exhausted 收账、带走部分结果,不许笼统当 failed。
+// stop_reason/steps_used 把模型最后一次应答的原始 stop reason 与实际请求
+// 次数交出去,失败语义由调用方分型。
 struct RunOutcome {
     bool cancelled = false;
-    bool hit_turn_limit = false;
+    bool hit_step_limit = false;
     std::string stop_reason;  // 模型最后一次应答的原始 stop_reason(空 = 一个字都没回来)
-    int turns_used = 0;       // 本次 Run() 实际发出的模型请求数
+    int steps_used = 0;       // 本次 Run() 实际发出的模型请求数(turn 内的 step 数)
 };
 
-// 轮数将尽提醒:剩三轮时当轮请求在 system 尾部附一句"收口"提示——停止
+// 步数将尽提醒:剩三步时当步请求在 system 尾部附一句"收口"提示——停止
 // 漫游、写检查点、交部分结论(规格"现场四")。只注入一次:提示落在"剩余
-// 轮数第一次降到阈值(含)以下"的那一轮,此后各轮不再重复(重复念叨只会
-// 把剩余轮数也烧掉)。阈值定死为 3。max_turns <= 0(无上限)时压根没有
-// "将尽"这回事,见 ShouldNudgeMaxTurns 实现——直接恒为 false。
-constexpr int kMaxTurnsNudgeThreshold = 3;
+// 步数第一次降到阈值(含)以下"的那一步,此后各步不再重复(重复念叨只会
+// 把剩余步数也烧掉)。阈值定死为 3。max_steps_per_turn <= 0(无上限)时压根
+// 没有"将尽"这回事,见 ShouldNudgeStepLimit 实现——直接恒为 false。
+constexpr int kStepLimitNudgeThreshold = 3;
 
-// 纯函数,可单测:第 turn 轮(0-based,对应 Run() 里 for 循环的循环变量)、
-// 总共 max_turns 轮,判断这一轮该不该在请求里附加"轮数将尽"的提示。
-// max_turns <= 0 表示无上限,永远不触发(压根没有"将尽"这回事)。
-bool ShouldNudgeMaxTurns(int turn, int max_turns);
+// 纯函数,可单测:第 step_index 步(0-based,对应 Run() 里 for 循环的循环
+// 变量)、总共 max_steps_per_turn 步,判断这一步该不该在请求里附加"步数
+// 将尽"的提示。max_steps_per_turn <= 0 表示无上限,永远不触发(压根没有
+// "将尽"这回事)。
+bool ShouldNudgeStepLimit(int step_index, int max_steps_per_turn);
 
 // ---------------------------------------------------------------------------
 // mid-turn 上下文安全点(0.27.x 分层压缩第一期)
@@ -147,18 +149,20 @@ using InboxPoll = std::function<std::optional<api::Message>()>;
 
 class AgentLoop {
 public:
-    // max_turns:一次 Run() 里最多跟模型来回几趟(每趟一次工具调用算一趟)。
+    // max_steps_per_turn:一次 Run()(一个 turn)里最多跟模型来回几步(每步
+    // 一次模型请求;一步可含多枚工具调用)。
     // <= 0 表示无上限——现在的模型常态是跑十几个小时的长程任务,任何硬闸
     // 都是矮墙;默认不设上限,防跑飞靠用户 ESC/Ctrl+C 打断和成本可见性
     // (跟 Claude Code 一个待遇)。想设闸的人显式配一个正整数,超过这个数
     // 还没到 end_turn 就报错退出——闸只服务"我确实想要一个硬上限"这个场景
     // (比如管道模式没有 ESC 可打断,想兜底防真死循环)。main.cpp 里这个值
-    // 改由 config.max_turns 传入(可经配置文件/环境变量调整),这里的默认
-    // 参数只服务不经过 main.cpp 配置流程的调用方(单测、未来的其它入口)。
+    // 改由 config.max_steps_per_turn 传入(可经配置文件/环境变量调整,旧名
+    // max_turns 兼容读入),这里的默认参数只服务不经过 main.cpp 配置流程的
+    // 调用方(单测、未来的其它入口)。
     // max_context_chars:发给模型前 history 裁剪的阈值(字符数),默认读
     // 环境变量 LUBANCODE_MAX_CONTEXT(没设置就是 kDefaultMaxContextChars)。
     AgentLoop(api::Backend& backend, tools::ToolRegistry& registry, std::string model,
-              std::string system_prompt, int max_tokens = 4096, int max_turns = 0,
+              std::string system_prompt, int max_tokens = 4096, int max_steps_per_turn = 0,
               std::size_t max_context_chars = MaxContextCharsFromEnv());
 
     // 发一轮用户输入。内部可能会跑好几个来回(工具调用),直到模型给出
@@ -244,7 +248,7 @@ private:
     std::string system_prompt_;
     std::string turn_system_suffix_;
     int max_tokens_;
-    int max_turns_;
+    int max_steps_per_turn_;  // 0 = 不限步(硬上限只管本 turn 内的 step)
     std::size_t max_context_chars_;
     std::size_t context_window_tokens_ = 0;  // mid-turn 评估用;0 = 未知,不评估
     bool structural_compression_enabled_ = true;  // 无损结构压缩(工作视图)

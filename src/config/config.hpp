@@ -72,9 +72,10 @@ constexpr const char* kDefaultTheme = "dark";
 // (字符数、老的硬安全网,单位不同、语义也不同)是两回事。
 constexpr std::size_t kDefaultContextWindowTokens = 256000;
 
-// max_turns(agent 主循环跟模型来回的轮数上限)的内置默认值。数值上跟
-// agent::AgentLoop 构造函数的默认参数保持一致,但 config 层不依赖 agent 层
-// (同 kDefaultMaxContextChars 的理由,依赖只许单向)。
+// max_steps_per_turn(agent 主循环一个 turn 内跟模型来回的步数上限;旧配置
+// 名 max_turns)的内置默认值。数值上跟 agent::AgentLoop 构造函数的默认参数
+// 保持一致,但 config 层不依赖 agent 层(同 kDefaultMaxContextChars 的理由,
+// 依赖只许单向)。
 //
 // 默认 0 = 无上限。曾经先后是 25、100——但硬闸这个思路本身就旧了:现在的
 // 模型常态是跑十几个小时的长程任务,不管定多高的数字,总有正常任务会撞
@@ -82,7 +83,7 @@ constexpr std::size_t kDefaultContextWindowTokens = 256000;
 // 防跑飞靠用户 ESC/Ctrl+C 打断和成本可见性(usage 汇报),而不是靠一堵矮墙。
 // 想要一个硬上限的人(比如管道模式没有 ESC 可打断,想兜底防真死循环),
 // 显式配一个正整数就是——闸只在"确实想要"的时候存在。
-constexpr int kDefaultMaxTurns = 0;
+constexpr int kDefaultMaxStepsPerTurn = 0;
 
 constexpr std::size_t kDefaultMemoryMaxIndexBytes = 16 * 1024;
 // 召回预算收紧(规格"召回只送命中，不送整份索引"):index.md 不再随请求
@@ -245,13 +246,14 @@ struct StatusPanelConfig {
     std::string separator = " · ";
 };
 
-// 子代理(subagent)段的运行配置。max_turns:nullopt = 未单独配置,运行时
-// 继承 config.max_turns(默认 0 = 不限轮);显式配了(含 0)就是子代理
-// 自己的预算,与主代理的 max_turns 分开管。待遇同 hooks:只从配置文件来
+// 子代理(subagent)段的运行配置。max_steps_per_turn(旧配置名
+// subagent.max_turns):nullopt = 未单独配置,运行时继承
+// config.max_steps_per_turn(默认 0 = 不限步);显式配了(含 0)就是子代理
+// 自己的预算,与主代理的分开管。待遇同 hooks:只从配置文件来
 // (项目级压全局),没有环境变量、没有内置默认值这两级——0 的语义全路
-// 一致,都是不限轮(规格"现场四":子代理不再暗藏轮数硬闸)。
+// 一致,都是不限步(规格"现场四":子代理不再暗藏步数硬闸)。
 struct SubagentConfig {
-    std::optional<int> max_turns;
+    std::optional<int> max_steps_per_turn;
 };
 
 struct Config {
@@ -277,12 +279,13 @@ struct Config {
     nlohmann::json extra_body = nlohmann::json::object();
     std::map<std::string, std::string> extra_headers;
     std::size_t max_context_chars = kDefaultMaxContextChars;
-    // max_turns:agent 主循环一次 Run() 最多跟模型来回几轮。只从"专属 env /
-    // 配置文件 / 默认值"三级来,没有通用 env 这一级(待遇同 max_context_chars)。
-    // 语义:不配、或者显式配 0,都是无上限;配正整数才是硬上限(超过就报错
-    // 停止)。负数、非法值在解析阶段就被忽略,落到下一级/默认值,不报错——
-    // 这是条"救命阀"字段,配置写错不该拦住用户开工。
-    int max_turns = kDefaultMaxTurns;
+    // max_steps_per_turn(旧名 max_turns):agent 主循环一次 Run() 最多跟
+    // 模型来回几步(一步一次模型请求)。只从"专属 env / 配置文件 / 默认值"
+    // 三级来,没有通用 env 这一级(待遇同 max_context_chars)。语义:不配、
+    // 或者显式配 0,都是无上限;配正整数才是硬上限(超过就报错停止)。
+    // 负数、非法值在解析阶段就被忽略,落到下一级/默认值,不报错——这是条
+    // "救命阀"字段,配置写错不该拦住用户开工。
+    int max_steps_per_turn = kDefaultMaxStepsPerTurn;
     std::string theme = kDefaultTheme;   // dark / light / plain,没配到就是 kDefaultTheme
     // i18n:界面语言(zh-CN / en / languages/ 里的语言码)。空串 = 跟系统
     // (启动时 DetectSystemLanguage 探测)。四级合并,env 是 LUBANCODE_LANG。
@@ -306,8 +309,8 @@ struct Config {
     // mcpServers),没配就是空 map——空 map 意味着 lsp 工具不注册。
     std::map<std::string, LspServerConfig> lsp_servers;
     StatusPanelConfig status_panel;
-    // 子代理段:只从配置文件来(项目级压全局);max_turns 未设(nullopt)
-    // 时运行时继承 max_turns。
+    // 子代理段:只从配置文件来(项目级压全局);预算未设(nullopt)
+    // 时运行时继承主代理的步数上限。
     SubagentConfig subagent;
     // tool_search:延迟挂载的启用阈值,0 = 永不延迟。只从配置文件读
     // (没有环境变量这一级),没配就是默认 20。
@@ -334,7 +337,7 @@ struct ConfigSources {
     Source auth_token = Source::Default;
     Source model = Source::Default;
     Source max_context_chars = Source::Default;
-    Source max_turns = Source::Default;
+    Source max_steps_per_turn = Source::Default;
     Source theme = Source::Default;
     Source language = Source::Default;  // i18n:界面语言
     Source system_prompt_file = Source::Default;
@@ -407,10 +410,11 @@ struct FileConfig {
     std::optional<std::string> api_key;
     std::optional<std::string> model;
     std::optional<std::size_t> max_context_chars;
-    // max_turns:非负整数才落进这个字段(0 = 显式无上限,是合法值);负数
+    // max_turns(旧配置键,读入后映射到 max_steps_per_turn):非负整数才落进
+    // 这个字段(0 = 显式无上限,是合法值);负数
     // 或者字段类型不对,ParseFileConfigJson 静默跳过(留 nullopt),不
     // 报错——见 Config::max_turns 注释。
-    std::optional<int> max_turns;
+    std::optional<int> max_turns;  // 旧键 "max_turns" 的值(新键见 max_steps_per_turn,兼容期双读)
     std::optional<std::string> theme;               // dark / light / plain
     std::optional<std::string> language;             // i18n:界面语言码
     std::optional<std::string> system_prompt_file;   // 人格文件路径
@@ -428,8 +432,9 @@ struct FileConfig {
     std::optional<std::map<std::string, LspServerConfig>> lsp_servers;
     // status_panel 整段回退；items 的顺序就是终端展示顺序。
     std::optional<StatusPanelConfig> status_panel;
-    // subagent 段:{"subagent": {"max_turns": N}}。非负整数(0 = 显式不
-    // 限轮);负数/类型不对静默跳过(待遇同 max_turns 的"救命阀"取舍)。
+    // subagent 段:{"subagent": {"max_turns": N}}(旧键,新键
+    // max_steps_per_turn)。非负整数(0 = 显式不限步);负数/类型不对静默
+    // 跳过(待遇同 max_turns 的"救命阀"取舍)。
     std::optional<int> subagent_max_turns;
     // extra_body/extra_headers:顶层"单 provider 配置"写法专用(不进
     // providers 数组的场景),整段有没有出现在 JSON 里(待遇同 hooks/
@@ -461,7 +466,7 @@ struct LubancodeEnvValues {
     std::optional<std::string> api_key;
     std::optional<std::string> model;
     std::optional<std::size_t> max_context_chars;
-    std::optional<int> max_turns;                    // LUBANCODE_MAX_TURNS,非负整数(0 = 无上限),负数忽略
+    std::optional<int> max_turns;  // 旧键 "max_turns" 的值(新键见 max_steps_per_turn,兼容期双读)                    // LUBANCODE_MAX_TURNS,非负整数(0 = 无上限),负数忽略
     std::optional<std::string> theme;               // LUBANCODE_THEME
     std::optional<std::string> language;             // LUBANCODE_LANG(i18n 界面语言)
     std::optional<std::string> system_prompt_file;   // LUBANCODE_SYSTEM_PROMPT_FILE

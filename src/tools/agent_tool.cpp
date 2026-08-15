@@ -154,7 +154,7 @@ std::string ReasonShortLabel(TaskOutcomeReason reason) {
     switch (reason) {
         case TaskOutcomeReason::ApiError:
             return "接口报错";
-        case TaskOutcomeReason::MaxTurns:
+        case TaskOutcomeReason::StepLimitExhausted:
             return "耗尽";
         case TaskOutcomeReason::MaxContext:
             return "上下文满";
@@ -192,10 +192,10 @@ const char* OutcomeStatusTag(TaskOutcomeStatus status) {
 // 四十轮探索不许一笔勾销(规格"现场三")。
 std::string ComposeOutcomeText(const TaskOutcome& outcome) {
     std::string out = std::string("[") + OutcomeStatusTag(outcome.status) + "] " + outcome.message;
-    if (outcome.turn_limit > 0) {
-        out += " · 轮数 " + std::to_string(outcome.turns_used) + "/" + std::to_string(outcome.turn_limit);
-    } else if (outcome.turns_used > 0) {
-        out += " · 轮数 " + std::to_string(outcome.turns_used);
+    if (outcome.step_limit > 0) {
+        out += " · 步数 " + std::to_string(outcome.steps_used) + "/" + std::to_string(outcome.step_limit);
+    } else if (outcome.steps_used > 0) {
+        out += " · 步数 " + std::to_string(outcome.steps_used);
     }
     if (!outcome.partial_result.empty()) {
         out += "\n检查点/部分结果:\n" + outcome.partial_result;
@@ -207,7 +207,7 @@ std::string ComposeOutcomeText(const TaskOutcome& outcome) {
         out += "\n模型 stop_reason: " + outcome.stop_reason;
     }
     out += "\n可重试动作: 先读本结果里的检查点,缩小范围、拆小任务后续派;"
-           "不要原样重发同一份 prompt,更不要擅自抬高轮数上限。";
+           "不要原样重发同一份 prompt,更不要擅自抬高步数上限。";
     return out;
 }
 
@@ -287,12 +287,12 @@ std::unique_ptr<ToolRegistry> BuildIsolatedRegistry(ToolRegistry& source, const 
 }  // namespace
 
 AgentTool::AgentTool(api::Backend& backend, ToolRegistry& sub_registry, std::string cwd, std::string model,
-                      int default_max_turns, std::string skills_segment)
+                      int default_max_steps_per_turn, std::string skills_segment)
     : backend_(backend),
       sub_registry_(sub_registry),
       cwd_(std::move(cwd)),
       model_(std::move(model)),
-      default_max_turns_(default_max_turns),
+      default_max_steps_per_turn_(default_max_steps_per_turn),
       skills_segment_(std::move(skills_segment)) {}
 
 AgentTool::~AgentTool() {
@@ -467,13 +467,13 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
     }
     const bool isolate = isolation == "worktree";
 
-    int max_turns = default_max_turns_;
+    int max_steps_per_turn = default_max_steps_per_turn_;
     if (const auto it = input.find("max_turns"); it != input.end() && !it->is_null()) {
         if (!it->is_number_integer()) {
             return {"max_turns 得是整数", true};
         }
-        max_turns = it->get<int>();
-        if (max_turns < 0) {
+        max_steps_per_turn = it->get<int>();
+        if (max_steps_per_turn < 0) {
             return {"max_turns 不能是负数(0 = 不设上限)", true};
         }
     }
@@ -483,9 +483,9 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
     const bool background =
         mode_explicit ? mode_background : input.value("run_in_background", background_by_default_);
     if (background) {
-        return LaunchBackground(input, title, agent_type, task_registry, max_turns, isolate);
+        return LaunchBackground(input, title, agent_type, task_registry, max_steps_per_turn, isolate);
     }
-    return ExecuteForeground(input, title, agent_type, task_registry, max_turns, isolate);
+    return ExecuteForeground(input, title, agent_type, task_registry, max_steps_per_turn, isolate);
 }
 
 std::optional<cli::AgentWorktree> AgentTool::SetupIsolationRoom(Result& error_out) {
@@ -514,7 +514,7 @@ std::string AgentTool::FinishIsolationRoom(const cli::AgentWorktree& room, const
 
 Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std::string& title,
                                           const std::string& agent_type, ToolRegistry& task_registry,
-                                          int max_turns, bool isolate) {
+                                          int max_steps_per_turn, bool isolate) {
     // isolation=worktree:建房、锁房、工具表套 base_dir 包装、隔离范围压栈,
     // 跑完收工(干净删房,有活留房附路径)。cwd 一根指头都不动。
     std::optional<cli::AgentWorktree> room;
@@ -545,7 +545,7 @@ Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std
         task->snapshot.title = title;
         task->snapshot.prompt = input.at("prompt").get<std::string>();
         task->snapshot.foreground = true;
-        task->snapshot.turn_limit = max_turns;  // 派出时预算进快照(规格"现场四")
+        task->snapshot.step_limit = max_steps_per_turn;  // 派出时预算进快照(规格"现场四")
         task->snapshot.state = AgentTaskState::Running;
         task->snapshot.start_time = std::chrono::steady_clock::now();
         task->snapshot.delivered = true;
@@ -554,7 +554,8 @@ Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std
     TouchTasks();
 
     const Hooks hooks = hooks_;
-    Result result = RunTask(backend_, effective_registry, task->snapshot.prompt, agent_type, max_turns, &hooks, task,
+    Result result = RunTask(backend_, effective_registry, task->snapshot.prompt, agent_type, max_steps_per_turn,
+                            &hooks, task,
                             /*detached=*/nullptr,
                             /*prepared_system_prompt=*/nullptr,
                             scope_storage.has_value() ? &*scope_storage : nullptr);
@@ -588,8 +589,8 @@ Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std
 }
 
 Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std::string& title,
-                                         const std::string& agent_type, ToolRegistry& task_registry, int max_turns,
-                                         bool isolate) {
+                                         const std::string& agent_type, ToolRegistry& task_registry,
+                                         int max_steps_per_turn, bool isolate) {
     if (!detached_backend_factory_) {
         return {"当前入口没有配置后台子代理后端,请把 run_in_background 设为 false", true};
     }
@@ -649,7 +650,7 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
         task->snapshot.agent_type = agent_type;
         task->snapshot.title = title;
         task->snapshot.prompt = input.at("prompt").get<std::string>();
-        task->snapshot.turn_limit = max_turns;  // 派出时预算进快照(规格"现场四")
+        task->snapshot.step_limit = max_steps_per_turn;  // 派出时预算进快照(规格"现场四")
         task->snapshot.state = AgentTaskState::Running;
         task->snapshot.start_time = std::chrono::steady_clock::now();
         tasks_.push_back(task);
@@ -665,7 +666,7 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
     system_prompt = agent::WithModelInstructions(system_prompt, detached.model_instructions);
     system_prompt = agent::WithSoul(system_prompt, detached.soul);
     ToolRegistry* registry = detached_registry != nullptr ? detached_registry.get() : &task_registry;
-    task_threads_.emplace_back([this, task, registry, prompt, agent_type, max_turns,
+    task_threads_.emplace_back([this, task, registry, prompt, agent_type, max_steps_per_turn,
                                 detached = std::move(detached),
                                 system_prompt = std::move(system_prompt),
                                 detached_registry = std::move(detached_registry),
@@ -686,7 +687,7 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
         DetachedRequestBackend backend(detached);
         Result result;
         try {
-            result = RunTask(backend, effective_registry, prompt, agent_type, max_turns, nullptr, task, &detached,
+            result = RunTask(backend, effective_registry, prompt, agent_type, max_steps_per_turn, nullptr, task, &detached,
                              &system_prompt, scope_storage.has_value() ? &*scope_storage : nullptr);
         } catch (const std::exception& error) {
             result = {"子代理执行失败: " + std::string(error.what()), true};
@@ -723,7 +724,7 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
 }
 
 Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_registry, const std::string& prompt,
-                                const std::string& agent_type, int max_turns, const Hooks* foreground_hooks,
+                                const std::string& agent_type, int max_steps_per_turn, const Hooks* foreground_hooks,
                                 const std::shared_ptr<TaskRecord>& task,
                                 const DetachedAgentBackend* detached,
                                 const std::string* prepared_system_prompt,
@@ -754,13 +755,14 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                          "工作目录、git 改道指回主树的操作都会被拦。改动留在房内,收工自会处置。";
     }
     // 每次 execute() 都是全新的、空历史的子代理——没有跨调用的状态。
-    // 长任务(40 轮、重试上百轮)的今天,"短命任务用不上 compact"的前提
+    // 长任务(几十步、重试上百次)的今天,"短命任务用不上 compact"的前提
     // 已倒:子代理复用主 compact(CompactHierarchical)与 AgentLoop 的压力
     // 通报,在"工具结果攒完、请求未发"的安全点把旧探索压成检查点式存档,
     // 不另造第二套摘要协议(规格"长任务还缺 compact")。窗口未知(0)时
     // loop 不做 projected 评估,行为与从前一致;TrimHistory 字符安全网照旧。
     const std::string task_model = detached != nullptr && !detached->model.empty() ? detached->model : model_;
-    agent::AgentLoop sub_loop(backend, task_registry, task_model, system_prompt, /*max_tokens=*/4096, max_turns);
+    agent::AgentLoop sub_loop(backend, task_registry, task_model, system_prompt, /*max_tokens=*/4096,
+                              max_steps_per_turn);
     if (context_window_tokens_ > 0) {
         sub_loop.SetContextWindowTokens(context_window_tokens_);
         sub_loop.SetOnContextPressure([&sub_loop, &backend, &task_model](
@@ -866,7 +868,9 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 std::lock_guard<std::mutex> lock(tasks_mutex_);
                 task->snapshot.input_tokens += usage.input_tokens;
                 task->snapshot.output_tokens += usage.output_tokens;
-                task->snapshot.turns_used += 1;  // 每笔 usage = 一次模型请求 = 一轮
+                // 步数不在这里记:usage 回调只是"一次请求结束"的时机,拿它
+                // 猜步数,provider 漏 usage 就会少算——直接账在 RunTask 循环
+                // 里按 RunOutcome::steps_used 累计(命名规范第三批)。
                 TouchTasks();
             }
             if (foreground_hooks != nullptr && foreground_hooks->on_usage) {
@@ -929,7 +933,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     bool run_hit_limit = false;
     std::string run_stop_reason;
     std::string run_error;
-    int turns_used_total = 0;
+    int steps_used_total = 0;
     // 已取走、尚未真正随一次模型请求发出的批次:续投那轮若失败/被打断,
     // 按下标退回未送,收尾账注照列原文。
     DrainedInbox inflight_drained;
@@ -940,14 +944,21 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             run_error = outcome.error();
             break;
         }
-        turns_used_total += outcome->turns_used;
+        steps_used_total += outcome->steps_used;
+        // 直接记账:步数来自 RunOutcome(循环内按模型请求累计),不靠 usage
+        // 回调猜——面板与终态摘要看到的 steps_used 同一笔账。
+        if (task != nullptr) {
+            std::lock_guard<std::mutex> lock(tasks_mutex_);
+            task->snapshot.steps_used = steps_used_total;
+            TouchTasks();
+        }
         run_stop_reason = outcome->stop_reason;
         if (outcome->cancelled) {
             run_cancelled = true;
             RestoreDrainedInbox(task, inflight_drained);
             break;  // 打断不是错误:半截文本照旧经 ExtractLastText 带出
         }
-        if (outcome->hit_turn_limit) {
+        if (outcome->hit_step_limit) {
             // 预算耗尽(规格"现场四"):不是笼统 failed,部分结果必须带回。
             run_hit_limit = true;
             RestoreDrainedInbox(task, inflight_drained);
@@ -983,8 +994,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
 
     // ---- 收场分型(规格"现场三"):结构化 TaskOutcome,不再只交一句话 ----
     TaskOutcome task_outcome;
-    task_outcome.turn_limit = max_turns;
-    task_outcome.turns_used = turns_used_total;
+    task_outcome.step_limit = max_steps_per_turn;
+    task_outcome.steps_used = steps_used_total;
     task_outcome.stop_reason = run_stop_reason;
     const std::string text = ExtractLastText(sub_loop);
     std::string snapshot_fallback;
@@ -1013,9 +1024,9 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                                   : Result{text + "\n" + ComposeOutcomeText(task_outcome), false};
     } else if (run_hit_limit) {
         task_outcome.status = TaskOutcomeStatus::BudgetExhausted;
-        task_outcome.reason = TaskOutcomeReason::MaxTurns;
-        task_outcome.message = "轮数预算已用满(" + std::to_string(turns_used_total) + "/" +
-                               std::to_string(max_turns) + " 轮)";
+        task_outcome.reason = TaskOutcomeReason::StepLimitExhausted;
+        task_outcome.message = "步数预算已用满(" + std::to_string(steps_used_total) + "/" +
+                               std::to_string(max_steps_per_turn) + " 步)";
         task_outcome.partial_result = partial;
         run_result = {ComposeOutcomeText(task_outcome), true};
     } else if (!run_error.empty()) {
@@ -1102,8 +1113,8 @@ std::vector<AgentTaskSummary> AgentTool::TaskSummaries() const {
         summary.prompt = task->snapshot.prompt;
         summary.foreground = task->snapshot.foreground;
         summary.state = task->snapshot.state;
-        summary.turn_limit = task->snapshot.turn_limit;
-        summary.turns_used = task->snapshot.turns_used;
+        summary.step_limit = task->snapshot.step_limit;
+        summary.steps_used = task->snapshot.steps_used;
         summary.outcome_reason = task->snapshot.outcome.reason;
         summary.input_tokens = task->snapshot.input_tokens;
         summary.output_tokens = task->snapshot.output_tokens;
@@ -1377,8 +1388,8 @@ std::vector<std::string> AgentTool::CompletionNoticeLines() const {
         if (!reason.empty() && reason != label) {
             label += " · " + reason;
         }
-        if (snapshot.state == AgentTaskState::BudgetExhausted && snapshot.turn_limit > 0) {
-            label += " · " + std::to_string(snapshot.turns_used) + "/" + std::to_string(snapshot.turn_limit) + " 轮";
+        if (snapshot.state == AgentTaskState::BudgetExhausted && snapshot.step_limit > 0) {
+            label += " · " + std::to_string(snapshot.steps_used) + "/" + std::to_string(snapshot.step_limit) + " 步";
         }
         out.push_back("#" + std::to_string(snapshot.id) + " " +
                       (snapshot.title.empty() ? "(未命名)" : snapshot.title) + " · " + label + " · " +
@@ -1410,7 +1421,7 @@ std::string AgentTool::DrainCompletionNotices() {
                 out << "已取消";
                 break;
             case AgentTaskState::BudgetExhausted:
-                out << "预算耗尽(" << snapshot.turns_used << "/" << snapshot.turn_limit << " 轮)";
+                out << "预算耗尽(" << snapshot.steps_used << "/" << snapshot.step_limit << " 步)";
                 break;
             case AgentTaskState::Running:
                 break;

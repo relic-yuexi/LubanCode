@@ -194,12 +194,13 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
         sub_registry_.Register(std::make_unique<lubancode::tools::LspTool>(*lsp_manager_));
         main_registry_.Register(std::make_unique<lubancode::tools::LspTool>(*lsp_manager_));
     }
-    // 子代理轮数预算从配置来(规格"现场四"):首选 subagent.max_turns,未设
-    // 继承 config.max_turns;0 的语义全路一致(不限轮)。旧版这里先后写死
+    // 子代理步数预算从配置来(规格"现场四"):首选 subagent 段的预算,未设
+    // 继承主代理的;0 的语义全路一致(不限步)。旧版这里先后写死
     // 过 40、构造器默认 15——两处暗闸都拆掉,不再有魔数。
-    const int subagent_default_turns = config.subagent.max_turns.value_or(config.max_turns);
+    const int subagent_default_steps_per_turn = config.subagent.max_steps_per_turn.value_or(config.max_steps_per_turn);
     main_registry_.Register(std::make_unique<lubancode::tools::AgentTool>(
-        agent_backend, sub_registry_, cwd_utf8, config.model, subagent_default_turns, skills_segment));
+        agent_backend, sub_registry_, cwd_utf8, config.model, subagent_default_steps_per_turn,
+        skills_segment));
     agent_tool_ = dynamic_cast<lubancode::tools::AgentTool*>(main_registry_.Find("agent"));
     if (agent_tool_ != nullptr) {
         // 长任务 compact:子代理复用主 compact,窗口从配置来(0 = 未知不评估)。
