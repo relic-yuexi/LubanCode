@@ -48,7 +48,6 @@
 #include "app/commands/settings_commands.hpp"
 #include "app/commands/workspace_commands.hpp"
 #include "app/version.hpp"
-#include "cli/agent_status.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/diff.hpp"

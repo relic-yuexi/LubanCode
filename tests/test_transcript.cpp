@@ -153,20 +153,11 @@ TEST_CASE("BuildToolTitle: run_command 显示命令,read/write/edit 显示路径
           "edit_file(b.txt)");
 }
 
-TEST_CASE("BuildToolTitle: agent 显示任务前 40 个码点") {
+TEST_CASE("BuildToolTitle: agent 只认真正短 title,不拿 prompt 片段冒充") {
     const std::string long_prompt(100, 'p');
-    const std::string title = BuildToolTitle("agent", {{"prompt", long_prompt}});
-    CHECK(title == "agent(" + long_prompt.substr(0, 40) + "...)");
-    // 中文按码点截,不劈开多字节字符
-    std::string cjk;
-    for (int i = 0; i < 50; ++i) {
-        cjk += "汉";
-    }
-    const std::string cjk_title = BuildToolTitle("agent", {{"prompt", cjk}});
-    CHECK(cjk_title.find("agent(") == 0);
-    CHECK(cjk_title.find("...") != std::string::npos);
-    // 40 个"汉"是 120 字节,加上前后缀不该更长
-    CHECK(cjk_title.size() == std::string("agent(").size() + 40 * 3 + 3 + 1);
+    const std::string title = BuildToolTitle("agent", {{"title", "项目记忆升级"}, {"prompt", long_prompt}});
+    CHECK(title == "agent(项目记忆升级)");
+    CHECK(title.find('p') == std::string::npos);  // prompt 一个字都不上标题
 }
 
 TEST_CASE("BuildToolTitle: ask_user 显示第一道问题,不把整份参数糊上屏") {

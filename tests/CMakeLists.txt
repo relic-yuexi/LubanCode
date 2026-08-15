@@ -61,7 +61,6 @@ add_executable(lubancode_tests
   test_divider.cpp
   test_format_utils.cpp
   test_transcript.cpp
-  test_agent_status.cpp
   test_agent_panel.cpp
   test_agent_inbox.cpp
   test_markdown.cpp
@@ -206,4 +205,13 @@ if(WIN32)
   #   agent_panel_driver <lubancode.exe> <工作目录> <报告文件>
   add_executable(agent_panel_driver agent_panel_driver.cpp)
   target_compile_features(agent_panel_driver PRIVATE cxx_std_23)
+
+  # 真前台任务 + 真流式监听(本单新增):进程内起假 anthropic SSE 服务,真
+  # lubancode.exe 连上去跑一条带 title 的前台 agent 调用,子代理卡在真工具
+  # (ping)里数秒,流式期间逐帧断言代理面板/详情/Esc 分层。工作目录建议给
+  # 一个空临时目录(避开项目记忆 identity):
+  #   agent_stream_driver <lubancode.exe> <工作目录> <报告文件>
+  add_executable(agent_stream_driver agent_stream_driver.cpp)
+  target_compile_features(agent_stream_driver PRIVATE cxx_std_23)
+  target_link_libraries(agent_stream_driver PRIVATE ws2_32)
 endif()

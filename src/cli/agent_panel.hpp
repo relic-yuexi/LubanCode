@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -20,12 +21,12 @@ namespace lubancode::cli {
 // 说明、工具流水、未送达介入消息)另走 detail provider 按需取,别让每拍
 // 刷新都复制全部工具输出。
 struct AgentPanelEntry {
-    std::string name;         // 如 "general-purpose #4"
-    std::string description;  // 任务短述(单行化后的截断)
-    std::string state;        // 状态摘要行("运行中(3 次工具调用 · …)")
+    std::string name;   // 如 "general-purpose #4"
+    std::string title;  // 真正短标题(AgentTaskSnapshot.title;旧任务空串,显示层退"未命名")
+    std::string state;  // 状态摘要行("运行中(3 次工具调用 · …)")
     bool running = false;
-    bool failed = false;      // 失败或取消
-    int task_id = 0;          // AgentTool 任务号;main/无 = 0
+    bool failed = false;  // 失败或取消
+    int task_id = 0;      // AgentTool 任务号;main/无 = 0
 };
 
 // 面板动作,由应用层(InteractiveSession)接线到 AgentTool 的正式取消/清理
@@ -56,8 +57,10 @@ enum class PanelKey {
     Other,
 };
 
-// 空闲 composer 上的面板焦点/查看态/停止全部两段确认。纯逻辑,不知道终端。
-// 规矩(规格第五、六节):
+// 空闲 composer 与流式监听共用的面板焦点/查看态/停止全部两段确认。纯逻辑,
+// 不知道终端。选择按稳定 task id 记(0 = main),任务增删/重排后按 id 修正,
+// 不靠易漂移的数组下标;取消/清除的动作目标也以 task id 交出(Outcome 里
+// 的 stop_current_task_id),绝不让调用方按下标回查。规矩(规格三、六节):
 //   - 正文非空时不抢上下/Enter,普通字母 x 只进 composer;
 //   - Enter 进查看态(同时把 composer 收件目标切到这只子代理),Esc 先退
 //     查看态、再退代理焦点;
@@ -71,17 +74,21 @@ public:
         bool consumed = false;      // 键被面板吃掉,不进 composer
         bool redraw = false;        // 面板状态变了,要重画
         bool stop_current = false;  // 对当前选中条目执行 停止/清除(应用层按条目状态分派)
+        int stop_current_task_id = 0;  // 稳定任务号;x 的动作目标;0 = 无
         bool stop_all = false;      // 两段确认完成,停止全部运行中任务
     };
 
-    // total_entries:main 计入的总条目数(<=1 = 只有 main,面板不出现)。
-    // composer_empty:此刻 composer 是否空(半句正文永远优先归 composer)。
-    Outcome HandleKey(PanelKey key, int total_entries, bool composer_empty,
+    // agent_task_ids:当前代理条目的稳定任务号表(main 不在表里,总条目数 =
+    // ids.size()+1)。composer_empty:此刻 composer 是否空(半句正文永远
+    // 优先归 composer)。
+    Outcome HandleKey(PanelKey key, const std::vector<int>& agent_task_ids, bool composer_empty,
                       std::chrono::steady_clock::time_point now);
 
-    // 条目增减(任务起停/清理)后的修正:选中收回界内。查看态里目标条目
-    // 还在就保留(任务从 running 变终态不清标签——消息投递由 AgentTool 拒收)。
-    void OnEntriesChanged(int total_entries);
+    // 条目增减(任务起停/清理/重排)后的修正:按 task id 找回选中;id 没了
+    // 就落到相邻条目(下标钳回界内),全没了收干净。查看态里目标条目还在
+    // 就保留(任务从 running 变终态不清标签——消息投递由 AgentTool 拒收);
+    // 目标被清掉则强制收起,收件目标回 main。
+    void OnEntriesChanged(const std::vector<int>& agent_task_ids);
     // 查看态目标条目被清理/会话收场:强制收起,收件目标回 main。
     void CloseView();
     // 全清(焦点/查看态/两段确认)。
@@ -90,9 +97,13 @@ public:
     bool focused() const { return focus_; }
     bool detail_open() const { return detail_; }
     bool stop_all_armed() const { return armed_; }
-    int selected() const { return selected_; }  // 0 = main
-    // 查看态里的收件目标条目下标(1..n);查看态关着或停在 main 上 = nullopt。
-    std::optional<int> target_index() const;
+    // 当前选中的稳定任务号;0 = main。id 已不在表里时(增删后未修正的空档)
+    // 按 main 算。
+    int selected_task_id() const { return selected_task_id_; }
+    // 选中条目在"main + ids"全表里的下标(0 = main),给窗口化布局用。
+    int selected_index(const std::vector<int>& agent_task_ids) const;
+    // 查看态里的收件目标稳定任务号;查看态关着或停在 main 上 = nullopt。
+    std::optional<int> target_task_id() const;
 
     // 两段确认的时限;超时由调用方每拍调这个摘掉(首行提示跟着收回)。
     static constexpr std::chrono::milliseconds kStopAllWindow{2000};
@@ -102,8 +113,41 @@ private:
     bool focus_ = false;
     bool detail_ = false;
     bool armed_ = false;
-    int selected_ = 0;
+    int selected_task_id_ = 0;  // 稳定任务号;0 = main
+    int selected_ = 0;          // 下标缓存(相邻回退与布局用),真实选择以 id 为准
     std::chrono::steady_clock::time_point arm_time_{};
+};
+
+// 会话级面板状态机外壳(规格三):空闲 composer(ReadLineKeyByKey)与流式
+// 监听线程(TurnInputListener)共用同一份选择/焦点/详情/两段确认,流式转
+// 空闲自然保得住状态,不靠两边各自记账。键处理只在持有 ConsoleReadMutex
+// 的线程上发生(空闲读键/监听线程抢到读锁),绘制线程(footer 重画)另走
+// 快照口——内部一把小锁把两边隔开。
+class AgentPanelSession {
+public:
+    using Outcome = AgentPanelController::Outcome;
+
+    Outcome HandleKey(PanelKey key, const std::vector<int>& agent_task_ids, bool composer_empty,
+                      std::chrono::steady_clock::time_point now);
+    void OnEntriesChanged(const std::vector<int>& agent_task_ids);
+    void CloseView();
+    void Reset();
+    bool ExpireArmed(std::chrono::steady_clock::time_point now);
+
+    // 绘制侧快照:选中下标按调用方给的 ids 现算(0 = main)。
+    struct Snapshot {
+        bool focused = false;
+        bool detail_open = false;
+        bool stop_all_armed = false;
+        int selected_index = 0;                 // main 计入的下标
+        int selected_task_id = 0;               // 稳定任务号;0 = main
+        std::optional<int> target_task_id;      // 查看态收件目标;nullopt = main
+    };
+    Snapshot SnapshotFor(const std::vector<int>& agent_task_ids) const;
+
+private:
+    mutable std::mutex mutex_;
+    AgentPanelController controller_;
 };
 
 // -----------------------------------------------------------------------
@@ -129,9 +173,12 @@ struct AgentPanelLayout {
 // 首行提示换成确认话。
 // 条目多于窗口时围着 selected 开窗,顶上写清总数与上下未展示数;详情超
 // 预算保留头部(任务说明优先),末行写清未展示行数。
+// streaming=true 时首行操作提示用流式版文案(规格四:屏上提示跟当前层
+// 同步,流式里 Esc 的分层语义与空闲不同)。
 AgentPanelLayout LayoutAgentPanel(const std::vector<AgentPanelEntry>& agents, int selected, bool focused,
                                   bool detail_open, const std::vector<std::string>& detail_lines,
-                                  int max_visible_entries, int max_total_rows, int width, bool armed_stop_all);
+                                  int max_visible_entries, int max_total_rows, int width, bool armed_stop_all,
+                                  bool streaming = false);
 
 // -----------------------------------------------------------------------
 // 输入框上横线右端的代理短标签(纯函数)

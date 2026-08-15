@@ -10,6 +10,8 @@
 
 #include "agent/loop.hpp"
 #include "agent/prompts.hpp"
+#include "cli/format_utils.hpp"
+#include "cli/i18n.hpp"
 #include "tools/path_utils.hpp"
 
 namespace lubancode::tools {
@@ -67,6 +69,10 @@ bool ExploreAllows(const Tool& tool) {
     return name == "read_file" || name == "search" || name == "web_fetch" || name == "web_search" ||
            name == "lsp";
 }
+
+// title 的硬上限(显示列,不是码点数):终端窄时显示层可以再截标题字段
+// 本身,但入参这里超过就拒绝,不替调用方截成另一句话。
+constexpr int kMaxTitleDisplayWidth = 40;
 
 // ---------------------------------------------------------------------------
 // isolation=worktree 的 base_dir 包装层(0.27.x)
@@ -153,7 +159,9 @@ std::string AgentTool::name() const {
 }
 
 std::string AgentTool::description() const {
-    return "把独立任务委托给子代理。agent_type=Explore 是只读代码搜索代理;general-purpose 能研究、执行多步任务和改代码。"
+    return "把独立任务委托给子代理。先想一个 4~16 字(英文 2~6 个词)的语义短标题填 title——名词短语或短命令,能彼此区分,"
+           "不要照抄 prompt 首句、不要塞路径清单或套话;再把完整的任务说明写进 prompt。title 给人看(代理面板/日志),"
+           "prompt 给子代理执行,两者各司其职。agent_type=Explore 是只读代码搜索代理;general-purpose 能研究、执行多步任务和改代码。"
            "子代理有独立上下文,只把结论交回主对话。run_in_background=true 时任务在会话后台运行,本次调用立刻返回任务编号,"
            "适合与主线无依赖的摸排;主线马上需要结论时传 false。后台任务不能弹权限确认,未预先放行的操作会被拒绝。"
            "子代理看不见当前对话历史,prompt 必须自包含。";
@@ -164,6 +172,13 @@ nlohmann::json AgentTool::input_schema() const {
     schema["type"] = "object";
 
     nlohmann::json properties = nlohmann::json::object();
+
+    nlohmann::json title_prop = nlohmann::json::object();
+    title_prop["type"] = "string";
+    title_prop["description"] =
+        "任务短标题,必填。给人看的语义字段:中文 4~16 字、英文 2~6 个词,名词短语或短命令,能与其他任务区分。"
+        "不得照抄 prompt 首句,不得含路径清单/验收全文/换行/制表符,硬上限 40 显示列。先概括 title,再写完整 prompt。";
+    properties["title"] = title_prop;
 
     nlohmann::json prompt_prop = nlohmann::json::object();
     prompt_prop["type"] = "string";
@@ -186,7 +201,9 @@ nlohmann::json AgentTool::input_schema() const {
 
     nlohmann::json background_prop = nlohmann::json::object();
     background_prop["type"] = "boolean";
-    background_prop["description"] = "是否放到会话后台运行。独立摸排用 true;当前回答离不开结果时用 false。";
+    background_prop["description"] =
+        "(兼容旧参)是否放到会话后台运行:true 等价 execution_mode=background,"
+        "false 等价 foreground。新调用建议用 execution_mode。";
     properties["run_in_background"] = background_prop;
 
     nlohmann::json isolation_prop = nlohmann::json::object();
@@ -199,12 +216,34 @@ nlohmann::json AgentTool::input_schema() const {
     properties["isolation"] = isolation_prop;
 
     schema["properties"] = properties;
-    schema["required"] = nlohmann::json::array({"prompt"});
+    schema["required"] = nlohmann::json::array({"title", "prompt"});
 
     return schema;
 }
 
 Tool::Result AgentTool::execute(const nlohmann::json& input) {
+    // title:必填语义短标题。缺失/空白/多行/超 40 显示列一律拒绝,提示主模型
+    // 补标题后重试——绝不替调用方截成另一句话,更不拿 prompt 片段冒充。
+    if (!input.contains("title") || !input.at("title").is_string()) {
+        return {lubancode::cli::tr("agent_tool.title_missing"), true};
+    }
+    std::string title = input.at("title").get<std::string>();
+    {
+        const std::size_t first = title.find_first_not_of(" \t\r\n");
+        const std::size_t last = title.find_last_not_of(" \t\r\n");
+        title = first == std::string::npos ? std::string() : title.substr(first, last - first + 1);
+    }
+    if (title.empty()) {
+        return {lubancode::cli::tr("agent_tool.title_missing"), true};
+    }
+    if (title.find('\n') != std::string::npos || title.find('\r') != std::string::npos ||
+        title.find('\t') != std::string::npos) {
+        return {lubancode::cli::tr("agent_tool.title_bad"), true};
+    }
+    if (lubancode::cli::DisplayWidthUtf8(title) > kMaxTitleDisplayWidth) {
+        return {lubancode::cli::tr("agent_tool.title_bad"), true};
+    }
+
     if (!input.contains("prompt") || !input.at("prompt").is_string()) {
         return {"缺少必填参数 prompt(字符串)", true};
     }
@@ -251,9 +290,9 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
         agent_type == "Explore" && explore_registry_ != nullptr ? *explore_registry_ : sub_registry_;
     const bool background = input.value("run_in_background", background_by_default_);
     if (background) {
-        return LaunchBackground(input, agent_type, task_registry, max_turns, isolate);
+        return LaunchBackground(input, title, agent_type, task_registry, max_turns, isolate);
     }
-    return ExecuteForeground(input, agent_type, task_registry, max_turns, isolate);
+    return ExecuteForeground(input, title, agent_type, task_registry, max_turns, isolate);
 }
 
 std::optional<cli::AgentWorktree> AgentTool::SetupIsolationRoom(Result& error_out) {
@@ -280,8 +319,9 @@ std::string AgentTool::FinishIsolationRoom(const cli::AgentWorktree& room, const
     return cli::FinishAgentWorktree(room.repo_root, room.room_path, room.branch, runner).note;
 }
 
-Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std::string& agent_type,
-                                          ToolRegistry& task_registry, int max_turns, bool isolate) {
+Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std::string& title,
+                                          const std::string& agent_type, ToolRegistry& task_registry,
+                                          int max_turns, bool isolate) {
     // isolation=worktree:建房、锁房、工具表套 base_dir 包装、隔离范围压栈,
     // 跑完收工(干净删房,有活留房附路径)。cwd 一根指头都不动。
     std::optional<cli::AgentWorktree> room;
@@ -300,19 +340,66 @@ Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std
     }
     ToolRegistry& effective_registry = isolated_registry != nullptr ? *isolated_registry : task_registry;
 
+    // 统一台账:前台任务同样分稳定 task id、进 tasks_——面板列表/详情/定向
+    // 介入 inbox/统计(工具次数、token、耗时)全认这一条,不再只归后台。
+    // 语义不变:execute() 仍阻塞父级工具调用等结论,进台账不等于改成后台跑。
+    // delivered 置 true:结论直接交回父级,不走后台完成回流。
+    auto task = std::make_shared<TaskRecord>();
+    {
+        std::lock_guard<std::mutex> lock(tasks_mutex_);
+        task->snapshot.id = next_task_id_++;
+        task->snapshot.agent_type = agent_type;
+        task->snapshot.title = title;
+        task->snapshot.prompt = input.at("prompt").get<std::string>();
+        task->snapshot.foreground = true;
+        task->snapshot.state = AgentTaskState::Running;
+        task->snapshot.start_time = std::chrono::steady_clock::now();
+        task->snapshot.delivered = true;
+        tasks_.push_back(task);
+    }
+    TouchTasks();
+
     const Hooks hooks = hooks_;
-    Result result = RunTask(backend_, effective_registry, input.at("prompt").get<std::string>(), agent_type,
-                            max_turns, &hooks, nullptr, /*detached=*/nullptr,
+    Result result = RunTask(backend_, effective_registry, task->snapshot.prompt, agent_type, max_turns, &hooks, task,
+                            /*detached=*/nullptr,
                             /*prepared_system_prompt=*/nullptr,
                             scope_storage.has_value() ? &*scope_storage : nullptr);
     if (room.has_value()) {
         result.content += FinishIsolationRoom(*room, git_runner_);
     }
+    // 收尾入账:面板 x 停掉(task->cancel)与父轮 ESC 打断(hooks.cancel)都算
+    // 取消;未送达的介入消息点名记进结果文本,不无声遗失(与后台同一条规矩)。
+    std::size_t undelivered_messages = 0;
+    {
+        std::lock_guard<std::mutex> inbox_lock(task->inbox_mutex);
+        for (const auto& item : task->inbox) {
+            if (!item.delivered) {
+                ++undelivered_messages;
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(tasks_mutex_);
+        task->snapshot.result = result.content;
+        task->snapshot.end_time = std::chrono::steady_clock::now();
+        if (task->cancel.load(std::memory_order_acquire) ||
+            (hooks.cancel != nullptr && hooks.cancel->load(std::memory_order_acquire))) {
+            task->snapshot.state = AgentTaskState::Cancelled;
+        } else {
+            task->snapshot.state = result.is_error ? AgentTaskState::Failed : AgentTaskState::Done;
+        }
+        if (undelivered_messages > 0) {
+            task->snapshot.result += "\n[" + std::to_string(undelivered_messages) +
+                                     " 条介入消息未送达(任务已收尾)]";
+        }
+    }
+    TouchTasks();
     return result;
 }
 
-Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std::string& agent_type,
-                                         ToolRegistry& task_registry, int max_turns, bool isolate) {
+Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std::string& title,
+                                         const std::string& agent_type, ToolRegistry& task_registry, int max_turns,
+                                         bool isolate) {
     if (!detached_backend_factory_) {
         return {"当前入口没有配置后台子代理后端,请把 run_in_background 设为 false", true};
     }
@@ -370,6 +457,7 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
         std::lock_guard<std::mutex> lock(tasks_mutex_);
         task->snapshot.id = next_task_id_++;
         task->snapshot.agent_type = agent_type;
+        task->snapshot.title = title;
         task->snapshot.prompt = input.at("prompt").get<std::string>();
         task->snapshot.state = AgentTaskState::Running;
         task->snapshot.start_time = std::chrono::steady_clock::now();
@@ -452,7 +540,7 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
 
 Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_registry, const std::string& prompt,
                                 const std::string& agent_type, int max_turns, const Hooks* foreground_hooks,
-                                const std::shared_ptr<TaskRecord>& background_task,
+                                const std::shared_ptr<TaskRecord>& task,
                                 const DetachedAgentBackend* detached,
                                 const std::string* prepared_system_prompt,
                                 const IsolationScope* isolation_scope) {
@@ -492,17 +580,17 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         sub_loop.SetToolFilter(tool_filter_);
     }
 
-    // 定向介入收件口:后台任务自己的 inbox。AgentLoop 在"工具结果攒完、
-    // 下一次请求未发"的轮次边界来取(InjectIncomingMessage 的注入规矩),
-    // 工具跑着不打断、刚产出的 tool result 不丢。每只任务的 sub_loop 只接
-    // 自己这只 TaskRecord,与主会话的 peer 收件点(跨会话传话)是两码事,
-    // 文案也分开——这边明写"主会话用户介入"。
-    if (background_task != nullptr) {
-        sub_loop.SetInbox([background_task]() -> std::optional<api::Message> {
+    // 定向介入收件口:这只任务自己的 inbox(前台后台同款)。AgentLoop 在
+    // "工具结果攒完、下一次请求未发"的轮次边界来取(InjectIncomingMessage
+    // 的注入规矩),工具跑着不打断、刚产出的 tool result 不丢。每只任务的
+    // sub_loop 只接自己这只 TaskRecord,与主会话的 peer 收件点(跨会话传话)
+    // 是两码事,文案也分开——这边明写"主会话用户介入"。
+    if (task != nullptr) {
+        sub_loop.SetInbox([task]() -> std::optional<api::Message> {
             std::string text;
             {
-                std::lock_guard<std::mutex> inbox_lock(background_task->inbox_mutex);
-                for (auto& item : background_task->inbox) {
+                std::lock_guard<std::mutex> inbox_lock(task->inbox_mutex);
+                for (auto& item : task->inbox) {
                     if (!item.delivered) {
                         text = item.text;
                         item.delivered = true;
@@ -523,29 +611,37 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         });
     }
 
+    // 统一台账回调:进 TaskRecord 的任务(前台后台都是),工具次数/usage/
+    // 实时输出全写快照;前台任务再把确认/打印/usage/pre/post 钩子原样转发
+    // 给父级——既有确认交互、转录与父级记账一个不丢。后台(foreground_hooks
+    // 为空)没有可停下来问话的终端,需确认的操作一律拒绝,跟 Claude Code
+    // 后台 subagent 的权限边界一致。
     agent::Callbacks sub_callbacks;
-    if (background_task != nullptr) {
-        sub_callbacks.on_text_delta = [this, background_task](const std::string& text) {
+    if (task != nullptr) {
+        sub_callbacks.on_text_delta = [this, task](const std::string& text) {
             std::lock_guard<std::mutex> lock(tasks_mutex_);
-            background_task->snapshot.live_output += text;
+            task->snapshot.live_output += text;
             constexpr std::size_t kLiveOutputCap = 64 * 1024;
-            if (background_task->snapshot.live_output.size() > kLiveOutputCap) {
-                background_task->snapshot.live_output.erase(
-                    0, background_task->snapshot.live_output.size() - kLiveOutputCap);
+            if (task->snapshot.live_output.size() > kLiveOutputCap) {
+                task->snapshot.live_output.erase(0, task->snapshot.live_output.size() - kLiveOutputCap);
             }
             TouchTasks();
         };
-        sub_callbacks.on_tool_start = [this, background_task](const std::string& tool_name,
-                                                               const nlohmann::json& tool_input) {
-            std::lock_guard<std::mutex> lock(tasks_mutex_);
-            background_task->snapshot.tool_calls.push_back(
-                AgentTaskToolCall{tool_name, tool_input.dump(), std::string(), false, false});
-            TouchTasks();
+        sub_callbacks.on_tool_start = [this, task, foreground_hooks](const std::string& tool_name,
+                                                                     const nlohmann::json& tool_input) {
+            {
+                std::lock_guard<std::mutex> lock(tasks_mutex_);
+                task->snapshot.tool_calls.push_back(
+                    AgentTaskToolCall{tool_name, tool_input.dump(), std::string(), false, false});
+                TouchTasks();
+            }
+            if (foreground_hooks != nullptr && foreground_hooks->on_sub_tool_start) {
+                foreground_hooks->on_sub_tool_start(tool_name, tool_input);
+            }
         };
-        sub_callbacks.on_tool_done = [this, background_task](const std::string& tool_name, const Result& result) {
+        sub_callbacks.on_tool_done = [this, task](const std::string& tool_name, const Result& result) {
             std::lock_guard<std::mutex> lock(tasks_mutex_);
-            for (auto it = background_task->snapshot.tool_calls.rbegin();
-                 it != background_task->snapshot.tool_calls.rend(); ++it) {
+            for (auto it = task->snapshot.tool_calls.rbegin(); it != task->snapshot.tool_calls.rend(); ++it) {
                 if (!it->done && it->name == tool_name) {
                     it->done = true;
                     it->is_error = result.is_error;
@@ -555,17 +651,28 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             }
             TouchTasks();
         };
-        // 后台没有可停下来问话的终端。需确认的操作一律拒绝，跟 Claude
-        // Code 后台 subagent 的权限边界一致。
-        sub_callbacks.on_tool_confirm = [](const std::string&, const nlohmann::json&) { return false; };
-        sub_callbacks.on_usage = [this, background_task](const api::Usage& usage) {
-            std::lock_guard<std::mutex> lock(tasks_mutex_);
-            background_task->snapshot.input_tokens += usage.input_tokens;
-            background_task->snapshot.output_tokens += usage.output_tokens;
-            TouchTasks();
+        if (foreground_hooks != nullptr) {
+            sub_callbacks.on_tool_confirm = foreground_hooks->on_tool_confirm;
+        } else {
+            sub_callbacks.on_tool_confirm = [](const std::string&, const nlohmann::json&) { return false; };
+        }
+        sub_callbacks.on_usage = [this, task, foreground_hooks](const api::Usage& usage) {
+            {
+                std::lock_guard<std::mutex> lock(tasks_mutex_);
+                task->snapshot.input_tokens += usage.input_tokens;
+                task->snapshot.output_tokens += usage.output_tokens;
+                TouchTasks();
+            }
+            if (foreground_hooks != nullptr && foreground_hooks->on_usage) {
+                foreground_hooks->on_usage(usage);
+            }
         };
+        if (foreground_hooks != nullptr) {
+            sub_callbacks.on_pre_tool_hook = foreground_hooks->on_pre_tool_hook;
+            sub_callbacks.on_post_tool_hook = foreground_hooks->on_post_tool_hook;
+        }
     } else if (foreground_hooks != nullptr) {
-        // 前台路径沿用旧回调，既有确认、转录和 usage 记账一个不丢。
+        // 没进台账的旧路径(测试直调 RunTask 等边缘):沿用旧回调。
         sub_callbacks.on_tool_start = [foreground_hooks](const std::string& tool_name,
                                                           const nlohmann::json& tool_input) {
             if (foreground_hooks->on_sub_tool_start) {
@@ -578,13 +685,35 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         sub_callbacks.on_post_tool_hook = foreground_hooks->on_post_tool_hook;
     }
 
-    // 打断信号透传:hooks_.cancel 是 main.cpp 那份 cancel_flag 的地址,
-    // 没设(nullptr)时 AgentLoop::Run 内部判断照旧短路成"没被打断",
-    // 行为跟原来一样;设了之后子代理的工具循环才会真的看见 ESC/Ctrl+C。
-    const std::atomic<bool>* cancel = background_task != nullptr
-                                          ? &background_task->cancel
-                                          : (foreground_hooks != nullptr ? foreground_hooks->cancel : nullptr);
+    // 打断信号:前台任务有两根——面板 x 置的 task->cancel 与父轮 ESC 置的
+    // hooks.cancel(地址透传,见 Hooks::cancel 注释)。AgentLoop 只收一根
+    // 指针,起一只 20ms 粒度的合并线程把两根并起来;后台任务只有
+    // task->cancel;都没进台账时保持旧透传。
+    std::atomic<bool> merged_cancel{false};
+    std::optional<std::thread> cancel_merger;
+    const std::atomic<bool>* cancel = nullptr;
+    if (task != nullptr && foreground_hooks != nullptr && foreground_hooks->cancel != nullptr) {
+        cancel = &merged_cancel;
+        cancel_merger.emplace([&merged_cancel, task, parent_cancel = foreground_hooks->cancel] {
+            while (!merged_cancel.load(std::memory_order_acquire)) {
+                if (task->cancel.load(std::memory_order_acquire) ||
+                    parent_cancel->load(std::memory_order_acquire)) {
+                    merged_cancel.store(true, std::memory_order_release);
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+        });
+    } else if (task != nullptr) {
+        cancel = &task->cancel;
+    } else if (foreground_hooks != nullptr) {
+        cancel = foreground_hooks->cancel;
+    }
     const auto result = sub_loop.Run(prompt, sub_callbacks, cancel);
+    if (cancel_merger.has_value()) {
+        merged_cancel.store(true, std::memory_order_release);  // 唤醒合并线程好 join
+        cancel_merger->join();
+    }
     if (!result.has_value()) {
         return {"子代理执行失败: " + result.error(), true};
     }
@@ -643,7 +772,9 @@ std::vector<AgentTaskSummary> AgentTool::TaskSummaries() const {
         AgentTaskSummary summary;
         summary.id = task->snapshot.id;
         summary.agent_type = task->snapshot.agent_type;
+        summary.title = task->snapshot.title;
         summary.prompt = task->snapshot.prompt;
+        summary.foreground = task->snapshot.foreground;
         summary.state = task->snapshot.state;
         summary.input_tokens = task->snapshot.input_tokens;
         summary.output_tokens = task->snapshot.output_tokens;
@@ -802,7 +933,8 @@ std::string AgentTool::DrainCompletionNotices() {
             continue;
         }
         snapshot.delivered = true;
-        out << "[后台子代理结果 #" << snapshot.id << " (" << snapshot.agent_type << ", ";
+        out << "[后台子代理结果 #" << snapshot.id << " "
+            << (snapshot.title.empty() ? "(未命名)" : snapshot.title) << " (" << snapshot.agent_type << ", ";
         switch (snapshot.state) {
             case AgentTaskState::Done:
                 out << "完成";

@@ -99,6 +99,48 @@ private:
     std::shared_ptr<BlockingBackendState> state_;
 };
 
+// "等到 cancel 才放行"的后端:统一台账后前台任务的打断信号是合并指针
+// (RunTask 栈上的局部变量),测试侧不能在它析构后再解引用——所以在
+// send_stream 返回前就地记下"cancel 是否被置位",事后只读这个布尔。
+struct WaitCancelState {
+    std::mutex mutex;
+    std::condition_variable ready;
+    bool started = false;
+    bool saw_cancel = false;
+};
+
+class WaitCancelBackend : public api::Backend {
+public:
+    explicit WaitCancelBackend(std::shared_ptr<WaitCancelState> state) : state_(std::move(state)) {}
+
+    std::expected<void, api::Error> send_stream(
+        const api::Request& request,
+        const std::function<void(const api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* cancel = nullptr) override {
+        (void)request;
+        (void)on_event;
+        {
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            state_->started = true;
+            state_->ready.notify_all();
+        }
+        if (cancel == nullptr) {
+            return std::unexpected(api::Error{api::ErrorKind::Api, "no cancel pointer", 0});
+        }
+        while (!cancel->load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        {
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            state_->saw_cancel = true;  // 合并指针还活着,就地记账
+        }
+        return std::unexpected(api::Error{api::ErrorKind::Cancelled, "cancelled", 0});
+    }
+
+private:
+    std::shared_ptr<WaitCancelState> state_;
+};
+
 // 固定返回一个结果的假工具,记下被调用了几次、needs_confirm 能配置。
 class FakeTool : public tools::Tool {
 public:
@@ -153,6 +195,7 @@ TEST_CASE("agent 工具:子代理一轮文本直接返回,Result.content 就是�
     tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
 
     nlohmann::json input;
+    input["title"] = "测试任务";
     input["prompt"] = "数一数文件个数";
     const tools::Tool::Result result = agent_tool.execute(input);
 
@@ -182,15 +225,88 @@ TEST_CASE("agent 工具:缺 prompt / 空 prompt 报 is_error,不发请求") {
     }
     {
         const tools::Tool::Result result =
-            agent_tool.execute(nlohmann::json{{"prompt", "查一查"}, {"agent_type", 7}});
+            agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "查一查"}, {"agent_type", 7}});
         CHECK(result.is_error);
     }
     {
         const tools::Tool::Result result =
-            agent_tool.execute(nlohmann::json{{"prompt", "查一查"}, {"run_in_background", "yes"}});
+            agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "查一查"}, {"run_in_background", "yes"}});
         CHECK(result.is_error);
     }
     CHECK(backend.captured_requests.empty());
+}
+
+// 真正短 title(规格一):缺失/空白/多行/超 40 显示列一律拒绝,提示补标题
+// 重试;绝不替调用方截成另一句话,更不拿 prompt 片段冒充。
+TEST_CASE("agent 工具:title 必填——缺失、空白、多行、超宽一律拒绝,不发请求") {
+    FakeBackend backend;
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+
+    // 缺失。
+    CHECK(agent_tool.execute(nlohmann::json{{"prompt", "查调用链"}}).is_error);
+    // 只有空白(trim 后空)。
+    CHECK(agent_tool.execute(nlohmann::json{{"title", "   \t "}, {"prompt", "查调用链"}}).is_error);
+    // 多行。
+    CHECK(agent_tool.execute(nlohmann::json{{"title", "两行\n标题"}, {"prompt", "查调用链"}}).is_error);
+    CHECK(agent_tool.execute(nlohmann::json{{"title", "带回车\r标题"}, {"prompt", "查调用链"}}).is_error);
+    // 超 40 显示列(21 个三列宽汉字 = 63 列)。
+    std::string wide;
+    for (int i = 0; i < 21; ++i) {
+        wide += "汉";
+    }
+    const auto too_wide = agent_tool.execute(nlohmann::json{{"title", wide}, {"prompt", "查调用链"}});
+    CHECK(too_wide.is_error);
+    CHECK(too_wide.content.find("40") != std::string::npos);
+    // 恰好 40 显示列(40 个 ASCII)——不拒绝。
+    backend.scripts = {TextOnlyScript("结论")};
+    const auto exact = agent_tool.execute(
+        nlohmann::json{{"title", std::string(40, 't')}, {"prompt", "查调用链"}});
+    CHECK_FALSE(exact.is_error);
+    CHECK(backend.captured_requests.size() == 1);  // 只有最后这次真发了请求
+    // 拒绝信息提示补标题(不是 prompt 报错)。
+    const auto missing = agent_tool.execute(nlohmann::json{{"prompt", "查调用链"}});
+    CHECK(missing.content.find("title") != std::string::npos);
+}
+
+TEST_CASE("agent 工具:title 与 prompt 各司其职——快照只存原样 title,prompt 不上显示名") {
+    FakeBackend backend;
+    backend.scripts = {TextOnlyScript("结论")};
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+
+    const std::string long_prompt = "你在一个 C++ 项目的隔离 git worktree 里实施项目记忆系统升级,这段说明很长很长";
+    const auto result = agent_tool.execute(
+        nlohmann::json{{"title", "项目记忆升级一期"}, {"prompt", long_prompt}});
+    CHECK_FALSE(result.is_error);
+    // 前台任务也进统一台账:title/prompt 原样入账,foreground 标记为真。
+    const auto fg = agent_tool.TaskSummaries();
+    REQUIRE(fg.size() == 1);
+    CHECK(fg[0].title == "项目记忆升级一期");
+    CHECK(fg[0].prompt == long_prompt);
+    CHECK(fg[0].foreground);
+
+    auto detached_backend = std::make_unique<FakeBackend>();
+    detached_backend->scripts = {TextOnlyScript("后台结论")};
+    tools::AgentTool bg_tool(*detached_backend, sub_registry, "/work/dir");
+    bg_tool.SetDetachedBackendFactory(
+        [&detached_backend]() {
+            tools::DetachedAgentBackend detached;
+            detached.backend = std::move(detached_backend);
+            return detached;
+        });
+    CHECK(bg_tool
+              .execute(nlohmann::json{{"title", "检索阈值回归"}, {"prompt", long_prompt},
+                                      {"run_in_background", true}})
+              .content.find("#") != std::string::npos);
+    const auto summaries = bg_tool.TaskSummaries();
+    REQUIRE(summaries.size() == 1);
+    CHECK(summaries[0].title == "检索阈值回归");
+    CHECK(summaries[0].prompt == long_prompt);
+    CHECK_FALSE(summaries[0].foreground);
+    const auto detail = bg_tool.TaskDetail(summaries[0].id);
+    REQUIRE(detail.has_value());
+    CHECK(detail->title == "检索阈值回归");
 }
 
 TEST_CASE("agent 工具:子代理调了个工具再返回,on_sub_tool_start 钩子被调用,call_count 增加") {
@@ -213,6 +329,7 @@ TEST_CASE("agent 工具:子代理调了个工具再返回,on_sub_tool_start 钩�
     agent_tool.SetHooks(hooks);
 
     nlohmann::json input;
+    input["title"] = "测试任务";
     input["prompt"] = "帮我用一下工具";
     const tools::Tool::Result result = agent_tool.execute(input);
 
@@ -234,6 +351,7 @@ TEST_CASE("agent 工具:超过 max_turns 报 is_error,说明里带上原因") {
     tools::AgentTool agent_tool(backend, sub_registry, "/work/dir", /*model=*/"", /*default_max_turns=*/3);
 
     nlohmann::json input;
+    input["title"] = "测试任务";
     input["prompt"] = "死循环吧";
     const tools::Tool::Result result = agent_tool.execute(input);
 
@@ -251,6 +369,7 @@ TEST_CASE("agent 工具:超过 max_turns 报 is_error,说明里带上原因") {
     tools::AgentTool agent_tool2(backend2, sub_registry2, "/work/dir");  // 默认 15
 
     nlohmann::json input2;
+    input2["title"] = "测试任务二";
     input2["prompt"] = "死循环吧";
     input2["max_turns"] = 2;
     const tools::Tool::Result result2 = agent_tool2.execute(input2);
@@ -272,6 +391,7 @@ TEST_CASE("agent 工具:入参 max_turns=0 透传给子代理,子代理循环按
     tools::AgentTool agent_tool(backend, sub_registry, "/work/dir", /*model=*/"", /*default_max_turns=*/3);
 
     nlohmann::json input;
+    input["title"] = "测试任务";
     input["prompt"] = "跑很多轮";
     input["max_turns"] = 0;
     const tools::Tool::Result result = agent_tool.execute(input);
@@ -288,6 +408,7 @@ TEST_CASE("agent 工具:入参 max_turns 是负数直接报错,不透传给子�
     tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
 
     nlohmann::json input;
+    input["title"] = "测试任务";
     input["prompt"] = "随便";
     input["max_turns"] = -1;
     const tools::Tool::Result result = agent_tool.execute(input);
@@ -318,6 +439,7 @@ TEST_CASE("agent 工具:确认回调转发——父拒绝,子内工具收到拒�
     agent_tool.SetHooks(hooks);
 
     nlohmann::json input;
+    input["title"] = "测试任务";
     input["prompt"] = "帮我删点东西";
     const tools::Tool::Result result = agent_tool.execute(input);
 
@@ -343,6 +465,7 @@ TEST_CASE("agent 工具:usage 累计到父回调,含请求次数") {
     agent_tool.SetHooks(hooks);
 
     nlohmann::json input;
+    input["title"] = "测试任务";
     input["prompt"] = "帮我用一下工具";
     const tools::Tool::Result result = agent_tool.execute(input);
 
@@ -367,6 +490,7 @@ TEST_CASE("agent 工具:不设 Hooks 也不崩(默认允许确认、不打印、
     tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");  // 没调 SetHooks
 
     nlohmann::json input;
+    input["title"] = "测试任务";
     input["prompt"] = "随便跑跑";
     const tools::Tool::Result result = agent_tool.execute(input);
 
@@ -385,29 +509,42 @@ TEST_CASE("agent 工具:hooks.cancel 原样透传给 sub_loop.Run()(根因一回
     // 跟从前(没有这个字段时)行为完全一样,不该凭空冒出一个非空指针。
     {
         nlohmann::json input;
+        input["title"] = "测试任务";
         input["prompt"] = "第一次不设 cancel";
         const tools::Tool::Result result = agent_tool.execute(input);
         CHECK_FALSE(result.is_error);
         REQUIRE(backend.captured_cancel_ptrs.size() == 1);
-        CHECK(backend.captured_cancel_ptrs[0] == nullptr);
+        // 统一台账后前台任务也有自己的 TaskRecord:cancel 指针是任务自己的
+        // 停止信号(面板 x 接这根),不再是 nullptr。
+        CHECK(backend.captured_cancel_ptrs[0] != nullptr);
     }
 
-    // 设了 hooks.cancel 之后,子代理内部每次独立请求收到的 cancel 指针都得
-    // 是这同一个地址——不是 main.cpp 传的另一份拷贝,也不是被悄悄丢弃成
-    // nullptr。这是 AgentTool::Hooks::cancel 字段 + execute() 里
-    // "sub_loop.Run(prompt, sub_callbacks, hooks_.cancel)" 那一行要保证的事。
+    // 设了 hooks.cancel 之后,父轮 ESC 的停止信号必须能进子代理的请求。
+    // 统一台账后前台任务的 cancel 是"父轮信号 + 面板 x 信号"合并出的一根
+    // 指针(20ms 粒度合并线程),不再与 hooks.cancel 同址,但父轮置位后它
+    // 必须跟着置位——用一只等到 cancel 才放行的后端钉死这条功能链。
     std::atomic<bool> cancel_flag{false};
     tools::AgentTool::Hooks hooks;
     hooks.cancel = &cancel_flag;
     agent_tool.SetHooks(hooks);
 
-    backend.scripts.push_back(TextOnlyScript("第二次也跑完了"));
-    nlohmann::json input2;
-    input2["prompt"] = "第二次设了 cancel";
-    const tools::Tool::Result result2 = agent_tool.execute(input2);
-    CHECK_FALSE(result2.is_error);
-    REQUIRE(backend.captured_cancel_ptrs.size() == 2);
-    CHECK(backend.captured_cancel_ptrs[1] == &cancel_flag);
+    auto wait_state = std::make_shared<WaitCancelState>();
+    WaitCancelBackend wait_backend(wait_state);
+    tools::ToolRegistry wait_registry;
+    tools::AgentTool wait_tool(wait_backend, wait_registry, "/work/dir");
+    tools::AgentTool::Hooks wait_hooks;
+    wait_hooks.cancel = &cancel_flag;
+    wait_tool.SetHooks(wait_hooks);
+    std::thread runner([&] {
+        (void)wait_tool.execute(nlohmann::json{{"title", "等打断"}, {"prompt", "跑吧"}});
+    });
+    std::unique_lock<std::mutex> state_lock(wait_state->mutex);
+    REQUIRE(wait_state->ready.wait_for(state_lock, std::chrono::seconds(2), [&] { return wait_state->started; }));
+    state_lock.unlock();
+    cancel_flag.store(true);
+    runner.join();
+    // 父轮 ESC 真传进了子代理请求(合并指针在请求返回前被置位)。
+    CHECK(wait_state->saw_cancel);
 }
 
 TEST_CASE("注册表排除:子代理工具表不含 agent 自己,主表含 agent,防递归深度硬限 1") {
@@ -436,7 +573,7 @@ TEST_CASE("Explore 子代理只把只读白名单工具交给模型") {
 
     tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
     const auto result = agent_tool.execute(
-        nlohmann::json{{"prompt", "查清调用链"}, {"agent_type", "Explore"}, {"run_in_background", false}});
+        nlohmann::json{{"title", "测试任务"}, {"prompt", "查清调用链"}, {"agent_type", "Explore"}, {"run_in_background", false}});
 
     CHECK_FALSE(result.is_error);
     REQUIRE(backend.captured_requests.size() == 1);
@@ -462,7 +599,7 @@ TEST_CASE("后台子代理立即交回任务号,独立跑完,结果只投递一�
 
     const auto begin = std::chrono::steady_clock::now();
     const auto launch = agent_tool.execute(
-        nlohmann::json{{"prompt", "在后台查清楚"}, {"agent_type", "Explore"}, {"run_in_background", true}});
+        nlohmann::json{{"title", "测试任务"}, {"prompt", "在后台查清楚"}, {"agent_type", "Explore"}, {"run_in_background", true}});
     const auto launch_time = std::chrono::steady_clock::now() - begin;
 
     CHECK_FALSE(launch.is_error);
@@ -520,7 +657,7 @@ TEST_CASE("agent 工具:空闲时跑完的后台子代理,HasUndeliveredCompleti
     });
 
     CHECK_FALSE(agent_tool.HasUndeliveredCompletions());  // 一个任务都没有:别唤醒
-    CHECK(agent_tool.execute(nlohmann::json{{"prompt", "后台摸排"}, {"run_in_background", true}}).content.find(
+    CHECK(agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "后台摸排"}, {"run_in_background", true}}).content.find(
               "#1") != std::string::npos);
     CHECK_FALSE(agent_tool.HasUndeliveredCompletions());  // 跑着:也别唤醒
 
@@ -539,4 +676,100 @@ TEST_CASE("agent 工具:空闲时跑完的后台子代理,HasUndeliveredCompleti
     const std::string notice = agent_tool.DrainCompletionNotices();
     CHECK(notice.find("后台摸排完毕") != std::string::npos);
     CHECK_FALSE(agent_tool.HasUndeliveredCompletions());  // 投递过就翻回假,不会反复唤醒
+}
+
+// ---------------------------------------------------------------------------
+// 统一台账(规格二):前台任务也进 TaskRecord,面板/详情/统计全认同一本账。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("统一台账:前台任务当场入账 Running,跑完 Done,统计落准且不走后台回流") {
+    auto state = std::make_shared<BlockingBackendState>();
+    BlockingBackend backend(state);
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+
+    std::thread runner([&] {
+        const tools::Tool::Result r =
+            agent_tool.execute(nlohmann::json{{"title", "前台摸排"}, {"prompt", "慢慢查"}});
+        CHECK_FALSE(r.is_error);
+        CHECK(r.content == "后台摸排完毕");
+    });
+    {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        REQUIRE(state->ready.wait_for(lock, std::chrono::seconds(2), [&] { return state->started; }));
+    }
+    // 阻塞着的当口,台账里就是一条 Running 的前台任务——面板看得到。
+    const auto mid = agent_tool.TaskSummaries();
+    REQUIRE(mid.size() == 1);
+    CHECK(mid[0].state == tools::AgentTaskState::Running);
+    CHECK(mid[0].foreground);
+    CHECK(mid[0].title == "前台摸排");
+
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->release = true;
+    }
+    state->ready.notify_all();
+    runner.join();
+
+    const auto done = agent_tool.TaskSummaries();
+    REQUIRE(done.size() == 1);
+    CHECK(done[0].state == tools::AgentTaskState::Done);
+    CHECK(done[0].foreground);
+    CHECK(done[0].input_tokens == 120);
+    CHECK(done[0].output_tokens == 30);
+    // 前台结论直接交回父级工具调用,不进后台完成回流。
+    CHECK_FALSE(agent_tool.HasUndeliveredCompletions());
+    CHECK(agent_tool.DrainCompletionNotices().empty());
+}
+
+TEST_CASE("统一台账:面板 x 停掉前台任务——父级收到取消结果,台账变 Cancelled") {
+    auto state = std::make_shared<BlockingBackendState>();
+    BlockingBackend backend(state);
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+
+    std::thread runner([&] {
+        const tools::Tool::Result r = agent_tool.execute(nlohmann::json{{"title", "要被停的"}, {"prompt", "查"}});
+        // 请求被取消:AgentLoop 按打断收场,半截话带打断标注交回父级
+        // (is_error=false,内容是打断说明,不是崩溃)。
+        CHECK_FALSE(r.is_error);
+        CHECK(r.content.find("打断") != std::string::npos);
+    });
+    {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        REQUIRE(state->ready.wait_for(lock, std::chrono::seconds(2), [&] { return state->started; }));
+    }
+    const auto mid = agent_tool.TaskSummaries();
+    REQUIRE(mid.size() == 1);
+    CHECK(agent_tool.CancelTask(mid[0].id));
+    runner.join();
+
+    const auto after = agent_tool.TaskSummaries();
+    REQUIRE(after.size() == 1);
+    CHECK(after[0].state == tools::AgentTaskState::Cancelled);
+    CHECK_FALSE(agent_tool.HasRunningTasks());
+}
+
+TEST_CASE("统一台账:一轮里先后多只前台代理,各自留终态,新一只不清空上一只") {
+    FakeBackend backend;
+    backend.scripts = {TextOnlyScript("结论甲"), TextOnlyScript("结论乙")};
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+
+    CHECK_FALSE(
+        agent_tool.execute(nlohmann::json{{"title", "甲任务"}, {"prompt", "查甲"}, {"run_in_background", false}})
+            .is_error);
+    CHECK_FALSE(
+        agent_tool.execute(nlohmann::json{{"title", "乙任务"}, {"prompt", "查乙"}, {"run_in_background", false}})
+            .is_error);
+
+    const auto summaries = agent_tool.TaskSummaries();
+    REQUIRE(summaries.size() == 2);
+    CHECK(summaries[0].title == "甲任务");
+    CHECK(summaries[1].title == "乙任务");
+    CHECK(summaries[0].state == tools::AgentTaskState::Done);
+    CHECK(summaries[1].state == tools::AgentTaskState::Done);
+    CHECK(summaries[0].foreground);
+    CHECK(summaries[1].foreground);
 }

@@ -21,7 +21,6 @@
 #include "agent/loop.hpp"
 #include "agent/workflow_recorder.hpp"
 #include "api/types.hpp"
-#include "cli/agent_status.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/image_input.hpp"
 #include "cli/live_transcript.hpp"
@@ -38,7 +37,6 @@
 namespace lubancode::app {
 
 // main.cpp 原文里这些名字是不限定引用的;搬进 app 命名空间后对齐一下。
-using lubancode::cli::AgentStatusPainter;
 using lubancode::cli::StreamBodyTracker;
 using lubancode::cli::ToolDisplay;
 using lubancode::cli::tr;

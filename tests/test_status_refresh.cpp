@@ -278,7 +278,7 @@ TEST_CASE("BuildCallbacks::on_usage: 子代理 usage 只进累计花销,不碰 t
 
     // BuildCallbacks 内部给 agent 工具灌了转发钩子;跑一轮子代理(500+100
     // tokens),花销统计要吃到,主 context 与状态行数据都不能动。
-    const tools::Tool::Result result = registry.Find("agent")->execute(nlohmann::json{{"prompt", "干点活"}});
+    const tools::Tool::Result result = registry.Find("agent")->execute(nlohmann::json{{"title", "干点活"}, {"prompt", "干点活"}});
     CHECK_FALSE(result.is_error);
     CHECK(stats.input_tokens == 500);
     CHECK(stats.output_tokens == 100);
