@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <system_error>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -10,6 +11,16 @@
 #include "platform/process.hpp"
 
 using namespace lubancode;
+
+
+// macOS 的 /var 是 /private/var 的符号链接:临时目录路径带着 /var 进去,
+// chdir 后 current_path() 出来已是 /private/var,裸等值必翻。断言两边都
+// 过一遍 canonical 再比(路径不存在时原样退回,给"拒进"类负例留活路)。
+inline std::filesystem::path NormalizedPath(const std::filesystem::path& path) {
+    std::error_code ec;
+    const std::filesystem::path canonical = std::filesystem::canonical(path, ec);
+    return ec ? path : canonical;
+}
 
 TEST_CASE("ParseWorktreeCommand: new/list/exit 的参数分清") {
     const auto named = cli::ParseWorktreeCommand("new feature_54");
@@ -257,7 +268,7 @@ TEST_CASE("WorktreeSession::Enter/Exit: 建房、进旧房、干净删房、scop
     CHECK(entered.branch == "worktree/fix-1");
     CHECK(session.active());
     CHECK(session.active_name() == "fix-1");
-    CHECK(std::filesystem::current_path() == cli::WorktreePath(repo, "fix-1"));
+    CHECK(NormalizedPath(std::filesystem::current_path()) == NormalizedPath(cli::WorktreePath(repo, "fix-1")));
     REQUIRE(hook_log.size() == 1);
     CHECK(hook_log[0] == "enter");
 
@@ -270,7 +281,7 @@ TEST_CASE("WorktreeSession::Enter/Exit: 建房、进旧房、干净删房、scop
     // exit keep:回原目录,房还在
     const auto kept = session.Exit("keep");
     CHECK(kept.code == cli::WorktreeResultCode::Kept);
-    CHECK(std::filesystem::current_path() == repo);
+    CHECK(NormalizedPath(std::filesystem::current_path()) == NormalizedPath(repo));
     CHECK(std::filesystem::exists(cli::WorktreePath(repo, "fix-1")));
     REQUIRE(hook_log.size() == 2);
     CHECK(hook_log[1] == "exit");
@@ -280,7 +291,7 @@ TEST_CASE("WorktreeSession::Enter/Exit: 建房、进旧房、干净删房、scop
     const auto removed = session.Exit("remove");
     CHECK(removed.code == cli::WorktreeResultCode::Removed);
     CHECK_FALSE(std::filesystem::exists(cli::WorktreePath(repo, "fix-1")));
-    CHECK(std::filesystem::current_path() == repo);
+    CHECK(NormalizedPath(std::filesystem::current_path()) == NormalizedPath(repo));
     REQUIRE(hook_log.size() == 4);
     CHECK(hook_log[3] == "exit");
 
@@ -332,7 +343,7 @@ TEST_CASE("WorktreeSession::Enter: 园子外的房先问,确认后才进;脏房 
     // 点头重进
     const auto confirmed = session.Enter("user-room", "head", /*confirmed_outside=*/true);
     CHECK(confirmed.code == cli::WorktreeResultCode::Created);
-    CHECK(std::filesystem::current_path() == outside);
+    CHECK(NormalizedPath(std::filesystem::current_path()) == NormalizedPath(outside));
 
     // 脏房 exit remove:要确认;确认后删房,但别人的分支不动(没 branch 调用)
     dirty = true;
@@ -367,7 +378,7 @@ TEST_CASE("WorktreeSession::EnterByPath: 马甲房(无登记)拒进") {
     const auto refused = session.EnterByPath(fake);
     CHECK(refused.code == cli::WorktreeResultCode::VerificationFailed);
     CHECK_FALSE(session.active());
-    CHECK(std::filesystem::current_path() == repo);  // 没被搬进去
+    CHECK(NormalizedPath(std::filesystem::current_path()) == NormalizedPath(repo));  // 没被搬进去
 
     std::error_code ec;
     std::filesystem::remove_all(base, ec);

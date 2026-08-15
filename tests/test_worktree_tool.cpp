@@ -7,6 +7,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <system_error>
 #include <fstream>
 #include <optional>
 #include <string>
@@ -83,6 +84,16 @@ struct TempRepo {
 
 }  // namespace
 
+
+// macOS 的 /var 是 /private/var 的符号链接:临时目录路径带着 /var 进去,
+// chdir 后 current_path() 出来已是 /private/var,裸等值必翻。断言两边都
+// 过一遍 canonical 再比(路径不存在时原样退回,给"拒进"类负例留活路)。
+inline std::filesystem::path NormalizedPath(const std::filesystem::path& path) {
+    std::error_code ec;
+    const std::filesystem::path canonical = std::filesystem::canonical(path, ec);
+    return ec ? path : canonical;
+}
+
 TEST_CASE("worktree 工具:名字与 schema 形状") {
     TempRepo temp;
     cli::WorktreeSession session(temp.Runner());
@@ -145,7 +156,7 @@ TEST_CASE("worktree 工具:进园外的房,confirm 通道说了算") {
     CHECK(refused.content.find("需要用户确认") != std::string::npos);
     CHECK_FALSE(session.active());
     CHECK(moved == 0);
-    CHECK(std::filesystem::current_path() == temp.repo);  // 没搬
+    CHECK(NormalizedPath(std::filesystem::current_path()) == NormalizedPath(temp.repo));  // 没搬
 
     // 用户点头:进得去,房名上状态,搬目录回调触发
     tools::WorktreeTool agree_tool(
@@ -156,7 +167,7 @@ TEST_CASE("worktree 工具:进园外的房,confirm 通道说了算") {
     CHECK(entered.content.find("已住进 worktree 房") != std::string::npos);
     CHECK(session.active_name() == "user-room");
     CHECK(moved == 1);
-    CHECK(std::filesystem::current_path() == temp.outside);
+    CHECK(NormalizedPath(std::filesystem::current_path()) == NormalizedPath(temp.outside));
 
     // 脏房 exit remove:confirm 点头才删;摇头则房原样保留
     temp.dirty = true;
@@ -167,7 +178,7 @@ TEST_CASE("worktree 工具:进园外的房,confirm 通道说了算") {
     CHECK(kept_dirty.is_error);
     CHECK(kept_dirty.content.find("已被拒绝") != std::string::npos);
     CHECK(std::filesystem::exists(temp.outside));
-    CHECK(std::filesystem::current_path() == temp.outside);  // 拒绝后不出房
+    CHECK(NormalizedPath(std::filesystem::current_path()) == NormalizedPath(temp.outside));  // 拒绝后不出房
 
     tools::WorktreeTool force_tool(
         session, /*confirm=*/[](const std::string&) -> std::optional<bool> { return true; }, [&moved]() { ++moved; });
