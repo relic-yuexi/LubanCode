@@ -1,4 +1,4 @@
-// 上下文压缩(0.21.x 起,0.31.x 分层化第一期):history 长了(手动 /compact,
+// 上下文压缩(0.21.x 起,0.27.x 分层化第一期):history 长了(手动 /compact,
 // ContextTracker 测出占用过 80%,或 AgentLoop 在模型请求前测出 projected
 // overflow 触发 mid-turn 压缩)时,把历史送给模型换一份浓缩"存档"回来,
 // 顶替掉老对话——跟 agent/context.hpp 的 TrimHistory(按字节硬切,不管

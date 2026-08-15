@@ -1747,7 +1747,7 @@ const Entry kEn[] = {
      "(the most recent request returned no usage; figures above are from the last measured request. The "
      "status bar shows the same numbers with a ~ prefix)"},
 
-    // ---- compact (0.31.x): new layered-compaction keys, zh+en paired ----
+    // ---- compact (0.27.x): new layered-compaction keys, zh+en paired ----
     {"cmd.compact.window_unknown", "(compact model window unknown; no window check was performed this time)"},
     {"cmd.compact.hierarchical", "History exceeded a single compact request: split into {0} episode chunks (map) and merged into the final summary (reduce passes: {1})."},
     {"cmd.compact.manifest", "manifest conservation check passed: {0} constraints / {1} open items"},

@@ -100,7 +100,7 @@ CompactEvent MakeCompactEvent(std::size_t old_history_size, const std::vector<ap
 std::vector<api::Message> ApplyCompactEvent(std::vector<api::Message> effective, const CompactEvent& event);
 
 // ---------------------------------------------------------------------------
-// compact_v2 事件(0.31.x 第三期):分层压缩的完整记账。
+// compact_v2 事件(0.27.x 第三期):分层压缩的完整记账。
 //
 // 回放语义与 v1 完全同型(archive + kept_from),/resume 读到 v2 与读到 v1
 // 走同一条重建路;多的字段(manifest/epoch/metrics)供审计、/export 与

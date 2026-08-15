@@ -224,7 +224,7 @@ private:
     CommandFlow ProcessLine(const std::string& content);
     CommandFlow DispatchSlashCommand(const lubancode::cli::ParsedSlashCommand& parsed);
     CommandFlow RunUserTurn(const std::string& content);
-    // ---- 上下文压缩的会话现场路(0.31.x 分层压缩第一期) ----
+    // ---- 上下文压缩的会话现场路(0.27.x 分层压缩第一期) ----
     // 压缩参数现场收集:窗口预算认压缩模型自己的目录条目,活动待办(未完
     // 成 todo 条目原文)进守恒校验——摘要漏一项 pending 就拒收,历史不动。
     lubancode::agent::CompactOptions BuildCompactOptions();
@@ -969,7 +969,7 @@ void InteractiveSession::RebuildLoop(bool preserve_history) {
                  lubancode::agent::AssembleSystemPrompt(prompt_options),
                  /*max_tokens=*/4096, config.max_turns, config.max_context_chars);
     loop->SetToolFilter(main_tool_filter());
-    // mid-turn 上下文安全点(0.31.x):窗口与压力通报随 loop 重建重灌;窗口
+    // mid-turn 上下文安全点(0.27.x):窗口与压力通报随 loop 重建重灌;窗口
     // 的后续变化(/context、/model)由 RunUserTurn 发轮前再同步。
     loop->SetContextWindowTokens(context_tracker.window_tokens());
     loop->SetOnContextPressure([this](const lubancode::agent::ContextPressure& pressure) {
@@ -1516,7 +1516,7 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
 
 // 发一轮用户正文:自动压缩检查 + 轮次材料 + RunTurn + 落盘 + 收排队。
 CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
-    // 窗口同步(0.31.x):/context、/model 改的是 tracker 的窗口,loop 的
+    // 窗口同步(0.27.x):/context、/model 改的是 tracker 的窗口,loop 的
     // mid-turn 评估用同一份,发轮前对齐一次。
     loop->SetContextWindowTokens(context_tracker.window_tokens());
     // 自动压缩:发真正的用户输入前,占用超过阈值(80%)就先压一压。失败只
@@ -1545,7 +1545,7 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
 }
 
 // ---------------------------------------------------------------------------
-// 上下文压缩的会话现场路(0.31.x 分层压缩第一期)
+// 上下文压缩的会话现场路(0.27.x 分层压缩第一期)
 // ---------------------------------------------------------------------------
 
 lubancode::agent::CompactOptions InteractiveSession::BuildCompactOptions() {
