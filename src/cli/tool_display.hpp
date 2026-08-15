@@ -738,7 +738,16 @@ private:
         } else if (name == "search") {
             item.summary_lines = {cli::SearchDoneSummary(result.content)};
         } else if (name == "agent") {
-            item.summary_lines = {cli::AgentDoneSummary(step_count, sub_tools)};
+            // 后台派出(规格"现场六"):启动卡只写不过期的事实——"后台子代理
+            // #N 已启动"。绝不把派出那一刻的 0/0 冒充任务摘要(计数随后台
+            // 线程走,主区条目拿不到,两本账当面打架);前台完成的照旧报
+            // 步数与工具数。后台启动的 Result 以"后台子代理 #"开头,是
+            // agent_tool 定下的回话,这里认这个前缀。
+            if (result.content.rfind("后台子代理 #", 0) == 0) {
+                item.summary_lines = {result.content.substr(0, result.content.find('\n'))};
+            } else {
+                item.summary_lines = {cli::AgentDoneSummary(step_count, sub_tools)};
+            }
         } else if (name == "todo_write" && todo_state) {
             // 沿用现有清单渲染,清单接在 ⎿ 之后(FormatTodoList 每行自带的
             // 两空格缩进剥掉,条目渲染自己管缩进)。
