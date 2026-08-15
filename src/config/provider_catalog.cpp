@@ -143,7 +143,8 @@ std::expected<ProviderPreset, std::string> ParseProvider(const std::string& id, 
     if (!value.is_object()) return std::unexpected(where + " 必须是 JSON object");
     if (auto known = RejectUnknown(value, {"name", "description", "wire", "base_url", "key_env",
                                            "default_model", "model_reasoning_effort", "native_web_search",
-                                           "stream_usage", "docs_url", "extra_body", "extra_headers", "models"},
+                                           "stream_usage", "reasoning_replay", "docs_url", "extra_body",
+                                           "extra_headers", "models"},
                                    where);
         !known.has_value()) return std::unexpected(known.error());
     ProviderPreset preset;
@@ -183,6 +184,16 @@ std::expected<ProviderPreset, std::string> ParseProvider(const std::string& id, 
             return std::unexpected(where + ".stream_usage 必须是布尔值");
         }
         preset.stream_usage = value["stream_usage"].get<bool>();
+    }
+    if (value.contains("reasoning_replay")) {
+        if (!value["reasoning_replay"].is_string()) {
+            return std::unexpected(where + ".reasoning_replay 必须是字符串");
+        }
+        const std::string replay = value["reasoning_replay"].get<std::string>();
+        if (replay != "never" && replay != "tool_episode") {
+            return std::unexpected(where + ".reasoning_replay 只认 never/tool_episode: " + replay);
+        }
+        preset.reasoning_replay = replay;
     }
     if (value.contains("docs_url")) {
         if (!value["docs_url"].is_string()) return std::unexpected(where + ".docs_url 必须是字符串");
@@ -433,6 +444,7 @@ ProviderConfig ProviderConfigFromPreset(const ProviderPreset& preset) {
     provider.model_reasoning_effort = preset.model_reasoning_effort;
     provider.native_web_search = preset.native_web_search;
     provider.stream_usage = preset.stream_usage;
+    provider.reasoning_replay = preset.reasoning_replay;
     provider.extra_body = preset.extra_body;
     provider.extra_headers = preset.extra_headers;
     if (const auto* model = preset.FindModel(preset.default_model); model != nullptr) {

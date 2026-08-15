@@ -49,6 +49,10 @@ struct ProviderPreset {
     // [DONE] 前多回一只完整 usage chunk)。有些兼容端不认 stream_options,
     // 所以按 provider 声明,默认不发;DeepSeek 等家置真。
     bool stream_usage = false;
+    // reasoning_replay:Chat wire 的思考回传策略,"" / "never" / "tool_episode"
+    // (语义见 api/chat/request.hpp)。DeepSeek 这类要求工具交互段回传
+    // reasoning_content 的端配 "tool_episode";默认空 = never。
+    std::string reasoning_replay;
     std::string docs_url;
     nlohmann::json extra_body = nlohmann::json::object();
     std::map<std::string, std::string> extra_headers;

@@ -223,6 +223,7 @@
       "default_model": "deepseek-v4-pro",
       "model_reasoning_effort": "high",
       "stream_usage": true,
+      "reasoning_replay": "tool_episode",
       "docs_url": "https://api-docs.deepseek.com/",
       "extra_body": {
         "thinking": { "type": "enabled" }
