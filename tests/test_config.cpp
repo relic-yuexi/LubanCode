@@ -337,9 +337,9 @@ TEST_CASE("MergeConfig: max_context_chars 专属 env 压过配置文件") {
 }
 
 // ---------------------------------------------------------------------------
-// max_turns:待遇跟 max_context_chars 一样(专属 env / 配置文件 / 默认值三级,
-// 没有通用 env)。语义:不配、或者显式配 0,都是无上限;配正整数才是硬
-// 上限。负数/非法值不报错,静默忽略落到下一级。
+// max_steps_per_turn(旧名 max_turns):待遇跟 max_context_chars 一样(专属
+// env / 配置文件 / 默认值三级,没有通用 env)。语义:不配、或者显式配 0,
+// 都是无上限;配正整数才是硬上限。负数/非法值不报错,静默忽略落到下一级。
 // ---------------------------------------------------------------------------
 
 TEST_CASE("MergeConfig: 什么都没设置时,max_turns 走内置默认值 0(无上限)") {
@@ -395,9 +395,144 @@ TEST_CASE("ParseFileConfigJson: max_turns 正整数正常解析") {
 }
 
 // ---------------------------------------------------------------------------
-// subagent.max_turns(0.30.x"失败预算"单):子代理不再暗藏 40 轮硬闸——预算
-// 从配置来,首选 subagent.max_turns,未设继承 config.max_turns;0 全路一致
-// 不限轮。待遇同 hooks:只从配置文件来(项目级压全局),没有 env/默认两级。
+// max_steps_per_turn <-> max_turns 兼容期双读(命名规范第二批):新名优先;
+// 同现同值按新名收账;同现异值明报冲突(取新名,不暗取);旧名单独出现
+// 映射到同一字段并打一次性弃用提示;0 = 不限步,两代同义。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseFileConfigJson: max_steps_per_turn 新键正常解析,与旧键各自独立读入") {
+    const auto ok = config::ParseFileConfigJson(R"({"max_steps_per_turn": 40})", "x.json");
+    REQUIRE(ok.has_value());
+    REQUIRE(ok->max_steps_per_turn.has_value());
+    CHECK(*ok->max_steps_per_turn == 40);
+    CHECK_FALSE(ok->max_turns.has_value());
+}
+
+TEST_CASE("MergeConfig: 新名单独出现,生效且不打弃用提示") {
+    config::FileConfig file;
+    file.max_steps_per_turn = 40;
+    file.source_path = "/tmp/.lubancode/config.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.max_steps_per_turn == 40);
+    CHECK(result->sources.max_steps_per_turn == config::Source::ProjectConfigFile);
+    CHECK(result->deprecation_notices.empty());
+}
+
+TEST_CASE("MergeConfig: 旧名单独出现,映射生效并打一条弃用提示") {
+    config::FileConfig file;
+    file.max_turns = 25;
+    file.source_path = "/tmp/.lubancode/config.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.max_steps_per_turn == 25);  // 旧名映射到同一字段
+    CHECK(result->sources.max_steps_per_turn == config::Source::ProjectConfigFile);
+    REQUIRE(result->deprecation_notices.size() == 1);
+    CHECK(result->deprecation_notices[0].find("max_turns=25") != std::string::npos);
+    CHECK(result->deprecation_notices[0].find("已弃用") != std::string::npos);
+}
+
+TEST_CASE("MergeConfig: 新旧同现同值,按新名收账并提示弃用") {
+    config::FileConfig file;
+    file.max_steps_per_turn = 40;
+    file.max_turns = 40;
+    file.source_path = "/tmp/.lubancode/config.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.max_steps_per_turn == 40);
+    REQUIRE(result->deprecation_notices.size() == 1);
+    CHECK(result->deprecation_notices[0].find("同值") != std::string::npos);
+}
+
+TEST_CASE("MergeConfig: 新旧同现异值,明报冲突,取新名不暗取") {
+    config::FileConfig file;
+    file.max_steps_per_turn = 40;
+    file.max_turns = 15;
+    file.source_path = "/tmp/.lubancode/config.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.max_steps_per_turn == 40);  // 新名优先
+    REQUIRE(result->deprecation_notices.size() == 1);
+    // 冲突信息把两个值都摆出来,不暗取一边。
+    CHECK(result->deprecation_notices[0].find("冲突") != std::string::npos);
+    CHECK(result->deprecation_notices[0].find("max_steps_per_turn=40") != std::string::npos);
+    CHECK(result->deprecation_notices[0].find("max_turns=15") != std::string::npos);
+}
+
+TEST_CASE("MergeConfig: 旧名 0 = 不限步,两代同义(显式无上限不当没配)") {
+    config::FileConfig file;
+    file.max_turns = 0;
+    file.source_path = "/tmp/.lubancode/config.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.max_steps_per_turn == 0);
+    CHECK(result->sources.max_steps_per_turn == config::Source::ProjectConfigFile);
+    REQUIRE(result->deprecation_notices.size() == 1);
+}
+
+TEST_CASE("MergeConfig: env 新名压过配置文件旧名(层级照旧,env > 文件)") {
+    config::LubancodeEnvValues lubancode_env;
+    lubancode_env.max_steps_per_turn = 30;
+
+    config::FileConfig file;
+    file.max_turns = 50;
+    file.source_path = "/tmp/.lubancode/config.json";
+
+    const auto result = config::MergeConfig(lubancode_env, file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.max_steps_per_turn == 30);
+    CHECK(result->sources.max_steps_per_turn == config::Source::LubancodeEnv);
+    // 文件里旧名的弃用提示照打(读了旧名这件事要记清)。
+    REQUIRE(result->deprecation_notices.size() == 1);
+}
+
+TEST_CASE("MergeConfig: env 新旧两个变量同现异值,明报冲突取新名") {
+    config::LubancodeEnvValues lubancode_env;
+    lubancode_env.max_steps_per_turn = 30;
+    lubancode_env.max_turns = 20;
+
+    const auto result = config::MergeConfig(lubancode_env, std::nullopt, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.max_steps_per_turn == 30);
+    CHECK(result->sources.max_steps_per_turn == config::Source::LubancodeEnv);
+    REQUIRE(result->deprecation_notices.size() == 1);
+    CHECK(result->deprecation_notices[0].find("冲突") != std::string::npos);
+}
+
+TEST_CASE("ParseFileConfigJson: subagent 段新键 max_steps_per_turn 正常解析") {
+    const auto ok = config::ParseFileConfigJson(R"({"subagent": {"max_steps_per_turn": 25}})", "x.json");
+    REQUIRE(ok.has_value());
+    REQUIRE(ok->subagent_max_steps_per_turn.has_value());
+    CHECK(*ok->subagent_max_steps_per_turn == 25);
+    CHECK_FALSE(ok->subagent_max_turns.has_value());
+}
+
+TEST_CASE("MergeConfig: subagent 段新旧同现异值,明报冲突取新名") {
+    config::FileConfig file;
+    file.subagent_max_steps_per_turn = 20;
+    file.subagent_max_turns = 8;
+    file.source_path = "/tmp/.lubancode/config.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    REQUIRE(result->config.subagent.max_steps_per_turn.has_value());
+    CHECK(*result->config.subagent.max_steps_per_turn == 20);
+    CHECK(result->sources.subagent == config::Source::ProjectConfigFile);
+    REQUIRE(result->deprecation_notices.size() == 1);
+    CHECK(result->deprecation_notices[0].find("subagent") != std::string::npos);
+    CHECK(result->deprecation_notices[0].find("冲突") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// subagent.max_steps_per_turn(旧名 subagent.max_turns;0.30.x"失败预算"单):
+// 子代理不再暗藏硬闸——预算从配置来,首选 subagent 段,未设继承主代理的
+// 预算;0 全路一致不限步。待遇同 hooks:只从配置文件来(项目级压全局),
+// 没有 env/默认两级。
 // ---------------------------------------------------------------------------
 
 TEST_CASE("ParseFileConfigJson: subagent.max_turns 正常解析;坏段/坏值/负数静默跳过") {

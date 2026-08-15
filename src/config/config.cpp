@@ -833,13 +833,20 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
         }
         config.max_context_chars = static_cast<std::size_t>(value);
     }
+    // 主预算键双读(命名规范第二批):新名 max_steps_per_turn 优先,旧名
+    // max_turns 兼容。两键同现的取舍与提示在 MergeConfig 统一判定,这里
+    // 只管把各自的值读出来。跟其余字段(比如 max_context_chars)不一样:
+    // 不报错,类型不对或者是负数都静默跳过(留 nullopt,MergeConfig 那一级
+    // 就当没写,往下一级/默认值找)。0 是合法值——显式声明"无上限"(跟
+    // 不写这个字段效果一样);只有负数才当手滑写错。这是条"救命阀"字段,
+    // 配置文件写错不该把整个启动拦下来。
+    if (parsed.contains("max_steps_per_turn")) {
+        const auto& field = parsed["max_steps_per_turn"];
+        if ((field.is_number_integer() || field.is_number_unsigned()) && field.get<long long>() >= 0) {
+            config.max_steps_per_turn = static_cast<int>(field.get<long long>());
+        }
+    }
     if (parsed.contains("max_turns")) {
-        // 跟其余字段(比如上面的 max_context_chars)不一样:这里不报错,
-        // 类型不对或者是负数都静默跳过(留 nullopt,MergeConfig 那一级就当
-        // 没写,往下一级/默认值找)。0 是合法值——显式声明"无上限"(跟不写
-        // 这个字段效果一样,但用户可能想在配置里明写出来);只有负数才当
-        // 手滑写错。max_turns 是条"救命阀"字段,配置文件写错不该把整个
-        // 启动拦下来。
         const auto& field = parsed["max_turns"];
         if ((field.is_number_integer() || field.is_number_unsigned()) && field.get<long long>() >= 0) {
             config.max_turns = static_cast<int>(field.get<long long>());
@@ -971,14 +978,23 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
         }
         config.status_panel = std::move(*panel_result);
     }
-    // subagent 段:只认 {"max_turns": N}(非负整数,0 = 显式不限轮);段不是
-    // object、字段类型不对、负数,一律静默跳过(留 nullopt,运行时继承
-    // max_turns)——待遇同 max_turns 本身:救命阀字段,配置写错不拦人开工。
-    if (parsed.contains("subagent") && parsed["subagent"].is_object() &&
-        parsed["subagent"].contains("max_turns") && parsed["subagent"]["max_turns"].is_number_integer()) {
-        const long long turns = parsed["subagent"]["max_turns"].get<long long>();
-        if (turns >= 0 && turns <= static_cast<long long>(1000000)) {
-            config.subagent_max_turns = static_cast<int>(turns);
+    // subagent 段双读(命名规范第二批):新名 {"subagent": {"max_steps_per_turn": N}}
+    // 优先,旧名 {"subagent": {"max_turns": N}} 兼容;段不是 object、字段
+    // 类型不对、负数、超上限(1000000),一律静默跳过(留 nullopt,运行时
+    // 继承主预算)——待遇同主预算本身:救命阀字段,配置写错不拦人开工。
+    if (parsed.contains("subagent") && parsed["subagent"].is_object()) {
+        const auto& subagent = parsed["subagent"];
+        if (subagent.contains("max_steps_per_turn") && subagent["max_steps_per_turn"].is_number_integer()) {
+            const long long steps = subagent["max_steps_per_turn"].get<long long>();
+            if (steps >= 0 && steps <= static_cast<long long>(1000000)) {
+                config.subagent_max_steps_per_turn = static_cast<int>(steps);
+            }
+        }
+        if (subagent.contains("max_turns") && subagent["max_turns"].is_number_integer()) {
+            const long long turns = subagent["max_turns"].get<long long>();
+            if (turns >= 0 && turns <= static_cast<long long>(1000000)) {
+                config.subagent_max_turns = static_cast<int>(turns);
+            }
         }
     }
     if (parsed.contains("extra_body")) {
@@ -1287,14 +1303,62 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     // 阶段被过滤(不会落进 FileConfig/LubancodeEnvValues),0(显式无上限)是
     // 合法值,这里只管按优先级挑;都没配到时默认值 kDefaultMaxStepsPerTurn
     // 本身也是 0(无上限)。 ----
-    if (lubancode_env.max_turns.has_value()) {
-        result.config.max_steps_per_turn = *lubancode_env.max_turns;
+    //
+    // 兼容期双读(命名规范第二批):新名优先;新旧同现同值按新名收账并提
+    // 示弃用;同现异值明报冲突(仍取新名,但把两个值都摆出来,不暗取);
+    // 只出现旧名时映射到同一字段并打一次性弃用提示。来源账(Source)照记
+    // 读到的是哪一级。 ----
+    const auto resolve_steps_per_turn = [&result](const std::optional<int>& new_value,
+                                                   const std::optional<int>& old_value,
+                                                   const std::string& origin_label) -> std::optional<int> {
+        if (new_value.has_value() && old_value.has_value()) {
+            if (*new_value != *old_value) {
+                result.deprecation_notices.push_back(
+                    "[配置] " + origin_label + " 里 max_steps_per_turn=" + std::to_string(*new_value) +
+                    " 与旧名 max_turns=" + std::to_string(*old_value) +
+                    " 冲突:已采用 max_steps_per_turn=" + std::to_string(*new_value) +
+                    "。请删掉 max_turns 或把两者改成同一个值。");
+            } else {
+                result.deprecation_notices.push_back("[配置] " + origin_label + " 里 max_turns=" +
+                                                     std::to_string(*old_value) +
+                                                     " 已弃用,与 max_steps_per_turn 同值,按新名收账。");
+            }
+            return new_value;
+        }
+        if (old_value.has_value()) {
+            result.deprecation_notices.push_back(
+                "[配置] " + origin_label + " 里 max_turns=" + std::to_string(*old_value) +
+                " 已弃用,新名是 max_steps_per_turn(0 = 不限步,语义不变);旧名将在未来版本移除。");
+            return old_value;
+        }
+        return new_value;
+    };
+
+    std::optional<int> env_steps;
+    if (lubancode_env.max_steps_per_turn.has_value() || lubancode_env.max_turns.has_value()) {
+        env_steps = resolve_steps_per_turn(lubancode_env.max_steps_per_turn, lubancode_env.max_turns,
+                                           "环境变量 LUBANCODE_MAX_STEPS_PER_TURN / LUBANCODE_MAX_TURNS");
+    }
+    std::optional<int> project_steps;
+    if (project_file.has_value() &&
+        (project_file->max_steps_per_turn.has_value() || project_file->max_turns.has_value())) {
+        project_steps = resolve_steps_per_turn(project_file->max_steps_per_turn, project_file->max_turns,
+                                               "项目级配置 " + project_file->source_path);
+    }
+    std::optional<int> global_steps;
+    if (global_file.has_value() &&
+        (global_file->max_steps_per_turn.has_value() || global_file->max_turns.has_value())) {
+        global_steps = resolve_steps_per_turn(global_file->max_steps_per_turn, global_file->max_turns,
+                                              "全局配置 " + global_file->source_path);
+    }
+    if (env_steps.has_value()) {
+        result.config.max_steps_per_turn = *env_steps;
         result.sources.max_steps_per_turn = Source::LubancodeEnv;
-    } else if (project_file.has_value() && project_file->max_turns.has_value()) {
-        result.config.max_steps_per_turn = *project_file->max_turns;
+    } else if (project_steps.has_value()) {
+        result.config.max_steps_per_turn = *project_steps;
         result.sources.max_steps_per_turn = Source::ProjectConfigFile;
-    } else if (global_file.has_value() && global_file->max_turns.has_value()) {
-        result.config.max_steps_per_turn = *global_file->max_turns;
+    } else if (global_steps.has_value()) {
+        result.config.max_steps_per_turn = *global_steps;
         result.sources.max_steps_per_turn = Source::GlobalConfigFile;
     } else {
         result.config.max_steps_per_turn = kDefaultMaxStepsPerTurn;
@@ -1533,11 +1597,27 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.config.lsp_servers = *global_file->lsp_servers;
     }
 
-    if (project_file.has_value() && project_file->subagent_max_turns.has_value()) {
-        result.config.subagent.max_steps_per_turn = *project_file->subagent_max_turns;
+    // subagent 段双读:新名优先,旧名兼容,冲突明报(同上 resolve 逻辑,
+    // 标签换成 subagent 段,提示里写清键的全名)。
+    std::optional<int> project_subagent_steps;
+    if (project_file.has_value() &&
+        (project_file->subagent_max_steps_per_turn.has_value() || project_file->subagent_max_turns.has_value())) {
+        project_subagent_steps =
+            resolve_steps_per_turn(project_file->subagent_max_steps_per_turn, project_file->subagent_max_turns,
+                                   "项目级配置 subagent 段 " + project_file->source_path);
+    }
+    std::optional<int> global_subagent_steps;
+    if (global_file.has_value() &&
+        (global_file->subagent_max_steps_per_turn.has_value() || global_file->subagent_max_turns.has_value())) {
+        global_subagent_steps =
+            resolve_steps_per_turn(global_file->subagent_max_steps_per_turn, global_file->subagent_max_turns,
+                                   "全局配置 subagent 段 " + global_file->source_path);
+    }
+    if (project_subagent_steps.has_value()) {
+        result.config.subagent.max_steps_per_turn = project_subagent_steps;
         result.sources.subagent = Source::ProjectConfigFile;
-    } else if (global_file.has_value() && global_file->subagent_max_turns.has_value()) {
-        result.config.subagent.max_steps_per_turn = *global_file->subagent_max_turns;
+    } else if (global_subagent_steps.has_value()) {
+        result.config.subagent.max_steps_per_turn = global_subagent_steps;
         result.sources.subagent = Source::GlobalConfigFile;
     } else {
         result.config.subagent.max_steps_per_turn = std::nullopt;  // 未单独配置:运行时继承主代理预算
@@ -2047,13 +2127,23 @@ std::expected<ConfigResult, std::string> LoadFromEnv() {
             // agent::MaxContextCharsFromEnv 行为保持一致)。
         }
     }
-    if (const auto raw = GetEnv("LUBANCODE_MAX_TURNS"); raw.has_value()) {
+    // 步数上限双读(命名规范第二批):新名 LUBANCODE_MAX_STEPS_PER_TURN
+    // 优先,旧名 LUBANCODE_MAX_TURNS 兼容;同现取舍与提示在 MergeConfig 判定。
+    for (const char* name : {"LUBANCODE_MAX_STEPS_PER_TURN", "LUBANCODE_MAX_TURNS"}) {
+        const auto raw = GetEnv(name);
+        if (!raw.has_value()) {
+            continue;
+        }
         try {
             const long long parsed = std::stoll(*raw);
-            if (parsed >= 0) {
-                lubancode_env.max_turns = static_cast<int>(parsed);
+            if (parsed < 0) {
+                continue;  // 负数:当没设置处理,往下一级找,不报错。
             }
-            // 负数:当没设置处理,往下一级找,不报错。0 是合法值(显式无上限)。
+            if (std::string(name) == "LUBANCODE_MAX_STEPS_PER_TURN") {
+                lubancode_env.max_steps_per_turn = static_cast<int>(parsed);
+            } else {
+                lubancode_env.max_turns = static_cast<int>(parsed);  // 0 是合法值(显式无上限)
+            }
         } catch (...) {
             // 不是合法数字:同样当没设置处理,不报错。
         }

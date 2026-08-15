@@ -152,7 +152,7 @@ platforms/<当前 wire>.md
 
 # 项目记忆 + 本轮召回内容                 （本轮开了记忆才添）
 
-step 预算将尽提醒                        （旧配置名为 max_turns；设了硬上限才添）
+step 预算将尽提醒                        （max_steps_per_turn，旧名 max_turns；设了硬上限才添）
 
 延迟工具索引                             （工具太多、启用 tool_search 才添）
 
@@ -645,7 +645,7 @@ User("那它怎么切 provider？")
 -> 再发完整 history
 ```
 
-默认主循环不设 step 上限，靠模型 `end_turn` 或用户 ESC 收口。旧配置项 `max_turns` 若设正数，限制的其实是一个 turn 内最多跑多少个 step，并非用户 turn 数；这笔命名债已记入 [`todos/项目变量与执行层级命名规范.todo`](../todos/项目变量与执行层级命名规范.todo)。
+默认主循环不设 step 上限，靠模型 `end_turn` 或用户 ESC 收口。配置项 `max_steps_per_turn`（旧名 `max_turns`，兼容期内仍可读入）若设正数，限制的就是一个 turn 内最多跑多少个 step；`0` 与不配都是不限。
 
 ### 服务端内置 web search
 

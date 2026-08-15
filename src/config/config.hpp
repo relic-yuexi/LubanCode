@@ -396,6 +396,10 @@ struct ConfigResult {
     std::optional<std::string> config_file_path;
     std::optional<std::string> project_config_file_path;  // <cwd>/.lubancode/config.json
     std::optional<std::string> global_config_file_path;   // <主目录>/.lubancode/config.json
+    // 兼容期提示(命名规范第二批):旧名 max_turns / LUBANCODE_MAX_TURNS
+    // 被读入、或新旧两键同现冲突时,这里一条一条记给用户看。空 = 本次加载
+    // 没碰旧名。MergeConfig(纯函数)填,cli_app 打印。
+    std::vector<std::string> deprecation_notices;
     // 本次加载时如果发生了"旧位置 .lubancode.json 挪到新位置
     // .lubancode/config.json"这件事,这里是要打印给用户看的那一行通知
     // (成功或失败都会有一行);没发生迁移就是 std::nullopt。LoadFromEnv 里填。
@@ -410,11 +414,13 @@ struct FileConfig {
     std::optional<std::string> api_key;
     std::optional<std::string> model;
     std::optional<std::size_t> max_context_chars;
-    // max_turns(旧配置键,读入后映射到 max_steps_per_turn):非负整数才落进
-    // 这个字段(0 = 显式无上限,是合法值);负数
-    // 或者字段类型不对,ParseFileConfigJson 静默跳过(留 nullopt),不
-    // 报错——见 Config::max_turns 注释。
-    std::optional<int> max_turns;  // 旧键 "max_turns" 的值(新键见 max_steps_per_turn,兼容期双读)
+    // max_steps_per_turn / max_turns(旧):同一预算的新旧两个键,兼容期
+    // 双读。非负整数才落进字段(0 = 显式无上限,是合法值);负数或者字段
+    // 类型不对,ParseFileConfigJson 静默跳过(留 nullopt),不报错——
+    // "救命阀"字段,配置写错不该拦住用户开工。两键同现同值按新名收账;
+    // 同现异值在 MergeConfig 明报冲突(新名优先)并打弃用提示。
+    std::optional<int> max_steps_per_turn;  // 新键 "max_steps_per_turn"
+    std::optional<int> max_turns;           // 旧键 "max_turns"(弃用,至少跨一个明确版本窗后再删)
     std::optional<std::string> theme;               // dark / light / plain
     std::optional<std::string> language;             // i18n:界面语言码
     std::optional<std::string> system_prompt_file;   // 人格文件路径
@@ -432,10 +438,11 @@ struct FileConfig {
     std::optional<std::map<std::string, LspServerConfig>> lsp_servers;
     // status_panel 整段回退；items 的顺序就是终端展示顺序。
     std::optional<StatusPanelConfig> status_panel;
-    // subagent 段:{"subagent": {"max_turns": N}}(旧键,新键
-    // max_steps_per_turn)。非负整数(0 = 显式不限步);负数/类型不对静默
-    // 跳过(待遇同 max_turns 的"救命阀"取舍)。
-    std::optional<int> subagent_max_turns;
+    // subagent 段:{"subagent": {"max_steps_per_turn": N}}(新键;旧键
+    // max_turns 兼容读入)。非负整数(0 = 显式不限步);负数/类型不对静默
+    // 跳过(待遇同主预算字段的"救命阀"取舍)。
+    std::optional<int> subagent_max_steps_per_turn;  // 新键
+    std::optional<int> subagent_max_turns;           // 旧键(弃用)
     // extra_body/extra_headers:顶层"单 provider 配置"写法专用(不进
     // providers 数组的场景),整段有没有出现在 JSON 里(待遇同 hooks/
     // mcpServers——只从配置文件来,没有环境变量、没有内置默认值这两级)。
@@ -466,7 +473,8 @@ struct LubancodeEnvValues {
     std::optional<std::string> api_key;
     std::optional<std::string> model;
     std::optional<std::size_t> max_context_chars;
-    std::optional<int> max_turns;  // 旧键 "max_turns" 的值(新键见 max_steps_per_turn,兼容期双读)                    // LUBANCODE_MAX_TURNS,非负整数(0 = 无上限),负数忽略
+    std::optional<int> max_steps_per_turn;  // LUBANCODE_MAX_STEPS_PER_TURN,非负整数(0 = 无上限),负数忽略
+    std::optional<int> max_turns;           // LUBANCODE_MAX_TURNS(旧名,兼容读入),非负整数(0 = 无上限),负数忽略
     std::optional<std::string> theme;               // LUBANCODE_THEME
     std::optional<std::string> language;             // LUBANCODE_LANG(i18n 界面语言)
     std::optional<std::string> system_prompt_file;   // LUBANCODE_SYSTEM_PROMPT_FILE

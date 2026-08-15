@@ -493,6 +493,35 @@ TEST_CASE("agent 工具:接口报错按 failed/api_error 分型,不再混进笼�
     CHECK(snapshots[0].outcome.reason == tools::TaskOutcomeReason::ApiError);
 }
 
+TEST_CASE("agent 工具:入参新名 max_steps_per_turn 生效,schema 只出新名、旧名 max_turns 仍收") {
+    FakeBackend backend;
+    for (int i = 0; i < 6; ++i) {
+        backend.scripts.push_back(ToolUseScript("toolu_step", "fake_tool"));
+    }
+    backend.scripts.push_back(TextOnlyScript("收工"));
+    tools::ToolRegistry sub_registry;
+    sub_registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"ok", false}, false));
+
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir", /*model=*/"", /*default_max_steps_per_turn=*/3);
+
+    // 新名入参:预算 7 步(6 次工具步 + 1 次收尾),压过构造默认 3——
+    // 默认 3 的话第三次工具步后就被硬闸掐断,能过这里全靠新名生效。
+    nlohmann::json input;
+    input["title"] = "测试任务";
+    input["prompt"] = "跑六步";
+    input["max_steps_per_turn"] = 7;
+    const tools::Tool::Result result = agent_tool.execute(input);
+
+    CHECK_FALSE(result.is_error);
+    CHECK(backend.captured_requests.size() == 7);  // 6 次工具步 + 1 次收尾,新名生效
+
+    // schema 只出新名,旧名不在(兼容只在解析层)。
+    const nlohmann::json schema = agent_tool.input_schema();
+    const std::string dumped = schema.dump();
+    CHECK(dumped.find("max_steps_per_turn") != std::string::npos);
+    CHECK(dumped.find("\"max_turns\"") == std::string::npos);
+}
+
 TEST_CASE("agent 工具:入参 max_turns=0 透传给子代理,子代理循环按无上限跑,不会被截断") {
     FakeBackend backend;
     for (int i = 0; i < 8; ++i) {

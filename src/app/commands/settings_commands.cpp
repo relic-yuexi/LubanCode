@@ -935,6 +935,9 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
               << lubancode::config::ToString(sources.active_provider) << "]\n";
     std::cout << "  max_context_chars  = " << config.max_context_chars << "  ["
               << lubancode::config::ToString(sources.max_context_chars) << "]\n";
+    std::cout << "  max_steps_per_turn = " << config.max_steps_per_turn
+              << (config.max_steps_per_turn == 0 ? tr("config.steps.unlimited") : "") << "  ["
+              << lubancode::config::ToString(sources.max_steps_per_turn) << "]\n";
     std::cout << "  theme              = " << config.theme << "  [" << lubancode::config::ToString(sources.theme)
               << "]\n";
     std::cout << "  status_panel       = ";

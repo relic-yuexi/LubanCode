@@ -342,14 +342,14 @@ nlohmann::json AgentTool::input_schema() const {
         "写清楚。";
     properties["prompt"] = prompt_prop;
 
-    nlohmann::json max_turns_prop = nlohmann::json::object();
-    max_turns_prop["type"] = "integer";
-    max_turns_prop["description"] =
-        "子代理最多跑几轮(每轮一次工具调用来回算一轮)。不填时用配置的默认:首选 subagent.max_turns,"
-        "未设则继承 max_turns(默认 0 = 不限轮)。传 0 = 不设上限;剩三轮时会收到收口提醒,"
-        "到限后返回 budget_exhausted 并带回检查点,不会笼统报失败。重试时先读检查点缩小范围,"
-        "不要原样重发任务、不要擅自抬高轮数。";
-    properties["max_turns"] = max_turns_prop;
+    nlohmann::json max_steps_prop = nlohmann::json::object();
+    max_steps_prop["type"] = "integer";
+    max_steps_prop["description"] =
+        "子代理最多跑几步(一步 = 一次模型请求,一步可含多枚工具调用)。不填时用配置的默认:首选 "
+        "subagent.max_steps_per_turn,未设则继承 max_steps_per_turn(默认 0 = 不限步)。传 0 = 不设上限;"
+        "剩三步时会收到收口提醒,到限后返回 budget_exhausted 并带回检查点,不会笼统报失败。重试时先读"
+        "检查点缩小范围,不要原样重发任务、不要擅自抬高步数上限。";
+    properties["max_steps_per_turn"] = max_steps_prop;
 
     nlohmann::json type_prop = nlohmann::json::object();
     type_prop["type"] = "string";
@@ -467,14 +467,28 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
     }
     const bool isolate = isolation == "worktree";
 
+    // 入参双读(命名规范第二批):schema 只出新名 max_steps_per_turn,旧名
+    // max_turns 仍收(兼容期,映射到同一字段);两者同现取新名——schema 里
+    // 本来就只有新名,同现只可能出自手写 JSON,新名优先即可。
     int max_steps_per_turn = default_max_steps_per_turn_;
-    if (const auto it = input.find("max_turns"); it != input.end() && !it->is_null()) {
-        if (!it->is_number_integer()) {
-            return {"max_turns 得是整数", true};
+    const auto steps_arg = input.find("max_steps_per_turn");
+    const auto turns_arg = input.find("max_turns");
+    const nlohmann::json* budget_arg = nullptr;
+    if (steps_arg != input.end() && !steps_arg->is_null()) {
+        budget_arg = &*steps_arg;
+    } else if (turns_arg != input.end() && !turns_arg->is_null()) {
+        budget_arg = &*turns_arg;  // 旧名,兼容读入
+    }
+    if (budget_arg != nullptr) {
+        if (!budget_arg->is_number_integer()) {
+            return {std::string(steps_arg != input.end() ? "max_steps_per_turn" : "max_turns") + " 得是整数",
+                    true};
         }
-        max_steps_per_turn = it->get<int>();
+        max_steps_per_turn = budget_arg->get<int>();
         if (max_steps_per_turn < 0) {
-            return {"max_turns 不能是负数(0 = 不设上限)", true};
+            return {std::string(steps_arg != input.end() ? "max_steps_per_turn" : "max_turns") +
+                        " 不能是负数(0 = 不设上限)",
+                    true};
         }
     }
 
