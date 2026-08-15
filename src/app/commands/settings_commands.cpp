@@ -986,22 +986,71 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
     } else if (result.config_file_path.has_value()) {
         std::cout << trf("config.label.file", *result.config_file_path) << "\n";
     }
-    // M9:hooks 只从配置文件来,没有来源分级可打,只打个数——四类都是空的
-    // 就直接说"未配置",省得打一堆 ×0。
+    // hooks 摘要:schema 2 按事件名数 handler(=装载后的定义数,与启动横幅、
+    // /hooks 的"已装载 N 条"对得上账),分 user/project 两层;旧四类另列。
+    // 两边都是空的才说"未配置",省得打一堆 ×0。
     {
         const auto& hooks = config.hooks;
         std::vector<std::string> parts;
+
+        // schema 2 的来源分级与 loader 同一套口径:项目配置文件匹配、或路径
+        // 落在当前目录之下 = project,其余 = user(保守取边,见 loader.cpp)。
+        const std::string cwd = lubancode::platform::CurrentDirUtf8();
+        const auto is_project_source = [&](const std::string& source_path) {
+            if (result.project_config_file_path.has_value() && source_path == *result.project_config_file_path) {
+                return true;
+            }
+            if (result.global_config_file_path.has_value() && source_path == *result.global_config_file_path) {
+                return false;
+            }
+            return !cwd.empty() && source_path.rfind(cwd, 0) == 0;
+        };
+
+        if (!hooks.events.empty()) {
+            int schema_total = 0;
+            int schema_user = 0;
+            int schema_project = 0;
+            std::vector<std::string> event_parts;
+            for (const auto& [event, groups] : hooks.events) {
+                int event_count = 0;
+                for (const auto& group : groups) {
+                    event_count += static_cast<int>(group.hooks.size());
+                    if (is_project_source(group.source_path)) {
+                        schema_project += static_cast<int>(group.hooks.size());
+                    } else {
+                        schema_user += static_cast<int>(group.hooks.size());
+                    }
+                }
+                schema_total += event_count;
+                if (event_count > 0) {
+                    event_parts.push_back(std::string(lubancode::hooks::ToString(event)) + "×" +
+                                          std::to_string(event_count));
+                }
+            }
+            std::string schema_part = "schema 2 ×" + std::to_string(schema_total) + " (user×" +
+                                      std::to_string(schema_user) + ", project×" + std::to_string(schema_project) + ")";
+            if (!event_parts.empty()) {
+                schema_part += "; ";
+                for (std::size_t i = 0; i < event_parts.size(); ++i) {
+                    if (i > 0) {
+                        schema_part += ", ";
+                    }
+                    schema_part += event_parts[i];
+                }
+            }
+            parts.push_back(std::move(schema_part));
+        }
         if (!hooks.pre_tool.empty()) {
-            parts.push_back("pre_tool×" + std::to_string(hooks.pre_tool.size()));
+            parts.push_back("legacy pre_tool×" + std::to_string(hooks.pre_tool.size()));
         }
         if (!hooks.post_tool.empty()) {
-            parts.push_back("post_tool×" + std::to_string(hooks.post_tool.size()));
+            parts.push_back("legacy post_tool×" + std::to_string(hooks.post_tool.size()));
         }
         if (!hooks.session_start.empty()) {
-            parts.push_back("session_start×" + std::to_string(hooks.session_start.size()));
+            parts.push_back("legacy session_start×" + std::to_string(hooks.session_start.size()));
         }
         if (!hooks.session_end.empty()) {
-            parts.push_back("session_end×" + std::to_string(hooks.session_end.size()));
+            parts.push_back("legacy session_end×" + std::to_string(hooks.session_end.size()));
         }
         std::cout << "  hooks              = ";
         if (parts.empty()) {
@@ -1009,7 +1058,7 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
         } else {
             for (std::size_t i = 0; i < parts.size(); ++i) {
                 if (i > 0) {
-                    std::cout << ", ";
+                    std::cout << "; ";
                 }
                 std::cout << parts[i];
             }
