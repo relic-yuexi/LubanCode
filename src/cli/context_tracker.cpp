@@ -24,9 +24,13 @@ void ContextTracker::ApplyUsage(const api::Usage& usage) {
     // 四项全零 = provider 没在流末给 usage(见头文件注释):不清零、不
     // 覆盖,现有数字原样保住,只标旧值。
     const bool measured = usage.input_tokens > 0 || usage.output_tokens > 0 ||
-                          usage.cache_read_tokens > 0 || usage.cache_creation_tokens > 0;
+                          usage.cache_read_tokens > 0 || usage.cache_creation_tokens > 0 ||
+                          usage.output_reasoning_tokens > 0;
     if (measured) {
         Update(usage);
+        // 本场累计(命中率分子分母):只认实测到的这笔,跨轮不清零。
+        session_cache_read_total_ += usage.cache_read_tokens > 0 ? usage.cache_read_tokens : 0;
+        session_input_total_ += api::TotalInputTokens(usage);
         usage_stale_ = false;
         return;
     }

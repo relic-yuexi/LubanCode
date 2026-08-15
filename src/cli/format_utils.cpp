@@ -64,11 +64,12 @@ std::string BuildStatusLineText(ConfirmMode mode, const std::string& model, int 
 }
 
 StatusPanelData WithContextUpdate(StatusPanelData data, int context_percent, std::int64_t used_tokens,
-                                  std::int64_t window_tokens, bool measured) {
+                                  std::int64_t window_tokens, bool measured, const std::string& cache_note) {
     data.context_percent = context_percent;
     data.used_tokens = used_tokens;
     data.window_tokens = window_tokens;
     data.context_stale = !measured;
+    data.cache_note = cache_note;
     return data;
 }
 
@@ -102,8 +103,14 @@ std::vector<StatusPanelSegment> BuildStatusPanelSegments(
             text = std::string(stale_mark) + "context " + std::to_string(data.context_percent) + "%";
         } else if (key == "tokens") {
             if (data.used_tokens > 0) {
+                // 缓存注记(缓存诊断单):cached_tokens 有则"缓存命中 X(Y%)",
+                // 没有则"缓存未报告"——不拿含糊的 0% 糊人。空串(一次实测都
+                // 没有)整段不挂。
                 text = std::string(stale_mark) + FormatTokenCount(data.used_tokens) + "/" +
                        FormatTokenCount(data.window_tokens);
+                if (!data.cache_note.empty()) {
+                    text += " · " + data.cache_note;
+                }
             }
         } else if (key == "provider") {
             if (!data.provider.empty()) {
@@ -168,6 +175,25 @@ std::string StreamHintText(bool plain) {
 
 std::string StreamFooterInterruptText(bool plain) {
     return tr(plain ? "stream.interrupt.plain" : "stream.interrupt");
+}
+
+std::string BuildCacheNote(const ContextTracker& tracker, bool last_usage_reported) {
+    if (tracker.session_input_total() <= 0) {
+        return {};  // 一次实测都没有:整段不挂
+    }
+    if (tracker.session_cache_read_total() > 0) {
+        const int percent = tracker.session_cache_hit_percent();
+        return trf("status.cache_note_hit", FormatTokenCount(tracker.session_cache_read_total()),
+                   percent >= 0 ? std::to_string(percent) : std::string("?"));
+    }
+    if (!last_usage_reported) {
+        return tr("status.cache_note_not_reported");
+    }
+    const auto enabled = tracker.server_prefix_caching();
+    if (enabled.has_value() && !*enabled) {
+        return tr("status.cache_note_disabled");
+    }
+    return tr("status.cache_note_zero");
 }
 
 namespace {

@@ -221,3 +221,35 @@ TEST_CASE("Chat request: 一条 assistant 多枚 tool call,reasoning 只写一�
     CHECK(body["messages"][3]["role"] == "tool");
     CHECK_FALSE(body["messages"][2].contains("reasoning_content"));
 }
+
+TEST_CASE("Chat request: 档位参数名按 provider 声明走,空档位字段整个缺席") {
+    api::Request request;
+    request.model = "qwen";
+    request.reasoning_effort = "xhigh";
+    api::Message user;
+    user.role = api::Role::User;
+    user.content.push_back(api::TextBlock{"ping"});
+    request.messages.push_back(user);
+
+    SUBCASE("默认参数名 reasoning_effort") {
+        const auto body = api::chat::BuildRequestJson(request);
+        CHECK(body["reasoning_effort"] == "xhigh");
+        CHECK_FALSE(body.contains("reasoning"));
+    }
+    SUBCASE("provider 声明 think_param 后换名字") {
+        api::chat::ChatRequestOptions options;
+        options.reasoning_param = "thinking_budget_level";
+        const auto body = api::chat::BuildRequestJson(request, nlohmann::json::object(), options);
+        CHECK(body["thinking_budget_level"] == "xhigh");
+        CHECK_FALSE(body.contains("reasoning_effort"));
+    }
+    SUBCASE("档位为空(不填):不偷偷塞默认档,字段缺席") {
+        request.reasoning_effort.clear();
+        const auto body = api::chat::BuildRequestJson(request);
+        CHECK_FALSE(body.contains("reasoning_effort"));
+        api::chat::ChatRequestOptions options;
+        options.reasoning_param = "custom";
+        const auto named = api::chat::BuildRequestJson(request, nlohmann::json::object(), options);
+        CHECK_FALSE(named.contains("custom"));
+    }
+}

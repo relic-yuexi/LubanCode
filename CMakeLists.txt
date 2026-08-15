@@ -360,6 +360,7 @@ add_library(lubancode_app STATIC
   src/app/commands/workspace_commands.cpp
   src/app/commands/hook_commands.cpp
   src/app/commands/peer_commands.cpp
+  src/app/commands/doctor_commands.cpp
   src/app/interactive_session.cpp
   src/app/one_shot.cpp
   src/app/cli_options.cpp

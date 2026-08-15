@@ -200,6 +200,13 @@ bool ApplyConfiguredActiveProvider(ConfigResult& result) {
     result.config.native_web_search = provider->native_web_search;
     result.config.stream_usage = provider->stream_usage;
     result.config.reasoning_replay = provider->reasoning_replay;
+    // Effort/缓存诊断声明镜像(本地兼容端诊断单):provider 是唯一来源,
+    // 切过去就带上;单 provider 顶层写法没有条目,镜像字段保持默认(未声明)。
+    result.config.provider_think_levels = provider->supported_think_levels;
+    result.config.think_param = provider->think_param;
+    result.config.think_passthrough = provider->think_passthrough;
+    result.config.metrics_url = provider->metrics_url;
+    result.config.stream_usage_declared = provider->stream_usage_declared;
     return true;
 }
 
@@ -218,6 +225,17 @@ bool SetProviderExtraBody(std::vector<ProviderConfig>& providers, const std::str
     for (ProviderConfig& provider : providers) {
         if (provider.name == name) {
             provider.extra_body = body;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool SetProviderStreamUsage(std::vector<ProviderConfig>& providers, const std::string& name, bool enabled) {
+    for (ProviderConfig& provider : providers) {
+        if (provider.name == name) {
+            provider.stream_usage = enabled;
+            provider.stream_usage_declared = true;  // 探针写回 = 显式声明
             return true;
         }
     }
@@ -883,6 +901,39 @@ std::expected<std::vector<ProviderConfig>, std::string> ParseProvidersConfig(
                 return std::unexpected(prefix + " 里的 stream_usage 字段必须是布尔值");
             }
             provider.stream_usage = item["stream_usage"].get<bool>();
+            // 写了键就是声明过——值 false 是"确认不支持",跟"压根没写"是两码事。
+            provider.stream_usage_declared = true;
+        }
+        // Effort/缓存诊断声明(本地兼容端诊断单):四个字段全可选,写了才生效。
+        if (item.contains("supported_think_levels")) {
+            if (!item["supported_think_levels"].is_array()) {
+                return std::unexpected(prefix + " 里的 supported_think_levels 字段必须是字符串数组");
+            }
+            for (const auto& level : item["supported_think_levels"]) {
+                if (!level.is_string() || level.get<std::string>().empty()) {
+                    return std::unexpected(prefix +
+                                           " 里的 supported_think_levels 元素必须是非空字符串");
+                }
+                provider.supported_think_levels.push_back(level.get<std::string>());
+            }
+        }
+        if (item.contains("think_param")) {
+            if (!item["think_param"].is_string() || item["think_param"].get<std::string>().empty()) {
+                return std::unexpected(prefix + " 里的 think_param 字段必须是非空字符串");
+            }
+            provider.think_param = item["think_param"].get<std::string>();
+        }
+        if (item.contains("think_passthrough")) {
+            if (!item["think_passthrough"].is_boolean()) {
+                return std::unexpected(prefix + " 里的 think_passthrough 字段必须是布尔值");
+            }
+            provider.think_passthrough = item["think_passthrough"].get<bool>();
+        }
+        if (item.contains("metrics_url")) {
+            if (!item["metrics_url"].is_string()) {
+                return std::unexpected(prefix + " 里的 metrics_url 字段必须是字符串");
+            }
+            provider.metrics_url = item["metrics_url"].get<std::string>();
         }
         if (item.contains("reasoning_replay")) {
             if (!item["reasoning_replay"].is_string()) {
@@ -2093,9 +2144,23 @@ nlohmann::json ProvidersToJson(const std::vector<ProviderConfig>& providers) {
         if (provider.native_web_search) {
             item["native_web_search"] = provider.native_web_search;
         }
-        // stream_usage 同理(见 ProviderConfig::stream_usage)。
-        if (provider.stream_usage) {
+        // stream_usage:declared 就落键——显式 false 是一份有效声明,写回不许
+        // 降级成"未声明"(见 ProviderConfig::stream_usage_declared)。
+        if (provider.stream_usage_declared) {
             item["stream_usage"] = provider.stream_usage;
+        }
+        // Effort/缓存诊断声明:非默认才落,旧配置写回不多出这些键。
+        if (!provider.supported_think_levels.empty()) {
+            item["supported_think_levels"] = provider.supported_think_levels;
+        }
+        if (!provider.think_param.empty()) {
+            item["think_param"] = provider.think_param;
+        }
+        if (!provider.think_passthrough) {
+            item["think_passthrough"] = provider.think_passthrough;
+        }
+        if (!provider.metrics_url.empty()) {
+            item["metrics_url"] = provider.metrics_url;
         }
         // reasoning_replay 同理:默认空(=never)不落盘。
         if (!provider.reasoning_replay.empty()) {
@@ -2320,6 +2385,31 @@ std::expected<std::string, std::string> SetProviderExtraBodyInGlobalConfig(const
         return std::unexpected(providers.error());
     }
     if (!SetProviderExtraBody(*providers, name, body)) {
+        return std::unexpected("provider 不存在: " + name);
+    }
+    const auto written = UpdateProvidersInConfigFile(path, *providers);
+    if (!written.has_value()) {
+        return std::unexpected(written.error());
+    }
+    return path;
+}
+
+std::expected<std::string, std::string> SetProviderStreamUsageInGlobalConfig(const std::string& name,
+                                                                               bool enabled) {
+    const auto home = HomeDir();
+    if (!home.has_value()) {
+        return std::unexpected("找不到用户主目录,没法更新 provider 配置");
+    }
+    const std::string path = NewConfigPathFor(std::filesystem::path(*home)).string();
+    auto root = ReadConfigObjectForUpdate(path);
+    if (!root.has_value()) {
+        return std::unexpected(root.error());
+    }
+    auto providers = ProvidersInConfigObject(*root, path);
+    if (!providers.has_value()) {
+        return std::unexpected(providers.error());
+    }
+    if (!SetProviderStreamUsage(*providers, name, enabled)) {
         return std::unexpected("provider 不存在: " + name);
     }
     const auto written = UpdateProvidersInConfigFile(path, *providers);

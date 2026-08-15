@@ -104,6 +104,8 @@ add_executable(lubancode_tests
   test_cli_options.cpp
   # 领域命令 handler 的状态账(/clear /title /send /peerperm)。
   test_app_commands.cpp
+  # /doctor 诊断纯函数(Effort 探针请求/四态分类/Prometheus 解析/固定前缀对账)。
+  test_doctor.cpp
   # memory 回合抽取(分型/转写/JSON 解析,纯函数)。
   test_memory_extract.cpp
   # memory 检索评测尺子(固定语料,Recall/Precision/注入字节/stale 拦截率)。

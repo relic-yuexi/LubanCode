@@ -444,6 +444,9 @@ ProviderConfig ProviderConfigFromPreset(const ProviderPreset& preset) {
     provider.model_reasoning_effort = preset.model_reasoning_effort;
     provider.native_web_search = preset.native_web_search;
     provider.stream_usage = preset.stream_usage;
+    // 目录预设的 stream_usage 是一份显式声明(哪怕值是 false——那家确认
+    // 不支持),与"自定义端压根没写"区分开,启动提醒只找后者。
+    provider.stream_usage_declared = true;
     provider.reasoning_replay = preset.reasoning_replay;
     provider.extra_body = preset.extra_body;
     provider.extra_headers = preset.extra_headers;

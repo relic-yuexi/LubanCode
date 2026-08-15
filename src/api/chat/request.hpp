@@ -31,6 +31,12 @@ enum class ReasoningReplayPolicy { Never, ToolEpisode };
 struct ChatRequestOptions {
     bool stream_usage = false;
     ReasoningReplayPolicy reasoning_replay = ReasoningReplayPolicy::Never;
+    // reasoning_param:推理档位在请求体顶层的参数名。OpenAI 官方是
+    // reasoning_effort(默认);有的本地兼容端叫别的名字,provider 可在
+    // 配置里声明(ProviderConfig::think_param),经 Config 镜像到这里。
+    // 空 = reasoning_effort。extra_body 仍在最后浅合并,用户显式写的
+    // 同名字段整个压过这里。
+    std::string reasoning_param = "reasoning_effort";
 };
 
 // 把中立请求翻成 OpenAI Chat Completions 兼容请求。extra_body 最后浅合并，

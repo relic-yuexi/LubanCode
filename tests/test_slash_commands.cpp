@@ -461,3 +461,17 @@ TEST_CASE("ParseProviderCommand: set extra_header 缺头名字(只给了字段�
     const auto parsed = cli::ParseProviderCommand("set glm extra_header");
     CHECK(parsed.action == cli::ProviderCommandAction::Invalid);
 }
+
+TEST_CASE("ParseSlashCommand: /doctor 与子命令参数") {
+    const auto bare = cli::ParseSlashCommand("/doctor");
+    CHECK(bare.command == cli::SlashCommand::Doctor);
+    CHECK(bare.args.empty());
+
+    const auto effort = cli::ParseSlashCommand("/doctor effort xhigh");
+    CHECK(effort.command == cli::SlashCommand::Doctor);
+    CHECK(effort.args == "effort xhigh");
+
+    const auto cache = cli::ParseSlashCommand("/DOCTOR cache probe");
+    CHECK(cache.command == cli::SlashCommand::Doctor);  // 大小写不敏感
+    CHECK(cache.args == "cache probe");
+}

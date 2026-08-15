@@ -28,6 +28,7 @@ std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::C
         // 语义见 chat/request.hpp。
         lubancode::api::chat::ChatRequestOptions chat_options;
         chat_options.stream_usage = config.stream_usage;
+        chat_options.reasoning_param = config.think_param;  // 空 = 默认 reasoning_effort
         chat_options.reasoning_replay =
             config.reasoning_replay == "tool_episode"
                 ? lubancode::api::chat::ReasoningReplayPolicy::ToolEpisode

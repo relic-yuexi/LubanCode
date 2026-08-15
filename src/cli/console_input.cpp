@@ -1719,13 +1719,13 @@ void SetStatusLineData(const StatusPanelData& values, const std::vector<std::str
 }
 
 void UpdateStatusLineContext(int context_percent, std::int64_t used_tokens, std::int64_t window_tokens,
-                             bool measured) {
+                             bool measured, const std::string& cache_note) {
     // 见 console_input.hpp 的注释:只改数据、不落笔,footer 的重画事务在
     // 安全时机(下一笔正文/ticker 一拍/挂起恢复)取新值。锁跟 footer 重画
     // 读的是同一把,发布与重画互不越界。
     std::lock_guard<std::mutex> lock(StdoutWriteMutex());
     StatusLineData& data = StatusDataSlot();
-    data.values = WithContextUpdate(data.values, context_percent, used_tokens, window_tokens, measured);
+    data.values = WithContextUpdate(data.values, context_percent, used_tokens, window_tokens, measured, cache_note);
 }
 
 StatusPanelData SnapshotStatusLineValues() {

@@ -160,6 +160,54 @@ TEST_CASE("一轮纯文本直接结束:一次请求,历史里 user+assistant 两
     CHECK(loop.history()[1].role == api::Role::Assistant);
 }
 
+TEST_CASE("finish_reason=length 且正文为空:length_empty_output 明报,不是无声空白") {
+    // 本地兼容端实测现场:reasoning 吃光输出预算,finish_reason=length,
+    // 一个正文字都没有。loop 不当错误(历史照常入账),但 RunOutcome 要
+    // 把事说破——上层打"输出预算耗尽"的明报,不留一片空白。
+    FakeBackend backend;
+    backend.scripts = {{
+        api::MessageStart{"msg", "model"},
+        api::ThinkingDelta{"想了很久很久"},
+        api::ContentBlockDone{0},
+        api::MessageDone{"max_tokens", api::Usage{0, 64, 0, 0, 64}},
+    }};
+    tools::ToolRegistry registry;
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    agent::Callbacks callbacks;
+    const auto result = loop.Run("说点什么", callbacks);
+    REQUIRE(result.has_value());
+    CHECK(result->cancelled == false);
+    CHECK(result->length_empty_output == true);
+    CHECK(result->stop_reason == "max_tokens");
+    // usage 拆账照常触发:reasoning 64 / output 64 交给了 on_usage。
+    REQUIRE(loop.history().size() == 2);
+
+    // 对照:length 但有正文,不算"空输出"。
+    FakeBackend backend2;
+    backend2.scripts = {{
+        api::MessageStart{"msg", "model"},
+        api::TextDelta{"说到一半被掐"},
+        api::ContentBlockDone{0},
+        api::MessageDone{"max_tokens", api::Usage{0, 64, 0, 0}},
+    }};
+    agent::AgentLoop loop2(backend2, registry, "test-model", "system prompt");
+    const auto result2 = loop2.Run("说点什么", callbacks);
+    REQUIRE(result2.has_value());
+    CHECK(result2->length_empty_output == false);
+
+    // 对照:end_turn 且正文为空(模型啥也没说但没撞预算),也不算。
+    FakeBackend backend3;
+    backend3.scripts = {{
+        api::MessageStart{"msg", "model"},
+        api::ContentBlockDone{0},
+        api::MessageDone{"end_turn", api::Usage{10, 2, 0, 0}},
+    }};
+    agent::AgentLoop loop3(backend3, registry, "test-model", "system prompt");
+    const auto result3 = loop3.Run("说点什么", callbacks);
+    REQUIRE(result3.has_value());
+    CHECK(result3->length_empty_output == false);
+}
+
 TEST_CASE("tool_use 一轮 -> 执行工具 -> 第二次请求历史带 tool_result -> end_turn") {
     FakeBackend backend;
     backend.scripts = {

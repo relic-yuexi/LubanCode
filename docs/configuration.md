@@ -208,6 +208,11 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 | `model_reasoning_effort` | 字符串,可选 | 切到该 provider 时按 `/think` 同一套机制应用的推理档位。 |
 | `context_window` | 字符串或整数 | 上下文窗口,默认 `256000`。 |
 | `native_web_search` | 布尔 | 是否声明服务端原生联网搜索,默认 `false`。 |
+| `supported_think_levels` | 字符串数组,可选 | 该端声明的推理档位表,`/think` 裸敲列出;没声明时 UI 写"未经能力验证",不猜。 |
+| `think_param` | 字符串,可选 | 推理档位的请求参数名,默认 `reasoning_effort`;有的兼容端叫别的名字。只影响 `chat_completions`。 |
+| `think_passthrough` | 布尔,可选 | 档位值是否原样透传,默认 `true`;声明 `false` 提示服务端只认自家映射。 |
+| `metrics_url` | 字符串,可选 | `/doctor cache` 读服务端指标(Prometheus 文本,vLLM `/metrics` 那套)的地址;空 = 不读,绝不擅自探公网。 |
+| `stream_usage` | 布尔,可选 | 该端支持 Chat 流式 `stream_options.include_usage`;写了键就算声明(显式 `false` = 确认不支持),没写时启动会提醒"统计可能恒为 0"。 |
 | `extra_body` | JSON object | 该端每次请求浅合并的额外顶层字段。 |
 | `extra_headers` | JSON object | 该端每次请求追加/覆盖的 HTTP 头。 |
 

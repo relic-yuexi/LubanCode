@@ -2748,3 +2748,95 @@ TEST_CASE("/provider set extra_body 落盘路径:SetProviderExtraBody 改完再 
     const nlohmann::json cleared = nlohmann::json::parse(cwd.ReadFile(".lubancode/config.json"));
     CHECK_FALSE(cleared["providers"][0].contains("extra_body"));
 }
+
+TEST_CASE("ParseFileConfigJson: providers 的 Effort/缓存诊断声明解析与缺省") {
+    const auto parsed = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"vllm","base_url":"http://127.0.0.1:8000/v1","wire":"chat_completions",)"
+        R"("supported_think_levels":["low","medium","xhigh"],"think_param":"reasoning_effort",)"
+        R"("think_passthrough":false,"metrics_url":"http://127.0.0.1:8000/metrics"}]})",
+        "/tmp/config.json");
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->providers.has_value());
+    const auto& provider = parsed->providers->front();
+    REQUIRE(provider.supported_think_levels.size() == 3);
+    CHECK(provider.supported_think_levels[2] == "xhigh");
+    CHECK(provider.think_param == "reasoning_effort");
+    CHECK(provider.think_passthrough == false);
+    CHECK(provider.metrics_url == "http://127.0.0.1:8000/metrics");
+    // stream_usage 没写:未声明。
+    CHECK(provider.stream_usage_declared == false);
+
+    // 缺省:四个字段都是"没声明",请求构造维持默认。
+    const auto bare = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"x","base_url":"https://a.test","wire":"anthropic"}]})", "/tmp/config.json");
+    REQUIRE(bare.has_value());
+    const auto& plain = bare->providers->front();
+    CHECK(plain.supported_think_levels.empty());
+    CHECK(plain.think_param.empty());
+    CHECK(plain.think_passthrough == true);
+    CHECK(plain.metrics_url.empty());
+}
+
+TEST_CASE("ParseFileConfigJson: 诊断声明类型不对就报错") {
+    const auto bad_levels = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"x","base_url":"https://a.test","wire":"anthropic","supported_think_levels":"low"}]})",
+        "/tmp/config.json");
+    CHECK_FALSE(bad_levels.has_value());
+    const auto bad_param = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"x","base_url":"https://a.test","wire":"anthropic","think_param":123}]})",
+        "/tmp/config.json");
+    CHECK_FALSE(bad_param.has_value());
+    const auto bad_passthrough = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"x","base_url":"https://a.test","wire":"anthropic","think_passthrough":"yes"}]})",
+        "/tmp/config.json");
+    CHECK_FALSE(bad_passthrough.has_value());
+}
+
+TEST_CASE("ParseFileConfigJson: stream_usage 写了键就算声明(显式 false 也是)") {
+    const auto parsed = config::ParseFileConfigJson(
+        R"({"providers":[{"name":"x","base_url":"https://a.test","wire":"chat_completions","stream_usage":false}]})",
+        "/tmp/config.json");
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->providers->front().stream_usage == false);
+    CHECK(parsed->providers->front().stream_usage_declared == true);
+}
+
+TEST_CASE("ApplyConfiguredActiveProvider: 切 provider 时诊断声明镜像进 Config") {
+    config::ConfigResult result;
+    result.config.wire = config::Wire::ChatCompletions;
+    result.config.base_url = "https://old.test";
+    config::ProviderConfig provider;
+    provider.name = "vllm";
+    provider.base_url = "http://127.0.0.1:8000/v1";
+    provider.wire = config::Wire::ChatCompletions;
+    provider.supported_think_levels = {"low", "xhigh"};
+    provider.think_param = "reasoning.effort";
+    provider.think_passthrough = false;
+    provider.metrics_url = "http://127.0.0.1:8000/metrics";
+    provider.stream_usage = true;
+    provider.stream_usage_declared = true;
+    result.config.providers = {provider};
+    result.config.active_provider = "vllm";
+
+    REQUIRE(config::ApplyConfiguredActiveProvider(result));
+    CHECK(result.config.provider_think_levels == std::vector<std::string>{"low", "xhigh"});
+    CHECK(result.config.think_param == "reasoning.effort");
+    CHECK(result.config.think_passthrough == false);
+    CHECK(result.config.metrics_url == "http://127.0.0.1:8000/metrics");
+    CHECK(result.config.stream_usage == true);
+    CHECK(result.config.stream_usage_declared == true);
+}
+
+TEST_CASE("SetProviderStreamUsage: 改值并置声明位,找不到名字返回 false") {
+    std::vector<config::ProviderConfig> providers{
+        {.name = "glm", .base_url = "https://a.test", .wire = config::Wire::ChatCompletions},
+    };
+    REQUIRE(config::SetProviderStreamUsage(providers, "glm", true));
+    CHECK(providers[0].stream_usage == true);
+    CHECK(providers[0].stream_usage_declared == true);
+    // 探针写回 false 也算一份显式声明。
+    REQUIRE(config::SetProviderStreamUsage(providers, "glm", false));
+    CHECK(providers[0].stream_usage == false);
+    CHECK(providers[0].stream_usage_declared == true);
+    CHECK_FALSE(config::SetProviderStreamUsage(providers, "no-such", true));
+}

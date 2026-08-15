@@ -134,6 +134,10 @@ struct Callbacks {
 struct RunOutcome {
     bool cancelled = false;
     bool hit_step_limit = false;
+    // 输出预算耗尽(finish_reason=length→"max_tokens")且最后一条 assistant
+    // 正文为空(reasoning 吃光了预算,一个正文字都没落)。不是错误,但调用方
+    // 必须向用户明报,不许静默留一片空白(本地兼容端 Effort 诊断单)。
+    bool length_empty_output = false;
     std::string stop_reason;  // 模型最后一次应答的原始 stop_reason(空 = 一个字都没回来)
     int steps_used = 0;       // 本次 Run() 实际发出的模型请求数(turn 内的 step 数)
 };

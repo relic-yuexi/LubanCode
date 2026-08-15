@@ -59,6 +59,7 @@
 #include "app/commands/workspace_commands.hpp"
 #include "app/commands/hook_commands.hpp"
 #include "app/commands/peer_commands.hpp"
+#include "app/commands/doctor_commands.hpp"
 #include "app/version.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
@@ -514,6 +515,14 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
                       /*window_explicit=*/config_result_.sources.context_window_tokens !=
                           lubancode::config::Source::Default,
                       current_think, context_tracker, current_model_instructions);
+
+    // stream_usage 启动诊断提醒(缓存诊断单):chat wire 且没人声明过这个
+    // 能力(自定义端没写、也不在目录预设里),token/缓存统计可能恒为 0。
+    // 只提醒,不发请求——能力探针(/doctor cache usage)由用户显式触发,
+    // 结论写回 provider 配置,下次启动这一行就闭嘴。
+    if (config.wire == lubancode::config::Wire::ChatCompletions && !config.stream_usage_declared) {
+        std::cout << theme.stats << tr("doctor.startup.stream_usage_hint") << theme.reset << "\n";
+    }
 
     // 陈房清扫(0.27.x):只清 agent- 前缀、超过 3 天没动静的隔离子代理房;
     // 有活(改动/自有提交)的跳过,锁着的先放(被杀会话留下的),用户
@@ -1896,8 +1905,11 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
             }
             case lubancode::cli::SlashCommand::Think:
                 // 目录条目按"此刻的会话模型"现查——/model 切过之后,
-                // /think 列的就是新模型声明的档位。
-                HandleThinkCommand(parsed.args, current_think, model_catalog.FindBySlug(*current_model));
+                // /think 列的就是新模型声明的档位。目录没有声明再看当前
+                // provider 配置的声明(Effort 诊断单:未知模型至少列本
+                // provider 配置,不只甩一句"以服务商为准")。
+                HandleThinkCommand(parsed.args, current_think, model_catalog.FindBySlug(*current_model),
+                                   config.provider_think_levels, config.think_param);
                 break;
             case lubancode::cli::SlashCommand::Skills:
                 PrintSkillsCommand(skills, CurrentDirUtf8(), home_dir);
@@ -1928,6 +1940,22 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                 break;
             case lubancode::cli::SlashCommand::Background:
                 return HandleBackgroundCommand(theme);
+            case lubancode::cli::SlashCommand::Doctor: {
+                // 本地兼容端 Effort/前缀缓存诊断。探针自己建临时 backend,
+                // 与会话 backend 无关;stream_usage 探针写回 config 后这里
+                // 顺手重建 real_backend,新能力下一次请求就带上。
+                lubancode::app::DoctorContext doctor_context{config,
+                                                             config.providers,
+                                                             active_provider,
+                                                             *current_model,
+                                                             *current_think,
+                                                             theme,
+                                                             context_tracker,
+                                                             active_provider_write_path};
+                HandleDoctorCommand(parsed.args, doctor_context);
+                real_backend.Rebuild(config);
+                break;
+            }
             case lubancode::cli::SlashCommand::Memory:
                 HandleMemoryCommand(parsed.args);
                 break;
@@ -2366,6 +2394,10 @@ void InteractiveSession::Run() {
         status_data.context_percent = context_tracker.UsagePercent();
         status_data.used_tokens = static_cast<long long>(context_tracker.current_tokens());
         status_data.window_tokens = static_cast<long long>(context_tracker.window_tokens());
+        // 缓存注记(缓存诊断单):与回合内局部更新同一只 helper、同一只
+        // tracker,空闲重建的第一帧不会先新后旧。
+        status_data.cache_note =
+            lubancode::cli::BuildCacheNote(context_tracker, !context_tracker.usage_stale());
         // 旧值标记同样出自 tracker:回合内 on_usage 局部发布的快照与这里整份
         // 重建读同一只 ContextTracker,数字与 ~ 标记完全一致,收口后的第一只
         // composer 不会先新后旧。

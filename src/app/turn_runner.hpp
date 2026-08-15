@@ -76,6 +76,7 @@ struct StepUsageRecord {
     std::int64_t cache_read_tokens = 0;
     std::int64_t cache_creation_tokens = 0;
     std::int64_t output_tokens = 0;
+    std::int64_t reasoning_tokens = 0;  // output 里的 reasoning 拆账(含在 output_tokens)
     bool reported = false;             // provider 是否回报了 usage
     std::string epoch_break_reason;    // 空 = 本步没断 epoch
 
@@ -113,6 +114,7 @@ struct UsageStats {
         record.cache_read_tokens = report.usage.cache_read_tokens;
         record.cache_creation_tokens = report.usage.cache_creation_tokens;
         record.output_tokens = report.usage.output_tokens;
+        record.reasoning_tokens = report.usage.output_reasoning_tokens;
         record.reported = report.reported();
         record.epoch_break_reason = report.epoch_break_reason;
         steps.push_back(std::move(record));
@@ -144,6 +146,15 @@ struct UsageStats {
         return total;
     }
 
+    // 输出里 reasoning 的拆账合计(含在 output_tokens 里,不是另加的一笔;
+    // provider 没拆账就是 0——与"reasoning 真为零"分不清,显示层措辞
+    // 按"未拆账"处理,不猜)。
+    std::int64_t reasoning_tokens() const {
+        std::int64_t total = 0;
+        for (const auto& step : steps) total += step.reasoning_tokens;
+        return total;
+    }
+
     // 完整输入(input + cache_read + cache_creation)。
     std::int64_t total_input_tokens() const {
         return input_tokens() + cache_read_tokens() + cache_creation_tokens();
@@ -158,6 +169,17 @@ struct UsageStats {
         const double ratio =
             static_cast<double>(cache_read_tokens()) / static_cast<double>(total_input_tokens()) * 100.0;
         return static_cast<int>(ratio + 0.5);
+    }
+
+    // 整轮里哪怕一笔 usage 是实测的就算 true——全没回报时统计行按
+    // "usage 未报告"收场,不拿 0 命中糊(缓存诊断单四态里的 not_reported)。
+    bool any_reported() const {
+        for (const auto& step : steps) {
+            if (step.reported) {
+                return true;
+            }
+        }
+        return false;
     }
 };
 

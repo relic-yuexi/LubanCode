@@ -1,6 +1,8 @@
 // settings_commands.hpp 的实现:模型/供应商/配置/语言/技能/更新命令的函数体。
 #include "app/commands/settings_commands.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <iostream>
 
 #include "app/version.hpp"
@@ -279,27 +281,34 @@ bool HandleSkillCommand(const std::string& args, const std::filesystem::path& gl
 }
 
 // /think(/effort 同义)命令:不带参数看当前档位,带参数切档位(本会话
-// 生效)。M10 把档位放开成任意字符串——不在这儿拦,认不认得留给发请求
-// 那一刻(responses 原样递,anthropic 查映射表、映射不上打警告)去判断,
-// 原样存,不强制转小写(anthropic 那张映射表自己做大小写不敏感匹配,
-// responses 要"原样递",这里转了小写反而破坏这条承诺)。
-// entry:当前模型在模型目录(models.json)里的条目,没有就是 nullptr。
-// 有条目且声明了 supported_think_levels → 裸敲列真实档位带描述,设了表外
-// 档位只提示"目录未声明,仍会发送",不拦;没有条目 → 维持现状提示。
+// 生效)。档位声明三层找:模型目录条目 → provider 配置 → 都没有明说
+// "未经能力验证"(Effort 诊断单)。"不填"是正式状态,文案写"未发送参数",
+// 不偷偷映射成任何档。
 void HandleThinkCommand(const std::string& args, const std::shared_ptr<std::string>& current_think,
-                         const lubancode::config::ModelCatalogEntry* entry) {
+                         const lubancode::config::ModelCatalogEntry* entry,
+                         const std::vector<std::string>& provider_levels, const std::string& think_param) {
     const std::vector<std::string> hint_lines = lubancode::config::ThinkLevelHintLines(entry);
+    const std::string param_name = think_param.empty() ? std::string("reasoning_effort") : think_param;
     if (args.empty()) {
-        std::cout << trf("cmd.think.current", current_think->empty() ? tr("config.think.unset") : *current_think)
+        std::cout << trf("cmd.think.current",
+                         current_think->empty() ? std::string(tr("config.think.unset")) : *current_think)
                   << "\n";
         if (!hint_lines.empty()) {
             std::cout << trf("cmd.think.catalog_header", entry->slug) << "\n";
             for (const auto& line : hint_lines) {
                 std::cout << line << "\n";
             }
+        } else if (!provider_levels.empty()) {
+            // 模型不在目录(或目录没声明),provider 配置声明了就列它——
+            // 本地兼容端的主路:声明在 providers[].supported_think_levels。
+            std::cout << trf("cmd.think.provider_header", param_name) << "\n";
+            for (const auto& level : provider_levels) {
+                std::cout << "  - " << level << "\n";
+            }
         } else {
-            std::cout << tr("cmd.think.provider") << "\n";
+            std::cout << tr("cmd.think.unverified") << "\n";
         }
+        std::cout << tr("cmd.think.doctor_hint") << "\n";
         return;
     }
     *current_think = args;
@@ -309,8 +318,28 @@ void HandleThinkCommand(const std::string& args, const std::shared_ptr<std::stri
             std::cout << tr("cmd.think.undeclared");
         }
         std::cout << "\n";
+    } else if (!provider_levels.empty()) {
+        const bool declared = std::any_of(provider_levels.begin(), provider_levels.end(),
+                                          [&args](const std::string& level) {
+                                              // ASCII 大小写不敏感,跟目录那张表一个待遇。
+                                              if (level.size() != args.size()) {
+                                                  return false;
+                                              }
+                                              for (std::size_t i = 0; i < level.size(); ++i) {
+                                                  const char a =
+                                                      static_cast<char>(std::tolower(static_cast<unsigned char>(level[i])));
+                                                  const char b =
+                                                      static_cast<char>(std::tolower(static_cast<unsigned char>(args[i])));
+                                                  if (a != b) {
+                                                      return false;
+                                                  }
+                                              }
+                                              return true;
+                                          });
+        std::cout << (declared ? tr("cmd.think.provider_declared") : tr("cmd.think.provider_undeclared"))
+                  << "\n";
     } else {
-        std::cout << tr("cmd.think.provider") << "\n";
+        std::cout << tr("cmd.think.unverified_send") << "\n";
     }
 }
 
@@ -653,6 +682,12 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             config.reasoning_replay = provider->reasoning_replay;
             config.extra_body = provider->extra_body;
             config.extra_headers = provider->extra_headers;
+            // Effort/缓存诊断声明镜像(Effort 诊断单):provider 是唯一来源。
+            config.provider_think_levels = provider->supported_think_levels;
+            config.think_param = provider->think_param;
+            config.think_passthrough = provider->think_passthrough;
+            config.metrics_url = provider->metrics_url;
+            config.stream_usage_declared = provider->stream_usage_declared;
             *current_model = config.model;
             config.active_provider = provider->name;
             active_provider = provider->name;

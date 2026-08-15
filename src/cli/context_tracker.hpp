@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 #include "api/types.hpp"
 
@@ -69,6 +70,28 @@ public:
         return static_cast<int>(ratio + 0.5);
     }
 
+    // ---- 会话级缓存诊断结论(前缀缓存诊断单) ----
+    // server_prefix_caching:/doctor cache 从服务端 metrics 读到的
+    // enable_prefix_caching 结论。nullopt = 还没读过(或读不到),显示层按
+    // "未验证"措辞;false 时统计行/状态栏写"服务端未启用",不再拿含糊的
+    // "0%" 糊人。两个累计字段是"本场命中率"的分子分母(每笔 usage 摊开
+    // 累加,跨轮不清零)——与 last_* 的"最近一次"语义分开。
+    void set_server_prefix_caching(std::optional<bool> enabled) { server_prefix_caching_ = enabled; }
+    std::optional<bool> server_prefix_caching() const { return server_prefix_caching_; }
+
+    std::int64_t session_cache_read_total() const { return session_cache_read_total_; }
+    std::int64_t session_input_total() const { return session_input_total_; }
+
+    // 本场(会话启动至今)缓存命中率(百分比);一次实测都没有返回 -1。
+    int session_cache_hit_percent() const {
+        if (session_input_total_ <= 0) {
+            return -1;
+        }
+        const double ratio = static_cast<double>(session_cache_read_total_) /
+                             static_cast<double>(session_input_total_) * 100.0;
+        return static_cast<int>(ratio + 0.5);
+    }
+
     // /context <档位> 用:会话级临时改窗口大小,不改配置文件。
     void set_window_tokens(std::size_t window_tokens) { window_tokens_ = window_tokens; }
 
@@ -85,6 +108,9 @@ private:
     std::int64_t last_cache_read_tokens_ = 0;
     std::int64_t last_input_tokens_ = 0;
     bool usage_stale_ = false;
+    std::optional<bool> server_prefix_caching_;
+    std::int64_t session_cache_read_total_ = 0;
+    std::int64_t session_input_total_ = 0;
 };
 
 }  // namespace lubancode::cli

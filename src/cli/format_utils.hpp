@@ -61,15 +61,21 @@ struct StatusPanelData {
     // 数据来源是 ContextTracker::usage_stale(),空闲重建与回合内局部更新
     // 两条路都带同一份。
     bool context_stale = false;
+    // 缓存注记(缓存诊断单):服务端回了 cached_tokens 就写"缓存命中 X(Y%)",
+    // 没回写"缓存未报告";挂在 tokens 段尾部,不单开一个 items 字段。空串 =
+    // 一次实测都还没有,不显示。数据来源 ContextTracker(本场累计口径)。
+    std::string cache_note;
 };
 
-// 状态行数据的局部更新:只改 context/tokens 两段的数字与旧值标记,其余
-// 字段(model/cwd/git_branch/provider/effort/rec)原样保住——回合内主请求
-// usage 到达时发布新快照用,不另造一份残缺 StatusPanelData。纯函数,单测
-// 钉"其他段保住"这一条。measured=false 把数字标成旧值(见
-// StatusPanelData::context_stale)。
+// 状态行数据的局部更新:只改 context/tokens 两段的数字、旧值标记与缓存
+// 注记,其余字段(model/cwd/git_branch/provider/effort/rec)原样保住——
+// 回合内主请求 usage 到达时发布新快照用,不另造一份残缺 StatusPanelData。
+// 纯函数,单测钉"其他段保住"这一条。measured=false 把数字标成旧值(见
+// StatusPanelData::context_stale)。cache_note 空串照写(一次实测都还没
+// 有时抹掉旧注记)。
 StatusPanelData WithContextUpdate(StatusPanelData data, int context_percent, std::int64_t used_tokens,
-                                  std::int64_t window_tokens, bool measured);
+                                  std::int64_t window_tokens, bool measured,
+                                  const std::string& cache_note = std::string());
 
 struct StatusPanelSegment {
     std::string key;
@@ -93,6 +99,14 @@ std::string CompactStatusPath(std::string_view path, int max_width);
 // 主题/不支持 ANSI)时两者都去掉 ⎋ 符号、退回纯 "ESC" 文字。
 std::string StreamHintText(bool plain);
 std::string StreamFooterInterruptText(bool plain);
+
+// tokens 段尾部的缓存注记(缓存诊断单,2026-08):cached_tokens 有则摆
+// "缓存命中 X(Y%)"(本场累计口径,见 ContextTracker);最近一次没回 usage
+// 写"缓存未报告";服务端禁用结论在 tracker 里时写"服务端未启用缓存";
+// 其余 0 命中如实写"缓存 0 命中"。一次实测都没有(累计输入 0)返回空串。
+// last_usage_reported = 最近一次请求是否真回了 usage(调用方手头的
+// report.reported();空闲重建路径传 !tracker.usage_stale())。
+std::string BuildCacheNote(const class ContextTracker& tracker, bool last_usage_reported);
 
 // /context 裸敲的分类占用分析:系统提示/工具定义/对话历史三类,配一条按
 // "占窗口比例"取整的条形图(默认 16 格,█ 实 ░ 空;plain 主题回退 # 和 -,

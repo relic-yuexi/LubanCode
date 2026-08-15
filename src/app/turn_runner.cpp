@@ -645,7 +645,11 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         // 不被独立子代理的上下文虚抬。
         lubancode::cli::UpdateStatusLineContext(
             context_tracker.UsagePercent(), static_cast<std::int64_t>(context_tracker.current_tokens()),
-            static_cast<std::int64_t>(context_tracker.window_tokens()), !context_tracker.usage_stale());
+            static_cast<std::int64_t>(context_tracker.window_tokens()), !context_tracker.usage_stale(),
+            // 缓存注记(缓存诊断单):cached_tokens 有则摆本场命中与命中率,
+            // 没回就写"未报告"——同一个 0 不糊。空闲重建那路(InteractiveSession
+            // 每圈)读同一只 helper,两处口径一致。
+            lubancode::cli::BuildCacheNote(context_tracker, report.reported()));
     };
 
     // agent 工具(注册了的话)需要这一轮现算好的转发逻辑:确认回调直接
@@ -975,7 +979,17 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     }
 
     if (!result.has_value()) {
-        std::cerr << theme.error << tr("error.prefix") << result.error() << theme.reset << "\n";
+        // 错误必须让人看见(本地兼容端 Effort 诊断单:xhigh 那次瞬时 exit 1,
+        // transport 错误被屏上重画搅得若有若无)。三道保险:拿
+        // StdoutWriteMutex 跟 footer/心跳线程错开;两个流都 flush(stderr
+        // 无缓冲但 Windows 终端重定向下未必);行前垫换行,别粘在残留帧上。
+        {
+            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+            std::cerr << "\n"
+                      << theme.error << tr("error.prefix") << result.error() << theme.reset << "\n";
+            std::cerr.flush();
+            std::cout.flush();
+        }
         out.status = 1;
         return out;
     }
@@ -989,6 +1003,23 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
         return out;
     }
     out.cancelled = result->cancelled;
+
+    // 输出预算耗尽且正文为空(reasoning 吃光 max_tokens):明报,不留一片
+    // 空白。usage 拆账顺带摆出来——output 里 reasoning 占多少一目了然;
+    // provider 没拆账(reasoning 字段缺席)就按"未拆账"说,不猜 0。
+    if (result->length_empty_output) {
+        const std::int64_t output_total = usage_stats.output_tokens();
+        const std::int64_t reasoning_total = usage_stats.reasoning_tokens();
+        std::cout << theme.error << trf("error.length_empty_output", output_total) << theme.reset << "\n";
+        std::cout << theme.stats
+                  << (reasoning_total > 0
+                          ? trf("error.length_empty_reasoning", reasoning_total)
+                          : tr("error.length_empty_no_split"))
+                  << theme.reset << "\n";
+        std::cout << theme.stats << tr("error.length_empty_hint") << theme.reset << "\n";
+        std::cout.flush();
+        out.status = 1;  // 一个字都没回,按失败收场——但话说清楚了,不是哑巴 1
+    }
 
     // Stop:主回合正常收束(没被打断、没撞预算、没报错)准备停时触发。
     // 钩子 continue=false = "还不能停,再续一轮":续跑理由作为带标识的
@@ -1042,18 +1073,31 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
 
     if (usage_stats.request_count() > 0 && !silent) {
         // 0.17.0:token 数字统一 k 化(cli::FormatTokenCount),超过 10k 的
-        // 数字不再铺一长串数位。i18n:整行进表(stats.line),缓存命中那一节
-        // 有则先按 stats.cache 拼好塞进 {1},没有就是空串。
+        // 数字不再铺一长串数位。i18n:整行进表(stats.line),缓存那一节
+        // 先拼好塞进 {1}。
         // 口径(前缀缓存守恒单):"输入"= TotalInputTokens(非缓存输入 +
         // 缓存读 + 缓存写)——DeepSeek 49k hit + 1k miss 显示为 50k 输入,
-        // 不是 1k,也不是 99k。命中率分母只取输入,不带 output;服务端没
-        // 回报 usage(总输入为 0)时只显示命中量,不伪造 0%。
-        const int hit_percent = usage_stats.cache_hit_percent();
-        const std::string cache_part =
-            usage_stats.cache_read_tokens() > 0
-                ? trf("stats.cache", lubancode::cli::FormatTokenCount(usage_stats.cache_read_tokens()),
-                      hit_percent >= 0 ? std::to_string(hit_percent) : std::string("?"))
-                : std::string();
+        // 不是 1k,也不是 99k。命中率分母只取输入,不带 output。
+        // 缓存节按四态说话(缓存诊断单):not_reported / disabled /
+        // enabled_no_hit / hit,同一个 0 不糊——"服务端未启用"只有
+        // /doctor cache 从 metrics 读到 enable_prefix_caching=False 才说
+        // (结论记在 ContextTracker),否则 0 命中如实带"是否启用未验证"。
+        const std::string cache_part = [&]() {
+            if (!usage_stats.any_reported()) {
+                return tr("stats.cache_not_reported");
+            }
+            if (usage_stats.cache_read_tokens() > 0) {
+                const int hit_percent = usage_stats.cache_hit_percent();
+                return trf("stats.cache", lubancode::cli::FormatTokenCount(usage_stats.cache_read_tokens()),
+                           hit_percent >= 0 ? std::to_string(hit_percent) : std::string("?"));
+            }
+            const auto server_enabled = context_tracker.server_prefix_caching();
+            if (server_enabled.has_value() && !*server_enabled) {
+                return tr("stats.cache_disabled");
+            }
+            return server_enabled.has_value() ? tr("stats.cache_no_hit_enabled")
+                                              : tr("stats.cache_no_hit_unverified");
+        }();
         std::cout << theme.stats
                   << trf("stats.line", lubancode::cli::FormatTokenCount(usage_stats.total_input_tokens()),
                          cache_part, lubancode::cli::FormatTokenCount(usage_stats.output_tokens()),

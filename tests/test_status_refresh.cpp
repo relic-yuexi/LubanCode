@@ -28,6 +28,7 @@
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/format_utils.hpp"
+#include "cli/i18n.hpp"
 #include "cli/live_transcript.hpp"
 #include "cli/theme.hpp"
 #include "cli/tool_display.hpp"
@@ -155,6 +156,46 @@ TEST_CASE("WithContextUpdate: 只改 context/tokens 两段,其余字段原样保
 TEST_CASE("WithContextUpdate: measured=false 把数字标成旧值") {
     const cli::StatusPanelData updated = cli::WithContextUpdate(BasePanelData(), 7, 70, 1000, false);
     CHECK(updated.context_stale);
+}
+
+TEST_CASE("WithContextUpdate: 缓存注记跟着局部更新,缺省时抹掉旧注记") {
+    const cli::StatusPanelData updated =
+        cli::WithContextUpdate(BasePanelData(), 7, 70, 1000, true, "缓存命中 1.2k(60%)");
+    CHECK(updated.cache_note == "缓存命中 1.2k(60%)");
+    // 不带注记参数(缺省)时抹掉旧注记,不是留着上一帧的。
+    const cli::StatusPanelData cleared = cli::WithContextUpdate(updated, 7, 70, 1000, true);
+    CHECK(cleared.cache_note.empty());
+    // 注记挂在 tokens 段尾部渲染(REC 非空会恒挂第一段,清掉只钉 tokens)。
+    const std::vector<std::string> items{"tokens"};
+    cli::StatusPanelData note_only = updated;
+    note_only.rec.clear();
+    const auto segments = cli::BuildStatusPanelSegments(items, cli::ConfirmMode::Confirm, note_only);
+    REQUIRE(segments.size() == 1);
+    CHECK(segments[0].text == "70/1000 · 缓存命中 1.2k(60%)");
+}
+
+TEST_CASE("BuildCacheNote: 一次实测都没有留空;有命中/未报告/未启用/零命中各有说法") {
+    cli::SetLanguage("zh-CN");  // 断言按中文文案钉死,不跟系统语言走
+    cli::ContextTracker tracker(1000);
+    CHECK(cli::BuildCacheNote(tracker, true).empty());
+
+    // 有命中:摆本场累计命中与命中率(1k hit / 2k 输入 = 50%)。
+    tracker.ApplyUsage(api::Usage{1000, 10, 1000, 0});
+    CHECK(cli::BuildCacheNote(tracker, true) == "缓存命中 1000(50%)");
+
+    // 零命中、服务端结论未知:如实"缓存 0 命中",不伪造 0%。
+    cli::ContextTracker cold(1000);
+    cold.ApplyUsage(api::Usage{1000, 10, 0, 0});
+    CHECK(cli::BuildCacheNote(cold, true) == "缓存 0 命中");
+
+    // 零命中、服务端明说禁用:写"服务端未启用缓存"。
+    cold.set_server_prefix_caching(false);
+    CHECK(cli::BuildCacheNote(cold, true) == "服务端未启用缓存");
+
+    // 最近一次没回 usage:写"缓存未报告"。
+    cli::ContextTracker silent(1000);
+    silent.ApplyUsage(api::Usage{1000, 10, 0, 0});
+    CHECK(cli::BuildCacheNote(silent, false) == "缓存未报告");
 }
 
 TEST_CASE("BuildStatusPanelSegments: 旧值时 context/tokens 段带 ~ 前缀,实测时不带") {

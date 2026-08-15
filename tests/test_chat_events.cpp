@@ -138,3 +138,31 @@ TEST_CASE("Chat events: usage 在 finish chunk 与独立 chunk 各来一次,只�
     CHECK(event.usage.output_tokens == 10);
     CHECK(api::TotalInputTokens(event.usage) == 100);
 }
+
+TEST_CASE("Chat events: completion_tokens_details.reasoning_tokens 摊进 usage 拆账") {
+    api::chat::EventParser parser;
+    parser.Consume(Frame(
+        R"({"id":"r","choices":[{"delta":{"content":"答"},"finish_reason":"length"}],"usage":{"prompt_tokens":20,"completion_tokens":64,"completion_tokens_details":{"reasoning_tokens":60}}})"));
+    const auto done = parser.Consume(Frame("[DONE]"));
+    REQUIRE(done.size() == 1);
+    const auto& event = std::get<api::MessageDone>(done[0]);
+    // reasoning 已含在 completion_tokens 总数里,不是另加的一笔。
+    CHECK(event.usage.output_tokens == 64);
+    CHECK(event.usage.output_reasoning_tokens == 60);
+    CHECK(event.stop_reason == "max_tokens");  // finish_reason=length → 预算耗尽
+}
+
+TEST_CASE("Chat events: 顶层 reasoning_tokens 也认,没拆账就是 0") {
+    api::chat::EventParser parser;
+    parser.Consume(Frame(
+        R"({"id":"q","choices":[{"delta":{"content":"答"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":2,"reasoning_tokens":7}})"));
+    const auto done = parser.Consume(Frame("[DONE]"));
+    const auto& event = std::get<api::MessageDone>(done[0]);
+    CHECK(event.usage.output_reasoning_tokens == 7);
+
+    api::chat::EventParser bare;
+    bare.Consume(Frame(
+        R"({"id":"q2","choices":[{"delta":{"content":"答"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":2}})"));
+    const auto done2 = bare.Consume(Frame("[DONE]"));
+    CHECK(std::get<api::MessageDone>(done2[0]).usage.output_reasoning_tokens == 0);
+}
