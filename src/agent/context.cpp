@@ -60,12 +60,14 @@ bool IsUserTurnStart(const api::Message& message) {
 // 超大的 ToolResultBlock 内容从尾部截短、打上标注。只动 tool_result 的
 // content 字符串,消息条数、tool_use/tool_result 的配对关系一概不碰。
 // 每条至少留 kMinKeepChars,免得截成空壳,模型连是什么工具的结果都看不出。
-std::vector<api::Message> ShrinkOversizedToolResults(std::vector<api::Message> messages, std::size_t max_chars) {
+// 截尾兜底带报告:截了哪些工具结果,给上层一句实话。
+std::vector<api::Message> ShrinkOversizedToolResults(std::vector<api::Message> messages, std::size_t max_chars,
+                                                     TrimReport* report) {
     constexpr std::size_t kMinKeepChars = 1024;
     const char kMark[] = "\n[内容过长已截断]";
     const std::size_t mark_size = sizeof(kMark) - 1;
 
-    std::size_t total = EstimateChars(messages);
+    std::size_t total = EstimateHistoryBytes(messages);
     if (total <= max_chars) {
         return messages;
     }
@@ -87,7 +89,10 @@ std::vector<api::Message> ShrinkOversizedToolResults(std::vector<api::Message> m
             const std::size_t cut = overage < reducible ? overage + mark_size : reducible + mark_size;
             tool_result.content.resize(tool_result.content.size() - cut);
             tool_result.content += kMark;
-            total = EstimateChars(messages);
+            if (report != nullptr) {
+                report->truncated_results = true;
+            }
+            total = EstimateHistoryBytes(messages);
         }
     }
     return messages;
@@ -95,7 +100,7 @@ std::vector<api::Message> ShrinkOversizedToolResults(std::vector<api::Message> m
 
 }  // namespace
 
-std::size_t EstimateChars(const std::vector<api::Message>& history) {
+std::size_t EstimateHistoryBytes(const std::vector<api::Message>& history) {
     std::size_t total = 0;
     for (const auto& message : history) {
         total += MessageChars(message);
@@ -103,8 +108,56 @@ std::size_t EstimateChars(const std::vector<api::Message>& history) {
     return total;
 }
 
-std::size_t EstimateTokens(const std::vector<api::Message>& history) {
-    return EstimateChars(history) / 3;
+std::size_t EstimateUtf8Tokens(const std::string& text) {
+    std::size_t ascii = 0;
+    std::size_t codepoints = 0;  // 全部码点;非 ASCII 数 = codepoints - ascii
+    for (const char c : text) {
+        const auto byte = static_cast<unsigned char>(c);
+        if ((byte & 0xC0) != 0x80) {
+            ++codepoints;  // UTF-8 后续字节不算新码点
+        }
+        if (byte < 0x80) {
+            ++ascii;
+        }
+    }
+    const std::size_t non_ascii = codepoints >= ascii ? codepoints - ascii : 0;
+    // ASCII 4 字符 1 token;非 ASCII 3 token 折 2 字。不引分词器,预算够用。
+    return ascii / 4 + (non_ascii * 3) / 2;
+}
+
+std::size_t EstimateMessageTokens(const api::Message& message) {
+    std::size_t total = 0;
+    for (const auto& block : message.content) {
+        total += std::visit(
+            [](const auto& b) -> std::size_t {
+                using T = std::decay_t<decltype(b)>;
+                if constexpr (std::is_same_v<T, api::TextBlock>) {
+                    return EstimateUtf8Tokens(b.text);
+                } else if constexpr (std::is_same_v<T, api::ImageBlock>) {
+                    // base64 体积粗折:约 4/3 字符 3 字节,再按字节 4 折 1。
+                    return (b.media_type.size() + b.data.size() + b.filename.size()) / 4;
+                } else if constexpr (std::is_same_v<T, api::ToolUseBlock>) {
+                    return EstimateUtf8Tokens(b.name) + EstimateUtf8Tokens(b.id) +
+                           EstimateUtf8Tokens(b.input.dump());
+                } else if constexpr (std::is_same_v<T, api::ToolResultBlock>) {
+                    return EstimateUtf8Tokens(b.tool_use_id) + EstimateUtf8Tokens(b.content);
+                } else if constexpr (std::is_same_v<T, api::ThinkingBlock>) {
+                    return EstimateUtf8Tokens(b.text) + EstimateUtf8Tokens(b.signature);
+                } else {
+                    return 0;
+                }
+            },
+            block);
+    }
+    return total;
+}
+
+std::size_t EstimateHistoryTokens(const std::vector<api::Message>& history) {
+    std::size_t total = 0;
+    for (const auto& message : history) {
+        total += EstimateMessageTokens(message);
+    }
+    return total;
 }
 
 std::size_t MaxContextCharsFromEnv() {
@@ -140,11 +193,11 @@ std::size_t MaxContextCharsFromEnv() {
 }
 
 std::vector<api::Message> TrimHistory(const std::vector<api::Message>& history, std::size_t max_chars,
-                                       std::size_t keep_recent_turns) {
+                                       std::size_t keep_recent_turns, TrimReport* report) {
     if (history.empty()) {
         return history;
     }
-    if (EstimateChars(history) <= max_chars) {
+    if (EstimateHistoryBytes(history) <= max_chars) {
         return history;
     }
 
@@ -163,12 +216,12 @@ std::vector<api::Message> TrimHistory(const std::vector<api::Message>& history, 
     if (turns.empty()) {
         // 找不到任何一条"真正的用户输入"消息(不应该发生,history 总是从
         // 用户消息开始),没法安全地按轮裁剪,只做工具结果截断兜底。
-        return ShrinkOversizedToolResults(history, max_chars);
+        return ShrinkOversizedToolResults(history, max_chars, report);
     }
 
     if (turns.size() <= keep_recent_turns + 1) {
         // 第一轮 + 最近 N 轮已经盖住了全部历史,没有中间可丢的。
-        return ShrinkOversizedToolResults(history, max_chars);
+        return ShrinkOversizedToolResults(history, max_chars, report);
     }
 
     const std::size_t first_turn_end = turns.front().second;
@@ -177,7 +230,7 @@ std::vector<api::Message> TrimHistory(const std::vector<api::Message>& history, 
 
     if (recent_start <= first_turn_end) {
         // 保留区间已经衔接甚至重叠,没有中间段可丢。
-        return ShrinkOversizedToolResults(history, max_chars);
+        return ShrinkOversizedToolResults(history, max_chars, report);
     }
 
     std::vector<api::Message> trimmed;
@@ -209,7 +262,11 @@ std::vector<api::Message> TrimHistory(const std::vector<api::Message>& history, 
         trimmed.push_back(history[i]);
     }
 
-    return ShrinkOversizedToolResults(std::move(trimmed), max_chars);
+    if (report != nullptr) {
+        report->trimmed_turns = true;
+        report->dropped_messages = recent_start - first_turn_end;
+    }
+    return ShrinkOversizedToolResults(std::move(trimmed), max_chars, report);
 }
 
 }  // namespace lubancode::agent

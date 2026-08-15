@@ -469,7 +469,7 @@ TEST_CASE("MakeCompactEvent 跟 BuildCompactedHistory 对得上账") {
     history.push_back(UserText("u2"));
     history.push_back(AssistantText("a2"));
     const auto archive = UserText("[对话存档,此前内容已压缩] 要点");
-    const auto new_history = agent::BuildCompactedHistory(history, archive);
+    const auto new_history = agent::BuildCompactedHistory(history, archive, /*hot_zone_tokens=*/1);
     REQUIRE(new_history.size() == 2);
 
     const auto event = agent::MakeCompactEvent(history.size(), new_history);
@@ -526,7 +526,7 @@ std::string JoinLines(const std::vector<std::string>& lines) {
 TEST_CASE("回放: 单次压缩,恢复的是压缩后的活状态") {
     // 流水:u1 a1 u2 a2 | compact | u3 a3
     std::vector<api::Message> history{UserText("u1"), AssistantText("a1"), UserText("u2"), AssistantText("a2")};
-    const auto new_history = agent::BuildCompactedHistory(history, UserText("[对话存档,此前内容已压缩] 玄武"));
+    const auto new_history = agent::BuildCompactedHistory(history, UserText("[对话存档,此前内容已压缩] 玄武"), /*hot_zone_tokens=*/1);
     const auto event = agent::MakeCompactEvent(history.size(), new_history);
 
     std::vector<std::string> lines;
@@ -560,7 +560,7 @@ TEST_CASE("回放: 两次压缩,逐次替换,最后一次说了算") {
     for (const auto& m : effective) {
         lines.push_back(agent::SerializeSessionMessage(m, "t"));
     }
-    auto compacted1 = agent::BuildCompactedHistory(effective, UserText("[对话存档,此前内容已压缩] 存档一"));
+    auto compacted1 = agent::BuildCompactedHistory(effective, UserText("[对话存档,此前内容已压缩] 存档一"), /*hot_zone_tokens=*/1);
     lines.push_back(agent::SerializeCompactEvent(agent::MakeCompactEvent(effective.size(), compacted1), "t"));
     effective = compacted1;
 
@@ -569,7 +569,7 @@ TEST_CASE("回放: 两次压缩,逐次替换,最后一次说了算") {
     effective.push_back(AssistantText("a3"));
     lines.push_back(agent::SerializeSessionMessage(UserText("u3"), "t"));
     lines.push_back(agent::SerializeSessionMessage(AssistantText("a3"), "t"));
-    auto compacted2 = agent::BuildCompactedHistory(effective, UserText("[对话存档,此前内容已压缩] 存档二"));
+    auto compacted2 = agent::BuildCompactedHistory(effective, UserText("[对话存档,此前内容已压缩] 存档二"), /*hot_zone_tokens=*/1);
     lines.push_back(agent::SerializeCompactEvent(agent::MakeCompactEvent(effective.size(), compacted2), "t"));
     effective = compacted2;
 
@@ -841,4 +841,85 @@ TEST_CASE("ParseSlashCommand: /title 裸敲与带标题") {
     const auto with_args = cli::ParseSlashCommand("/Title 我的 存档 标题");
     CHECK(with_args.command == cli::SlashCommand::Title);
     CHECK(with_args.args == "我的 存档 标题");
+}
+
+// ---------------------------------------------------------------------------
+// compact_v2 事件(0.31.x 第三期):分层压缩的完整记账与回放。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("compact_v2: 序列化/解析往返,epoch/manifest/metrics 都在") {
+    agent::CompactV2Event event;
+    event.archive = UserText("[对话存档,此前内容已压缩] 正文");
+    event.kept_from = 3;
+    event.epoch = 2;
+    event.manifest = nlohmann::json::parse(R"({"goal":"修好压缩","open_items":["补测试"]})");
+    event.metrics = nlohmann::json::parse(R"({"chunks":4,"reduce_passes":1,"trigger":"midturn"})");
+
+    const auto parsed = agent::ParseCompactV2Event(agent::SerializeCompactV2Event(event, "t"));
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->kept_from == 3);
+    CHECK(parsed->epoch == 2);
+    CHECK(parsed->manifest["goal"] == "修好压缩");
+    CHECK(parsed->metrics["chunks"] == 4);
+    CHECK(FirstText(parsed->archive) == "[对话存档,此前内容已压缩] 正文");
+}
+
+TEST_CASE("compact_v2: type 不对 / 缺 archive、kept_from → nullopt") {
+    CHECK_FALSE(agent::ParseCompactV2Event(agent::SerializeCompactEvent(agent::CompactEvent{}, "t")).has_value());
+    CHECK_FALSE(agent::ParseCompactV2Event("{bad json").has_value());
+    CHECK_FALSE(agent::ParseCompactV2Event(R"({"type":"compact_v2","archive":{"role":"user","content":[]}})")
+                    .has_value());  // 缺 kept_from
+}
+
+TEST_CASE("compact_v2: UpgradeToV2/AsCompactEvent 折返,v1 回放路共用") {
+    agent::CompactEvent v1;
+    v1.archive = UserText("[存档]");
+    v1.kept_from = 2;
+    const auto v2 = agent::UpgradeToV2(v1, /*epoch=*/5, nlohmann::json::object(), nlohmann::json::object());
+    CHECK(v2.epoch == 5);
+    const auto back = agent::AsCompactEvent(v2);
+    CHECK(back.kept_from == 2);
+    CHECK(FirstText(back.archive) == "[存档]");
+}
+
+TEST_CASE("回放: v1 与 v2 混排,活状态逐次替换,epoch/manifest 记账") {
+    // 流水:u1 a1 | compact(v1) | u2 a2 | compact_v2 | u3 a3
+    std::vector<api::Message> first{UserText("u1"), AssistantText("a1")};
+    auto compacted1 = agent::BuildCompactedHistory(first, UserText("[对话存档,此前内容已压缩] 存档一"),
+                                                   /*hot_zone_tokens=*/1);
+    agent::CompactEvent v1_event = agent::MakeCompactEvent(first.size(), compacted1);
+
+    std::vector<api::Message> effective = compacted1;
+    effective.push_back(UserText("u2"));
+    effective.push_back(AssistantText("a2"));
+    auto compacted2 = agent::BuildCompactedHistory(effective, UserText("[对话存档,此前内容已压缩] 存档二"),
+                                                   /*hot_zone_tokens=*/1);
+    const auto v2_event =
+        agent::UpgradeToV2(agent::MakeCompactEvent(effective.size(), compacted2), /*epoch=*/2,
+                           nlohmann::json::parse(R"({"goal":"二期目标","open_items":["收尾"]})"),
+                           nlohmann::json::parse(R"({"chunks":3,"hierarchical":true})"));
+
+    std::vector<std::string> lines;
+    for (const auto& m : first) {
+        lines.push_back(agent::SerializeSessionMessage(m, "t"));
+    }
+    lines.push_back(agent::SerializeCompactEvent(v1_event, "t"));
+    for (std::size_t i = compacted1.size(); i < effective.size(); ++i) {
+        lines.push_back(agent::SerializeSessionMessage(effective[i], "t"));
+    }
+    lines.push_back(agent::SerializeCompactV2Event(v2_event, "t"));
+    lines.push_back(agent::SerializeSessionMessage(UserText("u3"), "t"));
+    lines.push_back(agent::SerializeSessionMessage(AssistantText("a3"), "t"));
+
+    const auto session = agent::ParseSessionFile(JoinLines(lines));
+    REQUIRE(session.has_value());
+    CHECK(session->compact_count == 2);       // v1 + v2 都算
+    CHECK(session->compact_epoch == 2);       // v2 记的序号
+    CHECK(session->last_compact_manifest["goal"] == "二期目标");
+    REQUIRE(session->compact_positions.size() == 2);
+    CHECK(session->all_messages.size() == 6); // 全量流水:u1 a1 u2 a2 u3 a3 一条不少
+    // 有效态 = [并入存档二的 u2, a2, u3, a3](两次压缩逐次替换,最后说了算)。
+    REQUIRE(session->messages.size() == 4);
+    CHECK(FirstText(session->messages[0]).find("存档二") != std::string::npos);
+    CHECK(FirstText(session->messages[2]) == "u3");
 }

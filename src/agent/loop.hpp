@@ -15,6 +15,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agent/context.hpp"
+#include "agent/context_events.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "tools/registry.hpp"
@@ -91,6 +92,39 @@ constexpr int kMaxTurnsNudgeThreshold = 3;
 // 总共 max_turns 轮,判断这一轮该不该在请求里附加"轮数将尽"的提示。
 // max_turns <= 0 表示无上限,永远不触发(压根没有"将尽"这回事)。
 bool ShouldNudgeMaxTurns(int turn, int max_turns);
+
+// ---------------------------------------------------------------------------
+// mid-turn 上下文安全点(0.27.x 分层压缩第一期)
+//
+// 自动压缩旧账只看"上一回请求的 usage",且只在下一条外层用户消息发送前
+// 触发——工具循环中途回填了大结果后,下一次模型请求可能先撞墙。现在每次
+// 模型请求前(工具结果已攒完、请求尚未发出,正是不打断工具的那个缝)
+// 都先估一次 projected overflow,快撞窗口就把历史收一收。
+// ---------------------------------------------------------------------------
+
+// projected 判定的默认参考线:估占窗口的百分比。80 与 ContextTracker 的
+// kAutoCompactThresholdPercent 同档——这是参考线,不是写死的唯一口径。
+constexpr int kProjectedOverflowPercent = 80;
+
+// 每次模型请求前的上下文压力通报。phase 区分两种调用:
+//   PreRequest    —— 请求拼装前。projected_overflow 为真时,上层可在这个
+//                     安全点同步做语义压缩(ReplaceHistory);回调返回后
+//                     Run() 用(可能已换短的)history 重新拼请求。
+//   AfterHardTrim —— TrimHistory 字符安全网这次真丢了东西(丢轮/截结果)。
+//                     纯通报:上层必须向用户显式告警"发生了有损硬裁",
+//                     不许静默降级;此时再压缩也救不回这一次的请求。
+struct ContextPressure {
+    enum class Phase { PreRequest, AfterHardTrim };
+    Phase phase = Phase::PreRequest;
+    bool projected_overflow = false;   // 预计(含输出预留)放不下
+    std::size_t projected_tokens = 0;  // 估算的下一请求 prompt + 输出预留
+    std::size_t window_tokens = 0;     // 有效窗口;0 = 未知
+    bool hard_trimmed_turns = false;   // 丢了中间整轮
+    std::size_t hard_dropped_messages = 0;
+    bool hard_truncated_results = false;  // 截了超大工具结果
+};
+
+using OnContextPressure = std::function<void(const ContextPressure&)>;
 
 // 跨会话传话(0.25.x)的安全收件点:Run() 的工具循环每次"下一次请求尚未
 // 发出"的边界(循环顶)会调一次 inbox;有信就注进 history,再发请求——
@@ -175,6 +209,27 @@ public:
     // 调这个方法完成。
     void ReplaceHistory(std::vector<api::Message> new_history) { history_ = std::move(new_history); }
 
+    // mid-turn 上下文安全点:有效上下文窗口(token)。0(默认)= 未知,
+    // Run() 不做 projected 评估,行为与从前完全一致。上层(交互会话)在
+    // 构造/重建 loop、/context 或 /model 改窗口后同步进来。
+    void SetContextWindowTokens(std::size_t window_tokens) { context_window_tokens_ = window_tokens; }
+
+    // mid-turn 上下文安全点:压力通报回调。只在"工具结果已攒完、请求尚未
+    // 发出"的轮次边界被调(PreRequest 阶段),以及 TrimHistory 这次真丢了
+    // 东西之后(AfterHardTrim 阶段,纯通报)。回调在同一线程同步执行,里
+    // 面可以安全地做一次语义压缩并 ReplaceHistory。不设 = 不通报,安全网
+    // 照旧只是没人听见。
+    void SetOnContextPressure(OnContextPressure hook) { on_context_pressure_ = std::move(hook); }
+
+    // 无损结构压缩(0.27.x 第二期):默认开。每次请求前把"发给模型的
+    // 视图"里的重复工具结果、被覆盖的旧版读取、超长结果换成引用与预览
+    // (agent/context_events.hpp);活历史 history_ 与 session JSONL 一字
+    // 不动,tool use/result 配对不破。关掉 = 视图与从前逐字节一致。
+    void SetStructuralCompressionEnabled(bool enabled) { structural_compression_enabled_ = enabled; }
+    void SetStructuralCompressionOptions(const StructuralCompressionOptions& options) {
+        structural_options_ = options;
+    }
+
 private:
     api::Backend& backend_;
     tools::ToolRegistry& registry_;
@@ -184,7 +239,12 @@ private:
     int max_tokens_;
     int max_turns_;
     std::size_t max_context_chars_;
+    std::size_t context_window_tokens_ = 0;  // mid-turn 评估用;0 = 未知,不评估
+    bool structural_compression_enabled_ = true;  // 无损结构压缩(工作视图)
+    StructuralCompressionOptions structural_options_{};
+    StructuralCompressionStats structural_stats_{};  // 最近一次请求的结构压缩账(观测用)
     std::vector<api::Message> history_;
+    OnContextPressure on_context_pressure_;
     std::function<bool(const tools::Tool&)> tool_filter_;  // tool_search:空 = 不过滤,全量直挂
     InboxPoll inbox_;  // 跨会话收件点:空 = 没有来信要收,行为跟从前一致
 

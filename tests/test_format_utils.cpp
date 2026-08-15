@@ -163,9 +163,9 @@ TEST_CASE("CompactStatusPath: 长路径从左收起，保住盘符和末级目�
 // 自动压缩线 / 剩余 / 估算口径说明,共 9 行。
 // ---------------------------------------------------------------------------
 
-TEST_CASE("FormatContextBreakdown: 三类正常,估算 token=字符数/3,占比与条形按窗口取") {
-    // 30000/3=10000、15000/3=5000、60000/3=20000;窗口 256000。
-    const auto lines = FormatContextBreakdown(30000, 15000, 60000, /*cache_read=*/0,
+TEST_CASE("FormatContextBreakdown: 三类正常,token 直传(统一口径),占比与条形按窗口取") {
+    // token 由调用方按统一口径算好直传:10000/5000/20000;窗口 256000。
+    const auto lines = FormatContextBreakdown(10000, 5000, 20000, /*cache_read=*/0,
                                                /*window=*/256000, /*measured=*/0, BuiltinTheme("dark"), 16);
     REQUIRE(lines.size() == 9);
     CHECK(lines[0].find("上下文占用分析") != std::string::npos);
@@ -206,11 +206,11 @@ TEST_CASE("FormatContextBreakdown: 三类正常,估算 token=字符数/3,占比�
     CHECK(lines[7].find("剩余") != std::string::npos);
     CHECK(lines[7].find("221k") != std::string::npos);
 
-    CHECK(lines[8].find("粗估") != std::string::npos);
+    CHECK(lines[8].find("统一口径") != std::string::npos);
 }
 
 TEST_CASE("FormatContextBreakdown: 某类为 0 打 ~0、0%、全空条") {
-    const auto lines = FormatContextBreakdown(30000, 0, 60000, 0, 256000, 0, BuiltinTheme("dark"), 16);
+    const auto lines = FormatContextBreakdown(10000, 0, 20000, 0, 256000, 0, BuiltinTheme("dark"), 16);
     REQUIRE(lines.size() == 9);
     CHECK(lines[2].find("~0") != std::string::npos);
     CHECK(lines[2].find(" 0%") != std::string::npos);
@@ -220,7 +220,7 @@ TEST_CASE("FormatContextBreakdown: 某类为 0 打 ~0、0%、全空条") {
 
 TEST_CASE("FormatContextBreakdown: 历史带缓存命中就在行尾括注") {
     // 缓存命中意味着发过请求,配一份实测 100000。
-    const auto lines = FormatContextBreakdown(30000, 15000, 60000, /*cache_read=*/4600, 256000,
+    const auto lines = FormatContextBreakdown(10000, 5000, 20000, /*cache_read=*/4600, 256000,
                                                /*measured=*/100000, BuiltinTheme("dark"), 16);
     CHECK(lines[3].find("(缓存命中 4600)") != std::string::npos);
     // 反推口径与缓存括注同挂对话历史那一行。
@@ -231,9 +231,9 @@ TEST_CASE("FormatContextBreakdown: 历史带缓存命中就在行尾括注") {
 }
 
 TEST_CASE("FormatContextBreakdown: 有实测——总量用实测不带~、历史反推、三项和=实测") {
-    // sys=30000/3=10000、tools=15000/3=5000(仍字符估带 ~);实测 100000。
+    // sys=10000、tools=5000(统一口径估,带 ~);实测 100000。
     // 历史反推 = 100000-10000-5000 = 85000(不带 ~,行尾注反推口径)。
-    const auto lines = FormatContextBreakdown(30000, 15000, 60000, /*cache_read=*/0,
+    const auto lines = FormatContextBreakdown(10000, 5000, 20000, /*cache_read=*/0,
                                                /*window=*/256000, /*measured=*/100000, BuiltinTheme("dark"), 16);
     REQUIRE(lines.size() == 9);
     // 系统/工具照旧字符估带 ~。
@@ -258,8 +258,8 @@ TEST_CASE("FormatContextBreakdown: 有实测——总量用实测不带~、历�
 }
 
 TEST_CASE("FormatContextBreakdown: 无实测——三项纯字符估、整体带~、注明启动估算") {
-    // 30000/3=10000、15000/3=5000、60000/3=20000;实测 0。
-    const auto lines = FormatContextBreakdown(30000, 15000, 60000, /*cache_read=*/0,
+    // 统一口径 token 直传:10000/5000/20000;实测 0。
+    const auto lines = FormatContextBreakdown(10000, 5000, 20000, /*cache_read=*/0,
                                                /*window=*/256000, /*measured=*/0, BuiltinTheme("dark"), 16);
     REQUIRE(lines.size() == 9);
     CHECK(lines[3].find("~20k") != std::string::npos);
@@ -271,8 +271,8 @@ TEST_CASE("FormatContextBreakdown: 无实测——三项纯字符估、整体带
 }
 
 TEST_CASE("FormatContextBreakdown: 实测 < 系统+工具,历史钉 0") {
-    // sys=30000/3=10000、tools=15000/3=5000,合计 15000;实测 9000 < 15000。
-    const auto lines = FormatContextBreakdown(30000, 15000, 60000, /*cache_read=*/0,
+    // sys=10000、tools=5000,合计 15000;实测 9000 < 15000。
+    const auto lines = FormatContextBreakdown(10000, 5000, 20000, /*cache_read=*/0,
                                                /*window=*/256000, /*measured=*/9000, BuiltinTheme("dark"), 16);
     // 历史反推下限钉 0,不带 ~,仍注反推口径。
     CHECK(lines[3].find(" 0") != std::string::npos);
@@ -284,8 +284,8 @@ TEST_CASE("FormatContextBreakdown: 实测 < 系统+工具,历史钉 0") {
 }
 
 TEST_CASE("FormatContextBreakdown: 超窗口截断——条形打满、百分比钉 100、剩余 0") {
-    // 900000/3=300000 tokens > 窗口 256000。
-    const auto lines = FormatContextBreakdown(900000, 0, 0, 0, 256000, 0, BuiltinTheme("dark"), 16);
+    // 300000 tokens > 窗口 256000。
+    const auto lines = FormatContextBreakdown(300000, 0, 0, 0, 256000, 0, BuiltinTheme("dark"), 16);
     CHECK(lines[1].find("100%") != std::string::npos);
     CHECK(CountOccurrences(lines[1], "█") == 16);
     CHECK(CountOccurrences(lines[1], "░") == 0);
@@ -297,7 +297,7 @@ TEST_CASE("FormatContextBreakdown: 超窗口截断——条形打满、百分比
 }
 
 TEST_CASE("FormatContextBreakdown: plain 主题回退 # 和 -,不掺 Unicode 条形") {
-    const auto lines = FormatContextBreakdown(30000, 15000, 60000, 0, 256000, 0, BuiltinTheme("plain"), 16);
+    const auto lines = FormatContextBreakdown(10000, 5000, 20000, 0, 256000, 0, BuiltinTheme("plain"), 16);
     CHECK(CountOccurrences(lines[1], "#") == 1);
     CHECK(CountOccurrences(lines[1], "-") == 15);
     CHECK(lines[1].find("█") == std::string::npos);
@@ -308,15 +308,15 @@ TEST_CASE("FormatContextBreakdown: plain 主题回退 # 和 -,不掺 Unicode 条
 }
 
 TEST_CASE("FormatContextBreakdown: 窄宽度条形照比例取整") {
-    // 150/3=50 tokens,窗口 100 → 50%,宽度 4 → 2 实 2 空。
-    const auto lines = FormatContextBreakdown(150, 0, 0, 0, 100, 0, BuiltinTheme("dark"), 4);
+    // 50 tokens,窗口 100 → 50%,宽度 4 → 2 实 2 空。
+    const auto lines = FormatContextBreakdown(50, 0, 0, 0, 100, 0, BuiltinTheme("dark"), 4);
     CHECK(CountOccurrences(lines[1], "█") == 2);
     CHECK(CountOccurrences(lines[1], "░") == 2);
     CHECK(lines[1].find(" 50%") != std::string::npos);
 }
 
 TEST_CASE("FormatContextBreakdown: 窗口为 0 不除零,百分比一律 0、条形全空") {
-    const auto lines = FormatContextBreakdown(30000, 15000, 60000, 0, /*window=*/0, 0,
+    const auto lines = FormatContextBreakdown(10000, 5000, 20000, 0, /*window=*/0, 0,
                                                BuiltinTheme("dark"), 16);
     REQUIRE(lines.size() == 9);
     CHECK(lines[1].find(" 0%") != std::string::npos);

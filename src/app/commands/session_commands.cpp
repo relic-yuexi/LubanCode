@@ -4,6 +4,7 @@
 #include <iostream>
 
 #include "agent/compact.hpp"
+#include "agent/context_events.hpp"
 #include "config/config.hpp"
 #include "cli/spinner.hpp"
 #include "cli/transcript.hpp"
@@ -30,33 +31,14 @@ using lubancode::platform::CurrentDirUtf8;
 using lubancode::cli::tr;
 using lubancode::cli::trf;
 
-// 粗略估算一段历史占用了多少"token"——不真调分词器,按字符数打个折扣
-// (中英文混排,经验上大致两个字符算一个 token),仅供 /compact 报告
-// "压缩前后省了多少"用,数字前带 ~ 提醒这是估算值,不是真实用量(真实
-// 用量要靠 usage.input_tokens,那个得等实际发一次请求才知道)。
+// 字节账与 token 估算都收口到 agent/context.hpp 的统一口径(/context 的
+// "字符数"分类明细按字节报,压缩报告按统一 token 口径报)。
 std::size_t EstimateHistoryChars(const std::vector<lubancode::api::Message>& history) {
-    std::size_t total = 0;
-    for (const auto& message : history) {
-        for (const auto& block : message.content) {
-            std::visit(
-                [&total](const auto& b) {
-                    using T = std::decay_t<decltype(b)>;
-                    if constexpr (std::is_same_v<T, lubancode::api::TextBlock>) {
-                        total += b.text.size();
-                    } else if constexpr (std::is_same_v<T, lubancode::api::ImageBlock>) {
-                        total += b.media_type.size() + b.data.size() + b.filename.size();
-                    } else if constexpr (std::is_same_v<T, lubancode::api::ToolUseBlock>) {
-                        total += b.name.size() + b.input.dump().size();
-                    } else if constexpr (std::is_same_v<T, lubancode::api::ToolResultBlock>) {
-                        total += b.content.size();
-                    }
-                },
-                block);
-        }
-    }
-    return total;
+    return lubancode::agent::EstimateHistoryBytes(history);
 }
-std::size_t EstimateTokens(std::size_t chars) { return (chars + 1) / 2; }
+std::size_t EstimateHistoryTokens(const std::vector<lubancode::api::Message>& history) {
+    return lubancode::agent::EstimateHistoryTokens(history);
+}
 
 // /context 命令:不带参数打分类占用分析(系统提示/工具定义/对话历史三类
 // 字符数估 token + 条形图,拼装规则全在 FormatContextBreakdown,这里只管
@@ -65,11 +47,11 @@ std::size_t EstimateTokens(std::size_t chars) { return (chars + 1) / 2; }
 // 现场收集(裸敲才用得上,带参数分支忽略),缓存命中/窗口/实测占用都从
 // context_tracker 拿。
 void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracker& context_tracker,
-                           std::size_t sys_chars, std::size_t tools_chars, std::size_t history_chars,
+                           std::size_t sys_tokens, std::size_t tools_tokens, std::size_t history_tokens,
                            const lubancode::cli::Theme& theme) {
     if (args.empty()) {
         const auto lines = lubancode::cli::FormatContextBreakdown(
-            sys_chars, tools_chars, history_chars, context_tracker.last_cache_read_tokens(),
+            sys_tokens, tools_tokens, history_tokens, context_tracker.last_cache_read_tokens(),
             context_tracker.window_tokens(), context_tracker.current_tokens(), theme);
         for (const auto& line : lines) {
             std::cout << line << "\n";
@@ -95,39 +77,99 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
     std::cout << trf("cmd.context.window_changed", *parsed) << "\n";
 }
 
-// /compact 命令:把当前历史整段发给模型换一份压缩存档,顶替掉中间那段
-// 老对话,只留 archive + 最近一轮完整对话。backend 传裸的、没包
-// ModelOverrideBackend 的那份——Compact() 会自己把 compact_model 写进
-// request.model,要是走了 ModelOverrideBackend,会被强制换回当前会话
-// model,压缩模型这个字段就形同虚设了。
-// 压缩成功时返回对应的 compact 事件(archive + kept_from),调用方追加写进
-// 存档流水,/resume 才能回放出压缩后的活状态;失败/没得压给 nullopt。
-std::optional<lubancode::agent::CompactEvent> HandleCompactCommand(
-    const std::string& args, lubancode::agent::AgentLoop& loop, lubancode::api::Backend& raw_backend,
-    const std::string& compact_model, const lubancode::cli::Theme& theme, bool spinner_enabled) {
+// /compact 命令:窗口预算 + manifest 守恒校验 + 热区保留,一条路走到底。
+// --dry-run 只算结构压缩的可回收量与钉住项,不发请求、不改历史。
+CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::agent::AgentLoop& loop,
+                                          lubancode::api::Backend& raw_backend, const std::string& compact_model,
+                                          const lubancode::cli::Theme& theme, bool spinner_enabled,
+                                          const lubancode::agent::CompactOptions& options, int& compact_epoch) {
     const std::vector<lubancode::api::Message>& history = loop.History();
     if (history.empty()) {
         std::cout << tr("cmd.compact.empty") << "\n";
-        return std::nullopt;
+        return {};
     }
-    const std::size_t before_tokens = EstimateTokens(EstimateHistoryChars(history));
+
+    // --dry-run [--focus 文本] / --dry-run:只算不动手。
+    bool dry_run = false;
+    std::string focus = args;
+    if (args == "--dry-run") {
+        dry_run = true;
+        focus.clear();
+    } else if (args.rfind("--dry-run ", 0) == 0) {
+        dry_run = true;
+        focus = args.substr(std::string("--dry-run ").size());
+    }
+    if (dry_run) {
+        lubancode::agent::StructuralCompressionOptions struct_options;
+        lubancode::agent::StructuralCompressionStats struct_stats;
+        (void)lubancode::agent::CompressWorkingView(history, struct_options, struct_stats);  // 只要账
+        const std::size_t hot_from = lubancode::agent::HotZoneStartIndex(history);
+        std::vector<lubancode::api::Message> hot(history.begin() + static_cast<std::ptrdiff_t>(hot_from),
+                                                 history.end());
+        std::cout << tr("cmd.compact.dryrun.header") << "\n";
+        std::cout << trf("cmd.compact.dryrun.reclaim", struct_stats.reclaimable_bytes(),
+                         struct_stats.duplicate_groups, struct_stats.superseded_observations,
+                         struct_stats.offloaded_results)
+                  << "\n";
+        std::cout << trf("cmd.compact.dryrun.pinned", lubancode::agent::EstimateHistoryTokens(hot),
+                         options.required_open_items.size())
+                  << "\n";
+        return {};
+    }
+
+    const std::size_t before_tokens = EstimateHistoryTokens(history);
     const std::size_t old_size = history.size();
 
+    lubancode::agent::CompactOptions run_options = options;
+    run_options.focus = focus;
+
     lubancode::cli::Spinner spinner(theme, spinner_enabled);
-    const auto result = lubancode::agent::Compact(raw_backend, compact_model, history, args);
+    const auto result = lubancode::agent::CompactHierarchical(raw_backend, compact_model, history, run_options);
     spinner.Stop();
 
     if (!result.has_value()) {
         std::cout << theme.error << trf("cmd.compact.failed", result.error().message) << theme.reset << "\n";
-        return std::nullopt;
+        return {};
     }
 
-    const auto new_history = lubancode::agent::BuildCompactedHistory(history, *result);
-    const auto event = lubancode::agent::MakeCompactEvent(old_size, new_history);
+    const auto new_history = lubancode::agent::BuildCompactedHistory(history, result->archive);
+    const auto base_event = lubancode::agent::MakeCompactEvent(old_size, new_history);
     loop.ReplaceHistory(new_history);
-    const std::size_t after_tokens = EstimateTokens(EstimateHistoryChars(new_history));
+    const std::size_t after_tokens = EstimateHistoryTokens(new_history);
+
+    // compact_v2 事件:回放语义与 v1 同型,多的 manifest/epoch/metrics 供
+    // 审计与 rebase。
+    compact_epoch += 1;
+    nlohmann::json manifest_json;
+    manifest_json["goal"] = result->manifest.goal;
+    manifest_json["constraints"] = result->manifest.constraints;
+    manifest_json["open_items"] = result->manifest.open_items;
+    manifest_json["next_action"] = result->manifest.next_action;
+    nlohmann::json metrics_json;
+    metrics_json["chunks"] = result->metrics.chunks;
+    metrics_json["reduce_passes"] = result->metrics.reduce_passes;
+    metrics_json["hierarchical"] = result->metrics.hierarchical;
+    metrics_json["implementation"] = result->metrics.implementation;
+    metrics_json["source_digest"] = result->metrics.source_digest;  // 第四期预计算复用钩子
+    metrics_json["pre_tokens"] = before_tokens;
+    metrics_json["post_tokens"] = after_tokens;
+    metrics_json["trigger"] = "manual";
+    const auto event = lubancode::agent::UpgradeToV2(base_event, compact_epoch, std::move(manifest_json),
+                                                     std::move(metrics_json));
+
     std::cout << trf("cmd.compact.result", before_tokens, after_tokens) << "\n";
-    return event;
+    if (result->metrics.hierarchical) {
+        std::cout << trf("cmd.compact.hierarchical", result->metrics.chunks, result->metrics.reduce_passes)
+                  << "\n";
+    }
+    if (!options.budget.window_tokens.has_value()) {
+        std::cout << theme.stats << tr("cmd.compact.window_unknown") << theme.reset << "\n";
+    }
+    std::cout << trf("cmd.compact.manifest", result->manifest.constraints.size(),
+                     result->manifest.open_items.size())
+              << "\n";
+    return CompactCommandResult{event, before_tokens, after_tokens, result->manifest.constraints.size(),
+                                result->manifest.open_items.size()};
 }
 void PrintSessionsCommand(const std::string& sessions_dir, const std::string& args) {
     if (sessions_dir.empty()) {
@@ -230,7 +272,7 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
                     std::size_t& persisted_count, lubancode::agent::SessionMeta& session_meta,
                     std::string& session_title, const std::string& wire_str, const std::string& current_model,
                     const lubancode::cli::Theme& theme, bool quiet_if_none,
-                    lubancode::cli::WorktreeSession* worktree_session) {
+                    lubancode::cli::WorktreeSession* worktree_session, int* compact_epoch_out) {
     if (sessions_dir.empty()) {
         std::cout << tr("session.no_home") << "\n";
         return false;
@@ -302,6 +344,9 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
     }
     session_meta = session->meta;
     session_title = session->title;
+    if (compact_epoch_out != nullptr) {
+        *compact_epoch_out = session->compact_epoch;  // 压缩序号接着旧账数
+    }
 
     const std::string restored_history = lubancode::cli::FormatRestoredHistory(
         session->all_messages, theme, lubancode::cli::DetectConsoleWidth().value_or(80),
@@ -327,7 +372,7 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
     std::cout << "。\n";
     // context 记账:真实 usage 得等恢复后第一次请求才校准,这里先按字符
     // 粗估打一行,心里有数。
-    std::cout << trf("cmd.resume.estimate", EstimateTokens(EstimateHistoryChars(session->messages))) << "\n";
+    std::cout << trf("cmd.resume.estimate", EstimateHistoryTokens(session->messages)) << "\n";
     if (!session->meta.model.empty() && session->meta.model != current_model) {
         std::cout << theme.stats << trf("cmd.resume.model_mismatch", session->meta.model, current_model)
                   << theme.reset << "\n";
@@ -493,9 +538,9 @@ CommandFlow HandleResumeCommand(SessionCommandState& state, const std::string& a
         }
         target = *selected;
     }
-    if (ResumeSession(target, state.sessions_dir, state.loop, state.store, state.persisted_count, state.meta,
-                      state.title, state.wire_str, *state.current_model, theme, /*quiet_if_none=*/false,
-                      state.worktree_session)) {
+    if (ResumeSession(target, state.sessions_dir, state.loop, state.store, state.persisted_count,
+                      state.meta, state.title, state.wire_str, *state.current_model, theme,
+                      /*quiet_if_none=*/false, state.worktree_session, &state.compact_epoch)) {
         state.store_broken = false;  // 换了场,存档失败的旧账翻篇
         state.title_pending = false;
         if (state.worktree_session != nullptr && state.worktree_session->active()) {

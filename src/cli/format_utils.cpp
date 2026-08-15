@@ -232,8 +232,8 @@ std::string TokenText(std::size_t tokens) { return FormatTokenCount(static_cast<
 
 }  // namespace
 
-std::vector<std::string> FormatContextBreakdown(std::size_t sys_chars, std::size_t tools_chars,
-                                                 std::size_t history_chars, std::int64_t cache_read_tokens,
+std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::size_t tools_tokens_in,
+                                                 std::size_t history_tokens_est, std::int64_t cache_read_tokens,
                                                  std::size_t window_tokens, std::size_t measured_used_tokens,
                                                  const Theme& theme, int bar_width) {
     // plain 主题全部字段是空串,拿 reset 当探针(真主题 reset 恒非空)。
@@ -242,10 +242,11 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_chars, std::size
         bar_width = 0;
     }
 
-    // 系统提示、工具定义每轮固定,能单独按字符数粗估(字符数/3,中英混排的
-    // 粗折算),数字前带 ~ 提醒是估的——这两块是"可单独算的确定部分"。
-    const std::size_t sys_tokens = sys_chars / 3;
-    const std::size_t tools_tokens = tools_chars / 3;
+    // 系统提示、工具定义每轮固定,token 由调用方按全库统一口径
+    // (agent::EstimateUtf8Tokens:ASCII 4 字符约 1 token,非 ASCII 每字约
+    // 1.5 token)算好传进来,数字前带 ~ 提醒是估的。
+    const std::size_t sys_tokens = sys_tokens_in;
+    const std::size_t tools_tokens = tools_tokens_in;
 
     // measured_used_tokens 是 tracker 实测(最近一次请求的 input+cache_read+
     // cache_creation+output),只要发过一轮请求就是精确值,是唯一该信的数。
@@ -256,7 +257,7 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_chars, std::size
     const std::size_t sys_plus_tools = sys_tokens + tools_tokens;
     const std::size_t history_tokens =
         have_measured ? (measured_used_tokens > sys_plus_tools ? measured_used_tokens - sys_plus_tools : 0)
-                      : history_chars / 3;
+                      : history_tokens_est;
     const std::size_t used = have_measured ? measured_used_tokens : sys_plus_tools + history_tokens;
 
     const std::string label_sys = tr("cmd.context.bd.system");

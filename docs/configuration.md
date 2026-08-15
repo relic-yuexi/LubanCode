@@ -115,8 +115,8 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 | `think` | `none`/`low`/`medium`/`high`,可留空 | 空串 | 推理强度;空串时不往请求里带推理参数(跟无此功能的旧版本行为一致)。 |
 | `soul` | 空串 / `default` / `off` / `souls/` 下文件名(不带 `.md`) | 空串 | 风格叠加层。空串和 `default` 读 `SOUL.md`;`off` 不叠加。 |
 | `context_window` | 字符串或整数,支持 `256k`/`512k`/`1m` 或裸数字 | `256000` | 会话上下文窗口(token),`k=1000`、`m=1000000`(十进制)。 |
-| `compact_model` | 字符串,可留空 | 空串 | `/compact` 专用模型;空串就沿用会话模型。 |
-| `max_context_chars` | 正整数 | `600000` | 旧的按字符数硬切安全网,跟 `context_window` 不是一回事,两条防线互不依赖。 |
+| `compact_model` | 字符串,可留空 | 空串 | `/compact` 专用模型;空串就沿用会话模型。模型在目录里带 `context_window` 时,压缩输入按它单独算预算(窗口 − 输出预留 − 协议余量),装不下明确拒绝、不截史。 |
+| `max_context_chars` | 正整数 | `600000` | 旧的按字节硬切安全网,跟 `context_window` 不是一回事,两条防线互不依赖;真触发时终端打有损裁剪告警。 |
 | `max_turns` | 非负整数 | `0`(无上限) | agent 主循环一次来回的轮数上限。不配或配 `0` = 不设上限,防跑飞靠 ESC/Ctrl+C;配正整数才是硬上限,超过就报错停止。负数或非法值静默忽略。 |
 | `system_prompt_file` | 字符串,UTF-8 文本路径 | 无 | 人格段文件路径;没配就用内置人格,`--system-prompt` 命令行参数会压过它。 |
 | `tool_search_threshold` | 非负整数 | `20` | 注册工具总数超过此数才启用延迟挂载(工具搜索);`0` 永不延迟。 |
@@ -531,7 +531,7 @@ lubancode --config
 
 ### 自动压缩太早或太晚
 
-`context_window` 管 token 百分比；`max_context_chars` 是独立字符安全网。前者按服务端 usage 或估算触发，后者防极端大历史。两项都要看。
+`context_window` 管 token 百分比；`max_context_chars` 是独立字节安全网。前者有两条触发线：回合前按服务端 usage 实测（80%），回合中按统一估算口径的 projected（系统提示+工具定义+历史+输出预留，80%）。后者防极端大历史。两项都要看。token 估算全库一把尺：ASCII 4 字符约 1 token，非 ASCII 每字约 1.5 token。
 
 ### 项目记忆开不起来
 

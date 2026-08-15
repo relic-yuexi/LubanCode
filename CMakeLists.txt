@@ -297,6 +297,7 @@ add_library(lubancode_core STATIC
   "${_lubancode_embedded_prompts}"
   "${_lubancode_embedded_provider_catalog}"
   src/agent/context.cpp
+  src/agent/context_events.cpp
   src/agent/compact.cpp
   src/agent/session_store.cpp
   src/agent/workflow_recorder.cpp
