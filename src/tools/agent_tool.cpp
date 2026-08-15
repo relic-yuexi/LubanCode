@@ -189,7 +189,7 @@ const char* OutcomeStatusTag(TaskOutcomeStatus status) {
 
 // 结构化结果交回主模型的正文:短状态打头(主代理按 budget_exhausted /
 // failed 分型,不靠猜),再给检查点/部分结果与最后工具、stop reason——
-// 四十轮探索不许一笔勾销(规格"现场三")。
+// 几十步探索不许一笔勾销(规格"现场三")。
 std::string ComposeOutcomeText(const TaskOutcome& outcome) {
     std::string out = std::string("[") + OutcomeStatusTag(outcome.status) + "] " + outcome.message;
     if (outcome.step_limit > 0) {

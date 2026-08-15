@@ -559,7 +559,7 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         hooks.on_tool_confirm = callbacks.on_tool_confirm;
         // ESC/Ctrl+C 打断信号透传:没这一行,子代理内部工具循环永远拿到
         // nullptr,顶层怎么置位 cancel_flag 都传不进去——子代理会一路跑到
-        // 自己的 max_turns 或任务自然完成才停,ESC/Ctrl+C 对它形同虚设。
+        // 自己的步数上限(max_steps_per_turn)或任务自然完成才停,ESC/Ctrl+C 对它形同虚设。
         hooks.cancel = cancel_flag;
         // UI-B:子代理内层工具也走条目样式(前缀缩进四空格),状态同样原地
         // 更新——启动靠 on_sub_tool_start,终态靠下面包了一层的 post_tool
