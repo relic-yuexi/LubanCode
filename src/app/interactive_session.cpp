@@ -1720,7 +1720,8 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                     }
                     history_tokens = lubancode::agent::EstimateHistoryTokens(loop->History());
                 }
-                HandleContextCommand(parsed.args, context_tracker, sys_tokens, tools_tokens, history_tokens, theme);
+                HandleContextCommand(parsed.args, context_tracker, sys_tokens, tools_tokens, history_tokens, theme,
+                                     loop->cache_epoch());
                 break;
             }
             case lubancode::cli::SlashCommand::Compact: {
