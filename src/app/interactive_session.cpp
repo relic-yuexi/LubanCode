@@ -246,7 +246,7 @@ private:
     void PersistNewMessages();
     void RefillPeerPool();
     void CollectPeerMessages();
-    void RunPeerTurn(const std::string& text);
+    void RunPeerTurn(const std::string& text, bool silent = false);
     void PumpSteeringToSubagents();
     void EnsureMemoryTool();
     void PrintMemoryUsage() const;
@@ -1356,7 +1356,10 @@ void InteractiveSession::CollectPeerMessages() {
 
 // 空闲时收到的信直接另起一轮(规格:会话空闲,把信作为一轮"外来消息"
 // 交给模型)。走 RunTurn,不走 ProcessLine——来信不得当 slash 命令跑。
-void InteractiveSession::RunPeerTurn(const std::string& text) {
+// silent:查看态下的后台回流轮用——轮子照常跑(消化/输出/usage),但所有
+// 输出只进 transcript 台账不上屏,用户正看的子代理视口零扰动(回流单规格
+// 第一节;语义细节见 turn_runner.hpp RunTurn 的 silent 注释)。
+void InteractiveSession::RunPeerTurn(const std::string& text, bool silent) {
     if (peer_started) {
         peer_runtime->SetStatus("busy");
     }
@@ -1375,7 +1378,8 @@ void InteractiveSession::RunPeerTurn(const std::string& text) {
     // 走会话层 SteeringQueue,不在这里收。直接调,不接没人用的返回值。
     RunTurn(*loop, text, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
             lubancode::app::HookRuntime(), spinner_enabled, transcript, todo_state(), &transcript_expanded,
-            settings_local.allow_commands, settings_local.deny_commands, session_agent_tool());
+            settings_local.allow_commands, settings_local.deny_commands, session_agent_tool(),
+            /*recorder=*/nullptr, silent);
     PersistNewMessages();
     if (peer_started) {
         peer_runtime->SetStatus("idle");
@@ -2443,9 +2447,23 @@ void InteractiveSession::Run() {
         // 有且只有一条——旧底栏已在 wake 路正式退场(RetireIdleChrome),通知
         // 不再夹在两副 chrome 中间当一行来路不明的永久字;Ctrl+O/Ctrl+E 重铺
         // transcript 时它跟着回来。
+        // 查看态(回流单规格第一节):用户正看某只子代理时,回流照常发生但
+        // 一切终端影响收进后台——通知不打裸 cout(事件照进 main 台账),主轮
+        // 走静默档(输出进台账、usage 照记、查看帧零扰动),收口后坞里那行
+        // 退场,导航坞提示行给一枚短 toast。回 main 时新内容都在。
         if (session_agent_tool() != nullptr &&
             !SessionSteeringQueue().HasDeliverable(lubancode::cli::MessageTarget::Main()) &&
             session_agent_tool()->HasUndeliveredCompletions()) {
+            const bool viewing = lubancode::cli::CurrentAgentViewedTaskId() != 0;
+            std::string reflow_ids;
+            if (viewing) {
+                for (const int id : session_agent_tool()->UndeliveredCompletionTaskIds()) {
+                    if (!reflow_ids.empty()) {
+                        reflow_ids += " ";
+                    }
+                    reflow_ids += "#" + std::to_string(id);
+                }
+            }
             const std::vector<std::string> notices = session_agent_tool()->CompletionNoticeLines();
             {
                 lubancode::cli::TranscriptItem item;
@@ -2456,7 +2474,7 @@ void InteractiveSession::Run() {
                 item.status = lubancode::cli::TranscriptStatus::Ok;
                 item.start_time = item.end_time = std::chrono::steady_clock::now();
                 item.summary_lines = notices;
-                {
+                if (!viewing) {
                     std::lock_guard<std::mutex> stdout_lock(lubancode::cli::StdoutWriteMutex());
                     std::cout << theme.tool_line << item.title << theme.reset << "\n";
                     for (const auto& note : notices) {
@@ -2467,7 +2485,13 @@ void InteractiveSession::Run() {
                 transcript.push_back(std::move(item));
             }
             RunPeerTurn("后台子代理有新结果送达(资料附在本条消息里)。请阅读后继续推进手头任务;"
-                        "若结论已够用,向用户简要汇报要点,不要重新摸排。");
+                        "若结论已够用,向用户简要汇报要点,不要重新摸排。",
+                        /*silent=*/viewing);
+            if (viewing) {
+                // 坞行退场由 DrainCompletionNotices 的 TouchTasks + 下一帧带出;
+                // toast 替那行留一句人话,几秒自收,不抢屏。
+                lubancode::cli::ShowPanelToast(trf("agent_panel.reflow_toast", reflow_ids));
+            }
             continue;
         }
 

@@ -154,6 +154,17 @@ void ResetAgentPanelSession();
 // 清零。管道/重定向模式走不到逐键路径,恒 nullopt。
 std::optional<int> CurrentComposerAgentTarget();
 
+// 查看态现值:会话层面板控制器的 viewed_task_id(0 = main)。与上面那只
+// "收件目标"同源,但生命周期不跟 ReadLine(读取返回后仍准确)——主循环
+// 在后台回流路上问它:正看着某只子代理时回流须静默,这个数是唯一真状态。
+int CurrentAgentViewedTaskId();
+
+// 查看态回流的短提示(toast):后台收货完,把"谁完成了"挂进导航坞的
+// 提示行位置,几秒后随下一帧自动收——不抢屏、不进对话流、不碰上方查看帧。
+// 与空闲路本地的 panel_notice 同一挂点;写点在会话主循环、读点在空闲
+// composer 的 100ms 帧,都归主线程,不用加锁。
+void ShowPanelToast(const std::string& text);
+
 // 空闲唤醒钩子:composer 主提示符在逐键等待期间,每 100ms 的面板刷新一拍
 // 顺带问一次;返回 true 表示应用层有系统侧事件要在会话空闲时处理(比如
 // 后台子代理跑完、结果等着交回主代理),ReadLine 以空串返回让调用方的循环

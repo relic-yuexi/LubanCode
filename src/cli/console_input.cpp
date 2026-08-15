@@ -176,6 +176,18 @@ std::function<bool()>& IdleWakeHookSlot() {
     return hook;
 }
 
+// 查看态回流的短提示(见 console_input.hpp ShowPanelToast 注释):挂进
+// 导航坞提示行位置,到时随下一帧自动收。读写都在主线程(会话主循环写、
+// 空闲 composer 帧读),不加锁。
+struct PanelToastState {
+    std::string text;
+    std::chrono::steady_clock::time_point until{};
+};
+PanelToastState& PanelToastSlot() {
+    static PanelToastState state;
+    return state;
+}
+
 // 键位缝:platform 语义按键 -> 面板动作 id(PanelKey)。面板键位要换/要接
 // keymap,只动这一张小表;状态机与布局都在 cli/agent_panel(纯逻辑,单测钉)。
 std::optional<PanelKey> MapToPanelKey(const platform::KeyInput& key) {
@@ -906,6 +918,17 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 panel_notice.clear();
             }
         }
+        // 查看态回流 toast(ShowPanelToast):与 panel_notice 同一挂点、同一
+        // 过期规矩。到时 build_dock 少还这一行,帧指纹跟着变,下一拍整帧
+        // 重画自然收走——不抢屏,不进对话流。
+        PanelToastState& toast = PanelToastSlot();
+        if (!toast.text.empty()) {
+            if (std::chrono::steady_clock::now() < toast.until) {
+                lines.insert(lines.begin() + 1, toast.text);
+            } else {
+                toast.text.clear();
+            }
+        }
         return lines;
     };
     const auto fingerprint_of = [](const std::vector<AgentPanelEntry>& entries,
@@ -1037,6 +1060,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     // 下——Esc 回 main 后代理正文不再占着当前 viewport 冒充活状态。正文
     // 长过回滚缓冲顶时(顶部早已滚出 viewport),viewport 之内也保证擦净,
     // 滚出部分自然留在滚屏历史,不清回滚账。
+    // 锚点只在本段读取内有效:两段读取之间可能跑过整轮(流式正文滚屏),
+    // 绝对行号全部失效——跨调用的"查看任务退场"走下面进门路的清屏重铺,
+    // 不认旧锚点。
     // -------------------------------------------------------------------
     std::optional<int> view_body_top;  // 上一视图正文的缓冲顶行;nullopt = 无
     const auto erase_previous_view_body = [&]() {
@@ -1072,7 +1098,32 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     };
 
     if (box) {
+        // 进门先记查看态:第一帧 build_dock 会 OnEntriesChanged,查看的任务
+        // 若在两段读取之间退场(后台回流轮置 delivered、x 清条目后重进),
+        // viewed 在这一帧里翻 0——翻转发生在帧内,下面 100ms 拍的
+        // viewed_before_tick 已经读不到旧值,原子回 main 得在这里补上。
+        const int viewed_before_entry = panel_session.SnapshotFor(nav_ids_for(panel_entries())).viewed_task_id;
         redraw_with_panel(editor.CurrentRenderState(), panel_entries());
+        if (viewed_before_entry != 0 &&
+            panel_session.SnapshotFor(nav_ids_for(panel_entries())).viewed_task_id == 0) {
+            // 原子回 main(规格"现场一/四"),与 tick 路同义。但锚点跨调用
+            // 不可信(期间可能整轮流式滚过屏),改走 Ctrl+L 的办法:清整个
+            // 可视区、main 帧重铺、重锚整帧重画——不按绝对行号硬擦,滚屏
+            // 历史照旧不清。回流轮的新输出已在 transcript 里,重铺时带出。
+            const std::optional<platform::ScreenInfo> clear_info = platform::GetScreenInfo();
+            if (clear_info.has_value()) {
+                const int vh =
+                    clear_info->viewport_height > 0 ? clear_info->viewport_height : clear_info->height;
+                const int top = clear_info->viewport_y;
+                for (int y = top; y < top + vh && y < clear_info->height; ++y) {
+                    platform::ClearRowHardFrom(0, y, clear_info->width);
+                }
+                platform::SetCursorPos(0, top);
+                view_body_top.reset();
+                print_view_frame(0);
+            }
+            reanchor_prompt_and_redraw();
+        }
     }
 
     // Ctrl+L 与 resize 共用的整屏重建(规格"整屏重画"节):作废帧锚点、清
@@ -1645,6 +1696,17 @@ void SetAgentPanelActions(AgentPanelActions actions) { AgentPanelActionsSlot() =
 void ResetAgentPanelSession() { PanelSessionSlot().Reset(); }
 
 std::optional<int> CurrentComposerAgentTarget() { return GetComposerTarget(); }
+
+int CurrentAgentViewedTaskId() {
+    // 会话层面板控制器的真状态,不跟某次 ReadLine 的生命周期:主循环在两次
+    // 读取之间(回流轮前后)问它,答案必须仍然准确。
+    return PanelSessionSlot().SnapshotFor({}).viewed_task_id;
+}
+
+void ShowPanelToast(const std::string& text) {
+    PanelToastSlot().text = text;
+    PanelToastSlot().until = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+}
 
 void SetIdleWakeHook(std::function<bool()> hook) { IdleWakeHookSlot() = std::move(hook); }
 

@@ -174,16 +174,22 @@ inline std::optional<FileDiffPreview> BuildFileDiffPreview(const std::string& na
 // 计时(run_command 耗时)、行统计(write/edit 的 "新增 N 行,删除 M 行")
 // 全在这一层做,tools/ 层一个字不动。
 struct ToolDisplay {
+    // silent(查看态回流单):静默收货档——条目照建、TranscriptItem 照进台账、
+    // 线程安全快照照更,但一个字节都不往终端写(painter 关死、管道模式那几
+    // 行稳定纯文本也不打、diff 预览不铺)。给"用户正看别的子代理、main 在
+    // 后台消化结果"的那一轮用;回 main 时台账重铺,条目全在。
     ToolDisplay(std::vector<lubancode::cli::TranscriptItem>& transcript_ref, const lubancode::cli::Theme& theme_ref,
                 bool console, std::shared_ptr<lubancode::tools::TodoListState> todo,
-                const std::atomic<bool>* cancel, const std::atomic<bool>* expanded = nullptr)
+                const std::atomic<bool>* cancel, const std::atomic<bool>* expanded = nullptr,
+                bool silent = false)
         : transcript(transcript_ref),
           theme(theme_ref),
           is_console(console),
-          painter(theme_ref, console, expanded),
+          painter(theme_ref, console && !silent, expanded),
           todo_state(std::move(todo)),
           cancel_flag(cancel),
           expanded_(expanded),
+          silent_(silent),
           transcript_snapshot_(transcript_ref) {}
 
     std::vector<lubancode::cli::TranscriptItem>& transcript;
@@ -192,6 +198,7 @@ struct ToolDisplay {
     TranscriptPainter painter;
     std::shared_ptr<lubancode::tools::TodoListState> todo_state;
     const std::atomic<bool>* cancel_flag = nullptr;
+    bool silent_ = false;
     // UI-D 折叠(#三):同一份 Ctrl+O 紧凑/详细全局开关(TranscriptPainter
     // 构造函数第三个参数那份,这里再存一份指针给 OnSubToolStart/Result/
     // Blocked 判断要不要把子代理内层工具条目画到屏幕上——紧凑态(默认)
@@ -246,7 +253,7 @@ struct ToolDisplay {
 
     void OnToolStart(const std::string& name, const nlohmann::json& input) {
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
-        if (!is_console) {
+        if (!is_console && !silent_) {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
             std::cout << "\n" << theme.tool_line << tr("pipe.tool_start") << name << " " << input.dump() << theme.reset
                       << "\n";
@@ -383,7 +390,7 @@ struct ToolDisplay {
         UpdateSnapshotItem(active_main);
         if (is_console) {
             painter.Repaint(item);
-        } else {
+        } else if (!silent_) {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
             std::cout << tr("pipe.tool_done") << name << ": " << PipeSummary(item, name) << "\n";
             // 管道模式沿用 M11 的行为:todo_write 成功后紧跟着把清单打出来,
@@ -429,7 +436,7 @@ struct ToolDisplay {
             UpdateSnapshotItem(active_thinking);
             if (is_console) {
                 painter.PaintNew(transcript[static_cast<std::size_t>(active_thinking)]);
-            } else {
+            } else if (!silent_) {
                 std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
                 std::cout << "\n" << theme.tool_line
                           << lubancode::cli::tr("transcript.thinking_running") << theme.reset << "\n";
@@ -483,7 +490,7 @@ struct ToolDisplay {
     void OnSubToolStart(const std::string& name, const nlohmann::json& input) {
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
         agent_sub_tools += 1;
-        if (!is_console) {
+        if (!is_console && !silent_) {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
             std::cout << "\n"
                        << theme.stats << tr("pipe.subtool_start") << name << " " << input.dump() << theme.reset
@@ -578,8 +585,8 @@ struct ToolDisplay {
     // OnConfirmAnswered 的 TrimBelow 带走。管道模式(is_console 为假)
     // 整个不打,保持稳定纯文本输出。
     void ShowDiffPreview(const std::string& name, const nlohmann::json& input, bool trim_on_done) {
-        if (!is_console) {
-            return;
+        if (!is_console || silent_) {
+            return;  // 管道模式保持稳定纯文本;静默档不铺预览(数据进 full_output 不丢)
         }
         const lubancode::cli::StreamFooterPaintScope footer_paint;
         const auto preview = BuildFileDiffPreview(name, input, theme);
