@@ -885,6 +885,49 @@ TEST_CASE("agent 工具:空闲时跑完的后台子代理,HasUndeliveredCompleti
     CHECK_FALSE(agent_tool.HasUndeliveredCompletions());  // 投递过就翻回假,不会反复唤醒
 }
 
+// 退场链钉死(查看态回流单第一桩):done+delivered 的坞行退场靠面板数据源
+// 按 TaskRevision 缓存拉新快照——DrainCompletionNotices 置 delivered 时若不
+// Touch 修订号,退场永远到不了屏上,行赖在坞里直到别的任务碰巧碰一下账。
+// 用户实测"看着 #2,#1 完成后坞里那行不退场"正是这一环断的。
+TEST_CASE("agent 工具:投递置位即 TouchTasks,面板修订号跟上,退场不再迟滞") {
+    tools::ToolRegistry sub_registry;
+    auto state = std::make_shared<BlockingBackendState>();
+    FakeBackend foreground_backend;  // 前台路径不触发,挂着只为构造
+    tools::AgentTool agent_tool(foreground_backend, sub_registry, "/work/dir");
+    agent_tool.SetDetachedBackendFactory([state]() {
+        tools::DetachedAgentBackend detached;
+        detached.backend = std::make_unique<BlockingBackend>(state);
+        return detached;
+    });
+
+    CHECK(agent_tool.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "后台摸排"}, {"run_in_background", true}})
+              .content.find("#1") != std::string::npos);
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->release = true;
+    }
+    state->ready.notify_all();
+    for (int i = 0; i < 100 && agent_tool.HasRunningTasks(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE_FALSE(agent_tool.HasRunningTasks());
+
+    // 未投递任务号口子(toast 报"谁完成了"用):peek 不置位。
+    REQUIRE(agent_tool.UndeliveredCompletionTaskIds() == std::vector<int>{1});
+
+    const std::uint64_t revision_before = agent_tool.TaskRevision();
+    (void)agent_tool.DrainCompletionNotices();
+    // delivered 一翻,修订号必须跟上——面板(BuildAgentPanelEntries 的缓存)
+    // 只认修订号,不 Touch 就看不见退场。
+    CHECK(agent_tool.TaskRevision() != revision_before);
+    CHECK(agent_tool.UndeliveredCompletionTaskIds().empty());
+
+    // 再 Drain 无货:不动账,修订号原地不动(不该无端触发面板重拉)。
+    const std::uint64_t revision_after = agent_tool.TaskRevision();
+    CHECK(agent_tool.DrainCompletionNotices().empty());
+    CHECK(agent_tool.TaskRevision() == revision_after);
+}
+
 // ---------------------------------------------------------------------------
 // 统一台账(规格二):前台任务也进 TaskRecord,面板/详情/统计全认同一本账。
 // ---------------------------------------------------------------------------

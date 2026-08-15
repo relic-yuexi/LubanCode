@@ -221,6 +221,12 @@ std::string ImageInputErrorText(const lubancode::cli::ImageInputError& error);
 // 还没看见),换成 atomic<bool> 用 load/store 的 acquire/release 语义堵上。
 // allow_commands/deny_commands:settings.local.json 的 run_command 前缀白/黑
 // 名单,原样递给 BuildCallbacks 的确认回调叠加判定(缺省空表 = 无叠加)。
+// silent(查看态回流单):静默收货档——给"用户正查看别的子代理、main 在
+// 后台消化后台结果"的那一轮用。轮子照常跑(模型请求、工具执行、usage/
+// context 记账、Hooks、确认交互一个不少),但一切装饰性输出不上屏:分界
+// 线/统计行不打、流式 footer 不起、心跳不跳、正文与工具卡只进 transcript
+// 台账(StreamBodyTracker 攒正文,收口时归档成一条 assistant 条目),回
+// main 时重铺可见。错误路径的 std::cerr 照打——错要让人看见,不静默吞。
 RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bool auto_confirm,
                        std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
                        lubancode::cli::ContextTracker& context_tracker, lubancode::tools::ToolRegistry& registry,
@@ -231,6 +237,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                        const std::vector<std::string>& allow_commands = {},
                        const std::vector<std::string>& deny_commands = {},
                        lubancode::tools::AgentTool* completion_agent = nullptr,
-                       lubancode::agent::WorkflowRecorder* recorder = nullptr);
+                       lubancode::agent::WorkflowRecorder* recorder = nullptr,
+                       bool silent = false);
 
 }  // namespace lubancode::app

@@ -5,6 +5,7 @@
 #include "app/turn_runner.hpp"
 
 #include <cctype>
+#include <chrono>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -769,7 +770,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                        const std::vector<std::string>& allow_commands,
                        const std::vector<std::string>& deny_commands,
                        lubancode::tools::AgentTool* completion_agent,
-                       lubancode::agent::WorkflowRecorder* recorder) {
+                       lubancode::agent::WorkflowRecorder* recorder, bool silent) {
     auto prepared_input = lubancode::cli::PrepareImageInput(user_input);
     if (!prepared_input.has_value()) {
         std::cerr << theme.error << tr("error.prefix") << ImageInputErrorText(prepared_input.error())
@@ -777,8 +778,10 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
         return RunTurnResult{1};
     }
     for (const auto& image : prepared_input->attachments) {
-        std::cout << theme.stats << trf("image.attached", image.filename, image.width, image.height)
-                  << theme.reset << "\n";
+        if (!silent) {
+            std::cout << theme.stats << trf("image.attached", image.filename, image.width, image.height)
+                      << theme.reset << "\n";
+        }
     }
     const std::string background_results =
         completion_agent != nullptr ? completion_agent->DrainCompletionNotices() : std::string();
@@ -812,11 +815,12 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     // cancel_flag 先于 display/callbacks 建:ToolDisplay 要拿它判断"这一轮
     // 是不是被 ESC 打断的"(打断态条目标 Interrupted)。
     std::atomic<bool> cancel_flag{false};
-    ToolDisplay display(transcript, theme, is_console, todo_state, &cancel_flag, transcript_expanded);
+    ToolDisplay display(transcript, theme, is_console, todo_state, &cancel_flag, transcript_expanded, silent);
     // markdown:正文两段式渲染的记账员。渲染只活在真控制台 + 彩色主题——
     // 管道/重定向(is_console 为假)和 plain 主题(theme.reset 空)全部
-    // enabled=false,正文原样输出,一个字节不动。
-    StreamBodyTracker body_tracker(theme, is_console && !theme.reset.empty());
+    // enabled=false,正文原样输出,一个字节不动。silent 档正文不上屏,
+    // 只攒进台账(见 StreamBodyTracker 注释)。
+    StreamBodyTracker body_tracker(theme, is_console && !theme.reset.empty(), silent);
     // hooks 上下文:这一轮的 turn_id 换新(session_id 等会话字段保持会话层
     // 设好的值),确认档可能被 Shift+Tab 切过,按当前值报。
     if (hook_dispatcher != nullptr && !hook_dispatcher->Empty()) {
@@ -843,13 +847,14 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
 
     // 用户这一行已经提交、真要开始等模型作答了——分界线打在这儿,紧跟在
     // 提示符那一行之后、模型正文开始打字机输出之前。
-    PrintDivider(theme, is_console);
+    PrintDivider(theme, is_console && !silent);
 
     // 0.21.x 流式脚注:流式期间在正文下方常驻一行"⎋ 打断 · 键入并回车 排队
     // 下一条",让用户看见能 ESC 打断、能键入排队(回归前屏上啥都没有)。只在
     // Windows 真控制台开——footer 要随时查光标位,POSIX 走 DSR 6n 会跟监听
-    // 线程抢 stdin,跟 StreamBodyTracker 的重画一样诚实关掉。
-    lubancode::cli::BeginStreamFooter(theme, is_console && lubancode::platform::SupportsScreenRepaint());
+    // 线程抢 stdin,跟 StreamBodyTracker 的重画一样诚实关掉。静默档不起
+    // footer:屏幕此刻归用户正看的查看帧,main 的回流轮一个字节不铺。
+    lubancode::cli::BeginStreamFooter(theme, is_console && lubancode::platform::SupportsScreenRepaint() && !silent);
 
     // 子代理状态的心跳:旧 AgentStatusBoard/AgentStatusPainter 那套 400ms
     // ticker 已删,前台/后台子代理状态全在 AgentTool 统一台账里、由 footer
@@ -888,7 +893,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     private:
         std::atomic<bool> stop_{false};
         std::thread thread_;
-    } footer_heartbeat(is_console && lubancode::platform::SupportsScreenRepaint());
+    } footer_heartbeat(is_console && lubancode::platform::SupportsScreenRepaint() && !silent);
 
     // 监听线程:流式期间的面板按键、排队/打断都在它手里(键位优先级见
     // TurnInputListener::ThreadMain)。
@@ -918,7 +923,46 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
         body_tracker.FinalizeRepaint();
     }
 
-    std::cout << "\n";
+    // 静默档收尾:正文一个字都没上过屏,但一个字也不能丢——整段归档成一条
+    // transcript 条目(工具条目与思考块本来就进了台账),回 main 重铺/Ctrl+E
+    // 聚焦查看全都能看见。打断/报错的半截话照归,状态如实标。
+    if (silent) {
+        std::string silent_body = body_tracker.TakeSilentBody();
+        if (!silent_body.empty()) {
+            lubancode::cli::TranscriptItem item;
+            item.id = static_cast<int>(transcript.size()) + 1;
+            item.kind = lubancode::cli::TranscriptKind::Tool;
+            item.tool_name = "assistant";
+            item.title = tr("transcript.assistant_bg_title");
+            item.status = !result.has_value() ? lubancode::cli::TranscriptStatus::Error
+                          : result->cancelled ? lubancode::cli::TranscriptStatus::Interrupted
+                                              : lubancode::cli::TranscriptStatus::Ok;
+            item.start_time = item.end_time = std::chrono::steady_clock::now();
+            item.full_output = std::move(silent_body);
+            // 紧凑档摘要:正文头两行,每行掐 120 码点——渲染层还会按终端宽
+            // 截,这里先兜住 Ctrl+E(不截宽)那一路。
+            std::size_t cursor = 0;
+            for (int taken = 0; taken < 2 && cursor < item.full_output.size(); ++taken) {
+                std::size_t cut = item.full_output.find('\n', cursor);
+                const std::string line = item.full_output.substr(cursor, cut == std::string::npos
+                                                                            ? std::string::npos
+                                                                            : cut - cursor);
+                if (!line.empty()) {
+                    item.summary_lines.push_back(
+                        lubancode::cli::TruncateUtf8Codepoints(line, 120));
+                }
+                if (cut == std::string::npos) {
+                    break;
+                }
+                cursor = cut + 1;
+            }
+            transcript.push_back(std::move(item));
+        }
+    }
+
+    if (!silent) {
+        std::cout << "\n";
+    }
 
     if (!result.has_value()) {
         std::cerr << theme.error << tr("error.prefix") << result.error() << theme.reset << "\n";
@@ -977,7 +1021,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
         }
     }
 
-    if (usage_stats.request_count() > 0) {
+    if (usage_stats.request_count() > 0 && !silent) {
         // 0.17.0:token 数字统一 k 化(cli::FormatTokenCount),超过 10k 的
         // 数字不再铺一长串数位。i18n:整行进表(stats.line),缓存命中那一节
         // 有则先按 stats.cache 拼好塞进 {1},没有就是空串。
@@ -999,7 +1043,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     }
     // 回合正常结束(不是上面那条 !result.has_value() 的报错早退)——统计行
     // 之后再打一条分界线,跟开头那条首尾呼应,把这一问一答框完整。
-    PrintDivider(theme, is_console);
+    PrintDivider(theme, is_console && !silent);
     return out;
 }
 

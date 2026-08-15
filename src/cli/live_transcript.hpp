@@ -477,16 +477,30 @@ public:
     // 原地重画不开的平台(POSIX,见 platform::SupportsScreenRepaint 注释)
     // 直接按 enabled=false 走:OnDelta 退化成"拿锁原样打印",信息不丢,
     // 跟老版本非 Windows 分支逐字节一致。
-    StreamBodyTracker(const lubancode::cli::Theme& theme, bool enabled)
-        : theme_(theme), enabled_(enabled && lubancode::platform::SupportsScreenRepaint()) {}
+    // silent(查看态回流单):正文一个字节都不上屏——只攒进 silent_body_,
+    // 收口时由调用方取走进台账。用户此刻正看别的子代理的查看帧,main 的
+    // 回流输出不能糊上去;数据不能丢,回 main 重铺要看得见。
+    StreamBodyTracker(const lubancode::cli::Theme& theme, bool enabled, bool silent = false)
+        : theme_(theme), enabled_(enabled && lubancode::platform::SupportsScreenRepaint()), silent_(silent) {}
 
     StreamBodyTracker(const StreamBodyTracker&) = delete;
     StreamBodyTracker& operator=(const StreamBodyTracker&) = delete;
+
+    // 静默档攒下的正文全文(截 kFullOutputCapBytes);非静默档恒空串。
+    std::string TakeSilentBody() { return std::move(silent_body_); }
 
     // 流式正文增量:原样打印 + 记账。M10 的锁规矩不变——流式期间的
     // std::cout 写都拿 StdoutWriteMutex,跟监听线程的 "[已打断]"/"[已排队]"
     // 错开。
     void OnDelta(const std::string& text) {
+        if (silent_) {
+            silent_body_ += text;
+            if (silent_body_.size() > lubancode::cli::kFullOutputCapBytes) {
+                silent_body_ = lubancode::cli::TruncateUtf8Bytes(silent_body_,
+                                                                lubancode::cli::kFullOutputCapBytes);
+            }
+            return;  // 不打印、不碰 footer、不动行数账——屏幕此刻归查看帧
+        }
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         // 0.21.x 流式脚注:正文落笔前先把脚注那行擦掉(免得跟正文抢行/被正文
         // 顶到中间),落笔后再重画到正文下方——见 console_input.hpp 注释。
@@ -732,6 +746,8 @@ private:
 
     const lubancode::cli::Theme& theme_;
     bool enabled_;
+    bool silent_ = false;
+    std::string silent_body_;
     bool in_block_ = false;
     bool unsafe_ = false;
     int start_row_ = 0;

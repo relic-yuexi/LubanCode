@@ -322,6 +322,138 @@ TEST_CASE("footer 挂起期间发布:数据更新,一个字节都不落笔;恢�
 }
 
 // ---------------------------------------------------------------------------
+// RunTurn 静默档(查看态下的后台回流单):用户正看某只子代理时,main 的
+// 回流轮照常跑(模型请求、usage/context 记账),但一切输出只进 transcript
+// 台账、一个字节不上屏;正文归档成 assistant 条目,回 main 重铺可见。
+// ---------------------------------------------------------------------------
+
+// 不需确认的假工具:静默档里真跑一遍,断言条目照进台账。
+class QuietProbeTool : public tools::Tool {
+public:
+    std::string name() const override { return "quiet_probe"; }
+    std::string description() const override { return "probe"; }
+    nlohmann::json input_schema() const override { return nlohmann::json::object(); }
+    bool needs_confirm() const override { return false; }
+    tools::Tool::Result execute(const nlohmann::json& input) override {
+        ++calls;
+        last_input = input;
+        return {"探针完成", false};
+    }
+
+    int calls = 0;
+    nlohmann::json last_input = nlohmann::json::object();
+};
+
+TEST_CASE("RunTurn 静默档:正文与统计不上屏,归档成 assistant 条目,usage 照记") {
+    FakeBackend backend;
+    backend.scripts = {TextOnlyScript("结论:方案可行。\n依据有三。", api::Usage{400, 60})};
+    tools::ToolRegistry registry;
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    cli::ContextTracker tracker(1000);
+    std::set<std::string> always_allowed;
+    std::vector<cli::TranscriptItem> transcript;
+    std::atomic<bool> expanded{false};
+
+    std::ostringstream captured;
+    std::streambuf* const old_buf = std::cout.rdbuf(captured.rdbuf());
+    const app::RunTurnResult result =
+        app::RunTurn(loop, "后台子代理有新结果送达", /*auto_confirm=*/false, always_allowed, cli::Theme{}, tracker,
+                    registry, /*hook_dispatcher=*/nullptr, /*is_console=*/false, transcript,
+                    /*todo_state=*/nullptr, &expanded, /*allow_commands=*/{}, /*deny_commands=*/{},
+                    /*completion_agent=*/nullptr, /*recorder=*/nullptr, /*silent=*/true);
+    std::cout.rdbuf(old_buf);
+
+    CHECK(result.status == 0);
+    CHECK(captured.str().empty());           // 静默收货:一个字节都没上屏(查看帧零扰动)
+    CHECK(tracker.current_tokens() == 460);  // context 照常入账(第三桩是上游症状,这里钉死通路)
+    CHECK(cli::SnapshotStatusLineValues().used_tokens == 460);  // 状态行数据源同步发布
+
+    // 正文归档成 assistant 条目:回 main 时重铺/Ctrl+E 全文可见(不静默丢输出)。
+    REQUIRE(transcript.size() == 1);
+    CHECK(transcript[0].tool_name == "assistant");
+    CHECK(transcript[0].status == cli::TranscriptStatus::Ok);
+    CHECK(transcript[0].full_output.find("方案可行") != std::string::npos);
+    REQUIRE(transcript[0].summary_lines.size() == 2);
+    CHECK(transcript[0].summary_lines[0] == "结论:方案可行。");
+    CHECK(transcript[0].summary_lines[1] == "依据有三。");
+}
+
+TEST_CASE("RunTurn 非静默对照:同一轮照常上屏,不因静默档的闸误伤正路") {
+    FakeBackend backend;
+    backend.scripts = {TextOnlyScript("正常轮的正文", api::Usage{100, 10})};
+    tools::ToolRegistry registry;
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    cli::ContextTracker tracker(1000);
+    std::set<std::string> always_allowed;
+    std::vector<cli::TranscriptItem> transcript;
+    std::atomic<bool> expanded{false};
+
+    std::ostringstream captured;
+    std::streambuf* const old_buf = std::cout.rdbuf(captured.rdbuf());
+    const app::RunTurnResult result =
+        app::RunTurn(loop, "用户的话", /*auto_confirm=*/false, always_allowed, cli::Theme{}, tracker, registry,
+                     /*hook_dispatcher=*/nullptr, /*is_console=*/false, transcript,
+                     /*todo_state=*/nullptr, &expanded, /*allow_commands=*/{}, /*deny_commands=*/{},
+                     /*completion_agent=*/nullptr, /*recorder=*/nullptr, /*silent=*/false);
+    std::cout.rdbuf(old_buf);
+
+    CHECK(result.status == 0);
+    CHECK(captured.str().find("正常轮的正文") != std::string::npos);  // 正文照打
+    CHECK(captured.str().find("100") != std::string::npos);           // 统计行照打(输入 100)
+    CHECK(tracker.current_tokens() == 110);
+    CHECK(transcript.empty());  // 非静默档不归档 assistant 条目(正文已在屏上)
+}
+
+TEST_CASE("RunTurn 静默档:工具与思考只进台账,工具真执行、条目齐全") {
+    FakeBackend backend;
+    backend.scripts = {
+        {
+            api::MessageStart{"msg", "model"},
+            api::ThinkingDelta{"想一想再动手"},
+            api::ContentBlockDone{0},
+            api::ToolUseStart{1, "toolu_1", "quiet_probe"},
+            api::ToolUseInputDelta{1, "{\"n\":7}"},
+            api::ContentBlockDone{1},
+            api::MessageDone{"tool_use", api::Usage{200, 30}},
+        },
+        TextOnlyScript("干完了。", api::Usage{150, 20}),
+    };
+    QuietProbeTool* probe = new QuietProbeTool();
+    tools::ToolRegistry registry;
+    registry.Register(std::unique_ptr<QuietProbeTool>(probe));
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    cli::ContextTracker tracker(1000);
+    std::set<std::string> always_allowed;
+    std::vector<cli::TranscriptItem> transcript;
+    std::atomic<bool> expanded{false};
+
+    std::ostringstream captured;
+    std::streambuf* const old_buf = std::cout.rdbuf(captured.rdbuf());
+    const app::RunTurnResult result =
+        app::RunTurn(loop, "后台子代理有新结果送达", /*auto_confirm=*/true, always_allowed, cli::Theme{}, tracker,
+                    registry, /*hook_dispatcher=*/nullptr, /*is_console=*/false, transcript,
+                    /*todo_state=*/nullptr, &expanded, /*allow_commands=*/{}, /*deny_commands=*/{},
+                    /*completion_agent=*/nullptr, /*recorder=*/nullptr, /*silent=*/true);
+    std::cout.rdbuf(old_buf);
+
+    CHECK(result.status == 0);
+    CHECK(captured.str().empty());      // 工具卡/思考块/正文全都没上屏
+    CHECK(probe->calls == 1);           // 工具真执行了(静默是显示档,不是跳过)
+    REQUIRE(probe->last_input.value("n", 0) == 7);
+
+    // 台账齐全:思考块 + 工具条目 + assistant 正文条目。
+    REQUIRE(transcript.size() == 3);
+    CHECK(transcript[0].kind == cli::TranscriptKind::Thinking);
+    CHECK(transcript[0].full_output == "想一想再动手");
+    CHECK(transcript[1].kind == cli::TranscriptKind::Tool);
+    CHECK(transcript[1].tool_name == "quiet_probe");
+    CHECK(transcript[1].status == cli::TranscriptStatus::Ok);
+    CHECK(transcript[2].tool_name == "assistant");
+    CHECK(transcript[2].full_output == "干完了。");
+    CHECK(tracker.current_tokens() == 170);  // 两次请求的 usage 都入账(覆盖式:150+20)
+}
+
+// ---------------------------------------------------------------------------
 // 流式 Shift+Tab 切档:与空闲路同一枚 SharedEditor 档位、同一个轮转纯函数
 // ---------------------------------------------------------------------------
 
