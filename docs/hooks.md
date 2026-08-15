@@ -97,6 +97,50 @@ cli_app(会话起落)         HookRunRecord(全程留痕)
 
 工具事件再带 `tool_input`(以及 PostToolUse 的 `tool_response`/`tool_succeeded`);SessionStart 带 `source`;SessionEnd 带 `reason`;Pre/PostCompact 带 `trigger`;SubagentStart/Stop 带 `agent_id`/`agent_type`/`parent_agent_id`(Stop 另带 `agent_transcript_path`/`last_assistant_message`/`stop_hook_active`);Stop 带 `stop_hook_active`/`last_assistant_message`;UserPromptSubmit 带 `prompt`。`agent_id` 非空 = 子代理触发(主代理为 null),主/子不会串账。
 
+工具事件再带 `tool_input`(以及 PostToolUse 的 `tool_response`/`tool_succeeded`);SessionStart 带 `source`;SessionEnd 带 `reason`;Pre/PostCompact 带 `trigger`;SubagentStart/Stop 带 `agent_id`/`agent_type`/`parent_agent_id`(Stop 另带 `agent_transcript_path`/`last_assistant_message`/`stop_hook_active`);Stop 带 `stop_hook_active`/`last_assistant_message`;UserPromptSubmit 带 `prompt`。`agent_id` 非空 = 子代理触发(主代理为 null),主/子不会串账。
+
+### 编码契约(Windows 必读):stdin 是 UTF-8 无 BOM 字节流
+
+宿主往 hook 的 stdin 写的是 **UTF-8、无 BOM** 的原始字节——不按当前 OEM/ANSI 代码页转换,也不猜。中文、emoji、反斜杠、换行、超长 prompt(32KB+)都按字节原样进管道。
+
+但 Windows 上的解释器**默认不按 UTF-8 读管道**:PowerShell 5.1 用 `[Console]::InputEncoding`(中文机器上是 gb2312/GBK)解码重定向的 stdin,直接 `$input` / `[Console]::In.ReadToEnd()` 会把中文读成乱码,`ConvertFrom-Json` 随之报错。hook 脚本必须**明示按 UTF-8 读**。四种写法的最小例子:
+
+**PowerShell 5.1**(拿 StreamReader 明示 UTF-8,不依赖控制台状态):
+
+```powershell
+$reader = New-Object IO.StreamReader([Console]::OpenStandardInput(), (New-Object Text.UTF8Encoding $false))
+$payload = $reader.ReadToEnd() | ConvertFrom-Json
+$payload.prompt   # 中文、emoji 原样到达
+```
+
+**pwsh 7**(重定向 stdin 默认就是 UTF-8;显式写法与上面同款,最稳):
+
+```powershell
+$payload = [Console]::In.ReadToEnd() | ConvertFrom-Json
+```
+
+**Python**(按字节读再解码,不碰 locale):
+
+```python
+import sys, json
+payload = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+print(payload["prompt"])   # 如需往 stdout 写中文/emoji:
+sys.stdout.reconfigure(encoding="utf-8")  # 先这一行,再 print
+```
+
+**Node**(块累积成 Buffer,按 UTF-8 转字符串):
+
+```javascript
+let raw = [];
+process.stdin.on("data", (chunk) => raw.push(chunk));
+process.stdin.on("end", () => {
+  const payload = JSON.parse(Buffer.concat(raw).toString("utf8"));
+  console.log(payload.prompt);
+});
+```
+
+反向同样成立:宿主按"先认 UTF-8"的明示策略解 hook 的 stdout/stderr(见下节)。hook 要往 stdout 写含中文的 JSON,也得按 UTF-8 写——PowerShell 先 `[Console]::OutputEncoding = [Text.Encoding]::UTF8` 再输出,或用 `[IO.File]`/`[Console]::OpenStandardOutput()` 写字节;Python 用 `sys.stdout.reconfigure(encoding="utf-8")` 或 `sys.stdout.buffer.write(...)`。
+
 ### 输出:stdout JSON + 退出码
 
 ```
@@ -212,3 +256,5 @@ cli_app(会话起落)         HookRunRecord(全程留痕)
 7. `/hooks runs` 看运行记录;`/hooks disable #N` 后该钩子记 skipped_disabled。
 8. /clear、/resume、/compact、自动压缩各走一遍,钩子(SessionStart matcher=resume/clear/compact、PreCompact manual/auto)各命中各的。
 9. 大 tool input(>32KB)经 stdin 到钩子,原样可达(环境变量路径早撑爆了)。
+10. 中文 prompt("只回复 OK，不调用工具")经 UserPromptSubmit 钩子原样到达:PowerShell 5.1 / pwsh 7 / Python 三支钩子各配一遍,照"编码契约"一节的例程读 stdin,`/hooks runs` 里该条 outcome=ok;故意用 `$input` 直读(不按契约)会看到乱码——那是脚本没按契约读,不是宿主写错。
+11. emoji(如 🎉)、反斜杠路径、带换行的 prompt 各试一遍;钩子 stderr 里打中文,`/hooks runs` 的 stderr 首段不乱码。
