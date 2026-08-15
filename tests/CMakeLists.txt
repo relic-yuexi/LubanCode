@@ -15,6 +15,7 @@ add_executable(lubancode_tests
   test_ask_user.cpp
   test_search.cpp
   test_context.cpp
+  test_context_events.cpp
   test_config.cpp
   test_model_catalog.cpp
   test_provider_catalog.cpp

@@ -212,8 +212,17 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
             on_context_pressure_(pressure);
         }
 
+        // 无损结构压缩(第二期):只改发给模型的视图——冷区里重复的只读
+        // 工具结果换引用、被新版本覆盖的旧读取标 superseded、超长结果换
+        // artifact 引用(头尾预览)。活历史与 session JSONL 一字不动,
+        // tool use/result 配对天然不破(只重写 result 的 content 字符串)。
+        // 压完的视图更小,后面 TrimHistory 的字符安全网也更少真开刀。
+        const std::vector<api::Message>& view_source =
+            structural_compression_enabled_ ? CompressWorkingView(history_, structural_options_, structural_stats_)
+                                            : history_;
         TrimReport trim_report;
-        request.messages = TrimHistory(history_, max_context_chars_, kDefaultKeepRecentTurns, &trim_report);
+        request.messages =
+            TrimHistory(view_source, max_context_chars_, kDefaultKeepRecentTurns, &trim_report);
         request.max_tokens = max_tokens_;
         // 有损硬裁发生了(丢轮/截结果),显式通报——静默降级会让用户以为语
         // 义压缩已成功,模型其实已经看不到那段原文。

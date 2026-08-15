@@ -4,6 +4,7 @@
 #include <iostream>
 
 #include "agent/compact.hpp"
+#include "agent/context_events.hpp"
 #include "config/config.hpp"
 #include "cli/spinner.hpp"
 #include "cli/transcript.hpp"
@@ -77,6 +78,7 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
 }
 
 // /compact 命令:窗口预算 + manifest 守恒校验 + 热区保留,一条路走到底。
+// --dry-run 只算结构压缩的可回收量与钉住项,不发请求、不改历史。
 CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::agent::AgentLoop& loop,
                                           lubancode::api::Backend& raw_backend, const std::string& compact_model,
                                           const lubancode::cli::Theme& theme, bool spinner_enabled,
@@ -86,11 +88,40 @@ CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::ag
         std::cout << tr("cmd.compact.empty") << "\n";
         return {};
     }
+
+    // --dry-run [--focus 文本] / --dry-run:只算不动手。
+    bool dry_run = false;
+    std::string focus = args;
+    if (args == "--dry-run") {
+        dry_run = true;
+        focus.clear();
+    } else if (args.rfind("--dry-run ", 0) == 0) {
+        dry_run = true;
+        focus = args.substr(std::string("--dry-run ").size());
+    }
+    if (dry_run) {
+        lubancode::agent::StructuralCompressionOptions struct_options;
+        lubancode::agent::StructuralCompressionStats struct_stats;
+        (void)lubancode::agent::CompressWorkingView(history, struct_options, struct_stats);  // 只要账
+        const std::size_t hot_from = lubancode::agent::HotZoneStartIndex(history);
+        std::vector<lubancode::api::Message> hot(history.begin() + static_cast<std::ptrdiff_t>(hot_from),
+                                                 history.end());
+        std::cout << tr("cmd.compact.dryrun.header") << "\n";
+        std::cout << trf("cmd.compact.dryrun.reclaim", struct_stats.reclaimable_bytes(),
+                         struct_stats.duplicate_groups, struct_stats.superseded_observations,
+                         struct_stats.offloaded_results)
+                  << "\n";
+        std::cout << trf("cmd.compact.dryrun.pinned", lubancode::agent::EstimateHistoryTokens(hot),
+                         options.required_open_items.size())
+                  << "\n";
+        return {};
+    }
+
     const std::size_t before_tokens = EstimateHistoryTokens(history);
     const std::size_t old_size = history.size();
 
     lubancode::agent::CompactOptions run_options = options;
-    run_options.focus = args;
+    run_options.focus = focus;
 
     lubancode::cli::Spinner spinner(theme, spinner_enabled);
     const auto result = lubancode::agent::Compact(raw_backend, compact_model, history, run_options);

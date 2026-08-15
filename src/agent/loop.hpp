@@ -15,6 +15,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agent/context.hpp"
+#include "agent/context_events.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "tools/registry.hpp"
@@ -220,6 +221,15 @@ public:
     // 照旧只是没人听见。
     void SetOnContextPressure(OnContextPressure hook) { on_context_pressure_ = std::move(hook); }
 
+    // 无损结构压缩(0.31.x 第二期):默认开。每次请求前把"发给模型的
+    // 视图"里的重复工具结果、被覆盖的旧版读取、超长结果换成引用与预览
+    // (agent/context_events.hpp);活历史 history_ 与 session JSONL 一字
+    // 不动,tool use/result 配对不破。关掉 = 视图与从前逐字节一致。
+    void SetStructuralCompressionEnabled(bool enabled) { structural_compression_enabled_ = enabled; }
+    void SetStructuralCompressionOptions(const StructuralCompressionOptions& options) {
+        structural_options_ = options;
+    }
+
 private:
     api::Backend& backend_;
     tools::ToolRegistry& registry_;
@@ -230,6 +240,9 @@ private:
     int max_turns_;
     std::size_t max_context_chars_;
     std::size_t context_window_tokens_ = 0;  // mid-turn 评估用;0 = 未知,不评估
+    bool structural_compression_enabled_ = true;  // 无损结构压缩(工作视图)
+    StructuralCompressionOptions structural_options_{};
+    StructuralCompressionStats structural_stats_{};  // 最近一次请求的结构压缩账(观测用)
     std::vector<api::Message> history_;
     OnContextPressure on_context_pressure_;
     std::function<bool(const tools::Tool&)> tool_filter_;  // tool_search:空 = 不过滤,全量直挂
