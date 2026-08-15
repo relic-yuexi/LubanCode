@@ -1,0 +1,359 @@
+# 多智能体会话视图与导航状态回归
+
+状态：待做（2026-08-16 真实终端截图回归；基线 `36620fb`，`lubancode 0.26.0`）
+
+## 这张单管什么
+
+上一轮《子代理导航贴底并整帧去重》《子代理真切会话、完成退场与失败预算》已经销单。真实终端一跑，旧病仍在，又添了几处状态错乱。
+
+这回不再把“能画出代理列表”当完工。须把三本账分清：
+
+```text
+selected_task_id   方向键正指着谁
+viewed_task_id     上方正显示谁的会话
+active_task_ids    哪些任务还该留在底部导航坞
+```
+
+三者各管一事。方向键不能偷换会话，完成任务不能长住活动坞，子代理也不能只剩一串工具流水。
+
+## 实测办法
+
+没有跑仓库自带 `tests`。另建了一处小目录：
+
+```text
+C:\Users\moontidef\AppData\Local\Temp\lubancode-multiagent-manual-20260816
+├─ alpha\brief.md / implementation.md / review.md / tasks.md
+└─ beta\brief.md  / implementation.md / review.md / tasks.md
+```
+
+在 Windows Terminal 启动 release 二进制，叫 main 派两只后台代理，各读一边文件。随后逐拍截图：派出、运行、完成、选中、Enter 切入、Esc 返回、终端重排。
+
+本轮截图留在同一临时目录，编号 `01` 至 `22`。其中几张最能说明问题：
+
+- `05-after-completion.png`：完成通知、完成尾巴与旧思考行同时留在主正文。
+- `12-zoomed-out.png`：缩小字号后才露出 composer 与底部导航；正常字号时它们已被长正文顶出视口。
+- `13-select-alpha.png`、`14-agent-view-small.png`：视口在代理工具流水与 main 之间跳，重排后所看会话守不住。
+- `15-enter-alpha.png`：进入 Alpha 后，上方只有任务说明和原始工具流水。
+- `16-esc-from-alpha.png`、`17-second-esc.png`：按 Esc 后，屏上仍停在 Alpha 工具流水，用户看不出已经回 main。
+
+截图只作现场证据，不作自动验收依赖。临时目录会消失，正式回归须另写小型黑盒驱动。
+
+## 现场一：完成任务不退场
+
+两只代理都已完成，底部仍长期摆着：
+
+```text
+○ general-purpose #1  核对 Alpha 约束
+○ general-purpose #2  核对 Beta 约束
+```
+
+这不是偶发残影。代码明写着要保留：
+
+- `BuildAgentPanelEntries()` 把 `TaskSummaries()` 全数塞进面板，终态也不筛。
+- `DockNavigationIds()` 把正常完成算作 `idle`。
+- `kMaxIdleRows = 3`，所以前三只完成任务会一直占住底栏。
+
+用户要的不是一册任务坟场。底栏只管正在干活的会话。任务正常完成，结果交回 main，底栏那行便自动退场。
+
+### 新规矩
+
+```text
+running                 留在活动导航坞
+done + result delivered 从活动导航坞退场
+failed / exhausted      留一条短错，等用户查看或清理
+cancelled               短暂提示后退场
+```
+
+退场只是从活动坞隐藏，不是抹掉台账。旧 transcript、用量、错误与任务 id 仍可从任务历史或主会话完成事件查到。
+
+若用户正看着一只代理，它恰好完成：
+
+1. 结果只交回 main 一次。
+2. composer 目标立刻回 main，不能再把字送给终态任务。
+3. 上方回 main，并给一枚短 toast：“#N 已完成”。
+4. 活动坞删掉该行，选择落到相邻运行项；没有便落 main。
+5. 不把整份完成代理详情永久铺进 scrollback。
+
+## 现场二：方向键竟会改掉当前会话
+
+用户定的交互很清楚：
+
+```text
+先看 agent #1
+按 Down，只把选择光标移到 agent #2
+上方仍看 agent #1
+再按 Enter，才切到 agent #2
+```
+
+现行实现做不到。`src/cli/agent_panel.cpp::AgentPanelController::HandleKey()` 在 `Up/Down` 分支里直接写：
+
+```cpp
+viewed_task_id_ = 0;  // 换选择 = 离开旧查看态,视口先回 main
+```
+
+这行须删。选中态与查看态本来就不是一回事。Claude Code 也是两枚视觉状态：pointer 管选择，实心标记管正在查看。
+
+### 按键契约
+
+```text
+Up/Down  只改 selected_task_id；不改 viewed_task_id，不改 composer_target
+Enter    viewed_task_id = selected_task_id；这时才换上方会话与收件目标
+Esc      viewed_task_id = 0，selected_task_id = 0，可靠回 main
+x        只作用于 selected_task_id，不得误伤 viewed_task_id 指向的另一只
+```
+
+方向键游走时，底栏须同时画清两件事：
+
+- `❯`：下一次 Enter 会打开谁。
+- `◉`：上方此刻正在看谁、输入将发给谁。
+
+两枚标记可以落在不同的行。不能拿颜色含混过去。
+
+## 现场三：Enter 进去的不是“同款会话”
+
+用户要的是：子代理同 main 一样显示。该有用户消息、助手文字、思考、工具卡、工具结果、后续介入、最终答话；时间顺序也一样。
+
+现行 `BuildAgentTaskTranscriptLines()` 只拼五块：
+
+```text
+标题
+[后台]
+任务说明
+工具调用流水
+结论/输出
+```
+
+数据源 `AgentTaskSnapshot` 也只留 `prompt`、`tool_calls`、`live_output/result`。故而屏上只能看见大段原始 JSON、路径和文件全文。助手中间说过什么，何时收到 main 的补话，何时转折，统统不见。
+
+这不是 transcript，只是一张审计详情页。
+
+### 改法
+
+每只子代理都须有独立的、按时间追加的消息账。事件类型与 main 对齐：
+
+```text
+user_message
+assistant_reasoning
+assistant_text
+tool_start
+tool_result
+steering_message
+compact_checkpoint
+completion / failure
+```
+
+上方会话视口须复用 main 的 `TranscriptItem`、折叠规则、宽字符处理与工具卡 renderer。不要再由 `BuildAgentTaskTranscriptLines()` 手搓第二套长文本。
+
+任务详情仍可留，但另作详情动作。它不能冒充会话，更不能成为 Enter 默认页。
+
+同 main 的意思不是把 main history 复制给代理。两边各有独立消息账，共用一套显示组件。
+
+## 现场四：回 main 在视觉上失灵
+
+实测进入 Alpha 后，按一次乃至两次 Esc，画面仍停在 Alpha 的工具流水。用户手测也撞见“main 回不去了”。
+
+状态机表面上会清 `viewed_task_id`，可渲染路仍是追加打印：
+
+- `PrintViewedTranscript(task_id)` 把整份代理详情 `cout` 到当前 scrollback。
+- 回 main 时只打印“已回主会话”和最近五条摘要。
+- 旧代理正文没有成为可替换的 viewport，只是已经写进终端历史的一大截字。
+- 工具流水太长时，composer 与导航坞被推到可视区外；用户看见的最后一行仍像活状态。
+- 字号变化或终端 reflow 后，旧正文、当前正文与 footer 的相对位置又会变。
+
+所以 `viewed_task_id` 改对了，也不等于用户看见的页面改对了。
+
+### 必须改成 retained view
+
+会话切换不能靠“往 scrollback 再打印一份”。须从状态重建同一块可视视口：
+
+```text
+selected transcript snapshot
+composer
+status line
+agent dock
+```
+
+Enter、Esc、resize、字号变化、后台完成，都走同一个 frame builder。旧帧先擦，下一帧原位落下。无论代理 transcript 多长，composer 与活动坞都须留在当前可视区底部。
+
+`Esc -> main` 完成后，至少要同时满足：
+
+```text
+viewed_task_id == 0
+composer_target == main
+main 行带 viewed 标记
+上方首个可辨标题写 main
+代理正文不再占当前 viewport
+```
+
+## 现场五：完成通知与旧状态留尾巴
+
+本轮仍拍到了旧单声称已经修好的残留：
+
+```text
+[后台子代理完成,结果交回主会话继续]
+└ #1 核对 Alpha 约束 · 完成 · 5次工具 · 6016
+思考 1.5s
+```
+
+这些行完成后仍挂在永久滚屏里。正常字号下，用户只看见旧“思考”，会以为 main 还卡着；缩小字号，才在更下方瞧见空 composer。
+
+新规矩：
+
+- 后台完成是短 toast，或一条有归属的 main transcript 事件，二选一。
+- 同一任务只报一次，不能“黄通知 + 灰尾巴 + 主代理复述”三连发。
+- spinner/thinking 属瞬时 frame。结束便擦，不准写成永久 transcript。
+- 完成唤醒不得复制 composer、状态栏或导航坞。
+- 正常 1500x930 窗口、默认字号下，空 composer 始终看得见。
+
+## 现场六：派出卡片的计数永远是零
+
+主正文里的两张启动卡一直写：
+
+```text
+agent(核对 Alpha 约束)
+└ 子代理 0轮 · 0次工具
+```
+
+任务完成后，底栏却写 5 次工具。两本账当面打架。
+
+若启动卡是历史事件，就只写不会过期的事实：
+
+```text
+已启动后台子代理 #1 · 核对 Alpha 约束
+```
+
+若要显示实时计数，卡片便须按 task id 从 registry 取数，并由同一 frame 重画。不能把派出那一刻的 `0/0` 永久冒充任务摘要。
+
+## 交互示意
+
+### 正在看 #1，光标移到 #2
+
+```text
+[上方：general-purpose #1 完整会话，显示方式同 main]
+────────────────────────────────────────
+> 给 #1 的输入框
+────────────────────────────────────────
+确认模式 · model · cwd · branch · context
+↑/↓ 选择 · Enter 切换 · Esc 回 main
+  ● main                 主会话
+  ◉ general-purpose #1  核对 Alpha 约束   运行中
+❯ ◌ general-purpose #2  核对 Beta 约束    运行中
+```
+
+此时再按 Down/Up，只挪 `❯`。上方仍是 #1，composer 仍给 #1。
+
+### 按 Enter 后
+
+```text
+[上方：general-purpose #2 完整会话]
+...
+  ○ general-purpose #1  核对 Alpha 约束   运行中
+❯ ◉ general-purpose #2  核对 Beta 约束    运行中
+```
+
+### #2 正常完成后
+
+```text
+[上方：main；只出现一次 #2 完成结果]
+...
+❯ ● main                 主会话
+  ◌ general-purpose #1  核对 Alpha 约束   运行中
+```
+
+#2 已从活动坞退场。历史仍可查，不能把台账一并删掉。
+
+## 实施次序
+
+### 第一刀：拆开选择、查看与活动集合
+
+- `Up/Down` 不再清 `viewed_task_id`。
+- Enter 才提交选择。
+- Esc 无条件回 main，并校验 composer target。
+- 正常完成且结果已送达的任务从活动坞过滤掉。
+- 当前查看任务终结时，按上文规矩原子返回 main。
+
+### 第二刀：给子代理接正式消息账
+
+- 子代理 loop 逐事件写 transcript。
+- main 与 subagent 共用 renderer，不共用 history。
+- 工具详情沿用 main 的折叠/展开，不默认铺全文。
+- steering、compact、失败检查点都按发生次序可见。
+
+### 第三刀：收成一只 retained viewport
+
+- transcript、composer、status、dock 合成完整 frame。
+- view switch 不再 append 整页到 scrollback。
+- completion、resize、reflow 只重建当前 frame。
+- 瞬时通知与 spinner 不污染永久 history。
+
+### 第四刀：补黑盒截图回归
+
+继续用临时小 fixture，不拿项目自身 tests 当唯一证据。黑盒驱动启动真实 release/debug 二进制，向真实终端发键并截屏。测试完须清理进程与临时目录。
+
+## 自动验收
+
+### 状态机单测
+
+1. `viewed=#1, selected=#1` 按 Down：`viewed` 仍是 #1，`selected` 变 #2。
+2. 接着按 Enter：`viewed` 才变 #2，target 同步变 #2。
+3. `viewed=#2, selected=#1` 按 `x`：只停 #1。
+4. 任一代理视图按 Esc：`viewed=0`、`selected=0`、target=main。
+5. #2 正常完成并已投递：活动导航 ids 不再含 #2，历史台账仍含 #2。
+6. #2 失败：活动坞留短错；查看后可清，不误删别的任务。
+
+### transcript 单测
+
+1. 子代理按次序产生 assistant text、tool call、tool result、assistant text，Enter 后四类内容顺序不乱。
+2. 子代理中间文字不能因后续工具调用而丢掉。
+3. main 发来的补充消息须显示在收到它的那个位置。
+4. 工具结果默认折叠；展开行为、截断提示与 main 一致。
+5. compact 后有边界与检查点，不能只剩最终一句。
+
+### 真终端截图回归
+
+固定 1500x930、默认字号，派两只后台代理：
+
+1. 截图 A：两只运行，composer、状态栏、活动坞同时可见。
+2. 截图 B：Enter 进 #1，上方既有助手文字，也有工具卡。
+3. 截图 C：按 Down，pointer 到 #2；上方标题、正文、target 仍属 #1。
+4. 截图 D：按 Enter，上方才换 #2。
+5. 截图 E：按 Esc，一拍回 main；不能再看见代理详情占着当前 viewport。
+6. 截图 F：#2 完成，活动坞只剩 main 与仍运行的 #1。
+7. 截图 G：全部完成，活动坞自动收起；屏上只剩一只 composer。
+8. 改窗口宽高、缩放字号再恢复。每拍只许一副 composer/status/dock，当前会话不漂。
+
+不要只比字符串。还要做行区间断言：
+
+```text
+CountVisibleComposer() == 1
+CountVisibleStatusLine() == 1
+CountVisibleAgentDock() <= 1
+VisibleTranscriptOwner() == viewed_task_id
+DoneTaskRowsInActiveDock() == 0
+```
+
+## 不做
+
+- 不拿 `Up/Down` 顺手切 transcript。
+- 不把正常完成任务永久摊在活动坞里。
+- 不把 prompt、原始 JSON 和工具全文拼起来冒充会话。
+- 不为 subagent 再养一套与 main 不同的显示器。
+- 不靠追加打印“已回主会话”假装切页成功。
+- 不靠缩小字号、清屏或多打空行找回 composer。
+- 不因任务退场便删 transcript 与审计账。
+- 不用只测纯状态机来代替真实 Windows Terminal 截图。
+
+## 销单线
+
+以下十条，一条不差：
+
+1. 完成且已投递的任务自动离开活动导航坞，历史仍可查。
+2. Up/Down 只改选择；Enter 才改查看会话与 composer target。
+3. Esc 从任何子代理视图一拍回 main，画面与内部状态一致。
+4. 子代理拥有按时间排序的完整消息账，并复用 main renderer。
+5. 默认视图不再是“任务说明 + 原始工具流水”的静态详情。
+6. composer 与导航坞始终留在当前可视区，不被长 transcript 顶走。
+7. 后台完成、旧思考、启动卡计数不再留下矛盾尾巴。
+8. resize、reflow、缩放、任务完成后，选择与查看状态不漂。
+9. 状态机、transcript、帧布局三层单测全过。
+10. 用独立小目录跑真实多代理，并以逐拍截图通过黑盒验收。
