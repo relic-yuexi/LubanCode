@@ -1,11 +1,12 @@
-// 子代理面板移到输入框上方(0.28.x)专用的"刮屏驱动器":跟
-// tests/stream_footer_driver.cpp 同一套手艺(AllocConsole + WriteConsoleInputW
-// + ReadConsoleOutputW),验的是这轮新加的东西——空闲 composer 的代理面板
-// 画在输入框上横线之上、输入框与状态行钉在视口下部、焦点/查看态/两段确认
-// 的屏面行为。不进 ctest,集成验证时手动跑:
+// 子代理导航贴底(0.29.x)专用的"刮屏驱动器":跟 tests/stream_footer_driver.cpp
+// 同一套手艺(AllocConsole + WriteConsoleInputW + ReadConsoleOutputW),验的
+// 是这轮的新东西——空闲 composer 的代理导航坞画在 composer 下横线与状态行
+// 之后贴底、任意状态转换后每种导航行至多一份(残帧计数)、闲置汇总折叠、
+// Ctrl+L 整屏重画。不进 ctest,集成验证时手动跑:
 //   agent_panel_driver <lubancode.exe 路径> <子进程工作目录> <报告文件路径>
 // 面板数据走 LUBANCODE_AGENT_PANEL_DEMO 假代理钩子(InteractiveSession 构造
-// 时认这个环境变量),不用真起子代理、不碰网络。
+// 时认这个环境变量),不用真起子代理、不碰网络。前 5 只演示代理设为完成态
+// (DEMO_IDLE),驱动闲置折叠;其余运行中。
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -93,6 +94,31 @@ int FindLastRow(const std::string& needle, int max_rows = 400) {
     return -1;
 }
 
+// ---- 残帧扫描(规格"测试"四):不能只查"最后一次 FindRow 找到了",
+//      要数遍整屏,前面堆着的旧副本一票否决。 ----
+int CountRowsWith(const std::string& needle, int max_rows = 400) {
+    int count = 0;
+    for (int row = 0; row < max_rows; ++row) {
+        if (ReadRow(row).find(needle) != std::string::npos) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// main 导航行:状态灯 ● + "main"(身份列)。状态行/正文里的 "main" 不算。
+int CountMainRows() {
+    int count = 0;
+    for (int row = 0; row < 400; ++row) {
+        const std::string text = ReadRow(row);
+        if (text.find("\xe2\x97\x8f main") != std::string::npos ||
+            text.find("\xe2\x97\x89 main") != std::string::npos) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 bool WaitForText(const std::string& needle, int timeout_ms, int* found_row = nullptr) {
     const DWORD deadline = GetTickCount() + static_cast<DWORD>(timeout_ms);
     while (GetTickCount() < deadline) {
@@ -172,6 +198,55 @@ int FindComposerInputRow(int max_rows = 400) {
     return -1;
 }
 
+// 导航文本(操作提示/代理行)绝不许出现在 composer 上横线之上。
+bool NoDockTextAboveComposer(int rule_row) {
+    for (int r = 0; r < rule_row; ++r) {
+        const std::string text = ReadRow(r);
+        if (text.find("\xe2\x86\x91/\xe2\x86\x93") != std::string::npos) {  // ↑/↓
+            return false;
+        }
+        if (text.find("general-purpose #") != std::string::npos) {
+            return false;
+        }
+        if (text.find("\xe2\x97\x8f main") != std::string::npos) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// 当前屏面快照的残帧总账:提示 1、main 1、每只代理 <=1、闲置汇总 <=1,
+// 且都在 composer 上横线之下。返回 true 表示账面干净。
+bool DockLedgerClean(int rule_row) {
+    // 提示行文案随焦点收放(聚焦版没有"↑/↓"),按各版共性认:恰好一行。
+    int hint_rows = 0;
+    for (int row = 0; row < 400; ++row) {
+        const std::string text = ReadRow(row);
+        if (text.find("\xe2\x86\x91/\xe2\x86\x93") != std::string::npos ||       // ↑/↓
+            text.find("Enter \xe6\x9f\xa5\xe7\x9c\x8b") != std::string::npos ||  // Enter 查看
+            text.find("\xe5\x86\x8d\xe6\x8c\x89 Ctrl+K") != std::string::npos) { // 再按 Ctrl+K(两段确认)
+            ++hint_rows;
+        }
+    }
+    if (hint_rows != 1) {
+        return false;
+    }
+    if (CountMainRows() != 1) {
+        return false;
+    }
+    for (int i = 1; i <= 8; ++i) {
+        const std::string title = "\xe6\xbc\x94\xe7\xa4\xba\xe4\xbb\xbb\xe5\x8a\xa1 " +
+                                  std::to_string(i);  // 演示任务 N
+        if (CountRowsWith(title) > 1) {
+            return false;
+        }
+    }
+    if (CountRowsWith("\xe9\x97\xb2\xe7\xbd\xae\xe4\xbb\xa3\xe7\x90\x86") > 1) {  // 闲置代理(汇总行)
+        return false;
+    }
+    return NoDockTextAboveComposer(rule_row);
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -185,8 +260,10 @@ int wmain(int argc, wchar_t** argv) {
         return 2;
     }
 
-    // 假代理面板钩子:6 只演示任务,只喂给这一场子进程。
-    _wputenv(L"LUBANCODE_AGENT_PANEL_DEMO=6");
+    // 假代理面板钩子:8 只演示任务,前 5 只完成态(驱动闲置折叠),后 3 只
+    // 运行中。只喂给这一场子进程。
+    _wputenv(L"LUBANCODE_AGENT_PANEL_DEMO=8");
+    _wputenv(L"LUBANCODE_AGENT_PANEL_DEMO_IDLE=5");
 
     FreeConsole();
     if (!AllocConsole()) {
@@ -207,7 +284,7 @@ int wmain(int argc, wchar_t** argv) {
     SMALL_RECT small{0, 0, 1, 1};
     SetConsoleWindowInfo(g_conout, TRUE, &small);
     SetConsoleScreenBufferSize(g_conout, COORD{120, 400});
-    SMALL_RECT window{0, 0, 119, 29};  // 矮窗口:面板要向上长,不能把输入框顶出去
+    SMALL_RECT window{0, 0, 119, 29};  // 矮窗口:导航坞贴底长,不能把 composer 挤出屏
     SetConsoleWindowInfo(g_conout, TRUE, &window);
     FlushConsoleInputBuffer(g_conin);
 
@@ -226,59 +303,127 @@ int wmain(int argc, wchar_t** argv) {
     }
     CloseHandle(pi.hThread);
 
-    // ---- 开场帧:面板在输入框上方 ----
-    int hint_row = -1;
-    Check(WaitForText("\xe2\x86\x91/\xe2\x86\x93", 30000, &hint_row), "开场:面板操作提示行出现(30s 内)");
+    // ---- 开场帧:导航坞在 composer 下横线与状态行之后 ----
+    Check(WaitForText("\xe2\x86\x91/\xe2\x86\x93", 30000), "开场:导航操作提示行出现(30s 内)");
     Sleep(500);  // 等首帧整帧画稳
+    int hint_row = FindLastRow("\xe2\x86\x91/\xe2\x86\x93");
     int input_row = FindComposerInputRow();
     Check(input_row > 0, "开场:composer 输入行按结构找到");
     const int rule_row = input_row - 1;
-    const int agent_row = FindLastRow("general-purpose #6");
-    Check(agent_row >= 0 && agent_row < rule_row, "代理行在上横线之上(不在输入框下面)");
-    const int main_row = FindLastRow("main");
-    Check(main_row >= 0 && main_row < rule_row && main_row > hint_row, "main 行在面板列表里");
-    Check(FindLastRow("演示任务 3") >= 0, "6 只演示代理全量在列(没有无声截断)");
-    Check(!IsRuleRow(input_row + 2) ? true : IsRuleRow(input_row + 1), "输入框下横线与状态行仍钉在框底");
+    const int status_row = input_row + 2;  // 上横线(输入行-1)/输入/下横线/状态
+    Check(hint_row > status_row, "导航提示在状态行之下(composer 下横线之后)");
+    const int main_row = FindLastRow("\xe2\x97\x8f main");
+    Check(main_row >= 0 && main_row > status_row, "main 行在状态行之下,不插进正文");
+    const int agent_row = FindLastRow("general-purpose #1");
+    Check(agent_row >= 0 && agent_row > status_row, "代理行在状态行之下(导航坞贴底)");
+    Check(NoDockTextAboveComposer(rule_row), "composer 上横线之上没有任何导航文本");
+    Check(DockLedgerClean(rule_row), "开场残帧账:提示/main/代理/汇总各至多一份");
 
-    // ---- 焦点:空 composer 按下键进代理焦点,选中标记出现 ----
-    SendKey(VK_DOWN, 0, 0);
-    int marker_row = -1;
-    Check(WaitForText("\xe2\x9d\xaf", 3000, &marker_row), "按下键:焦点标记 ❯ 出现");
-    Check(marker_row < rule_row, "焦点标记落在代理行,不在 composer 里");
+    // ---- 闲置折叠:前 5 只完成态,只列前三只与一行汇总 ----
+    Check(FindLastRow("\xe6\xbc\x94\xe7\xa4\xba\xe4\xbb\xbb\xe5\x8a\xa1 3") >= 0, "闲置折叠:第 1~3 只完成态在列");
+    Check(FindLastRow("\xe6\xbc\x94\xe7\xa4\xba\xe4\xbb\xbb\xe5\x8a\xa1 4") < 0,
+          "闲置折叠:第 4 只完成态被折起(屏上不见)");
+    int summary_row = -1;
+    Check(WaitForText("\xe9\x97\xb2\xe7\xbd\xae\xe4\xbb\xa3\xe7\x90\x86", 3000, &summary_row),
+          "闲置折叠:汇总行出现");
+    Check(summary_row > status_row, "闲置折叠:汇总行在状态行之下");
+    Check(CountRowsWith("\xe9\x97\xb2\xe7\xbd\xae\xe4\xbb\xa3\xe7\x90\x86") == 1, "闲置汇总至多一份");
 
-    // ---- 查看态:Enter 展开,上横线右端挂短标题 ----
+    // ---- 汇总哨兵可导航:Down×4(1,2,3,哨兵)后 Enter 展开 ----
+    for (int i = 0; i < 4; ++i) {
+        SendKey(VK_DOWN, 0, 0);
+        Sleep(120);
+    }
+    Check(WaitForText("\xe2\x9d\xaf", 3000), "导航:连按 4 下 Down,焦点标记出现");
+    Check(FindLastRow("\xe5\x8f\xa6\xe6\x9c\x89") >= 0 && WaitForText("\xe5\x8f\xa6\xe6\x9c\x89", 1000),
+          "导航:选中落在汇总哨兵上(另有 N 只)");
     SendKey(VK_RETURN, L'\r', 0);
-    Check(WaitForText("Enter \xe6\x94\xb6\xe8\xb5\xb7", 3000), "Enter:查看态展开(详情提示行出现)");
-    Check(WaitForText("\xe6\xbc\x94\xe7\xa4\xba\xe4\xbb\xbb\xe5\x8a\xa1 1", 3000),
-          "查看态:上横线右端挂代理短标题");
-    // Esc 先退查看态(标签摘掉——看 composer 上横线那一行,不再挂短标题),
-    // 再 Esc 退焦点。
-    SendKey(VK_ESCAPE, 0, 0);
-    Check(WaitForTextGone("Enter \xe6\x94\xb6\xe8\xb5\xb7", 3000), "Esc:退查看态,详情行收起");
-    {
-        // 退查看态后面板收了详情行,框顶挪位:重新按结构找框。
-        int rule_after = -1;
-        for (int r = 398; r >= 0; --r) {
-            const std::string input_text = ReadRow(r + 1);
-            if (IsRuleRow(r) && !input_text.empty() && input_text[0] == '>' && IsRuleRow(r + 2) &&
-                !IsRuleRow(r + 3)) {
-                rule_after = r;
-                break;
-            }
+    Check(WaitForText("\xe6\xbc\x94\xe7\xa4\xba\xe4\xbb\xbb\xe5\x8a\xa1 4", 3000),
+          "Enter 展开闲置:第 4 只完成态回到列表");
+    Check(CountRowsWith("\xe9\x97\xb2\xe7\xbd\xae\xe4\xbb\xa3\xe7\x90\x86") == 0,
+          "Enter 展开后:汇总行收走,没有第二份");
+    Check(DockLedgerClean(FindComposerInputRow() - 1), "展开后残帧账干净");
+    for (int r = 0; r < 44; ++r) {
+        const std::string row = ReadRow(r);
+        if (!row.empty()) {
+            Log("EXPAND " + std::to_string(r) + ": " + row);
         }
-        Check(rule_after >= 0 && ReadRow(rule_after).find("\xe6\xbc\x94\xe7\xa4\xba\xe4\xbb\xbb\xe5\x8a\xa1 1") ==
-                  std::string::npos,
-              "Esc:退查看态,上横线右端短标题摘掉");
     }
     SendKey(VK_ESCAPE, 0, 0);
+    Check(WaitForTextGone("\xe6\xbc\x94\xe7\xa4\xba\xe4\xbb\xbb\xe5\x8a\xa1 4", 3000), "Esc 收起闲置汇总");
+    Check(CountRowsWith("\xe9\x97\xb2\xe7\xbd\xae\xe4\xbb\xa3\xe7\x90\x86") == 1, "收起后汇总恰好一份");
+    SendKey(VK_ESCAPE, 0, 0);
     Check(WaitForTextGone("\xe2\x9d\xaf", 3000), "再 Esc:退出代理焦点");
+
+    // ---- 连按 20 次上下:不多出第二份提示或 main ----
+    for (int i = 0; i < 20; ++i) {
+        SendKey(i % 2 == 0 ? VK_DOWN : VK_UP, 0, 0);
+        Sleep(60);
+    }
+    Sleep(400);
+    Check(DockLedgerClean(FindComposerInputRow() - 1), "连按 20 次上下后残帧账干净(提示/main 各一份)");
+
+    // ---- Enter/Esc 往返 20 次:查看态详情不留残骸 ----
+    SendKey(VK_DOWN, 0, 0);
+    WaitForText("\xe2\x9d\xaf", 3000);
+    for (int i = 0; i < 20; ++i) {
+        SendKey(VK_RETURN, L'\r', 0);
+        Sleep(120);
+        SendKey(VK_ESCAPE, 0, 0);
+        Sleep(120);
+    }
+    Check(FindLastRow("\xe4\xbb\xbb\xe5\x8a\xa1\xe6\xa0\x87\xe9\xa2\x98") < 0,
+          "Enter/Esc 往返 20 次:详情('任务标题')不留残骸");
+    Check(DockLedgerClean(FindComposerInputRow() - 1), "往返 20 次后残帧账干净");
+    SendKey(VK_ESCAPE, 0, 0);
+    WaitForTextGone("\xe2\x9d\xaf", 3000);
+
+    // ---- Ctrl+L:草稿/选择保住,重复行归零 ----
+    SendKey(VK_DOWN, 0, 0);
+    WaitForText("\xe2\x9d\xaf", 3000);
+    SendText("\xe8\x8d\x89\xe7\xa8\xbf");  // 草稿
+    Sleep(300);
+    // 打了字,面板焦点让位(既有规矩);Ctrl+L 只重画,不吞输入。
+    SendKey('L', 0, LEFT_CTRL_PRESSED);
+    Sleep(600);
+    int input_after = FindComposerInputRow();
+    Check(input_after > 0 && ReadRow(input_after).find("\xe8\x8d\x89\xe7\xa8\xbf") != std::string::npos,
+          "Ctrl+L:composer 草稿还在(不吞输入)");
+    Check(DockLedgerClean(FindComposerInputRow() - 1), "Ctrl+L:重复行归零,残帧账干净");
+    // 清草稿(Ctrl+C 有字先清字,空闲路已有实现,顺手回归)。
+    SendKey('C', 0, LEFT_CTRL_PRESSED);
+    Sleep(400);
+    Check(FindComposerInputRow() > 0 && ReadRow(FindComposerInputRow()).find("\xe8\x8d\x89\xe7\xa8\xbf") ==
+              std::string::npos,
+          "Ctrl+C:空闲草稿清空,框还在");
+    DWORD exit_code = STILL_ACTIVE;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    Check(exit_code == STILL_ACTIVE, "Ctrl+C 清草稿:进程仍活");
+
+    // ---- resize:拉窄再拉宽,旧宽度字符清空、账面仍干净 ----
+    SetConsoleScreenBufferSize(g_conout, COORD{80, 400});
+    SMALL_RECT narrow{0, 0, 79, 29};
+    SetConsoleWindowInfo(g_conout, TRUE, &narrow);
+    Sleep(800);
+    for (int r = 0; r < 44; ++r) {
+        const std::string row = ReadRow(r);
+        if (!row.empty()) {
+            Log("NARROW " + std::to_string(r) + ": " + row);
+        }
+    }
+    Check(DockLedgerClean(FindComposerInputRow() - 1), "resize 拉窄后残帧账干净");
+    SetConsoleScreenBufferSize(g_conout, COORD{120, 400});
+    SMALL_RECT wide{0, 0, 119, 29};
+    SetConsoleWindowInfo(g_conout, TRUE, &wide);
+    Sleep(800);
+    Check(DockLedgerClean(FindComposerInputRow() - 1), "resize 拉宽后残帧账干净");
 
     // ---- 两段确认:Ctrl+X 亮确认提示,Esc 撤销,不误杀 ----
     SendKey('X', 0, LEFT_CTRL_PRESSED);
     Check(WaitForText("\xe5\x86\x8d\xe6\x8c\x89", 3000), "Ctrl+X:出现'再按 Ctrl+K 确认'提示");
     SendKey(VK_ESCAPE, 0, 0);
     Check(WaitForTextGone("\xe5\x86\x8d\xe6\x8c\x89", 3000), "Esc:两段确认撤销,提示收走");
-    Check(FindLastRow("general-purpose #6") >= 0, "误按第一段不动任务:面板原样");
+    Check(FindLastRow("general-purpose #1") >= 0, "误按第一段不动任务:坞原样");
 
     // ---- 退出子进程 ----
     SendText("/exit");
