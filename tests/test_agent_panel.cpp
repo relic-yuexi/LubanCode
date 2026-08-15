@@ -258,6 +258,51 @@ TEST_CASE("导航表:运行中/失败/正在查看的行永不折叠") {
     CHECK(mixed_ids == Ids({1, 2, 3, 4, 5, kIdleSummaryTaskId}));
 }
 
+// -----------------------------------------------------------------------
+// 活动坞退场(规格"现场一"新规矩):done+delivered 与 cancelled 退场,
+// failed/exhausted 留短错;退场只是不进导航表,台账不清。
+// -----------------------------------------------------------------------
+
+TEST_CASE("导航表:done+delivered 与 cancelled 退场,running/failed 留坞") {
+    SetLanguage("zh");
+    std::vector<AgentPanelEntry> agents = MakeAgents(5);  // 全 running
+    // #2 完成、结果已交回 main;#4 被用户中止;#5 失败。
+    agents[1].running = false;
+    agents[1].done_delivered = true;
+    agents[3].running = false;
+    agents[3].cancelled = true;
+    agents[4].running = false;
+    agents[4].failed = true;
+    const auto ids = DockNavigationIds(agents, false, 0);
+    CHECK(ids == Ids({1, 3, 5}));  // 退场的不进导航表,台账(条目表)照留
+    // 布局同账:坞里画 main + #1/#3/#5,折叠汇总不数退场条目。
+    const auto layout = LayoutAgentDock(agents, 0, false, 0, 0, 80, false, false, false);
+    CHECK(layout.navigation_ids == Ids({0, 1, 3, 5}));
+    CHECK_FALSE(layout.idle_summary);
+    CHECK(layout.hidden_idle == 0);
+}
+
+TEST_CASE("状态机:正在查看的任务完成退场,原子回 main,选择落相邻运行项") {
+    SetLanguage("zh");
+    AgentPanelController c;
+    // 选中并查看 #2。
+    const auto ids = Ids({1, 2, 3});
+    c.HandleKey(PanelKey::Down, ids, true, Now());
+    c.HandleKey(PanelKey::Down, ids, true, Now());
+    c.HandleKey(PanelKey::EnterView, ids, true, Now());
+    REQUIRE(c.viewed_task_id() == 2);
+    REQUIRE(c.target_task_id().has_value());
+
+    // #2 完成、结果交回 main:导航表里没了它——OnEntriesChanged 强制收起
+    // 查看态,收件目标回 main(规格"现场一"五步的 1/2/4)。
+    const auto after = Ids({1, 3});
+    c.OnEntriesChanged(after);
+    CHECK(c.viewed_task_id() == 0);
+    CHECK_FALSE(c.target_task_id().has_value());
+    // 选择落相邻运行项(旧下标 2 钳到界内 -> #3),没有便回 main。
+    CHECK(c.selected_task_id() == 3);
+}
+
 TEST_CASE("坞布局:6 只闲置只列前三只与一行汇总,汇总不占 5 行窗口的代理位") {
     SetLanguage("zh");
     const auto agents = MakeIdleAgents(6);
@@ -348,7 +393,7 @@ TEST_CASE("渲染:身份列钳位 4~28,长名字吞不掉全屏") {
 // 按键状态机
 // -----------------------------------------------------------------------
 
-TEST_CASE("状态机:上下进入焦点并环绕,Enter 进查看态,Esc 两层退出") {
+TEST_CASE("状态机:上下进入焦点并环绕,Enter 进查看态,Esc 一拍回 main") {
     SetLanguage("zh");
     AgentPanelController c;
     const auto ids = Ids({11, 22, 33});  // main + 3 只,task id 不连续
@@ -376,14 +421,13 @@ TEST_CASE("状态机:上下进入焦点并环绕,Enter 进查看态,Esc 两层�
     CHECK(out.consumed);
     CHECK(c.viewed_task_id() == 33);
 
-    out = c.HandleKey(PanelKey::Esc, ids, true, Now());  // 先退查看态
+    // Esc 一拍回 main(规格"现场二"按键契约):查看、选择、焦点一次收
+    // 干净——不存在"先退查看、再退焦点"的两段路,更不存在屏上还挂着代理
+    // 正文、字却已经送回 main 的缝。
+    out = c.HandleKey(PanelKey::Esc, ids, true, Now());
     CHECK(out.consumed);
     CHECK(c.viewed_task_id() == 0);
     CHECK_FALSE(c.target_task_id().has_value());
-    CHECK(c.focused());
-
-    out = c.HandleKey(PanelKey::Esc, ids, true, Now());  // 再退焦点
-    CHECK(out.consumed);
     CHECK_FALSE(c.focused());
     CHECK(c.selected_task_id() == 0);
 }
@@ -446,11 +490,89 @@ TEST_CASE("状态机:闲置汇总哨兵——Enter 展开、Esc 收起,不接停
     CHECK(c.viewed_task_id() == 0);
     CHECK_FALSE(c.target_task_id().has_value());
     CHECK(c.selected_task_id() == kIdleSummaryTaskId);  // 展开不改选中
-    // Esc 收起汇总(还在焦点里)。
+    // Esc 一拍回 main:汇总收起、焦点同退(规格"现场二":Esc 无条件回 main)。
     const auto esc = c.HandleKey(PanelKey::Esc, nav, true, Now());
     CHECK(esc.consumed);
     CHECK_FALSE(c.idle_expanded());
-    CHECK(c.focused());
+    CHECK_FALSE(c.focused());
+    CHECK(c.selected_task_id() == 0);
+}
+
+// -----------------------------------------------------------------------
+// 三本账拆分(规格"现场二"):selected(❯ 指着谁)/ viewed(◉ 正看谁)/
+// 活动坞(谁该留)各管一事,方向键不许偷换会话。
+// -----------------------------------------------------------------------
+
+TEST_CASE("状态机:Up/Down 只挪选择,viewed 与 composer 目标纹丝不动") {
+    SetLanguage("zh");
+    AgentPanelController c;
+    const auto ids = Ids({1, 2});
+    // Enter 进 #1:viewed=selected=1。
+    c.HandleKey(PanelKey::Down, ids, true, Now());
+    c.HandleKey(PanelKey::EnterView, ids, true, Now());
+    REQUIRE(c.viewed_task_id() == 1);
+    REQUIRE(c.target_task_id().has_value());
+    CHECK(*c.target_task_id() == 1);
+
+    // 按 Down:选择光标到 #2,上方仍看 #1、composer 仍给 #1。
+    const auto out = c.HandleKey(PanelKey::Down, ids, true, Now());
+    CHECK(out.consumed);
+    CHECK(c.selected_task_id() == 2);
+    CHECK(c.viewed_task_id() == 1);
+    REQUIRE(c.target_task_id().has_value());
+    CHECK(*c.target_task_id() == 1);
+
+    // Up 同理:只挪 ❯,◉ 不动。
+    c.HandleKey(PanelKey::Up, ids, true, Now());
+    CHECK(c.selected_task_id() == 1);
+    CHECK(c.viewed_task_id() == 1);
+}
+
+TEST_CASE("状态机:Enter 才提交查看与收件目标;x 只作用 selected,不误伤 viewed") {
+    SetLanguage("zh");
+    AgentPanelController c;
+    const auto ids = Ids({1, 2});
+    c.HandleKey(PanelKey::Down, ids, true, Now());
+    c.HandleKey(PanelKey::EnterView, ids, true, Now());
+    REQUIRE(c.viewed_task_id() == 1);
+
+    // Down 到 #2,再 Enter:viewed 与 target 这时才换到 #2。
+    c.HandleKey(PanelKey::Down, ids, true, Now());
+    REQUIRE(c.selected_task_id() == 2);
+    CHECK(c.viewed_task_id() == 1);
+    const auto enter = c.HandleKey(PanelKey::EnterView, ids, true, Now());
+    CHECK(enter.consumed);
+    CHECK(c.viewed_task_id() == 2);
+    REQUIRE(c.target_task_id().has_value());
+    CHECK(*c.target_task_id() == 2);
+
+    // viewed=#2、selected 回 #1:按 x 只停 #1,viewed 的 #2 不受牵连。
+    c.HandleKey(PanelKey::Up, ids, true, Now());
+    REQUIRE(c.selected_task_id() == 1);
+    REQUIRE(c.viewed_task_id() == 2);
+    const auto stop = c.HandleKey(PanelKey::StopEntry, ids, true, Now());
+    CHECK(stop.consumed);
+    CHECK(stop.stop_current);
+    CHECK(stop.stop_current_task_id == 1);  // 动作目标 = 选择,不是查看
+    CHECK(c.viewed_task_id() == 2);         // #2 仍在被查看
+}
+
+TEST_CASE("状态机:代理视图按 Esc 一拍回 main,内部状态与目标全复位") {
+    SetLanguage("zh");
+    AgentPanelController c;
+    const auto ids = Ids({7, 8});
+    c.HandleKey(PanelKey::Down, ids, true, Now());
+    c.HandleKey(PanelKey::EnterView, ids, true, Now());
+    c.HandleKey(PanelKey::Down, ids, true, Now());  // 选择挪到 #8,查看仍在 #7
+    REQUIRE(c.viewed_task_id() == 7);
+    REQUIRE(c.selected_task_id() == 8);
+    const auto esc = c.HandleKey(PanelKey::Esc, ids, true, Now());
+    CHECK(esc.consumed);
+    CHECK(esc.redraw);
+    CHECK(c.viewed_task_id() == 0);
+    CHECK(c.selected_task_id() == 0);
+    CHECK_FALSE(c.target_task_id().has_value());  // composer 目标必回 main
+    CHECK_FALSE(c.focused());
 }
 
 TEST_CASE("状态机:Ctrl+X Ctrl+K 两段确认——成功、超时、Esc 撤销、错键撤销") {
@@ -523,7 +645,8 @@ TEST_CASE("状态机:按稳定 task id 选择——任务重排不丢,选中项�
     d.OnEntriesChanged(Ids({}));
     CHECK_FALSE(d.focused());
 
-    // 查看态目标被清:强制收起,收件目标回 main。
+    // 查看态目标被清(完成退场/清理):只退查看态,收件目标回 main;选择
+    // 不整份归零——落相邻运行项(规格"现场一"第 4 步)。
     AgentPanelController e;
     e.HandleKey(PanelKey::Down, Ids({11, 22}), true, Now());
     e.HandleKey(PanelKey::EnterView, Ids({11, 22}), true, Now());
@@ -531,7 +654,7 @@ TEST_CASE("状态机:按稳定 task id 选择——任务重排不丢,选中项�
     e.OnEntriesChanged(Ids({22}));  // 11 被清
     CHECK(e.viewed_task_id() == 0);
     CHECK_FALSE(e.target_task_id().has_value());
-    CHECK(e.selected_task_id() == 0);
+    CHECK(e.selected_task_id() == 22);  // 落相邻,不归零
 }
 
 TEST_CASE("会话级 AgentPanelSession:快照与键处理共用同一份状态,线程安全外壳") {

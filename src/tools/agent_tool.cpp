@@ -779,7 +779,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                               max_steps_per_turn);
     if (context_window_tokens_ > 0) {
         sub_loop.SetContextWindowTokens(context_window_tokens_);
-        sub_loop.SetOnContextPressure([&sub_loop, &backend, &task_model](
+        sub_loop.SetOnContextPressure([this, &sub_loop, &backend, &task_model, task](
                                           const agent::ContextPressure& pressure) {
             if (pressure.phase != agent::ContextPressure::Phase::PreRequest || !pressure.projected_overflow) {
                 return;  // AfterHardTrim 是纯通报;安全网丢的东西压缩救不回
@@ -789,6 +789,21 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                     agent::CompactHierarchical(backend, task_model, sub_loop.History(), options);
                 compacted.has_value()) {
                 sub_loop.ReplaceHistory(agent::BuildCompactedHistory(sub_loop.History(), compacted->archive));
+                if (task != nullptr) {
+                    // 消息账记一枚压缩检查点:查看态里看得到"前情进存档"的
+                    // 边界,不是只剩最终一句(规格 transcript 单测第 5 条)。
+                    std::string archive_text;
+                    for (const auto& block : compacted->archive.content) {
+                        if (const auto* text_block = std::get_if<api::TextBlock>(&block)) {
+                            archive_text += text_block->text;
+                        }
+                    }
+                    std::lock_guard<std::mutex> lock(tasks_mutex_);
+                    AgentTaskEvent event;
+                    event.kind = AgentTaskEventKind::CompactCheckpoint;
+                    event.text = std::move(archive_text);
+                    AppendTaskEventLocked(task, std::move(event));
+                }
             }
             // 压缩失败:旧历史原样不动,字符安全网(TrimHistory)仍在,不硬塞。
         });
@@ -825,6 +840,16 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             // 取走一条就 TouchTasks:面板 queued 数当即归零递减,与
             // "入 inbox 即 Touch"凑成一对(规格第六节)。
             TouchTasks();
+            // 消息账:轮次边界注入的介入记 steering_message——先放
+            // inbox_mutex 再拿 tasks_mutex_,与 SendTaskMessage(先
+            // tasks_mutex_ 后 inbox_mutex)不同时持两锁,锁序不冲。
+            {
+                std::lock_guard<std::mutex> tasks_lock(tasks_mutex_);
+                AgentTaskEvent event;
+                event.kind = AgentTaskEventKind::SteeringMessage;
+                event.text = text;
+                AppendTaskEventLocked(task, std::move(event));
+            }
             api::Message message;
             message.role = api::Role::User;
             message.content.push_back(api::TextBlock{FormatInboxDelivery(text, source)});
@@ -839,6 +864,15 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     // 后台 subagent 的权限边界一致。
     agent::Callbacks sub_callbacks;
     if (task != nullptr) {
+        // 消息账开卷:任务说明(= 第一条 user_message)。续投输入在 Run 循环
+        // 里按收到次序补记(规格"现场三")。
+        {
+            std::lock_guard<std::mutex> lock(tasks_mutex_);
+            AgentTaskEvent event;
+            event.kind = AgentTaskEventKind::UserMessage;
+            event.text = prompt;
+            AppendTaskEventLocked(task, std::move(event));
+        }
         sub_callbacks.on_text_delta = [this, task](const std::string& text) {
             std::lock_guard<std::mutex> lock(tasks_mutex_);
             task->snapshot.live_output += text;
@@ -846,12 +880,26 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             if (task->snapshot.live_output.size() > kLiveOutputCap) {
                 task->snapshot.live_output.erase(0, task->snapshot.live_output.size() - kLiveOutputCap);
             }
+            task->pending_text += text;  // 消息账:事件边界(工具/轮次收口)切成段
+            TouchTasks();
+        };
+        sub_callbacks.on_thinking_delta = [this, task](const std::string& text) {
+            std::lock_guard<std::mutex> lock(tasks_mutex_);
+            task->pending_reasoning += text;  // 思考也入账,查看态与 main 同款折叠
             TouchTasks();
         };
         sub_callbacks.on_tool_start = [this, task, foreground_hooks](const std::string& tool_name,
                                                                      const nlohmann::json& tool_input) {
             {
                 std::lock_guard<std::mutex> lock(tasks_mutex_);
+                // 先把已流出的正文/思考切成事件,再记工具发起——"助手文字 ->
+                // 工具卡"的时序不许倒(规格 transcript 单测第 1 条)。
+                FlushPendingTaskTextLocked(task);
+                AgentTaskEvent event;
+                event.kind = AgentTaskEventKind::ToolStart;
+                event.tool_name = tool_name;
+                event.input_json = tool_input.dump();
+                AppendTaskEventLocked(task, std::move(event));
                 task->snapshot.tool_calls.push_back(
                     AgentTaskToolCall{tool_name, tool_input.dump(), std::string(), false, false});
                 TouchTasks();
@@ -862,6 +910,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         };
         sub_callbacks.on_tool_done = [this, task](const std::string& tool_name, const Result& result) {
             std::lock_guard<std::mutex> lock(tasks_mutex_);
+            FlushPendingTaskTextLocked(task);  // 工具结果前若有残余正文,先入账
             for (auto it = task->snapshot.tool_calls.rbegin(); it != task->snapshot.tool_calls.rend(); ++it) {
                 if (!it->done && it->name == tool_name) {
                     it->done = true;
@@ -870,6 +919,12 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                     break;
                 }
             }
+            AgentTaskEvent event;
+            event.kind = AgentTaskEventKind::ToolResult;
+            event.tool_name = tool_name;
+            event.result = result.content;
+            event.is_error = result.is_error;
+            AppendTaskEventLocked(task, std::move(event));
             TouchTasks();
         };
         if (foreground_hooks != nullptr) {
@@ -960,9 +1015,11 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         }
         steps_used_total += outcome->steps_used;
         // 直接记账:步数来自 RunOutcome(循环内按模型请求累计),不靠 usage
-        // 回调猜——面板与终态摘要看到的 steps_used 同一笔账。
+        // 回调猜——面板与终态摘要看到的 steps_used 同一笔账。顺带把这轮流
+        // 到一半的正文/思考封进消息账(轮次边界)。
         if (task != nullptr) {
             std::lock_guard<std::mutex> lock(tasks_mutex_);
+            FlushPendingTaskTextLocked(task);
             task->snapshot.steps_used = steps_used_total;
             TouchTasks();
         }
@@ -997,6 +1054,17 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 continuation += "\n\n";
             }
             continuation += FormatInboxDelivery(drained.texts[i], drained.sources[i]);
+        }
+        // 消息账:介入按收到次序记 steering_message——"main/用户何时补了话"
+        // 在查看态里看得见落点,不沉进黑洞(规格 transcript 单测第 3 条)。
+        if (task != nullptr) {
+            std::lock_guard<std::mutex> lock(tasks_mutex_);
+            for (const auto& text : drained.texts) {
+                AgentTaskEvent event;
+                event.kind = AgentTaskEventKind::SteeringMessage;
+                event.text = text;
+                AppendTaskEventLocked(task, std::move(event));
+            }
         }
         run_input = std::move(continuation);
         inflight_drained = std::move(drained);
@@ -1074,6 +1142,19 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     }
     if (task != nullptr) {
         std::lock_guard<std::mutex> lock(tasks_mutex_);
+        // 消息账收口:残余正文先封卷,再记终局事件——completion 带最终结论
+        // 全文,failure 带短因与部分结果(规格"现场三"事件表)。
+        FlushPendingTaskTextLocked(task);
+        AgentTaskEvent final_event;
+        if (task_outcome.status == TaskOutcomeStatus::Completed) {
+            final_event.kind = AgentTaskEventKind::Completion;
+            final_event.text = text;
+        } else {
+            final_event.kind = AgentTaskEventKind::Failure;
+            final_event.text =
+                task_outcome.message + (partial.empty() ? std::string() : "\n" + partial);
+        }
+        AppendTaskEventLocked(task, std::move(final_event));
         task->snapshot.outcome = std::move(task_outcome);
     }
     return run_result;
@@ -1134,6 +1215,7 @@ std::vector<AgentTaskSummary> AgentTool::TaskSummaries() const {
         summary.output_tokens = task->snapshot.output_tokens;
         summary.start_time = task->snapshot.start_time;
         summary.end_time = task->snapshot.end_time;
+        summary.delivered = task->snapshot.delivered;
         summary.tool_call_count = task->snapshot.tool_calls.size();
         std::lock_guard<std::mutex> inbox_lock(task->inbox_mutex);
         for (const auto& item : task->inbox) {
@@ -1154,6 +1236,74 @@ std::optional<AgentTaskSnapshot> AgentTool::TaskDetail(int task_id) const {
         }
     }
     return std::nullopt;
+}
+
+// ---- 消息账(规格"现场三")----
+
+void AgentTool::AppendTaskEventLocked(const std::shared_ptr<TaskRecord>& task, AgentTaskEvent event) {
+    // 单事件正文/结果的字节帽与 live_output 同档:超长截尾,防一只话痨
+    // 子代理把会话内存吃穿;截掉的只是账面显示,模型历史不受影响。
+    constexpr std::size_t kEventTextCap = 64 * 1024;
+    if (event.text.size() > kEventTextCap) {
+        event.text = event.text.substr(event.text.size() - kEventTextCap);
+    }
+    if (event.result.size() > kEventTextCap) {
+        event.result = event.result.substr(0, kEventTextCap);
+    }
+    // 事件总数帽(防超长会话无限增长):到顶后丢最老,并在队头留一条截断
+    // 标记——账面看得见"中间有缺",不是无声蒸发。
+    constexpr std::size_t kMaxTaskEvents = 4000;
+    if (task->events.size() >= kMaxTaskEvents) {
+        task->events.erase(task->events.begin());
+        AgentTaskEvent marker;
+        marker.kind = AgentTaskEventKind::CompactCheckpoint;
+        marker.text = "(事件过多,最早的记录已被截去)";
+        task->events.insert(task->events.begin(), std::move(marker));
+    }
+    task->events.push_back(std::move(event));
+}
+
+void AgentTool::FlushPendingTaskTextLocked(const std::shared_ptr<TaskRecord>& task) {
+    if (!task->pending_reasoning.empty()) {
+        AgentTaskEvent event;
+        event.kind = AgentTaskEventKind::AssistantReasoning;
+        event.text = std::move(task->pending_reasoning);
+        task->pending_reasoning.clear();
+        AppendTaskEventLocked(task, std::move(event));
+    }
+    if (!task->pending_text.empty()) {
+        AgentTaskEvent event;
+        event.kind = AgentTaskEventKind::AssistantText;
+        event.text = std::move(task->pending_text);
+        task->pending_text.clear();
+        AppendTaskEventLocked(task, std::move(event));
+    }
+}
+
+std::vector<AgentTaskEvent> AgentTool::TaskEvents(int task_id) const {
+    std::lock_guard<std::mutex> lock(tasks_mutex_);
+    for (const auto& task : tasks_) {
+        if (task->snapshot.id != task_id) {
+            continue;
+        }
+        std::vector<AgentTaskEvent> out = task->events;
+        // 运行中正在累积的正文/思考也带出去(各一段):查看态看到的与
+        // live_output 同步,不是只到上一个边界的旧账。
+        if (!task->pending_reasoning.empty()) {
+            AgentTaskEvent event;
+            event.kind = AgentTaskEventKind::AssistantReasoning;
+            event.text = task->pending_reasoning;
+            out.push_back(std::move(event));
+        }
+        if (!task->pending_text.empty()) {
+            AgentTaskEvent event;
+            event.kind = AgentTaskEventKind::AssistantText;
+            event.text = task->pending_text;
+            out.push_back(std::move(event));
+        }
+        return out;
+    }
+    return {};
 }
 
 std::vector<std::string> AgentTool::PendingTaskMessages(int task_id) const {

@@ -914,7 +914,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         std::string value;
         for (const auto& entry : entries) {
             value += std::to_string(entry.task_id) + "\x1f" + entry.name + "\x1f" + entry.title +
-                     "\x1f" + entry.state + "\x1f" + (entry.running ? "R" : entry.failed ? "F" : "D") +
+                     "\x1f" + entry.state + "\x1f" +
+                     (entry.running ? "R" : entry.failed ? "F" : entry.cancelled ? "C"
+                                                        : entry.done_delivered ? "X" : "D") +
                      "\n";
         }
         value += "#" + std::to_string(snapshot.selected_task_id) + (snapshot.focused ? "f" : "-") +
@@ -1028,6 +1030,47 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         prev_body_row_count = 0;
     };
 
+    // -------------------------------------------------------------------
+    // 会话视口的 retained view(规格"现场四"):查看态正文不靠"往 scrollback
+    // 再打印一份"冒充切页。上一视图正文落帧时记下它的缓冲顶行
+    // (view_body_top);真切会话时先把旧帧从可视区硬擦干净,新帧原位落
+    // 下——Esc 回 main 后代理正文不再占着当前 viewport 冒充活状态。正文
+    // 长过回滚缓冲顶时(顶部早已滚出 viewport),viewport 之内也保证擦净,
+    // 滚出部分自然留在滚屏历史,不清回滚账。
+    // -------------------------------------------------------------------
+    std::optional<int> view_body_top;  // 上一视图正文的缓冲顶行;nullopt = 无
+    const auto erase_previous_view_body = [&]() {
+        if (!view_body_top.has_value()) {
+            return;
+        }
+        const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
+        if (!info.has_value()) {
+            view_body_top.reset();
+            return;  // 拿不到屏幕信息:退回旧行为,不硬擦
+        }
+        int top = *view_body_top;
+        if (top < info->viewport_y) {
+            top = info->viewport_y;  // 只管当前 viewport,滚屏历史不动
+        }
+        for (int y = top; y < info->height; ++y) {
+            platform::ClearRowHardFrom(0, y, info->width);
+        }
+        platform::SetCursorPos(0, top);
+        view_body_top.reset();
+    };
+    // view_hook 前后各取一次光标:正文顶行落在打印前的光标处,新帧从这
+    // 里开始,也是下一次切换要擦的顶。
+    const auto print_view_frame = [&](int viewed_after) {
+        const std::optional<platform::ScreenInfo> before = platform::GetScreenInfo();
+        const auto& view_hook = AgentViewSwitchHookSlot();
+        if (view_hook) {
+            view_hook(viewed_after);
+        }
+        if (before.has_value()) {
+            view_body_top = before->cursor_y;
+        }
+    };
+
     if (box) {
         redraw_with_panel(editor.CurrentRenderState(), panel_entries());
     }
@@ -1048,7 +1091,13 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             platform::ClearRowHardFrom(0, y, clear_info->width);
         }
         platform::SetCursorPos(0, top);
-        if (UiHandlerSlot()) {
+        // 正文重铺:查看态铺该代理的消息账(view_frame),main 态从 transcript
+        // 快照重铺——resize/reflow/整屏重建后,正在看的会话不漂(规格销单线 8)。
+        const int viewed_now = panel_session.SnapshotFor(nav_ids_for(panel_entries())).viewed_task_id;
+        if (viewed_now != 0) {
+            view_body_top.reset();  // 旧锚点随整屏清一起作废,view_frame 会重记
+            print_view_frame(viewed_now);
+        } else if (UiHandlerSlot()) {
             (void)UiHandlerSlot()(UiKeyAction::RepaintScreen);  // 正文从 transcript 快照重铺
         }
         if (box) {
@@ -1088,6 +1137,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 last_screen_height = size_info->height;
             }
             const auto entries = panel_entries();
+            const int viewed_before_tick = panel_session.SnapshotFor(nav_ids_for(entries)).viewed_task_id;
             const bool armed_expired = panel_session.ExpireArmed(std::chrono::steady_clock::now());
             std::string tag;
             const std::vector<std::string> dock = build_dock(entries, tag);
@@ -1095,6 +1145,18 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             const AgentPanelSession::Snapshot snapshot = panel_session.SnapshotFor(nav_ids_for(entries));
             const BottomChromeFrame frame = build_frame(queue_rows, dock, editor.CurrentRenderState(),
                                                          snapshot.selected_task_id);
+            if (viewed_before_tick != 0 && snapshot.viewed_task_id == 0) {
+                // 正在查看的任务完成退场(结果交回 main)/被清理:原子回
+                // main——上方视口换源、composer 目标回 main、选择落相邻运行
+                // 项,全在这一拍办完;旧代理正文先擦净再落 main 帧,不得继续
+                // 躺在视口里冒充当前会话(规格"现场一/四")。完成结果的短行
+                // 由主循环投递路记一条有归属的 transcript 事件,这里不重复报。
+                retire_idle_chrome();
+                erase_previous_view_body();
+                print_view_frame(0);
+                reanchor_prompt_and_redraw();
+                continue;
+            }
             if (armed_expired || fingerprint_of(entries, frame, snapshot) != panel_fingerprint) {
                 redraw_with_panel(editor.CurrentRenderState(), entries);
             }
@@ -1286,18 +1348,17 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                     const int viewed_after =
                         panel_session.SnapshotFor(nav_ids_for(panel_entries())).viewed_task_id;
                     if (outcome.consumed && viewed_after != viewed_before) {
-                        // 真切会话(规格"现场一"):Enter 设 viewed_task_id / Esc
+                        // 真切会话(规格"现场一/四"):Enter 设 viewed_task_id / Esc
                         // 清零,上方视口整块换源。换源前先正式收束旧底栏帧
-                        // (RetireIdleChrome:整帧硬清、帧账归零)——空 composer
-                        // 的旧框滚进滚屏只会是残帧,清掉再铺新正文;随后请应用
-                        // 层铺出"此刻该看的 transcript",重打提示符、重锚、整帧
-                        // 重画。Enter 只切视图,草稿不提交(能进到这的 Enter 必然
-                        // 发生在 composer 为空时)。
+                        // (RetireIdleChrome:整帧硬清、帧账归零),再把上一视图
+                        // 正文从可视区擦净(retained view:旧帧先擦,新帧原位
+                        // 落——Esc 回 main 后代理正文不再占着 viewport 冒充活
+                        // 状态);随后请应用层铺出"此刻该看的 transcript",重打
+                        // 提示符、重锚、整帧重画。Enter 只切视图,草稿不提交
+                        // (能进到这的 Enter 必然发生在 composer 为空时)。
                         retire_idle_chrome();
-                        const auto& view_hook = AgentViewSwitchHookSlot();
-                        if (view_hook) {
-                            view_hook(viewed_after);
-                        }
+                        erase_previous_view_body();
+                        print_view_frame(viewed_after);
                         reanchor_prompt_and_redraw();
                         continue;
                     }

@@ -311,6 +311,11 @@ const Entry kZhCN[] = {
     {"agent_panel.stream_hint_focused_short", "Enter 查看 · x 停止/清除 · Esc 逐层退出"},
     {"agent_panel.stream_hint_idle_expanded", "Enter 查看 · Esc 收起"},
     {"agent_panel.idle_summary", "另有 {0} 只闲置代理 · Enter 展开"},
+    {"agent_panel.event_steering", "介入"},
+    {"agent_panel.event_thinking", "思考"},
+    {"agent_panel.event_failed", "任务终止"},
+    {"agent_panel.events_unavailable", "该任务没有消息账(旧版派出的任务),仅有结论:"},
+    {"agent_panel.main_header", "── 查看 main · 主会话 ──"},
 
     // ---- 确认提示 ----
     {"confirm.prompt", "[y] 本次允许  [a] 本会话总是允许(该工具)  [N] 拒绝: "},
@@ -1370,6 +1375,12 @@ const Entry kEn[] = {
     {"agent_panel.stream_hint_focused_short", "Enter view · x stop/clear · Esc exits layer by layer"},
     {"agent_panel.stream_hint_idle_expanded", "Enter view · Esc collapse"},
     {"agent_panel.idle_summary", "{0} more idle agent(s) · Enter to expand"},
+    {"agent_panel.event_steering", "Steering"},
+    {"agent_panel.event_thinking", "Thinking"},
+    {"agent_panel.event_failed", "Task ended"},
+    {"agent_panel.events_unavailable",
+     "No message ledger for this task (launched by an older build); only the result is available:"},
+    {"agent_panel.main_header", "── viewing main · main session ──"},
 
     // ---- confirm prompt ----
     {"confirm.prompt", "[y] allow once  [a] always allow this tool (this session)  [N] deny: "},

@@ -977,3 +977,204 @@ TEST_CASE("统一台账:一轮里先后多只前台代理,各自留终态,新一
     CHECK(summaries[0].foreground);
     CHECK(summaries[1].foreground);
 }
+
+// ---------------------------------------------------------------------------
+// 子代理消息账(规格"现场三"):每只任务独立的、按时间追加的事件流。
+// 事件类型与 main 对齐,查看态复用 main renderer——这里钉账本身:时序、
+// 中间文字不丢、工具配对、介入落点、终局事件。
+// ---------------------------------------------------------------------------
+
+// 一条 assistant 消息里"先说话再调工具"的脚本:正文块(block 0)在前,
+// tool_use 块(block 1)在后——钉"助手中间文字不能因后续工具调用而丢"。
+std::vector<api::StreamEvent> TextThenToolScript(const std::string& text, const std::string& tool_id,
+                                                 const std::string& tool_name) {
+    return {
+        api::MessageStart{"msg", "model"},
+        api::TextDelta{text},
+        api::ContentBlockDone{0},
+        api::ToolUseStart{1, tool_id, tool_name},
+        api::ToolUseInputDelta{1, "{}"},
+        api::ContentBlockDone{1},
+        api::MessageDone{"tool_use", api::Usage{}},
+    };
+}
+
+TEST_CASE("消息账:按次序 user -> 正文 -> 工具 -> 结果 -> 正文 -> 完成,顺序不乱") {
+    FakeBackend backend;
+    backend.scripts = {
+        TextThenToolScript("先看一眼目录", "toolu_1", "fake_tool"),
+        TextOnlyScript("结论:共三处入口"),
+    };
+    tools::ToolRegistry sub_registry;
+    sub_registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"工具结果全文", false}, false));
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+
+    REQUIRE_FALSE(agent_tool.execute(nlohmann::json{{"title", "查入口"}, {"prompt", "数一数入口"}}).is_error);
+    const auto summaries = agent_tool.TaskSummaries();
+    REQUIRE(summaries.size() == 1);
+    const auto events = agent_tool.TaskEvents(summaries[0].id);
+    REQUIRE(events.size() == 6);
+    CHECK(events[0].kind == tools::AgentTaskEventKind::UserMessage);
+    CHECK(events[0].text == "数一数入口");
+    CHECK(events[1].kind == tools::AgentTaskEventKind::AssistantText);
+    CHECK(events[1].text == "先看一眼目录");  // 中间文字不因后续工具调用丢掉
+    CHECK(events[2].kind == tools::AgentTaskEventKind::ToolStart);
+    CHECK(events[2].tool_name == "fake_tool");
+    CHECK(events[3].kind == tools::AgentTaskEventKind::ToolResult);
+    CHECK(events[3].tool_name == "fake_tool");
+    CHECK(events[3].result == "工具结果全文");
+    CHECK_FALSE(events[3].is_error);
+    CHECK(events[4].kind == tools::AgentTaskEventKind::AssistantText);
+    CHECK(events[4].text == "结论:共三处入口");
+    CHECK(events[5].kind == tools::AgentTaskEventKind::Completion);
+    CHECK(events[5].text == "结论:共三处入口");  // 完成事件带最终结论全文
+}
+
+TEST_CASE("消息账:思考入账、工具出错带错误标记;失败任务的终局是 Failure") {
+    FakeBackend backend;
+    // 第一轮:思考 + 出错的工具;第二轮:没有文本结论 -> NoFinalText 失败。
+    backend.scripts = {
+        {
+            api::MessageStart{"msg", "model"},
+            api::ThinkingDelta{"想一想从哪下手"},
+            api::ContentBlockDone{0},
+            api::ToolUseStart{1, "toolu_1", "fake_tool"},
+            api::ToolUseInputDelta{1, "{}"},
+            api::ContentBlockDone{1},
+            api::MessageDone{"tool_use", api::Usage{}},
+        },
+        {
+            api::MessageStart{"msg", "model"},
+            api::MessageDone{"end_turn", api::Usage{}},
+        },
+    };
+    tools::ToolRegistry sub_registry;
+    sub_registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"炸了", true}, false));
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+
+    agent_tool.execute(nlohmann::json{{"title", "试错"}, {"prompt", "试一下"}});
+    const auto summaries = agent_tool.TaskSummaries();
+    REQUIRE(summaries.size() == 1);
+    const auto events = agent_tool.TaskEvents(summaries[0].id);
+    REQUIRE(events.size() == 5);
+    CHECK(events[0].kind == tools::AgentTaskEventKind::UserMessage);
+    CHECK(events[1].kind == tools::AgentTaskEventKind::AssistantReasoning);
+    CHECK(events[1].text == "想一想从哪下手");
+    CHECK(events[2].kind == tools::AgentTaskEventKind::ToolStart);
+    CHECK(events[3].kind == tools::AgentTaskEventKind::ToolResult);
+    CHECK(events[3].is_error);  // 工具错误在账
+    CHECK(events[4].kind == tools::AgentTaskEventKind::Failure);  // 失败终局入账
+}
+
+TEST_CASE("消息账:终态任务事件账保留,投递与否不清账(台账与退场分离)") {
+    FakeBackend backend;
+    backend.scripts = {TextOnlyScript("完事")};
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+    REQUIRE_FALSE(agent_tool.execute(nlohmann::json{{"title", "小任务"}, {"prompt", "去"}}).is_error);
+    const auto summaries = agent_tool.TaskSummaries();
+    REQUIRE(summaries.size() == 1);
+    REQUIRE(summaries[0].state == tools::AgentTaskState::Done);
+    const auto events = agent_tool.TaskEvents(summaries[0].id);
+    REQUIRE(events.size() == 3);  // user + 正文 + completion
+    CHECK(events[0].kind == tools::AgentTaskEventKind::UserMessage);
+    CHECK(events[1].kind == tools::AgentTaskEventKind::AssistantText);
+    CHECK(events[2].kind == tools::AgentTaskEventKind::Completion);
+}
+
+// 每轮都挂住的后端:任务线程在轮次里等放闸,测试侧从容 SendTaskMessage
+// (无竞态——封账交接只会发生在轮次收口后),放一轮、跑一轮。
+class StallAllBackend : public api::Backend {
+public:
+    struct State {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::size_t started = 0;
+        bool release = false;
+    };
+    explicit StallAllBackend(std::shared_ptr<State> state) : state_(std::move(state)) {}
+
+    std::expected<void, api::Error> send_stream(
+        const api::Request& request, const std::function<void(const api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* cancel = nullptr) override {
+        (void)request;
+        std::size_t index;
+        {
+            std::unique_lock<std::mutex> lock(state_->mutex);
+            index = state_->started;
+            ++state_->started;
+            state_->cv.notify_all();
+            state_->cv.wait_for(lock, std::chrono::seconds(5), [&]() {
+                return state_->release || (cancel != nullptr && cancel->load(std::memory_order_acquire));
+            });
+            state_->release = false;  // 一次放行只放一轮
+        }
+        if (cancel != nullptr && cancel->load(std::memory_order_acquire)) {
+            return std::unexpected(api::Error{api::ErrorKind::Cancelled, "cancelled", 0});
+        }
+        const std::vector<api::StreamEvent> events =
+            index == 0 ? ToolUseScript("toolu_1", "fake_tool") : TextOnlyScript("收尾:按补充意见办");
+        for (const auto& event : events) {
+            on_event(event);
+        }
+        return {};
+    }
+
+private:
+    std::shared_ptr<State> state_;
+};
+
+TEST_CASE("消息账:中途介入记 steering_message,落在收到它的那个位置") {
+    tools::ToolRegistry sub_registry;
+    sub_registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"probe ok", false}, false));
+    const auto state = std::make_shared<StallAllBackend::State>();
+    FakeBackend foreground_placeholder;  // 构造用,后台走 detached factory
+    tools::AgentTool agent_tool(foreground_placeholder, sub_registry, "/work/dir");
+    agent_tool.SetDetachedBackendFactory([state]() {
+        tools::DetachedAgentBackend detached;
+        detached.backend = std::make_unique<StallAllBackend>(state);
+        return detached;
+    });
+
+    CHECK(agent_tool
+              .execute(nlohmann::json{{"title", "摸排"}, {"prompt", "查一查"}, {"run_in_background", true}})
+              .content.find("#1") != std::string::npos);
+    {  // 等第一轮挂住。
+        std::unique_lock<std::mutex> lock(state->mutex);
+        state->cv.wait_for(lock, std::chrono::seconds(2), [&]() { return state->started >= 1; });
+    }
+    CHECK(agent_tool.SendTaskMessage(1, "只读,不要修改") == tools::TaskMessageStatus::Queued);
+    CHECK(agent_tool.SendTaskMessage(1, "把证据列全") == tools::TaskMessageStatus::Queued);
+    {  // 放第一轮:工具收口后封账交接取走两条,续跑第二轮。
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->release = true;
+    }
+    state->cv.notify_all();
+    {  // 等第二轮挂住,再放行收尾。
+        std::unique_lock<std::mutex> lock(state->mutex);
+        state->cv.wait_for(lock, std::chrono::seconds(2), [&]() { return state->started >= 2; });
+        state->release = true;
+    }
+    state->cv.notify_all();
+    for (int i = 0; i < 300 && agent_tool.HasRunningTasks(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE_FALSE(agent_tool.HasRunningTasks());
+
+    const auto summaries = agent_tool.TaskSummaries();
+    REQUIRE(summaries.size() == 1);
+    const auto events = agent_tool.TaskEvents(1);
+    REQUIRE(events.size() == 7);
+    CHECK(events[0].kind == tools::AgentTaskEventKind::UserMessage);
+    CHECK(events[1].kind == tools::AgentTaskEventKind::ToolStart);
+    CHECK(events[2].kind == tools::AgentTaskEventKind::ToolResult);
+    // 两条介入按收到次序记在工具之后、收尾正文之前——"main 何时补了话"
+    // 在账上看得见落点(规格 transcript 单测第 3 条)。
+    CHECK(events[3].kind == tools::AgentTaskEventKind::SteeringMessage);
+    CHECK(events[3].text == "只读,不要修改");
+    CHECK(events[4].kind == tools::AgentTaskEventKind::SteeringMessage);
+    CHECK(events[4].text == "把证据列全");
+    CHECK(events[5].kind == tools::AgentTaskEventKind::AssistantText);
+    CHECK(events[5].text == "收尾:按补充意见办");
+    CHECK(events[6].kind == tools::AgentTaskEventKind::Completion);
+}

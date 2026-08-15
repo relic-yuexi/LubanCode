@@ -411,9 +411,41 @@ int wmain(int argc, wchar_t** argv) {
             Log("VIEW " + std::to_string(r) + ": " + row);
         }
     }
+
+    // ---- 三账拆分(规格"现场二"按键契约):Down 只挪选择,Enter 才切 ----
+    // 正看 #1,按 Down:选择光标到 #2,上方查看头行仍属 #1。
+    SendKey(VK_DOWN, 0, 0);
+    Sleep(400);
+    Check(FindLastRow("\xe6\x9f\xa5\xe7\x9c\x8b general-purpose #1") >= 0,
+          "Down 后:上方仍看 #1(查看头行未变)");  // 查看 general-purpose #1
+    Check(FindLastRow("\xe6\x9f\xa5\xe7\x9c\x8b general-purpose #2") < 0,
+          "Down 后:#2 的查看头行并未出现(方向键不偷换会话)");
+    // 再 Enter:查看这才切到 #2。
+    SendKey(VK_RETURN, L'\r', 0);
+    Check(WaitForText("\xe6\x9f\xa5\xe7\x9c\x8b general-purpose #2", 5000),
+          "Enter 后:上方才换 #2");  // 查看 general-purpose #2
+
+    // Esc 一拍回 main:查看头行换 main,代理正文不再占当前 viewport(retained
+    // view:旧帧已擦,Viewport 内不得再见 #2 的查看头行)。
     SendKey(VK_ESCAPE, 0, 0);
     Check(WaitForText("\xe5\xb7\xb2\xe5\x9b\x9e\xe4\xb8\xbb\xe4\xbc\x9a\xe8\xaf\x9d", 5000),
           "Esc:回 main 的复位行出现");  // 已回主会话
+    {
+        CONSOLE_SCREEN_BUFFER_INFO info{};
+        bool agent_view_gone = true;
+        if (GetConsoleScreenBufferInfo(g_conout, &info)) {
+            for (int r = info.srWindow.Top; r < 400; ++r) {
+                if (ReadRow(r).find("\xe6\x9f\xa5\xe7\x9c\x8b general-purpose") != std::string::npos) {
+                    agent_view_gone = false;
+                    break;
+                }
+            }
+        }
+        Check(agent_view_gone,
+              "Esc \xe5\x90\x8e:\xe5\xbd\x93\xe5\x89\x8d viewport "
+              "\xe4\xb8\x8d\xe5\x86\x8d\xe5\x87\xba\xe7\x8e\xb0\xe4\xbb\xa3\xe7\x90\x86\xe6\x9f\xa5\xe7\x9c\x8b\xe5\xa4\xb4\xe8\xa1\x8c(retained view "
+              "\xe5\xb7\xb2\xe6\x93\xa6\xe6\x97\xa7\xe5\xb8\xa7)");
+    }
     Check(CountVisibleComposers() == 1, "Esc 回 main:屏上 composer 仍恰好一份");
 
     // ---- Enter/Esc 往返 20 次:不多一份输入框/状态栏/导航坞 ----
