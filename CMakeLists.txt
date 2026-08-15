@@ -276,6 +276,7 @@ add_library(lubancode_core STATIC
   src/hooks/trust.cpp
   src/hooks/loader.cpp
   src/hooks/dispatcher.cpp
+  src/hooks/detached.cpp
   src/tools/skill_loader.cpp
   src/tools/skill_tool.cpp
   src/tools/todo_tool.cpp

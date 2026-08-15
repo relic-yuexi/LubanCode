@@ -4,6 +4,8 @@
 #include <sstream>
 #include <vector>
 
+#include "app/hook_runtime.hpp"
+
 namespace lubancode::app {
 
 namespace {
@@ -124,6 +126,10 @@ void HandleHooksCommand(const std::string& args, lubancode::hooks::HookDispatche
     if (dispatcher == nullptr) {
         std::cout << "hooks 运行时未初始化(异常路径),本命令不可用。\n";
         return;
+    }
+    // 安全点:先把后台子代理投递的记录归并进来,列表与流水看到的才是全账。
+    for (const std::string& notice : AdoptBackgroundHookRecordNotices()) {
+        std::cout << "[hooks] " << notice << "\n";
     }
     if (dispatcher->Empty()) {
         PrintDefinitionList(*dispatcher);

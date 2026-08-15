@@ -36,6 +36,7 @@
 #include "agent/loop.hpp"  // ToolHookDecision/ToolPhase:hooks 框架转发的类型
 #include "api/types.hpp"
 #include "cli/worktree.hpp"
+#include "hooks/detached.hpp"
 #include "hooks/dispatcher.hpp"
 #include "tools/isolation.hpp"
 #include "tools/registry.hpp"
@@ -450,12 +451,16 @@ private:
                              ToolRegistry& task_registry, int max_steps_per_turn, bool isolate);
     Result LaunchBackground(const nlohmann::json& input, const std::string& title, const std::string& agent_type,
                             ToolRegistry& task_registry, int max_steps_per_turn, bool isolate);
+    // background_hooks:后台任务的只读 hooks 会话(LaunchBackground 在主线程
+    // 造好带进来;前台路径为空)。RunTask 拿它在后台线程发 SubagentStart/Stop
+    // 与工具事件——记录只投递,主会话安全点归并(见 hooks/detached.hpp)。
     Result RunTask(api::Backend& backend, ToolRegistry& task_registry, const std::string& prompt,
                    const std::string& agent_type, int max_steps_per_turn, const Hooks* foreground_hooks,
                    const std::shared_ptr<TaskRecord>& task,
                    const DetachedAgentBackend* detached = nullptr,
                    const std::string* prepared_system_prompt = nullptr,
-                   const IsolationScope* isolation_scope = nullptr);
+                   const IsolationScope* isolation_scope = nullptr,
+                   const std::shared_ptr<lubancode::hooks::DetachedHookSession>& background_hooks = nullptr);
     void TouchTasks() { task_revision_.fetch_add(1, std::memory_order_release); }
 
     // 消息账的写入辅助(都假定调用方已持 tasks_mutex_ 或独占任务线程收口):

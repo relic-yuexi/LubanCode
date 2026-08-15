@@ -8,6 +8,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 
 #include <nlohmann/json.hpp>
 
@@ -776,3 +777,103 @@ TEST_CASE("dispatcher: 超长 stderr 截断入账,带截断标志") {
     CHECK(record.stderr_head.size() == hooks::HookRunRecord::kStderrHeadBytes);
 }
 #endif
+
+// ---------------------------------------------------------------------------
+// 后台(外挂)执行面:快照执行不落账,记录投递-归并闭环,信任闸门照过。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("dispatcher: EmitDetached 真跑钩子但不碰账本,投递后安全点归并") {
+    const std::string script = WriteHookScript("detached-ok", "exit 0");
+    hooks::HookDispatcher dispatcher = MakeDispatcher({MakeDefinition(RunScriptCommand(script))});
+    const std::vector<hooks::HookDefinition> snapshot = dispatcher.PolicySnapshot();
+    REQUIRE(snapshot.size() == 1);
+
+    const auto merged = hooks::HookDispatcher::EmitDetached(snapshot, hooks::HookEvent::PreToolUse,
+                                                            MakeToolPayload(), dispatcher.context());
+    CHECK(merged.executed == 1);
+    REQUIRE(merged.records.size() == 1);
+    CHECK(merged.records[0].outcome == "ok");
+
+    // 不落账:直接 Emit 的路才会进 recent_/last_record_,detached 跑完账本纹丝不动。
+    CHECK(dispatcher.RecentRecords(10).empty());
+    CHECK(dispatcher.LastRecordFor(1) == nullptr);
+
+    // 投递 -> 归并闭环:记录进账,告警随行,收编一次就干净。
+    CHECK_FALSE(dispatcher.HasExternalRecords());
+    dispatcher.PostExternalRecords(merged.records, "后台子代理的钩子降级了一票");
+    CHECK(dispatcher.HasExternalRecords());
+    const auto adoption = dispatcher.AdoptExternalRecords();
+    REQUIRE(adoption.records.size() == 1);
+    REQUIRE(adoption.warnings.size() == 1);
+    CHECK(adoption.warnings[0].find("降级") != std::string::npos);
+    CHECK(dispatcher.RecentRecords(10).size() == 1);
+    CHECK(dispatcher.LastRecordFor(1) != nullptr);
+    CHECK(dispatcher.LastRecordFor(1)->outcome == "ok");
+    CHECK_FALSE(dispatcher.HasExternalRecords());
+    CHECK(dispatcher.AdoptExternalRecords().records.empty());  // 收编一次即清
+}
+
+TEST_CASE("dispatcher: 后台投递按时间序归并,新在前的流水序不乱") {
+    hooks::HookDispatcher dispatcher = MakeDispatcher({});
+    hooks::HookRunRecord first;
+    first.definition_id = 1;
+    first.event_name = "PostToolUse";
+    first.outcome = "ok";
+    hooks::HookRunRecord second = first;
+    second.outcome = "blocked";
+    dispatcher.PostExternalRecords({first});
+    dispatcher.PostExternalRecords({second});
+    const auto adoption = dispatcher.AdoptExternalRecords();
+    REQUIRE(adoption.records.size() == 2);
+    const auto recent = dispatcher.RecentRecords(10);
+    REQUIRE(recent.size() == 2);
+    CHECK(recent[0].outcome == "blocked");  // 后投递的(更新的)在前
+    CHECK(recent[1].outcome == "ok");
+}
+
+TEST_CASE("dispatcher: 未信任/禁用照进快照——后台执行也过信任闸门") {
+    const std::string script = WriteHookScript("detached-untrusted", "echo PWNED > bg-pwned-marker.txt\nexit 0");
+    hooks::HookDefinition proj_def = MakeDefinition(RunScriptCommand(script));
+    proj_def.source_kind = hooks::HookSourceKind::Project;
+    proj_def.source_path = "test://project-config";
+    proj_def.trusted = false;  // 未信任
+    hooks::HookDispatcher dispatcher = MakeDispatcher({proj_def});
+
+    const auto merged = hooks::HookDispatcher::EmitDetached(dispatcher.PolicySnapshot(),
+                                                            hooks::HookEvent::PreToolUse, MakeToolPayload(),
+                                                            dispatcher.context());
+    REQUIRE(merged.records.size() == 1);
+    CHECK(merged.records[0].outcome == "skipped_untrusted");
+    CHECK(merged.executed == 0);
+    // 进程根本没起:标记文件不存在。
+    const std::filesystem::path marker =
+        std::filesystem::temp_directory_path() / "lubancode-hook-dispatch" / "bg-pwned-marker.txt";
+    CHECK_FALSE(std::filesystem::exists(marker));
+}
+
+TEST_CASE("dispatcher: 后台线程投递与主线程归并并发,一条不丢") {
+    hooks::HookDispatcher dispatcher = MakeDispatcher({});
+    constexpr int kBatches = 100;
+    std::thread poster([&dispatcher] {
+        for (int i = 0; i < kBatches; ++i) {
+            hooks::HookRunRecord record;
+            record.definition_id = 1;
+            record.event_name = "PostToolUse";
+            record.outcome = "ok";
+            dispatcher.PostExternalRecords({record});
+        }
+    });
+    int adopted = 0;
+    while (true) {
+        adopted += static_cast<int>(dispatcher.AdoptExternalRecords().records.size());
+        if (poster.joinable() && !dispatcher.HasExternalRecords()) {
+            // 队列此刻空且投递线程还能 join = 再等一小拍仍空才算收完(投递
+            // 线程可能正卡在锁上)。join 之后必有终局判断。
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    poster.join();
+    adopted += static_cast<int>(dispatcher.AdoptExternalRecords().records.size());
+    CHECK(adopted == kBatches);
+}

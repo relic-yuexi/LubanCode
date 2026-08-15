@@ -87,6 +87,23 @@ void UpdateHookRuntimeContext(hooks::HookContext context) {
     }
 }
 
+std::vector<std::string> AdoptBackgroundHookRecordNotices() {
+    hooks::HookDispatcher* dispatcher = HookRuntime();
+    if (dispatcher == nullptr) {
+        return {};
+    }
+    hooks::HookDispatcher::ExternalAdoption adoption = dispatcher->AdoptExternalRecords();
+    std::vector<std::string> notices;
+    if (!adoption.records.empty()) {
+        notices.push_back("后台子代理 hooks 落账 " + std::to_string(adoption.records.size()) +
+                          " 条运行记录(/hooks runs 可查)");
+    }
+    for (auto& warning : adoption.warnings) {
+        notices.push_back(std::move(warning));
+    }
+    return notices;
+}
+
 std::string HookPermissionModeText() {
     switch (cli::CurrentConfirmMode()) {
         case cli::ConfirmMode::Confirm:

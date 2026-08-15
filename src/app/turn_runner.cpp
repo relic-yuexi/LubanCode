@@ -791,6 +791,16 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
             background_results});
     }
 
+    // 安全点(轮起):后台子代理投递的 hooks 记录在这里归并落账。告警走
+    // stderr(静默档也要让人看见降级),信息行只在非静默档打。
+    for (const std::string& notice : lubancode::app::AdoptBackgroundHookRecordNotices()) {
+        if (!silent) {
+            std::cout << theme.stats << "[hooks] " << notice << theme.reset << "\n";
+        } else {
+            std::cerr << "[hooks] " << notice << "\n";
+        }
+    }
+
     // UserPromptSubmit:用户 prompt 送模型前。可阻断(continue=false/exit 2,
     // 这一轮不发模型、不算错误),可追加 developer context(原 prompt 不动,
     // 注入文本带来源标识单独成块,不串成一坨)。
@@ -1018,6 +1028,15 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
             }
             out.cancelled = out.cancelled || continuation->cancelled;
             stop_hook_active = true;
+        }
+    }
+
+    // 安全点(轮收):后台子代理这轮攒下的 hooks 记录归并落账,报信一行。
+    for (const std::string& notice : lubancode::app::AdoptBackgroundHookRecordNotices()) {
+        if (!silent) {
+            std::cout << theme.stats << "[hooks] " << notice << theme.reset << "\n";
+        } else {
+            std::cerr << "[hooks] " << notice << "\n";
         }
     }
 
