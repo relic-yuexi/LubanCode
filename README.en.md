@@ -204,6 +204,7 @@ At startup, LubanCode walks from the Git root to the working directory. Each dir
 | `/provider` | Add from the catalog, refresh it, list, switch, edit, or remove endpoints. |
 | `/init` | Create and load project-level `AGENTS.md`. |
 | `/model` · `/think` | Change the active model and reasoning effort. |
+| `/doctor` | Diagnose a local OpenAI-compatible endpoint: `effort` sends a tiny probe (actual field sent, usage split); `cache` reads server metrics and audits fixed-prefix hit rates. |
 | `/context` · `/compact` | Inspect context use (usage of the most recent main-session request, sub-agent tokens not included) and compact conversation history. |
 | `/skills` · `/skill` | Manage skills under `~/.lubancode/skills`; run `/skill` bare for install examples. |
 | `/mcp` · `/lsp` · `/plugins` | Inspect external tools and language servers. |
