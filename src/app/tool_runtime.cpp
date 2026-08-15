@@ -4,6 +4,7 @@
 
 #include "app/tool_runtime.hpp"
 
+#include <algorithm>
 #include <iostream>
 #include <utility>
 
@@ -112,6 +113,11 @@ std::vector<McpServerRuntime> StartMcpServers(
 
 void RegisterMcpTools(std::vector<McpServerRuntime>& mcp_servers, lubancode::tools::ToolRegistry& registry) {
     for (auto& runtime : mcp_servers) {
+        // 每只 MCP 的 tools 按 qualified name 排序后注册:服务端 ListTools
+        // 若乱序,LubanCode 也跟着乱——跨进程 /resume 时 schema 内容虽一样,
+        // tools 数组次序换了,请求前缀照样对不上(前缀缓存守恒单第七期)。
+        std::sort(runtime.tools.begin(), runtime.tools.end(),
+                  [](const auto& left, const auto& right) { return left.name < right.name; });
         for (const auto& tool_info : runtime.tools) {
             // tool_search:MCP 工具裹一层 DeferredTool 标成延迟挂载(mcp/
             // 目录不动,没法直接在 McpTool 上加 override)。阈值没超时延迟
