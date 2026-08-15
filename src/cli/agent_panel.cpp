@@ -43,7 +43,7 @@ AgentPanelController::Outcome AgentPanelController::HandleKey(PanelKey key,
     }
     if (!panel_alive) {
         // 面板不存在(没有任何子代理):全部键还给 composer,状态收干净。
-        if (focus_ || detail_) {
+        if (focus_ || viewed_task_id_ != 0) {
             Reset();
             out.redraw = true;
         }
@@ -59,7 +59,7 @@ AgentPanelController::Outcome AgentPanelController::HandleKey(PanelKey key,
             }
             const int delta = key == PanelKey::Up ? -1 : 1;
             focus_ = true;
-            detail_ = false;  // 换选择 = 离开旧查看态,标签跟着换
+            viewed_task_id_ = 0;  // 换选择 = 离开旧查看态,视口先回 main
             const int next = (index + delta + total_entries) % total_entries;
             selected_ = next;
             selected_task_id_ = next == 0 ? 0 : agent_task_ids[static_cast<std::size_t>(next - 1)];
@@ -78,14 +78,17 @@ AgentPanelController::Outcome AgentPanelController::HandleKey(PanelKey key,
                 out.redraw = true;
                 return out;
             }
-            detail_ = !detail_;
+            // Enter 只切视图:设置 viewed_task_id,上方 transcript 换源、composer
+            // 收件目标跟着换;绝不幸提交 composer 草稿(规格按键规矩)。正在看
+            // 的就是这只时再按一次 = 刷新,不 toggle。
+            viewed_task_id_ = selected_task_id_;
             out.consumed = true;
             out.redraw = true;
             return out;
         }
         case PanelKey::Esc: {
-            if (detail_) {
-                detail_ = false;  // 先退查看态,标签摘掉
+            if (viewed_task_id_ != 0) {
+                viewed_task_id_ = 0;  // 先退查看态:视口回 main,标签摘掉
                 out.consumed = true;
                 out.redraw = true;
                 return out;
@@ -165,8 +168,8 @@ void AgentPanelController::OnEntriesChanged(const std::vector<int>& agent_task_i
         return;
     }
     // 查看态的目标被清掉:强制收起,收件目标回 main(规格七)。
-    if (detail_ && target_task_id().has_value() &&
-        std::find(agent_task_ids.begin(), agent_task_ids.end(), selected_task_id_) == agent_task_ids.end()) {
+    if (viewed_task_id_ != 0 &&
+        std::find(agent_task_ids.begin(), agent_task_ids.end(), viewed_task_id_) == agent_task_ids.end()) {
         CloseView();
         return;
     }
@@ -181,7 +184,7 @@ void AgentPanelController::OnEntriesChanged(const std::vector<int>& agent_task_i
 }
 
 void AgentPanelController::CloseView() {
-    detail_ = false;
+    viewed_task_id_ = 0;
     focus_ = false;
     selected_ = 0;
     selected_task_id_ = 0;
@@ -191,18 +194,19 @@ void AgentPanelController::CloseView() {
 
 void AgentPanelController::Reset() {
     focus_ = false;
-    detail_ = false;
+    viewed_task_id_ = 0;
     selected_ = 0;
     selected_task_id_ = 0;
     armed_ = false;
     idle_expanded_ = false;
 }
 
+// 收件目标 = viewed_task_id(会话层唯一真状态的派生口),不另记一份。
 std::optional<int> AgentPanelController::target_task_id() const {
-    if (!detail_ || selected_task_id_ <= 0) {
+    if (viewed_task_id_ <= 0) {
         return std::nullopt;
     }
-    return selected_task_id_;
+    return viewed_task_id_;
 }
 
 // ---- AgentPanelSession:会话级外壳,一把小锁把键处理与绘制快照隔开 ----
@@ -238,7 +242,7 @@ AgentPanelSession::Snapshot AgentPanelSession::SnapshotFor(const std::vector<int
     std::lock_guard<std::mutex> lock(mutex_);
     Snapshot out;
     out.focused = controller_.focused();
-    out.detail_open = controller_.detail_open();
+    out.viewed_task_id = controller_.viewed_task_id();
     out.stop_all_armed = controller_.stop_all_armed();
     out.idle_expanded = controller_.idle_expanded();
     out.selected_index = controller_.selected_index(agent_task_ids);
@@ -283,7 +287,6 @@ std::vector<int> DockNavigationIds(const std::vector<AgentPanelEntry>& agents, b
 }
 
 AgentDockLayout LayoutAgentDock(const std::vector<AgentPanelEntry>& agents, int selected, bool focused,
-                                bool detail_open, const std::vector<std::string>& detail_lines,
                                 int max_visible_entries, int max_total_rows, int width, bool armed_stop_all,
                                 bool streaming, bool idle_expanded, int viewed_task_id) {
     AgentDockLayout out;
@@ -301,7 +304,7 @@ AgentDockLayout LayoutAgentDock(const std::vector<AgentPanelEntry>& agents, int 
     // 按它对齐出条目指针表,折起来的数目用"总数 - 保留数"倒推——布局与
     // 按键状态机永远同一本账。
     {
-        const std::vector<int> folded = DockNavigationIds(agents, idle_expanded, detail_open ? viewed_task_id : 0);
+        const std::vector<int> folded = DockNavigationIds(agents, idle_expanded, viewed_task_id);
         out.navigation_ids.insert(out.navigation_ids.end(), folded.begin(), folded.end());
     }
     std::vector<const AgentPanelEntry*> nav_entries;  // 与 navigation_ids 对齐(main/哨兵 = nullptr)
@@ -332,38 +335,17 @@ AgentDockLayout LayoutAgentDock(const std::vector<AgentPanelEntry>& agents, int 
     // 围着 selected 开,选中永不消失(仿 Claude Code 的密度) ----
     const int agent_total = out.total_count - 1;
     const int entry_cap = max_visible_entries > 0 ? max_visible_entries : agent_total;
-    const int detail_size = detail_open && safe_selected != 0 ? static_cast<int>(detail_lines.size())
-                        : (detail_open ? 1 : 0);  // main 详情固定 1 行
     int agents_visible = (std::min)(agent_total, entry_cap);
-    int detail_shown = detail_size;
-    bool detail_truncated = false;
-    // ---- 矮屏预算:提示(永不丢)> 至少一条条目(含选中)> 详情 > 更多条目 ----
+    // ---- 矮屏预算:提示(永不丢)> 至少一条条目(含选中)> 更多条目 ----
     if (max_total_rows > 0) {
         int chosen = -1;
         for (int vis = agents_visible; vis >= 1; --vis) {
             const int note = vis < agent_total ? 1 : 0;
-            const int detail_hint = detail_open ? 1 : 0;
-            const int base = 1 + note + 1 + vis + detail_hint;  // 提示+计数+main+代理+详情提示
+            const int base = 1 + note + 1 + vis;  // 提示+计数+main+代理
             if (base > max_total_rows) {
                 continue;
             }
-            const int detail_room = max_total_rows - base;
-            int shown = detail_size;
-            bool truncated = false;
-            if (detail_open && detail_size > detail_room) {
-                if (detail_room >= 2) {
-                    shown = detail_room - 1;
-                    truncated = true;
-                } else if (detail_room == 1) {
-                    shown = 0;
-                    truncated = true;
-                } else {
-                    continue;
-                }
-            }
             chosen = vis;
-            detail_shown = shown;
-            detail_truncated = truncated;
             break;
         }
         if (chosen < 1) {
@@ -436,7 +418,7 @@ AgentDockLayout LayoutAgentDock(const std::vector<AgentPanelEntry>& agents, int 
             row.identity.clear();
             row.middle = trf("agent_panel.idle_summary", out.hidden_idle);
         } else {
-            if (detail_open && viewed_task_id == id) {
+            if (viewed_task_id == id) {
                 row.lamp = "\xE2\x97\x89 ";  // ◉ 正在查看(实心标记,不靠颜色)
             } else if (entry->running) {
                 row.lamp = "\xE2\x97\x8C ";  // ◌ 运行中
@@ -462,35 +444,8 @@ AgentDockLayout LayoutAgentDock(const std::vector<AgentPanelEntry>& agents, int 
     for (auto& row : entry_rows) {
         out.rows.push_back(std::move(row));
     }
-
-    // ---- 查看态详情(缀在树后面,预算内保头部) ----
-    if (detail_open) {
-        AgentDockRow hint;
-        hint.kind = AgentDockRow::Kind::DetailHint;
-        hint.text = tr("agent_panel.detail_hint");
-        out.rows.push_back(std::move(hint));
-        if (safe_selected == 0) {
-            AgentDockRow row;
-            row.kind = AgentDockRow::Kind::DetailLine;
-            row.text = "  " + tr("agent_panel.main_detail");
-            out.rows.push_back(std::move(row));
-        } else {
-            const int shown = detail_truncated ? detail_shown : detail_size;
-            for (int i = 0; i < shown && i < static_cast<int>(detail_lines.size()); ++i) {
-                AgentDockRow row;
-                row.kind = AgentDockRow::Kind::DetailLine;
-                row.text = "  " + detail_lines[static_cast<std::size_t>(i)];
-                out.rows.push_back(std::move(row));
-            }
-            if (detail_truncated) {
-                AgentDockRow row;
-                row.kind = AgentDockRow::Kind::DetailLine;
-                row.text = trf("agent_panel.detail_more_note",
-                               detail_lines.size() - static_cast<std::size_t>(shown));
-                out.rows.push_back(std::move(row));
-            }
-        }
-    }
+    // 导航坞到此为止:只放行、状态与提示。查看态的长正文(prompt/工具流水/
+    // 结论)由上方会话视口承接,不向坞下方生长(规格"现场一")。
     return out;
 }
 

@@ -205,7 +205,11 @@ private:
 
     // ---- 原先的大 lambda,逐只升成方法 ----
     std::vector<lubancode::cli::AgentPanelEntry> BuildAgentPanelEntries();
-    std::vector<std::string> BuildAgentTaskDetail(int task_id);
+    // 查看态的会话视口(规格"现场一"):viewed_task_id 指向哪只,就把它的
+    // transcript(prompt/工具调用/结果/错误)整块铺进上方;0 = 重铺 main
+    // 最近条目。导航坞里不再有长正文。
+    std::vector<std::string> BuildAgentTaskTranscriptLines(int task_id, int width);
+    void PrintViewedTranscript(int viewed_task_id);
     void CleanupBackgroundAgents();
     bool HandleTranscriptUi(lubancode::cli::UiKeyAction action);
     void PrintRecentItems(std::size_t count);
@@ -532,10 +536,11 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
     });
 
     // 后台子代理面板的数据源(缓存 + 修订号,面板每 100ms 拉一次)。列表走
-    // 轻量全量(TaskSummaries,不截 8 只);详情按需(只有查看态打开的那只
-    // 才拉),别让每拍刷新复制全部工具输出。
+    // 轻量全量(TaskSummaries,不截 8 只);查看态的长正文由视图切换钩子按
+    // viewed_task_id 现取,整块换进上方会话视口——导航坞只放导航。
     lubancode::cli::SetAgentPanelProvider([this]() { return BuildAgentPanelEntries(); });
-    lubancode::cli::SetAgentPanelDetailProvider([this](int task_id) { return BuildAgentTaskDetail(task_id); });
+    lubancode::cli::SetAgentViewSwitchHook(
+        [this](int viewed_task_id) { PrintViewedTranscript(viewed_task_id); });
 
     // 面板动作接线(x 停止/清除、Ctrl+X Ctrl+K 两段确认停全部):只发信号/
     // 清台账,面板等任务线程报终态的那一拍自己改灯。
@@ -749,7 +754,7 @@ InteractiveSession::~InteractiveSession() {
     // 异常退场也走这条。
     lubancode::cli::SetTranscriptUiHandler(nullptr);
     lubancode::cli::SetAgentPanelProvider(nullptr);
-    lubancode::cli::SetAgentPanelDetailProvider(nullptr);
+    lubancode::cli::SetAgentViewSwitchHook(nullptr);
     lubancode::cli::SetAgentPanelActions(lubancode::cli::AgentPanelActions{});
     lubancode::cli::SetIdleWakeHook(nullptr);
 }
@@ -788,8 +793,7 @@ std::vector<lubancode::cli::AgentPanelEntry> InteractiveSession::BuildAgentPanel
             state_key = "agent_status.state_done";
         }
         entry.state = trf("agent_status.summary", tr(state_key), task.tool_call_count,
-                          lubancode::cli::FormatTokenCount(tokens), lubancode::cli::FormatSeconds(seconds));
-        // 列表行只认真正短 title;旧任务没有 title 就显示"未命名子代理 #N"
+                          lubancode::cli::FormatTokenCount(tokens), lubancode::cli::FormatSeconds(seconds));        // 列表行只认真正短 title;旧任务没有 title 就显示"未命名子代理 #N"
         // ——绝不回退到 prompt 前若干字(prompt 只在详情里出现)。
         entry.title = task.title.empty() ? trf("agent_panel.untitled", task.id) : task.title;
         if (task.pending_message_count > 0) {
@@ -802,58 +806,109 @@ std::vector<lubancode::cli::AgentPanelEntry> InteractiveSession::BuildAgentPanel
     return out;
 }
 
-// 查看态详情(按需取,每 100ms 那拍只在查看态开着时才会来问这一只):
-// 完整任务说明、全部工具调用流水(不截"最近 8 次")、未送达介入消息、
-// 结论/实时输出尾巴。
-std::vector<std::string> InteractiveSession::BuildAgentTaskDetail(int task_id) {
+// 查看态的会话视口行(规格"现场一"):子代理 transcript 整块换进上方——
+// 完整任务说明、全部工具调用流水(不截"最近 8 次")、每次调用的结果、
+// 未送达介入消息、结论/实时输出尾巴。这些只在这里出现,导航坞里绝不含
+// 长正文。任务不在台账(被清理/演示假代理)时给一行占位,不静默空白。
+std::vector<std::string> InteractiveSession::BuildAgentTaskTranscriptLines(int task_id, int width) {
     std::vector<std::string> lines;
     lubancode::tools::AgentTool* agent_tool = session_agent_tool();
-    if (agent_tool == nullptr) {
-        return lines;
+    std::optional<lubancode::tools::AgentTaskSnapshot> snapshot;
+    if (agent_tool != nullptr) {
+        snapshot = agent_tool->TaskDetail(task_id);
     }
-    const auto snapshot = agent_tool->TaskDetail(task_id);
-    if (!snapshot.has_value()) {
-        lines.push_back(tr("agent_panel.detail_gone"));
-        return lines;
-    }
-    const auto one_line = [](std::string text) {
-        for (char& c : text) {
-            if (c == '\n' || c == '\r' || c == '\t') {
-                c = ' ';
-            }
+    // 头行先从面板条目拿身份与短标题(演示钩子的假代理也认得),台账里
+    // 再补一遍明细。
+    std::string name = "subagent #" + std::to_string(task_id);
+    std::string title;
+    for (const auto& entry : BuildAgentPanelEntries()) {
+        if (entry.task_id == task_id) {
+            name = entry.name;
+            title = entry.title;
+            break;
         }
-        return text;
-    };
-    // 详情先给"任务标题"(真正短标题,可能退"未命名"),标明前台/后台来源,
-    // 完整 prompt 另起"任务说明"——两者分开,不混用。
-    lines.push_back(tr("agent_panel.detail_title") +
-                    (snapshot->title.empty() ? trf("agent_panel.untitled", snapshot->id) : snapshot->title));
+    }
+    if (!snapshot.has_value()) {
+        lines.push_back(lubancode::cli::TruncateUtf8ToDisplayWidth(
+            "── " + name + (title.empty() ? std::string() : " · " + title) + " ──", std::max(0, width - 1)));
+        lines.push_back("  " + tr("agent_panel.detail_gone"));
+        return lines;
+    }
+    if (snapshot->title.empty() == false && title.empty()) {
+        title = snapshot->title;
+    }
+    lines.push_back(lubancode::cli::TruncateUtf8ToDisplayWidth(
+        trf("agent_panel.view_header", name,
+            title.empty() ? trf("agent_panel.untitled", snapshot->id) : title),
+        std::max(0, width - 1)));
     lines.push_back(std::string("  [") +
                     tr(snapshot->foreground ? "agent_panel.source_foreground" : "agent_panel.source_background") +
                     "]");
     lines.push_back(tr("agent_panel.detail_prompt"));
-    lines.push_back("  " + one_line(snapshot->prompt));
+    {
+        // 完整 prompt 原文照铺(缩进两格,换行保留)——查看态就是看这个的,
+        // 不折成一行。
+        std::string rest = snapshot->prompt;
+        std::size_t cut = 0;
+        do {
+            cut = rest.find('\n');
+            std::string chunk = cut == std::string::npos ? rest : rest.substr(0, cut);
+            if (cut != std::string::npos) {
+                rest.erase(0, cut + 1);
+            }
+            if (chunk.empty() && cut == std::string::npos) {
+                break;
+            }
+            lines.push_back("  " + lubancode::cli::TruncateUtf8ToDisplayWidth(chunk, std::max(0, width - 3)));
+        } while (cut != std::string::npos);
+    }
     const auto pending = agent_tool->PendingTaskMessages(task_id);
     if (!pending.empty()) {
         lines.push_back(trf("agent_panel.detail_pending_head", pending.size()));
         for (const auto& message : pending) {
-            lines.push_back("  * " + one_line(message));
+            lines.push_back("  * " + lubancode::cli::TruncateUtf8ToDisplayWidth(message, std::max(0, width - 5)));
         }
     }
     if (!snapshot->tool_calls.empty()) {
         lines.push_back(trf("agent_panel.detail_tools_head", snapshot->tool_calls.size()));
         for (std::size_t i = 0; i < snapshot->tool_calls.size(); ++i) {
             const auto& call = snapshot->tool_calls[i];
-            lines.push_back(std::string(call.done ? "● " : "◌ ") + std::to_string(i + 1) + ". " + call.name +
-                            " " + lubancode::cli::TruncateUtf8Codepoints(one_line(call.input_json), 120));
+            lines.push_back(std::string(call.done ? (call.is_error ? "× " : "● ") : "◌ ") +
+                            std::to_string(i + 1) + ". " + call.name + " " +
+                            lubancode::cli::TruncateUtf8ToDisplayWidth(call.input_json, std::max(0, width - 12)));
+            if (call.done && !call.result.empty()) {
+                lines.push_back("    ⎿ " +
+                                lubancode::cli::TruncateUtf8ToDisplayWidth(call.result, std::max(0, width - 6)));
+            }
         }
     }
     const std::string& result = snapshot->result.empty() ? snapshot->live_output : snapshot->result;
     if (!result.empty()) {
         lines.push_back(tr("agent_panel.detail_result_head"));
-        lines.push_back("  " + lubancode::cli::TruncateUtf8Codepoints(one_line(result), 400));
+        lines.push_back("  " + lubancode::cli::TruncateUtf8ToDisplayWidth(result, std::max(0, width - 3)));
     }
     return lines;
+}
+
+// 视图切换钩子(空闲路与流式监听共用,见 console_input.hpp):viewed_task_id
+// 变了就铺"此刻该看的会话正文"。持 StdoutWriteMutex——流式期间先擦 footer
+// 再铺、铺完画回;空闲路两步都是空操作,正文从旧 chrome 之下接着铺。
+void InteractiveSession::PrintViewedTranscript(int viewed_task_id) {
+    std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+    lubancode::cli::EraseStreamFooterLocked();
+    const int width = lubancode::cli::DetectConsoleWidth().value_or(80);
+    std::cout << "\n";
+    if (viewed_task_id == 0) {
+        // 回 main:最近几条摘要重铺,视口/标题/收件目标一同复位。
+        std::cout << theme.stats << tr("agent_panel.back_to_main") << theme.reset << "\n";
+        PrintRecentItems(5);
+    } else {
+        for (const auto& line : BuildAgentTaskTranscriptLines(viewed_task_id, width)) {
+            std::cout << line << "\n";
+        }
+    }
+    std::cout.flush();
+    lubancode::cli::RedrawStreamFooterLocked();
 }
 
 // 聚焦查看返回时的"简化重画":最近几条紧凑摘要(焦点标记照带)。

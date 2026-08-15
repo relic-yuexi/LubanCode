@@ -122,10 +122,10 @@ AgentPanelProvider& AgentPanelProviderSlot() {
     return provider;
 }
 
-// 详情按需取的槽(查看态打开的那只才被调,见 agent_panel.hpp)。
-std::function<std::vector<std::string>(int)>& AgentPanelDetailSlot() {
-    static std::function<std::vector<std::string>(int)> provider;
-    return provider;
+// 视图切换钩子的槽(viewed_task_id 变了才被调,见 console_input.hpp)。
+std::function<void(int)>& AgentViewSwitchHookSlot() {
+    static std::function<void(int)> hook;
+    return hook;
 }
 
 AgentPanelActions& AgentPanelActionsSlot() {
@@ -854,9 +854,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         return DockNavigationIds(entries, snap0.idle_expanded, snap0.target_task_id.value_or(0));
     };
 
-    // 导航坞帧:折叠+窗口化布局(纯函数)+ 查看态详情(按需取,只有打开的
-    // 那只才拉)+ 输入框上横线右端短标签 + composer 收件目标。0.29.x 起坞
-    // 画在状态行之下贴底(rows_below),空闲与流式共用同一套纯逻辑。
+    // 导航坞帧:折叠+窗口化布局(纯函数)+ 输入框上横线右端短标签 + composer
+    // 收件目标。0.29.x 起坞画在状态行之下贴底(rows_below),空闲与流式共用
+    // 同一套纯逻辑;导航坞只放导航,查看态长正文走视图切换钩子进上方视口。
     const auto build_dock = [&](const std::vector<AgentPanelEntry>& entries,
                                 std::string& tag_out) -> std::vector<std::string> {
         tag_out.clear();
@@ -870,10 +870,6 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         const std::vector<int> nav_ids = nav_ids_for(entries);
         panel_session.OnEntriesChanged(nav_ids);
         const AgentPanelSession::Snapshot snapshot = panel_session.SnapshotFor(nav_ids);
-        std::vector<std::string> detail_lines;
-        if (snapshot.detail_open && snapshot.selected_task_id > 0 && AgentPanelDetailSlot()) {
-            detail_lines = AgentPanelDetailSlot()(snapshot.selected_task_id);
-        }
         // 预算:常态最多单列 5 只代理(窗口围绕选中开);整坞封在半屏上下,
         // 输入框与状态栏始终留在视口里。宽度/高度每拍现查,resize 下一帧
         // 就对上。
@@ -882,10 +878,10 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         const int dock_budget =
             now.has_value() ? std::max(2, std::min(now->height / 2, 24)) : 0;
         const AgentDockLayout layout =
-            LayoutAgentDock(entries, snapshot.selected_index, snapshot.focused, snapshot.detail_open,
-                            detail_lines, kDockMaxVisibleEntries, dock_budget, width,
+            LayoutAgentDock(entries, snapshot.selected_index, snapshot.focused,
+                            kDockMaxVisibleEntries, dock_budget, width,
                             snapshot.stop_all_armed, /*streaming=*/false, snapshot.idle_expanded,
-                            snapshot.target_task_id.value_or(0));
+                            snapshot.viewed_task_id);
         if (snapshot.target_task_id.has_value()) {
             // composer 此刻以查看态那只子代理为收件人;上横线右端挂它的 title。
             for (const auto& entry : entries) {
@@ -922,8 +918,8 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                      "\n";
         }
         value += "#" + std::to_string(snapshot.selected_task_id) + (snapshot.focused ? "f" : "-") +
-                 (snapshot.detail_open ? "d" : "-") + (snapshot.stop_all_armed ? "a" : "-") +
-                 (snapshot.idle_expanded ? "i" : "-") + "\n";
+                 "v" + std::to_string(snapshot.viewed_task_id) +
+                 (snapshot.stop_all_armed ? "a" : "-") + (snapshot.idle_expanded ? "i" : "-") + "\n";
         value += BottomChromeFingerprint(frame);
         return value;
     };
@@ -975,6 +971,27 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         RedrawEditArea(start_row, prompt_end_col, prompt, state, frame.queue_rows, frame.agent_dock_rows,
                        tag, prev_body_row_count, previous_frame, prev_frame_origin, vt_enabled, chrome);
         panel_fingerprint = fingerprint_of(entries, frame, snapshot);
+    };
+
+    // 内容铺完后的重锚(UI 按键回调路 / 视图切换路共用):重打上横线与提示
+    // 符、重测锚点、作废旧帧、整帧重画。铺出的正文把旧 chrome 自然顶进滚屏。
+    const auto reanchor_prompt_and_redraw = [&]() {
+        if (box) {
+            const std::optional<platform::ScreenInfo> rule_info = platform::GetScreenInfo();
+            const int console_width = rule_info.has_value() ? rule_info->width : 80;
+            std::cout << BoxRuleLine(theme, console_width) << "\n";
+        }
+        std::cout << prompt;
+        std::cout.flush();
+        if (const std::optional<platform::ScreenInfo> after_info = platform::GetScreenInfo();
+            after_info.has_value()) {
+            start_row = after_info->cursor_y;
+            prompt_end_col = after_info->cursor_x;
+        }
+        prev_body_row_count = 0;
+        previous_frame.reset();
+        prev_frame_origin = -1;
+        redraw_with_panel(editor.CurrentRenderState(), panel_entries());
     };
 
     if (box) {
@@ -1200,6 +1217,8 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             if (const std::optional<PanelKey> panel_key = MapToPanelKey(*raw_key);
                 panel_key.has_value()) {
                 const bool empty_now = editor.CurrentRenderState().line.empty();
+                const int viewed_before =
+                    panel_session.SnapshotFor(nav_ids_for(entries_before_key)).viewed_task_id;
                 const auto outcome = panel_session.HandleKey(*panel_key, nav_ids_for(entries_before_key),
                                                              empty_now, std::chrono::steady_clock::now());
                 if (outcome.stop_all) {
@@ -1231,6 +1250,29 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                     }
                 }
                 if (outcome.consumed || outcome.redraw) {
+                    const int viewed_after =
+                        panel_session.SnapshotFor(nav_ids_for(panel_entries())).viewed_task_id;
+                    if (outcome.consumed && viewed_after != viewed_before) {
+                        // 真切会话(规格"现场一"):Enter 设 viewed_task_id / Esc
+                        // 清零,上方视口整块换源。光标先挪到旧 chrome 之下,请
+                        // 应用层铺出"此刻该看的 transcript",旧帧随正文滚走;
+                        // 随后重打提示符、重锚、整帧重画。Enter 只切视图,草稿
+                        // 不提交(能进到这的 Enter 必然发生在 composer 为空时)。
+                        const auto& view_hook = AgentViewSwitchHookSlot();
+                        if (view_hook) {
+                            if (const std::optional<platform::ScreenInfo> below = platform::GetScreenInfo();
+                                below.has_value()) {
+                                int last_row = start_row + prev_body_row_count;
+                                if (last_row >= below->height) {
+                                    last_row = below->height - 1;
+                                }
+                                platform::SetCursorPos(0, last_row);
+                            }
+                            view_hook(viewed_after);
+                        }
+                        reanchor_prompt_and_redraw();
+                        continue;
+                    }
                     redraw_with_panel(editor.CurrentRenderState(), panel_entries());
                     if (outcome.consumed) {
                         continue;
@@ -1245,9 +1287,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         }
 
         RenderState state = editor.HandleKey(*mapped);
-        if (!state.line.empty() && !panel_session.SnapshotFor(nav_ids_for(panel_entries())).detail_open) {
-            // 敲了正文即离开面板焦点(上下键归历史);查看态(收件目标)例外
-            // ——那只标签还挂着,话要送去那只子代理。
+        if (!state.line.empty() && panel_session.SnapshotFor(nav_ids_for(panel_entries())).viewed_task_id == 0) {
+            // 敲了正文即离开面板焦点(上下键归历史);查看态例外——那只标签
+            // 还挂着,话要送去那只子代理。
             panel_session.Reset();
         }
 
@@ -1283,22 +1325,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 const bool handled = UiHandlerSlot()(*action);
                 if (handled) {
                     // 回调铺完内容,重打提示符、重测锚点,整帧(含导航坞)重画。
-                    if (box) {
-                        const std::optional<platform::ScreenInfo> rule_info = platform::GetScreenInfo();
-                        const int console_width = rule_info.has_value() ? rule_info->width : 80;
-                        std::cout << BoxRuleLine(theme, console_width) << "\n";
-                    }
-                    std::cout << prompt;
-                    std::cout.flush();
-                    if (const std::optional<platform::ScreenInfo> after_info = platform::GetScreenInfo();
-                        after_info.has_value()) {
-                        start_row = after_info->cursor_y;
-                        prompt_end_col = after_info->cursor_x;
-                    }
-                    prev_body_row_count = 0;
-                    previous_frame.reset();
-                    prev_frame_origin = -1;
-                    redraw_with_panel(state, panel_entries());
+                    reanchor_prompt_and_redraw();
                     continue;
                 }
                 // 0.17.0:焦点导航请求没被消费(比如 transcript 还是空的)——
@@ -1520,8 +1547,8 @@ void SetTranscriptUiHandler(TranscriptUiHandler handler) { UiHandlerSlot() = std
 
 void SetAgentPanelProvider(AgentPanelProvider provider) { AgentPanelProviderSlot() = std::move(provider); }
 
-void SetAgentPanelDetailProvider(std::function<std::vector<std::string>(int task_id)> provider) {
-    AgentPanelDetailSlot() = std::move(provider);
+void SetAgentViewSwitchHook(std::function<void(int viewed_task_id)> hook) {
+    AgentViewSwitchHookSlot() = std::move(hook);
 }
 
 void SetAgentPanelActions(AgentPanelActions actions) { AgentPanelActionsSlot() = std::move(actions); }
@@ -1726,17 +1753,13 @@ void RedrawStreamFooterLocked() {
         PanelSessionSlot().OnEntriesChanged(nav_ids);
         if (!panel_entries.empty()) {
             const AgentPanelSession::Snapshot panel_snapshot = PanelSessionSlot().SnapshotFor(nav_ids);
-            std::vector<std::string> detail_lines;
-            if (panel_snapshot.detail_open && panel_snapshot.selected_task_id > 0 && AgentPanelDetailSlot()) {
-                detail_lines = AgentPanelDetailSlot()(panel_snapshot.selected_task_id);
-            }
             const int panel_budget = (std::max)(2, (std::min)(info->height / 2, 24));
             const AgentDockLayout dock_layout =
                 LayoutAgentDock(panel_entries, panel_snapshot.selected_index, panel_snapshot.focused,
-                                panel_snapshot.detail_open, detail_lines, kDockMaxVisibleEntries,
-                                panel_budget, info->width, panel_snapshot.stop_all_armed,
+                                kDockMaxVisibleEntries, panel_budget, info->width,
+                                panel_snapshot.stop_all_armed,
                                 /*streaming=*/true, panel_snapshot.idle_expanded,
-                                panel_snapshot.target_task_id.value_or(0));
+                                panel_snapshot.viewed_task_id);
             dock_rows_text = RenderAgentDockLines(dock_layout, info->width);
             dock_selected_task_id = panel_snapshot.selected_task_id;
             if (panel_snapshot.target_task_id.has_value()) {
@@ -2285,7 +2308,8 @@ void TurnInputListener::ThreadMain() {
             if (FooterSlot().enabled) {
                 const std::vector<int> ids = panel_ids_now();
                 const AgentPanelSession::Snapshot snapshot = PanelSessionSlot().SnapshotFor(ids);
-                if (!ids.empty() && (snapshot.stop_all_armed || snapshot.detail_open || snapshot.focused)) {
+                if (!ids.empty() &&
+                    (snapshot.stop_all_armed || snapshot.viewed_task_id != 0 || snapshot.focused)) {
                     (void)PanelSessionSlot().HandleKey(PanelKey::Esc, ids,
                                                        editor.CurrentRenderState().line.empty(),
                                                        std::chrono::steady_clock::now());
@@ -2404,7 +2428,7 @@ void TurnInputListener::ThreadMain() {
                 if (!ids.empty()) {
                     const bool empty_now = editor.CurrentRenderState().line.empty();
                     const AgentPanelSession::Snapshot snapshot = PanelSessionSlot().SnapshotFor(ids);
-                    if (snapshot.focused || snapshot.detail_open || empty_now) {
+                    if (snapshot.focused || snapshot.viewed_task_id != 0 || empty_now) {
                         const auto outcome = PanelSessionSlot().HandleKey(
                             key->kind == PK::Up ? PanelKey::Up : PanelKey::Down, ids, empty_now,
                             std::chrono::steady_clock::now());
@@ -2480,14 +2504,23 @@ void TurnInputListener::ThreadMain() {
                 refresh_footer();
                 continue;
             }
-            // 面板聚焦且 composer 空:Enter 进/收当前代理详情(与空闲同语义,
-            // 进入后 composer 收件目标切给该代理);否则 Enter 才落队。
+            // 面板聚焦且 composer 空:Enter 设 viewed_task_id(与空闲同语义,
+            // composer 收件目标切给该代理,上方视口换源);否则 Enter 才落队。
             if (FooterSlot().enabled && !edit.has_value()) {
                 const std::vector<int> ids = panel_ids_now();
                 const AgentPanelSession::Snapshot snapshot = PanelSessionSlot().SnapshotFor(ids);
                 if (!ids.empty() && snapshot.focused && editor.CurrentRenderState().line.empty()) {
                     (void)PanelSessionSlot().HandleKey(PanelKey::EnterView, ids, /*composer_empty=*/true,
                                                        std::chrono::steady_clock::now());
+                    const int viewed_after = PanelSessionSlot().SnapshotFor(ids).viewed_task_id;
+                    if (viewed_after != snapshot.viewed_task_id) {
+                        // 真切会话:钩子自管锁(先擦 footer 再铺该代理的
+                        // transcript、铺完重画 footer),这里不持锁调用。
+                        const auto& view_hook = AgentViewSwitchHookSlot();
+                        if (view_hook) {
+                            view_hook(viewed_after);
+                        }
+                    }
                     refresh_footer();
                     continue;
                 }
