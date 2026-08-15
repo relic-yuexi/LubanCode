@@ -162,9 +162,9 @@ std::string AgentTool::description() const {
     return "把独立任务委托给子代理。先想一个 4~16 字(英文 2~6 个词)的语义短标题填 title——名词短语或短命令,能彼此区分,"
            "不要照抄 prompt 首句、不要塞路径清单或套话;再把完整的任务说明写进 prompt。title 给人看(代理面板/日志),"
            "prompt 给子代理执行,两者各司其职。agent_type=Explore 是只读代码搜索代理;general-purpose 能研究、执行多步任务和改代码。"
-           "子代理有独立上下文,只把结论交回主对话。run_in_background=true 时任务在会话后台运行,本次调用立刻返回任务编号,"
-           "适合与主线无依赖的摸排;主线马上需要结论时传 false。后台任务不能弹权限确认,未预先放行的操作会被拒绝。"
-           "子代理看不见当前对话历史,prompt 必须自包含。";
+           "子代理有独立上下文,只把结论交回主对话。执行模式看 execution_mode(缺省 auto):交互会话里独立探索型任务默认后台跑,"
+           "下一步非等这份结果不可才显式写 foreground;管道/单发场景 auto 等价前台(阻塞等结论)。后台任务不能弹权限确认,"
+           "未预先放行的操作会被拒绝。子代理看不见当前对话历史,prompt 必须自包含。";
 }
 
 nlohmann::json AgentTool::input_schema() const {
@@ -198,6 +198,18 @@ nlohmann::json AgentTool::input_schema() const {
     type_prop["enum"] = nlohmann::json::array({"general-purpose", "Explore"});
     type_prop["description"] = "子代理类型:Explore 只读搜索分析;general-purpose 可做多步操作。默认 general-purpose。";
     properties["agent_type"] = type_prop;
+
+    nlohmann::json mode_prop = nlohmann::json::object();
+    mode_prop["type"] = "string";
+    mode_prop["enum"] = nlohmann::json::array({"auto", "foreground", "background"});
+    mode_prop["description"] =
+        "执行模式,缺省 auto。auto:交互会话里独立探索型任务默认后台跑(结论稍后送达),"
+        "非等结果不可时再显式写 foreground;管道/单发场景 auto 等价前台(阻塞等结论)。"
+        "background:立刻返回任务编号,后台独立跑;background 任务不能弹权限确认,"
+        "未预先放行的操作会被拒绝。foreground:本次调用阻塞等子代理结论。"
+        "旧参数 run_in_background 仍认(true=background,false=foreground);"
+        "两者都给时,显式(非 auto)的 execution_mode 优先。";
+    properties["execution_mode"] = mode_prop;
 
     nlohmann::json background_prop = nlohmann::json::object();
     background_prop["type"] = "boolean";
@@ -266,6 +278,28 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
         return {"agent_type 只认 general-purpose 或 Explore", true};
     }
 
+    // execution_mode(默认 auto):auto 在交互会话等价后台、管道/单发等价前台
+    // ——由 background_by_default_ 承载(交互会话把它设真,单发/管道默认假),
+    // 首版不做自动猜测,模型自己显式覆盖。旧 run_in_background 仍认;两者
+    // 都给时显式(非 auto)的 execution_mode 优先。
+    bool mode_explicit = false;
+    bool mode_background = false;
+    if (const auto it = input.find("execution_mode"); it != input.end() && !it->is_null()) {
+        if (!it->is_string()) {
+            return {"execution_mode 得是字符串(auto/foreground/background)", true};
+        }
+        const std::string mode = it->get<std::string>();
+        if (mode == "foreground") {
+            mode_explicit = true;
+            mode_background = false;
+        } else if (mode == "background") {
+            mode_explicit = true;
+            mode_background = true;
+        } else if (mode != "auto") {
+            return {"execution_mode 只认 auto、foreground 或 background", true};
+        }
+    }
+
     std::string isolation = input.value("isolation", std::string("none"));
     if (isolation != "none" && isolation != "worktree") {
         return {"isolation 只认 none 或 worktree", true};
@@ -288,7 +322,8 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
 
     ToolRegistry& task_registry =
         agent_type == "Explore" && explore_registry_ != nullptr ? *explore_registry_ : sub_registry_;
-    const bool background = input.value("run_in_background", background_by_default_);
+    const bool background =
+        mode_explicit ? mode_background : input.value("run_in_background", background_by_default_);
     if (background) {
         return LaunchBackground(input, title, agent_type, task_registry, max_turns, isolate);
     }

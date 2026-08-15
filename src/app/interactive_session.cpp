@@ -486,6 +486,10 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
     sub_deferral = tool_runtime_->sub_deferral();
     tool_search_threshold = config.tool_search_threshold;
     if (session_agent_tool() != nullptr) {
+        // execution_mode=auto 的缺省走向:交互会话里独立探索型任务默认后台
+        // (结论稍后送达),模型非等结果不可时显式写 foreground。管道/单发
+        // 不设这个,auto 等价前台。
+        session_agent_tool()->SetBackgroundByDefault(true);
         // 每个后台任务各造一份 HTTP client 与基础工具表。取配置/模型/魂时
         // 正在主线程的 agent 工具调用里，拷贝完才起线程，不跨线程读这些
         // 会话可变字段。

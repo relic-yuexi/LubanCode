@@ -547,6 +547,65 @@ TEST_CASE("agent 工具:hooks.cancel 原样透传给 sub_loop.Run()(根因一回
     CHECK(wait_state->saw_cancel);
 }
 
+// ---------------------------------------------------------------------------
+// execution_mode(auto/foreground/background,默认 auto):首版 auto 只随
+// 会话缺省走(交互=后台,管道/单发=前台),不做自动猜测;旧 run_in_background
+// 仍认,显式(非 auto)的 execution_mode 优先。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("execution_mode:显式 foreground/background 生效,auto 随会话缺省,旧参兼容") {
+    FakeBackend backend;
+    backend.scripts = {TextOnlyScript("前台结论")};
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+
+    // 缺省 auto + 会话缺省前台(管道/单发):阻塞跑前台。
+    CHECK_FALSE(agent_tool
+                    .execute(nlohmann::json{{"title", "模式一"}, {"prompt", "查"}, {"execution_mode", "auto"}})
+                    .is_error);
+    REQUIRE(agent_tool.TaskSummaries().size() == 1);
+    CHECK(agent_tool.TaskSummaries()[0].foreground);
+
+    // 会话缺省翻成后台(交互)后,auto 走后台:没有 detached 工厂会明确报错。
+    agent_tool.SetBackgroundByDefault(true);
+    const auto no_factory =
+        agent_tool.execute(nlohmann::json{{"title", "模式二"}, {"prompt", "查"}, {"execution_mode", "auto"}});
+    CHECK(no_factory.is_error);
+    CHECK(no_factory.content.find("run_in_background") != std::string::npos);  // 提示写明两套参数
+
+    // 显式 foreground 压过会话缺省后台:照旧阻塞等结论。
+    backend.scripts.push_back(TextOnlyScript("显式前台结论"));
+    const auto fg = agent_tool.execute(
+        nlohmann::json{{"title", "模式三"}, {"prompt", "查"}, {"execution_mode", "foreground"}});
+    CHECK_FALSE(fg.is_error);
+    CHECK(fg.content == "显式前台结论");
+
+    // 旧参兼容:false = foreground。
+    backend.scripts.push_back(TextOnlyScript("旧参前台结论"));
+    const auto legacy_fg =
+        agent_tool.execute(nlohmann::json{{"title", "模式四"}, {"prompt", "查"}, {"run_in_background", false}});
+    CHECK_FALSE(legacy_fg.is_error);
+    CHECK(legacy_fg.content == "旧参前台结论");
+
+    // 旧参 true = background:同样吃"没配后台后端"的明确报错。
+    const auto legacy_bg =
+        agent_tool.execute(nlohmann::json{{"title", "模式五"}, {"prompt", "查"}, {"run_in_background", true}});
+    CHECK(legacy_bg.is_error);
+
+    // 显式 background 压过一切(这里没工厂,仍报错,但报的是后台未配置)。
+    const auto bg = agent_tool.execute(
+        nlohmann::json{{"title", "模式六"}, {"prompt", "查"}, {"execution_mode", "background"}});
+    CHECK(bg.is_error);
+
+    // 不认得的模式值拒绝,不发请求。
+    const auto before = backend.captured_requests.size();
+    const auto bad =
+        agent_tool.execute(nlohmann::json{{"title", "模式七"}, {"prompt", "查"}, {"execution_mode", "somewhere"}});
+    CHECK(bad.is_error);
+    CHECK(bad.content.find("execution_mode") != std::string::npos);
+    CHECK(backend.captured_requests.size() == before);
+}
+
 TEST_CASE("注册表排除:子代理工具表不含 agent 自己,主表含 agent,防递归深度硬限 1") {
     FakeBackend backend;
 
