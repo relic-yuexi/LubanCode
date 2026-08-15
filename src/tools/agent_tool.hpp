@@ -359,6 +359,9 @@ public:
     // 通知给人看的短进度行用——"#2 标题 · 完成 · 12 次工具 · 3.4k tokens"。
     // 完整结果照旧走 DrainCompletionNotices 进模型消息。
     std::vector<std::string> CompletionNoticeLines() const;
+    // 未投递完成结果的任务号(只 peek 不置 delivered):回流收口的短提示
+    // (导航坞 toast)报"谁完成了"用,不用从通知行里倒着解析 #N。
+    std::vector<int> UndeliveredCompletionTaskIds() const;
 
     // 主会话切进 /worktree 后，子代理也得看见同一处工作目录。
     void SetWorkingDirectory(std::string cwd) { cwd_ = std::move(cwd); }

@@ -1654,15 +1654,28 @@ std::vector<std::string> AgentTool::CompletionNoticeLines() const {
     return out;
 }
 
+std::vector<int> AgentTool::UndeliveredCompletionTaskIds() const {
+    std::lock_guard<std::mutex> lock(tasks_mutex_);
+    std::vector<int> ids;
+    for (const auto& task : tasks_) {
+        if (task->snapshot.state != AgentTaskState::Running && !task->snapshot.delivered) {
+            ids.push_back(task->snapshot.id);
+        }
+    }
+    return ids;
+}
+
 std::string AgentTool::DrainCompletionNotices() {
     std::lock_guard<std::mutex> lock(tasks_mutex_);
     std::ostringstream out;
+    bool delivered_any = false;
     for (const auto& task : tasks_) {
         auto& snapshot = task->snapshot;
         if (snapshot.state == AgentTaskState::Running || snapshot.delivered) {
             continue;
         }
         snapshot.delivered = true;
+        delivered_any = true;
         out << "[后台子代理结果 #" << snapshot.id << " "
             << (snapshot.title.empty() ? "(未命名)" : snapshot.title) << " (" << snapshot.agent_type << ", ";
         switch (snapshot.state) {
@@ -1682,6 +1695,13 @@ std::string AgentTool::DrainCompletionNotices() {
                 break;
         }
         out << ")]\n" << snapshot.result << "\n";
+    }
+    // delivered 一翻,导航坞那行就该退场(done+delivered 不进导航表)。面板
+    // 数据源按 TaskRevision 缓存条目——这里不 Touch 的话修订号不动,退场
+    // 永远到不了屏上,行赖在坞里直到别的任务碰巧碰一下账(查看态回流单
+    // 实测的第一桩)。
+    if (delivered_any) {
+        TouchTasks();
     }
     return out.str();
 }
