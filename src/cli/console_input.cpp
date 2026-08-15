@@ -77,8 +77,8 @@ void StripTrailingCrLf(std::string& s) {
     }
 }
 
-// (FormatAgentPanel 已搬去 cli/agent_panel.cpp 的 LayoutAgentPanel:面板从
-// hint_lines 挪到输入框上方后,布局/窗口/状态机全在那边的纯逻辑层。)
+// (导航坞的布局/折叠/窗口/状态机全在 cli/agent_panel.cpp 的纯逻辑层,
+// 行序与帧账见 cli/bottom_chrome.hpp;这里只管接线与落笔。)
 
 // 贯穿整条交互会话存活的编辑器实例:main.cpp 里 `> ` 主循环、工具确认
 // 提示、/model 选择、初次配置向导,全部经这一个 ReadLine() 入口,底下共用

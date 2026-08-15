@@ -119,7 +119,7 @@ using TranscriptUiHandler = std::function<bool(UiKeyAction)>;
 // 走不到逐键路径,注册了也永远不会被调,天然无感。
 void SetTranscriptUiHandler(TranscriptUiHandler handler);
 
-// 会话内后台子代理面板(0.28.x 起画在输入框上方,不再借 hint_lines)。
+// 会话内后台子代理导航坞(0.29.x 起画在 composer 下横线与状态行之后贴底)。
 // 数据由应用层给,终端层只管选择与绘制:空 composer 按 ↑/↓ 进入代理焦点,
 // Enter 进查看态(同时把 composer 收件目标切到这只子代理),Esc 逐层退出,
 // x 停止/清除当前条目,Ctrl+X Ctrl+K 两段确认停止全部。主会话固定算第 0 项,
