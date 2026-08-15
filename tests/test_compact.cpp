@@ -7,6 +7,7 @@
 
 #include <doctest/doctest.h>
 
+#include <deque>
 #include <string>
 #include <vector>
 
@@ -635,4 +636,242 @@ TEST_CASE("AgentLoop: TrimHistory 兜底真丢东西时,AfterHardTrim 通报") {
         }
     }
     CHECK(saw_hard_trim);
+}
+
+// ---------------------------------------------------------------------------
+// 第三期:episode 切分与 map/reduce 分层压缩
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 多脚本后端:每个请求吃队首一份脚本,吃完的出队;队空再要就失败。
+// map/reduce 每一步的应答不同,得按次序喂。
+class ScriptedBackend : public api::Backend {
+public:
+    std::deque<std::vector<api::StreamEvent>> scripts;
+    bool fail_when_empty = true;
+    std::vector<api::Request> captured_requests;
+
+    std::expected<void, api::Error> send_stream(
+        const api::Request& request,
+        const std::function<void(const api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* /*cancel*/ = nullptr) override {
+        captured_requests.push_back(request);
+        if (scripts.empty()) {
+            if (fail_when_empty) {
+                return std::unexpected(api::Error{api::ErrorKind::Api, "脚本用尽", 0});
+            }
+            return {};
+        }
+        const auto script = scripts.front();
+        scripts.pop_front();
+        for (const auto& event : script) {
+            on_event(event);
+        }
+        return {};
+    }
+};
+
+std::vector<api::StreamEvent> TextScript(const std::string& text) {
+    return {
+        api::MessageStart{"msg", "model"},
+        api::TextDelta{text},
+        api::ContentBlockDone{0},
+        api::MessageDone{"end_turn", api::Usage{}},
+    };
+}
+
+// 一段局部小结(map 产物):五栏 + 末尾 json manifest。
+std::string EpisodeText(const std::string& tag) {
+    return "## 阶段目标\n" + tag + " 阶段的目标说明文字,足够长\n"
+           "## 已证实的事实\n" + tag + " 的事实\n## 关键决策\n(无)\n"
+           "## 涉及文件与符号\nsrc/" + tag + ".cpp\n## 未完成事项\n" + tag + " 收尾\n"
+           "```json\n{\"goal\": \"" + tag + " 阶段目标\", \"constraints\": [], \"open_items\": [\"" + tag +
+           " 收尾\"], \"next_action\": \"继续\"}\n```";
+}
+
+// 归并存档(reduce 产物):终稿六栏 + 守恒 manifest。
+std::string ReduceText(const std::string& open_items_json = R"(["总收尾"])") {
+    return "## 任务目标\n把分阶段压缩做完\n## 已证实的事实\n三段小结都齐了\n"
+           "## 关键决策\nmap 再 reduce\n## 涉及文件与符号\ncompact.cpp\n"
+           "## 关键命令与结果\n(无)\n## 未完成事项\n总收尾\n"
+           "```json\n{\"goal\": \"把分阶段压缩做完\", \"constraints\": [\"不许猜补\"], \"open_items\": " +
+           open_items_json + ", \"next_action\": \"收尾\"}\n```";
+}
+
+// 四轮大历史(每轮 ~1000 token),窗口预算只够装单轮。
+std::vector<api::Message> BigHistory() {
+    std::vector<api::Message> history;
+    for (int i = 0; i < 4; ++i) {
+        history.push_back(UserText("第" + std::to_string(i) + "问 " + std::string(4000, 'a')));
+        history.push_back(AssistantText("答" + std::to_string(i) + " " + std::string(100, 'b')));
+    }
+    return history;
+}
+
+agent::CompactOptions SmallWindowOptions() {
+    agent::CompactOptions options;
+    options.budget.window_tokens = 4000;
+    options.budget.output_reserve_tokens = 512;
+    options.budget.protocol_headroom_tokens = 0;
+    return options;
+}
+
+}  // namespace
+
+TEST_CASE("SplitEpisodes: 每条外层用户输入与 todo_write 都开新段") {
+    std::vector<api::Message> history;
+    history.push_back(UserText("u1"));
+    history.push_back(AssistantText("a1"));
+    history.push_back(AssistantText("a1b"));  // 同段内第二条 assistant
+    history.push_back(UserText("u2"));
+    // todo_write 在轮中间:plan 变化,自成边界。
+    history.push_back(AssistantToolUse("t9", "todo_write"));
+    history.push_back(UserToolResult("t9", "ok"));
+    history.push_back(AssistantText("a2"));
+    history.push_back(UserText("u3"));
+    history.push_back(AssistantText("a3"));
+
+    const auto episodes = agent::SplitEpisodes(history);
+    // 段界:u2 处、todo_write 处、u3 处。
+    REQUIRE(episodes.size() == 4);
+    CHECK(episodes[0] == std::make_pair(std::size_t{0}, std::size_t{3}));
+    CHECK(episodes[1] == std::make_pair(std::size_t{3}, std::size_t{4}));  // u2 单独
+    CHECK(episodes[2] == std::make_pair(std::size_t{4}, std::size_t{7}));  // todo_write 起
+    CHECK(episodes[3] == std::make_pair(std::size_t{7}, std::size_t{9}));
+}
+
+TEST_CASE("CompactHierarchical: 装得下退化为单次,一条请求") {
+    ScriptedBackend backend;
+    backend.scripts.push_back(SummaryScript(kGoodSummary));
+
+    std::vector<api::Message> history;
+    history.push_back(UserText("小历史"));
+    history.push_back(AssistantText("小回答"));
+
+    agent::CompactOptions options;  // 窗口未知 → 单次
+    const auto result = agent::CompactHierarchical(backend, "test-model", history, options);
+
+    REQUIRE(result.has_value());
+    CHECK_FALSE(result->metrics.hierarchical);
+    CHECK(result->metrics.chunks == 1);
+    REQUIRE(backend.captured_requests.size() == 1);
+}
+
+TEST_CASE("CompactHierarchical: 装不下走 map/reduce,块界不劈 tool 对") {
+    ScriptedBackend backend;
+    // 冷区三轮 → 3 份 map 小结 + 1 份 reduce 归并。
+    backend.scripts.push_back(TextScript(EpisodeText("壹")));
+    backend.scripts.push_back(TextScript(EpisodeText("贰")));
+    backend.scripts.push_back(TextScript(EpisodeText("叁")));
+    backend.scripts.push_back(TextScript(ReduceText()));
+
+    const std::vector<api::Message> history = BigHistory();
+    const auto result = agent::CompactHierarchical(backend, "test-model", history, SmallWindowOptions());
+
+    REQUIRE(result.has_value());
+    CHECK(result->metrics.hierarchical);
+    CHECK(result->metrics.chunks == 3);
+    CHECK(result->metrics.reduce_passes == 0);
+    CHECK(result->manifest.goal == "把分阶段压缩做完");
+    CHECK(std::get<api::TextBlock>(result->archive.content[0]).text.find("把分阶段压缩做完") != std::string::npos);
+
+    // 请求形状:前 3 份 map(指令带"局部小结",各吃一段消息),末份 reduce。
+    REQUIRE(backend.captured_requests.size() == 4);
+    for (std::size_t i = 0; i < 3; ++i) {
+        const api::Request& map_request = backend.captured_requests[i];
+        CHECK(map_request.system.find("局部小结") != std::string::npos);
+        // 一轮 = u + a,末条 assistant 另补一条 user 收尾(防 prefill 老坑)。
+        REQUIRE(map_request.messages.size() == 3);
+        CHECK(map_request.messages.back().role == api::Role::User);
+    }
+    const api::Request& reduce_request = backend.captured_requests.back();
+    CHECK(reduce_request.system.find("归并") != std::string::npos);
+    // reduce 的输入带着三份小结与来源事件号。
+    const std::string reduce_body = std::get<api::TextBlock>(reduce_request.messages[0].content[0]).text;
+    CHECK(reduce_body.find("局部小结 1/3") != std::string::npos);
+    CHECK(reduce_body.find("来源事件 e") != std::string::npos);
+    CHECK(reduce_body.find("壹") != std::string::npos);
+    CHECK(reduce_body.find("叁") != std::string::npos);
+}
+
+TEST_CASE("CompactHierarchical: 守恒校验在终稿上照样拦,历史不动") {
+    ScriptedBackend backend;
+    backend.scripts.push_back(TextScript(EpisodeText("壹")));
+    backend.scripts.push_back(TextScript(EpisodeText("贰")));
+    backend.scripts.push_back(TextScript(EpisodeText("叁")));
+    // 终稿把"补分块预算"这条待办弄丢了。
+    backend.scripts.push_back(TextScript(ReduceText(R"(["只留一条"])")));
+
+    std::vector<api::Message> history = BigHistory();
+    agent::CompactOptions options = SmallWindowOptions();
+    options.required_open_items = {"补分块预算"};
+
+    const auto result = agent::CompactHierarchical(backend, "test-model", history, options);
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message.find("守恒校验") != std::string::npos);
+    CHECK(result.error().message.find("补分块预算") != std::string::npos);
+    CHECK(history.size() == 8);  // 原史一字未动
+}
+
+TEST_CASE("CompactHierarchical: map 任一块失败,整趟失败,旧历史不动") {
+    ScriptedBackend backend;
+    backend.scripts.push_back(TextScript(EpisodeText("壹")));
+    backend.scripts.push_back(TextScript(EpisodeText("贰")));
+    backend.scripts.push_back({api::MessageStart{"msg", "model"}, api::StreamError{"中途断流"}});
+
+    std::vector<api::Message> history = BigHistory();
+    const auto result = agent::CompactHierarchical(backend, "test-model", history, SmallWindowOptions());
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message.find("中途断流") != std::string::npos);
+    CHECK(history.size() == 8);
+}
+
+TEST_CASE("CompactHierarchical: 上一轮存档只进 reduce 当参考,不进 map 块") {
+    ScriptedBackend backend;
+    backend.scripts.push_back(TextScript(EpisodeText("壹")));
+    backend.scripts.push_back(TextScript(EpisodeText("贰")));
+    backend.scripts.push_back(TextScript(EpisodeText("叁")));
+    backend.scripts.push_back(TextScript(ReduceText()));
+
+    // 首条消息带上一轮存档(BuildCompactedHistory 并入的形状)。
+    std::vector<api::Message> history = BigHistory();
+    api::Message& first = history[0];
+    std::get<api::TextBlock>(first.content[0]).text =
+        "[对话存档,此前内容已压缩] 上一轮的存档正文,不许复印。\n"
+        "```json\n{\"goal\": \"旧目标\", \"open_items\": []}\n```\n\n" +
+        std::get<api::TextBlock>(first.content[0]).text;
+
+    const auto result = agent::CompactHierarchical(backend, "test-model", history, SmallWindowOptions());
+    REQUIRE(result.has_value());
+    REQUIRE(backend.captured_requests.size() == 4);
+    // map 块不吃旧存档(阻断"摘要复印摘要")……
+    for (std::size_t i = 0; i + 1 < backend.captured_requests.size(); ++i) {
+        for (const auto& message : backend.captured_requests[i].messages) {
+            for (const auto& block : message.content) {
+                if (std::holds_alternative<api::TextBlock>(block)) {
+                    CHECK(std::get<api::TextBlock>(block).text.find("上一轮的存档正文") == std::string::npos);
+                }
+            }
+        }
+    }
+    // ……reduce 把它当参考输入带上,并声明以局部小结为准。
+    const std::string reduce_body =
+        std::get<api::TextBlock>(backend.captured_requests.back().messages[0].content[0]).text;
+    CHECK(reduce_body.find("上一轮的存档正文") != std::string::npos);
+    CHECK(backend.captured_requests.back().system.find("只当参考") != std::string::npos);
+}
+
+TEST_CASE("CompactHierarchical: 整份历史都在热区(单轮巨型)→ 交给单次压缩明确拒绝") {
+    ScriptedBackend backend;
+    std::vector<api::Message> history;
+    history.push_back(UserText(std::string(20000, 'x')));
+
+    const auto result = agent::CompactHierarchical(backend, "test-model", history, SmallWindowOptions());
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message.find("装不下") != std::string::npos);
+    CHECK(backend.captured_requests.empty());
 }

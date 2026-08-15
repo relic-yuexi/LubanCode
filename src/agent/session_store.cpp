@@ -296,6 +296,75 @@ std::vector<api::Message> ApplyCompactEvent(std::vector<api::Message> effective,
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// compact_v2 事件
+// ---------------------------------------------------------------------------
+
+std::string SerializeCompactV2Event(const CompactV2Event& event, const std::string& ts) {
+    nlohmann::json j;
+    j["type"] = "compact_v2";
+    j["schema"] = 2;
+    j["epoch"] = event.epoch;
+    j["archive"] = MessageToJson(event.archive);
+    j["kept_from"] = event.kept_from;
+    if (!event.manifest.is_null()) {
+        j["manifest"] = event.manifest;
+    }
+    if (!event.metrics.is_null()) {
+        j["metrics"] = event.metrics;
+    }
+    j["ts"] = ts;
+    return platform::DumpJsonSanitized(j);  // 坏串窄边界,同 SerializeSessionMessage
+}
+
+std::optional<CompactV2Event> ParseCompactV2Event(const std::string& line) {
+    const nlohmann::json j = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+    if (!j.is_object() || j.value("type", std::string()) != "compact_v2") {
+        return std::nullopt;
+    }
+    if (!j.contains("archive") || !j.contains("kept_from") || !j["kept_from"].is_number_integer()) {
+        return std::nullopt;
+    }
+    const auto kept = j["kept_from"].get<long long>();
+    if (kept < 0) {
+        return std::nullopt;
+    }
+    auto archive = MessageFromJson(j["archive"]);
+    if (!archive.has_value()) {
+        return std::nullopt;
+    }
+    CompactV2Event event;
+    event.archive = std::move(*archive);
+    event.kept_from = static_cast<std::size_t>(kept);
+    if (j.contains("epoch") && j["epoch"].is_number_integer()) {
+        event.epoch = j["epoch"].get<int>();
+    }
+    if (j.contains("manifest")) {
+        event.manifest = j["manifest"];
+    }
+    if (j.contains("metrics")) {
+        event.metrics = j["metrics"];
+    }
+    return event;
+}
+
+CompactV2Event UpgradeToV2(const CompactEvent& event, int epoch, nlohmann::json manifest, nlohmann::json metrics) {
+    CompactV2Event v2;
+    v2.archive = event.archive;
+    v2.kept_from = event.kept_from;
+    v2.epoch = epoch;
+    v2.manifest = std::move(manifest);
+    v2.metrics = std::move(metrics);
+    return v2;
+}
+
+CompactEvent AsCompactEvent(const CompactV2Event& event) {
+    CompactEvent v1;
+    v1.archive = event.archive;
+    v1.kept_from = event.kept_from;
+    return v1;
+}
+
 std::string SerializeTitleEvent(const std::string& title, const std::string& ts) {
     nlohmann::json j;
     j["type"] = "title";
@@ -581,7 +650,24 @@ std::optional<LoadedSession> ParseSessionFile(const std::string& content) {
                 }
                 session.compact_positions.push_back(session.all_messages.size());
                 session.compact_count += 1;
+                session.compact_epoch = session.compact_count;
+                session.last_compact_manifest = nlohmann::json();
                 session.messages = ApplyCompactEvent(std::move(session.messages), *event);
+                continue;
+            }
+            if (type == "compact_v2") {
+                // v2:回放与 v1 同型(archive + kept_from),manifest/epoch 记
+                // 进 LoadedSession 供审计与 rebase。
+                auto event = ParseCompactV2Event(line);
+                if (!event.has_value()) {
+                    session.skipped_lines += 1;
+                    continue;
+                }
+                session.compact_positions.push_back(session.all_messages.size());
+                session.compact_count += 1;
+                session.compact_epoch = event->epoch > 0 ? event->epoch : session.compact_count;
+                session.last_compact_manifest = event->manifest;
+                session.messages = ApplyCompactEvent(std::move(session.messages), AsCompactEvent(*event));
                 continue;
             }
             if (type == "title") {
@@ -773,6 +859,15 @@ bool SessionStore::AppendCompactEvent(const CompactEvent& event) {
         return false;
     }
     out_ << SerializeCompactEvent(event, NowTimestamp()) << "\n";
+    out_.flush();
+    return out_.good();
+}
+
+bool SessionStore::AppendCompactV2Event(const CompactV2Event& event) {
+    if (!out_.is_open()) {
+        return false;
+    }
+    out_ << SerializeCompactV2Event(event, NowTimestamp()) << "\n";
     out_.flush();
     return out_.good();
 }

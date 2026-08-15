@@ -49,29 +49,31 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                            const lubancode::cli::Theme& theme);
 
 
-// /compact 命令的结果:event 是压缩事件(archive + kept_from),成功时
-// 调用方追加写进存档流水,/resume 才能回放出压缩后的活状态;失败/没得压
-// 给 nullopt。before/after tokens 用统一估算口径,给"压缩前后省了多少"
-// 的报告;manifest_* 是摘要 manifest 里守住的目标数,供成功提示带一句
+// /compact 命令的结果:event 是 compact_v2 压缩事件(archive + kept_from +
+// manifest + metrics),成功时调用方追加写进存档流水,/resume 才能回放出
+// 压缩后的活状态;失败/没得压给 nullopt。before/after tokens 用统一估算
+// 口径;manifest_* 是摘要 manifest 里守住的目标数,供成功提示带一句
 // "保留了几条约束/待办"。
 struct CompactCommandResult {
-    std::optional<lubancode::agent::CompactEvent> event;
+    std::optional<lubancode::agent::CompactV2Event> event;
     std::size_t before_tokens = 0;
     std::size_t after_tokens = 0;
     std::size_t manifest_constraints = 0;
     std::size_t manifest_open_items = 0;
 };
 
-// /compact 命令:把当前历史整段发给模型换一份压缩存档,顶替掉中间那段
-// 老对话,热区按 token 预算保留。backend 传裸的、没包 ModelOverrideBackend
-// 的那份——Compact() 会自己把 compact_model 写进 request.model。args 是
-// /compact 的重点文本;options 携带窗口预算与必须守恒的待办(由会话现场
-// 收集,活动 todo 的未完成条目)。压缩模型窗口装不下时明确拒绝、不静默
-// 截史;manifest 校验不过同样旧 history 不动。
+// /compact 命令:分层压缩(装得下单次摘要;装不下按 episode 分块 map、
+// 归并 reduce),顶替掉中间那段老对话,热区按 token 预算保留。backend 传
+// 裸的、没包 ModelOverrideBackend 的那份——CompactHierarchical() 会自己把
+// compact_model 写进 request.model。args 是 /compact 的重点文本(或
+// --dry-run);compact_epoch 进出两头用:进 = 本场已压过几次,出 = 本次
+// 压完的序号(写进 v2 事件);options 携带窗口预算与必须守恒的待办。
+// 压缩模型窗口装不下(分块也救不了)时明确拒绝、不静默截史;manifest
+// 校验不过同样旧 history 不动。
 CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::agent::AgentLoop& loop,
                                           lubancode::api::Backend& raw_backend, const std::string& compact_model,
                                           const lubancode::cli::Theme& theme, bool spinner_enabled,
-                                          const lubancode::agent::CompactOptions& options);
+                                          const lubancode::agent::CompactOptions& options, int& compact_epoch);
 
 void PrintSessionsCommand(const std::string& sessions_dir, const std::string& args);
 
@@ -98,7 +100,8 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
                     std::size_t& persisted_count, lubancode::agent::SessionMeta& session_meta,
                     std::string& session_title, const std::string& wire_str, const std::string& current_model,
                     const lubancode::cli::Theme& theme, bool quiet_if_none,
-                    lubancode::cli::WorktreeSession* worktree_session = nullptr);
+                    lubancode::cli::WorktreeSession* worktree_session = nullptr,
+                    int* compact_epoch_out = nullptr);
 
 
 // /export [路径]:当前会话导出 Markdown,默认写 sessions/<id>.md。
@@ -120,6 +123,7 @@ struct SessionCommandState {
     lubancode::agent::AgentLoop& loop;        // /compact /resume /export 用
     lubancode::agent::SessionStore& store;
     std::size_t& persisted_count;             // 落盘基线
+    int& compact_epoch;                       // 压缩序号(/resume 接旧账,/compact 进出两头用)
     lubancode::agent::SessionMeta& meta;
     std::string& title;
     bool& title_pending;

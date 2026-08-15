@@ -21,6 +21,8 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "api/backend.hpp"
 #include "api/types.hpp"
 
@@ -113,5 +115,51 @@ std::vector<api::Message> BuildCompactedHistory(const std::vector<api::Message>&
 std::expected<CompactSummary, api::Error> Compact(api::Backend& backend, const std::string& model,
                                                   const std::vector<api::Message>& history,
                                                   const CompactOptions& options);
+
+// ---------------------------------------------------------------------------
+// 第三期:分阶段、分层摘要(map/reduce)
+// ---------------------------------------------------------------------------
+
+// 一段探索阶段的局部摘要(map 产物)。evidence_refs 是程序按事件账钉上的
+// 来源事件号区间("e12-e45"),不由模型自己编——模型只写正文与 manifest,
+// 来历由账说话。
+struct EpisodeSummary {
+    std::string markdown;        // 六栏小结正文
+    CompactManifest manifest;    // 该段的 goal/open_items 等
+    std::string evidence_refs;   // "e12-e45"(来源事件区间,程序钉)
+    std::size_t from_message = 0;
+    std::size_t to_message = 0;  // [from, to) 消息区间
+};
+
+// 分层压缩的指标:写进 compact_v2 事件,观测/回放都能看。
+struct HierarchicalMetrics {
+    int chunks = 1;             // map 块数;1 = 单次装下,没分层
+    int reduce_passes = 0;      // 归并轮次(局部摘要仍超预算时的再归并)
+    bool hierarchical = false;  // chunks > 1
+};
+
+// 一次压缩的完整产物:archive + manifest + 指标。
+struct LayeredCompactResult {
+    api::Message archive;
+    CompactManifest manifest;
+    HierarchicalMetrics metrics;
+};
+
+// episode 边界(纯函数,显式信号优先):每条外层用户文本输入(新要求/纠正)
+// 与每个 todo_write 调用(plan 变化)都开新段;切块绝不劈开 tool use/result
+// (段界只落在轮边界上)。返回每段的 [from, to) 消息区间。
+std::vector<std::pair<std::size_t, std::size_t>> SplitEpisodes(const std::vector<api::Message>& history);
+
+// 分层压缩:历史装不进压缩模型单次输入预算时,先按 episode 边界切块,
+// 各块独立产出带 evidence_refs 的局部摘要(map),再归并成最终存档与
+// manifest(reduce);归并输入仍超预算就两两归并,直到装得下。装得下时
+// 退化为单次压缩,与 Compact() 同路同校验。上一轮存档只作为 reduce 的
+// 一份"既有工作状态"参考输入,绝不拿摘要复印摘要——局部摘要永远从
+// 原始消息块来(阻断递归失真)。失败任一环(请求失败/摘要残次/守恒不过)
+// 返回错误,调用方旧 history 不动。
+std::expected<LayeredCompactResult, api::Error> CompactHierarchical(api::Backend& backend,
+                                                                     const std::string& model,
+                                                                     const std::vector<api::Message>& history,
+                                                                     const CompactOptions& options);
 
 }  // namespace lubancode::agent

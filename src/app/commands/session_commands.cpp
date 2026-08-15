@@ -82,7 +82,7 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
 CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::agent::AgentLoop& loop,
                                           lubancode::api::Backend& raw_backend, const std::string& compact_model,
                                           const lubancode::cli::Theme& theme, bool spinner_enabled,
-                                          const lubancode::agent::CompactOptions& options) {
+                                          const lubancode::agent::CompactOptions& options, int& compact_epoch) {
     const std::vector<lubancode::api::Message>& history = loop.History();
     if (history.empty()) {
         std::cout << tr("cmd.compact.empty") << "\n";
@@ -124,7 +124,7 @@ CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::ag
     run_options.focus = focus;
 
     lubancode::cli::Spinner spinner(theme, spinner_enabled);
-    const auto result = lubancode::agent::Compact(raw_backend, compact_model, history, run_options);
+    const auto result = lubancode::agent::CompactHierarchical(raw_backend, compact_model, history, run_options);
     spinner.Stop();
 
     if (!result.has_value()) {
@@ -133,10 +133,33 @@ CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::ag
     }
 
     const auto new_history = lubancode::agent::BuildCompactedHistory(history, result->archive);
-    const auto event = lubancode::agent::MakeCompactEvent(old_size, new_history);
+    const auto base_event = lubancode::agent::MakeCompactEvent(old_size, new_history);
     loop.ReplaceHistory(new_history);
     const std::size_t after_tokens = EstimateHistoryTokens(new_history);
+
+    // compact_v2 事件:回放语义与 v1 同型,多的 manifest/epoch/metrics 供
+    // 审计与 rebase。
+    compact_epoch += 1;
+    nlohmann::json manifest_json;
+    manifest_json["goal"] = result->manifest.goal;
+    manifest_json["constraints"] = result->manifest.constraints;
+    manifest_json["open_items"] = result->manifest.open_items;
+    manifest_json["next_action"] = result->manifest.next_action;
+    nlohmann::json metrics_json;
+    metrics_json["chunks"] = result->metrics.chunks;
+    metrics_json["reduce_passes"] = result->metrics.reduce_passes;
+    metrics_json["hierarchical"] = result->metrics.hierarchical;
+    metrics_json["pre_tokens"] = before_tokens;
+    metrics_json["post_tokens"] = after_tokens;
+    metrics_json["trigger"] = "manual";
+    const auto event = lubancode::agent::UpgradeToV2(base_event, compact_epoch, std::move(manifest_json),
+                                                     std::move(metrics_json));
+
     std::cout << trf("cmd.compact.result", before_tokens, after_tokens) << "\n";
+    if (result->metrics.hierarchical) {
+        std::cout << trf("cmd.compact.hierarchical", result->metrics.chunks, result->metrics.reduce_passes)
+                  << "\n";
+    }
     if (!options.budget.window_tokens.has_value()) {
         std::cout << theme.stats << tr("cmd.compact.window_unknown") << theme.reset << "\n";
     }
@@ -247,7 +270,7 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
                     std::size_t& persisted_count, lubancode::agent::SessionMeta& session_meta,
                     std::string& session_title, const std::string& wire_str, const std::string& current_model,
                     const lubancode::cli::Theme& theme, bool quiet_if_none,
-                    lubancode::cli::WorktreeSession* worktree_session) {
+                    lubancode::cli::WorktreeSession* worktree_session, int* compact_epoch_out) {
     if (sessions_dir.empty()) {
         std::cout << tr("session.no_home") << "\n";
         return false;
@@ -319,6 +342,9 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
     }
     session_meta = session->meta;
     session_title = session->title;
+    if (compact_epoch_out != nullptr) {
+        *compact_epoch_out = session->compact_epoch;  // 压缩序号接着旧账数
+    }
 
     const std::string restored_history = lubancode::cli::FormatRestoredHistory(
         session->all_messages, theme, lubancode::cli::DetectConsoleWidth().value_or(80),
@@ -510,9 +536,9 @@ CommandFlow HandleResumeCommand(SessionCommandState& state, const std::string& a
         }
         target = *selected;
     }
-    if (ResumeSession(target, state.sessions_dir, state.loop, state.store, state.persisted_count, state.meta,
-                      state.title, state.wire_str, *state.current_model, theme, /*quiet_if_none=*/false,
-                      state.worktree_session)) {
+    if (ResumeSession(target, state.sessions_dir, state.loop, state.store, state.persisted_count,
+                      state.meta, state.title, state.wire_str, *state.current_model, theme,
+                      /*quiet_if_none=*/false, state.worktree_session, &state.compact_epoch)) {
         state.store_broken = false;  // 换了场,存档失败的旧账翻篇
         state.title_pending = false;
         if (state.worktree_session != nullptr && state.worktree_session->active()) {

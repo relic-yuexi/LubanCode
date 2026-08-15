@@ -317,6 +317,7 @@ private:
     lubancode::agent::SessionMeta session_meta;  // /export 用;Begin/resume 时填
     std::string session_start_ts;
     std::size_t persisted_count = 0;    // history 里前多少条已经落过盘
+    int session_compact_epoch = 0;      // 本场第几次压缩(v2 事件记序;resume 接旧账)
     bool session_store_broken = false;  // 建档失败过,别每轮都再撞一次
     std::string session_title;          // /title 设的标题;resume 时取存档里最后一条
     bool session_title_pending = false;  // 建档前设了标题,建档成功后补写事件行
@@ -622,7 +623,8 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
     bool resume_moved_into_worktree = false;
     if (opts_.continue_last) {
         if (ResumeSession("", sessions_dir, *loop, session_store, persisted_count, session_meta, session_title,
-                          wire_str, *current_model, theme, /*quiet_if_none=*/true, &worktree_session)) {
+                          wire_str, *current_model, theme, /*quiet_if_none=*/true, &worktree_session,
+                          &session_compact_epoch)) {
             resume_moved_into_worktree = worktree_session.active();
         }
     }
@@ -1406,17 +1408,18 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
             }
             case lubancode::cli::SlashCommand::Compact: {
                 const std::string compact_model = config.compact_model.empty() ? *current_model : config.compact_model;
-                const auto compact_result = HandleCompactCommand(parsed.args, *loop, real_backend, compact_model,
-                                                                 theme, spinner_enabled, BuildCompactOptions());
+                const auto compact_result =
+                    HandleCompactCommand(parsed.args, *loop, real_backend, compact_model, theme, spinner_enabled,
+                                         BuildCompactOptions(), session_compact_epoch);
                 // 压缩把 history 换短了(失败则原样):落盘基线收到新长度,
-                // 存档文件保持只追加——全量流水不动,补写一行 compact
-                // 事件,/resume 按事件回放出压缩后的活状态,/export 仍走
-                // 全量,不丢内容。
+                // 存档文件保持只追加——全量流水不动,补写一行 compact_v2
+                // 事件(回放语义与 v1 同型,另记 manifest/epoch/metrics),
+                // /resume 按事件回放出压缩后的活状态,/export 仍走全量。
                 persisted_count = (std::min)(persisted_count, loop->History().size());
                 if (compact_result.event.has_value() && session_store.active() && !session_store_broken) {
                     // 写盘校验:compact 事件没落盘,存档里就没有压缩记录,
                     // /resume 会按全量流水回放到压缩前状态——打警告说明白。
-                    if (!session_store.AppendCompactEvent(*compact_result.event)) {
+                    if (!session_store.AppendCompactV2Event(*compact_result.event)) {
                         std::cout << theme.error << tr("session.compact_event_failed") << theme.reset << "\n";
                     }
                 }
@@ -1569,12 +1572,15 @@ lubancode::agent::CompactOptions InteractiveSession::BuildCompactOptions() {
 bool InteractiveSession::TryRunCompact(bool midturn) {
     const std::string compact_model = config.compact_model.empty() ? *current_model : config.compact_model;
     const lubancode::agent::CompactOptions options = BuildCompactOptions();
+    const std::size_t before_tokens = lubancode::agent::EstimateHistoryTokens(loop->History());
 
     std::cout << theme.stats << tr(midturn ? "compact.midturn_start" : "compact.auto_start") << theme.reset << "\n";
     lubancode::cli::Spinner spinner(theme, spinner_enabled);
-    // 用裸的 real_backend(理由同 /compact):Compact 自己把 compact_model
-    // 写进 request.model,包了 ModelOverrideBackend 会被换回会话模型。
-    const auto result = lubancode::agent::Compact(real_backend, compact_model, loop->History(), options);
+    // 用裸的 real_backend(理由同 /compact):压缩自己把 compact_model 写进
+    // request.model,包了 ModelOverrideBackend 会被换回会话模型。分层路
+    // (第三期):装得下单次摘要,装不下按 episode 分块 map、归并 reduce。
+    const auto result =
+        lubancode::agent::CompactHierarchical(real_backend, compact_model, loop->History(), options);
     spinner.Stop();
 
     if (!result.has_value()) {
@@ -1591,21 +1597,45 @@ bool InteractiveSession::TryRunCompact(bool midturn) {
 
     const std::size_t old_size = loop->History().size();
     const auto new_history = lubancode::agent::BuildCompactedHistory(loop->History(), result->archive);
-    const auto compact_event = lubancode::agent::MakeCompactEvent(old_size, new_history);
+    const auto base_event = lubancode::agent::MakeCompactEvent(old_size, new_history);
     loop->ReplaceHistory(new_history);
+    const std::size_t after_tokens = lubancode::agent::EstimateHistoryTokens(loop->History());
+
+    // compact_v2 事件(第三期):回放与 v1 同型;manifest/epoch/metrics 另记,
+    // 审计与"从原始事件 rebase"都有账可查。
+    session_compact_epoch += 1;
+    nlohmann::json manifest_json;
+    manifest_json["goal"] = result->manifest.goal;
+    manifest_json["constraints"] = result->manifest.constraints;
+    manifest_json["open_items"] = result->manifest.open_items;
+    manifest_json["next_action"] = result->manifest.next_action;
+    nlohmann::json metrics_json;
+    metrics_json["chunks"] = result->metrics.chunks;
+    metrics_json["reduce_passes"] = result->metrics.reduce_passes;
+    metrics_json["hierarchical"] = result->metrics.hierarchical;
+    metrics_json["pre_tokens"] = before_tokens;
+    metrics_json["post_tokens"] = after_tokens;
+    metrics_json["trigger"] = midturn ? "midturn" : "pre-turn";
+    const auto compact_event = lubancode::agent::UpgradeToV2(base_event, session_compact_epoch,
+                                                             std::move(manifest_json), std::move(metrics_json));
+
     // 落盘基线收到新长度,补写 compact 事件,理由同 /compact 分支。
     persisted_count = (std::min)(persisted_count, loop->History().size());
     if (session_store.active() && !session_store_broken) {
         // 写盘校验,理由同 /compact 分支。
-        if (!session_store.AppendCompactEvent(compact_event)) {
+        if (!session_store.AppendCompactV2Event(compact_event)) {
             std::cout << theme.error << tr("session.compact_event_failed") << theme.reset << "\n";
         }
     }
     if (!options.budget.window_tokens.has_value()) {
         std::cout << theme.stats << tr("cmd.compact.window_unknown") << theme.reset << "\n";
     }
-    std::cout << trf("compact.done_stats", lubancode::agent::EstimateHistoryTokens(loop->History()),
-                     result->manifest.constraints.size(), result->manifest.open_items.size())
+    if (result->metrics.hierarchical) {
+        std::cout << trf("cmd.compact.hierarchical", result->metrics.chunks, result->metrics.reduce_passes)
+                  << "\n";
+    }
+    std::cout << trf("compact.done_stats", after_tokens, result->manifest.constraints.size(),
+                     result->manifest.open_items.size())
               << "\n";
     if (midturn) {
         std::cout << tr("compact.midturn_done") << "\n";
@@ -1638,6 +1668,7 @@ SessionCommandState InteractiveSession::MakeSessionCommandState() {
         *loop,
         session_store,
         persisted_count,
+        session_compact_epoch,
         session_meta,
         session_title,
         session_title_pending,

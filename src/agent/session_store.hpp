@@ -37,6 +37,8 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "api/types.hpp"
 
 namespace lubancode::agent {
@@ -96,6 +98,35 @@ CompactEvent MakeCompactEvent(std::size_t old_history_size, const std::vector<ap
 // 回放一次压缩事件:effective 换成 [archive] + effective[kept_from..]。
 // kept_from 越界按"全不保留"处理(夹到 effective.size()),不越界访问。
 std::vector<api::Message> ApplyCompactEvent(std::vector<api::Message> effective, const CompactEvent& event);
+
+// ---------------------------------------------------------------------------
+// compact_v2 事件(0.31.x 第三期):分层压缩的完整记账。
+//
+// 回放语义与 v1 完全同型(archive + kept_from),/resume 读到 v2 与读到 v1
+// 走同一条重建路;多的字段(manifest/epoch/metrics)供审计、/export 与
+// "从原始事件 rebase"用,不影响老版本读档(老版本当坏行跳过,消息账无损)。
+// ---------------------------------------------------------------------------
+
+struct CompactV2Event {
+    api::Message archive;      // 同 v1:压缩后顶在最前的消息(存档已并入保留轮)
+    std::size_t kept_from = 0; // 同 v1:压缩前有效历史从第几条起原样保留
+    int epoch = 0;             // 本场第几次压缩(v1 也计数,从 1 起)
+    nlohmann::json manifest;   // 终稿 manifest(goal/constraints/open_items/...)
+    nlohmann::json metrics;    // chunks/reduce_passes/pre_post_tokens/trigger 等
+};
+
+// v2 事件 -> 一行 JSON(不带换行符)。
+std::string SerializeCompactV2Event(const CompactV2Event& event, const std::string& ts);
+
+// 一行 JSON -> v2 事件。type 不是 "compact_v2"、缺 archive/kept_from 给
+// nullopt;manifest/metrics/epoch 缺失按默认空值收(老写档兼容)。
+std::optional<CompactV2Event> ParseCompactV2Event(const std::string& line);
+
+// v1 事件升级成 v2(epoch/manifest/metrics 由调用方补)。
+CompactV2Event UpgradeToV2(const CompactEvent& event, int epoch, nlohmann::json manifest, nlohmann::json metrics);
+
+// v2 事件折回 v1 形状(回放共用一条路)。
+CompactEvent AsCompactEvent(const CompactV2Event& event);
 
 // 标题事件 -> 一行 JSON(不带换行符)。
 std::string SerializeTitleEvent(const std::string& title, const std::string& ts);
@@ -164,7 +195,9 @@ struct LoadedSession {
     // 升序;/export 按这个位置插标注行。
     std::vector<std::size_t> compact_positions;
     std::string title;                   // 最后一条 title 事件;没有就空
-    int compact_count = 0;               // 回放掉的 compact 事件数
+    int compact_count = 0;               // 回放掉的 compact 事件数(v1 + v2 都算)
+    int compact_epoch = 0;               // 最后一次压缩的序号(第几次压缩)
+    nlohmann::json last_compact_manifest;  // 最后一次压缩的 manifest(没有就 null)
     int repaired = 0;                    // 修补的孤儿 tool_use 块数
     int skipped_lines = 0;               // 解析不动、跳过的行数(坏事件行也算)
 };
@@ -208,6 +241,9 @@ public:
 
     // 追加一条压缩事件行(自动带 ts),append+flush。
     bool AppendCompactEvent(const CompactEvent& event);
+
+    // 追加一条 compact_v2 事件行(自动带 ts),append+flush。
+    bool AppendCompactV2Event(const CompactV2Event& event);
 
     // 追加一条标题事件行(自动带 ts),append+flush。
     bool AppendTitleEvent(const std::string& title);

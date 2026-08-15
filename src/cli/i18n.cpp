@@ -745,6 +745,7 @@ const Entry kZhCN[] = {
     {"cmd.compact.failed", "压缩失败: {0}"},
     {"cmd.compact.result", "压缩前 ~{0} tokens → 压缩后 ~{1} tokens(统一估算口径)"},
     {"cmd.compact.window_unknown", "(压缩模型窗口未知,本次未做窗口校验)"},
+    {"cmd.compact.hierarchical", "历史装不进单次压缩:按任务阶段分了 {0} 块(map)归并成终稿(reduce 轮次 {1})。"},
     {"cmd.compact.manifest", "manifest 守恒校验通过:约束 {0} 条 / 待办 {1} 条"},
     {"cmd.compact.dryrun.header", "/compact --dry-run:只算不动手,历史与请求都没改。"},
     {"cmd.compact.dryrun.reclaim", "结构压缩可回收约 {0} 字节(精确重复 {1} 处 · 旧版读取被覆盖 {2} 项 · 长结果外置 {3} 项;每轮请求已自动生效)"},
@@ -1748,6 +1749,7 @@ const Entry kEn[] = {
 
     // ---- compact (0.31.x): new layered-compaction keys, zh+en paired ----
     {"cmd.compact.window_unknown", "(compact model window unknown; no window check was performed this time)"},
+    {"cmd.compact.hierarchical", "History exceeded a single compact request: split into {0} episode chunks (map) and merged into the final summary (reduce passes: {1})."},
     {"cmd.compact.manifest", "manifest conservation check passed: {0} constraints / {1} open items"},
     {"cmd.compact.dryrun.header", "/compact --dry-run: calculation only; history and requests untouched."},
     {"cmd.compact.dryrun.reclaim", "Structural compression can reclaim ~{0} bytes ({1} exact duplicates collapsed · {2} superseded file reads · {3} long results offloaded; already applied to every request automatically)"},
