@@ -118,6 +118,10 @@ std::string ModuleByPath(const std::string& prompts_dir, std::string_view rel_pa
 
 }  // namespace
 
+std::string ModuleTextByPath(const std::string& prompts_dir, const std::string& rel_path) {
+    return ModuleByPath(prompts_dir, rel_path);
+}
+
 std::string AssembledCorePersona(const std::string& prompts_dir) {
     std::string out;
     for (const auto& module : embedded::kAllModules) {

@@ -451,6 +451,55 @@ TEST_CASE("MergeConfig: 全局打开 memory，项目可以收窄并关闭") {
     CHECK_FALSE(disabled->config.memory.enabled);
 }
 
+TEST_CASE("MergeConfig: memory.learn 只认三档,项目配置只能收窄") {
+    // 坏值解析直接报错。
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"memory":{"learn":"always"}})", "x.json").has_value());
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"memory":{"learn":1}})", "x.json").has_value());
+    const auto parsed = config::ParseFileConfigJson(R"({"memory":{"learn":"auto"}})", "x.json");
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->memory.has_value());
+    CHECK(*parsed->memory->learn == "auto");
+
+    // 全局显式授权 auto,项目收窄回 review。
+    config::FileConfig global;
+    global.source_path = "global.json";
+    config::MemoryFileConfig global_memory;
+    global_memory.enabled = true;
+    global_memory.learn = "auto";
+    global.memory = global_memory;
+    config::FileConfig project;
+    project.source_path = "project.json";
+    config::MemoryFileConfig project_memory;
+    project_memory.learn = "review";
+    project.memory = project_memory;
+    const auto narrowed = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    REQUIRE(narrowed.has_value());
+    CHECK(narrowed->config.memory.learn == "review");
+
+    // 全局只给 review,项目想升 auto:合并后仍是 review。
+    global.memory->learn = "review";
+    project.memory->learn = "auto";
+    const auto capped = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    REQUIRE(capped.has_value());
+    CHECK(capped->config.memory.learn == "review");
+
+    // 全局 auto、项目不写 learn:auto 保持。
+    global.memory->learn = "auto";
+    project.memory.reset();
+    const auto kept = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    REQUIRE(kept.has_value());
+    CHECK(kept->config.memory.learn == "auto");
+
+    // 老写法 generate=false 等价 learn=off。
+    global.memory->learn = "auto";
+    config::MemoryFileConfig legacy;
+    legacy.generate = false;
+    project.memory = legacy;
+    const auto legacy_off = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    REQUIRE(legacy_off.has_value());
+    CHECK(legacy_off->config.memory.learn == "off");
+}
+
 TEST_CASE("ParseFileConfigJson: max_turns 缺省时是 nullopt") {
     const auto missing = config::ParseFileConfigJson("{}", "x.json");
     REQUIRE(missing.has_value());

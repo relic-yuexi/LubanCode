@@ -32,9 +32,14 @@ using lubancode::cli::trf;
 
 lubancode::memory::Options MemoryOptionsFromConfig(const lubancode::config::MemoryConfig& config) {
     lubancode::memory::Options options;
+    // config.memory.enabled 只能由用户全局配置打开(config merge 层守过),
+    // 到了运行对象就当 global_allowed 用;本场总开关起手与全局授权同步。
+    options.global_allowed = config.enabled;
     options.enabled = config.enabled;
     options.use = config.use;
-    options.generate = config.generate;
+    // learn 档位与上限都来自合并后的配置;本场 set_learn 只能降到上限以内。
+    options.learn = lubancode::memory::ParseLearnMode(config.learn).value_or(lubancode::memory::LearnMode::Off);
+    options.learn_ceiling = options.learn;
     options.max_index_bytes = config.max_index_bytes;
     options.max_retrieval_bytes = config.max_retrieval_bytes;
     options.max_results = config.max_results;
@@ -242,7 +247,9 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
 }
 
 void ToolRuntime::AttachMemoryTool(std::shared_ptr<lubancode::memory::ProjectMemory> memory) {
-    if (memory != nullptr && main_registry_.Find("memory_save") == nullptr) {
+    // capability gate:全局未授权时连工具都不注册(规格"授权边界"节)。
+    if (memory != nullptr && memory->generate_enabled() &&
+        main_registry_.Find("memory_save") == nullptr) {
         main_registry_.Register(std::make_unique<lubancode::memory::MemorySaveTool>(std::move(memory)));
     }
 }

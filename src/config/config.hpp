@@ -85,13 +85,21 @@ constexpr std::size_t kDefaultContextWindowTokens = 256000;
 constexpr int kDefaultMaxTurns = 0;
 
 constexpr std::size_t kDefaultMemoryMaxIndexBytes = 16 * 1024;
-constexpr std::size_t kDefaultMemoryMaxRetrievalBytes = 24 * 1024;
-constexpr std::size_t kDefaultMemoryMaxResults = 4;
+// 召回预算收紧(规格"召回只送命中，不送整份索引"):index.md 不再随请求
+// 注入,正文默认总预算降到 8 KiB、最多 3 条;index 字段只管 index.md 文件
+// 本身的大小,不再影响 prompt。
+constexpr std::size_t kDefaultMemoryMaxRetrievalBytes = 8 * 1024;
+constexpr std::size_t kDefaultMemoryMaxResults = 3;
 
 struct MemoryConfig {
     bool enabled = false;
     bool use = true;
     bool generate = true;
+    // 学习档位(0.30.x 候审箱):off 不提候选不写入;review 提候选、用户
+    // 审过才入库(默认);auto 自动写入,只认全局配置显式授权——项目配置
+    // 只能收窄(off/review),不能替用户升到 auto。老 generate=false 等价
+    // 于 learn=off,合并时一并算进去。
+    std::string learn = "review";
     std::size_t max_index_bytes = kDefaultMemoryMaxIndexBytes;
     std::size_t max_retrieval_bytes = kDefaultMemoryMaxRetrievalBytes;
     std::size_t max_results = kDefaultMemoryMaxResults;
@@ -102,6 +110,7 @@ struct MemoryFileConfig {
     std::optional<bool> enabled;
     std::optional<bool> use;
     std::optional<bool> generate;
+    std::optional<std::string> learn;
     std::optional<std::size_t> max_index_bytes;
     std::optional<std::size_t> max_retrieval_bytes;
     std::optional<std::size_t> max_results;

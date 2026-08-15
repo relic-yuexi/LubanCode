@@ -387,7 +387,8 @@ const Entry kZhCN[] = {
     {"slash.desc.todos", "查看当前待办清单"},
     {"slash.desc.plugins", "列出挂载的插件工具(DLL + lua)和加载警告"},
     {"slash.desc.tools", "列工具三态:核心(恒在)/已加载/延迟未加载(tool_search 延迟挂载)"},
-    {"slash.desc.memory", "管理项目记忆;/memory on|off|use|learn|list|remember|forget|rebuild"},
+    {"slash.desc.memory",
+     "管理项目记忆;/memory on|off|use|learn|review|accept|edit|reject|list|remember|forget|rebuild|why"},
     {"slash.desc.sessions", "列本目录最近 20 场会话存档,倒序编号;/sessions all 列全部目录"},
     {"slash.desc.resume", "上下选择会话并恢复历史(也可跟编号或 id)"},
     {"slash.desc.export", "当前会话导出 Markdown;/export 路径 可指定输出文件"},
@@ -465,24 +466,45 @@ const Entry kZhCN[] = {
     {"cmd.memory.usage",
      "用法:\n"
      "  /memory                         看本场状态\n"
-     "  /memory on|off                  开关本场项目记忆\n"
+     "  /memory on|off                  开关本场项目记忆(须先全局授权)\n"
      "  /memory use on|off              开关同步召回\n"
-     "  /memory learn on|off            开关后台写入\n"
+     "  /memory learn off|review|auto   学习档位(auto 须全局配置授权)\n"
+     "  /memory review                  看待审候选\n"
+     "  /memory accept <id>             接受候选入库\n"
+     "  /memory edit <id> 标题 [:: 正文] 改候选\n"
+     "  /memory reject <id> [理由]      拒绝候选(同主题不再重提)\n"
      "  /memory list                     列出项目记忆\n"
      "  /memory remember fact|preference 标题 [:: 正文]\n"
      "  /memory forget <id>              归档一条记忆\n"
-     "  /memory rebuild                  后台重建索引\n"},
+     "  /memory rebuild                  后台重建索引\n"
+     "  /memory stale                    看指纹漂移与已过期的记忆\n"
+     "  /memory verify <id>              核验后续命(原 id 复活)\n"
+     "  /memory refresh <id>             核验并把 status 回炉为 active\n"
+     "  /memory why [id]                 看上一轮召回为何命中/落选\n"},
     {"cmd.memory.unavailable", "[memory] 找不到主目录，项目记忆不可用。"},
     {"cmd.memory.on", "开"},
     {"cmd.memory.off", "关"},
+    {"cmd.memory.global", "全局授权: {0}"},
+    {"cmd.memory.denied",
+     "[memory] 全局配置未授权开启项目记忆，本场命令开不了。"
+     "请在 <主目录>/.lubancode/config.json 里写 \"memory\": {\"enabled\": true} 后重启 lubancode。"},
     {"cmd.memory.status", "项目记忆: {0}；召回 {1}；写入 {2}"},
+    {"cmd.memory.learn_status", "学习档位: {0}(off/review/auto)"},
+    {"cmd.memory.candidates", "待审候选: {0}(/memory review)"},
+    {"cmd.memory.learn_denied", "[memory] {0}"},
+    {"cmd.memory.learn_set", "[memory] 学习档位已设为 {0}。"},
+    {"cmd.memory.review.empty", "[memory] 没有待审候选。"},
+    {"cmd.memory.review.header", "待审候选:"},
+    {"cmd.memory.review.hint",
+     "用 /memory accept <id> 接受、/memory edit <id> 标题::正文 修改、/memory reject <id> [理由] 拒绝。"},
+    {"cmd.memory.reject.done", "[memory] 候选已拒绝,同主题不会再自动重提。"},
+    {"cmd.memory.edit.done", "[memory] 候选已改,仍在待审区。"},
     {"cmd.memory.project", "项目: {0}"},
     {"cmd.memory.directory", "目录: {0}"},
     {"cmd.memory.counts", "条目: {0}；待办: {1}"},
     {"cmd.memory.master", "[memory] 本场已{0}。"},
     {"cmd.memory.toggle", "[memory] {0}子开关已{1}。"},
     {"cmd.memory.retrieval", "召回"},
-    {"cmd.memory.write", "写入"},
     {"cmd.memory.catalog_warning", "[memory] 索引有误，已改扫主题文件: {0}"},
     {"cmd.memory.empty", "项目记忆还是空的。"},
     {"cmd.memory.queued", "[memory] 已排进后台队列: {0}"},
@@ -490,6 +512,28 @@ const Entry kZhCN[] = {
     {"cmd.memory.worker_failed", "[memory] 后台任务暂未启动: {0}"},
     {"cmd.memory.project_failed", "[memory] 项目身份解析失败: {0}"},
     {"cmd.memory.switch_failed", "[memory] 切换项目失败: {0}"},
+    {"memory.extract.running", "[memory] 回合总结({0})…"},
+    {"memory.extract.failed", "[memory] 回合总结失败,本轮跳过: {0}"},
+    {"memory.extract.done", "[memory] 新候选 {0} 条待审(/memory review);自动入库 {1} 条。"},
+    {"cmd.memory.stale.empty", "[memory] 没有指纹漂移或已过期的记忆。"},
+    {"cmd.memory.stale.header", "陈旧清单(fingerprint=文件已变,expired=已过期):"},
+    {"cmd.memory.stale.fingerprint", "相关文件已变化"},
+    {"cmd.memory.stale.expired", "已过期"},
+    {"cmd.memory.stale.hint",
+     "核验后仍有效就 /memory verify <id> 续命;过期规约可改 expires_at 或 /memory forget 归档。"},
+    {"cmd.memory.why.expired", "已过 expires_at,等续期或归档"},
+    {"cmd.memory.why.scope", "scope 不符当前工作目录"},
+    {"cmd.memory.why.none", "[memory] 本场还没有召回记录。"},
+    {"cmd.memory.why.header", "[memory] 上一轮召回({0}):"},
+    {"cmd.memory.why.terms", "  检索词: {0}"},
+    {"cmd.memory.why.hit", "  {0}  分数 {1}(硬命中 {2}，词项 {3}) — 已注入 {4} 字节"},
+    {"cmd.memory.why.miss", "  {0}  分数 {1}(硬命中 {2}，词项 {3}) — 未注入: {4}"},
+    {"cmd.memory.why.stale", "相关文件已变化，只提示不注正文"},
+    {"cmd.memory.why.below_threshold", "分数未过最低门槛"},
+    {"cmd.memory.why.budget", "条数/字节预算已满"},
+    {"cmd.memory.why.skipped", "未取到正文"},
+    {"cmd.memory.why.total", "  合计注入 {0} 条 · {1} 字节"},
+    {"cmd.memory.why.missing", "[memory] 上一轮召回里没有 {0}。"},
 
     // ---- /language ----
     {"cmd.language.list_header", "可选语言(内置 zh-CN/en + <主目录>/.lubancode/languages/*.json):"},
@@ -1362,7 +1406,9 @@ const Entry kEn[] = {
     {"slash.desc.todos", "show the current todo list"},
     {"slash.desc.plugins", "list mounted plugin tools (DLL + lua) and load warnings"},
     {"slash.desc.tools", "list tool states: core / loaded / deferred (tool_search)"},
-    {"slash.desc.memory", "manage project memory; /memory on|off|use|learn|list|remember|forget|rebuild"},
+    {"slash.desc.memory",
+     "manage project memory; /memory on|off|use|learn|review|accept|edit|reject|list|remember|forget|"
+     "rebuild|why"},
     {"slash.desc.sessions", "list the 20 most recent session archives here; /sessions all for every dir"},
     {"slash.desc.resume", "choose and replay a session (or pass a number/id)"},
     {"slash.desc.export", "export this session as Markdown; /export <path> picks the output file"},
@@ -1465,24 +1511,46 @@ const Entry kEn[] = {
     {"cmd.memory.usage",
      "Usage:\n"
      "  /memory                                  show session status\n"
-     "  /memory on|off                           toggle project memory\n"
+     "  /memory on|off                           toggle project memory (needs global grant)\n"
      "  /memory use on|off                       toggle synchronous retrieval\n"
-     "  /memory learn on|off                     toggle background writes\n"
+     "  /memory learn off|review|auto            learning tier (auto needs global grant)\n"
+     "  /memory review                           list pending candidates\n"
+     "  /memory accept <id>                      accept a candidate into the store\n"
+     "  /memory edit <id> title [:: body]        edit a candidate\n"
+     "  /memory reject <id> [reason]             reject a candidate (same topic won't return)\n"
      "  /memory list                              list project memories\n"
      "  /memory remember fact|preference title [:: body]\n"
      "  /memory forget <id>                       archive one memory\n"
-     "  /memory rebuild                           rebuild the index in background\n"},
+     "  /memory rebuild                           rebuild the index in background\n"
+     "  /memory stale                             list drifted (fingerprint) and expired memories\n"
+     "  /memory verify <id>                       re-verify, reviving the entry under its id\n"
+     "  /memory refresh <id>                      re-verify and reset status to active\n"
+     "  /memory why [id]                          explain the last recall: hits, misses, blocks\n"},
     {"cmd.memory.unavailable", "[memory] The home directory is unavailable; project memory cannot run."},
     {"cmd.memory.on", "on"},
     {"cmd.memory.off", "off"},
+    {"cmd.memory.global", "Global grant: {0}"},
+    {"cmd.memory.denied",
+     "[memory] Project memory is not enabled in your global config, so session commands cannot turn it "
+     "on. Add \"memory\": {\"enabled\": true} to <home>/.lubancode/config.json and restart lubancode."},
     {"cmd.memory.status", "Project memory: {0}; retrieval {1}; writes {2}"},
+    {"cmd.memory.learn_status", "Learning tier: {0} (off/review/auto)"},
+    {"cmd.memory.candidates", "Pending candidates: {0} (/memory review)"},
+    {"cmd.memory.learn_denied", "[memory] {0}"},
+    {"cmd.memory.learn_set", "[memory] Learning tier set to {0}."},
+    {"cmd.memory.review.empty", "[memory] No pending candidates."},
+    {"cmd.memory.review.header", "Pending candidates:"},
+    {"cmd.memory.review.hint",
+     "Use /memory accept <id> to accept, /memory edit <id> title::body to edit, /memory reject <id> "
+     "[reason] to reject."},
+    {"cmd.memory.reject.done", "[memory] Candidate rejected; the same topic won't be proposed again."},
+    {"cmd.memory.edit.done", "[memory] Candidate updated; still pending review."},
     {"cmd.memory.project", "Project: {0}"},
     {"cmd.memory.directory", "Directory: {0}"},
     {"cmd.memory.counts", "Entries: {0}; pending: {1}"},
     {"cmd.memory.master", "[memory] Project memory is now {0} for this session."},
     {"cmd.memory.toggle", "[memory] The {0} sub-switch is now {1}."},
     {"cmd.memory.retrieval", "retrieval"},
-    {"cmd.memory.write", "write"},
     {"cmd.memory.catalog_warning", "[memory] The catalog is invalid; scanned topic files instead: {0}"},
     {"cmd.memory.empty", "Project memory is empty."},
     {"cmd.memory.queued", "[memory] Queued for background processing: {0}"},
@@ -1490,6 +1558,29 @@ const Entry kEn[] = {
     {"cmd.memory.worker_failed", "[memory] Could not start pending background work: {0}"},
     {"cmd.memory.project_failed", "[memory] Could not resolve project identity: {0}"},
     {"cmd.memory.switch_failed", "[memory] Could not switch the memory project: {0}"},
+    {"memory.extract.running", "[memory] turn summary ({0})..."},
+    {"memory.extract.failed", "[memory] turn summary failed; skipped this turn: {0}"},
+    {"memory.extract.done", "[memory] {0} new candidate(s) pending (/memory review); {1} auto-saved."},
+    {"cmd.memory.stale.empty", "[memory] No drifted or expired memories."},
+    {"cmd.memory.stale.header", "Stale list (fingerprint = files changed, expired = past expires_at):"},
+    {"cmd.memory.stale.fingerprint", "related files changed"},
+    {"cmd.memory.stale.expired", "expired"},
+    {"cmd.memory.stale.hint",
+     "Still valid? /memory verify <id> revives it under the same id; expired rules can be renewed or "
+     "archived with /memory forget."},
+    {"cmd.memory.why.expired", "past expires_at; awaiting renewal or archive"},
+    {"cmd.memory.why.scope", "scope does not cover the current working directory"},
+    {"cmd.memory.why.none", "[memory] No recall trace yet in this session."},
+    {"cmd.memory.why.header", "[memory] Last recall ({0}):"},
+    {"cmd.memory.why.terms", "  query terms: {0}"},
+    {"cmd.memory.why.hit", "  {0}  score {1} (hard hits {2}, terms {3}) — injected {4} bytes"},
+    {"cmd.memory.why.miss", "  {0}  score {1} (hard hits {2}, terms {3}) — not injected: {4}"},
+    {"cmd.memory.why.stale", "related files changed; hint only, body withheld"},
+    {"cmd.memory.why.below_threshold", "score below the minimum threshold"},
+    {"cmd.memory.why.budget", "result/byte budget exhausted"},
+    {"cmd.memory.why.skipped", "body unavailable"},
+    {"cmd.memory.why.total", "  injected {0} entries · {1} bytes"},
+    {"cmd.memory.why.missing", "[memory] {0} was not part of the last recall."},
 
     {"cmd.init.created", "Created {0} and loaded it for this session."},
     {"cmd.init.exists", "Project instructions already exist at {0}; left them untouched and reloaded them."},

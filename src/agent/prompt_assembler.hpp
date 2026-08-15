@@ -69,4 +69,9 @@ std::vector<PromptModuleSource> PromptModuleSources(const std::string& prompts_d
 // current_date 空串 = 现取本机日期。
 std::string BuildEnvironmentSegment(const std::string& cwd, const std::string& current_date = std::string());
 
+// 按相对路径取一个模块正文:用户文件优先,嵌入版回退;找不到模块返回
+// 空串。给系统提示之外的提示词消费方用(如 memory 回合总结的分型提示词
+// features/memory-summary-*.md),同一套"用户可改、内置兜底"规矩。
+std::string ModuleTextByPath(const std::string& prompts_dir, const std::string& rel_path);
+
 }  // namespace lubancode::agent
