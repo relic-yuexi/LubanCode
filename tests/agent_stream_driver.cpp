@@ -233,6 +233,22 @@ int FindLastDockRow(const std::string& needle, int rule_row) {
     return -1;
 }
 
+// 当前可视区(不含滚屏历史)内含某文本的行数:第三幕"回 main 重铺恰好
+// 一次"用——前两幕的同款文案躺在滚屏里,不能数进来。
+int CountViewportRowsWith(const std::string& needle) {
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    if (!GetConsoleScreenBufferInfo(g_conout, &info)) {
+        return -1;
+    }
+    int count = 0;
+    for (int r = info.srWindow.Top; r <= info.srWindow.Bottom; ++r) {
+        if (ReadRow(r).find(needle) != std::string::npos) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 // 全缓冲区按结构认出的 composer 框数(上横线/'>' 空输入行/下横线/状态行
 // 成套):完成唤醒后旧底栏该已退场,只剩一副。输入行须为空——"分界线+
 // > 已提交正文 + 分界线"是历史回显,不是 composer,不误计。
@@ -389,6 +405,28 @@ const char* kBgTitle =
 const char* kPromptHead =
     "\xe4\xbd\xa0\xe5\x9c\xa8\xe4\xb8\x80\xe4\xb8\xaa C++ \xe9\xa1\xb9\xe7\x9b\xae\xe7\x9a\x84\xe9\x9a\x94"
     "\xe7\xa6\xbb";  // 你在一个 C++ 项目的隔离
+// 第三幕(查看态回流)的锚文本:用户话、两只后台的 prompt/title/结论、
+// 回流正文、半句草稿。
+const char* kAct3User =
+    "\xe6\xb4\xbe\xe4\xb8\xa4\xe5\x8f\xaa\xe5\x90\x8e\xe5\x8f\xb0\xe4\xbb\xa3\xe7\x90\x86\xe6\x85\xa2\xe6\x85\xa2"
+    "\xe6\x9f\xa5";  // 派两只后台代理慢慢查
+const char* kFastPrompt =
+    "\xe5\xbf\xab\xe6\x9f\xa5\xe7\x94\xb2\xe4\xb8\x80\xe4\xbb\xbd\xe8\xb4\xa6\xe7\x9b\xae";  // 快查甲一份账目
+const char* kSlowPrompt =
+    "\xe6\x85\xa2\xe6\x9f\xa5\xe4\xb9\x99\xe4\xb8\x80\xe4\xbb\xbd\xe8\xb4\xa6\xe7\x9b\xae";  // 慢查乙一份账目
+const char* kFastTitle = "\xe5\xbf\xab\xe6\x9f\xa5\xe7\x94\xb2\xe6\x8a\xa5\xe5\x91\x8a";  // 快查甲报告
+const char* kSlowTitle = "\xe6\x85\xa2\xe6\x9f\xa5\xe4\xb9\x99\xe6\x8a\xa5\xe5\x91\x8a";  // 慢查乙报告
+const char* kFastDone =
+    "\xe7\x94\xb2\xe4\xbb\xa3\xe7\x90\x86\xe5\xae\x8c\xe6\xaf\x95\xef\xbc\x9a\xe7\x94\xb2\xe7\x9a\x84\xe8\xb4\xa6"
+    "\xe7\x9b\xae\xe4\xba\xa4\xe5\x9b\x9e";  // 甲代理完毕:甲的账目交回
+const char* kSlowDone =
+    "\xe4\xb9\x99\xe4\xbb\xa3\xe7\x90\x86\xe5\xae\x8c\xe6\xaf\x95\xef\xbc\x9a\xe4\xb9\x99\xe7\x9a\x84\xe8\xb4\xa6"
+    "\xe7\x9b\xae\xe4\xba\xa4\xe5\x9b\x9e";  // 乙代理完毕:乙的账目交回
+const char* kReflowText =
+    "\xe9\x9d\x99\xe9\xbb\x98\xe5\x9b\x9e\xe6\xb5\x81\xef\xbc\x9a\xe7\x94\xb2\xe7\x9a\x84\xe7\xbb\x93\xe6\x9e\x9c"
+    "\xe5\xb7\xb2\xe6\xb6\x88\xe5\x8c\x96";  // 静默回流:甲的结果已消化
+const char* kDraftText = "\xe7\xbb\x99\xe4\xb9\x99\xe7\x9a\x84\xe5\x8d\x8a\xe5\x8f\xa5\xe8\xaf\x9d";  // 给乙的半句话
+const char* kToastText = "\xe7\xbb\x93\xe6\x9e\x9c\xe5\xb7\xb2\xe5\x9b\x9e\xe6\xb5\x81 main";  // 结果已回流 main
 
 int StartFakeAnthropicServer() {
     WSADATA wsa;
@@ -416,8 +454,206 @@ int StartFakeAnthropicServer() {
     //          -> 主(收尾)。
     //   第二幕:主派后台代理 -> 主收口 -> 后台子(读文件)-> 后台子(结论,
     //          压 3 秒让空闲 composer 先画出来)-> 完成唤醒的主(收口)。
-    std::thread([listener]() {
+    //   第三幕(查看态回流单):主连派两只后台,时长全靠"每轮睡 1 秒 +
+    //          读文件"的短轮链(#3 九轮后交卷 ~12s,#4 永不交卷)——单条
+    //          长睡眠连接会把主回合的收口请求一起拖住,拆短轮把重叠压到
+    //          一秒内;后台子代理的需确认工具一律被拒,只能用免确认的
+    //          read_file 拖时间 -> 用户 Enter 切看 #4、敲半句草稿 -> #3
+    //          跑完(草稿在,唤醒让位)-> Ctrl+C 清草稿 -> 空闲唤醒触发静默
+    //          回流(查看帧零扰动、#3 坞行退场、toast 一枚)-> Esc 回 main
+    //          重铺回流输出。
+    // 连接各起一线程处理:第三幕的睡眠剧本不能堵死 accept 循环(主回合的
+    // 连排派发要跟后台代理的慢连接并行)。跨连接的共享账(幕号/第二幕子
+    // 代理轮次)拿一把小锁护住。
+    struct ServerState {
+        std::mutex mutex;
         int bg_sub_turn = 0;
+        int main_stage = 0;  // 主回合当前幕(1/2/3),按最新 user 消息推进
+    };
+    const auto state = std::make_shared<ServerState>();
+    const auto serve_connection = [state](SOCKET_T client_fd) {
+        const std::string raw = DrainHttpRequest(client_fd);
+        const std::size_t body_at = raw.find("\r\n\r\n");
+        const std::string body = body_at == std::string::npos ? std::string() : raw.substr(body_at + 4);
+        const auto has = [&body](const char* needle) {
+            return body.find(needle) != std::string::npos;
+        };
+        // 子代理请求的 system 带专用 persona(SubAgentPersona),主回合
+        // 不带——凭这个把两条会话的请求分账,不被后台线程抢跑打乱。
+        const bool sub_agent_request = has("\xe8\x83\xbd\xe6\x90\x9c\xe7\xb4\xa2"
+                                           "\xe3\x80\x81\xe5\x88\x86\xe6\x9e\x90"
+                                           "\xe5\xb9\xb6\xe5\xae\x8c\xe6\x88\x90"
+                                           "\xe5\xa4\x9a\xe6\xad\xa5\xe4\xbb\xbb"
+                                           "\xe5\x8a\xa1");  // 能搜索、分析并完成多步任务
+        int stage = 0;
+        // 主回合分幕只认"最新一条真用户话"的特征(历史里的旧 user 消息
+        // 与回流 prompt 会跟着之后每次请求重复出现,按全文匹配会把新幕
+        // 误派成旧幕)。消息对象按字母序序列化(content 在前、role 在后),
+        // 最新 user 消息的正文落在"上一条 assistant 的 role 键之后、最新
+        // user 的 role 键之前"这个区间;尾巴是工具回执时区间里只有回执,
+        // 分幕沿用现状,不被历史旧标记劫持。
+        const std::size_t last_user_at = body.rfind("\"role\":\"user\"");
+        const std::size_t last_assistant_at = body.rfind("\"role\":\"assistant\"");
+        const std::size_t newest_from = last_assistant_at == std::string::npos ? 0 : last_assistant_at;
+        const std::size_t newest_to = last_user_at == std::string::npos ? body.size() : last_user_at;
+        const std::string newest_user_text =
+            newest_from < newest_to ? body.substr(newest_from, newest_to - newest_from) : std::string();
+        const auto newest_has = [&newest_user_text](const char* needle) {
+            return newest_user_text.find(needle) != std::string::npos;
+        };
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            if (!sub_agent_request) {
+                if (newest_has("\xe6\xb4\xbe\xe4\xb8\x80\xe5\x8f\xaa\xe5\x89\x8d\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3"
+                               "\xe7\x90\x86")) {  // 派一只前台子代理
+                    state->main_stage = 1;
+                } else if (newest_has("\xe5\x86\x8d\xe6\xb4\xbe\xe4\xb8\x80\xe5\x8f\xaa\xe5\x90\x8e\xe5\x8f\xb0")) {  // 再派一只后台
+                    state->main_stage = 2;
+                } else if (newest_has(kAct3User)) {
+                    state->main_stage = 3;
+                }
+            }
+            stage = state->main_stage;
+        }
+        Log("SERVER request body_bytes=" + std::to_string(body.size()) +
+            " sub=" + (sub_agent_request ? "y" : "n") + " stage=" + std::to_string(stage));
+        // 已完成的读文件轮数(数 tool_use 入参里路径出现的次数):第三幕
+        // 两只后台代理靠"每轮一秒"的读文件链拖时间——单条慢连接会把主
+        // 回合的收口请求一起拖住(实测同一环境),拆成短轮就把重叠窗口
+        // 压到一秒以内。后台子代理跑需确认的工具会被拒,read_file 免确认。
+        const auto read_rounds = [&body]() {
+            std::size_t count = 0;
+            std::size_t pos = 0;
+            while ((pos = body.find("C:/Windows/win.ini", pos)) != std::string::npos) {
+                ++count;
+                pos += 1;
+            }
+            return count;
+        };
+        if (sub_agent_request && has(kFastPrompt)) {
+            // 第三幕:快代理 #3。九轮"睡 1 秒 + 读文件"后交结论——总时长
+            // ~12 秒:用户切看 #4、敲半句草稿都发生在它交卷之前。
+            Sleep(1000);
+            if (read_rounds() >= 8) {
+                RespondSse(client_fd, TextTurn(kFastDone));
+            } else {
+                RespondSse(client_fd,
+                           ToolUseTurn("toolu_bg3_a", "read_file", "{\"path\":\"C:/Windows/win.ini\"}"));
+            }
+        } else if (sub_agent_request && has(kSlowPrompt)) {
+            // 第三幕:慢代理 #4。同样的短轮链但永不交卷(阈值抬到天上去),
+            // 整幕保持运行中——查看态要看的正是它。
+            Sleep(1000);
+            if (read_rounds() >= 1000) {
+                RespondSse(client_fd, TextTurn(kSlowDone));
+            } else {
+                RespondSse(client_fd,
+                           ToolUseTurn("toolu_bg3_b", "read_file", "{\"path\":\"C:/Windows/win.ini\"}"));
+            }
+        } else if (sub_agent_request && has(kPromptHead)) {
+            // 第一幕:前台子代理。第一轮给真工具(ping ~7 秒),拿到工具
+            // 结果后给结论。
+            if (body.find("Ping") != std::string::npos ||
+                body.find("Pinging") != std::string::npos) {
+                RespondSse(client_fd, TextTurn("\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86\xe5\xb9\xb2"
+                                                   "\xe5\xae\x8c\xe4\xba\x86\xef\xbc\x9a\xe6\xa3\x80"
+                                                   "\xe7\xb4\xa2\xe9\x98\x88\xe5\x80\xbc\xe5\x9b\x9e"
+                                                   "\xe5\xbd\x92\xe5\x85\xa8\xe7\xbb\xbf"));  // 子代理干完了:检索阈值回归全绿
+            } else {
+                RespondSse(client_fd,
+                           ToolUseTurn("toolu_sub", "run_command",
+                                       "{\"command\":\"ping -n 8 127.0.0.1\",\"shell\":\"cmd\"}"));
+            }
+        } else if (sub_agent_request && has("\xe5\x90\x8e\xe5\x8f\xb0\xe6\x91\xb8\xe6\x8e\x92\xe4\xb8\x80\xe4\xbb\xbd")) {
+            // 第二幕:后台子代理自己的来回。第一轮给读文件(免确认,后台
+            // 子代理跑得动),第二轮压 3 秒给结论——空闲 composer 先画出来,
+            // 完成唤醒那条路真被走到。
+            int turn = 0;
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                turn = ++state->bg_sub_turn;
+            }
+            if (turn == 1) {
+                RespondSse(client_fd,
+                           ToolUseTurn("toolu_bg_sub", "read_file",
+                                       "{\"path\":\"C:/Windows/win.ini\"}"));
+            } else {
+                Sleep(3000);
+                RespondSse(client_fd, TextTurn("\xe5\x90\x8e\xe5\x8f\xb0\xe6\x91\xb8\xe6\x8e\x92"
+                                                   "\xe5\xae\x8c\xe6\xaf\x95\xef\xbc\x9a\xe4\xba\x8b"
+                                                   "\xe5\xae\x9e\xe6\xb8\x85\xe5\x8d\x95\xe5\x9c\xa8"
+                                                   "\xe6\x89\x8b"));  // 后台摸排完毕:事实清单在手
+            }
+        } else if (sub_agent_request) {
+            RespondSse(client_fd, TextTurn("ok"));
+        } else if (newest_has("\xe5\x90\x8e\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86\xe6\x9c\x89\xe6\x96\xb0\xe7\xbb\x93\xe6\x9e\x9c")) {
+            // 完成唤醒后 RunPeerTurn 起的那一轮主请求(最新 user 消息就是
+            // 回流 prompt)。第三幕的回流带着甲的结论,回一句独特标记的
+            // 正文,驱动器靠它断言"查看期间一个字不上屏、Esc 回 main 重
+            // 铺可见"。
+            if (has(kFastDone)) {
+                RespondSse(client_fd, TextTurn(kReflowText));
+            } else {
+                RespondSse(client_fd, TextTurn("\xe6\x94\xb6\xe5\x88\xb0\xe5\x90\x8e\xe5\x8f\xb0"
+                                                   "\xe7\xbb\x93\xe6\x9e\x9c"));  // 收到后台结果
+            }
+        } else if (stage == 3) {
+            // 第三幕:主回合按工具结果推进——没派过派 #3,派过 #3 派 #4,
+            // 都派过收口。任务号按启动回执里的 "#N" 区分。
+            if (has("\xe5\x90\x8e\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86 #4")) {
+                RespondSse(client_fd,
+                           TextTurn("\xe4\xb8\xa4\xe5\x8f\xaa\xe5\x90\x8e\xe5\x8f\xb0\xe9\x83\xbd"
+                                    "\xe6\xb4\xbe\xe5\xa5\xbd\xe4\xba\x86"));  // 两只后台都派好了
+            } else if (has("\xe5\x90\x8e\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86 #3")) {
+                RespondSse(client_fd,
+                           ToolUseTurn("toolu_bg3_b", "agent",
+                                       "{\"title\":\"" + std::string(kSlowTitle) + "\",\"prompt\":\"" +
+                                           std::string(kSlowPrompt) + "\",\"execution_mode\":\"background\"}"));
+            } else {
+                RespondSse(client_fd,
+                           ToolUseTurn("toolu_bg3_a", "agent",
+                                       "{\"title\":\"" + std::string(kFastTitle) + "\",\"prompt\":\"" +
+                                           std::string(kFastPrompt) + "\",\"execution_mode\":\"background\"}"));
+            }
+        } else if (stage == 2) {
+            // 第二幕:主回合。没派过后台(工具结果带"已启动")就派,派过
+            // 收口。
+            if (has("\xe5\xb7\xb2\xe5\x90\xaf\xe5\x8a\xa8")) {
+                RespondSse(client_fd, TextTurn("\xe5\xb7\xb2\xe6\xb4\xbe\xe5\x87\xba\xe5\x90\x8e"
+                                                   "\xe5\x8f\xb0\xe4\xbb\xa3\xe7\x90\x86"));  // 已派出后台代理
+            } else {
+                RespondSse(client_fd,
+                           ToolUseTurn("toolu_bg", "agent",
+                                       "{\"title\":\"" + std::string(kBgTitle) +
+                                           "\",\"prompt\":\"\xe5\x90\x8e\xe5\x8f\xb0\xe6\x91\xb8"
+                                           "\xe6\x8e\x92\xe4\xb8\x80\xe4\xbb\xbd\xe4\xba\x8b"
+                                           "\xe5\xae\x9e\xe6\xb8\x85\xe5\x8d\x95\",\"execution_mode\":"
+                                           "\"background\"}"));
+            }
+        } else if (stage == 1) {
+            // 第一幕:主回合。收到子代理结论(工具结果带"检索阈值回归
+            // 全绿")就收尾,否则派前台子代理。
+            if (has("\xe6\xa3\x80\xe7\xb4\xa2\xe9\x98\x88\xe5\x80\xbc\xe5\x9b\x9e\xe5\xbd\x92\xe5\x85\xa8\xe7\xbb\xbf")) {
+                RespondSse(client_fd, TextTurn("\xe4\xb8\xbb\xe4\xbb\xa3\xe7\x90\x86\xe6\xb1\x87"
+                                                   "\xe6\x80\xbb\xe5\xae\x8c\xe6\xaf\x95"));  // 主代理汇总完毕
+            } else {
+                RespondSse(client_fd,
+                           ToolUseTurn("toolu_agent", "agent",
+                                       "{\"title\":\"" + std::string(kTitle) + "\",\"prompt\":\"" +
+                                           std::string(kPromptHead) +
+                                           " git worktree "
+                                           "\xe9\x87\x8c\xe5\xae\x9e\xe6\x96\xbd\xe9\xa1\xb9\xe7\x9b\xae"
+                                           "\xe8\xae\xb0\xe5\xbf\x86\xe7\xb3\xbb\xe7\xbb\x9f\xe5\x8d\x87"
+                                           "\xe7\xba\xa7\xef\xbc\x8c\xe8\xbf\x99\xe6\xae\xb5\xe8\xaf\xb4"
+                                           "\xe6\x98\x8e\xe5\xbe\x88\xe9\x95\xbf\xe5\xbe\x88\xe9\x95\xbf"
+                                           "\xe3\x80\x82\",\"run_in_background\":false}"));
+            }
+        } else {
+            RespondSse(client_fd, TextTurn("ok"));
+        }
+        closesocket(client_fd);
+    };
+    std::thread([listener, state, serve_connection]() {
         while (true) {
             sockaddr_in client{};
             int client_len = sizeof(client);
@@ -426,90 +662,7 @@ int StartFakeAnthropicServer() {
             if (client_fd == kBadSocket) {
                 return;
             }
-            const std::string raw = DrainHttpRequest(client_fd);
-            const std::size_t body_at = raw.find("\r\n\r\n");
-            const std::string body = body_at == std::string::npos ? std::string() : raw.substr(body_at + 4);
-            Log("SERVER request body_bytes=" + std::to_string(body.size()));
-            const auto has = [&body](const char* needle) {
-                return body.find(needle) != std::string::npos;
-            };
-            // 子代理请求的 system 带专用 persona(SubAgentPersona),主回合
-            // 不带——凭这个把两条会话的请求分账,不被后台线程抢跑打乱。
-            const bool sub_agent_request = has("\xe8\x83\xbd\xe6\x90\x9c\xe7\xb4\xa2"
-                                               "\xe3\x80\x81\xe5\x88\x86\xe6\x9e\x90"
-                                               "\xe5\xb9\xb6\xe5\xae\x8c\xe6\x88\x90"
-                                               "\xe5\xa4\x9a\xe6\xad\xa5\xe4\xbb\xbb"
-                                               "\xe5\x8a\xa1");  // 能搜索、分析并完成多步任务
-            if (has("\xe5\x90\x8e\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86\xe6\x9c\x89\xe6\x96\xb0\xe7\xbb\x93\xe6\x9e\x9c")) {
-                // 完成唤醒后 RunPeerTurn 起的那一轮主请求。
-                RespondSse(client_fd, TextTurn("\xe6\x94\xb6\xe5\x88\xb0\xe5\x90\x8e\xe5\x8f\xb0"
-                                                   "\xe7\xbb\x93\xe6\x9e\x9c"));  // 收到后台结果
-            } else if (sub_agent_request && has(kPromptHead)) {
-                // 第一幕:前台子代理。第一轮给真工具(ping ~7 秒),拿到工具
-                // 结果后给结论。
-                if (body.find("Ping") != std::string::npos ||
-                    body.find("Pinging") != std::string::npos) {
-                    RespondSse(client_fd, TextTurn("\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86\xe5\xb9\xb2"
-                                                       "\xe5\xae\x8c\xe4\xba\x86\xef\xbc\x9a\xe6\xa3\x80"
-                                                       "\xe7\xb4\xa2\xe9\x98\x88\xe5\x80\xbc\xe5\x9b\x9e"
-                                                       "\xe5\xbd\x92\xe5\x85\xa8\xe7\xbb\xbf"));  // 子代理干完了:检索阈值回归全绿
-                } else {
-                    RespondSse(client_fd,
-                               ToolUseTurn("toolu_sub", "run_command",
-                                           "{\"command\":\"ping -n 8 127.0.0.1\",\"shell\":\"cmd\"}"));
-                }
-            } else if (sub_agent_request && has("\xe5\x90\x8e\xe5\x8f\xb0\xe6\x91\xb8\xe6\x8e\x92\xe4\xb8\x80\xe4\xbb\xbd")) {
-                // 第二幕:后台子代理自己的来回。第一轮给读文件,第二轮压 3 秒
-                // 给结论——空闲 composer 先画出来,完成唤醒那条路真被走到。
-                ++bg_sub_turn;
-                if (bg_sub_turn == 1) {
-                    RespondSse(client_fd,
-                               ToolUseTurn("toolu_bg_sub", "read_file",
-                                           "{\"path\":\"C:/Windows/win.ini\"}"));
-                } else {
-                    Sleep(3000);
-                    RespondSse(client_fd, TextTurn("\xe5\x90\x8e\xe5\x8f\xb0\xe6\x91\xb8\xe6\x8e\x92"
-                                                       "\xe5\xae\x8c\xe6\xaf\x95\xef\xbc\x9a\xe4\xba\x8b"
-                                                       "\xe5\xae\x9e\xe6\xb8\x85\xe5\x8d\x95\xe5\x9c\xa8"
-                                                       "\xe6\x89\x8b"));  // 后台摸排完毕:事实清单在手
-                }
-            } else if (has("\xe5\x86\x8d\xe6\xb4\xbe\xe4\xb8\x80\xe5\x8f\xaa\xe5\x90\x8e\xe5\x8f\xb0")) {
-                // 第二幕:主回合。没派过后台(工具结果带"已启动")就派,派过
-                // 收口。
-                if (has("\xe5\xb7\xb2\xe5\x90\xaf\xe5\x8a\xa8")) {
-                    RespondSse(client_fd, TextTurn("\xe5\xb7\xb2\xe6\xb4\xbe\xe5\x87\xba\xe5\x90\x8e"
-                                                       "\xe5\x8f\xb0\xe4\xbb\xa3\xe7\x90\x86"));  // 已派出后台代理
-                } else {
-                    RespondSse(client_fd,
-                               ToolUseTurn("toolu_bg", "agent",
-                                           "{\"title\":\"" + std::string(kBgTitle) +
-                                               "\",\"prompt\":\"\xe5\x90\x8e\xe5\x8f\xb0\xe6\x91\xb8"
-                                               "\xe6\x8e\x92\xe4\xb8\x80\xe4\xbb\xbd\xe4\xba\x8b"
-                                               "\xe5\xae\x9e\xe6\xb8\x85\xe5\x8d\x95\",\"execution_mode\":"
-                                               "\"background\"}"));
-                }
-            } else if (has("\xe6\xb4\xbe\xe4\xb8\x80\xe5\x8f\xaa\xe5\x89\x8d\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86")) {
-                // 第一幕:主回合。收到子代理结论(工具结果带"检索阈值回归
-                // 全绿")就收尾,否则派前台子代理。
-                if (has("\xe6\xa3\x80\xe7\xb4\xa2\xe9\x98\x88\xe5\x80\xbc\xe5\x9b\x9e\xe5\xbd\x92\xe5\x85\xa8\xe7\xbb\xbf")) {
-                    RespondSse(client_fd, TextTurn("\xe4\xb8\xbb\xe4\xbb\xa3\xe7\x90\x86\xe6\xb1\x87"
-                                                       "\xe6\x80\xbb\xe5\xae\x8c\xe6\xaf\x95"));  // 主代理汇总完毕
-                } else {
-                    RespondSse(client_fd,
-                               ToolUseTurn("toolu_agent", "agent",
-                                           "{\"title\":\"" + std::string(kTitle) + "\",\"prompt\":\"" +
-                                               std::string(kPromptHead) +
-                                               " git worktree "
-                                               "\xe9\x87\x8c\xe5\xae\x9e\xe6\x96\xbd\xe9\xa1\xb9\xe7\x9b\xae"
-                                               "\xe8\xae\xb0\xe5\xbf\x86\xe7\xb3\xbb\xe7\xbb\x9f\xe5\x8d\x87"
-                                               "\xe7\xba\xa7\xef\xbc\x8c\xe8\xbf\x99\xe6\xae\xb5\xe8\xaf\xb4"
-                                               "\xe6\x98\x8e\xe5\xbe\x88\xe9\x95\xbf\xe5\xbe\x88\xe9\x95\xbf"
-                                               "\xe3\x80\x82\",\"run_in_background\":false}"));
-                }
-            } else {
-                RespondSse(client_fd, TextTurn("ok"));
-            }
-            closesocket(client_fd);
+            std::thread(serve_connection, client_fd).detach();
         }
     }).detach();
     return port;
@@ -752,11 +905,12 @@ int wmain(int argc, wchar_t** argv) {
              "\xe7\x90\x86\xe5\x8e\xbb\xe6\x91\xb8\xe6\x8e\x92");  // 再派一只后台代理去摸排
     SendKey(VK_RETURN, L'\r', 0);
     // 主回合收口后回空闲:坞里挂着第二只任务(运行中),空闲 composer 画出。
+    // 第一幕的前台任务早已 done+delivered 退场,坞里只剩第二只。
     Check(WaitForText(kBgTitle, 15000), "后台幕:空闲后坞里出现第二只任务(运行中)");
     Check(WaitForIdleComposer(15000), "后台幕:空闲 composer 画出");
     Sleep(700);  // 等末帧画稳
-    Check(CountDockRowsWith("general-purpose", FindFooterInputRow() - 1) == 2,
-          "后台幕:坞里两只代理各一行");
+    Check(CountDockRowsWith("general-purpose", FindFooterInputRow() - 1) == 1,
+          "后台幕:坞里只剩第二只任务一行(前台那只已退场)");
     {
         bool bg_docked = false;
         for (int attempt = 0; attempt < 3 && !bg_docked; ++attempt) {
@@ -789,7 +943,11 @@ int wmain(int argc, wchar_t** argv) {
     // 旧帧在唤醒路被硬清,缓冲区里 composer 框结构只此一份。
     Check(CountVisibleComposers() == 1,
           "后台完成唤醒:composer 框全缓冲区恰好一份(旧底栏已退场)");
-    Check(CountMainRows() == 1, "后台完成唤醒:main 导航行恰好一份");
+    // 退场链(查看态回流单):结果交回 main 置 delivered,导航坞行随即退场
+    // ——此刻两只任务都 done+delivered,导航表空了,整坞随之消失(0 只代理
+    // 整坞不出场是既有规矩),代理行归零。
+    Check(CountDockRowsWith("general-purpose", FindFooterInputRow() - 1) == 0,
+          "后台完成唤醒:完成任务的坞行已退场(不再赖在坞里)");
     // 完成通知有且只有一条,归 main(在 transcript 区,composer 上横线之上)。
     Check(CountRowsWith("\xe5\x90\x8e\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86\xe5\xae\x8c\xe6\x88\x90") == 1,
           "后台完成唤醒:完成通知恰好一条");  // 后台子代理完成
@@ -799,8 +957,107 @@ int wmain(int argc, wchar_t** argv) {
         const int rule_end = FindFooterInputRow() - 1;
         Check(notice_row >= 0 && notice_row < rule_end, "后台完成唤醒:通知在 transcript 区(chrome 之上)");
     }
-    Check(CountDockRowsWith(kBgTitle, FindFooterInputRow() - 1) == 1,
-          "后台完成唤醒:第二只任务的导航行恰好一份(通知/工具条目归 transcript)");
+    Check(CountDockRowsWith(kBgTitle, FindFooterInputRow() - 1) == 0,
+          "后台完成唤醒:第二只任务的导航行也已退场(台账保留,坞里无痕)");
+
+    // ---- 第三幕(查看态回流单):看 #4 时 #3 完成——回流静默、查看帧零扰动、
+    //      #3 坞行退场、toast 一枚、Esc 回 main 重铺可见、半句草稿不丢 ----
+    SendText(kAct3User);  // 派两只后台代理慢慢查
+    SendKey(VK_RETURN, L'\r', 0);
+    // 主回合连派 #3/#4 后收口(#3 ~12s 交卷、#4 永不交卷,都先运行中)。等
+    // "请求 3 次"统计行钉死回合真收口——按结构找输入框分不清流式 footer
+    // 与空闲 composer,拿它当空闲门闩会把导航键喂给监听线程。
+    Check(WaitForText(kFastTitle, 15000), "第三幕:快代理 #3 入坞");
+    Check(WaitForText(kSlowTitle, 15000), "第三幕:慢代理 #4 入坞");
+    Check(WaitForText("\xe8\xaf\xb7\xe6\xb1\x82 3 \xe6\xac\xa1", 15000),
+          "第三幕:主回合收口(请求 3 次统计行)");  // 请求 3 次
+    Check(WaitForIdleComposer(15000), "第三幕:空闲 composer 画出");
+    Sleep(700);
+    {
+        // 重画挪位的空窗:重测三次再定罪。
+        int docked = -1;
+        for (int attempt = 0; attempt < 3 && docked != 2; ++attempt) {
+            docked = CountDockRowsWith("general-purpose", FindFooterInputRow() - 1);
+            if (docked != 2) {
+                Sleep(300);
+            }
+        }
+        Check(docked == 2, "第三幕:坞里 #3/#4 各一行");
+    }
+    // Down×2(main -> #3 -> #4)聚焦 #4,Enter 切查看。❯ 门闩不可用——滚屏
+    // 里躺着第一幕的旧焦点标记,按步进睡眠等 100ms 拍消化按键。
+    SendKey(VK_DOWN, 0, 0);
+    Sleep(600);
+    SendKey(VK_DOWN, 0, 0);
+    Sleep(600);
+    SendKey(VK_RETURN, L'\r', 0);
+    Sleep(800);
+    // 切看后的屏面留档(不判定,只 INFO):排查/复盘用,与 EXPAND/VIEW 同款。
+    for (int r = 0; r < 44; ++r) {
+        const std::string row = ReadRow(r);
+        if (!row.empty()) {
+            Log("ACT3NAV " + std::to_string(r) + ": " + row);
+        }
+    }
+    int view4_row = -1;
+    Check(WaitForText("\xe6\x9f\xa5\xe7\x9c\x8b general-purpose #4", 5000, &view4_row),
+          "第三幕:上方视口出现 #4 的查看头行");  // 查看 general-purpose #4
+    int slow_prompt_row = -1;
+    {
+        const int rule_now = FindFooterInputRow() - 1;
+        slow_prompt_row = FindLastRow(kSlowPrompt);
+        Check(slow_prompt_row >= 0 && slow_prompt_row < rule_now, "第三幕:#4 的 prompt 在查看视口里");
+        Check(CountRowsWith("\xe6\x9f\xa5\xe7\x9c\x8b general-purpose #4") == 1, "第三幕:查看头行恰好一份");
+    }
+    // 给 #4 敲半句草稿,等 #3 跑完:草稿还在(空闲唤醒让位给正文,不抢输入)。
+    SendText(kDraftText);
+    Sleep(400);
+    bool fast_done_docked = false;
+    {
+        const DWORD fast_deadline = GetTickCount() + 30000;
+        while (GetTickCount() < fast_deadline) {
+            const int r = FindLastDockRow(kFastTitle, FindFooterInputRow() - 1);
+            if (r >= 0 && ReadRow(r).find("\xe5\xae\x8c\xe6\x88\x90(") != std::string::npos) {  // 完成(
+                fast_done_docked = true;
+                break;
+            }
+            Sleep(200);
+        }
+    }
+    Check(fast_done_docked, "第三幕:#3 跑完,坞行原地变完成(未投递过渡态)");
+    {
+        const int input_row = FindFooterInputRow();
+        Check(input_row > 0 && ReadRow(input_row).find(kDraftText) != std::string::npos,
+              "第三幕:半句草稿原样在(唤醒让位,#3 完成不吃输入)");
+        Check(FindLastRow(kReflowText) < 0, "第三幕:草稿未清,回流还没发生");
+    }
+    // Ctrl+C 清草稿 -> 空闲唤醒 -> 查看态静默回流(输出全进台账,不上屏)。
+    SendKey('C', 0, LEFT_CTRL_PRESSED);
+    Check(WaitForText(kToastText, 15000), "第三幕:静默回流收口,导航坞 toast 出现");
+    Sleep(400);
+    {
+        // 查看帧零扰动:头行/正文行号不漂、恰好一份;回流正文一个字不上屏。
+        Check(FindLastRow("\xe6\x9f\xa5\xe7\x9c\x8b general-purpose #4") == view4_row,
+              "第三幕:回流后 #4 查看头行锚点不漂");
+        Check(FindLastRow(kSlowPrompt) == slow_prompt_row, "第三幕:回流后查看视口内容行不漂");
+        Check(CountRowsWith("\xe6\x9f\xa5\xe7\x9c\x8b general-purpose #4") == 1,
+              "第三幕:查看头行仍恰好一份(没有第二帧)");
+        Check(FindLastRow(kReflowText) < 0, "第三幕:回流正文没上屏(静默收货,零侵入)");
+        const int rule4 = FindFooterInputRow() - 1;
+        Check(CountDockRowsWith(kFastTitle, rule4) == 0, "第三幕:#3 坞行已退场(done+delivered)");
+        Check(CountDockRowsWith(kSlowTitle, rule4) == 1, "第三幕:#4 坞行还在(查看目标纹丝不动)");
+        Check(FindLastDockRow(kToastText, rule4) > rule4, "第三幕:toast 挂在坞区(不抢正文)");
+        Check(CountVisibleComposers() == 1, "第三幕:composer 恰好一份");
+    }
+    // Esc 回 main:重铺见到回流的完成事件与主轮输出各一次(视口内数,前两幕
+    // 滚屏旧账不算)。
+    SendKey(VK_ESCAPE, 0, 0);
+    Check(WaitForText("\xe5\xb7\xb2\xe5\x9b\x9e\xe4\xb8\xbb\xe4\xbc\x9a\xe8\xaf\x9d", 5000),
+          "第三幕:Esc 回 main");  // 已回主会话
+    Sleep(500);
+    Check(CountViewportRowsWith(kReflowText) == 1, "第三幕:回 main 重铺见回流正文恰好一次");
+    Check(CountViewportRowsWith("\xe5\x90\x8e\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86\xe5\xae\x8c\xe6\x88\x90") == 1,
+          "第三幕:回 main 重铺见完成事件恰好一次");  // 后台子代理完成
 
     // ---- 排查/留档:把当前屏面非空行倒进报告(不判定,只 INFO) ----
     {
