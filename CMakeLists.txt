@@ -16,6 +16,9 @@ endif()
 # ---------------------------------------------------------------------------
 if(MSVC)
   add_compile_options(/utf-8 /W4 /permissive-)
+  # vendored doctest 2.4.12 给 std::tuple 做特化,新 MSVC 的 N5014 合规检查
+  # (C5285)会告警;第三方头改不了,就地压掉。自家代码不该犯这条,压了不亏。
+  add_compile_options(/wd5285)
 
   # 全静态链接,exe 自己就能跑,不用到处放 DLL、操心 PATH(见下方
   # BUILD_SHARED_LIBS OFF)。cpr 在 BUILD_SHARED_LIBS OFF 时,会在它自己的

@@ -62,7 +62,7 @@ std::size_t FindClosingDollar(const std::string& text, std::size_t opening, bool
             pos += 2;
             continue;
         }
-        if (text[pos] == '$' && (!block || pos + 1 < text.size() && text[pos + 1] == '$')) {
+        if (text[pos] == '$' && (!block || (pos + 1 < text.size() && text[pos + 1] == '$'))) {
             return pos;
         }
         ++pos;

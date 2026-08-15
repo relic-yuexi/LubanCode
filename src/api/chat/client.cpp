@@ -133,7 +133,15 @@ std::expected<void, Error> ChatCompletionsBackend::send_stream(
     const cpr::Response response = cpr::Post(
         cpr::Url{base_url_ + "/chat/completions"}, cpr_headers, cpr::Body{body},
         cpr::ConnectTimeout{std::chrono::milliseconds(connect_timeout_ms_)},
-        cpr::LowSpeed{1, stream_idle_timeout_secs_}, header_cb, write_cb, progress_cb);
+        #if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)  // 新版 cpr 弃用 int 构造改 chrono;vendored 1.11 只有 int 形,值两边通用
+#endif
+        cpr::LowSpeed{1, stream_idle_timeout_secs_}
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+, header_cb, write_cb, progress_cb);
 
     if (cancelled || (cancel != nullptr && cancel->load())) {
         return std::unexpected(Error{ErrorKind::Cancelled, "用户按 ESC 打断了这次请求", 0});
