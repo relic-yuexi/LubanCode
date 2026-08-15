@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 
+#include "agent/compact.hpp"
 #include "agent/loop.hpp"
 #include "agent/session_store.hpp"
 #include "api/backend.hpp"
@@ -28,36 +29,49 @@ namespace lubancode::app {
 using lubancode::cli::tr;
 using lubancode::cli::trf;
 
-// 粗略估算一段历史占用了多少"token"——不真调分词器,按字符数打个折扣
-// (中英文混排,经验上大致两个字符算一个 token),仅供 /compact 报告
-// "压缩前后省了多少"用,数字前带 ~ 提醒这是估算值,不是真实用量(真实
-// 用量要靠 usage.input_tokens,那个得等实际发一次请求才知道)。
+// 粗略估算一段历史占用了多少"token"——统一口径在 agent/context.hpp
+// (ASCII 4 字符 1 token,非 ASCII 1.5 token/字);这里只是转发,老调用点
+// (/context 分类明细)不必各认一遍。数字带 ~ 提醒是估算值,真实用量以
+// provider usage 为准。
 std::size_t EstimateHistoryChars(const std::vector<lubancode::api::Message>& history);
 
-std::size_t EstimateTokens(std::size_t chars);
+std::size_t EstimateHistoryTokens(const std::vector<lubancode::api::Message>& history);
 
 
 // /context 命令:不带参数打分类占用分析(系统提示/工具定义/对话历史三类
-// 字符数估 token + 条形图,拼装规则全在 FormatContextBreakdown,这里只管
-// 收集与打印);带参数(256k/512k/1m/裸数字)临时改窗口大小,只本会话
-// 生效,不改配置文件。sys_chars/tools_chars/history_chars 由调用方在会话
-// 现场收集(裸敲才用得上,带参数分支忽略),缓存命中/窗口/实测占用都从
-// context_tracker 拿。
+// 统一口径 token 估算 + 条形图,拼装规则全在 FormatContextBreakdown,这里
+// 只管收集与打印);带参数(256k/512k/1m/裸数字)临时改窗口大小,只本会话
+// 生效,不改配置文件。sys_tokens/tools_tokens/history_tokens 由调用方在会话
+// 现场按统一口径(agent/context.hpp)算好(裸敲才用得上,带参数分支忽略),
+// 缓存命中/窗口/实测占用都从 context_tracker 拿。
 void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracker& context_tracker,
-                           std::size_t sys_chars, std::size_t tools_chars, std::size_t history_chars,
+                           std::size_t sys_tokens, std::size_t tools_tokens, std::size_t history_tokens,
                            const lubancode::cli::Theme& theme);
 
 
+// /compact 命令的结果:event 是压缩事件(archive + kept_from),成功时
+// 调用方追加写进存档流水,/resume 才能回放出压缩后的活状态;失败/没得压
+// 给 nullopt。before/after tokens 用统一估算口径,给"压缩前后省了多少"
+// 的报告;manifest_* 是摘要 manifest 里守住的目标数,供成功提示带一句
+// "保留了几条约束/待办"。
+struct CompactCommandResult {
+    std::optional<lubancode::agent::CompactEvent> event;
+    std::size_t before_tokens = 0;
+    std::size_t after_tokens = 0;
+    std::size_t manifest_constraints = 0;
+    std::size_t manifest_open_items = 0;
+};
+
 // /compact 命令:把当前历史整段发给模型换一份压缩存档,顶替掉中间那段
-// 老对话,只留 archive + 最近一轮完整对话。backend 传裸的、没包
-// ModelOverrideBackend 的那份——Compact() 会自己把 compact_model 写进
-// request.model,要是走了 ModelOverrideBackend,会被强制换回当前会话
-// model,压缩模型这个字段就形同虚设了。
-// 压缩成功时返回对应的 compact 事件(archive + kept_from),调用方追加写进
-// 存档流水,/resume 才能回放出压缩后的活状态;失败/没得压给 nullopt。
-std::optional<lubancode::agent::CompactEvent> HandleCompactCommand(
-    const std::string& args, lubancode::agent::AgentLoop& loop, lubancode::api::Backend& raw_backend,
-    const std::string& compact_model, const lubancode::cli::Theme& theme, bool spinner_enabled);
+// 老对话,热区按 token 预算保留。backend 传裸的、没包 ModelOverrideBackend
+// 的那份——Compact() 会自己把 compact_model 写进 request.model。args 是
+// /compact 的重点文本;options 携带窗口预算与必须守恒的待办(由会话现场
+// 收集,活动 todo 的未完成条目)。压缩模型窗口装不下时明确拒绝、不静默
+// 截史;manifest 校验不过同样旧 history 不动。
+CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::agent::AgentLoop& loop,
+                                          lubancode::api::Backend& raw_backend, const std::string& compact_model,
+                                          const lubancode::cli::Theme& theme, bool spinner_enabled,
+                                          const lubancode::agent::CompactOptions& options);
 
 void PrintSessionsCommand(const std::string& sessions_dir, const std::string& args);
 

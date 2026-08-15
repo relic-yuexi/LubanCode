@@ -1,8 +1,9 @@
-// agent/compact.hpp:BuildCompactedHistory 纯逻辑(archive + 最近一轮完整
-// 对话,tool_use/tool_result 永远配对)、Compact() 用 FakeBackend 按脚本吐
-// 事件(不碰真网络),验证请求怎么拼、失败时怎么处理。0.21.x 加钉:
-// 压缩指令带固定栏目头、空/短摘要拒收、压缩前后 AgentLoop 的 system
-// 逐字节不变(守护测试)。
+// agent/compact.hpp:BuildCompactedHistory 纯逻辑(archive + 按 token 预算
+// 保留的热区,tool_use/tool_result 永远配对)、Compact() 用 FakeBackend 按脚
+// 本吐事件(不碰真网络),验证请求怎么拼、失败时怎么处理。0.31.x 分层压缩
+// 第一期加钉:压缩模型窗口预算(装不下明确拒绝,不发请求、不截史)、摘要
+// 末尾可解析 JSON manifest、待办守恒校验(漏一项拒收,旧历史不动)、热区
+// 按 token 预算保留多轮。
 
 #include <doctest/doctest.h>
 
@@ -10,6 +11,7 @@
 #include <vector>
 
 #include "agent/compact.hpp"
+#include "agent/context.hpp"
 #include "agent/loop.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
@@ -47,8 +49,8 @@ api::Message UserToolResult(const std::string& tool_use_id, const std::string& c
     return m;
 }
 
-// 按脚本吐事件的假后端,复用 test_loop.cpp 里那套写法:记下收到的
-// Request,方便断言 system 里带没带 focus 文本、messages 是不是整份历史。
+// 按脚本吐事件的假后端:记下收到的 Request,方便断言 system 里带没带
+// focus 文本、messages 是不是整份历史、窗口拒绝时是不是压根没发。
 class FakeBackend : public api::Backend {
 public:
     std::vector<api::StreamEvent> script;
@@ -80,16 +82,36 @@ std::vector<api::StreamEvent> SummaryScript(const std::string& text) {
     };
 }
 
-// 空/短摘要拒收(40 字门槛)落地后,脚本里的"成功摘要"都得够长。旧断言
-// 用的"摘要正文"(4 字)会被拒收,统一换成这份带栏目头的长摘要。
-const std::string kLongSummary =
-    "## 任务目标\n实现上下文管理与压缩\n## 已证实的事实\n关键文件是 config.cpp\n"
-    "## 关键决策\n按栏目输出存档\n## 涉及文件与符号\nconfig.cpp\n"
-    "## 关键命令与结果\n(无)\n## 未完成事项\n补齐单元测试与文档说明";
+// 成功摘要 = 够长的六栏正文 + 末尾 ```json manifest。默认 manifest 覆盖
+// 两枚"必须守恒"的待办;单独的守恒用例再换特制 manifest。
+std::string LongSummaryWithManifest(const std::string& manifest_json,
+                                    const std::string& open_items_json = R"(["补齐单元测试","写文档说明"])") {
+    return "## 任务目标\n实现上下文管理与压缩,关键文件是 config.cpp\n"
+           "## 已证实的事实\n六栏存档与 manifest 由模型一并产出\n"
+           "## 关键决策\n按栏目输出存档\n## 涉及文件与符号\nconfig.cpp\n"
+           "## 关键命令与结果\n(无)\n## 未完成事项\n补齐单元测试;写文档说明\n"
+           "```json\n" +
+           (manifest_json.empty()
+                ? "{\"goal\": \"实现上下文管理与压缩\", \"constraints\": [\"不许猜补\"], \"open_items\": " +
+                      open_items_json + ", \"next_action\": \"补测试\"}"
+                : manifest_json) +
+           "\n```";
+}
+
+const std::string kGoodSummary = LongSummaryWithManifest("");
+
+agent::CompactOptions PlainOptions() {
+    agent::CompactOptions options;  // 窗口未知:不拦截(老行为的兼容档)
+    return options;
+}
 
 }  // namespace
 
-TEST_CASE("BuildCompactedHistory: 新历史 = archive + 最近一轮完整对话") {
+// ---------------------------------------------------------------------------
+// BuildCompactedHistory:热区按 token 预算保留
+// ---------------------------------------------------------------------------
+
+TEST_CASE("BuildCompactedHistory: 新历史 = archive 并入热区首条,热区整段保留") {
     std::vector<api::Message> history;
     history.push_back(UserText("第一句话,提到一个名字:张三"));
     history.push_back(AssistantText("好的,记住了"));
@@ -99,23 +121,21 @@ TEST_CASE("BuildCompactedHistory: 新历史 = archive + 最近一轮完整对话
     history.push_back(AssistantText("读完了"));
 
     api::Message archive = UserText("[对话存档,此前内容已压缩] 摘要正文");
+    // 默认 12k 预算:两轮都小,全进热区。
     const auto new_history = agent::BuildCompactedHistory(history, archive);
 
-    // 存档正文并入保留轮第一条 user 消息的开头——不再单独成一条消息,
-    // 不然存档 user 紧跟保留轮的 user 输入,相邻两条 user 违反角色交替。
-    REQUIRE_FALSE(new_history.empty());
+    // 存档正文并入热区第一条 user 消息的开头——不单独成一条消息,不然
+    // 存档 user 紧跟热区的 user 输入,相邻两条 user 违反角色交替。
+    REQUIRE(new_history.size() == 6);
     CHECK(new_history[0].role == api::Role::User);
     REQUIRE(std::holds_alternative<api::TextBlock>(new_history[0].content[0]));
     const std::string& first_text = std::get<api::TextBlock>(new_history[0].content[0]).text;
     CHECK(first_text.find("对话存档") != std::string::npos);
     CHECK(first_text.find("摘要正文") != std::string::npos);
-    CHECK(first_text.find("最近一次提问") != std::string::npos);
-    // 存档在前,原始输入在后。
-    CHECK(first_text.find("对话存档") < first_text.find("最近一次提问"));
-
-    // 消息总数 = 保留轮的 4 条(第一条已与存档合并),后面紧跟 assistant。
-    REQUIRE(new_history.size() == 4);
-    CHECK(new_history[1].role == api::Role::Assistant);
+    CHECK(first_text.find("第一句话") != std::string::npos);
+    CHECK(first_text.find("对话存档") < first_text.find("第一句话"));
+    // 热区里的最后一轮原样在后面。
+    CHECK(std::get<api::TextBlock>(new_history[2].content[0]).text == "最近一次提问");
 
     // 合并后不出现相邻两条 user 消息。
     for (std::size_t i = 0; i + 1 < new_history.size(); ++i) {
@@ -123,19 +143,29 @@ TEST_CASE("BuildCompactedHistory: 新历史 = archive + 最近一轮完整对话
             new_history[i].role == api::Role::User && new_history[i + 1].role == api::Role::User;
         CHECK_FALSE(both_user);
     }
+}
 
-    // "第一句话"/"张三"不该出现在新历史里(已经被压缩进 archive,不在这里重复)
-    bool found_old = false;
-    for (const auto& message : new_history) {
-        for (const auto& block : message.content) {
-            if (std::holds_alternative<api::TextBlock>(block)) {
-                if (std::get<api::TextBlock>(block).text.find("张三") != std::string::npos) {
-                    found_old = true;
-                }
-            }
-        }
-    }
-    CHECK_FALSE(found_old);
+TEST_CASE("BuildCompactedHistory: 热区按 token 预算往前多收几轮,老的不进热区") {
+    std::vector<api::Message> history;
+    history.push_back(UserText("很老的一轮,不该进热区:老话"));
+    history.push_back(AssistantText("老回答"));
+    history.push_back(UserText("中间一轮,预算够就该留:中话"));
+    history.push_back(AssistantText("中回答"));
+    history.push_back(UserText("最近一轮:新话"));
+    history.push_back(AssistantText("新回答"));
+
+    api::Message archive = UserText("[对话存档,此前内容已压缩] 摘要");
+    // 预算给足:三轮全留(每轮就十几个 token,1000 绰绰有余)。
+    auto wide = agent::BuildCompactedHistory(history, archive, /*hot_zone_tokens=*/1000);
+    REQUIRE(wide.size() == 6);  // 三轮 6 条,第一条并入存档后仍是一条消息
+    CHECK(std::get<api::TextBlock>(wide[0].content[0]).text.find("老话") != std::string::npos);
+    CHECK(std::get<api::TextBlock>(wide[2].content[0]).text.find("中话") != std::string::npos);
+
+    // 预算掐小:只留最后一轮(最后一轮必留,不论预算)。
+    auto narrow = agent::BuildCompactedHistory(history, archive, /*hot_zone_tokens=*/1);
+    REQUIRE(narrow.size() == 2);  // 最后一轮 2 条,第一条已并入存档
+    CHECK(std::get<api::TextBlock>(narrow[0].content[0]).text.find("新话") != std::string::npos);
+    CHECK(std::get<api::TextBlock>(narrow[0].content[0]).text.find("中话") == std::string::npos);
 }
 
 TEST_CASE("BuildCompactedHistory: tool_use 和 tool_result 永远配对,不会被切开") {
@@ -186,44 +216,48 @@ TEST_CASE("BuildCompactedHistory: 空历史,新历史只有 archive") {
     REQUIRE(new_history.size() == 1);
 }
 
-TEST_CASE("Compact: 成功时返回 user 角色的存档消息,content 带固定前缀和模型给出的正文") {
+// ---------------------------------------------------------------------------
+// Compact:请求形状与旧坑守护
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Compact: 成功时返回 user 角色的存档消息与解析过的 manifest") {
     FakeBackend backend;
-    // 旧断言的短摘要"任务是实现 M6.6,关键文件是 config.cpp"(27 字)会被
-    // 40 字门槛拒收,换成长摘要,原有关键短语保留。
-    backend.script = SummaryScript(kLongSummary);
+    backend.script = SummaryScript(kGoodSummary);
 
     std::vector<api::Message> history;
     history.push_back(UserText("帮我实现上下文管理"));
     history.push_back(AssistantText("好的,开始"));
 
-    const auto result = agent::Compact(backend, "test-model", history, "");
+    const auto result = agent::Compact(backend, "test-model", history, PlainOptions());
 
     REQUIRE(result.has_value());
-    CHECK(result->role == api::Role::User);
-    REQUIRE(std::holds_alternative<api::TextBlock>(result->content[0]));
-    const std::string& text = std::get<api::TextBlock>(result->content[0]).text;
+    CHECK(result->archive.role == api::Role::User);
+    REQUIRE(std::holds_alternative<api::TextBlock>(result->archive.content[0]));
+    const std::string& text = std::get<api::TextBlock>(result->archive.content[0]).text;
     CHECK(text.find("[对话存档,此前内容已压缩]") == 0);
     CHECK(text.find("关键文件是 config.cpp") != std::string::npos);
+    CHECK(result->manifest.goal == "实现上下文管理与压缩");
+    REQUIRE(result->manifest.open_items.size() == 2);
+    CHECK(result->manifest.open_items[0] == "补齐单元测试");
 
     REQUIRE(backend.captured_requests.size() == 1);
     CHECK(backend.captured_requests[0].model == "test-model");
-    // history 最后一条是 assistant("好的,开始"),会被补一条 user 收尾消息,
-    // 避免 API 把整个请求当成"续写最后一条 assistant 消息"处理(见
-    // compact.cpp 里的坑),所以这里是 history.size() + 1,不是 history.size()。
+    // history 最后一条是 assistant,会被补一条 user 收尾消息(防 prefill
+    // continuation 的老坑),所以是 history.size() + 1。
     REQUIRE(backend.captured_requests[0].messages.size() == history.size() + 1);
     CHECK(backend.captured_requests[0].messages.back().role == api::Role::User);
 }
 
 TEST_CASE("Compact: history 最后一条已经是 user 角色时,不额外补收尾消息") {
     FakeBackend backend;
-    backend.script = SummaryScript(kLongSummary);
+    backend.script = SummaryScript(kGoodSummary);
 
     std::vector<api::Message> history;
     history.push_back(UserText("问题一"));
     history.push_back(AssistantText("回答一"));
-    history.push_back(UserToolResult("tool_1", "工具结果"));  // 最后一条角色是 user
+    history.push_back(UserToolResult("tool_1", "工具结果"));
 
-    const auto result = agent::Compact(backend, "test-model", history, "");
+    const auto result = agent::Compact(backend, "test-model", history, PlainOptions());
 
     REQUIRE(result.has_value());
     REQUIRE(backend.captured_requests.size() == 1);
@@ -232,32 +266,23 @@ TEST_CASE("Compact: history 最后一条已经是 user 角色时,不额外补收
 
 TEST_CASE("Compact: focus 非空时,请求的 system 指令里带上 重点保留:xxx") {
     FakeBackend backend;
-    backend.script = SummaryScript(kLongSummary);
+    backend.script = SummaryScript(kGoodSummary);
+    agent::CompactOptions options = PlainOptions();
+    options.focus = "数据库连接字符串";
 
     std::vector<api::Message> history;
     history.push_back(UserText("问题"));
 
-    const auto result = agent::Compact(backend, "test-model", history, "数据库连接字符串");
+    const auto result = agent::Compact(backend, "test-model", history, options);
 
     REQUIRE(result.has_value());
     REQUIRE(backend.captured_requests.size() == 1);
     CHECK(backend.captured_requests[0].system.find("重点保留:数据库连接字符串") != std::string::npos);
+    // manifest 模板也进了指令,模型才知道要产出机器骨架。
+    CHECK(backend.captured_requests[0].system.find("\"open_items\"") != std::string::npos);
 }
 
-TEST_CASE("Compact: focus 为空时,请求的 system 指令里不出现 重点保留") {
-    FakeBackend backend;
-    backend.script = SummaryScript(kLongSummary);
-
-    std::vector<api::Message> history;
-    history.push_back(UserText("问题"));
-
-    const auto result = agent::Compact(backend, "test-model", history, "");
-
-    REQUIRE(result.has_value());
-    CHECK(backend.captured_requests[0].system.find("重点保留") == std::string::npos);
-}
-
-TEST_CASE("Compact: 后端失败时返回错误,不影响传入的原始 history(调用方该继续用旧历史)") {
+TEST_CASE("Compact: 后端失败时返回错误,不影响传入的原始 history") {
     FakeBackend backend;
     backend.fail = true;
     backend.fail_message = "连接超时";
@@ -265,16 +290,12 @@ TEST_CASE("Compact: 后端失败时返回错误,不影响传入的原始 history
     std::vector<api::Message> history;
     history.push_back(UserText("问题"));
     history.push_back(AssistantText("回答"));
-    const std::vector<api::Message> history_copy = history;
 
-    const auto result = agent::Compact(backend, "test-model", history, "");
+    const auto result = agent::Compact(backend, "test-model", history, PlainOptions());
 
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().message == "连接超时");
-    // history 本来就是 const&,压缩失败不该也不会改动它。
-    REQUIRE(history.size() == history_copy.size());
-    CHECK(std::get<api::TextBlock>(history[0].content[0]).text ==
-          std::get<api::TextBlock>(history_copy[0].content[0]).text);
+    REQUIRE(history.size() == 2);
 }
 
 TEST_CASE("Compact: 流内报 StreamError 也算失败,返回错误") {
@@ -287,43 +308,15 @@ TEST_CASE("Compact: 流内报 StreamError 也算失败,返回错误") {
     std::vector<api::Message> history;
     history.push_back(UserText("问题"));
 
-    const auto result = agent::Compact(backend, "test-model", history, "");
+    const auto result = agent::Compact(backend, "test-model", history, PlainOptions());
 
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().message.find("服务器繁忙") != std::string::npos);
 }
 
-TEST_CASE("Compact: 压缩系统指令带全部固定栏目头,只写确证不许猜补") {
-    FakeBackend backend;
-    backend.script = SummaryScript(kLongSummary);
-
-    std::vector<api::Message> history;
-    history.push_back(UserText("问题"));
-
-    const auto result = agent::Compact(backend, "test-model", history, "");
-
-    REQUIRE(result.has_value());
-    REQUIRE(backend.captured_requests.size() == 1);
-    const std::string& system = backend.captured_requests[0].system;
-    for (const char* header : {"## 任务目标", "## 已证实的事实", "## 关键决策", "## 涉及文件与符号",
-                                "## 关键命令与结果", "## 未完成事项"}) {
-        CHECK(system.find(header) != std::string::npos);
-    }
-    CHECK(system.find("不许猜补") != std::string::npos);
-}
-
-TEST_CASE("Compact: focus 非空时,系统指令另带 ## 重点保留 栏目头") {
-    FakeBackend backend;
-    backend.script = SummaryScript(kLongSummary);
-
-    std::vector<api::Message> history;
-    history.push_back(UserText("问题"));
-
-    const auto result = agent::Compact(backend, "test-model", history, "数据库连接字符串");
-
-    REQUIRE(result.has_value());
-    CHECK(backend.captured_requests[0].system.find("## 重点保留") != std::string::npos);
-}
+// ---------------------------------------------------------------------------
+// Compact:manifest 三道验收
+// ---------------------------------------------------------------------------
 
 TEST_CASE("Compact: 摘要剥空白后为空 → 拒收,返回错误不给存档") {
     FakeBackend backend;
@@ -332,7 +325,7 @@ TEST_CASE("Compact: 摘要剥空白后为空 → 拒收,返回错误不给存档
     std::vector<api::Message> history;
     history.push_back(UserText("问题"));
 
-    const auto result = agent::Compact(backend, "test-model", history, "");
+    const auto result = agent::Compact(backend, "test-model", history, PlainOptions());
 
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().message.find("历史未动") != std::string::npos);
@@ -340,40 +333,186 @@ TEST_CASE("Compact: 摘要剥空白后为空 → 拒收,返回错误不给存档
 
 TEST_CASE("Compact: 摘要不足 40 字 → 拒收(prefill continuation 只回一个字的老坑)") {
     FakeBackend backend;
-    backend.script = SummaryScript("2");  // 实测出过:模型顺着最后一条 assistant 只接一个"2"
+    backend.script = SummaryScript("2");
 
     std::vector<api::Message> history;
     history.push_back(UserText("问题"));
     history.push_back(AssistantText("2"));
 
-    const auto result = agent::Compact(backend, "test-model", history, "");
+    const auto result = agent::Compact(backend, "test-model", history, PlainOptions());
 
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().message.find("过短") != std::string::npos);
     CHECK(result.error().message.find("历史未动") != std::string::npos);
 }
 
-TEST_CASE("Compact: 刚过 40 字门槛的摘要照常收下") {
+TEST_CASE("Compact: 40 字够但末尾没有 JSON manifest → 拒收") {
     FakeBackend backend;
-    // 正好 40 个字符(码点):门槛是"不足 40 拒收",40 整该收。
-    std::string exactly40;
-    for (int i = 0; i < 40; ++i) {
-        exactly40 += "查";
-    }
-    backend.script = SummaryScript(exactly40);
+    std::string forty_plus =
+        "## 任务目标\n实现上下文管理与压缩,不短,凑够四十字免得跟最外层防呆混为一谈。\n";
+    backend.script = SummaryScript(forty_plus);
 
     std::vector<api::Message> history;
     history.push_back(UserText("问题"));
 
-    const auto result = agent::Compact(backend, "test-model", history, "");
+    const auto result = agent::Compact(backend, "test-model", history, PlainOptions());
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message.find("manifest") != std::string::npos);
+    CHECK(result.error().message.find("历史未动") != std::string::npos);
+}
+
+TEST_CASE("Compact: manifest 是坏 JSON → 拒收") {
+    FakeBackend backend;
+    backend.script = SummaryScript(LongSummaryWithManifest(
+        "{\"goal\": \"实现压缩\", \"open_items\": [没引起来], \"next_action\": \"x\"}"));
+
+    std::vector<api::Message> history;
+    history.push_back(UserText("问题"));
+
+    const auto result = agent::Compact(backend, "test-model", history, PlainOptions());
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message.find("manifest") != std::string::npos);
+}
+
+TEST_CASE("Compact: manifest 缺 goal 键 → 拒收") {
+    FakeBackend backend;
+    backend.script =
+        SummaryScript(LongSummaryWithManifest("{\"open_items\": [\"补测试\"], \"next_action\": \"x\"}"));
+
+    std::vector<api::Message> history;
+    history.push_back(UserText("问题"));
+
+    const auto result = agent::Compact(backend, "test-model", history, PlainOptions());
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message.find("manifest") != std::string::npos);
+}
+
+TEST_CASE("Compact: 守恒校验——活动待办漏一项 → 拒收,历史不动") {
+    FakeBackend backend;
+    // open_items 只有一条,丢了"写文档说明"。
+    backend.script = SummaryScript(LongSummaryWithManifest("", R"(["补齐单元测试"])"));
+
+    std::vector<api::Message> history;
+    history.push_back(UserText("问题"));
+    agent::CompactOptions options = PlainOptions();
+    options.required_open_items = {"补齐单元测试", "写文档说明"};
+
+    const auto result = agent::Compact(backend, "test-model", history, options);
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message.find("守恒校验") != std::string::npos);
+    CHECK(result.error().message.find("写文档说明") != std::string::npos);
+    CHECK(result.error().message.find("历史未动") != std::string::npos);
+}
+
+TEST_CASE("Compact: 守恒校验——待办逐字都在(空白归一后) → 收下") {
+    FakeBackend backend;
+    backend.script =
+        SummaryScript(LongSummaryWithManifest("", "[\"补齐 单元测试\", \"写 文档 说明\"]"));
+
+    std::vector<api::Message> history;
+    history.push_back(UserText("问题"));
+    agent::CompactOptions options = PlainOptions();
+    options.required_open_items = {"补齐单元测试", "写文档说明"};
+
+    const auto result = agent::Compact(backend, "test-model", history, options);
+
     REQUIRE(result.has_value());
+    REQUIRE(result->manifest.open_items.size() == 2);
+}
+
+TEST_CASE("Compact: 指令把必须守恒的待办逐条列给模型") {
+    FakeBackend backend;
+    backend.script = SummaryScript(LongSummaryWithManifest("", R"(["修分块预算","补测试"])"));
+
+    std::vector<api::Message> history;
+    history.push_back(UserText("问题"));
+    agent::CompactOptions options = PlainOptions();
+    options.required_open_items = {"修分块预算", "补测试"};
+
+    REQUIRE(agent::Compact(backend, "test-model", history, options).has_value());
+    const std::string& system = backend.captured_requests[0].system;
+    CHECK(system.find("一项都不许丢、不许改写") != std::string::npos);
+    CHECK(system.find("1. 修分块预算") != std::string::npos);
+    CHECK(system.find("2. 补测试") != std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
-// 守护测试(0.21.x):压缩只动 history,绝不动 system——AgentLoop 构造时
-// 定死的系统提示,压缩前后发出去的请求里必须逐字节一致。用记录请求的
-// FakeBackend 跑一轮、压缩替换历史、再跑一轮,对比两次的 Request.system。
+// Compact:压缩模型自己的窗口预算
 // ---------------------------------------------------------------------------
+
+TEST_CASE("Compact: 窗口装不下当前历史 → 明确拒绝,不发请求,不截史") {
+    FakeBackend backend;
+    backend.script = SummaryScript(kGoodSummary);  // 就算后端肯回,也轮不到发
+
+    std::vector<api::Message> history;
+    history.push_back(UserText(std::string(20000, 'x')));  // 20000 ASCII ≈ 5000 token
+
+    agent::CompactOptions options;
+    options.budget.window_tokens = 4096;  // 减去预留后预算极小,必装不下
+
+    const auto result = agent::Compact(backend, "test-model", history, options);
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message.find("装不下") != std::string::npos);
+    CHECK(result.error().message.find("历史一字未动") != std::string::npos);
+    // 关键:压根没发请求——拒绝发生在发送前,不是截了史再发。
+    CHECK(backend.captured_requests.empty());
+    // 历史原样。
+    REQUIRE(history.size() == 1);
+    CHECK(std::get<api::TextBlock>(history[0].content[0]).text.size() == 20000);
+}
+
+TEST_CASE("Compact: 窗口装得下 → 照常发送") {
+    FakeBackend backend;
+    backend.script = SummaryScript(kGoodSummary);
+
+    std::vector<api::Message> history;
+    history.push_back(UserText("小问题"));
+
+    agent::CompactOptions options;
+    options.budget.window_tokens = 32768;
+
+    REQUIRE(agent::Compact(backend, "test-model", history, options).has_value());
+    REQUIRE(backend.captured_requests.size() == 1);
+}
+
+TEST_CASE("CompactInputBudget: 预算 = 窗口 − 输出预留 − 协议余量") {
+    agent::CompactBudget budget;
+    budget.window_tokens = 100000;
+    budget.output_reserve_tokens = 4096;
+    budget.protocol_headroom_tokens = 2048;
+    CHECK(agent::CompactInputBudget(budget).has_value());
+    CHECK(*agent::CompactInputBudget(budget) == 100000 - 4096 - 2048);
+    // 窗口未知 → 无预算可核。
+    agent::CompactBudget unknown;
+    CHECK_FALSE(agent::CompactInputBudget(unknown).has_value());
+    // 窗口连预留都盖不住 → 预算 0,任何输入都装不下。
+    agent::CompactBudget tiny;
+    tiny.window_tokens = 100;
+    CHECK(agent::CompactInputBudget(tiny).has_value());
+    CHECK(*agent::CompactInputBudget(tiny) == 0);
+}
+
+TEST_CASE("ParseCompactManifest: 取末尾最后一个 json 围栏块,前面的不算") {
+    const std::string text =
+        "正文里先引用了一枚代码块:\n```json\n{\"goal\": \"旧的\", \"open_items\": [\"旧\"]}\n```\n"
+        "存档正文若干字若干字若干字若干字。\n"
+        "```json\n{\"goal\": \"新的\", \"open_items\": [\"新\"]}\n```";
+    const auto manifest = agent::ParseCompactManifest(text);
+    REQUIRE(manifest.has_value());
+    CHECK(manifest->goal == "新的");
+    REQUIRE(manifest->open_items.size() == 1);
+    CHECK(manifest->open_items[0] == "新");
+}
+
+// ---------------------------------------------------------------------------
+// 守护测试:压缩只动 history,绝不动 system
+// ---------------------------------------------------------------------------
+
 TEST_CASE("守护:压缩前后 AgentLoop 发出的 system 逐字节不变") {
     const std::string system_prompt =
         "系统提示原文——含人格段、环境段、features 段,一个字节都不许因压缩而变。";
@@ -388,20 +527,18 @@ TEST_CASE("守护:压缩前后 AgentLoop 发出的 system 逐字节不变") {
     const std::string system_before = loop_backend.captured_requests.front().system;
     CHECK(system_before == system_prompt);
 
-    // 压缩走独立后端(跟 main.cpp 用裸 real_backend 一个路数),替换历史。
+    // 压缩走独立后端(跟会话层用裸 real_backend 一个路数),替换历史。
     FakeBackend compact_backend;
-    compact_backend.script = SummaryScript(kLongSummary);
-    const auto archive = agent::Compact(compact_backend, "test-model", loop.History(), "");
-    REQUIRE(archive.has_value());
-    loop.ReplaceHistory(agent::BuildCompactedHistory(loop.History(), *archive));
+    compact_backend.script = SummaryScript(kGoodSummary);
+    const auto summary = agent::Compact(compact_backend, "test-model", loop.History(), PlainOptions());
+    REQUIRE(summary.has_value());
+    loop.ReplaceHistory(agent::BuildCompactedHistory(loop.History(), summary->archive));
 
     REQUIRE(loop.Run("第二问", agent::Callbacks{}).has_value());
     const std::string system_after = loop_backend.captured_requests.back().system;
 
-    // 逐字节:压缩前后完全一致,且就是构造时那份。
     CHECK(system_after == system_before);
     CHECK(system_after == system_prompt);
-    // 顺带钉死:压缩后的历史确实换了(存档进了第一条 user 消息)。
     bool archived = false;
     for (const auto& message : loop_backend.captured_requests.back().messages) {
         for (const auto& block : message.content) {
@@ -412,4 +549,90 @@ TEST_CASE("守护:压缩前后 AgentLoop 发出的 system 逐字节不变") {
         }
     }
     CHECK(archived);
+}
+
+// ---------------------------------------------------------------------------
+// 0.31.x:AgentLoop mid-turn 压力通报
+// ---------------------------------------------------------------------------
+
+TEST_CASE("AgentLoop: 窗口未知或没设回调时,请求前不做任何通报(行为不变)") {
+    FakeBackend backend;
+    backend.script = SummaryScript("普通回答,凑够字数,不触发任何压缩门槛。");
+    tools::ToolRegistry registry;
+    agent::AgentLoop loop(backend, registry, "test-model", "sys");
+    int calls = 0;
+    loop.SetOnContextPressure([&calls](const agent::ContextPressure&) { ++calls; });
+    REQUIRE(loop.Run("第一问", agent::Callbacks{}).has_value());
+    CHECK(calls == 0);  // 窗口 0 = 未知,不评估
+}
+
+TEST_CASE("AgentLoop: projected overflow 在请求前通报,回调里压缩后请求换短史") {
+    // 一轮脚本:先答一句长的(带工具调用会复杂化,这里纯文本即可)。
+    FakeBackend backend;
+    backend.script = SummaryScript("回答正文,凑够字数,免得跟压缩门槛混淆。");
+    tools::ToolRegistry registry;
+    agent::AgentLoop loop(backend, registry, "test-model", "sys");
+    loop.SetContextWindowTokens(1000);  // 极小窗口:第一请求必然 projected overflow
+
+    std::vector<agent::ContextPressure> seen;
+    bool compacted = false;
+    loop.SetOnContextPressure([&](const agent::ContextPressure& pressure) {
+        seen.push_back(pressure);
+        if (pressure.phase == agent::ContextPressure::Phase::PreRequest && pressure.projected_overflow &&
+            !compacted) {
+            compacted = true;
+            // 安全点换短史(模拟会话层做了一次语义压缩)。
+            api::Message archive;
+            archive.role = api::Role::User;
+            archive.content.push_back(api::TextBlock{"[对话存档,此前内容已压缩] 摘要正文,不短。"});
+            loop.ReplaceHistory({archive});
+        }
+    });
+
+    REQUIRE(loop.Run(std::string(6000, 'a') + "的问题", agent::Callbacks{}).has_value());
+
+    REQUIRE_FALSE(seen.empty());
+    CHECK(seen.front().phase == agent::ContextPressure::Phase::PreRequest);
+    CHECK(seen.front().projected_overflow);
+    CHECK(seen.front().window_tokens == 1000);
+    CHECK(compacted);
+    // 请求确实是用换短后的历史发的:只有一条 archive 消息。
+    REQUIRE(backend.captured_requests.size() == 1);
+    REQUIRE(backend.captured_requests[0].messages.size() == 1);
+    CHECK(std::get<api::TextBlock>(backend.captured_requests[0].messages[0].content[0]).text.find("对话存档") !=
+          std::string::npos);
+}
+
+TEST_CASE("AgentLoop: TrimHistory 兜底真丢东西时,AfterHardTrim 通报") {
+    FakeBackend backend;
+    backend.script = SummaryScript("回答正文,凑够字数,免得跟压缩门槛混淆。");
+    tools::ToolRegistry registry;
+    // max_context_chars 设得很小:第五轮起(轮数盖过 keep_recent_turns+1)
+    // 必触发轮级裁剪。
+    agent::AgentLoop loop(backend, registry, "test-model", "sys", /*max_tokens=*/4096,
+                          /*max_turns=*/0, /*max_context_chars=*/2600);
+    loop.SetContextWindowTokens(0);  // 不做 projected 评估,单测硬裁线
+
+    std::vector<agent::ContextPressure> seen;
+    loop.SetOnContextPressure([&seen](const agent::ContextPressure& pressure) { seen.push_back(pressure); });
+
+    // 前四轮:轮数不够裁,没有通报。
+    for (int i = 0; i < 4; ++i) {
+        REQUIRE(loop.Run("第" + std::to_string(i) + "问" + std::string(500, 'x'), agent::Callbacks{}).has_value());
+    }
+    CHECK(seen.empty());
+
+    // 第五轮:轮数盖过 keep_recent_turns + 1,中间轮被整轮丢掉,请求发出去
+    // 之前必须通报——静默降级不许再有。
+    REQUIRE(loop.Run("第5问" + std::string(500, 'x'), agent::Callbacks{}).has_value());
+    REQUIRE_FALSE(seen.empty());
+    bool saw_hard_trim = false;
+    for (const auto& pressure : seen) {
+        if (pressure.phase == agent::ContextPressure::Phase::AfterHardTrim) {
+            saw_hard_trim = true;
+            CHECK(pressure.hard_trimmed_turns);
+            CHECK(pressure.hard_dropped_messages > 0);
+        }
+    }
+    CHECK(saw_hard_trim);
 }

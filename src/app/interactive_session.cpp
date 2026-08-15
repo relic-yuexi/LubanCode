@@ -224,6 +224,17 @@ private:
     CommandFlow ProcessLine(const std::string& content);
     CommandFlow DispatchSlashCommand(const lubancode::cli::ParsedSlashCommand& parsed);
     CommandFlow RunUserTurn(const std::string& content);
+    // ---- 上下文压缩的会话现场路(0.31.x 分层压缩第一期) ----
+    // 压缩参数现场收集:窗口预算认压缩模型自己的目录条目,活动待办(未完
+    // 成 todo 条目原文)进守恒校验——摘要漏一项 pending 就拒收,历史不动。
+    lubancode::agent::CompactOptions BuildCompactOptions();
+    // 自动(外层用户消息前)与 mid-turn(工具循环边界)压缩共用的一条路:
+    // 压缩 → 校验 → 换历史 → 落盘事件 → 报数。midturn=true 时先补落盘再换
+    // 史,这一轮攒下的消息先全量进 JSONL,真账一字不丢。
+    bool TryRunCompact(bool midturn);
+    // AgentLoop 每次模型请求前的压力通报:projected overflow 在安全点收一
+    // 次历史;TrimHistory 真丢了东西就显式告警,不静默降级。
+    void HandleContextPressure(const lubancode::agent::ContextPressure& pressure);
     SessionCommandState MakeSessionCommandState();
     lubancode::tools::DetachedAgentBackend BuildDetachedBackend() const;
     std::unique_ptr<lubancode::tools::ToolRegistry> BuildDetachedRegistry() const;
@@ -956,6 +967,12 @@ void InteractiveSession::RebuildLoop(bool preserve_history) {
                  lubancode::agent::AssembleSystemPrompt(prompt_options),
                  /*max_tokens=*/4096, config.max_turns, config.max_context_chars);
     loop->SetToolFilter(main_tool_filter());
+    // mid-turn 上下文安全点(0.31.x):窗口与压力通报随 loop 重建重灌;窗口
+    // 的后续变化(/context、/model)由 RunUserTurn 发轮前再同步。
+    loop->SetContextWindowTokens(context_tracker.window_tokens());
+    loop->SetOnContextPressure([this](const lubancode::agent::ContextPressure& pressure) {
+        HandleContextPressure(pressure);
+    });
     if (reapply_peer_inbox) {
         reapply_peer_inbox();  // 跨会话收件点:重建的 loop 也要能收信
     }
@@ -1352,49 +1369,54 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                 return HandleClearCommand(session_state, config, theme, spinner_enabled);
             }
             case lubancode::cli::SlashCommand::Context: {
-                // 裸敲才收集三类字符数(带参数走切窗口分支,收了也白收)。
-                // 口径对齐"实际发出的请求":
+                // 裸敲才收集三类 token 估算(带参数走切窗口分支,收了也白收)。
+                // 口径对齐"实际发出的请求",token 全按统一口径
+                // (agent/context.hpp:ASCII 4 字符约 1 token,非 ASCII 每字
+                // 约 1.5 token)折算:
                 //   系统提示 = AgentLoop 那份拼装结果 + 目录 base_instructions
                 //              + 魂(几层 Backend 包装发请求前拼进 system 的);
                 //   工具定义 = registry 里"会真进 tools 数组"的工具(延迟
                 //              机制开着就按谓词过滤成核心+已挂载)的
                 //              名字+描述+schema,外加延迟索引段;
                 //   对话历史 = loop.History() 全量(文本/工具调用/工具结果)。
-                std::size_t sys_chars = 0;
-                std::size_t tools_chars = 0;
-                std::size_t history_chars = 0;
+                std::size_t sys_tokens = 0;
+                std::size_t tools_tokens = 0;
+                std::size_t history_tokens = 0;
                 if (parsed.args.empty()) {
-                    sys_chars = lubancode::agent::AssembleSystemPrompt(prompt_options).size() +
-                                current_model_instructions->size() + current_soul->size();
+                    sys_tokens =
+                        lubancode::agent::EstimateUtf8Tokens(lubancode::agent::AssembleSystemPrompt(prompt_options)) +
+                        lubancode::agent::EstimateUtf8Tokens(*current_model_instructions) +
+                        lubancode::agent::EstimateUtf8Tokens(*current_soul);
                     for (const auto& tool : registry().All()) {
                         if (!main_tool_filter()(*tool)) {
                             continue;  // 延迟未挂载:不在 tools 数组里,不算
                         }
-                        tools_chars += tool->name().size() + tool->description().size() +
-                                       tool->input_schema().dump().size();
+                        tools_tokens += lubancode::agent::EstimateUtf8Tokens(tool->name()) +
+                                        lubancode::agent::EstimateUtf8Tokens(tool->description()) +
+                                        lubancode::agent::EstimateUtf8Tokens(tool->input_schema().dump());
                     }
                     if (main_deferral) {
-                        tools_chars +=
-                            lubancode::tools::BuildDeferredToolsIndexSegment(registry(), *loaded_tools()).size();
+                        tools_tokens += lubancode::agent::EstimateUtf8Tokens(
+                            lubancode::tools::BuildDeferredToolsIndexSegment(registry(), *loaded_tools()));
                     }
-                    history_chars = EstimateHistoryChars(loop->History());
+                    history_tokens = lubancode::agent::EstimateHistoryTokens(loop->History());
                 }
-                HandleContextCommand(parsed.args, context_tracker, sys_chars, tools_chars, history_chars, theme);
+                HandleContextCommand(parsed.args, context_tracker, sys_tokens, tools_tokens, history_tokens, theme);
                 break;
             }
             case lubancode::cli::SlashCommand::Compact: {
                 const std::string compact_model = config.compact_model.empty() ? *current_model : config.compact_model;
-                const auto compact_event =
-                    HandleCompactCommand(parsed.args, *loop, real_backend, compact_model, theme, spinner_enabled);
+                const auto compact_result = HandleCompactCommand(parsed.args, *loop, real_backend, compact_model,
+                                                                 theme, spinner_enabled, BuildCompactOptions());
                 // 压缩把 history 换短了(失败则原样):落盘基线收到新长度,
                 // 存档文件保持只追加——全量流水不动,补写一行 compact
                 // 事件,/resume 按事件回放出压缩后的活状态,/export 仍走
                 // 全量,不丢内容。
                 persisted_count = (std::min)(persisted_count, loop->History().size());
-                if (compact_event.has_value() && session_store.active() && !session_store_broken) {
+                if (compact_result.event.has_value() && session_store.active() && !session_store_broken) {
                     // 写盘校验:compact 事件没落盘,存档里就没有压缩记录,
                     // /resume 会按全量流水回放到压缩前状态——打警告说明白。
-                    if (!session_store.AppendCompactEvent(*compact_event)) {
+                    if (!session_store.AppendCompactEvent(*compact_result.event)) {
                         std::cout << theme.error << tr("session.compact_event_failed") << theme.reset << "\n";
                     }
                 }
@@ -1491,33 +1513,14 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
 
 // 发一轮用户正文:自动压缩检查 + 轮次材料 + RunTurn + 落盘 + 收排队。
 CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
-    // 自动压缩:发真正的用户输入前,占用超过阈值(80%)就先压一压。
-    // 用裸的 real_backend(理由同 /compact),失败只警告不拦——字符数
-    // 硬安全网(TrimHistory)还在,不会真的爆掉。
+    // 窗口同步(0.31.x):/context、/model 改的是 tracker 的窗口,loop 的
+    // mid-turn 评估用同一份,发轮前对齐一次。
+    loop->SetContextWindowTokens(context_tracker.window_tokens());
+    // 自动压缩:发真正的用户输入前,占用超过阈值(80%)就先压一压。失败只
+    // 警告不拦——字符数硬安全网(TrimHistory)还在,不会真的爆掉;工具循环
+    // 中途的溢出由 loop 的压力通报(HandleContextPressure)另走 mid-turn 路。
     if (context_tracker.ShouldAutoCompact()) {
-        std::cout << theme.stats << tr("compact.auto_start") << theme.reset << "\n";
-        lubancode::cli::Spinner spinner(theme, spinner_enabled);
-        const std::string compact_model = config.compact_model.empty() ? *current_model : config.compact_model;
-        const auto compact_result = lubancode::agent::Compact(real_backend, compact_model, loop->History(), "");
-        spinner.Stop();
-        if (compact_result.has_value()) {
-            const std::size_t old_size = loop->History().size();
-            const auto new_history = lubancode::agent::BuildCompactedHistory(loop->History(), *compact_result);
-            const auto compact_event = lubancode::agent::MakeCompactEvent(old_size, new_history);
-            loop->ReplaceHistory(new_history);
-            // 落盘基线收到新长度,补写 compact 事件,理由同 /compact 分支。
-            persisted_count = (std::min)(persisted_count, loop->History().size());
-            if (session_store.active() && !session_store_broken) {
-                // 写盘校验,理由同 /compact 分支。
-                if (!session_store.AppendCompactEvent(compact_event)) {
-                    std::cout << theme.error << tr("session.compact_event_failed") << theme.reset << "\n";
-                }
-            }
-            std::cout << tr("compact.auto_done") << "\n";
-        } else {
-            std::cout << theme.error << trf("compact.auto_failed", compact_result.error().message) << theme.reset
-                      << tr("compact.auto_failed_tail") << "\n";
-        }
+        TryRunCompact(/*midturn=*/false);
     }
 
     // 人在聚焦查看画面里直接敲了正文发送:视为离开聚焦态(新一轮输出
@@ -1536,6 +1539,97 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
     // 每轮结束(成功/出错/ESC 打断都算)把新增消息逐条追加落盘。
     PersistNewMessages();
     return CommandFlow::Continue;
+}
+
+// ---------------------------------------------------------------------------
+// 上下文压缩的会话现场路(0.31.x 分层压缩第一期)
+// ---------------------------------------------------------------------------
+
+lubancode::agent::CompactOptions InteractiveSession::BuildCompactOptions() {
+    lubancode::agent::CompactOptions options;
+    // 窗口预算认压缩模型自己的目录条目,不拿主模型窗口冒充;目录里查不到
+    // (自定义模型、中转起名)就留空——Compact() 不做窗口拦截,但输出会
+    // 明说"窗口未知,未校验",不假装核过。
+    const std::string compact_model = config.compact_model.empty() ? *current_model : config.compact_model;
+    if (const auto* entry = model_catalog.FindBySlug(compact_model); entry != nullptr) {
+        options.budget.window_tokens = entry->context_window_tokens;
+    }
+    // 活动待办守恒:pending/in_progress 条目原文逐条钉进 manifest 校验,
+    // 摘要漏一项就拒收,旧历史不动。
+    if (const auto& state = todo_state(); state != nullptr) {
+        for (const auto& item : state->items) {
+            if (item.status != lubancode::tools::TodoStatus::Completed && !item.content.empty()) {
+                options.required_open_items.push_back(item.content);
+            }
+        }
+    }
+    return options;
+}
+
+bool InteractiveSession::TryRunCompact(bool midturn) {
+    const std::string compact_model = config.compact_model.empty() ? *current_model : config.compact_model;
+    const lubancode::agent::CompactOptions options = BuildCompactOptions();
+
+    std::cout << theme.stats << tr(midturn ? "compact.midturn_start" : "compact.auto_start") << theme.reset << "\n";
+    lubancode::cli::Spinner spinner(theme, spinner_enabled);
+    // 用裸的 real_backend(理由同 /compact):Compact 自己把 compact_model
+    // 写进 request.model,包了 ModelOverrideBackend 会被换回会话模型。
+    const auto result = lubancode::agent::Compact(real_backend, compact_model, loop->History(), options);
+    spinner.Stop();
+
+    if (!result.has_value()) {
+        std::cout << theme.error << trf("compact.auto_failed", result.error().message) << theme.reset
+                  << tr("compact.auto_failed_tail") << "\n";
+        return false;
+    }
+
+    // mid-turn 触发时这一轮攒下的 assistant/工具消息还没落盘——先补全量
+    // 账再换史,JSONL 一字不丢;压缩只改后续模型看的活历史形状。
+    if (midturn) {
+        PersistNewMessages();
+    }
+
+    const std::size_t old_size = loop->History().size();
+    const auto new_history = lubancode::agent::BuildCompactedHistory(loop->History(), result->archive);
+    const auto compact_event = lubancode::agent::MakeCompactEvent(old_size, new_history);
+    loop->ReplaceHistory(new_history);
+    // 落盘基线收到新长度,补写 compact 事件,理由同 /compact 分支。
+    persisted_count = (std::min)(persisted_count, loop->History().size());
+    if (session_store.active() && !session_store_broken) {
+        // 写盘校验,理由同 /compact 分支。
+        if (!session_store.AppendCompactEvent(compact_event)) {
+            std::cout << theme.error << tr("session.compact_event_failed") << theme.reset << "\n";
+        }
+    }
+    if (!options.budget.window_tokens.has_value()) {
+        std::cout << theme.stats << tr("cmd.compact.window_unknown") << theme.reset << "\n";
+    }
+    std::cout << trf("compact.done_stats", lubancode::agent::EstimateHistoryTokens(loop->History()),
+                     result->manifest.constraints.size(), result->manifest.open_items.size())
+              << "\n";
+    if (midturn) {
+        std::cout << tr("compact.midturn_done") << "\n";
+    }
+    return true;
+}
+
+void InteractiveSession::HandleContextPressure(const lubancode::agent::ContextPressure& pressure) {
+    if (pressure.phase == lubancode::agent::ContextPressure::Phase::PreRequest) {
+        // 工具结果已攒完、请求尚未发出——正是不打断工具的安全点。撞线就
+        // 在这里收一次历史,不再等下一条外层用户消息。
+        if (pressure.projected_overflow) {
+            TryRunCompact(/*midturn=*/true);
+        }
+        return;
+    }
+    // AfterHardTrim:字符安全网这次真丢了东西。显式告警,不许静默降级——
+    // 用户须知道模型眼下已经看不到那段原文;完整流水仍在存档,/export 可查。
+    if (pressure.hard_trimmed_turns) {
+        std::cout << theme.error << trf("compact.hard_trim_turns", pressure.hard_dropped_messages) << theme.reset
+                  << "\n";
+    } else if (pressure.hard_truncated_results) {
+        std::cout << theme.error << tr("compact.hard_trim_results") << theme.reset << "\n";
+    }
 }
 
 SessionCommandState InteractiveSession::MakeSessionCommandState() {

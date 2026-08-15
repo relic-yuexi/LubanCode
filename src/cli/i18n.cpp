@@ -738,16 +738,23 @@ const Entry kZhCN[] = {
     {"cmd.context.bd.measured", "(实测)"},
     {"cmd.context.bd.history_derived", "(=实测总量−系统−工具)"},
     {"cmd.context.bd.note.measured", "(总量为上一轮实测 token;系统提示/工具为字符估,历史为实测总量反推)"},
-    {"cmd.context.bd.note.est", "(尚无实测,启动估算:token 为字符数/3 粗估,实际以模型返回为准)"},
+    {"cmd.context.bd.note.est", "(尚无实测,启动估算:统一口径,ASCII 4 字符约 1 token、非 ASCII 每字约 1.5 token,实际以模型返回为准)"},
     {"cmd.context.note.semantics", "(context = 主会话最近一次请求的占用,不是累计花销,不含独立子代理的 token)"},
     {"cmd.context.note.stale", "(最近一次请求未返回 usage,以上为再上一次的实测值;状态栏同款数字带 ~ 前缀)"},
     {"cmd.compact.empty", "当前没有对话历史,不用压缩。"},
     {"cmd.compact.failed", "压缩失败: {0}"},
-    {"cmd.compact.result", "压缩前 ~{0} tokens → 压缩后 ~{1} tokens"},
+    {"cmd.compact.result", "压缩前 ~{0} tokens → 压缩后 ~{1} tokens(统一估算口径)"},
+    {"cmd.compact.window_unknown", "(压缩模型窗口未知,本次未做窗口校验)"},
+    {"cmd.compact.manifest", "manifest 守恒校验通过:约束 {0} 条 / 待办 {1} 条"},
     {"compact.auto_start", "[compact] 上下文接近上限,自动压缩中..."},
     {"compact.auto_done", "[compact] 自动压缩完成。"},
     {"compact.auto_failed", "[compact] 自动压缩失败: {0}"},
     {"compact.auto_failed_tail", "(继续按原历史发送,字符数安全网仍会兜底)"},
+    {"compact.midturn_start", "[compact] 工具循环中途,预计下一次请求将超出窗口,先收一次历史..."},
+    {"compact.midturn_done", "[compact] mid-turn 压缩完成,工具循环继续。"},
+    {"compact.done_stats", "[compact] 历史 ~{0} tokens;manifest 守住约束 {1} 条 / 待办 {2} 条"},
+    {"compact.hard_trim_turns", "[警告] 上下文发生有损硬裁剪:中间 {0} 条消息被丢弃(字符安全网兜底,不是语义压缩)。模型已看不到那段原文;完整流水仍在会话存档,可 /export 查看、/compact 重建摘要。"},
+    {"compact.hard_trim_results", "[警告] 上下文发生有损硬裁剪:超大工具结果被截尾(字符安全网兜底,不是语义压缩)。模型已看不到被截内容;完整流水仍在会话存档,可 /export 查看。"},
     {"cmd.think.current", "当前推理强度: {0}"},
     {"cmd.think.catalog_header", "模型目录声明的档位({0}):"},
     {"cmd.think.provider", "支持哪些档位以服务商为准。"},
@@ -1735,6 +1742,15 @@ const Entry kEn[] = {
     {"cmd.context.note.stale",
      "(the most recent request returned no usage; figures above are from the last measured request. The "
      "status bar shows the same numbers with a ~ prefix)"},
+
+    // ---- compact (0.31.x): new layered-compaction keys, zh+en paired ----
+    {"cmd.compact.window_unknown", "(compact model window unknown; no window check was performed this time)"},
+    {"cmd.compact.manifest", "manifest conservation check passed: {0} constraints / {1} open items"},
+    {"compact.midturn_start", "[compact] mid-tool-loop: next request projected to overflow the window; compacting history first..."},
+    {"compact.midturn_done", "[compact] mid-turn compaction done; tool loop continues."},
+    {"compact.done_stats", "[compact] history ~{0} tokens; manifest kept {1} constraints / {2} open items"},
+    {"compact.hard_trim_turns", "[warning] Lossy hard trim: {0} mid-history messages were dropped (character safety net, not semantic compaction). The model can no longer see that text; the full ledger is still in the session file (/export to view, /compact to rebuild the summary)."},
+    {"compact.hard_trim_results", "[warning] Lossy hard trim: oversized tool results were truncated (character safety net, not semantic compaction). The model can no longer see the cut text; the full ledger is still in the session file (/export to view)."},
 
     // TODO(P1):以下 zh-CN 键暂缺英文翻译,tr 回退 zh-CN——诚实回退,不机翻凑数:
     //   mcp.* / plugin.* / tool_search.* / catalog.* / cmd.tools.* / cmd.plugins.* /

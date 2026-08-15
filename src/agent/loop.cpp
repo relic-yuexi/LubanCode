@@ -187,8 +187,45 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         if (ShouldNudgeMaxTurns(turn, max_turns_)) {
             request.system += BuildMaxTurnsNudgeText(max_turns_ - turn);
         }
-        request.messages = TrimHistory(history_, max_context_chars_);
+
+        // mid-turn 安全点:拼请求前先估 projected——system + 工具定义 + 全份
+        // history + 输出预留,过参考线就把压力通报出去。上层回调里可以同步
+        // 做一次语义压缩(ReplaceHistory),返回后下面 TrimHistory 拿到的就
+        // 是(可能已换短的)history_。窗口未知(0)或没设回调时跳过,行为
+        // 与从前一致——这一步不发出任何请求,估错了也不会误伤。
+        if (context_window_tokens_ > 0 && on_context_pressure_) {
+            std::size_t projected = EstimateUtf8Tokens(request.system) + EstimateHistoryTokens(history_) +
+                                    static_cast<std::size_t>(max_tokens_);
+            for (const auto& tool : registry_.All()) {
+                if (tool_filter_ && !tool_filter_(*tool)) {
+                    continue;
+                }
+                projected += EstimateUtf8Tokens(tool->name()) + EstimateUtf8Tokens(tool->description()) +
+                             EstimateUtf8Tokens(tool->input_schema().dump());
+            }
+            ContextPressure pressure;
+            pressure.phase = ContextPressure::Phase::PreRequest;
+            pressure.projected_tokens = projected;
+            pressure.window_tokens = context_window_tokens_;
+            pressure.projected_overflow =
+                projected >= context_window_tokens_ * static_cast<std::size_t>(kProjectedOverflowPercent) / 100;
+            on_context_pressure_(pressure);
+        }
+
+        TrimReport trim_report;
+        request.messages = TrimHistory(history_, max_context_chars_, kDefaultKeepRecentTurns, &trim_report);
         request.max_tokens = max_tokens_;
+        // 有损硬裁发生了(丢轮/截结果),显式通报——静默降级会让用户以为语
+        // 义压缩已成功,模型其实已经看不到那段原文。
+        if ((trim_report.trimmed_turns || trim_report.truncated_results) && on_context_pressure_) {
+            ContextPressure pressure;
+            pressure.phase = ContextPressure::Phase::AfterHardTrim;
+            pressure.hard_trimmed_turns = trim_report.trimmed_turns;
+            pressure.hard_dropped_messages = trim_report.dropped_messages;
+            pressure.hard_truncated_results = trim_report.truncated_results;
+            pressure.window_tokens = context_window_tokens_;
+            on_context_pressure_(pressure);
+        }
         // 每轮现拼,不在 Run() 开头拼一次复用:tool_search 命中会在一次
         // Run() 中途把工具加进 loaded 集合(谓词的判定依据),下一轮请求
         // 就得带上新挂载工具的完整定义。没设谓词时,重拼出来的内容每轮
@@ -197,7 +234,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
 
         // 硬上限:轮级裁剪 + 工具结果截断都做完还是装不下(比如单条用户输入
         // 就超大),明确报错,不把一份注定被拒的超大请求发出去。
-        if (EstimateChars(request.messages) > max_context_chars_) {
+        if (EstimateHistoryBytes(request.messages) > max_context_chars_) {
             return std::unexpected("上下文超过上限(" + std::to_string(max_context_chars_) +
                                     " 字符),裁剪与截断后仍装不下,无法发送。请用 /compact 压缩历史,或开新会话。");
         }

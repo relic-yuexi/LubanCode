@@ -469,7 +469,7 @@ TEST_CASE("MakeCompactEvent 跟 BuildCompactedHistory 对得上账") {
     history.push_back(UserText("u2"));
     history.push_back(AssistantText("a2"));
     const auto archive = UserText("[对话存档,此前内容已压缩] 要点");
-    const auto new_history = agent::BuildCompactedHistory(history, archive);
+    const auto new_history = agent::BuildCompactedHistory(history, archive, /*hot_zone_tokens=*/1);
     REQUIRE(new_history.size() == 2);
 
     const auto event = agent::MakeCompactEvent(history.size(), new_history);
@@ -526,7 +526,7 @@ std::string JoinLines(const std::vector<std::string>& lines) {
 TEST_CASE("回放: 单次压缩,恢复的是压缩后的活状态") {
     // 流水:u1 a1 u2 a2 | compact | u3 a3
     std::vector<api::Message> history{UserText("u1"), AssistantText("a1"), UserText("u2"), AssistantText("a2")};
-    const auto new_history = agent::BuildCompactedHistory(history, UserText("[对话存档,此前内容已压缩] 玄武"));
+    const auto new_history = agent::BuildCompactedHistory(history, UserText("[对话存档,此前内容已压缩] 玄武"), /*hot_zone_tokens=*/1);
     const auto event = agent::MakeCompactEvent(history.size(), new_history);
 
     std::vector<std::string> lines;
@@ -560,7 +560,7 @@ TEST_CASE("回放: 两次压缩,逐次替换,最后一次说了算") {
     for (const auto& m : effective) {
         lines.push_back(agent::SerializeSessionMessage(m, "t"));
     }
-    auto compacted1 = agent::BuildCompactedHistory(effective, UserText("[对话存档,此前内容已压缩] 存档一"));
+    auto compacted1 = agent::BuildCompactedHistory(effective, UserText("[对话存档,此前内容已压缩] 存档一"), /*hot_zone_tokens=*/1);
     lines.push_back(agent::SerializeCompactEvent(agent::MakeCompactEvent(effective.size(), compacted1), "t"));
     effective = compacted1;
 
@@ -569,7 +569,7 @@ TEST_CASE("回放: 两次压缩,逐次替换,最后一次说了算") {
     effective.push_back(AssistantText("a3"));
     lines.push_back(agent::SerializeSessionMessage(UserText("u3"), "t"));
     lines.push_back(agent::SerializeSessionMessage(AssistantText("a3"), "t"));
-    auto compacted2 = agent::BuildCompactedHistory(effective, UserText("[对话存档,此前内容已压缩] 存档二"));
+    auto compacted2 = agent::BuildCompactedHistory(effective, UserText("[对话存档,此前内容已压缩] 存档二"), /*hot_zone_tokens=*/1);
     lines.push_back(agent::SerializeCompactEvent(agent::MakeCompactEvent(effective.size(), compacted2), "t"));
     effective = compacted2;
 

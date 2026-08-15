@@ -56,7 +56,7 @@ TEST_CASE("EstimateChars: 累加所有文本/工具入参/工具结果的字节�
     std::vector<api::Message> history;
     history.push_back(UserText("12345"));
     history.push_back(AssistantText("abcde"));
-    CHECK(agent::EstimateChars(history) == 10);
+    CHECK(agent::EstimateHistoryBytes(history) == 10);
 }
 
 TEST_CASE("TrimHistory: 不超限时原样返回,一条不动") {
@@ -84,7 +84,7 @@ TEST_CASE("TrimHistory: 超限时保留最早一轮和最近 N 轮,中间整轮�
     AppendFullTurn(history, "recent2", 50);
     AppendFullTurn(history, "recent3", 50);
 
-    const std::size_t full_chars = agent::EstimateChars(history);
+    const std::size_t full_chars = agent::EstimateHistoryBytes(history);
     REQUIRE(full_chars > 0);
 
     // 阈值设得比全量小,但比"第一轮 + 最近三轮"大,逼着中间 5 轮被裁掉。
@@ -153,7 +153,7 @@ TEST_CASE("TrimHistory: tool_use 与 tool_result 永远成对,不会被从中间
         AppendFullTurn(history, "t" + std::to_string(i), 200);
     }
 
-    const std::size_t full_chars = agent::EstimateChars(history);
+    const std::size_t full_chars = agent::EstimateHistoryBytes(history);
     const auto trimmed = agent::TrimHistory(history, full_chars / 3, /*keep_recent_turns=*/2);
 
     // 逐条检查:如果一条 assistant 消息里有 ToolUseBlock,紧跟着下一条
@@ -183,7 +183,7 @@ TEST_CASE("TrimHistory: 轮数不够裁(第一轮和最近 N 轮已覆盖全部)
     AppendFullTurn(history, "only1", 500000);
     AppendFullTurn(history, "only2", 500000);
 
-    const std::size_t full_chars = agent::EstimateChars(history);
+    const std::size_t full_chars = agent::EstimateHistoryBytes(history);
     // 阈值远小于全量,强制触发"超限"分支,但只有 2 轮、keep_recent_turns=3
     // 时第一轮和"最近 3 轮"必然覆盖/重叠了全部历史,裁不动。
     const auto trimmed = agent::TrimHistory(history, full_chars / 10, /*keep_recent_turns=*/3);
@@ -222,7 +222,7 @@ TEST_CASE("TrimHistory: 轮数不够裁但单条 tool_result 超大时,内容尾
     CHECK(tool_result.content.find("[内容过长已截断]") != std::string::npos);
 
     // 截断后总量确实落回了阈值以内。
-    CHECK(agent::EstimateChars(trimmed) <= 10000);
+    CHECK(agent::EstimateHistoryBytes(trimmed) <= 10000);
 }
 
 TEST_CASE("TrimHistory: 截断有下限,不会把 tool_result 截成空壳") {
@@ -238,4 +238,67 @@ TEST_CASE("TrimHistory: 截断有下限,不会把 tool_result 截成空壳") {
     const auto& tool_result = std::get<api::ToolResultBlock>(trimmed[2].content[0]);
     CHECK(tool_result.content.size() >= 1024);
     CHECK(tool_result.content.find('x') != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// 0.31.x 分层压缩第一期:统一 token 口径 + 硬裁剪报告
+// ---------------------------------------------------------------------------
+
+TEST_CASE("EstimateUtf8Tokens: 统一口径,ASCII 4 字符 1 token,非 ASCII 1.5 token/字") {
+    // 纯 ASCII:8 个字符 2 token。
+    CHECK(agent::EstimateUtf8Tokens("abcdefgh") == 2);
+    // 纯中文(UTF-8 每字 3 字节):4 个码点 6 token(1.5/字)。
+    CHECK(agent::EstimateUtf8Tokens("你好世界") == 6);
+    // 混排:ASCII 4 个 = 1 token,中文 2 个 = 3 token,合计 4。
+    CHECK(agent::EstimateUtf8Tokens("abcd你好") == 4);
+    // 空串 0。
+    CHECK(agent::EstimateUtf8Tokens("") == 0);
+}
+
+TEST_CASE("EstimateHistoryTokens: 逐块累加,统一口径不回退到字节/3") {
+    std::vector<api::Message> history;
+    history.push_back(UserText("12345678"));  // 8 ASCII = 2 token
+    history.push_back(AssistantText("你好"));  // 2 码点 = 3 token
+    CHECK(agent::EstimateHistoryTokens(history) == 5);
+}
+
+TEST_CASE("TrimHistory: TrimReport 报告丢轮与截结果,不丢时全默认假") {
+    // 不超限:一条不动,报告全假。
+    {
+        std::vector<api::Message> history;
+        history.push_back(UserText("你好"));
+        agent::TrimReport report;
+        const auto trimmed = agent::TrimHistory(history, 100000, 3, &report);
+        CHECK(trimmed.size() == history.size());
+        CHECK_FALSE(report.trimmed_turns);
+        CHECK_FALSE(report.truncated_results);
+        CHECK(report.dropped_messages == 0);
+    }
+    // 超限丢轮:报告真、条数对得上(丢的 = 原长 - 新长,占位并进了保留首条)。
+    {
+        std::vector<api::Message> history;
+        AppendFullTurn(history, "turn0", 50);
+        for (int i = 1; i <= 5; ++i) {
+            AppendFullTurn(history, "mid" + std::to_string(i), 50);
+        }
+        AppendFullTurn(history, "recent1", 50);
+        const std::size_t full = agent::EstimateHistoryBytes(history);
+        agent::TrimReport report;
+        const auto trimmed = agent::TrimHistory(history, full / 2, 1, &report);
+        CHECK(report.trimmed_turns);
+        CHECK(report.dropped_messages > 0);
+        CHECK(report.dropped_messages == history.size() - trimmed.size());
+    }
+    // 超大工具结果截尾:truncated_results 真,轮没丢。
+    {
+        std::vector<api::Message> history;
+        history.push_back(UserText("输入"));
+        history.push_back(AssistantToolUse("tool_big", "t"));
+        history.push_back(UserToolResult("tool_big", std::string(50000, 'x')));
+        agent::TrimReport report;
+        const auto trimmed = agent::TrimHistory(history, 10000, 3, &report);
+        CHECK(report.truncated_results);
+        CHECK_FALSE(report.trimmed_turns);
+        CHECK(trimmed.size() == history.size());
+    }
 }

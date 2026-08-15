@@ -102,16 +102,18 @@ std::string StreamFooterInterruptText(bool plain);
 // measured_used_tokens 是 tracker 实测(最近一次请求的 usage 精确 token),
 // 是唯一该信的数,分两支:
 //   实测 > 0(至少发过一轮请求)——已用/剩余/压缩百分比一律用实测,不带 ~;
-//     系统提示、工具仍按字符数/3 估(带 ~,可单独算的确定部分),历史 =
+//     系统提示、工具仍按统一口径估(带 ~,可单独算的确定部分),历史 =
 //     max(0, 实测总量 - 系统 - 工具)反推(不带 ~,行尾注"=实测总量−系统−
 //     工具"),三分项之和恒等于实测总量;已用行尾标"(实测)"。
-//   实测 == 0(如刚启动)——三项全用字符估(字符数/3),整体带 ~,末行注明
+//   实测 == 0(如刚启动)——三项全用统一口径估,整体带 ~,末行注明
 //     "尚无实测,启动估算"。
+// 前三个参数是 token 估算值(统一口径,agent::EstimateUtf8Tokens),
+// 不是字符数——/3 与 /2 两把旧尺已并轨。
 // cache_read_tokens > 0 时对话历史行尾括注缓存命中量。window_tokens 为 0
 // 不除零,百分比一律 0;占比超 100% 截断(条形打满、百分比钉在 100)。数字
 // 全走 FormatTokenCount。返回逐行文本(行内不带换行符),打印由调用方管。
-std::vector<std::string> FormatContextBreakdown(std::size_t sys_chars, std::size_t tools_chars,
-                                                 std::size_t history_chars, std::int64_t cache_read_tokens,
+std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens, std::size_t tools_tokens,
+                                                 std::size_t history_tokens_est, std::int64_t cache_read_tokens,
                                                  std::size_t window_tokens, std::size_t measured_used_tokens,
                                                  const Theme& theme, int bar_width = 16);
 
