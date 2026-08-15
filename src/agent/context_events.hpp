@@ -23,6 +23,7 @@
 #pragma once
 
 #include <cstddef>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -66,26 +67,28 @@ struct NormalizedEvent {
 std::vector<NormalizedEvent> BuildEventLedger(const std::vector<api::Message>& history);
 
 // ---------------------------------------------------------------------------
-// 无损结构压缩(只改工作视图)
+// 无损结构压缩(只改工作视图)——"首次定形,epoch 内不追改"
 // ---------------------------------------------------------------------------
 
 struct StructuralCompressionOptions {
-    // 超过这个字节数的冷区工具结果,正文换成 artifact 引用(头尾预览)。
+    // 超过这个字节数的工具结果,首次进请求视图就换成 artifact 引用(头尾
+    // 预览)——要么首次就预览,要么这个 epoch 一直全文,不能半路变脸
+    // (半路变脸就是追改已发前缀,前缀缓存守恒单第六期)。
     std::size_t long_result_bytes = 8192;
     // 换 artifact 引用时保留的头/尾预览字节数。
     std::size_t preview_bytes = 256;
     // 短于这个字节数的结果不做去重/外置——换引用的标注本身就不止这几个
     // 字节,压了反而更长。
     std::size_t min_compressible_bytes = 512;
-    // 热区保护:最后一条用户文本输入(含)之后的消息不碰——那是模型正
-    // 盯着看的最近上下文。true = 按这个规矩保护(默认)。
+    // 旧字段,已由"首次定形"规则取代(不再有热区豁免:热时全文、冷后换
+    // 预览正是追改来源)。保留字段只为配置兼容,解析照收、行为不再看它。
     bool protect_hot_zone = true;
 };
 
 struct StructuralCompressionStats {
     std::size_t duplicate_groups = 0;          // 精确重复组数(同键同 hash)
     std::size_t duplicate_saved_bytes = 0;     // 去重省下的字节数
-    std::size_t superseded_observations = 0;   // 被新版本覆盖的旧文件读取数
+    std::size_t superseded_observations = 0;   // 同键新版出现(旧版不追改,只记数)
     std::size_t superseded_saved_bytes = 0;
     std::size_t offloaded_results = 0;         // 长结果换成 artifact 引用数
     std::size_t offloaded_saved_bytes = 0;
@@ -96,12 +99,43 @@ struct StructuralCompressionStats {
     }
 };
 
+// 一枚 tool result 的"首次定形"决策。决策在一枚结果第一次进入请求视图时
+// 做出,此后本 epoch 内不再改——追改已发前缀就是断缓存,老账递给模型后
+// 不得涂改(agent/prefix.hpp 的追加律)。
+enum class ResultViewKind {
+    Full,          // 原文全文(短结果的默认归宿)
+    Artifact,      // 超长,首次即换成 artifact 引用(头尾预览)
+    DuplicateRef,  // 同键同 hash 的后来者,自述"与事件 eN 相同"
+    NewVersion,    // 同键不同 hash 的新版本,自述"替代事件 eN",原文照发
+};
+
+struct ResultViewDecision {
+    ResultViewKind kind = ResultViewKind::Full;
+    std::string ref_event_id;   // DuplicateRef/NewVersion 指到的那枚事件
+    std::size_t seen_count = 1; // DuplicateRef:同键同 hash 累计出现次数
+};
+
+// 决策台账:tool_use_id -> 首次定形的决策。AgentLoop 每个 epoch 持一份
+// (ReplaceHistory/compact 开新 epoch 时清空);不带记忆的调用(单测、
+// /compact --dry-run 的"若现在从头压"估算)现场建一份新的即可。
+struct ResultViewMemo {
+    std::map<std::string, ResultViewDecision> decisions;
+};
+
 // 结构压缩:返回发给模型的工作视图。原 history 不动、消息条数不变、块序不
-// 变,只把冷区里可收的 tool_result.content 换成:
-//   - 精确重复:"[已收敛:与 e12 相同(read_file src/a.cpp),累计出现 3 次]"
-//   - 被覆盖:"[已收敛:此版本其后已改版,最新读取见 e45;头部预览…]"
-//   - 超长:  "[artifact e123 · sha=... · 12345 字节 · 头部预览… 尾部预览…]"
-// stats 填实际回收量;/compact --dry-run 与观测直接读它。
+// 变;每枚 tool_result 按首次定形的决策渲染:
+//   - 精确重复:"[已收敛:与事件 e12 的结果完全相同(read_file),累计出现 3 次;全文在会话存档]"
+//   - 新版本:  "[此读取替代事件 e7 的旧版本]\n" + 原文(超长则 artifact)
+//   - 超长:    "[artifact e123 · sha=... · 12345 字节 · 头部预览… 尾部预览…]"
+// 硬规矩(前缀缓存守恒单第六期):后来者只自述,绝不回头改早先事件的
+// 表示——e7 不补 superseded,重复不拆第一份。stats 只记本次新做的决策
+// (memo 命中的旧决策不再计)。
+std::vector<api::Message> CompressWorkingView(const std::vector<api::Message>& history,
+                                              const StructuralCompressionOptions& options,
+                                              StructuralCompressionStats& stats, ResultViewMemo& memo);
+
+// 便捷重载:现场建一份新 memo,等于"若现在从头定形"的一次性视图
+// (/compact --dry-run 的估算、单测用)。
 std::vector<api::Message> CompressWorkingView(const std::vector<api::Message>& history,
                                               const StructuralCompressionOptions& options,
                                               StructuralCompressionStats& stats);

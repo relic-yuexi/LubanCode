@@ -142,133 +142,168 @@ std::vector<NormalizedEvent> BuildEventLedger(const std::vector<api::Message>& h
     return events;
 }
 
+// 按首次定形的决策渲染一枚结果的视图正文。
+std::string RenderResultView(const NormalizedEvent& event, const ResultViewDecision& decision,
+                             const StructuralCompressionOptions& options) {
+    switch (decision.kind) {
+        case ResultViewKind::Full:
+            return event.result_content;
+        case ResultViewKind::Artifact: {
+            const std::size_t head = options.preview_bytes < event.result_content.size()
+                                         ? options.preview_bytes
+                                         : event.result_content.size();
+            const std::size_t tail_begin = event.result_content.size() > options.preview_bytes
+                                               ? event.result_content.size() - options.preview_bytes
+                                               : 0;
+            return "[artifact " + event.id + " · sha=" + event.content_hash + " · " +
+                   std::to_string(event.result_content.size()) + " 字节 · 头部:\n" +
+                   event.result_content.substr(0, head) + "\n…尾部:\n" + event.result_content.substr(tail_begin) +
+                   "\n全文在会话存档,可用 /export 查看]";
+        }
+        case ResultViewKind::DuplicateRef:
+            return "[已收敛:与事件 " + decision.ref_event_id + " 的结果完全相同(" + event.tool_name +
+                   "),累计出现 " + std::to_string(decision.seen_count) + " 次;全文在会话存档]";
+        case ResultViewKind::NewVersion: {
+            // 新版本自述"替代 eN",原文照发(超长再折 artifact);绝不回头
+            // 给 eN 补 superseded——那枚事件的表示在它首次进视图时已定形。
+            if (event.result_content.size() > options.long_result_bytes) {
+                ResultViewDecision artifact;
+                artifact.kind = ResultViewKind::Artifact;
+                return "[此读取替代事件 " + decision.ref_event_id + " 的旧版本]\n" +
+                       RenderResultView(event, artifact, options);
+            }
+            return "[此读取替代事件 " + decision.ref_event_id + " 的旧版本]\n" + event.result_content;
+        }
+    }
+    return event.result_content;
+}
+
 std::vector<api::Message> CompressWorkingView(const std::vector<api::Message>& history,
                                               const StructuralCompressionOptions& options,
                                               StructuralCompressionStats& stats) {
+    ResultViewMemo fresh_memo;
+    return CompressWorkingView(history, options, stats, fresh_memo);
+}
+
+std::vector<api::Message> CompressWorkingView(const std::vector<api::Message>& history,
+                                              const StructuralCompressionOptions& options,
+                                              StructuralCompressionStats& stats, ResultViewMemo& memo) {
     stats = StructuralCompressionStats{};
     const std::vector<NormalizedEvent> ledger = BuildEventLedger(history);
     stats.events_total = ledger.size();
 
-    const std::size_t hot_start = options.protect_hot_zone ? HotZoneStartIndex(history)
-                                                                    : history.size();
-
-    // 决策账(只对冷区、只对带键的只读工具):
-    //   dedup_state[key] = {first_kept_id, hash, count}——同键同 hash 只留
-    //   第一份正文(它必须在冷区;热区本来就不动),后来者换引用。
-    //   版本账:同键不同 hash = 文件改版,旧版(冷区)标 superseded。
+    // 键的活账(判定"同键第几遍/新版本"用,原文 hash 口径,不受 memo 影响):
+    //   key_states[key] = {kept_event_id, kept_hash, seen_count}
+    //   kept 是同键头一份(它首次进视图时已定形,后来者只自述,不改它)。
     struct KeyState {
-        std::string kept_event_id;   // 保留正文的那枚事件
-        std::string kept_hash;       // 它的内容 hash
-        std::size_t seen_count = 1;  // 同键同 hash 累计出现次数
-        std::string latest_event_id; // 同键最新一枚事件的 id(不论 hash)
-        std::string latest_hash;
+        std::string kept_event_id;
+        std::string kept_hash;
+        std::size_t seen_count = 1;
     };
     std::map<std::string, KeyState> key_states;
 
-    // 重写计划:message_index -> tool_use_id -> 替换正文。
-    std::map<std::pair<std::size_t, std::string>, std::string> rewrites;
+    // 渲染账:tool_use_id -> 视图正文。memo 命中的旧决策直接照抄;新事件
+    // 现场定形并写进 memo——这份决策在本 epoch 内从此钉死。
+    std::map<std::string, std::string> rendered;
 
     for (const auto& event : ledger) {
-        // 键的记账不管冷热都做(热区出现也计入"看过几遍"),但只对冷区落
-        // 重写。
-        const bool cold = event.message_index < hot_start;
-        if (!event.dedup_key.empty()) {
+        if (event.result_message_index == static_cast<std::size_t>(-1)) {
+            continue;  // 没配上结果的孤儿 tool_use,不动
+        }
+        // memo 命中:首次定形过的决策原样重放,stats 不再计——"追改"这条路
+        // 从根上堵死。
+        if (auto pinned = memo.decisions.find(event.tool_use_id); pinned != memo.decisions.end()) {
+            rendered[event.tool_use_id] = RenderResultView(event, pinned->second, options);
+            // 键账照记(后面的事件要靠它判断自己是第几遍/新版本)。
+            if (!event.dedup_key.empty()) {
+                auto& state = key_states[event.dedup_key];
+                if (state.kept_event_id.empty()) {
+                    state.kept_event_id = event.id;
+                    state.kept_hash = event.content_hash;
+                } else if (event.content_hash == state.kept_hash) {
+                    state.seen_count += 1;
+                } else {
+                    // 新版本成了该键的最新事实:后来的同 hash 重复指它。
+                    state.kept_event_id = event.id;
+                    state.kept_hash = event.content_hash;
+                    state.seen_count = 1;
+                }
+            }
+            continue;
+        }
+
+        // 首次定形。副作用工具(空键)永远全文——判重不给它们开门。
+        ResultViewDecision decision;
+        if (event.dedup_key.empty()) {
+            decision.kind = ResultViewKind::Full;
+        } else {
             auto& state = key_states[event.dedup_key];
             if (state.kept_event_id.empty()) {
+                // 同键头一份:短则全文钉死,超长首次即 artifact——要么首次
+                // 就预览,要么这个 epoch 一直全文,不能半路变脸。
+                decision.kind = event.result_content.size() > options.long_result_bytes
+                                    ? ResultViewKind::Artifact
+                                    : ResultViewKind::Full;
                 state.kept_event_id = event.id;
                 state.kept_hash = event.content_hash;
-                state.latest_event_id = event.id;
-                state.latest_hash = event.content_hash;
-                continue;
-            }
-            state.latest_event_id = event.id;
-            state.latest_hash = event.content_hash;
-            if (event.content_hash == state.kept_hash) {
+            } else if (event.content_hash == state.kept_hash) {
+                // 精确重复:后来者自述指回 kept 那枚;太短不值得换标注。
                 state.seen_count += 1;
-                if (cold && event.result_content.size() >= options.min_compressible_bytes &&
-                    event.result_message_index != static_cast<std::size_t>(-1)) {
-                    const std::string stub = "[已收敛:与事件 " + state.kept_event_id + " 的结果完全相同(" +
-                                             event.tool_name + "),累计出现 " + std::to_string(state.seen_count) +
-                                             " 次;全文在会话存档]";
-                    stats.duplicate_groups += 1;
-                    stats.duplicate_saved_bytes += event.result_content.size() - stub.size();
-                    rewrites[{event.result_message_index, event.tool_use_id}] = stub;
-                }
+                decision.kind = event.result_content.size() >= options.min_compressible_bytes
+                                    ? ResultViewKind::DuplicateRef
+                                    : ResultViewKind::Full;
+                decision.ref_event_id = state.kept_event_id;
+                decision.seen_count = state.seen_count;
             } else {
-                // 同键不同 hash:文件改版,这是新版本的一枚读取。它自己保
-                // 正文(新版本是当下事实;超长的走第二遍的 artifact 外置)。
-                // 旧版本的 superseded 标记也在第二遍统一落——那里能反查
-                // "后面存在同键不同 hash"。
+                // 文件改版:新版本原文照发(自述替代旧事件),键账换新事实。
+                decision.kind = event.result_content.size() >= options.min_compressible_bytes
+                                    ? ResultViewKind::NewVersion
+                                    : ResultViewKind::Full;
+                decision.ref_event_id = state.kept_event_id;
                 state.kept_event_id = event.id;
                 state.kept_hash = event.content_hash;
                 state.seen_count = 1;
             }
         }
-    }
 
-    // 第二遍:supersession 与 artifact 外置。supersession 需要"同键的后一
-    // 枚不同 hash 事件"的存在;重扫一遍账,把每个"后面存在同键不同 hash"
-    // 的冷区事件标掉。
-    for (std::size_t idx = 0; idx < ledger.size(); ++idx) {
-        const NormalizedEvent& event = ledger[idx];
-        if (event.dedup_key.empty() || event.message_index >= hot_start ||
-            event.result_message_index == static_cast<std::size_t>(-1)) {
-            continue;
-        }
-        if (event.result_content.size() < options.min_compressible_bytes) {
-            continue;
-        }
-        if (rewrites.count({event.message_index, event.tool_use_id}) != 0) {
-            continue;  // 已经是精确重复的引用,不再叠加
-        }
-        bool superseded = false;
-        std::string newer_id;
-        for (std::size_t j = idx + 1; j < ledger.size(); ++j) {
-            if (ledger[j].dedup_key == event.dedup_key && ledger[j].content_hash != event.content_hash) {
-                superseded = true;
-                newer_id = ledger[j].id;
+        // stats:只记本次新做的决策(不含 memo 命中的旧账)。
+        const std::string view_text = RenderResultView(event, decision, options);
+        switch (decision.kind) {
+            case ResultViewKind::DuplicateRef:
+                stats.duplicate_groups += 1;
+                stats.duplicate_saved_bytes += event.result_content.size() > view_text.size()
+                                                   ? event.result_content.size() - view_text.size()
+                                                   : 0;
                 break;
-            }
+            case ResultViewKind::NewVersion:
+                if (decision.ref_event_id != event.id) {
+                    stats.superseded_observations += 1;
+                }
+                break;
+            case ResultViewKind::Artifact:
+                stats.offloaded_results += 1;
+                stats.offloaded_saved_bytes += event.result_content.size() > view_text.size()
+                                                   ? event.result_content.size() - view_text.size()
+                                                   : 0;
+                break;
+            case ResultViewKind::Full:
+                break;
         }
-        const std::size_t head = options.preview_bytes < event.result_content.size() ? options.preview_bytes
-                                                                                     : event.result_content.size();
-        if (superseded) {
-            const std::string stub = event.result_content.substr(0, head) +
-                                     "\n[已收敛:此版本其后已改版,最新读取见事件 " + newer_id +
-                                     ";头部预览止于此,全文在会话存档]";
-            stats.superseded_observations += 1;
-            stats.superseded_saved_bytes += event.result_content.size() - stub.size();
-            rewrites[{event.result_message_index, event.tool_use_id}] = stub;
-            continue;
-        }
-        if (event.result_content.size() > options.long_result_bytes) {
-            const std::string tail_begin = event.result_content.substr(
-                event.result_content.size() > options.preview_bytes
-                    ? event.result_content.size() - options.preview_bytes
-                    : 0);
-            const std::string stub = "[artifact " + event.id + " · sha=" + event.content_hash + " · " +
-                                     std::to_string(event.result_content.size()) +
-                                     " 字节 · 头部:\n" + event.result_content.substr(0, head) +
-                                     "\n…尾部:\n" + tail_begin + "\n全文在会话存档,可用 /export 查看]";
-            stats.offloaded_results += 1;
-            stats.offloaded_saved_bytes += event.result_content.size() - stub.size();
-            rewrites[{event.result_message_index, event.tool_use_id}] = stub;
-        }
+
+        memo.decisions[event.tool_use_id] = decision;
+        rendered[event.tool_use_id] = view_text;
     }
 
     // 落视图:只重写命中的 tool_result.content,消息条数与块序不动。
     std::vector<api::Message> view = history;
-    for (const auto& [location, stub] : rewrites) {
-        const auto [message_index, tool_use_id] = location;
-        if (message_index >= view.size()) {
-            continue;
-        }
-        for (auto& block : view[message_index].content) {
-            if (std::holds_alternative<api::ToolResultBlock>(block)) {
-                auto& result = std::get<api::ToolResultBlock>(block);
-                if (result.tool_use_id == tool_use_id) {
-                    result.content = stub;
-                }
+    for (auto& message : view) {
+        for (auto& block : message.content) {
+            if (!std::holds_alternative<api::ToolResultBlock>(block)) {
+                continue;
+            }
+            auto& result = std::get<api::ToolResultBlock>(block);
+            if (auto it = rendered.find(result.tool_use_id); it != rendered.end()) {
+                result.content = it->second;
             }
         }
     }

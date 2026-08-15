@@ -230,17 +230,47 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
             on_context_pressure_(pressure);
         }
 
-        // 无损结构压缩(第二期):只改发给模型的视图——冷区里重复的只读
-        // 工具结果换引用、被新版本覆盖的旧读取标 superseded、超长结果换
-        // artifact 引用(头尾预览)。活历史与 session JSONL 一字不动,
-        // tool use/result 配对天然不破(只重写 result 的 content 字符串)。
-        // 压完的视图更小,后面 TrimHistory 的字符安全网也更少真开刀。
-        const std::vector<api::Message>& view_source =
-            structural_compression_enabled_ ? CompressWorkingView(history_, structural_options_, structural_stats_)
-                                            : history_;
+        // 无损结构压缩(第六期"首次定形"):只改发给模型的视图——每枚
+        // tool result 第一次进请求视图时定形(短则全文、超长首次即 artifact
+        // 预览、重复自述指回、新版本自述替代),决策台账 epoch 内钉死,绝不
+        // 追改已经发过的表示。活历史与 session JSONL 一字不动,tool use/
+        // result 配对天然不破。压完的视图更小,后面字符安全网也更少真开刀。
+        std::vector<api::Message> view_source;
+        if (structural_compression_enabled_) {
+            view_source =
+                CompressWorkingView(history_, structural_options_, structural_stats_, result_view_memo_);
+        } else {
+            view_source = history_;
+        }
+
+        // 字符安全网 + sticky 视图:还没动手裁过,就按老规矩裁;真动手裁了
+        // (丢轮/截结果),把裁过的视图钉住,后续只往尾部追加新消息——不
+        // 再每请求重算"第一轮 + 最近 N 轮"让窗口一路滑(窗口滑就是追改
+        // 已发前缀)。全量 JSONL 照旧保留,sticky 只是模型眼下那本账。
         TrimReport trim_report;
-        request.messages =
-            TrimHistory(view_source, max_context_chars_, kDefaultKeepRecentTurns, &trim_report);
+        if (sticky_view_.has_value() && view_source.size() >= sticky_base_history_size_) {
+            std::vector<api::Message> pinned = *sticky_view_;
+            pinned.insert(pinned.end(), view_source.begin() + static_cast<std::ptrdiff_t>(sticky_base_history_size_),
+                          view_source.end());
+            if (EstimateHistoryBytes(pinned) > max_context_chars_) {
+                // 钉住的视图也装不下了(长会话总会到这一步):重裁一次,
+                // 换一副新形状并重新钉住——这是一次明确的 epoch break,
+                // 下面 trim_report 会把它记上(hard_trim)。
+                pinned = TrimHistory(std::move(pinned), max_context_chars_, kDefaultKeepRecentTurns, &trim_report);
+                sticky_view_ = pinned;
+                sticky_base_history_size_ = view_source.size();
+            }
+            request.messages = std::move(pinned);
+        } else {
+            std::vector<api::Message> trimmed =
+                TrimHistory(view_source, max_context_chars_, kDefaultKeepRecentTurns, &trim_report);
+            if (trim_report.trimmed_turns || trim_report.truncated_results) {
+                // 第一次真动手裁:钉住,开新 epoch 的账由下面的 hard_trim 记。
+                sticky_view_ = trimmed;
+                sticky_base_history_size_ = view_source.size();
+            }
+            request.messages = std::move(trimmed);
+        }
         request.max_tokens = max_tokens_;
         // 有损硬裁发生了(丢轮/截结果),显式通报——静默降级会让用户以为语
         // 义压缩已成功,模型其实已经看不到那段原文。

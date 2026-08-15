@@ -230,6 +230,11 @@ public:
         ++cache_epoch_;
         pending_epoch_break_reason_ = "history_compacted";
         last_prefix_.reset();
+        // 新 epoch,压缩决策与 sticky 视图一并翻篇:compact 是唯一常规的
+        // 全量重写点,重写后的视图从头定形(前缀缓存守恒单第六期)。
+        result_view_memo_.decisions.clear();
+        sticky_view_.reset();
+        sticky_base_history_size_ = 0;
     }
 
     // 当前 cache epoch(前缀记账,agent/prefix.hpp):1 起,每次断前缀 +1。
@@ -277,6 +282,15 @@ private:
     std::optional<PrefixFingerprint> last_prefix_;
     int cache_epoch_ = 1;
     std::string pending_epoch_break_reason_;
+    // 结构压缩"首次定形"的决策台账(tool_use_id -> 决策),epoch 内跨请求
+    // 钉死;ReplaceHistory(开新 epoch)时清空(agent/context_events.hpp)。
+    ResultViewMemo result_view_memo_;
+    // hard trim 的 sticky 工作视图:第一次真动手裁(丢轮/截结果)后把裁过
+    // 的视图钉住,后续请求只往它尾部追加新消息——不再每请求拿全量 history
+    // 重算"第一轮 + 最近 N 轮",裁剪窗口一路滑。sticky_base_history_size_
+    // 记钉住那一刻全量视图的长度,追加时按它切尾。ReplaceHistory 时翻篇。
+    std::optional<std::vector<api::Message>> sticky_view_;
+    std::size_t sticky_base_history_size_ = 0;
     OnContextPressure on_context_pressure_;
     std::function<bool(const tools::Tool&)> tool_filter_;  // tool_search:空 = 不过滤,全量直挂
     InboxPoll inbox_;  // 跨会话收件点:空 = 没有来信要收,行为跟从前一致

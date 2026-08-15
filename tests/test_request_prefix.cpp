@@ -384,12 +384,12 @@ TEST_CASE("前缀: 工具表中途成批挂载只断一次,断因 tools_changed,
 }
 
 // ---------------------------------------------------------------------------
-// 断裂源四(钉案):结构压缩的"由热转冷"追改旧 tool result——上一轮热区发
-// 全文,下一条外层用户消息一到,同一枚结果忽然换成 artifact 预览。
-// (第六期"首次定形,epoch 内不追改"落地后翻绿。)
+// 断裂源四(已修):结构压缩改成"首次定形,epoch 内不追改"——长结果首次进
+// 视图就是 artifact 预览,此后(含由热转冷)一个字节不变;重复与新版只
+// 自述,绝不回头改早先事件。
 // ---------------------------------------------------------------------------
 
-TEST_CASE("前缀[钉案]: 长工具结果由热转冷后现行实现会追改旧消息(第六期首次定形后翻绿)") {
+TEST_CASE("前缀: 长工具结果首次即预览,由热转冷不再追改旧消息") {
     CaptureBackend backend;
     const std::string big(9000, 'x');  // 超过 long_result_bytes(8192)
     backend.scripts = {
@@ -409,25 +409,29 @@ TEST_CASE("前缀[钉案]: 长工具结果由热转冷后现行实现会追改�
     REQUIRE(loop.Run("追问", callbacks).has_value());
     REQUIRE(backend.captured.size() == 3);
 
-    // 轮内:工具结果刚落地,在热区,两份请求逐字节追加。
-    CHECK(IsAppendOnlySuccessor(backend.captured[0], backend.captured[1]));
+    // 首次进视图(P2,工具结果刚攒完的那份请求)就是 artifact 预览——
+    // 要么首次就预览,要么这个 epoch 一直全文,不能半路变脸。
+    const auto* first_result =
+        std::get_if<api::ToolResultBlock>(&backend.captured[1].messages[2].content[0]);
+    REQUIRE(first_result != nullptr);
+    CHECK(first_result->content.find("[artifact") == 0);
+    CHECK(first_result->content.size() < big.size());
 
-    // 跨轮:上一轮跌进冷区,同一枚 read_file 结果被换成 artifact 预览——
-    // 旧消息被追改,断因 old_message_changed,位置指到那条消息。
-    const agent::PrefixDiff diff = agent::DiffRequests(backend.captured[1], backend.captured[2]);
-    CHECK_FALSE(diff.append_only());
-    CHECK(diff.break_reason() == "old_message_changed");
-    // 台账点名:第三份请求(轮 2 的第一份,step 0)记断。
+    // 轮内、跨轮(由热转冷)都逐字节追加——第六期前这里会追改旧消息。
+    CHECK(IsAppendOnlySuccessor(backend.captured[0], backend.captured[1]));
+    CHECK(IsAppendOnlySuccessor(backend.captured[1], backend.captured[2]));
+
     REQUIRE(reports.size() == 3);
-    CHECK(reports[2].epoch_break_reason == "old_message_changed");
+    CHECK(reports[2].epoch_break_reason.empty());
+    CHECK(reports[2].prefix_append_only);
 }
 
 // ---------------------------------------------------------------------------
-// 断裂源五(钉案):hard trim 的裁剪窗口随新回合往后滑,每份请求都可能换
-// 一副裁剪形状。(第六期 sticky view 落地后翻绿。)
+// 断裂源五(已修):hard trim 第一次真动手裁之后,裁过的视图钉住(sticky
+// view),后续只往尾部追加——裁剪窗口不再随新回合一路滑。
 // ---------------------------------------------------------------------------
 
-TEST_CASE("前缀[钉案]: hard trim 裁剪窗口现行实现逐请求滑动(第六期 sticky view 后翻绿)") {
+TEST_CASE("前缀: hard trim 后 sticky view 钉住,后续请求不再滑窗") {
     CaptureBackend backend;
     backend.scripts = {
         TextScript("答一"), TextScript("答二"), TextScript("答三"),
@@ -435,10 +439,11 @@ TEST_CASE("前缀[钉案]: hard trim 裁剪窗口现行实现逐请求滑动(第
         TextScript("答七"),
     };
     tools::ToolRegistry registry;
-    // max_context_chars 压小:7 轮每轮 ~1000 字符,第 5 轮起 TrimHistory
-    // 开始丢中间轮(留第一轮 + 最近 3 轮)。
+    // 7 轮每轮 ~1000 字符;上限 6000:第 6 轮起 TrimHistory 开始丢中间轮
+    // (留第一轮 + 最近 3 轮,约 4000 字符,给后续追加留了余量——余量内
+    // sticky 不再动手,余量耗尽再裁一次是新的明确 epoch break)。
     agent::AgentLoop loop(backend, registry, "test-model", "system prompt", /*max_tokens=*/4096,
-                          /*max_steps_per_turn=*/0, /*max_context_chars=*/4200);
+                          /*max_steps_per_turn=*/0, /*max_context_chars=*/6000);
     agent::Callbacks callbacks;
     std::vector<api::UsageReport> reports;
     callbacks.on_usage = [&](const api::UsageReport& report) { reports.push_back(report); };
@@ -449,7 +454,7 @@ TEST_CASE("前缀[钉案]: hard trim 裁剪窗口现行实现逐请求滑动(第
     }
     REQUIRE(backend.captured.size() == 7);
 
-    // 找到第一份真正动手裁的请求:从它起,再发一份(下一轮)看窗口滑不滑。
+    // 找到第一份真正动手裁的请求(第 6 轮):hard_trim 记账。
     std::size_t first_trimmed = 0;
     bool saw_trim_reason = false;
     for (std::size_t i = 0; i < reports.size(); ++i) {
@@ -460,10 +465,21 @@ TEST_CASE("前缀[钉案]: hard trim 裁剪窗口现行实现逐请求滑动(第
         }
     }
     REQUIRE(saw_trim_reason);
-    // 钉案:trim 之后下一份请求的视图又换了形状(窗口滑动),旧消息又被追改。
+    CHECK(first_trimmed == 5);  // 第 6 轮(0-based 下标 5)
+    CHECK(reports[first_trimmed].cache_epoch == 2);
+
+    // trim 前的追加律照旧(trim 那次除外)。
+    for (std::size_t i = 1; i < first_trimmed; ++i) {
+        CHECK(IsAppendOnlySuccessor(backend.captured[i - 1], backend.captured[i]));
+    }
+
+    // trim 之后:视图钉住,下一轮只是尾部追加——旧消息不再被追改、窗口
+    // 不再滑。全量 JSONL 仍照旧保留,sticky 只是模型眼下那本账。
     REQUIRE(first_trimmed + 1 < backend.captured.size());
+    CHECK(IsAppendOnlySuccessor(backend.captured[first_trimmed], backend.captured[first_trimmed + 1]));
     const agent::PrefixDiff diff =
         agent::DiffRequests(backend.captured[first_trimmed], backend.captured[first_trimmed + 1]);
-    CHECK_FALSE(diff.append_only());
-    CHECK(diff.old_message_changed);
+    CHECK(diff.appended_messages == 2);
+    CHECK(reports[first_trimmed + 1].epoch_break_reason.empty());
+    CHECK(reports[first_trimmed + 1].prefix_append_only);
 }
