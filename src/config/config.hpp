@@ -95,6 +95,11 @@ struct MemoryConfig {
     bool enabled = false;
     bool use = true;
     bool generate = true;
+    // 学习档位(0.30.x 候审箱):off 不提候选不写入;review 提候选、用户
+    // 审过才入库(默认);auto 自动写入,只认全局配置显式授权——项目配置
+    // 只能收窄(off/review),不能替用户升到 auto。老 generate=false 等价
+    // 于 learn=off,合并时一并算进去。
+    std::string learn = "review";
     std::size_t max_index_bytes = kDefaultMemoryMaxIndexBytes;
     std::size_t max_retrieval_bytes = kDefaultMemoryMaxRetrievalBytes;
     std::size_t max_results = kDefaultMemoryMaxResults;
@@ -105,6 +110,7 @@ struct MemoryFileConfig {
     std::optional<bool> enabled;
     std::optional<bool> use;
     std::optional<bool> generate;
+    std::optional<std::string> learn;
     std::optional<std::size_t> max_index_bytes;
     std::optional<std::size_t> max_retrieval_bytes;
     std::optional<std::size_t> max_results;

@@ -94,8 +94,11 @@ add_executable(lubancode_tests
   test_cli_options.cpp
   # 领域命令 handler 的状态账(/clear /title /send /peerperm)。
   test_app_commands.cpp
+  # memory 回合抽取(分型/转写/JSON 解析,纯函数)。
+  test_memory_extract.cpp
   ${CMAKE_SOURCE_DIR}/src/app/cli_options.cpp
   ${CMAKE_SOURCE_DIR}/src/app/backend_stack.cpp
+  ${CMAKE_SOURCE_DIR}/src/app/memory_extract.cpp
   ${CMAKE_SOURCE_DIR}/src/app/tool_runtime.cpp
   ${CMAKE_SOURCE_DIR}/src/app/turn_runner.cpp
   ${CMAKE_SOURCE_DIR}/src/app/commands/prompt_commands.cpp

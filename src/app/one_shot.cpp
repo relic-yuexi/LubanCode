@@ -152,7 +152,9 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
             std::filesystem::current_path(), lubancode::tools::Utf8ToPath(*home_lubancode));
         if (identity.has_value()) {
             auto options = MemoryOptionsFromConfig(config.memory);
-            options.generate = false;
+            // 单发只可召回不可写(规格授权节):学习档压到 off,写入闸关死。
+            options.learn = lubancode::memory::LearnMode::Off;
+            options.learn_ceiling = lubancode::memory::LearnMode::Off;
             project_memory = std::make_shared<lubancode::memory::ProjectMemory>(
                 std::move(*identity), lubancode::tools::Utf8ToPath(*home_lubancode), options);
         }

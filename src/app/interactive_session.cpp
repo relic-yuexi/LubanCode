@@ -89,6 +89,7 @@
 #include "lsp/manager.hpp"
 #include "memory/memory_tool.hpp"
 #include "memory/project_memory.hpp"
+#include "app/memory_extract.hpp"
 #include "mcp/client.hpp"
 #include "mcp/mcp_tool.hpp"
 #include "tools/agent_tool.hpp"
@@ -220,6 +221,9 @@ private:
     void EnsureMemoryTool();
     void PrintMemoryUsage() const;
     void HandleMemoryCommand(const std::string& raw_args);
+    // 回合收尾的记忆抽取:learn 档位不在 off 才跑;失败只打一行,不影响
+    // 主会话(用户基调 1/3:分型总结 + 检索扩展词)。
+    void ExtractTurnMemory(const std::string& user_text, std::size_t history_before);
     void SyncWorktreeDirectory();
     CommandFlow ProcessLine(const std::string& content);
     CommandFlow DispatchSlashCommand(const lubancode::cli::ParsedSlashCommand& parsed);
@@ -1158,9 +1162,11 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
                   << trf("cmd.memory.status", toggle_word(status.enabled), toggle_word(status.use),
                           toggle_word(status.generate))
                   << "\n"
+                  << trf("cmd.memory.learn_status", status.learn) << "\n"
                   << trf("cmd.memory.project", status.project_key) << "\n"
                   << trf("cmd.memory.directory", PathToUtf8(status.memory_dir)) << "\n"
-                  << trf("cmd.memory.counts", status.entry_count, status.pending_jobs) << "\n";
+                  << trf("cmd.memory.counts", status.entry_count, status.pending_jobs) << "\n"
+                  << trf("cmd.memory.candidates", status.pending_candidates) << "\n";
         return;
     }
     if (action == "on" || action == "off") {
@@ -1176,7 +1182,7 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
                   << "\n";
         return;
     }
-    if (action == "use" || action == "learn") {
+    if (action == "use") {
         std::string value;
         words >> value;
         std::transform(value.begin(), value.end(), value.begin(),
@@ -1186,20 +1192,101 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
             return;
         }
         const bool enabled = value == "on";
-        // 同一道授权闸:全局没授权,子开关也开不了。
         if (enabled && !project_memory->global_allowed()) {
             std::cout << tr("cmd.memory.denied") << "\n";
             return;
         }
-        if (action == "use") {
-            project_memory->set_use(enabled);
-        } else {
-            project_memory->set_generate(enabled);
-            if (enabled) EnsureMemoryTool();
+        project_memory->set_use(enabled);
+        std::cout << trf("cmd.memory.toggle", tr("cmd.memory.retrieval"),
+                         enabled ? tr("cmd.memory.on") : tr("cmd.memory.off"))
+                  << "\n";
+        return;
+    }
+    if (action == "learn") {
+        std::string value;
+        words >> value;
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        // 兼容老写法:learn on = review,learn off = off。
+        if (value == "on") value = "review";
+        auto mode = lubancode::memory::ParseLearnMode(value);
+        if (!mode.has_value()) {
+            PrintMemoryUsage();
+            return;
         }
-        std::cout << trf("cmd.memory.toggle",
-                          action == "use" ? tr("cmd.memory.retrieval") : tr("cmd.memory.write"),
-                          enabled ? tr("cmd.memory.on") : tr("cmd.memory.off"))
+        const auto switched = project_memory->set_learn(*mode);
+        if (!switched.has_value()) {
+            // 全局未授权(auto 上限之外的降档仍允许),给出指引。
+            if (!project_memory->global_allowed()) {
+                std::cout << tr("cmd.memory.denied") << "\n";
+            } else {
+                std::cout << trf("cmd.memory.learn_denied", switched.error()) << "\n";
+            }
+            return;
+        }
+        EnsureMemoryTool();
+        std::cout << trf("cmd.memory.learn_set", lubancode::memory::LearnModeName(*mode)) << "\n";
+        return;
+    }
+    if (action == "review") {
+        const auto candidates = project_memory->ListCandidates();
+        if (candidates.empty()) {
+            std::cout << tr("cmd.memory.review.empty") << "\n";
+            return;
+        }
+        std::cout << tr("cmd.memory.review.header") << "\n";
+        for (const auto& candidate : candidates) {
+            std::cout << "- " << candidate.id << " [" << lubancode::memory::MemoryKindName(candidate.kind)
+                      << "/" << candidate.confidence << "] " << candidate.title;
+            if (!candidate.summary.empty() && candidate.summary != candidate.title) {
+                std::cout << " - " << candidate.summary;
+            }
+            std::cout << "\n";
+        }
+        std::cout << tr("cmd.memory.review.hint") << "\n";
+        return;
+    }
+    if (action == "accept" || action == "reject") {
+        std::string id;
+        words >> id;
+        if (id.empty()) {
+            PrintMemoryUsage();
+            return;
+        }
+        std::string reason;
+        std::getline(words, reason);
+        reason = TrimAscii(std::move(reason));
+        if (action == "accept") {
+            const auto queued = project_memory->AcceptCandidate(id);
+            std::cout << (queued.has_value() ? trf("cmd.memory.queued", *queued)
+                                             : trf("cmd.memory.queue_failed", queued.error()))
+                      << "\n";
+        } else {
+            const auto rejected = project_memory->RejectCandidate(id, std::move(reason));
+            std::cout << (rejected.has_value() ? tr("cmd.memory.reject.done")
+                                               : trf("cmd.memory.queue_failed", rejected.error()))
+                      << "\n";
+        }
+        return;
+    }
+    if (action == "edit") {
+        std::string id;
+        words >> id;
+        std::string remainder;
+        std::getline(words, remainder);
+        remainder = TrimAscii(std::move(remainder));
+        if (id.empty() || remainder.empty()) {
+            PrintMemoryUsage();
+            return;
+        }
+        const std::size_t separator = remainder.find("::");
+        std::string title = TrimAscii(remainder.substr(0, separator));
+        std::string content = separator == std::string::npos
+                                  ? std::string()
+                                  : TrimAscii(remainder.substr(separator + 2));
+        const auto edited = project_memory->EditCandidate(id, title, content);
+        std::cout << (edited.has_value() ? tr("cmd.memory.edit.done")
+                                         : trf("cmd.memory.queue_failed", edited.error()))
                   << "\n";
         return;
     }
@@ -1584,13 +1671,103 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
             ? project_memory->BuildTurnContext(content, std::filesystem::current_path())
             : std::string();
     loop->SetTurnSystemSuffix(std::move(turn_suffix));
+    const std::size_t history_before = loop->History().size();
     RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
             config.hooks, spinner_enabled, transcript, todo_state(), &transcript_expanded,
             settings_local.allow_commands, settings_local.deny_commands, session_agent_tool(),
             recorder.has_value() ? &*recorder : nullptr);
     // 每轮结束(成功/出错/ESC 打断都算)把新增消息逐条追加落盘。
     PersistNewMessages();
+    // 回合收尾总结与候选抽取(learn off 时是空操作)。
+    ExtractTurnMemory(content, history_before);
     return CommandFlow::Continue;
+}
+
+// 回合收尾抽取:只看本轮增量,借当前主模型产严格 JSON;候选进待审区
+// (auto 档且证据齐的直写),检索扩展词留给下一轮召回。失败降级一行字,
+// 不影响主会话,也不重试。
+void InteractiveSession::ExtractTurnMemory(const std::string& user_text, std::size_t history_before) {
+    if (project_memory == nullptr || !project_memory->generate_enabled()) return;
+
+    const auto& history = loop->History();
+    if (history_before >= history.size()) return;
+    std::vector<api::Message> slice(history.begin() + static_cast<std::ptrdiff_t>(history_before),
+                                    history.end());
+
+    // 工具名清单喂给分型器;转写压缩后整段不超 24 KiB。
+    std::vector<std::string> tool_names;
+    for (const auto& message : slice) {
+        for (const auto& block : message.content) {
+            if (const auto* use = std::get_if<api::ToolUseBlock>(&block)) {
+                tool_names.push_back(use->name);
+            }
+        }
+    }
+    const std::string turn_transcript = BuildTurnTranscript(slice, 24 * 1024);
+    if (turn_transcript.empty()) return;
+
+    const std::string task_type = ClassifyTaskType(user_text, tool_names);
+    const std::string system_prompt = BuildExtractionSystemPrompt(prompts_dir, task_type);
+    if (system_prompt.empty()) return;
+
+    std::cout << theme.stats << trf("memory.extract.running", task_type) << theme.reset << "\n";
+    const auto extraction =
+        RunMemoryExtraction(real_backend, *current_model, system_prompt, turn_transcript, /*timeout_secs=*/45);
+    if (!extraction.has_value()) {
+        std::cout << theme.stats << trf("memory.extract.failed", extraction.error()) << theme.reset << "\n";
+        return;
+    }
+
+    // 检索扩展词:合并进 ProjectMemory,下一轮 BM25/词法查询用;learns off
+    // 或失败时不清旧值,自然退回纯词法。
+    std::vector<std::string> hints = extraction->retrieval_terms;
+    hints.reserve(hints.size() + extraction->candidates.size());
+    for (const auto& candidate : extraction->candidates) {
+        for (const auto& keyword : candidate.keywords) hints.push_back(keyword);
+    }
+    if (!hints.empty()) project_memory->SetRetrievalHints(std::move(hints));
+
+    std::size_t queued = 0;
+    std::size_t written = 0;
+    for (const auto& proposed : extraction->candidates) {
+        lubancode::memory::MemoryCandidate candidate;
+        auto kind = lubancode::memory::ParseMemoryKind(proposed.kind);
+        if (!kind.has_value()) continue;
+        candidate.kind = *kind;
+        candidate.title = proposed.title;
+        candidate.summary = proposed.summary;
+        candidate.content = proposed.content;
+        candidate.keywords = proposed.keywords;
+        candidate.paths = proposed.paths;
+        candidate.confidence = proposed.confidence;
+        candidate.task_type = task_type;
+
+        // auto 档直写闸:inferred 只进候选区;fact 须 verified 且带证据,
+        // 否则也落待审区让人把关(规格"inferred 只准进候选区")。
+        const bool auto_writable = project_memory->learn_mode() == lubancode::memory::LearnMode::Auto &&
+                                   candidate.confidence != "inferred" &&
+                                   !(candidate.kind == lubancode::memory::MemoryKind::Fact &&
+                                     (candidate.confidence != "verified" || candidate.paths.empty()));
+        if (auto_writable) {
+            lubancode::memory::SaveRequest request;
+            request.kind = candidate.kind;
+            request.title = candidate.title;
+            request.summary = candidate.summary;
+            request.content = candidate.content;
+            request.keywords = candidate.keywords;
+            request.paths = candidate.paths;
+            if (project_memory->EnqueueSave(request).has_value()) {
+                ++written;
+                continue;
+            }
+        }
+        if (project_memory->AddCandidate(std::move(candidate)).has_value()) {
+            ++queued;
+        }
+    }
+    if (queued + written > 0) {
+        std::cout << theme.stats << trf("memory.extract.done", queued, written) << theme.reset << "\n";
+    }
 }
 
 SessionCommandState InteractiveSession::MakeSessionCommandState() {

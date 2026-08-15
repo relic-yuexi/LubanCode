@@ -37,7 +37,9 @@ lubancode::memory::Options MemoryOptionsFromConfig(const lubancode::config::Memo
     options.global_allowed = config.enabled;
     options.enabled = config.enabled;
     options.use = config.use;
-    options.generate = config.generate;
+    // learn 档位与上限都来自合并后的配置;本场 set_learn 只能降到上限以内。
+    options.learn = lubancode::memory::ParseLearnMode(config.learn).value_or(lubancode::memory::LearnMode::Off);
+    options.learn_ceiling = options.learn;
     options.max_index_bytes = config.max_index_bytes;
     options.max_retrieval_bytes = config.max_retrieval_bytes;
     options.max_results = config.max_results;

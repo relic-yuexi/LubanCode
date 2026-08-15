@@ -892,6 +892,18 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
             return std::unexpected(result.error());
         if (auto result = parse_bool("generate", memory.generate); !result.has_value())
             return std::unexpected(result.error());
+        if (field.contains("learn")) {
+            if (!field["learn"].is_string()) {
+                return std::unexpected("配置文件 " + file_path_for_error +
+                                       " 里的 memory.learn 必须是字符串(off|review|auto)");
+            }
+            const std::string learn = field["learn"].get<std::string>();
+            if (learn != "off" && learn != "review" && learn != "auto") {
+                return std::unexpected("配置文件 " + file_path_for_error +
+                                       " 里的 memory.learn 只认 off、review 或 auto");
+            }
+            memory.learn = learn;
+        }
         if (auto result = parse_positive("max_index_bytes", memory.max_index_bytes); !result.has_value())
             return std::unexpected(result.error());
         if (auto result = parse_positive("max_retrieval_bytes", memory.max_retrieval_bytes); !result.has_value())
@@ -1393,28 +1405,54 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     }
 
     // ---- memory:默认关闭。只有用户主目录的全局配置能打开；受版本控制的
-    // 项目 config.json 只能在全局已打开之后收窄 use/generate/预算，或显式
-    // 关闭。陌生仓库不能替用户开启聊天提取。 ----
-    const auto apply_memory_fields = [](MemoryConfig& target, const MemoryFileConfig& source,
-                                        bool allow_enable) {
+    // 项目 config.json 只能在全局已打开之后收窄 use/generate/learn/预算，
+    // 或显式关闭。陌生仓库不能替用户开启聊天提取,更不能替用户升到 auto。 ----
+    // learn 档位按"只收窄"合并:off(0) < review(1) < auto(2),项目级取
+    // min(全局, 项目);老 generate=false 压成 off。auto 只能出自全局配置。
+    const auto learn_rank = [](const std::string& learn) {
+        if (learn == "auto") return 2;
+        if (learn == "review") return 1;
+        return 0;
+    };
+    const auto rank_to_learn = [](int rank) {
+        if (rank >= 2) return std::string("auto");
+        if (rank == 1) return std::string("review");
+        return std::string("off");
+    };
+    const auto apply_memory_fields = [learn_rank, rank_to_learn](MemoryConfig& target,
+                                                                 const MemoryFileConfig& source,
+                                                                 bool allow_enable, bool global_level) {
         if (source.enabled.has_value()) {
             if (!*source.enabled) target.enabled = false;
             else if (allow_enable) target.enabled = true;
         }
         if (source.use.has_value()) target.use = *source.use;
         if (source.generate.has_value()) target.generate = *source.generate;
+        if (source.learn.has_value()) {
+            if (global_level) {
+                target.learn = *source.learn;
+            } else {
+                // 项目级只收窄:取两档中更低的那档。
+                const int rank = (std::min)(learn_rank(target.learn), learn_rank(*source.learn));
+                target.learn = rank_to_learn(rank);
+            }
+        }
+        if (source.generate.has_value() && !*source.generate) {
+            target.learn = "off";  // 老写法 generate=false 等价 learn=off
+        }
         if (source.max_index_bytes.has_value()) target.max_index_bytes = *source.max_index_bytes;
         if (source.max_retrieval_bytes.has_value()) target.max_retrieval_bytes = *source.max_retrieval_bytes;
         if (source.max_results.has_value()) target.max_results = *source.max_results;
     };
     result.config.memory = MemoryConfig{};
     if (global_file.has_value() && global_file->memory.has_value()) {
-        apply_memory_fields(result.config.memory, *global_file->memory, /*allow_enable=*/true);
+        apply_memory_fields(result.config.memory, *global_file->memory, /*allow_enable=*/true, /*global_level=*/true);
         result.sources.memory = Source::GlobalConfigFile;
     }
     if (project_file.has_value() && project_file->memory.has_value()) {
         if (result.config.memory.enabled) {
-            apply_memory_fields(result.config.memory, *project_file->memory, /*allow_enable=*/false);
+            apply_memory_fields(result.config.memory, *project_file->memory, /*allow_enable=*/false,
+                                /*global_level=*/false);
         }
         // 全局没开时，项目 enabled=true 不生效；enabled=false 仍如实保持关闭。
         result.sources.memory = Source::ProjectConfigFile;

@@ -477,3 +477,137 @@ TEST_CASE("ProjectMemory: 默认预算 8 KiB/3 条,预算边界不劈开 UTF-8")
     }
     CHECK(valid);
 }
+
+TEST_CASE("ProjectMemory: learn 三档,auto 越权开不了") {
+    const fs::path root = TempRoot("learn");
+    const fs::path repo = root / "repo";
+    fs::create_directories(repo / ".git");
+    const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
+    REQUIRE(identity.has_value());
+
+    memory::Options options;
+    options.global_allowed = true;
+    options.enabled = true;                 // 配置默认上限 review
+    options.learn_ceiling = memory::LearnMode::Review;
+    memory::ProjectMemory store(*identity, root / "home", options);
+    CHECK(store.learn_mode() == memory::LearnMode::Review);
+    CHECK(store.generate_enabled());        // review = 提候选 + memory_save 可用
+
+    REQUIRE(store.set_learn(memory::LearnMode::Off).has_value());
+    CHECK_FALSE(store.generate_enabled());
+    REQUIRE(store.set_learn(memory::LearnMode::Review).has_value());
+
+    // 想开 auto:超出配置上限,拒绝。
+    CHECK_FALSE(store.set_learn(memory::LearnMode::Auto).has_value());
+    CHECK(store.learn_mode() == memory::LearnMode::Review);
+
+    // 全局配置授权 auto 后才开得了。
+    memory::Options auto_ok = options;
+    auto_ok.learn = memory::LearnMode::Auto;
+    auto_ok.learn_ceiling = memory::LearnMode::Auto;
+    memory::ProjectMemory live(*identity, root / "home", auto_ok);
+    REQUIRE(live.set_learn(memory::LearnMode::Auto).has_value());
+    // 降档永远可以。
+    REQUIRE(live.set_learn(memory::LearnMode::Review).has_value());
+
+    CHECK(memory::ParseLearnMode("off").has_value());
+    CHECK(memory::ParseLearnMode("REVIEW").has_value());
+    CHECK(memory::ParseLearnMode("always").has_value() == false);
+}
+
+TEST_CASE("ProjectMemory: 候选箱走 add/review/accept,拒绝项防死缠") {
+    const fs::path root = TempRoot("candidates");
+    const fs::path repo = root / "repo";
+    fs::create_directories(repo / ".git");
+    Write(repo / "pyproject.toml", "[project]\n");
+    const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
+    REQUIRE(identity.has_value());
+    memory::Options options;
+    options.global_allowed = true;
+    options.enabled = true;
+    memory::ProjectMemory store(*identity, root / "home", options);
+
+    memory::MemoryCandidate candidate;
+    candidate.kind = memory::MemoryKind::Preference;
+    candidate.title = "Python 包管理器";
+    candidate.summary = "添加依赖只用 uv add";
+    candidate.content = "用户明确要求：添加 Python 依赖时使用 `uv add <package>`。";
+    candidate.keywords = {"uv"};
+    candidate.paths = {"pyproject.toml"};
+    candidate.confidence = "user-stated";
+    candidate.task_type = "config";
+    const auto added = store.AddCandidate(candidate);
+    REQUIRE(added.has_value());
+    const std::string id = *added;
+    CHECK(id.starts_with("cand-"));
+
+    // 同主题候选原位更新,不铺第二条。
+    candidate.summary = "uv add,更新过的摘要";
+    const auto again = store.AddCandidate(candidate);
+    REQUIRE(again.has_value());
+    CHECK(*again == id);
+    auto listed = store.ListCandidates();
+    REQUIRE(listed.size() == 1);
+    CHECK(listed[0].summary == "uv add,更新过的摘要");
+
+    // inferred 候选接受不了。
+    memory::MemoryCandidate inferred = candidate;
+    inferred.title = "另一个主题";
+    inferred.confidence = "inferred";
+    auto inferred_id = store.AddCandidate(inferred);
+    REQUIRE(inferred_id.has_value());
+    CHECK_FALSE(store.AcceptCandidate(*inferred_id).has_value());
+
+    // 接受:转正式 job,worker 落盘后可召回;候选文件消失。
+    const auto queued = store.AcceptCandidate(id);
+    REQUIRE(queued.has_value());
+    REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
+    CHECK(store.ListEntries().size() == 1);
+    CHECK(store.ListCandidates().size() == 1);  // 只剩 inferred 那条
+    const std::string context = store.BuildTurnContext("给 pyproject.toml 加 uv 依赖", repo);
+    CHECK(context.find("## 召回: preference.python") != std::string::npos);
+
+    // 拒绝:被拒正文不留,同主题不再收。
+    const auto rejected = store.RejectCandidate(*inferred_id, "不该记");
+    REQUIRE(rejected.has_value());
+    CHECK(store.ListCandidates().empty());
+    const auto readded = store.AddCandidate(inferred);
+    CHECK_FALSE(readded.has_value());  // 短哈希账本挡住死缠
+
+    // learn off 时候选与接受都被闸住。
+    REQUIRE(store.set_learn(memory::LearnMode::Off).has_value());
+    memory::MemoryCandidate fresh = candidate;
+    fresh.title = "再一条";
+    CHECK_FALSE(store.AddCandidate(fresh).has_value());
+    CHECK_FALSE(store.AcceptCandidate("whatever").has_value());
+}
+
+TEST_CASE("ProjectMemory: 检索扩展词并进下一轮词法查询") {
+    const fs::path root = TempRoot("hints");
+    const fs::path repo = root / "repo";
+    fs::create_directories(repo / ".git");
+    Write(repo / "pyproject.toml", "[project]\n");
+    const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
+    REQUIRE(identity.has_value());
+    memory::Options options;
+    options.global_allowed = true;
+    options.enabled = true;
+    memory::ProjectMemory store(*identity, root / "home", options);
+
+    memory::SaveRequest request;
+    request.kind = memory::MemoryKind::Preference;
+    request.id = "preference.dep-tool";
+    request.title = "依赖工具";
+    request.summary = "添加依赖用 uv add";
+    request.content = "用户明确要求使用 `uv add`。";
+    request.keywords = {"uv"};
+    REQUIRE(store.EnqueueSave(request).has_value());
+    REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
+
+    // 这句查询本不命中("加包"与标题/关键词不沾边)。
+    CHECK(store.BuildTurnContext("帮我把包加上", repo).find("## 召回") == std::string::npos);
+    // 上一轮总结给了扩展词 "uv",同一句查询就能召回了。
+    store.SetRetrievalHints({"uv"});
+    CHECK(store.BuildTurnContext("帮我把包加上", repo).find("## 召回: preference.dep-tool") !=
+          std::string::npos);
+}
