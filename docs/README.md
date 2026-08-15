@@ -43,6 +43,7 @@
 | 页面 | 收什么 |
 | --- | --- |
 | [配置手册](configuration.md) | 配置层级、所有顶层字段、环境变量、providers、hooks、MCP、搜索、LSP、权限与目录。 |
+| [Hooks 手册](hooks.md) | hooks 事件全表、stdin/stdout 协议、决策归并、来源相加、项目 hook 信任审查、`/hooks` 台账、legacy 兼容、工具覆盖矩阵与边界。 |
 | [Provider 目录](provider-catalog.md) | 内置/在线目录、缓存、预设、模型 variant、合并优先级与维护办法。 |
 | [项目指令](project-instructions.md) | `/init`、层级加载、override、32 KiB 上限、写法与排错。 |
 | [项目记忆](memory-system-design.md) | 已实现路径、检索、后台写入、命令、安全，以及仍未实现的后续阶段。 |
