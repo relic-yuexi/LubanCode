@@ -85,8 +85,11 @@ constexpr std::size_t kDefaultContextWindowTokens = 256000;
 constexpr int kDefaultMaxTurns = 0;
 
 constexpr std::size_t kDefaultMemoryMaxIndexBytes = 16 * 1024;
-constexpr std::size_t kDefaultMemoryMaxRetrievalBytes = 24 * 1024;
-constexpr std::size_t kDefaultMemoryMaxResults = 4;
+// 召回预算收紧(规格"召回只送命中，不送整份索引"):index.md 不再随请求
+// 注入,正文默认总预算降到 8 KiB、最多 3 条;index 字段只管 index.md 文件
+// 本身的大小,不再影响 prompt。
+constexpr std::size_t kDefaultMemoryMaxRetrievalBytes = 8 * 1024;
+constexpr std::size_t kDefaultMemoryMaxResults = 3;
 
 struct MemoryConfig {
     bool enabled = false;

@@ -1128,7 +1128,10 @@ void InteractiveSession::PumpSteeringToSubagents() {
 }
 
 void InteractiveSession::EnsureMemoryTool() {
-    if (project_memory != nullptr && registry().Find("memory_save") == nullptr) {
+    // capability gate:全局未授权时 memory_save 不注册(双保险之一,另一道
+    // 在 MemorySaveTool::execute 的运行时判定)。
+    if (project_memory != nullptr && project_memory->generate_enabled() &&
+        registry().Find("memory_save") == nullptr) {
         registry().Register(std::make_unique<lubancode::memory::MemorySaveTool>(project_memory));
     }
 }
@@ -1151,7 +1154,8 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
     if (action.empty() || action == "status") {
         const auto status = project_memory->Status();
         const auto toggle_word = [](bool enabled) { return enabled ? tr("cmd.memory.on") : tr("cmd.memory.off"); };
-        std::cout << trf("cmd.memory.status", toggle_word(status.enabled), toggle_word(status.use),
+        std::cout << trf("cmd.memory.global", toggle_word(status.global_allowed)) << "\n"
+                  << trf("cmd.memory.status", toggle_word(status.enabled), toggle_word(status.use),
                           toggle_word(status.generate))
                   << "\n"
                   << trf("cmd.memory.project", status.project_key) << "\n"
@@ -1160,8 +1164,14 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
         return;
     }
     if (action == "on" || action == "off") {
-        project_memory->set_enabled(action == "on");
-        if (action == "on" && project_memory->generate_enabled()) EnsureMemoryTool();
+        // 授权闸:全局未授权时 /memory on 只会得到"去哪改全局配置"的指引,
+        // 不能凭本场命令翻开能力(规格"授权与本场状态分开")。
+        const auto toggled = project_memory->set_enabled(action == "on");
+        if (!toggled.has_value()) {
+            std::cout << tr("cmd.memory.denied") << "\n";
+            return;
+        }
+        if (action == "on") EnsureMemoryTool();
         std::cout << trf("cmd.memory.master", action == "on" ? tr("cmd.memory.on") : tr("cmd.memory.off"))
                   << "\n";
         return;
@@ -1176,6 +1186,11 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
             return;
         }
         const bool enabled = value == "on";
+        // 同一道授权闸:全局没授权,子开关也开不了。
+        if (enabled && !project_memory->global_allowed()) {
+            std::cout << tr("cmd.memory.denied") << "\n";
+            return;
+        }
         if (action == "use") {
             project_memory->set_use(enabled);
         } else {
@@ -1186,6 +1201,46 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
                           action == "use" ? tr("cmd.memory.retrieval") : tr("cmd.memory.write"),
                           enabled ? tr("cmd.memory.on") : tr("cmd.memory.off"))
                   << "\n";
+        return;
+    }
+    if (action == "why") {
+        std::string id;
+        words >> id;
+        const auto trace = project_memory->LastTrace();
+        if (!trace.valid) {
+            std::cout << tr("cmd.memory.why.none") << "\n";
+            return;
+        }
+        std::cout << trf("cmd.memory.why.header", trace.at) << "\n";
+        std::ostringstream joined_terms;
+        for (std::size_t i = 0; i < trace.terms.size(); ++i) {
+            if (i != 0) joined_terms << " ";
+            joined_terms << trace.terms[i];
+        }
+        std::cout << trf("cmd.memory.why.terms", joined_terms.str()) << "\n";
+        bool matched_id = id.empty();
+        for (const auto& entry : trace.entries) {
+            if (!id.empty() && entry.id != id) continue;
+            matched_id = true;
+            if (entry.injected) {
+                std::cout << trf("cmd.memory.why.hit", entry.id, entry.score, entry.hard_hits,
+                                 entry.term_hits, entry.bytes)
+                          << "\n";
+                continue;
+            }
+            std::string reason;
+            if (entry.stale_blocked) reason = tr("cmd.memory.why.stale");
+            else if (entry.below_threshold) reason = tr("cmd.memory.why.below_threshold");
+            else if (entry.budget_dropped) reason = tr("cmd.memory.why.budget");
+            else reason = tr("cmd.memory.why.skipped");
+            std::cout << trf("cmd.memory.why.miss", entry.id, entry.score, entry.hard_hits,
+                             entry.term_hits, reason)
+                      << "\n";
+        }
+        if (!matched_id) {
+            std::cout << trf("cmd.memory.why.missing", id) << "\n";
+        }
+        std::cout << trf("cmd.memory.why.total", trace.injected_count, trace.injected_bytes) << "\n";
         return;
     }
     if (action == "list") {

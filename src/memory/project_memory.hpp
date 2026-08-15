@@ -15,12 +15,18 @@
 namespace lubancode::memory {
 
 struct Options {
+    // 授权分两层(规格"授权与本场状态分开"):
+    //   global_allowed  用户全局配置授予的能力,构造后运行时不可翻开;
+    //   enabled         本场总开关,只能在 global_allowed 范围内开关。
+    // use/generate 仍是本场子开关。项目配置只能收窄不能扩权,这条在
+    // config merge 层守过一次,这里再守一次。
+    bool global_allowed = false;
     bool enabled = false;
     bool use = true;
     bool generate = true;
-    std::size_t max_index_bytes = 16 * 1024;
-    std::size_t max_retrieval_bytes = 24 * 1024;
-    std::size_t max_results = 4;
+    std::size_t max_index_bytes = 16 * 1024;      // index.md 留给人看,不再进 prompt
+    std::size_t max_retrieval_bytes = 8 * 1024;   // 每轮注入正文总预算
+    std::size_t max_results = 3;                  // 每轮最多注入条数
 };
 
 struct ProjectIdentity {
@@ -67,6 +73,7 @@ struct MemoryEntry {
 };
 
 struct RuntimeStatus {
+    bool global_allowed = false;
     bool enabled = false;
     bool use = false;
     bool generate = false;
@@ -76,15 +83,44 @@ struct RuntimeStatus {
     std::size_t pending_jobs = 0;
 };
 
+// 一轮召回的本地 trace(规格"每次召回都说得清")。只存归一化词项、id、
+// 分数与字节,不抄主题正文,也不记用户完整问题。
+struct RecallTraceEntry {
+    std::string id;
+    int score = 0;
+    int hard_hits = 0;    // 路径/关键词/标题硬命中次数
+    int term_hits = 0;    // 词法词项命中次数
+    bool injected = false;
+    bool stale_blocked = false;   // 指纹漂移,只提示不注正文
+    bool below_threshold = false; // 分数没过最低门槛
+    bool budget_dropped = false;  // 过了门槛但预算/条数不够
+    std::size_t bytes = 0;
+};
+
+struct RecallTrace {
+    bool valid = false;
+    std::string at;
+    std::string project_key;
+    std::vector<std::string> terms;
+    std::vector<RecallTraceEntry> entries;  // 计分过的候选,含被拦与落选
+    std::size_t injected_count = 0;
+    std::size_t injected_bytes = 0;
+};
+
 class ProjectMemory {
 public:
     ProjectMemory(ProjectIdentity identity, std::filesystem::path home_lubancode,
                   Options options, std::string executable = std::string());
 
+    bool global_allowed() const { return options_.global_allowed; }
     bool enabled() const { return options_.enabled; }
-    bool use_enabled() const { return options_.enabled && options_.use; }
-    bool generate_enabled() const { return options_.enabled && options_.generate; }
-    void set_enabled(bool enabled) { options_.enabled = enabled; }
+    bool use_enabled() const { return options_.global_allowed && options_.enabled && options_.use; }
+    bool generate_enabled() const {
+        return options_.global_allowed && options_.enabled && options_.generate;
+    }
+    // 本场总开关。global_allowed 为假时,传 true 只会拿到错误(闸在运行
+    // 对象上再守一道),传 false 照常允许收窄。
+    std::expected<void, std::string> set_enabled(bool enabled);
     void set_use(bool enabled) { options_.use = enabled; }
     void set_generate(bool enabled) { options_.generate = enabled; }
     void set_source_session(std::string id) { source_session_ = std::move(id); }
@@ -94,8 +130,13 @@ public:
 
     std::expected<void, std::string> SetWorkingDirectory(const std::filesystem::path& cwd);
 
-    // 每条外层用户消息调用一次。返回空串表示本轮无记忆段。
+    // 每条外层用户消息调用一次。返回空串表示本轮无记忆段;没有过门槛的
+    // 命中时只保留极短能力说明,不再注入整份 index.md。
     std::string BuildTurnContext(const std::string& query, const std::filesystem::path& cwd) const;
+
+    // 上一轮召回的 trace(读 .state/trace-last.json)。没有记录时
+    // valid=false。/memory why 用。
+    RecallTrace LastTrace() const;
 
     std::expected<std::string, std::string> EnqueueSave(const SaveRequest& request);
     std::expected<std::string, std::string> EnqueueForget(const std::string& id);
