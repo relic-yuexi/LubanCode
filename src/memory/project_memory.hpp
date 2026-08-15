@@ -17,8 +17,9 @@
 
 namespace lubancode::memory {
 
-// 最低召回门槛:硬命中(路径 12/关键词 8/标题 5)一次即过线;纯 BM25
-// 软分要两三个稀有词项才凑得满。单个常见中文双字片段过不了这条线。
+// 最低召回门槛:稳定实体硬命中(路径 12/关键词与 symbol 8/标题 5/id 6)
+// 一次即过线;纯 BM25 软分要两个不同词组的稀有词项才凑得满。单个常见
+// 中文双字片段过不了这条线,带虚词字符的句式碎片更是连词组都算不上。
 constexpr int kMemoryMinRecallScore = 8;
 
 // 学习三档(规格"学习改成三档"):off 不提候选不写入;review 自动提候选,
@@ -119,9 +120,9 @@ struct MemoryEntry {
 // 门槛值得注入",预算裁剪另算。
 struct ScoredEntry {
     const MemoryEntry* entry = nullptr;
-    int hard_hits = 0;     // 路径/关键词/标题硬命中次数
-    int token_hits = 0;    // 分词后命中的查询词项数
-    double bm25 = 0.0;     // 本地 BM25 软分
+    int hard_hits = 0;     // 稳定实体(路径/关键词/symbol/标题/id)硬命中次数
+    int token_hits = 0;    // 分词后命中的有效词项数(虚词碎片不计)
+    double bm25 = 0.0;     // 本地 BM25 软分(词项按来源权重折算)
     int score = 0;         // 硬命中分 + cwd 排位加分 + BM25 折算分(排序用)
     bool qualifies = false;       // 过最低门槛,值得注入(调用方据此判)
     bool stale_blocked = false;   // 指纹漂移,只提示不注正文(由调用方判)
@@ -129,19 +130,37 @@ struct ScoredEntry {
     bool scope_blocked = false;   // scope 不符当前 cwd,不注入
 };
 
+// 检索词的来源、词路与权重(trace 报账用):source 说词从哪来(query 本体
+// 还是回合总结的扩展词),kind 说走哪条词路(word=整词/标识符/词典实体,
+// gram=中文二元片段),weight 是进 BM25 与门槛判定的乘子——带虚词字符的
+// 句式碎片拿 kWeakGramWeight,凑不了门槛,也拉不动分数。
+struct TraceTerm {
+    std::string text;
+    std::string source = "query";  // query | hint
+    std::string kind = "gram";     // word | gram
+    double weight = 0.8;
+};
+
+// 归一化(查询与索引共用):NFKC 常用子集(全角 ASCII/全角空格/弯引号/
+// 长划/连字/半角片假名)、ASCII 小写、路径分隔符统一正斜杠。标点经这套
+// 之后要么归半角要么当分隔符,不再黏进中文二元词。
+std::string NormalizeForRetrieval(const std::string& text);
+
 // 标识符拆分 + 中英混排分词:camelCase/snake_case/kebab/路径段都拆
 // (BuildTurnContext -> build/turn/context),中文出双字片段;查询与
 // 索引共用同一套。
 std::vector<std::string> TokenizeForRetrieval(const std::string& text);
 
-// 纯函数排级:硬命中(路径/关键词/标题,词边界匹配)+ BM25 软分。返回
-// 有得分的条目(含没过门槛的,给 trace 用),qualifies 标记是否过最低
-// 门槛(至少一次硬命中或两个词项命中,且核心分过线)。archived/conflict
-// 不参与;过期/scope 越区打标记由调用方拦。指纹漂移要摸项目文件,也由
-// 调用方判。
+// 纯函数排级:硬命中(路径/关键词/symbol/标题/id 稳定实体,词边界匹配)
+// + BM25 软分(词项带权重)。返回有得分的条目(含没过门槛的,给 trace
+// 用),qualifies 标记是否过最低门槛(至少一次硬命中,或带整词的两次
+// 词项命中/三次纯二元命中,且核心分过线)。traced_terms 回填本轮查询词
+// 项(含来源与权重),供 trace 落盘。archived/conflict 不参与;过期/
+// scope 越区打标记由调用方拦。指纹漂移要摸项目文件,也由调用方判。
 std::vector<ScoredEntry> RankEntries(const std::vector<MemoryEntry>& entries, const std::string& query,
                                      const std::string& cwd_relative,
-                                     const std::vector<std::string>& hints = {});
+                                     const std::vector<std::string>& hints = {},
+                                     std::vector<TraceTerm>* traced_terms = nullptr);
 
 // 待审候选(规格"候选审阅箱")。回合收尾抽取产出,先住待审区,用户
 // /memory accept|edit|reject 之后才动正式库。按项目 key 分账,耐退出。
@@ -171,19 +190,26 @@ struct RuntimeStatus {
     std::size_t pending_candidates = 0;
 };
 
-// 一轮召回的本地 trace(规格"每次召回都说得清")。只存归一化词项、id、
-// 分数与字节,不抄主题正文,也不记用户完整问题。
+// 查询来源(规格"合成事件隔离"):只有 user 的提问(与显式要求事实的
+// main 回流)才跑检索;后台完成唤醒、钩子、压缩续跑、系统播报这类宿主
+// 合成 prompt 默认整轮跳过——不产检索词,不占检索预算,trace 只记来源。
+enum class QueryOrigin { User, BackgroundCompletion, Hook, Compact, System };
+std::string QueryOriginName(QueryOrigin origin);
+
+// 一轮召回的本地 trace(规格"每次召回都说得清")。只存归一化词项(带
+// 来源与权重)、id、分数与字节,不抄主题正文,也不记用户完整问题。
 struct RecallTraceEntry {
     std::string id;
     int score = 0;
-    int hard_hits = 0;    // 路径/关键词/标题硬命中次数
-    int term_hits = 0;    // 分词后命中的查询词项数
+    int hard_hits = 0;    // 稳定实体(路径/关键词/symbol/标题/id)硬命中次数
+    int term_hits = 0;    // 分词后命中的有效词项数(虚词碎片不计)
     bool injected = false;
     bool stale_blocked = false;   // 指纹漂移,只提示不注正文
     bool below_threshold = false; // 分数没过最低门槛
     bool budget_dropped = false;  // 过了门槛但预算/条数不够
     bool scope_blocked = false;   // scope 不符当前 cwd,不注入
     bool expired = false;         // 已过 expires_at,不召回
+    bool duplicate_dropped = false;  // 同一事实/相同证据,去重让位
     std::size_t bytes = 0;
 };
 
@@ -191,10 +217,12 @@ struct RecallTrace {
     bool valid = false;
     std::string at;
     std::string project_key;
-    std::vector<std::string> terms;
+    std::string query_origin = "user";  // user | background_completion | hook | compact | system
+    bool skipped = false;               // 合成控制消息:本轮没跑检索
+    std::vector<TraceTerm> terms;
     std::vector<RecallTraceEntry> entries;  // 计分过的候选,含被拦与落选
     std::size_t injected_count = 0;
-    std::size_t injected_bytes = 0;
+    std::size_t injected_bytes = 0;  // 去重后有效字节
 };
 
 class ProjectMemory {
@@ -226,8 +254,12 @@ public:
     std::expected<void, std::string> SetWorkingDirectory(const std::filesystem::path& cwd);
 
     // 每条外层用户消息调用一次。返回空串表示本轮无记忆段;没有过门槛的
-    // 命中时只保留极短能力说明,不再注入整份 index.md。
-    std::string BuildTurnContext(const std::string& query, const std::filesystem::path& cwd) const;
+    // 命中时零注入零脚手架(规格"零命中不塞空脚手架")。origin 记这条
+    // 查询从哪来:user 才跑检索,合成控制消息(后台完成唤醒等)默认整轮
+    // 跳过,只留 trace 来源;确需事实的合成回流可传 force_retrieval。
+    std::string BuildTurnContext(const std::string& query, const std::filesystem::path& cwd,
+                                 QueryOrigin origin = QueryOrigin::User,
+                                 bool force_retrieval = false) const;
 
     // 上一轮召回的 trace(读 .state/trace-last.json)。没有记录时
     // valid=false。/memory why 用。

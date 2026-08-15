@@ -247,7 +247,11 @@ private:
     void PersistNewMessages();
     void RefillPeerPool();
     void CollectPeerMessages();
-    void RunPeerTurn(const std::string& text, bool silent = false);
+    // 外来消息轮:peer 来信是 user 语义(另一会话的用户正文);后台完成
+    // 唤醒是宿主合成控制消息,传 BackgroundCompletion——检索整轮跳过,
+    // 不在 trace 里留一串无意义词。
+    void RunPeerTurn(const std::string& text, bool silent = false,
+                     memory::QueryOrigin origin = memory::QueryOrigin::User);
     void PumpSteeringToSubagents();
     void EnsureMemoryTool();
     void PrintMemoryUsage() const;
@@ -1368,14 +1372,14 @@ void InteractiveSession::CollectPeerMessages() {
 // silent:查看态下的后台回流轮用——轮子照常跑(消化/输出/usage),但所有
 // 输出只进 transcript 台账不上屏,用户正看的子代理视口零扰动(回流单规格
 // 第一节;语义细节见 turn_runner.hpp RunTurn 的 silent 注释)。
-void InteractiveSession::RunPeerTurn(const std::string& text, bool silent) {
+void InteractiveSession::RunPeerTurn(const std::string& text, bool silent, memory::QueryOrigin origin) {
     if (peer_started) {
         peer_runtime->SetStatus("busy");
     }
     focus_view_active = false;
     std::string turn_suffix =
         project_memory != nullptr
-            ? project_memory->BuildTurnContext(text, std::filesystem::current_path())
+            ? project_memory->BuildTurnContext(text, std::filesystem::current_path(), origin)
             : std::string();
     // 运行中子代理名册(动态 context):本轮重算,不进 history——compact
     // 后下一条用户消息照常从 TaskRecord 重注入,不依赖摘要记任务号。
@@ -1592,10 +1596,18 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
             return;
         }
         std::cout << trf("cmd.memory.why.header", trace.at) << "\n";
+        std::cout << trf("cmd.memory.why.origin", trace.query_origin) << "\n";
+        if (trace.skipped) {
+            std::cout << tr("cmd.memory.why.skipped_turn") << "\n";
+            return;
+        }
+        // 检索词带词路与权重:word=整词/词典实体,gram=中文二元,虚词碎片
+        // 拿低权重——用户要看得出为何命中,不只见一把碎字。
         std::ostringstream joined_terms;
         for (std::size_t i = 0; i < trace.terms.size(); ++i) {
             if (i != 0) joined_terms << " ";
-            joined_terms << trace.terms[i];
+            joined_terms << trace.terms[i].text << "[" << trace.terms[i].kind << "/"
+                         << trace.terms[i].source << " ×" << trace.terms[i].weight << "]";
         }
         std::cout << trf("cmd.memory.why.terms", joined_terms.str()) << "\n";
         bool matched_id = id.empty();
@@ -1612,6 +1624,7 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
             if (entry.expired) reason = tr("cmd.memory.why.expired");
             else if (entry.scope_blocked) reason = tr("cmd.memory.why.scope");
             else if (entry.stale_blocked) reason = tr("cmd.memory.why.stale");
+            else if (entry.duplicate_dropped) reason = tr("cmd.memory.why.duplicate");
             else if (entry.below_threshold) reason = tr("cmd.memory.why.below_threshold");
             else if (entry.budget_dropped) reason = tr("cmd.memory.why.budget");
             else reason = tr("cmd.memory.why.skipped");
@@ -2032,7 +2045,8 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
     focus_view_active = false;
     std::string turn_suffix =
         project_memory != nullptr
-            ? project_memory->BuildTurnContext(content, std::filesystem::current_path())
+            ? project_memory->BuildTurnContext(content, std::filesystem::current_path(),
+                                               memory::QueryOrigin::User)
             : std::string();
     // 运行中子代理名册(规格第二节):每条外层用户消息到来时给 main 一份
     // 动态重算的名册——task id + 真 title + 类型 + 待送数,不塞 prompt 与
@@ -2518,7 +2532,7 @@ void InteractiveSession::Run() {
             }
             RunPeerTurn("后台子代理有新结果送达(资料附在本条消息里)。请阅读后继续推进手头任务;"
                         "若结论已够用,向用户简要汇报要点,不要重新摸排。",
-                        /*silent=*/viewing);
+                        /*silent=*/viewing, memory::QueryOrigin::BackgroundCompletion);
             if (viewing) {
                 // 坞行退场由 DrainCompletionNotices 的 TouchTasks + 下一帧带出;
                 // toast 替那行留一句人话,几秒自收,不抢屏。

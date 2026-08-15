@@ -110,6 +110,8 @@ add_executable(lubancode_tests
   test_memory_extract.cpp
   # memory 检索评测尺子(固定语料,Recall/Precision/注入字节/stale 拦截率)。
   test_memory_retrieval.cpp
+  # memory 中文检索评测尺子(100 条中文语料,召回率/误命中率/注入字节 P50/P95)。
+  test_memory_retrieval_zh.cpp
   # app 与终端实现由 lubancode_app 提供，不在测试目标里重复编译。
   # 回归 BuildCallbacks::on_usage 接线(状态行局部发布)仍走真实终端实现。
   test_repaint_coord.cpp

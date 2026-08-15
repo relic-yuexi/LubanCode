@@ -1,0 +1,1959 @@
+{
+  "schema": 1,
+  "description": "中文检索瘦身评测集(规格'记忆召回的中文检索瘦身与合成事件隔离'):100 条中文项目记忆 + 固定问句。全中文标题/关键词,混排代号、错误码、命令、路径、全半角标点与常见虚词;含同内容重复对(测去重)、scope 越区、expired 过期。改检索器前后各跑一遍,数字进 CI 防长歪。",
+  "entries": [
+    {
+      "id": "fact.zh-release-codename",
+      "kind": "fact",
+      "title": "发布代号",
+      "summary": "本项目发布代号是青瓷-47，对外文案统一用它",
+      "keywords": [
+        "发布代号",
+        "青瓷-47",
+        "代号"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-build-dir",
+      "kind": "fact",
+      "title": "构建目录",
+      "summary": "构建产物一律进 build/，不进源码树",
+      "keywords": [
+        "构建目录",
+        "构建产物",
+        "build"
+      ],
+      "paths": [
+        "CMakeLists.txt"
+      ]
+    },
+    {
+      "id": "fact.zh-build-parallel",
+      "kind": "fact",
+      "title": "并行编译度",
+      "summary": "并行编译最多 16 路，再多内存吃紧",
+      "keywords": [
+        "并行编译",
+        "编译线程"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-build-cache",
+      "kind": "fact",
+      "title": "编译缓存",
+      "summary": "ccache 挂在 /usr/local/bin，命中率八成",
+      "keywords": [
+        "ccache",
+        "编译缓存",
+        "命中率"
+      ],
+      "paths": [
+        "scripts/setup.sh"
+      ]
+    },
+    {
+      "id": "fact.zh-build-warning",
+      "kind": "fact",
+      "title": "零告警铁律",
+      "summary": "W4 下不许出告警，出告警不许合入",
+      "keywords": [
+        "告警",
+        "零告警",
+        "w4"
+      ],
+      "paths": [
+        "CMakeLists.txt"
+      ]
+    },
+    {
+      "id": "fact.zh-build-pch",
+      "kind": "fact",
+      "title": "预编译头",
+      "summary": "pch.hpp 挂在 src 与 tests 两处",
+      "keywords": [
+        "预编译头",
+        "pch"
+      ],
+      "paths": [
+        "src/pch.hpp"
+      ]
+    },
+    {
+      "id": "fact.zh-build-ninja",
+      "kind": "fact",
+      "title": "生成器用 Ninja",
+      "summary": "本地构建生成器固定 Ninja，VS 只出包",
+      "keywords": [
+        "ninja",
+        "生成器",
+        "本地构建"
+      ],
+      "paths": [
+        "CMakePresets.json"
+      ]
+    },
+    {
+      "id": "fact.zh-build-debug-info",
+      "kind": "fact",
+      "title": "调试信息格式",
+      "summary": "Debug 用 /Z7 嵌进 obj，不单起 PDB",
+      "keywords": [
+        "调试信息",
+        "z7",
+        "pdb"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-build-toolchain",
+      "kind": "fact",
+      "title": "工具链版本",
+      "summary": "MSVC 19.38、GCC 13、Clang 17 三家都要过",
+      "keywords": [
+        "工具链",
+        "msvc",
+        "gcc",
+        "clang"
+      ],
+      "paths": [
+        "vcpkg.json"
+      ]
+    },
+    {
+      "id": "fact.zh-build-fpic",
+      "kind": "fact",
+      "title": "动态库编译项",
+      "summary": "插件目标要加 POSITION_INDEPENDENT_CODE",
+      "keywords": [
+        "插件目标",
+        "position_independent_code",
+        "动态库"
+      ],
+      "paths": [
+        "CMakeLists.txt"
+      ]
+    },
+    {
+      "id": "fact.zh-build-lto",
+      "kind": "fact",
+      "title": "链接期优化",
+      "summary": "Release 才开 LTO，Debug 关掉省时间",
+      "keywords": [
+        "lto",
+        "链接期优化",
+        "release"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-build-bootstrap",
+      "kind": "fact",
+      "title": "引导脚本",
+      "summary": "bootstrap.sh 会先装依赖再 configure",
+      "keywords": [
+        "bootstrap",
+        "引导脚本"
+      ],
+      "paths": [
+        "scripts/bootstrap.sh"
+      ]
+    },
+    {
+      "id": "fact.zh-build-out-of-source",
+      "kind": "fact",
+      "title": "源外构建",
+      "summary": "源外构建是规矩，build 目录随时可删",
+      "keywords": [
+        "源外构建"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-test-runner",
+      "kind": "fact",
+      "title": "测试跑法",
+      "summary": "ctest -C Debug 全绿才许交",
+      "keywords": [
+        "ctest",
+        "全绿",
+        "测试跑法"
+      ],
+      "paths": [
+        "CMakeLists.txt"
+      ]
+    },
+    {
+      "id": "fact.zh-test-naming-zh",
+      "kind": "fact",
+      "title": "用例命名",
+      "summary": "TEST_CASE 用中文一句话说清场景",
+      "keywords": [
+        "用例命名",
+        "test_case",
+        "中文命名"
+      ],
+      "paths": [
+        "tests/test_config.cpp"
+      ]
+    },
+    {
+      "id": "fact.zh-test-fixture",
+      "kind": "fact",
+      "title": "夹具目录",
+      "summary": "固定语料放 tests/fixtures，别外链",
+      "keywords": [
+        "夹具",
+        "fixtures",
+        "固定语料"
+      ],
+      "paths": [
+        "tests/fixtures"
+      ]
+    },
+    {
+      "id": "fact.zh-test-doctest",
+      "kind": "fact",
+      "title": "测试框架",
+      "summary": "单测框架 doctest，不用 gtest",
+      "keywords": [
+        "doctest",
+        "单测框架",
+        "gtest"
+      ],
+      "paths": [
+        "tests/CMakeLists.txt"
+      ]
+    },
+    {
+      "id": "fact.zh-test-isolation",
+      "kind": "fact",
+      "title": "测试隔离",
+      "summary": "每个用例自起临时目录，用完即删",
+      "keywords": [
+        "测试隔离",
+        "临时目录"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-test-flaky",
+      "kind": "fact",
+      "title": "不稳用例",
+      "summary": "test_sse 有一例网络不稳，重跑即可",
+      "keywords": [
+        "不稳用例",
+        "test_sse",
+        "重跑"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-test-coverage",
+      "kind": "fact",
+      "title": "覆盖率口径",
+      "summary": "覆盖率只看 src/，tests 不计",
+      "keywords": [
+        "覆盖率",
+        "coverage"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-test-seed",
+      "kind": "fact",
+      "title": "随机种子",
+      "summary": "模糊测试种子写死 20260101",
+      "keywords": [
+        "随机种子",
+        "fuzz",
+        "20260101"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-test-mock",
+      "kind": "fact",
+      "title": "假后端",
+      "summary": "CaptureBackend 当假后端，不打真网",
+      "keywords": [
+        "假后端",
+        "capturebackend",
+        "mock"
+      ],
+      "paths": [
+        "tests/test_project_memory.cpp"
+      ]
+    },
+    {
+      "id": "fact.zh-test-timeout",
+      "kind": "fact",
+      "title": "用例超时",
+      "summary": "单用例超时 30 秒，超了算红",
+      "keywords": [
+        "用例超时",
+        "超时上限"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-test-parallel-jobs",
+      "kind": "fact",
+      "title": "测试并行度",
+      "summary": "ctest 并行 8 路，内存够用",
+      "keywords": [
+        "ctest并行",
+        "测试并行"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-test-regression",
+      "kind": "fact",
+      "title": "回归集",
+      "summary": "回归集在 tests/regression.list",
+      "keywords": [
+        "回归集",
+        "regression"
+      ],
+      "paths": [
+        "tests/regression.list"
+      ]
+    },
+    {
+      "id": "fact.zh-deploy-host",
+      "kind": "fact",
+      "title": "部署机器",
+      "summary": "生产机是 ubuntu-22，内网 10.2.0.15",
+      "keywords": [
+        "生产机",
+        "部署机器",
+        "ubuntu"
+      ],
+      "paths": [
+        "docs/deploy.md"
+      ]
+    },
+    {
+      "id": "fact.zh-deploy-user",
+      "kind": "fact",
+      "title": "部署账号",
+      "summary": "上产用 deploy 账号，不许 root",
+      "keywords": [
+        "部署账号",
+        "deploy",
+        "root"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-deploy-window",
+      "kind": "fact",
+      "title": "发布窗口",
+      "summary": "周二周四晚十点后允许发版",
+      "keywords": [
+        "发布窗口",
+        "发版",
+        "时段"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-deploy-rollback",
+      "kind": "fact",
+      "title": "回滚步骤",
+      "summary": "回滚就是软链切回上一版目录",
+      "keywords": [
+        "回滚",
+        "软链",
+        "rollback"
+      ],
+      "paths": [
+        "scripts/rollback.sh"
+      ]
+    },
+    {
+      "id": "fact.zh-env-proxy",
+      "kind": "fact",
+      "title": "内网代理",
+      "summary": "拉包要过 10.2.0.9:3128 代理",
+      "keywords": [
+        "代理",
+        "proxy",
+        "3128"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-env-mirror",
+      "kind": "fact",
+      "title": "镜像源",
+      "summary": "FetchContent 走 codeload 镜像拉依赖",
+      "keywords": [
+        "镜像",
+        "codeload",
+        "fetchcontent"
+      ],
+      "paths": [
+        "cmake/deps.cmake"
+      ]
+    },
+    {
+      "id": "fact.zh-env-locale",
+      "kind": "fact",
+      "title": "机器locale",
+      "summary": "生产机 locale 是 C.UTF-8",
+      "keywords": [
+        "locale",
+        "c.utf-8"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-env-python",
+      "kind": "fact",
+      "title": "Python 版本",
+      "summary": "服务器 Python 3.11，别用 3.12 特性",
+      "keywords": [
+        "python",
+        "3.11"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-env-tz",
+      "kind": "fact",
+      "title": "时区",
+      "summary": "部署脚本按东八区打时间戳",
+      "keywords": [
+        "时区",
+        "东八区",
+        "时间戳"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-env-disk",
+      "kind": "fact",
+      "title": "磁盘水位",
+      "summary": "构建机磁盘过八成要清 build",
+      "keywords": [
+        "磁盘水位",
+        "清理build"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-env-docker",
+      "kind": "fact",
+      "title": "容器基底",
+      "summary": "容器基底镜像 debian-12-slim",
+      "keywords": [
+        "基底镜像",
+        "debian"
+      ],
+      "paths": [
+        "Dockerfile"
+      ]
+    },
+    {
+      "id": "fact.zh-env-secrets",
+      "kind": "fact",
+      "title": "钥匙去处",
+      "summary": "真钥匙只进环境变量，不进仓",
+      "keywords": [
+        "钥匙",
+        "环境变量",
+        "密钥"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-mod-memory",
+      "kind": "fact",
+      "title": "记忆模块",
+      "summary": "src/memory 管项目记忆的存取与召回",
+      "keywords": [
+        "记忆模块",
+        "项目记忆",
+        "召回"
+      ],
+      "paths": [
+        "src/memory"
+      ]
+    },
+    {
+      "id": "fact.zh-mod-hooks",
+      "kind": "fact",
+      "title": "钩子模块",
+      "summary": "src/hooks 管生命周期钩子的分发",
+      "keywords": [
+        "钩子",
+        "生命周期",
+        "hooks"
+      ],
+      "paths": [
+        "src/hooks"
+      ]
+    },
+    {
+      "id": "fact.zh-mod-lsp",
+      "kind": "fact",
+      "title": "语言服务",
+      "summary": "src/lsp 管语言服务器的起停",
+      "keywords": [
+        "语言服务",
+        "lsp",
+        "起停"
+      ],
+      "paths": [
+        "src/lsp"
+      ]
+    },
+    {
+      "id": "fact.zh-mod-mcp",
+      "kind": "fact",
+      "title": "MCP 接入",
+      "summary": "src/mcp 管外部工具服务的接入",
+      "keywords": [
+        "mcp",
+        "外部工具",
+        "接入"
+      ],
+      "paths": [
+        "src/mcp"
+      ]
+    },
+    {
+      "id": "fact.zh-mod-cli",
+      "kind": "fact",
+      "title": "界面层",
+      "summary": "src/cli 是终端界面与输入法",
+      "keywords": [
+        "界面层",
+        "终端界面",
+        "cli"
+      ],
+      "paths": [
+        "src/cli"
+      ]
+    },
+    {
+      "id": "fact.zh-mod-agent",
+      "kind": "fact",
+      "title": "代理循环",
+      "summary": "src/agent 是主循环与消息装配",
+      "keywords": [
+        "代理循环",
+        "主循环",
+        "消息装配"
+      ],
+      "paths": [
+        "src/agent"
+      ]
+    },
+    {
+      "id": "fact.zh-mod-api",
+      "kind": "fact",
+      "title": "协议层",
+      "summary": "src/api 管双协议的请求与流式",
+      "keywords": [
+        "协议层",
+        "双协议",
+        "流式"
+      ],
+      "paths": [
+        "src/api"
+      ]
+    },
+    {
+      "id": "fact.zh-mod-platform",
+      "kind": "fact",
+      "title": "平台层",
+      "summary": "src/platform 收平台差异，路径与进程",
+      "keywords": [
+        "平台层",
+        "平台差异",
+        "进程"
+      ],
+      "paths": [
+        "src/platform"
+      ]
+    },
+    {
+      "id": "fact.zh-mod-tools",
+      "kind": "fact",
+      "title": "工具层",
+      "summary": "src/tools 是内置工具集",
+      "keywords": [
+        "工具层",
+        "内置工具",
+        "tools"
+      ],
+      "paths": [
+        "src/tools"
+      ]
+    },
+    {
+      "id": "fact.zh-mod-config",
+      "kind": "fact",
+      "title": "配置层",
+      "summary": "src/config 管四级配置合并",
+      "keywords": [
+        "配置层",
+        "四级配置",
+        "配置合并"
+      ],
+      "paths": [
+        "src/config"
+      ]
+    },
+    {
+      "id": "fact.zh-mod-prompts",
+      "kind": "fact",
+      "title": "提示词模块",
+      "summary": "src/prompts 放分模块的提示词正文",
+      "keywords": [
+        "提示词",
+        "prompts"
+      ],
+      "paths": [
+        "src/prompts"
+      ]
+    },
+    {
+      "id": "fact.zh-mod-i18n",
+      "kind": "fact",
+      "title": "双语文案",
+      "summary": "i18n 中英两边键都要齐",
+      "keywords": [
+        "i18n",
+        "双语",
+        "文案"
+      ],
+      "paths": [
+        "src/cli/i18n.cpp"
+      ]
+    },
+    {
+      "id": "fact.zh-mod-theme",
+      "kind": "fact",
+      "title": "主题",
+      "summary": "三套内置主题：dark、light、plain",
+      "keywords": [
+        "主题",
+        "dark",
+        "light",
+        "plain"
+      ],
+      "paths": [
+        "src/cli/theme.cpp"
+      ]
+    },
+    {
+      "id": "fact.zh-mod-skill",
+      "kind": "fact",
+      "title": "技能包",
+      "summary": "skills 目录放项目技能包",
+      "keywords": [
+        "技能包",
+        "skills"
+      ],
+      "paths": [
+        "skills"
+      ]
+    },
+    {
+      "id": "fact.zh-mod-session",
+      "kind": "fact",
+      "title": "会话存档",
+      "summary": "会话按 JSONL 落盘，resume 重放",
+      "keywords": [
+        "会话存档",
+        "jsonl",
+        "resume"
+      ],
+      "paths": [
+        "src/agent/session_store.cpp"
+      ]
+    },
+    {
+      "id": "fact.zh-mod-worktree",
+      "kind": "fact",
+      "title": "并行开发",
+      "summary": "并行开发用 git worktree 各开地盘",
+      "keywords": [
+        "并行开发",
+        "worktree",
+        "地盘"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-cmd-clean",
+      "kind": "fact",
+      "title": "清理命令",
+      "summary": "全清用 cmake --build build/debug --target clean",
+      "keywords": [
+        "清理命令",
+        "clean",
+        "全量清理"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-cmd-format",
+      "kind": "fact",
+      "title": "格式化命令",
+      "summary": "格式化跑 scripts/format.sh，clang-format 17",
+      "keywords": [
+        "格式化",
+        "clang-format",
+        "format"
+      ],
+      "paths": [
+        "scripts/format.sh"
+      ]
+    },
+    {
+      "id": "fact.zh-cmd-lint",
+      "kind": "fact",
+      "title": "静态检查",
+      "summary": "clang-tidy 只查 src，警告当错误",
+      "keywords": [
+        "clang-tidy",
+        "静态检查"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-cmd-bench",
+      "kind": "fact",
+      "title": "基准脚本",
+      "summary": "基准跑 scripts/bench.sh，结果进 docs",
+      "keywords": [
+        "基准",
+        "bench",
+        "性能"
+      ],
+      "paths": [
+        "scripts/bench.sh"
+      ]
+    },
+    {
+      "id": "fact.zh-cmd-release",
+      "kind": "fact",
+      "title": "出包脚本",
+      "summary": "scripts/release.sh 一次打三平台包",
+      "keywords": [
+        "出包",
+        "release",
+        "打包"
+      ],
+      "paths": [
+        "scripts/release.sh"
+      ]
+    },
+    {
+      "id": "fact.zh-cmd-migrate",
+      "kind": "fact",
+      "title": "数据迁移",
+      "summary": "迁移跑 scripts/migrate.py，先备份",
+      "keywords": [
+        "数据迁移",
+        "migrate",
+        "先备份"
+      ],
+      "paths": [
+        "scripts/migrate.py"
+      ]
+    },
+    {
+      "id": "fact.zh-cmd-doctor",
+      "kind": "fact",
+      "title": "环境自检",
+      "summary": "lubancode --doctor 自检环境",
+      "keywords": [
+        "doctor",
+        "环境自检"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-cmd-log",
+      "kind": "fact",
+      "title": "运行日志",
+      "summary": "运行日志在 .state/log，轮转五份",
+      "keywords": [
+        "运行日志",
+        "log",
+        "轮转"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-cmd-stats",
+      "kind": "fact",
+      "title": "用量统计",
+      "summary": "/stats 看本轮用量与速率",
+      "keywords": [
+        "stats",
+        "用量",
+        "统计"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-err-e2401",
+      "kind": "fact",
+      "title": "错误码 E2401",
+      "summary": "E2401 是网关超时，先查代理",
+      "keywords": [
+        "e2401",
+        "网关超时",
+        "错误码"
+      ],
+      "paths": [
+        "docs/errors.md"
+      ]
+    },
+    {
+      "id": "fact.zh-err-lnk1104",
+      "kind": "fact",
+      "title": "链接错误 LNK1104",
+      "summary": "LNK1104 多半是残留进程占了 exe，taskkill 再编",
+      "keywords": [
+        "lnk1104",
+        "链接错误",
+        "taskkill"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-err-lnk2019",
+      "kind": "fact",
+      "title": "未决议符号",
+      "summary": "LNK2019 先查声明与定义不一致",
+      "keywords": [
+        "lnk2019",
+        "未决议"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-err-ctest-config",
+      "kind": "fact",
+      "title": "ctest 配置坑",
+      "summary": "裸 ctest 报 Test not available，要带 -C Debug",
+      "keywords": [
+        "ctest配置",
+        "test not available",
+        "裸跑"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-err-gbk",
+      "kind": "fact",
+      "title": "GBK 崩溃",
+      "summary": "Windows 控制台 GBK 会崩，先 chcp 65001",
+      "keywords": [
+        "gbk",
+        "崩溃",
+        "chcp"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-err-apikey",
+      "kind": "fact",
+      "title": "钥匙不对",
+      "summary": "INVALID_API_KEY 多半打错了门，查 base url",
+      "keywords": [
+        "invalid_api_key",
+        "钥匙不对",
+        "base"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-err-timeout",
+      "kind": "fact",
+      "title": "网关 503",
+      "summary": "中转 503 就退避重试，别硬敲",
+      "keywords": [
+        "503",
+        "退避",
+        "重试"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-err-path",
+      "kind": "fact",
+      "title": "路径不认",
+      "summary": "MSYS 的 /tmp 它不认，要给 Windows 路径",
+      "keywords": [
+        "msys",
+        "路径不认",
+        "windows"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-err-port",
+      "kind": "fact",
+      "title": "端口占用",
+      "summary": "端口 7777 被占，先 lsof 查进程",
+      "keywords": [
+        "端口占用",
+        "7777",
+        "lsof"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-err-oom",
+      "kind": "fact",
+      "title": "链接器内存爆",
+      "summary": "链接器内存爆就把并行度降到 8",
+      "keywords": [
+        "链接器内存",
+        "内存爆",
+        "降并行度"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-dep-vcpkg",
+      "kind": "fact",
+      "title": "依赖管理",
+      "summary": "C++ 依赖走 vcpkg 清单模式",
+      "keywords": [
+        "依赖管理",
+        "vcpkg",
+        "清单"
+      ],
+      "paths": [
+        "vcpkg.json"
+      ]
+    },
+    {
+      "id": "fact.zh-dep-nlohmann",
+      "kind": "fact",
+      "title": "JSON 库",
+      "summary": "JSON 用 nlohmann，头文件直接进",
+      "keywords": [
+        "nlohmann",
+        "json"
+      ],
+      "paths": [
+        "vcpkg.json"
+      ]
+    },
+    {
+      "id": "fact.zh-dep-doctest-ver",
+      "kind": "fact",
+      "title": "测试库版本",
+      "summary": "doctest 钉在 2.4.11",
+      "keywords": [
+        "doctest",
+        "2.4.11"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-dep-fmt",
+      "kind": "fact",
+      "title": "格式库",
+      "summary": "fmt 只用 10 以上，注意 API 变动",
+      "keywords": [
+        "fmt",
+        "格式库"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-dep-openssl",
+      "kind": "fact",
+      "title": "加密库",
+      "summary": "TLS 走 OpenSSL 3，别引 1.1",
+      "keywords": [
+        "openssl",
+        "tls",
+        "加密库"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-dep-zlib",
+      "kind": "fact",
+      "title": "压缩库",
+      "summary": "zlib 只在出包用，运行时不带",
+      "keywords": [
+        "zlib",
+        "压缩库"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-dep-pin",
+      "kind": "fact",
+      "title": "版本钉死",
+      "summary": "三方依赖一律钉死版本，不浮动",
+      "keywords": [
+        "版本钉死",
+        "浮动版本"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-dep-review",
+      "kind": "fact",
+      "title": "新依赖门槛",
+      "summary": "加新依赖先过评审，说清替代案",
+      "keywords": [
+        "新依赖",
+        "依赖评审",
+        "替代案"
+      ],
+      "paths": []
+    },
+    {
+      "id": "preference.zh-lang-commit",
+      "kind": "preference",
+      "title": "提交语言",
+      "summary": "提交信息用中文，一行说清",
+      "keywords": [
+        "提交语言",
+        "提交信息",
+        "中文"
+      ],
+      "paths": []
+    },
+    {
+      "id": "preference.zh-answer-style",
+      "kind": "preference",
+      "title": "回答风格",
+      "summary": "回答先给结论，再给依据",
+      "keywords": [
+        "回答风格",
+        "先给结论"
+      ],
+      "paths": []
+    },
+    {
+      "id": "preference.zh-code-comment",
+      "kind": "preference",
+      "title": "注释习惯",
+      "summary": "注释写为什么，不复述代码",
+      "keywords": [
+        "注释习惯",
+        "注释"
+      ],
+      "paths": []
+    },
+    {
+      "id": "preference.zh-naming-cn",
+      "kind": "preference",
+      "title": "命名习惯",
+      "summary": "标识符用英文，注释用中文",
+      "keywords": [
+        "命名习惯",
+        "标识符",
+        "英文命名"
+      ],
+      "paths": []
+    },
+    {
+      "id": "preference.zh-error-handling",
+      "kind": "preference",
+      "title": "错误处理风格",
+      "summary": "错误处理用 expected，不抛异常",
+      "keywords": [
+        "错误处理",
+        "expected",
+        "异常"
+      ],
+      "paths": []
+    },
+    {
+      "id": "preference.zh-test-first",
+      "kind": "preference",
+      "title": "测试先行",
+      "summary": "修 bug 先补红测，再动实现",
+      "keywords": [
+        "测试先行",
+        "红测",
+        "修bug"
+      ],
+      "paths": []
+    },
+    {
+      "id": "preference.zh-doc-keep",
+      "kind": "preference",
+      "title": "文档同步",
+      "summary": "改接口要同步改 docs",
+      "keywords": [
+        "文档同步",
+        "改接口"
+      ],
+      "paths": [
+        "docs"
+      ]
+    },
+    {
+      "id": "preference.zh-small-pr",
+      "kind": "preference",
+      "title": "小步提交",
+      "summary": "一次提交只做一件事",
+      "keywords": [
+        "小步提交",
+        "一次一事"
+      ],
+      "paths": []
+    },
+    {
+      "id": "preference.zh-no-magic",
+      "kind": "preference",
+      "title": "不写魔数",
+      "summary": "魔数提成具名常量",
+      "keywords": [
+        "魔数",
+        "具名常量"
+      ],
+      "paths": []
+    },
+    {
+      "id": "preference.zh-shell",
+      "kind": "preference",
+      "title": "脚本shell",
+      "summary": "脚本按 bash 写，不迁 powershell",
+      "keywords": [
+        "bash",
+        "脚本shell",
+        "powershell"
+      ],
+      "paths": []
+    },
+    {
+      "id": "preference.zh-editor-tab",
+      "kind": "preference",
+      "title": "缩进",
+      "summary": "缩进四空格，不用 tab",
+      "keywords": [
+        "缩进",
+        "空格",
+        "tab"
+      ],
+      "paths": []
+    },
+    {
+      "id": "preference.zh-review-tone",
+      "kind": "preference",
+      "title": "评审语气",
+      "summary": "评审对事不对人，直说问题",
+      "keywords": [
+        "评审",
+        "评审语气",
+        "对事不对人"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-dup-cache-a",
+      "kind": "fact",
+      "title": "编译缓存目录",
+      "summary": "ccache 目录在 ~/.ccache，满了自动清",
+      "keywords": [
+        "缓存目录",
+        "ccache目录"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-dup-cache-b",
+      "kind": "fact",
+      "title": "编译缓存目录",
+      "summary": "ccache 目录在 ~/.ccache，满了自动清",
+      "keywords": [
+        "缓存目录",
+        "ccache目录"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-dup-deploy-a",
+      "kind": "fact",
+      "title": "部署节奏",
+      "summary": "每周只发两次，周二周四",
+      "keywords": [
+        "部署节奏",
+        "发版节奏",
+        "周二"
+      ],
+      "paths": [
+        "docs/deploy.md"
+      ]
+    },
+    {
+      "id": "fact.zh-dup-deploy-b",
+      "kind": "fact",
+      "title": "部署节奏",
+      "summary": "每周只发两次，周二周四",
+      "keywords": [
+        "部署节奏",
+        "发版节奏",
+        "周二"
+      ],
+      "paths": [
+        "docs/deploy.md"
+      ]
+    },
+    {
+      "id": "fact.zh-scope-web",
+      "kind": "fact",
+      "title": "前端构建",
+      "summary": "web 子树构建用 vite，产物进 dist",
+      "keywords": [
+        "前端构建",
+        "vite",
+        "dist"
+      ],
+      "paths": [
+        "web/build.ts"
+      ],
+      "scope": {
+        "kind": "subtree",
+        "value": "web"
+      }
+    },
+    {
+      "id": "fact.zh-expired-holiday",
+      "kind": "fact",
+      "title": "假期值班",
+      "summary": "春节值班表在 wiki 首页",
+      "keywords": [
+        "值班",
+        "春节",
+        "wiki"
+      ],
+      "paths": [],
+      "expires_at": "2025-01-01"
+    },
+    {
+      "id": "fact.zh-err-unicode",
+      "kind": "fact",
+      "title": "输出乱码",
+      "summary": "输出乱码先查终端编码与 locale",
+      "keywords": [
+        "乱码",
+        "终端编码"
+      ],
+      "paths": []
+    },
+    {
+      "id": "fact.zh-err-fullwidth",
+      "kind": "fact",
+      "title": "全角坑",
+      "summary": "用户输入常带全角冒号，解析要先归一",
+      "keywords": [
+        "全角",
+        "全角冒号",
+        "归一"
+      ],
+      "paths": []
+    }
+  ],
+  "queries": [
+    {
+      "query": "这个项目的发布代号是什么？只回复代号，不要调用工具。",
+      "expect": [
+        "fact.zh-release-codename"
+      ]
+    },
+    {
+      "query": "构建产物放在哪个目录里？",
+      "expect": [
+        "fact.zh-build-dir"
+      ]
+    },
+    {
+      "query": "并行编译最多开多少路？",
+      "expect": [
+        "fact.zh-build-parallel"
+      ]
+    },
+    {
+      "query": "ccache 的命中率大概多少？",
+      "expect": [
+        "fact.zh-build-cache"
+      ]
+    },
+    {
+      "query": "出了告警还能合并吗？",
+      "expect": [
+        "fact.zh-build-warning"
+      ]
+    },
+    {
+      "query": "预编译头挂在哪几处？",
+      "expect": [
+        "fact.zh-build-pch"
+      ]
+    },
+    {
+      "query": "本地构建的生成器固定用什么？",
+      "expect": [
+        "fact.zh-build-ninja"
+      ]
+    },
+    {
+      "query": "调试信息是什么格式？",
+      "expect": [
+        "fact.zh-build-debug-info"
+      ]
+    },
+    {
+      "query": "工具链要过哪几家编译器？",
+      "expect": [
+        "fact.zh-build-toolchain"
+      ]
+    },
+    {
+      "query": "插件目标要加什么编译选项？",
+      "expect": [
+        "fact.zh-build-fpic"
+      ]
+    },
+    {
+      "query": "LTO 在哪个配置下才开？",
+      "expect": [
+        "fact.zh-build-lto"
+      ]
+    },
+    {
+      "query": "bootstrap 脚本都做什么？",
+      "expect": [
+        "fact.zh-build-bootstrap"
+      ]
+    },
+    {
+      "query": "源外构建是什么规矩？",
+      "expect": [
+        "fact.zh-build-out-of-source"
+      ]
+    },
+    {
+      "query": "ctest 怎么跑才算全绿？",
+      "expect": [
+        "fact.zh-test-runner"
+      ]
+    },
+    {
+      "query": "测试用例的命名有什么讲究？",
+      "expect": [
+        "fact.zh-test-naming-zh"
+      ]
+    },
+    {
+      "query": "固定语料应该放在哪里？",
+      "expect": [
+        "fact.zh-test-fixture"
+      ]
+    },
+    {
+      "query": "单测用的什么框架？",
+      "expect": [
+        "fact.zh-test-doctest"
+      ]
+    },
+    {
+      "query": "用例之间怎么隔离？",
+      "expect": [
+        "fact.zh-test-isolation"
+      ]
+    },
+    {
+      "query": "test_sse 那个不稳的用例怎么办？",
+      "expect": [
+        "fact.zh-test-flaky"
+      ]
+    },
+    {
+      "query": "覆盖率统计算哪些目录？",
+      "expect": [
+        "fact.zh-test-coverage"
+      ]
+    },
+    {
+      "query": "模糊测试的随机种子是多少？",
+      "expect": [
+        "fact.zh-test-seed"
+      ]
+    },
+    {
+      "query": "假后端用的是哪个类？",
+      "expect": [
+        "fact.zh-test-mock"
+      ]
+    },
+    {
+      "query": "单个用例的超时上限是多少秒？",
+      "expect": [
+        "fact.zh-test-timeout"
+      ]
+    },
+    {
+      "query": "回归集放在哪个文件？",
+      "expect": [
+        "fact.zh-test-regression"
+      ]
+    },
+    {
+      "query": "生产机是什么操作系统？",
+      "expect": [
+        "fact.zh-deploy-host"
+      ]
+    },
+    {
+      "query": "上生产用什么账号？",
+      "expect": [
+        "fact.zh-deploy-user"
+      ]
+    },
+    {
+      "query": "什么时段允许发版？",
+      "expect": [
+        "fact.zh-deploy-window"
+      ]
+    },
+    {
+      "query": "回滚操作是怎么做的？",
+      "expect": [
+        "fact.zh-deploy-rollback"
+      ]
+    },
+    {
+      "query": "拉依赖包要过哪个代理？",
+      "expect": [
+        "fact.zh-env-proxy"
+      ]
+    },
+    {
+      "query": "FetchContent 从哪个镜像拉？",
+      "expect": [
+        "fact.zh-env-mirror"
+      ]
+    },
+    {
+      "query": "服务器的 Python 是什么版本？",
+      "expect": [
+        "fact.zh-env-python"
+      ]
+    },
+    {
+      "query": "构建机磁盘水位到多少要清理？",
+      "expect": [
+        "fact.zh-env-disk"
+      ]
+    },
+    {
+      "query": "容器基底镜像用的是什么？",
+      "expect": [
+        "fact.zh-env-docker"
+      ]
+    },
+    {
+      "query": "真正的钥匙放在哪里？",
+      "expect": [
+        "fact.zh-env-secrets"
+      ]
+    },
+    {
+      "query": "项目记忆的存取在哪个模块？",
+      "expect": [
+        "fact.zh-mod-memory"
+      ]
+    },
+    {
+      "query": "生命周期钩子在哪里分发？",
+      "expect": [
+        "fact.zh-mod-hooks"
+      ]
+    },
+    {
+      "query": "语言服务器的起停归谁管？",
+      "expect": [
+        "fact.zh-mod-lsp"
+      ]
+    },
+    {
+      "query": "外部工具服务怎么接入？",
+      "expect": [
+        "fact.zh-mod-mcp"
+      ]
+    },
+    {
+      "query": "终端界面在哪一层？",
+      "expect": [
+        "fact.zh-mod-cli"
+      ]
+    },
+    {
+      "query": "主循环与消息装配在哪里？",
+      "expect": [
+        "fact.zh-mod-agent"
+      ]
+    },
+    {
+      "query": "双协议的请求在哪一层处理？",
+      "expect": [
+        "fact.zh-mod-api"
+      ]
+    },
+    {
+      "query": "平台差异收在哪个模块？",
+      "expect": [
+        "fact.zh-mod-platform"
+      ]
+    },
+    {
+      "query": "内置工具集在哪个目录？",
+      "expect": [
+        "fact.zh-mod-tools"
+      ]
+    },
+    {
+      "query": "四级配置合并在哪里实现？",
+      "expect": [
+        "fact.zh-mod-config"
+      ]
+    },
+    {
+      "query": "i18n 的键中英两边要注意什么？",
+      "expect": [
+        "fact.zh-mod-i18n"
+      ]
+    },
+    {
+      "query": "内置主题有哪几套？",
+      "expect": [
+        "fact.zh-mod-theme"
+      ]
+    },
+    {
+      "query": "会话存档怎么恢复？",
+      "expect": [
+        "fact.zh-mod-session"
+      ]
+    },
+    {
+      "query": "并行开发怎么开地盘？",
+      "expect": [
+        "fact.zh-mod-worktree"
+      ]
+    },
+    {
+      "query": "全量清理怎么跑？",
+      "expect": [
+        "fact.zh-cmd-clean"
+      ]
+    },
+    {
+      "query": "代码格式化用什么命令？",
+      "expect": [
+        "fact.zh-cmd-format"
+      ]
+    },
+    {
+      "query": "clang-tidy 检查哪些范围？",
+      "expect": [
+        "fact.zh-cmd-lint"
+      ]
+    },
+    {
+      "query": "出包脚本能打几个平台？",
+      "expect": [
+        "fact.zh-cmd-release"
+      ]
+    },
+    {
+      "query": "跑数据迁移前要注意什么？",
+      "expect": [
+        "fact.zh-cmd-migrate"
+      ]
+    },
+    {
+      "query": "环境自检用什么命令？",
+      "expect": [
+        "fact.zh-cmd-doctor"
+      ]
+    },
+    {
+      "query": "运行日志放在哪里？",
+      "expect": [
+        "fact.zh-cmd-log"
+      ]
+    },
+    {
+      "query": "本轮用量在哪里看？",
+      "expect": [
+        "fact.zh-cmd-stats"
+      ]
+    },
+    {
+      "query": "错误码 E2401 是什么意思？",
+      "expect": [
+        "fact.zh-err-e2401"
+      ]
+    },
+    {
+      "query": "LNK1104 报错怎么解决？",
+      "expect": [
+        "fact.zh-err-lnk1104"
+      ]
+    },
+    {
+      "query": "LNK2019 先查什么？",
+      "expect": [
+        "fact.zh-err-lnk2019"
+      ]
+    },
+    {
+      "query": "裸跑 ctest 会报什么错？",
+      "expect": [
+        "fact.zh-err-ctest-config"
+      ]
+    },
+    {
+      "query": "Windows 控制台乱码还崩溃怎么办？",
+      "expect": [
+        "fact.zh-err-gbk",
+        "fact.zh-err-unicode"
+      ]
+    },
+    {
+      "query": "INVALID_API_KEY 一般是什么原因？",
+      "expect": [
+        "fact.zh-err-apikey"
+      ]
+    },
+    {
+      "query": "中转返回 503 怎么处理？",
+      "expect": [
+        "fact.zh-err-timeout"
+      ]
+    },
+    {
+      "query": "MSYS 的路径它不认怎么办？",
+      "expect": [
+        "fact.zh-err-path"
+      ]
+    },
+    {
+      "query": "7777 端口被占了先查什么？",
+      "expect": [
+        "fact.zh-err-port"
+      ]
+    },
+    {
+      "query": "ccache 的缓存目录在哪里？",
+      "expect": [
+        "fact.zh-dup-cache-a",
+        "fact.zh-dup-cache-b"
+      ]
+    },
+    {
+      "query": "部署节奏是怎样的？",
+      "expect": [
+        "fact.zh-dup-deploy-a",
+        "fact.zh-dup-deploy-b"
+      ]
+    },
+    {
+      "query": "web 子树的前端构建用什么？",
+      "expect": [
+        "fact.zh-scope-web"
+      ],
+      "cwd": "web"
+    },
+    {
+      "query": "C++ 依赖用什么管理？",
+      "expect": [
+        "fact.zh-dep-vcpkg"
+      ]
+    },
+    {
+      "query": "JSON 用的哪个库？",
+      "expect": [
+        "fact.zh-dep-nlohmann"
+      ]
+    },
+    {
+      "query": "doctest 钉在哪个版本？",
+      "expect": [
+        "fact.zh-dep-doctest-ver"
+      ]
+    },
+    {
+      "query": "fmt 要注意什么？",
+      "expect": [
+        "fact.zh-dep-fmt"
+      ]
+    },
+    {
+      "query": "TLS 用哪个版本的库？",
+      "expect": [
+        "fact.zh-dep-openssl"
+      ]
+    },
+    {
+      "query": "加新依赖要过什么门槛？",
+      "expect": [
+        "fact.zh-dep-review"
+      ]
+    },
+    {
+      "query": "提交信息用什么语言写？",
+      "expect": [
+        "preference.zh-lang-commit"
+      ]
+    },
+    {
+      "query": "回答风格有什么要求？",
+      "expect": [
+        "preference.zh-answer-style"
+      ]
+    },
+    {
+      "query": "注释应该写什么内容？",
+      "expect": [
+        "preference.zh-code-comment"
+      ]
+    },
+    {
+      "query": "标识符和注释分别用什么语言？",
+      "expect": [
+        "preference.zh-naming-cn"
+      ]
+    },
+    {
+      "query": "错误处理用什么风格？",
+      "expect": [
+        "preference.zh-error-handling"
+      ]
+    },
+    {
+      "query": "修bug 的步骤是什么？",
+      "expect": [
+        "preference.zh-test-first"
+      ]
+    },
+    {
+      "query": "改接口要同步做什么？",
+      "expect": [
+        "preference.zh-doc-keep"
+      ]
+    },
+    {
+      "query": "一次提交做几件事？",
+      "expect": [
+        "preference.zh-small-pr"
+      ]
+    },
+    {
+      "query": "魔数怎么处理？",
+      "expect": [
+        "preference.zh-no-magic"
+      ]
+    },
+    {
+      "query": "脚本按什么 shell 写？",
+      "expect": [
+        "preference.zh-shell"
+      ]
+    },
+    {
+      "query": "缩进用空格还是 tab？",
+      "expect": [
+        "preference.zh-editor-tab"
+      ]
+    },
+    {
+      "query": "评审有什么讲究？",
+      "expect": [
+        "preference.zh-review-tone"
+      ]
+    },
+    {
+      "query": "输出乱码先查什么？",
+      "expect": [
+        "fact.zh-err-unicode"
+      ]
+    },
+    {
+      "query": "用户输入带全角冒号怎么办？",
+      "expect": [
+        "fact.zh-err-fullwidth"
+      ]
+    },
+    {
+      "query": "今天中午吃什么好？",
+      "expect": []
+    },
+    {
+      "query": "帮我写一首关于秋天的诗",
+      "expect": []
+    },
+    {
+      "query": "怎么减肥比较健康？",
+      "expect": []
+    },
+    {
+      "query": "量子计算入门看什么书？",
+      "expect": []
+    },
+    {
+      "query": "现在的房贷利率是多少",
+      "expect": []
+    },
+    {
+      "query": "周报应该怎么写？",
+      "expect": []
+    },
+    {
+      "query": "面试的时候要注意什么？",
+      "expect": []
+    },
+    {
+      "query": "怎么做自我介绍比较好？",
+      "expect": []
+    },
+    {
+      "query": "五子棋的规则是什么？",
+      "expect": []
+    },
+    {
+      "query": "路由器的密码忘了怎么办",
+      "expect": []
+    },
+    {
+      "query": "显卡驱动怎么更新？",
+      "expect": []
+    },
+    {
+      "query": "正则表达式入门教程推荐",
+      "expect": []
+    },
+    {
+      "query": "健康饮食有什么建议",
+      "expect": []
+    },
+    {
+      "query": "学英语用什么 app 好？",
+      "expect": []
+    },
+    {
+      "query": "怎么备份手机里的照片？",
+      "expect": []
+    },
+    {
+      "query": "周末去哪里玩比较好",
+      "expect": []
+    },
+    {
+      "query": "猫咪掉毛严重怎么办",
+      "expect": []
+    },
+    {
+      "query": "咖啡和茶哪个更提神",
+      "expect": []
+    },
+    {
+      "query": "内存泄漏一般怎么排查？",
+      "expect": []
+    },
+    {
+      "query": "单例模式应该怎么写？",
+      "expect": []
+    },
+    {
+      "query": "依赖注入是什么设计模式？",
+      "expect": []
+    },
+    {
+      "query": "docker 容器怎么进去？",
+      "expect": []
+    },
+    {
+      "query": "git 怎么撤销上一次提交",
+      "expect": []
+    },
+    {
+      "query": "数据库索引怎么优化？",
+      "expect": []
+    },
+    {
+      "query": "网关选型看哪些指标？",
+      "expect": []
+    },
+    {
+      "query": "编译原理有什么好书推荐",
+      "expect": []
+    },
+    {
+      "query": "怎么学好线性代数",
+      "expect": []
+    },
+    {
+      "query": "早餐吃什么比较有营养",
+      "expect": []
+    },
+    {
+      "query": "健身一周练几次比较好",
+      "expect": []
+    },
+    {
+      "query": "最近的股市行情怎么样",
+      "expect": []
+    },
+    {
+      "query": "孩子不爱写作业怎么办",
+      "expect": []
+    },
+    {
+      "query": "汽车保养周期是多久？",
+      "expect": []
+    },
+    {
+      "query": "春节值班表在哪里看？",
+      "expect": []
+    },
+    {
+      "query": "线程池大小一般怎么定？",
+      "expect": []
+    },
+    {
+      "query": "电脑磁盘怎么分区比较好",
+      "expect": []
+    },
+    {
+      "query": "这个是怎么弄的呢？",
+      "expect": []
+    },
+    {
+      "query": "接下来该怎么办？",
+      "expect": []
+    },
+    {
+      "query": "还有别的什么办法吗",
+      "expect": []
+    },
+    {
+      "query": "你看这样行不行",
+      "expect": []
+    }
+  ]
+}
