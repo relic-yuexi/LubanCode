@@ -582,8 +582,7 @@ TEST_CASE("ProjectMemory: 候选箱走 add/review/accept,拒绝项防死缠") {
     CHECK_FALSE(store.AcceptCandidate("whatever").has_value());
 }
 
-TEST_CASE("ProjectMemory: 检索扩展词并进下一轮词法查询") {
-    const fs::path root = TempRoot("hints");
+TEST_CASE("ProjectMemory: 检索扩展词并进下一轮词法查询") {    const fs::path root = TempRoot("hints");
     const fs::path repo = root / "repo";
     fs::create_directories(repo / ".git");
     Write(repo / "pyproject.toml", "[project]\n");
@@ -610,4 +609,92 @@ TEST_CASE("ProjectMemory: 检索扩展词并进下一轮词法查询") {
     store.SetRetrievalHints({"uv"});
     CHECK(store.BuildTurnContext("帮我把包加上", repo).find("## 召回: preference.dep-tool") !=
           std::string::npos);
+}
+
+TEST_CASE("ProjectMemory: schema 1 旧主题平滑读入,核验后升 schema 2") {
+    const fs::path root = TempRoot("schema1");
+    const fs::path repo = root / "repo";
+    fs::create_directories(repo / ".git");
+    Write(repo / "legacy.cpp", "int LegacyEntry() { return 1; }\n");
+    const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
+    REQUIRE(identity.has_value());
+    memory::Options options;
+    options.global_allowed = true;
+    options.enabled = true;
+    memory::ProjectMemory store(*identity, root / "home", options);
+
+    // 手写一份 schema 1 老主题(升级前的存量格式)。
+    const fs::path facts_dir = store.memory_dir() / "facts";
+    fs::create_directories(facts_dir);
+    const std::string legacy_meta =
+        "<!-- lubancode-memory\n"
+        R"({"schema":1,"id":"fact.legacy-entry","kind":"fact","title":"老版入口","summary":"LegacyEntry 住在 legacy.cpp","keywords":["LegacyEntry"],"paths":["legacy.cpp"],"status":"active","updated_at":"2025-06-01T00:00:00Z","source_sessions":[],"fingerprints":{}})"
+        "\n-->\n\n# 老版入口\n\nLegacyEntry 返回一,老正文原样保留。\n";
+    Write(facts_dir / "fact.legacy-entry.md", legacy_meta);
+    REQUIRE(store.EnqueueRebuild().has_value());
+    REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
+
+    // 可读、可列、可召回。
+    const auto entries = store.ListEntries();
+    REQUIRE(entries.size() == 1);
+    CHECK(entries[0].id == "fact.legacy-entry");
+    CHECK(entries[0].confidence == "verified");  // schema 1 推定
+    CHECK(entries[0].scope.kind == "project");
+    const std::string context = store.BuildTurnContext("LegacyEntry 在哪", repo);
+    CHECK(context.find("老正文原样保留") != std::string::npos);
+
+    // 核验:原 id 复活,元数据顺手升 schema 2,正文一字不动。
+    REQUIRE(store.EnqueueVerify("fact.legacy-entry", /*refresh=*/false).has_value());
+    REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
+    const std::string upgraded = Read(facts_dir / "fact.legacy-entry.md");
+    CHECK(upgraded.find("\"schema\":2") != std::string::npos);  // 主题元数据是紧凑 JSON
+    CHECK(upgraded.find("last_verified_at") != std::string::npos);
+    CHECK(upgraded.find("老正文原样保留") != std::string::npos);
+    // 文件没动过,核验后不在陈旧清单。
+    CHECK(store.ListStaleEntries().empty());
+}
+
+TEST_CASE("ProjectMemory: scope 不符不注入,subtree 内加分可召回") {
+    const fs::path root = TempRoot("scope");
+    const fs::path repo = root / "repo";
+    fs::create_directories(repo / ".git");
+    fs::create_directories(repo / "web");
+    fs::create_directories(repo / "src");
+    const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
+    REQUIRE(identity.has_value());
+    memory::Options options;
+    options.global_allowed = true;
+    options.enabled = true;
+    memory::ProjectMemory store(*identity, root / "home", options);
+
+    memory::SaveRequest request;
+    request.kind = memory::MemoryKind::Fact;
+    request.id = "fact.frontend-build";
+    request.title = "前端构建";
+    request.summary = "web 子树 vite 构建";
+    request.content = "web 子树的构建入口。";
+    request.keywords = {"vite"};
+    request.scope.kind = "subtree";
+    request.scope.value = "web";
+    REQUIRE(store.EnqueueSave(request).has_value());
+    REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
+
+    // 关键词硬命中,但 cwd 在 src(越区):不注入。
+    CHECK(store.BuildTurnContext("vite 构建", repo / "src").find("## 召回") == std::string::npos);
+    // cwd 落在 web 子树内:照常召回。
+    CHECK(store.BuildTurnContext("vite 构建", repo / "web").find("## 召回: fact.frontend-build") !=
+          std::string::npos);
+
+    // scope 校验:global 键位预留,本期拒收;subtree 缺路径也拒。
+    memory::SaveRequest bad = request;
+    bad.id.clear();
+    bad.title = "越权写";
+    bad.scope.kind = "global";
+    CHECK_FALSE(store.EnqueueSave(bad).has_value());
+    bad.scope.kind = "subtree";
+    bad.scope.value.clear();
+    CHECK_FALSE(store.EnqueueSave(bad).has_value());
+    bad.scope.kind = "project";
+    bad.expires_at = "not-a-date";
+    CHECK_FALSE(store.EnqueueSave(bad).has_value());
 }

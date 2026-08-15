@@ -1316,7 +1316,9 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
                 continue;
             }
             std::string reason;
-            if (entry.stale_blocked) reason = tr("cmd.memory.why.stale");
+            if (entry.expired) reason = tr("cmd.memory.why.expired");
+            else if (entry.scope_blocked) reason = tr("cmd.memory.why.scope");
+            else if (entry.stale_blocked) reason = tr("cmd.memory.why.stale");
             else if (entry.below_threshold) reason = tr("cmd.memory.why.below_threshold");
             else if (entry.budget_dropped) reason = tr("cmd.memory.why.budget");
             else reason = tr("cmd.memory.why.skipped");
@@ -1392,6 +1394,38 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
     }
     if (action == "rebuild") {
         const auto queued = project_memory->EnqueueRebuild();
+        std::cout << (queued.has_value() ? trf("cmd.memory.queued", *queued)
+                                         : trf("cmd.memory.queue_failed", queued.error()))
+                  << "\n";
+        return;
+    }
+    if (action == "stale") {
+        const auto stale = project_memory->ListStaleEntries();
+        if (stale.empty()) {
+            std::cout << tr("cmd.memory.stale.empty") << "\n";
+            return;
+        }
+        std::cout << tr("cmd.memory.stale.header") << "\n";
+        for (const auto& item : stale) {
+            std::cout << "- " << item.entry.id << " [" << item.reason << "] " << item.entry.title;
+            if (item.reason == "fingerprint") {
+                std::cout << " (" << tr("cmd.memory.stale.fingerprint") << ")";
+            } else {
+                std::cout << " (" << tr("cmd.memory.stale.expired") << ": " << item.entry.expires_at << ")";
+            }
+            std::cout << "\n";
+        }
+        std::cout << tr("cmd.memory.stale.hint") << "\n";
+        return;
+    }
+    if (action == "verify" || action == "refresh") {
+        std::string id;
+        words >> id;
+        if (id.empty()) {
+            PrintMemoryUsage();
+            return;
+        }
+        const auto queued = project_memory->EnqueueVerify(id, action == "refresh");
         std::cout << (queued.has_value() ? trf("cmd.memory.queued", *queued)
                                          : trf("cmd.memory.queue_failed", queued.error()))
                   << "\n";

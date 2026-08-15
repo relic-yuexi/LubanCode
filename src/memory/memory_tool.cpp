@@ -9,8 +9,10 @@ std::string MemorySaveTool::name() const {
 }
 
 std::string MemorySaveTool::description() const {
-    return "把一条小而稳定的项目事实或用户明确偏好排进后台记忆。只在信息已经由源码、工具结果或用户明说证实时调用；"
-           "不要保存当前任务进度、猜测、日志、网页/MCP 原文、密钥或个人数据。已有同主题时沿用索引里的 id 做更新。";
+    return "把一条小而稳定的项目事实或用户明确偏好排进后台记忆(正式入库,不经待审区)。"
+           "只在信息已经由源码、工具结果或用户明说证实时调用;fact 必须在 paths 或 evidence 里"
+           "给出可核验证据。不要保存当前任务进度、猜测、日志、网页/MCP 原文、密钥或个人数据。"
+           "已有同主题时沿用索引里的 id 做更新。自动候选走回合总结,不经过这个工具。";
 }
 
 nlohmann::json MemorySaveTool::input_schema() const {
@@ -27,7 +29,30 @@ nlohmann::json MemorySaveTool::input_schema() const {
              {"keywords", {{"type", "array"}, {"items", {{"type", "string"}}},
                            {"description", "函数名、类名、命令等精确检索词，最多 16 项"}}},
              {"paths", {{"type", "array"}, {"items", {{"type", "string"}}},
-                        {"description", "支撑事实的项目内相对路径，最多 24 项"}}},
+                        {"description", "支撑事实的项目内相对路径，最多 24 项；fact 必填至少一项"}}},
+             {"confidence", {{"type", "string"}, {"enum", {"user-stated", "verified", "inferred"}},
+                             {"description", "user-stated=用户明说的偏好；verified=已核验的事实；"
+                                             "inferred=推断(只该出现在待审候选，不该走本工具)"}}},
+             {"scope", {{"type", "object"},
+                        {"properties",
+                         {
+                             {"kind", {{"type", "string"}, {"enum", {"project", "subtree", "path"}},
+                                       {"description", "记忆适用的范围；subtree/path 须配 value"}}},
+                             {"value", {{"type", "string"}, {"description", "项目内相对路径(subtree/path 时必填)"}}},
+                         }},
+                        {"description", "可选。当前工作目录不在范围内时不注入，防串味"}}},
+             {"evidence", {{"type", "array"},
+                           {"items",
+                            {{"type", "object"},
+                             {"properties",
+                              {
+                                  {"path", {{"type", "string"}, {"description", "项目内相对路径"}}},
+                                  {"symbol", {{"type", "string"}, {"description", "可选:函数/类/配置键"}}},
+                              }},
+                             {"required", {"path"}}}},
+                           {"description", "可选。可核验证据，最多 24 项；fact 建议给出"}}},
+             {"expires_at", {{"type", "string"},
+                             {"description", "可选。临时规约的到期日(YYYY-MM-DD 或 ISO 时间);到期后不再召回"}}},
          }},
         {"required", {"kind", "title", "summary", "content"}},
     };
@@ -49,6 +74,22 @@ tools::Tool::Result MemorySaveTool::execute(const nlohmann::json& input) {
     request.title = input["title"].get<std::string>();
     request.summary = input["summary"].get<std::string>();
     request.content = input["content"].get<std::string>();
+    request.confidence = input.value("confidence", std::string());
+    request.expires_at = input.value("expires_at", std::string());
+    if (input.contains("scope") && input["scope"].is_object()) {
+        request.scope.kind = input["scope"].value("kind", std::string("project"));
+        request.scope.value = input["scope"].value("value", std::string());
+    }
+    if (input.contains("evidence") && input["evidence"].is_array()) {
+        for (const auto& item : input["evidence"]) {
+            if (!item.is_object()) return {"evidence 每项必须是带 path 的 object", true};
+            MemoryEvidence evidence;
+            evidence.path = item.value("path", std::string());
+            evidence.symbol = item.value("symbol", std::string());
+            if (evidence.path.empty()) return {"evidence 每项必须有 path", true};
+            request.evidence.push_back(std::move(evidence));
+        }
+    }
     for (const char* field : {"keywords", "paths"}) {
         if (!input.contains(field)) continue;
         if (!input[field].is_array()) return {std::string(field) + " 必须是字符串数组", true};

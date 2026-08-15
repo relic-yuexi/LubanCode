@@ -96,6 +96,8 @@ add_executable(lubancode_tests
   test_app_commands.cpp
   # memory 回合抽取(分型/转写/JSON 解析,纯函数)。
   test_memory_extract.cpp
+  # memory 检索评测尺子(固定语料,Recall/Precision/注入字节/stale 拦截率)。
+  test_memory_retrieval.cpp
   ${CMAKE_SOURCE_DIR}/src/app/cli_options.cpp
   ${CMAKE_SOURCE_DIR}/src/app/backend_stack.cpp
   ${CMAKE_SOURCE_DIR}/src/app/memory_extract.cpp

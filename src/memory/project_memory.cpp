@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <cmath>
 #include <ctime>
 #include <fstream>
 #include <iomanip>
@@ -12,6 +13,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <nlohmann/json.hpp>
@@ -260,6 +262,41 @@ bool LooksSensitive(const SaveRequest& request) {
     return false;
 }
 
+bool LooksLikeDateOrIsoTime(const std::string& raw) {
+    // 宽松校验:YYYY-MM-DD 起头,可带 THH:MM:SSZ。字典序即时间序,召回
+    // 侧只做字符串比较。
+    if (raw.size() < 10) return false;
+    for (std::size_t i = 0; i < 10; ++i) {
+        const char c = raw[i];
+        const bool digit = c >= '0' && c <= '9';
+        const bool dash = c == '-' && (i == 4 || i == 7);
+        if (!digit && !dash) return false;
+    }
+    for (std::size_t i = 10; i < raw.size(); ++i) {
+        const char c = raw[i];
+        if (!((c >= '0' && c <= '9') || c == ':' || c == 'T' || c == 'Z' || c == '+' || c == '-')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::expected<void, std::string> ValidateScope(const MemoryScope& scope) {
+    if (scope.kind == "project") return {};
+    if (scope.kind == "global") {
+        // 跨项目/全局经验本期不做:键位预留(schema 注释见 MemoryScope),
+        // 现在写入只会裂出第二套分账,先拒。
+        return std::unexpected("scope=global 本期未开放,跨项目经验暂不收");
+    }
+    if (scope.kind != "subtree" && scope.kind != "path") {
+        return std::unexpected("scope.kind 只认 project、subtree 或 path");
+    }
+    if (!IsSafeRelativePath(scope.value)) {
+        return std::unexpected("scope=subtree/path 须带项目内相对路径");
+    }
+    return {};
+}
+
 std::expected<void, std::string> ValidateSaveRequest(const SaveRequest& request) {
     if (request.title.empty() || request.title.size() > kMaxTitleBytes) {
         return std::unexpected("记忆标题不能为空，且不能超过 200 字节");
@@ -286,6 +323,24 @@ std::expected<void, std::string> ValidateSaveRequest(const SaveRequest& request)
         if (!IsSafeRelativePath(path)) {
             return std::unexpected("记忆 paths 只许项目内相对路径: " + path);
         }
+    }
+    if (!request.confidence.empty() && request.confidence != "user-stated" &&
+        request.confidence != "verified" && request.confidence != "inferred") {
+        return std::unexpected("confidence 只认 user-stated、verified 或 inferred");
+    }
+    if (auto scope = ValidateScope(request.scope); !scope.has_value()) {
+        return std::unexpected(scope.error());
+    }
+    if (request.evidence.size() > kMaxPaths) {
+        return std::unexpected("evidence 最多 24 项");
+    }
+    for (const auto& item : request.evidence) {
+        if (!IsSafeRelativePath(item.path)) {
+            return std::unexpected("evidence 路径只许项目内相对路径: " + item.path);
+        }
+    }
+    if (!request.expires_at.empty() && !LooksLikeDateOrIsoTime(request.expires_at)) {
+        return std::unexpected("expires_at 须是 YYYY-MM-DD 或 ISO 时间");
     }
     if (LooksSensitive(request)) {
         return std::unexpected("记忆疑似含密钥、口令或认证头，拒绝落盘");
@@ -366,8 +421,12 @@ struct StoredEntry {
 };
 
 nlohmann::json EntryMetadata(const StoredEntry& entry) {
+    nlohmann::json evidence = nlohmann::json::array();
+    for (const auto& item : entry.public_entry.evidence) {
+        evidence.push_back(nlohmann::json{{"path", item.path}, {"symbol", item.symbol}});
+    }
     return nlohmann::json{
-        {"schema", 1},
+        {"schema", 2},
         {"id", entry.public_entry.id},
         {"kind", MemoryKindName(entry.public_entry.kind)},
         {"title", entry.public_entry.title},
@@ -377,13 +436,24 @@ nlohmann::json EntryMetadata(const StoredEntry& entry) {
         {"status", entry.public_entry.status},
         {"updated_at", entry.public_entry.updated_at},
         {"source_sessions", entry.public_entry.source_sessions},
+        {"scope", nlohmann::json{{"kind", entry.public_entry.scope.kind},
+                                 {"value", entry.public_entry.scope.value}}},
+        {"evidence", evidence},
+        {"confidence", entry.public_entry.confidence},
+        {"last_verified_at", entry.public_entry.last_verified_at},
+        {"expires_at", entry.public_entry.expires_at.empty() ? nlohmann::json()
+                                                             : nlohmann::json(entry.public_entry.expires_at)},
         {"fingerprints", entry.fingerprints},
     };
 }
 
 std::expected<StoredEntry, std::string> ParseStoredEntry(const nlohmann::json& meta,
                                                          const std::string& relative_file) {
-    if (!meta.is_object() || meta.value("schema", 0) != 1) {
+    // schema 1 平滑迁移:老主题照读,新字段填缺省值(confidence 按 kind 推
+    // 定,scope=project);下次同 id 保存或核验时自然写成 schema 2,老正文
+    // 一字不动。
+    const int schema = meta.value("schema", 0);
+    if (!meta.is_object() || (schema != 1 && schema != 2)) {
         return std::unexpected("记忆元数据 schema 不受支持");
     }
     StoredEntry entry;
@@ -420,6 +490,29 @@ std::expected<StoredEntry, std::string> ParseStoredEntry(const nlohmann::json& m
         for (const auto& item : meta["source_sessions"]) {
             if (item.is_string()) entry.public_entry.source_sessions.push_back(item.get<std::string>());
         }
+    }
+    if (meta.contains("scope") && meta["scope"].is_object()) {
+        entry.public_entry.scope.kind = meta["scope"].value("kind", std::string("project"));
+        entry.public_entry.scope.value = meta["scope"].value("value", std::string());
+    }
+    if (meta.contains("evidence") && meta["evidence"].is_array()) {
+        for (const auto& item : meta["evidence"]) {
+            if (!item.is_object()) continue;
+            MemoryEvidence evidence;
+            evidence.path = item.value("path", std::string());
+            evidence.symbol = item.value("symbol", std::string());
+            if (!evidence.path.empty()) entry.public_entry.evidence.push_back(std::move(evidence));
+        }
+    }
+    entry.public_entry.confidence = meta.value("confidence", std::string());
+    if (entry.public_entry.confidence.empty()) {
+        // schema 1 缺省推定:fact 本就该核验过,preference 本就该用户明说。
+        entry.public_entry.confidence =
+            entry.public_entry.kind == MemoryKind::Fact ? "verified" : "user-stated";
+    }
+    entry.public_entry.last_verified_at = meta.value("last_verified_at", std::string());
+    if (meta.contains("expires_at") && meta["expires_at"].is_string()) {
+        entry.public_entry.expires_at = meta["expires_at"].get<std::string>();
     }
     if (meta.contains("fingerprints") && meta["fingerprints"].is_object()) {
         entry.fingerprints = meta["fingerprints"];
@@ -587,98 +680,140 @@ std::vector<std::string> Utf8Units(const std::string& text) {
     return units;
 }
 
-std::unordered_set<std::string> QueryTerms(const std::string& query) {
-    std::unordered_set<std::string> terms;
-    const std::string lower = LowerAscii(query);
-    std::string token;
-    for (const unsigned char c : lower) {
-        if (c < 0x80 && (std::isalnum(c) != 0 || c == '_' || c == '.' || c == '/' || c == '-')) {
-            token.push_back(static_cast<char>(c));
-        } else {
-            if (token.size() >= 2) terms.insert(token);
-            token.clear();
+// ---- 检索分词与 BM25(第三期) ----
+// 标识符拆分(BuildTurnContext -> build/turn/context;project_memory.cpp
+// -> project/memory/cpp),中文出双字片段;查询与索引共用同一套分词,
+// 才能保证倒排表两侧对得上。
+
+// 拆一个 ASCII 标识符:驼峰边界(小写->大写、大写串末位接小写)切开;
+// 每段小写化。整串(小写化)也一并返回——精确匹配完整标识符仍是一条词。
+void SplitIdentifier(const std::string& word, std::vector<std::string>& out) {
+    std::vector<std::size_t> cuts{0};
+    for (std::size_t i = 1; i < word.size(); ++i) {
+        const bool prev_upper = std::isupper(static_cast<unsigned char>(word[i - 1])) != 0;
+        const bool cur_upper = std::isupper(static_cast<unsigned char>(word[i])) != 0;
+        const bool next_lower =
+            i + 1 < word.size() && std::islower(static_cast<unsigned char>(word[i + 1])) != 0;
+        if ((cur_upper && !prev_upper) || (cur_upper && prev_upper && next_lower)) {
+            cuts.push_back(i);
         }
     }
-    if (token.size() >= 2) terms.insert(token);
-    const auto units = Utf8Units(query);
-    for (std::size_t i = 0; i + 1 < units.size(); ++i) {
-        if (static_cast<unsigned char>(units[i][0]) >= 0x80 ||
-            static_cast<unsigned char>(units[i + 1][0]) >= 0x80) {
-            terms.insert(units[i] + units[i + 1]);
+    if (cuts.size() > 1) {
+        for (std::size_t i = 0; i < cuts.size(); ++i) {
+            const std::size_t begin = cuts[i];
+            const std::size_t end = i + 1 < cuts.size() ? cuts[i + 1] : word.size();
+            if (end > begin) out.push_back(LowerAscii(word.substr(begin, end - begin)));
         }
     }
-    return terms;
+    out.push_back(LowerAscii(word));
 }
 
-// 计分细账:score 是总分,hard_hits 是路径/关键词/标题这类硬命中次数,
-// term_hits 是词法词项命中数。/memory why 的 trace 要靠它说清"为何命中"。
-struct ScoreDetail {
-    int score = 0;
-    int hard_hits = 0;
-    int term_hits = 0;
-};
+bool IsAsciiWordByte(unsigned char c) {
+    return c < 0x80 && std::isalnum(c) != 0;
+}
 
-ScoreDetail ScoreEntry(const StoredEntry& stored, const std::string& query,
-                       const std::unordered_set<std::string>& terms, const std::string& cwd_relative,
-                       const std::vector<std::string>& hints) {
-    const MemoryEntry& entry = stored.public_entry;
-    const std::string lower_query = LowerAscii(query);
-    const std::string haystack = LowerAscii(entry.title + " " + entry.summary + " " +
-                                            [&]() {
-                                                std::string joined;
-                                                for (const auto& keyword : entry.keywords) joined += " " + keyword;
-                                                for (const auto& path : entry.paths) joined += " " + path;
-                                                return joined;
-                                            }());
-    ScoreDetail detail;
-    detail.score = entry.status == "stale" ? -10 : 0;
-    for (const std::string& path : entry.paths) {
-        const std::string lower_path = LowerAscii(path);
-        if (!lower_path.empty() && lower_query.find(lower_path) != std::string::npos) {
-            detail.score += 12;
-            ++detail.hard_hits;
-        }
-        if (!cwd_relative.empty() && lower_path.starts_with(LowerAscii(cwd_relative) + "/")) detail.score += 4;
+// 词边界子串匹配:lower_term 出现在 lower_query 里,且两侧(若有)不是
+// ASCII 字母数字。防 "assemble" 撞上 "sse"、"entries" 撞上 "tr" 这类
+// 假硬命中。两侧是 CJK/标点/空白都算边界。
+bool BoundaryMatch(const std::string& lower_query, const std::string& lower_term) {
+    if (lower_term.empty()) return false;
+    std::size_t pos = lower_query.find(lower_term);
+    while (pos != std::string::npos) {
+        const bool prev_ok = pos == 0 || !IsAsciiWordByte(static_cast<unsigned char>(lower_query[pos - 1]));
+        const std::size_t end = pos + lower_term.size();
+        const bool next_ok =
+            end >= lower_query.size() || !IsAsciiWordByte(static_cast<unsigned char>(lower_query[end]));
+        if (prev_ok && next_ok) return true;
+        pos = lower_query.find(lower_term, pos + 1);
     }
-    for (const std::string& keyword : entry.keywords) {
-        const std::string lower_keyword = LowerAscii(keyword);
-        if (lower_keyword.empty()) continue;
-        if (lower_query.find(lower_keyword) != std::string::npos) {
-            detail.score += 8;
-            ++detail.hard_hits;
-            continue;
-        }
-        // 回合总结的扩展词与关键词精确等价(大小写不敏感):算硬命中。这是
-        // "检索词经 LLM 总结提召准"的落点,不许额外打请求,词来自上一轮
-        // 总结(用户基调 3)。
-        for (const std::string& hint : hints) {
-            if (LowerAscii(hint) == lower_keyword) {
-                detail.score += 8;
-                ++detail.hard_hits;
-                break;
+    return false;
+}
+
+// 分词成词 -> 出现次数(索引侧要 tf);查询侧只取词集合。文本按"连续
+// ASCII 字母数字"与"CJK 字符"分段,分隔符自然切开。
+std::unordered_map<std::string, std::size_t> TermCounts(const std::string& text) {
+    std::unordered_map<std::string, std::size_t> counts;
+    std::string word;
+    std::string cjk;
+    const auto flush_word = [&]() {
+        if (word.size() >= 2) {
+            std::vector<std::string> parts;
+            SplitIdentifier(word, parts);
+            for (const std::string& part : parts) {
+                if (part.size() >= 2) ++counts[part];
             }
         }
-    }
-    const std::string lower_title = LowerAscii(entry.title);
-    const std::string lower_summary = LowerAscii(entry.summary);
-    if ((!lower_title.empty() && lower_query.find(lower_title) != std::string::npos) ||
-        (!lower_summary.empty() && lower_query.find(lower_summary) != std::string::npos)) {
-        detail.score += 5;
-        ++detail.hard_hits;
-    }
-    for (const std::string& term : terms) {
-        if (term.size() >= 2 && haystack.find(LowerAscii(term)) != std::string::npos) {
-            detail.score += 2;
-            ++detail.term_hits;
-            if (detail.term_hits >= 10) break;
+        word.clear();
+    };
+    const auto flush_cjk = [&]() {
+        if (cjk.size() < static_cast<std::size_t>(6)) {  // 不足两个汉字,不出双字
+            cjk.clear();
+            return;
+        }
+        const auto units = Utf8Units(cjk);
+        for (std::size_t i = 0; i + 1 < units.size(); ++i) {
+            ++counts[LowerAscii(units[i] + units[i + 1])];
+        }
+        cjk.clear();
+    };
+    for (const char c : text) {
+        const unsigned char byte = static_cast<unsigned char>(c);
+        if (IsAsciiWordByte(byte)) {
+            if (!cjk.empty()) flush_cjk();
+            word.push_back(c);
+        } else if (byte >= 0x80) {
+            if (!word.empty()) flush_word();
+            cjk.push_back(c);
+        } else {
+            if (!word.empty()) flush_word();
+            if (!cjk.empty()) flush_cjk();
         }
     }
-    return detail;
+    if (!word.empty()) flush_word();
+    if (!cjk.empty()) flush_cjk();
+    return counts;
+}
+
+// 主题的索引文本:标题、摘要、关键词、路径、范围、证据全都进。
+std::string EntryIndexText(const MemoryEntry& entry) {
+    std::string text = entry.title + " " + entry.summary + " " + entry.scope.value;
+    for (const auto& keyword : entry.keywords) text += " " + keyword;
+    for (const auto& path : entry.paths) text += " " + path;
+    for (const auto& item : entry.evidence) text += " " + item.path + " " + item.symbol;
+    return text;
+}
+
+// BM25 参数:常用取值,库小也不会失真。
+constexpr double kBm25K1 = 1.5;
+constexpr double kBm25B = 0.75;
+// BM25 软分折算成与硬命中同一量纲的"分":乘 2,封顶 24(老词法分封顶
+// 20 的量级)。这样最低门槛 8 对软硬两路是同一把尺。
+constexpr int Bm25Points(double bm25) {
+    const int points = static_cast<int>(bm25 * 2.0);
+    return points > 24 ? 24 : points;
 }
 
 // 最低召回门槛(规格"召回只送命中"):路径/关键词一次硬命中(12/8 分)即
-// 过线;单个中文双字片段(2 分)远远不够,纯词项凑分至少要四个。
+// 过线;单个常见中文双字片段(idf 低,BM25 折算只有一两分)远远不够。
 constexpr int kMinRecallScore = 8;
+
+// scope 判定:project 恒适用;subtree/path 要求 cwd 落在范围内(相对
+// 路径前缀对齐)。不适用 = 不注入("该用才用")。
+bool ScopeApplies(const MemoryEntry& entry, const std::string& cwd_relative) {
+    if (entry.scope.kind == "project" || entry.scope.value.empty()) return true;
+    if (cwd_relative.empty()) return false;
+    const std::string scope = LowerAscii(entry.scope.value);
+    const std::string cwd = LowerAscii(cwd_relative);
+    if (entry.scope.kind == "path") return scope == cwd;
+    return cwd == scope || cwd.starts_with(scope + "/");
+}
+
+// expires_at 是否已过。格式宽松:YYYY-MM-DD 或 ISO 时间串,字典序比较
+// 恰好等价于时间序(同一格式族内)。
+bool EntryExpired(const MemoryEntry& entry) {
+    if (entry.expires_at.empty()) return false;
+    return entry.expires_at <= NowIsoUtc();
+}
 
 // 把长度截到不劈开 UTF-8 序列为止。预算边界收尾用。
 std::size_t Utf8SafeLength(std::string_view text) {
@@ -720,6 +855,8 @@ void WriteRecallTrace(const fs::path& memory_dir, const RecallTrace& trace) {
             {"stale_blocked", entry.stale_blocked},
             {"below_threshold", entry.below_threshold},
             {"budget_dropped", entry.budget_dropped},
+            {"scope_blocked", entry.scope_blocked},
+            {"expired", entry.expired},
             {"bytes", entry.bytes},
         });
     }
@@ -758,6 +895,8 @@ RecallTrace ReadRecallTrace(const fs::path& memory_dir) {
             entry.stale_blocked = item.value("stale_blocked", false);
             entry.below_threshold = item.value("below_threshold", false);
             entry.budget_dropped = item.value("budget_dropped", false);
+            entry.scope_blocked = item.value("scope_blocked", false);
+            entry.expired = item.value("expired", false);
             entry.bytes = item.value("bytes", std::size_t{0});
             trace.entries.push_back(std::move(entry));
         }
@@ -820,6 +959,21 @@ std::expected<void, std::string> ProcessUpsert(const nlohmann::json& job,
     if (job.contains("paths") && job["paths"].is_array()) {
         for (const auto& item : job["paths"]) if (item.is_string()) request.paths.push_back(item);
     }
+    request.confidence = job.value("confidence", std::string());
+    request.expires_at = job.value("expires_at", std::string());
+    if (job.contains("scope") && job["scope"].is_object()) {
+        request.scope.kind = job["scope"].value("kind", std::string("project"));
+        request.scope.value = job["scope"].value("value", std::string());
+    }
+    if (job.contains("evidence") && job["evidence"].is_array()) {
+        for (const auto& item : job["evidence"]) {
+            if (!item.is_object()) continue;
+            MemoryEvidence evidence;
+            evidence.path = item.value("path", std::string());
+            evidence.symbol = item.value("symbol", std::string());
+            if (!evidence.path.empty()) request.evidence.push_back(std::move(evidence));
+        }
+    }
     if (auto valid = ValidateSaveRequest(request); !valid.has_value()) return valid;
 
     std::vector<StoredEntry> entries = ScanTopics(memory_dir);
@@ -845,6 +999,17 @@ std::expected<void, std::string> ProcessUpsert(const nlohmann::json& job,
     updated.public_entry.paths = request.paths;
     updated.public_entry.status = "active";
     updated.public_entry.updated_at = NowIsoUtc();
+    // 保存即一次核验:盖 last_verified_at。schema 2 新字段全量落盘。
+    updated.public_entry.last_verified_at = updated.public_entry.updated_at;
+    if (!request.confidence.empty()) {
+        updated.public_entry.confidence = request.confidence;
+    } else {
+        updated.public_entry.confidence =
+            request.kind == MemoryKind::Fact ? "verified" : "user-stated";
+    }
+    updated.public_entry.scope = request.scope;
+    updated.public_entry.evidence = request.evidence;
+    updated.public_entry.expires_at = request.expires_at;
     if (!request.source_session.empty() &&
         std::find(updated.public_entry.source_sessions.begin(), updated.public_entry.source_sessions.end(),
                   request.source_session) == updated.public_entry.source_sessions.end()) {
@@ -886,6 +1051,34 @@ std::expected<void, std::string> ProcessForget(const nlohmann::json& job, const 
     return std::unexpected("找不到记忆 id: " + id);
 }
 
+// 核验(verify/refresh):原 id 复活——正文一字不动,重算指纹、盖
+// last_verified_at、status 回 active。这是"核验后续命"那条顺手路径。
+std::expected<void, std::string> ProcessVerify(const nlohmann::json& job, const fs::path& memory_dir,
+                                               const fs::path& project_root) {
+    const std::string id = job.value("id", std::string());
+    if (!IsValidId(id)) return std::unexpected("verify job 的 id 不合法");
+    const bool refresh = job.value("refresh", false);
+    auto entries = ScanTopics(memory_dir);
+    for (auto& stored : entries) {
+        if (stored.public_entry.id != id) continue;
+        stored.public_entry.last_verified_at = NowIsoUtc();
+        if (refresh || stored.public_entry.status != "conflict") {
+            stored.public_entry.status = "active";
+        }
+        stored.fingerprints = nlohmann::json::object();
+        for (const std::string& relative : stored.public_entry.paths) {
+            const std::string hash = FileFingerprint(project_root / Utf8Path(relative));
+            if (!hash.empty()) stored.fingerprints[relative] = hash;
+        }
+        const std::string content = StripTopicMetadata(ReadFile(memory_dir / Utf8Path(stored.public_entry.file)));
+        auto written = AtomicWrite(memory_dir / Utf8Path(stored.public_entry.file),
+                                   BuildTopicText(stored, content));
+        if (!written.has_value()) return written;
+        return RebuildMemoryIndex(memory_dir);
+    }
+    return std::unexpected("找不到记忆 id: " + id);
+}
+
 std::expected<void, std::string> ProcessJob(const fs::path& job_path,
                                             const fs::path& home_lubancode) {
     nlohmann::json job;
@@ -911,6 +1104,7 @@ std::expected<void, std::string> ProcessJob(const fs::path& job_path,
     const std::string operation = job.value("operation", std::string());
     if (operation == "upsert") return ProcessUpsert(job, memory_dir, project_root);
     if (operation == "forget") return ProcessForget(job, memory_dir);
+    if (operation == "verify") return ProcessVerify(job, memory_dir, project_root);
     if (operation == "rebuild") return RebuildMemoryIndex(memory_dir);
     return std::unexpected("不认得的 memory job operation: " + operation);
 }
@@ -928,6 +1122,137 @@ void MoveFailedJob(const fs::path& job_path, const fs::path& failed_dir, const s
 }
 
 }  // namespace
+
+std::vector<std::string> TokenizeForRetrieval(const std::string& text) {
+    std::vector<std::string> out;
+    for (const auto& [term, count] : TermCounts(text)) {
+        out.push_back(term);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::vector<ScoredEntry> RankEntries(const std::vector<MemoryEntry>& entries, const std::string& query,
+                                     const std::string& cwd_relative,
+                                     const std::vector<std::string>& hints) {
+    // 查询词项:查询本身 + 检索扩展词(回合总结顺手产出,不额外打请求)。
+    std::unordered_set<std::string> query_terms;
+    for (const auto& [term, count] : TermCounts(query)) query_terms.insert(term);
+    for (const std::string& hint : hints) {
+        for (const std::string& term : TokenizeForRetrieval(hint)) query_terms.insert(term);
+    }
+    if (query_terms.empty() && hints.empty()) return {};
+
+    // 文档侧:每条主题的词项频次与文档长度,顺手攒 df。
+    struct Doc {
+        const MemoryEntry* entry;
+        std::unordered_map<std::string, std::size_t> tf;
+        std::size_t len = 0;
+    };
+    std::vector<Doc> docs;
+    docs.reserve(entries.size());
+    std::unordered_map<std::string, std::size_t> df;
+    std::size_t total_len = 0;
+    for (const auto& entry : entries) {
+        if (entry.status == "archived" || entry.status == "conflict") continue;
+        Doc doc;
+        doc.entry = &entry;
+        doc.tf = TermCounts(EntryIndexText(entry));
+        for (const auto& [term, count] : doc.tf) {
+            doc.len += count;
+            ++df[term];
+        }
+        total_len += doc.len;
+        docs.push_back(std::move(doc));
+    }
+    if (docs.empty()) return {};
+    const double avg_len = static_cast<double>(total_len) / static_cast<double>(docs.size());
+    const double n_docs = static_cast<double>(docs.size());
+
+    std::vector<ScoredEntry> scored;
+    for (const Doc& doc : docs) {
+        const MemoryEntry& entry = *doc.entry;
+        ScoredEntry result;
+        result.entry = &entry;
+        result.expired = EntryExpired(entry);
+        result.scope_blocked = !ScopeApplies(entry, cwd_relative);
+        int hard = entry.status == "stale" ? -10 : 0;
+        int boost = 0;  // 排位加分,不算进门槛判定
+        const std::string lower_query = LowerAscii(query);
+
+        // 硬命中层:完整路径、关键词、标题/摘要整段,一律词边界匹配。
+        for (const std::string& path : entry.paths) {
+            const std::string lower_path = LowerAscii(path);
+            if (BoundaryMatch(lower_query, lower_path)) {
+                hard += 12;
+                ++result.hard_hits;
+            }
+            if (!cwd_relative.empty() && lower_path.starts_with(LowerAscii(cwd_relative) + "/")) boost += 4;
+        }
+        for (const std::string& keyword : entry.keywords) {
+            const std::string lower_keyword = LowerAscii(keyword);
+            if (lower_keyword.empty()) continue;
+            if (BoundaryMatch(lower_query, lower_keyword)) {
+                hard += 8;
+                ++result.hard_hits;
+                continue;
+            }
+            // 扩展词与关键词精确等价(大小写不敏感):算硬命中。
+            for (const std::string& hint : hints) {
+                if (LowerAscii(hint) == lower_keyword) {
+                    hard += 8;
+                    ++result.hard_hits;
+                    break;
+                }
+            }
+        }
+        const std::string lower_title = LowerAscii(entry.title);
+        const std::string lower_summary = LowerAscii(entry.summary);
+        if (BoundaryMatch(lower_query, lower_title) || BoundaryMatch(lower_query, lower_summary)) {
+            hard += 5;
+            ++result.hard_hits;
+        }
+
+        // 软排序层:BM25。idf 取 ln(1 + N/df):标准式在 N=1 的小库里会把
+        // 唯一命中词压到近零,这一式在大小库都稳。文档长度为零(纯符号
+        // 主题没分出词)时不给软分。
+        double bm25 = 0.0;
+        if (doc.len > 0 && avg_len > 0) {
+            for (const std::string& term : query_terms) {
+                const auto it = doc.tf.find(term);
+                if (it == doc.tf.end()) continue;
+                ++result.token_hits;
+                const std::size_t term_df = df.count(term) != 0 ? df.at(term) : 1;
+                const double idf = std::log(1.0 + n_docs / static_cast<double>(term_df));
+                const double tf = static_cast<double>(it->second);
+                const double normalizer = 1.0 - kBm25B + kBm25B * (static_cast<double>(doc.len) / avg_len);
+                bm25 += idf * (tf * (kBm25K1 + 1.0)) / (tf + kBm25K1 * normalizer);
+            }
+        }
+        result.bm25 = bm25;
+        result.score = hard + boost + Bm25Points(bm25);
+        // 门槛判在"核心分"上(hard + BM25 折算,不含 cwd 排位加分):
+        // 一次硬命中,或至少两个不同词项的软命中,分数还得过线。只撞中
+        // 一个词项(哪怕很稀有)不注入——单个中文双字片段说不清相关性。
+        const int core = hard + Bm25Points(bm25);
+        result.qualifies = (result.hard_hits > 0 || result.token_hits >= 2) && core >= kMinRecallScore;
+        if (result.score > 0 || result.qualifies) scored.push_back(std::move(result));
+    }
+
+    // 同分:先硬命中多的,再看最近核验时间(核验过的老卡不输没核验的新
+    // 卡),最后按 id 定序,全链路确定。
+    std::sort(scored.begin(), scored.end(), [](const ScoredEntry& a, const ScoredEntry& b) {
+        if (a.score != b.score) return a.score > b.score;
+        if (a.hard_hits != b.hard_hits) return a.hard_hits > b.hard_hits;
+        const std::string& a_verified = a.entry->last_verified_at.empty() ? a.entry->updated_at
+                                                                          : a.entry->last_verified_at;
+        const std::string& b_verified = b.entry->last_verified_at.empty() ? b.entry->updated_at
+                                                                          : b.entry->last_verified_at;
+        if (a_verified != b_verified) return a_verified > b_verified;
+        return a.entry->id < b.entry->id;
+    });
+    return scored;
+}
 
 std::expected<ProjectIdentity, std::string> ResolveProjectIdentity(
     const fs::path& cwd, const fs::path& home_lubancode) {
@@ -1037,49 +1362,52 @@ std::string ProjectMemory::BuildTurnContext(const std::string& query, const fs::
     // 正常请求只检索机器 catalog,不再整段注入 index.md;index 留给人看与
     // 灾后重建。没有过门槛的命中,本轮 suffix 就只有上面这段极短说明。
     std::string catalog_error;
-    const auto entries = LoadCatalog(memory_dir_, &catalog_error);
+    const auto stored = LoadCatalog(memory_dir_, &catalog_error);
     std::error_code ec;
     fs::path cwd_relative_path = fs::relative(AbsoluteNormal(cwd), identity_.project_root, ec);
     const std::string cwd_relative = ec || cwd_relative_path == "." ? std::string() : PathUtf8(cwd_relative_path);
-    auto terms = QueryTerms(query);
-    // 回合总结顺手产出的扩展词(同义改写/符号名)并进来,不打额外请求;
-    // learn off 或抽取失败时没有 hints,自然退回纯词法。
-    for (const std::string& hint : retrieval_hints_) {
-        const std::string lower = LowerAscii(hint);
-        if (lower.size() >= 2) terms.insert(lower);
-    }
-    struct Ranked {
-        ScoreDetail detail;
-        const StoredEntry* entry;
-    };
-    std::vector<Ranked> ranked;
-    for (const auto& entry : entries) {
-        if (entry.public_entry.status == "archived" || entry.public_entry.status == "conflict") continue;
-        auto detail = ScoreEntry(entry, query, terms, cwd_relative, retrieval_hints_);
-        if (detail.score > 0) ranked.push_back({detail, &entry});
-    }
-    // 同分时优先硬命中多的,再按 id 定序,不拿更新时间把无关新卡顶上来。
-    std::sort(ranked.begin(), ranked.end(), [](const Ranked& a, const Ranked& b) {
-        if (a.detail.score != b.detail.score) return a.detail.score > b.detail.score;
-        if (a.detail.hard_hits != b.detail.hard_hits) return a.detail.hard_hits > b.detail.hard_hits;
-        return a.entry->public_entry.id < b.entry->public_entry.id;
-    });
+
+    // 排级交给纯函数 RankEntries(BM25 + 硬命中);指纹漂移要摸项目文件,
+    // 留在这一层做。retrieval_hints 来自回合总结,learn off/失败时为空,
+    // 查询自然退回纯词法。
+    std::vector<MemoryEntry> public_entries;
+    public_entries.reserve(stored.size());
+    for (const auto& entry : stored) public_entries.push_back(entry.public_entry);
+    const auto ranked = RankEntries(public_entries, query, cwd_relative, retrieval_hints_);
 
     RecallTrace trace;
     trace.at = NowIsoUtc();
     trace.project_key = identity_.key;
-    trace.terms.assign(terms.begin(), terms.end());
+    trace.terms = TokenizeForRetrieval(query);
+    for (const std::string& hint : retrieval_hints_) {
+        for (const std::string& term : TokenizeForRetrieval(hint)) {
+            if (std::find(trace.terms.begin(), trace.terms.end(), term) == trace.terms.end()) {
+                trace.terms.push_back(term);
+            }
+        }
+    }
     std::sort(trace.terms.begin(), trace.terms.end());
 
     std::size_t used = 0;
     std::size_t emitted = 0;
-    for (const Ranked& hit : ranked) {
+    for (const ScoredEntry& hit : ranked) {
         RecallTraceEntry traced;
-        traced.id = hit.entry->public_entry.id;
-        traced.score = hit.detail.score;
-        traced.hard_hits = hit.detail.hard_hits;
-        traced.term_hits = hit.detail.term_hits;
-        if (hit.detail.score < kMinRecallScore) {
+        traced.id = hit.entry->id;
+        traced.score = hit.score;
+        traced.hard_hits = hit.hard_hits;
+        traced.term_hits = hit.token_hits;
+        if (hit.expired) {
+            // 已过 expires_at:不召回,等用户续期或归档,不在 prompt 里占字。
+            traced.expired = true;
+            trace.entries.push_back(std::move(traced));
+            continue;
+        }
+        if (hit.scope_blocked) {
+            traced.scope_blocked = true;
+            trace.entries.push_back(std::move(traced));
+            continue;
+        }
+        if (!hit.qualifies) {
             traced.below_threshold = true;
             trace.entries.push_back(std::move(traced));
             continue;
@@ -1089,8 +1417,16 @@ std::string ProjectMemory::BuildTurnContext(const std::string& query, const fs::
             trace.entries.push_back(std::move(traced));
             continue;
         }
-        const MemoryEntry& entry = hit.entry->public_entry;
-        if (!FingerprintsCurrent(*hit.entry, identity_.project_root)) {
+        const MemoryEntry& entry = *hit.entry;
+        // 指纹对照要找到 StoredEntry(catalog 里带 fingerprints)。
+        const StoredEntry* stored_hit = nullptr;
+        for (const auto& item : stored) {
+            if (item.public_entry.id == entry.id) {
+                stored_hit = &item;
+                break;
+            }
+        }
+        if (stored_hit != nullptr && !FingerprintsCurrent(*stored_hit, identity_.project_root)) {
             traced.stale_blocked = true;
             trace.entries.push_back(std::move(traced));
             out += "\n- 命中 `" + entry.id + "`，但相关文件已变化；本轮不注入正文，请读源码核验。\n";
@@ -1164,9 +1500,36 @@ std::expected<std::string, std::string> ProjectMemory::EnqueueRebuild() {
     return EnqueueJob("rebuild", nullptr, std::string());
 }
 
+std::expected<std::string, std::string> ProjectMemory::EnqueueVerify(const std::string& id, bool refresh) {
+    if (!options_.global_allowed || !options_.enabled) return std::unexpected("本场记忆未开启");
+    if (!IsValidId(id)) return std::unexpected("记忆 id 不合法");
+    nlohmann::json extra{{"refresh", refresh}};
+    return EnqueueJob("verify", nullptr, id, extra);
+}
+
+std::vector<ProjectMemory::StaleEntry> ProjectMemory::ListStaleEntries() const {
+    std::vector<StaleEntry> out;
+    for (const auto& stored : LoadCatalog(memory_dir_)) {
+        if (stored.public_entry.status == "archived") continue;
+        StaleEntry item;
+        item.entry = stored.public_entry;
+        if (EntryExpired(stored.public_entry)) {
+            item.reason = "expired";
+            out.push_back(std::move(item));
+            continue;
+        }
+        if (!FingerprintsCurrent(stored, identity_.project_root)) {
+            item.reason = "fingerprint";
+            out.push_back(std::move(item));
+        }
+    }
+    return out;
+}
+
 std::expected<std::string, std::string> ProjectMemory::EnqueueJob(const std::string& operation,
                                                                   const SaveRequest* request,
-                                                                  const std::string& id) {
+                                                                  const std::string& id,
+                                                                  nlohmann::json extra) {
     nlohmann::json job{
         {"schema", 1},
         {"operation", operation},
@@ -1177,6 +1540,10 @@ std::expected<std::string, std::string> ProjectMemory::EnqueueJob(const std::str
         {"memory_dir", PathUtf8(memory_dir_)},
         {"created_at", NowIsoUtc()},
     };
+    if (!extra.is_object()) extra = nlohmann::json::object();
+    for (auto it = extra.begin(); it != extra.end(); ++it) {
+        job[it.key()] = it.value();
+    }
     if (!id.empty()) job["id"] = id;
     if (request != nullptr) {
         job["kind"] = MemoryKindName(request->kind);
@@ -1186,6 +1553,19 @@ std::expected<std::string, std::string> ProjectMemory::EnqueueJob(const std::str
         job["keywords"] = request->keywords;
         job["paths"] = request->paths;
         job["source_session"] = request->source_session;
+        if (!request->confidence.empty()) job["confidence"] = request->confidence;
+        if (!request->expires_at.empty()) job["expires_at"] = request->expires_at;
+        if (request->scope.kind != "project" || !request->scope.value.empty()) {
+            job["scope"] = nlohmann::json{{"kind", request->scope.kind},
+                                          {"value", request->scope.value}};
+        }
+        if (!request->evidence.empty()) {
+            nlohmann::json evidence = nlohmann::json::array();
+            for (const auto& item : request->evidence) {
+                evidence.push_back(nlohmann::json{{"path", item.path}, {"symbol", item.symbol}});
+            }
+            job["evidence"] = std::move(evidence);
+        }
     }
     const fs::path pending = home_lubancode_ / "memory-jobs" / "pending";
     const std::string job_name = JobStamp() + ".json";
@@ -1417,7 +1797,12 @@ std::expected<std::string, std::string> ProjectMemory::AcceptCandidate(const std
     request.content = candidate->content;
     request.keywords = candidate->keywords;
     request.paths = candidate->paths;
+    request.confidence = candidate->confidence;
     request.source_session = source_session_;
+    // 候选的 paths 同时充当证据(schema 2:fact 须有可核验证据)。
+    for (const std::string& path : candidate->paths) {
+        request.evidence.push_back(MemoryEvidence{path, std::string()});
+    }
     auto queued = EnqueueSave(request);
     if (!queued.has_value()) return queued;
 

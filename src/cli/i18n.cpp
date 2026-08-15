@@ -468,6 +468,9 @@ const Entry kZhCN[] = {
      "  /memory remember fact|preference 标题 [:: 正文]\n"
      "  /memory forget <id>              归档一条记忆\n"
      "  /memory rebuild                  后台重建索引\n"
+     "  /memory stale                    看指纹漂移与已过期的记忆\n"
+     "  /memory verify <id>              核验后续命(原 id 复活)\n"
+     "  /memory refresh <id>             核验并把 status 回炉为 active\n"
      "  /memory why [id]                 看上一轮召回为何命中/落选\n"},
     {"cmd.memory.unavailable", "[memory] 找不到主目录，项目记忆不可用。"},
     {"cmd.memory.on", "开"},
@@ -503,6 +506,14 @@ const Entry kZhCN[] = {
     {"memory.extract.running", "[memory] 回合总结({0})…"},
     {"memory.extract.failed", "[memory] 回合总结失败,本轮跳过: {0}"},
     {"memory.extract.done", "[memory] 新候选 {0} 条待审(/memory review);自动入库 {1} 条。"},
+    {"cmd.memory.stale.empty", "[memory] 没有指纹漂移或已过期的记忆。"},
+    {"cmd.memory.stale.header", "陈旧清单(fingerprint=文件已变,expired=已过期):"},
+    {"cmd.memory.stale.fingerprint", "相关文件已变化"},
+    {"cmd.memory.stale.expired", "已过期"},
+    {"cmd.memory.stale.hint",
+     "核验后仍有效就 /memory verify <id> 续命;过期规约可改 expires_at 或 /memory forget 归档。"},
+    {"cmd.memory.why.expired", "已过 expires_at,等续期或归档"},
+    {"cmd.memory.why.scope", "scope 不符当前工作目录"},
     {"cmd.memory.why.none", "[memory] 本场还没有召回记录。"},
     {"cmd.memory.why.header", "[memory] 上一轮召回({0}):"},
     {"cmd.memory.why.terms", "  检索词: {0}"},
@@ -1491,6 +1502,9 @@ const Entry kEn[] = {
      "  /memory remember fact|preference title [:: body]\n"
      "  /memory forget <id>                       archive one memory\n"
      "  /memory rebuild                           rebuild the index in background\n"
+     "  /memory stale                             list drifted (fingerprint) and expired memories\n"
+     "  /memory verify <id>                       re-verify, reviving the entry under its id\n"
+     "  /memory refresh <id>                      re-verify and reset status to active\n"
      "  /memory why [id]                          explain the last recall: hits, misses, blocks\n"},
     {"cmd.memory.unavailable", "[memory] The home directory is unavailable; project memory cannot run."},
     {"cmd.memory.on", "on"},
@@ -1527,6 +1541,15 @@ const Entry kEn[] = {
     {"memory.extract.running", "[memory] turn summary ({0})..."},
     {"memory.extract.failed", "[memory] turn summary failed; skipped this turn: {0}"},
     {"memory.extract.done", "[memory] {0} new candidate(s) pending (/memory review); {1} auto-saved."},
+    {"cmd.memory.stale.empty", "[memory] No drifted or expired memories."},
+    {"cmd.memory.stale.header", "Stale list (fingerprint = files changed, expired = past expires_at):"},
+    {"cmd.memory.stale.fingerprint", "related files changed"},
+    {"cmd.memory.stale.expired", "expired"},
+    {"cmd.memory.stale.hint",
+     "Still valid? /memory verify <id> revives it under the same id; expired rules can be renewed or "
+     "archived with /memory forget."},
+    {"cmd.memory.why.expired", "past expires_at; awaiting renewal or archive"},
+    {"cmd.memory.why.scope", "scope does not cover the current working directory"},
     {"cmd.memory.why.none", "[memory] No recall trace yet in this session."},
     {"cmd.memory.why.header", "[memory] Last recall ({0}):"},
     {"cmd.memory.why.terms", "  query terms: {0}"},

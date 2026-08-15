@@ -13,7 +13,13 @@
 #include <utility>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 namespace lubancode::memory {
+
+// 最低召回门槛:硬命中(路径 12/关键词 8/标题 5)一次即过线;纯 BM25
+// 软分要两三个稀有词项才凑得满。单个常见中文双字片段过不了这条线。
+constexpr int kMemoryMinRecallScore = 8;
 
 // 学习三档(规格"学习改成三档"):off 不提候选不写入;review 自动提候选,
 // 用户审过才入库(建议默认);auto 自动写入,须用户在全局配置显式授权。
@@ -59,6 +65,20 @@ enum class MemoryKind { Fact, Preference };
 std::string MemoryKindName(MemoryKind kind);
 std::expected<MemoryKind, std::string> ParseMemoryKind(const std::string& raw);
 
+// 主题范围(schema 2):project 全项目;subtree/path 限子树或单文件,当前
+// cwd 不在范围内时不注入(该用才用)。跨项目/全局经验本期不做——键位
+// 预留:以后加 "global" 时只认全局配置授权,存储键须另行分账,别混进
+// project key 这套目录。
+struct MemoryScope {
+    std::string kind = "project";  // project | subtree | path
+    std::string value;             // kind != project 时必填,项目内相对路径
+};
+
+struct MemoryEvidence {
+    std::string path;    // 项目内相对路径
+    std::string symbol;  // 可选:函数/类/配置键
+};
+
 struct SaveRequest {
     MemoryKind kind = MemoryKind::Fact;
     std::string id;
@@ -68,6 +88,11 @@ struct SaveRequest {
     std::vector<std::string> keywords;
     std::vector<std::string> paths;
     std::string source_session;
+    // schema 2 新增:范围、证据、置信度与寿命。
+    std::string confidence;               // user-stated | verified | inferred
+    MemoryScope scope;
+    std::vector<MemoryEvidence> evidence;
+    std::string expires_at;               // 空 = 永不过期;ISO 日期或日期时间
 };
 
 struct MemoryEntry {
@@ -81,7 +106,42 @@ struct MemoryEntry {
     std::string status = "active";
     std::string updated_at;
     std::vector<std::string> source_sessions;
+    // schema 2 新增;schema 1 旧主题读入时填缺省值(confidence 按 kind
+    // 推定,scope=project),照常可读、可列、可召回、可 rebuild。
+    std::string confidence;
+    MemoryScope scope;
+    std::vector<MemoryEvidence> evidence;
+    std::string last_verified_at;
+    std::string expires_at;  // 空 = 永不过期
 };
+
+// 检索排级的纯函数结果(评测集与 /memory why 共用)。injected 只是"过
+// 门槛值得注入",预算裁剪另算。
+struct ScoredEntry {
+    const MemoryEntry* entry = nullptr;
+    int hard_hits = 0;     // 路径/关键词/标题硬命中次数
+    int token_hits = 0;    // 分词后命中的查询词项数
+    double bm25 = 0.0;     // 本地 BM25 软分
+    int score = 0;         // 硬命中分 + cwd 排位加分 + BM25 折算分(排序用)
+    bool qualifies = false;       // 过最低门槛,值得注入(调用方据此判)
+    bool stale_blocked = false;   // 指纹漂移,只提示不注正文(由调用方判)
+    bool expired = false;         // 已过 expires_at,不召回
+    bool scope_blocked = false;   // scope 不符当前 cwd,不注入
+};
+
+// 标识符拆分 + 中英混排分词:camelCase/snake_case/kebab/路径段都拆
+// (BuildTurnContext -> build/turn/context),中文出双字片段;查询与
+// 索引共用同一套。
+std::vector<std::string> TokenizeForRetrieval(const std::string& text);
+
+// 纯函数排级:硬命中(路径/关键词/标题,词边界匹配)+ BM25 软分。返回
+// 有得分的条目(含没过门槛的,给 trace 用),qualifies 标记是否过最低
+// 门槛(至少一次硬命中或两个词项命中,且核心分过线)。archived/conflict
+// 不参与;过期/scope 越区打标记由调用方拦。指纹漂移要摸项目文件,也由
+// 调用方判。
+std::vector<ScoredEntry> RankEntries(const std::vector<MemoryEntry>& entries, const std::string& query,
+                                     const std::string& cwd_relative,
+                                     const std::vector<std::string>& hints = {});
 
 // 待审候选(规格"候选审阅箱")。回合收尾抽取产出,先住待审区,用户
 // /memory accept|edit|reject 之后才动正式库。按项目 key 分账,耐退出。
@@ -117,11 +177,13 @@ struct RecallTraceEntry {
     std::string id;
     int score = 0;
     int hard_hits = 0;    // 路径/关键词/标题硬命中次数
-    int term_hits = 0;    // 词法词项命中次数
+    int term_hits = 0;    // 分词后命中的查询词项数
     bool injected = false;
     bool stale_blocked = false;   // 指纹漂移,只提示不注正文
     bool below_threshold = false; // 分数没过最低门槛
     bool budget_dropped = false;  // 过了门槛但预算/条数不够
+    bool scope_blocked = false;   // scope 不符当前 cwd,不注入
+    bool expired = false;         // 已过 expires_at,不召回
     std::size_t bytes = 0;
 };
 
@@ -195,6 +257,16 @@ public:
     std::expected<std::string, std::string> EnqueueSave(const SaveRequest& request);
     std::expected<std::string, std::string> EnqueueForget(const std::string& id);
     std::expected<std::string, std::string> EnqueueRebuild();
+    // 核验:原 id 复活——重算指纹、盖 last_verified_at、status 回 active。
+    // refresh=true 时连 status 一并回炉(verify 只盖时间戳)。
+    std::expected<std::string, std::string> EnqueueVerify(const std::string& id, bool refresh);
+
+    // 陈旧清单:指纹漂移的与已过期的,附原因(/memory stale 用)。
+    struct StaleEntry {
+        MemoryEntry entry;
+        std::string reason;  // "fingerprint" | "expired"
+    };
+    std::vector<StaleEntry> ListStaleEntries() const;
 
     std::vector<MemoryEntry> ListEntries(std::string* error = nullptr) const;
     RuntimeStatus Status() const;
@@ -205,7 +277,8 @@ public:
 private:
     std::expected<std::string, std::string> EnqueueJob(const std::string& operation,
                                                        const SaveRequest* request,
-                                                       const std::string& id);
+                                                       const std::string& id,
+                                                       nlohmann::json extra = nlohmann::json::object());
     std::filesystem::path CandidatesDir() const;
 
     ProjectIdentity identity_;
