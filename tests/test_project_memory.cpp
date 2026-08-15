@@ -256,7 +256,8 @@ TEST_CASE("ProjectMemory: 端到端 captured request——无命中不含索引,
     REQUIRE(store.EnqueueSave(request).has_value());
     REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
 
-    // 无命中:本轮 user 消息只带极短能力说明,不含 index.md,也不含任何主题正文。
+    // 无命中:本轮 user 消息零注入零脚手架——不含 index.md,不含任何主题
+    // 正文,连"# 项目记忆"的空头都不塞(规格"零命中不塞空脚手架")。
     {
         CaptureBackend backend;
         tools::ToolRegistry registry;
@@ -265,13 +266,7 @@ TEST_CASE("ProjectMemory: 端到端 captured request——无命中不含索引,
         REQUIRE(loop.Run("部署到树莓派怎么做", agent::Callbacks{}).has_value());
         REQUIRE(backend.requests.size() == 1);
         CHECK(backend.requests[0].system == "stable system");  // 动态上下文不进 system
-        CHECK(backend.requests[0].messages[0].content.size() == 2);
-        const auto* no_hit = std::get_if<api::TextBlock>(&backend.requests[0].messages[0].content[1]);
-        REQUIRE(no_hit != nullptr);
-        CHECK(no_hit->text.find("# 项目记忆") == 0);
-        CHECK(no_hit->text.find("## Facts") == std::string::npos);
-        CHECK(no_hit->text.find("## Preferences") == std::string::npos);
-        CHECK(no_hit->text.find("uv add") == std::string::npos);
+        CHECK(backend.requests[0].messages[0].content.size() == 1);  // 空 suffix 不挂第二块
     }
 
     // 命中:记忆正文随本轮 user 消息进请求视图(第五期起不再进 system),
@@ -458,29 +453,40 @@ TEST_CASE("ProjectMemory: 无相关命中不注入索引,弱双字片段过不�
     REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
     REQUIRE(fs::exists(store.memory_dir() / "index.md"));
 
-    // 完全不相关的问话:suffix 只有极短说明,不含 index.md 内容与正文。
+    // 完全不相关的问话:零注入零脚手架,不含 index.md 内容与正文。
     const std::string unrelated = store.BuildTurnContext("部署到树莓派需要哪些步骤", repo);
-    CHECK(unrelated.find("## 召回") == std::string::npos);
-    CHECK(unrelated.find("uv add") == std::string::npos);
-    CHECK(unrelated.find("## Facts") == std::string::npos);
-    CHECK(unrelated.find("## Preferences") == std::string::npos);
+    CHECK(unrelated.empty());
+    const auto unrelated_trace = store.LastTrace();
+    REQUIRE(unrelated_trace.valid);
+    CHECK(unrelated_trace.query_origin == "user");
+    CHECK_FALSE(unrelated_trace.skipped);
+    CHECK(unrelated_trace.injected_count == 0);
+    CHECK(unrelated_trace.injected_bytes == 0);
 
     // 只撞中一个中文双字片段("依赖"):分数远低于门槛,不注入正文。
     const std::string weak = store.BuildTurnContext("依赖注入是什么设计模式", repo);
-    CHECK(weak.find("## 召回") == std::string::npos);
+    CHECK(weak.empty());
     CHECK(weak.find("uv add") == std::string::npos);
 
     // 弱命中的 trace:有 id、分数与 below_threshold,不泄完整问题。
     const auto weak_trace = store.LastTrace();
     REQUIRE(weak_trace.valid);
     REQUIRE_FALSE(weak_trace.terms.empty());
+    // 检索词不黏标点:任何 term 都不含中英文标点。
+    for (const memory::TraceTerm& term : weak_trace.terms) {
+        CHECK(term.text.find("？") == std::string::npos);
+        CHECK(term.text.find("，") == std::string::npos);
+        CHECK(term.text.find("？") == std::string::npos);
+        CHECK(term.text.find(',') == std::string::npos);
+        CHECK(term.text.find('?') == std::string::npos);
+    }
     REQUIRE(weak_trace.entries.size() == 1);
     CHECK(weak_trace.entries[0].id == "preference.python-package-manager");
     CHECK(weak_trace.entries[0].score < 8);
     CHECK(weak_trace.entries[0].below_threshold);
     CHECK(weak_trace.injected_count == 0);
 
-    // 强命中照常注入,trace 也记上已注入与字节数。
+    // 强命中照常注入,trace 也记上已注入与字节数;词项带词路与权重。
     const std::string strong = store.BuildTurnContext("给 pyproject.toml 加 Python 依赖", repo);
     CHECK(strong.find("## 召回: preference.python-package-manager") != std::string::npos);
     const auto trace = store.LastTrace();
@@ -489,6 +495,86 @@ TEST_CASE("ProjectMemory: 无相关命中不注入索引,弱双字片段过不�
     CHECK(trace.injected_bytes > 0);
     REQUIRE(trace.entries.size() == 1);
     CHECK(trace.entries[0].injected);
+    bool seen_word = false;
+    bool seen_query_source = false;
+    for (const memory::TraceTerm& term : trace.terms) {
+        if (term.kind == "word" && term.weight == 1.0) seen_word = true;
+        if (term.source == "query") seen_query_source = true;
+    }
+    CHECK(seen_word);
+    CHECK(seen_query_source);
+}
+
+TEST_CASE("ProjectMemory: 合成事件隔离——后台完成唤醒不跑检索,零命中不塞脚手架") {
+    const fs::path root = TempRoot("origin");
+    const fs::path repo = root / "repo";
+    fs::create_directories(repo / ".git");
+    Write(repo / "pyproject.toml", "[project]\n");
+    const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
+    REQUIRE(identity.has_value());
+    memory::Options options;
+    options.global_allowed = true;
+    options.enabled = true;
+    memory::ProjectMemory store(*identity, root / "home", options);
+
+    memory::SaveRequest request;
+    request.kind = memory::MemoryKind::Preference;
+    request.id = "preference.python-package-manager";
+    request.title = "Python 包管理器";
+    request.summary = "添加 Python 依赖只用 uv add";
+    request.content = "用户明确要求使用 `uv add <package>`。";
+    request.keywords = {"uv", "pyproject.toml"};
+    request.paths = {"pyproject.toml"};
+    REQUIRE(store.EnqueueSave(request).has_value());
+    REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
+
+    // 后台完成唤醒这类宿主合成 prompt:整轮不检索,suffix 为空,trace 只记
+    // 来源,不产检索词——旧版 trace 里那串无意义碎字就此断根。
+    const std::string wake = store.BuildTurnContext(
+        "后台子代理有新结果送达(资料附在本条消息里)。请阅读后继续推进手头任务。",
+        repo, memory::QueryOrigin::BackgroundCompletion);
+    CHECK(wake.empty());
+    const auto wake_trace = store.LastTrace();
+    REQUIRE(wake_trace.valid);
+    CHECK(wake_trace.query_origin == "background_completion");
+    CHECK(wake_trace.skipped);
+    CHECK(wake_trace.terms.empty());
+    CHECK(wake_trace.entries.empty());
+    CHECK(wake_trace.injected_count == 0);
+
+    // 其余合成来源(hook/compact/system)同样默认跳过。
+    for (const memory::QueryOrigin origin : {memory::QueryOrigin::Hook, memory::QueryOrigin::Compact,
+                                             memory::QueryOrigin::System}) {
+        CHECK(store.BuildTurnContext("继续压缩后的总结", repo, origin).empty());
+        const auto trace = store.LastTrace();
+        REQUIRE(trace.valid);
+        CHECK(trace.skipped);
+        CHECK(trace.terms.empty());
+    }
+
+    // 确需事实的合成回流:force_retrieval 显式打开,检索照跑。
+    const std::string forced = store.BuildTurnContext("用 uv 加依赖", repo,
+                                                      memory::QueryOrigin::BackgroundCompletion,
+                                                      /*force_retrieval=*/true);
+    CHECK(forced.find("## 召回: preference.python-package-manager") != std::string::npos);
+    const auto forced_trace = store.LastTrace();
+    REQUIRE(forced_trace.valid);
+    CHECK(forced_trace.query_origin == "background_completion");
+    CHECK_FALSE(forced_trace.skipped);
+    CHECK(forced_trace.injected_count == 1);
+
+    // 用户提问照常检索,来源记 user。
+    const std::string user = store.BuildTurnContext("用 uv 加依赖", repo, memory::QueryOrigin::User);
+    CHECK(user.find("## 召回: preference.python-package-manager") != std::string::npos);
+    CHECK(store.LastTrace().query_origin == "user");
+
+    // 零命中:user 问法不命中时 suffix 一个字节都不进(不塞空脚手架)。
+    CHECK(store.BuildTurnContext("今天天气怎么样", repo, memory::QueryOrigin::User).empty());
+    const auto zero = store.LastTrace();
+    REQUIRE(zero.valid);
+    CHECK_FALSE(zero.skipped);
+    CHECK(zero.injected_count == 0);
+    CHECK(zero.injected_bytes == 0);
 }
 
 TEST_CASE("ProjectMemory: 默认预算 8 KiB/3 条,预算边界不劈开 UTF-8") {

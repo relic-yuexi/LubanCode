@@ -427,8 +427,8 @@ TEST_CASE("检索评测:端到端注入字节、stale 拦截与 expired 不进 p
         }
     }
 
-    // 无命中问法的 suffix 只有极短能力说明,远小于 1 KiB,更不含索引正文。
-    CHECK(no_hit_bytes < 1024);
+    // 无命中问法的 suffix 是零——不塞空脚手架,更不含索引正文。
+    CHECK(no_hit_bytes == 0);
 
     double average = 0.0;
     for (const std::size_t sample : byte_samples) average += static_cast<double>(sample);

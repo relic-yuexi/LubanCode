@@ -189,19 +189,26 @@ struct RuntimeStatus {
     std::size_t pending_candidates = 0;
 };
 
-// 一轮召回的本地 trace(规格"每次召回都说得清")。只存归一化词项、id、
-// 分数与字节,不抄主题正文,也不记用户完整问题。
+// 查询来源(规格"合成事件隔离"):只有 user 的提问(与显式要求事实的
+// main 回流)才跑检索;后台完成唤醒、钩子、压缩续跑、系统播报这类宿主
+// 合成 prompt 默认整轮跳过——不产检索词,不占检索预算,trace 只记来源。
+enum class QueryOrigin { User, BackgroundCompletion, Hook, Compact, System };
+std::string QueryOriginName(QueryOrigin origin);
+
+// 一轮召回的本地 trace(规格"每次召回都说得清")。只存归一化词项(带
+// 来源与权重)、id、分数与字节,不抄主题正文,也不记用户完整问题。
 struct RecallTraceEntry {
     std::string id;
     int score = 0;
-    int hard_hits = 0;    // 路径/关键词/标题硬命中次数
-    int term_hits = 0;    // 分词后命中的查询词项数
+    int hard_hits = 0;    // 稳定实体(路径/关键词/symbol/标题/id)硬命中次数
+    int term_hits = 0;    // 分词后命中的有效词项数(虚词碎片不计)
     bool injected = false;
     bool stale_blocked = false;   // 指纹漂移,只提示不注正文
     bool below_threshold = false; // 分数没过最低门槛
     bool budget_dropped = false;  // 过了门槛但预算/条数不够
     bool scope_blocked = false;   // scope 不符当前 cwd,不注入
     bool expired = false;         // 已过 expires_at,不召回
+    bool duplicate_dropped = false;  // 同一事实/相同证据,去重让位
     std::size_t bytes = 0;
 };
 
@@ -209,10 +216,12 @@ struct RecallTrace {
     bool valid = false;
     std::string at;
     std::string project_key;
-    std::vector<std::string> terms;
+    std::string query_origin = "user";  // user | background_completion | hook | compact | system
+    bool skipped = false;               // 合成控制消息:本轮没跑检索
+    std::vector<TraceTerm> terms;
     std::vector<RecallTraceEntry> entries;  // 计分过的候选,含被拦与落选
     std::size_t injected_count = 0;
-    std::size_t injected_bytes = 0;
+    std::size_t injected_bytes = 0;  // 去重后有效字节
 };
 
 class ProjectMemory {
@@ -244,8 +253,12 @@ public:
     std::expected<void, std::string> SetWorkingDirectory(const std::filesystem::path& cwd);
 
     // 每条外层用户消息调用一次。返回空串表示本轮无记忆段;没有过门槛的
-    // 命中时只保留极短能力说明,不再注入整份 index.md。
-    std::string BuildTurnContext(const std::string& query, const std::filesystem::path& cwd) const;
+    // 命中时零注入零脚手架(规格"零命中不塞空脚手架")。origin 记这条
+    // 查询从哪来:user 才跑检索,合成控制消息(后台完成唤醒等)默认整轮
+    // 跳过,只留 trace 来源;确需事实的合成回流可传 force_retrieval。
+    std::string BuildTurnContext(const std::string& query, const std::filesystem::path& cwd,
+                                 QueryOrigin origin = QueryOrigin::User,
+                                 bool force_retrieval = false) const;
 
     // 上一轮召回的 trace(读 .state/trace-last.json)。没有记录时
     // valid=false。/memory why 用。

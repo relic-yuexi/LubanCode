@@ -285,8 +285,8 @@ TEST_CASE("中文检索评测:端到端注入字节 P50/P95 与零命中不塞�
     CHECK(!byte_samples.empty());
     CHECK(p50 <= 2.5 * 1024);
     CHECK(p95 <= 8.0 * 1024 + 256);
-    // 零命中不塞空脚手架:suffix 不进任何主题正文,也不进整段使用说明。
-    CHECK(zero_hit_suffix_bytes < 1024);
+    // 零命中不塞空脚手架:suffix 一个字节都不进。
+    CHECK(zero_hit_suffix_bytes == 0);
 
     fs::remove_all(root, ec);
 }

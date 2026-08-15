@@ -223,8 +223,9 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         loop.SetToolFilter(tool_runtime.main_tool_filter());
     }
     if (project_memory != nullptr) {
-        loop.SetTurnContext(
-            project_memory->BuildTurnContext(question, std::filesystem::current_path()));
+        // 单发模式的问题就是用户提问,query_origin=user 才跑检索。
+        loop.SetTurnContext(project_memory->BuildTurnContext(question, std::filesystem::current_path(),
+                                                             memory::QueryOrigin::User));
     }
     std::set<std::string> always_allowed_tools;
     // settings.local.json 的 allow_tools:单发模式同样注入(免确认)。
