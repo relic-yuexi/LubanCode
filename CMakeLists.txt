@@ -261,6 +261,7 @@ add_library(lubancode_core STATIC
   src/tools/background_tasks.cpp
   src/tools/background_output.cpp
   src/tools/command_safety.cpp
+  src/tools/schema_check.cpp
   src/tools/isolation.cpp
   src/tools/worktree_tool.cpp
   src/tools/write_file.cpp

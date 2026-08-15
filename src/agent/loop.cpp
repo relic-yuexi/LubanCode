@@ -8,6 +8,7 @@
 
 #include "api/assembler.hpp"
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:工具结果的第一道编码关口
+#include "tools/schema_check.hpp"      // updatedInput 改写后的 schema 复检
 
 namespace lubancode::agent {
 
@@ -42,6 +43,24 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         return result;
     };
 
+    // 工具状态机相位通报(没设回调 = 没配 hooks,行为与从前逐字节一致)。
+    const auto phase = [&callbacks, &call](ToolPhase p) {
+        if (callbacks.on_tool_phase) {
+            callbacks.on_tool_phase(call.name, p);
+        }
+    };
+    // 钩子拦截的统一收尾:停在 Blocked 相位(不冒充"运行过又失败"),
+    // additionalContext 一并塞进 tool_result 给模型看。
+    const auto blocked = [&phase, &dispatch_done, &call](const std::string& reason,
+                                                          const std::vector<std::string>& extra_context) {
+        phase(ToolPhase::Blocked);
+        std::string content = reason;
+        for (const auto& ctx : extra_context) {
+            content += "\n[钩子附注] " + ctx;
+        }
+        return dispatch_done(call.name, tools::Tool::Result{content, true});
+    };
+
     if (callbacks.on_tool_start) {
         callbacks.on_tool_start(call.name, call.input);
     }
@@ -60,23 +79,64 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
                                             true});
     }
 
-    if (callbacks.on_pre_tool_hook) {
-        const std::optional<std::string> blocked = callbacks.on_pre_tool_hook(call.name, call.input);
-        if (blocked.has_value()) {
-            return dispatch_done(call.name, tools::Tool::Result{*blocked, true});
+    // ---- PreToolUse:在 UI 标记"真执行"之前、权限确认之前。deny -> 拦;
+    // ask -> 即使确认档放行也要问用户;allow -> 跳过用户确认(deny 规则
+    // 与权限策略仍在确认回调里,钩子越不了权);updatedInput 只与 allow
+    // 同返,先过一遍工具 schema,改写打回即拦。
+    phase(ToolPhase::CheckingHook);
+    ToolHookDecision pre;
+    if (callbacks.on_pre_tool_use_hook) {
+        pre = callbacks.on_pre_tool_use_hook(call.name, call.input);
+    } else if (callbacks.on_pre_tool_hook) {
+        // 旧回调兼容:非空 = deny。
+        const std::optional<std::string> legacy_blocked = callbacks.on_pre_tool_hook(call.name, call.input);
+        if (legacy_blocked.has_value()) {
+            pre.decision = ToolHookDecision::Decision::Deny;
+            pre.reason = *legacy_blocked;
         }
     }
 
+    if (pre.decision == ToolHookDecision::Decision::Deny) {
+        return blocked(pre.reason.empty() ? "被 PreToolUse 钩子拦截" : pre.reason, pre.additional_context);
+    }
+
+    nlohmann::json effective_input = call.input;
+    if (pre.updated_input.has_value()) {
+        const auto schema_error = tools::ValidateInputAgainstSchema(*pre.updated_input, tool->input_schema());
+        if (schema_error.has_value()) {
+            // 钩子明确想改参,改出来的形状这工具不认——按拦截处理,不悄悄
+            // 拿原参数跑出去(那是绕 schema 的路)。
+            return blocked("PreToolUse 钩子改写入参未通过工具 schema,已拦截: " + *schema_error,
+                           pre.additional_context);
+        }
+        effective_input = *pre.updated_input;
+    }
+
     if (tool->needs_confirm()) {
-        const bool allowed = callbacks.on_tool_confirm ? callbacks.on_tool_confirm(call.name, call.input) : true;
+        phase(ToolPhase::WaitingPermission);
+        const bool allowed =
+            callbacks.on_tool_confirm ? callbacks.on_tool_confirm(call.name, effective_input) : true;
         if (!allowed) {
             return dispatch_done(call.name, tools::Tool::Result{"用户拒绝执行该工具", true});
         }
     }
 
-    tools::Tool::Result result = tool->execute(call.input);
+    phase(ToolPhase::Running);
+    tools::Tool::Result result = tool->execute(effective_input);
+    // PostToolUse(新):结果先清洗成合法 UTF-8 再给钩子;钩子的反馈追加进
+    // 模型所见 tool_result,原始结果照旧进审计(副作用已发生,不能撤销,
+    // 也不冒充撤销)。旧回调照旧吃它一贯拿到的结果。
+    if (!platform::IsValidUtf8(result.content)) {
+        result.content = platform::SanitizeExternalText(result.content);
+    }
+    if (callbacks.on_post_tool_use_hook) {
+        const std::vector<std::string> feedback = callbacks.on_post_tool_use_hook(call.name, effective_input, result);
+        for (const auto& line : feedback) {
+            result.content += "\n[post-tool-use hook 追加] " + line;
+        }
+    }
     if (callbacks.on_post_tool_hook) {
-        callbacks.on_post_tool_hook(call.name, call.input, result);
+        callbacks.on_post_tool_hook(call.name, effective_input, result);
     }
     return dispatch_done(call.name, std::move(result));
 }

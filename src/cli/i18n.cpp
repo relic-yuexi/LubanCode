@@ -669,6 +669,8 @@ const Entry kZhCN[] = {
 
     // ---- transcript 摘要词(彩色主题;plain 的 [RUNNING] 等不进表) ----
     {"transcript.pending", "待确认"},
+    {"transcript.checking_hook", "检查钩子…"},
+    {"transcript.hook_blocked", "被钩子拦下(未执行)"},
     {"transcript.read_lines", "读取 {0} 行"},
     {"transcript.exit_code", "退出码 {0}"},
     {"transcript.added", "新增 {0} 行"},
@@ -1783,6 +1785,8 @@ const Entry kEn[] = {
     // ---- transcript summary words ----
     {"transcript.pending", "Awaiting confirmation"},
     {"transcript.read_lines", "Read {0} lines"},
+    {"transcript.checking_hook", "Checking hooks..."},
+    {"transcript.hook_blocked", "Blocked by hook (not executed)"},
     {"transcript.exit_code", "exit code {0}"},
     {"transcript.added", "Added {0} lines"},
     {"transcript.added_removed", "Added {0} lines, removed {1} lines"},

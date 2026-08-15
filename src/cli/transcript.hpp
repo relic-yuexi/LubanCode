@@ -32,7 +32,7 @@ namespace lubancode::cli {
 
 // 条目状态。Pending 是"needs_confirm 的工具画出来了、还在等用户点头"那个
 // 档;Running 起是正经五态(执行中/成功/失败/拒绝/ESC 打断)。
-enum class TranscriptStatus { Pending, Running, Ok, Error, Cancelled, Interrupted };
+enum class TranscriptStatus { Pending, Running, Ok, Error, Cancelled, Interrupted, Blocked };
 
 // 主循环的工具是 Tool,子代理内层的工具是 SubTool(渲染时整体再缩四空格)。
 // Thinking 是模型思考过程折叠块("思考 Xs",Ctrl+O 展开看正文)。

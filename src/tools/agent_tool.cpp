@@ -894,6 +894,10 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         if (foreground_hooks != nullptr) {
             sub_callbacks.on_pre_tool_hook = foreground_hooks->on_pre_tool_hook;
             sub_callbacks.on_post_tool_hook = foreground_hooks->on_post_tool_hook;
+            sub_callbacks.on_pre_tool_use_hook = foreground_hooks->on_pre_tool_use_hook;
+            sub_callbacks.on_permission_request = foreground_hooks->on_permission_request;
+            sub_callbacks.on_tool_phase = foreground_hooks->on_tool_phase;
+            sub_callbacks.on_post_tool_use_hook = foreground_hooks->on_post_tool_use_hook;
         }
     } else if (foreground_hooks != nullptr) {
         // 没进台账的旧路径(测试直调 RunTask 等边缘):沿用旧回调。
@@ -907,6 +911,10 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         sub_callbacks.on_usage = foreground_hooks->on_usage;
         sub_callbacks.on_pre_tool_hook = foreground_hooks->on_pre_tool_hook;
         sub_callbacks.on_post_tool_hook = foreground_hooks->on_post_tool_hook;
+        sub_callbacks.on_pre_tool_use_hook = foreground_hooks->on_pre_tool_use_hook;
+        sub_callbacks.on_permission_request = foreground_hooks->on_permission_request;
+        sub_callbacks.on_tool_phase = foreground_hooks->on_tool_phase;
+        sub_callbacks.on_post_tool_use_hook = foreground_hooks->on_post_tool_use_hook;
     }
 
     // 打断信号:前台任务有两根——面板 x 置的 task->cancel 与父轮 ESC 置的
