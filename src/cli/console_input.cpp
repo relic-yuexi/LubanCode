@@ -994,6 +994,40 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         redraw_with_panel(editor.CurrentRenderState(), panel_entries());
     };
 
+    // RetireIdleChrome(规格"现场二"):空闲 composer 的底栏所有权交接。wake
+    // 要把系统侧事件交回主循环时,先按上一帧的账把整帧(待发队列、上下横
+    // 线、输入行、状态栏、导航坞、提示行)正式收束——硬清干净、帧账归零,
+    // 绝不靠一个换行把旧帧推进滚屏留小尾巴。清完即 NoChrome,主循环的通知
+    // 与流式 footer 才接手所有权;任何时刻只有一名 owner。流式那头的
+    // RetireStreamingChrome 是 EndStreamFooter 里的 EraseStreamFooterLocked,
+    // 同一本帧账的另一头。
+    const auto retire_idle_chrome = [&]() {
+        if (!box) {
+            return;
+        }
+        const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
+        if (!info.has_value()) {
+            return;  // 拿不到屏幕信息就不硬擦,退回旧行为(换行让位)
+        }
+        int top = prev_frame_origin;
+        if (top < 0) {
+            top = start_row > 0 ? start_row - 1 : 0;
+        }
+        int bottom = start_row + prev_body_row_count;
+        if (bottom >= info->height) {
+            bottom = info->height - 1;
+        }
+        for (int r = top; r <= bottom; ++r) {
+            if (r >= 0) {
+                platform::ClearRowHardFrom(0, r, info->width);
+            }
+        }
+        platform::SetCursorPos(0, top);
+        previous_frame.reset();
+        prev_frame_origin = -1;
+        prev_body_row_count = 0;
+    };
+
     if (box) {
         redraw_with_panel(editor.CurrentRenderState(), panel_entries());
     }
@@ -1065,8 +1099,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 redraw_with_panel(editor.CurrentRenderState(), entries);
             }
             // 空闲唤醒:系统侧有事件(后台子代理跑完等)要在会话空闲时处理。
-            // composer 空着才让位——用户敲了一半的正文不抢;空串返回,调用方
-            // 循环顶自会去办,办完回来重新给提示符。
+            // composer 空着才让位——用户敲了一半的正文不抢;让位前先正式
+            // 收束旧底栏帧(RetireIdleChrome),空串返回,调用方循环顶自会去
+            // 办,办完回来重新给提示符(IdleComposer 再起)。
             if (composer && editor.CurrentRenderState().line.empty()) {
                 const auto& wake = IdleWakeHookSlot();
                 if (wake && wake()) {
@@ -1074,9 +1109,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                         steering.CancelEdit(*queue_edit);
                         queue_edit.reset();
                     }
-                    if (prev_body_row_count > 0) {
-                        platform::SetCursorPos(0, start_row + prev_body_row_count);
-                    }
+                    retire_idle_chrome();
                     std::cout << "\n";
                     return std::string();
                 }

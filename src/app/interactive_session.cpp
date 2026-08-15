@@ -2170,10 +2170,33 @@ void InteractiveSession::Run() {
         // 开头会把 DrainCompletionNotices 拿到的结果原文附带进消息。用户自己
         // 排队的消息优先:队列非空时先让队头那条走,它起 RunTurn 一样能把
         // 结果捎上。
+        // 完成通知(规格"现场二"):短进度行 + 归 main 的 transcript 事件,
+        // 有且只有一条——旧底栏已在 wake 路正式退场(RetireIdleChrome),通知
+        // 不再夹在两副 chrome 中间当一行来路不明的永久字;Ctrl+O/Ctrl+E 重铺
+        // transcript 时它跟着回来。
         if (session_agent_tool() != nullptr &&
             !SessionSteeringQueue().HasDeliverable(lubancode::cli::MessageTarget::Main()) &&
             session_agent_tool()->HasUndeliveredCompletions()) {
-            std::cout << theme.stats << "[后台子代理完成,结果交回主会话继续]" << theme.reset << "\n";
+            const std::vector<std::string> notices = session_agent_tool()->CompletionNoticeLines();
+            {
+                lubancode::cli::TranscriptItem item;
+                item.id = static_cast<int>(transcript.size()) + 1;
+                item.kind = lubancode::cli::TranscriptKind::Tool;
+                item.tool_name = "agent_notice";
+                item.title = tr("agent_panel.completion_notice");
+                item.status = lubancode::cli::TranscriptStatus::Ok;
+                item.start_time = item.end_time = std::chrono::steady_clock::now();
+                item.summary_lines = notices;
+                {
+                    std::lock_guard<std::mutex> stdout_lock(lubancode::cli::StdoutWriteMutex());
+                    std::cout << theme.tool_line << item.title << theme.reset << "\n";
+                    for (const auto& note : notices) {
+                        std::cout << theme.stats << "  ⎿ " << note << theme.reset << "\n";
+                    }
+                    std::cout.flush();
+                }
+                transcript.push_back(std::move(item));
+            }
             RunPeerTurn("后台子代理有新结果送达(资料附在本条消息里)。请阅读后继续推进手头任务;"
                         "若结论已够用,向用户简要汇报要点,不要重新摸排。");
             continue;

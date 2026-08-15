@@ -227,6 +227,10 @@ public:
     // TaskRevision 画状态,主循环靠这个知道"该把结果送回主代理了"——
     // DrainCompletionNotices 投递完之后这里就翻回 false。
     bool HasUndeliveredCompletions() const;
+    // 未投递完成结果的短行(每个任务一行,只 peek 不置 delivered):完成
+    // 通知给人看的短进度行用——"#2 标题 · 完成 · 12 次工具 · 3.4k tokens"。
+    // 完整结果照旧走 DrainCompletionNotices 进模型消息。
+    std::vector<std::string> CompletionNoticeLines() const;
 
     // 主会话切进 /worktree 后，子代理也得看见同一处工作目录。
     void SetWorkingDirectory(std::string cwd) { cwd_ = std::move(cwd); }

@@ -116,6 +116,21 @@ std::string FirstLineOf(const std::string& text) {
     return line;
 }
 
+// 终态短标签(通知/面板共用)。
+std::string StateShortLabel(AgentTaskState state) {
+    switch (state) {
+        case AgentTaskState::Done:
+            return "完成";
+        case AgentTaskState::Failed:
+            return "失败";
+        case AgentTaskState::Cancelled:
+            return "停下";
+        case AgentTaskState::Running:
+            return "运行中";
+    }
+    return "";
+}
+
 // title 的硬上限(显示列,不是码点数):终端窄时显示层可以再截标题字段
 // 本身,但入参这里超过就拒绝,不替调用方截成另一句话。
 constexpr int kMaxTitleDisplayWidth = 40;
@@ -1135,6 +1150,23 @@ bool AgentTool::HasUndeliveredCompletions() const {
     return std::any_of(tasks_.begin(), tasks_.end(), [](const auto& task) {
         return task->snapshot.state != AgentTaskState::Running && !task->snapshot.delivered;
     });
+}
+
+std::vector<std::string> AgentTool::CompletionNoticeLines() const {
+    std::vector<std::string> out;
+    std::lock_guard<std::mutex> lock(tasks_mutex_);
+    for (const auto& task : tasks_) {
+        const AgentTaskSnapshot& snapshot = task->snapshot;
+        if (snapshot.state == AgentTaskState::Running || snapshot.delivered) {
+            continue;
+        }
+        const std::int64_t tokens = snapshot.input_tokens + snapshot.output_tokens;
+        out.push_back("#" + std::to_string(snapshot.id) + " " +
+                      (snapshot.title.empty() ? "(未命名)" : snapshot.title) + " · " +
+                      StateShortLabel(snapshot.state) + " · " + std::to_string(snapshot.tool_calls.size()) +
+                      " 次工具 · " + lubancode::cli::FormatTokenCount(tokens));
+    }
+    return out;
 }
 
 std::string AgentTool::DrainCompletionNotices() {
