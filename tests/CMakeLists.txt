@@ -50,6 +50,7 @@ add_executable(lubancode_tests
   # 运行名册、假 main backend 集成(inbox 收到 + 来源标签)。
   test_agent_message_tool.cpp
   test_hooks.cpp
+  test_hooks_framework.cpp
   test_skills.cpp
   test_mcp_transport.cpp
   test_mcp_config.cpp

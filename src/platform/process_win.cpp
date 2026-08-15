@@ -334,6 +334,225 @@ ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, c
     return result;
 }
 
+// RunProcessWithStdin 的公共骨架:与上面 RunProcess(wstring) 同构,多一条
+// stdin 管道与一个写线程。写线程阻塞在 WriteFile 上而子进程不读时,靠
+// "超时杀树 → 子进程读端关闭 → WriteFile 以 ERROR_BROKEN_PIPE 失败"收场;
+// 兜底再 CancelSynchronousIo 一把,绝不吊死。
+static ProcessResult RunProcessWithStdinImpl(const std::wstring& cmdline, const std::string& stdin_data,
+                                             int timeout_ms, const EnvPairs& extra_env,
+                                             std::size_t max_output_bytes) {
+    ProcessResult result;
+    const std::vector<EnvBackup> backups = ApplyEnv(extra_env);
+
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = nullptr;
+
+    HANDLE read_pipe = nullptr;
+    HANDLE write_pipe = nullptr;
+    if (!CreatePipe(&read_pipe, &write_pipe, &sa, 0)) {
+        result.spawn_failed = true;
+        result.spawn_error = "创建管道失败(错误码 " + std::to_string(GetLastError()) + ")";
+        RestoreEnv(backups);
+        return result;
+    }
+    // 父进程这边留着的读端不能被子进程继承,不然子进程退出后管道写端还有一份
+    // 在父进程手里,ReadFile 会一直等不到 EOF。
+    SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0);
+
+    // stdin:读端给子进程继承,写端留在父进程(不继承),写完就关。
+    HANDLE stdin_read = nullptr;
+    HANDLE stdin_write = nullptr;
+    if (!CreatePipe(&stdin_read, &stdin_write, &sa, 0)) {
+        result.spawn_failed = true;
+        result.spawn_error = "创建 stdin 管道失败(错误码 " + std::to_string(GetLastError()) + ")";
+        CloseHandle(read_pipe);
+        CloseHandle(write_pipe);
+        RestoreEnv(backups);
+        return result;
+    }
+    SetHandleInformation(stdin_write, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = write_pipe;
+    si.hStdError = write_pipe;
+    si.hStdInput = stdin_read;
+
+    PROCESS_INFORMATION pi{};
+
+    std::vector<wchar_t> cmdline_buf(cmdline.begin(), cmdline.end());
+    cmdline_buf.push_back(L'\0');
+
+    const BOOL ok = CreateProcessW(
+        nullptr, cmdline_buf.data(), nullptr, nullptr, TRUE,
+        CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
+
+    RestoreEnv(backups);
+
+    // 子进程已经拿到了自己那份继承来的句柄,这里可以关了。
+    CloseHandle(write_pipe);
+    CloseHandle(stdin_read);
+
+    if (!ok) {
+        CloseHandle(read_pipe);
+        CloseHandle(stdin_write);
+        result.spawn_failed = true;
+        result.spawn_error = "启动子进程失败(错误码 " + std::to_string(GetLastError()) + ")";
+        return result;
+    }
+
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (job != nullptr) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limit{};
+        limit.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limit, sizeof(limit));
+        if (!AssignProcessToJobObject(job, pi.hProcess)) {
+            CloseHandle(job);
+            job = nullptr;
+        }
+    }
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
+
+    HANDLE overflow_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+
+    // stdin 写线程:一次性写完就关写端。子进程不读而数据超过管道缓冲时,
+    // WriteFile 会阻塞到子进程死掉(读端关闭)为止——超时杀树正是一条
+    // 解开它的路。
+    std::atomic<bool> stdin_done{false};
+    std::thread stdin_writer([&] {
+        if (!stdin_data.empty()) {
+            std::size_t written_total = 0;
+            while (written_total < stdin_data.size()) {
+                DWORD written = 0;
+                const std::size_t chunk = std::min<std::size_t>(stdin_data.size() - written_total, 64 * 1024);
+                if (!WriteFile(stdin_write, stdin_data.data() + written_total, static_cast<DWORD>(chunk), &written,
+                               nullptr)) {
+                    break;  // 子进程死了/管道断,EPIPE 类失败,写不完就写不完
+                }
+                written_total += written;
+            }
+        }
+        CloseHandle(stdin_write);
+        stdin_write = nullptr;
+        stdin_done.store(true);
+    });
+
+    std::string output;
+    std::atomic<bool> output_over_limit{false};
+    std::atomic<bool> reader_stop{false};
+    std::atomic<bool> reader_done{false};
+    std::thread reader([&] {
+        char buf[4096];
+        DWORD n = 0;
+        while (!reader_stop.load() && ReadFile(read_pipe, buf, sizeof(buf), &n, nullptr) && n > 0) {
+            if (output.size() < max_output_bytes) {
+                const std::size_t room = max_output_bytes - output.size();
+                output.append(buf, std::min<std::size_t>(n, room));
+                if (output.size() >= max_output_bytes && !output_over_limit.load()) {
+                    output_over_limit.store(true);
+                    if (overflow_event != nullptr) {
+                        SetEvent(overflow_event);
+                    }
+                }
+            }
+        }
+        reader_done.store(true);
+    });
+
+    const DWORD wait_ms = timeout_ms > 0 ? static_cast<DWORD>(timeout_ms) : INFINITE;
+    HANDLE wait_handles[2] = {pi.hProcess, overflow_event};
+    const DWORD wait_count = overflow_event != nullptr ? 2 : 1;
+    const DWORD wait_result = WaitForMultipleObjects(wait_count, wait_handles, FALSE, wait_ms);
+    if (wait_result == WAIT_TIMEOUT || wait_result == WAIT_OBJECT_0 + 1) {
+        if (wait_result == WAIT_TIMEOUT) {
+            result.timed_out = true;
+        }
+        if (job != nullptr) {
+            CloseHandle(job);  // KILL_ON_JOB_CLOSE:关句柄的一瞬间,job 里所有进程全杀
+            job = nullptr;
+        } else {
+            TerminateProcess(pi.hProcess, 1);
+        }
+        WaitForSingleObject(pi.hProcess, 5000);
+    }
+
+    // 后代若继承了管道写端还活着,ReadFile 永远等不到 EOF——收掉 Job 连带
+    // 杀光可能残留的后代,写端才会全关、读线程才能收尾。
+    if (job != nullptr) {
+        CloseHandle(job);
+        job = nullptr;
+    }
+
+    const auto reader_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!reader_done.load() && std::chrono::steady_clock::now() < reader_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (!reader_done.load()) {
+        reader_stop.store(true);
+        while (!reader_done.load()) {
+            CancelSynchronousIo(reader.native_handle());
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+    reader.join();
+
+    // stdin 写线程的收尾:子进程死后写端断裂,WriteFile 自然失败退出;万一
+    // 还有谁挂着句柄不退,CancelSynchronousIo 取消挂起的写。
+    const auto stdin_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!stdin_done.load() && std::chrono::steady_clock::now() < stdin_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (!stdin_done.load()) {
+        while (!stdin_done.load()) {
+            CancelSynchronousIo(stdin_writer.native_handle());
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+    stdin_writer.join();
+    if (stdin_write != nullptr) {
+        CloseHandle(stdin_write);  // 写线程被取消时可能没走到关句柄那步
+        stdin_write = nullptr;
+    }
+
+    DWORD exit_code = 0;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    result.exit_code = exit_code;
+    result.output = std::move(output);
+    result.output_truncated = output_over_limit.load();
+
+    if (overflow_event != nullptr) {
+        CloseHandle(overflow_event);
+    }
+    CloseHandle(read_pipe);
+    CloseHandle(pi.hProcess);
+
+    return result;
+}
+
+ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const std::string& stdin_data,
+                                  int timeout_ms, const EnvPairs& extra_env, std::size_t max_output_bytes) {
+    ProcessResult result;
+    if (argv.empty()) {
+        result.spawn_failed = true;
+        result.spawn_error = "argv 不能为空";
+        return result;
+    }
+    return RunProcessWithStdinImpl(BuildProcessCommandLine(argv[0], std::vector<std::string>(argv.begin() + 1, argv.end())),
+                                   stdin_data, timeout_ms, extra_env, max_output_bytes);
+}
+
+ProcessResult RunShellCommandWithStdin(const std::string& command_utf8, const std::string& stdin_data,
+                                       int timeout_ms, const EnvPairs& extra_env, std::size_t max_output_bytes) {
+    ProcessResult result =
+        RunProcessWithStdinImpl(BuildCmdCommandLine(command_utf8), stdin_data, timeout_ms, extra_env, max_output_bytes);
+    result.output = AcpBytesToUtf8(result.output);
+    return result;
+}
+
 // ---------------------------------------------------------------------------
 // 后台模式:spawn 立刻返回,不等待、不捕获进内存,stdout/stderr 直接指到
 // 日志文件的句柄上(CreateProcessW 层面重定向,不经过管道/读线程)。

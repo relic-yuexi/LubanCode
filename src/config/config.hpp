@@ -35,6 +35,10 @@
 // object(不是指针/引用),json_fwd.hpp 那种前向声明不够用,得换成全量头。
 #include <nlohmann/json.hpp>
 
+// hooks schema 2 的事件枚举(HooksConfig.events 的键)。events.hpp 自身零
+// 依赖,不会把 hooks 层的执行逻辑拖进 config。
+#include "hooks/events.hpp"
+
 namespace lubancode::config {
 
 // 说哪种"方言"跟模型对话:Anthropic 的 Messages API,还是 OpenAI 的
@@ -186,21 +190,62 @@ constexpr int kDefaultRequestTimeoutSecs = 30;
 // 空串,执行时也不看这个字段。command 是要跑的一整条命令行,直接交给
 // cmd.exe 执行(不像 run_command 工具那样还分 powershell/cmd 两种 shell、
 // 也不需要用户确认这一步)。
+// Hooks 生命周期单:source_path 记这条配置读自哪个文件(项目级/全局分级
+// 与信任审查的账;解析时填,不影响既有默认构造的调用方)。
 struct HookEntry {
     std::string matcher;
     std::string command;
+    std::string source_path;
+};
+
+// hooks schema 2:一只 command handler。type 给将来 HTTP/MCP/prompt/agent
+// 留门,本期只执行 command(别的值解析报错,不静默当 command 跑)。command
+// + args 是不经 shell 的 exec form(Windows 可另给 command_windows/
+// args_windows);只写 command 不写 args = 旧式 shell 字符串(照跑,文档把
+// exec form 列为首选)。timeout 配置里写秒(1..600),这里换算成毫秒存。
+struct HookHandlerConfig {
+    std::string type = "command";
+    std::string command;
+    std::vector<std::string> args;          // 空 = shell 字符串形式
+    std::string command_windows;            // Windows 专用可执行文件(缺省用 command)
+    std::vector<std::string> args_windows;  // Windows 专用参数(缺省用 args)
+    int timeout_ms = 30000;                 // 0/负数按 30000 算
+    bool async = false;                     // 解析并展示;本期不执行(安全点投递是第六步)
+    std::string status_message;             // UI 展示用,不影响执行
+    std::string failure_policy = "warn";    // warn | deny
+};
+
+// hooks schema 2:一组 matcher + 若干 handler。matcher 省略/"" /"*" 全匹配;
+// "a|b" 精确集合;regex=true 时按正则解释——不偷偷把特殊字符当正则。
+// source_path 记这组读自哪个文件(合并后靠它分 user/project,信任分级用)。
+struct HookMatcherGroupConfig {
+    std::string matcher;
+    bool regex = false;
+    std::vector<HookHandlerConfig> hooks;
+    std::string source_path;
 };
 
 // M9:hooks 配置整体——只从配置文件来,没有环境变量、也没有内置默认值这
 // 两级(跟其余字段不一样,config.json 里没写就是空,四个数组都是空的)。
+// Hooks 生命周期单:旧四类(pre_tool 等)照旧保留,走 legacy adapter 守旧
+// 语义;新增 events 一层(schema 2,键为 PascalCase 事件名,如 PreToolUse),
+// 这层的 handler 吃 stdin JSON、按 0/2/其它三分退出码。
 struct HooksConfig {
     std::vector<HookEntry> pre_tool;
     std::vector<HookEntry> post_tool;
     std::vector<HookEntry> session_start;
     std::vector<HookEntry> session_end;
 
+    // schema 2:事件 -> 匹配组列表。合并规则与旧四类一致地"相加"(用户级
+    // 与项目级同事件的组拼在一起,用户级在前)。
+    std::map<hooks::HookEvent, std::vector<HookMatcherGroupConfig>> events;
+
     bool Empty() const {
-        return pre_tool.empty() && post_tool.empty() && session_start.empty() && session_end.empty();
+        return pre_tool.empty() && post_tool.empty() && session_start.empty() && session_end.empty() && events.empty();
+    }
+
+    bool HasLegacy() const {
+        return !pre_tool.empty() || !post_tool.empty() || !session_start.empty() || !session_end.empty();
     }
 };
 
