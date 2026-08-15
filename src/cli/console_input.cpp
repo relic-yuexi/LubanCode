@@ -1287,20 +1287,15 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                         panel_session.SnapshotFor(nav_ids_for(panel_entries())).viewed_task_id;
                     if (outcome.consumed && viewed_after != viewed_before) {
                         // 真切会话(规格"现场一"):Enter 设 viewed_task_id / Esc
-                        // 清零,上方视口整块换源。光标先挪到旧 chrome 之下,请
-                        // 应用层铺出"此刻该看的 transcript",旧帧随正文滚走;
-                        // 随后重打提示符、重锚、整帧重画。Enter 只切视图,草稿
-                        // 不提交(能进到这的 Enter 必然发生在 composer 为空时)。
+                        // 清零,上方视口整块换源。换源前先正式收束旧底栏帧
+                        // (RetireIdleChrome:整帧硬清、帧账归零)——空 composer
+                        // 的旧框滚进滚屏只会是残帧,清掉再铺新正文;随后请应用
+                        // 层铺出"此刻该看的 transcript",重打提示符、重锚、整帧
+                        // 重画。Enter 只切视图,草稿不提交(能进到这的 Enter 必然
+                        // 发生在 composer 为空时)。
+                        retire_idle_chrome();
                         const auto& view_hook = AgentViewSwitchHookSlot();
                         if (view_hook) {
-                            if (const std::optional<platform::ScreenInfo> below = platform::GetScreenInfo();
-                                below.has_value()) {
-                                int last_row = start_row + prev_body_row_count;
-                                if (last_row >= below->height) {
-                                    last_row = below->height - 1;
-                                }
-                                platform::SetCursorPos(0, last_row);
-                            }
                             view_hook(viewed_after);
                         }
                         reanchor_prompt_and_redraw();

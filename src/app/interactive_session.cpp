@@ -608,6 +608,21 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
             }
             return fake;
         });
+        // 演示钩子同样接管视图切换:假代理不在 AgentTool 台账里,查看态的
+        // 头行从假条目表出,正文给一行占位——刮屏驱动器照旧只认屏面。
+        lubancode::cli::SetAgentViewSwitchHook([demo_count, demo_idle, this](int viewed_task_id) {
+            std::lock_guard<std::mutex> stdout_lock(lubancode::cli::StdoutWriteMutex());
+            std::cout << "\n";
+            if (viewed_task_id == 0) {
+                std::cout << theme.stats << tr("agent_panel.back_to_main") << theme.reset << "\n";
+            } else if (viewed_task_id >= 1 && viewed_task_id <= demo_count) {
+                std::cout << trf("agent_panel.view_header", "general-purpose #" + std::to_string(viewed_task_id),
+                                 "演示任务 " + std::to_string(viewed_task_id))
+                          << "\n"
+                          << "  [" << (viewed_task_id > demo_idle ? "后台" : "完成") << "] 演示条目,无 transcript 台账\n";
+            }
+            std::cout.flush();
+        });
     }
 
     // 后台子代理结果回流(空闲唤醒):任务在会话空闲时跑完的,不能干等用户
