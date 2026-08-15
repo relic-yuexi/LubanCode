@@ -1,0 +1,909 @@
+# DeepSeek 前缀缓存守恒与命中统计
+
+状态：待做（请求形状、上下文工作视图与 usage 口径）
+
+## 结论
+
+LubanCode 的活历史，大体守规矩。
+
+`AgentLoop` 收一条用户消息，往 `history_` 末尾添。模型回工具调用，再添 assistant。工具跑完，再添 tool result。若 system、tools 与旧消息不动，后一份请求本该是前一份请求的原样追加版。
+
+可发请求前，还有几只手会改旧账。
+
+最伤 DeepSeek 前缀缓存的有四处：
+
+1. 项目记忆与运行中子代理名册，每个外层回合重算，塞进 `system` 尾巴。
+2. `tool_search` 命中后，一面删改 system 里的延迟索引，一面改 `tools` 数组。
+3. 默认开启的结构压缩，每次重算请求视图。上一轮由热转冷后，旧 tool result 会忽然换成引用、预览或 `superseded` 标记。
+4. 配了正数 `max_turns` 时，末三轮把一枚不断变化的倒计时塞进 `system`。
+
+另有三桩配套欠账：
+
+1. 当前 Chat 序列化不回传任何 `ThinkingBlock`。纯对话答复省掉 reasoning 没错；可一段交互只要走了 DeepSeek tool call，官方要求把相关 `reasoning_content` 原样带回后续请求。眼下全被漏掉，可能直接吃 400。
+2. 同一轮多枚工具调用会攒齐结果、按模型次序落账，只发一次后续模型请求。这点已经守住。可工具仍逐个跑，墙钟时间白白拉长。
+3. `on_usage` 每个 step 都会响，状态里却只留最近一次与整回合累计。哪一步冷 miss、哪一步断前缀，回头无账可查。
+
+usage 本身也有硬伤：当前 Chat Completions 解析器压根不读 DeepSeek 的 `prompt_cache_hit_tokens` 与 `prompt_cache_miss_tokens`。就算服务端命中了，LubanCode 多半也只会记成 0。通用 Chat 与 Responses 的 `input_tokens` 又含着 cached tokens，`ContextTracker` 却再加一遍 `cache_read_tokens`，会把上下文占用算重。
+
+故此要分两步办：
+
+```text
+先把 usage 读准、口径理顺
+再守请求共同前缀
+```
+
+只修显示，缓存仍会丢。只修请求，数字仍会骗人。两边缺一不可。
+
+## DeepSeek 的准绳
+
+官方文档核于 2026-08-15：
+
+- 上下文缓存：<https://api-docs.deepseek.com/zh-cn/guides/kv_cache/>
+- Chat Completions：<https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/>
+- 思考模式：<https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/>
+
+规则很直白：从第 0 token 起比共同前缀。中段相同不算。缓存又是尽力而为，不许把一次没命中都赖给客户端。
+
+DeepSeek usage 给三笔数：
+
+```text
+prompt_tokens = prompt_cache_hit_tokens + prompt_cache_miss_tokens
+```
+
+命中率按 token 算：
+
+```text
+prompt_cache_hit_tokens
+-----------------------------------------------
+prompt_cache_hit_tokens + prompt_cache_miss_tokens
+```
+
+这不是“十次 HTTP 命中九次”。一份 50k 输入，49k 从缓存取，1k 新算，命中率便是 98%。
+
+流式请求还可带：
+
+```json
+"stream_options": {"include_usage": true}
+```
+
+如此会在 `[DONE]` 前多回一只 usage chunk。当前 LubanCode 固定 `stream: true`，却没显式要这只 chunk。
+
+## 现行请求怎么拼
+
+`src/agent/loop.cpp:178` 每次工具往返都另造一份 `api::Request`：
+
+```text
+model   = model_
+system  = system_prompt_
+        + turn_system_suffix_
+        + max-turn nudge（条件触发）
+messages = CompressWorkingView(history_)
+         -> TrimHistory(...)
+tools    = BuildToolDefinitions()
+```
+
+随后几层 backend 又改 system：
+
+```text
+DeferredIndexBackend      加延迟工具索引
+ModelInstructionsBackend  加模型专属指令
+SoulOverlayBackend        加魂
+```
+
+Chat wire 最后在 `src/api/chat/request.cpp:46` 展开成 `messages` 与 `tools`。
+
+正常工具往返本应长这样：
+
+```text
+P1 = S + T + H + user
+
+P2 = S + T + H + user
+   + assistant tool_call
+   + tool result
+```
+
+现行代码只有在下列条件同时成立时，才真是这个形状：
+
+```text
+turn suffix 没变
+max-turn 提醒没变
+延迟工具集合没变
+结构压缩没重写旧消息
+TrimHistory 没换裁剪边界
+没人切 model/provider/think
+```
+
+默认 `max_turns=0` 时，单次 `Run()` 内的普通工具往返尚算稳。跨外层用户回合就不稳了：记忆后缀与名册会重算，上一轮还会从结构压缩热区掉进冷区。
+
+## 会破坏共同前缀的实锤
+
+### 一、每回合重算的 system suffix
+
+`src/app/interactive_session.cpp:1736` 先按新用户输入召回项目记忆：
+
+```text
+project_memory->BuildTurnContext(content, cwd)
+```
+
+紧接着，`src/app/interactive_session.cpp:1745` 又拼运行中子代理名册：
+
+```text
+session_agent_tool()->RunningTasksRoster()
+```
+
+最后交给：
+
+```text
+loop->SetTurnSystemSuffix(...)
+```
+
+`src/agent/loop.cpp:181` 把这段接在 system 后面。它在同一次 `Run()` 内不变，故普通工具往返还能复用。下一条外层用户消息来时，召回结果与任务名册一变，分叉点就落在旧历史前面。
+
+结果如下：
+
+```text
+上一轮：stable system + memory(A) + roster(A) + 全历史
+下一轮：stable system + memory(B) + roster(B) + 全历史 + 新用户
+```
+
+DeepSeek 最多复用 `stable system`。后头工具 schema 与长历史，即便一字没改，也接不上。
+
+这处影响最大。对话越长，损失越大。
+
+### 二、轮数倒计时逐请求改 system
+
+`src/agent/loop.cpp:187` 在剩余三轮内追加：
+
+```text
+[系统提醒] ... 最多还能来回 N 轮 ...
+```
+
+N 每轮递减。若 `max_turns<=3`，从第一份请求就开始变。若上限更大，前头一直没有，走到末三轮又忽然出现。
+
+默认 `max_turns=0` 不触发。这不是默认路径的主犯。用户一旦设了正数，它便会在最需要收尾的几次工具往返里连续打断前缀。
+
+### 三、tool_search 同时改 system 与 tools
+
+`src/tools/tool_search.cpp:103` 每次按 `loaded` 集合重建延迟索引。命中一只工具后：
+
+- 那只工具从 system 索引里消失；
+- `另有 N 个` 的 N 跟着变；
+- `src/agent/loop.cpp:242` 重建 tools 时，那只工具的完整 schema 又插进数组。
+
+这是同一次 `Run()` 内就会发生的前缀断裂：
+
+```text
+P1：system 里有 foo 索引，tools 里没有 foo
+tool_search 命中 foo
+P2：system 里删了 foo 索引，tools 里添了 foo schema
+```
+
+延迟挂载本就拿“少发 schema”换动态工具集。它与“整场工具表冻结，靠服务端缓存摊薄成本”是两条不同路线。不能两头都算赚到。
+
+现行 `loaded` 跨 `/clear` 保留。故同一场里每挂一批工具，都会开一轮新缓存 epoch。挂完之后才重新稳定。
+
+### 四、结构压缩会追改旧 tool result
+
+`src/agent/loop.hpp:243` 把结构压缩默认设为 true。
+
+每次请求前，`src/agent/loop.cpp:220` 都重跑 `CompressWorkingView()`。它不改 `history_`，却会改发给模型那份旧消息。
+
+`src/agent/context_events.cpp` 有三类追改：
+
+- 同键同内容的旧结果换成引用；
+- 后来读到新版本，早先结果加 `superseded`；
+- 冷区超长结果换成 artifact 头尾预览。
+
+关键在 `hot_start`。最后一轮是热区，眼下不碰。下一条外层用户消息一来，上一轮跌进冷区。它的 tool result 可能第一次被改写。
+
+于是：
+
+```text
+P1 里，上一轮 read_file 还是全文
+P2 里，同一枚旧 read_file 忽然成了 artifact stub
+```
+
+会话 JSONL 虽一字不动，DeepSeek 看见的请求前缀却动了。缓存只认请求，不认本地账本。
+
+这也是常态路径。只要工具结果够长、重复读取够多，对话跨轮后便会碰上。
+
+### 五、TrimHistory 会改中段与旧消息正文
+
+`src/agent/context.cpp:195` 超过字符上限后，会：
+
+- 留第一轮；
+- 丢中间轮；
+- 给最近区第一条 user 加 `[早前对话已裁剪]`；
+- 必要时截短旧 tool result。
+
+这当然会断缓存。更麻烦的是，最近 N 轮的边界随新回合往后挪。若一直靠 view-only hard trim 顶着，每次请求都可能换一次裁剪形状。
+
+这条是安全网，不该为缓存撤掉。该做的是让它少出手；真出手时，明确开新 epoch，并把裁过的工作视图钉住，别下一轮再换一副样子。
+
+### 六、语义 compact 直接换历史
+
+`src/app/interactive_session.cpp:1900` 调 `BuildCompactedHistory()`，随后 `ReplaceHistory()`。
+
+手动 `/compact`、发轮前自动 compact、工具往返中 mid-turn compact，都会把旧历史换成 archive + 热区。
+
+这是有意改前缀。不可假装无事发生。压缩后第一份请求应记作新 epoch 的冷启动；后续再守住。
+
+### 七、memory_save 可在会话中途注册或隐藏
+
+`src/app/interactive_session.cpp:1178` 的 `EnsureMemoryTool()` 会在 `/memory on` 或 `/memory learn ...` 后，把 `memory_save` 追加进 registry。
+
+`src/app/tool_runtime.cpp:244` 的 filter 又会按 `generate_enabled()` 决定它进不进 tools。
+
+这会改工具表。`/memory use on/off` 还会改下一回合有没有记忆召回后缀。
+
+这些都是用户主动切能力后的 epoch break。眼下没有任何提示，也没有测试钉住“只断一次，随后稳定”。
+
+### 八、切设置会换缓存命名空间或提示前缀
+
+下列命令本就该打断旧缓存：
+
+```text
+/model
+/provider
+/think
+/soul
+/skills 后的刷新
+/init 或项目指令刷新
+/worktree 或 cwd 变化
+/clear
+/resume
+```
+
+`/model`、`/provider` 还会换服务端缓存命名空间。`/think` 未必只是一只无害采样参数；DeepSeek 当前 thinking 配置与模型运行形态相关，也该按 epoch break 对待。
+
+`/soul`、模型专属指令、项目 `AGENTS.md`、Skill 清单、wire 平台段都住 system。内容一改，前缀自然变。
+
+这些不算 bug。缺的是统一记账：用户须看得出这次命中跌下去，是主动换了哪根梁。
+
+### 九、日期与 cwd 放在 system 前半段
+
+`src/agent/prompt_assembler.cpp:165` 把 cwd、当天日期、操作系统写进运行环境段。日期只在构造或 rebuild 时取一次，并非每请求跳动，这点尚稳。
+
+可跨午夜重建、恢复会话、切 worktree 时，这段会变。它又放在工具方针、项目指令与历史之前。一处小改，后头全断。
+
+会话内固定日期没错。往后若要逐轮刷新时间，绝不可直接照这条路塞回 system 前头。
+
+### 十、跨进程工具顺序未全钉死
+
+会话内的 `ToolRegistry` 用 vector，`All()` 按注册顺序返。基础工具顺序稳定。MCP server 配置是 `std::map`，server 次序也稳。
+
+仍有两处毛边：
+
+- `src/tools/plugin_loader.cpp:96` 直接遍历 DLL 目录，没有先按文件名排序；
+- `src/app/tool_runtime.cpp:113` 照 MCP `ListTools()` 原顺序注册，服务若乱序，LubanCode 也跟着乱。
+
+Lua 插件已经先排序，这处做得对。
+
+跨进程 `/resume` 若还在 DeepSeek 缓存存活期，DLL 或 MCP 工具换个顺序，schema 内容虽一样，前缀也可能对不上。这里不如会话内动态 suffix 常见，却该顺手堵住。
+
+## 没有破坏前缀的部分
+
+不能把所有动态行为都列成罪状。
+
+以下路径本身守着追加律：
+
+- `history_.push_back()` 依次添 user、assistant、tool result；
+- tool use 与 tool result 成对，旧消息不重排；
+- `ToolRegistry::All()` 在单进程内按注册顺序返；
+- `nlohmann::json` 对对象键的输出稳定；
+- 外来排队消息在下一请求前并到尚未发出的尾部 tool-result 消息，没追改已发前缀；
+- 项目记忆 suffix 在同一次 `Run()` 内固定，普通工具往返不重算；
+- 默认 `max_turns=0`，不会冒出倒计时。
+- 同一 assistant 消息里的多枚 tool call 会全部执行，结果按原 content 顺序塞进一条 user/tool-result 消息，随后才发下一份模型请求。
+
+故此无需重写整个 agent loop。要管住的是请求视图与动态头段。
+
+## 另外三处差额
+
+### 一、DeepSeek reasoning 回传少了关键半边
+
+现行链路能收、能存，却不能按 DeepSeek 规矩重放：
+
+```text
+src/api/chat/events.cpp         reasoning_content -> ThinkingDelta
+src/api/assembler.cpp           ThinkingDelta -> ThinkingBlock
+src/api/chat/request.cpp        只拼 TextBlock 与 ToolUseBlock，略过 ThinkingBlock
+```
+
+纯对话中没有工具调用时，下一请求不带上一轮 reasoning，省 token，也合 DeepSeek 规矩。一段 user-to-user 交互若走了工具，情形便翻过来：相关 `reasoning_content` 须连同工具链原样回传，并在后续 user 轮次里保留。少了它，不只折缓存，还会触犯 wire 协议。
+
+当前官方页的措辞比“只保留那条含 `tool_calls` 的 assistant”更严：带 `tools` 的请求，在后续请求中须完整回传 `reasoning_content`；样例到下一轮 user 仍带着上一轮工具链产生的 reasoning。实现不可只看单条消息有没有 `ToolUseBlock`，还得看 provider/model 版本与这一段交互是否启用了工具。
+
+这里不能拿“界面不显示/不导出思考”当“线上请求不回传思考”。两桩事须分开管。
+
+建议给 provider 能力立明文策略：
+
+```text
+reasoning_replay_policy = never
+                        | tool_episode
+                        | signed_blocks
+                        | provider_managed
+```
+
+DeepSeek Chat 取 `tool_episode`。纯对话 reasoning 从后续请求里略过；一旦这一段走工具，按当前官方协议保留整段所需 reasoning。字节与次序照旧，不摘要，不拼 UI 标签。Anthropic 继续走带 signature 的 block。Responses 若由服务端状态或 reasoning item 续接，走自己的 serializer，不套 DeepSeek 特判。
+
+### 二、多工具只批量落账，尚未并发执行
+
+`src/agent/loop.cpp:354` 逐块调用 `RunOneTool()`。它有两点已经做对：
+
+- 一次 assistant 回复里的工具全跑完，才发下一份模型请求；
+- `tool_results` 按模型给出的次序 push，历史不乱。
+
+故而“并发后少一圈 HTTP”不适用于现行 LubanCode。HTTP 圈数本就只有一圈。并发能省的是工具墙钟时间。
+
+要并发，先让工具自报执行属性：
+
+```text
+execution_mode = parallel_safe | serial | exclusive
+```
+
+只把明确标成 `parallel_safe`、无需交互确认、不会改共享会话状态的调用放进有界任务组。文件写入、shell、副作用插件、授权弹窗与共享事务仍串行。结果可乱序完成，写回历史时须按原 tool call index 排列。
+
+审计日志另记真实 start/end；模型历史只认模型次序。取消时，已起的任务尽力停或等它收口，未起的补合成 `tool_result`，继续守住一呼一应。
+
+### 三、逐 step usage 有回调，没有流水账
+
+`src/agent/loop.cpp:329` 每份响应都会调 `on_usage`。`src/app/turn_runner.cpp:524` 一路把数累进 `UsageStats`，`ContextTracker` 则覆盖成最近一份。于是屏上能见总花销，也能见眼下占用，却回答不了：
+
+```text
+第几步断了缓存？
+是 system、tools、历史改了，还是服务端尽力缓存没接上？
+工具往返后命中率从多少跌到多少？
+```
+
+须添 append-only 的 `StepUsageRecord`。每个模型请求各记一笔，不能只存整场平均数。
+
+## usage 现行硬伤
+
+### 一、DeepSeek 字段没读
+
+`src/api/chat/events.cpp:45` 只读：
+
+```text
+prompt_tokens
+completion_tokens
+prompt_tokens_details.cached_tokens
+```
+
+DeepSeek 官方字段却在 usage 顶层：
+
+```text
+prompt_cache_hit_tokens
+prompt_cache_miss_tokens
+```
+
+所以当前 DeepSeek 即便返回 49,000 hit、1,000 miss，`cache_read_tokens` 仍可能落 0。
+
+`tests/test_chat_events.cpp` 只有 Qwen/OpenAI 风格的 `prompt_tokens_details.cached_tokens` 用例。没有一条 DeepSeek usage 样本。
+
+### 二、Chat 与 Responses 会把 cached 算两遍
+
+通用 Chat 当前这样记：
+
+```text
+input_tokens      = prompt_tokens          // 已含 cached
+cache_read_tokens = cached_tokens
+```
+
+Responses 当前也一样：
+
+```text
+input_tokens      = usage.input_tokens     // 已含 cached
+cache_read_tokens = input_tokens_details.cached_tokens
+```
+
+`src/cli/context_tracker.cpp:15` 又算：
+
+```text
+input_tokens + cache_read_tokens + cache_creation_tokens + output_tokens
+```
+
+Anthropic 的 `input_tokens` 不含 cache read，这个公式对。Chat 与 Responses 的 input 是总数，这个公式就重了。
+
+现有单测甚至把这个混口径钉成了现状：Chat 用例要求 input=12、cache=4。若后头拿 12+4 算真实输入，便成 16。
+
+### 三、流式 usage 没明确索取
+
+`src/api/chat/request.cpp:47` 固定发：
+
+```json
+{"stream": true}
+```
+
+没带 `stream_options.include_usage=true`。DeepSeek 当前文档支持这项，并许诺在 `[DONE]` 前给一只完整 usage chunk。
+
+有些兼容端不认 `stream_options`，不可给所有 Chat provider 生塞。DeepSeek preset 应显式带；通用 provider 则由 capability 或配置决定。
+
+## 目标契约
+
+### 一、统一 usage 语义
+
+`api::Usage` 的口径须写死：
+
+```text
+input_tokens          本次未从缓存读取、需按普通输入处理的 token
+cache_read_tokens     从缓存读取的输入 token
+cache_creation_tokens 本次写缓存的输入 token（provider 有此概念才填）
+output_tokens         输出 token
+```
+
+完整输入统一由一只 helper 算：
+
+```text
+TotalInputTokens(usage)
+= input_tokens + cache_read_tokens + cache_creation_tokens
+```
+
+DeepSeek 映射：
+
+```text
+input_tokens      = prompt_cache_miss_tokens
+cache_read_tokens = prompt_cache_hit_tokens
+```
+
+OpenAI/Qwen 风格 Chat 映射：
+
+```text
+cache_read_tokens = prompt_tokens_details.cached_tokens
+input_tokens      = max(prompt_tokens - cache_read_tokens, 0)
+```
+
+Responses 同理：
+
+```text
+cache_read_tokens = input_tokens_details.cached_tokens
+input_tokens      = max(input_tokens_total - cache_read_tokens, 0)
+```
+
+没有 cache 明细时：
+
+```text
+input_tokens = provider 返回的 prompt/input total
+cache_read_tokens = 0
+```
+
+若怕 `input_tokens` 改语义牵连太广，可给原始总数另加 `prompt_tokens_total`。不可继续让同一字段在 Anthropic 表示 miss，在 Chat 表示 total。
+
+### 二、给请求立 cache epoch
+
+一场会话不是永远只有一份缓存前缀。该有明确 epoch：
+
+```text
+session start       -> epoch 1
+tool set 改变       -> epoch + 1
+system 改变         -> epoch + 1
+model/provider 改变 -> epoch + 1
+compact/hard trim   -> epoch + 1
+```
+
+同一 epoch 内守一条硬规矩：
+
+> 已经发给模型的 system、tools 与消息前缀，不得追改。新材料只往尾部添。
+
+epoch break 不算失败。无名无姓、每轮偷偷断一次，才算失败。
+
+### 三、让事件日志做唯一账本
+
+请求不该从 UI 状态、临时状态与几只 manager 现场拼凑。应从 append-only 事件日志投影：
+
+```text
+MessageAppended
+RequestContextAppended
+ToolSetChanged
+SystemChanged
+ModelChanged
+HistoryCompacted
+```
+
+`RequestProjector(events, epoch)` 产出 system、tools 与 messages。UI 只看这本账，不给请求添材料。动态材料要么先落事件再发送，要么明确只属 transport，不得暗改 token 前缀。
+
+请求头或 provider 配置若会改变模型可见字节，也须记一笔变更事件与 hash。密钥、正文不落盘，只记字段名、旧 hash、新 hash、原因。这样 `/resume` 才能照同一组事件重建同一份请求。
+
+投影器须有确定性：同一事件流、同一版本、同一 provider capability，产出的 canonical bytes 必须相同。序列化版本升级若会改字节，就开新 epoch，别装作还能续旧缓存。
+
+### 四、动态上下文离开 system 头段
+
+项目记忆与任务名册不该每回合改 system。
+
+建议引入“内部上下文块”，随本轮 user 一同进入请求视图：
+
+```text
+UserTextBlock
+InternalContextBlock{kind=memory_retrieval, turn_id=...}
+InternalContextBlock{kind=running_tasks_snapshot, turn_id=...}
+```
+
+第一次发出后，其渲染结果在本 epoch 内钉住。后续请求照原样重放。新一轮再往尾部添新块。
+
+这些块可不进 Markdown export，也可在 session JSONL 另记为 `request_context` 事件。不能只存在一轮、下一轮又从旧请求里抽掉；抽掉就是追改前缀。
+
+旧任务名册要明写“截至 turn N 的快照”。更好的路是记任务 start/finish delta，少堆几份会陈旧的全量名册。
+
+项目记忆召回虽会多占后续上下文，却本就是模型当时看过的证据。留到 compact 再收，比每回合从旧前缀里拔掉更合账。须用真实 token 与成本基准衡量，不能凭感觉定。
+
+### 五、倒计时只追加一次
+
+不要每请求改 `N`。
+
+可在首次跨入收尾区时，给当时尚未发出的 user/tool-result 尾部添一条固定提醒：
+
+```text
+[系统提醒] 已进入轮数上限前的收尾区，请尽快收束。
+```
+
+这条随历史留住。后头不改数字，不撤旧提醒。硬上限仍由循环计数执行，提示无需承担精确计数。
+
+### 六、结构压缩改成“首次定形，往后不追改”
+
+当前算法省 token，却不守缓存。
+
+改法如下：
+
+1. 给每枚 tool result 建稳定 event id 与 content hash。
+2. 它第一次进入请求视图时，就决定用全文还是 artifact 预览。
+3. 决定落账后，本 epoch 内不再改。
+4. 后来的重复结果可自己写“同事件 e7”，不可回头改 e7。
+5. 后来的新版本可自己写“替代事件 e7”，不可给 e7 补 `superseded`。
+6. compact 开新 epoch 后，才可重算整份新视图。
+
+这样仍能收敛后来增量，又保住已经缓存的旧前缀。
+
+热区规则也须改。今日“热时发全文，冷后换预览”正是追改来源。长结果要么首次就预览，要么这一 epoch 一直全文。不能半路变脸。
+
+### 七、hard trim 结果要钉住
+
+第一次 hard trim 后，生成一份 sticky working history。后续只往这份视图尾部添，直到语义 compact 或别的 epoch break。
+
+不能每请求拿完整 `history_` 重算“第一轮 + 最近 N 轮”，使裁剪窗口一路滑。
+
+全量 JSONL 仍照旧保留。sticky view 只是模型眼下那本账。
+
+### 八、工具表按稳定策略管理
+
+先把无意乱序堵住：
+
+- DLL 文件按规范化文件名排序后加载；
+- 每只 MCP 的 tools 按 qualified name 排序后注册；
+- 同名工具拒绝或按固定来源规则裁决；
+- schema 落一份 canonical hash，便于诊断。
+
+再处理有意变化：
+
+```text
+tool_search 挂载
+memory_save 开关
+插件/MCP 热刷新（将来若有）
+```
+
+每次变化显式开新 epoch。一次 `tool_search` 若命中多只，成批挂载，只断一次。
+
+还可做两档策略，拿实测说话：
+
+```text
+stable-tools   启动时冻结全量 tools，首包大，后续缓存稳
+deferred-tools 保留 tool_search，schema 小，每批挂载开新 epoch
+```
+
+不要按 provider 名硬猜哪档更便宜。用长会话、工具数、首 token 时延与 hit/miss 账跑基准，再给 DeepSeek preset 选默认。
+
+### 九、按协议回传 reasoning 状态
+
+DeepSeek Chat 的 serializer 按交互段与 provider capability 办事：
+
+```text
+这一段纯对话，没有工具调用
+-> 不写 reasoning_content
+
+这一段启用并实际走了工具
+-> 按 DeepSeek 当前协议保留相关 reasoning_content
+
+后续 user/tool_result 继续追加
+-> 已纳入协议状态的 assistant 消息保持原样
+```
+
+这不是缓存技巧，是协议底线。顺手却也守住缓存：该留下的块永不改写，不该留下的裸 reasoning 从第一回就不进后续请求。
+
+### 十、安全工具受控并发
+
+在 `Tool` 元数据里加执行属性。调度器先按 assistant content index 收集调用，再切成可并发批次与串行屏障。并发数设上限，别让一轮模型输出打满文件句柄、进程与 MCP 连接。
+
+结果数组预分槽位。任务完成只填自己的槽，不直接往 history push。全批收口后，按原 index 造一条 tool-result 消息。如此执行可快，旧账不乱。
+
+### 十一、每个模型 step 单独落 usage
+
+建议记录：
+
+```text
+StepUsageRecord {
+  session_id
+  outer_turn_id
+  step_index
+  request_id
+  provider
+  model
+  cache_epoch
+  input_tokens
+  cache_read_tokens
+  cache_creation_tokens
+  output_tokens
+  cache_hit_ratio
+  prefix_fingerprint
+  append_only
+  epoch_break_reason
+}
+```
+
+整回合统计由这些记录求和。命中率用 token 总和重算，不能把各 step 百分比直接取平均。`ContextTracker` 仍可只看最近一笔，审计层却须把每笔留住。一次冷 miss 到账，debug 日志当场报出；莫等整轮结束才拿平均数遮过去。
+
+## 可借的路，不可混的账
+
+三家公开接口各有门道：
+
+| 路子 | 公开能力 | LubanCode 可借什么 |
+|---|---|---|
+| DeepSeek Chat | 自动前缀缓存；客户端重放完整消息；走过工具的交互须按协议回传 `reasoning_content` | 本地事件重建、严格追加、读取 hit/miss |
+| Claude Messages | `tools -> system -> messages` 前缀；自动或显式 `cache_control`；5 分钟或 1 小时 TTL | 稳定层分段、显式断点、逐层诊断 |
+| OpenAI Responses | `previous_response_id`、结构化 reasoning item、compaction、prompt caching | 把“服务端续接”与“客户端重放”分成两种 backend 契约 |
+
+参考：
+
+- Claude Prompt Caching：<https://platform.claude.com/docs/en/build-with-claude/prompt-caching>
+- Claude Code 成本说明：<https://code.claude.com/docs/en/costs>
+- OpenAI Conversation State：<https://developers.openai.com/api/docs/guides/conversation-state>
+- OpenAI Compaction：<https://developers.openai.com/api/docs/guides/compaction>
+- OpenAI Prompt Caching：<https://developers.openai.com/api/docs/guides/prompt-caching>
+- OpenAI 模型指南：<https://developers.openai.com/api/docs/guides/latest-model>
+
+Codex 产品内部何时分段、何时 compact，公开文档没摊全。这里只记 OpenAI API 已公开能力，不拿产品猜测当实现事实。
+
+## 可观测性
+
+没有前缀指纹，排这类错只能盯着 token 数猜。
+
+新增一份不泄正文的请求诊断：
+
+```text
+cache_epoch
+epoch_break_reason
+model_hash
+system_hash
+tools_hash
+history_prefix_hash
+message_count
+stable_message_count_since_last_request
+request_input_tokens
+cache_read_tokens
+cache_hit_ratio
+request_id
+outer_turn_id
+step_index
+```
+
+hash 用稳定 canonical bytes 算。只打 hash、长度与原因，不把 system、工具参数、记忆正文写进普通日志。
+
+每次请求跟上一份比：
+
+```text
+system_changed
+tools_changed
+old_message_changed_at=<index>
+append_only=true|false
+```
+
+若同一 epoch 出现 `append_only=false`，开发构建直接告警。测试里当失败。
+
+UI 不必常驻铺一排数。`/context` 或 debug 日志给一行即可：
+
+```text
+缓存前缀 epoch 4：命中 49k / 总输入 50k（98%）；本轮只追加 1k
+```
+
+没拿到 usage 时，写“服务端未回报”，不可拿 0 冒充真未命中。
+
+逐 step 例子：
+
+```text
+turn 12 / step 1 / epoch 4：read 49k，miss 1k，98%，append-only
+turn 12 / step 2 / epoch 5：read 0，miss 51k，0%，tools_changed(tool_search)
+```
+
+总览仍可给整轮合计。诊断须留逐步细账。两者不争一块地方。
+
+## 实施次序
+
+### 第一期：把 DeepSeek usage 读准
+
+- `src/api/chat/request.cpp` 支持按 provider capability 发 `stream_options.include_usage=true`。
+- DeepSeek catalog preset 打开该 capability；用户 extra_body 仍可显式覆盖。
+- `src/api/chat/events.cpp` 读取顶层 hit/miss 字段。
+- 若 DeepSeek 字段与 `prompt_tokens` 同时出现，校验 `hit + miss == prompt_tokens`。不等时保留服务端原数并记诊断，别崩会话。
+- Chat/Responses/Anthropic 统一 `Usage` 口径。
+- `ContextTracker`、统计行、子代理汇总、`/context` 全改用统一 helper。
+- UI 增加命中率。分母只取输入，不把 output 混进去。
+- `on_usage` 入参补 request/turn/step 身份，落 `StepUsageRecord`；整轮汇总改从逐步记录求和。
+
+### 第二期：补 DeepSeek reasoning 回传
+
+- Chat serializer 识别 user-to-user 工具交互段，不只检查单条 assistant 消息。
+- 纯对话 reasoning 继续略过；工具交互段按 provider capability 完整回传所需 `reasoning_content`。
+- 回传内容保留原字节，不加标签，不摘要，不混进 `content`。
+- capability 写在 provider/backend 契约里，不按 model 名散落特判。
+- 先补 request JSON 单测，再跑一次真实 thinking + tool call 往返，确认不吃 400。
+
+### 第三期：钉请求前缀测试
+
+- 给 `AgentLoop` 的捕获 backend 留每次 `api::Request`。
+- 写 `IsAppendOnlySuccessor(P1, P2)` 纯函数，逐项查 model、system、tools、旧消息。
+- 先钉默认普通工具往返。
+- 再分别复现记忆 suffix、任务名册、max-turn nudge、tool_search、结构压缩、hard trim。
+- 每桩先写会失败的回归用例，再改实现。
+
+### 第四期：把请求改成事件投影
+
+- 给模型可见变更立 append-only 事件。
+- 请求只由 `RequestProjector` 产出，UI 与临时 manager 不再直接拼 prompt。
+- 给投影版本、canonical serializer 与 cache epoch 建明确关系。
+- 请求配置变化只记脱敏 hash 与原因。
+
+### 第五期：搬动态 system 尾段
+
+- 引入内部上下文块或等价的 request-context ledger。
+- 项目记忆、任务名册改走尾部追加。
+- max-turn 提醒改成固定、只追加一次。
+- system 只留会话/epoch 内稳定材料。
+
+### 第六期：稳定工作视图
+
+- 结构压缩表示按 event id memoize。
+- 取消“由热转冷后追改旧结果”。
+- hard trim 生成 sticky view。
+- compact 成为唯一常规全量重写点，并显式开新 epoch。
+
+### 第七期：工具表稳定化
+
+- 排序 DLL 与 MCP tools。
+- 工具定义 canonical hash。
+- tool_search 成批挂载，只开一次 epoch。
+- 基准比较 stable-tools 与 deferred-tools。
+
+### 第八期：受控并发安全工具
+
+- 给内置工具、插件与 MCP tool 补 `execution_mode`，默认 `serial`。
+- 并发调度只开放给显式 `parallel_safe`。
+- 结果按原 call index 落 history，完成次序另进审计日志。
+- 测取消、异常、超时、部分启动与并发上限。
+
+## 测试
+
+### usage 单测
+
+给 `tests/test_chat_events.cpp` 添 DeepSeek 真形状：
+
+```json
+{
+  "choices": [],
+  "usage": {
+    "prompt_tokens": 50000,
+    "completion_tokens": 80,
+    "prompt_cache_hit_tokens": 49000,
+    "prompt_cache_miss_tokens": 1000
+  }
+}
+```
+
+断言：
+
+```text
+input_tokens == 1000
+cache_read_tokens == 49000
+TotalInputTokens == 50000
+hit ratio == 98%
+```
+
+再补：
+
+- 只有 prompt_tokens，没有 cache 字段；
+- 只有 OpenAI/Qwen `cached_tokens`；
+- hit/miss 与 total 不合；
+- usage chunk 的 choices 为空；
+- usage 在 finish chunk 与独立 chunk 各来一次，不得重复累计；
+- `[DONE]` 前后次序异常也只结一次账。
+
+Responses 用例须改口径，钉住“不把 cached 加两遍”。Anthropic 原有用例继续过。
+
+### 请求形状单测
+
+至少覆盖：
+
+1. 稳定 system + 稳定 tools + 一次工具调用：P2 是 P1 追加版。
+2. 连续两条外层用户消息且项目记忆命中不同：旧前缀仍不变，新 context 只在尾部。
+3. 运行中子代理名册变化：不改旧 system。
+4. `max_turns=3`：三次请求不改 system，提醒只添一次。
+5. 上一轮长 read_file 从热区转冷：旧结果表示不变。
+6. 后来出现重复读取：只压后来结果，不追改早先结果。
+7. tool_search 一次挂三只：只产生一个明确 epoch break；后续又恢复追加律。
+8. `/memory on/off`：每次工具集合变化都记原因，不静默。
+9. hard trim 后连续两轮：sticky view 前缀不滑。
+10. compact 后第一请求开新 epoch，第二请求继续追加。
+11. DLL 与 MCP 返回顺序互换，最终 tools canonical 顺序仍相同。
+
+### reasoning 序列化单测
+
+至少覆盖：
+
+1. 纯对话 `ThinkingBlock + TextBlock`，没有工具：下一请求不含 `reasoning_content`。
+2. `ThinkingBlock + ToolUseBlock`：请求含原样 `reasoning_content` 与 `tool_calls`。
+3. 一段交互先 tool call、后 final answer：下一轮 user 请求仍按 capability 保留这段所需 reasoning。
+4. tool result 与下一条 user 追加后，旧 assistant reasoning 仍在原位，内容不变。
+5. 一条 assistant 含多枚 tool call，只写一次对应 reasoning，不拆、不重。
+6. Anthropic signature 与 Responses reasoning 路径不受 DeepSeek 策略误伤。
+
+### 多工具调度单测
+
+至少覆盖：
+
+1. 三只 `parallel_safe` 工具确实重叠执行，最大并发不越配置。
+2. 完成次序为 3、1、2，history 仍按 call 1、2、3 排。
+3. `serial` 或 `exclusive` 工具形成屏障，不与旁边副作用工具交叠。
+4. 中途取消后，每枚 tool call 仍有且只有一枚 tool result。
+5. 串行与并行两种执行法都只触发一份后续模型请求。
+
+### 逐 step 统计单测
+
+造三步 usage：首次冷 miss、工具往返热 hit、tool set 变化后冷 miss。断言：
+
+- 三笔记录各有不同 step index 与 request id；
+- 第二笔命中率单独显示，不被整轮平均吞掉；
+- 第三笔带 `epoch_break_reason=tools_changed`；
+- 整轮命中率按 token 总和重算，不取三只百分比的算术平均；
+- provider 不回 usage 时记 unknown，不伪造 0%。
+
+### 真实 DeepSeek 测试
+
+新增 opt-in e2e。没 `DEEPSEEK_API_KEY` 就跳过，不进普通离线 ctest。
+
+测试流程：
+
+1. 铺一段足够长的稳定 system/历史，跨过服务端缓存单元。
+2. 强制走一次可控工具往返。
+3. 再追问一轮。
+4. 捕获每次 usage 与前缀指纹。
+5. 除首次请求与明确 epoch break 外，要求拿到 `cache_read_tokens > 0`。
+6. 服务端尽力缓存偶有失手时，报告请求指纹与原始 usage，允许受控重试一次；仍失败就把“请求前缀不等”与“前缀相等但服务端未命中”分开报。
+
+测试不能只断言数字。若解析器把旧 usage 重放一遍，也会假绿。须同时检查本次独立 usage chunk 与 request id。
+
+## 验收
+
+- DeepSeek 流式 usage 能读到 hit 与 miss。
+- 49k hit + 1k miss 显示为 50k 输入、98% 命中，不显示 99k，也不显示 0。
+- Chat、Responses、Anthropic 三条 wire 的 `Usage` 语义一致。
+- 纯对话 reasoning 不回传；DeepSeek 工具交互段所需 `reasoning_content` 按 provider 协议原样回传。
+- 默认工具往返中，后一份请求是前一份的逐消息追加版。
+- 同一事件流可重建出相同 canonical request；UI 状态不能暗改请求。
+- 项目记忆与任务名册变化不再改 system。
+- 结构压缩不再追改已经发过的 tool result。
+- hard trim、compact、tool set、model/provider 变化都有明确 epoch 与原因。
+- 工具不变时，tools 顺序与 canonical bytes 跨重建稳定。
+- 每次模型请求各有一笔 usage；冷 miss 能定位到 step 与 epoch break 原因。
+- 多枚并行安全工具可重叠执行，结果仍按模型次序落账，HTTP 轮数不变。
+- opt-in DeepSeek e2e 能分清客户端前缀破坏、usage 解析失败、服务端尽力缓存未命中三种情形。
+- 文档不再只说“缓存命中忽高忽低是服务端行为”。客户端自己改前缀时，要把原因说出来。
+
+## 不做
+
+- 不在本地实现 KV Cache。缓存仍归 provider 管。
+- 不把真实 prompt 全文写进普通日志。
+- 不为追命中率撤掉上下文上限与 compact。
+- 不承诺服务端 100% 命中。
+- 不拿 HTTP 请求次数冒充 token 命中率。
+- 不为 DeepSeek 特判整套 AgentLoop。稳定前缀是各 provider 共用的请求纪律。
+
+## 一句话
+
+旧账一旦递给模型，就别再涂改。要改，另开新账，并把缘由写明。
