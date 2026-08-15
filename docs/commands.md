@@ -76,7 +76,33 @@ command | lubancode "补充要求"
 
 ### `/think [档位]`、`/effort [档位]`
 
-裸敲显示当前档位、模型目录声明和 provider 提示。带参数则切本场档位。档位名字不强行锁死为四档，厂商声明什么便可用什么。
+裸敲显示当前档位与档位声明。声明按三层找：模型目录（`models.json` 条目的 `supported_think_levels`）最准；没有条目再看 provider 配置的 `supported_think_levels`；都没有就明说"未经能力验证"，不甩一句"以服务商为准"完事。带参数则切本场档位。档位名字不强行锁死为四档，厂商声明什么便可用什么；表外档位照发，但会标注不在声明表内。
+
+"不填"是正式状态：请求里没有这个字段，文案写"未发送参数"，不偷偷映射成任何默认档。provider 可在配置里声明 `supported_think_levels`（档位数组）、`think_param`（请求参数名，默认 `reasoning_effort`）、`think_passthrough`（是否原样透传）。
+
+### `/doctor [effort|cache]`
+
+本地兼容端诊断（vLLM/Qwen 一类自建端）。裸敲看概要，不发请求。
+
+```text
+/doctor effort [档位|unset]    发一只极小探针:报告 HTTP 状态、清洗后的服务端
+                                错误、请求侧实际发送值(参数名+档位;unset 时
+                                字段确实缺席)、finish_reason、usage 的
+                                reasoning/output 拆账。
+/doctor cache                  metrics_url 明配后读服务端 /metrics,报
+                                enable_prefix_caching 与 query/hit/cached
+                                计数;没配就说明怎么配,不擅自探。
+/doctor cache probe            两轮固定前缀测试:同 system、同历史前缀,只换
+                                最后一句。报前缀字节是否稳定、服务端 query/hit
+                                增量、第二轮 cached_tokens。
+/doctor cache usage            stream_usage 能力探针:发一只带
+                                stream_options.include_usage 的极小请求,结论
+                                写回 provider 配置。
+```
+
+诊断只对本地兼容端动手：`probe`/`usage` 两个动作挡在"base_url 是本机地址，或 metrics_url 已明配"这道闸后面，公网 provider 不发。密钥与正文不进报告——只摆参数名、档位值、token 数与错误摘要。
+
+usage 账分四态：`not_reported`（服务端没回 usage）/ `disabled`（metrics 明说没启用，状态栏写"服务端未启用缓存"）/ `enabled_no_hit`（已启用未命中）/ `hit`。同一个 0 不糊。
 
 ### `/config`
 
