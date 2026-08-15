@@ -614,6 +614,7 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
             std::lock_guard<std::mutex> stdout_lock(lubancode::cli::StdoutWriteMutex());
             std::cout << "\n";
             if (viewed_task_id == 0) {
+                std::cout << theme.stats << tr("agent_panel.main_header") << theme.reset << "\n";
                 std::cout << theme.stats << tr("agent_panel.back_to_main") << theme.reset << "\n";
             } else if (viewed_task_id >= 1 && viewed_task_id <= demo_count) {
                 std::cout << trf("agent_panel.view_header", "general-purpose #" + std::to_string(viewed_task_id),
