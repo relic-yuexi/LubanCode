@@ -971,6 +971,16 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
         }
         config.status_panel = std::move(*panel_result);
     }
+    // subagent 段:只认 {"max_turns": N}(非负整数,0 = 显式不限轮);段不是
+    // object、字段类型不对、负数,一律静默跳过(留 nullopt,运行时继承
+    // max_turns)——待遇同 max_turns 本身:救命阀字段,配置写错不拦人开工。
+    if (parsed.contains("subagent") && parsed["subagent"].is_object() &&
+        parsed["subagent"].contains("max_turns") && parsed["subagent"]["max_turns"].is_number_integer()) {
+        const long long turns = parsed["subagent"]["max_turns"].get<long long>();
+        if (turns >= 0 && turns <= static_cast<long long>(1000000)) {
+            config.subagent_max_turns = static_cast<int>(turns);
+        }
+    }
     if (parsed.contains("extra_body")) {
         auto extra_body_result = ParseExtraBodyConfig(parsed["extra_body"], file_path_for_error);
         if (!extra_body_result.has_value()) {
@@ -1522,6 +1532,16 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.config.lsp_servers = *global_file->lsp_servers;
     }
 
+    if (project_file.has_value() && project_file->subagent_max_turns.has_value()) {
+        result.config.subagent.max_turns = *project_file->subagent_max_turns;
+        result.sources.subagent = Source::ProjectConfigFile;
+    } else if (global_file.has_value() && global_file->subagent_max_turns.has_value()) {
+        result.config.subagent.max_turns = *global_file->subagent_max_turns;
+        result.sources.subagent = Source::GlobalConfigFile;
+    } else {
+        result.config.subagent.max_turns = std::nullopt;  // 未单独配置:运行时继承 max_turns
+        result.sources.subagent = Source::Default;
+    }
     if (project_file.has_value() && project_file->status_panel.has_value()) {
         result.config.status_panel = *project_file->status_panel;
         result.sources.status_panel = Source::ProjectConfigFile;

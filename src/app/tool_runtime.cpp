@@ -194,11 +194,17 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
         sub_registry_.Register(std::make_unique<lubancode::tools::LspTool>(*lsp_manager_));
         main_registry_.Register(std::make_unique<lubancode::tools::LspTool>(*lsp_manager_));
     }
-    // default_max_turns 从 15 提到 40:子代理干的是真活(委托它翻找文件、
-    // 通读多份文件,实测一单能有 30~190 次工具调用),15 轮远远不够。
+    // 子代理轮数预算从配置来(规格"现场四"):首选 subagent.max_turns,未设
+    // 继承 config.max_turns;0 的语义全路一致(不限轮)。旧版这里先后写死
+    // 过 40、构造器默认 15——两处暗闸都拆掉,不再有魔数。
+    const int subagent_default_turns = config.subagent.max_turns.value_or(config.max_turns);
     main_registry_.Register(std::make_unique<lubancode::tools::AgentTool>(
-        agent_backend, sub_registry_, cwd_utf8, config.model, /*default_max_turns=*/40, skills_segment));
+        agent_backend, sub_registry_, cwd_utf8, config.model, subagent_default_turns, skills_segment));
     agent_tool_ = dynamic_cast<lubancode::tools::AgentTool*>(main_registry_.Find("agent"));
+    if (agent_tool_ != nullptr) {
+        // 长任务 compact:子代理复用主 compact,窗口从配置来(0 = 未知不评估)。
+        agent_tool_->SetContextWindowTokens(config.context_window_tokens);
+    }
     // agent_message:主模型给运行中子代理传增量的窄工具(只挂主表——子代理
     // 深度硬限 1,不该再往下传话)。execute 只调 AgentTool::SendTaskMessage,
     // 与查看态传话、排队转投共用同一本 TaskRecord::inbox。

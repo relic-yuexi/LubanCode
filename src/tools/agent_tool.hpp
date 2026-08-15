@@ -41,7 +41,43 @@
 
 namespace lubancode::tools {
 
-enum class AgentTaskState { Running, Done, Failed, Cancelled };
+enum class AgentTaskState { Running, Done, Failed, Cancelled, BudgetExhausted };
+
+// ---------------------------------------------------------------------------
+// 子代理的结构化结果(规格"现场三"):子代理不得只交 text + is_error。
+// 预算耗尽(budget_exhausted)与失败(failed)分家;部分结果必须带回——
+// 四十轮探索不许一笔勾销。
+// ---------------------------------------------------------------------------
+
+// 收场状态:completed = 正常交了结论;failed = 没交结论/出错;stopped =
+// 用户中止;budget_exhausted = 轮数预算用满(检查点/部分结果仍在)。
+enum class TaskOutcomeStatus { Completed, Failed, Stopped, BudgetExhausted };
+
+// 短因:面板与通知只放短因,完整错误进 transcript。
+enum class TaskOutcomeReason {
+    None,          // 无(还没收场/正常完成)
+    ApiError,      // 接口报错(请求失败/流中断)
+    MaxTurns,      // 轮数预算耗尽
+    MaxContext,    // 上下文装不下
+    NoFinalText,   // 最后一轮没有文本结论
+    ToolError,     // 最后一次工具调用出错带崩了收尾
+    UserStop,      // 用户中止
+    ProtocolError, // 会话协议异常(连历史都没有等)
+};
+
+struct TaskOutcome {
+    TaskOutcomeStatus status = TaskOutcomeStatus::Failed;
+    TaskOutcomeReason reason = TaskOutcomeReason::None;
+    std::string message;         // 给人看的短说明(一两句)
+    std::string partial_result;  // 已取得的事实或最后检查点(尽力保住)
+    std::string stop_reason;     // 模型原始 stop reason(空 = 一个字都没回来)
+    std::string last_tool;       // 最后一次工具名与结果摘要
+    int turns_used = 0;
+    int turn_limit = 0;          // 0 = 不限轮
+    std::int64_t input_tokens = 0;
+    std::int64_t output_tokens = 0;
+    double elapsed_seconds = 0;
+};
 
 struct AgentTaskToolCall {
     std::string name;
@@ -61,6 +97,9 @@ struct AgentTaskSnapshot {
     // 前台(阻塞父级调用)还是后台(独立线程)。详情可看,列表不必铺。
     bool foreground = false;
     AgentTaskState state = AgentTaskState::Running;
+    // 派出时写死的预算(0 = 不限轮):面板可见,不等撞墙才揭晓(规格"现场四")。
+    int turn_limit = 0;
+    int turns_used = 0;  // 已发生的模型请求数(on_usage 记账)
     std::int64_t input_tokens = 0;
     std::int64_t output_tokens = 0;
     std::chrono::steady_clock::time_point start_time{};
@@ -68,6 +107,9 @@ struct AgentTaskSnapshot {
     std::vector<AgentTaskToolCall> tool_calls;
     std::string live_output;
     std::string result;
+    // 结构化结果:终态时由 RunTask 填。运行中 status 停在 Failed/None,
+    // 消费方只看 state == Running 判"还在跑"。
+    TaskOutcome outcome;
     bool delivered = false;
 };
 
@@ -81,6 +123,9 @@ struct AgentTaskSummary {
     std::string prompt;
     bool foreground = false;
     AgentTaskState state = AgentTaskState::Running;
+    int turn_limit = 0;
+    int turns_used = 0;
+    TaskOutcomeReason outcome_reason = TaskOutcomeReason::None;  // 面板短因用
     std::int64_t input_tokens = 0;
     std::int64_t output_tokens = 0;
     std::chrono::steady_clock::time_point start_time{};
@@ -153,13 +198,16 @@ public:
     // model:子代理发请求用的 model 字段;如果 backend 链里有会覆盖 model
     // 的包装层(比如 main.cpp 的 ModelOverrideBackend),这里填什么都会被
     // 覆盖掉,留空也没关系。
-    // default_max_turns:入参没给 max_turns 时用这个默认值。
+    // default_max_turns:入参没给 max_turns 时用的默认值。调用方必须从配置
+    // 传入(首选 subagent.max_turns,未设继承 config.max_turns;默认 0 =
+    // 不限轮)——这里不再暗藏魔数(旧版先后藏过 15 和 40,规格"现场四"点名
+    // 拆掉);仅测试直调时用参数默认 0。
     // skills_segment:M9 新增,系统提示词里"可用技能"那一段(见
     // agent::BuildSkillsPromptSegment),子代理跟主代理共用同一份扫描结果,
     // 空串表示没有技能(不注入)。main.cpp 扫描一次,主代理、子代理都传
     // 同一份。
     AgentTool(api::Backend& backend, ToolRegistry& sub_registry, std::string cwd, std::string model = std::string(),
-              int default_max_turns = 15, std::string skills_segment = std::string());
+              int default_max_turns = 0, std::string skills_segment = std::string());
 
     ~AgentTool() override;
 
@@ -227,9 +275,18 @@ public:
     // TaskRevision 画状态,主循环靠这个知道"该把结果送回主代理了"——
     // DrainCompletionNotices 投递完之后这里就翻回 false。
     bool HasUndeliveredCompletions() const;
+    // 未投递完成结果的短行(每个任务一行,只 peek 不置 delivered):完成
+    // 通知给人看的短进度行用——"#2 标题 · 完成 · 12 次工具 · 3.4k tokens"。
+    // 完整结果照旧走 DrainCompletionNotices 进模型消息。
+    std::vector<std::string> CompletionNoticeLines() const;
 
     // 主会话切进 /worktree 后，子代理也得看见同一处工作目录。
     void SetWorkingDirectory(std::string cwd) { cwd_ = std::move(cwd); }
+
+    // 子代理的上下文窗口(token):mid-turn 压力评估与自动 compact 用
+    // (规格"长任务还缺 compact")。0 = 未知,不评估——行为与从前一致。
+    // 启动时(main.cpp)从 config.context_window_tokens 传入。
+    void SetContextWindowTokens(std::size_t tokens) { context_window_tokens_ = tokens; }
 
     // tool_search(延迟挂载):子代理注册表同机制。filter 原样灌给每次
     // execute() 新建的 sub_loop(loaded 集合与主会话共享,挂载一次两边
@@ -342,6 +399,7 @@ private:
     std::function<bool(const Tool&)> tool_filter_;            // tool_search:空 = 不过滤
     std::function<std::string()> deferred_index_provider_;    // tool_search:空 = 不注索引段
     lubancode::cli::GitRunner git_runner_;                    // isolation 房务;空 = 真 git
+    std::size_t context_window_tokens_ = 0;                   // 子代理 mid-turn 压缩评估;0 = 未知
 };
 
 }  // namespace lubancode::tools

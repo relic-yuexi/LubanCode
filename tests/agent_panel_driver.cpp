@@ -198,10 +198,28 @@ int FindComposerInputRow(int max_rows = 400) {
     return -1;
 }
 
-// 导航文本(操作提示/代理行)绝不许出现在 composer 上横线之上。
+// 当前缓冲区按结构认出的 composer 框数:上横线/'> ' 输入行/下横线/非横线
+// 状态行成套才算一份。切换与重画都得多不出一份。
+int CountVisibleComposers() {
+    int count = 0;
+    for (int r = 370; r >= 0; --r) {
+        const std::string input_text = ReadRow(r + 1);
+        if (IsRuleRow(r) && !input_text.empty() && input_text[0] == '>' && IsRuleRow(r + 2) && !IsRuleRow(r + 3)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// 导航文本(操作提示/代理行)绝不许出现在 composer 上横线之上。查看态的
+// 视口头行("── 查看 general-purpose #N …")是有归属的正文,不算导航泄漏。
 bool NoDockTextAboveComposer(int rule_row) {
     for (int r = 0; r < rule_row; ++r) {
         const std::string text = ReadRow(r);
+        if (text.find("\xe2\x94\x80\xe2\x94\x80 \xe6\x9f\xa5\xe7\x9c\x8b ") ==
+            0) {  // 以"── 查看 "起头:查看头行,放行
+            continue;
+        }
         if (text.find("\xe2\x86\x91/\xe2\x86\x93") != std::string::npos) {  // ↑/↓
             return false;
         }
@@ -216,7 +234,8 @@ bool NoDockTextAboveComposer(int rule_row) {
 }
 
 // 当前屏面快照的残帧总账:提示 1、main 1、每只代理 <=1、闲置汇总 <=1,
-// 且都在 composer 上横线之下。返回 true 表示账面干净。
+// 且都在 composer 上横线之下。标题/汇总只数坞区(composer 上横线之下)——
+// 查看态的上横线右端也挂同一枚 title,那不是残帧。
 bool DockLedgerClean(int rule_row) {
     // 提示行文案随焦点收放(聚焦版没有"↑/↓"),按各版共性认:恰好一行。
     int hint_rows = 0;
@@ -237,7 +256,14 @@ bool DockLedgerClean(int rule_row) {
     for (int i = 1; i <= 8; ++i) {
         const std::string title = "\xe6\xbc\x94\xe7\xa4\xba\xe4\xbb\xbb\xe5\x8a\xa1 " +
                                   std::to_string(i);  // 演示任务 N
-        if (CountRowsWith(title) > 1) {
+        // 只数坞区:上横线之上的同名出现是查看头行/横线右端标签,有归属。
+        int dock_titles = 0;
+        for (int row = rule_row + 1; row < 400; ++row) {
+            if (ReadRow(row).find(title) != std::string::npos) {
+                ++dock_titles;
+            }
+        }
+        if (dock_titles > 1) {
             return false;
         }
     }
@@ -363,17 +389,43 @@ int wmain(int argc, wchar_t** argv) {
     Sleep(400);
     Check(DockLedgerClean(FindComposerInputRow() - 1), "连按 20 次上下后残帧账干净(提示/main 各一份)");
 
-    // ---- Enter/Esc 往返 20 次:查看态详情不留残骸 ----
+    // ---- Enter 真切会话:上方视口换源成该代理 transcript,坞里无长正文 ----
     SendKey(VK_DOWN, 0, 0);
     WaitForText("\xe2\x9d\xaf", 3000);
+    SendKey(VK_RETURN, L'\r', 0);
+    // 视口头行:"── 查看 general-purpose #1 · 演示任务 1 · Esc 回 main ──"。
+    Check(WaitForText("\xe6\x9f\xa5\xe7\x9c\x8b general-purpose #1", 5000),
+          "Enter:上方视口出现 #1 的查看头行(真切换,不是坞下展开)");  // 查看 general-purpose #1
+    {
+        const int view_header_row = FindLastRow("\xe6\x9f\xa5\xe7\x9c\x8b general-purpose #1");
+        const int rule_now = FindComposerInputRow() - 1;
+        Check(view_header_row >= 0 && view_header_row < rule_now,
+              "Enter:查看头行在 composer 上横线之上(正文区)");
+        Check(CountVisibleComposers() == 1, "Enter 后:屏上 composer 恰好一份");
+        Check(DockLedgerClean(rule_now), "Enter 后:残帧账干净(提示/main/代理各一份)");
+    }
+    // Esc 回 main:视口、目标、标题、选中态一同复位(复位行出现)。
+    for (int r = 0; r < 44; ++r) {
+        const std::string row = ReadRow(r);
+        if (!row.empty()) {
+            Log("VIEW " + std::to_string(r) + ": " + row);
+        }
+    }
+    SendKey(VK_ESCAPE, 0, 0);
+    Check(WaitForText("\xe5\xb7\xb2\xe5\x9b\x9e\xe4\xb8\xbb\xe4\xbc\x9a\xe8\xaf\x9d", 5000),
+          "Esc:回 main 的复位行出现");  // 已回主会话
+    Check(CountVisibleComposers() == 1, "Esc 回 main:屏上 composer 仍恰好一份");
+
+    // ---- Enter/Esc 往返 20 次:不多一份输入框/状态栏/导航坞 ----
     for (int i = 0; i < 20; ++i) {
         SendKey(VK_RETURN, L'\r', 0);
         Sleep(120);
         SendKey(VK_ESCAPE, 0, 0);
         Sleep(120);
     }
-    Check(FindLastRow("\xe4\xbb\xbb\xe5\x8a\xa1\xe6\xa0\x87\xe9\xa2\x98") < 0,
-          "Enter/Esc 往返 20 次:详情('任务标题')不留残骸");
+    Check(CountVisibleComposers() == 1, "往返 20 次:composer 恰好一份");
+    Check(FindLastRow("\xe4\xbb\xbb\xe5\x8a\xa1\xe8\xaf\xb4\xe6\x98\x8e") < 0,
+          "Enter/Esc 往返 20 次:导航坞不再出现'任务说明'长正文");  // 任务说明
     Check(DockLedgerClean(FindComposerInputRow() - 1), "往返 20 次后残帧账干净");
     SendKey(VK_ESCAPE, 0, 0);
     WaitForTextGone("\xe2\x9d\xaf", 3000);

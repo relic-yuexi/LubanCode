@@ -9,6 +9,7 @@
 #include <variant>
 
 #include "agent/loop.hpp"
+#include "agent/compact.hpp"
 #include "agent/prompts.hpp"
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
@@ -114,6 +115,114 @@ std::string FirstLineOf(const std::string& text) {
     }
     line.resize(std::min(bytes, line.size()));
     return line;
+}
+
+// 终态短标签(通知/面板共用;第三刀换成带 reason 的短因)。
+std::string StateShortLabel(AgentTaskState state) {
+    switch (state) {
+        case AgentTaskState::Done:
+            return "完成";
+        case AgentTaskState::Failed:
+            return "失败";
+        case AgentTaskState::Cancelled:
+            return "停下";
+        case AgentTaskState::BudgetExhausted:
+            return "耗尽";
+        case AgentTaskState::Running:
+            return "运行中";
+    }
+    return "";
+}
+
+// 终态映射:结构化 status -> 台账 state(Failed 里再由 reason 分短因)。
+AgentTaskState StateFromOutcome(TaskOutcomeStatus status) {
+    switch (status) {
+        case TaskOutcomeStatus::Completed:
+            return AgentTaskState::Done;
+        case TaskOutcomeStatus::Stopped:
+            return AgentTaskState::Cancelled;
+        case TaskOutcomeStatus::BudgetExhausted:
+            return AgentTaskState::BudgetExhausted;
+        case TaskOutcomeStatus::Failed:
+            return AgentTaskState::Failed;
+    }
+    return AgentTaskState::Failed;
+}
+
+// 短因(规格"现场三"):面板与通知只放短因,完整错误进 transcript。
+std::string ReasonShortLabel(TaskOutcomeReason reason) {
+    switch (reason) {
+        case TaskOutcomeReason::ApiError:
+            return "接口报错";
+        case TaskOutcomeReason::MaxTurns:
+            return "耗尽";
+        case TaskOutcomeReason::MaxContext:
+            return "上下文满";
+        case TaskOutcomeReason::NoFinalText:
+            return "未交结论";
+        case TaskOutcomeReason::ToolError:
+            return "工具出错";
+        case TaskOutcomeReason::UserStop:
+            return "用户中止";
+        case TaskOutcomeReason::ProtocolError:
+            return "会话异常";
+        case TaskOutcomeReason::None:
+            return "";
+    }
+    return "";
+}
+
+// 状态码短名(结果文本/测试用):completed/failed/stopped/budget_exhausted。
+const char* OutcomeStatusTag(TaskOutcomeStatus status) {
+    switch (status) {
+        case TaskOutcomeStatus::Completed:
+            return "completed";
+        case TaskOutcomeStatus::Failed:
+            return "failed";
+        case TaskOutcomeStatus::Stopped:
+            return "stopped";
+        case TaskOutcomeStatus::BudgetExhausted:
+            return "budget_exhausted";
+    }
+    return "failed";
+}
+
+// 结构化结果交回主模型的正文:短状态打头(主代理按 budget_exhausted /
+// failed 分型,不靠猜),再给检查点/部分结果与最后工具、stop reason——
+// 四十轮探索不许一笔勾销(规格"现场三")。
+std::string ComposeOutcomeText(const TaskOutcome& outcome) {
+    std::string out = std::string("[") + OutcomeStatusTag(outcome.status) + "] " + outcome.message;
+    if (outcome.turn_limit > 0) {
+        out += " · 轮数 " + std::to_string(outcome.turns_used) + "/" + std::to_string(outcome.turn_limit);
+    } else if (outcome.turns_used > 0) {
+        out += " · 轮数 " + std::to_string(outcome.turns_used);
+    }
+    if (!outcome.partial_result.empty()) {
+        out += "\n检查点/部分结果:\n" + outcome.partial_result;
+    }
+    if (!outcome.last_tool.empty()) {
+        out += "\n最后工具: " + outcome.last_tool;
+    }
+    if (!outcome.stop_reason.empty()) {
+        out += "\n模型 stop_reason: " + outcome.stop_reason;
+    }
+    out += "\n可重试动作: 先读本结果里的检查点,缩小范围、拆小任务后续派;"
+           "不要原样重发同一份 prompt,更不要擅自抬高轮数上限。";
+    return out;
+}
+
+// 检查点兜底:最后一条 assistant 没有文本(或压根没有 assistant)时,把
+// 台账里最后完成的工具结果/实时输出尾巴当部分结果带回——绝不交白卷。
+std::string CheckpointFallback(const AgentTaskSnapshot& snapshot) {
+    for (auto it = snapshot.tool_calls.rbegin(); it != snapshot.tool_calls.rend(); ++it) {
+        if (it->done && !it->result.empty() && !it->is_error) {
+            return "最后取得的工具结果(" + it->name + "):\n" + it->result;
+        }
+    }
+    if (!snapshot.live_output.empty()) {
+        return "实时输出尾巴:\n" + snapshot.live_output;
+    }
+    return std::string();
 }
 
 // title 的硬上限(显示列,不是码点数):终端窄时显示层可以再截标题字段
@@ -236,7 +345,10 @@ nlohmann::json AgentTool::input_schema() const {
     nlohmann::json max_turns_prop = nlohmann::json::object();
     max_turns_prop["type"] = "integer";
     max_turns_prop["description"] =
-        "子代理最多跑几轮(每轮一次工具调用来回算一轮),不填默认 40;传 0 = 不设上限。";
+        "子代理最多跑几轮(每轮一次工具调用来回算一轮)。不填时用配置的默认:首选 subagent.max_turns,"
+        "未设则继承 max_turns(默认 0 = 不限轮)。传 0 = 不设上限;剩三轮时会收到收口提醒,"
+        "到限后返回 budget_exhausted 并带回检查点,不会笼统报失败。重试时先读检查点缩小范围,"
+        "不要原样重发任务、不要擅自抬高轮数。";
     properties["max_turns"] = max_turns_prop;
 
     nlohmann::json type_prop = nlohmann::json::object();
@@ -433,6 +545,7 @@ Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std
         task->snapshot.title = title;
         task->snapshot.prompt = input.at("prompt").get<std::string>();
         task->snapshot.foreground = true;
+        task->snapshot.turn_limit = max_turns;  // 派出时预算进快照(规格"现场四")
         task->snapshot.state = AgentTaskState::Running;
         task->snapshot.start_time = std::chrono::steady_clock::now();
         task->snapshot.delivered = true;
@@ -458,9 +571,16 @@ Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std
         task->snapshot.end_time = std::chrono::steady_clock::now();
         if (task->cancel.load(std::memory_order_acquire) ||
             (hooks.cancel != nullptr && hooks.cancel->load(std::memory_order_acquire))) {
+            // 面板 x / 父轮 ESC:按用户中止收账(outcome 若已写成别的,改回
+            // stopped,短因对得上)。
             task->snapshot.state = AgentTaskState::Cancelled;
+            task->snapshot.outcome.status = TaskOutcomeStatus::Stopped;
+            task->snapshot.outcome.reason = TaskOutcomeReason::UserStop;
+            if (task->snapshot.outcome.message.empty()) {
+                task->snapshot.outcome.message = "用户中止了这只子代理";
+            }
         } else {
-            task->snapshot.state = result.is_error ? AgentTaskState::Failed : AgentTaskState::Done;
+            task->snapshot.state = StateFromOutcome(task->snapshot.outcome.status);
         }
     }
     TouchTasks();
@@ -529,6 +649,7 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
         task->snapshot.agent_type = agent_type;
         task->snapshot.title = title;
         task->snapshot.prompt = input.at("prompt").get<std::string>();
+        task->snapshot.turn_limit = max_turns;  // 派出时预算进快照(规格"现场四")
         task->snapshot.state = AgentTaskState::Running;
         task->snapshot.start_time = std::chrono::steady_clock::now();
         tasks_.push_back(task);
@@ -585,8 +706,13 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
             task->snapshot.end_time = std::chrono::steady_clock::now();
             if (task->cancel.load(std::memory_order_acquire)) {
                 task->snapshot.state = AgentTaskState::Cancelled;
+                task->snapshot.outcome.status = TaskOutcomeStatus::Stopped;
+                task->snapshot.outcome.reason = TaskOutcomeReason::UserStop;
+                if (task->snapshot.outcome.message.empty()) {
+                    task->snapshot.outcome.message = "用户中止了这只子代理";
+                }
             } else {
-                task->snapshot.state = result.is_error ? AgentTaskState::Failed : AgentTaskState::Done;
+                task->snapshot.state = StateFromOutcome(task->snapshot.outcome.status);
             }
         }
         TouchTasks();
@@ -627,11 +753,30 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                          "。相对路径一律以这间房为基准(包装层会自动解析);主 checkout 只读——写入、命令"
                          "工作目录、git 改道指回主树的操作都会被拦。改动留在房内,收工自会处置。";
     }
-    // 每次 execute() 都是全新的、空历史的子代理——没有跨调用的状态,
-    // 子代理内部也不做自动 compact(短命任务用不上),AgentLoop 自带的
-    // 字符数硬安全网(TrimHistory)照样生效,不用额外处理。
+    // 每次 execute() 都是全新的、空历史的子代理——没有跨调用的状态。
+    // 长任务(40 轮、重试上百轮)的今天,"短命任务用不上 compact"的前提
+    // 已倒:子代理复用主 compact(CompactHierarchical)与 AgentLoop 的压力
+    // 通报,在"工具结果攒完、请求未发"的安全点把旧探索压成检查点式存档,
+    // 不另造第二套摘要协议(规格"长任务还缺 compact")。窗口未知(0)时
+    // loop 不做 projected 评估,行为与从前一致;TrimHistory 字符安全网照旧。
     const std::string task_model = detached != nullptr && !detached->model.empty() ? detached->model : model_;
     agent::AgentLoop sub_loop(backend, task_registry, task_model, system_prompt, /*max_tokens=*/4096, max_turns);
+    if (context_window_tokens_ > 0) {
+        sub_loop.SetContextWindowTokens(context_window_tokens_);
+        sub_loop.SetOnContextPressure([&sub_loop, &backend, &task_model](
+                                          const agent::ContextPressure& pressure) {
+            if (pressure.phase != agent::ContextPressure::Phase::PreRequest || !pressure.projected_overflow) {
+                return;  // AfterHardTrim 是纯通报;安全网丢的东西压缩救不回
+            }
+            agent::CompactOptions options;  // 子代理没有守恒待办,manifest 只做结构校验
+            if (const auto compacted =
+                    agent::CompactHierarchical(backend, task_model, sub_loop.History(), options);
+                compacted.has_value()) {
+                sub_loop.ReplaceHistory(agent::BuildCompactedHistory(sub_loop.History(), compacted->archive));
+            }
+            // 压缩失败:旧历史原样不动,字符安全网(TrimHistory)仍在,不硬塞。
+        });
+    }
     if (agent_type == "Explore") {
         sub_loop.SetToolFilter([](const Tool& tool) { return ExploreAllows(tool); });
     } else if (detached == nullptr && tool_filter_) {
@@ -721,6 +866,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 std::lock_guard<std::mutex> lock(tasks_mutex_);
                 task->snapshot.input_tokens += usage.input_tokens;
                 task->snapshot.output_tokens += usage.output_tokens;
+                task->snapshot.turns_used += 1;  // 每笔 usage = 一次模型请求 = 一轮
                 TouchTasks();
             }
             if (foreground_hooks != nullptr && foreground_hooks->on_usage) {
@@ -770,14 +916,20 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         cancel = foreground_hooks->cancel;
     }
     // 主 Run + 续投循环(规格第五节"排到了却没送"):Queued 是交付承诺。
-    // 一轮 Run 正常收口(非打断、非错误)后,先与 SendTaskMessage 做原子
-    // 交接(SealOrContinueInbox):inbox 空 -> 封账,准备进终态;还有未送
-    // 项 -> 标已取、拼成新一轮用户输入续跑一轮。于是子代理正写最终纯文本
-    // 时收到的消息也会被处理,不会"返回了 Queued 却只在收场报告里见"。
-    // 续跑那轮失败/被打断:取走批次退回未送(RestoreDrainedInbox),收尾
-    // 账注逐条列原文——取消不承诺继续执行,但必须列明。
+    // 一轮 Run 正常收口(非打断、非错误、非预算耗尽)后,先与 SendTaskMessage
+    // 做原子交接(SealOrContinueInbox):inbox 空 -> 封账,准备进终态;还有
+    // 未送项 -> 标已取、拼成新一轮用户输入续跑一轮。于是子代理正写最终纯
+    // 文本时收到的消息也会被处理,不会"返回了 Queued 却只在收场报告里见"。
+    // 续跑那轮失败/被打断/撞限:取走批次退回未送(RestoreDrainedInbox),
+    // 收尾账注逐条列原文——取消与预算耗尽不承诺继续执行,但必须列明。
     std::string run_input = prompt;
     Result run_result;
+    // 收场原始信号(供分型):
+    bool run_cancelled = false;
+    bool run_hit_limit = false;
+    std::string run_stop_reason;
+    std::string run_error;
+    int turns_used_total = 0;
     // 已取走、尚未真正随一次模型请求发出的批次:续投那轮若失败/被打断,
     // 按下标退回未送,收尾账注照列原文。
     DrainedInbox inflight_drained;
@@ -785,12 +937,21 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         const auto outcome = sub_loop.Run(run_input, sub_callbacks, cancel);
         if (!outcome.has_value()) {
             RestoreDrainedInbox(task, inflight_drained);
-            run_result = {"子代理执行失败: " + outcome.error(), true};
+            run_error = outcome.error();
             break;
         }
+        turns_used_total += outcome->turns_used;
+        run_stop_reason = outcome->stop_reason;
         if (outcome->cancelled) {
+            run_cancelled = true;
             RestoreDrainedInbox(task, inflight_drained);
             break;  // 打断不是错误:半截文本照旧经 ExtractLastText 带出
+        }
+        if (outcome->hit_turn_limit) {
+            // 预算耗尽(规格"现场四"):不是笼统 failed,部分结果必须带回。
+            run_hit_limit = true;
+            RestoreDrainedInbox(task, inflight_drained);
+            break;
         }
         inflight_drained = DrainedInbox{};  // 上一批已随本轮请求真正送达
         bool sealed = false;
@@ -802,6 +963,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         // 退回未送,让收尾账注列明。
         if (cancel != nullptr && cancel->load(std::memory_order_acquire)) {
             RestoreDrainedInbox(task, drained);
+            run_cancelled = true;
             break;
         }
         std::string continuation;
@@ -818,18 +980,78 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         merged_cancel.store(true, std::memory_order_release);  // 唤醒合并线程好 join
         cancel_merger->join();
     }
-    if (run_result.is_error) {
-        return run_result;
-    }
 
+    // ---- 收场分型(规格"现场三"):结构化 TaskOutcome,不再只交一句话 ----
+    TaskOutcome task_outcome;
+    task_outcome.turn_limit = max_turns;
+    task_outcome.turns_used = turns_used_total;
+    task_outcome.stop_reason = run_stop_reason;
     const std::string text = ExtractLastText(sub_loop);
-    if (sub_loop.History().empty()) {
-        return {"子代理没有给出任何结论", true};
+    std::string snapshot_fallback;
+    if (task != nullptr) {
+        std::lock_guard<std::mutex> lock(tasks_mutex_);
+        task_outcome.input_tokens = task->snapshot.input_tokens;
+        task_outcome.output_tokens = task->snapshot.output_tokens;
+        task_outcome.elapsed_seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - task->snapshot.start_time).count();
+        if (!task->snapshot.tool_calls.empty()) {
+            const AgentTaskToolCall& call = task->snapshot.tool_calls.back();
+            task_outcome.last_tool =
+                call.name + (call.done ? (call.is_error ? "(出错) " : " ") : "(未完成) ") +
+                (call.done ? FirstLineOf(call.result) : FirstLineOf(call.input_json));
+        }
+        snapshot_fallback = CheckpointFallback(task->snapshot);
     }
-    if (text.empty()) {
-        return {"子代理没有给出文本结论", true};
+    const std::string partial = text.empty() ? snapshot_fallback : text;
+
+    if (run_cancelled) {
+        task_outcome.status = TaskOutcomeStatus::Stopped;
+        task_outcome.reason = TaskOutcomeReason::UserStop;
+        task_outcome.message = "用户中止了这只子代理";
+        task_outcome.partial_result = partial;
+        run_result = text.empty() ? Result{ComposeOutcomeText(task_outcome), true}
+                                  : Result{text + "\n" + ComposeOutcomeText(task_outcome), false};
+    } else if (run_hit_limit) {
+        task_outcome.status = TaskOutcomeStatus::BudgetExhausted;
+        task_outcome.reason = TaskOutcomeReason::MaxTurns;
+        task_outcome.message = "轮数预算已用满(" + std::to_string(turns_used_total) + "/" +
+                               std::to_string(max_turns) + " 轮)";
+        task_outcome.partial_result = partial;
+        run_result = {ComposeOutcomeText(task_outcome), true};
+    } else if (!run_error.empty()) {
+        task_outcome.status = TaskOutcomeStatus::Failed;
+        if (run_error.find("上下文") != std::string::npos) {
+            task_outcome.reason = TaskOutcomeReason::MaxContext;
+        } else {
+            task_outcome.reason = TaskOutcomeReason::ApiError;
+        }
+        task_outcome.message = run_error;
+        task_outcome.partial_result = partial;
+        run_result = {"子代理执行失败: " + run_error + "\n" + ComposeOutcomeText(task_outcome), true};
+    } else if (sub_loop.History().empty()) {
+        task_outcome.status = TaskOutcomeStatus::Failed;
+        task_outcome.reason = TaskOutcomeReason::ProtocolError;
+        task_outcome.message = "子代理没有给出任何结论(连一次应答都没有)";
+        run_result = {ComposeOutcomeText(task_outcome), true};
+    } else if (text.empty()) {
+        // 最后一条 assistant 没有文本:保留 stop reason 与最后工具状态,
+        // 不只报一句"没有给出文本结论"(规格"现场三")。
+        task_outcome.status = TaskOutcomeStatus::Failed;
+        task_outcome.reason = TaskOutcomeReason::NoFinalText;
+        task_outcome.message = "最后一轮没有文本结论(stop_reason=" +
+                               (run_stop_reason.empty() ? "(无)" : run_stop_reason) + ")";
+        task_outcome.partial_result = partial;
+        run_result = {ComposeOutcomeText(task_outcome), true};
+    } else {
+        task_outcome.status = TaskOutcomeStatus::Completed;
+        task_outcome.reason = TaskOutcomeReason::None;
+        run_result = {text, false};
     }
-    return {text, false};
+    if (task != nullptr) {
+        std::lock_guard<std::mutex> lock(tasks_mutex_);
+        task->snapshot.outcome = std::move(task_outcome);
+    }
+    return run_result;
 }
 
 std::vector<AgentTaskSnapshot> AgentTool::TaskSnapshots(std::size_t max_entries) const {
@@ -880,6 +1102,9 @@ std::vector<AgentTaskSummary> AgentTool::TaskSummaries() const {
         summary.prompt = task->snapshot.prompt;
         summary.foreground = task->snapshot.foreground;
         summary.state = task->snapshot.state;
+        summary.turn_limit = task->snapshot.turn_limit;
+        summary.turns_used = task->snapshot.turns_used;
+        summary.outcome_reason = task->snapshot.outcome.reason;
         summary.input_tokens = task->snapshot.input_tokens;
         summary.output_tokens = task->snapshot.output_tokens;
         summary.start_time = task->snapshot.start_time;
@@ -1137,6 +1362,32 @@ bool AgentTool::HasUndeliveredCompletions() const {
     });
 }
 
+std::vector<std::string> AgentTool::CompletionNoticeLines() const {
+    std::vector<std::string> out;
+    std::lock_guard<std::mutex> lock(tasks_mutex_);
+    for (const auto& task : tasks_) {
+        const AgentTaskSnapshot& snapshot = task->snapshot;
+        if (snapshot.state == AgentTaskState::Running || snapshot.delivered) {
+            continue;
+        }
+        const std::int64_t tokens = snapshot.input_tokens + snapshot.output_tokens;
+        // 短因先行(规格"现场三"):耗尽/停下/失败·接口报错一眼分得开。
+        std::string label = StateShortLabel(snapshot.state);
+        const std::string reason = ReasonShortLabel(snapshot.outcome.reason);
+        if (!reason.empty() && reason != label) {
+            label += " · " + reason;
+        }
+        if (snapshot.state == AgentTaskState::BudgetExhausted && snapshot.turn_limit > 0) {
+            label += " · " + std::to_string(snapshot.turns_used) + "/" + std::to_string(snapshot.turn_limit) + " 轮";
+        }
+        out.push_back("#" + std::to_string(snapshot.id) + " " +
+                      (snapshot.title.empty() ? "(未命名)" : snapshot.title) + " · " + label + " · " +
+                      std::to_string(snapshot.tool_calls.size()) + " 次工具 · " +
+                      lubancode::cli::FormatTokenCount(tokens));
+    }
+    return out;
+}
+
 std::string AgentTool::DrainCompletionNotices() {
     std::lock_guard<std::mutex> lock(tasks_mutex_);
     std::ostringstream out;
@@ -1157,6 +1408,9 @@ std::string AgentTool::DrainCompletionNotices() {
                 break;
             case AgentTaskState::Cancelled:
                 out << "已取消";
+                break;
+            case AgentTaskState::BudgetExhausted:
+                out << "预算耗尽(" << snapshot.turns_used << "/" << snapshot.turn_limit << " 轮)";
                 break;
             case AgentTaskState::Running:
                 break;

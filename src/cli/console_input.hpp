@@ -121,16 +121,22 @@ void SetTranscriptUiHandler(TranscriptUiHandler handler);
 
 // 会话内后台子代理导航坞(0.29.x 起画在 composer 下横线与状态行之后贴底)。
 // 数据由应用层给,终端层只管选择与绘制:空 composer 按 ↑/↓ 进入代理焦点,
-// Enter 进查看态(同时把 composer 收件目标切到这只子代理),Esc 逐层退出,
-// x 停止/清除当前条目,Ctrl+X Ctrl+K 两段确认停止全部。主会话固定算第 0 项,
-// provider 只返回后台子代理项。条目结构/动作/按键状态机在 cli/agent_panel.hpp。
+// Enter 设置 viewed_task_id(上方会话视口整块换源、composer 收件目标切到
+// 这只子代理),Esc 逐层退出,x 停止/清除当前条目,Ctrl+X Ctrl+K 两段确认
+// 停止全部。主会话固定算第 0 项,provider 只返回后台子代理项。条目结构/
+// 动作/按键状态机在 cli/agent_panel.hpp。导航坞只放导航——查看态的长正文
+// (完整 prompt、工具调用流水、结论)走下面那只视图切换钩子,整块换进
+// 上方会话视口,不向坞下方生长。
 using AgentPanelProvider = std::function<std::vector<AgentPanelEntry>()>;
 void SetAgentPanelProvider(AgentPanelProvider provider);
 
-// 详情按需取:列表每 100ms 刷新只拉轻量条目;查看态打开的那只才调这个,
-// 把完整任务说明、工具调用流水、未送达介入消息交出来——别让每拍刷新都
-// 复制全部工具输出。task_id 认不出返回空。
-void SetAgentPanelDetailProvider(std::function<std::vector<std::string>(int task_id)> provider);
+// 视图切换钩子:viewed_task_id 变了(Enter 切进某只子代理 / Esc 回 main)
+// 终端层调这个,应用层把"此刻该看的会话正文"铺出来——0 = 重铺 main 的
+// 最近条目,task_id = 铺那只子代理的完整 transcript(prompt/工具调用/结果/
+// 错误)。空闲路调它前,终端层已把光标挪到旧 chrome 之下,旧帧随铺出的
+// 正文滚走;流式路由它自己(在 StdoutWriteMutex 内)先擦 footer 再铺、
+// 铺完重画 footer。传空钩子即清除。
+void SetAgentViewSwitchHook(std::function<void(int viewed_task_id)> hook);
 
 // 面板动作(x 停止/清除、两段确认停全部)的接线口。终端层不直接碰
 // AgentTool;停止必须走正式取消接口,等任务线程报终态再改灯。

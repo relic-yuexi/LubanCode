@@ -783,6 +783,15 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
         out.status = 1;
         return out;
     }
+    if (result->hit_turn_limit) {
+        // 主循环的轮数硬闸(0.30.x 起从"报错"改为"预算耗尽"):loop 把它当
+        // RunOutcome 而不是 error 交回来,这里按老口径打一行、记 status,不
+        // 影响子代理那边按 budget_exhausted 收账带走部分结果。
+        std::cerr << theme.error << tr("error.prefix")
+                  << trf("error.turn_limit", result->turns_used) << theme.reset << "\n";
+        out.status = 1;
+        return out;
+    }
     out.cancelled = result->cancelled;
 
     if (usage_stats.request_count > 0) {

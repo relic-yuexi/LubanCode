@@ -22,9 +22,9 @@
 namespace lubancode::cli {
 
 // 面板条目。main 不在列表里(固定画成第 0 项);provider 只交后台子代理。
-// 轻量:列表每 100ms 拉一次,这里只放列表行要用的字段——详情(完整任务
-// 说明、工具流水、未送达介入消息)另走 detail provider 按需取,别让每拍
-// 刷新都复制全部工具输出。
+// 轻量:列表每 100ms 拉一次,这里只放列表行要用的字段——查看态的长正文
+// (完整任务说明、工具流水、结论)由应用层按 viewed_task_id 从任务台账
+// 现取,整块换进上方会话视口,别让每拍刷新都复制全部工具输出。
 struct AgentPanelEntry {
     std::string name;   // 如 "general-purpose #4"
     std::string title;  // 真正短标题(AgentTaskSnapshot.title;旧任务空串,显示层退"未命名")
@@ -72,8 +72,8 @@ constexpr int kIdleSummaryTaskId = -1;
 // 不靠易漂移的数组下标;取消/清除的动作目标也以 task id 交出(Outcome 里
 // 的 stop_current_task_id),绝不让调用方按下标回查。规矩(规格三、六节):
 //   - 正文非空时不抢上下/Enter,普通字母 x 只进 composer;
-//   - Enter 进查看态(同时把 composer 收件目标切到这只子代理),Esc 先退
-//     查看态、再退代理焦点;
+//   - Enter 消费按键、设置 viewed_task_id(切上方会话视口与 composer 收件
+//     目标),Esc 先清 viewed 回 main、再退代理焦点;
 //   - x 只在焦点落在一只子代理上时消费:运行中 = 停止,终态 = 清除;main
 //     行不接停止/清除;
 //   - Ctrl+X -> Ctrl+K 两段确认有时限,超时/Esc/别键撤销;
@@ -105,8 +105,11 @@ public:
     void Reset();
 
     bool focused() const { return focus_; }
-    bool detail_open() const { return detail_; }
     bool stop_all_armed() const { return armed_; }
+    // 会话层唯一真状态:正看哪只会话(0 = main)。上方 transcript 的数据源、
+    // composer 收件目标、导航坞里被查看行的 ◉ 标记,三样全由这一枚 id 推出,
+    // 不许各记一份(规格"现场一")。
+    int viewed_task_id() const { return viewed_task_id_; }
     // 闲置汇总行是否处于展开态(Enter 展开、Esc 收起;展开/收起不改任何
     // 真任务的 task id 与消息目标)。
     bool idle_expanded() const { return idle_expanded_; }
@@ -124,7 +127,7 @@ public:
 
 private:
     bool focus_ = false;
-    bool detail_ = false;
+    int viewed_task_id_ = 0;  // 正看哪只会话;0 = main(会话层唯一真状态)
     bool armed_ = false;
     bool idle_expanded_ = false;
     int selected_task_id_ = 0;  // 稳定任务号;0 = main
@@ -151,7 +154,7 @@ public:
     // 绘制侧快照:选中下标按调用方给的 ids 现算(0 = main)。
     struct Snapshot {
         bool focused = false;
-        bool detail_open = false;
+        int viewed_task_id = 0;                 // 正看哪只会话;0 = main
         bool stop_all_armed = false;
         bool idle_expanded = false;
         int selected_index = 0;                 // main 计入的下标
@@ -177,8 +180,6 @@ struct AgentDockRow {
         Note,         // 窗口计数行("共 N 只 · 上方未展示 …")
         Entry,        // main 或一只子代理(三列结构)
         IdleSummary,  // "另有 N 只闲置代理 · Enter 展开"(可导航哨兵)
-        DetailHint,   // 查看态提示行
-        DetailLine,   // 查看态详情正文行
     };
     Kind kind = Kind::Entry;
     int task_id = 0;   // Entry:0=main/任务号;IdleSummary:kIdleSummaryTaskId
@@ -188,11 +189,11 @@ struct AgentDockRow {
     std::string identity;   // 身份列:"main" / "general-purpose #2"
     std::string middle;     // 中段:真正短标题(优先吃宽、优先截断)
     std::string status;     // 右列:状态摘要(耗时/token/queued),右对齐
-    std::string text;       // Hint/Note/DetailHint/DetailLine 的整行文本
+    std::string text;       // Hint/Note 的整行文本
 };
 
 struct AgentDockLayout {
-    std::vector<AgentDockRow> rows;  // 渲染顺序:提示 →[计数]→ main+条目(+汇总)→[详情]
+    std::vector<AgentDockRow> rows;  // 渲染顺序:提示 →[计数]→ main+条目(+汇总)
     std::vector<int> navigation_ids;  // 导航表:[0(main), 任务号…, -1(汇总哨兵,若有)]
     int visible_first = 0;           // 窗口里第一条的导航下标(0 = main)
     int visible_count = 0;           // 窗口里摆了几条(main 计入)
@@ -207,26 +208,29 @@ struct AgentDockLayout {
 
 // agents:后台子代理条目(main 由这里补成导航表第 0 项);selected:导航表
 // 下标(0 = main,可落在 kIdleSummaryTaskId 哨兵上);focused:未聚焦不画
-// 选中标记;detail_open/detail_lines:查看态详情(调用方按需从 detail
-// provider 取);max_visible_entries:窗口最多摆几条代理行(<=0 = 不限,
-// 常态 5);max_total_rows:整坞(提示/计数/条目/详情)最多占几行(<=0 =
+// 选中标记;max_visible_entries:窗口最多摆几条代理行(<=0 = 不限,
+// 常态 5);max_total_rows:整坞(提示/计数/条目)最多占几行(<=0 =
 // 不限,矮屏开窗预算);width:终端列宽;armed_stop_all:两段确认第一段;
-// streaming:提示行用流式版文案;idle_expanded:闲置汇总是否展开。
+// streaming:提示行用流式版文案;idle_expanded:闲置汇总是否展开;
+// viewed_task_id:正查看的任务号(0 = main),该行画 ◉ 且永不折叠。
 //
 // 折叠规矩(规格"闲置与终态收纳"):活动/失败/正在查看的行永不折叠;闲置
 // (完成)行最多单列三只,更多折成一行汇总;汇总行是导航哨兵,Enter 展开、
 // Esc 收起,展开/收起不改任何 task id。条目多于窗口时围着 selected 开窗,
-// 选中行永不因开窗消失;详情超预算保头部,末行写清未展示数。
+// 选中行永不因开窗消失。
 // 导航表(纯函数):条目经闲置折叠后的可导航 id 序列(不含 main——控制器
 // 契约与旧 PanelEntryIds 一致,main 隐式算第 0 项)。闲置(完成)条目最多
 // 单列三只,更多折成一行汇总哨兵(kIdleSummaryTaskId,插在首个被折条目的
 // 位置);活动/失败/正在查看(viewed_task_id)的行永不折叠。布局渲染与按键
 // 状态机共用这一份,选择永远落不进被折起来的区域。
+//
+// 导航坞只放导航:行、状态与提示。完整 prompt、工具调用流水、结论与错误
+// 全在上方会话视口里看(查看态由应用层的 transcript 换源负责,规格"现场
+// 一"),绝不向坞下方生长。
 std::vector<int> DockNavigationIds(const std::vector<AgentPanelEntry>& agents, bool idle_expanded,
                                    int viewed_task_id);
 
 AgentDockLayout LayoutAgentDock(const std::vector<AgentPanelEntry>& agents, int selected, bool focused,
-                                bool detail_open, const std::vector<std::string>& detail_lines,
                                 int max_visible_entries, int max_total_rows, int width, bool armed_stop_all,
                                 bool streaming, bool idle_expanded, int viewed_task_id = 0);
 
