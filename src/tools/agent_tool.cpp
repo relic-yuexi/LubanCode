@@ -840,6 +840,16 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             // 取走一条就 TouchTasks:面板 queued 数当即归零递减,与
             // "入 inbox 即 Touch"凑成一对(规格第六节)。
             TouchTasks();
+            // 消息账:轮次边界注入的介入记 steering_message——先放
+            // inbox_mutex 再拿 tasks_mutex_,与 SendTaskMessage(先
+            // tasks_mutex_ 后 inbox_mutex)不同时持两锁,锁序不冲。
+            {
+                std::lock_guard<std::mutex> tasks_lock(tasks_mutex_);
+                AgentTaskEvent event;
+                event.kind = AgentTaskEventKind::SteeringMessage;
+                event.text = text;
+                AppendTaskEventLocked(task, std::move(event));
+            }
             api::Message message;
             message.role = api::Role::User;
             message.content.push_back(api::TextBlock{FormatInboxDelivery(text, source)});
