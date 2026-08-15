@@ -120,15 +120,18 @@ std::optional<StreamEvent> HandleCompleted(const json& data) {
     }
 
     if (auto usage_it = response.find("usage"); usage_it != response.end() && usage_it->is_object()) {
-        event.usage.input_tokens = usage_it->value("input_tokens", static_cast<std::int64_t>(0));
+        // 统一口径(api::Usage 文件头):input_tokens 总数已含 cached_tokens,
+        // 摊开成 input=total-cached、cache_read=cached,消费端不再加两遍。
+        // responses wire 没有"缓存写入"概念,cache_creation_tokens 恒为 0。
         event.usage.output_tokens = usage_it->value("output_tokens", static_cast<std::int64_t>(0));
-        // input_tokens_details.cached_tokens 是缓存命中的那部分 input_tokens
-        // (已经含在 input_tokens 总数里,不是额外加的)。responses wire 没有
-        // "缓存写入" 这个概念,cache_creation_tokens 恒为 0。
+        const std::int64_t input_total = usage_it->value("input_tokens", static_cast<std::int64_t>(0));
+        std::int64_t cached = 0;
         if (auto details_it = usage_it->find("input_tokens_details");
             details_it != usage_it->end() && details_it->is_object()) {
-            event.usage.cache_read_tokens = details_it->value("cached_tokens", static_cast<std::int64_t>(0));
+            cached = details_it->value("cached_tokens", static_cast<std::int64_t>(0));
         }
+        event.usage.cache_read_tokens = cached;
+        event.usage.input_tokens = input_total > cached ? input_total - cached : 0;
     }
 
     return event;

@@ -881,6 +881,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             {
                 std::lock_guard<std::mutex> lock(tasks_mutex_);
                 task->snapshot.input_tokens += usage.input_tokens;
+                task->snapshot.cache_read_tokens += usage.cache_read_tokens;
+                task->snapshot.cache_creation_tokens += usage.cache_creation_tokens;
                 task->snapshot.output_tokens += usage.output_tokens;
                 // 步数不在这里记:usage 回调只是"一次请求结束"的时机,拿它
                 // 猜步数,provider 漏 usage 就会少算——直接账在 RunTask 循环
@@ -1016,6 +1018,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     if (task != nullptr) {
         std::lock_guard<std::mutex> lock(tasks_mutex_);
         task_outcome.input_tokens = task->snapshot.input_tokens;
+        task_outcome.cache_read_tokens = task->snapshot.cache_read_tokens;
+        task_outcome.cache_creation_tokens = task->snapshot.cache_creation_tokens;
         task_outcome.output_tokens = task->snapshot.output_tokens;
         task_outcome.elapsed_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - task->snapshot.start_time).count();
@@ -1131,6 +1135,8 @@ std::vector<AgentTaskSummary> AgentTool::TaskSummaries() const {
         summary.steps_used = task->snapshot.steps_used;
         summary.outcome_reason = task->snapshot.outcome.reason;
         summary.input_tokens = task->snapshot.input_tokens;
+        summary.cache_read_tokens = task->snapshot.cache_read_tokens;
+        summary.cache_creation_tokens = task->snapshot.cache_creation_tokens;
         summary.output_tokens = task->snapshot.output_tokens;
         summary.start_time = task->snapshot.start_time;
         summary.end_time = task->snapshot.end_time;
@@ -1395,7 +1401,7 @@ std::vector<std::string> AgentTool::CompletionNoticeLines() const {
         if (snapshot.state == AgentTaskState::Running || snapshot.delivered) {
             continue;
         }
-        const std::int64_t tokens = snapshot.input_tokens + snapshot.output_tokens;
+        const std::int64_t tokens = snapshot.total_input_tokens() + snapshot.output_tokens;
         // 短因先行(规格"现场三"):耗尽/停下/失败·接口报错一眼分得开。
         std::string label = StateShortLabel(snapshot.state);
         const std::string reason = ReasonShortLabel(snapshot.outcome.reason);

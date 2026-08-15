@@ -824,7 +824,7 @@ std::vector<lubancode::cli::AgentPanelEntry> InteractiveSession::BuildAgentPanel
                        task.state == lubancode::tools::AgentTaskState::BudgetExhausted;
         const auto end = entry.running ? now : task.end_time;
         const double seconds = std::chrono::duration<double>(end - task.start_time).count();
-        const std::int64_t tokens = task.input_tokens + task.output_tokens;
+        const std::int64_t tokens = task.total_input_tokens() + task.output_tokens;
         // 状态短话(规格"现场三/四"):导航坞只放短因——完成/失败 · 接口报错/
         // 耗尽 · 40/40 轮/停下 · 用户中止;完整错误进 transcript(Enter 查看)。
         // 正数预算派出即可见:运行中带"N/M 轮",不等撞墙才揭晓。

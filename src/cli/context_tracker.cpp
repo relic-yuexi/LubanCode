@@ -7,16 +7,17 @@ namespace lubancode::cli {
 ContextTracker::ContextTracker(std::size_t window_tokens) : window_tokens_(window_tokens) {}
 
 void ContextTracker::Update(const api::Usage& usage) {
-    // Anthropic 语义:usage.input_tokens 不含缓存命中/缓存写入那部分——
-    // 真实发出去的提示词体积得把 cache_read/cache_creation 一起加回来,
-    // 不然压缩过一轮、后续请求大量命中缓存时,input_tokens 会很小,
-    // 算出来的占用远低于真实值(实测出现过 input=144、cache_read=1472,
-    // 按旧公式只算 144,报出 context 0%)。
-    const std::int64_t total =
-        usage.input_tokens + usage.cache_read_tokens + usage.cache_creation_tokens + usage.output_tokens;
+    // 统一口径(api::Usage 文件头):input_tokens 已是"非缓存输入",
+    // 完整提示词体积 = TotalInputTokens(input + cache_read + cache_creation),
+    // 再加输出。三家 wire 摊成同一副语义后,这一只公式对所有家都对——
+    // 旧实现里 Chat/Responses 把含 cached 的总数塞进 input_tokens,这里
+    // 再加一遍 cache_read,会把占用算重(前缀缓存守恒单第一期修掉)。
+    const std::int64_t total = api::TotalInputTokens(usage) + usage.output_tokens;
     current_tokens_ = total > 0 ? static_cast<std::size_t>(total) : 0;
-    // 缓存命中量同样覆盖式记一份,/context 分类明细用;负数(不该出现)按 0。
+    // 缓存命中量与完整输入同样覆盖式记一份,/context 分类明细与命中率用;
+    // 负数(不该出现)按 0。
     last_cache_read_tokens_ = usage.cache_read_tokens > 0 ? usage.cache_read_tokens : 0;
+    last_input_tokens_ = api::TotalInputTokens(usage);
 }
 
 void ContextTracker::ApplyUsage(const api::Usage& usage) {

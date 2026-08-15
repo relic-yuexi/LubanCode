@@ -8,10 +8,9 @@
 // 的真实度量(真实用量记账,不是拿字符数瞎估),累加多次请求反而是重复
 // 计数、数字会越滚越大、跟"当前历史实际占用"这件事对不上。
 //
-// 占用公式是 input_tokens + cache_read_tokens + cache_creation_tokens +
-// output_tokens,不是单纯 input+output——Anthropic 语义里 usage.input_tokens
-// 不含缓存命中/缓存写入那部分,真实提示词体积得把这两块加回来,不然大量
-// 命中缓存时会把占用严重低估(细节见 context_tracker.cpp 里 Update() 的注释)。
+// 占用公式是 TotalInputTokens(input+cache_read+cache_creation) + output
+// ——api::Usage 的统一口径下三家 wire 语义一致(input_tokens 一律是"非缓存
+// 输入"),这一只公式对所有家都对。
 
 #pragma once
 
@@ -55,6 +54,21 @@ public:
     // 厂商没给(或还没发过请求)就是 0。
     std::int64_t last_cache_read_tokens() const { return last_cache_read_tokens_; }
 
+    // 最近一次请求的完整输入(TotalInputTokens),命中率分母用——只取输入,
+    // 不把 output 混进去。0 = 还没实测过。
+    std::int64_t last_total_input_tokens() const { return last_input_tokens_; }
+
+    // 最近一次请求的缓存命中率(百分比,四舍五入)。分母只取输入;没实测
+    // (总输入为 0)时返回 -1,调用方写"服务端未回报",不许拿 0 冒充真未命中。
+    int last_cache_hit_percent() const {
+        if (last_input_tokens_ <= 0) {
+            return -1;
+        }
+        const double ratio = static_cast<double>(last_cache_read_tokens_) /
+                             static_cast<double>(last_input_tokens_) * 100.0;
+        return static_cast<int>(ratio + 0.5);
+    }
+
     // /context <档位> 用:会话级临时改窗口大小,不改配置文件。
     void set_window_tokens(std::size_t window_tokens) { window_tokens_ = window_tokens; }
 
@@ -69,6 +83,7 @@ private:
     std::size_t current_tokens_ = 0;
     std::size_t window_tokens_;
     std::int64_t last_cache_read_tokens_ = 0;
+    std::int64_t last_input_tokens_ = 0;
     bool usage_stale_ = false;
 };
 

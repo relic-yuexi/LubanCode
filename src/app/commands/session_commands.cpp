@@ -52,7 +52,8 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
     if (args.empty()) {
         const auto lines = lubancode::cli::FormatContextBreakdown(
             sys_tokens, tools_tokens, history_tokens, context_tracker.last_cache_read_tokens(),
-            context_tracker.window_tokens(), context_tracker.current_tokens(), theme);
+            context_tracker.window_tokens(), context_tracker.current_tokens(), theme,
+            /*bar_width=*/16, context_tracker.last_cache_hit_percent());
         for (const auto& line : lines) {
             std::cout << line << "\n";
         }

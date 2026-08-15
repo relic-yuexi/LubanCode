@@ -528,6 +528,7 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         usage_stats.input_tokens += usage.input_tokens;
         usage_stats.output_tokens += usage.output_tokens;
         usage_stats.cache_read_tokens += usage.cache_read_tokens;
+        usage_stats.cache_creation_tokens += usage.cache_creation_tokens;
         usage_stats.request_count += 1;
         // ContextTracker 只认"最近一次请求"的真实用量,整个覆盖,不跟着
         // usage_stats 一起累加——语义区别见 cli/context_tracker.hpp 文件头。
@@ -573,6 +574,7 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
             usage_stats.input_tokens += usage.input_tokens;
             usage_stats.output_tokens += usage.output_tokens;
             usage_stats.cache_read_tokens += usage.cache_read_tokens;
+            usage_stats.cache_creation_tokens += usage.cache_creation_tokens;
             usage_stats.request_count += 1;
             display.agent_step_count += 1;  // 子代理每一次独立请求算一步,agent 条目终态摘要用
             // 子代理自己的 token/工具次数/耗时都记在 AgentTool 统一台账里,
@@ -798,14 +800,20 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
         // 0.17.0:token 数字统一 k 化(cli::FormatTokenCount),超过 10k 的
         // 数字不再铺一长串数位。i18n:整行进表(stats.line),缓存命中那一节
         // 有则先按 stats.cache 拼好塞进 {1},没有就是空串。
+        // 口径(前缀缓存守恒单):"输入"= TotalInputTokens(非缓存输入 +
+        // 缓存读 + 缓存写)——DeepSeek 49k hit + 1k miss 显示为 50k 输入,
+        // 不是 1k,也不是 99k。命中率分母只取输入,不带 output;服务端没
+        // 回报 usage(总输入为 0)时只显示命中量,不伪造 0%。
+        const int hit_percent = usage_stats.cache_hit_percent();
         const std::string cache_part =
             usage_stats.cache_read_tokens > 0
-                ? trf("stats.cache", lubancode::cli::FormatTokenCount(usage_stats.cache_read_tokens))
+                ? trf("stats.cache", lubancode::cli::FormatTokenCount(usage_stats.cache_read_tokens),
+                      hit_percent >= 0 ? std::to_string(hit_percent) : std::string("?"))
                 : std::string();
         std::cout << theme.stats
-                  << trf("stats.line", lubancode::cli::FormatTokenCount(usage_stats.input_tokens), cache_part,
-                          lubancode::cli::FormatTokenCount(usage_stats.output_tokens), usage_stats.request_count,
-                          context_tracker.UsagePercent())
+                  << trf("stats.line", lubancode::cli::FormatTokenCount(usage_stats.total_input_tokens()),
+                         cache_part, lubancode::cli::FormatTokenCount(usage_stats.output_tokens),
+                         usage_stats.request_count, context_tracker.UsagePercent())
                   << theme.reset << "\n";
     }
     // 回合正常结束(不是上面那条 !result.has_value() 的报错早退)——统计行

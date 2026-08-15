@@ -62,14 +62,33 @@ std::string TrimAscii(std::string value);
 std::expected<std::vector<std::string>, std::string> PromptAskUser(
     const lubancode::tools::AskUserQuestion& question, const lubancode::cli::Theme& theme);
 
-// 一次 Run() 内(可能因为工具调用来回好几趟)的 token 用量累计:输入、
-// 输出 tokens 各自求和,再数一下总共发了几次独立请求。RunTurn() 结束后
-// 打一行,不跨多次用户提问累计——一问一答算一次统计。
+// 一次 Run() 内(可能因为工具调用来回好几趟)的 token 用量累计:四项
+// token 各自求和(api::Usage 统一口径,input_tokens 是"非缓存输入"),
+// 再数一下总共发了几次独立请求。RunTurn() 结束后打一行,不跨多次用户
+// 提问累计——一问一答算一次统计。统计行的"输入"一律走 TotalInputTokens
+// (input+cache_read+cache_creation),命中率分母也只取输入。
 struct UsageStats {
     std::int64_t input_tokens = 0;
     std::int64_t output_tokens = 0;
     std::int64_t cache_read_tokens = 0;
+    std::int64_t cache_creation_tokens = 0;
     int request_count = 0;
+
+    // 完整输入(input + cache_read + cache_creation)。
+    std::int64_t total_input_tokens() const {
+        return input_tokens + cache_read_tokens + cache_creation_tokens;
+    }
+
+    // 本轮缓存命中率(百分比,四舍五入);分母只取输入,没实测(总输入
+    // 为 0)时返回 -1,显示层写"服务端未回报",不许拿 0 冒充真未命中。
+    int cache_hit_percent() const {
+        if (total_input_tokens() <= 0) {
+            return -1;
+        }
+        const double ratio = static_cast<double>(cache_read_tokens) /
+                             static_cast<double>(total_input_tokens()) * 100.0;
+        return static_cast<int>(ratio + 0.5);
+    }
 };
 
 // 交互循环、单发模式共用的回调:文本打字机打印(正文保持原色,不着色),

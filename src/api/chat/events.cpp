@@ -1,5 +1,7 @@
 #include "api/chat/events.hpp"
 
+#include <iostream>
+
 #include <nlohmann/json.hpp>
 
 namespace lubancode::api::chat {
@@ -14,6 +16,44 @@ std::string StopReason(const std::string& reason, bool has_tools) {
         return "tool_use";
     }
     return "end_turn";
+}
+
+// usage 对象 -> 统一口径(api::Usage 文件头注释)。三副形状:
+//   1) DeepSeek 顶层 prompt_cache_hit_tokens/prompt_cache_miss_tokens:
+//      input=miss,cache_read=hit。与 prompt_tokens 同时出现时校验
+//      hit+miss==prompt_tokens,不等保留 hit/miss 原数、打一行诊断,不崩。
+//   2) OpenAI/Qwen 风格 prompt_tokens_details.cached_tokens(已含在
+//      prompt_tokens 总数里):cache_read=cached,input=total-cached。
+//   3) 光杆 prompt_tokens:input=total,cache_read=0。
+// 每次带 usage 的帧整个覆盖(不是累加)——finish chunk 与 [DONE] 前的
+// 独立 usage chunk 各来一次也只认最后一份数,不会重复累计。
+Usage ParseUsage(const nlohmann::json& usage) {
+    Usage out;
+    out.output_tokens = usage.value("completion_tokens", static_cast<std::int64_t>(0));
+    const std::int64_t prompt_total = usage.value("prompt_tokens", static_cast<std::int64_t>(0));
+    const bool has_deepseek_hit = usage.contains("prompt_cache_hit_tokens");
+    const bool has_deepseek_miss = usage.contains("prompt_cache_miss_tokens");
+    if (has_deepseek_hit || has_deepseek_miss) {
+        const std::int64_t hit = usage.value("prompt_cache_hit_tokens", static_cast<std::int64_t>(0));
+        const std::int64_t miss = usage.value("prompt_cache_miss_tokens", static_cast<std::int64_t>(0));
+        if (prompt_total > 0 && hit + miss != prompt_total) {
+            // 服务端账目不合:以 hit/miss 为准(它俩才是缓存口径的分项),
+            // 保留原数、只记诊断,绝不崩会话。
+            std::cerr << "[usage] DeepSeek prompt_cache_hit(" << hit << ")+miss(" << miss
+                      << ") != prompt_tokens(" << prompt_total << "),按 hit/miss 记账\n";
+        }
+        out.input_tokens = miss;
+        out.cache_read_tokens = hit;
+        return out;
+    }
+    if (auto details = usage.find("prompt_tokens_details"); details != usage.end() && details->is_object()) {
+        const std::int64_t cached = details->value("cached_tokens", static_cast<std::int64_t>(0));
+        out.cache_read_tokens = cached;
+        out.input_tokens = prompt_total > cached ? prompt_total - cached : 0;
+        return out;
+    }
+    out.input_tokens = prompt_total;
+    return out;
 }
 
 }  // namespace
@@ -43,12 +83,7 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
     }
 
     if (auto usage = data.find("usage"); usage != data.end() && usage->is_object()) {
-        usage_.input_tokens = usage->value("prompt_tokens", static_cast<std::int64_t>(0));
-        usage_.output_tokens = usage->value("completion_tokens", static_cast<std::int64_t>(0));
-        if (auto details = usage->find("prompt_tokens_details");
-            details != usage->end() && details->is_object()) {
-            usage_.cache_read_tokens = details->value("cached_tokens", static_cast<std::int64_t>(0));
-        }
+        usage_ = ParseUsage(*usage);
     }
 
     auto choices = data.find("choices");

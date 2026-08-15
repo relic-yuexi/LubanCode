@@ -230,6 +230,16 @@ TEST_CASE("FormatContextBreakdown: 历史带缓存命中就在行尾括注") {
     CHECK(lines[5].find("缓存命中") == std::string::npos);
 }
 
+TEST_CASE("FormatContextBreakdown: 带命中率就在括注里补百分比,没回报只摆命中量") {
+    // hit_percent=50:括注带 ",50%";-1(服务端没回报 usage)退成不带百分比。
+    const auto with_ratio = FormatContextBreakdown(10000, 5000, 20000, 4600, 256000, 100000,
+                                                   BuiltinTheme("dark"), 16, /*hit_percent=*/50);
+    CHECK(with_ratio[3].find("(缓存命中 4600,50%)") != std::string::npos);
+    const auto without_ratio = FormatContextBreakdown(10000, 5000, 20000, 4600, 256000, 100000,
+                                                      BuiltinTheme("dark"), 16, /*hit_percent=*/-1);
+    CHECK(without_ratio[3].find("(缓存命中 4600)") != std::string::npos);
+}
+
 TEST_CASE("FormatContextBreakdown: 有实测——总量用实测不带~、历史反推、三项和=实测") {
     // sys=10000、tools=5000(统一口径估,带 ~);实测 100000。
     // 历史反推 = 100000-10000-5000 = 85000(不带 ~,行尾注反推口径)。

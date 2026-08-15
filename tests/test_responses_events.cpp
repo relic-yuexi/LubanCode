@@ -139,9 +139,13 @@ TEST_CASE("response.completed:usage.input_tokens_details.cached_tokens 映射进
     REQUIRE(event.has_value());
     REQUIRE(std::holds_alternative<MessageDone>(*event));
     const auto& done = std::get<MessageDone>(*event);
-    CHECK(done.usage.input_tokens == 1578);
+    // 统一口径(前缀缓存守恒单):cached_tokens 已含在 input_tokens 总数里,
+    // 摊开成 input=1578-128=1450、cache_read=128——消费端(TotalInputTokens)
+    // 加回去才是 1578,不再把 cached 算两遍。
+    CHECK(done.usage.input_tokens == 1450);
     CHECK(done.usage.output_tokens == 83);
     CHECK(done.usage.cache_read_tokens == 128);
+    CHECK(TotalInputTokens(done.usage) == 1578);
     CHECK(done.usage.cache_creation_tokens == 0);  // responses wire 没有缓存写入这个概念
 }
 

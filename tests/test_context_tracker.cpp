@@ -72,6 +72,27 @@ TEST_CASE("ContextTracker: last_cache_read_tokens 覆盖式记最近一次缓存
     CHECK(tracker.last_cache_read_tokens() == 0);
 }
 
+TEST_CASE("ContextTracker: 命中率分母只取输入,没实测记 -1 不伪造 0%") {
+    cli::ContextTracker tracker(1000);
+    // 还没发过请求:总输入 0,命中率 -1(服务端未回报),不是 0。
+    CHECK(tracker.last_total_input_tokens() == 0);
+    CHECK(tracker.last_cache_hit_percent() == -1);
+
+    // DeepSeek 49k hit + 1k miss:总输入 50k,命中率 98%。
+    tracker.Update(api::Usage{1000, 80, 49000, 0});
+    CHECK(tracker.last_total_input_tokens() == 50000);
+    CHECK(tracker.last_cache_hit_percent() == 98);
+
+    // cache_creation 也算进输入分母(Anthropic 语义)。
+    tracker.Update(api::Usage{100, 20, 300, 500});
+    CHECK(tracker.last_total_input_tokens() == 900);
+    CHECK(tracker.last_cache_hit_percent() == 33);  // 300/900
+
+    // 全冷未命中:命中率如实报 0,不是 -1(实测过)。
+    tracker.Update(api::Usage{500, 10, 0, 0});
+    CHECK(tracker.last_cache_hit_percent() == 0);
+}
+
 TEST_CASE("ContextTracker: 窗口大小是 0 时不除零,百分比按 0 处理") {
     cli::ContextTracker tracker(0);
     tracker.Update(api::Usage{100, 0});

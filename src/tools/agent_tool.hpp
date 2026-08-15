@@ -74,9 +74,17 @@ struct TaskOutcome {
     std::string last_tool;       // 最后一次工具名与结果摘要
     int steps_used = 0;
     int step_limit = 0;          // 0 = 不限步(一个 turn 内的模型请求数上限)
+    // api::Usage 统一口径:input 是"非缓存输入",完整输入 = 三项相加
+    // (见 TotalInputTokens)。展示一律用完整输入,别把缓存命中漏掉。
     std::int64_t input_tokens = 0;
+    std::int64_t cache_read_tokens = 0;
+    std::int64_t cache_creation_tokens = 0;
     std::int64_t output_tokens = 0;
     double elapsed_seconds = 0;
+
+    std::int64_t total_input_tokens() const {
+        return input_tokens + cache_read_tokens + cache_creation_tokens;
+    }
 };
 
 struct AgentTaskToolCall {
@@ -100,7 +108,10 @@ struct AgentTaskSnapshot {
     // 派出时写死的预算(0 = 不限步):面板可见,不等撞墙才揭晓(规格"现场四")。
     int step_limit = 0;
     int steps_used = 0;  // 已发生的模型请求数(RunOutcome 直接记账,不靠 usage 回调猜)
+    // api::Usage 统一口径(input=非缓存输入),完整输入 = 三项相加。
     std::int64_t input_tokens = 0;
+    std::int64_t cache_read_tokens = 0;
+    std::int64_t cache_creation_tokens = 0;
     std::int64_t output_tokens = 0;
     std::chrono::steady_clock::time_point start_time{};
     std::chrono::steady_clock::time_point end_time{};
@@ -111,6 +122,10 @@ struct AgentTaskSnapshot {
     // 消费方只看 state == Running 判"还在跑"。
     TaskOutcome outcome;
     bool delivered = false;
+
+    std::int64_t total_input_tokens() const {
+        return input_tokens + cache_read_tokens + cache_creation_tokens;
+    }
 };
 
 // 轻量列表条目(0.28.x 面板全量化):列表每 100ms 刷新一次,不再复制
@@ -126,12 +141,19 @@ struct AgentTaskSummary {
     int step_limit = 0;
     int steps_used = 0;
     TaskOutcomeReason outcome_reason = TaskOutcomeReason::None;  // 面板短因用
+    // api::Usage 统一口径(input=非缓存输入),完整输入 = 三项相加。
     std::int64_t input_tokens = 0;
+    std::int64_t cache_read_tokens = 0;
+    std::int64_t cache_creation_tokens = 0;
     std::int64_t output_tokens = 0;
     std::chrono::steady_clock::time_point start_time{};
     std::chrono::steady_clock::time_point end_time{};
     std::size_t tool_call_count = 0;
     std::size_t pending_message_count = 0;  // 已排队未送达的介入消息数
+
+    std::int64_t total_input_tokens() const {
+        return input_tokens + cache_read_tokens + cache_creation_tokens;
+    }
 };
 
 // SendTaskMessage 的收信结果。
