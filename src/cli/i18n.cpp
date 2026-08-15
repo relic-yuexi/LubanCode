@@ -76,9 +76,9 @@ const Entry kZhCN[] = {
      "  /context        看当前上下文占用分析(系统提示/工具定义/对话历史分类明细 + 条形图)\n"
      "  /context 512k   临时改窗口大小(256k/512k/1m/裸数字都认),只本会话生效\n"
      "  /compact [重点说明]  手动触发一次历史压缩,可选指定这次额外保留什么\n"
-     "  /think          看当前推理强度(/effort 同义)\n"
-     "  /think 档位     切推理强度,档位以服务商为准(anthropic 内置 none/low/medium/high/xhigh/max\n"
-     "                  映射,responses 原样递给 API)\n"
+     "  /think          看当前推理强度(/effort 同义);不填是正式状态,请求里字段缺席\n"
+     "  /think 档位     切推理强度;档位列模型目录/provider 声明,没声明就明说未经能力验证\n"
+     "                  (anthropic 映射 none/low/medium/high/xhigh/max,responses 原样递)\n"
      "  /skills         列出扫描到的技能(官方 + 主目录级 + 项目级)\n"
      "  /skill          管技能;裸敲看安装网址、本地目录、更新与删除示例\n"
      "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
@@ -180,7 +180,7 @@ const Entry kZhCN[] = {
      "  /clear          清空对话历史\n"
      "  /context        看当前上下文占用;/context 256k|512k|1m 临时改窗口大小\n"
      "  /compact        手动压缩历史;/compact 重点说明 可指定这次额外保留什么\n"
-     "  /think          看当前推理强度;/think 档位 切档位,档位以服务商为准(/effort 同义)\n"
+     "  /think          看当前推理强度;/think 档位 切档位(声明未知的档会如实标注,/effort 同义)\n"
      "  /skills         列出扫描到的技能(官方 + 主目录级 + 项目级)\n"
      "  /skill          管技能;裸敲看安装网址、本地目录、更新与删除示例\n"
      "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
@@ -298,6 +298,10 @@ const Entry kZhCN[] = {
     {"agent_panel.reflow_toast", "子代理 {0} 已完成,结果已回流 main(查看态静默收货)"},
     {"transcript.assistant_bg_title", "后台回流 · 分析"},
     {"error.step_limit", "已达 step 上限(max_steps_per_turn;旧名 max_turns),本轮实际跑了 {0} 步,可调大上限或设 0 解除。"},
+    {"error.length_empty_output", "输出预算耗尽(finish_reason=length):共输出 {0} tokens,正文一个字都没落。"},
+    {"error.length_empty_reasoning", "usage 拆账:其中 reasoning {0} tokens——输出预算全被思考吃掉。"},
+    {"error.length_empty_no_split", "usage 未拆 reasoning 账(服务端没回 reasoning_tokens),预算去向无法核对。"},
+    {"error.length_empty_hint", "可 /think 降档(或 /think unset 不发参数)后重试,或调大输出预算。"},
     {"agent_panel.detail_prompt", "任务说明: "},
     {"agent_panel.detail_pending_head", "已排队、尚未送达的介入消息 {0} 条: "},
     {"agent_panel.detail_tools_head", "工具调用流水(共 {0} 次): "},
@@ -414,7 +418,7 @@ const Entry kZhCN[] = {
     {"slash.desc.exit", "退出(裸词 exit/quit 也认)"},
     {"slash.desc.context", "看当前上下文占用;/context 256k|512k|1m 临时改窗口大小"},
     {"slash.desc.compact", "手动压缩历史;/compact 重点说明 可指定这次额外保留什么"},
-    {"slash.desc.think", "看当前推理强度;/think 档位 切档位,档位以服务商为准(/effort 同义)"},
+    {"slash.desc.think", "看当前推理强度;/think 档位 切档位,声明未知会如实标注(/effort 同义)"},
     {"slash.desc.effort", "同 /think(推理强度别名)"},
     {"slash.desc.skills", "列出扫描到的技能(官方 + 主目录级 + 项目级)"},
     {"slash.desc.skill", "管理技能(裸敲查看安装网址、本地目录等完整示例)"},
@@ -488,6 +492,7 @@ const Entry kZhCN[] = {
     {"slash.desc.peers", "列同机可见的其它 Lubancode 会话(名字/状态/目录);方向键选,Enter 看详情"},
     {"slash.desc.send", "/send <名字或短id> <话>:给另一场会话递一张字条"},
     {"slash.desc.peerperm", "/peerperm auto|accept|hold|refuse:跨会话来信的收件档"},
+    {"slash.desc.doctor", "/doctor effort|cache:本地兼容端 Effort 档位与前缀缓存诊断(探针要发请求)"},
 
     // ---- /update ----
     {"cmd.update.usage", "用法: /update 或 /update check"},
@@ -606,7 +611,7 @@ const Entry kZhCN[] = {
     {"config.not_set", "(未设置)"},
     {"config.language.follow_system", "(未设置,跟系统: {0})"},
     {"config.compact_model.unset", "(未设置,跟会话模型一致)"},
-    {"config.think.unset", "(未设置,不发这个参数)"},
+    {"config.think.unset", "未发送参数(请求里无此字段)"},
     {"config.soul.unset", "(未设置,用主目录 SOUL.md)"},
     {"config.threshold.never", "(永不延迟)"},
     {"config.steps.unlimited", "(无上限)"},
@@ -700,6 +705,14 @@ const Entry kZhCN[] = {
     // ---- 统计行 ----
     {"stats.line", "[tokens] 输入 {0}{1} · 输出 {2} · 请求 {3} 次 · context {4}%"},
     {"stats.cache", "(缓存命中 {0},{1}%)"},
+    {"stats.cache_not_reported", "(usage 未报告)"},
+    {"stats.cache_disabled", "(服务端未启用前缀缓存)"},
+    {"stats.cache_no_hit_enabled", "(缓存已启用,本场未命中)"},
+    {"stats.cache_no_hit_unverified", "(缓存 0 命中,服务端是否启用未验证)"},
+    {"status.cache_note_hit", "缓存命中 {0}({1}%)"},
+    {"status.cache_note_not_reported", "缓存未报告"},
+    {"status.cache_note_disabled", "服务端未启用缓存"},
+    {"status.cache_note_zero", "缓存 0 命中"},
 
     // ---- 管道模式稳定输出 ----
     {"pipe.tool_start", "[工具] "},
@@ -855,9 +868,64 @@ const Entry kZhCN[] = {
     {"compact.hard_trim_results", "[警告] 上下文发生有损硬裁剪:超大工具结果被截尾(字符安全网兜底,不是语义压缩)。模型已看不到被截内容;完整流水仍在会话存档,可 /export 查看。"},
     {"cmd.think.current", "当前推理强度: {0}"},
     {"cmd.think.catalog_header", "模型目录声明的档位({0}):"},
+    {"cmd.think.provider_header", "provider 声明的档位(请求参数 {0}):"},
+    {"cmd.think.unverified", "当前模型与 provider 都没声明档位——未经能力验证。"},
+    {"cmd.think.unverified_send", "(未经能力验证,仍会按原样发送)"},
+    {"cmd.think.provider_declared", "(在 provider 声明表内)"},
+    {"cmd.think.provider_undeclared", "(不在 provider 声明表内,仍会发送)"},
+    {"cmd.think.doctor_hint", "提示: /doctor effort [档位|unset] 发极小探针,可实测服务端是否采纳该档。"},
     {"cmd.think.provider", "支持哪些档位以服务商为准。"},
     {"cmd.think.switched", "推理强度已切到 {0}(本会话生效)。"},
     {"cmd.think.undeclared", "提示: 模型目录未声明该档,仍会发送。"},
+
+    // ---- /doctor:本地兼容端 Effort 与前缀缓存诊断(2026-08 单) ----
+    {"doctor.usage.usage_line", "用法: /doctor effort [档位|unset] | /doctor cache [probe|usage]"},
+    {"doctor.overview.header", "诊断概览(不发请求,只看当前声明与结论):"},
+    {"doctor.overview.effort", "  当前档位: "},
+    {"doctor.overview.declared", "  档位声明: "},
+    {"doctor.overview.unverified", "未经能力验证(模型目录与 provider 都没声明)"},
+    {"doctor.overview.levels", "已声明 {0} 档(/think 裸敲可列)"},
+    {"doctor.overview.cache", "  前缀缓存: "},
+    {"doctor.overview.usage_hint", "探针要发请求: /doctor effort [档位|unset] 实测档位; /doctor cache 读指标、probe 对账、usage 探 stream_usage。"},
+    {"doctor.level.unset", "未发送参数"},
+    {"doctor.startup.stream_usage_hint", "提示: 当前端未声明 stream_usage,token/缓存统计可能恒为 0;/doctor cache usage 可探测并写回配置。"},
+    {"doctor.effort.probe_header", "Effort 探针:模型 {0},档位 {1}。"},
+    {"doctor.effort.request_field", "请求侧实际发送值:"},
+    {"doctor.effort.field_absent", "未发送参数(请求体无 {0} 字段)"},
+    {"doctor.effort.mapped_suffix", " 档映射)"},
+    {"doctor.probe.sending", "发送探针(极小请求;密钥与正文不进报告)…"},
+    {"doctor.effort.http_ok", "HTTP 2xx:请求被服务端接受。"},
+    {"doctor.effort.http_error", "HTTP {0}:请求被拒或出错。"},
+    {"doctor.effort.finish", "finish_reason:"},
+    {"doctor.value.absent", "(未报告)"},
+    {"doctor.effort.body", "正文 {0} 字符 · 思考 {1} 字符。"},
+    {"doctor.effort.usage", "usage:输入 {0} · 输出 {1} · 缓存命中 {2}"},
+    {"doctor.effort.usage_reasoning", "usage 拆账:输出里 reasoning {0} tokens。"},
+    {"doctor.effort.usage_no_split", "usage 未拆 reasoning 账(服务端没回 reasoning_tokens)。"},
+    {"doctor.effort.usage_not_reported", "usage:未报告(服务端没回 usage——chat 端常见原因是 stream_usage 没开,/doctor cache usage 可探)。"},
+    {"doctor.cache.no_metrics", "未配 metrics_url,读不到服务端指标。本地兼容端可在 provider 配置里写 metrics_url(如 http://127.0.0.1:8000/metrics)后重试;不擅自拿 base_url 猜端点去探。"},
+    {"doctor.cache.metrics_header", "服务端指标({0}):"},
+    {"doctor.cache.metrics_enabled", "enable_prefix_caching = True:服务端已启用前缀缓存。"},
+    {"doctor.cache.metrics_disabled", "enable_prefix_caching = False:服务端未启用前缀缓存——\"缓存利用率 0%\" 是服务端没开,不是提示词没守住前缀。"},
+    {"doctor.cache.metrics_enabled_unknown", "指标里没有 enable_prefix_caching 标签,启用状态未知。"},
+    {"doctor.cache.metrics_counters", "prefix_cache_queries_total = {0} · prefix_cache_hits_total = {1} · prompt_tokens_cached_total = {2}"},
+    {"doctor.cache.metrics_read_failed", "{0}"},
+    {"doctor.cache.state.unverified", "未验证(没读过服务端指标)"},
+    {"doctor.cache.probe_gate", "当前端不是本机地址且未明配 metrics_url,不发探针——公网 provider 不擅自发请求。确属自有端,请在 provider 配置里写 metrics_url 后重试。"},
+    {"doctor.cache.probe_round", "第 {0} 轮(同 system、同历史前缀,只换最后一句):"},
+    {"doctor.cache.probe_usage", "  usage:非缓存输入 {0} · cached_tokens 命中 {1}"},
+    {"doctor.cache.probe_prefix", "前缀字节:两轮请求体公共前缀 {0} 字节(设计前缀 {1} 字节)"},
+    {"doctor.cache.probe_prefix_stable", " —— 稳定"},
+    {"doctor.cache.probe_prefix_broken", " —— 不稳(公共前缀比设计短,序列化在改写前缀)"},
+    {"doctor.cache.probe_delta", "服务端增量:queries {0} · hits {1} · cached tokens {2}"},
+    {"doctor.error.truncated", "…(截断)"},
+    {"doctor.usage.not_chat", "stream_usage 探针只对 chat_completions 端有意义;anthropic/responses 的 usage 本来就在流末回。"},
+    {"doctor.usage.no_provider", "当前会话没走 providers[] 条目(单 provider 顶层写法),探针结论没有落盘的地方——改用 providers 配置后可用。"},
+    {"doctor.usage.probing", "发一只带 stream_options.include_usage 的极小请求,看服务端认不认…"},
+    {"doctor.usage.supported", "服务端认 stream_options.include_usage:流末回了 usage。"},
+    {"doctor.usage.unsupported", "服务端没回 usage:大概率不认 stream_options(或该端不回报 usage)。"},
+    {"doctor.usage.written", "已写回 provider {0} 的 stream_usage(配置文件 {1}),后续请求生效。"},
+    {"doctor.usage.write_failed", "写回失败: {0}"},
 
     // ---- 模型目录应用 / /model ----
     {"catalog.apply_think", "think→{0}(目录默认)"},
@@ -1729,7 +1797,7 @@ const Entry kEn[] = {
     {"config.not_set", "(not set)"},
     {"config.language.follow_system", "(not set, following system: {0})"},
     {"config.compact_model.unset", "(not set; uses the session model)"},
-    {"config.think.unset", "(not set; parameter not sent)"},
+    {"config.think.unset", "not sent (field absent from request)"},
     {"config.soul.unset", "(not set; uses SOUL.md in the home dir)"},
     {"config.threshold.never", "(never defer)"},
     {"config.steps.unlimited", "(unlimited)"},

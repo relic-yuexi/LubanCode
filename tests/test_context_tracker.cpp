@@ -99,3 +99,32 @@ TEST_CASE("ContextTracker: 窗口大小是 0 时不除零,百分比按 0 处理"
     CHECK(tracker.UsagePercent() == 0);
     CHECK_FALSE(tracker.ShouldAutoCompact());
 }
+
+TEST_CASE("ContextTracker: 本场累计命中率跨请求累加,与最近一次分开记账") {
+    cli::ContextTracker tracker(1000);
+    CHECK(tracker.session_cache_hit_percent() == -1);  // 一次实测都没有
+    // 第一轮冷 miss(总输入 1k,命中 0),第二轮吃缓存(总输入 2k,命中 1k):
+    // 本场累计 = 命中 1k / 输入 3k = 33%;最近一次 = 1k/2k = 50%。
+    tracker.ApplyUsage(api::Usage{1000, 10, 0, 0});
+    tracker.ApplyUsage(api::Usage{1000, 10, 1000, 0});
+    CHECK(tracker.session_cache_read_total() == 1000);
+    CHECK(tracker.session_input_total() == 3000);
+    CHECK(tracker.session_cache_hit_percent() == 33);
+    CHECK(tracker.last_cache_hit_percent() == 50);
+    // provider 没回 usage(全零):累计账不动,只标旧值。
+    tracker.ApplyUsage(api::Usage{});
+    CHECK(tracker.session_input_total() == 3000);
+    CHECK(tracker.usage_stale());
+}
+
+TEST_CASE("ContextTracker: 服务端前缀缓存结论三态,默认未验证") {
+    cli::ContextTracker tracker(1000);
+    CHECK_FALSE(tracker.server_prefix_caching().has_value());  // 没读过 metrics
+    tracker.set_server_prefix_caching(false);                  // /doctor cache 读到 False
+    REQUIRE(tracker.server_prefix_caching().has_value());
+    CHECK_FALSE(*tracker.server_prefix_caching());
+    tracker.set_server_prefix_caching(std::nullopt);  // 重新变回未知
+    CHECK_FALSE(tracker.server_prefix_caching().has_value());
+    tracker.set_server_prefix_caching(true);
+    CHECK(*tracker.server_prefix_caching());
+}

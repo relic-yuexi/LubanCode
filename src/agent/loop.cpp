@@ -490,7 +490,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
                     history_.push_back(std::move(orphan_message));
                 }
 
-                return RunOutcome{true, false, last_stop_reason, steps_used};
+                return RunOutcome{true, false, false, last_stop_reason, steps_used};
             }
             return std::unexpected("请求失败: " + err.message);
         }
@@ -529,7 +529,22 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         }
 
         if (stop_reason != "tool_use" && !has_tool_use) {
-            return RunOutcome{false, false, stop_reason, steps_used};
+            // 输出预算耗尽且正文为空(本地兼容端实测过的现场:reasoning 吃光
+            // max_tokens,finish_reason=length,一个正文字都没有)。这是
+            // "成功收场但啥也没说",不当错误——但必须把事说破,不许留一片
+            // 空白让用户猜。标记交出去,RunTurn 打明报。
+            RunOutcome outcome{false, false, false, stop_reason, steps_used};
+            if (stop_reason == "max_tokens") {
+                bool has_text = false;
+                for (const auto& block : assistant_message.content) {
+                    if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr && !text->text.empty()) {
+                        has_text = true;
+                        break;
+                    }
+                }
+                outcome.length_empty_output = !has_text;
+            }
+            return outcome;
         }
 
         // 工具循环:逐个执行模型要的工具调用。cancel 中途被置位("工具已
@@ -565,7 +580,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         history_.push_back(std::move(tool_result_message));
 
         if (interrupted) {
-            return RunOutcome{true, false, last_stop_reason, steps_used};
+            return RunOutcome{true, false, false, last_stop_reason, steps_used};
         }
     }
 
@@ -573,7 +588,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
     // for 循环条件恒真,永远不会正常退出到这一行。预算耗尽不是错误:history
     // 里留着到限为止的全部来回,部分结果由调用方(子代理按 budget_exhausted
     // 收账)带走;主循环按老口径打一行"已达上限"。
-    return RunOutcome{false, true, last_stop_reason, steps_used};
+    return RunOutcome{false, true, false, last_stop_reason, steps_used};
 }
 
 }  // namespace lubancode::agent

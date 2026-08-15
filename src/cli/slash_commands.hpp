@@ -46,6 +46,7 @@ enum class SlashCommand {
     Peers,   // /peers:列同机可见的其它会话(跨会话传话),方向键菜单
     Send,    // /send <名字或 peer_id> <话>:给另一场会话递一张字条
     Peerperm,  // /peerperm auto|accept|hold|refuse:跨会话来信的权限档
+    Doctor,  // /doctor effort|cache:本地兼容端 Effort/前缀缓存诊断(探针要发请求)
     Unknown,  // 以 / 开头,但不认得这个命令
 };
 

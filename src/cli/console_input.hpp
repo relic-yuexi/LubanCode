@@ -191,9 +191,10 @@ void SetStatusLineData(const StatusPanelData& values, const std::vector<std::str
 // 的 400ms ticker、挂起恢复的第一帧)在安全时机取新值——footer 挂起在
 // ask_user/确认菜单里时不抢屏,菜单退出后的下一帧自然带出新数。
 // measured=false 把数字标成旧值(ContextTracker::usage_stale,渲染带 ~)。
-// 管道/重定向模式没有状态行,设了也无感。
+// cache_note(缓存诊断单):tokens 段尾部的缓存注记("缓存命中 X(Y%)" /
+// "缓存未报告"),空串 = 抹掉旧注记。管道/重定向模式没有状态行,设了也无感。
 void UpdateStatusLineContext(int context_percent, std::int64_t used_tokens, std::int64_t window_tokens,
-                             bool measured);
+                             bool measured, const std::string& cache_note = std::string());
 
 // 状态行数据源此刻的快照(拿 StdoutWriteMutex 拷贝):测试/诊断用,常规
 // 渲染路径不走这个(每帧重画在 BuildStatusLine 里现读)。

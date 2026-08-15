@@ -78,11 +78,15 @@ bool HandleSkillCommand(const std::string& args, const std::filesystem::path& gl
 // 那一刻(responses 原样递,anthropic 查映射表、映射不上打警告)去判断,
 // 原样存,不强制转小写(anthropic 那张映射表自己做大小写不敏感匹配,
 // responses 要"原样递",这里转了小写反而破坏这条承诺)。
-// entry:当前模型在模型目录(models.json)里的条目,没有就是 nullptr。
-// 有条目且声明了 supported_think_levels → 裸敲列真实档位带描述,设了表外
-// 档位只提示"目录未声明,仍会发送",不拦;没有条目 → 维持现状提示。
+// 档位声明按三层找(Effort 诊断单):模型目录条目(entry)的
+// supported_think_levels 最准;没有条目再看 provider 配置声明
+// (provider_levels);都没有就明说"未经能力验证"——绝不甩一句
+// "以服务商为准"完事。think_param 是 provider 声明的请求参数名(空 =
+// reasoning_effort),一并展示。
 void HandleThinkCommand(const std::string& args, const std::shared_ptr<std::string>& current_think,
-                         const lubancode::config::ModelCatalogEntry* entry = nullptr);
+                         const lubancode::config::ModelCatalogEntry* entry = nullptr,
+                         const std::vector<std::string>& provider_levels = {},
+                         const std::string& think_param = {});
 
 
 // 把模型目录条目应用到会话状态:/model 切换(两个 explicit 都传 false,
