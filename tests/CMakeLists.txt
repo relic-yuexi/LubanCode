@@ -45,6 +45,9 @@ add_executable(lubancode_tests
   test_context_tracker.cpp
   test_anthropic_request.cpp
   test_agent_tool.cpp
+  # agent_message 窄工具(主模型给运行中子代理传增量):入参/四类失败、
+  # 运行名册、假 main backend 集成(inbox 收到 + 来源标签)。
+  test_agent_message_tool.cpp
   test_hooks.cpp
   test_skills.cpp
   test_mcp_transport.cpp

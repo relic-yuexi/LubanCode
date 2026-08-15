@@ -96,6 +96,12 @@ enum class TaskMessageStatus {
     Finished,  // 任务已进终态,明确拒收——绝不改投 main
 };
 
+// 定向消息的来路。三条来源不同(main steering 仍走会话层 SteeringQueue,
+// 不进 inbox):查看态 composer 与用户排队转投是 User,主模型经
+// agent_message 工具转交是 MainAgent——history 里的来源标签按这个分,
+// 不混(规格"不要混淆三种 queue"节)。
+enum class TaskMessageSource { User, MainAgent };
+
 // 后台子代理不能借主回合那条 Backend：主回合会重画 spinner，切 provider
 // 时还会替换内部 client。工厂在 launch 当口造一份独立快照，线程随后只
 // 握自己的 client、模型和提示词叠加层。
@@ -193,7 +199,17 @@ public:
     // 定向介入:把用户在查看态提交的话排进该任务自己的 inbox,在"当前
     // 工具调用收尾、下一次模型请求发出之前"注进那只子代理的 history——
     // 不经 main history,不串到别只代理。终态明确拒收(不改投 main)。
-    TaskMessageStatus SendTaskMessage(int task_id, const std::string& text);
+    // source 只决定注入 history 时的来源标签(User=用户直发,MainAgent=
+    // 主模型经 agent_message 工具转交),落点同一条 inbox。
+    TaskMessageStatus SendTaskMessage(int task_id, const std::string& text,
+                                      TaskMessageSource source = TaskMessageSource::User);
+
+    // 运行中子代理名册(给主模型的动态 context 用):每条外层用户消息到
+    // 来时现算一份,只列 task id/真标题/类型/待送数,不塞 prompt 与日志。
+    // 没有运行中任务时返回空串(不注入)。调用方把它拼进请求级 system 尾
+    // 段(AgentLoop::SetTurnSystemSuffix)——不进 history,compact 后照常
+    // 从台账重注入,不依赖摘要记任务号。
+    std::string RunningTasksRoster() const;
 
     // 正式取消接口(面板 x / Ctrl+X Ctrl+K 接这里):只发停止信号,等任务
     // 线程报出终态,快照里的灯才会变——不从面板侧抹行。
@@ -253,11 +269,26 @@ private:
         struct InboxItem {
             std::string text;
             bool delivered = false;
+            TaskMessageSource source = TaskMessageSource::User;
         };
         AgentTaskSnapshot snapshot;
         std::atomic<bool> cancel{false};
         mutable std::mutex inbox_mutex;
         std::deque<InboxItem> inbox;
+        // 封账闸(规格第五节"排到了却没送"):子代理准备从 Running 进终态
+        // 时,在 tasks_mutex_ 里查一遍 inbox——空则置 true,此后
+        // SendTaskMessage 明确拒收(Finished);非空则不封账,取走注入、
+        // 再续跑一轮。置位与入队同锁成对,不存在"刚封账又收信"的缝。
+        bool inbox_closed = false;
+    };
+
+    // 续投交接的取件批次:SealOrContinueInbox 取走未送项时记下标与原文;
+    // 续跑若失败(取消/provider 错误),按 indices 把这批退回未送,收场
+    // 报告照列原文——不能"取走了就当送到了"。
+    struct DrainedInbox {
+        std::vector<std::size_t> indices;
+        std::vector<std::string> texts;
+        std::vector<TaskMessageSource> sources;
     };
 
     // isolation=worktree 的一站式准备:从 cwd_ 找仓库根、建房(agent- 前缀,
@@ -278,6 +309,17 @@ private:
                    const std::string* prepared_system_prompt = nullptr,
                    const IsolationScope* isolation_scope = nullptr);
     void TouchTasks() { task_revision_.fetch_add(1, std::memory_order_release); }
+
+    // 原子交接(规格第五节):子代理一轮 Run 正常收口后调。inbox 空 ->
+    // 置 inbox_closed 封账(sealed=true,后续 SendTaskMessage 拒收);
+    // 有未送项 -> 取走标 delivered(sealed=false),调用方必须把它们注入
+    // 再续跑一轮——"Queued 是交付承诺",纯文本收尾也续开一轮处理增量。
+    DrainedInbox SealOrContinueInbox(const std::shared_ptr<TaskRecord>& task, bool& sealed);
+    // 续跑失败时把取件批次退回未送(按下标回滚,不整箱回退)。
+    void RestoreDrainedInbox(const std::shared_ptr<TaskRecord>& task, const DrainedInbox& drained);
+    // 收尾账注:还有未送介入消息时,给结果文本追加"N 条未送达 + 逐条
+    // 首行原文"的附言(取消/max turns/provider 错误都不能无声遗失)。
+    static std::string UndeliveredInboxNote(const std::shared_ptr<TaskRecord>& task);
 
     api::Backend& backend_;
     ToolRegistry& sub_registry_;

@@ -11,6 +11,7 @@
 #include "cli/i18n.hpp"
 #include "memory/memory_tool.hpp"
 #include "mcp/mcp_tool.hpp"
+#include "tools/agent_message_tool.hpp"
 #include "tools/background_output.hpp"
 #include "tools/edit_file.hpp"
 #include "tools/lua_tool.hpp"
@@ -198,6 +199,12 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     main_registry_.Register(std::make_unique<lubancode::tools::AgentTool>(
         agent_backend, sub_registry_, cwd_utf8, config.model, /*default_max_turns=*/40, skills_segment));
     agent_tool_ = dynamic_cast<lubancode::tools::AgentTool*>(main_registry_.Find("agent"));
+    // agent_message:主模型给运行中子代理传增量的窄工具(只挂主表——子代理
+    // 深度硬限 1,不该再往下传话)。execute 只调 AgentTool::SendTaskMessage,
+    // 与查看态传话、排队转投共用同一本 TaskRecord::inbox。
+    if (agent_tool_ != nullptr) {
+        main_registry_.Register(std::make_unique<lubancode::tools::AgentMessageTool>(agent_tool_));
+    }
     if (agent_tool_ != nullptr && explore_registry_.has_value()) {
         agent_tool_->SetExploreRegistry(&*explore_registry_);
     }
