@@ -255,8 +255,9 @@ TEST_CASE("RunOneTool 信任边界: on_tool_done 与下一轮请求拿同一份�
     agent::Callbacks callbacks;
     callbacks.on_post_tool_hook = [&order](const std::string&, const nlohmann::json&,
                                            const tools::Tool::Result& result) {
-        // post hook 在清洗之前拿到原文(规格:post hook 之后、on_tool_done
-        // 之前清洗),它看没看到原文在这里如实记下来。
+        // hooks 框架第三步起的次序:PostToolUse 在工具结果已清洗成合法
+        // UTF-8 之后触发(规格"PostToolUse 在工具结果已清洗、已结构化后
+        // 触发")——post hook 看到的必须是干净内容。
         order.push_back(IsValidUtf8(result.content) ? "post:clean" : "post:raw");
     };
     callbacks.on_tool_done = [&order, &done_content](const std::string&, const tools::Tool::Result& result) {
@@ -267,9 +268,10 @@ TEST_CASE("RunOneTool 信任边界: on_tool_done 与下一轮请求拿同一份�
     const auto outcome = loop.Run("跑一趟", callbacks);
     REQUIRE(outcome.has_value());
 
-    // 回调次序:post hook 先于 on_tool_done;on_tool_done 收到的已合法。
+    // 回调次序:post hook 先于 on_tool_done;两者拿到的都已合法(hooks
+    // 框架把清洗挪到了 post hook 之前)。
     REQUIRE(order.size() == 2);
-    CHECK(order[0] == "post:raw");
+    CHECK(order[0] == "post:clean");
     CHECK(order[1] == "done");
     CHECK(IsValidUtf8(done_content));
     CHECK(done_content.find("好开头") != std::string::npos);

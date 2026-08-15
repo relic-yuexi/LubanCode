@@ -436,6 +436,221 @@ ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, c
     return RunProcess({"/bin/sh", "-c", command_utf8}, timeout_ms, extra_env, max_output_bytes);
 }
 
+ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const std::string& stdin_data,
+                                  int timeout_ms, const EnvPairs& extra_env, std::size_t max_output_bytes) {
+    ProcessResult result;
+    if (argv.empty()) {
+        result.spawn_failed = true;
+        result.spawn_error = "argv 不能为空";
+        return result;
+    }
+
+    IgnoreSigpipeOnce();
+
+    int out_pipe[2] = {-1, -1};
+    int in_pipe[2] = {-1, -1};
+    int exec_pipe[2] = {-1, -1};
+    if (pipe(out_pipe) != 0 || pipe(in_pipe) != 0 || pipe(exec_pipe) != 0) {
+        result.spawn_failed = true;
+        result.spawn_error = std::string("创建管道失败: ") + std::strerror(errno);
+        for (int fd : {out_pipe[0], out_pipe[1], in_pipe[0], in_pipe[1], exec_pipe[0], exec_pipe[1]}) {
+            if (fd >= 0) {
+                close(fd);
+            }
+        }
+        return result;
+    }
+    fcntl(exec_pipe[1], F_SETFD, FD_CLOEXEC);
+    // 父进程留的读端不给子进程继承(CLOEXEC),不然后代握着写端 EOF 等不到。
+    fcntl(out_pipe[0], F_SETFD, FD_CLOEXEC);
+    fcntl(exec_pipe[0], F_SETFD, FD_CLOEXEC);
+    // stdin 写端留在父进程,不继承;读端给子进程。
+    fcntl(in_pipe[1], F_SETFD, FD_CLOEXEC);
+
+    EnvBlock env_block = BuildEnvBlock(extra_env);
+    std::vector<char*> argv_ptrs = BuildArgvPtrs(argv);
+
+    const pid_t pid = fork();
+    if (pid < 0) {
+        result.spawn_failed = true;
+        result.spawn_error = std::string("fork 失败: ") + std::strerror(errno);
+        for (int fd : {out_pipe[0], out_pipe[1], in_pipe[0], in_pipe[1], exec_pipe[0], exec_pipe[1]}) {
+            close(fd);
+        }
+        return result;
+    }
+    if (pid == 0) {
+        // 子进程:自立进程组,stdin 接管道读端,stdout/stderr 都指到输出管道
+        // 写端。只用 async-signal-safe 的调用。
+        setpgid(0, 0);
+        dup2(in_pipe[0], STDIN_FILENO);
+        dup2(out_pipe[1], STDOUT_FILENO);
+        dup2(out_pipe[1], STDERR_FILENO);
+        for (int fd : {in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1], exec_pipe[0], exec_pipe[1]}) {
+            if (fd > STDERR_FILENO) {
+                close(fd);
+            }
+        }
+        environ = env_block.ptrs.data();
+        execvp(argv_ptrs[0], argv_ptrs.data());
+        const int err = errno;
+        (void)!write(exec_pipe[1], &err, sizeof(err));
+        _exit(127);
+    }
+
+    // 父进程:setpgid 两头都调,谁先跑到都不留窗口。
+    setpgid(pid, pid);
+    close(out_pipe[1]);
+    close(in_pipe[0]);
+    close(exec_pipe[1]);
+
+    const std::optional<int> exec_err = ReadExecErrno(exec_pipe[0]);
+    close(exec_pipe[0]);
+    if (exec_err.has_value()) {
+        int status = 0;
+        waitpid(pid, &status, 0);  // 子进程 _exit(127) 了,收尸
+        close(out_pipe[0]);
+        close(in_pipe[1]);
+        result.spawn_failed = true;
+        result.spawn_error = "启动子进程失败(" + std::string(std::strerror(*exec_err)) + "): " + argv[0];
+        return result;
+    }
+
+    // stdin 写线程:一次性写完就关写端(子进程读到 EOF)。子进程不读而数据
+    // 超过管道缓冲时,write 阻塞——SIGPIPE 已忽略,子进程死掉后读端关闭,
+    // write 以 EPIPE 失败收场,写线程退,绝不吊死。
+    std::atomic<bool> stdin_done{false};
+    std::thread stdin_writer([&] {
+        std::size_t written_total = 0;
+        while (written_total < stdin_data.size()) {
+            const ssize_t n = write(in_pipe[1], stdin_data.data() + written_total, stdin_data.size() - written_total);
+            if (n < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                break;  // EPIPE 等:子进程死了/不收,写不完就写不完
+            }
+            written_total += static_cast<std::size_t>(n);
+        }
+        close(in_pipe[1]);
+        in_pipe[1] = -1;
+        stdin_done.store(true);
+    });
+
+    // 读线程:与 RunProcess 同款,poll + read,超限置 overflow 继续读空。
+    std::string output;
+    std::atomic<bool> output_over_limit{false};
+    std::atomic<bool> reader_stop{false};
+    std::atomic<bool> reader_done{false};
+    std::thread reader([&] {
+        char buf[4096];
+        while (!reader_stop.load()) {
+            struct pollfd pfd{out_pipe[0], POLLIN, 0};
+            const int pr = poll(&pfd, 1, 100);
+            if (pr < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                break;
+            }
+            if (pr == 0) {
+                continue;
+            }
+            const ssize_t n = read(out_pipe[0], buf, sizeof(buf));
+            if (n < 0 && errno == EINTR) {
+                continue;
+            }
+            if (n <= 0) {
+                break;
+            }
+            if (output.size() < max_output_bytes) {
+                const std::size_t room = max_output_bytes - output.size();
+                output.append(buf, std::min(static_cast<std::size_t>(n), room));
+                if (output.size() >= max_output_bytes) {
+                    output_over_limit.store(true);
+                }
+            }
+        }
+        reader_done.store(true);
+    });
+
+    const bool has_timeout = timeout_ms > 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(has_timeout ? timeout_ms : 0);
+    int exit_status = 0;
+    bool exited = false;
+    while (true) {
+        int status = 0;
+        const pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) {
+            exit_status = status;
+            exited = true;
+            break;
+        }
+        if (r < 0 && errno != EINTR) {
+            break;
+        }
+        if (output_over_limit.load()) {
+            KillProcessGroup(pid, 2000, &exit_status);
+            exited = true;
+            break;
+        }
+        if (has_timeout && std::chrono::steady_clock::now() >= deadline) {
+            result.timed_out = true;
+            KillProcessGroup(pid, 2000, &exit_status);
+            exited = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    // 补杀整组,后代握着的写端全关,读线程才能等到 EOF 收尾。
+    killpg(pid, SIGKILL);
+
+    const auto reader_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!reader_done.load() && std::chrono::steady_clock::now() < reader_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    reader_stop.store(true);
+    reader.join();
+
+    // stdin 写线程:子进程死透了,write 早就 EPIPE 退出;限时兜底等一把。
+    const auto stdin_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!stdin_done.load() && std::chrono::steady_clock::now() < stdin_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (!stdin_done.load()) {
+        // 极罕见:还有后代握着 stdin 读端活着。杀完组了仍不退,直接关 fd
+        // 逼 write 失败(EPIPE/EIO),写线程自然收场。
+        if (in_pipe[1] >= 0) {
+            close(in_pipe[1]);
+            in_pipe[1] = -1;
+        }
+    }
+    stdin_writer.join();
+
+    if (!exited) {
+        int status = 0;
+        if (waitpid(pid, &status, WNOHANG) == pid) {
+            exit_status = status;
+        }
+    }
+
+    close(out_pipe[0]);
+    if (in_pipe[1] >= 0) {
+        close(in_pipe[1]);
+    }
+
+    result.exit_code = ExitCodeFromStatus(exit_status);
+    result.output = std::move(output);
+    result.output_truncated = output_over_limit.load();
+    return result;
+}
+
+ProcessResult RunShellCommandWithStdin(const std::string& command_utf8, const std::string& stdin_data,
+                                       int timeout_ms, const EnvPairs& extra_env, std::size_t max_output_bytes) {
+    return RunProcessWithStdin({"/bin/sh", "-c", command_utf8}, stdin_data, timeout_ms, extra_env, max_output_bytes);
+}
+
 // ---------------------------------------------------------------------------
 // 后台模式:spawn 立刻返回,不等待、不捕获进内存,stdout/stderr 直接 dup2
 // 到日志文件描述符上。

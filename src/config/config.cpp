@@ -325,6 +325,7 @@ std::expected<std::vector<HookEntry>, std::string> ParseHookEntryArray(const nlo
         }
         HookEntry entry;
         entry.command = item["command"].get<std::string>();
+        entry.source_path = file_path_for_error;
         if (with_matcher) {
             entry.matcher = "*";  // 缺省当 "*"
             if (item.contains("matcher")) {
@@ -569,6 +570,153 @@ std::expected<StatusPanelConfig, std::string> ParseStatusPanelConfig(
     return out;
 }
 
+// hooks schema 2:解析一只 handler("type":"command" + command/args/exec
+// form 变体)。字段用错在这里就报错,不静默猜。
+std::expected<HookHandlerConfig, std::string> ParseHookHandlerConfig(const nlohmann::json& item,
+                                                                     const std::string& where,
+                                                                     const std::string& file_path_for_error) {
+    if (!item.is_object()) {
+        return std::unexpected("配置文件 " + file_path_for_error + " 里的 " + where + " 必须是一个 JSON object");
+    }
+    HookHandlerConfig handler;
+    if (item.contains("type")) {
+        if (!item["type"].is_string()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 " + where + ".type 必须是字符串");
+        }
+        handler.type = item["type"].get<std::string>();
+    }
+    if (handler.type != "command") {
+        return std::unexpected("配置文件 " + file_path_for_error + " 里的 " + where + ".type 只支持 \"command\"");
+    }
+    if (!item.contains("command") || !item["command"].is_string() || item["command"].get<std::string>().empty()) {
+        return std::unexpected("配置文件 " + file_path_for_error + " 里的 " + where +
+                               " 缺少必填字段 command(非空字符串)");
+    }
+    handler.command = item["command"].get<std::string>();
+
+    const auto parse_args = [&](const char* field, std::vector<std::string>& out) -> bool {
+        if (!item.contains(field)) {
+            return true;
+        }
+        if (!item[field].is_array()) {
+            return false;
+        }
+        for (const auto& arg : item[field]) {
+            if (!arg.is_string()) {
+                return false;
+            }
+            out.push_back(arg.get<std::string>());
+        }
+        return true;
+    };
+    if (!parse_args("args", handler.args)) {
+        return std::unexpected("配置文件 " + file_path_for_error + " 里的 " + where + ".args 必须是字符串数组");
+    }
+    if (item.contains("command_windows")) {
+        if (!item["command_windows"].is_string()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 " + where +
+                                   ".command_windows 必须是字符串");
+        }
+        handler.command_windows = item["command_windows"].get<std::string>();
+    }
+    if (!parse_args("args_windows", handler.args_windows)) {
+        return std::unexpected("配置文件 " + file_path_for_error + " 里的 " + where +
+                               ".args_windows 必须是字符串数组");
+    }
+    if (item.contains("timeout")) {
+        // 配置里写秒(与 Claude Code/Codex 的写法一致),1..600,这里换算成
+        // 毫秒存。越界/类型不对报错——timeout 是安全参数,写错了糊弄过去
+        // 比拦下来更危险。
+        if (!item["timeout"].is_number_integer() || item["timeout"].get<long long>() < 1 ||
+            item["timeout"].get<long long>() > 600) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 " + where +
+                                   ".timeout 必须是 1..600 的整数(秒)");
+        }
+        handler.timeout_ms = static_cast<int>(item["timeout"].get<long long>() * 1000);
+    }
+    if (item.contains("async")) {
+        if (!item["async"].is_boolean()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 " + where + ".async 必须是 boolean");
+        }
+        handler.async = item["async"].get<bool>();
+    }
+    if (item.contains("statusMessage")) {
+        if (!item["statusMessage"].is_string()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 " + where +
+                                   ".statusMessage 必须是字符串");
+        }
+        handler.status_message = item["statusMessage"].get<std::string>();
+    }
+    if (item.contains("failure_policy")) {
+        if (!item["failure_policy"].is_string()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 " + where +
+                                   ".failure_policy 必须是字符串(warn 或 deny)");
+        }
+        const std::string policy = item["failure_policy"].get<std::string>();
+        if (policy != "warn" && policy != "deny") {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 " + where +
+                                   ".failure_policy 只支持 warn 或 deny");
+        }
+        handler.failure_policy = policy;
+    }
+    return handler;
+}
+
+// hooks schema 2:解析一个事件键下的匹配组数组([{matcher, regex, hooks[]}]).
+std::expected<std::vector<HookMatcherGroupConfig>, std::string> ParseHookMatcherGroups(
+    const nlohmann::json& arr, hooks::HookEvent event, const std::string& file_path_for_error) {
+    if (!arr.is_array()) {
+        return std::unexpected("配置文件 " + file_path_for_error + " 里的 hooks." + std::string(ToString(event)) +
+                               " 字段必须是数组");
+    }
+    std::vector<HookMatcherGroupConfig> groups;
+    groups.reserve(arr.size());
+    for (std::size_t i = 0; i < arr.size(); ++i) {
+        const auto& item = arr[i];
+        const std::string where = "hooks." + std::string(ToString(event)) + "[" + std::to_string(i) + "]";
+        if (!item.is_object()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 " + where + " 必须是一个 JSON object");
+        }
+        HookMatcherGroupConfig group;
+        if (item.contains("matcher")) {
+            if (!item["matcher"].is_string()) {
+                return std::unexpected("配置文件 " + file_path_for_error + " 里的 " + where +
+                                       ".matcher 必须是字符串");
+            }
+            group.matcher = item["matcher"].get<std::string>();
+        }
+        if (item.contains("regex")) {
+            if (!item["regex"].is_boolean()) {
+                return std::unexpected("配置文件 " + file_path_for_error + " 里的 " + where + ".regex 必须是 boolean");
+            }
+            group.regex = item["regex"].get<bool>();
+        }
+        // 没有匹配字段的事件(UserPromptSubmit/Stop/Subagent*)写具体 matcher
+        // = 配置错误,当场报,不静默吞。
+        if (!EventHasMatcherField(event) && !group.matcher.empty() && group.matcher != "*") {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 " + where +
+                                   ".matcher 无从匹配:" + std::string(ToString(event)) +
+                                   " 事件没有可匹配字段,matcher 只能省略或 \"*\"");
+        }
+        if (!item.contains("hooks") || !item["hooks"].is_array() || item["hooks"].empty()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 " + where +
+                                   ".hooks 必须是非空数组");
+        }
+        group.hooks.reserve(item["hooks"].size());
+        for (std::size_t h = 0; h < item["hooks"].size(); ++h) {
+            auto parsed =
+                ParseHookHandlerConfig(item["hooks"][h], where + ".hooks[" + std::to_string(h) + "]", file_path_for_error);
+            if (!parsed.has_value()) {
+                return std::unexpected(parsed.error());
+            }
+            group.hooks.push_back(std::move(*parsed));
+        }
+        group.source_path = file_path_for_error;
+        groups.push_back(std::move(group));
+    }
+    return groups;
+}
+
 std::expected<HooksConfig, std::string> ParseHooksConfig(const nlohmann::json& hooks_json,
                                                            const std::string& file_path_for_error) {
     if (!hooks_json.is_object()) {
@@ -576,6 +724,19 @@ std::expected<HooksConfig, std::string> ParseHooksConfig(const nlohmann::json& h
     }
 
     HooksConfig config;
+    // schema_version 可选;写了 2(或缺省)都行——旧四类键与 v2 事件键可以
+    // 同文件共存(旧四类走 legacy adapter)。写了别的版本号报错,不猜。
+    if (hooks_json.contains("schema_version")) {
+        if (!hooks_json["schema_version"].is_number_integer()) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                   " 里的 hooks.schema_version 必须是整数(当前支持 2)");
+        }
+        const long long version = hooks_json["schema_version"].get<long long>();
+        if (version != 2) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 hooks.schema_version=" +
+                                   std::to_string(version) + " 不认识(当前支持 2)");
+        }
+    }
     if (hooks_json.contains("pre_tool")) {
         auto parsed = ParseHookEntryArray(hooks_json["pre_tool"], "pre_tool", true, file_path_for_error);
         if (!parsed.has_value()) {
@@ -603,6 +764,26 @@ std::expected<HooksConfig, std::string> ParseHooksConfig(const nlohmann::json& h
             return std::unexpected(parsed.error());
         }
         config.session_end = std::move(*parsed);
+    }
+    // v2 事件键(PascalCase)。不认得的键报错——事件名拼错、或照抄了
+    // Claude Code 三十来类里我们没实现的事件,都当场拦下,不假装支持。
+    for (auto it = hooks_json.begin(); it != hooks_json.end(); ++it) {
+        const std::string& key = it.key();
+        if (key == "schema_version" || key == "pre_tool" || key == "post_tool" || key == "session_start" ||
+            key == "session_end") {
+            continue;
+        }
+        hooks::HookEvent event{};
+        if (!hooks::ParseHookEvent(key, event)) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 hooks." + key +
+                                   " 不是认识的事件名(schema 2 用 PascalCase,如 PreToolUse;旧格式 pre_tool "
+                                   "等四类仍受支持)");
+        }
+        auto parsed = ParseHookMatcherGroups(it.value(), event, file_path_for_error);
+        if (!parsed.has_value()) {
+            return std::unexpected(parsed.error());
+        }
+        config.events[event] = std::move(*parsed);
     }
     return config;
 }
@@ -1570,13 +1751,59 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.sources.request_timeout_secs = Source::Default;
     }
 
-    // ---- 对象型整段(hooks/mcpServers/search/lsp/providers):只从配置文件来,没有
-    // 环境变量、没有内置默认值这两级。按"整段"回退——项目级写了就用项目级
-    // 那一整段,否则用全局那一整段(不做键级混合,语义清楚)。 ----
-    if (project_file.has_value() && project_file->hooks.has_value()) {
-        result.config.hooks = *project_file->hooks;
-    } else if (global_file.has_value() && global_file->hooks.has_value()) {
-        result.config.hooks = *global_file->hooks;
+    // ---- 对象型整段(hooks 除外):只从配置文件来,没有环境变量、没有
+    // 内置默认值这两级。按"整段"回退——项目级写了就用项目级那一整段,
+    // 否则用全局那一整段(不做键级混合,语义清楚)。hooks 是唯一例外,
+    // 改成相加(见下一段)。 ----
+
+    // ---- hooks:相加合并(Hooks 生命周期单,breaking change)。 ----
+    // 旧行为是"项目级整段压过全局"——仓库配置能把用户/管理员的审计钩子
+    // 整段顶走,是条安全洞。现在两层相加:旧四类数组拼接(用户级在前、
+    // 项目级在后),v2 事件组同事件追加。项目配置删不掉 user/managed 的
+    // 任何一条;执行排序按来源(user 先于 project),决策归并在 hooks 层。
+    // 两边都有旧四类时打一次迁移说明(行为变了,得让用户看见)。
+    {
+        const bool project_has_hooks = project_file.has_value() && project_file->hooks.has_value();
+        const bool global_has_hooks = global_file.has_value() && global_file->hooks.has_value();
+        const bool project_has_legacy = project_has_hooks && (*project_file->hooks).HasLegacy();
+        const bool global_has_legacy = global_has_hooks && (*global_file->hooks).HasLegacy();
+
+        HooksConfig merged;
+        if (global_has_hooks) {
+            merged = *global_file->hooks;  // 用户级打底
+        }
+        if (project_has_hooks) {
+            const HooksConfig& project_hooks = *project_file->hooks;
+            // 旧四类拼接(用户级在前)。source_path 各自带,信任分级靠它。
+            merged.pre_tool.insert(merged.pre_tool.end(), project_hooks.pre_tool.begin(),
+                                   project_hooks.pre_tool.end());
+            merged.post_tool.insert(merged.post_tool.end(), project_hooks.post_tool.begin(),
+                                    project_hooks.post_tool.end());
+            merged.session_start.insert(merged.session_start.end(), project_hooks.session_start.begin(),
+                                        project_hooks.session_start.end());
+            merged.session_end.insert(merged.session_end.end(), project_hooks.session_end.begin(),
+                                      project_hooks.session_end.end());
+            // v2 事件组:同事件的组追加(用户级组在前)。
+            for (const auto& [event, groups] : project_hooks.events) {
+                auto& target = merged.events[event];
+                target.insert(target.end(), groups.begin(), groups.end());
+            }
+        }
+        result.config.hooks = std::move(merged);
+
+        if (global_has_legacy && project_has_legacy) {
+            result.deprecation_notices.push_back(
+                "hooks 合并规则已变:全局与项目里的旧格式 hooks(pre_tool/post_tool/"
+                "session_start/session_end)现在会一起生效(旧版本项目级整段覆盖全局)。"
+                "两层都拦不动对方;项目级 hooks 须经 /hooks 信任后才执行。");
+        }
+        if (global_has_legacy ^ project_has_legacy) {
+            const std::string which = global_has_legacy ? "全局" : "项目";
+            result.deprecation_notices.push_back(
+                which + "配置里有旧格式 hooks(pre_tool 等四类)。旧协议已废弃:环境变量输入、"
+                        "任意非零退出码拦截、固定 30 秒超时这些旧语义只保兼容,将来迁到 schema 2"
+                        "(stdin JSON + 事件名键,见文档 docs/hooks.md)。");
+        }
     }
 
     if (project_file.has_value() && project_file->mcp_servers.has_value()) {

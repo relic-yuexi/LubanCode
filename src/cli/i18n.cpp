@@ -187,6 +187,7 @@ const Entry kZhCN[] = {
      "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
      "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
      "  /plugins        列出挂载的插件工具(DLL + lua)和加载警告\n"
+     "  /hooks          hooks 台账:来源/命令/信任/禁用/最近结果;trust|untrust|disable|enable <#id>、runs [N]\n"
      "  /tools          列工具三态:核心(恒在)/已加载/延迟未加载(tool_search 延迟挂载)\n"
      "  /memory         管项目记忆;/memory on|off|use|learn|list|remember|forget|rebuild\n"
      "  /sessions       列本目录最近 20 场会话存档(时间倒序编号);/sessions all 列全部目录\n"
@@ -673,6 +674,8 @@ const Entry kZhCN[] = {
 
     // ---- transcript 摘要词(彩色主题;plain 的 [RUNNING] 等不进表) ----
     {"transcript.pending", "待确认"},
+    {"transcript.checking_hook", "检查钩子…"},
+    {"transcript.hook_blocked", "被钩子拦下(未执行)"},
     {"transcript.read_lines", "读取 {0} 行"},
     {"transcript.exit_code", "退出码 {0}"},
     {"transcript.added", "新增 {0} 行"},
@@ -1233,6 +1236,7 @@ const Entry kEn[] = {
      "  /lsp            list LSP server status per language\n"
      "  /todos          show the current todo list\n"
      "  /plugins        list mounted plugin tools (DLL + lua) and load warnings\n"
+     "  /hooks          hooks ledger: source/command/trust/disabled/last result; trust|untrust|disable|enable <#id>, runs [N]\n"
      "  /tools          list tool states: core / loaded / deferred (tool_search)\n"
      "  /memory         manage project memory; /memory on|off|use|learn|list|remember|forget|rebuild\n"
      "  /sessions       list the 20 most recent session archives here; /sessions all for every dir\n"
@@ -1792,6 +1796,8 @@ const Entry kEn[] = {
     // ---- transcript summary words ----
     {"transcript.pending", "Awaiting confirmation"},
     {"transcript.read_lines", "Read {0} lines"},
+    {"transcript.checking_hook", "Checking hooks..."},
+    {"transcript.hook_blocked", "Blocked by hook (not executed)"},
     {"transcript.exit_code", "exit code {0}"},
     {"transcript.added", "Added {0} lines"},
     {"transcript.added_removed", "Added {0} lines, removed {1} lines"},

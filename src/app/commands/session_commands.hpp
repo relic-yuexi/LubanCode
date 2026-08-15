@@ -139,6 +139,9 @@ struct SessionCommandState {
     const std::string& sessions_dir;
     const std::string& wire_str;
     const std::shared_ptr<std::string>& current_model;
+    // hooks 框架:/resume 成功后回调(SessionStart source=resume 的发射口,
+    // 会话层接)。可空(单测不接)。
+    std::function<void()> on_resumed;
 };
 
 // /clear:丢历史重建、存档翻篇、标题翻篇。

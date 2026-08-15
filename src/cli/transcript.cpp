@@ -30,6 +30,8 @@ std::string StatusColor(TranscriptStatus status, const Theme& theme) {
             return theme.stats;
         case TranscriptStatus::Interrupted:
             return "\x1b[2m" + theme.tool_line;
+        case TranscriptStatus::Blocked:
+            return theme.error;  // 拦下用失败色,但措辞是"未执行",不冒充跑过
     }
     return std::string();
 }
@@ -91,6 +93,8 @@ std::string TranscriptStatusWord(TranscriptStatus status) {
             return "[CANCELLED]";
         case TranscriptStatus::Interrupted:
             return "[INTERRUPTED]";
+        case TranscriptStatus::Blocked:
+            return "[BLOCKED]";
     }
     return "[?]";
 }

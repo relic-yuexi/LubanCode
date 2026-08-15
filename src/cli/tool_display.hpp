@@ -315,6 +315,56 @@ struct ToolDisplay {
         }
     }
 
+    // hooks 框架第三步:工具状态机的两个新过渡态,按当前主/子条目路由
+    // (子代理工具执行期 active_sub 活着,自动落到子条目;主代理工具落主
+    // 条目)。CheckingHook 把那行 "Running..." 换成钩子检查中(单行换单行,
+    // 锚点行数不乱);Blocked 标记"被钩子拦下,没有执行"——终态渲染据此
+    // 区分"拦下"与"跑过又失败",不冒充。没配 hooks 的会话不会走到这里。
+    void OnHookCheckingText() {
+        const int idx = active_sub >= 0 ? active_sub : active_main;
+        if (idx < 0) {
+            return;
+        }
+        auto& item = transcript[static_cast<std::size_t>(idx)];
+        if (item.status == lubancode::cli::TranscriptStatus::Blocked ||
+            item.status == lubancode::cli::TranscriptStatus::Cancelled) {
+            return;  // 已定格,不再被后续相位盖掉
+        }
+        const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
+        item.summary_lines = {tr("transcript.checking_hook")};
+        UpdateSnapshotItem(idx);
+        if (is_console && (idx != active_sub || SubItemsExpanded())) {
+            // 子条目紧凑态没画过(无锚点),Repaint 会掉进兜底追加分支——
+            // 与 OnSubToolResult 同一条规矩:只有画过的才原地重画。
+            painter.Repaint(item);
+        }
+    }
+
+    void OnHookMarkBlocked() {
+        const bool sub = active_sub >= 0;
+        const int idx = sub ? active_sub : active_main;
+        if (idx < 0) {
+            return;
+        }
+        const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
+        auto& item = transcript[static_cast<std::size_t>(idx)];
+        item.status = lubancode::cli::TranscriptStatus::Blocked;
+        item.summary_lines = {tr("transcript.hook_blocked")};
+        item.end_time = std::chrono::steady_clock::now();
+        UpdateSnapshotItem(idx);
+        if (is_console) {
+            if (!sub || SubItemsExpanded()) {
+                painter.Repaint(item);
+            }
+            if (sub) {
+                RetractIfCompact(item);
+                active_sub = -1;  // 拦下的子工具不会再有 post 钩子,槽位在这儿收掉
+            }
+        } else if (sub) {
+            active_sub = -1;
+        }
+    }
+
     void OnToolDone(const std::string& name, const lubancode::tools::Tool::Result& result) {
         if (active_main < 0) {
             return;
@@ -700,6 +750,15 @@ private:
 
         if (item.status == cli::TranscriptStatus::Cancelled) {
             return;  // 确认回调里已经定格成拒绝态,别拿 "用户拒绝执行该工具" 再盖一遍
+        }
+        if (item.status == cli::TranscriptStatus::Blocked) {
+            // hooks:被钩子拦下的条目已定格成"拦下(未执行)"——full_output
+            // 补上拦截理由(钩子写进 tool_result 的那段),摘要保持"拦下",
+            // 不冒充"运行过又失败"。
+            const std::string reason = cli::TruncateUtf8Bytes(result.content, cli::kFullOutputCapBytes);
+            item.full_output = cli::TruncateUtf8Bytes(
+                diff_full.empty() ? reason : reason + "\n\n" + diff_full, cli::kFullOutputCapBytes);
+            return;
         }
         if (result.is_error) {
             if (result.content == "用户拒绝执行该工具") {

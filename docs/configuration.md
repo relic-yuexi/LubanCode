@@ -60,6 +60,8 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
     "max_results": 4
   },
   "hooks": {
+    "schema_version": 2,
+    "PreToolUse": [],
     "pre_tool": [],
     "post_tool": [],
     "session_start": [],
@@ -91,7 +93,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 4. **通用环境变量**(向后兼容,跟 Claude Code、Codex 等工具共用同名变量容易撞车,建议改用第 1 级):`wire=anthropic` 时读 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_MODEL`;`wire=responses` 或 `chat_completions` 时读 `OPENAI_BASE_URL`/`OPENAI_API_KEY`/`OPENAI_MODEL`。
 5. **内置默认值**。
 
-逐字段合并:项目级写了某字段就用项目级那一份,项目级缺的字段回退全局,全局也缺再往下一级找。`hooks`、`mcpServers`、`search`、`lsp`、`status_panel` 这几段是**整段回退**(不做键级混合)——项目级写了 `hooks` 就用项目级那一整段 `hooks`,否则用全局那一整段。`tool_search_threshold`、`connect_timeout_ms`、`stream_idle_timeout_secs`、`request_timeout_secs` 只从配置文件(项目级 > 全局)或内置默认值来,没有环境变量这一级。
+逐字段合并:项目级写了某字段就用项目级那一份,项目级缺的字段回退全局,全局也缺再往下一级找。`mcpServers`、`search`、`lsp`、`status_panel` 这几段是**整段回退**(不做键级混合)——项目级写了就用项目级那一整段,否则用全局那一整段。例外是 `hooks`:全局与项目两层**相加**(两层都跑,项目级删不掉全局的钩子;项目级钩子须经信任审查,见 [Hooks 手册](hooks.md))。`tool_search_threshold`、`connect_timeout_ms`、`stream_idle_timeout_secs`、`request_timeout_secs` 只从配置文件(项目级 > 全局)或内置默认值来,没有环境变量这一级。
 
 `/config`(或 `lubancode --config`)会打出每个字段最终来自哪一级,排查配置问题用。
 
@@ -267,11 +269,20 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 
 ### hooks
 
-`hooks` 可有 `pre_tool`、`post_tool`、`session_start`、`session_end` 四个数组,每项须有字符串 `command`。命令交给平台默认 shell：Windows 用 `cmd.exe`，POSIX 用 `/bin/sh`。`pre_tool`/`post_tool` 可再写字符串 `matcher`:精确工具名,或 `"*"` 匹配全部工具;省略/空串也当 `"*"`。`session_start`/`session_end` 不看 `matcher`。
+`hooks` 现在有两套写法,可同文件共存:
+
+**schema 2(推荐)**——键为 PascalCase 事件名(`PreToolUse`/`PermissionRequest`/`PostToolUse`/`SessionStart`/`SessionEnd`/`UserPromptSubmit`/`Stop`/`PreCompact`/`PostCompact`/`SubagentStart`/`SubagentStop`),每组 `matcher` + `hooks` 数组;handler 走 stdin JSON 协议,支持 exec form(`command`+`args`,不经 shell)、超时、`failure_policy`。**项目级的 hooks 须经 `/hooks` 信任审查后才执行**(按定义哈希,命令一改须重审)。事件全表、协议字段、决策归并与信任边界见 [Hooks 手册](hooks.md)。
+
+**旧格式(兼容保留,已废弃)**——`pre_tool`、`post_tool`、`session_start`、`session_end` 四个数组,每项须有字符串 `command`。命令交给平台默认 shell：Windows 用 `cmd.exe`，POSIX 用 `/bin/sh`。`pre_tool`/`post_tool` 可再写字符串 `matcher`:精确工具名,或 `"*"` 匹配全部工具;省略/空串也当 `"*"`。`session_start`/`session_end` 不看 `matcher`。旧语义不变:任意非零退出码拦 `pre_tool`、`LUBAN_TOOL_*` 环境变量照导、固定 30 秒。
+
+另:全局与项目两层的 `hooks` 是**相加**关系(两层都跑),不再是项目级整段覆盖——与其余整段回退段(mcpServers/search/lsp)不同。
 
 ```json
 {
   "hooks": {
+    "PreToolUse": [
+      { "matcher": "write_file", "hooks": [ { "command": "python", "args": ["check.py"] } ] }
+    ],
     "pre_tool": [
       { "matcher": "write_file", "command": "echo about to write" }
     ],

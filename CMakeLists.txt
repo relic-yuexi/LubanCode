@@ -261,6 +261,7 @@ add_library(lubancode_core STATIC
   src/tools/background_tasks.cpp
   src/tools/background_output.cpp
   src/tools/command_safety.cpp
+  src/tools/schema_check.cpp
   src/tools/isolation.cpp
   src/tools/worktree_tool.cpp
   src/tools/write_file.cpp
@@ -270,6 +271,11 @@ add_library(lubancode_core STATIC
   src/tools/agent_tool.cpp
   src/tools/agent_message_tool.cpp
   src/tools/hooks.cpp
+  src/hooks/hash.cpp
+  src/hooks/protocol.cpp
+  src/hooks/trust.cpp
+  src/hooks/loader.cpp
+  src/hooks/dispatcher.cpp
   src/tools/skill_loader.cpp
   src/tools/skill_tool.cpp
   src/tools/todo_tool.cpp
@@ -345,10 +351,12 @@ add_library(lubancode_app STATIC
   src/app/memory_extract.cpp
   src/app/tool_runtime.cpp
   src/app/turn_runner.cpp
+  src/app/hook_runtime.cpp
   src/app/commands/prompt_commands.cpp
   src/app/commands/session_commands.cpp
   src/app/commands/settings_commands.cpp
   src/app/commands/workspace_commands.cpp
+  src/app/commands/hook_commands.cpp
   src/app/commands/peer_commands.cpp
   src/app/interactive_session.cpp
   src/app/one_shot.cpp

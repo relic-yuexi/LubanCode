@@ -90,6 +90,25 @@ ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms,
                                const EnvPairs& extra_env = {},
                                std::size_t max_output_bytes = kDefaultMaxOutputBytes);
 
+// hooks schema 2 的 stdin JSON 通道(不经过 shell 的 exec form):起进程、
+// 把 stdin_data 一次性写进子进程 stdin 后关写端、合并捕获 stdout/stderr、
+// 等跑完或超时杀树。语义与 RunProcess 对齐(超时/超限杀整棵树、env 注入
+// UTF-8、Windows 输出按系统 ANSI 代码页转 UTF-8)。
+//
+// stdin 的写入在独立线程:子进程不读 stdin(比如 `echo hi`)而数据大过
+// 管道缓冲时,写会阻塞——没关系,超时杀树后子进程的读端关闭,阻塞的写
+// 立刻以失败收场,写线程收尸,绝不吊死父进程。stdin_data 为空 = 立刻关
+// 写端(子进程读到 EOF),行为等同 RunProcess 的 stdin=/dev/null。
+ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const std::string& stdin_data,
+                                  int timeout_ms, const EnvPairs& extra_env = {},
+                                  std::size_t max_output_bytes = kDefaultMaxOutputBytes);
+
+// 同上,但按平台默认 shell 跑一条命令串(shell 字符串形式的 v2 hook 用;
+// legacy 钩子继续走 RunShellCommand,不吃 stdin)。
+ProcessResult RunShellCommandWithStdin(const std::string& command_utf8, const std::string& stdin_data,
+                                       int timeout_ms, const EnvPairs& extra_env = {},
+                                       std::size_t max_output_bytes = kDefaultMaxOutputBytes);
+
 // 一个 PID 的进程还活着吗。给跨会话名册清陈条用(会话崩了,名片得清)。
 // Windows: OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) + GetExitCodeProcess;
 // POSIX: kill(pid, 0)。自己这个 pid 恒算活着。探测不到权限/出错按"活着"

@@ -23,6 +23,26 @@
 
 namespace lubancode::agent {
 
+// hooks 框架第三步:工具生命周期相位(UI 状态机 requested -> checking_hook
+// -> waiting_permission -> running -> done,被拦时停在 blocked,不冒充"运行
+// 过又失败")。on_tool_start 算 requested;下面几个相位由 on_tool_phase 报。
+enum class ToolPhase {
+    CheckingHook,      // PreToolUse 钩子跑起来了(权限确认之前)
+    WaitingPermission, // 即将问用户确认(只有真要弹确认才报)
+    Running,           // 钩子与确认都过了,工具真开跑
+    Blocked,           // 被钩子拦下,不会执行
+};
+
+// PreToolUse 钩子的归并表态(deny > ask > allow;updatedInput 只与 allow
+// 同返,改写后须重过工具 schema、deny 规则与权限判断——不许借钩子越权)。
+struct ToolHookDecision {
+    enum class Decision { None, Allow, Ask, Deny };
+    Decision decision = Decision::None;
+    std::string reason;  // deny/ask 的理由,给用户与模型看
+    std::optional<nlohmann::json> updated_input;
+    std::vector<std::string> additional_context;  // 给模型的追加上下文
+};
+
 struct Callbacks {
     // 流式文本增量,打字机效果打印用。
     std::function<void(const std::string& text)> on_text_delta;
@@ -64,13 +84,41 @@ struct Callbacks {
     // agent/ 本身不知道、也不关心 hooks 具体怎么解析、怎么执行(config::/
     // tools::hooks 那一层的事),只提供这一个挂接点,好保持依赖单向
     // (agent/ 不反过来牵扯 config/)。
+    //
+    // hooks 框架第三步:新代码请用下面的 on_pre_tool_use_hook(带决策/
+    // updatedInput/additionalContext 的完整表态);这个旧回调保留作兼容,
+    // 两者都设时新回调优先,只有新回调缺位才回落到旧回调。
     std::function<std::optional<std::string>(const std::string& name, const nlohmann::json& input)> on_pre_tool_hook;
+
+    // hooks 框架:PreToolUse 的完整表态。deny -> 工具不执行(确认也不问);
+    // ask -> 即使确认档本来放行,也要问用户;allow -> 跳过用户确认,但
+    // deny_commands/权限规则照走(在确认回调里,不许钩子越权);updatedInput
+    // 只与 allow 同返,RunOneTool 会先过一遍工具 schema,改写打回即拦。
+    std::function<ToolHookDecision(const std::string& name, const nlohmann::json& input)> on_pre_tool_use_hook;
+
+    // hooks 框架:PermissionRequest。只有宿主本来要问用户确认时才触发
+    // (RunOneTool 在调 on_tool_confirm 前把这个相位交给确认回调那一层,
+    // 由它判断"真要弹确认"再发射)。deny -> 拒绝执行;allow -> 不弹确认;
+    // 不表态 -> 正常问用户。
+    std::function<ToolHookDecision(const std::string& name, const nlohmann::json& input)> on_permission_request;
+
+    // hooks 框架:UI 工具状态机的相位通报。没配 hooks 的会话不设这个回调,
+    // 展示行为与从前逐字节一致。
+    std::function<void(const std::string& name, ToolPhase phase)> on_tool_phase;
 
     // M9:hooks.post_tool。工具真的执行完了(拿到 Result)才调用一次;不会
     // 影响返回给模型的结果,单纯给上层一个"跑一下 post_tool 命令"的机会。
     // 不设就跳过。
     std::function<void(const std::string& name, const nlohmann::json& input, const tools::Tool::Result& result)>
         on_post_tool_hook;
+
+    // hooks 框架:PostToolUse 的完整版。与旧回调的差别:在工具结果清洗成
+    // 合法 UTF-8 之后触发(旧回调吃原始结果),返回的每段文本追加进模型
+    // 所见的 tool_result(副作用已经发生,不能撤销,只许追加反馈;原始
+    // 结果照旧进审计账)。不设就跳过。
+    std::function<std::vector<std::string>(const std::string& name, const nlohmann::json& input,
+                                           const tools::Tool::Result& result)>
+        on_post_tool_use_hook;
 };
 
 // Run() 的收场情况。cancelled=true 表示这一轮是被 ESC 打断收场的——打断

@@ -252,30 +252,27 @@ plugin__hello_plugin__reverse_text
 
 ## 7. Hooks
 
-Hooks 在会话或工具边界跑外部命令。适合审计、格式检查、策略拦截和通知。
+Hooks 在会话或工具边界跑外部命令。适合审计、格式检查、策略拦截和通知。事件全表(PreToolUse/PermissionRequest/PostToolUse/SessionStart/End/UserPromptSubmit/Stop/Pre-PostCompact/SubagentStart-Stop)、stdin/stdout JSON 协议、决策归并、`/hooks` 管理面与信任模型见 **[Hooks 手册](hooks.md)**。这里只给速览。
+
+**schema 2(推荐)**:键为 PascalCase 事件名,handler 走 stdin JSON + 结构化 stdout,支持 exec form 与超时:
 
 ```json
 {
   "hooks": {
-    "session_start": [
-      { "command": "echo session-start" }
+    "schema_version": 2,
+    "PreToolUse": [
+      { "matcher": "run_command", "hooks": [ { "command": "python", "args": ["policy-check.py"] } ] }
     ],
-    "pre_tool": [
-      { "matcher": "run_command", "command": "policy-check" }
-    ],
-    "post_tool": [
-      { "matcher": "*", "command": "audit-tool" }
-    ],
-    "session_end": [
-      { "command": "echo session-end" }
+    "SessionStart": [
+      { "matcher": "startup", "hooks": [ { "command": "echo session-start" } ] }
     ]
   }
 }
 ```
 
-`pre_tool` / `post_tool` 的 `matcher` 可写完整工具名或 `*`。省略时按 `*`。session hooks 不看 matcher。
+**旧格式(已废弃,兼容保留)**:`pre_tool`/`post_tool`/`session_start`/`session_end` 四个数组,环境变量输入,任意非零退出码拦 `pre_tool`:
 
-工具 hooks 会收到环境变量：
+工具 hooks 收到环境变量(仅旧格式):
 
 | 变量 | 何时有 | 内容 |
 | --- | --- | --- |
@@ -286,7 +283,9 @@ Hooks 在会话或工具边界跑外部命令。适合审计、格式检查、�
 
 `pre_tool` 返回非零退出码，会拦住该工具，并把输出前几行交回模型。起进程失败或超时则告警后放行。`post_tool` 和 session hook 的失败只告警，不回滚已经发生的动作。
 
-命令走平台默认 shell：Windows 用 `cmd.exe`，POSIX 用 `/bin/sh`。单条默认限时。Hooks 不再另弹工具确认；一旦配置，便按生命周期执行。因此只在可信配置里写，尤其小心项目级 `config.json`。
+命令走平台默认 shell：Windows 用 `cmd.exe`，POSIX 用 `/bin/sh`。单条默认限时 30 秒(schema 2 可按 handler 配)。
+
+**信任**:全局与项目两层 hooks 相加,都跑;**项目级 hooks 须经 `/hooks` 信任审查(按定义哈希)才执行**——未信任的绝不启进程,命令一改须重审。信任账在用户主目录,仓库改不动它。
 
 ## 8. 延迟挂载
 

@@ -196,12 +196,14 @@ public:
     nlohmann::json input_schema() const override { return nlohmann::json::object(); }
     bool needs_confirm() const override { return false; }
 
-    tools::Tool::Result execute(const nlohmann::json&) override {
+    tools::Tool::Result execute(const nlohmann::json& input) override {
         ++call_count;
+        last_input = input;
         return {"写好了", false};
     }
 
     int call_count = 0;
+    nlohmann::json last_input = nlohmann::json::object();
 };
 
 std::vector<api::StreamEvent> TextOnlyScript(const std::string& text) {
@@ -289,4 +291,200 @@ TEST_CASE("AgentLoop 往返: on_pre_tool_hook 放行(nullopt)时工具正常执�
     CHECK(hook_called);
     CHECK(post_hook_called);
     CHECK(write_tool->call_count == 1);  // 真的执行了
+}
+
+// ---------------------------------------------------------------------------
+// 4) hooks 框架第三步:PreToolUse 完整表态 / 工具状态机相位 / updatedInput
+//    重过 schema / PostToolUse 反馈追加。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RunOneTool 状态机: 相位序列 requested->checking_hook->running->done;deny 停在 blocked") {
+    FakeBackend backend;
+    backend.scripts = {
+        ToolUseScript("toolu_10", "write_file"),
+        TextOnlyScript("被拦了,不写了"),
+    };
+    tools::ToolRegistry registry;
+    auto* write_tool = new FakeWriteTool();
+    registry.Register(std::unique_ptr<FakeWriteTool>(write_tool));
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+
+    std::vector<agent::ToolPhase> phases;
+    agent::Callbacks callbacks;
+    callbacks.on_tool_phase = [&phases](const std::string&, agent::ToolPhase phase) { phases.push_back(phase); };
+    callbacks.on_pre_tool_use_hook = [](const std::string&,
+                                        const nlohmann::json&) -> agent::ToolHookDecision {
+        agent::ToolHookDecision decision;
+        decision.decision = agent::ToolHookDecision::Decision::Deny;
+        decision.reason = "危险操作";
+        decision.additional_context = {"换个目录再试"};
+        return decision;
+    };
+
+    const auto result = loop.Run("写个文件", callbacks);
+    REQUIRE(result.has_value());
+    CHECK(write_tool->call_count == 0);  // 没执行
+    REQUIRE(phases.size() == 2);
+    CHECK(phases[0] == agent::ToolPhase::CheckingHook);
+    CHECK(phases[1] == agent::ToolPhase::Blocked);  // 停在 blocked,不冒充跑过
+
+    REQUIRE(backend.captured_requests.size() == 2);
+    const auto& tool_result =
+        std::get<api::ToolResultBlock>(backend.captured_requests[1].messages.back().content[0]);
+    CHECK(tool_result.is_error);
+    CHECK(tool_result.content.find("危险操作") != std::string::npos);
+    CHECK(tool_result.content.find("换个目录再试") != std::string::npos);  // additional_context 给模型看
+}
+
+TEST_CASE("RunOneTool: updatedInput 合法时按改写后的入参执行") {
+    FakeBackend backend;
+    backend.scripts = {
+        ToolUseScript("toolu_11", "write_file"),
+        TextOnlyScript("照改后的写"),
+    };
+    tools::ToolRegistry registry;
+    auto* write_tool = new FakeWriteTool();
+    registry.Register(std::unique_ptr<FakeWriteTool>(write_tool));
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+
+    agent::Callbacks callbacks;
+    callbacks.on_pre_tool_use_hook = [](const std::string&,
+                                        const nlohmann::json& input) -> agent::ToolHookDecision {
+        agent::ToolHookDecision decision;
+        decision.decision = agent::ToolHookDecision::Decision::Allow;
+        nlohmann::json updated = input.is_null() ? nlohmann::json::object() : input;
+        updated["path"] = "rewritten.txt";  // FakeWriteTool 的 schema 没约束,放行
+        decision.updated_input = updated;
+        return decision;
+    };
+
+    const auto result = loop.Run("写个文件", callbacks);
+    REQUIRE(result.has_value());
+    CHECK(write_tool->call_count == 1);
+    CHECK(write_tool->last_input.value("path", std::string()) == "rewritten.txt");
+}
+
+namespace {
+
+// schema 认真要求的假工具:required path(string)。
+class StrictSchemaTool : public tools::Tool {
+public:
+    std::string name() const override { return "write_file"; }
+    std::string description() const override { return "strict"; }
+    nlohmann::json input_schema() const override {
+        return nlohmann::json::parse(R"({
+            "type": "object",
+            "required": ["path"],
+            "properties": {"path": {"type": "string"}, "content": {"type": "string"}}
+        })");
+    }
+    bool needs_confirm() const override { return false; }
+    tools::Tool::Result execute(const nlohmann::json& input) override {
+        ++call_count;
+        last_input = input;
+        return {"写好了", false};
+    }
+    int call_count = 0;
+    nlohmann::json last_input;
+};
+
+}  // namespace
+
+TEST_CASE("RunOneTool: updatedInput 不过工具 schema = 打回并拦截,不按原参跑") {
+    FakeBackend backend;
+    backend.scripts = {
+        ToolUseScript("toolu_12", "write_file"),
+        TextOnlyScript("改写被拒"),
+    };
+    tools::ToolRegistry registry;
+    auto* strict_tool = new StrictSchemaTool();
+    registry.Register(std::unique_ptr<StrictSchemaTool>(strict_tool));
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+
+    agent::Callbacks callbacks;
+    callbacks.on_pre_tool_use_hook = [](const std::string&,
+                                        const nlohmann::json&) -> agent::ToolHookDecision {
+        agent::ToolHookDecision decision;
+        decision.decision = agent::ToolHookDecision::Decision::Allow;
+        decision.updated_input = nlohmann::json::object({{"path", 12345}});  // 类型错:string 槽塞数字
+        return decision;
+    };
+
+    const auto result = loop.Run("写个文件", callbacks);
+    REQUIRE(result.has_value());
+    CHECK(strict_tool->call_count == 0);  // 拦下,不悄悄按原参数执行
+
+    const auto& tool_result =
+        std::get<api::ToolResultBlock>(backend.captured_requests[1].messages.back().content[0]);
+    CHECK(tool_result.is_error);
+    CHECK(tool_result.content.find("schema") != std::string::npos);
+}
+
+TEST_CASE("RunOneTool: PostToolUse 反馈追加进模型所见 tool_result") {
+    FakeBackend backend;
+    backend.scripts = {
+        ToolUseScript("toolu_13", "write_file"),
+        TextOnlyScript("收到反馈"),
+    };
+    tools::ToolRegistry registry;
+    auto* write_tool = new FakeWriteTool();
+    registry.Register(std::unique_ptr<FakeWriteTool>(write_tool));
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+
+    agent::Callbacks callbacks;
+    bool post_hook_called = false;
+    callbacks.on_post_tool_hook = [&](const std::string&, const nlohmann::json&, const tools::Tool::Result&) {
+        post_hook_called = true;  // 旧回调照旧在
+    };
+    callbacks.on_post_tool_use_hook = [](const std::string&, const nlohmann::json&,
+                                         const tools::Tool::Result&) -> std::vector<std::string> {
+        return {"格式检查通过", "行尾有多余空格"};
+    };
+
+    const auto result = loop.Run("写个文件", callbacks);
+    REQUIRE(result.has_value());
+    CHECK(write_tool->call_count == 1);
+    CHECK(post_hook_called);
+
+    const auto& tool_result =
+        std::get<api::ToolResultBlock>(backend.captured_requests[1].messages.back().content[0]);
+    CHECK_FALSE(tool_result.is_error);
+    CHECK(tool_result.content.find("写好了") != std::string::npos);
+    CHECK(tool_result.content.find("post-tool-use hook 追加] 格式检查通过") != std::string::npos);
+    CHECK(tool_result.content.find("post-tool-use hook 追加] 行尾有多余空格") != std::string::npos);
+}
+
+TEST_CASE("RunOneTool: ask 决策时仍走确认回调(钩子不越过确认,确认层定夺)") {
+    FakeBackend backend;
+    backend.scripts = {
+        ToolUseScript("toolu_14", "write_file"),
+        TextOnlyScript("好"),
+    };
+    // needs_confirm=true 的假工具:ask 之后确认回调必须被问到。
+    class ConfirmTool : public FakeWriteTool {
+    public:
+        bool needs_confirm() const override { return true; }
+    };
+    tools::ToolRegistry registry;
+    auto* confirm_tool = new ConfirmTool();
+    registry.Register(std::unique_ptr<ConfirmTool>(confirm_tool));
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+
+    bool confirm_asked = false;
+    agent::Callbacks callbacks;
+    callbacks.on_pre_tool_use_hook = [](const std::string&, const nlohmann::json&) -> agent::ToolHookDecision {
+        agent::ToolHookDecision decision;
+        decision.decision = agent::ToolHookDecision::Decision::Ask;
+        decision.reason = "这命令得问问";
+        return decision;
+    };
+    callbacks.on_tool_confirm = [&confirm_asked](const std::string&, const nlohmann::json&) {
+        confirm_asked = true;
+        return true;  // 用户(测试替身)允许
+    };
+
+    const auto result = loop.Run("写个文件", callbacks);
+    REQUIRE(result.has_value());
+    CHECK(confirm_asked);  // ask 决策传到了确认层,不是钩子直接放行
+    CHECK(confirm_tool->call_count == 1);
 }

@@ -40,6 +40,7 @@
 #include "api/responses/client.hpp"
 #include "app/backend_stack.hpp"
 #include "app/tool_runtime.hpp"
+#include "app/hook_runtime.hpp"
 #include "app/turn_runner.hpp"
 #include "app/commands/session_commands.hpp"
 #include "app/commands/prompt_commands.hpp"
@@ -238,7 +239,7 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     // 压根不起,会话层队列天然为空。
     std::vector<lubancode::cli::TranscriptItem> transcript;
     return RunTurn(loop, question, auto_confirm, always_allowed_tools, theme, context_tracker, registry,
-                    config.hooks, spinner_enabled, transcript, todo_state, /*transcript_expanded=*/nullptr,
+                    lubancode::app::HookRuntime(), spinner_enabled, transcript, todo_state, /*transcript_expanded=*/nullptr,
                     settings_local.allow_commands, settings_local.deny_commands)
         .status;
 }

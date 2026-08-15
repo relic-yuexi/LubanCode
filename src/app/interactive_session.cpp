@@ -51,11 +51,13 @@
 #include "api/responses/client.hpp"
 #include "app/backend_stack.hpp"
 #include "app/tool_runtime.hpp"
+#include "app/hook_runtime.hpp"
 #include "app/turn_runner.hpp"
 #include "app/commands/session_commands.hpp"
 #include "app/commands/prompt_commands.hpp"
 #include "app/commands/settings_commands.hpp"
 #include "app/commands/workspace_commands.hpp"
+#include "app/commands/hook_commands.hpp"
 #include "app/commands/peer_commands.hpp"
 #include "app/version.hpp"
 #include "cli/console_input.hpp"
@@ -268,6 +270,9 @@ private:
     // 次历史;TrimHistory 真丢了东西就显式告警,不静默降级。
     void HandleContextPressure(const lubancode::agent::ContextPressure& pressure);
     SessionCommandState MakeSessionCommandState();
+    // hooks 框架第四五步:会话级事件发射(SessionStart 各来源/SessionEnd
+    // 各原因/Pre/PostCompact)。没配该事件的 hooks 就空操作。
+    void EmitSessionHook(lubancode::hooks::HookEvent event, nlohmann::json fields, const std::string& match_value);
     lubancode::tools::DetachedAgentBackend BuildDetachedBackend() const;
     std::unique_ptr<lubancode::tools::ToolRegistry> BuildDetachedRegistry() const;
 
@@ -1286,11 +1291,18 @@ void InteractiveSession::PersistNewMessages() {
         session_meta.model = *current_model;
         session_meta.cwd = CurrentDirUtf8();
         session_meta.started_at = lubancode::agent::NowTimestamp();
-        if (!session_store.Begin(session_meta,
-                                  lubancode::agent::MakeSessionId(session_start_ts, first_text))) {
+        const std::string session_id = lubancode::agent::MakeSessionId(session_start_ts, first_text);
+        if (!session_store.Begin(session_meta, session_id)) {
             session_store_broken = true;
             std::cout << theme.error << trf("session.create_failed", sessions_dir) << theme.reset << "\n";
             return;
+        }
+        // hooks 上下文补真 session id 与转录路径(建档这一刻才齐)。
+        if (lubancode::app::HookRuntime() != nullptr) {
+            lubancode::hooks::HookContext hook_context = lubancode::app::HookRuntime()->context();
+            hook_context.session_id = session_id;
+            hook_context.transcript_path = session_store.file_path();
+            lubancode::app::UpdateHookRuntimeContext(hook_context);
         }
         // 建档前 /title 设过标题:现在有文件了,把事件行补上。
         if (session_title_pending && !session_title.empty()) {
@@ -1362,7 +1374,7 @@ void InteractiveSession::RunPeerTurn(const std::string& text) {
     // RunTurnResult 只剩 status/cancelled,peer 来信轮两边都不看;排队消息
     // 走会话层 SteeringQueue,不在这里收。直接调,不接没人用的返回值。
     RunTurn(*loop, text, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
-            config.hooks, spinner_enabled, transcript, todo_state(), &transcript_expanded,
+            lubancode::app::HookRuntime(), spinner_enabled, transcript, todo_state(), &transcript_expanded,
             settings_local.allow_commands, settings_local.deny_commands, session_agent_tool());
     PersistNewMessages();
     if (peer_started) {
@@ -1834,6 +1846,23 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                 break;
             }
             case lubancode::cli::SlashCommand::Compact: {
+                // PreCompact(trigger=manual):钩子可以拦这一压(备份场景)。
+                {
+                    lubancode::hooks::HookDispatcher* dispatcher = lubancode::app::HookRuntime();
+                    if (dispatcher != nullptr && !dispatcher->Empty() &&
+                        dispatcher->HasHandlersFor(lubancode::hooks::HookEvent::PreCompact)) {
+                        lubancode::hooks::HookPayload payload;
+                        payload.event = lubancode::hooks::HookEvent::PreCompact;
+                        payload.fields["trigger"] = "manual";
+                        payload.match_value = "manual";
+                        const auto merged = dispatcher->Emit(lubancode::hooks::HookEvent::PreCompact, payload);
+                        if (merged.blocked) {
+                            std::cout << theme.error << "PreCompact 钩子拦下这次压缩: " << merged.block_reason
+                                      << theme.reset << "\n";
+                            break;
+                        }
+                    }
+                }
                 const std::string compact_model = config.compact_model.empty() ? *current_model : config.compact_model;
                 const auto compact_result =
                     HandleCompactCommand(parsed.args, *loop, real_backend, compact_model, theme, spinner_enabled,
@@ -1849,6 +1878,14 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                     if (!session_store.AppendCompactV2Event(*compact_result.event)) {
                         std::cout << theme.error << tr("session.compact_event_failed") << theme.reset << "\n";
                     }
+                }
+                if (compact_result.event.has_value()) {
+                    // PostCompact 审计 + 压缩后的上下文重注入走 SessionStart
+                    // (source=compact),不靠 PostCompact 硬塞(规格)。
+                    EmitSessionHook(lubancode::hooks::HookEvent::PostCompact,
+                                    nlohmann::json{{"trigger", "manual"}}, "manual");
+                    EmitSessionHook(lubancode::hooks::HookEvent::SessionStart,
+                                    nlohmann::json{{"source", "compact"}}, "compact");
                 }
                 break;
             }
@@ -1880,6 +1917,9 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                 break;
             case lubancode::cli::SlashCommand::Tools:
                 PrintToolsCommand(registry(), *loaded_tools(), main_deferral, tool_search_threshold);
+                break;
+            case lubancode::cli::SlashCommand::Hooks:
+                HandleHooksCommand(parsed.args, lubancode::app::HookRuntime(), theme);
                 break;
             case lubancode::cli::SlashCommand::Background:
                 return HandleBackgroundCommand(theme);
@@ -1972,7 +2012,7 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
     loop->SetTurnSystemSuffix(std::move(turn_suffix));
     const std::size_t history_before = loop->History().size();
     RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
-            config.hooks, spinner_enabled, transcript, todo_state(), &transcript_expanded,
+            lubancode::app::HookRuntime(), spinner_enabled, transcript, todo_state(), &transcript_expanded,
             settings_local.allow_commands, settings_local.deny_commands, session_agent_tool(),
             recorder.has_value() ? &*recorder : nullptr);
     // 每轮结束(成功/出错/ESC 打断都算)把新增消息逐条追加落盘。
@@ -2099,6 +2139,24 @@ bool InteractiveSession::TryRunCompact(bool midturn) {
     const lubancode::agent::CompactOptions options = BuildCompactOptions();
     const std::size_t before_tokens = lubancode::agent::EstimateHistoryTokens(loop->History());
 
+    // PreCompact(trigger=auto):自动/中途压缩也过一遍门,可拦。
+    {
+        lubancode::hooks::HookDispatcher* dispatcher = lubancode::app::HookRuntime();
+        if (dispatcher != nullptr && !dispatcher->Empty() &&
+            dispatcher->HasHandlersFor(lubancode::hooks::HookEvent::PreCompact)) {
+            lubancode::hooks::HookPayload payload;
+            payload.event = lubancode::hooks::HookEvent::PreCompact;
+            payload.fields["trigger"] = "auto";
+            payload.match_value = "auto";
+            const auto merged = dispatcher->Emit(lubancode::hooks::HookEvent::PreCompact, payload);
+            if (merged.blocked) {
+                std::cout << theme.error << "PreCompact 钩子拦下这次自动压缩: " << merged.block_reason
+                          << theme.reset << "\n";
+                return false;  // 压缩被拦不是错误:主流程照走,旧历史不动
+            }
+        }
+    }
+
     std::cout << theme.stats << tr(midturn ? "compact.midturn_start" : "compact.auto_start") << theme.reset << "\n";
     lubancode::cli::Spinner spinner(theme, spinner_enabled);
     // 用裸的 real_backend(理由同 /compact):压缩自己把 compact_model 写进
@@ -2167,6 +2225,11 @@ bool InteractiveSession::TryRunCompact(bool midturn) {
     if (midturn) {
         std::cout << tr("compact.midturn_done") << "\n";
     }
+    // PostCompact 审计 + 压缩后的上下文重注入走 SessionStart(source=
+    // compact)——自动压缩后紧接着的续请求前送达,不拖到下一条用户消息
+    // (本函数就活在那个安全点里)。
+    EmitSessionHook(lubancode::hooks::HookEvent::PostCompact, nlohmann::json{{"trigger", "auto"}}, "auto");
+    EmitSessionHook(lubancode::hooks::HookEvent::SessionStart, nlohmann::json{{"source", "compact"}}, "compact");
     return true;
 }
 
@@ -2202,6 +2265,11 @@ SessionCommandState InteractiveSession::MakeSessionCommandState() {
         session_store_broken,
         session_start_ts,
         [this]() {
+            // /clear:旧上下文就此终局——SessionEnd(reason=clear) 先发,新的
+            // 空会话用 SessionStart(source=clear) 开账。
+            EmitSessionHook(lubancode::hooks::HookEvent::SessionEnd, nlohmann::json{{"reason", "clear"}}, "clear");
+            EmitSessionHook(lubancode::hooks::HookEvent::SessionStart, nlohmann::json{{"source", "clear"}},
+                            "clear");
             if (project_memory != nullptr) {
                 project_memory->set_source_session(session_start_ts);
             }
@@ -2216,7 +2284,38 @@ SessionCommandState InteractiveSession::MakeSessionCommandState() {
         &worktree_session,
         sessions_dir,
         wire_str,
-        current_model};
+        current_model,
+        // /resume 成功:恢复的历史开新账(SessionStart source=resume)。
+        [this]() {
+            EmitSessionHook(lubancode::hooks::HookEvent::SessionStart, nlohmann::json{{"source", "resume"}},
+                            "resume");
+        }};
+}
+
+void InteractiveSession::EmitSessionHook(lubancode::hooks::HookEvent event, nlohmann::json fields,
+                                         const std::string& match_value) {
+    lubancode::hooks::HookDispatcher* dispatcher = lubancode::app::HookRuntime();
+    if (dispatcher == nullptr || dispatcher->Empty() || !dispatcher->HasHandlersFor(event)) {
+        return;
+    }
+    // SessionStart 的两个来源(startup 已在 cli_app 发过、这里管 resume/clear/
+    // compact)都要把转录路径与 session id 对齐——存档文件名就是会话 id
+    // (MakeSessionId 落盘时定的),resume 后这份才是真的。
+    if (event == lubancode::hooks::HookEvent::SessionStart) {
+        lubancode::hooks::HookContext ctx = dispatcher->context();
+        if (session_store.active()) {
+            ctx.transcript_path = session_store.file_path();
+            std::filesystem::path file(
+                reinterpret_cast<const char8_t*>(session_store.file_path().c_str()));
+            ctx.session_id = file.stem().string();
+        }
+        lubancode::app::UpdateHookRuntimeContext(ctx);
+    }
+    lubancode::hooks::HookPayload payload;
+    payload.event = event;
+    payload.fields = std::move(fields);
+    payload.match_value = match_value;
+    dispatcher->Emit(event, payload);
 }
 
 // /clear 与退出共用的清场:停全部子代理、报未送达,排队消息明确处置——

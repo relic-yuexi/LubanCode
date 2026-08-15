@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "agent/compact.hpp"
+#include "app/hook_runtime.hpp"
 #include "cli/console_input.hpp"
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
@@ -265,7 +266,7 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                             const lubancode::cli::Theme& theme, UsageStats& usage_stats,
                                             lubancode::cli::ContextTracker& context_tracker,
                                             lubancode::tools::ToolRegistry& registry,
-                                            const lubancode::config::HooksConfig& hooks_config,
+                                            lubancode::hooks::HookDispatcher* hook_dispatcher,
                                             ToolDisplay& display, StreamBodyTracker& body_tracker,
                                             const std::vector<std::string>& allow_commands,
                                             const std::vector<std::string>& deny_commands,
@@ -273,21 +274,87 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                             lubancode::agent::WorkflowRecorder* recorder) {
     lubancode::agent::Callbacks callbacks;
 
-    // M9:hooks_config 四个数组全空是常态(没配 hooks 的用户占多数),这时候
-    // 干脆不设这两个回调——跟"没有 hooks 系统"时行为完全一样,也省得每次
-    // 工具调用都白跑一趟"遍历空数组"。
-    if (!hooks_config.Empty()) {
-        callbacks.on_pre_tool_hook = [&hooks_config](const std::string& name,
-                                                       const nlohmann::json& input) -> std::optional<std::string> {
-            const auto outcome = lubancode::tools::RunPreToolHooks(hooks_config, name, input);
-            if (outcome.intercepted) {
-                return outcome.block_message;
+    // hooks:dispatcher 为空指针或没有工具事件的定义是常态(没配 hooks 的
+    // 用户占多数),这时候干脆不设这些回调——跟"没有 hooks 系统"时行为
+    // 完全一样。配了就全走 dispatcher:来源相加、信任审查、并发归并都在
+    // 那一层,这里只发事件、领决策。
+    const bool has_tool_hooks =
+        hook_dispatcher != nullptr && !hook_dispatcher->Empty() &&
+        (hook_dispatcher->HasHandlersFor(lubancode::hooks::HookEvent::PreToolUse) ||
+         hook_dispatcher->HasHandlersFor(lubancode::hooks::HookEvent::PostToolUse) ||
+         hook_dispatcher->HasHandlersFor(lubancode::hooks::HookEvent::PermissionRequest));
+    const bool has_permission_hooks =
+        hook_dispatcher != nullptr && !hook_dispatcher->Empty() &&
+        hook_dispatcher->HasHandlersFor(lubancode::hooks::HookEvent::PermissionRequest);
+    // PreToolUse 的归并决策要在确认回调里继续用(allow 跳过用户确认、
+    // ask 强制问一句)——确认回调的签名不带它,靠这个共享槽传:RunOneTool
+    // 先跑 PreToolUse 再问确认,槽里的决策就是当前这次工具调用的。子代理
+    // 转发的是同一批 std::function(闭包随行),槽照常可用。
+    auto pre_decision_slot = std::make_shared<lubancode::agent::ToolHookDecision>();
+    if (has_tool_hooks) {
+        callbacks.on_pre_tool_use_hook = [hook_dispatcher, pre_decision_slot](
+                                             const std::string& name,
+                                             const nlohmann::json& input) -> lubancode::agent::ToolHookDecision {
+            lubancode::hooks::HookPayload payload;
+            payload.event = lubancode::hooks::HookEvent::PreToolUse;
+            payload.fields["tool_name"] = name;
+            payload.fields["tool_input"] = input.is_null() ? nlohmann::json::object() : input;
+            payload.match_value = name;
+            const auto merged = hook_dispatcher->Emit(lubancode::hooks::HookEvent::PreToolUse, payload);
+
+            lubancode::agent::ToolHookDecision decision;
+            switch (merged.permission) {
+                case lubancode::hooks::HookEventResult::Permission::Deny:
+                    decision.decision = lubancode::agent::ToolHookDecision::Decision::Deny;
+                    decision.reason = "被 PreToolUse 钩子拦截: " + merged.permission_reason;
+                    break;
+                case lubancode::hooks::HookEventResult::Permission::Ask:
+                    decision.decision = lubancode::agent::ToolHookDecision::Decision::Ask;
+                    decision.reason = merged.permission_reason;
+                    break;
+                case lubancode::hooks::HookEventResult::Permission::Allow:
+                    decision.decision = lubancode::agent::ToolHookDecision::Decision::Allow;
+                    decision.reason = merged.permission_reason;
+                    break;
+                case lubancode::hooks::HookEventResult::Permission::None:
+                    break;
             }
-            return std::nullopt;
+            decision.updated_input = merged.updated_input;
+            decision.additional_context = merged.additional_context;
+            *pre_decision_slot = decision;
+            return decision;
         };
-        callbacks.on_post_tool_hook = [&hooks_config](const std::string& name, const nlohmann::json& input,
-                                                        const lubancode::tools::Tool::Result& result) {
-            lubancode::tools::RunPostToolHooks(hooks_config, name, input, result);
+
+        callbacks.on_post_tool_use_hook = [hook_dispatcher](
+                                              const std::string& name, const nlohmann::json& input,
+                                              const lubancode::tools::Tool::Result&
+                                              result) -> std::vector<std::string> {
+            lubancode::hooks::HookPayload payload;
+            payload.event = lubancode::hooks::HookEvent::PostToolUse;
+            payload.fields["tool_name"] = name;
+            payload.fields["tool_input"] = input.is_null() ? nlohmann::json::object() : input;
+            payload.fields["tool_response"] = result.content;
+            payload.fields["tool_response_text"] = result.content;  // legacy 环境变量走纯文本
+            payload.fields["tool_succeeded"] = !result.is_error;
+            payload.match_value = name;
+            return hook_dispatcher->Emit(lubancode::hooks::HookEvent::PostToolUse, payload).additional_context;
+        };
+
+        // UI 相位:checking_hook/blocked 由 ToolDisplay 按当前主/子条目路由
+        // (子代理工具执行期 active_sub 活着,自动落到子条目上);等权限/
+        // 运行的过渡由既有 OnConfirmRequest/终态渲染覆盖,不重复画。
+        callbacks.on_tool_phase = [&display](const std::string& /*name*/, lubancode::agent::ToolPhase phase) {
+            switch (phase) {
+                case lubancode::agent::ToolPhase::CheckingHook:
+                    display.OnHookCheckingText();
+                    break;
+                case lubancode::agent::ToolPhase::Blocked:
+                    display.OnHookMarkBlocked();
+                    break;
+                case lubancode::agent::ToolPhase::WaitingPermission:
+                case lubancode::agent::ToolPhase::Running:
+                    break;
+            }
         };
     }
 
@@ -328,7 +395,8 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
     };
 
     callbacks.on_tool_confirm = [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands,
-                                  &deny_commands](const std::string& name, const nlohmann::json& input) -> bool {
+                                  &deny_commands, hook_dispatcher, pre_decision_slot,
+                                  has_permission_hooks](const std::string& name, const nlohmann::json& input) -> bool {
         // 会话级确认模式(Shift+Tab 循环切),跟 --yes/auto_confirm 叠加:
         //   yolo  —— 全自动放行(auto_confirm 本来就是这个语义,这里再查一遍
         //             CurrentConfirmMode() 是为了让 Shift+Tab 中途切到 yolo
@@ -343,6 +411,13 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         //     会话"总是允许");但 yolo/--yes 是显式全放,deny 不拦(只在
         //     confirm/auto 档生效)。
         //   allow_commands 前缀命中 → auto 档里等价 command_safety 判成 Safe。
+        // hooks 第三步:PreToolUse 的归并决策在这里收尾——
+        //   hook allow 跳过用户确认,但 deny_commands/权限策略照走(先算
+        //   policy 再看 hook,deny_hit 压过 hook allow,不许钩子越权);
+        //   hook ask 即使档位本来放行,也要问用户一句。
+        // 真要弹确认时先发 PermissionRequest 钩子:任一 deny -> 拒;任一
+        // allow -> 不弹;全不表态 -> 正常问用户。
+        const lubancode::agent::ToolHookDecision pre = *pre_decision_slot;
         const lubancode::cli::ConfirmMode mode = lubancode::cli::CurrentConfirmMode();
         const bool file_tool = name == "write_file" || name == "edit_file";
 
@@ -357,7 +432,9 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
             }
         }
 
-        // permissions 裁定(deny 压 allow,纯函数,见 config 层):
+        // permissions 裁定(deny 压 allow,纯函数,见 config 层)。注意这里
+        // 用的是钩子可能改写过的 input(updatedInput 重过 deny 规则——不许
+        // 借改参绕黑名单)。
         const lubancode::config::CommandPermission perm =
             name == "run_command"
                 ? lubancode::config::ClassifyCommandByPermissions(command, allow_commands, deny_commands)
@@ -373,11 +450,15 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                lubancode::tools::CommandSafety::Safe ||
                            perm == lubancode::config::CommandPermission::Allow;
         }
+        // PreToolUse 钩子的表态参与裁决:deny_hit(策略黑名单)最高;钩子
+        // allow 只跳"问用户"这一步;钩子 ask 把"本来自动放行"拉回确认。
+        const bool hook_allow_skip = pre.decision == lubancode::agent::ToolHookDecision::Decision::Allow && !deny_hit;
+        const bool hook_ask = pre.decision == lubancode::agent::ToolHookDecision::Decision::Ask;
         const bool auto_pass = !deny_hit &&
                                (auto_confirm || mode == lubancode::cli::ConfirmMode::Yolo ||
                                 (mode == lubancode::cli::ConfirmMode::Auto && (file_tool || safe_command)) ||
-                                always_allowed_tools.count(name) != 0);
-        if (auto_pass) {
+                                always_allowed_tools.count(name) != 0 || hook_allow_skip);
+        if (auto_pass && !hook_ask) {
             // UI-C:自动放行(--yes/yolo/auto 档的文件工具/选过 a)也把统一
             // diff 预览打出来——用户看得见将要发生什么,但不停下等确认,
             // 打完即执行;执行完预览被 TrimBelow 擦掉,条目只留 +N -M。
@@ -386,6 +467,29 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                 display.ShowDiffPreview(name, input, /*trim_on_done=*/true);
             }
             return true;
+        }
+
+        // ---- 真要问用户了:PermissionRequest 钩子先表态。----
+        if (has_permission_hooks) {
+            lubancode::hooks::HookPayload payload;
+            payload.event = lubancode::hooks::HookEvent::PermissionRequest;
+            payload.fields["tool_name"] = name;
+            payload.fields["tool_input"] = input.is_null() ? nlohmann::json::object() : input;
+            payload.match_value = name;
+            const auto merged = hook_dispatcher->Emit(lubancode::hooks::HookEvent::PermissionRequest, payload);
+            if (merged.permission == lubancode::hooks::HookEventResult::Permission::Deny) {
+                std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+                std::cout << theme.error << "[hook] PermissionRequest 钩子拒绝执行 " << name << ": "
+                          << merged.permission_reason << theme.reset << "\n";
+                return false;
+            }
+            if (merged.permission == lubancode::hooks::HookEventResult::Permission::Allow) {
+                if (file_tool) {
+                    display.ShowDiffPreview(name, input, /*trim_on_done=*/true);
+                }
+                return true;
+            }
+            // 全不表态 -> 正常问用户(落下去)。
         }
         // UI-B:真的要问了——条目先改成"待确认"态(黄灯 + 待确认),确认块
         // (参数详情 + [y/a/N] 提示)跟在条目下面;答完确认块整个擦掉,
@@ -591,6 +695,22 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                 return blocked;
             };
         }
+        // hooks 第三步:新回调同样转发(deny 定格由 phase(Blocked) 走 display
+        // 路由,这里不重复画)。
+        hooks.on_pre_tool_use_hook = callbacks.on_pre_tool_use_hook;
+        hooks.on_permission_request = callbacks.on_permission_request;
+        hooks.on_tool_phase = callbacks.on_tool_phase;
+        hooks.hook_dispatcher = hook_dispatcher;
+        if (callbacks.on_post_tool_use_hook) {
+            hooks.on_post_tool_use_hook = [&display, base = callbacks.on_post_tool_use_hook](
+                                              const std::string& name, const nlohmann::json& input,
+                                              const lubancode::tools::Tool::Result&
+                                              result) -> std::vector<std::string> {
+                const std::vector<std::string> feedback = base(name, input, result);
+                display.OnSubToolResult(name, input, result);
+                return feedback;
+            };
+        }
         hooks.on_post_tool_hook = [&display, base = callbacks.on_post_tool_hook](
                                        const std::string& name, const nlohmann::json& input,
                                        const lubancode::tools::Tool::Result& result) {
@@ -648,7 +768,7 @@ std::string ImageInputErrorText(const lubancode::cli::ImageInputError& error) {
 RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bool auto_confirm,
                        std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
                        lubancode::cli::ContextTracker& context_tracker, lubancode::tools::ToolRegistry& registry,
-                       const lubancode::config::HooksConfig& hooks_config, bool is_console,
+                       lubancode::hooks::HookDispatcher* hook_dispatcher, bool is_console,
                        std::vector<lubancode::cli::TranscriptItem>& transcript,
                        std::shared_ptr<lubancode::tools::TodoListState> todo_state,
                        std::atomic<bool>* transcript_expanded,
@@ -674,6 +794,26 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
             background_results});
     }
 
+    // UserPromptSubmit:用户 prompt 送模型前。可阻断(continue=false/exit 2,
+    // 这一轮不发模型、不算错误),可追加 developer context(原 prompt 不动,
+    // 注入文本带来源标识单独成块,不串成一坨)。
+    if (hook_dispatcher != nullptr && !hook_dispatcher->Empty() &&
+        hook_dispatcher->HasHandlersFor(lubancode::hooks::HookEvent::UserPromptSubmit)) {
+        lubancode::hooks::HookPayload payload;
+        payload.event = lubancode::hooks::HookEvent::UserPromptSubmit;
+        payload.fields["prompt"] = user_input;
+        const auto merged = hook_dispatcher->Emit(lubancode::hooks::HookEvent::UserPromptSubmit, payload);
+        if (merged.blocked) {
+            std::cerr << theme.error << tr("error.prefix") << "UserPromptSubmit 钩子阻断本轮: "
+                      << merged.block_reason << theme.reset << "\n";
+            return RunTurnResult{0};
+        }
+        for (const auto& ctx : merged.additional_context) {
+            prepared_input->message.content.push_back(lubancode::api::TextBlock{
+                "[UserPromptSubmit 钩子附加上下文,非用户手敲]\n" + ctx});
+        }
+    }
+
     UsageStats usage_stats;
     // cancel_flag 先于 display/callbacks 建:ToolDisplay 要拿它判断"这一轮
     // 是不是被 ESC 打断的"(打断态条目标 Interrupted)。
@@ -683,9 +823,17 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     // 管道/重定向(is_console 为假)和 plain 主题(theme.reset 空)全部
     // enabled=false,正文原样输出,一个字节不动。
     StreamBodyTracker body_tracker(theme, is_console && !theme.reset.empty());
+    // hooks 上下文:这一轮的 turn_id 换新(session_id 等会话字段保持会话层
+    // 设好的值),确认档可能被 Shift+Tab 切过,按当前值报。
+    if (hook_dispatcher != nullptr && !hook_dispatcher->Empty()) {
+        lubancode::hooks::HookContext turn_context = hook_dispatcher->context();
+        turn_context.turn_id = lubancode::hooks::HookDispatcher::NextHookRunId();
+        turn_context.permission_mode = lubancode::app::HookPermissionModeText();
+        hook_dispatcher->UpdateContext(std::move(turn_context));
+    }
     const lubancode::agent::Callbacks callbacks =
         BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker, registry,
-                        hooks_config, display, body_tracker, allow_commands, deny_commands, &cancel_flag,
+                        hook_dispatcher, display, body_tracker, allow_commands, deny_commands, &cancel_flag,
                         recorder);
 
     // markdown × M10:监听线程随时可能在流式正文当中插打 [已排队]/[已打断]
@@ -793,6 +941,47 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
         return out;
     }
     out.cancelled = result->cancelled;
+
+    // Stop:主回合正常收束(没被打断、没撞预算、没报错)准备停时触发。
+    // 钩子 continue=false = "还不能停,再续一轮":续跑理由作为带标识的
+    // continuation prompt 入账,不伪装成用户输入;stop_hook_active 防咬尾,
+    // 最多续一次。续跑轮没有输入监听(ESC 打断靠外层循环兜底),如实注明。
+    if (hook_dispatcher != nullptr && !hook_dispatcher->Empty() &&
+        hook_dispatcher->HasHandlersFor(lubancode::hooks::HookEvent::Stop) && !result->cancelled) {
+        const auto last_assistant_text = [&loop]() {
+            for (auto it = loop.history().rbegin(); it != loop.history().rend(); ++it) {
+                if (it->role != lubancode::api::Role::Assistant) {
+                    continue;
+                }
+                for (auto block = it->content.rbegin(); block != it->content.rend(); ++block) {
+                    if (const auto* text = std::get_if<lubancode::api::TextBlock>(&*block)) {
+                        return text->text;
+                    }
+                }
+            }
+            return std::string();
+        }();
+
+        bool stop_hook_active = false;
+        for (int round = 0; round < 2; ++round) {
+            lubancode::hooks::HookPayload payload;
+            payload.event = lubancode::hooks::HookEvent::Stop;
+            payload.fields["stop_hook_active"] = stop_hook_active;
+            payload.fields["last_assistant_message"] = last_assistant_text;
+            const auto merged = hook_dispatcher->Emit(lubancode::hooks::HookEvent::Stop, payload);
+            if (!merged.blocked || stop_hook_active) {
+                break;  // 没人拉闸,或已经续过一次(不许无限续)
+            }
+            std::cout << theme.stats << "[stop 钩子] 要求再收口一轮: " << merged.block_reason << theme.reset
+                      << "\n";
+            const auto continuation = loop.Run("[stop 钩子续跑,非用户输入] " + merged.block_reason, callbacks);
+            if (!continuation.has_value() || continuation->cancelled || continuation->hit_step_limit) {
+                break;  // 续跑轮报错/被打断/撞预算:如实停,不带病硬续
+            }
+            out.cancelled = out.cancelled || continuation->cancelled;
+            stop_hook_active = true;
+        }
+    }
 
     if (usage_stats.request_count > 0) {
         // 0.17.0:token 数字统一 k 化(cli::FormatTokenCount),超过 10k 的

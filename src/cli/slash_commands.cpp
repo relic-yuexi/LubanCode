@@ -107,6 +107,8 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Todos;
     } else if (lower == "/plugins") {
         parsed.command = SlashCommand::Plugins;
+    } else if (lower == "/hooks") {
+        parsed.command = SlashCommand::Hooks;
     } else if (lower == "/tools") {
         parsed.command = SlashCommand::Tools;
     } else if (lower == "/memory") {
