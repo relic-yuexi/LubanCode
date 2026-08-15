@@ -429,3 +429,74 @@ TEST_CASE("dispatcher: UserPromptSubmit 可阻断,additionalContext 归并") {
     REQUIRE(merged.additional_context.size() == 1);
     CHECK(merged.additional_context[0] == "extra-context-1");
 }
+
+TEST_CASE("dispatcher: SessionStart 按 source 匹配——resume 只命中 resume 的钩子") {
+    const std::string script = WriteHookScript("on-resume", "exit 0");
+    hooks::HookDefinition def = MakeDefinition(RunScriptCommand(script));
+    def.event = hooks::HookEvent::SessionStart;
+    def.matcher = "resume";
+    hooks::HookDispatcher dispatcher = MakeDispatcher({def});
+
+    hooks::HookPayload startup;
+    startup.event = hooks::HookEvent::SessionStart;
+    startup.fields["source"] = "startup";
+    startup.match_value = "startup";
+    auto merged = dispatcher.Emit(hooks::HookEvent::SessionStart, startup);
+    CHECK(merged.records.empty());  // startup 不该命中 resume 钩子
+
+    hooks::HookPayload resume = startup;
+    resume.fields["source"] = "resume";
+    resume.match_value = "resume";
+    merged = dispatcher.Emit(hooks::HookEvent::SessionStart, resume);
+    REQUIRE(merged.records.size() == 1);
+    CHECK(merged.records[0].outcome == "ok");
+}
+
+TEST_CASE("dispatcher: SubagentStop 的 continue=false 归并进 blocked(续跑由调用方)") {
+    const std::string script = WriteHookScript(
+        "subagent-stop-block",
+        "echo {\"continue\":false,\"stopReason\":\"run-the-tests\",\"hookSpecificOutput\":"
+        "{\"hookEventName\":\"SubagentStop\",\"additionalContext\":\"missing coverage\"}}");
+    hooks::HookDefinition def = MakeDefinition(RunScriptCommand(script));
+    def.event = hooks::HookEvent::SubagentStop;
+    hooks::HookDispatcher dispatcher = MakeDispatcher({def});
+    hooks::HookPayload payload;
+    payload.event = hooks::HookEvent::SubagentStop;
+    payload.fields["agent_id"] = "7";
+    payload.fields["agent_type"] = "general";
+    payload.fields["stop_hook_active"] = false;
+    const auto merged = dispatcher.Emit(hooks::HookEvent::SubagentStop, payload);
+    CHECK(merged.blocked);  // "还不能停,再收口一轮"
+    CHECK(merged.block_reason.find("run-the-tests") != std::string::npos);
+    REQUIRE(merged.additional_context.size() == 1);
+    // SubagentStop 没有 permission 语义——不许借它做权限决定。
+    CHECK(merged.permission == hooks::HookEventResult::Permission::None);
+}
+
+TEST_CASE("dispatcher: EmitWith 的上下文覆写进 stdin(子代理 agent_id 分得清)") {
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / "lubancode-hook-dispatch";
+    std::filesystem::create_directories(dir);
+    const std::string sink = (dir / "subctx-sink.json").string();
+#ifdef _WIN32
+    const std::string cmd = "powershell -NoProfile -Command [Console]::In.ReadToEnd() > " + sink;
+#else
+    const std::string cmd = "sh -c 'cat > " + sink + "'";
+#endif
+    hooks::HookDispatcher dispatcher = MakeDispatcher({MakeDefinition(cmd)});
+    hooks::HookContext sub_context = dispatcher.context();
+    sub_context.agent_id = "agent_42";
+    sub_context.agent_type = "Explore";
+    sub_context.parent_agent_id = std::nullopt;
+
+    hooks::HookPayload payload = MakeToolPayload();
+    dispatcher.EmitWith(hooks::HookEvent::PreToolUse, payload, sub_context);
+    std::ifstream in(std::filesystem::path(reinterpret_cast<const char8_t*>(sink.c_str())), std::ios::binary);
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    REQUIRE_FALSE(content.empty());
+    const nlohmann::json parsed = nlohmann::json::parse(content);
+    CHECK(parsed["agent_id"] == "agent_42");
+    CHECK(parsed["agent_type"] == "Explore");
+    CHECK(parsed["parent_agent_id"].is_null());
+    // 覆写不落账:主上下文(agent 字段 null)不受影响。
+    CHECK(dispatcher.context().agent_id == std::nullopt);
+}

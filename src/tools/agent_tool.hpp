@@ -36,6 +36,7 @@
 #include "agent/loop.hpp"  // ToolHookDecision/ToolPhase:hooks 框架转发的类型
 #include "api/types.hpp"
 #include "cli/worktree.hpp"
+#include "hooks/dispatcher.hpp"
 #include "tools/isolation.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
@@ -202,6 +203,13 @@ public:
         // "cancel != nullptr && cancel->load()"判断打断,不用重新实现打断
         // 语义。不设(默认 nullptr)= 子代理收不到外部打断,行为跟从前一样。
         const std::atomic<bool>* cancel = nullptr;
+
+        // hooks 框架第四五步:进程级 dispatcher。前台子代理用它发
+        // SubagentStart/SubagentStop,并把 dispatcher 的上下文换成这只子代理
+        // 的 agent_id/agent_type(跑完还原)——工具事件的 stdin JSON 就分得清
+        // 主代理与子代理。后台子代理不接 hooks(线程模型见 dispatcher 注释),
+        // 这里是空指针。
+        lubancode::hooks::HookDispatcher* hook_dispatcher = nullptr;
     };
 
     // backend:子代理发请求用的后端。main.cpp 传进来的通常是跟主循环共用

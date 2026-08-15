@@ -549,6 +549,10 @@ CommandFlow HandleResumeCommand(SessionCommandState& state, const std::string& a
                 state.sync_worktree_directory();
             }
         }
+        // hooks:恢复的历史开新账(SessionStart source=resume)。
+        if (state.on_resumed) {
+            state.on_resumed();
+        }
     }
     return CommandFlow::Continue;
 }

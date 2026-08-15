@@ -165,6 +165,16 @@ bool HookDispatcher::MatcherHits(const HookDefinition& def, const std::string& m
 }
 
 HookEventResult HookDispatcher::Emit(HookEvent event, const HookPayload& payload) {
+    // 记账所需的 context_ 快照在 EmitImpl 里读;EmitWith 走覆写版。
+    return EmitImpl(event, payload, context_, /*context_override=*/false);
+}
+
+HookEventResult HookDispatcher::EmitWith(HookEvent event, const HookPayload& payload, HookContext ctx) {
+    return EmitImpl(event, payload, ctx, /*context_override=*/true);
+}
+
+HookEventResult HookDispatcher::EmitImpl(HookEvent event, const HookPayload& payload, const HookContext& ctx,
+                                         bool /*context_override*/) {
     HookEventResult merged;
     const std::string hook_run_id = NextHookRunId();
     const std::string event_name(ToString(event));
@@ -245,14 +255,14 @@ HookEventResult HookDispatcher::Emit(HookEvent event, const HookPayload& payload
     std::vector<std::thread> workers;
     workers.reserve(to_run.size());
     for (std::size_t i = 0; i < to_run.size(); ++i) {
-        workers.emplace_back([this, i, &runs, &to_run, &payload, &hook_run_id]() {
+        workers.emplace_back([this, i, &runs, &to_run, &payload, &hook_run_id, &ctx]() {
             HandlerRun& run = runs[i];
             run.def = to_run[i]->def;
             const auto start = std::chrono::steady_clock::now();
             if (to_run[i]->def->legacy) {
                 run.exec = ExecuteLegacy(*to_run[i]->def, payload);
             } else {
-                const nlohmann::json stdin_json = BuildStdinPayload(payload, context_, hook_run_id);
+                const nlohmann::json stdin_json = BuildStdinPayload(payload, ctx, hook_run_id);
                 run.exec = ExecuteV2(*to_run[i]->def, stdin_json.dump());
             }
             run.duration_ms = static_cast<int>(

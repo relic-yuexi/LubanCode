@@ -58,6 +58,13 @@ public:
     // 缺省——调用方照常往下走,只把记录入账。
     HookEventResult Emit(HookEvent event, const HookPayload& payload);
 
+    // 带上下文覆写的发射:子代理(SubagentStart/Stop 与子代理内的工具
+    // 事件)用——stdin JSON 里的 agent_id/agent_type/parent_agent_id 得是
+    // 这只子代理的,不是主会话那份。ctx 从 context() 拷贝后改 agent 字段
+    // 再传进来。本期只在宿主主线程同步调用(前台子代理在主线程里跑;后台
+    // 子代理不接 hooks,见 agent_tool 注释),不加锁。
+    HookEventResult EmitWith(HookEvent event, const HookPayload& payload, HookContext ctx);
+
     // 会话上下文更新(turn_id 每轮换;子代理触发时带 agent_id/type)。
     void UpdateContext(HookContext context) { context_ = std::move(context); }
     const HookContext& context() const { return context_; }
@@ -86,6 +93,8 @@ private:
     // 匹配:matcher(缺省/*/精确/竖线集合/显式 regex)对 match_value。
     // 事件没有匹配字段时(match_value 空),只有 */缺省能命中。
     bool MatcherHits(const HookDefinition& def, const std::string& match_value) const;
+    HookEventResult EmitImpl(HookEvent event, const HookPayload& payload, const HookContext& ctx,
+                             bool context_override);
 
     std::vector<HookDefinition> definitions_;
     HookTrustStore trust_;

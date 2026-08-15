@@ -941,6 +941,46 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     } else if (foreground_hooks != nullptr) {
         cancel = foreground_hooks->cancel;
     }
+    // hooks 第四五步:SubagentStart + 上下文切换。前台子代理在宿主主线程
+    // 里同步跑,dispatcher 上下文换成这只子代理的(agent_id/agent_type),
+    // 转发过来的工具事件(PreToolUse 等)发的 stdin JSON 就带子代理身份;
+    // 跑完还原。后台子代理 hooks 为空(线程模型见 dispatcher.hpp 注释),
+    // 这一段整个跳过。
+    lubancode::hooks::HookDispatcher* sub_hook_dispatcher =
+        foreground_hooks != nullptr ? foreground_hooks->hook_dispatcher : nullptr;
+    std::optional<lubancode::hooks::HookContext> parent_hook_context;
+    if (sub_hook_dispatcher != nullptr && !sub_hook_dispatcher->Empty()) {
+        parent_hook_context = sub_hook_dispatcher->context();
+        lubancode::hooks::HookContext sub_context = *parent_hook_context;
+        sub_context.agent_id = std::to_string(task != nullptr ? task->snapshot.id : 0);
+        sub_context.agent_type = agent_type;
+        // parent_agent_id:外层的 agent id(主代理触发时为 null)。
+        sub_context.parent_agent_id = parent_hook_context->agent_id;
+
+        if (sub_hook_dispatcher->HasHandlersFor(lubancode::hooks::HookEvent::SubagentStart)) {
+            lubancode::hooks::HookPayload start;
+            start.event = lubancode::hooks::HookEvent::SubagentStart;
+            start.fields["agent_id"] = *sub_context.agent_id;
+            start.fields["agent_type"] = agent_type;
+            start.fields["parent_agent_id"] =
+                parent_hook_context->agent_id.has_value() ? nlohmann::json(*parent_hook_context->agent_id)
+                                                          : nlohmann::json();
+            sub_hook_dispatcher->EmitWith(lubancode::hooks::HookEvent::SubagentStart, start, sub_context);
+        }
+        sub_hook_dispatcher->UpdateContext(std::move(sub_context));
+    }
+    // 上下文还原的 RAII 兜底:正常路径在 SubagentStop 之后手工还原;万一
+    // 中途异常穿出,也不能把子代理身份留在主会话的钩子上下文里。
+    struct HookContextRestore {
+        lubancode::hooks::HookDispatcher* dispatcher;
+        std::optional<lubancode::hooks::HookContext> saved;
+        ~HookContextRestore() {
+            if (dispatcher != nullptr && saved.has_value()) {
+                dispatcher->UpdateContext(std::move(*saved));
+            }
+        }
+    } hook_context_restore{sub_hook_dispatcher, parent_hook_context};
+
     // 主 Run + 续投循环(规格第五节"排到了却没送"):Queued 是交付承诺。
     // 一轮 Run 正常收口(非打断、非错误、非预算耗尽)后,先与 SendTaskMessage
     // 做原子交接(SealOrContinueInbox):inbox 空 -> 封账,准备进终态;还有
@@ -1012,6 +1052,43 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     if (cancel_merger.has_value()) {
         merged_cancel.store(true, std::memory_order_release);  // 唤醒合并线程好 join
         cancel_merger->join();
+    }
+
+    // hooks 第四五步:SubagentStop。带 agent id/type/末条 assistant 文本;
+    // 钩子 continue=false = "再收口一轮":续跑理由带标识入账(不装用户
+    // 输入),stop_hook_active 防咬尾,最多续一次;取消/撞预算/续跑出错
+    // 就如实停。上下文还原交给 hook_context_restore 析构(含异常路径)。
+    if (sub_hook_dispatcher != nullptr && !sub_hook_dispatcher->Empty() &&
+        sub_hook_dispatcher->HasHandlersFor(lubancode::hooks::HookEvent::SubagentStop) && !run_cancelled) {
+        lubancode::hooks::HookContext sub_context = sub_hook_dispatcher->context();
+        bool stop_hook_active = false;
+        for (int round = 0; round < 2; ++round) {
+            std::string last_text = ExtractLastText(sub_loop);
+            lubancode::hooks::HookPayload stop;
+            stop.event = lubancode::hooks::HookEvent::SubagentStop;
+            stop.fields["agent_id"] = sub_context.agent_id.value_or(std::string());
+            stop.fields["agent_type"] = sub_context.agent_type.value_or(std::string());
+            stop.fields["agent_transcript_path"] = std::string();  // 子代理历史不落独立文件,如实留空
+            stop.fields["last_assistant_message"] = last_text;
+            stop.fields["stop_hook_active"] = stop_hook_active;
+            const auto merged =
+                sub_hook_dispatcher->EmitWith(lubancode::hooks::HookEvent::SubagentStop, stop, sub_context);
+            if (!merged.blocked || stop_hook_active) {
+                break;  // 没人要求续,或已经续过一次(不许无限续)
+            }
+            const auto continuation =
+                sub_loop.Run("[SubagentStop 钩子续跑,非用户输入] " + merged.block_reason, sub_callbacks, cancel);
+            if (!continuation.has_value() || continuation->cancelled || continuation->hit_step_limit) {
+                break;
+            }
+            steps_used_total += continuation->steps_used;
+            if (task != nullptr) {
+                std::lock_guard<std::mutex> lock(tasks_mutex_);
+                task->snapshot.steps_used = steps_used_total;
+                TouchTasks();
+            }
+            stop_hook_active = true;
+        }
     }
 
     // ---- 收场分型(规格"现场三"):结构化 TaskOutcome,不再只交一句话 ----
