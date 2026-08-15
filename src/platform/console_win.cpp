@@ -440,6 +440,7 @@ std::optional<ScreenInfo> GetScreenInfo() {
     out.cursor_y = static_cast<int>(info.dwCursorPosition.Y);
     out.viewport_x = static_cast<int>(info.srWindow.Left);
     out.viewport_y = static_cast<int>(info.srWindow.Top);
+    out.viewport_height = static_cast<int>(info.srWindow.Bottom) - static_cast<int>(info.srWindow.Top) + 1;
     return out;
 }
 
@@ -557,6 +558,9 @@ std::optional<KeyInput> KeyReader::ReadOne() {
     } else if (ctrl && ke.wVirtualKeyCode == 'K') {
         reset_text_run();
         out.kind = KeyInput::Kind::CtrlK;  // 子代理面板:停止全部(两段确认第二段)
+    } else if (ctrl && ke.wVirtualKeyCode == 'L') {
+        reset_text_run();
+        out.kind = KeyInput::Kind::CtrlL;  // 底栏自救:整屏重画
     } else if (ke.wVirtualKeyCode == VK_BACK) {
         reset_text_run();
         out.kind = KeyInput::Kind::Backspace;

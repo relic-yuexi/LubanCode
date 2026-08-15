@@ -931,6 +931,14 @@ bool InteractiveSession::HandleTranscriptUi(lubancode::cli::UiKeyAction action) 
             PrintRecentItems(5);
             return true;
         }
+        case cli::UiKeyAction::RepaintScreen: {
+            // Ctrl+L:终端层已清可视区、作废帧锚点;这里从 transcript 快照重铺
+            // 会话画面(横幅 + 最近条目),底栏由终端层随后画回。数据都在,
+            // 只是重铺——草稿/选择/收件目标在终端层状态里,不受影响。
+            PrintBanner(config, theme);
+            PrintRecentItems(count > 0 ? 10 : 0);
+            return true;
+        }
     }
     return false;
 }

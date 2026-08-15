@@ -62,6 +62,7 @@ struct ScreenInfo {
     int cursor_y = 0;  // 光标行,0 基
     int viewport_x = 0;  // Windows 可视窗口左上角在缓冲区里的坐标;POSIX 恒 0
     int viewport_y = 0;
+    int viewport_height = 0;  // 可视窗口行数;0 = 未知(调用方兜底用 height)
 };
 
 // 拿不到(非真控制台、查询失败)返回 std::nullopt,调用方这一帧放弃定位。
@@ -121,6 +122,8 @@ struct KeyInput {
         // 只在面板这一处消费,别处按 Ctrl+X/Ctrl+K 仍是死键,跟升级前一样。
         CtrlX,
         CtrlK,
+        // 0.29.x 底栏自救:Ctrl+L 整屏重画(作废锚点、清可视区、从状态重建)。
+        CtrlL,
         Esc,
         Delete,  // Del 键(排队待发消息浏览里"删当前项"用;两平台键序都认)
     };

@@ -290,6 +290,15 @@ const Entry kZhCN[] = {
     {"agent_panel.main", "主会话"},
     {"agent_panel.detail_hint", "Enter 收起 · Esc 返回列表 · 消息将发给这只代理"},
     {"agent_panel.main_detail", "主会话仍可继续收发消息。"},
+    {"agent_panel.hint_short", "↑/↓ 选择 · Enter 查看"},
+    {"agent_panel.hint_focused", "Enter 查看 · x 停止/清除 · Esc 返回 · Ctrl+X Ctrl+K 停止全部代理"},
+    {"agent_panel.hint_focused_short", "Enter 查看 · x 停止/清除 · Esc 返回"},
+    {"agent_panel.hint_idle_expanded", "Enter 查看 · Esc 收起"},
+    {"agent_panel.stream_hint_short", "↑/↓ 选择 · Enter 查看"},
+    {"agent_panel.stream_hint_focused", "Enter 查看 · x 停止/清除 · Esc 逐层退出 · Ctrl+X Ctrl+K 停止全部代理"},
+    {"agent_panel.stream_hint_focused_short", "Enter 查看 · x 停止/清除 · Esc 逐层退出"},
+    {"agent_panel.stream_hint_idle_expanded", "Enter 查看 · Esc 收起"},
+    {"agent_panel.idle_summary", "另有 {0} 只闲置代理 · Enter 展开"},
 
     // ---- 确认提示 ----
     {"confirm.prompt", "[y] 本次允许  [a] 本会话总是允许(该工具)  [N] 拒绝: "},
@@ -1327,6 +1336,15 @@ const Entry kEn[] = {
     {"agent_panel.main", "main session"},
     {"agent_panel.detail_hint", "Enter collapse · Esc back · messages go to this agent"},
     {"agent_panel.main_detail", "The main session remains interactive."},
+    {"agent_panel.hint_short", "↑/↓ select · Enter view"},
+    {"agent_panel.hint_focused", "Enter view · x stop/clear · Esc back · Ctrl+X Ctrl+K stop all agents"},
+    {"agent_panel.hint_focused_short", "Enter view · x stop/clear · Esc back"},
+    {"agent_panel.hint_idle_expanded", "Enter view · Esc collapse"},
+    {"agent_panel.stream_hint_short", "↑/↓ select · Enter view"},
+    {"agent_panel.stream_hint_focused", "Enter view · x stop/clear · Esc exits layer by layer · Ctrl+X Ctrl+K stop all agents"},
+    {"agent_panel.stream_hint_focused_short", "Enter view · x stop/clear · Esc exits layer by layer"},
+    {"agent_panel.stream_hint_idle_expanded", "Enter view · Esc collapse"},
+    {"agent_panel.idle_summary", "{0} more idle agent(s) · Enter to expand"},
 
     // ---- confirm prompt ----
     {"confirm.prompt", "[y] allow once  [a] always allow this tool (this session)  [N] deny: "},

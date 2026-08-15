@@ -108,6 +108,9 @@ enum class UiKeyAction {
     FocusNewer,    // 焦点往新走(0.17.0:焦点态内 Shift+Tab;态外 Shift+Tab 恒切确认档,不发这个)
     FocusView,     // Ctrl+E:聚焦查看当前焦点条目(已在聚焦态则返回)
     Escape,        // ESC:回调只在聚焦查看态消费它(返回会话画面),否则还给编辑器
+    // Ctrl+L 整屏重画:终端层已作废帧锚点、清了可视区,应用层把 transcript
+    // 快照重铺一遍(横幅+最近条目)。回调返回 true 表示真铺了正文。
+    RepaintScreen,
 };
 using TranscriptUiHandler = std::function<bool(UiKeyAction)>;
 
