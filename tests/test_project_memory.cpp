@@ -577,6 +577,102 @@ TEST_CASE("ProjectMemory: 合成事件隔离——后台完成唤醒不跑检索
     CHECK(zero.injected_bytes == 0);
 }
 
+TEST_CASE("ProjectMemory: 检索预算按去重后有效字节,同一事实只注一份") {
+    const fs::path root = TempRoot("dedupe");
+    const fs::path repo = root / "repo";
+    fs::create_directories(repo / ".git");
+    Write(repo / "web" / "build.ts", "export {}\n");
+    Write(repo / "src" / "loop.cpp", "int main() {}\n");
+    const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
+    REQUIRE(identity.has_value());
+    memory::Options options;
+    options.global_allowed = true;
+    options.enabled = true;
+    options.max_results = 3;
+    memory::ProjectMemory store(*identity, root / "home", options);
+
+    // 同一事实反复保存:不同 id,同标题同路径同正文。
+    memory::SaveRequest first;
+    first.kind = memory::MemoryKind::Fact;
+    first.id = "fact.build-entry-a";
+    first.title = "前端构建入口";
+    first.summary = "web 子树用 vite build 出包";
+    first.content = "web 子树的构建入口是 web/build.ts,产物进 dist/。";
+    first.keywords = {"前端构建", "vite"};
+    first.paths = {"web/build.ts"};
+    REQUIRE(store.EnqueueSave(first).has_value());
+    memory::SaveRequest second = first;
+    second.id = "fact.build-entry-b";
+    REQUIRE(store.EnqueueSave(second).has_value());
+    // 同一路径反复探索出的同主题记忆:同标题同路径,内容不同。
+    memory::SaveRequest third;
+    third.kind = memory::MemoryKind::Fact;
+    third.id = "fact.build-entry-c";
+    third.title = "前端构建入口";
+    third.summary = "vite build 细节补充";
+    third.content = "vite build 的缓存目录在 node_modules/.vite,清掉可全量重建。";
+    third.keywords = {"前端构建", "vite", "缓存"};
+    third.paths = {"web/build.ts"};
+    REQUIRE(store.EnqueueSave(third).has_value());
+    // 不同事实共用一条路径:标题不同,两条都该留。
+    memory::SaveRequest fourth;
+    fourth.kind = memory::MemoryKind::Fact;
+    fourth.id = "fact.build-script-owner";
+    fourth.title = "构建脚本维护人";
+    fourth.summary = "build.ts 归前端组维护";
+    fourth.content = "web/build.ts 归前端组维护,后端别直接改。";
+    fourth.keywords = {"构建脚本", "维护人"};
+    fourth.paths = {"web/build.ts"};
+    REQUIRE(store.EnqueueSave(fourth).has_value());
+    REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
+    REQUIRE(store.ListEntries().size() == 4);
+
+    // 问"前端构建":a/b/c 三条同事实(同标题同路径)只注入排级最前一条,
+    // 共用路径的不同事实(build-script-owner)照常注入。
+    const std::string context = store.BuildTurnContext("前端构建入口和构建脚本谁管", repo);
+    std::size_t injected_count = 0;
+    bool injected_dup_survivor = false;
+    bool injected_owner = false;
+    // "## 召回: " 头占 11 字节(两个汉字各 3 字节)。
+    for (std::size_t pos = context.find("## 召回: ", 0); pos != std::string::npos;
+         pos = context.find("## 召回: ", pos + 1)) {
+        ++injected_count;
+        if (context.find("fact.build-entry-", pos) == pos + 11) injected_dup_survivor = true;
+        if (context.find("fact.build-script-owner", pos) == pos + 11) injected_owner = true;
+    }
+    CHECK(injected_count == 2);
+    CHECK(injected_dup_survivor);
+    CHECK(injected_owner);
+
+    // trace:a/b/c 里让位的记 duplicate_dropped,不占预算。
+    const auto trace = store.LastTrace();
+    REQUIRE(trace.valid);
+    std::size_t duplicate_dropped = 0;
+    std::size_t injected = 0;
+    for (const auto& entry : trace.entries) {
+        if (entry.duplicate_dropped) ++duplicate_dropped;
+        if (entry.injected) ++injected;
+    }
+    CHECK(injected == 2);
+    CHECK(duplicate_dropped == 2);  // 同事实三胞胎让位两条
+    CHECK(trace.injected_count == 2);
+
+    // 同主题不同正文:c 挂在检索词上也只注一份(同标题同路径去重)。
+    const std::string twin = store.BuildTurnContext("vite 缓存目录在哪", repo);
+    std::size_t twin_injected = 0;
+    for (std::size_t pos = twin.find("## 召回: ", 0); pos != std::string::npos;
+         pos = twin.find("## 召回: ", pos + 1)) {
+        ++twin_injected;
+    }
+    CHECK(twin_injected == 1);
+    const auto twin_trace = store.LastTrace();
+    std::size_t twin_duplicates = 0;
+    for (const auto& entry : twin_trace.entries) {
+        if (entry.duplicate_dropped) ++twin_duplicates;
+    }
+    CHECK(twin_duplicates == 2);
+}
+
 TEST_CASE("ProjectMemory: 默认预算 8 KiB/3 条,预算边界不劈开 UTF-8") {
     const fs::path root = TempRoot("budget");
     const fs::path repo = root / "repo";

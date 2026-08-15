@@ -1788,6 +1788,11 @@ std::string ProjectMemory::BuildTurnContext(const std::string& query, const fs::
     std::string body;
     std::size_t used = 0;
     std::size_t emitted = 0;
+    // 检索预算按"去重后有效字节"算:同一事实(同正文)只注一份,同证据
+    // 同主题(同标题+同路径集)也只留一条——排级序里分数高、更可信、更
+    // 新的那条先到先得,后来者 duplicate_dropped 让位,不占预算。
+    std::unordered_set<std::uint64_t> seen_content;
+    std::unordered_set<std::string> seen_fact;
     for (const ScoredEntry& hit : ranked) {
         RecallTraceEntry traced;
         traced.id = hit.entry->id;
@@ -1841,6 +1846,26 @@ std::string ProjectMemory::BuildTurnContext(const std::string& query, const fs::
         }
         topic = Trim(std::move(topic));
         if (topic.empty()) continue;
+        // 去重键一:正文哈希——同一事实反复保存(不同 id 同内容)只注一份。
+        const std::uint64_t content_key = StableHash(NormalizeForRetrieval(topic));
+        // 去重键二:标题 + 路径集——同一路径反复探索出的同主题记忆,留排级
+        // 在前的那条。无路径的条目不并这条(缺证据,谈不上"相同证据")。
+        std::string fact_key;
+        if (!entry.paths.empty()) {
+            std::vector<std::string> normalized_paths;
+            normalized_paths.reserve(entry.paths.size());
+            for (const std::string& path : entry.paths) {
+                normalized_paths.push_back(NormalizeForRetrieval(path));
+            }
+            std::sort(normalized_paths.begin(), normalized_paths.end());
+            fact_key = NormalizeForRetrieval(entry.title) + "\x1f";
+            for (const std::string& path : normalized_paths) fact_key += path + "\x1f";
+        }
+        if (seen_content.count(content_key) != 0 || (!fact_key.empty() && seen_fact.count(fact_key) != 0)) {
+            traced.duplicate_dropped = true;
+            trace.entries.push_back(std::move(traced));
+            continue;
+        }
         body += "\n## 召回: " + entry.id + "\n\n来源: " + PathUtf8(memory_dir_ / Utf8Path(entry.file)) +
                 "\n\n" + topic + "\n";
         used += topic.size();
@@ -1850,6 +1875,8 @@ std::string ProjectMemory::BuildTurnContext(const std::string& query, const fs::
         trace.injected_count += 1;
         trace.injected_bytes += topic.size();
         trace.entries.push_back(std::move(traced));
+        seen_content.insert(content_key);
+        if (!fact_key.empty()) seen_fact.insert(fact_key);
     }
     WriteRecallTrace(memory_dir_, trace);
     if (body.empty()) return {};  // 零命中:不塞空脚手架

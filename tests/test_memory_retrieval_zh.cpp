@@ -199,10 +199,11 @@ TEST_CASE("中文检索评测:100 条固定语料的召回率与误命中率") {
               << " Precision@3=" << precision_at_3 << " false-hit-rate=" << false_hit_rate << "\n";
 
     // CI 防线:优化前基线 Recall@1/@3=1.00、Precision@3=0.81、误命中率
-    // 5.1%(2/39)。检索瘦身只许把误命中率与精度做上去,召回不许掉。
+    // 5.1%(2/39);瘦身后 Precision@3=0.88、误命中率持平。改检索器只许
+    // 把精度做上去,召回与误命中率不许倒退。
     CHECK(recall_at_1 >= 0.95);
     CHECK(recall_at_3 >= 0.95);
-    CHECK(precision_at_3 >= 0.78);
+    CHECK(precision_at_3 >= 0.85);
     CHECK(false_hit_rate <= 0.08);
 }
 
@@ -257,10 +258,24 @@ TEST_CASE("中文检索评测:端到端注入字节 P50/P95 与零命中不塞�
     std::vector<std::size_t> byte_samples;
     std::size_t zero_hit_suffix_bytes = 0;
     std::size_t zero_hit_count = 0;
+    // 同内容重复对(cache/deploy 两对)在去重后各只注入一对里的一条——
+    // 别的相关记忆(比如 ccache 命中率那条)照常注入,不受牵连。
+    std::size_t dup_pair_queries_checked = 0;
+    std::size_t dup_pair_clean = 0;
     for (const auto* list : {&fixture.positive, &fixture.negative}) {
         for (const FixtureQuery& query : *list) {
             const std::string context = store.BuildTurnContext(query.query, repo / fs::path(query.cwd));
             const std::size_t bytes = RecallBlockBytes(context);
+            const bool cache_pair = query.query.find("缓存目录在哪里") != std::string::npos;
+            const bool deploy_pair = query.query.find("部署节奏") != std::string::npos;
+            if (cache_pair || deploy_pair) {
+                ++dup_pair_queries_checked;
+                const std::string first = cache_pair ? "fact.zh-dup-cache-a" : "fact.zh-dup-deploy-a";
+                const std::string second = cache_pair ? "fact.zh-dup-cache-b" : "fact.zh-dup-deploy-b";
+                const bool has_first = context.find("## 召回: " + first) != std::string::npos;
+                const bool has_second = context.find("## 召回: " + second) != std::string::npos;
+                if (!has_first || !has_second) ++dup_pair_clean;
+            }
             if (bytes == 0) {
                 zero_hit_suffix_bytes = std::max(zero_hit_suffix_bytes, context.size());
                 ++zero_hit_count;
@@ -278,7 +293,8 @@ TEST_CASE("中文检索评测:端到端注入字节 P50/P95 与零命中不塞�
         return byte_samples.empty() ? 0.0 : sum / static_cast<double>(byte_samples.size());
     }();
     std::cout << "[memory-zh-eval] injected-queries=" << byte_samples.size() << " zero-hit-queries="
-              << zero_hit_count << "\n";
+              << zero_hit_count << " dup-pair-deduped=" << dup_pair_clean << "/"
+              << dup_pair_queries_checked << "\n";
     std::cout << "[memory-zh-eval] avg-injected-bytes=" << average << " P50=" << p50 << " P95=" << p95
               << " zero-hit-suffix-bytes=" << zero_hit_suffix_bytes << "\n";
 
@@ -287,6 +303,9 @@ TEST_CASE("中文检索评测:端到端注入字节 P50/P95 与零命中不塞�
     CHECK(p95 <= 8.0 * 1024 + 256);
     // 零命中不塞空脚手架:suffix 一个字节都不进。
     CHECK(zero_hit_suffix_bytes == 0);
+    // 同内容重复对:两条固定问句都不许把同一对双胞胎双双注入。
+    CHECK(dup_pair_queries_checked == 2);
+    CHECK(dup_pair_clean == 2);
 
     fs::remove_all(root, ec);
 }
