@@ -70,6 +70,7 @@
 #include "cli/diff.hpp"
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
+#include "cli/line_editor.hpp"  // DisplayWidthUtf8:查看帧折行记账
 #include "cli/i18n.hpp"
 #include "cli/image_input.hpp"
 #include "cli/live_transcript.hpp"
@@ -466,6 +467,13 @@ private:
     // 思考/正文尾巴的展开开关。只在主线程(HandleTranscriptUi)翻,构建
     // 查看帧时读;Esc/切换查看目标时复位。
     bool agent_view_expanded_ = false;
+    // 查看帧的 retained 账(修"切换视图每秒往滚屏堆一帧"):上一帧画在哪个
+    // 绝对行、占几物理行、当时的视口顶——下一帧先按这三笔擦掉旧帧再原位
+    // 画新帧。滚屏了按视口位移修正;滚出缓冲或拿不到屏幕信息就退回追加
+    // (偶尔残一回,绝不误吞正文)。跑新一轮主回合时作废(RunUserTurn 复位)。
+    int view_frame_top_ = -1;
+    int view_frame_rows_ = 0;
+    int view_frame_vp_y_ = 0;
 
     // ---- 主 AgentLoop 与轮次材料 ----
     lubancode::agent::PromptOptions prompt_options;
@@ -1018,8 +1026,10 @@ std::vector<lubancode::cli::AgentPanelEntry> InteractiveSession::BuildAgentPanel
         const std::int64_t tokens = task.total_input_tokens() + task.output_tokens;
         // tokens 三态(规格根因三):未报告且已跑过步数就写"未报告",不画 0
         // ——0 会误导成"服务端一枚 token 都没跑",实则可能烧满了输出预算。
+        // 运行中的一律未报告即写"未报告":首步流中 steps_used 还是 0,但
+        // 请求已发出、token 正在烧,"0 tokens"正是用户看着诡异的假信号。
         const std::string token_text =
-            task.usage_reported || task.steps_used == 0
+            task.usage_reported || (!entry.running && task.steps_used == 0)
                 ? lubancode::cli::FormatTokenCount(tokens)
                 : tr("agent_status.tokens_not_reported");
         // 状态短话(规格"现场三/四"+活跃度单):导航坞只放短因——完成/失败 ·
@@ -1287,13 +1297,45 @@ void InteractiveSession::PrintViewedTranscript(int viewed_task_id, int tail_rows
     std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
     lubancode::cli::EraseStreamFooterLocked();
     const int width = lubancode::cli::DetectConsoleWidth().value_or(80);
-    std::cout << "\n";
+
+    // 擦旧帧:上一帧的绝对行号/行数/视口顶都记着;滚屏按位移修正。擦不
+    // 成(管道、滚出缓冲、宽度变了折行账失准)就退回旧式追加,残影偶尔一
+    // 回,绝不误吞正文。
+    const auto info = platform::GetScreenInfo();
+    int frame_top = -1;
+    if (info.has_value() && view_frame_rows_ > 0) {
+        const int delta = info->viewport_y - view_frame_vp_y_;
+        const int top = view_frame_top_ - delta;
+        if (top >= 0 && top + view_frame_rows_ <= info->height) {
+            for (int i = 0; i < view_frame_rows_; ++i) {
+                platform::ClearRowHardFrom(0, top + i, info->width);
+            }
+            platform::SetCursorPos(0, top);
+            frame_top = top;
+        }
+    }
+    if (frame_top < 0) {
+        std::cout << "\n";
+    }
+    int frame_rows = 0;
+    const auto print_line = [&](const std::string& line) {
+        std::cout << line << "\n";
+        const int display = std::max(1, static_cast<int>(lubancode::cli::DisplayWidthUtf8(line)));
+        frame_rows += (display + width - 1) / width;  // 折行按物理行记
+    };
+
     if (viewed_task_id == 0) {
         // 回 main:首个可辨标题写明 main(规格"Esc 回 main"五条件),最近
         // 几条摘要重铺,视口/标题/收件目标一同复位。
-        std::cout << theme.stats << tr("agent_panel.main_header") << theme.reset << "\n";
-        std::cout << theme.stats << tr("agent_panel.back_to_main") << theme.reset << "\n";
-        PrintRecentItems(5);
+        print_line(theme.stats + tr("agent_panel.main_header") + theme.reset);
+        print_line(theme.stats + tr("agent_panel.back_to_main") + theme.reset);
+        const int width_for_items = width;
+        const std::size_t from = transcript.size() > 5 ? transcript.size() - 5 : 0;
+        for (std::size_t i = from; i < transcript.size(); ++i) {
+            print_line(lubancode::cli::FormatTranscriptItem(
+                transcript[i], theme, width_for_items, /*expanded=*/false,
+                static_cast<int>(i) == focus_index));
+        }
     } else {
         std::vector<std::string> body = BuildAgentTaskTranscriptLines(viewed_task_id, width);
         if (tail_rows > 0 && static_cast<int>(body.size()) > tail_rows) {
@@ -1314,10 +1356,18 @@ void InteractiveSession::PrintViewedTranscript(int viewed_task_id, int tail_rows
             body = std::move(tailed);
         }
         for (const auto& line : body) {
-            std::cout << line << "\n";
+            print_line(line);
         }
     }
     std::cout.flush();
+    // 记新帧账:打印完光标停在帧尾下一行行首,回推即帧顶;视口顶同步记。
+    if (const auto after = platform::GetScreenInfo(); after.has_value()) {
+        view_frame_top_ = after->cursor_y - frame_rows;
+        view_frame_rows_ = frame_rows;
+        view_frame_vp_y_ = after->viewport_y;
+    } else {
+        view_frame_rows_ = 0;  // 管道路:不留擦账,免得下次乱擦
+    }
     lubancode::cli::RedrawStreamFooterLocked();
 }
 
@@ -3030,6 +3080,9 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
     }
     loop->SetTurnContext(std::move(turn_suffix));
     const std::size_t history_before = loop->History().size();
+    // 新一轮主回合要在查看帧下方铺正文,旧帧的绝对行账就此作废——不复位
+    // 的话,下次进查看态会按陈账去擦,误吞刚铺的正文。
+    view_frame_rows_ = 0;
     // 终端标题(0.30.x 第四批):跑着/等输入两态,项目·分支跟着;拿不到
     // 焦点状态,不做"未聚焦才通知"的假判断,只在长轮收口时叫一声铃。
     if (spinner_enabled) {

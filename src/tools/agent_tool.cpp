@@ -624,8 +624,10 @@ std::string AgentTool::description() const {
     return "把独立任务委托给子代理。先想一个 4~16 字(英文 2~6 个词)的语义短标题填 title——名词短语或短命令,能彼此区分,"
            "不要照抄 prompt 首句、不要塞路径清单或套话;再把完整的任务说明写进 prompt。title 给人看(代理面板/日志),"
            "prompt 给子代理执行,两者各司其职。agent_type=Explore 是只读代码搜索代理;general-purpose 能研究、执行多步任务和改代码。"
-           "子代理有独立上下文,只把结论交回主对话。执行模式看 execution_mode(缺省 auto):交互会话里独立探索型任务默认后台跑,"
-           "下一步非等这份结果不可才显式写 foreground;管道/单发场景 auto 等价前台(阻塞等结论)。后台任务不能弹权限确认,"
+           "子代理有独立上下文,只把结论交回主对话。执行模式看 execution_mode(缺省 auto):交互会话里探索、生成、写代码、"
+           "调研这类独立任务用缺省 auto 即可——后台独立跑,完成后结论自动交回,主对话还能继续干别的;不要为了拿结果"
+           "习惯性写 foreground,后台结果一样会回流,只有紧接着的下一步非等这份结果不可才显式写 foreground。"
+           "管道/单发场景 auto 等价前台(阻塞等结论)。后台任务不能弹权限确认,"
            "未预先放行的操作会被拒绝。子代理看不见当前对话历史,prompt 必须自包含。";
 }
 
@@ -668,8 +670,9 @@ nlohmann::json AgentTool::input_schema() const {
     mode_prop["type"] = "string";
     mode_prop["enum"] = nlohmann::json::array({"auto", "foreground", "background"});
     mode_prop["description"] =
-        "执行模式,缺省 auto。auto:交互会话里独立探索型任务默认后台跑(结论稍后送达),"
-        "非等结果不可时再显式写 foreground;管道/单发场景 auto 等价前台(阻塞等结论)。"
+        "执行模式,缺省 auto。auto:交互会话里默认后台独立跑(结论完成后自动交回主对话,"
+        "主对话可继续干别的)——不要习惯性写 foreground,只有下一步非等这份结果不可才显式写;"
+        "管道/单发场景 auto 等价前台(阻塞等结论)。"
         "background:立刻返回任务编号,后台独立跑;background 任务不能弹权限确认,"
         "未预先放行的操作会被拒绝。foreground:本次调用阻塞等子代理结论。"
         "旧参数 run_in_background 仍认(true=background,false=foreground);"
