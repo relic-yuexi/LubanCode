@@ -142,11 +142,13 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
                                                ? delta->at("reasoning").get<std::string>()
                                                : std::string();
                 // 两者都非空:相等(镜像)按一份算;不等按优先级取
-                // reasoning_content,另一份弃掉并在诊断里点名,不装没事。
-                if (!canonical.empty() && !alias.empty() && canonical != alias) {
+                // reasoning_content,另一份弃掉并打一行诊断(整场只打一次,
+                // 逐 chunk 念叨只会刷屏),不装没事。
+                if (!canonical.empty() && !alias.empty() && canonical != alias &&
+                    !reasoning_conflict_diagnostic_printed_) {
+                    reasoning_conflict_diagnostic_printed_ = true;
                     std::cerr << "[reasoning] 同一 chunk 里 reasoning_content 与 reasoning 内容不同,"
-                              << "按声明优先级取 reasoning_content(" << canonical.size() << " 字节),"
-                              << "弃 reasoning(" << alias.size() << " 字节)\n";
+                              << "按固定优先级取 reasoning_content,弃 reasoning(此诊断整场只报一次)\n";
                 }
                 reasoning_text = !canonical.empty() ? canonical : alias;
             }

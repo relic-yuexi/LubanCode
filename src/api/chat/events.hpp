@@ -46,6 +46,7 @@ private:
     bool finished_ = false;
     int reasoning_details_blocks_ = 0;
     bool reasoning_details_diagnostic_printed_ = false;
+    bool reasoning_conflict_diagnostic_printed_ = false;
 };
 
 }  // namespace lubancode::api::chat

@@ -320,6 +320,10 @@ public:
     std::string description() const override { return target_.description(); }
     nlohmann::json input_schema() const override { return target_.input_schema(); }
     bool needs_confirm() const override { return target_.needs_confirm(); }
+    // deferred 必须转发:私有 todo 的包装表出现在延迟挂载的会话里时,
+    // 外挂工具的延迟身份不能被包装层洗掉(洗掉=未挂载也全量直挂,
+    // tool_search 的账就错了)。
+    bool deferred() const override { return target_.deferred(); }
     Result execute(const nlohmann::json& input) override { return target_.execute(input); }
 
 private:
