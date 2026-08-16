@@ -3030,11 +3030,16 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
     }
     loop->SetTurnContext(std::move(turn_suffix));
     const std::size_t history_before = loop->History().size();
-<<<<<<< HEAD
+    // 终端标题(0.30.x 第四批):跑着/等输入两态,项目·分支跟着;拿不到
+    // 焦点状态,不做"未聚焦才通知"的假判断,只在长轮收口时叫一声铃。
+    if (spinner_enabled) {
+        lubancode::cli::SetTerminalTitle(BuildTerminalTitleText(tr("notify.state_busy")));
+    }
     // usage 出账(模型分工第一期):整轮逐步 usage 带出来记进分角色台账
     // (普通 turn = normal 档);compact/抽取的后台采样在各自路径另记,
     // 不混进这里。
     lubancode::app::UsageStats turn_usage;
+    const auto turn_started = std::chrono::steady_clock::now();
     RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
             lubancode::app::HookRuntime(), spinner_enabled, transcript, todo_state(), &transcript_expanded,
             settings_local.allow_commands, settings_local.deny_commands, session_agent_tool(),
@@ -3049,24 +3054,13 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
         model_router->ledger().Record(lubancode::agent::ModelRole::Normal,
                                       step.model.empty() ? *current_model : step.model, step_usage,
                                       /*duration_ms=*/0, step.reported);
-=======
-    // 终端标题(0.30.x 第四批):跑着/等输入两态,项目·分支跟着;拿不到
-    // 焦点状态,不做"未聚焦才通知"的假判断,只在长轮收口时叫一声铃。
-    if (spinner_enabled) {
-        lubancode::cli::SetTerminalTitle(BuildTerminalTitleText(tr("notify.state_busy")));
     }
-    const auto turn_started = std::chrono::steady_clock::now();
-    RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
-            lubancode::app::HookRuntime(), spinner_enabled, transcript, todo_state(), &transcript_expanded,
-            settings_local.allow_commands, settings_local.deny_commands, session_agent_tool(),
-            recorder.has_value() ? &*recorder : nullptr);
     if (spinner_enabled) {
         lubancode::cli::SetTerminalTitle(BuildTerminalTitleText(tr("notify.state_idle")));
         const auto elapsed = std::chrono::steady_clock::now() - turn_started;
         if (elapsed > std::chrono::seconds(30)) {
             lubancode::cli::NotifyUserAttention();  // 长轮跑完叫一声,每轮至多一次
         }
->>>>>>> worktree-agent-a7ccaa1e45bd8c2d2
     }
     // 每轮结束(成功/出错/ESC 打断都算)把新增消息逐条追加落盘。
     PersistNewMessages();
