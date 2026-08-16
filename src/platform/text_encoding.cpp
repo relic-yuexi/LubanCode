@@ -185,4 +185,57 @@ std::string DescribeUtf8Issue(const std::string& field, const std::string& text)
     return out;
 }
 
+std::string Utf8DeltaGate::Feed(std::string_view delta) {
+    pending_.append(delta);
+    static constexpr char kReplacement[] = "\xEF\xBF\xBD";  // U+FFFD 的 UTF-8 编码
+
+    std::string out;
+    out.reserve(pending_.size());
+    std::size_t i = 0;
+    while (i < pending_.size()) {
+        const unsigned char first = static_cast<unsigned char>(pending_[i]);
+        if (first <= 0x7f) {
+            out += pending_[i];
+            ++i;
+            continue;
+        }
+        // 首字节声明的续字节数(与 DecodeAt 同一套判定,别写第二份解码器)。
+        std::size_t tail_count = 0;
+        if ((first & 0xe0) == 0xc0) {
+            tail_count = 1;
+        } else if ((first & 0xf0) == 0xe0) {
+            tail_count = 2;
+        } else if ((first & 0xf8) == 0xf0) {
+            tail_count = 3;
+        } else {
+            out.append(kReplacement, 3);  // 非法首字节:立即替换,不扣
+            ++i;
+            continue;
+        }
+        if (i + tail_count >= pending_.size()) {
+            break;  // 尾巴没到齐:从这里起扣住,等下一块拼齐
+        }
+        const DecodedSequence seq = DecodeAt(pending_, i);
+        if (seq.length == 0) {
+            out.append(kReplacement, 3);  // 字节齐了但不合法(续字节坏/代理/越界)
+            ++i;
+            continue;
+        }
+        out.append(pending_, i, seq.length);
+        i += seq.length;
+    }
+    pending_.erase(0, i);
+    return out;
+}
+
+std::string Utf8DeltaGate::Flush() {
+    if (pending_.empty()) {
+        return std::string();
+    }
+    // 到了流尽头还拼不齐的,就是真坏字节:逐段替换 U+FFFD,合法片段保留。
+    const std::string released = ReplaceInvalidWithFFFD(pending_);
+    pending_.clear();
+    return released;
+}
+
 }  // namespace lubancode::platform
