@@ -16,6 +16,7 @@
 
 #include "agent/context.hpp"
 #include "agent/context_events.hpp"
+#include "agent/microcompact.hpp"
 #include "agent/prefix.hpp"
 #include "agent/runtime_profile.hpp"
 #include "api/backend.hpp"
@@ -382,6 +383,25 @@ public:
 
     // 最近一次请求的结构压缩账(/context 与诊断用)。
     const StructuralCompressionStats& structural_stats() const { return structural_stats_; }
+
+    // L2 microcompact(第三期):把一趟局部摘要写进决策台账(冷区 artifact
+    // 的视图从 L1 预览换成 cheap 摘要)。这是有意改已发前缀的收拾动作:
+    // 给前缀记账点名(epoch 断因 microcompact)、清掉钉住的 sticky 视图按
+    // 新决策重算,不装无事发生。原文与仓里的 blob 不动。返回换掉的枚数。
+    int ApplyMicrocompactSummaries(const std::map<std::string, MicrocompactSummary>& summaries) {
+        const int applied = agent::ApplyMicrocompactSummaries(result_view_memo_, summaries);
+        if (applied > 0) {
+            if (pending_epoch_break_reason_.empty()) {
+                pending_epoch_break_reason_ = "microcompact";
+            }
+            sticky_view_.reset();
+            sticky_base_history_size_ = 0;
+        }
+        return applied;
+    }
+
+    // 决策台账只读口(L2 挑候选用)。
+    const ResultViewMemo& result_view_memo() const { return result_view_memo_; }
 
 private:
     api::Backend& backend_;
