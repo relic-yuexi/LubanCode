@@ -150,10 +150,12 @@ void SetAgentPanelProvider(AgentPanelProvider provider);
 // 视图切换钩子:viewed_task_id 变了(Enter 切进某只子代理 / Esc 回 main)
 // 终端层调这个,应用层把"此刻该看的会话正文"铺出来——0 = 重铺 main 的
 // 最近条目,task_id = 铺那只子代理的完整 transcript(prompt/工具调用/结果/
-// 错误)。空闲路调它前,终端层已把光标挪到旧 chrome 之下,旧帧随铺出的
-// 正文滚走;流式路由它自己(在 StdoutWriteMutex 内)先擦 footer 再铺、
+// 错误)。tail_rows = 0 整份铺(真切会话);>0 是实时流的重铺拍(追加需求
+// "查看态实时思考流"):应用层只保头几行+最近 tail_rows 行,长会话不往滚屏
+// 一秒刷一遍。空闲路调它前,终端层已把光标挪到旧 chrome 之下,旧帧随铺出
+// 的正文滚走;流式路由它自己(在 StdoutWriteMutex 内)先擦 footer 再铺、
 // 铺完重画 footer。传空钩子即清除。
-void SetAgentViewSwitchHook(std::function<void(int viewed_task_id)> hook);
+void SetAgentViewSwitchHook(std::function<void(int viewed_task_id, int tail_rows)> hook);
 
 // 面板动作(x 停止/清除、两段确认停全部)的接线口。终端层不直接碰
 // AgentTool;停止必须走正式取消接口,等任务线程报终态再改灯。

@@ -1522,6 +1522,14 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
                 config.subagent_max_active = static_cast<int>(active);
             }
         }
+        // 整轮墙钟兜底:非负整数(0 = 不限,其余坏值静默跳过)。
+        if (subagent.contains("wall_clock_timeout_secs") &&
+            subagent["wall_clock_timeout_secs"].is_number_integer()) {
+            const long long secs = subagent["wall_clock_timeout_secs"].get<long long>();
+            if (secs >= 0 && secs <= 86400) {
+                config.subagent_wall_clock_timeout_secs = static_cast<int>(secs);
+            }
+        }
     }
     // agent 段(main 与子代理共用的运行预算,规格根因一):待遇同 subagent
     // 段——坏值静默跳过,不拦人开工。max_output_tokens 缺失/null = unset。
@@ -2277,6 +2285,12 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.config.subagent.max_active = project_file->subagent_max_active;
     } else if (global_file.has_value() && global_file->subagent_max_active.has_value()) {
         result.config.subagent.max_active = global_file->subagent_max_active;
+    }
+    // 整轮墙钟兜底:项目级压全局,都没写 = 公开默认值(1800s;0 = 不限)。
+    if (project_file.has_value() && project_file->subagent_wall_clock_timeout_secs.has_value()) {
+        result.config.subagent.wall_clock_timeout_secs = project_file->subagent_wall_clock_timeout_secs;
+    } else if (global_file.has_value() && global_file->subagent_wall_clock_timeout_secs.has_value()) {
+        result.config.subagent.wall_clock_timeout_secs = global_file->subagent_wall_clock_timeout_secs;
     }
 
     // agent 段(main 与子代理共用的预算):项目级压全局,按字段各回各的

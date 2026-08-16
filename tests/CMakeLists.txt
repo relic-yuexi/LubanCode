@@ -53,6 +53,11 @@ add_executable(lubancode_tests
   test_context_tracker.cpp
   test_anthropic_request.cpp
   test_agent_tool.cpp
+  # 子代理活跃度/诊断日志/墙钟兜底/挂起服务真链路(规格《子代理活跃度
+  # 不可见与疑似挂死》):活度账阶段与流式尾巴、LUBANCODE_DEBUG_SUBAGENT
+  # 逐事件日志与隐私、墙钟收杀与强制收账、accept 后装死 socket 的
+  # stream_idle_timeout 终态。
+  test_agent_activity.cpp
   # agent_message 窄工具(主模型给运行中子代理传增量):入参/四类失败、
   # 运行名册、假 main backend 集成(inbox 收到 + 来源标签)。
   test_agent_message_tool.cpp

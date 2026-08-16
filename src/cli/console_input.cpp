@@ -112,9 +112,10 @@ AgentPanelProvider& AgentPanelProviderSlot() {
     return provider;
 }
 
-// 视图切换钩子的槽(viewed_task_id 变了才被调,见 console_input.hpp)。
-std::function<void(int)>& AgentViewSwitchHookSlot() {
-    static std::function<void(int)> hook;
+// 视图切换钩子的槽(viewed_task_id 变了才被调;tail_rows>0 = 实时流重铺拍,
+// 见 console_input.hpp)。
+std::function<void(int, int)>& AgentViewSwitchHookSlot() {
+    static std::function<void(int, int)> hook;
     return hook;
 }
 
@@ -1073,12 +1074,13 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         view_body_top.reset();
     };
     // view_hook 前后各取一次光标:正文顶行落在打印前的光标处,新帧从这
-    // 里开始,也是下一次切换要擦的顶。
-    const auto print_view_frame = [&](int viewed_after) {
+    // 里开始,也是下一次切换要擦的顶。tail_rows>0 是实时流的重铺拍(只铺
+    // 头几行+最近 N 行,见 console_input.hpp 的钩子注释)。
+    const auto print_view_frame = [&](int viewed_after, int tail_rows = 0) {
         const std::optional<platform::ScreenInfo> before = platform::GetScreenInfo();
         const auto& view_hook = AgentViewSwitchHookSlot();
         if (view_hook) {
-            view_hook(viewed_after);
+            view_hook(viewed_after, tail_rows);
         }
         if (before.has_value()) {
             view_body_top = before->cursor_y;
@@ -1162,6 +1164,25 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     int last_screen_width = -1;
     int last_screen_height = -1;
 
+    // 查看态实时流(追加需求"查看态实时思考流"):正看一只运行中子代理、
+    // 它的内容修订号动了(思考/正文增量、事件追加、阶段翻页),按 1s 节流
+    // 重铺查看帧——retained view 原地擦旧帧、铺"头三行+最近 N 行",滚屏
+    // 历史不刷屏。切进查看态那一拍记下起始修订号,免得刚切完就白铺一遍。
+    std::uint64_t live_view_revision = 0;
+    std::chrono::steady_clock::time_point live_view_last_refresh{};
+    const auto note_view_revision = [&](const std::vector<AgentPanelEntry>& entries, int viewed_task_id) {
+        live_view_revision = 0;
+        if (viewed_task_id == 0) {
+            return;
+        }
+        for (const auto& entry : entries) {
+            if (entry.task_id == viewed_task_id) {
+                live_view_revision = entry.content_revision;
+                break;
+            }
+        }
+    };
+
     while (true) {
         // ReadOne 原本会一直堵到下一枚按键，后台代理即便完成，面板也只会
         // 在用户敲键后才变。100ms 探一次队列；没键就只重画这一帧。
@@ -1195,6 +1216,37 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 print_view_frame(0);
                 reanchor_prompt_and_redraw();
                 continue;
+            }
+            // 实时流判定(追加需求):查看目标还在导航表里、修订号动了、距上
+            // 次重铺 ≥1s——重铺"头三行+尾部"一帧(reanchor_prompt_and_redraw
+            // 收尾自带整帧重画与指纹记账)。终态任务的收尾事件也会动修订号,
+            // 自然重铺一次终局(此后不再动)。
+            if (snapshot.viewed_task_id != 0) {
+                std::uint64_t viewed_revision = 0;
+                for (const auto& entry : entries) {
+                    if (entry.task_id == snapshot.viewed_task_id) {
+                        viewed_revision = entry.content_revision;
+                        break;
+                    }
+                }
+                const auto now_tick = std::chrono::steady_clock::now();
+                if (live_view_last_refresh.time_since_epoch().count() == 0) {
+                    live_view_last_refresh = now_tick;  // 进查看态后的首拍只记时不铺
+                } else if (viewed_revision != 0 && viewed_revision != live_view_revision &&
+                           now_tick - live_view_last_refresh >= std::chrono::seconds(1)) {
+                    live_view_revision = viewed_revision;
+                    live_view_last_refresh = now_tick;
+                    const std::optional<platform::ScreenInfo> live_info = platform::GetScreenInfo();
+                    const int viewport_rows = live_info.has_value()
+                                                  ? (std::max)(6, live_info->viewport_height -
+                                                                      live_info->viewport_height / 4)
+                                                  : 20;
+                    retire_idle_chrome();
+                    erase_previous_view_body();
+                    print_view_frame(snapshot.viewed_task_id, viewport_rows);
+                    reanchor_prompt_and_redraw();
+                    continue;
+                }
             }
             if (armed_expired || fingerprint_of(entries, frame, snapshot) != panel_fingerprint) {
                 redraw_with_panel(editor.CurrentRenderState(), entries);
@@ -1404,6 +1456,8 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                         retire_idle_chrome();
                         erase_previous_view_body();
                         print_view_frame(viewed_after);
+                        note_view_revision(panel_entries(), viewed_after);
+                        live_view_last_refresh = std::chrono::steady_clock::now();
                         reanchor_prompt_and_redraw();
                         continue;
                     }
@@ -1723,7 +1777,7 @@ void SetTranscriptUiHandler(TranscriptUiHandler handler) { UiHandlerSlot() = std
 
 void SetAgentPanelProvider(AgentPanelProvider provider) { AgentPanelProviderSlot() = std::move(provider); }
 
-void SetAgentViewSwitchHook(std::function<void(int viewed_task_id)> hook) {
+void SetAgentViewSwitchHook(std::function<void(int viewed_task_id, int tail_rows)> hook) {
     AgentViewSwitchHookSlot() = std::move(hook);
 }
 
@@ -2754,7 +2808,7 @@ void TurnInputListener::ThreadMain() {
                         // transcript、铺完重画 footer),这里不持锁调用。
                         const auto& view_hook = AgentViewSwitchHookSlot();
                         if (view_hook) {
-                            view_hook(viewed_after);
+                            view_hook(viewed_after, /*tail_rows=*/0);
                         }
                     }
                     refresh_footer();

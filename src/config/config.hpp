@@ -113,6 +113,13 @@ constexpr int kDefaultLengthContinuations = 1;
 constexpr int kDefaultSubagentMaxDepth = 3;
 constexpr int kDefaultSubagentMaxActive = 8;
 
+// 子代理整轮墙钟兜底(规格"detached 超时链路核查与兜底"):一只任务(含
+// 续投轮)最多跑多少秒。connect/stream_idle 超时是"单请求"的闸,这道是
+// "整轮"的最后一道——哪怕所有超时全失效、后端不理取消,任务也不能无限
+// 占着坞行。默认 30 分钟;xhigh 长思考的合法长任务撞上它只说明该显式调大
+// (subagent.wall_clock_timeout_secs),0 = 不限。
+constexpr int kDefaultSubagentWallClockTimeoutSecs = 1800;
+
 constexpr std::size_t kDefaultMemoryMaxIndexBytes = 16 * 1024;
 // 召回预算收紧(规格"召回只送命中，不送整份索引"):index.md 不再随请求
 // 注入,正文默认总预算降到 8 KiB、最多 3 条;index 字段只管 index.md 文件
@@ -410,6 +417,9 @@ struct SubagentConfig {
     // kDefaultSubagentMaxDepth / kDefaultSubagentMaxActive(默认值公开)。
     std::optional<int> max_depth;
     std::optional<int> max_active;
+    // 整轮墙钟兜底(秒):nullopt = kDefaultSubagentWallClockTimeoutSecs;
+    // 显式 0 = 不限。到点先走正常取消链,宽限期内不收口就强制收账。
+    std::optional<int> wall_clock_timeout_secs;
 };
 
 // PTC(Programmatic Tool Calling)的调用档(规格"三种调用档"节):
@@ -686,6 +696,8 @@ struct FileConfig {
     // subagent 段的 max_depth / max_active:正整数;坏值静默跳过(救命阀)。
     std::optional<int> subagent_max_depth;
     std::optional<int> subagent_max_active;
+    // subagent 段的 wall_clock_timeout_secs:非负整数(0 = 不限),坏值跳过。
+    std::optional<int> subagent_wall_clock_timeout_secs;
     // agent 段:{"agent": {"max_output_tokens": N, "length_continuations": N}}。
     // max_output_tokens 正整数(缺失/null = unset,走 provider/目录/兜底);
     // length_continuations 非负整数(0 = 关续跑)。坏值静默跳过——救命阀
