@@ -62,6 +62,12 @@ struct KeyEvent {
     char32_t ch = 0;  // 只有 kind == Char 时有意义
     std::string text;  // 只有 kind == Paste 时有意义
     std::size_t replace_before = 0;  // Paste:撤掉已逐字露出的 paste 前缀
+    // Ctrl/Alt 修饰(keymap 和弦层):platform 层把 Ctrl+字母/Alt+字母按
+    // Char 送出并置位。编辑器对带修饰的 Char 一律不当正文插入(见
+    // HandleKey 开头的守卫);分发层(console_input)在喂编辑器之前先拿
+    // 它查 keymap。默认 false,老调用点语义一字不变。
+    bool ctrl = false;
+    bool alt = false;
 
     static KeyEvent Char(char32_t c) { return KeyEvent{KeyKind::Char, c, {}, 0}; }
     static KeyEvent Paste(std::string value, std::size_t replace = 0) {

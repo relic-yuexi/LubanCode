@@ -61,6 +61,7 @@
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
+#include "cli/keymap.hpp"
 #include "cli/queue_model.hpp"
 #include "cli/slash_commands.hpp"
 #include "cli/terminal_frame.hpp"
@@ -178,30 +179,37 @@ PanelToastState& PanelToastSlot() {
     return state;
 }
 
-// 键位缝:platform 语义按键 -> 面板动作 id(PanelKey)。面板键位要换/要接
-// keymap,只动这一张小表;状态机与布局都在 cli/agent_panel(纯逻辑,单测钉)。
+// 键位缝:platform 语义按键 -> 面板动作 id(PanelKey)。0.30.x 交互抛光
+// 总账起,这层从手写小表换成 keymap 查表(Panel 作用域):用户 /keymap
+// 改绑 agent.* 动作,面板跟脚换键,这函数一个字不用改。状态机与布局仍在
+// cli/agent_panel(纯逻辑,单测钉)。
 std::optional<PanelKey> MapToPanelKey(const platform::KeyInput& key) {
-    using PK = platform::KeyInput::Kind;
-    switch (key.kind) {
-        case PK::Up:
+    // NewLine(Shift/Alt+Enter)不是和弦,不进面板,照旧插换行。
+    if (key.kind == platform::KeyInput::Kind::NewLine) {
+        return std::nullopt;
+    }
+    const auto chord = keymap::ChordFromKeyInput(key);
+    if (!chord.has_value()) {
+        return std::nullopt;
+    }
+    using keymap::ActionId;
+    switch (keymap::ActiveKeymap().Lookup(keymap::KeyScope::Panel, *chord)) {
+        case ActionId::AgentNavUp:
             return PanelKey::Up;
-        case PK::Down:
+        case ActionId::AgentNavDown:
             return PanelKey::Down;
-        case PK::Enter:
-            return PanelKey::EnterView;  // NewLine(Shift/Alt+Enter)不进面板,照旧插换行
-        case PK::Esc:
+        case ActionId::AgentView:
+            return PanelKey::EnterView;
+        case ActionId::AgentBack:
             return PanelKey::Esc;
-        case PK::CtrlX:
+        case ActionId::AgentStop:
+            return PanelKey::StopEntry;
+        case ActionId::AgentStopAllArm:
             return PanelKey::StopAllArm;
-        case PK::CtrlK:
+        case ActionId::AgentStopAllConfirm:
             return PanelKey::StopAllConfirm;
-        case PK::Char:
-            if (key.ch == U'x' || key.ch == U'X') {
-                return PanelKey::StopEntry;
-            }
-            return std::nullopt;  // 其余字母只进 composer
         default:
-            return std::nullopt;
+            return std::nullopt;  // 没绑到面板动作的键,交回 composer
     }
 }
 
@@ -359,8 +367,12 @@ std::optional<KeyEvent> MapKey(const platform::KeyInput& key) {
     switch (key.kind) {
         case PK::None:
             return std::nullopt;
-        case PK::Char:
-            return KeyEvent::Char(key.ch);
+        case PK::Char: {
+            KeyEvent event = KeyEvent::Char(key.ch);
+            event.ctrl = key.ctrl;
+            event.alt = key.alt;  // 和弦修饰随行,编辑器核心自己不当正文插
+            return event;
+        }
         case PK::Paste:
             return KeyEvent::Paste(key.text, key.replace_before);
         case PK::Backspace:

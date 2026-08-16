@@ -137,6 +137,14 @@ struct KeyInput {
     char32_t ch = 0;
     std::string text;
     std::size_t replace_before = 0;  // Paste:先撤掉光标前多少个码点，再放附件
+    // 修饰键标志(交互抛光总账:keymap 和弦层)。只对 Kind::Char 有意义:
+    // 平台层把 Ctrl+字母/Alt+字母 这类"没有专枚举"的组合按 Char 送出并
+    // 置位修饰键;编辑器核心对带修饰的 Char 一律不当正文插入,键位分发层
+    // (cli/keymap)拿它匹配和弦。专枚举键(CtrlC/CtrlO……)不置位——它们
+    // 自带语义,别处不该再当和弦二次匹配。
+    bool ctrl = false;
+    bool alt = false;
+    bool shift = false;
 };
 
 // 原始逐键模式的进入/退出(RAII)。Windows: SetConsoleMode 关掉

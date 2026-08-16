@@ -362,6 +362,8 @@ add_library(lubancode_core STATIC
   src/cli/transcript.cpp
   src/cli/agent_panel.cpp
   src/cli/bottom_chrome.cpp
+  src/cli/keymap.cpp
+  src/cli/terminal_caps.cpp
   src/cli/markdown.cpp
   src/cli/latex_math.cpp
   src/cli/diff.cpp

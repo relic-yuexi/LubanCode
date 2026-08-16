@@ -687,6 +687,15 @@ RenderState LineEditorCore::CurrentRenderState() const {
 }
 
 RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
+    // keymap 和弦守卫:带 Ctrl/Alt 修饰的 Char 不是正文(Ctrl+R/Ctrl+G/
+    // Alt+V 这类),编辑器一律不插。正常路径下分发层(console_input)
+    // 在喂编辑器之前就把这些键截走分派了;守卫是兜底——确认提示这类
+    // 单行读取没有 keymap,直接喂编辑器,修饰键到这儿安静落下,不当
+    // 正文混进答案里。
+    if (event.kind == KeyKind::Char && (event.ctrl || event.alt)) {
+        return BuildRenderState(false, false, false, false);
+    }
+
     // UI-A:非 composer 模式(确认提示、/model 选择、向导……)不认"插换行"
     // 这回事,NewLine 直接当 Enter 处理——单行读取场景语义跟升级前一字不差
     // (以前终端层遇到 VK_RETURN 不看修饰键,Shift+Enter 本来就是提交)。
