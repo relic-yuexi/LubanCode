@@ -1040,4 +1040,61 @@ std::string NowTimestamp() { return FormatLocalTime("%Y-%m-%d %H:%M:%S"); }
 
 std::string NowIdTimestamp() { return FormatLocalTime("%Y%m%d-%H%M%S"); }
 
+std::vector<PromptHistoryRecord> ExtractPromptHistory(const std::string& jsonl_content) {
+    std::vector<PromptHistoryRecord> out;
+    std::size_t line_start = 0;
+    while (line_start <= jsonl_content.size()) {
+        const std::size_t line_end = jsonl_content.find('\n', line_start);
+        const std::string line =
+            jsonl_content.substr(line_start,
+                                 line_end == std::string::npos ? std::string::npos : line_end - line_start);
+        if (!line.empty()) {
+            try {
+                const nlohmann::json parsed = nlohmann::json::parse(line);
+                // 消息行没有顶层 type;事件行(compact/title/cwd)有,跳过。
+                const bool is_message = parsed.is_object() && !parsed.contains("type") &&
+                                        parsed.contains("role") && parsed.contains("content");
+                if (is_message && parsed["role"] == "user" && parsed["content"].is_array() &&
+                    !parsed["content"].empty()) {
+                    const auto& first = parsed["content"][0];
+                    bool has_text_only = first.is_object() && first.value("type", "") == "text" &&
+                                         first.contains("text") && first["text"].is_string();
+                    if (has_text_only) {
+                        // tool_result 装在 user 消息里(工具回执),不是提问。
+                        for (const auto& block : parsed["content"]) {
+                            if (block.is_object() && block.value("type", "") == "tool_result") {
+                                has_text_only = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (has_text_only) {
+                        std::string text = first["text"].get<std::string>();
+                        // 首尾空白剥掉;空白串、slash 命令不是提问。
+                        while (!text.empty() && (text.front() == ' ' || text.front() == '\t' ||
+                                                 text.front() == '\n' || text.front() == '\r')) {
+                            text.erase(text.begin());
+                        }
+                        while (!text.empty() && (text.back() == ' ' || text.back() == '\t' ||
+                                                 text.back() == '\n' || text.back() == '\r')) {
+                            text.pop_back();
+                        }
+                        if (!text.empty() && text.front() != '/') {
+                            out.push_back(PromptHistoryRecord{std::move(text),
+                                                              parsed.value("ts", std::string())});
+                        }
+                    }
+                }
+            } catch (const std::exception&) {
+                // 坏行跳过,不废整份(与 ParseSessionFile 同一取舍)。
+            }
+        }
+        if (line_end == std::string::npos) {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+    return out;
+}
+
 }  // namespace lubancode::agent

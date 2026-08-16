@@ -26,7 +26,9 @@
 #include "cli/agent_panel.hpp"  // AgentPanelEntry/Actions(面板纯逻辑层)
 #include "cli/choice_menu.hpp"
 #include "cli/format_utils.hpp"  // StatusPanelData(状态行数据源)
+#include "cli/history_search.hpp"  // PromptHistoryDataset(Ctrl+R 数据)
 #include "cli/line_editor.hpp"
+#include "cli/mention_menu.hpp"  // FileMentionEntry(@ 提及数据)
 #include "cli/queue_model.hpp"
 #include "cli/theme.hpp"
 
@@ -128,6 +130,11 @@ enum class UiKeyAction {
     // Ctrl+L 整屏重画:终端层已作废帧锚点、清了可视区,应用层把 transcript
     // 快照重铺一遍(横幅+最近条目)。回调返回 true 表示真铺了正文。
     RepaintScreen,
+    // 0.30.x 第四批转录导航(空 composer 的 { } [ v,键位走 keymap):
+    PrevUserTurn,  // {:跳上一条用户提问,状态行写"第 N/M 轮"
+    NextUserTurn,  // }:跳下一条
+    ToScrollback,  // [:完整转录写进终端 scrollback(用终端自带搜索)
+    ViewInEditor,  // v:转录写临时 Markdown 交 $VISUAL/$EDITOR 只读查看
 };
 using TranscriptUiHandler = std::function<bool(UiKeyAction)>;
 
@@ -191,6 +198,41 @@ void ShowPanelToast(const std::string& text);
 // 提交后再说。传空钩子即清除;管道/重定向走不到逐键路径,设了也永不触发。
 void SetIdleWakeHook(std::function<bool()> hook);
 
+// Ctrl+R 提问历史反向搜索的数据源(0.30.x 第二批):应用层从 session 事件
+// 账只读现抽一份 PromptHistoryDataset(打开搜索框时取一次,范围轮换在
+// 终端层本地过滤,不反复读盘)。传空清除;管道/重定向走不到逐键路径,
+// 设了也永不触发。终端层不校验数据来源——只认喂进来的条目。
+using PromptHistoryProvider = std::function<PromptHistoryDataset()>;
+void SetPromptHistoryProvider(PromptHistoryProvider provider);
+
+// ---------------------------------------------------------------------------
+// 0.30.x 第三批:草稿 stash、@ 文件提及菜单、外部编辑器
+// ---------------------------------------------------------------------------
+
+// 草稿 stash(一格):composer.stash 动作(keymap 可绑键)一键收起当前
+// 草稿,再按取回。分账:存下时的收件目标(查看态那只子代理,0 = main)
+// 与 cwd;取回时目标或 cwd 对不上就拒(给甲写的话不送给乙)。只存内存,
+// 不落盘——未发送内容不该进任何存档,进程退出即弃(隐私上明确的取舍)。
+struct ComposerStashSnapshot {
+    bool has = false;
+    std::string text;
+    int target_task_id = 0;
+    std::string cwd;
+};
+bool ComposerStashHasContent();
+ComposerStashSnapshot ComposerStashPeek();
+void ComposerStashDiscard();
+
+// @ 文件提及菜单的数据源:应用层扫 cwd/Git 根(排除 .git/构建产物)给
+// 相对路径清单。缓存归应用层(索引可能上千条,不许每键一扫);终端层每
+// 键拿清单做模糊匹配(纯函数 FuzzyMatchMentions,便宜)。传空清除。
+using FileMentionProvider = std::function<std::vector<FileMentionEntry>()>;
+void SetFileMentionProvider(FileMentionProvider provider);
+
+// 外部编辑器($VISUAL/$EDITOR)读回的草稿转换:CRLF 归一成 '\n'、剥编辑器
+// 补的一个行尾换行。纯函数,测试钉着。
+std::string NormalizeEditorDraft(std::string bytes);
+
 // 0.17.0:常驻状态行(composer 输入框下横线之下那一行)要展示的会话数据。
 // main.cpp 在每轮给主提示符之前更新一次(/model 切换、context 百分比刷新
 // 全走这一条路,反正每轮循环都会路过);终端层每帧重画状态行时读它,配上
@@ -218,6 +260,20 @@ void UpdateStatusLineContext(int context_percent, std::int64_t used_tokens, std:
 // 状态行数据源此刻的快照(拿 StdoutWriteMutex 拷贝):测试/诊断用,常规
 // 渲染路径不走这个(每帧重画在 BuildStatusLine 里现读)。
 StatusPanelData SnapshotStatusLineValues();
+
+// ---------------------------------------------------------------------------
+// 0.30.x 第四批:终端标题与"轮到你了"
+// ---------------------------------------------------------------------------
+
+// 终端标题(OSC 0):真控制台才写,管道/重定向不添转义。/title 管的是会话
+// 存档名,这里管的是终端 tab 上的那一枚(项目 · 分支 · 状态),两本账分开。
+void SetTerminalTitle(const std::string& text);
+
+// "轮到你了":BEL 一声。拿不到终端焦点状态(那要窗口管理器配合,诚实
+// 承认不知),所以不做"未聚焦才响"的判断——由调用方按"长任务跑完/等待
+// 确认"节流,只在状态翻转时叫一声,不刷风暴。桌面通知(OSC 9;9/777)
+// 支持面参差,能力探测层报 Unknown,这里不假装会发。
+void NotifyUserAttention();
 
 // M11(0.10.0):真控制台此刻的显示宽度(列数),给分界线(cli::BuildDividerLine)
 // 探测用。查的是 stdout 那个句柄(跟 DetectConsoleCapability 一致)——分界线

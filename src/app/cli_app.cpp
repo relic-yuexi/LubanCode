@@ -55,6 +55,7 @@
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
 #include "cli/image_input.hpp"
+#include "cli/keymap.hpp"
 #include "cli/live_transcript.hpp"
 #include "cli/worktree.hpp"
 #include "cli/markdown.hpp"
@@ -321,6 +322,15 @@ int RunCli(const std::vector<std::string>& args) {
     const lubancode::config::ModelCatalog model_catalog = lubancode::config::LoadModelCatalog();
     for (const auto& warning : model_catalog.warnings) {
         std::cout << trf("catalog.warning", warning) << "\n";
+    }
+
+    // 用户键位覆盖(~/.lubancode/keymap.json,交互抛光总账的 keymap 层):
+    // 启动读一次,坏条目只告警跳过(该项回默认),不拦人。刻意不读项目
+    // 目录——键位是用户全局的,项目配置不许暗改(规格第 10 条)。
+    if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
+        for (const auto& warning : lubancode::cli::keymap::LoadActiveKeymapOverrides(*luban_dir)) {
+            std::cout << trf("keymap.override_warning", warning) << "\n";
+        }
     }
 
     // settings.local.json(项目级本地权限):启动读一次,坏 JSON 只告警跳过

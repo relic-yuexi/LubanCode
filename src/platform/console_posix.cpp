@@ -377,7 +377,15 @@ std::optional<KeyInput> KeyReader::ReadOne() {
             out.kind = KeyInput::Kind::NewLine;  // Alt+Enter:ESC + CR
             return out;
         }
-        // 其余 Alt+<key> 组合暂不映射,整个吃掉。
+        if (b1 >= 0x21 && b1 <= 0x7e) {
+            // Alt+<可打印键>(ESC + 字节):按 Char 送出并置 alt,交给
+            // cli/keymap 和弦层分派。字母折小写,与 Windows 侧归一。
+            out.kind = KeyInput::Kind::Char;
+            out.ch = static_cast<char32_t>(b1 >= 'A' && b1 <= 'Z' ? b1 - 'A' + 'a' : b1);
+            out.alt = true;
+            return out;
+        }
+        // 其余 Alt+<控制键> 组合暂不映射,整个吃掉。
         return KeyInput{};
     }
     if (b0 == '\r' || b0 == '\n') {
@@ -420,8 +428,24 @@ std::optional<KeyInput> KeyReader::ReadOne() {
         out.kind = KeyInput::Kind::CtrlK;  // 子代理面板:停止全部(两段确认第二段)
         return out;
     }
+    if (b0 == 0x10) {
+        out.kind = KeyInput::Kind::CtrlP;  // 历史:上一条(明确别名,不受多行位置影响)
+        return out;
+    }
+    if (b0 == 0x0e) {
+        out.kind = KeyInput::Kind::CtrlN;  // 历史:下一条
+        return out;
+    }
+    if (b0 >= 0x01 && b0 <= 0x1a) {
+        // Ctrl+字母(未列专枚举的那批):按 Char 送出并置 ctrl,交给
+        // cli/keymap 和弦层分派(编辑器核心对带修饰的 Char 不当正文插)。
+        out.kind = KeyInput::Kind::Char;
+        out.ch = static_cast<char32_t>(b0 - 0x01 + 'a');
+        out.ctrl = true;
+        return out;
+    }
     if (b0 < 0x20) {
-        return KeyInput{};  // 其余控制字符不映射
+        return KeyInput{};  // 其余控制字符(NUL/Ctrl+\ 那批)不映射
     }
 
     // UTF-8 解码:终端天然给 UTF-8 字节,按首字节定长收继续字节。坏序列

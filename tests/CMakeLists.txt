@@ -82,6 +82,13 @@ add_executable(lubancode_tests
   test_agent_panel.cpp
   # 0.29.x 底栏一本帧账:行序/高度/指纹纯逻辑(空闲与流式共用)。
   test_bottom_chrome.cpp
+  # 交互抛光总账第一步:Action/Keymap/Capability 三层地基。
+  test_keymap.cpp
+  test_terminal_caps.cpp
+  # 第二批:Ctrl+R 提问历史反向搜索(索引/过滤/状态机/渲染行)。
+  test_history_search.cpp
+  # 第三批:@ 提及菜单纯逻辑 + 编辑器整枚删 + 编辑器草稿归一。
+  test_mention_menu.cpp
   test_agent_inbox.cpp
   test_markdown.cpp
   test_latex_math.cpp

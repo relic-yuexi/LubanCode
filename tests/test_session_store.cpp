@@ -923,3 +923,37 @@ TEST_CASE("回放: v1 与 v2 混排,活状态逐次替换,epoch/manifest 记账"
     CHECK(FirstText(session->messages[0]).find("存档二") != std::string::npos);
     CHECK(FirstText(session->messages[2]) == "u3");
 }
+
+// ---------------------------------------------------------------------------
+// ExtractPromptHistory(0.30.x Ctrl+R 反向搜索):只读事件账的用户提问行。
+// ---------------------------------------------------------------------------
+TEST_CASE("ExtractPromptHistory:只收用户纯文本提问,事件行/工具回执/slash 不进") {
+    using agent::SerializeSessionMessage;
+    const api::Message user_text = api::Message{api::Role::User, {api::TextBlock{"怎么配代理"}}};
+    const api::Message user_slash = api::Message{api::Role::User, {api::TextBlock{"/model gpt"}}};
+    const api::Message user_tool_result =
+        api::Message{api::Role::User, {api::ToolResultBlock{"tool-1", "命令输出", false}}};
+    const api::Message assistant_text =
+        api::Message{api::Role::Assistant, {api::TextBlock{"这样配:……"}}};
+    const std::string jsonl =
+        SerializeSessionMeta(agent::SessionMeta{1, "anthropic", "m", "d", "t"}) + "\n" +
+        SerializeSessionMessage(user_text, "2026-08-16 10:00:00") + "\n" +
+        agent::SerializeTitleEvent("标题", "2026-08-16 10:00:01") + "\n" +
+        SerializeSessionMessage(user_slash, "2026-08-16 10:01:00") + "\n" +
+        SerializeSessionMessage(assistant_text, "2026-08-16 10:02:00") + "\n" +
+        SerializeSessionMessage(user_tool_result, "2026-08-16 10:03:00") + "\n" + "{bad json line" +
+        "\n";
+    const auto records = agent::ExtractPromptHistory(jsonl);
+    REQUIRE(records.size() == 1);
+    CHECK(records[0].text == "怎么配代理");
+    CHECK(records[0].ts == "2026-08-16 10:00:00");
+
+    // 空串/纯空白提问不进;多行提问整段收(拼 '\n'),首尾空白剥掉。
+    const api::Message multiline = api::Message{api::Role::User, {api::TextBlock{"第一行\n第二行\n\n  "}}};
+    const api::Message blank = api::Message{api::Role::User, {api::TextBlock{"   "}}};
+    const std::string jsonl2 =
+        SerializeSessionMessage(multiline, "ts1") + "\n" + SerializeSessionMessage(blank, "ts2") + "\n";
+    const auto records2 = agent::ExtractPromptHistory(jsonl2);
+    REQUIRE(records2.size() == 1);
+    CHECK(records2[0].text == "第一行\n第二行");
+}

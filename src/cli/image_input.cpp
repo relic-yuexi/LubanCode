@@ -276,10 +276,22 @@ std::vector<std::string> ParseInlineImagePaths(std::string_view input) {
         if (begin == input.size()) {
             continue;
         }
-        const char quote = input[begin] == '"' || input[begin] == '\'' ? input[begin++] : '\0';
+        // 0.30.x 起角括号也是引式(@<带 空格 的路径>,Alt+V 贴图与 @ 提及
+        // 菜单插的就是这种):开 '<' 闭 '>'。
+        char quote = '\0';
+        char closer = '\0';
+        if (input[begin] == '"' || input[begin] == '\'') {
+            quote = input[begin];
+            closer = quote;
+            ++begin;
+        } else if (input[begin] == '<') {
+            quote = '<';
+            closer = '>';
+            ++begin;
+        }
         std::size_t end = begin;
         if (quote != '\0') {
-            while (end < input.size() && input[end] != quote) {
+            while (end < input.size() && input[end] != closer) {
                 ++end;
             }
             if (end == input.size() || !LooksLikeImagePath(input.substr(begin, end - begin))) {

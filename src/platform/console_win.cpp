@@ -588,6 +588,12 @@ std::optional<KeyInput> KeyReader::ReadOne() {
     } else if (ctrl && ke.wVirtualKeyCode == 'L') {
         reset_text_run();
         out.kind = KeyInput::Kind::CtrlL;  // 底栏自救:整屏重画
+    } else if (ctrl && ke.wVirtualKeyCode == 'P') {
+        reset_text_run();
+        out.kind = KeyInput::Kind::CtrlP;  // 历史:上一条(明确别名,不受多行位置影响)
+    } else if (ctrl && ke.wVirtualKeyCode == 'N') {
+        reset_text_run();
+        out.kind = KeyInput::Kind::CtrlN;  // 历史:下一条
     } else if (ke.wVirtualKeyCode == VK_BACK) {
         reset_text_run();
         out.kind = KeyInput::Kind::Backspace;
@@ -648,6 +654,26 @@ std::optional<KeyInput> KeyReader::ReadOne() {
         }
         reset_text_run();
         out.kind = KeyInput::Kind::Esc;
+    } else if (ke.uChar.UnicodeChar != 0 && ctrl && !alt &&
+               ke.wVirtualKeyCode >= 'A' && ke.wVirtualKeyCode <= 'Z') {
+        // Ctrl+字母(未列专枚举的那批):按 Char 送出并置 ctrl,交给
+        // cli/keymap 和弦层分派(编辑器核心对带修饰的 Char 不当正文插)。
+        // 输入法/死键不会走到这——它们不带 VK_ 字母码。
+        reset_text_run();
+        out.kind = KeyInput::Kind::Char;
+        out.ch = static_cast<char32_t>(ke.wVirtualKeyCode - 'A' + 'a');
+        out.ctrl = true;
+    } else if (ke.uChar.UnicodeChar != 0 && !ctrl && alt &&
+               ((ke.wVirtualKeyCode >= 'A' && ke.wVirtualKeyCode <= 'Z') ||
+                (ke.wVirtualKeyCode >= '0' && ke.wVirtualKeyCode <= '9'))) {
+        // Alt+字母/数字:同上,作和弦送出(Alt+V 贴图这类)。原先是当
+        // 普通字符插进编辑器——按住 Alt 打字不是正常输入姿势,改判和弦。
+        reset_text_run();
+        out.kind = KeyInput::Kind::Char;
+        out.ch = static_cast<char32_t>(ke.wVirtualKeyCode >= 'A' && ke.wVirtualKeyCode <= 'Z'
+                                           ? ke.wVirtualKeyCode - 'A' + 'a'
+                                           : ke.wVirtualKeyCode);
+        out.alt = true;
     } else if (ke.uChar.UnicodeChar != 0 && !ctrl) {
         const wchar_t wc = ke.uChar.UnicodeChar;
         constexpr ULONGLONG kRapidTextGapMs = 50;

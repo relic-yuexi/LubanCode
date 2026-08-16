@@ -14,6 +14,7 @@
 using lubancode::cli::BuiltinTheme;
 using lubancode::cli::DetectMarkdownStructure;
 using lubancode::cli::DisplayWidthUtf8;
+using lubancode::cli::MarkdownToPlainText;
 using lubancode::cli::RenderMarkdown;
 
 namespace {
@@ -485,5 +486,28 @@ TEST_CASE("RenderMarkdown: 表格超宽仍按列截断加省略号,不软换行"
         }
     }
     CHECK(truncated);  // 表格靠列对齐,折行会毁对齐——仍截断
+}
+
+TEST_CASE("MarkdownToPlainText:剥标记留正文,围栏内一字不动") {
+    const std::string markdown =
+        "## 标题行\n"
+        "**粗体** 与 *斜体* 与 `行内码`\n"
+        "[链接文字](https://example.com) 收尾\n"
+        "```cpp\n"
+        "int x = *ptr;  // 围栏内的星与斜杠不动\n"
+        "```\n"
+        "- 列表项";
+    const std::string plain = MarkdownToPlainText(markdown);
+    CHECK(plain.find("##") == std::string::npos);       // 标题井号剥掉
+    CHECK(plain.find("标题行") != std::string::npos);
+    CHECK(plain.find("*") != std::string::npos);        // 围栏内的 * 留着
+    CHECK(plain.find("粗体") != std::string::npos);
+    CHECK(plain.find("`") == std::string::npos);        // 围栏外的反引号剥掉
+    CHECK(plain.find("行内码") != std::string::npos);
+    CHECK(plain.find("https://") == std::string::npos); // 链接只留文字
+    CHECK(plain.find("链接文字") != std::string::npos);
+    CHECK(plain.find("int x = *ptr;") != std::string::npos);  // 围栏内容原样
+    CHECK(plain.find("```") == std::string::npos);      // 围栏标记行不进
+    CHECK(plain.find("- 列表项") != std::string::npos);
 }
 

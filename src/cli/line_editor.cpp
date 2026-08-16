@@ -11,6 +11,37 @@ namespace {
 
 constexpr char32_t kPasteTokenBase = 0xF0000;
 
+// @ 提及词元的终点标点(与 cli/mention_menu.cpp 的 IsMentionBoundary 同一
+// 口径,路径里不会出现的逗号顿号闭括号这批;'.' 不算——路径自己带点)。
+bool MentionBoundaryChar(char32_t c) {
+    switch (c) {
+        case U',':
+        case U';':
+        case U':':
+        case U'!':
+        case U'?':
+        case U')':
+        case U']':
+        case U'}':
+        case U'"':
+        case U'\'':
+        case U'，':
+        case U'、':
+        case U'；':
+        case U'。':
+        case U'：':
+        case U'！':
+        case U'？':
+        case U'）':
+        case U'】':
+        case U'》':
+        case U'」':
+            return true;
+        default:
+            return false;
+    }
+}
+
 // 手写 UTF-8 -> UTF-32 解码已升为公开函数 Utf8ToUtf32(0.28.x 取回排队
 // 消息装回编辑 buffer 也要用),本体搬去下面的公开区;非法起始字节、序列
 // 被截断、续字节不是 10xxxxxx 一律跳过一个字节继续——这是给自己代码拼
@@ -374,6 +405,32 @@ void LineEditorCore::LoadText(const std::u32string& joined) {
     ResetHistoryBrowsing();
 }
 
+void LineEditorCore::LoadTextWithCursor(const std::u32string& joined, std::size_t cursor) {
+    LoadJoined(joined);
+    tab_cycle_.reset();
+    menu_selection_.reset();
+    ResetHistoryBrowsing();
+    if (cursor > joined.size()) {
+        cursor = joined.size();  // 末尾(行数-1 的行尾)已是缺省,钳界即可
+        return;
+    }
+    // 拼接串下标 -> (row, col):逐行走,越过一行要跨过它 + 换行符。
+    std::size_t row = 0;
+    std::size_t col = cursor;
+    for (; row + 1 < lines_.size(); ++row) {
+        const std::size_t step = lines_[row].size() + 1;  // 行内容 + '\n'
+        if (col < step) {
+            break;
+        }
+        col -= step;
+    }
+    if (row >= lines_.size()) {
+        row = lines_.size() - 1;
+    }
+    row_ = row;
+    col_ = (std::min)(col, lines_[row_].size());
+}
+
 void LineEditorCore::InsertChar(char32_t ch) {
     lines_[row_].insert(col_, 1, ch);
     ++col_;
@@ -467,8 +524,39 @@ void LineEditorCore::InsertNewLine() {
     ResetHistoryBrowsing();
 }
 
-void LineEditorCore::DeleteBackward() {
-    if (col_ > 0) {
+void LineEditorCore::DeleteBackward() {    if (col_ > 0) {
+        // 0.30.x @ 提及词元整枚删:光标恰在词元尾(删一个字会留下半个词
+        // 元)时整枚拿走;光标在词元中间(正改查询)仍是普通退格。词元
+        // 由前向解析定位(与 mention_menu 同一套判定:'@' 在词首、后随
+        // 非空白段;@<...> 形式闭角收口,内容允许空白)。
+        const std::u32string& line = lines_[row_];
+        for (std::size_t at = 0; at < col_; ++at) {
+            if (line[at] != U'@' || (at > 0 && line[at - 1] != U' ' && line[at - 1] != U'\t')) {
+                continue;  // 不在词首的 '@' 是正文
+            }
+            std::size_t end = at + 1;
+            if (end < line.size() && line[end] == U'<') {
+                const std::size_t close = line.find(U'>', end + 1);
+                if (close != std::u32string::npos) {
+                    end = close + 1;
+                } else {
+                    continue;  // 闭角没配上的还在编辑,不算完整词元
+                }
+            } else {
+                // 词元终点与 mention_menu 的 IsMentionBoundary 同一套口径
+                // (空白 + 逗号顿号这类路径里不会出现的标点),两边一起改。
+                while (end < line.size() && line[end] != U' ' && line[end] != U'\t' &&
+                       !MentionBoundaryChar(line[end])) {
+                    ++end;
+                }
+            }
+            if (end == col_) {
+                lines_[row_].erase(at, end - at);
+                col_ = at;
+                ResetHistoryBrowsing();
+                return;
+            }
+        }
         lines_[row_].erase(col_ - 1, 1);
         --col_;
         ResetHistoryBrowsing();
@@ -687,6 +775,15 @@ RenderState LineEditorCore::CurrentRenderState() const {
 }
 
 RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
+    // keymap 和弦守卫:带 Ctrl/Alt 修饰的 Char 不是正文(Ctrl+R/Ctrl+G/
+    // Alt+V 这类),编辑器一律不插。正常路径下分发层(console_input)
+    // 在喂编辑器之前就把这些键截走分派了;守卫是兜底——确认提示这类
+    // 单行读取没有 keymap,直接喂编辑器,修饰键到这儿安静落下,不当
+    // 正文混进答案里。
+    if (event.kind == KeyKind::Char && (event.ctrl || event.alt)) {
+        return BuildRenderState(false, false, false, false);
+    }
+
     // UI-A:非 composer 模式(确认提示、/model 选择、向导……)不认"插换行"
     // 这回事,NewLine 直接当 Enter 处理——单行读取场景语义跟升级前一字不差
     // (以前终端层遇到 VK_RETURN 不看修饰键,Shift+Enter 本来就是提交)。
@@ -916,6 +1013,18 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
             state.esc_pressed = true;
             return state;
         }
+        case KeyKind::CtrlP:
+            // 明确的历史别名:不受多行光标位置影响,也不碰草稿外的事。
+            // 非 composer 读取(确认提示/编号选择)没有历史概念,当死键。
+            if (composer_) {
+                MoveHistory(true);
+            }
+            break;
+        case KeyKind::CtrlN:
+            if (composer_) {
+                MoveHistory(false);
+            }
+            break;
         case KeyKind::CtrlO: {
             // UI-D:紧凑/详细全局切换请求。只在 composer(主提示符)下转发,
             // 确认提示、/model 选择这些单行读取不认这个键(什么都不发生)。

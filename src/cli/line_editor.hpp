@@ -49,6 +49,9 @@ enum class KeyKind {
               // 语义一个字都不变
     CtrlC,
     CtrlD,
+    CtrlP,  // 0.30.x 多行历史边缘:上一条历史的明确别名——多行内 Up/Down
+            // 先走行间移动,Ctrl+P/Ctrl+N 永远直翻历史
+    CtrlN,  // 同上:下一条历史
     Delete,  // Del 键:composer 编辑里暂不理会(排队待发消息浏览才用);枚举
              // 与 platform::KeyInput::Kind 保持平行,终端层好搬运
     Esc,   // M10:ESC 打断/清行。终端层只在真控制台下(VK_ESCAPE)产出这个
@@ -62,6 +65,12 @@ struct KeyEvent {
     char32_t ch = 0;  // 只有 kind == Char 时有意义
     std::string text;  // 只有 kind == Paste 时有意义
     std::size_t replace_before = 0;  // Paste:撤掉已逐字露出的 paste 前缀
+    // Ctrl/Alt 修饰(keymap 和弦层):platform 层把 Ctrl+字母/Alt+字母按
+    // Char 送出并置位。编辑器对带修饰的 Char 一律不当正文插入(见
+    // HandleKey 开头的守卫);分发层(console_input)在喂编辑器之前先拿
+    // 它查 keymap。默认 false,老调用点语义一字不变。
+    bool ctrl = false;
+    bool alt = false;
 
     static KeyEvent Char(char32_t c) { return KeyEvent{KeyKind::Char, c, {}, 0}; }
     static KeyEvent Paste(std::string value, std::size_t replace = 0) {
@@ -232,6 +241,11 @@ public:
     // 与"手敲新消息"从这一刻起走同一套光标/退格/粘贴/软换行能力,而不是
     // 塞进一只只会尾删的临时 buffer。历史浏览位也复位(取回的不是历史)。
     void LoadText(const std::u32string& joined);
+
+    // 0.30.x 外部编辑器读回/提及插入:同 LoadText,但光标按拼接串里的
+    // 码点下标落位(编辑器回来光标留在原处;@ 词元替换后光标落词元尾)。
+    // cursor 越界按末尾算。
+    void LoadTextWithCursor(const std::u32string& joined, std::size_t cursor);
 
     // 方向键直选菜单(单行 / 开头按 ↓ 进入)开关,默认开。忙碌排队输入框
     // (TurnInputListener 的本地编辑器)关掉:流式期间 Up/Down 分给代理面

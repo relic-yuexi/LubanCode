@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(lubancode VERSION 0.26.9 LANGUAGES CXX)
+project(lubancode VERSION 0.26.10 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -247,13 +247,15 @@ if(WIN32)
     src/platform/paths_win.cpp
     src/platform/process_win.cpp
     src/platform/console_win.cpp
-    src/platform/peer_transport_win.cpp)
+    src/platform/peer_transport_win.cpp
+    src/platform/clipboard_win.cpp)
 else()
   set(_lubancode_platform_sources
     src/platform/paths_posix.cpp
     src/platform/process_posix.cpp
     src/platform/console_posix.cpp
-    src/platform/peer_transport_posix.cpp)
+    src/platform/peer_transport_posix.cpp
+    src/platform/clipboard_posix.cpp)
 endif()
 
 add_library(lubancode_core STATIC
@@ -367,6 +369,10 @@ add_library(lubancode_core STATIC
   src/cli/transcript.cpp
   src/cli/agent_panel.cpp
   src/cli/bottom_chrome.cpp
+  src/cli/keymap.cpp
+  src/cli/terminal_caps.cpp
+  src/cli/history_search.cpp
+  src/cli/mention_menu.cpp
   src/cli/markdown.cpp
   src/cli/latex_math.cpp
   src/cli/diff.cpp
@@ -377,6 +383,10 @@ target_include_directories(lubancode_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include   # M7:C ABI 插件对外头文件 luban_plugin.h
   ${CMAKE_BINARY_DIR}/generated)        # 0.19.x:embedded_prompts.hpp(提示词嵌入)
 target_link_libraries(lubancode_core PUBLIC cpr::cpr nlohmann_json::nlohmann_json)
+if(WIN32)
+  # WIC(Windows Imaging Component):剪贴板位图 CF_DIB -> PNG 转码(Alt+V 直贴)。
+  target_link_libraries(lubancode_core PRIVATE windowscodecs)
+endif()
 target_link_libraries(lubancode_core PRIVATE lubancode_lua)  # M7:Lua 插件运行时
 target_link_libraries(lubancode_core PRIVATE yaml-cpp::yaml-cpp)  # 项目记忆 front matter(schema 3)
 target_compile_features(lubancode_core PUBLIC cxx_std_23)

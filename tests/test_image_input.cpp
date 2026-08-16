@@ -46,6 +46,14 @@ TEST_CASE("图片路径识别: @路径和带空格的引号路径") {
     CHECK(paths[1] == "shots/last one.JPEG");
 }
 
+TEST_CASE("图片路径识别:角括号引式(@<带 空格 的路径>,Alt+V 贴图插的就是这种)") {
+    const auto paths = cli::ParseInlineImagePaths("贴 @<C:/Users/谁 的 图/paste 1.png> 完");
+    REQUIRE(paths.size() == 1);
+    CHECK(paths[0] == "C:/Users/谁 的 图/paste 1.png");
+    // 角括号里不是图片:留正文。
+    CHECK(cli::ParseInlineImagePaths("@<docs/带 空格>").empty());
+}
+
 TEST_CASE("普通 @词不是图片:留在正文,不进图片入口") {
     // 内联候选只认图片模样的扩展名;@cache/@todo/邮箱/代码注解原样留正文。
     CHECK(cli::ParseInlineImagePaths("@cache").empty());

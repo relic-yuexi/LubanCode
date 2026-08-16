@@ -75,6 +75,8 @@
 #include "cli/live_transcript.hpp"
 #include "cli/worktree.hpp"
 #include "cli/markdown.hpp"
+#include "cli/keymap.hpp"
+#include "cli/mention_menu.hpp"
 #include "cli/provider_wizard.hpp"
 #include "cli/record_command.hpp"
 #include "cli/setup_wizard.hpp"
@@ -128,6 +130,7 @@
 #include "platform/console.hpp"
 #include "platform/terminal_batch.hpp"
 #include "platform/paths.hpp"
+#include "platform/clipboard.hpp"
 
 namespace lubancode::app {
 
@@ -335,6 +338,20 @@ private:
     void RunPeerTurn(const std::string& text, bool silent = false,
                      memory::QueryOrigin origin = memory::QueryOrigin::User);
     void PumpSteeringToSubagents();
+    // Ctrl+R 提问历史搜索的数据源(0.30.x 第二批):只读 session 事件账
+    // (存档 JSONL 的用户提问行)拼整份 PromptHistoryDataset。
+    lubancode::cli::PromptHistoryDataset CollectPromptHistory();
+    // /copy [plain](0.30.x 第二批):复制上一段完整答话到剪贴板。
+    void HandleCopyCommand(const std::string& raw_args);
+    // @ 提及(0.30.x 第三批):文件索引(按根缓存)与提交前校验/账单。
+    std::vector<lubancode::cli::FileMentionEntry> FileMentionIndexSnapshot();
+    // /keymap(0.30.x 第四批):列/改绑/复位键位,写用户级 keymap.json。
+    void HandleKeymapCommand(const std::string& raw_args);
+    // 终端标题模板:项目短名 · 分支 · 状态(0.30.x 第四批)。
+    std::string BuildTerminalTitleText(const std::string& state_word) const;
+    // 返回:第一段是错误(非空 = 拦下这一轮不发送),第二段是给模型的
+    // 提及账(空 = 没有)。
+    std::pair<std::string, std::string> BuildMentionLedger(const std::string& content);
     void EnsureMemoryTool();
     void PrintMemoryUsage() const;
     void HandleMemoryCommand(const std::string& raw_args);
@@ -432,6 +449,9 @@ private:
 
     // ---- UI 状态 ----
     std::vector<lubancode::cli::TranscriptItem> transcript;
+    // @ 提及文件索引(第三批):按根缓存,根变了重扫(cwd/worktree 切换)。
+    std::vector<lubancode::cli::FileMentionEntry> mention_index_;
+    std::string mention_index_root_;
     std::uint64_t agent_panel_revision_ = 0;  // SetAgentPanelProvider 的缓存
     std::vector<lubancode::tools::AgentTaskSummary> agent_panel_tasks_;  // 轻量全量(不截 8 只)
     // Ctrl+O 全局开关,RunTurn 里新条目也按它画。atomic<bool>:回合执行期间
@@ -439,6 +459,7 @@ private:
     // 在这条跨线程路径上的可见性问题。
     std::atomic<bool> transcript_expanded{false};
     int focus_index = -1;                    // 焦点条目的 transcript 下标,-1 = 无焦点
+    int nav_turn_index_ = -1;                // { } 轮次导航的当前轮(-1 = 未开始,起手最近一轮)
     bool focus_view_active = false;          // 正在聚焦查看
     std::atomic<bool> expand_latest{false};  // Ctrl+O:inline 展开最近一条
     // 子代理查看态的 Ctrl+O(追加需求"查看态实时思考流"):查看帧里流式
@@ -783,6 +804,14 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
         return session_agent_tool() != nullptr && session_agent_tool()->HasUndeliveredCompletions();
     });
 
+    // Ctrl+R 提问历史搜索的数据源(0.30.x 第二批):只读 session 事件账,
+    // 打开搜索框时取一次(范围轮换在终端层本地过滤,不反复读盘)。
+    lubancode::cli::SetPromptHistoryProvider([this]() { return CollectPromptHistory(); });
+
+    // @ 文件提及菜单的数据源(0.30.x 第三批):按 Git 根(没有就 cwd)扫
+    // 一份相对路径清单,根变了才重扫;排除 .git/构建产物与隐藏目录。
+    lubancode::cli::SetFileMentionProvider([this]() { return FileMentionIndexSnapshot(); });
+
     // -----------------------------------------------------------------------
     // UI-D(0.16.0):Ctrl+O 紧凑/详细 + 焦点导航 + Ctrl+E 聚焦查看。
     // 按键语义翻译在 LineEditorCore(composer 空不空、键是什么),转发管道
@@ -953,6 +982,8 @@ InteractiveSession::~InteractiveSession() {
     lubancode::cli::SetAgentViewSwitchHook(nullptr);
     lubancode::cli::SetAgentPanelActions(lubancode::cli::AgentPanelActions{});
     lubancode::cli::SetIdleWakeHook(nullptr);
+    lubancode::cli::SetPromptHistoryProvider(nullptr);
+    lubancode::cli::SetFileMentionProvider(nullptr);
 }
 
 // 后台子代理面板:轻量全量列表(0.28.x 起不截 8 只,详情另走 BuildAgentTaskDetail;
@@ -1394,6 +1425,129 @@ bool InteractiveSession::HandleTranscriptUi(lubancode::cli::UiKeyAction action) 
             PrintRecentItems(count > 0 ? 10 : 0);
             return true;
         }
+        case cli::UiKeyAction::PrevUserTurn:
+        case cli::UiKeyAction::NextUserTurn: {
+            // { / }:在用户提问(轮次)之间走。轮次从活 history 数(非 slash
+            // 的用户消息),屏幕上给选中轮的正文摘要,状态行写"第 N/M 轮"。
+            std::vector<std::size_t> turn_indexes;
+            for (std::size_t i = 0; i < loop->History().size(); ++i) {
+                const auto& message = loop->History()[i];
+                if (message.role != lubancode::api::Role::User || message.content.empty()) {
+                    continue;
+                }
+                const auto* text = std::get_if<lubancode::api::TextBlock>(&message.content.front());
+                if (text == nullptr || text->text.empty() || text->text.front() == '/') {
+                    continue;
+                }
+                bool has_tool_result = false;
+                for (const auto& block : message.content) {
+                    if (std::holds_alternative<lubancode::api::ToolResultBlock>(block)) {
+                        has_tool_result = true;
+                        break;
+                    }
+                }
+                if (!has_tool_result) {
+                    turn_indexes.push_back(i);
+                }
+            }
+            if (turn_indexes.empty()) {
+                return false;
+            }
+            const bool older = action == cli::UiKeyAction::PrevUserTurn;
+            if (nav_turn_index_ < 0) {
+                nav_turn_index_ = static_cast<int>(turn_indexes.size()) - 1;  // 起手最近一轮
+            } else if (older && nav_turn_index_ > 0) {
+                --nav_turn_index_;
+            } else if (!older && nav_turn_index_ + 1 < static_cast<int>(turn_indexes.size())) {
+                ++nav_turn_index_;
+            }
+            const std::size_t turn = turn_indexes[static_cast<std::size_t>(nav_turn_index_)];
+            const auto& message = loop->History()[turn];
+            const auto* text = std::get_if<lubancode::api::TextBlock>(&message.content.front());
+            std::cout << "\n"
+                      << theme.stats
+                      << trf("ui.turn_nav", nav_turn_index_ + 1, turn_indexes.size()) << theme.reset << "\n";
+            if (text != nullptr) {
+                const std::string clipped = text->text.substr(0, 400);
+                std::cout << theme.stats << clipped << (text->text.size() > 400 ? "…" : "")
+                          << theme.reset << "\n";
+            }
+            return true;
+        }
+        case cli::UiKeyAction::ToScrollback: {
+            // [:完整转录写进终端 scrollback——用终端自带搜索找路。条目按
+            // 当前展开档铺,压缩点/截断在 FormatTranscriptItems 里自带标注;
+            // 这只是查看,不改活 history(正式存档走 /export)。
+            if (count == 0) {
+                return false;
+            }
+            std::cout << "\n"
+                      << theme.stats << tr("ui.to_scrollback") << theme.reset << "\n";
+            std::cout << cli::FormatTranscriptItems(transcript, theme, width, transcript_expanded);
+            std::cout.flush();
+            return true;
+        }
+        case cli::UiKeyAction::ViewInEditor: {
+            // v:转录写临时 Markdown,交 $VISUAL/$EDITOR 只读查看。看完回来
+            // composer 与光标原样(终端层已收帧重画)。
+            std::string markdown;
+            for (const auto& message : loop->History()) {
+                const char* role_word =
+                    message.role == lubancode::api::Role::User ? "## 用户" : "## 助手";
+                markdown += role_word;
+                markdown += "\n\n";
+                for (const auto& block : message.content) {
+                    if (const auto* text = std::get_if<lubancode::api::TextBlock>(&block)) {
+                        markdown += text->text + "\n\n";
+                    } else if (const auto* use = std::get_if<lubancode::api::ToolUseBlock>(&block)) {
+                        markdown += "> 工具调用: " + use->name + "\n\n";
+                    } else if (const auto* result = std::get_if<lubancode::api::ToolResultBlock>(&block)) {
+                        markdown += "> 工具结果: " +
+                                    result->content.substr(0, 2000) +
+                                    (result->content.size() > 2000 ? "…(截断)" : "") + "\n\n";
+                    }
+                }
+            }
+            if (markdown.empty()) {
+                return false;
+            }
+            std::string editor_cmd;
+            if (const auto visual = lubancode::platform::GetEnvVar("VISUAL");
+                visual.has_value() && !visual->empty()) {
+                editor_cmd = *visual;
+            } else if (const auto ed = lubancode::platform::GetEnvVar("EDITOR");
+                       ed.has_value() && !ed->empty()) {
+                editor_cmd = *ed;
+            } else {
+#ifdef _WIN32
+                editor_cmd = "notepad";
+#else
+                editor_cmd = "vi";
+#endif
+            }
+            std::filesystem::path file;
+            try {
+                file = std::filesystem::temp_directory_path() /
+                       ("lubancode-transcript-" +
+                        std::to_string(lubancode::platform::CurrentProcessId()) + ".md");
+            } catch (const std::exception&) {
+                std::cout << theme.error << tr("editor.no_temp") << theme.reset << "\n";
+                return true;
+            }
+            {
+                std::ofstream out(file, std::ios::binary | std::ios::trunc);
+                if (!out) {
+                    std::cout << theme.error << tr("editor.write_failed") << theme.reset << "\n";
+                    return true;
+                }
+                out << markdown;
+            }
+            std::cout << theme.stats << trf("ui.view_in_editor", editor_cmd) << theme.reset << "\n";
+            std::cout.flush();
+            (void)lubancode::platform::RunInteractiveCommand(editor_cmd + " \"" +
+                                                             lubancode::tools::PathToUtf8(file) + "\"");
+            return true;
+        }
     }
     return false;
 }
@@ -1684,6 +1838,359 @@ void InteractiveSession::PumpSteeringToSubagents() {
             SessionSteeringQueue().MarkTargetGone(item.id, "目标子代理已结束");
         }
     }
+}
+
+// Ctrl+R 提问历史搜索的数据源:只读 session 事件账。ListSessions 按新→旧
+// 给场次,这里倒序遍历(整体旧→新,BuildHistorySearchIndex 认这个序);
+// 每场内部 ExtractPromptHistory 本就是旧→新。当前会话若还没建档(首条
+// 消息未落地),活 history 里的用户提问也并进来——同一只读规则。
+lubancode::cli::PromptHistoryDataset InteractiveSession::CollectPromptHistory() {
+    lubancode::cli::PromptHistoryDataset data;
+    data.current_session_id = session_store.session_id();
+    data.current_project_key = lubancode::agent::NormalizePathForCompare(CurrentDirUtf8());
+    if (!sessions_dir.empty()) {
+        const std::vector<lubancode::agent::SessionListEntry> listed =
+            lubancode::agent::ListSessions(sessions_dir, /*limit=*/150);
+        for (auto it = listed.rbegin(); it != listed.rend(); ++it) {
+            const auto bytes = lubancode::agent::ReadSessionFileBytes(it->file_path);
+            if (!bytes.has_value()) {
+                continue;  // 读不动这场就跳过,不废整份
+            }
+            const std::string project_key = lubancode::agent::NormalizePathForCompare(it->cwd);
+            for (auto& record : lubancode::agent::ExtractPromptHistory(*bytes)) {
+                lubancode::cli::PromptHistoryEntry entry;
+                entry.text = std::move(record.text);
+                entry.ts = std::move(record.ts);
+                entry.session_id = it->id;
+                entry.title = it->title;
+                entry.project_key = project_key;
+                data.entries.push_back(std::move(entry));
+            }
+        }
+    }
+    // 活 history 兜底:建档前(或建不了档)的本场提问。
+    const std::string current_id =
+        data.current_session_id.empty() ? std::string("current") : data.current_session_id;
+    for (const auto& message : loop->History()) {
+        if (message.role != lubancode::api::Role::User || message.content.empty()) {
+            continue;
+        }
+        const auto* text = std::get_if<lubancode::api::TextBlock>(&message.content.front());
+        if (text == nullptr || text->text.empty() || text->text.front() == '/') {
+            continue;  // 与 ExtractPromptHistory 同一只读规则
+        }
+        bool has_tool_result = false;
+        for (const auto& block : message.content) {
+            if (std::holds_alternative<lubancode::api::ToolResultBlock>(block)) {
+                has_tool_result = true;
+                break;
+            }
+        }
+        if (has_tool_result) {
+            continue;
+        }
+        lubancode::cli::PromptHistoryEntry entry;
+        entry.text = text->text;
+        entry.session_id = current_id;
+        entry.project_key = data.current_project_key;
+        entry.ts = session_start_ts;
+        data.entries.push_back(std::move(entry));
+    }
+    return data;
+}
+
+// /copy [plain]:复制上一段完整答话。"已完成"由结构保证:交互循环单线程,
+// 这个命令只在回合收口、提示符回来之后才会被分派——不存在"流式中"的调
+// 用点。默认复制原始 Markdown(history 里的 TextBlock 本就无 ANSI、无
+// spinner、无 token 统计);plain 走 MarkdownToPlainText。
+void InteractiveSession::HandleCopyCommand(const std::string& raw_args) {
+    std::string args = raw_args;
+    while (!args.empty() && (args.front() == ' ' || args.front() == '\t')) {
+        args.erase(args.begin());
+    }
+    for (char& c : args) {
+        c = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    }
+    if (!args.empty() && args != "plain") {
+        std::cout << theme.stats << tr("cmd.copy.usage") << theme.reset << "\n";
+        return;
+    }
+
+    // 倒着找最近一条有正文的 assistant 消息(工具调用中间可能穿插空文本)。
+    std::string text;
+    for (auto it = loop->History().rbegin(); it != loop->History().rend(); ++it) {
+        if (it->role != lubancode::api::Role::Assistant) {
+            continue;
+        }
+        std::vector<std::string> parts;
+        for (const auto& block : it->content) {
+            if (const auto* block_text = std::get_if<lubancode::api::TextBlock>(&block);
+                block_text != nullptr && !block_text->text.empty()) {
+                parts.push_back(block_text->text);
+            }
+        }
+        if (parts.empty()) {
+            continue;
+        }
+        text = parts.front();
+        for (std::size_t i = 1; i < parts.size(); ++i) {
+            text += "\n\n";
+            text += parts[i];
+        }
+        break;
+    }
+    if (text.empty()) {
+        std::cout << theme.error << tr("cmd.copy.no_assistant") << theme.reset << "\n";
+        return;
+    }
+    if (args == "plain") {
+        text = lubancode::cli::MarkdownToPlainText(text);
+    }
+
+    std::string detail;
+    switch (lubancode::platform::CopyTextToClipboard(text, detail)) {
+        case lubancode::platform::ClipboardResult::Ok:
+            std::cout << theme.stats << trf("cmd.copy.done", text.size()) << theme.reset << "\n";
+            break;
+        case lubancode::platform::ClipboardResult::Unsupported:
+            std::cout << theme.error << trf("cmd.copy.unsupported", detail) << theme.reset << "\n";
+            break;
+        case lubancode::platform::ClipboardResult::Failure:
+            // 失败必须报错,不得打印"已复制"后空着。
+            std::cout << theme.error << trf("cmd.copy.failed", detail) << theme.reset << "\n";
+            break;
+    }
+}
+
+// @ 提及的文件索引:Git 根优先(提"项目文件"按项目走),没有根就 cwd。
+// 深度限 6、条目限 3000,排除 .git/构建产物/依赖目录/点目录。相对路径
+// 一律正斜杠。根没变就返回缓存(cwd/worktree 切换由 SyncWorktreeDirectory
+// 清缓存)。
+std::vector<lubancode::cli::FileMentionEntry> InteractiveSession::FileMentionIndexSnapshot() {
+    const std::filesystem::path cwd = std::filesystem::current_path();
+    const auto root = lubancode::cli::FindRepositoryRoot(cwd);
+    const std::filesystem::path base = root.value_or(cwd);
+    const std::string root_key = lubancode::tools::PathToUtf8(base);
+    if (root_key == mention_index_root_ && !mention_index_.empty()) {
+        return mention_index_;
+    }
+    mention_index_root_ = root_key;
+    mention_index_.clear();
+    static const std::set<std::string> kExcluded = {
+        ".git", "build", "out", "dist", "node_modules", "target", "_deps", "_build",
+        ".lubancode", ".cache", "__pycache__", ".venv", "venv", "cmake-build-debug"};
+    std::error_code ec;
+    std::filesystem::recursive_directory_iterator it(base, ec), end;
+    while (it != end && mention_index_.size() < 3000) {
+        const std::filesystem::path current = it->path();
+        const std::string name = current.filename().string();
+        if (it->is_symlink(ec)) {
+            it.disable_recursion_pending();
+            ++it;
+            continue;  // 符号链接不进清单也不下钻
+        }
+        const bool is_dir = it->is_directory(ec);
+        if (is_dir && (kExcluded.contains(name) || (!name.empty() && name.front() == '.'))) {
+            it.disable_recursion_pending();
+            ++it;
+            continue;
+        }
+        if (it.depth() > 6) {
+            it.disable_recursion_pending();
+            ++it;
+            continue;
+        }
+        if (current != base) {
+            std::string rel = lubancode::tools::PathToUtf8(current.lexically_relative(base));
+            for (char& c : rel) {
+                if (c == '\\') {
+                    c = '/';
+                }
+            }
+            mention_index_.push_back(lubancode::cli::FileMentionEntry{rel, is_dir});
+        }
+        ++it;
+    }
+    // 目录排前、路径短排前——@src/cli 选目录一击即中。
+    std::sort(mention_index_.begin(), mention_index_.end(),
+              [](const auto& a, const auto& b) {
+                  if (a.is_dir != b.is_dir) {
+                      return a.is_dir;
+                  }
+                  return a.relative_path < b.relative_path;
+              });
+    return mention_index_;
+}
+
+// 提交前提及校验(规格第二批第 2 条验收):目标消失或跑出工作区要明报错,
+// 这轮不发。活着的提及附一份"相对 → 绝对"账给模型(turn context,不进
+// 永久 history),不叫模型猜裸路径。图片路径不进账——它们走
+// PrepareImageInput 的视觉附件路。
+std::pair<std::string, std::string> InteractiveSession::BuildMentionLedger(const std::string& content) {
+    const std::vector<std::string> tokens = lubancode::cli::ExtractTextMentions(content);
+    if (tokens.empty()) {
+        return {};
+    }
+    const std::filesystem::path cwd = std::filesystem::current_path();
+    const auto root = lubancode::cli::FindRepositoryRoot(cwd);
+    const std::filesystem::path base = root.value_or(cwd);
+    const std::string base_key = lubancode::agent::NormalizePathForCompare(lubancode::tools::PathToUtf8(base));
+    std::string ledger;
+    for (const std::string& token : tokens) {
+        if (lubancode::cli::MediaTypeForPath(token).has_value()) {
+            continue;  // 图片:视觉附件路自己管
+        }
+        // 相对根解析;根内没有再按 cwd 相对试一次(临时文件那类提及)。
+        std::filesystem::path resolved;
+        bool found = false;
+        for (const std::filesystem::path& candidate : {base / lubancode::tools::Utf8ToPath(token),
+                                                       cwd / lubancode::tools::Utf8ToPath(token)}) {
+            std::error_code ec;
+            if (std::filesystem::exists(candidate, ec)) {
+                resolved = candidate;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return {trf("mention.missing", token), {}};
+        }
+        // 项目根校验:解析后的绝对路径必须仍在根内(或等于根),不许 @..
+        // 越狱到园子外。
+        std::error_code ec;
+        const std::filesystem::path canon = std::filesystem::weakly_canonical(resolved, ec);
+        const std::string canon_key =
+            lubancode::agent::NormalizePathForCompare(lubancode::tools::PathToUtf8(canon));
+        if (!canon_key.empty() && canon_key.rfind(base_key + "/", 0) != 0 && canon_key != base_key) {
+            return {trf("mention.outside_root", token), {}};
+        }
+        const bool is_dir = std::filesystem::is_directory(canon, ec);
+        ledger += "\n- " + token + " -> " + lubancode::tools::PathToUtf8(canon) +
+                  (is_dir ? "(目录)" : "(文件)");
+    }
+    if (ledger.empty()) {
+        return {};
+    }
+    return {{}, tr("mention.ledger_header") + ledger + "\n"};
+}
+
+// 终端标题模板:项目短名 · 分支 · 状态词。纯拼串,可单测可不测(肉眼可核)。
+std::string InteractiveSession::BuildTerminalTitleText(const std::string& state_word) const {
+    std::string project;
+    if (const auto root = lubancode::cli::FindRepositoryRoot(std::filesystem::current_path())) {
+        project = root->filename().string();
+    }
+    if (project.empty()) {
+        project = "lubancode";
+    }
+    const std::string branch = lubancode::cli::CurrentGitBranch(std::filesystem::current_path());
+    std::string out = "lubancode · " + project;
+    if (!branch.empty()) {
+        out += " · " + branch;
+    }
+    out += " · " + state_word;
+    return out;
+}
+
+// /keymap [set 动作 和弦 | reset [动作|all]]:列动作名/当前键/作用域/
+// 可否改绑;set 走 keymap 的冲突检查(同域撞车拒绝),落盘用户级
+// ~/.lubancode/keymap.json(项目配置不读不写,改键是全局的)。
+void InteractiveSession::HandleKeymapCommand(const std::string& raw_args) {
+    namespace keymap = lubancode::cli::keymap;
+    std::vector<std::string> words;
+    std::string current;
+    for (const char c : raw_args) {
+        if (c == ' ' || c == '\t') {
+            if (!current.empty()) {
+                words.push_back(std::move(current));
+                current.clear();
+            }
+        } else {
+            current.push_back(c);
+        }
+    }
+    if (!current.empty()) {
+        words.push_back(std::move(current));
+    }
+
+    if (words.empty()) {
+        // 列全表:作用域分组,和弦右对齐,固定键/未绑键标明。
+        std::cout << tr("keymap.list_header") << "\n";
+        for (const auto& record : keymap::ActiveKeymap().AllBindings()) {
+            const std::string chord = record.has_default ? keymap::FormatKeyChord(record.chord) : "-";
+            std::cout << theme.stats << "  [" << keymap::ScopeName(record.scope) << "] " << chord;
+            for (int pad = static_cast<int>(chord.size()); pad < 12; ++pad) {
+                std::cout << ' ';
+            }
+            std::cout << keymap::ActionName(record.action)
+                      << (!record.bindable ? tr("keymap.fixed_suffix")
+                           : !record.has_default ? tr("keymap.unbound_suffix") : "")
+                      << theme.reset << "\n";
+        }
+        std::cout << tr("keymap.usage") << "\n";
+        return;
+    }
+    if (words[0] == "set") {
+        if (words.size() != 3) {
+            std::cout << theme.error << tr("keymap.usage") << theme.reset << "\n";
+            return;
+        }
+        const auto action = keymap::ActionFromName(words[1]);
+        if (!action.has_value()) {
+            std::cout << theme.error << trf("keymap.unknown_action", words[1]) << theme.reset << "\n";
+            return;
+        }
+        const auto chord = keymap::ParseKeyChord(words[2]);
+        if (!chord.has_value()) {
+            std::cout << theme.error << trf("keymap.bad_chord", words[2]) << theme.reset << "\n";
+            return;
+        }
+        std::string error;
+        if (!keymap::ActiveKeymap().SetBinding(*action, *chord, error)) {
+            std::cout << theme.error << trf("keymap.bind_failed", error) << theme.reset << "\n";
+            return;
+        }
+        if (home_lubancode.has_value()) {
+            if (const auto save_error = keymap::SaveActiveKeymapOverrides(*home_lubancode);
+                save_error.has_value()) {
+                std::cout << theme.error << trf("keymap.save_failed", *save_error) << theme.reset << "\n";
+            }
+        }
+        std::cout << theme.stats
+                  << trf("keymap.bound", keymap::ActionName(*action), keymap::FormatKeyChord(*chord))
+                  << theme.reset << "\n";
+        return;
+    }
+    if (words[0] == "reset") {
+        std::string error;
+        if (words.size() == 2 && words[1] == "all") {
+            keymap::Keymap fresh;  // 出厂默认整份换血
+            for (const auto& record : fresh.AllBindings()) {
+                if (record.bindable) {
+                    (void)keymap::ActiveKeymap().ResetBinding(record.action, error);
+                }
+            }
+            std::cout << theme.stats << tr("keymap.reset_all") << theme.reset << "\n";
+        } else if (words.size() == 2) {
+            const auto action = keymap::ActionFromName(words[1]);
+            if (!action.has_value() || !keymap::ActiveKeymap().ResetBinding(*action, error)) {
+                std::cout << theme.error << trf("keymap.reset_failed", words[1]) << theme.reset << "\n";
+                return;
+            }
+            std::cout << theme.stats << trf("keymap.reset_one", words[1]) << theme.reset << "\n";
+        } else {
+            std::cout << theme.error << tr("keymap.usage") << theme.reset << "\n";
+            return;
+        }
+        if (home_lubancode.has_value()) {
+            if (const auto save_error = keymap::SaveActiveKeymapOverrides(*home_lubancode);
+                save_error.has_value()) {
+                std::cout << theme.error << trf("keymap.save_failed", *save_error) << theme.reset << "\n";
+            }
+        }
+        return;
+    }
+    std::cout << theme.error << tr("keymap.usage") << theme.reset << "\n";
 }
 
 void InteractiveSession::EnsureMemoryTool() {
@@ -2089,6 +2596,9 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
 void InteractiveSession::SyncWorktreeDirectory() {
     // 切 worktree 收面板:查看态目标跟着旧房的任务走,别把消息投去旧目标。
     lubancode::cli::ResetAgentPanelSession();
+    // @ 提及索引跟着根走:根变了重扫(下一拍 FileMentionIndexSnapshot 自办)。
+    mention_index_root_.clear();
+    mention_index_.clear();
     prompt_options.cwd = CurrentDirUtf8();
     if (project_memory != nullptr) {
         if (const auto updated = project_memory->SetWorkingDirectory(std::filesystem::current_path());
@@ -2185,6 +2695,11 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                 return HandleWorktreeCommand(worktree_state, parsed.args, theme);
             }
             case lubancode::cli::SlashCommand::Clear: {
+                // stash 是"还没说出口的话",不跟 history 一锅清(规格:草稿
+                // 各自存账);清场时提醒一句它还在。
+                if (lubancode::cli::ComposerStashHasContent()) {
+                    std::cout << theme.stats << tr("stash.still_there") << theme.reset << "\n";
+                }
                 SessionCommandState session_state = MakeSessionCommandState();
                 return HandleClearCommand(session_state, config, theme, spinner_enabled);
             }
@@ -2385,6 +2900,9 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                 break;
             case lubancode::cli::SlashCommand::Background:
                 return HandleBackgroundCommand(theme);
+            case lubancode::cli::SlashCommand::Keymap:
+                HandleKeymapCommand(parsed.args);
+                break;
             case lubancode::cli::SlashCommand::Doctor: {
                 // 本地兼容端 Effort/前缀缓存诊断。探针自己建临时 backend,
                 // 与会话 backend 无关;stream_usage 探针写回 config 后这里
@@ -2427,6 +2945,9 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
             case lubancode::cli::SlashCommand::Export:
                 HandleExportCommand(parsed.args, *loop, session_store, sessions_dir, session_meta, session_title,
                                     artifact_store.get());
+                break;
+            case lubancode::cli::SlashCommand::Copy:
+                HandleCopyCommand(parsed.args);
                 break;
             case lubancode::cli::SlashCommand::Title: {
                 SessionCommandState session_state = MakeSessionCommandState();
@@ -2483,7 +3004,14 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
     // 马上往下铺,聚焦画面已经不是"当前画面"了),下次 Ctrl+E 是重新
     // 聚焦,不是"返回"。
     focus_view_active = false;
-    std::string turn_suffix =
+    // @ 提及校验(0.30.x 第三批):目标消失/越出项目根,明报错拦下这轮;
+    // 活着的提及附账进 turn context(不进永久 history)。
+    const auto [mention_error, mention_ledger] = BuildMentionLedger(content);
+    if (!mention_error.empty()) {
+        std::cout << theme.error << mention_error << theme.reset << "\n";
+        return CommandFlow::Continue;
+    }
+    std::string turn_suffix = mention_ledger;
         project_memory != nullptr
             ? project_memory->BuildTurnContext(content, std::filesystem::current_path(),
                                                memory::QueryOrigin::User)
@@ -2502,6 +3030,7 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
     }
     loop->SetTurnContext(std::move(turn_suffix));
     const std::size_t history_before = loop->History().size();
+<<<<<<< HEAD
     // usage 出账(模型分工第一期):整轮逐步 usage 带出来记进分角色台账
     // (普通 turn = normal 档);compact/抽取的后台采样在各自路径另记,
     // 不混进这里。
@@ -2520,6 +3049,24 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
         model_router->ledger().Record(lubancode::agent::ModelRole::Normal,
                                       step.model.empty() ? *current_model : step.model, step_usage,
                                       /*duration_ms=*/0, step.reported);
+=======
+    // 终端标题(0.30.x 第四批):跑着/等输入两态,项目·分支跟着;拿不到
+    // 焦点状态,不做"未聚焦才通知"的假判断,只在长轮收口时叫一声铃。
+    if (spinner_enabled) {
+        lubancode::cli::SetTerminalTitle(BuildTerminalTitleText(tr("notify.state_busy")));
+    }
+    const auto turn_started = std::chrono::steady_clock::now();
+    RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
+            lubancode::app::HookRuntime(), spinner_enabled, transcript, todo_state(), &transcript_expanded,
+            settings_local.allow_commands, settings_local.deny_commands, session_agent_tool(),
+            recorder.has_value() ? &*recorder : nullptr);
+    if (spinner_enabled) {
+        lubancode::cli::SetTerminalTitle(BuildTerminalTitleText(tr("notify.state_idle")));
+        const auto elapsed = std::chrono::steady_clock::now() - turn_started;
+        if (elapsed > std::chrono::seconds(30)) {
+            lubancode::cli::NotifyUserAttention();  // 长轮跑完叫一声,每轮至多一次
+        }
+>>>>>>> worktree-agent-a7ccaa1e45bd8c2d2
     }
     // 每轮结束(成功/出错/ESC 打断都算)把新增消息逐条追加落盘。
     PersistNewMessages();
@@ -3217,6 +3764,9 @@ void InteractiveSession::Run() {
             lubancode::cli::ReadLine(theme.prompt + "> " + theme.reset, theme,
                                       /*esc_rejects=*/false, /*composer=*/true);
         if (!line.has_value()) {
+            if (lubancode::cli::ComposerStashHasContent()) {
+                std::cout << theme.stats << tr("stash.still_there") << theme.reset << "\n";
+            }
             break;  // EOF:Ctrl+Z 或管道读尽
         }
         if (line->empty()) {
@@ -3226,6 +3776,9 @@ void InteractiveSession::Run() {
         composer_target = lubancode::cli::CurrentComposerAgentTarget();
 
         if (content == "exit" || content == "quit") {
+            if (lubancode::cli::ComposerStashHasContent()) {
+                std::cout << theme.stats << tr("stash.still_there") << theme.reset << "\n";
+            }
             break;
         }
         // 定向介入(规格第七节):查看态 composer 提交的话直接进那只子代理

@@ -37,4 +37,10 @@ bool DetectMarkdownStructure(const std::string& text);
 //   > 引用     -> 淡色 │ 前缀
 std::vector<std::string> RenderMarkdown(const std::string& text, const Theme& theme, int width);
 
+// markdown -> 纯文本(0.30.x /copy plain):剥标题井号、粗斜体星、行内码
+// 反引号、围栏标记行,链接 [文字](地址) 留文字,列表圆点保留可读。代码
+// 围栏内的正文一字不动。这是"终端可见纯文"的近似,不是完整 CommonMark
+// 转换——够拿去贴聊天窗,不承诺字节级还原文档。
+std::string MarkdownToPlainText(const std::string& markdown);
+
 }  // namespace lubancode::cli

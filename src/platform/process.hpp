@@ -128,6 +128,12 @@ bool IsProcessAlive(unsigned long pid);
 // 本进程的 pid(名册名片用)。Windows: GetCurrentProcessId;POSIX: getpid。
 unsigned long CurrentProcessId();
 
+// 交互式子进程(0.30.x 外部编辑器 $VISUAL/$EDITOR 用):不捕获输出、不给
+// stdin 喂数据——子进程直接继承本进程的控制台/终端,跑完返回退出码。
+// Windows 用 _wsystem(UTF-8 命令串内部转宽字符),POSIX 用 system()。
+// 调用方须已收掉屏幕上的常驻帧(composer 框等),给编辑器让出整屏。
+int RunInteractiveCommand(const std::string& command_utf8);
+
 #ifdef _WIN32
 
 // Windows 专属重载:cmdline 是完整的"可执行文件 + 参数"命令行,调用方

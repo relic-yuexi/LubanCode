@@ -128,6 +128,10 @@ struct KeyInput {
         // 只在面板这一处消费,别处按 Ctrl+X/Ctrl+K 仍是死键,跟升级前一样。
         CtrlX,
         CtrlK,
+        // 0.30.x 多行历史边缘:Ctrl+P/Ctrl+N 是"上一条/下一条历史"的明确
+        // 别名,不受多行光标位置影响(Up/Down 在多行里先走行间移动)。
+        CtrlP,
+        CtrlN,
         // 0.29.x 底栏自救:Ctrl+L 整屏重画(作废锚点、清可视区、从状态重建)。
         CtrlL,
         Esc,
@@ -137,6 +141,14 @@ struct KeyInput {
     char32_t ch = 0;
     std::string text;
     std::size_t replace_before = 0;  // Paste:先撤掉光标前多少个码点，再放附件
+    // 修饰键标志(交互抛光总账:keymap 和弦层)。只对 Kind::Char 有意义:
+    // 平台层把 Ctrl+字母/Alt+字母 这类"没有专枚举"的组合按 Char 送出并
+    // 置位修饰键;编辑器核心对带修饰的 Char 一律不当正文插入,键位分发层
+    // (cli/keymap)拿它匹配和弦。专枚举键(CtrlC/CtrlO……)不置位——它们
+    // 自带语义,别处不该再当和弦二次匹配。
+    bool ctrl = false;
+    bool alt = false;
+    bool shift = false;
 };
 
 // 原始逐键模式的进入/退出(RAII)。Windows: SetConsoleMode 关掉
