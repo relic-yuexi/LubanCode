@@ -1411,6 +1411,12 @@ void InteractiveSession::RunPeerTurn(const std::string& text, bool silent, memor
     if (session_agent_tool() != nullptr) {
         turn_suffix += session_agent_tool()->RunningTasksRoster();
     }
+    // PTC 指南(PTC 单):当前已挂载 stub 的签名索引,随轮次请求视图走
+    // (不进稳定的 system——前缀缓存守恒)。tool_search 中途挂载新工具,
+    // 下一轮这里自动带上新签名。
+    if (tool_runtime_->ptc_tool() != nullptr) {
+        turn_suffix += tool_runtime_->ptc_tool()->GuideSegment();
+    }
     loop->SetTurnContext(std::move(turn_suffix));
     // RunTurnResult 只剩 status/cancelled,peer 来信轮两边都不看;排队消息
     // 走会话层 SteeringQueue,不在这里收。直接调,不接没人用的返回值。
@@ -2081,6 +2087,10 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
     if (session_agent_tool() != nullptr) {
         turn_suffix += session_agent_tool()->RunningTasksRoster();
     }
+    // PTC 指南:与 RunPeerTurn 同一份(GuideSegment 含当前挂载集的签名)。
+    if (tool_runtime_->ptc_tool() != nullptr) {
+        turn_suffix += tool_runtime_->ptc_tool()->GuideSegment();
+    }
     loop->SetTurnContext(std::move(turn_suffix));
     const std::size_t history_before = loop->History().size();
     RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
@@ -2443,6 +2453,11 @@ void InteractiveSession::Run() {
         status_data.context_stale = context_tracker.usage_stale();
         // REC 标记:录制中恒挂状态行第一段(见 StatusPanelData::rec)。
         status_data.rec = lubancode::cli::RecorderStatusMarker(recorder);
+        // 工具调用后端档(PTC 单):json 默认时留空(状态行零变化),
+        // programmatic/auto 时恒亮一段,回落原因写全(规格 UI 节)。
+        if (config.tool_calling != lubancode::config::ToolCallingMode::Json) {
+            status_data.tools = tool_runtime_->ptc_resolution();
+        }
         lubancode::cli::SetStatusLineData(status_data, config.status_panel.items, config.status_panel.separator);
 
         // 后台命令完成通知:每圈开头取一次"新进入终态"的任务,有就打一行淡色

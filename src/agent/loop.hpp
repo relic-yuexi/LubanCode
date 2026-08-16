@@ -188,6 +188,14 @@ struct ContextPressure {
 
 using OnContextPressure = std::function<void(const ContextPressure&)>;
 
+// 执行一枚工具调用的完整链(公开导出;实现在 loop.cpp 顶部,注释在那头):
+// 找工具/延迟挂载谓词 -> PreToolUse(含 updatedInput 的 schema 复检) ->
+// 确认档(needs_confirm + PermissionRequest)-> 执行 -> PostToolUse -> 编码
+// 清洗 -> on_tool_done。JSON 后端的工具循环与 PTC 的每一枚 stub 调用共用
+// 这一条路,不许有第二条绕过 hooks/权限的暗门。
+tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUseBlock& call, const Callbacks& callbacks,
+                                const std::function<bool(const tools::Tool&)>& tool_filter);
+
 // 跨会话传话(0.25.x)的安全收件点:Run() 的工具循环每次"下一次请求尚未
 // 发出"的边界(循环顶)会调一次 inbox;有信就注进 history,再发请求——
 // 工具跑着不打断,正文收口后才收。注入规则(纯函数,单测钉):

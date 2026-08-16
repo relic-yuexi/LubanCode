@@ -89,6 +89,11 @@ std::vector<StatusPanelSegment> BuildStatusPanelSegments(
     if (!data.worktree.empty()) {
         out.push_back({"worktree", "WT " + data.worktree});
     }
+    // 工具调用后端档(PTC 单):非空恒挂一段,不进 items 配置(理由见
+    // StatusPanelData::tools 注释)。纯文本 "tools <档>"。
+    if (!data.tools.empty()) {
+        out.push_back({"tools", "tools " + data.tools});
+    }
     for (const std::string& key : items) {
         std::string text;
         if (key == "permission_mode") {

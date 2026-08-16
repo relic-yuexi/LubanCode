@@ -5,6 +5,7 @@
 #include "app/tool_runtime.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <iostream>
 #include <utility>
 
@@ -12,6 +13,7 @@
 #include "cli/i18n.hpp"
 #include "memory/memory_tool.hpp"
 #include "mcp/mcp_tool.hpp"
+#include "ptc/profile.hpp"
 #include "tools/agent_message_tool.hpp"
 #include "tools/background_output.hpp"
 #include "tools/edit_file.hpp"
@@ -27,6 +29,22 @@
 #include "tools/write_file.hpp"
 
 namespace lubancode::app {
+
+namespace {
+
+// 沙箱豁免开关:POSIX 只有 rlimit(资源上限,无文件系统/网络隔离),按
+// 规格"没有可靠 sandbox 的平台默认禁 PTC"执行;开发者/测试要用环境
+// 变量 LUBANCODE_PTC_ALLOW_NO_SANDBOX 显式豁免,风险自担。
+bool PosixSandboxExempted() {
+#ifndef _WIN32
+    const char* raw = std::getenv("LUBANCODE_PTC_ALLOW_NO_SANDBOX");
+    return raw != nullptr && raw[0] != '\0';
+#else
+    return true;  // Windows 有 Job Object + 受限 token,天然豁免
+#endif
+}
+
+}  // namespace
 
 // i18n:装配函数里到处用 tr/trf,拉进来省得每处全限定。
 using lubancode::cli::tr;
@@ -264,6 +282,98 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     sub_tool_filter_ = [loaded = loaded_tools_, deferral = sub_deferral_](const lubancode::tools::Tool& tool) {
         return !deferral || !tool.deferred() || loaded->count(tool.name()) != 0;
     };
+
+    // ---- PTC 装配(tool_calling 配置档 + 五条硬条件 + auto 门槛)----
+    // json(默认):什么都不挂,行为与从前逐字节一致。
+    // programmatic:五条硬条件齐(Python 探测在 PtcTool 构造里做)才挂;
+    // 不齐明报回落 json。auto:画像 verified + 门槛过才选 ptc——首版没有
+    // verified 画像,恒落 json(ResolveToolCalling 照规格实现,不放宽)。
+    ptc_resolution_ = "json";
+    if (config.tool_calling != lubancode::config::ToolCallingMode::Json) {
+        lubancode::ptc::PtcHardConditions hard;
+#ifdef _WIN32
+        hard.sandbox_reliable = true;  // Job Object + 受限 token
+#else
+        hard.sandbox_reliable = PosixSandboxExempted();  // rlimit 不算可靠沙箱
+#endif
+        // 构造 PtcTool(顺带探测 Python)。条件齐才注册进主表。
+        auto tool = std::make_unique<lubancode::ptc::PtcTool>(main_registry_, main_tool_filter_,
+                                                              [&] {
+                                                                  lubancode::ptc::PtcTool::Config ptc_config;
+                                                                  ptc_config.python_cmd = config.ptc.python;
+                                                                  ptc_config.limits.wall_clock_ms =
+                                                                      config.ptc.wall_clock_ms;
+                                                                  ptc_config.limits.cpu_ms = config.ptc.cpu_ms;
+                                                                  ptc_config.limits.memory_bytes =
+                                                                      config.ptc.memory_bytes;
+                                                                  ptc_config.limits.output_bytes =
+                                                                      config.ptc.output_bytes;
+                                                                  ptc_config.limits.max_calls =
+                                                                      config.ptc.max_calls;
+                                                                  ptc_config.limits.max_concurrency =
+                                                                      config.ptc.max_concurrency;
+                                                                  ptc_config.restricted_token =
+                                                                      config.ptc.restricted_token;
+                                                                  ptc_config.eligible_tools = config.ptc.tools;
+                                                                  return ptc_config;
+                                                              }());
+        const bool python_ok = tool->available();
+        hard.python_version_ok = python_ok;
+        hard.tools_wired = python_ok;  // 入选集(默认 read_file/search)都接 RPC/权限/hooks/取消链
+        hard.context_fits_stubs = true;
+        hard.model_free_code = true;
+
+        // 画像指纹:provider + endpoint + model + wire + python + harness。
+        // 存档里 harness 版本对不上 = 画像过期,按 unknown 算。
+        const std::string store_path = lubancode::ptc::DefaultProfileStorePath();
+        lubancode::ptc::PtcStatus profile_status = lubancode::ptc::PtcStatus::Unknown;
+        if (!store_path.empty()) {
+            const std::string fingerprint = lubancode::ptc::BuildPtcFingerprint(
+                config.active_provider, config.base_url, config.model,
+                lubancode::config::ProviderWireName(config.wire), tool->available() ? "py" : "",
+                lubancode::ptc::kPtcHarnessRevision);
+            lubancode::ptc::PtcProfileStore store(store_path);
+            const auto profile = store.Find(fingerprint);
+            if (profile.has_value() && profile->harness_revision == lubancode::ptc::kPtcHarnessRevision) {
+                profile_status = profile->status;
+            }
+        }
+
+        lubancode::ptc::PtcTool* registered = nullptr;
+        if (config.tool_calling == lubancode::config::ToolCallingMode::Programmatic) {
+            // 强制档:硬条件不齐(POSIX 无沙箱未豁免/没有 Python)就明报
+            // 回落,不留一只空壳工具让模型白调。
+            if (hard.AllMet()) {
+                registered = tool.get();
+                main_registry_.Register(std::move(tool));
+                ptc_resolution_ = "ptc";
+            } else {
+                const auto failures = hard.FailureTexts();
+                ptc_resolution_ = "ptc→json(" + (failures.empty() ? std::string("条件不齐") : failures.front()) + ")";
+                std::cout << theme.error << trf("ptc.fallback_line", ptc_resolution_) << theme.reset << "\n";
+            }
+        } else {
+            // auto:门槛判定(首版无 verified 画像,恒 json)。
+            lubancode::ptc::PtcAutoGates gates;
+            gates.profile_status = profile_status;
+            gates.hard_conditions_met = hard.AllMet();
+            gates.estimated_chain_depth = 0;  // 预估器未建:保守零
+            gates.estimated_fanout = 0;
+            const auto decision = lubancode::ptc::ResolveToolCalling(gates);
+            if (decision == lubancode::ptc::ToolCallingDecision::Programmatic) {
+                registered = tool.get();
+                main_registry_.Register(std::move(tool));
+                ptc_resolution_ = "auto→ptc";
+            } else {
+                ptc_resolution_ = "auto→json";
+                if (!python_ok && !config.ptc.python.empty()) {
+                    std::cout << theme.error << trf("ptc.probe_failed", tool->unavailability_reason())
+                              << theme.reset << "\n";
+                }
+            }
+        }
+        ptc_tool_ = registered;
+    }
 }
 
 void ToolRuntime::AttachMemoryTool(std::shared_ptr<lubancode::memory::ProjectMemory> memory) {

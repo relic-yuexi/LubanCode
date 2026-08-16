@@ -65,6 +65,11 @@ struct StatusPanelData {
     // 没回写"缓存未报告";挂在 tokens 段尾部,不单开一个 items 字段。空串 =
     // 一次实测都还没有,不显示。数据来源 ContextTracker(本场累计口径)。
     std::string cache_note;
+    // 工具调用后端档(PTC 单):非空时状态行恒亮 "tools <档>" 一段——跟
+    // REC/WT 同待遇,不进 items 配置(后端选择是能力与安全状态,用户没配
+    // 也该看得见;规格 UI 节)。取值 "ptc" / "auto→json" / "auto→ptc" /
+    // "ptc→json(原因)"。tool_calling=json(默认)时留空,状态行零变化。
+    std::string tools;
 };
 
 // 状态行数据的局部更新:只改 context/tokens 两段的数字、旧值标记与缓存
