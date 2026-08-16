@@ -36,6 +36,11 @@ struct AgentPanelEntry {
     // 用户中止——都从活动导航坞退场。退场只是不进导航表,台账与详情照查。
     bool done_delivered = false;
     bool cancelled = false;
+    // 内容修订号(追加需求"查看态实时思考流"):这只任务的消息账(事件/思考/
+    // 正文增量/阶段翻页)每动一笔 +1。空闲 composer 的 100ms 拍拿它判断
+    // "正查看的运行中子代理又在出活",到 1s 节流拍就重铺查看帧——终端层
+    // 只比数字,不复制内容。0 = 无实时流(演示假代理/终态)。
+    std::uint64_t content_revision = 0;
 };
 
 // 面板动作,由应用层(InteractiveSession)接线到 AgentTool 的正式取消/清理

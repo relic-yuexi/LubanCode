@@ -192,6 +192,8 @@ std::string OutcomeReasonText(lubancode::tools::TaskOutcomeReason reason) {
             return tr("agent_status.reason_tool_error");
         case R::UserStop:
             return tr("agent_status.reason_user_stop");
+        case R::WallClockTimeout:
+            return tr("agent_status.reason_wall_clock");
         case R::ProtocolError:
             return tr("agent_status.reason_protocol_error");
         case R::None:
@@ -200,13 +202,56 @@ std::string OutcomeReasonText(lubancode::tools::TaskOutcomeReason reason) {
     return tr("agent_status.reason_unknown");
 }
 
+// 实时活跃短语(规格"子代理活跃度不可见"):运行中的任务按当前阶段换这一
+// 条——等首字节(带已等秒数)/思考中·N 字/正文 N 字/工具 名·M 秒。按阶段
+// 换,不堆三段;只报计数,不碰思考与正文内容。
+std::string AgentActivityWord(const lubancode::tools::AgentTaskActivity& activity,
+                              std::chrono::steady_clock::time_point now) {
+    using A = lubancode::tools::AgentTaskActivity;
+    switch (activity.stage) {
+        case A::Stage::WaitingFirstByte: {
+            const int seconds = activity.request_started.time_since_epoch().count() == 0
+                                    ? 0
+                                    : static_cast<int>(
+                                          std::chrono::duration_cast<std::chrono::seconds>(now -
+                                                                                            activity.request_started)
+                                              .count());
+            return trf("agent_activity.waiting", seconds);
+        }
+        case A::Stage::Thinking:
+            return trf("agent_activity.thinking", activity.reasoning_chars);
+        case A::Stage::Text:
+            return trf("agent_activity.text", activity.text_chars);
+        case A::Stage::Tool: {
+            const int seconds = activity.tool_started.time_since_epoch().count() == 0
+                                    ? 0
+                                    : static_cast<int>(
+                                          std::chrono::duration_cast<std::chrono::seconds>(now - activity.tool_started)
+                                              .count());
+            return trf("agent_activity.tool", activity.tool_name, seconds);
+        }
+        case A::Stage::None:
+            break;
+    }
+    return std::string();
+}
+
 // 状态短话(规格"现场三"):导航坞行与查看态统计行共用的一套拼装——
-// 运行中带预算进度,终态带短因。一处写死,两处口径永远一致。
+// 运行中优先出实时活跃短语(治"死秒表"),没进流的空档退回"运行中";终态
+// 带短因。一处写死,两处口径永远一致。
 std::string AgentStateWord(lubancode::tools::AgentTaskState state, int steps_used, int step_limit,
-                           lubancode::tools::TaskOutcomeReason outcome_reason) {
+                           lubancode::tools::TaskOutcomeReason outcome_reason,
+                           const lubancode::tools::AgentTaskActivity* activity,
+                           std::chrono::steady_clock::time_point now) {
     using S = lubancode::tools::AgentTaskState;
     if (state == S::Running) {
-        std::string word = tr("agent_status.state_running");
+        std::string word;
+        if (activity != nullptr) {
+            word = AgentActivityWord(*activity, now);
+        }
+        if (word.empty()) {
+            word = tr("agent_status.state_running");
+        }
         if (step_limit > 0) {
             word += trf("agent_status.budget_suffix", steps_used, step_limit);
         }
@@ -264,7 +309,8 @@ private:
     // transcript(prompt/工具调用/结果/错误)整块铺进上方;0 = 重铺 main
     // 最近条目。导航坞里不再有长正文。
     std::vector<std::string> BuildAgentTaskTranscriptLines(int task_id, int width);
-    void PrintViewedTranscript(int viewed_task_id);
+    // tail_rows>0 时只铺头三行+最近 N 行(实时流重铺拍,不刷滚屏)。
+    void PrintViewedTranscript(int viewed_task_id, int tail_rows = 0);
     void CleanupBackgroundAgents();
     bool HandleTranscriptUi(lubancode::cli::UiKeyAction action);
     void PrintRecentItems(std::size_t count);
@@ -370,6 +416,10 @@ private:
     int focus_index = -1;                    // 焦点条目的 transcript 下标,-1 = 无焦点
     bool focus_view_active = false;          // 正在聚焦查看
     std::atomic<bool> expand_latest{false};  // Ctrl+O:inline 展开最近一条
+    // 子代理查看态的 Ctrl+O(追加需求"查看态实时思考流"):查看帧里流式
+    // 思考/正文尾巴的展开开关。只在主线程(HandleTranscriptUi)翻,构建
+    // 查看帧时读;Esc/切换查看目标时复位。
+    bool agent_view_expanded_ = false;
 
     // ---- 主 AgentLoop 与轮次材料 ----
     lubancode::agent::PromptOptions prompt_options;
@@ -585,6 +635,12 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
         // 会话可变字段。
         session_agent_tool()->SetDetachedBackendFactory([this]() { return BuildDetachedBackend(); });
         session_agent_tool()->SetDetachedRegistryFactory([this]() { return BuildDetachedRegistry(); });
+        // 墙钟兜底(规格三):整轮上限从 subagent.wall_clock_timeout_secs 来
+        // (项目级压全局,都没写用公开默认 1800s;0 = 不限)。哪怕接口超时
+        // 全失效,任务也不无限占着坞行。
+        session_agent_tool()->SetWallClockTimeout(
+            config.subagent.wall_clock_timeout_secs.value_or(
+                lubancode::config::kDefaultSubagentWallClockTimeoutSecs));
         // 提示词运行时化:子代理系统提示同机制(features 模块用户文件优先)。
         session_agent_tool()->SetPromptsDir(prompts_dir);
         session_agent_tool()->SetProjectInstructions(project_instructions);
@@ -610,7 +666,7 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
     // viewed_task_id 现取,整块换进上方会话视口——导航坞只放导航。
     lubancode::cli::SetAgentPanelProvider([this]() { return BuildAgentPanelEntries(); });
     lubancode::cli::SetAgentViewSwitchHook(
-        [this](int viewed_task_id) { PrintViewedTranscript(viewed_task_id); });
+        [this](int viewed_task_id, int tail_rows) { PrintViewedTranscript(viewed_task_id, tail_rows); });
 
     // 面板动作接线(x 停止/清除、Ctrl+X Ctrl+K 两段确认停全部):只发信号/
     // 清台账,面板等任务线程报终态的那一拍自己改灯。
@@ -655,7 +711,8 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
         });
         // 演示钩子同样接管视图切换:假代理不在 AgentTool 台账里,查看态的
         // 头行从假条目表出,正文给一行占位——刮屏驱动器照旧只认屏面。
-        lubancode::cli::SetAgentViewSwitchHook([demo_count, demo_idle, this](int viewed_task_id) {
+        lubancode::cli::SetAgentViewSwitchHook([demo_count, demo_idle, this](int viewed_task_id, int tail_rows) {
+            (void)tail_rows;  // 演示代理没有实时流,重铺拍与整铺同款
             std::lock_guard<std::mutex> stdout_lock(lubancode::cli::StdoutWriteMutex());
             std::cout << "\n";
             if (viewed_task_id == 0) {
@@ -881,15 +938,19 @@ std::vector<lubancode::cli::AgentPanelEntry> InteractiveSession::BuildAgentPanel
             task.usage_reported || task.steps_used == 0
                 ? lubancode::cli::FormatTokenCount(tokens)
                 : tr("agent_status.tokens_not_reported");
-        // 状态短话(规格"现场三/四"):导航坞只放短因——完成/失败 · 接口报错/
-        // 耗尽 · 40/40 轮/停下 · 用户中止;完整错误进 transcript(Enter 查看)。
-        // 正数预算派出即可见:运行中带"N/M 轮",不等撞墙才揭晓。
+        // 状态短话(规格"现场三/四"+活跃度单):导航坞只放短因——完成/失败 ·
+        // 接口报错/耗尽 · 40/40 轮/停下 · 用户中止;完整错误进 transcript
+        // (Enter 查看)。运行中优先出实时活跃短语(思考中·N 字/工具 名·M 秒),
+        // 长思考任务的坞行秒级跳动,不再是死秒表。正数预算派出即可见:运行中
+        // 带"N/M 步",不等撞墙才揭晓。
         const std::string state_word =
-            AgentStateWord(task.state, task.steps_used, task.step_limit, task.outcome_reason);
+            AgentStateWord(task.state, task.steps_used, task.step_limit, task.outcome_reason,
+                           task.state == lubancode::tools::AgentTaskState::Running ? &task.activity : nullptr, now);
         entry.state = trf("agent_status.summary", state_word, task.tool_call_count, token_text,
                           lubancode::cli::FormatSeconds(seconds));  // 列表行只认真正短 title;旧任务没有 title 就显示"未命名子代理 #N"
         // ——绝不回退到 prompt 前若干字(prompt 只在详情里出现)。
         entry.title = task.title.empty() ? trf("agent_panel.untitled", task.id) : task.title;
+        entry.content_revision = task.content_revision;
         if (task.pending_message_count > 0) {
             // 有话已排给这只代理、还没在轮次边界送达——列表行尾巴明写,
             // 详情里再列原文,不让"已排给 subagent #N"只活在提交那一瞬。
@@ -941,13 +1002,15 @@ std::vector<std::string> InteractiveSession::BuildAgentTaskTranscriptLines(int t
     lines.push_back(std::string("  [") +
                     tr(snapshot->foreground ? "agent_panel.source_foreground" : "agent_panel.source_background") +
                     "]");
-    // 统计与当前状态行(规格"现场三"):与导航坞行同一套口径(共用
+    // 统计与当前状态行(规格"现场三"+活跃度单):与导航坞行同一套口径(共用
     // AgentStateWord + agent_status.summary)——agent 视图像 main 一样有
-    // 账可查,不只剩一张 tool-use 流水单。运行中的任务用时现算,查看帧
-    // 是切换那一刻的快照。
+    // 账可查,不只剩一张 tool-use 流水单。运行中的任务用时现算;首字节耗时
+    // (当前这轮请求从发出到首个流事件)一并写在这行,长任务分得清"在想"
+    // 还是"没来"。
     {
         const bool running = snapshot->state == lubancode::tools::AgentTaskState::Running;
-        const auto end = running ? std::chrono::steady_clock::now() : snapshot->end_time;
+        const auto now = std::chrono::steady_clock::now();
+        const auto end = running ? now : snapshot->end_time;
         const double seconds = end > snapshot->start_time
                                    ? std::chrono::duration<double>(end - snapshot->start_time).count()
                                    : 0.0;
@@ -958,13 +1021,18 @@ std::vector<std::string> InteractiveSession::BuildAgentTaskTranscriptLines(int t
             snapshot->usage_reported || snapshot->steps_used == 0
                 ? lubancode::cli::FormatTokenCount(tokens)
                 : tr("agent_status.tokens_not_reported");
-        lines.push_back("  " + theme.stats +
-                        trf("agent_status.summary",
-                            AgentStateWord(snapshot->state, snapshot->steps_used, snapshot->step_limit,
-                                           snapshot->outcome.reason),
-                            static_cast<int>(snapshot->tool_calls.size()), token_text,
-                            lubancode::cli::FormatSeconds(seconds)) +
-                        theme.reset);
+        std::string stats_line =
+            "  " + theme.stats +
+            trf("agent_status.summary",
+                AgentStateWord(snapshot->state, snapshot->steps_used, snapshot->step_limit,
+                               snapshot->outcome.reason,
+                               running ? &snapshot->activity : nullptr, now),
+                static_cast<int>(snapshot->tool_calls.size()), token_text,
+                lubancode::cli::FormatSeconds(seconds));
+        if (running && snapshot->activity.first_byte_ms >= 0) {
+            stats_line += " · " + trf("agent_activity.first_byte", snapshot->activity.first_byte_ms);
+        }
+        lines.push_back(stats_line + theme.reset);
     }
 
     const std::vector<lubancode::tools::AgentTaskEvent> events =
@@ -1043,6 +1111,8 @@ std::vector<std::string> InteractiveSession::BuildAgentTaskTranscriptLines(int t
                 push_markdown(theme.confirm + "> " + tr("agent_panel.event_steering") + theme.reset, event.text);
                 break;
             case lubancode::tools::AgentTaskEventKind::AssistantText:
+                // 流式正文尾巴(追加需求):查看态就是这只代理此刻的实时会话
+                // ——已流出的正文按渲染版铺开,重铺拍自然带出增量。
                 push_markdown(theme.banner + "● " + tr("cmd.resume.history.assistant") + theme.reset, event.text);
                 break;
             case lubancode::tools::AgentTaskEventKind::AssistantReasoning: {
@@ -1050,10 +1120,21 @@ std::vector<std::string> InteractiveSession::BuildAgentTaskTranscriptLines(int t
                 item.id = next_item_id++;
                 item.kind = lubancode::cli::TranscriptKind::Thinking;
                 item.tool_name = "thinking";
-                item.title = tr("agent_panel.event_thinking");
                 item.full_output = event.text;
-                item.status = lubancode::cli::TranscriptStatus::Ok;
-                push_rendered(lubancode::cli::FormatTranscriptItem(item, theme, width, /*expanded=*/false));
+                if (event.streaming) {
+                    // 流式思考尾巴(追加需求"查看态实时思考流"):与 main 流式
+                    // 思考同款折叠规矩——Running 条目,头行"思考中 · N 字"
+                    // 随重铺拍跳动;Ctrl+O 展开看长文(FormatTranscriptItem 的
+                    // thinking_live 分支自带"约一屏后截断收口")。
+                    item.status = lubancode::cli::TranscriptStatus::Running;
+                    item.title = trf("agent_activity.thinking",
+                                     static_cast<int>(lubancode::cli::CountUtf8Codepoints(event.text)));
+                } else {
+                    item.status = lubancode::cli::TranscriptStatus::Ok;
+                    item.title = tr("agent_panel.event_thinking");
+                }
+                push_rendered(lubancode::cli::FormatTranscriptItem(item, theme, width,
+                                                                   /*expanded=*/event.streaming && agent_view_expanded_));
                 break;
             }
             case lubancode::tools::AgentTaskEventKind::ToolStart:
@@ -1113,9 +1194,12 @@ std::vector<std::string> InteractiveSession::BuildAgentTaskTranscriptLines(int t
 }
 
 // 视图切换钩子(空闲路与流式监听共用,见 console_input.hpp):viewed_task_id
-// 变了就铺"此刻该看的会话正文"。持 StdoutWriteMutex——流式期间先擦 footer
-// 再铺、铺完画回;空闲路两步都是空操作,正文从旧 chrome 之下接着铺。
-void InteractiveSession::PrintViewedTranscript(int viewed_task_id) {
+// 变了就铺"此刻该看的会话正文"。tail_rows>0 是实时流的重铺拍(追加需求
+// "查看态实时思考流"):只保头三行(标题/来源/统计)+ 最近 tail 行,长会话
+// 不往滚屏里一秒刷一遍;tail_rows=0(真切会话)仍整份铺。持
+// StdoutWriteMutex——流式期间先擦 footer 再铺、铺完画回;空闲路两步都是
+// 空操作,正文从旧 chrome 之下接着铺。
+void InteractiveSession::PrintViewedTranscript(int viewed_task_id, int tail_rows) {
     std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
     lubancode::cli::EraseStreamFooterLocked();
     const int width = lubancode::cli::DetectConsoleWidth().value_or(80);
@@ -1127,7 +1211,25 @@ void InteractiveSession::PrintViewedTranscript(int viewed_task_id) {
         std::cout << theme.stats << tr("agent_panel.back_to_main") << theme.reset << "\n";
         PrintRecentItems(5);
     } else {
-        for (const auto& line : BuildAgentTaskTranscriptLines(viewed_task_id, width)) {
+        std::vector<std::string> body = BuildAgentTaskTranscriptLines(viewed_task_id, width);
+        if (tail_rows > 0 && static_cast<int>(body.size()) > tail_rows) {
+            // 头三行(标题/来源/统计)钉住,其余取最近 tail_rows-3 行:滚屏
+            // 不刷屏,正在长的尾巴永远在视口里。
+            constexpr int kHeadLines = 3;
+            std::vector<std::string> tailed;
+            tailed.reserve(static_cast<std::size_t>(tail_rows));
+            for (int i = 0; i < kHeadLines && i < static_cast<int>(body.size()); ++i) {
+                tailed.push_back(std::move(body[static_cast<std::size_t>(i)]));
+            }
+            const int keep = tail_rows - kHeadLines;
+            for (int i = static_cast<int>(body.size()) - keep; i < static_cast<int>(body.size()); ++i) {
+                if (i >= kHeadLines) {
+                    tailed.push_back(std::move(body[static_cast<std::size_t>(i)]));
+                }
+            }
+            body = std::move(tailed);
+        }
+        for (const auto& line : body) {
             std::cout << line << "\n";
         }
     }
@@ -1151,6 +1253,19 @@ bool InteractiveSession::HandleTranscriptUi(lubancode::cli::UiKeyAction action) 
     const int count = static_cast<int>(transcript.size());
     switch (action) {
         case cli::UiKeyAction::ToggleExpand: {
+            // 子代理查看态的 Ctrl+O(追加需求"查看态实时思考流"):展开/收起
+            // 查看帧里流式的思考/正文尾巴,与 main 流式思考同款折叠规矩——
+            // 展开档铺"思考中 · N 字"的正文(约一屏,超了截断收口),紧凑
+            // 档只留头行。main 聚焦查看不受影响。
+            const int viewed_task = cli::CurrentAgentViewedTaskId();
+            if (viewed_task != 0) {
+                agent_view_expanded_ = !agent_view_expanded_;
+                std::cout << "\n"
+                          << theme.stats
+                          << (agent_view_expanded_ ? tr("ui.expanded") : tr("ui.compact")) << theme.reset << "\n";
+                PrintViewedTranscript(viewed_task, /*tail_rows=*/0);
+                return true;
+            }
             // Ctrl+O:展开/收起最近一条(Claude Code 风格),不再全局全展开。
             // expanded_index 落在最近一条,FormatTranscriptItems 只展开它。
             focus_view_active = false;
