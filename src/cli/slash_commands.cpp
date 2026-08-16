@@ -149,6 +149,8 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Peerperm;
     } else if (lower == "/doctor") {
         parsed.command = SlashCommand::Doctor;
+    } else if (lower == "/keymap") {
+        parsed.command = SlashCommand::Keymap;
     } else {
         parsed.command = SlashCommand::Unknown;
     }
@@ -534,6 +536,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/send", tr("slash.desc.send")},
             {"/peerperm", tr("slash.desc.peerperm")},
             {"/doctor", tr("slash.desc.doctor")},
+            {"/keymap", tr("slash.desc.keymap")},
         };
     }
     return commands;

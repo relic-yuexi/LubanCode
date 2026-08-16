@@ -130,6 +130,11 @@ enum class UiKeyAction {
     // Ctrl+L 整屏重画:终端层已作废帧锚点、清了可视区,应用层把 transcript
     // 快照重铺一遍(横幅+最近条目)。回调返回 true 表示真铺了正文。
     RepaintScreen,
+    // 0.30.x 第四批转录导航(空 composer 的 { } [ v,键位走 keymap):
+    PrevUserTurn,  // {:跳上一条用户提问,状态行写"第 N/M 轮"
+    NextUserTurn,  // }:跳下一条
+    ToScrollback,  // [:完整转录写进终端 scrollback(用终端自带搜索)
+    ViewInEditor,  // v:转录写临时 Markdown 交 $VISUAL/$EDITOR 只读查看
 };
 using TranscriptUiHandler = std::function<bool(UiKeyAction)>;
 
@@ -253,6 +258,20 @@ void UpdateStatusLineContext(int context_percent, std::int64_t used_tokens, std:
 // 状态行数据源此刻的快照(拿 StdoutWriteMutex 拷贝):测试/诊断用,常规
 // 渲染路径不走这个(每帧重画在 BuildStatusLine 里现读)。
 StatusPanelData SnapshotStatusLineValues();
+
+// ---------------------------------------------------------------------------
+// 0.30.x 第四批:终端标题与"轮到你了"
+// ---------------------------------------------------------------------------
+
+// 终端标题(OSC 0):真控制台才写,管道/重定向不添转义。/title 管的是会话
+// 存档名,这里管的是终端 tab 上的那一枚(项目 · 分支 · 状态),两本账分开。
+void SetTerminalTitle(const std::string& text);
+
+// "轮到你了":BEL 一声。拿不到终端焦点状态(那要窗口管理器配合,诚实
+// 承认不知),所以不做"未聚焦才响"的判断——由调用方按"长任务跑完/等待
+// 确认"节流,只在状态翻转时叫一声,不刷风暴。桌面通知(OSC 9;9/777)
+// 支持面参差,能力探测层报 Unknown,这里不假装会发。
+void NotifyUserAttention();
 
 // M11(0.10.0):真控制台此刻的显示宽度(列数),给分界线(cli::BuildDividerLine)
 // 探测用。查的是 stdout 那个句柄(跟 DetectConsoleCapability 一致)——分界线

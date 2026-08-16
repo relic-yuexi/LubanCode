@@ -16,6 +16,7 @@
 #include "cli/theme.hpp"
 #include "cli/worktree.hpp"
 #include "lsp/manager.hpp"
+#include "platform/text_encoding.hpp"
 #include "tools/registry.hpp"
 
 namespace lubancode::app {
@@ -259,6 +260,9 @@ CommandFlow HandleBackgroundCommand(const lubancode::cli::Theme& theme) {
     // /background:列后台命令任务清单。文案直接用字面量(跟
     // background_output 工具的返回文本一个路数),不经 i18n——这条命令是
     // 给开发者的运维视图,新功能先不铺多语言。
+    // 0.30.x 第四批起每项补三行尾巴:最近三行非空输出、启动时间、已跑
+    // 时长(仿 Codex /ps 的省眼力手法);日志被删/非法 UTF-8/进程已死都
+    // 只是那一项少几行,菜单不带崩。
     const auto tasks = lubancode::tools::BackgroundTaskRegistry::Instance().List();
     if (tasks.empty()) {
         std::cout << "当前没有后台任务。" << "\n";
@@ -273,13 +277,52 @@ CommandFlow HandleBackgroundCommand(const lubancode::cli::Theme& theme) {
             case lubancode::tools::BackgroundTaskStatus::Failed: label = "失败"; break;
             case lubancode::tools::BackgroundTaskStatus::Stopped: label = "已停止"; break;
         }
+        // 时长:运行中 = now - start;终态 = finish - start(拿不到按 0)。
+        const auto span_end = t.status == lubancode::tools::BackgroundTaskStatus::Running
+                                  ? std::chrono::system_clock::now()
+                                  : t.finish_time;
+        const long long secs =
+            span_end > t.start_time
+                ? std::chrono::duration_cast<std::chrono::seconds>(span_end - t.start_time).count()
+                : 0;
         std::cout << theme.tool_line << "[#" << t.task_id << "] " << label;
         if (t.status != lubancode::tools::BackgroundTaskStatus::Running) {
             std::cout << " (exit " << t.exit_code << ")";
         }
-        std::cout << theme.reset << "  PID=" << t.pid << "\n"
-                  << theme.stats << "  命令: " << t.command << "  日志: " << t.log_path << theme.reset
-                  << "\n" << "\n";
+        std::cout << theme.reset << "  PID=" << t.pid << "  已跑 " << secs << "s" << "\n"
+                  << theme.stats << "  命令: " << t.command << theme.reset << "\n"
+                  << theme.stats << "  日志: " << t.log_path << theme.reset << "\n";
+        // 尾巴:尾部若干行里挑最近三行非空(输出正增长时看得到在动)。
+        if (const std::string tail =
+                lubancode::tools::BackgroundTaskRegistry::Instance().ReadOutput(t.task_id, 24);
+            !tail.empty()) {
+            std::string safe = lubancode::platform::SanitizeExternalText(tail);
+            std::vector<std::string> non_empty;
+            std::size_t line_start = 0;
+            while (line_start <= safe.size()) {
+                const std::size_t line_end = safe.find('\n', line_start);
+                std::string line = safe.substr(
+                    line_start, line_end == std::string::npos ? std::string::npos : line_end - line_start);
+                while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+                    line.pop_back();
+                }
+                if (!line.empty()) {
+                    non_empty.push_back(std::move(line));
+                }
+                if (line_end == std::string::npos) {
+                    break;
+                }
+                line_start = line_end + 1;
+            }
+            if (non_empty.size() > 3) {
+                non_empty.erase(non_empty.begin(),
+                                non_empty.end() - 3);  // 只要最近三行非空
+            }
+            for (const std::string& line : non_empty) {
+                std::cout << theme.stats << "  ⎿ " << line << theme.reset << "\n";
+            }
+        }
+        std::cout << "\n";
     }
     return CommandFlow::Continue;
 }

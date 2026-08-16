@@ -1086,6 +1086,30 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             state.hint_lines =
                 BuildMentionMenuLines(mention_entries, *matches, mention_selected, width);
             state.selected_index = -1;
+            return;
+        }
+        // 空 composer 的常用键速览(规格:"footer 先摆三四枚常用键,? 展开
+        // 全表"):键位从 keymap 反查,改键后提示跟着改。
+        if (state.lines.size() == 1 && state.lines[0].empty()) {
+            const keymap::Keymap& km = keymap::ActiveKeymap();
+            std::string hint;
+            const auto add = [&](keymap::ActionId action, const char* label_key) {
+                const auto chord = km.ChordFor(action);
+                if (!chord.has_value()) {
+                    return;
+                }
+                if (!hint.empty()) {
+                    hint += " · ";
+                }
+                hint += keymap::FormatKeyChord(*chord) + " " + tr(label_key);
+            };
+            add(keymap::ActionId::HelpShow, "hint.keys.help");
+            add(keymap::ActionId::ChatSearchHistory, "hint.keys.search_history");
+            add(keymap::ActionId::TranscriptToggleExpand, "hint.keys.expand");
+            add(keymap::ActionId::ChatExternalEditor, "hint.keys.editor");
+            if (!hint.empty()) {
+                state.hint_lines = {hint};
+            }
         }
     };
 
@@ -1493,6 +1517,69 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                         }
                         panel_notice_until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
                         redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
+                        continue;
+                    }
+                    case ActionId::HelpShow: {
+                        // '?' 场景帮助:只列当前场景有效键,不倒整本 /help;
+                        // 键位从 keymap 反查,用户改键后提示跟着改。空
+                        // composer 才当帮助,有正文时 '?' 是普通字符。
+                        if (!editor.CurrentRenderState().line.empty()) {
+                            break;
+                        }
+                        retire_idle_chrome();
+                        std::cout << "\n";
+                        {
+                            std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+                            std::cout << theme.tool_line << tr("help.scene_header") << theme.reset << "\n";
+                            for (const auto& record : keymap::ActiveKeymap().AllBindings()) {
+                                if (record.scope == keymap::KeyScope::Streaming) {
+                                    continue;  // 流式脚注那批不属"当前场景"(空闲 composer)
+                                }
+                                const std::string chord_text =
+                                    record.has_default ? keymap::FormatKeyChord(record.chord) : "-";
+                                std::cout << theme.stats << "  " << chord_text;
+                                for (int pad = static_cast<int>(chord_text.size()); pad < 12; ++pad) {
+                                    std::cout << ' ';
+                                }
+                                std::cout << keymap::ActionName(record.action);
+                                if (!record.bindable) {
+                                    std::cout << tr("help.fixed_suffix");
+                                } else if (!record.has_default) {
+                                    std::cout << tr("help.unbound_suffix");
+                                }
+                                std::cout << theme.reset << "\n";
+                            }
+                            std::cout << theme.stats << tr("help.scene_footer") << theme.reset << "\n";
+                            std::cout.flush();
+                        }
+                        reanchor_prompt_and_redraw();
+                        continue;
+                    }
+                    case ActionId::TranscriptPrevUserTurn:
+                    case ActionId::TranscriptNextUserTurn:
+                    case ActionId::TranscriptToScrollback:
+                    case ActionId::TranscriptViewInEditor: {
+                        // 转录导航(空 composer 的 { } [ v):有正文时全是
+                        // 普通字符。动作交应用层(HandleTranscriptUi),没
+                        // 人认(空会话)就补帧了事。
+                        if (!editor.CurrentRenderState().line.empty() || search_chord->ctrl ||
+                            search_chord->alt) {
+                            break;
+                        }
+                        UiKeyAction action = UiKeyAction::PrevUserTurn;
+                        switch (keymap::ActiveKeymap().Lookup(keymap::KeyScope::Composer, *search_chord)) {
+                            case ActionId::TranscriptPrevUserTurn: action = UiKeyAction::PrevUserTurn; break;
+                            case ActionId::TranscriptNextUserTurn: action = UiKeyAction::NextUserTurn; break;
+                            case ActionId::TranscriptToScrollback: action = UiKeyAction::ToScrollback; break;
+                            case ActionId::TranscriptViewInEditor: action = UiKeyAction::ViewInEditor; break;
+                            default: break;
+                        }
+                        retire_idle_chrome();
+                        std::cout << "\n";
+                        if (UiHandlerSlot()) {
+                            (void)UiHandlerSlot()(action);
+                        }
+                        reanchor_prompt_and_redraw();
                         continue;
                     }
                     default:
@@ -2199,6 +2286,25 @@ void UpdateStatusLineContext(int context_percent, std::int64_t used_tokens, std:
 StatusPanelData SnapshotStatusLineValues() {
     std::lock_guard<std::mutex> lock(StdoutWriteMutex());
     return StatusDataSlot().values;
+}
+
+void SetTerminalTitle(const std::string& text) {
+    const platform::StdoutConsoleProbe probe = platform::ProbeStdoutConsole();
+    if (!probe.is_console || !probe.vt_enabled) {
+        return;  // 管道/重定向不添转义
+    }
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    std::cout << "\x1b]0;" << text << "\x07";
+    std::cout.flush();
+}
+
+void NotifyUserAttention() {
+    if (!platform::ProbeStdoutConsole().is_console) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    std::cout << "\a";
+    std::cout.flush();
 }
 
 std::optional<int> DetectConsoleWidth() {

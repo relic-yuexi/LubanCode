@@ -49,6 +49,7 @@ enum class SlashCommand {
     Send,    // /send <名字或 peer_id> <话>:给另一场会话递一张字条
     Peerperm,  // /peerperm auto|accept|hold|refuse:跨会话来信的权限档
     Doctor,  // /doctor effort|cache:本地兼容端 Effort/前缀缓存诊断(探针要发请求)
+    Keymap,  // /keymap [set 动作 和弦|reset [动作|all]]:看/改键位(用户级落盘)
     Unknown,  // 以 / 开头,但不认得这个命令
 };
 

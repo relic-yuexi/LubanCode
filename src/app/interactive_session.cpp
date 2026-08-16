@@ -72,6 +72,7 @@
 #include "cli/live_transcript.hpp"
 #include "cli/worktree.hpp"
 #include "cli/markdown.hpp"
+#include "cli/keymap.hpp"
 #include "cli/mention_menu.hpp"
 #include "cli/provider_wizard.hpp"
 #include "cli/record_command.hpp"
@@ -289,6 +290,10 @@ private:
     void HandleCopyCommand(const std::string& raw_args);
     // @ 提及(0.30.x 第三批):文件索引(按根缓存)与提交前校验/账单。
     std::vector<lubancode::cli::FileMentionEntry> FileMentionIndexSnapshot();
+    // /keymap(0.30.x 第四批):列/改绑/复位键位,写用户级 keymap.json。
+    void HandleKeymapCommand(const std::string& raw_args);
+    // 终端标题模板:项目短名 · 分支 · 状态(0.30.x 第四批)。
+    std::string BuildTerminalTitleText(const std::string& state_word) const;
     // 返回:第一段是错误(非空 = 拦下这一轮不发送),第二段是给模型的
     // 提及账(空 = 没有)。
     std::pair<std::string, std::string> BuildMentionLedger(const std::string& content);
@@ -383,6 +388,7 @@ private:
     // 在这条跨线程路径上的可见性问题。
     std::atomic<bool> transcript_expanded{false};
     int focus_index = -1;                    // 焦点条目的 transcript 下标,-1 = 无焦点
+    int nav_turn_index_ = -1;                // { } 轮次导航的当前轮(-1 = 未开始,起手最近一轮)
     bool focus_view_active = false;          // 正在聚焦查看
     std::atomic<bool> expand_latest{false};  // Ctrl+O:inline 展开最近一条
 
@@ -1251,6 +1257,129 @@ bool InteractiveSession::HandleTranscriptUi(lubancode::cli::UiKeyAction action) 
             PrintRecentItems(count > 0 ? 10 : 0);
             return true;
         }
+        case cli::UiKeyAction::PrevUserTurn:
+        case cli::UiKeyAction::NextUserTurn: {
+            // { / }:在用户提问(轮次)之间走。轮次从活 history 数(非 slash
+            // 的用户消息),屏幕上给选中轮的正文摘要,状态行写"第 N/M 轮"。
+            std::vector<std::size_t> turn_indexes;
+            for (std::size_t i = 0; i < loop->History().size(); ++i) {
+                const auto& message = loop->History()[i];
+                if (message.role != lubancode::api::Role::User || message.content.empty()) {
+                    continue;
+                }
+                const auto* text = std::get_if<lubancode::api::TextBlock>(&message.content.front());
+                if (text == nullptr || text->text.empty() || text->text.front() == '/') {
+                    continue;
+                }
+                bool has_tool_result = false;
+                for (const auto& block : message.content) {
+                    if (std::holds_alternative<lubancode::api::ToolResultBlock>(block)) {
+                        has_tool_result = true;
+                        break;
+                    }
+                }
+                if (!has_tool_result) {
+                    turn_indexes.push_back(i);
+                }
+            }
+            if (turn_indexes.empty()) {
+                return false;
+            }
+            const bool older = action == cli::UiKeyAction::PrevUserTurn;
+            if (nav_turn_index_ < 0) {
+                nav_turn_index_ = static_cast<int>(turn_indexes.size()) - 1;  // 起手最近一轮
+            } else if (older && nav_turn_index_ > 0) {
+                --nav_turn_index_;
+            } else if (!older && nav_turn_index_ + 1 < static_cast<int>(turn_indexes.size())) {
+                ++nav_turn_index_;
+            }
+            const std::size_t turn = turn_indexes[static_cast<std::size_t>(nav_turn_index_)];
+            const auto& message = loop->History()[turn];
+            const auto* text = std::get_if<lubancode::api::TextBlock>(&message.content.front());
+            std::cout << "\n"
+                      << theme.stats
+                      << trf("ui.turn_nav", nav_turn_index_ + 1, turn_indexes.size()) << theme.reset << "\n";
+            if (text != nullptr) {
+                const std::string clipped = text->text.substr(0, 400);
+                std::cout << theme.stats << clipped << (text->text.size() > 400 ? "…" : "")
+                          << theme.reset << "\n";
+            }
+            return true;
+        }
+        case cli::UiKeyAction::ToScrollback: {
+            // [:完整转录写进终端 scrollback——用终端自带搜索找路。条目按
+            // 当前展开档铺,压缩点/截断在 FormatTranscriptItems 里自带标注;
+            // 这只是查看,不改活 history(正式存档走 /export)。
+            if (count == 0) {
+                return false;
+            }
+            std::cout << "\n"
+                      << theme.stats << tr("ui.to_scrollback") << theme.reset << "\n";
+            std::cout << cli::FormatTranscriptItems(transcript, theme, width, transcript_expanded);
+            std::cout.flush();
+            return true;
+        }
+        case cli::UiKeyAction::ViewInEditor: {
+            // v:转录写临时 Markdown,交 $VISUAL/$EDITOR 只读查看。看完回来
+            // composer 与光标原样(终端层已收帧重画)。
+            std::string markdown;
+            for (const auto& message : loop->History()) {
+                const char* role_word =
+                    message.role == lubancode::api::Role::User ? "## 用户" : "## 助手";
+                markdown += role_word;
+                markdown += "\n\n";
+                for (const auto& block : message.content) {
+                    if (const auto* text = std::get_if<lubancode::api::TextBlock>(&block)) {
+                        markdown += text->text + "\n\n";
+                    } else if (const auto* use = std::get_if<lubancode::api::ToolUseBlock>(&block)) {
+                        markdown += "> 工具调用: " + use->name + "\n\n";
+                    } else if (const auto* result = std::get_if<lubancode::api::ToolResultBlock>(&block)) {
+                        markdown += "> 工具结果: " +
+                                    result->content.substr(0, 2000) +
+                                    (result->content.size() > 2000 ? "…(截断)" : "") + "\n\n";
+                    }
+                }
+            }
+            if (markdown.empty()) {
+                return false;
+            }
+            std::string editor_cmd;
+            if (const auto visual = lubancode::platform::GetEnvVar("VISUAL");
+                visual.has_value() && !visual->empty()) {
+                editor_cmd = *visual;
+            } else if (const auto ed = lubancode::platform::GetEnvVar("EDITOR");
+                       ed.has_value() && !ed->empty()) {
+                editor_cmd = *ed;
+            } else {
+#ifdef _WIN32
+                editor_cmd = "notepad";
+#else
+                editor_cmd = "vi";
+#endif
+            }
+            std::filesystem::path file;
+            try {
+                file = std::filesystem::temp_directory_path() /
+                       ("lubancode-transcript-" +
+                        std::to_string(lubancode::platform::CurrentProcessId()) + ".md");
+            } catch (const std::exception&) {
+                std::cout << theme.error << tr("editor.no_temp") << theme.reset << "\n";
+                return true;
+            }
+            {
+                std::ofstream out(file, std::ios::binary | std::ios::trunc);
+                if (!out) {
+                    std::cout << theme.error << tr("editor.write_failed") << theme.reset << "\n";
+                    return true;
+                }
+                out << markdown;
+            }
+            std::cout << theme.stats << trf("ui.view_in_editor", editor_cmd) << theme.reset << "\n";
+            std::cout.flush();
+            (void)lubancode::platform::RunInteractiveCommand(editor_cmd + " \"" +
+                                                             lubancode::tools::PathToUtf8(file) + "\"");
+            return true;
+        }
     }
     return false;
 }
@@ -1744,6 +1873,125 @@ std::pair<std::string, std::string> InteractiveSession::BuildMentionLedger(const
         return {};
     }
     return {{}, tr("mention.ledger_header") + ledger + "\n"};
+}
+
+// 终端标题模板:项目短名 · 分支 · 状态词。纯拼串,可单测可不测(肉眼可核)。
+std::string InteractiveSession::BuildTerminalTitleText(const std::string& state_word) const {
+    std::string project;
+    if (const auto root = lubancode::cli::FindRepositoryRoot(std::filesystem::current_path())) {
+        project = root->filename().string();
+    }
+    if (project.empty()) {
+        project = "lubancode";
+    }
+    const std::string branch = lubancode::cli::CurrentGitBranch(std::filesystem::current_path());
+    std::string out = "lubancode · " + project;
+    if (!branch.empty()) {
+        out += " · " + branch;
+    }
+    out += " · " + state_word;
+    return out;
+}
+
+// /keymap [set 动作 和弦 | reset [动作|all]]:列动作名/当前键/作用域/
+// 可否改绑;set 走 keymap 的冲突检查(同域撞车拒绝),落盘用户级
+// ~/.lubancode/keymap.json(项目配置不读不写,改键是全局的)。
+void InteractiveSession::HandleKeymapCommand(const std::string& raw_args) {
+    namespace keymap = lubancode::cli::keymap;
+    std::vector<std::string> words;
+    std::string current;
+    for (const char c : raw_args) {
+        if (c == ' ' || c == '\t') {
+            if (!current.empty()) {
+                words.push_back(std::move(current));
+                current.clear();
+            }
+        } else {
+            current.push_back(c);
+        }
+    }
+    if (!current.empty()) {
+        words.push_back(std::move(current));
+    }
+
+    if (words.empty()) {
+        // 列全表:作用域分组,和弦右对齐,固定键/未绑键标明。
+        std::cout << tr("keymap.list_header") << "\n";
+        for (const auto& record : keymap::ActiveKeymap().AllBindings()) {
+            const std::string chord = record.has_default ? keymap::FormatKeyChord(record.chord) : "-";
+            std::cout << theme.stats << "  [" << keymap::ScopeName(record.scope) << "] " << chord;
+            for (int pad = static_cast<int>(chord.size()); pad < 12; ++pad) {
+                std::cout << ' ';
+            }
+            std::cout << keymap::ActionName(record.action)
+                      << (!record.bindable ? tr("keymap.fixed_suffix")
+                           : !record.has_default ? tr("keymap.unbound_suffix") : "")
+                      << theme.reset << "\n";
+        }
+        std::cout << tr("keymap.usage") << "\n";
+        return;
+    }
+    if (words[0] == "set") {
+        if (words.size() != 3) {
+            std::cout << theme.error << tr("keymap.usage") << theme.reset << "\n";
+            return;
+        }
+        const auto action = keymap::ActionFromName(words[1]);
+        if (!action.has_value()) {
+            std::cout << theme.error << trf("keymap.unknown_action", words[1]) << theme.reset << "\n";
+            return;
+        }
+        const auto chord = keymap::ParseKeyChord(words[2]);
+        if (!chord.has_value()) {
+            std::cout << theme.error << trf("keymap.bad_chord", words[2]) << theme.reset << "\n";
+            return;
+        }
+        std::string error;
+        if (!keymap::ActiveKeymap().SetBinding(*action, *chord, error)) {
+            std::cout << theme.error << trf("keymap.bind_failed", error) << theme.reset << "\n";
+            return;
+        }
+        if (home_lubancode.has_value()) {
+            if (const auto save_error = keymap::SaveActiveKeymapOverrides(*home_lubancode);
+                save_error.has_value()) {
+                std::cout << theme.error << trf("keymap.save_failed", *save_error) << theme.reset << "\n";
+            }
+        }
+        std::cout << theme.stats
+                  << trf("keymap.bound", keymap::ActionName(*action), keymap::FormatKeyChord(*chord))
+                  << theme.reset << "\n";
+        return;
+    }
+    if (words[0] == "reset") {
+        std::string error;
+        if (words.size() == 2 && words[1] == "all") {
+            keymap::Keymap fresh;  // 出厂默认整份换血
+            for (const auto& record : fresh.AllBindings()) {
+                if (record.bindable) {
+                    (void)keymap::ActiveKeymap().ResetBinding(record.action, error);
+                }
+            }
+            std::cout << theme.stats << tr("keymap.reset_all") << theme.reset << "\n";
+        } else if (words.size() == 2) {
+            const auto action = keymap::ActionFromName(words[1]);
+            if (!action.has_value() || !keymap::ActiveKeymap().ResetBinding(*action, error)) {
+                std::cout << theme.error << trf("keymap.reset_failed", words[1]) << theme.reset << "\n";
+                return;
+            }
+            std::cout << theme.stats << trf("keymap.reset_one", words[1]) << theme.reset << "\n";
+        } else {
+            std::cout << theme.error << tr("keymap.usage") << theme.reset << "\n";
+            return;
+        }
+        if (home_lubancode.has_value()) {
+            if (const auto save_error = keymap::SaveActiveKeymapOverrides(*home_lubancode);
+                save_error.has_value()) {
+                std::cout << theme.error << trf("keymap.save_failed", *save_error) << theme.reset << "\n";
+            }
+        }
+        return;
+    }
+    std::cout << theme.error << tr("keymap.usage") << theme.reset << "\n";
 }
 
 void InteractiveSession::EnsureMemoryTool() {
@@ -2367,6 +2615,9 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                 break;
             case lubancode::cli::SlashCommand::Background:
                 return HandleBackgroundCommand(theme);
+            case lubancode::cli::SlashCommand::Keymap:
+                HandleKeymapCommand(parsed.args);
+                break;
             case lubancode::cli::SlashCommand::Doctor: {
                 // 本地兼容端 Effort/前缀缓存诊断。探针自己建临时 backend,
                 // 与会话 backend 无关;stream_usage 探针写回 config 后这里
@@ -2490,10 +2741,23 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
     }
     loop->SetTurnContext(std::move(turn_suffix));
     const std::size_t history_before = loop->History().size();
+    // 终端标题(0.30.x 第四批):跑着/等输入两态,项目·分支跟着;拿不到
+    // 焦点状态,不做"未聚焦才通知"的假判断,只在长轮收口时叫一声铃。
+    if (spinner_enabled) {
+        lubancode::cli::SetTerminalTitle(BuildTerminalTitleText(tr("notify.state_busy")));
+    }
+    const auto turn_started = std::chrono::steady_clock::now();
     RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
             lubancode::app::HookRuntime(), spinner_enabled, transcript, todo_state(), &transcript_expanded,
             settings_local.allow_commands, settings_local.deny_commands, session_agent_tool(),
             recorder.has_value() ? &*recorder : nullptr);
+    if (spinner_enabled) {
+        lubancode::cli::SetTerminalTitle(BuildTerminalTitleText(tr("notify.state_idle")));
+        const auto elapsed = std::chrono::steady_clock::now() - turn_started;
+        if (elapsed > std::chrono::seconds(30)) {
+            lubancode::cli::NotifyUserAttention();  // 长轮跑完叫一声,每轮至多一次
+        }
+    }
     // 每轮结束(成功/出错/ESC 打断都算)把新增消息逐条追加落盘。
     PersistNewMessages();
     // 回合收尾总结与候选抽取(learn off 时是空操作)。
