@@ -290,6 +290,27 @@ void RedrawStreamFooterLocked();
 // 调用方须已持有 StdoutWriteMutex。末尾带换行的 N 行文字应传 N + 1。
 bool EnsureStreamScreenRowsLocked(int rows_needed);
 
+// ---------------------------------------------------------------------------
+// 帧账的"保锚可见"原语(多智能体真机回归单):全程序独此一处管
+// "要画的行必须落在可视区里"。从 top_row 起 rows_needed 行若伸出可视窗
+// 口底,先平移视口(经典 conhost 长缓冲:窗口之下还有缓冲行,内容与绝对
+// 锚点一个不动),平移到头(视口贴缓冲区底——Windows Terminal/ConPTY 的
+// 常态)再退回"缓冲区末行写换行滚内容"的老法。返回内容实际滚动的行数
+// (平移视口时为 0):调用方拿它把绝对锚点上移对账。调用方须已持有
+// StdoutWriteMutex。
+// 病根:绝对定位画帧(SetCursorPos/VT CUP)画出窗口底,控制台不会像顺
+// 序打印那样把窗口带下去——帧画在缓冲区里、用户看不见,回合收口后
+// composer 与代理坞"画在下方却不在 viewport 内"说的就是它,非得按字号
+// 借终端 reflow 才救得回来。
+// ---------------------------------------------------------------------------
+int EnsureViewportRowsLocked(int top_row, int rows_needed);
+
+// 上者的正文/工具账封装:锚点(anchor_row)护栏——贴底滚内容的行数比锚点
+// 上方还多时返回 -1(账对不上,调用方按老规矩弃画/记 unsafe),平移视口
+// 与正常滚内容返回实际滚动行数(平移为 0)。调用方须已持有
+// StdoutWriteMutex。
+int EnsureViewportRowsForAnchorLocked(int anchor_row, int top_row, int rows_needed);
+
 // 流式回合里的 Working 不另占一套 stdout 绘制权。Spinner 只把当前帧
 // 塞进 footer 状态，由 RedrawStreamFooterLocked 把 Working、队列、输入框
 // 一气画完。Start 返回 false 表示当前没有 footer（如 /compact），调用方

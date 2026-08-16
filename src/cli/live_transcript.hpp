@@ -395,25 +395,21 @@ private:
         return nullptr;
     }
 
-    // 从 start_row 起要写 rows_needed 行,会不会撞到缓冲区最后一行?会的话
-    // 先主动滚够行数,再把所有登记过的锚点(和调用方手里这个 start_row)
-    // 一起往上平移——跟 console_input.cpp 的 EnsureRoomForRows 同一套账。
+    // 从 start_row 起要写 rows_needed 行,会不会伸出可视窗口底?会的话先按
+    // 帧账原语腾够(长缓冲平移视口、贴底滚内容),再把所有登记过的锚点
+    // (和调用方手里这个 start_row)随内容滚动一起往上平移——跟
+    // console_input.cpp 的 EnsureRoomForRows 同一套账,全认
+    // EnsureViewportRowsLocked 一处。这里不带锚点护栏(老行为:滚了再说,
+    // 锚点夹 0),护栏是 footer/正文块各自的规矩。
     void EnsureRoom(int& start_row, int rows_needed) {
         const std::optional<lubancode::platform::ScreenInfo> info = lubancode::platform::GetScreenInfo();
         if (!info.has_value()) {
             return;
         }
-        const int buffer_height = info->height;
-        const int needed_bottom = start_row + rows_needed - 1;
-        if (needed_bottom < buffer_height) {
-            return;
+        const int overflow = lubancode::cli::EnsureViewportRowsLocked(start_row, rows_needed);
+        if (overflow <= 0) {
+            return;  // 平移视口(0):锚点不动;拿不到屏幕信息同样一笔不滚
         }
-        const int overflow = needed_bottom - buffer_height + 1;
-        lubancode::platform::SetCursorPos(0, buffer_height - 1);
-        for (int i = 0; i < overflow; ++i) {
-            std::cout << "\n";
-        }
-        std::cout.flush();
         for (auto& anchor : anchors_) {
             anchor.start_row = (std::max)(0, anchor.start_row - overflow);
         }
@@ -634,21 +630,15 @@ private:
                 }
                 rows_needed += static_cast<int>(lubancode::cli::DisplayWidthUtf8(text)) /
                                (std::max)(1, info->width);
-                const int overflow = info->cursor_y + rows_needed - info->height + 1;
-                if (overflow > 0) {
-                    if (overflow > start_row_) {
-                        unsafe_ = true;
-                    } else {
-                        const int saved_x = info->cursor_x;
-                        const int saved_y = info->cursor_y;
-                        lubancode::platform::SetCursorPos(0, info->height - 1);
-                        for (int i = 0; i < overflow; ++i) {
-                            std::cout << "\n";
-                        }
-                        std::cout.flush();
-                        start_row_ -= overflow;
-                        lubancode::platform::SetCursorPos(saved_x, saved_y - overflow);
-                    }
+                // 帧账原语(带锚点护栏):长缓冲平移视口,贴底滚内容;要滚的
+                // 比块首上方还多(-1)就记 unsafe,块保持原样不重画。
+                const int overflow =
+                    lubancode::cli::EnsureViewportRowsForAnchorLocked(start_row_, info->cursor_y, rows_needed);
+                if (overflow < 0) {
+                    unsafe_ = true;
+                } else if (overflow > 0) {
+                    start_row_ -= overflow;
+                    lubancode::platform::SetCursorPos(info->cursor_x, info->cursor_y - overflow);
                 }
             } else {
                 unsafe_ = true;
@@ -692,22 +682,23 @@ private:
             return;
         }
         const int new_rows = static_cast<int>(lines.size());
-        // 渲染版比原样块高(标题前后的空行、表格边线都要地方)、又贴着
-        // 缓冲区底:照 OnDelta 同一套,自己先滚够、start_row_ 同步上移。
-        // 渲染版比整个缓冲区还高才放弃(原样保留,信息不丢)。
-        if (start_row_ + new_rows >= buffer_height) {
-            const int overflow = start_row_ + new_rows - buffer_height + 1;
-            if (overflow > start_row_) {
+        // 渲染版比原样块高(标题前后的空行、表格边线都要地方)、又伸出可视
+        // 窗口底:照 OnDelta 同一套,先按帧账原语腾够(长缓冲平移视口、贴底
+        // 滚内容)、start_row_ 随滚动上移;要滚的比块首上方还多(-1)才放弃
+        // (原样保留,信息不丢)。平移/滚动都会动 viewport 原点,随后
+        // TerminalBatch 的坐标系要重探。
+        {
+            const int overflow =
+                lubancode::cli::EnsureViewportRowsForAnchorLocked(start_row_, start_row_, new_rows + 1);
+            if (overflow < 0) {
                 return;
             }
-            lubancode::platform::SetCursorPos(0, buffer_height - 1);
-            for (int i = 0; i < overflow; ++i) {
-                std::cout << "\n";
+            if (overflow > 0) {
+                start_row_ -= overflow;
             }
-            std::cout.flush();
-            start_row_ -= overflow;
-            if (const auto after_scroll = lubancode::platform::GetScreenInfo();
-                after_scroll.has_value()) {
+            // 平移视口(返回 0)与滚内容(返回 >0)都会动 viewport 原点,
+            // 重探不问返回值。
+            if (const auto after_scroll = lubancode::platform::GetScreenInfo(); after_scroll.has_value()) {
                 viewport_x = after_scroll->viewport_x;
                 viewport_y = after_scroll->viewport_y;
             }

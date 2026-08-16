@@ -907,9 +907,16 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     // 快照；也保证下一次 ReadLine() 前不再抢控制台输入。心跳线程随后收。
     listener.Stop();
     lubancode::cli::SetStreamScreenPrintHook(nullptr);  // 线程已 join,摘钩,别让它抓着局部引用过夜
-    // 脚注在 markdown 收束重画之前擦掉、关停:它常驻在正文块区间之外,不擦
-    // 的话会残留在重画区下方;关停后 FinalizeRepaint 按"块首到光标"记账,
-    // 光标此刻正停在正文末尾(最后一笔 OnDelta 已把它拨回),账目干净。
+    // streaming→idle 的交接是一笔事务,次序钉死不许倒:
+    //   1) 收 streaming footer(EndStreamFooter 里的 EraseStreamFooterLocked,
+    //      按上一帧的账整框擦净、光标拨回正文续写位);
+    //   2) 写最终正文(body_tracker.FinalizeRepaint,markdown 收束重画);
+    //   3) 统计行 + 尾分界线(顺序打印,窗口自然跟行);
+    //   4) 主循环回到 ReadLine 画 idle composer/代理坞/状态栏,首帧经
+    //      EnsureViewportRowsLocked(帧账的"保锚可见"原语)把整帧纳入可视区
+    //      ——长缓冲平移视口、贴底滚内容,不许靠改字号/滚轮/Ctrl+End 救场。
+    // 本函数只管前三步;第四步在 console_input 的 composer 首帧里,帧账
+    // 一处收口(规格《多智能体真机回归_可视区重排与查看态》)。
     lubancode::cli::EndStreamFooter();
     lubancode::cli::SetStreamScreenScrollHook(nullptr);
 
