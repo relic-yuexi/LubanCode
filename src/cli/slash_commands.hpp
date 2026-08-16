@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -74,7 +75,11 @@ enum class ProviderCommandAction {
     // switch 专用短用法),不再落进 Invalid -> 总帮助那条死路。
     SwitchInteractive,
     Remove,
-    Set
+    Set,
+    // 容错单:/provider edit <名字> 进向导面板改旧 provider;裸敲 edit(TTY
+    // 开选择列表,选中进编辑;非 TTY 给 edit 专用短用法)。
+    Edit,
+    EditInteractive
 };
 
 struct ParsedProviderCommand {
@@ -108,9 +113,32 @@ struct ParsedProviderCommand {
     std::string field;
     std::string header_name;
     std::string value;
+    // action == Invalid 时才有意义:第一个词的原始拼写(保留大小写)。容错
+    // 单用它做编辑距离近邻——已知子命令敲错参(如 "refresh now")时它等于
+    // 该子命令本身,调用方据此改打"参数不对 + 该子命令短用法"。
+    std::string bad_word;
 };
 
 ParsedProviderCommand ParseProviderCommand(const std::string& args);
+
+// ---------------------------------------------------------------------------
+// /provider 子命令容错(容错单):拼错的子命令(swtich/lst/remvoe)不再倒
+// 13 行总表,给一句"是不是想敲 X?"+ X 的专用短用法。匹配是纯函数,单测
+// 钉死。
+// ---------------------------------------------------------------------------
+
+// 已知子命令清单,按提示时的推荐序排列(近邻距离打平时取排前面的)。
+std::vector<std::string> ProviderSubcommands();
+
+// 编辑距离(Levenshtein,大小写不敏感)最近邻:距离 <= 2 的已知子命令;
+// 没有近邻返回 std::nullopt。word 本身是已知子命令时原样返回(距离 0)。
+// 只建议,不替用户执行——"不做模糊自动执行"是规格明令。
+std::optional<std::string> NearestProviderSubcommand(const std::string& word);
+
+// 某个子命令的专用短用法(一行)。认不得的子命令返回空串。i18n 走
+// cmd.provider.usage_short.<子命令> 一族(switch 复用既有的
+// cmd.provider.switch.usage_short)。
+std::string ProviderSubcommandUsageLine(const std::string& subcommand);
 
 // /record 的二级参数,同样收在 cli 层做纯解析:拆出动作、名字/编号、note
 // 的原文(install|discard 的第三个词管装到哪一级)。缺参数、认不得的动作

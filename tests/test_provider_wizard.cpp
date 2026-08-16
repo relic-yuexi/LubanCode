@@ -603,6 +603,225 @@ TEST_CASE("IsLocalBaseUrl: 本机与局域网认得,公网不认") {
     CHECK_FALSE(cli::IsLocalBaseUrl("https://cc.moontidef.work/v1"));
 }
 
+// ---------------------------------------------------------------------------
+// /provider edit(容错单):同一套向导面板改旧 provider。夹具照 add 的五组
+// (前进/后退/跳转/失效/取消)对 edit 模式照跑,另钉 diff、掩码与锁名。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+config::ProviderConfig EditableProvider() {
+    config::ProviderConfig p;
+    p.name = "custom";
+    p.base_url = "https://old.example.test/v1";
+    p.wire = config::Wire::Responses;
+    p.auth = config::ProviderAuthMode::Inline;
+    p.api_key = "sk-old-key-123456";
+    p.model = "old-model";
+    p.model_reasoning_effort = "high";
+    p.extra_body["thinking"] = true;
+    p.context_window_tokens = 200000;   // 向导不碰的字段:写盘得原样带回去
+    p.native_web_search = true;
+    return p;
+}
+
+}  // namespace
+
+TEST_CASE("RunProviderEditWizard: 跳转——起手汇总页,跳回 base_url 改值,直回汇总,确认写入") {
+    ScriptedIO scripted;
+    scripted.Say("3");                            // 汇总页跳第 3 项 base_url
+    scripted.Say("https://new.example.test/v1");  // 改地址 -> 回程票直回汇总
+    scripted.Say("Y");                            // 确认写入
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderEditWizard(io, EditableProvider());
+
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->save_requested);
+    CHECK(outcome->provider.name == "custom");
+    CHECK(outcome->provider.base_url == "https://new.example.test/v1");
+    // 其他字段原样:改一项不动全身。
+    CHECK(outcome->provider.model == "old-model");
+    CHECK(outcome->provider.model_reasoning_effort == "high");
+    CHECK(outcome->provider.api_key == "sk-old-key-123456");
+    CHECK(outcome->provider.context_window_tokens == 200000);
+    CHECK(outcome->provider.native_web_search);
+    CHECK(outcome->provider.extra_body.at("thinking") == true);
+    CHECK(scripted.fetch_calls == 0);  // 编辑模式不拉模型列表
+    // 确认页 diff:旧值 -> 新值都露面。
+    CHECK(scripted.AnyPrintedContains("https://old.example.test/v1 → https://new.example.test/v1"));
+}
+
+TEST_CASE("RunProviderEditWizard: 前进——回车逐项保留,一个不改,原样写回") {
+    ScriptedIO scripted;
+    scripted.Say("3");   // 跳回 base_url
+    scripted.Say("");    // 回车 = 保留旧值
+    scripted.Say("Y");   // 汇总确认
+    auto io = scripted.Build();
+    const config::ProviderConfig original = EditableProvider();
+    const auto outcome = cli::RunProviderEditWizard(io, original);
+
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->save_requested);
+    CHECK(outcome->provider.base_url == original.base_url);
+    CHECK(outcome->provider.model == original.model);
+    CHECK(outcome->provider.api_key == original.api_key);
+    CHECK(scripted.AnyPrintedContains("本次没有字段改动"));
+}
+
+TEST_CASE("RunProviderEditWizard: 后退——从 effort 一路退回 auth 再前进,全程保留旧值") {
+    ScriptedIO scripted;
+    scripted.lines = {"3"};  // auth 选择页选 3(inline,保持原模式)
+    scripted.Say("6");       // 汇总跳第 6 项 effort
+    scripted.Back();         // effort -> 模型步(回程票被 Back 撕掉)
+    scripted.Back();         // 模型步 -> 密钥步(选择页,吃 lines[0])
+    scripted.Say("");        // inline 子页:回车保留旧 key
+    scripted.Say("");        // 模型步:回车保留(edit 模式不拉列表)
+    scripted.Say("");        // effort:回车保留
+    scripted.Say("");        // extra_body:回车保留
+    scripted.Say("Y");       // 汇总确认
+    auto io = scripted.Build();
+    const config::ProviderConfig original = EditableProvider();
+    const auto outcome = cli::RunProviderEditWizard(io, original);
+
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->save_requested);
+    CHECK(outcome->provider.auth == config::ProviderAuthMode::Inline);
+    CHECK(outcome->provider.api_key == "sk-old-key-123456");  // 退回再前进,key 不丢
+    CHECK(outcome->provider.model == original.model);
+    CHECK(outcome->provider.model_reasoning_effort == "high");
+    CHECK(scripted.fetch_calls == 0);
+    // 回到密钥步不回显明文,只露掩码。
+    CHECK_FALSE(scripted.AnyPrintedContains("sk-old-key-123456"));
+}
+
+TEST_CASE("RunProviderEditWizard: 失效——改了地址也不发请求,模型步回车保留,手改才落") {
+    ScriptedIO scripted;
+    scripted.Say("3");                            // 改 base_url(地址变了,旧模型列表作废)
+    scripted.Say("https://new.example.test/v1");
+    scripted.Say("5");                            // 汇总跳第 5 项 model
+    scripted.Say("new-model");                    // 手敲新模型
+    scripted.Say("Y");
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderEditWizard(io, EditableProvider());
+
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->provider.base_url == "https://new.example.test/v1");
+    CHECK(outcome->provider.model == "new-model");
+    CHECK(scripted.fetch_calls == 0);  // 地址作废也轮不到拉列表:edit 模式压根不发请求
+}
+
+TEST_CASE("RunProviderEditWizard: 取消——Ctrl+C 与 EOF 都返回 nullopt,不写盘") {
+    SUBCASE("汇总页 Ctrl+C") {
+        ScriptedIO scripted;
+        scripted.Cancel();
+        auto io = scripted.Build();
+        CHECK_FALSE(cli::RunProviderEditWizard(io, EditableProvider()).has_value());
+    }
+    SUBCASE("改到一半 EOF") {
+        ScriptedIO scripted;
+        scripted.Say("3");  // 跳回 base_url,之后事件耗尽 -> EOF
+        auto io = scripted.Build();
+        CHECK_FALSE(cli::RunProviderEditWizard(io, EditableProvider()).has_value());
+    }
+    SUBCASE("最后一问答 n,不写盘") {
+        ScriptedIO scripted;
+        scripted.Say("n");
+        auto io = scripted.Build();
+        const auto outcome = cli::RunProviderEditWizard(io, EditableProvider());
+        REQUIRE(outcome.has_value());
+        CHECK_FALSE(outcome->save_requested);
+    }
+}
+
+TEST_CASE("RunProviderEditWizard: 换 key 走 diff,明文只在内存里,屏上全是掩码") {
+    ScriptedIO scripted;
+    scripted.lines = {"3"};             // auth 选择页选 3(inline)
+    scripted.Say("4");                  // 汇总跳第 4 项 auth
+    scripted.Say("sk-new-key-999888");  // 贴新 key
+    scripted.Say("Y");
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderEditWizard(io, EditableProvider());
+
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->provider.api_key == "sk-new-key-999888");
+    // 全程打印里不许出现新旧明文,只许掩码(前 8 位)。
+    CHECK_FALSE(scripted.AnyPrintedContains("sk-old-key-123456"));
+    CHECK_FALSE(scripted.AnyPrintedContains("sk-new-key-999888"));
+    CHECK(scripted.AnyPrintedContains("sk-old-k"));
+    CHECK(scripted.AnyPrintedContains("sk-new-k"));
+    CHECK(scripted.AnyPrintedContains("→"));  // diff 行露过面
+}
+
+TEST_CASE("RunProviderEditWizard: env 模式回车保留自定义变量名,不悄悄复位默认值") {
+    config::ProviderConfig provider = EditableProvider();
+    provider.auth = config::ProviderAuthMode::Env;
+    provider.api_key.clear();
+    provider.key_env = "MY_CUSTOM_KEY";
+
+    ScriptedIO scripted;
+    scripted.lines = {"2"};  // auth 选择页选 2(env)
+    scripted.Say("4");       // 汇总跳第 4 项 auth
+    scripted.Say("");        // env 子页:回车 = 保留 MY_CUSTOM_KEY
+    scripted.Say("Y");
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderEditWizard(io, provider);
+
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->provider.key_env == "MY_CUSTOM_KEY");
+}
+
+TEST_CASE("RunProviderEditWizard: 汇总页第 1 项锁名,明说不支持改名") {
+    ScriptedIO scripted;
+    scripted.Say("1");  // 想跳去改名字
+    scripted.Say("Y");  // 被拦回汇总后确认写入
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderEditWizard(io, EditableProvider());
+
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->save_requested);
+    CHECK(outcome->provider.name == "custom");  // 名字没动
+    CHECK(scripted.AnyPrintedContains("不支持改名"));
+}
+
+TEST_CASE("ProviderEditDiffLines: 改哪行哪行带箭头,没改的原样,全没改附说明") {
+    const config::ProviderConfig original = EditableProvider();
+
+    SUBCASE("只改 base_url") {
+        config::ProviderConfig draft = original;
+        draft.base_url = "https://new.example.test/v1";
+        const auto lines = cli::ProviderEditDiffLines(original, draft);
+        REQUIRE(lines.size() == 7);  // 7 行汇总;有改动就不附"没有改动"说明
+        CHECK(lines[0].find("custom") != std::string::npos);
+        CHECK(lines[0].find("不支持改名") != std::string::npos);
+        bool diff_seen = false;
+        for (const std::string& line : lines) {
+            const bool has_arrow = line.find("→") != std::string::npos;
+            if (line.find("base_url") != std::string::npos) {
+                CHECK(has_arrow);
+                CHECK(line.find("https://old.example.test/v1") != std::string::npos);
+                CHECK(line.find("https://new.example.test/v1") != std::string::npos);
+                diff_seen = true;
+            } else {
+                CHECK_FALSE(has_arrow);  // 别的行不许带箭头
+            }
+        }
+        CHECK(diff_seen);
+        // key 只露掩码,明文不进 diff 行。
+        for (const std::string& line : lines) {
+            CHECK(line.find("sk-old-key-123456") == std::string::npos);
+        }
+    }
+
+    SUBCASE("一个没改") {
+        const auto lines = cli::ProviderEditDiffLines(original, original);
+        REQUIRE(lines.size() == 8);  // 7 行汇总 + 1 行"本次没有字段改动"
+        CHECK(lines.back().find("本次没有字段改动") != std::string::npos);
+        for (const std::string& line : lines) {
+            CHECK(line.find("→") == std::string::npos);
+        }
+    }
+}
+
 TEST_CASE("ProviderWizardStepIndex: 八步序是枚举序") {
     CHECK(cli::ProviderWizardStepIndex(cli::ProviderWizardStep::Name) == 0);
     CHECK(cli::ProviderWizardStepIndex(cli::ProviderWizardStep::Wire) == 1);

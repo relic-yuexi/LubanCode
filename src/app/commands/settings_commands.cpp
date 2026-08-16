@@ -849,6 +849,39 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             return false;  // 返回 provider 列表
         }
     };
+    // /provider edit 的正式执行(容错单):进同一套向导面板改旧 provider,
+    // 确认才写盘,取消不动配置。改的正好是当前活跃端时,整套重新应用——
+    // 与 execute_switch 同一条路,不另立第二套字段镜像。
+    const auto run_edit = [&](const std::string& name) {
+        const lubancode::config::ProviderConfig* provider =
+            lubancode::config::FindProvider(config.providers, name);
+        if (provider == nullptr) {
+            std::cout << trf("cmd.provider.not_found", name) << "\n";
+            return;
+        }
+        lubancode::cli::WizardIO io = MakeInteractiveWizardIO(theme);
+        const auto outcome = lubancode::cli::RunProviderEditWizard(io, *provider);
+        if (!outcome.has_value() || !outcome->save_requested) {
+            std::cout << tr("cmd.provider.edit.cancelled") << "\n";
+            return;
+        }
+        const auto saved = lubancode::config::ReplaceProviderInGlobalConfig(name, outcome->provider);
+        if (!saved.has_value()) {
+            std::cout << trf("cmd.provider.edit.save_failed", saved.error()) << "\n";
+            return;
+        }
+        // 内存里的这份跟着换,后续 execute_switch / list 看到的都是新值。
+        const auto it = std::find_if(config.providers.begin(), config.providers.end(),
+                                     [&](const lubancode::config::ProviderConfig& p) { return p.name == name; });
+        if (it != config.providers.end()) {
+            *it = outcome->provider;
+        }
+        std::cout << trf("cmd.provider.edit.saved", name, *saved) << "\n";
+        if (active_provider == name) {
+            execute_switch(name, "");  // 重新应用整套配置,立即生效
+        }
+    };
+
     switch (command.action) {
         case lubancode::cli::ProviderCommandAction::List:
             PrintProviderList(config.providers, config, active_provider);
@@ -925,6 +958,10 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     const auto picked = lubancode::cli::RunProviderSwitchPicker(
                         config.providers, active_provider, command.name,
                         trf("cmd.provider.not_found", command.name), {}, theme);
+                    if (picked.pick == lubancode::cli::ProviderSwitchPick::Edit) {
+                        run_edit(picked.name);  // e 快捷键:原地进编辑向导
+                        return;
+                    }
                     if (picked.pick == lubancode::cli::ProviderSwitchPick::Named) {
                         const lubancode::config::ProviderConfig* chosen =
                             lubancode::config::FindProvider(config.providers, picked.name);
@@ -985,6 +1022,10 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                 }
                 if (picked.pick == lubancode::cli::ProviderSwitchPick::AddNew) {
                     RunProviderAddWizardInteractive("", config, theme);
+                    return;
+                }
+                if (picked.pick == lubancode::cli::ProviderSwitchPick::Edit) {
+                    run_edit(picked.name);  // e 快捷键:原地进编辑向导
                     return;
                 }
                 const lubancode::config::ProviderConfig* provider =
@@ -1214,9 +1255,82 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                 std::cout << trf("cmd.provider.remove_failed", removed.error()) << "\n";
             }
             return;
-        case lubancode::cli::ProviderCommandAction::Invalid:
-            std::cout << tr("cmd.provider.usage") << "\n";
+        case lubancode::cli::ProviderCommandAction::Edit: {
+            // /provider edit <名字>(容错单):TTY、管道都进向导(向导自己在
+            // 管道下退化为朴素逐行,自动化可脚本驱动);名字找不着时 TTY 开
+            // 已筛选的选择列表把"不存在"贴在面板内,非 TTY 一行报错。
+            const lubancode::config::ProviderConfig* provider =
+                lubancode::config::FindProvider(config.providers, command.name);
+            if (provider == nullptr) {
+                const bool can_panel = is_console && lubancode::platform::StdinIsInteractive();
+                if (can_panel) {
+                    const auto picked = lubancode::cli::RunProviderSwitchPicker(
+                        config.providers, active_provider, command.name,
+                        trf("cmd.provider.not_found", command.name), {}, theme,
+                        /*edit_on_enter=*/true);
+                    if (picked.pick == lubancode::cli::ProviderSwitchPick::AddNew) {
+                        RunProviderAddWizardInteractive("", config, theme);
+                    } else if (picked.pick == lubancode::cli::ProviderSwitchPick::Named ||
+                               picked.pick == lubancode::cli::ProviderSwitchPick::Edit) {
+                        run_edit(picked.name);
+                    }
+                    return;
+                }
+                std::cout << trf("cmd.provider.not_found", command.name) << "\n";
+                return;
+            }
+            run_edit(command.name);
             return;
+        }
+        case lubancode::cli::ProviderCommandAction::EditInteractive: {
+            // 裸敲 /provider edit:意图是改一家已有的,复用 switch 选择器面板,
+            // Enter 语义换成"编辑"。非 TTY 只给 edit 专用短用法,不倒总表。
+            const bool can_panel = is_console && lubancode::platform::StdinIsInteractive();
+            if (!can_panel) {
+                std::cout << lubancode::cli::ProviderSubcommandUsageLine("edit") << "\n";
+                return;
+            }
+            const auto picked = lubancode::cli::RunProviderSwitchPicker(
+                config.providers, active_provider, "", {}, {}, theme,
+                /*edit_on_enter=*/true);
+            if (picked.pick == lubancode::cli::ProviderSwitchPick::AddNew) {
+                RunProviderAddWizardInteractive("", config, theme);
+            } else if (picked.pick == lubancode::cli::ProviderSwitchPick::Named ||
+                       picked.pick == lubancode::cli::ProviderSwitchPick::Edit) {
+                run_edit(picked.name);
+            }
+            return;
+        }
+        case lubancode::cli::ProviderCommandAction::Invalid: {
+            // 子命令容错(容错单):拼错(swtich)给"是不是想敲 X"+ X 的专用
+            // 短用法;已知子命令敲错参(refresh now)给"参数不对"+ 短用法;
+            // 无近邻 TTY 给短提示+最常用三行,非 TTY 给一行。任何路径都不再
+            // 倒 13 行总表——总表留给 /help。
+            const std::string lowered_word = [&]() {
+                std::string word = command.bad_word;
+                for (char& c : word) {
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                }
+                return word;
+            }();
+            const auto nearest = lubancode::cli::NearestProviderSubcommand(lowered_word);
+            if (nearest.has_value()) {
+                if (*nearest == lowered_word) {
+                    std::cout << tr("cmd.provider.bad_args") << "\n";
+                } else {
+                    std::cout << trf("cmd.provider.typo_hint", command.bad_word, *nearest) << "\n";
+                }
+                std::cout << lubancode::cli::ProviderSubcommandUsageLine(*nearest) << "\n";
+                return;
+            }
+            const bool tty = is_console && lubancode::platform::StdinIsInteractive();
+            if (tty) {
+                std::cout << trf("cmd.provider.unknown_sub.tty", command.bad_word) << "\n";
+            } else {
+                std::cout << tr("cmd.provider.unknown_sub.pipe") << "\n";
+            }
+            return;
+        }
     }
 }
 

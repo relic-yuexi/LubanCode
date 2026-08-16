@@ -2466,6 +2466,49 @@ TEST_CASE("SetProviderNativeWebSearch: 名字不存在返回 false,列表原样�
     CHECK_FALSE(providers[0].native_web_search);
 }
 
+// ---------------------------------------------------------------------------
+// /provider edit(容错单):ReplaceProvider 纯函数整条替换,别的条目与改名
+// 护栏都钉死。落盘(ReplaceProviderInGlobalConfig)与 Add/Set 家族同一条
+// 路,管道抽验手工看。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ReplaceProvider: 整条换掉,别的条目原样,向导不碰的字段也带得回来") {
+    std::vector<config::ProviderConfig> providers{
+        {.name = "glm", .base_url = "https://open.bigmodel.cn/api/paas/v4", .wire = config::Wire::Responses},
+        {.name = "minimax", .base_url = "https://api.minimax.io/anthropic", .wire = config::Wire::Anthropic},
+    };
+    config::ProviderConfig edited = providers[0];
+    edited.base_url = "https://new.example.test/v1";
+    edited.context_window_tokens = 300000;  // 向导不编辑的字段,靠副本原样回写
+    edited.supported_think_levels = {"low", "high"};
+
+    CHECK(config::ReplaceProvider(providers, "glm", edited));
+    REQUIRE(providers.size() == 2);
+    CHECK(providers[0].base_url == "https://new.example.test/v1");
+    CHECK(providers[0].context_window_tokens == 300000);
+    CHECK(providers[0].supported_think_levels.size() == 2);
+    CHECK(providers[0].name == "glm");  // 条目还叫 glm
+    // 没点名的那条不受影响。
+    CHECK(providers[1].base_url == "https://api.minimax.io/anthropic");
+}
+
+TEST_CASE("ReplaceProvider: 改名与找不到名字都返回 false,列表原样不动") {
+    std::vector<config::ProviderConfig> providers{
+        {.name = "glm", .base_url = "https://a.test", .wire = config::Wire::Anthropic},
+    };
+    config::ProviderConfig renamed = providers[0];
+    renamed.name = "glm2";
+    CHECK_FALSE(config::ReplaceProvider(providers, "glm", renamed));  // 改名不留暗门
+
+    config::ProviderConfig other;
+    other.name = "other";
+    CHECK_FALSE(config::ReplaceProvider(providers, "no-such-provider", other));
+
+    REQUIRE(providers.size() == 1);
+    CHECK(providers[0].name == "glm");
+    CHECK(providers[0].base_url == "https://a.test");
+}
+
 TEST_CASE("/provider set 落盘路径:SetProviderNativeWebSearch 改完再 UpdateProvidersInConfigFile,临时文件回读原样") {
     TempCwdDir cwd;
     const std::filesystem::path path = std::filesystem::path(cwd.Path()) / ".lubancode" / "config.json";

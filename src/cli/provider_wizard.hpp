@@ -45,6 +45,10 @@ ProviderWizardStep ProviderWizardStepAt(std::size_t index);
 struct ProviderWizardState {
     ProviderWizardStep step = ProviderWizardStep::Name;
     config::ProviderConfig draft;
+    // 容错单:/provider edit 用。edit_mode 下全字段预填、起手直接进汇总页、
+    // 名字锁死、模型步回车=保留(不拉列表);original 留着出确认页 diff。
+    bool edit_mode = false;
+    config::ProviderConfig original;
     std::vector<config::ProviderConfig> existing;  // 查重名用
     bool name_set = false;
     bool wire_set = false;
@@ -54,6 +58,10 @@ struct ProviderWizardState {
     bool effort_set = false;
     bool extra_body_set = false;
     bool models_valid = false;                 // 模型列表缓存可用
+    // key_env 是不是显式给的(edit 预填、preset 带的、env 子页敲过/确认过)。
+    // env 子页的回车默认值按它走:显式给的回车保留,否则按 wire 现算默认
+    // (add 起手垫的那个 key_env 不算数——wire 改了它该跟着换)。
+    bool key_env_explicit = false;
     std::vector<api::ModelInfo> models;        // 上次拉到的列表
     std::optional<api::Error> last_fetch_error;  // 最近一次拉模型失败(手填页的
                                                 // Back 靠它回到失败页);拉成即清
@@ -78,6 +86,21 @@ std::optional<ProviderWizardOutcome> RunProviderAddWizard(WizardIO& io, const st
 std::optional<ProviderWizardOutcome> RunProviderPresetWizard(
     WizardIO& io, const config::ProviderCatalog& catalog, const std::string& name_prefill,
     const std::vector<config::ProviderConfig>& existing);
+
+// /provider edit <名字>(容错单):同一套八步面板改旧 provider。draft 全字段
+// 预填现有值,起手直接进汇总页——改哪项点哪项,回程票直回汇总;回车=保留,
+// 改动才落。名字锁死(名字页与汇总页第 1 项都明说"不支持改名");auth=inline
+// 只露掩码,重新输入才换 key。取消/EOF 返回 std::nullopt,不写盘;最后一问
+// 答 n 时有值但 save_requested == false。管道(非 TTY)下走朴素逐行,与
+// add 向导同一套回落,自动化照用。
+std::optional<ProviderWizardOutcome> RunProviderEditWizard(WizardIO& io,
+                                                            const config::ProviderConfig& provider);
+
+// 编辑模式确认页的行(纯函数,单测钉 diff 与掩码):改了的字段打
+// "N) 字段 = 旧 → 新",没改的原样;一个都没改时末尾附一句说明。key 只露
+// 掩码,绝不回显明文。名字行带"(不支持改名)"尾注。
+std::vector<std::string> ProviderEditDiffLines(const config::ProviderConfig& original,
+                                               const config::ProviderConfig& draft);
 
 // 从一段可能带中文/空格的输入里抽一个合法 provider 名字的建议:空白折成
 // 短横线,不合规字符丢弃,折叠出的一串作名字。抽不出(全是不合规字符)回

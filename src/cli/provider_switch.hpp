@@ -71,16 +71,21 @@ private:
 // start_cursor_name:光标先停这个名字上(补钥页返回列表时"刚才的选择仍在"),
 // 不在筛选结果里就退回当前 provider/首项。
 // 返回:Named(带名字)/ AddNew(空列表或筛空时选了"添加")/ Cancelled。
-enum class ProviderSwitchPick { Named, AddNew, Cancelled };
+// 容错单:Edit = 按 e 快捷键直接编辑高亮的那家(只在筛选词为空且列表有
+// 高亮项时生效,免得跟敲筛选词打架);edit_on_enter 参数让 /provider edit
+// 裸敲复用这块面板——Enter 语义从"切到这家"变"编辑这家",标题与 footer
+// 换编辑口径,选中结果仍是 Named,由调用方按发起时的意图解读。
+enum class ProviderSwitchPick { Named, AddNew, Cancelled, Edit };
 struct ProviderSwitchResult {
     ProviderSwitchPick pick = ProviderSwitchPick::Cancelled;
-    std::string name;    // Named 时有效
+    std::string name;    // Named / Edit 时有效
     std::string filter;  // 退出面板时的筛选词(补钥页返回列表时"筛选词仍在")
 };
 ProviderSwitchResult RunProviderSwitchPicker(const std::vector<config::ProviderConfig>& providers,
                                               const std::string& active_provider,
                                               const std::string& start_filter, const std::string& notice,
-                                              const std::string& start_cursor_name, const Theme& theme);
+                                              const std::string& start_cursor_name, const Theme& theme,
+                                              bool edit_on_enter = false);
 
 // 短地址:剥协议头、去结尾斜杠(127.0.0.1:8000/v1 留 /v1 一段,长路径不搬)。
 std::string ShortenProviderUrl(const std::string& base_url);

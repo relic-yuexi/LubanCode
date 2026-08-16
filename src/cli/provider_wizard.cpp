@@ -97,6 +97,11 @@ std::string AuthDisplayLine(const config::ProviderConfig& draft) {
     return std::string();
 }
 
+// 面板标题:add 与 edit 各一顶帽子,一眼分清这次进来是添新的还是改旧的。
+std::string WizardTitle(const ProviderWizardState& state) {
+    return tr(state.edit_mode ? "provider_wizard.edit.title" : "provider_wizard.title");
+}
+
 // ---------------------------------------------------------------------------
 // 步骤结果:主循环只认这个,各步 handler 不直接改 state.step。
 // ---------------------------------------------------------------------------
@@ -163,9 +168,9 @@ ChoiceNav ReadChoiceNav(WizardIO& io, const WizardFrame& frame, const std::vecto
 // 第一步再退的"退出向导?"确认。默认不写盘:空串/n/N 都算不退,y/Y 才退。
 // ---------------------------------------------------------------------------
 
-StepResult ConfirmExit(WizardIO& io) {
+StepResult ConfirmExit(WizardIO& io, const ProviderWizardState& state) {
     WizardFrame frame;
-    frame.title = tr("provider_wizard.title");
+    frame.title = WizardTitle(state);
     frame.body = {tr("provider_wizard.exit_confirm.body")};
     frame.prompt = tr("provider_wizard.exit_confirm.prompt");
     frame.footer = tr("provider_wizard.footer.back");
@@ -192,8 +197,32 @@ StepResult ConfirmExit(WizardIO& io) {
 // ---------------------------------------------------------------------------
 
 StepResult RunNameStep(WizardIO& io, ProviderWizardState& state) {
+    if (state.edit_mode) {
+        // 编辑模式名字锁死:回车/Back 都回汇总(汇总才是 edit 的家),敲了
+        // 新名字就明说"不支持改名",不留任何悄悄改名的口子。
+        WizardFrame frame;
+        frame.title = WizardTitle(state);
+        frame.body = {trf("provider_wizard.edit.name_locked", state.draft.name),
+                      tr("provider_wizard.edit.no_rename")};
+        frame.error = state.last_error;
+        frame.prompt = tr("provider_wizard.edit.name_prompt");
+        frame.footer = tr("provider_wizard.footer.back");
+        const WizardInputEvent event = ReadTextEvent(io, frame);
+        if (event.kind == WizardInputEvent::Kind::Back) {
+            return Goto(ProviderWizardStep::Confirm);
+        }
+        if (event.kind != WizardInputEvent::Kind::Submitted) {
+            return Cancel();
+        }
+        if (!event.text.empty() && event.text != state.draft.name) {
+            state.last_error = tr("provider_wizard.edit.no_rename");
+            return Stay();
+        }
+        state.last_error.clear();
+        return Goto(ProviderWizardStep::Confirm);
+    }
     WizardFrame frame;
-    frame.title = tr("provider_wizard.title");
+    frame.title = WizardTitle(state);
     frame.progress = trf("provider_wizard.progress", 1, kProviderWizardStepCount);
     frame.body = {tr("provider_wizard.name.hint")};
     if (state.name_set) {
@@ -205,7 +234,7 @@ StepResult RunNameStep(WizardIO& io, ProviderWizardState& state) {
 
     const WizardInputEvent event = ReadTextEvent(io, frame);
     if (event.kind == WizardInputEvent::Kind::Back) {
-        return ConfirmExit(io);
+        return ConfirmExit(io, state);
     }
     if (event.kind != WizardInputEvent::Kind::Submitted) {
         return Cancel();
@@ -244,7 +273,7 @@ StepResult RunWireStep(WizardIO& io, ProviderWizardState& state) {
     }
 
     WizardFrame frame;
-    frame.title = tr("provider_wizard.title");
+    frame.title = WizardTitle(state);
     frame.progress = trf("provider_wizard.progress", 2, kProviderWizardStepCount);
     frame.body = {tr("provider_wizard.wire.hint")};
     if (state.wire_set) {
@@ -276,7 +305,7 @@ StepResult RunWireStep(WizardIO& io, ProviderWizardState& state) {
 // base_url 步:校验(剥尾斜杠 + scheme)/v1 建议(只建议,不暗改)。
 StepResult RunBaseUrlStep(WizardIO& io, ProviderWizardState& state) {
     WizardFrame frame;
-    frame.title = tr("provider_wizard.title");
+    frame.title = WizardTitle(state);
     frame.progress = trf("provider_wizard.progress", 3, kProviderWizardStepCount);
     frame.body = {tr("provider_wizard.base_url.hint")};
     // 接口格式已定,展示最终探测地址——少没少 /v1 一眼瞧得出来。
@@ -315,7 +344,7 @@ StepResult RunBaseUrlStep(WizardIO& io, ProviderWizardState& state) {
     if (state.draft.wire != config::Wire::Anthropic && url.find("/v1") == std::string::npos) {
         const std::string with_v1 = url + "/v1";
         WizardFrame offer;
-        offer.title = tr("provider_wizard.title");
+        offer.title = WizardTitle(state);
         offer.progress = trf("provider_wizard.progress", 3, kProviderWizardStepCount);
         offer.body = {trf("provider_wizard.base_url.v1_offer", with_v1)};
         offer.footer = tr("provider_wizard.footer.back");
@@ -347,7 +376,14 @@ StepResult RunBaseUrlStep(WizardIO& io, ProviderWizardState& state) {
 // ---------------------------------------------------------------------------
 
 StepResult RunAuthStep(WizardIO& io, ProviderWizardState& state) {
-    const std::string default_env = DefaultKeyEnvForWire(state.draft.wire);
+    // env 子页的默认变量名:key_env 是显式给的(edit 预填、preset 带的、
+    // env 子页敲过/确认过)就回车保留,不能悄悄复位;否则按 wire 现算默认
+    // ——add 起手垫的那个不算数,wire 改了默认值得跟着换。
+    const std::string default_env =
+        state.draft.auth == config::ProviderAuthMode::Env && state.key_env_explicit &&
+                !state.draft.key_env.empty()
+            ? state.draft.key_env
+            : DefaultKeyEnvForWire(state.draft.wire);
     while (true) {
         std::vector<WizardChoiceItem> items = {
             {tr("provider_wizard.auth.opt_none"), tr("provider_wizard.auth.desc_none")},
@@ -366,7 +402,7 @@ StepResult RunAuthStep(WizardIO& io, ProviderWizardState& state) {
         }
 
         WizardFrame frame;
-        frame.title = tr("provider_wizard.title");
+        frame.title = WizardTitle(state);
         frame.progress = trf("provider_wizard.progress", 4, kProviderWizardStepCount);
         frame.body = {tr("provider_wizard.auth.hint")};
         if (state.auth_set) {
@@ -396,7 +432,7 @@ StepResult RunAuthStep(WizardIO& io, ProviderWizardState& state) {
         if (*choice.index == 1) {
             // 环境变量名:默认值按接口格式算;回车确认默认。
             WizardFrame env_frame;
-            env_frame.title = tr("provider_wizard.title");
+            env_frame.title = WizardTitle(state);
             env_frame.progress = trf("provider_wizard.progress", 4, kProviderWizardStepCount);
             env_frame.body = {trf("provider_wizard.auth.env.prompt", default_env)};
             const std::optional<std::string> current = platform::GetEnvVar(default_env.c_str());
@@ -420,12 +456,13 @@ StepResult RunAuthStep(WizardIO& io, ProviderWizardState& state) {
             }
             state.draft.auth = config::ProviderAuthMode::Env;
             state.draft.key_env = env_name;
+            state.key_env_explicit = true;  // 敲过或回车确认过,往后按它当默认
             state.auth_set = true;
             return AfterEdit(state, ProviderWizardStep::Model);
         }
         // 贴入明文 key。回到这一步不回显;回车 = 保留已设 key。
         WizardFrame key_frame;
-        key_frame.title = tr("provider_wizard.title");
+        key_frame.title = WizardTitle(state);
         key_frame.progress = trf("provider_wizard.progress", 4, kProviderWizardStepCount);
         key_frame.body = {tr("provider_wizard.auth.inline.hint")};
         if (!state.draft.api_key.empty()) {
@@ -474,7 +511,7 @@ StepResult RunModelFetchFailed(WizardIO& io, ProviderWizardState& state, const a
 StepResult RunManualModelInput(WizardIO& io, ProviderWizardState& state, const std::string& fetch_summary) {
     while (true) {
         WizardFrame frame;
-        frame.title = tr("provider_wizard.title");
+        frame.title = WizardTitle(state);
         frame.progress = trf("provider_wizard.progress", 5, kProviderWizardStepCount);
         frame.body = {tr("provider_wizard.model.manual_hint")};
         if (!fetch_summary.empty()) {
@@ -510,16 +547,22 @@ StepResult RunManualModelInput(WizardIO& io, ProviderWizardState& state, const s
 StepResult RunModelStep(WizardIO& io, ProviderWizardState& state) {
     // 第一问:回车拉列表,或直接输入模型名。
     WizardFrame frame;
-    frame.title = tr("provider_wizard.title");
+    frame.title = WizardTitle(state);
     frame.progress = trf("provider_wizard.progress", 5, kProviderWizardStepCount);
-    frame.body = {trf("provider_wizard.model.probe", api::ModelsUrl(state.draft.wire, state.draft.base_url),
-                      config::ProviderWireName(state.draft.wire)),
-                  tr("provider_wizard.model.hint")};
-    // 环境变量没设,拉模型前先说清,不等请求失败才叫用户猜。
-    if (state.draft.auth == config::ProviderAuthMode::Env && state.draft.api_key.empty()) {
-        const std::optional<std::string> value = platform::GetEnvVar(state.draft.key_env.c_str());
-        if (!value.has_value() || value->empty()) {
-            frame.body.push_back(trf("provider_wizard.auth.env.note_unset", state.draft.key_env));
+    if (state.edit_mode) {
+        // 编辑模式回车=保留当前模型,不发网络请求——"只改 base_url"这种
+        // 常见活不该被一回车拽去拉列表。要换模型就手敲新名字。
+        frame.body = {tr("provider_wizard.edit.model.hint")};
+    } else {
+        frame.body = {trf("provider_wizard.model.probe", api::ModelsUrl(state.draft.wire, state.draft.base_url),
+                          config::ProviderWireName(state.draft.wire)),
+                      tr("provider_wizard.model.hint")};
+        // 环境变量没设,拉模型前先说清,不等请求失败才叫用户猜。
+        if (state.draft.auth == config::ProviderAuthMode::Env && state.draft.api_key.empty()) {
+            const std::optional<std::string> value = platform::GetEnvVar(state.draft.key_env.c_str());
+            if (!value.has_value() || value->empty()) {
+                frame.body.push_back(trf("provider_wizard.auth.env.note_unset", state.draft.key_env));
+            }
         }
     }
     if (state.model_set) {
@@ -541,6 +584,10 @@ StepResult RunModelStep(WizardIO& io, ProviderWizardState& state) {
         state.model_set = true;
         state.last_error.clear();
         return AfterEdit(state, ProviderWizardStep::Effort);
+    }
+    if (state.edit_mode && state.model_set) {
+        state.last_error.clear();
+        return AfterEdit(state, ProviderWizardStep::Effort);  // 回车保留旧模型
     }
     // 回车:拉列表(或沿用仍有效的缓存)。
     return TryFetchAndPick(io, state);
@@ -579,7 +626,7 @@ StepResult TryFetchAndPick(WizardIO& io, ProviderWizardState& state) {
         }
     }
     WizardFrame list_frame;
-    list_frame.title = tr("provider_wizard.title");
+    list_frame.title = WizardTitle(state);
     list_frame.progress = trf("provider_wizard.progress", 5, kProviderWizardStepCount);
     list_frame.body = {trf("provider_wizard.model.probe", api::ModelsUrl(state.draft.wire, state.draft.base_url),
                            config::ProviderWireName(state.draft.wire))};
@@ -617,7 +664,7 @@ StepResult RunModelFetchFailed(WizardIO& io, ProviderWizardState& state, const a
         items.push_back({tr("provider_wizard.model.opt_retry"), {}});
 
         WizardFrame frame;
-        frame.title = tr("provider_wizard.title");
+        frame.title = WizardTitle(state);
         frame.progress = trf("provider_wizard.progress", 5, kProviderWizardStepCount);
         frame.body = {summary, FetchHintForStatus(error)};
         frame.footer = tr("provider_wizard.footer.back");
@@ -661,7 +708,7 @@ StepResult RunModelFetchFailed(WizardIO& io, ProviderWizardState& state, const a
 
 StepResult RunEffortStep(WizardIO& io, ProviderWizardState& state) {
     WizardFrame frame;
-    frame.title = tr("provider_wizard.title");
+    frame.title = WizardTitle(state);
     frame.progress = trf("provider_wizard.progress", 6, kProviderWizardStepCount);
     frame.body = {tr("provider_wizard.effort.hint")};
     if (state.effort_set && !state.draft.model_reasoning_effort.empty()) {
@@ -692,7 +739,7 @@ StepResult RunEffortStep(WizardIO& io, ProviderWizardState& state) {
 
 StepResult RunExtraBodyStep(WizardIO& io, ProviderWizardState& state) {
     WizardFrame frame;
-    frame.title = tr("provider_wizard.title");
+    frame.title = WizardTitle(state);
     frame.progress = trf("provider_wizard.progress", 7, kProviderWizardStepCount);
     frame.body = {tr("provider_wizard.extra_body.hint")};
     if (!state.draft.extra_body.empty()) {
@@ -742,6 +789,9 @@ StepResult RunExtraBodyStep(WizardIO& io, ProviderWizardState& state) {
 // ---------------------------------------------------------------------------
 
 std::vector<std::string> SummaryLines(const ProviderWizardState& state) {
+    if (state.edit_mode) {
+        return ProviderEditDiffLines(state.original, state.draft);
+    }
     const config::ProviderConfig& p = state.draft;
     return {
         trf("provider_wizard.summary.name", p.name),
@@ -761,7 +811,7 @@ std::vector<std::string> SummaryLines(const ProviderWizardState& state) {
 StepResult RunConfirmStep(WizardIO& io, ProviderWizardState& state) {
     while (true) {
         WizardFrame frame;
-        frame.title = tr("provider_wizard.title");
+        frame.title = WizardTitle(state);
         frame.progress = trf("provider_wizard.progress", 8, kProviderWizardStepCount);
         frame.body = SummaryLines(state);
         frame.body.push_back(tr("provider_wizard.confirm.hint"));
@@ -800,8 +850,78 @@ StepResult RunConfirmStep(WizardIO& io, ProviderWizardState& state) {
             continue;
         }
         state.last_error.clear();
+        if (state.edit_mode && n == 1) {
+            // 名字锁死:第 1 项不给跳,明说不支持改名(规格:改名=删旧建新,
+            // 风险另议)。
+            state.last_error = tr("provider_wizard.edit.no_rename");
+            continue;
+        }
         state.return_to = ProviderWizardStep::Confirm;  // 改完直接回汇总
         return Goto(ProviderWizardStepAt(static_cast<std::size_t>(n - 1)));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 主循环:step enum 驱动,前进/后退/跳转/取消/确认全在这一个 switch 里。
+// add 与 edit 两套起手(ProviderWizardState 摆好)共用,别另立第二套循环。
+// ---------------------------------------------------------------------------
+std::optional<ProviderWizardOutcome> RunWizardLoop(WizardIO& io, ProviderWizardState& state) {
+    while (true) {
+        // 这一步开跑前有没有回程票:汇总页跳回单项时,票是跳转那一步刚发的,
+        // 不能撕;早先剩下的票(用户在跳回后又自己往回走)才作废。
+        const bool had_return_ticket = state.return_to.has_value();
+        StepResult result;
+        switch (state.step) {
+            case ProviderWizardStep::Name:
+                result = RunNameStep(io, state);
+                break;
+            case ProviderWizardStep::Wire:
+                result = RunWireStep(io, state);
+                break;
+            case ProviderWizardStep::BaseUrl:
+                result = RunBaseUrlStep(io, state);
+                break;
+            case ProviderWizardStep::Auth:
+                result = RunAuthStep(io, state);
+                break;
+            case ProviderWizardStep::Model:
+                result = RunModelStep(io, state);
+                break;
+            case ProviderWizardStep::Effort:
+                result = RunEffortStep(io, state);
+                break;
+            case ProviderWizardStep::ExtraBody:
+                result = RunExtraBodyStep(io, state);
+                break;
+            case ProviderWizardStep::Confirm:
+                result = RunConfirmStep(io, state);
+                break;
+            default:
+                return std::nullopt;
+        }
+        switch (result.action) {
+            case StepResult::Action::Stay:
+                continue;
+            case StepResult::Action::Goto:
+                if (had_return_ticket &&
+                    ProviderWizardStepIndex(result.target) < ProviderWizardStepIndex(state.step)) {
+                    // 跳回单项后又自己往回走 = 用户在导航,旧回程票作废。
+                    // (刚从汇总页发的新票不在此列:had_return_ticket 那会儿
+                    // 它还没发出来。)
+                    state.return_to.reset();
+                }
+                if (result.target != state.step) {
+                    state.last_error.clear();  // 换步不带旧错
+                }
+                state.step = result.target;
+                continue;
+            case StepResult::Action::Cancel:
+                return std::nullopt;
+            case StepResult::Action::Save:
+                return ProviderWizardOutcome{state.draft, true};
+            case StepResult::Action::NoSave:
+                return ProviderWizardOutcome{state.draft, false};
+        }
     }
 }
 
@@ -872,7 +992,9 @@ bool IsLocalBaseUrl(const std::string& base_url) {
 }
 
 // ---------------------------------------------------------------------------
-// 主循环:step enum 驱动,前进/后退/跳转/取消/确认全在这一个 switch 里。
+// 两个入口:add 起手从名字步往前走;edit 起手直接进汇总页,全字段预填。
+// 主循环是同一个 RunWizardLoop,行为差异全由 ProviderWizardState 摆的
+// edit_mode + 预填值 + 起手步决定。
 // ---------------------------------------------------------------------------
 
 std::optional<ProviderWizardOutcome> RunProviderAddWizard(
@@ -893,63 +1015,69 @@ std::optional<ProviderWizardOutcome> RunProviderAddWizard(
         }
     }
 
-    while (true) {
-        // 这一步开跑前有没有回程票:汇总页跳回单项时,票是跳转那一步刚发的,
-        // 不能撕;早先剩下的票(用户在跳回后又自己往回走)才作废。
-        const bool had_return_ticket = state.return_to.has_value();
-        StepResult result;
-        switch (state.step) {
-            case ProviderWizardStep::Name:
-                result = RunNameStep(io, state);
-                break;
-            case ProviderWizardStep::Wire:
-                result = RunWireStep(io, state);
-                break;
-            case ProviderWizardStep::BaseUrl:
-                result = RunBaseUrlStep(io, state);
-                break;
-            case ProviderWizardStep::Auth:
-                result = RunAuthStep(io, state);
-                break;
-            case ProviderWizardStep::Model:
-                result = RunModelStep(io, state);
-                break;
-            case ProviderWizardStep::Effort:
-                result = RunEffortStep(io, state);
-                break;
-            case ProviderWizardStep::ExtraBody:
-                result = RunExtraBodyStep(io, state);
-                break;
-            case ProviderWizardStep::Confirm:
-                result = RunConfirmStep(io, state);
-                break;
-            default:
-                return std::nullopt;
-        }
-        switch (result.action) {
-            case StepResult::Action::Stay:
-                continue;
-            case StepResult::Action::Goto:
-                if (had_return_ticket &&
-                    ProviderWizardStepIndex(result.target) < ProviderWizardStepIndex(state.step)) {
-                    // 跳回单项后又自己往回走 = 用户在导航,旧回程票作废。
-                    // (刚从汇总页发的新票不在此列:had_return_ticket 那会儿
-                    // 它还没发出来。)
-                    state.return_to.reset();
-                }
-                if (result.target != state.step) {
-                    state.last_error.clear();  // 换步不带旧错
-                }
-                state.step = result.target;
-                continue;
-            case StepResult::Action::Cancel:
-                return std::nullopt;
-            case StepResult::Action::Save:
-                return ProviderWizardOutcome{state.draft, true};
-            case StepResult::Action::NoSave:
-                return ProviderWizardOutcome{state.draft, false};
-        }
+    return RunWizardLoop(io, state);
+}
+
+std::optional<ProviderWizardOutcome> RunProviderEditWizard(WizardIO& io,
+                                                            const config::ProviderConfig& provider) {
+    ProviderWizardState state;
+    state.edit_mode = true;
+    state.draft = provider;    // 全字段预填:context_window/extra_headers 这类
+                               // 向导不碰的字段也一并坐船,写盘原样带回去
+    state.original = provider;  // 确认页 diff 的对照底
+    state.name_set = true;
+    state.wire_set = true;
+    state.base_url_set = true;
+    state.auth_set = true;
+    state.model_set = true;
+    state.effort_set = true;
+    state.extra_body_set = true;
+    state.key_env_explicit = true;  // 配置里带的 key_env 是显式值,回车保留
+    state.models_valid = false;  // 编辑模式模型步回车=保留,列表缓存压根不用
+    state.step = ProviderWizardStep::Confirm;  // 起手直接进汇总页
+    return RunWizardLoop(io, state);
+}
+
+std::vector<std::string> ProviderEditDiffLines(const config::ProviderConfig& original,
+                                               const config::ProviderConfig& draft) {
+    const config::ProviderConfig& o = original;
+    const config::ProviderConfig& p = draft;
+    // 改了的字段打"旧 → 新",没改的原样。名字行永远打"(不支持改名)"尾注。
+    const auto effort_of = [](const config::ProviderConfig& c) {
+        return c.model_reasoning_effort.empty() ? tr("provider_wizard.effort.unset")
+                                                : c.model_reasoning_effort;
+    };
+    const auto extra_of = [](const config::ProviderConfig& c) {
+        return c.extra_body.empty() ? tr("provider_wizard.extra_body.unset")
+                                    : trf("provider_wizard.extra_body.summary", c.extra_body.size());
+    };
+    std::vector<std::string> lines;
+    bool any_changed = false;
+    const auto field = [&any_changed](bool changed, const char* same_key, const char* diff_key,
+                                      const std::string& old_value, const std::string& new_value) {
+        any_changed = any_changed || changed;
+        return changed ? trf(diff_key, old_value, new_value) : trf(same_key, new_value);
+    };
+    lines.push_back(trf("provider_wizard.edit.name_locked", p.name));
+    lines.push_back(field(o.wire != p.wire, "provider_wizard.summary.wire", "provider_wizard.edit.diff.wire",
+                          config::ProviderWireName(o.wire), config::ProviderWireName(p.wire)));
+    lines.push_back(field(o.base_url != p.base_url, "provider_wizard.summary.base_url",
+                          "provider_wizard.edit.diff.base_url", o.base_url, p.base_url));
+    // 鉴权行连着 key_env/api_key 一起比,展示走 AuthDisplayLine(掩码)。
+    lines.push_back(field(AuthDisplayLine(o) != AuthDisplayLine(p) || o.auth != p.auth,
+                          "provider_wizard.summary.auth", "provider_wizard.edit.diff.auth",
+                          AuthDisplayLine(o), AuthDisplayLine(p)));
+    lines.push_back(field(o.model != p.model, "provider_wizard.summary.model",
+                          "provider_wizard.edit.diff.model", o.model, p.model));
+    lines.push_back(field(o.model_reasoning_effort != p.model_reasoning_effort,
+                          "provider_wizard.summary.effort", "provider_wizard.edit.diff.effort",
+                          effort_of(o), effort_of(p)));
+    lines.push_back(field(o.extra_body != p.extra_body, "provider_wizard.summary.extra_body",
+                          "provider_wizard.edit.diff.extra_body", extra_of(o), extra_of(p)));
+    if (!any_changed) {
+        lines.push_back(tr("provider_wizard.edit.diff_none"));
     }
+    return lines;
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,6 +1145,8 @@ std::optional<ProviderWizardOutcome> RunProviderPresetWizard(
         auth_state.draft = provider;
         auth_state.draft.key_env = preset.key_env.empty() ? DefaultKeyEnvForWire(provider.wire)
                                                           : preset.key_env;
+        // 预设声明的变量名是显式值:env 子页回车保留,不按 wire 复位。
+        auth_state.key_env_explicit = !preset.key_env.empty();
         StepResult auth_result = RunAuthStep(io, auth_state);
         if (auth_result.action != StepResult::Action::Goto || !auth_state.auth_set) {
             return std::nullopt;  // 取消/Esc/EOF,半个预设不落盘

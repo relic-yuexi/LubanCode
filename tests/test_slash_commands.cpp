@@ -468,6 +468,76 @@ TEST_CASE("ParseProviderCommand: set extra_header 缺头名字(只给了字段�
     CHECK(parsed.action == cli::ProviderCommandAction::Invalid);
 }
 
+// ---------------------------------------------------------------------------
+// /provider edit 解析(容错单)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseProviderCommand: edit 拆名字,裸敲进 EditInteractive,词数超了 Invalid") {
+    const auto edited = cli::ParseProviderCommand("edit custom");
+    CHECK(edited.action == cli::ProviderCommandAction::Edit);
+    CHECK(edited.name == "custom");
+
+    const auto bare = cli::ParseProviderCommand("edit");
+    CHECK(bare.action == cli::ProviderCommandAction::EditInteractive);
+
+    // 名字之后再冒词照旧 Invalid(短用法由容错层给)。
+    CHECK(cli::ParseProviderCommand("edit a b").action == cli::ProviderCommandAction::Invalid);
+    CHECK(cli::ParseProviderCommand("EDIT custom").action == cli::ProviderCommandAction::Edit);  // 大小写不敏感
+}
+
+// ---------------------------------------------------------------------------
+// /provider 子命令容错(容错单):编辑距离近邻纯函数,单测钉死
+// ---------------------------------------------------------------------------
+
+TEST_CASE("NearestProviderSubcommand: 真机实录的拼错词各归各主") {
+    CHECK(cli::NearestProviderSubcommand("swtich") == std::optional<std::string>("switch"));
+    CHECK(cli::NearestProviderSubcommand("lst") == std::optional<std::string>("list"));
+    CHECK(cli::NearestProviderSubcommand("remvoe") == std::optional<std::string>("remove"));
+    CHECK(cli::NearestProviderSubcommand("refesh") == std::optional<std::string>("refresh"));
+    CHECK(cli::NearestProviderSubcommand("adds") == std::optional<std::string>("add"));
+    CHECK(cli::NearestProviderSubcommand("edti") == std::optional<std::string>("edit"));
+    CHECK(cli::NearestProviderSubcommand("se") == std::optional<std::string>("set"));
+    // 大小写不敏感;本身就是已知子命令时原样返回(距离 0)。
+    CHECK(cli::NearestProviderSubcommand("SWITCH") == std::optional<std::string>("switch"));
+    CHECK(cli::NearestProviderSubcommand("Switch") == std::optional<std::string>("switch"));
+}
+
+TEST_CASE("NearestProviderSubcommand: 无理词无近邻,超阈值不硬凑") {
+    CHECK_FALSE(cli::NearestProviderSubcommand("zzzzzz").has_value());
+    CHECK_FALSE(cli::NearestProviderSubcommand("hello-world").has_value());
+    CHECK_FALSE(cli::NearestProviderSubcommand("listtess").has_value());
+    CHECK_FALSE(cli::NearestProviderSubcommand("").has_value());
+    // 距离 3,超过 <=2 的阈值,不给近邻。
+    CHECK_FALSE(cli::NearestProviderSubcommand("swtichx").has_value());
+}
+
+TEST_CASE("NearestProviderSubcommand: 距离打平取清单序排前面的") {
+    // "a" 离 add 2 步,是唯一 <=2 的近邻。
+    CHECK(cli::NearestProviderSubcommand("a") == std::optional<std::string>("add"));
+    CHECK(cli::NearestProviderSubcommand("st") == std::optional<std::string>("set"));
+}
+
+TEST_CASE("NearestProviderSubcommand: 距离 1 优先于距离 2") {
+    // "swich" 离 switch 1 步、离 set 远,取 switch。
+    CHECK(cli::NearestProviderSubcommand("swich") == std::optional<std::string>("switch"));
+}
+
+TEST_CASE("ProviderSubcommandUsageLine: 每个子命令都有短用法,switch 复用既有键") {
+    for (const std::string& sub : cli::ProviderSubcommands()) {
+        const std::string usage = cli::ProviderSubcommandUsageLine(sub);
+        CHECK_FALSE(usage.empty());
+        CHECK(usage.find(sub) != std::string::npos);  // 用法里得提到自己
+    }
+    CHECK(cli::ProviderSubcommandUsageLine("bogus").empty());  // 认不得的不编用法
+}
+
+TEST_CASE("ParseProviderCommand: Invalid 时 bad_word 带着第一词原始拼写") {
+    CHECK(cli::ParseProviderCommand("swtich custom").bad_word == "swtich");
+    CHECK(cli::ParseProviderCommand("Swtich").bad_word == "Swtich");        // 保留大小写
+    CHECK(cli::ParseProviderCommand("refresh now").bad_word == "refresh");  // 错参也算
+    CHECK(cli::ParseProviderCommand("switch glm").bad_word == "switch");    // 合法路径也带着,不用而已
+}
+
 TEST_CASE("ParseSlashCommand: /doctor 与子命令参数") {
     const auto bare = cli::ParseSlashCommand("/doctor");
     CHECK(bare.command == cli::SlashCommand::Doctor);
