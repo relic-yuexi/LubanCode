@@ -426,27 +426,21 @@ std::optional<KeyEvent> MapKey(const platform::KeyInput& key) {
     return std::nullopt;
 }
 
-// 探一下从 start_row 起要画 total_rows 行(编辑行 + 提示行)会不会撞到
-// 屏幕缓冲区最后一行(GetScreenInfo 的 height)——真撞上了,后面往下写
-// 东西会让缓冲区内容整体往上滚,start_row 记的那个绝对行号就跟着报废。
-// 这里主动先滚够所需的行数(挪到缓冲区最后一行、写换行逼滚屏)、同步把
-// start_row 往上修正相同的行数,账目对平之后再画,不留"锚点失效"的口子
-// ——这是修复"提示行堆残骸"时确认到的另一个锚点失效来源,原地一并堵上。
+// 帧账的"保锚可见"原语定义在文件后段(匿名 namespace 之外——头文件里
+// 对外声明了,live_transcript.hpp 的正文账也要调),这里只留注释指路。
+
+// 探一下从 start_row 起要画 total_rows 行(编辑行 + 提示行)会不会伸出
+// 可视窗口底——真伸出了,先按帧账原语 EnsureViewportRowsLocked 把可视区
+// 腾够(长缓冲平移视口,贴底滚内容),start_row 只随内容滚动平移,账目
+// 对平之后再画。旧版按"缓冲区最后一行"探底,长缓冲(conhost 9001 行、
+// 真控制台驱动器的 120×400)里帧会画到窗口底下用户看不见——正是"回合
+// 收口后 composer 掉出可视区"那单的根子。
 void EnsureRoomForRows(int& start_row, int buffer_height, int total_rows) {
-    const int needed_bottom_row = start_row + total_rows - 1;
-    if (needed_bottom_row < buffer_height) {
-        return;  // 缓冲区里本来就放得下,不用滚
+    const int overflow = EnsureViewportRowsLocked(start_row, total_rows);
+    if (overflow > 0) {
+        start_row = (std::max)(0, start_row - overflow);
     }
-    const int overflow = needed_bottom_row - buffer_height + 1;
-    platform::SetCursorPos(0, buffer_height - 1);
-    for (int i = 0; i < overflow; ++i) {
-        std::cout << "\n";
-    }
-    std::cout.flush();
-    start_row -= overflow;
-    if (start_row < 0) {
-        start_row = 0;
-    }
+    (void)buffer_height;
 }
 
 // -----------------------------------------------------------------------
@@ -1794,6 +1788,61 @@ void SetStreamScreenScrollHook(std::function<void(int)> hook) {
     StreamScreenScrollHookSlot() = std::move(hook);
 }
 
+// 帧账的"保锚可见"原语(规格见 console_input.hpp):全程序独此一处管
+// "要画的行必须落在可视区里"。从 top_row 起 rows_needed 行若伸出可视窗
+// 口底,先平移视口(经典 conhost 长缓冲:窗口之下还有缓冲行,内容与绝对
+// 锚点一个不动),平移到头(视口贴缓冲区底——Windows Terminal/ConPTY 的
+// 常态)再退回"缓冲区末行写换行滚内容"的老法。返回内容实际滚动的行数
+// (平移视口时为 0):调用方拿它把绝对锚点上移对账。
+int EnsureViewportRowsLocked(int top_row, int rows_needed) {
+    const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
+    if (!info.has_value() || info->height <= 0) {
+        return 0;
+    }
+    const ViewportRevealPlan plan = ComputeViewportReveal(info->height, info->viewport_y, info->viewport_height,
+                                                          top_row, rows_needed);
+    // 长缓冲:窗口底下还有缓冲行,平移视口把帧带进可视区——内容一个字节
+    // 不动,所有绝对锚点原样保真,不用任何对账(平移不足的部分落到滚内容)。
+    if (plan.pan_rows > 0 && platform::PanViewportDown(plan.pan_rows) < plan.pan_rows) {
+        // 平移没到位(异常/贴底):按老法滚内容兜底,总量按原计划。
+        const int shortfall = plan.pan_rows;
+        platform::SetCursorPos(0, info->height - 1);
+        for (int i = 0; i < shortfall + plan.scroll_rows; ++i) {
+            std::cout << "\n";
+        }
+        std::cout.flush();
+        return shortfall + plan.scroll_rows;
+    }
+    // 视口已贴缓冲区底(WT/ConPTY 常态):老法,末行写换行滚内容。滚掉的
+    // 内容行数就是返回值,调用方把锚点上移对齐。
+    if (plan.scroll_rows > 0) {
+        platform::SetCursorPos(0, info->height - 1);
+        for (int i = 0; i < plan.scroll_rows; ++i) {
+            std::cout << "\n";
+        }
+        std::cout.flush();
+        return plan.scroll_rows;
+    }
+    return 0;
+}
+
+// 帧账原语的正文/工具账封装:多一枚"锚点护栏"。长缓冲平移视口不问锚点
+// (内容不动,想滚都没滚);贴缓冲底要滚内容时,要滚的行数比 anchor_row
+// (这一块的锚点/块首)还多,滚完锚点也就负了——账对不上,返回 -1 让调用
+// 方按各自的老规矩收场(footer 弃画这一帧、正文块记 unsafe 放弃重画)。
+int EnsureViewportRowsForAnchorLocked(int anchor_row, int top_row, int rows_needed) {
+    const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
+    if (!info.has_value() || info->height <= 0) {
+        return 0;
+    }
+    const ViewportRevealPlan plan = ComputeViewportReveal(info->height, info->viewport_y, info->viewport_height,
+                                                          top_row, rows_needed);
+    if (plan.scroll_rows > anchor_row) {
+        return -1;
+    }
+    return EnsureViewportRowsLocked(top_row, rows_needed);
+}
+
 bool EnsureStreamScreenRowsLocked(int rows_needed) {
     if (rows_needed <= 0) {
         return true;
@@ -1802,23 +1851,18 @@ bool EnsureStreamScreenRowsLocked(int rows_needed) {
     if (!info.has_value() || info->height <= 0) {
         return false;
     }
-    const int needed_bottom = info->cursor_y + rows_needed - 1;
-    if (needed_bottom < info->height) {
-        return true;
-    }
-    const int overflow = needed_bottom - info->height + 1;
-    if (overflow > info->cursor_y) {
+    // 锚点护栏在封装里:要滚的行数比光标上方的内容还多,滚了锚点也救不回,
+    // 这一帧放弃(-1)。
+    const int overflow = EnsureViewportRowsForAnchorLocked(info->cursor_y, info->cursor_y, rows_needed);
+    if (overflow < 0) {
         return false;
     }
-    platform::SetCursorPos(0, info->height - 1);
-    for (int i = 0; i < overflow; ++i) {
-        std::cout << "\n";
+    if (overflow > 0) {
+        if (const auto& hook = StreamScreenScrollHookSlot()) {
+            hook(overflow);
+        }
+        platform::SetCursorPos(info->cursor_x, info->cursor_y - overflow);
     }
-    std::cout.flush();
-    if (const auto& hook = StreamScreenScrollHookSlot()) {
-        hook(overflow);
-    }
-    platform::SetCursorPos(info->cursor_x, info->cursor_y - overflow);
     return true;
 }
 

@@ -335,6 +335,14 @@ void ClearRowHardFrom(int x, int y, int count) {
     std::cout << "\x1b[0m\x1b[" << (y + 1) << ";" << (x + 1) << "H\x1b[" << count << "X" << std::flush;
 }
 
+int PanViewportDown(int rows) {
+    // POSIX 坐标系里窗口即缓冲(ScreenInfo 的 height 本就是窗口行数),
+    // 没有"窗口之下还有缓冲行"这回事,平移无从谈起——保锚可见退回"贴底
+    // 滚内容"一条路,由 cli 层的帧账原语自理。
+    (void)rows;
+    return 0;
+}
+
 RawInputScope::RawInputScope() {
     ok_ = EnterRawTermios(&original_termios_);
 }

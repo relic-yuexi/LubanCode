@@ -92,3 +92,63 @@ TEST_CASE("terminal batch converts screen-buffer coordinates to viewport coordin
     const std::string bytes = batch.Finish();
     CHECK(bytes.find("\x1b[3;3H") != std::string::npos);
 }
+
+// ---- 帧账"保锚可见"决策(多智能体真机回归单):纯函数钉死两套控制台形态的账 ----
+// 长缓冲(conhost 9001 行/驱动器 120×400):窗口底下有余量,只平移视口,
+// 内容与锚点一个不动;贴缓冲底(WT/ConPTY 常态):全靠滚内容,锚点要对账。
+
+TEST_CASE("viewport reveal: 已在可视区,一笔不动") {
+    const auto plan = lubancode::cli::ComputeViewportReveal(/*buffer_height=*/400, /*viewport_y=*/0,
+                                                            /*viewport_height=*/30, /*top_row=*/10,
+                                                            /*rows_needed=*/8);
+    CHECK(plan.pan_rows == 0);
+    CHECK(plan.scroll_rows == 0);
+}
+
+TEST_CASE("viewport reveal: 长缓冲窗口底下有余量,全走平移视口") {
+    // 窗口 0..29,帧 25..34 伸出 5 行;缓冲 400 行,底下 370 行余量。
+    const auto plan = lubancode::cli::ComputeViewportReveal(400, 0, 30, 25, 10);
+    CHECK(plan.pan_rows == 5);
+    CHECK(plan.scroll_rows == 0);
+}
+
+TEST_CASE("viewport reveal: 视口贴缓冲底(WT/ConPTY 形态),全走滚内容") {
+    // 缓冲即窗口(30 行),帧 25..34 伸出 5 行——平移没余量,只能滚。
+    const auto plan = lubancode::cli::ComputeViewportReveal(30, 0, 30, 25, 10);
+    CHECK(plan.pan_rows == 0);
+    CHECK(plan.scroll_rows == 5);
+}
+
+TEST_CASE("viewport reveal: 余量不够时先平移再滚剩余") {
+    // 缓冲 32 行,窗口 0..29,帧 25..34 伸 5 行——底下只有 2 行,平 2 滚 3。
+    const auto plan = lubancode::cli::ComputeViewportReveal(32, 0, 30, 25, 10);
+    CHECK(plan.pan_rows == 2);
+    CHECK(plan.scroll_rows == 3);
+}
+
+TEST_CASE("viewport reveal: 窗口不在缓冲顶(用户上滚过)按窗口实位算") {
+    // 窗口 100..129,帧 95..102 已在区内不动;帧 128..135 伸 6 行平 6。
+    const auto in_view = lubancode::cli::ComputeViewportReveal(400, 100, 30, 95, 8);
+    CHECK(in_view.pan_rows == 0);
+    CHECK(in_view.scroll_rows == 0);
+    const auto spill = lubancode::cli::ComputeViewportReveal(400, 100, 30, 128, 8);
+    CHECK(spill.pan_rows == 6);
+    CHECK(spill.scroll_rows == 0);
+}
+
+TEST_CASE("viewport reveal: 退化入参不炸——零行需求/零高缓冲/窗口报得比缓冲长") {
+    const auto none = lubancode::cli::ComputeViewportReveal(400, 0, 30, 25, 0);
+    CHECK(none.pan_rows == 0);
+    CHECK(none.scroll_rows == 0);
+    const auto no_buffer = lubancode::cli::ComputeViewportReveal(0, 0, 30, 25, 8);
+    CHECK(no_buffer.pan_rows == 0);
+    CHECK(no_buffer.scroll_rows == 0);
+    // viewport_height 报 0(未知):按缓冲高兜底,贴底形态走滚。
+    const auto fallback = lubancode::cli::ComputeViewportReveal(30, 0, 0, 25, 10);
+    CHECK(fallback.pan_rows == 0);
+    CHECK(fallback.scroll_rows == 5);
+    // 窗口报得比缓冲还长:夹回缓冲底,不出现负平移。
+    const auto clamped = lubancode::cli::ComputeViewportReveal(30, 10, 30, 25, 10);
+    CHECK(clamped.pan_rows == 0);
+    CHECK(clamped.scroll_rows == 5);
+}

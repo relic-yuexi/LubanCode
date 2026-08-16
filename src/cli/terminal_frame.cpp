@@ -106,4 +106,26 @@ InlineFrameDiffStats QueueInlineFrameDiff(platform::TerminalBatch& batch,
     return stats;
 }
 
+ViewportRevealPlan ComputeViewportReveal(int buffer_height, int viewport_y, int viewport_height, int top_row,
+                                         int rows_needed) {
+    ViewportRevealPlan plan;
+    if (rows_needed <= 0 || buffer_height <= 0) {
+        return plan;
+    }
+    const int window_rows = viewport_height > 0 ? viewport_height : buffer_height;
+    int viewport_bottom = viewport_y + window_rows - 1;
+    if (viewport_bottom > buffer_height - 1) {
+        viewport_bottom = buffer_height - 1;  // 防御:窗口报得比缓冲还长,按缓冲算
+    }
+    const int needed_bottom = top_row + rows_needed - 1;
+    int overflow = needed_bottom - viewport_bottom;
+    if (overflow <= 0) {
+        return plan;  // 已经在可视区里,一笔都不动
+    }
+    const int room_below = buffer_height - 1 - viewport_bottom;
+    plan.pan_rows = room_below > 0 ? (std::min)(overflow, room_below) : 0;
+    plan.scroll_rows = overflow - plan.pan_rows;
+    return plan;
+}
+
 }  // namespace lubancode::cli

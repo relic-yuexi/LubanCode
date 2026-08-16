@@ -481,6 +481,33 @@ void ClearRowHardFrom(int x, int y, int count) {
     }
 }
 
+int PanViewportDown(int rows) {
+    if (rows <= 0) {
+        return 0;
+    }
+    const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
+    CONSOLE_SCREEN_BUFFER_INFOEX info{};
+    info.cbSize = sizeof(info);
+    if (!GetConsoleScreenBufferInfoEx(h_out, &info)) {
+        return 0;
+    }
+    const int buffer_bottom = static_cast<int>(info.dwSize.Y) - 1;
+    const int viewport_bottom = static_cast<int>(info.srWindow.Bottom);
+    const int room = buffer_bottom - viewport_bottom;
+    if (room <= 0) {
+        return 0;  // 窗口已贴缓冲区底:没有可平移的余地,调用方退回滚内容
+    }
+    const int pan = (std::min)(rows, room);
+    info.srWindow.Top += static_cast<SHORT>(pan);
+    info.srWindow.Bottom += static_cast<SHORT>(pan);
+    // dwCursorPosition 原样带回(缓冲没滚,绝对坐标仍有效),光标一个不挪
+    // ——挪了反而可能触发控制台"把光标带回视野"的反向滚动,平移白做。
+    if (!SetConsoleScreenBufferInfoEx(h_out, &info)) {
+        return 0;
+    }
+    return pan;
+}
+
 RawInputScope::RawInputScope() {
     const HANDLE h_in = GetStdHandle(STD_INPUT_HANDLE);
     DWORD original_mode = 0;
