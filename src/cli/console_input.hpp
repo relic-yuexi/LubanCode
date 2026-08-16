@@ -106,6 +106,13 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
 ConfirmMode CurrentConfirmMode();
 void SetConfirmMode(ConfirmMode mode);
 
+// AllSlashCommands() -> LineEditorCore 补全候选的唯一转换口:空闲 composer
+// 的 SharedEditor() 与流式监听线程(TurnInputListener)的本地编辑器都从这
+// 里拿候选。命令清单仍只有 slash_commands 那一份——命令增删、i18n 说明变
+// 化后两只 composer 同一拍生效,不靠维护者记得改第二处。每次现转、不留静
+// 态副本(语言切换后下一只编辑器自然拿到新说明)。
+std::vector<CompletionCandidate> BuildSlashCompletionCandidates();
+
 // UI-D(0.16.0):等输入期间(composer 主提示符)按下 Ctrl+O / Ctrl+E /
 // 空 composer Tab / Shift+Tab / ESC(聚焦查看态返回用)时,终端层把语义
 // 转发给应用层的动作。终端层自己零 transcript 知识:回调打印什么它不管,

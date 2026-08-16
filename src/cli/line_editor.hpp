@@ -96,17 +96,10 @@ struct CompletionCandidate {
     std::string description;  // 一句话说明,提示行展示用
 };
 
-// 流式输入行的 slash 命令提示(用户反馈"流式打 / 也要像空闲输入框一样出补全
-// 提示")。规则:buffer 非空、首字符是 '/'、且还没敲空格(还在敲命令词)才
-// 出提示,以整段 buffer 作命令词做大小写不敏感前缀匹配;其余情形一律给空
-// vector。行文本跟 LineEditorCore 提示区同一套摆法:一行 "  /name  说明",
-// 最多 6 行,超出加一行"共 N 个命令"(i18n key ui.menu_more,文案沿用现有
-// 机制,不重写);这里没有选中态,永不出 "> " 标记行。纯函数、不碰任何编辑
-// 状态/历史,流式 footer 的监听线程每次按键现算一遍,单测直接钉
-// (tests/test_queue_model.cpp)。buffer 收 UTF-8(echo_text 那份原样进来),
-// 内部自己解码。
-std::vector<std::string> StreamSlashHintLines(const std::vector<CompletionCandidate>& candidates,
-                                              const std::string& buffer_utf8);
+// 补全候选的来源转换口在接线层(console_input.hpp 的
+// BuildSlashCompletionCandidates()):由 AllSlashCommands() 现转一份
+// std::vector<CompletionCandidate>,空闲 SharedEditor() 与流式监听线程的
+// 本地编辑器共用,核心层自己不认得任何具体命令名字,不写第二份命令清单。
 
 // 简易 East Asian Width 判定:>= 0x1100 起,常用的 CJK 统一表意文字、
 // 假名、韩文音节、全角标点这些区段按显示宽度 2 算,其余按 1 算。UI-A
@@ -240,6 +233,12 @@ public:
     // 塞进一只只会尾删的临时 buffer。历史浏览位也复位(取回的不是历史)。
     void LoadText(const std::u32string& joined);
 
+    // 方向键直选菜单(单行 / 开头按 ↓ 进入)开关,默认开。忙碌排队输入框
+    // (TurnInputListener 的本地编辑器)关掉:流式期间 Up/Down 分给代理面
+    // 板、排队条目编辑与历史浏览,方向键直选不硬塞进来(忙碌 Tab 单规格五);
+    // Tab 补全/轮转不受这只开关影响。编辑器级能力开关,跨 BeginLine 存活。
+    void set_menu_selection_enabled(bool enabled) { menu_select_enabled_ = enabled; }
+
     ConfirmMode confirm_mode() const { return confirm_mode_; }
 
     // 0.17.0:终端层在"焦点导航请求没被应用层消费"(比如 transcript 是空
@@ -296,6 +295,7 @@ private:
 
     std::optional<TabCycleState> tab_cycle_;
     std::optional<MenuSelectionState> menu_selection_;
+    bool menu_select_enabled_ = true;  // 见 set_menu_selection_enabled 注释
     // atomic:确认档是会话级状态,跨线程读写——流式期间监听线程
     // (TurnInputListener)会切档,主线程的确认回调/peer 名册回调随时在读
     // CurrentConfirmMode()。普通枚举在这条跨线程路径上没有可见性保证
