@@ -351,6 +351,44 @@ struct SubagentConfig {
     std::optional<int> max_steps_per_turn;
 };
 
+// PTC(Programmatic Tool Calling)的调用档(规格"三种调用档"节):
+//   Json          保持现状(默认);
+//   Programmatic  强制走 PTC;Python/沙箱不满足硬条件时明报并回落 JSON;
+//   Auto          按能力画像与任务形状选,状态栏写出本轮选择。首版 auto
+//                 恒选 json(没有 verified 画像),门槛逻辑在 ptc/profile。
+enum class ToolCallingMode { Json, Programmatic, Auto };
+
+std::string ToString(ToolCallingMode mode);
+// 认不得的值报错(错误信息列全合法值);交给 ParseFileConfigJson 用。
+std::expected<ToolCallingMode, std::string> ParseToolCallingMode(const std::string& raw);
+
+// PTC 段的运行配置(五道上限 + 解释器 + 入选工具)。0 上限 = 用内置默认。
+// 待遇同 hooks:只从配置文件来(项目级压全局),没配就是默认值。
+struct PtcConfig {
+    std::string python;                               // 解释器命令/路径,空 = 平台默认探测
+    int wall_clock_ms = 30000;                        // 墙钟
+    int cpu_ms = 20000;                               // CPU 时间
+    std::size_t memory_bytes = 512 * 1024 * 1024;     // 内存
+    std::size_t output_bytes = 8 * 1024 * 1024;       // 输出字节(RPC 双向合计)
+    int max_calls = 100;                              // 调用数
+    int max_concurrency = 8;                          // 并发数(在飞窗口)
+    bool restricted_token = true;                     // Windows 受限 token
+    std::vector<std::string> tools;                   // 入选工具白名单,空 = 默认只读集
+};
+
+// config.json 里 ptc 段的可选形状(全字段可选,没写的落默认)。
+struct PtcFileConfig {
+    std::optional<std::string> python;
+    std::optional<int> wall_clock_ms;
+    std::optional<int> cpu_ms;
+    std::optional<std::size_t> memory_bytes;
+    std::optional<std::size_t> output_bytes;
+    std::optional<int> max_calls;
+    std::optional<int> max_concurrency;
+    std::optional<bool> restricted_token;
+    std::optional<std::vector<std::string>> tools;
+};
+
 struct Config {
     Wire wire = Wire::Anthropic;
     std::string base_url;
@@ -434,6 +472,11 @@ struct Config {
     // tool_search:延迟挂载的启用阈值,0 = 永不延迟。只从配置文件读
     // (没有环境变量这一级),没配就是默认 20。
     int tool_search_threshold = kDefaultToolSearchThreshold;
+    // PTC:工具调用后端档。默认 json(行为与从前逐字节一致)。只从配置
+    // 文件读(项目级压全局),环境变量不认——强开 PTC 是须看清后果的动作。
+    ToolCallingMode tool_calling = ToolCallingMode::Json;
+    // PTC:运行限额与解释器。没配 ptc 段就是内置默认。
+    PtcConfig ptc;
     // M11(网络超时):三个字段只从配置文件读(项目级 > 全局,跟
     // tool_search_threshold 同样待遇,没有环境变量这一级),没配就是上面
     // 那三个内置默认值。connect_timeout_ms 单位毫秒,另外两个单位秒。
@@ -474,6 +517,8 @@ struct ConfigSources {
     Source providers = Source::Default;
     Source status_panel = Source::Default;
     Source subagent = Source::Default;  // 子代理段:配置文件或默认
+    Source tool_calling = Source::Default;  // PTC 调用档:配置文件或默认(json)
+    Source ptc = Source::Default;           // PTC 段:配置文件或默认
     Source memory = Source::Default;
 };
 
@@ -569,6 +614,9 @@ struct FileConfig {
     std::optional<std::map<std::string, std::string>> extra_headers;
     // tool_search:延迟挂载阈值,非负整数(0 = 永不延迟)。
     std::optional<int> tool_search_threshold;
+    // PTC:调用档字符串(json|programmatic|auto)与 ptc 段(整段回退)。
+    std::optional<std::string> tool_calling;
+    std::optional<PtcFileConfig> ptc;
     // M11(网络超时):三个字段都是正整数,没写就是 std::nullopt(往下一级
     // 找,最终落到内置默认值)。connect_timeout_ms 单位毫秒,另外两个单位秒。
     std::optional<int> connect_timeout_ms;

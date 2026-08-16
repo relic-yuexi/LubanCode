@@ -163,6 +163,26 @@ struct SpawnResult {
     bool command_not_found = false;  // 可执行文件不存在(LSP 层要给更友好的报错)
 };
 
+// PTC 沙箱(P1):长命子进程的 OS 级资源约束。0/false = 不设这道墙。
+//   - Windows:Job Object 的 CPU 时间/进程内存上限 + KILL_ON_JOB_CLOSE,
+//     restricted_token 再叠一枚受限 token(禁用全部特权);
+//   - POSIX:RLIMIT_CPU / RLIMIT_AS(fork 后 exec 前 setrlimit),没有
+//     文件系统/网络隔离,restricted_token 无对应实现(忽略);
+//   - 两平台都只是资源墙,不是文件系统/网络隔离——那层靠 Python 侧
+//     护栏(白名单 import),画像据此分级,如实交账。
+struct SpawnConstraints {
+    int cpu_seconds = 0;           // CPU 时间上限(墙钟之外的第五道墙之一)
+    std::size_t memory_bytes = 0;  // 地址空间上限
+    bool restricted_token = false; // Windows:CreateRestrictedToken 起进程
+};
+
+// 一份已经退出(或仍在跑)的子进程资源快照,撞线归因用。字段 0 = 未知
+// (平台没实现那一路)。CPU 是 100ns 单位(Windows Job 口径),内存取峰值。
+struct ChildResourceUsage {
+    std::uint64_t cpu_100ns = 0;
+    std::size_t peak_memory_bytes = 0;
+};
+
 // 长命子进程的双向管道:stdin 可写、stdout/stderr 各有一条专属读线程,把
 // 读到的原始字节块喂给回调(分帧不归这里管,MCP 的行分帧、LSP 的
 // Content-Length 分帧都在各自传输层)。
@@ -188,6 +208,13 @@ public:
                        std::function<bool(std::string_view)> on_stdout,
                        std::function<void(std::string_view)> on_stderr);
 
+    // 同上,但带 PTC 沙箱约束(Job/rlimit 的 CPU、内存上限,Windows 受限
+    // token)。constraints 全默认时与四参版本行为一致。job 限额设置失败只
+    // 降级(照常起进程),由调用方拿 SandboxGrade 自己记档,不硬失败。
+    SpawnResult Start(const std::string& command, const std::vector<std::string>& args, const EnvPairs& env,
+                       std::function<bool(std::string_view)> on_stdout,
+                       std::function<void(std::string_view)> on_stderr, const SpawnConstraints& constraints);
+
     // 原始字节一次性写进子进程 stdin,内部加锁防止多个请求线程交错。进程
     // 已经退出/没起成功都返回 false。
     bool Write(const std::string& data);
@@ -203,6 +230,13 @@ public:
 
     // 进程是否还活着。
     bool IsAlive() const;
+
+    // PTC 沙箱:退出后的资源快照(撞线归因用)。没起过/平台没实现那一路
+    // 返回全零。可在 Shutdown 之后调,job 句柄关掉前读到的值缓存于此。
+    ChildResourceUsage ResourceUsageSnapshot() const;
+
+    // 子进程退出码;没起过或还没退出返回 -1。Shutdown 之后有效(收尸完)。
+    int exit_code() const;
 
 private:
     void JoinReaderThreads();
@@ -233,6 +267,10 @@ private:
 
     std::thread stdout_thread_;
     std::thread stderr_thread_;
+
+    // PTC 沙箱的收尾快照(Shutdown 时填,ResourceUsageSnapshot/exit_code 读)。
+    ChildResourceUsage resource_usage_cache_{};
+    int exit_code_cache_ = -1;
 
     std::atomic<bool> started_{false};
     std::atomic<bool> shutdown_done_{false};

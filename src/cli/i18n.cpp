@@ -800,6 +800,8 @@ const Entry kZhCN[] = {
     {"mcp.list_failed", "[mcp] {0}: 获取工具清单失败 - {1}"},
     {"mcp.mounted", "[mcp] {0}: {1} 个工具已挂载"},
     {"plugin.mounted_line", "[plugin] {0}: {1} 个工具"},
+    {"ptc.fallback_line", "[ptc] programmatic 工具调用未启用,回落 JSON: {0}"},
+    {"ptc.probe_failed", "[ptc] Python 探测失败: {0}"},
     {"tool_search.enabled", "[tool_search] 工具超过阈值 {0},MCP/插件等外挂工具改为延迟挂载(/tools 看三态)"},
     {"catalog.warning", "[models.json 警告] {0}"},
     {"settings.local.warning", "[settings.local.json 警告] {0}"},

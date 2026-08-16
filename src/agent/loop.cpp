@@ -14,21 +14,16 @@
 
 namespace lubancode::agent {
 
-namespace {
-
 // 执行一个工具调用:先通知上层要开始了,M9 的 pre_tool 钩子紧接着检查一遍
 // (拦截了就直接结束,连确认都不问),needs_confirm 的话再问一句,拒绝/
 // 找不到工具/被钩子拦截/正常执行,最后都会走 on_tool_done 通知一遍,保证
 // 上层能看到完整的生命周期。工具真执行完之后再跑一遍 post_tool 钩子
-// (M9)——这是本次任务在 agent/ 里唯一的挂接点,函数本身不知道 hooks 具体
-// 怎么解析执行,只在两个该介入的地方各调一次回调。
+// (M9)。
 //
-// 编码信任边界:所有工具结果(内置工具、MCP、插件、post hook 加工过的)
-// 在交给任何消费者之前,先在这里过一遍 SanitizeExternalText——此前只有入
-// history 前清洗一次,on_tool_done 背后的 recorder/转录/Ctrl+E 拿到的还是
-// 原文,坏字节照样能把它们的 JSON 序列化打崩(见 todos/工具输出非法UTF8
-// 导致会话退出.todo)。规范化之后,recorder、转录、history、请求/会话
-// JSON 拿到的都是同一份内容。
+// PTC(P1)起此函数从匿名命名空间转正导出:programmatic_tool_calling 脚本
+// 里的每一枚 stub 调用都要走这条完整链(schema 校验在钩子改写复检里、
+// PreToolUse/权限/执行/PostToolUse/编码信任边界一个不少),不许另开一条
+// 绕过 hooks 的暗门。JSON 与 PTC 两个后端共用同一份执行代码。
 tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUseBlock& call, const Callbacks& callbacks,
                                 const std::function<bool(const tools::Tool&)>& tool_filter) {
     // 每条收尾路共用的分发口:先清洗,再 on_tool_done,清洗版随返回值交给
@@ -142,6 +137,8 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     }
     return dispatch_done(call.name, std::move(result));
 }
+
+namespace {
 
 // 步数将尽提醒的正文:固定文案,不带倒计时数字。前缀缓存守恒单第五期起
 // 不再改 system——提醒在"剩余步数第一次降到阈值"那一步,追加进当时尚未

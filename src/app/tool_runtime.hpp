@@ -29,6 +29,7 @@
 #include "lsp/manager.hpp"
 #include "mcp/client.hpp"
 #include "memory/project_memory.hpp"
+#include "ptc/ptc_tool.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/ask_user.hpp"
 #include "tools/plugin_loader.hpp"
@@ -153,6 +154,12 @@ public:
         return explore_registry_.has_value() ? &*explore_registry_ : nullptr;
     }
     lubancode::tools::AgentTool* agent_tool() { return agent_tool_; }
+    // PTC(programmatic_tool_calling 工具):tool_calling=json 或装配不成时
+    // 为 nullptr。装配成败与 auto 档的落点看 ptc_resolution 文案。
+    lubancode::ptc::PtcTool* ptc_tool() { return ptc_tool_; }
+    // 本场工具调用后端的落点文案(状态栏用):"ptc" / "json" / "auto→json"
+    // / "auto→ptc" / "ptc→json(回落原因)"。
+    const std::string& ptc_resolution() const { return ptc_resolution_; }
     const std::shared_ptr<lubancode::tools::TodoListState>& todo_state() const { return todo_state_; }
     const std::shared_ptr<std::set<std::string>>& loaded_tools() const { return loaded_tools_; }
     bool main_deferral() const { return main_deferral_; }
@@ -178,6 +185,10 @@ private:
     std::optional<lubancode::tools::ToolRegistry> explore_registry_;
     lubancode::tools::ToolRegistry sub_registry_;
     lubancode::tools::ToolRegistry main_registry_;
+    // PTC 工具对象在 main_registry_ 里(与 agent_tool_ 同款:注册表持有,
+    // 这里只留裸指针)。
+    lubancode::ptc::PtcTool* ptc_tool_ = nullptr;
+    std::string ptc_resolution_;
     lubancode::tools::AgentTool* agent_tool_ = nullptr;  // 对象在 main_registry_ 里
     std::shared_ptr<lubancode::tools::TodoListState> todo_state_;
     std::shared_ptr<std::set<std::string>> loaded_tools_ = std::make_shared<std::set<std::string>>();

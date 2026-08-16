@@ -300,6 +300,13 @@ add_library(lubancode_core STATIC
   src/agent/peer_registry.cpp
   src/agent/peer_mailbox.cpp
   src/agent/peer_session.cpp
+  src/ptc/protocol.cpp
+  src/ptc/stub_generator.cpp
+  src/ptc/bootstrap_py.cpp
+  src/ptc/runner.cpp
+  src/ptc/profile.cpp
+  src/ptc/ptc_tool.cpp
+  src/ptc/bench.cpp
   src/agent/prompt_assembler.cpp
   "${_lubancode_embedded_prompts}"
   "${_lubancode_embedded_provider_catalog}"

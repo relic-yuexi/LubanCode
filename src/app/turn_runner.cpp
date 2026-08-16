@@ -20,6 +20,7 @@
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
 #include "platform/console.hpp"
+#include "ptc/ptc_tool.hpp"
 #include "tools/command_safety.hpp"
 #include "tools/hooks.hpp"
 
@@ -719,6 +720,24 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
             display.OnSubToolResult(name, input, result);
         };
         agent_tool->SetHooks(std::move(hooks));
+    }
+
+    // PTC 工具(注册了的话):脚本里每一枚 stub 调用都要过这一轮的完整
+    // 执行链——PreToolUse/权限/PostToolUse 原样转发(schema 复检与审计在
+    // agent::RunOneTool 里),Esc 取消链透传。展示回调(on_tool_start/
+    // on_tool_done)刻意不转发:规格 UI 节要求 PTC 只画一张卡、聚合行在
+    // 结果文本里,不把 16 枚同构工具卡刷满屏;外层那枚
+    // programmatic_tool_calling 调用照常走 display 的一条卡。
+    if (auto* ptc_tool = dynamic_cast<lubancode::ptc::PtcTool*>(registry.Find("programmatic_tool_calling"));
+        ptc_tool != nullptr) {
+        lubancode::ptc::PtcTool::Hooks hooks;
+        hooks.on_tool_confirm = callbacks.on_tool_confirm;
+        hooks.on_pre_tool_use_hook = callbacks.on_pre_tool_use_hook;
+        hooks.on_permission_request = callbacks.on_permission_request;
+        hooks.on_tool_phase = callbacks.on_tool_phase;
+        hooks.on_post_tool_use_hook = callbacks.on_post_tool_use_hook;
+        hooks.cancel = cancel_flag;
+        ptc_tool->SetHooks(std::move(hooks));
     }
 
     return callbacks;

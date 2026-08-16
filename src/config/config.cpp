@@ -365,6 +365,22 @@ std::string ToString(Source source) {
     return cli::tr("config.source.unknown");
 }
 
+std::string ToString(ToolCallingMode mode) {
+    switch (mode) {
+        case ToolCallingMode::Json: return "json";
+        case ToolCallingMode::Programmatic: return "programmatic";
+        case ToolCallingMode::Auto: return "auto";
+    }
+    return "json";
+}
+
+std::expected<ToolCallingMode, std::string> ParseToolCallingMode(const std::string& raw) {
+    if (raw == "json") return ToolCallingMode::Json;
+    if (raw == "programmatic") return ToolCallingMode::Programmatic;
+    if (raw == "auto") return ToolCallingMode::Auto;
+    return std::unexpected("tool_calling 只认 json / programmatic / auto,收到: \"" + raw + "\"");
+}
+
 std::expected<std::size_t, std::string> ParseContextWindowTokens(const std::string& raw) {
     if (raw.empty()) {
         return std::unexpected(std::string("context_window 不能是空串"));
@@ -1228,6 +1244,81 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
         }
         config.tool_search_threshold = static_cast<int>(value);
     }
+    // PTC:调用档(json|programmatic|auto)。认不得的值报错——这个字段
+    // 没法静默落默认,下游不知道走哪个后端。
+    if (parsed.contains("tool_calling")) {
+        const auto& field = parsed["tool_calling"];
+        if (!field.is_string()) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                   " 里的 tool_calling 字段必须是字符串(json|programmatic|auto)");
+        }
+        const auto mode = ParseToolCallingMode(field.get<std::string>());
+        if (!mode.has_value()) {
+            return std::unexpected(mode.error());
+        }
+        config.tool_calling = field.get<std::string>();
+    }
+    // PTC 段:五道上限 + 解释器 + 入选白名单。字段类型不对报错(这些是
+    // 安全上限,写错值该拦下来,不学"救命阀"字段的静默路)。
+    if (parsed.contains("ptc")) {
+        const auto& field = parsed["ptc"];
+        if (!field.is_object()) {
+            return std::unexpected("配置文件 " + file_path_for_error + " 里的 ptc 字段必须是 JSON object");
+        }
+        PtcFileConfig ptc;
+        if (field.contains("python")) {
+            if (!field["python"].is_string()) {
+                return std::unexpected("配置文件 " + file_path_for_error + " 里的 ptc.python 必须是字符串");
+            }
+            ptc.python = field["python"].get<std::string>();
+        }
+        const auto parse_limit = [&](const char* name, long long minimum,
+                                     std::optional<long long> target_storage) -> std::expected<void, std::string> {
+            (void)target_storage;
+            if (!field.contains(name)) return {};
+            const auto& value = field[name];
+            if ((!value.is_number_integer() && !value.is_number_unsigned()) || value.get<long long>() < minimum) {
+                return std::unexpected("配置文件 " + file_path_for_error + " 里的 ptc." + name + " 必须是 >= " +
+                                       std::to_string(minimum) + " 的整数");
+            }
+            return {};
+        };
+        // 先逐个验型,再落值(验型失败整段报错,不留半截)。
+        for (const auto& [name, minimum] : std::vector<std::pair<const char*, long long>>{
+                 {"wall_clock_ms", 100}, {"cpu_ms", 100}, {"memory_bytes", 1024 * 1024},
+                 {"output_bytes", 1024}, {"max_calls", 1},  {"max_concurrency", 1}}) {
+            const auto checked = parse_limit(name, minimum, std::nullopt);
+            if (!checked.has_value()) {
+                return std::unexpected(checked.error());
+            }
+        }
+        if (field.contains("wall_clock_ms")) ptc.wall_clock_ms = static_cast<int>(field["wall_clock_ms"].get<long long>());
+        if (field.contains("cpu_ms")) ptc.cpu_ms = static_cast<int>(field["cpu_ms"].get<long long>());
+        if (field.contains("memory_bytes")) ptc.memory_bytes = static_cast<std::size_t>(field["memory_bytes"].get<long long>());
+        if (field.contains("output_bytes")) ptc.output_bytes = static_cast<std::size_t>(field["output_bytes"].get<long long>());
+        if (field.contains("max_calls")) ptc.max_calls = static_cast<int>(field["max_calls"].get<long long>());
+        if (field.contains("max_concurrency")) ptc.max_concurrency = static_cast<int>(field["max_concurrency"].get<long long>());
+        if (field.contains("restricted_token")) {
+            if (!field["restricted_token"].is_boolean()) {
+                return std::unexpected("配置文件 " + file_path_for_error + " 里的 ptc.restricted_token 必须是布尔值");
+            }
+            ptc.restricted_token = field["restricted_token"].get<bool>();
+        }
+        if (field.contains("tools")) {
+            if (!field["tools"].is_array()) {
+                return std::unexpected("配置文件 " + file_path_for_error + " 里的 ptc.tools 必须是字符串数组");
+            }
+            std::vector<std::string> tools;
+            for (const auto& entry : field["tools"]) {
+                if (!entry.is_string()) {
+                    return std::unexpected("配置文件 " + file_path_for_error + " 里的 ptc.tools 元素必须是字符串");
+                }
+                tools.push_back(entry.get<std::string>());
+            }
+            ptc.tools = std::move(tools);
+        }
+        config.ptc = std::move(ptc);
+    }
     if (parsed.contains("memory")) {
         const auto& field = parsed["memory"];
         if (!field.is_object()) {
@@ -1840,6 +1931,47 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     } else {
         result.config.tool_search_threshold = kDefaultToolSearchThreshold;
         result.sources.tool_search_threshold = Source::Default;
+    }
+
+    // ---- PTC 调用档与限额段:项目级 > 全局 > 默认(json),没有环境变量
+    // 这一级。tool_calling 字符串在解析层已验;这里翻成枚举。ptc 段按
+    // "整段回退"(项目级写了就用项目级那整段,否则全局那整段)。指针先取
+    // 好,不在比较式里再解引用(空 optional 的 * 是 MSVC debug 断言)。 ----
+    const FileConfig* project_ptr = project_file.has_value() ? &*project_file : nullptr;
+    const FileConfig* global_ptr = global_file.has_value() ? &*global_file : nullptr;
+    const FileConfig* tool_calling_file =
+        project_ptr != nullptr && project_ptr->tool_calling.has_value()
+            ? project_ptr
+            : (global_ptr != nullptr && global_ptr->tool_calling.has_value() ? global_ptr : nullptr);
+    if (tool_calling_file != nullptr) {
+        const auto mode = ParseToolCallingMode(*tool_calling_file->tool_calling);
+        if (!mode.has_value()) {
+            return std::unexpected(mode.error());
+        }
+        result.config.tool_calling = *mode;
+        result.sources.tool_calling = tool_calling_file == project_ptr ? Source::ProjectConfigFile
+                                                                       : Source::GlobalConfigFile;
+    } else {
+        result.config.tool_calling = ToolCallingMode::Json;
+        result.sources.tool_calling = Source::Default;
+    }
+    const FileConfig* ptc_file = project_ptr != nullptr && project_ptr->ptc.has_value()
+                                     ? project_ptr
+                                     : (global_ptr != nullptr && global_ptr->ptc.has_value() ? global_ptr : nullptr);
+    if (ptc_file != nullptr) {
+        const PtcFileConfig& ptc = *ptc_file->ptc;
+        if (ptc.python.has_value()) result.config.ptc.python = *ptc.python;
+        if (ptc.wall_clock_ms.has_value()) result.config.ptc.wall_clock_ms = *ptc.wall_clock_ms;
+        if (ptc.cpu_ms.has_value()) result.config.ptc.cpu_ms = *ptc.cpu_ms;
+        if (ptc.memory_bytes.has_value()) result.config.ptc.memory_bytes = *ptc.memory_bytes;
+        if (ptc.output_bytes.has_value()) result.config.ptc.output_bytes = *ptc.output_bytes;
+        if (ptc.max_calls.has_value()) result.config.ptc.max_calls = *ptc.max_calls;
+        if (ptc.max_concurrency.has_value()) result.config.ptc.max_concurrency = *ptc.max_concurrency;
+        if (ptc.restricted_token.has_value()) result.config.ptc.restricted_token = *ptc.restricted_token;
+        if (ptc.tools.has_value()) result.config.ptc.tools = *ptc.tools;
+        result.sources.ptc = ptc_file == project_ptr ? Source::ProjectConfigFile : Source::GlobalConfigFile;
+    } else {
+        result.sources.ptc = Source::Default;
     }
 
     // ---- memory:默认关闭。只有用户主目录的全局配置能打开；受版本控制的

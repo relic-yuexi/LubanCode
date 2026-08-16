@@ -122,6 +122,8 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 | `max_steps_per_turn` | 非负整数 | `0`(无上限) | agent 主循环一个 turn 内的步数上限:一步 = 一次模型请求,一步可含多枚工具调用。不配或配 `0` = 不设上限,防跑飞靠 ESC/Ctrl+C;配正整数才是硬上限,超过就按预算耗尽收场。负数或非法值静默忽略。旧名 `max_turns` 仍可读入(兼容期,读到会打弃用提示);两者同现且值不同会明报冲突并采用新名。 |
 | `system_prompt_file` | 字符串,UTF-8 文本路径 | 无 | 人格段文件路径;没配就用内置人格,`--system-prompt` 命令行参数会压过它。 |
 | `tool_search_threshold` | 非负整数 | `20` | 注册工具总数超过此数才启用延迟挂载(工具搜索);`0` 永不延迟。 |
+| `tool_calling` | `json` / `programmatic` / `auto` | `json` | 工具调用后端。`json` 保持现状;`programmatic` 强制 PTC(模型写 Python 脚本编排工具,详见 docs/ptc.md),条件不满足时启动明报回落;`auto` 按能力画像与任务形状选,首版恒落 `json`。只从配置文件读,环境变量不认。 |
+| `ptc` | JSON object | 见 docs/ptc.md | PTC 的 Python 解释器、五道上限(墙钟/CPU/内存/输出字节/调用数与并发数)、受限 token 与入选工具白名单。项目级整段压过全局。 |
 | `memory` | JSON object | `enabled=false` | 项目记忆开关、读写子开关与召回预算，见下节。只能由全局配置打开。 |
 | `language` | `zh-CN` / `en` / 语言包语言码 | 空 = 跟系统 | 界面语言。 |
 | `hooks` | JSON object | 四类数组都空 | 外部命令钩子,详见下节。 |

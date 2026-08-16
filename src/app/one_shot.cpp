@@ -222,10 +222,18 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     if (main_deferral) {
         loop.SetToolFilter(tool_runtime.main_tool_filter());
     }
+    std::string turn_context;
     if (project_memory != nullptr) {
         // 单发模式的问题就是用户提问,query_origin=user 才跑检索。
-        loop.SetTurnContext(project_memory->BuildTurnContext(question, std::filesystem::current_path(),
-                                                             memory::QueryOrigin::User));
+        turn_context = project_memory->BuildTurnContext(question, std::filesystem::current_path(),
+                                                         memory::QueryOrigin::User);
+    }
+    // PTC 指南:与交互会话同一份(当前挂载集的签名索引)。
+    if (tool_runtime.ptc_tool() != nullptr) {
+        turn_context += tool_runtime.ptc_tool()->GuideSegment();
+    }
+    if (!turn_context.empty()) {
+        loop.SetTurnContext(std::move(turn_context));
     }
     std::set<std::string> always_allowed_tools;
     // settings.local.json 的 allow_tools:单发模式同样注入(免确认)。

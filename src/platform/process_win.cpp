@@ -676,6 +676,13 @@ ChildProcess::~ChildProcess() {
 SpawnResult ChildProcess::Start(const std::string& command, const std::vector<std::string>& args,
                                   const EnvPairs& env, std::function<bool(std::string_view)> on_stdout,
                                   std::function<void(std::string_view)> on_stderr) {
+    return Start(command, args, env, std::move(on_stdout), std::move(on_stderr), SpawnConstraints{});
+}
+
+SpawnResult ChildProcess::Start(const std::string& command, const std::vector<std::string>& args,
+                                  const EnvPairs& env, std::function<bool(std::string_view)> on_stdout,
+                                  std::function<void(std::string_view)> on_stderr,
+                                  const SpawnConstraints& constraints) {
     on_stdout_ = std::move(on_stdout);
     on_stderr_ = std::move(on_stderr);
 
@@ -729,8 +736,34 @@ SpawnResult ChildProcess::Start(const std::string& command, const std::vector<st
     std::vector<wchar_t> cmdline_buf(cmdline.begin(), cmdline.end());
     cmdline_buf.push_back(L'\0');
 
-    const BOOL ok = CreateProcessW(nullptr, cmdline_buf.data(), nullptr, nullptr, TRUE,
-                                    CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
+    // PTC 沙箱:受限 token(自己 token 的禁权版,CreateProcessAsUser 允许
+    // 无特权进程用"自己派生的受限 token"起子进程)。造不出就照常起,调用
+    // 方的沙箱档位自己降级记档。
+    HANDLE child_token = nullptr;
+    if (constraints.restricted_token) {
+        HANDLE current = nullptr;
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &current)) {
+            CreateRestrictedToken(current, DISABLE_MAX_PRIVILEGE, 0, nullptr, 0, nullptr, 0, nullptr, &child_token);
+            CloseHandle(current);
+        }
+    }
+
+    BOOL ok = FALSE;
+    DWORD error_code = 0;
+    if (child_token != nullptr) {
+        ok = CreateProcessAsUserW(child_token, nullptr, cmdline_buf.data(), nullptr, nullptr, TRUE,
+                                  CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
+        CloseHandle(child_token);
+        if (!ok) {
+            // 受限 token 这条路走不通(策略/权限),降级回普通创建,不硬失败。
+            ok = CreateProcessW(nullptr, cmdline_buf.data(), nullptr, nullptr, TRUE,
+                                CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
+        }
+    } else {
+        ok = CreateProcessW(nullptr, cmdline_buf.data(), nullptr, nullptr, TRUE,
+                            CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
+    }
+    error_code = GetLastError();
 
     RestoreEnv(backups);
 
@@ -740,7 +773,6 @@ SpawnResult ChildProcess::Start(const std::string& command, const std::vector<st
     CloseHandle(stderr_write);
 
     if (!ok) {
-        const DWORD error_code = GetLastError();
         CloseHandle(stdin_write);
         CloseHandle(stdout_read);
         CloseHandle(stderr_read);
@@ -757,10 +789,21 @@ SpawnResult ChildProcess::Start(const std::string& command, const std::vector<st
     stderr_read_ = stderr_read;
 
     // Job Object:超时/主动关停时,关掉 job 句柄能把整棵进程树一起杀掉。
+    // PTC 沙箱约束在这一并落墙:CPU 时间(PROCESS_TIME,100ns 单位)与
+    // 进程内存(PROCESS_MEMORY)。设不上只降级,照常跑。
     HANDLE job = CreateJobObjectW(nullptr, nullptr);
     if (job != nullptr) {
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION limit{};
         limit.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (constraints.cpu_seconds > 0) {
+            limit.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_TIME;
+            limit.BasicLimitInformation.PerProcessUserTimeLimit.QuadPart =
+                static_cast<LONGLONG>(constraints.cpu_seconds) * 10000000LL;
+        }
+        if (constraints.memory_bytes > 0) {
+            limit.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+            limit.ProcessMemoryLimit = constraints.memory_bytes;
+        }
         SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limit, sizeof(limit));
         if (!AssignProcessToJobObject(job, pi.hProcess)) {
             CloseHandle(job);
@@ -881,6 +924,27 @@ void ChildProcess::Shutdown(int wait_ms) {
         }
     }
 
+    // PTC 沙箱:句柄关掉前把资源账与退出码读出来缓存(撞线归因用)。
+    if (job_ != nullptr) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+        if (QueryInformationJobObject(static_cast<HANDLE>(job_), JobObjectExtendedLimitInformation, &info,
+                                      sizeof(info), nullptr)) {
+            resource_usage_cache_.peak_memory_bytes = info.PeakProcessMemoryUsed;
+        }
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting{};
+        if (QueryInformationJobObject(static_cast<HANDLE>(job_), JobObjectBasicAccountingInformation, &accounting,
+                                      sizeof(accounting), nullptr)) {
+            // TotalUserTime 是 job 内全部进程的用户态 CPU 合计(100ns)。
+            resource_usage_cache_.cpu_100ns = accounting.TotalUserTime.QuadPart;
+        }
+    }
+    if (process_ != nullptr) {
+        DWORD exit_code = 0;
+        if (GetExitCodeProcess(static_cast<HANDLE>(process_), &exit_code)) {
+            exit_code_cache_ = static_cast<int>(exit_code);
+        }
+    }
+
     // 根进程退了不代表后代也退了:后代若继承了 stdout/stderr 写端还活着,
     // 读线程等不到 EOF。先把 Job 收掉(KILL_ON_JOB_CLOSE 连带清光后代),
     // 写端才会全关,读线程才能正常收尾;JoinReaderThreads 里另有限时+取消
@@ -904,6 +968,10 @@ void ChildProcess::Shutdown(int wait_ms) {
         process_ = nullptr;
     }
 }
+
+ChildResourceUsage ChildProcess::ResourceUsageSnapshot() const { return resource_usage_cache_; }
+
+int ChildProcess::exit_code() const { return exit_code_cache_; }
 
 bool ChildProcess::IsAlive() const {
     if (process_ == nullptr) {
