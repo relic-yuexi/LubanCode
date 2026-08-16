@@ -25,6 +25,7 @@
 #include "cli/slash_commands.hpp"
 #include "cli/setup_wizard.hpp"
 #include "cli/theme.hpp"
+#include "cli/wizard_panel.hpp"
 #include "config/config.hpp"
 #include "config/model_catalog.hpp"
 #include "config/provider_catalog.hpp"
@@ -63,9 +64,16 @@ void ClearAndPrintBanner(const lubancode::config::Config& config, const lubancod
 
 // 给向导(初次配置 / provider add)造一份完整 WizardIO:print/read_line/fetch_models
 // 接真实 IO,choose 接 ReadChoiceMenu(↑↓ 方向键,初始高亮落在默认项,回车即选中),
-// interactive 让 ReadChoice 在管道/重定向时回落编号。两处向导共用,免得注入逻辑漂移。
+// interactive 让 ReadChoice 在管道/重定向时回落编号。向导重排单再加两个注入
+// 点:draw_frame 接 WizardPanel(TTY 原地面板,试填不落 transcript;不可用时
+// 自动退化朴素逐行),read_event 把 Esc/Ctrl+C/EOF 翻成导航事件。两处向导
+// 共用,免得注入逻辑漂移。
 lubancode::cli::WizardIO MakeInteractiveWizardIO(const lubancode::cli::Theme& theme) {
     lubancode::cli::WizardIO io;
+    // 面板归 WizardIO 的闭包共有(shared_ptr):io 活多久面板活多久,向导
+    // 走完面板析构自动收掉整块区域,transcript 只剩调用方的收尾行。
+    auto panel = std::make_shared<lubancode::cli::WizardPanel>();
+    const bool panel_active = lubancode::cli::WizardPanel::Available();
     io.print = [](const std::string& line) {
         std::cout << line << "\n";
         std::cout.flush();
@@ -77,8 +85,32 @@ lubancode::cli::WizardIO MakeInteractiveWizardIO(const lubancode::cli::Theme& th
     };
     io.interactive = lubancode::platform::StdinIsInteractive() &&
                      lubancode::platform::ProbeStdoutConsole().is_console;
-    io.choose = [&theme](const std::vector<lubancode::cli::WizardChoiceItem>& items,
-                         std::size_t default_index, const std::string& hint) -> std::optional<std::size_t> {
+    io.draw_frame = [panel, panel_active](const lubancode::cli::WizardFrame& frame) {
+        if (!panel_active) {
+            return;  // 面板开不了:setup_wizard 的朴素逐行回落兜着
+        }
+        // 选择帧给选项数+1 行预留(菜单还带一行提示),面板把 footer 画在
+        // 预留区之下,菜单画进预留区,滚屏风险一并堵住。
+        panel->Draw(frame, frame.prompt.empty() ? 12 : 0);
+    };
+    io.read_event = [panel, panel_active]() -> lubancode::cli::WizardInputEvent {
+        lubancode::cli::ReadExitReason reason = lubancode::cli::ReadExitReason::Submitted;
+        const std::optional<std::string> line = panel_active ? panel->ReadText(&reason)
+                                                             : lubancode::cli::ReadLine(
+                                                                   "", lubancode::cli::Theme{},
+                                                                   /*esc_rejects=*/true,
+                                                                   /*composer=*/false, &reason);
+        using Kind = lubancode::cli::WizardInputEvent::Kind;
+        if (!line.has_value()) {
+            return lubancode::cli::WizardInputEvent{
+                reason == lubancode::cli::ReadExitReason::Esc ? Kind::Back : Kind::Cancelled, std::string()};
+        }
+        return lubancode::cli::WizardInputEvent{Kind::Submitted, lubancode::cli::WizardTrim(*line)};
+    };
+    io.choose = [&theme, panel, panel_active](
+                    const std::vector<lubancode::cli::WizardChoiceItem>& items, std::size_t default_index,
+                    const std::string& hint,
+                    lubancode::cli::WizardInputEvent::Kind* cancel_kind) -> std::optional<std::size_t> {
         std::vector<lubancode::cli::ChoiceMenuItem> menu_items;
         menu_items.reserve(items.size());
         for (const auto& it : items) {
@@ -87,7 +119,15 @@ lubancode::cli::WizardIO MakeInteractiveWizardIO(const lubancode::cli::Theme& th
         lubancode::cli::ChoiceMenuOptions opts;
         opts.hint = hint;
         opts.initial_cursor = default_index;  // 初始高亮落在默认项,回车即选中默认
-        const auto selected = lubancode::cli::ReadChoiceMenu(menu_items, opts, theme);
+        lubancode::cli::ReadExitReason reason = lubancode::cli::ReadExitReason::Submitted;
+        const auto selected = lubancode::cli::ReadChoiceMenu(menu_items, opts, theme, &reason);
+        if (cancel_kind != nullptr && !selected.has_value()) {
+            *cancel_kind = reason == lubancode::cli::ReadExitReason::Esc
+                               ? lubancode::cli::WizardInputEvent::Kind::Back
+                               : (reason == lubancode::cli::ReadExitReason::Cancel
+                                      ? lubancode::cli::WizardInputEvent::Kind::Cancelled
+                                      : lubancode::cli::WizardInputEvent::Kind::Eof);
+        }
         if (!selected.has_value() || selected->selected_indices.empty()) {
             return std::nullopt;  // Esc/Ctrl+C/EOF
         }
@@ -503,8 +543,23 @@ void PrintProviderList(const std::vector<lubancode::config::ProviderConfig>& pro
         const std::string current = is_current ? tr("cmd.provider.current") : "";
         // api_key/model_reasoning_effort 都是可选字段;api_key 展示一律走
         // MaskApiKey 打码,绝不明文——跟 /config、初次配置向导汇总同一个规矩。
+        // 鉴权三态:none 写"无需鉴权"(不再把空 key_env 摆出来唬人);env 才
+        // 提变量名;inline 才露打码 key。
+        std::string auth_display;
+        switch (provider.auth) {
+            case lubancode::config::ProviderAuthMode::None:
+                auth_display = tr("cmd.provider.auth_none");
+                break;
+            case lubancode::config::ProviderAuthMode::Inline:
+                auth_display = trf("cmd.provider.extra_api_key",
+                                   lubancode::config::MaskApiKey(provider.api_key));
+                break;
+            case lubancode::config::ProviderAuthMode::Env:
+                auth_display = "key_env=" + provider.key_env;
+                break;
+        }
         std::string extra;
-        if (!provider.api_key.empty()) {
+        if (!provider.api_key.empty() && provider.auth != lubancode::config::ProviderAuthMode::Inline) {
             extra += trf("cmd.provider.extra_api_key", lubancode::config::MaskApiKey(provider.api_key));
         }
         if (!provider.model_reasoning_effort.empty()) {
@@ -522,7 +577,7 @@ void PrintProviderList(const std::vector<lubancode::config::ProviderConfig>& pro
             extra += trf("cmd.provider.extra_headers_hint", provider.extra_headers.size());
         }
         std::cout << trf("cmd.provider.line", provider.name, lubancode::config::ProviderWireName(provider.wire),
-                          provider.base_url, model, provider.context_window_tokens, provider.key_env, extra, current)
+                          provider.base_url, model, provider.context_window_tokens, auth_display, extra, current)
                   << "\n";
     }
 }
@@ -652,11 +707,22 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                 std::cout << trf("cmd.provider.not_found", command.name) << "\n";
                 return;
             }
-            const auto api_key = lubancode::config::ProviderApiKey(*provider);
-            if (!api_key.has_value()) {
-                std::cout << trf("cmd.provider.key_missing", provider->name, provider->key_env) << "\n";
+            // 鉴权三态:预检吃 ResolveProviderAuth 这一份共享结果——none 直接过,
+            // env 缺变量/inline 缺 key 才拦,按模式说人话。
+            const lubancode::config::ProviderAuthResolution auth =
+                lubancode::config::ResolveProviderAuth(*provider);
+            if (auth.status == lubancode::config::ProviderAuthResolution::Status::Missing) {
+                if (provider->auth == lubancode::config::ProviderAuthMode::Inline) {
+                    std::cout << trf("cmd.provider.key_missing_inline", provider->name) << "\n";
+                } else {
+                    std::cout << trf("cmd.provider.key_missing", provider->name, auth.env_name) << "\n";
+                }
                 return;
             }
+            const std::string api_key = auth.status ==
+                                                lubancode::config::ProviderAuthResolution::Status::Ready
+                                            ? *auth.key
+                                            : std::string();
 
             // 项目配置显式写了 active_provider 就继续写回项目；其余场景
             // 记到用户全局配置。只存名字，不复制密钥或 endpoint。
@@ -674,7 +740,8 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
 
             config.wire = provider->wire;
             config.base_url = provider->base_url;
-            config.auth_token = *api_key;
+            config.auth_token = api_key;
+            config.auth_mode = provider->auth;  // none 时空 auth_token 是合法态
             config.model = command.model.empty() ? provider->model : command.model;
             config.context_window_tokens = provider->context_window_tokens;
             config.native_web_search = provider->native_web_search;
@@ -832,6 +899,83 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                 }
                 return;
             }
+            if (command.field == "auth") {
+                // /provider set <名字> auth none|env|inline(向导重排单)。切到
+                // env/inline 时若还缺变量名/key,接着开相应输入页补齐,不落
+                // 半截配置;none 必须由用户显式敲这命令,谁也不许凭地址猜。
+                const auto mode = lubancode::config::ParseProviderAuthMode(command.value);
+                if (!mode.has_value()) {
+                    std::cout << trf("cmd.provider.set_failed", mode.error()) << "\n";
+                    return;
+                }
+                const lubancode::config::ProviderConfig* target =
+                    lubancode::config::FindProvider(config.providers, command.name);
+                if (target == nullptr) {
+                    std::cout << trf("cmd.provider.not_found", command.name) << "\n";
+                    return;
+                }
+                std::string prompted_env;
+                std::string prompted_key;
+                std::expected<std::string, std::string> saved;
+                if (*mode == lubancode::config::ProviderAuthMode::Env && target->key_env.empty()) {
+                    const std::optional<std::string> key_env =
+                        lubancode::cli::ReadLine(tr("cmd.provider.auth_env_prompt"));
+                    if (!key_env.has_value() || key_env->empty()) {
+                        std::cout << tr("cmd.provider.auth_aborted") << "\n";
+                        return;
+                    }
+                    prompted_env = *key_env;
+                    saved = lubancode::config::SetProviderAuthEnvInGlobalConfig(command.name, prompted_env);
+                } else if (*mode == lubancode::config::ProviderAuthMode::Inline && target->api_key.empty()) {
+                    const std::optional<std::string> key =
+                        lubancode::cli::ReadLine(tr("cmd.provider.auth_inline_prompt"));
+                    if (!key.has_value() || key->empty()) {
+                        std::cout << tr("cmd.provider.auth_aborted") << "\n";
+                        return;
+                    }
+                    prompted_key = *key;
+                    saved = lubancode::config::SetProviderAuthInlineInGlobalConfig(command.name, prompted_key);
+                } else {
+                    saved = lubancode::config::SetProviderAuthModeInGlobalConfig(command.name, *mode);
+                }
+                if (!saved.has_value()) {
+                    std::cout << trf("cmd.provider.set_failed", saved.error()) << "\n";
+                    return;
+                }
+                // 内存这份跟着换(补过的变量名/key 一并同步),活跃端立即生效。
+                lubancode::config::SetProviderAuthMode(config.providers, command.name, *mode);
+                const auto fresh_it = std::find_if(
+                    config.providers.begin(), config.providers.end(),
+                    [&](const lubancode::config::ProviderConfig& p) { return p.name == command.name; });
+                if (fresh_it != config.providers.end()) {
+                    if (!prompted_env.empty()) {
+                        fresh_it->key_env = prompted_env;
+                    }
+                    if (!prompted_key.empty()) {
+                        fresh_it->api_key = prompted_key;
+                    }
+                    if (*mode == lubancode::config::ProviderAuthMode::None) {
+                        fresh_it->key_env.clear();
+                    }
+                    if (active_provider == command.name) {
+                        const lubancode::config::ProviderAuthResolution auth =
+                            lubancode::config::ResolveProviderAuth(*fresh_it);
+                        config.auth_mode = fresh_it->auth;
+                        config.auth_token =
+                            auth.status == lubancode::config::ProviderAuthResolution::Status::Ready
+                                ? *auth.key
+                                : std::string();
+                        real_backend.Rebuild(config);
+                    }
+                }
+                std::cout << trf("cmd.provider.set_ok", command.name, command.field,
+                                 lubancode::config::ProviderAuthModeName(*mode), *saved)
+                          << "\n";
+                if (active_provider == command.name) {
+                    std::cout << trf("cmd.provider.set_active_applied", command.name) << "\n";
+                }
+                return;
+            }
             std::cout << trf("cmd.provider.set_failed", trf("cmd.provider.set_unknown_field", command.field))
                       << "\n";
             return;
@@ -963,8 +1107,11 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
     std::cout << "  wire               = " << wire_str << "  [" << lubancode::config::ToString(sources.wire) << "]\n";
     std::cout << "  base_url           = " << (config.base_url.empty() ? tr("config.not_set") : config.base_url)
               << "  [" << lubancode::config::ToString(sources.base_url) << "]\n";
-    std::cout << "  api_key            = " << lubancode::config::MaskApiKey(config.auth_token) << "  ["
-              << lubancode::config::ToString(sources.auth_token) << "]\n";
+    std::cout << "  api_key            = "
+              << (config.auth_mode == lubancode::config::ProviderAuthMode::None
+                      ? tr("cmd.provider.auth_none")
+                      : lubancode::config::MaskApiKey(config.auth_token))
+              << "  [" << lubancode::config::ToString(sources.auth_token) << "]\n";
     std::cout << "  model              = " << (config.model.empty() ? tr("config.not_set") : config.model) << "  ["
               << lubancode::config::ToString(sources.model) << "]\n";
     std::cout << "  active_provider    = "

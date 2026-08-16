@@ -26,6 +26,56 @@ std::string WireToString(config::Wire wire) {
 
 }  // namespace
 
+std::string WizardTrim(const std::string& s) {
+    return Trim(s);
+}
+
+// 画一帧(向导重排单):注入了 draw_frame(TTY 面板)就整帧交给它;没注入
+// (管道/单测/不支持原地重画的终端)退化朴素逐行——分隔线、标题+步骤号、
+// 正文、错误、输入提示、footer 逐行打印,步骤号/返回/错误一个不少。
+void DrawWizardFrame(WizardIO& io, const WizardFrame& frame) {
+    if (io.draw_frame) {
+        io.draw_frame(frame);
+        return;
+    }
+    io.print("------------------------------------------------------------");
+    std::string header = frame.title;
+    if (!frame.progress.empty()) {
+        header += header.empty() ? frame.progress : "  " + frame.progress;
+    }
+    if (!header.empty()) {
+        io.print(header);
+    }
+    io.print("");
+    for (const std::string& line : frame.body) {
+        io.print(line);
+    }
+    if (!frame.error.empty()) {
+        io.print("! " + frame.error);
+    }
+    if (!frame.prompt.empty()) {
+        io.print(frame.prompt);
+    }
+    if (!frame.footer.empty()) {
+        io.print(frame.footer);
+    }
+    io.print("------------------------------------------------------------");
+}
+
+// 读一个导航事件:注入了 read_event(TTY 面板)就交给它;没注入回落
+// read_line——nullopt 算 Eof,其余算 Submitted。朴素路上没有 Esc/Ctrl+C
+// 可言,Back 与 Cancelled 只在注入端出现。
+WizardInputEvent ReadWizardEvent(WizardIO& io) {
+    if (io.read_event) {
+        return io.read_event();
+    }
+    const auto line = io.read_line();
+    if (!line.has_value()) {
+        return WizardInputEvent{WizardInputEvent::Kind::Eof, std::string()};
+    }
+    return WizardInputEvent{WizardInputEvent::Kind::Submitted, Trim(*line)};
+}
+
 // 剥掉尾部所有斜杠(base_url 不该带结尾 /,后面各 client 自己拼 /v1/messages
 // 之类的路径,留着斜杠会拼出双斜杠)。/provider add 向导(provider_wizard.cpp)
 // 复用这个函数,声明搬进了 setup_wizard.hpp。
@@ -101,11 +151,12 @@ std::optional<std::size_t> ChooseByNumber(WizardIO& io, const std::vector<Wizard
 
 // 单选:优先走注入点 io.choose(生产 = 方向键菜单);未注入时回落到 ChooseByNumber
 // (编号列表 + read_line)。空输入按 default_index(0-based),超范围/非数字重问,
-// EOF 返回 std::nullopt。返回选中下标(0-based)。
+// EOF 返回 std::nullopt。返回选中下标(0-based)。setup 向导不关心取消是哪个
+// 键,cancel_kind 传 nullptr(向导重排单加的口子,provider 向导才用)。
 std::optional<std::size_t> ReadChoice(WizardIO& io, const std::vector<WizardChoiceItem>& items,
                                       std::size_t default_index, const std::string& hint) {
     if (io.interactive && io.choose) {
-        return io.choose(items, default_index, hint);
+        return io.choose(items, default_index, hint, nullptr);
     }
     return ChooseByNumber(io, items, default_index);
 }

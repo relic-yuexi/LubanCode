@@ -1,8 +1,14 @@
-// /provider add 向导:纯逻辑测试,脚本化输入序列 + 假的 print 收集器 + 假的
-// fetch_models,不碰真实 stdin/stdout,也不真发网络请求。跟 test_setup_wizard.cpp
-// 用的是同一套 ScriptedIO 手法。
+// /provider add 向导(向导重排单):纯逻辑测试。脚本化导航事件(文本步)+
+// 脚本化编号行(选择步)+ 假的 print 收集器 + 假的 fetch_models,不碰真实
+// stdin/stdout,也不真发网络请求。步骤序:名字 → 接口格式 → base_url →
+// 密钥来源 → 模型 → 推理档位 → 额外参数 → 确认。
+//
+// 文本步吃 events 队列(Submitted/Back/Cancelled/Eof 四态事件);选择步在
+// 非交互回落下吃 lines 队列(编号)。两条队列分开,序列写得清楚。
 
 #include <doctest/doctest.h>
+
+#include <iostream>
 
 #include "cli/provider_wizard.hpp"
 
@@ -11,24 +17,45 @@ using namespace lubancode;
 namespace {
 
 struct ScriptedIO {
-    std::vector<std::string> inputs;
-    std::size_t next = 0;
+    // 选择步(非交互编号回落)吃的行。
+    std::vector<std::string> lines;
+    std::size_t lines_next = 0;
+    // 文本步吃的导航事件。
+    std::vector<cli::WizardInputEvent> events;
+    std::size_t events_next = 0;
     std::vector<std::string> printed;
+    int fetch_calls = 0;
+    std::vector<std::string> fetch_keys;
     cli::WizardFetchModelsFn fetch = [](config::Wire, const std::string&,
-                                         const std::string&) -> std::expected<std::vector<api::ModelInfo>, api::Error> {
+                                        const std::string&) -> std::expected<std::vector<api::ModelInfo>, api::Error> {
         return std::vector<api::ModelInfo>{};
     };
+
+    void Say(const std::string& text) { events.push_back({cli::WizardInputEvent::Kind::Submitted, text}); }
+    void Back() { events.push_back({cli::WizardInputEvent::Kind::Back, ""}); }
+    void Cancel() { events.push_back({cli::WizardInputEvent::Kind::Cancelled, ""}); }
 
     cli::WizardIO Build() {
         cli::WizardIO io;
         io.print = [this](const std::string& line) { printed.push_back(line); };
         io.read_line = [this]() -> std::optional<std::string> {
-            if (next >= inputs.size()) {
+            if (lines_next >= lines.size()) {
                 return std::nullopt;
             }
-            return inputs[next++];
+            return lines[lines_next++];
         };
-        io.fetch_models = fetch;
+        io.read_event = [this]() -> cli::WizardInputEvent {
+            if (events_next >= events.size()) {
+                return cli::WizardInputEvent{cli::WizardInputEvent::Kind::Eof, std::string()};
+            }
+            return events[events_next++];
+        };
+        io.fetch_models = [this](config::Wire wire, const std::string& base_url,
+                                 const std::string& api_key) {
+            ++fetch_calls;  // 计数放包装层:自定义 fetch(不碰计数)也照数。
+            fetch_keys.push_back(api_key);
+            return fetch(wire, base_url, api_key);
+        };
         return io;
     }
 
@@ -42,225 +69,470 @@ struct ScriptedIO {
     }
 };
 
+api::Error HttpError(int status, const std::string& body = "") {
+    return api::Error{api::ErrorKind::HttpStatus, body, status};
+}
+
 }  // namespace
 
-TEST_CASE("RunProviderAddWizard: 全部手填,直接贴 key、手输模型、设置 effort,确认写入") {
+// ---------------------------------------------------------------------------
+// 前进:八步走全
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RunProviderAddWizard: 八步前进,inline key + 手填模型 + effort + extra_body,确认写入") {
     ScriptedIO scripted;
-    scripted.inputs = {
-        "sub-openai",                          // 名字
-        "https://cc.moontidef.work/",           // base_url,带尾部斜杠
-        "2",                                     // wire = responses
-        "sk-test-key-1234567890",               // api_key 直贴
-        "gpt-5.5",                               // model 手输
-        "xhigh",                                 // effort
-        "{\"thinking\":{\"type\":\"enabled\"},\"reasoning_effort\":\"max\"}",  // extra_body
-        "",                                       // 确认:回车 -> 默认 Y
-    };
+    scripted.lines = {"2", "3"};  // wire=responses, auth=inline
+    scripted.Say("sub-openai");   // 1) 名字
+    scripted.Say("https://cc.moontidef.work/v1/");  // 3) base_url,带尾斜杠
+    scripted.Say("sk-test-key-1234567890");      // 4) inline key
+    scripted.Say("gpt-5.5");                     // 5) model 手填
+    scripted.Say("xhigh");                       // 6) effort
+    scripted.Say("{\"thinking\":{\"type\":\"enabled\"},\"reasoning_effort\":\"max\"}");  // 7) extra_body
+    scripted.Say("");                            // 8) 确认:回车 -> 默认写入
     auto io = scripted.Build();
     const auto outcome = cli::RunProviderAddWizard(io, "", {});
 
     REQUIRE(outcome.has_value());
     CHECK(outcome->provider.name == "sub-openai");
-    CHECK(outcome->provider.base_url == "https://cc.moontidef.work");  // 尾部斜杠被剥掉
+    CHECK(outcome->provider.base_url == "https://cc.moontidef.work/v1");  // 尾斜杠剥掉
     CHECK(outcome->provider.wire == config::Wire::Responses);
+    CHECK(outcome->provider.auth == config::ProviderAuthMode::Inline);
     CHECK(outcome->provider.api_key == "sk-test-key-1234567890");
     CHECK(outcome->provider.model == "gpt-5.5");
     CHECK(outcome->provider.model_reasoning_effort == "xhigh");
     CHECK(outcome->provider.extra_body.at("reasoning_effort") == "max");
-    CHECK(outcome->provider.extra_body.at("thinking").at("type") == "enabled");
     CHECK(outcome->save_requested == true);
-    CHECK(scripted.AnyPrintedContains("sk-test-..."));  // 汇总展示时 api_key 打码,不落明文
+    CHECK(scripted.AnyPrintedContains("sk-test-..."));  // 汇总只露掩码
     CHECK_FALSE(scripted.AnyPrintedContains("sk-test-key-1234567890"));
+    CHECK(scripted.fetch_calls == 0);  // 手填模型,不拉列表
 }
 
-TEST_CASE("RunProviderAddWizard: 命令行给了合法名字就跳过名字这一步") {
+TEST_CASE("RunProviderAddWizard: wire 先于 base_url——responses 的探测地址带 /models") {
     ScriptedIO scripted;
-    scripted.inputs = {
-        // 没有"名字"这一问了,第一条输入直接是 base_url
-        "https://api.example.test",
-        "1",              // wire = anthropic
-        "the-key",        // api_key 直贴
-        "MyModel",        // model
-        "",                // effort:留空跳过
-        "",                // extra_body:留空跳过
-        "n",               // 不确认
+    scripted.lines = {"2", "2"};  // wire=responses, auth=env
+    scripted.Say("p1");
+    scripted.Say("https://api.example.test/v1");
+    scripted.Say("");  // env 名:回车用默认(wire=responses -> OPENAI_API_KEY)
+    scripted.Say("MyModel");
+    scripted.Say("");
+    scripted.Say("");
+    scripted.Say("Y");
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderAddWizard(io, "", {});
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->provider.key_env == "OPENAI_API_KEY");
+    CHECK(scripted.AnyPrintedContains("https://api.example.test/v1/models"));
+}
+
+TEST_CASE("RunProviderAddWizard: auth=env 且环境变量未设置时,模型步提前说清") {
+    ScriptedIO scripted;
+    scripted.lines = {"1", "2"};  // wire=anthropic, auth=env
+    scripted.Say("p1");
+    scripted.Say("https://api.example.test");
+    scripted.Say("SOME_UNSET_ENV_FOR_TEST");
+    scripted.Say("manual-model");  // 手填,不拉列表
+    scripted.Say("");
+    scripted.Say("");
+    scripted.Say("Y");
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderAddWizard(io, "", {});
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->provider.key_env == "SOME_UNSET_ENV_FOR_TEST");
+    CHECK(scripted.AnyPrintedContains("SOME_UNSET_ENV_FOR_TEST"));  // 未设置提示露过面
+}
+
+TEST_CASE("RunProviderAddWizard: auth=none,拉模型时 key 是空串(请求不带鉴权头)") {
+    ScriptedIO scripted;
+    scripted.fetch = [](config::Wire, const std::string&,
+                        const std::string&) -> std::expected<std::vector<api::ModelInfo>, api::Error> {
+        return std::vector<api::ModelInfo>{{"model-a", "Model A"}};
     };
+    scripted.lines = {"2", "1", "1"};  // wire=responses, auth=none, 模型列表选 1
+    scripted.Say("local");
+    scripted.Say("http://127.0.0.1:8000/v1");
+    scripted.Say("");   // 5) model:回车拉列表
+    scripted.Say("");
+    scripted.Say("");
+    scripted.Say("Y");
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderAddWizard(io, "", {});
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->provider.auth == config::ProviderAuthMode::None);
+    CHECK(outcome->provider.model == "model-a");
+    REQUIRE(scripted.fetch_keys.size() == 1);
+    CHECK(scripted.fetch_keys[0].empty());  // none:彻底不带 key
+}
+
+TEST_CASE("RunProviderAddWizard: 命令行给了合法名字就跳过名字步") {
+    ScriptedIO scripted;
+    scripted.lines = {"1", "3"};
+    scripted.Say("https://api.example.test");
+    scripted.Say("the-key");
+    scripted.Say("MyModel");
+    scripted.Say("");
+    scripted.Say("");
+    scripted.Say("n");
     auto io = scripted.Build();
     const auto outcome = cli::RunProviderAddWizard(io, "myprovider", {});
-
     REQUIRE(outcome.has_value());
     CHECK(outcome->provider.name == "myprovider");
-    CHECK(outcome->provider.model_reasoning_effort.empty());
-    CHECK(outcome->provider.extra_body.empty());
     CHECK(outcome->save_requested == false);
 }
 
-TEST_CASE("RunProviderAddWizard: 命令行给的名字重名或非法字符,回落到交互式重问") {
-    const std::vector<config::ProviderConfig> existing{{.name = "dup", .base_url = "https://x.test"}};
+// ---------------------------------------------------------------------------
+// 校验:错误留在当前步,改正后过
+// ---------------------------------------------------------------------------
 
+TEST_CASE("RunProviderAddWizard: 名字输中文报错并给 slug 建议,改正后过") {
     ScriptedIO scripted;
-    scripted.inputs = {
-        "new-name",                  // 重问后给一个合法且不重名的名字
-        "https://api.example.test",
-        "1",
-        "the-key",
-        "MyModel",
-        "",
-        "",
-        "Y",
-    };
-    auto io = scripted.Build();
-    const auto outcome = cli::RunProviderAddWizard(io, "dup", existing);
-
-    REQUIRE(outcome.has_value());
-    CHECK(outcome->provider.name == "new-name");
-    CHECK(scripted.AnyPrintedContains("dup"));  // 提示过命令行给的名字不能用
-}
-
-TEST_CASE("RunProviderAddWizard: base_url 没有 http(s) 前缀会被拒绝,重新问") {
-    ScriptedIO scripted;
-    scripted.inputs = {
-        "p1",
-        "not-a-url",                  // 拒绝
-        "ftp://example.test",         // 也拒绝(协议不对)
-        "https://api.example.test",   // 通过
-        "1",
-        "the-key",
-        "MyModel",
-        "",
-        "",
-        "Y",
-    };
+    scripted.lines = {"1", "3"};
+    scripted.Say("本地服务器");   // 不合规
+    scripted.Say("local-server");  // 改正
+    scripted.Say("https://api.example.test");
+    scripted.Say("the-key");
+    scripted.Say("MyModel");
+    scripted.Say("");
+    scripted.Say("");
+    scripted.Say("Y");
     auto io = scripted.Build();
     const auto outcome = cli::RunProviderAddWizard(io, "", {});
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->provider.name == "local-server");
+    CHECK(scripted.AnyPrintedContains("local-server"));  // slug 建议露过面
+}
 
+TEST_CASE("RunProviderAddWizard: base_url 漏协议被拒,改正后过") {
+    ScriptedIO scripted;
+    scripted.lines = {"1", "3"};
+    scripted.Say("p1");
+    scripted.Say("not-a-url");                // 拒
+    scripted.Say("ftp://example.test");       // 也拒
+    scripted.Say("https://api.example.test"); // 过
+    scripted.Say("the-key");
+    scripted.Say("MyModel");
+    scripted.Say("");
+    scripted.Say("");
+    scripted.Say("Y");
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderAddWizard(io, "", {});
     REQUIRE(outcome.has_value());
     CHECK(outcome->provider.base_url == "https://api.example.test");
 }
 
-TEST_CASE("RunProviderAddWizard: api_key 留空改问 key_env,留空按默认 ANTHROPIC_AUTH_TOKEN") {
-    ScriptedIO scripted;
-    scripted.inputs = {
-        "p1",
-        "https://api.example.test",
-        "1",
-        "",   // api_key 留空
-        "",   // key_env 留空 -> 默认
-        "MyModel",
-        "",
-        "",
-        "Y",
-    };
-    auto io = scripted.Build();
-    const auto outcome = cli::RunProviderAddWizard(io, "", {});
-
-    REQUIRE(outcome.has_value());
-    CHECK(outcome->provider.api_key.empty());
-    CHECK(outcome->provider.key_env == "ANTHROPIC_AUTH_TOKEN");
+TEST_CASE("RunProviderAddWizard: OpenAI 兼容地址没带 /v1,给采用与否两个选项") {
+    SUBCASE("采用 /v1") {
+        ScriptedIO scripted;
+        scripted.lines = {"2", "1", "1", "1"};  // wire=responses, v1 offer 采用, auth=none, 列表选 1
+        scripted.Say("p1");
+        scripted.Say("http://127.0.0.1:8000");
+        scripted.fetch = [](config::Wire, const std::string&,
+                            const std::string&) -> std::expected<std::vector<api::ModelInfo>, api::Error> {
+            return std::vector<api::ModelInfo>{{"m", ""}};
+        };
+        scripted.Say("");  // model 回车拉列表
+        scripted.Say("");
+        scripted.Say("");
+        scripted.Say("Y");
+        auto io = scripted.Build();
+        const auto outcome = cli::RunProviderAddWizard(io, "", {});
+        REQUIRE(outcome.has_value());
+        CHECK(outcome->provider.base_url == "http://127.0.0.1:8000/v1");
+    }
+    SUBCASE("保持原样") {
+        ScriptedIO scripted;
+        scripted.lines = {"2", "2", "1"};  // wire=responses, v1 offer 选 2(保持), auth=none
+        scripted.Say("p1");
+        scripted.Say("http://127.0.0.1:8000");
+        scripted.Say("m");
+        scripted.Say("");
+        scripted.Say("");
+        scripted.Say("Y");
+        auto io = scripted.Build();
+        const auto outcome = cli::RunProviderAddWizard(io, "", {});
+        REQUIRE(outcome.has_value());
+        CHECK(outcome->provider.base_url == "http://127.0.0.1:8000");
+    }
 }
 
-TEST_CASE("RunProviderAddWizard: api_key 留空、key_env 自定义,拉模型列表时用的是环境变量里的值") {
+TEST_CASE("RunProviderAddWizard: extra_body 坏 JSON 重问,合法 object 才过") {
     ScriptedIO scripted;
-    scripted.fetch = [](config::Wire wire, const std::string& base_url,
-                         const std::string& api_key) -> std::expected<std::vector<api::ModelInfo>, api::Error> {
-        CHECK(wire == config::Wire::Responses);
-        CHECK(base_url == "https://api.example.test");
-        // key_env 指向的环境变量在测试环境里多半没设置,取不到值时 fetch_key
-        // 应该是空字符串,而不是 key_env 这个名字本身。
-        CHECK(api_key.empty());
-        return std::vector<api::ModelInfo>{{"model-a", "Model A"}};
-    };
-    scripted.inputs = {
-        "p1",
-        "https://api.example.test",
-        "2",                 // wire = responses
-        "",                   // api_key 留空
-        "SOME_UNSET_ENV_FOR_TEST",  // key_env
-        "",                    // model:回车走列表
-        "1",                    // 选第一个
-        "",
-        "",
-        "Y",
-    };
+    scripted.lines = {"1", "3"};
+    scripted.Say("p1");
+    scripted.Say("https://api.example.test");
+    scripted.Say("the-key");
+    scripted.Say("MyModel");
+    scripted.Say("");
+    scripted.Say("{not json");   // 拒
+    scripted.Say("[1,2,3]");     // 不是 object,拒
+    scripted.Say("{\"a\":1}");   // 过
+    scripted.Say("Y");
     auto io = scripted.Build();
     const auto outcome = cli::RunProviderAddWizard(io, "", {});
-
-    REQUIRE(outcome.has_value());
-    CHECK(outcome->provider.model == "model-a");
-    CHECK(outcome->provider.key_env == "SOME_UNSET_ENV_FOR_TEST");
-}
-
-TEST_CASE("RunProviderAddWizard: effort 留空 = 不设置,汇总展示未设置") {
-    ScriptedIO scripted;
-    scripted.inputs = {
-        "p1", "https://api.example.test", "1", "the-key", "MyModel", "", "", "Y",
-    };
-    auto io = scripted.Build();
-    const auto outcome = cli::RunProviderAddWizard(io, "", {});
-
-    REQUIRE(outcome.has_value());
-    CHECK(outcome->provider.model_reasoning_effort.empty());
-}
-
-TEST_CASE("RunProviderAddWizard: 最后一问答 n,save_requested 为 false") {
-    ScriptedIO scripted;
-    scripted.inputs = {
-        "p1", "https://api.example.test", "1", "the-key", "MyModel", "high", "", "n",
-    };
-    auto io = scripted.Build();
-    const auto outcome = cli::RunProviderAddWizard(io, "", {});
-
-    REQUIRE(outcome.has_value());
-    CHECK(outcome->save_requested == false);
-}
-
-TEST_CASE("RunProviderAddWizard: extra_body 不合法 JSON 会重问,合法 object 才通过") {
-    ScriptedIO scripted;
-    scripted.inputs = {
-        "p1", "https://api.example.test", "1", "the-key", "MyModel", "",
-        "{not json",           // 解析失败,重问
-        "[1,2,3]",             // 解析成功但不是 object,重问
-        "{\"a\":1}",           // 合法 object,通过
-        "Y",
-    };
-    auto io = scripted.Build();
-    const auto outcome = cli::RunProviderAddWizard(io, "", {});
-
     REQUIRE(outcome.has_value());
     CHECK(outcome->provider.extra_body.at("a") == 1);
-    CHECK(scripted.AnyPrintedContains("不是合法 JSON"));       // 解析失败那次提示过
-    CHECK(scripted.AnyPrintedContains("JSON object"));         // 不是 object 那次提示过
 }
 
-TEST_CASE("RunProviderAddWizard: extra_body 中途 EOF 返回 std::nullopt") {
+// ---------------------------------------------------------------------------
+// 后退:每步能回,旧值作默认,模型列表作废重拉
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RunProviderAddWizard: 模型步 Back 回密钥步,回车保留旧值,缓存不废") {
     ScriptedIO scripted;
-    scripted.inputs = {
-        "p1", "https://api.example.test", "1", "the-key", "MyModel", "high",
-        // extra_body 这一步之后没有更多输入了 -> EOF
+    scripted.fetch = [](config::Wire, const std::string&,
+                        const std::string&) -> std::expected<std::vector<api::ModelInfo>, api::Error> {
+        return std::vector<api::ModelInfo>{{"model-a", ""}};
     };
+    scripted.lines = {"1", "2", "2", "1"};
+    //            wire, auth=env, 退回后再选 env, 列表选 1
+    scripted.Say("p1");
+    scripted.Say("https://a.test");
+    scripted.Say("");    // env 名:默认 ANTHROPIC_AUTH_TOKEN
+    scripted.Back();     // 模型步第一问 Back -> 回密钥步
+    scripted.Say("");    // env 名:回车保留旧值
+    scripted.Say("");    // model:回车拉列表(第 1 次)
+    scripted.Say("");    // effort
+    scripted.Say("");    // extra_body
+    scripted.Say("Y");
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderAddWizard(io, "", {});
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->provider.key_env == "ANTHROPIC_AUTH_TOKEN");
+    CHECK(outcome->provider.model == "model-a");
+    CHECK(scripted.fetch_calls == 1);  // 退回再前进,值没改 -> 拉一次就够
+}
+
+TEST_CASE("RunProviderAddWizard: 汇总页跳回 base_url 改值,改完直回汇总") {
+    ScriptedIO scripted;
+    scripted.fetch = [](config::Wire, const std::string&,
+                        const std::string&) -> std::expected<std::vector<api::ModelInfo>, api::Error> {
+        return std::vector<api::ModelInfo>{{"model-a", ""}};
+    };
+    scripted.lines = {"1", "3", "1"};
+    //            wire anthropic, auth=inline, 模型列表选 1
+    scripted.Say("p1");
+    scripted.Say("https://a.test");
+    scripted.Say("the-key");
+    scripted.Say("");    // model 回车拉列表(lines[2]=1 选 model-a)
+    scripted.Say("");    // effort
+    scripted.Say("");    // extra_body
+    scripted.Say("3");   // 汇总页:跳回第 3 项 base_url
+    scripted.Say("https://b.test");  // 改地址 -> AfterEdit 直回汇总,不重走 auth/model
+    scripted.Say("Y");   // 汇总确认
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderAddWizard(io, "", {});
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->provider.base_url == "https://b.test");
+    CHECK(outcome->provider.model == "model-a");
+    CHECK(outcome->provider.name == "p1");
+    CHECK(scripted.AnyPrintedContains("https://b.test"));  // 汇总里露出新地址
+}
+
+TEST_CASE("RunProviderAddWizard: 汇总页跳回 wire 改协议,模型缓存作废,前进时重拉") {
+    ScriptedIO scripted;
+    int fetch_count = 0;
+    scripted.fetch = [&fetch_count](config::Wire wire, const std::string& base_url, const std::string&)
+        -> std::expected<std::vector<api::ModelInfo>, api::Error> {
+        ++fetch_count;
+        (void)wire;
+        (void)base_url;
+        return std::vector<api::ModelInfo>{{"model-a", ""}};
+    };
+    scripted.lines = {"1", "3", "1", "2", "1"};
+    //           wire anthropic, inline key, 列表选 1, 跳回 wire 后选 2, 列表再选 1
+    scripted.Say("p1");
+    scripted.Say("https://a.test");
+    scripted.Say("the-key");
+    scripted.Say("");    // model 回车拉列表(第 1 次)
+    scripted.Say("");    // effort
+    scripted.Say("");    // extra_body
+    scripted.Say("2");   // 汇总页:跳回第 2 项 wire
+    // wire 步:lines[3]="2" 选 responses -> 改完直回汇总
+    scripted.Say("5");   // 汇总页:跳回第 5 项 model
+    scripted.Say("");    // model 回车 -> 缓存已作废,重拉(第 2 次),lines[4]="1"
+    scripted.Say("Y");
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderAddWizard(io, "", {});
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->provider.wire == config::Wire::Responses);
+    CHECK(fetch_count == 2);  // 改了 wire,旧列表作废重拉
+}
+
+// ---------------------------------------------------------------------------
+// 跳转:模型拉取失败页可直达 wire / base_url,404 可加 /v1 重试
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RunProviderAddWizard: 拉取 404 可直达 base_url,改完再拉") {
+    ScriptedIO scripted;
+    scripted.fetch = [](config::Wire, const std::string& base_url,
+                        const std::string&) -> std::expected<std::vector<api::ModelInfo>, api::Error> {
+        if (base_url.find("a.test") != std::string::npos) {
+            return std::unexpected(HttpError(404, "nope"));  // 旧地址 404,新地址出列表
+        }
+        return std::vector<api::ModelInfo>{{"model-a", ""}};
+    };
+    // lines: wire=responses(2), auth=none(1), 失败页选"返回检查 base_url"(选 3:
+    // add_v1 不出现——地址已带 /v1;选项序 手填1/wire2/url3/重试4),改完前进
+    // 再过一遍 auth(none),列表选 1。
+    scripted.lines = {"2", "1", "3", "1", "1"};
+    scripted.Say("p1");
+    scripted.Say("https://a.test/v1");
+    scripted.Say("");    // model 回车 -> 404 失败页
+    scripted.Say("https://b.test/v1");  // base_url 步改地址 -> 前进回 auth
+    scripted.Say("");    // model 再回车 -> 这次成功,lines[4]=1 选 model-a
+    scripted.Say("");
+    scripted.Say("");
+    scripted.Say("Y");
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderAddWizard(io, "", {});
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->provider.base_url == "https://b.test/v1");
+    CHECK(outcome->provider.model == "model-a");
+    CHECK(scripted.fetch_calls == 2);
+    CHECK(scripted.AnyPrintedContains("404"));
+}
+
+TEST_CASE("RunProviderAddWizard: OpenAI 地址没 /v1 又吃 404,可选'加上 /v1 后重试'") {
+    ScriptedIO scripted;
+    bool fail = true;
+    scripted.fetch = [&fail](config::Wire wire, const std::string& base_url,
+                             const std::string&) -> std::expected<std::vector<api::ModelInfo>, api::Error> {
+        (void)wire;
+        if (fail && base_url.find("/v1") == std::string::npos) {
+            return std::unexpected(HttpError(404));
+        }
+        fail = false;
+        return std::vector<api::ModelInfo>{{"m", ""}};
+    };
+    // lines: wire=responses(2), auth=none(1), 失败页第 1 项 = 加 /v1 重试, 列表选 1
+    scripted.lines = {"2", "1", "1", "1"};
+    scripted.Say("p1");
+    scripted.Say("http://127.0.0.1:8000");
+    scripted.Say("");  // model 回车 -> 404(地址没 /v1,失败页多一项)
+    scripted.Say("");
+    scripted.Say("");
+    scripted.Say("Y");
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderAddWizard(io, "", {});
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->provider.base_url == "http://127.0.0.1:8000/v1");
+    CHECK(outcome->provider.model == "m");
+    CHECK(scripted.AnyPrintedContains("http://127.0.0.1:8000/v1/models"));
+}
+
+TEST_CASE("RunProviderAddWizard: 拉取失败仍可手填模型名,空串报错留在本步") {
+    ScriptedIO scripted;
+    scripted.fetch = [](config::Wire, const std::string&,
+                        const std::string&) -> std::expected<std::vector<api::ModelInfo>, api::Error> {
+        return std::unexpected(api::Error{api::ErrorKind::Network, "connect refused", 0});
+    };
+    // lines: wire=1, auth=3(inline), 失败页选手填(1)
+    scripted.lines = {"1", "3", "1"};
+    scripted.Say("p1");
+    scripted.Say("https://a.test");
+    scripted.Say("the-key");
+    scripted.Say("");    // model 回车 -> 网络失败
+    scripted.Say("");    // 手填空串 -> 报错,留在本步
+    scripted.Say("m1");  // 填上 -> 过
+    scripted.Say("");
+    scripted.Say("");
+    scripted.Say("Y");
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderAddWizard(io, "", {});
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->provider.model == "m1");
+    CHECK(scripted.AnyPrintedContains("连接失败"));
+}
+
+// ---------------------------------------------------------------------------
+// 取消:EOF / Ctrl+C / 第一步再退的确认
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RunProviderAddWizard: 事件队列耗尽(EOF)返回 nullopt") {
+    ScriptedIO scripted;
+    scripted.lines = {"1"};
+    scripted.Say("p1");
+    scripted.Say("https://a.test");
+    // wire 之后没有事件了 -> EOF
     auto io = scripted.Build();
     const auto outcome = cli::RunProviderAddWizard(io, "", {});
     CHECK_FALSE(outcome.has_value());
 }
 
-TEST_CASE("RunProviderAddWizard: 中途 EOF 返回 std::nullopt") {
+TEST_CASE("RunProviderAddWizard: Ctrl+C 事件直接取消,不写盘") {
     ScriptedIO scripted;
-    scripted.inputs = {
-        "p1", "https://api.example.test",
-        // wire 这一步之后没有更多输入了 -> EOF
-    };
+    scripted.lines = {"1", "1"};
+    scripted.Say("p1");
+    scripted.Say("https://a.test");
+    scripted.Say("");  // model 回车
+    scripted.Cancel();
     auto io = scripted.Build();
     const auto outcome = cli::RunProviderAddWizard(io, "", {});
     CHECK_FALSE(outcome.has_value());
 }
 
-TEST_CASE("RunProviderPresetWizard: 选预设只问 key 和确认，默认模型参数全带上") {
+TEST_CASE("RunProviderAddWizard: 第一步 Back 弹退出确认,回车默认不退") {
+    ScriptedIO scripted;
+    scripted.lines = {"1", "3"};
+    scripted.Back();   // 名字步 Back -> 退出确认
+    scripted.Say("");  // 默认 N:不退,留在名字步
+    scripted.Say("p1");
+    scripted.Say("https://a.test");
+    scripted.Say("the-key");
+    scripted.Say("m");
+    scripted.Say("");
+    scripted.Say("");
+    scripted.Say("Y");
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderAddWizard(io, "", {});
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->provider.name == "p1");
+    CHECK(scripted.AnyPrintedContains("退出向导"));
+}
+
+TEST_CASE("RunProviderAddWizard: 第一步 Back 后答 y,退出向导") {
+    ScriptedIO scripted;
+    scripted.Back();
+    scripted.Say("y");
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderAddWizard(io, "", {});
+    CHECK_FALSE(outcome.has_value());
+}
+
+TEST_CASE("RunProviderAddWizard: 回到密钥步不回显明文 key") {
+    ScriptedIO scripted;
+    scripted.lines = {"1", "3", "3"};
+    scripted.Say("p1");
+    scripted.Say("https://a.test");
+    scripted.Say("sk-secret-key-9876543210");
+    scripted.Say("m");
+    scripted.Say("");
+    scripted.Say("");
+    scripted.Say("4");   // 汇总页跳回第 4 项 auth
+    // auth 步:lines[2]="3" 再选 inline -> 子页显示"已设置明文密钥(掩码)"
+    scripted.Say("");    // 回车保留旧 key
+    scripted.Say("Y");
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderAddWizard(io, "", {});
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->provider.api_key == "sk-secret-key-9876543210");
+    // 全程打印里不许出现明文 key(汇总/回显都只露掩码——掩码=前 8 位)。
+    CHECK_FALSE(scripted.AnyPrintedContains("sk-secret-key-9876543210"));
+    CHECK(scripted.AnyPrintedContains("sk-secre"));
+}
+
+// ---------------------------------------------------------------------------
+// 预设向导
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RunProviderPresetWizard: 选预设只问密钥与确认,参数全带上") {
     const auto catalog = config::ParseProviderCatalogJson(
         R"({"schema_version":1,"revision":"2026-07-25","providers":{"glm":{"name":"GLM","description":"Chat","wire":"chat_completions","base_url":"https://api.test/v1","key_env":"GLM_KEY","default_model":"glm-x","model_reasoning_effort":"max","extra_body":{"tool_stream":true},"models":{"glm-x":{"name":"GLM X","context_window":"1m"}}}}})",
         "p");
     REQUIRE(catalog.has_value());
     ScriptedIO scripted;
-    scripted.inputs = {"1", "sk-demo", ""};
+    scripted.lines = {"1", "3"};  // 目录选 glm, auth=inline
+    scripted.Say("sk-demo");      // inline key
+    scripted.Say("");             // 确认:回车写入
     auto io = scripted.Build();
     const auto outcome = cli::RunProviderPresetWizard(io, *catalog, "", {});
     REQUIRE(outcome.has_value());
@@ -269,22 +541,77 @@ TEST_CASE("RunProviderPresetWizard: 选预设只问 key 和确认，默认模型
     CHECK(outcome->provider.wire == config::Wire::ChatCompletions);
     CHECK(outcome->provider.model == "glm-x");
     CHECK(outcome->provider.context_window_tokens == 1000000);
+    CHECK(outcome->provider.auth == config::ProviderAuthMode::Inline);
     CHECK(outcome->provider.api_key == "sk-demo");
     CHECK(outcome->provider.extra_body["tool_stream"] == true);
+    CHECK(outcome->provider.key_env == "GLM_KEY");
 }
 
-TEST_CASE("RunProviderPresetWizard: 最后一项仍回到全手填旧向导") {
+TEST_CASE("RunProviderPresetWizard: 预设也认'无需鉴权'") {
     const auto catalog = config::ParseProviderCatalogJson(
         R"({"schema_version":1,"revision":"2026-07-25","providers":{"p":{"name":"P","wire":"responses","base_url":"https://api.test/v1","key_env":"P_KEY","default_model":"m","models":{"m":{"name":"M"}}}}})",
         "p");
     REQUIRE(catalog.has_value());
     ScriptedIO scripted;
-    scripted.inputs = {
-        "2", "custom", "https://custom.test/v1", "3", "key", "model", "", "", "Y"
-    };
+    scripted.lines = {"1", "1"};  // 目录选 p, auth=none
+    scripted.Say("");             // 确认
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderPresetWizard(io, *catalog, "", {});
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->provider.auth == config::ProviderAuthMode::None);
+    CHECK(outcome->provider.model == "m");
+}
+
+TEST_CASE("RunProviderPresetWizard: 末项回到全手填向导(新次序)") {
+    const auto catalog = config::ParseProviderCatalogJson(
+        R"({"schema_version":1,"revision":"2026-07-25","providers":{"p":{"name":"P","wire":"responses","base_url":"https://api.test/v1","key_env":"P_KEY","default_model":"m","models":{"m":{"name":"M"}}}}})",
+        "p");
+    REQUIRE(catalog.has_value());
+    ScriptedIO scripted;
+    scripted.lines = {"2", "3", "3"};  // 目录选自定义, wire=chat(3), auth=inline(3)
+    scripted.Say("custom");
+    scripted.Say("https://custom.test/v1");
+    scripted.Say("key");
+    scripted.Say("model");
+    scripted.Say("");
+    scripted.Say("");
+    scripted.Say("Y");
     auto io = scripted.Build();
     const auto outcome = cli::RunProviderPresetWizard(io, *catalog, "", {});
     REQUIRE(outcome.has_value());
     CHECK(outcome->provider.name == "custom");
     CHECK(outcome->provider.wire == config::Wire::ChatCompletions);
+}
+
+// ---------------------------------------------------------------------------
+// 纯小工具
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SuggestProviderSlug: 空格折短横线,中文折一枚,全废抽空串") {
+    CHECK(cli::SuggestProviderSlug("local server") == "local-server");
+    CHECK(cli::SuggestProviderSlug("本地服务器") == "");
+    CHECK(cli::SuggestProviderSlug("my 127.0.0.1 服务") == "my-127.0.0.1");
+    CHECK(cli::SuggestProviderSlug("a/b c") == "a-b-c");
+}
+
+TEST_CASE("IsLocalBaseUrl: 本机与局域网认得,公网不认") {
+    CHECK(cli::IsLocalBaseUrl("http://127.0.0.1:8000/v1"));
+    CHECK(cli::IsLocalBaseUrl("http://localhost:3000"));
+    CHECK(cli::IsLocalBaseUrl("http://192.168.1.5/v1"));
+    CHECK(cli::IsLocalBaseUrl("http://10.0.0.2/v1"));
+    CHECK_FALSE(cli::IsLocalBaseUrl("https://api.minimax.io"));
+    CHECK_FALSE(cli::IsLocalBaseUrl("https://cc.moontidef.work/v1"));
+}
+
+TEST_CASE("ProviderWizardStepIndex: 八步序是枚举序") {
+    CHECK(cli::ProviderWizardStepIndex(cli::ProviderWizardStep::Name) == 0);
+    CHECK(cli::ProviderWizardStepIndex(cli::ProviderWizardStep::Wire) == 1);
+    CHECK(cli::ProviderWizardStepIndex(cli::ProviderWizardStep::BaseUrl) == 2);
+    CHECK(cli::ProviderWizardStepIndex(cli::ProviderWizardStep::Auth) == 3);
+    CHECK(cli::ProviderWizardStepIndex(cli::ProviderWizardStep::Model) == 4);
+    CHECK(cli::ProviderWizardStepIndex(cli::ProviderWizardStep::Effort) == 5);
+    CHECK(cli::ProviderWizardStepIndex(cli::ProviderWizardStep::ExtraBody) == 6);
+    CHECK(cli::ProviderWizardStepIndex(cli::ProviderWizardStep::Confirm) == 7);
+    CHECK(cli::kProviderWizardStepCount == 8);
+    CHECK(cli::ProviderWizardStepAt(99) == cli::ProviderWizardStep::Confirm);
 }
