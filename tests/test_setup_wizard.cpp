@@ -235,7 +235,7 @@ TEST_CASE("RunSetupWizard: 注入 io.choose 时走方向键选择路径") {
     auto io = scripted.Build();
     io.interactive = true;
     io.choose = [&](const std::vector<cli::WizardChoiceItem>&, std::size_t,
-                    const std::string&) -> std::optional<std::size_t> {
+                    const std::string&, cli::WizardInputEvent::Kind*) -> std::optional<std::size_t> {
         if (choose_next >= choose_returns.size()) return std::nullopt;
         return choose_returns[choose_next++];
     };
@@ -257,7 +257,7 @@ TEST_CASE("RunSetupWizard: io.choose 返回 nullopt 时向导放弃") {
     auto io = scripted.Build();
     io.interactive = true;
     io.choose = [](const std::vector<cli::WizardChoiceItem>&, std::size_t,
-                   const std::string&) -> std::optional<std::size_t> {
+                   const std::string&, cli::WizardInputEvent::Kind*) -> std::optional<std::size_t> {
         return std::nullopt;  // 模拟 Esc
     };
     scripted.inputs = {};

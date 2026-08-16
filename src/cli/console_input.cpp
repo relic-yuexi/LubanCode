@@ -780,7 +780,7 @@ private:
 };
 
 std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const Theme& theme, bool esc_rejects,
-                                             bool composer) {
+                                             bool composer, ReadExitReason* exit_reason) {
     // 整个函数体都攥着这把锁:M10 的 TurnInputListener 监听线程只在抢到锁
     // 的间隙才读控制台输入,这一行锁一上,就等于宣布"编辑器正在读",监听
     // 线程会自动让出、不跟这里抢同一份键盘输入。
@@ -789,7 +789,11 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     // 原始逐键模式进不去(极少见,非标准终端)就退回整行读入。
     platform::RawInputScope raw_scope;
     if (!raw_scope.ok()) {
-        return platform::ReadLineCooked();
+        const std::optional<std::string> cooked = platform::ReadLineCooked();
+        if (exit_reason != nullptr) {
+            *exit_reason = cooked.has_value() ? ReadExitReason::Submitted : ReadExitReason::Cancel;
+        }
+        return cooked;
     }
     BracketedPasteScope paste_scope(composer && !theme.reset.empty());
 
@@ -1218,6 +1222,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                     }
                     retire_idle_chrome();
                     std::cout << "\n";
+                    if (exit_reason != nullptr) {
+                        *exit_reason = ReadExitReason::Submitted;
+                    }
                     return std::string();
                 }
             }
@@ -1228,6 +1235,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             if (queue_edit.has_value()) {
                 steering.CancelEdit(*queue_edit);
                 queue_edit.reset();
+            }
+            if (exit_reason != nullptr) {
+                *exit_reason = ReadExitReason::Cancel;
             }
             return std::nullopt;  // EOF/读失败
         }
@@ -1484,6 +1494,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             CollapseBoxOnSubmit(prev_frame_origin, prompt_end_col, prev_body_row_count, state, prompt,
                                 vt_enabled);
             std::cout << "\n";
+            if (exit_reason != nullptr) {
+                *exit_reason = ReadExitReason::Submitted;
+            }
             return Utf32ToUtf8(state.line);
         }
 
@@ -1493,6 +1506,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             // 确认与可取消选择场景:Esc 不留在循环里继续等，直接交回
             // nullopt。不能拿空串代替——/model 明明把空串当默认第一项。
             std::cout << "\n";
+            if (exit_reason != nullptr) {
+                *exit_reason = ReadExitReason::Esc;
+            }
             return std::nullopt;
         }
         if (state.eof_requested) {
@@ -1509,6 +1525,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 platform::SetCursorPos(0, start_row + prev_body_row_count);
             }
             std::cout << "\n";
+            if (exit_reason != nullptr) {
+                *exit_reason = ReadExitReason::Cancel;
+            }
             return std::nullopt;
         }
         if (state.cleared) {
@@ -1518,6 +1537,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             // 非框读取的提交:RedrawEditArea 刚按提交帧把完整多行内容画在
             // 屏幕上、光标停在末行末尾,这里换行收尾。
             std::cout << "\n";
+            if (exit_reason != nullptr) {
+                *exit_reason = ReadExitReason::Submitted;
+            }
             return Utf32ToUtf8(state.line);
         }
     }
@@ -1525,9 +1547,10 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
 
 }  // namespace
 
-std::optional<std::string> ReadLine(const std::string& prompt, const Theme& theme, bool esc_rejects, bool composer) {
+std::optional<std::string> ReadLine(const std::string& prompt, const Theme& theme, bool esc_rejects, bool composer,
+                                    ReadExitReason* exit_reason) {
     if (platform::StdinIsInteractive()) {
-        return ReadLineKeyByKey(prompt, theme, esc_rejects, composer);
+        return ReadLineKeyByKey(prompt, theme, esc_rejects, composer, exit_reason);
     }
     (void)composer;  // 管道/重定向:没有 composer 概念,照旧逐行 getline
 
@@ -1537,20 +1560,33 @@ std::optional<std::string> ReadLine(const std::string& prompt, const Theme& them
     }
     std::string line;
     if (!std::getline(std::cin, line)) {
+        if (exit_reason != nullptr) {
+            *exit_reason = ReadExitReason::Cancel;
+        }
         return std::nullopt;
     }
     StripTrailingCrLf(line);
+    if (exit_reason != nullptr) {
+        *exit_reason = ReadExitReason::Submitted;
+    }
     return line;
 }
 
 std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>& items,
-                                                const ChoiceMenuOptions& options, const Theme& theme) {
+                                                const ChoiceMenuOptions& options, const Theme& theme,
+                                                ReadExitReason* exit_reason) {
     if (items.empty() || !platform::StdinIsInteractive()) {
+        if (exit_reason != nullptr) {
+            *exit_reason = ReadExitReason::Cancel;
+        }
         return std::nullopt;
     }
     std::lock_guard<std::mutex> console_read_lock(ConsoleReadMutex());
     platform::RawInputScope raw_scope;
     if (!raw_scope.ok()) {
+        if (exit_reason != nullptr) {
+            *exit_reason = ReadExitReason::Cancel;
+        }
         return std::nullopt;
     }
 
@@ -1645,10 +1681,16 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
         return std::nullopt;
     }
     platform::KeyReader key_reader;
+    // 取消是哪个键按的:Esc(向导当"返回上一步")还是 Ctrl+C/Ctrl+D(取消
+    // 整条流程)。draw() 失败那类环境性早退按 Cancel 报,不区分。
+    bool cancel_was_esc = false;
     while (!menu.state().submitted && !menu.state().cancelled) {
         const std::optional<platform::KeyInput> raw_key = key_reader.ReadOne();
         if (!raw_key.has_value()) {
             clear();
+            if (exit_reason != nullptr) {
+                *exit_reason = ReadExitReason::Cancel;
+            }
             return std::nullopt;
         }
         const std::optional<KeyEvent> mapped = MapKey(*raw_key);
@@ -1656,9 +1698,15 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
             continue;
         }
         menu.HandleKey(*mapped);
+        if (menu.state().cancelled && mapped->kind == KeyKind::Esc) {
+            cancel_was_esc = true;
+        }
         if (!menu.state().submitted && !menu.state().cancelled) {
             if (!draw()) {
                 clear();
+                if (exit_reason != nullptr) {
+                    *exit_reason = ReadExitReason::Cancel;
+                }
                 return std::nullopt;
             }
         }
@@ -1670,6 +1718,10 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
         result.custom_text = menu.state().custom_text;
     }
     clear();
+    if (exit_reason != nullptr) {
+        *exit_reason = cancelled ? (cancel_was_esc ? ReadExitReason::Esc : ReadExitReason::Cancel)
+                                 : ReadExitReason::Submitted;
+    }
     return cancelled ? std::nullopt : std::optional<ChoiceMenuResult>(std::move(result));
 }
 

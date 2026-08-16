@@ -21,10 +21,12 @@
 #include "platform/console.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/i18n.hpp"
+#include "cli/provider_switch.hpp"
 #include "cli/provider_wizard.hpp"
 #include "cli/slash_commands.hpp"
 #include "cli/setup_wizard.hpp"
 #include "cli/theme.hpp"
+#include "cli/wizard_panel.hpp"
 #include "config/config.hpp"
 #include "config/model_catalog.hpp"
 #include "config/provider_catalog.hpp"
@@ -63,9 +65,16 @@ void ClearAndPrintBanner(const lubancode::config::Config& config, const lubancod
 
 // 给向导(初次配置 / provider add)造一份完整 WizardIO:print/read_line/fetch_models
 // 接真实 IO,choose 接 ReadChoiceMenu(↑↓ 方向键,初始高亮落在默认项,回车即选中),
-// interactive 让 ReadChoice 在管道/重定向时回落编号。两处向导共用,免得注入逻辑漂移。
+// interactive 让 ReadChoice 在管道/重定向时回落编号。向导重排单再加两个注入
+// 点:draw_frame 接 WizardPanel(TTY 原地面板,试填不落 transcript;不可用时
+// 自动退化朴素逐行),read_event 把 Esc/Ctrl+C/EOF 翻成导航事件。两处向导
+// 共用,免得注入逻辑漂移。
 lubancode::cli::WizardIO MakeInteractiveWizardIO(const lubancode::cli::Theme& theme) {
     lubancode::cli::WizardIO io;
+    // 面板归 WizardIO 的闭包共有(shared_ptr):io 活多久面板活多久,向导
+    // 走完面板析构自动收掉整块区域,transcript 只剩调用方的收尾行。
+    auto panel = std::make_shared<lubancode::cli::WizardPanel>();
+    const bool panel_active = lubancode::cli::WizardPanel::Available();
     io.print = [](const std::string& line) {
         std::cout << line << "\n";
         std::cout.flush();
@@ -77,8 +86,32 @@ lubancode::cli::WizardIO MakeInteractiveWizardIO(const lubancode::cli::Theme& th
     };
     io.interactive = lubancode::platform::StdinIsInteractive() &&
                      lubancode::platform::ProbeStdoutConsole().is_console;
-    io.choose = [&theme](const std::vector<lubancode::cli::WizardChoiceItem>& items,
-                         std::size_t default_index, const std::string& hint) -> std::optional<std::size_t> {
+    io.draw_frame = [panel, panel_active](const lubancode::cli::WizardFrame& frame) {
+        if (!panel_active) {
+            return;  // 面板开不了:setup_wizard 的朴素逐行回落兜着
+        }
+        // 选择帧给选项数+1 行预留(菜单还带一行提示),面板把 footer 画在
+        // 预留区之下,菜单画进预留区,滚屏风险一并堵住。
+        panel->Draw(frame, frame.prompt.empty() ? 12 : 0);
+    };
+    io.read_event = [panel, panel_active]() -> lubancode::cli::WizardInputEvent {
+        lubancode::cli::ReadExitReason reason = lubancode::cli::ReadExitReason::Submitted;
+        const std::optional<std::string> line = panel_active ? panel->ReadText(&reason)
+                                                             : lubancode::cli::ReadLine(
+                                                                   "", lubancode::cli::Theme{},
+                                                                   /*esc_rejects=*/true,
+                                                                   /*composer=*/false, &reason);
+        using Kind = lubancode::cli::WizardInputEvent::Kind;
+        if (!line.has_value()) {
+            return lubancode::cli::WizardInputEvent{
+                reason == lubancode::cli::ReadExitReason::Esc ? Kind::Back : Kind::Cancelled, std::string()};
+        }
+        return lubancode::cli::WizardInputEvent{Kind::Submitted, lubancode::cli::WizardTrim(*line)};
+    };
+    io.choose = [&theme, panel, panel_active](
+                    const std::vector<lubancode::cli::WizardChoiceItem>& items, std::size_t default_index,
+                    const std::string& hint,
+                    lubancode::cli::WizardInputEvent::Kind* cancel_kind) -> std::optional<std::size_t> {
         std::vector<lubancode::cli::ChoiceMenuItem> menu_items;
         menu_items.reserve(items.size());
         for (const auto& it : items) {
@@ -87,7 +120,15 @@ lubancode::cli::WizardIO MakeInteractiveWizardIO(const lubancode::cli::Theme& th
         lubancode::cli::ChoiceMenuOptions opts;
         opts.hint = hint;
         opts.initial_cursor = default_index;  // 初始高亮落在默认项,回车即选中默认
-        const auto selected = lubancode::cli::ReadChoiceMenu(menu_items, opts, theme);
+        lubancode::cli::ReadExitReason reason = lubancode::cli::ReadExitReason::Submitted;
+        const auto selected = lubancode::cli::ReadChoiceMenu(menu_items, opts, theme, &reason);
+        if (cancel_kind != nullptr && !selected.has_value()) {
+            *cancel_kind = reason == lubancode::cli::ReadExitReason::Esc
+                               ? lubancode::cli::WizardInputEvent::Kind::Back
+                               : (reason == lubancode::cli::ReadExitReason::Cancel
+                                      ? lubancode::cli::WizardInputEvent::Kind::Cancelled
+                                      : lubancode::cli::WizardInputEvent::Kind::Eof);
+        }
         if (!selected.has_value() || selected->selected_indices.empty()) {
             return std::nullopt;  // Esc/Ctrl+C/EOF
         }
@@ -501,12 +542,20 @@ void PrintProviderList(const std::vector<lubancode::config::ProviderConfig>& pro
                                 (active_provider.empty() && provider.wire == current_config.wire &&
                                  provider.base_url == current_config.base_url && provider.model == current_config.model);
         const std::string current = is_current ? tr("cmd.provider.current") : "";
-        // api_key/model_reasoning_effort 都是可选字段;api_key 展示一律走
-        // MaskApiKey 打码,绝不明文——跟 /config、初次配置向导汇总同一个规矩。
-        std::string extra;
-        if (!provider.api_key.empty()) {
-            extra += trf("cmd.provider.extra_api_key", lubancode::config::MaskApiKey(provider.api_key));
+        // 鉴权三态:none 写"无需鉴权";env 提变量名;inline 露打码 key。
+        std::string auth_display;
+        switch (provider.auth) {
+            case lubancode::config::ProviderAuthMode::None:
+                auth_display = tr("cmd.provider.auth_none");
+                break;
+            case lubancode::config::ProviderAuthMode::Inline:
+                auth_display = "api_key=" + lubancode::config::MaskApiKey(provider.api_key);
+                break;
+            case lubancode::config::ProviderAuthMode::Env:
+                auth_display = "key_env=" + provider.key_env;
+                break;
         }
+        std::string extra;
         if (!provider.model_reasoning_effort.empty()) {
             extra += trf("cmd.provider.extra_effort", provider.model_reasoning_effort);
         }
@@ -522,7 +571,7 @@ void PrintProviderList(const std::vector<lubancode::config::ProviderConfig>& pro
             extra += trf("cmd.provider.extra_headers_hint", provider.extra_headers.size());
         }
         std::cout << trf("cmd.provider.line", provider.name, lubancode::config::ProviderWireName(provider.wire),
-                          provider.base_url, model, provider.context_window_tokens, provider.key_env, extra, current)
+                          provider.base_url, model, provider.context_window_tokens, auth_display, extra, current)
                   << "\n";
     }
 }
@@ -580,6 +629,226 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                            const std::optional<std::string>& active_provider_write_path,
                            lubancode::config::Source& active_provider_source) {
     const lubancode::cli::ParsedProviderCommand command = lubancode::cli::ParseProviderCommand(args);
+
+    // 切换的正式执行:预检过了才进来(鉴权齐备或显式给了 model 覆盖)。
+    // Switch 快捷路径与 SwitchInteractive 选择器共用这一段,免得两处漂移。
+    const auto execute_switch = [&](const std::string& switch_name, const std::string& switch_model) {
+        const lubancode::config::ProviderConfig* provider =
+            lubancode::config::FindProvider(config.providers, switch_name);
+        if (provider == nullptr) {
+            std::cout << trf("cmd.provider.not_found", switch_name) << "\n";
+            return;
+        }
+        const lubancode::config::ProviderAuthResolution auth =
+            lubancode::config::ResolveProviderAuth(*provider);
+        const std::string api_key = auth.status ==
+                                            lubancode::config::ProviderAuthResolution::Status::Ready
+                                        ? *auth.key
+                                        : std::string();
+        // 项目配置显式写了 active_provider 就继续写回项目；其余场景
+        // 记到用户全局配置。只存名字，不复制密钥或 endpoint。
+        const auto remembered = [&]() -> std::expected<std::string, std::string> {
+            if (active_provider_write_path.has_value()) {
+                const auto written = lubancode::config::UpdateActiveProviderInConfigFile(
+                    *active_provider_write_path, provider->name);
+                if (!written.has_value()) {
+                    return std::unexpected(written.error());
+                }
+                return *active_provider_write_path;
+            }
+            return lubancode::config::SetActiveProviderInGlobalConfig(provider->name);
+        }();
+
+        config.wire = provider->wire;
+        config.base_url = provider->base_url;
+        config.auth_token = api_key;
+        config.auth_mode = provider->auth;  // none 时空 auth_token 是合法态
+        config.model = switch_model.empty() ? provider->model : switch_model;
+        config.context_window_tokens = provider->context_window_tokens;
+        config.native_web_search = provider->native_web_search;
+        config.stream_usage = provider->stream_usage;
+        config.reasoning_replay = provider->reasoning_replay;
+        config.extra_body = provider->extra_body;
+        config.extra_headers = provider->extra_headers;
+        // Effort/缓存诊断声明镜像(Effort 诊断单):provider 是唯一来源。
+        config.provider_think_levels = provider->supported_think_levels;
+        config.think_param = provider->think_param;
+        config.think_passthrough = provider->think_passthrough;
+        config.metrics_url = provider->metrics_url;
+        config.stream_usage_declared = provider->stream_usage_declared;
+        *current_model = config.model;
+        config.active_provider = provider->name;
+        active_provider = provider->name;
+        session_wire = lubancode::config::ProviderWireName(config.wire);
+        real_backend.Rebuild(config);
+        prompt_options.wire = lubancode::config::ProviderWireName(config.wire);
+        context_tracker.set_window_tokens(config.context_window_tokens);
+        // 校验、取 key、重建后端都成功了才清。清完先按新配置重画横幅，
+        // 随后的目录应用与切换提示仍留在屏上；Agent 历史照旧保留。
+        if (is_console) {
+            ClearAndPrintBanner(config, theme);
+        }
+        ApplyModelCatalog(catalog, *current_model, /*think_explicit=*/false, /*window_explicit=*/true,
+                          current_think, context_tracker, current_model_instructions);
+        // provider 配了 model_reasoning_effort 就按 /think 同一套机制应用
+        // (直接改 current_think,下一次请求就带上);没配就不动——不管
+        // ApplyModelCatalog 刚才有没有按模型目录动过档位,都维持现状。
+        // 放在 ApplyModelCatalog 之后:provider 的显式配置该压过目录默认。
+        if (!provider->model_reasoning_effort.empty()) {
+            *current_think = provider->model_reasoning_effort;
+            std::cout << trf("cmd.provider.effort_applied", provider->name, provider->model_reasoning_effort)
+                      << "\n";
+        }
+        rebuild_loop(/*preserve_history=*/true);
+        std::cout << trf("cmd.provider.switched", provider->name, provider->base_url) << "\n";
+        if (remembered.has_value()) {
+            active_provider_source = active_provider_write_path.has_value()
+                                         ? lubancode::config::Source::ProjectConfigFile
+                                         : lubancode::config::Source::GlobalConfigFile;
+            std::cout << trf("cmd.provider.remembered", provider->name) << "\n";
+        } else {
+            std::cout << trf("cmd.provider.remember_failed", remembered.error()) << "\n";
+        }
+    };
+
+    // 缺密钥的补救页(向导重排单):选中缺 key 的 provider 不退出选择器,
+    // 原地换一页可处理的状态。返回 true = 鉴权已齐可以接着切;false = 返回
+    // 列表(选择与筛选词由调用方还原)或干脆取消。
+    const auto remediate_missing_auth = [&](const std::string& name) -> bool {
+        while (true) {
+            const lubancode::config::ProviderConfig* provider =
+                lubancode::config::FindProvider(config.providers, name);
+            if (provider == nullptr) {
+                return false;
+            }
+            const lubancode::config::ProviderAuthResolution auth =
+                lubancode::config::ResolveProviderAuth(*provider);
+            if (auth.status != lubancode::config::ProviderAuthResolution::Status::Missing) {
+                return true;  // 补齐了(env/inline/none 任一路)
+            }
+            const bool inline_missing = provider->auth == lubancode::config::ProviderAuthMode::Inline;
+            std::vector<lubancode::cli::ChoiceMenuItem> items = {
+                {tr("provider_remedy.opt_input_key"), tr(inline_missing ? "provider_remedy.hint_inline"
+                                                                          : "provider_remedy.hint_env")},
+                {tr("provider_remedy.opt_change_env"), {}},
+                {tr("provider_remedy.opt_no_auth"), {}},
+                {tr("provider_remedy.opt_howto"), {}},
+                {tr("provider_remedy.opt_back"), {}},
+            };
+            std::cout << trf("provider_remedy.title", name) << "\n";
+            std::cout << (inline_missing ? trf("provider_remedy.body_inline", name)
+                                         : trf("provider_remedy.body_env", name, auth.env_name)) << "\n";
+            lubancode::cli::ChoiceMenuOptions opts;
+            opts.hint = tr("provider_remedy.footer");
+            lubancode::cli::ReadExitReason reason = lubancode::cli::ReadExitReason::Submitted;
+            const auto selected = lubancode::cli::ReadChoiceMenu(items, opts, theme, &reason);
+            if (!selected.has_value() || selected->selected_indices.empty()) {
+                return false;  // Esc 返回列表;Ctrl+C 取消
+            }
+            const std::size_t pick = selected->selected_indices.front();
+            if (pick == 0) {
+                // 现在输入 API key:先讲明保存去处(只供本次会话 / 写入用户
+                // 配置),写盘按明文 key 风险提示办。
+                std::vector<lubancode::cli::ChoiceMenuItem> where = {
+                    {tr("provider_remedy.key_session"), tr("provider_remedy.key_session_desc")},
+                    {tr("provider_remedy.key_persist"), tr("provider_remedy.key_persist_desc")},
+                };
+                lubancode::cli::ChoiceMenuOptions where_opts;
+                where_opts.hint = tr("provider_remedy.footer");
+                const auto where_sel = lubancode::cli::ReadChoiceMenu(where, where_opts, theme);
+                if (!where_sel.has_value() || where_sel->selected_indices.empty()) {
+                    continue;  // 当没选,回补救页
+                }
+                const std::optional<std::string> key =
+                    lubancode::cli::ReadLine(tr("cmd.provider.auth_inline_prompt"));
+                if (!key.has_value() || key->empty()) {
+                    continue;
+                }
+                const bool persist = where_sel->selected_indices.front() == 1;
+                const auto it = std::find_if(config.providers.begin(), config.providers.end(),
+                                             [&](const lubancode::config::ProviderConfig& p) {
+                                                 return p.name == name;
+                                             });
+                if (it != config.providers.end()) {
+                    it->auth = lubancode::config::ProviderAuthMode::Inline;
+                    it->api_key = *key;
+                }
+                if (persist) {
+                    const auto saved = lubancode::config::SetProviderAuthInlineInGlobalConfig(name, *key);
+                    if (!saved.has_value()) {
+                        std::cout << trf("cmd.provider.set_failed", saved.error()) << "\n";
+                        return false;
+                    }
+                    std::cout << trf("provider_remedy.key_saved", name,
+                                     lubancode::config::MaskApiKey(*key), *saved) << "\n";
+                } else {
+                    std::cout << trf("provider_remedy.key_session_only",
+                                     lubancode::config::MaskApiKey(*key)) << "\n";
+                }
+                continue;  // 回页顶复查:现在 Ready 了,直接返回 true
+            }
+            if (pick == 1) {
+                // 改用另一个环境变量:只存变量名;当前进程取不到值就照实说
+                // "未设置",不假装修好了。
+                const std::optional<std::string> env_name =
+                    lubancode::cli::ReadLine(tr("cmd.provider.auth_env_prompt"));
+                if (!env_name.has_value() || env_name->empty()) {
+                    continue;
+                }
+                const auto saved = lubancode::config::SetProviderAuthEnvInGlobalConfig(name, *env_name);
+                if (!saved.has_value()) {
+                    std::cout << trf("cmd.provider.set_failed", saved.error()) << "\n";
+                    return false;
+                }
+                const auto it = std::find_if(config.providers.begin(), config.providers.end(),
+                                             [&](const lubancode::config::ProviderConfig& p) {
+                                                 return p.name == name;
+                                             });
+                if (it != config.providers.end()) {
+                    it->auth = lubancode::config::ProviderAuthMode::Env;
+                    it->key_env = *env_name;
+                }
+                const std::optional<std::string> value = lubancode::platform::GetEnvVar(env_name->c_str());
+                std::cout << (value.has_value() && !value->empty()
+                                  ? trf("provider_wizard.auth.env.note_set", *env_name)
+                                  : trf("provider_wizard.auth.env.note_unset", *env_name)) << "\n";
+                continue;
+            }
+            if (pick == 2) {
+                // 设为无需鉴权:明确写回 provider,重启仍认得,不是"忽略这次错误"。
+                const auto saved = lubancode::config::SetProviderAuthModeInGlobalConfig(
+                    name, lubancode::config::ProviderAuthMode::None);
+                if (!saved.has_value()) {
+                    std::cout << trf("cmd.provider.set_failed", saved.error()) << "\n";
+                    return false;
+                }
+                const auto it = std::find_if(config.providers.begin(), config.providers.end(),
+                                             [&](const lubancode::config::ProviderConfig& p) {
+                                                 return p.name == name;
+                                             });
+                if (it != config.providers.end()) {
+                    it->auth = lubancode::config::ProviderAuthMode::None;
+                    it->key_env.clear();
+                }
+                std::cout << trf("provider_remedy.none_saved", name, *saved) << "\n";
+                continue;
+            }
+            if (pick == 3) {
+                // 查看设置方法:按当前终端给一条命令,说清设完要不要重启。
+                const std::string env_for_howto =
+                    auth.env_name.empty() ? provider->key_env : auth.env_name;
+#ifdef _WIN32
+                std::cout << trf("provider_remedy.howto_powershell", env_for_howto) << "\n";
+                std::cout << trf("provider_remedy.howto_cmd", env_for_howto) << "\n";
+#else
+                std::cout << trf("provider_remedy.howto_posix", env_for_howto) << "\n";
+#endif
+                std::cout << tr("provider_remedy.howto_restart") << "\n";
+                continue;
+            }
+            return false;  // 返回 provider 列表
+        }
+    };
     switch (command.action) {
         case lubancode::cli::ProviderCommandAction::List:
             PrintProviderList(config.providers, config, active_provider);
@@ -648,80 +917,91 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
         case lubancode::cli::ProviderCommandAction::Switch: {
             const lubancode::config::ProviderConfig* provider =
                 lubancode::config::FindProvider(config.providers, command.name);
+            const bool can_panel = is_console && lubancode::platform::StdinIsInteractive();
             if (provider == nullptr) {
+                // 找不到名字:TTY 下不开死胡同,开已筛选的列表把"不存在"贴在
+                // 面板内;非 TTY 照旧一行报错。
+                if (can_panel) {
+                    const auto picked = lubancode::cli::RunProviderSwitchPicker(
+                        config.providers, active_provider, command.name,
+                        trf("cmd.provider.not_found", command.name), {}, theme);
+                    if (picked.pick == lubancode::cli::ProviderSwitchPick::Named) {
+                        const lubancode::config::ProviderConfig* chosen =
+                            lubancode::config::FindProvider(config.providers, picked.name);
+                        if (chosen != nullptr &&
+                            lubancode::config::ResolveProviderAuth(*chosen).status ==
+                                lubancode::config::ProviderAuthResolution::Status::Missing &&
+                            !remediate_missing_auth(picked.name)) {
+                            return;
+                        }
+                        execute_switch(picked.name, "");
+                    } else if (picked.pick == lubancode::cli::ProviderSwitchPick::AddNew) {
+                        RunProviderAddWizardInteractive("", config, theme);
+                    }
+                    return;
+                }
                 std::cout << trf("cmd.provider.not_found", command.name) << "\n";
                 return;
             }
-            const auto api_key = lubancode::config::ProviderApiKey(*provider);
-            if (!api_key.has_value()) {
-                std::cout << trf("cmd.provider.key_missing", provider->name, provider->key_env) << "\n";
+            // 鉴权三态:预检吃 ResolveProviderAuth 这一份共享结果——none 直接过,
+            // env 缺变量/inline 缺 key 在 TTY 下进补救页,非 TTY 按模式报错。
+            const lubancode::config::ProviderAuthResolution auth =
+                lubancode::config::ResolveProviderAuth(*provider);
+            if (auth.status == lubancode::config::ProviderAuthResolution::Status::Missing) {
+                if (can_panel) {
+                    if (!remediate_missing_auth(command.name)) {
+                        return;  // 取消/返回:当前 provider、模型、后端与配置都不动
+                    }
+                } else {
+                    if (provider->auth == lubancode::config::ProviderAuthMode::Inline) {
+                        std::cout << trf("cmd.provider.key_missing_inline", provider->name) << "\n";
+                    } else {
+                        std::cout << trf("cmd.provider.key_missing", provider->name, auth.env_name) << "\n";
+                    }
+                    return;
+                }
+            }
+            execute_switch(command.name, command.model);
+            return;
+        }
+        case lubancode::cli::ProviderCommandAction::SwitchInteractive: {
+            // 裸敲 /provider switch:意图是换一家,不倒总帮助。TTY 开原地面板;
+            // 非 TTY 只给 switch 专用短用法,不打印 add/remove/set 全家桶。
+            const bool can_panel = is_console && lubancode::platform::StdinIsInteractive();
+            if (!can_panel) {
+                std::cout << tr("cmd.provider.switch.usage_short") << "\n";
                 return;
             }
-
-            // 项目配置显式写了 active_provider 就继续写回项目；其余场景
-            // 记到用户全局配置。只存名字，不复制密钥或 endpoint。
-            const auto remembered = [&]() -> std::expected<std::string, std::string> {
-                if (active_provider_write_path.has_value()) {
-                    const auto written = lubancode::config::UpdateActiveProviderInConfigFile(
-                        *active_provider_write_path, provider->name);
-                    if (!written.has_value()) {
-                        return std::unexpected(written.error());
-                    }
-                    return *active_provider_write_path;
+            std::string filter;
+            std::string cursor_name;  // 补钥页返回列表时"刚才的选择仍在"
+            while (true) {
+                std::string notice;
+                const auto picked = lubancode::cli::RunProviderSwitchPicker(
+                    config.providers, active_provider, filter, notice, cursor_name, theme);
+                filter = picked.filter;
+                cursor_name.clear();
+                if (picked.pick == lubancode::cli::ProviderSwitchPick::Cancelled) {
+                    return;  // 取消不改当前 provider,不写配置
                 }
-                return lubancode::config::SetActiveProviderInGlobalConfig(provider->name);
-            }();
-
-            config.wire = provider->wire;
-            config.base_url = provider->base_url;
-            config.auth_token = *api_key;
-            config.model = command.model.empty() ? provider->model : command.model;
-            config.context_window_tokens = provider->context_window_tokens;
-            config.native_web_search = provider->native_web_search;
-            config.stream_usage = provider->stream_usage;
-            config.reasoning_replay = provider->reasoning_replay;
-            config.extra_body = provider->extra_body;
-            config.extra_headers = provider->extra_headers;
-            // Effort/缓存诊断声明镜像(Effort 诊断单):provider 是唯一来源。
-            config.provider_think_levels = provider->supported_think_levels;
-            config.think_param = provider->think_param;
-            config.think_passthrough = provider->think_passthrough;
-            config.metrics_url = provider->metrics_url;
-            config.stream_usage_declared = provider->stream_usage_declared;
-            *current_model = config.model;
-            config.active_provider = provider->name;
-            active_provider = provider->name;
-            session_wire = lubancode::config::ProviderWireName(config.wire);
-            real_backend.Rebuild(config);
-            prompt_options.wire = lubancode::config::ProviderWireName(config.wire);
-            context_tracker.set_window_tokens(config.context_window_tokens);
-            // 校验、取 key、重建后端都成功了才清。清完先按新配置重画横幅，
-            // 随后的目录应用与切换提示仍留在屏上；Agent 历史照旧保留。
-            if (is_console) {
-                ClearAndPrintBanner(config, theme);
+                if (picked.pick == lubancode::cli::ProviderSwitchPick::AddNew) {
+                    RunProviderAddWizardInteractive("", config, theme);
+                    return;
+                }
+                const lubancode::config::ProviderConfig* provider =
+                    lubancode::config::FindProvider(config.providers, picked.name);
+                if (provider == nullptr) {
+                    continue;  // 列表里有名字却找不到:极少见,回列表
+                }
+                if (lubancode::config::ResolveProviderAuth(*provider).status ==
+                    lubancode::config::ProviderAuthResolution::Status::Missing) {
+                    cursor_name = picked.name;
+                    if (!remediate_missing_auth(picked.name)) {
+                        continue;  // 返回列表:选择与筛选词都还原
+                    }
+                }
+                execute_switch(picked.name, "");
+                return;
             }
-            ApplyModelCatalog(catalog, *current_model, /*think_explicit=*/false, /*window_explicit=*/true,
-                              current_think, context_tracker, current_model_instructions);
-            // provider 配了 model_reasoning_effort 就按 /think 同一套机制应用
-            // (直接改 current_think,下一次请求就带上);没配就不动——不管
-            // ApplyModelCatalog 刚才有没有按模型目录动过档位,都维持现状。
-            // 放在 ApplyModelCatalog 之后:provider 的显式配置该压过目录默认。
-            if (!provider->model_reasoning_effort.empty()) {
-                *current_think = provider->model_reasoning_effort;
-                std::cout << trf("cmd.provider.effort_applied", provider->name, provider->model_reasoning_effort)
-                          << "\n";
-            }
-            rebuild_loop(/*preserve_history=*/true);
-            std::cout << trf("cmd.provider.switched", provider->name, provider->base_url) << "\n";
-            if (remembered.has_value()) {
-                active_provider_source = active_provider_write_path.has_value()
-                                             ? lubancode::config::Source::ProjectConfigFile
-                                             : lubancode::config::Source::GlobalConfigFile;
-                std::cout << trf("cmd.provider.remembered", provider->name) << "\n";
-            } else {
-                std::cout << trf("cmd.provider.remember_failed", remembered.error()) << "\n";
-            }
-            return;
         }
         case lubancode::cli::ProviderCommandAction::Set: {
             // 认三个可设字段:native_web_search(开关)、extra_body(整段
@@ -828,6 +1108,83 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                         config.extra_headers[command.header_name] = command.value;
                     }
                     real_backend.Rebuild(config);
+                    std::cout << trf("cmd.provider.set_active_applied", command.name) << "\n";
+                }
+                return;
+            }
+            if (command.field == "auth") {
+                // /provider set <名字> auth none|env|inline(向导重排单)。切到
+                // env/inline 时若还缺变量名/key,接着开相应输入页补齐,不落
+                // 半截配置;none 必须由用户显式敲这命令,谁也不许凭地址猜。
+                const auto mode = lubancode::config::ParseProviderAuthMode(command.value);
+                if (!mode.has_value()) {
+                    std::cout << trf("cmd.provider.set_failed", mode.error()) << "\n";
+                    return;
+                }
+                const lubancode::config::ProviderConfig* target =
+                    lubancode::config::FindProvider(config.providers, command.name);
+                if (target == nullptr) {
+                    std::cout << trf("cmd.provider.not_found", command.name) << "\n";
+                    return;
+                }
+                std::string prompted_env;
+                std::string prompted_key;
+                std::expected<std::string, std::string> saved;
+                if (*mode == lubancode::config::ProviderAuthMode::Env && target->key_env.empty()) {
+                    const std::optional<std::string> key_env =
+                        lubancode::cli::ReadLine(tr("cmd.provider.auth_env_prompt"));
+                    if (!key_env.has_value() || key_env->empty()) {
+                        std::cout << tr("cmd.provider.auth_aborted") << "\n";
+                        return;
+                    }
+                    prompted_env = *key_env;
+                    saved = lubancode::config::SetProviderAuthEnvInGlobalConfig(command.name, prompted_env);
+                } else if (*mode == lubancode::config::ProviderAuthMode::Inline && target->api_key.empty()) {
+                    const std::optional<std::string> key =
+                        lubancode::cli::ReadLine(tr("cmd.provider.auth_inline_prompt"));
+                    if (!key.has_value() || key->empty()) {
+                        std::cout << tr("cmd.provider.auth_aborted") << "\n";
+                        return;
+                    }
+                    prompted_key = *key;
+                    saved = lubancode::config::SetProviderAuthInlineInGlobalConfig(command.name, prompted_key);
+                } else {
+                    saved = lubancode::config::SetProviderAuthModeInGlobalConfig(command.name, *mode);
+                }
+                if (!saved.has_value()) {
+                    std::cout << trf("cmd.provider.set_failed", saved.error()) << "\n";
+                    return;
+                }
+                // 内存这份跟着换(补过的变量名/key 一并同步),活跃端立即生效。
+                lubancode::config::SetProviderAuthMode(config.providers, command.name, *mode);
+                const auto fresh_it = std::find_if(
+                    config.providers.begin(), config.providers.end(),
+                    [&](const lubancode::config::ProviderConfig& p) { return p.name == command.name; });
+                if (fresh_it != config.providers.end()) {
+                    if (!prompted_env.empty()) {
+                        fresh_it->key_env = prompted_env;
+                    }
+                    if (!prompted_key.empty()) {
+                        fresh_it->api_key = prompted_key;
+                    }
+                    if (*mode == lubancode::config::ProviderAuthMode::None) {
+                        fresh_it->key_env.clear();
+                    }
+                    if (active_provider == command.name) {
+                        const lubancode::config::ProviderAuthResolution auth =
+                            lubancode::config::ResolveProviderAuth(*fresh_it);
+                        config.auth_mode = fresh_it->auth;
+                        config.auth_token =
+                            auth.status == lubancode::config::ProviderAuthResolution::Status::Ready
+                                ? *auth.key
+                                : std::string();
+                        real_backend.Rebuild(config);
+                    }
+                }
+                std::cout << trf("cmd.provider.set_ok", command.name, command.field,
+                                 lubancode::config::ProviderAuthModeName(*mode), *saved)
+                          << "\n";
+                if (active_provider == command.name) {
                     std::cout << trf("cmd.provider.set_active_applied", command.name) << "\n";
                 }
                 return;
@@ -963,8 +1320,11 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
     std::cout << "  wire               = " << wire_str << "  [" << lubancode::config::ToString(sources.wire) << "]\n";
     std::cout << "  base_url           = " << (config.base_url.empty() ? tr("config.not_set") : config.base_url)
               << "  [" << lubancode::config::ToString(sources.base_url) << "]\n";
-    std::cout << "  api_key            = " << lubancode::config::MaskApiKey(config.auth_token) << "  ["
-              << lubancode::config::ToString(sources.auth_token) << "]\n";
+    std::cout << "  api_key            = "
+              << (config.auth_mode == lubancode::config::ProviderAuthMode::None
+                      ? tr("cmd.provider.auth_none")
+                      : lubancode::config::MaskApiKey(config.auth_token))
+              << "  [" << lubancode::config::ToString(sources.auth_token) << "]\n";
     std::cout << "  model              = " << (config.model.empty() ? tr("config.not_set") : config.model) << "  ["
               << lubancode::config::ToString(sources.model) << "]\n";
     std::cout << "  active_provider    = "

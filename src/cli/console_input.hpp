@@ -56,8 +56,15 @@ namespace lubancode::cli {
 // 占 N 行,提示符只在第一行,后续行两空格续行缩进。默认 false 的调用点
 // (确认提示、/model 编号选择、向导)单行语义跟升级前一字不差。管道/重定向
 // 模式没有 composer 概念,这个参数完全没作用,照旧逐行 getline。
+// 0.30.x 向导重排单:一次读取"为什么返回了"。Submitted = 正常提交(有返回
+// 值);Esc = 按了 Esc(向导拿来当"返回上一步");Cancel = Ctrl+C / Ctrl+D /
+// 管道读尽这类"整条流程别继续了"。只区分到这一层——向导的取消路对
+// Ctrl+C 与 EOF 同等待遇,不必再细分。现有调用方不传指针,行为一字不变。
+enum class ReadExitReason { Submitted, Esc, Cancel };
+
 std::optional<std::string> ReadLine(const std::string& prompt, const Theme& theme = Theme{},
-                                     bool esc_rejects = false, bool composer = false);
+                                     bool esc_rejects = false, bool composer = false,
+                                     ReadExitReason* exit_reason = nullptr);
 
 // ask_user 的逐键选择菜单。单选用上下键移动、Enter 确认；多选用空格
 // 勾选、Enter 提交。核心状态与终端绘制分开，方向键/多选规则可直接单测。
@@ -82,9 +89,12 @@ struct ChoiceMenuResult {
 };
 
 // 真终端绘制原地选择菜单。editable_index 指向的末项可直接键入文字，
-// 返回普通选中项与行内文本；Esc/Ctrl+C/EOF 返回 nullopt。
+// 返回普通选中项与行内文本；Esc/Ctrl+C/EOF 返回 nullopt。exit_reason
+// (向导重排单)可选:Esc 填 Esc(向导当"返回上一步"),Ctrl+C/Ctrl+D/EOF
+// 填 Cancel;选中则填 Submitted。不传行为一字不变。
 std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>& items,
-                                                const ChoiceMenuOptions& options, const Theme& theme);
+                                                const ChoiceMenuOptions& options, const Theme& theme,
+                                                ReadExitReason* exit_reason = nullptr);
 
 // 会话级确认模式的查询/设置。真控制台下 Shift+Tab 会改这个状态(存在
 // ReadLine() 内部维护的、贯穿整条交互会话的 LineEditorCore 实例里,见

@@ -314,6 +314,8 @@ add_library(lubancode_core STATIC
   src/cli/image_input.cpp
   src/cli/setup_wizard.cpp
   src/cli/provider_wizard.cpp
+  src/cli/provider_switch.cpp
+  src/cli/wizard_panel.cpp
   src/cli/slash_commands.cpp
   src/cli/worktree.cpp
   src/cli/theme.cpp

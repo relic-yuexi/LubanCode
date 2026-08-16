@@ -2528,6 +2528,165 @@ TEST_CASE("ProviderApiKey: api_key 为空时退回 key_env 环境变量,没设�
     CHECK_FALSE(key.has_value());
 }
 
+// ---------------------------------------------------------------------------
+// 鉴权三态(向导重排单):none/env/inline 的解析、迁移、校验、运行时解析。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseProviderAuthMode / ProviderAuthModeName: 三态互转,认不得的值报错") {
+    CHECK(config::ParseProviderAuthMode("none") == config::ProviderAuthMode::None);
+    CHECK(config::ParseProviderAuthMode("env") == config::ProviderAuthMode::Env);
+    CHECK(config::ParseProviderAuthMode("inline") == config::ProviderAuthMode::Inline);
+    CHECK_FALSE(config::ParseProviderAuthMode("OFF").has_value());
+    CHECK_FALSE(config::ParseProviderAuthMode("").has_value());
+    CHECK(config::ProviderAuthModeName(config::ProviderAuthMode::None) == "none");
+    CHECK(config::ProviderAuthModeName(config::ProviderAuthMode::Env) == "env");
+    CHECK(config::ProviderAuthModeName(config::ProviderAuthMode::Inline) == "inline");
+}
+
+TEST_CASE("旧配置迁移: 没写 auth 时 api_key 非空算 inline,否则算 env,绝不迁成 none") {
+    const auto parsed = config::ParseFileConfigJson(
+        R"({"providers":[
+            {"name":"a","base_url":"https://a.test","wire":"anthropic","api_key":"sk-x"},
+            {"name":"b","base_url":"https://b.test","wire":"responses"},
+            {"name":"c","base_url":"https://c.test","wire":"responses","key_env":"MISSING_ENV_XYZ"}
+        ]})",
+        "test.json");
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->providers->size() == 3);
+    CHECK(parsed->providers->at(0).auth == config::ProviderAuthMode::Inline);
+    CHECK(parsed->providers->at(1).auth == config::ProviderAuthMode::Env);
+    // 环境变量 MISSING_ENV_XYZ 没设置,迁移结果仍是 env——缺 key 不等于无鉴权。
+    CHECK(parsed->providers->at(2).auth == config::ProviderAuthMode::Env);
+}
+
+TEST_CASE("旧配置迁移: 显式写的 auth 原样生效,落盘值稳定") {
+    const auto parsed = config::ParseFileConfigJson(
+        R"({"providers":[
+            {"name":"a","base_url":"https://a.test","wire":"anthropic","auth":"none"},
+            {"name":"b","base_url":"https://b.test","wire":"responses","auth":"inline","api_key":"sk-y"}
+        ]})",
+        "test.json");
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->providers->at(0).auth == config::ProviderAuthMode::None);
+    // auth=none 允许 key_env 缺省(默认字段还在,但空串也合法)。
+    CHECK(parsed->providers->at(1).auth == config::ProviderAuthMode::Inline);
+
+    // 序列化回写:auth 永远落盘;none 时空 key_env 不落键。
+    TempCwdDir cwd;
+    const std::filesystem::path path = std::filesystem::path(cwd.Path()) / ".lubancode" / "config.json";
+    cwd.WriteFile(".lubancode/config.json", R"({"providers":[]})");
+    std::vector<config::ProviderConfig> round_trip = *parsed->providers;
+    round_trip[0].key_env.clear();
+    REQUIRE(config::UpdateProvidersInConfigFile(path.string(), round_trip).has_value());
+    const nlohmann::json written = nlohmann::json::parse(cwd.ReadFile(".lubancode/config.json"));
+    CHECK(written["providers"][0]["auth"] == "none");
+    CHECK(written["providers"][1]["auth"] == "inline");
+    CHECK_FALSE(written["providers"][0].contains("key_env"));
+    CHECK(written["providers"][1].contains("key_env"));
+
+    // 再读回来,auth 三态不丢——重启后仍认得。
+    const auto reparsed = config::ParseFileConfigJson(written.dump(), path.string());
+    REQUIRE(reparsed.has_value());
+    CHECK(reparsed->providers->at(0).auth == config::ProviderAuthMode::None);
+    CHECK(reparsed->providers->at(1).auth == config::ProviderAuthMode::Inline);
+}
+
+TEST_CASE("ValidateProviderConfig: 按 auth 模式校验,none 允许 key_env 空") {
+    config::ProviderConfig provider;
+    provider.name = "p";
+    provider.base_url = "https://p.test";
+
+    provider.auth = config::ProviderAuthMode::None;
+    provider.key_env.clear();
+    CHECK(config::ValidateProviderConfig(provider).has_value());
+
+    provider.auth = config::ProviderAuthMode::Env;
+    CHECK_FALSE(config::ValidateProviderConfig(provider).has_value());
+    provider.key_env = "SOME_ENV";
+    CHECK(config::ValidateProviderConfig(provider).has_value());
+
+    provider.auth = config::ProviderAuthMode::Inline;
+    CHECK_FALSE(config::ValidateProviderConfig(provider).has_value());
+    provider.api_key = "sk-z";
+    CHECK(config::ValidateProviderConfig(provider).has_value());
+}
+
+TEST_CASE("ResolveProviderAuth: 无需鉴权/已取到/该有却缺三态分清") {
+    config::ProviderConfig provider;
+    provider.name = "p";
+    provider.base_url = "https://p.test";
+    provider.key_env = "LUBANCODE_TEST_PROVIDER_KEY_ENV_DOES_NOT_EXIST_XYZ";
+
+    provider.auth = config::ProviderAuthMode::None;
+    auto resolved = config::ResolveProviderAuth(provider);
+    CHECK(resolved.status == config::ProviderAuthResolution::Status::NotRequired);
+    CHECK_FALSE(resolved.key.has_value());
+
+    provider.auth = config::ProviderAuthMode::Env;
+    resolved = config::ResolveProviderAuth(provider);
+    CHECK(resolved.status == config::ProviderAuthResolution::Status::Missing);
+    CHECK(resolved.env_name == "LUBANCODE_TEST_PROVIDER_KEY_ENV_DOES_NOT_EXIST_XYZ");
+
+    provider.auth = config::ProviderAuthMode::Inline;
+    provider.api_key = "sk-inline";
+    resolved = config::ResolveProviderAuth(provider);
+    CHECK(resolved.status == config::ProviderAuthResolution::Status::Ready);
+    CHECK(*resolved.key == "sk-inline");
+
+    // 旧优先级兼容:env 模式下 api_key 非空仍优先(一行式 --key 构造的条目)。
+    provider.auth = config::ProviderAuthMode::Env;
+    resolved = config::ResolveProviderAuth(provider);
+    CHECK(resolved.status == config::ProviderAuthResolution::Status::Ready);
+    CHECK(*resolved.key == "sk-inline");
+}
+
+TEST_CASE("RequireApiKey / RequireConfigured: auth_mode=none 时空 key 放行") {
+    config::ConfigResult result;
+    result.config.base_url = "https://p.test";
+    result.config.model = "m";
+    result.config.auth_token = "";
+
+    result.config.auth_mode = config::ProviderAuthMode::Env;
+    CHECK_FALSE(config::RequireApiKey(result).has_value());
+    CHECK_FALSE(config::RequireConfigured(result).has_value());
+
+    result.config.auth_mode = config::ProviderAuthMode::None;
+    CHECK(config::RequireApiKey(result).has_value());
+    CHECK(config::RequireConfigured(result).has_value());
+}
+
+TEST_CASE("ApplyConfiguredActiveProvider: 镜像 auth_mode,none 时空 auth_token 合法") {
+    config::ConfigResult result;
+    result.config.active_provider = "bare";
+    result.sources.active_provider = config::Source::GlobalConfigFile;
+    result.sources.providers = config::Source::GlobalConfigFile;
+    config::ProviderConfig provider;
+    provider.name = "bare";
+    provider.base_url = "https://bare.test";
+    provider.wire = config::Wire::ChatCompletions;
+    provider.auth = config::ProviderAuthMode::None;
+    provider.key_env.clear();
+    provider.model = "m";
+    result.config.providers = {provider};
+
+    CHECK(config::ApplyConfiguredActiveProvider(result));
+    CHECK(result.config.auth_mode == config::ProviderAuthMode::None);
+    CHECK(result.config.auth_token.empty());
+    CHECK(config::RequireApiKey(result).has_value());
+}
+
+TEST_CASE("SetProviderAuthMode: 换模式成功/找不到名字原样不动") {
+    std::vector<config::ProviderConfig> providers{
+        {.name = "glm", .base_url = "https://g.test", .wire = config::Wire::Responses},
+    };
+    CHECK(config::SetProviderAuthMode(providers, "glm", config::ProviderAuthMode::None));
+    CHECK(providers[0].auth == config::ProviderAuthMode::None);
+    CHECK(config::SetProviderAuthMode(providers, "glm", config::ProviderAuthMode::Env));
+    CHECK(providers[0].auth == config::ProviderAuthMode::Env);
+    CHECK_FALSE(config::SetProviderAuthMode(providers, "no-such", config::ProviderAuthMode::None));
+    CHECK(providers[0].auth == config::ProviderAuthMode::Env);
+}
+
 TEST_CASE("ValidateProviderName: 空名字、非法字符、重名都拦下") {
     const std::vector<config::ProviderConfig> existing{{.name = "dup"}};
 

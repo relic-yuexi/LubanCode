@@ -38,9 +38,24 @@ std::expected<std::vector<ModelInfo>, std::string> ParseAnthropicModelsResponse(
 // id 当 display_name。
 std::expected<std::vector<ModelInfo>, std::string> ParseResponsesModelsResponse(const std::string& json_text);
 
-// 真正发请求:按 wire 挑端点和解析函数,GET 请求带
-// `Authorization: Bearer {api_key}`。网络错、HTTP 非 2xx、响应体解析失败,
-// 统一走 Error 返回(跟 Backend::send_stream 用同一套 Error 类型)。
+// 纯函数(向导重排单):算"探测模型列表要打的完整 URL"。anthropic wire 补
+// /v1/models,responses/chat_completions 补 /models;anthropic 且 base_url
+// 已带 /v1 结尾时不重复再补一份(否则会拼出 /v1/v1/models)。向导界面展示
+// 的探测地址与 ListModels 实际请求的地址同出这一份,不许两处各算各的。
+std::string ModelsUrl(config::Wire wire, const std::string& base_url);
+
+// 纯函数:ListModels 的请求头。api_key 非空给 Authorization: Bearer;为空
+// (鉴权三态 none/缺 env)彻底不带,不发空 Bearer。extra_headers 空值删头、
+// 非空覆盖。header 单测钉在这(三套正式 client 的同款规矩在
+// api::RequestBaseHeaders)。
+std::map<std::string, std::string> ModelsRequestHeaders(
+    const std::string& api_key, const std::map<std::string, std::string>& extra_headers);
+
+// 真正发请求:按 wire 挑端点和解析函数(地址统一出自 ModelsUrl),GET
+// 请求带 `Authorization: Bearer {api_key}`;api_key 为空(鉴权三态的
+// none/缺 env)时彻底不带这个头,不发空 Bearer。网络错、HTTP 非 2xx、
+// 响应体解析失败,统一走 Error 返回(跟 Backend::send_stream 用同一套
+// Error 类型)。
 // M11(网络超时):这是个非流式请求(响应体就是一个模型列表,不会很大),
 // 没有"回复很长"的顾虑,直接给连接超时 + 整体超时两道上限,都有默认值
 // (来自 config::kDefault*),两个调用点(初次配置向导、/model)目前都用

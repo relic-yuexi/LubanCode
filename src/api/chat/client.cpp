@@ -123,8 +123,9 @@ std::expected<void, Error> ChatCompletionsBackend::send_stream(
             return true;
         });
 
-    std::map<std::string, std::string> headers{{"Content-Type", "application/json"},
-                                               {"Authorization", "Bearer " + auth_token_}};
+    // 鉴权三态:auth_token 空(无鉴权)时基础头里压根没有 Authorization,
+    // 不发空 Bearer(与 anthropic/responses/ListModels 同一份规矩)。
+    std::map<std::string, std::string> headers = RequestBaseHeaders(auth_token_);
     for (const auto& [name, value] : extra_headers_) {
         if (value.empty()) headers.erase(name);
         else headers[name] = value;

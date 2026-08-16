@@ -334,12 +334,12 @@ std::expected<void, Error> AnthropicBackend::send_stream(
 
     const std::string url = base_url_ + "/v1/messages";
 
-    // extra_headers 覆盖/追加到内置两个头上(ApplyExtraHeaders 是纯函数,
-    // 单测直接调);cpr::Header 本身大小写不敏感,同名 key 再赋值一次就是
-    // 覆盖,包括 Authorization——用户自己对后果负责。
+    // extra_headers 覆盖/追加到基础头上(ApplyExtraHeaders 是纯函数,单测
+    // 直接调);cpr::Header 本身大小写不敏感,同名 key 再赋值一次就是覆盖,
+    // 包括 Authorization——用户自己对后果负责。鉴权三态:auth_token 空
+    // (无鉴权)时基础头里压根没有 Authorization,不发空 Bearer。
     const std::map<std::string, std::string> merged_headers =
-        ApplyExtraHeaders({{"Content-Type", "application/json"}, {"Authorization", "Bearer " + auth_token_}},
-                          extra_headers_);
+        ApplyExtraHeaders(RequestBaseHeaders(auth_token_), extra_headers_);
     cpr::Header cpr_headers;
     for (const auto& [name, value] : merged_headers) {
         cpr_headers[name] = value;
