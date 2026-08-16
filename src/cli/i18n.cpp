@@ -612,12 +612,16 @@ const Entry kZhCN[] = {
      "  /memory edit <id> 标题 [:: 正文] 改候选\n"
      "  /memory reject <id> [理由]      拒绝候选(同主题不再重提)\n"
      "  /memory list                     列出项目记忆\n"
-     "  /memory remember fact|preference 标题 [:: 正文]\n"
+     "  /memory remember fact|preference|feedback 标题 [:: 正文]\n"
+     "  /memory remember user preference|feedback 标题 [:: 正文]  (须全局授权)\n"
      "  /memory forget <id>              归档一条记忆\n"
      "  /memory rebuild                  后台重建索引\n"
      "  /memory stale                    看指纹漂移与已过期的记忆\n"
      "  /memory verify <id>              核验后续命(原 id 复活)\n"
      "  /memory refresh <id>             核验并把 status 回炉为 active\n"
+     "  /memory migrate                  旧格式主题批迁 front matter(先列账再确认)\n"
+     "  /memory show <id>                看一份主题的 front matter 与正文\n"
+     "  /memory open [id]                用 $VISUAL/$EDITOR 编辑主题或索引\n"
      "  /memory why [id]                 看上一轮召回为何命中/落选\n"},
     {"cmd.memory.unavailable", "[memory] 找不到主目录，项目记忆不可用。"},
     {"cmd.memory.on", "开"},
@@ -670,11 +674,24 @@ const Entry kZhCN[] = {
     {"cmd.memory.why.miss", "  {0}  分数 {1}(硬命中 {2}，词项 {3}) — 未注入: {4}"},
     {"cmd.memory.why.stale", "相关文件已变化，只提示不注正文"},
     {"cmd.memory.why.duplicate", "同一事实/相同证据已注入,去重让位"},
+    {"cmd.memory.why.superseded", "项目层同主题已注入,用户层让位"},
+    {"cmd.memory.why.layer_user", "(用户层)"},
+    {"cmd.memory.user_layer", "用户层"},
+    {"cmd.memory.user_status", "用户级记忆: {0} 条;目录: {1}(授权在全局 memory.user_enabled)"},
     {"cmd.memory.why.below_threshold", "分数未过最低门槛"},
     {"cmd.memory.why.budget", "条数/字节预算已满"},
     {"cmd.memory.why.skipped", "未取到正文"},
     {"cmd.memory.why.total", "  合计注入 {0} 条 · {1} 字节"},
     {"cmd.memory.why.missing", "[memory] 上一轮召回里没有 {0}。"},
+    {"cmd.memory.migrate.none",
+     "[memory] 没有要迁的旧格式主题(已跳过 {0} 份,警告 {1} 份)。"},
+    {"cmd.memory.migrate.plan",
+     "[memory] 迁移计划:将改 {0} 份,跳过 {1} 份,警告 {2} 份。原件会备进 .state/migration-backup/。"},
+    {"cmd.memory.migrate.confirm", "照此迁移? [y/N]: "},
+    {"cmd.memory.migrate.cancelled", "不迁,旧主题原样保留。"},
+    {"cmd.memory.migrate.done", "[memory] 已迁 {0} 份为 front matter;备份在 {1}。"},
+    {"cmd.memory.show.header", "[memory] {0}(住 {1}):"},
+    {"cmd.memory.open.done", "[memory] 编辑收妥,已校验并重建索引。"},
 
     // ---- /language ----
     {"cmd.language.list_header", "可选语言(内置 zh-CN/en + <主目录>/.lubancode/languages/*.json):"},
@@ -1970,12 +1987,16 @@ const Entry kEn[] = {
      "  /memory edit <id> title [:: body]        edit a candidate\n"
      "  /memory reject <id> [reason]             reject a candidate (same topic won't return)\n"
      "  /memory list                              list project memories\n"
-     "  /memory remember fact|preference title [:: body]\n"
+     "  /memory remember fact|preference|feedback title [:: body]\n"
+     "  /memory remember user preference|feedback title [:: body]  (needs global grant)\n"
      "  /memory forget <id>                       archive one memory\n"
      "  /memory rebuild                           rebuild the index in background\n"
      "  /memory stale                             list drifted (fingerprint) and expired memories\n"
      "  /memory verify <id>                       re-verify, reviving the entry under its id\n"
      "  /memory refresh <id>                      re-verify and reset status to active\n"
+     "  /memory migrate                           batch-migrate legacy topics to front matter (plan first)\n"
+     "  /memory show <id>                         show one topic's front matter and body\n"
+     "  /memory open [id]                         edit a topic or the index via $VISUAL/$EDITOR\n"
      "  /memory why [id]                          explain the last recall: hits, misses, blocks\n"},
     {"cmd.memory.unavailable", "[memory] The home directory is unavailable; project memory cannot run."},
     {"cmd.memory.on", "on"},
@@ -2030,11 +2051,26 @@ const Entry kEn[] = {
     {"cmd.memory.why.miss", "  {0}  score {1} (hard hits {2}, terms {3}) — not injected: {4}"},
     {"cmd.memory.why.stale", "related files changed; hint only, body withheld"},
     {"cmd.memory.why.duplicate", "duplicate fact/evidence already injected; deduped"},
+    {"cmd.memory.why.superseded", "project-layer topic on the same theme was injected; user layer yielded"},
+    {"cmd.memory.why.layer_user", " (user layer)"},
+    {"cmd.memory.user_layer", "user layer"},
+    {"cmd.memory.user_status",
+     "User-level memories: {0}; directory: {1} (grant lives in global memory.user_enabled)"},
     {"cmd.memory.why.below_threshold", "score below the minimum threshold"},
     {"cmd.memory.why.budget", "result/byte budget exhausted"},
     {"cmd.memory.why.skipped", "body unavailable"},
     {"cmd.memory.why.total", "  injected {0} entries · {1} bytes"},
     {"cmd.memory.why.missing", "[memory] {0} was not part of the last recall."},
+    {"cmd.memory.migrate.none",
+     "[memory] No legacy topics to migrate ({0} skipped, {1} warnings)."},
+    {"cmd.memory.migrate.plan",
+     "[memory] Migration plan: {0} to migrate, {1} skipped, {2} warnings. "
+     "Originals are backed up under .state/migration-backup/."},
+    {"cmd.memory.migrate.confirm", "Migrate as planned? [y/N]: "},
+    {"cmd.memory.migrate.cancelled", "Migration cancelled; legacy topics are untouched."},
+    {"cmd.memory.migrate.done", "[memory] Migrated {0} topics to front matter; backup at {1}."},
+    {"cmd.memory.show.header", "[memory] {0} (lives under {1}):"},
+    {"cmd.memory.open.done", "[memory] Edit accepted; validated and index rebuilt."},
 
     {"cmd.init.created", "Created {0} and loaded it for this session."},
     {"cmd.init.exists", "Project instructions already exist at {0}; left them untouched and reloaded them."},

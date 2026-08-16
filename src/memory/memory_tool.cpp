@@ -9,9 +9,10 @@ std::string MemorySaveTool::name() const {
 }
 
 std::string MemorySaveTool::description() const {
-    return "把一条小而稳定的项目事实或用户明确偏好排进后台记忆(正式入库,不经待审区)。"
+    return "把一条小而稳定的项目事实、用户明确偏好或用户明说的行事纠正排进后台记忆(正式入库,不经待审区)。"
            "只在信息已经由源码、工具结果或用户明说证实时调用;fact 必须在 paths 或 evidence 里"
-           "给出可核验证据。不要保存当前任务进度、猜测、日志、网页/MCP 原文、密钥或个人数据。"
+           "给出可核验证据;feedback 只收用户当场明说的纠正(如版本节奏、验收习惯),confidence 须"
+           "user-stated,模型推断不得直写。不要保存当前任务进度、猜测、日志、网页/MCP 原文、密钥或个人数据。"
            "已有同主题时沿用索引里的 id 做更新。自动候选走回合总结,不经过这个工具。";
 }
 
@@ -20,8 +21,9 @@ nlohmann::json MemorySaveTool::input_schema() const {
         {"type", "object"},
         {"properties",
          {
-             {"kind", {{"type", "string"}, {"enum", {"fact", "preference"}},
-                       {"description", "fact=可核验的项目事实；preference=用户明确说出的本项目偏好"}}},
+             {"kind", {{"type", "string"}, {"enum", {"fact", "preference", "feedback"}},
+                       {"description", "fact=可核验的项目事实；preference=用户明确说出的本项目偏好；"
+                                       "feedback=用户明说的行事纠正(须 user-stated)"}}},
              {"id", {{"type", "string"}, {"description", "可选。更新已有记忆时用索引里的稳定 id"}}},
              {"title", {{"type", "string"}, {"description", "一个可独立更新的短主题"}}},
              {"summary", {{"type", "string"}, {"description", "索引里的一行摘要"}}},
@@ -36,8 +38,10 @@ nlohmann::json MemorySaveTool::input_schema() const {
              {"scope", {{"type", "object"},
                         {"properties",
                          {
-                             {"kind", {{"type", "string"}, {"enum", {"project", "subtree", "path"}},
-                                       {"description", "记忆适用的范围；subtree/path 须配 value"}}},
+                             {"kind", {{"type", "string"}, {"enum", {"project", "subtree", "path", "user"}},
+                                       {"description", "记忆适用的范围；subtree/path 须配 value；"
+                                                       "user=跨项目用户记忆(仅 preference/feedback，"
+                                                       "不得带项目路径证据，须全局授权 memory.user_enabled)"}}},
                              {"value", {{"type", "string"}, {"description", "项目内相对路径(subtree/path 时必填)"}}},
                          }},
                         {"description", "可选。当前工作目录不在范围内时不注入，防串味"}}},
@@ -79,6 +83,7 @@ tools::Tool::Result MemorySaveTool::execute(const nlohmann::json& input) {
     if (input.contains("scope") && input["scope"].is_object()) {
         request.scope.kind = input["scope"].value("kind", std::string("project"));
         request.scope.value = input["scope"].value("value", std::string());
+        if (request.scope.kind == "user") request.scope.level = "user";
     }
     if (input.contains("evidence") && input["evidence"].is_array()) {
         for (const auto& item : input["evidence"]) {

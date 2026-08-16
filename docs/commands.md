@@ -189,15 +189,19 @@ usage 账分四态：`not_reported`（服务端没回 usage）/ `disabled`（met
 /memory edit <id> 标题 [:: 正文]
 /memory reject <id> [理由]
 /memory list
-/memory remember fact|preference 标题 [:: 正文]
+/memory remember fact|preference|feedback 标题 [:: 正文]
 /memory forget <id>
 /memory rebuild
 /memory stale
-/memory verify|refresh <id>
+/memory verify <id>
+/memory refresh <id>
+/memory migrate
+/memory show <id>
+/memory open [id]
 /memory why [id]
 ```
 
-`on/off` 改本场总状态；`use` 控召回；`learn` 分 `off/review/auto` 三档。默认 `review` 把每轮抽出的候选放进待审箱，`accept/edit/reject` 再处置；`auto` 须全局明确授权。`why` 解释上一轮为何命中或落选；`stale/verify/refresh` 管指纹漂移与过期项。详见[项目记忆](memory-system-design.md)。
+`on/off` 改本场总状态；`use` 控召回；`learn` 控学习档位(只能降到全局授权以内)。`review` 看待审候选,`accept`/`edit`/`reject` 处置。`remember` 排后台任务(feedback 只收用户明说的纠正)，`forget` 归档而非直接抹账，`rebuild` 从主题 Markdown 重建 catalog 与 index，`stale` 查陈旧，`verify`/`refresh` 续命，`migrate` 把旧格式主题批迁 front matter(先列账、备份、确认后动盘)，`show` 看单份主题，`open` 用 `$VISUAL/$EDITOR` 编辑主题或索引(编辑回来先校验,坏 YAML 不覆盖原件)，`why` 对上一轮召回对账。详见[项目记忆](memory-system-design.md)。
 
 ## 个性与语言
 

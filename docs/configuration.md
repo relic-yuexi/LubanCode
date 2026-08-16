@@ -179,6 +179,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
     "use": true,
     "learn": "review",
     "generate": true,
+    "user_enabled": false,
     "max_index_bytes": 16384,
     "max_retrieval_bytes": 8192,
     "max_results": 3
@@ -187,16 +188,16 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 ```
 
 - `enabled` 管总开关。
-- `use` 管同步召回。每轮从本地 catalog 排级，最多取 `max_results` 份正文。
-- `learn` 是学习档：`off` 不抽取不写入；`review` 每轮收尾抽候选，等用户审；`auto` 只把证据与置信度过闸的候选直写。默认 `review`，`auto` 只能由全局配置授权。
-- `generate` 是旧兼容开关；显式 `false` 等价于 `learn=off`。新配置优先写 `learn`。
-- `max_index_bytes` 限制人读 `index.md` 的大小；它不再整份注入 prompt。`max_retrieval_bytes` 限制命中正文总字节数；预算都须是正整数。
+- `user_enabled` 管用户级记忆(跨项目偏好与反馈,住 `~/.lubancode/memory/user/`),默认关。只认全局配置授权;项目配置无权开启或写入,只能收窄成关。
+- `use` 管同步召回。每轮只检索机器 catalog，最多注入 `max_results` 份正文，总计不超过 `max_retrieval_bytes` 字节。
+- `learn` 管学习档位，三选一：`off` 不提候选不写入；`review`(默认)每回合结束用当前模型提 0～3 条候选进待审箱，`/memory review` 审过才入库；`auto` 自动写入，只认全局配置显式授权。旧写法 `generate` 仍可读：`generate=false` 等价 `learn=off`，`generate=true` 等价 `learn=review`。
+- `max_index_bytes` 限制 `index.md` 文件本身的大小(它只给人看，不进 prompt)；`max_retrieval_bytes` 限制每轮命中正文总字节数；三项预算都须是正整数。
 
-项目级 `.lubancode/config.json` 不能自行把记忆从关改开。全局开过后，项目配置可以关闭，或收紧 `use`、`learn` 与预算；不能把 `review` 抬成 `auto`。陌生仓库便不能替用户开启自动写入。
+项目级 `.lubancode/config.json` 不能自行把记忆从关改开。全局开过后，项目配置可以关闭，或收紧 `use`、`learn` 与预算——项目级只能降档，不能替用户升到 `auto`。陌生仓库便不能替用户开启聊天提取。
 
 Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正文放在 `~/.lubancode/projects/<项目key>/memory/`，分 `facts/` 与 `preferences/`；`index.md` 和 `.state/catalog.json` 都可从主题文件重建。记忆不写进会话 history，也不随 `/export` 导出。
 
-交互会话可用 `/memory` 看状态。`/memory learn off|review|auto` 只在全局授权上限内切本场；`review/accept/edit/reject` 管待审箱，`why` 查上一轮召回，`stale/verify/refresh` 管陈旧事实。`remember`、`list`、`forget`、`rebuild` 仍可显式维护。
+交互会话可用 `/memory` 看状态。`/memory use on|off` 与 `/memory learn off|review|auto` 只改本场(只能降到全局授权以内)；`/memory review` 看待审候选，`accept`/`edit`/`reject` 处置；`/memory remember fact|preference 标题 [:: 正文]` 可显式排一条；`list`、`forget <id>`、`rebuild`、`stale`、`verify <id>`、`why [id]` 分别用来查看、归档、重建、查陈旧、续命与对账。
 
 ### providers 数组字段
 

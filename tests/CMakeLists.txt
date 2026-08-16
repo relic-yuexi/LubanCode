@@ -112,6 +112,8 @@ add_executable(lubancode_tests
   test_doctor.cpp
   # memory 回合抽取(分型/转写/JSON 解析,纯函数)。
   test_memory_extract.cpp
+  # memory schema 3 front matter(往返字节稳定/坑人字符/双格式剥壳)。
+  test_memory_frontmatter.cpp
   # memory 检索评测尺子(固定语料,Recall/Precision/注入字节/stale 拦截率)。
   test_memory_retrieval.cpp
   # memory 中文检索评测尺子(100 条中文语料,召回率/误命中率/注入字节 P50/P95)。
@@ -153,7 +155,8 @@ endif()
 # 路径——ctest 跑的时候工作目录不一定是 tests/ 源码目录,不能瞎猜相对路径。
 target_compile_definitions(lubancode_tests PRIVATE
   LUBANCODE_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
-  LUBANCODE_TEST_OFFICIAL_SKILLS_DIR="${CMAKE_SOURCE_DIR}/skills")
+  LUBANCODE_TEST_OFFICIAL_SKILLS_DIR="${CMAKE_SOURCE_DIR}/skills"
+  LUBANCODE_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 # M7:真 DLL 加载测试的靶子——示例插件 hello_plugin(直接编 examples/ 里那
 # 份源码,顺带验证示例真的能编)+ api_version 填错的 bad_version_plugin。

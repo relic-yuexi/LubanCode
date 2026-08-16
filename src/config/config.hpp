@@ -124,6 +124,9 @@ struct MemoryConfig {
     bool enabled = false;
     bool use = true;
     bool generate = true;
+    // 用户级记忆(跨项目偏好/反馈,住 ~/.lubancode/memory/user/):另设一道
+    // 全局授权,默认关。项目配置无权开启或写入,只能收窄成关。
+    bool user_enabled = false;
     // 学习档位(0.30.x 候审箱):off 不提候选不写入;review 提候选、用户
     // 审过才入库(默认);auto 自动写入,只认全局配置显式授权——项目配置
     // 只能收窄(off/review),不能替用户升到 auto。老 generate=false 等价
@@ -139,6 +142,7 @@ struct MemoryFileConfig {
     std::optional<bool> enabled;
     std::optional<bool> use;
     std::optional<bool> generate;
+    std::optional<bool> user_enabled;
     std::optional<std::string> learn;
     std::optional<std::size_t> max_index_bytes;
     std::optional<std::size_t> max_retrieval_bytes;

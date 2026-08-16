@@ -1402,6 +1402,8 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
             return std::unexpected(result.error());
         if (auto result = parse_bool("generate", memory.generate); !result.has_value())
             return std::unexpected(result.error());
+        if (auto result = parse_bool("user_enabled", memory.user_enabled); !result.has_value())
+            return std::unexpected(result.error());
         if (field.contains("learn")) {
             if (!field["learn"].is_string()) {
                 return std::unexpected("配置文件 " + file_path_for_error +
@@ -2085,6 +2087,11 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         }
         if (source.use.has_value()) target.use = *source.use;
         if (source.generate.has_value()) target.generate = *source.generate;
+        // 用户级记忆只认全局授权:项目配置写 true 不生效,写 false 收窄成关。
+        if (source.user_enabled.has_value()) {
+            if (!*source.user_enabled) target.user_enabled = false;
+            else if (global_level) target.user_enabled = true;
+        }
         if (source.learn.has_value()) {
             if (global_level) {
                 target.learn = *source.learn;

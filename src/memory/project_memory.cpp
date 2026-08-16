@@ -18,6 +18,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "memory/frontmatter.hpp"
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
 
@@ -27,8 +28,9 @@ namespace {
 
 namespace fs = std::filesystem;
 
-constexpr std::string_view kMetaOpen = "<!-- lubancode-memory\n";
-constexpr std::string_view kMetaClose = "\n-->";
+// 旧格式(schema 1/2)的元数据标记,常量移进 frontmatter.hpp 共用。
+constexpr std::string_view kMetaOpen = frontmatter::kLegacyMetaOpen;
+constexpr std::string_view kMetaClose = frontmatter::kLegacyMetaClose;
 constexpr std::size_t kMaxTopicBytes = 8 * 1024;
 constexpr std::size_t kMaxTitleBytes = 200;
 constexpr std::size_t kMaxSummaryBytes = 500;
@@ -226,7 +228,7 @@ bool IsValidId(const std::string& id) {
             return false;
         }
     }
-    return id.starts_with("fact.") || id.starts_with("preference.");
+    return id.starts_with("fact.") || id.starts_with("preference.") || id.starts_with("feedback.");
 }
 
 bool IsSafeRelativePath(const std::string& raw) {
@@ -282,14 +284,30 @@ bool LooksLikeDateOrIsoTime(const std::string& raw) {
 }
 
 std::expected<void, std::string> ValidateScope(const MemoryScope& scope) {
+    if (scope.level == "user") {
+        // 用户级记忆(跨项目偏好/反馈):不放仓库事实,不假借项目路径作
+        // 证据——证据清一色要在写入处再拦一道,这里先守 scope 自身齐整。
+        if (scope.kind != "user") {
+            return std::unexpected("scope.level=user 时 kind 须为 user");
+        }
+        if (!scope.value.empty()) {
+            return std::unexpected("用户级记忆不带 scope.value(它不属于任何项目)");
+        }
+        return {};
+    }
+    if (scope.level != "project" && !scope.level.empty()) {
+        return std::unexpected("scope.level 只认 project 或 user");
+    }
+    if (scope.kind == "user") {
+        return std::unexpected("scope.kind=user 须配 level=user");
+    }
     if (scope.kind == "project") return {};
     if (scope.kind == "global") {
-        // 跨项目/全局经验本期不做:键位预留(schema 注释见 MemoryScope),
-        // 现在写入只会裂出第二套分账,先拒。
-        return std::unexpected("scope=global 本期未开放,跨项目经验暂不收");
+        // 跨项目/全局经验按用户层分账:要走 level=user 那条路,不认旧键。
+        return std::unexpected("scope=global 不再单独开放,跨项目经验走 level=user");
     }
     if (scope.kind != "subtree" && scope.kind != "path") {
-        return std::unexpected("scope.kind 只认 project、subtree 或 path");
+        return std::unexpected("scope.kind 只认 project、subtree、path 或 user");
     }
     if (!IsSafeRelativePath(scope.value)) {
         return std::unexpected("scope=subtree/path 须带项目内相对路径");
@@ -309,11 +327,25 @@ std::expected<void, std::string> ValidateSaveRequest(const SaveRequest& request)
     }
     if (!request.id.empty()) {
         if (!IsValidId(request.id)) {
-            return std::unexpected("记忆 id 只许字母、数字、点、短横线、下划线，并须以 fact. 或 preference. 开头");
+            return std::unexpected("记忆 id 只许字母、数字、点、短横线、下划线，并须以 fact.、preference. 或 feedback. 开头");
         }
         const std::string want = MemoryKindName(request.kind) + ".";
         if (!request.id.starts_with(want)) {
             return std::unexpected("记忆 id 的前缀与 kind 不符");
+        }
+    }
+    // feedback 只收用户明说的纠正:推断(inferred)不许直写,须先过待审
+    // 层或由用户改实。
+    if (request.kind == MemoryKind::Feedback && request.confidence == "inferred") {
+        return std::unexpected("feedback 只收用户明说的纠正(confidence 须为 user-stated),模型推断不得直写");
+    }
+    // 用户级记忆只收跨项目偏好/反馈:不放仓库事实,不假借项目路径作证据。
+    if (request.scope.level == "user") {
+        if (request.kind == MemoryKind::Fact) {
+            return std::unexpected("用户级记忆不放仓库事实(fact 只住项目层)");
+        }
+        if (!request.paths.empty() || !request.evidence.empty()) {
+            return std::unexpected("用户级记忆不得假借项目路径作证据,paths/evidence 须为空");
         }
     }
     if (request.keywords.size() > kMaxKeywords || request.paths.size() > kMaxPaths) {
@@ -426,8 +458,9 @@ nlohmann::json EntryMetadata(const StoredEntry& entry) {
         evidence.push_back(nlohmann::json{{"path", item.path}, {"symbol", item.symbol}});
     }
     return nlohmann::json{
-        {"schema", 2},
+        {"schema", entry.public_entry.schema},
         {"id", entry.public_entry.id},
+        {"name", entry.public_entry.name},
         {"kind", MemoryKindName(entry.public_entry.kind)},
         {"title", entry.public_entry.title},
         {"summary", entry.public_entry.summary},
@@ -435,8 +468,10 @@ nlohmann::json EntryMetadata(const StoredEntry& entry) {
         {"paths", entry.public_entry.paths},
         {"status", entry.public_entry.status},
         {"updated_at", entry.public_entry.updated_at},
+        {"created_at", entry.public_entry.created_at},
         {"source_sessions", entry.public_entry.source_sessions},
-        {"scope", nlohmann::json{{"kind", entry.public_entry.scope.kind},
+        {"scope", nlohmann::json{{"level", entry.public_entry.scope.level},
+                                 {"kind", entry.public_entry.scope.kind},
                                  {"value", entry.public_entry.scope.value}}},
         {"evidence", evidence},
         {"confidence", entry.public_entry.confidence},
@@ -449,20 +484,25 @@ nlohmann::json EntryMetadata(const StoredEntry& entry) {
 
 std::expected<StoredEntry, std::string> ParseStoredEntry(const nlohmann::json& meta,
                                                          const std::string& relative_file) {
-    // schema 1 平滑迁移:老主题照读,新字段填缺省值(confidence 按 kind 推
-    // 定,scope=project);下次同 id 保存或核验时自然写成 schema 2,老正文
-    // 一字不动。
+    // schema 1/2 平滑迁移:老主题照读,新字段填缺省值(confidence 按 kind 推
+    // 定,scope=project);下次同 id 保存或核验时自然写成 schema 3,老正文
+    // 一字不动。schema 3 是 front matter 主题;catalog 里存的是同一份内部
+    // 结构(带 name/created_at),字段对齐读。
     const int schema = meta.value("schema", 0);
-    if (!meta.is_object() || (schema != 1 && schema != 2)) {
+    if (!meta.is_object() || (schema != 1 && schema != 2 && schema != 3)) {
         return std::unexpected("记忆元数据 schema 不受支持");
     }
     StoredEntry entry;
+    entry.public_entry.schema = schema;
     entry.public_entry.id = meta.value("id", std::string());
+    entry.public_entry.name = meta.value("name", std::string());
     entry.public_entry.title = meta.value("title", std::string());
     entry.public_entry.summary = meta.value("summary", std::string());
     entry.public_entry.file = relative_file;
     entry.public_entry.status = meta.value("status", std::string("active"));
     entry.public_entry.updated_at = meta.value("updated_at", std::string());
+    entry.public_entry.created_at = meta.value("created_at", std::string());
+    if (entry.public_entry.created_at.empty()) entry.public_entry.created_at = entry.public_entry.updated_at;
     if (!IsSafeRelativePath(relative_file)) {
         return std::unexpected("记忆文件路径越出 memory 根");
     }
@@ -492,6 +532,7 @@ std::expected<StoredEntry, std::string> ParseStoredEntry(const nlohmann::json& m
         }
     }
     if (meta.contains("scope") && meta["scope"].is_object()) {
+        entry.public_entry.scope.level = meta["scope"].value("level", std::string("project"));
         entry.public_entry.scope.kind = meta["scope"].value("kind", std::string("project"));
         entry.public_entry.scope.value = meta["scope"].value("value", std::string());
     }
@@ -521,10 +562,39 @@ std::expected<StoredEntry, std::string> ParseStoredEntry(const nlohmann::json& m
 }
 
 std::expected<StoredEntry, std::string> ParseTopicFile(const fs::path& path,
-                                                       const fs::path& memory_dir) {
+                                                       const fs::path& memory_dir,
+                                                       const char* layer = "project") {
     const std::string text = ReadFile(path);
+    std::error_code ec;
+    const fs::path relative = fs::relative(path, memory_dir, ec);
+    const std::string relative_file = ec ? PathUtf8(path.filename()) : PathUtf8(relative);
+    // 双格式 reader:schema 3 走 front matter(YAML),schema 1/2 走 HTML
+    // 注释里的严格 JSON。新写一律 schema 3,旧主题照读照召回。
+    if (text.starts_with("---\n") || text.starts_with("---\r\n")) {
+        auto parsed = frontmatter::Parse(text);
+        if (!parsed.has_value()) return std::unexpected(parsed.error());
+        StoredEntry stored;
+        stored.public_entry = std::move(parsed->entry);
+        stored.fingerprints = std::move(parsed->fingerprints);
+        stored.public_entry.file = relative_file;
+        if (!IsSafeRelativePath(relative_file)) {
+            return std::unexpected("记忆文件路径越出 memory 根");
+        }
+        if (!IsValidId(stored.public_entry.id)) {
+            return std::unexpected("记忆元数据缺 id 或 id 不合法");
+        }
+        for (const std::string& item : stored.public_entry.paths) {
+            if (!IsSafeRelativePath(item)) {
+                return std::unexpected("记忆 paths 只许项目内相对路径: " + item);
+            }
+        }
+        if (stored.public_entry.scope.level != layer) {
+            return std::unexpected(std::string("scope.level 与所在目录层不符(应为 ") + layer + ")");
+        }
+        return stored;
+    }
     if (!text.starts_with(kMetaOpen)) {
-        return std::unexpected("缺 lubancode-memory 元数据");
+        return std::unexpected("缺 lubancode-memory 元数据或 front matter");
     }
     const std::size_t end = text.find(kMetaClose, kMetaOpen.size());
     if (end == std::string::npos) {
@@ -536,14 +606,18 @@ std::expected<StoredEntry, std::string> ParseTopicFile(const fs::path& path,
     } catch (const nlohmann::json::exception& e) {
         return std::unexpected("记忆元数据不是合法 JSON: " + std::string(e.what()));
     }
-    std::error_code ec;
-    const fs::path relative = fs::relative(path, memory_dir, ec);
-    return ParseStoredEntry(meta, ec ? PathUtf8(path.filename()) : PathUtf8(relative));
+    return ParseStoredEntry(meta, relative_file);
 }
 
-std::vector<StoredEntry> ScanTopics(const fs::path& memory_dir, std::vector<std::string>* warnings = nullptr) {
+std::vector<StoredEntry> ScanTopics(const fs::path& memory_dir, std::vector<std::string>* warnings = nullptr,
+                                    const char* layer = "project") {
     std::vector<StoredEntry> entries;
-    for (const char* folder : {"facts", "preferences"}) {
+    // 用户层不放 facts:跨项目只有偏好与反馈,仓库事实住项目层。
+    const std::vector<const char*> folders = layer == std::string_view("user")
+                                                 ? std::vector<const char*>{"preferences", "feedback"}
+                                                 : std::vector<const char*>{"facts", "preferences",
+                                                                            "feedback"};
+    for (const char* folder : folders) {
         const fs::path root = memory_dir / folder;
         std::error_code ec;
         fs::directory_iterator it(root, ec);
@@ -554,12 +628,32 @@ std::vector<StoredEntry> ScanTopics(const fs::path& memory_dir, std::vector<std:
             if (!item.is_regular_file(ec) || item.path().extension() != ".md") {
                 continue;
             }
-            auto parsed = ParseTopicFile(item.path(), memory_dir);
+            auto parsed = ParseTopicFile(item.path(), memory_dir, layer);
             if (parsed.has_value()) {
                 entries.push_back(std::move(*parsed));
             } else if (warnings != nullptr) {
                 warnings->push_back(PathUtf8(item.path()) + ": " + parsed.error());
             }
+        }
+    }
+    // 同 id 撞车:两份都停成 conflict,不凭时间偷偷选一份。重建 catalog、
+    // list、召回全认这个状态(conflict 不注入)。
+    std::unordered_map<std::string, std::vector<std::size_t>> by_id;
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        by_id[entries[i].public_entry.id].push_back(i);
+    }
+    for (auto& [id, indexes] : by_id) {
+        if (indexes.size() < 2) continue;
+        for (const std::size_t index : indexes) {
+            entries[index].public_entry.status = "conflict";
+        }
+        if (warnings != nullptr) {
+            std::string files;
+            for (const std::size_t index : indexes) {
+                if (!files.empty()) files += ", ";
+                files += entries[index].public_entry.file;
+            }
+            warnings->push_back("两份主题撞同一 id " + id + ": " + files + ";已标 conflict,须手工处置");
         }
     }
     std::sort(entries.begin(), entries.end(), [](const StoredEntry& a, const StoredEntry& b) {
@@ -571,22 +665,23 @@ std::vector<StoredEntry> ScanTopics(const fs::path& memory_dir, std::vector<std:
     return entries;
 }
 
-std::vector<StoredEntry> LoadCatalog(const fs::path& memory_dir, std::string* error = nullptr) {
+std::vector<StoredEntry> LoadCatalog(const fs::path& memory_dir, std::string* error = nullptr,
+                                     const char* layer = "project") {
     const fs::path path = memory_dir / ".state" / "catalog.json";
     const std::string text = ReadFile(path);
     if (text.empty()) {
-        return ScanTopics(memory_dir);
+        return ScanTopics(memory_dir, nullptr, layer);
     }
     nlohmann::json root;
     try {
         root = nlohmann::json::parse(text);
     } catch (const nlohmann::json::exception& e) {
         if (error != nullptr) *error = e.what();
-        return ScanTopics(memory_dir);
+        return ScanTopics(memory_dir, nullptr, layer);
     }
     if (!root.is_object() || !root.contains("entries") || !root["entries"].is_array()) {
         if (error != nullptr) *error = "catalog 结构不对";
-        return ScanTopics(memory_dir);
+        return ScanTopics(memory_dir, nullptr, layer);
     }
     std::vector<StoredEntry> entries;
     for (const auto& item : root["entries"]) {
@@ -617,12 +712,16 @@ std::string EscapeMarkdownLabel(std::string value) {
     return value;
 }
 
-std::string BuildIndex(const std::vector<StoredEntry>& entries) {
+std::string BuildIndex(const std::vector<StoredEntry>& entries, const char* layer = "project") {
     std::ostringstream out;
-    out << "# Project Memory\n\n"
+    out << (layer == std::string_view("user") ? "# User Memory\n\n" : "# Project Memory\n\n")
         << "<!-- 此文件由 LubanCode 生成。请改主题文件，不要直接改索引。 -->\n\n";
-    for (const auto kind : {MemoryKind::Fact, MemoryKind::Preference}) {
-        out << (kind == MemoryKind::Fact ? "## Facts\n\n" : "## Preferences\n\n");
+    const bool user_layer = layer == std::string_view("user");
+    for (const auto [kind, heading] : {std::pair{MemoryKind::Fact, "Facts"},
+                                       std::pair{MemoryKind::Preference, "Preferences"},
+                                       std::pair{MemoryKind::Feedback, "Feedback"}}) {
+        if (user_layer && kind == MemoryKind::Fact) continue;  // 用户层不放事实
+        out << "## " << heading << "\n\n";
         bool any = false;
         for (const auto& stored : entries) {
             const MemoryEntry& entry = stored.public_entry;
@@ -659,10 +758,7 @@ std::string FileFingerprint(const fs::path& path) {
 }
 
 std::string StripTopicMetadata(std::string text) {
-    if (!text.starts_with(kMetaOpen)) return text;
-    const std::size_t end = text.find(kMetaClose, kMetaOpen.size());
-    if (end == std::string::npos) return text;
-    return Trim(text.substr(end + kMetaClose.size()));
+    return frontmatter::StripTopicMetadata(std::move(text));
 }
 
 std::vector<std::string> Utf8Units(const std::string& text) {
@@ -1111,9 +1207,10 @@ constexpr int Bm25Points(double bm25) {
 // 过线;单个常见中文双字片段(idf 低,BM25 折算只有一两分)远远不够。
 constexpr int kMinRecallScore = 8;
 
-// scope 判定:project 恒适用;subtree/path 要求 cwd 落在范围内(相对
-// 路径前缀对齐)。不适用 = 不注入("该用才用")。
+// scope 判定:project 恒适用;user 层跨项目恒适用;subtree/path 要求 cwd
+// 落在范围内(相对路径前缀对齐)。不适用 = 不注入("该用才用")。
 bool ScopeApplies(const MemoryEntry& entry, const std::string& cwd_relative) {
+    if (entry.scope.level == "user" || entry.scope.kind == "user") return true;
     if (entry.scope.kind == "project" || entry.scope.value.empty()) return true;
     if (cwd_relative.empty()) return false;
     const std::string scope = LowerAscii(entry.scope.value);
@@ -1177,6 +1274,7 @@ void WriteRecallTrace(const fs::path& memory_dir, const RecallTrace& trace) {
     for (const RecallTraceEntry& entry : trace.entries) {
         root["entries"].push_back(nlohmann::json{
             {"id", entry.id},
+            {"layer", entry.layer},
             {"score", entry.score},
             {"hard_hits", entry.hard_hits},
             {"term_hits", entry.term_hits},
@@ -1187,6 +1285,7 @@ void WriteRecallTrace(const fs::path& memory_dir, const RecallTrace& trace) {
             {"scope_blocked", entry.scope_blocked},
             {"expired", entry.expired},
             {"duplicate_dropped", entry.duplicate_dropped},
+            {"layer_superseded", entry.layer_superseded},
             {"bytes", entry.bytes},
         });
     }
@@ -1234,6 +1333,7 @@ RecallTrace ReadRecallTrace(const fs::path& memory_dir) {
             if (!item.is_object()) continue;
             RecallTraceEntry entry;
             entry.id = item.value("id", std::string());
+            entry.layer = item.value("layer", std::string("project"));
             entry.score = item.value("score", 0);
             entry.hard_hits = item.value("hard_hits", 0);
             entry.term_hits = item.value("term_hits", 0);
@@ -1244,6 +1344,7 @@ RecallTrace ReadRecallTrace(const fs::path& memory_dir) {
             entry.scope_blocked = item.value("scope_blocked", false);
             entry.expired = item.value("expired", false);
             entry.duplicate_dropped = item.value("duplicate_dropped", false);
+            entry.layer_superseded = item.value("layer_superseded", false);
             entry.bytes = item.value("bytes", std::size_t{0});
             trace.entries.push_back(std::move(entry));
         }
@@ -1284,8 +1385,31 @@ std::expected<void, std::string> WriteProjectMetadata(const nlohmann::json& job)
 }
 
 std::string BuildTopicText(const StoredEntry& entry, const std::string& content) {
-    return std::string(kMetaOpen) + EntryMetadata(entry).dump() + std::string(kMetaClose) +
-           "\n\n# " + OneLine(entry.public_entry.title, kMaxTitleBytes) + "\n\n" + Trim(content) + "\n";
+    return frontmatter::BuildTopicText(entry.public_entry, entry.fingerprints, content);
+}
+
+// id 去类型前缀得 name(schema 3 的文件 slug)。id 本就验证过字符集,这里
+// 只做切分与兜底。
+std::string NameFromId(const std::string& id, const std::string& kind_name) {
+    const std::string prefix = kind_name + ".";
+    if (id.starts_with(prefix) && id.size() > prefix.size()) {
+        return id.substr(prefix.size());
+    }
+    return id;
+}
+
+// canonical 路径:schema 3 一律住 <类型目录>/<name>.md。
+const char* KindFolder(MemoryKind kind) {
+    switch (kind) {
+        case MemoryKind::Fact: return "facts";
+        case MemoryKind::Preference: return "preferences";
+        case MemoryKind::Feedback: return "feedback";
+    }
+    return "facts";
+}
+
+std::string CanonicalTopicFile(MemoryKind kind, const std::string& name) {
+    return std::string(KindFolder(kind)) + "/" + name + ".md";
 }
 
 std::expected<void, std::string> ProcessUpsert(const nlohmann::json& job,
@@ -1309,6 +1433,7 @@ std::expected<void, std::string> ProcessUpsert(const nlohmann::json& job,
     request.confidence = job.value("confidence", std::string());
     request.expires_at = job.value("expires_at", std::string());
     if (job.contains("scope") && job["scope"].is_object()) {
+        request.scope.level = job["scope"].value("level", std::string("project"));
         request.scope.kind = job["scope"].value("kind", std::string("project"));
         request.scope.value = job["scope"].value("value", std::string());
     }
@@ -1337,6 +1462,7 @@ std::expected<void, std::string> ProcessUpsert(const nlohmann::json& job,
 
     StoredEntry updated;
     if (existing != nullptr) updated = *existing;
+    const std::string previous_file = updated.public_entry.file;
     updated.public_entry.id = id;
     updated.public_entry.kind = request.kind;
     updated.public_entry.title = OneLine(request.title, kMaxTitleBytes);
@@ -1346,8 +1472,16 @@ std::expected<void, std::string> ProcessUpsert(const nlohmann::json& job,
     updated.public_entry.paths = request.paths;
     updated.public_entry.status = "active";
     updated.public_entry.updated_at = NowIsoUtc();
-    // 保存即一次核验:盖 last_verified_at。schema 2 新字段全量落盘。
+    // 保存即一次核验:盖 last_verified_at。schema 3 新字段一并落定:name 从
+    // id 切出来,created_at 保住旧值(老主题用其 updated_at 补)。
     updated.public_entry.last_verified_at = updated.public_entry.updated_at;
+    if (updated.public_entry.created_at.empty()) {
+        updated.public_entry.created_at = existing != nullptr ? existing->public_entry.updated_at
+                                                             : std::string();
+        if (updated.public_entry.created_at.empty()) {
+            updated.public_entry.created_at = updated.public_entry.updated_at;
+        }
+    }
     if (!request.confidence.empty()) {
         updated.public_entry.confidence = request.confidence;
     } else {
@@ -1362,12 +1496,19 @@ std::expected<void, std::string> ProcessUpsert(const nlohmann::json& job,
                   request.source_session) == updated.public_entry.source_sessions.end()) {
         updated.public_entry.source_sessions.push_back(request.source_session);
     }
-    const std::string folder = request.kind == MemoryKind::Fact ? "facts" : "preferences";
-    if (updated.public_entry.file.empty()) {
-        updated.public_entry.file = folder + "/" + Slug(id) + ".md";
-    }
+    updated.public_entry.schema = 3;
+    updated.public_entry.name = NameFromId(id, MemoryKindName(request.kind));
+    updated.public_entry.file = CanonicalTopicFile(request.kind, updated.public_entry.name);
+    // 指纹盖住证据路径 ∪ paths(schema 3 里两者本就该是一份)。
     updated.fingerprints = nlohmann::json::object();
-    for (const std::string& relative : request.paths) {
+    std::vector<std::string> fingerprint_paths = request.paths;
+    for (const MemoryEvidence& proof : request.evidence) {
+        if (std::find(fingerprint_paths.begin(), fingerprint_paths.end(), proof.path) ==
+            fingerprint_paths.end()) {
+            fingerprint_paths.push_back(proof.path);
+        }
+    }
+    for (const std::string& relative : fingerprint_paths) {
         const std::string hash = FileFingerprint(project_root / Utf8Path(relative));
         if (!hash.empty()) updated.fingerprints[relative] = hash;
     }
@@ -1375,13 +1516,28 @@ std::expected<void, std::string> ProcessUpsert(const nlohmann::json& job,
     const fs::path topic = memory_dir / Utf8Path(updated.public_entry.file);
     auto written = AtomicWrite(topic, BuildTopicText(updated, request.content));
     if (!written.has_value()) return written;
-    return RebuildMemoryIndex(memory_dir);
+    // 旧文件名不同(老格式或换名)才清;同一把项目锁里先写新再删旧,中途
+    // 失败旧文件仍在,新文件不半截落地。
+    if (!previous_file.empty() && previous_file != updated.public_entry.file) {
+        std::error_code remove_ec;
+        fs::remove(memory_dir / Utf8Path(previous_file), remove_ec);
+    }
+    return RebuildMemoryIndex(memory_dir, request.scope.level == "user");
+}
+
+// 某层 catalog 里有没有这个 id(Forget/Verify 路由用)。
+bool LayerHasEntry(const fs::path& memory_dir, const std::string& id) {
+    for (const auto& stored : LoadCatalog(memory_dir, nullptr, "user")) {
+        if (stored.public_entry.id == id) return true;
+    }
+    return false;
 }
 
 std::expected<void, std::string> ProcessForget(const nlohmann::json& job, const fs::path& memory_dir) {
     const std::string id = job.value("id", std::string());
     if (!IsValidId(id)) return std::unexpected("forget job 的 id 不合法");
-    const auto entries = ScanTopics(memory_dir);
+    const bool user_layer = job.value("layer", std::string("project")) == "user";
+    const auto entries = ScanTopics(memory_dir, nullptr, user_layer ? "user" : "project");
     for (const auto& entry : entries) {
         if (entry.public_entry.id != id) continue;
         std::error_code ec;
@@ -1393,7 +1549,7 @@ std::expected<void, std::string> ProcessForget(const nlohmann::json& job, const 
         }
         fs::rename(memory_dir / Utf8Path(entry.public_entry.file), destination, ec);
         if (ec) return std::unexpected("归档记忆失败: " + ec.message());
-        return RebuildMemoryIndex(memory_dir);
+        return RebuildMemoryIndex(memory_dir, user_layer);
     }
     return std::unexpected("找不到记忆 id: " + id);
 }
@@ -1405,9 +1561,11 @@ std::expected<void, std::string> ProcessVerify(const nlohmann::json& job, const 
     const std::string id = job.value("id", std::string());
     if (!IsValidId(id)) return std::unexpected("verify job 的 id 不合法");
     const bool refresh = job.value("refresh", false);
-    auto entries = ScanTopics(memory_dir);
+    const bool user_layer = job.value("layer", std::string("project")) == "user";
+    auto entries = ScanTopics(memory_dir, nullptr, user_layer ? "user" : "project");
     for (auto& stored : entries) {
         if (stored.public_entry.id != id) continue;
+        const std::string previous_file = stored.public_entry.file;
         stored.public_entry.last_verified_at = NowIsoUtc();
         if (refresh || stored.public_entry.status != "conflict") {
             stored.public_entry.status = "active";
@@ -1417,11 +1575,25 @@ std::expected<void, std::string> ProcessVerify(const nlohmann::json& job, const 
             const std::string hash = FileFingerprint(project_root / Utf8Path(relative));
             if (!hash.empty()) stored.fingerprints[relative] = hash;
         }
-        const std::string content = StripTopicMetadata(ReadFile(memory_dir / Utf8Path(stored.public_entry.file)));
+        // 核验顺手升 schema 3:name/created_at 落定,文件挪去规范名。正文一
+        // 字不动。
+        stored.public_entry.schema = 3;
+        stored.public_entry.name = NameFromId(stored.public_entry.id,
+                                              MemoryKindName(stored.public_entry.kind));
+        if (stored.public_entry.created_at.empty()) {
+            stored.public_entry.created_at = stored.public_entry.updated_at;
+        }
+        stored.public_entry.file = CanonicalTopicFile(stored.public_entry.kind, stored.public_entry.name);
+        const std::string content =
+            frontmatter::StripTitleHeading(StripTopicMetadata(ReadFile(memory_dir / Utf8Path(previous_file))));
         auto written = AtomicWrite(memory_dir / Utf8Path(stored.public_entry.file),
                                    BuildTopicText(stored, content));
         if (!written.has_value()) return written;
-        return RebuildMemoryIndex(memory_dir);
+        if (!previous_file.empty() && previous_file != stored.public_entry.file) {
+            std::error_code remove_ec;
+            fs::remove(memory_dir / Utf8Path(previous_file), remove_ec);
+        }
+        return RebuildMemoryIndex(memory_dir, user_layer);
     }
     return std::unexpected("找不到记忆 id: " + id);
 }
@@ -1439,8 +1611,12 @@ std::expected<void, std::string> ProcessJob(const fs::path& job_path,
     }
     const fs::path memory_dir = Utf8Path(job.value("memory_dir", std::string()));
     const fs::path project_root = Utf8Path(job.value("project_root", std::string()));
-    if (memory_dir.empty() || !IsWithin(memory_dir, home_lubancode / "projects")) {
-        return std::unexpected("job 的 memory_dir 越出项目记忆根");
+    // job 的落点只认两处:某项目的 memory/,或用户级 memory/user/。别的
+    // 一律越界拒办。
+    const bool user_job = IsWithin(memory_dir, home_lubancode / "memory" / "user");
+    if (memory_dir.empty() ||
+        (!IsWithin(memory_dir, home_lubancode / "projects") && !user_job)) {
+        return std::unexpected("job 的 memory_dir 越出项目/用户记忆根");
     }
 
     DirectoryLock project_lock(memory_dir / ".state" / "memory.lock");
@@ -1604,8 +1780,9 @@ std::vector<ScoredEntry> RankEntries(const std::vector<MemoryEntry>& entries, co
     }
 
     // 同分:先硬命中多的,再比可信档(user-stated > verified > inferred),
-    // 再看最近核验时间(核验过的老卡不输没核验的新卡),最后按 id 定序,
-    // 全链路确定——去重让位时也是这一序。
+    // 再看最近核验时间(核验过的老卡不输没核验的新卡),项目层压过用户层
+    // (规格"项目层 feedback/preference 压过用户层同主题"),最后按 id 定
+    // 序,全链路确定——去重让位时也是这一序。
     const auto confidence_rank = [](const std::string& confidence) {
         if (confidence == "user-stated") return 3;
         if (confidence == "verified") return 2;
@@ -1622,6 +1799,9 @@ std::vector<ScoredEntry> RankEntries(const std::vector<MemoryEntry>& entries, co
         const std::string& b_verified = b.entry->last_verified_at.empty() ? b.entry->updated_at
                                                                           : b.entry->last_verified_at;
         if (a_verified != b_verified) return a_verified > b_verified;
+        if (a.entry->scope.level != b.entry->scope.level) {
+            return a.entry->scope.level != "user";  // 项目层在前
+        }
         return a.entry->id < b.entry->id;
     });
     return scored;
@@ -1679,7 +1859,12 @@ std::expected<ProjectIdentity, std::string> ResolveProjectIdentity(
 }
 
 std::string MemoryKindName(MemoryKind kind) {
-    return kind == MemoryKind::Fact ? "fact" : "preference";
+    switch (kind) {
+        case MemoryKind::Fact: return "fact";
+        case MemoryKind::Preference: return "preference";
+        case MemoryKind::Feedback: return "feedback";
+    }
+    return "fact";
 }
 
 std::string QueryOriginName(QueryOrigin origin) {
@@ -1697,7 +1882,8 @@ std::expected<MemoryKind, std::string> ParseMemoryKind(const std::string& raw) {
     const std::string lower = LowerAscii(raw);
     if (lower == "fact") return MemoryKind::Fact;
     if (lower == "preference") return MemoryKind::Preference;
-    return std::unexpected("memory kind 只认 fact 或 preference");
+    if (lower == "feedback") return MemoryKind::Feedback;
+    return std::unexpected("memory kind 只认 fact、preference 或 feedback");
 }
 
 std::string LearnModeName(LearnMode mode) {
@@ -1770,16 +1956,22 @@ std::string ProjectMemory::BuildTurnContext(const std::string& query, const fs::
 
     // 正常请求只检索机器 catalog,不再整段注入 index.md;index 留给人看与
     // 灾后重建。零命中时零注入零脚手架——旧版"每轮都塞一段使用说明"的
-    // 现象就此钉死。
+    // 现象就此钉死。用户级记忆(全局另设授权)开着时两层各查一份,同 id/
+    // 同证据去重,项目层压过用户层;总条数与总字节预算不因多一层翻倍。
     std::string catalog_error;
-    const auto stored = LoadCatalog(memory_dir_, &catalog_error);
+    auto stored = LoadCatalog(memory_dir_, &catalog_error);
+    if (options_.user_enabled) {
+        const auto user_stored = LoadCatalog(user_memory_dir(), nullptr, "user");
+        stored.insert(stored.end(), user_stored.begin(), user_stored.end());
+    }
     std::error_code ec;
     fs::path cwd_relative_path = fs::relative(AbsoluteNormal(cwd), identity_.project_root, ec);
     const std::string cwd_relative = ec || cwd_relative_path == "." ? std::string() : PathUtf8(cwd_relative_path);
 
     // 排级交给纯函数 RankEntries(BM25 + 硬命中);指纹漂移要摸项目文件,
-    // 留在这一层做。retrieval_hints 来自回合总结,learn off/失败时为空,
-    // 查询自然退回纯词法。词项(带来源与权重)由 RankEntries 回填进 trace。
+    // 留在这一层做(用户层主题无项目证据,不查指纹)。retrieval_hints 来自
+    // 回合总结,learn off/失败时为空,查询自然退回纯词法。词项(带来源与
+    // 权重)由 RankEntries 回填进 trace。
     std::vector<MemoryEntry> public_entries;
     public_entries.reserve(stored.size());
     for (const auto& entry : stored) public_entries.push_back(entry.public_entry);
@@ -1790,15 +1982,31 @@ std::string ProjectMemory::BuildTurnContext(const std::string& query, const fs::
     std::size_t emitted = 0;
     // 检索预算按"去重后有效字节"算:同一事实(同正文)只注一份,同证据
     // 同主题(同标题+同路径集)也只留一条——排级序里分数高、更可信、更
-    // 新的那条先到先得,后来者 duplicate_dropped 让位,不占预算。
+    // 新的那条先到先得,后来者 duplicate_dropped 让位,不占预算。用户层
+    // 让位给项目层同主题时另记 layer_superseded,/memory why 说得清。
     std::unordered_set<std::uint64_t> seen_content;
     std::unordered_set<std::string> seen_fact;
+    std::unordered_set<std::string> seen_ids;
+    // 项目层已有的 id:用户层同主题直接让位(规格"项目层更具体,压过用户
+    // 层"),不比分数——两条是同一主题,只认更具体的那份。
+    std::unordered_set<std::string> project_ids;
+    for (const auto& item : stored) {
+        if (item.public_entry.scope.level != "user") project_ids.insert(item.public_entry.id);
+    }
+    const fs::path& base_dir = memory_dir_;
+    const fs::path user_dir = user_memory_dir();
     for (const ScoredEntry& hit : ranked) {
         RecallTraceEntry traced;
         traced.id = hit.entry->id;
+        traced.layer = hit.entry->scope.level == "user" ? "user" : "project";
         traced.score = hit.score;
         traced.hard_hits = hit.hard_hits;
         traced.term_hits = hit.token_hits;
+        if (traced.layer == "user" && project_ids.count(traced.id) != 0) {
+            traced.layer_superseded = true;
+            trace.entries.push_back(std::move(traced));
+            continue;
+        }
         if (hit.expired) {
             // 已过 expires_at:不召回,等用户续期或归档,不在 prompt 里占字。
             traced.expired = true;
@@ -1821,7 +2029,15 @@ std::string ProjectMemory::BuildTurnContext(const std::string& query, const fs::
             continue;
         }
         const MemoryEntry& entry = *hit.entry;
-        // 指纹对照要找到 StoredEntry(catalog 里带 fingerprints)。
+        // 同 id 先到先得:排级里项目层在前,用户层同 id 只能落选让位。
+        if (seen_ids.count(entry.id) != 0) {
+            traced.layer_superseded = traced.layer == "user";
+            traced.duplicate_dropped = !traced.layer_superseded;
+            trace.entries.push_back(std::move(traced));
+            continue;
+        }
+        // 指纹对照要找到 StoredEntry(catalog 里带 fingerprints);用户层
+        // 主题没有项目证据,不查指纹。
         const StoredEntry* stored_hit = nullptr;
         for (const auto& item : stored) {
             if (item.public_entry.id == entry.id) {
@@ -1829,16 +2045,19 @@ std::string ProjectMemory::BuildTurnContext(const std::string& query, const fs::
                 break;
             }
         }
-        if (stored_hit != nullptr && !FingerprintsCurrent(*stored_hit, identity_.project_root)) {
+        if (traced.layer != "user" && stored_hit != nullptr &&
+            !FingerprintsCurrent(*stored_hit, identity_.project_root)) {
             traced.stale_blocked = true;
             trace.entries.push_back(std::move(traced));
             body += "\n- 命中 `" + entry.id + "`，但相关文件已变化；本轮不注入正文，请读源码核验。\n";
             continue;
         }
+        const fs::path& topic_dir = traced.layer == "user" ? user_dir : base_dir;
         const std::size_t room = options_.max_retrieval_bytes - used;
-        // 先按主题上限把整篇读进来(元数据头另算余量),剥掉元数据后再按
-        // 剩余预算截——否则预算小的时候会截进元数据 JSON 的半截里。
-        std::string topic = ReadBounded(memory_dir_ / Utf8Path(entry.file), kMaxTopicBytes + 4096);
+        // 先按主题上限把整篇读进来(元数据头另算余量;front matter 带指纹
+        // 表会比旧 JSON 头长些),剥掉元数据后再按剩余预算截——否则预算小
+        // 的时候会截进元数据的半截里。
+        std::string topic = ReadBounded(topic_dir / Utf8Path(entry.file), kMaxTopicBytes + 8192);
         topic = StripTopicMetadata(std::move(topic));
         if (topic.size() > room) {
             const std::string_view bounded(topic.data(), room);
@@ -1862,12 +2081,16 @@ std::string ProjectMemory::BuildTurnContext(const std::string& query, const fs::
             for (const std::string& path : normalized_paths) fact_key += path + "\x1f";
         }
         if (seen_content.count(content_key) != 0 || (!fact_key.empty() && seen_fact.count(fact_key) != 0)) {
-            traced.duplicate_dropped = true;
+            traced.duplicate_dropped = traced.layer != "user";
+            traced.layer_superseded = traced.layer == "user";
             trace.entries.push_back(std::move(traced));
             continue;
         }
-        body += "\n## 召回: " + entry.id + "\n\n来源: " + PathUtf8(memory_dir_ / Utf8Path(entry.file)) +
-                "\n\n" + topic + "\n";
+        // 用户层命中在头里标注来源层;项目层保持原样,不给 prompt 平添
+        // 噪声(规格:不能两份正文重复注入,且要说清来自哪一层)。
+        const std::string layer_note = traced.layer == "user" ? "(用户级记忆)" : "";
+        body += "\n## 召回: " + entry.id + layer_note + "\n\n来源: " +
+                PathUtf8(topic_dir / Utf8Path(entry.file)) + "\n\n" + topic + "\n";
         used += topic.size();
         ++emitted;
         traced.injected = true;
@@ -1876,6 +2099,7 @@ std::string ProjectMemory::BuildTurnContext(const std::string& query, const fs::
         trace.injected_bytes += topic.size();
         trace.entries.push_back(std::move(traced));
         seen_content.insert(content_key);
+        seen_ids.insert(entry.id);
         if (!fact_key.empty()) seen_fact.insert(fact_key);
     }
     WriteRecallTrace(memory_dir_, trace);
@@ -1909,6 +2133,11 @@ std::expected<void, std::string> ProjectMemory::set_learn(LearnMode mode) {
 
 std::expected<std::string, std::string> ProjectMemory::EnqueueSave(const SaveRequest& request) {
     if (!generate_enabled()) return std::unexpected("本场记忆写入未开启");
+    // 用户级记忆的授权另设一道:项目配置无权开启或写入(规格"用户层必须
+    // 另设全局授权")。
+    if (request.scope.level == "user" && !options_.user_enabled) {
+        return std::unexpected("用户级记忆未在全局配置授权(memory.user_enabled),本场命令开不了");
+    }
     SaveRequest with_source = request;
     if (with_source.source_session.empty()) with_source.source_session = source_session_;
     if (auto valid = ValidateSaveRequest(with_source); !valid.has_value()) return std::unexpected(valid.error());
@@ -1918,7 +2147,13 @@ std::expected<std::string, std::string> ProjectMemory::EnqueueSave(const SaveReq
 std::expected<std::string, std::string> ProjectMemory::EnqueueForget(const std::string& id) {
     if (!options_.global_allowed || !options_.enabled) return std::unexpected("本场记忆未开启");
     if (!IsValidId(id)) return std::unexpected("记忆 id 不合法");
-    return EnqueueJob("forget", nullptr, id);
+    // id 住在哪一层就忘了哪一层:用户层开着且在那边找得到,job 落到用户目录。
+    nlohmann::json extra;
+    if (options_.user_enabled && LayerHasEntry(user_memory_dir(), id)) {
+        extra["layer"] = "user";
+        extra["memory_dir"] = PathUtf8(user_memory_dir());
+    }
+    return EnqueueJob("forget", nullptr, id, extra);
 }
 
 std::expected<std::string, std::string> ProjectMemory::EnqueueRebuild() {
@@ -1930,6 +2165,10 @@ std::expected<std::string, std::string> ProjectMemory::EnqueueVerify(const std::
     if (!options_.global_allowed || !options_.enabled) return std::unexpected("本场记忆未开启");
     if (!IsValidId(id)) return std::unexpected("记忆 id 不合法");
     nlohmann::json extra{{"refresh", refresh}};
+    if (options_.user_enabled && LayerHasEntry(user_memory_dir(), id)) {
+        extra["layer"] = "user";
+        extra["memory_dir"] = PathUtf8(user_memory_dir());
+    }
     return EnqueueJob("verify", nullptr, id, extra);
 }
 
@@ -1963,7 +2202,9 @@ std::expected<std::string, std::string> ProjectMemory::EnqueueJob(const std::str
         {"display_name", identity_.display_name},
         {"project_root", PathUtf8(identity_.project_root)},
         {"project_dir", PathUtf8(identity_.project_dir)},
-        {"memory_dir", PathUtf8(memory_dir_)},
+        {"memory_dir", PathUtf8(request != nullptr && request->scope.level == "user"
+                                    ? user_memory_dir()
+                                    : memory_dir_)},
         {"created_at", NowIsoUtc()},
     };
     if (!extra.is_object()) extra = nlohmann::json::object();
@@ -1981,8 +2222,10 @@ std::expected<std::string, std::string> ProjectMemory::EnqueueJob(const std::str
         job["source_session"] = request->source_session;
         if (!request->confidence.empty()) job["confidence"] = request->confidence;
         if (!request->expires_at.empty()) job["expires_at"] = request->expires_at;
-        if (request->scope.kind != "project" || !request->scope.value.empty()) {
-            job["scope"] = nlohmann::json{{"kind", request->scope.kind},
+        if (request->scope.level != "project" || request->scope.kind != "project" ||
+            !request->scope.value.empty()) {
+            job["scope"] = nlohmann::json{{"level", request->scope.level},
+                                          {"kind", request->scope.kind},
                                           {"value", request->scope.value}};
         }
         if (!request->evidence.empty()) {
@@ -2021,15 +2264,29 @@ std::vector<MemoryEntry> ProjectMemory::ListEntries(std::string* error) const {
     return out;
 }
 
+std::vector<MemoryEntry> ProjectMemory::ListUserEntries(std::string* error) const {
+    std::vector<MemoryEntry> out;
+    if (!options_.user_enabled) return out;
+    for (const auto& entry : LoadCatalog(user_memory_dir(), error, "user")) {
+        out.push_back(entry.public_entry);
+    }
+    return out;
+}
+
 RuntimeStatus ProjectMemory::Status() const {
     RuntimeStatus status;
     status.global_allowed = options_.global_allowed;
     status.enabled = options_.enabled;
     status.use = use_enabled();
     status.generate = generate_enabled();
+    status.user_enabled = options_.user_enabled;
     status.learn = LearnModeName(options_.learn);
     status.project_key = identity_.key;
     status.memory_dir = memory_dir_;
+    if (options_.user_enabled) {
+        status.user_memory_dir = user_memory_dir();
+        status.user_entry_count = ListUserEntries().size();
+    }
     status.entry_count = ListEntries().size();
     status.pending_candidates = ListCandidates().size();
     std::error_code ec;
@@ -2211,6 +2468,10 @@ std::expected<std::string, std::string> ProjectMemory::AcceptCandidate(const std
     if (candidate->confidence == "inferred") {
         return std::unexpected("候选置信度是 inferred,先 /memory edit 改实或直接 reject");
     }
+    // feedback 只收用户明说的纠正(规格:模型推断不得直写 feedback)。
+    if (candidate->kind == MemoryKind::Feedback && candidate->confidence != "user-stated") {
+        return std::unexpected("feedback 候选只收用户明说的纠正(confidence 须为 user-stated)");
+    }
     // fact 须有可核验证据。
     if (candidate->kind == MemoryKind::Fact && candidate->paths.empty()) {
         return std::unexpected("fact 候选缺证据路径,先 /memory edit 补 paths 或直接 reject");
@@ -2291,9 +2552,276 @@ void ProjectMemory::SetRetrievalHints(std::vector<std::string> hints) {
     retrieval_hints_ = std::move(hints);
 }
 
-std::expected<void, std::string> RebuildMemoryIndex(const fs::path& memory_dir) {
+// 按 id 在两层里找主题。show/open 共用;返回 <条目, 所在目录>。
+std::optional<std::pair<MemoryEntry, fs::path>> ProjectMemory::FindTopic(const std::string& id) const {
+    for (const auto& entry : ListEntries()) {
+        if (entry.id == id) return std::make_pair(entry, memory_dir_);
+    }
+    if (options_.user_enabled) {
+        for (const auto& entry : ListUserEntries()) {
+            if (entry.id == id) return std::make_pair(entry, user_memory_dir());
+        }
+    }
+    return std::nullopt;
+}
+
+std::expected<std::pair<std::string, fs::path>, std::string> ProjectMemory::ReadTopicForShow(
+    const std::string& id) const {
+    if (!IsValidId(id)) return std::unexpected("记忆 id 不合法: " + id);
+    const auto found = FindTopic(id);
+    if (!found.has_value()) return std::unexpected("找不到记忆 id: " + id);
+    const auto& [entry, dir] = *found;
+    const std::string text = ReadFile(dir / Utf8Path(entry.file));
+    if (text.empty()) return std::unexpected("主题文件读不出来: " + entry.file);
+    return std::make_pair(text, dir);
+}
+
+std::expected<ProjectMemory::TopicEditSession, std::string> ProjectMemory::BeginTopicEdit(
+    const std::string& id) const {
+    auto topic = ReadTopicForShow(id);
+    if (!topic.has_value()) return std::unexpected(topic.error());
+    const auto& [text, dir] = *topic;
+    auto parsed = frontmatter::Parse(text);
+    if (!parsed.has_value()) {
+        return std::unexpected("这份主题不是合法 front matter,先 /memory migrate: " + parsed.error());
+    }
+    const auto found = FindTopic(id);
+    if (!found.has_value()) return std::unexpected("找不到记忆 id: " + id);
+    TopicEditSession session;
+    session.dir = dir;
+    session.id = parsed->entry.id;
+    session.level = parsed->entry.scope.level;
+    session.original = dir / Utf8Path(found->first.file);
+    session.scratch = dir / Utf8Path(found->first.file + ".edit-" + JobStamp() + ".md");
+    auto staged = AtomicWrite(session.scratch, text);
+    if (!staged.has_value()) return std::unexpected(staged.error());
+    return session;
+}
+
+std::expected<void, std::string> ProjectMemory::CommitTopicEdit(const TopicEditSession& session) const {
+    const std::string edited = ReadFile(session.scratch);
+    std::error_code ec;
+    const auto discard = [&session, &ec]() { fs::remove(session.scratch, ec); };
+    if (edited.empty()) {
+        discard();
+        return std::unexpected("编辑后内容为空,原件未动");
+    }
+    auto parsed = frontmatter::Parse(edited);
+    if (!parsed.has_value()) {
+        discard();
+        return std::unexpected("编辑后的 YAML 不合法,原件未动: " + parsed.error());
+    }
+    const MemoryEntry& next = parsed->entry;
+    // id 与层不许在编辑器里换:换 id 等于造新主题,得走正式写入。
+    if (next.id != session.id) {
+        discard();
+        return std::unexpected("编辑不得改 id(要新建请用 remember/memory_save),原件未动");
+    }
+    if (next.scope.level != session.level) {
+        discard();
+        return std::unexpected("编辑不得改 scope.level(跨层搬家走 forget 后重写),原件未动");
+    }
+    if (!IsValidId(next.id)) {
+        discard();
+        return std::unexpected("编辑后的 id 不合法,原件未动");
+    }
+    for (const std::string& path : next.paths) {
+        if (!IsSafeRelativePath(path)) {
+            discard();
+            return std::unexpected("编辑后的 paths 只许项目内相对路径: " + path);
+        }
+    }
+    // 校验通过:同一把项目锁里原子替换,再重建该层派生物。
+    DirectoryLock project_lock(session.dir / ".state" / "memory.lock");
+    if (!project_lock.acquired()) {
+        discard();
+        return std::unexpected("该层记忆正由另一个 worker 更新,稍后再试");
+    }
+    auto replaced = AtomicWrite(session.original, edited);
+    discard();
+    if (!replaced.has_value()) return std::unexpected(replaced.error());
+    return RebuildMemoryIndex(session.dir, session.level == "user");
+}
+
+// 编辑器选择:$VISUAL 压过 $EDITOR;都没给就退平台缺省(Windows 记事本、
+// 类 Unix vi)。命令行里带空格的路径由进程启动层负责引号。
+std::string PickEditorProgram() {
+    if (const auto visual = platform::GetEnvVar("VISUAL"); visual.has_value()) {
+        return *visual;
+    }
+    if (const auto editor = platform::GetEnvVar("EDITOR"); editor.has_value()) {
+        return *editor;
+    }
+#ifdef _WIN32
+    return "notepad";
+#else
+    return "vi";
+#endif
+}
+
+std::expected<void, std::string> ProjectMemory::EditTopicInEditor(const std::string& id) const {
+    auto session = BeginTopicEdit(id);
+    if (!session.has_value()) return std::unexpected(session.error());
+
+    const std::string program = PickEditorProgram();
+    const int kEditorTimeoutMs = 30 * 60 * 1000;
+    const auto ran = platform::RunProcess({program, PathUtf8(session->scratch)}, kEditorTimeoutMs);
+    if (ran.spawn_failed || ran.timed_out) {
+        std::error_code ec;
+        fs::remove(session->scratch, ec);
+        return std::unexpected(ran.timed_out ? "编辑器超时未退出,原件未动"
+                                             : "编辑器没跑起来($VISUAL/$EDITOR): " + ran.spawn_error);
+    }
+    return CommitTopicEdit(*session);
+}
+
+std::expected<void, std::string> ProjectMemory::OpenIndexInEditor() const {
+    const std::string program = PickEditorProgram();
+    const fs::path index = memory_dir_ / "index.md";
+    std::error_code ec;
+    if (!fs::exists(index, ec)) {
+        auto built = RebuildMemoryIndex(memory_dir_);
+        if (!built.has_value()) return built;
+    }
+    const int kEditorTimeoutMs = 30 * 60 * 1000;
+    const auto ran = platform::RunProcess({program, PathUtf8(index)}, kEditorTimeoutMs);
+    if (ran.spawn_failed) {
+        return std::unexpected("编辑器没跑起来($VISUAL/$EDITOR): " + ran.spawn_error);
+    }
+    if (ran.timed_out) return std::unexpected("编辑器超时未退出");
+    // index 是派生物,手改只为眼看;顺手重建一次,让它跟主题对齐。
+    return RebuildMemoryIndex(memory_dir_);
+}
+
+ProjectMemory::MigrationPlan ProjectMemory::PlanMigration() const {
     std::vector<std::string> warnings;
-    const auto entries = ScanTopics(memory_dir, &warnings);
+    const auto entries = ScanTopics(memory_dir_, &warnings);
+    MigrationPlan plan;
+    for (const auto& stored : entries) {
+        MigrationItem item;
+        item.file = stored.public_entry.file;
+        item.id = stored.public_entry.id;
+        if (stored.public_entry.status == "conflict") {
+            item.action = "warn";
+            item.reason = "与另一份撞同一 id,已停为 conflict,须手工处置";
+            ++plan.warnings;
+        } else if (stored.public_entry.schema >= 3) {
+            item.action = "skip";
+            item.reason = "已是 schema 3";
+            ++plan.to_skip;
+        } else {
+            item.action = "migrate";
+            item.reason = "schema " + std::to_string(stored.public_entry.schema) + " -> 3";
+            ++plan.to_migrate;
+        }
+        plan.items.push_back(std::move(item));
+    }
+    // 读不动的坏文件也计进警告(ScanTopics 只往 warnings 里记了路径与原因)。
+    for (const std::string& warning : warnings) {
+        MigrationItem item;
+        item.action = "warn";
+        item.reason = warning;
+        ++plan.warnings;
+        plan.items.push_back(std::move(item));
+    }
+    return plan;
+}
+
+std::expected<ProjectMemory::MigrationResult, std::string> ProjectMemory::RunMigration() const {
+    MigrationPlan plan = PlanMigration();
+    if (plan.to_migrate == 0) {
+        return MigrationResult{0, std::string()};  // 没活干:重跑不重复
+    }
+
+    // 与 worker 同一把项目锁:改名与写新内容须在同一把锁里完成。
+    DirectoryLock project_lock(memory_dir_ / ".state" / "memory.lock");
+    if (!project_lock.acquired()) {
+        return std::unexpected("项目记忆正由另一个 worker 更新,稍后再试");
+    }
+
+    std::string stamp = NowIsoUtc();
+    std::replace(stamp.begin(), stamp.end(), ':', '-');  // Windows 目录名不吃冒号
+    const fs::path backup = memory_dir_ / ".state" / "migration-backup" / stamp;
+
+    std::vector<StoredEntry> entries = ScanTopics(memory_dir_);
+    struct Attempt {
+        fs::path old_path;
+        fs::path new_path;
+        std::string original_file;
+    };
+    std::vector<Attempt> attempts;
+    std::size_t migrated = 0;
+    const auto rollback = [&attempts, &backup]() {
+        // 回退:原地改写的从备份还原(原件已被原子替换盖掉),挪了名的只删
+        // 新文件——旧文件从头到尾没动过。
+        std::error_code ec;
+        for (const Attempt& attempt : attempts) {
+            if (attempt.old_path == attempt.new_path) {
+                fs::copy_file(backup / Utf8Path(attempt.original_file), attempt.old_path,
+                              fs::copy_options::overwrite_existing, ec);
+            } else {
+                fs::remove(attempt.new_path, ec);
+            }
+        }
+    };
+    for (auto& stored : entries) {
+        if (stored.public_entry.schema >= 3 || stored.public_entry.status == "conflict") continue;
+        const fs::path old_path = memory_dir_ / Utf8Path(stored.public_entry.file);
+        const std::string original_file = stored.public_entry.file;
+        const std::string body =
+            frontmatter::StripTitleHeading(StripTopicMetadata(ReadFile(old_path)));
+        stored.public_entry.schema = 3;
+        stored.public_entry.name =
+            NameFromId(stored.public_entry.id, MemoryKindName(stored.public_entry.kind));
+        if (stored.public_entry.created_at.empty()) {
+            stored.public_entry.created_at = stored.public_entry.updated_at;
+        }
+        stored.public_entry.file =
+            CanonicalTopicFile(stored.public_entry.kind, stored.public_entry.name);
+        const fs::path new_path = memory_dir_ / Utf8Path(stored.public_entry.file);
+
+        // 原件先备进 .state/migration-backup/<时间>/,按原相对路径镜像。
+        std::error_code ec;
+        const fs::path keep = backup / Utf8Path(original_file);
+        fs::create_directories(keep.parent_path(), ec);
+        if (ec) return std::unexpected("创建迁移备份目录失败: " + ec.message());
+        fs::copy_file(old_path, keep, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            rollback();
+            return std::unexpected("迁移备份失败: " + PathUtf8(old_path) + ": " + ec.message());
+        }
+
+        auto result = AtomicWrite(new_path, BuildTopicText(stored, body));
+        if (!result.has_value()) {
+            rollback();
+            return std::unexpected("迁移写入失败(已回退): " + result.error());
+        }
+        attempts.push_back(Attempt{old_path, new_path, original_file});
+        ++migrated;
+    }
+
+    // 全部写妥才动旧文件与派生物;失败时旧文件仍在,catalog 仍可用。
+    for (const Attempt& attempt : attempts) {
+        if (attempt.old_path == attempt.new_path) continue;
+        std::error_code ec;
+        fs::remove(attempt.old_path, ec);
+        if (ec) {
+            return std::unexpected("迁移清理旧文件失败: " + PathUtf8(attempt.old_path) + ": " +
+                                   ec.message());
+        }
+    }
+    auto rebuilt = RebuildMemoryIndex(memory_dir_);
+    if (!rebuilt.has_value()) {
+        rollback();
+        return std::unexpected(rebuilt.error());
+    }
+    return MigrationResult{migrated, PathUtf8(backup)};
+}
+
+std::expected<void, std::string> RebuildMemoryIndex(const fs::path& memory_dir, bool user_layer) {
+    std::vector<std::string> warnings;
+    const char* layer = user_layer ? "user" : "project";
+    const auto entries = ScanTopics(memory_dir, &warnings, layer);
     nlohmann::json catalog{{"schema", 1}, {"generated_at", NowIsoUtc()}, {"entries", nlohmann::json::array()}};
     for (const auto& entry : entries) {
         nlohmann::json item = EntryMetadata(entry);
@@ -2303,7 +2831,7 @@ std::expected<void, std::string> RebuildMemoryIndex(const fs::path& memory_dir) 
     if (!warnings.empty()) catalog["warnings"] = warnings;
     auto catalog_write = AtomicWrite(memory_dir / ".state" / "catalog.json", catalog.dump(2) + "\n");
     if (!catalog_write.has_value()) return catalog_write;
-    return AtomicWrite(memory_dir / "index.md", BuildIndex(entries));
+    return AtomicWrite(memory_dir / "index.md", BuildIndex(entries, layer));
 }
 
 std::expected<std::size_t, std::string> RunPendingMemoryJobs(const fs::path& home_lubancode) {

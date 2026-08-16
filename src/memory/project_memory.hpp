@@ -40,6 +40,10 @@ struct Options {
     bool global_allowed = false;
     bool enabled = false;
     bool use = true;
+    // 用户级记忆(住 <主目录>/memory/user/,跨项目偏好与反馈):另设一道
+    // 全局授权,项目配置无权开启或写入。召回时两层各查、同 id/同证据去
+    // 重、项目层压过用户层。
+    bool user_enabled = false;
     LearnMode learn = LearnMode::Review;
     LearnMode learn_ceiling = LearnMode::Review;
     std::size_t max_index_bytes = 16 * 1024;      // index.md 留给人看,不再进 prompt
@@ -61,18 +65,23 @@ struct ProjectIdentity {
 std::expected<ProjectIdentity, std::string> ResolveProjectIdentity(
     const std::filesystem::path& cwd, const std::filesystem::path& home_lubancode);
 
-enum class MemoryKind { Fact, Preference };
+// fact=可核验的项目事实;preference=用户主动选定的项目技术偏好;
+// feedback=用户对 LubanCode 行事方式的明确纠正(版本节奏、验收习惯、提交
+// 规矩),只收 user-stated,模型推断不得直写。
+enum class MemoryKind { Fact, Preference, Feedback };
 
 std::string MemoryKindName(MemoryKind kind);
 std::expected<MemoryKind, std::string> ParseMemoryKind(const std::string& raw);
 
-// 主题范围(schema 2):project 全项目;subtree/path 限子树或单文件,当前
-// cwd 不在范围内时不注入(该用才用)。跨项目/全局经验本期不做——键位
-// 预留:以后加 "global" 时只认全局配置授权,存储键须另行分账,别混进
-// project key 这套目录。
+// 主题范围(schema 2/3):project 全项目;subtree/path 限子树或单文件,当前
+// cwd 不在范围内时不注入(该用才用)。schema 3 加 level:project|user,
+// 用户层主题 level=user 且 kind=user,不得假借项目路径作证据。
+// 跨项目/全局经验本期不做——键位预留:以后加 "global" 时只认全局配置授权,
+// 存储键须另行分账,别混进 project key 这套目录。
 struct MemoryScope {
-    std::string kind = "project";  // project | subtree | path
-    std::string value;             // kind != project 时必填,项目内相对路径
+    std::string kind = "project";  // project | subtree | path | user
+    std::string value;             // kind 为 subtree/path 时必填,项目内相对路径
+    std::string level = "project"; // project | user(schema 3 起;旧主题读入填默认)
 };
 
 struct MemoryEvidence {
@@ -114,6 +123,12 @@ struct MemoryEntry {
     std::vector<MemoryEvidence> evidence;
     std::string last_verified_at;
     std::string expires_at;  // 空 = 永不过期
+    // schema 3 新增:name 是文件 slug(层内唯一),id 去掉类型前缀便是;
+    // created_at 记首次创建(旧主题读入时用 updated_at 补);schema 记这份
+    // 主题当下的格式(1/2/3),经 upsert/verify 改写后一律成 3。
+    std::string name;
+    std::string created_at;
+    int schema = 2;
 };
 
 // 检索排级的纯函数结果(评测集与 /memory why 共用)。injected 只是"过
@@ -182,10 +197,13 @@ struct RuntimeStatus {
     bool enabled = false;
     bool use = false;
     bool generate = false;
+    bool user_enabled = false;  // 用户级记忆(全局授权另设)
     std::string learn;   // off | review | auto(本场档位)
     std::string project_key;
     std::filesystem::path memory_dir;
+    std::filesystem::path user_memory_dir;
     std::size_t entry_count = 0;
+    std::size_t user_entry_count = 0;
     std::size_t pending_jobs = 0;
     std::size_t pending_candidates = 0;
 };
@@ -200,6 +218,7 @@ std::string QueryOriginName(QueryOrigin origin);
 // 来源与权重)、id、分数与字节,不抄主题正文,也不记用户完整问题。
 struct RecallTraceEntry {
     std::string id;
+    std::string layer = "project";  // project | user(命中来自哪一层)
     int score = 0;
     int hard_hits = 0;    // 稳定实体(路径/关键词/symbol/标题/id)硬命中次数
     int term_hits = 0;    // 分词后命中的有效词项数(虚词碎片不计)
@@ -210,6 +229,7 @@ struct RecallTraceEntry {
     bool scope_blocked = false;   // scope 不符当前 cwd,不注入
     bool expired = false;         // 已过 expires_at,不召回
     bool duplicate_dropped = false;  // 同一事实/相同证据,去重让位
+    bool layer_superseded = false;   // 用户层同主题被项目层压过
     std::size_t bytes = 0;
 };
 
@@ -250,6 +270,9 @@ public:
 
     const ProjectIdentity& identity() const { return identity_; }
     const std::filesystem::path& memory_dir() const { return memory_dir_; }
+    // 用户级记忆目录:<主目录>/memory/user/。与项目记忆分账,各自一份
+    // index.md 与 .state/catalog.json。
+    std::filesystem::path user_memory_dir() const { return home_lubancode_ / "memory" / "user"; }
 
     std::expected<void, std::string> SetWorkingDirectory(const std::filesystem::path& cwd);
 
@@ -286,6 +309,58 @@ public:
     // 旧值,查询自然退回纯词法。
     void SetRetrievalHints(std::vector<std::string> hints);
 
+    // ---- show/open(规格:front matter 摘要与正文;外部编辑回来先校验再
+    // 原子替换,坏 YAML 不覆盖原件) ----
+    // 按 id 找主题(两层都找)。返回 <主题全文, 所在目录>;找不到给错误。
+    std::expected<std::pair<std::string, std::filesystem::path>, std::string> ReadTopicForShow(
+        const std::string& id) const;
+
+private:
+    std::optional<std::pair<MemoryEntry, std::filesystem::path>> FindTopic(const std::string& id) const;
+
+public:
+    // 编辑会话三段式:Begin 建同目录临时副本(原件不被编辑器碰),Commit
+    // parse+校验(不得改 id 与层)后原子替换并重建该层派生物;坏 YAML 或
+    // 字段不合法,原件分毫不动。EditTopicInEditor 是接 $VISUAL/$EDITOR 的
+    // 胶水;测试直接用 Begin/Commit。
+    struct TopicEditSession {
+        std::filesystem::path original;
+        std::filesystem::path scratch;
+        std::filesystem::path dir;
+        std::string id;
+        std::string level;
+    };
+    std::expected<TopicEditSession, std::string> BeginTopicEdit(const std::string& id) const;
+    std::expected<void, std::string> CommitTopicEdit(const TopicEditSession& session) const;
+    std::expected<void, std::string> EditTopicInEditor(const std::string& id) const;
+    // /memory open 不带 id:编辑器看一眼项目层 index.md(派生物,不校验)。
+    std::expected<void, std::string> OpenIndexInEditor() const;
+
+    // ---- 显式迁移(规格"迁移":旧格式主题批迁 schema 3) ----
+    // 先出计划:将改几份(schema 1/2)、跳过几份(已是 3 或 archive)、警告
+    // 几份(读不动的);不动盘。
+    struct MigrationItem {
+        std::string file;
+        std::string id;
+        std::string action;  // migrate | skip | warn
+        std::string reason;
+    };
+    struct MigrationPlan {
+        std::vector<MigrationItem> items;
+        std::size_t to_migrate = 0;
+        std::size_t to_skip = 0;
+        std::size_t warnings = 0;
+    };
+    MigrationPlan PlanMigration() const;
+    // 确认后批迁:.state/migration-backup/<时间>/ 留原件,全部写妥、catalog
+    // 与 index 重建成功才报完成;中途失败删掉本轮新文件,旧主题与 catalog
+    // 仍可用。重跑不重复(已是 schema 3 的跳过)、不改 id、不丢来源会话。
+    struct MigrationResult {
+        std::size_t migrated = 0;
+        std::string backup_dir;
+    };
+    std::expected<MigrationResult, std::string> RunMigration() const;
+
     std::expected<std::string, std::string> EnqueueSave(const SaveRequest& request);
     std::expected<std::string, std::string> EnqueueForget(const std::string& id);
     std::expected<std::string, std::string> EnqueueRebuild();
@@ -301,6 +376,8 @@ public:
     std::vector<StaleEntry> ListStaleEntries() const;
 
     std::vector<MemoryEntry> ListEntries(std::string* error = nullptr) const;
+    // 用户层条目(全局授权关着时为空表)。/memory list 合并两层展示。
+    std::vector<MemoryEntry> ListUserEntries(std::string* error = nullptr) const;
     RuntimeStatus Status() const;
 
     // 有 pending job 时起一枚会话级后台 worker。失败不删 job，下次还能捞。
@@ -327,7 +404,9 @@ private:
 std::expected<std::size_t, std::string> RunPendingMemoryJobs(
     const std::filesystem::path& home_lubancode);
 
-// 测试与 /memory rebuild 共用的同步底层。不起进程。
-std::expected<void, std::string> RebuildMemoryIndex(const std::filesystem::path& memory_dir);
+// 测试与 /memory rebuild 共用的同步底层。不起进程。user_layer=true 时按
+// 用户层扫描(preferences/feedback,没有 facts),index 头写 User Memory。
+std::expected<void, std::string> RebuildMemoryIndex(const std::filesystem::path& memory_dir,
+                                                    bool user_layer = false);
 
 }  // namespace lubancode::memory

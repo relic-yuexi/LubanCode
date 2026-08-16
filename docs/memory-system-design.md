@@ -4,7 +4,7 @@
 
 项目记忆让 LubanCode 跨会话记住少量仓库事实与用户偏好。它默认关闭。检索只读本地文件；写入先排队，再由后台进程原子落盘。
 
-> 当前状态：本地 BM25/实体召回、召回 trace、回合收尾模型抽取、`off/review/auto` 三档学习、候选审阅箱、`memory_save`、显式 `remember`、后台 upsert、陈旧核验、归档遗忘与索引重建都已实现。闲时归并、自然语言冲突消解、用户级跨项目记忆尚未实现。
+> 当前状态：同步词法召回(BM25+硬命中)、`memory_save`、`/memory remember`、后台 upsert、归档遗忘、索引重建、回合结束抽取候选与待审审阅箱(review/auto 两档)、schema 3 front matter 与 `/memory migrate`、用户级跨项目记忆(`memory.user` 目录)都已实现。闲时归并尚未实现。
 
 ## 1. 记忆不等于会话
 
@@ -26,7 +26,7 @@
     "enabled": true,
     "use": true,
     "learn": "review",
-    "generate": true,
+>>>>>>> worktree-agent-a94bec28ba9adcdba
     "max_index_bytes": 16384,
     "max_retrieval_bytes": 8192,
     "max_results": 3
@@ -38,6 +38,7 @@
 | --- | --- | --- |
 | `enabled` | `false` | 总开关。关闭时不建运行对象，也不注册写入工具 |
 | `use` | `true` | 是否召回已有记忆 |
+<<<<<<< HEAD
 | `learn` | `review` | `off` 不学习；`review` 抽候选待审；`auto` 对过闸候选直写 |
 | `generate` | `true` | 旧兼容开关；`false` 等价于 `learn=off` |
 | `max_index_bytes` | `16384` | 人读 `index.md` 的大小上限，不直接进 prompt |
@@ -45,6 +46,14 @@
 | `max_results` | `3` | 最多注入几份主题正文 |
 
 项目 `.lubancode/config.json` 不能把全局关闭的记忆自行打开。全局开过后，项目可关闭总开关，也可收窄 `use`、`learn` 与预算。全局只授 `review` 时，项目不能抬到 `auto`。
+=======
+| `user_enabled` | `false` | 用户级记忆(跨项目偏好/反馈,住 `~/.lubancode/memory/user/`)。只认全局配置授权,项目配置无权开启 |
+| `learn` | `review` | 学习档位:`off` 不提候选不写入;`review` 每回合提候选进待审箱;`auto` 自动写入,只认全局配置显式授权 |
+| `max_index_bytes` | `16384` | `index.md` 文件本身的上限(只给人看,不进 prompt) |
+| `max_retrieval_bytes` | `8192` | 每轮命中主题正文总预算 |
+| `max_results` | `3` | 最多注入几份主题正文 |
+
+项目 `.lubancode/config.json` 不能把全局关闭的记忆自行打开。全局开过后，项目可关闭总开关，也可收窄 `use`、`learn` 与预算——项目级只能降档,不能升到 `auto`。陌生仓库便不能靠一份受版本控制的配置，偷偷开启长期记录。
 
 单发模式可以召回，但强制关闭写入。它不维护完整交互会话，故而不挂 `memory_save`。
 
@@ -62,28 +71,38 @@
 /memory list
 /memory remember fact 标题 [:: 正文]
 /memory remember preference 标题 [:: 正文]
+/memory remember feedback 标题 [:: 正文]
 /memory forget <id>
 /memory rebuild
 /memory stale
-/memory verify|refresh <id>
+/memory verify <id>
+/memory refresh <id>
+/memory migrate
+/memory show <id>
+/memory open [id]
 /memory why [id]
 ```
 
 | 命令 | 动作 |
 | --- | --- |
-| `/memory` | 显示本场开关、项目 key、目录、条目数、pending 数 |
+| `/memory` | 显示本场开关、学习档位、项目 key、目录、条目数、pending 数与待审候选数 |
 | `on|off` | 只改本场总开关 |
 | `use on|off` | 只改本场召回开关 |
-| `learn off|review|auto` | 只改本场学习档，不能高过全局授权上限 |
-| `review` | 列待审候选与置信度 |
-| `accept/edit/reject` | 接受、修改或拒绝候选；拒绝账只留主题哈希与理由 |
+| `learn off\|review\|auto` | 只改本场学习档位；只能降到全局授权以内 |
+| `review` | 列待审候选 |
+| `accept <id>` | 候选转正式入库(inferred 须先改实) |
+| `edit <id>` | 改候选标题或正文，仍留待审区 |
+| `reject <id> [理由]` | 拒绝候选，同主题不再自动重提 |
 | `list` | 从 catalog 列 id、类型、标题与摘要 |
 | `remember` | 由用户明确排一条 upsert 任务 |
 | `forget` | 把指定 id 归档，不再召回 |
 | `rebuild` | 扫描主题 Markdown，重建 catalog 与 index |
-| `stale` | 列指纹漂移与已过期条目 |
-| `verify/refresh` | 续命核验；`refresh` 还把状态回炉为 active |
-| `why` | 展示上一轮召回词、得分、拦截原因与注入预算 |
+| `stale` | 列指纹漂移与已过期的记忆 |
+| `verify`/`refresh` | 核验续命；refresh 连 status 一并回炉 |
+| `migrate` | 旧格式主题批迁 schema 3，先列账再确认 |
+| `show <id>` | 看一份主题的 front matter 与正文 |
+| `open [id]` | 用 `$VISUAL/$EDITOR` 编辑主题或索引；回来先校验再原子替换 |
+| `why [id]` | 看上一轮召回为何命中/落选 |
 
 这些开关只管当前进程，不回写 `config.json`。要永久开关，改全局配置。
 
@@ -108,6 +127,14 @@
 - 本项目用 pnpm，不用 npm。
 - Python 环境用 uv。
 - 改动后先跑窄测试，再跑全套。
+
+反馈 `feedback` 专收用户对 LubanCode 行事方式的明确纠正：
+
+- 每笔验收合并进 main 后 patch 版本加一，不攒大跳跃。
+- 提交信息用中文，末尾带共同署名。
+- 改动先过窄测试再跑全套，不许一步到位跑全量。
+
+feedback 必须是用户明说的(`confidence: user-stated`)。模型推断出来的"用户大概想要"不算数——它只能进待审候选，且 accept 闸会拦；`memory_save` 直接标 inferred 的 feedback 会被拒。正文里用 `## Why` 小节保住来龙去脉，模型可以压短措辞，不可把"不要每次突兀跳版"改成泛泛的"遵循语义化版本"。
 
 这些不要存：
 
@@ -148,6 +175,13 @@ Git 项目按 common git dir 认身份：
 ```text
 ~/.lubancode/
   sessions/                         会话存档，记忆不混进去
+  memory/
+    user/                           用户级记忆(跨项目,须全局授权)
+      index.md                      给人看的短索引(User Memory),可重建
+      preferences/                  跨项目偏好
+      feedback/                     跨项目行事反馈
+      archive/
+      .state/catalog.json
   projects/
     lubancode-4fd2c83a9e5b7a10/
       project.json                  项目身份资料
@@ -156,10 +190,11 @@ Git 项目按 common git dir 认身份：
         rejected.json               被拒主题短哈希与理由，不存正文
       memory/
         index.md                    给人看的短索引，可重建
-        facts/                      事实主题
+        facts/                      事实主题(只住项目层)
           agent-loop-request-flow.md
         preferences/                项目偏好主题
           package-manager.md
+        feedback/                   项目层行事反馈
         archive/                    已遗忘或被替代的旧主题
         .state/
           catalog.json              机器检索元数据，可重建
@@ -172,25 +207,79 @@ Git 项目按 common git dir 认身份：
 
 Markdown 是真本。`catalog.json` 与 `index.md` 都是派生物。删坏了可 `/memory rebuild`。
 
+### 用户级与项目级分账
+
+用户层放跨项目仍成立的偏好与反馈，如回答语言、提交署名习惯；不得放某仓库的构建命令，也不得假借项目路径作证据(写入校验会拦)。项目层放仓库事实(只住这层)、项目偏好与只对该仓库生效的反馈。
+
+用户层必须另设全局授权(`memory.user_enabled`,默认关)。项目配置无权开启或写入用户记忆，只能收窄成关——陌生仓库不能靠一份受版本控制的配置替用户开跨项目记忆。
+
+召回时两层各查一份 catalog：硬命中、scope、过期、指纹规则照旧；同 id、同证据或高度相同正文只注一份；项目层同主题直接压过用户层，不比分数。总条数与总字节预算不因多一层目录翻倍。`/memory why` 会写清命中来自 `user` 还是本项目，以及哪条因项目层覆盖而落选。
+
 ## 7. 主题文件
 
 每个文件只写一块能独立更新的主题。不要造 `all-facts.md`，也不要每句话拆一份。
 
+新写主题一律用 schema 3:文件开头一段 YAML front matter,由 `yaml-cpp` 解析(不手搓解析器),正文跟在分隔线之后。字段顺序与引号策略固定,连续两次 parse/write 字节稳定;时间一律按字符串读,不受 YAML 隐式类型与本机时区牵扯。程序只认文件开头第一对 `---`,正文里的水平线不算分隔线。
+
 ```markdown
-<!-- lubancode-memory
-{"schema":1,"id":"fact.agent-loop.request-flow","kind":"fact","summary":"AgentLoop 组装请求并按轮刷新工具表","keywords":["AgentLoop","TrimHistory"],"paths":["src/agent/loop.cpp"],"status":"active","updated_at":"2026-08-06T00:00:00Z","source_sessions":["20260806-..."]}
--->
+---
+name: agent-loop-request-flow
+description: AgentLoop 组装请求并按轮刷新工具表
+metadata:
+  schema: 3
+  node_type: memory
+  type: fact
+  id: fact.agent-loop.request-flow
+  confidence: verified
+  status: active
+  scope:
+    level: project
+    kind: project
+    value: ""
+  origin_session_ids:
+    - 20260806-...
+  created: 2026-08-06T00:00:00Z
+  modified: 2026-08-06T00:00:00Z
+  last_verified: 2026-08-06T00:00:00Z
+  expires: null
+  keywords:
+    - AgentLoop
+  evidence:
+    - path: src/agent/loop.cpp
+      symbol: AgentLoop::Run
+  fingerprints:
+    src/agent/loop.cpp: fnv1a64-...
+---
 
 # AgentLoop 请求路径
 
 `AgentLoop::Run` 在 `src/agent/loop.cpp` 组装请求。历史裁剪后写进请求。
 
-## 证据
+## Why
 
-- `src/agent/loop.cpp`：`AgentLoop::Run`
+入口收敛在一处,刷新工具表与组装请求须同一份时序。
 ```
 
-隐藏注释里是严格 JSON。它带稳定 id、类型、摘要、关键词、路径、状态和来源。注入模型前，程序剥掉元数据，只送正文。
+- `name` 是文件 slug,供人看,层内唯一;文件名就是 `<类型目录>/<name>.md`。
+- `description` 是索引里的一行摘要,索引不另藏手写摘要。标题取正文首个一级标题,没有则退回 name。
+- `metadata.id` 是跨改名不变的机器主键;`name` 改了,id 不跟着乱变。
+- `node_type` 固定 `memory`,为以后别的节点类型留口子。
+- 支撑路径与符号都进 `evidence`(schema 3 没有独立的 `paths` 字段,老主题的 paths 迁移时升格为证据)。
+- `fingerprints` 存关联文件的指纹,供陈旧判定;catalog 删掉后可从主题与项目文件重算。
+- 注入模型前,程序剥掉 front matter,只送正文。
+
+旧格式(schema 1/2)的主题把元数据藏在文件头的 HTML 注释严格 JSON 里。reader 同时认两种格式:旧主题照读、照列、照召回、照 rebuild;某条旧主题同 id 更新或核验时,只迁这一份成 schema 3,正文原样带过去。两份文件撞同一 id 时双双停为 `conflict`,不凭时间偷偷选一份。
+
+### 批量迁移:`/memory migrate`
+
+不想等旧主题逐条自然更新,可以一次批迁:
+
+1. 先列账:将改几份、跳过几份(已是 schema 3 或躺在 archive)、警告几份(读不动或已停 conflict),不碰盘。
+2. 确认(`y`)后才动。原件先按原相对路径备进 `.state/migration-backup/<时间>/`。
+3. 全部写妥、catalog 与 index 重建成功,才报完成;改名与写新内容在同一把项目锁里。
+4. 中途失败:原地改写的从备份还原,挪了名字的删掉新文件——旧主题与 catalog 仍可用,重跑不重复、不改 id、不丢来源会话。
+
+archive 里的旧主题默认不迁;恢复或用户显式要求时再说。
 
 ### 稳定 id
 
@@ -209,27 +298,29 @@ preference.package-manager
 
 ## 8. Index 与 catalog
 
-`index.md` 供人扫一眼：
+`index.md` 供人翻一眼：
 
 ```markdown
 # Project Memory
 
 ## Facts
 
-- [AgentLoop 请求路径](facts/agent-loop-request-flow.md) — 请求组装与工具刷新
+- [AgentLoop 请求路径](facts/agent-loop-request-flow.md) — 请求组装与工具刷新；id: `fact.agent-loop.request-flow`
 
 ## Preferences
 
-- [包管理器](preferences/package-manager.md) — 本项目用 pnpm
+- [包管理器](preferences/package-manager.md) — 本项目用 pnpm；id: `preference.package-manager`
 ```
 
-`.state/catalog.json` 供程序检索。它保存文件相对路径、摘要、关键词、范围、证据、状态和时间。正文不塞进 catalog。`index.md` 不再整份注入 prompt；模型只收到过门槛、过预算的命中正文。
+每项只写链接、description、id 与状态,不藏第二份手写摘要。它不进 prompt,机器检索读 catalog。
+
+`.state/catalog.json` 供程序检索。它保存 name、description、类型、scope、关键词、证据、状态、时间、指纹与相对文件。正文不塞进 catalog。
 
 `/memory rebuild` 会：
 
-1. 扫 `facts/` 与 `preferences/`。
-2. 解析固定元数据注释。
-3. 跳过坏文件并把警告写进 catalog。
+1. 扫 `facts/` 与 `preferences/`(两种格式混读)。
+2. 解析 front matter 或旧元数据注释。
+3. 跳过坏文件并把警告写进 catalog；同 id 撞车双双标 `conflict`。
 4. 原子写新 catalog。
 5. 按 catalog 原子写新 index。
 
@@ -264,7 +355,7 @@ flowchart LR
 
 时间只用于破同分。新而无关的条目压不过旧而精准的条目。
 
-程序按分数取至多 `max_results` 份主题，总正文不超过 `max_retrieval_bytes`。范围不符、已经过期、指纹漂移、低于门槛或与高分事实重复的条目都不注入；原因写进 `.state/trace-last.json`，可用 `/memory why [id]` 查看。指纹漂移时只提示回源码核验，不塞旧正文。
+正常请求只检索机器 catalog，不再把 `index.md` 注入 prompt——index 留给人看与灾后重建。零命中时零注入零脚手架。按分数取至多 `max_results` 份主题，总正文不超过 `max_retrieval_bytes`；同一事实(同正文或同标题+同路径集)只注一份。命中主题所指文件已经变化时，只留一句“可能陈旧”，不注正文，叫模型回源码核验。已过 `expires_at` 的条目也不召回。
 
 ## 10. 注入边界
 
@@ -463,14 +554,13 @@ linked worktree 共用 common git dir，故而共享记忆。切 worktree 后会
 
 下面这些是后续方向，不是现版功能：
 
-- 独立低价模型与后台 idle debounce。
-- 自然语言冲突判断与自动归并。
-- 成本阈值与抽取失败自动重试。
+- 闲时归并、idle debounce、成本阈值和自动失败重试策略。
 - 文件变化后自动 refresh。
 - 自动拆分、归并过大的主题与分层索引。
 - embedding、向量检索与知识图谱。
-- `~/.lubancode/memory/user/` 跨项目用户偏好。
 - 子代理按自己的任务单独检索。
+
+回合抽取已经落地:`review` 档每回合结束用当前模型从本轮增量提 0～3 条候选进待审箱(`/memory review` 审阅),`auto` 档在证据齐、无敏感内容时直写。
 
 现版故意先守“小而准”：短索引、小主题、本地检索、后台幂等写。数据真多到词法检索吃力，再换检索器；磁盘格式与写入链无须一并推倒。
 
