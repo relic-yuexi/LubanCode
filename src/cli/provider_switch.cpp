@@ -256,7 +256,8 @@ std::string PanelRule(int width) {
 ProviderSwitchResult RunProviderSwitchPicker(const std::vector<config::ProviderConfig>& providers,
                                               const std::string& active_provider,
                                               const std::string& start_filter, const std::string& notice,
-                                              const std::string& start_cursor_name, const Theme& theme) {
+                                              const std::string& start_cursor_name, const Theme& theme,
+                                              bool edit_on_enter) {
     ProviderSwitchResult result;
     if (!platform::StdinIsInteractive() || !platform::ProbeStdoutConsole().is_console ||
         !platform::SupportsScreenRepaint()) {
@@ -307,7 +308,7 @@ ProviderSwitchResult RunProviderSwitchPicker(const std::vector<config::ProviderC
 
         std::vector<std::string> lines;
         lines.push_back(PanelRule(width));
-        lines.push_back(tr("provider_switch.title"));
+        lines.push_back(tr(edit_on_enter ? "provider_switch.edit_title" : "provider_switch.title"));
         lines.push_back("");
         if (!notice.empty()) {
             lines.push_back(TruncateUtf8ToDisplayWidth("! " + notice, width - 2));
@@ -335,7 +336,7 @@ ProviderSwitchResult RunProviderSwitchPicker(const std::vector<config::ProviderC
                             core.state().filter.empty()
                                 ? std::string(tr("provider_switch.filter_empty"))
                                 : core.state().filter));
-        lines.push_back(tr("provider_switch.footer"));
+        lines.push_back(tr(edit_on_enter ? "provider_switch.footer_edit" : "provider_switch.footer"));
         lines.push_back(PanelRule(width));
 
         const int rows_needed = static_cast<int>(lines.size()) + 2;
@@ -406,6 +407,16 @@ ProviderSwitchResult RunProviderSwitchPicker(const std::vector<config::ProviderC
         const std::optional<KeyEvent> mapped = MapSwitchKey(*raw_key);
         if (!mapped.has_value()) {
             continue;
+        }
+        // 快捷键 e(容错单):筛选词为空、列表里有高亮项时,直接进该家的
+        // 编辑向导。非空筛选词里 e 仍是普通字符——不然"deepseek"这类词
+        // 根本没法往筛选里敲。
+        if (mapped->kind == KeyKind::Char && mapped->ch == U'e' && core.state().filter.empty() &&
+            !visible.empty()) {
+            clear();
+            result.pick = ProviderSwitchPick::Edit;
+            result.name = entries[visible[core.state().cursor]].name;
+            return result;
         }
         const std::string filter_before = core.state().filter;
         core.HandleKey(*mapped);

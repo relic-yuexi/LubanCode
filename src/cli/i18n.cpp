@@ -66,7 +66,7 @@ const Entry kZhCN[] = {
      "  /help           列出所有命令\n"
      "  /model          拉取模型列表,编号选择切换(默认第一个)\n"
      "  /model 名字     直接切到指定模型名,不用拉列表\n"
-     "  /provider       列已配服务端;/provider add|switch|remove|set|refresh 管多端模型(refresh 刷厂家目录)\n"
+     "  /provider       列已配服务端;/provider add|switch|edit|remove|set|refresh 管多端模型(refresh 刷厂家目录)\n"
      "  /config         打印当前生效配置(复用 --config 的逻辑),外加本会话实际在用的 model\n"
      "  /update         检查 GitHub 最新 Release；升级安装时一并同步官方技能\n"
      "  /init           在项目根生成 AGENTS.md,并让主代理、子代理立即采用\n"
@@ -171,7 +171,7 @@ const Entry kZhCN[] = {
      "  /help           列出所有命令\n"
      "  /model          拉取模型列表,编号选择切换(默认第一个)\n"
      "  /model 名字     直接切到指定模型名,不用拉列表\n"
-     "  /provider       列已配服务端;/provider add|switch|remove|set|refresh 管多端模型(refresh 刷厂家目录)\n"
+     "  /provider       列已配服务端;/provider add|switch|edit|remove|set|refresh 管多端模型(refresh 刷厂家目录)\n"
      "  /config         打印当前生效配置(api_key 打码),外加本会话实际在用的 model\n"
      "  /update         检查 GitHub 最新 Release；升级安装时一并同步官方技能\n"
      "  /init           在项目根生成 AGENTS.md,并让本会话立即采用\n"
@@ -469,6 +469,20 @@ const Entry kZhCN[] = {
     {"provider_wizard.confirm.hint", "输入项号跳回修改;回车确认写入。"},
     {"provider_wizard.confirm.prompt", "改哪项(1-7),回车确认写入 [Y/n]: "},
     {"provider_wizard.confirm.bad_number", "认 1-7 的项号,回车确认写入,n 放弃。"},
+
+    // ---- /provider edit 向导(容错单):同一套八步面板,全字段预填 ----
+    {"provider_wizard.edit.title", "编辑 provider"},
+    {"provider_wizard.edit.name_locked", "1) name       = {0}(不支持改名)"},
+    {"provider_wizard.edit.no_rename", "edit 不改名字;要换名字,先删了再添。"},
+    {"provider_wizard.edit.name_prompt", "回车返回汇总: "},
+    {"provider_wizard.edit.diff.wire", "2) wire       = {0} → {1}"},
+    {"provider_wizard.edit.diff.base_url", "3) base_url   = {0} → {1}"},
+    {"provider_wizard.edit.diff.auth", "4) auth       = {0} → {1}"},
+    {"provider_wizard.edit.diff.model", "5) model      = {0} → {1}"},
+    {"provider_wizard.edit.diff.effort", "6) effort     = {0} → {1}"},
+    {"provider_wizard.edit.diff.extra_body", "7) extra_body = {0} → {1}"},
+    {"provider_wizard.edit.diff_none", "本次没有字段改动;回车原样写回,n 放弃。"},
+    {"provider_wizard.edit.model.hint", "输入新模型名,回车保留当前值(编辑模式不拉列表)。"},
     {"provider_wizard.cancelled", "已取消,没有写入任何配置。"},
 
     // ---- slash 命令描述表 ----
@@ -1059,9 +1073,34 @@ const Entry kZhCN[] = {
     {"cmd.provider.auth_aborted", "已取消,配置没改。"},
     {"cmd.provider.switch.usage_short", "用法: /provider switch <名字> [模型]"},
 
+    // ---- /provider 子命令容错(容错单) ----
+    {"cmd.provider.typo_hint", "没认得 `{0}`,是不是想敲 `{1}`?"},
+    {"cmd.provider.bad_args", "参数不对。"},
+    {"cmd.provider.unknown_sub.tty",
+     "没认得的子命令: {0}。常用的:\n"
+     "  /provider add       添一家\n"
+     "  /provider switch    换一家\n"
+     "  /provider list      看已配"},
+    {"cmd.provider.unknown_sub.pipe", "用法: /provider <子命令>;敲 /provider list 看已配的 provider。"},
+    {"cmd.provider.usage_short.list", "用法: /provider list"},
+    {"cmd.provider.usage_short.refresh", "用法: /provider refresh"},
+    {"cmd.provider.usage_short.add",
+     "用法: /provider add [名字](进向导),或 /provider add <名字> <base_url> <anthropic|responses|chat_"
+     "completions> [--key-env 变量名] [--key 明文key] [--model 模型] [--effort 档位] [--window 大小]"},
+    {"cmd.provider.usage_short.remove", "用法: /provider remove <名字>"},
+    {"cmd.provider.usage_short.set", "用法: /provider set <名字> <字段> <值>(字段: auth、native_web_search、extra_body、extra_header)"},
+    {"cmd.provider.usage_short.edit", "用法: /provider edit <名字>(裸敲开选择列表)"},
+
+    // ---- /provider edit(容错单) ----
+    {"cmd.provider.edit.saved", "已保存 provider {0} 的改动,写进全局配置 {1}。"},
+    {"cmd.provider.edit.save_failed", "存 provider 改动失败: {0}"},
+    {"cmd.provider.edit.cancelled", "已取消,配置没改。"},
+
     // ---- /provider switch 选择器(向导重排单) ----
     {"provider_switch.title", "切换 provider"},
-    {"provider_switch.footer", "↑↓ 选择  Enter 切换  Esc 取消  输入文字筛选"},
+    {"provider_switch.footer", "↑↓ 选择  Enter 切换  Esc 取消  输入文字筛选(筛选词为空时按 e 编辑选中项)"},
+    {"provider_switch.edit_title", "编辑哪个 provider?"},
+    {"provider_switch.footer_edit", "↑↓ 选择  Enter 编辑  Esc 取消  输入文字筛选"},
     {"provider_switch.filter_line", "筛选: {0}"},
     {"provider_switch.filter_empty", "(未输入)"},
     {"provider_switch.empty_hint", "还没有 provider。"},
@@ -1293,7 +1332,7 @@ const Entry kEn[] = {
      "  /help           list all commands\n"
      "  /model          fetch the model list and switch by number (default: first)\n"
      "  /model <name>   switch directly to a model name without fetching the list\n"
-     "  /provider       list configured providers; /provider add|switch|remove|set|refresh manages endpoints (refresh updates the catalog)\n"
+     "  /provider       list configured providers; /provider add|switch|edit|remove|set|refresh manages endpoints (refresh updates the catalog)\n"
      "  /config         print the effective configuration plus the model in use this session\n"
      "  /update         check the latest GitHub Release; installs also sync official skills\n"
      "  /init           create AGENTS.md at the project root and load it for main/sub-agents now\n"
@@ -1407,7 +1446,7 @@ const Entry kEn[] = {
      "  /help           list all commands\n"
      "  /model          fetch the model list and switch by number (default: first)\n"
      "  /model <name>   switch directly to a model name\n"
-     "  /provider       list configured providers; /provider add|switch|remove|set|refresh manages endpoints (refresh updates the catalog)\n"
+     "  /provider       list configured providers; /provider add|switch|edit|remove|set|refresh manages endpoints (refresh updates the catalog)\n"
      "  /config         print the effective configuration (api_key masked) plus the session model\n"
      "  /update         check the latest GitHub Release; installs also sync official skills\n"
      "  /init           create AGENTS.md at the project root and load it now\n"
@@ -1721,6 +1760,20 @@ const Entry kEn[] = {
     {"provider_wizard.confirm.hint", "Type an item number to jump back and edit; Enter confirms."},
     {"provider_wizard.confirm.prompt", "Item to edit (1-7), Enter to confirm [Y/n]: "},
     {"provider_wizard.confirm.bad_number", "Enter an item number 1-7, or press Enter to confirm, or n to abort."},
+
+    // ---- /provider edit wizard (typo unit): same eight panels, prefilled ----
+    {"provider_wizard.edit.title", "Edit provider"},
+    {"provider_wizard.edit.name_locked", "1) name       = {0} (rename not supported)"},
+    {"provider_wizard.edit.no_rename", "Renaming is not supported here; remove and re-add instead."},
+    {"provider_wizard.edit.name_prompt", "Press Enter to go back to the summary: "},
+    {"provider_wizard.edit.diff.wire", "2) wire       = {0} → {1}"},
+    {"provider_wizard.edit.diff.base_url", "3) base_url   = {0} → {1}"},
+    {"provider_wizard.edit.diff.auth", "4) auth       = {0} → {1}"},
+    {"provider_wizard.edit.diff.model", "5) model      = {0} → {1}"},
+    {"provider_wizard.edit.diff.effort", "6) effort     = {0} → {1}"},
+    {"provider_wizard.edit.diff.extra_body", "7) extra_body = {0} → {1}"},
+    {"provider_wizard.edit.diff_none", "No field changed; Enter writes it back unchanged, n aborts."},
+    {"provider_wizard.edit.model.hint", "Type a new model name; Enter keeps the current one (no list fetch in edit)."},
     {"provider_wizard.cancelled", "Cancelled; nothing was written."},
 
     // ---- slash command descriptions ----
@@ -2180,9 +2233,38 @@ const Entry kEn[] = {
     {"cmd.provider.auth_aborted", "Cancelled; nothing was changed."},
     {"cmd.provider.switch.usage_short", "Usage: /provider switch <name> [model]"},
 
+    // ---- /provider subcommand fault tolerance (typo unit) ----
+    {"cmd.provider.typo_hint", "Unknown subcommand `{0}` — did you mean `{1}`?"},
+    {"cmd.provider.bad_args", "Those arguments don't fit."},
+    {"cmd.provider.unknown_sub.tty",
+     "Unknown subcommand: {0}. Common ones:\n"
+     "  /provider add\n"
+     "  /provider switch\n"
+     "  /provider list"},
+    {"cmd.provider.unknown_sub.pipe",
+     "Usage: /provider <subcommand>; run /provider list to see configured providers."},
+    {"cmd.provider.usage_short.list", "Usage: /provider list"},
+    {"cmd.provider.usage_short.refresh", "Usage: /provider refresh"},
+    {"cmd.provider.usage_short.add",
+     "Usage: /provider add [name] (wizard), or /provider add <name> <base_url> "
+     "<anthropic|responses|chat_completions> [--key-env ENV] [--key API_KEY] [--model MODEL] [--effort LEVEL] "
+     "[--window SIZE]"},
+    {"cmd.provider.usage_short.remove", "Usage: /provider remove <name>"},
+    {"cmd.provider.usage_short.set",
+     "Usage: /provider set <name> <field> <value> (fields: auth, native_web_search, extra_body, extra_header)"},
+    {"cmd.provider.usage_short.edit", "Usage: /provider edit <name> (bare opens a picker)"},
+
+    // ---- /provider edit (typo unit) ----
+    {"cmd.provider.edit.saved", "Saved changes to provider {0}; global config at {1}."},
+    {"cmd.provider.edit.save_failed", "Could not save provider changes: {0}"},
+    {"cmd.provider.edit.cancelled", "Cancelled; nothing was changed."},
+
     // ---- /provider switch picker (wizard reorder) ----
     {"provider_switch.title", "Switch provider"},
-    {"provider_switch.footer", "Up/Down select  Enter switch  Esc cancel  type to filter"},
+    {"provider_switch.footer",
+     "Up/Down select  Enter switch  Esc cancel  type to filter (press e to edit when filter is empty)"},
+    {"provider_switch.edit_title", "Edit which provider?"},
+    {"provider_switch.footer_edit", "Up/Down select  Enter edit  Esc cancel  type to filter"},
     {"provider_switch.filter_line", "filter: {0}"},
     {"provider_switch.filter_empty", "(none)"},
     {"provider_switch.empty_hint", "No providers configured yet."},

@@ -349,6 +349,20 @@ bool SetProviderAuthMode(std::vector<ProviderConfig>& providers, const std::stri
     return false;
 }
 
+bool ReplaceProvider(std::vector<ProviderConfig>& providers, const std::string& name,
+                     const ProviderConfig& provider) {
+    if (provider.name != name) {
+        return false;  // 改名不支持:edit 向导明说不许,这里也不留暗门
+    }
+    for (ProviderConfig& entry : providers) {
+        if (entry.name == name) {
+            entry = provider;
+            return true;
+        }
+    }
+    return false;
+}
+
 std::string ToString(Source source) {
     switch (source) {
         case Source::LubancodeEnv:
@@ -2766,6 +2780,41 @@ std::expected<std::string, std::string> SetProviderAuthInlineInGlobalConfig(cons
         provider.auth = ProviderAuthMode::Inline;
         provider.api_key = api_key;
     });
+}
+
+std::expected<std::string, std::string> ReplaceProviderInGlobalConfig(const std::string& name,
+                                                                      const ProviderConfig& provider) {
+    if (provider.name != name) {
+        return std::unexpected("edit 不支持改名(新名字 " + provider.name + " != " + name +
+                               ");要换名字,先删了再添。");
+    }
+    const auto valid = ValidateProviderConfig(provider);
+    if (!valid.has_value()) {
+        return std::unexpected(valid.error());
+    }
+    // 走 AddProviderToGlobalConfig 同一条路子:整份读进来,替换那一条,整份
+    // 写回去——UpdateProvidersInConfigFile 里的校验(重名/条目合法)照兜底。
+    const auto home = HomeDir();
+    if (!home.has_value()) {
+        return std::unexpected("找不到用户主目录,没法更新 provider 配置");
+    }
+    const std::string path = NewConfigPathFor(std::filesystem::path(*home)).string();
+    auto root = ReadConfigObjectForUpdate(path);
+    if (!root.has_value()) {
+        return std::unexpected(root.error());
+    }
+    auto providers = ProvidersInConfigObject(*root, path);
+    if (!providers.has_value()) {
+        return std::unexpected(providers.error());
+    }
+    if (!ReplaceProvider(*providers, name, provider)) {
+        return std::unexpected("provider 不存在: " + name);
+    }
+    const auto written = UpdateProvidersInConfigFile(path, *providers);
+    if (!written.has_value()) {
+        return std::unexpected(written.error());
+    }
+    return path;
 }
 
 std::expected<ConfigResult, std::string> LoadFromEnv() {

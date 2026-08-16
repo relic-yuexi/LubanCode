@@ -768,6 +768,14 @@ bool SetProviderExtraHeader(std::vector<ProviderConfig>& providers, const std::s
 bool SetProviderAuthMode(std::vector<ProviderConfig>& providers, const std::string& name,
                          ProviderAuthMode mode);
 
+// 纯函数,不摸文件(容错单,/provider edit 用):把 name 对应那条 provider
+// 整条换成 provider(向导不碰的字段——context_window、extra_headers、
+// supported_think_levels 这类——靠调用方传入的这份副本原样带回来)。改名
+// 不支持:provider.name != name 时原样不动、返回 false。找不到 name 也返回
+// false、原样不动。
+bool ReplaceProvider(std::vector<ProviderConfig>& providers, const std::string& name,
+                     const ProviderConfig& provider);
+
 // 纯函数:检查合并结果里的 api_key 是不是空的。空的话报错,错误信息里把
 // 四级来源都提一遍(按 result.config.wire 挑出对应的通用环境变量名),
 // 让人知道去哪儿配。真正要跟模型对话之前(AskOnce/InteractiveLoop 之前)
@@ -893,6 +901,13 @@ std::expected<std::string, std::string> SetProviderAuthEnvInGlobalConfig(const s
                                                                          const std::string& key_env);
 std::expected<std::string, std::string> SetProviderAuthInlineInGlobalConfig(const std::string& name,
                                                                             const std::string& api_key);
+
+// /provider edit 用(容错单):把全局配置里 name 那条 provider 整条换成
+// provider 再落盘(实际替换那一步走 ReplaceProvider 纯函数,校验兜底)。
+// 找不到名字、或者想顺手改名(provider.name != name),都报错、不碰文件。
+// 其他条目原样保留。
+std::expected<std::string, std::string> ReplaceProviderInGlobalConfig(const std::string& name,
+                                                                      const ProviderConfig& provider);
 
 // 把一段 JSON 文本解析成 FileConfig。file_path_for_error 只用来拼错误信息,
 // 不影响解析本身。JSON 坏了、或者顶层不是一个 object,都返回带路径的错误。

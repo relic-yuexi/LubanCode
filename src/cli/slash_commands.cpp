@@ -1,8 +1,10 @@
 #include "cli/slash_commands.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <optional>
 #include <sstream>
+#include <string_view>
 #include <utility>
 
 #include "cli/i18n.hpp"
@@ -166,6 +168,18 @@ ParsedProviderCommand ParseProviderCommand(const std::string& args) {
     }
 
     const std::string action = ToLower(words[0]);
+    parsed.bad_word = words[0];  // Invalid 时给容错层看的第一词原始拼写
+    if (action == "edit") {
+        // 容错单:/provider edit <名字> 进向导改旧 provider。裸敲 edit(TTY)
+        // 开选择列表;词数超了(3 个及以上)照旧 Invalid,提示走容错短用法。
+        if (words.size() == 1) {
+            parsed.action = ProviderCommandAction::EditInteractive;
+        } else if (words.size() == 2) {
+            parsed.action = ProviderCommandAction::Edit;
+            parsed.name = words[1];
+        }
+        return parsed;
+    }
     if (action == "refresh") {
         if (words.size() == 1) parsed.action = ProviderCommandAction::Refresh;
         return parsed;
@@ -310,6 +324,79 @@ ParsedProviderCommand ParseProviderCommand(const std::string& args) {
 
 bool CanRemoveProvider(const std::string& active_provider, const std::string& name) {
     return active_provider != name;
+}
+
+// ---------------------------------------------------------------------------
+// /provider 子命令容错(容错单)
+// ---------------------------------------------------------------------------
+
+std::vector<std::string> ProviderSubcommands() {
+    return {"list", "refresh", "add", "switch", "remove", "set", "edit"};
+}
+
+namespace {
+
+// 经典 Levenshtein(两行滚动数组)。子命令最长 7 个字符,直接算全表,不做
+// 提前剪枝——量太小,剪枝反倒是噪音。
+std::size_t EditDistanceAscii(std::string_view a, std::string_view b) {
+    const std::size_t rows = a.size() + 1;
+    const std::size_t cols = b.size() + 1;
+    std::vector<std::size_t> prev(cols);
+    std::vector<std::size_t> curr(cols);
+    for (std::size_t j = 0; j < cols; ++j) {
+        prev[j] = j;
+    }
+    for (std::size_t i = 1; i < rows; ++i) {
+        curr[0] = i;
+        for (std::size_t j = 1; j < cols; ++j) {
+            const std::size_t substitution = prev[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1);
+            curr[j] = std::min({prev[j] + 1, curr[j - 1] + 1, substitution});
+        }
+        prev.swap(curr);
+    }
+    return prev[cols - 1];
+}
+
+}  // namespace
+
+std::optional<std::string> NearestProviderSubcommand(const std::string& word) {
+    // 空词/离谱长词不比——它们跟谁都不沾亲。
+    if (word.empty() || word.size() > 16) {
+        return std::nullopt;
+    }
+    const std::string lowered = ToLower(word);
+    constexpr std::size_t kMaxDistance = 2;
+    std::optional<std::string> best;
+    std::size_t best_distance = kMaxDistance + 1;
+    for (const std::string& candidate : ProviderSubcommands()) {
+        // 长度差超过阈值的不用进算法,省一趟 DP。
+        if (lowered.size() > candidate.size() + kMaxDistance ||
+            candidate.size() > lowered.size() + kMaxDistance) {
+            continue;
+        }
+        const std::size_t distance = EditDistanceAscii(lowered, candidate);
+        if (distance < best_distance) {
+            best_distance = distance;
+            best = candidate;
+        }
+        // 距离相同不换人:清单序即推荐序,排前面的赢(纯词如 "a" 同时离
+        // add/set 两边 2 步,取 add)。
+    }
+    if (best_distance > kMaxDistance) {
+        return std::nullopt;
+    }
+    return best;
+}
+
+std::string ProviderSubcommandUsageLine(const std::string& subcommand) {
+    const std::vector<std::string> known = ProviderSubcommands();
+    if (std::find(known.begin(), known.end(), subcommand) == known.end()) {
+        return std::string();  // 认不得的子命令不编用法,tr 缺键会回 key 本身
+    }
+    if (subcommand == "switch") {
+        return tr("cmd.provider.switch.usage_short");  // 既有键,不另立门户
+    }
+    return tr("cmd.provider.usage_short." + subcommand);
 }
 
 ParsedRecordCommand ParseRecordCommand(const std::string& args) {
