@@ -5,6 +5,7 @@
 #include <algorithm>
 
 #include "cli/i18n.hpp"
+#include "cli/keymap.hpp"  // ChordFor/FormatKeyChord(首行键名反查)
 #include "cli/line_editor.hpp"  // TruncateUtf8ToDisplayWidth / DisplayWidthUtf8
 
 namespace lubancode::cli {
@@ -175,16 +176,32 @@ std::vector<std::string> BuildHistorySearchLines(const HistorySearchSession& ses
                                                  const std::string& highlight_stats,
                                                  const std::string& highlight_reset) {
     std::vector<std::string> lines;
-    // 首行:范围 + 可用键(从 keymap 反查是 ? 帮助/第四批的事;这里按
-    // 当前会话实况写默认键,Ctrl+S 被流控截走时用户已改绑的话提示也应
-    // 改——v1 先默认,帮助层接管后统一反查)。
+    // 首行:范围 + 可用键。键名从 keymap 反查(用户改绑后提示跟着改,
+    // 规格第 9 条"不能写死");某动作没绑键(改绑成空不会发生,但复位到
+    // 无默认的 stash 这类不在此列)就整段略过。
     const std::string* scope_word = nullptr;
     switch (session.scope()) {
         case HistorySearchScope::Session: scope_word = &tr("search.scope.session"); break;
         case HistorySearchScope::Project: scope_word = &tr("search.scope.project"); break;
         case HistorySearchScope::All: scope_word = &tr("search.scope.all"); break;
     }
-    lines.push_back(tr("search.header") + " [" + *scope_word + "] · " + tr("search.keys_hint") +
+    std::string keys;
+    const auto append_key = [&](keymap::ActionId action, const char* label_key) {
+        const auto chord = keymap::ActiveKeymap().ChordFor(action);
+        if (!chord.has_value()) {
+            return;
+        }
+        if (!keys.empty()) {
+            keys += " · ";
+        }
+        keys += keymap::FormatKeyChord(*chord) + " " + tr(label_key);
+    };
+    append_key(keymap::ActionId::SearchOlder, "search.key.older");
+    append_key(keymap::ActionId::SearchScopeCycle, "search.key.scope");
+    append_key(keymap::ActionId::SearchAccept, "search.key.accept");
+    append_key(keymap::ActionId::SearchAcceptSubmit, "search.key.accept_submit");
+    append_key(keymap::ActionId::SearchCancel, "search.key.cancel");
+    lines.push_back(tr("search.header") + " [" + *scope_word + "]" + (keys.empty() ? "" : " · " + keys) +
                     (query.empty() ? std::string() : " · " + tr("search.query") + ": " + query));
 
     const auto& matches = session.matches();
