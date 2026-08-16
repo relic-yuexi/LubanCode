@@ -1,9 +1,9 @@
 // tools::AgentTool:内置 "agent" 工具,用 FakeBackend 按脚本吐 StreamEvent
 // (不碰真网络),验证:一轮纯文本直接返回;子代理调工具(用假工具)后
 // 返回;超步数预算按 budget_exhausted 收账(带部分结果与步数账);最后一步
-// 无文本结论/接口报错按结构化 TaskOutcome 分型;确认回调转发(父拒绝 ->
-// 子内工具收到拒绝);usage 累计到父回调;注册表排除(主表见 agent,子表
-// 不见,防递归)。
+// 无文本结论/接口报错/输出预算耗尽按结构化 TaskOutcome 分型;确认回调转发
+// (父拒绝 -> 子内工具收到拒绝);usage 累计到父回调;同级派工与深度治理
+// (子表可挂 AgentDispatchTool 转发壳,递归靠显式深度上限防,不靠拿掉工具)。
 
 #include <doctest/doctest.h>
 
@@ -29,6 +29,7 @@
 #include "hooks/trust.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/registry.hpp"
+#include "tools/todo_tool.hpp"
 #include "tools/tool.hpp"
 
 using namespace lubancode;
@@ -262,6 +263,96 @@ TEST_CASE("agent 工具:计数账——一步并行三件工具 steps_used 仍�
     CHECK(snapshots[0].tool_calls.size() == 3);
     CHECK(snapshots[0].outcome.steps_used == 2);
     CHECK(snapshots[0].outcome.status == tools::TaskOutcomeStatus::Completed);
+}
+
+// ---------------------------------------------------------------------------
+// 输出预算耗尽(规格根因四,vLLM 0.27.1 + qwen3.8-27b 现场的收场侧):
+// thinking 吃满输出上限、续跑用完仍无正文 → budget_exhausted /
+// output_budget_exhausted,不再笼统 no_final_text;失败页带实际上限、
+// 已续次数、usage 是否报告、思考检查点与四条去路。usage 未报告时台账
+// 不画 0,标 usage_reported=false。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("agent 工具:输出预算耗尽——budget_exhausted 分型带结构化账") {
+    FakeBackend backend;
+    // 两轮都是 reasoning-only + finish_reason=length(默认续跑 1 次)。
+    backend.scripts = {
+        {
+            api::MessageStart{"msg", "model"},
+            api::ThinkingDelta{"先想棋盘布局"},
+            api::ContentBlockDone{0},
+            api::MessageDone{"max_tokens", api::Usage{0, 0, 0, 0, 0}},  // usage 全零:未报告
+        },
+        {
+            api::MessageStart{"msg", "model"},
+            api::ThinkingDelta{"还在想"},
+            api::ContentBlockDone{0},
+            api::MessageDone{"max_tokens", api::Usage{0, 0, 0, 0, 0}},
+        },
+    };
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+    // 子代理运行策略:声明了上限才在失败页报数;步数不限。
+    agent::AgentRuntimeProfile profile;
+    profile.model = "test-model";
+    profile.max_output_tokens = 4096;
+    profile.max_output_tokens_source = agent::OutputBudgetSource::ConfigFile;
+    agent_tool.SetRuntimeProfile(profile);
+
+    const tools::Tool::Result result =
+        agent_tool.execute(nlohmann::json{{"title", "写象棋网页"}, {"prompt", "写一个中国象棋网页游戏"}});
+
+    CHECK(result.is_error);
+    CHECK(result.content.find("budget_exhausted") != std::string::npos);
+    CHECK(result.content.find("输出预算耗尽") != std::string::npos);
+    // 四条去路(规格根因四):失败页必须给全。
+    CHECK(result.content.find("继续") != std::string::npos);
+    CHECK(result.content.find("max_output_tokens") != std::string::npos);
+    CHECK(result.content.find("/think") != std::string::npos);
+    CHECK(result.content.find("拆小") != std::string::npos);
+    CHECK(result.content.find("4096") != std::string::npos);  // 实际上限写进失败页
+
+    const auto snapshots = agent_tool.TaskSnapshots();
+    REQUIRE(snapshots.size() == 1);
+    const auto& outcome = snapshots[0].outcome;
+    CHECK(snapshots[0].state == tools::AgentTaskState::BudgetExhausted);
+    CHECK(outcome.status == tools::TaskOutcomeStatus::BudgetExhausted);
+    CHECK(outcome.reason == tools::TaskOutcomeReason::OutputBudgetExhausted);
+    CHECK(outcome.output_limit_tokens == 4096);
+    CHECK(outcome.length_continuations_used == 1);
+    CHECK(outcome.usage_reported == false);  // 两轮 usage 全零:未报告,不冒充 0
+    CHECK(outcome.stop_reason == "max_tokens");
+    CHECK(outcome.thinking_checkpoint.find("思考") != std::string::npos);
+    // 台账同款三态:usage_reported=false(面板据此写"tokens 未报告")。
+    CHECK(snapshots[0].usage_reported == false);
+    CHECK(snapshots[0].steps_used == 2);
+}
+
+TEST_CASE("agent 工具:思考撞墙后续跑救回来——正常完成,usage 报告位翻真") {
+    FakeBackend backend;
+    backend.scripts = {
+        {
+            api::MessageStart{"msg", "model"},
+            api::ThinkingDelta{"想"},
+            api::ContentBlockDone{0},
+            api::MessageDone{"max_tokens", api::Usage{0, 4096, 0, 0, 0}},
+        },
+        TextOnlyScript("结论:改用分步实现"),
+    };
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+
+    const tools::Tool::Result result =
+        agent_tool.execute(nlohmann::json{{"title", "小结"}, {"prompt", "给个结论"}});
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("结论:改用分步实现") != std::string::npos);
+    const auto snapshots = agent_tool.TaskSnapshots();
+    REQUIRE(snapshots.size() == 1);
+    CHECK(snapshots[0].outcome.status == tools::TaskOutcomeStatus::Completed);
+    CHECK(snapshots[0].outcome.reason == tools::TaskOutcomeReason::None);
+    // 第一轮 usage 带了 4096 输出:报告位为真(哪怕第二轮全零也算报告过)。
+    CHECK(snapshots[0].usage_reported == true);
 }
 
 TEST_CASE("agent 工具:缺 prompt / 空 prompt 报 is_error,不发请求") {
@@ -763,7 +854,7 @@ TEST_CASE("execution_mode:显式 foreground/background 生效,auto 随会话缺�
     CHECK(backend.captured_requests.size() == before);
 }
 
-TEST_CASE("注册表排除:子代理工具表不含 agent 自己,主表含 agent,防递归深度硬限 1") {
+TEST_CASE("同级派工:子表可挂 agent 转发壳,递归靠显式深度上限防,不靠拿掉工具") {
     FakeBackend backend;
 
     tools::ToolRegistry sub_registry;
@@ -771,11 +862,74 @@ TEST_CASE("注册表排除:子代理工具表不含 agent 自己,主表含 agent
 
     tools::ToolRegistry main_registry;
     main_registry.Register(std::make_unique<FakeTool>("read_file", tools::Tool::Result{"ok", false}, false));
-    main_registry.Register(std::make_unique<tools::AgentTool>(backend, sub_registry, "/work/dir"));
-
-    CHECK(sub_registry.Find("agent") == nullptr);
+    auto agent_tool = std::make_unique<tools::AgentTool>(backend, sub_registry, "/work/dir");
+    main_registry.Register(std::make_unique<tools::AgentDispatchTool>(*agent_tool));
+    // AgentDispatchTool 只是转发壳:name/schema/描述与目标一致,execute 直通。
     CHECK(main_registry.Find("agent") != nullptr);
     CHECK(main_registry.Find("agent")->name() == "agent");
+    CHECK(main_registry.Find("agent")->input_schema() == agent_tool->input_schema());
+    // 旧测试直建的子表没有转发壳(调用方没挂),行为照旧——递归治理在
+    // AgentTool 的深度账上,不在"表里有没有这枚工具"上。
+    CHECK(sub_registry.Find("agent") == nullptr);
+}
+
+TEST_CASE("深度治理:嵌套派工超过上限明报,不发请求") {
+    // 造一只"被问到就再派一只子代理"的假 agent 目标,验证深度账在
+    // AgentTool 内部滚动——不真跑模型,只看拒绝文案与请求数。
+    FakeBackend backend;
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+    agent_tool.SetDispatchGovernance(/*max_active=*/8, /*max_depth=*/1);
+
+    // 直接 execute = 第 1 层,允许(会正常起任务);
+    // 在第 1 层任务里再经转发壳派工 = 第 2 层,拒绝。
+    // 用 RunTask 的公开路径难在单测里嵌套,这里钉治理入口的语义:
+    // 深度上限 1 时,处在第 1 层里再派会被拒。用一个在前台任务执行期间
+    // 再次调用 execute 的假工具模拟嵌套。
+    class NestingTool : public tools::Tool {
+    public:
+        NestingTool(tools::AgentDispatchTool& dispatch) : dispatch_(dispatch) {}
+        std::string name() const override { return "nesting_probe"; }
+        std::string description() const override { return "再派一只"; }
+        nlohmann::json input_schema() const override { return nlohmann::json::object(); }
+        bool needs_confirm() const override { return false; }
+        tools::Tool::Result execute(const nlohmann::json&) override {
+            called = true;
+            last_result = dispatch_.execute(nlohmann::json{{"title", "孙任务"}, {"prompt", "查"}});
+            return {"嵌套结果见旁账", false};
+        }
+        bool called = false;
+        tools::Tool::Result last_result{"", false};
+
+    private:
+        tools::AgentDispatchTool& dispatch_;
+    };
+
+    tools::AgentDispatchTool dispatch(agent_tool);
+    auto nesting = std::make_unique<NestingTool>(dispatch);
+    NestingTool& nesting_ref = *nesting;
+    sub_registry.Register(std::move(nesting));
+    // 脚本:第一轮让模型调用 nesting_probe(它会在第 1 层内再派第 2 层)。
+    backend.scripts = {
+        {
+            api::MessageStart{"msg", "model"},
+            api::ToolUseStart{0, "toolu_n", "nesting_probe"},
+            api::ToolUseInputDelta{0, "{}"},
+            api::ContentBlockDone{0},
+            api::MessageDone{"tool_use", api::Usage{}},
+        },
+        TextOnlyScript("外层收口"),
+    };
+    const tools::Tool::Result result =
+        agent_tool.execute(nlohmann::json{{"title", "外层"}, {"prompt", "开工"}});
+    // 外层任务本身照常完成;嵌套那次被深度上限拒绝——明报,不发请求。
+    CHECK_FALSE(result.is_error);
+    CHECK(nesting_ref.called);
+    CHECK(nesting_ref.last_result.is_error);
+    CHECK(nesting_ref.last_result.content.find("深度上限") != std::string::npos);
+    CHECK(nesting_ref.last_result.content.find("subagent.max_depth") != std::string::npos);
+    // 只有外层的两次请求:嵌套派工在被拒时没碰模型。
+    CHECK(backend.captured_requests.size() == 2);
 }
 
 TEST_CASE("Explore 子代理只把只读白名单工具交给模型") {
@@ -797,6 +951,104 @@ TEST_CASE("Explore 子代理只把只读白名单工具交给模型") {
     REQUIRE(backend.captured_requests[0].tools.size() == 2);
     CHECK(backend.captured_requests[0].tools[0].name == "read_file");
     CHECK(backend.captured_requests[0].tools[1].name == "search");
+}
+
+TEST_CASE("Explore 撞只读墙:错误写明'角色限制',不写'子代理无权限'") {
+    // 模型幻觉调了白名单外的写工具:Explore 的过滤谓词不放行,错误文案
+    // 得说清限制来自只读角色(规格"同级矩阵"第 3 条),下一轮交检查点。
+    FakeBackend backend;
+    backend.scripts = {
+        {
+            api::MessageStart{"msg", "model"},
+            api::ToolUseStart{0, "toolu_w", "write_file"},
+            api::ToolUseInputDelta{0, "{}"},
+            api::ContentBlockDone{0},
+            api::MessageDone{"tool_use", api::Usage{}},
+        },
+        TextOnlyScript("检查点:只读调查完成,写入建议附后"),
+    };
+    tools::ToolRegistry sub_registry;
+    sub_registry.Register(std::make_unique<FakeTool>("read_file", tools::Tool::Result{"read", false}, false));
+    sub_registry.Register(std::make_unique<FakeTool>("write_file", tools::Tool::Result{"write", false}, false));
+
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+    const auto result = agent_tool.execute(
+        nlohmann::json{{"title", "只读查"}, {"prompt", "查"}, {"agent_type", "Explore"}, {"run_in_background", false}});
+
+    CHECK_FALSE(result.is_error);
+    REQUIRE(backend.captured_requests.size() == 2);
+    // 第二次请求带回的 tool_result 里是"角色限制"的说法。
+    const auto& second = backend.captured_requests[1];
+    std::string tool_result_text;
+    for (const auto& message : second.messages) {
+        for (const auto& block : message.content) {
+            if (const auto* tool_result = std::get_if<api::ToolResultBlock>(&block);
+                tool_result != nullptr && tool_result->tool_use_id == "toolu_w") {
+                tool_result_text = tool_result->content;
+            }
+        }
+    }
+    CHECK(tool_result_text.find("角色限制") != std::string::npos);
+    CHECK(tool_result_text.find("Explore") != std::string::npos);
+    CHECK(tool_result_text.find("子代理无权限") == std::string::npos);
+}
+
+TEST_CASE("子代理记忆召回:按任务 prompt 独立检索,注入本轮 user 消息尾部") {
+    FakeBackend backend;
+    backend.scripts = {TextOnlyScript("结论")};
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+    // 召回 provider:吃任务 prompt,吐一段上下文(会话层闭包 ProjectMemory,
+    // 这里用假实现钉注入语义)。
+    agent_tool.SetTurnContextProvider([](const std::string& task_prompt) {
+        return "[项目记忆] 与\"" + task_prompt + "\"相关的召回段";
+    });
+
+    const tools::Tool::Result result =
+        agent_tool.execute(nlohmann::json{{"title", "带记忆"}, {"prompt", "查构建系统"}});
+    CHECK_FALSE(result.is_error);
+    REQUIRE(backend.captured_requests.size() == 1);
+    // 召回段随本轮 user 消息进请求视图(SetTurnContext 语义),模型第一
+    // 份请求就看得见。
+    std::string first_user_text;
+    for (const auto& message : backend.captured_requests[0].messages) {
+        if (message.role != api::Role::User) {
+            continue;
+        }
+        for (const auto& block : message.content) {
+            if (const auto* text = std::get_if<api::TextBlock>(&block)) {
+                first_user_text += text->text;
+            }
+        }
+        break;
+    }
+    CHECK(first_user_text.find("查构建系统") != std::string::npos);
+    CHECK(first_user_text.find("[项目记忆]") != std::string::npos);
+}
+
+TEST_CASE("子代理私有 todo:每只任务的 todo_write 独占一块板,不写主表状态") {
+    FakeBackend backend;
+    backend.scripts = {
+        {
+            api::MessageStart{"msg", "model"},
+            api::ToolUseStart{0, "toolu_t", "todo_write"},
+            api::ToolUseInputDelta{0, R"({"items":[{"content":"查","status":"pending"}]})"},
+            api::ContentBlockDone{0},
+            api::MessageDone{"tool_use", api::Usage{}},
+        },
+        TextOnlyScript("办完了"),
+    };
+    tools::ToolRegistry sub_registry;
+    const auto shared_board = std::make_shared<tools::TodoListState>();
+    sub_registry.Register(std::make_unique<tools::TodoWriteTool>(shared_board));
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+
+    const tools::Tool::Result result =
+        agent_tool.execute(nlohmann::json{{"title", "带 todo"}, {"prompt", "办"}});
+    CHECK_FALSE(result.is_error);
+    // 主表/会话级那块板一个字没动:子代理的 todo 是任务私有的,任务退出
+    // 即散(规格"不让子代理共享并并发修改 main 的同一份 todo")。
+    CHECK(shared_board->items.empty());
 }
 
 TEST_CASE("后台子代理立即交回任务号,独立跑完,结果只投递一次") {

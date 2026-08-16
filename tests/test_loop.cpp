@@ -160,17 +160,55 @@ TEST_CASE("一轮纯文本直接结束:一次请求,历史里 user+assistant 两
     CHECK(loop.history()[1].role == api::Role::Assistant);
 }
 
-TEST_CASE("finish_reason=length 且正文为空:length_empty_output 明报,不是无声空白") {
-    // 本地兼容端实测现场:reasoning 吃光输出预算,finish_reason=length,
-    // 一个正文字都没有。loop 不当错误(历史照常入账),但 RunOutcome 要
-    // 把事说破——上层打"输出预算耗尽"的明报,不留一片空白。
+TEST_CASE("输出上限 unset:请求里不带 max_tokens;声明了才带(规格根因一)") {
     FakeBackend backend;
-    backend.scripts = {{
-        api::MessageStart{"msg", "model"},
-        api::ThinkingDelta{"想了很久很久"},
-        api::ContentBlockDone{0},
-        api::MessageDone{"max_tokens", api::Usage{0, 64, 0, 0, 64}},
-    }};
+    backend.scripts = {TextOnlyScript("好")};
+    tools::ToolRegistry registry;
+    agent::Callbacks callbacks;
+
+    // 默认构造(兼容门不传值)= unset:api::Request::max_tokens 是 nullopt,
+    // 不再有一枚写死的 4096——chat/responses 端整个不发字段,交服务端默认。
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    REQUIRE(loop.Run("问", callbacks).has_value());
+    REQUIRE(backend.captured_requests.size() == 1);
+    CHECK_FALSE(backend.captured_requests[0].max_tokens.has_value());
+    CHECK(loop.runtime_profile().max_output_tokens == std::nullopt);
+
+    // profile 声明了 8192:请求带上声明值,main 与子代理同一份。
+    FakeBackend backend2;
+    backend2.scripts = {TextOnlyScript("好")};
+    agent::AgentRuntimeProfile profile;
+    profile.model = "test-model";
+    profile.max_output_tokens = 8192;
+    profile.max_output_tokens_source = agent::OutputBudgetSource::ConfigFile;
+    agent::AgentLoop loop2(backend2, registry, profile, "system prompt");
+    REQUIRE(loop2.Run("问", callbacks).has_value());
+    REQUIRE(backend2.captured_requests.size() == 1);
+    REQUIRE(backend2.captured_requests[0].max_tokens.has_value());
+    CHECK(*backend2.captured_requests[0].max_tokens == 8192);
+    CHECK(loop2.runtime_profile().max_output_tokens == 8192);
+}
+
+TEST_CASE("finish_reason=length 且正文为空:续跑一次后仍空,结构化账交出去") {
+    // 本地兼容端实测现场:reasoning 吃光输出预算,finish_reason=length,
+    // 一个正文字都没有。规格根因四:先按 profile.length_continuations
+    // (默认 1)自动续跑一轮——注入宿主标记(非用户输入),不重发原 prompt;
+    // 续跑仍空才算耗尽,RunOutcome 交结构化账(上限/续数/usage/思考检查点)。
+    FakeBackend backend;
+    backend.scripts = {
+        {
+            api::MessageStart{"msg", "model"},
+            api::ThinkingDelta{"想了很久很久"},
+            api::ContentBlockDone{0},
+            api::MessageDone{"max_tokens", api::Usage{0, 64, 0, 0, 64}},
+        },
+        {
+            api::MessageStart{"msg", "model"},
+            api::ThinkingDelta{"还在想"},
+            api::ContentBlockDone{0},
+            api::MessageDone{"max_tokens", api::Usage{0, 64, 0, 0, 64}},
+        },
+    };
     tools::ToolRegistry registry;
     agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
     agent::Callbacks callbacks;
@@ -179,10 +217,36 @@ TEST_CASE("finish_reason=length 且正文为空:length_empty_output 明报,不�
     CHECK(result->cancelled == false);
     CHECK(result->length_empty_output == true);
     CHECK(result->stop_reason == "max_tokens");
-    // usage 拆账照常触发:reasoning 64 / output 64 交给了 on_usage。
-    REQUIRE(loop.history().size() == 2);
+    CHECK(result->output_budget.exhausted == true);
+    CHECK(result->output_budget.continuations_used == 1);
+    CHECK(result->output_budget.continuation_limit == 1);
+    CHECK(result->output_budget.usage_reported == true);   // usage 非零,报告过
+    CHECK(result->output_budget.thinking_bytes > 0);       // 思考检查点有账
+    CHECK_FALSE(result->output_budget.thinking_tail.empty());
+    // 续跑那一步真的发了第二次请求,且历史里留着宿主标记(非用户输入)。
+    REQUIRE(backend.captured_requests.size() == 2);
+    REQUIRE(loop.history().size() == 4);  // user / assistant(thinking) / 标记 / assistant(thinking)
+    bool saw_marker = false;
+    for (const auto& block : loop.history()[2].content) {
+        if (const auto* text = std::get_if<api::TextBlock>(&block);
+            text != nullptr && text->text.find("[系统标记,非用户输入]") != std::string::npos) {
+            saw_marker = true;
+        }
+    }
+    CHECK(saw_marker);
+    // 不原样重发 prompt:第二次请求的末条 user 是标记,不是原始问题。
+    const std::string second_tail = [&]() {
+        std::string out;
+        for (const auto& block : backend.captured_requests[1].messages.back().content) {
+            if (const auto* text = std::get_if<api::TextBlock>(&block)) {
+                out += text->text;
+            }
+        }
+        return out;
+    }();
+    CHECK(second_tail.find("说点什么") == std::string::npos);
 
-    // 对照:length 但有正文,不算"空输出"。
+    // 对照:length 但有正文,不算"空输出",也不续跑。
     FakeBackend backend2;
     backend2.scripts = {{
         api::MessageStart{"msg", "model"},
@@ -194,6 +258,9 @@ TEST_CASE("finish_reason=length 且正文为空:length_empty_output 明报,不�
     const auto result2 = loop2.Run("说点什么", callbacks);
     REQUIRE(result2.has_value());
     CHECK(result2->length_empty_output == false);
+    CHECK(result2->output_budget.exhausted == false);
+    CHECK(result2->output_budget.continuations_used == 0);
+    CHECK(backend2.captured_requests.size() == 1);
 
     // 对照:end_turn 且正文为空(模型啥也没说但没撞预算),也不算。
     FakeBackend backend3;
@@ -206,6 +273,78 @@ TEST_CASE("finish_reason=length 且正文为空:length_empty_output 明报,不�
     const auto result3 = loop3.Run("说点什么", callbacks);
     REQUIRE(result3.has_value());
     CHECK(result3->length_empty_output == false);
+}
+
+TEST_CASE("length 续跑救得回来:第一轮思考撞墙,标记后续轮交出正文") {
+    FakeBackend backend;
+    backend.scripts = {
+        {
+            api::MessageStart{"msg", "model"},
+            api::ThinkingDelta{"先想"},
+            api::ContentBlockDone{0},
+            api::MessageDone{"max_tokens", api::Usage{}},  // usage 全零:未报告
+        },
+        TextOnlyScript("结论是 42"),
+    };
+    tools::ToolRegistry registry;
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    agent::Callbacks callbacks;
+    const auto result = loop.Run("问个问题", callbacks);
+    REQUIRE(result.has_value());
+    CHECK(result->stop_reason == "end_turn");
+    CHECK(result->length_empty_output == false);
+    // 续跑救回来了:不算耗尽,但账上写清用了几次续跑、usage 未报告。
+    CHECK(result->output_budget.exhausted == false);
+    CHECK(result->output_budget.continuations_used == 1);
+    CHECK(result->output_budget.usage_reported == false);
+    CHECK(result->output_budget.thinking_bytes == std::size_t{6});  // "先想"(UTF-8 6 字节)
+}
+
+TEST_CASE("length 续跑次数为 0:撞墙即收场,不烧第二次") {
+    FakeBackend backend;
+    backend.scripts = {{
+        api::MessageStart{"msg", "model"},
+        api::ThinkingDelta{"想"},
+        api::ContentBlockDone{0},
+        api::MessageDone{"max_tokens", api::Usage{0, 8, 0, 0, 0}},
+    }};
+    tools::ToolRegistry registry;
+    agent::AgentRuntimeProfile profile;
+    profile.model = "test-model";
+    profile.length_continuations = 0;  // 显式关掉续跑
+    agent::AgentLoop loop(backend, registry, profile, "system prompt");
+    agent::Callbacks callbacks;
+    const auto result = loop.Run("问", callbacks);
+    REQUIRE(result.has_value());
+    CHECK(result->length_empty_output == true);
+    CHECK(result->output_budget.exhausted == true);
+    CHECK(result->output_budget.continuations_used == 0);
+    CHECK(backend.captured_requests.size() == 1);
+}
+
+TEST_CASE("max_tokens 撞墙但块里有完整 tool_use:信块不信帧,照常执行续轮") {
+    FakeBackend backend;
+    backend.scripts = {
+        {
+            api::MessageStart{"msg", "model"},
+            api::ThinkingDelta{"先查一下"},
+            api::ToolUseStart{0, "toolu_1", "fake_tool"},
+            api::ToolUseInputDelta{0, "{}"},
+            api::ContentBlockDone{0},
+            api::MessageDone{"max_tokens", api::Usage{0, 100, 0, 0, 0}},  // 帧说 length,块是完整的
+        },
+        TextOnlyScript("查完了"),
+    };
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"工具结果", false}, false));
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    agent::Callbacks callbacks;
+    const auto result = loop.Run("查", callbacks);
+    REQUIRE(result.has_value());
+    CHECK(result->stop_reason == "end_turn");
+    CHECK(result->length_empty_output == false);
+    CHECK(result->output_budget.exhausted == false);   // 工具照跑、续轮交了正文,不算耗尽
+    REQUIRE(backend.captured_requests.size() == 2);
 }
 
 TEST_CASE("tool_use 一轮 -> 执行工具 -> 第二次请求历史带 tool_result -> end_turn") {

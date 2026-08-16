@@ -25,7 +25,8 @@ namespace lubancode::agent {
 // PreToolUse/权限/执行/PostToolUse/编码信任边界一个不少),不许另开一条
 // 绕过 hooks 的暗门。JSON 与 PTC 两个后端共用同一份执行代码。
 tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUseBlock& call, const Callbacks& callbacks,
-                                const std::function<bool(const tools::Tool&)>& tool_filter) {
+                                const std::function<bool(const tools::Tool&)>& tool_filter,
+                                const std::string& filter_denial) {
     // 每条收尾路共用的分发口:先清洗,再 on_tool_done,清洗版随返回值交给
     // 调用方(进 history / 下一轮请求)。日志只记字段名、长度、坏字节位置
     // 与前后几个十六进制字节,不倒正文。
@@ -68,12 +69,15 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     }
 
     // tool_search(延迟挂载):注册表里查得到,但过滤谓词不放行——延迟工具
-    // 还没挂载。不当"未知工具"糊弄,给一条指路的友好错误,模型下一步自然
-    // 去调 tool_search。
+    // 还没挂载,或者这个角色用不上它(Explore 只读那类)。不当"未知工具"
+    // 糊弄,给一条指路的友好错误:默认说"尚未挂载,先 tool_search";调用
+    // 方另给了 filter_denial(角色限制)就照说——限制来自哪里,得看得见。
     if (tool_filter && !tool_filter(*tool)) {
-        return dispatch_done(call.name, tools::Tool::Result{
-                                            "工具 " + call.name + " 存在但尚未挂载:请先用 tool_search 检索挂载,再调用。",
-                                            true});
+        const std::string denial =
+            filter_denial.empty()
+                ? "工具 " + call.name + " 存在但尚未挂载:请先用 tool_search 检索挂载,再调用。"
+                : "工具 " + call.name + ": " + filter_denial;
+        return dispatch_done(call.name, tools::Tool::Result{denial, true});
     }
 
     // ---- PreToolUse:在 UI 标记"真执行"之前、权限确认之前。deny -> 拦;
@@ -150,6 +154,15 @@ std::string BuildStepLimitNudgeText() {
            "并给出部分结论与下一步建议。到限后检查点就是交回主会话的全部,别把它带进坟墓。";
 }
 
+// 输出预算耗尽时的续跑标记(规格根因四):宿主注入,要求模型收束思考、
+// 先调工具或交检查点。明写"非用户输入"——不伪装成人话,也不原样重发
+// 用户 prompt(那只是把同样的思考再烧一遍)。
+std::string BuildLengthContinuationText() {
+    return "[系统标记,非用户输入] 上一轮输出在预算上限处被截断(finish_reason=length),"
+           "整轮只有思考、没有正文。请立即停止展开思考:要么调用下一枚该调的工具,"
+           "要么用不超过五行给出检查点(已确认的事实、下一步)。不要再继续推理。";
+}
+
 // 前缀 debug 开关(环境变量 LUBANCODE_DEBUG_PREFIX 任意非空值打开):
 // 每次请求跟上一份比,打一行断因与追加律。只打断因、位置与 hash,不打
 // system 正文、工具参数、记忆正文(前缀缓存守恒单"不做"节)。
@@ -200,16 +213,27 @@ bool ShouldNudgeStepLimit(int step_index, int max_steps_per_turn) {
     return (max_steps_per_turn - step_index) == (std::min)(max_steps_per_turn, kStepLimitNudgeThreshold);
 }
 
-AgentLoop::AgentLoop(api::Backend& backend, tools::ToolRegistry& registry, std::string model,
-                      std::string system_prompt, int max_tokens, int max_steps_per_turn,
-                      std::size_t max_context_chars)
+AgentLoop::AgentLoop(api::Backend& backend, tools::ToolRegistry& registry, AgentRuntimeProfile profile,
+                     std::string system_prompt)
     : backend_(backend),
       registry_(registry),
-      model_(std::move(model)),
+      model_(std::move(profile.model)),
       system_prompt_(std::move(system_prompt)),
-      max_tokens_(max_tokens),
-      max_steps_per_turn_(max_steps_per_turn),
-      max_context_chars_(max_context_chars) {}
+      profile_(std::move(profile)) {}
+
+AgentLoop::AgentLoop(api::Backend& backend, tools::ToolRegistry& registry, std::string model,
+                      std::string system_prompt, std::optional<int> max_tokens, int max_steps_per_turn,
+                      std::size_t max_context_chars)
+    : AgentLoop(backend, registry,
+                [&]() {
+                    AgentRuntimeProfile profile;
+                    profile.model = std::move(model);
+                    profile.max_output_tokens = std::move(max_tokens);
+                    profile.max_steps_per_turn = max_steps_per_turn;
+                    profile.max_context_chars = max_context_chars;
+                    return profile;
+                }(),
+                std::move(system_prompt)) {}
 
 std::vector<api::ToolDefinition> AgentLoop::BuildToolDefinitions() const {
     std::vector<api::ToolDefinition> defs;
@@ -255,12 +279,17 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
     // 发请求前算好,报 usage 时随 UsageReport 交出去。
     bool step_prefix_append_only = true;
     std::string step_epoch_break_reason;
+    // 输出预算活账(规格根因四):撞墙、续跑、usage 是否报告、思考检查点
+    // 都在这一份上滚,收场时随 RunOutcome.output_budget 交出去。
+    OutputBudgetReport budget_report;
+    budget_report.limit_tokens = profile_.max_output_tokens.value_or(0);
+    budget_report.continuation_limit = profile_.length_continuations;
 
-    // max_steps_per_turn_ <= 0 = 无上限:循环条件里第一个子句恒真,第二个
+    // profile_.max_steps_per_turn <= 0 = 无上限:循环条件里第一个子句恒真,第二个
     // 子句(步数比较)压根不会被求值,step_index 就一直往上涨,靠 end_turn
-    // 或者用户 ESC/Ctrl+C(cancel)收场,不靠这里的硬闸。max_steps_per_turn_ > 0
+    // 或者用户 ESC/Ctrl+C(cancel)收场,不靠这里的硬闸。profile_.max_steps_per_turn > 0
     // 时才是"到点就停"的老行为。
-    for (int step_index = 0; max_steps_per_turn_ <= 0 || step_index < max_steps_per_turn_; ++step_index) {
+    for (int step_index = 0; profile_.max_steps_per_turn <= 0 || step_index < profile_.max_steps_per_turn; ++step_index) {
         // 跨会话传话的安全收件点:工具结果已攒完、下一次请求尚未发出——
         // 正是"不打断工具、步边界收信"的那个缝。step_index==0 不收:这一步
         // 的用户消息刚落下,空闲路径(main.cpp)在起 Run 之前已经收过一趟,
@@ -280,7 +309,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         // 追加进尚未发出的尾部消息(user 输入或刚攒完的 tool result),随
         // history 留住——不改 system,不撤旧提醒,追加律不破。ShouldNudge-
         // StepLimit 每次 Run 只真一次,天然只注一遍。
-        if (ShouldNudgeStepLimit(step_index, max_steps_per_turn_) && !history_.empty()) {
+        if (ShouldNudgeStepLimit(step_index, profile_.max_steps_per_turn) && !history_.empty()) {
             history_.back().content.push_back(api::TextBlock{BuildStepLimitNudgeText()});
         }
 
@@ -289,9 +318,13 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         // 做一次语义压缩(ReplaceHistory),返回后下面 TrimHistory 拿到的就
         // 是(可能已换短的)history_。窗口未知(0)或没设回调时跳过,行为
         // 与从前一致——这一步不发出任何请求,估错了也不会误伤。
-        if (context_window_tokens_ > 0 && on_context_pressure_) {
+        if (profile_.context_window_tokens > 0 && on_context_pressure_) {
+            // 输出上限纳入 projected 计算(规格根因一):声明了用声明值,
+            // unset 用保守估计(kUnsetOutputReserveEstimateTokens)——服务端
+            // 默认上限拿不到准数,宁可早压不撞墙。
+            const OutputBudget output_budget{profile_.max_output_tokens, profile_.max_output_tokens_source};
             std::size_t projected = EstimateUtf8Tokens(request.system) + EstimateHistoryTokens(history_) +
-                                    static_cast<std::size_t>(max_tokens_);
+                                    static_cast<std::size_t>(output_budget.reserve_for_estimate());
             for (const auto& tool : registry_.All()) {
                 if (tool_filter_ && !tool_filter_(*tool)) {
                     continue;
@@ -302,9 +335,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
             ContextPressure pressure;
             pressure.phase = ContextPressure::Phase::PreRequest;
             pressure.projected_tokens = projected;
-            pressure.window_tokens = context_window_tokens_;
+            pressure.window_tokens = profile_.context_window_tokens;
             pressure.projected_overflow =
-                projected >= context_window_tokens_ * static_cast<std::size_t>(kProjectedOverflowPercent) / 100;
+                projected >= profile_.context_window_tokens * static_cast<std::size_t>(kProjectedOverflowPercent) / 100;
             on_context_pressure_(pressure);
         }
 
@@ -330,18 +363,18 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
             std::vector<api::Message> pinned = *sticky_view_;
             pinned.insert(pinned.end(), view_source.begin() + static_cast<std::ptrdiff_t>(sticky_base_history_size_),
                           view_source.end());
-            if (EstimateHistoryBytes(pinned) > max_context_chars_) {
+            if (EstimateHistoryBytes(pinned) > profile_.max_context_chars) {
                 // 钉住的视图也装不下了(长会话总会到这一步):重裁一次,
                 // 换一副新形状并重新钉住——这是一次明确的 epoch break,
                 // 下面 trim_report 会把它记上(hard_trim)。
-                pinned = TrimHistory(std::move(pinned), max_context_chars_, kDefaultKeepRecentTurns, &trim_report);
+                pinned = TrimHistory(std::move(pinned), profile_.max_context_chars, kDefaultKeepRecentTurns, &trim_report);
                 sticky_view_ = pinned;
                 sticky_base_history_size_ = view_source.size();
             }
             request.messages = std::move(pinned);
         } else {
             std::vector<api::Message> trimmed =
-                TrimHistory(view_source, max_context_chars_, kDefaultKeepRecentTurns, &trim_report);
+                TrimHistory(view_source, profile_.max_context_chars, kDefaultKeepRecentTurns, &trim_report);
             if (trim_report.trimmed_turns || trim_report.truncated_results) {
                 // 第一次真动手裁:钉住,开新 epoch 的账由下面的 hard_trim 记。
                 sticky_view_ = trimmed;
@@ -349,7 +382,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
             }
             request.messages = std::move(trimmed);
         }
-        request.max_tokens = max_tokens_;
+        request.max_tokens = profile_.max_output_tokens;  // nullopt = unset,交服务端默认
         // 有损硬裁发生了(丢轮/截结果),显式通报——静默降级会让用户以为语
         // 义压缩已成功,模型其实已经看不到那段原文。
         if ((trim_report.trimmed_turns || trim_report.truncated_results) && on_context_pressure_) {
@@ -358,7 +391,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
             pressure.hard_trimmed_turns = trim_report.trimmed_turns;
             pressure.hard_dropped_messages = trim_report.dropped_messages;
             pressure.hard_truncated_results = trim_report.truncated_results;
-            pressure.window_tokens = context_window_tokens_;
+            pressure.window_tokens = profile_.context_window_tokens;
             on_context_pressure_(pressure);
         }
         // 有损硬裁真出手了:下一份请求的工作视图换了裁剪形状,前缀记账给
@@ -376,8 +409,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
 
         // 硬上限:轮级裁剪 + 工具结果截断都做完还是装不下(比如单条用户输入
         // 就超大),明确报错,不把一份注定被拒的超大请求发出去。
-        if (EstimateHistoryBytes(request.messages) > max_context_chars_) {
-            return std::unexpected("上下文超过上限(" + std::to_string(max_context_chars_) +
+        if (EstimateHistoryBytes(request.messages) > profile_.max_context_chars) {
+            return std::unexpected("上下文超过上限(" + std::to_string(profile_.max_context_chars) +
                                     " 字符),裁剪与截断后仍装不下,无法发送。请用 /compact 压缩历史,或开新会话。");
         }
 
@@ -437,6 +470,21 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
                                 callbacks.on_text_delta(e.text);
                             }
                         } else if constexpr (std::is_same_v<T, api::ThinkingDelta>) {
+                            // 输出预算活账:思考字节与末段摘要(检查点证据,
+                            // 截尾保留,不整段攒)。与回调分发同一处,流到即记。
+                            budget_report.thinking_bytes += e.text.size();
+                            budget_report.thinking_tail += e.text;
+                            if (budget_report.thinking_tail.size() > 512) {
+                                std::size_t start = budget_report.thinking_tail.size() - 512;
+                                // 截尾不劈半个字:起点落在 UTF-8 续字节上就
+                                // 推到下一个字符边界。
+                                while (start < budget_report.thinking_tail.size() &&
+                                       (static_cast<unsigned char>(budget_report.thinking_tail[start]) & 0xC0) ==
+                                           0x80) {
+                                    ++start;
+                                }
+                                budget_report.thinking_tail.erase(0, start);
+                            }
                             if (callbacks.on_thinking_delta) {
                                 callbacks.on_thinking_delta(e.text);
                             }
@@ -500,6 +548,14 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         ++steps_used;
         last_stop_reason = stop_reason;
         history_.push_back(assistant_message);
+        // usage 是否报告(规格根因四):任一请求带回过非零 usage 就算报告过,
+        // 之后失败页说"token 数未报告"只看这一位,不拿 0 糊。
+        {
+            const api::Usage& usage = assembler.usage();
+            budget_report.usage_reported = budget_report.usage_reported || usage.input_tokens > 0 ||
+                                            usage.output_tokens > 0 || usage.cache_read_tokens > 0 ||
+                                            usage.cache_creation_tokens > 0 || usage.output_reasoning_tokens > 0;
+        }
 
         if (callbacks.on_usage) {
             api::UsageReport report;
@@ -527,20 +583,37 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
 
         if (stop_reason != "tool_use" && !has_tool_use) {
             // 输出预算耗尽且正文为空(本地兼容端实测过的现场:reasoning 吃光
-            // max_tokens,finish_reason=length,一个正文字都没有)。这是
-            // "成功收场但啥也没说",不当错误——但必须把事说破,不许留一片
-            // 空白让用户猜。标记交出去,RunTurn 打明报。
-            RunOutcome outcome{false, false, false, stop_reason, steps_used};
-            if (stop_reason == "max_tokens") {
-                bool has_text = false;
-                for (const auto& block : assistant_message.content) {
-                    if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr && !text->text.empty()) {
-                        has_text = true;
-                        break;
-                    }
+            // max_tokens,finish_reason=length,一个正文字都没有)。规格根因四:
+            // max_tokens 是独立状态,先给一次受控续跑——只有思考、没有正文和
+            // 工具时,注入一条宿主标记(要求收束思考,先调工具或交检查点),
+            // 再走一步。标记不是用户输入,文本里写明来历;绝不原样重发 prompt
+            // (那只是再烧一遍同样的思考)。续跑次数有显式账
+            // (profile_.length_continuations,默认 1),烧完仍空才收场。
+            bool has_text = false;
+            for (const auto& block : assistant_message.content) {
+                if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr && !text->text.empty()) {
+                    has_text = true;
+                    break;
                 }
-                outcome.length_empty_output = !has_text;
             }
+            if (stop_reason == "max_tokens" && !has_text) {
+                const bool can_continue = budget_report.continuations_used < profile_.length_continuations &&
+                                          (cancel == nullptr || !cancel->load());
+                if (can_continue) {
+                    api::Message marker;
+                    marker.role = api::Role::User;
+                    marker.content.push_back(api::TextBlock{BuildLengthContinuationText()});
+                    history_.push_back(std::move(marker));
+                    ++budget_report.continuations_used;
+                    continue;  // 下一步循环:不重发 prompt,只带标记续跑
+                }
+                budget_report.exhausted = true;
+                RunOutcome outcome{false, false, true, stop_reason, steps_used};
+                outcome.output_budget = budget_report;
+                return outcome;
+            }
+            RunOutcome outcome{false, false, false, stop_reason, steps_used};
+            outcome.output_budget = budget_report;  // 未撞墙也带走账(续跑过的轮次要可查)
             return outcome;
         }
 
@@ -560,7 +633,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
                 tool_results.push_back(api::ToolResultBlock{call.id, "用户按 ESC 打断,该工具未执行", true});
                 continue;
             }
-            const tools::Tool::Result result = RunOneTool(registry_, call, callbacks, tool_filter_);
+            const tools::Tool::Result result = RunOneTool(registry_, call, callbacks, tool_filter_,
+                                                          tool_filter_denial_);
             // 断言式兜底:RunOneTool 出口已经规范化过(见它文件头的信任边界
             // 注释),这里再过一遍 SanitizeUtf8 只为防将来有人在 Run() 之外
             // 绕路改历史——已经合法的内容是原样穿透的空操作。
@@ -581,7 +655,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         }
     }
 
-    // 只有 max_steps_per_turn_ > 0(用户显式设了硬上限)才可能走到这里——无上限时
+    // 只有 profile_.max_steps_per_turn > 0(用户显式设了硬上限)才可能走到这里——无上限时
     // for 循环条件恒真,永远不会正常退出到这一行。预算耗尽不是错误:history
     // 里留着到限为止的全部来回,部分结果由调用方(子代理按 budget_exhausted
     // 收账)带走;主循环按老口径打一行"已达上限"。

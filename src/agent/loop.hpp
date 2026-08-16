@@ -17,6 +17,7 @@
 #include "agent/context.hpp"
 #include "agent/context_events.hpp"
 #include "agent/prefix.hpp"
+#include "agent/runtime_profile.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "tools/registry.hpp"
@@ -122,6 +123,28 @@ struct Callbacks {
         on_post_tool_use_hook;
 };
 
+// 输出预算耗尽的明细账(规格根因四):max_tokens 从普通 end turn 里拆出来
+// 的独立状态。exhausted=true 表示本次 Run() 以 finish_reason=length 收场、
+// 自动续跑也用完(或未开)、最终一个正文字都没有——已收的 Text/Thinking/
+// tool use/usage 全在 history 与 usage 回调里保住,这份账只管把"撞了哪堵
+// 墙、续了几次、usage 报没报、思考留没留"交出去,失败页与子代理收场
+// 分型共用,main 与子代理同一状态机。
+struct OutputBudgetReport {
+    bool exhausted = false;
+    // 实际生效的输出上限;0 = unset(请求没带字段,交服务端/模型默认——
+    // 这时候墙在服务端,数值客户端看不到)。
+    int limit_tokens = 0;
+    int continuations_used = 0;  // 自动续跑已用掉几次
+    int continuation_limit = 0;  // 配置允许的续跑次数(profile.length_continuations)
+    // 整场 Run() 里服务端有没有回过 usage(任一请求带回过非零 usage 即真)。
+    // 未报告时 token 数不可知,展示层必须写"未报告",不许画 0。
+    bool usage_reported = false;
+    // 已收 thinking 的总字节与末段摘要(检查点证据:模型确实在思考,不是
+    // 一个字没跑)。tail 截尾保留,不整段外带。
+    std::size_t thinking_bytes = 0;
+    std::string thinking_tail;
+};
+
 // Run() 的收场情况。cancelled=true 表示这一轮是被 ESC 打断收场的——打断
 // 不是错误(std::expected 的 value 分支,不是 error 分支),半截 assistant
 // 文本已经照常带着打断标注入了历史,history() 状态完整、下一轮能正常接着
@@ -131,6 +154,8 @@ struct Callbacks {
 // budget_exhausted 收账、带走部分结果,不许笼统当 failed。
 // stop_reason/steps_used 把模型最后一次应答的原始 stop reason 与实际请求
 // 次数交出去,失败语义由调用方分型。
+// output_budget:输出预算账(见上)。length_empty_output 是它的旧视图
+// (exhausted && 无正文),保留给既有消费方。
 struct RunOutcome {
     bool cancelled = false;
     bool hit_step_limit = false;
@@ -140,6 +165,7 @@ struct RunOutcome {
     bool length_empty_output = false;
     std::string stop_reason;  // 模型最后一次应答的原始 stop_reason(空 = 一个字都没回来)
     int steps_used = 0;       // 本次 Run() 实际发出的模型请求数(turn 内的 step 数)
+    OutputBudgetReport output_budget;
 };
 
 // 步数将尽提醒:剩三步时当步请求在 system 尾部附一句"收口"提示——停止
@@ -193,8 +219,12 @@ using OnContextPressure = std::function<void(const ContextPressure&)>;
 // 确认档(needs_confirm + PermissionRequest)-> 执行 -> PostToolUse -> 编码
 // 清洗 -> on_tool_done。JSON 后端的工具循环与 PTC 的每一枚 stub 调用共用
 // 这一条路,不许有第二条绕过 hooks/权限的暗门。
+// filter_denial:过滤谓词不放行时的说明文案。默认空 = tool_search 的
+// "尚未挂载"说法;Explore 这类角色限制的调用方另给一句写明"角色限制"
+// 的文案——限制须来自角色并看得见,不许含糊成"子代理无权限"(规格)。
 tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUseBlock& call, const Callbacks& callbacks,
-                                const std::function<bool(const tools::Tool&)>& tool_filter);
+                                const std::function<bool(const tools::Tool&)>& tool_filter,
+                                const std::string& filter_denial = std::string());
 
 // 跨会话传话(0.25.x)的安全收件点:Run() 的工具循环每次"下一次请求尚未
 // 发出"的边界(循环顶)会调一次 inbox;有信就注进 history,再发请求——
@@ -210,6 +240,16 @@ using InboxPoll = std::function<std::optional<api::Message>()>;
 
 class AgentLoop {
 public:
+    // 正门(规格根因一):吃一份不可变 AgentRuntimeProfile——输出预算、
+    // 上下文预算、窗口、步数、length 续跑次数全从这一份来。main、
+    // general-purpose 子代理、后台子代理、单发模式各自声明覆盖什么,其余
+    // 继承,不再一串易漏的裸参数。system_prompt 单独给(它随 /clear 等重建)。
+    AgentLoop(api::Backend& backend, tools::ToolRegistry& registry, AgentRuntimeProfile profile,
+              std::string system_prompt);
+
+    // 兼容门(单测与既有调用方):裸参数版,内部折成一份 profile。
+    // max_tokens 不再有 4096 默认——nullopt = unset(chat/responses 不发
+    // 字段交服务端默认;anthropic 由 client 落公开兜底),想给值显式传。
     // max_steps_per_turn:一次 Run()(一个 turn)里最多跟模型来回几步(每步
     // 一次模型请求;一步可含多枚工具调用)。
     // <= 0 表示无上限——现在的模型常态是跑十几个小时的长程任务,任何硬闸
@@ -223,8 +263,12 @@ public:
     // max_context_chars:发给模型前 history 裁剪的阈值(字符数),默认读
     // 环境变量 LUBANCODE_MAX_CONTEXT(没设置就是 kDefaultMaxContextChars)。
     AgentLoop(api::Backend& backend, tools::ToolRegistry& registry, std::string model,
-              std::string system_prompt, int max_tokens = 4096, int max_steps_per_turn = 0,
-              std::size_t max_context_chars = MaxContextCharsFromEnv());
+              std::string system_prompt, std::optional<int> max_tokens = std::nullopt,
+              int max_steps_per_turn = 0, std::size_t max_context_chars = MaxContextCharsFromEnv());
+
+    // 只读访问:运行期诊断(/context、agent 查看态)要展示"这份 loop 实际
+    // 吃到的预算与来源",不再让各处自己猜。
+    const AgentRuntimeProfile& runtime_profile() const { return profile_; }
 
     // 发一轮用户输入。内部可能会跑好几个来回(工具调用),直到模型给出
     // end_turn(或者别的非 tool_use 的 stop_reason)才返回。历史跨多次
@@ -253,6 +297,11 @@ public:
     // 而不是构造时定死,是因为 tool_search 命中会在一次 Run() 中途改变
     // loaded 集合,下一轮请求就得看到新挂载的工具。
     void SetToolFilter(std::function<bool(const tools::Tool&)> filter) { tool_filter_ = std::move(filter); }
+
+    // 过滤谓词不放行时的说明文案(见 RunOneTool 的 filter_denial 注释)。
+    // 不设 = "尚未挂载,请先 tool_search"的默认说法;Explore 这类显式
+    // 只读角色设成"角色限制"的说法,模型与用户都看得出限制来自角色。
+    void SetToolFilterDenial(std::string message) { tool_filter_denial_ = std::move(message); }
 
     // /worktree 切换目录后只换运行环境段，已有聊天史要照留。主循环在下一
     // 次请求前换掉系统提示，文件工具则由进程 CWD 即刻接管。
@@ -304,7 +353,7 @@ public:
     // mid-turn 上下文安全点:有效上下文窗口(token)。0(默认)= 未知,
     // Run() 不做 projected 评估,行为与从前完全一致。上层(交互会话)在
     // 构造/重建 loop、/context 或 /model 改窗口后同步进来。
-    void SetContextWindowTokens(std::size_t window_tokens) { context_window_tokens_ = window_tokens; }
+    void SetContextWindowTokens(std::size_t window_tokens) { profile_.context_window_tokens = window_tokens; }
 
     // mid-turn 上下文安全点:压力通报回调。只在"工具结果已攒完、请求尚未
     // 发出"的轮次边界被调(PreRequest 阶段),以及 TrimHistory 这次真丢了
@@ -328,10 +377,9 @@ private:
     std::string model_;
     std::string system_prompt_;
     std::string turn_context_;
-    int max_tokens_;
-    int max_steps_per_turn_;  // 0 = 不限步(硬上限只管本 turn 内的 step)
-    std::size_t max_context_chars_;
-    std::size_t context_window_tokens_ = 0;  // mid-turn 评估用;0 = 未知,不评估
+    // 运行策略(输出/上下文预算、窗口、步数、length 续跑):构造时定死,
+    // 只有 context_window_tokens 有 setter(随 /context、/model 同步)。
+    AgentRuntimeProfile profile_;
     bool structural_compression_enabled_ = true;  // 无损结构压缩(工作视图)
     StructuralCompressionOptions structural_options_{};
     StructuralCompressionStats structural_stats_{};  // 最近一次请求的结构压缩账(观测用)
@@ -353,6 +401,7 @@ private:
     std::size_t sticky_base_history_size_ = 0;
     OnContextPressure on_context_pressure_;
     std::function<bool(const tools::Tool&)> tool_filter_;  // tool_search:空 = 不过滤,全量直挂
+    std::string tool_filter_denial_;  // 过滤不放行的说明(空 = 默认"尚未挂载"文案)
     InboxPoll inbox_;  // 跨会话收件点:空 = 没有来信要收,行为跟从前一致
 
     std::vector<api::ToolDefinition> BuildToolDefinitions() const;

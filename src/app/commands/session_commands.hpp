@@ -45,9 +45,12 @@ std::size_t EstimateHistoryTokens(const std::vector<lubancode::api::Message>& hi
 // 现场按统一口径(agent/context.hpp)算好(裸敲才用得上,带参数分支忽略),
 // 缓存命中/窗口/实测占用都从 context_tracker 拿。cache_epoch 是 loop 的
 // 前缀记账序号(agent/prefix.hpp),有实测 usage 时多打一行前缀缓存账。
+// main_profile(可空):当前 loop 实际吃到的运行策略,非空时多打一行输出
+// 上限与来源(规格根因一:"本轮上限"看得见,unset 也说破)。
 void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracker& context_tracker,
                            std::size_t sys_tokens, std::size_t tools_tokens, std::size_t history_tokens,
-                           const lubancode::cli::Theme& theme, int cache_epoch = 1);
+                           const lubancode::cli::Theme& theme, int cache_epoch = 1,
+                           const lubancode::agent::AgentRuntimeProfile* main_profile = nullptr);
 
 
 // /compact 命令的结果:event 是 compact_v2 压缩事件(archive + kept_from +

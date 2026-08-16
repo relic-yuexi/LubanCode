@@ -1031,18 +1031,38 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     out.cancelled = result->cancelled;
 
     // 输出预算耗尽且正文为空(reasoning 吃光 max_tokens):明报,不留一片
-    // 空白。usage 拆账顺带摆出来——output 里 reasoning 占多少一目了然;
-    // provider 没拆账(reasoning 字段缺席)就按"未拆账"说,不猜 0。
+    // 空白。规格根因四:结构化失败页——实际上限、已续次数、usage 是否
+    // 报告、思考检查点、四条去路。usage 拆账顺带摆出来——output 里
+    // reasoning 占多少一目了然;provider 没拆账(reasoning 字段缺席)就按
+    // "未拆账"说,不猜 0。
     if (result->length_empty_output) {
-        const std::int64_t output_total = usage_stats.output_tokens();
         const std::int64_t reasoning_total = usage_stats.reasoning_tokens();
-        std::cout << theme.error << trf("error.length_empty_output", output_total) << theme.reset << "\n";
+        std::cout << theme.error << trf("agent_outcome.output_budget.head", result->output_budget.continuations_used)
+                  << theme.reset << "\n";
+        if (result->output_budget.limit_tokens > 0) {
+            std::cout << theme.stats << trf("agent_outcome.output_budget.limit", result->output_budget.limit_tokens)
+                      << theme.reset << "\n";
+        } else {
+            std::cout << theme.stats << tr("agent_outcome.output_budget.limit_unset") << theme.reset << "\n";
+        }
+        std::cout << theme.stats
+                  << trf("agent_outcome.output_budget.continuations", result->output_budget.continuations_used)
+                  << theme.reset << "\n";
+        std::cout << theme.stats
+                  << tr(result->output_budget.usage_reported ? "agent_outcome.output_budget.usage_reported"
+                                                             : "agent_outcome.output_budget.usage_not_reported")
+                  << theme.reset << "\n";
+        if (result->output_budget.thinking_bytes > 0) {
+            std::cout << theme.stats
+                      << trf("error.length_empty_reasoning_bytes", result->output_budget.thinking_bytes)
+                      << theme.reset << "\n";
+        }
         std::cout << theme.stats
                   << (reasoning_total > 0
                           ? trf("error.length_empty_reasoning", reasoning_total)
                           : tr("error.length_empty_no_split"))
                   << theme.reset << "\n";
-        std::cout << theme.stats << tr("error.length_empty_hint") << theme.reset << "\n";
+        std::cout << theme.stats << tr("agent_outcome.output_budget.escapes") << theme.reset << "\n";
         std::cout.flush();
         out.status = 1;  // 一个字都没回,按失败收场——但话说清楚了,不是哑巴 1
     }

@@ -360,6 +360,7 @@ endif()
 add_library(lubancode_app STATIC
   src/app/backend_stack.cpp
   src/app/memory_extract.cpp
+  src/app/runtime_profile.cpp
   src/app/tool_runtime.cpp
   src/app/turn_runner.cpp
   src/app/hook_runtime.cpp

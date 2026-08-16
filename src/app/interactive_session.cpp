@@ -50,6 +50,7 @@
 #include "api/models.hpp"
 #include "api/responses/client.hpp"
 #include "app/backend_stack.hpp"
+#include "app/runtime_profile.hpp"
 #include "app/tool_runtime.hpp"
 #include "app/hook_runtime.hpp"
 #include "app/turn_runner.hpp"
@@ -874,13 +875,18 @@ std::vector<lubancode::cli::AgentPanelEntry> InteractiveSession::BuildAgentPanel
         const auto end = entry.running ? now : task.end_time;
         const double seconds = std::chrono::duration<double>(end - task.start_time).count();
         const std::int64_t tokens = task.total_input_tokens() + task.output_tokens;
+        // tokens 三态(规格根因三):未报告且已跑过步数就写"未报告",不画 0
+        // ——0 会误导成"服务端一枚 token 都没跑",实则可能烧满了输出预算。
+        const std::string token_text =
+            task.usage_reported || task.steps_used == 0
+                ? lubancode::cli::FormatTokenCount(tokens)
+                : tr("agent_status.tokens_not_reported");
         // 状态短话(规格"现场三/四"):导航坞只放短因——完成/失败 · 接口报错/
         // 耗尽 · 40/40 轮/停下 · 用户中止;完整错误进 transcript(Enter 查看)。
         // 正数预算派出即可见:运行中带"N/M 轮",不等撞墙才揭晓。
         const std::string state_word =
             AgentStateWord(task.state, task.steps_used, task.step_limit, task.outcome_reason);
-        entry.state = trf("agent_status.summary", state_word, task.tool_call_count,
-                          lubancode::cli::FormatTokenCount(tokens),
+        entry.state = trf("agent_status.summary", state_word, task.tool_call_count, token_text,
                           lubancode::cli::FormatSeconds(seconds));  // 列表行只认真正短 title;旧任务没有 title 就显示"未命名子代理 #N"
         // ——绝不回退到 prompt 前若干字(prompt 只在详情里出现)。
         entry.title = task.title.empty() ? trf("agent_panel.untitled", task.id) : task.title;
@@ -946,12 +952,18 @@ std::vector<std::string> InteractiveSession::BuildAgentTaskTranscriptLines(int t
                                    ? std::chrono::duration<double>(end - snapshot->start_time).count()
                                    : 0.0;
         const std::int64_t tokens = snapshot->total_input_tokens() + snapshot->output_tokens;
+        // tokens 三态(规格根因三):与导航坞行同一套口径——未报告且已跑过
+        // 步数写"未报告",一步没跑才是真 0。
+        const std::string token_text =
+            snapshot->usage_reported || snapshot->steps_used == 0
+                ? lubancode::cli::FormatTokenCount(tokens)
+                : tr("agent_status.tokens_not_reported");
         lines.push_back("  " + theme.stats +
                         trf("agent_status.summary",
                             AgentStateWord(snapshot->state, snapshot->steps_used, snapshot->step_limit,
                                            snapshot->outcome.reason),
-                            static_cast<int>(snapshot->tool_calls.size()),
-                            lubancode::cli::FormatTokenCount(tokens), lubancode::cli::FormatSeconds(seconds)) +
+                            static_cast<int>(snapshot->tool_calls.size()), token_text,
+                            lubancode::cli::FormatSeconds(seconds)) +
                         theme.reset);
     }
 
@@ -1248,17 +1260,33 @@ void InteractiveSession::RebuildLoop(bool preserve_history) {
     if (preserve_history && loop.has_value()) {
         old_history = loop->History();
     }
-    // max_tokens=4096 是 AgentLoop 自己的默认值,这里显式传出来是为了能
-    // 把 config.max_context_chars 一起传进去。步数上限改用
-    // config.max_steps_per_turn(可经配置文件/环境变量调整,默认
-    // 0=无上限)——防跑飞靠用户 ESC/Ctrl+C,不再靠硬闸
-    // 拦腰截断正常开发;想要硬上限的人自己配一个正整数。
+    // 运行策略走统一 profile(规格根因一):输出上限三级解析(config >
+    // provider > 模型目录),unset 交服务端默认,不再有写死的 4096;步数、
+    // 上下文、窗口、续跑次数同一份。子代理 tool 也在此处同步拿到派生份
+    // (subagent 段的显式覆盖在 BuildSubagentRuntimeProfile 里算),main 与
+    // 子代理同级吃同一套有效值。
     // tool_search:backend 换成 index_backend(索引段包装,未启用时纯
     // 透传);/clear 重建后过滤谓词要重新灌一遍——loaded 集合不清,
     // 已挂载的工具跨 /clear 仍然可用。
-    loop.emplace(*index_backend_, registry(), config.model,
-                 lubancode::agent::AssembleSystemPrompt(prompt_options),
-                 /*max_tokens=*/4096, config.max_steps_per_turn, config.max_context_chars);
+    const lubancode::agent::AgentRuntimeProfile main_profile =
+        lubancode::app::BuildMainRuntimeProfile(config, &model_catalog, *current_model);
+    loop.emplace(*index_backend_, registry(), main_profile,
+                 lubancode::agent::AssembleSystemPrompt(prompt_options));
+    if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry().Find("agent"));
+        agent_tool != nullptr) {
+        agent_tool->SetRuntimeProfile(
+            lubancode::app::BuildSubagentRuntimeProfile(main_profile, config));
+        // 子代理记忆召回(规格"同级能力审计"):按子任务 prompt 独立检索,
+        // 同预算同安全声明;与 main 的召回同一只 ProjectMemory。关着
+        // (use=false)就不注。
+        if (project_memory != nullptr && config.memory.use) {
+            agent_tool->SetTurnContextProvider(
+                [memory = project_memory](const std::string& task_prompt) {
+                    return memory->BuildTurnContext(task_prompt, std::filesystem::current_path(),
+                                                    lubancode::memory::QueryOrigin::User);
+                });
+        }
+    }
     loop->SetToolFilter(main_tool_filter());
     // mid-turn 上下文安全点(0.27.x):窗口与压力通报随 loop 重建重灌;窗口
     // 的后续变化(/context、/model)由 RunUserTurn 发轮前再同步。
@@ -1900,7 +1928,7 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                     history_tokens = lubancode::agent::EstimateHistoryTokens(loop->History());
                 }
                 HandleContextCommand(parsed.args, context_tracker, sys_tokens, tools_tokens, history_tokens, theme,
-                                     loop->cache_epoch());
+                                     loop->cache_epoch(), &loop->runtime_profile());
                 break;
             }
             case lubancode::cli::SlashCommand::Compact: {
@@ -1995,7 +2023,11 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                                                              *current_think,
                                                              theme,
                                                              context_tracker,
-                                                             active_provider_write_path};
+                                                             active_provider_write_path,
+                                                             loop.has_value() ? &loop->runtime_profile() : nullptr,
+                                                             &registry(),
+                                                             &sub_registry(),
+                                                             tool_runtime_->explore_registry()};
                 HandleDoctorCommand(parsed.args, doctor_context);
                 real_backend.Rebuild(config);
                 break;

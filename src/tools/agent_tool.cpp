@@ -14,6 +14,7 @@
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
 #include "tools/path_utils.hpp"
+#include "tools/todo_tool.hpp"
 
 namespace lubancode::tools {
 
@@ -156,6 +157,8 @@ std::string ReasonShortLabel(TaskOutcomeReason reason) {
             return "接口报错";
         case TaskOutcomeReason::StepLimitExhausted:
             return "耗尽";
+        case TaskOutcomeReason::OutputBudgetExhausted:
+            return "输出超限";
         case TaskOutcomeReason::MaxContext:
             return "上下文满";
         case TaskOutcomeReason::NoFinalText:
@@ -208,6 +211,27 @@ std::string ComposeOutcomeText(const TaskOutcome& outcome) {
     }
     out += "\n可重试动作: 先读本结果里的检查点,缩小范围、拆小任务后续派;"
            "不要原样重发同一份 prompt,更不要擅自抬高步数上限。";
+    return out;
+}
+
+// 输出预算耗尽的失败页(规格根因四):实际上限、已续次数、usage 是否
+// 报告、thinking 检查点,再加四条去路。i18n 走 cli::tr/trf,中英成对。
+std::string ComposeOutputBudgetOutcomeText(const TaskOutcome& outcome) {
+    using lubancode::cli::tr;
+    using lubancode::cli::trf;
+    std::string out = trf("agent_outcome.output_budget.head", outcome.length_continuations_used);
+    if (outcome.output_limit_tokens > 0) {
+        out += "\n" + trf("agent_outcome.output_budget.limit", outcome.output_limit_tokens);
+    } else {
+        out += "\n" + tr("agent_outcome.output_budget.limit_unset");
+    }
+    out += "\n" + trf("agent_outcome.output_budget.continuations", outcome.length_continuations_used);
+    out += "\n" + tr(outcome.usage_reported ? "agent_outcome.output_budget.usage_reported"
+                                            : "agent_outcome.output_budget.usage_not_reported");
+    if (!outcome.thinking_checkpoint.empty()) {
+        out += "\n" + outcome.thinking_checkpoint;
+    }
+    out += "\n" + tr("agent_outcome.output_budget.escapes");
     return out;
 }
 
@@ -283,6 +307,50 @@ std::unique_ptr<ToolRegistry> BuildIsolatedRegistry(ToolRegistry& source, const 
     }
     return out;
 }
+
+// 每任务私有 todo(规格"同级能力审计"todo 行):转发壳原样借用源表工具,
+// 唯独把 todo_write 换成这只任务独占的新实例——子代理有自己的私有 todo,
+// 不乱写 main 的待办,也不与别只子代理共用一块板。源表没有 todo_write
+// (Explore 只读表、旧测试直建的表)时返回空,调用方原样直用源表。
+class ForwardingTool : public Tool {
+public:
+    explicit ForwardingTool(Tool& target) : target_(target) {}
+
+    std::string name() const override { return target_.name(); }
+    std::string description() const override { return target_.description(); }
+    nlohmann::json input_schema() const override { return target_.input_schema(); }
+    bool needs_confirm() const override { return target_.needs_confirm(); }
+    Result execute(const nlohmann::json& input) override { return target_.execute(input); }
+
+private:
+    Tool& target_;
+};
+
+std::unique_ptr<ToolRegistry> BuildPrivateTodoRegistry(ToolRegistry& source) {
+    if (source.Find("todo_write") == nullptr) {
+        return nullptr;
+    }
+    auto out = std::make_unique<ToolRegistry>();
+    for (const auto& tool : source.All()) {
+        if (tool->name() == "todo_write") {
+            out->Register(std::make_unique<TodoWriteTool>(std::make_shared<TodoListState>()));
+        } else {
+            out->Register(std::make_unique<ForwardingTool>(*tool));
+        }
+    }
+    return out;
+}
+
+// 派工治理的 RAII 计数槽(规格"递归派工不能再靠拿掉工具解决"):全局
+// 并发与前台深度都在原子上滚,出入各一笔,拒绝路径也照退。
+struct DispatchSlot {
+    std::atomic<int>* counter = nullptr;
+    ~DispatchSlot() {
+        if (counter != nullptr) {
+            counter->fetch_sub(1);
+        }
+    }
+};
 
 }  // namespace
 
@@ -633,13 +701,15 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
     }
     {
         std::lock_guard<std::mutex> lock(tasks_mutex_);
-        constexpr std::size_t kMaxRunningTasks = 8;
+        // 全局并发槽(规格"递归派工"):不再写死 8,从配置(subagent.max_active,
+        // 默认 8)来;RunTask 里那笔 active_dispatches_ 是跨前台后台的硬账,
+        // 这里是同步拒绝的先手检查。
         const std::size_t running = static_cast<std::size_t>(
             std::count_if(tasks_.begin(), tasks_.end(), [](const auto& task) {
                 return task->snapshot.state == AgentTaskState::Running;
             }));
-        if (running >= kMaxRunningTasks) {
-            return {"后台子代理已跑满 8 路，请等一项收尾后再开", true};
+        if (running >= static_cast<std::size_t>(max_active_dispatches_)) {
+            return {"后台子代理已跑满 " + std::to_string(max_active_dispatches_) + " 路，请等一项收尾后再开", true};
         }
     }
 
@@ -755,6 +825,32 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                                 const std::string* prepared_system_prompt,
                                 const IsolationScope* isolation_scope,
                                 const std::shared_ptr<lubancode::hooks::DetachedHookSession>& background_hooks) {
+    // 派工治理(规格"递归派工不能再靠拿掉工具解决"):全局并发槽先占上
+    // (前台 + 后台都算),满了明报等收尾;前台任务再记一层嵌套深度,超限
+    // 明报。两笔账都是 RAII,拒绝路径也照退。
+    const int active = active_dispatches_.fetch_add(1) + 1;
+    DispatchSlot active_slot{&active_dispatches_};
+    if (active > max_active_dispatches_) {
+        return {"子代理并发槽已满(" + std::to_string(max_active_dispatches_) +
+                    " 路同时在跑,前台后台合计):请等一项收尾,或调大 subagent.max_active。",
+                true};
+    }
+    std::optional<DispatchSlot> depth_slot;
+    if (detached == nullptr) {
+        const int depth = foreground_depth_.fetch_add(1) + 1;
+        depth_slot.emplace(&foreground_depth_);
+        if (depth > max_dispatch_depth_) {
+            return {"已达子代理派工深度上限(" + std::to_string(max_dispatch_depth_) +
+                        " 层,subagent.max_depth 可调):请把任务拆平后再派,或由当前代理直接完成。",
+                    true};
+        }
+    }
+
+    // 每任务私有 todo:todo_write 换成本任务独占实例,其余工具转发;源表
+    // 没有 todo_write 时原样直用(Explore 只读表/旧测试直建的表)。
+    std::unique_ptr<ToolRegistry> private_todo_registry = BuildPrivateTodoRegistry(task_registry);
+    ToolRegistry& effective_registry = private_todo_registry != nullptr ? *private_todo_registry : task_registry;
+
     // tool_search:延迟工具索引段按"此刻的 loaded 集合"现算(provider 里
     // 闭包着 main.cpp 那份 shared_ptr),拼在子代理系统提示末尾。子代理
     // 运行中途自己 tool_search 挂载了新工具,这段索引不会跟着刷新(系统
@@ -787,10 +883,23 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     // 不另造第二套摘要协议(规格"长任务还缺 compact")。窗口未知(0)时
     // loop 不做 projected 评估,行为与从前一致;TrimHistory 字符安全网照旧。
     const std::string task_model = detached != nullptr && !detached->model.empty() ? detached->model : model_;
-    agent::AgentLoop sub_loop(backend, task_registry, task_model, system_prompt, /*max_tokens=*/4096,
-                              max_steps_per_turn);
+    // 运行策略与 main 同一份(规格根因一):输出上限、字符安全网、续跑
+    // 次数从 runtime_profile_(会话重建时由 BuildSubagentRuntimeProfile 灌
+    // 入)继承,模型换成这只任务的,步数用派出时的预算。默认 profile 的
+    // 输出上限是 unset——绝不在这里另写一枚 4096。
+    agent::AgentRuntimeProfile task_profile = runtime_profile_;
+    task_profile.model = task_model;
+    task_profile.max_steps_per_turn = max_steps_per_turn;
     if (context_window_tokens_ > 0) {
-        sub_loop.SetContextWindowTokens(context_window_tokens_);
+        task_profile.context_window_tokens = context_window_tokens_;
+    }
+    agent::AgentLoop sub_loop(backend, effective_registry, std::move(task_profile), system_prompt);
+    // 子代理的项目记忆召回(规格"同级能力审计"):按这只任务的 prompt 独立
+    // 检索,同预算同安全声明;provider 没设(旧调用方)就不注入,行为不变。
+    if (turn_context_provider_) {
+        sub_loop.SetTurnContext(turn_context_provider_(prompt));
+    }
+    if (context_window_tokens_ > 0) {
         sub_loop.SetOnContextPressure([this, &sub_loop, &backend, &task_model, task](
                                           const agent::ContextPressure& pressure) {
             if (pressure.phase != agent::ContextPressure::Phase::PreRequest || !pressure.projected_overflow) {
@@ -822,6 +931,11 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     }
     if (agent_type == "Explore") {
         sub_loop.SetToolFilter([](const Tool& tool) { return ExploreAllows(tool); });
+        // 角色限制明说(规格:错误说明写"角色限制"):模型撞到这堵墙时,
+        // 文案写清限制来自只读角色,并给出角色内的替代去路。
+        sub_loop.SetToolFilterDenial(
+            "此工具不在 Explore 角色的只读白名单内(角色限制):请改用只读工具(read_file/search/web_fetch/"
+            "web_search/lsp)完成调查;确需写入,把改动建议写进结论交回主代理执行。");
     } else if (detached == nullptr && tool_filter_) {
         sub_loop.SetToolFilter(tool_filter_);
     }
@@ -974,6 +1088,11 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 task->snapshot.cache_read_tokens += report.usage.cache_read_tokens;
                 task->snapshot.cache_creation_tokens += report.usage.cache_creation_tokens;
                 task->snapshot.output_tokens += report.usage.output_tokens;
+                // usage 是否报告(规格根因三):任何一次请求带回非零 usage
+                // 即置位。没报告过时面板写"未报告",不画 0。
+                if (report.reported()) {
+                    task->snapshot.usage_reported = true;
+                }
                 // 步数不在这里记:usage 回调只是"一次请求结束"的时机,拿它
                 // 猜步数,provider 漏 usage 就会少算——直接账在 RunTask 循环
                 // 里按 RunOutcome::steps_used 累计(命名规范第三批)。
@@ -1162,6 +1281,9 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     std::string run_stop_reason;
     std::string run_error;
     int steps_used_total = 0;
+    // 输出预算账(规格根因四):每轮 Run 交回的 OutputBudgetReport 留最后
+    // 一份,分型时判断是不是"续跑用完仍无正文"的收场。
+    std::optional<agent::OutputBudgetReport> run_output_budget;
     // 已取走、尚未真正随一次模型请求发出的批次:续投那轮若失败/被打断,
     // 按下标退回未送,收尾账注照列原文。
     DrainedInbox inflight_drained;
@@ -1173,6 +1295,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             break;
         }
         steps_used_total += outcome->steps_used;
+        run_output_budget = outcome->output_budget;
         // 直接记账:步数来自 RunOutcome(循环内按模型请求累计),不靠 usage
         // 回调猜——面板与终态摘要看到的 steps_used 同一笔账。顺带把这轮流
         // 到一半的正文/思考封进消息账(轮次边界)。
@@ -1269,6 +1392,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 break;
             }
             steps_used_total += continuation->steps_used;
+            run_output_budget = continuation->output_budget;
             if (task != nullptr) {
                 std::lock_guard<std::mutex> lock(tasks_mutex_);
                 task->snapshot.steps_used = steps_used_total;
@@ -1283,6 +1407,18 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     task_outcome.step_limit = max_steps_per_turn;
     task_outcome.steps_used = steps_used_total;
     task_outcome.stop_reason = run_stop_reason;
+    // 输出预算账(规格根因四):main 与子代理同一状态机的子代理侧——撞墙
+    // 上限、续跑次数、usage 是否报告、思考检查点,一并交出去。
+    if (run_output_budget.has_value()) {
+        task_outcome.output_limit_tokens = run_output_budget->limit_tokens;
+        task_outcome.length_continuations_used = run_output_budget->continuations_used;
+        task_outcome.usage_reported = run_output_budget->usage_reported;
+        if (run_output_budget->thinking_bytes > 0) {
+            task_outcome.thinking_checkpoint =
+                "[思考检查点] 已收 " + std::to_string(run_output_budget->thinking_bytes) +
+                " 字节思考,末段: " + FirstLineOf(run_output_budget->thinking_tail);
+        }
+    }
     const std::string text = ExtractLastText(sub_loop);
     std::string snapshot_fallback;
     if (task != nullptr) {
@@ -1332,6 +1468,18 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         task_outcome.reason = TaskOutcomeReason::ProtocolError;
         task_outcome.message = "子代理没有给出任何结论(连一次应答都没有)";
         run_result = {ComposeOutcomeText(task_outcome), true};
+    } else if (run_output_budget.has_value() && run_output_budget->exhausted) {
+        // 输出预算耗尽(规格根因四):独立状态,不再混进 NoFinalText。失败页
+        // 给实际上限/已续次数/usage 是否报告/思考检查点 + 四条去路;不重复
+        // 原 prompt,检查点尽量从思考末段与台账带回。
+        task_outcome.status = TaskOutcomeStatus::BudgetExhausted;
+        task_outcome.reason = TaskOutcomeReason::OutputBudgetExhausted;
+        task_outcome.message = "输出预算耗尽(续跑 " + std::to_string(task_outcome.length_continuations_used) +
+                               " 次后仍无正文)";
+        task_outcome.partial_result = partial.empty() && !task_outcome.thinking_checkpoint.empty()
+                                          ? task_outcome.thinking_checkpoint
+                                          : partial;
+        run_result = {ComposeOutcomeText(task_outcome) + "\n" + ComposeOutputBudgetOutcomeText(task_outcome), true};
     } else if (text.empty()) {
         // 最后一条 assistant 没有文本:保留 stop reason 与最后工具状态,
         // 不只报一句"没有给出文本结论"(规格"现场三")。
@@ -1365,6 +1513,12 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     }
     return run_result;
 }
+
+// 同级派工的转发壳(见 agent_tool.hpp 的 AgentDispatchTool 注释)。
+std::string AgentDispatchTool::name() const { return "agent"; }
+std::string AgentDispatchTool::description() const { return target_.description(); }
+nlohmann::json AgentDispatchTool::input_schema() const { return target_.input_schema(); }
+tools::Tool::Result AgentDispatchTool::execute(const nlohmann::json& input) { return target_.execute(input); }
 
 std::vector<AgentTaskSnapshot> AgentTool::TaskSnapshots(std::size_t max_entries) const {
     std::lock_guard<std::mutex> lock(tasks_mutex_);
@@ -1421,6 +1575,7 @@ std::vector<AgentTaskSummary> AgentTool::TaskSummaries() const {
         summary.cache_read_tokens = task->snapshot.cache_read_tokens;
         summary.cache_creation_tokens = task->snapshot.cache_creation_tokens;
         summary.output_tokens = task->snapshot.output_tokens;
+        summary.usage_reported = task->snapshot.usage_reported;
         summary.start_time = task->snapshot.start_time;
         summary.end_time = task->snapshot.end_time;
         summary.delivered = task->snapshot.delivered;
@@ -1754,6 +1909,12 @@ std::vector<std::string> AgentTool::CompletionNoticeLines() const {
             continue;
         }
         const std::int64_t tokens = snapshot.total_input_tokens() + snapshot.output_tokens;
+        // tokens 三态(规格根因三):报告了给数;没报告但已跑过步数就写
+        // "未报告";一步没跑才是真 0。不拿 0 冒充"服务端一枚 token 没烧"。
+        const std::string token_text =
+            snapshot.usage_reported || snapshot.steps_used == 0
+                ? lubancode::cli::FormatTokenCount(tokens)
+                : lubancode::cli::tr("agent_status.tokens_not_reported");
         // 短因先行(规格"现场三"):耗尽/停下/失败·接口报错一眼分得开。
         std::string label = StateShortLabel(snapshot.state);
         const std::string reason = ReasonShortLabel(snapshot.outcome.reason);
@@ -1765,8 +1926,7 @@ std::vector<std::string> AgentTool::CompletionNoticeLines() const {
         }
         out.push_back("#" + std::to_string(snapshot.id) + " " +
                       (snapshot.title.empty() ? "(未命名)" : snapshot.title) + " · " + label + " · " +
-                      std::to_string(snapshot.tool_calls.size()) + " 次工具 · " +
-                      lubancode::cli::FormatTokenCount(tokens));
+                      std::to_string(snapshot.tool_calls.size()) + " 次工具 · " + token_text);
     }
     return out;
 }
