@@ -118,12 +118,48 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
                 events.push_back(TextDelta{text});
             }
         }
-        // reasoning_content(DeepSeek 等模型的思考过程):流式立即吐,不攒。
-        if (auto reasoning = delta->find("reasoning_content"); reasoning != delta->end() && reasoning->is_string()) {
-            const std::string text = reasoning->get<std::string>();
-            if (!text.empty()) {
-                events.push_back(ThinkingDelta{text, ""});
+        // 思考增量(流式立即吐,不攒)。字段名两家方言:DeepSeek 系叫
+        // reasoning_content,vLLM 0.27+/Qwen 系叫 reasoning(本机 vLLM
+        // 0.27.1 + qwen3.8-27b 实测)。provider 声明了 reasoning_delta_field
+        // 就只认那一个;没声明走自动兼容,两个只读别名都认。同一 chunk
+        // 两者都有时必须去重(镜像字段的服务端会成对发),优先级定死:
+        // 声明字段 > reasoning_content > reasoning,一只 chunk 最多吐一份
+        // ThinkingDelta——绝不两份拼接,也不静默丢弃其中一个的判断依据
+        // 藏在实现里(就是这里的固定次序)。
+        {
+            std::string reasoning_text;
+            if (!reasoning_delta_field_.empty()) {
+                if (auto declared = delta->find(reasoning_delta_field_); declared != delta->end() &&
+                                                               declared->is_string()) {
+                    reasoning_text = declared->get<std::string>();
+                }
+            } else {
+                const std::string canonical =
+                    delta->contains("reasoning_content") && delta->at("reasoning_content").is_string()
+                        ? delta->at("reasoning_content").get<std::string>()
+                        : std::string();
+                const std::string alias = delta->contains("reasoning") && delta->at("reasoning").is_string()
+                                               ? delta->at("reasoning").get<std::string>()
+                                               : std::string();
+                // 两者都非空:相等(镜像)按一份算;不等按优先级取
+                // reasoning_content,另一份弃掉并在诊断里点名,不装没事。
+                if (!canonical.empty() && !alias.empty() && canonical != alias) {
+                    std::cerr << "[reasoning] 同一 chunk 里 reasoning_content 与 reasoning 内容不同,"
+                              << "按声明优先级取 reasoning_content(" << canonical.size() << " 字节),"
+                              << "弃 reasoning(" << alias.size() << " 字节)\n";
+                }
+                reasoning_text = !canonical.empty() ? canonical : alias;
             }
+            if (!reasoning_text.empty()) {
+                events.push_back(ThinkingDelta{reasoning_text, ""});
+            }
+        }
+        // 结构化 reasoning_details(OpenAI 风格):当前版本不映射成
+        // ThinkingDelta(映射另定,见规格),但也不静默吞掉——计数留账,
+        // Finish() 里打一行诊断,fixture 里的原始形状留在测试里。
+        if (auto details = delta->find("reasoning_details");
+            details != delta->end() && details->is_array() && !details->empty()) {
+            reasoning_details_blocks_ += static_cast<int>(details->size());
         }
         auto calls = delta->find("tool_calls");
         if (calls == delta->end() || !calls->is_array()) {
@@ -171,6 +207,14 @@ std::vector<StreamEvent> EventParser::Finish() {
     }
     if (saw_payload_ || started_ || !tool_calls_.empty()) {
         events.push_back(MessageDone{StopReason(finish_reason_, !tool_calls_.empty()), usage_});
+    }
+    // 结构化 reasoning_details 的留账诊断:不映射(映射另定)但必须说破,
+    // 不让"模型回了结构化思考、客户端一个字没接"这件事无声发生。
+    if (reasoning_details_blocks_ > 0 && !reasoning_details_diagnostic_printed_) {
+        reasoning_details_diagnostic_printed_ = true;
+        std::cerr << "[reasoning] 收到 " << reasoning_details_blocks_
+                  << " 个结构化 reasoning_details 块,当前版本未映射成 thinking(计入思考链的映射另定),"
+                  << "未混入正文\n";
     }
     return events;
 }

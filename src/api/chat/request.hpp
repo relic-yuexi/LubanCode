@@ -37,6 +37,17 @@ struct ChatRequestOptions {
     // 空 = reasoning_effort。extra_body 仍在最后浅合并,用户显式写的
     // 同名字段整个压过这里。
     std::string reasoning_param = "reasoning_effort";
+    // reasoning_delta_field:流式思考增量的字段名声明(解析侧)。空 =
+    // 自动兼容:reasoning_content(DeepSeek 系)与 reasoning(vLLM
+    // 0.27+/Qwen 系)两个只读别名都认,同一 chunk 两者都有时按固定
+    // 优先级去重(EventParser 注释)。provider 声明了就只认那一个字段。
+    // 只影响解析;不进请求体。
+    std::string reasoning_delta_field;
+    // reasoning_replay_field:reasoning 回传(tool_episode 策略)时写进
+    // assistant 消息的字段名。默认 reasoning_content(DeepSeek 协议);
+    // vLLM/Qwen 这类只认 reasoning 的端由 provider 声明改写。空 =
+    // reasoning_content。不想当然把所有服务都写成同一个名字。
+    std::string reasoning_replay_field;
 };
 
 // 把中立请求翻成 OpenAI Chat Completions 兼容请求。extra_body 最后浅合并，

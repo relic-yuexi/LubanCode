@@ -166,3 +166,159 @@ TEST_CASE("Chat events: 顶层 reasoning_tokens 也认,没拆账就是 0") {
     const auto done2 = bare.Consume(Frame("[DONE]"));
     CHECK(std::get<api::MessageDone>(done2[0]).usage.output_reasoning_tokens == 0);
 }
+
+// ---------------------------------------------------------------------------
+// delta.reasoning(vLLM 0.27.1 + qwen3.8-27b 真机实录缩成的 fixture,规格
+// "子代理与 MainAgent 同级"根因二):vLLM/Qwen 系用 delta.reasoning 送思考,
+// 不是 LubanCode 原先只认的 reasoning_content。六组流:真机实录、
+// reasoning_content 对照、两字段同现去重、reasoning-only + length、
+// usage 缺席、provider 声明字段。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Chat events: vLLM 真机实录——delta.reasoning 走 ThinkingDelta,usage-only chunk 的空 choices 不丢 usage") {
+    api::chat::EventParser parser;
+    // 1) delta.role 开场帧:只有 role,没有内容——MessageStart 有,无增量。
+    auto events = parser.Consume(Frame(
+        R"({"id":"chatcmpl_vllm","object":"chat.completion.chunk","model":"qwen3.8-27b","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]})"));
+    REQUIRE(events.size() == 1);
+    CHECK(std::holds_alternative<api::MessageStart>(events[0]));
+
+    // 2) delta.reasoning × N:思考逐块流出,每块立即成 ThinkingDelta。
+    events = parser.Consume(Frame(
+        R"({"id":"chatcmpl_vllm","choices":[{"index":0,"delta":{"reasoning":"We"},"finish_reason":null}]})"));
+    REQUIRE(events.size() == 1);
+    CHECK(std::get<api::ThinkingDelta>(events[0]).text == "We");
+    events = parser.Consume(Frame(
+        R"({"id":"chatcmpl_vllm","choices":[{"index":0,"delta":{"reasoning":" need"},"finish_reason":null}]})"));
+    REQUIRE(events.size() == 1);
+    CHECK(std::get<api::ThinkingDelta>(events[0]).text == " need");
+
+    // 3) 正文 delta.content。
+    events = parser.Consume(Frame(
+        R"({"id":"chatcmpl_vllm","choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":null}]})"));
+    REQUIRE(events.size() == 1);
+    CHECK(std::get<api::TextDelta>(events[0]).text == "OK");
+
+    // 4) finish_reason=stop 收口帧。
+    parser.Consume(Frame(
+        R"({"id":"chatcmpl_vllm","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]})"));
+
+    // 5) usage-only chunk:choices 是空数组——usage 必须照收,不能因没有
+    //    choices 便丢掉(根因三的现场:include_usage 开了才有这只帧)。
+    parser.Consume(Frame(
+        R"({"id":"chatcmpl_vllm","choices":[],"usage":{"prompt_tokens":15,"completion_tokens":2,"total_tokens":17}})"));
+
+    // 6) [DONE]。
+    const auto done = parser.Consume(Frame("[DONE]"));
+    REQUIRE(done.size() == 1);
+    const auto& event = std::get<api::MessageDone>(done[0]);
+    CHECK(event.stop_reason == "end_turn");
+    CHECK(event.usage.input_tokens == 15);
+    CHECK(event.usage.output_tokens == 2);
+    CHECK(event.usage.cache_read_tokens == 0);
+    CHECK(api::TotalInputTokens(event.usage) == 15);
+}
+
+TEST_CASE("Chat events: reasoning_content 对照——同一链路,不因字段名分家") {
+    api::chat::EventParser parser;
+    auto events = parser.Consume(Frame(
+        R"({"id":"chatcmpl_ds","model":"deepseek","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"先想"},"finish_reason":null}]})"));
+    REQUIRE(events.size() == 2);
+    CHECK(std::get<api::ThinkingDelta>(events[1]).text == "先想");
+    events = parser.Consume(Frame(
+        R"({"choices":[{"index":0,"delta":{"reasoning":"vLLM 风格"},"finish_reason":null}]})"));
+    REQUIRE(events.size() == 1);
+    CHECK(std::get<api::ThinkingDelta>(events[0]).text == "vLLM 风格");
+    events = parser.Consume(Frame(
+        R"({"choices":[{"index":0,"delta":{"content":"答"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1}})"));
+    REQUIRE(events.size() == 1);
+    CHECK(std::holds_alternative<api::TextDelta>(events[0]));
+}
+
+TEST_CASE("Chat events: 同一 chunk 两字段都有——去重,只吐一份") {
+    // 镜像服务端会把 reasoning 同时写成两个字段:相等按一份算。
+    api::chat::EventParser parser;
+    auto events = parser.Consume(Frame(
+        R"({"id":"x","choices":[{"delta":{"reasoning":"同一段","reasoning_content":"同一段"},"finish_reason":null}]})"));
+    REQUIRE(events.size() == 2);
+    CHECK(std::get<api::ThinkingDelta>(events[1]).text == "同一段");
+
+    // 不相等:按固定优先级取 reasoning_content,另一份弃掉(诊断行点名),
+    // 绝不拼成两段。
+    api::chat::EventParser differ;
+    events = differ.Consume(Frame(
+        R"({"id":"y","choices":[{"delta":{"reasoning":"alias","reasoning_content":"canonical"},"finish_reason":null}]})"));
+    REQUIRE(events.size() == 2);
+    CHECK(std::get<api::ThinkingDelta>(events[1]).text == "canonical");
+
+    // provider 声明了字段名:只认声明那个,另一个字段整个不看。
+    api::chat::EventParser declared{"reasoning"};
+    events = declared.Consume(Frame(
+        R"({"id":"z","choices":[{"delta":{"reasoning":"声明优先","reasoning_content":"不该取这份"},"finish_reason":null}]})"));
+    REQUIRE(events.size() == 2);
+    CHECK(std::get<api::ThinkingDelta>(events[1]).text == "声明优先");
+}
+
+TEST_CASE("Chat events: reasoning-only + finish_reason=length——stop_reason=max_tokens,usage 照收") {
+    api::chat::EventParser parser;
+    // 思考吃满输出预算的现场(根因一/根因四):只有 reasoning,一个正文
+    // 字都没有,finish_reason=length。解析层如实交账:ThinkingDelta 有、
+    // TextDelta 无、stop_reason=max_tokens、usage 带拆账。
+    auto events = parser.Consume(Frame(
+        R"({"id":"chatcmpl_len","model":"qwen3.8-27b","choices":[{"index":0,"delta":{"role":"assistant","reasoning":"先想"},"finish_reason":null}]})"));
+    REQUIRE(events.size() == 2);
+    CHECK(std::holds_alternative<api::MessageStart>(events[0]));
+    CHECK(std::holds_alternative<api::ThinkingDelta>(events[1]));
+    for (const char* piece : {"再想", "还在想"}) {
+        events = parser.Consume(Frame(std::string(R"({"choices":[{"index":0,"delta":{"reasoning":")") + piece +
+                                             R"("},"finish_reason":null}]})"));
+        REQUIRE(events.size() == 1);
+        CHECK(std::get<api::ThinkingDelta>(events[0]).text == piece);
+    }
+    parser.Consume(Frame(
+        R"({"choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":1200,"completion_tokens":4096,"completion_tokens_details":{"reasoning_tokens":4096}}})"));
+    const auto done = parser.Consume(Frame("[DONE]"));
+    REQUIRE(done.size() == 1);
+    const auto& event = std::get<api::MessageDone>(done[0]);
+    CHECK(event.stop_reason == "max_tokens");
+    CHECK(event.usage.output_tokens == 4096);
+    CHECK(event.usage.output_reasoning_tokens == 4096);
+}
+
+TEST_CASE("Chat events: usage 缺席——不拿零冒充,Reported 语义留给上层") {
+    api::chat::EventParser parser;
+    // stream_usage 没开的兼容端:全程没有 usage 帧。解析层交回的 usage
+    // 五项全零——"未报告"这层语义由 UsageReport::reported() 判,这里钉住
+    // 零值原样透传、不崩、不编造。
+    parser.Consume(Frame(
+        R"({"id":"chatcmpl_nousage","choices":[{"index":0,"delta":{"reasoning":"想"},"finish_reason":null}]})"));
+    parser.Consume(Frame(
+        R"({"choices":[{"index":0,"delta":{"content":"答"},"finish_reason":"stop"}]})"));
+    const auto done = parser.Consume(Frame("[DONE]"));
+    REQUIRE(done.size() == 1);
+    const auto& event = std::get<api::MessageDone>(done[0]);
+    CHECK(event.stop_reason == "end_turn");
+    CHECK(event.usage.input_tokens == 0);
+    CHECK(event.usage.output_tokens == 0);
+    CHECK(event.usage.cache_read_tokens == 0);
+    CHECK(event.usage.output_reasoning_tokens == 0);
+}
+
+TEST_CASE("Chat events: 结构化 reasoning_details——不映射也不静默吞,计数留账") {
+    api::chat::EventParser parser;
+    // 原始兼容 fixture(形状照 OpenAI 结构化思考抄,内容是编的):当前
+    // 版本不映射成 ThinkingDelta(映射另定),但计了数、Finish 时有诊断。
+    auto events = parser.Consume(Frame(
+        R"({"id":"rd","choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.text","text":"一块结构化思考"}]},"finish_reason":null}]})"));
+    // 不吐 ThinkingDelta(未映射),也不吐 TextDelta(绝不混进正文)。
+    for (const auto& event : events) {
+        CHECK_FALSE(std::holds_alternative<api::ThinkingDelta>(event));
+        CHECK_FALSE(std::holds_alternative<api::TextDelta>(event));
+    }
+    parser.Consume(Frame(
+        R"({"choices":[{"index":0,"delta":{"content":"答"},"finish_reason":"stop"}]})"));
+    const auto done = parser.Consume(Frame("[DONE]"));
+    REQUIRE(done.size() == 1);
+    CHECK(parser.reasoning_details_blocks() == 1);
+    CHECK(std::get<api::MessageDone>(done[0]).stop_reason == "end_turn");
+}
