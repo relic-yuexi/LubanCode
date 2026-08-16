@@ -1,6 +1,6 @@
 # 会话、上下文与存档
 
-[文档首页](README.md) · [命令参考](commands.md) · [项目记忆](memory-system-design.md) · [架构说明](architecture.md)
+[文档首页](README.md) · [命令参考](commands.md) · [项目记忆](memory-system-design.md) · [安全模型](security-model.md) · [测试手册](testing-guide.md) · [架构说明](architecture.md)
 
 LubanCode 把三件事分开：**history** 是当前模型要看的对话，**session** 是磁盘上的事件账，**memory** 是跨会话召回的项目知识。三者互相引用，却不混成一团。
 

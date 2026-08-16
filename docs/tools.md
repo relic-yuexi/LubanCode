@@ -2,7 +2,7 @@
 
 [文档首页](README.md) · [功能全览](feature-reference.md) · [命令参考](commands.md) · [扩展指南](extensions.md)
 
-本页对应 `v0.26.0`。工具由名称、说明、JSON Schema、确认属性和执行函数组成。模型只能调用当前注册且已挂载的工具；`/tools` 可查三态。
+本页按当前主线源码整理。工具由名称、说明、JSON Schema、确认属性和执行函数组成。模型只能调用当前注册且已挂载的工具；`/tools` 可查三态。
 
 ## 工具怎样进入请求
 
@@ -138,7 +138,7 @@
 
 ### `agent`
 
-`prompt` 必填，必须自包含；子代理看不见主对话。`max_turns` 可选，默认取构造时设置；0 表示不设上限，负数拒绝。
+`prompt` 必填，必须自包含；子代理看不见主对话。`max_steps_per_turn` 可选；没传时取 `subagent.max_steps_per_turn`，再没有便继承主代理预算。`0` 表示不设上限，负数拒绝。旧参数 `max_turns` 暂作兼容，新调用不要再写。
 
 子代理有独立历史、独立工具表与同一模型后端。其流式碎念不回主屏，只显示子工具状态，末尾把结论交回。主 Esc/Ctrl+C 会透传取消；pre/post hooks 与工具确认照常生效。
 
@@ -165,6 +165,12 @@
 ### `tool_search`
 
 参数 `query` 是空格分隔关键词，`limit` 默认 5。它在延迟工具的名字和说明里评分，命中后把这些工具加入本场 loaded 集合；下一轮请求便带完整 schema。没命中时会给名字前缀建议。
+
+### `programmatic_tool_calling`
+
+只在 `tool_calling=programmatic` 且 Python、平台围栏与工具白名单满足条件时注册。参数是一段 Python 脚本与用途说明。脚本从 `luban_tools` 导入 typed stub，用 `emit()` 交回一份摘要；每枚 stub 调用经 framed RPC 回宿主，再走与普通 JSON 工具相同的 schema、Hook、确认、取消与审计链。
+
+首版入选集只收 `read_file`、`search` 等配置允许的只读工具。POSIX 没有可靠文件系统/网络隔离时默认回落 JSON。完整配置、runner 上限与手测见 [PTC 手册](ptc.md)。
 
 ## 动态工具
 

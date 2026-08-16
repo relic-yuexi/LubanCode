@@ -1,5 +1,7 @@
 # PTC:Programmatic Tool Calling(程序化工具调用)
 
+[文档首页](README.md) · [配置手册](configuration.md) · [工具参考](tools.md) · [安全模型](security-model.md) · [测试指南](testing-guide.md)
+
 依据论文 *The Bitter Lesson of Tool Calling*(arxiv 2608.06370)。PTC 指模型写
 Python 脚本、经 typed stubs 编排工具,不是 Parallel Tool Calling。
 
@@ -77,6 +79,8 @@ Esc 取消链:先拒未开始的调用,在跑工具自然收尾,最后杀脚本�
   `LUBANCODE_PTC_ALLOW_NO_SANDBOX=1`,风险自担。
 - Python 层另有护栏(import 白名单 + 内建 open/input 封禁 + stdout 捕获):
   防君子栏,不是保险箱;硬边界在 OS 层。
+
+PTC 的资源墙与受限 token 不是强化沙箱。威胁边界见[安全模型](security-model.md)。
 
 ## 能力画像
 

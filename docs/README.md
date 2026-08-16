@@ -8,7 +8,7 @@
   <a href="../README.md">中文首页</a> · <a href="../README.en.md">English README</a> · <a href="https://github.com/relic-yuexi/LubanCode/releases">Releases</a>
 </p>
 
-这里收 `v0.26.0` 的使用手册与设计说明。当前 Release 测试为 `1374/1374`，共 `7094` 条断言。字段名、命令名若与文档冲突，以 `lubancode --help`、`lubancode --config` 和当前源码为准。
+这里收 LubanCode 当前主线的用户手册、参考资料与工程说明。版本号以 `CMakeLists.txt` 和 `src/app/version.hpp` 为准；已发布变化看 [CHANGELOG](../CHANGELOG.md)。文档若与 `lubancode --help`、`lubancode --config` 或源码冲突，以程序和源码为准，并把文档差错补回来。
 
 ## 先找路
 
@@ -16,49 +16,90 @@
 | --- | --- | --- |
 | 安装并跑起第一场会话 | [根 README](../README.md#安装) | [命令与按键](commands.md) |
 | 看软件到底能做什么 | [功能全览](feature-reference.md) | [工具参考](tools.md) |
-| 接一家或多家模型服务 | [配置手册](configuration.md) | [Provider 目录](provider-catalog.md) |
-| 查所有 slash 命令、启动参数和快捷键 | [命令与按键](commands.md) | [终端交互](terminal-ui.md) |
-| 查某件模型工具的参数与上限 | [工具参考](tools.md) | [配置手册](configuration.md) |
-| 看一句话怎样拼成请求、调用工具、再收成回答 | [Query 数据流](query-data-flow.md) | [架构说明](architecture.md) |
-| 恢复、压缩或导出会话 | [会话与上下文](sessions-and-context.md) | [项目记忆](memory-system-design.md) |
-| 写 Skill、接 MCP/LSP 或做插件 | [扩展指南](extensions.md) | [工具参考](tools.md) |
+| 接一家模型服务 | [配置手册](configuration.md) | [Provider 目录](provider-catalog.md) |
+| 查 slash 命令或快捷键 | [命令与按键](commands.md) | [终端交互](terminal-ui.md) |
+| 查工具参数、确认与上限 | [工具参考](tools.md) | [安全模型](security-model.md) |
+| 恢复、导出或压缩会话 | [会话与上下文](sessions-and-context.md) | [Query 数据流](query-data-flow.md) |
+| 开项目记忆 | [项目记忆](memory-system-design.md) | [安全模型](security-model.md) |
+| 写 Hook | [Hooks 手册](hooks.md) | [配置手册](configuration.md) |
+| 用程序化工具调用 | [PTC 手册](ptc.md) | [工具参考](tools.md) |
+| 写 Skill、接 MCP/LSP 或做插件 | [扩展指南](extensions.md) | [安全模型](security-model.md) |
 | 用 `/init` 给仓库立规矩 | [项目指令](project-instructions.md) | [配置手册](configuration.md) |
-| 看模块、线程、进程和数据怎样流 | [架构说明](architecture.md) | [终端交互](terminal-ui.md) |
-| 准备演示、简历或面试 | [求职项目手册](job-portfolio.md) | [架构说明](architecture.md) |
+| 编译、调试或改代码 | [开发指南](development-guide.md) | [架构说明](architecture.md) |
+| 加测试或跑终端回归 | [测试指南](testing-guide.md) | [终端交互](terminal-ui.md) |
+| 遇到故障，先找排查顺序 | [排错手册](troubleshooting.md) | 对应专题页 |
+| 改文档或审文档 PR | [文档规范](documentation-standard.md) | [命名与计数规范](naming-conventions.md) |
 
-## 文档地图
+## 文档分层
 
-### 使用手册
+文档分五层。每页只管自己那层，少抄，勤链。
 
-| 页面 | 收什么 |
+### 1. 产品入口
+
+| 页面 | 职责 |
 | --- | --- |
-| [功能全览](feature-reference.md) | 运行模式、协议、工具、代理、终端、会话、记忆、扩展、安全和当前边界。 |
-| [命令与按键](commands.md) | 8 个公开启动参数、29 个 slash 命令、编辑/菜单/工具条目按键与非交互降级。 |
-| [工具参考](tools.md) | 14 类内置或条件工具、动态 MCP/插件工具、参数、限制、确认和排错。 |
-| [终端交互](terminal-ui.md) | 多行编辑、粘贴、消息排队、Markdown/LaTeX、diff、工具转录、状态面板与图片。 |
-| [会话与上下文](sessions-and-context.md) | JSONL、恢复、标题、导出、token、缓存命中、压缩与项目记忆边界。 |
+| [根 README](../README.md) | 安装、产品定位、最短上手与发行入口。 |
+| [功能全览](feature-reference.md) | 当前已实现能力的总账，不收未来设想。 |
+| [命令与按键](commands.md) | 启动参数、slash 命令与键位参考。 |
 
-### 配置与项目
+### 2. 用户参考
 
-| 页面 | 收什么 |
+| 页面 | 职责 |
 | --- | --- |
-| [配置手册](configuration.md) | 配置层级、所有顶层字段、环境变量、providers、hooks、MCP、搜索、LSP、权限与目录。 |
-| [Hooks 手册](hooks.md) | hooks 事件全表、stdin/stdout 协议、决策归并、来源相加、项目 hook 信任审查、`/hooks` 台账、legacy 兼容、工具覆盖矩阵与边界。 |
-| [Provider 目录](provider-catalog.md) | 内置/在线目录、缓存、预设、模型 variant、合并优先级与维护办法。 |
-| [项目指令](project-instructions.md) | `/init`、层级加载、override、32 KiB 上限、写法与排错。 |
-| [项目记忆](memory-system-design.md) | 已实现路径、检索、后台写入、命令、安全，以及仍未实现的后续阶段。 |
-| [界面多语言](i18n.md) | 语言包格式、回退链、添加新语言、覆盖内置措辞与排错。 |
+| [配置手册](configuration.md) | 配置分层、字段、环境变量与合并规矩。 |
+| [Provider 目录](provider-catalog.md) | Provider/模型目录 schema、缓存与维护。 |
+| [工具参考](tools.md) | 工具 schema、上限、确认、结果与排错。 |
+| [Hooks 手册](hooks.md) | 事件、匹配、stdin/stdout、归并与信任审查。 |
+| [PTC 手册](ptc.md) | 程序化工具调用、能力画像、runner 与边界。 |
+| [界面多语言](i18n.md) | 语言包、回退链与新增语言。 |
 
-### 扩展与开发
+### 3. 工作指南
 
-| 页面 | 收什么 |
+| 页面 | 职责 |
 | --- | --- |
-| [扩展指南](extensions.md) | Skill、MCP、LSP、Lua、C ABI、hooks、延迟挂载、命名和信任边界。 |
-| [架构说明](architecture.md) | 组件分层、三协议、请求链、工具表、提示词、会话、终端并发、平台抽象与测试。 |
-| [命名与计数规范](naming-conventions.md) | turn/step 词典、计数器单位、通用五条与 review 清单。 |
-| [Query 数据流](query-data-flow.md) | 用“帮我看一下当前项目”追一遍 system、history、tools、三种 wire、流式回包与子代理。 |
-| [提示词模块](../src/prompts/README.md) | 内置 prompt 怎样拆分、构建嵌入、运行时播种和覆盖。 |
-| [求职项目手册](job-portfolio.md) | 项目数据、架构讲法、面试故事、演示脚本与源码证据。 |
+| [终端交互](terminal-ui.md) | composer、排队、转录、公式、diff 与面板。 |
+| [会话与上下文](sessions-and-context.md) | history、session、token、缓存与 compact。 |
+| [项目指令](project-instructions.md) | `/init`、AGENTS 层级、覆盖与上限。 |
+| [项目记忆](memory-system-design.md) | 召回、候选、学习档、后台写入与数据边界。 |
+| [扩展指南](extensions.md) | Skill、MCP、LSP、Lua、C ABI 与分发。 |
+| [排错手册](troubleshooting.md) | 从症状出发的检查顺序与证据清单。 |
+
+### 4. 内部设计
+
+| 页面 | 职责 |
+| --- | --- |
+| [架构说明](architecture.md) | 模块边界、启动、请求链、线程与平台。 |
+| [Query 数据流](query-data-flow.md) | 一条输入怎样走过 prompt、history、wire、工具与子代理。 |
+| [命名与计数规范](naming-conventions.md) | turn、step、request、token 等统一词典。 |
+| [提示词模块](../src/prompts/README.md) | 内置 prompt 的拆分、嵌入、播种与覆盖。 |
+
+### 5. 工程与治理
+
+| 页面 | 职责 |
+| --- | --- |
+| [开发指南](development-guide.md) | 工具链、构建、目录、改动落位与本地工作流。 |
+| [测试指南](testing-guide.md) | 单测、集成、真终端、真模型、CI 与基准口径。 |
+| [安全模型](security-model.md) | 信任边界、权限、密钥、扩展与本地数据。 |
+| [文档规范](documentation-standard.md) | 文档类型、权威来源、写法、同步矩阵与验收。 |
+| [求职项目手册](job-portfolio.md) | 演示与面试素材；不是产品事实的权威来源。 |
+
+## 事实听谁的
+
+同一件事不许多页各写一套。冲突时按下表追根。
+
+| 事实 | 权威来源 | 文档入口 |
+| --- | --- | --- |
+| 当前版本 | `CMakeLists.txt`、`src/app/version.hpp` | [CHANGELOG](../CHANGELOG.md) |
+| 启动参数 | `src/app/cli_options.*` | [命令与按键](commands.md) |
+| Slash 命令 | `src/cli/slash_commands.*`、`src/app/interactive_session.cpp` | [命令与按键](commands.md) |
+| 配置字段与默认值 | `src/config/config.hpp`、`src/config/config.cpp` | [配置手册](configuration.md) |
+| Provider schema | `src/config/provider_catalog.*`、`catalog/providers.json` | [Provider 目录](provider-catalog.md) |
+| 工具名与 schema | 各 `src/tools/*` 实现、`ToolRegistry` | [工具参考](tools.md) |
+| Hook 事件与决策 | `src/hooks/*`、配置解析 | [Hooks 手册](hooks.md) |
+| 终端键位与状态机 | `src/cli/line_editor.*`、`console_input.*` | [终端交互](terminal-ui.md) |
+| 会话格式 | `src/agent/session_store.*` | [会话与上下文](sessions-and-context.md) |
+| 测试目标 | `tests/CMakeLists.txt`、`.github/workflows/ci.yml` | [测试指南](testing-guide.md) |
+| 发行包 | `.github/workflows/release.yml`、安装脚本 | [开发指南](development-guide.md) |
 
 ## 十分钟上手
 
@@ -68,7 +109,7 @@
 lubancode
 ```
 
-缺配置时，向导会依次问语言、协议、地址、密钥与模型。写完直接进会话，不必重启。
+缺配置时，向导会问语言、协议、地址、鉴权与模型。写完便进会话。
 
 ### 2. 给仓库立规矩
 
@@ -76,7 +117,7 @@ lubancode
 /init
 ```
 
-它在 Git 根生成 `AGENTS.md`，按仓库文件填入构建测试命令。已有文件不覆盖，当前会话立即重载。
+它在 Git 根生成 `AGENTS.md`。已有文件不覆盖，当前会话立即重载。
 
 ### 3. 交代任务
 
@@ -84,9 +125,9 @@ lubancode
 先读项目结构，找出配置入口和测试命令。不要改文件。
 ```
 
-模型会用 `search`、`read_file` 或 LSP 查仓库。要改文件时，`write_file` / `edit_file` 先画 diff，再走确认。
+模型会用文件、搜索或 LSP 工具查仓库。要改文件时，写入工具先画 diff，再按当前确认档执行。
 
-### 4. 验证与续聊
+### 4. 收尾
 
 ```text
 /todos
@@ -94,52 +135,11 @@ lubancode
 /export
 ```
 
-下次从同一目录启动：
+下次从同一目录续接：
 
 ```powershell
 lubancode --continue
 ```
-
-## 常用工作流
-
-### 多 Provider
-
-```text
-/provider add
-/provider list
-/provider switch work
-/model
-/think high
-```
-
-预设能带出地址、协议、窗口和默认模型；密钥最好放 `key_env`。配置细节见[配置手册](configuration.md#providers-数组字段)。
-
-### 长任务
-
-1. 让模型用 `todo_write` 列计划。
-2. 大范围检索交给 `agent` 子代理。
-3. 模型工作时直接输入下一条，消息会排队。
-4. `Ctrl+O` 展开参数与全文，`Ctrl+E` 聚焦单条。
-5. 上下文逼近窗口时自动压缩；也可手工 `/compact`。
-
-### 外接工具
-
-```text
-/mcp
-/lsp
-/plugins
-/tools
-```
-
-MCP 与 LSP 是进程外服务；Lua 与 DLL 在宿主进程内。来路不明的扩展先读代码，再装。详见[扩展指南](extensions.md)。
-
-### 检查新版
-
-```text
-/update
-```
-
-它只查 GitHub 最新 Release，不自动覆盖程序。升级时运行新版包内安装脚本，官方 Skills 会跟着更新，用户 Skills 保留。脚本场景可用 `lubancode --check-update`。
 
 ## 数据住在哪里
 
@@ -158,53 +158,18 @@ MCP 与 LSP 是进程外服务；Lua 与 DLL 在宿主进程内。来路不明�
   plugins/                       Lua 与 DLL
   languages/                     外部语言包
 
-<exe-dir>/skills/                便携包、Windows 安装与开发构建的官方 Skill
-<prefix>/share/lubancode/skills/ POSIX 前缀安装的官方 Skill
-
 <project>/.lubancode/
   config.json                    项目级配置
   settings.local.json            本地权限，不该提交
   skills/                        项目级 Skill
 ```
 
-`AGENTS.md` 跟仓库走；项目记忆与 session 不写进仓库。配置的具体覆盖规则见[配置手册](configuration.md#一配置分层与优先级)。
+官方 Skill 随发行包走。项目记忆与 session 留在用户目录，不写进仓库。完整目录与覆盖规矩见[配置手册](configuration.md)。
 
-Skill 同名时，项目级压用户级，用户级压官方级。官方 Skill 随发行包更新；用户目录不会被程序升级当成普通官方资源覆盖。
+## 三条总规矩
 
-## 平台状态
+1. **现状与计划分开。** 已实现能力进功能表；未来设计进“后续”或 `todos/`。
+2. **规范与例子分开。** 规范页定契约，专题页给例子；别让一段样例反过来定义协议。
+3. **数字须能复测。** 性能、缓存、token、测试数都要写环境、样本与来源。一次手测不进产品总览。
 
-| 平台 | 编译器 | 终端路径 | 发行包 |
-| --- | --- | --- | --- |
-| Windows x64 | MSVC | Win32 控制台、Windows Terminal、VS Code Terminal | `.zip` |
-| Linux x64 | GCC | POSIX TTY；复杂原地重画按能力降级 | `.tar.gz` |
-| macOS arm64 | Clang | POSIX TTY；复杂原地重画按能力降级 | `.tar.gz` |
-
-管道与重定向自动用 plain 主题，不输出动画和原地改写。设 `LUBANCODE_FORCE_COLOR=1` 可强制颜色，但不会把管道伪装成真终端。
-
-## 安全边界
-
-- `confirm`、`auto`、`yolo` 三档只管确认策略，不是操作系统沙箱。
-- `--yes` 与 yolo 是显式全放。项目 deny 规则不会假装替用户推翻它。
-- `key_env` 比明文 `api_key` 更稳；示例、日志、Skill、插件都不该写 key。
-- hooks、MCP、Lua、DLL、Skill 都可能引导或执行代码。安装来源须可信。
-- Lua 与 DLL 在宿主进程内；不可信扩展应改走 MCP 进程边界。
-- 项目记忆默认关闭，也不能由受版本控制的项目配置自行开启。
-
-## 文档维护规矩
-
-改用户可见功能时，至少检查这些页：
-
-1. [功能全览](feature-reference.md)有没有登记。
-2. [命令与按键](commands.md)或[工具参考](tools.md)是否要补入口与参数。
-3. 对应专题页有没有写成功路、失败路和安全边界。
-4. [更新记录](../CHANGELOG.md)有没有一条用户能看懂的变化。
-
-数据刷新用：
-
-```powershell
-cmake --build build\release --config Release --target lubancode_tests
-.\build\release\tests\Release\lubancode_tests.exe --no-skip
-git status --short
-```
-
-文档不要抄未来设计当成现状。实现到哪便写到哪；未实现的单列“后续”，不能混进功能表。
+改用户可见行为时，从[文档规范](documentation-standard.md)的同步矩阵查该动哪些页。改完至少查本地链接、示例命令与 `git diff --check`。

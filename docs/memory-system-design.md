@@ -4,7 +4,7 @@
 
 项目记忆让 LubanCode 跨会话记住少量仓库事实与用户偏好。它默认关闭。检索只读本地文件；写入先排队，再由后台进程原子落盘。
 
-> 当前状态：同步词法召回、`memory_save`、`/memory remember`、后台 upsert、归档遗忘、索引重建都已实现。自动扫描每场对话、后台调用模型抽取、闲时归并、用户级跨项目记忆尚未实现。
+> 当前状态：本地 BM25/实体召回、召回 trace、回合收尾模型抽取、`off/review/auto` 三档学习、候选审阅箱、`memory_save`、显式 `remember`、后台 upsert、陈旧核验、归档遗忘与索引重建都已实现。闲时归并、自然语言冲突消解、用户级跨项目记忆尚未实现。
 
 ## 1. 记忆不等于会话
 
@@ -25,10 +25,11 @@
   "memory": {
     "enabled": true,
     "use": true,
+    "learn": "review",
     "generate": true,
     "max_index_bytes": 16384,
-    "max_retrieval_bytes": 24576,
-    "max_results": 4
+    "max_retrieval_bytes": 8192,
+    "max_results": 3
   }
 }
 ```
@@ -37,12 +38,13 @@
 | --- | --- | --- |
 | `enabled` | `false` | 总开关。关闭时不建运行对象，也不注册写入工具 |
 | `use` | `true` | 是否召回已有记忆 |
-| `generate` | `true` | 是否注册 `memory_save`，并允许排写入任务 |
-| `max_index_bytes` | `16384` | 每轮最多读入多少索引字节 |
-| `max_retrieval_bytes` | `24576` | 命中主题正文总预算 |
-| `max_results` | `4` | 最多注入几份主题正文 |
+| `learn` | `review` | `off` 不学习；`review` 抽候选待审；`auto` 对过闸候选直写 |
+| `generate` | `true` | 旧兼容开关；`false` 等价于 `learn=off` |
+| `max_index_bytes` | `16384` | 人读 `index.md` 的大小上限，不直接进 prompt |
+| `max_retrieval_bytes` | `8192` | 命中主题正文总预算 |
+| `max_results` | `3` | 最多注入几份主题正文 |
 
-项目 `.lubancode/config.json` 不能把全局关闭的记忆自行打开。全局开过后，项目可关闭总开关，也可收窄 `use`、`generate` 与预算。陌生仓库便不能靠一份受版本控制的配置，偷偷开启长期记录。
+项目 `.lubancode/config.json` 不能把全局关闭的记忆自行打开。全局开过后，项目可关闭总开关，也可收窄 `use`、`learn` 与预算。全局只授 `review` 时，项目不能抬到 `auto`。
 
 单发模式可以召回，但强制关闭写入。它不维护完整交互会话，故而不挂 `memory_save`。
 
@@ -52,12 +54,19 @@
 /memory
 /memory on|off
 /memory use on|off
-/memory learn on|off
+/memory learn off|review|auto
+/memory review
+/memory accept <id>
+/memory edit <id> 标题 [:: 正文]
+/memory reject <id> [理由]
 /memory list
 /memory remember fact 标题 [:: 正文]
 /memory remember preference 标题 [:: 正文]
 /memory forget <id>
 /memory rebuild
+/memory stale
+/memory verify|refresh <id>
+/memory why [id]
 ```
 
 | 命令 | 动作 |
@@ -65,11 +74,16 @@
 | `/memory` | 显示本场开关、项目 key、目录、条目数、pending 数 |
 | `on|off` | 只改本场总开关 |
 | `use on|off` | 只改本场召回开关 |
-| `learn on|off` | 只改本场写入开关；打开时补注册 `memory_save` |
+| `learn off|review|auto` | 只改本场学习档，不能高过全局授权上限 |
+| `review` | 列待审候选与置信度 |
+| `accept/edit/reject` | 接受、修改或拒绝候选；拒绝账只留主题哈希与理由 |
 | `list` | 从 catalog 列 id、类型、标题与摘要 |
 | `remember` | 由用户明确排一条 upsert 任务 |
 | `forget` | 把指定 id 归档，不再召回 |
 | `rebuild` | 扫描主题 Markdown，重建 catalog 与 index |
+| `stale` | 列指纹漂移与已过期条目 |
+| `verify/refresh` | 续命核验；`refresh` 还把状态回炉为 active |
+| `why` | 展示上一轮召回词、得分、拦截原因与注入预算 |
 
 这些开关只管当前进程，不回写 `config.json`。要永久开关，改全局配置。
 
@@ -137,8 +151,11 @@ Git 项目按 common git dir 认身份：
   projects/
     lubancode-4fd2c83a9e5b7a10/
       project.json                  项目身份资料
+      memory-candidates/            review 档待审候选
+        cand-*.json
+        rejected.json               被拒主题短哈希与理由，不存正文
       memory/
-        index.md                    给模型看的短索引，可重建
+        index.md                    给人看的短索引，可重建
         facts/                      事实主题
           agent-loop-request-flow.md
         preferences/                项目偏好主题
@@ -146,6 +163,7 @@ Git 项目按 common git dir 认身份：
         archive/                    已遗忘或被替代的旧主题
         .state/
           catalog.json              机器检索元数据，可重建
+          trace-last.json           上一轮召回解释，不存完整问题与正文
   memory-jobs/
     pending/                        等后台 worker 处理的 JSON
     failed/                         坏任务与错误说明
@@ -191,7 +209,7 @@ preference.package-manager
 
 ## 8. Index 与 catalog
 
-`index.md` 供模型扫一眼：
+`index.md` 供人扫一眼：
 
 ```markdown
 # Project Memory
@@ -205,7 +223,7 @@ preference.package-manager
 - [包管理器](preferences/package-manager.md) — 本项目用 pnpm
 ```
 
-`.state/catalog.json` 供程序检索。它保存文件相对路径、摘要、关键词、项目路径、状态和时间。正文不塞进 catalog。
+`.state/catalog.json` 供程序检索。它保存文件相对路径、摘要、关键词、范围、证据、状态和时间。正文不塞进 catalog。`index.md` 不再整份注入 prompt；模型只收到过门槛、过预算的命中正文。
 
 `/memory rebuild` 会：
 
@@ -219,19 +237,19 @@ preference.package-manager
 
 ## 9. 每轮怎样召回
 
-检索发生在外层用户消息进 Agent 之前。一轮内部即便多次调模型、调用工具，也沿用同一份记忆包；下一条用户消息再重算。
+检索发生在外层用户消息进 Agent 之前。一轮内部即便多次调模型、调用工具，也沿用同一份记忆包；下一条用户消息再重算。后台完成、Hook、compact 等宿主合成消息默认跳过召回，免得控制消息误触记忆；确需事实的 main 回流才显式强开。
 
 ```mermaid
 flowchart LR
     U[用户本轮消息] --> Q[提取路径、符号、词和字符片段]
-    Q --> I[读取 index 与 catalog]
+    Q --> I[读取 catalog 与主题元数据]
     I --> S[本地相关度打分]
     S --> F[核验命中路径指纹]
     F --> B[按条数与字节预算拼包]
     B --> A[本轮 system suffix]
 ```
 
-查询材料只取当前用户消息、相对 cwd、文件路径、扩展名、类名、函数名与命令。不会把整场历史拿去检索。
+查询材料只取当前用户消息、相对 cwd、文件路径、扩展名、类名、函数名与命令，再合并上一轮抽取给出的检索扩展词。不会把整场历史拿去检索。归一化、标识符拆分、中文二元片段与 BM25 共用一条本地词路。
 
 打分侧重精确命中：
 
@@ -246,7 +264,7 @@ flowchart LR
 
 时间只用于破同分。新而无关的条目压不过旧而精准的条目。
 
-程序先放有界 `index.md`，再按分数取至多 `max_results` 份主题，总正文不超过 `max_retrieval_bytes`。命中主题所指文件已经变化时，只留一句“可能陈旧”，不注正文，叫模型回源码核验。
+程序按分数取至多 `max_results` 份主题，总正文不超过 `max_retrieval_bytes`。范围不符、已经过期、指纹漂移、低于门槛或与高分事实重复的条目都不注入；原因写进 `.state/trace-last.json`，可用 `/memory why [id]` 查看。指纹漂移时只提示回源码核验，不塞旧正文。
 
 ## 10. 注入边界
 
@@ -268,7 +286,7 @@ flowchart LR
 
 这样既保住提示缓存的稳定前缀，也免旧记忆冒充更高层指令。
 
-## 11. 两条写入入口
+## 11. 三条写入入口
 
 ### 11.1 用户显式写
 
@@ -280,7 +298,7 @@ CLI 组装 `SaveRequest`，立即写一张 pending job，再拉起 worker。
 
 ### 11.2 模型调用 `memory_save`
 
-开启 `generate` 后，主代理工具表多出：
+学习档不为 `off` 时，主代理工具表多出：
 
 ```json
 {
@@ -296,7 +314,19 @@ CLI 组装 `SaveRequest`，立即写一张 pending job，再拉起 worker。
 
 `kind`、`title`、`summary`、`content` 必填。`id` 用于更新已有主题。`keywords` 最多 16 项，`paths` 最多 24 项，且须是项目内相对路径。
 
-模型只在事实已有源码或工具证据、偏好由用户明说时调用。它不会自动把整场对话交给另一模型抽取。
+模型只在事实已有源码或工具证据、偏好由用户明说时调用。工具只排后台任务，不在工具回调里直接改 Markdown。
+
+### 11.3 回合收尾抽取
+
+交互回合收口后，程序截取本轮新增 history，压成不超过 24 KiB 的转写，再用当前主模型产严格 JSON：任务分型、检索扩展词与少量记忆候选。抽取失败只打一行提示，不影响主回答，也不自动重试。
+
+候选按学习档分流：
+
+- `off`：不抽取、不提候选、不写。
+- `review`：候选落 `memory-candidates/`，由 `/memory review` 查看，再 `accept/edit/reject`。
+- `auto`：只有非 inferred 候选可考虑直写；fact 还须 `verified` 且带项目内证据路径。其余仍进待审箱。
+
+`auto` 只认用户全局配置的明确授权。项目配置和本场命令都不能越过授权上限。拒绝候选后只留主题短哈希与理由，防同主题反复纠缠，不保留被拒正文。
 
 ## 12. Job 与 worker
 
@@ -354,7 +384,7 @@ worker 做这些事：
 
 ### 文件变化
 
-事实条目可记录关联文件指纹。召回时若指纹不符，正文不注入，只提示模型核验。现版不会自动排 refresh，也不会调用模型重写；须由用户或模型在核验后再次 `memory_save`。
+事实条目可记录关联文件指纹。召回时若指纹不符，正文不注入，只提示模型核验。`/memory stale` 列漂移与过期项；核验后用 `verify` 续命，或用 `refresh` 连状态一并回炉。现版不会因文件变化自动调用模型重写。
 
 ### 冲突
 
@@ -381,7 +411,7 @@ linked worktree 共用 common git dir，故而共享记忆。切 worktree 后会
 
 子代理不独立自动召回项目记忆。主代理委托时应把必要事实写进任务。这样子代理只拿与子任务有关的材料，不把整份索引灌进去。
 
-`memory_save` 属条件工具。总开关与 generate 都打开才注册。工具很多时，它也可能进入延迟挂载目录；模型可用 `tool_search` 找到。
+`memory_save` 属条件工具。总开关打开且学习档不为 `off` 才注册。工具很多时，它也可能进入延迟挂载目录；模型可用 `tool_search` 找到。
 
 ## 16. 手工维护
 
@@ -403,11 +433,19 @@ linked worktree 共用 common git dir，故而共享记忆。切 worktree 后会
 
 **开了却没召回**
 
-看 `use`、条目数和 query 是否命中标题、摘要、关键词或路径。再看主题是否 archived/conflict，关联文件指纹是否已变。
+看 `use`、query origin 与 `/memory why`。再看条目是否低于门槛、超预算、scope 不符、expired、重复、archived/conflict，或关联文件指纹已变。
 
 **`memory_save` 不在工具表**
 
-确认 `enabled=true`、`generate=true`。若工具总数超过阈值，再查 `/tools` 的延迟项。
+确认 `enabled=true` 且 `learn` 不是 `off`。若工具总数超过阈值，再查 `/tools` 的延迟项。
+
+**回合结束后没见候选**
+
+看 `/memory` 的学习档。`off` 不抽；`review` 才进待审箱；抽取模型失败会在终端留一行提示。候选为空也可能是本轮没有值得跨会话保留的稳定事实。
+
+**候选为何没有自动写入**
+
+默认 `review` 本就要人工接受。`auto` 须在全局配置授权；inferred 候选、无证据 fact 与未核验事实仍会落待审箱。
 
 **`remember` 显示已排队，列表却没变化**
 
@@ -425,9 +463,9 @@ linked worktree 共用 common git dir，故而共享记忆。切 worktree 后会
 
 下面这些是后续方向，不是现版功能：
 
-- 自动审阅每场对话并挑记忆候选。
-- 另调低价模型做后台抽取与自然语言冲突判断。
-- idle debounce、成本阈值和自动失败重试策略。
+- 独立低价模型与后台 idle debounce。
+- 自然语言冲突判断与自动归并。
+- 成本阈值与抽取失败自动重试。
 - 文件变化后自动 refresh。
 - 自动拆分、归并过大的主题与分层索引。
 - embedding、向量检索与知识图谱。

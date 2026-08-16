@@ -2,9 +2,7 @@
 
 [文档首页](README.md) · [功能总览](feature-reference.md) · [工具手册](tools.md) · [会话与上下文](sessions-and-context.md) · [配置手册](configuration.md)
 
-LubanCode 是一支 C++23 命令行程序。上层接人，下层接系统。中间摆一副代理循环，把模型、工具、会话串起来。
-
-> 本页对应 `v0.26.0`。Windows/MSVC、Ubuntu/GCC、macOS/Clang 都在 CI 中编译并跑测试。当前测试基线为 1374 个用例、7094 条断言。
+LubanCode 是一支 C++23 命令行程序。上层接人，下层接系统。中间摆一副代理循环，把模型、工具、会话串起来。本页讲当前主线架构；版本号看 `CMakeLists.txt` 与 `src/app/version.hpp`，测试口径看[测试指南](testing-guide.md)。
 
 ## 1. 总图
 
@@ -38,6 +36,7 @@ flowchart LR
 | LSP | `src/lsp/` | 文档同步、语义查询、懒启动与闲置回收 | 语言服务器实现 |
 | Config | `src/config/` | 分层配置、模型目录、项目指令与 prompt 脚手架 | 请求执行 |
 | Memory | `src/memory/` | 项目记忆检索、写入、整理 | 通用会话历史 |
+| PTC | `src/ptc/` | typed stub、runner、RPC、能力画像与基准 | 普通 JSON 工具协议 |
 | Platform | `src/platform/` | 进程、终端、路径、编码、动态库 | 产品流程 |
 | Prompts | `src/prompts/` | 内置人格、工作规矩、工具方针、协议段 | 用户项目指令 |
 
@@ -98,7 +97,7 @@ LubanCode 支持三套 wire protocol：
 | --- | --- | --- |
 | `anthropic` | Anthropic Messages | Claude 及兼容网关 |
 | `responses` | OpenAI Responses | OpenAI 新接口及兼容服务 |
-| `chat` | Chat Completions | OpenAI 兼容服务与多数国产模型网关 |
+| `chat_completions` | Chat Completions | OpenAI 兼容服务与多数国产模型网关；`chat` 是兼容别名 |
 
 目录如下：
 
@@ -204,9 +203,9 @@ LUBANCODE_* 环境变量
 
 项目记忆与会话不是一回事。会话记“这回说过什么”，记忆记“这个仓库长期要守什么”。
 
-记忆默认关闭。打开后，程序按当前问题做词法检索，把少量相关条目塞进系统上下文。模型可调用 `memory_save` 写下稳定事实；用户也能用 `/memory` 查看、删除和重建索引。写盘走后台队列和原子替换，避免半截文件。
+记忆默认关闭。打开后，程序按当前问题做本地排级，把少量相关条目塞进本轮 system suffix。写入有三路：用户显式 `remember`、模型主动 `memory_save`、回合收尾抽取候选。默认学习档 `review` 先入待审箱；只有全局授权 `auto` 且证据过闸才直写。正式写盘仍走后台队列和原子替换。
 
-现阶段已落地的是显式写入、同步检索与维护命令。自动抽取、空闲合并、跨项目记忆仍在规划里。详见 [项目记忆](memory-system-design.md)。
+空闲归并、自然语言冲突消解、跨项目用户记忆仍在规划里。详见 [项目记忆](memory-system-design.md)。
 
 ## 11. 终端并发模型
 

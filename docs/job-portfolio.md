@@ -1,5 +1,7 @@
 # LubanCode 求职项目手册
 
+> 本页是演示与求职素材，不是产品事实的权威来源。本次未刷新测试数、提交数与代码行数，正文不固定这些数字。使用前须按“数据刷新”一节重算，并标日期与 commit。产品行为请回[文档首页](README.md)查对应专题。
+
 [文档首页](README.md) · [功能总览](feature-reference.md) · [架构说明](architecture.md) · [终端交互](terminal-ui.md) · [工具手册](tools.md)
 
 ## 一、项目概览
@@ -10,7 +12,7 @@ LubanCode 是一款用 C++23 编写的跨平台 AI 编程 CLI。它用统一事�
 
 ### 30 秒介绍
 
-我用 C++23 独立做了一款终端 AI 编程工具。项目不只包了一层模型接口。我把三套流式协议归一成中立消息与事件，写了可扩展工具注册表、子代理、MCP/LSP 接入、上下文压缩与会话恢复。终端侧支持流式 Markdown、行内 Unicode 数学、块级盒式 LaTeX、可编辑输入、消息排队、diff 确认与工具明细折叠。底层进程管理分别适配 Windows Job Object 与 POSIX 进程组。当前产品代码约 5.40 万行，测试约 2.89 万行，本地全量 1374 个用例、7094 条断言通过，CI 覆盖 MSVC、GCC 与 Clang。
+我用 C++23 独立做了一款终端 AI 编程工具。项目不只包了一层模型接口。我把三套流式协议归一成中立消息与事件，写了可扩展工具注册表、子代理、MCP/LSP 接入、上下文压缩与会话恢复。终端侧支持流式 Markdown、行内 Unicode 数学、块级盒式 LaTeX、可编辑输入、消息排队、diff 确认与工具明细折叠。底层进程管理分别适配 Windows Job Object 与 POSIX 进程组。CI 覆盖 MSVC、GCC 与 Clang。
 
 ### 2 分钟介绍
 
@@ -49,10 +51,10 @@ LubanCode 是一款用 C++23 编写的跨平台 AI 编程 CLI。它用统一事�
 | 项目 | 当前证据 |
 | --- | --- |
 | 语言与标准 | C++23，另含 C、Lua、PowerShell、Shell 与少量 Python 测试夹具 |
-| 产品代码 | 225 个 C/C++ 文件，约 53,955 行 |
-| 测试代码 | 98 个测试/夹具文件，约 28,901 行 |
-| 自动测试 | 本地 Release 全量 1374 个用例、7094 条断言通过 |
-| 提交记录 | 227 次提交，10 个版本标签 |
+| 产品代码 | 发布前按“数据刷新”重算，并标日期与 commit |
+| 测试代码 | 发布前按“数据刷新”重算，并标日期与 commit |
+| 自动测试 | 发布前跑 Release 全套，并记录通过、失败、跳过与环境 |
+| 提交记录 | 发布前按“数据刷新”重算 |
 | 模型协议 | Anthropic Messages、OpenAI Responses、Chat Completions |
 | 平台 | Windows x64、Linux x64、macOS arm64 |
 | 编译器矩阵 | MSVC、GCC、Clang |
@@ -71,14 +73,14 @@ LubanCode 是一款用 C++23 编写的跨平台 AI 编程 CLI。它用统一事�
 - 构建 Schema 驱动的工具注册表与多轮代理循环，覆盖文件读写、容错编辑、命令执行、搜索、子代理和待办；接入 MCP、LSP、Skills、Lua 与 C ABI 插件，并用延迟挂载控制工具 schema 的上下文开销。
 - 处理终端并发渲染难题：以统一 stdout 锁、原子状态、屏幕锚点和重画事务协调流式 Markdown、二维 LaTeX 公式、动态状态、工具条目与可编辑输入；支持执行中排队、打断、diff 确认及工具明细折叠。
 - 统一跨平台进程语义：Windows 采用 `CreateProcessW` 与 Job Object，POSIX 采用 `fork/exec`、进程组和 `poll`；实现超时、输出捕获、后台任务、长命双向管道及整棵进程树回收。
-- 建立 CMake + doctest + GitHub Actions 交付链；本地 Release 全量 1374 个用例通过，CI 在 MSVC/GCC/Clang 三路编译测试，并按标签生成 Windows/Linux/macOS 发行包。
+- 建立 CMake + doctest + GitHub Actions 交付链；CI 在 MSVC/GCC/Clang 三路编译测试，并按标签生成 Windows/Linux/macOS 发行包。简历若要报测试数，须先按“数据刷新”复测。
 
 ### 精简版：简历位置只够两条
 
 **LubanCode｜C++23 跨平台 AI 编程代理**
 
 - 独立设计三协议统一 Agent runtime，完成流式事件、工具循环、子代理、MCP/LSP、插件、上下文压缩与会话恢复；以抽象边界隔离模型协议、工具执行和终端 UI。
-- 解决跨线程终端重画与跨平台进程回收问题；项目约 5.40 万行产品代码、2.89 万行测试，本地 1374 个用例通过，三平台 CI 与自动发布链齐备。
+- 解决跨线程终端重画与跨平台进程回收问题；三平台 CI 与自动发布链齐备，工程规模与测试数按投递时 commit 复测。
 
 ### 偏 AI 应用基础设施岗位
 
@@ -596,7 +598,7 @@ ctest --test-dir build/release -C Release --output-on-failure
 | “完全安全” | “提供确认、权限与 hooks；进程内插件不具备沙箱” |
 | “支持所有 OpenAI 兼容接口” | “支持 Responses 与 Chat Completions 两类兼容协议，厂商差异可透传” |
 | “100% 跨平台一致” | “核心能力跨平台；复杂原地重画目前以 Windows 为主” |
-| “测试覆盖率很高” | “全量 1374 个用例通过”；没有 coverage 数据便不报百分比 |
+| “测试覆盖率很高” | “在 `<commit>` 的 `<环境>` 跑完全套，结果为 `<通过/失败/跳过>`”；没有 coverage 数据便不报百分比 |
 | “性能很好” | 先补 benchmark，再报启动、内存与吞吐 |
 
 ## 十五、作品集页面模板
@@ -611,8 +613,8 @@ Anthropic Messages、OpenAI Responses 和 Chat Completions，并提供可扩展
 工具系统、子代理、MCP/LSP、上下文压缩、会话恢复与终端 Markdown/LaTeX 交互。
 
 我主要解决了三类问题：多协议语义归一；Windows/POSIX 进程与 IPC；流式
-正文、工具状态和可编辑输入并发写屏。项目现有约 5.40 万行产品代码、
-2.89 万行测试，本地 1374 个用例通过，CI 覆盖 MSVC、GCC 与 Clang。
+正文、工具状态和可编辑输入并发写屏。CI 覆盖 MSVC、GCC 与 Clang；工程
+规模和本地测试结果按投递时 commit 复测后填写。
 
 - GitHub: https://github.com/relic-yuexi/LubanCode
 - Architecture: docs/architecture.md

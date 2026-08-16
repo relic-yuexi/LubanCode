@@ -2,7 +2,7 @@
 
 [文档首页](README.md) · [功能全览](feature-reference.md) · [终端交互](terminal-ui.md) · [配置手册](configuration.md)
 
-本页对应 `v0.26.0`。启动参数只在进程起手时解析；slash 命令只在交互会话里解析。命令词大小写不敏感，参数原样保留。
+本页按当前主线源码整理。启动参数只在进程起手时解析；slash 命令只在交互会话里解析。命令词大小写不敏感，参数原样保留。版本号看 `CMakeLists.txt` 与 `src/app/version.hpp`。
 
 ## 启动形式
 
@@ -183,14 +183,21 @@ usage 账分四态：`not_reported`（服务端没回 usage）/ `disabled`（met
 /memory
 /memory on|off
 /memory use on|off
-/memory learn on|off
+/memory learn off|review|auto
+/memory review
+/memory accept <id>
+/memory edit <id> 标题 [:: 正文]
+/memory reject <id> [理由]
 /memory list
 /memory remember fact|preference 标题 [:: 正文]
 /memory forget <id>
 /memory rebuild
+/memory stale
+/memory verify|refresh <id>
+/memory why [id]
 ```
 
-`on/off` 改本场总状态；`use` 控召回；`learn` 控写入工具。`remember` 排后台任务，`forget` 归档而非直接抹账，`rebuild` 从 Markdown 正文重建 catalog 与 index。详见[项目记忆](memory-system-design.md)。
+`on/off` 改本场总状态；`use` 控召回；`learn` 分 `off/review/auto` 三档。默认 `review` 把每轮抽出的候选放进待审箱，`accept/edit/reject` 再处置；`auto` 须全局明确授权。`why` 解释上一轮为何命中或落选；`stale/verify/refresh` 管指纹漂移与过期项。详见[项目记忆](memory-system-design.md)。
 
 ## 个性与语言
 

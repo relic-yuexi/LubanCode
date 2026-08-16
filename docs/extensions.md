@@ -1,6 +1,6 @@
 # 扩展 LubanCode
 
-[文档首页](README.md) · [工具手册](tools.md) · [配置手册](configuration.md) · [架构说明](architecture.md)
+[文档首页](README.md) · [工具手册](tools.md) · [配置手册](configuration.md) · [安全模型](security-model.md) · [测试手册](testing-guide.md) · [排错手册](troubleshooting.md) · [架构说明](architecture.md)
 
 LubanCode 留了六扇门：Skill、MCP、LSP、Lua、C ABI 插件、Hooks。分量不同，风险也不同。先挑最窄的一扇，够用便止。
 

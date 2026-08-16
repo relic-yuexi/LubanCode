@@ -1,6 +1,6 @@
 # 终端交互
 
-[文档首页](README.md) · [命令与键位](commands.md) · [会话与上下文](sessions-and-context.md) · [配置手册](configuration.md) · [架构说明](architecture.md)
+[文档首页](README.md) · [命令与键位](commands.md) · [会话与上下文](sessions-and-context.md) · [配置手册](configuration.md) · [测试手册](testing-guide.md) · [排错手册](troubleshooting.md)
 
 LubanCode 把终端当工作台，不当一根只进不出的管子。模型在写，输入框还能收字；工具在跑，状态仍可查看；公式到了终端，也尽量排成能读的样子。
 

@@ -2,7 +2,7 @@
 
 [文档首页](README.md) · [命令参考](commands.md) · [工具参考](tools.md) · [架构说明](architecture.md)
 
-本页对应 `v0.26.0`。它是一张功能总账：一项能力从哪里进入，什么时候出现，数据落在哪里，细节该去哪一页查。当前 Release 测试共 `1374` 例、`7094` 条断言。
+本页是一张当前功能总账：一项能力从哪里进入，什么时候出现，数据落在哪里，细节该去哪一页查。未来设计不混进这张表；版本与测试口径分别看源码和[测试指南](testing-guide.md)。
 
 ## 运行方式
 
@@ -28,6 +28,7 @@
 | 推理档位 | 会话级切换；具体档位由 provider/模型声明 | `/think`，`/effort` 同义 |
 | 厂商参数透传 | 请求体浅合并，HTTP 头追加或覆盖 | `extra_body`、`extra_headers` |
 | 原生联网搜索 | Anthropic/Responses 可声明服务端搜索工具 | provider 的 `native_web_search` |
+| 程序化工具调用 | 模型写受限 Python，经 typed stub 与宿主 RPC 批量编排只读工具 | `tool_calling=programmatic`；默认仍为 `json`，见 [PTC 手册](ptc.md) |
 
 模型地址与密钥没有内置默认值。交互模式缺配置会开向导；单发与管道模式直接报缺项。配置来源与覆盖顺序见[配置手册](configuration.md)。
 
@@ -55,10 +56,11 @@
 | 待办清单 | `todo_write` 全量维护 `pending / in_progress / completed`，终端原位更新变化项。 |
 | 用户选择 | `ask_user` 一次问 1 到 4 题，支持单选、多选和自由填写；只在交互模式挂载。 |
 | 工具延迟挂载 | 工具总数超过阈值时，MCP/插件等先留索引；`tool_search` 命中后再放进请求 schema。 |
+| PTC 后端 | `programmatic_tool_calling` 把一条脚本拆成多枚受控工具调用；每枚调用仍走 schema、Hook、确认、取消与审计。 |
 | Skills | 官方级、用户级、项目级三层 `SKILL.md`；项目 > 用户 > 官方。可列出、安装、更新、删除用户技能。 |
 | 项目指令 | 从 Git 根到 cwd 分层加载 `AGENTS.override.md` / `AGENTS.md`；主代理与子代理共用。 |
 | 隔离 worktree | 新建、列出、保留或移除工作树；会话切换到新 cwd 后重建项目上下文。 |
-| 项目记忆 | 默认关闭；同步本地召回，写入走后台队列；事实与偏好分开。 |
+| 项目记忆 | 默认关闭；本地召回；`off/review/auto` 三档学习；待审候选与正式写入分账。 |
 
 ## 终端界面
 
@@ -110,7 +112,7 @@
 | 法与魂 | `system_prompt.md` 与 `SOUL.md` | 人格替换与风格叠加分开 |
 | 主题/i18n | 内置主题、`languages/*.json` | 本地资源 |
 
-详见[扩展指南](extensions.md)。
+详见[扩展指南](extensions.md)。程序化工具调用另见 [PTC 手册](ptc.md)。
 
 ## 权限与安全
 

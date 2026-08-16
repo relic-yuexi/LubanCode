@@ -54,10 +54,11 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
   "memory": {
     "enabled": false,
     "use": true,
+    "learn": "review",
     "generate": true,
     "max_index_bytes": 16384,
-    "max_retrieval_bytes": 24576,
-    "max_results": 4
+    "max_retrieval_bytes": 8192,
+    "max_results": 3
   },
   "hooks": {
     "schema_version": 2,
@@ -122,8 +123,8 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 | `max_steps_per_turn` | 非负整数 | `0`(无上限) | agent 主循环一个 turn 内的步数上限:一步 = 一次模型请求,一步可含多枚工具调用。不配或配 `0` = 不设上限,防跑飞靠 ESC/Ctrl+C;配正整数才是硬上限,超过就按预算耗尽收场。负数或非法值静默忽略。旧名 `max_turns` 仍可读入(兼容期,读到会打弃用提示);两者同现且值不同会明报冲突并采用新名。 |
 | `system_prompt_file` | 字符串,UTF-8 文本路径 | 无 | 人格段文件路径;没配就用内置人格,`--system-prompt` 命令行参数会压过它。 |
 | `tool_search_threshold` | 非负整数 | `20` | 注册工具总数超过此数才启用延迟挂载(工具搜索);`0` 永不延迟。 |
-| `tool_calling` | `json` / `programmatic` / `auto` | `json` | 工具调用后端。`json` 保持现状;`programmatic` 强制 PTC(模型写 Python 脚本编排工具,详见 docs/ptc.md),条件不满足时启动明报回落;`auto` 按能力画像与任务形状选,首版恒落 `json`。只从配置文件读,环境变量不认。 |
-| `ptc` | JSON object | 见 docs/ptc.md | PTC 的 Python 解释器、五道上限(墙钟/CPU/内存/输出字节/调用数与并发数)、受限 token 与入选工具白名单。项目级整段压过全局。 |
+| `tool_calling` | `json` / `programmatic` / `auto` | `json` | 工具调用后端。`json` 保持现状；`programmatic` 强制 PTC，条件不满足时启动明报回落；`auto` 按能力画像与任务形状选，当前恒落 `json`。只从配置文件读，环境变量不认。见 [PTC 手册](ptc.md)。 |
+| `ptc` | JSON object | 见 [PTC 手册](ptc.md) | Python 解释器、资源上限、调用/并发上限、受限 token 与入选工具白名单。项目级整段压过全局。 |
 | `memory` | JSON object | `enabled=false` | 项目记忆开关、读写子开关与召回预算，见下节。只能由全局配置打开。 |
 | `language` | `zh-CN` / `en` / 语言包语言码 | 空 = 跟系统 | 界面语言。 |
 | `hooks` | JSON object | 四类数组都空 | 外部命令钩子,详见下节。 |
@@ -176,24 +177,26 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
   "memory": {
     "enabled": true,
     "use": true,
+    "learn": "review",
     "generate": true,
     "max_index_bytes": 16384,
-    "max_retrieval_bytes": 24576,
-    "max_results": 4
+    "max_retrieval_bytes": 8192,
+    "max_results": 3
   }
 }
 ```
 
 - `enabled` 管总开关。
-- `use` 管同步召回。每轮只读本地索引，最多取 `max_results` 份正文。
-- `generate` 挂出 `memory_save` 工具。模型只把小而稳定的事实或用户明说的项目偏好排进队列；后台进程落盘、更新同 id 主题并重建索引。
-- `max_index_bytes` 限制本轮索引字节数；`max_retrieval_bytes` 限制命中正文总字节数；三项预算都须是正整数。
+- `use` 管同步召回。每轮从本地 catalog 排级，最多取 `max_results` 份正文。
+- `learn` 是学习档：`off` 不抽取不写入；`review` 每轮收尾抽候选，等用户审；`auto` 只把证据与置信度过闸的候选直写。默认 `review`，`auto` 只能由全局配置授权。
+- `generate` 是旧兼容开关；显式 `false` 等价于 `learn=off`。新配置优先写 `learn`。
+- `max_index_bytes` 限制人读 `index.md` 的大小；它不再整份注入 prompt。`max_retrieval_bytes` 限制命中正文总字节数；预算都须是正整数。
 
-项目级 `.lubancode/config.json` 不能自行把记忆从关改开。全局开过后，项目配置可以关闭，或收紧 `use`、`generate` 与预算。陌生仓库便不能替用户开启聊天提取。
+项目级 `.lubancode/config.json` 不能自行把记忆从关改开。全局开过后，项目配置可以关闭，或收紧 `use`、`learn` 与预算；不能把 `review` 抬成 `auto`。陌生仓库便不能替用户开启自动写入。
 
 Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正文放在 `~/.lubancode/projects/<项目key>/memory/`，分 `facts/` 与 `preferences/`；`index.md` 和 `.state/catalog.json` 都可从主题文件重建。记忆不写进会话 history，也不随 `/export` 导出。
 
-交互会话可用 `/memory` 看状态。`/memory use on|off` 与 `/memory learn on|off` 只改本场；`/memory remember fact|preference 标题 [:: 正文]` 可显式排一条；`list`、`forget <id>`、`rebuild` 分别用来查看、归档与重建。
+交互会话可用 `/memory` 看状态。`/memory learn off|review|auto` 只在全局授权上限内切本场；`review/accept/edit/reject` 管待审箱，`why` 查上一轮召回，`stale/verify/refresh` 管陈旧事实。`remember`、`list`、`forget`、`rebuild` 仍可显式维护。
 
 ### providers 数组字段
 
@@ -505,7 +508,9 @@ GLM 系模型用 `thinking.type` 开关思考模式,外加一个自定义分级 
 | `/language` | 是 | 可写全局配置的 `language` |
 | `/prompt` | 是 | 管理主目录 prompt 文件；重建系统提示 |
 | `/memory use on|off` | 是 | 不落盘，只改本场 |
-| `/memory learn on|off` | 是 | 不落盘，只改本场 |
+| `/memory learn off|review|auto` | 是 | 不落盘，只改本场；项目配置不能把全局 `review` 抬成 `auto` |
+| `/memory review|accept|edit|reject` | 是 | 读写项目 `memory-candidates/`；接受后写入项目记忆 |
+| `/memory stale|verify|refresh|why` | 是 | 检查、核验或解释项目记忆；`refresh` 会更新主题文件 |
 | 确认提示按 `a` | 是 | 用户同意后，可写项目 `settings.local.json` |
 | `Shift+Tab` | 是 | 不落盘，只轮换本场确认档 |
 | `/init` | 是 | 项目根 `AGENTS.md`；已有文件不覆盖 |
