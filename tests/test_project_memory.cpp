@@ -1276,3 +1276,128 @@ TEST_CASE("ProjectMemory: 两个文件撞同一 id 停为 conflict,不偷偷选�
     REQUIRE(memory::RebuildMemoryIndex(memory_dir).has_value());
     for (const auto& entry : store.ListEntries()) CHECK(entry.status == "conflict");
 }
+
+// ---- /memory migrate(规格"迁移":先列账,确认后批迁,备份可回退) ----
+
+namespace {
+
+void WriteLegacyTopic(const fs::path& memory_dir, const std::string& file, const std::string& id,
+                      const std::string& title, const std::string& body, const std::string& sessions) {
+    const fs::path target = memory_dir / file;
+    fs::create_directories(target.parent_path());
+    Write(target,
+          "<!-- lubancode-memory\n"
+          "{\"schema\":2,\"id\":\"" + id + "\",\"kind\":\"" + id.substr(0, id.find('.')) +
+              "\",\"title\":\"" + title + "\",\"summary\":\"摘要" + title + "\",\"keywords\":[\"K" +
+              id.substr(id.find('.') + 1) + "\"],\"paths\":[],\"status\":\"active\","
+              "\"updated_at\":\"2026-01-01T00:00:00Z\",\"source_sessions\":" + sessions +
+              ",\"scope\":{\"kind\":\"project\",\"value\":\"\"},\"evidence\":[],"
+              "\"confidence\":\"verified\",\"last_verified_at\":\"2026-01-01T00:00:00Z\","
+              "\"expires_at\":null,\"fingerprints\":{}}\n"
+          "-->\n\n# " + title + "\n\n" + body + "\n");
+}
+
+}  // namespace
+
+TEST_CASE("ProjectMemory migrate: 列账、批迁、备份与重跑不重复") {
+    const fs::path root = TempRoot("migrate");
+    const fs::path repo = SetupRepo(root, "repo");
+    const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
+    REQUIRE(identity.has_value());
+    const fs::path memory_dir = identity->project_dir / "memory";
+    WriteLegacyTopic(memory_dir, "facts/legacy-a.md", "fact.legacy-a", "甲主题", "甲的正文。", "[\"sess-a\"]");
+    WriteLegacyTopic(memory_dir, "preferences/legacy-b.md", "preference.legacy-b", "乙主题", "乙的正文。", "[\"sess-b\"]");
+    // 一份已是 schema 3:跳过。
+    fs::create_directories(memory_dir / "preferences");
+    Write(memory_dir / "preferences" / "fresh.md",
+          "---\nname: fresh\ndescription: 新主题\nmetadata:\n  schema: 3\n  node_type: memory\n"
+          "  type: preference\n  id: preference.fresh\n  confidence: user-stated\n  status: active\n"
+          "  scope: {level: project, kind: project, value: \"\"}\n  origin_session_ids: []\n"
+          "  created: 2026-08-01T00:00:00Z\n  modified: 2026-08-01T00:00:00Z\n"
+          "  last_verified: 2026-08-01T00:00:00Z\n  expires: null\n  keywords: []\n  evidence: []\n"
+          "---\n\n# 新主题\n\n新正文。\n");
+    // archive 里的旧主题默认不动。
+    fs::create_directories(memory_dir / "archive");
+    Write(memory_dir / "archive" / "buried.md", "<!-- lubancode-memory\n{\"schema\":2}\n-->\n老归档。\n");
+
+    memory::Options options;
+    options.global_allowed = true;
+    options.enabled = true;
+    memory::ProjectMemory store(*identity, root / "home", options);
+
+    const auto plan = store.PlanMigration();
+    CHECK(plan.to_migrate == 2);
+    CHECK(plan.to_skip == 1);
+    CHECK(plan.warnings == 0);
+
+    const auto result = store.RunMigration();
+    REQUIRE(result.has_value());
+    CHECK(result->migrated == 2);
+    CHECK_FALSE(result->backup_dir.empty());
+
+    // 新文件住规范名,旧文件清掉,归档不动。
+    CHECK(fs::exists(memory_dir / "facts" / "legacy-a.md"));
+    CHECK(fs::exists(memory_dir / "preferences" / "legacy-b.md"));
+    CHECK(fs::exists(memory_dir / "preferences" / "fresh.md"));
+    CHECK(fs::exists(memory_dir / "archive" / "buried.md"));
+    // id 不变、来源会话不丢、正文原样。
+    const auto entries = store.ListEntries();
+    REQUIRE(entries.size() == 3);
+    for (const auto& entry : entries) {
+        if (entry.id == "fact.legacy-a") {
+            CHECK(entry.schema == 3);
+            REQUIRE(entry.source_sessions.size() == 1);
+            CHECK(entry.source_sessions[0] == "sess-a");
+            CHECK(Read(memory_dir / "facts" / "legacy-a.md").find("甲的正文。") != std::string::npos);
+        } else if (entry.id == "preference.legacy-b") {
+            CHECK(entry.schema == 3);
+            CHECK(entry.source_sessions[0] == "sess-b");
+        } else {
+            CHECK(entry.id == "preference.fresh");
+            CHECK(entry.schema == 3);
+        }
+    }
+    // 备份目录里有原件镜像(<时间戳>/下按原相对路径)。
+    const fs::path backup_root = memory_dir / ".state" / "migration-backup";
+    REQUIRE(fs::exists(backup_root));
+    const fs::path stamp_dir = fs::path(result->backup_dir);
+    REQUIRE(fs::exists(stamp_dir));
+    CHECK(fs::exists(stamp_dir / "facts" / "legacy-a.md"));
+    CHECK(fs::exists(stamp_dir / "preferences" / "legacy-b.md"));
+
+    // 重跑:没有活干,不重复、不改 id。
+    const auto again = store.RunMigration();
+    REQUIRE(again.has_value());
+    CHECK(again->migrated == 0);
+    CHECK(store.ListEntries().size() == 3);
+}
+
+TEST_CASE("ProjectMemory migrate: 中途失败旧主题与 catalog 仍可用") {
+    const fs::path root = TempRoot("migrate-fail");
+    const fs::path repo = SetupRepo(root, "repo");
+    const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
+    REQUIRE(identity.has_value());
+    const fs::path memory_dir = identity->project_dir / "memory";
+    WriteLegacyTopic(memory_dir, "facts/first.md", "fact.first", "第一份", "第一份正文。", "[]");
+    WriteLegacyTopic(memory_dir, "facts/old-second.md", "fact.second", "第二份", "第二份正文。", "[]");
+    // 在第二份的规范名位置立一堵墙:写入失败,迁移须回退。
+    fs::create_directories(memory_dir / "facts" / "second.md");
+
+    memory::Options options;
+    options.global_allowed = true;
+    options.enabled = true;
+    memory::ProjectMemory store(*identity, root / "home", options);
+    const auto plan = store.PlanMigration();
+    CHECK(plan.to_migrate == 2);
+    const auto result = store.RunMigration();
+    REQUIRE_FALSE(result.has_value());
+
+    // 旧主题仍在,照常可列可召回;本轮新文件已回退。
+    CHECK(fs::exists(memory_dir / "facts" / "first.md"));
+    CHECK(fs::exists(memory_dir / "facts" / "old-second.md"));
+    const auto entries = store.ListEntries();
+    REQUIRE(entries.size() == 2);
+    // 第一份是原地改写,回退须从备份还原成旧格式,不是删掉。
+    CHECK(Read(memory_dir / "facts" / "first.md").starts_with("<!-- lubancode-memory"));
+    CHECK(store.BuildTurnContext("Kfirst 是什么", repo).find("第一份正文") != std::string::npos);
+}

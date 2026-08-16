@@ -588,6 +588,7 @@ const Entry kZhCN[] = {
      "  /memory stale                    看指纹漂移与已过期的记忆\n"
      "  /memory verify <id>              核验后续命(原 id 复活)\n"
      "  /memory refresh <id>             核验并把 status 回炉为 active\n"
+     "  /memory migrate                  旧格式主题批迁 front matter(先列账再确认)\n"
      "  /memory why [id]                 看上一轮召回为何命中/落选\n"},
     {"cmd.memory.unavailable", "[memory] 找不到主目录，项目记忆不可用。"},
     {"cmd.memory.on", "开"},
@@ -645,6 +646,13 @@ const Entry kZhCN[] = {
     {"cmd.memory.why.skipped", "未取到正文"},
     {"cmd.memory.why.total", "  合计注入 {0} 条 · {1} 字节"},
     {"cmd.memory.why.missing", "[memory] 上一轮召回里没有 {0}。"},
+    {"cmd.memory.migrate.none",
+     "[memory] 没有要迁的旧格式主题(已跳过 {0} 份,警告 {1} 份)。"},
+    {"cmd.memory.migrate.plan",
+     "[memory] 迁移计划:将改 {0} 份,跳过 {1} 份,警告 {2} 份。原件会备进 .state/migration-backup/。"},
+    {"cmd.memory.migrate.confirm", "照此迁移? [y/N]: "},
+    {"cmd.memory.migrate.cancelled", "不迁,旧主题原样保留。"},
+    {"cmd.memory.migrate.done", "[memory] 已迁 {0} 份为 front matter;备份在 {1}。"},
 
     // ---- /language ----
     {"cmd.language.list_header", "可选语言(内置 zh-CN/en + <主目录>/.lubancode/languages/*.json):"},
@@ -1866,6 +1874,7 @@ const Entry kEn[] = {
      "  /memory stale                             list drifted (fingerprint) and expired memories\n"
      "  /memory verify <id>                       re-verify, reviving the entry under its id\n"
      "  /memory refresh <id>                      re-verify and reset status to active\n"
+     "  /memory migrate                           batch-migrate legacy topics to front matter (plan first)\n"
      "  /memory why [id]                          explain the last recall: hits, misses, blocks\n"},
     {"cmd.memory.unavailable", "[memory] The home directory is unavailable; project memory cannot run."},
     {"cmd.memory.on", "on"},
@@ -1925,6 +1934,14 @@ const Entry kEn[] = {
     {"cmd.memory.why.skipped", "body unavailable"},
     {"cmd.memory.why.total", "  injected {0} entries · {1} bytes"},
     {"cmd.memory.why.missing", "[memory] {0} was not part of the last recall."},
+    {"cmd.memory.migrate.none",
+     "[memory] No legacy topics to migrate ({0} skipped, {1} warnings)."},
+    {"cmd.memory.migrate.plan",
+     "[memory] Migration plan: {0} to migrate, {1} skipped, {2} warnings. "
+     "Originals are backed up under .state/migration-backup/."},
+    {"cmd.memory.migrate.confirm", "Migrate as planned? [y/N]: "},
+    {"cmd.memory.migrate.cancelled", "Migration cancelled; legacy topics are untouched."},
+    {"cmd.memory.migrate.done", "[memory] Migrated {0} topics to front matter; backup at {1}."},
 
     {"cmd.init.created", "Created {0} and loaded it for this session."},
     {"cmd.init.exists", "Project instructions already exist at {0}; left them untouched and reloaded them."},

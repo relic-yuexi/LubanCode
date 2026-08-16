@@ -66,6 +66,7 @@
 /memory stale
 /memory verify <id>
 /memory refresh <id>
+/memory migrate
 /memory why [id]
 ```
 
@@ -85,6 +86,7 @@
 | `rebuild` | 扫描主题 Markdown，重建 catalog 与 index |
 | `stale` | 列指纹漂移与已过期的记忆 |
 | `verify`/`refresh` | 核验续命；refresh 连 status 一并回炉 |
+| `migrate` | 旧格式主题批迁 schema 3，先列账再确认 |
 | `why [id]` | 看上一轮召回为何命中/落选 |
 
 这些开关只管当前进程，不回写 `config.json`。要永久开关，改全局配置。
@@ -232,6 +234,17 @@ metadata:
 - 注入模型前,程序剥掉 front matter,只送正文。
 
 旧格式(schema 1/2)的主题把元数据藏在文件头的 HTML 注释严格 JSON 里。reader 同时认两种格式:旧主题照读、照列、照召回、照 rebuild;某条旧主题同 id 更新或核验时,只迁这一份成 schema 3,正文原样带过去。两份文件撞同一 id 时双双停为 `conflict`,不凭时间偷偷选一份。
+
+### 批量迁移:`/memory migrate`
+
+不想等旧主题逐条自然更新,可以一次批迁:
+
+1. 先列账:将改几份、跳过几份(已是 schema 3 或躺在 archive)、警告几份(读不动或已停 conflict),不碰盘。
+2. 确认(`y`)后才动。原件先按原相对路径备进 `.state/migration-backup/<时间>/`。
+3. 全部写妥、catalog 与 index 重建成功,才报完成;改名与写新内容在同一把项目锁里。
+4. 中途失败:原地改写的从备份还原,挪了名字的删掉新文件——旧主题与 catalog 仍可用,重跑不重复、不改 id、不丢来源会话。
+
+archive 里的旧主题默认不迁;恢复或用户显式要求时再说。
 
 ### 稳定 id
 

@@ -2423,6 +2423,131 @@ void ProjectMemory::SetRetrievalHints(std::vector<std::string> hints) {
     retrieval_hints_ = std::move(hints);
 }
 
+ProjectMemory::MigrationPlan ProjectMemory::PlanMigration() const {
+    std::vector<std::string> warnings;
+    const auto entries = ScanTopics(memory_dir_, &warnings);
+    MigrationPlan plan;
+    for (const auto& stored : entries) {
+        MigrationItem item;
+        item.file = stored.public_entry.file;
+        item.id = stored.public_entry.id;
+        if (stored.public_entry.status == "conflict") {
+            item.action = "warn";
+            item.reason = "与另一份撞同一 id,已停为 conflict,须手工处置";
+            ++plan.warnings;
+        } else if (stored.public_entry.schema >= 3) {
+            item.action = "skip";
+            item.reason = "已是 schema 3";
+            ++plan.to_skip;
+        } else {
+            item.action = "migrate";
+            item.reason = "schema " + std::to_string(stored.public_entry.schema) + " -> 3";
+            ++plan.to_migrate;
+        }
+        plan.items.push_back(std::move(item));
+    }
+    // 读不动的坏文件也计进警告(ScanTopics 只往 warnings 里记了路径与原因)。
+    for (const std::string& warning : warnings) {
+        MigrationItem item;
+        item.action = "warn";
+        item.reason = warning;
+        ++plan.warnings;
+        plan.items.push_back(std::move(item));
+    }
+    return plan;
+}
+
+std::expected<ProjectMemory::MigrationResult, std::string> ProjectMemory::RunMigration() const {
+    MigrationPlan plan = PlanMigration();
+    if (plan.to_migrate == 0) {
+        return MigrationResult{0, std::string()};  // 没活干:重跑不重复
+    }
+
+    // 与 worker 同一把项目锁:改名与写新内容须在同一把锁里完成。
+    DirectoryLock project_lock(memory_dir_ / ".state" / "memory.lock");
+    if (!project_lock.acquired()) {
+        return std::unexpected("项目记忆正由另一个 worker 更新,稍后再试");
+    }
+
+    std::string stamp = NowIsoUtc();
+    std::replace(stamp.begin(), stamp.end(), ':', '-');  // Windows 目录名不吃冒号
+    const fs::path backup = memory_dir_ / ".state" / "migration-backup" / stamp;
+
+    std::vector<StoredEntry> entries = ScanTopics(memory_dir_);
+    struct Attempt {
+        fs::path old_path;
+        fs::path new_path;
+        std::string original_file;
+    };
+    std::vector<Attempt> attempts;
+    std::size_t migrated = 0;
+    const auto rollback = [&attempts, &backup]() {
+        // 回退:原地改写的从备份还原(原件已被原子替换盖掉),挪了名的只删
+        // 新文件——旧文件从头到尾没动过。
+        std::error_code ec;
+        for (const Attempt& attempt : attempts) {
+            if (attempt.old_path == attempt.new_path) {
+                fs::copy_file(backup / Utf8Path(attempt.original_file), attempt.old_path,
+                              fs::copy_options::overwrite_existing, ec);
+            } else {
+                fs::remove(attempt.new_path, ec);
+            }
+        }
+    };
+    for (auto& stored : entries) {
+        if (stored.public_entry.schema >= 3 || stored.public_entry.status == "conflict") continue;
+        const fs::path old_path = memory_dir_ / Utf8Path(stored.public_entry.file);
+        const std::string original_file = stored.public_entry.file;
+        const std::string body =
+            frontmatter::StripTitleHeading(StripTopicMetadata(ReadFile(old_path)));
+        stored.public_entry.schema = 3;
+        stored.public_entry.name =
+            NameFromId(stored.public_entry.id, MemoryKindName(stored.public_entry.kind));
+        if (stored.public_entry.created_at.empty()) {
+            stored.public_entry.created_at = stored.public_entry.updated_at;
+        }
+        stored.public_entry.file =
+            CanonicalTopicFile(stored.public_entry.kind, stored.public_entry.name);
+        const fs::path new_path = memory_dir_ / Utf8Path(stored.public_entry.file);
+
+        // 原件先备进 .state/migration-backup/<时间>/,按原相对路径镜像。
+        std::error_code ec;
+        const fs::path keep = backup / Utf8Path(original_file);
+        fs::create_directories(keep.parent_path(), ec);
+        if (ec) return std::unexpected("创建迁移备份目录失败: " + ec.message());
+        fs::copy_file(old_path, keep, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            rollback();
+            return std::unexpected("迁移备份失败: " + PathUtf8(old_path) + ": " + ec.message());
+        }
+
+        auto result = AtomicWrite(new_path, BuildTopicText(stored, body));
+        if (!result.has_value()) {
+            rollback();
+            return std::unexpected("迁移写入失败(已回退): " + result.error());
+        }
+        attempts.push_back(Attempt{old_path, new_path, original_file});
+        ++migrated;
+    }
+
+    // 全部写妥才动旧文件与派生物;失败时旧文件仍在,catalog 仍可用。
+    for (const Attempt& attempt : attempts) {
+        if (attempt.old_path == attempt.new_path) continue;
+        std::error_code ec;
+        fs::remove(attempt.old_path, ec);
+        if (ec) {
+            return std::unexpected("迁移清理旧文件失败: " + PathUtf8(attempt.old_path) + ": " +
+                                   ec.message());
+        }
+    }
+    auto rebuilt = RebuildMemoryIndex(memory_dir_);
+    if (!rebuilt.has_value()) {
+        rollback();
+        return std::unexpected(rebuilt.error());
+    }
+    return MigrationResult{migrated, PathUtf8(backup)};
+}
+
 std::expected<void, std::string> RebuildMemoryIndex(const fs::path& memory_dir) {
     std::vector<std::string> warnings;
     const auto entries = ScanTopics(memory_dir, &warnings);

@@ -1768,6 +1768,35 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
                   << "\n";
         return;
     }
+    if (action == "migrate") {
+        // 先列将改/跳过/警告几份,经确认才动盘;原件备进
+        // .state/migration-backup/<时间>/,全部写妥、重建成功才报完成。
+        const auto plan = project_memory->PlanMigration();
+        if (plan.to_migrate == 0) {
+            std::cout << trf("cmd.memory.migrate.none", plan.to_skip, plan.warnings) << "\n";
+            return;
+        }
+        std::cout << trf("cmd.memory.migrate.plan", plan.to_migrate, plan.to_skip, plan.warnings) << "\n";
+        for (const auto& item : plan.items) {
+            if (item.action == "migrate") {
+                std::cout << "  - " << item.id << " (" << item.file << "; " << item.reason << ")\n";
+            } else if (item.action == "warn") {
+                std::cout << "  [warn] " << item.reason << "\n";
+            }
+        }
+        const auto answer = lubancode::cli::ReadLine(theme.confirm + tr("cmd.memory.migrate.confirm") + theme.reset,
+                                                     theme, /*esc_rejects=*/true);
+        if (!answer.has_value() || (*answer != "y" && *answer != "Y")) {
+            std::cout << tr("cmd.memory.migrate.cancelled") << "\n";
+            return;
+        }
+        const auto result = project_memory->RunMigration();
+        std::cout << (result.has_value()
+                          ? trf("cmd.memory.migrate.done", result->migrated, result->backup_dir)
+                          : trf("cmd.memory.queue_failed", result.error()))
+                  << "\n";
+        return;
+    }
     PrintMemoryUsage();
 }
 

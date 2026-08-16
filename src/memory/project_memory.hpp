@@ -297,6 +297,31 @@ public:
     // 旧值,查询自然退回纯词法。
     void SetRetrievalHints(std::vector<std::string> hints);
 
+    // ---- 显式迁移(规格"迁移":旧格式主题批迁 schema 3) ----
+    // 先出计划:将改几份(schema 1/2)、跳过几份(已是 3 或 archive)、警告
+    // 几份(读不动的);不动盘。
+    struct MigrationItem {
+        std::string file;
+        std::string id;
+        std::string action;  // migrate | skip | warn
+        std::string reason;
+    };
+    struct MigrationPlan {
+        std::vector<MigrationItem> items;
+        std::size_t to_migrate = 0;
+        std::size_t to_skip = 0;
+        std::size_t warnings = 0;
+    };
+    MigrationPlan PlanMigration() const;
+    // 确认后批迁:.state/migration-backup/<时间>/ 留原件,全部写妥、catalog
+    // 与 index 重建成功才报完成;中途失败删掉本轮新文件,旧主题与 catalog
+    // 仍可用。重跑不重复(已是 schema 3 的跳过)、不改 id、不丢来源会话。
+    struct MigrationResult {
+        std::size_t migrated = 0;
+        std::string backup_dir;
+    };
+    std::expected<MigrationResult, std::string> RunMigration() const;
+
     std::expected<std::string, std::string> EnqueueSave(const SaveRequest& request);
     std::expected<std::string, std::string> EnqueueForget(const std::string& id);
     std::expected<std::string, std::string> EnqueueRebuild();
