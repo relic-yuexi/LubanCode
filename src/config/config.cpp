@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <optional>
 #include <sstream>
@@ -103,13 +104,51 @@ std::expected<void, std::string> ValidateProviderConfig(const ProviderConfig& pr
     if (provider.base_url.rfind("http://", 0) != 0 && provider.base_url.rfind("https://", 0) != 0) {
         return std::unexpected("base_url 得以 http:// 或 https:// 开头");
     }
-    if (provider.key_env.empty()) {
-        return std::unexpected("key_env 不能为空");
+    // 鉴权按模式校验(向导重排单):none 允许 key_env 为空;env 要求变量名
+    // 非空;inline 要求 key 非空。错误按模式说人话,不笼统喊"key_env 为空"。
+    switch (provider.auth) {
+        case ProviderAuthMode::None:
+            break;
+        case ProviderAuthMode::Env:
+            if (provider.key_env.empty()) {
+                return std::unexpected("auth=env 时 key_env(环境变量名)不能为空");
+            }
+            break;
+        case ProviderAuthMode::Inline:
+            if (provider.api_key.empty()) {
+                return std::unexpected("auth=inline 时 api_key 不能为空");
+            }
+            break;
     }
     if (provider.context_window_tokens == 0) {
         return std::unexpected("context_window 得是正整数");
     }
     return {};
+}
+
+std::expected<ProviderAuthMode, std::string> ParseProviderAuthMode(const std::string& raw) {
+    if (raw == "none") {
+        return ProviderAuthMode::None;
+    }
+    if (raw == "env") {
+        return ProviderAuthMode::Env;
+    }
+    if (raw == "inline") {
+        return ProviderAuthMode::Inline;
+    }
+    return std::unexpected("auth 字段只认得 none/env/inline,写的是: " + raw);
+}
+
+std::string ProviderAuthModeName(ProviderAuthMode mode) {
+    switch (mode) {
+        case ProviderAuthMode::None:
+            return "none";
+        case ProviderAuthMode::Env:
+            return "env";
+        case ProviderAuthMode::Inline:
+            return "inline";
+    }
+    return "env";
 }
 
 std::expected<void, std::string> ValidateProviderName(const std::string& name,
@@ -129,11 +168,47 @@ std::expected<void, std::string> ValidateProviderName(const std::string& name,
     return {};
 }
 
-std::optional<std::string> ProviderApiKey(const ProviderConfig& provider) {
-    if (!provider.api_key.empty()) {
-        return provider.api_key;
+ProviderAuthResolution ResolveProviderAuth(const ProviderConfig& provider) {
+    ProviderAuthResolution out;
+    switch (provider.auth) {
+        case ProviderAuthMode::None:
+            out.status = ProviderAuthResolution::Status::NotRequired;
+            out.env_name = provider.key_env;
+            return out;
+        case ProviderAuthMode::Inline:
+            if (!provider.api_key.empty()) {
+                out.status = ProviderAuthResolution::Status::Ready;
+                out.key = provider.api_key;
+            } else {
+                out.status = ProviderAuthResolution::Status::Missing;
+            }
+            return out;
+        case ProviderAuthMode::Env:
+            out.env_name = provider.key_env;
+            out.status = ProviderAuthResolution::Status::Missing;
+            // 兼容旧优先级:api_key 非空(明文贴过 key)仍然优先于环境变量——
+            // 一行式 /provider add --key、目录预设贴 key 这些路子构造出来的
+            // 条目可能没显式写 auth=inline,取值不能因此翻车。
+            if (!provider.api_key.empty()) {
+                out.status = ProviderAuthResolution::Status::Ready;
+                out.key = provider.api_key;
+                return out;
+            }
+            if (!provider.key_env.empty()) {
+                if (const std::optional<std::string> value = GetEnv(provider.key_env.c_str());
+                    value.has_value() && !value->empty()) {
+                    out.status = ProviderAuthResolution::Status::Ready;
+                    out.key = *value;
+                }
+            }
+            return out;
     }
-    return GetEnv(provider.key_env.c_str());
+    return out;
+}
+
+std::optional<std::string> ProviderApiKey(const ProviderConfig& provider) {
+    const ProviderAuthResolution resolved = ResolveProviderAuth(provider);
+    return resolved.status == ProviderAuthResolution::Status::Ready ? resolved.key : std::nullopt;
 }
 
 const ProviderConfig* FindProvider(const std::vector<ProviderConfig>& providers, const std::string& name) {
@@ -174,7 +249,10 @@ bool ApplyConfiguredActiveProvider(ConfigResult& result) {
         result.sources.base_url = source;
     }
     if (can_override(result.sources.auth_token)) {
+        // 鉴权三态:auth=none 时 auth_token 就是空,但那是合法状态——把模式
+        // 一并镜像过去,RequireApiKey 靠它分"无需鉴权"与"缺 key"。
         result.config.auth_token = ProviderApiKey(*provider).value_or(std::string());
+        result.config.auth_mode = provider->auth;
         result.sources.auth_token = source;
     }
     if (can_override(result.sources.model)) {
@@ -251,6 +329,20 @@ bool SetProviderExtraHeader(std::vector<ProviderConfig>& providers, const std::s
             } else {
                 provider.extra_headers[header_name] = value;
             }
+            return true;
+        }
+    }
+    return false;
+}
+
+bool SetProviderAuthMode(std::vector<ProviderConfig>& providers, const std::string& name,
+                         ProviderAuthMode mode) {
+    for (ProviderConfig& provider : providers) {
+        if (provider.name == name) {
+            provider.auth = mode;
+            // 只换模式,不动 key_env/api_key 既有值:换成 none 后空 key_env
+            // 从此合法;换回 env/inline 时若缺变量名/key,由调用方接着开
+            // 输入页补齐(ValidateProviderConfig 兜底拦半截配置)。
             return true;
         }
     }
@@ -851,8 +943,23 @@ std::expected<std::vector<ProviderConfig>, std::string> ParseProvidersConfig(
         }
         provider.wire = *parsed_wire;
 
+        if (item.contains("auth")) {
+            if (!item["auth"].is_string()) {
+                return std::unexpected(prefix + " 里的 auth 字段必须是字符串");
+            }
+            const auto parsed_auth = ParseProviderAuthMode(item["auth"].get<std::string>());
+            if (!parsed_auth.has_value()) {
+                return std::unexpected(prefix + " 里的 " + parsed_auth.error());
+            }
+            provider.auth = *parsed_auth;
+        }
         if (item.contains("key_env")) {
-            if (!item["key_env"].is_string() || item["key_env"].get<std::string>().empty()) {
+            if (!item["key_env"].is_string()) {
+                return std::unexpected(prefix + " 里的 key_env 字段必须是字符串");
+            }
+            // 空串只在 auth=none 下合法(none 模式压根不用变量名);其余模式
+            // 照旧报非空错误。
+            if (item["key_env"].get<std::string>().empty() && provider.auth != ProviderAuthMode::None) {
                 return std::unexpected(prefix + " 里的 key_env 字段必须是非空字符串");
             }
             provider.key_env = item["key_env"].get<std::string>();
@@ -862,6 +969,12 @@ std::expected<std::vector<ProviderConfig>, std::string> ParseProvidersConfig(
                 return std::unexpected(prefix + " 里的 api_key 字段必须是字符串");
             }
             provider.api_key = item["api_key"].get<std::string>();
+        }
+        // 旧配置没写 auth 时按旧语义迁移(向导重排单):api_key 非空算
+        // inline,否则算 env。绝不因为环境变量一时取不到值迁成 none——
+        // 缺 key 与无鉴权是两码事,后者必须由用户明确选择。
+        if (!item.contains("auth")) {
+            provider.auth = provider.api_key.empty() ? ProviderAuthMode::Env : ProviderAuthMode::Inline;
         }
         if (item.contains("model")) {
             if (!item["model"].is_string()) {
@@ -1979,6 +2092,9 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
 }
 
 std::expected<void, std::string> RequireApiKey(const ConfigResult& result) {
+    if (result.config.auth_mode == ProviderAuthMode::None) {
+        return {};  // 当前激活端明确声明无需鉴权,空 key 合法
+    }
     if (!result.config.auth_token.empty()) {
         return {};
     }
@@ -2002,7 +2118,8 @@ std::expected<void, std::string> RequireConfigured(const ConfigResult& result) {
     if (result.config.base_url.empty()) {
         missing.push_back("base_url");
     }
-    if (result.config.auth_token.empty()) {
+    // auth=none 时空 key 合法,不算缺配置(见 RequireApiKey 同款例外)。
+    if (result.config.auth_token.empty() && result.config.auth_mode != ProviderAuthMode::None) {
         missing.push_back("api_key");
     }
     if (result.config.model.empty()) {
@@ -2128,9 +2245,16 @@ nlohmann::json ProvidersToJson(const std::vector<ProviderConfig>& providers) {
         nlohmann::json item = {{"name", provider.name},
                                {"base_url", provider.base_url},
                                {"wire", ProviderWireName(provider.wire)},
-                               {"key_env", provider.key_env},
+                               // 鉴权模式永远落盘(向导重排单):写法稳定为
+                               // none/env/inline,读回来零歧义。
+                               {"auth", ProviderAuthModeName(provider.auth)},
                                {"model", provider.model},
                                {"context_window", provider.context_window_tokens}};
+        // key_env:auth=none 允许为空,空就不落这个键,别让旧读端看见空串;
+        // 其余模式非空,照常落。
+        if (!provider.key_env.empty()) {
+            item["key_env"] = provider.key_env;
+        }
         // api_key/model_reasoning_effort 都可选：没设置就不落这个键，别让
         // 一份没贴过明文 key 的旧配置写回后平白多出一个空字符串字段。
         if (!provider.api_key.empty()) {
@@ -2443,6 +2567,73 @@ std::expected<std::string, std::string> SetProviderExtraHeaderInGlobalConfig(con
         return std::unexpected(written.error());
     }
     return path;
+}
+
+namespace {
+
+// /provider set auth 家族共用的底子:读全局配置 -> 找到 name 那条 -> mutate
+// 改字段 -> 校验(半截配置不落盘) -> 原样写回。找不到名字、校验不过都
+// 报错、不碰文件。
+std::expected<std::string, std::string> MutateProviderInGlobalConfig(
+    const std::string& name, const std::function<void(ProviderConfig&)>& mutate) {
+    const auto home = HomeDir();
+    if (!home.has_value()) {
+        return std::unexpected("找不到用户主目录,没法更新 provider 配置");
+    }
+    const std::string path = NewConfigPathFor(std::filesystem::path(*home)).string();
+    auto root = ReadConfigObjectForUpdate(path);
+    if (!root.has_value()) {
+        return std::unexpected(root.error());
+    }
+    auto providers = ProvidersInConfigObject(*root, path);
+    if (!providers.has_value()) {
+        return std::unexpected(providers.error());
+    }
+    const ProviderConfig* target = FindProvider(*providers, name);
+    if (target == nullptr) {
+        return std::unexpected("provider 不存在: " + name);
+    }
+    ProviderConfig& mutable_target = (*providers)[static_cast<std::size_t>(target - providers->data())];
+    mutate(mutable_target);
+    const auto valid = ValidateProviderConfig(mutable_target);
+    if (!valid.has_value()) {
+        return std::unexpected(valid.error());
+    }
+    const auto written = UpdateProvidersInConfigFile(path, *providers);
+    if (!written.has_value()) {
+        return std::unexpected(written.error());
+    }
+    return path;
+}
+
+}  // namespace
+
+std::expected<std::string, std::string> SetProviderAuthModeInGlobalConfig(const std::string& name,
+                                                                          ProviderAuthMode mode) {
+    return MutateProviderInGlobalConfig(name, [mode](ProviderConfig& provider) {
+        provider.auth = mode;
+        // 换成 none 顺带把空 key_env 收干净:变量名这会儿没用了,落盘不
+        // 写这个键(ProvidersToJson 只在非空时落)。
+        if (mode == ProviderAuthMode::None) {
+            provider.key_env.clear();
+        }
+    });
+}
+
+std::expected<std::string, std::string> SetProviderAuthEnvInGlobalConfig(const std::string& name,
+                                                                         const std::string& key_env) {
+    return MutateProviderInGlobalConfig(name, [&key_env](ProviderConfig& provider) {
+        provider.auth = ProviderAuthMode::Env;
+        provider.key_env = key_env;
+    });
+}
+
+std::expected<std::string, std::string> SetProviderAuthInlineInGlobalConfig(const std::string& name,
+                                                                            const std::string& api_key) {
+    return MutateProviderInGlobalConfig(name, [&api_key](ProviderConfig& provider) {
+        provider.auth = ProviderAuthMode::Inline;
+        provider.api_key = api_key;
+    });
 }
 
 std::expected<ConfigResult, std::string> LoadFromEnv() {

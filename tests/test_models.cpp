@@ -106,3 +106,50 @@ TEST_CASE("ParseResponsesModelsResponse: 没有 data 字段报错") {
     const auto result = api::ParseResponsesModelsResponse(R"({"object": "list"})");
     REQUIRE_FALSE(result.has_value());
 }
+
+// ---------------------------------------------------------------------------
+// 向导重排单:模型探测 URL 的拼法与鉴权头三态。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ModelsUrl: anthropic 补 /v1/models,已带 /v1 不重复;OpenAI 系补 /models") {
+    // anthropic:裸地址补 /v1/models。
+    CHECK(api::ModelsUrl(config::Wire::Anthropic, "https://api.anthropic.com") ==
+          "https://api.anthropic.com/v1/models");
+    // anthropic:地址已带 /v1 结尾,不再拼出 /v1/v1/models。
+    CHECK(api::ModelsUrl(config::Wire::Anthropic, "https://cc.example.test/v1") ==
+          "https://cc.example.test/v1/models");
+    // responses / chat_completions:用户负责带 /v1,客户端只补 /models。
+    CHECK(api::ModelsUrl(config::Wire::Responses, "http://127.0.0.1:8000/v1") ==
+          "http://127.0.0.1:8000/v1/models");
+    CHECK(api::ModelsUrl(config::Wire::ChatCompletions, "http://127.0.0.1:8000/v1") ==
+          "http://127.0.0.1:8000/v1/models");
+}
+
+TEST_CASE("ModelsRequestHeaders: 有 key 带 Bearer,无 key 彻底省头,extra 覆盖/删头照旧") {
+    const auto with_key = api::ModelsRequestHeaders("sk-abc", {});
+    CHECK(with_key.at("Authorization") == "Bearer sk-abc");
+
+    // 无鉴权(auth=none)或 env 缺值:连 Authorization 这个头都不发,
+    // 绝不发一枚空 Bearer 冒充。
+    const auto without_key = api::ModelsRequestHeaders("", {});
+    CHECK_FALSE(without_key.contains("Authorization"));
+
+    // extra_headers:非空覆盖、空串删头(包括删 Authorization)。
+    const auto overridden =
+        api::ModelsRequestHeaders("sk-abc", {{"Authorization", "Bearer other"}, {"X-Custom", "v"}});
+    CHECK(overridden.at("Authorization") == "Bearer other");
+    CHECK(overridden.at("X-Custom") == "v");
+    const auto erased = api::ModelsRequestHeaders("sk-abc", {{"Authorization", ""}});
+    CHECK_FALSE(erased.contains("Authorization"));
+}
+
+TEST_CASE("RequestBaseHeaders: 三套正式 client 的基础头同款规矩") {
+    const auto with_key = api::RequestBaseHeaders("sk-abc");
+    CHECK(with_key.at("Content-Type") == "application/json");
+    CHECK(with_key.at("Authorization") == "Bearer sk-abc");
+
+    const auto without_key = api::RequestBaseHeaders("");
+    CHECK(without_key.at("Content-Type") == "application/json");
+    CHECK_FALSE(without_key.contains("Authorization"));
+    CHECK(without_key.size() == 1);
+}

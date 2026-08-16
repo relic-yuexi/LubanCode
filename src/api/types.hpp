@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <variant>
 #include <vector>
@@ -247,5 +248,17 @@ struct Error {
     std::string message;
     int http_status = 0;  // kind == HttpStatus 时才有意义
 };
+
+// 鉴权三态(向导重排单):按 token 组装请求基础头。token 非空给 Content-Type
+// + Authorization;token 为空(无鉴权,或 env 缺值)只给 Content-Type,彻底
+// 不发 Authorization——绝不发一枚空 Bearer 冒充无鉴权。三套正式 client
+// (anthropic/responses/chat)与 ListModels 同吃这一份,header 行为单测钉在这。
+inline std::map<std::string, std::string> RequestBaseHeaders(const std::string& auth_token) {
+    std::map<std::string, std::string> headers{{"Content-Type", "application/json"}};
+    if (!auth_token.empty()) {
+        headers["Authorization"] = "Bearer " + auth_token;
+    }
+    return headers;
+}
 
 }  // namespace lubancode::api

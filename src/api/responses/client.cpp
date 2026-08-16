@@ -164,10 +164,10 @@ std::expected<void, Error> ResponsesBackend::send_stream(
 
     const std::string url = base_url_ + "/responses";
 
-    // extra_headers 覆盖/追加到内置两个头上,同名覆盖(含 Authorization)。
+    // extra_headers 覆盖/追加到基础头上,同名覆盖(含 Authorization)。鉴权
+    // 三态:auth_token 空(无鉴权)时基础头里压根没有 Authorization。
     const std::map<std::string, std::string> merged_headers =
-        ApplyExtraHeaders({{"Content-Type", "application/json"}, {"Authorization", "Bearer " + auth_token_}},
-                          extra_headers_);
+        ApplyExtraHeaders(RequestBaseHeaders(auth_token_), extra_headers_);
     cpr::Header cpr_headers;
     for (const auto& [name, value] : merged_headers) {
         cpr_headers[name] = value;

@@ -62,20 +62,50 @@ std::expected<std::vector<ModelInfo>, std::string> ParseResponsesModelsResponse(
     return ExtractModelsFromDataArray(parsed["data"]);
 }
 
+std::string ModelsUrl(config::Wire wire, const std::string& base_url) {
+    const bool is_anthropic = (wire == config::Wire::Anthropic);
+    if (is_anthropic) {
+        // base_url 已带 /v1 结尾时不重复再补(否则 /v1/v1/models)。
+        if (base_url.size() >= 3 && base_url.compare(base_url.size() - 3, 3, "/v1") == 0) {
+            return base_url + "/models";
+        }
+        return base_url + "/v1/models";
+    }
+    return base_url + "/models";
+}
+
+std::map<std::string, std::string> ModelsRequestHeaders(
+    const std::string& api_key, const std::map<std::string, std::string>& extra_headers) {
+    std::map<std::string, std::string> headers;
+    if (!api_key.empty()) {
+        headers["Authorization"] = "Bearer " + api_key;
+    }
+    for (const auto& [name, value] : extra_headers) {
+        if (value.empty()) {
+            headers.erase(name);
+        } else {
+            headers[name] = value;
+        }
+    }
+    return headers;
+}
+
 std::expected<std::vector<ModelInfo>, Error> ListModels(config::Wire wire, const std::string& base_url,
                                                           const std::string& api_key, int connect_timeout_ms,
                                                           int request_timeout_secs,
                                                           const std::map<std::string, std::string>& extra_headers) {
     const bool is_anthropic = (wire == config::Wire::Anthropic);
-    const std::string url = base_url + (is_anthropic ? "/v1/models" : "/models");
+    const std::string url = ModelsUrl(wire, base_url);
 
     // M11:非流式请求,直接给连接超时 + 整体超时(cpr::Timeout 是总时长上限,
     // 跟 send_stream 那条"不设总超时,只设空闲读超时"的路数不一样——这里
     // 响应体小,回复"很长"的顾虑不存在)。
-    cpr::Header headers{{"Authorization", "Bearer " + api_key}};
-    for (const auto& [name, value] : extra_headers) {
-        if (value.empty()) headers.erase(name);
-        else headers[name] = value;
+    // 鉴权头出自 ModelsRequestHeaders:鉴权三态下 key 为空时彻底不带
+    // Authorization,不发空 Bearer。
+    const std::map<std::string, std::string> header_map = ModelsRequestHeaders(api_key, extra_headers);
+    cpr::Header headers;
+    for (const auto& [name, value] : header_map) {
+        headers[name] = value;
     }
     cpr::Response response =
         cpr::Get(cpr::Url{url}, headers,

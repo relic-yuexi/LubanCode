@@ -121,19 +121,37 @@ struct MemoryFileConfig {
     std::optional<std::size_t> max_results;
 };
 
+// 鉴权三态(向导重排单):一家 provider 到底怎么带钥匙,显式分成三份——
+//   None    无需鉴权。key_env 允许为空,请求彻底不带 Authorization/x-api-key
+//           头(不是发一枚空 Bearer 冒充)。必须由用户明确选(向导选项或
+//           /provider set <名字> auth none),绝不凭 localhost/HTTP 地址猜。
+//   Env     从环境变量读。key_env 必须非空;变量没设就是"该有却缺"。
+//   Inline  明文 key 落盘到 api_key。api_key 必须非空,展示一律打码。
+// 旧配置没写 auth 字段时按旧语义迁移:api_key 非空算 inline,否则算 env——
+// 环境变量一时取不到值绝不迁成 none(缺 key ≠ 无鉴权)。落盘键名 "auth",
+// 取值 "none"/"env"/"inline",写法稳定。
+enum class ProviderAuthMode { None, Env, Inline };
+
+// auth 字段的字符串解析/序列化。认不得的值报错并列出合法写法。
+std::expected<ProviderAuthMode, std::string> ParseProviderAuthMode(const std::string& raw);
+std::string ProviderAuthModeName(ProviderAuthMode mode);
+
 // 一家模型服务端的会话配置。默认走 key_env(只记密钥所在环境变量的名字，
-// 不落明文)；/provider add 向导允许直接贴 key 落盘到 api_key 字段，取值
-// 优先级 api_key（非空）> 环境变量 key_env（见 ProviderApiKey）。api_key
-// 落了盘就不再是"只记名字"那套安全设计——展示/日志一律走 MaskApiKey 打码，
-// 由调用方自己当心。model 可以留空：切过去后仍可用 /model 选。
-// model_reasoning_effort 可选：切到这个 provider 时按 /think 同一套机制
-// 应用（写进 current_think），留空 = 不动当前档位。
+// 不落明文)；/provider add 向导允许直接贴 key 落盘到 api_key 字段。走哪条
+// 路由 auth 显式决定(三态见上);旧配置没有 auth 时按 api_key 有无迁移。
+// api_key 落了盘就不再是"只记名字"那套安全设计——展示/日志一律走
+// MaskApiKey 打码，由调用方自己当心。model 可以留空：切过去后仍可用
+// /model 选。model_reasoning_effort 可选：切到这个 provider 时按 /think
+// 同一套机制应用（写进 current_think），留空 = 不动当前档位。
 struct ProviderConfig {
     std::string name;
     std::string base_url;
     Wire wire = Wire::Anthropic;
+    // 鉴权模式:见 ProviderAuthMode 注释。默认 Env 对齐旧配置的主流写法;
+    // 解析旧配置(没写 auth)时按 api_key 有无现场迁移,序列化时永远落盘。
+    ProviderAuthMode auth = ProviderAuthMode::Env;
     std::string key_env = "ANTHROPIC_AUTH_TOKEN";
-    std::string api_key;               // 可选，非空时优先于 key_env
+    std::string api_key;               // auth=inline 时必填，非空时优先于 key_env
     std::string model;
     std::string model_reasoning_effort;  // 可选，切到该端时应用的推理档位
     std::size_t context_window_tokens = kDefaultContextWindowTokens;
@@ -337,6 +355,12 @@ struct Config {
     Wire wire = Wire::Anthropic;
     std::string base_url;
     std::string auth_token;  // 即 api_key
+    // 当前激活端的鉴权模式(向导重排单):从 ProviderConfig::auth 镜像过来,
+    // 跟 provider_think_levels 那批镜像字段同一待遇——不走独立四级合并。
+    // None 时 auth_token 允许为空:RequireApiKey/RequireConfigured 放行,
+    // 三套 client 与 ListModels 彻底省鉴权头。默认 Env 对齐"顶层单 provider
+    // 旧写法"(没有条目可镜像,缺 key 照旧报错)。
+    ProviderAuthMode auth_mode = ProviderAuthMode::Env;
     std::string model;
     // native_web_search:当前生效端是否声明原生联网搜索。anthropic/
     // responses 各自翻译成协议工具；chat_completions 没有统一形状，靠
@@ -643,8 +667,18 @@ std::expected<void, std::string> ValidateProviderConfig(const ProviderConfig& pr
 std::expected<void, std::string> ValidateProviderName(const std::string& name,
                                                         const std::vector<ProviderConfig>& existing);
 
-// 运行时取密钥：provider.api_key 非空就直接用（向导贴的明文）；否则退到
-// provider.key_env 对应的环境变量，没有、或环境变量为空，返回 nullopt。
+// 运行时鉴权解析(向导重排单):把"无需鉴权 / 已取到 key / 该有 key 却缺"
+// 三态分清,模型探测、切换预检和正式请求都吃这一份结果,不许各猜一遍。
+struct ProviderAuthResolution {
+    enum class Status { NotRequired, Ready, Missing };
+    Status status = Status::Missing;
+    std::optional<std::string> key;  // Ready 时非空;其余两态为 nullopt
+    std::string env_name;            // env 模式的变量名(报错/展示用,可为空)
+};
+ProviderAuthResolution ResolveProviderAuth(const ProviderConfig& provider);
+
+// 旧便捷口(保留既有调用方):Ready 时给 key,其余(无需鉴权、缺失)给
+// nullopt。要分清"无需鉴权"与"缺 key"的调用方请改用 ResolveProviderAuth。
 std::optional<std::string> ProviderApiKey(const ProviderConfig& provider);
 
 const ProviderConfig* FindProvider(const std::vector<ProviderConfig>& providers, const std::string& name);
@@ -680,10 +714,18 @@ bool SetProviderStreamUsage(std::vector<ProviderConfig>& providers, const std::s
 bool SetProviderExtraHeader(std::vector<ProviderConfig>& providers, const std::string& name,
                              const std::string& header_name, const std::string& value);
 
+// 纯函数,不摸文件:把 name 对应那条 provider 的鉴权模式整个换成 mode
+// (连同字段语义一起换:none 允许 key_env 空、inline 要求 api_key 非空)。
+// 找不到 name 返回 false、原样不动。/provider set <名字> auth ... 用。
+bool SetProviderAuthMode(std::vector<ProviderConfig>& providers, const std::string& name,
+                         ProviderAuthMode mode);
+
 // 纯函数:检查合并结果里的 api_key 是不是空的。空的话报错,错误信息里把
 // 四级来源都提一遍(按 result.config.wire 挑出对应的通用环境变量名),
 // 让人知道去哪儿配。真正要跟模型对话之前(AskOnce/InteractiveLoop 之前)
 // 才需要调这个;--config 只是看一眼配置,不需要。
+// 例外(向导重排单):result.config.auth_mode 为 none 时放行——当前激活端
+// 明确声明无需鉴权,空 key 是合法状态,不算缺配置。
 std::expected<void, std::string> RequireApiKey(const ConfigResult& result);
 
 // 纯函数:非交互场景(单发模式 `lubancode "问题"`、管道模式)在真正发请求前的
@@ -791,6 +833,18 @@ std::expected<std::string, std::string> SetProviderStreamUsageInGlobalConfig(con
 std::expected<std::string, std::string> SetProviderExtraHeaderInGlobalConfig(const std::string& name,
                                                                                const std::string& header_name,
                                                                                const std::string& value);
+
+// /provider set auth 用:把全局配置里对应 provider 的鉴权模式换成 mode 再
+// 落盘(实际改字段那一步走 SetProviderAuthMode)。找不到名字报错、不碰文件。
+std::expected<std::string, std::string> SetProviderAuthModeInGlobalConfig(const std::string& name,
+                                                                          ProviderAuthMode mode);
+
+// /provider set auth env/inline 补齐版:切模式的同时把缺的变量名/key 一并
+// 写上,不留半截配置(env 要求变量名非空、inline 要求 key 非空,校验兜底)。
+std::expected<std::string, std::string> SetProviderAuthEnvInGlobalConfig(const std::string& name,
+                                                                         const std::string& key_env);
+std::expected<std::string, std::string> SetProviderAuthInlineInGlobalConfig(const std::string& name,
+                                                                            const std::string& api_key);
 
 // 把一段 JSON 文本解析成 FileConfig。file_path_for_error 只用来拼错误信息,
 // 不影响解析本身。JSON 坏了、或者顶层不是一个 object,都返回带路径的错误。
