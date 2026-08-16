@@ -12,6 +12,7 @@
 #include <string>
 
 #include "agent/compact.hpp"
+#include "agent/context_budget.hpp"
 #include "agent/loop.hpp"
 #include "agent/session_store.hpp"
 #include "api/backend.hpp"
@@ -47,10 +48,29 @@ std::size_t EstimateHistoryTokens(const std::vector<lubancode::api::Message>& hi
 // 前缀记账序号(agent/prefix.hpp),有实测 usage 时多打一行前缀缓存账。
 // main_profile(可空):当前 loop 实际吃到的运行策略,非空时多打一行输出
 // 上限与来源(规格根因一:"本轮上限"看得见,unset 也说破)。
+// /context 的分层占用与预算报告(第四期,规格"/context"节):由会话现场
+// 收集——视图各层的枚数与字节、ContextBudgetPlan 总账、最近一次 compact
+// 的台账。字段全可选/零值安全,没有就不打那一行。
+struct ContextLayersReport {
+    std::size_t inline_full_results = 0;      // 视图里全文的结果枚数(L0)
+    std::size_t artifact_previews = 0;        // L1 预览枚数
+    std::size_t microcompact_summaries = 0;   // L2 摘要枚数(原文数 = artifact 预览+摘要)
+    std::size_t reclaimable_bytes = 0;        // 结构压缩最近一次请求省下的字节
+    std::optional<lubancode::agent::ContextBudgetPlan> budget;
+    // 最近一次 compact:"cheap:m · 62k→18k · 3.2s · 校验通过";空 = 没压过。
+    std::string last_compact_line;
+};
+
+// usage_ledger(可空,模型分工第一期):分角色 usage 台账,非空时列一节
+// "模型调用分角色账"——普通 turn 归 normal,压缩/抽取/标题归 cheap,
+// 回退另有留痕(规格"路由看得见")。
 void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracker& context_tracker,
                            std::size_t sys_tokens, std::size_t tools_tokens, std::size_t history_tokens,
                            const lubancode::cli::Theme& theme, int cache_epoch = 1,
-                           const lubancode::agent::AgentRuntimeProfile* main_profile = nullptr);
+                           const lubancode::agent::AgentRuntimeProfile* main_profile = nullptr,
+                           const lubancode::agent::ModelUsageLedger* usage_ledger = nullptr,
+                           const lubancode::agent::ContextArtifactStore* artifact_store = nullptr,
+                           const ContextLayersReport* layers = nullptr);
 
 
 // /compact 命令的结果:event 是 compact_v2 压缩事件(archive + kept_from +
@@ -67,17 +87,21 @@ struct CompactCommandResult {
 };
 
 // /compact 命令:分层压缩(装得下单次摘要;装不下按 episode 分块 map、
-// 归并 reduce),顶替掉中间那段老对话,热区按 token 预算保留。backend 传
-// 裸的、没包 ModelOverrideBackend 的那份——CompactHierarchical() 会自己把
-// compact_model 写进 request.model。args 是 /compact 的重点文本(或
-// --dry-run);compact_epoch 进出两头用:进 = 本场已压过几次,出 = 本次
-// 压完的序号(写进 v2 事件);options 携带窗口预算与必须守恒的待办。
+// 归并 reduce),顶替掉中间那段老对话,热区按 token 预算保留。backend 由
+// 调用方按 ModelRouterService 的 Compact 路由取(可能是会话裸 backend,也
+// 可能是跨 provider 的另一只 client)——CompactHierarchical() 自己把
+// route.model 写进 request.model、route.effort 带上。args 是 /compact 的
+// 重点文本(或 --dry-run);compact_epoch 进出两头用:进 = 本场已压过几次,
+// 出 = 本次压完的序号(写进 v2 事件);options 携带窗口预算与必须守恒的
+// 待办;accounting 非空时收回本次压缩的 usage/时长(分角色记账)。
 // 压缩模型窗口装不下(分块也救不了)时明确拒绝、不静默截史;manifest
 // 校验不过同样旧 history 不动。
 CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::agent::AgentLoop& loop,
-                                          lubancode::api::Backend& raw_backend, const std::string& compact_model,
+                                          lubancode::api::Backend& raw_backend,
+                                          const lubancode::agent::ModelRoute& compact_route,
                                           const lubancode::cli::Theme& theme, bool spinner_enabled,
-                                          const lubancode::agent::CompactOptions& options, int& compact_epoch);
+                                          const lubancode::agent::CompactOptions& options, int& compact_epoch,
+                                          lubancode::agent::BackgroundCallAccounting* accounting = nullptr);
 
 void PrintSessionsCommand(const std::string& sessions_dir, const std::string& args);
 
@@ -111,9 +135,13 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
 // /export [路径]:当前会话导出 Markdown,默认写 sessions/<id>.md。
 // 有存档文件就从文件读**全量流水**导出(压缩不丢内容,发生点插一行标注);
 // 没有存档文件(没落过盘)退回导内存里这份历史。/title 设过的标题当大标题。
+// artifact_store(可空,第二期):非空且有落盘时追加"可追回 artifact"附录
+// ——id/工具/字节/sha 指纹/真本路径,导出内容里被折叠的结果按 id 对得上
+// 真本(规格"/export 必须说明哪些内容来自 artifact")。
 void HandleExportCommand(const std::string& args, const lubancode::agent::AgentLoop& loop,
                           const lubancode::agent::SessionStore& store, const std::string& sessions_dir,
-                          const lubancode::agent::SessionMeta& session_meta, const std::string& session_title);
+                          const lubancode::agent::SessionMeta& session_meta, const std::string& session_title,
+                          const lubancode::agent::ContextArtifactStore* artifact_store = nullptr);
 
 
 // ---------------------------------------------------------------------------

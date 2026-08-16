@@ -260,6 +260,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                        const std::vector<std::string>& deny_commands = {},
                        lubancode::tools::AgentTool* completion_agent = nullptr,
                        lubancode::agent::WorkflowRecorder* recorder = nullptr,
-                       bool silent = false);
+                       bool silent = false,
+                       UsageStats* usage_out = nullptr);
 
 }  // namespace lubancode::app

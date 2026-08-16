@@ -16,6 +16,7 @@
 
 #include "agent/context.hpp"
 #include "agent/context_events.hpp"
+#include "agent/microcompact.hpp"
 #include "agent/prefix.hpp"
 #include "agent/runtime_profile.hpp"
 #include "api/backend.hpp"
@@ -24,6 +25,8 @@
 #include "tools/tool.hpp"
 
 namespace lubancode::agent {
+
+class ContextArtifactStore;
 
 // hooks 框架第三步:工具生命周期相位(UI 状态机 requested -> checking_hook
 // -> waiting_permission -> running -> done,被拦时停在 blocked,不冒充"运行
@@ -371,6 +374,35 @@ public:
         structural_options_ = options;
     }
 
+    // 可追回 artifact(渐进式上下文仓第二期):设了仓之后,结构压缩判成
+    // Artifact 的超长结果先原子落盘(blob -> chunks -> index),视图渲染带
+    // 稳定 artifact_id,模型凭 id 走 context_search/context_read 追回全文;
+    // 落盘失败保内存全文,行为退回没仓的样子。传空指针清除。仓的存活期
+    // 由调用方(会话层)保证。
+    void SetArtifactStore(ContextArtifactStore* store) { artifact_store_ = store; }
+
+    // 最近一次请求的结构压缩账(/context 与诊断用)。
+    const StructuralCompressionStats& structural_stats() const { return structural_stats_; }
+
+    // L2 microcompact(第三期):把一趟局部摘要写进决策台账(冷区 artifact
+    // 的视图从 L1 预览换成 cheap 摘要)。这是有意改已发前缀的收拾动作:
+    // 给前缀记账点名(epoch 断因 microcompact)、清掉钉住的 sticky 视图按
+    // 新决策重算,不装无事发生。原文与仓里的 blob 不动。返回换掉的枚数。
+    int ApplyMicrocompactSummaries(const std::map<std::string, MicrocompactSummary>& summaries) {
+        const int applied = agent::ApplyMicrocompactSummaries(result_view_memo_, summaries);
+        if (applied > 0) {
+            if (pending_epoch_break_reason_.empty()) {
+                pending_epoch_break_reason_ = "microcompact";
+            }
+            sticky_view_.reset();
+            sticky_base_history_size_ = 0;
+        }
+        return applied;
+    }
+
+    // 决策台账只读口(L2 挑候选用)。
+    const ResultViewMemo& result_view_memo() const { return result_view_memo_; }
+
 private:
     api::Backend& backend_;
     tools::ToolRegistry& registry_;
@@ -383,6 +415,7 @@ private:
     bool structural_compression_enabled_ = true;  // 无损结构压缩(工作视图)
     StructuralCompressionOptions structural_options_{};
     StructuralCompressionStats structural_stats_{};  // 最近一次请求的结构压缩账(观测用)
+    ContextArtifactStore* artifact_store_ = nullptr;  // 可追回 artifact 的仓(空 = 没仓,退回旧行为)
     std::vector<api::Message> history_;
     // 前缀记账(agent/prefix.hpp):上一份实际发出的请求指纹(没有 = 本
     // turn 第一份请求,无从比较,天然算追加)、cache epoch 序号、loop 自己

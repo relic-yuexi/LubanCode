@@ -793,7 +793,8 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                        const std::vector<std::string>& allow_commands,
                        const std::vector<std::string>& deny_commands,
                        lubancode::tools::AgentTool* completion_agent,
-                       lubancode::agent::WorkflowRecorder* recorder, bool silent) {
+                       lubancode::agent::WorkflowRecorder* recorder, bool silent,
+                       UsageStats* usage_out) {
     auto prepared_input = lubancode::cli::PrepareImageInput(user_input);
     if (!prepared_input.has_value()) {
         std::cerr << theme.error << tr("error.prefix") << ImageInputErrorText(prepared_input.error())
@@ -1152,6 +1153,12 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     }
     // 回合正常结束(不是上面那条 !result.has_value() 的报错早退)——统计行
     // 之后再打一条分界线,跟开头那条首尾呼应,把这一问一答框完整。
+    // usage 台账出账(模型分工第一期):整轮的逐步 usage 交给调用方记进
+    // 分角色账本(normal 档),compact/抽取那几笔后台采样另走各处的
+    // BackgroundCallAccounting,不混进这里。
+    if (usage_out != nullptr) {
+        *usage_out = usage_stats;
+    }
     PrintDivider(theme, is_console && !silent);
     return out;
 }

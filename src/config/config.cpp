@@ -1157,6 +1157,107 @@ std::expected<std::vector<ProviderConfig>, std::string> ParseProvidersConfig(
     return providers;
 }
 
+namespace {
+
+// model_roles 段里一格的解析。prefix 用于报错("配置文件 xxx 里的
+// model_roles.cheap")。model 空/缺失/null = 该格未配置,返回默认构造。
+std::expected<ModelRoleRouteConfig, std::string> ParseModelRoleEntry(const nlohmann::json& entry,
+                                                                     const std::string& prefix) {
+    ModelRoleRouteConfig role;
+    if (!entry.is_object()) {
+        return std::unexpected(prefix + " 必须是一个 JSON object");
+    }
+    const auto read_string = [&entry, &prefix](const char* key, std::string& out) -> std::optional<std::string> {
+        if (!entry.contains(key) || entry[key].is_null()) {
+            return std::nullopt;
+        }
+        if (!entry[key].is_string()) {
+            return prefix + " 里的 " + key + " 字段必须是字符串";
+        }
+        std::string value = entry[key].get<std::string>();
+        if (!value.empty()) {
+            out = std::move(value);
+        }
+        return std::nullopt;
+    };
+    if (const auto error = read_string("provider", role.provider)) {
+        return std::unexpected(*error);
+    }
+    if (const auto error = read_string("model", role.model)) {
+        return std::unexpected(*error);
+    }
+    if (const auto error = read_string("effort", role.effort)) {
+        return std::unexpected(*error);
+    }
+    // 窗口与输出上限:字符串("512k"/"8k"/裸数字)或正整数都认,折算成
+    // token 数;换算不动的值报错指明哪格哪个字段。
+    const auto read_tokens = [&entry, &prefix](const char* key,
+                                               std::optional<std::size_t>& out) -> std::optional<std::string> {
+        if (!entry.contains(key) || entry[key].is_null()) {
+            return std::nullopt;
+        }
+        const auto& field = entry[key];
+        if (field.is_string()) {
+            const auto parsed = ParseContextWindowTokens(field.get<std::string>());
+            if (!parsed.has_value()) {
+                return prefix + " 里的 " + key + " 换算不动: " + parsed.error();
+            }
+            out = *parsed;
+            return std::nullopt;
+        }
+        if (field.is_number_integer() || field.is_number_unsigned()) {
+            const long long value = field.get<long long>();
+            if (value <= 0) {
+                return prefix + " 里的 " + key + " 必须是正数";
+            }
+            out = static_cast<std::size_t>(value);
+            return std::nullopt;
+        }
+        return prefix + " 里的 " + key + " 必须是字符串或正整数";
+    };
+    if (const auto error = read_tokens("context_window", role.context_window)) {
+        return std::unexpected(*error);
+    }
+    if (const auto error = read_tokens("max_output_tokens", role.max_output_tokens)) {
+        return std::unexpected(*error);
+    }
+    return role;
+}
+
+}  // namespace
+
+std::expected<ModelRolesConfig, std::string> ParseModelRolesConfig(const nlohmann::json& model_roles_json,
+                                                                   const std::string& file_path_for_error) {
+    if (!model_roles_json.is_object()) {
+        return std::unexpected("配置文件 " + file_path_for_error + " 里的 model_roles 字段必须是一个 JSON object");
+    }
+    ModelRolesConfig roles;
+    for (auto it = model_roles_json.begin(); it != model_roles_json.end(); ++it) {
+        const std::string& key = it.key();
+        const std::string prefix = "配置文件 " + file_path_for_error + " 里的 model_roles." + key;
+        ModelRoleRouteConfig parsed;
+        if (it.value().is_null()) {
+            parsed = ModelRoleRouteConfig{};
+        } else {
+            const auto entry = ParseModelRoleEntry(it.value(), prefix);
+            if (!entry.has_value()) {
+                return std::unexpected(entry.error());
+            }
+            parsed = *entry;
+        }
+        if (key == "normal") {
+            roles.normal = std::move(parsed);
+        } else if (key == "cheap") {
+            roles.cheap = std::move(parsed);
+        } else if (key == "lao") {
+            roles.lao = std::move(parsed);
+        } else {
+            return std::unexpected(prefix + " 不是认得的角色(只认 normal/cheap/lao)");
+        }
+    }
+    return roles;
+}
+
 std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& json_text,
                                                              const std::string& file_path_for_error) {
     nlohmann::json parsed;
@@ -1237,6 +1338,44 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
             return std::unexpected("配置文件 " + file_path_for_error + " 里的 compact_model 字段必须是字符串");
         }
         config.compact_model = parsed["compact_model"].get<std::string>();
+    }
+    // 三角色 shorthand:读入即归一——空串当未配置(留 nullopt),不让
+    // "写了空字符串"与"压根没写"在合并层分成两种语义(规格:空=缺失/
+    // 空串/null 三者归一)。
+    const auto parse_role_shorthand =
+        [&parsed, &file_path_for_error](const char* key, std::optional<std::string>& out)
+        -> std::optional<std::string> {
+        if (!parsed.contains(key)) {
+            return std::nullopt;
+        }
+        const auto& field = parsed[key];
+        if (field.is_null()) {
+            return std::nullopt;  // 显式 null = 未配置,归一
+        }
+        if (!field.is_string()) {
+            return "配置文件 " + file_path_for_error + " 里的 " + key + " 字段必须是字符串";
+        }
+        std::string value = field.get<std::string>();
+        if (!value.empty()) {
+            out = std::move(value);
+        }
+        return std::nullopt;
+    };
+    if (const auto error = parse_role_shorthand("normal_model", config.normal_model)) {
+        return std::unexpected(*error);
+    }
+    if (const auto error = parse_role_shorthand("cheap_model", config.cheap_model)) {
+        return std::unexpected(*error);
+    }
+    if (const auto error = parse_role_shorthand("lao_model", config.lao_model)) {
+        return std::unexpected(*error);
+    }
+    if (parsed.contains("model_roles")) {
+        const auto parsed_roles = ParseModelRolesConfig(parsed["model_roles"], file_path_for_error);
+        if (!parsed_roles.has_value()) {
+            return std::unexpected(parsed_roles.error());
+        }
+        config.model_roles = *parsed_roles;
     }
     if (parsed.contains("think")) {
         if (!parsed["think"].is_string()) {
@@ -1988,6 +2127,66 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     } else {
         result.config.compact_model.clear();
         result.sources.compact_model = Source::Default;
+    }
+
+    // ---- 三角色 shorthand(模型分工第一期):待遇同 compact_model,
+    // env > 项目级 > 全局 > 默认(未配置)。读入时已归一(空串/null 当没写)。
+    const auto merge_role_shorthand = [&pick, &lubancode_env, &result](
+                                          const std::optional<std::string>& env_value,
+                                          std::optional<std::string> FileConfig::*field, std::string& out,
+                                          Source& out_source) {
+        if (env_value.has_value()) {
+            out = *env_value;
+            out_source = Source::LubancodeEnv;
+        } else if (const auto p = pick(field); p.value != nullptr) {
+            out = *p.value;
+            out_source = p.source;
+        } else {
+            out.clear();
+            out_source = Source::Default;
+        }
+    };
+    merge_role_shorthand(lubancode_env.normal_model, &FileConfig::normal_model, result.config.normal_model,
+                         result.sources.normal_model);
+    merge_role_shorthand(lubancode_env.cheap_model, &FileConfig::cheap_model, result.config.cheap_model,
+                         result.sources.cheap_model);
+    merge_role_shorthand(lubancode_env.lao_model, &FileConfig::lao_model, result.config.lao_model,
+                         result.sources.lao_model);
+
+    // ---- model_roles 高级段:整段回退(项目级写了压过全局,同 hooks/
+    // mcpServers 待遇),没有环境变量这一级。 ----
+    if (project_file.has_value() && project_file->model_roles.has_value()) {
+        result.config.model_roles = *project_file->model_roles;
+        result.sources.model_roles = Source::ProjectConfigFile;
+    } else if (global_file.has_value() && global_file->model_roles.has_value()) {
+        result.config.model_roles = *global_file->model_roles;
+        result.sources.model_roles = Source::GlobalConfigFile;
+    } else {
+        result.config.model_roles = ModelRolesConfig{};
+        result.sources.model_roles = Source::Default;
+    }
+
+    // ---- 三角色冲突与兼容提示(规格"调用点收拢"):同写报冲突、按清楚
+    // 的优先级取值,一行一笔记给启动横幅与 /model roles。 ----
+    {
+        const bool compact_set = !result.config.compact_model.empty();
+        const bool cheap_set = !result.config.cheap_model.empty();
+        const bool cheap_advanced = !result.config.model_roles.cheap.model.empty();
+        if (compact_set && (cheap_set || cheap_advanced)) {
+            result.model_role_notices.push_back(
+                "compact_model 与 cheap_model 同时配置:cheap_model(新)优先,compact_model 不再生效");
+        }
+        const auto shorthand_vs_advanced_notice = [&](const char* role_name, const std::string& shorthand,
+                                                      const std::string& advanced) {
+            if (!shorthand.empty() && !advanced.empty() && shorthand != advanced) {
+                result.model_role_notices.push_back(std::string(role_name) + ":model_roles 段(高级,含 "
+                                                   "provider/effort)与 " + role_name + "_model 同时配置且值不同,"
+                                                   "model_roles 段优先");
+            }
+        };
+        shorthand_vs_advanced_notice("normal", result.config.normal_model, result.config.model_roles.normal.model);
+        shorthand_vs_advanced_notice("cheap", result.config.cheap_model, result.config.model_roles.cheap.model);
+        shorthand_vs_advanced_notice("lao", result.config.lao_model, result.config.model_roles.lao.model);
     }
 
     // ---- think:env > 项目级 > 全局 > 默认值(空串 = 不发这个参数),没有
@@ -2973,6 +3172,12 @@ std::expected<ConfigResult, std::string> LoadFromEnv() {
     lubancode_env.system_prompt_file = GetEnv("LUBANCODE_SYSTEM_PROMPT_FILE");
     lubancode_env.context_window = GetEnv("LUBANCODE_CONTEXT_WINDOW");
     lubancode_env.compact_model = GetEnv("LUBANCODE_COMPACT_MODEL");
+    // 三角色 shorthand 的环境变量(设了空串 = 没设,归一交给 GetEnv 的
+    // optional 语义:空串给 nullopt)。高级 model_roles 段没有环境变量这
+    // 一级——跨 provider 路由值得落盘成一份可查的配置,不藏在 shell 里。
+    lubancode_env.normal_model = GetEnv("LUBANCODE_NORMAL_MODEL");
+    lubancode_env.cheap_model = GetEnv("LUBANCODE_CHEAP_MODEL");
+    lubancode_env.lao_model = GetEnv("LUBANCODE_LAO_MODEL");
     lubancode_env.think = GetEnv("LUBANCODE_THINK");
     lubancode_env.soul = GetEnv("LUBANCODE_SOUL");
     if (const auto raw = GetEnv("LUBANCODE_MAX_CONTEXT"); raw.has_value()) {

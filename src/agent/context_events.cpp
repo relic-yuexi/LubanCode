@@ -4,6 +4,8 @@
 #include <utility>
 #include <variant>
 
+#include "agent/artifact_store.hpp"
+
 namespace lubancode::agent {
 
 namespace {
@@ -155,6 +157,18 @@ std::string RenderResultView(const NormalizedEvent& event, const ResultViewDecis
             const std::size_t tail_begin = event.result_content.size() > options.preview_bytes
                                                ? event.result_content.size() - options.preview_bytes
                                                : 0;
+            // 第二期:落盘成功的 artifact 视图带稳定 id 与两把只读钥匙的
+            // 指引——模型凭 id 能搜全文、能分块读,不再只是"存档里有"的
+            // 一句空话(规格"给模型两把只读钥匙")。
+            if (!decision.artifact_id.empty()) {
+                return "[artifact " + decision.artifact_id + " · " + event.id + " · " + event.tool_name +
+                       " · " + std::to_string(event.result_content.size()) + " 字节 · sha256=" +
+                       decision.artifact_sha + " · 头部预览:\n" + event.result_content.substr(0, head) +
+                       "\n…尾部预览:\n" + event.result_content.substr(tail_begin) +
+                       "\n全文已落盘。预览不足时:先用 context_search(artifact_id=\"" + decision.artifact_id +
+                       "\", query=...) 搜命中行,再用 context_read 按 chunk_id 或行窗读取;"
+                       "省略号不是全文]";
+            }
             return "[artifact " + event.id + " · sha=" + event.content_hash + " · " +
                    std::to_string(event.result_content.size()) + " 字节 · 头部:\n" +
                    event.result_content.substr(0, head) + "\n…尾部:\n" + event.result_content.substr(tail_begin) +
@@ -174,6 +188,15 @@ std::string RenderResultView(const NormalizedEvent& event, const ResultViewDecis
             }
             return "[此读取替代事件 " + decision.ref_event_id + " 的旧版本]\n" + event.result_content;
         }
+        case ResultViewKind::MicrocompactSummary: {
+            // L2(第三期):局部语义摘要换掉 L1 预览。原文不丢——仓里的
+            // blob 原样,摘要里写明追回路径;摘要≠全文,不许把摘要当证据
+            // 的终点(规格 L2 节)。
+            return "[microcompact 摘要 · 原文 artifact " + decision.artifact_id + " · 事件 " + event.id +
+                   " · 由 cheap:" + decision.summary_model + " 生成 · 摘要不等于全文,"
+                   "需要证据用 context_read(artifact_id=\"" + decision.artifact_id + "\") 追回原文]\n" +
+                   decision.summary_text;
+        }
     }
     return event.result_content;
 }
@@ -188,6 +211,13 @@ std::vector<api::Message> CompressWorkingView(const std::vector<api::Message>& h
 std::vector<api::Message> CompressWorkingView(const std::vector<api::Message>& history,
                                               const StructuralCompressionOptions& options,
                                               StructuralCompressionStats& stats, ResultViewMemo& memo) {
+    return CompressWorkingView(history, options, stats, memo, /*store=*/nullptr);
+}
+
+std::vector<api::Message> CompressWorkingView(const std::vector<api::Message>& history,
+                                              const StructuralCompressionOptions& options,
+                                              StructuralCompressionStats& stats, ResultViewMemo& memo,
+                                              ContextArtifactStore* store) {
     stats = StructuralCompressionStats{};
     const std::vector<NormalizedEvent> ledger = BuildEventLedger(history);
     stats.events_total = ledger.size();
@@ -263,6 +293,21 @@ std::vector<api::Message> CompressWorkingView(const std::vector<api::Message>& h
                 state.kept_event_id = event.id;
                 state.kept_hash = event.content_hash;
                 state.seen_count = 1;
+            }
+        }
+
+        // 第二期:判成 Artifact 的先落盘(原子次序与幂等见 artifact_store)。
+        // 落盘失败(仓没开/磁盘错/任一步没成)决策退回 Full——内存全文照旧
+        // 发送,磁盘失败绝不把全文换成空引用(规格"原文不丢")。
+        if (decision.kind == ResultViewKind::Artifact && store != nullptr) {
+            if (const auto offloaded =
+                    store->Offload(event.tool_use_id, event.tool_name, event.result_content,
+                                   event.result_message_index);
+                offloaded.has_value()) {
+                decision.artifact_id = offloaded->artifact_id;
+                decision.artifact_sha = offloaded->sha256.substr(0, 12);
+            } else {
+                decision.kind = ResultViewKind::Full;
             }
         }
 

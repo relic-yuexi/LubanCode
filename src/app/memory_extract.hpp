@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "agent/model_router.hpp"  // BackgroundCallAccounting(usage 出账)
 #include "api/backend.hpp"
 #include "api/types.hpp"
 
@@ -52,10 +53,14 @@ std::string BuildExtractionSystemPrompt(const std::string& prompts_dir, const st
 std::expected<MemoryExtraction, std::string> ParseExtractionJson(const std::string& text);
 
 // 发一次抽取请求(同步,带看门狗取消)。失败只返回错误,调用方降级。
+// reasoning_effort 非空时随请求带上(cheap 路由的档位);accounting 非空时
+// 把这次调用的 usage/时长记进去(分角色记账,不混普通 turn 的账)。
 std::expected<MemoryExtraction, std::string> RunMemoryExtraction(api::Backend& backend,
                                                                  const std::string& model,
                                                                  const std::string& system_prompt,
                                                                  const std::string& transcript,
-                                                                 int timeout_secs);
+                                                                 int timeout_secs,
+                                                                 const std::string& reasoning_effort = std::string(),
+                                                                 agent::BackgroundCallAccounting* accounting = nullptr);
 
 }  // namespace lubancode::app

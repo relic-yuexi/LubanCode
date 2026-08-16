@@ -184,15 +184,19 @@ std::expected<MemoryExtraction, std::string> RunMemoryExtraction(api::Backend& b
                                                                  const std::string& model,
                                                                  const std::string& system_prompt,
                                                                  const std::string& transcript,
-                                                                 int timeout_secs) {
+                                                                 int timeout_secs,
+                                                                 const std::string& reasoning_effort,
+                                                                 agent::BackgroundCallAccounting* accounting) {
     api::Request request;
     request.model = model;
     request.system = system_prompt;
+    request.reasoning_effort = reasoning_effort;
     api::Message message;
     message.role = api::Role::User;
     message.content.push_back(api::TextBlock{transcript});
     request.messages.push_back(std::move(message));
     request.max_tokens = 1500;
+    const auto started = std::chrono::steady_clock::now();
 
     // 看门狗:到点还没收工就拉取消旗,客户端读流响应它;主路径结束先
     // 置 done 再 join,看门狗不误伤。
@@ -222,6 +226,21 @@ std::expected<MemoryExtraction, std::string> RunMemoryExtraction(api::Backend& b
         &cancel);
     done = true;
     watchdog.join();
+
+    // usage 出账(分角色记账):抽取这轮采样不混普通 turn 的账。
+    if (accounting != nullptr) {
+        const api::Usage& usage = assembler.usage();
+        accounting->usage.input_tokens += usage.input_tokens;
+        accounting->usage.cache_read_tokens += usage.cache_read_tokens;
+        accounting->usage.cache_creation_tokens += usage.cache_creation_tokens;
+        accounting->usage.output_tokens += usage.output_tokens;
+        accounting->usage.output_reasoning_tokens += usage.output_reasoning_tokens;
+        accounting->usage_reported = usage.input_tokens > 0 || usage.output_tokens > 0 ||
+                                     usage.cache_read_tokens > 0 || usage.cache_creation_tokens > 0;
+        accounting->duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::steady_clock::now() - started)
+                                      .count();
+    }
 
     if (!send_result.has_value()) return std::unexpected(send_result.error().message);
     if (stream_error) return std::unexpected(stream_error_message);

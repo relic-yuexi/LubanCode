@@ -1010,6 +1010,32 @@ const Entry kZhCN[] = {
     {"compact.done_stats", "[compact] 历史 ~{0} tokens;manifest 守住约束 {1} 条 / 待办 {2} 条"},
     {"compact.hard_trim_turns", "[警告] 上下文发生有损硬裁剪:中间 {0} 条消息被丢弃(字符安全网兜底,不是语义压缩)。模型已看不到那段原文;完整流水仍在会话存档,可 /export 查看、/compact 重建摘要。"},
     {"compact.hard_trim_results", "[警告] 上下文发生有损硬裁剪:超大工具结果被截尾(字符安全网兜底,不是语义压缩)。模型已看不到被截内容;完整流水仍在会话存档,可 /export 查看。"},
+
+    // ---- 模型路由(cheap/normal/lao 分工第一期):状态栏短闪与回退留痕 ----
+    {"router.compact_flash", "压缩 {0} → {1} · {2}"},
+    {"router.task_flash", "{0} · {1}"},
+    {"router.fallback_flash", "{0} 不可用,已回落 {1}"},
+    {"router.usage.header", "模型调用分角色账(本会话累计):"},
+    {"router.usage.fallback_header", "回退记录:"},
+
+    // ---- 可追回 artifact(渐进式上下文仓第二期) ----
+    {"artifact.store_open_failed", "[artifact] 上下文仓开不了({0}),超长结果退回内存全文,不产生假引用。"},
+    {"cmd.context.artifacts", "artifact 层:{0} 枚落盘 · 全文共 {1} 字节可追回(context_search/context_read 按 id 检索)"},
+    {"cmd.context.artifacts_none", "artifact 层:本会话尚无落盘的超长工具结果。"},
+
+    // ---- L2 microcompact(第三期):冷区局部语义压缩 ----
+    {"microcompact.done", "[microcompact] 冷区收拾:{0} 枚换成 cheap 摘要(原文在仓,context_read 可追);{1} 枚退回 L1 预览。"},
+    {"microcompact.all_failed", "[microcompact] 本趟全部失败,冷区保持 L1 预览,原文未动。"},
+
+    // ---- ContextBudgetPlan 与分层占用(第四期,/context 展示) ----
+    {"cmd.context.layers", "分层占用:inline 全文 {0} 枚 · artifact 预览(L1){1} 枚 · microcompact 摘要(L2){2} 枚"},
+    {"cmd.context.reclaimable", "结构压缩最近一次请求回收 ~{0} 字节(重复收敛 + 长结果外置)"},
+    {"cmd.context.budget", "预算总账:窗口 {0} · 开销 {2} · 可压缩历史 {1}(统一估算口径)"},
+    {"cmd.context.budget_detail", "  开销明细:system+模型指令 {0} · 工具声明 {1} · 热区 {2} · 输出预留 {3} · 压缩指令+协议 {4} · 估算误差边 {5}"},
+    {"cmd.context.compact_budget", "压缩预算:单次压缩请求输入上限 {0} · 摘要产出目标 {1}(两只数不混用)"},
+    {"cmd.context.next_line", "下一触发线:{0}(窗口 80%) · 当前 {1} · {2}"},
+    {"cmd.context.next_line_over", "已越线,下一轮发送前会自动压缩"},
+    {"cmd.context.last_compact", "最近一次 compact:{0}"},
     {"cmd.think.current", "当前推理强度: {0}"},
     {"cmd.think.catalog_header", "模型目录声明的档位({0}):"},
     {"cmd.think.provider_header", "provider 声明的档位(请求参数 {0}):"},
@@ -1097,6 +1123,8 @@ const Entry kZhCN[] = {
     {"cmd.model.bad_number", "编号不对,取消切换。"},
     {"cmd.model.not_number", "没听懂,取消切换。"},
     {"cmd.model.switched", "已切换到模型: {0}(本会话生效)"},
+    {"cmd.model.roles_header", "三档模型角色(角色跟任务走,不跟 main/subagent 身份走;未配置的角色回落 normal):"},
+    {"cmd.model.roles_unavailable", "模型路由未建(单发/测试路径),/model roles 只在交互会话可用。"},
     {"cmd.write_config_prompt", "写进配置文件 {0}? [y/N]: "},
     {"cmd.write_config.updated", "已更新 {0}"},
     {"cmd.write_config.failed", "更新失败: {0}"},

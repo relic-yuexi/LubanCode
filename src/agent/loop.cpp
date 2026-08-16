@@ -346,10 +346,11 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         // 预览、重复自述指回、新版本自述替代),决策台账 epoch 内钉死,绝不
         // 追改已经发过的表示。活历史与 session JSONL 一字不动,tool use/
         // result 配对天然不破。压完的视图更小,后面字符安全网也更少真开刀。
+        // 第二期:带仓时 Artifact 决策先落盘,视图带稳定 artifact_id。
         std::vector<api::Message> view_source;
         if (structural_compression_enabled_) {
-            view_source =
-                CompressWorkingView(history_, structural_options_, structural_stats_, result_view_memo_);
+            view_source = CompressWorkingView(history_, structural_options_, structural_stats_,
+                                              result_view_memo_, artifact_store_);
         } else {
             view_source = history_;
         }

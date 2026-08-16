@@ -25,6 +25,7 @@
 
 #include "api/backend.hpp"
 #include "api/types.hpp"
+#include "agent/model_router.hpp"  // BackgroundCallAccounting(usage 出账)
 
 namespace lubancode::agent {
 
@@ -114,7 +115,9 @@ std::vector<api::Message> BuildCompactedHistory(const std::vector<api::Message>&
 //   4. ValidateCompactManifest 通过(目标非空、待办守恒)。
 std::expected<CompactSummary, api::Error> Compact(api::Backend& backend, const std::string& model,
                                                   const std::vector<api::Message>& history,
-                                                  const CompactOptions& options);
+                                                  const CompactOptions& options,
+                                                  const std::string& reasoning_effort = std::string(),
+                                                  BackgroundCallAccounting* accounting = nullptr);
 
 // ---------------------------------------------------------------------------
 // 第三期:分阶段、分层摘要(map/reduce)
@@ -168,6 +171,8 @@ std::vector<std::pair<std::size_t, std::size_t>> SplitEpisodes(const std::vector
 std::expected<LayeredCompactResult, api::Error> CompactHierarchical(api::Backend& backend,
                                                                      const std::string& model,
                                                                      const std::vector<api::Message>& history,
-                                                                     const CompactOptions& options);
+                                                                     const CompactOptions& options,
+                                                                     const std::string& reasoning_effort = std::string(),
+                                                                     BackgroundCallAccounting* accounting = nullptr);
 
 }  // namespace lubancode::agent

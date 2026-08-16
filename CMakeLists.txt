@@ -305,6 +305,7 @@ add_library(lubancode_core STATIC
   src/tools/skill_tool.cpp
   src/tools/todo_tool.cpp
   src/tools/tool_search.cpp
+  src/tools/context_tools.cpp
   src/tools/plugin_loader.cpp
   src/tools/lua_tool.cpp
   src/tools/web_fetch.cpp
@@ -337,8 +338,12 @@ add_library(lubancode_core STATIC
   "${_lubancode_embedded_provider_catalog}"
   src/agent/context.cpp
   src/agent/context_events.cpp
+  src/agent/artifact_store.cpp
+  src/agent/model_router.cpp
   src/agent/prefix.cpp
   src/agent/compact.cpp
+  src/agent/context_budget.cpp
+  src/agent/microcompact.cpp
   src/agent/session_store.cpp
   src/agent/workflow_recorder.cpp
   src/agent/skill_drafter.cpp
@@ -386,6 +391,8 @@ endif()
 add_library(lubancode_app STATIC
   src/app/backend_stack.cpp
   src/app/memory_extract.cpp
+  src/app/model_router.cpp
+  src/app/session_title.cpp
   src/app/runtime_profile.cpp
   src/app/tool_runtime.cpp
   src/app/turn_runner.cpp

@@ -38,7 +38,10 @@
 #include <variant>
 #include <vector>
 #include <nlohmann/json.hpp>
+#include "agent/artifact_store.hpp"
 #include "agent/compact.hpp"
+#include "agent/context_budget.hpp"
+#include "agent/microcompact.hpp"
 #include "agent/loop.hpp"
 #include "agent/peer_session.hpp"
 #include "agent/prompts.hpp"
@@ -93,6 +96,8 @@
 #include "memory/memory_tool.hpp"
 #include "memory/project_memory.hpp"
 #include "app/memory_extract.hpp"
+#include "app/model_router.hpp"
+#include "app/session_title.hpp"
 #include "mcp/client.hpp"
 #include "mcp/mcp_tool.hpp"
 #include "tools/agent_tool.hpp"
@@ -100,6 +105,7 @@
 #include "tools/background_output.hpp"
 #include "tools/background_tasks.hpp"
 #include "tools/command_safety.hpp"
+#include "tools/context_tools.hpp"
 #include "tools/edit_file.hpp"
 #include "tools/hooks.hpp"
 #include "tools/lua_tool.hpp"
@@ -318,6 +324,9 @@ private:
     void RefreshSkills();
     void RefreshProjectInstructions();
     void PersistNewMessages();
+    // 建档与开仓(第二期):建档提前到发轮前;仓跟着会话 id 开张。
+    bool EnsureSessionBegun(const std::string& first_text);
+    void OpenArtifactStore();
     void RefillPeerPool();
     void CollectPeerMessages();
     // 外来消息轮:peer 来信是 user 语义(另一会话的用户正文);后台完成
@@ -332,6 +341,13 @@ private:
     // 回合收尾的记忆抽取:learn 档位不在 off 才跑;失败只打一行,不影响
     // 主会话(用户基调 1/3:分型总结 + 检索扩展词)。
     void ExtractTurnMemory(const std::string& user_text, std::size_t history_before);
+    // 会话起名(模型分工第一期,cheap 角色):新会话首轮收尾或 resume 进来
+    // 一场没标题的旧档时,拿开头几条消息起一枚短标题,成功落 title 事件;
+    // 失败安静降级(/sessions 继续用首句摘要)。一场只试一次,不追着重试。
+    void MaybeGenerateSessionTitle(lubancode::agent::TaskKind kind);
+    // L2 microcompact(第三期):回合收尾看一眼冷区——冷区 artifact 累计字节
+    // 过线(带迟滞)就请 cheap 渐次收拾几枚,失败退 L1 不删原文。
+    void MaybeMicrocompact();
     void SyncWorktreeDirectory();
     CommandFlow ProcessLine(const std::string& content);
     CommandFlow DispatchSlashCommand(const lubancode::cli::ParsedSlashCommand& parsed);
@@ -384,6 +400,15 @@ private:
     std::shared_ptr<std::string> current_model;
     std::shared_ptr<std::string> current_think;
     std::string active_provider;
+    // 统一模型路由(模型分工第一期):compact/记忆抽取/标题这类后台小活按
+    // TaskKind 从这里取"模型+effort+backend",不再各自拼 compact_model 这类
+    // 散装字符串。指针成员:构造函数体内 real_backend/current_model 落定后
+    // 再建(引用成员绑不了构造顺序),会话生命周期内唯一。
+    std::unique_ptr<lubancode::app::ModelRouterService> model_router;
+    // 渐进式上下文仓(第二期):超长工具结果落 blobs/chunks/index,模型凭
+    // artifact_id 用 context_search/context_read 追回全文。shared_ptr:两把
+    // 工具持同一块内存,会话建档那一刻才 Open,没开的仓一切操作安全退化。
+    std::shared_ptr<lubancode::agent::ContextArtifactStore> artifact_store;
     std::shared_ptr<std::string> current_model_instructions;
     std::string current_soul_name;
     std::shared_ptr<std::string> current_soul;
@@ -440,6 +465,12 @@ private:
     bool session_store_broken = false;  // 建档失败过,别每轮都再撞一次
     std::string session_title;          // /title 设的标题;resume 时取存档里最后一条
     bool session_title_pending = false;  // 建档前设了标题,建档成功后补写事件行
+    bool session_title_auto_attempted = false;  // cheap 起名只试一次,失败不追着重试
+    // L2 microcompact(第三期)的迟滞活账:压完一趟后冷区字节再涨五成才压下一趟。
+    lubancode::agent::MicrocompactHysteresis microcompact_hysteresis;
+    // 最近一次 compact 的台账(第四期 /context"最近一次 compact 所用角色、
+    // 模型、前后 token、耗时和校验结果"):一行人话,由压缩路径写。
+    std::string last_compact_line;
 
     // ---- 录制(0.25.x):会话里至多一场,/record 命令组驱动 ----
     std::optional<lubancode::agent::WorkflowRecorder> recorder;
@@ -544,6 +575,7 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
       real_backend(config),
       current_model(std::make_shared<std::string>(config.model)),
       current_think(std::make_shared<std::string>(config.think)),
+      artifact_store(std::make_shared<lubancode::agent::ContextArtifactStore>()),
       current_model_instructions(std::make_shared<std::string>()),
       current_soul_name(config.soul.empty() ? "default" : config.soul),
       current_soul(std::make_shared<std::string>(LoadSoulContentByName(current_soul_name, /*warn=*/true))),
@@ -577,6 +609,15 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
                 break;
             }
         }
+    }
+
+    // 统一模型路由(模型分工第一期):后台小活(压缩/抽取/标题)按
+    // TaskKind 取路由,usage 分角色记账。配置有歧义(compact_model 与
+    // cheap_model 同写之类)时把 MergeConfig 记的提示打出来——路由看得见。
+    model_router = std::make_unique<lubancode::app::ModelRouterService>(config_result_, real_backend,
+                                                                        current_model, active_provider);
+    for (const std::string& notice : config_result_.model_role_notices) {
+        std::cout << theme.stats << "[模型路由] " << notice << theme.reset << "\n";
     }
 
     // 图标只在真控制台打(管道/重定向不打装饰字符,理由同 ClearScreen 的
@@ -622,6 +663,13 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
     // (账只有一本,一边 active 另一边回 AlreadyActive)。
     tool_runtime_.emplace(config, theme, wrapped_backend, skills, skills_segment, CurrentDirUtf8(),
                           MakeRuntimeOptions());
+    // 可追回 artifact 的两把只读钥匙(第二期):main 与子代理同级都有——
+    // 子代理的超长结果同样落仓,它自己也要能追回证据(角色跟 TaskKind 走,
+    // 工具能力同理,不按身份裁)。
+    registry().Register(std::make_unique<lubancode::tools::ContextSearchTool>(artifact_store));
+    registry().Register(std::make_unique<lubancode::tools::ContextReadTool>(artifact_store));
+    sub_registry().Register(std::make_unique<lubancode::tools::ContextSearchTool>(artifact_store));
+    sub_registry().Register(std::make_unique<lubancode::tools::ContextReadTool>(artifact_store));
     main_deferral = tool_runtime_->main_deferral();
     sub_deferral = tool_runtime_->sub_deferral();
     tool_search_threshold = config.tool_search_threshold;
@@ -789,6 +837,11 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
                           wire_str, *current_model, theme, /*quiet_if_none=*/true, &worktree_session,
                           &session_compact_epoch)) {
             resume_moved_into_worktree = worktree_session.active();
+            // 仓按恢复的那场开张(旧档若落过盘,artifact 继续可追)。
+            OpenArtifactStore();
+            // resume 进来的旧档没标题:cheap 角色给续聊点个名(规格"会话标题
+            // 与 resume 列表摘要"归 cheap)。
+            MaybeGenerateSessionTitle(lubancode::agent::TaskKind::ResumeSummary);
         }
     }
 
@@ -1403,6 +1456,8 @@ void InteractiveSession::RebuildLoop(bool preserve_history) {
         }
     }
     loop->SetToolFilter(main_tool_filter());
+    // 可追回 artifact(第二期):重建的 loop 也要接上仓(空仓安全退化)。
+    loop->SetArtifactStore(artifact_store.get());
     // mid-turn 上下文安全点(0.27.x):窗口与压力通报随 loop 重建重灌;窗口
     // 的后续变化(/context、/model)由 RunUserTurn 发轮前再同步。
     loop->SetContextWindowTokens(context_tracker.window_tokens());
@@ -1437,6 +1492,53 @@ void InteractiveSession::RefreshProjectInstructions() {
     RebuildLoop(/*preserve_history=*/true);
 }
 
+// 建档(渐进式上下文仓第二期起,第一轮用户输入**之前**就要建):仓要拿
+// session id 开张,超长结果在第一轮请求里就得能落盘,不能等回合收尾。首条
+// 文本做 slug;建档失败置 session_store_broken 照旧拦落盘,会话本身照跑。
+// 建档成功顺手开仓(开不成只告警:超长结果退回内存全文,不产生假引用)。
+bool InteractiveSession::EnsureSessionBegun(const std::string& first_text) {
+    if (session_store.active() || sessions_dir.empty() || session_store_broken) {
+        return session_store.active();
+    }
+    session_meta = lubancode::agent::SessionMeta{};
+    session_meta.wire = wire_str;
+    session_meta.model = *current_model;
+    session_meta.cwd = CurrentDirUtf8();
+    session_meta.started_at = lubancode::agent::NowTimestamp();
+    const std::string session_id = lubancode::agent::MakeSessionId(session_start_ts, first_text);
+    if (!session_store.Begin(session_meta, session_id)) {
+        session_store_broken = true;
+        std::cout << theme.error << trf("session.create_failed", sessions_dir) << theme.reset << "\n";
+        return false;
+    }
+    // hooks 上下文补真 session id 与转录路径(建档这一刻才齐)。
+    if (lubancode::app::HookRuntime() != nullptr) {
+        lubancode::hooks::HookContext hook_context = lubancode::app::HookRuntime()->context();
+        hook_context.session_id = session_id;
+        hook_context.transcript_path = session_store.file_path();
+        lubancode::app::UpdateHookRuntimeContext(hook_context);
+    }
+    // 建档前 /title 设过标题:现在有文件了,把事件行补上。
+    if (session_title_pending && !session_title.empty()) {
+        session_store.AppendTitleEvent(session_title);
+    }
+    session_title_pending = false;
+    OpenArtifactStore();
+    return true;
+}
+
+// 开仓:<sessions_dir>/<session-id>/context(与 <session-id>.jsonl 并排,
+// /sessions 只扫 *.jsonl,互不干扰)。开不成只告警——仓是加层,不是依赖。
+void InteractiveSession::OpenArtifactStore() {
+    if (sessions_dir.empty() || !session_store.active()) {
+        return;
+    }
+    const std::string root = sessions_dir + "/" + session_store.session_id() + "/context";
+    if (!artifact_store->Open(root, session_store.session_id())) {
+        std::cout << theme.stats << trf("artifact.store_open_failed", root) << theme.reset << "\n";
+    }
+}
+
 // 把 history 里 persisted_count 之后的消息逐条追加落盘(append+flush,
 // 崩溃安全)。history 被 ReplaceHistory 换短(/compact)的场合由调用处
 // 先把 persisted_count 收到新长度,这里只管"只增不减"的常态。
@@ -1467,29 +1569,11 @@ void InteractiveSession::PersistNewMessages() {
             }
             break;
         }
-        session_meta = lubancode::agent::SessionMeta{};
-        session_meta.wire = wire_str;
-        session_meta.model = *current_model;
-        session_meta.cwd = CurrentDirUtf8();
-        session_meta.started_at = lubancode::agent::NowTimestamp();
-        const std::string session_id = lubancode::agent::MakeSessionId(session_start_ts, first_text);
-        if (!session_store.Begin(session_meta, session_id)) {
-            session_store_broken = true;
-            std::cout << theme.error << trf("session.create_failed", sessions_dir) << theme.reset << "\n";
+        // 建档提前到发轮之前(RunUserTurn)已办;这里是兜底(peer 轮等
+        // 不经 RunUserTurn 的路径)。
+        if (!EnsureSessionBegun(first_text)) {
             return;
         }
-        // hooks 上下文补真 session id 与转录路径(建档这一刻才齐)。
-        if (lubancode::app::HookRuntime() != nullptr) {
-            lubancode::hooks::HookContext hook_context = lubancode::app::HookRuntime()->context();
-            hook_context.session_id = session_id;
-            hook_context.transcript_path = session_store.file_path();
-            lubancode::app::UpdateHookRuntimeContext(hook_context);
-        }
-        // 建档前 /title 设过标题:现在有文件了,把事件行补上。
-        if (session_title_pending && !session_title.empty()) {
-            session_store.AppendTitleEvent(session_title);
-        }
-        session_title_pending = false;
     }
     for (std::size_t i = persisted_count; i < history.size(); ++i) {
         if (!session_store.AppendMessage(history[i])) {
@@ -2052,11 +2136,18 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
             case lubancode::cli::SlashCommand::Help:
                 PrintSlashHelp();
                 break;
-            case lubancode::cli::SlashCommand::Model:
+            case lubancode::cli::SlashCommand::Model: {
+                // /model roles 要打路由表:Table() 按值返回,存局部再取址。
+                const std::optional<lubancode::agent::ModelRouteTable> roles_table =
+                    model_router != nullptr
+                        ? std::optional<lubancode::agent::ModelRouteTable>(model_router->Table())
+                        : std::nullopt;
                 HandleModelCommand(parsed.args, config, current_model, config_file_path, model_catalog,
                                     current_think, context_tracker, current_model_instructions,
-                                    /*offer_config_write=*/active_provider.empty());
+                                    /*offer_config_write=*/active_provider.empty(),
+                                    roles_table.has_value() ? &*roles_table : nullptr);
                 break;
+            }
             case lubancode::cli::SlashCommand::Provider:
                 HandleProviderCommand(parsed.args, config, active_provider, real_backend, wire_str,
                                       current_model, current_think, context_tracker,
@@ -2130,8 +2221,56 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                     }
                     history_tokens = lubancode::agent::EstimateHistoryTokens(loop->History());
                 }
+                // 分层占用 + 预算总账(第四期,规格"/context"节):视图各层
+                // 枚数从决策台账数,预算从统一公式算,/context 打的就是
+                // compact 用的同一本账。
+                app::ContextLayersReport layers;
+                if (parsed.args.empty()) {
+                    for (const auto& [id, decision] : loop->result_view_memo().decisions) {
+                        (void)id;
+                        switch (decision.kind) {
+                            case lubancode::agent::ResultViewKind::Full:
+                            case lubancode::agent::ResultViewKind::NewVersion:
+                                layers.inline_full_results += 1;
+                                break;
+                            case lubancode::agent::ResultViewKind::Artifact:
+                                layers.artifact_previews += 1;
+                                break;
+                            case lubancode::agent::ResultViewKind::MicrocompactSummary:
+                                layers.microcompact_summaries += 1;
+                                break;
+                            case lubancode::agent::ResultViewKind::DuplicateRef:
+                                break;
+                        }
+                    }
+                    layers.reclaimable_bytes = loop->structural_stats().reclaimable_bytes();
+                    lubancode::agent::ContextBudgetInputs budget_inputs;
+                    budget_inputs.window_tokens = context_tracker.window_tokens() > 0
+                                                      ? std::optional<std::size_t>(context_tracker.window_tokens())
+                                                      : std::nullopt;
+                    budget_inputs.stable_system_tokens =
+                        lubancode::agent::EstimateUtf8Tokens(lubancode::agent::AssembleSystemPrompt(prompt_options));
+                    budget_inputs.model_instructions_tokens =
+                        lubancode::agent::EstimateUtf8Tokens(*current_model_instructions) +
+                        lubancode::agent::EstimateUtf8Tokens(*current_soul);
+                    budget_inputs.tool_schemas_tokens = tools_tokens;
+                    budget_inputs.current_user_turn_tokens =
+                        lubancode::agent::EstimateHistoryTokens(std::vector<lubancode::api::Message>(
+                            loop->History().begin() + static_cast<std::ptrdiff_t>(
+                                                       lubancode::agent::HotZoneStartIndex(loop->History())),
+                            loop->History().end()));
+                    budget_inputs.protected_hot_zone_tokens = lubancode::agent::kDefaultHotZoneTokens;
+                    budget_inputs.requested_output_reserve_tokens =
+                        static_cast<std::size_t>(loop->runtime_profile().max_output_tokens.value_or(
+                            lubancode::agent::kUnsetOutputReserveEstimateTokens));
+                    budget_inputs.compact_prompt_overhead_tokens = 512;  // 压缩指令的公开估算档
+                    layers.budget = lubancode::agent::BuildContextBudgetPlan(budget_inputs);
+                    layers.last_compact_line = last_compact_line;
+                }
                 HandleContextCommand(parsed.args, context_tracker, sys_tokens, tools_tokens, history_tokens, theme,
-                                     loop->cache_epoch(), &loop->runtime_profile());
+                                     loop->cache_epoch(), &loop->runtime_profile(),
+                                     model_router != nullptr ? &model_router->ledger() : nullptr,
+                                     artifact_store.get(), &layers);
                 break;
             }
             case lubancode::cli::SlashCommand::Compact: {
@@ -2152,10 +2291,41 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                         }
                     }
                 }
-                const std::string compact_model = config.compact_model.empty() ? *current_model : config.compact_model;
+                // 压缩路由(模型分工第一期):/compact 走 cheap 角色的有效值
+                // (cheap_model 未配置回落 normal;compact_model 旧字段只在
+                // 没配 cheap 时顶替压缩)。backend 可能是跨 provider 的另一只
+                // client,拿不到就明说,不拿会话模型顶包。
+                const auto compact_routed =
+                    model_router->Route(lubancode::agent::TaskKind::Compact);
+                if (compact_routed.backend == nullptr) {
+                    std::cout << theme.error << "压缩路由找不到 provider \"" << compact_routed.route.provider
+                              << "\",本次 /compact 未执行" << theme.reset << "\n";
+                    break;
+                }
+                lubancode::agent::BackgroundCallAccounting compact_accounting;
                 const auto compact_result =
-                    HandleCompactCommand(parsed.args, *loop, real_backend, compact_model, theme, spinner_enabled,
-                                         BuildCompactOptions(), session_compact_epoch);
+                    HandleCompactCommand(parsed.args, *loop, *compact_routed.backend, compact_routed.route, theme,
+                                          spinner_enabled, BuildCompactOptions(), session_compact_epoch,
+                                          &compact_accounting);
+                // 分角色记账 + 状态栏短闪:压缩用了谁、前后多少,一行交代。
+                model_router->ledger().Record(
+                    lubancode::agent::ModelRole::Cheap, compact_routed.route.model, compact_accounting.usage,
+                    compact_accounting.duration_ms, compact_accounting.usage_reported);
+                if (compact_result.event.has_value()) {
+                    std::cout << theme.stats
+                              << trf("router.compact_flash",
+                                     lubancode::cli::FormatTokenCount(compact_result.before_tokens),
+                                     lubancode::cli::FormatTokenCount(compact_result.after_tokens),
+                                     "cheap:" + compact_routed.route.model)
+                              << theme.reset << "\n";
+                    // 最近一次 compact 的台账(/context 展示,第四期)。
+                    last_compact_line = "cheap:" + compact_routed.route.model + " · " +
+                                        lubancode::cli::FormatTokenCount(compact_result.before_tokens) + "→" +
+                                        lubancode::cli::FormatTokenCount(compact_result.after_tokens) + " · " +
+                                        std::to_string(compact_accounting.duration_ms / 1000) + "." +
+                                        std::to_string((compact_accounting.duration_ms % 1000) / 100) +
+                                        "s · 校验通过(manifest 守恒)";
+                }
                 // 压缩把 history 换短了(失败则原样):落盘基线收到新长度,
                 // 存档文件保持只追加——全量流水不动,补写一行 compact_v2
                 // 事件(回放语义与 v1 同型,另记 manifest/epoch/metrics),
@@ -2255,7 +2425,8 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                 return HandleResumeCommand(session_state, parsed.args, theme);
             }
             case lubancode::cli::SlashCommand::Export:
-                HandleExportCommand(parsed.args, *loop, session_store, sessions_dir, session_meta, session_title);
+                HandleExportCommand(parsed.args, *loop, session_store, sessions_dir, session_meta, session_title,
+                                    artifact_store.get());
                 break;
             case lubancode::cli::SlashCommand::Title: {
                 SessionCommandState session_state = MakeSessionCommandState();
@@ -2295,6 +2466,9 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
 
 // 发一轮用户正文:自动压缩检查 + 轮次材料 + RunTurn + 落盘 + 收排队。
 CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
+    // 建档提前到发轮之前(第二期):仓要拿 session id 开张,第一轮请求里
+    // 的超长结果才有地方落盘。失败不拦会话,只是没有 artifact 可追。
+    EnsureSessionBegun(content);
     // 窗口同步(0.27.x):/context、/model 改的是 tracker 的窗口,loop 的
     // mid-turn 评估用同一份,发轮前对齐一次。
     loop->SetContextWindowTokens(context_tracker.window_tokens());
@@ -2328,12 +2502,32 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
     }
     loop->SetTurnContext(std::move(turn_suffix));
     const std::size_t history_before = loop->History().size();
+    // usage 出账(模型分工第一期):整轮逐步 usage 带出来记进分角色台账
+    // (普通 turn = normal 档);compact/抽取的后台采样在各自路径另记,
+    // 不混进这里。
+    lubancode::app::UsageStats turn_usage;
     RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
             lubancode::app::HookRuntime(), spinner_enabled, transcript, todo_state(), &transcript_expanded,
             settings_local.allow_commands, settings_local.deny_commands, session_agent_tool(),
-            recorder.has_value() ? &*recorder : nullptr);
+            recorder.has_value() ? &*recorder : nullptr, /*silent=*/false, &turn_usage);
+    for (const auto& step : turn_usage.steps) {
+        api::Usage step_usage;
+        step_usage.input_tokens = step.input_tokens;
+        step_usage.output_tokens = step.output_tokens;
+        step_usage.cache_read_tokens = step.cache_read_tokens;
+        step_usage.cache_creation_tokens = step.cache_creation_tokens;
+        step_usage.output_reasoning_tokens = step.reasoning_tokens;
+        model_router->ledger().Record(lubancode::agent::ModelRole::Normal,
+                                      step.model.empty() ? *current_model : step.model, step_usage,
+                                      /*duration_ms=*/0, step.reported);
+    }
     // 每轮结束(成功/出错/ESC 打断都算)把新增消息逐条追加落盘。
     PersistNewMessages();
+    // L2 microcompact(第三期):冷区过线(带迟滞)渐次收拾,失败退 L1。
+    MaybeMicrocompact();
+    // 会话起名(cheap 角色):建档后第一轮回合收尾、还没有标题时起一枚,
+    // 成功落 title 事件;失败安静降级(/sessions 继续用首句摘要,不拦人)。
+    MaybeGenerateSessionTitle(lubancode::agent::TaskKind::SessionTitle);
     // 回合收尾总结与候选抽取(learn off 时是空操作)。
     ExtractTurnMemory(content, history_before);
     return CommandFlow::Continue;
@@ -2366,9 +2560,25 @@ void InteractiveSession::ExtractTurnMemory(const std::string& user_text, std::si
     const std::string system_prompt = BuildExtractionSystemPrompt(prompts_dir, task_type);
     if (system_prompt.empty()) return;
 
-    std::cout << theme.stats << trf("memory.extract.running", task_type) << theme.reset << "\n";
+    // 抽取走 cheap 角色(模型分工第一期):低风险后台小活,配了 cheap_model
+    // 用便宜的,没配回落 normal(与 main 同模型,行为与从前一致)。状态栏
+    // 短闪一行:任务种类 + 角色:模型(规格"运行提示")。
+    const auto extract_routed = model_router->Route(lubancode::agent::TaskKind::MemoryExtract);
+    std::cout << theme.stats
+              << trf("router.task_flash", trf("memory.extract.running", task_type),
+                     "cheap:" + extract_routed.route.model)
+              << theme.reset << "\n";
+    lubancode::agent::BackgroundCallAccounting extract_accounting;
     const auto extraction =
-        RunMemoryExtraction(real_backend, *current_model, system_prompt, turn_transcript, /*timeout_secs=*/45);
+        extract_routed.backend != nullptr
+            ? RunMemoryExtraction(*extract_routed.backend, extract_routed.route.model, system_prompt,
+                                  turn_transcript, /*timeout_secs=*/45, extract_routed.route.effort,
+                                  &extract_accounting)
+            : std::expected<MemoryExtraction, std::string>(
+                  std::unexpected("cheap 路由找不到 provider \"" + extract_routed.route.provider + "\""));
+    model_router->ledger().Record(lubancode::agent::ModelRole::Cheap, extract_routed.route.model,
+                                  extract_accounting.usage, extract_accounting.duration_ms,
+                                  extract_accounting.usage_reported);
     if (!extraction.has_value()) {
         std::cout << theme.stats << trf("memory.extract.failed", extraction.error()) << theme.reset << "\n";
         return;
@@ -2429,18 +2639,144 @@ void InteractiveSession::ExtractTurnMemory(const std::string& user_text, std::si
     }
 }
 
+void InteractiveSession::MaybeMicrocompact() {
+    // L2 microcompact(第三期):回合收尾的冷区收拾。仓没开/路由拿不到
+    // backend 都直接静默跳过——这是锦上添花的一层,不是关键路径。
+    if (!artifact_store->active() || model_router == nullptr) {
+        return;
+    }
+    const lubancode::agent::MicrocompactOptions options;
+    const auto candidates = lubancode::agent::PickMicrocompactCandidates(
+        loop->History(), loop->result_view_memo(), options, microcompact_hysteresis);
+    if (candidates.empty()) {
+        return;
+    }
+    // 迟滞:这一趟尝试了(成没成都算)就记账,冷区要比这趟再涨五成才有
+    // 下一趟——免得刚压完又立刻重压。
+    microcompact_hysteresis.pass_attempted = true;
+    microcompact_hysteresis.last_pass_cold_bytes =
+        lubancode::agent::ColdArtifactBytes(loop->History(), loop->result_view_memo());
+
+    const auto routed = model_router->Route(lubancode::agent::TaskKind::Microcompact);
+    if (routed.backend == nullptr) {
+        return;
+    }
+    std::cout << theme.stats
+              << trf("router.task_flash", "微压缩 " + std::to_string(candidates.size()) + " 枚",
+                     "cheap:" + routed.route.model)
+              << theme.reset << "\n";
+
+    std::map<std::string, lubancode::agent::MicrocompactSummary> summaries;
+    int failed = 0;
+    for (const auto& candidate : candidates) {
+        const auto* ref = artifact_store->Find(candidate.artifact_id);
+        if (ref == nullptr) {
+            ++failed;
+            continue;
+        }
+        lubancode::agent::BackgroundCallAccounting accounting;
+        auto summary =
+            lubancode::agent::RunMicrocompact(*routed.backend, routed.route.model, routed.route.effort,
+                                              *artifact_store, *ref, candidate.event_id, options, &accounting);
+        model_router->ledger().Record(lubancode::agent::ModelRole::Cheap, routed.route.model, accounting.usage,
+                                      accounting.duration_ms, accounting.usage_reported);
+        if (summary.has_value()) {
+            summaries.emplace(candidate.tool_use_id, std::move(*summary));
+        } else {
+            ++failed;  // 失败退 L1:决策不动,视图照旧预览,原文不删
+        }
+    }
+    const int applied = loop->ApplyMicrocompactSummaries(summaries);
+    if (applied > 0) {
+        std::cout << theme.stats
+                  << trf("microcompact.done", applied, candidates.size() - static_cast<std::size_t>(applied))
+                  << theme.reset << "\n";
+    } else if (failed > 0) {
+        std::cout << theme.stats << tr("microcompact.all_failed") << theme.reset << "\n";
+    }
+}
+
+void InteractiveSession::MaybeGenerateSessionTitle(lubancode::agent::TaskKind kind) {
+    if (session_title_auto_attempted || session_title_pending || !session_title.empty()) {
+        return;
+    }
+    if (!session_store.active()) {
+        return;  // 没建档就没什么好起名的,/title 的人工路径照旧
+    }
+    // 得有真实对话可看:至少一条 assistant 正文(用户消息建房时必有)。
+    const auto& history = loop->History();
+    bool has_reply = false;
+    for (const auto& message : history) {
+        if (message.role != api::Role::Assistant) {
+            continue;
+        }
+        for (const auto& block : message.content) {
+            if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr && !text->text.empty()) {
+                has_reply = true;
+                break;
+            }
+        }
+        if (has_reply) {
+            break;
+        }
+    }
+    if (!has_reply) {
+        return;
+    }
+    session_title_auto_attempted = true;  // 一场只试一次,失败安静降级
+
+    const auto routed = model_router->Route(kind);
+    if (routed.backend == nullptr) {
+        return;
+    }
+    lubancode::agent::BackgroundCallAccounting accounting;
+    const auto title = GenerateSessionTitle(*routed.backend, routed.route.model, routed.route.effort, history,
+                                            /*timeout_secs=*/30, &accounting);
+    model_router->ledger().Record(lubancode::agent::ModelRole::Cheap, routed.route.model, accounting.usage,
+                                  accounting.duration_ms, accounting.usage_reported);
+    if (!title.has_value() || title->empty()) {
+        return;
+    }
+    session_title = *title;
+    if (session_store.AppendTitleEvent(session_title)) {
+        std::cout << theme.stats
+                  << trf("router.task_flash", tr("cmd.title.set_pending"), "cheap:" + routed.route.model)
+                  << theme.reset << "\n";
+    } else {
+        std::cout << theme.error << tr("cmd.title.write_failed") << theme.reset << "\n";
+        session_title.clear();  // 落不了盘就不占内存标题,/sessions 仍用首句
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 上下文压缩的会话现场路(0.27.x 分层压缩第一期)
 // ---------------------------------------------------------------------------
 
 lubancode::agent::CompactOptions InteractiveSession::BuildCompactOptions() {
     lubancode::agent::CompactOptions options;
-    // 窗口预算认压缩模型自己的目录条目,不拿主模型窗口冒充;目录里查不到
-    // (自定义模型、中转起名)就留空——Compact() 不做窗口拦截,但输出会
-    // 明说"窗口未知,未校验",不假装核过。
-    const std::string compact_model = config.compact_model.empty() ? *current_model : config.compact_model;
-    if (const auto* entry = model_catalog.FindBySlug(compact_model); entry != nullptr) {
+    // 窗口预算认压缩路由自己的声明:高级段 model_roles 声明了 context_
+    // window 就用它;没有再查模型目录条目;目录里也查不到(自定义模型、
+    // 中转起名)就留空——Compact() 不做窗口拦截,但输出会明说"窗口未知,
+    // 未校验",不假装核过。cheap 与 normal 窗口不同,分块按 cheap 的窗口
+    // 算(规格"预算来源")。
+    const auto compact_route = model_router->RouteInfo(lubancode::agent::TaskKind::Compact);
+    if (compact_route.context_window.has_value()) {
+        options.budget.window_tokens = compact_route.context_window;
+    } else if (const auto* entry = model_catalog.FindBySlug(compact_route.model); entry != nullptr) {
         options.budget.window_tokens = entry->context_window_tokens;
+    }
+    // 预算总账(第四期):协议余量按统一公式算(协议头 + 估算误差边),
+    // /context 展示的与 compact 拦截用的是同一本账,不再各写各的魔数。
+    {
+        lubancode::agent::ContextBudgetInputs budget_inputs;
+        budget_inputs.window_tokens = options.budget.window_tokens;
+        budget_inputs.requested_output_reserve_tokens = options.budget.output_reserve_tokens;
+        budget_inputs.compact_prompt_overhead_tokens = 512;  // 压缩指令的公开估算档
+        const auto plan = lubancode::agent::BuildContextBudgetPlan(budget_inputs);
+        if (plan.compact_call_input_budget.has_value()) {
+            options.budget.protocol_headroom_tokens =
+                plan.protocol_headroom + plan.tokenizer_error_margin + plan.compact_prompt_overhead;
+        }
     }
     // 活动待办守恒:pending/in_progress 条目原文逐条钉进 manifest 校验,
     // 摘要漏一项就拒收,旧历史不动。
@@ -2455,7 +2791,9 @@ lubancode::agent::CompactOptions InteractiveSession::BuildCompactOptions() {
 }
 
 bool InteractiveSession::TryRunCompact(bool midturn) {
-    const std::string compact_model = config.compact_model.empty() ? *current_model : config.compact_model;
+    // 压缩路由(模型分工第一期):cheap 角色的有效值;跨 provider 拿不到
+    // backend 就直接走 normal 修一次的路(同一只),失败再报,不静默截史。
+    auto compact_routed = model_router->Route(lubancode::agent::TaskKind::Compact);
     const lubancode::agent::CompactOptions options = BuildCompactOptions();
     const std::size_t before_tokens = lubancode::agent::EstimateHistoryTokens(loop->History());
 
@@ -2479,12 +2817,43 @@ bool InteractiveSession::TryRunCompact(bool midturn) {
 
     std::cout << theme.stats << tr(midturn ? "compact.midturn_start" : "compact.auto_start") << theme.reset << "\n";
     lubancode::cli::Spinner spinner(theme, spinner_enabled);
-    // 用裸的 real_backend(理由同 /compact):压缩自己把 compact_model 写进
-    // request.model,包了 ModelOverrideBackend 会被换回会话模型。分层路
-    // (第三期):装得下单次摘要,装不下按 episode 分块 map、归并 reduce。
-    const auto result =
-        lubancode::agent::CompactHierarchical(real_backend, compact_model, loop->History(), options);
+    // 走路由给的 backend(cheap 跨 provider 时是另一只裸 client,理由同
+    // /compact:压缩自己把 route.model 写进 request.model)。分层路:装得下
+    // 单次摘要,装不下按 episode 分块 map、归并 reduce。
+    lubancode::agent::BackgroundCallAccounting compact_accounting;
+    lubancode::agent::ModelRole used_role = lubancode::agent::ModelRole::Cheap;
+    auto result = lubancode::agent::CompactHierarchical(
+        compact_routed.backend != nullptr ? *compact_routed.backend : real_backend, compact_routed.route.model,
+        loop->History(), options, compact_routed.route.effort, &compact_accounting);
+
+    // cheap 失败的回退(规格"失败与安全"):配了独立 cheap 路由(与 normal
+    // 不同模型)、而压缩又没成(请求/校验任一环)时,先试 normal 修一次;
+    // 仍失败旧史不动。回退要留痕:状态栏打一行,台账记一笔,不悄悄换人。
+    if (!result.has_value() && compact_routed.route.model != *current_model) {
+        const auto repair_routed = model_router->Route(lubancode::agent::TaskKind::CompactRepair);
+        const std::string reason = result.error().message;
+        model_router->ledger().RecordFallback(lubancode::agent::TaskKind::Compact,
+                                              lubancode::agent::ModelRole::Cheap,
+                                              lubancode::agent::ModelRole::Normal, reason);
+        std::cout << theme.stats
+                  << trf("router.fallback_flash", "cheap:" + compact_routed.route.model,
+                         "normal:" + repair_routed.route.model)
+                  << theme.reset << "\n";
+        if (repair_routed.backend != nullptr) {
+            result = lubancode::agent::CompactHierarchical(*repair_routed.backend, repair_routed.route.model,
+                                                           loop->History(), options, repair_routed.route.effort,
+                                                           &compact_accounting);
+            if (result.has_value()) {
+                compact_routed.route = repair_routed.route;
+                used_role = lubancode::agent::ModelRole::Normal;
+            }
+        }
+    }
     spinner.Stop();
+
+    // 分角色记账:成功走的哪个角色就记哪笔(回退后是 normal)。
+    model_router->ledger().Record(used_role, compact_routed.route.model, compact_accounting.usage,
+                                  compact_accounting.duration_ms, compact_accounting.usage_reported);
 
     if (!result.has_value()) {
         std::cout << theme.error << trf("compact.auto_failed", result.error().message) << theme.reset
@@ -2503,6 +2872,21 @@ bool InteractiveSession::TryRunCompact(bool midturn) {
     const auto base_event = lubancode::agent::MakeCompactEvent(old_size, new_history);
     loop->ReplaceHistory(new_history);
     const std::size_t after_tokens = lubancode::agent::EstimateHistoryTokens(loop->History());
+    // 状态栏短闪:压缩前后与所用角色一行交代(规格"运行提示")。
+    std::cout << theme.stats
+              << trf("router.compact_flash", lubancode::cli::FormatTokenCount(before_tokens),
+                     lubancode::cli::FormatTokenCount(after_tokens),
+                     (used_role == lubancode::agent::ModelRole::Normal ? std::string("normal:")
+                                                                      : std::string("cheap:")) +
+                         compact_routed.route.model)
+              << theme.reset << "\n";
+    // 最近一次 compact 的台账(/context"最近一次 compact"一行,规格第四期)。
+    last_compact_line =
+        (used_role == lubancode::agent::ModelRole::Normal ? std::string("normal:") : std::string("cheap:")) +
+        compact_routed.route.model + " · " + lubancode::cli::FormatTokenCount(before_tokens) + "→" +
+        lubancode::cli::FormatTokenCount(after_tokens) + " · " +
+        std::to_string(compact_accounting.duration_ms / 1000) + "." +
+        std::to_string((compact_accounting.duration_ms % 1000) / 100) + "s · 校验通过(manifest 守恒)";
 
     // compact_v2 事件(第三期):回放与 v1 同型;manifest/epoch/metrics 另记,
     // 审计与"从原始事件 rebase"都有账可查。
@@ -2586,7 +2970,9 @@ SessionCommandState InteractiveSession::MakeSessionCommandState() {
         session_start_ts,
         [this]() {
             // /clear:旧上下文就此终局——SessionEnd(reason=clear) 先发,新的
-            // 空会话用 SessionStart(source=clear) 开账。
+            // 空会话用 SessionStart(source=clear) 开账。仓也关掉:工具们持
+            // 同一只仓,scope 只跟当前会话,旧场子的 artifact 查不到。
+            artifact_store->Close();
             EmitSessionHook(lubancode::hooks::HookEvent::SessionEnd, nlohmann::json{{"reason", "clear"}}, "clear");
             EmitSessionHook(lubancode::hooks::HookEvent::SessionStart, nlohmann::json{{"source", "clear"}},
                             "clear");
@@ -2605,10 +2991,12 @@ SessionCommandState InteractiveSession::MakeSessionCommandState() {
         sessions_dir,
         wire_str,
         current_model,
-        // /resume 成功:恢复的历史开新账(SessionStart source=resume)。
+        // /resume 成功:恢复的历史开新账(SessionStart source=resume),
+        // 仓也按恢复的那场开张(旧档若落过盘,artifact 继续可追)。
         [this]() {
             EmitSessionHook(lubancode::hooks::HookEvent::SessionStart, nlohmann::json{{"source", "resume"}},
                             "resume");
+            OpenArtifactStore();
         }};
 }
 

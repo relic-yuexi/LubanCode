@@ -1,6 +1,7 @@
 #include "agent/compact.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -141,15 +142,20 @@ bool HasTodoWrite(const api::Message& message) {
 }
 
 // 发一次"给我摘要"请求:system 指令 + 消息列表,收一段纯文本回来。
-// 失败(请求失败/流内错误)原样透传;正文交调用方再验。
+// 失败(请求失败/流内错误)原样透传;正文交调用方再验。reasoning_effort
+// 非空时带上(cheap 路由的 effort 档);accounting 非空时把这次子请求的
+// usage 累进去。
 std::expected<std::string, api::Error> RequestSummaryText(api::Backend& backend, const std::string& model,
                                                           const std::string& system,
                                                           const std::vector<api::Message>& messages,
-                                                          int max_tokens) {
+                                                          int max_tokens,
+                                                          const std::string& reasoning_effort = std::string(),
+                                                          BackgroundCallAccounting* accounting = nullptr) {
     api::Request request;
     request.model = model;
     request.system = system;
     request.messages = messages;
+    request.reasoning_effort = reasoning_effort;
     // 老坑同前:末条 assistant 会被当 prefill continuation,补一条 user 收尾。
     if (!request.messages.empty() && request.messages.back().role == api::Role::Assistant) {
         api::Message trailer;
@@ -174,6 +180,17 @@ std::expected<std::string, api::Error> RequestSummaryText(api::Backend& backend,
             },
             event);
     });
+    if (accounting != nullptr) {
+        const api::Usage& usage = assembler.usage();
+        accounting->usage.input_tokens += usage.input_tokens;
+        accounting->usage.cache_read_tokens += usage.cache_read_tokens;
+        accounting->usage.cache_creation_tokens += usage.cache_creation_tokens;
+        accounting->usage.output_tokens += usage.output_tokens;
+        accounting->usage.output_reasoning_tokens += usage.output_reasoning_tokens;
+        accounting->usage_reported =
+            accounting->usage_reported || usage.input_tokens > 0 || usage.output_tokens > 0 ||
+            usage.cache_read_tokens > 0 || usage.cache_creation_tokens > 0;
+    }
     if (!send_result.has_value()) {
         return std::unexpected(send_result.error());
     }
@@ -318,8 +335,27 @@ std::vector<std::pair<std::size_t, std::size_t>> SplitEpisodes(const std::vector
 std::expected<LayeredCompactResult, api::Error> CompactHierarchical(api::Backend& backend,
                                                                      const std::string& model,
                                                                      const std::vector<api::Message>& history,
-                                                                     const CompactOptions& options) {
+                                                                     const CompactOptions& options,
+                                                                     const std::string& reasoning_effort,
+                                                                     BackgroundCallAccounting* accounting) {
     LayeredCompactResult result;
+    // 计时守卫:任何 return 路径(含错误)都把墙钟记进账,调用方拿去按
+    // 角色记账。Compact() 自己也写 duration(单次路),这里最后覆盖成整场
+    // 分层的总时——语义就是"这次压缩任务一共花了多久"。
+    struct AccountingGuard {
+        BackgroundCallAccounting* accounting;
+        std::chrono::steady_clock::time_point started;
+        ~AccountingGuard() {
+            if (accounting == nullptr) {
+                return;
+            }
+            accounting->duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - started)
+                                          .count();
+        }
+    } accounting_guard{accounting, std::chrono::steady_clock::now()};
+    // 分层路内部各次子请求都从这一份出账(单次路交给 Compact() 自己记)。
+    const auto map_accounting = accounting;
     // 观测钩子(第四期):本次压缩输入的内容指纹。将来"episode 关闭后台
     // 预计算局部摘要、正式触发时按 digest 复用"靠它判失效;现在只记不用。
     {
@@ -339,7 +375,7 @@ std::expected<LayeredCompactResult, api::Error> CompactHierarchical(api::Backend
     // 预算未知 → 分不了块(没法判定块上限),退化为单次压缩(老行为)。
     const auto input_budget = CompactInputBudget(options.budget);
     if (!input_budget.has_value()) {
-        const auto single = Compact(backend, model, history, options);
+        const auto single = Compact(backend, model, history, options, reasoning_effort, accounting);
         if (!single.has_value()) {
             return std::unexpected(single.error());
         }
@@ -353,7 +389,7 @@ std::expected<LayeredCompactResult, api::Error> CompactHierarchical(api::Backend
         EstimateUtf8Tokens(BuildCompactInstruction(options)) + EstimateHistoryTokens(history) +
         options.budget.protocol_headroom_tokens;
     if (single_input <= *input_budget) {
-        const auto single = Compact(backend, model, history, options);
+        const auto single = Compact(backend, model, history, options, reasoning_effort, accounting);
         if (!single.has_value()) {
             return std::unexpected(single.error());
         }
@@ -367,7 +403,7 @@ std::expected<LayeredCompactResult, api::Error> CompactHierarchical(api::Backend
     if (hot_start == 0) {
         // 整份历史都在最后一轮里(单轮巨型):没有冷区可分层,交给单次压缩
         // 按窗口预算明确拒绝——绝不静默截史。
-        const auto single = Compact(backend, model, history, options);
+        const auto single = Compact(backend, model, history, options, reasoning_effort, accounting);
         if (!single.has_value()) {
             return std::unexpected(single.error());
         }
@@ -451,7 +487,8 @@ std::expected<LayeredCompactResult, api::Error> CompactHierarchical(api::Backend
         std::vector<api::Message> messages(cold.begin() + static_cast<std::ptrdiff_t>(chunk.from),
                                            cold.begin() + static_cast<std::ptrdiff_t>(chunk.to));
         const auto text = RequestSummaryText(backend, model, map_instruction, messages,
-                                             static_cast<int>(options.budget.output_reserve_tokens));
+                                             static_cast<int>(options.budget.output_reserve_tokens),
+                                             reasoning_effort, map_accounting);
         if (!text.has_value()) {
             return std::unexpected(text.error());
         }
@@ -519,7 +556,8 @@ std::expected<LayeredCompactResult, api::Error> CompactHierarchical(api::Backend
                 summaries[i + 1].markdown});
             const auto text = RequestSummaryText(backend, model, merge_instruction,
                                                  std::vector<api::Message>{pair_message},
-                                                 static_cast<int>(options.budget.output_reserve_tokens));
+                                                 static_cast<int>(options.budget.output_reserve_tokens),
+                                                 reasoning_effort, map_accounting);
             if (!text.has_value()) {
                 return std::unexpected(text.error());
             }
@@ -540,7 +578,8 @@ std::expected<LayeredCompactResult, api::Error> CompactHierarchical(api::Backend
     // 终稿 reduce。
     const auto final_text =
         RequestSummaryText(backend, model, BuildReduceInstruction(options, !prior_state.empty()),
-                           build_reduce_input(), static_cast<int>(options.budget.output_reserve_tokens));
+                           build_reduce_input(), static_cast<int>(options.budget.output_reserve_tokens),
+                           reasoning_effort, map_accounting);
     if (!final_text.has_value()) {
         return std::unexpected(final_text.error());
     }
@@ -745,7 +784,8 @@ std::vector<api::Message> BuildCompactedHistory(const std::vector<api::Message>&
 
 std::expected<CompactSummary, api::Error> Compact(api::Backend& backend, const std::string& model,
                                                   const std::vector<api::Message>& history,
-                                                  const CompactOptions& options) {
+                                                  const CompactOptions& options, const std::string& reasoning_effort,
+                                                  BackgroundCallAccounting* accounting) {
     const std::string instruction = BuildCompactInstruction(options);
 
     // 窗口预算:估算输入(指令 + 全份 history,统一 token 口径)超过压缩
@@ -768,6 +808,7 @@ std::expected<CompactSummary, api::Error> Compact(api::Backend& backend, const s
     request.model = model;
     request.system = instruction;
     request.messages = history;
+    request.reasoning_effort = reasoning_effort;
 
     // 踩过的坑:history 最后一条常常是 assistant 消息,原样发出去会被
     // Anthropic/Responses 两边当成"续写最后这条 assistant 消息"(prefill
@@ -787,6 +828,7 @@ std::expected<CompactSummary, api::Error> Compact(api::Backend& backend, const s
     bool stream_error = false;
     std::string stream_error_message;
 
+    const auto started = std::chrono::steady_clock::now();
     const auto send_result = backend.send_stream(request, [&](const api::StreamEvent& event) {
         assembler.Feed(event);
         std::visit(
@@ -799,6 +841,23 @@ std::expected<CompactSummary, api::Error> Compact(api::Backend& backend, const s
             },
             event);
     });
+
+    // usage 出账(分角色记账):压缩额外花的这轮采样不混进普通 turn 的账,
+    // 交给调用方记进 ModelUsageLedger。
+    if (accounting != nullptr) {
+        const api::Usage& usage = assembler.usage();
+        accounting->usage.input_tokens += usage.input_tokens;
+        accounting->usage.cache_read_tokens += usage.cache_read_tokens;
+        accounting->usage.cache_creation_tokens += usage.cache_creation_tokens;
+        accounting->usage.output_tokens += usage.output_tokens;
+        accounting->usage.output_reasoning_tokens += usage.output_reasoning_tokens;
+        accounting->usage_reported = accounting->usage_reported || usage.input_tokens > 0 ||
+                                     usage.output_tokens > 0 || usage.cache_read_tokens > 0 ||
+                                     usage.cache_creation_tokens > 0;
+        accounting->duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::steady_clock::now() - started)
+                                      .count();
+    }
 
     if (!send_result.has_value()) {
         return std::unexpected(send_result.error());
