@@ -2678,12 +2678,33 @@ void InteractiveSession::SyncWorktreeDirectory() {
 // 触发了 /exit,外层循环该退出了。
 CommandFlow InteractiveSession::ProcessLine(const std::string& content) {
     const lubancode::cli::ParsedSlashCommand parsed = lubancode::cli::ParseSlashCommand(content);
-    if (parsed.command != lubancode::cli::SlashCommand::NotSlash &&
-        parsed.command != lubancode::cli::SlashCommand::Image) {
-        return DispatchSlashCommand(parsed);
+    // 会话级兜底(宽窄转换异常单):slash 命令、普通回合、回合收尾的起名/
+    // 记忆抽取,任何 std::exception 都不再穿透顶层把整场掀了——错误上屏、
+    // history 里已有的落盘、循环继续。这不是"每层包一遍":回合执行的最内
+    // 环已有 RunTurn 那道收口,这里是会话边界唯一的一道;再往外只剩启动
+    // 期(cli_app 顶层 catch)才许退进程。
+    try {
+        if (parsed.command != lubancode::cli::SlashCommand::NotSlash &&
+            parsed.command != lubancode::cli::SlashCommand::Image) {
+            return DispatchSlashCommand(parsed);
+        }
+        // 普通正文(含 peer 来信组包后的文字):自动压缩检查 + 发一轮。
+        return RunUserTurn(content);
+    } catch (const std::exception& e) {
+        {
+            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+            std::cerr << "\n"
+                      << theme.error << tr("error.prefix") << trf("error.unexpected", e.what()) << theme.reset
+                      << "\n";
+            std::cerr.flush();
+        }
+        try {
+            PersistNewMessages();  // 已入 history 的部分照常落盘,/resume 接得回来
+        } catch (...) {
+            // 落盘自己都失败了:报不出更多信息,会话仍续命
+        }
+        return CommandFlow::Continue;
     }
-    // 普通正文(含 peer 来信组包后的文字):自动压缩检查 + 发一轮。
-    return RunUserTurn(content);
 }
 
 // slash 分派:顶层 switch 只做路由,肥 case 全在各领域 handler

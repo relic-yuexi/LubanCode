@@ -11,6 +11,7 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <typeinfo>
 #include <utility>
 
 #include "agent/compact.hpp"
@@ -935,7 +936,18 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
         cancel_flag, theme, transcript_expanded,
         [&display](bool expanded) { return display.FormatSnapshotForToggleLocked(expanded); });
 
-    const auto result = loop.Run(std::move(prepared_input->message), callbacks, &cancel_flag);
+    // 回合级异常兜底(宽窄转换异常单):流式/工具链路里任何 std::exception
+    // ——历史病灶是 path 窄转换的 system_error(1113),文案正是"No mapping
+    // for the Unicode character..."——不再穿透顶层把整场会话掀了。转成本
+    // 回合的失败收口:走下面共用的错误路径(listener 停、footer 收、错误
+    // 上屏),交回 status=1;外层会话继续跑,prompt 回得来,已入 history
+    // 的部分(用户消息)照常落盘。异常类型一并打出来,真机再出事有姓有名。
+    std::expected<lubancode::agent::RunOutcome, std::string> result;
+    try {
+        result = loop.Run(std::move(prepared_input->message), callbacks, &cancel_flag);
+    } catch (const std::exception& e) {
+        result = std::unexpected(trf("error.unexpected", e.what()) + std::string(" [") + typeid(e).name() + "]");
+    }
 
     // Run() 已经返回,不管是不是被打断——先收输入线程，保证它不再碰转录
     // 快照；也保证下一次 ReadLine() 前不再抢控制台输入。心跳线程随后收。

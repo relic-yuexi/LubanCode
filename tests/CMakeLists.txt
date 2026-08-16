@@ -7,6 +7,9 @@ add_executable(lubancode_tests
   test_background_tasks.cpp
   test_command_safety.cpp
   test_loop.cpp
+  # 宽窄转换异常单(未映射 Unicode 字符掐死会话):SSE 劈半 delta 闸门、
+  # emoji 路径 u8 通道、宽窄转换不许抛、后端抛异常的回合收口。
+  test_unicode_boundaries.cpp
   test_responses_request.cpp
   test_responses_events.cpp
   test_chat_request.cpp
