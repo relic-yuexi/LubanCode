@@ -109,6 +109,8 @@ add_executable(lubancode_tests
   test_doctor.cpp
   # memory 回合抽取(分型/转写/JSON 解析,纯函数)。
   test_memory_extract.cpp
+  # memory schema 3 front matter(往返字节稳定/坑人字符/双格式剥壳)。
+  test_memory_frontmatter.cpp
   # memory 检索评测尺子(固定语料,Recall/Precision/注入字节/stale 拦截率)。
   test_memory_retrieval.cpp
   # memory 中文检索评测尺子(100 条中文语料,召回率/误命中率/注入字节 P50/P95)。

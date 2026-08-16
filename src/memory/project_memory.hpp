@@ -61,18 +61,23 @@ struct ProjectIdentity {
 std::expected<ProjectIdentity, std::string> ResolveProjectIdentity(
     const std::filesystem::path& cwd, const std::filesystem::path& home_lubancode);
 
-enum class MemoryKind { Fact, Preference };
+// fact=可核验的项目事实;preference=用户主动选定的项目技术偏好;
+// feedback=用户对 LubanCode 行事方式的明确纠正(版本节奏、验收习惯、提交
+// 规矩),只收 user-stated,模型推断不得直写。
+enum class MemoryKind { Fact, Preference, Feedback };
 
 std::string MemoryKindName(MemoryKind kind);
 std::expected<MemoryKind, std::string> ParseMemoryKind(const std::string& raw);
 
-// 主题范围(schema 2):project 全项目;subtree/path 限子树或单文件,当前
-// cwd 不在范围内时不注入(该用才用)。跨项目/全局经验本期不做——键位
-// 预留:以后加 "global" 时只认全局配置授权,存储键须另行分账,别混进
-// project key 这套目录。
+// 主题范围(schema 2/3):project 全项目;subtree/path 限子树或单文件,当前
+// cwd 不在范围内时不注入(该用才用)。schema 3 加 level:project|user,
+// 用户层主题 level=user 且 kind=user,不得假借项目路径作证据。
+// 跨项目/全局经验本期不做——键位预留:以后加 "global" 时只认全局配置授权,
+// 存储键须另行分账,别混进 project key 这套目录。
 struct MemoryScope {
-    std::string kind = "project";  // project | subtree | path
-    std::string value;             // kind != project 时必填,项目内相对路径
+    std::string kind = "project";  // project | subtree | path | user
+    std::string value;             // kind 为 subtree/path 时必填,项目内相对路径
+    std::string level = "project"; // project | user(schema 3 起;旧主题读入填默认)
 };
 
 struct MemoryEvidence {
@@ -114,6 +119,12 @@ struct MemoryEntry {
     std::vector<MemoryEvidence> evidence;
     std::string last_verified_at;
     std::string expires_at;  // 空 = 永不过期
+    // schema 3 新增:name 是文件 slug(层内唯一),id 去掉类型前缀便是;
+    // created_at 记首次创建(旧主题读入时用 updated_at 补);schema 记这份
+    // 主题当下的格式(1/2/3),经 upsert/verify 改写后一律成 3。
+    std::string name;
+    std::string created_at;
+    int schema = 2;
 };
 
 // 检索排级的纯函数结果(评测集与 /memory why 共用)。injected 只是"过

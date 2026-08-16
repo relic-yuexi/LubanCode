@@ -60,6 +60,7 @@
 /memory list
 /memory remember fact 标题 [:: 正文]
 /memory remember preference 标题 [:: 正文]
+/memory remember feedback 标题 [:: 正文]
 /memory forget <id>
 /memory rebuild
 /memory stale
@@ -109,6 +110,14 @@
 - 本项目用 pnpm，不用 npm。
 - Python 环境用 uv。
 - 改动后先跑窄测试，再跑全套。
+
+反馈 `feedback` 专收用户对 LubanCode 行事方式的明确纠正：
+
+- 每笔验收合并进 main 后 patch 版本加一，不攒大跳跃。
+- 提交信息用中文，末尾带共同署名。
+- 改动先过窄测试再跑全套，不许一步到位跑全量。
+
+feedback 必须是用户明说的(`confidence: user-stated`)。模型推断出来的"用户大概想要"不算数——它只能进待审候选，且 accept 闸会拦；`memory_save` 直接标 inferred 的 feedback 会被拒。正文里用 `## Why` 小节保住来龙去脉，模型可以压短措辞，不可把"不要每次突兀跳版"改成泛泛的"遵循语义化版本"。
 
 这些不要存：
 
@@ -173,21 +182,56 @@ Markdown 是真本。`catalog.json` 与 `index.md` 都是派生物。删坏了�
 
 每个文件只写一块能独立更新的主题。不要造 `all-facts.md`，也不要每句话拆一份。
 
+新写主题一律用 schema 3:文件开头一段 YAML front matter,由 `yaml-cpp` 解析(不手搓解析器),正文跟在分隔线之后。字段顺序与引号策略固定,连续两次 parse/write 字节稳定;时间一律按字符串读,不受 YAML 隐式类型与本机时区牵扯。程序只认文件开头第一对 `---`,正文里的水平线不算分隔线。
+
 ```markdown
-<!-- lubancode-memory
-{"schema":1,"id":"fact.agent-loop.request-flow","kind":"fact","summary":"AgentLoop 组装请求并按轮刷新工具表","keywords":["AgentLoop","TrimHistory"],"paths":["src/agent/loop.cpp"],"status":"active","updated_at":"2026-08-06T00:00:00Z","source_sessions":["20260806-..."]}
--->
+---
+name: agent-loop-request-flow
+description: AgentLoop 组装请求并按轮刷新工具表
+metadata:
+  schema: 3
+  node_type: memory
+  type: fact
+  id: fact.agent-loop.request-flow
+  confidence: verified
+  status: active
+  scope:
+    level: project
+    kind: project
+    value: ""
+  origin_session_ids:
+    - 20260806-...
+  created: 2026-08-06T00:00:00Z
+  modified: 2026-08-06T00:00:00Z
+  last_verified: 2026-08-06T00:00:00Z
+  expires: null
+  keywords:
+    - AgentLoop
+  evidence:
+    - path: src/agent/loop.cpp
+      symbol: AgentLoop::Run
+  fingerprints:
+    src/agent/loop.cpp: fnv1a64-...
+---
 
 # AgentLoop 请求路径
 
 `AgentLoop::Run` 在 `src/agent/loop.cpp` 组装请求。历史裁剪后写进请求。
 
-## 证据
+## Why
 
-- `src/agent/loop.cpp`：`AgentLoop::Run`
+入口收敛在一处,刷新工具表与组装请求须同一份时序。
 ```
 
-隐藏注释里是严格 JSON。它带稳定 id、类型、摘要、关键词、路径、状态和来源。注入模型前，程序剥掉元数据，只送正文。
+- `name` 是文件 slug,供人看,层内唯一;文件名就是 `<类型目录>/<name>.md`。
+- `description` 是索引里的一行摘要,索引不另藏手写摘要。标题取正文首个一级标题,没有则退回 name。
+- `metadata.id` 是跨改名不变的机器主键;`name` 改了,id 不跟着乱变。
+- `node_type` 固定 `memory`,为以后别的节点类型留口子。
+- 支撑路径与符号都进 `evidence`(schema 3 没有独立的 `paths` 字段,老主题的 paths 迁移时升格为证据)。
+- `fingerprints` 存关联文件的指纹,供陈旧判定;catalog 删掉后可从主题与项目文件重算。
+- 注入模型前,程序剥掉 front matter,只送正文。
+
+旧格式(schema 1/2)的主题把元数据藏在文件头的 HTML 注释严格 JSON 里。reader 同时认两种格式:旧主题照读、照列、照召回、照 rebuild;某条旧主题同 id 更新或核验时,只迁这一份成 schema 3,正文原样带过去。两份文件撞同一 id 时双双停为 `conflict`,不凭时间偷偷选一份。
 
 ### 稳定 id
 
@@ -206,27 +250,29 @@ preference.package-manager
 
 ## 8. Index 与 catalog
 
-`index.md` 供模型扫一眼：
+`index.md` 供人翻一眼：
 
 ```markdown
 # Project Memory
 
 ## Facts
 
-- [AgentLoop 请求路径](facts/agent-loop-request-flow.md) — 请求组装与工具刷新
+- [AgentLoop 请求路径](facts/agent-loop-request-flow.md) — 请求组装与工具刷新；id: `fact.agent-loop.request-flow`
 
 ## Preferences
 
-- [包管理器](preferences/package-manager.md) — 本项目用 pnpm
+- [包管理器](preferences/package-manager.md) — 本项目用 pnpm；id: `preference.package-manager`
 ```
 
-`.state/catalog.json` 供程序检索。它保存文件相对路径、摘要、关键词、项目路径、状态和时间。正文不塞进 catalog。
+每项只写链接、description、id 与状态,不藏第二份手写摘要。它不进 prompt,机器检索读 catalog。
+
+`.state/catalog.json` 供程序检索。它保存 name、description、类型、scope、关键词、证据、状态、时间、指纹与相对文件。正文不塞进 catalog。
 
 `/memory rebuild` 会：
 
-1. 扫 `facts/` 与 `preferences/`。
-2. 解析固定元数据注释。
-3. 跳过坏文件并把警告写进 catalog。
+1. 扫 `facts/` 与 `preferences/`(两种格式混读)。
+2. 解析 front matter 或旧元数据注释。
+3. 跳过坏文件并把警告写进 catalog；同 id 撞车双双标 `conflict`。
 4. 原子写新 catalog。
 5. 按 catalog 原子写新 index。
 

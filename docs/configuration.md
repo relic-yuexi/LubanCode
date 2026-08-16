@@ -54,10 +54,10 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
   "memory": {
     "enabled": false,
     "use": true,
-    "generate": true,
+    "learn": "review",
     "max_index_bytes": 16384,
-    "max_retrieval_bytes": 24576,
-    "max_results": 4
+    "max_retrieval_bytes": 8192,
+    "max_results": 3
   },
   "hooks": {
     "schema_version": 2,

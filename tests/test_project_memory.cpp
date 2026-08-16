@@ -858,7 +858,7 @@ TEST_CASE("ProjectMemory: 检索扩展词并进下一轮词法查询") {    cons
           std::string::npos);
 }
 
-TEST_CASE("ProjectMemory: schema 1 旧主题平滑读入,核验后升 schema 2") {
+TEST_CASE("ProjectMemory: schema 1 旧主题平滑读入,核验后升 schema 3") {
     const fs::path root = TempRoot("schema1");
     const fs::path repo = root / "repo";
     fs::create_directories(repo / ".git");
@@ -890,13 +890,15 @@ TEST_CASE("ProjectMemory: schema 1 旧主题平滑读入,核验后升 schema 2")
     const std::string context = store.BuildTurnContext("LegacyEntry 在哪", repo);
     CHECK(context.find("老正文原样保留") != std::string::npos);
 
-    // 核验:原 id 复活,元数据顺手升 schema 2,正文一字不动。
+    // 核验:原 id 复活,顺手升 schema 3(挪去规范名),正文一字不动。
     REQUIRE(store.EnqueueVerify("fact.legacy-entry", /*refresh=*/false).has_value());
     REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
-    const std::string upgraded = Read(facts_dir / "fact.legacy-entry.md");
-    CHECK(upgraded.find("\"schema\":2") != std::string::npos);  // 主题元数据是紧凑 JSON
-    CHECK(upgraded.find("last_verified_at") != std::string::npos);
+    const std::string upgraded = Read(facts_dir / "legacy-entry.md");
+    CHECK(upgraded.starts_with("---\n"));
+    CHECK(upgraded.find("  schema: 3") != std::string::npos);
+    CHECK(upgraded.find("last_verified:") != std::string::npos);
     CHECK(upgraded.find("老正文原样保留") != std::string::npos);
+    CHECK_FALSE(fs::exists(facts_dir / "fact.legacy-entry.md"));
     // 文件没动过,核验后不在陈旧清单。
     CHECK(store.ListStaleEntries().empty());
 }
@@ -985,4 +987,292 @@ TEST_CASE("文档漂移: 记忆默认值、学习三档与命令面跟代码对�
     CHECK(design.find("/memory verify") != std::string::npos);
     CHECK(design.find("/memory accept") != std::string::npos);
     CHECK(configuration.find("learn") != std::string::npos);
+}
+
+// ---- schema 3 front matter 与旧格式混住(规格"迁移"1/2/3 条) ----
+
+namespace {
+
+fs::path SetupRepo(const fs::path& root, const std::string& name) {
+    const fs::path repo = root / name;
+    fs::create_directories(repo / ".git");
+    return repo;
+}
+
+}  // namespace
+
+TEST_CASE("ProjectMemory: 新写主题走 schema 3 front matter,字段齐、字节稳") {
+    const fs::path root = TempRoot("schema3-write");
+    const fs::path repo = SetupRepo(root, "repo");
+    Write(repo / "loop.cpp", "void AgentLoopRun() {}\n");
+    const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
+    REQUIRE(identity.has_value());
+
+    memory::Options options;
+    options.global_allowed = true;
+    options.enabled = true;
+    memory::ProjectMemory store(*identity, root / "home", options);
+    memory::SaveRequest first;
+    first.kind = memory::MemoryKind::Fact;
+    first.id = "fact.agent-loop.request-flow";
+    first.title = "AgentLoop 请求路径";
+    first.summary = "AgentLoopRun 住在 src/loop.cpp";
+    first.content = "`AgentLoopRun` 负责组装请求。\n\n## Why\n\n入口收敛在一处。";
+    first.keywords = {"AgentLoopRun"};
+    first.paths = {"loop.cpp"};
+    REQUIRE(store.EnqueueSave(first).has_value());
+    REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
+
+    const auto entries = store.ListEntries();
+    REQUIRE(entries.size() == 1);
+    CHECK(entries[0].schema == 3);
+    CHECK(entries[0].name == "agent-loop.request-flow");
+    CHECK_FALSE(entries[0].created_at.empty());
+    const fs::path topic = store.memory_dir() / "facts" / "agent-loop.request-flow.md";
+    REQUIRE(fs::exists(topic));
+    const std::string text = Read(topic);
+    CHECK(text.starts_with("---\n"));
+    CHECK(text.find("name: agent-loop.request-flow") != std::string::npos);
+    CHECK(text.find("metadata:") != std::string::npos);
+    CHECK(text.find("node_type: memory") != std::string::npos);
+    CHECK(text.find("id: fact.agent-loop.request-flow") != std::string::npos);
+    CHECK(text.find("fingerprints:") != std::string::npos);
+    CHECK(text.find("loop.cpp") != std::string::npos);
+    CHECK(text.find("# AgentLoop 请求路径") != std::string::npos);
+    CHECK(text.find("## Why") != std::string::npos);
+
+    // 索引与召回照常;注入正文剥掉 front matter。
+    CHECK(Read(store.memory_dir() / "index.md").find("fact.agent-loop.request-flow") != std::string::npos);
+    const std::string context = store.BuildTurnContext("AgentLoopRun 在哪里", repo);
+    CHECK(context.find("负责组装请求") != std::string::npos);
+    CHECK(context.find("metadata:") == std::string::npos);
+    CHECK(context.find("fingerprints:") == std::string::npos);
+}
+
+TEST_CASE("ProjectMemory: schema 1/2/3 混放,list/rebuild/召回都工作") {
+    const fs::path root = TempRoot("schema-mixed");
+    const fs::path repo = SetupRepo(root, "repo");
+    Write(repo / "loop.cpp", "new\n");
+    Write(repo / "panel.cpp", "new\n");
+    const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
+    REQUIRE(identity.has_value());
+    const fs::path memory_dir = identity->project_dir / "memory";
+
+    // schema 1 旧主题:没有 scope/evidence/confidence。
+    fs::create_directories(memory_dir / "facts");
+    Write(memory_dir / "facts" / "legacy-one.md",
+          "<!-- lubancode-memory\n"
+          "{\"schema\":1,\"id\":\"fact.legacy.one\",\"kind\":\"fact\",\"title\":\"旧格式一\","
+          "\"summary\":\"老事实\",\"keywords\":[\"LegacyOne\"],\"paths\":[\"loop.cpp\"],"
+          "\"status\":\"active\",\"updated_at\":\"2026-01-01T00:00:00Z\","
+          "\"source_sessions\":[\"s-old\"]}\n"
+          "-->\n\n# 旧格式一\n\n老正文。\n");
+    // schema 2 主题。
+    Write(memory_dir / "facts" / "legacy-two.md",
+          "<!-- lubancode-memory\n"
+          "{\"schema\":2,\"id\":\"fact.legacy.two\",\"kind\":\"fact\",\"title\":\"旧格式二\","
+          "\"summary\":\"第二老事实\",\"keywords\":[\"LegacyTwo\"],\"paths\":[\"panel.cpp\"],"
+          "\"status\":\"active\",\"updated_at\":\"2026-02-01T00:00:00Z\",\"source_sessions\":[\"s-2\"],"
+          "\"scope\":{\"kind\":\"project\",\"value\":\"\"},\"evidence\":[],\"confidence\":\"verified\","
+          "\"last_verified_at\":\"2026-02-01T00:00:00Z\",\"expires_at\":null,\"fingerprints\":{}}\n"
+          "-->\n\n# 旧格式二\n\n第二老正文。\n");
+    // schema 3 手写主题。
+    fs::create_directories(memory_dir / "preferences");
+    Write(memory_dir / "preferences" / "fresh-pref.md",
+          "---\n"
+          "name: fresh-pref\n"
+          "description: 新格式偏好\n"
+          "metadata:\n"
+          "  schema: 3\n"
+          "  node_type: memory\n"
+          "  type: preference\n"
+          "  id: preference.fresh-pref\n"
+          "  confidence: user-stated\n"
+          "  status: active\n"
+          "  scope: {level: project, kind: project, value: \"\"}\n"
+          "  origin_session_ids: []\n"
+          "  created: 2026-08-01T00:00:00Z\n"
+          "  modified: 2026-08-01T00:00:00Z\n"
+          "  last_verified: 2026-08-01T00:00:00Z\n"
+          "  expires: null\n"
+          "  keywords: []\n"
+          "  evidence: []\n"
+          "---\n\n# 新格式偏好\n\n新正文。\n");
+
+    memory::Options options;
+    options.global_allowed = true;
+    options.enabled = true;
+    memory::ProjectMemory store(*identity, root / "home", options);
+    const auto entries = store.ListEntries();
+    REQUIRE(entries.size() == 3);
+    CHECK(entries[0].id == "fact.legacy.one");
+    CHECK(entries[0].schema == 1);
+    CHECK(entries[0].confidence == "verified");  // schema 1 缺省推定
+    CHECK(entries[1].schema == 2);
+    CHECK(entries[2].id == "preference.fresh-pref");
+    CHECK(entries[2].schema == 3);
+    CHECK(entries[2].title == "新格式偏好");  // 正文首个一级标题
+
+    // rebuild 混读三种格式;catalog/index 重建后照常。
+    REQUIRE(memory::RebuildMemoryIndex(memory_dir).has_value());
+    const auto after = store.ListEntries();
+    CHECK(after.size() == 3);
+
+    // 召回:旧格式主题照常注入。
+    const std::string context = store.BuildTurnContext("LegacyOne 是什么", repo);
+    CHECK(context.find("老正文") != std::string::npos);
+}
+
+TEST_CASE("ProjectMemory: 旧主题同 id 更新只迁那一份,正文原样带过去") {
+    const fs::path root = TempRoot("schema3-upsert-migrate");
+    const fs::path repo = SetupRepo(root, "repo");
+    Write(repo / "loop.cpp", "void AgentLoopRun() {}\n");
+    const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
+    REQUIRE(identity.has_value());
+    const fs::path memory_dir = identity->project_dir / "memory";
+    fs::create_directories(memory_dir / "facts");
+    Write(memory_dir / "facts" / "old-name.md",
+          "<!-- lubancode-memory\n"
+          "{\"schema\":2,\"id\":\"fact.agent-loop.request-flow\",\"kind\":\"fact\",\"title\":\"AgentLoop 请求路径\","
+          "\"summary\":\"老摘要\",\"keywords\":[\"AgentLoopRun\"],\"paths\":[\"loop.cpp\"],"
+          "\"status\":\"active\",\"updated_at\":\"2026-01-01T00:00:00Z\",\"source_sessions\":[\"s-old\"],"
+          "\"scope\":{\"kind\":\"project\",\"value\":\"\"},\"evidence\":[],\"confidence\":\"verified\","
+          "\"last_verified_at\":\"2026-01-01T00:00:00Z\",\"expires_at\":null,\"fingerprints\":{}}\n"
+          "-->\n\n# AgentLoop 请求路径\n\n老正文一字不动。\n");
+    Write(memory_dir / "facts" / "untouched.md",
+          "<!-- lubancode-memory\n"
+          "{\"schema\":2,\"id\":\"fact.untouched\",\"kind\":\"fact\",\"title\":\"另一条\","
+          "\"summary\":\"不该被迁\",\"keywords\":[],\"paths\":[],\"status\":\"active\","
+          "\"updated_at\":\"2026-01-01T00:00:00Z\",\"source_sessions\":[]}\n"
+          "-->\n\n# 另一条\n\n照旧。\n");
+
+    memory::Options options;
+    options.global_allowed = true;
+    options.enabled = true;
+    memory::ProjectMemory store(*identity, root / "home", options);
+    memory::SaveRequest update;
+    update.kind = memory::MemoryKind::Fact;
+    update.id = "fact.agent-loop.request-flow";
+    update.title = "AgentLoop 请求路径";
+    update.summary = "新摘要";
+    update.content = "老正文一字不动。";  // 同 id 更新,正文换新
+    update.keywords = {"AgentLoopRun"};
+    update.paths = {"loop.cpp"};
+    REQUIRE(store.EnqueueSave(update).has_value());
+    REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
+
+    // 被更新的那份成了 schema 3,挪去规范名,来源会话保住;另一份原样。
+    CHECK(fs::exists(memory_dir / "facts" / "agent-loop.request-flow.md"));
+    CHECK_FALSE(fs::exists(memory_dir / "facts" / "old-name.md"));
+    const std::string migrated = Read(memory_dir / "facts" / "agent-loop.request-flow.md");
+    CHECK(migrated.starts_with("---\n"));
+    CHECK(migrated.find("origin_session_ids:") != std::string::npos);
+    CHECK(migrated.find("- s-old") != std::string::npos);
+    CHECK(migrated.find("老正文一字不动") != std::string::npos);
+    CHECK(Read(memory_dir / "facts" / "untouched.md").starts_with("<!-- lubancode-memory"));
+
+    const auto entries = store.ListEntries();
+    REQUIRE(entries.size() == 2);
+    for (const auto& entry : entries) {
+        if (entry.id == "fact.agent-loop.request-flow") {
+            CHECK(entry.schema == 3);
+            REQUIRE_FALSE(entry.source_sessions.empty());
+            CHECK(entry.source_sessions.front() == "s-old");
+        } else {
+            CHECK(entry.schema == 2);
+        }
+    }
+}
+
+TEST_CASE("ProjectMemory: feedback 类型只收用户明说,推断不得直写") {
+    const fs::path root = TempRoot("feedback");
+    const fs::path repo = SetupRepo(root, "repo");
+    const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
+    REQUIRE(identity.has_value());
+
+    memory::Options options;
+    options.global_allowed = true;
+    options.enabled = true;
+    memory::ProjectMemory store(*identity, root / "home", options);
+
+    // 用户明说的 feedback:照收,住 feedback/ 目录,schema 3。
+    memory::SaveRequest stated;
+    stated.kind = memory::MemoryKind::Feedback;
+    stated.id = "feedback.version-cadence";
+    stated.title = "版本节奏";
+    stated.summary = "每笔合并后 patch +1";
+    stated.content = "每合并一笔进 main,patch 位加一。如 0.26.1 -> 0.26.2。\n\n## Why\n\n任一提交都可发版。";
+    REQUIRE(store.EnqueueSave(stated).has_value());
+    REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
+    const fs::path topic = store.memory_dir() / "feedback" / "version-cadence.md";
+    REQUIRE(fs::exists(topic));
+    const std::string text = Read(topic);
+    CHECK(text.find("  type: feedback") != std::string::npos);
+    CHECK(text.find("  confidence: user-stated") != std::string::npos);
+    const auto entries = store.ListEntries();
+    REQUIRE(entries.size() == 1);
+    CHECK(entries[0].kind == memory::MemoryKind::Feedback);
+    CHECK(Read(store.memory_dir() / "index.md").find("## Feedback") != std::string::npos);
+
+    // 模型推断(inferred)的 feedback:拒收。
+    memory::SaveRequest inferred = stated;
+    inferred.id.clear();
+    inferred.title = "推断的规矩";
+    inferred.confidence = "inferred";
+    CHECK_FALSE(store.EnqueueSave(inferred).has_value());
+
+    // 待审箱同闸:feedback 候选只有 user-stated 能 accept。
+    memory::MemoryCandidate candidate;
+    candidate.kind = memory::MemoryKind::Feedback;
+    candidate.title = "验收习惯";
+    candidate.summary = "先跑窄测试";
+    candidate.content = "改完先跑窄测试,再跑全套。";
+    candidate.confidence = "verified";  // 不是用户明说
+    const auto id = store.AddCandidate(candidate);
+    REQUIRE(id.has_value());
+    CHECK_FALSE(store.AcceptCandidate(*id).has_value());
+    REQUIRE(store.RejectCandidate(*id, "test").has_value());
+    candidate.confidence = "user-stated";
+    candidate.title = "提交署名";  // 换个主题:同主题拒过的候选不再收
+    candidate.summary = "中文署名";
+    candidate.content = "提交信息用中文,末尾带共同署名。";
+    const auto id2 = store.AddCandidate(candidate);
+    REQUIRE(id2.has_value());
+    REQUIRE(store.AcceptCandidate(*id2).has_value());
+    REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
+    const auto after = store.ListEntries();
+    REQUIRE(after.size() == 2);
+    CHECK(after[0].kind == memory::MemoryKind::Feedback);
+    CHECK(after[0].id != "feedback.version-cadence");
+}
+
+TEST_CASE("ProjectMemory: 两个文件撞同一 id 停为 conflict,不偷偷选一份") {
+    const fs::path root = TempRoot("schema-conflict");
+    const fs::path repo = SetupRepo(root, "repo");
+    const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
+    REQUIRE(identity.has_value());
+    const fs::path memory_dir = identity->project_dir / "memory";
+    fs::create_directories(memory_dir / "facts");
+    for (const char* name : {"dup-a.md", "dup-b.md"}) {
+        Write(memory_dir / "facts" / name,
+              "<!-- lubancode-memory\n"
+              "{\"schema\":2,\"id\":\"fact.dup\",\"kind\":\"fact\",\"title\":\"撞车\",\"summary\":\"s\","
+              "\"keywords\":[\"DupKey\"],\"paths\":[],\"status\":\"active\","
+              "\"updated_at\":\"2026-01-01T00:00:00Z\",\"source_sessions\":[]}\n"
+              "-->\n\n# 撞车\n\n正文。\n");
+    }
+
+    memory::Options options;
+    options.global_allowed = true;
+    options.enabled = true;
+    memory::ProjectMemory store(*identity, root / "home", options);
+    std::string warning;
+    const auto entries = store.ListEntries(&warning);
+    REQUIRE(entries.size() == 2);
+    for (const auto& entry : entries) CHECK(entry.status == "conflict");
+    // conflict 不注入。
+    CHECK(store.BuildTurnContext("DupKey 撞车", repo).find("## 召回") == std::string::npos);
+    // rebuild 也保持 conflict,不消解。
+    REQUIRE(memory::RebuildMemoryIndex(memory_dir).has_value());
+    for (const auto& entry : store.ListEntries()) CHECK(entry.status == "conflict");
 }

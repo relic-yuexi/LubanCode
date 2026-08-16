@@ -145,6 +145,30 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# yaml-cpp(项目记忆 schema 3 的 front matter):与 lua 同一待遇,不管走没
+# 走 vcpkg 都 FetchContent 拉源码自建,免得两条构建路各认一份。规格不许
+# 手搓半吊子 YAML 解析器,front matter 读写全交给它。
+# ---------------------------------------------------------------------------
+_lubancode_tarball(_lubancode_yamlcpp_url "jbeder/yaml-cpp" "0.8.0")
+# yaml-cpp 0.8.0 的 cmake_minimum_required 还停在 3.4,新 CMake 已删 <3.5
+# 兼容;官方给的政策出口就是这项。顶层自要求 3.21,不受影响。
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE INTERNAL "")
+set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_INSTALL OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_FORMAT_SOURCE OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+  yaml-cpp
+  URL ${_lubancode_yamlcpp_url}
+)
+FetchContent_MakeAvailable(yaml-cpp)
+if(MSVC)
+  # 别人家的 C++,顶层 /W4 会刷一屏没意义的告警,单独关掉(同 lua)。
+  target_compile_options(yaml-cpp PRIVATE /w)
+endif()
+
+# ---------------------------------------------------------------------------
 # Lua 5.4(M7 Lua 插件用):不管走没走 vcpkg,统一 FetchContent 拉源码
 # (跟下面 doctest 一个待遇)。lua 官方仓库没有 CMakeLists,这里自己包一层:
 # GLOB 根目录的 *.c,排除 lua.c(独立解释器入口)/onelua.c(单文件合并编译
@@ -286,6 +310,7 @@ add_library(lubancode_core STATIC
   src/tools/web_fetch.cpp
   src/tools/web_search.cpp
   src/memory/project_memory.cpp
+  src/memory/frontmatter.cpp
   src/memory/memory_tool.cpp
   src/mcp/transport.cpp
   src/mcp/client.cpp
@@ -348,6 +373,7 @@ target_include_directories(lubancode_core PUBLIC
   ${CMAKE_BINARY_DIR}/generated)        # 0.19.x:embedded_prompts.hpp(提示词嵌入)
 target_link_libraries(lubancode_core PUBLIC cpr::cpr nlohmann_json::nlohmann_json)
 target_link_libraries(lubancode_core PRIVATE lubancode_lua)  # M7:Lua 插件运行时
+target_link_libraries(lubancode_core PRIVATE yaml-cpp::yaml-cpp)  # 项目记忆 front matter(schema 3)
 target_compile_features(lubancode_core PUBLIC cxx_std_23)
 target_precompile_headers(lubancode_core PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
