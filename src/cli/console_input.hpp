@@ -26,6 +26,7 @@
 #include "cli/agent_panel.hpp"  // AgentPanelEntry/Actions(面板纯逻辑层)
 #include "cli/choice_menu.hpp"
 #include "cli/format_utils.hpp"  // StatusPanelData(状态行数据源)
+#include "cli/history_search.hpp"  // PromptHistoryDataset(Ctrl+R 数据)
 #include "cli/line_editor.hpp"
 #include "cli/queue_model.hpp"
 #include "cli/theme.hpp"
@@ -188,6 +189,13 @@ void ShowPanelToast(const std::string& text);
 // 顶去办自己的事。只在 composer 为空时问——用户敲了一半的正文不抢,等
 // 提交后再说。传空钩子即清除;管道/重定向走不到逐键路径,设了也永不触发。
 void SetIdleWakeHook(std::function<bool()> hook);
+
+// Ctrl+R 提问历史反向搜索的数据源(0.30.x 第二批):应用层从 session 事件
+// 账只读现抽一份 PromptHistoryDataset(打开搜索框时取一次,范围轮换在
+// 终端层本地过滤,不反复读盘)。传空清除;管道/重定向走不到逐键路径,
+// 设了也永不触发。终端层不校验数据来源——只认喂进来的条目。
+using PromptHistoryProvider = std::function<PromptHistoryDataset()>;
+void SetPromptHistoryProvider(PromptHistoryProvider provider);
 
 // 0.17.0:常驻状态行(composer 输入框下横线之下那一行)要展示的会话数据。
 // main.cpp 在每轮给主提示符之前更新一次(/model 切换、context 百分比刷新

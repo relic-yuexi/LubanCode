@@ -128,6 +128,10 @@ struct KeyInput {
         // 只在面板这一处消费,别处按 Ctrl+X/Ctrl+K 仍是死键,跟升级前一样。
         CtrlX,
         CtrlK,
+        // 0.30.x 多行历史边缘:Ctrl+P/Ctrl+N 是"上一条/下一条历史"的明确
+        // 别名,不受多行光标位置影响(Up/Down 在多行里先走行间移动)。
+        CtrlP,
+        CtrlN,
         // 0.29.x 底栏自救:Ctrl+L 整屏重画(作废锚点、清可视区、从状态重建)。
         CtrlL,
         Esc,

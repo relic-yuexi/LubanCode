@@ -588,6 +588,12 @@ std::optional<KeyInput> KeyReader::ReadOne() {
     } else if (ctrl && ke.wVirtualKeyCode == 'L') {
         reset_text_run();
         out.kind = KeyInput::Kind::CtrlL;  // 底栏自救:整屏重画
+    } else if (ctrl && ke.wVirtualKeyCode == 'P') {
+        reset_text_run();
+        out.kind = KeyInput::Kind::CtrlP;  // 历史:上一条(明确别名,不受多行位置影响)
+    } else if (ctrl && ke.wVirtualKeyCode == 'N') {
+        reset_text_run();
+        out.kind = KeyInput::Kind::CtrlN;  // 历史:下一条
     } else if (ke.wVirtualKeyCode == VK_BACK) {
         reset_text_run();
         out.kind = KeyInput::Kind::Backspace;

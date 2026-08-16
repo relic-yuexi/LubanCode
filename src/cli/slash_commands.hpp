@@ -35,6 +35,7 @@ enum class SlashCommand {
     Sessions,  // /sessions:列最近的会话存档(本目录;/sessions all 列全部目录)
     Resume,    // /resume <编号或id>:载入某场存档历史续聊
     Export,    // /export [路径]:当前会话导出 Markdown
+    Copy,      // /copy [plain]:复制上一段完整答话(默认原始 Markdown,plain 纯文本)
     Title,     // /title [标题]:看/设当前会话标题(追加 title 事件行,最后一条胜)
     Soul,      // /soul [内容|clear|名字|off|default]:魂(风格叠加层)查看/设置
     Prompt,    // /prompt [reset]:看法(系统提示词)的来源,或还原 system_prompt.md

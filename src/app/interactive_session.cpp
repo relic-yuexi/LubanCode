@@ -122,6 +122,7 @@
 #include "platform/console.hpp"
 #include "platform/terminal_batch.hpp"
 #include "platform/paths.hpp"
+#include "platform/clipboard.hpp"
 
 namespace lubancode::app {
 
@@ -280,6 +281,11 @@ private:
     void RunPeerTurn(const std::string& text, bool silent = false,
                      memory::QueryOrigin origin = memory::QueryOrigin::User);
     void PumpSteeringToSubagents();
+    // Ctrl+R 提问历史搜索的数据源(0.30.x 第二批):只读 session 事件账
+    // (存档 JSONL 的用户提问行)拼整份 PromptHistoryDataset。
+    lubancode::cli::PromptHistoryDataset CollectPromptHistory();
+    // /copy [plain](0.30.x 第二批):复制上一段完整答话到剪贴板。
+    void HandleCopyCommand(const std::string& raw_args);
     void EnsureMemoryTool();
     void PrintMemoryUsage() const;
     void HandleMemoryCommand(const std::string& raw_args);
@@ -678,6 +684,10 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
         return session_agent_tool() != nullptr && session_agent_tool()->HasUndeliveredCompletions();
     });
 
+    // Ctrl+R 提问历史搜索的数据源(0.30.x 第二批):只读 session 事件账,
+    // 打开搜索框时取一次(范围轮换在终端层本地过滤,不反复读盘)。
+    lubancode::cli::SetPromptHistoryProvider([this]() { return CollectPromptHistory(); });
+
     // -----------------------------------------------------------------------
     // UI-D(0.16.0):Ctrl+O 紧凑/详细 + 焦点导航 + Ctrl+E 聚焦查看。
     // 按键语义翻译在 LineEditorCore(composer 空不空、键是什么),转发管道
@@ -843,6 +853,7 @@ InteractiveSession::~InteractiveSession() {
     lubancode::cli::SetAgentViewSwitchHook(nullptr);
     lubancode::cli::SetAgentPanelActions(lubancode::cli::AgentPanelActions{});
     lubancode::cli::SetIdleWakeHook(nullptr);
+    lubancode::cli::SetPromptHistoryProvider(nullptr);
 }
 
 // 后台子代理面板:轻量全量列表(0.28.x 起不截 8 只,详情另走 BuildAgentTaskDetail;
@@ -1484,6 +1495,128 @@ void InteractiveSession::PumpSteeringToSubagents() {
             // 标注,原文留队,绝不改投 main(规格"队列按目标分账")。
             SessionSteeringQueue().MarkTargetGone(item.id, "目标子代理已结束");
         }
+    }
+}
+
+// Ctrl+R 提问历史搜索的数据源:只读 session 事件账。ListSessions 按新→旧
+// 给场次,这里倒序遍历(整体旧→新,BuildHistorySearchIndex 认这个序);
+// 每场内部 ExtractPromptHistory 本就是旧→新。当前会话若还没建档(首条
+// 消息未落地),活 history 里的用户提问也并进来——同一只读规则。
+lubancode::cli::PromptHistoryDataset InteractiveSession::CollectPromptHistory() {
+    lubancode::cli::PromptHistoryDataset data;
+    data.current_session_id = session_store.session_id();
+    data.current_project_key = lubancode::agent::NormalizePathForCompare(CurrentDirUtf8());
+    if (!sessions_dir.empty()) {
+        const std::vector<lubancode::agent::SessionListEntry> listed =
+            lubancode::agent::ListSessions(sessions_dir, /*limit=*/150);
+        for (auto it = listed.rbegin(); it != listed.rend(); ++it) {
+            const auto bytes = lubancode::agent::ReadSessionFileBytes(it->file_path);
+            if (!bytes.has_value()) {
+                continue;  // 读不动这场就跳过,不废整份
+            }
+            const std::string project_key = lubancode::agent::NormalizePathForCompare(it->cwd);
+            for (auto& record : lubancode::agent::ExtractPromptHistory(*bytes)) {
+                lubancode::cli::PromptHistoryEntry entry;
+                entry.text = std::move(record.text);
+                entry.ts = std::move(record.ts);
+                entry.session_id = it->id;
+                entry.title = it->title;
+                entry.project_key = project_key;
+                data.entries.push_back(std::move(entry));
+            }
+        }
+    }
+    // 活 history 兜底:建档前(或建不了档)的本场提问。
+    const std::string current_id =
+        data.current_session_id.empty() ? std::string("current") : data.current_session_id;
+    for (const auto& message : loop->History()) {
+        if (message.role != lubancode::api::Role::User || message.content.empty()) {
+            continue;
+        }
+        const auto* text = std::get_if<lubancode::api::TextBlock>(&message.content.front());
+        if (text == nullptr || text->text.empty() || text->text.front() == '/') {
+            continue;  // 与 ExtractPromptHistory 同一只读规则
+        }
+        bool has_tool_result = false;
+        for (const auto& block : message.content) {
+            if (std::holds_alternative<lubancode::api::ToolResultBlock>(block)) {
+                has_tool_result = true;
+                break;
+            }
+        }
+        if (has_tool_result) {
+            continue;
+        }
+        lubancode::cli::PromptHistoryEntry entry;
+        entry.text = text->text;
+        entry.session_id = current_id;
+        entry.project_key = data.current_project_key;
+        entry.ts = session_start_ts;
+        data.entries.push_back(std::move(entry));
+    }
+    return data;
+}
+
+// /copy [plain]:复制上一段完整答话。"已完成"由结构保证:交互循环单线程,
+// 这个命令只在回合收口、提示符回来之后才会被分派——不存在"流式中"的调
+// 用点。默认复制原始 Markdown(history 里的 TextBlock 本就无 ANSI、无
+// spinner、无 token 统计);plain 走 MarkdownToPlainText。
+void InteractiveSession::HandleCopyCommand(const std::string& raw_args) {
+    std::string args = raw_args;
+    while (!args.empty() && (args.front() == ' ' || args.front() == '\t')) {
+        args.erase(args.begin());
+    }
+    for (char& c : args) {
+        c = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    }
+    if (!args.empty() && args != "plain") {
+        std::cout << theme.stats << tr("cmd.copy.usage") << theme.reset << "\n";
+        return;
+    }
+
+    // 倒着找最近一条有正文的 assistant 消息(工具调用中间可能穿插空文本)。
+    std::string text;
+    for (auto it = loop->History().rbegin(); it != loop->History().rend(); ++it) {
+        if (it->role != lubancode::api::Role::Assistant) {
+            continue;
+        }
+        std::vector<std::string> parts;
+        for (const auto& block : it->content) {
+            if (const auto* block_text = std::get_if<lubancode::api::TextBlock>(&block);
+                block_text != nullptr && !block_text->text.empty()) {
+                parts.push_back(block_text->text);
+            }
+        }
+        if (parts.empty()) {
+            continue;
+        }
+        text = parts.front();
+        for (std::size_t i = 1; i < parts.size(); ++i) {
+            text += "\n\n";
+            text += parts[i];
+        }
+        break;
+    }
+    if (text.empty()) {
+        std::cout << theme.error << tr("cmd.copy.no_assistant") << theme.reset << "\n";
+        return;
+    }
+    if (args == "plain") {
+        text = lubancode::cli::MarkdownToPlainText(text);
+    }
+
+    std::string detail;
+    switch (lubancode::platform::CopyTextToClipboard(text, detail)) {
+        case lubancode::platform::ClipboardResult::Ok:
+            std::cout << theme.stats << trf("cmd.copy.done", text.size()) << theme.reset << "\n";
+            break;
+        case lubancode::platform::ClipboardResult::Unsupported:
+            std::cout << theme.error << trf("cmd.copy.unsupported", detail) << theme.reset << "\n";
+            break;
+        case lubancode::platform::ClipboardResult::Failure:
+            // 失败必须报错,不得打印"已复制"后空着。
+            std::cout << theme.error << trf("cmd.copy.failed", detail) << theme.reset << "\n";
+            break;
     }
 }
 
@@ -2141,6 +2274,9 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
             }
             case lubancode::cli::SlashCommand::Export:
                 HandleExportCommand(parsed.args, *loop, session_store, sessions_dir, session_meta, session_title);
+                break;
+            case lubancode::cli::SlashCommand::Copy:
+                HandleCopyCommand(parsed.args);
                 break;
             case lubancode::cli::SlashCommand::Title: {
                 SessionCommandState session_state = MakeSessionCommandState();

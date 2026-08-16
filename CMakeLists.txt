@@ -247,13 +247,15 @@ if(WIN32)
     src/platform/paths_win.cpp
     src/platform/process_win.cpp
     src/platform/console_win.cpp
-    src/platform/peer_transport_win.cpp)
+    src/platform/peer_transport_win.cpp
+    src/platform/clipboard_win.cpp)
 else()
   set(_lubancode_platform_sources
     src/platform/paths_posix.cpp
     src/platform/process_posix.cpp
     src/platform/console_posix.cpp
-    src/platform/peer_transport_posix.cpp)
+    src/platform/peer_transport_posix.cpp
+    src/platform/clipboard_posix.cpp)
 endif()
 
 add_library(lubancode_core STATIC
@@ -364,6 +366,7 @@ add_library(lubancode_core STATIC
   src/cli/bottom_chrome.cpp
   src/cli/keymap.cpp
   src/cli/terminal_caps.cpp
+  src/cli/history_search.cpp
   src/cli/markdown.cpp
   src/cli/latex_math.cpp
   src/cli/diff.cpp

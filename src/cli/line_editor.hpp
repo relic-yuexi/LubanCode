@@ -49,6 +49,9 @@ enum class KeyKind {
               // 语义一个字都不变
     CtrlC,
     CtrlD,
+    CtrlP,  // 0.30.x 多行历史边缘:上一条历史的明确别名——多行内 Up/Down
+            // 先走行间移动,Ctrl+P/Ctrl+N 永远直翻历史
+    CtrlN,  // 同上:下一条历史
     Delete,  // Del 键:composer 编辑里暂不理会(排队待发消息浏览才用);枚举
              // 与 platform::KeyInput::Kind 保持平行,终端层好搬运
     Esc,   // M10:ESC 打断/清行。终端层只在真控制台下(VK_ESCAPE)产出这个

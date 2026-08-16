@@ -289,6 +289,22 @@ std::vector<SessionListEntry> ListSessions(const std::string& sessions_dir, std:
 // 整个读进来(二进制,按 UTF-8 字节串用)。读不到给 nullopt。
 std::optional<std::string> ReadSessionFileBytes(const std::string& file_path);
 
+// ---------------------------------------------------------------------------
+// 提问历史抽取(0.30.x Ctrl+R 反向搜索)
+// ---------------------------------------------------------------------------
+
+// 一条从存档里抽出的用户提问。只读事件账,不新增任何写路径。
+struct PromptHistoryRecord {
+    std::string text;  // 提问正文(多行拼 '\n')
+    std::string ts;    // 存档消息行里的原始 ts
+};
+
+// 纯函数:一场存档的完整 JSONL -> 该场的用户提问记录。只收"role==user 且
+// 首块是纯 text、无 tool_result 块"的行——工具结果、密钥、未发送草稿、
+// 事件行(compact/title/cwd)一概不进;以 '/' 起头的 slash 命令不是提问,
+// 也不进。坏行跳过,不废整份。时间序,文件里什么序就什么序。
+std::vector<PromptHistoryRecord> ExtractPromptHistory(const std::string& jsonl_content);
+
 // 当前本地时间,"yyyy-mm-dd HH:MM:SS"。meta.started_at / 消息 ts 用。
 std::string NowTimestamp();
 

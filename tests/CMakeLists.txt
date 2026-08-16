@@ -80,6 +80,8 @@ add_executable(lubancode_tests
   # 交互抛光总账第一步:Action/Keymap/Capability 三层地基。
   test_keymap.cpp
   test_terminal_caps.cpp
+  # 第二批:Ctrl+R 提问历史反向搜索(索引/过滤/状态机/渲染行)。
+  test_history_search.cpp
   test_agent_inbox.cpp
   test_markdown.cpp
   test_latex_math.cpp

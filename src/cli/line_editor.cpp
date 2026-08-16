@@ -925,6 +925,18 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
             state.esc_pressed = true;
             return state;
         }
+        case KeyKind::CtrlP:
+            // 明确的历史别名:不受多行光标位置影响,也不碰草稿外的事。
+            // 非 composer 读取(确认提示/编号选择)没有历史概念,当死键。
+            if (composer_) {
+                MoveHistory(true);
+            }
+            break;
+        case KeyKind::CtrlN:
+            if (composer_) {
+                MoveHistory(false);
+            }
+            break;
         case KeyKind::CtrlO: {
             // UI-D:紧凑/详细全局切换请求。只在 composer(主提示符)下转发,
             // 确认提示、/model 选择这些单行读取不认这个键(什么都不发生)。

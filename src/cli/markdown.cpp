@@ -847,4 +847,80 @@ std::vector<std::string> RenderMarkdown(const std::string& text, const Theme& th
     return out;
 }
 
+std::string MarkdownToPlainText(const std::string& markdown) {
+    // 行级处理:围栏内外分开算,围栏内一字不动(只去掉 ``` 标记行本身)。
+    std::string out;
+    bool in_fence = false;
+    std::size_t line_start = 0;
+    const auto append_line = [&](const std::string& line) {
+        if (!out.empty()) {
+            out += '\n';
+        }
+        out += line;
+    };
+    while (line_start <= markdown.size()) {
+        const std::size_t line_end = markdown.find('\n', line_start);
+        std::string line = markdown.substr(
+            line_start, line_end == std::string::npos ? std::string::npos : line_end - line_start);
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        const std::string trimmed = Trim(line);
+        if (trimmed.starts_with("```") || trimmed.starts_with("~~~")) {
+            in_fence = !in_fence;
+            // 标记行本身不进纯文本;围栏开合都不写字。
+        } else if (in_fence) {
+            append_line(line);
+        } else if (trimmed.empty()) {
+            append_line({});
+        } else {
+            // 标题:剥前导 # 与紧跟的空格。
+            std::string body = line;
+            std::size_t at = 0;
+            while (at < body.size() && body[at] == '#') {
+                ++at;
+            }
+            if (at > 0 && at < body.size() && body[at] == ' ') {
+                body = body.substr(at + 1);
+            }
+            // 行内:链接留文字;粗斜体星/下划线与行内码反引号剥掉。
+            std::string plain;
+            for (std::size_t i = 0; i < body.size();) {
+                if (body.compare(i, 1, "[") == 0) {
+                    const std::size_t close = body.find(']', i);
+                    const std::size_t paren = close == std::string::npos ? std::string::npos : body.find('(', close);
+                    if (close != std::string::npos && paren == close + 1) {
+                        const std::size_t paren_close = body.find(')', paren);
+                        if (paren_close != std::string::npos) {
+                            plain += body.substr(i + 1, close - i - 1);
+                            i = paren_close + 1;
+                            continue;
+                        }
+                    }
+                }
+                const char c = body[i];
+                if (c == '*' || c == '`') {
+                    ++i;  // 剥标记字符,内容原样留
+                    continue;
+                }
+                plain.push_back(c);
+                ++i;
+            }
+            append_line(plain);
+        }
+        if (line_end == std::string::npos) {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+    // 头尾空行剪掉。
+    while (!out.empty() && (out.front() == '\n')) {
+        out.erase(out.begin());
+    }
+    while (!out.empty() && (out.back() == '\n')) {
+        out.pop_back();
+    }
+    return out;
+}
+
 }  // namespace lubancode::cli

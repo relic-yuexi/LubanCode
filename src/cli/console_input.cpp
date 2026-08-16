@@ -167,6 +167,12 @@ std::function<bool()>& IdleWakeHookSlot() {
     return hook;
 }
 
+// Ctrl+R 提问历史搜索的数据源槽(同一套会话级静态槽;主线程读写)。
+PromptHistoryProvider& PromptHistoryProviderSlot() {
+    static PromptHistoryProvider provider;
+    return provider;
+}
+
 // 查看态回流的短提示(见 console_input.hpp ShowPanelToast 注释):挂进
 // 导航坞提示行位置,到时随下一帧自动收。读写都在主线程(会话主循环写、
 // 空闲 composer 帧读),不加锁。
@@ -420,6 +426,10 @@ std::optional<KeyEvent> MapKey(const platform::KeyInput& key) {
         case PK::CtrlL:
             // 整屏重画键:同上,只在 ReadLineKeyByKey 的自救缝里消费。
             return std::nullopt;
+        case PK::CtrlP:
+            return KeyEvent::Simple(KeyKind::CtrlP);
+        case PK::CtrlN:
+            return KeyEvent::Simple(KeyKind::CtrlN);
         case PK::Esc:
             return KeyEvent::Simple(KeyKind::Esc);
         case PK::Delete:
@@ -955,6 +965,13 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     std::optional<SteeringQueue::EditHandle> queue_edit;  // 正在取回编辑的凭据
     bool queue_delete_armed = false;
     std::chrono::steady_clock::time_point queue_delete_armed_until{};
+
+    // Ctrl+R 提问历史搜索(0.30.x 第二批):查询文本就活在编辑器缓冲里,
+    // 命中行挂在提示行位置(transient rows);打开时原草稿整份存起,取消
+    // 时一字不少装回。范围轮换/选位都在纯逻辑层(HistorySearchSession)。
+    HistorySearchSession history_search;
+    std::string history_search_draft;
+    std::string history_search_last_query;  // 查询未变就不重跑匹配
     const auto queue_rows_now = [&]() -> std::vector<std::string> {
         const auto snapshot = steering.Snapshot();
         if (snapshot.empty()) {
@@ -985,7 +1002,29 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         return frame;
     };
 
-    auto redraw_with_panel = [&](const RenderState& state, const std::vector<AgentPanelEntry>& entries) {
+    // 搜索开着时把 RenderState 的提示行换成命中清单;查询变化就地重跑
+    // 匹配。redraw_with_panel 与 100ms tick 的指纹账共用这一份,不然
+    // tick 拿 slash 提示算指纹,与真画出的搜索行对不上,帧帧空转重画。
+    const auto apply_search_hints = [&](RenderState& state) {
+        if (!history_search.active()) {
+            return;
+        }
+        const std::string query = Utf32ToUtf8(state.line);
+        if (query != history_search_last_query) {
+            history_search.Rerun(query);
+            history_search_last_query = query;
+        }
+        const std::optional<platform::ScreenInfo> info_now = platform::GetScreenInfo();
+        const int width = info_now.has_value() ? info_now->width : 80;
+        state.hint_lines =
+            BuildHistorySearchLines(history_search, query, width, theme.stats, theme.reset);
+        state.selected_index = -1;  // slash 菜单的选中镜像不适用于搜索行
+    };
+
+    auto redraw_with_panel = [&](const RenderState& raw_state, const std::vector<AgentPanelEntry>& entries) {
+        // 搜索开着:提示行位置换装成命中清单(查询变化就地重跑匹配)。
+        RenderState state = raw_state;
+        apply_search_hints(state);
         std::string tag;
         const std::vector<std::string> dock = build_dock(entries, tag);
         const std::vector<std::string> queue_rows = queue_rows_now();
@@ -1194,7 +1233,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             const std::vector<std::string> dock = build_dock(entries, tag);
             const std::vector<std::string> queue_rows = queue_rows_now();
             const AgentPanelSession::Snapshot snapshot = panel_session.SnapshotFor(nav_ids_for(entries));
-            const BottomChromeFrame frame = build_frame(queue_rows, dock, editor.CurrentRenderState(),
+            RenderState tick_state = editor.CurrentRenderState();
+            apply_search_hints(tick_state);  // 搜索行进指纹,与真画的那份同一账
+            const BottomChromeFrame frame = build_frame(queue_rows, dock, tick_state,
                                                          snapshot.selected_task_id);
             if (viewed_before_tick != 0 && snapshot.viewed_task_id == 0) {
                 // 正在查看的任务完成退场(结果交回 main)/被清理:原子回
@@ -1244,6 +1285,107 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             return std::nullopt;  // EOF/读失败
         }
         const auto entries_before_key = panel_entries();
+
+        // ---- Ctrl+R 提问历史搜索(0.30.x 第二批;键位全走 keymap) ----
+        // 搜索开着时整个键盘优先归它:命中的动作键(更早/换范围/接受/提交/
+        // 取消)与 ↑/↓ 选位都在这里消费;其余键(打字、退格、左右移)落到
+        // 编辑器当查询输入,命中清单随重画自然刷新。
+        if (composer) {
+            const auto search_chord = keymap::ChordFromKeyInput(*raw_key);
+            if (!history_search.active()) {
+                if (search_chord.has_value() && !queue_edit.has_value() &&
+                    keymap::ActiveKeymap().Lookup(keymap::KeyScope::Composer, *search_chord) ==
+                        keymap::ActionId::ChatSearchHistory &&
+                    PromptHistoryProviderSlot()) {
+                    // 打开:原草稿整份存起(取消时一字不少装回),编辑器清成
+                    // 空查询。没有数据源(单发/管道/未注册)时这个键不消费,
+                    // 落回编辑器原语义。
+                    history_search_draft = Utf32ToUtf8(editor.CurrentRenderState().line);
+                    history_search.Open(PromptHistoryProviderSlot()(), HistorySearchScope::Session);
+                    history_search_last_query.clear();
+                    editor.BeginLine(/*composer=*/true);
+                    redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
+                    continue;
+                }
+            } else if (search_chord.has_value()) {
+                using keymap::ActionId;
+                const auto search_action =
+                    keymap::ActiveKeymap().Lookup(keymap::KeyScope::Search, *search_chord);
+                const auto finish_search = [&](bool submit) -> std::optional<std::string> {
+                    const PromptHistoryEntry* entry = history_search.SelectedEntry();
+                    if (entry != nullptr) {
+                        editor.LoadText(Utf8ToUtf32(entry->text));  // 取回即新草稿,不改任何原件
+                    }
+                    history_search.Close();
+                    if (!submit) {
+                        return std::nullopt;
+                    }
+                    // Enter 接受并提交:合成一次 Enter 走编辑器的正常提交路
+                    // (历史账、提交帧全按老规矩),收尾与下面 box 提交同款。
+                    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Enter));
+                    if (box) {
+                        CollapseBoxOnSubmit(prev_frame_origin, prompt_end_col, prev_body_row_count,
+                                            state, prompt, vt_enabled);
+                    }
+                    std::cout << "\n";
+                    if (exit_reason != nullptr) {
+                        *exit_reason = ReadExitReason::Submitted;
+                    }
+                    return Utf32ToUtf8(state.line);
+                };
+                switch (search_action) {
+                    case ActionId::SearchOlder:
+                        history_search.MoveOlder();
+                        redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
+                        continue;
+                    case ActionId::SearchScopeCycle: {
+                        history_search.CycleScope();
+                        history_search.Rerun(Utf32ToUtf8(editor.CurrentRenderState().line));
+                        history_search_last_query = Utf32ToUtf8(editor.CurrentRenderState().line);
+                        redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
+                        continue;
+                    }
+                    case ActionId::SearchAccept:
+                        // Tab/Esc:接受命中回 composer 继续改;没有命中就当
+                        // 收起搜索还原草稿(与取消同效,不丢已敲的查询以外的东西)。
+                        if (history_search.SelectedEntry() == nullptr) {
+                            editor.LoadText(Utf8ToUtf32(history_search_draft));
+                        } else {
+                            (void)finish_search(/*submit=*/false);
+                        }
+                        history_search.Close();
+                        redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
+                        continue;
+                    case ActionId::SearchAcceptSubmit: {
+                        if (const auto submitted = finish_search(/*submit=*/true);
+                            submitted.has_value()) {
+                            return *submitted;
+                        }
+                        redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
+                        continue;
+                    }
+                    case ActionId::SearchCancel:
+                        editor.LoadText(Utf8ToUtf32(history_search_draft));  // 原草稿一字不少
+                        history_search.Close();
+                        redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
+                        continue;
+                    default:
+                        break;
+                }
+                // ↑/↓ 在命中条目间走(核心方向键,不是和弦)。
+                if (raw_key->kind == platform::KeyInput::Kind::Up) {
+                    history_search.MoveOlder();
+                    redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
+                    continue;
+                }
+                if (raw_key->kind == platform::KeyInput::Kind::Down) {
+                    history_search.MoveNewer();
+                    redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
+                    continue;
+                }
+            }
+        }
+
 
         // ---- Ctrl+L 整屏重画(规格"整屏重画"节):从状态重建,不吞输入 ----
         // 与 resize 共用 rebuild_screen。composer 草稿、面板选择、查看态与
@@ -1757,6 +1899,10 @@ void ShowPanelToast(const std::string& text) {
 }
 
 void SetIdleWakeHook(std::function<bool()> hook) { IdleWakeHookSlot() = std::move(hook); }
+
+void SetPromptHistoryProvider(PromptHistoryProvider provider) {
+    PromptHistoryProviderSlot() = std::move(provider);
+}
 
 void SetStatusLineData(const StatusPanelData& values, const std::vector<std::string>& items,
                        const std::string& separator) {

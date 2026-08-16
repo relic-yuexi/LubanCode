@@ -428,6 +428,14 @@ std::optional<KeyInput> KeyReader::ReadOne() {
         out.kind = KeyInput::Kind::CtrlK;  // 子代理面板:停止全部(两段确认第二段)
         return out;
     }
+    if (b0 == 0x10) {
+        out.kind = KeyInput::Kind::CtrlP;  // 历史:上一条(明确别名,不受多行位置影响)
+        return out;
+    }
+    if (b0 == 0x0e) {
+        out.kind = KeyInput::Kind::CtrlN;  // 历史:下一条
+        return out;
+    }
     if (b0 >= 0x01 && b0 <= 0x1a) {
         // Ctrl+字母(未列专枚举的那批):按 Char 送出并置 ctrl,交给
         // cli/keymap 和弦层分派(编辑器核心对带修饰的 Char 不当正文插)。
