@@ -32,6 +32,7 @@
 
 #include <fcntl.h>
 #include <poll.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -781,6 +782,13 @@ ChildProcess::~ChildProcess() {
 SpawnResult ChildProcess::Start(const std::string& command, const std::vector<std::string>& args,
                                   const EnvPairs& env, std::function<bool(std::string_view)> on_stdout,
                                   std::function<void(std::string_view)> on_stderr) {
+    return Start(command, args, env, std::move(on_stdout), std::move(on_stderr), SpawnConstraints{});
+}
+
+SpawnResult ChildProcess::Start(const std::string& command, const std::vector<std::string>& args,
+                                  const EnvPairs& env, std::function<bool(std::string_view)> on_stdout,
+                                  std::function<void(std::string_view)> on_stderr,
+                                  const SpawnConstraints& constraints) {
     IgnoreSigpipeOnce();
     on_stdout_ = std::move(on_stdout);
     on_stderr_ = std::move(on_stderr);
@@ -829,6 +837,20 @@ SpawnResult ChildProcess::Start(const std::string& command, const std::vector<st
             if (fd > STDERR_FILENO) {
                 close(fd);
             }
+        }
+        // PTC 沙箱:exec 前落资源墙。setrlimit 是 async-signal-safe 白名单外
+        // 的调用,但 fork 后单线程 exec 前的窗口里可用(glibc 文档允许)。
+        if (constraints.cpu_seconds > 0) {
+            struct rlimit cpu_limit{};
+            cpu_limit.rlim_cur = static_cast<rlim_t>(constraints.cpu_seconds);
+            cpu_limit.rlim_max = static_cast<rlim_t>(constraints.cpu_seconds);
+            setrlimit(RLIMIT_CPU, &cpu_limit);
+        }
+        if (constraints.memory_bytes > 0) {
+            struct rlimit as_limit{};
+            as_limit.rlim_cur = static_cast<rlim_t>(constraints.memory_bytes);
+            as_limit.rlim_max = static_cast<rlim_t>(constraints.memory_bytes);
+            setrlimit(RLIMIT_AS, &as_limit);
         }
         environ = env_block.ptrs.data();
         execvp(argv_ptrs[0], argv_ptrs.data());
@@ -995,6 +1017,14 @@ void ChildProcess::Shutdown(int wait_ms) {
         // 后代若还握着 stdout/stderr 写端,读线程等不到 EOF——补杀整组,
         // 对齐 Windows 关 Job 句柄的行为。
         killpg(pid, SIGKILL);
+        // PTC 沙箱归因:退出码缓存(WIFEXITED 取退出码;被信号杀记负数,
+        // SIGXCPU/SIGKILL 这类资源墙信号靠它辨认)。资源峰值(RUSAGE_CHILDREN
+        // 混着后台任务账)不可信,POSIX 这路留未知。
+        if (WIFEXITED(exit_status_)) {
+            exit_code_cache_ = WEXITSTATUS(exit_status_);
+        } else if (WIFSIGNALED(exit_status_)) {
+            exit_code_cache_ = -WTERMSIG(exit_status_);
+        }
     }
 
     JoinReaderThreads();
@@ -1027,6 +1057,14 @@ bool ChildProcess::IsAlive() const {
     }
     return r == 0;  // 0 = 还活着;-1 = 查不到,当死了算
 }
+
+ChildResourceUsage ChildProcess::ResourceUsageSnapshot() const {
+    // POSIX:RUSAGE_CHILDREN 混着后台命令的账,拆不出这家子进程自己的数,
+    // 如实返回未知(全零);撞线归因走 exit_code 的负数信号编码。
+    return resource_usage_cache_;
+}
+
+int ChildProcess::exit_code() const { return exit_code_cache_; }
 
 bool IsProcessAlive(unsigned long pid) {
     if (pid == 0) {
