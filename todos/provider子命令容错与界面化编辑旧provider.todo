@@ -1,0 +1,52 @@
+# provider 子命令容错与界面化编辑旧 provider
+
+状态：待做（2026-08-16 用户真机实录）
+
+## 现场
+
+用户敲 `/provider set custom auth none` 成功后,手滑敲了 `/provider swtich custom`:
+
+```text
+> /provider swtich custom
+用法:
+  /provider list
+  /provider refresh    从 LubanCode 仓库更新常见厂家目录
+  /provider add        进分步向导(裸敲)
+  ...(整整 13 行全家桶)
+```
+
+再敲 `/provider swtich` 又是一整屏。两张问题:
+
+1. **未知子命令倒总用法**——上一单明令"非 TTY 裸敲 switch 只打 switch 专用短用法,不倒 add/remove/set 全家桶";但子命令拼错(swtich/proivder/adds)直接落 Invalid 分支,规矩没覆盖到它。
+2. **旧 provider 没有界面编辑**——`set` 命令一行一行改太难受;向导只能 add 不能 edit。
+
+## 需求
+
+### 一、子命令容错
+
+- `/provider <未知词>` 时:与已知子命令(list/refresh/add/switch/remove/set)做编辑距离比对,最近邻距离<=2 给一句"是不是想敲 `switch`?"+**该子命令的专用短用法**(不倒全家桶)。
+- 没有近邻时,TTY 给短提示+最常用三行(add/switch/list);非 TTY 只给一行"用法: /provider <子命令>,敲 /provider list 看已配"。任何路径都不再打 13 行总表——总表只留给 `/help`。
+- 匹配规则写纯函数,单测钉死(swtich→switch、lst→list、remvoe→remove、无理词→无近邻)。
+
+### 二、/provider edit <名字> 界面编辑
+
+- `/provider edit <名字>`(TTY)进**同一套向导面板**(复用 ProviderWizardState/WizardPanel/回程票),所有字段**预填现有值**:回车=保留原值,改动才落。
+- 直接进汇总页起手(八步都可跳),改哪项点哪项,回程票直回汇总;确认页 diff 出本次改了哪些字段(旧值→新值,key 只露掩码)。
+- 确认才写盘;取消/Ctrl+C 不动配置。写盘保持其他字段原样。
+- key 处理:auth=inline 时显示"已设置明文密钥(掩码)",重新输入才换;auth=none/env 同向导规矩。
+- `/provider edit` 裸敲(TTY)开 provider 选择列表(复用 switch 选择器面板),选中进编辑;非 TTY 给短用法。
+- switch 选择器里加一项快捷:选中某 provider 按 `e` 直接进编辑。
+- i18n 中英成对;面板窄终端/resize 按既有 WizardPanel 规矩。
+
+## 验收
+
+- 敲 `swtich`/`swtich custom`/`lst`:各只见一句纠错+该子命令短用法,屏上无 13 行总表。
+- `/provider edit custom` 进面板,全字段预填,回车逐项保留,只改 base_url 一项,确认后 diff 只列这一项,其他字段(含 key 掩码)原样。
+- 取消后配置文件 mtime 不变。
+- 裸敲 edit 开选择列表;switch 面板按 e 进编辑。
+- 纯函数容错单测 + 向导 fixture 五组(前进/后退/跳转/失效/取消)对 edit 模式照跑。
+
+## 不做
+
+- 不做模糊自动执行(纠错只建议,不替用户跑)。
+- 不在 edit 里改 provider 名字(改名=删旧建新,风险另议;本期明确提示不支持)。
