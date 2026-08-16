@@ -118,6 +118,12 @@ add_executable(lubancode_tests
   # 可追回 artifact(第二期):分块边界/原子落盘/hash 隔离/预算拒绝/
   # CompressWorkingView 落仓/两把只读钥匙的 scope。
   test_artifact_store.cpp
+  # L2 microcompact(第三期):冷区挑选/触发线与迟滞/摘要解析/失败退 L1/
+  # 应用趟与渲染(假 backend,mock 全程)。
+  test_microcompact.cpp
+  # ContextBudgetPlan(第四期):统一预算总账公式/窗口未知与超窗边界/
+  # 摘要目标与压缩请求输入预算分账。
+  test_context_budget.cpp
   # memory schema 3 front matter(往返字节稳定/坑人字符/双格式剥壳)。
   test_memory_frontmatter.cpp
   # memory 检索评测尺子(固定语料,Recall/Precision/注入字节/stale 拦截率)。

@@ -12,6 +12,7 @@
 #include <string>
 
 #include "agent/compact.hpp"
+#include "agent/context_budget.hpp"
 #include "agent/loop.hpp"
 #include "agent/session_store.hpp"
 #include "api/backend.hpp"
@@ -47,6 +48,19 @@ std::size_t EstimateHistoryTokens(const std::vector<lubancode::api::Message>& hi
 // 前缀记账序号(agent/prefix.hpp),有实测 usage 时多打一行前缀缓存账。
 // main_profile(可空):当前 loop 实际吃到的运行策略,非空时多打一行输出
 // 上限与来源(规格根因一:"本轮上限"看得见,unset 也说破)。
+// /context 的分层占用与预算报告(第四期,规格"/context"节):由会话现场
+// 收集——视图各层的枚数与字节、ContextBudgetPlan 总账、最近一次 compact
+// 的台账。字段全可选/零值安全,没有就不打那一行。
+struct ContextLayersReport {
+    std::size_t inline_full_results = 0;      // 视图里全文的结果枚数(L0)
+    std::size_t artifact_previews = 0;        // L1 预览枚数
+    std::size_t microcompact_summaries = 0;   // L2 摘要枚数(原文数 = artifact 预览+摘要)
+    std::size_t reclaimable_bytes = 0;        // 结构压缩最近一次请求省下的字节
+    std::optional<lubancode::agent::ContextBudgetPlan> budget;
+    // 最近一次 compact:"cheap:m · 62k→18k · 3.2s · 校验通过";空 = 没压过。
+    std::string last_compact_line;
+};
+
 // usage_ledger(可空,模型分工第一期):分角色 usage 台账,非空时列一节
 // "模型调用分角色账"——普通 turn 归 normal,压缩/抽取/标题归 cheap,
 // 回退另有留痕(规格"路由看得见")。
@@ -55,7 +69,8 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                            const lubancode::cli::Theme& theme, int cache_epoch = 1,
                            const lubancode::agent::AgentRuntimeProfile* main_profile = nullptr,
                            const lubancode::agent::ModelUsageLedger* usage_ledger = nullptr,
-                           const lubancode::agent::ContextArtifactStore* artifact_store = nullptr);
+                           const lubancode::agent::ContextArtifactStore* artifact_store = nullptr,
+                           const ContextLayersReport* layers = nullptr);
 
 
 // /compact 命令的结果:event 是 compact_v2 压缩事件(archive + kept_from +

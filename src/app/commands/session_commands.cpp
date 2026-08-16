@@ -53,7 +53,8 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                            const lubancode::cli::Theme& theme, int cache_epoch,
                            const lubancode::agent::AgentRuntimeProfile* main_profile,
                            const lubancode::agent::ModelUsageLedger* usage_ledger,
-                           const lubancode::agent::ContextArtifactStore* artifact_store) {
+                           const lubancode::agent::ContextArtifactStore* artifact_store,
+                           const ContextLayersReport* layers) {
     if (args.empty()) {
         const auto lines = lubancode::cli::FormatContextBreakdown(
             sys_tokens, tools_tokens, history_tokens, context_tracker.last_cache_read_tokens(),
@@ -103,6 +104,55 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                 std::cout << trf("cmd.context.artifacts", stats.artifacts, stats.total_bytes) << "\n";
             } else {
                 std::cout << tr("cmd.context.artifacts_none") << "\n";
+            }
+        }
+        // 分层占用与预算总账(第四期,规格"/context"节):inline 正文/L1
+        // 预览/L2 摘要各几枚、预算怎么扣的、下一触发线在哪、最近一次
+        // compact 用了谁——一张单子说清 token 花在哪、何时会压、原文去
+        // 哪找(规格验收)。
+        if (layers != nullptr) {
+            std::cout << trf("cmd.context.layers", layers->inline_full_results, layers->artifact_previews,
+                             layers->microcompact_summaries)
+                      << "\n";
+            if (layers->reclaimable_bytes > 0) {
+                std::cout << trf("cmd.context.reclaimable", layers->reclaimable_bytes) << "\n";
+            }
+            if (layers->budget.has_value()) {
+                const auto& plan = *layers->budget;
+                std::cout << trf("cmd.context.budget", plan.window,
+                                 plan.compactable_history_budget.has_value()
+                                     ? lubancode::cli::FormatTokenCount(*plan.compactable_history_budget)
+                                     : std::string("?"),
+                                 lubancode::cli::FormatTokenCount(plan.overhead_total()))
+                          << "\n";
+                std::cout << trf("cmd.context.budget_detail", plan.stable_system + plan.model_instructions,
+                                 plan.tool_schemas, plan.protected_hot_zone, plan.requested_output_reserve,
+                                 plan.compact_prompt_overhead + plan.protocol_headroom,
+                                 plan.tokenizer_error_margin)
+                          << "\n";
+                if (plan.compact_call_input_budget.has_value()) {
+                    std::cout << trf("cmd.context.compact_budget",
+                                     lubancode::cli::FormatTokenCount(*plan.compact_call_input_budget),
+                                     lubancode::cli::FormatTokenCount(plan.summary_target_budget))
+                              << "\n";
+                }
+                // 下一触发线:窗口的自动压缩线(kAutoCompactThresholdPercent)
+                // 与当前占用的差,迟滞/分道在各自层里另有账。
+                const std::size_t window = context_tracker.window_tokens();
+                if (window > 0) {
+                    const std::size_t line = window * 80 / 100;  // 与 kAutoCompactThresholdPercent 同档
+                    const auto used = static_cast<std::int64_t>(context_tracker.current_tokens());
+                    std::cout << trf("cmd.context.next_line", lubancode::cli::FormatTokenCount(line),
+                                     used >= 0 ? lubancode::cli::FormatTokenCount(used) : std::string("0"),
+                                     used >= static_cast<std::int64_t>(line)
+                                             ? tr("cmd.context.next_line_over")
+                                             : lubancode::cli::FormatTokenCount(
+                                                   static_cast<std::int64_t>(line) - used))
+                              << "\n";
+                }
+            }
+            if (!layers->last_compact_line.empty()) {
+                std::cout << trf("cmd.context.last_compact", layers->last_compact_line) << "\n";
             }
         }
         // 分角色 usage 台账(模型分工第一期,规格"路由看得见"):普通 turn

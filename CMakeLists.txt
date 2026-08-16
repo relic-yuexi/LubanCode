@@ -342,6 +342,8 @@ add_library(lubancode_core STATIC
   src/agent/model_router.cpp
   src/agent/prefix.cpp
   src/agent/compact.cpp
+  src/agent/context_budget.cpp
+  src/agent/microcompact.cpp
   src/agent/session_store.cpp
   src/agent/workflow_recorder.cpp
   src/agent/skill_drafter.cpp

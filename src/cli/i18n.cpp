@@ -1008,6 +1008,20 @@ const Entry kZhCN[] = {
     {"artifact.store_open_failed", "[artifact] 上下文仓开不了({0}),超长结果退回内存全文,不产生假引用。"},
     {"cmd.context.artifacts", "artifact 层:{0} 枚落盘 · 全文共 {1} 字节可追回(context_search/context_read 按 id 检索)"},
     {"cmd.context.artifacts_none", "artifact 层:本会话尚无落盘的超长工具结果。"},
+
+    // ---- L2 microcompact(第三期):冷区局部语义压缩 ----
+    {"microcompact.done", "[microcompact] 冷区收拾:{0} 枚换成 cheap 摘要(原文在仓,context_read 可追);{1} 枚退回 L1 预览。"},
+    {"microcompact.all_failed", "[microcompact] 本趟全部失败,冷区保持 L1 预览,原文未动。"},
+
+    // ---- ContextBudgetPlan 与分层占用(第四期,/context 展示) ----
+    {"cmd.context.layers", "分层占用:inline 全文 {0} 枚 · artifact 预览(L1){1} 枚 · microcompact 摘要(L2){2} 枚"},
+    {"cmd.context.reclaimable", "结构压缩最近一次请求回收 ~{0} 字节(重复收敛 + 长结果外置)"},
+    {"cmd.context.budget", "预算总账:窗口 {0} · 开销 {2} · 可压缩历史 {1}(统一估算口径)"},
+    {"cmd.context.budget_detail", "  开销明细:system+模型指令 {0} · 工具声明 {1} · 热区 {2} · 输出预留 {3} · 压缩指令+协议 {4} · 估算误差边 {5}"},
+    {"cmd.context.compact_budget", "压缩预算:单次压缩请求输入上限 {0} · 摘要产出目标 {1}(两只数不混用)"},
+    {"cmd.context.next_line", "下一触发线:{0}(窗口 80%) · 当前 {1} · {2}"},
+    {"cmd.context.next_line_over", "已越线,下一轮发送前会自动压缩"},
+    {"cmd.context.last_compact", "最近一次 compact:{0}"},
     {"cmd.think.current", "当前推理强度: {0}"},
     {"cmd.think.catalog_header", "模型目录声明的档位({0}):"},
     {"cmd.think.provider_header", "provider 声明的档位(请求参数 {0}):"},
