@@ -5,7 +5,6 @@
 #include <chrono>
 #include <cctype>
 #include <cmath>
-#include <cstdlib>
 #include <ctime>
 #include <fstream>
 #include <iomanip>
@@ -2089,9 +2088,9 @@ std::string ProjectMemory::BuildTurnContext(const std::string& query, const fs::
         }
         // 用户层命中在头里标注来源层;项目层保持原样,不给 prompt 平添
         // 噪声(规格:不能两份正文重复注入,且要说清来自哪一层)。
-        const std::string origin = traced.layer == "user" ? "(用户级记忆)" : "";
-        body += "\n## 召回: " + entry.id + origin + "\n\n来源: " + PathUtf8(topic_dir / Utf8Path(entry.file)) +
-                "\n\n" + topic + "\n";
+        const std::string layer_note = traced.layer == "user" ? "(用户级记忆)" : "";
+        body += "\n## 召回: " + entry.id + layer_note + "\n\n来源: " +
+                PathUtf8(topic_dir / Utf8Path(entry.file)) + "\n\n" + topic + "\n";
         used += topic.size();
         ++emitted;
         traced.injected = true;
@@ -2644,21 +2643,27 @@ std::expected<void, std::string> ProjectMemory::CommitTopicEdit(const TopicEditS
     return RebuildMemoryIndex(session.dir, session.level == "user");
 }
 
+// 编辑器选择:$VISUAL 压过 $EDITOR;都没给就退平台缺省(Windows 记事本、
+// 类 Unix vi)。命令行里带空格的路径由进程启动层负责引号。
+std::string PickEditorProgram() {
+    if (const auto visual = platform::GetEnvVar("VISUAL"); visual.has_value()) {
+        return *visual;
+    }
+    if (const auto editor = platform::GetEnvVar("EDITOR"); editor.has_value()) {
+        return *editor;
+    }
+#ifdef _WIN32
+    return "notepad";
+#else
+    return "vi";
+#endif
+}
+
 std::expected<void, std::string> ProjectMemory::EditTopicInEditor(const std::string& id) const {
     auto session = BeginTopicEdit(id);
     if (!session.has_value()) return std::unexpected(session.error());
 
-    // 编辑器:$VISUAL 压过 $EDITOR;都没给就退平台缺省(Windows 记事本、
-    // 类 Unix vi)。命令行里带空格的路径由进程启动层负责引号。
-    const char* visual = std::getenv("VISUAL");
-    const char* editor = std::getenv("EDITOR");
-    std::string program = visual != nullptr && *visual != '\0' ? visual
-                          : editor != nullptr && *editor      ? editor
-#ifdef _WIN32
-                                                             : "notepad";
-#else
-                                                             : "vi";
-#endif
+    const std::string program = PickEditorProgram();
     const int kEditorTimeoutMs = 30 * 60 * 1000;
     const auto ran = platform::RunProcess({program, PathUtf8(session->scratch)}, kEditorTimeoutMs);
     if (ran.spawn_failed || ran.timed_out) {
@@ -2671,15 +2676,7 @@ std::expected<void, std::string> ProjectMemory::EditTopicInEditor(const std::str
 }
 
 std::expected<void, std::string> ProjectMemory::OpenIndexInEditor() const {
-    const char* visual = std::getenv("VISUAL");
-    const char* editor = std::getenv("EDITOR");
-    std::string program = visual != nullptr && *visual != '\0' ? visual
-                          : editor != nullptr && *editor      ? editor
-#ifdef _WIN32
-                                                             : "notepad";
-#else
-                                                             : "vi";
-#endif
+    const std::string program = PickEditorProgram();
     const fs::path index = memory_dir_ / "index.md";
     std::error_code ec;
     if (!fs::exists(index, ec)) {
