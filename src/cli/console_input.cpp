@@ -69,6 +69,17 @@
 
 namespace lubancode::cli {
 
+std::vector<CompletionCandidate> BuildSlashCompletionCandidates() {
+    // 见 console_input.hpp 的声明注释:空闲 SharedEditor() 与流式监听线程
+    // 的本地编辑器共用这唯一一只转换口,组装循环不许再抄第二遍。
+    std::vector<CompletionCandidate> candidates;
+    candidates.reserve(AllSlashCommands().size());
+    for (const auto& cmd : AllSlashCommands()) {
+        candidates.push_back(CompletionCandidate{cmd.name, cmd.description});
+    }
+    return candidates;
+}
+
 namespace {
 
 void StripTrailingCrLf(std::string& s) {
@@ -83,31 +94,10 @@ void StripTrailingCrLf(std::string& s) {
 // 贯穿整条交互会话存活的编辑器实例:main.cpp 里 `> ` 主循环、工具确认
 // 提示、/model 选择、初次配置向导,全部经这一个 ReadLine() 入口,底下共用
 // 这一份 LineEditorCore——历史列表、确认模式才有地方跨多轮读取存住。
-// 补全候选从 cli::slash_commands 现有定义转过来,不重复写一份命令清单。
+// 补全候选从 BuildSlashCompletionCandidates() 转来,不重复写一份命令清单。
 LineEditorCore& SharedEditor() {
-    static LineEditorCore editor = [] {
-        std::vector<CompletionCandidate> candidates;
-        for (const auto& cmd : AllSlashCommands()) {
-            candidates.push_back(CompletionCandidate{cmd.name, cmd.description});
-        }
-        return LineEditorCore(std::move(candidates));
-    }();
+    static LineEditorCore editor = [] { return LineEditorCore(BuildSlashCompletionCandidates()); }();
     return editor;
-}
-
-// 流式输入行 slash 提示的候选表:跟 SharedEditor 同一份来源(AllSlashCommands
-// 转候选),但单独建一份静态表——监听线程只拿它喂纯函数
-// StreamSlashHintLines 现算提示行,不碰 SharedEditor 的编辑状态/历史,两边的
-// 键盘路径互不知晓。命令清单仍只有 slash_commands 那一份,不抄第二遍。
-const std::vector<CompletionCandidate>& StreamHintCandidates() {
-    static const std::vector<CompletionCandidate> candidates = [] {
-        std::vector<CompletionCandidate> out;
-        for (const auto& cmd : AllSlashCommands()) {
-            out.push_back(CompletionCandidate{cmd.name, cmd.description});
-        }
-        return out;
-    }();
-    return candidates;
 }
 
 // UI-D(0.16.0):会话级 UI 按键回调(Ctrl+O/Ctrl+E/焦点导航)。存这儿、
@@ -2335,9 +2325,13 @@ void TurnInputListener::ThreadMain() {
     // 排队输入/取回编辑共用一只真正的 LineEditorCore(composer 模式)。不用
     // SharedEditor():那份是前台"真正在读一行"的编辑器,历史/档位是会话级
     // 状态,监听线程不能去碰;这里只要光标/退格/粘贴/多行软换行这些纯编辑
-    // 能力,补全候选给空表(流式输入行的 slash 提示由 StreamSlashHintLines
-    // 现算,不碰编辑器状态)。
-    LineEditorCore editor;
+    // 能力。补全候选走与空闲路同一只 BuildSlashCompletionCandidates():slash
+    // 提示、Tab 补全/公共前缀/轮转全在编辑器一处记账,footer 只读它的
+    // RenderState(见下面 refresh_footer),不再养第二套提示状态机。方向键
+    // 直选菜单关掉:流式期间 Up/Down 分给代理面板、队列条目编辑与历史浏览
+    // (规格五),本单只补 Tab。
+    LineEditorCore editor(BuildSlashCompletionCandidates());
+    editor.set_menu_selection_enabled(false);
     editor.BeginLine(/*composer=*/true);
 
     // 代理面板(规格三/四):流式期间与空闲 composer 共用同一枚会话级
@@ -2395,27 +2389,22 @@ void TurnInputListener::ThreadMain() {
     bool delete_armed = false;
     std::chrono::steady_clock::time_point delete_armed_until{};
 
-    // 输入行回显:多行正文只摆首行,尾巴带行数提示(完整正文在取回编辑器
-    // 里看/改;footer 的输入行是单行会计,不能塞换行)。
-    auto echo_text = [&] {
-        const RenderState state = editor.CurrentRenderState();
-        const std::string first = Utf32ToUtf8(state.lines.empty() ? std::u32string() : state.lines[0]);
-        if (state.lines.size() <= 1) {
-            return first;
-        }
-        return first + trf("queue.echo_more_lines", state.lines.size() - 1);
-    };
-
-    // footer 快照:输入行回显 + slash 提示(队列区在 RedrawStreamFooterLocked
-    // 里现拉 SteeringQueue 快照,这里不用搬)。Windows 真控制台之外
-    // (footer.enabled 为假)这些都是空操作,退回老的"不回显、只 Enter 时
-    // 整条落队"。
+    // footer 快照:输入行回显 + slash 提示,全部取本地编辑器同一份
+    // RenderState(队列区在 RedrawStreamFooterLocked 里现拉 SteeringQueue
+    // 快照,这里不用搬)。回显多行正文只摆首行、尾巴带行数提示(完整正文在
+    // 取回编辑器里看/改;footer 的输入行是单行会计,不能塞换行)。slash 提示
+    // 直接用编辑器的 hint_lines:候选名单、Tab 轮转的 "> " 选中标记、收起门槛
+    // (还在敲命令词才列,补成 "/effort " 这类带空格的完成态就收)全在编辑器
+    // 一处记账,footer 不拿回显文本另算一份没有状态的菜单。Windows 真控制台
+    // 之外(footer.enabled 为假)这些都是空操作,退回老的"不回显、只 Enter
+    // 时整条落队"。
     auto refresh_footer = [&] {
         std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
-        FooterSlot().echo = echo_text();
-        // slash 提示:编辑态(取回改写)和敲字态同一条规则——buffer 以 '/'
-        // 开头、还没敲空格就实时列出匹配命令,纯函数现算,不碰任何编辑器状态。
-        FooterSlot().hints = StreamSlashHintLines(StreamHintCandidates(), FooterSlot().echo);
+        const RenderState state = editor.CurrentRenderState();
+        const std::string first = Utf32ToUtf8(state.lines.empty() ? std::u32string() : state.lines[0]);
+        FooterSlot().echo =
+            state.lines.size() <= 1 ? first : first + trf("queue.echo_more_lines", state.lines.size() - 1);
+        FooterSlot().hints = state.hint_lines;
         RedrawStreamFooterLocked();
     };
 
@@ -2648,8 +2637,8 @@ void TurnInputListener::ThreadMain() {
             // (工具确认/ask_user)时说明那条路自己会处理按键,这里让路、
             // 不抢。重画走 stdout 锁:footer 挂起期间(确认菜单里)自动只记
             // 不画,退场第一帧带出;连切只原地换状态行,不铺提示行残骸
-            // (对齐空闲路 M11 的取舍)。Tab 不跟着做:流式输入行不引入补全
-            // 交互,维持不理会。
+            // (对齐空闲路 M11 的取舍)。Tab 与它分工:Shift+Tab 只切档,非空
+            // 的 Tab 落进本地编辑器走 slash 补全,空正文 Tab 在下面明拦 no-op。
             {
                 std::unique_lock<std::mutex> mode_lock(ConsoleReadMutex(), std::try_to_lock);
                 if (!mode_lock.owns_lock()) {
@@ -2806,8 +2795,18 @@ void TurnInputListener::ThreadMain() {
             }
         }
 
-        // 其余按键统一喂编辑器(字符/粘贴/退格/左右/Home/End;Tab 等 MapKey
-        // 不认的维持不理会,跟老逻辑一致)。任意编辑动作解除 Del 待确认。
+        // 忙碌且 composer 为空时的 Tab:监听线程明确 no-op。这一下若喂给
+        // 编辑器,composer 模式会把它翻成"进焦点态 + focus_move",而监听
+        // 线程既不消费那个返回值、也不真切换焦点——画面没动,编辑器内部却
+        // 换了暗状态,后续 Tab 的补全语义跟着遭殃。流式期间焦点浏览本就不
+        // 开(docs/terminal-ui.md),这里当场拦下;拦过之后再键入 /eff,第
+        // 一下 Tab 照常补全,不受任何残留状态影响。
+        if (key->kind == PK::Tab && editor.CurrentRenderState().line.empty()) {
+            continue;
+        }
+
+        // 其余按键统一喂编辑器(字符/粘贴/退格/左右/Home/End;非空的 Tab
+        // 落进编辑器走 slash 补全/轮转)。任意编辑动作解除 Del 待确认。
         if (const std::optional<KeyEvent> mapped = MapKey(*key); mapped.has_value()) {
             delete_armed = false;
             editor.HandleKey(*mapped);

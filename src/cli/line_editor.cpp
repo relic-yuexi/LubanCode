@@ -630,9 +630,13 @@ RenderState LineEditorCore::BuildRenderState(bool submitted, bool cleared, bool 
         } else if (tab_cycle_.has_value()) {
             matches = tab_cycle_->matches;
             selected_index = tab_cycle_->index;
-        } else {
-            const std::u32string word = CurrentWord(lines_[0]);
-            matches = MatchingCandidateNames(word);
+        } else if (lines_[0].find(U' ') == std::u32string::npos) {
+            // 还在敲命令词(整行没空格)才现算候选。命令词后面已带尾巴——
+            // 补成 "/effort " 的唯一命中完成态、或用户已敲参数进了参数区
+            // ——提示收起,不留小尾巴;这跟 HandleTab"光标越过命令词就不补"
+            // 是同一把门槛。轮转/菜单态各有进入那一刻存好的名单,不走这道
+            // 门,选中标记照常跟随。
+            matches = MatchingCandidateNames(lines_[0]);
         }
         state.hint_lines = BuildHintLines(matches, selected_index);
         state.selected_index = selected_index;
@@ -821,7 +825,8 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
             if (row_ + 1 < lines_.size()) {
                 ++row_;
                 col_ = std::min(col_, lines_[row_].size());
-            } else if (lines_.size() == 1 && !lines_[0].empty() && lines_[0].front() == U'/') {
+            } else if (menu_select_enabled_ && lines_.size() == 1 && !lines_[0].empty() &&
+                       lines_[0].front() == U'/') {
                 // 0.16.0:单行、以 / 开头、候选非空——↓ 进入菜单选择态,选中
                 // 第一条。候选为空(比如 /zzz)不进菜单,↓ 保持翻历史的老
                 // 语义;多行 composer 里 / 是正文,走不到这个分支(上面的
@@ -931,52 +936,6 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
     }
 
     return BuildRenderState(false, false, false, false);
-}
-
-std::vector<std::string> StreamSlashHintLines(const std::vector<CompletionCandidate>& candidates,
-                                              const std::string& buffer_utf8) {
-    // 出提示的门槛建在码点层:首字符是 '/'、整段没有空格。空串自然不过门。
-    const std::u32string buffer = Utf8ToUtf32(buffer_utf8);
-    if (buffer.empty() || buffer.front() != U'/' ||
-        buffer.find(U' ') != std::u32string::npos) {
-        return {};
-    }
-
-    // 匹配与 LineEditorCore::MatchingCandidateNames 同一规矩:ASCII 命令名
-    // 大小写不敏感前缀匹配,命中按候选表原顺序摆。
-    const std::string word_lower = ToLowerAscii(buffer_utf8);
-    std::vector<std::string> matches;
-    for (const auto& cand : candidates) {
-        const std::string cand_lower = ToLowerAscii(cand.name);
-        if (cand_lower.size() >= word_lower.size() &&
-            cand_lower.compare(0, word_lower.size(), word_lower) == 0) {
-            matches.push_back(cand.name);
-        }
-    }
-    if (matches.empty()) {
-        return {};
-    }
-
-    // 摆法跟 LineEditorCore::BuildHintLines(selected_index = -1) 一致:一行
-    // "  /name  说明",封顶 6 行,超出加一行汇总;没有选中态,不出 "> " 行。
-    constexpr std::size_t kMaxLines = 6;
-    std::vector<std::string> lines;
-    for (std::size_t i = 0; i < matches.size() && i < kMaxLines; ++i) {
-        std::string line = "  ";
-        line += matches[i];
-        line += "  ";
-        for (const auto& cand : candidates) {
-            if (cand.name == matches[i]) {
-                line += cand.description;
-                break;
-            }
-        }
-        lines.push_back(std::move(line));
-    }
-    if (matches.size() > kMaxLines) {
-        lines.push_back(trf("ui.menu_more", matches.size()));
-    }
-    return lines;
 }
 
 }  // namespace lubancode::cli

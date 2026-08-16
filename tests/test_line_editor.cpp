@@ -5,8 +5,11 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <string>
 
+#include "cli/console_input.hpp"  // BuildSlashCompletionCandidates(候选唯一转换口)
 #include "cli/line_editor.hpp"
+#include "cli/slash_commands.hpp"  // AllSlashCommands
 
 using namespace lubancode::cli;
 
@@ -497,6 +500,182 @@ TEST_CASE("LineEditorCore: 候选超过 6 个,提示区最多 6 行 + 一行汇�
     CHECK(summary.find("8") != std::string::npos);  // 汇总行报出总数
     CHECK(summary.find("/a6") == std::string::npos);  // 第 7、8 个候选没有单独一行
     CHECK(summary.find("/a7") == std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// 忙碌排队输入框(TurnInputListener 的本地编辑器)的 Tab 补全:候选同样来自
+// BuildSlashCompletionCandidates(),提示直接读 RenderState(接线层不再另算
+// StreamSlashHintLines 那份平行账)。这里用与监听线程同款构造钉死编辑器侧
+// 语义;监听线程"空正文 Tab 明拦 no-op"的接线在 console_input.cpp。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("BuildSlashCompletionCandidates: 与 AllSlashCommands 逐条对齐,/think /effort 都在") {
+    const auto candidates = BuildSlashCompletionCandidates();
+    const auto& commands = AllSlashCommands();
+    REQUIRE(candidates.size() == commands.size());
+    for (std::size_t i = 0; i < commands.size(); ++i) {
+        CHECK(candidates[i].name == commands[i].name);          // 顺序一致
+        CHECK(candidates[i].description == commands[i].description);  // 说明同源
+    }
+    bool has_think = false;
+    bool has_effort = false;
+    for (const auto& cand : candidates) {
+        has_think = has_think || cand.name == "/think";
+        has_effort = has_effort || cand.name == "/effort";
+    }
+    CHECK(has_think);
+    CHECK(has_effort);
+}
+
+TEST_CASE("忙碌路同款 editor: /eff 出提示,Tab 一补成 /effort ,提示收起") {
+    LineEditorCore editor(BuildSlashCompletionCandidates());
+    editor.BeginLine(/*composer=*/true);
+    TypeString(editor, "/eff");
+    const RenderState before = editor.CurrentRenderState();
+    REQUIRE(before.hint_lines.size() == 1);  // 看得见:唯一命中 /effort
+    CHECK(before.hint_lines[0].find("/effort") != std::string::npos);
+
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.line == U"/effort ");  // 按得着:一下补成整名 + 空格
+    CHECK(state.cursor == state.line.size());
+    CHECK(state.hint_lines.empty());  // 补全带空格即收,不留 /effort 小尾巴
+}
+
+TEST_CASE("忙碌路同款 editor: 大小写不敏感,候选名写回规范小写") {
+    LineEditorCore editor(BuildSlashCompletionCandidates());
+    editor.BeginLine(/*composer=*/true);
+    TypeString(editor, "/EFF");
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.line == U"/effort ");
+    CHECK(state.cursor == state.line.size());
+}
+
+TEST_CASE("忙碌路同款 editor: 三枚同前缀,公共前缀 → 连续轮转 → 选中标记跟随") {
+    std::vector<CompletionCandidate> candidates = {
+        {"/alpha", "甲"},
+        {"/alpine", "乙"},
+        {"/alphabet", "丙"},
+    };
+    LineEditorCore editor(std::move(candidates));
+    editor.BeginLine(/*composer=*/true);
+    TypeString(editor, "/al");
+
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.line == U"/alp");  // 第一下只补最长公共前缀,不进轮转
+    REQUIRE(state.hint_lines.size() == 3);
+    for (const auto& line : state.hint_lines) {
+        CHECK(line.rfind("  ", 0) == 0);  // 没选中任何候选,不出 "> "
+    }
+
+    auto marked_name = [](const RenderState& s) {
+        for (const auto& line : s.hint_lines) {
+            if (line.rfind("> ", 0) == 0) {
+                return line;
+            }
+        }
+        return std::string();
+    };
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.line == U"/alpha ");  // 第二下开始轮转,第一枚候选
+    REQUIRE(state.hint_lines.size() == 3);
+    CHECK(marked_name(state).find("/alpha") != std::string::npos);  // 标记跟着走
+
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.line == U"/alpine ");
+    CHECK(marked_name(state).find("/alpine") != std::string::npos);
+
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.line == U"/alphabet ");
+    CHECK(marked_name(state).find("/alphabet") != std::string::npos);
+
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.line == U"/alpha ");  // 转一圈回来
+
+    state = editor.HandleKey(KeyEvent::Char(U'x'));  // 打字打断轮转会话
+    CHECK(state.line == U"/alpha x");
+    CHECK(state.hint_lines.empty());  // 命令词后带尾巴,提示收起
+    const std::u32string frozen = state.line;
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.line == frozen);  // 光标在参数区,旧轮转会话已失效,不乱补
+}
+
+TEST_CASE("忙碌路同款 editor: 先空输入 Tab,再键入 /eff,第一下 Tab 仍补全") {
+    LineEditorCore editor(BuildSlashCompletionCandidates());
+    editor.BeginLine(/*composer=*/true);
+    // 空正文 Tab 若真喂进编辑器,会进焦点态(监听线程在真路径上明拦 no-op,
+    // 见 console_input.cpp);这里故意喂一下,钉死"即便留下焦点态,打字也会
+    // 把它退干净,后续补全不受暗状态祸害"。
+    const RenderState focus = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(focus.focus_active);
+    CHECK(focus.focus_move == 1);
+
+    TypeString(editor, "/eff");
+    const RenderState typing = editor.CurrentRenderState();
+    CHECK_FALSE(typing.focus_active);  // 打字退出焦点态
+    REQUIRE(typing.hint_lines.size() == 1);
+
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.line == U"/effort ");  // 仍只需一下
+    CHECK(state.cursor == state.line.size());
+}
+
+TEST_CASE("忙碌路同款 editor: 参数区、普通正文、多行、未知前缀,Tab 均不误改") {
+    LineEditorCore editor(BuildSlashCompletionCandidates());
+    editor.set_menu_selection_enabled(false);  // 监听线程同款构造:关方向键直选
+    editor.BeginLine(/*composer=*/true);
+
+    TypeString(editor, "/eff xhigh");
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.line == U"/eff xhigh");  // 光标在参数区,不补命令词
+    CHECK(state.hint_lines.empty());
+
+    editor.BeginLine(/*composer=*/true);
+    TypeString(editor, "hello world");
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.line == U"hello world");  // 普通正文
+    CHECK(state.hint_lines.empty());
+
+    editor.BeginLine(/*composer=*/true);
+    TypeString(editor, "/eff");
+    editor.HandleKey(KeyEvent::Simple(KeyKind::NewLine));
+    TypeString(editor, "x");
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(Utf32ToUtf8(state.line) == "/eff\nx");  // 多行里 / 是正文
+    CHECK(state.hint_lines.empty());
+
+    editor.BeginLine(/*composer=*/true);
+    TypeString(editor, "/zzz");
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.line == U"/zzz");  // 未知前缀
+    CHECK(state.hint_lines.empty());
+}
+
+TEST_CASE("忙碌路同款 editor: 关掉方向键直选后,Down 不进候选菜单,Up/Down 不抢") {
+    LineEditorCore editor(BuildSlashCompletionCandidates());
+    editor.set_menu_selection_enabled(false);
+    editor.BeginLine(/*composer=*/true);
+    TypeString(editor, "/eff");
+
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Down));
+    CHECK(state.selected_index == -1);  // 没进菜单,没有选中标记
+    CHECK(state.line == U"/eff");       // 行内容不动
+    REQUIRE(state.hint_lines.size() == 1);
+    CHECK(state.hint_lines[0].rfind("  ", 0) == 0);  // 仍是普通提示行,不带 "> "
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Up));
+    CHECK(state.selected_index == -1);
+    CHECK(state.line == U"/eff");
+}
+
+TEST_CASE("空闲路默认仍开方向键直选:set_menu_selection_enabled 只关忙碌那只") {
+    LineEditorCore editor(SampleCandidates());
+    editor.set_menu_selection_enabled(false);
+    editor.set_menu_selection_enabled(true);  // 关了再开,回到默认
+    editor.BeginLine(/*composer=*/true);
+    TypeString(editor, "/mo");
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Down));
+    CHECK(state.selected_index == 0);  // 照常进菜单、选中第一条
+    REQUIRE(state.hint_lines.size() == 1);
+    CHECK(state.hint_lines[0].rfind("> ", 0) == 0);
 }
 
 TEST_CASE("LineEditorCore: ShiftTab 循环切换确认模式,三档循环") {
