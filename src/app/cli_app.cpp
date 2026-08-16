@@ -491,7 +491,11 @@ int RunCli(const std::vector<std::string>& args) {
         // base_url/api_key,这里多加一条 model 判断更稳妥,免得 env 只配了
         // base_url/api_key 漏了 model,走进会话却发不出请求)。
         lubancode::config::ConfigResult effective = *config_result;
-        if (effective.config.base_url.empty() || effective.config.auth_token.empty() ||
+        // auth=none 的当前激活端:空 key 合法(RequireApiKey 同款例外),不该被
+        // 拉进初次配置向导——base_url/model 仍须齐。
+        if (effective.config.base_url.empty() ||
+            (effective.config.auth_token.empty() &&
+             effective.config.auth_mode != lubancode::config::ProviderAuthMode::None) ||
             effective.config.model.empty()) {
             const auto wizard_config = RunInitialSetupWizard(effective.config_file_path, theme);
             if (!wizard_config.has_value()) {
