@@ -1,0 +1,143 @@
+# 忙碌排队输入框 Tab 补全失效
+
+状态：待做（2026-08-16 用户真机截图）
+
+## 现场
+
+主代理仍在工作时，用户可在底部 composer 里预写下一条消息。此时键入：
+
+```text
+/eff
+```
+
+屏上已经列出：
+
+```text
+/effort  同 /think（推理强度别名）
+```
+
+可按 `Tab` 后，输入仍停在 `/eff`，没有补成 `/effort `。空闲 composer 里，同样操作本应补全。
+
+这算 bug，不算尚未设计的新功能。现有文档已经承诺：
+
+- `docs/commands.md`：输入 `/` 后可用 `Tab` 补全。
+- `docs/terminal-ui.md`：单行 slash 命令按 `Tab` 补全并打开候选。
+- `docs/feature-reference.md`：Slash 候选实时提示，`Tab` 补全。
+
+文档没有写“模型忙碌时除外”，界面也明明画出了候选。看得见，按不着，便是坏了。
+
+## 已查明的根因
+
+### 1. 忙碌 composer 拿空候选表起身
+
+`src/cli/console_input.cpp` 的 `TurnInputListener::ThreadMain()` 另建了一只本地编辑器：
+
+```cpp
+LineEditorCore editor;
+```
+
+这只编辑器专管模型工作期间的排队输入、取回和改写。构造时没传 `AllSlashCommands()` 候选，故 `LineEditorCore::HandleTab()` 虽然收到按键，`MatchingCandidateNames()` 仍只会拿到空表，随后原地返回。
+
+### 2. 提示与补全各记一份账
+
+同一文件又用 `StreamHintCandidates()` 取完整命令表，再让 `StreamSlashHintLines()` 单独画提示。因此出现分裂：
+
+- 画面知道 `/effort` 存在；
+- 编辑器不知道 `/effort` 存在；
+- 用户按 `Tab`，键已送达，却没有候选可补。
+
+这不是终端吞键。`platform::KeyInput::Kind::Tab` 已由 `MapKey()` 正常映射成 `KeyKind::Tab`，最后也会喂给本地 `LineEditorCore`。
+
+### 3. 编辑器返回态被丢了
+
+`LineEditorCore` 本来会在 `RenderState` 中给出 `hint_lines`、`selected_index` 与补全后的正文。忙碌路径调用 `editor.HandleKey()` 后丢掉返回态，`refresh_footer()` 又从 `FooterSlot().echo` 另算一份无选中标记的提示。
+
+这会埋下第二层错位：即便只把候选表塞回去，连续按 `Tab` 轮转多个候选时，正文已换，提示区也未必能照着编辑器的轮转状态标出当前项。
+
+### 4. 空输入 Tab 还会留下暗焦点
+
+忙碌路径把空 composer 的 `Tab` 也喂给 `LineEditorCore`。编辑器会进入 `focus_mode_` 并返回 `focus_move`，可监听线程既不消费返回值，也不真切换焦点。画面没有动，编辑器内部却换了状态。
+
+本次修复须顺手堵住这枚暗状态。忙碌时空输入 `Tab` 若仍不支持工具条目浏览，就应明确 no-op，不能悄悄进焦点态。
+
+## 已排除的误判
+
+排队消息送达后会由 `InteractiveSession::Run()` 取出，再统一交给 `ProcessLine()`。`ProcessLine()` 会先跑 `ParseSlashCommand()`，故补成 `/effort` 后按回车，最终仍会执行 slash 命令，不会当普通用户正文送给模型。
+
+本单不改命令分派，也不另造“排队命令”协议。
+
+## 需求
+
+### 一、忙碌与空闲共用同一份候选来源
+
+- `TurnInputListener` 的本地 `LineEditorCore` 必须拿到与 `SharedEditor()` 相同的 `AllSlashCommands()` 候选。
+- 候选转换只留一只 helper/factory。不要让 `SharedEditor()`、`StreamHintCandidates()`、忙碌 editor 各抄一遍组装循环。
+- 命令新增、删改或 i18n 说明变化后，两种 composer 同时生效，不靠维护者记得改第二处。
+
+### 二、忙碌输入框恢复完整 Tab 语义
+
+- 唯一命中：`/eff` + `Tab` → `/effort `，光标落在末尾。
+- 多项命中：第一下先补最长公共前缀；已到公共前缀时，连续 `Tab` 按候选顺序轮转。
+- 大小写匹配照旧不敏感；候选名仍写回规范小写。
+- 命令词后已有尾巴时，不吞参数；光标已在参数区时不乱补命令词。
+- 普通正文、无匹配前缀、多行 composer 仍保持原规矩，不误补。
+- 打字、退格、移动光标后，旧的 Tab 轮转会话立刻失效。
+
+### 三、提示区服从编辑器状态
+
+- `refresh_footer()` 应取本地 editor 的 `RenderState`，用其中 `hint_lines` 与 `selected_index` 画候选；不要再拿回显文本另算一份失去状态的菜单。
+- 连按 `Tab` 时，当前候选须有 `> ` 标记；轮到第 7 项以后，窗口照 `LineEditorCore::BuildHintLines()` 滚动，选中项不能跑出可视区。
+- 补成唯一命令并带空格后，候选提示应当收起；不得留下 `/effort` 小尾巴。
+- 中文说明、窄终端截断和 footer 原地重画沿用现有布局，不得往 transcript 铺残影。
+
+### 四、空输入不留暗状态
+
+- 模型忙碌且 composer 为空时，若 `Tab` 暂不承担焦点浏览，就在监听线程明拦并 no-op。
+- no-op 后再键入 `/eff`，第一下 `Tab` 必须正常补全，不能受先前暗 `focus_mode_` 影响。
+- 空闲 composer 的“空输入 Tab 进入工具条目焦点态”照旧，不得回归。
+
+### 五、别抢上下键
+
+忙碌时 `Up/Down` 已分给子代理面板、排队条目编辑和历史浏览。本单只补 `Tab`，不把方向键直选菜单硬塞进来。往后若要统一直选，须另做键位优先级设计。
+
+## 建议改法
+
+1. 抽出 `BuildSlashCompletionCandidates()`，由 `AllSlashCommands()` 生成 `std::vector<CompletionCandidate>`。
+2. `SharedEditor()` 与 `TurnInputListener` 都用这只 helper 构造编辑器。
+3. 忙碌 footer 直接读取 `editor.CurrentRenderState()`：回显取 `lines/line`，候选取 `hint_lines`。
+4. 若 `StreamSlashHintLines()` 此后再无生产调用，删掉这条平行实现及只钉它的重复测试；若仍须保留，必须说明唯一用途，不能再当忙碌 editor 的第二套状态机。
+5. 在监听线程入口显式处理“空正文 Tab”，别把不消费的 `focus_move` 塞回编辑器。
+
+## 验收
+
+### 纯逻辑
+
+- 候选 helper 包含 `/think` 与 `/effort`，顺序、说明与 `AllSlashCommands()` 一致。
+- 用忙碌路径同款 editor：`/eff` + `Tab` 得 `/effort `。
+- 造三枚同前缀命令，钉死“公共前缀 → 连续轮转 → 选中标记跟随”。
+- 先空输入 `Tab`，再键入 `/eff` 并 `Tab`，仍只需一下便补全。
+- `/eff xhigh`、普通正文、多行正文、未知前缀均不误改。
+
+### 真终端
+
+- Windows Terminal / conhost：模型流式输出期间键入 `/eff`，候选出现；按 `Tab` 当场变成 `/effort `，不闪、不铺新行。
+- 回车排队；当前轮结束后，队列泵执行 `/effort`，屏上出现推理档位信息，模型 history 不新增一条“/effort”用户正文。
+- 造两个以上同前缀候选，连续 `Tab` 时正文与 `> ` 标记同走。
+- 补全后继续输入 `xhigh`，取回编辑、删除、再提交，正文与目标都不丢。
+- 主代理忙碌、查看子代理、子代理定向 composer 三种目标各跑一遍；补全只改草稿，不改收件目标。
+- POSIX PTY 跑同样按键序列，确认 `\t` 没被 shell 或终端层吃掉。
+
+## 回归边界
+
+- 空闲 composer 的补全、方向键直选、历史、焦点态不变。
+- `Shift+Tab` 仍只切 `confirm / auto / yolo`；焦点态内现有语义不变。
+- 模型忙碌时 `Esc` 打断、`Enter` 落队、`Shift+Left` 取回编辑不变。
+- slash 命令仍由 `ProcessLine()` 统一分派，不在监听线程执行，免得跨线程改会话配置。
+- 管道/非 TTY 没有逐键补全，维持现状；文档须把“交互终端”前提说清。
+
+## 不做
+
+- 不在本单重排 slash 命令或改 `/effort` 语义。
+- 不给忙碌候选菜单抢占 `Up/Down`。
+- 不做 shell 路径补全、`@` 文件补全或参数值补全。
+- 不在监听线程直接执行命令。
