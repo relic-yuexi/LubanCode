@@ -26,6 +26,7 @@
 #include <ws2tcpip.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -324,6 +325,20 @@ void RespondSse(SOCKET_T s, const std::vector<std::string>& events) {
     SendAll(s, head + body);
 }
 
+// 慢流应答:先发响应头(不带 Content-Length,连接关闭即定界),再按
+// gap_ms 逐事件吐——给"流式期间采样活度账"留窗口(幕六:思考流查看态)。
+void RespondSseSlow(SOCKET_T s, const std::vector<std::string>& events, int gap_ms) {
+    const std::string head = "HTTP/1.1 200 OK\r\n"
+                             "Content-Type: text/event-stream\r\n"
+                             "Connection: close\r\n"
+                             "\r\n";
+    SendAll(s, head);
+    for (const auto& event : events) {
+        Sleep(gap_ms);
+        SendAll(s, Sse(event));
+    }
+}
+
 std::vector<std::string> TextTurn(const std::string& text) {
     return {
         "{\"type\":\"message_start\",\"message\":{\"id\":\"msg\",\"model\":\"fake-model\"}}",
@@ -391,6 +406,39 @@ std::string LongBody() {
     return text;
 }
 
+// ---- 幕六(追加需求"查看态实时思考流")的剧本锚 ----
+// 思考流场景开关:真后端按"甲 = 慢思考流"派发;主回合只派甲、回流轮直收。
+std::atomic<bool> g_thinking_scene{false};
+const char* kThinkingDone =
+    "\xe6\x80\x9d\xe8\x80\x83\xe5\xae\x8c\xe6\xaf\x95\xe4\xba\xa4\xe5\x8d\xb7";  // 思考完毕交卷
+
+// 甲的慢思考流:40 段思考增量(每段 500ms,约 20 秒窗口),随后一小段正文
+// 收口——坞行/查看态在此期间应显示"思考中 · N 字"且 N 逐秒增长。
+std::vector<std::string> ThinkingStreamTurn() {
+    std::vector<std::string> events;
+    events.push_back("{\"type\":\"message_start\",\"message\":{\"id\":\"msg\",\"model\":\"fake-model\"}}");
+    events.push_back(
+        "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}");
+    for (int i = 1; i <= 40; ++i) {
+        // 第N段:棋盘、走法、界面……慢慢想。
+        std::string piece = "\xe7\xac\xac" + std::to_string(i) +
+                            "\xe6\xae\xb5\xef\xbc\x9a\xe6\xa3\x8b\xe7\x9b\x98\xe3\x80\x81\xe8\xb5\xb0\xe6\xb3\x95\xef"
+                            "\xbc\x8c\xe6\x85\xa2\xe6\x85\xa2\xe6\x83\xb3\xe3\x80\x82";  // 第N段:棋盘、走法,慢慢想。
+        events.push_back("{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\","
+                         "\"thinking\":\"" +
+                         piece + "\"}}");
+    }
+    events.push_back("{\"type\":\"content_block_stop\",\"index\":0}");
+    events.push_back(
+        "{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}");
+    events.push_back("{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"" +
+                     std::string(kThinkingDone) + "\"}}");
+    events.push_back("{\"type\":\"content_block_stop\",\"index\":1}");
+    events.push_back("{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_"
+                     "tokens\":80,\"output_tokens\":40}}");
+    return events;
+}
+
 int StartFakeAnthropicServer() {
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
@@ -453,6 +501,11 @@ int StartFakeAnthropicServer() {
             return last_user != std::string::npos && body.find(needle, last_user) != std::string::npos;
         };
         if (sub_agent_request) {
+            if (g_thinking_scene.load()) {
+                // 幕六:甲 = 慢思考流(20 段 × 400ms),乙不出场。
+                RespondSseSlow(client_fd, ThinkingStreamTurn(), 400);
+                return;
+            }
             // 后台子代理自己的来回:三轮"睡 1 秒 + 读文件"后交卷。
             bool is_a = has(kAgentA);
             int reads = 0;
@@ -470,6 +523,11 @@ int StartFakeAnthropicServer() {
             }
         } else if (newest_has("\xe5\x90\x8e\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86\xe6\x9c\x89\xe6\x96\xb0\xe7\xbb\x93"
                               "\xe6\x9e\x9c")) {  // 后台子代理有新结果
+            if (g_thinking_scene.load()) {
+                // 幕六的回流轮:直收,不再跑工具。
+                RespondSse(client_fd, TextTurn(kReflowDone));
+                return;
+            }
             std::lock_guard<std::mutex> lock(state->mutex);
             if (state->reflow_tool_done) {
                 RespondSse(client_fd, TextTurn(kReflowDone));
@@ -701,6 +759,115 @@ void RunScenario(const std::string& name, const std::wstring& exe_path, const st
     }
 }
 
+// ---- 幕六(追加需求"查看态实时思考流"):思考流期间进查看态,字数在长 ----
+// 剧本:主回合派甲(后台);甲按 500ms 一段慢慢吐 40 段思考(约 20s 窗口)。
+// 断言:1) 坞行出"思考中 · N 字"(不再是死秒表);2) Down+Enter 进查看态
+// 后,"思考中 · N 字"在视口里逐秒增长(实时流重铺,1s 节流);3) 干净退出。
+// 不等主回合长正文——集成环境下"收口句重画"不总是可刮(基线 exe 同样
+// 刮不到),这一幕只对自己要验的活度链路负责。
+std::string ThinkingCharsInViewport() {
+    // "思考中" 的 UTF-8;数字在 "· " 与 " 字" 之间。只扫可视窗口,从上往
+    // 下取第一处——查看态正文在坞上方,先命中即它(不跟坞行混)。
+    const std::string needle = "\xe6\x80\x9d\xe8\x80\x83\xe4\xb8\xad";  // 思考中
+    const std::string mid = "\xc2\xb7 ";
+    const std::string tail = " \xe5\xad\x97";  // " 字"
+    for (int row = WindowTop(); row <= WindowBottom(); ++row) {
+        const std::string text = ReadRow(row);
+        const std::size_t at = text.find(needle);
+        if (at == std::string::npos) {
+            continue;
+        }
+        const std::size_t mid_at = text.find(mid, at);
+        if (mid_at == std::string::npos) {
+            continue;
+        }
+        std::size_t number_at = mid_at + mid.size();
+        std::string digits;
+        while (number_at < text.size() && text[number_at] >= '0' && text[number_at] <= '9') {
+            digits += text[number_at];
+            ++number_at;
+        }
+        if (!digits.empty() && text.compare(number_at, tail.size(), tail) == 0) {
+            return digits;
+        }
+    }
+    return {};
+}
+
+void RunThinkingViewScene(const std::wstring& exe_path, const std::wstring& workdir) {
+    Log("==== 幕:思考流查看态(追加需求) ====");
+    g_reset_server_state();
+    g_thinking_scene.store(true);
+    ChildGuard guard;
+    if (!SpawnChild(exe_path, workdir, guard)) {
+        g_thinking_scene.store(false);
+        return;
+    }
+    Check(WaitForText("\xe9\x94\xae\xe5\x85\xa5\xe5\xb9\xb6\xe5\x9b\x9e\xe8\xbd\xa6", 30000) ||
+              FindComposerInputRow() > 0,
+          "思考流: 开场空闲 composer 出现");  // 键入并回车
+    Sleep(400);
+    SendText(kUserPromptReal);
+    SendKey(VK_RETURN, L'\r', 0);
+    Check(WaitForText(kTitleA, 20000), "思考流: 甲坞行出现");
+
+    // 断言一:坞行出"思考中 · N 字"——长思考不再只剩秒表。
+    Check(WaitForText("\xe6\x80\x9d\xe8\x80\x83\xe4\xb8\xad", 20000),
+          "思考流: 坞行显示思考中阶段");  // 思考中
+    // 等主回合收口回到空闲 composer(Down/Enter 走空闲面板路),窗口 20s
+    // 够留出增长采样;等不到空闲也照样往下试(流式 footer 同样能进查看态)。
+    const DWORD idle_deadline = GetTickCount() + 12000;
+    while (GetTickCount() < idle_deadline && FindComposerInputRow() <= 0) {
+        Sleep(300);
+    }
+    Sleep(600);
+    // 断言二:空 composer Down 聚焦面板、Enter 切进甲的查看态,视口里
+    // "思考中 · N 字"的 N 逐秒增长。
+    SendKey(VK_DOWN, 0, 0);
+    Sleep(250);
+    SendKey(VK_RETURN, L'\r', 0);
+    Check(WaitForText("\xe5\x90\x8e\xe5\x8f\xb0", 8000), "思考流: 查看态头行(来源行)出现");  // 后台
+    int first = -1;
+    int last = -1;
+    const DWORD sample_deadline = GetTickCount() + 14000;
+    while (GetTickCount() < sample_deadline) {
+        const std::string digits = ThinkingCharsInViewport();
+        if (!digits.empty()) {
+            const int value = atoi(digits.c_str());
+            if (first < 0) {
+                first = value;
+            }
+            last = value;
+        }
+        Sleep(400);
+    }
+    Check(first > 0, "思考流: 查看态读到思考字数(首采样 " + std::to_string(first) + ")");
+    Check(last > first, "思考流: 思考字数在长(" + std::to_string(first) + " -> " + std::to_string(last) + ")");
+    DumpViewport("thinking-view");
+
+    // 等甲收口(回流正文此环境不总可刮,等完成短行即可),再干净退出。
+    const DWORD done_deadline = GetTickCount() + 30000;
+    while (GetTickCount() < done_deadline && FindLastRow(kThinkingDone) < 0 &&
+           FindLastRow(kReflowDone) < 0) {
+        Sleep(300);
+    }
+    Sleep(1200);
+    SendKey(VK_ESCAPE, 0, 0);  // 退查看态/焦点(多余的一拍归编辑器清空,无害)
+    Sleep(200);
+    SendText("exit");
+    SendKey(VK_RETURN, L'\r', 0);
+    if (WaitForSingleObject(guard.pi.hProcess, 15000) == WAIT_OBJECT_0) {
+        DWORD code = 0;
+        GetExitCodeProcess(guard.pi.hProcess, &code);
+        Check(code == 0, "思考流: 干净退出码 0(实得 " + std::to_string(code) + ")");
+        CloseHandle(guard.pi.hProcess);
+        guard.pi.hProcess = nullptr;
+    } else {
+        Check(false, "思考流: 15 秒内没退出");
+    }
+    g_thinking_scene.store(false);
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -791,6 +958,11 @@ int wmain(int argc, wchar_t** argv) {
         hooks.scroll_up_before_reflow = true;
         RunScenario("scroll-nonbottom", exe_path, workdir, hooks);
     }
+
+    // 幕六(追加需求"查看态实时思考流"):子代理慢思考流期间进查看态,
+    // 坞行与视口的"思考中 · N 字"逐秒增长。
+    SetSceneSize(120, 30, 400);
+    RunThinkingViewScene(exe_path, workdir);
 
     Log(g_failures == 0 ? "ALL PASS" : ("FAILURES: " + std::to_string(g_failures)));
     FreeConsole();
