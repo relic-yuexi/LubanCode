@@ -70,7 +70,7 @@ std::expected<void, Error> ChatCompletionsBackend::send_stream(
         return std::unexpected(Error{ErrorKind::Parse, platform::DescribeDumpFailure(body_json, e), 0});
     }
     SseFramer framer;
-    EventParser parser;
+    EventParser parser{options_.reasoning_delta_field};
     std::string error_body;
     int status_code = 0;
     bool status_known = false;

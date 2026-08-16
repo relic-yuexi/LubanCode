@@ -109,9 +109,13 @@ std::vector<bool> SegmentToolUseFlags(const std::vector<Message>& messages) {
 
 nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& extra_body,
                                 const ChatRequestOptions& options) {
-    json body{{"model", request.model},
-              {"stream", true},
-              {"max_tokens", request.max_tokens}};
+    json body{{"model", request.model}, {"stream", true}};
+    // max_tokens 可省略(chat 协议):unset 就整个不带字段,交服务端/模型
+    // 默认——vLLM 这类端的默认上限远大于旧版写死的 4096,reasoning 模型
+    // 思考不至于一步撞墙(规格根因一)。显式声明了才落键。
+    if (request.max_tokens.has_value()) {
+        body["max_tokens"] = *request.max_tokens;
+    }
 
     json messages = json::array();
     if (!request.system.empty()) {
@@ -147,13 +151,18 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
         const std::string text = JoinedText(message);
         assistant["content"] = text.empty() ? json(nullptr) : json(text);
         // reasoning 回传(tool_episode):这段交互走了工具,段内 assistant 的
-        // 思考按原字节回传成 reasoning_content——一条消息只写一份(多枚
-        // tool call 也不拆不重),不混进 content。纯对话段照旧略过。
+        // 思考按原字节回传——字段名按 provider 声明走(默认
+        // reasoning_content,DeepSeek 协议;vLLM/Qwen 这类端声明成
+        // reasoning),一条消息只写一份(多枚 tool call 也不拆不重),不混进
+        // content。纯对话段照旧略过。
         if (options.reasoning_replay == ReasoningReplayPolicy::ToolEpisode &&
             message_index < segment_tool_use.size() && segment_tool_use[message_index]) {
             const std::string reasoning = JoinedThinking(message);
             if (!reasoning.empty()) {
-                assistant["reasoning_content"] = reasoning;
+                const std::string field =
+                    options.reasoning_replay_field.empty() ? std::string("reasoning_content")
+                                                           : options.reasoning_replay_field;
+                assistant[field] = reasoning;
             }
         }
         json tool_calls = json::array();

@@ -583,6 +583,40 @@ void PrintDoctorOverview(const DoctorContext& context) {
     std::cout.flush();
 }
 
+// /doctor agents:main 与各 agent type 的差异矩阵(规格"架构落点":能力
+// 差异要打印得出来,不靠散落的 Register/不 Register 暗示)。矩阵材料从
+// DoctorContext 来,没接(单测/旧调用方)就整节省略。i18n 中英成对。
+void PrintAgentsMatrix(const DoctorContext& context) {
+    std::cout << tr("doctor.agents.header") << "\n";
+    const auto tool_count = [](const lubancode::tools::ToolRegistry* registry) {
+        return registry != nullptr ? registry->All().size() : std::size_t{0};
+    };
+    if (context.main_profile != nullptr) {
+        std::cout << trf("doctor.agents.budget",
+                         context.main_profile->max_output_tokens.value_or(0),
+                         context.main_profile->max_steps_per_turn == 0
+                             ? std::string(tr("config.steps.unlimited"))
+                             : std::to_string(context.main_profile->max_steps_per_turn),
+                         context.main_profile->length_continuations)
+                  << "\n";
+        std::cout << trf("doctor.agents.governance",
+                         context.config.subagent.max_active.value_or(lubancode::config::kDefaultSubagentMaxActive),
+                         context.config.subagent.max_depth.value_or(lubancode::config::kDefaultSubagentMaxDepth))
+                  << "\n";
+    }
+    if (context.main_registry != nullptr) {
+        std::cout << trf("doctor.agents.row_main", tool_count(context.main_registry)) << "\n";
+    }
+    if (context.sub_registry != nullptr) {
+        std::cout << trf("doctor.agents.row_sub", tool_count(context.sub_registry)) << "\n";
+    }
+    if (context.explore_registry != nullptr) {
+        std::cout << trf("doctor.agents.row_explore", tool_count(context.explore_registry)) << "\n";
+    }
+    std::cout << tr("doctor.agents.note") << "\n";
+    std::cout.flush();
+}
+
 }  // namespace
 
 void HandleDoctorCommand(const std::string& args, const DoctorContext& context) {
@@ -624,6 +658,10 @@ void HandleDoctorCommand(const std::string& args, const DoctorContext& context) 
             return;
         }
         ReadAndReportMetrics(context);
+        return;
+    }
+    if (subcommand == "agents") {
+        PrintAgentsMatrix(context);
         return;
     }
     if (subcommand.empty()) {

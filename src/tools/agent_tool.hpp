@@ -4,10 +4,11 @@
 // 结论),中间的搜索/试错/来回工具调用过程都不会挤占主对话的上下文,
 // 这是这个工具存在的全部意义。
 //
-// 防递归:子代理拿到的工具注册表(sub_registry)不含 "agent" 自己,深度
-// 硬限 1——子代理没法再委托一个孙代理。main.cpp 负责建两份 ToolRegistry
-// (主表含 agent,子表不含),这里只管拿着子表的引用用,自己不做任何排除
-// 逻辑。
+// 子代理是独立任务 agent:默认与 main 同能力(同一份 runtime profile、
+// 同一 provider 能力、同工具面——含再派 agent 的资格),接一项任务,
+// 通常完成后自动退出。递归失控不靠"子表拿掉 agent 工具"防:子表挂的是
+// AgentDispatchTool 转发壳,真闸是 AgentTool 的全局并发槽与显式深度上限
+// (SetDispatchGovernance,subagent.max_active / subagent.max_depth)。
 //
 // 回调贯通:子代理执行期间的确认请求(needs_confirm 的工具)、usage 记账、
 // "子代理调了个工具"这件事本身,都要能让上层(main.cpp)看到、按同一套
@@ -34,6 +35,7 @@
 
 #include "api/backend.hpp"
 #include "agent/loop.hpp"  // ToolHookDecision/ToolPhase:hooks 框架转发的类型
+#include "agent/runtime_profile.hpp"
 #include "api/types.hpp"
 #include "cli/worktree.hpp"
 #include "hooks/detached.hpp"
@@ -61,6 +63,7 @@ enum class TaskOutcomeReason {
     None,              // 无(还没收场/正常完成)
     ApiError,          // 接口报错(请求失败/流中断)
     StepLimitExhausted,  // 步数预算耗尽(旧名 MaxTurns,口径已改按 step 记)
+    OutputBudgetExhausted,  // 输出预算耗尽(max_tokens;续跑用完仍无正文,规格根因四)
     MaxContext,        // 上下文装不下
     NoFinalText,   // 最后一轮没有文本结论
     ToolError,     // 最后一次工具调用出错带崩了收尾
@@ -77,6 +80,12 @@ struct TaskOutcome {
     std::string last_tool;       // 最后一次工具名与结果摘要
     int steps_used = 0;
     int step_limit = 0;          // 0 = 不限步(一个 turn 内的模型请求数上限)
+    // 输出预算账(规格根因四,来自 agent::OutputBudgetReport):撞墙的
+    // 上限(0 = unset,墙在服务端)、续跑次数、usage 是否报告、思考检查点。
+    int output_limit_tokens = 0;       // 0 = unset(请求没带字段)
+    int length_continuations_used = 0;
+    bool usage_reported = false;       // 服务端一次 usage 都没回过时,token 数按"未报告"说
+    std::string thinking_checkpoint;   // 已收思考的字节数 + 末段摘要
     // api::Usage 统一口径:input 是"非缓存输入",完整输入 = 三项相加
     // (见 TotalInputTokens)。展示一律用完整输入,别把缓存命中漏掉。
     std::int64_t input_tokens = 0;
@@ -116,6 +125,9 @@ struct AgentTaskSnapshot {
     std::int64_t cache_read_tokens = 0;
     std::int64_t cache_creation_tokens = 0;
     std::int64_t output_tokens = 0;
+    // 服务端有没有回过 usage(规格根因三):没回过且已跑过步数时,面板
+    // 写"tokens 未报告",不画 0。任何一次请求带回非零 usage 即置位。
+    bool usage_reported = false;
     std::chrono::steady_clock::time_point start_time{};
     std::chrono::steady_clock::time_point end_time{};
     std::vector<AgentTaskToolCall> tool_calls;
@@ -176,6 +188,7 @@ struct AgentTaskSummary {
     std::int64_t cache_read_tokens = 0;
     std::int64_t cache_creation_tokens = 0;
     std::int64_t output_tokens = 0;
+    bool usage_reported = false;  // 未报告时面板写"tokens 未报告",不画 0
     std::chrono::steady_clock::time_point start_time{};
     std::chrono::steady_clock::time_point end_time{};
     std::size_t tool_call_count = 0;
@@ -212,6 +225,29 @@ struct DetachedAgentBackend {
     std::string model_instructions;
     std::string soul;
     nlohmann::json request_extra_body = nlohmann::json::object();
+};
+
+// 同级派工的转发壳(规格"递归派工不能再靠拿掉工具解决"):子代理工具表
+// 里的 "agent" 工具,目标就是主 AgentTool 实例——子代理默认与 main 同
+// 能力,能再拆任务。递归失控不靠"子表没有 agent"防,改由 AgentTool 的
+// 全局并发槽 + 显式深度上限治理(SetDispatchGovernance):超限时 execute
+// 明报,模型看得见墙在哪。后台(detached)注册表不挂这枚壳:后台线程
+// 不能同步跑前台任务(UI 回调线程模型不允许),后续如需"后台再派后台"
+// 另立单子接。
+class AgentTool;
+
+class AgentDispatchTool : public Tool {
+public:
+    explicit AgentDispatchTool(AgentTool& target) : target_(target) {}
+
+    std::string name() const override;
+    std::string description() const override;
+    nlohmann::json input_schema() const override;
+    bool needs_confirm() const override { return false; }
+    Result execute(const nlohmann::json& input) override;
+
+private:
+    AgentTool& target_;
 };
 
 class AgentTool : public Tool {
@@ -372,6 +408,32 @@ public:
     // 启动时(main.cpp)从 config.context_window_tokens 传入。
     void SetContextWindowTokens(std::size_t tokens) { context_window_tokens_ = tokens; }
 
+    // 运行策略(规格根因一):会话重建时把 main 的有效 profile 派生份
+    // (subagent 段的显式覆盖已在 BuildSubagentRuntimeProfile 里算入)灌
+    // 进来——输出上限、上下文安全网、续跑次数与 main 同一份,子代理不再
+    // 另藏 4096,也不再落回环境默认的 max_context_chars。未灌(旧测试
+    // 直调)时用默认 profile:输出上限 unset、字符安全网取 agent 层默认。
+    void SetRuntimeProfile(agent::AgentRuntimeProfile profile) { runtime_profile_ = std::move(profile); }
+
+    // 派工治理(规格"递归派工不能再靠拿掉工具解决"):
+    //   max_active  全局并发槽:同时跑着的子代理任务(前台 + 后台)上限,
+    //               超过就明报"等一项收尾",不再每层各算各的;
+    //   max_depth   前台派工嵌套深度上限(main=0,子=1,孙=2……),超过明报。
+    // 两者都来自配置(subagent.max_active / subagent.max_depth),默认值
+    // 公开(config.hpp 的 kDefaultSubagentMaxActive/MaxDepth)。
+    void SetDispatchGovernance(int max_active, int max_depth) {
+        max_active_dispatches_ = max_active > 0 ? max_active : 1;
+        max_dispatch_depth_ = max_depth > 0 ? max_depth : 1;
+    }
+
+    // 子代理的项目记忆召回(规格"同级能力审计"):按子任务 prompt 独立
+    // 检索,同预算同安全声明——不是每轮全量注入,也不共享 main 的召回
+    // 快照。provider 收任务 prompt,返回本轮注入的上下文段(空 = 不注)。
+    // 由会话层灌(闭包着 ProjectMemory),不设 = 子代理不召回(旧行为)。
+    void SetTurnContextProvider(std::function<std::string(const std::string&)> provider) {
+        turn_context_provider_ = std::move(provider);
+    }
+
     // tool_search(延迟挂载):子代理注册表同机制。filter 原样灌给每次
     // execute() 新建的 sub_loop(loaded 集合与主会话共享,挂载一次两边
     // 可用);index_provider 每次 execute() 现算"延迟未加载"索引段,拼进
@@ -503,6 +565,13 @@ private:
     std::function<std::string()> deferred_index_provider_;    // tool_search:空 = 不注索引段
     lubancode::cli::GitRunner git_runner_;                    // isolation 房务;空 = 真 git
     std::size_t context_window_tokens_ = 0;                   // 子代理 mid-turn 压缩评估;0 = 未知
+    agent::AgentRuntimeProfile runtime_profile_;              // 运行策略:与 main 同一份(默认 unset,无 4096)
+    // 派工治理(规格"递归派工"):全局并发槽与前台深度账。
+    int max_active_dispatches_ = 8;  // 与 kDefaultSubagentMaxActive 同值;会话层从配置灌
+    int max_dispatch_depth_ = 3;     // 与 kDefaultSubagentMaxDepth 同值;1 = 子代理不再往下派
+    std::atomic<int> active_dispatches_{0};   // 当前跑着的 RunTask 总数(前台+后台)
+    std::atomic<int> foreground_depth_{0};    // 前台嵌套深度(同步栈上的一层算一层)
+    std::function<std::string(const std::string&)> turn_context_provider_;  // 子代理记忆召回;空 = 不召回
 };
 
 }  // namespace lubancode::tools

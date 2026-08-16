@@ -4,9 +4,9 @@
 //
 // 状态存会话级:main.cpp 造一份 TodoListState(shared_ptr),塞给
 // TodoWriteTool 的构造函数,同一份指针也交给 /todos 命令、on_tool_done
-// 渲染回调——三处读写的是同一块内存。只挂主注册表(main.cpp 的
-// registry),不挂子代理的 sub_registry:子代理是短命的一次性跑腿,不该
-// 让它乱写主会话的待办清单。
+// 渲染回调——三处读写的是同一块内存。主表与子表各挂各的实例;子代理的
+// todo 由 AgentTool::RunTask 给每只任务换独占实例(私有 todo),不写
+// main 的待办清单。
 #pragma once
 
 #include <memory>

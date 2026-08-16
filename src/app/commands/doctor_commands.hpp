@@ -23,9 +23,11 @@
 #include <nlohmann/json.hpp>
 
 #include "api/types.hpp"
+#include "agent/runtime_profile.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/theme.hpp"
 #include "config/config.hpp"
+#include "tools/registry.hpp"
 
 namespace lubancode::app {
 
@@ -101,6 +103,12 @@ struct DoctorContext {
     const lubancode::cli::Theme& theme;
     lubancode::cli::ContextTracker& context_tracker;
     std::optional<std::string> provider_write_path;
+    // /doctor agents 的差异矩阵材料(规格"架构落点":能力差异要打印得出来,
+    // 不靠散落的 Register 暗示)。可空:没接的调用方(单测)那节不打印。
+    const lubancode::agent::AgentRuntimeProfile* main_profile = nullptr;
+    const lubancode::tools::ToolRegistry* main_registry = nullptr;
+    const lubancode::tools::ToolRegistry* sub_registry = nullptr;
+    const lubancode::tools::ToolRegistry* explore_registry = nullptr;
 };
 
 void HandleDoctorCommand(const std::string& args, const DoctorContext& context);

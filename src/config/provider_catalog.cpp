@@ -143,7 +143,8 @@ std::expected<ProviderPreset, std::string> ParseProvider(const std::string& id, 
     if (!value.is_object()) return std::unexpected(where + " 必须是 JSON object");
     if (auto known = RejectUnknown(value, {"name", "description", "wire", "base_url", "key_env",
                                            "default_model", "model_reasoning_effort", "native_web_search",
-                                           "stream_usage", "reasoning_replay", "docs_url", "extra_body",
+                                           "stream_usage", "reasoning_replay", "reasoning_delta_field",
+                                           "reasoning_replay_field", "docs_url", "extra_body",
                                            "extra_headers", "models"},
                                    where);
         !known.has_value()) return std::unexpected(known.error());
@@ -194,6 +195,18 @@ std::expected<ProviderPreset, std::string> ParseProvider(const std::string& id, 
             return std::unexpected(where + ".reasoning_replay 只认 never/tool_episode: " + replay);
         }
         preset.reasoning_replay = replay;
+    }
+    // 思考字段名声明(只认非空字符串;名字对不对由服务端说了算,这里
+    // 不猜合法值——声明错字的代价是思考解析不到,诊断行看得见)。
+    for (const char* field : {"reasoning_delta_field", "reasoning_replay_field"}) {
+        if (value.contains(field)) {
+            if (!value[field].is_string() || value[field].get<std::string>().empty()) {
+                return std::unexpected(where + "." + field + " 必须是非空字符串");
+            }
+            const std::string declared = value[field].get<std::string>();
+            if (std::string(field) == "reasoning_delta_field") preset.reasoning_delta_field = declared;
+            else preset.reasoning_replay_field = declared;
+        }
     }
     if (value.contains("docs_url")) {
         if (!value["docs_url"].is_string()) return std::unexpected(where + ".docs_url 必须是字符串");
@@ -448,10 +461,13 @@ ProviderConfig ProviderConfigFromPreset(const ProviderPreset& preset) {
     // 不支持),与"自定义端压根没写"区分开,启动提醒只找后者。
     provider.stream_usage_declared = true;
     provider.reasoning_replay = preset.reasoning_replay;
+    provider.reasoning_delta_field = preset.reasoning_delta_field;
+    provider.reasoning_replay_field = preset.reasoning_replay_field;
     provider.extra_body = preset.extra_body;
     provider.extra_headers = preset.extra_headers;
     if (const auto* model = preset.FindModel(preset.default_model); model != nullptr) {
         if (model->context_window_tokens.has_value()) provider.context_window_tokens = *model->context_window_tokens;
+        if (model->max_output_tokens.has_value()) provider.max_output_tokens = *model->max_output_tokens;
         if (provider.model_reasoning_effort.empty()) provider.model_reasoning_effort = model->default_think;
     }
     return provider;

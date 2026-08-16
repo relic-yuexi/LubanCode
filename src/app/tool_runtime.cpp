@@ -197,9 +197,11 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     if (!config.lsp_servers.empty()) {
         lsp_manager_.emplace(config.lsp_servers, cwd_utf8);
     }
-    // 三份表:sub_registry 只有基础工具(防递归,子代理没有 agent),
-    // registry 在此之上多挂 agent 本身;explore 只读硬边界。两份基础表
-    // 各自独立构建,工具实例互不共享(本就无状态)。
+    // 三份表:sub_registry 与 main_registry 同为"基础 + MCP + LSP"的全能力
+    // 表(子代理与 main 同级,规格"产品不变量");agent 委托工具两边都有
+    // ——子表挂的是转发壳(AgentDispatchTool),递归不再靠拿掉工具防,改由
+    // AgentTool 的全局并发槽 + 显式深度上限治理(SetDispatchGovernance)。
+    // explore 只读硬边界:独立一张只读表,不含 agent/todo/写入类。
     if (options.with_explore) {
         explore_registry_.emplace(BuildExploreToolRegistry(config.search));
     }
@@ -229,25 +231,43 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     if (agent_tool_ != nullptr) {
         // 长任务 compact:子代理复用主 compact,窗口从配置来(0 = 未知不评估)。
         agent_tool_->SetContextWindowTokens(config.context_window_tokens);
+        // 派工治理(规格"递归派工不能再靠拿掉工具解决"):并发槽与深度上限
+        // 都从配置来,没写用公开默认值(config.hpp)。
+        agent_tool_->SetDispatchGovernance(config.subagent.max_active.value_or(lubancode::config::kDefaultSubagentMaxActive),
+                                           config.subagent.max_depth.value_or(lubancode::config::kDefaultSubagentMaxDepth));
     }
-    // agent_message:主模型给运行中子代理传增量的窄工具(只挂主表——子代理
-    // 深度硬限 1,不该再往下传话)。execute 只调 AgentTool::SendTaskMessage,
-    // 与查看态传话、排队转投共用同一本 TaskRecord::inbox。
+    // 同级派工:子表也挂 agent(转发壳,目标是上面那只 AgentTool)。后台
+    // 的独立注册表(BuildDetachedRegistry)不挂——后台线程不能同步跑前台
+    // 任务,那条路要另立单子接(见 AgentDispatchTool 注释)。
+    if (agent_tool_ != nullptr) {
+        sub_registry_.Register(std::make_unique<lubancode::tools::AgentDispatchTool>(*agent_tool_));
+    }
+    // agent_message:主模型给运行中子代理传增量的窄工具(只挂主表——深度
+    // 超限的孙代理不该再往下传话;主表那枚是 main 用的)。execute 只调
+    // AgentTool::SendTaskMessage,与查看态传话、排队转投共用同一本
+    // TaskRecord::inbox。
     if (agent_tool_ != nullptr) {
         main_registry_.Register(std::make_unique<lubancode::tools::AgentMessageTool>(agent_tool_));
     }
     if (agent_tool_ != nullptr && explore_registry_.has_value()) {
         agent_tool_->SetExploreRegistry(&*explore_registry_);
     }
-    // todo_write 只挂主表:子代理是短命跑腿,不该有权限乱写主会话的
-    // 待办清单。todo_state 由调用方取走共享(RunTurn 渲染、/todos 命令)。
+    // todo_write:主表挂会话级待办(/todos、RunTurn 渲染读同一份 state);
+    // 子表也挂(同级能力),但 AgentTool::RunTask 会把每只任务的 todo_write
+    // 换成该任务独占的实例——子代理有自己的私有 todo,不乱写 main 的
+    // 待办,也不与别只子代理共用一块板。
     todo_state_ = std::make_shared<lubancode::tools::TodoListState>();
     main_registry_.Register(std::make_unique<lubancode::tools::TodoWriteTool>(todo_state_));
+    sub_todo_state_ = std::make_shared<lubancode::tools::TodoListState>();
+    sub_registry_.Register(std::make_unique<lubancode::tools::TodoWriteTool>(sub_todo_state_));
     if (options.with_ask_user) {
         main_registry_.Register(std::make_unique<lubancode::tools::AskUserTool>(options.ask_user_handler));
     }
+    // memory_save 同级(规格"同级能力审计"memory 写入行):同授权、默认写
+    // 候选——子表也挂,与主表同一个 ProjectMemory 引擎。
     if (options.memory != nullptr && options.memory->generate_enabled()) {
         main_registry_.Register(std::make_unique<lubancode::memory::MemorySaveTool>(options.memory));
+        sub_registry_.Register(std::make_unique<lubancode::memory::MemorySaveTool>(options.memory));
     }
     // 模型侧 worktree 工具:只挂主表(子代理不起房,带 isolation 的
     // 子代理由 agent_tool 另走 base_dir 包装那条路)。
@@ -255,8 +275,10 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
         main_registry_.Register(std::make_unique<lubancode::tools::WorktreeTool>(
             *options.worktree_session, options.worktree_confirm, options.on_worktree_moved));
     }
-    // 插件工具只挂主表(短命跑腿不用外挂),挂载行紧跟 [mcp] 那几行。
+    // 插件工具主表 + 子表都挂(子代理与 main 同能力,独立任务 agent 默认
+    // 完成后退出,不是低配跑腿),挂载行紧跟 [mcp] 那几行。
     MountPlugins(plugin_host_, main_registry_, theme, plugin_mounted_, plugin_warnings_);
+    MountPlugins(plugin_host_, sub_registry_, theme, plugin_mounted_, plugin_warnings_);
 
     // tool_search(延迟挂载):全部工具(MCP/插件/LSP/agent/todo)都注册
     // 完了才数总数、定启停。loaded 集合是会话级的(/clear 不清),主会话

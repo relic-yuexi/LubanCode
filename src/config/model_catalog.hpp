@@ -49,6 +49,9 @@ struct ModelCatalogEntry {
     std::vector<ThinkLevel> supported_think_levels;
     std::string base_instructions;
     std::optional<std::size_t> context_window_tokens;
+    // 输出上限声明("8k"/裸数字,解析时换算):三级声明的最底一级
+    // (agent::ResolveOutputBudget),规格根因一。nullopt = 未声明。
+    std::optional<std::size_t> max_output_tokens;
     std::optional<bool> supports_parallel_tool_calls;  // 暂不启用
     std::vector<std::string> input_modalities;          // 暂不启用
     std::string truncation_policy;                       // 暂不启用

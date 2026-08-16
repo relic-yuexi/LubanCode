@@ -52,7 +52,11 @@ json ContentBlockToItem(const ContentBlock& block, Role role) {
 nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, const json& extra_body) {
     json body;
     body["model"] = request.model;
-    body["max_output_tokens"] = request.max_tokens;
+    // max_output_tokens 可省略(responses 协议):unset 交服务端默认
+    // (Request::max_tokens 注释,规格根因一)。显式声明了才落键。
+    if (request.max_tokens.has_value()) {
+        body["max_output_tokens"] = *request.max_tokens;
+    }
     body["stream"] = true;
     body["store"] = false;  // 无状态:历史全靠自己带,跟 Anthropic 后端行为一致
 

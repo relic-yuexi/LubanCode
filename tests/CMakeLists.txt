@@ -21,6 +21,9 @@ add_executable(lubancode_tests
   test_request_prefix.cpp
   test_config.cpp
   test_model_catalog.cpp
+  # 运行策略(子代理与 MainAgent 同级,根因一):输出预算三级解析与
+  # main/子代理同有效值的铁律。
+  test_runtime_profile.cpp
   test_provider_catalog.cpp
   test_update_checker.cpp
   test_models.cpp

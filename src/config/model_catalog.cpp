@@ -123,6 +123,28 @@ std::optional<ModelCatalogEntry> ParseEntry(const nlohmann::json& item, std::str
         entry.context_window_tokens = *parsed;
     }
 
+    // 输出上限声明(规格根因一):与 context_window 同一套换算("8k"/
+    // 裸数字),坏条目跳过。它是三级声明的最底一级(agent::ResolveOutput-
+    // Budget):配置文件与 provider 声明都缺席才轮到它;再缺席 = unset。
+    if (item.contains("max_output_tokens")) {
+        const auto& field = item["max_output_tokens"];
+        std::string raw;
+        if (field.is_string()) {
+            raw = field.get<std::string>();
+        } else if (field.is_number_integer() || field.is_number_unsigned()) {
+            raw = std::to_string(field.get<long long>());
+        } else {
+            error_out = "max_output_tokens 字段必须是字符串或数字";
+            return std::nullopt;
+        }
+        const auto parsed = ParseContextWindowTokens(raw);
+        if (!parsed.has_value()) {
+            error_out = parsed.error();
+            return std::nullopt;
+        }
+        entry.max_output_tokens = *parsed;
+    }
+
     if (item.contains("supports_parallel_tool_calls")) {
         if (!item["supports_parallel_tool_calls"].is_boolean()) {
             error_out = "supports_parallel_tool_calls 字段必须是布尔值";
@@ -170,6 +192,7 @@ ModelCatalog BuiltinModelsFromProviderCatalog() {
             entry.description = model.description;
             entry.default_think = model.default_think;
             entry.context_window_tokens = model.context_window_tokens;
+            entry.max_output_tokens = model.max_output_tokens;
             for (const auto& variant : model.variants) {
                 entry.supported_think_levels.push_back(
                     ThinkLevel{variant.id, variant.description, variant.extra_body});

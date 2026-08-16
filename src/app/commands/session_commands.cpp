@@ -17,6 +17,7 @@
 #include "agent/loop.hpp"
 #include "agent/session_store.hpp"
 #include "app/commands/settings_commands.hpp"
+#include "app/runtime_profile.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/i18n.hpp"
@@ -48,7 +49,8 @@ std::size_t EstimateHistoryTokens(const std::vector<lubancode::api::Message>& hi
 // context_tracker 拿。
 void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracker& context_tracker,
                            std::size_t sys_tokens, std::size_t tools_tokens, std::size_t history_tokens,
-                           const lubancode::cli::Theme& theme, int cache_epoch) {
+                           const lubancode::cli::Theme& theme, int cache_epoch,
+                           const lubancode::agent::AgentRuntimeProfile* main_profile) {
     if (args.empty()) {
         const auto lines = lubancode::cli::FormatContextBreakdown(
             sys_tokens, tools_tokens, history_tokens, context_tracker.last_cache_read_tokens(),
@@ -56,6 +58,18 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
             /*bar_width=*/16, context_tracker.last_cache_hit_percent());
         for (const auto& line : lines) {
             std::cout << line << "\n";
+        }
+        // 输出上限与来源(规格根因一):本轮每份请求给模型留的输出空间,
+        // unset 也说破——"交服务端默认"比一枚看不见的 4096 诚实。输出预留
+        // 已计入上面的 projected 评估(loop.cpp),这里展示的就是那份值。
+        if (main_profile != nullptr) {
+            if (main_profile->max_output_tokens.has_value()) {
+                std::cout << trf("cmd.context.output_budget", *main_profile->max_output_tokens,
+                                 app::OutputBudgetSourceText(main_profile->max_output_tokens_source, false))
+                          << "\n";
+            } else {
+                std::cout << tr("cmd.context.output_budget_unset") << "\n";
+            }
         }
         // 前缀缓存账(前缀缓存守恒单):epoch 与最近一次请求的命中率一行
         // 交代——命中跌下去时,用户看得出是主动换了哪根梁(epoch 断因在

@@ -270,6 +270,22 @@ const Entry kZhCN[] = {
     {"agent_status.reason_protocol_error", "会话异常"},
     {"agent_status.reason_unknown", "未注明原因"},
     {"agent_status.summary", "{0}({1} 次工具调用 · {2} tokens · {3})"},
+    {"agent_status.tokens_not_reported", "tokens 未报告"},
+    // 输出预算耗尽的结构化失败页(规格根因四):main 与子代理共用同一组
+    // 键,中英成对。
+    {"agent_outcome.output_budget.head",
+     "输出预算耗尽(stop_reason=max_tokens):自动续跑 {0} 次后仍无正文。已收到的思考与工具结果都保留在会话里。"},
+    {"agent_outcome.output_budget.limit", "本场输出上限: {0} tokens(来源见 /config)"},
+    {"agent_outcome.output_budget.limit_unset", "本场输出上限: unset——请求未带字段,墙在服务端默认"},
+    {"agent_outcome.output_budget.continuations", "已自动续跑: {0} 次(上限 agent.length_continuations)"},
+    {"agent_outcome.output_budget.usage_reported", "usage: 服务端已报告,token 账见回合统计"},
+    {"agent_outcome.output_budget.usage_not_reported",
+     "usage: 未报告——服务端报了 length 但没回 usage,token 数不可知,不按 0 算(chat 端常见原因是 stream_usage "
+     "没开,/doctor cache usage 可探)"},
+    {"agent_outcome.output_budget.escapes",
+     "去路: 1) 输入\"继续\"让它接着收束; 2) 提高本场输出上限(config 的 agent.max_output_tokens); 3) 降低或关闭 "
+     "thinking(/think none); 4) 拆小任务或换非推理模型"},
+    {"error.length_empty_reasoning_bytes", "已收到 {0} 字节思考(末段已留检查点,见会话记录)"},
     {"agent_status.expand_hint", "(ctrl+o 展开明细)"},
     {"agent_tool.title_missing",
      "缺少必填参数 title:给任务一个语义短标题(中文 4~16 字、英文 2~6 个词,名词短语,不照抄 prompt 首句),补上后重试。"},
@@ -699,6 +715,17 @@ const Entry kZhCN[] = {
     {"config.soul.unset", "(未设置,用主目录 SOUL.md)"},
     {"config.threshold.never", "(永不延迟)"},
     {"config.steps.unlimited", "(无上限)"},
+    // 输出预算(规格"子代理与 MainAgent 同级"根因一):unset 说破,不装 0
+    // 也不藏魔数;来源四级句与 /context 的输出上限行共用。
+    {"config.output.unset", "unset(请求不带字段,交服务端/模型默认;anthropic 必填时落公开兜底 8192)"},
+    {"config.output.tokens", "{0} tokens"},
+    {"config.output_source.config", "配置 agent.max_output_tokens"},
+    {"config.output_source.config_subagent", "配置 subagent.max_output_tokens(显式覆盖)"},
+    {"config.output_source.provider", "provider 声明"},
+    {"config.output_source.catalog", "模型目录声明"},
+    {"config.output_source.unset", "unset(三级都未声明)"},
+    {"cmd.context.output_budget", "输出上限 {0} tokens[{1}]——thinking 与正文共用这笔预算,已计入 projected 评估"},
+    {"cmd.context.output_budget_unset", "输出上限 unset[三级都未声明]——请求不带字段,交服务端/模型默认;projected 评估按 8192 保守估计"},
     {"config.label.file", "  配置文件           = {0}"},
     {"config.hooks.none", "(未配置)"},
     {"config.mcp.count", "{0} 个服务器"},
@@ -965,7 +992,7 @@ const Entry kZhCN[] = {
     {"cmd.think.undeclared", "提示: 模型目录未声明该档,仍会发送。"},
 
     // ---- /doctor:本地兼容端 Effort 与前缀缓存诊断(2026-08 单) ----
-    {"doctor.usage.usage_line", "用法: /doctor effort [档位|unset] | /doctor cache [probe|usage]"},
+    {"doctor.usage.usage_line", "用法: /doctor effort [档位|unset] | /doctor cache [probe|usage] | /doctor agents"},
     {"doctor.overview.header", "诊断概览(不发请求,只看当前声明与结论):"},
     {"doctor.overview.effort", "  当前档位: "},
     {"doctor.overview.declared", "  档位声明: "},
@@ -989,6 +1016,17 @@ const Entry kZhCN[] = {
     {"doctor.effort.usage_reasoning", "usage 拆账:输出里 reasoning {0} tokens。"},
     {"doctor.effort.usage_no_split", "usage 未拆 reasoning 账(服务端没回 reasoning_tokens)。"},
     {"doctor.effort.usage_not_reported", "usage:未报告(服务端没回 usage——chat 端常见原因是 stream_usage 没开,/doctor cache usage 可探)。"},
+    // /doctor agents:main 与各 agent type 的差异矩阵(规格"架构落点")。
+    {"doctor.agents.header", "main 与各 agent type 的能力矩阵(默认同级;差异来自角色或显式配置)"},
+    {"doctor.agents.budget",
+     "共用运行策略:输出上限 {0}(0 = unset,交服务端默认) · 步数 {1} · length 续跑 {2} 次"},
+    {"doctor.agents.governance", "派工治理:并发槽 ≤ {0}(subagent.max_active) · 深度 ≤ {1}(subagent.max_depth)"},
+    {"doctor.agents.row_main", "main        :{0} 枚工具(含 agent/todo/ask_user)"},
+    {"doctor.agents.row_sub",
+     "general-purpose:{0} 枚工具(与 main 同能力;todo 为每任务私有实例,可再派 agent)"},
+    {"doctor.agents.row_explore", "Explore     :{0} 枚工具(只读白名单,角色限制——不是子代理无权限)"},
+    {"doctor.agents.note",
+     "注:输出上限/步数/续跑/并发/深度 main 与子代理同一份(runtime profile);仅 Explore 按角色收窄工具。"},
     {"doctor.cache.no_metrics", "未配 metrics_url,读不到服务端指标。本地兼容端可在 provider 配置里写 metrics_url(如 http://127.0.0.1:8000/metrics)后重试;不擅自拿 base_url 猜端点去探。"},
     {"doctor.cache.metrics_header", "服务端指标({0}):"},
     {"doctor.cache.metrics_enabled", "enable_prefix_caching = True:服务端已启用前缀缓存。"},
@@ -1559,6 +1597,25 @@ const Entry kEn[] = {
     {"agent_status.reason_protocol_error", "protocol error"},
     {"agent_status.reason_unknown", "unspecified"},
     {"agent_status.summary", "{0} ({1} tool uses · {2} tokens · {3})"},
+    {"agent_status.tokens_not_reported", "tokens not reported"},
+    // Structured failure page for output budget exhaustion (spec root cause 4):
+    // shared by main and subagents, zh/en paired.
+    {"agent_outcome.output_budget.head",
+     "Output budget exhausted (stop_reason=max_tokens): still no text after {0} automatic continuation(s). Thinking and "
+     "tool results received so far are preserved in the session."},
+    {"agent_outcome.output_budget.limit", "Output budget this session: {0} tokens (source in /config)"},
+    {"agent_outcome.output_budget.limit_unset",
+     "Output budget this session: unset — the field was omitted; the wall is the server default"},
+    {"agent_outcome.output_budget.continuations", "Automatic continuations used: {0} (limit agent.length_continuations)"},
+    {"agent_outcome.output_budget.usage_reported", "usage: reported by the server; see the turn stats"},
+    {"agent_outcome.output_budget.usage_not_reported",
+     "usage: not reported — the server said length but returned no usage, so token counts are unknown and not treated as "
+     "0 (on chat endpoints the usual cause is stream_usage off; /doctor cache usage can probe)"},
+    {"agent_outcome.output_budget.escapes",
+     "Ways out: 1) type \"continue\" to let it wrap up; 2) raise the output budget (config agent.max_output_tokens); 3) "
+     "lower or disable thinking (/think none); 4) split the task or switch to a non-reasoning model"},
+    {"error.length_empty_reasoning_bytes", "{0} bytes of thinking received (a checkpoint of the tail is kept; see the "
+                                          "session record)"},
     {"agent_status.expand_hint", "(ctrl+o to expand)"},
     {"agent_tool.title_missing",
      "Missing required parameter title: give the task a short semantic title (4-16 CJK chars or 2-6 English words, a "
@@ -2039,6 +2096,37 @@ const Entry kEn[] = {
     {"config.soul.unset", "(not set; uses SOUL.md in the home dir)"},
     {"config.threshold.never", "(never defer)"},
     {"config.steps.unlimited", "(unlimited)"},
+    // Output budget (same-level subagents spec, root cause 1): unset is spoken
+    // out loud — no fake 0, no hidden magic number.
+    {"config.output.unset",
+     "unset (field omitted from the request; server/model default applies. anthropic requires it and falls back to "
+     "the public default 8192)"},
+    {"config.output.tokens", "{0} tokens"},
+    {"config.output_source.config", "config agent.max_output_tokens"},
+    {"config.output_source.config_subagent", "config subagent.max_output_tokens (explicit override)"},
+    {"config.output_source.provider", "provider declaration"},
+    {"config.output_source.catalog", "model catalog declaration"},
+    {"config.output_source.unset", "unset (no declaration at any of the three levels)"},
+    {"cmd.context.output_budget",
+     "output budget {0} tokens [{1}] — thinking and text share this budget; it is included in the projected estimate"},
+    {"cmd.context.output_budget_unset",
+     "output budget unset [no declaration at any of the three levels] — field omitted, server/model default applies; "
+     "projected estimate assumes a conservative 8192"},
+    // /doctor agents: capability matrix between main and agent types (en pair
+    // for the zh entries above; the rest of the doctor section is zh-only as of
+    // this writing — new strings come in pairs per house rule).
+    {"doctor.agents.header", "Capability matrix: main vs agent types (same level by default; differences come from roles or explicit config)"},
+    {"doctor.agents.budget",
+     "shared runtime profile: output budget {0} (0 = unset, server default) · steps {1} · length continuations {2}"},
+    {"doctor.agents.governance",
+     "dispatch governance: concurrency slots ≤ {0} (subagent.max_active) · depth ≤ {1} (subagent.max_depth)"},
+    {"doctor.agents.row_main", "main        : {0} tools (incl. agent/todo/ask_user)"},
+    {"doctor.agents.row_sub",
+     "general-purpose: {0} tools (same capabilities as main; per-task private todo; may dispatch further agents)"},
+    {"doctor.agents.row_explore", "Explore     : {0} tools (read-only allowlist, a role restriction — not \"subagent has no permission\")"},
+    {"doctor.agents.note",
+     "note: output budget/steps/continuations/concurrency/depth are one shared runtime profile for main and subagents; "
+     "only Explore narrows tools by role."},
     {"config.label.file", "  config file        = {0}"},
     {"config.hooks.none", "(not configured)"},
     {"config.mcp.count", "{0} servers"},

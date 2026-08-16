@@ -53,6 +53,13 @@ struct ProviderPreset {
     // (语义见 api/chat/request.hpp)。DeepSeek 这类要求工具交互段回传
     // reasoning_content 的端配 "tool_episode";默认空 = never。
     std::string reasoning_replay;
+    // reasoning_delta_field / reasoning_replay_field:Chat wire 思考字段的
+    // 两枚名字声明(语义见 api/chat/request.hpp 的 ChatRequestOptions)。
+    // 空 = 自动兼容(delta 侧两个别名都认) / 回传写 reasoning_content。
+    // vLLM 0.27+/Qwen 这类端 delta 叫 reasoning、回传也只认 reasoning,
+    // 两条都声明成 "reasoning"。
+    std::string reasoning_delta_field;
+    std::string reasoning_replay_field;
     std::string docs_url;
     nlohmann::json extra_body = nlohmann::json::object();
     std::map<std::string, std::string> extra_headers;

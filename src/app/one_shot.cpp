@@ -39,6 +39,7 @@
 #include "api/models.hpp"
 #include "api/responses/client.hpp"
 #include "app/backend_stack.hpp"
+#include "app/runtime_profile.hpp"
 #include "app/tool_runtime.hpp"
 #include "app/hook_runtime.hpp"
 #include "app/turn_runner.hpp"
@@ -185,6 +186,19 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     if (auto* agent_tool = tool_runtime.agent_tool(); agent_tool != nullptr) {
         agent_tool->SetPromptsDir(prompts_dir);  // 子代理系统提示同机制
         agent_tool->SetProjectInstructions(project_instructions);
+        // 运行策略同级(规格根因一):单发模式的子代理也吃 main 的有效
+        // profile 派生份——输出上限/字符安全网/续跑次数同一份,不落回
+        // 环境默认。main 的 profile 在下面算,这里先建一份同源的。
+        agent_tool->SetRuntimeProfile(lubancode::app::BuildSubagentRuntimeProfile(
+            lubancode::app::BuildMainRuntimeProfile(config, &once_catalog, config.model), config));
+        // 单发模式的子代理记忆召回:按任务 prompt 独立检索(与 main 同一只
+        // ProjectMemory;关着就不注)。
+        if (project_memory != nullptr && config.memory.use) {
+            agent_tool->SetTurnContextProvider([memory = project_memory](const std::string& task_prompt) {
+                return memory->BuildTurnContext(task_prompt, std::filesystem::current_path(),
+                                                lubancode::memory::QueryOrigin::User);
+            });
+        }
         if (sub_deferral) {
             agent_tool->SetToolFilter(sub_tool_filter);
             agent_tool->SetDeferredIndexProvider([&sub_registry, loaded_tools]() {
@@ -211,14 +225,17 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     prompt_options.wire = lubancode::config::ProviderWireName(config.wire);
     prompt_options.prompts_dir = prompts_dir;  // 运行时模块:构造时现读现拼
 
+    // 运行策略走统一 profile(规格根因一):输出上限三级解析(config >
+    // provider > 模型目录),unset 交服务端默认——与交互会话同一只装配
+    // 函数,单发不再单写一枚 4096。
+    const lubancode::agent::AgentRuntimeProfile main_profile =
+        lubancode::app::BuildMainRuntimeProfile(config, &once_catalog, config.model);
     lubancode::agent::AgentLoop loop(
-        index_backend, registry, config.model,
+        index_backend, registry, main_profile,
         lubancode::agent::WithSoul(
             lubancode::agent::WithModelInstructions(
                 lubancode::agent::AssembleSystemPrompt(prompt_options), model_instructions),
-            soul_content),
-        // 步数上限同上,改用 config 的 max_steps_per_turn(默认 0=无上限)。
-        /*max_tokens=*/4096, config.max_steps_per_turn, config.max_context_chars);
+            soul_content));
     if (main_deferral) {
         loop.SetToolFilter(tool_runtime.main_tool_filter());
     }

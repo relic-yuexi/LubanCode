@@ -100,8 +100,9 @@ struct PluginMountInfo {
 };
 
 // M7:扫两类插件(<主目录>/.lubancode/plugins 下的 *.dll 和 *.lua),挂进
-// 主 registry——子代理表不挂,短命跑腿不用外挂。每个插件打一行
-// "[plugin] 名: N 个工具";坏 DLL / 坏 lua 打警告跳过,不崩。
+// 目标 registry——主表与子代理表都挂(子代理与 main 同能力,独立任务
+// agent 默认完成后退出,不是低配跑腿);Explore 只读表不挂。每个插件打
+// 一行 "[plugin] 名: N 个工具";坏 DLL / 坏 lua 打警告跳过,不崩。
 // plugin_host 由调用方持有,且必须声明在 registry 之前(PluginTool 手中的
 // luban_tool_def* 指向 DLL 静态数据,模块要活得比 registry 久,析构反序那
 // 一套,理由同 mcp_servers);LuaTool 连 lua_State 整个搬进 registry,没有
@@ -161,6 +162,9 @@ public:
     // / "auto→ptc" / "ptc→json(回落原因)"。
     const std::string& ptc_resolution() const { return ptc_resolution_; }
     const std::shared_ptr<lubancode::tools::TodoListState>& todo_state() const { return todo_state_; }
+    // 子表的 todo 板(占位:AgentTool::RunTask 会给每只任务换独占实例,
+    // 这块板只是"子代理有 todo 能力"的装配落点,面板不读它)。
+    const std::shared_ptr<lubancode::tools::TodoListState>& sub_todo_state() const { return sub_todo_state_; }
     const std::shared_ptr<std::set<std::string>>& loaded_tools() const { return loaded_tools_; }
     bool main_deferral() const { return main_deferral_; }
     bool sub_deferral() const { return sub_deferral_; }
@@ -191,6 +195,7 @@ private:
     std::string ptc_resolution_;
     lubancode::tools::AgentTool* agent_tool_ = nullptr;  // 对象在 main_registry_ 里
     std::shared_ptr<lubancode::tools::TodoListState> todo_state_;
+    std::shared_ptr<lubancode::tools::TodoListState> sub_todo_state_;
     std::shared_ptr<std::set<std::string>> loaded_tools_ = std::make_shared<std::set<std::string>>();
     bool main_deferral_ = false;
     bool sub_deferral_ = false;

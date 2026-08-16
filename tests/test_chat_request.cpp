@@ -253,3 +253,47 @@ TEST_CASE("Chat request: 档位参数名按 provider 声明走,空档位字段�
         CHECK_FALSE(named.contains("custom"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// reasoning 回传字段名(reasoning_replay_field,vLLM/Qwen 单):回传历史
+// 时不许想当然把所有服务都写成 reasoning_content——DeepSeek 协议要
+// reasoning_content,vLLM 0.27+/Qwen 只认 reasoning。
+// ---------------------------------------------------------------------------
+
+api::chat::ChatRequestOptions ToolEpisodeWithReplayField(const std::string& field) {
+    api::chat::ChatRequestOptions options;
+    options.reasoning_replay = api::chat::ReasoningReplayPolicy::ToolEpisode;
+    options.reasoning_replay_field = field;
+    return options;
+}
+
+TEST_CASE("Chat request: 回传字段名按 provider 声明走,默认仍是 reasoning_content") {
+    api::Request request;
+    request.model = "qwen3.8-27b";
+    request.tools.push_back({"read_file", "读文件", nlohmann::json{{"type", "object"}}});
+    api::Message user;
+    user.role = api::Role::User;
+    user.content.push_back(api::TextBlock{"读 a.cpp"});
+    request.messages.push_back(user);
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    assistant.content.push_back(api::ThinkingBlock{"先想路径", ""});
+    assistant.content.push_back(api::ToolUseBlock{"call_1", "read_file", nlohmann::json{{"path", "a.cpp"}}});
+    request.messages.push_back(assistant);
+    api::Message result;
+    result.role = api::Role::User;
+    result.content.push_back(api::ToolResultBlock{"call_1", "正文", false});
+    request.messages.push_back(result);
+
+    SUBCASE("默认:回传写 reasoning_content(DeepSeek 协议,现行行为)") {
+        const auto body = api::chat::BuildRequestJson(request, nlohmann::json::object(), ToolEpisode());
+        CHECK(body["messages"][1]["reasoning_content"] == "先想路径");
+        CHECK_FALSE(body["messages"][1].contains("reasoning"));
+    }
+    SUBCASE("声明 reasoning(vLLM/Qwen):同一个名字,不是 reasoning_content") {
+        const auto body = api::chat::BuildRequestJson(request, nlohmann::json::object(),
+                                                      ToolEpisodeWithReplayField("reasoning"));
+        CHECK(body["messages"][1]["reasoning"] == "先想路径");
+        CHECK_FALSE(body["messages"][1].contains("reasoning_content"));
+    }
+}

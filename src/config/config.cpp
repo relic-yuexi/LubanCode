@@ -278,12 +278,15 @@ bool ApplyConfiguredActiveProvider(ConfigResult& result) {
     result.config.native_web_search = provider->native_web_search;
     result.config.stream_usage = provider->stream_usage;
     result.config.reasoning_replay = provider->reasoning_replay;
+    result.config.reasoning_delta_field = provider->reasoning_delta_field;
+    result.config.reasoning_replay_field = provider->reasoning_replay_field;
     // Effort/缓存诊断声明镜像(本地兼容端诊断单):provider 是唯一来源,
     // 切过去就带上;单 provider 顶层写法没有条目,镜像字段保持默认(未声明)。
     result.config.provider_think_levels = provider->supported_think_levels;
     result.config.think_param = provider->think_param;
     result.config.think_passthrough = provider->think_passthrough;
     result.config.metrics_url = provider->metrics_url;
+    result.config.provider_max_output_tokens = provider->max_output_tokens;
     result.config.stream_usage_declared = provider->stream_usage_declared;
     return true;
 }
@@ -1066,6 +1069,24 @@ std::expected<std::vector<ProviderConfig>, std::string> ParseProvidersConfig(
             }
             provider.think_param = item["think_param"].get<std::string>();
         }
+        // 输出上限声明:字符串(k/m 写法)或正整数都认,与 context_window
+        // 同一套换算;坏值报错(这不是救命阀,是能力声明,写错就该让人看见)。
+        if (item.contains("max_output_tokens")) {
+            std::string raw_output;
+            if (item["max_output_tokens"].is_string()) {
+                raw_output = item["max_output_tokens"].get<std::string>();
+            } else if (item["max_output_tokens"].is_number_integer() ||
+                       item["max_output_tokens"].is_number_unsigned()) {
+                raw_output = std::to_string(item["max_output_tokens"].get<long long>());
+            } else {
+                return std::unexpected(prefix + " 里的 max_output_tokens 字段必须是正整数或 k/m 字符串");
+            }
+            const auto parsed_output = ParseContextWindowTokens(raw_output);
+            if (!parsed_output.has_value()) {
+                return std::unexpected(prefix + " 里的 max_output_tokens 字段: " + parsed_output.error());
+            }
+            provider.max_output_tokens = *parsed_output;
+        }
         if (item.contains("think_passthrough")) {
             if (!item["think_passthrough"].is_boolean()) {
                 return std::unexpected(prefix + " 里的 think_passthrough 字段必须是布尔值");
@@ -1087,6 +1108,20 @@ std::expected<std::vector<ProviderConfig>, std::string> ParseProvidersConfig(
                 return std::unexpected(prefix + " 里的 reasoning_replay 只认 never/tool_episode: " + replay);
             }
             provider.reasoning_replay = replay;
+        }
+        // 思考字段名声明(vLLM/Qwen 单):两枚全可选,必须非空字符串——
+        // 空串与"没写"没法区分,写空等于没写,不如报错让人改对。
+        for (const char* field : {"reasoning_delta_field", "reasoning_replay_field"}) {
+            if (item.contains(field)) {
+                if (!item[field].is_string() || item[field].get<std::string>().empty()) {
+                    return std::unexpected(prefix + " 里的 " + field + " 字段必须是非空字符串");
+                }
+                if (std::string(field) == "reasoning_delta_field") {
+                    provider.reasoning_delta_field = item[field].get<std::string>();
+                } else {
+                    provider.reasoning_replay_field = item[field].get<std::string>();
+                }
+            }
         }
         if (item.contains("extra_body")) {
             // 不直接复用 ParseExtraBodyConfig——那个函数的报错信息自己拼了
@@ -1462,6 +1497,44 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
             const long long turns = subagent["max_turns"].get<long long>();
             if (turns >= 0 && turns <= static_cast<long long>(1000000)) {
                 config.subagent_max_turns = static_cast<int>(turns);
+            }
+        }
+        // 输出上限:正整数才落(0/负数/坏类型静默跳过);null 与缺失同义
+        // (规格"兼容与配置":字段缺失或 null 就继承 agent 段,不落回魔数)。
+        if (subagent.contains("max_output_tokens") && subagent["max_output_tokens"].is_number_integer()) {
+            const long long tokens = subagent["max_output_tokens"].get<long long>();
+            if (tokens > 0 && tokens <= static_cast<long long>(10000000)) {
+                config.subagent_max_output_tokens = static_cast<int>(tokens);
+            }
+        }
+        // 派工治理:深度与并发槽,正整数才落,坏值静默跳过(救命阀)。
+        if (subagent.contains("max_depth") && subagent["max_depth"].is_number_integer()) {
+            const long long depth = subagent["max_depth"].get<long long>();
+            if (depth > 0 && depth <= 32) {
+                config.subagent_max_depth = static_cast<int>(depth);
+            }
+        }
+        if (subagent.contains("max_active") && subagent["max_active"].is_number_integer()) {
+            const long long active = subagent["max_active"].get<long long>();
+            if (active > 0 && active <= 256) {
+                config.subagent_max_active = static_cast<int>(active);
+            }
+        }
+    }
+    // agent 段(main 与子代理共用的运行预算,规格根因一):待遇同 subagent
+    // 段——坏值静默跳过,不拦人开工。max_output_tokens 缺失/null = unset。
+    if (parsed.contains("agent") && parsed["agent"].is_object()) {
+        const auto& agent = parsed["agent"];
+        if (agent.contains("max_output_tokens") && agent["max_output_tokens"].is_number_integer()) {
+            const long long tokens = agent["max_output_tokens"].get<long long>();
+            if (tokens > 0 && tokens <= static_cast<long long>(10000000)) {
+                config.agent_max_output_tokens = static_cast<int>(tokens);
+            }
+        }
+        if (agent.contains("length_continuations") && agent["length_continuations"].is_number_integer()) {
+            const long long continuations = agent["length_continuations"].get<long long>();
+            if (continuations >= 0 && continuations <= 100) {
+                config.agent_length_continuations = static_cast<int>(continuations);
             }
         }
     }
@@ -2178,6 +2251,46 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.config.subagent.max_steps_per_turn = std::nullopt;  // 未单独配置:运行时继承主代理预算
         result.sources.subagent = Source::Default;
     }
+    // subagent.max_output_tokens:项目级压全局;都没写 = 继承 agent 段的
+    // 有效值(运行时解析,规格"同级"根因一)。
+    if (project_file.has_value() && project_file->subagent_max_output_tokens.has_value()) {
+        result.config.subagent.max_output_tokens = project_file->subagent_max_output_tokens;
+    } else if (global_file.has_value() && global_file->subagent_max_output_tokens.has_value()) {
+        result.config.subagent.max_output_tokens = global_file->subagent_max_output_tokens;
+    } else {
+        result.config.subagent.max_output_tokens = std::nullopt;
+    }
+    // 派工治理:深度与并发槽,项目级压全局,没写用公开默认值。
+    if (project_file.has_value() && project_file->subagent_max_depth.has_value()) {
+        result.config.subagent.max_depth = project_file->subagent_max_depth;
+    } else if (global_file.has_value() && global_file->subagent_max_depth.has_value()) {
+        result.config.subagent.max_depth = global_file->subagent_max_depth;
+    }
+    if (project_file.has_value() && project_file->subagent_max_active.has_value()) {
+        result.config.subagent.max_active = project_file->subagent_max_active;
+    } else if (global_file.has_value() && global_file->subagent_max_active.has_value()) {
+        result.config.subagent.max_active = global_file->subagent_max_active;
+    }
+
+    // agent 段(main 与子代理共用的预算):项目级压全局,按字段各回各的
+    // 级;都没写 = unset(输出上限走 provider/目录声明)与默认续跑次数。
+    if (project_file.has_value() && project_file->agent_max_output_tokens.has_value()) {
+        result.config.agent.max_output_tokens = project_file->agent_max_output_tokens;
+        result.sources.agent = Source::ProjectConfigFile;
+    } else if (global_file.has_value() && global_file->agent_max_output_tokens.has_value()) {
+        result.config.agent.max_output_tokens = global_file->agent_max_output_tokens;
+        result.sources.agent = Source::GlobalConfigFile;
+    } else {
+        result.config.agent.max_output_tokens = std::nullopt;
+        result.sources.agent = Source::Default;
+    }
+    if (project_file.has_value() && project_file->agent_length_continuations.has_value()) {
+        result.config.agent.length_continuations = *project_file->agent_length_continuations;
+    } else if (global_file.has_value() && global_file->agent_length_continuations.has_value()) {
+        result.config.agent.length_continuations = *global_file->agent_length_continuations;
+    } else {
+        result.config.agent.length_continuations = kDefaultLengthContinuations;
+    }
     if (project_file.has_value() && project_file->status_panel.has_value()) {
         result.config.status_panel = *project_file->status_panel;
         result.sources.status_panel = Source::ProjectConfigFile;
@@ -2406,6 +2519,10 @@ nlohmann::json ProvidersToJson(const std::vector<ProviderConfig>& providers) {
         if (!provider.api_key.empty()) {
             item["api_key"] = provider.api_key;
         }
+        // 输出上限声明:未声明(nullopt)不落键,旧配置写回不多出这个字段。
+        if (provider.max_output_tokens.has_value()) {
+            item["max_output_tokens"] = *provider.max_output_tokens;
+        }
         if (!provider.model_reasoning_effort.empty()) {
             item["model_reasoning_effort"] = provider.model_reasoning_effort;
         }
@@ -2435,6 +2552,13 @@ nlohmann::json ProvidersToJson(const std::vector<ProviderConfig>& providers) {
         // reasoning_replay 同理:默认空(=never)不落盘。
         if (!provider.reasoning_replay.empty()) {
             item["reasoning_replay"] = provider.reasoning_replay;
+        }
+        // 思考字段名声明同理:默认空(自动兼容/回传 reasoning_content)不落盘。
+        if (!provider.reasoning_delta_field.empty()) {
+            item["reasoning_delta_field"] = provider.reasoning_delta_field;
+        }
+        if (!provider.reasoning_replay_field.empty()) {
+            item["reasoning_replay_field"] = provider.reasoning_replay_field;
         }
         // extra_body/extra_headers 同理:默认空,非空才落盘,没设置的旧
         // 配置写回后不多出这两个键。

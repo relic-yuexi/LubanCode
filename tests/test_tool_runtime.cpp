@@ -47,7 +47,7 @@ const std::vector<lubancode::tools::SkillMeta>& NoSkills() {
 
 using namespace lubancode::app;
 
-TEST_CASE("默认装配:主表有 agent/todo_write/基础工具,子表无 agent,Explore 缺席") {
+TEST_CASE("默认装配:主表有 agent/todo_write/基础工具,子表同级(含 agent 转发壳与 todo)") {
     lubancode::config::Config config = EmptyConfig();
     NullBackend backend;
     ToolRuntime runtime(config, lubancode::cli::BuiltinTheme("plain"), backend, NoSkills(),
@@ -58,9 +58,16 @@ TEST_CASE("默认装配:主表有 agent/todo_write/基础工具,子表无 agent,
     CHECK(runtime.main_registry().Find("read_file") != nullptr);
     CHECK(runtime.main_registry().Find("run_command") != nullptr);
     CHECK(runtime.main_registry().Find("ask_user") == nullptr);  // 交互独有,默认不挂
-    CHECK(runtime.sub_registry().Find("agent") == nullptr);      // 防递归
-    CHECK(runtime.sub_registry().Find("todo_write") == nullptr); // 只挂主表
+    // 同级能力(规格"产品不变量"):子表也挂 agent(AgentDispatchTool 转发壳)
+    // 与 todo_write(RunTask 给每只任务换独占实例);递归治理靠 AgentTool 的
+    // 深度账,不靠"子表没有 agent"。
+    CHECK(runtime.sub_registry().Find("agent") != nullptr);
+    CHECK(runtime.sub_registry().Find("agent")->name() == "agent");
+    CHECK(runtime.sub_registry().Find("todo_write") != nullptr);
     CHECK(runtime.sub_registry().Find("read_file") != nullptr);
+    // 子表 todo 板与主表各是各的:子代理不写 main 的待办。
+    CHECK(runtime.sub_todo_state() != nullptr);
+    CHECK(runtime.sub_todo_state() != runtime.todo_state());
     CHECK(runtime.explore_registry() == nullptr);  // 单发/默认无 Explore
     CHECK(runtime.agent_tool() != nullptr);
     CHECK(runtime.todo_state() != nullptr);
@@ -87,7 +94,8 @@ TEST_CASE("with_explore:Explore 只读硬边界,并挂到 agent 工具") {
     CHECK(explore->Find("search") != nullptr);
     CHECK(explore->Find("write_file") == nullptr);   // 只读边界:无写入
     CHECK(explore->Find("run_command") == nullptr);  // 无命令
-    CHECK(explore->Find("agent") == nullptr);        // 无委托
+    CHECK(explore->Find("agent") == nullptr);        // 只读角色不派工(角色限制)
+    CHECK(explore->Find("todo_write") == nullptr);   // 只读角色无 todo
     // Explore 表不进 MCP(空配置下无从验),但 agent 工具确实拿到了它。
     CHECK(runtime.agent_tool() != nullptr);
 }

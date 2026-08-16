@@ -6,6 +6,7 @@
 #include <iostream>
 
 #include "app/version.hpp"
+#include "app/runtime_profile.hpp"
 #include "app/turn_runner.hpp"
 #include "platform/paths.hpp"
 
@@ -1449,6 +1450,36 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
     std::cout << "  max_steps_per_turn = " << config.max_steps_per_turn
               << (config.max_steps_per_turn == 0 ? tr("config.steps.unlimited") : "") << "  ["
               << lubancode::config::ToString(sources.max_steps_per_turn) << "]\n";
+    // 输出预算(规格根因一):写明实际值与来源——unset 交服务端默认
+    // (chat/responses 不发字段;anthropic 必填,client 落公开兜底),三级
+    // 声明(config > provider > 模型目录)哪级说了算就在这里点名。子代理
+    // 单列一行:默认与 main 同一份,subagent 段显式覆盖才不同。
+    {
+        const std::string effective_model = session_model.value_or(config.model);
+        const lubancode::agent::AgentRuntimeProfile main_profile =
+            lubancode::app::BuildMainRuntimeProfile(config, catalog, effective_model);
+        const lubancode::agent::AgentRuntimeProfile subagent_profile =
+            lubancode::app::BuildSubagentRuntimeProfile(main_profile, config);
+        const auto budget_line = [](const lubancode::agent::AgentRuntimeProfile& profile) {
+            if (!profile.max_output_tokens.has_value()) {
+                return tr("config.output.unset");
+            }
+            return trf("config.output.tokens", *profile.max_output_tokens);
+        };
+        std::cout << "  max_output_tokens  = "
+                  << budget_line(main_profile) << "  ["
+                  << lubancode::app::OutputBudgetSourceText(
+                         main_profile.max_output_tokens_source, /*subagent_override=*/false)
+                  << "]\n";
+        std::cout << "  max_output_tokens (subagent) = "
+                  << budget_line(subagent_profile) << "  ["
+                  << lubancode::app::OutputBudgetSourceText(
+                         subagent_profile.max_output_tokens_source,
+                         config.subagent.max_output_tokens.has_value())
+                  << "]\n";
+        std::cout << "  length_continuations = " << config.agent.length_continuations << "  ["
+                  << lubancode::config::ToString(sources.agent) << "]\n";
+    }
     std::cout << "  theme              = " << config.theme << "  [" << lubancode::config::ToString(sources.theme)
               << "]\n";
     std::cout << "  status_panel       = ";

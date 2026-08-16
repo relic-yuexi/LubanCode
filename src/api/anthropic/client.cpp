@@ -99,8 +99,12 @@ std::optional<json> BuildThinkingJson(const Request& request) {
         return std::nullopt;
     }
 
-    if (budget >= request.max_tokens) {
-        budget = request.max_tokens > 256 ? request.max_tokens - 256 : request.max_tokens / 2;
+    // max_tokens 必填(anthropic):unset 时落公开兜底(见
+    // kRequiredMaxOutputTokensFallback 注释),预算夹逼拿兜底后的有效值算。
+    const int effective_max_tokens = request.max_tokens.value_or(kRequiredMaxOutputTokensFallback);
+
+    if (budget >= effective_max_tokens) {
+        budget = effective_max_tokens > 256 ? effective_max_tokens - 256 : effective_max_tokens / 2;
         if (budget < 1) {
             budget = 1;
         }
@@ -116,7 +120,10 @@ std::optional<json> BuildThinkingJson(const Request& request) {
 json BuildRequestJson(const Request& request, bool native_web_search, const json& extra_body) {
     json body;
     body["model"] = request.model;
-    body["max_tokens"] = request.max_tokens;
+    // max_tokens 是 anthropic 协议的必填字段:unset 时落公开兜底
+    // (kRequiredMaxOutputTokensFallback,三级声明都缺席才轮到它),不藏
+    // 魔数;想改上限走配置 agent.max_output_tokens 或目录声明。
+    body["max_tokens"] = request.max_tokens.value_or(kRequiredMaxOutputTokensFallback);
     body["stream"] = true;
 
     if (!request.system.empty()) {
