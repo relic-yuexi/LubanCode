@@ -9,6 +9,8 @@
 
 #include <array>
 #include <cstdio>
+#include <optional>
+#include <vector>
 
 #include "platform/console.hpp"
 
@@ -59,6 +61,14 @@ std::string Base64Encode(const std::string& bytes) {
 bool ClipboardLikelyAvailable() {
     // OSC 52 只对真终端有意义;管道/重定向写出去就是污染。
     return StdinIsInteractive();
+}
+
+std::optional<std::vector<unsigned char>> ReadClipboardImagePng(std::size_t max_bytes, std::string& error) {
+    // OSC 52 只有"写"方向(终端转交本机剪贴板),没有可靠的"读"回协议;
+    // 明确不支持,不装作能读。
+    (void)max_bytes;
+    error = "此平台读不了剪贴板位图(OSC 52 只写不读)";
+    return std::nullopt;
 }
 
 ClipboardResult CopyTextToClipboard(const std::string& utf8_text, std::string& error_detail) {

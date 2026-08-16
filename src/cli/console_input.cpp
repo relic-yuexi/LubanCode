@@ -64,11 +64,13 @@
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
+#include "cli/image_input.hpp"  // kMaxImageBytes(Alt+V 贴图的上限)
 #include "cli/keymap.hpp"
 #include "cli/mention_menu.hpp"
 #include "cli/queue_model.hpp"
 #include "cli/slash_commands.hpp"
 #include "cli/terminal_frame.hpp"
+#include "platform/clipboard.hpp"
 #include "platform/console.hpp"
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
@@ -1580,6 +1582,56 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                             (void)UiHandlerSlot()(action);
                         }
                         reanchor_prompt_and_redraw();
+                        continue;
+                    }
+                    case ActionId::ImagePasteClipboard: {
+                        // Alt+V 剪贴板位图直贴(0.30.x 第三批):取剪贴板图,
+                        // PNG 落受限临时文件,光标处插 @路径(提交时走既有
+                        // 视觉附件路,尺寸/超限校验在那头还有一道)。无图/
+                        // 超限/平台不支持明报错,不暗降糊图,原草稿不动。
+                        std::string paste_error;
+                        const auto png =
+                            platform::ReadClipboardImagePng(kMaxImageBytes, paste_error);
+                        if (!png.has_value()) {
+                            std::cout << theme.error
+                                      << trf("image.paste_failed", paste_error)
+                                      << theme.reset << "\n";
+                            redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
+                            continue;
+                        }
+                        namespace fs = std::filesystem;
+                        static unsigned paste_seq = 0;
+                        fs::path file;
+                        try {
+                            file = fs::temp_directory_path() /
+                                   ("lubancode-paste-" + std::to_string(platform::CurrentProcessId()) +
+                                    "-" + std::to_string(++paste_seq) + ".png");
+                        } catch (const std::exception&) {
+                            std::cout << theme.error << tr("editor.no_temp") << theme.reset << "\n";
+                            continue;
+                        }
+                        {
+                            std::ofstream out(file, std::ios::binary | std::ios::trunc);
+                            if (!out) {
+                                std::cout << theme.error << tr("editor.write_failed") << theme.reset << "\n";
+                                continue;
+                            }
+                            out.write(reinterpret_cast<const char*>(png->data()),
+                                      static_cast<std::streamsize>(png->size()));
+                        }
+                        // 光标处插 @<路径>(临时路径常带空格,一律角括号形)。
+                        const RenderState before = editor.CurrentRenderState();
+                        const std::string token =
+                            "@<" + lubancode::tools::PathToUtf8(file) + "> ";
+                        std::string joined = Utf32ToUtf8(before.line);
+                        const std::size_t at = (std::min)(before.cursor, joined.size());
+                        joined.insert(at, token);
+                        editor.LoadTextWithCursor(Utf8ToUtf32(joined), at + token.size());
+                        std::cout << theme.stats
+                                  << trf("image.pasted", png->size() / 1024,
+                                         lubancode::tools::PathToUtf8(file))
+                                  << theme.reset << "\n";
+                        redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
                         continue;
                     }
                     default:

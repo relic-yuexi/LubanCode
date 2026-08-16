@@ -378,6 +378,10 @@ target_include_directories(lubancode_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include   # M7:C ABI 插件对外头文件 luban_plugin.h
   ${CMAKE_BINARY_DIR}/generated)        # 0.19.x:embedded_prompts.hpp(提示词嵌入)
 target_link_libraries(lubancode_core PUBLIC cpr::cpr nlohmann_json::nlohmann_json)
+if(WIN32)
+  # WIC(Windows Imaging Component):剪贴板位图 CF_DIB -> PNG 转码(Alt+V 直贴)。
+  target_link_libraries(lubancode_core PRIVATE windowscodecs)
+endif()
 target_link_libraries(lubancode_core PRIVATE lubancode_lua)  # M7:Lua 插件运行时
 target_link_libraries(lubancode_core PRIVATE yaml-cpp::yaml-cpp)  # 项目记忆 front matter(schema 3)
 target_compile_features(lubancode_core PUBLIC cxx_std_23)

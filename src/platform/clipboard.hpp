@@ -5,7 +5,10 @@
 // 纯管道/重定向场景:IsClipboardAvailable 恒 No——不往管道里写转义。
 #pragma once
 
+#include <cstddef>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace lubancode::platform {
 
@@ -23,5 +26,11 @@ ClipboardResult CopyTextToClipboard(const std::string& utf8_text, std::string& e
 // 看 stdout 是不是真终端(OSC 52 只往终端写)。tmux/SSH 下一律真——
 // 终端会自己决定转不转发,写失败由 CopyTextToClipboard 如实报。
 bool ClipboardLikelyAvailable();
+
+// 读剪贴板里的一张位图,返回 PNG 字节(0.30.x Alt+V 直贴)。Windows:
+// 先试剪贴板里现成的 "PNG" 注册格式(浏览器/编辑器复制图片常带),没有
+// 再把 CF_DIB 经 WIC 转码成 PNG。POSIX:OSC 52 只写不读,明确不支持。
+// max_bytes:超限直接拒(不暗降糊图),error 写明原因。失败给空。
+std::optional<std::vector<unsigned char>> ReadClipboardImagePng(std::size_t max_bytes, std::string& error);
 
 }  // namespace lubancode::platform
