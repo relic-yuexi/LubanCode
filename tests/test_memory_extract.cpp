@@ -126,7 +126,8 @@ TEST_CASE("ParseExtractionJson: 严格字段与容错围栏") {
 
 TEST_CASE("BuildExtractionSystemPrompt: 基础契约 + 分型侧重") {
     const std::string code_prompt = app::BuildExtractionSystemPrompt("", "code");
-    CHECK(code_prompt.find("候选只收三类") != std::string::npos);
+    CHECK(code_prompt.find("候选只收四类") != std::string::npos);
+    CHECK(code_prompt.find("feedback") != std::string::npos);
     CHECK(code_prompt.find("失败经验") != std::string::npos);
 
     const std::string config_prompt = app::BuildExtractionSystemPrompt("", "config");

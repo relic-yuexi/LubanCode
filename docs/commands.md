@@ -183,14 +183,22 @@ usage 账分四态：`not_reported`（服务端没回 usage）/ `disabled`（met
 /memory
 /memory on|off
 /memory use on|off
-/memory learn on|off
+/memory learn off|review|auto
+/memory review
+/memory accept <id>
+/memory edit <id> 标题 [:: 正文]
+/memory reject <id> [理由]
 /memory list
-/memory remember fact|preference 标题 [:: 正文]
+/memory remember fact|preference|feedback 标题 [:: 正文]
 /memory forget <id>
 /memory rebuild
+/memory stale
+/memory verify <id>
+/memory refresh <id>
+/memory why [id]
 ```
 
-`on/off` 改本场总状态；`use` 控召回；`learn` 控写入工具。`remember` 排后台任务，`forget` 归档而非直接抹账，`rebuild` 从 Markdown 正文重建 catalog 与 index。详见[项目记忆](memory-system-design.md)。
+`on/off` 改本场总状态；`use` 控召回；`learn` 控学习档位(只能降到全局授权以内)。`review` 看待审候选,`accept`/`edit`/`reject` 处置。`remember` 排后台任务(feedback 只收用户明说的纠正)，`forget` 归档而非直接抹账，`rebuild` 从主题 Markdown 重建 catalog 与 index，`stale` 查陈旧，`verify`/`refresh` 续命，`why` 对上一轮召回对账。详见[项目记忆](memory-system-design.md)。
 
 ## 个性与语言
 

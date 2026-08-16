@@ -2164,11 +2164,14 @@ void InteractiveSession::ExtractTurnMemory(const std::string& user_text, std::si
         candidate.task_type = task_type;
 
         // auto 档直写闸:inferred 只进候选区;fact 须 verified 且带证据,
-        // 否则也落待审区让人把关(规格"inferred 只准进候选区")。
+        // feedback 须用户明说,否则也落待审区让人把关(规格"inferred 只准
+        // 进候选区"、"模型推断不得直写 feedback")。
         const bool auto_writable = project_memory->learn_mode() == lubancode::memory::LearnMode::Auto &&
                                    candidate.confidence != "inferred" &&
                                    !(candidate.kind == lubancode::memory::MemoryKind::Fact &&
-                                     (candidate.confidence != "verified" || candidate.paths.empty()));
+                                     (candidate.confidence != "verified" || candidate.paths.empty())) &&
+                                   !(candidate.kind == lubancode::memory::MemoryKind::Feedback &&
+                                     candidate.confidence != "user-stated");
         if (auto_writable) {
             lubancode::memory::SaveRequest request;
             request.kind = candidate.kind;

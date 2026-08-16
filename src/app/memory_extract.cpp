@@ -155,7 +155,10 @@ std::expected<MemoryExtraction, std::string> ParseExtractionJson(const std::stri
             if (!item.is_object() || extraction.candidates.size() >= 3) continue;
             ProposedCandidate candidate;
             candidate.kind = item.value("kind", std::string());
-            if (candidate.kind != "fact" && candidate.kind != "preference") continue;
+            if (candidate.kind != "fact" && candidate.kind != "preference" &&
+                candidate.kind != "feedback") {
+                continue;
+            }
             candidate.title = item.value("title", std::string());
             candidate.summary = item.value("summary", std::string());
             candidate.content = item.value("content", std::string());

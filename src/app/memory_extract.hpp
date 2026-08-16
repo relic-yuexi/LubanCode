@@ -17,7 +17,7 @@ namespace lubancode::app {
 
 // 抽取结果(回合总结 + 候选 + 检索扩展词)。
 struct ProposedCandidate {
-    std::string kind;         // fact | preference
+    std::string kind;         // fact | preference | feedback
     std::string title;
     std::string summary;
     std::string content;
