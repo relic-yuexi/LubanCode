@@ -38,6 +38,7 @@
 #include <variant>
 #include <vector>
 #include <nlohmann/json.hpp>
+#include "agent/artifact_store.hpp"
 #include "agent/compact.hpp"
 #include "agent/loop.hpp"
 #include "agent/peer_session.hpp"
@@ -102,6 +103,7 @@
 #include "tools/background_output.hpp"
 #include "tools/background_tasks.hpp"
 #include "tools/command_safety.hpp"
+#include "tools/context_tools.hpp"
 #include "tools/edit_file.hpp"
 #include "tools/hooks.hpp"
 #include "tools/lua_tool.hpp"
@@ -274,6 +276,9 @@ private:
     void RefreshSkills();
     void RefreshProjectInstructions();
     void PersistNewMessages();
+    // 建档与开仓(第二期):建档提前到发轮前;仓跟着会话 id 开张。
+    bool EnsureSessionBegun(const std::string& first_text);
+    void OpenArtifactStore();
     void RefillPeerPool();
     void CollectPeerMessages();
     // 外来消息轮:peer 来信是 user 语义(另一会话的用户正文);后台完成
@@ -349,6 +354,10 @@ private:
     // 散装字符串。指针成员:构造函数体内 real_backend/current_model 落定后
     // 再建(引用成员绑不了构造顺序),会话生命周期内唯一。
     std::unique_ptr<lubancode::app::ModelRouterService> model_router;
+    // 渐进式上下文仓(第二期):超长工具结果落 blobs/chunks/index,模型凭
+    // artifact_id 用 context_search/context_read 追回全文。shared_ptr:两把
+    // 工具持同一块内存,会话建档那一刻才 Open,没开的仓一切操作安全退化。
+    std::shared_ptr<lubancode::agent::ContextArtifactStore> artifact_store;
     std::shared_ptr<std::string> current_model_instructions;
     std::string current_soul_name;
     std::shared_ptr<std::string> current_soul;
@@ -506,6 +515,7 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
       real_backend(config),
       current_model(std::make_shared<std::string>(config.model)),
       current_think(std::make_shared<std::string>(config.think)),
+      artifact_store(std::make_shared<lubancode::agent::ContextArtifactStore>()),
       current_model_instructions(std::make_shared<std::string>()),
       current_soul_name(config.soul.empty() ? "default" : config.soul),
       current_soul(std::make_shared<std::string>(LoadSoulContentByName(current_soul_name, /*warn=*/true))),
@@ -593,6 +603,13 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
     // (账只有一本,一边 active 另一边回 AlreadyActive)。
     tool_runtime_.emplace(config, theme, wrapped_backend, skills, skills_segment, CurrentDirUtf8(),
                           MakeRuntimeOptions());
+    // 可追回 artifact 的两把只读钥匙(第二期):main 与子代理同级都有——
+    // 子代理的超长结果同样落仓,它自己也要能追回证据(角色跟 TaskKind 走,
+    // 工具能力同理,不按身份裁)。
+    registry().Register(std::make_unique<lubancode::tools::ContextSearchTool>(artifact_store));
+    registry().Register(std::make_unique<lubancode::tools::ContextReadTool>(artifact_store));
+    sub_registry().Register(std::make_unique<lubancode::tools::ContextSearchTool>(artifact_store));
+    sub_registry().Register(std::make_unique<lubancode::tools::ContextReadTool>(artifact_store));
     main_deferral = tool_runtime_->main_deferral();
     sub_deferral = tool_runtime_->sub_deferral();
     tool_search_threshold = config.tool_search_threshold;
@@ -753,6 +770,8 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
                           wire_str, *current_model, theme, /*quiet_if_none=*/true, &worktree_session,
                           &session_compact_epoch)) {
             resume_moved_into_worktree = worktree_session.active();
+            // 仓按恢复的那场开张(旧档若落过盘,artifact 继续可追)。
+            OpenArtifactStore();
             // resume 进来的旧档没标题:cheap 角色给续聊点个名(规格"会话标题
             // 与 resume 列表摘要"归 cheap)。
             MaybeGenerateSessionTitle(lubancode::agent::TaskKind::ResumeSummary);
@@ -1312,6 +1331,8 @@ void InteractiveSession::RebuildLoop(bool preserve_history) {
         }
     }
     loop->SetToolFilter(main_tool_filter());
+    // 可追回 artifact(第二期):重建的 loop 也要接上仓(空仓安全退化)。
+    loop->SetArtifactStore(artifact_store.get());
     // mid-turn 上下文安全点(0.27.x):窗口与压力通报随 loop 重建重灌;窗口
     // 的后续变化(/context、/model)由 RunUserTurn 发轮前再同步。
     loop->SetContextWindowTokens(context_tracker.window_tokens());
@@ -1346,6 +1367,53 @@ void InteractiveSession::RefreshProjectInstructions() {
     RebuildLoop(/*preserve_history=*/true);
 }
 
+// 建档(渐进式上下文仓第二期起,第一轮用户输入**之前**就要建):仓要拿
+// session id 开张,超长结果在第一轮请求里就得能落盘,不能等回合收尾。首条
+// 文本做 slug;建档失败置 session_store_broken 照旧拦落盘,会话本身照跑。
+// 建档成功顺手开仓(开不成只告警:超长结果退回内存全文,不产生假引用)。
+bool InteractiveSession::EnsureSessionBegun(const std::string& first_text) {
+    if (session_store.active() || sessions_dir.empty() || session_store_broken) {
+        return session_store.active();
+    }
+    session_meta = lubancode::agent::SessionMeta{};
+    session_meta.wire = wire_str;
+    session_meta.model = *current_model;
+    session_meta.cwd = CurrentDirUtf8();
+    session_meta.started_at = lubancode::agent::NowTimestamp();
+    const std::string session_id = lubancode::agent::MakeSessionId(session_start_ts, first_text);
+    if (!session_store.Begin(session_meta, session_id)) {
+        session_store_broken = true;
+        std::cout << theme.error << trf("session.create_failed", sessions_dir) << theme.reset << "\n";
+        return false;
+    }
+    // hooks 上下文补真 session id 与转录路径(建档这一刻才齐)。
+    if (lubancode::app::HookRuntime() != nullptr) {
+        lubancode::hooks::HookContext hook_context = lubancode::app::HookRuntime()->context();
+        hook_context.session_id = session_id;
+        hook_context.transcript_path = session_store.file_path();
+        lubancode::app::UpdateHookRuntimeContext(hook_context);
+    }
+    // 建档前 /title 设过标题:现在有文件了,把事件行补上。
+    if (session_title_pending && !session_title.empty()) {
+        session_store.AppendTitleEvent(session_title);
+    }
+    session_title_pending = false;
+    OpenArtifactStore();
+    return true;
+}
+
+// 开仓:<sessions_dir>/<session-id>/context(与 <session-id>.jsonl 并排,
+// /sessions 只扫 *.jsonl,互不干扰)。开不成只告警——仓是加层,不是依赖。
+void InteractiveSession::OpenArtifactStore() {
+    if (sessions_dir.empty() || !session_store.active()) {
+        return;
+    }
+    const std::string root = sessions_dir + "/" + session_store.session_id() + "/context";
+    if (!artifact_store->Open(root, session_store.session_id())) {
+        std::cout << theme.stats << trf("artifact.store_open_failed", root) << theme.reset << "\n";
+    }
+}
+
 // 把 history 里 persisted_count 之后的消息逐条追加落盘(append+flush,
 // 崩溃安全)。history 被 ReplaceHistory 换短(/compact)的场合由调用处
 // 先把 persisted_count 收到新长度,这里只管"只增不减"的常态。
@@ -1376,29 +1444,11 @@ void InteractiveSession::PersistNewMessages() {
             }
             break;
         }
-        session_meta = lubancode::agent::SessionMeta{};
-        session_meta.wire = wire_str;
-        session_meta.model = *current_model;
-        session_meta.cwd = CurrentDirUtf8();
-        session_meta.started_at = lubancode::agent::NowTimestamp();
-        const std::string session_id = lubancode::agent::MakeSessionId(session_start_ts, first_text);
-        if (!session_store.Begin(session_meta, session_id)) {
-            session_store_broken = true;
-            std::cout << theme.error << trf("session.create_failed", sessions_dir) << theme.reset << "\n";
+        // 建档提前到发轮之前(RunUserTurn)已办;这里是兜底(peer 轮等
+        // 不经 RunUserTurn 的路径)。
+        if (!EnsureSessionBegun(first_text)) {
             return;
         }
-        // hooks 上下文补真 session id 与转录路径(建档这一刻才齐)。
-        if (lubancode::app::HookRuntime() != nullptr) {
-            lubancode::hooks::HookContext hook_context = lubancode::app::HookRuntime()->context();
-            hook_context.session_id = session_id;
-            hook_context.transcript_path = session_store.file_path();
-            lubancode::app::UpdateHookRuntimeContext(hook_context);
-        }
-        // 建档前 /title 设过标题:现在有文件了,把事件行补上。
-        if (session_title_pending && !session_title.empty()) {
-            session_store.AppendTitleEvent(session_title);
-        }
-        session_title_pending = false;
     }
     for (std::size_t i = persisted_count; i < history.size(); ++i) {
         if (!session_store.AppendMessage(history[i])) {
@@ -2048,7 +2098,8 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                 }
                 HandleContextCommand(parsed.args, context_tracker, sys_tokens, tools_tokens, history_tokens, theme,
                                      loop->cache_epoch(), &loop->runtime_profile(),
-                                     model_router != nullptr ? &model_router->ledger() : nullptr);
+                                     model_router != nullptr ? &model_router->ledger() : nullptr,
+                                     artifact_store.get());
                 break;
             }
             case lubancode::cli::SlashCommand::Compact: {
@@ -2196,7 +2247,8 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                 return HandleResumeCommand(session_state, parsed.args, theme);
             }
             case lubancode::cli::SlashCommand::Export:
-                HandleExportCommand(parsed.args, *loop, session_store, sessions_dir, session_meta, session_title);
+                HandleExportCommand(parsed.args, *loop, session_store, sessions_dir, session_meta, session_title,
+                                    artifact_store.get());
                 break;
             case lubancode::cli::SlashCommand::Title: {
                 SessionCommandState session_state = MakeSessionCommandState();
@@ -2236,6 +2288,9 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
 
 // 发一轮用户正文:自动压缩检查 + 轮次材料 + RunTurn + 落盘 + 收排队。
 CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
+    // 建档提前到发轮之前(第二期):仓要拿 session id 开张,第一轮请求里
+    // 的超长结果才有地方落盘。失败不拦会话,只是没有 artifact 可追。
+    EnsureSessionBegun(content);
     // 窗口同步(0.27.x):/context、/model 改的是 tracker 的窗口,loop 的
     // mid-turn 评估用同一份,发轮前对齐一次。
     loop->SetContextWindowTokens(context_tracker.window_tokens());
@@ -2658,7 +2713,9 @@ SessionCommandState InteractiveSession::MakeSessionCommandState() {
         session_start_ts,
         [this]() {
             // /clear:旧上下文就此终局——SessionEnd(reason=clear) 先发,新的
-            // 空会话用 SessionStart(source=clear) 开账。
+            // 空会话用 SessionStart(source=clear) 开账。仓也关掉:工具们持
+            // 同一只仓,scope 只跟当前会话,旧场子的 artifact 查不到。
+            artifact_store->Close();
             EmitSessionHook(lubancode::hooks::HookEvent::SessionEnd, nlohmann::json{{"reason", "clear"}}, "clear");
             EmitSessionHook(lubancode::hooks::HookEvent::SessionStart, nlohmann::json{{"source", "clear"}},
                             "clear");
@@ -2677,10 +2734,12 @@ SessionCommandState InteractiveSession::MakeSessionCommandState() {
         sessions_dir,
         wire_str,
         current_model,
-        // /resume 成功:恢复的历史开新账(SessionStart source=resume)。
+        // /resume 成功:恢复的历史开新账(SessionStart source=resume),
+        // 仓也按恢复的那场开张(旧档若落过盘,artifact 继续可追)。
         [this]() {
             EmitSessionHook(lubancode::hooks::HookEvent::SessionStart, nlohmann::json{{"source", "resume"}},
                             "resume");
+            OpenArtifactStore();
         }};
 }
 

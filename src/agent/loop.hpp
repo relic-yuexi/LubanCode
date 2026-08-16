@@ -25,6 +25,8 @@
 
 namespace lubancode::agent {
 
+class ContextArtifactStore;
+
 // hooks 框架第三步:工具生命周期相位(UI 状态机 requested -> checking_hook
 // -> waiting_permission -> running -> done,被拦时停在 blocked,不冒充"运行
 // 过又失败")。on_tool_start 算 requested;下面几个相位由 on_tool_phase 报。
@@ -371,6 +373,16 @@ public:
         structural_options_ = options;
     }
 
+    // 可追回 artifact(渐进式上下文仓第二期):设了仓之后,结构压缩判成
+    // Artifact 的超长结果先原子落盘(blob -> chunks -> index),视图渲染带
+    // 稳定 artifact_id,模型凭 id 走 context_search/context_read 追回全文;
+    // 落盘失败保内存全文,行为退回没仓的样子。传空指针清除。仓的存活期
+    // 由调用方(会话层)保证。
+    void SetArtifactStore(ContextArtifactStore* store) { artifact_store_ = store; }
+
+    // 最近一次请求的结构压缩账(/context 与诊断用)。
+    const StructuralCompressionStats& structural_stats() const { return structural_stats_; }
+
 private:
     api::Backend& backend_;
     tools::ToolRegistry& registry_;
@@ -383,6 +395,7 @@ private:
     bool structural_compression_enabled_ = true;  // 无损结构压缩(工作视图)
     StructuralCompressionOptions structural_options_{};
     StructuralCompressionStats structural_stats_{};  // 最近一次请求的结构压缩账(观测用)
+    ContextArtifactStore* artifact_store_ = nullptr;  // 可追回 artifact 的仓(空 = 没仓,退回旧行为)
     std::vector<api::Message> history_;
     // 前缀记账(agent/prefix.hpp):上一份实际发出的请求指纹(没有 = 本
     // turn 第一份请求,无从比较,天然算追加)、cache epoch 序号、loop 自己

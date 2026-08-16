@@ -305,6 +305,7 @@ add_library(lubancode_core STATIC
   src/tools/skill_tool.cpp
   src/tools/todo_tool.cpp
   src/tools/tool_search.cpp
+  src/tools/context_tools.cpp
   src/tools/plugin_loader.cpp
   src/tools/lua_tool.cpp
   src/tools/web_fetch.cpp
@@ -337,6 +338,7 @@ add_library(lubancode_core STATIC
   "${_lubancode_embedded_provider_catalog}"
   src/agent/context.cpp
   src/agent/context_events.cpp
+  src/agent/artifact_store.cpp
   src/agent/model_router.cpp
   src/agent/prefix.cpp
   src/agent/compact.cpp

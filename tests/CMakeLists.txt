@@ -115,6 +115,9 @@ add_executable(lubancode_tests
   # 模型分工第一期:三角色解析/回退链/任务映射/compact_model 兼容/
   # usage 分账//model roles 短表/跨 provider 路由(mock 全程)。
   test_model_router.cpp
+  # 可追回 artifact(第二期):分块边界/原子落盘/hash 隔离/预算拒绝/
+  # CompressWorkingView 落仓/两把只读钥匙的 scope。
+  test_artifact_store.cpp
   # memory schema 3 front matter(往返字节稳定/坑人字符/双格式剥壳)。
   test_memory_frontmatter.cpp
   # memory 检索评测尺子(固定语料,Recall/Precision/注入字节/stale 拦截率)。
@@ -193,6 +196,12 @@ target_compile_features(deepseek_e2e PRIVATE cxx_std_23)
 add_executable(latex_box_experiment EXCLUDE_FROM_ALL latex_box_experiment.cpp)
 target_link_libraries(latex_box_experiment PRIVATE lubancode_core)
 target_compile_features(latex_box_experiment PRIVATE cxx_std_23)
+
+# 可追回 artifact(第二期)的布局实测驱动器:手动跑,验收记录用。
+#   artifact_layout_dump <输出根目录>
+add_executable(artifact_layout_dump EXCLUDE_FROM_ALL artifact_layout_dump.cpp)
+target_link_libraries(artifact_layout_dump PRIVATE lubancode_core)
+target_compile_features(artifact_layout_dump PRIVATE cxx_std_23)
 
 # 0.17.0:集成验证用的刮屏驱动器(AllocConsole + WriteConsoleInput +
 # ReadConsoleOutput,真控制台专用),不进 ctest——要真钥匙、要弹控制台

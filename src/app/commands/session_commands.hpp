@@ -54,7 +54,8 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                            std::size_t sys_tokens, std::size_t tools_tokens, std::size_t history_tokens,
                            const lubancode::cli::Theme& theme, int cache_epoch = 1,
                            const lubancode::agent::AgentRuntimeProfile* main_profile = nullptr,
-                           const lubancode::agent::ModelUsageLedger* usage_ledger = nullptr);
+                           const lubancode::agent::ModelUsageLedger* usage_ledger = nullptr,
+                           const lubancode::agent::ContextArtifactStore* artifact_store = nullptr);
 
 
 // /compact 命令的结果:event 是 compact_v2 压缩事件(archive + kept_from +
@@ -119,9 +120,13 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
 // /export [路径]:当前会话导出 Markdown,默认写 sessions/<id>.md。
 // 有存档文件就从文件读**全量流水**导出(压缩不丢内容,发生点插一行标注);
 // 没有存档文件(没落过盘)退回导内存里这份历史。/title 设过的标题当大标题。
+// artifact_store(可空,第二期):非空且有落盘时追加"可追回 artifact"附录
+// ——id/工具/字节/sha 指纹/真本路径,导出内容里被折叠的结果按 id 对得上
+// 真本(规格"/export 必须说明哪些内容来自 artifact")。
 void HandleExportCommand(const std::string& args, const lubancode::agent::AgentLoop& loop,
                           const lubancode::agent::SessionStore& store, const std::string& sessions_dir,
-                          const lubancode::agent::SessionMeta& session_meta, const std::string& session_title);
+                          const lubancode::agent::SessionMeta& session_meta, const std::string& session_title,
+                          const lubancode::agent::ContextArtifactStore* artifact_store = nullptr);
 
 
 // ---------------------------------------------------------------------------

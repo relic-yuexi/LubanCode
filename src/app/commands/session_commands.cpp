@@ -4,6 +4,7 @@
 #include <iostream>
 
 #include "agent/compact.hpp"
+#include "agent/artifact_store.hpp"
 #include "agent/context_events.hpp"
 #include "config/config.hpp"
 #include "cli/spinner.hpp"
@@ -51,7 +52,8 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                            std::size_t sys_tokens, std::size_t tools_tokens, std::size_t history_tokens,
                            const lubancode::cli::Theme& theme, int cache_epoch,
                            const lubancode::agent::AgentRuntimeProfile* main_profile,
-                           const lubancode::agent::ModelUsageLedger* usage_ledger) {
+                           const lubancode::agent::ModelUsageLedger* usage_ledger,
+                           const lubancode::agent::ContextArtifactStore* artifact_store) {
     if (args.empty()) {
         const auto lines = lubancode::cli::FormatContextBreakdown(
             sys_tokens, tools_tokens, history_tokens, context_tracker.last_cache_read_tokens(),
@@ -92,6 +94,16 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
         }
         if (context_tracker.ShouldAutoCompact()) {
             std::cout << tr("cmd.context.compact_hint") << "\n";
+        }
+        // artifact 层(第二期,规格"/context"节):落盘几枚、全文多少字节
+        // 可追回——"原文还能去哪找"看得见。
+        if (artifact_store != nullptr && artifact_store->active()) {
+            const auto stats = artifact_store->StatsOf();
+            if (stats.artifacts > 0) {
+                std::cout << trf("cmd.context.artifacts", stats.artifacts, stats.total_bytes) << "\n";
+            } else {
+                std::cout << tr("cmd.context.artifacts_none") << "\n";
+            }
         }
         // 分角色 usage 台账(模型分工第一期,规格"路由看得见"):普通 turn
         // 归 normal,压缩/抽取/标题的后台采样归 cheap,回退单独留痕。
@@ -459,7 +471,8 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
 // 没有存档文件(没落过盘)退回导内存里这份历史。/title 设过的标题当大标题。
 void HandleExportCommand(const std::string& args, const lubancode::agent::AgentLoop& loop,
                           const lubancode::agent::SessionStore& store, const std::string& sessions_dir,
-                          const lubancode::agent::SessionMeta& session_meta, const std::string& session_title) {
+                          const lubancode::agent::SessionMeta& session_meta, const std::string& session_title,
+                          const lubancode::agent::ContextArtifactStore* artifact_store) {
     const auto& history = loop.History();
     if (history.empty()) {
         std::cout << tr("cmd.export.empty") << "\n";
@@ -495,6 +508,22 @@ void HandleExportCommand(const std::string& args, const lubancode::agent::AgentL
     if (!exported_from_file) {
         markdown = lubancode::agent::ExportSessionMarkdown(session_meta, history, id,
                                                              /*max_result_lines=*/30, session_title);
+    }
+
+    // artifact 附录(第二期,规格"原文不丢":"/export 必须说明哪些内容来自
+    // artifact"):逐枚列 id/工具/字节数/sha 指纹与仓路径,导出的 Markdown
+    // 里被折叠的工具结果都能按 id 对上真本。本导出走全量流水(全文都在),
+    // 这份附录是"还能去哪核"的地图,不是内容本体。
+    if (artifact_store != nullptr && artifact_store->active() && !artifact_store->refs().empty()) {
+        markdown += "\n\n## 附:可追回 artifact\n\n";
+        markdown += "| id | 工具 | 字节 | 行 | sha256(前12) | 真本 |\n";
+        markdown += "|----|------|------|----|--------------|------|\n";
+        for (const auto& ref : artifact_store->refs()) {
+            markdown += "| " + ref.artifact_id + " | " + ref.tool_name + " | " + std::to_string(ref.bytes) +
+                        " | " + std::to_string(ref.lines) + " | " + ref.sha256.substr(0, 12) + " | `" +
+                        ref.blob_path + "` |\n";
+        }
+        markdown += "\n真本按 sha256 内容寻址存于 `" + artifact_store->root() + "`,hash 不合的 blob 会被隔离不供给。\n";
     }
 
     const std::filesystem::path path(

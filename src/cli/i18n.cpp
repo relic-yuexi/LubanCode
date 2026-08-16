@@ -1003,6 +1003,11 @@ const Entry kZhCN[] = {
     {"router.fallback_flash", "{0} 不可用,已回落 {1}"},
     {"router.usage.header", "模型调用分角色账(本会话累计):"},
     {"router.usage.fallback_header", "回退记录:"},
+
+    // ---- 可追回 artifact(渐进式上下文仓第二期) ----
+    {"artifact.store_open_failed", "[artifact] 上下文仓开不了({0}),超长结果退回内存全文,不产生假引用。"},
+    {"cmd.context.artifacts", "artifact 层:{0} 枚落盘 · 全文共 {1} 字节可追回(context_search/context_read 按 id 检索)"},
+    {"cmd.context.artifacts_none", "artifact 层:本会话尚无落盘的超长工具结果。"},
     {"cmd.think.current", "当前推理强度: {0}"},
     {"cmd.think.catalog_header", "模型目录声明的档位({0}):"},
     {"cmd.think.provider_header", "provider 声明的档位(请求参数 {0}):"},

@@ -33,6 +33,10 @@
 #include "api/types.hpp"
 
 namespace lubancode::agent {
+class ContextArtifactStore;
+}
+
+namespace lubancode::agent {
 
 // ---------------------------------------------------------------------------
 // 规范化事件账
@@ -113,6 +117,11 @@ struct ResultViewDecision {
     ResultViewKind kind = ResultViewKind::Full;
     std::string ref_event_id;   // DuplicateRef/NewVersion 指到的那枚事件
     std::size_t seen_count = 1; // DuplicateRef:同键同 hash 累计出现次数
+    // Artifact(第二期):落盘成功后记稳定 artifact_id("a0007")与 sha256
+    // 短指纹(12 hex)——视图渲染与 memo 重放都用它。空 = 没落盘(无仓或
+    // 落盘失败,后者决策已退回 Full)。
+    std::string artifact_id;
+    std::string artifact_sha;
 };
 
 // 决策台账:tool_use_id -> 首次定形的决策。AgentLoop 每个 epoch 持一份
@@ -139,6 +148,16 @@ std::vector<api::Message> CompressWorkingView(const std::vector<api::Message>& h
 std::vector<api::Message> CompressWorkingView(const std::vector<api::Message>& history,
                                               const StructuralCompressionOptions& options,
                                               StructuralCompressionStats& stats);
+
+// 第二期(可追回 artifact):带仓的定形。新事件判成 Artifact 时先走仓的
+// 原子落盘(blob -> chunks -> index),成功把 artifact_id 记进决策、视图
+// 渲染带稳定 id 与检索指引;失败(仓没开/磁盘错/hash 不合)决策退回
+// Full——内存全文照旧发送,绝不换成空引用(规格"原文不丢")。卸载对
+// 同 tool_use_id 幂等,compact/重开 epoch 后重放不重复落盘。
+std::vector<api::Message> CompressWorkingView(const std::vector<api::Message>& history,
+                                              const StructuralCompressionOptions& options,
+                                              StructuralCompressionStats& stats, ResultViewMemo& memo,
+                                              ContextArtifactStore* store);
 
 // 内容指纹:FNV-1a 64,十六进制 16 位。不引加密库——指纹只用来判"完全相同"
 // 与做引用锚点,不做安全用途。
