@@ -4,7 +4,7 @@
 
 项目记忆让 LubanCode 跨会话记住少量仓库事实与用户偏好。它默认关闭。检索只读本地文件；写入先排队，再由后台进程原子落盘。
 
-> 当前状态：同步词法召回(BM25+硬命中)、`memory_save`、`/memory remember`、后台 upsert、归档遗忘、索引重建、回合结束抽取候选与待审审阅箱(review/auto 两档)都已实现。闲时归并、用户级跨项目记忆尚未实现。
+> 当前状态：同步词法召回(BM25+硬命中)、`memory_save`、`/memory remember`、后台 upsert、归档遗忘、索引重建、回合结束抽取候选与待审审阅箱(review/auto 两档)、schema 3 front matter 与 `/memory migrate`、用户级跨项目记忆(`memory.user` 目录)都已实现。闲时归并尚未实现。
 
 ## 1. 记忆不等于会话
 
@@ -37,6 +37,7 @@
 | --- | --- | --- |
 | `enabled` | `false` | 总开关。关闭时不建运行对象，也不注册写入工具 |
 | `use` | `true` | 是否召回已有记忆 |
+| `user_enabled` | `false` | 用户级记忆(跨项目偏好/反馈,住 `~/.lubancode/memory/user/`)。只认全局配置授权,项目配置无权开启 |
 | `learn` | `review` | 学习档位:`off` 不提候选不写入;`review` 每回合提候选进待审箱;`auto` 自动写入,只认全局配置显式授权 |
 | `max_index_bytes` | `16384` | `index.md` 文件本身的上限(只给人看,不进 prompt) |
 | `max_retrieval_bytes` | `8192` | 每轮命中主题正文总预算 |
@@ -160,15 +161,23 @@ Git 项目按 common git dir 认身份：
 ```text
 ~/.lubancode/
   sessions/                         会话存档，记忆不混进去
+  memory/
+    user/                           用户级记忆(跨项目,须全局授权)
+      index.md                      给人看的短索引(User Memory),可重建
+      preferences/                  跨项目偏好
+      feedback/                     跨项目行事反馈
+      archive/
+      .state/catalog.json
   projects/
     lubancode-4fd2c83a9e5b7a10/
       project.json                  项目身份资料
       memory/
-        index.md                    给模型看的短索引，可重建
-        facts/                      事实主题
+        index.md                    给人看的短索引，可重建
+        facts/                      事实主题(只住项目层)
           agent-loop-request-flow.md
         preferences/                项目偏好主题
           package-manager.md
+        feedback/                   项目层行事反馈
         archive/                    已遗忘或被替代的旧主题
         .state/
           catalog.json              机器检索元数据，可重建
@@ -179,6 +188,14 @@ Git 项目按 common git dir 认身份：
 ```
 
 Markdown 是真本。`catalog.json` 与 `index.md` 都是派生物。删坏了可 `/memory rebuild`。
+
+### 用户级与项目级分账
+
+用户层放跨项目仍成立的偏好与反馈，如回答语言、提交署名习惯；不得放某仓库的构建命令，也不得假借项目路径作证据(写入校验会拦)。项目层放仓库事实(只住这层)、项目偏好与只对该仓库生效的反馈。
+
+用户层必须另设全局授权(`memory.user_enabled`,默认关)。项目配置无权开启或写入用户记忆，只能收窄成关——陌生仓库不能靠一份受版本控制的配置替用户开跨项目记忆。
+
+召回时两层各查一份 catalog：硬命中、scope、过期、指纹规则照旧；同 id、同证据或高度相同正文只注一份；项目层同主题直接压过用户层，不比分数。总条数与总字节预算不因多一层目录翻倍。`/memory why` 会写清命中来自 `user` 还是本项目，以及哪条因项目层覆盖而落选。
 
 ## 7. 主题文件
 
@@ -503,7 +520,6 @@ linked worktree 共用 common git dir，故而共享记忆。切 worktree 后会
 - 文件变化后自动 refresh。
 - 自动拆分、归并过大的主题与分层索引。
 - embedding、向量检索与知识图谱。
-- `~/.lubancode/memory/user/` 跨项目用户偏好。
 - 子代理按自己的任务单独检索。
 
 回合抽取已经落地:`review` 档每回合结束用当前模型从本轮增量提 0～3 条候选进待审箱(`/memory review` 审阅),`auto` 档在证据齐、无敏感内容时直写。

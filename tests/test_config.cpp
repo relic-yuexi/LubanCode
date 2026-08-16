@@ -654,6 +654,48 @@ TEST_CASE("MergeConfig: 全局打开 memory，项目可以收窄并关闭") {
     CHECK_FALSE(disabled->config.memory.enabled);
 }
 
+TEST_CASE("MergeConfig: memory.user_enabled 只认全局授权,项目只能收窄成关") {
+    // 默认关。
+    const auto defaults = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, std::nullopt,
+                                               EmptyGenericEnv());
+    REQUIRE(defaults.has_value());
+    CHECK_FALSE(defaults->config.memory.user_enabled);
+
+    // 项目配置写 true 不生效:用户级记忆的授权只能在全局配置给。
+    config::FileConfig project;
+    project.source_path = "project.json";
+    config::MemoryFileConfig project_memory;
+    project_memory.enabled = true;
+    project_memory.user_enabled = true;
+    project.memory = project_memory;
+    const auto project_only = config::MergeConfig(EmptyLubancodeEnv(), project, std::nullopt,
+                                                   EmptyGenericEnv());
+    REQUIRE(project_only.has_value());
+    CHECK_FALSE(project_only->config.memory.user_enabled);
+
+    // 全局授权后,项目可以收窄成关。
+    config::FileConfig global;
+    global.source_path = "global.json";
+    config::MemoryFileConfig global_memory;
+    global_memory.enabled = true;
+    global_memory.user_enabled = true;
+    global.memory = global_memory;
+    const auto granted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global,
+                                              EmptyGenericEnv());
+    REQUIRE(granted.has_value());
+    CHECK(granted->config.memory.user_enabled);
+
+    config::MemoryFileConfig narrow;
+    narrow.user_enabled = false;
+    project.memory = narrow;
+    const auto narrowed = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    REQUIRE(narrowed.has_value());
+    CHECK_FALSE(narrowed->config.memory.user_enabled);
+
+    // 坏值拒绝。
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"memory":{"user_enabled":"yes"}})", "x.json").has_value());
+}
+
 TEST_CASE("MergeConfig: memory.learn 只认三档,项目配置只能收窄") {
     // 坏值解析直接报错。
     CHECK_FALSE(config::ParseFileConfigJson(R"({"memory":{"learn":"always"}})", "x.json").has_value());

@@ -1493,8 +1493,13 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
                   << trf("cmd.memory.learn_status", status.learn) << "\n"
                   << trf("cmd.memory.project", status.project_key) << "\n"
                   << trf("cmd.memory.directory", PathToUtf8(status.memory_dir)) << "\n"
-                  << trf("cmd.memory.counts", status.entry_count, status.pending_jobs) << "\n"
-                  << trf("cmd.memory.candidates", status.pending_candidates) << "\n";
+                  << trf("cmd.memory.counts", status.entry_count, status.pending_jobs) << "\n";
+        if (status.user_enabled) {
+            std::cout << trf("cmd.memory.user_status", status.user_entry_count,
+                             PathToUtf8(status.user_memory_dir))
+                      << "\n";
+        }
+        std::cout << trf("cmd.memory.candidates", status.pending_candidates) << "\n";
         return;
     }
     if (action == "on" || action == "off") {
@@ -1645,8 +1650,12 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
         for (const auto& entry : trace.entries) {
             if (!id.empty() && entry.id != id) continue;
             matched_id = true;
+            // 命中来自哪一层:用户层带标注,项目层不打扰(规格"/memory why
+            // 须写清命中来自 user 还是某个 project key")。
+            const std::string shown_id =
+                entry.layer == "user" ? entry.id + tr("cmd.memory.why.layer_user") : entry.id;
             if (entry.injected) {
-                std::cout << trf("cmd.memory.why.hit", entry.id, entry.score, entry.hard_hits,
+                std::cout << trf("cmd.memory.why.hit", shown_id, entry.score, entry.hard_hits,
                                  entry.term_hits, entry.bytes)
                           << "\n";
                 continue;
@@ -1655,11 +1664,12 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
             if (entry.expired) reason = tr("cmd.memory.why.expired");
             else if (entry.scope_blocked) reason = tr("cmd.memory.why.scope");
             else if (entry.stale_blocked) reason = tr("cmd.memory.why.stale");
+            else if (entry.layer_superseded) reason = tr("cmd.memory.why.superseded");
             else if (entry.duplicate_dropped) reason = tr("cmd.memory.why.duplicate");
             else if (entry.below_threshold) reason = tr("cmd.memory.why.below_threshold");
             else if (entry.budget_dropped) reason = tr("cmd.memory.why.budget");
             else reason = tr("cmd.memory.why.skipped");
-            std::cout << trf("cmd.memory.why.miss", entry.id, entry.score, entry.hard_hits,
+            std::cout << trf("cmd.memory.why.miss", shown_id, entry.score, entry.hard_hits,
                              entry.term_hits, reason)
                       << "\n";
         }
@@ -1671,9 +1681,12 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
     }
     if (action == "list") {
         std::string error;
+        // 两层合并列:项目层在前,用户层带标注。
         const auto entries = project_memory->ListEntries(&error);
         if (!error.empty()) std::cout << trf("cmd.memory.catalog_warning", error) << "\n";
-        if (entries.empty()) {
+        const auto user_entries = project_memory->ListUserEntries(&error);
+        if (!error.empty()) std::cout << trf("cmd.memory.catalog_warning", error) << "\n";
+        if (entries.empty() && user_entries.empty()) {
             std::cout << tr("cmd.memory.empty") << "\n";
             return;
         }
@@ -1685,11 +1698,26 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
             }
             std::cout << "\n";
         }
+        for (const auto& entry : user_entries) {
+            std::cout << "- " << entry.id << " [" << lubancode::memory::MemoryKindName(entry.kind) << "] "
+                      << entry.title << " (" << tr("cmd.memory.user_layer") << ")";
+            if (!entry.summary.empty() && entry.summary != entry.title) {
+                std::cout << " - " << entry.summary;
+            }
+            std::cout << "\n";
+        }
         return;
     }
     if (action == "remember") {
         std::string kind_text;
         words >> kind_text;
+        // 用户级写法:/memory remember user preference 标题 :: 正文。
+        // 授权另设全局 memory.user_enabled,项目配置无权开。
+        bool to_user = false;
+        if (kind_text == "user") {
+            to_user = true;
+            words >> kind_text;
+        }
         auto kind = lubancode::memory::ParseMemoryKind(kind_text);
         std::string remainder;
         std::getline(words, remainder);
@@ -1701,6 +1729,10 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
         const std::size_t separator = remainder.find("::");
         lubancode::memory::SaveRequest request;
         request.kind = *kind;
+        if (to_user) {
+            request.scope.level = "user";
+            request.scope.kind = "user";
+        }
         request.title = TrimAscii(remainder.substr(0, separator));
         request.content = separator == std::string::npos
                               ? request.title

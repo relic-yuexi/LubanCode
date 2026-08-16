@@ -177,6 +177,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
     "enabled": true,
     "use": true,
     "learn": "review",
+    "user_enabled": false,
     "max_index_bytes": 16384,
     "max_retrieval_bytes": 8192,
     "max_results": 3
@@ -185,6 +186,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 ```
 
 - `enabled` 管总开关。
+- `user_enabled` 管用户级记忆(跨项目偏好与反馈,住 `~/.lubancode/memory/user/`),默认关。只认全局配置授权;项目配置无权开启或写入,只能收窄成关。
 - `use` 管同步召回。每轮只检索机器 catalog，最多注入 `max_results` 份正文，总计不超过 `max_retrieval_bytes` 字节。
 - `learn` 管学习档位，三选一：`off` 不提候选不写入；`review`(默认)每回合结束用当前模型提 0～3 条候选进待审箱，`/memory review` 审过才入库；`auto` 自动写入，只认全局配置显式授权。旧写法 `generate` 仍可读：`generate=false` 等价 `learn=off`，`generate=true` 等价 `learn=review`。
 - `max_index_bytes` 限制 `index.md` 文件本身的大小(它只给人看，不进 prompt)；`max_retrieval_bytes` 限制每轮命中正文总字节数；三项预算都须是正整数。

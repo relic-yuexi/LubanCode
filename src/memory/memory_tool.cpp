@@ -38,8 +38,10 @@ nlohmann::json MemorySaveTool::input_schema() const {
              {"scope", {{"type", "object"},
                         {"properties",
                          {
-                             {"kind", {{"type", "string"}, {"enum", {"project", "subtree", "path"}},
-                                       {"description", "记忆适用的范围；subtree/path 须配 value"}}},
+                             {"kind", {{"type", "string"}, {"enum", {"project", "subtree", "path", "user"}},
+                                       {"description", "记忆适用的范围；subtree/path 须配 value；"
+                                                       "user=跨项目用户记忆(仅 preference/feedback，"
+                                                       "不得带项目路径证据，须全局授权 memory.user_enabled)"}}},
                              {"value", {{"type", "string"}, {"description", "项目内相对路径(subtree/path 时必填)"}}},
                          }},
                         {"description", "可选。当前工作目录不在范围内时不注入，防串味"}}},
@@ -81,6 +83,7 @@ tools::Tool::Result MemorySaveTool::execute(const nlohmann::json& input) {
     if (input.contains("scope") && input["scope"].is_object()) {
         request.scope.kind = input["scope"].value("kind", std::string("project"));
         request.scope.value = input["scope"].value("value", std::string());
+        if (request.scope.kind == "user") request.scope.level = "user";
     }
     if (input.contains("evidence") && input["evidence"].is_array()) {
         for (const auto& item : input["evidence"]) {

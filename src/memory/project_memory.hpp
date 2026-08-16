@@ -40,6 +40,10 @@ struct Options {
     bool global_allowed = false;
     bool enabled = false;
     bool use = true;
+    // 用户级记忆(住 <主目录>/memory/user/,跨项目偏好与反馈):另设一道
+    // 全局授权,项目配置无权开启或写入。召回时两层各查、同 id/同证据去
+    // 重、项目层压过用户层。
+    bool user_enabled = false;
     LearnMode learn = LearnMode::Review;
     LearnMode learn_ceiling = LearnMode::Review;
     std::size_t max_index_bytes = 16 * 1024;      // index.md 留给人看,不再进 prompt
@@ -193,10 +197,13 @@ struct RuntimeStatus {
     bool enabled = false;
     bool use = false;
     bool generate = false;
+    bool user_enabled = false;  // 用户级记忆(全局授权另设)
     std::string learn;   // off | review | auto(本场档位)
     std::string project_key;
     std::filesystem::path memory_dir;
+    std::filesystem::path user_memory_dir;
     std::size_t entry_count = 0;
+    std::size_t user_entry_count = 0;
     std::size_t pending_jobs = 0;
     std::size_t pending_candidates = 0;
 };
@@ -211,6 +218,7 @@ std::string QueryOriginName(QueryOrigin origin);
 // 来源与权重)、id、分数与字节,不抄主题正文,也不记用户完整问题。
 struct RecallTraceEntry {
     std::string id;
+    std::string layer = "project";  // project | user(命中来自哪一层)
     int score = 0;
     int hard_hits = 0;    // 稳定实体(路径/关键词/symbol/标题/id)硬命中次数
     int term_hits = 0;    // 分词后命中的有效词项数(虚词碎片不计)
@@ -221,6 +229,7 @@ struct RecallTraceEntry {
     bool scope_blocked = false;   // scope 不符当前 cwd,不注入
     bool expired = false;         // 已过 expires_at,不召回
     bool duplicate_dropped = false;  // 同一事实/相同证据,去重让位
+    bool layer_superseded = false;   // 用户层同主题被项目层压过
     std::size_t bytes = 0;
 };
 
@@ -261,6 +270,9 @@ public:
 
     const ProjectIdentity& identity() const { return identity_; }
     const std::filesystem::path& memory_dir() const { return memory_dir_; }
+    // 用户级记忆目录:<主目录>/memory/user/。与项目记忆分账,各自一份
+    // index.md 与 .state/catalog.json。
+    std::filesystem::path user_memory_dir() const { return home_lubancode_ / "memory" / "user"; }
 
     std::expected<void, std::string> SetWorkingDirectory(const std::filesystem::path& cwd);
 
@@ -337,6 +349,8 @@ public:
     std::vector<StaleEntry> ListStaleEntries() const;
 
     std::vector<MemoryEntry> ListEntries(std::string* error = nullptr) const;
+    // 用户层条目(全局授权关着时为空表)。/memory list 合并两层展示。
+    std::vector<MemoryEntry> ListUserEntries(std::string* error = nullptr) const;
     RuntimeStatus Status() const;
 
     // 有 pending job 时起一枚会话级后台 worker。失败不删 job，下次还能捞。
@@ -363,7 +377,9 @@ private:
 std::expected<std::size_t, std::string> RunPendingMemoryJobs(
     const std::filesystem::path& home_lubancode);
 
-// 测试与 /memory rebuild 共用的同步底层。不起进程。
-std::expected<void, std::string> RebuildMemoryIndex(const std::filesystem::path& memory_dir);
+// 测试与 /memory rebuild 共用的同步底层。不起进程。user_layer=true 时按
+// 用户层扫描(preferences/feedback,没有 facts),index 头写 User Memory。
+std::expected<void, std::string> RebuildMemoryIndex(const std::filesystem::path& memory_dir,
+                                                    bool user_layer = false);
 
 }  // namespace lubancode::memory

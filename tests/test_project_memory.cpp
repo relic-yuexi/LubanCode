@@ -987,6 +987,15 @@ TEST_CASE("文档漂移: 记忆默认值、学习三档与命令面跟代码对�
     CHECK(design.find("/memory verify") != std::string::npos);
     CHECK(design.find("/memory accept") != std::string::npos);
     CHECK(configuration.find("learn") != std::string::npos);
+
+    // 格式与分层:schema 3 front matter、迁移命令、feedback 类型与用户级
+    // 授权键,文档与代码谁改了不改另一边就红。
+    CHECK(design.find("front matter") != std::string::npos);
+    CHECK(design.find("schema: 3") != std::string::npos);
+    CHECK(design.find("/memory migrate") != std::string::npos);
+    CHECK(design.find("feedback") != std::string::npos);
+    CHECK(configuration.find("user_enabled") != std::string::npos);
+    CHECK(design.find("memory.user_enabled") != std::string::npos);
 }
 
 // ---- schema 3 front matter 与旧格式混住(规格"迁移"1/2/3 条) ----
@@ -1370,6 +1379,165 @@ TEST_CASE("ProjectMemory migrate: 列账、批迁、备份与重跑不重复") {
     REQUIRE(again.has_value());
     CHECK(again->migrated == 0);
     CHECK(store.ListEntries().size() == 3);
+}
+
+// ---- 用户级目录(规格第七步:两层各查、同 id 去重、项目层压用户层) ----
+
+namespace {
+
+void WriteUserTopic(const fs::path& home, const std::string& file, const std::string& id,
+                    const std::string& title, const std::string& description, const std::string& body) {
+    const fs::path target = home / "memory" / "user" / file;
+    fs::create_directories(target.parent_path());
+    Write(target,
+          "---\n"
+          "name: " + id.substr(id.find('.') + 1) + "\n"
+          "description: " + description + "\n"
+          "metadata:\n"
+          "  schema: 3\n"
+          "  node_type: memory\n"
+          "  type: " + id.substr(0, id.find('.')) + "\n"
+          "  id: " + id + "\n"
+          "  confidence: user-stated\n"
+          "  status: active\n"
+          "  scope: {level: user, kind: user, value: \"\"}\n"
+          "  origin_session_ids: []\n"
+          "  created: 2026-08-01T00:00:00Z\n"
+          "  modified: 2026-08-01T00:00:00Z\n"
+          "  last_verified: 2026-08-01T00:00:00Z\n"
+          "  expires: null\n"
+          "  keywords:\n    - " + id.substr(id.find('.') + 1) + "\n"
+          "  evidence: []\n"
+          "---\n\n# " + title + "\n\n" + body + "\n");
+}
+
+}  // namespace
+
+TEST_CASE("ProjectMemory 用户层: 两层各查,同 id 只注一份,项目层压过用户层") {
+    const fs::path root = TempRoot("user-layer");
+    const fs::path repo = SetupRepo(root, "repo");
+    const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
+    REQUIRE(identity.has_value());
+
+    // 用户层:回答语言偏好(跨项目成立)。
+    WriteUserTopic(root / "home", "preferences/reply-language.md", "preference.reply-language",
+                  "回答语言", "一律用中文回答", "无论哪个项目,回答一律用中文。\n\n## Why\n\n用户明说。\n");
+    // 项目层也有同 id 一份(更具体)。
+    const fs::path memory_dir = identity->project_dir / "memory";
+    fs::create_directories(memory_dir / "preferences");
+    Write(memory_dir / "preferences" / "reply-language.md",
+          "---\n"
+          "name: reply-language\n"
+          "description: 本项目回答用简体中文\n"
+          "metadata:\n"
+          "  schema: 3\n"
+          "  node_type: memory\n"
+          "  type: preference\n"
+          "  id: preference.reply-language\n"
+          "  confidence: user-stated\n"
+          "  status: active\n"
+          "  scope: {level: project, kind: project, value: \"\"}\n"
+          "  origin_session_ids: []\n"
+          "  created: 2026-08-01T00:00:00Z\n"
+          "  modified: 2026-08-02T00:00:00Z\n"
+          "  last_verified: 2026-08-02T00:00:00Z\n"
+          "  expires: null\n"
+          "  keywords:\n    - reply-language\n"
+          "  evidence: []\n"
+          "---\n\n# 回答语言\n\n本项目回答用简体中文,带工程术语时保留英文原词。\n");
+
+    memory::Options options;
+    options.global_allowed = true;
+    options.enabled = true;
+    options.user_enabled = true;
+    memory::ProjectMemory store(*identity, root / "home", options);
+
+    // 只开项目层:用户层那份不进召回。
+    memory::Options project_only = options;
+    project_only.user_enabled = false;
+    memory::ProjectMemory plain_store(*identity, root / "home", project_only);
+    const std::string solo = plain_store.BuildTurnContext("reply-language 用哪种语言", repo);
+    CHECK(solo.find("工程术语时保留英文原词") != std::string::npos);
+
+    // 两层都开:同 id 只注项目层那份,用户层让位;why 说得清。
+    const std::string context = store.BuildTurnContext("reply-language 用哪种语言", repo);
+    CHECK(context.find("工程术语时保留英文原词") != std::string::npos);
+    CHECK(context.find("无论哪个项目,回答一律用中文") == std::string::npos);
+    const auto trace = store.LastTrace();
+    REQUIRE(trace.valid);
+    bool saw_user_superseded = false;
+    bool saw_project_injected = false;
+    for (const auto& entry : trace.entries) {
+        if (entry.id != "preference.reply-language") continue;
+        if (entry.layer == "user" && entry.layer_superseded) saw_user_superseded = true;
+        if (entry.layer == "project" && entry.injected) saw_project_injected = true;
+    }
+    CHECK(saw_user_superseded);
+    CHECK(saw_project_injected);
+
+    // 用户层独有主题照常注入,头里带(用户级记忆)标注。
+    WriteUserTopic(root / "home", "feedback/commit-signing.md", "feedback.commit-signing", "提交署名",
+                   "提交信息用中文", "提交信息用中文写,末尾带共同署名。\n");
+    const std::string user_only = store.BuildTurnContext("commit-signing 怎么署名", repo);
+    CHECK(user_only.find("末尾带共同署名") != std::string::npos);
+    CHECK(user_only.find("(用户级记忆)") != std::string::npos);
+
+    // list 两层合并,用户层带标注。
+    const auto listed = store.ListUserEntries();
+    CHECK(listed.size() == 2);
+}
+
+TEST_CASE("ProjectMemory 用户层: 写入走全局授权,项目证据不得混入") {
+    const fs::path root = TempRoot("user-write");
+    const fs::path repo = SetupRepo(root, "repo");
+    const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
+    REQUIRE(identity.has_value());
+
+    memory::Options options;
+    options.global_allowed = true;
+    options.enabled = true;
+    options.user_enabled = true;
+    memory::ProjectMemory store(*identity, root / "home", options);
+
+    memory::SaveRequest request;
+    request.kind = memory::MemoryKind::Preference;
+    request.id = "preference.global-pnpm";
+    request.title = "全局包管理器";
+    request.summary = "一律用 pnpm";
+    request.content = "所有前端项目一律用 pnpm。";
+    request.scope.level = "user";
+    request.scope.kind = "user";
+    REQUIRE(store.EnqueueSave(request).has_value());
+    REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
+    const fs::path user_topic = root / "home" / "memory" / "user" / "preferences" / "global-pnpm.md";
+    REQUIRE(fs::exists(user_topic));
+    const std::string text = Read(user_topic);
+    CHECK(text.find("level: user") != std::string::npos);
+    CHECK(text.find("kind: user") != std::string::npos);
+    CHECK(Read(root / "home" / "memory" / "user" / "index.md").find("# User Memory") != std::string::npos);
+
+    // 用户层不放 fact,不得带项目路径证据。
+    memory::SaveRequest bad_fact = request;
+    bad_fact.kind = memory::MemoryKind::Fact;
+    bad_fact.id = "fact.no-user-facts";
+    CHECK_FALSE(store.EnqueueSave(bad_fact).has_value());
+    memory::SaveRequest bad_paths = request;
+    bad_paths.paths = {"package.json"};
+    CHECK_FALSE(store.EnqueueSave(bad_paths).has_value());
+
+    // 全局没授权时,用户层写入被拒(项目配置无权开)。
+    memory::Options ungranted = options;
+    ungranted.user_enabled = false;
+    memory::ProjectMemory plain_store(*identity, root / "home", ungranted);
+    CHECK_FALSE(plain_store.EnqueueSave(request).has_value());
+    // 授权关着时召回也只查项目层。
+    CHECK(plain_store.ListUserEntries().empty());
+
+    // forget 按层路由:用户层的 id 在用户目录归档。
+    REQUIRE(store.EnqueueForget("preference.global-pnpm").has_value());
+    REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
+    CHECK_FALSE(fs::exists(user_topic));
+    CHECK(fs::exists(root / "home" / "memory" / "user" / "archive" / "global-pnpm.md"));
 }
 
 TEST_CASE("ProjectMemory migrate: 中途失败旧主题与 catalog 仍可用") {

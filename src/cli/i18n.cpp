@@ -583,6 +583,7 @@ const Entry kZhCN[] = {
      "  /memory reject <id> [理由]      拒绝候选(同主题不再重提)\n"
      "  /memory list                     列出项目记忆\n"
      "  /memory remember fact|preference|feedback 标题 [:: 正文]\n"
+     "  /memory remember user preference|feedback 标题 [:: 正文]  (须全局授权)\n"
      "  /memory forget <id>              归档一条记忆\n"
      "  /memory rebuild                  后台重建索引\n"
      "  /memory stale                    看指纹漂移与已过期的记忆\n"
@@ -641,6 +642,10 @@ const Entry kZhCN[] = {
     {"cmd.memory.why.miss", "  {0}  分数 {1}(硬命中 {2}，词项 {3}) — 未注入: {4}"},
     {"cmd.memory.why.stale", "相关文件已变化，只提示不注正文"},
     {"cmd.memory.why.duplicate", "同一事实/相同证据已注入,去重让位"},
+    {"cmd.memory.why.superseded", "项目层同主题已注入,用户层让位"},
+    {"cmd.memory.why.layer_user", "(用户层)"},
+    {"cmd.memory.user_layer", "用户层"},
+    {"cmd.memory.user_status", "用户级记忆: {0} 条;目录: {1}(授权在全局 memory.user_enabled)"},
     {"cmd.memory.why.below_threshold", "分数未过最低门槛"},
     {"cmd.memory.why.budget", "条数/字节预算已满"},
     {"cmd.memory.why.skipped", "未取到正文"},
@@ -1869,6 +1874,7 @@ const Entry kEn[] = {
      "  /memory reject <id> [reason]             reject a candidate (same topic won't return)\n"
      "  /memory list                              list project memories\n"
      "  /memory remember fact|preference|feedback title [:: body]\n"
+     "  /memory remember user preference|feedback title [:: body]  (needs global grant)\n"
      "  /memory forget <id>                       archive one memory\n"
      "  /memory rebuild                           rebuild the index in background\n"
      "  /memory stale                             list drifted (fingerprint) and expired memories\n"
@@ -1929,6 +1935,11 @@ const Entry kEn[] = {
     {"cmd.memory.why.miss", "  {0}  score {1} (hard hits {2}, terms {3}) — not injected: {4}"},
     {"cmd.memory.why.stale", "related files changed; hint only, body withheld"},
     {"cmd.memory.why.duplicate", "duplicate fact/evidence already injected; deduped"},
+    {"cmd.memory.why.superseded", "project-layer topic on the same theme was injected; user layer yielded"},
+    {"cmd.memory.why.layer_user", " (user layer)"},
+    {"cmd.memory.user_layer", "user layer"},
+    {"cmd.memory.user_status",
+     "User-level memories: {0}; directory: {1} (grant lives in global memory.user_enabled)"},
     {"cmd.memory.why.below_threshold", "score below the minimum threshold"},
     {"cmd.memory.why.budget", "result/byte budget exhausted"},
     {"cmd.memory.why.skipped", "body unavailable"},
