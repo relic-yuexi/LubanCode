@@ -116,6 +116,17 @@ add_executable(lubancode_tests
   # 回归 BuildCallbacks::on_usage 接线(状态行局部发布)仍走真实终端实现。
   test_repaint_coord.cpp
   test_utf8_boundary.cpp
+  # PTC(Programmatic Tool Calling)P0:协议帧、stub 生成器、受限 runner
+  # (假工具 + 真 Python)、五道上限、取消链、编码穿透。
+  test_ptc_protocol.cpp
+  test_ptc_stub.cpp
+  test_ptc_runner.cpp
+  # PTC P1:真工具完整链(schema/PreToolUse/权限/执行/PostToolUse/取消)、
+  # 延迟挂载谓词、能力画像(指纹/auto 门槛/熔断器/存档)与 config 段。
+  test_ptc_tool.cpp
+  test_ptc_profile.cpp
+  # PTC P2:LubanBench-Tool 八类场景离线层(题库/判卷/报告)。
+  test_ptc_bench.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)
