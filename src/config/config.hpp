@@ -450,6 +450,36 @@ struct PtcFileConfig {
     std::optional<std::vector<std::string>> tools;
 };
 
+// ---------------------------------------------------------------------------
+// 三档模型角色(渐进式上下文装载与 cheap/normal/lao 模型分工,第一期)
+// ---------------------------------------------------------------------------
+
+// model_roles 高级段里一格角色的解析结果。全部字段可选;model 为空 =
+// 该格未写(高级段写了这格但没给模型名,当未配置,回落链照走)。context_
+// window 用与顶层同一种写法("512k"/裸数字),解析折算成 token 数。
+struct ModelRoleRouteConfig {
+    std::string provider;
+    std::string model;
+    std::string effort;
+    std::optional<std::size_t> context_window;
+    std::optional<std::size_t> max_output_tokens;
+};
+
+// config.json 顶层 "model_roles" 段:{"normal":{...},"cheap":{...},
+// "lao":{...}}。整段回退(项目级写了压过全局,同 hooks/mcpServers 待遇);
+// 每格 model 非空才算配置了该角色,格内其余字段(provider/effort/窗口/
+// 输出上限)只有 model 也在场才生效——没有"只改 effort 不换模型"的悬空
+// 半截路由。
+struct ModelRolesConfig {
+    ModelRoleRouteConfig normal;
+    ModelRoleRouteConfig cheap;
+    ModelRoleRouteConfig lao;
+
+    bool Empty() const {
+        return normal.model.empty() && cheap.model.empty() && lao.model.empty();
+    }
+};
+
 struct Config {
     Wire wire = Wire::Anthropic;
     std::string base_url;
@@ -518,7 +548,15 @@ struct Config {
     std::string language;
     std::string system_prompt_file;      // --system-prompt / system_prompt_file,没配到就是空串
     std::size_t context_window_tokens = kDefaultContextWindowTokens;  // M6.6:上下文窗口 token 数
-    std::string compact_model;  // M6.6:压缩用的模型,空串 = 跟当前会话模型一致
+    std::string compact_model;  // M6.6:压缩用的模型,空串 = 跟当前会话模型一致(兼容别名,见下)
+    // 三档模型角色(第一期):shorthand 只填模型名,沿用当前 provider;
+    // 高级路由走下面的 model_roles 段。空串 = 未配置,走回退链
+    // (cheap/lao -> normal -> 会话模型);compact_model 只在 cheap_model
+    // 也未配置时顶替压缩类任务,不接管记忆抽取与标题(规格"调用点收拢")。
+    std::string normal_model;
+    std::string cheap_model;
+    std::string lao_model;
+    ModelRolesConfig model_roles;  // 高级段:整段回退(项目级压全局)
     std::string think;          // M6.6:推理强度,none/low/medium/high,空串 = 不发这个参数
     // 魂法分家:启动时用哪个"魂"(风格叠加层)。空串或 "default" = 主目录
     // 的 SOUL.md;"off" = 不叠加;别的名字 = souls/<名字>.md。/soul 切换后
@@ -577,6 +615,10 @@ struct ConfigSources {
     Source system_prompt_file = Source::Default;
     Source context_window_tokens = Source::Default;
     Source compact_model = Source::Default;
+    Source normal_model = Source::Default;  // 三角色 shorthand:四级合并,同 compact_model
+    Source cheap_model = Source::Default;
+    Source lao_model = Source::Default;
+    Source model_roles = Source::Default;  // 高级段:整段回退,只有配置文件/默认两级
     Source think = Source::Default;
     Source soul = Source::Default;
     Source tool_search_threshold = Source::Default;  // tool_search:配置文件或默认,只有这两级
@@ -637,6 +679,10 @@ struct ConfigResult {
     // 被读入、或新旧两键同现冲突时,这里一条一条记给用户看。空 = 本次加载
     // 没碰旧名。MergeConfig(纯函数)填,cli_app 打印。
     std::vector<std::string> deprecation_notices;
+    // 三角色路由提示(模型分工第一期):compact_model 与 cheap_model 同写
+    // 冲突、shorthand 与 model_roles 同角色撞车这类"看得出取了谁"的一行行
+    // 账。空 = 没有歧义。MergeConfig 填,启动横幅与 /model roles 打。
+    std::vector<std::string> model_role_notices;
     // 本次加载时如果发生了"旧位置 .lubancode.json 挪到新位置
     // .lubancode/config.json"这件事,这里是要打印给用户看的那一行通知
     // (成功或失败都会有一行);没发生迁移就是 std::nullopt。LoadFromEnv 里填。
@@ -662,7 +708,13 @@ struct FileConfig {
     std::optional<std::string> language;             // i18n:界面语言码
     std::optional<std::string> system_prompt_file;   // 人格文件路径
     std::optional<std::string> context_window;        // "256k"/"512k"/"1m"/裸数字,原始字符串,解析交给 MergeConfig
-    std::optional<std::string> compact_model;         // 压缩用的模型
+    std::optional<std::string> compact_model;         // 压缩用的模型(兼容别名)
+    // 三角色 shorthand(读入即归一:空串/null 都留 nullopt = 未配置)。
+    std::optional<std::string> normal_model;
+    std::optional<std::string> cheap_model;
+    std::optional<std::string> lao_model;
+    // model_roles 高级段,整段有没有出现在 JSON 里。
+    std::optional<ModelRolesConfig> model_roles;
     std::optional<std::string> think;                 // none/low/medium/high
     std::optional<std::string> soul;                  // 魂的名字(default/off/souls 里的文件名)
     std::optional<HooksConfig> hooks;                  // M9:hooks 段,整段有没有出现在 JSON 里
@@ -732,6 +784,9 @@ struct LubancodeEnvValues {
     std::optional<std::string> system_prompt_file;   // LUBANCODE_SYSTEM_PROMPT_FILE
     std::optional<std::string> context_window;        // LUBANCODE_CONTEXT_WINDOW,原始字符串
     std::optional<std::string> compact_model;         // LUBANCODE_COMPACT_MODEL
+    std::optional<std::string> normal_model;          // LUBANCODE_NORMAL_MODEL(设了空串 = 没设)
+    std::optional<std::string> cheap_model;           // LUBANCODE_CHEAP_MODEL
+    std::optional<std::string> lao_model;             // LUBANCODE_LAO_MODEL
     std::optional<std::string> think;                 // LUBANCODE_THINK
     std::optional<std::string> soul;                  // LUBANCODE_SOUL
 };
@@ -783,6 +838,15 @@ std::expected<std::size_t, std::string> ParseContextWindowTokens(const std::stri
 // provider 的 wire 写法沿用既有配置字段：anthropic / responses / chat_completions。
 std::expected<Wire, std::string> ParseProviderWire(const std::string& raw);
 std::string ProviderWireName(Wire wire);
+
+// 纯函数,不碰 IO:解析 config.json 里的 "model_roles" 字段(整个 JSON
+// object)。每格 {"provider": "...", "model": "...", "effort": "...",
+// "context_window": "512k"|数字, "max_output_tokens": "8k"|数字},除 model
+// 外全可选;model 空/缺失/null = 该角色未配置(整格调空)。认不得的角色
+// 键报错(不静默吞,配置写错了得让人知道);格内类型不对报错并指明是哪格
+// 哪个字段。
+std::expected<ModelRolesConfig, std::string> ParseModelRolesConfig(const nlohmann::json& model_roles_json,
+                                                                   const std::string& file_path_for_error);
 
 // /provider set <名字> <字段> <值> 的"值"解析:on/off、true/false、1/0 都
 // 认,大小写不敏感(cli 层已经小写化过,这里再兜一道);认不出就报错，

@@ -50,7 +50,8 @@ std::size_t EstimateHistoryTokens(const std::vector<lubancode::api::Message>& hi
 void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracker& context_tracker,
                            std::size_t sys_tokens, std::size_t tools_tokens, std::size_t history_tokens,
                            const lubancode::cli::Theme& theme, int cache_epoch,
-                           const lubancode::agent::AgentRuntimeProfile* main_profile) {
+                           const lubancode::agent::AgentRuntimeProfile* main_profile,
+                           const lubancode::agent::ModelUsageLedger* usage_ledger) {
     if (args.empty()) {
         const auto lines = lubancode::cli::FormatContextBreakdown(
             sys_tokens, tools_tokens, history_tokens, context_tracker.last_cache_read_tokens(),
@@ -92,6 +93,23 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
         if (context_tracker.ShouldAutoCompact()) {
             std::cout << tr("cmd.context.compact_hint") << "\n";
         }
+        // 分角色 usage 台账(模型分工第一期,规格"路由看得见"):普通 turn
+        // 归 normal,压缩/抽取/标题的后台采样归 cheap,回退单独留痕。
+        if (usage_ledger != nullptr) {
+            const auto role_lines = usage_ledger->ReportLines();
+            if (!role_lines.empty()) {
+                std::cout << tr("router.usage.header") << "\n";
+                for (const std::string& line : role_lines) {
+                    std::cout << "  " << line << "\n";
+                }
+            }
+            if (!usage_ledger->fallback_notes().empty()) {
+                std::cout << tr("router.usage.fallback_header") << "\n";
+                for (const std::string& note : usage_ledger->fallback_notes()) {
+                    std::cout << "  " << note << "\n";
+                }
+            }
+        }
         return;
     }
     const auto parsed = lubancode::config::ParseContextWindowTokens(args);
@@ -106,9 +124,11 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
 // /compact 命令:窗口预算 + manifest 守恒校验 + 热区保留,一条路走到底。
 // --dry-run 只算结构压缩的可回收量与钉住项,不发请求、不改历史。
 CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::agent::AgentLoop& loop,
-                                          lubancode::api::Backend& raw_backend, const std::string& compact_model,
+                                          lubancode::api::Backend& raw_backend,
+                                          const lubancode::agent::ModelRoute& compact_route,
                                           const lubancode::cli::Theme& theme, bool spinner_enabled,
-                                          const lubancode::agent::CompactOptions& options, int& compact_epoch) {
+                                          const lubancode::agent::CompactOptions& options, int& compact_epoch,
+                                          lubancode::agent::BackgroundCallAccounting* accounting) {
     const std::vector<lubancode::api::Message>& history = loop.History();
     if (history.empty()) {
         std::cout << tr("cmd.compact.empty") << "\n";
@@ -150,7 +170,8 @@ CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::ag
     run_options.focus = focus;
 
     lubancode::cli::Spinner spinner(theme, spinner_enabled);
-    const auto result = lubancode::agent::CompactHierarchical(raw_backend, compact_model, history, run_options);
+    const auto result = lubancode::agent::CompactHierarchical(raw_backend, compact_route.model, history,
+                                                              run_options, compact_route.effort, accounting);
     spinner.Stop();
 
     if (!result.has_value()) {

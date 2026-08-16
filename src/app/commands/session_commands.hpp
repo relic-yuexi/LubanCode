@@ -47,10 +47,14 @@ std::size_t EstimateHistoryTokens(const std::vector<lubancode::api::Message>& hi
 // 前缀记账序号(agent/prefix.hpp),有实测 usage 时多打一行前缀缓存账。
 // main_profile(可空):当前 loop 实际吃到的运行策略,非空时多打一行输出
 // 上限与来源(规格根因一:"本轮上限"看得见,unset 也说破)。
+// usage_ledger(可空,模型分工第一期):分角色 usage 台账,非空时列一节
+// "模型调用分角色账"——普通 turn 归 normal,压缩/抽取/标题归 cheap,
+// 回退另有留痕(规格"路由看得见")。
 void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracker& context_tracker,
                            std::size_t sys_tokens, std::size_t tools_tokens, std::size_t history_tokens,
                            const lubancode::cli::Theme& theme, int cache_epoch = 1,
-                           const lubancode::agent::AgentRuntimeProfile* main_profile = nullptr);
+                           const lubancode::agent::AgentRuntimeProfile* main_profile = nullptr,
+                           const lubancode::agent::ModelUsageLedger* usage_ledger = nullptr);
 
 
 // /compact 命令的结果:event 是 compact_v2 压缩事件(archive + kept_from +
@@ -67,17 +71,21 @@ struct CompactCommandResult {
 };
 
 // /compact 命令:分层压缩(装得下单次摘要;装不下按 episode 分块 map、
-// 归并 reduce),顶替掉中间那段老对话,热区按 token 预算保留。backend 传
-// 裸的、没包 ModelOverrideBackend 的那份——CompactHierarchical() 会自己把
-// compact_model 写进 request.model。args 是 /compact 的重点文本(或
-// --dry-run);compact_epoch 进出两头用:进 = 本场已压过几次,出 = 本次
-// 压完的序号(写进 v2 事件);options 携带窗口预算与必须守恒的待办。
+// 归并 reduce),顶替掉中间那段老对话,热区按 token 预算保留。backend 由
+// 调用方按 ModelRouterService 的 Compact 路由取(可能是会话裸 backend,也
+// 可能是跨 provider 的另一只 client)——CompactHierarchical() 自己把
+// route.model 写进 request.model、route.effort 带上。args 是 /compact 的
+// 重点文本(或 --dry-run);compact_epoch 进出两头用:进 = 本场已压过几次,
+// 出 = 本次压完的序号(写进 v2 事件);options 携带窗口预算与必须守恒的
+// 待办;accounting 非空时收回本次压缩的 usage/时长(分角色记账)。
 // 压缩模型窗口装不下(分块也救不了)时明确拒绝、不静默截史;manifest
 // 校验不过同样旧 history 不动。
 CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::agent::AgentLoop& loop,
-                                          lubancode::api::Backend& raw_backend, const std::string& compact_model,
+                                          lubancode::api::Backend& raw_backend,
+                                          const lubancode::agent::ModelRoute& compact_route,
                                           const lubancode::cli::Theme& theme, bool spinner_enabled,
-                                          const lubancode::agent::CompactOptions& options, int& compact_epoch);
+                                          const lubancode::agent::CompactOptions& options, int& compact_epoch,
+                                          lubancode::agent::BackgroundCallAccounting* accounting = nullptr);
 
 void PrintSessionsCommand(const std::string& sessions_dir, const std::string& args);
 

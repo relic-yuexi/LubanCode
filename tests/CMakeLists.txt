@@ -112,6 +112,9 @@ add_executable(lubancode_tests
   test_doctor.cpp
   # memory 回合抽取(分型/转写/JSON 解析,纯函数)。
   test_memory_extract.cpp
+  # 模型分工第一期:三角色解析/回退链/任务映射/compact_model 兼容/
+  # usage 分账//model roles 短表/跨 provider 路由(mock 全程)。
+  test_model_router.cpp
   # memory schema 3 front matter(往返字节稳定/坑人字符/双格式剥壳)。
   test_memory_frontmatter.cpp
   # memory 检索评测尺子(固定语料,Recall/Precision/注入字节/stale 拦截率)。

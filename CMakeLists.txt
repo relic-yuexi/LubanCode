@@ -337,6 +337,7 @@ add_library(lubancode_core STATIC
   "${_lubancode_embedded_provider_catalog}"
   src/agent/context.cpp
   src/agent/context_events.cpp
+  src/agent/model_router.cpp
   src/agent/prefix.cpp
   src/agent/compact.cpp
   src/agent/session_store.cpp
@@ -386,6 +387,8 @@ endif()
 add_library(lubancode_app STATIC
   src/app/backend_stack.cpp
   src/app/memory_extract.cpp
+  src/app/model_router.cpp
+  src/app/session_title.cpp
   src/app/runtime_profile.cpp
   src/app/tool_runtime.cpp
   src/app/turn_runner.cpp

@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include "agent/model_router.hpp"
+
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -102,11 +104,14 @@ void ApplyModelCatalog(const lubancode::config::ModelCatalog& catalog, const std
                         const std::shared_ptr<std::string>& current_model_instructions);
 
 
-// /model 命令的执行逻辑:带参数直接切;不带参数拉列表编号选。切完了,
-// 有配置文件才问"写进配置文件?",没有就只提示本会话生效。
+// /model 命令的执行逻辑:带参数直接切;不带参数拉列表编号选;参数是
+// "roles" 时打三角色路由短表(模型分工第一期)。切完了,有配置文件才问
+// "写进配置文件?",没有就只提示本会话生效。
 // catalog:模型目录——列表里优先显示目录条目的 display_name(其次接口
 // 给的 display_name,最后 id 兜底);切换成功后按目录条目应用
 // default_think / context_window / base_instructions(见 ApplyModelCatalog)。
+// roles_table(可空):会话的 ModelRouterService 路由表,空指针时 /model
+// roles 打"路由未建(单发/测试路径)"——不装没事发生。
 void HandleModelCommand(const std::string& args, lubancode::config::Config& config,
                          const std::shared_ptr<std::string>& current_model,
                          std::optional<std::string>& config_file_path,
@@ -114,7 +119,8 @@ void HandleModelCommand(const std::string& args, lubancode::config::Config& conf
                          const std::shared_ptr<std::string>& current_think,
                          lubancode::cli::ContextTracker& context_tracker,
                          const std::shared_ptr<std::string>& current_model_instructions,
-                         bool offer_config_write = true);
+                         bool offer_config_write = true,
+                         const lubancode::agent::ModelRouteTable* roles_table = nullptr);
 
 void PrintProviderList(const std::vector<lubancode::config::ProviderConfig>& providers,
                        const lubancode::config::Config& current_config,

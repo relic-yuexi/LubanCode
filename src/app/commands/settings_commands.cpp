@@ -6,6 +6,7 @@
 #include <iostream>
 
 #include "app/version.hpp"
+#include "app/model_router.hpp"
 #include "app/runtime_profile.hpp"
 #include "app/turn_runner.hpp"
 #include "platform/paths.hpp"
@@ -426,7 +427,21 @@ void HandleModelCommand(const std::string& args, lubancode::config::Config& conf
                          const std::shared_ptr<std::string>& current_think,
                          lubancode::cli::ContextTracker& context_tracker,
                          const std::shared_ptr<std::string>& current_model_instructions,
-                         bool offer_config_write) {
+                         bool offer_config_write, const lubancode::agent::ModelRouteTable* roles_table) {
+    // /model roles:三角色路由短表(模型分工第一期)。回落行写明
+    // "回落到 normal",不把同名重印一遍(规格"界面"节)。
+    if (args == "roles") {
+        if (roles_table == nullptr) {
+            std::cout << tr("cmd.model.roles_unavailable") << "\n";
+            return;
+        }
+        std::cout << tr("cmd.model.roles_header") << "\n";
+        for (const std::string& line : lubancode::app::FormatModelRolesTable(*roles_table)) {
+            std::cout << "  " << line << "\n";
+        }
+        return;
+    }
+
     std::string chosen;
 
     if (!args.empty()) {
