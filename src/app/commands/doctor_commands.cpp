@@ -614,6 +614,9 @@ void PrintAgentsMatrix(const DoctorContext& context) {
         std::cout << trf("doctor.agents.row_explore", tool_count(context.explore_registry)) << "\n";
     }
     std::cout << tr("doctor.agents.note") << "\n";
+    // 子代理流诊断开关(规格"二、治'无法证明'"):这里提一句,下次用户问
+    // "你怎么知道真入了账"就有现成的自查口。
+    std::cout << tr("doctor.agents.subagent_debug_log") << "\n";
     std::cout.flush();
 }
 

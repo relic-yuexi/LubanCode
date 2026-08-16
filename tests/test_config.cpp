@@ -628,6 +628,45 @@ TEST_CASE("ParseFileConfigJson/MergeConfig: subagent.max_depth 与 max_active(�
 }
 
 // ---------------------------------------------------------------------------
+// subagent.wall_clock_timeout_secs(规格《子代理活跃度不可见与疑似挂死》):
+// 整轮墙钟兜底,0 = 不限;坏值静默跳过,合并项目级压全局,没写 = nullopt
+// (运行时用 kDefaultSubagentWallClockTimeoutSecs = 1800)。
+// ---------------------------------------------------------------------------
+TEST_CASE("ParseFileConfigJson/MergeConfig: subagent.wall_clock_timeout_secs(墙钟兜底)") {
+    const auto ok = config::ParseFileConfigJson(R"({"subagent": {"wall_clock_timeout_secs": 600}})", "x.json");
+    REQUIRE(ok.has_value());
+    REQUIRE(ok->subagent_wall_clock_timeout_secs.has_value());
+    CHECK(*ok->subagent_wall_clock_timeout_secs == 600);
+    // 0 = 不限,合法显式值。
+    const auto zero = config::ParseFileConfigJson(R"({"subagent": {"wall_clock_timeout_secs": 0}})", "x.json");
+    REQUIRE(zero.has_value());
+    REQUIRE(zero->subagent_wall_clock_timeout_secs.has_value());
+    CHECK(*zero->subagent_wall_clock_timeout_secs == 0);
+    // 坏值(负数/非整数/超界)静默跳过。
+    const auto bad =
+        config::ParseFileConfigJson(R"({"subagent": {"wall_clock_timeout_secs": -5}})", "x.json");
+    REQUIRE(bad.has_value());
+    CHECK_FALSE(bad->subagent_wall_clock_timeout_secs.has_value());
+    const auto bad_type =
+        config::ParseFileConfigJson(R"({"subagent": {"wall_clock_timeout_secs": "30min"}})", "x.json");
+    REQUIRE(bad_type.has_value());
+    CHECK_FALSE(bad_type->subagent_wall_clock_timeout_secs.has_value());
+
+    // 合并:项目级压全局,都没写 = nullopt。
+    config::FileConfig global;
+    global.subagent_wall_clock_timeout_secs = 900;
+    global.source_path = "/tmp/home/.lubancode/config.json";
+    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global, EmptyGenericEnv());
+    REQUIRE(merged.has_value());
+    REQUIRE(merged->config.subagent.wall_clock_timeout_secs.has_value());
+    CHECK(*merged->config.subagent.wall_clock_timeout_secs == 900);
+    const auto merged_empty = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, std::nullopt,
+                                                  EmptyGenericEnv());
+    REQUIRE(merged_empty.has_value());
+    CHECK(merged_empty->config.subagent.wall_clock_timeout_secs == std::nullopt);
+}
+
+// ---------------------------------------------------------------------------
 // subagent.max_steps_per_turn(旧名 subagent.max_turns;0.30.x"失败预算"单):
 // 子代理不再暗藏硬闸——预算从配置来,首选 subagent 段,未设继承主代理的
 // 预算;0 全路一致不限步。待遇同 hooks:只从配置文件来(项目级压全局),

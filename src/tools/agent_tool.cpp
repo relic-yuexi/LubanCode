@@ -1,10 +1,14 @@
 #include "tools/agent_tool.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <ctime>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <sstream>
+#include <string_view>
 #include <utility>
 #include <variant>
 
@@ -13,6 +17,8 @@
 #include "agent/prompts.hpp"
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
+#include "cli/transcript.hpp"  // CountUtf8Codepoints:活度账"多少字"的码点计数
+#include "platform/paths.hpp"
 #include "tools/path_utils.hpp"
 #include "tools/todo_tool.hpp"
 
@@ -167,6 +173,8 @@ std::string ReasonShortLabel(TaskOutcomeReason reason) {
             return "工具出错";
         case TaskOutcomeReason::UserStop:
             return "用户中止";
+        case TaskOutcomeReason::WallClockTimeout:
+            return "墙钟超时";
         case TaskOutcomeReason::ProtocolError:
             return "会话异常";
         case TaskOutcomeReason::None:
@@ -356,7 +364,234 @@ struct DispatchSlot {
     }
 };
 
+// ---------------------------------------------------------------------------
+// 子代理流事件诊断日志(规格"二、治'无法证明'")
+//
+// LUBANCODE_DEBUG_SUBAGENT=1(或 =<目录>)时,每个子代理任务一只日志文件
+// (<目录>/subagent-<task_id>.log,缺省 ~/.lubancode/logs/),逐流事件一行:
+// 请求发出/首事件(首字节耗时可查)/每种事件型(delta.thinking、delta.text、
+// tool_use、usage、done、error)的字节数与累计/错误与超时也落。只打类型与
+// 计数,不打思考与正文内容(密钥/正文不进日志的既有规矩);开关解析与文件
+// 打开都走 TraceBackend 自己,不设环境变量时零开销(一个空串判断)。
+// ---------------------------------------------------------------------------
+
+// 环境变量的三态:关(没设/0/false)/开到缺省目录(~/.lubancode/logs)/
+// 开到指定目录。目录不存在就建;建不成日志整体退化为关(诊断工具不许把
+// 正路带崩)。
+std::optional<std::filesystem::path> SubagentDebugLogDir() {
+    const auto value = lubancode::platform::GetEnvVar("LUBANCODE_DEBUG_SUBAGENT");
+    if (!value.has_value() || value->empty()) {
+        return std::nullopt;
+    }
+    std::string mode = *value;
+    for (char& c : mode) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (mode == "0" || mode == "false" || mode == "off" || mode == "no") {
+        return std::nullopt;
+    }
+    std::filesystem::path dir;
+    if (mode == "1" || mode == "true" || mode == "yes" || mode == "on") {
+        const auto home = lubancode::platform::HomeDir();
+        if (!home.has_value()) {
+            return std::nullopt;
+        }
+        dir = std::filesystem::path(*home) / ".lubancode" / "logs";
+    } else {
+        dir = lubancode::tools::Utf8ToPath(*value);
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec) {
+        return std::nullopt;
+    }
+    return dir;
+}
+
+// 一行日志的毫秒级墙钟时间戳(HH:MM:SS.mmm)。
+std::string LogTimestamp() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t seconds = std::chrono::system_clock::to_time_t(now);
+    const auto ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
+    std::tm tm_buffer{};
+#ifdef _WIN32
+    localtime_s(&tm_buffer, &seconds);
+#else
+    localtime_r(&seconds, &tm_buffer);
+#endif
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "%02d:%02d:%02d.%03d", tm_buffer.tm_hour, tm_buffer.tm_min,
+                  tm_buffer.tm_sec, static_cast<int>(ms));
+    return buffer;
+}
+
+// 流事件 -> 诊断短名与字节数(只数长度,不看内容)。
+struct EventTag {
+    const char* type = "";
+    std::size_t bytes = 0;
+};
+EventTag TagOfEvent(const api::StreamEvent& event) {
+    if (std::holds_alternative<api::MessageStart>(event)) {
+        return {"message_start", 0};
+    }
+    if (const auto* text = std::get_if<api::TextDelta>(&event)) {
+        return {"delta.text", text->text.size()};
+    }
+    if (const auto* thinking = std::get_if<api::ThinkingDelta>(&event)) {
+        return {"delta.thinking", thinking->text.size() + thinking->signature.size()};
+    }
+    if (std::holds_alternative<api::ToolUseStart>(event)) {
+        return {"tool_use.start", 0};
+    }
+    if (const auto* input = std::get_if<api::ToolUseInputDelta>(&event)) {
+        return {"delta.tool_input", input->partial_json.size()};
+    }
+    if (std::holds_alternative<api::ContentBlockDone>(event)) {
+        return {"block_done", 0};
+    }
+    if (std::holds_alternative<api::BuiltinToolStart>(event)) {
+        return {"builtin_tool.start", 0};
+    }
+    if (const auto* builtin_done = std::get_if<api::BuiltinToolDone>(&event)) {
+        return {"builtin_tool.done", builtin_done->summary.size()};
+    }
+    if (std::holds_alternative<api::MessageDone>(event)) {
+        return {"done", 0};
+    }
+    if (const auto* error = std::get_if<api::StreamError>(&event)) {
+        return {"stream_error", error->message.size()};
+    }
+    return {"unknown", 0};
+}
+
+// 错误短文:第一行,截 200 字节(按 UTF-8 续字节截齐)。错误正文是服务端
+// 诊断信息,可以落;模型思考与正文依然一个字不落。
+std::string FirstLineCapped(const std::string& text, std::size_t cap = 200) {
+    std::size_t end = text.find('\n');
+    if (end == std::string::npos) {
+        end = text.size();
+    }
+    end = std::min(end, cap);
+    while (end > 0 && (static_cast<unsigned char>(text[end - 1]) & 0xC0) == 0x80) {
+        --end;  // 不劈半个字符
+    }
+    return text.substr(0, end);
+}
+
 }  // namespace
+
+// 子代理请求的包装后端:一进(请求发出)、一首个事件、逐事件、一收场,全数
+// 记进活度账(tasks_mutex_ 下)与诊断日志(开了环境变量才有文件)。前台与
+// 后台任务都从 RunTask 走这里,主会话的请求不经此包装。
+class AgentTool::TraceBackend : public api::Backend {
+public:
+    TraceBackend(api::Backend& inner, AgentTool& tool, const std::shared_ptr<TaskRecord>& task)
+        : inner_(inner), tool_(tool), task_(task) {
+        if (const auto dir = SubagentDebugLogDir(); dir.has_value()) {
+            const std::filesystem::path path = *dir / ("subagent-" + std::to_string(task->snapshot.id) + ".log");
+            log_.open(path, std::ios::binary | std::ios::app);
+        }
+    }
+
+    std::expected<void, api::Error> send_stream(
+        const api::Request& request,
+        const std::function<void(const api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* cancel = nullptr) override {
+        const auto request_started = std::chrono::steady_clock::now();
+        const int seq = ++request_seq_;
+        bool saw_first_event = false;
+        std::uint64_t events_total = 0;
+        std::uint64_t text_bytes = 0;
+        std::uint64_t thinking_bytes = 0;
+        {
+            std::lock_guard<std::mutex> lock(tool_.tasks_mutex_);
+            task_->activity.stage = AgentTaskActivity::Stage::WaitingFirstByte;
+            task_->activity.request_started = request_started;
+            task_->activity.first_byte_ms = -1;
+            task_->activity.reasoning_bytes = 0;
+            task_->activity.text_bytes = 0;
+            ++task_->content_revision;
+            tool_.TouchTasks();
+        }
+        LogLine("request seq=" + std::to_string(seq) + " model=" + request.model +
+                " messages=" + std::to_string(request.messages.size()));
+        const auto wrapped = [&](const api::StreamEvent& event) {
+            const EventTag tag = TagOfEvent(event);
+            ++events_total;
+            if (tag.type == std::string_view("delta.text")) {
+                text_bytes += tag.bytes;
+            } else if (tag.type == std::string_view("delta.thinking")) {
+                thinking_bytes += tag.bytes;
+            }
+            if (!saw_first_event) {
+                saw_first_event = true;
+                const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - request_started)
+                                    .count();
+                {
+                    std::lock_guard<std::mutex> lock(tool_.tasks_mutex_);
+                    task_->activity.first_byte_ms = static_cast<int>(ms);
+                    ++task_->content_revision;
+                }
+                LogLine("first_event seq=" + std::to_string(seq) + " type=" + tag.type +
+                        " ttfb_ms=" + std::to_string(ms));
+            }
+            LogLine("event seq=" + std::to_string(seq) + " type=" + tag.type +
+                    " bytes=" + std::to_string(tag.bytes) + " events=" + std::to_string(events_total) +
+                    " text_bytes=" + std::to_string(text_bytes) +
+                    " thinking_bytes=" + std::to_string(thinking_bytes));
+            on_event(event);
+        };
+        auto result = inner_.send_stream(request, wrapped, cancel);
+        if (result.has_value()) {
+            LogLine("stream_end seq=" + std::to_string(seq) + " ok events=" + std::to_string(events_total) +
+                    " text_bytes=" + std::to_string(text_bytes) +
+                    " thinking_bytes=" + std::to_string(thinking_bytes));
+        } else {
+            const api::Error& error = result.error();
+            std::string kind;
+            switch (error.kind) {
+                case api::ErrorKind::Network:
+                    kind = "network";
+                    break;
+                case api::ErrorKind::HttpStatus:
+                    kind = "http_" + std::to_string(error.http_status);
+                    break;
+                case api::ErrorKind::Parse:
+                    kind = "parse";
+                    break;
+                case api::ErrorKind::Api:
+                    kind = "api";
+                    break;
+                case api::ErrorKind::Cancelled:
+                    kind = "cancelled";
+                    break;
+            }
+            // B 场景(流挂死/超时)当场现形:错误与超时必落,含首行短文。
+            LogLine("stream_end seq=" + std::to_string(seq) + " error kind=" + kind +
+                    " events=" + std::to_string(events_total) + " text_bytes=" + std::to_string(text_bytes) +
+                    " thinking_bytes=" + std::to_string(thinking_bytes) +
+                    " message=" + FirstLineCapped(error.message));
+        }
+        return result;
+    }
+
+private:
+    void LogLine(const std::string& body) {
+        if (!log_.is_open()) {
+            return;
+        }
+        log_ << LogTimestamp() << " " << body << "\n";
+        log_.flush();  // 挂死现场要的是"杀进程也留得住"的那几行
+    }
+
+    api::Backend& inner_;
+    AgentTool& tool_;
+    std::shared_ptr<TaskRecord> task_;
+    std::ofstream log_;
+    int request_seq_ = 0;
+};
 
 AgentTool::AgentTool(api::Backend& backend, ToolRegistry& sub_registry, std::string cwd, std::string model,
                       int default_max_steps_per_turn, std::string skills_segment)
@@ -654,21 +889,29 @@ Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std
     result.content += UndeliveredInboxNote(task);
     {
         std::lock_guard<std::mutex> lock(tasks_mutex_);
-        task->snapshot.result = result.content;
-        task->snapshot.end_time = std::chrono::steady_clock::now();
-        if (task->cancel.load(std::memory_order_acquire) ||
-            (hooks.cancel != nullptr && hooks.cancel->load(std::memory_order_acquire))) {
-            // 面板 x / 父轮 ESC:按用户中止收账(outcome 若已写成别的,改回
-            // stopped,短因对得上)。
-            task->snapshot.state = AgentTaskState::Cancelled;
-            task->snapshot.outcome.status = TaskOutcomeStatus::Stopped;
-            task->snapshot.outcome.reason = TaskOutcomeReason::UserStop;
-            if (task->snapshot.outcome.message.empty()) {
-                task->snapshot.outcome.message = "用户中止了这只子代理";
+        // 看门狗已强制收账(wall_clock 绝境):台账保持那份,这里只报收尾。
+        if (!task->force_finalized) {
+            task->snapshot.result = result.content;
+            task->snapshot.end_time = std::chrono::steady_clock::now();
+            if (task->cancel.load(std::memory_order_acquire) ||
+                (hooks.cancel != nullptr && hooks.cancel->load(std::memory_order_acquire))) {
+                // 面板 x / 父轮 ESC:按用户中止收账(outcome 若已写成别的,改回
+                // stopped,短因对得上)。
+                task->snapshot.state = AgentTaskState::Cancelled;
+                task->snapshot.outcome.status = TaskOutcomeStatus::Stopped;
+                task->snapshot.outcome.reason = TaskOutcomeReason::UserStop;
+                if (task->snapshot.outcome.message.empty()) {
+                    task->snapshot.outcome.message = "用户中止了这只子代理";
+                }
+            } else {
+                task->snapshot.state = StateFromOutcome(task->snapshot.outcome.status);
             }
-        } else {
-            task->snapshot.state = StateFromOutcome(task->snapshot.outcome.status);
+            task->activity = AgentTaskActivity{};
         }
+        task->finalized.store(true, std::memory_order_release);
+    }
+    if (task->watchdog.joinable()) {
+        task->watchdog.join();
     }
     TouchTasks();
     return result;
@@ -802,18 +1045,26 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
         result.content += UndeliveredInboxNote(task);
         {
             std::lock_guard<std::mutex> lock(tasks_mutex_);
-            task->snapshot.result = result.content;
-            task->snapshot.end_time = std::chrono::steady_clock::now();
-            if (task->cancel.load(std::memory_order_acquire)) {
-                task->snapshot.state = AgentTaskState::Cancelled;
-                task->snapshot.outcome.status = TaskOutcomeStatus::Stopped;
-                task->snapshot.outcome.reason = TaskOutcomeReason::UserStop;
-                if (task->snapshot.outcome.message.empty()) {
-                    task->snapshot.outcome.message = "用户中止了这只子代理";
+            // 看门狗已强制收账(wall_clock 绝境):台账保持那份,这里只报收尾。
+            if (!task->force_finalized) {
+                task->snapshot.result = result.content;
+                task->snapshot.end_time = std::chrono::steady_clock::now();
+                if (task->cancel.load(std::memory_order_acquire)) {
+                    task->snapshot.state = AgentTaskState::Cancelled;
+                    task->snapshot.outcome.status = TaskOutcomeStatus::Stopped;
+                    task->snapshot.outcome.reason = TaskOutcomeReason::UserStop;
+                    if (task->snapshot.outcome.message.empty()) {
+                        task->snapshot.outcome.message = "用户中止了这只子代理";
+                    }
+                } else {
+                    task->snapshot.state = StateFromOutcome(task->snapshot.outcome.status);
                 }
-            } else {
-                task->snapshot.state = StateFromOutcome(task->snapshot.outcome.status);
+                task->activity = AgentTaskActivity{};
             }
+            task->finalized.store(true, std::memory_order_release);
+        }
+        if (task->watchdog.joinable()) {
+            task->watchdog.join();
         }
         TouchTasks();
     });
@@ -897,7 +1148,16 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     if (context_window_tokens_ > 0) {
         task_profile.context_window_tokens = context_window_tokens_;
     }
-    agent::AgentLoop sub_loop(backend, effective_registry, std::move(task_profile), system_prompt);
+    // 活度账 + 诊断日志的包装后端:子代理的每次模型请求都从这里过(请求
+    // 发出/首事件/逐事件/收场错误)。必须在 sub_loop 之前声明(它引用的
+    // 寿命盖过 loop);上下文压缩那一路(CompactHierarchical)仍用原 backend,
+    // 不混进任务的阶段账。没进台账的旧边缘路径(task 为空)原样透传。
+    std::optional<TraceBackend> traced_storage;
+    if (task != nullptr) {
+        traced_storage.emplace(backend, *this, task);
+    }
+    api::Backend& loop_backend = traced_storage.has_value() ? *traced_storage : backend;
+    agent::AgentLoop sub_loop(loop_backend, effective_registry, std::move(task_profile), system_prompt);
     // 子代理的项目记忆召回(规格"同级能力审计"):按这只任务的 prompt 独立
     // 检索,同预算同安全声明;provider 没设(旧调用方)就不注入,行为不变。
     if (turn_context_provider_) {
@@ -1003,7 +1263,23 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             event.text = prompt;
             AppendTaskEventLocked(task, std::move(event));
         }
-        sub_callbacks.on_text_delta = [this, task](const std::string& text) {
+        // 活度账的节流拍(规格"一、治'看不见'"):增量路径 1s 一拍 TouchTasks
+        // ——数字逐秒长,不再每枚 delta 都碰全局修订号;阶段翻页与事件边界
+        // 不受节流,立即拍。content_revision(查看态实时流的判据)不节流,
+        // 每笔增量都 +1,1s 内攒着的那拍一并带出。
+        const auto touch_activity = [this, task](AgentTaskActivity::Stage stage) {
+            const auto now = std::chrono::steady_clock::now();
+            const bool stage_changed = task->activity.stage != stage;
+            if (stage_changed) {
+                task->activity.stage = stage;  // 阶段翻页:立即拍,坞行当秒换文案
+                task->last_activity_touch = now;
+                TouchTasks();
+            } else if (now - task->last_activity_touch >= std::chrono::seconds(1)) {
+                task->last_activity_touch = now;
+                TouchTasks();
+            }
+        };
+        sub_callbacks.on_text_delta = [this, task, touch_activity](const std::string& text) {
             std::lock_guard<std::mutex> lock(tasks_mutex_);
             task->snapshot.live_output += text;
             constexpr std::size_t kLiveOutputCap = 64 * 1024;
@@ -1011,12 +1287,16 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 task->snapshot.live_output.erase(0, task->snapshot.live_output.size() - kLiveOutputCap);
             }
             task->pending_text += text;  // 消息账:事件边界(工具/轮次收口)切成段
-            TouchTasks();
+            task->activity.text_bytes = task->pending_text.size();
+            ++task->content_revision;
+            touch_activity(AgentTaskActivity::Stage::Text);
         };
-        sub_callbacks.on_thinking_delta = [this, task](const std::string& text) {
+        sub_callbacks.on_thinking_delta = [this, task, touch_activity](const std::string& text) {
             std::lock_guard<std::mutex> lock(tasks_mutex_);
             task->pending_reasoning += text;  // 思考也入账,查看态与 main 同款折叠
-            TouchTasks();
+            task->activity.reasoning_bytes = task->pending_reasoning.size();
+            ++task->content_revision;
+            touch_activity(AgentTaskActivity::Stage::Thinking);
         };
         sub_callbacks.on_tool_start = [this, task, foreground_hooks](const std::string& tool_name,
                                                                      const nlohmann::json& tool_input) {
@@ -1032,6 +1312,10 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 AppendTaskEventLocked(task, std::move(event));
                 task->snapshot.tool_calls.push_back(
                     AgentTaskToolCall{tool_name, tool_input.dump(), std::string(), false, false});
+                task->activity.stage = AgentTaskActivity::Stage::Tool;
+                task->activity.tool_name = tool_name;
+                task->activity.tool_started = std::chrono::steady_clock::now();
+                ++task->content_revision;
                 TouchTasks();
             }
             if (foreground_hooks != nullptr && foreground_hooks->on_sub_tool_start) {
@@ -1055,6 +1339,11 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             event.result = result.content;
             event.is_error = result.is_error;
             AppendTaskEventLocked(task, std::move(event));
+            // 工具收口:阶段退回 None(下一请求发出时 TraceBackend 再翻
+            // WaitingFirstByte);工具名即时清,不拿旧名字接着报秒。
+            task->activity.stage = AgentTaskActivity::Stage::None;
+            task->activity.tool_name.clear();
+            ++task->content_revision;
             TouchTasks();
         };
         if (foreground_hooks != nullptr) {
@@ -1191,16 +1480,24 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     // 打断信号:前台任务有两根——面板 x 置的 task->cancel 与父轮 ESC 置的
     // hooks.cancel(地址透传,见 Hooks::cancel 注释)。AgentLoop 只收一根
     // 指针,起一只 20ms 粒度的合并线程把两根并起来;后台任务只有
-    // task->cancel;都没进台账时保持旧透传。
+    // task->cancel;都没进台账时保持旧透传。墙钟兜底开着时(任何任务)也
+    // 走合并线程:看门狗的 wall_stop 是第三根,同样并进来。
+    const bool merge_cancel_signals = (task != nullptr && foreground_hooks != nullptr &&
+                                       foreground_hooks->cancel != nullptr) ||
+                                      (task != nullptr && wall_clock_timeout_secs_ > 0);
     std::atomic<bool> merged_cancel{false};
     std::optional<std::thread> cancel_merger;
     const std::atomic<bool>* cancel = nullptr;
-    if (task != nullptr && foreground_hooks != nullptr && foreground_hooks->cancel != nullptr) {
+    if (merge_cancel_signals) {
+        const std::atomic<bool>* parent_cancel =
+            foreground_hooks != nullptr ? foreground_hooks->cancel : nullptr;
         cancel = &merged_cancel;
-        cancel_merger.emplace([&merged_cancel, task, parent_cancel = foreground_hooks->cancel] {
+        cancel_merger.emplace([&merged_cancel, task, parent_cancel] {
             while (!merged_cancel.load(std::memory_order_acquire)) {
-                if (task->cancel.load(std::memory_order_acquire) ||
-                    parent_cancel->load(std::memory_order_acquire)) {
+                if ((task != nullptr &&
+                     (task->cancel.load(std::memory_order_acquire) ||
+                      task->wall_stop.load(std::memory_order_acquire))) ||
+                    (parent_cancel != nullptr && parent_cancel->load(std::memory_order_acquire))) {
                     merged_cancel.store(true, std::memory_order_release);
                     return;
                 }
@@ -1211,6 +1508,60 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         cancel = &task->cancel;
     } else if (foreground_hooks != nullptr) {
         cancel = foreground_hooks->cancel;
+    }
+
+    // 墙钟看门狗(规格三):整轮上限兜底。到点置 wall_stop(合并线程收进
+    // 停止信号——绝不置 task->cancel,那会被收成"用户中止");宽限期内
+    // 任务线程仍没报终态(所有超时全失效、后端不理取消的绝境),直接把
+    // 台账翻成 Failed/WallClockTimeout——任务绝不无限占着坞行。线程记在
+    // TaskRecord 里、闭包另握一份 record 的 shared_ptr 自保:任务线程卡死
+    // 的绝境下 record 不悬垂;正常收尾(finalized 置位后)由收尾块 join 掉。
+    if (task != nullptr && wall_clock_timeout_secs_ > 0) {
+        task->wall_stop.store(false, std::memory_order_release);
+        task->wall_clock_fired.store(false, std::memory_order_release);
+        task->finalized.store(false, std::memory_order_release);
+        task->force_finalized = false;
+        const auto deadline = task->snapshot.start_time + std::chrono::seconds(wall_clock_timeout_secs_);
+        const int grace_secs = wall_clock_grace_secs_;
+        std::thread watchdog([this, task, deadline, grace_secs] {
+            while (!task->finalized.load(std::memory_order_acquire) &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            }
+            if (task->finalized.load(std::memory_order_acquire)) {
+                return;  // 正常收尾在限内办完,无事发生
+            }
+            task->wall_clock_fired.store(true, std::memory_order_release);
+            task->wall_stop.store(true, std::memory_order_release);
+            const auto grace_end = std::chrono::steady_clock::now() + std::chrono::seconds(grace_secs);
+            while (!task->finalized.load(std::memory_order_acquire) &&
+                   std::chrono::steady_clock::now() < grace_end) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            if (task->finalized.load(std::memory_order_acquire)) {
+                return;  // 停止信号起了作用,任务线程自己收的账更准
+            }
+            std::lock_guard<std::mutex> lock(tasks_mutex_);
+            if (task->finalized.load(std::memory_order_acquire) ||
+                task->snapshot.state != AgentTaskState::Running) {
+                return;
+            }
+            task->force_finalized = true;
+            task->snapshot.state = AgentTaskState::Failed;
+            task->snapshot.end_time = std::chrono::steady_clock::now();
+            task->activity = AgentTaskActivity{};
+            task->snapshot.outcome.status = TaskOutcomeStatus::Failed;
+            task->snapshot.outcome.reason = TaskOutcomeReason::WallClockTimeout;
+            task->snapshot.outcome.message = lubancode::cli::trf(
+                "agent_outcome.wall_clock_force", static_cast<int>(wall_clock_timeout_secs_));
+            task->snapshot.result = task->snapshot.outcome.message;
+            AgentTaskEvent forced_event;
+            forced_event.kind = AgentTaskEventKind::Failure;
+            forced_event.text = task->snapshot.outcome.message;
+            AppendTaskEventLocked(task, std::move(forced_event));
+            TouchTasks();
+        });
+        task->watchdog = std::move(watchdog);
     }
     // hooks 第四五步:SubagentStart + 上下文切换。前台子代理在宿主主线程
     // 里同步跑,dispatcher 上下文换成这只子代理的(agent_id/agent_type),
@@ -1282,6 +1633,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     // 收场原始信号(供分型):
     bool run_cancelled = false;
     bool run_hit_limit = false;
+    bool run_wall_clock = false;
     std::string run_stop_reason;
     std::string run_error;
     int steps_used_total = 0;
@@ -1314,6 +1666,13 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             run_cancelled = true;
             RestoreDrainedInbox(task, inflight_drained);
             break;  // 打断不是错误:半截文本照旧经 ExtractLastText 带出
+        }
+        // 墙钟到点(看门狗置的 wall_stop 把流掐断,loop 按打断收场):
+        // 这不是用户中止,是超时兜底——按 WallClockTimeout 分型。
+        if (task != nullptr && task->wall_clock_fired.load(std::memory_order_acquire)) {
+            RestoreDrainedInbox(task, inflight_drained);
+            run_wall_clock = true;
+            break;
         }
         if (outcome->hit_step_limit) {
             // 预算耗尽(规格"现场四"):不是笼统 failed,部分结果必须带回。
@@ -1443,7 +1802,16 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     }
     const std::string partial = text.empty() ? snapshot_fallback : text;
 
-    if (run_cancelled) {
+    if (run_wall_clock || (task != nullptr && task->wall_clock_fired.load(std::memory_order_acquire))) {
+        // 墙钟超时(规格三):接口超时全失效的最后一道闸。失败页写明超时
+        // 原因与实际用时,检查点/部分结果照常带回——几十步探索不因超时
+        // 一笔勾销。
+        task_outcome.status = TaskOutcomeStatus::Failed;
+        task_outcome.reason = TaskOutcomeReason::WallClockTimeout;
+        task_outcome.message = lubancode::cli::trf("agent_outcome.wall_clock", wall_clock_timeout_secs_);
+        task_outcome.partial_result = partial;
+        run_result = {"子代理执行失败: " + task_outcome.message + "\n" + ComposeOutcomeText(task_outcome), true};
+    } else if (run_cancelled) {
         task_outcome.status = TaskOutcomeStatus::Stopped;
         task_outcome.reason = TaskOutcomeReason::UserStop;
         task_outcome.message = "用户中止了这只子代理";
@@ -1500,6 +1868,15 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     }
     if (task != nullptr) {
         std::lock_guard<std::mutex> lock(tasks_mutex_);
+        // 看门狗已强制收账(任务线程绝境下晚归):台账保持强制收账那份,
+        // 这里只补一条"晚归"事件留痕,不再翻状态/结果。
+        if (task->force_finalized) {
+            AgentTaskEvent late_event;
+            late_event.kind = AgentTaskEventKind::Failure;
+            late_event.text = lubancode::cli::tr("agent_outcome.wall_clock_late");
+            AppendTaskEventLocked(task, std::move(late_event));
+            return run_result;
+        }
         // 消息账收口:残余正文先封卷,再记终局事件——completion 带最终结论
         // 全文,failure 带短因与部分结果(规格"现场三"事件表)。
         FlushPendingTaskTextLocked(task);
@@ -1514,6 +1891,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         }
         AppendTaskEventLocked(task, std::move(final_event));
         task->snapshot.outcome = std::move(task_outcome);
+        task->activity = AgentTaskActivity{};  // 终态不再带阶段文案(活度账清空)
     }
     return run_result;
 }
@@ -1530,7 +1908,12 @@ std::vector<AgentTaskSnapshot> AgentTool::TaskSnapshots(std::size_t max_entries)
         std::vector<AgentTaskSnapshot> out;
         out.reserve(tasks_.size());
         for (const auto& task : tasks_) {
-            out.push_back(task->snapshot);
+            AgentTaskSnapshot snapshot = task->snapshot;
+            snapshot.activity = task->activity;
+            snapshot.activity.reasoning_chars = cli::CountUtf8Codepoints(task->pending_reasoning);
+            snapshot.activity.text_chars = cli::CountUtf8Codepoints(task->pending_text);
+            snapshot.content_revision = task->content_revision;
+            out.push_back(std::move(snapshot));
         }
         return out;
     }
@@ -1554,7 +1937,12 @@ std::vector<AgentTaskSnapshot> AgentTool::TaskSnapshots(std::size_t max_entries)
     out.reserve(selected_count);
     for (std::size_t i = 0; i < tasks_.size(); ++i) {
         if (selected[i]) {
-            out.push_back(tasks_[i]->snapshot);
+            AgentTaskSnapshot snapshot = tasks_[i]->snapshot;
+            snapshot.activity = tasks_[i]->activity;
+            snapshot.activity.reasoning_chars = cli::CountUtf8Codepoints(tasks_[i]->pending_reasoning);
+            snapshot.activity.text_chars = cli::CountUtf8Codepoints(tasks_[i]->pending_text);
+            snapshot.content_revision = tasks_[i]->content_revision;
+            out.push_back(std::move(snapshot));
         }
     }
     return out;
@@ -1584,6 +1972,10 @@ std::vector<AgentTaskSummary> AgentTool::TaskSummaries() const {
         summary.end_time = task->snapshot.end_time;
         summary.delivered = task->snapshot.delivered;
         summary.tool_call_count = task->snapshot.tool_calls.size();
+        summary.activity = task->activity;
+        summary.activity.reasoning_chars = cli::CountUtf8Codepoints(task->pending_reasoning);
+        summary.activity.text_chars = cli::CountUtf8Codepoints(task->pending_text);
+        summary.content_revision = task->content_revision;
         std::lock_guard<std::mutex> inbox_lock(task->inbox_mutex);
         for (const auto& item : task->inbox) {
             if (!item.delivered) {
@@ -1599,7 +1991,12 @@ std::optional<AgentTaskSnapshot> AgentTool::TaskDetail(int task_id) const {
     std::lock_guard<std::mutex> lock(tasks_mutex_);
     for (const auto& task : tasks_) {
         if (task->snapshot.id == task_id) {
-            return task->snapshot;
+            AgentTaskSnapshot snapshot = task->snapshot;
+            snapshot.activity = task->activity;
+            snapshot.activity.reasoning_chars = cli::CountUtf8Codepoints(task->pending_reasoning);
+            snapshot.activity.text_chars = cli::CountUtf8Codepoints(task->pending_text);
+            snapshot.content_revision = task->content_revision;
+            return snapshot;
         }
     }
     return std::nullopt;
@@ -1628,6 +2025,7 @@ void AgentTool::AppendTaskEventLocked(const std::shared_ptr<TaskRecord>& task, A
         task->events.insert(task->events.begin(), std::move(marker));
     }
     task->events.push_back(std::move(event));
+    ++task->content_revision;  // 查看态实时流:消息账动了,这一拍要重铺
 }
 
 void AgentTool::FlushPendingTaskTextLocked(const std::shared_ptr<TaskRecord>& task) {
@@ -1655,17 +2053,21 @@ std::vector<AgentTaskEvent> AgentTool::TaskEvents(int task_id) const {
         }
         std::vector<AgentTaskEvent> out = task->events;
         // 运行中正在累积的正文/思考也带出去(各一段):查看态看到的与
-        // live_output 同步,不是只到上一个边界的旧账。
+        // live_output 同步,不是只到上一个边界的旧账。streaming 旗标上:
+        // 查看态据此画"思考中 · N 字"的 Running 条目,与 main 流式思考
+        // 同款折叠规矩(追加需求"查看态实时思考流")。
         if (!task->pending_reasoning.empty()) {
             AgentTaskEvent event;
             event.kind = AgentTaskEventKind::AssistantReasoning;
             event.text = task->pending_reasoning;
+            event.streaming = true;
             out.push_back(std::move(event));
         }
         if (!task->pending_text.empty()) {
             AgentTaskEvent event;
             event.kind = AgentTaskEventKind::AssistantText;
             event.text = task->pending_text;
+            event.streaming = true;
             out.push_back(std::move(event));
         }
         return out;

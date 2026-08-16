@@ -46,6 +46,12 @@
 
 namespace lubancode::tools {
 
+// 墙钟兜底的默认收杀宽限:看门狗发出停止信号后,任务线程这么久还没报终态
+// (后端不理取消的绝境),就把台账强制翻成终态。上限本体的默认值
+// (kDefaultSubagentWallClockTimeoutSecs)在 config.hpp,跟 subagent.* 那批
+// 默认住一起;宽限是实现细节,住这边。
+constexpr int kDefaultSubagentWallClockGraceSecs = 30;
+
 enum class AgentTaskState { Running, Done, Failed, Cancelled, BudgetExhausted };
 
 // ---------------------------------------------------------------------------
@@ -68,7 +74,35 @@ enum class TaskOutcomeReason {
     NoFinalText,   // 最后一轮没有文本结论
     ToolError,     // 最后一次工具调用出错带崩了收尾
     UserStop,      // 用户中止
+    WallClockTimeout,  // 整轮墙钟上限兜底(subagent.wall_clock_timeout_secs)
     ProtocolError, // 会话协议异常(连历史都没有等)
+};
+
+// ---------------------------------------------------------------------------
+// 运行中任务的实时活跃账(规格"子代理活跃度不可见"):思考/正文/工具/首字节
+// 四个阶段,坞行与查看态据此换文案——不再是只走秒表的死数字。计数只进
+// 字节数与阶段名,思考与正文本身绝不进 dock 行(规格"不做"第一条)。
+// 写点全在任务线程(TraceBackend + loop 回调),读点(面板/查看态)拿
+// tasks_mutex_ 拷快照。
+// ---------------------------------------------------------------------------
+struct AgentTaskActivity {
+    enum class Stage { None, WaitingFirstByte, Thinking, Text, Tool };
+    Stage stage = Stage::None;
+    // 当前正在累积的一段思考/正文的字节数(与 pending_reasoning/pending_text
+    // 同源;事件边界切段后归零重数)。
+    std::size_t reasoning_bytes = 0;
+    std::size_t text_bytes = 0;
+    // 显示用的码点数(汉字一眼读得出"多少字"):快照拷贝时从 pending 串现算,
+    // 不在增量回调里逐片数(增量可能劈开多字节字符)。
+    int reasoning_chars = 0;
+    int text_chars = 0;
+    // 当前请求发出时刻与首事件耗时(首字节):等首字节阶段显示"等首字节 · Ns",
+    // 到了以后查看态统计行显示"首字节 Nms"。first_byte_ms < 0 = 还没来。
+    std::chrono::steady_clock::time_point request_started{};
+    int first_byte_ms = -1;
+    // 工具执行中:工具名与起跑时刻(坞行显示"工具 read_file · 3s")。
+    std::string tool_name;
+    std::chrono::steady_clock::time_point tool_started{};
 };
 
 struct TaskOutcome {
@@ -133,6 +167,10 @@ struct AgentTaskSnapshot {
     std::vector<AgentTaskToolCall> tool_calls;
     std::string live_output;
     std::string result;
+    // 实时活跃账(运行中才有意义;终态清空)与内容修订号:查看态据此判断
+    // "这只任务的消息账又长了"(思考/正文增量、事件追加、阶段翻页都 +1)。
+    AgentTaskActivity activity;
+    std::uint64_t content_revision = 0;
     // 结构化结果:终态时由 RunTask 填。运行中 status 停在 Failed/None,
     // 消费方只看 state == Running 判"还在跑"。
     TaskOutcome outcome;
@@ -168,6 +206,10 @@ struct AgentTaskEvent {
     std::string input_json;  // ToolStart:入参紧凑 JSON
     std::string result;      // ToolResult:结果全文(截 kFullOutputCapBytes)
     bool is_error = false;   // ToolResult:是否出错
+    // 流式尾巴(追加需求"查看态实时思考流"):TaskEvents 拼在账尾的
+    // "正在累积、尚未切段"的正文/思考带这面旗——查看态据此画"思考中 · N 字"
+    // 的 Running 条目(与 main 流式思考同款折叠),封卷事件恒 false。
+    bool streaming = false;
 };
 
 // 轻量列表条目(0.28.x 面板全量化):列表每 100ms 刷新一次,不再复制
@@ -193,6 +235,10 @@ struct AgentTaskSummary {
     std::chrono::steady_clock::time_point end_time{};
     std::size_t tool_call_count = 0;
     std::size_t pending_message_count = 0;  // 已排队未送达的介入消息数
+    // 实时活跃账与内容修订号(与 AgentTaskSnapshot 同源,轻量拷贝):坞行按
+    // 阶段换文案用前者;查看态的"实时流重铺"靠后者判断这只任务的账又动了。
+    AgentTaskActivity activity;
+    std::uint64_t content_revision = 0;
     // 结果是否已交回主会话(DrainCompletionNotices 置位)。面板的"退场"账
     // 用:done+delivered 的任务从活动导航坞退场,台账照查(规格"现场一")。
     bool delivered = false;
@@ -426,6 +472,17 @@ public:
         max_dispatch_depth_ = max_depth > 0 ? max_depth : 1;
     }
 
+    // 墙钟兜底(规格"detached 超时链路核查与兜底"):一只任务整轮的墙钟
+    // 上限,秒。到点先走正常取消链(合并 cancel);任务线程 grace_secs 内
+    // 还没报终态(所有超时全失效、后端不理取消的绝境),由看门狗直接把台账
+    // 翻成 Failed/WallClockTimeout——任务绝不无限占着坞行。0 = 不限。会话层
+    // 从 subagent.wall_clock_timeout_secs 灌(默认 kDefaultSubagentWallClock-
+    // TimeoutSecs);测试直调默认 0(不限),要测显式设小值。
+    void SetWallClockTimeout(int secs, int grace_secs = kDefaultSubagentWallClockGraceSecs) {
+        wall_clock_timeout_secs_ = secs > 0 ? secs : 0;
+        wall_clock_grace_secs_ = grace_secs > 0 ? grace_secs : 1;
+    }
+
     // 子代理的项目记忆召回(规格"同级能力审计"):按子任务 prompt 独立
     // 检索,同预算同安全声明——不是每轮全量注入,也不共享 main 的召回
     // 快照。provider 收任务 prompt,返回本轮注入的上下文段(空 = 不注)。
@@ -486,6 +543,26 @@ private:
         std::vector<AgentTaskEvent> events;
         std::string pending_text;
         std::string pending_reasoning;
+        // 实时活跃账(规格"子代理活跃度不可见"):阶段/字节数/首字节/工具
+        // 起跑时刻,写点在任务线程(TraceBackend 与 loop 回调,持 tasks_mutex_),
+        // 读点随快照拷出。last_activity_touch 是增量路径的节流锚(1s 一拍
+        // TouchTasks;阶段翻页/事件边界不受节流,立即拍)。
+        AgentTaskActivity activity;
+        std::uint64_t content_revision = 0;
+        std::chrono::steady_clock::time_point last_activity_touch{};
+        // 墙钟兜底的三枚信号:wall_stop 看门狗到点置位(合并 cancel 线程收进
+        // merged_cancel,绝不动 task->cancel——那会被收成"用户中止");
+        // wall_clock_fired 供 RunTask 收场分型(墙钟超时 ≠ 用户中止);
+        // finalized 是任务线程正式收尾的标志(看门狗宽限期内据此早退)。
+        std::atomic<bool> wall_stop{false};
+        std::atomic<bool> wall_clock_fired{false};
+        std::atomic<bool> finalized{false};
+        // 看门狗强制收账后置位:任务线程晚到的收尾不得再把台账翻回去
+        // (状态/结果/outcome 一律保持强制收账那份)。
+        bool force_finalized = false;
+        // 墙钟看门狗线程(RunTask 起,收尾块 join):闭包另握一份 record 的
+        // shared_ptr 自保——任务线程卡死的绝境下 record 不悬垂。
+        std::thread watchdog;
         // 封账闸(规格第五节"排到了却没送"):子代理准备从 Running 进终态
         // 时,在 tasks_mutex_ 里查一遍 inbox——空则置 true,此后
         // SendTaskMessage 明确拒收(Finished);非空则不封账,取走注入、
@@ -524,6 +601,11 @@ private:
                    const IsolationScope* isolation_scope = nullptr,
                    const std::shared_ptr<lubancode::hooks::DetachedHookSession>& background_hooks = nullptr);
     void TouchTasks() { task_revision_.fetch_add(1, std::memory_order_release); }
+
+    // 子代理请求的包装后端(agent_tool.cpp 内实现):一次不落地把"请求发出/
+    // 首事件/逐事件/收场错误"记进活度账与诊断日志(LUBANCODE_DEBUG_SUBAGENT)。
+    // 嵌套类可以直接摸 AgentTool 的私账(tasks_mutex_/TaskRecord)。
+    class TraceBackend;
 
     // 消息账的写入辅助(都假定调用方已持 tasks_mutex_ 或独占任务线程收口):
     //   AppendTaskEventLocked —— 追加一枚事件(正文按 kLiveOutputCap 截尾);
@@ -571,6 +653,9 @@ private:
     int max_dispatch_depth_ = 3;     // 与 kDefaultSubagentMaxDepth 同值;1 = 子代理不再往下派
     std::atomic<int> active_dispatches_{0};   // 当前跑着的 RunTask 总数(前台+后台)
     std::atomic<int> foreground_depth_{0};    // 前台嵌套深度(同步栈上的一层算一层)
+    // 墙钟兜底:整轮上限与收杀宽限(秒;0 = 不限)。SetWallClockTimeout 灌。
+    int wall_clock_timeout_secs_ = 0;
+    int wall_clock_grace_secs_ = kDefaultSubagentWallClockGraceSecs;
     std::function<std::string(const std::string&)> turn_context_provider_;  // 子代理记忆召回;空 = 不召回
 };
 

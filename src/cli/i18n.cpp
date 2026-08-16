@@ -267,10 +267,24 @@ const Entry kZhCN[] = {
     {"agent_status.reason_no_final_text", "未交结论"},
     {"agent_status.reason_tool_error", "工具出错"},
     {"agent_status.reason_user_stop", "用户中止"},
+    {"agent_status.reason_wall_clock", "墙钟超时"},
     {"agent_status.reason_protocol_error", "会话异常"},
     {"agent_status.reason_unknown", "未注明原因"},
     {"agent_status.summary", "{0}({1} 次工具调用 · {2} tokens · {3})"},
     {"agent_status.tokens_not_reported", "tokens 未报告"},
+    // 实时活跃信号(规格"子代理活跃度不可见"):坞行/查看态按阶段换这一条
+    // 文案,别堆三段;只报计数,思考与正文本身不进 dock 行。
+    {"agent_activity.thinking", "思考中 · {0} 字"},
+    {"agent_activity.text", "正文 {0} 字"},
+    {"agent_activity.tool", "工具 {0} · {1}s"},
+    {"agent_activity.waiting", "等首字节 · {0}s"},
+    {"agent_activity.first_byte", "首字节 {0}ms"},
+    // 墙钟兜底(规格三)的收场文案:超时原因明写,检查点照常带回。
+    {"agent_outcome.wall_clock",
+     "子代理整轮墙钟超时(≥ {0}s,subagent.wall_clock_timeout_secs):已强制收口;超时前取得的检查点见下。"},
+    {"agent_outcome.wall_clock_force",
+     "子代理墙钟超时且未在宽限期内响应停止信号,已强制收账(上限 {0}s,subagent.wall_clock_timeout_secs)。"},
+    {"agent_outcome.wall_clock_late", "任务线程在强制收账后才返回;台账保持强制收账那份。"},
     // 输出预算耗尽的结构化失败页(规格根因四):main 与子代理共用同一组
     // 键,中英成对。
     {"agent_outcome.output_budget.head",
@@ -1044,6 +1058,9 @@ const Entry kZhCN[] = {
     {"doctor.agents.row_explore", "Explore     :{0} 枚工具(只读白名单,角色限制——不是子代理无权限)"},
     {"doctor.agents.note",
      "注:输出上限/步数/续跑/并发/深度 main 与子代理同一份(runtime profile);仅 Explore 按角色收窄工具。"},
+    {"doctor.agents.subagent_debug_log",
+     "子代理流诊断:设 LUBANCODE_DEBUG_SUBAGENT=1 后,每个子代理任务逐流事件一行落 "
+     "~/.lubancode/logs/subagent-<任务号>.log(只记事件类型与字节数,不记正文与思考;也可设成别的目录)。"},
     {"doctor.cache.no_metrics", "未配 metrics_url,读不到服务端指标。本地兼容端可在 provider 配置里写 metrics_url(如 http://127.0.0.1:8000/metrics)后重试;不擅自拿 base_url 猜端点去探。"},
     {"doctor.cache.metrics_header", "服务端指标({0}):"},
     {"doctor.cache.metrics_enabled", "enable_prefix_caching = True:服务端已启用前缀缓存。"},
@@ -1611,10 +1628,28 @@ const Entry kEn[] = {
     {"agent_status.reason_no_final_text", "no final text"},
     {"agent_status.reason_tool_error", "tool error"},
     {"agent_status.reason_user_stop", "stopped by user"},
+    {"agent_status.reason_wall_clock", "wall-clock timeout"},
     {"agent_status.reason_protocol_error", "protocol error"},
     {"agent_status.reason_unknown", "unspecified"},
     {"agent_status.summary", "{0} ({1} tool uses · {2} tokens · {3})"},
     {"agent_status.tokens_not_reported", "tokens not reported"},
+    // Live activity signal (spec "subagent activity invisible"): the dock/view
+    // line swaps this single phrase per stage; counts only, never content.
+    {"agent_activity.thinking", "thinking · {0} chars"},
+    {"agent_activity.text", "text {0} chars"},
+    {"agent_activity.tool", "tool {0} · {1}s"},
+    {"agent_activity.waiting", "awaiting first byte · {0}s"},
+    {"agent_activity.first_byte", "first byte {0}ms"},
+    // Wall-clock fallback (spec item 3): the timeout reason is spelled out and
+    // checkpoints are still brought back.
+    {"agent_outcome.wall_clock",
+     "Subagent wall-clock timeout (>= {0}s, subagent.wall_clock_timeout_secs): forcibly wrapped up; checkpoints gathered "
+     "before the timeout follow."},
+    {"agent_outcome.wall_clock_force",
+     "Subagent hit the wall-clock limit and did not respond to the stop signal within the grace period; the ledger was "
+     "forcefully closed (limit {0}s, subagent.wall_clock_timeout_secs)."},
+    {"agent_outcome.wall_clock_late",
+     "The task thread returned only after the forceful close; the ledger keeps the forced record."},
     // Structured failure page for output budget exhaustion (spec root cause 4):
     // shared by main and subagents, zh/en paired.
     {"agent_outcome.output_budget.head",
@@ -2163,6 +2198,10 @@ const Entry kEn[] = {
     {"doctor.agents.note",
      "note: output budget/steps/continuations/concurrency/depth are one shared runtime profile for main and subagents; "
      "only Explore narrows tools by role."},
+    {"doctor.agents.subagent_debug_log",
+     "Subagent stream diagnostics: set LUBANCODE_DEBUG_SUBAGENT=1 and every subagent task logs one line per stream event "
+     "to ~/.lubancode/logs/subagent-<id>.log (event types and byte counts only, never content or thinking; a custom "
+     "directory can be given instead)."},
     {"config.label.file", "  config file        = {0}"},
     {"config.hooks.none", "(not configured)"},
     {"config.mcp.count", "{0} servers"},
