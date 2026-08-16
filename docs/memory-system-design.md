@@ -4,7 +4,7 @@
 
 项目记忆让 LubanCode 跨会话记住少量仓库事实与用户偏好。它默认关闭。检索只读本地文件；写入先排队，再由后台进程原子落盘。
 
-> 当前状态：同步词法召回、`memory_save`、`/memory remember`、后台 upsert、归档遗忘、索引重建都已实现。自动扫描每场对话、后台调用模型抽取、闲时归并、用户级跨项目记忆尚未实现。
+> 当前状态：同步词法召回(BM25+硬命中)、`memory_save`、`/memory remember`、后台 upsert、归档遗忘、索引重建、回合结束抽取候选与待审审阅箱(review/auto 两档)都已实现。闲时归并、用户级跨项目记忆尚未实现。
 
 ## 1. 记忆不等于会话
 
@@ -25,10 +25,10 @@
   "memory": {
     "enabled": true,
     "use": true,
-    "generate": true,
+    "learn": "review",
     "max_index_bytes": 16384,
-    "max_retrieval_bytes": 24576,
-    "max_results": 4
+    "max_retrieval_bytes": 8192,
+    "max_results": 3
   }
 }
 ```
@@ -37,12 +37,12 @@
 | --- | --- | --- |
 | `enabled` | `false` | 总开关。关闭时不建运行对象，也不注册写入工具 |
 | `use` | `true` | 是否召回已有记忆 |
-| `generate` | `true` | 是否注册 `memory_save`，并允许排写入任务 |
-| `max_index_bytes` | `16384` | 每轮最多读入多少索引字节 |
-| `max_retrieval_bytes` | `24576` | 命中主题正文总预算 |
-| `max_results` | `4` | 最多注入几份主题正文 |
+| `learn` | `review` | 学习档位:`off` 不提候选不写入;`review` 每回合提候选进待审箱;`auto` 自动写入,只认全局配置显式授权 |
+| `max_index_bytes` | `16384` | `index.md` 文件本身的上限(只给人看,不进 prompt) |
+| `max_retrieval_bytes` | `8192` | 每轮命中主题正文总预算 |
+| `max_results` | `3` | 最多注入几份主题正文 |
 
-项目 `.lubancode/config.json` 不能把全局关闭的记忆自行打开。全局开过后，项目可关闭总开关，也可收窄 `use`、`generate` 与预算。陌生仓库便不能靠一份受版本控制的配置，偷偷开启长期记录。
+项目 `.lubancode/config.json` 不能把全局关闭的记忆自行打开。全局开过后，项目可关闭总开关，也可收窄 `use`、`learn` 与预算——项目级只能降档,不能升到 `auto`。陌生仓库便不能靠一份受版本控制的配置，偷偷开启长期记录。
 
 单发模式可以召回，但强制关闭写入。它不维护完整交互会话，故而不挂 `memory_save`。
 
@@ -52,24 +52,39 @@
 /memory
 /memory on|off
 /memory use on|off
-/memory learn on|off
+/memory learn off|review|auto
+/memory review
+/memory accept <id>
+/memory edit <id> 标题 [:: 正文]
+/memory reject <id> [理由]
 /memory list
 /memory remember fact 标题 [:: 正文]
 /memory remember preference 标题 [:: 正文]
 /memory forget <id>
 /memory rebuild
+/memory stale
+/memory verify <id>
+/memory refresh <id>
+/memory why [id]
 ```
 
 | 命令 | 动作 |
 | --- | --- |
-| `/memory` | 显示本场开关、项目 key、目录、条目数、pending 数 |
+| `/memory` | 显示本场开关、学习档位、项目 key、目录、条目数、pending 数与待审候选数 |
 | `on|off` | 只改本场总开关 |
 | `use on|off` | 只改本场召回开关 |
-| `learn on|off` | 只改本场写入开关；打开时补注册 `memory_save` |
+| `learn off\|review\|auto` | 只改本场学习档位；只能降到全局授权以内 |
+| `review` | 列待审候选 |
+| `accept <id>` | 候选转正式入库(inferred 须先改实) |
+| `edit <id>` | 改候选标题或正文，仍留待审区 |
+| `reject <id> [理由]` | 拒绝候选，同主题不再自动重提 |
 | `list` | 从 catalog 列 id、类型、标题与摘要 |
 | `remember` | 由用户明确排一条 upsert 任务 |
 | `forget` | 把指定 id 归档，不再召回 |
 | `rebuild` | 扫描主题 Markdown，重建 catalog 与 index |
+| `stale` | 列指纹漂移与已过期的记忆 |
+| `verify`/`refresh` | 核验续命；refresh 连 status 一并回炉 |
+| `why [id]` | 看上一轮召回为何命中/落选 |
 
 这些开关只管当前进程，不回写 `config.json`。要永久开关，改全局配置。
 
@@ -246,7 +261,7 @@ flowchart LR
 
 时间只用于破同分。新而无关的条目压不过旧而精准的条目。
 
-程序先放有界 `index.md`，再按分数取至多 `max_results` 份主题，总正文不超过 `max_retrieval_bytes`。命中主题所指文件已经变化时，只留一句“可能陈旧”，不注正文，叫模型回源码核验。
+正常请求只检索机器 catalog，不再把 `index.md` 注入 prompt——index 留给人看与灾后重建。零命中时零注入零脚手架。按分数取至多 `max_results` 份主题，总正文不超过 `max_retrieval_bytes`；同一事实(同正文或同标题+同路径集)只注一份。命中主题所指文件已经变化时，只留一句“可能陈旧”，不注正文，叫模型回源码核验。已过 `expires_at` 的条目也不召回。
 
 ## 10. 注入边界
 
@@ -425,14 +440,14 @@ linked worktree 共用 common git dir，故而共享记忆。切 worktree 后会
 
 下面这些是后续方向，不是现版功能：
 
-- 自动审阅每场对话并挑记忆候选。
-- 另调低价模型做后台抽取与自然语言冲突判断。
-- idle debounce、成本阈值和自动失败重试策略。
+- 闲时归并、idle debounce、成本阈值和自动失败重试策略。
 - 文件变化后自动 refresh。
 - 自动拆分、归并过大的主题与分层索引。
 - embedding、向量检索与知识图谱。
 - `~/.lubancode/memory/user/` 跨项目用户偏好。
 - 子代理按自己的任务单独检索。
+
+回合抽取已经落地:`review` 档每回合结束用当前模型从本轮增量提 0～3 条候选进待审箱(`/memory review` 审阅),`auto` 档在证据齐、无敏感内容时直写。
 
 现版故意先守“小而准”：短索引、小主题、本地检索、后台幂等写。数据真多到词法检索吃力，再换检索器；磁盘格式与写入链无须一并推倒。
 

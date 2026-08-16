@@ -176,24 +176,24 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
   "memory": {
     "enabled": true,
     "use": true,
-    "generate": true,
+    "learn": "review",
     "max_index_bytes": 16384,
-    "max_retrieval_bytes": 24576,
-    "max_results": 4
+    "max_retrieval_bytes": 8192,
+    "max_results": 3
   }
 }
 ```
 
 - `enabled` 管总开关。
-- `use` 管同步召回。每轮只读本地索引，最多取 `max_results` 份正文。
-- `generate` 挂出 `memory_save` 工具。模型只把小而稳定的事实或用户明说的项目偏好排进队列；后台进程落盘、更新同 id 主题并重建索引。
-- `max_index_bytes` 限制本轮索引字节数；`max_retrieval_bytes` 限制命中正文总字节数；三项预算都须是正整数。
+- `use` 管同步召回。每轮只检索机器 catalog，最多注入 `max_results` 份正文，总计不超过 `max_retrieval_bytes` 字节。
+- `learn` 管学习档位，三选一：`off` 不提候选不写入；`review`(默认)每回合结束用当前模型提 0～3 条候选进待审箱，`/memory review` 审过才入库；`auto` 自动写入，只认全局配置显式授权。旧写法 `generate` 仍可读：`generate=false` 等价 `learn=off`，`generate=true` 等价 `learn=review`。
+- `max_index_bytes` 限制 `index.md` 文件本身的大小(它只给人看，不进 prompt)；`max_retrieval_bytes` 限制每轮命中正文总字节数；三项预算都须是正整数。
 
-项目级 `.lubancode/config.json` 不能自行把记忆从关改开。全局开过后，项目配置可以关闭，或收紧 `use`、`generate` 与预算。陌生仓库便不能替用户开启聊天提取。
+项目级 `.lubancode/config.json` 不能自行把记忆从关改开。全局开过后，项目配置可以关闭，或收紧 `use`、`learn` 与预算——项目级只能降档，不能替用户升到 `auto`。陌生仓库便不能替用户开启聊天提取。
 
 Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正文放在 `~/.lubancode/projects/<项目key>/memory/`，分 `facts/` 与 `preferences/`；`index.md` 和 `.state/catalog.json` 都可从主题文件重建。记忆不写进会话 history，也不随 `/export` 导出。
 
-交互会话可用 `/memory` 看状态。`/memory use on|off` 与 `/memory learn on|off` 只改本场；`/memory remember fact|preference 标题 [:: 正文]` 可显式排一条；`list`、`forget <id>`、`rebuild` 分别用来查看、归档与重建。
+交互会话可用 `/memory` 看状态。`/memory use on|off` 与 `/memory learn off|review|auto` 只改本场(只能降到全局授权以内)；`/memory review` 看待审候选，`accept`/`edit`/`reject` 处置；`/memory remember fact|preference 标题 [:: 正文]` 可显式排一条；`list`、`forget <id>`、`rebuild`、`stale`、`verify <id>`、`why [id]` 分别用来查看、归档、重建、查陈旧、续命与对账。
 
 ### providers 数组字段
 

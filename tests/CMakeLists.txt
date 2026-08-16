@@ -150,7 +150,8 @@ endif()
 # 路径——ctest 跑的时候工作目录不一定是 tests/ 源码目录,不能瞎猜相对路径。
 target_compile_definitions(lubancode_tests PRIVATE
   LUBANCODE_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
-  LUBANCODE_TEST_OFFICIAL_SKILLS_DIR="${CMAKE_SOURCE_DIR}/skills")
+  LUBANCODE_TEST_OFFICIAL_SKILLS_DIR="${CMAKE_SOURCE_DIR}/skills"
+  LUBANCODE_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 # M7:真 DLL 加载测试的靶子——示例插件 hello_plugin(直接编 examples/ 里那
 # 份源码,顺带验证示例真的能编)+ api_version 填错的 bad_version_plugin。

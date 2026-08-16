@@ -12,6 +12,7 @@
 #include "agent/prefix.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
+#include "config/config.hpp"
 #include "memory/memory_tool.hpp"
 #include "memory/project_memory.hpp"
 #include "tools/registry.hpp"
@@ -943,4 +944,45 @@ TEST_CASE("ProjectMemory: scope 不符不注入,subtree 内加分可召回") {
     bad.scope.kind = "project";
     bad.expires_at = "not-a-date";
     CHECK_FALSE(store.EnqueueSave(bad).has_value());
+}
+
+// ---- 文档漂移(规格"验收":文档默认值与代码一致,并有测试守着) ----
+// docs/configuration.md 与 docs/memory-system-design.md 写的默认值、学习三档
+// 与命令面,须跟 config.hpp 的常量、/memory 的实际子命令对齐。改代码不改
+// 文档(或反过来)这里就会红。
+namespace {
+std::string ReadDoc(const fs::path& base, const char* name) {
+    std::ifstream file(base / "docs" / name, std::ios::binary);
+    if (!file.is_open()) return {};
+    return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+}
+}  // namespace
+
+TEST_CASE("文档漂移: 记忆默认值、学习三档与命令面跟代码对齐") {
+    const fs::path source = LUBANCODE_TEST_SOURCE_DIR;
+    const std::string configuration = ReadDoc(source, "configuration.md");
+    const std::string design = ReadDoc(source, "memory-system-design.md");
+    REQUIRE_FALSE(configuration.empty());
+    REQUIRE_FALSE(design.empty());
+
+    // 默认值:两份文档的配置示例都用代码里的真值。
+    const std::string index_bytes = std::to_string(config::kDefaultMemoryMaxIndexBytes);
+    const std::string retrieval_bytes = std::to_string(config::kDefaultMemoryMaxRetrievalBytes);
+    const std::string max_results = std::to_string(config::kDefaultMemoryMaxResults);
+    for (const std::string* doc : {&configuration, &design}) {
+        CHECK(doc->find("\"max_index_bytes\": " + index_bytes) != std::string::npos);
+        CHECK(doc->find("\"max_retrieval_bytes\": " + retrieval_bytes) != std::string::npos);
+        CHECK(doc->find("\"max_results\": " + max_results) != std::string::npos);
+        // 旧默认值(24 KiB/4 条)不许再出现在配置示例里。
+        CHECK(doc->find("24576") == std::string::npos);
+        CHECK(doc->find("\"max_results\": 4") == std::string::npos);
+    }
+
+    // 学习三档与命令面:候选审阅箱、why、stale、verify 都进了文档。
+    CHECK(design.find("/memory review") != std::string::npos);
+    CHECK(design.find("/memory why") != std::string::npos);
+    CHECK(design.find("/memory stale") != std::string::npos);
+    CHECK(design.find("/memory verify") != std::string::npos);
+    CHECK(design.find("/memory accept") != std::string::npos);
+    CHECK(configuration.find("learn") != std::string::npos);
 }
