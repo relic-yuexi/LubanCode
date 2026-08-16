@@ -1005,4 +1005,14 @@ bool IsProcessAlive(unsigned long pid) {
 
 unsigned long CurrentProcessId() { return static_cast<unsigned long>(GetCurrentProcessId()); }
 
+int RunInteractiveCommand(const std::string& command_utf8) {
+    // _wsystem:继承当前控制台、等子进程跑完。编辑器(vim/notepad)自己
+    // 管自己的控制台模式,不需要我们喂 stdin/收 stdout。
+    if (command_utf8.empty()) {
+        return -1;
+    }
+    const std::wstring wide = Utf8ToWide(command_utf8);
+    return _wsystem(wide.c_str());
+}
+
 }  // namespace lubancode::platform

@@ -54,19 +54,27 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <mutex>
+#include <sstream>
 #include <utility>
 
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
 #include "cli/keymap.hpp"
+#include "cli/mention_menu.hpp"
 #include "cli/queue_model.hpp"
 #include "cli/slash_commands.hpp"
 #include "cli/terminal_frame.hpp"
 #include "platform/console.hpp"
+#include "platform/paths.hpp"
+#include "platform/process.hpp"
 #include "platform/terminal_batch.hpp"
+#include "platform/text_encoding.hpp"
+#include "tools/path_utils.hpp"
 
 namespace lubancode::cli {
 
@@ -170,6 +178,18 @@ std::function<bool()>& IdleWakeHookSlot() {
 // Ctrl+R 提问历史搜索的数据源槽(同一套会话级静态槽;主线程读写)。
 PromptHistoryProvider& PromptHistoryProviderSlot() {
     static PromptHistoryProvider provider;
+    return provider;
+}
+
+// 草稿 stash(一格,主线程读写;取回在键路、询问在应用收场路,都是主线程)。
+ComposerStashSnapshot& ComposerStashSlot() {
+    static ComposerStashSnapshot stash;
+    return stash;
+}
+
+// @ 文件提及菜单的数据源槽(同一套;主线程)。
+FileMentionProvider& FileMentionProviderSlot() {
+    static FileMentionProvider provider;
     return provider;
 }
 
@@ -972,6 +992,15 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     HistorySearchSession history_search;
     std::string history_search_draft;
     std::string history_search_last_query;  // 查询未变就不重跑匹配
+
+    // @ 文件提及菜单(0.30.x 第三批):索引每次读取取一次(应用层缓存),
+    // 模糊匹配按词元签名缓存在这里;词元变了选位归零、Esc 收起自动重开。
+    std::vector<FileMentionEntry> mention_entries;
+    bool mention_index_loaded = false;
+    std::string mention_cache_token;
+    std::vector<std::size_t> mention_matches_cache;
+    int mention_selected = 0;
+    bool mention_dismissed = false;
     const auto queue_rows_now = [&]() -> std::vector<std::string> {
         const auto snapshot = steering.Snapshot();
         if (snapshot.empty()) {
@@ -1005,20 +1034,59 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     // 搜索开着时把 RenderState 的提示行换成命中清单;查询变化就地重跑
     // 匹配。redraw_with_panel 与 100ms tick 的指纹账共用这一份,不然
     // tick 拿 slash 提示算指纹,与真画出的搜索行对不上,帧帧空转重画。
+    // 搜索之外,@ 提及菜单也走这里换装(第三批)。
+    const auto mention_menu_for = [&](const RenderState& state) -> const std::vector<std::size_t>* {
+        if (!composer || history_search.active() || queue_edit.has_value() || !FileMentionProviderSlot()) {
+            mention_cache_token.clear();
+            return nullptr;
+        }
+        if (state.cursor_row >= state.lines.size()) {
+            mention_cache_token.clear();
+            return nullptr;
+        }
+        const auto token = FindMentionToken(state.lines[state.cursor_row], state.cursor_col);
+        if (!token.has_value()) {
+            mention_cache_token.clear();  // 离开词元:缓存作废(含选位)
+            return nullptr;
+        }
+        const std::string signature = std::to_string(token->start) + ":" + token->query;
+        if (signature != mention_cache_token) {
+            mention_cache_token = signature;
+            mention_dismissed = false;
+            mention_selected = 0;
+            if (!mention_index_loaded) {
+                mention_entries = FileMentionProviderSlot()();
+                mention_index_loaded = true;
+            }
+            mention_matches_cache = FuzzyMatchMentions(mention_entries, token->query);
+        }
+        if (mention_dismissed || mention_matches_cache.empty()) {
+            return nullptr;
+        }
+        return &mention_matches_cache;
+    };
+
     const auto apply_search_hints = [&](RenderState& state) {
-        if (!history_search.active()) {
+        if (history_search.active()) {
+            const std::string query = Utf32ToUtf8(state.line);
+            if (query != history_search_last_query) {
+                history_search.Rerun(query);
+                history_search_last_query = query;
+            }
+            const std::optional<platform::ScreenInfo> info_now = platform::GetScreenInfo();
+            const int width = info_now.has_value() ? info_now->width : 80;
+            state.hint_lines =
+                BuildHistorySearchLines(history_search, query, width, theme.stats, theme.reset);
+            state.selected_index = -1;  // slash 菜单的选中镜像不适用于搜索行
             return;
         }
-        const std::string query = Utf32ToUtf8(state.line);
-        if (query != history_search_last_query) {
-            history_search.Rerun(query);
-            history_search_last_query = query;
+        if (const auto* matches = mention_menu_for(state); matches != nullptr) {
+            const std::optional<platform::ScreenInfo> info_now = platform::GetScreenInfo();
+            const int width = info_now.has_value() ? info_now->width : 80;
+            state.hint_lines =
+                BuildMentionMenuLines(mention_entries, *matches, mention_selected, width);
+            state.selected_index = -1;
         }
-        const std::optional<platform::ScreenInfo> info_now = platform::GetScreenInfo();
-        const int width = info_now.has_value() ? info_now->width : 80;
-        state.hint_lines =
-            BuildHistorySearchLines(history_search, query, width, theme.stats, theme.reset);
-        state.selected_index = -1;  // slash 菜单的选中镜像不适用于搜索行
     };
 
     auto redraw_with_panel = [&](const RenderState& raw_state, const std::vector<AgentPanelEntry>& entries) {
@@ -1058,15 +1126,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         redraw_with_panel(editor.CurrentRenderState(), panel_entries());
     };
 
-    // RetireIdleChrome(规格"现场二"):空闲 composer 的底栏所有权交接。wake
-    // 要把系统侧事件交回主循环时,先按上一帧的账把整帧(待发队列、上下横
-    // 线、输入行、状态栏、导航坞、提示行)正式收束——硬清干净、帧账归零,
-    // 绝不靠一个换行把旧帧推进滚屏留小尾巴。清完即 NoChrome,主循环的通知
-    // 与流式 footer 才接手所有权;任何时刻只有一名 owner。流式那头的
-    // RetireStreamingChrome 是 EndStreamFooter 里的 EraseStreamFooterLocked,
-    // 同一本帧账的另一头。
-    const auto retire_idle_chrome = [&]() {
-        if (!box) {
+    const auto retire_idle_chrome = [&]() {        if (!box) {
             return;
         }
         const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
@@ -1092,6 +1152,96 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         prev_body_row_count = 0;
     };
 
+    // Ctrl+G 外部编辑器(0.30.x 第三批):收掉底栏帧把整屏让给编辑器,
+    // $VISUAL/$EDITOR(都没有时 Windows notepad、POSIX vi)继承控制台跑;
+    // 读回保多行,CRLF 归一、剥编辑器补的一个行尾换行。启动失败/非零退出/
+    // 文件被删/非法 UTF-8,原草稿一字不动,短错一行。临时文件用完即删。
+    const auto run_external_editor = [&]() -> void {
+        const std::string draft = Utf32ToUtf8(editor.CurrentRenderState().line);
+        std::string editor_cmd;
+        if (const auto visual = platform::GetEnvVar("VISUAL"); visual.has_value() && !visual->empty()) {
+            editor_cmd = *visual;
+        } else if (const auto ed = platform::GetEnvVar("EDITOR"); ed.has_value() && !ed->empty()) {
+            editor_cmd = *ed;
+        } else {
+#ifdef _WIN32
+            editor_cmd = "notepad";
+#else
+            editor_cmd = "vi";
+#endif
+        }
+        namespace fs = std::filesystem;
+        fs::path file;
+        try {
+            file = fs::temp_directory_path() /
+                   ("lubancode-draft-" + std::to_string(platform::CurrentProcessId()) + "-" +
+                    std::to_string(
+                        std::chrono::steady_clock::now().time_since_epoch().count()) +
+                    ".md");
+        } catch (const std::exception&) {
+            std::cout << theme.error << tr("editor.no_temp") << theme.reset << "\n";
+            return;
+        }
+        {
+            std::ofstream out(file, std::ios::binary | std::ios::trunc);
+            if (!out) {
+                std::cout << theme.error << tr("editor.write_failed") << theme.reset << "\n";
+                return;
+            }
+            out << draft;
+            out.flush();
+            if (!out) {
+                std::error_code rm;
+                fs::remove(file, rm);
+                std::cout << theme.error << tr("editor.write_failed") << theme.reset << "\n";
+                return;
+            }
+        }
+        retire_idle_chrome();
+        std::cout << "\n" << std::flush;
+        const std::string command = editor_cmd + " \"" + lubancode::tools::PathToUtf8(file) + "\"";
+        const int exit_code = platform::RunInteractiveCommand(command);
+        std::string read_back;
+        bool read_ok = false;
+        {
+            std::ifstream in(file, std::ios::binary);
+            if (in) {
+                std::ostringstream buffer;
+                buffer << in.rdbuf();
+                read_back = buffer.str();
+                read_ok = true;
+            }
+        }
+        std::error_code rm_ec;
+        fs::remove(file, rm_ec);  // 用完即清;崩溃残件留给系统临时目录回收
+        if (exit_code != 0) {
+            std::cout << theme.error << trf("editor.nonzero", exit_code) << theme.reset << "\n";
+            reanchor_prompt_and_redraw();
+            return;
+        }
+        if (!read_ok) {
+            std::cout << theme.error << tr("editor.file_gone") << theme.reset << "\n";
+            reanchor_prompt_and_redraw();
+            return;
+        }
+        if (!platform::IsValidUtf8(read_back)) {
+            std::cout << theme.error << tr("editor.bad_utf8") << theme.reset << "\n";
+            reanchor_prompt_and_redraw();
+            return;
+        }
+        const std::string normalized = NormalizeEditorDraft(read_back);
+        editor.LoadTextWithCursor(Utf8ToUtf32(normalized), normalized.size());
+        std::cout << theme.stats << trf("editor.done", editor_cmd) << theme.reset << "\n";
+        reanchor_prompt_and_redraw();
+    };
+
+    // RetireIdleChrome(规格"现场二"):空闲 composer 的底栏所有权交接。wake
+    // 要把系统侧事件交回主循环时,先按上一帧的账把整帧(待发队列、上下横
+    // 线、输入行、状态栏、导航坞、提示行)正式收束——硬清干净、帧账归零,
+    // 绝不靠一个换行把旧帧推进滚屏留小尾巴。清完即 NoChrome,主循环的通知
+    // 与流式 footer 才接手所有权;任何时刻只有一名 owner。流式那头的
+    // RetireStreamingChrome 是 EndStreamFooter 里的 EraseStreamFooterLocked,
+    // 同一本帧账的另一头。
     // -------------------------------------------------------------------
     // 会话视口的 retained view(规格"现场四"):查看态正文不靠"往 scrollback
     // 再打印一份"冒充切页。上一视图正文落帧时记下它的缓冲顶行
@@ -1286,28 +1436,69 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         }
         const auto entries_before_key = panel_entries();
 
-        // ---- Ctrl+R 提问历史搜索(0.30.x 第二批;键位全走 keymap) ----
+        // ---- Composer 域动作(0.30.x 第二/三批;键位全走 keymap) ----
         // 搜索开着时整个键盘优先归它:命中的动作键(更早/换范围/接受/提交/
         // 取消)与 ↑/↓ 选位都在这里消费;其余键(打字、退格、左右移)落到
         // 编辑器当查询输入,命中清单随重画自然刷新。
         if (composer) {
             const auto search_chord = keymap::ChordFromKeyInput(*raw_key);
-            if (!history_search.active()) {
-                if (search_chord.has_value() && !queue_edit.has_value() &&
-                    keymap::ActiveKeymap().Lookup(keymap::KeyScope::Composer, *search_chord) ==
-                        keymap::ActionId::ChatSearchHistory &&
-                    PromptHistoryProviderSlot()) {
-                    // 打开:原草稿整份存起(取消时一字不少装回),编辑器清成
-                    // 空查询。没有数据源(单发/管道/未注册)时这个键不消费,
-                    // 落回编辑器原语义。
-                    history_search_draft = Utf32ToUtf8(editor.CurrentRenderState().line);
-                    history_search.Open(PromptHistoryProviderSlot()(), HistorySearchScope::Session);
-                    history_search_last_query.clear();
-                    editor.BeginLine(/*composer=*/true);
-                    redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
-                    continue;
+            if (!history_search.active() && !queue_edit.has_value() && search_chord.has_value()) {
+                using keymap::ActionId;
+                switch (keymap::ActiveKeymap().Lookup(keymap::KeyScope::Composer, *search_chord)) {
+                    case ActionId::ChatSearchHistory: {
+                        // Ctrl+R 反向搜索:原草稿整份存起(取消时一字不少装
+                        // 回),编辑器清成空查询。没有数据源(单发/管道/未注册)
+                        // 时这个键不消费,落回编辑器原语义。
+                        if (!PromptHistoryProviderSlot()) {
+                            break;
+                        }
+                        history_search_draft = Utf32ToUtf8(editor.CurrentRenderState().line);
+                        history_search.Open(PromptHistoryProviderSlot()(), HistorySearchScope::Session);
+                        history_search_last_query.clear();
+                        editor.BeginLine(/*composer=*/true);
+                        redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
+                        continue;
+                    }
+                    case ActionId::ChatExternalEditor: {
+                        // Ctrl+G 外部编辑器:草稿写临时文件,$VISUAL/$EDITOR
+                        // 继承控制台编辑;读回保多行,失败原草稿一字不动。
+                        run_external_editor();
+                        continue;
+                    }
+                    case ActionId::ComposerStash: {
+                        // 草稿收起/取回(一格):存下收件目标与 cwd,取回对
+                        // 不上就拒,给甲写的话不送给乙。
+                        const RenderState now = editor.CurrentRenderState();
+                        ComposerStashSnapshot& stash = ComposerStashSlot();
+                        if (stash.has) {
+                            const std::optional<int> target = GetComposerTarget();
+                            const std::string cwd_now =
+                                lubancode::tools::PathToUtf8(std::filesystem::current_path());
+                            if (stash.target_task_id != target.value_or(0) || stash.cwd != cwd_now) {
+                                panel_notice = tr("stash.restore_refused");
+                            } else {
+                                editor.LoadText(Utf8ToUtf32(stash.text));
+                                ComposerStashSlot() = ComposerStashSnapshot{};
+                                panel_notice = tr("stash.restored");
+                            }
+                        } else if (now.line.empty()) {
+                            panel_notice = tr("stash.empty");
+                        } else {
+                            stash.has = true;
+                            stash.text = Utf32ToUtf8(now.line);
+                            stash.target_task_id = GetComposerTarget().value_or(0);
+                            stash.cwd = lubancode::tools::PathToUtf8(std::filesystem::current_path());
+                            editor.BeginLine(/*composer=*/true);
+                            panel_notice = tr("stash.stashed");
+                        }
+                        panel_notice_until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+                        redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
+                        continue;
+                    }
+                    default:
+                        break;
                 }
-            } else if (search_chord.has_value()) {
+            } else if (history_search.active() && search_chord.has_value()) {
                 using keymap::ActionId;
                 const auto search_action =
                     keymap::ActiveKeymap().Lookup(keymap::KeyScope::Search, *search_chord);
@@ -1386,6 +1577,62 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             }
         }
 
+
+        // ---- @ 提及菜单(0.30.x 第三批):方向键走、Enter/Tab 选中插入、
+        // Esc 只收菜单。菜单开着时 Enter 只插入不提交(防误发),Tab 也不
+        // 进焦点态(composer 必然非空)。----
+        if (composer && !history_search.active()) {
+            const RenderState mention_preview = editor.CurrentRenderState();
+            if (const auto* mention_matches = mention_menu_for(mention_preview);
+                mention_matches != nullptr) {
+                using PK = platform::KeyInput::Kind;
+                if (raw_key->kind == PK::Up || raw_key->kind == PK::Down) {
+                    if (raw_key->kind == PK::Up) {
+                        if (mention_selected > 0) {
+                            --mention_selected;
+                        }
+                    } else if (mention_selected + 1 < static_cast<int>(mention_matches->size())) {
+                        ++mention_selected;
+                    }
+                    redraw_with_panel(mention_preview, entries_before_key);
+                    continue;
+                }
+                if (raw_key->kind == PK::Enter || raw_key->kind == PK::Tab) {
+                    const auto token =
+                        FindMentionToken(mention_preview.lines[mention_preview.cursor_row],
+                                         mention_preview.cursor_col);
+                    if (token.has_value()) {
+                        const FileMentionEntry& entry =
+                            mention_entries[(*mention_matches)[mention_selected]];
+                        const std::string insertion = MentionInsertionString(entry) + " ";
+                        // 整份重装:替换光标行,光标落词元尾(替换串末尾)。
+                        std::u32string joined;
+                        std::size_t cursor_abs = 0;
+                        for (std::size_t r = 0; r < mention_preview.lines.size(); ++r) {
+                            if (r > 0) {
+                                joined.push_back(U'\n');
+                            }
+                            if (r == mention_preview.cursor_row) {
+                                joined += ReplaceMentionToken(
+                                    mention_preview.lines[mention_preview.cursor_row], *token, insertion);
+                                cursor_abs = joined.size();
+                            } else {
+                                joined += mention_preview.lines[r];
+                            }
+                        }
+                        editor.LoadTextWithCursor(joined, cursor_abs);
+                    }
+                    mention_dismissed = true;  // 插完收菜单;再敲 @ 会重开
+                    redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
+                    continue;
+                }
+                if (raw_key->kind == PK::Esc) {
+                    mention_dismissed = true;  // 只收菜单,不清行、不打断
+                    redraw_with_panel(mention_preview, entries_before_key);
+                    continue;
+                }
+            }
+        }
 
         // ---- Ctrl+L 整屏重画(规格"整屏重画"节):从状态重建,不吞输入 ----
         // 与 resize 共用 rebuild_screen。composer 草稿、面板选择、查看态与
@@ -1902,6 +2149,33 @@ void SetIdleWakeHook(std::function<bool()> hook) { IdleWakeHookSlot() = std::mov
 
 void SetPromptHistoryProvider(PromptHistoryProvider provider) {
     PromptHistoryProviderSlot() = std::move(provider);
+}
+
+bool ComposerStashHasContent() { return ComposerStashSlot().has; }
+
+ComposerStashSnapshot ComposerStashPeek() { return ComposerStashSlot(); }
+
+void ComposerStashDiscard() { ComposerStashSlot() = ComposerStashSnapshot{}; }
+
+void SetFileMentionProvider(FileMentionProvider provider) {
+    FileMentionProviderSlot() = std::move(provider);
+}
+
+std::string NormalizeEditorDraft(std::string bytes) {
+    // CRLF / 裸 CR 归一成 '\n';编辑器普遍在文件尾补一个换行,读回时剥
+    // 掉那一个(用户真想留空末行会留两个——剥一个不伤)。
+    std::string out;
+    out.reserve(bytes.size());
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+        if (bytes[i] == '\r' && i + 1 < bytes.size() && bytes[i + 1] == '\n') {
+            continue;  // "\r\n" 里的 '\r' 丢弃,下一轮收 '\n'
+        }
+        out.push_back(bytes[i] == '\r' ? '\n' : bytes[i]);
+    }
+    if (!out.empty() && out.back() == '\n') {
+        out.pop_back();
+    }
+    return out;
 }
 
 void SetStatusLineData(const StatusPanelData& values, const std::vector<std::string>& items,

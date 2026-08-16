@@ -28,6 +28,7 @@
 #include "cli/format_utils.hpp"  // StatusPanelData(状态行数据源)
 #include "cli/history_search.hpp"  // PromptHistoryDataset(Ctrl+R 数据)
 #include "cli/line_editor.hpp"
+#include "cli/mention_menu.hpp"  // FileMentionEntry(@ 提及数据)
 #include "cli/queue_model.hpp"
 #include "cli/theme.hpp"
 
@@ -196,6 +197,34 @@ void SetIdleWakeHook(std::function<bool()> hook);
 // 设了也永不触发。终端层不校验数据来源——只认喂进来的条目。
 using PromptHistoryProvider = std::function<PromptHistoryDataset()>;
 void SetPromptHistoryProvider(PromptHistoryProvider provider);
+
+// ---------------------------------------------------------------------------
+// 0.30.x 第三批:草稿 stash、@ 文件提及菜单、外部编辑器
+// ---------------------------------------------------------------------------
+
+// 草稿 stash(一格):composer.stash 动作(keymap 可绑键)一键收起当前
+// 草稿,再按取回。分账:存下时的收件目标(查看态那只子代理,0 = main)
+// 与 cwd;取回时目标或 cwd 对不上就拒(给甲写的话不送给乙)。只存内存,
+// 不落盘——未发送内容不该进任何存档,进程退出即弃(隐私上明确的取舍)。
+struct ComposerStashSnapshot {
+    bool has = false;
+    std::string text;
+    int target_task_id = 0;
+    std::string cwd;
+};
+bool ComposerStashHasContent();
+ComposerStashSnapshot ComposerStashPeek();
+void ComposerStashDiscard();
+
+// @ 文件提及菜单的数据源:应用层扫 cwd/Git 根(排除 .git/构建产物)给
+// 相对路径清单。缓存归应用层(索引可能上千条,不许每键一扫);终端层每
+// 键拿清单做模糊匹配(纯函数 FuzzyMatchMentions,便宜)。传空清除。
+using FileMentionProvider = std::function<std::vector<FileMentionEntry>()>;
+void SetFileMentionProvider(FileMentionProvider provider);
+
+// 外部编辑器($VISUAL/$EDITOR)读回的草稿转换:CRLF 归一成 '\n'、剥编辑器
+// 补的一个行尾换行。纯函数,测试钉着。
+std::string NormalizeEditorDraft(std::string bytes);
 
 // 0.17.0:常驻状态行(composer 输入框下横线之下那一行)要展示的会话数据。
 // main.cpp 在每轮给主提示符之前更新一次(/model 切换、context 百分比刷新

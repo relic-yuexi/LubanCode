@@ -82,6 +82,8 @@ add_executable(lubancode_tests
   test_terminal_caps.cpp
   # 第二批:Ctrl+R 提问历史反向搜索(索引/过滤/状态机/渲染行)。
   test_history_search.cpp
+  # 第三批:@ 提及菜单纯逻辑 + 编辑器整枚删 + 编辑器草稿归一。
+  test_mention_menu.cpp
   test_agent_inbox.cpp
   test_markdown.cpp
   test_latex_math.cpp

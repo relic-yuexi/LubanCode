@@ -242,6 +242,11 @@ public:
     // 塞进一只只会尾删的临时 buffer。历史浏览位也复位(取回的不是历史)。
     void LoadText(const std::u32string& joined);
 
+    // 0.30.x 外部编辑器读回/提及插入:同 LoadText,但光标按拼接串里的
+    // 码点下标落位(编辑器回来光标留在原处;@ 词元替换后光标落词元尾)。
+    // cursor 越界按末尾算。
+    void LoadTextWithCursor(const std::u32string& joined, std::size_t cursor);
+
     // 方向键直选菜单(单行 / 开头按 ↓ 进入)开关,默认开。忙碌排队输入框
     // (TurnInputListener 的本地编辑器)关掉:流式期间 Up/Down 分给代理面
     // 板、排队条目编辑与历史浏览,方向键直选不硬塞进来(忙碌 Tab 单规格五);

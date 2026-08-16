@@ -1079,4 +1079,11 @@ bool IsProcessAlive(unsigned long pid) {
 
 unsigned long CurrentProcessId() { return static_cast<unsigned long>(::getpid()); }
 
+int RunInteractiveCommand(const std::string& command_utf8) {
+    if (command_utf8.empty()) {
+        return -1;
+    }
+    return ::system(command_utf8.c_str());
+}
+
 }  // namespace lubancode::platform

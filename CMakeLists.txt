@@ -367,6 +367,7 @@ add_library(lubancode_core STATIC
   src/cli/keymap.cpp
   src/cli/terminal_caps.cpp
   src/cli/history_search.cpp
+  src/cli/mention_menu.cpp
   src/cli/markdown.cpp
   src/cli/latex_math.cpp
   src/cli/diff.cpp

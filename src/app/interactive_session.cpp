@@ -72,6 +72,7 @@
 #include "cli/live_transcript.hpp"
 #include "cli/worktree.hpp"
 #include "cli/markdown.hpp"
+#include "cli/mention_menu.hpp"
 #include "cli/provider_wizard.hpp"
 #include "cli/record_command.hpp"
 #include "cli/setup_wizard.hpp"
@@ -286,6 +287,11 @@ private:
     lubancode::cli::PromptHistoryDataset CollectPromptHistory();
     // /copy [plain](0.30.x 第二批):复制上一段完整答话到剪贴板。
     void HandleCopyCommand(const std::string& raw_args);
+    // @ 提及(0.30.x 第三批):文件索引(按根缓存)与提交前校验/账单。
+    std::vector<lubancode::cli::FileMentionEntry> FileMentionIndexSnapshot();
+    // 返回:第一段是错误(非空 = 拦下这一轮不发送),第二段是给模型的
+    // 提及账(空 = 没有)。
+    std::pair<std::string, std::string> BuildMentionLedger(const std::string& content);
     void EnsureMemoryTool();
     void PrintMemoryUsage() const;
     void HandleMemoryCommand(const std::string& raw_args);
@@ -367,6 +373,9 @@ private:
 
     // ---- UI 状态 ----
     std::vector<lubancode::cli::TranscriptItem> transcript;
+    // @ 提及文件索引(第三批):按根缓存,根变了重扫(cwd/worktree 切换)。
+    std::vector<lubancode::cli::FileMentionEntry> mention_index_;
+    std::string mention_index_root_;
     std::uint64_t agent_panel_revision_ = 0;  // SetAgentPanelProvider 的缓存
     std::vector<lubancode::tools::AgentTaskSummary> agent_panel_tasks_;  // 轻量全量(不截 8 只)
     // Ctrl+O 全局开关,RunTurn 里新条目也按它画。atomic<bool>:回合执行期间
@@ -688,6 +697,10 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
     // 打开搜索框时取一次(范围轮换在终端层本地过滤,不反复读盘)。
     lubancode::cli::SetPromptHistoryProvider([this]() { return CollectPromptHistory(); });
 
+    // @ 文件提及菜单的数据源(0.30.x 第三批):按 Git 根(没有就 cwd)扫
+    // 一份相对路径清单,根变了才重扫;排除 .git/构建产物与隐藏目录。
+    lubancode::cli::SetFileMentionProvider([this]() { return FileMentionIndexSnapshot(); });
+
     // -----------------------------------------------------------------------
     // UI-D(0.16.0):Ctrl+O 紧凑/详细 + 焦点导航 + Ctrl+E 聚焦查看。
     // 按键语义翻译在 LineEditorCore(composer 空不空、键是什么),转发管道
@@ -854,6 +867,7 @@ InteractiveSession::~InteractiveSession() {
     lubancode::cli::SetAgentPanelActions(lubancode::cli::AgentPanelActions{});
     lubancode::cli::SetIdleWakeHook(nullptr);
     lubancode::cli::SetPromptHistoryProvider(nullptr);
+    lubancode::cli::SetFileMentionProvider(nullptr);
 }
 
 // 后台子代理面板:轻量全量列表(0.28.x 起不截 8 只,详情另走 BuildAgentTaskDetail;
@@ -1620,6 +1634,118 @@ void InteractiveSession::HandleCopyCommand(const std::string& raw_args) {
     }
 }
 
+// @ 提及的文件索引:Git 根优先(提"项目文件"按项目走),没有根就 cwd。
+// 深度限 6、条目限 3000,排除 .git/构建产物/依赖目录/点目录。相对路径
+// 一律正斜杠。根没变就返回缓存(cwd/worktree 切换由 SyncWorktreeDirectory
+// 清缓存)。
+std::vector<lubancode::cli::FileMentionEntry> InteractiveSession::FileMentionIndexSnapshot() {
+    const std::filesystem::path cwd = std::filesystem::current_path();
+    const auto root = lubancode::cli::FindRepositoryRoot(cwd);
+    const std::filesystem::path base = root.value_or(cwd);
+    const std::string root_key = lubancode::tools::PathToUtf8(base);
+    if (root_key == mention_index_root_ && !mention_index_.empty()) {
+        return mention_index_;
+    }
+    mention_index_root_ = root_key;
+    mention_index_.clear();
+    static const std::set<std::string> kExcluded = {
+        ".git", "build", "out", "dist", "node_modules", "target", "_deps", "_build",
+        ".lubancode", ".cache", "__pycache__", ".venv", "venv", "cmake-build-debug"};
+    std::error_code ec;
+    std::filesystem::recursive_directory_iterator it(base, ec), end;
+    while (it != end && mention_index_.size() < 3000) {
+        const std::filesystem::path current = it->path();
+        const std::string name = current.filename().string();
+        if (it->is_symlink(ec)) {
+            it.disable_recursion_pending();
+            ++it;
+            continue;  // 符号链接不进清单也不下钻
+        }
+        const bool is_dir = it->is_directory(ec);
+        if (is_dir && (kExcluded.contains(name) || (!name.empty() && name.front() == '.'))) {
+            it.disable_recursion_pending();
+            ++it;
+            continue;
+        }
+        if (it.depth() > 6) {
+            it.disable_recursion_pending();
+            ++it;
+            continue;
+        }
+        if (current != base) {
+            std::string rel = lubancode::tools::PathToUtf8(current.lexically_relative(base));
+            for (char& c : rel) {
+                if (c == '\\') {
+                    c = '/';
+                }
+            }
+            mention_index_.push_back(lubancode::cli::FileMentionEntry{rel, is_dir});
+        }
+        ++it;
+    }
+    // 目录排前、路径短排前——@src/cli 选目录一击即中。
+    std::sort(mention_index_.begin(), mention_index_.end(),
+              [](const auto& a, const auto& b) {
+                  if (a.is_dir != b.is_dir) {
+                      return a.is_dir;
+                  }
+                  return a.relative_path < b.relative_path;
+              });
+    return mention_index_;
+}
+
+// 提交前提及校验(规格第二批第 2 条验收):目标消失或跑出工作区要明报错,
+// 这轮不发。活着的提及附一份"相对 → 绝对"账给模型(turn context,不进
+// 永久 history),不叫模型猜裸路径。图片路径不进账——它们走
+// PrepareImageInput 的视觉附件路。
+std::pair<std::string, std::string> InteractiveSession::BuildMentionLedger(const std::string& content) {
+    const std::vector<std::string> tokens = lubancode::cli::ExtractTextMentions(content);
+    if (tokens.empty()) {
+        return {};
+    }
+    const std::filesystem::path cwd = std::filesystem::current_path();
+    const auto root = lubancode::cli::FindRepositoryRoot(cwd);
+    const std::filesystem::path base = root.value_or(cwd);
+    const std::string base_key = lubancode::agent::NormalizePathForCompare(lubancode::tools::PathToUtf8(base));
+    std::string ledger;
+    for (const std::string& token : tokens) {
+        if (lubancode::cli::MediaTypeForPath(token).has_value()) {
+            continue;  // 图片:视觉附件路自己管
+        }
+        // 相对根解析;根内没有再按 cwd 相对试一次(临时文件那类提及)。
+        std::filesystem::path resolved;
+        bool found = false;
+        for (const std::filesystem::path& candidate : {base / lubancode::tools::Utf8ToPath(token),
+                                                       cwd / lubancode::tools::Utf8ToPath(token)}) {
+            std::error_code ec;
+            if (std::filesystem::exists(candidate, ec)) {
+                resolved = candidate;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return {trf("mention.missing", token), {}};
+        }
+        // 项目根校验:解析后的绝对路径必须仍在根内(或等于根),不许 @..
+        // 越狱到园子外。
+        std::error_code ec;
+        const std::filesystem::path canon = std::filesystem::weakly_canonical(resolved, ec);
+        const std::string canon_key =
+            lubancode::agent::NormalizePathForCompare(lubancode::tools::PathToUtf8(canon));
+        if (!canon_key.empty() && canon_key.rfind(base_key + "/", 0) != 0 && canon_key != base_key) {
+            return {trf("mention.outside_root", token), {}};
+        }
+        const bool is_dir = std::filesystem::is_directory(canon, ec);
+        ledger += "\n- " + token + " -> " + lubancode::tools::PathToUtf8(canon) +
+                  (is_dir ? "(目录)" : "(文件)");
+    }
+    if (ledger.empty()) {
+        return {};
+    }
+    return {{}, tr("mention.ledger_header") + ledger + "\n"};
+}
+
 void InteractiveSession::EnsureMemoryTool() {
     // capability gate:全局未授权时 memory_save 不注册(双保险之一,另一道
     // 在 MemorySaveTool::execute 的运行时判定)。
@@ -2023,6 +2149,9 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
 void InteractiveSession::SyncWorktreeDirectory() {
     // 切 worktree 收面板:查看态目标跟着旧房的任务走,别把消息投去旧目标。
     lubancode::cli::ResetAgentPanelSession();
+    // @ 提及索引跟着根走:根变了重扫(下一拍 FileMentionIndexSnapshot 自办)。
+    mention_index_root_.clear();
+    mention_index_.clear();
     prompt_options.cwd = CurrentDirUtf8();
     if (project_memory != nullptr) {
         if (const auto updated = project_memory->SetWorkingDirectory(std::filesystem::current_path());
@@ -2112,6 +2241,11 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                 return HandleWorktreeCommand(worktree_state, parsed.args, theme);
             }
             case lubancode::cli::SlashCommand::Clear: {
+                // stash 是"还没说出口的话",不跟 history 一锅清(规格:草稿
+                // 各自存账);清场时提醒一句它还在。
+                if (lubancode::cli::ComposerStashHasContent()) {
+                    std::cout << theme.stats << tr("stash.still_there") << theme.reset << "\n";
+                }
                 SessionCommandState session_state = MakeSessionCommandState();
                 return HandleClearCommand(session_state, config, theme, spinner_enabled);
             }
@@ -2330,7 +2464,14 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
     // 马上往下铺,聚焦画面已经不是"当前画面"了),下次 Ctrl+E 是重新
     // 聚焦,不是"返回"。
     focus_view_active = false;
-    std::string turn_suffix =
+    // @ 提及校验(0.30.x 第三批):目标消失/越出项目根,明报错拦下这轮;
+    // 活着的提及附账进 turn context(不进永久 history)。
+    const auto [mention_error, mention_ledger] = BuildMentionLedger(content);
+    if (!mention_error.empty()) {
+        std::cout << theme.error << mention_error << theme.reset << "\n";
+        return CommandFlow::Continue;
+    }
+    std::string turn_suffix = mention_ledger;
         project_memory != nullptr
             ? project_memory->BuildTurnContext(content, std::filesystem::current_path(),
                                                memory::QueryOrigin::User)
@@ -2850,6 +2991,9 @@ void InteractiveSession::Run() {
             lubancode::cli::ReadLine(theme.prompt + "> " + theme.reset, theme,
                                       /*esc_rejects=*/false, /*composer=*/true);
         if (!line.has_value()) {
+            if (lubancode::cli::ComposerStashHasContent()) {
+                std::cout << theme.stats << tr("stash.still_there") << theme.reset << "\n";
+            }
             break;  // EOF:Ctrl+Z 或管道读尽
         }
         if (line->empty()) {
@@ -2859,6 +3003,9 @@ void InteractiveSession::Run() {
         composer_target = lubancode::cli::CurrentComposerAgentTarget();
 
         if (content == "exit" || content == "quit") {
+            if (lubancode::cli::ComposerStashHasContent()) {
+                std::cout << theme.stats << tr("stash.still_there") << theme.reset << "\n";
+            }
             break;
         }
         // 定向介入(规格第七节):查看态 composer 提交的话直接进那只子代理

@@ -11,6 +11,37 @@ namespace {
 
 constexpr char32_t kPasteTokenBase = 0xF0000;
 
+// @ 提及词元的终点标点(与 cli/mention_menu.cpp 的 IsMentionBoundary 同一
+// 口径,路径里不会出现的逗号顿号闭括号这批;'.' 不算——路径自己带点)。
+bool MentionBoundaryChar(char32_t c) {
+    switch (c) {
+        case U',':
+        case U';':
+        case U':':
+        case U'!':
+        case U'?':
+        case U')':
+        case U']':
+        case U'}':
+        case U'"':
+        case U'\'':
+        case U'，':
+        case U'、':
+        case U'；':
+        case U'。':
+        case U'：':
+        case U'！':
+        case U'？':
+        case U'）':
+        case U'】':
+        case U'》':
+        case U'」':
+            return true;
+        default:
+            return false;
+    }
+}
+
 // 手写 UTF-8 -> UTF-32 解码已升为公开函数 Utf8ToUtf32(0.28.x 取回排队
 // 消息装回编辑 buffer 也要用),本体搬去下面的公开区;非法起始字节、序列
 // 被截断、续字节不是 10xxxxxx 一律跳过一个字节继续——这是给自己代码拼
@@ -374,6 +405,32 @@ void LineEditorCore::LoadText(const std::u32string& joined) {
     ResetHistoryBrowsing();
 }
 
+void LineEditorCore::LoadTextWithCursor(const std::u32string& joined, std::size_t cursor) {
+    LoadJoined(joined);
+    tab_cycle_.reset();
+    menu_selection_.reset();
+    ResetHistoryBrowsing();
+    if (cursor > joined.size()) {
+        cursor = joined.size();  // 末尾(行数-1 的行尾)已是缺省,钳界即可
+        return;
+    }
+    // 拼接串下标 -> (row, col):逐行走,越过一行要跨过它 + 换行符。
+    std::size_t row = 0;
+    std::size_t col = cursor;
+    for (; row + 1 < lines_.size(); ++row) {
+        const std::size_t step = lines_[row].size() + 1;  // 行内容 + '\n'
+        if (col < step) {
+            break;
+        }
+        col -= step;
+    }
+    if (row >= lines_.size()) {
+        row = lines_.size() - 1;
+    }
+    row_ = row;
+    col_ = (std::min)(col, lines_[row_].size());
+}
+
 void LineEditorCore::InsertChar(char32_t ch) {
     lines_[row_].insert(col_, 1, ch);
     ++col_;
@@ -467,8 +524,39 @@ void LineEditorCore::InsertNewLine() {
     ResetHistoryBrowsing();
 }
 
-void LineEditorCore::DeleteBackward() {
-    if (col_ > 0) {
+void LineEditorCore::DeleteBackward() {    if (col_ > 0) {
+        // 0.30.x @ 提及词元整枚删:光标恰在词元尾(删一个字会留下半个词
+        // 元)时整枚拿走;光标在词元中间(正改查询)仍是普通退格。词元
+        // 由前向解析定位(与 mention_menu 同一套判定:'@' 在词首、后随
+        // 非空白段;@<...> 形式闭角收口,内容允许空白)。
+        const std::u32string& line = lines_[row_];
+        for (std::size_t at = 0; at < col_; ++at) {
+            if (line[at] != U'@' || (at > 0 && line[at - 1] != U' ' && line[at - 1] != U'\t')) {
+                continue;  // 不在词首的 '@' 是正文
+            }
+            std::size_t end = at + 1;
+            if (end < line.size() && line[end] == U'<') {
+                const std::size_t close = line.find(U'>', end + 1);
+                if (close != std::u32string::npos) {
+                    end = close + 1;
+                } else {
+                    continue;  // 闭角没配上的还在编辑,不算完整词元
+                }
+            } else {
+                // 词元终点与 mention_menu 的 IsMentionBoundary 同一套口径
+                // (空白 + 逗号顿号这类路径里不会出现的标点),两边一起改。
+                while (end < line.size() && line[end] != U' ' && line[end] != U'\t' &&
+                       !MentionBoundaryChar(line[end])) {
+                    ++end;
+                }
+            }
+            if (end == col_) {
+                lines_[row_].erase(at, end - at);
+                col_ = at;
+                ResetHistoryBrowsing();
+                return;
+            }
+        }
         lines_[row_].erase(col_ - 1, 1);
         --col_;
         ResetHistoryBrowsing();
