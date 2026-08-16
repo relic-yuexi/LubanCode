@@ -26,7 +26,6 @@
     "enabled": true,
     "use": true,
     "learn": "review",
->>>>>>> worktree-agent-a94bec28ba9adcdba
     "max_index_bytes": 16384,
     "max_retrieval_bytes": 8192,
     "max_results": 3
