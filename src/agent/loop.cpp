@@ -455,6 +455,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         // 它,哪一步是哪个请求才有账可查(前缀缓存守恒单第一期)。
         std::string stream_request_id;
         std::string stream_model;
+        // wire 边界闸门(宽窄转换异常单):中转把多字节序列劈在 delta 边界
+        // 时,半截尾巴扣在闸内、下一块拼齐再放行——显示层永远只见完整合法
+        // 的 UTF-8。history 侧 assembler 攒的是原始拼接(劈半自愈),不走
+        // 闸;流收口后统一 Flush,残尾按 U+FFFD 放完。
+        platform::Utf8DeltaGate text_delta_gate;
+        platform::Utf8DeltaGate thinking_delta_gate;
 
         const auto send_result = backend_.send_stream(
             request,
@@ -468,7 +474,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
                             stream_model = e.model;
                         } else if constexpr (std::is_same_v<T, api::TextDelta>) {
                             if (callbacks.on_text_delta) {
-                                callbacks.on_text_delta(e.text);
+                                const std::string gated = text_delta_gate.Feed(e.text);
+                                if (!gated.empty()) {
+                                    callbacks.on_text_delta(gated);
+                                }
                             }
                         } else if constexpr (std::is_same_v<T, api::ThinkingDelta>) {
                             // 输出预算活账:思考字节与末段摘要(检查点证据,
@@ -487,7 +496,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
                                 budget_report.thinking_tail.erase(0, start);
                             }
                             if (callbacks.on_thinking_delta) {
-                                callbacks.on_thinking_delta(e.text);
+                                const std::string gated = thinking_delta_gate.Feed(e.text);
+                                if (!gated.empty()) {
+                                    callbacks.on_thinking_delta(gated);
+                                }
                             }
                         } else if constexpr (std::is_same_v<T, api::StreamError>) {
                             stream_error = true;
@@ -505,6 +517,21 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
                     event);
             },
             cancel);
+
+        // 流收口:闸里扣着的尾巴拼不齐就是坏字节,按 U+FFFD 放完——错误/
+        // 打断路径也要放,显示层与 history 的账对得上。
+        if (callbacks.on_text_delta) {
+            const std::string text_tail = text_delta_gate.Flush();
+            if (!text_tail.empty()) {
+                callbacks.on_text_delta(text_tail);
+            }
+        }
+        if (callbacks.on_thinking_delta) {
+            const std::string thinking_tail = thinking_delta_gate.Flush();
+            if (!thinking_tail.empty()) {
+                callbacks.on_thinking_delta(thinking_tail);
+            }
+        }
 
         if (!send_result.has_value()) {
             const api::Error& err = send_result.error();

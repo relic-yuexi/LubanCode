@@ -7,10 +7,13 @@
 #include <fstream>
 #include <map>
 
+#include "platform/paths.hpp"  // PathToUtf8:临时目录路径不走 ACP 窄口
 #include "platform/process.hpp"
 #include "ptc/stub_generator.hpp"
 
 namespace lubancode::ptc {
+
+using lubancode::platform::PathToUtf8;
 
 namespace {
 
@@ -55,7 +58,7 @@ std::string SpillRunArtifact(const PtcRunResult& run) {
     if (!out.good()) {
         return {};
     }
-    return path.string();
+    return PathToUtf8(path);
 }
 
 }  // namespace

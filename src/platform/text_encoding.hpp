@@ -13,7 +13,9 @@
 // 这里搬出来跟 SanitizeUtf8 共享同一套解码逻辑,别再造第二份。
 #pragma once
 
+#include <cstddef>
 #include <string>
+#include <string_view>
 
 namespace lubancode::platform {
 
@@ -51,5 +53,25 @@ std::string SanitizeExternalText(const std::string& text);
 // 一行诊断:字段名、字节长度、首个坏字节偏移、坏字节前后各约 6 字节的
 // 十六进制窗口。编码出事时日志只记这些——不倒源码、不倒密钥、不倒正文。
 std::string DescribeUtf8Issue(const std::string& field, const std::string& text);
+
+// 流式增量闸门(宽窄转换异常单):中转把模型流的 text/thinking delta 按
+// 自己的块边界切,多字节序列(emoji、生僻字)会被拦腰劈开——半截字节
+// 放给显示层,轻则屏上闪替换符,重则下游逐块做编码转换时踩进坏序列。
+// 这只闸门扣住"疑似被截断的尾巴",下一块拼齐再放行;彻底非法的字节
+// (不是截断、是真坏)立即按 U+FFFD 替换放行,不许无限扣——上游断流
+// 的话尾巴永远悬着。流收尾调 Flush,拼不齐的残尾就是坏字节,如实替换
+// 后放完。放行的每一段都保证是完整合法的 UTF-8。
+class Utf8DeltaGate {
+public:
+    // 本块可安全放行的完整 UTF-8 前缀(可能为空:整块都是半截序列时全扣)。
+    std::string Feed(std::string_view delta);
+    // 流收尾:闸内残尾逐字节替换 U+FFFD 后全放行,闸清空。
+    std::string Flush();
+    // 闸里还扣着多少字节(测试与诊断用)。
+    std::size_t pending_bytes() const { return pending_.size(); }
+
+private:
+    std::string pending_;
+};
 
 }  // namespace lubancode::platform

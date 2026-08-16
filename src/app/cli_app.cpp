@@ -25,6 +25,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <typeinfo>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -539,7 +540,11 @@ int RunCli(const std::vector<std::string>& args) {
             executable};
         RunInteractiveSession(session_options);
     } catch (const std::exception& e) {
-        std::cerr << tr("error.prefix") << trf("error.unexpected", e.what()) << "\n";
+        // 最后防线:到这里的是启动期/会话外层的真 fatal,退进程;交互会话
+        // 内部的回合异常已在 RunTurn 与 ProcessLine 两道兜底收口,走不到这
+        // 儿。异常类型一并打出,真机出事好定位(system_error 的 1113 文案
+        // 就是宽窄转换异常那单的原文)。
+        std::cerr << tr("error.prefix") << trf("error.unexpected", e.what()) << " (" << typeid(e).name() << ")\n";
         return 1;
     }
     return 0;

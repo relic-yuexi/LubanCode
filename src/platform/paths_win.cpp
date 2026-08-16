@@ -1,6 +1,7 @@
 // Windows 实现:环境变量 + 主目录 + 宽窄转换。转换三件套从
 // tools/process_exec.cpp 原样搬来(跨平台单搬家),GetEnvVar 从
-// config/config.cpp 原样搬来,逻辑一字未改。
+// config/config.cpp 原样搬来;宽窄转换异常单起 Utf8ToWide/WideToUtf8
+// 加了"不许抛"的合同(坏字符替换 U+FFFD,见函数注释)。
 #include "platform/paths.hpp"
 
 #include <cstdlib>
@@ -69,15 +70,22 @@ std::expected<void, std::string> ReplaceFileAtomically(const std::filesystem::pa
     return std::unexpected("原子替换文件失败，Windows 错误码 " + std::to_string(GetLastError()));
 }
 
+// 宽窄转换三件套的合同(宽窄转换异常单):任何输入都不抛、不把
+// GetLastError 的文案变成异常往上送。目标本就是 UTF-8/UTF-16,可解的都
+// 尽力解,解不动的字符替换 U+FFFD——坏一个字,不丢一整段、不掀会话。
 std::wstring Utf8ToWide(const std::string& utf8) {
     if (utf8.empty()) {
         return std::wstring();
     }
+    // CP_UTF8 + flags=0 对坏序列(劈半的/孤立的续字节)按 U+FFFD 尽力替换,
+    // 不报失败(实测 Win11;报失败要显式 MB_ERR_INVALID_CHARS)。长度探测
+    // 返回 0 属极端兜底:给空串,不抛。
     const int len = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
-    std::wstring wide(static_cast<std::size_t>(len), L'\0');
-    if (len > 0) {
-        MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), wide.data(), len);
+    if (len <= 0) {
+        return std::wstring();
     }
+    std::wstring wide(static_cast<std::size_t>(len), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), wide.data(), len);
     return wide;
 }
 
@@ -85,11 +93,55 @@ std::string WideToUtf8(const std::wstring& wide) {
     if (wide.empty()) {
         return std::string();
     }
-    const int len = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
-    std::string utf8(static_cast<std::size_t>(len), '\0');
+    // 现行 Windows 上孤立代理对也会被替换成 U+FFFD(Win11 实测);返回 0
+    // 的老机器兜一手:手动把孤立代理换成 U+FFFD 再转一遍——目标是 UTF-8,
+    // 任何 Unicode 标量都编得出来,替换之后必然成功。绝不把 1113 的文案
+    // 从这条路穿透出去。
+    const int len = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr,
+                                        nullptr);
     if (len > 0) {
-        WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), utf8.data(), len, nullptr, nullptr);
+        std::string utf8(static_cast<std::size_t>(len), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), utf8.data(), len, nullptr,
+                            nullptr);
+        return utf8;
     }
+    std::wstring sanitized;
+    sanitized.reserve(wide.size());
+    bool pending_high = false;
+    for (const wchar_t wc : wide) {
+        if (wc >= 0xD800 && wc <= 0xDBFF) {
+            if (pending_high) {
+                sanitized.push_back(0xFFFD);  // 连着两个高代理:前一个孤立
+            }
+            pending_high = true;
+            continue;
+        }
+        if (wc >= 0xDC00 && wc <= 0xDFFF) {
+            if (!pending_high) {
+                sanitized.push_back(0xFFFD);  // 没有高代理领着的低代理
+                continue;
+            }
+            sanitized.push_back(wc);  // 成对代理:原样保留,转换时自然拼回
+            pending_high = false;
+            continue;
+        }
+        if (pending_high) {
+            sanitized.push_back(0xFFFD);  // 高代理后面跟的不是低代理
+            pending_high = false;
+        }
+        sanitized.push_back(wc);
+    }
+    if (pending_high) {
+        sanitized.push_back(0xFFFD);  // 收尾还挂着孤立高代理
+    }
+    const int retry = WideCharToMultiByte(CP_UTF8, 0, sanitized.data(), static_cast<int>(sanitized.size()), nullptr, 0,
+                                          nullptr, nullptr);
+    if (retry <= 0) {
+        return std::string();  // 理论上到不了:不再抛,也不再猜
+    }
+    std::string utf8(static_cast<std::size_t>(retry), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, sanitized.data(), static_cast<int>(sanitized.size()), utf8.data(), retry, nullptr,
+                        nullptr);
     return utf8;
 }
 

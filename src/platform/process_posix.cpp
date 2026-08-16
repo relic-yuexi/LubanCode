@@ -228,6 +228,8 @@ std::string BuildBackgroundLogPath() {
     const unsigned long long seq = counter.fetch_add(1);
     const std::filesystem::path dir = std::filesystem::temp_directory_path();
     const std::string filename = "lubancode_bg_" + std::to_string(ms) + "_" + std::to_string(seq) + ".log";
+    // POSIX 例外:path 的窄口就是本机字节串(UTF-8),.string() 在这里既
+    // 正确又必要,不换成 PathToUtf8(那是 Windows ACP 窄口的保险)。
     return (dir / filename).string();
 }
 

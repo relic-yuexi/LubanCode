@@ -2033,7 +2033,7 @@ std::vector<lubancode::cli::FileMentionEntry> InteractiveSession::FileMentionInd
     std::filesystem::recursive_directory_iterator it(base, ec), end;
     while (it != end && mention_index_.size() < 3000) {
         const std::filesystem::path current = it->path();
-        const std::string name = current.filename().string();
+        const std::string name = lubancode::tools::PathToUtf8(current.filename());
         if (it->is_symlink(ec)) {
             it.disable_recursion_pending();
             ++it;
@@ -2128,7 +2128,7 @@ std::pair<std::string, std::string> InteractiveSession::BuildMentionLedger(const
 std::string InteractiveSession::BuildTerminalTitleText(const std::string& state_word) const {
     std::string project;
     if (const auto root = lubancode::cli::FindRepositoryRoot(std::filesystem::current_path())) {
-        project = root->filename().string();
+        project = lubancode::tools::PathToUtf8(root->filename());
     }
     if (project.empty()) {
         project = "lubancode";
@@ -2678,12 +2678,33 @@ void InteractiveSession::SyncWorktreeDirectory() {
 // 触发了 /exit,外层循环该退出了。
 CommandFlow InteractiveSession::ProcessLine(const std::string& content) {
     const lubancode::cli::ParsedSlashCommand parsed = lubancode::cli::ParseSlashCommand(content);
-    if (parsed.command != lubancode::cli::SlashCommand::NotSlash &&
-        parsed.command != lubancode::cli::SlashCommand::Image) {
-        return DispatchSlashCommand(parsed);
+    // 会话级兜底(宽窄转换异常单):slash 命令、普通回合、回合收尾的起名/
+    // 记忆抽取,任何 std::exception 都不再穿透顶层把整场掀了——错误上屏、
+    // history 里已有的落盘、循环继续。这不是"每层包一遍":回合执行的最内
+    // 环已有 RunTurn 那道收口,这里是会话边界唯一的一道;再往外只剩启动
+    // 期(cli_app 顶层 catch)才许退进程。
+    try {
+        if (parsed.command != lubancode::cli::SlashCommand::NotSlash &&
+            parsed.command != lubancode::cli::SlashCommand::Image) {
+            return DispatchSlashCommand(parsed);
+        }
+        // 普通正文(含 peer 来信组包后的文字):自动压缩检查 + 发一轮。
+        return RunUserTurn(content);
+    } catch (const std::exception& e) {
+        {
+            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+            std::cerr << "\n"
+                      << theme.error << tr("error.prefix") << trf("error.unexpected", e.what()) << theme.reset
+                      << "\n";
+            std::cerr.flush();
+        }
+        try {
+            PersistNewMessages();  // 已入 history 的部分照常落盘,/resume 接得回来
+        } catch (...) {
+            // 落盘自己都失败了:报不出更多信息,会话仍续命
+        }
+        return CommandFlow::Continue;
     }
-    // 普通正文(含 peer 来信组包后的文字):自动压缩检查 + 发一轮。
-    return RunUserTurn(content);
 }
 
 // slash 分派:顶层 switch 只做路由,肥 case 全在各领域 handler
@@ -3607,9 +3628,11 @@ void InteractiveSession::EmitSessionHook(lubancode::hooks::HookEvent event, nloh
         lubancode::hooks::HookContext ctx = dispatcher->context();
         if (session_store.active()) {
             ctx.transcript_path = session_store.file_path();
-            std::filesystem::path file(
-                reinterpret_cast<const char8_t*>(session_store.file_path().c_str()));
-            ctx.session_id = file.stem().string();
+            // 会话存档名就是会话 id(MakeSessionId:时间戳 + 首句 slug,slug
+            // 原样保留多字节字符)——GBK 机器上 .string() 遇 emoji 就是
+            // 1113 异常,一律走 u8 通道。
+            ctx.session_id = lubancode::tools::PathToUtf8(
+                lubancode::tools::Utf8ToPath(session_store.file_path()).stem());
         }
         lubancode::app::UpdateHookRuntimeContext(ctx);
     }

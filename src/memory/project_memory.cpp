@@ -1543,7 +1543,7 @@ std::expected<void, std::string> ProcessForget(const nlohmann::json& job, const 
         std::error_code ec;
         fs::create_directories(memory_dir / "archive", ec);
         if (ec) return std::unexpected("创建 archive 失败: " + ec.message());
-        fs::path destination = memory_dir / "archive" / Utf8Path(fs::path(entry.public_entry.file).filename().string());
+        fs::path destination = memory_dir / "archive" / Utf8Path(entry.public_entry.file).filename();
         if (fs::exists(destination, ec)) {
             destination += "." + JobStamp();
         }

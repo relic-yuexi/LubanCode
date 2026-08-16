@@ -10,6 +10,8 @@
 #include <nlohmann/json.hpp>
 
 #include "config/config.hpp"
+
+#include "platform/paths.hpp"  // PathToUtf8:目录名窄口不走 ACP
 #include "config/provider_catalog.hpp"
 
 namespace lubancode::config {
@@ -219,7 +221,8 @@ std::optional<std::string> ModelCatalogPath() {
     if (!dir.has_value()) {
         return std::nullopt;
     }
-    return (std::filesystem::path(*dir) / "models.json").string();
+    // dir 已是 UTF-8 字符串,纯 ASCII 文件名直接拼接,不绕 path 窄口(ACP)。
+    return *dir + "/models.json";
 }
 
 ModelCatalog ParseModelCatalogJson(const std::string& json_text, const std::string& file_path_for_error) {

@@ -14,9 +14,28 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace lubancode::platform {
+
+// UTF-8 字符串 <-> std::filesystem::path 的正统通道(宽窄转换异常单)。
+// Windows 上 path 的窄口走系统 ANSI 代码页(国内机器是 GBK):路径带
+// emoji/生僻字时 path::string() 会抛 system_error,what() 正是
+// "No mapping for the Unicode character exists in the target multi-byte
+// code page."(ERROR_NO_UNICODE_TRANSLATION,1113)——真机上掐死过整场
+// 会话;窄串构造 path 也会按 GBK 误解 UTF-8 字节。全仓凡 path 要落
+// UTF-8 文本/日志/请求的,一律走 PathToUtf8;确需 ACP 的 Win32 边界,
+// 注释写明再碰 .string()。
+inline std::filesystem::path Utf8ToPath(const std::string& utf8) {
+    const std::u8string_view view(reinterpret_cast<const char8_t*>(utf8.data()), utf8.size());
+    return std::filesystem::path(view);
+}
+
+inline std::string PathToUtf8(const std::filesystem::path& path) {
+    const std::u8string u8 = path.u8string();
+    return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+}
 
 // 读一个环境变量;没设置或者是空串都算"没有"。Windows 走 _dupenv_s(MSVC
 // 下 std::getenv 会吃 C4996 告警),其余平台走 std::getenv。

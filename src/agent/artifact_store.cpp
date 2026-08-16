@@ -10,6 +10,7 @@
 #include "agent/context_events.hpp"  // Fingerprint64:块局部指纹
 #include "agent/session_store.hpp"   // NowTimestamp
 #include "hooks/hash.hpp"            // Sha256Hex:真本的内容寻址
+#include "platform/paths.hpp"        // Utf8ToPath:仓路径不走 ACP 窄口
 #include "platform/text_encoding.hpp"
 
 namespace lubancode::agent {
@@ -393,8 +394,11 @@ std::string MimeFor(ArtifactContentKind kind) {
 }
 
 // 原子写:同目录 tmp 文件写完 flush/close 再 rename。任一步失败 false。
-bool AtomicWriteFile(const std::string& path, const std::string& content) {
-    const std::string tmp = path + ".tmp";
+// 路径一律收 std::filesystem::path(调用方经 platform::Utf8ToPath 从 UTF-8
+// 建好)——窄串口走 ACP,GBK 机器上仓路径带 emoji/生僻字会直接抛 1113。
+bool AtomicWriteFile(const std::filesystem::path& path, const std::string& content) {
+    std::filesystem::path tmp = path;
+    tmp += ".tmp";  // 纯 ASCII 后缀,窄口拼接不涉代码页
     {
         std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
         if (!file.is_open()) {
@@ -404,7 +408,7 @@ bool AtomicWriteFile(const std::string& path, const std::string& content) {
         file.flush();
         if (!file.good()) {
             file.close();
-            std::remove(tmp.c_str());
+            std::filesystem::remove(tmp);
             return false;
         }
     }
@@ -414,13 +418,13 @@ bool AtomicWriteFile(const std::string& path, const std::string& content) {
     std::error_code ec;
     std::filesystem::rename(tmp, path, ec);
     if (ec) {
-        std::remove(tmp.c_str());
+        std::filesystem::remove(tmp, ignored);
         return false;
     }
     return true;
 }
 
-bool AppendLineFlushed(const std::string& path, const std::string& line) {
+bool AppendLineFlushed(const std::filesystem::path& path, const std::string& line) {
     std::ofstream file(path, std::ios::binary | std::ios::app);
     if (!file.is_open()) {
         return false;
@@ -430,7 +434,7 @@ bool AppendLineFlushed(const std::string& path, const std::string& line) {
     return file.good();
 }
 
-std::optional<std::string> ReadFileBytes(const std::string& path) {
+std::optional<std::string> ReadFileBytes(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
         return std::nullopt;
@@ -447,7 +451,7 @@ bool ContextArtifactStore::Open(std::string root_dir, std::string session_id) {
     refs_.clear();
     next_seq_ = 1;
     std::error_code ec;
-    const std::filesystem::path root(root_dir);
+    const std::filesystem::path root = lubancode::platform::Utf8ToPath(root_dir);
     std::filesystem::create_directories(root / "blobs", ec);
     if (ec) {
         return false;
@@ -457,8 +461,7 @@ bool ContextArtifactStore::Open(std::string root_dir, std::string session_id) {
         return false;
     }
     // 读回已有索引(append-only,编号接着走)。
-    const std::string index_path = (root / "index.jsonl").string();
-    if (const auto bytes = ReadFileBytes(index_path); bytes.has_value()) {
+    if (const auto bytes = ReadFileBytes(root / "index.jsonl"); bytes.has_value()) {
         std::istringstream stream(*bytes);
         std::string line;
         while (std::getline(stream, line)) {
@@ -534,16 +537,17 @@ std::optional<ArtifactRef> ContextArtifactStore::Offload(const std::string& tool
     ref.blob_path = "blobs/" + sha + ".txt";
     ref.chunk_index_path = "chunks/" + sha + ".json";
 
-    const std::filesystem::path root(root_);
+    const std::filesystem::path root = lubancode::platform::Utf8ToPath(root_);
     // 次序钉死:blob -> chunks -> index。任一步失败给 nullopt,不追加索引,
     // 编号不推进(下一枚接着用同一个号——刚失败那枚没有留下登记行)。
-    const std::string blob_path = (root / ref.blob_path).string();
+    const std::filesystem::path blob_path = root / ref.blob_path;
     if (!std::filesystem::exists(blob_path)) {
         if (!AtomicWriteFile(blob_path, content)) {
             return std::nullopt;
         }
     }
-    if (!std::filesystem::exists((root / ref.chunk_index_path).string())) {
+    const std::filesystem::path chunk_index_path = root / ref.chunk_index_path;
+    if (!std::filesystem::exists(chunk_index_path)) {
         nlohmann::json chunk_index;
         chunk_index["sha256"] = sha;
         chunk_index["kind"] = [kind]() {
@@ -566,11 +570,11 @@ std::optional<ArtifactRef> ContextArtifactStore::Offload(const std::string& tool
             chunk_array.push_back(chunk.ToJson());
         }
         chunk_index["chunks"] = std::move(chunk_array);
-        if (!AtomicWriteFile((root / ref.chunk_index_path).string(), chunk_index.dump())) {
+        if (!AtomicWriteFile(chunk_index_path, chunk_index.dump())) {
             return std::nullopt;
         }
     }
-    if (!AppendLineFlushed((root / "index.jsonl").string(), ref.ToJson().dump())) {
+    if (!AppendLineFlushed(root / "index.jsonl", ref.ToJson().dump())) {
         return std::nullopt;  // blob 在了但没登记:不可追回,调用方保留内存全文
     }
     refs_.push_back(ref);
@@ -589,7 +593,7 @@ const ArtifactRef* ContextArtifactStore::Find(const std::string& artifact_id) co
 
 std::optional<std::string> ContextArtifactStore::ReadBlobVerified(const ArtifactRef& ref,
                                                                   std::string* error) const {
-    const auto bytes = ReadFileBytes((std::filesystem::path(root_) / ref.blob_path).string());
+    const auto bytes = ReadFileBytes(lubancode::platform::Utf8ToPath(root_) / ref.blob_path);
     if (!bytes.has_value()) {
         if (error != nullptr) {
             *error = "artifact " + ref.artifact_id + " 的 blob 读不到: " + ref.blob_path;
@@ -606,7 +610,7 @@ std::optional<std::string> ContextArtifactStore::ReadBlobVerified(const Artifact
 }
 
 std::vector<ArtifactChunk> ContextArtifactStore::ChunksFor(const ArtifactRef& ref) const {
-    const auto bytes = ReadFileBytes((std::filesystem::path(root_) / ref.chunk_index_path).string());
+    const auto bytes = ReadFileBytes(lubancode::platform::Utf8ToPath(root_) / ref.chunk_index_path);
     if (!bytes.has_value()) {
         return {};
     }

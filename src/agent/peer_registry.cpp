@@ -150,7 +150,7 @@ std::vector<PeerCard> PeerRegistry::ListPeers(long long now_unix,
         if (ec || !entry.is_regular_file(ec)) {
             continue;
         }
-        const std::string filename = entry.path().filename().string();
+        const std::string filename = lubancode::platform::PathToUtf8(entry.path().filename());
         if (filename.size() < 6 || filename.compare(filename.size() - 5, 5, ".json") != 0 ||
             (filename.size() >= 9 && filename.compare(filename.size() - 9, 9, ".json.tmp") == 0)) {
             continue;  // 不是名片(可能是写到一半的临时文件)

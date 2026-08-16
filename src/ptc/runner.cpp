@@ -18,11 +18,14 @@
 #include <random>
 #include <sstream>
 
+#include "platform/paths.hpp"  // PathToUtf8:临时目录路径不走 ACP 窄口
 #include "platform/process.hpp"
 #include "ptc/bootstrap_py.hpp"
 #include "ptc/protocol.hpp"
 
 namespace lubancode::ptc {
+
+using lubancode::platform::PathToUtf8;
 
 namespace {
 
@@ -192,7 +195,7 @@ PtcRunResult PtcRunner::Run(const std::string& script, const std::string& stub_m
         !WriteFile(dir / "luban_tools.py", stub_module_python) ||
         !WriteFile(dir / "ptc_script.py", script)) {
         result.failure = PtcFailure::Spawn;
-        result.error = "写 PTC 临时文件失败: " + dir.string();
+        result.error = "写 PTC 临时文件失败: " + PathToUtf8(dir);
         cleanup();
         return result;
     }
@@ -252,7 +255,7 @@ PtcRunResult PtcRunner::Run(const std::string& script, const std::string& stub_m
         state.bytes_in += chunk.size();
     };
 
-    const std::string main_path = (dir / "ptc_main.py").string();
+    const std::string main_path = PathToUtf8(dir / "ptc_main.py");
     const auto spawn = child.Start(options.python_cmd, {"-I", "-S", "-B", main_path}, {}, on_stdout, on_stderr,
                                    constraints);
     if (!spawn.success) {
