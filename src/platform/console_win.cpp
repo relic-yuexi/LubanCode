@@ -16,6 +16,8 @@
 //   SetupConsoleUtf8          <- wmain 开头的 SetConsoleOutputCP/SetConsoleCP
 #include "platform/console.hpp"
 
+#include "platform/paths.hpp"  // Utf8ToWide/WideToUtf8:输入侧宽窄转换共用 platform 那份(不许抛)
+
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -28,6 +30,10 @@
 #include <vector>
 
 namespace lubancode::platform {
+
+// 输入侧(剪贴板/按键)的宽窄转换直接用 paths_win 那两份(Utf8ToWide/
+// WideToUtf8,经上面的 paths.hpp 引进来):同一份"坏字符替换 U+FFFD、
+// 绝不抛"的合同,不在这只文件再养一份私有实现。
 
 namespace {
 
@@ -70,28 +76,6 @@ std::optional<wchar_t> ReadKeyChar(DWORD timeout_ms, std::vector<INPUT_RECORD>& 
             return record.Event.KeyEvent.uChar.UnicodeChar;
         }
     }
-}
-
-std::string WideToUtf8(const std::wstring& wide) {
-    const int size = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0,
-                                         nullptr, nullptr);
-    std::string out;
-    if (size > 0) {
-        out.resize(static_cast<std::size_t>(size));
-        WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), out.data(), size, nullptr,
-                            nullptr);
-    }
-    return out;
-}
-
-std::wstring Utf8ToWide(std::string_view text) {
-    const int size = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
-    std::wstring out;
-    if (size > 0) {
-        out.resize(static_cast<std::size_t>(size));
-        MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), size);
-    }
-    return out;
 }
 
 std::wstring NormalizeNewlines(std::wstring_view text) {
