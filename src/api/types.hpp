@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -13,6 +14,13 @@
 #include <nlohmann/json.hpp>
 
 namespace lubancode::api {
+
+// anthropic wire 必填 max_tokens 时的公开兜底:模型/provider/配置三级都
+// 没声明输出上限才用它(见 Request::max_tokens 注释)。与
+// config::kDefaultRequiredMaxOutputTokens、agent::kUnsetOutputReserveEstimateTokens
+// 同值同注释规矩——改一处须三处一起改,且这不是"把 4096 换一枚更大的
+// 魔数":它是兜底声明,配置/目录声明永远压过它。
+inline constexpr int kRequiredMaxOutputTokensFallback = 8192;
 
 // ---------------------------------------------------------------------------
 // 内容块
@@ -84,7 +92,12 @@ struct Request {
     std::string model;
     std::string system;
     std::vector<Message> messages;
-    int max_tokens = 4096;
+    // 输出上限。nullopt = unset:协议允许省略的 wire(chat/responses)整个
+    // 不带这个字段,交服务端/模型默认(子代理同级单根因一:旧版三处写死
+    // 4096,reasoning 模型一思考就撞墙)。anthropic 协议必填,client 落
+    // 公开兜底 kRequiredMaxOutputTokensFallback,不藏魔数;想改上限走
+    // 配置 agent.max_output_tokens / 模型目录声明,不走改源码。
+    std::optional<int> max_tokens;
     std::vector<ToolDefinition> tools;  // M1 先留空位,不填
     // M6.6:推理强度,none/low/medium/high,空串 = 不发这个参数(维持原有
     // 行为)。responses wire 翻成 "reasoning":{"effort":...};anthropic wire

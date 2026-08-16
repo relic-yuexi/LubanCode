@@ -61,7 +61,7 @@ TEST_CASE("budget_tokens 永远小于 max_tokens(Anthropic 的硬约束),max_tok
     request.max_tokens = 512;  // 默认 high 档位的 16384 远超这个 max_tokens
     const auto body = BuildRequestJson(request);
     const int budget = body.at("thinking").at("budget_tokens").get<int>();
-    CHECK(budget < request.max_tokens);
+    CHECK(budget < *request.max_tokens);
     CHECK(budget >= 1);
 }
 

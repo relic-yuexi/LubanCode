@@ -34,7 +34,7 @@ TEST_CASE("BuildEffortProbeRequest: 档位进请求,空串留空,max_tokens 极�
     const api::Request probe = app::BuildEffortProbeRequest("qwen-test", "xhigh");
     CHECK(probe.model == "qwen-test");
     CHECK(probe.reasoning_effort == "xhigh");
-    CHECK(probe.max_tokens <= 128);  // 极小探针,不烧预算
+    CHECK(*probe.max_tokens <= 128);  // 极小探针,不烧预算
     REQUIRE(probe.messages.size() == 1);
 
     const api::Request unset = app::BuildEffortProbeRequest("qwen-test", "");

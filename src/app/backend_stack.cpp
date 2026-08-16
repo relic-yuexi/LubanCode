@@ -29,6 +29,8 @@ std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::C
         lubancode::api::chat::ChatRequestOptions chat_options;
         chat_options.stream_usage = config.stream_usage;
         chat_options.reasoning_param = config.think_param;  // 空 = 默认 reasoning_effort
+        chat_options.reasoning_delta_field = config.reasoning_delta_field;  // 空 = 两别名自动兼容
+        chat_options.reasoning_replay_field = config.reasoning_replay_field;  // 空 = reasoning_content
         chat_options.reasoning_replay =
             config.reasoning_replay == "tool_episode"
                 ? lubancode::api::chat::ReasoningReplayPolicy::ToolEpisode

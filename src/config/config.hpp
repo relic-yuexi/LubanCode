@@ -89,6 +89,30 @@ constexpr std::size_t kDefaultContextWindowTokens = 256000;
 // 显式配一个正整数就是——闸只在"确实想要"的时候存在。
 constexpr int kDefaultMaxStepsPerTurn = 0;
 
+// anthropic 等必填 max_tokens 的 wire 在三级声明(配置 agent 段 / provider
+// 声明 / 模型目录)都缺席时的公开兜底(规格"子代理与 MainAgent 同级"根因
+// 一)。与 api::kRequiredMaxOutputTokensFallback、agent::kUnsetOutputReserve-
+// EstimateTokens 同值同注释规矩,三处须一起改。这不是"把 4096 换一枚更大
+// 的魔数":它是明说的兜底,任何一级声明都压过它;想改上限走配置,不走
+// 改源码。chat/responses wire 用不到它(协议可省略,unset 就整个不发字段)。
+constexpr int kDefaultRequiredMaxOutputTokens = 8192;
+
+// max_tokens 打断在思考段时的自动续跑次数(agent.length_continuations):
+// 默认 1,经实测(本机 vLLM 0.27.1 + qwen3.8-27b)一次足以让模型收束思考
+// 交出工具调用或检查点;更多次是在替用户烧 token,显式配置才能加。0 = 关。
+constexpr int kDefaultLengthContinuations = 1;
+
+// 子代理派工治理(规格"递归派工不能再靠拿掉工具解决"):
+//   max_depth  前台派工的最大嵌套深度(main=0 层,子代理=1 层,孙代理=2
+//              层……)。默认 3:同级允许拆任务,但树不许无限长;用户可配
+//              (subagent.max_depth),配 1 = 回到"子代理不再往下派"的老
+//              行为。默认不因"子代理"身份硬锁为 1(规格原话)。
+//   max_active 全局并发槽:同时跑着的子代理任务(前台 + 后台)总数上限,
+//              不再每层各算各的。默认 8(旧版后台硬编码同值,现在公开
+//              可配:subagent.max_active)。
+constexpr int kDefaultSubagentMaxDepth = 3;
+constexpr int kDefaultSubagentMaxActive = 8;
+
 constexpr std::size_t kDefaultMemoryMaxIndexBytes = 16 * 1024;
 // 召回预算收紧(规格"召回只送命中，不送整份索引"):index.md 不再随请求
 // 注入,正文默认总预算降到 8 KiB、最多 3 条;index 字段只管 index.md 文件
@@ -155,6 +179,10 @@ struct ProviderConfig {
     std::string model;
     std::string model_reasoning_effort;  // 可选，切到该端时应用的推理档位
     std::size_t context_window_tokens = kDefaultContextWindowTokens;
+    // 输出上限的 provider 级声明(nullopt = 未声明)。目录预设从默认模型
+    // 条目镜像;手写配置可直接写。它是三级声明里的一级(优先级见
+    // agent::ResolveOutputBudget):配置文件显式值压过它,它压过模型目录。
+    std::optional<std::size_t> max_output_tokens;
     // native_web_search:该端若原生支持联网搜索(服务端自己查、把结果编排
     // 进回复文本里,客户端不用实现任何执行逻辑),开这个开关就在请求里带上
     // 声明。默认 false(不是所有兼容端都支持,乱开可能把请求搞坏)。
@@ -173,6 +201,13 @@ struct ProviderConfig {
     // (语义见 api/chat/request.hpp)。待遇同 stream_usage:目录是唯一
     // 来源,切 provider 时镜像,默认空 = never。
     std::string reasoning_replay;
+    // reasoning_delta_field / reasoning_replay_field:Chat wire 思考字段的
+    // 名字声明(语义见 api/chat/request.hpp 的 ChatRequestOptions)。空 =
+    // 自动兼容(delta 侧 reasoning_content/reasoning 两个别名都认)/
+    // 回传写 reasoning_content。待遇同 reasoning_replay:目录是唯一来源,
+    // 切 provider 时镜像。
+    std::string reasoning_delta_field;
+    std::string reasoning_replay_field;
     // ---- Effort 能力声明(本地兼容端诊断单,2026-08)----
     // 服务端到底认哪些推理档位,客户端天生不知道——只能由配置声明。四件:
     //   supported_think_levels  声明的档位表(low/medium/xhigh...);空 = 未
@@ -341,14 +376,36 @@ struct StatusPanelConfig {
     std::string separator = " · ";
 };
 
+// agent 段的运行配置(main 与子代理共用的那部分预算,规格根因一)。
+// 待遇同 subagent 段:只从配置文件来(项目级压全局),没有环境变量、
+// 没有内置默认值这两级。
+//   max_output_tokens   nullopt = unset:三级声明(本字段 > provider 声明 >
+//                       模型目录)都没写,chat/responses 请求不带字段交服务端
+//                       默认;anthropic 必填,由 client 落公开兜底
+//                       (kDefaultRequiredMaxOutputTokens)。显式正整数才是
+//                       "本场就用这个上限"。旧版三处写死 4096 的矮墙已拆。
+//   length_continuations max_tokens 打断在思考段时的自动续跑次数,默认
+//                       kDefaultLengthContinuations(1);main 与子代理同值。
+struct AgentRunConfig {
+    std::optional<int> max_output_tokens;
+    int length_continuations = kDefaultLengthContinuations;
+};
+
 // 子代理(subagent)段的运行配置。max_steps_per_turn(旧配置名
 // subagent.max_turns):nullopt = 未单独配置,运行时继承
 // config.max_steps_per_turn(默认 0 = 不限步);显式配了(含 0)就是子代理
 // 自己的预算,与主代理的分开管。待遇同 hooks:只从配置文件来
 // (项目级压全局),没有环境变量、没有内置默认值这两级——0 的语义全路
 // 一致,都是不限步(规格"现场四":子代理不再暗藏步数硬闸)。
+// max_output_tokens:nullopt = 继承 agent 段的有效值(默认同级,不暗自
+// 缩小);显式正整数是用户主动收窄/放宽,面板与请求里明写这一份。
 struct SubagentConfig {
     std::optional<int> max_steps_per_turn;
+    std::optional<int> max_output_tokens;
+    // 派工治理(规格"递归派工不能再靠拿掉工具解决"):nullopt = 用
+    // kDefaultSubagentMaxDepth / kDefaultSubagentMaxActive(默认值公开)。
+    std::optional<int> max_depth;
+    std::optional<int> max_active;
 };
 
 // PTC(Programmatic Tool Calling)的调用档(规格"三种调用档"节):
@@ -413,6 +470,10 @@ struct Config {
     bool stream_usage = false;
     // reasoning_replay:同上,从 ProviderConfig 同名字段镜像,空 = never。
     std::string reasoning_replay;
+    // 思考字段名声明(ProviderConfig 同名字段镜像,空 = 自动兼容/回传
+    // reasoning_content)。BuildBackend 把它喂给 ChatRequestOptions。
+    std::string reasoning_delta_field;
+    std::string reasoning_replay_field;
     // ---- Effort/缓存诊断的 provider 声明镜像(切换 provider 时同步)----
     // provider_think_levels/think_param/think_passthrough:见 ProviderConfig
     // 同名字段。/think、/doctor effort、状态栏"未经能力验证"提示都读这层,
@@ -423,6 +484,10 @@ struct Config {
     std::string think_param;
     bool think_passthrough = true;
     std::string metrics_url;
+    // provider 级声明的输出上限(ProviderConfig::max_output_tokens 镜像,
+    // nullopt = 未声明)。RunTime profile 解析(agent::ResolveOutputBudget)
+    // 拿它当三级里的一级;不参与四级合并——provider 是唯一来源。
+    std::optional<std::size_t> provider_max_output_tokens;
     // 当前活跃端是否显式声明过 stream_usage(写了键就算,值 false 也是)。
     // 启动诊断靠它分"声明了不支持"与"压根没声明"。
     bool stream_usage_declared = false;
@@ -466,6 +531,9 @@ struct Config {
     // mcpServers),没配就是空 map——空 map 意味着 lsp 工具不注册。
     std::map<std::string, LspServerConfig> lsp_servers;
     StatusPanelConfig status_panel;
+    // agent 段(main 与子代理共用的运行预算):只从配置文件来(项目级压
+    // 全局);未设(nullopt)时输出上限走 provider/模型目录声明或 unset。
+    AgentRunConfig agent;
     // 子代理段:只从配置文件来(项目级压全局);预算未设(nullopt)
     // 时运行时继承主代理的步数上限。
     SubagentConfig subagent;
@@ -517,6 +585,7 @@ struct ConfigSources {
     Source providers = Source::Default;
     Source status_panel = Source::Default;
     Source subagent = Source::Default;  // 子代理段:配置文件或默认
+    Source agent = Source::Default;      // agent 段:配置文件或默认
     Source tool_calling = Source::Default;  // PTC 调用档:配置文件或默认(json)
     Source ptc = Source::Default;           // PTC 段:配置文件或默认
     Source memory = Source::Default;
@@ -607,6 +676,18 @@ struct FileConfig {
     // 跳过(待遇同主预算字段的"救命阀"取舍)。
     std::optional<int> subagent_max_steps_per_turn;  // 新键
     std::optional<int> subagent_max_turns;           // 旧键(弃用)
+    // subagent 段的 max_output_tokens:正整数;缺失/null = 继承 agent 段
+    // (null 与缺失同义,规格"兼容与配置"节)。
+    std::optional<int> subagent_max_output_tokens;
+    // subagent 段的 max_depth / max_active:正整数;坏值静默跳过(救命阀)。
+    std::optional<int> subagent_max_depth;
+    std::optional<int> subagent_max_active;
+    // agent 段:{"agent": {"max_output_tokens": N, "length_continuations": N}}。
+    // max_output_tokens 正整数(缺失/null = unset,走 provider/目录/兜底);
+    // length_continuations 非负整数(0 = 关续跑)。坏值静默跳过——救命阀
+    // 字段,配置写错不拦人开工。
+    std::optional<int> agent_max_output_tokens;
+    std::optional<int> agent_length_continuations;
     // extra_body/extra_headers:顶层"单 provider 配置"写法专用(不进
     // providers 数组的场景),整段有没有出现在 JSON 里(待遇同 hooks/
     // mcpServers——只从配置文件来,没有环境变量、没有内置默认值这两级)。

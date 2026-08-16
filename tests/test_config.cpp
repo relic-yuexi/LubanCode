@@ -529,6 +529,105 @@ TEST_CASE("MergeConfig: subagent 段新旧同现异值,明报冲突取新名") {
 }
 
 // ---------------------------------------------------------------------------
+// agent 段与 subagent.max_output_tokens(规格"子代理与 MainAgent 同级"
+// 根因一):输出上限从配置三级来,null = unset(交服务端默认/provider/
+// 目录声明),subagent 段未写就继承 agent 段,不落回编译期魔数。
+// length_continuations 默认 1(实测),坏值静默跳过。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseFileConfigJson: agent 段 max_output_tokens 与 length_continuations") {
+    const auto ok = config::ParseFileConfigJson(
+        R"({"agent": {"max_output_tokens": 32768, "length_continuations": 2}})", "x.json");
+    REQUIRE(ok.has_value());
+    REQUIRE(ok->agent_max_output_tokens.has_value());
+    CHECK(*ok->agent_max_output_tokens == 32768);
+    REQUIRE(ok->agent_length_continuations.has_value());
+    CHECK(*ok->agent_length_continuations == 2);
+
+    // null 与缺失同义(= unset,不压过任何一级声明);0/负数/坏类型静默跳过。
+    const auto null_field = config::ParseFileConfigJson(R"({"agent": {"max_output_tokens": null}})", "x.json");
+    REQUIRE(null_field.has_value());
+    CHECK_FALSE(null_field->agent_max_output_tokens.has_value());
+    const auto bad = config::ParseFileConfigJson(R"({"agent": {"max_output_tokens": 0, "length_continuations": -1}})",
+                                                 "x.json");
+    REQUIRE(bad.has_value());
+    CHECK_FALSE(bad->agent_max_output_tokens.has_value());
+    CHECK_FALSE(bad->agent_length_continuations.has_value());
+    // 段不是 object:整段跳过,不算错。
+    const auto bad_segment = config::ParseFileConfigJson(R"({"agent": 3})", "x.json");
+    REQUIRE(bad_segment.has_value());
+    CHECK_FALSE(bad_segment->agent_max_output_tokens.has_value());
+}
+
+TEST_CASE("ParseFileConfigJson: subagent.max_output_tokens(null = 继承 agent 段)") {
+    const auto ok = config::ParseFileConfigJson(R"({"subagent": {"max_output_tokens": 8192}})", "x.json");
+    REQUIRE(ok.has_value());
+    REQUIRE(ok->subagent_max_output_tokens.has_value());
+    CHECK(*ok->subagent_max_output_tokens == 8192);
+    // null 与缺失同义:继承 agent 段(运行时 BuildSubagentRuntimeProfile 算)。
+    const auto null_field = config::ParseFileConfigJson(R"({"subagent": {"max_output_tokens": null}})", "x.json");
+    REQUIRE(null_field.has_value());
+    CHECK_FALSE(null_field->subagent_max_output_tokens.has_value());
+}
+
+TEST_CASE("MergeConfig: agent 段项目级压全局,都没写 = unset + 默认续跑 1 次") {
+    config::FileConfig project;
+    project.agent_max_output_tokens = 65536;
+    project.source_path = "/tmp/project/.lubancode/config.json";
+    config::FileConfig global;
+    global.agent_max_output_tokens = 16384;
+    global.agent_length_continuations = 3;
+    global.source_path = "/tmp/home/.lubancode/config.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    REQUIRE(result->config.agent.max_output_tokens.has_value());
+    CHECK(*result->config.agent.max_output_tokens == 65536);  // 项目级压全局
+    CHECK(result->sources.agent == config::Source::ProjectConfigFile);
+    CHECK(result->config.agent.length_continuations == 3);  // 全局的字段各回各级
+
+    const auto none = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global, EmptyGenericEnv());
+    REQUIRE(none.has_value());
+    REQUIRE(none->config.agent.max_output_tokens.has_value());
+    CHECK(*none->config.agent.max_output_tokens == 16384);
+    CHECK(none->sources.agent == config::Source::GlobalConfigFile);
+
+    // 全都没有:unset + 默认续跑次数,绝无 4096。
+    config::FileConfig empty;
+    empty.source_path = "/tmp/.lubancode/config.json";
+    const auto unset = config::MergeConfig(EmptyLubancodeEnv(), empty, EmptyGenericEnv());
+    REQUIRE(unset.has_value());
+    CHECK(unset->config.agent.max_output_tokens == std::nullopt);
+    CHECK(unset->config.agent.length_continuations == config::kDefaultLengthContinuations);
+    CHECK(unset->config.subagent.max_output_tokens == std::nullopt);
+    CHECK(unset->sources.agent == config::Source::Default);
+}
+
+TEST_CASE("ParseFileConfigJson/MergeConfig: subagent.max_depth 与 max_active(派工治理)") {
+    const auto ok = config::ParseFileConfigJson(R"({"subagent": {"max_depth": 2, "max_active": 4}})", "x.json");
+    REQUIRE(ok.has_value());
+    REQUIRE(ok->subagent_max_depth.has_value());
+    CHECK(*ok->subagent_max_depth == 2);
+    REQUIRE(ok->subagent_max_active.has_value());
+    CHECK(*ok->subagent_max_active == 4);
+    // 坏值(0/负数/超界)静默跳过。
+    const auto bad = config::ParseFileConfigJson(R"({"subagent": {"max_depth": 0, "max_active": -1}})", "x.json");
+    REQUIRE(bad.has_value());
+    CHECK_FALSE(bad->subagent_max_depth.has_value());
+    CHECK_FALSE(bad->subagent_max_active.has_value());
+
+    // 合并:项目级压全局,没写 = nullopt(运行时用公开默认值)。
+    config::FileConfig global;
+    global.subagent_max_depth = 5;
+    global.source_path = "/tmp/home/.lubancode/config.json";
+    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global, EmptyGenericEnv());
+    REQUIRE(merged.has_value());
+    REQUIRE(merged->config.subagent.max_depth.has_value());
+    CHECK(*merged->config.subagent.max_depth == 5);
+    CHECK(merged->config.subagent.max_active == std::nullopt);
+}
+
+// ---------------------------------------------------------------------------
 // subagent.max_steps_per_turn(旧名 subagent.max_turns;0.30.x"失败预算"单):
 // 子代理不再暗藏硬闸——预算从配置来,首选 subagent 段,未设继承主代理的
 // 预算;0 全路一致不限步。待遇同 hooks:只从配置文件来(项目级压全局),
