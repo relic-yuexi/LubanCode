@@ -840,6 +840,20 @@ int wmain(int argc, wchar_t** argv) {
         Check(FindLastRow(kPromptHead) < rule_with_tag, "流式:完整 prompt 在视口里,不在导航坞");
         Check(FindLastRow("\xe4\xbb\xbb\xe5\x8a\xa1\xe8\xaf\xb4\xe6\x98\x8e") < rule_with_tag,
               "流式:'任务说明'只在视口,不向坞下方生长");  // 任务说明
+        // 统计与当前状态行(真机回归单验收第 4 条):agent 视图与 main 同
+        // 待遇——状态短话 + 工具次数 + token + 用时,不只剩一张流水单。
+        int stats_row = -1;
+        for (int r = rule_with_tag - 1; r >= 0; --r) {
+            const std::string text = ReadRow(r);
+            if (text.find("\xe6\xac\xa1\xe5\xb7\xa5\xe5\x85\xb7\xe8\xb0\x83\xe7\x94\xa8") !=
+                    std::string::npos &&  // 次工具调用
+                text.find("tokens") != std::string::npos) {
+                stats_row = r;
+                break;
+            }
+        }
+        Check(stats_row >= 0 && stats_row < rule_with_tag,
+              "流式:查看视口带统计与当前状态行(工具次数/tokens/用时)");
     }
 
     // ---- Ctrl+C 有字先清字:敲半句,Ctrl+C 只清草稿,不打断、不退出 ----

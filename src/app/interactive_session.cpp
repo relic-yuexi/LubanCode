@@ -198,6 +198,32 @@ std::string OutcomeReasonText(lubancode::tools::TaskOutcomeReason reason) {
     return tr("agent_status.reason_unknown");
 }
 
+// 状态短话(规格"现场三"):导航坞行与查看态统计行共用的一套拼装——
+// 运行中带预算进度,终态带短因。一处写死,两处口径永远一致。
+std::string AgentStateWord(lubancode::tools::AgentTaskState state, int steps_used, int step_limit,
+                           lubancode::tools::TaskOutcomeReason outcome_reason) {
+    using S = lubancode::tools::AgentTaskState;
+    if (state == S::Running) {
+        std::string word = tr("agent_status.state_running");
+        if (step_limit > 0) {
+            word += trf("agent_status.budget_suffix", steps_used, step_limit);
+        }
+        return word;
+    }
+    switch (state) {
+        case S::Done:
+            return tr("agent_status.state_done");
+        case S::Cancelled:
+            return trf("agent_status.state_stopped_reason", tr("agent_status.reason_user_stop"));
+        case S::BudgetExhausted:
+            return trf("agent_status.state_exhausted", steps_used, step_limit);
+        case S::Failed:
+        case S::Running:
+            return trf("agent_status.state_failed_reason", OutcomeReasonText(outcome_reason));
+    }
+    return trf("agent_status.state_failed_reason", OutcomeReasonText(outcome_reason));
+}
+
 }  // namespace
 
 // 一场交互会话:整场可变状态按所有权收成成员。构造 = 原先
@@ -838,31 +864,11 @@ std::vector<lubancode::cli::AgentPanelEntry> InteractiveSession::BuildAgentPanel
         // 状态短话(规格"现场三/四"):导航坞只放短因——完成/失败 · 接口报错/
         // 耗尽 · 40/40 轮/停下 · 用户中止;完整错误进 transcript(Enter 查看)。
         // 正数预算派出即可见:运行中带"N/M 轮",不等撞墙才揭晓。
-        std::string state_word;
-        if (entry.running) {
-            state_word = tr("agent_status.state_running");
-        } else {
-            switch (task.state) {
-                case lubancode::tools::AgentTaskState::Done:
-                    state_word = tr("agent_status.state_done");
-                    break;
-                case lubancode::tools::AgentTaskState::Cancelled:
-                    state_word = trf("agent_status.state_stopped_reason", tr("agent_status.reason_user_stop"));
-                    break;
-                case lubancode::tools::AgentTaskState::BudgetExhausted:
-                    state_word = trf("agent_status.state_exhausted", task.steps_used, task.step_limit);
-                    break;
-                case lubancode::tools::AgentTaskState::Failed:
-                case lubancode::tools::AgentTaskState::Running:
-                    state_word = trf("agent_status.state_failed_reason", OutcomeReasonText(task.outcome_reason));
-                    break;
-            }
-        }
-        if (entry.running && task.step_limit > 0) {
-            state_word += trf("agent_status.budget_suffix", task.steps_used, task.step_limit);
-        }
+        const std::string state_word =
+            AgentStateWord(task.state, task.steps_used, task.step_limit, task.outcome_reason);
         entry.state = trf("agent_status.summary", state_word, task.tool_call_count,
-                          lubancode::cli::FormatTokenCount(tokens), lubancode::cli::FormatSeconds(seconds));        // 列表行只认真正短 title;旧任务没有 title 就显示"未命名子代理 #N"
+                          lubancode::cli::FormatTokenCount(tokens),
+                          lubancode::cli::FormatSeconds(seconds));  // 列表行只认真正短 title;旧任务没有 title 就显示"未命名子代理 #N"
         // ——绝不回退到 prompt 前若干字(prompt 只在详情里出现)。
         entry.title = task.title.empty() ? trf("agent_panel.untitled", task.id) : task.title;
         if (task.pending_message_count > 0) {
@@ -916,6 +922,25 @@ std::vector<std::string> InteractiveSession::BuildAgentTaskTranscriptLines(int t
     lines.push_back(std::string("  [") +
                     tr(snapshot->foreground ? "agent_panel.source_foreground" : "agent_panel.source_background") +
                     "]");
+    // 统计与当前状态行(规格"现场三"):与导航坞行同一套口径(共用
+    // AgentStateWord + agent_status.summary)——agent 视图像 main 一样有
+    // 账可查,不只剩一张 tool-use 流水单。运行中的任务用时现算,查看帧
+    // 是切换那一刻的快照。
+    {
+        const bool running = snapshot->state == lubancode::tools::AgentTaskState::Running;
+        const auto end = running ? std::chrono::steady_clock::now() : snapshot->end_time;
+        const double seconds = end > snapshot->start_time
+                                   ? std::chrono::duration<double>(end - snapshot->start_time).count()
+                                   : 0.0;
+        const std::int64_t tokens = snapshot->total_input_tokens() + snapshot->output_tokens;
+        lines.push_back("  " + theme.stats +
+                        trf("agent_status.summary",
+                            AgentStateWord(snapshot->state, snapshot->steps_used, snapshot->step_limit,
+                                           snapshot->outcome.reason),
+                            static_cast<int>(snapshot->tool_calls.size()),
+                            lubancode::cli::FormatTokenCount(tokens), lubancode::cli::FormatSeconds(seconds)) +
+                        theme.reset);
+    }
 
     const std::vector<lubancode::tools::AgentTaskEvent> events =
         agent_tool != nullptr ? agent_tool->TaskEvents(task_id)
