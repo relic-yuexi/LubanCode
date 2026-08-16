@@ -309,6 +309,33 @@ public:
     // 旧值,查询自然退回纯词法。
     void SetRetrievalHints(std::vector<std::string> hints);
 
+    // ---- show/open(规格:front matter 摘要与正文;外部编辑回来先校验再
+    // 原子替换,坏 YAML 不覆盖原件) ----
+    // 按 id 找主题(两层都找)。返回 <主题全文, 所在目录>;找不到给错误。
+    std::expected<std::pair<std::string, std::filesystem::path>, std::string> ReadTopicForShow(
+        const std::string& id) const;
+
+private:
+    std::optional<std::pair<MemoryEntry, std::filesystem::path>> FindTopic(const std::string& id) const;
+
+public:
+    // 编辑会话三段式:Begin 建同目录临时副本(原件不被编辑器碰),Commit
+    // parse+校验(不得改 id 与层)后原子替换并重建该层派生物;坏 YAML 或
+    // 字段不合法,原件分毫不动。EditTopicInEditor 是接 $VISUAL/$EDITOR 的
+    // 胶水;测试直接用 Begin/Commit。
+    struct TopicEditSession {
+        std::filesystem::path original;
+        std::filesystem::path scratch;
+        std::filesystem::path dir;
+        std::string id;
+        std::string level;
+    };
+    std::expected<TopicEditSession, std::string> BeginTopicEdit(const std::string& id) const;
+    std::expected<void, std::string> CommitTopicEdit(const TopicEditSession& session) const;
+    std::expected<void, std::string> EditTopicInEditor(const std::string& id) const;
+    // /memory open 不带 id:编辑器看一眼项目层 index.md(派生物,不校验)。
+    std::expected<void, std::string> OpenIndexInEditor() const;
+
     // ---- 显式迁移(规格"迁移":旧格式主题批迁 schema 3) ----
     // 先出计划:将改几份(schema 1/2)、跳过几份(已是 3 或 archive)、警告
     // 几份(读不动的);不动盘。

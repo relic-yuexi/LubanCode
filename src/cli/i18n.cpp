@@ -590,6 +590,8 @@ const Entry kZhCN[] = {
      "  /memory verify <id>              核验后续命(原 id 复活)\n"
      "  /memory refresh <id>             核验并把 status 回炉为 active\n"
      "  /memory migrate                  旧格式主题批迁 front matter(先列账再确认)\n"
+     "  /memory show <id>                看一份主题的 front matter 与正文\n"
+     "  /memory open [id]                用 $VISUAL/$EDITOR 编辑主题或索引\n"
      "  /memory why [id]                 看上一轮召回为何命中/落选\n"},
     {"cmd.memory.unavailable", "[memory] 找不到主目录，项目记忆不可用。"},
     {"cmd.memory.on", "开"},
@@ -658,6 +660,8 @@ const Entry kZhCN[] = {
     {"cmd.memory.migrate.confirm", "照此迁移? [y/N]: "},
     {"cmd.memory.migrate.cancelled", "不迁,旧主题原样保留。"},
     {"cmd.memory.migrate.done", "[memory] 已迁 {0} 份为 front matter;备份在 {1}。"},
+    {"cmd.memory.show.header", "[memory] {0}(住 {1}):"},
+    {"cmd.memory.open.done", "[memory] 编辑收妥,已校验并重建索引。"},
 
     // ---- /language ----
     {"cmd.language.list_header", "可选语言(内置 zh-CN/en + <主目录>/.lubancode/languages/*.json):"},
@@ -1881,6 +1885,8 @@ const Entry kEn[] = {
      "  /memory verify <id>                       re-verify, reviving the entry under its id\n"
      "  /memory refresh <id>                      re-verify and reset status to active\n"
      "  /memory migrate                           batch-migrate legacy topics to front matter (plan first)\n"
+     "  /memory show <id>                         show one topic's front matter and body\n"
+     "  /memory open [id]                         edit a topic or the index via $VISUAL/$EDITOR\n"
      "  /memory why [id]                          explain the last recall: hits, misses, blocks\n"},
     {"cmd.memory.unavailable", "[memory] The home directory is unavailable; project memory cannot run."},
     {"cmd.memory.on", "on"},
@@ -1953,6 +1959,8 @@ const Entry kEn[] = {
     {"cmd.memory.migrate.confirm", "Migrate as planned? [y/N]: "},
     {"cmd.memory.migrate.cancelled", "Migration cancelled; legacy topics are untouched."},
     {"cmd.memory.migrate.done", "[memory] Migrated {0} topics to front matter; backup at {1}."},
+    {"cmd.memory.show.header", "[memory] {0} (lives under {1}):"},
+    {"cmd.memory.open.done", "[memory] Edit accepted; validated and index rebuilt."},
 
     {"cmd.init.created", "Created {0} and loaded it for this session."},
     {"cmd.init.exists", "Project instructions already exist at {0}; left them untouched and reloaded them."},

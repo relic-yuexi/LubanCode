@@ -1800,6 +1800,33 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
                   << "\n";
         return;
     }
+    if (action == "show") {
+        std::string id;
+        words >> id;
+        if (id.empty()) {
+            PrintMemoryUsage();
+            return;
+        }
+        const auto topic = project_memory->ReadTopicForShow(id);
+        if (!topic.has_value()) {
+            std::cout << trf("cmd.memory.queue_failed", topic.error()) << "\n";
+            return;
+        }
+        const auto& [text, dir] = *topic;
+        std::cout << trf("cmd.memory.show.header", id, PathToUtf8(dir)) << "\n" << text;
+        if (!text.empty() && text.back() != '\n') std::cout << "\n";
+        return;
+    }
+    if (action == "open") {
+        std::string id;
+        words >> id;
+        const auto edited = id.empty() ? project_memory->OpenIndexInEditor()
+                                       : project_memory->EditTopicInEditor(id);
+        std::cout << (edited.has_value() ? tr("cmd.memory.open.done")
+                                         : trf("cmd.memory.queue_failed", edited.error()))
+                  << "\n";
+        return;
+    }
     if (action == "migrate") {
         // 先列将改/跳过/警告几份,经确认才动盘;原件备进
         // .state/migration-backup/<时间>/,全部写妥、重建成功才报完成。

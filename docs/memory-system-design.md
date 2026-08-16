@@ -68,6 +68,8 @@
 /memory verify <id>
 /memory refresh <id>
 /memory migrate
+/memory show <id>
+/memory open [id]
 /memory why [id]
 ```
 
@@ -88,6 +90,8 @@
 | `stale` | 列指纹漂移与已过期的记忆 |
 | `verify`/`refresh` | 核验续命；refresh 连 status 一并回炉 |
 | `migrate` | 旧格式主题批迁 schema 3，先列账再确认 |
+| `show <id>` | 看一份主题的 front matter 与正文 |
+| `open [id]` | 用 `$VISUAL/$EDITOR` 编辑主题或索引；回来先校验再原子替换 |
 | `why [id]` | 看上一轮召回为何命中/落选 |
 
 这些开关只管当前进程，不回写 `config.json`。要永久开关，改全局配置。

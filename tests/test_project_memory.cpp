@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -993,6 +994,8 @@ TEST_CASE("文档漂移: 记忆默认值、学习三档与命令面跟代码对�
     CHECK(design.find("front matter") != std::string::npos);
     CHECK(design.find("schema: 3") != std::string::npos);
     CHECK(design.find("/memory migrate") != std::string::npos);
+    CHECK(design.find("/memory show") != std::string::npos);
+    CHECK(design.find("/memory open") != std::string::npos);
     CHECK(design.find("feedback") != std::string::npos);
     CHECK(configuration.find("user_enabled") != std::string::npos);
     CHECK(design.find("memory.user_enabled") != std::string::npos);
@@ -1538,6 +1541,85 @@ TEST_CASE("ProjectMemory 用户层: 写入走全局授权,项目证据不得混�
     REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
     CHECK_FALSE(fs::exists(user_topic));
     CHECK(fs::exists(root / "home" / "memory" / "user" / "archive" / "global-pnpm.md"));
+}
+
+// ---- show/open(规格:外部编辑回来先校验再原子替换,坏 YAML 不覆盖原件) ----
+
+TEST_CASE("ProjectMemory show/open: 编辑回读校验,坏 YAML 不覆盖原件") {
+    const fs::path root = TempRoot("show-open");
+    const fs::path repo = SetupRepo(root, "repo");
+    const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
+    REQUIRE(identity.has_value());
+
+    memory::Options options;
+    options.global_allowed = true;
+    options.enabled = true;
+    memory::ProjectMemory store(*identity, root / "home", options);
+    memory::SaveRequest request;
+    request.kind = memory::MemoryKind::Preference;
+    request.id = "preference.package-manager";
+    request.title = "包管理器";
+    request.summary = "本项目用 pnpm";
+    request.content = "本项目一律用 pnpm,不跑 npm install。";
+    request.keywords = {"pnpm"};
+    REQUIRE(store.EnqueueSave(request).has_value());
+    REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
+
+    // show:整份主题读得出来,front matter 与正文都在。
+    const auto shown = store.ReadTopicForShow("preference.package-manager");
+    REQUIRE(shown.has_value());
+    CHECK(shown->first.starts_with("---\n"));
+    CHECK(shown->first.find("本项目一律用 pnpm") != std::string::npos);
+    CHECK_FALSE(store.ReadTopicForShow("preference.nope").has_value());
+
+    const fs::path topic = store.memory_dir() / "preferences" / "package-manager.md";
+    const std::string original = Read(topic);
+
+    // 坏 YAML:Commit 拒收,原件分毫不动,临时件清掉。
+    auto session = store.BeginTopicEdit("preference.package-manager");
+    REQUIRE(session.has_value());
+    CHECK(fs::exists(session->scratch));
+    Write(session->scratch, "---\nname: x\n\tbad: [\n---\n\n# 标题\n\n正文。\n");
+    const auto broken = store.CommitTopicEdit(*session);
+    CHECK_FALSE(broken.has_value());
+    CHECK(Read(topic) == original);
+    CHECK_FALSE(fs::exists(session->scratch));
+
+    // 改 id:同样拒收。
+    session = store.BeginTopicEdit("preference.package-manager");
+    REQUIRE(session.has_value());
+    Write(session->scratch, "---\nname: other\ndescription: d\nmetadata:\n  schema: 3\n  node_type: memory\n"
+                           "  type: preference\n  id: preference.other\n  confidence: user-stated\n"
+                           "  status: active\n  scope: {level: project, kind: project, value: \"\"}\n"
+                           "  origin_session_ids: []\n  created: 2026-08-01T00:00:00Z\n"
+                           "  modified: 2026-08-01T00:00:00Z\n  last_verified: 2026-08-01T00:00:00Z\n"
+                           "  expires: null\n  keywords: []\n  evidence: []\n"
+                           "---\n\n# 换名\n\n正文。\n");
+    CHECK_FALSE(store.CommitTopicEdit(*session).has_value());
+    CHECK(Read(topic) == original);
+
+    // 改 description 与正文(规矩内的编辑):原子替换,重建后可召回。
+    session = store.BeginTopicEdit("preference.package-manager");
+    REQUIRE(session.has_value());
+    std::string edited = Read(session->scratch);
+    const std::size_t marker = edited.find("本项目一律用 pnpm,不跑 npm install。");
+    REQUIRE(marker != std::string::npos);
+    edited.replace(marker, strlen("本项目一律用 pnpm,不跑 npm install。"),
+                   "一律用 pnpm;锁文件不让别人动。");
+    const std::size_t desc = edited.find("description: 本项目用 pnpm");
+    REQUIRE(desc != std::string::npos);
+    edited.replace(desc, strlen("description: 本项目用 pnpm"), "description: 一律用 pnpm");
+    Write(session->scratch, edited);
+    const auto committed = store.CommitTopicEdit(*session);
+    CAPTURE(committed.error());
+    REQUIRE(committed.has_value());
+    CHECK_FALSE(fs::exists(session->scratch));
+    const std::string updated = Read(topic);
+    CHECK(updated.find("锁文件不让别人动") != std::string::npos);
+    const auto entries = store.ListEntries();
+    REQUIRE(entries.size() == 1);
+    CHECK(entries[0].summary == "一律用 pnpm");
+    CHECK(store.BuildTurnContext("pnpm 用什么", repo).find("锁文件不让别人动") != std::string::npos);
 }
 
 TEST_CASE("ProjectMemory migrate: 中途失败旧主题与 catalog 仍可用") {

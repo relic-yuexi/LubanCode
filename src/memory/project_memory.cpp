@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <ctime>
 #include <fstream>
 #include <iomanip>
@@ -2550,6 +2551,149 @@ std::expected<void, std::string> ProjectMemory::RejectCandidate(const std::strin
 
 void ProjectMemory::SetRetrievalHints(std::vector<std::string> hints) {
     retrieval_hints_ = std::move(hints);
+}
+
+// 按 id 在两层里找主题。show/open 共用;返回 <条目, 所在目录>。
+std::optional<std::pair<MemoryEntry, fs::path>> ProjectMemory::FindTopic(const std::string& id) const {
+    for (const auto& entry : ListEntries()) {
+        if (entry.id == id) return std::make_pair(entry, memory_dir_);
+    }
+    if (options_.user_enabled) {
+        for (const auto& entry : ListUserEntries()) {
+            if (entry.id == id) return std::make_pair(entry, user_memory_dir());
+        }
+    }
+    return std::nullopt;
+}
+
+std::expected<std::pair<std::string, fs::path>, std::string> ProjectMemory::ReadTopicForShow(
+    const std::string& id) const {
+    if (!IsValidId(id)) return std::unexpected("记忆 id 不合法: " + id);
+    const auto found = FindTopic(id);
+    if (!found.has_value()) return std::unexpected("找不到记忆 id: " + id);
+    const auto& [entry, dir] = *found;
+    const std::string text = ReadFile(dir / Utf8Path(entry.file));
+    if (text.empty()) return std::unexpected("主题文件读不出来: " + entry.file);
+    return std::make_pair(text, dir);
+}
+
+std::expected<ProjectMemory::TopicEditSession, std::string> ProjectMemory::BeginTopicEdit(
+    const std::string& id) const {
+    auto topic = ReadTopicForShow(id);
+    if (!topic.has_value()) return std::unexpected(topic.error());
+    const auto& [text, dir] = *topic;
+    auto parsed = frontmatter::Parse(text);
+    if (!parsed.has_value()) {
+        return std::unexpected("这份主题不是合法 front matter,先 /memory migrate: " + parsed.error());
+    }
+    const auto found = FindTopic(id);
+    if (!found.has_value()) return std::unexpected("找不到记忆 id: " + id);
+    TopicEditSession session;
+    session.dir = dir;
+    session.id = parsed->entry.id;
+    session.level = parsed->entry.scope.level;
+    session.original = dir / Utf8Path(found->first.file);
+    session.scratch = dir / Utf8Path(found->first.file + ".edit-" + JobStamp() + ".md");
+    auto staged = AtomicWrite(session.scratch, text);
+    if (!staged.has_value()) return std::unexpected(staged.error());
+    return session;
+}
+
+std::expected<void, std::string> ProjectMemory::CommitTopicEdit(const TopicEditSession& session) const {
+    const std::string edited = ReadFile(session.scratch);
+    std::error_code ec;
+    const auto discard = [&session, &ec]() { fs::remove(session.scratch, ec); };
+    if (edited.empty()) {
+        discard();
+        return std::unexpected("编辑后内容为空,原件未动");
+    }
+    auto parsed = frontmatter::Parse(edited);
+    if (!parsed.has_value()) {
+        discard();
+        return std::unexpected("编辑后的 YAML 不合法,原件未动: " + parsed.error());
+    }
+    const MemoryEntry& next = parsed->entry;
+    // id 与层不许在编辑器里换:换 id 等于造新主题,得走正式写入。
+    if (next.id != session.id) {
+        discard();
+        return std::unexpected("编辑不得改 id(要新建请用 remember/memory_save),原件未动");
+    }
+    if (next.scope.level != session.level) {
+        discard();
+        return std::unexpected("编辑不得改 scope.level(跨层搬家走 forget 后重写),原件未动");
+    }
+    if (!IsValidId(next.id)) {
+        discard();
+        return std::unexpected("编辑后的 id 不合法,原件未动");
+    }
+    for (const std::string& path : next.paths) {
+        if (!IsSafeRelativePath(path)) {
+            discard();
+            return std::unexpected("编辑后的 paths 只许项目内相对路径: " + path);
+        }
+    }
+    // 校验通过:同一把项目锁里原子替换,再重建该层派生物。
+    DirectoryLock project_lock(session.dir / ".state" / "memory.lock");
+    if (!project_lock.acquired()) {
+        discard();
+        return std::unexpected("该层记忆正由另一个 worker 更新,稍后再试");
+    }
+    auto replaced = AtomicWrite(session.original, edited);
+    discard();
+    if (!replaced.has_value()) return std::unexpected(replaced.error());
+    return RebuildMemoryIndex(session.dir, session.level == "user");
+}
+
+std::expected<void, std::string> ProjectMemory::EditTopicInEditor(const std::string& id) const {
+    auto session = BeginTopicEdit(id);
+    if (!session.has_value()) return std::unexpected(session.error());
+
+    // 编辑器:$VISUAL 压过 $EDITOR;都没给就退平台缺省(Windows 记事本、
+    // 类 Unix vi)。命令行里带空格的路径由进程启动层负责引号。
+    const char* visual = std::getenv("VISUAL");
+    const char* editor = std::getenv("EDITOR");
+    std::string program = visual != nullptr && *visual != '\0' ? visual
+                          : editor != nullptr && *editor      ? editor
+#ifdef _WIN32
+                                                             : "notepad";
+#else
+                                                             : "vi";
+#endif
+    const int kEditorTimeoutMs = 30 * 60 * 1000;
+    const auto ran = platform::RunProcess({program, PathUtf8(session->scratch)}, kEditorTimeoutMs);
+    if (ran.spawn_failed || ran.timed_out) {
+        std::error_code ec;
+        fs::remove(session->scratch, ec);
+        return std::unexpected(ran.timed_out ? "编辑器超时未退出,原件未动"
+                                             : "编辑器没跑起来($VISUAL/$EDITOR): " + ran.spawn_error);
+    }
+    return CommitTopicEdit(*session);
+}
+
+std::expected<void, std::string> ProjectMemory::OpenIndexInEditor() const {
+    const char* visual = std::getenv("VISUAL");
+    const char* editor = std::getenv("EDITOR");
+    std::string program = visual != nullptr && *visual != '\0' ? visual
+                          : editor != nullptr && *editor      ? editor
+#ifdef _WIN32
+                                                             : "notepad";
+#else
+                                                             : "vi";
+#endif
+    const fs::path index = memory_dir_ / "index.md";
+    std::error_code ec;
+    if (!fs::exists(index, ec)) {
+        auto built = RebuildMemoryIndex(memory_dir_);
+        if (!built.has_value()) return built;
+    }
+    const int kEditorTimeoutMs = 30 * 60 * 1000;
+    const auto ran = platform::RunProcess({program, PathUtf8(index)}, kEditorTimeoutMs);
+    if (ran.spawn_failed) {
+        return std::unexpected("编辑器没跑起来($VISUAL/$EDITOR): " + ran.spawn_error);
+    }
+    if (ran.timed_out) return std::unexpected("编辑器超时未退出");
+    // index 是派生物,手改只为眼看;顺手重建一次,让它跟主题对齐。
+    return RebuildMemoryIndex(memory_dir_);
 }
 
 ProjectMemory::MigrationPlan ProjectMemory::PlanMigration() const {
