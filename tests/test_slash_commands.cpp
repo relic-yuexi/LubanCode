@@ -372,6 +372,12 @@ TEST_CASE("ParseProviderCommand: list/switch/remove 与错参") {
     CHECK(switched.name == "glm");
     CHECK(switched.model == "glm-4.5-air");
 
+    // 裸敲 /provider switch:不判 Invalid、不倒总帮助,交给交互层开选择器。
+    const auto bare = cli::ParseProviderCommand("switch");
+    CHECK(bare.action == cli::ProviderCommandAction::SwitchInteractive);
+    // 词数超了(4 个)照旧 Invalid。
+    CHECK(cli::ParseProviderCommand("switch a b c").action == cli::ProviderCommandAction::Invalid);
+
     const auto removed = cli::ParseProviderCommand("remove glm");
     CHECK(removed.action == cli::ProviderCommandAction::Remove);
     CHECK(removed.name == "glm");

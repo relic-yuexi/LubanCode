@@ -64,7 +64,18 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input);
 // /provider 的二级参数也收在 cli 层做纯解析，main.cpp 只接收已拆好的
 // 字段、做写盘和切会话。model / window 选项都只认一个值；少参数、重复
 // 选项、夹生子命令一律 Invalid，由调用方统一打印用法。
-enum class ProviderCommandAction { Invalid, List, Refresh, Add, Switch, Remove, Set };
+enum class ProviderCommandAction {
+    Invalid,
+    List,
+    Refresh,
+    Add,
+    Switch,
+    // 向导重排单:裸敲 /provider switch(TTY 开选择器;非 TTY 由调用方给
+    // switch 专用短用法),不再落进 Invalid -> 总帮助那条死路。
+    SwitchInteractive,
+    Remove,
+    Set
+};
 
 struct ParsedProviderCommand {
     ProviderCommandAction action = ProviderCommandAction::Invalid;

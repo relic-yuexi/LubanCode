@@ -177,6 +177,12 @@ ParsedProviderCommand ParseProviderCommand(const std::string& args) {
             if (words.size() == 3) {
                 parsed.model = words[2];
             }
+            return parsed;
+        }
+        if (words.size() == 1) {
+            // 裸敲 /provider switch:意图很明白(要换一家),不判 Invalid、不倒
+            // 总帮助。TTY 下开选择器,非 TTY 给 switch 专用短用法。
+            parsed.action = ProviderCommandAction::SwitchInteractive;
         }
         return parsed;
     }
