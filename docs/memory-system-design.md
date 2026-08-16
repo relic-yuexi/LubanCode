@@ -38,17 +38,9 @@
 | --- | --- | --- |
 | `enabled` | `false` | 总开关。关闭时不建运行对象，也不注册写入工具 |
 | `use` | `true` | 是否召回已有记忆 |
-<<<<<<< HEAD
-| `learn` | `review` | `off` 不学习；`review` 抽候选待审；`auto` 对过闸候选直写 |
-| `generate` | `true` | 旧兼容开关；`false` 等价于 `learn=off` |
-| `max_index_bytes` | `16384` | 人读 `index.md` 的大小上限，不直接进 prompt |
-| `max_retrieval_bytes` | `8192` | 命中主题正文总预算 |
-| `max_results` | `3` | 最多注入几份主题正文 |
-
-项目 `.lubancode/config.json` 不能把全局关闭的记忆自行打开。全局开过后，项目可关闭总开关，也可收窄 `use`、`learn` 与预算。全局只授 `review` 时，项目不能抬到 `auto`。
-=======
 | `user_enabled` | `false` | 用户级记忆(跨项目偏好/反馈,住 `~/.lubancode/memory/user/`)。只认全局配置授权,项目配置无权开启 |
 | `learn` | `review` | 学习档位:`off` 不提候选不写入;`review` 每回合提候选进待审箱;`auto` 自动写入,只认全局配置显式授权 |
+| `generate` | `true` | 旧兼容开关;`false` 等价于 `learn=off`,新配置优先写 `learn` |
 | `max_index_bytes` | `16384` | `index.md` 文件本身的上限(只给人看,不进 prompt) |
 | `max_retrieval_bytes` | `8192` | 每轮命中主题正文总预算 |
 | `max_results` | `3` | 最多注入几份主题正文 |
