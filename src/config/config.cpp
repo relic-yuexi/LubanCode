@@ -45,7 +45,16 @@ std::optional<std::string> HomeLubancodeDir() {
     if (!home.has_value()) {
         return std::nullopt;
     }
-    return (std::filesystem::path(*home) / ".lubancode").string();
+#ifdef _WIN32
+    // %USERPROFILE% 经 _dupenv_s 拿到的是系统 ANSI 代码页(国内机器 GBK)
+    // 字节:先按 ACP 解回再出 UTF-8,不许窄口往返把编码漂移带进来——用户
+    // 名带中文/emoji 时这条路就是整场的根路径,编码错了处处错。
+    const std::string home_utf8 = platform::AcpBytesToUtf8(*home);
+#else
+    // POSIX 的 env 本来就是 UTF-8 字节串,原样用。
+    const std::string& home_utf8 = *home;
+#endif
+    return home_utf8 + "/.lubancode";
 }
 
 // 新位置配置文件的路径:<base_dir>/.lubancode/config.json。
@@ -1714,8 +1723,10 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
 
 ConfigMigrationOutcome MigrateConfigFileIfNeeded(const std::string& old_path_str, const std::string& new_path_str) {
     namespace fs = std::filesystem;
-    const fs::path old_path(old_path_str);
-    const fs::path new_path(new_path_str);
+    // 两个入参都是 UTF-8 字符串(调用方 PathToUtf8 过的),构造 path 走
+    // u8 通道,不按 ACP 误解。
+    const fs::path old_path = platform::Utf8ToPath(old_path_str);
+    const fs::path new_path = platform::Utf8ToPath(new_path_str);
 
     std::error_code ec;
     if (fs::exists(new_path, ec) && !ec) {
@@ -1730,7 +1741,7 @@ ConfigMigrationOutcome MigrateConfigFileIfNeeded(const std::string& old_path_str
     ec.clear();
     fs::create_directories(new_path.parent_path(), ec);
     if (ec) {
-        return ConfigMigrationOutcome{old_path_str, "配置迁移失败(建目录 " + new_path.parent_path().string() +
+        return ConfigMigrationOutcome{old_path_str, "配置迁移失败(建目录 " + platform::PathToUtf8(new_path.parent_path()) +
                                                           " 出错: " + ec.message() + "),继续使用旧配置 " + old_path_str};
     }
 
@@ -1758,11 +1769,11 @@ namespace {
 std::expected<FileConfig, std::string> ReadAndParseConfigFile(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
-        return std::unexpected("配置文件 " + path.string() + " 存在,但打不开(检查一下权限)");
+        return std::unexpected("配置文件 " + platform::PathToUtf8(path) + " 存在,但打不开(检查一下权限)");
     }
     std::ostringstream buffer;
     buffer << file.rdbuf();
-    return ParseFileConfigJson(buffer.str(), path.string());
+    return ParseFileConfigJson(buffer.str(), platform::PathToUtf8(path));
 }
 
 }  // namespace
@@ -1789,8 +1800,9 @@ std::expected<std::optional<FileConfig>, std::string> LoadConfigFromBaseDir(cons
     if (!fs::exists(old_path, ec) || ec) {
         return std::optional<FileConfig>(std::nullopt);
     }
-    const ConfigMigrationOutcome outcome = MigrateConfigFileIfNeeded(old_path.string(), new_path.string());
-    const fs::path effective = outcome.effective_path.empty() ? old_path : fs::path(outcome.effective_path);
+    const ConfigMigrationOutcome outcome = MigrateConfigFileIfNeeded(platform::PathToUtf8(old_path), platform::PathToUtf8(new_path));
+    const fs::path effective =
+            outcome.effective_path.empty() ? old_path : platform::Utf8ToPath(outcome.effective_path);
     auto parsed = ReadAndParseConfigFile(effective);
     if (!parsed.has_value()) {
         return std::unexpected(parsed.error());
@@ -2639,7 +2651,7 @@ std::expected<std::string, std::string> SaveConfigFile(const Config& config) {
     std::error_code ec;
     fs::create_directories(path.parent_path(), ec);
     if (ec) {
-        return std::unexpected("建目录 " + path.parent_path().string() + " 失败: " + ec.message());
+        return std::unexpected("建目录 " + platform::PathToUtf8(path.parent_path()) + " 失败: " + ec.message());
     }
 
     nlohmann::json j;
@@ -2660,11 +2672,11 @@ std::expected<std::string, std::string> SaveConfigFile(const Config& config) {
 
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file.is_open()) {
-        return std::unexpected("配置文件 " + path.string() + " 打不开写入(检查一下权限)");
+        return std::unexpected("配置文件 " + platform::PathToUtf8(path) + " 打不开写入(检查一下权限)");
     }
     file << j.dump(2);
     file.close();
-    return path.string();
+    return platform::PathToUtf8(path);
 }
 
 namespace {
@@ -2827,7 +2839,7 @@ std::expected<void, std::string> WriteConfigObject(const std::string& file_path,
     if (!path.parent_path().empty()) {
         fs::create_directories(path.parent_path(), ec);
         if (ec) {
-            return std::unexpected("建目录 " + path.parent_path().string() + " 失败: " + ec.message());
+            return std::unexpected("建目录 " + platform::PathToUtf8(path.parent_path()) + " 失败: " + ec.message());
         }
     }
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -2888,7 +2900,7 @@ std::expected<std::string, std::string> SetActiveProviderInGlobalConfig(const st
     if (!home.has_value()) {
         return std::unexpected("找不到用户主目录,没法记住当前 provider");
     }
-    const std::string path = NewConfigPathFor(std::filesystem::path(*home)).string();
+    const std::string path = platform::PathToUtf8(NewConfigPathFor(std::filesystem::path(*home)));
     auto root = ReadConfigObjectForUpdate(path);
     if (!root.has_value()) {
         return std::unexpected(root.error());
@@ -2910,7 +2922,7 @@ std::expected<std::string, std::string> AddProviderToGlobalConfig(const Provider
     if (!home.has_value()) {
         return std::unexpected("找不到用户主目录,没法保存 provider 配置");
     }
-    const std::string path = NewConfigPathFor(std::filesystem::path(*home)).string();
+    const std::string path = platform::PathToUtf8(NewConfigPathFor(std::filesystem::path(*home)));
     auto root = ReadConfigObjectForUpdate(path);
     if (!root.has_value()) {
         return std::unexpected(root.error());
@@ -2935,7 +2947,7 @@ std::expected<std::string, std::string> RemoveProviderFromGlobalConfig(const std
     if (!home.has_value()) {
         return std::unexpected("找不到用户主目录,没法更新 provider 配置");
     }
-    const std::string path = NewConfigPathFor(std::filesystem::path(*home)).string();
+    const std::string path = platform::PathToUtf8(NewConfigPathFor(std::filesystem::path(*home)));
     auto root = ReadConfigObjectForUpdate(path);
     if (!root.has_value()) {
         return std::unexpected(root.error());
@@ -2964,7 +2976,7 @@ std::expected<std::string, std::string> SetProviderNativeWebSearchInGlobalConfig
     if (!home.has_value()) {
         return std::unexpected("找不到用户主目录,没法更新 provider 配置");
     }
-    const std::string path = NewConfigPathFor(std::filesystem::path(*home)).string();
+    const std::string path = platform::PathToUtf8(NewConfigPathFor(std::filesystem::path(*home)));
     auto root = ReadConfigObjectForUpdate(path);
     if (!root.has_value()) {
         return std::unexpected(root.error());
@@ -2989,7 +3001,7 @@ std::expected<std::string, std::string> SetProviderExtraBodyInGlobalConfig(const
     if (!home.has_value()) {
         return std::unexpected("找不到用户主目录,没法更新 provider 配置");
     }
-    const std::string path = NewConfigPathFor(std::filesystem::path(*home)).string();
+    const std::string path = platform::PathToUtf8(NewConfigPathFor(std::filesystem::path(*home)));
     auto root = ReadConfigObjectForUpdate(path);
     if (!root.has_value()) {
         return std::unexpected(root.error());
@@ -3014,7 +3026,7 @@ std::expected<std::string, std::string> SetProviderStreamUsageInGlobalConfig(con
     if (!home.has_value()) {
         return std::unexpected("找不到用户主目录,没法更新 provider 配置");
     }
-    const std::string path = NewConfigPathFor(std::filesystem::path(*home)).string();
+    const std::string path = platform::PathToUtf8(NewConfigPathFor(std::filesystem::path(*home)));
     auto root = ReadConfigObjectForUpdate(path);
     if (!root.has_value()) {
         return std::unexpected(root.error());
@@ -3040,7 +3052,7 @@ std::expected<std::string, std::string> SetProviderExtraHeaderInGlobalConfig(con
     if (!home.has_value()) {
         return std::unexpected("找不到用户主目录,没法更新 provider 配置");
     }
-    const std::string path = NewConfigPathFor(std::filesystem::path(*home)).string();
+    const std::string path = platform::PathToUtf8(NewConfigPathFor(std::filesystem::path(*home)));
     auto root = ReadConfigObjectForUpdate(path);
     if (!root.has_value()) {
         return std::unexpected(root.error());
@@ -3070,7 +3082,7 @@ std::expected<std::string, std::string> MutateProviderInGlobalConfig(
     if (!home.has_value()) {
         return std::unexpected("找不到用户主目录,没法更新 provider 配置");
     }
-    const std::string path = NewConfigPathFor(std::filesystem::path(*home)).string();
+    const std::string path = platform::PathToUtf8(NewConfigPathFor(std::filesystem::path(*home)));
     auto root = ReadConfigObjectForUpdate(path);
     if (!root.has_value()) {
         return std::unexpected(root.error());
@@ -3142,7 +3154,7 @@ std::expected<std::string, std::string> ReplaceProviderInGlobalConfig(const std:
     if (!home.has_value()) {
         return std::unexpected("找不到用户主目录,没法更新 provider 配置");
     }
-    const std::string path = NewConfigPathFor(std::filesystem::path(*home)).string();
+    const std::string path = platform::PathToUtf8(NewConfigPathFor(std::filesystem::path(*home)));
     auto root = ReadConfigObjectForUpdate(path);
     if (!root.has_value()) {
         return std::unexpected(root.error());
@@ -3264,7 +3276,9 @@ std::expected<std::string, std::string> ReadSystemPromptFile(const std::string& 
 // ---------------------------------------------------------------------------
 
 std::string SettingsLocalPath(const std::string& cwd_dir) {
-    return (std::filesystem::path(cwd_dir) / ".lubancode" / "settings.local.json").string();
+    // cwd_dir 是 UTF-8(CurrentDirUtf8 来的),窄口构造 path 会按 ACP 误解
+    // 中文/emoji 字节——一律走 u8 通道。
+    return platform::PathToUtf8(platform::Utf8ToPath(cwd_dir) / ".lubancode" / "settings.local.json");
 }
 
 std::expected<SettingsLocal, std::string> ParseSettingsLocal(const std::string& json_text,
@@ -3378,7 +3392,7 @@ std::expected<std::string, std::string> AddAllowedToolToSettingsLocal(const std:
     std::error_code ec;
     fs::create_directories(fs::path(path).parent_path(), ec);
     if (ec) {
-        return std::unexpected("建目录 " + fs::path(path).parent_path().string() + " 失败: " + ec.message());
+        return std::unexpected("建目录 " + platform::PathToUtf8(fs::path(path).parent_path()) + " 失败: " + ec.message());
     }
 
     std::ofstream out(path, std::ios::binary | std::ios::trunc);

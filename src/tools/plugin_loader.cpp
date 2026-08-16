@@ -103,7 +103,7 @@ std::vector<std::string> PluginHost::LoadDirectory(const std::filesystem::path& 
             continue;
         }
         // 扩展名大小写不敏感(Windows 下 .DLL 也常见)。
-        std::string ext = entry.path().extension().string();
+        std::string ext = lubancode::tools::PathToUtf8(entry.path().extension());
         for (char& c : ext) {
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         }
@@ -112,7 +112,7 @@ std::vector<std::string> PluginHost::LoadDirectory(const std::filesystem::path& 
         }
     }
     std::sort(dll_files.begin(), dll_files.end(), [](const auto& left, const auto& right) {
-        return left.filename().string() < right.filename().string();
+        return lubancode::tools::PathToUtf8(left.filename()) < lubancode::tools::PathToUtf8(right.filename());
     });
     for (const auto& path : dll_files) {
         const std::string file_name = PathToUtf8(path.filename());

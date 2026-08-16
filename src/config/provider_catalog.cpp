@@ -17,6 +17,7 @@
 #endif
 
 #include "embedded_provider_catalog.hpp"
+#include "platform/paths.hpp"  // PathToUtf8:缓存路径不走 ACP 窄口
 
 namespace lubancode::config {
 
@@ -259,12 +260,13 @@ std::expected<void, std::string> AtomicWrite(const fs::path& path, const std::st
     std::error_code ec;
     fs::create_directories(path.parent_path(), ec);
     if (ec) return std::unexpected("建立目录失败: " + ec.message());
-    const fs::path temp = path.string() + ".tmp";
+    fs::path temp = path;
+    temp += ".tmp";  // 纯 ASCII 后缀,窄口拼接不涉代码页
     {
         std::ofstream out(temp, std::ios::binary | std::ios::trunc);
-        if (!out.is_open()) return std::unexpected("临时文件打不开: " + temp.string());
+        if (!out.is_open()) return std::unexpected("临时文件打不开: " + platform::PathToUtf8(temp));
         out << text;
-        if (!out.good()) return std::unexpected("临时文件写入失败: " + temp.string());
+        if (!out.good()) return std::unexpected("临时文件写入失败: " + platform::PathToUtf8(temp));
     }
 #ifdef _WIN32
     if (!MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
@@ -360,7 +362,7 @@ std::expected<ProviderCatalog, std::string> ParseProviderCatalogJson(const std::
 std::optional<std::string> ProviderCatalogCachePath() {
     const auto dir = CacheDir();
     if (!dir.has_value()) return std::nullopt;
-    return (*dir / "provider-catalog.json").string();
+    return platform::PathToUtf8(*dir / "provider-catalog.json");
 }
 
 ProviderCatalog LoadProviderCatalog() {
@@ -416,7 +418,7 @@ std::expected<ProviderCatalogRefresh, std::string> RefreshProviderCatalog(int co
     if (response.error) return std::unexpected("拉取 provider 目录失败: " + response.error.message);
 
     ProviderCatalogRefresh result;
-    result.cache_path = cache.string();
+    result.cache_path = platform::PathToUtf8(cache);
     json meta = old_meta;
     meta["checked_at"] = static_cast<long long>(std::time(nullptr));
     const std::string etag = HeaderValue(response.header, "etag");

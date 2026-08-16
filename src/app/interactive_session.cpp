@@ -2033,7 +2033,7 @@ std::vector<lubancode::cli::FileMentionEntry> InteractiveSession::FileMentionInd
     std::filesystem::recursive_directory_iterator it(base, ec), end;
     while (it != end && mention_index_.size() < 3000) {
         const std::filesystem::path current = it->path();
-        const std::string name = current.filename().string();
+        const std::string name = lubancode::tools::PathToUtf8(current.filename());
         if (it->is_symlink(ec)) {
             it.disable_recursion_pending();
             ++it;
@@ -2128,7 +2128,7 @@ std::pair<std::string, std::string> InteractiveSession::BuildMentionLedger(const
 std::string InteractiveSession::BuildTerminalTitleText(const std::string& state_word) const {
     std::string project;
     if (const auto root = lubancode::cli::FindRepositoryRoot(std::filesystem::current_path())) {
-        project = root->filename().string();
+        project = lubancode::tools::PathToUtf8(root->filename());
     }
     if (project.empty()) {
         project = "lubancode";
@@ -3607,9 +3607,11 @@ void InteractiveSession::EmitSessionHook(lubancode::hooks::HookEvent event, nloh
         lubancode::hooks::HookContext ctx = dispatcher->context();
         if (session_store.active()) {
             ctx.transcript_path = session_store.file_path();
-            std::filesystem::path file(
-                reinterpret_cast<const char8_t*>(session_store.file_path().c_str()));
-            ctx.session_id = file.stem().string();
+            // 会话存档名就是会话 id(MakeSessionId:时间戳 + 首句 slug,slug
+            // 原样保留多字节字符)——GBK 机器上 .string() 遇 emoji 就是
+            // 1113 异常,一律走 u8 通道。
+            ctx.session_id = lubancode::tools::PathToUtf8(
+                lubancode::tools::Utf8ToPath(session_store.file_path()).stem());
         }
         lubancode::app::UpdateHookRuntimeContext(ctx);
     }
