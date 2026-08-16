@@ -1,0 +1,255 @@
+# 项目记忆借鉴 Claude Code，改用 Front Matter 与分层目录
+
+状态：待做（2026-08-16 据现有实现与 Claude Code 记忆样例补单）
+
+## 先说结论
+
+LubanCode 现有记忆并非一团聊天摘要。骨架已经立住：一条主题一份 Markdown，事实与偏好分目录，`index.md` 给人看，`catalog.json` 给机器搜；写入走 pending job 和后台 worker；召回有 BM25、硬命中、范围、证据指纹、过期、去重与 trace。
+
+短处不在“能不能存”，在“人瞧着费劲”。主题头是一行藏在 HTML 注释里的 JSON。字段虽全，打开文件先撞见一长串括号。手改容易漏逗号，Git diff 也常整行翻红。用户想翻一翻“它到底记了什么”，不如 Claude Code 那种 YAML front matter 来得明白。
+
+该借它的章法，不照抄它的内脏：
+
+- 一条记忆一份短 Markdown。
+- 文件名就是能认出的 slug。
+- 开头用 YAML front matter 摆清名字、摘要、类型、来源与时间。
+- 正文只写规矩、事实与缘由，常用 `Why` 留下来龙去脉。
+- 根索引只放短摘要和链接，像一张目录。
+
+LubanCode 已有的检索、安全与后台写入不能丢。
+
+## 现版到底怎样存
+
+总开关默认关闭。用户全局配置打开后，项目按 Git common dir 算稳定 key。主工作树与 linked worktree 共用一库。目录现为：
+
+```text
+~/.lubancode/
+  projects/<project-key>/
+    project.json
+    memory/
+      index.md
+      facts/*.md
+      preferences/*.md
+      archive/*
+      .state/
+        catalog.json
+        trace-last.json
+        candidates/*.json
+  memory-jobs/
+    pending/*.json
+    failed/*
+```
+
+正式主题才是原本。现版 schema 2 大致如此：
+
+```markdown
+<!-- lubancode-memory
+{"schema":2,"id":"preference.version-cadence","kind":"preference","title":"版本节奏","summary":"每笔合并后 patch +1","keywords":["kVersion","CMake VERSION"],"paths":["src/app/version.hpp","CMakeLists.txt"],"status":"active","updated_at":"2026-08-16T05:24:16Z","source_sessions":["..."],"scope":{"kind":"project","value":""},"evidence":[],"confidence":"user-stated","last_verified_at":"2026-08-16T05:24:16Z","expires_at":null,"fingerprints":{}}
+-->
+
+# 版本节奏
+
+每合并一笔进 main，patch 位加一，不攒许多改动再跳大版。
+```
+
+`.state/catalog.json` 从这些主题头重建，正文不塞进去。`index.md` 也由主题生成。待审候选和 worker job 仍用 JSON，这是机器队列，不必为了整齐强换 YAML。
+
+学习已有三档：
+
+- `off`：不抽取，不写入。
+- `review`：每轮结束用当前模型提 0～3 条候选，进待审箱。
+- `auto`：只有用户全局明确授权，且事实有证据、偏好由用户明说，才自动排入正式库。
+
+召回时不再把整份 `index.md` 塞进 prompt。程序搜 catalog，过门槛后最多取三条、总计 8 KiB。记忆只作本轮线索，不进 session，也不随 `/export` 外带。
+
+## 文档先对账
+
+`docs/memory-system-design.md` 开头仍说自动回合抽取尚未实现，配置手册还写 24 KiB、4 条。代码已经是回合抽取、候选审阅、默认 8 KiB、3 条。开工先把文档与实现对齐，免得迁移建立在旧账上。
+
+## 新格式
+
+正式主题升级到 schema 3。外形取 Claude Code 的长处，字段保住 LubanCode 的能力：
+
+```markdown
+---
+name: lubancode-version-cadence
+description: 每笔验收合并进 main 后，patch 版本加一，不攒大跳跃
+metadata:
+  schema: 3
+  node_type: memory
+  type: feedback
+  id: feedback.lubancode-version-cadence
+  confidence: user-stated
+  status: active
+  scope:
+    level: project
+    kind: project
+    value: ""
+  origin_session_ids:
+    - 0591791e-4362-4df1-be31-b92561e8a644
+  created: 2026-08-16T05:24:16Z
+  modified: 2026-08-16T05:24:16Z
+  last_verified: 2026-08-16T05:24:16Z
+  expires: null
+  keywords:
+    - kVersion
+    - CMake VERSION
+  evidence:
+    - path: src/app/version.hpp
+      symbol: kVersion
+    - path: CMakeLists.txt
+      symbol: VERSION
+---
+
+# 版本节奏
+
+每合并一笔进 main，patch 位加一。如 `0.26.1 -> 0.26.2`。不要攒一批再突兀跳版。
+
+## Why
+
+大批改动挤在一次版本跃迁里，用户看不出每笔验收落在哪一版。小步走，任一提交都可发版。
+```
+
+### 字段规矩
+
+- `name` 是文件 slug，供人看，也须在本层目录内唯一。
+- `description` 是索引里的一行摘要。索引不另藏一份容易漂移的手写摘要。
+- `metadata.id` 是跨改名、跨移动不变的机器主键。`name` 改了，id 不跟着乱变。
+- `node_type` 先固定为 `memory`，为以后 notebook、summary 等节点留口子。
+- `type` 首批认 `fact`、`preference`、`feedback`。
+- `feedback` 专收用户对 LubanCode 行事方式的明确纠正，如版本节奏、验收习惯、提交规矩。它必须是 `user-stated`，不能由模型猜。
+- `preference` 收用户主动选定的项目技术偏好，如 pnpm、uv、测试次序。
+- `fact` 收可核验的项目事实，自动入库时必须带 evidence。
+- `scope.level` 分 `project` 与 `user`。项目层沿用现有 `kind=project|subtree|path`；用户层不得假借某一项目路径作证据。
+- 来源用数组，不退回 Claude 样例的单个 `originSessionId`。同 id 多次更新，须保住各次来源。
+- 时间统一用 UTC ISO 8601。读取时把 YAML 时间按字符串处理，不能受本机时区和 YAML 隐式类型牵着走。
+- `fingerprints` 可继续放 metadata，也可只留在可重建 catalog。若只留 catalog，须证明删 catalog 后仍能从主题与项目文件重算，不丢陈旧判定所需资料。
+
+## 新目录
+
+项目记忆保留现有身份与隔离，再补用户级一层：
+
+```text
+~/.lubancode/
+  memory/
+    user/
+      index.md
+      preferences/*.md
+      feedback/*.md
+      archive/*
+      .state/catalog.json
+  projects/<project-key>/
+    project.json
+    memory/
+      index.md
+      facts/*.md
+      preferences/*.md
+      feedback/*.md
+      archive/*
+      .state/catalog.json
+```
+
+- 用户层放跨项目仍成立的偏好与反馈，如回答语言、提交署名习惯。不得放某仓库构建命令。
+- 项目层放仓库事实、项目偏好与只对该仓库生效的反馈。版本节奏若只管 LubanCode，就住项目层。
+- 每层各有一份 `index.md`，按 Facts、Preferences、Feedback 分组。每项只写链接、description、id 与状态。
+- `index.md` 仍是派生物，只供人翻，不参与正常 prompt 注入。机器检索继续读 catalog。
+- 用户层必须另设全局授权。项目配置无权开启或写入用户记忆。
+- 同一条内容若用户层与项目层都命中，项目层更具体，压过用户层；不能两份正文重复注入。
+
+## YAML 怎么落地
+
+不要手搓一只“差不多能用”的 YAML 解析器。冒号、引号、Unicode、多行文本、数组和 `null` 很快便会把它拖垮。
+
+- 评估引入 `yaml-cpp`。只把 front matter 交给结构化解析器，正文仍按分隔线之后的 Markdown 原样保留。
+- 若不愿新增依赖，就先做 RFC，选 TOML front matter 或格式化多行 JSON；不能嘴上叫 YAML，底下只认几种碰巧通过的行。
+- writer 固定字段顺序与缩进，字符串该引号时加引号。连续两次 parse/write 应字节稳定。
+- parser 只认文件开头第一对 `---`。正文里的水平线不算 front matter 结束符。
+- 所有长度、id、相对路径、敏感内容、目录越界校验照旧。换了外皮，护栏不能松。
+
+## 迁移
+
+迁移须渐进，不能一升级便把用户手工维护过的 Markdown 全刷一遍。
+
+1. reader 同时认 schema 1/2 的 HTML 注释 JSON 与 schema 3 front matter。
+2. 新写主题一律用 schema 3。
+3. 旧主题同 id 更新时，只迁这一份；正文原样带过去。
+4. 提供 `/memory migrate`，先列将改几份、跳过几份、警告几份，再经确认批量迁移。
+5. 批量迁移先在 `.state/migration-backup/<时间>/` 留原件，全部写妥、重建 catalog/index 成功后才报完成。
+6. `/memory rebuild` 混读新旧格式。两个文件撞同一 id 时停为 conflict，不凭时间偷偷选一份。
+7. archive 中的旧主题默认不改。只有恢复或用户显式要求时再迁。
+
+迁移后文件名可改成 `name.md`。改名与写新内容须在同一把项目锁里完成。失败时旧文件仍在，新文件不得半截落地。
+
+## 写入与索引
+
+- `memory_save`、回合抽取、待审 accept、`/memory remember` 最终都走同一枚 schema 3 writer。
+- upsert 仍以稳定 id 为准。标题相似不等于同一主题；自然语言归并继续放在待审层，不在 worker 里武断合并。
+- 写入 feedback 时，必须保住用户原意和 Why。模型可以压短，不可把“不要每次突兀跳版”改成泛泛的“遵循语义化版本”。
+- `index.md` 建议生成这种短行：
+
+```markdown
+- [版本节奏](feedback/lubancode-version-cadence.md) — 每笔合并后 patch +1，不攒大跳跃
+```
+
+- catalog 收 `name`、description、type、scope、关键词、证据、状态、时间与相对文件。正文仍不进 catalog。
+- `/memory list` 默认按目录顺序列短项；`/memory show <id>` 展示 front matter 摘要与正文；`/memory open [id]` 用 `$VISUAL/$EDITOR` 打开索引或主题。
+- 外部编辑回来先 parse、校验，再原子替换并 rebuild。坏 YAML 不覆盖原件。
+
+## 召回顺序
+
+格式升级不该改坏检索尺子：
+
+1. 分别检索用户层与当前项目层 catalog。
+2. 路径、符号、id、keyword 硬命中仍压过软分。
+3. scope、过期、状态、指纹规则照旧。
+4. 对相同 id、相同证据或高度相同 description 去重。
+5. 项目层 feedback/preference 压过用户层同主题。
+6. 仍守总条数与总字节预算，不因多一层目录便翻倍注入。
+
+`/memory why` 须写清命中来自 `user` 还是某个 project key，也要说明哪条因项目层覆盖而落选。
+
+## 自动学习
+
+- `review` 仍作建议默认。回合结束提候选，不可每轮都刷出“写了几条”的噪声；有候选时用一行 toast 或状态提示，用户再进 `/memory review`。
+- 用户当场说“记住”“以后都这样”时，可提一条高置信 feedback 候选。若全局授权为 auto，也只在语义明确、无敏感内容时直写。
+- 一句话重复说两遍，应更新同一 id 或同主题候选，不再生两份近义文件。
+- 自动抽取的 prompt 要产出 `type`、`name`、description、正文与 Why 候选。Why 没有根据就留空，不能编故事。
+- 版本节奏这类规矩若与 `AGENTS.md` 冲突，记忆不得压过项目指令。召回包继续声明“只作线索”。
+
+## 不照抄的地方
+
+- 不把 Claude Code 的字段名当协议圣旨。`originSessionId` 要适应多来源，改成数组。
+- 不删 scope、evidence、confidence、expires、status 与指纹。它们正是陈旧控制和安全边界。
+- 不把所有记忆混进一只目录。用户层与项目层必须分账。
+- 不把 `index.md` 当唯一真本，也不整份塞进每轮 prompt。
+- 不因换 YAML 就让 worker 直接覆盖文件。锁、pending job、失败箱、原子替换全保留。
+- 不默认开启跨项目记忆，不让仓库内配置替用户开全局学习。
+
+## 验收
+
+- schema 3 主题打开便能读懂；改 description、正文或 Why 后 `/memory rebuild` 能正确重建。
+- YAML 中含中文、冒号、单双引号、Windows 路径、空数组与 `null`，均可稳定往返。
+- schema 1、schema 2、schema 3 可混放；list、recall、forget、verify、refresh、rebuild 都能工作。
+- `/memory migrate` 中途失败时原主题与 catalog 仍可用；重跑不重复、不改 id、不丢来源会话。
+- feedback 只收用户明说内容；模型推断不能直写 feedback。
+- 用户层与项目层同主题时只注一份，项目层优先；`/memory why` 能把覆盖关系说清。
+- 主工作树与 linked worktree 仍共用项目记忆；两份独立 clone 仍不误共享。
+- index 与 catalog 都能从主题重建。删掉派生文件后，召回结果不变。
+- 待审候选、pending job、failed job 继续用 JSON，旧 worker job 仍能处理。
+- 记忆不进 session、不随导出外带；secret 样例、绝对越界路径和 `..` 仍被拦住。
+- 文档里的默认值、命令、学习三档、磁盘格式与代码一致，并有一枚文档漂移测试或生成源，免得再各写各的。
+
+## 建议落刀次序
+
+```text
+1. 先修文档现状与默认值
+2. 定 schema 3 字段和 YAML 依赖
+3. 双格式 reader + schema 3 writer
+4. catalog/index 适配 + 混合格式 rebuild
+5. feedback 类型
+6. 显式 migrate 与备份
+7. 用户级目录、授权、去重与召回
+8. show/open 与回合候选提示抛光
+```
+
+前六步只改项目记忆外形与类型。第七步才碰跨项目边界。莫把迁移、全局记忆与检索改算法揉成一次大换血。
