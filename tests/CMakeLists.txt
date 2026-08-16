@@ -214,4 +214,14 @@ if(WIN32)
   add_executable(agent_stream_driver EXCLUDE_FROM_ALL agent_stream_driver.cpp)
   target_compile_features(agent_stream_driver PRIVATE cxx_std_23)
   target_link_libraries(agent_stream_driver PRIVATE ws2_32)
+
+  # 可视区重排驱动器(多智能体真机回归单):真控制台跑"主回合派两只后台
+  # 代理随即收口"的完整回合,断言 composer 顶边/代理坞/状态栏全在可视窗
+  # 口里(不许靠改字号/滚轮救场)。五幕:80×24、120×35、全屏、改字号三
+  # 时机各十轮、滚动缓冲区非底部;每幕把 viewport 快照写进报告。假
+  # anthropic SSE 服务供模型,不碰真网络:
+  #   viewport_driver <lubancode.exe> <工作目录> <报告文件>
+  add_executable(viewport_driver EXCLUDE_FROM_ALL viewport_driver.cpp)
+  target_compile_features(viewport_driver PRIVATE cxx_std_23)
+  target_link_libraries(viewport_driver PRIVATE ws2_32)
 endif()
