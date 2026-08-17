@@ -1351,31 +1351,70 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         };
         if (foreground_hooks != nullptr) {
             sub_callbacks.on_tool_confirm = foreground_hooks->on_tool_confirm;
-        } else if (background_hooks != nullptr && !background_hooks->Empty()) {
-            // PermissionRequest:后台没有终端可问,钩子是唯一的策略口。deny 拒
-            // (告警随行);allow 替人工放行;不表态维持后台硬边界——需要确认
-            // 的操作一律拒绝,跟没有 hooks 时的行为一致,但现在钩子看得见这
-            // 一票,审计账不断。
-            const std::shared_ptr<lubancode::hooks::DetachedHookSession> hooks_session = background_hooks;
-            sub_callbacks.on_tool_confirm = [hooks_session](const std::string& name, const nlohmann::json& input) {
-                lubancode::hooks::HookPayload payload;
-                payload.event = lubancode::hooks::HookEvent::PermissionRequest;
-                payload.fields["tool_name"] = name;
-                payload.fields["tool_input"] = input.is_null() ? nlohmann::json::object() : input;
-                payload.match_value = name;
-                const auto merged = hooks_session->Emit(lubancode::hooks::HookEvent::PermissionRequest, payload);
-                if (merged.permission == lubancode::hooks::HookEventResult::Permission::Allow) {
-                    return true;
+        } else {
+            // 后台任务没人可问(后台代理权限拒绝无告知单,2026-08-17):需确认
+            // 的操作被拒那一刻,除了给子代理一份如实的拒绝文案(见
+            // on_tool_denial_text,不再冒充"用户拒绝"),还当场推一条通知进
+            // permission_denial_notices_——主会话空闲拍里取走,toast + transcript
+            // 事件同拍落地,绝不攒到最终报告才让用户知道。
+            // 配了 hooks 时 PermissionRequest 钩子是唯一的策略口:allow 替人工
+            // 放行;deny 拒(告警随行);不表态维持后台硬边界——需要确认的
+            // 操作一律拒绝,跟没有 hooks 时的行为一致,但钩子看得见这一票,
+            // 审计账不断。
+            const std::shared_ptr<lubancode::hooks::DetachedHookSession> hooks_session =
+                background_hooks != nullptr && !background_hooks->Empty() ? background_hooks : nullptr;
+            // 最近一次拒绝的原因(on_tool_confirm 与 on_tool_denial_text 同线程
+            // 先后调,RunTask 栈上局部共享):空 = 未预放行;非空 = 钩子 deny 的
+            // 理由。
+            std::string last_denial_hook_reason;
+            sub_callbacks.on_tool_confirm = [this, task, hooks_session, &last_denial_hook_reason](
+                                                const std::string& name, const nlohmann::json& input) {
+                last_denial_hook_reason.clear();
+                if (hooks_session != nullptr) {
+                    lubancode::hooks::HookPayload payload;
+                    payload.event = lubancode::hooks::HookEvent::PermissionRequest;
+                    payload.fields["tool_name"] = name;
+                    payload.fields["tool_input"] = input.is_null() ? nlohmann::json::object() : input;
+                    payload.match_value = name;
+                    const auto merged =
+                        hooks_session->Emit(lubancode::hooks::HookEvent::PermissionRequest, payload);
+                    if (merged.permission == lubancode::hooks::HookEventResult::Permission::Allow) {
+                        return true;
+                    }
+                    if (merged.permission == lubancode::hooks::HookEventResult::Permission::Deny) {
+                        last_denial_hook_reason =
+                            merged.permission_reason.empty() ? std::string("钩子未给理由") : merged.permission_reason;
+                        hooks_session->PostWarning(
+                            "后台子代理 #" + hooks_session->context().agent_id.value_or(std::string("?")) +
+                            " 的 PermissionRequest 钩子拒绝执行 " + name + ": " + merged.permission_reason);
+                    }
                 }
-                if (merged.permission == lubancode::hooks::HookEventResult::Permission::Deny) {
-                    hooks_session->PostWarning(
-                        "后台子代理 #" + hooks_session->context().agent_id.value_or(std::string("?")) +
-                        " 的 PermissionRequest 钩子拒绝执行 " + name + ": " + merged.permission_reason);
+                const int task_id = task != nullptr ? task->snapshot.id : 0;
+                std::string notice = "后台 #" + std::to_string(task_id) + " 请求 " + name + " 未放行,已拒";
+                if (!last_denial_hook_reason.empty()) {
+                    notice += "(PermissionRequest 钩子拒绝)";
+                }
+                notice += "——/permissions 预放行或让其前台重试";
+                {
+                    std::lock_guard<std::mutex> lock(tasks_mutex_);
+                    permission_denial_notices_.push_back(std::move(notice));
                 }
                 return false;
             };
-        } else {
-            sub_callbacks.on_tool_confirm = [](const std::string&, const nlohmann::json&) { return false; };
+            // 给模型的拒绝文案:如实说"后台无法弹确认、未预放行",把出路也写
+            // 上(重试无意义;报告受阻或改走只读;用户可 /permissions 预放行后
+            // 重派)。缺省那份"用户拒绝执行该工具"会把这个后台边界藏起来,
+            // 子代理的最终报告便写成"均被用户拒绝"——既冤枉了用户,也把主模
+            // 型的下一步带偏。
+            sub_callbacks.on_tool_denial_text = [&last_denial_hook_reason](const std::string& name) {
+                std::string text = "后台任务无法弹出权限确认," + name + " 未预先放行,已被拒绝。";
+                if (!last_denial_hook_reason.empty()) {
+                    text += "拒绝来自 PermissionRequest 钩子:" + last_denial_hook_reason + "。";
+                }
+                text += "重试同一操作不会成功:请停止重试,向用户如实报告受阻(后台未预放行,并非用户拒绝),"
+                        "或改走只读产出;用户可用 /permissions 预放行后重派任务。";
+                return text;
+            };
         }
         sub_callbacks.on_usage = [this, task, foreground_hooks](const api::UsageReport& report) {
             {
@@ -2349,6 +2388,13 @@ std::vector<int> AgentTool::UndeliveredCompletionTaskIds() const {
         }
     }
     return ids;
+}
+
+std::vector<std::string> AgentTool::TakePermissionDenialNotices() {
+    std::lock_guard<std::mutex> lock(tasks_mutex_);
+    std::vector<std::string> taken = std::move(permission_denial_notices_);
+    permission_denial_notices_.clear();
+    return taken;
 }
 
 std::string AgentTool::DrainCompletionNotices() {

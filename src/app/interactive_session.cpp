@@ -811,6 +811,33 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
         return session_agent_tool() != nullptr && session_agent_tool()->HasUndeliveredCompletions();
     });
 
+    // 后台代理权限拒绝的当场告知(后台代理权限拒绝无告知单,2026-08-17):
+    // 后台任务的 needs_confirm 工具被拒那一刻,AgentTool 已把一行通知推进
+    // 台账;空闲 composer 的 100ms 拍在这里取走——导航坞 toast 一枚(几秒
+    // 自收)+ transcript 记一条有归属的事件,用户当拍看见,不攒到最终报告。
+    // 只落 toast 与台账,不打裸行:不打断 composer,查看态零扰动。
+    lubancode::cli::SetBackgroundNoticeHook([this]() {
+        if (session_agent_tool() == nullptr) {
+            return;
+        }
+        const std::vector<std::string> notices = session_agent_tool()->TakePermissionDenialNotices();
+        if (notices.empty()) {
+            return;
+        }
+        for (const std::string& notice : notices) {
+            lubancode::cli::ShowPanelToast(notice);
+            lubancode::cli::TranscriptItem item;
+            item.id = static_cast<int>(transcript.size()) + 1;
+            item.kind = lubancode::cli::TranscriptKind::Tool;
+            item.tool_name = "agent_notice";
+            item.title = tr("agent_panel.denial_notice_title");
+            item.status = lubancode::cli::TranscriptStatus::Error;
+            item.start_time = item.end_time = std::chrono::steady_clock::now();
+            item.summary_lines = {notice};
+            transcript.push_back(std::move(item));
+        }
+    });
+
     // Ctrl+R 提问历史搜索的数据源(0.30.x 第二批):只读 session 事件账,
     // 打开搜索框时取一次(范围轮换在终端层本地过滤,不反复读盘)。
     lubancode::cli::SetPromptHistoryProvider([this]() { return CollectPromptHistory(); });
@@ -989,6 +1016,7 @@ InteractiveSession::~InteractiveSession() {
     lubancode::cli::SetAgentViewSwitchHook(nullptr);
     lubancode::cli::SetAgentPanelActions(lubancode::cli::AgentPanelActions{});
     lubancode::cli::SetIdleWakeHook(nullptr);
+    lubancode::cli::SetBackgroundNoticeHook(nullptr);
     lubancode::cli::SetPromptHistoryProvider(nullptr);
     lubancode::cli::SetFileMentionProvider(nullptr);
 }

@@ -199,6 +199,13 @@ void ShowPanelToast(const std::string& text);
 // 提交后再说。传空钩子即清除;管道/重定向走不到逐键路径,设了也永不触发。
 void SetIdleWakeHook(std::function<bool()> hook);
 
+// 后台通知钩子(后台代理权限拒绝无告知单,2026-08-17):空闲 composer 每
+// 100ms 的拍里叫一声,应用层把攒着的"当场要让人知道"的系统侧通知取走、
+// 自己落账(导航坞 toast + transcript 事件)——比如后台子代理的 needs_confirm
+// 工具被拒,用户当拍就能看见,不用等最终报告。与 IdleWakeHook 不同,这个
+// 不让位、不起轮,纯通知。传空钩子即清除;管道/重定向走不到逐键路径。
+void SetBackgroundNoticeHook(std::function<void()> hook);
+
 // Ctrl+R 提问历史反向搜索的数据源(0.30.x 第二批):应用层从 session 事件
 // 账只读现抽一份 PromptHistoryDataset(打开搜索框时取一次,范围轮换在
 // 终端层本地过滤,不反复读盘)。传空清除;管道/重定向走不到逐键路径,

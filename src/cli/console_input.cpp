@@ -178,6 +178,14 @@ std::function<bool()>& IdleWakeHookSlot() {
     return hook;
 }
 
+// 后台通知钩子的存取点(同一套会话级静态槽;主线程独占):空闲 composer
+// 的 100ms 拍里叫一声,应用层把攒着的"当场要让人知道"的系统侧通知(比如
+// 后台子代理的权限拒绝)取走自己落账(toast + transcript 事件)。
+std::function<void()>& BackgroundNoticeHookSlot() {
+    static std::function<void()> hook;
+    return hook;
+}
+
 // Ctrl+R 提问历史搜索的数据源槽(同一套会话级静态槽;主线程读写)。
 PromptHistoryProvider& PromptHistoryProviderSlot() {
     static PromptHistoryProvider provider;
@@ -1453,6 +1461,12 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 last_screen_width = size_info->width;
                 last_screen_height = size_info->height;
             }
+            // 后台代理权限拒绝等"当场要让人知道"的通知:应用层这一拍取走
+            // 攒着的,自己落 toast 与 transcript 事件(终端层只叫一声,不管
+            // 通知内容)。放在帧构建之前,toast 当拍就能进这一帧的坞区。
+            if (const auto& notice_hook = BackgroundNoticeHookSlot()) {
+                notice_hook();
+            }
             const auto entries = panel_entries();
             const int viewed_before_tick = panel_session.SnapshotFor(nav_ids_for(entries)).viewed_task_id;
             const bool armed_expired = panel_session.ExpireArmed(std::chrono::steady_clock::now());
@@ -2399,6 +2413,8 @@ void ShowPanelToast(const std::string& text) {
 }
 
 void SetIdleWakeHook(std::function<bool()> hook) { IdleWakeHookSlot() = std::move(hook); }
+
+void SetBackgroundNoticeHook(std::function<void()> hook) { BackgroundNoticeHookSlot() = std::move(hook); }
 
 void SetPromptHistoryProvider(PromptHistoryProvider provider) {
     PromptHistoryProviderSlot() = std::move(provider);

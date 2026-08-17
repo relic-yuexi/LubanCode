@@ -118,7 +118,12 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         const bool allowed =
             callbacks.on_tool_confirm ? callbacks.on_tool_confirm(call.name, effective_input) : true;
         if (!allowed) {
-            return dispatch_done(call.name, tools::Tool::Result{"用户拒绝执行该工具", true});
+            // 拒绝文案可由回调层给(后台子代理的拒绝是"无法弹确认、未预放
+            // 行",不是用户拒绝——缺省文案会把子代理的最终报告带偏成"均被
+            // 用户拒绝")。
+            const std::string denial = callbacks.on_tool_denial_text ? callbacks.on_tool_denial_text(call.name)
+                                                                     : std::string("用户拒绝执行该工具");
+            return dispatch_done(call.name, tools::Tool::Result{denial, true});
         }
     }
 

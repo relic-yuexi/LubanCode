@@ -64,6 +64,14 @@ struct Callbacks {
     // 没设这个回调、或者工具本来就不需要确认,都视为允许。
     std::function<bool(const std::string& name, const nlohmann::json& input)> on_tool_confirm;
 
+    // on_tool_confirm 返回 false(拒绝)后,给模型的 tool_result 文案从这里
+    // 取;不设用缺省"用户拒绝执行该工具"。给后台子代理用——它没人可问,
+    // 拒绝的原因是"后台无法弹确认、未预放行",不是用户拒绝;子代理照缺省
+    // 文案汇报,最终报告就会写成"均被用户拒绝",误导派工的主模型
+    //(后台代理权限拒绝无告知单,2026-08-17)。与 on_tool_confirm 同线程
+    // 先后调用,回调层可以拿同一份局部状态区分拒绝原因。
+    std::function<std::string(const std::string& name)> on_tool_denial_text;
+
     // 工具跑完了(不管成功、失败、被拒绝、还是压根没找到这个工具),都会调用一次。
     std::function<void(const std::string& name, const tools::Tool::Result& result)> on_tool_done;
 
