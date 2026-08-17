@@ -37,6 +37,8 @@
 
 `settings.local.json`、会话“总是允许”和确认档可改变实际确认行为。详见[配置手册](configuration.md#七settingslocaljson项目级本地权限)。
 
+后台代理的写操作须预放行：后台子代理没有可弹确认的终端，`needs_confirm` 的工具（`write_file`、`edit_file`、`run_command` 等）一律当场拒绝——主会话导航坞会立刻弹一条 toast 并在 transcript 记事件（含 `/permissions` 预放行的出路），但重试仍会被拒。要让后台代理干活，先在 `/permissions`（写进 `settings.local.json` 的 allow）预放行对应工具，或让它前台跑。
+
 ## 文件工具
 
 ### `read_file`

@@ -446,6 +446,10 @@ public:
     // (导航坞 toast)报"谁完成了"用,不用从通知行里倒着解析 #N。
     std::vector<int> UndeliveredCompletionTaskIds() const;
 
+    // 取走攒着的后台权限拒绝通知(每条一行,取走即清):主会话空闲拍轮询,
+    // 有就 toast + transcript 事件。空表 = 没有未告知的拒绝。
+    std::vector<std::string> TakePermissionDenialNotices();
+
     // 主会话切进 /worktree 后，子代理也得看见同一处工作目录。
     void SetWorkingDirectory(std::string cwd) { cwd_ = std::move(cwd); }
 
@@ -640,6 +644,11 @@ private:
     std::function<std::unique_ptr<ToolRegistry>()> detached_registry_factory_;
     mutable std::mutex tasks_mutex_;
     std::vector<std::shared_ptr<TaskRecord>> tasks_;
+    // 后台任务"需确认工具被拒"的当场通知(后台代理权限拒绝无告知单,
+    // 2026-08-17):任务线程在 on_tool_confirm 拒绝那一刻推一行进来,主会话
+    // 在空闲 composer 的 100ms 拍里 TakePermissionDenialNotices 取走——
+    // toast + transcript 事件当场落地,绝不攒到最终报告。
+    std::vector<std::string> permission_denial_notices_;
     std::vector<std::thread> task_threads_;
     int next_task_id_ = 1;
     std::atomic<std::uint64_t> task_revision_{0};

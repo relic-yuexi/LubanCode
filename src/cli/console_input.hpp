@@ -159,9 +159,10 @@ void SetAgentPanelProvider(AgentPanelProvider provider);
 // 最近条目,task_id = 铺那只子代理的完整 transcript(prompt/工具调用/结果/
 // 错误)。tail_rows = 0 整份铺(真切会话);>0 是实时流的重铺拍(追加需求
 // "查看态实时思考流"):应用层只保头几行+最近 tail_rows 行,长会话不往滚屏
-// 一秒刷一遍。空闲路调它前,终端层已把光标挪到旧 chrome 之下,旧帧随铺出
-// 的正文滚走;流式路由它自己(在 StdoutWriteMutex 内)先擦 footer 再铺、
-// 铺完重画 footer。传空钩子即清除。
+// 一秒刷一遍。钩子只打印、不擦旧帧(查看态完成退场花屏单,2026-08-17):
+// 旧查看帧的擦账只有终端层 view_body_top 那一本,两条路(空闲 ReadLine/
+// 流式监听)调钩子前都已按账擦净旧帧、把光标摆到帧顶;流式路钩子自己
+// (在 StdoutWriteMutex 内)先擦 footer 再铺、铺完画回。传空钩子即清除。
 void SetAgentViewSwitchHook(std::function<void(int viewed_task_id, int tail_rows)> hook);
 
 // 面板动作(x 停止/清除、两段确认停全部)的接线口。终端层不直接碰
@@ -197,6 +198,13 @@ void ShowPanelToast(const std::string& text);
 // 顶去办自己的事。只在 composer 为空时问——用户敲了一半的正文不抢,等
 // 提交后再说。传空钩子即清除;管道/重定向走不到逐键路径,设了也永不触发。
 void SetIdleWakeHook(std::function<bool()> hook);
+
+// 后台通知钩子(后台代理权限拒绝无告知单,2026-08-17):空闲 composer 每
+// 100ms 的拍里叫一声,应用层把攒着的"当场要让人知道"的系统侧通知取走、
+// 自己落账(导航坞 toast + transcript 事件)——比如后台子代理的 needs_confirm
+// 工具被拒,用户当拍就能看见,不用等最终报告。与 IdleWakeHook 不同,这个
+// 不让位、不起轮,纯通知。传空钩子即清除;管道/重定向走不到逐键路径。
+void SetBackgroundNoticeHook(std::function<void()> hook);
 
 // Ctrl+R 提问历史反向搜索的数据源(0.30.x 第二批):应用层从 session 事件
 // 账只读现抽一份 PromptHistoryDataset(打开搜索框时取一次,范围轮换在

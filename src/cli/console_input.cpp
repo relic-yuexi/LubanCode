@@ -178,6 +178,14 @@ std::function<bool()>& IdleWakeHookSlot() {
     return hook;
 }
 
+// 后台通知钩子的存取点(同一套会话级静态槽;主线程独占):空闲 composer
+// 的 100ms 拍里叫一声,应用层把攒着的"当场要让人知道"的系统侧通知(比如
+// 后台子代理的权限拒绝)取走自己落账(toast + transcript 事件)。
+std::function<void()>& BackgroundNoticeHookSlot() {
+    static std::function<void()> hook;
+    return hook;
+}
+
 // Ctrl+R 提问历史搜索的数据源槽(同一套会话级静态槽;主线程读写)。
 PromptHistoryProvider& PromptHistoryProviderSlot() {
     static PromptHistoryProvider provider;
@@ -1279,6 +1287,13 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     // 锚点只在本段读取内有效:两段读取之间可能跑过整轮(流式正文滚屏),
     // 绝对行号全部失效——跨调用的"查看任务退场"走下面进门路的清屏重铺,
     // 不认旧锚点。
+    //
+    // 擦账只此一本(查看态完成退场花屏单,2026-08-17):0.26.11 曾在 app 侧
+    // PrintViewedTranscript 里另立一份帧账(绝对行顶/行数/视口顶),进门先按
+    // 那份账擦一遍再画——两把擦子先后下手,console 侧刚把旧帧区清空、app 侧
+    // 又按一份跨调用且会被实时流重铺/滚屏弄失准的绝对行账再擦一矩形,光标
+    // 被带偏到别处,退场回 main 那一拍整个画面跟着报销。现在 app 侧钩子只打
+    // 印不擦,擦旧帧全归这本账(每次铺帧前现记现擦,绝不跨调用攒)。
     // -------------------------------------------------------------------
     std::optional<int> view_body_top;  // 上一视图正文的缓冲顶行;nullopt = 无
     const auto erase_previous_view_body = [&]() {
@@ -1300,10 +1315,13 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         platform::SetCursorPos(0, top);
         view_body_top.reset();
     };
-    // view_hook 前后各取一次光标:正文顶行落在打印前的光标处,新帧从这
-    // 里开始,也是下一次切换要擦的顶。tail_rows>0 是实时流的重铺拍(只铺
-    // 头几行+最近 N 行,见 console_input.hpp 的钩子注释)。
+    // 擦旧帧与铺新帧永远成对(先擦净再落帧,钩子只打印):调这一个就够,
+    // 不给"只打印不擦"或"只擦不重记"留缝。view_hook 前取一次光标:正文顶行
+    // 落在打印前的光标处,新帧从这里开始,也是下一次切换要擦的顶。
+    // tail_rows>0 是实时流的重铺拍(只铺头几行+最近 N 行,见 console_input.hpp
+    // 的钩子注释)。
     const auto print_view_frame = [&](int viewed_after, int tail_rows = 0) {
+        erase_previous_view_body();
         const std::optional<platform::ScreenInfo> before = platform::GetScreenInfo();
         const auto& view_hook = AgentViewSwitchHookSlot();
         if (view_hook) {
@@ -1321,8 +1339,8 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         // viewed_before_tick 已经读不到旧值,原子回 main 得在这里补上。
         const int viewed_before_entry = panel_session.SnapshotFor(nav_ids_for(panel_entries())).viewed_task_id;
         redraw_with_panel(editor.CurrentRenderState(), panel_entries());
-        if (viewed_before_entry != 0 &&
-            panel_session.SnapshotFor(nav_ids_for(panel_entries())).viewed_task_id == 0) {
+        const int viewed_after_entry = panel_session.SnapshotFor(nav_ids_for(panel_entries())).viewed_task_id;
+        if (viewed_before_entry != 0 && viewed_after_entry == 0) {
             // 原子回 main(规格"现场一/四"),与 tick 路同义。但锚点跨调用
             // 不可信(期间可能整轮流式滚过屏),改走 Ctrl+L 的办法:清整个
             // 可视区、main 帧重铺、重锚整帧重画——不按绝对行号硬擦,滚屏
@@ -1340,6 +1358,26 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 print_view_frame(0);
             }
             reanchor_prompt_and_redraw();
+        } else if (viewed_before_entry != 0 && viewed_after_entry != 0) {
+            // 跨读取段仍是查看态(流式监听里切看后回合收口、查看态提交介入
+            // 消息后重进 composer……):上一段记的帧锚点在这段里不可信,而
+            // 本段的 view_body_top 还是空的——不重铺的话,下一拍实时流重铺
+            // 会在旧帧下方再铺一份,查看帧成双。进门就把可视区整块清掉、该
+            // 代理的查看帧整份重铺,帧账从这一帧重新起(与上面退场回 main
+            // 同一条"不认跨拍锚点"的规矩)。
+            const std::optional<platform::ScreenInfo> clear_info = platform::GetScreenInfo();
+            if (clear_info.has_value()) {
+                const int vh =
+                    clear_info->viewport_height > 0 ? clear_info->viewport_height : clear_info->height;
+                const int top = clear_info->viewport_y;
+                for (int y = top; y < top + vh && y < clear_info->height; ++y) {
+                    platform::ClearRowHardFrom(0, y, clear_info->width);
+                }
+                platform::SetCursorPos(0, top);
+                view_body_top.reset();
+                print_view_frame(viewed_after_entry);
+                reanchor_prompt_and_redraw();
+            }
         }
     }
 
@@ -1423,6 +1461,12 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 last_screen_width = size_info->width;
                 last_screen_height = size_info->height;
             }
+            // 后台代理权限拒绝等"当场要让人知道"的通知:应用层这一拍取走
+            // 攒着的,自己落 toast 与 transcript 事件(终端层只叫一声,不管
+            // 通知内容)。放在帧构建之前,toast 当拍就能进这一帧的坞区。
+            if (const auto& notice_hook = BackgroundNoticeHookSlot()) {
+                notice_hook();
+            }
             const auto entries = panel_entries();
             const int viewed_before_tick = panel_session.SnapshotFor(nav_ids_for(entries)).viewed_task_id;
             const bool armed_expired = panel_session.ExpireArmed(std::chrono::steady_clock::now());
@@ -1440,8 +1484,24 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 // 项,全在这一拍办完;旧代理正文先擦净再落 main 帧,不得继续
                 // 躺在视口里冒充当前会话(规格"现场一/四")。完成结果的短行
                 // 由主循环投递路记一条有归属的 transcript 事件,这里不重复报。
+                //
+                // 退场清屏不认任何跨拍锚点(与进门路同款):查看期间实时流
+                // 每 ≥1s 重铺一拍,重铺后的滚屏/平移会把上一拍记的绝对行号
+                // 全弄失准,按账硬擦轻则漏擦留残影、重则擦到别处(查看态完
+                // 成退场整屏空白卡死单,2026-08-17)。直接把当前可视区整块清
+                // 干净、main 帧整帧重铺——滚屏历史照旧不清,结果一行不丢。
                 retire_idle_chrome();
-                erase_previous_view_body();
+                const std::optional<platform::ScreenInfo> clear_info = platform::GetScreenInfo();
+                if (clear_info.has_value()) {
+                    const int vh =
+                        clear_info->viewport_height > 0 ? clear_info->viewport_height : clear_info->height;
+                    const int top = clear_info->viewport_y;
+                    for (int y = top; y < top + vh && y < clear_info->height; ++y) {
+                        platform::ClearRowHardFrom(0, y, clear_info->width);
+                    }
+                    platform::SetCursorPos(0, top);
+                    view_body_top.reset();  // 旧帧随整块清屏作废,print_view_frame 会重记
+                }
                 print_view_frame(0);
                 reanchor_prompt_and_redraw();
                 continue;
@@ -1471,7 +1531,6 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                                                                       live_info->viewport_height / 4)
                                                   : 20;
                     retire_idle_chrome();
-                    erase_previous_view_body();
                     print_view_frame(snapshot.viewed_task_id, viewport_rows);
                     reanchor_prompt_and_redraw();
                     continue;
@@ -1994,7 +2053,6 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                         // 提示符、重锚、整帧重画。Enter 只切视图,草稿不提交
                         // (能进到这的 Enter 必然发生在 composer 为空时)。
                         retire_idle_chrome();
-                        erase_previous_view_body();
                         print_view_frame(viewed_after);
                         note_view_revision(panel_entries(), viewed_after);
                         live_view_last_refresh = std::chrono::steady_clock::now();
@@ -2042,8 +2100,21 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 action = UiKeyAction::Escape;
             }
             if (action.has_value()) {
-                if (const std::optional<platform::ScreenInfo> before_info = platform::GetScreenInfo();
-                    before_info.has_value()) {
+                // 查看态里的 Ctrl+O 是"查看帧重铺拍"(HandleTranscriptUi 会整份
+                // 重铺那只子代理的 transcript):与真切会话同款,先收底栏、按
+                // view_body_top 这本账把旧查看帧擦净——app 侧只打印不擦,不在这
+                // 再开第二本账(查看态完成退场花屏单)。
+                const bool view_relay = *action == UiKeyAction::ToggleExpand && CurrentAgentViewedTaskId() != 0;
+                std::optional<int> relay_frame_top;
+                if (view_relay) {
+                    retire_idle_chrome();
+                    erase_previous_view_body();
+                    if (const std::optional<platform::ScreenInfo> relay_info = platform::GetScreenInfo();
+                        relay_info.has_value()) {
+                        relay_frame_top = relay_info->cursor_y;
+                    }
+                } else if (const std::optional<platform::ScreenInfo> before_info = platform::GetScreenInfo();
+                           before_info.has_value()) {
                     int last_row = start_row + prev_body_row_count;
                     if (last_row >= before_info->height) {
                         last_row = before_info->height - 1;
@@ -2052,6 +2123,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 }
                 const bool handled = UiHandlerSlot()(*action);
                 if (handled) {
+                    if (relay_frame_top.has_value()) {
+                        view_body_top = relay_frame_top;  // 重铺帧的顶,下一次切换照账擦
+                    }
                     // 回调铺完内容,重打提示符、重测锚点,整帧(含导航坞)重画。
                     reanchor_prompt_and_redraw();
                     continue;
@@ -2339,6 +2413,8 @@ void ShowPanelToast(const std::string& text) {
 }
 
 void SetIdleWakeHook(std::function<bool()> hook) { IdleWakeHookSlot() = std::move(hook); }
+
+void SetBackgroundNoticeHook(std::function<void()> hook) { BackgroundNoticeHookSlot() = std::move(hook); }
 
 void SetPromptHistoryProvider(PromptHistoryProvider provider) {
     PromptHistoryProviderSlot() = std::move(provider);
@@ -3033,6 +3109,43 @@ void TurnInputListener::ThreadMain() {
     bool delete_armed = false;
     std::chrono::steady_clock::time_point delete_armed_until{};
 
+    // 流式路查看帧的擦账(与空闲路 ReadLineKeyByKey 里那本同款规矩,各自
+    // 一份、只在本段读取内有效):真切会话前先按上一帧的缓冲顶行把旧查看
+    // 帧从可视区擦净再铺新帧。app 侧视图切换钩子只打印不擦(查看态完成
+    // 退场花屏单,2026-08-17)——擦账全程序只认"铺帧前现记的 console 侧
+    // 这一本",绝不并立第二本。
+    std::optional<int> view_body_top;
+    const auto erase_previous_view_body = [&]() {
+        if (!view_body_top.has_value()) {
+            return;
+        }
+        const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
+        if (!info.has_value()) {
+            view_body_top.reset();
+            return;  // 拿不到屏幕信息:退回旧行为,不硬擦
+        }
+        int top = *view_body_top;
+        if (top < info->viewport_y) {
+            top = info->viewport_y;  // 只管当前 viewport,滚屏历史不动
+        }
+        for (int y = top; y < info->height; ++y) {
+            platform::ClearRowHardFrom(0, y, info->width);
+        }
+        platform::SetCursorPos(0, top);
+        view_body_top.reset();
+    };
+    const auto print_view_frame = [&](int viewed_after) {
+        erase_previous_view_body();
+        const std::optional<platform::ScreenInfo> before = platform::GetScreenInfo();
+        const auto& view_hook = AgentViewSwitchHookSlot();
+        if (view_hook) {
+            view_hook(viewed_after, /*tail_rows=*/0);
+        }
+        if (before.has_value()) {
+            view_body_top = before->cursor_y;
+        }
+    };
+
     // footer 快照:输入行回显 + slash 提示,全部取本地编辑器同一份
     // RenderState(队列区在 RedrawStreamFooterLocked 里现拉 SteeringQueue
     // 快照,这里不用搬)。回显多行正文只摆首行、尾巴带行数提示(完整正文在
@@ -3394,12 +3507,10 @@ void TurnInputListener::ThreadMain() {
                                                        std::chrono::steady_clock::now());
                     const int viewed_after = PanelSessionSlot().SnapshotFor(ids).viewed_task_id;
                     if (viewed_after != snapshot.viewed_task_id) {
-                        // 真切会话:钩子自管锁(先擦 footer 再铺该代理的
-                        // transcript、铺完重画 footer),这里不持锁调用。
-                        const auto& view_hook = AgentViewSwitchHookSlot();
-                        if (view_hook) {
-                            view_hook(viewed_after, /*tail_rows=*/0);
-                        }
+                        // 真切会话:先按上一帧的账擦净旧查看帧,钩子只打印
+                        // (自管锁:先擦 footer 再铺、铺完重画 footer),这里
+                        // 不持锁调用。
+                        print_view_frame(viewed_after);
                     }
                     refresh_footer();
                     continue;

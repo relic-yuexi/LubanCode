@@ -450,6 +450,56 @@ TEST_CASE("用户拒绝确认:工具不执行,tool_result 是 is_error") {
     CHECK(tool_result.content.find("拒绝") != std::string::npos);
 }
 
+TEST_CASE("拒绝文案回调:设了 on_tool_denial_text 用回调的,没设用缺省'用户拒绝'") {
+    // 后台子代理的拒绝是"没人可问、未预放行",不是用户拒绝(后台代理权限
+    // 拒绝无告知单,2026-08-17)——文案必须能由回调层如实给,不然子代理
+    // 照缺省文案汇报,最终报告写成"均被用户拒绝"。
+    {
+        FakeBackend backend;
+        backend.scripts = {
+            ToolUseScript("toolu_deny", "dangerous_tool"),
+            TextOnlyScript("收到,如实汇报受阻"),
+        };
+        tools::ToolRegistry registry;
+        registry.Register(
+            std::make_unique<FakeTool>("dangerous_tool", tools::Tool::Result{"不该被看到的结果", false}, true));
+
+        agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+        agent::Callbacks callbacks;
+        callbacks.on_tool_confirm = [](const std::string&, const nlohmann::json&) -> bool { return false; };
+        callbacks.on_tool_denial_text = [](const std::string& name) {
+            return "后台任务无法弹权限确认," + name + " 未预先放行,已被拒绝。";
+        };
+        REQUIRE(loop.Run("去写个文件", callbacks).has_value());
+
+        REQUIRE(loop.history().size() == 4);
+        const auto& tool_result = std::get<api::ToolResultBlock>(loop.history()[2].content[0]);
+        CHECK(tool_result.is_error);
+        CHECK(tool_result.content.find("后台任务无法弹权限确认") != std::string::npos);
+        CHECK(tool_result.content.find("未预先放行") != std::string::npos);
+        CHECK(tool_result.content.find("用户拒绝") == std::string::npos);
+    }
+    {
+        // 不设回调:缺省文案不变(前台/普通会话的拒绝就是用户拒绝)。
+        FakeBackend backend;
+        backend.scripts = {
+            ToolUseScript("toolu_deny2", "dangerous_tool"),
+            TextOnlyScript("好的,不执行了"),
+        };
+        tools::ToolRegistry registry;
+        registry.Register(
+            std::make_unique<FakeTool>("dangerous_tool", tools::Tool::Result{"不该被看到的结果", false}, true));
+
+        agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+        agent::Callbacks callbacks;
+        callbacks.on_tool_confirm = [](const std::string&, const nlohmann::json&) -> bool { return false; };
+        REQUIRE(loop.Run("去写个文件", callbacks).has_value());
+
+        const auto& tool_result = std::get<api::ToolResultBlock>(loop.history()[2].content[0]);
+        CHECK(tool_result.content == "用户拒绝执行该工具");
+    }
+}
+
 TEST_CASE("超过步数上限:预算耗尽不是错误,hit_step_limit 带 steps/stop_reason 交回") {
     FakeBackend backend;
     // 永远回 tool_use,模型一直要工具,逼近步数上限。

@@ -1108,6 +1108,67 @@ TEST_CASE("后台子代理立即交回任务号,独立跑完,结果只投递一�
     CHECK(agent_tool.DrainCompletionNotices().empty());
 }
 
+// 后台代理权限拒绝无告知单(2026-08-17):后台子代理没人可问,needs_confirm
+// 的工具一律当场拒。要验的是三件事:通知账里当场落一条(带任务号/工具名
+// 与 /permissions 出路,取走即清,不攒到最终报告);任务事件账里给子代理的
+// 拒绝文案如实写"后台无法弹确认、未预放行",全文不出现"用户拒绝";需确
+// 认工具从头到尾没真执行。
+TEST_CASE("后台子代理的 needs_confirm 工具被拒:当场入通知账,拒绝文案如实") {
+    FakeBackend foreground_backend;
+    tools::ToolRegistry sub_registry;
+    auto* gated_ptr = new FakeTool("write_confirm", tools::Tool::Result{"写了", false}, /*needs_confirm=*/true);
+    sub_registry.Register(std::unique_ptr<FakeTool>(gated_ptr));
+
+    auto backend = std::make_unique<FakeBackend>();
+    backend->scripts = {
+        ToolUseScript("toolu_deny", "write_confirm"),
+        TextOnlyScript("受阻:写操作未放行,如实汇报"),
+    };
+    FakeBackend* backend_ptr = backend.get();
+    tools::AgentTool agent_tool(foreground_backend, sub_registry, "/work/dir");
+    agent_tool.SetDetachedBackendFactory([&backend]() {
+        tools::DetachedAgentBackend detached;
+        detached.backend = std::move(backend);
+        return detached;
+    });
+
+    const auto launch = agent_tool.execute(
+        nlohmann::json{{"title", "写份材料"}, {"prompt", "去写个文件"}, {"run_in_background", true}});
+    REQUIRE_FALSE(launch.is_error);
+    (void)backend_ptr;
+
+    for (int i = 0; i < 300 && agent_tool.HasRunningTasks(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE_FALSE(agent_tool.HasRunningTasks());
+
+    // 通知账:恰好一条,带任务号、工具名与 /permissions 出路;取走即清。
+    const std::vector<std::string> notices = agent_tool.TakePermissionDenialNotices();
+    REQUIRE(notices.size() == 1);
+    CHECK(notices[0].find("#1") != std::string::npos);
+    CHECK(notices[0].find("write_confirm") != std::string::npos);
+    CHECK(notices[0].find("未放行") != std::string::npos);
+    CHECK(notices[0].find("/permissions") != std::string::npos);
+    CHECK(agent_tool.TakePermissionDenialNotices().empty());
+
+    // 事件账:给子代理的拒绝文案如实说原因与出路,不冒充"用户拒绝"。
+    const auto events = agent_tool.TaskEvents(1);
+    bool saw_denial = false;
+    for (const auto& event : events) {
+        if (event.kind == tools::AgentTaskEventKind::ToolResult && event.tool_name == "write_confirm") {
+            saw_denial = true;
+            CHECK(event.is_error);
+            CHECK(event.result.find("后台任务无法弹出权限确认") != std::string::npos);
+            CHECK(event.result.find("未预先放行") != std::string::npos);
+            CHECK(event.result.find("并非用户拒绝") != std::string::npos);
+            CHECK(event.result.find("用户拒绝执行该工具") == std::string::npos);
+        }
+    }
+    CHECK(saw_denial);
+    // 需确认工具没真执行。
+    CHECK(gated_ptr->call_count == 0);
+}
+
 // 回流回归(2026-08-14 死机会话):后台子代理在会话空闲时跑完,主循环正
 // 阻塞在等键输入上。面板轮询看得见"完成"(TaskRevision 变了),但结果
 // 只在下一个 RunTurn 开头才被 Drain 走——没有"有货待投递"的信号,主循环

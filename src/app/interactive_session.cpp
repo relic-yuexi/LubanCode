@@ -467,13 +467,12 @@ private:
     // 思考/正文尾巴的展开开关。只在主线程(HandleTranscriptUi)翻,构建
     // 查看帧时读;Esc/切换查看目标时复位。
     bool agent_view_expanded_ = false;
-    // 查看帧的 retained 账(修"切换视图每秒往滚屏堆一帧"):上一帧画在哪个
-    // 绝对行、占几物理行、当时的视口顶——下一帧先按这三笔擦掉旧帧再原位
-    // 画新帧。滚屏了按视口位移修正;滚出缓冲或拿不到屏幕信息就退回追加
-    // (偶尔残一回,绝不误吞正文)。跑新一轮主回合时作废(RunUserTurn 复位)。
-    int view_frame_top_ = -1;
-    int view_frame_rows_ = 0;
-    int view_frame_vp_y_ = 0;
+    // 查看帧没有 app 侧擦账(查看态完成退场花屏单,2026-08-17):旧帧擦除
+    // 只认终端层 console_input 那本 view_body_top——铺帧前现记现擦,不跨
+    // 调用攒绝对行号。这里(PrintViewedTranscript)只从终端层摆好的光标处
+    // 起打印。旧版 app 侧另记一份"绝对行顶/物理行数/视口顶"的帧账,被
+    // 实时流重铺/滚屏弄失准后进门一擦,擦花刚铺好的帧、光标带偏——两本
+    // 账并存即出事,已拆。
 
     // ---- 主 AgentLoop 与轮次材料 ----
     lubancode::agent::PromptOptions prompt_options;
@@ -812,6 +811,33 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
         return session_agent_tool() != nullptr && session_agent_tool()->HasUndeliveredCompletions();
     });
 
+    // 后台代理权限拒绝的当场告知(后台代理权限拒绝无告知单,2026-08-17):
+    // 后台任务的 needs_confirm 工具被拒那一刻,AgentTool 已把一行通知推进
+    // 台账;空闲 composer 的 100ms 拍在这里取走——导航坞 toast 一枚(几秒
+    // 自收)+ transcript 记一条有归属的事件,用户当拍看见,不攒到最终报告。
+    // 只落 toast 与台账,不打裸行:不打断 composer,查看态零扰动。
+    lubancode::cli::SetBackgroundNoticeHook([this]() {
+        if (session_agent_tool() == nullptr) {
+            return;
+        }
+        const std::vector<std::string> notices = session_agent_tool()->TakePermissionDenialNotices();
+        if (notices.empty()) {
+            return;
+        }
+        for (const std::string& notice : notices) {
+            lubancode::cli::ShowPanelToast(notice);
+            lubancode::cli::TranscriptItem item;
+            item.id = static_cast<int>(transcript.size()) + 1;
+            item.kind = lubancode::cli::TranscriptKind::Tool;
+            item.tool_name = "agent_notice";
+            item.title = tr("agent_panel.denial_notice_title");
+            item.status = lubancode::cli::TranscriptStatus::Error;
+            item.start_time = item.end_time = std::chrono::steady_clock::now();
+            item.summary_lines = {notice};
+            transcript.push_back(std::move(item));
+        }
+    });
+
     // Ctrl+R 提问历史搜索的数据源(0.30.x 第二批):只读 session 事件账,
     // 打开搜索框时取一次(范围轮换在终端层本地过滤,不反复读盘)。
     lubancode::cli::SetPromptHistoryProvider([this]() { return CollectPromptHistory(); });
@@ -990,6 +1016,7 @@ InteractiveSession::~InteractiveSession() {
     lubancode::cli::SetAgentViewSwitchHook(nullptr);
     lubancode::cli::SetAgentPanelActions(lubancode::cli::AgentPanelActions{});
     lubancode::cli::SetIdleWakeHook(nullptr);
+    lubancode::cli::SetBackgroundNoticeHook(nullptr);
     lubancode::cli::SetPromptHistoryProvider(nullptr);
     lubancode::cli::SetFileMentionProvider(nullptr);
 }
@@ -1293,36 +1320,29 @@ std::vector<std::string> InteractiveSession::BuildAgentTaskTranscriptLines(int t
 // 不往滚屏里一秒刷一遍;tail_rows=0(真切会话)仍整份铺。持
 // StdoutWriteMutex——流式期间先擦 footer 再铺、铺完画回;空闲路两步都是
 // 空操作,正文从旧 chrome 之下接着铺。
+//
+// 只打印,不擦旧帧(查看态完成退场花屏单,2026-08-17):旧帧擦账归终端层
+// console_input 的 view_body_top(每次铺帧前现记现擦,绝不跨调用攒绝对行
+// 号)。这里曾经自记一份"绝对行顶/物理行数/视口顶"的帧账、进门先按它擦
+// 一矩形——账被实时流重铺/滚屏/平移弄失准后,这一擦轻则漏擦留残影,重则
+// 擦掉刚铺好的帧、把光标带偏到别处(查看态盯完后台任务、完成退场回 main
+// 那拍整屏空白卡死,即此病)。调用方(空闲 tick/流式监听/Ctrl+O 重铺)都已
+// 先擦净再把光标摆到帧顶,本函数从光标处起铺即可。
+//
+// "卡死"定性(驱动器复现后):不是线程死锁——本函数持 StdoutWriteMutex
+// 后只再拿 AgentTool 的 tasks_mutex_(TaskEvents),全程序锁序恒为
+// StdoutWriteMutex → tasks_mutex_(流式 footer 心跳线程、空闲 tick、监听
+// 线程同序);任务线程的回调在 tasks_mutex_ 作用域内不反向拿输出锁,无
+// ABBA。真机上的"按键无响应"是双重擦账把画面与光标账擦崩:ReadLine 循
+// 环一直活着、键都进了编辑器,但帧没了、chrome 锚点在屏外,回显画在用户
+// 看不见的地方。驱动器第四幕"退场后键入立即回显 + /exit 退出码 0"钉死
+// 这一条。
 void InteractiveSession::PrintViewedTranscript(int viewed_task_id, int tail_rows) {
     std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
     lubancode::cli::EraseStreamFooterLocked();
     const int width = lubancode::cli::DetectConsoleWidth().value_or(80);
 
-    // 擦旧帧:上一帧的绝对行号/行数/视口顶都记着;滚屏按位移修正。擦不
-    // 成(管道、滚出缓冲、宽度变了折行账失准)就退回旧式追加,残影偶尔一
-    // 回,绝不误吞正文。
-    const auto info = platform::GetScreenInfo();
-    int frame_top = -1;
-    if (info.has_value() && view_frame_rows_ > 0) {
-        const int delta = info->viewport_y - view_frame_vp_y_;
-        const int top = view_frame_top_ - delta;
-        if (top >= 0 && top + view_frame_rows_ <= info->height) {
-            for (int i = 0; i < view_frame_rows_; ++i) {
-                platform::ClearRowHardFrom(0, top + i, info->width);
-            }
-            platform::SetCursorPos(0, top);
-            frame_top = top;
-        }
-    }
-    if (frame_top < 0) {
-        std::cout << "\n";
-    }
-    int frame_rows = 0;
-    const auto print_line = [&](const std::string& line) {
-        std::cout << line << "\n";
-        const int display = std::max(1, static_cast<int>(lubancode::cli::DisplayWidthUtf8(line)));
-        frame_rows += (display + width - 1) / width;  // 折行按物理行记
-    };
+    const auto print_line = [&](const std::string& line) { std::cout << line << "\n"; };
 
     if (viewed_task_id == 0) {
         // 回 main:首个可辨标题写明 main(规格"Esc 回 main"五条件),最近
@@ -1360,14 +1380,6 @@ void InteractiveSession::PrintViewedTranscript(int viewed_task_id, int tail_rows
         }
     }
     std::cout.flush();
-    // 记新帧账:打印完光标停在帧尾下一行行首,回推即帧顶;视口顶同步记。
-    if (const auto after = platform::GetScreenInfo(); after.has_value()) {
-        view_frame_top_ = after->cursor_y - frame_rows;
-        view_frame_rows_ = frame_rows;
-        view_frame_vp_y_ = after->viewport_y;
-    } else {
-        view_frame_rows_ = 0;  // 管道路:不留擦账,免得下次乱擦
-    }
     lubancode::cli::RedrawStreamFooterLocked();
 }
 
@@ -3101,9 +3113,8 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
     }
     loop->SetTurnContext(std::move(turn_suffix));
     const std::size_t history_before = loop->History().size();
-    // 新一轮主回合要在查看帧下方铺正文,旧帧的绝对行账就此作废——不复位
-    // 的话,下次进查看态会按陈账去擦,误吞刚铺的正文。
-    view_frame_rows_ = 0;
+    // 查看帧的 app 侧擦账已拆(见 PrintViewedTranscript 注释):新回合铺正文
+    // 不再需要在这里复位什么行账,终端层那本 view_body_top 按读取段自生灭。
     // 终端标题(0.30.x 第四批):跑着/等输入两态,项目·分支跟着;拿不到
     // 焦点状态,不做"未聚焦才通知"的假判断,只在长轮收口时叫一声铃。
     if (spinner_enabled) {
