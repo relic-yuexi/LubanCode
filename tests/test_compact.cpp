@@ -587,6 +587,7 @@ TEST_CASE("AgentLoop: projected overflow 在请求前通报,回调里压缩后�
     backend.script = SummaryScript("回答正文,凑够字数,免得跟压缩门槛混淆。");
     tools::ToolRegistry registry;
     agent::AgentLoop loop(backend, registry, "test-model", "sys");
+    loop.SetTurnContext("project memory context");
     loop.SetContextWindowTokens(1000);  // 极小窗口:第一请求必然 projected overflow
 
     std::vector<agent::ContextPressure> seen;
@@ -616,6 +617,20 @@ TEST_CASE("AgentLoop: projected overflow 在请求前通报,回调里压缩后�
     REQUIRE(backend.captured_requests[0].messages.size() == 1);
     CHECK(std::get<api::TextBlock>(backend.captured_requests[0].messages[0].content[0]).text.find("对话存档") !=
           std::string::npos);
+    REQUIRE(backend.captured_requests[0].messages[0].content.size() == 2);
+    const auto* context = std::get_if<api::TextBlock>(&backend.captured_requests[0].messages[0].content[1]);
+    REQUIRE(context != nullptr);
+    CHECK(context->text == "project memory context");
+
+    // compact 换的是持久历史；动态上下文只补回请求视图。
+    for (const auto& message : loop.History()) {
+        for (const auto& block : message.content) {
+            const auto* text = std::get_if<api::TextBlock>(&block);
+            if (text != nullptr) {
+                CHECK(text->text.find("project memory context") == std::string::npos);
+            }
+        }
+    }
 }
 
 TEST_CASE("AgentLoop: TrimHistory 兜底真丢东西时,AfterHardTrim 通报") {

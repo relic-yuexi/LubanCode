@@ -1,6 +1,6 @@
 # Hooks:生命周期与信任协议
 
-[文档首页](README.md) · [扩展手册](extensions.md) · [安全模型](security-model.md) · [测试手册](testing-guide.md) · [排错手册](troubleshooting.md)
+[文档首页](README.md) · [Hooks 流程](hooks-flow.md) · [工具调用流程](tool-calling-flow.md) · [扩展手册](extensions.md) · [安全模型](security-model.md) · [测试手册](testing-guide.md) · [排错手册](troubleshooting.md)
 
 LubanCode 的 hooks 框架。对齐 Claude Code / Codex 的共同骨架(PreToolUse、PermissionRequest、PostToolUse、SessionStart/End、UserPromptSubmit、Stop、Pre/PostCompact、SubagentStart/Stop),配置贴两家的通用形状,少造方言。
 

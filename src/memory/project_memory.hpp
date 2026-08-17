@@ -280,9 +280,9 @@ public:
     // 命中时零注入零脚手架(规格"零命中不塞空脚手架")。origin 记这条
     // 查询从哪来:user 才跑检索,合成控制消息(后台完成唤醒等)默认整轮
     // 跳过,只留 trace 来源;确需事实的合成回流可传 force_retrieval。
-    std::string BuildTurnContext(const std::string& query, const std::filesystem::path& cwd,
-                                 QueryOrigin origin = QueryOrigin::User,
-                                 bool force_retrieval = false) const;
+    [[nodiscard]] std::string BuildTurnContext(const std::string& query, const std::filesystem::path& cwd,
+                                               QueryOrigin origin = QueryOrigin::User,
+                                               bool force_retrieval = false) const;
 
     // 上一轮召回的 trace(读 .state/trace-last.json)。没有记录时
     // valid=false。/memory why 用。

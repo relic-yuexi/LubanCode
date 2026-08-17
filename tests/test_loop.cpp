@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "agent/loop.hpp"
+#include "agent/session_store.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "tools/registry.hpp"
@@ -762,7 +763,7 @@ TEST_CASE("上下文硬上限:裁剪与截断后仍超限(单条用户输入就�
 
 // ---------------------------------------------------------------------------
 // 步数将尽提醒:ShouldNudgeStepLimit 是纯函数,直接测触发时机;再用一个真跑
-// AgentLoop 的用例确认提醒文本真的被附到了发出去的 request.system 尾部。
+// AgentLoop 的用例确认提醒文本真的附到了发出去的末条消息尾部。
 // ---------------------------------------------------------------------------
 
 TEST_CASE("ShouldNudgeStepLimit: 剩 3 步那一步触发一次,其余各步不再重复") {
@@ -849,6 +850,18 @@ TEST_CASE("本轮动态上下文:随本轮 user 消息尾部进请求视图,发�
     CHECK(context->text == "project memory context");
     REQUIRE(backend.captured_requests[1].messages.size() == 3);
     REQUIRE(backend.captured_requests[1].messages[0].content.size() == 2);
+
+    // 持久历史只写真输入。session 与 export 都从 History() 取数,不得把
+    // 临时召回包带出本轮请求。
+    REQUIRE_FALSE(loop.History().empty());
+    REQUIRE(loop.History()[0].content.size() == 1);
+    const auto* durable_user = std::get_if<api::TextBlock>(&loop.History()[0].content[0]);
+    REQUIRE(durable_user != nullptr);
+    CHECK(durable_user->text == "go");
+    const std::string session_line = agent::SerializeSessionMessage(loop.History()[0], "ts");
+    CHECK(session_line.find("project memory context") == std::string::npos);
+    const std::string exported = agent::ExportSessionMarkdown(agent::SessionMeta{}, loop.History(), "test");
+    CHECK(exported.find("project memory context") == std::string::npos);
 }
 
 TEST_CASE("图片用户消息入历史，下一轮请求仍带着") {

@@ -1,6 +1,6 @@
 # 会话、上下文与存档
 
-[文档首页](README.md) · [命令参考](commands.md) · [项目记忆](memory-system-design.md) · [安全模型](security-model.md) · [测试手册](testing-guide.md) · [架构说明](architecture.md)
+[文档首页](README.md) · [上下文压缩机制](context-compaction.md) · [命令参考](commands.md) · [项目记忆](memory-system-design.md) · [安全模型](security-model.md) · [测试手册](testing-guide.md) · [架构说明](architecture.md)
 
 LubanCode 把三件事分开：**history** 是当前模型要看的对话，**session** 是磁盘上的事件账，**memory** 是跨会话召回的项目知识。三者互相引用，却不混成一团。
 
@@ -62,7 +62,7 @@ worktree 是独立路径，故 session 仍按各自 cwd 分开列；项目记忆
 3. 工具 schema：当前已挂载工具的名称、说明与 JSON Schema。
 4. 历史：用户、助手、工具调用与结果，以及压缩摘要。
 
-项目记忆命中内容作为本轮 system suffix 追加。它不进入历史，不随着内部工具来回越积越多；下一条外层用户消息再重算。
+项目记忆命中内容先拼成本轮 `turn_context`，随尚未发送的用户消息尾部进入请求视图。它不进入永久 history，不随着内部工具来回越积越多；下一条外层用户消息再重算。
 
 ## token 与缓存命中
 
@@ -84,6 +84,8 @@ worktree 是独立路径，故 session 仍按各自 cwd 分开列；项目记忆
 `k`、`m` 按十进制。这个值告诉压缩器何时该收历史，也供状态栏计算百分比。它不能凭空放大服务端真实窗口；provider 配错过大，最终仍会被远端拒绝。
 
 ## 自动压缩
+
+本节列用户可见行为。单次摘要、episode 切块、map/reduce、验收与回放的完整时序，见[上下文压缩机制](context-compaction.md)。
 
 当历史逼近 `context_window`，主循环会把较旧内容压成摘要，保住最近消息与继续完成任务所需事实。压缩事件写进 session，恢复和导出时能看见边界。
 
@@ -181,7 +183,7 @@ worktree 是独立路径，故 session 仍按各自 cwd 分开列；项目记忆
 
 ### 项目记忆会污染会话吗
 
-不会写入 history、JSONL 或 Markdown 导出。它只作每轮临时 system suffix，且开头明写“只作线索”。
+不会写入永久 history、JSONL 或 Markdown 导出。它只作本轮临时 `turn_context`，随用户消息尾部进入请求视图，且开头明写“只作线索”。
 
 ### 缓存命中为何忽高忽低
 

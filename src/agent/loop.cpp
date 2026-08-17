@@ -262,13 +262,25 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
     if (user_message.role != api::Role::User || user_message.content.empty()) {
         return std::unexpected("用户消息为空，无法发送。");
     }
-    history_.push_back(std::move(user_message));
+    run_active_ = true;
+    active_turn_context_ = turn_context_;
+    struct RunStateGuard {
+        bool& active;
+        std::string& context;
+        ~RunStateGuard() {
+            active = false;
+            context.clear();
+        }
+    } run_state_guard{run_active_, active_turn_context_};
+
+    history_.push_back(user_message);
     // 动态上下文(记忆召回/任务名册)随本轮 user 进请求视图:发过即钉住,
-    // 不再每回合改 system 制造分叉点。落在消息尾部——本条消息尚未发出,
-    // 追加不算追改(前缀缓存守恒单第五期)。
-    if (!turn_context_.empty()) {
-        history_.back().content.push_back(api::TextBlock{turn_context_});
+    // 不再每回合改 system 制造分叉点。持久 history_ 只留真输入;动态块
+    // 只落 request_history_,故而 session/export/compact 都不会把它带走。
+    if (!active_turn_context_.empty()) {
+        user_message.content.push_back(api::TextBlock{active_turn_context_});
     }
+    request_history_.push_back(std::move(user_message));
 
     // 步数与 stop reason 的活账:每次模型请求(每个 step)各记一笔,收场时随
     // RunOutcome 交出去——上层(子代理)按它分型 budget_exhausted/no_final_text
@@ -298,7 +310,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         // 不可能替用户答确认。
         if (inbox_ && step_index > 0) {
             while (auto incoming = inbox_()) {
-                InjectIncomingMessage(history_, std::move(*incoming));
+                api::Message durable = *incoming;
+                InjectIncomingMessage(history_, std::move(durable));
+                InjectIncomingMessage(request_history_, std::move(*incoming));
             }
         }
 
@@ -310,20 +324,22 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         // history 留住——不改 system,不撤旧提醒,追加律不破。ShouldNudge-
         // StepLimit 每次 Run 只真一次,天然只注一遍。
         if (ShouldNudgeStepLimit(step_index, profile_.max_steps_per_turn) && !history_.empty()) {
-            history_.back().content.push_back(api::TextBlock{BuildStepLimitNudgeText()});
+            const api::TextBlock nudge{BuildStepLimitNudgeText()};
+            history_.back().content.push_back(nudge);
+            request_history_.back().content.push_back(nudge);
         }
 
         // mid-turn 安全点:拼请求前先估 projected——system + 工具定义 + 全份
         // history + 输出预留,过参考线就把压力通报出去。上层回调里可以同步
         // 做一次语义压缩(ReplaceHistory),返回后下面 TrimHistory 拿到的就
-        // 是(可能已换短的)history_。窗口未知(0)或没设回调时跳过,行为
+        // 是(可能已换短的)request_history_。窗口未知(0)或没设回调时跳过,行为
         // 与从前一致——这一步不发出任何请求,估错了也不会误伤。
         if (profile_.context_window_tokens > 0 && on_context_pressure_) {
             // 输出上限纳入 projected 计算(规格根因一):声明了用声明值,
             // unset 用保守估计(kUnsetOutputReserveEstimateTokens)——服务端
             // 默认上限拿不到准数,宁可早压不撞墙。
             const OutputBudget output_budget{profile_.max_output_tokens, profile_.max_output_tokens_source};
-            std::size_t projected = EstimateUtf8Tokens(request.system) + EstimateHistoryTokens(history_) +
+            std::size_t projected = EstimateUtf8Tokens(request.system) + EstimateHistoryTokens(request_history_) +
                                     static_cast<std::size_t>(output_budget.reserve_for_estimate());
             for (const auto& tool : registry_.All()) {
                 if (tool_filter_ && !tool_filter_(*tool)) {
@@ -349,10 +365,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         // 第二期:带仓时 Artifact 决策先落盘,视图带稳定 artifact_id。
         std::vector<api::Message> view_source;
         if (structural_compression_enabled_) {
-            view_source = CompressWorkingView(history_, structural_options_, structural_stats_,
+            view_source = CompressWorkingView(request_history_, structural_options_, structural_stats_,
                                               result_view_memo_, artifact_store_);
         } else {
-            view_source = history_;
+            view_source = request_history_;
         }
 
         // 字符安全网 + sticky 视图:还没动手裁过,就按老规矩裁;真动手裁了
@@ -543,6 +559,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
                 api::Message assistant_message = assembler.BuildMessage();
                 assistant_message.content.push_back(api::TextBlock{"[用户按 ESC 打断了这条回答]"});
                 history_.push_back(assistant_message);
+                request_history_.push_back(assistant_message);
 
                 // 半截流里如果混进了没走完的 tool_use 块(硬收尾出来的,
                 // input 多半是空对象或者解析失败),必须给每一个都配一条
@@ -560,7 +577,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
                     api::Message orphan_message;
                     orphan_message.role = api::Role::User;
                     orphan_message.content = std::move(orphan_results);
-                    history_.push_back(std::move(orphan_message));
+                    history_.push_back(orphan_message);
+                    request_history_.push_back(std::move(orphan_message));
                 }
 
                 return RunOutcome{true, false, false, last_stop_reason, steps_used};
@@ -576,6 +594,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         ++steps_used;
         last_stop_reason = stop_reason;
         history_.push_back(assistant_message);
+        request_history_.push_back(assistant_message);
         // usage 是否报告(规格根因四):任一请求带回过非零 usage 就算报告过,
         // 之后失败页说"token 数未报告"只看这一位,不拿 0 糊。
         {
@@ -631,7 +650,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
                     api::Message marker;
                     marker.role = api::Role::User;
                     marker.content.push_back(api::TextBlock{BuildLengthContinuationText()});
-                    history_.push_back(std::move(marker));
+                    history_.push_back(marker);
+                    request_history_.push_back(std::move(marker));
                     ++budget_report.continuations_used;
                     continue;  // 下一步循环:不重发 prompt,只带标记续跑
                 }
@@ -676,7 +696,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         api::Message tool_result_message;
         tool_result_message.role = api::Role::User;
         tool_result_message.content = std::move(tool_results);
-        history_.push_back(std::move(tool_result_message));
+        history_.push_back(tool_result_message);
+        request_history_.push_back(std::move(tool_result_message));
 
         if (interrupted) {
             return RunOutcome{true, false, false, last_stop_reason, steps_used};

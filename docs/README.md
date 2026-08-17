@@ -19,9 +19,10 @@
 | 接一家模型服务 | [配置手册](configuration.md) | [Provider 目录](provider-catalog.md) |
 | 查 slash 命令或快捷键 | [命令与按键](commands.md) | [终端交互](terminal-ui.md) |
 | 查工具参数、确认与上限 | [工具参考](tools.md) | [安全模型](security-model.md) |
-| 恢复、导出或压缩会话 | [会话与上下文](sessions-and-context.md) | [Query 数据流](query-data-flow.md) |
-| 开项目记忆 | [项目记忆](memory-system-design.md) | [安全模型](security-model.md) |
-| 写 Hook | [Hooks 手册](hooks.md) | [配置手册](configuration.md) |
+| 恢复、导出或压缩会话 | [会话与上下文](sessions-and-context.md) | [上下文压缩机制](context-compaction.md) |
+| 看工具怎样调用、校验与回填 | [工具调用流程](tool-calling-flow.md) | [工具参考](tools.md) |
+| 开项目记忆 | [项目记忆](memory-system-design.md) | [项目记忆流程](memory-system-flow.md) |
+| 写 Hook | [Hooks 手册](hooks.md) | [Hooks 流程](hooks-flow.md) |
 | 用程序化工具调用 | [PTC 手册](ptc.md) | [工具参考](tools.md) |
 | 写 Skill、接 MCP/LSP 或做插件 | [扩展指南](extensions.md) | [安全模型](security-model.md) |
 | 用 `/init` 给仓库立规矩 | [项目指令](project-instructions.md) | [配置手册](configuration.md) |
@@ -59,8 +60,10 @@
 | --- | --- |
 | [终端交互](terminal-ui.md) | composer、排队、转录、公式、diff 与面板。 |
 | [会话与上下文](sessions-and-context.md) | history、session、token、缓存与 compact。 |
+| [上下文压缩机制](context-compaction.md) | 结构压缩、语义 compact、分层归并、验收与回放。 |
 | [项目指令](project-instructions.md) | `/init`、AGENTS 层级、覆盖与上限。 |
 | [项目记忆](memory-system-design.md) | 召回、候选、学习档、后台写入与数据边界。 |
+| [项目记忆流程](memory-system-flow.md) | 项目身份、召回、候选审阅、队列与 worker 全链。 |
 | [扩展指南](extensions.md) | Skill、MCP、LSP、Lua、C ABI 与分发。 |
 | [排错手册](troubleshooting.md) | 从症状出发的检查顺序与证据清单。 |
 
@@ -70,6 +73,8 @@
 | --- | --- |
 | [架构说明](architecture.md) | 模块边界、启动、请求链、线程与平台。 |
 | [Query 数据流](query-data-flow.md) | 一条输入怎样走过 prompt、history、wire、工具与子代理。 |
+| [工具调用流程](tool-calling-flow.md) | 工具块怎样验参、过 Hook 与权限、执行、配对并回填。 |
+| [Hooks 流程](hooks-flow.md) | Hook 怎样装载、匹配、并发执行、归并并回到业务层。 |
 | [命名与计数规范](naming-conventions.md) | turn、step、request、token 等统一词典。 |
 | [提示词模块](../src/prompts/README.md) | 内置 prompt 的拆分、嵌入、播种与覆盖。 |
 

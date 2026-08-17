@@ -1,6 +1,6 @@
 # 工具参考
 
-[文档首页](README.md) · [功能全览](feature-reference.md) · [命令参考](commands.md) · [扩展指南](extensions.md)
+[文档首页](README.md) · [工具调用流程](tool-calling-flow.md) · [Hooks 流程](hooks-flow.md) · [功能全览](feature-reference.md) · [命令参考](commands.md) · [扩展指南](extensions.md) · [安全模型](security-model.md)
 
 本页按当前主线源码整理。工具由名称、说明、JSON Schema、确认属性和执行函数组成。模型只能调用当前注册且已挂载的工具；`/tools` 可查三态。
 

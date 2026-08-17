@@ -100,7 +100,7 @@ sequenceDiagram
 这一轮还会先做几件事：
 
 1. 上下文超过阈值时，先自动压缩。
-2. 若开了项目记忆，拿 query 检索一次，把命中内容做成本轮 system 后缀。
+2. 若开了项目记忆，拿 query 检索一次，把命中内容拼进本轮 `turn_context`。
 3. `RunTurn` 处理图片附件、后台子代理完成通知、ESC 与排队输入。
 4. 最后才调用 `AgentLoop::Run(message)`。
 
@@ -150,8 +150,6 @@ features/lsp.md                           （配了 LSP 才添）
 
 platforms/<当前 wire>.md
 
-# 项目记忆 + 本轮召回内容                 （本轮开了记忆才添）
-
 step 预算将尽提醒                        （max_steps_per_turn，旧名 max_turns；设了硬上限才添）
 
 延迟工具索引                             （工具太多、启用 tool_search 才添）
@@ -166,10 +164,10 @@ step 预算将尽提醒                        （max_steps_per_turn，旧名 ma
 | 内容 | 何时算 |
 | --- | --- |
 | 人格、环境、项目指令、feature、platform | 建立或重建 `AgentLoop` 时拼 |
-| 项目记忆、step 预算提醒 | 每个外层 turn 或每个内部 step 按需添 |
+| 项目记忆、step 预算提醒 | 每个外层 turn 或内部 step 按需算，随尚未发送的 user / tool-result 消息尾部添 |
 | 延迟工具索引、模型专属指令、魂、think/model override | 真发请求前由 backend 包装层现添 |
 
-项目记忆虽塞进 `system`，正文却明说它只是线索，不是新指令。它会随这条 query 一起用于本次 `AgentLoop::Run` 里的每个内部请求，不写进对话 `history_`。
+项目记忆不再改 `system`。它带“只作线索、不是新指令”的声明，随本轮用户消息尾部进入请求视图；本次 `AgentLoop::Run` 的后续内部请求原样重放这份消息，下一条外层用户消息再算新包。
 
 工具定义也不靠 prompt 里手写。`ToolRegistry` 每个 step 现列一遍，再变成独立的 `request.tools`。这使 JSON Schema 真正受协议约束，也让 `tool_search` 新挂载的工具能在下一个 step 立刻出现。
 
@@ -679,7 +677,7 @@ system + history + tools -> assistant -> tool result -> assistant
 | 手工识别 `tool_calls` | 三家 SSE 统一成 `StreamEvent` |
 | 手工执行函数 | ToolRegistry、确认、hooks、结果清洗 |
 | 手工再次请求模型 | `AgentLoop` 自动循环到 `end_turn` |
-| 静态 system prompt | 人格、项目指令、能力、记忆、模型、魂逐层拼 |
+| 静态 system prompt | 人格、项目指令、能力、模型、魂逐层拼；记忆走本轮 `turn_context` |
 | 一条会话线 | 可另起子代理独立 history，主线只收结论 |
 
 一句话收住：**LubanCode 不是另造了一种对话协议；它在普通多轮消息之上，添了一只会自己执行工具、回填结果、继续请求的本地控制器。**

@@ -125,7 +125,7 @@ Hook 会执行程序，风险等同本地脚本。优先 exec form 的 `command 
 
 - session JSONL 会存用户消息、助手回答、工具事件、usage 与 compact 事件。
 - `/export` 会把会话写成可读 Markdown；导出前审一遍敏感内容。
-- 项目记忆住用户目录，不进 session，也不随 export 外带。
+- 项目记忆住用户目录，只进本轮请求视图，不进 session，也不随 export 外带。
 - 记忆候选须过长度、敏感内容、证据与学习档闸门。
 - 日志、PID、临时端口、原始网页、密钥与个人数据不该进长期记忆。
 - 删除/forget 要说明是归档、拒收还是物理清除，不能含糊。

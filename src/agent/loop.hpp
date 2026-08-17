@@ -171,7 +171,7 @@ struct RunOutcome {
     OutputBudgetReport output_budget;
 };
 
-// 步数将尽提醒:剩三步时当步请求在 system 尾部附一句"收口"提示——停止
+// 步数将尽提醒:剩三步时在当步末条消息尾部附一句"收口"提示——停止
 // 漫游、写检查点、交部分结论(规格"现场四")。只注入一次:提示落在"剩余
 // 步数第一次降到阈值(含)以下"的那一步,此后各步不再重复(重复念叨只会
 // 把剩余步数也烧掉)。阈值定死为 3。max_steps_per_turn <= 0(无上限)时压根
@@ -318,10 +318,9 @@ public:
 
     // 请求级动态上下文(项目记忆召回、运行中子代理名册)。前缀缓存守恒单
     // 第五期起不再塞 system 尾巴——那会让分叉点落在全部旧历史之前,每条
-    // 外层用户消息都断一次前缀。现在它随本轮 user 消息进请求视图:Run()
-    // 落 user 消息时追加成尾部的 TextBlock,发过即钉住,后续请求原样重放;
-    // 下一轮来了再往新 user 消息尾部添新快照(旧快照留在旧消息里,标注
-    // "当时快照")。system 从此只留会话/epoch 内稳定材料。空串 = 不追加。
+    // 外层用户消息都断一次前缀。现在它随本轮 user 消息进 request_history_
+    // 的尾部 TextBlock,发过即钉住,后续请求原样重放;持久 history_ 不收
+    // 这块,session/export/compact/记忆抽取都只见用户真输入。空串 = 不追加。
     void SetTurnContext(std::string context) { turn_context_ = std::move(context); }
 
     // M6.6:/compact 用。跟 history() 是同一份数据,单独起个大写名字是为了
@@ -339,6 +338,13 @@ public:
     // epoch 的冷启动,后续再守追加律。
     void ReplaceHistory(std::vector<api::Message> new_history) {
         history_ = std::move(new_history);
+        request_history_ = history_;
+        // mid-turn compact 在 Run() 的请求安全点同步换史。本轮动态上下文
+        // 不该进 compact/session,却仍须给压缩后的下一次请求看；新 epoch
+        // 已经开了,补在最新消息尾部即可,不追改旧请求。
+        if (run_active_ && !active_turn_context_.empty() && !request_history_.empty()) {
+            request_history_.back().content.push_back(api::TextBlock{active_turn_context_});
+        }
         ++cache_epoch_;
         pending_epoch_break_reason_ = "history_compacted";
         last_prefix_.reset();
@@ -409,6 +415,8 @@ private:
     std::string model_;
     std::string system_prompt_;
     std::string turn_context_;
+    std::string active_turn_context_;  // 只在 Run() 活着时给 mid-turn compact 重注入
+    bool run_active_ = false;
     // 运行策略(输出/上下文预算、窗口、步数、length 续跑):构造时定死,
     // 只有 context_window_tokens 有 setter(随 /context、/model 同步)。
     AgentRuntimeProfile profile_;
@@ -416,7 +424,8 @@ private:
     StructuralCompressionOptions structural_options_{};
     StructuralCompressionStats structural_stats_{};  // 最近一次请求的结构压缩账(观测用)
     ContextArtifactStore* artifact_store_ = nullptr;  // 可追回 artifact 的仓(空 = 没仓,退回旧行为)
-    std::vector<api::Message> history_;
+    std::vector<api::Message> history_;          // 可持久、可 compact 的真历史
+    std::vector<api::Message> request_history_;  // 模型视图；另含每轮动态上下文
     // 前缀记账(agent/prefix.hpp):上一份实际发出的请求指纹(没有 = 本
     // turn 第一份请求,无从比较,天然算追加)、cache epoch 序号、loop 自己
     // 先知道的断因(compact/hard trim,报出后即清)。

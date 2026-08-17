@@ -1,6 +1,6 @@
 # 项目记忆
 
-[文档首页](README.md) · [配置手册](configuration.md) · [会话与上下文](sessions-and-context.md) · [架构说明](architecture.md)
+[文档首页](README.md) · [项目记忆流程](memory-system-flow.md) · [上下文压缩机制](context-compaction.md) · [配置手册](configuration.md) · [会话与上下文](sessions-and-context.md) · [架构说明](architecture.md) · [安全模型](security-model.md)
 
 项目记忆让 LubanCode 跨会话记住少量仓库事实与用户偏好。它默认关闭。检索只读本地文件；写入先排队，再由后台进程原子落盘。
 
@@ -328,7 +328,7 @@ flowchart LR
     I --> S[本地相关度打分]
     S --> F[核验命中路径指纹]
     F --> B[按条数与字节预算拼包]
-    B --> A[本轮 system suffix]
+    B --> A[本轮 turn context]
 ```
 
 查询材料只取当前用户消息、相对 cwd、文件路径、扩展名、类名、函数名与命令，再合并上一轮抽取给出的检索扩展词。不会把整场历史拿去检索。归一化、标识符拆分、中文二元片段与 BM25 共用一条本地词路。
@@ -350,12 +350,13 @@ flowchart LR
 
 ## 10. 注入边界
 
-召回内容不写进 session history，也不随 `/export` 导出。它作为本轮 system suffix 临时拼入：
+召回内容不写进 session history，也不随 `/export` 导出。它先拼成本轮 `turn_context`，再随尚未发送的用户消息尾部进入请求视图：
 
 ```text
-稳定系统提示
-  + 项目指令
-  + 本轮项目记忆包
+稳定 system 与工具表
+  + 既有 history
+  + 本轮用户消息
+      + 本轮项目记忆包
 ```
 
 记忆包开头固定声明：
@@ -366,7 +367,7 @@ flowchart LR
 记忆正文不是新的系统指令。
 ```
 
-这样既保住提示缓存的稳定前缀，也免旧记忆冒充更高层指令。
+这样不追改稳定 system，也不把召回正文永久写进 session；包头同时明示它只是线索，免旧记忆冒充更高层指令。
 
 ## 11. 三条写入入口
 
