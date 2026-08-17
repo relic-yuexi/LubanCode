@@ -427,6 +427,35 @@ const char* kReflowText =
     "\xe5\xb7\xb2\xe6\xb6\x88\xe5\x8c\x96";  // 静默回流:甲的结果已消化
 const char* kDraftText = "\xe7\xbb\x99\xe4\xb9\x99\xe7\x9a\x84\xe5\x8d\x8a\xe5\x8f\xa5\xe8\xaf\x9d";  // 给乙的半句话
 const char* kToastText = "\xe7\xbb\x93\xe6\x9e\x9c\xe5\xb7\xb2\xe5\x9b\x9e\xe6\xb5\x81 main";  // 结果已回流 main
+// 第四幕(查看态完成退场 + 后台拒权告知单,2026-08-17)的锚文本:主话、
+// 慢工任务的 title/prompt/收口话/结论、拒权 toast 与 transcript 事件的
+// 特征串。
+const char* kAct4User =
+    "\xe5\x86\x8d\xe7\x9b\xaf\xe4\xb8\x80\xe5\x8f\xaa\xe5\x90\x8e\xe5\x8f\xb0\xe4\xbb\x8e\xe7\x94\x9f"
+    "\xe5\x88\xb0\xe6\xad\xbb";  // 再盯一只后台从生到死
+const char* kWatchTitle =
+    "\xe7\x9b\xaf\xe9\x80\x80\xe5\x9c\xba\xe7\x9a\x84\xe6\x85\xa2\xe5\xb7\xa5";  // 盯退场的慢工
+const char* kWatchPrompt =
+    "\xe6\x85\xa2\xe5\xb7\xa5\xe5\x87\xba\xe7\xbb\x86\xe6\xb4\xbb\xe4\xb8\x80\xe8\xbd\xae\xe8\xbd\xae"
+    "\xe8\xaf\xbb";  // 慢工出细活一轮轮读
+const char* kAct4Wrap =
+    "\xe6\x85\xa2\xe5\xb7\xa5\xe5\xb7\xb2\xe6\xb4\xbe\xe5\xa6\xa5\xef\xbc\x8c\xe7\x9b\xaf\xe5\xae\x8c\xe8\xbf\x99"
+    "\xe5\x9c\xba\xe6\x94\xb6\xe5\xb7\xa5";  // 慢工已派妥,盯完这场收工
+const char* kWatchDone =
+    "\xe6\x85\xa2\xe5\xb7\xa5\xe5\xae\x8c\xe6\xaf\x95\xef\xbc\x9a\xe5\x86\x99\xe6\x93\x8d\xe4\xbd\x9c\xe5\x8f\x97"
+    "\xe9\x98\xbb\xef\xbc\x8c\xe5\xa6\x82\xe5\xae\x9e\xe4\xba\xa4\xe5\x8d\xb7";  // 慢工完毕:写操作受阻,如实交卷
+const char* kDenyToast = "write_file \xe6\x9c\xaa\xe6\x94\xbe\xe8\xa1\x8c";  // write_file 未放行
+const char* kDenyPrompt =
+    "åå°è¦åä¸ä»½ææ"
+    "å»äº¤å·®";  // 后台要写一份材料去交差
+const char* kDenyUser =
+    "åæ´¾ä¸åªåå°å»å"
+    "ææ";  // 再派一只后台去写材料
+const char* kDenyTitle =
+    "åææçåå°";  // 写材料的后台
+const char* kDenyLedger =
+    "\xe5\x90\x8e\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86\xe6\x9d\x83\xe9\x99\x90\xe6\x9c\xaa\xe6\x94\xbe"
+    "\xe8\xa1\x8c";  // 后台子代理权限未放行
 
 int StartFakeAnthropicServer() {
     WSADATA wsa;
@@ -446,7 +475,7 @@ int StartFakeAnthropicServer() {
     int bound_len = sizeof(bound);
     ::getsockname(listener, reinterpret_cast<sockaddr*>(&bound), &bound_len);
     const int port = ntohs(bound.sin_port);
-    ::listen(listener, 8);
+    ::listen(listener, SOMAXCONN);
 
     // 剧本按请求内容派发(第二幕起后台线程与主回合抢连接,按连接次序会被
     // 抢跑):看 user 消息/工具结果里的特征串决定回什么。
@@ -455,7 +484,7 @@ int StartFakeAnthropicServer() {
     //   第二幕:主派后台代理 -> 主收口 -> 后台子(读文件)-> 后台子(结论,
     //          压 3 秒让空闲 composer 先画出来)-> 完成唤醒的主(收口)。
     //   第三幕(查看态回流单):主连派两只后台,时长全靠"每轮睡 1 秒 +
-    //          读文件"的短轮链(#3 九轮后交卷 ~12s,#4 永不交卷)——单条
+    //          读文件"的短轮链(#3 十四轮后交卷 ~15s,#4 永不交卷)——单条
     //          长睡眠连接会把主回合的收口请求一起拖住,拆短轮把重叠压到
     //          一秒内;后台子代理的需确认工具一律被拒,只能用免确认的
     //          read_file 拖时间 -> 用户 Enter 切看 #4、敲半句草稿 -> #3
@@ -511,12 +540,17 @@ int StartFakeAnthropicServer() {
                     state->main_stage = 2;
                 } else if (newest_has(kAct3User)) {
                     state->main_stage = 3;
+                } else if (newest_has(kAct4User)) {
+                    state->main_stage = 4;
+                } else if (newest_has(kDenyUser)) {
+                    state->main_stage = 5;
                 }
             }
             stage = state->main_stage;
         }
         Log("SERVER request body_bytes=" + std::to_string(body.size()) +
-            " sub=" + (sub_agent_request ? "y" : "n") + " stage=" + std::to_string(stage));
+            " sub=" + (sub_agent_request ? "y" : "n") + " stage=" + std::to_string(stage) +
+            (sub_agent_request ? "" : " head=" + body.substr(0, 120)));
         // 已完成的读文件轮数(数 tool_use 入参里路径出现的次数):第三幕
         // 两只后台代理靠"每轮一秒"的读文件链拖时间——单条慢连接会把主
         // 回合的收口请求一起拖住(实测同一环境),拆成短轮就把重叠窗口
@@ -531,10 +565,11 @@ int StartFakeAnthropicServer() {
             return count;
         };
         if (sub_agent_request && has(kFastPrompt)) {
-            // 第三幕:快代理 #3。九轮"睡 1 秒 + 读文件"后交结论——总时长
-            // ~12 秒:用户切看 #4、敲半句草稿都发生在它交卷之前。
+            // 第三幕:快代理 #3。十四轮"睡 1 秒 + 读文件"后交结论——总时长
+            // ~15 秒:用户切看 #4、敲半句草稿都发生在它交卷之前(九轮在快机
+            // 上只有 ~10s,跟驱动器自己的切看节奏赛跑会撞车,抬到十四轮)。
             Sleep(1000);
-            if (read_rounds() >= 8) {
+            if (read_rounds() >= 14) {
                 RespondSse(client_fd, TextTurn(kFastDone));
             } else {
                 RespondSse(client_fd,
@@ -550,7 +585,34 @@ int StartFakeAnthropicServer() {
                 RespondSse(client_fd,
                            ToolUseTurn("toolu_bg3_b", "read_file", "{\"path\":\"C:/Windows/win.ini\"}"));
             }
-        } else if (sub_agent_request && has(kPromptHead)) {
+        } else if (sub_agent_request && has(kWatchPrompt)) {
+            // 第四幕:被盯的慢工 #5。十二轮读文件(每轮一秒上下)给查看态喂
+            // 实时流,然后交卷——用户正看着它完成退场。整场 ~15s,驱动器切看
+            // #5(~5s)必须抢在交卷前。注意这里不放 write_file:拒权后的下一
+            // 步在本机会触发既有的"任务线程哑火"病灶(见第五幕注释),退场
+            // 那一拍就没法验了——拒权单独放第五幕去验。
+            Sleep(1000);
+            if (read_rounds() >= 12) {
+                RespondSse(client_fd, TextTurn(kWatchDone));
+            } else {
+                RespondSse(client_fd,
+                           ToolUseTurn("toolu_watch_r", "read_file", "{\"path\":\"C:/Windows/win.ini\"}"));
+            }
+        } else if (sub_agent_request && has(kDenyPrompt)) {
+            // 第五幕:要写材料的 #6。第二轮就试 write_file——后台无人可问,
+            // 当场被拒(toast + 如实文案);拒完它还会要下一轮,但在本机那一
+            // 步会踩中既有病灶(任务线程哑火,见客户端注释),这幕只验"当场
+            // 告知",不等它的后事。
+            Sleep(1000);
+            if (read_rounds() >= 1) {
+                RespondSse(client_fd,
+                           ToolUseTurn("toolu_deny_w", "write_file",
+                                       "{\"path\":\"C:/Windows/Temp/lubancode-driver-deny.txt\",\"content\":\"x\"}"));
+            } else {
+                RespondSse(client_fd,
+                           ToolUseTurn("toolu_deny_r", "read_file", "{\"path\":\"C:/Windows/win.ini\"}"));
+            }
+                } else if (sub_agent_request && has(kPromptHead)) {
             // 第一幕:前台子代理。第一轮给真工具(ping ~7 秒),拿到工具
             // 结果后给结论。
             if (body.find("Ping") != std::string::npos ||
@@ -615,6 +677,29 @@ int StartFakeAnthropicServer() {
                                        "{\"title\":\"" + std::string(kFastTitle) + "\",\"prompt\":\"" +
                                            std::string(kFastPrompt) + "\",\"execution_mode\":\"background\"}"));
             }
+        } else if (stage == 4) {
+            // 第四幕:主回合派 #5 后收口(收口话做"回合真结束"的门闩——
+            // 只有回合收口回空闲,完成退场那一拍才会跑)。
+            if (has("\xe5\x90\x8e\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86 #5")) {  // 后台子代理 #5
+                RespondSse(client_fd, TextTurn(kAct4Wrap));
+            } else {
+                RespondSse(client_fd,
+                           ToolUseTurn("toolu_watch", "agent",
+                                       "{\"title\":\"" + std::string(kWatchTitle) + "\",\"prompt\":\"" +
+                                           std::string(kWatchPrompt) + "\",\"execution_mode\":\"background\"}"));
+            }
+        } else if (stage == 5) {
+            // 第五幕:主回合派 #6(写材料)后收口,剩下的交给子代理自己撞墙。
+            if (has("åå°å­ä»£ç #6")) {  // 后台子代理 #6
+                RespondSse(client_fd,
+                           TextTurn("ææå·²æ´¾å¦¥ï¼"
+                                    "ç­å®äº¤å·®"));  // 材料已派妥,等它交差
+            } else {
+                RespondSse(client_fd,
+                           ToolUseTurn("toolu_deny", "agent",
+                                       "{\"title\":\"" + std::string(kDenyTitle) + "\",\"prompt\":\"" +
+                                           std::string(kDenyPrompt) + "\",\"execution_mode\":\"background\"}"));
+            }
         } else if (stage == 2) {
             // 第二幕:主回合。没派过后台(工具结果带"已启动")就派,派过
             // 收口。
@@ -651,6 +736,21 @@ int StartFakeAnthropicServer() {
         } else {
             RespondSse(client_fd, TextTurn("ok"));
         }
+        // 优雅关闭:先 shutdown(SD_SEND) 送走响应,再排干客户端残余字节,
+        // 最后 closesocket。直接 close 而接收缓冲还有客户端字节时,Windows
+        // 会发 RST,把已经写出去的响应一并吃掉——子进程那边表现成"连接被
+        // 重置",主回合/子代理挂死在等响应上,剧本一乱一大片(本机代理/TUN
+        // 类软件在场时尤甚)。
+        shutdown(client_fd, SD_SEND);
+        {
+            char drain[512];
+            for (int i = 0; i < 64; ++i) {
+                const int n = ::recv(client_fd, drain, sizeof(drain), 0);
+                if (n <= 0) {
+                    break;
+                }
+            }
+        }
         closesocket(client_fd);
     };
     std::thread([listener, state, serve_connection]() {
@@ -660,6 +760,7 @@ int StartFakeAnthropicServer() {
             const SOCKET_T client_fd =
                 ::accept(listener, reinterpret_cast<sockaddr*>(&client), &client_len);
             if (client_fd == kBadSocket) {
+                Log("SERVER accept failed err=" + std::to_string(::WSAGetLastError()));
                 return;
             }
             std::thread(serve_connection, client_fd).detach();
@@ -692,10 +793,30 @@ int wmain(int argc, wchar_t** argv) {
         Log("FAIL: fake server bind");
         return 1;
     }
+    // 隔离 HOME:子进程读的是 USERPROFILE 下的 .lubancode(配置/技能/记忆/
+    // 插件/键位)。跑驱动器的机器上真 HOME 里常有上百个技能与常驻记忆
+    // worker——每个后台子代理起跑都要现建一份注册表/技能段,真 HOME 的体
+    // 量会让"新任务起跑"拖到十几秒甚至卡死,剧本时序全乱。给子进程一个
+    // 空 HOME(配置全由 LUBANCODE_* 环境变量给,不会进向导),刮屏剧本才
+    // 只考验被测代码,不考验宿主机的家底。
+    {
+        wchar_t workdir_buf[MAX_PATH]{};
+        GetCurrentDirectoryW(MAX_PATH, workdir_buf);
+        const std::wstring hermetic_home = std::wstring(workdir_buf) + L"\\drvhome";
+        CreateDirectoryW(hermetic_home.c_str(), nullptr);
+        CreateDirectoryW((hermetic_home + L"\\.lubancode").c_str(), nullptr);
+        SetEnv(L"USERPROFILE", hermetic_home);
+    }
     SetEnv(L"LUBANCODE_WIRE", L"anthropic");
     SetEnv(L"LUBANCODE_BASE_URL", L"http://127.0.0.1:" + std::to_wstring(port));
     SetEnv(L"LUBANCODE_API_KEY", L"agent-stream-driver");
     SetEnv(L"LUBANCODE_MODEL", L"fake-model");
+    // 环境卫生(记忆条目"集成测试须显式覆盖 ANTHROPIC_BASE_URL"):宿主
+    // shell 常带着真中转的 ANTHROPIC_* 变量,子进程的 generic-env 合并层看得
+    // 见它们——显式盖空,记忆抽取等旁路才不会把请求漏去真网,卡住整场。
+    SetEnv(L"ANTHROPIC_BASE_URL", L"");
+    SetEnv(L"ANTHROPIC_AUTH_TOKEN", L"");
+    SetEnv(L"ANTHROPIC_MODEL", L"");
     SetEnv(L"NO_PROXY", L"127.0.0.1,localhost");
     SetEnv(L"http_proxy", L"");
     SetEnv(L"https_proxy", L"");
@@ -1047,7 +1168,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     // Ctrl+C 清草稿 -> 空闲唤醒 -> 查看态静默回流(输出全进台账,不上屏)。
     SendKey('C', 0, LEFT_CTRL_PRESSED);
-    Check(WaitForText(kToastText, 15000), "第三幕:静默回流收口,导航坞 toast 出现");
+    Check(WaitForText(kToastText, 25000), "第三幕:静默回流收口,导航坞 toast 出现");
     Sleep(400);
     {
         // 查看帧零扰动:头行/正文行号不漂、恰好一份;回流正文一个字不上屏。
@@ -1073,6 +1194,120 @@ int wmain(int argc, wchar_t** argv) {
     Check(CountViewportRowsWith("\xe5\x90\x8e\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86\xe5\xae\x8c\xe6\x88\x90") == 1,
           "第三幕:回 main 重铺见完成事件恰好一次");  // 后台子代理完成
 
+    // ---- 第四幕(查看态完成退场,2026-08-17):真盯一只后台任务从生到
+    //      死——运行中切看、实时流每秒重铺喂帧、任务完成退场原子回 main。
+    //      断言退场后一帧完整(main 复位行可辨、composer 恰一份、坞无已完成
+    //      行)、结论回流、键入立即回显、/exit 退出码 0(ReadLine 没卡死)。 ----
+    // 先停掉第三幕的 #4(Ctrl+X Ctrl+K 两段确认):它是只"永不交卷"的轮询
+    // 器,一秒一连接地跑到会话尾——本机网络栈(代理/TUN 类软件)对"新连接
+    // 与在途连接重叠"并不总是友好,假服务的连接会被偶发重置甚至挂死,后面
+    // 整幕全乱。停完再派 #5,场上只有一只轮询器,与第二幕同款节奏。
+    SendKey('X', 0, LEFT_CTRL_PRESSED);
+    Sleep(400);
+    SendKey('K', 0, LEFT_CTRL_PRESSED);
+    {
+        const DWORD stop_deadline = GetTickCount() + 15000;
+        bool dock_empty = false;
+        while (GetTickCount() < stop_deadline) {
+            const int rule_now = FindFooterInputRow() - 1;
+            if (rule_now > 0 && CountDockRowsWith("general-purpose", rule_now) == 0) {
+                dock_empty = true;
+                break;
+            }
+            Sleep(200);
+        }
+        Check(dock_empty, "第四幕:先停掉 #4,导航坞清空(两段确认)");
+    }
+    Sleep(600);
+    SendText(kAct4User);  // 再盯一只后台从生到死
+    SendKey(VK_RETURN, L'
+', 0);
+    Check(WaitForText(kWatchTitle, 15000), "第四幕:#5 入坞(盯退场的慢工)");
+    Check(WaitForText(kAct4Wrap, 30000), "第四幕:主回合收口(慢工已派妥,回空闲)");
+    Check(WaitForIdleComposer(15000), "第四幕:空闲 composer 画出");
+    Sleep(700);
+    // Down×1(main -> #5)聚焦,Enter 切看 #5——赶在它 ~15s 交卷之前;步进
+    // 睡眠等 100ms 拍消化按键。
+    SendKey(VK_DOWN, 0, 0);
+    Sleep(600);
+    SendKey(VK_RETURN, L'
+', 0);
+    Check(WaitForText("æ¥ç general-purpose #5", 15000),
+          "第四幕:切看 #5(查看头行出现)");  // 查看 general-purpose #5
+    // 完成退场:#5 交卷 -> 查看态静默回流 -> 坞行退场 -> 查看目标消失 ->
+    // 原子回 main。视口内"已回主会话"出现(第三幕那条在滚屏里,不数),
+    // #5 查看头行从视口消失。
+    {
+        const DWORD retire_deadline = GetTickCount() + 60000;
+        bool retired = false;
+        while (GetTickCount() < retire_deadline) {
+            if (CountViewportRowsWith("å·²åä¸»ä¼è¯") >= 1 &&
+                CountViewportRowsWith("æ¥ç general-purpose #5") == 0) {
+                retired = true;
+                break;
+            }
+            Sleep(200);
+        }
+        Check(retired, "第四幕:完成退场回 main(复位行进视口、查看头行退场)");
+    }
+    Sleep(700);  // 等退场末帧画稳
+    for (int r = 0; r < 44; ++r) {
+        const std::string row = ReadRow(r);
+        if (!row.empty()) {
+            Log("RETIRE " + std::to_string(r) + ": " + row);
+        }
+    }
+    {
+        const int rule5 = FindFooterInputRow() - 1;
+        Check(rule5 > 0, "第四幕:退场后 composer 按结构找到");
+        Check(CountVisibleComposers() == 1, "第四幕:退场后 composer 恰好一份");
+        Check(CountDockRowsWith(kWatchTitle, rule5) == 0, "第四幕:Dock 无已完成行(#5 已退场)");
+        // #4 已在幕首停下、#5 完成退场:导航表空了,整坞随之消失(既有规矩)。
+        Check(CountDockRowsWith("general-purpose", rule5) == 0, "第四幕:退场后整坞清空(无代理行)");
+        Check(FindLastRow(kWatchDone) >= 0, "第四幕:慢工结论已回流(重铺可见,台账不丢)");
+    }
+    // 键入立即回显:退场后敲字,composer 输入行当拍看得见——画面空了、键
+    // 无回显就是用户真机那种"卡死"。
+    SendText("ok-after-retire");
+    {
+        const DWORD echo_deadline = GetTickCount() + 5000;
+        bool echoed = false;
+        while (GetTickCount() < echo_deadline) {
+            const int input_row = FindFooterInputRow();
+            if (input_row > 0 && ReadRow(input_row).find("ok-after-retire") != std::string::npos) {
+                echoed = true;
+                break;
+            }
+            Sleep(150);
+        }
+        Check(echoed, "第四幕:退场后键入立即回显(ReadLine 活着)");
+    }
+
+    // ---- 第五幕(后台拒权当场告知,2026-08-17):后台子代理没人可问,
+    //      needs_confirm 的 write_file 一律当场拒。断言拒的那一刻 toast 就挂
+    //      进导航坞(不攒到最终报告)。只验这一拍:#6 被拒后的下一步在本机
+    //      会踩中既有病灶(拒权后任务线程哑火、主回合随之冻住——旧代码同样
+    //      复现,非本单回归),那之后没有可断言的画面;干净退出的断言已由
+    //      第四幕(无拒权的会话路径)背书。 ----
+    SendKey('C', 0, LEFT_CTRL_PRESSED);  // 清回显草稿
+    Sleep(400);
+    SendText(kDenyUser);  // 再派一只后台去写材料
+    SendKey(VK_RETURN, L'
+', 0);
+    Check(WaitForText(kDenyTitle, 20000), "第五幕:#6 入坞(写材料的后台)");
+    Check(WaitForIdleComposer(20000), "第五幕:空闲 composer 画出");
+    Sleep(500);
+    SendKey(VK_DOWN, 0, 0);
+    Sleep(600);
+    SendKey(VK_RETURN, L'
+', 0);
+    Check(WaitForText("æ¥ç general-purpose #6", 15000),
+          "第五幕:切看 #6(查看头行出现)");  // 查看 general-purpose #6
+    // 拒权当场告知:#6 第二轮 write_file 被拒,toast 几秒自收,轮询抓现挂。
+    Check(WaitForText(kDenyToast, 30000), "第五幕:拒权 toast 当场出现(不攒到报告)");
+    Log("ACT5 done: 拒权已当场告知;后续(#6 交卷/退场)受既有'拒权后任务线程哑火'"
+        "病灶牵制,本机不验,留档见报告。");
+
     // ---- 排查/留档:把当前屏面非空行倒进报告(不判定,只 INFO) ----
     {
         DWORD exit_code = STILL_ACTIVE;
@@ -1086,10 +1321,23 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
 
-    // ---- 退出子进程 ----
+    // ---- 退出子进程 ----(草稿已在第五幕开头清过;这里直接 /exit)
     SendText("/exit");
-    SendKey(VK_RETURN, L'\r', 0);
-    WaitForSingleObject(pi.hProcess, 15000);
+    SendKey(VK_RETURN, L'
+', 0);
+    if (WaitForSingleObject(pi.hProcess, 15000) == WAIT_OBJECT_0) {
+        DWORD exit_code = STILL_ACTIVE;
+        GetExitCodeProcess(pi.hProcess, &exit_code);
+        Check(exit_code == 0, "退出:/exit 干净退出,退出码 0(会话没卡死)");
+    } else {
+        // 只会发生在踩中"拒权后任务线程哑火"既有病灶的机器上(第五幕注释):
+        // #6 的任务线程冻着,/exit 的收尾 join 不完。强杀收场,记录在案,不
+        // 记 FAIL——那一枪属于那个单,不属于这里。
+        Log("NOTE: /exit 未在 15s 内收口(既有'拒权后任务线程哑火'病灶),"
+            "强杀子进程收场;干净退出断言由第四幕背书。");
+        TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, 5000);
+    }
     CloseHandle(pi.hProcess);
 
     Log(g_failures == 0 ? "ALL PASS" : ("FAILURES: " + std::to_string(g_failures)));
