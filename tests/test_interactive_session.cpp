@@ -32,9 +32,13 @@ TEST_CASE("InteractiveSession:真构造、EOF 退场、真析构") {
 
     // stdin 指到空设备:ReadLine 第一圈就 EOF,主循环当场退场。
     std::FILE* redirected = nullptr;
+#if defined(_WIN32)
     if (freopen_s(&redirected, kNullDevice, "r", stdin) != 0) {
         redirected = nullptr;
     }
+#else
+    redirected = std::freopen(kNullDevice, "r", stdin);
+#endif
     REQUIRE(redirected != nullptr);
 
     lubancode::config::ConfigResult config_result;
