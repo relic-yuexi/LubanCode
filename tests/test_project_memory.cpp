@@ -708,7 +708,15 @@ TEST_CASE("ProjectMemory: 默认预算 8 KiB/3 条,预算边界不劈开 UTF-8")
     std::size_t end = context.find("\n## 召回", begin + 1);
     if (end == std::string::npos) end = context.size();
     std::string section = context.substr(begin, end - begin);
-    CHECK(section.size() <= 61 + 200);  // 预算只管正文,标题行另算
+    // 脚手架行(标题/来源路径)的长度随平台变——macOS 的 /var/folders 比
+    // /tmp 长几个字节,曾把 +200 的富余顶破。预算管正文:正文 = 来源行
+    // 之后第二个空行起的那截。
+    const std::size_t first_gap = section.find("\n\n");
+    REQUIRE(first_gap != std::string::npos);
+    const std::size_t body_begin = section.find("\n\n", first_gap + 2);
+    REQUIRE(body_begin != std::string::npos);
+    const std::string body = section.substr(body_begin + 2);
+    CHECK(body.size() <= 61 + 1);  // 61 预算 + 结尾换行
     // 逐字节验证整段是合法 UTF-8。
     bool valid = true;
     for (std::size_t i = 0; i < section.size();) {
