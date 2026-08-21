@@ -152,7 +152,7 @@ TEST_CASE("熔断器: 语法错/RPC 错计数,工具失败不算,成功清零,3 
 
 TEST_CASE("画像存档: 写/读/查往返,坏文件当空,别家指纹不动") {
     TempStore temp;
-    PtcProfileStore store(temp.path.string());
+    PtcProfileStore store(lubancode::platform::PathToUtf8(temp.path));
     CHECK(store.Load().empty());  // 文件不存在 = 空
 
     PtcProfile profile;
@@ -183,10 +183,10 @@ TEST_CASE("画像存档: 写/读/查往返,坏文件当空,别家指纹不动") 
 
     // 坏文件:Load 当空,不抛。
     {
-        std::ofstream out(lubancode::platform::Utf8ToWide(temp.path.string()), std::ios::binary | std::ios::trunc);
+        std::ofstream out(temp.path, std::ios::binary | std::ios::trunc);
         out << "not json at all";
     }
-    PtcProfileStore broken(temp.path.string());
+    PtcProfileStore broken(lubancode::platform::PathToUtf8(temp.path));
     CHECK(broken.Load().empty());
 }
 
