@@ -422,7 +422,7 @@ TEST_CASE("墙钟兜底:后端不理取消(所有超时全失效),宽限期后�
     tools::ToolRegistry sub;
     sub.Register(std::make_unique<EchoTool>());
     tools::AgentTool tool(backend, sub, "D:/");
-    tool.SetDetachedBackendFactory([&backend]() {
+    tool.SetDetachedBackendFactory([&backend, kHoldSecs]() {
         tools::DetachedAgentBackend detached;
         detached.backend = std::make_unique<UnresponsiveBackend>(kHoldSecs);
         return detached;
