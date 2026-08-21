@@ -47,6 +47,17 @@ std::string WriteHookScript(const std::string& name, const std::string& body) {
 std::string RunScriptCommand(const std::string& path) { return "sh \"" + path + "\""; }
 #endif
 
+// echo 一行 JSON:sh 会把双引号当引号语法吃掉,吐出来的就不是 JSON 了;
+// POSIX 用单引号裹整串保真(这些 JSON 里没有单引号),cmd 不吃双引号、
+// 原样透传。
+std::string EchoJson(const std::string& json) {
+#ifdef _WIN32
+    return "echo " + json;
+#else
+    return "echo '" + json + "'";
+#endif
+}
+
 namespace {
 
 // 一只 v2 PreToolUse 钩子的定义(hand-built,不走配置解析)。
@@ -110,9 +121,8 @@ TEST_CASE("dispatcher: exit 2 阻断,deny 胜出") {
 
 TEST_CASE("dispatcher: exit 0 + JSON allow 带 updatedInput") {
     const std::string script = WriteHookScript(
-        "allow",
-        "echo {\"continue\":true,\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\","
-        "\"permissionDecision\":\"allow\",\"updatedInput\":{\"command\":\"dir /b\"}}}");
+        "allow", EchoJson("{\"continue\":true,\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\","
+                          "\"permissionDecision\":\"allow\",\"updatedInput\":{\"command\":\"dir /b\"}}}"));
     hooks::HookDispatcher dispatcher = MakeDispatcher({MakeDefinition(RunScriptCommand(script))});
     const auto merged = dispatcher.Emit(hooks::HookEvent::PreToolUse, MakeToolPayload());
     CHECK(merged.permission == hooks::HookEventResult::Permission::Allow);
@@ -163,12 +173,12 @@ TEST_CASE("dispatcher: 空 stdout + exit 0 = 无结构化输出,无决策") {
 
 TEST_CASE("dispatcher: 多只同时表态,deny 胜 ask 胜 allow") {
     const std::string allow_script =
-        WriteHookScript("m-allow", "echo {\"hookSpecificOutput\":{\"permissionDecision\":\"allow\"}}");
+        WriteHookScript("m-allow", EchoJson("{\"hookSpecificOutput\":{\"permissionDecision\":\"allow\"}}"));
     const std::string ask_script =
-        WriteHookScript("m-ask", "echo {\"hookSpecificOutput\":{\"permissionDecision\":\"ask\"}}");
+        WriteHookScript("m-ask", EchoJson("{\"hookSpecificOutput\":{\"permissionDecision\":\"ask\"}}"));
     const std::string deny_script =
-        WriteHookScript("m-deny", "echo {\"hookSpecificOutput\":{\"permissionDecision\":\"deny\","
-                                  "\"permissionDecisionReason\":\"dangerous-op\"}}");
+        WriteHookScript("m-deny", EchoJson("{\"hookSpecificOutput\":{\"permissionDecision\":\"deny\","
+                                           "\"permissionDecisionReason\":\"dangerous-op\"}}"));
     hooks::HookDispatcher dispatcher = MakeDispatcher(
         {MakeDefinition(RunScriptCommand(allow_script)), MakeDefinition(RunScriptCommand(ask_script)),
          MakeDefinition(RunScriptCommand(deny_script))});
@@ -182,7 +192,7 @@ TEST_CASE("dispatcher: 多只同时表态,deny 胜 ask 胜 allow") {
 
 TEST_CASE("dispatcher: 无 deny、有 ask -> ask;全无表态 -> None") {
     const std::string ask_script =
-        WriteHookScript("only-ask", "echo {\"hookSpecificOutput\":{\"permissionDecision\":\"ask\"}}");
+        WriteHookScript("only-ask", EchoJson("{\"hookSpecificOutput\":{\"permissionDecision\":\"ask\"}}"));
     hooks::HookDispatcher dispatcher = MakeDispatcher({MakeDefinition(RunScriptCommand(ask_script))});
     auto merged = dispatcher.Emit(hooks::HookEvent::PreToolUse, MakeToolPayload());
     CHECK(merged.permission == hooks::HookEventResult::Permission::Ask);
@@ -203,6 +213,11 @@ TEST_CASE("dispatcher: 两只慢钩子并发,总耗时接近最慢一只") {
                                               "sleep 0.6\nexit 0"
 #endif
     );
+#ifndef _WIN32
+    // 第二只用不同脚本:同一文件同 hash,dispatcher 按定义去重就只剩一只
+    // (executed==2 挂)。Windows 分支两条 ping 命令本就不同,没这问题。
+    const std::string slow2 = WriteHookScript("slow2", "sleep 0.6\nexit 0");
+#endif
 #ifdef _WIN32
     // Windows cmd 没有 sleep,用 ping 顶(约 600ms+)。
     const std::string cmd1 = "ping -n 1 -w 600 127.0.0.1 >nul & exit 0";
@@ -210,7 +225,7 @@ TEST_CASE("dispatcher: 两只慢钩子并发,总耗时接近最慢一只") {
     hooks::HookDispatcher dispatcher = MakeDispatcher({MakeDefinition(cmd1), MakeDefinition(cmd2)});
 #else
     hooks::HookDispatcher dispatcher = MakeDispatcher({MakeDefinition(RunScriptCommand(slow1)),
-                                                        MakeDefinition(RunScriptCommand(slow1))});
+                                                        MakeDefinition(RunScriptCommand(slow2))});
 #endif
     const auto start = std::chrono::steady_clock::now();
     const auto merged = dispatcher.Emit(hooks::HookEvent::PreToolUse, MakeToolPayload());
@@ -420,8 +435,8 @@ TEST_CASE("dispatcher: 大 tool input 走 stdin,远超环境块上限也能到")
 TEST_CASE("dispatcher: UserPromptSubmit 可阻断,additionalContext 归并") {
     const std::string script = WriteHookScript(
         "prompt-block",
-        "echo {\"continue\":false,\"stopReason\":\"prompt-not-allowed\",\"hookSpecificOutput\":"
-        "{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"extra-context-1\"}}");
+        EchoJson("{\"continue\":false,\"stopReason\":\"prompt-not-allowed\",\"hookSpecificOutput\":"
+                 "{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"extra-context-1\"}}"));
     hooks::HookDefinition def = MakeDefinition(RunScriptCommand(script));
     def.event = hooks::HookEvent::UserPromptSubmit;
     hooks::HookDispatcher dispatcher = MakeDispatcher({def});
@@ -460,8 +475,8 @@ TEST_CASE("dispatcher: SessionStart 按 source 匹配——resume 只命中 resu
 TEST_CASE("dispatcher: SubagentStop 的 continue=false 归并进 blocked(续跑由调用方)") {
     const std::string script = WriteHookScript(
         "subagent-stop-block",
-        "echo {\"continue\":false,\"stopReason\":\"run-the-tests\",\"hookSpecificOutput\":"
-        "{\"hookEventName\":\"SubagentStop\",\"additionalContext\":\"missing coverage\"}}");
+        EchoJson("{\"continue\":false,\"stopReason\":\"run-the-tests\",\"hookSpecificOutput\":"
+                 "{\"hookEventName\":\"SubagentStop\",\"additionalContext\":\"missing coverage\"}}"));
     hooks::HookDefinition def = MakeDefinition(RunScriptCommand(script));
     def.event = hooks::HookEvent::SubagentStop;
     hooks::HookDispatcher dispatcher = MakeDispatcher({def});

@@ -230,6 +230,9 @@ TEST_CASE("DecodeHookStreamBytes: UTF-8 直通,含中文与 emoji") {
     CHECK(decoded.text == bytes);
 }
 
+#ifdef _WIN32
+// 候选代码页的转码走 Win32 MultiByteToWideChar,POSIX 没有这层——同下面
+// "候选页也解不动"一案的待遇,只在 Windows 编。
 TEST_CASE("DecodeHookStreamBytes: GBK 字节按明示代码页解出并标注") {
     // "中文" 的 GBK(cp936)编码:D6 D0 CE C4。不是合法 UTF-8。
     const std::string gbk_bytes = std::string("\xD6\xD0\xCE\xC4", 4);
@@ -238,6 +241,7 @@ TEST_CASE("DecodeHookStreamBytes: GBK 字节按明示代码页解出并标注") 
     CHECK_FALSE(decoded.from_raw_digest);
     CHECK(decoded.text == "中文");
 }
+#endif
 
 #ifdef _WIN32
 TEST_CASE("DecodeHookStreamBytes: 候选页也解不动 = 原始字节摘要,不替换") {
