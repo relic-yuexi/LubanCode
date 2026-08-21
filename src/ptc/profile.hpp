@@ -24,7 +24,7 @@
 namespace lubancode::ptc {
 
 // harness 版本:bootstrap/stub 生成器/协议改动时递增。指纹成分之一。
-inline constexpr const char* kPtcHarnessRevision = "ptc-v1";
+inline constexpr const char* kPtcHarnessRevision = "ptc-v2";
 
 enum class PtcStatus { Unsupported, Unknown, Experimental, Verified };
 

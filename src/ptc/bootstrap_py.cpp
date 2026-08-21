@@ -1,4 +1,4 @@
-// bootstrap_py.hpp 的两条嵌入源码。改这里 = 换 harness_revision(ptc-v1),
+// bootstrap_py.hpp 的两条嵌入源码。改这里 = 换 harness_revision(ptc-v2),
 // 画像指纹随之变,旧 verified 降回 unknown。
 
 #include "ptc/bootstrap_py.hpp"
@@ -274,6 +274,10 @@ def main():
     # 缓存再上护栏;护栏清洗时把敏感模块从 sys.modules 删名(asyncio 自己
     # 绑定的引用不受影响),脚本 `import asyncio` 走缓存照常可用。
     import asyncio
+    # typing 同待遇:生成的 stub 在护栏下 `from typing import ...`;Python
+    # 3.13+ 的 typing 模块层要拉私有加速模块 _typing,冷 import 撞白名单,
+    # 整轮误报 guard 错(Windows 老版 python 没这层,POSIX 新版全中)。
+    import typing
 
     captured = ptc_runtime.install_guard()
 
