@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <variant>
@@ -9,6 +10,20 @@
 #include "api/assembler.hpp"
 
 namespace lubancode::app {
+namespace {
+
+// 首尾整串比对:中文引号(“「”」)在 UTF-8 里三个字节,拿 front()/
+// back() 的单字节比字面量,MSVC 静默、gcc 警告、clang 报错,还全比不中。
+bool StartsWithBytes(const std::string& s, std::string_view prefix) {
+    return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
+}
+
+bool EndsWithBytes(const std::string& s, std::string_view suffix) {
+    return s.size() >= suffix.size() &&
+           s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+}  // namespace
 
 std::string SanitizeTitle(const std::string& raw, std::size_t max_chars) {
     std::string text = raw;
@@ -34,15 +49,31 @@ std::string SanitizeTitle(const std::string& raw, std::size_t max_chars) {
         squeezed += c;
     }
     // 剥首尾引号(模型爱加的书名号/引号一并剥掉一层)。
-    while (!squeezed.empty() &&
-           (squeezed.front() == '"' || squeezed.front() == '\'' || squeezed.front() == '“' ||
-            squeezed.front() == '「')) {
-        squeezed.erase(squeezed.begin());
+    while (!squeezed.empty()) {
+        bool stripped = false;
+        for (const std::string_view q : {"\"", "'", "“", "「"}) {
+            if (StartsWithBytes(squeezed, q)) {
+                squeezed.erase(0, q.size());
+                stripped = true;
+                break;
+            }
+        }
+        if (!stripped) {
+            break;
+        }
     }
-    while (!squeezed.empty() &&
-           (squeezed.back() == '"' || squeezed.back() == '\'' || squeezed.back() == '”' ||
-            squeezed.back() == '」')) {
-        squeezed.pop_back();
+    while (!squeezed.empty()) {
+        bool stripped = false;
+        for (const std::string_view q : {"\"", "'", "”", "」"}) {
+            if (EndsWithBytes(squeezed, q)) {
+                squeezed.resize(squeezed.size() - q.size());
+                stripped = true;
+                break;
+            }
+        }
+        if (!stripped) {
+            break;
+        }
     }
     // 限长:按 UTF-8 码点截,不从码点中腰劈开。
     std::size_t count = 0;
