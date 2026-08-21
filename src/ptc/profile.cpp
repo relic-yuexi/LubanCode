@@ -183,7 +183,7 @@ std::string PtcCircuitBreaker::Reason() const {
 
 std::vector<PtcProfile> PtcProfileStore::Load() const {
     std::vector<PtcProfile> out;
-    std::ifstream in(lubancode::platform::Utf8ToWide(path_), std::ios::binary);
+    std::ifstream in(lubancode::platform::Utf8ToPath(path_), std::ios::binary);
     if (!in) {
         return out;  // 没有存档 = 全 unknown,不算错
     }
@@ -213,7 +213,7 @@ std::optional<PtcProfile> PtcProfileStore::Find(const std::string& fingerprint) 
 bool PtcProfileStore::Save(const PtcProfile& profile, std::string* error) {
     // 全量读改写:保留别的指纹条目。
     nlohmann::json root = nlohmann::json::object();
-    std::ifstream in(lubancode::platform::Utf8ToWide(path_), std::ios::binary);
+    std::ifstream in(lubancode::platform::Utf8ToPath(path_), std::ios::binary);
     if (in) {
         std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         const auto parsed = nlohmann::json::parse(text, nullptr, false);
@@ -222,7 +222,7 @@ bool PtcProfileStore::Save(const PtcProfile& profile, std::string* error) {
         }
     }
     root[profile.fingerprint] = profile.ToJson();
-    std::ofstream out(lubancode::platform::Utf8ToWide(path_), std::ios::binary | std::ios::trunc);
+    std::ofstream out(lubancode::platform::Utf8ToPath(path_), std::ios::binary | std::ios::trunc);
     if (!out) {
         if (error != nullptr) {
             *error = "打不开画像存档写入: " + path_;
