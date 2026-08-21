@@ -89,12 +89,13 @@ EnvBlock BuildEnvBlock(const EnvPairs& extra_env) {
     return block;
 }
 
-// argv 的 char* 数组(exec 要的形状)。
-std::vector<char*> BuildArgvPtrs(std::vector<std::string>& argv) {
+// argv 的 char* 数组(exec 要的形状)。exec 家族不改 argv 指向的字符串,
+// 签名里的 char* 是 POSIX 历史遗留,const_cast 安全。
+std::vector<char*> BuildArgvPtrs(const std::vector<std::string>& argv) {
     std::vector<char*> ptrs;
     ptrs.reserve(argv.size() + 1);
-    for (auto& s : argv) {
-        ptrs.push_back(s.data());
+    for (const auto& s : argv) {
+        ptrs.push_back(const_cast<char*>(s.data()));
     }
     ptrs.push_back(nullptr);
     return ptrs;
@@ -703,8 +704,7 @@ BackgroundSpawnResult RunProcessBackground(const std::vector<std::string>& argv,
     fcntl(exec_pipe[1], F_SETFD, FD_CLOEXEC);
 
     EnvBlock env_block = BuildEnvBlock(extra_env);
-    std::vector<std::string> argv_copy = argv;
-    std::vector<char*> argv_ptrs = BuildArgvPtrs(argv_copy);
+    std::vector<char*> argv_ptrs = BuildArgvPtrs(argv);
 
     const pid_t pid = fork();
     if (pid < 0) {
