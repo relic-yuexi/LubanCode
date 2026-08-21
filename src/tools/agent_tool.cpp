@@ -1255,6 +1255,13 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     // 给父级——既有确认交互、转录与父级记账一个不丢。后台(foreground_hooks
     // 为空)没有可停下来问话的终端,需确认的操作一律拒绝,跟 Claude Code
     // 后台 subagent 的权限边界一致。
+    // 最近一次拒绝的原因(on_tool_confirm 与 on_tool_denial_text 同线程
+    // 先后调,RunTask 栈上局部共享):空 = 未预放行;非空 = 钩子 deny 的
+    // 理由。声明必须罩住两个 lambda 的整段存活期——sub_callbacks 的装配
+    // 块(下面 if (task != nullptr))在 sub_loop.Run 之前就收口,放块里
+    // 必成悬垂引用:MSVC 栈布局侥幸不炸,POSIX 上当场 SIGSEGV(ASAN:
+    // stack-use-after-scope)。
+    std::string last_denial_hook_reason;
     agent::Callbacks sub_callbacks;
     if (task != nullptr) {
         // 消息账开卷:任务说明(= 第一条 user_message)。续投输入在 Run 循环
@@ -1363,10 +1370,6 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             // 审计账不断。
             const std::shared_ptr<lubancode::hooks::DetachedHookSession> hooks_session =
                 background_hooks != nullptr && !background_hooks->Empty() ? background_hooks : nullptr;
-            // 最近一次拒绝的原因(on_tool_confirm 与 on_tool_denial_text 同线程
-            // 先后调,RunTask 栈上局部共享):空 = 未预放行;非空 = 钩子 deny 的
-            // 理由。
-            std::string last_denial_hook_reason;
             sub_callbacks.on_tool_confirm = [this, task, hooks_session, &last_denial_hook_reason](
                                                 const std::string& name, const nlohmann::json& input) {
                 last_denial_hook_reason.clear();
