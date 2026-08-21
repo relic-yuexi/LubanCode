@@ -494,8 +494,10 @@ ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const st
         dup2(in_pipe[0], STDIN_FILENO);
         dup2(out_pipe[1], STDOUT_FILENO);
         dup2(err_pipe[1], STDERR_FILENO);
-        for (int fd : {in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1], err_pipe[0], err_pipe[1], exec_pipe[0],
-                       exec_pipe[1]}) {
+        // 注意:exec_pipe[1] 不关——execvp 失败后还要靠它把 errno 送回父进程
+        // (这里关了,父进程只读到 EOF,启动失败就误报成"跑了但退出码 127")。
+        // exec 成功那头由预先置好的 CLOEXEC 自动收口。
+        for (int fd : {in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1], err_pipe[0], err_pipe[1], exec_pipe[0]}) {
             if (fd > STDERR_FILENO) {
                 close(fd);
             }
