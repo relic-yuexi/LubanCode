@@ -2,6 +2,17 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.28] - 2026-08-23
+
+- **工具文案全量双语收官。** 剩余九件工具(网页搜索/抓取、tool_search、skill、会话列举与跨会话传话、worktree、项目记忆、PTC)的描述与参数说明全部迁入语言分档;英文会话拿到全英文工具表,缺省中文与旧版逐字节一致,`LUBANCODE_LANG` 切换即时生效。
+- **文案一致性进了测试账。** 语言驱动器扩到 100 节中英双语逐字节比对;工具源码不再容得下游离中文描述,grep 检查与负例钉进回归,后续新工具照此门进。
+
+## [v0.26.27] - 2026-08-23
+
+- **无界面后台接口接通。** `codex app-server` 同类能力落到 LubanCode：JSON-RPC stdio、thread/turn 生命周期、流式事件、审批反向请求、取消与硬超时已经接上；终端与后台接口共用运行时合同，不再各养一套 Agent 逻辑。
+- **会话与终端更像一张清楚的账。** 裸敲 `/resume` 进入可搜索、筛选、排序的全屏会话台账；排队消息可随存档恢复；工具文案按语言分档，运行条目、ID 与状态刷新也收回统一口径。
+- **插件、文档与三平台一道收口。** Process Plugin v1 冻结 manifest/stdio 合同，Lua 调用与主/子代理挂载补并发和去重；官方 docs 与 Skill 同包安装，文档按功能、参考、架构、开发分层；Windows、Linux、macOS 的文件时钟与安装路径差异补齐。
+
 ## [v0.26.0] - 2026-08-15
 
 - **终端交互大修。** 子代理面板移到输入框上方：任务全量列示可选，`x` 停止/清除，`Ctrl+X Ctrl+K` 两段确认停全部，Enter 进查看态后可直接给那只代理递话；排队消息在工具边界按序送达，`Esc` 打断并立即送，`Shift+←` 取回编辑；流式打 `/` 出补全，context 状态栏回合内实时刷新（`~` 标旧值），流式 Shift+Tab 切档，思考可 Ctrl+O 展开，ask_user 不再被子代理状态遮挡。
@@ -62,6 +73,7 @@
 - **模型与扩展接成一体。** 接入 Anthropic Messages 与 OpenAI Responses，并提供上下文压缩、会话恢复、MCP、LSP、Skills、Lua、C ABI 插件和联网工具。
 - **三平台可以直接安装。** Windows、Linux 与 macOS 均有自动构建的发行包和安装脚本，CI 分别用 MSVC、GCC 与 Clang 编译测试。
 
+[v0.26.27]: https://github.com/relic-yuexi/LubanCode/compare/v0.26.0...v0.26.27
 [v0.26.0]: https://github.com/relic-yuexi/LubanCode/compare/v0.25.1...v0.26.0
 [v0.25.1]: https://github.com/relic-yuexi/LubanCode/compare/v0.25.0...v0.25.1
 [v0.25.0]: https://github.com/relic-yuexi/LubanCode/compare/v0.24.1...v0.25.0

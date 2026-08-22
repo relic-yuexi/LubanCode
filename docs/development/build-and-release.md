@@ -21,9 +21,12 @@
 
 ```powershell
 cmake --preset release
-cmake --build --preset release --target lubancode
+cmake --build --preset release
 .\build\release\Release\lubancode.exe --version
 ```
+
+默认目标会编主程序，并把官方 `skills/` 与 `docs/` 镜到 exe 旁。只点名
+`--target lubancode` 虽能得到程序，却不会刷新这两棵资源树。
 
 要带测试：
 
@@ -176,7 +179,14 @@ git status --short
 
 ## 10. 发行
 
-版本号同时在 `CMakeLists.txt` 与 `src/app/version.hpp`。两处须一致。用户变化写 `CHANGELOG.md`。
+版本号只写在 `src/app/version.hpp`；CMake 配置时从它读取 `PROJECT_VERSION`。用户变化写 `CHANGELOG.md`。发版前先跑：
+
+```powershell
+bash scripts/check_release.sh
+bash scripts/check_docs.sh
+```
+
+前一页核对源码版本与 CHANGELOG；release workflow 还会把 tag 一并送进去，三者有一处不合便停。
 
 推送 `v*` 标签后，release workflow 先查文档目录、链接与 Skill 路由，再在 Windows、Linux、macOS 重编。包里收程序、双语 README、`docs/`、`skills/` 与安装脚本，最后创建 GitHub Release。不要拿本机 `build/` 产物手工塞进发行包。
 

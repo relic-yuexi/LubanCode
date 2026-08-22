@@ -10,6 +10,7 @@
 #include "platform/paths.hpp"  // PathToUtf8:临时目录路径不走 ACP 窄口
 #include "platform/process.hpp"
 #include "ptc/stub_generator.hpp"
+#include "tools/tool_text.hpp"  // 模型可见文案(描述)查表,源头 prompts/tools/
 
 namespace lubancode::ptc {
 
@@ -116,10 +117,12 @@ PtcTool::PtcTool(tools::ToolRegistry& registry, std::function<bool(const tools::
 std::string PtcTool::name() const { return "programmatic_tool_calling"; }
 
 std::string PtcTool::description() const {
-    return "编排一段 Python 脚本批量调用已挂载的只读工具(read_file/search 等):写变量、条件、循环、"
-           "asyncio.gather 扇出,一段脚本收完把 emit() 的精简摘要送回。适合遍历一批文件、先查 A 再喂 "
-           "B/C 的长链、同时派多路只读调用后聚合;短任务直接用普通工具更省。输入给 purpose(一句话"
-           "目的,进审计账)与 script(Python 源码,import luban_tools 拿 typed stubs,结尾必须 emit)。";
+    // 文案在 src/prompts/tools/<语言>/programmatic_tool_calling.md,兜底是迁移前的原文。
+    return tools::ToolText("programmatic_tool_calling", "description",
+                    "编排一段 Python 脚本批量调用已挂载的只读工具(read_file/search 等):写变量、条件、循环、"
+                    "asyncio.gather 扇出,一段脚本收完把 emit() 的精简摘要送回。适合遍历一批文件、先查 A 再喂 "
+                    "B/C 的长链、同时派多路只读调用后聚合;短任务直接用普通工具更省。输入给 purpose(一句话"
+                    "目的,进审计账)与 script(Python 源码,import luban_tools 拿 typed stubs,结尾必须 emit)。");
 }
 
 nlohmann::json PtcTool::input_schema() const {

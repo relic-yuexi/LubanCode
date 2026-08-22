@@ -356,3 +356,18 @@ TEST_CASE("图片界面文案中英都有") {
     CHECK(cli::trf("image.attached", "err.png", 12, 34) == "[image] attached err.png (12x34)");
     CHECK(cli::tr("error.image.too_large").find("5MB") != std::string::npos);
 }
+
+TEST_CASE("/model roles 在补全说明与帮助里中英都有入口") {
+    LangGuard guard;
+    for (const std::string language : {"zh-CN", "en"}) {
+        cli::SetLanguage(language);
+        CHECK(cli::tr("slash.desc.model").find("/model roles") != std::string::npos);
+        CHECK(cli::tr("help.slash").find("/model roles") != std::string::npos);
+        CHECK(cli::tr("slash_help.body").find("/model roles") != std::string::npos);
+        const std::string header = cli::tr("cmd.model.roles_header");
+        const bool names_subagents = header.find("子代理") != std::string::npos ||
+                                     header.find("subagent") != std::string::npos ||
+                                     header.find("sub-agents") != std::string::npos;
+        CHECK(names_subagents);
+    }
+}
