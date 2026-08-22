@@ -1,0 +1,386 @@
+# 终端 Composer 刷新闪失：Enter 所有权交接与多行行尾光标
+
+状态：待做（2026-08-23，用户真机截图：输入两行后，刷新时输入框会短暂消失；
+按 Enter 更常见；行尾光标压在最后一个汉字上，看着不像落在字符后面）
+
+## 一句话
+
+这不是一只 bug。Enter 先把旧框擦净，下一任画面晚些才接手，故而露白；
+光标另有一笔账，逻辑索引虽到行尾，终端实坐标却可能少走一格。先定清画面
+所有权，再用终端实测坐标钉住字符宽度，不能再凭内存里的数字自证无错。
+
+## 用户看见了什么
+
+### 现场一：刷新时，输入框像被抽走
+
+- 用户还在输入，后台状态、子代理、缓存数字一刷新，整只输入框偶尔闪没。
+- 按 Enter 后尤其显眼：上横线、输入正文、下横线、状态栏、代理坞一起退场；
+  隔一会儿，工具或回答才出现。
+- 输入越长、终端越慢、提交前 hooks/记忆/compact 做得越多，空窗越容易看清。
+- 这段空白让人不知内容究竟提交成功，还是丢了。
+
+### 现场二：两行末尾，光标压住最后一个字
+
+- 光标位于第二行行尾时，视觉上反白最后一个汉字。
+- 用户要继续插字，本应看见光标停在末字右边那格；眼下却像覆盖模式。
+- ASCII 短句未必复现。汉字、emoji、组合字符、软换行边界更容易露馅。
+
+## 已翻过的代码
+
+| 事情 | 现入口 | 眼下做法 |
+|---|---|---|
+| composer 逐键读取 | `src/cli/console_input.cpp::ReadLineKeyByKey` | 每 100ms 等键，也轮询面板与状态修订 |
+| 底部整帧 | `RedrawEditArea` | 拼 `InlineFrame`，再走 VT diff 或 Win32 兼容绘制 |
+| Enter 收框 | `CollapseBoxOnSubmit` | 清掉整帧，只从帧顶重打纯文本 `> 内容` |
+| 软换行与光标 | `src/cli/terminal_frame.cpp::LayoutComposerRows` | 从 UTF-32 索引算物理行与显示列 |
+| 字符宽度 | `src/cli/line_editor.cpp::CharDisplayWidth` | 手写 East Asian Width 近似表 |
+| VT 批量写 | `src/platform/terminal_batch.cpp` | DEC 2026 同步输出包住 clear/write/CUP |
+| 帧差量 | `QueueInlineFrameDiff` | 行变了才擦写；行与逻辑光标都没变便不发 CUP |
+| 回合启动 | `src/app/interactive_session.cpp`、`src/app/turn_runner.cpp` | 输入返回后再过命令、提及、记忆、hook、图片等门 |
+
+## 根因判断
+
+### 根因一：Enter 不是普通刷新，是破坏式退场
+
+`ReadLineKeyByKey` 发现 `box && state.submitted` 后，当场调用
+`CollapseBoxOnSubmit`。这函数会：
+
+1. 从 `prev_frame_origin` 起，把旧 frame 所占行全部硬擦掉；
+2. 重打 `> 内容` 与续行；
+3. 把光标挪到提交文本末尾；
+4. 调用方再打一枚换行，立刻返回字符串。
+
+这时 `InteractiveSession` 尚未判明：
+
+- 它是普通用户回合；
+- 它是 slash 命令；
+- 它要发给某只子代理；
+- 提及路径是否有效；
+- `UserPromptSubmit` hook 会不会拦；
+- 记忆召回与自动 compact 要花多久；
+- 图片能否读入；
+- streaming footer 何时起画。
+
+故而旧 owner 已撒手，新 owner 还没接笔。空窗不是错觉，乃真实时序。
+
+### 根因二：所谓“刷新”分成两条路
+
+平常刷新走 `RedrawEditArea -> QueueInlineFrameDiff`。它只改变化行，最后归还
+光标。Enter 却绕开 diff，整块清、整块重打。二者看着都叫 redraw，语义不同：
+
+```text
+普通刷新：旧 frame --同一 owner 内 diff--> 新 frame
+
+Enter：旧 composer --先清空--> 无 owner 空窗 --若干工作--> turn/footer
+```
+
+所以答案很直白：刷新不该这么刷。至少 Enter 这一下，眼下不是原子换帧。
+
+### 根因三：同步输出只是愿望，未形成能力合同
+
+`TerminalBatch` 默认写 `ESC[?2026h/l`。支持 DEC synchronized output 的终端会
+攒齐后再显示。不支持的终端可能忽略它，用户便看见“先擦、后写”。眼下只探
+VT 可用，没探 DEC 2026 是否真受支持，也没为不支持者选别的策略。
+
+即便终端支持同步输出，Enter 后那段跨函数、跨阶段的空窗也包不进同一只 batch。
+它只能减轻一帧内闪烁，治不了 owner 交接。
+
+### 根因四：光标只有逻辑测试，没有真机闭环
+
+`LayoutComposerRows` 对常见汉字的公式大体说得通。问题在于它只拿
+`CharDisplayWidth` 算宽。终端最终按自己的规矩占格。两边可能在这些地方分账：
+
+- 组合附加符；
+- variation selector；
+- ZWJ emoji；
+- emoji skin tone；
+- 东亚 ambiguous width；
+- Windows Terminal 与传统 conhost 的宽度差；
+- 字体把 grapheme 画成一枚，代码却按多个 code point 累加；
+- 恰好占满一行时，终端自动换行与本地软换行同时发生；
+- 别的 stdout writer 动过物理光标，frame cache 却仍以为光标没动。
+
+后一条尤其要紧。`QueueInlineFrameDiff` 若发现“行没变、逻辑光标也没变”，便
+不发 CUP。可物理光标可能已被状态刷新、通知、别的 painter 挪走。缓存账与
+屏幕账一旦分家，下一拍还会继续信错账。
+
+## 目标行为
+
+### 提交时
+
+- Enter 后，用户输入立刻定格成“已提交用户块”。不得先消失再回来。
+- 同一原子帧里，composer 从 editing 变 submitted；Working/footer 接到位置。
+- 提交前本地工作再慢，屏上也有确定回执：已提交、校验中或准备中。
+- slash、子代理消息、普通 turn 各有明确出口，不借同一段裸 `cout` 蒙混。
+- 提交失败时，恢复草稿、光标、选择区与滚动位置。不能只报错，再让用户重打。
+
+### 编辑时
+
+- 任何后台刷新不得把 composer 整块清成空白。
+- 光标始终落在插入点。行尾便落在末 grapheme 后那格。
+- 软换行、显式换行、窗口 resize 后，插入点不跳、不压字、不越框。
+- plain/pipe 模式不输出定位转义，仍给稳定纯文本。
+
+## 设计定案
+
+### 一、把画面所有权写成状态机
+
+新立 `ComposerPresentationState`，至少认这些相位：
+
+```text
+IdleEditing
+  -> Submitting
+      -> SubmittedToMain
+      -> SubmittedToSubagent
+      -> HandledAsCommand
+      -> RejectedAndRestored
+  -> Retired
+```
+
+再定 owner：
+
+| 相位 | 谁持画笔 | 可否清旧 frame |
+|---|---|---|
+| IdleEditing | BottomChrome/Composer | 只可同 owner diff |
+| Submitting | Composer handoff transaction | 不可露出无 owner 帧 |
+| SubmittedToMain | Turn transcript + BottomChrome | 接手成功后才退休 editing frame |
+| SubmittedToSubagent | Subagent transcript/queue | 目标确认后原子替换 |
+| HandledAsCommand | Command renderer | 命令先领 frame，再收 composer |
+| RejectedAndRestored | Composer | 原草稿原位复活 |
+
+任何时刻，只准一位 owner 画这片行；也不准无人管。
+
+### 二、低层读取不再决定提交长什么样
+
+`ReadLineKeyByKey` 不应调用 `CollapseBoxOnSubmit` 后只交 `string`。改交结构：
+
+```cpp
+struct ComposerSubmission {
+    std::string text;
+    std::vector<std::u32string> logical_lines;
+    ComposerFrameSnapshot frame;
+    SelectionSnapshot selection;
+    int target_task_id;
+    std::uint64_t submission_id;
+};
+```
+
+- 低层只封住草稿与 frame 锚点，不先擦屏。
+- `InteractiveSession` 判路。
+- 目标 renderer 备好 next frame 后，调用 `CommitSubmissionHandoff`。
+- handoff 在一把 stdout 锁、一只 `TerminalBatch`、一枚 frame revision 内完成。
+- 旧 `CollapseBoxOnSubmit` 先收成兼容 adapter，最后删掉。
+
+### 三、提交块与 streaming footer 同笔落画
+
+普通 turn 的第一次画面应这样变：
+
+```text
+[正在编辑的 composer]
+          |
+          | Enter
+          v
+[有底色的已提交用户块]
+[Working / 准备中]
+[新的可排队 composer，若产品保留忙时输入]
+```
+
+若准备工作尚未完成，先画静态 `Working`。不必等首个模型 token。准备失败，就把
+Working 改为错误，并按策略恢复草稿或留下可重试块。
+
+### 四、frame revision 与物理光标要两本账
+
+新 frame 至少记：
+
+```text
+frame_id
+revision
+owner
+origin
+rows
+planned_cursor
+physical_cursor_known
+terminal_generation
+```
+
+- 任何旁路 stdout 写都要使 `physical_cursor_known=false`，或递增
+  `terminal_generation`。
+- diff 前若 generation 变过，即使逻辑 cursor 未变，也必须补一枚 CUP。
+- 全屏 clear、viewport pan、scroll、confirm menu、transcript repaint 都要废旧锚。
+- 不准拿“previous frame 相同”推出“物理屏幕一定相同”。
+
+### 五、字符宽度从 code point 升成 grapheme/cell 合同
+
+分两层做：
+
+1. `GraphemeSegmenter`：把 UTF-32/UTF-8 文本拆成用户眼里的字符簇；
+2. `TerminalCellWidth`：按当前终端能力算每簇占格。
+
+首版可用成熟 Unicode 库；若暂不引依赖，也须把 provider 抽出来，Windows、
+POSIX、测试各能注入。手写表只能当 fallback，不可继续冒充最终真值。
+
+边界规矩：
+
+- combining mark 不单占格；
+- ZWJ 序列不得从中间放光标；
+- VS15/VS16 跟前簇走；
+- 宽字符放不下剩余一格时，整簇挪到下一物理行；
+- 恰好填满一行时，自己决定下一插入格，不能借终端自动换行猜；
+- 行尾插入点需要一格可见空位；必要时多开一物理行。
+
+### 六、同步输出做能力分级
+
+```text
+Level A：VT + synchronized output 已知可用
+Level B：VT 可用，synchronized output 未知/不可用
+Level C：Win32 legacy console API
+Level D：pipe/plain
+```
+
+- A：clear/write/cursor 全包一批。
+- B：短帧可先 hide cursor，再定点覆盖，末尾 show；少做整行硬清。
+- C：优先 `WriteConsoleOutput`/矩形缓冲一次提交；做不到才逐行画。
+- D：不做原地刷新，只顺序写稳定文本。
+- 程序退出、异常、Ctrl+C 路都要兜底 show cursor，不能留下隐形光标。
+
+## 失败与恢复
+
+### 提交前校验失败
+
+- 留住 `ComposerSubmission`，恢复 editing frame。
+- 光标、选择、历史游标、目标子代理一并还原。
+- 错误行放在框外，不能覆盖草稿。
+
+### handoff 写到一半
+
+- batch flush 失败或屏幕信息失效，标 frame unknown。
+- 下一拍走整帧重建，不再做增量 diff。
+- 文本数据仍在 submission/turn model，屏坏可重画，内容不能只活在 stdout。
+
+### resize 与 scroll 撞在提交点
+
+- 以 terminal generation 检查乐观锁。
+- generation 不同，丢弃旧坐标计划，按新宽重排，再一次性提交。
+- 不许拿旧 `frame_top` 在新窗口里硬擦。
+
+## 埋点与诊断
+
+加 `LUBANCODE_DEBUG_TERMINAL_FRAME=1`，每帧只记结构，不记用户正文：
+
+```text
+frame_id/revision/owner
+reason=key|idle_refresh|resize|submit|handoff|notice
+origin/row_count
+old_cursor/new_cursor/physical_cursor
+changed_rows
+terminal_generation
+sync_output_level
+handoff_latency_ms
+```
+
+- 用户正文只记字节数、grapheme 数、逻辑行数，不落原文。
+- Enter 空窗记 `submit_captured_at` 到 `next_owner_painted_at`。目标为 0 个可见帧。
+- 若 planned 与 physical 不同，单独报 `cursor_drift`，带终端名与宽度算法版本。
+
+## 落地次序
+
+### P0：先钉住现象
+
+- [ ] 加真控制台 driver：两行中文停在末尾，抓屏并查询物理 cursor。
+- [ ] 在 `CollapseBoxOnSubmit` 前后、`RunTurn` footer 起画处记时间。
+- [ ] 复现普通 prompt、slash、子代理定向消息三条 Enter 路。
+- [ ] 复现后台面板每 100ms 刷新时的 composer 闪失。
+
+### P1：封住 Enter 空窗
+
+- [ ] 引入 `ComposerSubmission`。
+- [ ] 低层读取不再提前硬清 frame。
+- [ ] main/subagent/command 各自实现 handoff。
+- [ ] 提交块与 Working/footer 同一事务落画。
+- [ ] 校验失败恢复原草稿。
+
+### P2：修正物理光标
+
+- [ ] 抽 `TerminalCellWidth`。
+- [ ] 补 grapheme 分段。
+- [ ] frame 加 terminal generation 与 physical-cursor-known。
+- [ ] 旁路 stdout 一律废光标缓存。
+- [ ] exact-width 行尾必要时造空续行。
+
+### P3：收敛平台差异
+
+- [ ] 探同步输出能力，不只探 VT。
+- [ ] Windows legacy 走矩形批写或等价原子方案。
+- [ ] POSIX 在 tmux、screen、常见终端各跑 driver。
+- [ ] plain/pipe 另钉 golden，不夹 ANSI。
+
+## 测试矩阵
+
+### 文本与光标
+
+- 空文本、单 ASCII、单汉字、ASCII+汉字；
+- 两个显式逻辑行，末行空与不空；
+- 光标在行首、行中、行尾；
+- 恰好填满首行、差一格填满、宽字符前只剩一格；
+- combining mark、VS16、ZWJ family emoji、肤色修饰；
+- tab、控制字符、非法 UTF-8 的既有清洗路径；
+- Home/End、左右移动、删除、粘贴后，光标仍落 grapheme 边界。
+
+### 帧与刷新
+
+- frame 内容不变、物理 cursor 被旁路输出挪过：仍补 CUP；
+- 只状态行变、只代理坞变、只提示行变：composer 不闪；
+- frame 变高、变矮，旧尾行全擦净；
+- resize 发生在 key 后、layout 前、flush 前、flush 后；
+- viewport 到底触发 pan/scroll，锚点随行；
+- 不支持 DEC 2026 时，不出现肉眼可见清空帧。
+
+### Enter 交接
+
+- 普通 turn：submitted block 与 Working 连着出现；
+- slash：命令输出接手，不画假的 Working；
+- 子代理定向：目标块写明 task id，原位回执；
+- hook 拒绝、提及失效、图片读取失败：草稿可恢复；
+- memory/compact 故意延迟 2 秒：用户块一直在；
+- Enter 连按、粘贴末尾 Enter、IME 提交与 Enter 不串；
+- Ctrl+C/Esc 撞在 Submitting：只收一次，不重交也不丢稿。
+
+### 真机
+
+- Windows Terminal / PowerShell；
+- conhost 兼容路；
+- Linux xterm-compatible；
+- tmux / screen；
+- 40、80、120、200 列；
+- 高延迟终端与录屏下逐帧检查；
+- CJK 字体、emoji 字体缺失两种现场。
+
+## 验收口径
+
+- Enter 到下一 owner 落画之间，不出现一帧全空 composer 区。
+- 准备阶段故意睡 2 秒，已提交用户块仍稳稳留在屏上。
+- 两行中文行尾，物理光标坐标等于 renderer 计划坐标，并落在末字之后。
+- 任何非 editor stdout 写后，下一帧都能归还真实光标。
+- resize、滚屏、后台面板刷新各跑 500 次，无残行、无重影、无光标压字。
+- plain 输出无定位转义；TTY 退出后光标必恢复可见。
+
+## 不顺手做
+
+- 本单不定用户提交块的颜色与工具留白；见
+  `todos/终端用户输入背景块_工具条目留白与转录信息层级.todo`。
+- 本单不改子代理停止链；见
+  `todos/子代理x停止失效_取消令牌贯通工具进程与可验证回执.todo`。
+- 本单不借机重写全套 TUI。先把 ownership 与 cursor contract 钉牢。
+
+## 主要落点
+
+| 责任 | 文件 |
+|---|---|
+| composer 读取、提交与 frame handoff | `src/cli/console_input.*` |
+| 软换行、frame diff、cursor plan | `src/cli/terminal_frame.*` |
+| Unicode 编辑与宽度 | `src/cli/line_editor.*` |
+| VT/Win32 批量绘制 | `src/platform/terminal_batch.*`、`src/platform/console_*` |
+| session 判路 | `src/app/interactive_session.cpp` |
+| turn/footer 接手 | `src/app/turn_runner.cpp` |
+| 逻辑测试 | `tests/test_terminal_frame.cpp`、`tests/test_line_editor.cpp` |
+| 真屏驱动 | `tests/screen_driver.cpp`、`tests/stream_footer_driver.cpp`、新增 composer driver |

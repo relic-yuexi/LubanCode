@@ -1,0 +1,385 @@
+# 终端用户输入背景块：工具条目留白与转录信息层级
+
+状态：待做（2026-08-23，用户以 Codex 真机截图定调：已提交输入铺一层克制底色；
+工具调用、工具结果与别类内容上下有气口，一眼分清谁问、谁跑、谁答）
+
+## 一句话
+
+别靠一串 `\n` 碰运气排版。先把用户输入、思考、工具、结果、助手正文收成
+有身份的 block，再由一张间距表排它们。用户块铺淡底，工具内部紧，块与块
+之间松一口气。如此清楚，不必堆卡片，也不必满屏横线。
+
+## 从截图读出的规矩
+
+截图只能证明可见效果，不臆测 Codex 内部实现。可见之处有四条：
+
+1. 已提交输入占一条连续色面。两行同属一块，跟下面运行结果不混。
+2. 提示符与正文落在同一视觉轴。背景不只染字，整行都有承托。
+3. 输入块下方留出空隙，再进状态、工具或代理区。
+4. 工具与工具、工具与结果、结果与下一段内容不贴脸，屏仍紧凑。
+
+目标不是照抄颜色。要抄的是层级。
+
+## 现状账
+
+### 用户输入只是一段临时 stdout
+
+- live 提交由 `CollapseBoxOnSubmit` 重打成 `> 内容`。
+- 恢复历史由 `FormatRestoredHistory` 另排一遍 user/assistant。
+- 正常 `TranscriptItem` 只认 `Tool / SubTool / Thinking`，不认 User。
+- 故而 live、resume、Ctrl+L 重画、导出各有一套样子。
+- 用户输入不在统一 view model 里，背景、换行、间距只能四处补。
+
+### 工具留白散在 painter 的副作用里
+
+- `TranscriptPainter::PaintNew` 先补行首，再直接 `cout << "\n"` 留空行。
+- 找不到锚点时，`Repaint` 又走自己的追加换行。
+- `StreamBodyTracker::OnToolBlockDone` 另记“下一段正文要分开”。
+- 恢复历史有一只 `separate()` lambda。
+- subtool、thinking、confirm、retract、resize 各自算行数。
+
+所以“有时松、有时挤”并不奇怪。空行没有身份，也不归 anchor 管。原地重画
+一长一短，它便可能被吃掉，或多留一行。
+
+### 工具 start 与 result 已是一枚 item 的两个状态
+
+现有 `ToolDisplay` 会把 Running item 原地改成 Ok/Error。这个方向对。不能为了
+“结果有间隔”又把 start、done 画成两张重复卡片。应当这样理解：
+
+```text
+ToolBlock
+  header: tool use / running / final status
+  body: params summary / result summary / expanded output
+```
+
+块内不加空行。块外按相邻角色留白。
+
+## 产品定案
+
+### 一、默认画面
+
+```text
+  用户输入第一行                                    [淡中性底色铺满]
+  用户输入第二行                                    [同一色面]
+
+● read_file(src/cli/console_input.cpp)
+  ⎿ 读取 184 行
+
+● run_command(cmake --build ...)
+  ⎿ 完成 · 0 · 4.2s
+
+助手正文从这里起。正文内部仍按 Markdown 排。
+```
+
+- 用户块是一条 surface，不做浮卡，不加圆角幻觉。
+- 工具 header 与自己的 result 摘要贴紧。
+- 两枚一级工具之间缺省空一行。
+- 子工具挂在父工具下，可更紧，不必每枚都空一行。
+- 工具批次之后接助手正文，空一行。
+- 连续正文交给 Markdown，不乱插空行。
+
+### 二、统一 block 角色
+
+扩出中立显示模型，至少认：
+
+```text
+UserPrompt
+AssistantText
+Thinking
+Tool
+SubTool
+Warning
+Error
+TurnFooter
+SystemNotice
+```
+
+每块带：
+
+```text
+item_id / turn_id / step_id / parent_id
+role
+status
+compact_content / detail_ref
+spacing_class
+surface_style
+revision
+```
+
+这与 `todos/终端回合视觉收束_工具批次分组分界线与WorkedFor.todo` 的
+`TurnView/TurnItemView` 合流。不要再造一套只供背景色使用的伪 transcript。
+
+过渡期可先做纯函数 `FormatUserPromptBlock`，由 live 与 resume 共用；待
+`TurnItemView` 落地，再把 adapter 摘掉。
+
+## 用户输入块规格
+
+### 内容
+
+- 只画用户真实提交文本。
+- 系统提示、记忆召回、隐藏 context、skills 注入一概不露。
+- 图片用一行稳定摘要；原图路径按既有隐私规矩处理。
+- `@file` 若 UI 原先显示用户写下的字样，照原文；解析后塞进模型的文件正文不展。
+- 定向子代理消息可在角上用淡标签写 `to #3`，但标签不侵占正文宽度。
+- 空白 prompt 不生成空色块。
+
+### 几何
+
+- 背景铺到“内容区安全宽度”，不能只染有字那几格。
+- 左右各留固定 1~2 格 padding。窄屏可降为 1 格。
+- 多行逐行补齐背景，末行也补齐。
+- wrap 复用 composer 同一套 grapheme/cell layout，提交前后不得忽然换行。
+- 块宽随 resize 重算；旧背景属性须硬清，不能留下色尾。
+- 背景 ANSI 每行开、每行关。不能靠软换行把背景带到下一行。
+
+### 颜色
+
+给 `Theme` 添语义 token，不在 renderer 里写死 ANSI：
+
+```text
+surface_user_bg
+surface_user_fg
+surface_user_marker
+surface_padding
+```
+
+- dark：取中性灰，略亮于终端底，不用蓝紫大色块。
+- light：取浅灰，正文仍有足够对比。
+- high contrast：可用边线/反白替代低对比底色。
+- plain/no-color：退成 `> ` 标记与块后空行，不夹 ANSI。
+- `NO_COLOR`、重定向、dumb terminal 必须守住。
+
+颜色值先用 screenshot/golden 与真机校，不在 TODO 里拍死 RGB。验收看语义层级、
+对比度与终端兼容，不看某一台屏幕上的绝对色。
+
+### 状态
+
+- editing：仍由 composer chrome 画，不提前铺 transcript surface。
+- submitting：内容冻结，surface 立即落地。
+- accepted：保持原样，不再重打一份。
+- rejected：可在块下写短错，并恢复草稿；不能同时留“已提交”假象。
+- interrupted：用户块不消失。中断属 turn footer，不改用户原话颜色。
+
+## 间距不是换行，是布局数据
+
+### 间距矩阵
+
+以“空白物理行数”为单位，首版建议：
+
+| 前块 -> 后块 | 默认间距 | 说明 |
+|---|---:|---|
+| UserPrompt -> Thinking | 1 | 问与做分开 |
+| UserPrompt -> Tool | 1 | 同上 |
+| UserPrompt -> AssistantText | 1 | 直接回答也留气口 |
+| Thinking -> Tool | 0 或 1 | 同 model step 可紧；长 thinking 后留 1 |
+| Tool -> Tool | 1 | 一级工具各成块 |
+| Tool -> SubTool | 0 | 子项贴父项 |
+| SubTool -> SubTool | 0 | 同父批次紧排 |
+| Tool/SubTool -> AssistantText | 1 | 工具与答复分开 |
+| AssistantText -> Tool | 1 | 新一拍工具 |
+| Warning/Error -> 任意主块 | 1 | 异常不黏正文 |
+| 任意正文 -> TurnFooter | 1 | 收尾另起 |
+
+矩阵不是永远硬编码。可变因素有：
+
+- compact/expanded 模式；
+- parent_id 是否相同；
+- step_id/batch_id 是否相同；
+- 前块最后一行、后块第一行是否自带 Markdown 空白；
+- 窗口是否太矮；
+- plain 输出是否要保稳定日志密度。
+
+最终收口成纯函数：
+
+```cpp
+BlockGap GapBetween(const RenderBlock& before,
+                    const RenderBlock& after,
+                    const LayoutPolicy& policy);
+```
+
+### 空行要归 anchor
+
+- gap 归后块 leading gap，或归明确的 boundary block；全程序只选一种。
+- `PaintNew/Repaint/Retract` 的 row count 包含 gap。
+- 重画工具内容时，只改工具自身行，不能擦到邻块 gap。
+- 删除最后一块时，连自己的 gap 收净，不留下越来越长的空洞。
+- resize 重建由 block 列表重新算，不复用旧 stdout 空行猜位置。
+
+## 工具块细节
+
+### 一枚工具的一生
+
+```text
+Pending -> Running -> WaitingApproval -> Ok/Error/Blocked/Interrupted
+```
+
+- 状态原地换，不追加第二枚“结果块”。
+- header 一行报工具与短参数。
+- summary 紧接 header。没有摘要便不占空行。
+- expanded output 属同一块 detail。
+- Error 可染状态灯与短因，不要整片红底。
+- result 很长时折叠，写“另有 N 行”，不让它吞掉块间节奏。
+
+### 多工具
+
+- 同一 model response 的一级工具属一批，仍可每枚留一行。
+- 若一口气有五十枚微小工具，允许 compact policy 把同批间距降为 0，并在批次
+  前后各留 1；不能让 50 枚空行淹掉内容。
+- PTC/Lua 内层调用与 subagent 子工具按 parent 分组，缺省紧排。
+- 并行工具将来按稳定 item id 更新。谁先完成，只改谁；间距不随完成次序抖。
+
+### 调用与结果的区别
+
+用户所说“tool use 和结果上下留空”，落实为两层：
+
+1. 工具块跟别的块有边界；
+2. header 跟自己的 summary 用缩进、`⎿`、状态色分层，不另塞空行。
+
+这样既分得清，又不把一枚调用画成两枚。
+
+## live、恢复、重画必须同源
+
+### live
+
+Runtime 产 block event；terminal renderer 维护 block tree 与 frame。stdout painter
+只作 adapter，不再掌握唯一真相。
+
+### `/resume`
+
+`FormatRestoredHistory` 不另写一套 user header + tool separator。它应把 JSONL
+消息先投成同一组 `RenderBlock`，再走同一 renderer。缺少 live-only 字段时用
+稳定 fallback，不改相邻间距。
+
+### Ctrl+L / resize
+
+- 从 block model 重排整屏。
+- 背景逐行硬清、重铺。
+- 不重复写一枚用户 prompt。
+- viewport 若只保最近 N 行，不能从用户块中间切开却丢掉角色标识；必要时加
+  `… earlier in this prompt` 占位。
+
+### pipe / 日志 / 导出
+
+- 纯文本不输出背景 ANSI。
+- 保留 `> user`、`[tool]` 等稳定机器可读标记。
+- block gap 可固定为一空行；提供 `--compact-output` 时才压紧。
+- JSON 事件输出只发结构，不发“空行事件”。间距属于 renderer。
+
+## 与 Enter 修复的交接
+
+本单依赖
+`todos/终端Composer刷新闪失_Enter所有权交接与多行行尾光标.todo`：
+
+- 先冻结 `ComposerSubmission`；
+- 由 `UserPromptBlock` 接手同一片 frame；
+- 同一 transaction 里退 editing chrome、落 user surface、亮 Working；
+- 不先 `CollapseBoxOnSubmit` 成裸文本，再回头涂背景。
+
+若反着做，背景块仍会闪没，或在 scrollback 里重打一份。
+
+## 无障碍与终端 corner case
+
+- 色盲与无色终端不能只靠底色分角色；保留提示符/缩进。
+- 高对比主题可禁背景，改左侧竖线或反白 marker。
+- ANSI reset 必须保住链接、粗体、Markdown code span 的样式边界。
+- 用户文本里带 ANSI/ESC 时，先按既有安全路径转义，绝不能注入控制序列。
+- bidi、RTL 首版至少不崩、不越框；若不支持光标编辑，要明定降级。
+- CJK 宽字符、emoji、combining 与背景 padding 同按 cell 算。
+- 最后一列不能写字符后再触发隐式 wrap，背景会漏到下一行。
+- 终端只有 20 列时，先保 marker 与正文，再舍左右 padding。
+- 超长单词按 cell wrap，不可撑破 block。
+- 用户末尾带多枚换行，要区分正文空行与 block 外 gap，不能叠加失控。
+
+## 落地次序
+
+### P0：黄金图与纯布局
+
+- [ ] 钉 dark/light/plain 三套 user block golden。
+- [ ] 钉单行、两行、长行、CJK、emoji、图片摘要。
+- [ ] 写 `GapBetween` 表驱动测试。
+- [ ] 钉 tool->tool、tool->assistant、parent->subtool 画面。
+
+### P1：用户块同源
+
+- [ ] Theme 添 surface token。
+- [ ] 写纯函数 `FormatUserPromptBlock`/`LayoutUserPromptBlock`。
+- [ ] live 提交接入 handoff transaction。
+- [ ] restored history 复用同一 formatter。
+- [ ] plain 输出守住无 ANSI。
+
+### P2：间距结构化
+
+- [ ] 引入 `RenderBlock/spacing_class/parent_id`。
+- [ ] 把 `PaintNew` 里的裸 `cout << "\n"` 迁走。
+- [ ] 把 `StreamBodyTracker::separate_next_body_` 迁进 layout policy。
+- [ ] anchor 行数含 gap；repaint/retract 同账。
+- [ ] confirm、thinking、subtool、silent 回流全过矩阵。
+
+### P3：统一 turn view
+
+- [ ] 与 `TurnView/TurnItemView` TODO 合流。
+- [ ] User/AssistantText 正式进 transcript model。
+- [ ] Ctrl+L、resume、focus view、export 从一份 block tree 投影。
+- [ ] 删除 live/history 两套格式分支。
+
+## 测试矩阵
+
+### 相邻关系
+
+- user->thinking、user->tool、user->assistant；
+- tool->tool 同批与跨批；
+- tool->subtool、subtool->subtool、subtool->assistant；
+- thinking->tool、thinking->assistant；
+- error/warning 插在正文前后；
+- 空块、只有状态无摘要、长展开结果；
+- 终态 repaint 行数变长/变短；
+- retract 中间块、最后块、父块连子块。
+
+### 显示模式
+
+- dark、light、plain、NO_COLOR、高对比；
+- compact、expanded、focus view；
+- 20/40/80/120/200 列；
+- resize 前后用户块 wrap 不丢字；
+- Windows Terminal、conhost、xterm、tmux；
+- 重定向到文件后无 ESC 字节。
+
+### 生命周期
+
+- 提交后长时间准备，用户块不消失；
+- 工具 Running -> Ok，空行数不跳；
+- Running -> 多行 Error，后块不被盖；
+- 用户中断，块与 footer 间距正确；
+- resume 后与原 live 截图同层级；
+- Ctrl+L 十次不重复 prompt、不累计空行；
+- 50 枚工具不生成 50 行无意义荒地；
+- 并行乱序完成，块位置不换。
+
+## 验收口径
+
+- 用户输入在首眼便与工具、回答分开；无色模式也分得开。
+- 两行用户输入共享连续背景，背景不漏色、不留尾巴。
+- 一级工具之间有稳定气口；工具 header 与自己的结果不被空行拆散。
+- 同一段历史在 live、resume、Ctrl+L 后只差 viewport，不差结构与间距。
+- repaint、resize、retract 后空行不增不减。
+- pipe 输出无 ANSI，机器日志不因视觉空行改变事件语义。
+
+## 不顺手做
+
+- 不在本单实现全套 `Worked for` 与工具 batch 事件；沿用既有视觉收束 TODO。
+- 不做卡片套卡片，不给每枚工具画边框。
+- 不把工具 start/result 拆成重复两项。
+- 不用背景色掩盖角色数据缺失；先有 block role，再谈样式。
+
+## 主要落点
+
+| 责任 | 文件 |
+|---|---|
+| Theme surface token | `src/cli/theme.*` |
+| 用户块与恢复历史 | `src/cli/transcript.*` |
+| live block painter | `src/cli/live_transcript.hpp` |
+| 工具生命周期 adapter | `src/cli/tool_display.hpp` |
+| composer handoff | `src/cli/console_input.*` |
+| turn 事件与正文 | `src/app/turn_runner.cpp`、后续 runtime view model |
+| 单元 golden | `tests/test_transcript.cpp`、`tests/test_terminal_frame.cpp` |
+| 真屏 driver | `tests/screen_driver.cpp`、`tests/agent_stream_driver.cpp` |

@@ -1,0 +1,459 @@
+# 子代理 `x` 停止失效：取消令牌贯通工具、进程与可验证回执
+
+状态：待做（2026-08-23，用户真机反馈：代理坞写着 `x 停止/清除`，实际按下后
+子代理停不住，看着像摆设）
+
+## 一句话
+
+眼下 `x` 只保证“把一枚 atomic bool 置真”，不保证正在跑的工作真停。模型流
+若肯看旗，能收；普通工具不收 cancel token，命令与阻塞 I/O 便要等到自己
+回来。再加上按键有隐藏前提、界面没有回执，用户自然只看见一枚死键。要把
+请求、执行、确认、进程树、台账与画面串成一条可验证的停止链。
+
+## 现状链路
+
+### 按键
+
+```text
+x
+ -> keymap AgentStop
+ -> PanelKey::StopEntry
+ -> AgentPanelController::Outcome.stop_current
+ -> AgentPanelActions.cancel_task(task_id)
+ -> InteractiveSession
+ -> AgentTool::CancelTask(task_id)
+ -> task->cancel.store(true)
+```
+
+这段接线确实存在，不可笼统说“x 什么都没做”。
+
+### 隐藏前提
+
+`PanelKey::StopEntry` 只有这些条件全中才消费：
+
+- 面板已经 `focus_`；
+- composer 为空；
+- 当前选中项不是 main；
+- 当前选中项不是闲置汇总哨兵；
+- task id 仍在本拍导航表里。
+
+提示行却只写 `x 停止/清除`。用户若没先按上下键聚焦，或光标还在 composer，
+按 `x` 只会输入字母。即便动作发出，空闲路径也不显示成功/失败回执。
+
+### 子代理循环
+
+`AgentTool::RunTask` 把：
+
+- task 自己的 `cancel`；
+- 父回合 Esc 的 cancel；
+- 墙钟 watchdog 的 `wall_stop`
+
+合并到 `merged_cancel`，再交 `AgentLoop::Run`。合并线程每 20ms 看一回。
+
+### 真正断点
+
+`AgentLoop` 会把 cancel 传给模型 backend，也会在工具与工具之间查旗。可它调用
+`RunOneTool` 时，没有把 cancel 交给工具。`Tool` 基类只有：
+
+```cpp
+virtual Result execute(const nlohmann::json& input) = 0;
+```
+
+于是现语义明写着：正在跑的工具照常等它跑完；后续工具才不执行。
+
+这便解释了用户所见：
+
+- 子代理正在等模型流，backend 支持取消：较快停；
+- backend 卡在不响应取消的网络调用：等超时或墙钟；
+- 子代理正在 `run_command`：命令跑完前未必停；
+- 子代理正在 web/MCP/Lua/plugin/ask_user：各走各路，行为不一；
+- `x` 已置旗，面板仍显示 Running，且没有 `Stopping`，像毫无反应。
+
+## 不能混淆的四个词
+
+| 动作 | 含义 |
+|---|---|
+| Request stop | 已受理停止请求，只代表信号入账 |
+| Cancelling | 取消正在传播，任务可能尚在跑 |
+| Cancelled | 任务线程已收口，资源已回收 |
+| Force-finalized | 台账先翻终态，底层工作可能仍未归来 |
+
+界面不准把第一项写成第三项。也不准后台还跑着，坞里却先把行删掉。
+
+## 目标行为
+
+### 用户按一下 `x`
+
+- 明确选中一只 running 子代理后，立刻回执 `正在停止 #3…`。
+- 行状态从 Running 变 Cancelling，保留 task id 与耗时。
+- 新的模型请求、新工具、新 inbox 交付一律关闸。
+- 正在跑的 cancellable 操作收到同一枚 token。
+- 到 grace deadline 仍未停，按能力升级；不能无限悬着。
+- 最终写清 `已停止`、`停止失败` 或 `已强制收账，底层仍可能晚归`。
+
+### 按键不可用时
+
+- 未聚焦：提示用户先选择，或产品改成 `x` 自动作用于当前高亮行。
+- 选中 main：不吞键，或明报 main 要用 Esc；不能静默。
+- composer 非空：字母 `x` 仍须正常输入。
+- task 已完成：动作改成 clear，并给回执。
+- task 已退场/陌生 id：回执“任务状态已变化”，刷新列表。
+
+## 产品与按键定案
+
+### 方案 A：保留焦点前提，补清楚提示（改动小）
+
+```text
+↑/↓ 选择 · Enter 查看 · x 停止所选 · Esc 返回
+```
+
+- 只有出现 `❯` 选择标记时才显示 `x 停止所选`。
+- 未聚焦态不写 x，免得许下做不到的承诺。
+- 按键发出后弹短 toast，状态行变 Cancelling。
+
+### 方案 B：未聚焦也认当前可操作项（体验更直接）
+
+- 若只有一只 running 子代理，空 composer 下按 x 直接停它。
+- 多只时必须先选，不猜。
+- 正在查看某只时，x 作用于 viewed task。
+- 此策略要写成纯函数并测，不能在空闲、流式两条输入路各猜一套。
+
+建议先落 A，少歧义。后续若真机反馈仍嫌绕，再开 B。无论哪种，提示必须与
+状态机同源，不能手写一串永远不变的帮助文案。
+
+## 取消模型
+
+### 一、统一 `CancellationToken`
+
+不要继续到处传 `const atomic<bool>*`。立一层只读 token 与可写 source：
+
+```cpp
+enum class CancelReason {
+    UserStopTask,
+    ParentTurnInterrupted,
+    SessionClosing,
+    DeadlineExceeded,
+    PermissionCancelled,
+};
+
+struct CancellationToken {
+    bool IsCancelled() const;
+    CancelReason Reason() const;
+    std::optional<Deadline> Deadline() const;
+    CallbackHandle OnCancel(std::function<void(CancelReason)>);
+};
+```
+
+- 多来源合并用 `LinkedCancellationSource`，不另起 20ms polling thread。
+- reason 首次写入后钉住；墙钟不能冒充用户点 x。
+- token 活期必须长过被取消操作，不能拿栈上 atomic 给 detached 线程。
+- callback 注销要竞态安全，晚注册时若已取消便立刻调用一次。
+
+### 二、工具接口接执行上下文
+
+将工具入口渐进迁成：
+
+```cpp
+virtual Result execute(const nlohmann::json& input,
+                       const ToolExecutionContext& context);
+```
+
+`ToolExecutionContext` 至少带：
+
+```text
+thread_id / turn_id / task_id / tool_use_id
+cancellation_token
+deadline
+cwd
+output sink
+```
+
+旧工具先用 adapter 调旧 `execute(input)`，并标 `cancellation_capability=None`。
+不能一夜之间假装全支持。
+
+### 三、能力分级
+
+```text
+Cooperative       主动轮询 token，可很快收口
+InterruptibleIO   token callback 能唤醒 socket/pipe/wait
+ProcessTree       可终止整棵进程树
+BoundaryOnly      当前调用不可打断，只能阻止后续动作
+NonCancellable    明确不能停
+```
+
+工具注册时公开能力。UI 才能写实话：
+
+- `正在停止`；
+- `等当前文件写完便停`；
+- `此工具不能立即停止，最迟等到 30s 超时`。
+
+## 各类工具怎么停
+
+### 模型 backend
+
+- cancel callback 关闭/abort HTTP request，不能只等 on_event 下次被调用。
+- SSE parser、重试 backoff、限流 sleep 都用可中断等待。
+- provider SDK 不支持 abort 时，标 BoundaryOnly，并受 request hard timeout 管。
+- 取消后迟到 delta 不再写 transcript，只记 late event 诊断。
+
+### `run_command`
+
+- Windows 每次执行放进 Job Object；取消时收根、子、孙。
+- POSIX 新建 process group；先 SIGTERM，grace 后 SIGKILL。
+- stdout/stderr reader 要随管道关闭醒来，不能 join 卡死。
+- cancelled 与 timed_out 分开记。
+- 后台命令已脱离当前工具时，停止子代理是否连带停它，要按 ownership 定：
+  子代理专属便停；用户明确要求长期运行则转交 session registry，不暗杀。
+
+此处与
+`todos/run_command跨平台Shell语义_进程生命周期与后台任务收口.todo`
+合流，不另写第二套进程树方案。
+
+### 文件工具
+
+- read/search/list：分块循环查 token。
+- write/edit：到原子提交前可取消；正在 rename/replace 的临界区不硬断。
+- 若已有副作用，结果写 `cancelled_after_commit`，不能报“未执行”。
+- 大文件读取每批查旗，避免一只同步 read 占死。
+
+### 网络、MCP、plugin、Lua
+
+- web fetch/search：abort request，DNS/连接/读取各有 deadline。
+- MCP：若协议支持 request cancellation，发 cancel notification；不支持便关当前
+  request 或按 server 隔离策略重启，不能一刀杀掉别的会话请求。
+- out-of-process plugin：协议添 cancel request；到期终止该 invocation 子进程。
+- in-process Lua/C：Lua 用 instruction hook 查 token；C ABI 传 host cancel callback。
+- in-process 原生 plugin 若长时阻塞且无合作取消，不能安全 kill thread，须明确
+  NonCancellable；高风险长任务应迁到隔离进程。
+
+### ask_user 与审批
+
+- 子代理停止时，挂起的 broker future 立刻按 cancel resolve。
+- 输入监听权归还主 composer。
+- 不能留一只看不见的确认框，等用户答了又唤醒已停任务。
+
+## 状态机与台账
+
+`AgentTaskState` 补 `Cancelling`，或另加 stop phase。推荐分开：
+
+```text
+execution_state: Running | Terminal
+stop_state: None | Requested | Propagating | Escalating | Settled | Failed
+```
+
+如此既能保旧兼容，又能说清“任务还活着，但已在停”。
+
+台账至少记：
+
+```text
+stop_requested_at
+stop_requested_by
+cancel_reason
+active_operation_kind/id
+capability
+grace_deadline
+escalation
+settled_at
+late_completion
+```
+
+终态分型：
+
+```text
+cancelled_before_start
+cancelled_waiting_model
+cancelled_during_tool
+cancelled_after_side_effect
+cancel_failed
+force_finalized
+```
+
+这些字段也给“哪枚工具没停住”提供证据。
+
+## 幂等、竞态与晚归
+
+### 连按 x
+
+- `RequestCancel(task_id)` 幂等。
+- 首次返回 `Accepted`；后续返回 `AlreadyRequested`。
+- 不重置 grace deadline，不重复发 kill，不刷多枚 toast。
+
+### x 与自然完成撞车
+
+- 终态 CAS 只许一方赢。
+- 若完成先赢，回执 `任务恰已完成`，不可改成 Cancelled。
+- 若 cancel 先赢，迟到成功结果记 late completion，不翻回 Done。
+
+### x 与 clear 撞车
+
+- Running/Cancelling 不可 clear。
+- 只有资源收净、线程 join/detach policy 已落账，才允许从活动坞清。
+- force-finalized 的条目仍要在详情留警告，直到晚归或 session 收场。
+
+### 父 turn Esc 与 x 同时来
+
+- linked token 只收一次，reason 依优先规则钉住。
+- 用户明确点 x 可记 task-level；父 turn Esc 仍要取消其余前台子任务。
+- completion notice 只投一次。
+
+## 回执合同
+
+动作接口不要只回 bool。改成：
+
+```cpp
+struct CancelTaskResult {
+    Status status; // Accepted, AlreadyRequested, AlreadyTerminal, NotFound, Rejected
+    int task_id;
+    CancelCapability capability;
+    std::string active_operation;
+    std::optional<Duration> grace;
+};
+```
+
+UI 文案示例：
+
+```text
+正在停止 #3 · run_command · 最长等 3s
+#3 已停止 · 1.2s
+#3 已完成，无须停止
+#3 当前工具不支持立即停止；已禁止后续步骤
+#3 停止失败 · 详情见 /agent 3
+```
+
+空闲 `ReadLineKeyByKey` 与流式 `TurnInputListener` 都调用同一 dispatcher、同一
+toast formatter。眼下两处各有分派代码，须收成一处，免得一条有回执、一条没。
+
+## 诊断与“怎么知道卡在哪”
+
+加结构日志，默认不记 prompt 与工具输出：
+
+```text
+task_id / tool_use_id
+cancel_requested_at
+signal_reached_backend_at
+signal_reached_tool_at
+process_term_sent_at / kill_sent_at
+operation_returned_at
+task_finalized_at
+capability / reason / outcome
+```
+
+`/agent <id>` 详情可显示最近停止链：
+
+```text
+12:01:03.120 收到 x
+12:01:03.121 已取消模型请求
+12:01:03.143 工具 run_command 收到信号
+12:01:04.152 进程树已退出
+12:01:04.160 任务收口
+```
+
+若停不住，最后一条便告诉人卡在 backend、工具、进程树还是 join。
+
+## 落地次序
+
+### P0：先让 x 不再像死键
+
+- [ ] 按键提示只在满足前置条件时显示。
+- [ ] cancel action 返回结构结果，不再扔掉 bool。
+- [ ] task 立刻显 `Cancelling` 与 active operation。
+- [ ] 空闲、流式两路共用 dispatcher 与 toast。
+- [ ] 给 `CancelTask` 加直接测试，也加真键盘 driver。
+
+### P1：取消原语
+
+- [ ] 引入 CancellationSource/Token/Reason。
+- [ ] linked token 替掉 20ms 合并线程。
+- [ ] backend、backoff、broker 先接 token。
+- [ ] 终态 CAS 与 late completion 规则落账。
+
+### P2：工具执行上下文
+
+- [ ] `ToolExecutionContext` 接进 `RunOneTool` 与 Tool adapter。
+- [ ] 工具公开 cancel capability。
+- [ ] read/search/web/MCP/Lua 逐项接 cooperative cancel。
+- [ ] 不支持者明报 BoundaryOnly/NonCancellable。
+
+### P3：进程与硬兜底
+
+- [ ] run_command 收进程树。
+- [ ] grace + escalation。
+- [ ] stdout/stderr reader 可唤醒。
+- [ ] force-finalized 与底层晚归分账。
+- [ ] session 退出不再靠无界 join，也不悄悄遗留工作。
+
+## 测试矩阵
+
+### 按键与 UI
+
+- 未聚焦按 x；已聚焦选 main；选 running；选 completed；
+- composer 有字母时输入 x，不误停；
+- 空闲 composer 与流式 footer 两条路；
+- task 列表在按键前后重排，仍按稳定 id；
+- 连按 x、x 与 Esc、x 与 Ctrl+X/Ctrl+K；
+- Accepted/AlreadyRequested/Terminal/NotFound 都有准确回执。
+
+### 模型与等待
+
+- backend 正常响应 cancel；
+- backend 不响应 cancel，只等 request timeout；
+- cancel 落在 DNS、连接、首 token 前、流到一半、重试 backoff；
+- ask_user/审批等待中停止；
+- 墙钟与用户 x 同时到，reason 不串。
+
+### 工具
+
+- 五枚串行工具：第二枚运行时按 x，第二枚按能力停，后三枚记未执行；
+- read 大文件、search 大树、web 慢响应、MCP 卡死；
+- Lua 无限循环被 instruction hook 收掉；
+- in-process non-cancellable plugin 给 truthful fallback；
+- 工具完成与 cancel 同拍，终态只一枚。
+
+### 进程
+
+- 根进程、子进程、孙进程全在，x 后全退；
+- 子进程忽略 TERM，grace 后 KILL；
+- Windows Job Object 与 POSIX process group；
+- 进程退出但 pipe reader 卡住；
+- 端口、临时文件、工作树锁在停止后释放；
+- 后台服务 ownership 策略不误杀用户要保留的进程。
+
+### 台账与恢复
+
+- Cancelled 不投正常完成通知；
+- 部分结果与副作用写清；
+- force-finalized 后晚归不翻案；
+- `/resume` 后不复活已取消任务；
+- session 退出有界收口；
+- 诊断日志能看出信号最后抵达哪层。
+
+## 验收口径
+
+- x 动作 100ms 内给可见回执，task 行进入 Cancelling。
+- 可取消 backend/tool 在约定 grace 内收口。
+- run_command 停止后根、子、孙与监听端口全消失。
+- 不可立即取消的工具明说，且后续模型/工具不再启动。
+- 连按、竞态、晚归不造双终态，不把 cancelled 翻回 done。
+- 空闲与流式两条按键路，行为与文案一致。
+- `/agent <id>` 能指出取消卡在何层，不再只剩“好像没停”。
+
+## 不顺手做
+
+- 不用 `TerminateThread`、pthread cancel 杀 in-process 代码。
+- 不把“台账已停”冒充“底层资源已停”。
+- 不因一只 MCP invocation 卡住便粗暴杀掉共享 server，除非隔离合同允许。
+- 不借本单改子代理调度、并行上限或 prompt。
+
+## 主要落点
+
+| 责任 | 文件 |
+|---|---|
+| 面板状态机与提示 | `src/cli/agent_panel.*` |
+| 空闲/流式按键分派 | `src/cli/console_input.cpp` |
+| 应用层 action 接线 | `src/app/interactive_session.cpp` |
+| 子代理任务、台账、linked cancel | `src/tools/agent_tool.*` |
+| AgentLoop 与 `RunOneTool` 工具边界 | `src/agent/loop.*` |
+| 工具执行合同 | `src/tools/tool.hpp`、`src/tools/registry.hpp` |
+| 命令进程树 | `src/tools/run_command.*`、platform process 层 |
+| 逻辑测试 | `tests/test_agent_panel.cpp`、`tests/test_agent_activity.cpp` |
+| 真机驱动 | `tests/agent_panel_driver.cpp`、`tests/agent_stream_driver.cpp` |
