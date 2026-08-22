@@ -27,6 +27,7 @@
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "app/turn_runner.hpp"
+#include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
@@ -875,4 +876,23 @@ TEST_CASE("RunTurn 集成:同批三枚工具,transcript 里 Pending 先立、终
         pos += 4;
     }
     CHECK(footer_count == 1);
+}
+
+// ---------------------------------------------------------------------------
+// turn 活动条的边界账(无真控制台:footer 未启用,全链短路——钉的正是
+// "没起过的 EndTurn 返回 -1,不误伤 /compact 那类单次 spinner"的契约)。
+// 同钟一致性由口径保证:Working 秒数与 Worked footer 都出自 turn_wall_start
+// 同一枚 steady 钟差,数字格式共用 FormatTurnDuration(上面已钉档位),
+// 不存在第二把尺。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("turn 活动条:footer 未启用时 Begin/Update/End 全链空操作") {
+    lubancode::cli::BeginStreamFooter(lubancode::cli::Theme{}, /*enabled=*/false);
+    CHECK_FALSE(lubancode::cli::TurnActivityActive());
+    lubancode::cli::BeginTurnActivity("Working", 1000);
+    CHECK_FALSE(lubancode::cli::TurnActivityActive());  // 没起成
+    lubancode::cli::UpdateTurnActivityElapsed(0, 5);
+    lubancode::cli::SetTurnActivityInterruptRequested();
+    CHECK(lubancode::cli::EndTurnActivity() == -1);     // 没起过的 End 返回 -1
+    CHECK_FALSE(lubancode::cli::TurnActivityActive());
 }
