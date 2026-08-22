@@ -935,6 +935,7 @@ const Entry kZhCN[] = {
     {"transcript.thinking_stream_more", "……共 {0} 行,思考结束后 Ctrl+O 看全文"},
     {"transcript.batch_pending", "(本拍排队中)"},
     {"transcript.batch_skipped", "本拍未执行(已打断)"},
+    {"transcript.more_lines", " +{0} lines"},
     {"todo.empty", "没有待办。"},
 
     // ---- 统计行 ----
@@ -2608,6 +2609,7 @@ const Entry kEn[] = {
     {"transcript.thinking_stream_more", "… {0} lines so far — press Ctrl+O again after thinking finishes for the full text"},
     {"transcript.batch_pending", "(queued in this step)"},
     {"transcript.batch_skipped", "not run this step (interrupted)"},
+    {"transcript.more_lines", " +{0} lines"},
     {"todo.empty", "No todos."},
 
     // ---- stats line ----

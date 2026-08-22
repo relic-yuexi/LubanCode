@@ -1273,7 +1273,13 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
         }
     }
 
-    if (usage_stats.request_count() > 0 && !silent) {
+    // 统计降噪(终端回合视觉收束单第七节):输入/缓存/输出/请求数/context
+    // 长行不再每轮全摊——context 与缓存命中常驻底部状态栏(UpdateStatusLine
+    // Context 已在 on_usage 局部发布),紧凑态 footer 只写总耗时;详细态
+    // (Ctrl+O)才展开这行。管道/重定向(is_console 为假)没有状态栏,长行
+    // 照打——稳定纯文本输出是 automation 的契约,不能静默吞。
+    const bool stats_verbose = (transcript_expanded != nullptr && transcript_expanded->load()) || !is_console;
+    if (usage_stats.request_count() > 0 && !silent && stats_verbose) {
         // 0.17.0:token 数字统一 k 化(cli::FormatTokenCount),超过 10k 的
         // 数字不再铺一长串数位。i18n:整行进表(stats.line),缓存那一节
         // 先拼好塞进 {1}。

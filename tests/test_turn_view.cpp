@@ -26,6 +26,9 @@
 #include "api/types.hpp"
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
+#include "cli/theme.hpp"
+#include "cli/tool_display.hpp"
+#include "cli/transcript.hpp"
 #include "runtime/id_authority.hpp"
 #include "runtime/turn_collector.hpp"
 #include "runtime/turn_view.hpp"
@@ -488,4 +491,66 @@ TEST_CASE("TurnView 枚举稳定字符串往返") {
     CHECK(p == TurnActivityPhase::Stopping);
     CHECK_FALSE(ParseTurnItemViewState("no-such", s));
     CHECK_FALSE(ParseTurnActivityPhase("", p));
+}
+
+// ---------------------------------------------------------------------------
+// ToolDisplay 的批次预告与多行命令标题(回合视觉收束单第三/四节)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("多行 run_command 标题:只取首个非空逻辑行,末尾 +N lines") {
+    using lubancode::cli::BuildToolTitle;
+    // 单行:照旧。
+    CHECK(BuildToolTitle("run_command", {{"command", "git status"}}).find("+") == std::string::npos);
+
+    // 五行脚本:首行 + "+4 lines"(不按分号切、不横铺)。
+    const std::string script = "$env:http_proxy='http://127.0.0.1:10808'\n"
+                               "$env:https_proxy=$env:http_proxy\n"
+                               "git fetch origin\n"
+                               "git merge origin/main\n"
+                               "git log --oneline -3";
+    const std::string title = BuildToolTitle("run_command", {{"command", script}});
+    CHECK(title.find("$env:http_proxy='http://127.0.0.1:10808'") != std::string::npos);
+    CHECK(title.find("git merge") == std::string::npos);  // 后续行不进标题
+    CHECK(title.find("+4 lines") != std::string::npos);
+
+    // 前导空行跳过:首行从第一个非空行起算;余行数按"首行之外还有几行"
+    // 报(含首行后的空行,如实)。"\n\nls\npwd" 四行,首非空是 ls,余 1 行。
+    const std::string leading = "\n\nls\npwd";
+    const std::string t2 = BuildToolTitle("run_command", {{"command", leading}});
+    CHECK(t2.find("ls") != std::string::npos);
+    CHECK(t2.find("+1 lines") != std::string::npos);
+
+    // 引号/管道里的分号不是命令边界:整段算一条命令(单子原文)。
+    const std::string semicolons = "echo \"a;b;c\"";
+    CHECK(BuildToolTitle("run_command", {{"command", semicolons}}).find("echo \"a;b;c\"") != std::string::npos);
+}
+
+TEST_CASE("ToolDisplay 批次预告:三枚先登记 Pending,start 点亮、终态各归各") {
+    std::vector<lubancode::cli::TranscriptItem> transcript;
+    std::atomic<bool> cancel{false};
+    lubancode::cli::Theme theme;
+    lubancode::cli::ToolDisplay display(transcript, theme, /*console=*/false, nullptr, &cancel);
+
+    display.OnBatchAnnounced({"b1", "b2", "b3"});
+    REQUIRE(transcript.size() == 3);
+    CHECK(transcript[0].status == lubancode::cli::TranscriptStatus::Pending);
+    CHECK(transcript[1].status == lubancode::cli::TranscriptStatus::Pending);
+    CHECK(transcript[2].status == lubancode::cli::TranscriptStatus::Pending);
+
+    // start 到了:点亮预告的那条,不另起一枚。
+    display.OnToolStart("b2", "read_file", nlohmann::json{{"path", "x"}});
+    REQUIRE(transcript.size() == 3);
+    CHECK(transcript[0].status == lubancode::cli::TranscriptStatus::Pending);
+    CHECK(transcript[1].status == lubancode::cli::TranscriptStatus::Running);
+    CHECK(transcript[1].tool_name == "read_file");
+    CHECK(transcript[1].title.find("read_file") != std::string::npos);
+
+    display.OnToolDone("b2", "read_file", lubancode::tools::Tool::Result{"ok", false});
+    CHECK(transcript[1].status == lubancode::cli::TranscriptStatus::Ok);
+
+    // 未 start 的那两枚按 Skipped 定格(ESC 路)。
+    display.OnBatchSkipped();
+    CHECK(transcript[0].status == lubancode::cli::TranscriptStatus::Cancelled);
+    CHECK(transcript[2].status == lubancode::cli::TranscriptStatus::Cancelled);
+    CHECK(transcript[1].status == lubancode::cli::TranscriptStatus::Ok);  // 已终态的不动
 }

@@ -1502,11 +1502,12 @@ bool TerminalSessionController::HandleTranscriptUi(lubancode::cli::UiKeyAction a
         }
         case cli::UiKeyAction::FocusView: {
             if (focus_view_active) {
-                // 再按 Ctrl+E:返回。简化重画:横幅 + 最近几条摘要,
-                // 聚焦画面留在滚动历史里。
+                // 再按 Ctrl+E:返回。恢复最近条目(聚焦画面留在滚动历史
+                // 里)。回合视觉收束单:不再追打 banner——会话 chrome 只在
+                // 启动与真正换 provider/session 时出现,普通返回路径追加
+                // banner 会看着像模型每步重启。
                 focus_view_active = false;
                 std::cout << "\n" << theme.stats << tr("ui.back") << theme.reset << "\n";
-                PrintBanner(config, theme);
                 PrintRecentItems(5);
                 return true;
             }
@@ -1529,14 +1530,14 @@ bool TerminalSessionController::HandleTranscriptUi(lubancode::cli::UiKeyAction a
             }
             focus_view_active = false;
             std::cout << "\n" << theme.stats << tr("ui.back") << theme.reset << "\n";
-            PrintBanner(config, theme);
-            PrintRecentItems(5);
+            PrintRecentItems(5);  // 不追打 banner(同 FocusView 返回路)
             return true;
         }
         case cli::UiKeyAction::RepaintScreen: {
             // Ctrl+L:终端层已清可视区、作废帧锚点;这里从 transcript 快照重铺
-            // 会话画面(横幅 + 最近条目),底栏由终端层随后画回。数据都在,
-            // 只是重铺——草稿/选择/收件目标在终端层状态里,不受影响。
+            // 会话画面(session header 一份 + 最近条目),底栏由终端层随后画
+            // 回。这是 replace screen——可视区已清,不往 scrollback 叠第二份
+            // banner;数据都在,草稿/选择/收件目标在终端层状态里,不受影响。
             PrintBanner(config, theme);
             PrintRecentItems(count > 0 ? 10 : 0);
             return true;
