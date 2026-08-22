@@ -807,12 +807,80 @@ std::string WorkflowRuntime::RunReduce(const ExecutionContext& ctx, const Workfl
 
 WorkflowRunSummary WorkflowRuntime::Run(const WorkflowDefinition& definition, const RunInputs& inputs,
                                          const std::atomic<bool>* cancel_token) {
+    Store store;
+    // 预置为空(新跑):全部节点从头跑。
+    return RunWithStore(definition, inputs.values, std::move(store), {}, cancel_token, false);
+}
+
+std::expected<WorkflowRunSummary, std::string> WorkflowRuntime::Resume(
+    const std::filesystem::path& run_dir, const std::atomic<bool>* cancel_token) {
+    // 1) definition 快照:归一化定义必须还原得动(定义没了也续得上)。
+    std::ifstream def_file(run_dir / "definition.json", std::ios::binary);
+    if (!def_file) {
+        return std::unexpected("run 目录没有 definition 快照: " + lubancode::platform::PathToUtf8(run_dir));
+    }
+    nlohmann::json def_json;
+    try {
+        def_json = nlohmann::json::parse(def_file);
+    } catch (const std::exception& e) {
+        return std::unexpected(std::string("definition 快照解析失败: ") + e.what());
+    }
+    WorkflowDefinition definition;
+    try {
+        definition = WorkflowDefinition::FromJson(def_json);
+    } catch (const std::exception& e) {
+        return std::unexpected(std::string("definition 快照还原失败: ") + e.what());
+    }
+
+    // 2) journal 重放:已完成节点(有 output)不重跑。
+    const std::vector<JournalEvent> events = ReadJournalEvents(run_dir);
+    const auto replayed = ReplayNodes(events);
+    const auto checkpoint = ReadLatestCheckpoint(run_dir);
+    nlohmann::json inputs_json = nlohmann::json::object();
+    std::map<std::string, NodeRunRecord> precompleted;
+    if (checkpoint.has_value() && checkpoint->is_object()) {
+        if (const auto it = checkpoint->find("inputs"); it != checkpoint->end() && it->is_object()) {
+            inputs_json = *it;
+        }
+        // checkpoint 里的节点 output 全部认账(它只在节点终态后写)。
+        if (const auto nodes = checkpoint->find("nodes"); nodes != checkpoint->end() && nodes->is_object()) {
+            for (auto node = nodes->begin(); node != nodes->end(); ++node) {
+                NodeRunRecord record;
+                record.node_id = node.key();
+                record.state = NodeState::Succeeded;
+                precompleted.emplace(node.key(), std::move(record));
+            }
+        }
+    }
+    // journal 事件比 checkpoint 新的部分也认(node_completed 有 output)。
+    for (const auto& [node_id, node] : replayed) {
+        if (node.state == "succeeded") {
+            precompleted.insert_or_assign(node_id, NodeRunRecord{node_id, NodeState::Succeeded});
+        }
+    }
+
+    Store store;
+    if (checkpoint.has_value()) {
+        store = Store::FromJson(*checkpoint);
+    } else {
+        store.Initialize(inputs_json, nlohmann::json{{"run_id", std::string()}});
+    }
+    return RunWithStore(definition, inputs_json, std::move(store), precompleted, cancel_token, true);
+}
+
+WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& definition,
+                                                  const nlohmann::json& inputs, Store&& preloaded,
+                                                  const std::map<std::string, NodeRunRecord>& precompleted,
+                                                  const std::atomic<bool>* cancel_token, bool resuming) {
     WorkflowRunSummary account;
     account.run_id = options_.run_id_generator ? options_.run_id_generator() : DefaultRunId();
     account.workflow_id = definition.id;
     account.state = RunState::Created;
+    for (const auto& [id, record] : precompleted) {
+        account.nodes.emplace(id, record);
+    }
 
-    Store store;
+    Store store = std::move(preloaded);
     const std::int64_t started_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
 
     // 取消最先看:用户都撤了,校验也不必做。
@@ -826,7 +894,7 @@ WorkflowRunSummary WorkflowRuntime::Run(const WorkflowDefinition& definition, co
 
     // validating:输入 schema 对账。
     account.state = RunState::Validating;
-    if (auto problem = ValidateInputsAgainstSchema(inputs.values, definition.inputs)) {
+    if (auto problem = ValidateInputsAgainstSchema(inputs, definition.inputs)) {
         account.state = RunState::Failed;
         account.error_code = "invalid_inputs";
         account.error_message = *problem;
@@ -834,11 +902,13 @@ WorkflowRunSummary WorkflowRuntime::Run(const WorkflowDefinition& definition, co
         return account;
     }
 
-    store.Initialize(inputs.values, nlohmann::json{
-        {"workflow_id", definition.id},
-        {"workflow_version", definition.version},
-        {"run_id", account.run_id},
-    });
+    if (!resuming) {
+        store.Initialize(inputs, nlohmann::json{
+            {"workflow_id", definition.id},
+            {"workflow_version", definition.version},
+            {"run_id", account.run_id},
+        });
+    }
     account.state = RunState::Ready;
 
     // journal(可选)。
@@ -998,6 +1068,13 @@ WorkflowRunSummary WorkflowRuntime::Run(const WorkflowDefinition& definition, co
             break;
         }
 
+        // 恢复路径:已成功的节点不再跑(副作用不重复做,单子"Run Journal"
+        // 一节),沿 success 边直接过。
+        if (resuming && account.nodes.count(node.id) > 0 &&
+            account.nodes.at(node.id).state == NodeState::Succeeded) {
+            current = NextNodeFor(definition, node.id, "success");
+            continue;
+        }
         const std::string outcome = RunNode(ctx, node);
         // skip 的节点(unavailable)计入缺失账(单子验收:报告明写缺了谁)。
         if (outcome == "skipped") {

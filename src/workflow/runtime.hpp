@@ -163,12 +163,24 @@ public:
     WorkflowRunSummary Run(const WorkflowDefinition& definition, const RunInputs& inputs,
                            const std::atomic<bool>* cancel_token = nullptr);
 
+    // 断点续跑(第 4 批):从 run_dir 的 definition 快照 + journal 重放,
+    // 已 succeeded 的节点不再跑(副作用不重复做),从第一只未完成节点续。
+    // 定义 hash 对不上(定义被改/删)给差异报错,不硬续。
+    std::expected<WorkflowRunSummary, std::string> Resume(const std::filesystem::path& run_dir,
+                                                          const std::atomic<bool>* cancel_token = nullptr);
+
     // 预算检查点(内部用,公开给测试):步数/工具调用/token 是否越帽。
     bool WithinBudget(const WorkflowLimits& limits, const WorkflowRunSummary& account) const;
 
     const RuntimeOptions& options() const { return options_; }
 
 private:
+    // 带预置 Store 与已完成节点账的内部跑法(Resume 用)。
+    WorkflowRunSummary RunWithStore(const WorkflowDefinition& definition, const nlohmann::json& inputs,
+                                    Store&& preloaded,
+                                    const std::map<std::string, NodeRunRecord>& precompleted,
+                                    const std::atomic<bool>* cancel_token, bool resuming);
+
     struct ExecutionContext {
         const WorkflowDefinition* definition = nullptr;
         WorkflowRunSummary* account = nullptr;

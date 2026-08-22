@@ -205,6 +205,9 @@ add_executable(lubancode_tests
   # 第 3 批:parallel/join 五策略、稳定汇合顺序、并发帽、map/foreach/
   # reduce、switch 条件选路、并行取消传播(论文四路假工具)。
   test_workflow_parallel.cpp
+  # 第 4 批:宿主执行器(真 ToolRegistry/假 backend/即时 broker)、
+  # subflow 结果映射与错误隔离、journal 断点恢复。
+  test_workflow_agents.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)
