@@ -114,6 +114,9 @@ add_executable(lubancode_tests
   # 第四五步:SessionLifecycle 搬与删的唯一收口(引用解析/archive 字节
   # 原样/幂等/目标拒绝/路径校验/开句柄先关/归档视图不掺默认列表)。
   test_session_lifecycle.cpp
+  # 第六步:SessionCommandService(runtime 侧命令服务,typed command 收口)
+  # 与合同枚举往返(thread.archive 等 + thread.deleted)。
+  test_session_command_service.cpp
   test_prompt_files.cpp
   test_project_instructions.cpp
   test_project_memory.cpp

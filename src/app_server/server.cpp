@@ -18,6 +18,8 @@
 #include <utility>
 #include <vector>
 
+#include "agent/session_catalog.hpp"
+#include "runtime/session_command_service.hpp"
 #include "tools/ask_user.hpp"
 #include "tools/registry.hpp"
 
@@ -223,16 +225,39 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
 }
 
 nlohmann::json Server::HandleThreadList() {
-    // 列举走现成的 ListSessions(会话目录真扫);目录没配就只报活着的。
+    // 列举走 SessionCatalog 的结构化摘要(会话管理器单第六步):与终端
+    // picker 共吃一碗饭——同一查询给同一份 id/顺序/状态,不各自重扫
+    // JSONL。默认 active(归档场不掺默认列表);createdAt/updatedAt 用
+    // 存档侧稳定串,前端按自己的 locale 画相对时间。
+    // TODO(显示系统剥离单第 5-8 步):Server 装配 SessionCommandService
+    // 后,thread/list 的查询参数(state/sort/search/分页)与
+    // thread.archive/unarchive/delete 方法从这里接线——协议方法名与
+    // runtime::ClientCommandKind 已对齐(thread.archive 等),装配层
+    // 换调用方即可,不要在 server 里另写第二条扫盘路。
     std::vector<nlohmann::json> entries;
     if (!sessions_dir_.empty()) {
-        for (const agent::SessionListEntry& entry : agent::ListSessions(sessions_dir_, 100)) {
-            entries.push_back(nlohmann::json{{"threadId", entry.id},
-                                             {"startedAt", entry.started_at},
-                                             {"cwd", entry.cwd},
-                                             {"title", entry.title},
-                                             {"firstUserText", entry.first_user_text},
-                                             {"messageCount", entry.message_count}});
+        agent::SessionCatalog catalog(sessions_dir_);
+        catalog.Scan();
+        agent::SessionQuery query;
+        query.scope = agent::SessionScope::All;
+        query.state = agent::SessionState::Active;
+        query.sort = agent::SessionSort::Updated;
+        query.limit = 100;
+        const auto page = catalog.Query(query);
+        for (const agent::SessionSummary& entry : page.entries) {
+            nlohmann::json item =
+                runtime::SessionSummaryToJson(entry.id, entry.title, entry.first_user_text, entry.cwd,
+                                              entry.model, entry.created_at, entry.updated_at,
+                                              entry.message_count,
+                                              entry.state == agent::SessionState::Archived
+                                                  ? "archived"
+                                                  : "active",
+                                              entry.health == agent::SessionHealth::Damaged
+                                                  ? "damaged"
+                                                  : "ok");
+            // 旧字段 startedAt 继续给(createdAt 同源),老前端不断。
+            item["startedAt"] = entry.created_at;
+            entries.push_back(std::move(item));
         }
     }
     return MakeThreadListResult(entries);

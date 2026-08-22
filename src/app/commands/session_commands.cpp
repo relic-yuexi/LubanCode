@@ -33,6 +33,7 @@
 #include "cli/theme.hpp"
 #include "cli/worktree.hpp"
 #include "platform/paths.hpp"
+#include "runtime/session_command_service.hpp"
 
 namespace lubancode::app {
 
@@ -1012,7 +1013,9 @@ int HandleSessionManagementCommand(const std::string& sessions_dir, int kind, co
         std::cout << tr(is_delete ? "cmd.session.delete.usage" : "cmd.session.archive.usage") << "\n";
         return 1;
     }
-    lubancode::agent::SessionLifecycle lifecycle(sessions_dir);
+    // 搬删经 runtime 侧的 SessionCommandService(第六步:typed command
+    // 收口)——终端适配层只管确认屏与文案,不直接碰 lifecycle。
+    lubancode::runtime::SessionCommandService service(sessions_dir);
 
     std::string id;
     std::string title;
@@ -1059,8 +1062,14 @@ int HandleSessionManagementCommand(const std::string& sessions_dir, int kind, co
                 return 1;
             }
         }
-        const auto result = lifecycle.DeleteSession(id, /*confirmed=*/true);
-        if (!result.ok()) {
+        // typed command:协议形状的 confirm 走 payload(确认策略归适配层,
+        // 服务只认 confirm=true 才动手)。
+        lubancode::runtime::ClientCommand command;
+        command.kind = lubancode::runtime::ClientCommandKind::DeleteThread;
+        command.thread_id = id;
+        command.payload = {{"confirm", true}};
+        const auto receipt = service.HandleCommand(command);
+        if (!receipt.accepted) {
             std::cout << trf("cmd.session.delete.failed", id) << "\n";
             return 1;
         }
@@ -1068,8 +1077,12 @@ int HandleSessionManagementCommand(const std::string& sessions_dir, int kind, co
         return 0;
     }
 
-    const auto result = is_archive ? lifecycle.ArchiveSession(id) : lifecycle.UnarchiveSession(id);
-    if (!result.ok()) {
+    lubancode::runtime::ClientCommand command;
+    command.kind = is_archive ? lubancode::runtime::ClientCommandKind::ArchiveThread
+                              : lubancode::runtime::ClientCommandKind::UnarchiveThread;
+    command.thread_id = id;
+    const auto receipt = service.HandleCommand(command);
+    if (!receipt.accepted) {
         std::cout << trf(is_archive ? "cmd.session.archive.failed" : "cmd.session.unarchive.failed", id)
                   << "\n";
         return 1;
@@ -1089,15 +1102,18 @@ bool ArchiveCurrentSession(const std::string& sessions_dir, lubancode::agent::Se
         std::cout << tr("cmd.archive.not_active") << "\n";
         return false;
     }
-    lubancode::agent::SessionLifecycle lifecycle(sessions_dir);
+    lubancode::runtime::SessionCommandService service(sessions_dir);
     // 活动句柄:搬之前先刷盘收柄(Windows sharing violation 的闸)。目标
     // 就是当前会话时,lifecycle 调这里的回调。
-    lifecycle.SetActiveFile(store.file_path(), [&store](const std::string&) {
+    service.SetActiveFile(store.file_path(), [&store](const std::string&) {
         store.Reset();  // ofstream close 自带 flush;RAII 收柄
         return true;
     });
-    const auto result = lifecycle.ArchiveSession(store.session_id());
-    if (!result.ok()) {
+    lubancode::runtime::ClientCommand command;
+    command.kind = lubancode::runtime::ClientCommandKind::ArchiveThread;
+    command.thread_id = store.session_id();
+    const auto receipt = service.HandleCommand(command);
+    if (!receipt.accepted) {
         // 搬失败:句柄已收但文件还在原地,账没坏;如实告诉人。
         std::cout << trf("cmd.session.archive.failed", store.session_id()) << "\n";
         return false;
@@ -1135,13 +1151,17 @@ bool DeleteCurrentSession(const std::string& sessions_dir, lubancode::agent::Ses
         std::cout << tr("cmd.session.delete.cancelled") << "\n";
         return false;
     }
-    lubancode::agent::SessionLifecycle lifecycle(sessions_dir);
-    lifecycle.SetActiveFile(store.file_path(), [&store](const std::string&) {
+    lubancode::runtime::SessionCommandService service(sessions_dir);
+    service.SetActiveFile(store.file_path(), [&store](const std::string&) {
         store.Reset();
         return true;
     });
-    const auto result = lifecycle.DeleteSession(store.session_id(), /*confirmed=*/true);
-    if (!result.ok()) {
+    lubancode::runtime::ClientCommand command;
+    command.kind = lubancode::runtime::ClientCommandKind::DeleteThread;
+    command.thread_id = store.session_id();
+    command.payload = {{"confirm", true}};  // 确认屏已收过,这里带确认动手
+    const auto receipt = service.HandleCommand(command);
+    if (!receipt.accepted) {
         std::cout << trf("cmd.session.delete.failed", store.session_id()) << "\n";
         return false;
     }
