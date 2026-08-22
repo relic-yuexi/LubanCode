@@ -1,6 +1,8 @@
 // session_commands.hpp 的实现:上下文/压缩/会话存档命令的函数体。
 #include "app/commands/session_commands.hpp"
 
+#include <cstdlib>
+#include <ctime>
 #include <iostream>
 
 #include "agent/compact.hpp"
@@ -16,12 +18,15 @@
 #include <string>
 
 #include "agent/loop.hpp"
+#include "agent/session_catalog.hpp"
 #include "agent/session_store.hpp"
 #include "app/commands/settings_commands.hpp"
 #include "app/runtime_profile.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/i18n.hpp"
+#include "cli/session_picker.hpp"
+#include "cli/session_picker_panel.hpp"
 #include "cli/theme.hpp"
 #include "cli/worktree.hpp"
 #include "platform/paths.hpp"
@@ -323,17 +328,65 @@ void PrintSessionsCommand(const std::string& sessions_dir, const std::string& ar
     }
 }
 
-// /resume 裸敲:本目录最近 20 场直接做成方向键菜单。显式编号/id 仍由
-// ResumeSession 解析，脚本和熟手用法不变。
+// ---------------------------------------------------------------------------
+// /resume 裸敲的全屏选择器(SessionPicker):打开时扫一回台账,键盘搜索
+// 只筛内存;Filter(Cwd/All)与 Sort(Updated/Created)切换时重查一次
+// catalog(指纹缓存,没动的场不重读)。Enter 回 id 交 ResumeSession,
+// Esc 原路返回不动盘。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 存档时间串("yyyy-mm-dd HH:MM:SS")-> epoch 秒。本地时间口径(与落档
+// 同一时区);认不出的串折 0(相对时间按"很久以前"算,不炸)。
+long long SessionTsToEpoch(const std::string& ts) {
+    if (ts.size() < 19) {
+        return 0;
+    }
+    std::tm tm_buf{};
+    tm_buf.tm_year = std::atoi(ts.substr(0, 4).c_str()) - 1900;
+    tm_buf.tm_mon = std::atoi(ts.substr(5, 2).c_str()) - 1;
+    tm_buf.tm_mday = std::atoi(ts.substr(8, 2).c_str());
+    tm_buf.tm_hour = std::atoi(ts.substr(11, 2).c_str());
+    tm_buf.tm_min = std::atoi(ts.substr(14, 2).c_str());
+    tm_buf.tm_sec = std::atoi(ts.substr(17, 2).c_str());
+    tm_buf.tm_isdst = -1;
+#ifdef _WIN32
+    return _mkgmtime(&tm_buf);
+#else
+    return timegm(&tm_buf);
+#endif
+}
+
+// SessionCatalog 的一页 -> picker 喂料(相对时间在这层算,协议层留稳定串)。
+lubancode::cli::SessionPickerFeed MakePickerFeed(const std::vector<lubancode::agent::SessionSummary>& entries,
+                                                 long long now_epoch) {
+    lubancode::cli::SessionPickerFeed feed;
+    feed.entries.reserve(entries.size());
+    const std::string now_key = lubancode::agent::NowTimestamp();
+    const long long now = now_epoch != 0 ? now_epoch : SessionTsToEpoch(now_key);
+    for (const auto& entry : entries) {
+        lubancode::cli::SessionPickerEntry row;
+        row.id = entry.id;
+        row.title = entry.title;
+        row.preview = entry.first_user_text;
+        row.cwd = entry.cwd;
+        row.updated_ago = lubancode::cli::FormatSessionAgo(now, SessionTsToEpoch(entry.updated_at));
+        row.created_ago = lubancode::cli::FormatSessionAgo(now, SessionTsToEpoch(entry.created_at));
+        row.damaged = entry.health == lubancode::agent::SessionHealth::Damaged;
+        feed.entries.push_back(std::move(row));
+    }
+    feed.total = entries.size();
+    feed.now_epoch = now;
+    return feed;
+}
+
+}  // namespace
+
 std::optional<std::string> PromptResumeTarget(const std::string& sessions_dir,
                                               const lubancode::cli::Theme& theme) {
     if (sessions_dir.empty()) {
         std::cout << tr("session.no_home") << "\n";
-        return std::nullopt;
-    }
-    const auto entries = lubancode::agent::ListSessions(sessions_dir, 20, CurrentDirUtf8());
-    if (entries.empty()) {
-        std::cout << tr("cmd.resume.none") << "\n";
         return std::nullopt;
     }
     if (!lubancode::platform::StdinIsInteractive() || !lubancode::platform::ProbeStdoutConsole().is_console) {
@@ -341,28 +394,53 @@ std::optional<std::string> PromptResumeTarget(const std::string& sessions_dir,
         return std::nullopt;
     }
 
-    std::cout << "\n" << theme.banner << tr("cmd.resume.menu_title") << theme.reset << "\n";
-    std::vector<lubancode::cli::ChoiceMenuItem> items;
-    items.reserve(entries.size());
-    for (const auto& entry : entries) {
-        const std::string& raw_label = !entry.title.empty() ? entry.title : entry.first_user_text;
-        const std::string label = raw_label.empty() ? tr("cmd.sessions.no_text")
-                                                    : lubancode::agent::TruncateUtf8Chars(raw_label, 56);
-        items.push_back({label,
-                         trf("cmd.resume.menu_description",
-                             entry.started_at.empty() ? tr("cmd.sessions.unknown_time") : entry.started_at,
-                             entry.message_count, entry.id)});
+    // 打开时扫一回台账(指纹缓存);本目录与全部都空才说"没什么可恢复"。
+    lubancode::agent::SessionCatalog catalog(sessions_dir);
+    catalog.Scan();
+    lubancode::agent::SessionQuery query;
+    query.scope = lubancode::agent::SessionScope::Cwd;
+    query.sort = lubancode::agent::SessionSort::Updated;
+    query.cwd = CurrentDirUtf8();
+    query.limit = 0;  // 面板自己管视口,数据一次给全
+    if (catalog.Query(query).total == 0) {
+        lubancode::agent::SessionQuery all_query = query;
+        all_query.scope = lubancode::agent::SessionScope::All;
+        if (catalog.Query(all_query).total == 0) {
+            std::cout << tr("cmd.resume.none") << "\n";
+            return std::nullopt;
+        }
     }
-    lubancode::cli::ChoiceMenuOptions options;
-    options.hint = tr("cmd.resume.menu_hint");
-    options.invalid_hint = tr("cmd.resume.menu_hint");
-    options.editable_hint = tr("cmd.resume.menu_hint");
-    const auto selected = lubancode::cli::ReadChoiceMenu(items, options, theme);
-    if (!selected.has_value() || selected->selected_indices.empty()) {
-        std::cout << theme.stats << tr("cmd.resume.cancelled") << theme.reset << "\n";
-        return std::nullopt;
+
+    // 面板循环:面板里改 Filter/Sort 会把形状带出来,这里重查 catalog
+    // (没动的场走指纹缓存,不重读)再进面板,选中项按 id 留住。
+    lubancode::cli::SessionPickerScope scope = lubancode::cli::SessionPickerScope::Cwd;
+    lubancode::cli::SessionPickerSort sort = lubancode::cli::SessionPickerSort::Updated;
+    std::string keep_id;  // 换筛选前的选中项,重进面板时守住它
+    for (;;) {
+        query.scope = scope == lubancode::cli::SessionPickerScope::Cwd
+                          ? lubancode::agent::SessionScope::Cwd
+                          : lubancode::agent::SessionScope::All;
+        query.sort = sort == lubancode::cli::SessionPickerSort::Updated
+                         ? lubancode::agent::SessionSort::Updated
+                         : lubancode::agent::SessionSort::Created;
+        const auto page = catalog.Query(query);
+        const auto feed = MakePickerFeed(page.entries, 0);
+        const auto result =
+            lubancode::cli::RunSessionPickerPanel(feed, theme, scope, sort, keep_id);
+        if (!result.picked_id.has_value()) {
+            if (result.scope != scope || result.sort != sort) {
+                // 只是换了形状:带着新形状重查再进面板,不算取消;
+                // 选中项按 id 留住。
+                scope = result.scope;
+                sort = result.sort;
+                keep_id = result.selected_id;
+                continue;
+            }
+            std::cout << theme.stats << tr("cmd.resume.cancelled") << theme.reset << "\n";
+            return std::nullopt;
+        }
+        return *result.picked_id;
     }
-    return entries[selected->selected_indices.front()].id;
 }
 
 // /resume <编号或id> 和 --continue 共用的执行逻辑。target 是编号(按

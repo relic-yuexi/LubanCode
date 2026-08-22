@@ -465,6 +465,10 @@ std::optional<KeyEvent> MapKey(const platform::KeyInput& key) {
             return KeyEvent::Simple(KeyKind::Esc);
         case PK::Delete:
             return KeyEvent::Simple(KeyKind::Delete);
+        case PK::PageUp:
+            return KeyEvent::Simple(KeyKind::PageUp);
+        case PK::PageDown:
+            return KeyEvent::Simple(KeyKind::PageDown);
     }
     return std::nullopt;
 }

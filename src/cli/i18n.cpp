@@ -610,7 +610,7 @@ const Entry kZhCN[] = {
     {"slash.desc.memory",
      "管理项目记忆;/memory on|off|use|learn|review|accept|edit|reject|list|remember|forget|rebuild|why"},
     {"slash.desc.sessions", "列本目录最近 20 场会话存档,倒序编号;/sessions all 列全部目录"},
-    {"slash.desc.resume", "上下选择会话并恢复历史(也可跟编号或 id)"},
+    {"slash.desc.resume", "打开会话台账:搜索/筛选/排序后续聊(也可跟编号或 id)"},
     {"slash.desc.export", "当前会话导出 Markdown;/export 路径 可指定输出文件"},
     {"slash.desc.title", "看当前会话标题;/title 标题 给本场起名,/sessions 列表和导出都用它"},
     {"slash.desc.soul", "看当前魂;/soul 内容 写进 SOUL.md,/soul clear 还原默认；名字仍可切换备选魂"},
@@ -1372,10 +1372,7 @@ const Entry kZhCN[] = {
     {"cmd.sessions.no_text", "(没有用户文本)"},
     {"cmd.sessions.dir_line", "      目录: {0}"},
     {"cmd.sessions.dir_unknown", "(未知)"},
-    {"cmd.resume.usage", "用法:/resume(上下选择) | /resume 编号 | /resume id"},
-    {"cmd.resume.menu_title", "恢复哪一场会话?"},
-    {"cmd.resume.menu_description", "{0} · {1} 条 · {2}"},
-    {"cmd.resume.menu_hint", "↑/↓ 移动 · Enter 恢复 · Esc 取消"},
+    {"cmd.resume.usage", "用法:/resume(全屏选择器) | /resume 编号 | /resume id"},
     {"cmd.resume.cancelled", "已取消恢复。"},
     {"cmd.resume.none", "本目录还没有会话存档,没什么可恢复(/sessions all 看全部目录)。"},
     {"cmd.resume.out_of_range", "编号 {0} 超出范围(本目录现有 {1} 场,/sessions 看列表)。"},
@@ -1442,6 +1439,29 @@ const Entry kZhCN[] = {
     {"session.create_failed", "[会话存档] 在 {0} 建档失败,本场对话不落盘(不影响继续聊)。"},
     {"session.append_failed", "[会话存档] 追加写入失败,后续不再落盘(不影响继续聊)。"},
     {"session.compact_event_failed", "[会话存档] 存档事件写盘失败,/resume 将回放到压缩前状态。"},
+
+    // ---- 会话选择器(SessionPicker,/resume 裸敲的全屏台账) ----
+    {"picker.title", "恢复哪一场会话?"},
+    {"picker.search.placeholder", "输入即搜(标题/首句/id/目录)…"},
+    {"picker.filter.label", "Filter"},
+    {"picker.filter.cwd", "Cwd"},
+    {"picker.filter.all", "All"},
+    {"picker.sort.label", "Sort"},
+    {"picker.sort.updated", "Updated"},
+    {"picker.sort.created", "Created"},
+    {"picker.empty.none", "本目录还没有会话存档(Tab 切 All 看全部目录)。"},
+    {"picker.empty.search", "没有命中: {0}"},
+    {"picker.no_text", "(没有用户文本)"},
+    {"picker.damaged", "damaged"},
+    {"picker.footer",
+     "enter resume · esc exit · tab focus · </> change option · up/down browse · pgup/pgdn page · "
+     "home/end jump"},
+    {"picker.status", "{0} / {1} · {2}%"},
+    {"picker.status.empty", "0 / 0 · 0%"},
+    {"picker.ago.now", "just now"},
+    {"picker.ago.minutes", "{0}m ago"},
+    {"picker.ago.hours", "{0}h ago"},
+    {"picker.ago.days", "{0}d ago"},
 
     // ---- UI-D 画面提示 ----
     {"ui.expanded", "—— 详细模式(Ctrl+O 切回紧凑)——"},
@@ -2085,7 +2105,7 @@ const Entry kEn[] = {
      "manage project memory; /memory on|off|use|learn|review|accept|edit|reject|list|remember|forget|"
      "rebuild|why"},
     {"slash.desc.sessions", "list the 20 most recent session archives here; /sessions all for every dir"},
-    {"slash.desc.resume", "choose and replay a session (or pass a number/id)"},
+    {"slash.desc.resume", "open the session picker: search/filter/sort, then resume (or pass a number/id)"},
     {"slash.desc.export", "export this session as Markdown; /export <path> picks the output file"},
     {"slash.desc.title", "show the session title; /title <title> names this session"},
     {"slash.desc.soul", "show the current soul; /soul <text> writes SOUL.md; /soul clear restores default; a name switches souls"},
@@ -2494,10 +2514,7 @@ const Entry kEn[] = {
      "      Remove a home-level skill.\n"
      "Home path: ~/.lubancode/skills/<name>/SKILL.md\n"
      "Project path (manual): <cwd>/.lubancode/skills/<name>/SKILL.md"},
-    {"cmd.resume.usage", "Usage: /resume (arrow-key menu) | /resume <number> | /resume <id>"},
-    {"cmd.resume.menu_title", "Which session should be restored?"},
-    {"cmd.resume.menu_description", "{0} · {1} messages · {2}"},
-    {"cmd.resume.menu_hint", "↑/↓ move · Enter restore · Esc cancel"},
+    {"cmd.resume.usage", "Usage: /resume (full-screen picker) | /resume <number> | /resume <id>"},
     {"cmd.resume.cancelled", "Resume cancelled."},
     {"cmd.resume.queue_restored", "({0} queued message(s) restored too; sent when the turn ends)"},
     {"cmd.resume.worktree_gone", "The worktree this session lived in is gone: {0}. Staying in the current directory; binding to the worktree cleared."},
@@ -2673,6 +2690,29 @@ const Entry kEn[] = {
     {"compact.done_stats", "[compact] history ~{0} tokens; manifest kept {1} constraints / {2} open items"},
     {"compact.hard_trim_turns", "[warning] Lossy hard trim: {0} mid-history messages were dropped (character safety net, not semantic compaction). The model can no longer see that text; the full ledger is still in the session file (/export to view, /compact to rebuild the summary)."},
     {"compact.hard_trim_results", "[warning] Lossy hard trim: oversized tool results were truncated (character safety net, not semantic compaction). The model can no longer see the cut text; the full ledger is still in the session file (/export to view)."},
+
+    // ---- Session picker (SessionPicker, the full-screen ledger behind bare /resume) ----
+    {"picker.title", "Resume a previous session"},
+    {"picker.search.placeholder", "Type to search (title/first line/id/cwd)..."},
+    {"picker.filter.label", "Filter"},
+    {"picker.filter.cwd", "Cwd"},
+    {"picker.filter.all", "All"},
+    {"picker.sort.label", "Sort"},
+    {"picker.sort.updated", "Updated"},
+    {"picker.sort.created", "Created"},
+    {"picker.empty.none", "No session archives in this directory yet (Tab to Filter, switch to All)."},
+    {"picker.empty.search", "No match: {0}"},
+    {"picker.no_text", "(no user text)"},
+    {"picker.damaged", "damaged"},
+    {"picker.footer",
+     "enter resume · esc exit · tab focus · </> change option · up/down browse · pgup/pgdn page · "
+     "home/end jump"},
+    {"picker.status", "{0} / {1} · {2}%"},
+    {"picker.status.empty", "0 / 0 · 0%"},
+    {"picker.ago.now", "just now"},
+    {"picker.ago.minutes", "{0}m ago"},
+    {"picker.ago.hours", "{0}h ago"},
+    {"picker.ago.days", "{0}d ago"},
 
     // TODO(P1):以下 zh-CN 键暂缺英文翻译,tr 回退 zh-CN——诚实回退,不机翻凑数:
     //   mcp.* / plugin.* / tool_search.* / catalog.* / cmd.tools.* / cmd.plugins.* /

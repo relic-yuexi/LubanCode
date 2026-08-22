@@ -58,6 +58,8 @@ enum class KeyKind {
     CtrlO,  // UI-D:紧凑/详细全局切换。核心层只在 composer 模式下置
             // toggle_expand_requested,真正重画 transcript 是 main.cpp 的事
     CtrlE,  // UI-D:聚焦查看当前焦点条目。同上,核心层只置 focus_view_requested
+    PageUp,  // 翻页键:会话选择器(SessionPicker)用;编辑器/菜单按死键落空
+    PageDown,
 };
 
 struct KeyEvent {

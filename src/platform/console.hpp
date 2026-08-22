@@ -136,6 +136,10 @@ struct KeyInput {
         CtrlL,
         Esc,
         Delete,  // Del 键(排队待发消息浏览里"删当前项"用;两平台键序都认)
+        // PageUp/PageDown(VK_PRIOR/VK_NEXT、CSI 5~/6~):会话选择器翻页用。
+        // 只在 SessionPicker 一处消费,别处按死键处理,跟升级前一样。
+        PageUp,
+        PageDown,
     };
     Kind kind = Kind::None;
     char32_t ch = 0;

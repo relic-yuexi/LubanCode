@@ -104,6 +104,12 @@ add_executable(lubancode_tests
   test_web_fetch.cpp
   test_web_search.cpp
   test_session_store.cpp
+  # 会话管理器单第一步:SessionCatalog 中立查询层(排序键/摘要/两排序/两
+  # scope/搜索/分页/坏档/空表/指纹缓存)。
+  test_session_catalog.cpp
+  # 第二步:SessionPicker 纯逻辑(焦点轮换/搜索/筛选排序切换/翻页边界/
+  # 选中保持/视口窗口账/渲染帧/空态/相对时间/百分比)。
+  test_session_picker.cpp
   test_prompt_files.cpp
   test_project_instructions.cpp
   test_project_memory.cpp
@@ -169,9 +175,6 @@ add_executable(lubancode_tests
   test_app_server_connection.cpp
   test_app_server_dispatch.cpp
   test_app_server_turn.cpp
-  # app-server 阶段 2:审批与打断(permission/request 四态、悬停/超时/
-  # 打断、acceptForSession 免问、迟到失效、ask_user 的 user/ask)。
-  test_app_server_approval.cpp
   # app-server 阶段 2:审批与打断(permission/request 四态、悬停/超时/
   # 打断、acceptForSession 免问、迟到失效、ask_user 的 user/ask)。
   # 显示系统剥离单第一步:runtime 合同(Event/Command/Broker 形状与序列化

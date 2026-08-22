@@ -368,6 +368,7 @@ add_library(lubancode_core STATIC
   src/agent/context_budget.cpp
   src/agent/microcompact.cpp
   src/agent/session_store.cpp
+  src/agent/session_catalog.cpp
   src/agent/workflow_recorder.cpp
   src/agent/skill_drafter.cpp
   # 显示系统剥离单第一步:runtime 合同(纯类型 + 序列化,零 cli/app 依赖)。
@@ -397,6 +398,7 @@ add_library(lubancode_core STATIC
   src/cli/keymap.cpp
   src/cli/terminal_caps.cpp
   src/cli/history_search.cpp
+  src/cli/session_picker.cpp
   src/cli/mention_menu.cpp
   src/cli/markdown.cpp
   src/cli/latex_math.cpp
@@ -452,6 +454,7 @@ add_library(lubancode_app STATIC
   src/app/cli_options.cpp
   src/app/cli_app.cpp
   src/cli/console_input.cpp
+  src/cli/session_picker_panel.cpp
   src/cli/spinner.cpp
   src/cli/record_command.cpp)
 target_link_libraries(lubancode_app PUBLIC lubancode_core)
