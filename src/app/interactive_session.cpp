@@ -64,6 +64,7 @@
 #include "app/commands/hook_commands.hpp"
 #include "app/commands/peer_commands.hpp"
 #include "app/commands/doctor_commands.hpp"
+#include "app/commands/workflow_commands.hpp"
 #include "app/version.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
@@ -3147,11 +3148,45 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                                             peer_held_stash};
                 return HandlePeerpermCommand(peer_state, parsed.args);
             }
+            case lubancode::cli::SlashCommand::Workflow: {
+                // Workflows 自然语言编排单:正门 /workflow。catalog 现扫现用,
+                // 不占会话状态;能力表取自当前主表(此刻挂着的工具)。
+                lubancode::app::WorkflowCommandContext wf_ctx;
+                wf_ctx.project_root = std::filesystem::current_path();
+                wf_ctx.user_root = home_dir.has_value()
+                                       ? std::optional<std::filesystem::path>(
+                                             lubancode::tools::Utf8ToPath(*home_dir))
+                                       : std::nullopt;
+                wf_ctx.registry = &registry();
+                for (const auto& skill : skills) wf_ctx.skill_names.push_back(skill.name);
+                wf_ctx.theme = &theme;
+                HandleWorkflowCommand(parsed.args, wf_ctx);
+                break;
+            }
             case lubancode::cli::SlashCommand::Exit:
                 return CommandFlow::Exit;
-            case lubancode::cli::SlashCommand::Unknown:
+            case lubancode::cli::SlashCommand::Unknown: {
+                // Workflows 单:不认得的 / 词先查 WorkflowCatalog——查着了
+                // 是 /<alias> 直呼,查不着才打"不认得"。内建词永远居首,
+                // 撞名禁用的 alias 也不接(只留 /workflow run 正门)。
+                if (!parsed.alias_word.empty()) {
+                    lubancode::app::WorkflowCommandContext wf_ctx;
+                    wf_ctx.project_root = std::filesystem::current_path();
+                    wf_ctx.user_root = home_dir.has_value()
+                                           ? std::optional<std::filesystem::path>(
+                                                 lubancode::tools::Utf8ToPath(*home_dir))
+                                           : std::nullopt;
+                    wf_ctx.theme = &theme;
+                    const std::string wf_id = ResolveWorkflowAlias(wf_ctx, parsed.alias_word);
+                    if (!wf_id.empty()) {
+                        std::cout << theme.stats << "直呼 /" << parsed.alias_word << " -> workflow " << wf_id
+                                  << ";运行入口随下一批接线,先 /workflow show " << wf_id << theme.reset << "\n";
+                        break;
+                    }
+                }
                 std::cout << trf("error.unknown_command", parsed.raw_word) << "\n";
                 break;
+            }
             case lubancode::cli::SlashCommand::NotSlash:
                 break;  // 走不到这里,ProcessLine 已经分流
         }

@@ -196,6 +196,9 @@ add_executable(lubancode_tests
   # 混日志/坏 JSON/call_id 不合/超时/ESC/非零退出/stderr 塞满/输出超限,
   # 缺 Python 整文件 SKIP。
   test_plugin_process.cpp
+  # Workflows 自然语言编排单第 1 批:定义/解析 round-trip/内容 hash/
+  # catalog 两级扫描与遮蔽/校验器全错类/图渲染,纯逻辑。
+  test_workflow_definition.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)

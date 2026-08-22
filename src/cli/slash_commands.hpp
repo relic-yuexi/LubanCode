@@ -50,6 +50,8 @@ enum class SlashCommand {
     Peerperm,  // /peerperm auto|accept|hold|refuse:跨会话来信的权限档
     Doctor,  // /doctor effort|cache:本地兼容端 Effort/前缀缓存诊断(探针要发请求)
     Keymap,  // /keymap [set 动作 和弦|reset [动作|all]]:看/改键位(用户级落盘)
+    Workflow,  // /workflow list|show|graph|validate|run|resume|cancel|history|...:自然语言编排的图
+    WorkflowAlias,  // /<workflow-alias> <args>:直呼已装 Workflow(运行时查 catalog)
     Unknown,  // 以 / 开头,但不认得这个命令
 };
 
@@ -57,6 +59,10 @@ struct ParsedSlashCommand {
     SlashCommand command = SlashCommand::NotSlash;
     std::string args;      // 命令词后面剩下的部分,已剥两端空白;没有就是空串
     std::string raw_word;  // 原始命令词(小写化之前),Unknown 时用来提示"XXX 不认得"
+    // WorkflowAlias 时:命令词剥掉 '/' 后的原文(保留大小写,alias 是
+    // Unicode 敏感的);具体查不查得进 catalog 由会话层定,parser 只认
+    // "不是内建词"这一件事。
+    std::string alias_word;
 };
 
 // 纯函数:识别一行输入是不是 slash 命令、是哪一个、参数是什么。

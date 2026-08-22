@@ -409,6 +409,12 @@ add_library(lubancode_core STATIC
   src/cli/latex_math.cpp
   src/cli/diff.cpp
   src/cli/diff_syntax.cpp
+  # Workflows 自然语言编排单:定义/解析/校验/目录/图渲染,纯逻辑。
+  src/workflow/definition.cpp
+  src/workflow/parser.cpp
+  src/workflow/catalog.cpp
+  src/workflow/validator.cpp
+  src/workflow/graph_view.cpp
 )
 target_include_directories(lubancode_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -454,6 +460,7 @@ add_library(lubancode_app STATIC
   src/app/commands/hook_commands.cpp
   src/app/commands/peer_commands.cpp
   src/app/commands/doctor_commands.cpp
+  src/app/commands/workflow_commands.cpp
   src/app/interactive_session.cpp
   src/app/one_shot.cpp
   src/app/cli_options.cpp
