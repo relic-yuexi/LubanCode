@@ -1,0 +1,163 @@
+# 显示系统彻底剥离:统一 SessionRuntime 接 TUI、Web 与 Tauri
+
+状态：待做（2026-08-22 用户定调）
+
+## 一句话
+
+把“代理怎样跑”与“画面怎样画”彻底分开。内核只收结构化命令，只吐结构化事件；现有终端做一位前端，后来的 Web GUI、Tauri 和 `lubancode app-server` 都接同一颗 SessionRuntime，不复制 AgentLoop，不拿 slash 字符串冒充 API。
+
+```text
+Terminal UI ─────┐
+Tauri sidecar ───┼──► SessionRuntime / CommandService
+Web bridge ──────┘             │
+                               ├─ AgentLoop
+                               ├─ ToolRuntime
+                               ├─ SessionStore
+                               └─ Hooks / Memory / Peers
+                                      │
+                         EventSink / InteractionBroker
+```
+
+## 与 app-server 的关系
+
+- 本单是 `LubanCode_app-server_无界面后台协议与SSH远程项目.todo` 的前置地基。
+- 本单先把运行时、事件、审批与终端拆开；app-server 再把同一套 Command/Event 装进 JSON-RPC。
+- 两单不得各造一套 thread/turn/item、审批状态机或会话恢复逻辑。协议只是适配器，不是第二颗内核。
+
+## 现状盘点（2026-08-22 已核）
+
+### 已有好地基
+
+- `agent::AgentLoop` 已用 `Callbacks` 上报正文、思考、工具起止、usage 与 hook 相位。模型协议、工具注册与会话存档大体不认终端。
+- `SessionStore` 已能建档、续档、逐条追加与列历史，可直接托住 GUI 的 thread/list、thread/read、thread/resume。
+- `TranscriptItem`、diff、Markdown、todo、状态摘要已有不少纯函数；终端渲染成果可以保留，不必重写。
+- 取消已有 `atomic<bool>`，排队已有 SteeringQueue，子代理已有独立任务台账。GUI 接入不用重造这些机制。
+
+### 当前缠结
+
+- `src/app/turn_runner.cpp` 同时管输入预处理、Hooks、权限裁定、终端菜单、diff 预览、stdout、footer、键盘监听、Agent 回调、usage 与收场。
+- `on_tool_confirm` 是同步 `bool`。它当场调 `ReadChoiceMenu/ReadLine`，把审批牢牢钉在 stdin；远端前端没法凭 request id 稍后回答。
+- `src/app/interactive_session.cpp` 约 3900 行。同一对象里混住 backend、tools、session、memory、peer 与焦点、面板、键位、composer、终端标题。
+- `ToolDisplay` 既造转录条目，又读磁盘算 diff，又管 ANSI、宽度、光标和 stdout；数据账与屏幕账没有分家。
+- slash 命令 handler 边改状态、边问用户、边打印。Web/Tauri 若直接复用，只能伪造 `/model`、`/resume` 等字符串，拿不到稳定结构。
+- 名叫 `lubancode_core` 的 CMake target 仍编入 i18n、transcript、markdown 等 CLI 文件；`app` 与 `cli` 互相 include，层次没有形成编译期硬边界。
+- `agent/tools/api` 仍有少量 `std::cerr`，会污染 app-server 的 stdout/stderr 纪律，也拦不住 GUI 收日志。
+- `TranscriptItem` 是终端 view model：含标题、摘要行、截断全文、steady_clock；它不能充当跨进程协议与持久领域模型。
+- ToolDisplay 靠 `active_main/active_sub` 猜当前条目。多 thread、多连接或并行 turn 一来，隐式槽位会串账。
+
+## 完成后的硬边界
+
+### 一、Runtime 不碰界面
+
+- `SessionRuntime` 不 include `cli/*`，不读 stdin，不写 stdout/stderr，不认 Theme、ANSI、终端宽度、键位或光标。
+- Runtime 持有一场会话真正的状态：backend、AgentLoop、ToolRuntime、SessionStore、memory、hooks、peer、steering、权限档与存档基线。
+- Runtime 的公共门只收 typed command，返回即时 receipt；长活另在线程执行，进度走 EventSink。
+- 单发模式、交互 TUI、app-server 共用同一套 `TurnRuntime`，不再由 `AskOnce` 与 `InteractiveSession` 各装一遍大栈。
+
+### 二、命令与事件
+
+```text
+ClientCommand
+  StartThread / ResumeThread / ListThreads / ReadThread
+  StartTurn / SteerTurn / InterruptTurn
+  ResolveApproval / AnswerQuestion
+  SetModel / SetThink / SetProvider / SetLanguage
+  ClearThread / SetTitle / Compact / Export
+
+ServerEvent
+  ThreadStarted / ThreadUpdated
+  TurnStarted / TurnCompleted
+  ItemStarted / ItemDelta / ItemCompleted
+  ApprovalRequested / QuestionRequested / InteractionResolved
+  UsageUpdated / ContextUpdated / Warning / Error
+```
+
+- 每条事件至少带 `thread_id`、`seq`、时间戳；回合事件再带 `turn_id`，条目事件再带 `item_id`。
+- `seq` 在一条 thread 内单调递增。前端凭它排序、查漏、重连补账，不靠收到次序猜。
+- 工具、思考、正文、命令、diff、todo、子代理都落成 Item。终态只发一次，成功、失败、拒绝、取消分清。
+- 事件数据不带 ANSI，不按终端宽度截断，不预先翻成“● Done”一类画面文案。
+- 错误用稳定 `code + details`，可另带 fallback message。前端翻译与排版不反过来改业务判断。
+
+### 三、审批与提问
+
+- 新立 `InteractionBroker`。Runtime 发 `ApprovalRequested` 或 `QuestionRequested`，登记 `request_id`，工作线程等 promise/future。
+- 前端以 `ResolveApproval/AnswerQuestion` 回答。连接线程、WebSocket 线程或 Tauri relay 不得跟着阻塞。
+- 决定至少认 `accept`、`accept_for_session`、`decline`、`cancel`；会话永久放行只写本场权限账。
+- “顺手写进 settings.local.json”另发一枚明确命令，不藏在审批回调里追问第二遍。
+- 回合取消、客户端断开、超时或 thread 关闭时，Broker 清掉悬空请求，统一按 cancel 收口。
+- `ask_user` 走同一 Broker，不许再绕回 `ReadLine` 开私门。
+
+### 四、领域条目与前端 view model
+
+- 新立中立 `TurnItem`：原始工具名、结构化 input/result、状态、起止时间、diff 数据、子项关系与错误码都留真值。
+- 终端端把 TurnItem 投影成现有 `TranscriptItem`，再交 TranscriptPainter 画；Web/Tauri 直接拿 TurnItem 造组件。
+- diff 计算移出 ToolDisplay，产出中立行表（kind、old/new line、text、path）；终端添色，Web 添 DOM class。
+- 完整输出的存储上限、协议发送上限、终端预览上限分三本账。不能再用终端 64KB 截断值冒充真结果。
+- Runtime 可按 thread 产一份 `SessionSnapshot`。前端初连、重连、切页先拿快照，再接增量事件。
+
+### 五、slash 命令退回终端适配层
+
+- slash parser 只把文字翻成 typed command；CommandService 执行并回结构结果；TerminalCommandRenderer 才打印。
+- `/model` 裸敲所需的模型列表、当前项、能力档位都由 query 返回；终端开 ChoiceMenu，Web 开下拉框。
+- `/resume`、`/provider`、`/language`、`/worktree`、`/memory` 同理。业务函数不接 Theme，不调 ReadLine，不写 cout。
+- 纯终端动作（`/copy`、`/keymap`、清屏、焦点、Ctrl+O、编辑器打开）留在 Terminal frontend，不塞进远端协议。
+
+### 六、日志
+
+- 新立 `LogSink`，分 debug/info/warn/error，带 component、thread/turn/item id 与结构字段。
+- `agent/tools/api` 里的直接 `std::cerr` 全改投 LogSink；TUI 缺省把 warn/error 画到 stderr，app-server 保证 stdout 只有协议。
+- 用户可见 ErrorEvent 与诊断日志分账。一次错误不能又发事件、又裸写 stderr、又塞工具结果，重复三遍。
+
+## 建议目录与构建边界
+
+名字实现时可微调，依赖方向不可倒：
+
+```text
+src/runtime/          SessionRuntime、TurnRuntime、CommandService、Event、InteractionBroker
+src/frontend/terminal 输入、菜单、Theme、TranscriptPainter、TerminalEventSink
+src/app_server/       JSON-RPC dispatcher、schema、stdio/以后 websocket transport
+src/agent|api|tools/  既有内核，不 include frontend/terminal
+```
+
+```text
+lubancode_engine       api + agent + tools + config + memory + hooks
+lubancode_runtime      session runtime + typed commands/events
+lubancode_terminal     现有 CLI 输入与渲染
+lubancode_app_server   协议与传输
+lubancode              只分派子命令和装配前端
+```
+
+## 落地次序（一批一枚 commit）
+
+1. **立合同，不改画面**：加 Event/Command/LogSink/InteractionBroker 类型与序列化单测；现有 TUI 先接 adapter，行为逐字不变。
+2. **拆 TurnRuntime**：把 `BuildCallbacks/RunTurn` 中权限、Hooks、usage、取消、输入预处理抽出；footer、监听器、ToolDisplay 留 TerminalTurnView。
+3. **补稳定 id**：thread/turn/item/request/seq 从 Runtime 产生，Agent 回调带 tool_use_id；删 `active_main/active_sub` 的身份职责。
+4. **拆领域条目**：TurnItem 与终端 TranscriptItem 分家；diff、todo、子代理状态先产结构，再由终端投影。
+5. **拆 SessionRuntime**：从 InteractiveSession 搬走 backend/tools/store/memory/hooks/peer/steering；原类缩成 TerminalSessionController。
+6. **拆命令服务**：先改 `/model`、`/resume`、审批三条 GUI 必经路，再分批搬 provider/language/worktree/memory/compact/export。
+7. **清编译边界**：engine/runtime 禁止 include terminal；清掉 core 内直接标准流；CMake 拆 target，CI 加依赖守门 grep。
+8. **接 app-server**：stdio JSON-RPC 只翻 Command/Event；用假前端跑完整回合、审批、提问、取消、续档。
+9. **接 Tauri/Web 样板**：Tauri 以 sidecar 拉起 app-server；Web 先走 loopback bridge，验证同一事件流能画出会话、工具、diff 与审批。
+10. **删兼容桥**：所有入口都过 SessionRuntime 后，删旧 RunTurn/InteractiveSession 业务分支与重复 AskOnce 装配。
+
+## 验收
+
+- `lubancode_engine` 与 `lubancode_runtime` 源码中搜不到 `std::cin/cout/cerr`、ANSI、Theme、ReadLine、ChoiceMenu、TranscriptPainter。
+- engine/runtime 不 include `cli/*` 或 `frontend/terminal/*`；CMake target 依赖单向，反向 include 直接编不过。
+- 现有 TUI 的流式正文、Markdown、工具卡、diff、todo、三档确认、排队、ESC、Ctrl+O、子代理面板与会话恢复不回归。
+- 同一份假 backend 脚本分别喂 TerminalEventSink 与 JsonEventSink：事件 id、次序、终态和领域数据完全一致，只有渲染不同。
+- 审批请求可悬起，再从另一线程回答；等待期间事件泵仍活，interrupt 能立即取消，迟到回答报 request 已失效。
+- 两个 thread 并行跑，item 与审批不串台；重连先取 snapshot，再从 `last_seq + 1` 补事件。
+- `/model`、`/resume` 不经 slash 字符串也能由 typed API 完整调用；终端 slash 只是薄翻译。
+- app-server stdout 全是合法协议消息。底层警告走 LogSink，工具输出走 ItemEvent，不漏裸字节。
+- Tauri 样板能拉起 sidecar、新建会话、流式收文、批准命令、看 diff、打断回合、续接旧会话。
+- 全量单测与三平台 CI 过关；新增 Runtime 合同测试、事件黄金报文、审批竞态、断线收口与多 thread 隔离测试。
+
+## 不做
+
+- 不在本单雕 Web/Tauri 成品界面；只做共用内核、合同、适配器和最小样板。
+- 不先拿 WebSocket 替换 cout 糊一层。输出通道变了，不等于显示与业务分开了。
+- 不让 GUI 直接读 session JSONL、工具内部状态或全局单例；一切从 Runtime query/snapshot/event 取。
+- 不把终端专属 view model 定成公网协议 schema。
+- 不为剥离重写 AgentLoop、ToolRegistry、SessionStore、Markdown 或终端 painter；能包 adapter 的先包，逐步搬。
+- 不用 C ABI 把整颗异步会话直接塞进 Tauri。首选 sidecar + app-server，先守住进程与崩溃边界。
