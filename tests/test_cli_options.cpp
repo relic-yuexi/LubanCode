@@ -151,7 +151,9 @@ TEST_CASE("plugin 出现在位置参数之后:当普通文本并进 positional(�
 TEST_CASE("早退参数在 plugin 之前:早退生效") {
     CHECK(ParseCliArgs(Args({"lubancode", "--version", "plugin", "init", "python"})).action ==
           CliAction::PrintVersion);
+}
 
+// ---------------------------------------------------------------------------
 // 会话管理子命令(会话管理器单第四、五步):archive/unarchive/delete
 // ---------------------------------------------------------------------------
 
