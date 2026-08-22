@@ -31,6 +31,9 @@ class AskUserTool : public Tool {
 public:
     explicit AskUserTool(AskUserHandler handler);
 
+    // 换 handler(app-server 一类前端在装配后把终端问话换成反向请求)。
+    void SetHandler(AskUserHandler handler) { handler_ = std::move(handler); }
+
     std::string name() const override;
     std::string description() const override;
     nlohmann::json input_schema() const override;

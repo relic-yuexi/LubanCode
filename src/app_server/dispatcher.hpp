@@ -49,6 +49,12 @@ struct DispatchContext {
     // 出事件用(事件经这条路走,handler 不直接碰 outbox——保持 dispatcher
     // 纯逻辑可测)。事件一律 must_keep 分型见 outbox.hpp 的 EventMustKeep。
     std::function<void(std::string_view method, const nlohmann::json& params, bool must_keep)> emit_event;
+
+    // 反向请求响应的落点(阶段 2 接线):前端对 permission/request 或
+    // user/ask 的答复走这里,交 server 的悬起件配对。空 = 没接线(骨架
+    // 期测试与直驱的形状)。返回值:空串 = 配对成功;否则稳定错误码
+    //(kStaleRequestId 一类),由 HandleResponse 折成响应回给前端。
+    std::function<std::string(const IncomingResponse& response)> resolve_interaction;
 };
 
 // 方法 handler:params 进,响应 JSON(result 或 error 的整条响应信封,
@@ -68,14 +74,21 @@ public:
     // 处理一条通知(initialized/exit)。通知没有响应,产出只有事件/关线。
     DispatchOutcome HandleNotification(const IncomingNotification& notification, DispatchContext& context);
 
-    // 服务端反向请求(审批/ask_user)的响应进来时走这里。骨架期没有
-    // 反向请求在飞,一律丢弃并打 stderr 诊断——留位,接线在 Broker 那条线。
-    DispatchOutcome HandleResponse(const IncomingResponse& response);
+    // 服务端反向请求(审批/ask_user)的响应进来时走这里。没接
+    // resolve_interaction(骨架期形状)丢弃并打 stderr 诊断;接了就把响
+    // 应交悬起件配对,配不上(迟到/失效)回 kErrStaleRequestId——前端
+    // 拿它区分"答对了"与"答晚了"。
+    DispatchOutcome HandleResponse(const IncomingResponse& response,
+                                   DispatchContext& context = kNullContext);
 
     // 注册方法(装配层用)。同名再注册,后注册的胜。
     void RegisterMethod(std::string_view method, MethodHandler handler);
 
     HandshakeState state() const { return state_; }
+
+    // 空上下文(HandleResponse 的缺省参数:直驱测试没装配 resolve 回调,
+    // 也不该为此造一条假连接)。
+    static DispatchContext kNullContext;
 
     // 装配层给的握手结果拼装(initialize 的 result)。
     void SetInitializeResultFactory(std::function<nlohmann::json()> factory) {
