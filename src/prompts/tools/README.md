@@ -50,11 +50,12 @@ std::string ReadFileTool::description() const {
 - read_file、write_file(基建批 + 文件工具第一批的两枚试点)
 - edit_file、search(文件工具批余量)
 - run_command、background_output、stop_background;批3-5(0.26.21):agent、agent_message(含 persona.general/persona.explore)、ask_user、todo_write、lsp、context_search、context_read(命令族批)
+- 清底批(全部迁完):web_search、web_fetch、tool_search、skill、list_sessions、send_session_message、worktree、memory_save、programmatic_tool_calling
 
 run_command 的描述与 command/shell 两个参数的平台分档文案,档里单列
 `(POSIX)` 节(如 `## description (POSIX)`),cpp 侧键名随 `#ifdef` 走;
 Windows 用主键,POSIX 用 `(POSIX)` 键。timeout_ms / run_in_background /
 cwd 三参数两平台一字不差,只入主键,不分档。
 
-其余工具的描述仍在各自 .cpp 里,后续批次照单子
-(`todos/工具描述与模型可见文案抽离C++按语言分档.todo`)搬。
+静态工具已全部迁完。不迁的只剩动态描述:lua_tool、plugin_tool/plugin_loader、
+mcp_tool——外挂自带描述,进不了档。

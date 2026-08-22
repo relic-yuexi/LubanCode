@@ -5,6 +5,8 @@
 
 #include <sstream>
 
+#include "tools/tool_text.hpp"  // 模型可见文案(描述)查表,源头 prompts/tools/
+
 namespace lubancode::tools {
 
 namespace {
@@ -29,9 +31,11 @@ ListSessionsTool::ListSessionsTool(std::function<std::vector<agent::PeerCard>()>
     : peers_provider_(std::move(peers_provider)), self_peer_id_(std::move(self_peer_id)) {}
 
 std::string ListSessionsTool::description() const {
-    return "列出同一台机器上当前用户开启的其它 Lubancode 会话(不跨机器、不跨用户)。"
-           "每场会话给出 peer_id(短 id,发送消息时用来定人)、名字、状态(空闲/忙/等待)、"
-           "工作目录。只有在手头的结论会影响另一场活会话时才需要查它;不要闲聊、不要催问成环。";
+    // 文案在 src/prompts/tools/<语言>/list_sessions.md,兜底是迁移前的原文。
+    return ToolText("list_sessions", "description",
+                    "列出同一台机器上当前用户开启的其它 Lubancode 会话(不跨机器、不跨用户)。"
+                    "每场会话给出 peer_id(短 id,发送消息时用来定人)、名字、状态(空闲/忙/等待)、"
+                    "工作目录。只有在手头的结论会影响另一场活会话时才需要查它;不要闲聊、不要催问成环。");
 }
 
 nlohmann::json ListSessionsTool::input_schema() const {

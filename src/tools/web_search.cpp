@@ -6,6 +6,8 @@
 #include <cpr/cpr.h>
 #include <nlohmann/json.hpp>
 
+#include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
+
 namespace lubancode::tools {
 
 namespace {
@@ -121,8 +123,10 @@ std::string WebSearchTool::name() const {
 }
 
 std::string WebSearchTool::description() const {
-    return "网络搜索,返回编号列表(标题/URL/摘要)。适合查最新资讯、找文档地址;拿到 URL 之后"
-           "用 web_fetch 抓正文。需要搜好几轮、读好几篇再总结的活,交给 agent 子代理去干。";
+    // 文案在 src/prompts/tools/<语言>/web_search.md,兜底是迁移前的原文。
+    return ToolText("web_search", "description",
+                    "网络搜索,返回编号列表(标题/URL/摘要)。适合查最新资讯、找文档地址;拿到 URL 之后"
+                    "用 web_fetch 抓正文。需要搜好几轮、读好几篇再总结的活,交给 agent 子代理去干。");
 }
 
 nlohmann::json WebSearchTool::input_schema() const {
@@ -133,12 +137,12 @@ nlohmann::json WebSearchTool::input_schema() const {
 
     nlohmann::json query_prop = nlohmann::json::object();
     query_prop["type"] = "string";
-    query_prop["description"] = "搜索关键词或问题";
+    query_prop["description"] = ToolText("web_search", "param.query", "搜索关键词或问题");
     properties["query"] = query_prop;
 
     nlohmann::json count_prop = nlohmann::json::object();
     count_prop["type"] = "integer";
-    count_prop["description"] = "想要几条结果,不填默认 5,上限 10";
+    count_prop["description"] = ToolText("web_search", "param.count", "想要几条结果,不填默认 5,上限 10");
     properties["count"] = count_prop;
 
     schema["properties"] = properties;
