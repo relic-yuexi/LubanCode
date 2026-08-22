@@ -372,6 +372,11 @@ add_library(lubancode_core STATIC
   src/agent/skill_drafter.cpp
   # 显示系统剥离单第一步:runtime 合同(纯类型 + 序列化,零 cli/app 依赖)。
   src/runtime/runtime_contract.cpp
+  # plugins 本地 Tool 运行时(冻结合同 + process v1):manifest 强校验、
+  # 进程协议帧、无 shell 进程执行、工具装配层。
+  src/runtime/plugin_contract.cpp
+  src/runtime/plugin_process.cpp
+  src/runtime/plugin_tool.cpp
   src/cli/i18n.cpp
   src/cli/image_input.cpp
   src/cli/setup_wizard.cpp

@@ -175,6 +175,13 @@ add_executable(lubancode_tests
   # 显示系统剥离单 P2:AgentLoop 异步审批通道(async 优先/同步回落/四态
   # 收账/悬空收口文案)。
   test_approval_broker.cpp
+  # plugins 本地 Tool 运行时第 1 步(冻结合同):manifest 强校验/标识符/
+  # ${plugin_dir} 圈禁/协议帧/入参 Schema 子集/模型可见性,纯函数直测。
+  test_plugin_contract.cpp
+  # 第 2 步(process v1):自带 Python helper 的真机终态矩阵——正常往返/
+  # 混日志/坏 JSON/call_id 不合/超时/ESC/非零退出/stderr 塞满/输出超限,
+  # 缺 Python 整文件 SKIP。
+  test_plugin_process.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)
