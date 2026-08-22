@@ -62,10 +62,11 @@ inline constexpr std::string_view kMethodThreadList = "thread/list";
 inline constexpr std::string_view kMethodThreadResume = "thread/resume"; // 留位:存档恢复单
 inline constexpr std::string_view kMethodThreadRead = "thread/read";    // 留位:只读详情
 
-// turn:一轮问答。steer/interrupt 骨架期不接,名字与终态先留。
+// turn:一轮问答。steer 骨架期不接(SteeringQueue 另一张单在改),interrupt
+// 阶段 2 接线。
 inline constexpr std::string_view kMethodTurnStart = "turn/start";
 inline constexpr std::string_view kMethodTurnSteer = "turn/steer";        // 留位:追加指令
-inline constexpr std::string_view kMethodTurnInterrupt = "turn/interrupt"; // 留位:精确打断
+inline constexpr std::string_view kMethodTurnInterrupt = "turn/interrupt"; // 精确打断(已接线)
 
 // 只读信息面。骨架期不接。
 inline constexpr std::string_view kMethodModelList = "model/list";   // 留位
@@ -83,6 +84,9 @@ inline constexpr std::string_view kMethodConfigRead = "config/read"; // 留位
 
 inline constexpr std::string_view kMethodPermissionRequest = "permission/request"; // 工具审批
 inline constexpr std::string_view kMethodUserAsk = "user/ask";                     // ask_user
+
+// 反向请求响应里的稳定错误码(runtime::kStaleRequestId 的协议面)。
+inline constexpr int kErrStaleRequestId = -32005; // 迟到/失效的 requestId
 
 // 审批决定(前端响应 permission/request 的 result.decision)。
 inline constexpr std::string_view kDecisionAccept = "accept";
@@ -118,13 +122,13 @@ inline constexpr std::string_view kItemTypeQuestion = "question";   // ask_user(
 inline constexpr std::string_view kItemTypeAgent = "agent";         // 子代理(留位)
 inline constexpr std::string_view kItemTypeError = "error";         // 错误条目
 
-// 回合终态(turn/completed 的 params.status)。interrupted/rejected 是
-// 打断与审批拒绝的留位:骨架期接线的是 success/error/cancelled。
+// 回合终态(turn/completed 的 params.status)。interrupted 是 turn/interrupt
+// 的终态(阶段 2 接线);rejected 留位给"审批拒到回合收不了场"的分型。
 inline constexpr std::string_view kTurnStatusSuccess = "success";
 inline constexpr std::string_view kTurnStatusError = "error";
 inline constexpr std::string_view kTurnStatusCancelled = "cancelled";
-inline constexpr std::string_view kTurnStatusInterrupted = "interrupted"; // 留位:turn/interrupt
-inline constexpr std::string_view kTurnStatusRejected = "rejected";       // 留位:审批拒绝
+inline constexpr std::string_view kTurnStatusInterrupted = "interrupted"; // turn/interrupt 的终态
+inline constexpr std::string_view kTurnStatusRejected = "rejected";       // 留位:审批拒绝分型
 
 // ---------------------------------------------------------------------------
 // 溢出通报

@@ -148,6 +148,11 @@ ParamsCheck CheckTurnStartParams(const nlohmann::json& params, std::string& out_
 // thread/stop:threadId(字符串)必填。
 ParamsCheck CheckThreadStopParams(const nlohmann::json& params, std::string& out_thread_id);
 
+// turn/interrupt:threadId(字符串)必填;turnId 可选(空 = 打断该 thread
+// 当前在跑的回合)。
+ParamsCheck CheckTurnInterruptParams(const nlohmann::json& params, std::string& out_thread_id,
+                                     std::string& out_turn_id);
+
 // ---------------------------------------------------------------------------
 // 出站事件参数的拼装助手(一处拼、处处用,字段名冻结前不许散着抄)
 // ---------------------------------------------------------------------------

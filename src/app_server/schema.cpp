@@ -243,6 +243,27 @@ ParamsCheck CheckThreadStopParams(const nlohmann::json& params, std::string& out
     return RequireString(params, "threadId", kMethodThreadStop, out_thread_id);
 }
 
+ParamsCheck CheckTurnInterruptParams(const nlohmann::json& params, std::string& out_thread_id,
+                                     std::string& out_turn_id) {
+    const ParamsCheck base = CheckParamsIsObject(params, kMethodTurnInterrupt);
+    if (!base.ok) {
+        return base;
+    }
+    ParamsCheck check = RequireString(params, "threadId", kMethodTurnInterrupt, out_thread_id);
+    if (!check.ok) {
+        return check;
+    }
+    // turnId 可选:给了但不是字符串才报;缺/空 = 打断该 thread 当前回合。
+    if (params.contains("turnId") && !params["turnId"].is_null()) {
+        if (!params["turnId"].is_string()) {
+            return ParamsCheck{false, kErrInvalidParams,
+                               std::string(kMethodTurnInterrupt) + ": turnId 必须是字符串"};
+        }
+        out_turn_id = params["turnId"].get<std::string>();
+    }
+    return ParamsCheck{};
+}
+
 // ---------------------------------------------------------------------------
 // 出站事件参数
 // ---------------------------------------------------------------------------
@@ -323,10 +344,10 @@ nlohmann::json MakeInitializeResult(std::string_view lubancode_version, std::str
     capabilities["methods"] = std::vector<std::string>{
         std::string(kMethodInitialize), std::string(kMethodInitialized), std::string(kMethodShutdown),
         std::string(kMethodThreadStart), std::string(kMethodThreadList), std::string(kMethodThreadStop),
-        std::string(kMethodTurnStart)};
+        std::string(kMethodTurnStart), std::string(kMethodTurnInterrupt)};
     capabilities["pending"] = std::vector<std::string>{
         std::string(kMethodThreadResume), std::string(kMethodThreadRead), std::string(kMethodTurnSteer),
-        std::string(kMethodTurnInterrupt), std::string(kMethodModelList), std::string(kMethodConfigRead)};
+        std::string(kMethodModelList), std::string(kMethodConfigRead)};
     // 审批与 ask_user 的反向请求:协议位占住,执行链等 Broker(另一条线)。
     capabilities["serverRequests"] = std::vector<std::string>{std::string(kMethodPermissionRequest),
                                                               std::string(kMethodUserAsk)};
