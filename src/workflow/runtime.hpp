@@ -175,10 +175,24 @@ private:
         Store* store = nullptr;
         RunJournal* journal = nullptr;
         const std::atomic<bool>* cancel = nullptr;
+        // 并行分支共写 account.nodes(std::map 并发写会坏):所有
+        // NodeRunRecord 的读改走这把锁。Store 自带锁,不归它管。
+        std::mutex* nodes_mutex = nullptr;
     };
 
     // 单节点全生命周期(含 retry)。返回 outcome(success/error/empty/skipped)。
     std::string RunNode(const ExecutionContext& ctx, const WorkflowNode& node);
+    // 并行分支调度 + 汇合(第 3 批)。返回 join 后的 outcome
+    // (success/error/skipped/cancelled);分支账进 store:<id>.outputs 按
+    // 定义顺序、<id>.unavailable 记缺失。
+    std::string RunParallel(const ExecutionContext& ctx, const WorkflowNode& node);
+    // map/foreach:数组拆项跑 body。map 并发(foreach 顺次);map 的结果
+    // 数组按 items 顺序排,完成时间只进 meta。
+    std::string RunMap(const ExecutionContext& ctx, const WorkflowNode& node);
+    // reduce:items 数组按定义顺序过 reduce_body,累加成单值。
+    std::string RunReduce(const ExecutionContext& ctx, const WorkflowNode& node);
+    // switch:受限条件评估(ConditionOp,禁 eval)。
+    std::string EvaluateSwitch(const WorkflowDefinition& def, const WorkflowNode& node, const Store& store) const;
     // 取某节点某 outcome 的下一站;空串 = 没边(结束)。
     std::string NextNodeFor(const WorkflowDefinition& def, const std::string& node_id,
                             const std::string& outcome) const;

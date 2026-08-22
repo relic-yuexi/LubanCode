@@ -11,6 +11,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <mutex>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <thread>
@@ -266,6 +268,10 @@ std::expected<nlohmann::json, ResolveError> WorkflowRuntime::BuildResult(const W
 
 std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const WorkflowNode& node) {
     WorkflowRunSummary& account = *ctx.account;
+    // 并行分支共写 account.nodes:持锁落记录。单线程路径(顺序图)锁空着,
+    // 裸引用照旧——顺序图不为并行付锁钱。
+    std::unique_lock<std::mutex> nodes_lock;
+    if (ctx.nodes_mutex != nullptr) nodes_lock = std::unique_lock<std::mutex>(*ctx.nodes_mutex);
     NodeRunRecord& record = account.nodes[node.id];
 
     const auto executor_it = options_.executors.find(node.kind);
@@ -293,6 +299,8 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
             ctx.journal->Append(kEventNodeStarted, node.id, attempt,
                                 nlohmann::json{{"kind", ToString(node.kind)}});
         }
+        // Execute 不持账面锁:真活儿(工具/网络/模型)并发跑,只有账本串行。
+        if (nodes_lock.owns_lock()) nodes_lock.unlock();
 
         NodeExecRequest request;
         request.definition = ctx.definition;
@@ -317,6 +325,9 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
         request.resolved_input = resolved_input->value;
 
         result = executor.Execute(request);
+        if (nodes_lock.owns_lock() == false && ctx.nodes_mutex != nullptr) {
+            nodes_lock.lock();
+        }
         account.tokens_used += result.tokens_used;
         if (!result.ok) {
             account.tool_calls += 1;
@@ -395,6 +406,405 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
     return "error";
 }
 
+// ---------------------------------------------------------------------------
+// 并行、map、reduce、switch(第 3 批)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// ConditionOp 评估(纯函数,switch 用):只读结构化值,禁 eval。
+bool EvaluateCondition(lubancode::workflow::ConditionOp op, const nlohmann::json* value,
+                       const nlohmann::json& literal) {
+    using CO = lubancode::workflow::ConditionOp;
+    switch (op) {
+        case CO::Exists:
+            return value != nullptr && !value->is_null();
+        case CO::NotExists:
+            return value == nullptr || value->is_null();
+        case CO::Equals:
+            return value != nullptr && *value == literal;
+        case CO::NotEquals:
+            return value == nullptr || !(*value == literal);
+        case CO::GreaterThan:
+            return value != nullptr && value->is_number() && literal.is_number() &&
+                   value->get<double>() > literal.get<double>();
+        case CO::LessThan:
+            return value != nullptr && value->is_number() && literal.is_number() &&
+                   value->get<double>() < literal.get<double>();
+        case CO::Contains:
+            if (value == nullptr) return false;
+            if (value->is_array()) {
+                for (const auto& item : *value) {
+                    if (item == literal) return true;
+                }
+                return false;
+            }
+            if (value->is_string() && literal.is_string()) {
+                return value->get<std::string>().find(literal.get<std::string>()) != std::string::npos;
+            }
+            return false;
+        case CO::StartsWith:
+            return value != nullptr && value->is_string() && literal.is_string() &&
+                   value->get<std::string>().rfind(literal.get<std::string>(), 0) == 0;
+        case CO::NonEmpty:
+            if (value == nullptr) return false;
+            if (value->is_array()) return !value->empty();
+            if (value->is_string()) return !value->get<std::string>().empty();
+            return false;
+    }
+    return false;
+}
+
+// 从 ${...} 字符串剥出内层路径(非引用原样返回,当字面量路径走 store 下钻)。
+std::string StripRefBraces(const std::string& path) {
+    if (path.size() > 4 && path.front() == '$' && path[1] == '{' && path.back() == '}') {
+        return path.substr(2, path.size() - 3);
+    }
+    return path;
+}
+
+}  // namespace
+
+std::string WorkflowRuntime::EvaluateSwitch(const WorkflowDefinition& def, const WorkflowNode& node,
+                                            const Store& store) const {
+    for (const auto& c : node.conditions) {
+        const std::string ref = StripRefBraces(c.path);
+        // switch 条件只读 store(inputs/nodes/run);不中就落下一条。
+        std::optional<nlohmann::json> resolved;
+        if (auto r = ResolveRef(store, ref); r.has_value()) {
+            resolved = std::move(*r);
+        }
+        const nlohmann::json* value = resolved.has_value() ? &*resolved : nullptr;
+        if (EvaluateCondition(c.op, value, c.literal)) {
+            return c.to;
+        }
+    }
+    return node.default_to;  // 可空:都不中且无 default -> 空(主循环收 skipped)
+}
+
+std::string WorkflowRuntime::RunParallel(const ExecutionContext& ctx, const WorkflowNode& node) {
+    WorkflowRunSummary& account = *ctx.account;
+    const WorkflowDefinition& def = *ctx.definition;
+
+    const int global_cap = std::max(1, def.limits.max_concurrency);
+    const int node_cap = node.max_concurrency > 0 ? node.max_concurrency : global_cap;
+    // 全局、节点两层帽取最小(provider/tool 层帽由各执行器自己再收)。
+    const int effective_cap = std::min(global_cap, node_cap);
+
+    NodeRunRecord& record = account.nodes[node.id];
+    record.state = NodeState::Running;
+    if (ctx.journal != nullptr) {
+        ctx.journal->Append(kEventBranchStarted, node.id, 0,
+                            nlohmann::json{{"branches", node.branches}, {"cap", effective_cap}});
+    }
+
+    struct BranchOutcome {
+        std::string outcome;
+    };
+    const std::size_t count = node.branches.size();
+    std::vector<BranchOutcome> results(count);
+    std::atomic<std::size_t> next_index{0};
+    std::atomic<int> succeeded{0};
+    std::atomic<int> failed{0};
+    std::atomic<bool> cancelled{false};
+    std::mutex node_mutex;  // account.nodes 并行写互斥
+
+    const auto worker = [&]() {
+        while (true) {
+            if (ctx.cancel != nullptr && ctx.cancel->load()) {
+                cancelled.store(true);
+                return;
+            }
+            const std::size_t index = next_index.fetch_add(1);
+            if (index >= count) return;
+            const std::string& branch_id = node.branches[index];
+            const auto branch_it = def.node_map.find(branch_id);
+            if (branch_it == def.node_map.end()) {
+                std::lock_guard<std::mutex> lock(node_mutex);
+                NodeRunRecord& br = account.nodes[branch_id];
+                br.state = NodeState::Failed;
+                br.error_code = "unknown_node";
+                br.error_message = "parallel 分支不存在";
+                results[index].outcome = "error";
+                failed.fetch_add(1);
+                continue;
+            }
+            // 分支可以是一条链:沿 success 边跑到头。
+            std::string cursor = branch_id;
+            std::string branch_outcome;
+            int guard = 0;
+            while (!cursor.empty()) {
+                if (++guard > def.limits.max_steps) {
+                    branch_outcome = "error";
+                    break;
+                }
+                const auto step_it = def.node_map.find(cursor);
+                if (step_it == def.node_map.end()) {
+                    branch_outcome = "error";
+                    break;
+                }
+                const WorkflowNode& step = step_it->second;
+                // RunNode 内部只碰自己名下的 Store 分区与 account.nodes[自己]
+                //(std::map 写入互斥由 nodes_mutex_ 担着),分支间不互踩。
+                const std::string outcome = RunNode(ctx, step);
+                if (outcome == "error" || outcome == "cancelled") {
+                    branch_outcome = outcome;
+                    break;
+                }
+                if (outcome == "skipped") {
+                    branch_outcome = "skipped";
+                    break;
+                }
+                cursor = NextNodeFor(def, cursor, outcome);
+                if (cursor.empty()) {
+                    branch_outcome = "success";
+                    break;
+                }
+            }
+            results[index].outcome = branch_outcome.empty() ? "success" : branch_outcome;
+            if (branch_outcome == "success") succeeded.fetch_add(1);
+            if (branch_outcome == "error") failed.fetch_add(1);
+        }
+    };
+
+    const std::size_t threads = std::min<std::size_t>(static_cast<std::size_t>(effective_cap), count);
+    std::vector<std::thread> pool;
+    pool.reserve(threads);
+    for (std::size_t i = 0; i < threads; ++i) pool.emplace_back(worker);
+    for (auto& t : pool) t.join();
+
+    // 汇合结果:按定义顺序收,不按谁先回来排(单子 Store 一节)。
+    nlohmann::json outputs = nlohmann::json::array();
+    nlohmann::json unavailable = nlohmann::json::array();
+    for (std::size_t i = 0; i < count; ++i) {
+        const std::string& branch_id = node.branches[i];
+        nlohmann::json entry = nlohmann::json::object();
+        entry["branch"] = branch_id;
+        entry["outcome"] = results[i].outcome;
+        if (auto output = ctx.store->GetOutput(branch_id)) {
+            entry["output"] = *output;
+        }
+        if (results[i].outcome == "skipped" || results[i].outcome == "error") {
+            unavailable.push_back(branch_id);
+            if (results[i].outcome == "skipped") {
+                account.unavailable_sources.push_back(branch_id);
+            }
+        }
+        outputs.push_back(std::move(entry));
+    }
+    ctx.store->CommitOutputOverwrite(node.id, nlohmann::json{{"outputs", outputs}, {"unavailable", unavailable}});
+    if (ctx.journal != nullptr) {
+        ctx.journal->Append(kEventJoinCompleted, node.id, 0,
+                            nlohmann::json{{"join", ToString(node.join)},
+                                           {"succeeded", succeeded.load()},
+                                           {"failed", failed.load()},
+                                           {"unavailable", unavailable}});
+    }
+
+    // join 政策(单子"并行与汇合规矩"五种)。
+    if (cancelled.load()) {
+        record.state = NodeState::Cancelled;
+        return "cancelled";
+    }
+    switch (node.join) {
+        case JoinPolicy::All:
+            if (failed.load() > 0 || static_cast<int>(count) != succeeded.load()) {
+                record.state = NodeState::Failed;
+                return "error";
+            }
+            record.state = NodeState::Succeeded;
+            return "success";
+        case JoinPolicy::AllSettled:
+            // 全等完,成功与失败一并交下游(论文多源检索缺一路的用法)。
+            record.state = NodeState::Succeeded;
+            return "success";
+        case JoinPolicy::Any:
+            if (succeeded.load() > 0) {
+                record.state = NodeState::Succeeded;
+                return "success";
+            }
+            record.state = NodeState::Failed;
+            return "error";
+        case JoinPolicy::Quorum: {
+            const int needed = std::max(1, node.join_quorum);
+            if (succeeded.load() >= needed) {
+                record.state = NodeState::Succeeded;
+                return "success";
+            }
+            record.state = NodeState::Failed;
+            return "error";
+        }
+        case JoinPolicy::Race:
+            // 首个终态便过关,成功失败都算(实现上等全部回来再判;定义时
+            // 明示用途窄,单子原文)。
+            record.state = succeeded.load() > 0 ? NodeState::Succeeded : NodeState::Failed;
+            return succeeded.load() > 0 ? "success" : "error";
+    }
+    record.state = NodeState::Succeeded;
+    return "success";
+}
+
+std::string WorkflowRuntime::RunMap(const ExecutionContext& ctx, const WorkflowNode& node) {
+    WorkflowRunSummary& account = *ctx.account;
+    const WorkflowDefinition& def = *ctx.definition;
+
+    NodeRunRecord& record = account.nodes[node.id];
+    record.state = NodeState::Running;
+
+    // items 展开。
+    auto items = ResolveRef(*ctx.store, StripRefBraces(node.items_ref));
+    if (!items.has_value() || !items->is_array()) {
+        record.state = NodeState::Failed;
+        record.error_code = "bad_items";
+        record.error_message = "map/foreach 的 items 不是数组: " + node.items_ref;
+        return "error";
+    }
+    const std::size_t count = items->size();
+    // 展开上限(单子:展开后可能越过 max_nodes/max_steps,validator 已查
+    // 静态形状;这里对运行时数据再收一道)。
+    if (static_cast<int>(count) > def.limits.max_nodes) {
+        record.state = NodeState::Failed;
+        record.error_code = "map_too_large";
+        record.error_message = "map 展开 " + std::to_string(count) + " 项,越过 max_nodes(" +
+                               std::to_string(def.limits.max_nodes) + ")";
+        return "error";
+    }
+    const auto body_it = def.node_map.find(node.map_body);
+    if (body_it == def.node_map.end()) {
+        record.state = NodeState::Failed;
+        record.error_code = "unknown_body";
+        record.error_message = "map body 节点不存在: " + node.map_body;
+        return "error";
+    }
+
+    nlohmann::json mapped = nlohmann::json::array();
+    nlohmann::json meta_times = nlohmann::json::array();
+    int failures = 0;
+    const bool sequential = node.kind == NodeKind::Foreach;
+    std::mutex mapped_mutex;  // mapped 数组并发按下标写也要互斥(json 非线程安全)
+
+    const auto run_item = [&](std::size_t index) -> bool {
+        if (ctx.cancel != nullptr && ctx.cancel->load()) return false;
+        // 逐项把 item 塞进 body 的 input(item 字段),跑一遍 body 链。
+        WorkflowNode body = body_it->second;  // 拷一份:input 覆写 item
+        nlohmann::json item_input = body.input.is_object() ? body.input : nlohmann::json::object();
+        item_input["item"] = (*items)[index];
+        item_input["index"] = index;
+        body.input = item_input;
+        const std::string outcome = RunNode(ctx, body);
+        if (outcome == "success" || outcome == "empty") {
+            auto output = ctx.store->GetOutput(body.id);
+            std::lock_guard<std::mutex> lock(mapped_mutex);
+            mapped[index] = output.has_value() ? *output : nlohmann::json();  // items 顺序,不是完成顺序
+            return true;
+        }
+        std::lock_guard<std::mutex> lock(mapped_mutex);
+        failures += 1;
+        return false;
+    };
+
+    if (sequential || count <= 1) {
+        for (std::size_t i = 0; i < count; ++i) {
+            if (!run_item(i)) {
+                if (ctx.cancel != nullptr && ctx.cancel->load()) {
+                    record.state = NodeState::Cancelled;
+                    return "cancelled";
+                }
+                break;  // foreach 顺次:一项败就停(有依赖的活)
+            }
+        }
+    } else {
+        // map 并发:线程池 + 全局帽。
+        const int cap = std::min(std::max(1, def.limits.max_concurrency),
+                                 node.max_concurrency > 0 ? node.max_concurrency
+                                                          : std::max(1, def.limits.max_concurrency));
+        std::atomic<std::size_t> next_index{0};
+        std::mutex write_mutex;
+        std::vector<std::thread> pool;
+        const std::size_t threads = std::min<std::size_t>(static_cast<std::size_t>(cap), count);
+        // 预填 null,保证下标写不越界。
+        for (std::size_t i = 0; i < count; ++i) mapped.push_back(nlohmann::json());
+        const auto worker = [&]() {
+            while (true) {
+                const std::size_t index = next_index.fetch_add(1);
+                if (index >= count) return;
+                const bool ok = run_item(index);
+                (void)ok;
+                if (ctx.cancel != nullptr && ctx.cancel->load()) return;
+            }
+        };
+        pool.reserve(threads);
+        for (std::size_t i = 0; i < threads; ++i) pool.emplace_back(worker);
+        for (auto& t : pool) t.join();
+    }
+
+    if (ctx.cancel != nullptr && ctx.cancel->load()) {
+        record.state = NodeState::Cancelled;
+        return "cancelled";
+    }
+    ctx.store->CommitOutputOverwrite(node.id,
+                                     nlohmann::json{{"items", mapped}, {"failures", failures}});
+    record.state = failures > 0 && node.kind == NodeKind::Foreach ? NodeState::Failed : NodeState::Succeeded;
+    return failures > 0 && node.kind == NodeKind::Foreach ? "error" : "success";
+}
+
+std::string WorkflowRuntime::RunReduce(const ExecutionContext& ctx, const WorkflowNode& node) {
+    WorkflowRunSummary& account = *ctx.account;
+    NodeRunRecord& record = account.nodes[node.id];
+    record.state = NodeState::Running;
+
+    // reduce 的 items:node.items_ref 没写就找 input.items(定义可以两处写)。
+    std::string items_ref = node.items_ref;
+    if (items_ref.empty() && node.input.is_object() && node.input.contains("items") &&
+        node.input["items"].is_string()) {
+        items_ref = node.input["items"].get<std::string>();
+    }
+    auto items = ResolveRef(*ctx.store, StripRefBraces(items_ref));
+    if (!items.has_value() || !items->is_array()) {
+        record.state = NodeState::Failed;
+        record.error_code = "bad_items";
+        record.error_message = "reduce 的 items 不是数组";
+        return "error";
+    }
+    const auto body_it = ctx.definition->node_map.find(node.reduce_body);
+    if (body_it == ctx.definition->node_map.end()) {
+        record.state = NodeState::Failed;
+        record.error_code = "unknown_body";
+        record.error_message = "reduce body 节点不存在: " + node.reduce_body;
+        return "error";
+    }
+    nlohmann::json acc = nlohmann::json();
+    if (!node.initial_ref.empty()) {
+        if (auto init = ResolveRef(*ctx.store, StripRefBraces(node.initial_ref)); init.has_value()) {
+            acc = *init;
+        }
+    }
+    // 稳定次序:items 顺序,不按完成时间(单子:reduce 按稳定次序汇总)。
+    for (const auto& item : *items) {
+        if (ctx.cancel != nullptr && ctx.cancel->load()) {
+            record.state = NodeState::Cancelled;
+            return "cancelled";
+        }
+        WorkflowNode body = body_it->second;
+        nlohmann::json body_input = body.input.is_object() ? body.input : nlohmann::json::object();
+        body_input["acc"] = acc;
+        body_input["item"] = item;
+        body.input = body_input;
+        const std::string outcome = RunNode(ctx, body);
+        if (outcome != "success") {
+            record.state = NodeState::Failed;
+            record.error_code = "reduce_step_failed";
+            return "error";
+        }
+        if (auto output = ctx.store->GetOutput(body.id)) {
+            acc = *output;
+        }
+    }
+    ctx.store->CommitOutputOverwrite(node.id, acc);
+    record.state = NodeState::Succeeded;
+    return "success";
+}
+
 WorkflowRunSummary WorkflowRuntime::Run(const WorkflowDefinition& definition, const RunInputs& inputs,
                                          const std::atomic<bool>* cancel_token) {
     WorkflowRunSummary account;
@@ -458,6 +868,8 @@ WorkflowRunSummary WorkflowRuntime::Run(const WorkflowDefinition& definition, co
     ctx.store = &store;
     ctx.journal = journal.has_value() ? &*journal : nullptr;
     ctx.cancel = cancel_token;
+    std::mutex nodes_mutex;  // 并行分支共写账本的那把锁
+    ctx.nodes_mutex = &nodes_mutex;
 
     // 主循环:entry 起步,按 outcome 边走。
     std::string current = definition.entry;
@@ -503,6 +915,70 @@ WorkflowRunSummary WorkflowRuntime::Run(const WorkflowDefinition& definition, co
                 journal->SaveCheckpoint(journal->last_seq(), store.ToJson());
             }
             current = NextNodeFor(definition, node.id, "success");
+            continue;
+        }
+        // switch:按结构化条件选路(受限表达式,禁 eval)。
+        if (node.kind == NodeKind::Switch) {
+            current = EvaluateSwitch(definition, node, store);
+            if (current.empty()) {
+                account.state = RunState::Succeeded;  // 都不中且无 default:skipped 收
+            }
+            continue;
+        }
+        // parallel:分支齐跑,join 政策收束(第 3 批)。
+        if (node.kind == NodeKind::Parallel || node.kind == NodeKind::Join) {
+            const std::string join_outcome = RunParallel(ctx, node);
+            if (join_outcome == "cancelled") {
+                account.state = RunState::Cancelled;
+                account.error_code = "cancelled";
+                break;
+            }
+            if (join_outcome == "error") {
+                account.state = RunState::Failed;
+                account.error_code = "join_failed";
+                const NodeRunRecord* worst = nullptr;
+                for (const auto& b : node.branches) {
+                    const auto it = account.nodes.find(b);
+                    if (it != account.nodes.end() && it->second.state == NodeState::Failed) {
+                        if (worst == nullptr) worst = &it->second;
+                    }
+                }
+                account.error_message = node.id + ": 分支失败(" +
+                                        (worst != nullptr ? worst->error_code : std::string("?")) + ")";
+                break;
+            }
+            current = NextNodeFor(definition, node.id, join_outcome.empty() ? "joined" : join_outcome);
+            continue;
+        }
+        // map/foreach:数组拆项,逐项跑 body(map 并发,foreach 顺次)。
+        if (node.kind == NodeKind::Map || node.kind == NodeKind::Foreach) {
+            const std::string map_outcome = RunMap(ctx, node);
+            if (map_outcome == "cancelled") {
+                account.state = RunState::Cancelled;
+                account.error_code = "cancelled";
+                break;
+            }
+            if (map_outcome == "error") {
+                account.state = RunState::Failed;
+                account.error_code = "map_failed";
+                account.error_message = node.id + ": map 展开或执行失败";
+                break;
+            }
+            current = NextNodeFor(definition, node.id, map_outcome);
+            continue;
+        }
+        // reduce:按定义顺序汇总(第 3 批:吃 map/parallel 的结果数组)。
+        if (node.kind == NodeKind::Reduce) {
+            const std::string reduce_outcome = RunReduce(ctx, node);
+            if (reduce_outcome == "error") {
+                account.state = RunState::Failed;
+                account.error_code = "reduce_failed";
+                const NodeRunRecord& reduce_record = account.nodes[node.id];
+                account.error_message =
+                    node.id + ": " + reduce_record.error_code + " " + reduce_record.error_message;
+                break;
+            }
+            current = NextNodeFor(definition, node.id, reduce_outcome);
             continue;
         }
 

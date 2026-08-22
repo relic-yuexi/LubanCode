@@ -258,7 +258,12 @@ std::expected<WorkflowDefinition, std::vector<ParseIssue>> ParseWorkflowYaml(con
                 try { node.max_concurrency = std::stoi(n.Scalar()); } catch (...) {}
             }
             node_str("items", node.items_ref);
-            node_str("body", node.map_body);
+            // body 是 map/foreach/reduce 共用的字段名:map/foreach 逐项跑,
+            // reduce 累加;两处都填,消费方按节点种类取。
+            if (const auto& n = raw["body"]; n && n.IsScalar()) {
+                node.map_body = n.Scalar();
+                node.reduce_body = n.Scalar();
+            }
             node_str("reduce_body", node.reduce_body);
             node_str("initial", node.initial_ref);
             if (const auto& cs = raw["conditions"]; cs && cs.IsSequence()) {

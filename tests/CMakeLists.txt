@@ -202,6 +202,9 @@ add_executable(lubancode_tests
   # 第 2 批:Store/resolver、状态机迁移表、RunJournal 落盘与恢复、顺序图
   # 最小闭环(fake executor/fake clock)、重试/取消/预算/fallback 边。
   test_workflow_runtime.cpp
+  # 第 3 批:parallel/join 五策略、稳定汇合顺序、并发帽、map/foreach/
+  # reduce、switch 条件选路、并行取消传播(论文四路假工具)。
+  test_workflow_parallel.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)
