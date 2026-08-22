@@ -48,6 +48,11 @@ public:
     // M11(网络超时):connect_timeout_ms(连接超时,毫秒)、
     // stream_idle_timeout_secs(SSE 读空闲超时,秒,不是总时长上限)两个都有
     // 默认值,来自 config::kDefault*,main.cpp 用 Config 里实际生效的值调用。
+    // request_hard_timeout_secs(cpr 并发挂死单):每枚请求的硬墙钟(秒,
+    // 0 = 不设)。connect/idle 两道闸只各管一段,真机现场出现过两道都不响、
+    // 请求永挂的病(本机代理/TUN 截胡回环),这面墙是最后一道兜底——靠
+    // ProgressCallback 对 steady_clock 比期限掐流,不用 cpr::Timeout(那会把
+    // 正常长流拦腰砍断)。默认值同样来自 config::kDefault*。
     // native_web_search:该端(ProviderConfig::native_web_search 镜像到
     // Config::native_web_search)是否声明协议原生联网搜索,默认 false。
     // extra_body/extra_headers:同上,从 Config 同名字段传进来,默认都是
@@ -57,7 +62,8 @@ public:
                       int stream_idle_timeout_secs = config::kDefaultStreamIdleTimeoutSecs,
                       bool native_web_search = false,
                       nlohmann::json extra_body = nlohmann::json::object(),
-                      std::map<std::string, std::string> extra_headers = {});
+                      std::map<std::string, std::string> extra_headers = {},
+                      int request_hard_timeout_secs = config::kDefaultRequestHardTimeoutSecs);
 
     std::expected<void, Error> send_stream(
         const Request& request,
@@ -72,6 +78,7 @@ private:
     bool native_web_search_;
     nlohmann::json extra_body_;
     std::map<std::string, std::string> extra_headers_;
+    int request_hard_timeout_secs_;
 };
 
 }  // namespace lubancode::api::anthropic

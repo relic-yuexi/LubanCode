@@ -1596,6 +1596,16 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
         }
         config.request_timeout_secs = static_cast<int>(field.get<long long>());
     }
+    if (parsed.contains("request_hard_timeout_secs")) {
+        // 流式请求的硬墙钟:0 是合法值(显式不设墙),所以这里收非负整数,
+        // 只拦负数与非整数——与前三个"必须正整数"的超时字段在这一处不同。
+        const auto& field = parsed["request_hard_timeout_secs"];
+        if ((!field.is_number_integer() && !field.is_number_unsigned()) || field.get<long long>() < 0) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                    " 里的 request_hard_timeout_secs 字段必须是非负整数(单位秒,0 = 不设硬墙钟)");
+        }
+        config.request_hard_timeout_secs = static_cast<int>(field.get<long long>());
+    }
     if (parsed.contains("hooks")) {
         auto hooks_result = ParseHooksConfig(parsed["hooks"], file_path_for_error);
         if (!hooks_result.has_value()) {
@@ -2376,6 +2386,18 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     } else {
         result.config.request_timeout_secs = kDefaultRequestTimeoutSecs;
         result.sources.request_timeout_secs = Source::Default;
+    }
+
+    // 流式请求硬墙钟(cpr 并发挂死单):待遇同上三级,但 0 合法(不设墙)。
+    if (project_file.has_value() && project_file->request_hard_timeout_secs.has_value()) {
+        result.config.request_hard_timeout_secs = *project_file->request_hard_timeout_secs;
+        result.sources.request_hard_timeout_secs = Source::ProjectConfigFile;
+    } else if (global_file.has_value() && global_file->request_hard_timeout_secs.has_value()) {
+        result.config.request_hard_timeout_secs = *global_file->request_hard_timeout_secs;
+        result.sources.request_hard_timeout_secs = Source::GlobalConfigFile;
+    } else {
+        result.config.request_hard_timeout_secs = kDefaultRequestHardTimeoutSecs;
+        result.sources.request_hard_timeout_secs = Source::Default;
     }
 
     // ---- 对象型整段(hooks 除外):只从配置文件来,没有环境变量、没有

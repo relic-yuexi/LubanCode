@@ -14,6 +14,12 @@
 //   - 回归:完整走完一遍正常的 SSE(短消息),确认新增的超时参数没有破坏
 //     "服务器规规矩矩応答"这条主路径。
 //
+// 硬墙钟(cpr 并发挂死单)另有一组:accept 之后**一个字节都不发**——连接
+// 收下了、响应头都不给。真机现场(本机代理/TUN 截胡 127.0.0.1 回环)的挂死
+// 就是这副样子:请求进了 cpr::Post 再不返。这组用例把 stream_idle 配得很大,
+// 只留 request_hard_timeout_secs 一道闸,证明落锤的是硬墙钟、不是 LowSpeed,
+// 而且收场文案分型到"请求硬超时"那一档。
+//
 // 只在 Windows 下编译(项目当前只在 WIN32 下过测试;POSIX 分支的 socket API
 // 写法留了条件编译,但没有 CI 覆盖,谨慎起见别在非 WIN32 平台上悄悄跑一份
 // 没验证过的路径)。
@@ -38,9 +44,11 @@
 #include <thread>
 
 #include "api/anthropic/client.hpp"
+#include "api/chat/client.hpp"
 #include "api/responses/client.hpp"
 #include "api/types.hpp"
 #include "cli/i18n.hpp"
+#include "config/config.hpp"
 
 namespace {
 
@@ -270,4 +278,113 @@ TEST_CASE("anthropic: 配了新超时参数,服务器正常应答完整 SSE 流�
 
     REQUIRE(result.has_value());
     CHECK(collected_text == "hi");
+}
+
+// ---------------------------------------------------------------------------
+// 硬墙钟(cpr 并发挂死单):裸 socket 收下连接后一个字节都不回——连接阶段
+// 完成了、响应头都不给,connect 超时管不着(已连上),LowSpeed 空闲超时也
+// 配得很大,唯一能落锤的就是 request_hard_timeout_secs 这面墙。这正是真机
+// 现场"子代理长轮询请求进 cpr::Post 再不返"的形状。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("anthropic: 收下连接后彻底装死,硬墙钟在 2s 内落锤,分型文案点明硬超时") {
+    lubancode::cli::SetLanguage("zh-CN");
+    constexpr int kHardTimeoutSecs = 2;
+
+    // 装死姿势:连请求都懒得读,收下连接就睡——一个字节不发、不关。
+    const int port = StartFakeServer([](socket_t) {
+        std::this_thread::sleep_for(std::chrono::seconds(30));
+    });
+
+    // idle 给 25s(远大于硬墙钟):证明落锤的不是 LowSpeed 那道闸。
+    lubancode::api::anthropic::AnthropicBackend backend(
+        "http://127.0.0.1:" + std::to_string(port), "test-token",
+        /*connect_timeout_ms=*/3000,
+        /*stream_idle_timeout_secs=*/25,
+        /*native_web_search=*/false, /*extra_body=*/{},
+        /*extra_headers=*/{},
+        /*request_hard_timeout_secs=*/kHardTimeoutSecs);
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto result =
+        backend.send_stream(MakeMinimalRequest(), [](const lubancode::api::StreamEvent&) {});
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().kind == lubancode::api::ErrorKind::Network);
+    CHECK(result.error().message.find(
+              lubancode::cli::trf("error.network.hard_timeout", kHardTimeoutSecs)) == 0);
+    // 真的是硬墙钟提前掐断的,不是干等了 25s 的空闲超时,更不是 30s 的装死。
+    CHECK(elapsed < std::chrono::seconds(kHardTimeoutSecs + 8));
+}
+
+TEST_CASE("responses: 收下连接后彻底装死,硬墙钟落锤(与 anthropic 同一副机理)") {
+    lubancode::cli::SetLanguage("zh-CN");
+    constexpr int kHardTimeoutSecs = 2;
+
+    const int port = StartFakeServer([](socket_t) {
+        std::this_thread::sleep_for(std::chrono::seconds(30));
+    });
+
+    lubancode::api::responses::ResponsesBackend backend(
+        "http://127.0.0.1:" + std::to_string(port), "test-token",
+        /*connect_timeout_ms=*/3000,
+        /*stream_idle_timeout_secs=*/25,
+        /*native_web_search=*/false, /*extra_body=*/{},
+        /*extra_headers=*/{},
+        /*request_hard_timeout_secs=*/kHardTimeoutSecs);
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto result =
+        backend.send_stream(MakeMinimalRequest(), [](const lubancode::api::StreamEvent&) {});
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().kind == lubancode::api::ErrorKind::Network);
+    CHECK(result.error().message.find(
+              lubancode::cli::trf("error.network.hard_timeout", kHardTimeoutSecs)) == 0);
+    CHECK(elapsed < std::chrono::seconds(kHardTimeoutSecs + 8));
+}
+
+TEST_CASE("chat: 收下连接后彻底装死,硬墙钟落锤(chat wire 同一副机理)") {
+    lubancode::cli::SetLanguage("zh-CN");
+    constexpr int kHardTimeoutSecs = 2;
+
+    const int port = StartFakeServer([](socket_t) {
+        std::this_thread::sleep_for(std::chrono::seconds(30));
+    });
+
+    lubancode::api::chat::ChatCompletionsBackend backend(
+        "http://127.0.0.1:" + std::to_string(port), "test-token",
+        /*connect_timeout_ms=*/3000,
+        /*stream_idle_timeout_secs=*/25,
+        /*extra_body=*/{}, /*extra_headers=*/{},
+        /*options=*/{},
+        /*request_hard_timeout_secs=*/kHardTimeoutSecs);
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto result =
+        backend.send_stream(MakeMinimalRequest(), [](const lubancode::api::StreamEvent&) {});
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().kind == lubancode::api::ErrorKind::Network);
+    CHECK(result.error().message.find(
+              lubancode::cli::trf("error.network.hard_timeout", kHardTimeoutSecs)) == 0);
+    CHECK(elapsed < std::chrono::seconds(kHardTimeoutSecs + 8));
+}
+
+TEST_CASE("硬墙钟关掉(0 = 不设),行为交还 idle/connect 两道闸,不误伤") {
+    // 这条不测"挂多久"(那要真等 25s),只证 0 值本身被尊重:配置解析层
+    // 收非负整数、缺省留 nullopt——构造侧的"0 = 不设"语义在这里钉一下,
+    // 省得将来把 0 当成正数误用。合并/默认值的账在 test_config.cpp 里另钉。
+    const auto parsed =
+        lubancode::config::ParseFileConfigJson(R"({"request_hard_timeout_secs": 0})", "x.json");
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->request_hard_timeout_secs.has_value());
+    CHECK(*parsed->request_hard_timeout_secs == 0);
+
+    const auto missing = lubancode::config::ParseFileConfigJson(R"({})", "x.json");
+    REQUIRE(missing.has_value());
+    CHECK_FALSE(missing->request_hard_timeout_secs.has_value());
 }

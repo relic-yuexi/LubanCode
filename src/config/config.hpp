@@ -277,9 +277,18 @@ constexpr int kDefaultToolSearchThreshold = 20;
 //   列表)的整体超时——这类请求响应体小,没有"回复很长"的顾虑,直接给
 //   总时长上限。30 秒跟 tools/web_search.cpp、tools/web_fetch.cpp 里已有的
 //   cpr::Timeout{30000} 保持一致的量级。
+// - kDefaultRequestHardTimeoutSecs(cpr 并发挂死单):每枚**流式**请求的
+//   硬墙钟——与上面三个是两码事。connect/idle 两道闸只管"连接阶段"与
+//   "连续无字节";真机现场(本机代理/TUN 截胡 127.0.0.1 回环)出现过
+//   请求进了 cpr::Post 再不返、两道闸都不触发的挂死,唯一兜底是给整枚
+//   请求一面不可穿透的墙:ProgressCallback 里对 steady_clock 比期限,
+//   超期返回 false 掐流(libcurl 周期性调它,连接死寂也醒)。不能用
+//   cpr::Timeout 实现——那是 CURLOPT_TIMEOUT,会把正常的长流拦腰砍断。
+//   默认 300s 给足长思考/长回复的余量;0 = 不设这道墙(回到旧行为)。
 constexpr int kDefaultConnectTimeoutMs = 15000;
 constexpr int kDefaultStreamIdleTimeoutSecs = 60;
 constexpr int kDefaultRequestTimeoutSecs = 30;
+constexpr int kDefaultRequestHardTimeoutSecs = 300;
 
 // M9:一条钩子。matcher 只有 pre_tool/post_tool 才有意义——工具名精确匹配,
 // 或者 "*" 匹配所有工具;session_start/session_end 没有这个概念,解析时留
@@ -603,6 +612,12 @@ struct Config {
     int connect_timeout_ms = kDefaultConnectTimeoutMs;
     int stream_idle_timeout_secs = kDefaultStreamIdleTimeoutSecs;
     int request_timeout_secs = kDefaultRequestTimeoutSecs;
+    // 每枚流式请求的硬墙钟(秒,0 = 不设;见 kDefaultRequestHardTimeoutSecs
+    // 注释)。待遇同上:只从配置文件读,项目级压全局。注意与
+    // subagent.wall_clock_timeout_secs 分工:那是"一只任务整轮"的墙,
+    // 这是"一枚请求"的墙——整轮墙兜的是所有超时全失效的绝境,请求墙
+    // 兜的是单枚请求挂死;两道并存,谁先到谁先响。
+    int request_hard_timeout_secs = kDefaultRequestHardTimeoutSecs;
     // 上次成功切换的 provider 名。只记名字，不复制 URL、模型或密钥；
     // LoadFromEnv 合并完配置后再从 providers 里展开成当前运行配置。
     std::string active_provider;
@@ -635,6 +650,7 @@ struct ConfigSources {
     Source connect_timeout_ms = Source::Default;        // M11:配置文件或默认,只有这两级
     Source stream_idle_timeout_secs = Source::Default;   // 同上
     Source request_timeout_secs = Source::Default;       // 同上
+    Source request_hard_timeout_secs = Source::Default;  // 同上(流式请求硬墙钟)
     Source active_provider = Source::Default;
     Source extra_body = Source::Default;
     Source extra_headers = Source::Default;
@@ -771,6 +787,9 @@ struct FileConfig {
     std::optional<int> connect_timeout_ms;
     std::optional<int> stream_idle_timeout_secs;
     std::optional<int> request_timeout_secs;
+    // 流式请求硬墙钟(秒)。与前三个不同:0 是合法值(显式不设墙),所以
+    // 解析收非负整数(负数/非整数报错,与其他字段同一套规矩)。
+    std::optional<int> request_hard_timeout_secs;
     std::optional<std::string> active_provider;
     std::optional<std::vector<ProviderConfig>> providers;
     std::optional<MemoryFileConfig> memory;
