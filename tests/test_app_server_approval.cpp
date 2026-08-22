@@ -219,7 +219,7 @@ TEST_CASE("审批:accept 放行,工具真执行,回合 success") {
     // 回合起在工作线程:审批悬停等前端答复,答复从"读线程"一侧喂。
     std::thread turn_thread([&] {
         std::string ec;
-        harness.server->HandleTurnStart(thread_id, "写个文件", ec);
+        harness.server->HandleTurnStart(thread_id, "写个文件", {}, ec);
     });
 
     // 等审批请求出站(事件泵在测试线程上活——审批悬停不堵泵)。
@@ -265,7 +265,7 @@ TEST_CASE("审批:decline 拒绝,工具不执行,拒绝理由随 tool_result 回
 
     std::thread turn_thread([&] {
         std::string ec;
-        harness.server->HandleTurnStart(thread_id, "写个文件", ec);
+        harness.server->HandleTurnStart(thread_id, "写个文件", {}, ec);
     });
 
     std::optional<nlohmann::json> permission;
@@ -298,7 +298,7 @@ TEST_CASE("审批:cancel 视作拒绝收口(用户主动撤),工具不执行") {
 
     std::thread turn_thread([&] {
         std::string ec;
-        harness.server->HandleTurnStart(thread_id, "写个文件", ec);
+        harness.server->HandleTurnStart(thread_id, "写个文件", {}, ec);
     });
 
     std::optional<nlohmann::json> permission;
@@ -329,7 +329,7 @@ TEST_CASE("审批:acceptForSession 放行,同工具二次免问") {
     // 第一轮:答复 acceptForSession。
     std::thread first([&] {
         std::string ec;
-        harness.server->HandleTurnStart(thread_id, "一轮", ec);
+        harness.server->HandleTurnStart(thread_id, "一轮", {}, ec);
     });
     std::optional<nlohmann::json> permission;
     for (int i = 0; i < 400 && !permission.has_value(); ++i) {
@@ -345,7 +345,7 @@ TEST_CASE("审批:acceptForSession 放行,同工具二次免问") {
     // 第二轮:同工具,不该再发 permission/request(免问直接放)。
     const int permission_events_before = harness.CountEvents("permission/request");
     std::string ec2;
-    const nlohmann::json second = harness.server->HandleTurnStart(thread_id, "二轮", ec2);
+    const nlohmann::json second = harness.server->HandleTurnStart(thread_id, "二轮", {}, ec2);
     REQUIRE(ec2.empty());
     CHECK(harness.tool_calls->load() == 2);                    // 直接执行了
     CHECK(harness.CountEvents("permission/request") == permission_events_before); // 没多一发
@@ -367,7 +367,7 @@ TEST_CASE("审批超时:悬空收口,不冒充用户拒绝,工具不执行") {
 
     std::thread turn_thread([&] {
         std::string ec;
-        harness.server->HandleTurnStart(thread_id, "写个文件", ec);
+        harness.server->HandleTurnStart(thread_id, "写个文件", {}, ec);
     });
 
     // 审批请求出了,悬停,不答。
@@ -402,7 +402,7 @@ TEST_CASE("turn/interrupt:审批悬停立即醒,终态 interrupted") {
 
     std::thread turn_thread([&] {
         std::string ec;
-        harness.server->HandleTurnStart(thread_id, "写个文件", ec);
+        harness.server->HandleTurnStart(thread_id, "写个文件", {}, ec);
     });
 
     std::optional<nlohmann::json> permission;
@@ -448,7 +448,7 @@ TEST_CASE("turn/interrupt:点名的回合不是当前在跑的,报失效") {
 
     std::thread turn_thread([&] {
         std::string ec;
-        harness.server->HandleTurnStart(thread_id, "写个文件", ec);
+        harness.server->HandleTurnStart(thread_id, "写个文件", {}, ec);
     });
     std::optional<nlohmann::json> permission;
     for (int i = 0; i < 400 && !permission.has_value(); ++i) {
@@ -484,7 +484,7 @@ TEST_CASE("turn/interrupt:流式打断(无审批在飞),终态 interrupted") {
 
     std::thread turn_thread([&] {
         std::string ec;
-        harness.server->HandleTurnStart(thread_id, "写个文件", ec);
+        harness.server->HandleTurnStart(thread_id, "写个文件", {}, ec);
     });
 
     // 等审批请求出站(工具边界),打断,悬起收口,回合收 interrupted。
@@ -518,7 +518,7 @@ TEST_CASE("迟到回答:回合已收口,答复报失效不炸") {
 
     std::thread turn_thread([&] {
         std::string ec;
-        harness.server->HandleTurnStart(thread_id, "写个文件", ec);
+        harness.server->HandleTurnStart(thread_id, "写个文件", {}, ec);
     });
     std::optional<nlohmann::json> permission;
     for (int i = 0; i < 400 && !permission.has_value(); ++i) {
@@ -586,7 +586,7 @@ TEST_CASE("ask_user:user/ask 反向请求,answers 送回原回合") {
 
     std::thread turn_thread([&] {
         std::string ec;
-        server->HandleTurnStart(thread_id, "问路线", ec);
+        server->HandleTurnStart(thread_id, "问路线", {}, ec);
     });
 
     // 等 user/ask 出站。
@@ -658,7 +658,7 @@ TEST_CASE("ask_user:悬停期间 turn/interrupt,提问按取消收口") {
 
     std::thread turn_thread([&] {
         std::string ec;
-        server->HandleTurnStart(thread_id, "问", ec);
+        server->HandleTurnStart(thread_id, "问", {}, ec);
     });
 
     std::optional<nlohmann::json> ask_event;
@@ -766,7 +766,7 @@ TEST_CASE("interrupt 硬时限:置旗后回合卡死不退,等满时限分离,�
 
     std::thread turn_thread([&] {
         std::string ec;
-        harness.server->HandleTurnStart(thread_id, "写", ec);
+        harness.server->HandleTurnStart(thread_id, "写", {}, ec);
     });
 
     std::optional<nlohmann::json> permission;
