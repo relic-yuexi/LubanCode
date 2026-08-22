@@ -99,8 +99,11 @@ std::string FileMtimeTimestamp(const std::string& file_path) {
     if (ec) {
         return std::string();
     }
+    // file_clock::to_sys 是 libstdc++ 的私有出口,libc++/MSVC 都没有这个
+    // 成员(CI 实锤:macOS/Windows 双挂)。C++20 的 clock_cast 是三家共用的
+    // 正路。
     const std::time_t tt = std::chrono::system_clock::to_time_t(
-        std::chrono::file_clock::to_sys(mtime));
+        std::chrono::clock_cast<std::chrono::system_clock>(mtime));
     std::tm tm_buf{};
 #ifdef _WIN32
     localtime_s(&tm_buf, &tt);
@@ -261,11 +264,14 @@ std::vector<std::size_t> SortSessionSummaries(const std::vector<SessionSummary>&
 namespace {
 
 // "size:mtime_count:path"。mtime 用原始计数(file_clock 的 rep),秒级
-// 截断会把同秒的两笔写漏认成没变。
+// 截断会把同秒的两笔写漏认成没变。count() 在 libc++ 上是 __int128,
+// 直接进流是歧义重载(macOS CI 实锤)——按 int64 落账:纳秒计数在
+// file_clock 纪元(2174 年)的量程内远够不到 int64 上限,截断无损。
 std::string MakeFingerprint(const std::string& file_path, std::uintmax_t size,
                             std::filesystem::file_time_type mtime) {
     std::ostringstream oss;
-    oss << size << ':' << mtime.time_since_epoch().count() << ':' << file_path;
+    oss << size << ':'
+        << static_cast<std::int64_t>(mtime.time_since_epoch().count()) << ':' << file_path;
     return oss.str();
 }
 
