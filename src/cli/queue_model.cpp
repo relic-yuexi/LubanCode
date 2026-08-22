@@ -91,6 +91,25 @@ QueueId SteeringQueue::Enqueue(MessageTarget target, std::string text) {
     return id;
 }
 
+bool SteeringQueue::RestoreFromArchive(std::vector<QueuedMessage> items) {
+    if (items.empty()) {
+        return true;  // 存档里没有排队账,空手而归不算失败
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!items_.empty()) {
+        return false;  // 本场已有自己的账,不拿旧档盖
+    }
+    QueueId max_id = 0;
+    for (auto& item : items) {
+        max_id = std::max(max_id, item.id);
+        // 回还过的条目(attempts>0)照旧不自动重发:存档记的是"等用户处置"
+        // 的状态,resume 不该偷偷把死循环闸拆了。
+        items_.push_back(std::move(item));
+    }
+    next_id_ = max_id + 1;  // 后续新条目不与恢复的 id 撞号
+    return true;
+}
+
 std::vector<QueuedMessage> SteeringQueue::Snapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return items_;
@@ -134,6 +153,33 @@ std::optional<QueuedMessage> SteeringQueue::TakeFirstDeliverable(MessageTarget t
             items_.erase(it);
             return out;
         }
+    }
+    return std::nullopt;
+}
+
+void SteeringQueue::ReturnToFront(QueuedMessage item) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    item.delivery_attempts += 1;
+    // 状态归位:自动发送失败不是条目本身的病(TargetGone/Failed 才是),
+    // 还回来的还是健康的 Queued,只是带上了"已试过一次"的账。
+    item.state = QueueItemState::Queued;
+    item.edit_open = false;
+    item.delivery = immediate_ ? DeliveryMode::Immediate : DeliveryMode::AfterNextToolBoundary;
+    items_.insert(items_.begin(), std::move(item));
+}
+
+std::optional<QueuedMessage> SteeringQueue::TakeFirstAutoSendable(MessageTarget target) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto it = items_.begin(); it != items_.end(); ++it) {
+        if (it->target != target || it->state != QueueItemState::Queued || it->edit_open) {
+            continue;
+        }
+        if (it->delivery_attempts >= kMaxAutoSendAttempts) {
+            continue;  // 已试过一次、失败还回来的:不自动重发,留队等人
+        }
+        std::optional<QueuedMessage> out = std::move(*it);
+        items_.erase(it);
+        return out;
     }
     return std::nullopt;
 }
@@ -199,6 +245,12 @@ SteeringQueue::CommitStatus SteeringQueue::CommitEdit(const EditHandle& handle, 
         item.text = std::move(new_text);
         ++item.version;
         item.edit_open = false;
+        // 用户亲手改写过的就是一条新话:自动重试的旧账翻篇,终态标注一并
+        // 作废(取走即消费单——不然失败/目标已结束的条目改完也永远不投
+        // 递,死在队里)。目标本身没改(改目标是另一码事,面板处置键的事)。
+        item.delivery_attempts = 0;
+        item.state = QueueItemState::Queued;
+        item.note.clear();
         return CommitStatus::Ok;
     }
     return CommitStatus::NotFound;
@@ -392,6 +444,45 @@ std::vector<std::string> BuildSteeringQueueRows(const std::vector<QueuedMessage>
         }
         rows.push_back("  \xE2\x86\xB3 " + prefix + FirstLineOf(item.text));  // "  ↳ "
     }
+    return rows;
+}
+
+// ---------------------------------------------------------------------------
+// 清账告知成行(路径三)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 首条预览行:剥前导空白、截到第一个换行(全文用户自己排的,认得)。
+std::string DisposalPreviewRow(const QueuedMessage& item) {
+    std::string first_line = item.text;
+    first_line.erase(0, first_line.find_first_not_of("\r\n\t "));
+    const std::size_t cut = first_line.find('\n');
+    if (cut != std::string::npos) {
+        first_line.resize(cut);
+    }
+    return trf("queue.disposal_preview", item.target.short_label(), first_line);
+}
+
+}  // namespace
+
+std::vector<std::string> BuildQueueDisposalRows(const std::vector<QueuedMessage>& discarded) {
+    std::vector<std::string> rows;
+    if (discarded.empty()) {
+        return rows;  // 没倒掉东西就不吭声,与旧"空队列零输出"一致
+    }
+    rows.push_back(trf("queue.disposal_head", discarded.size()));
+    rows.push_back(DisposalPreviewRow(discarded.front()));
+    return rows;
+}
+
+std::vector<std::string> BuildQueueArchiveRows(const std::vector<QueuedMessage>& queued) {
+    std::vector<std::string> rows;
+    if (queued.empty()) {
+        return rows;
+    }
+    rows.push_back(trf("queue.archive_head", queued.size()));
+    rows.push_back(DisposalPreviewRow(queued.front()));
     return rows;
 }
 

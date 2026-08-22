@@ -701,6 +701,133 @@ TEST_CASE("回放: cwd 事件追加,最后一条覆盖 meta.cwd") {
 }
 
 // ---------------------------------------------------------------------------
+// queue 事件(取走即消费单路径二:排队消息落会话存档)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::vector<agent::ArchivedQueueItem> SampleQueue() {
+    std::vector<agent::ArchivedQueueItem> items;
+    agent::ArchivedQueueItem main_item;
+    main_item.id = 1;
+    main_item.text = "排在第一的";
+    items.push_back(main_item);
+    agent::ArchivedQueueItem agent_item;
+    agent_item.id = 2;
+    agent_item.subagent = true;
+    agent_item.task_id = 3;
+    agent_item.text = "给三号的";
+    items.push_back(agent_item);
+    agent::ArchivedQueueItem retried;
+    retried.id = 3;
+    retried.text = "失败回还过的";
+    retried.attempts = 2;
+    items.push_back(retried);
+    return items;
+}
+
+}  // namespace
+
+TEST_CASE("queue 事件序列化往返:main/子代理/回还账都在") {
+    const std::string line = agent::SerializeQueueEvent(SampleQueue(), "2026-08-22 10:00:00");
+    CHECK(line.find('\n') == std::string::npos);
+    CHECK_FALSE(agent::DeserializeSessionMessage(line).has_value());  // 不是消息行
+
+    const auto parsed = agent::ParseQueueEvent(line);
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->size() == 3);
+    CHECK((*parsed)[0].id == 1);
+    CHECK_FALSE((*parsed)[0].subagent);
+    CHECK((*parsed)[0].text == "排在第一的");
+    CHECK((*parsed)[0].attempts == 0);
+    CHECK((*parsed)[1].subagent);
+    CHECK((*parsed)[1].task_id == 3);
+    CHECK((*parsed)[1].text == "给三号的");
+    CHECK((*parsed)[2].attempts == 2);  // 自动重试到顶的账也往返
+
+    // 空快照也合法(清账后落的"没排队了")。
+    const auto empty = agent::ParseQueueEvent(agent::SerializeQueueEvent({}, "t"));
+    REQUIRE(empty.has_value());
+    CHECK(empty->empty());
+}
+
+TEST_CASE("queue 事件解析: 坏行/坏条目不废整份") {
+    CHECK_FALSE(agent::ParseQueueEvent("").has_value());
+    CHECK_FALSE(agent::ParseQueueEvent("{\"type\":\"queue\"}").has_value());  // 缺 items
+    CHECK_FALSE(agent::ParseQueueEvent("{\"type\":\"queue\",\"items\":42}").has_value());
+    CHECK_FALSE(agent::ParseQueueEvent(agent::SerializeTitleEvent("x", "t")).has_value());
+
+    // 单条缺 text / 空 text / id=0 / 认不出的目标号:跳过那一条,其余保住。
+    const std::string mixed =
+        "{\"type\":\"queue\",\"items\":["
+        "{\"id\":7,\"target\":\"main\",\"text\":\"好的条目\"},"
+        "{\"id\":8,\"target\":\"main\"},"
+        "{\"id\":0,\"target\":\"main\",\"text\":\"没 id 的\"},"
+        "{\"id\":9,\"target\":\"#abc\",\"text\":\"目标号认不出\"},"
+        "{\"id\":10,\"target\":\"#5\",\"text\":\"五号的\"}"
+        "],\"ts\":\"t\"}";
+    const auto parsed = agent::ParseQueueEvent(mixed);
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->size() == 2);
+    CHECK((*parsed)[0].text == "好的条目");
+    CHECK((*parsed)[1].subagent);
+    CHECK((*parsed)[1].task_id == 5);
+}
+
+TEST_CASE("回放: queue 事件快照式,最后一条胜;消息账不受牵连") {
+    std::vector<std::string> lines;
+    lines.push_back(agent::SerializeSessionMessage(UserText("u1"), "t"));
+    lines.push_back(agent::SerializeQueueEvent(SampleQueue(), "t"));
+    lines.push_back(agent::SerializeSessionMessage(AssistantText("a1"), "t"));
+    // 送走一条之后的快照:只剩给三号的。
+    std::vector<agent::ArchivedQueueItem> after_deliver;
+    agent::ArchivedQueueItem only_agent;
+    only_agent.id = 2;
+    only_agent.subagent = true;
+    only_agent.task_id = 3;
+    only_agent.text = "给三号的";
+    after_deliver.push_back(only_agent);
+    lines.push_back(agent::SerializeQueueEvent(after_deliver, "t"));
+
+    const auto session = agent::ParseSessionFile(JoinLines(lines));
+    REQUIRE(session.has_value());
+    CHECK(session->messages.size() == 2);  // 事件行不算消息
+    CHECK(session->skipped_lines == 0);
+    REQUIRE(session->queued_messages.size() == 1);  // 最后一条快照说了算
+    CHECK(session->queued_messages[0].task_id == 3);
+
+    // 没有 queue 行的老档:空表,老场子照旧全量恢复。
+    std::vector<std::string> legacy;
+    legacy.push_back(agent::SerializeSessionMessage(UserText("u1"), "t"));
+    const auto legacy_session = agent::ParseSessionFile(JoinLines(legacy));
+    REQUIRE(legacy_session.has_value());
+    CHECK(legacy_session->queued_messages.empty());
+}
+
+TEST_CASE("queue 事件经真 SessionStore 落盘再读回:排队→退出→resume 接得回") {
+    std::error_code ec;
+    const std::filesystem::path dir = std::filesystem::temp_directory_path(ec) /
+                                      ("lubancode_queue_event_" + std::to_string(::rand()));
+    std::filesystem::create_directories(dir, ec);
+    agent::SessionStore store(dir.string());
+    REQUIRE(store.Begin(agent::SessionMeta{}, "sess-queue-test"));
+    CHECK(store.AppendMessage(UserText("第一问")));
+    CHECK(store.AppendQueueEvent(SampleQueue()));
+    store.Reset();  // 模拟 /exit 关档;柄先关,目录才能收
+
+    const auto bytes = agent::ReadSessionFileBytes(dir.string() + "/sess-queue-test.jsonl");
+    REQUIRE(bytes.has_value());
+    const auto session = agent::ParseSessionFile(*bytes);
+    REQUIRE(session.has_value());
+    REQUIRE(session->queued_messages.size() == 3);
+    CHECK(session->queued_messages[0].text == "排在第一的");
+    CHECK(session->queued_messages[2].attempts == 2);
+    CHECK(session->messages.size() == 1);  // 排队快照不是消息
+
+    std::filesystem::remove_all(dir, ec);
+}
+
+// ---------------------------------------------------------------------------
 // 路径归一化 / 中间缩略
 // ---------------------------------------------------------------------------
 
