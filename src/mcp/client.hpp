@@ -9,6 +9,7 @@
 
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <expected>
 #include <map>
 #include <memory>
@@ -96,7 +97,9 @@ public:
 
     // 执行一次工具调用(tools/call)。不抛异常,失败统统体现在返回值的
     // is_error 字段里。
-    tools::Tool::Result CallTool(const std::string& tool_name, const nlohmann::json& arguments);
+    // jsonrpc_request_id_out:逐枚追踪单,外层 execution 挂内层请求账用。
+    tools::Tool::Result CallTool(const std::string& tool_name, const nlohmann::json& arguments,
+                                 std::int64_t* jsonrpc_request_id_out = nullptr);
 
     // 关停传输层(见 Transport::Shutdown 的语义)。
     void Shutdown();
@@ -122,12 +125,22 @@ private:
 
     // 发一个带 id 的请求,等回应(或超时/进程死掉/写失败)。返回 result 字段,
     // 或者 unexpected<string> 装着人话错误。
+    // jsonrpc_request_id_out(逐枚追踪单):非空时回填本次内层 JSON-RPC id,
+    // 外层 tool execution 拿它挂账(超时删 pending 后迟到响应的丢弃也靠这
+    // 个 id 关联,不投给新调用)。
     std::expected<nlohmann::json, std::string> SendRequestAndWait(const std::string& method,
-                                                                    const nlohmann::json& params, int timeout_ms);
+                                                                    const nlohmann::json& params, int timeout_ms,
+                                                                    std::int64_t* jsonrpc_request_id_out = nullptr);
 
     // 发一个不带 id 的通知,不等回应。
     bool SendNotification(const std::string& method, const nlohmann::json& params);
 
+    // 逐枚追踪单:迟到响应的留账口。超时删 pending 后响应才到时,读线程
+    // 用原 JSON-RPC id 调它(在 reader 线程上,实现自己管线程安全);宿主
+    // 的实现翻成 mcp_late_response_dropped trace 事件,关联原 execution。
+    void SetLateResponseSink(std::function<void(std::int64_t)> sink) { late_response_sink_ = std::move(sink); }
+
+    std::function<void(std::int64_t)> late_response_sink_;
     std::string server_name_;
 
     std::unique_ptr<StdioTransportAdapter> owned_transport_;  // StartProcess 路径下持有

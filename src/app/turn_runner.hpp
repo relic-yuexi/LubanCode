@@ -31,6 +31,7 @@
 #include "hooks/dispatcher.hpp"
 #include "platform/paths.hpp"
 #include "runtime/turn_runtime.hpp"
+#include "runtime/tool_trace_hub.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/ask_user.hpp"
 #include "tools/registry.hpp"
@@ -85,7 +86,8 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                             const std::vector<std::string>& allow_commands,
                                             const std::vector<std::string>& deny_commands,
                                             const std::atomic<bool>* cancel_flag = nullptr,
-                                            lubancode::agent::WorkflowRecorder* recorder = nullptr);
+                                            lubancode::agent::WorkflowRecorder* recorder = nullptr,
+                                            lubancode::runtime::ToolTraceHub* trace_hub = nullptr);
 
 // RunTurn() 的结果:status 沿用老语义(0 成功、非 0 出错);cancelled 标记
 // 这一轮是不是被 ESC 打断的(打断不算错误,status 照样是 0)。
@@ -142,6 +144,9 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                        lubancode::tools::AgentTool* completion_agent = nullptr,
                        lubancode::agent::WorkflowRecorder* recorder = nullptr,
                        bool silent = false,
-                       lubancode::runtime::TurnUsageStats* usage_out = nullptr);
+                       lubancode::runtime::TurnUsageStats* usage_out = nullptr,
+                       lubancode::runtime::ToolTraceHub* trace_hub = nullptr,
+                       std::string thread_id_for_trace = std::string(),
+                       std::string turn_id_for_trace = std::string());
 
 }  // namespace lubancode::app

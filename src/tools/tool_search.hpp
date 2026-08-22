@@ -44,6 +44,13 @@ public:
     nlohmann::json input_schema() const override { return inner_->input_schema(); }
     bool needs_confirm() const override { return inner_->needs_confirm(); }
     bool deferred() const override { return true; }
+    // 逐枚追踪单:注册元数据透传内层的回答,不把来源洗成 deferred——
+    // trace 里 MCP 工具就是 MCP,延迟挂载只是宿主的工具表策略,不是
+    // 工具的身份。
+    EffectClass effect_class() const override { return inner_->effect_class(); }
+    Idempotency idempotency() const override { return inner_->idempotency(); }
+    RecoveryCapability recovery_capability() const override { return inner_->recovery_capability(); }
+    std::string version_or_digest() const override { return inner_->version_or_digest(); }
     Result execute(const nlohmann::json& input) override { return inner_->execute(input); }
 
 private:

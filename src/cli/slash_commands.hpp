@@ -54,6 +54,7 @@ enum class SlashCommand {
     Doctor,  // /doctor effort|cache:本地兼容端 Effort/前缀缓存诊断(探针要发请求)
     Keymap,  // /keymap [set 动作 和弦|reset [动作|all]]:看/改键位(用户级落盘)
     Workflow,  // /workflow list|show|graph|validate|run|resume|cancel|history|...:自然语言编排的图
+    Trace,     // /trace [errors|<execution_id>|toolu <id>|turn <id>]:工具逐枚追踪账(逐枚追踪单)
     WorkflowAlias,  // /<workflow-alias> <args>:直呼已装 Workflow(运行时查 catalog)
     Unknown,  // 以 / 开头,但不认得这个命令
 };

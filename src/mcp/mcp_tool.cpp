@@ -28,7 +28,17 @@ bool McpTool::needs_confirm() const {
 }
 
 tools::Tool::Result McpTool::execute(const nlohmann::json& input) {
-    return client_.CallTool(info_.name, input);
+    // 逐枚追踪单:内层 JSON-RPC id 随结果带出(details.jsonrpc_request_id),
+    // 外层 execution 关联账从这拿(单子"MCP 外层 execution 要挂内层")。
+    std::int64_t jsonrpc_request_id = -1;
+    tools::Tool::Result result = client_.CallTool(info_.name, input, &jsonrpc_request_id);
+    if (jsonrpc_request_id >= 0) {
+        result.details["jsonrpc_request_id"] = jsonrpc_request_id;
+        result.details["mcp_server"] = server_name_;
+        result.details["mcp_tool"] = info_.name;
+    }
+    result.effect_summary = "mcp " + server_name_ + "/" + info_.name;
+    return result;
 }
 
 }  // namespace lubancode::mcp

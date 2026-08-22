@@ -4,6 +4,8 @@
 #include <fstream>
 #include <system_error>
 
+#include "hooks/hash.hpp"  // Sha256Hex:undo token 的 pre/post image 摘要
+#include "platform/text_encoding.hpp"
 #include "tools/isolation.hpp"
 #include "tools/path_utils.hpp"
 #include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
@@ -82,6 +84,18 @@ Tool::Result WriteFileTool::execute(const nlohmann::json& input) {
         }
     }
 
+    // 逐枚追踪单:preimage 先读(条件式撤销的 token 靠它——当前内容仍
+    // 等于 postimage 才可恢复 preimage;新建文件只在内容未再变时可移走)。
+    std::string preimage;
+    if (existed_before) {
+        std::ifstream in(path, std::ios::binary);
+        if (in.is_open()) {
+            std::ostringstream buffer;
+            buffer << in.rdbuf();
+            preimage = buffer.str();
+        }
+    }
+
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file.is_open()) {
         return {"打不开文件写(权限不够或者路径不对): " + path_str, true};
@@ -92,11 +106,22 @@ Tool::Result WriteFileTool::execute(const nlohmann::json& input) {
     }
     file.close();
 
-    std::string message = "写入成功,共 " + std::to_string(content.size()) + " 字节: " + path_str;
+    // undo token(逐枚追踪单"本地文件条件式撤销"):超 kUndoPreimageCap
+    // 不内联正文,token 标不可用——不拿半截原文冒充可恢复。
+    Tool::Result result;
+    result.content = "写入成功,共 " + std::to_string(content.size()) + " 字节: " + path_str;
     if (existed_before) {
-        message += "(覆盖了原有文件)";
+        result.content += "(覆盖了原有文件)";
     }
-    return {message, false};
+    result.undo_path = path_str;
+    result.undo_preimage_sha256 = hooks::Sha256Hex(preimage);
+    result.undo_postimage_sha256 = hooks::Sha256Hex(content);
+    result.undo_created_new_file = !existed_before;
+    if (static_cast<std::uint64_t>(preimage.size()) <= Tool::kToolUndoPreimageCap) {
+        result.undo_preimage = std::move(preimage);
+    }
+    result.effect_summary = "write " + path_str + " (" + std::to_string(content.size()) + " bytes)";
+    return result;
 }
 
 }  // namespace lubancode::tools

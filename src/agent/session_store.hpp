@@ -40,6 +40,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agent/tool_trace.hpp"
 #include "api/types.hpp"
 
 namespace lubancode::agent {
@@ -213,6 +214,24 @@ std::string NormalizePathForCompare(const std::string& utf8_path);
 // 反向的孤儿 tool_result(对不上任何 tool_use)直接删掉。返回修补的块数。
 int RepairToolPairs(std::vector<api::Message>& history);
 
+// 逐枚追踪单:trace-aware 修复。有 trace 账的存档先按四档结论修:
+//   - finished(含闸前终态)/result_recoverable:补一条带原始 outcome 的
+//     结果(inline 正文可得就带原文;artifact 只留指引)。
+//   - unknown_after_start:补 [会话恢复] unknown_after_start 错误结果,
+//     副作用状态未核验,不自动重跑。
+//   - not_started:补 [会话恢复] 未执行。
+// 没挂到 trace 的 tool_use(老档、或 PTC 内层)回落 RepairToolPairs 老逻辑。
+// corrupt 的 execution 按 unknown 处理(最保守)。返回 {修补块数, trace 命中数}。
+struct TraceRepairReport {
+    int repaired = 0;         // 补了结果的 tool_use 块数(trace + legacy 合计)
+    int trace_matched = 0;    // 由 trace 账修复的块数(0 = 老档全走 legacy)
+    int unknown_after_start = 0;  // 标 unknown 的块数(告知用户副作用未核验)
+    int not_started = 0;      // 判定未执行的块数
+    int result_recovered = 0; // 从 trace 恢复出原始结果的块数
+};
+TraceRepairReport RepairToolPairsWithTrace(std::vector<api::Message>& history,
+                                           const ToolExecutionLedger& ledger);
+
 // ---------------------------------------------------------------------------
 // 整文件解析 / 导出
 // ---------------------------------------------------------------------------
@@ -237,6 +256,13 @@ struct LoadedSession {
     // 最后一条 queue 事件快照(排队消息落档单):没有 queue 行就是空表。
     // /resume 拿它重建会话层 SteeringQueue(空表 = 档里没排队的账)。
     std::vector<ArchivedQueueItem> queued_messages;
+    // 工具追踪栅栏事件(tool_trace_v1),按文件序。逐枚追踪单:/resume 的
+    // trace-aware 修复从这份账折叠 ToolExecutionLedger;老档没这些行,
+    // 空表 = 走旧逻辑(RepairToolPairs 补洞),向后兼容。
+    std::vector<ToolTraceEvent> tool_trace_events;
+    // trace-aware 修复的分档账(没有 trace 行的档全零):/resume 按它告知
+    // 用户"几枚未执行、几枚副作用未知、几枚恢复了原始结果"。
+    TraceRepairReport trace_repair;
 };
 
 // 纯函数:整个 .jsonl 文件内容 -> meta + 有效态消息列表(事件已回放、已修补
@@ -292,6 +318,11 @@ public:
     // 追加一条排队消息快照事件行(自动带 ts),append+flush。排队账一变
     // (进队/送达/回还)由会话层追一份全量快照;/resume 回放取最后一条。
     bool AppendQueueEvent(const std::vector<ArchivedQueueItem>& items);
+
+    // 追加一条工具追踪栅栏事件行(tool_trace_v1,自动带 ts),append+flush。
+    // 逐枚追踪单:一行一栅栏,append-only;这是 durable started/finished
+    // 的落点,写失败即知(process-crash durable 的口径,见单子 Durability 节)。
+    bool AppendToolTraceEvent(const ToolTraceEvent& event);
 
     // /clear:关掉当前文件(留在磁盘上),回到"没有活动会话"状态,下一条
     // 用户消息再 Begin 一场新的。

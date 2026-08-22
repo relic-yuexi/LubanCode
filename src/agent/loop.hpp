@@ -6,6 +6,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <expected>
 #include <functional>
 #include <memory>
@@ -20,6 +21,7 @@
 #include "agent/microcompact.hpp"
 #include "agent/prefix.hpp"
 #include "agent/runtime_profile.hpp"
+#include "agent/tool_trace.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "tools/registry.hpp"
@@ -199,6 +201,32 @@ struct Callbacks {
     std::function<std::vector<std::string>(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input,
                                            const tools::Tool::Result& result)>
         on_post_tool_use_hook;
+
+    // ---- 逐枚追踪单:canonical 工具生命周期事件的唯一出水口 ---------------
+    // RunOneTool 与工具循环只把栅栏事件(scheduled/execution_started/
+    // execution_finished/result_committed,以及 verification/迟到响应)交给
+    // 这一个回调;UI 投影(Runtime EventSink)、持久账(SessionTraceSink)、
+    // Workflow projection、Hook correlation 各自从这条流里取自己那份——
+    // 不许 AgentLoop 同时手调三份写口(单子"一份事件,两路消费")。
+    // 不设 = 没装配 trace hub,行为与从前逐字节一致(单测/子代理旧路)。
+    // 栅栏语义与持久规矩见 agent/tool_trace.hpp 文件头。同步回调,在工具
+    // 执行线程里被调,sink 自己管线程安全;sink 失败各自报稳定错误,UI
+    // 失败不拦工具,durable started 写失败由装配层按 effect class 决定
+    // 是否拦执行。
+    std::function<void(const ToolTraceEvent&)> on_tool_trace;
+    // 拦截查询:RunOneTool 在 emit(execution_started) 之后、Tool::execute
+    // 之前同步问一句。true = trace sink 判这枚 execution 该拦(started
+    // 落不住且是副作用档),RunOneTool 立即以 result_store_failed 收尾,
+    // 不 execute。不设 = 没有拦截源,照常执行。
+    std::function<bool(const std::string& execution_id)> on_tool_trace_blocked;
+
+    // ---- 逐枚追踪:消息落盘次序的三个关口(单子"消息落盘次序要改") ------
+    // 1. assistant 消息组装完、刚入 history:装配层 append+flush 进 session。
+    //    不设 = 老路(整轮收口后 PersistNewMessages),行为不变。
+    std::function<void(const api::Message&)> on_assistant_message_ready;
+    // 2. 本批五枚 tool result 全收齐、合并的 user 消息刚入 history:装配层
+    //    append+flush user 消息,再为每枚写 result_committed 栅栏。
+    std::function<void(const std::string& batch_id, const api::Message& tool_result_message)> on_tool_results_committed;
 };
 
 // 输出预算耗尽的明细账(规格根因四):max_tokens 从普通 end turn 里拆出来
@@ -292,6 +320,22 @@ struct ContextPressure {
 
 using OnContextPressure = std::function<void(const ContextPressure&)>;
 
+// 逐枚追踪:一枚工具调用的执行上下文(execution_id 宿主发号、批次与
+// 序号、父执行/重试/补偿关系)。trace 缺席(单测/子代理旧路)时
+// RunOneTool 的栅栏发射全部空操作,行为与从前逐字节一致。
+struct ToolTraceContext {
+    std::string execution_id;   // 审计主键(IdAuthority 的 item id 同源)
+    std::string thread_id;      // 哪场会话
+    std::string turn_id;        // 哪一轮
+    std::string provider_request_id;  // MessageStart 的 request id;可空
+    std::string batch_id;       // 同一 assistant message 的五枚共用
+    int sequence_in_batch = -1; // 0..N-1
+    std::string parent_execution_id;   // 子代理/PTC 内层归属;可空
+    std::string retry_of;              // 显式重试关系;可空
+    std::string blocked_by;            // 宿主因前置失败明确跳过;可空
+    std::string compensates;           // 补偿哪枚调用;可空
+};
+
 // 执行一枚工具调用的完整链(公开导出;实现在 loop.cpp 顶部,注释在那头):
 // 找工具/延迟挂载谓词 -> PreToolUse(含 updatedInput 的 schema 复检) ->
 // 确认档(needs_confirm + PermissionRequest)-> 执行 -> PostToolUse -> 编码
@@ -300,9 +344,11 @@ using OnContextPressure = std::function<void(const ContextPressure&)>;
 // filter_denial:过滤谓词不放行时的说明文案。默认空 = tool_search 的
 // "尚未挂载"说法;Explore 这类角色限制的调用方另给一句写明"角色限制"
 // 的文案——限制须来自角色并看得见,不许含糊成"子代理无权限"(规格)。
+// trace:逐枚追踪的执行上下文;nullptr = 不追踪(旧行为)。
 tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUseBlock& call, const Callbacks& callbacks,
                                 const std::function<bool(const tools::Tool&)>& tool_filter,
-                                const std::string& filter_denial = std::string());
+                                const std::string& filter_denial = std::string(),
+                                const ToolTraceContext* trace = nullptr);
 
 // 跨会话传话(0.25.x)的安全收件点:Run() 的工具循环每次"下一次请求尚未
 // 发出"的边界(循环顶)会调一次 inbox;有信就注进 history,再发请求——
@@ -484,6 +530,11 @@ public:
     // 决策台账只读口(L2 挑候选用)。
     const ResultViewMemo& result_view_memo() const { return result_view_memo_; }
 
+    // 逐枚追踪:execution_id 发号口。装配层(接了 Runtime 的会话)把它指
+    // 到 IdAuthority::NextItemId 上——execution_id 与 Runtime item id 同源,
+    // 不另开计数器。不设 = 旧路兜底 "exec-N"(仅单测/未接 Runtime 的会话)。
+    void SetExecutionIdIssuer(std::function<std::string()> issuer) { execution_id_issuer_ = std::move(issuer); }
+
 private:
     api::Backend& backend_;
     tools::ToolRegistry& registry_;
@@ -520,6 +571,19 @@ private:
     std::function<bool(const tools::Tool&)> tool_filter_;  // tool_search:空 = 不过滤,全量直挂
     std::string tool_filter_denial_;  // 过滤不放行的说明(空 = 默认"尚未挂载"文案)
     InboxPoll inbox_;  // 跨会话收件点:空 = 没有来信要收,行为跟从前一致
+
+    // 逐枚追踪:批次序号(execution_id 的兜底发号)。装配层接了 Runtime
+    // 的会话在 SetExecutionIdIssuer 里换成 IdAuthority 的号——单子明言
+    // 不可再造第二只计数器,这里只是没接 Runtime 的旧路(单测)兜底。
+    int batch_counter_ = 0;
+    std::uint64_t execution_counter_ = 0;
+    std::function<std::string()> execution_id_issuer_;
+    std::string issue_execution_id() {
+        if (execution_id_issuer_) {
+            return execution_id_issuer_();
+        }
+        return "exec-" + std::to_string(++execution_counter_);
+    }
 
     std::vector<api::ToolDefinition> BuildToolDefinitions() const;
 };

@@ -399,6 +399,8 @@ add_library(lubancode_engine STATIC
   src/agent/context_budget.cpp
   src/agent/microcompact.cpp
   src/agent/session_store.cpp
+  # 逐枚追踪单:工具生命周期栅栏事件、恢复账本(纯函数)。
+  src/agent/tool_trace.cpp
   src/agent/session_catalog.cpp
   # 会话管理器单第四五步:SessionLifecycle 搬与删的唯一收口(纯磁盘薄壳)。
   src/agent/session_lifecycle.cpp
@@ -455,6 +457,8 @@ add_library(lubancode_runtime STATIC
   src/runtime/plugin_tool.cpp
   # plugins 第 4 步:内嵌 Lua 进 RuntimeManager(三道软墙)。
   src/runtime/plugin_lua.cpp
+  # 逐枚追踪单:canonical 工具事件的装配层分线器(持久栅栏/UI 投影/录制)。
+  src/runtime/tool_trace_hub.cpp
 )
 target_include_directories(lubancode_runtime PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src

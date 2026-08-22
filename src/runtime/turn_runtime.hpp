@@ -84,12 +84,14 @@ PermissionVerdict EvaluatePermission(const PermissionContext& context, const age
 // 走);updatedInput/additionalContext 随行。dispatcher 为空 = 没配 hooks,
 // 返回全默认决策(与"没有 hooks 系统"逐字节一致)。
 agent::ToolHookDecision EmitPreToolUse(hooks::HookDispatcher* dispatcher, const std::string& name,
-                                       const nlohmann::json& input);
+                                       const nlohmann::json& input,
+                                       const std::string& tool_execution_id = std::string());
 
 // PostToolUse:钩子反馈逐条交回,追加进模型所见的 tool_result。副作用已发
 // 生,不能撤销,只许追加反馈。
 std::vector<std::string> EmitPostToolUse(hooks::HookDispatcher* dispatcher, const std::string& name,
-                                         const nlohmann::json& input, const tools::Tool::Result& result);
+                                         const nlohmann::json& input, const tools::Tool::Result& result,
+                                         const std::string& tool_execution_id = std::string());
 
 // PermissionRequest:真要问用户前的那一票。deny -> 拒;allow -> 不弹;不表
 // 态 -> 正常问。发射本体;文案上屏由前端负责。

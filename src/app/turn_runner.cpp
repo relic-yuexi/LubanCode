@@ -508,8 +508,14 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                             const std::vector<std::string>& allow_commands,
                                             const std::vector<std::string>& deny_commands,
                                             const std::atomic<bool>* cancel_flag,
-                                            lubancode::agent::WorkflowRecorder* recorder) {
+                                            lubancode::agent::WorkflowRecorder* recorder,
+                                            lubancode::runtime::ToolTraceHub* trace_hub) {
     lubancode::agent::Callbacks callbacks;
+
+    // 逐枚追踪单:装了 hub 的轮次,recorder 吃 canonical trace 的投影
+    // (hub.AttachProjection),不走 on_tool_start/on_tool_done 各自手打——
+    // 一份事件,两路消费,次序不再分叉。
+    const bool trace_projection_installed = trace_hub != nullptr;
 
     // hooks:dispatcher 为空指针或没有工具事件的定义是常态(没配 hooks 的
     // 用户占多数),这时候干脆不设这些回调——跟"没有 hooks 系统"时行为
@@ -586,10 +592,14 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
     // markdown:条目要开画了,正文当前块到此为止(保持原样,不重画)。
     // recorder:录一遍生成技能(0.25.x)的监听挂点——只在这里旁听事件,
     // 不改工具本身的执行路径;没在录(nullptr)零影响。
-    callbacks.on_tool_start = [&display, &body_tracker, recorder](const std::string& tool_use_id,
-                                                                  const std::string& name,
-                                                                  const nlohmann::json& input) {
-        if (recorder != nullptr) {
+    // 逐枚追踪单:录制件改从 canonical trace 派生——on_tool_start 只管
+    // 画面,工具事件的录制挪到 on_tool_trace 的 projection(见下方 trace
+    // hub 接线;没装 hub 的旧路保持原样,行为一字不差)。
+    const bool recorder_via_trace = trace_projection_installed;
+    callbacks.on_tool_start = [&display, &body_tracker, recorder, recorder_via_trace](
+                                  const std::string& tool_use_id, const std::string& name,
+                                  const nlohmann::json& input) {
+        if (recorder != nullptr && !recorder_via_trace) {
             recorder->RecordToolCall(name, input);
         }
         display.OnThinkingDone();  // 思考块若有,先收尾
@@ -626,10 +636,10 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         return std::make_shared<ReadyApprovalFuture>(std::move(response));
     };
 
-    callbacks.on_tool_done = [&display, &body_tracker, recorder](const std::string& tool_use_id,
-                                                                 const std::string& name,
-                                                                 const lubancode::tools::Tool::Result& result) {
-        if (recorder != nullptr) {
+    callbacks.on_tool_done = [&display, &body_tracker, recorder, recorder_via_trace](
+                                  const std::string& tool_use_id, const std::string& name,
+                                  const lubancode::tools::Tool::Result& result) {
+        if (recorder != nullptr && !recorder_via_trace) {
             recorder->RecordToolResult(name, result.is_error, result.content);
         }
         display.OnToolDone(tool_use_id, name, result);
@@ -841,7 +851,9 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                        const std::vector<std::string>& deny_commands,
                        lubancode::tools::AgentTool* completion_agent,
                        lubancode::agent::WorkflowRecorder* recorder, bool silent,
-                       lubancode::runtime::TurnUsageStats* usage_out) {
+                       lubancode::runtime::TurnUsageStats* usage_out,
+                       lubancode::runtime::ToolTraceHub* turn_trace_hub,
+                       std::string thread_id_for_trace, std::string turn_id_for_trace) {
     auto prepared_input = lubancode::cli::PrepareImageInput(user_input);
     if (!prepared_input.has_value()) {
         std::cerr << theme.error << tr("error.prefix") << ImageInputErrorText(prepared_input.error())
@@ -909,10 +921,30 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
         turn_context.permission_mode = lubancode::app::HookPermissionModeText();
         hook_dispatcher->UpdateContext(std::move(turn_context));
     }
-    const lubancode::agent::Callbacks callbacks =
+    lubancode::agent::Callbacks callbacks =
         BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker, registry,
                         hook_dispatcher, display, body_tracker, allow_commands, deny_commands, &cancel_flag,
-                        recorder);
+                        recorder, turn_trace_hub);
+    // 逐枚追踪单:hub 装进 callbacks(canonical 事件出口 + 消息落盘次序
+    // 关口);recorder 挂成投影,只吃 execution_id/outcome/摘要。hub 由
+    // 调用方(会话层)持有并传入;nullptr = 这轮不追踪(单测/旧路)。
+    if (turn_trace_hub != nullptr) {
+        if (recorder != nullptr) {
+            turn_trace_hub->AttachProjection(
+                [recorder](const lubancode::agent::ToolTraceEvent& event) {
+                    if (event.kind == lubancode::agent::ToolTraceEventKind::Scheduled) {
+                        recorder->RecordToolCall(event.tool_name, nlohmann::json::object(), event.execution_id,
+                                                 event.tool_use_id);
+                    } else if (event.kind == lubancode::agent::ToolTraceEventKind::ExecutionFinished) {
+                        recorder->RecordToolResult(event.tool_name,
+                                                   event.outcome != lubancode::agent::ToolOutcome::Succeeded,
+                                                   event.fallback_message, lubancode::agent::ToString(event.outcome),
+                                                   event.error_code, event.execution_id);
+                    }
+                });
+        }
+        turn_trace_hub->Install(loop, callbacks, thread_id_for_trace, turn_id_for_trace);
+    }
 
     // markdown × M10:监听线程随时可能在流式正文当中插打 [已排队]/[已打断]
     // 整行——这几行不在 body_tracker 的行数账里,不通气的话收束重画会把

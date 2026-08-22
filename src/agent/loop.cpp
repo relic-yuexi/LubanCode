@@ -1,6 +1,8 @@
 #include "agent/loop.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <type_traits>
 #include <utility>
@@ -8,11 +10,22 @@
 
 #include "agent/prefix.hpp"
 #include "api/assembler.hpp"
+#include "hooks/hash.hpp"  // Sha256Hex:trace 的入参/结果摘要锚
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:工具结果的第一道编码关口
 #include "tools/schema_check.hpp"      // updatedInput 改写后的 schema 复检
 #include "platform/log_sink.hpp"
 
 namespace lubancode::agent {
+
+namespace {
+// Unix epoch 毫秒(chrono 跨 clock 铁律:两枚 now 差只在这类帮手里出现,
+// 全文件统一走它)。
+std::int64_t NowMsEpoch() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+}  // namespace
 
 // 执行一个工具调用:先通知上层要开始了,M9 的 pre_tool 钩子紧接着检查一遍
 // (拦截了就直接结束,连确认都不问),needs_confirm 的话再问一句,拒绝/
@@ -26,7 +39,8 @@ namespace lubancode::agent {
 // 绕过 hooks 的暗门。JSON 与 PTC 两个后端共用同一份执行代码。
 tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUseBlock& call, const Callbacks& callbacks,
                                 const std::function<bool(const tools::Tool&)>& tool_filter,
-                                const std::string& filter_denial) {
+                                const std::string& filter_denial,
+                                const ToolTraceContext* trace) {
     // 每条收尾路共用的分发口:先清洗,再 on_tool_done,清洗版随返回值交给
     // 调用方(进 history / 下一轮请求)。日志只记字段名、长度、坏字节位置
     // 与前后几个十六进制字节,不倒正文。
@@ -49,6 +63,103 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
             callbacks.on_tool_phase(call.id, call.name, p);
         }
     };
+
+    // ---- 逐枚追踪:栅栏发射器(trace 缺席 = 没装配,全部空操作) ---------
+    // 领域事件只从这一个口出(单子"一份事件,两路消费"):Runtime 投影、
+    // 持久账、录制件、Hook 关联各取所需,RunOneTool 不再多路手写。
+    const auto started_at = std::chrono::steady_clock::now();
+    ToolTraceEvent fired_started;  // 已越过 started 的载荷,finished 时复用
+    bool crossed_start = false;
+    const auto emit = [trace, &callbacks, &call, &fired_started, &crossed_start](ToolTraceEvent event) {
+        if (trace == nullptr) {
+            return;
+        }
+        // 身份三件从 trace 上下文带(execution_id 宿主发号,batch/序号/
+        // parent 由调用方钉);事件自己只管相位与载荷。
+        event.execution_id = trace->execution_id;
+        event.item_id = trace->execution_id;  // Runtime item id 同源(单子:不自造第二只计数器)
+        event.tool_use_id = call.id;
+        event.tool_name = call.name;
+        event.batch_id = trace->batch_id;
+        event.sequence_in_batch = trace->sequence_in_batch;
+        event.turn_id = trace->turn_id;
+        event.thread_id = trace->thread_id;
+        event.provider_request_id = trace->provider_request_id;
+        event.parent_execution_id = trace->parent_execution_id;
+        event.retry_of = trace->retry_of;
+        event.blocked_by = trace->blocked_by;
+        event.compensates = trace->compensates;
+        event.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::system_clock::now().time_since_epoch())
+                                 .count();
+        if (event.kind == ToolTraceEventKind::ExecutionStarted) {
+            fired_started = event;
+            crossed_start = true;
+        }
+        callbacks.on_tool_trace(event);
+    };
+    // 结果引用:小结果内联(过 kInlineResultCap),大结果标 Unavailable
+    // (artifact 卸载是装配层/artifact store 的活,RunOneTool 不重复落一份;
+    // 恢复侧拿不到正文就如实标,不冒充可恢复)。
+    const auto make_result_ref = [](const std::string& content) {
+        ToolResultRef ref;
+        ref.sha256 = hooks::Sha256Hex(content);
+        ref.bytes = content.size();
+        if (content.size() <= kInlineResultCap) {
+            ref.kind = ToolResultRef::Kind::Inline;
+            ref.content = content;
+        } else {
+            ref.kind = ToolResultRef::Kind::Unavailable;
+        }
+        ref.preview = BuildTracePreview(content, 160, 160);
+        return ref;
+    };
+    // 终态栅栏:拿到原始结果(UTF-8 规范化之后、PostToolUse 之前——原样
+    // outcome 先落账,免得 Hook 崩溃抹掉工具已完成的事实)。
+    const auto finish = [&](const tools::Tool::Result& result, ToolSourceKind source_kind,
+                            const std::string& source_instance, EffectClass effect_class) {
+        if (trace == nullptr) {
+            return;
+        }
+        ToolTraceEvent event;
+        event.kind = ToolTraceEventKind::ExecutionFinished;
+        // outcome:工具自报的稳定字符串优先;没报的按失败形态投影
+        //(succeeded 只在工具明确自报时才算,不拿 is_error=false 冒充)。
+        if (!result.outcome.empty()) {
+            if (!ParseToolOutcome(result.outcome, event.outcome)) {
+                event.outcome = result.is_error ? ToolOutcome::ToolError : ToolOutcome::Succeeded;
+            }
+        } else {
+            event.outcome = result.is_error ? ToolOutcome::ToolError : ToolOutcome::Succeeded;
+        }
+        event.error_code = result.error_code;
+        event.fallback_message = result.content.empty() ? std::string() : result.content.substr(0, 200);
+        event.details = result.details;
+        event.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - started_at)
+                                .count();
+        event.result_ref = make_result_ref(result.content);
+        event.source_kind = source_kind;
+        event.source_instance = source_instance;
+        // 本地文件条件式撤销(单子第四期):write/edit 带回的 undo token
+        // 随 finished 栅栏落账;恢复侧凭它(加上当前文件内容的复检)给
+        // "可撤销"建议,宿主不自动执行。
+        if (!result.undo_path.empty()) {
+            event.undo.path = result.undo_path;
+            event.undo.preimage_sha256 = result.undo_preimage_sha256;
+            event.undo.postimage_sha256 = result.undo_postimage_sha256;
+            event.undo.created_new_file = result.undo_created_new_file;
+            event.undo.preimage = result.undo_preimage;
+        }
+        if (crossed_start) {
+            event.effect_class = fired_started.effect_class;
+            event.effective_input_sha256 = fired_started.effective_input_sha256;
+        } else {
+            event.effect_class = effect_class;
+        }
+        emit(std::move(event));
+    };
+
     // 钩子拦截的统一收尾:停在 Blocked 相位(不冒充"运行过又失败"),
     // additionalContext 一并塞进 tool_result 给模型看。
     const auto blocked = [&phase, &dispatch_done, &call](const std::string& reason,
@@ -66,8 +177,55 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     }
 
     tools::Tool* tool = registry.Find(call.name);
+    // 来源/副作用档从注册元数据拿(逐枚追踪单:不靠 RTTI 猜);没带元数据
+    // 的注册按 builtin 记,副作用档取工具自己的保守声明。
+    const tools::ToolRegistration* registration = registry.RegistrationOf(call.name);
+    ToolSourceKind source_kind = ToolSourceKind::Builtin;
+    std::string source_instance;
+    EffectClass effect_class = EffectClass::InProcessUnknown;
+    if (registration != nullptr) {
+        switch (registration->source_kind) {
+            case tools::ToolSourceKind::Builtin: source_kind = ToolSourceKind::Builtin; break;
+            case tools::ToolSourceKind::Mcp: source_kind = ToolSourceKind::Mcp; break;
+            case tools::ToolSourceKind::Lsp: source_kind = ToolSourceKind::Lsp; break;
+            case tools::ToolSourceKind::PluginLua: source_kind = ToolSourceKind::PluginLua; break;
+            case tools::ToolSourceKind::PluginNative: source_kind = ToolSourceKind::PluginNative; break;
+            case tools::ToolSourceKind::Agent: source_kind = ToolSourceKind::Agent; break;
+            case tools::ToolSourceKind::Ptc: source_kind = ToolSourceKind::Ptc; break;
+            case tools::ToolSourceKind::Deferred: source_kind = ToolSourceKind::Deferred; break;
+        }
+        source_instance = registration->source_instance;
+        // 两侧 EffectClass 枚举各自独立(tools 不牵 agent),语义一一对应,
+        // 这里显式映射(与下面的 tool->effect_class() 同一张表)。
+        switch (registration->effect_class) {
+            case tools::EffectClass::ReadOnlyLocal: effect_class = EffectClass::ReadOnlyLocal; break;
+            case tools::EffectClass::ReadOnlyRemote: effect_class = EffectClass::ReadOnlyRemote; break;
+            case tools::EffectClass::LocalReversible: effect_class = EffectClass::LocalReversible; break;
+            case tools::EffectClass::LocalProcessUnknown: effect_class = EffectClass::LocalProcessUnknown; break;
+            case tools::EffectClass::RemoteIdempotent: effect_class = EffectClass::RemoteIdempotent; break;
+            case tools::EffectClass::RemoteCompensatable: effect_class = EffectClass::RemoteCompensatable; break;
+            case tools::EffectClass::RemoteIrreversible: effect_class = EffectClass::RemoteIrreversible; break;
+            case tools::EffectClass::InProcessUnknown: effect_class = EffectClass::InProcessUnknown; break;
+        }
+    } else if (tool != nullptr) {
+        switch (tool->effect_class()) {
+            case tools::EffectClass::ReadOnlyLocal: effect_class = EffectClass::ReadOnlyLocal; break;
+            case tools::EffectClass::ReadOnlyRemote: effect_class = EffectClass::ReadOnlyRemote; break;
+            case tools::EffectClass::LocalReversible: effect_class = EffectClass::LocalReversible; break;
+            case tools::EffectClass::LocalProcessUnknown: effect_class = EffectClass::LocalProcessUnknown; break;
+            case tools::EffectClass::RemoteIdempotent: effect_class = EffectClass::RemoteIdempotent; break;
+            case tools::EffectClass::RemoteCompensatable: effect_class = EffectClass::RemoteCompensatable; break;
+            case tools::EffectClass::RemoteIrreversible: effect_class = EffectClass::RemoteIrreversible; break;
+            case tools::EffectClass::InProcessUnknown: effect_class = EffectClass::InProcessUnknown; break;
+        }
+    }
+
     if (tool == nullptr) {
-        return dispatch_done(call.id, call.name, tools::Tool::Result{"未知工具: " + call.name, true});
+        tools::Tool::Result unknown{"未知工具: " + call.name, true};
+        unknown.outcome = ToString(ToolOutcome::UnknownTool);
+        unknown.error_code = kErrRegistryUnknownTool;
+        finish(unknown, source_kind, source_instance, effect_class);
+        return dispatch_done(call.id, call.name, std::move(unknown));
     }
 
     // tool_search(延迟挂载):注册表里查得到,但过滤谓词不放行——延迟工具
@@ -79,7 +237,11 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
             filter_denial.empty()
                 ? "工具 " + call.name + " 存在但尚未挂载:请先用 tool_search 检索挂载,再调用。"
                 : "工具 " + call.name + ": " + filter_denial;
-        return dispatch_done(call.id, call.name, tools::Tool::Result{denial, true});
+        tools::Tool::Result unavailable{denial, true};
+        unavailable.outcome = ToString(ToolOutcome::Unavailable);
+        unavailable.error_code = kErrRegistryNotMounted;
+        finish(unavailable, source_kind, source_instance, effect_class);
+        return dispatch_done(call.id, call.name, std::move(unavailable));
     }
 
     // ---- PreToolUse:在 UI 标记"真执行"之前、权限确认之前。deny -> 拦;
@@ -100,7 +262,17 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     }
 
     if (pre.decision == ToolHookDecision::Decision::Deny) {
-        return blocked(pre.reason.empty() ? "被 PreToolUse 钩子拦截" : pre.reason, pre.additional_context);
+        phase(ToolPhase::Blocked);  // 停在 blocked,不冒充"运行过又失败"
+        tools::Tool::Result denied{pre.reason.empty() ? std::string("被 PreToolUse 钩子拦截") : pre.reason, true};
+        denied.outcome = ToString(ToolOutcome::HookDenied);
+        denied.error_code = kErrHookPreDenied;
+        finish(denied, source_kind, source_instance, effect_class);
+        std::string content = denied.content;
+        for (const auto& ctx : pre.additional_context) {
+            content += "\n[钩子附注] " + ctx;
+        }
+        denied.content = std::move(content);
+        return dispatch_done(call.id, call.name, std::move(denied));
     }
 
     nlohmann::json effective_input = call.input;
@@ -109,8 +281,17 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         if (schema_error.has_value()) {
             // 钩子明确想改参,改出来的形状这工具不认——按拦截处理,不悄悄
             // 拿原参数跑出去(那是绕 schema 的路)。
-            return blocked("PreToolUse 钩子改写入参未通过工具 schema,已拦截: " + *schema_error,
-                           pre.additional_context);
+            phase(ToolPhase::Blocked);  // 改写打回也是拦,同样停在 blocked
+            tools::Tool::Result rejected{"PreToolUse 钩子改写入参未通过工具 schema,已拦截: " + *schema_error, true};
+            rejected.outcome = ToString(ToolOutcome::SchemaRejected);
+            rejected.error_code = kErrHookUpdatedInputInvalid;
+            finish(rejected, source_kind, source_instance, effect_class);
+            std::string content = rejected.content;
+            for (const auto& ctx : pre.additional_context) {
+                content += "\n[钩子附注] " + ctx;
+            }
+            rejected.content = std::move(content);
+            return dispatch_done(call.id, call.name, std::move(rejected));
         }
         effective_input = *pre.updated_input;
     }
@@ -136,7 +317,11 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
                 const std::string denial =
                     callbacks.on_tool_denial_text ? callbacks.on_tool_denial_text(call.id, call.name)
                                                   : std::string("审批请求悬空收口,未执行该工具");
-                return dispatch_done(call.id, call.name, tools::Tool::Result{denial, true});
+                tools::Tool::Result cancelled{denial, true};
+                cancelled.outcome = ToString(ToolOutcome::PermissionDeclined);
+                cancelled.error_code = kErrPermissionDeclined;
+                finish(cancelled, source_kind, source_instance, effect_class);
+                return dispatch_done(call.id, call.name, std::move(cancelled));
             }
             switch (response->decision) {
                 case ApprovalDecision::Accept:
@@ -159,11 +344,39 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
             const std::string denial = callbacks.on_tool_denial_text
                                            ? callbacks.on_tool_denial_text(call.id, call.name)
                                            : std::string("用户拒绝执行该工具");
-            return dispatch_done(call.id, call.name, tools::Tool::Result{denial, true});
+            tools::Tool::Result declined{denial, true};
+            declined.outcome = ToString(ToolOutcome::PermissionDeclined);
+            declined.error_code = kErrPermissionDeclined;
+            finish(declined, source_kind, source_instance, effect_class);
+            return dispatch_done(call.id, call.name, std::move(declined));
         }
     }
 
     phase(ToolPhase::Running);
+    // 逐枚追踪:durable started 在 Tool::execute 前发射(副作用边界之前)。
+    // 落不落得住由 sink 决定(持久 sink append+flush;装配层对副作用工具
+    // 会把"写不成就拦执行"的闸装在 sink 里);这里只保证事件先于 execute。
+    {
+        ToolTraceEvent started;
+        started.kind = ToolTraceEventKind::ExecutionStarted;
+        started.effective_input_sha256 = hooks::Sha256Hex(effective_input.dump());
+        started.effect_class = effect_class;
+        started.source_kind = source_kind;
+        started.source_instance = source_instance;
+        emit(std::move(started));
+    }
+    // 副作用闸:started 落不住的副作用工具,这里拦(单子:写不成时,
+    // 副作用工具不得继续执行)。拦下的以 result_store_failed 收尾——不
+    // 冒充工具失败,也不冒充成功;模型与恢复账都看得出是宿主拦的。
+    if (trace != nullptr && callbacks.on_tool_trace_blocked &&
+        callbacks.on_tool_trace_blocked(trace->execution_id)) {
+        tools::Tool::Result blocked_by_trace{"追踪账写盘失败,该工具未执行(副作用档默认拦截)", true};
+        blocked_by_trace.outcome = ToString(ToolOutcome::ResultStoreFailed);
+        blocked_by_trace.error_code = kErrSessionTraceAppendFailed;
+        // finished 栅栏已在 hub 侧落过(拦截时补的 terminal 行),这里只
+        // 走展示与返回,不再发第二枚。
+        return dispatch_done(call.id, call.name, std::move(blocked_by_trace));
+    }
     tools::Tool::Result result = tool->execute(effective_input);
     // PostToolUse(新):结果先清洗成合法 UTF-8 再给钩子;钩子的反馈追加进
     // 模型所见 tool_result,原始结果照旧进审计(副作用已发生,不能撤销,
@@ -171,6 +384,11 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     if (!platform::IsValidUtf8(result.content)) {
         result.content = platform::SanitizeExternalText(result.content);
     }
+    // finished 栅栏在 PostToolUse 之前:原始 outcome 与结果正文先落账,
+    // Hook 崩溃抹不掉"工具已完成"的事实;钩子追加的文本只进模型所见,
+    // trace 里的 result_ref 记的是追加前的原始结果(两份 digest 分得开,
+    // 恢复时能判断 Hook 到底改了什么)。
+    finish(result, source_kind, source_instance, effect_class);
     if (callbacks.on_post_tool_use_hook) {
         const std::vector<std::string> feedback =
             callbacks.on_post_tool_use_hook(call.id, call.name, effective_input, result);
@@ -639,6 +857,14 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         last_stop_reason = stop_reason;
         history_.push_back(assistant_message);
         request_history_.push_back(assistant_message);
+        // 逐枚追踪:assistant 消息一入 history 就交装配层 append+flush 进
+        // session(单子:provider assistant message 在执行工具前落盘)。
+        // 老路(收口后 PersistNewMessages)照旧兜底——没装 trace 的会话
+        // 一字不变;装了的,PersistNew 的只增不减账不会重复落(persisted
+        // 基线此刻还没推进)。
+        if (callbacks.on_assistant_message_ready) {
+            callbacks.on_assistant_message_ready(assistant_message);
+        }
         // usage 是否报告(规格根因四):任一请求带回过非零 usage 就算报告过,
         // 之后失败页说"token 数未报告"只看这一位,不拿 0 糊。
         {
@@ -713,20 +939,83 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         // 执行、结果还没发回"那个当口——正在跑的这个工具照常等它跑完、结果
         // 照常入历史;还没轮到的后续工具不再真的执行,补一条"未执行"的合成
         // 结果)保住 tool_use/tool_result 的成对约束,再从 Run() 正常返回。
+        //
+        // 逐枚追踪(单子"消息落盘次序要改"):assistant message 入 history
+        // 后先发批次头(装配层此刻把 assistant 消息 append+flush 进
+        // session),再为每枚 tool use 写 scheduled,然后逐枚执行
+        // (started -> finished),五枚结果收齐、合并的 user 消息入 history
+        // 后再发批次尾(装配层补落 user 消息 + 各枚 result_committed)。
+        // 审计按枚及时落,崩溃窗口从"整轮"缩到"当前这枚";wire 语义不变,
+        // 五枚结果仍同一条 user message。
+        const bool trace_armed = callbacks.on_tool_trace != nullptr;
+        std::string batch_id;
+        int sequence_in_batch = 0;
+        if (trace_armed) {
+            batch_id = "batch-" + std::to_string(++batch_counter_);
+        }
+        std::vector<std::string> scheduled_ids;  // 本批各枚 execution_id(装 trace 时才有)
+        std::vector<std::string> scheduled_tool_use_ids;
+        std::vector<std::string> scheduled_names;
+        if (trace_armed && callbacks.on_tool_trace) {
+            for (const auto& block : assistant_message.content) {
+                if (!std::holds_alternative<api::ToolUseBlock>(block)) {
+                    continue;
+                }
+                const auto& call = std::get<api::ToolUseBlock>(block);
+                ToolTraceEvent scheduled;
+                scheduled.kind = ToolTraceEventKind::Scheduled;
+                scheduled.batch_id = batch_id;
+                scheduled.sequence_in_batch = sequence_in_batch;
+                scheduled.execution_id = issue_execution_id();
+                scheduled.tool_use_id = call.id;
+                scheduled.tool_name = call.name;
+                scheduled.timestamp_ms = NowMsEpoch();
+                callbacks.on_tool_trace(scheduled);
+                scheduled_ids.push_back(scheduled.execution_id);
+                scheduled_tool_use_ids.push_back(call.id);
+                scheduled_names.push_back(call.name);
+                ++sequence_in_batch;
+            }
+        }
+
         bool interrupted = false;
+        int tool_index = -1;
         std::vector<api::ContentBlock> tool_results;
         for (const auto& block : assistant_message.content) {
             if (!std::holds_alternative<api::ToolUseBlock>(block)) {
                 continue;
             }
+            ++tool_index;
             const auto& call = std::get<api::ToolUseBlock>(block);
             if (interrupted || (cancel != nullptr && cancel->load())) {
                 interrupted = true;
+                // 未轮到便被 ESC 收掉:记 cancelled_before_start 终态栅栏
+                // (单子生命周期规矩),不冒充执行过。
+                if (trace_armed) {
+                    ToolTraceEvent cancelled;
+                    cancelled.kind = ToolTraceEventKind::ExecutionFinished;
+                    cancelled.outcome = ToolOutcome::CancelledBeforeStart;
+                    cancelled.batch_id = batch_id;
+                    cancelled.sequence_in_batch = tool_index;
+                    cancelled.execution_id = scheduled_ids[tool_index];
+                    cancelled.tool_use_id = call.id;
+                    cancelled.tool_name = call.name;
+                    cancelled.timestamp_ms = NowMsEpoch();
+                    callbacks.on_tool_trace(cancelled);
+                }
                 tool_results.push_back(api::ToolResultBlock{call.id, "用户按 ESC 打断,该工具未执行", true});
                 continue;
             }
-            const tools::Tool::Result result = RunOneTool(registry_, call, callbacks, tool_filter_,
-                                                          tool_filter_denial_);
+            ToolTraceContext trace_ctx;
+            if (trace_armed) {
+                trace_ctx.execution_id = scheduled_ids[tool_index];
+                trace_ctx.batch_id = batch_id;
+                trace_ctx.sequence_in_batch = tool_index;
+                trace_ctx.provider_request_id = stream_request_id;
+            }
+            const tools::Tool::Result result =
+                RunOneTool(registry_, call, callbacks, tool_filter_, tool_filter_denial_,
+                           trace_armed ? &trace_ctx : nullptr);
             // 断言式兜底:RunOneTool 出口已经规范化过(见它文件头的信任边界
             // 注释),这里再过一遍 SanitizeUtf8 只为防将来有人在 Run() 之外
             // 绕路改历史——已经合法的内容是原样穿透的空操作。
@@ -741,7 +1030,31 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         tool_result_message.role = api::Role::User;
         tool_result_message.content = std::move(tool_results);
         history_.push_back(tool_result_message);
+        // 批次尾回调要在 move 进 request_history_ 之前拿:回调里读的是
+        // 五枚结果齐的 user message(装配层此刻 append+flush 它)。
+        const bool results_callback_armed = callbacks.on_tool_results_committed != nullptr;
+        api::Message message_for_callback = results_callback_armed ? tool_result_message : api::Message{};
         request_history_.push_back(std::move(tool_result_message));
+
+        if (trace_armed) {
+            // 批次尾:结果消息本体已入 history。先交装配层 append+flush user
+            // 消息(设了回调的会话),再为每枚发 result_committed 栅栏——
+            // 栅栏是 canonical 事件流的一部分,不依赖装配层是否监听消息
+            // 落盘;若这里之前崩溃,resume 由 trace 重建:finished 的从
+            // result ref 恢复,started 无 finished 的标 unknown,只有
+            // scheduled 的标未执行(单子"消息落盘次序")。
+            if (results_callback_armed) {
+                callbacks.on_tool_results_committed(batch_id, message_for_callback);
+            }
+            for (const std::string& execution_id : scheduled_ids) {
+                ToolTraceEvent committed;
+                committed.kind = ToolTraceEventKind::ResultCommitted;
+                committed.batch_id = batch_id;
+                committed.execution_id = execution_id;
+                committed.timestamp_ms = NowMsEpoch();
+                callbacks.on_tool_trace(committed);
+            }
+        }
 
         if (interrupted) {
             return RunOutcome{true, false, false, last_stop_reason, steps_used};

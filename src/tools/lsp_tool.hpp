@@ -46,6 +46,9 @@ std::string FormatLspDiagnostics(const std::optional<nlohmann::json>& diagnostic
 
 class LspTool : public Tool {
 public:
+
+    // 逐枚追踪单:LSP 请求只读远端档(不动本地文件)。
+    lubancode::tools::EffectClass effect_class() const override { return lubancode::tools::EffectClass::ReadOnlyRemote; }
     explicit LspTool(lsp::Manager& manager);
 
     std::string name() const override;

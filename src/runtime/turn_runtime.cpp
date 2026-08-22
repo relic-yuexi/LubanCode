@@ -103,7 +103,7 @@ agent::ToolHookDecision MapPreToolDecision(const hooks::HookEventResult& merged)
 }
 
 agent::ToolHookDecision EmitPreToolUse(hooks::HookDispatcher* dispatcher, const std::string& name,
-                                       const nlohmann::json& input) {
+                                       const nlohmann::json& input, const std::string& tool_execution_id) {
     if (dispatcher == nullptr) {
         return agent::ToolHookDecision{};
     }
@@ -112,11 +112,19 @@ agent::ToolHookDecision EmitPreToolUse(hooks::HookDispatcher* dispatcher, const 
     payload.fields["tool_name"] = name;
     payload.fields["tool_input"] = input.is_null() ? nlohmann::json::object() : input;
     payload.match_value = name;
+    // 逐枚追踪单:运行账钉到 execution(dispatcher 把它抄进每条
+    // HookRunRecord;不传就按无关联记,老调用方不受影响)。
+    if (dispatcher->context().tool_execution_id.empty()) {
+        hooks::HookContext ctx = dispatcher->context();
+        ctx.tool_execution_id = tool_execution_id;
+        dispatcher->UpdateContext(std::move(ctx));
+    }
     return MapPreToolDecision(dispatcher->Emit(hooks::HookEvent::PreToolUse, payload));
 }
 
 std::vector<std::string> EmitPostToolUse(hooks::HookDispatcher* dispatcher, const std::string& name,
-                                         const nlohmann::json& input, const tools::Tool::Result& result) {
+                                         const nlohmann::json& input, const tools::Tool::Result& result,
+                                         const std::string& tool_execution_id) {
     if (dispatcher == nullptr) {
         return {};
     }
@@ -128,6 +136,11 @@ std::vector<std::string> EmitPostToolUse(hooks::HookDispatcher* dispatcher, cons
     payload.fields["tool_response_text"] = result.content;  // legacy 环境变量走纯文本
     payload.fields["tool_succeeded"] = !result.is_error;
     payload.match_value = name;
+    if (dispatcher->context().tool_execution_id != tool_execution_id) {
+        hooks::HookContext ctx = dispatcher->context();
+        ctx.tool_execution_id = tool_execution_id;
+        dispatcher->UpdateContext(std::move(ctx));
+    }
     return dispatcher->Emit(hooks::HookEvent::PostToolUse, payload).additional_context;
 }
 

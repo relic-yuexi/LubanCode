@@ -8,6 +8,11 @@ namespace lubancode::tools {
 // (结果里会注明"覆盖了原有文件")。执行前需要用户确认。
 class WriteFileTool : public Tool {
 public:
+
+    // 逐枚追踪单:注册元数据声明。
+    lubancode::tools::EffectClass effect_class() const override { return lubancode::tools::EffectClass::LocalReversible; }
+    lubancode::tools::Idempotency idempotency() const override { return lubancode::tools::Idempotency::NonIdempotent; }
+    lubancode::tools::RecoveryCapability recovery_capability() const override { return lubancode::tools::RecoveryCapability::ConditionallyUndoable; }
     std::string name() const override;
     std::string description() const override;
     nlohmann::json input_schema() const override;

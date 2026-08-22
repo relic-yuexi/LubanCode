@@ -257,6 +257,8 @@ HookEventResult HookDispatcher::RunEventCore(const std::vector<HookDefinition>& 
         slot.record.command_display = HookCommandDisplay(def.handler);
         slot.record.source_label = def.source_label;
         slot.record.timestamp_unix = UnixNow();
+        // 逐枚追踪单:运行账钉在工具 execution 上(可空,非工具事件没有)。
+        slot.record.tool_execution_id = ctx.tool_execution_id;
 
         if (def.disabled) {
             slot.record.outcome = "skipped_disabled";

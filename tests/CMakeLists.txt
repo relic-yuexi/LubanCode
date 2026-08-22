@@ -243,6 +243,9 @@ add_executable(lubancode_tests
   # 第 8 步(管理面与信任):env 整环境替换硬保证、PluginTrustStore 记账、
   # 插件内容指纹、项目插件信任门。
   test_plugin_admin.cpp
+  # 工具调用逐枚追踪单:五工具批次/崩溃注入九窗口四档恢复/幂等与冲突/
+  # trace-aware 修补/落盘次序/来源与错误码/undo token/可疑窗口。
+  test_tool_trace.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 # 依赖守门(显示系统剥离单第八步):测试要现扫源码树,把源码根递进去。

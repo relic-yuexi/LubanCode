@@ -131,8 +131,16 @@ public:
 
     // 工具事件(model 来源)。只在 Recording 态生效;Paused 静默跳过(不录
     // 暂停期间的动作),Inactive 是调用方没挂监听,天然到不了这里。
-    void RecordToolCall(const std::string& tool_name, const nlohmann::json& input);
-    void RecordToolResult(const std::string& tool_name, bool is_error, const std::string& content);
+    // 逐枚追踪单:改带 execution_id/tool_use_id——同名五连可配对,录制件
+    // 从 canonical tool trace 派生,不由 TurnRunner 再手打一遍事件。旧参
+    // 数位置不动,新参末尾带默认值,既有调用方照旧编译。
+    void RecordToolCall(const std::string& tool_name, const nlohmann::json& input,
+                        const std::string& execution_id = std::string(),
+                        const std::string& tool_use_id = std::string());
+    void RecordToolResult(const std::string& tool_name, bool is_error, const std::string& content,
+                          const std::string& outcome = std::string(),
+                          const std::string& error_code = std::string(),
+                          const std::string& execution_id = std::string());
 
     RecorderState state() const { return state_; }
     const std::string& name() const { return name_; }

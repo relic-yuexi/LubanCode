@@ -61,7 +61,13 @@ void Client::OnLine(const std::string& line) {
             std::lock_guard<std::mutex> lock(mutex_);
             auto it = pending_.find(id);
             if (it == pending_.end()) {
-                return;  // 不认识的 id(可能是超时后迟到的响应),丢掉。
+                // 迟到响应:超时删过 pending,响应现在才到。丢弃但留账
+                // (逐枚追踪单:另记 late_response_dropped,关联原请求,
+                // 不能投给新调用)——迟丢账走回调,宿主翻成 trace 事件。
+                if (late_response_sink_) {
+                    late_response_sink_(id);
+                }
+                return;
             }
             entry = it->second;
             entry->response = std::move(parsed);
@@ -76,8 +82,8 @@ void Client::OnLine(const std::string& line) {
 }
 
 std::expected<nlohmann::json, std::string> Client::SendRequestAndWait(const std::string& method,
-                                                                       const nlohmann::json& params,
-                                                                       int timeout_ms) {
+                                                                       const nlohmann::json& params, int timeout_ms,
+                                                                       std::int64_t* jsonrpc_request_id_out) {
     if (transport_ == nullptr) {
         return std::unexpected("MCP 服务器 " + server_name_ + " 传输层未就绪");
     }
@@ -135,7 +141,13 @@ std::expected<nlohmann::json, std::string> Client::SendRequestAndWait(const std:
     }
 
     if (!response.contains("result")) {
+        if (jsonrpc_request_id_out != nullptr) {
+            *jsonrpc_request_id_out = id;
+        }
         return std::unexpected("MCP 服务器 " + server_name_ + " 响应缺少 result 字段: " + method);
+    }
+    if (jsonrpc_request_id_out != nullptr) {
+        *jsonrpc_request_id_out = id;
     }
     return response["result"];
 }
@@ -193,11 +205,23 @@ std::expected<std::vector<ToolInfo>, std::string> Client::ListTools() {
     }
 }
 
-tools::Tool::Result Client::CallTool(const std::string& tool_name, const nlohmann::json& arguments) {
+tools::Tool::Result Client::CallTool(const std::string& tool_name, const nlohmann::json& arguments,
+                                       std::int64_t* jsonrpc_request_id_out) {
     const nlohmann::json params = {{"name", tool_name}, {"arguments", arguments}};
-    auto result = SendRequestAndWait("tools/call", params, tool_call_timeout_ms_);
+    auto result = SendRequestAndWait("tools/call", params, tool_call_timeout_ms_, jsonrpc_request_id_out);
     if (!result.has_value()) {
-        return tools::Tool::Result{result.error(), true};
+        // 逐枚追踪单:server 进程退出/传输断、超时分开记,不靠中文正文
+        // 分辨。迟到响应的丢弃在 transport 读线程里(HookRunRecord 之外
+        // 另记 late_response_dropped,见 client.hpp 注释)。
+        tools::Tool::Result failed{result.error(), true};
+        if (result.error().find("超时") != std::string::npos) {
+            failed.outcome = "timed_out";
+            failed.error_code = "mcp.timeout";
+        } else {
+            failed.outcome = "transport_error";
+            failed.error_code = "mcp.transport_closed";
+        }
+        return failed;
     }
 
     // CallTool 承诺不抛异常;.value() 在字段存在但类型不对时抛 type_error,
