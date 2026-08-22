@@ -2,6 +2,8 @@
 
 #include <utility>
 
+#include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
+
 namespace lubancode::tools {
 
 namespace {
@@ -22,11 +24,13 @@ std::string WorktreeTool::name() const {
 }
 
 std::string WorktreeTool::description() const {
-    return "住进隔离的 git worktree 里干活,不碰主 checkout。大改动先 worktree enter(缺省名字自动生成,"
-           "基准 fresh=远端默认分支或 head=当前 HEAD),整场会话搬进房里:读写、命令都在房内,"
-           "状态行会亮房名;干完 worktree exit keep(留房)或 exit remove(干净才删,脏了要用户确认)。"
-           "worktree status 看在不在房里、脏没脏;worktree list 列全部工作树。"
-           "别把构建产物提交进房里;房里的改动最终仍要合回主分支。";
+    // 文案在 src/prompts/tools/<语言>/worktree.md,兜底是迁移前的原文。
+    return ToolText("worktree", "description",
+                    "住进隔离的 git worktree 里干活,不碰主 checkout。大改动先 worktree enter(缺省名字自动生成,"
+                    "基准 fresh=远端默认分支或 head=当前 HEAD),整场会话搬进房里:读写、命令都在房内,"
+                    "状态行会亮房名;干完 worktree exit keep(留房)或 exit remove(干净才删,脏了要用户确认)。"
+                    "worktree status 看在不在房里、脏没脏;worktree list 列全部工作树。"
+                    "别把构建产物提交进房里;房里的改动最终仍要合回主分支。");
 }
 
 nlohmann::json WorktreeTool::input_schema() const {
@@ -38,27 +42,35 @@ nlohmann::json WorktreeTool::input_schema() const {
     nlohmann::json action_prop = nlohmann::json::object();
     action_prop["type"] = "string";
     action_prop["enum"] = nlohmann::json::array({"enter", "status", "list", "exit"});
-    action_prop["description"] = "enter=建房或进已有房(整场会话搬进去);status=房内状态;list=列工作树;"
-                                 "exit=搬回原处(配 mode)";
+    action_prop["description"] =
+        ToolText("worktree", "param.action",
+                 "enter=建房或进已有房(整场会话搬进去);status=房内状态;list=列工作树;"
+                 "exit=搬回原处(配 mode)");
     properties["action"] = action_prop;
 
     nlohmann::json name_prop = nlohmann::json::object();
     name_prop["type"] = "string";
-    name_prop["description"] = "enter 时的房名(字母数字-_),不填自动生成;也可传已有 worktree 的名字或路径,"
-                               "园子(.lubancode/worktrees)之外的房要先经用户确认";
+    name_prop["description"] =
+        ToolText("worktree", "param.name",
+                 "enter 时的房名(字母数字-_),不填自动生成;也可传已有 worktree 的名字或路径,"
+                 "园子(.lubancode/worktrees)之外的房要先经用户确认");
     properties["name"] = name_prop;
 
     nlohmann::json base_prop = nlohmann::json::object();
     base_prop["type"] = "string";
     base_prop["enum"] = nlohmann::json::array({"fresh", "head"});
-    base_prop["description"] = "enter 建新房的基准:fresh=远端默认分支(缺省,fetch 5 秒封顶失败回落本地);"
-                               "head=当前 HEAD";
+    base_prop["description"] =
+        ToolText("worktree", "param.base",
+                 "enter 建新房的基准:fresh=远端默认分支(缺省,fetch 5 秒封顶失败回落本地);"
+                 "head=当前 HEAD");
     properties["base"] = base_prop;
 
     nlohmann::json mode_prop = nlohmann::json::object();
     mode_prop["type"] = "string";
     mode_prop["enum"] = nlohmann::json::array({"keep", "remove"});
-    mode_prop["description"] = "exit 的方式:keep=房留在盘上;remove=干净才删(脏了必须用户确认,别替用户点头)";
+    mode_prop["description"] =
+        ToolText("worktree", "param.mode",
+                 "exit 的方式:keep=房留在盘上;remove=干净才删(脏了必须用户确认,别替用户点头)");
     properties["mode"] = mode_prop;
 
     schema["properties"] = properties;

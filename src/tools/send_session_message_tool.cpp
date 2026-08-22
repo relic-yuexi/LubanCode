@@ -5,6 +5,8 @@
 #include <optional>
 #include <sstream>
 
+#include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
+
 namespace lubancode::tools {
 
 SendSessionMessageTool::SendSessionMessageTool(
@@ -13,10 +15,12 @@ SendSessionMessageTool::SendSessionMessageTool(
     : peers_provider_(std::move(peers_provider)), send_(std::move(send)) {}
 
 std::string SendSessionMessageTool::description() const {
-    return "给同一台机器上另一场 Lubancode 会话递一条纯文本消息(不传文件、不传聊天记录,只递一张字条)。"
-           "target 填对方的名字或 peer_id(list_sessions 可查)。对端正忙时消息会在两次工具调用之间送达,"
-           "不打断它手头的工具;对端空闲则另起一轮。只有在手头结论会影响另一场活会话时才发送;"
-           "不许闲聊,不许催问成环。";
+    // 文案在 src/prompts/tools/<语言>/send_session_message.md,兜底是迁移前的原文。
+    return ToolText("send_session_message", "description",
+                    "给同一台机器上另一场 Lubancode 会话递一条纯文本消息(不传文件、不传聊天记录,只递一张字条)。"
+                    "target 填对方的名字或 peer_id(list_sessions 可查)。对端正忙时消息会在两次工具调用之间送达,"
+                    "不打断它手头的工具;对端空闲则另起一轮。只有在手头结论会影响另一场活会话时才发送;"
+                    "不许闲聊,不许催问成环。");
 }
 
 nlohmann::json SendSessionMessageTool::input_schema() const {
@@ -24,8 +28,11 @@ nlohmann::json SendSessionMessageTool::input_schema() const {
         {"type", "object"},
         {"properties",
          {
-             {"target", {{"type", "string"}, {"description", "对方会话的名字或 peer_id"}}},
-             {"text", {{"type", "string"}, {"description", "纯文本正文"}}},
+             {"target", {{"type", "string"},
+                         {"description", ToolText("send_session_message", "param.target",
+                                                  "对方会话的名字或 peer_id")}}},
+             {"text", {{"type", "string"},
+                       {"description", ToolText("send_session_message", "param.text", "纯文本正文")}}},
          }},
         {"required", nlohmann::json::array({"target", "text"})},
     };
