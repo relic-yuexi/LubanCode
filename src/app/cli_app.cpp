@@ -4,6 +4,7 @@
 #include "app/cli_options.hpp"
 #include "app/interactive_session.hpp"
 #include "app/one_shot.hpp"
+#include "app_server/server.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -207,6 +208,25 @@ public:
 private:
     lubancode::hooks::HookDispatcher* dispatcher_;
 };
+
+// app-server 子模式:无界面后台协议,stdio 上逐行 JSON。装配前奏(配置
+// 加载、i18n、hooks 装载)在 RunCli 里已经跑完——这里只把服务立起来进
+// 主循环。stdout 从这一刻起是协议专线,任何 std::cout 都不许再出现
+// (诊断走 stderr,app_server 模块自己守规矩,这层也一样)。
+// 骨架期(协议骨架单):backend 走真装配(BuildBackend)——假 backend
+// 只在单测里注入;真回合执行链(审批/打断/steering)是后续单的活。
+int RunAppServerMode(const lubancode::config::ConfigResult& config_result) {
+    lubancode::app_server::ServerOptions options;
+    if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
+        options.sessions_dir = *luban_dir + "/sessions";
+    }
+    options.cwd = CurrentDirUtf8();
+    lubancode::app_server::Server server(
+        std::move(options),
+        [&config_result]() { return lubancode::app::BuildBackend(config_result.config); },
+        nullptr);
+    return server.Run();
+}
 
 // 真正的入口逻辑,跟平台无关:args[0] 是程序名,args[1..] 是实参。
 // Windows 下 argv 单独处理(见文件末尾的 wmain),是为了绕开 Windows
@@ -464,6 +484,11 @@ int RunCli(const std::vector<std::string>& args) {
     // 兜底:JSON 编码、网络库内部等地方万一抛出没接住的异常,也不能让
     // 整个进程崩掉(崩掉的话用户只会看到一个莫名其妙的退出码)。
     try {
+        if (cli_options.app_server) {
+            // app-server 是独占模式:不进单发,不进交互。旗标在解析层就
+            // 拦下了,这里再守一道(one_shot 防守的单子原文),双保险。
+            return RunAppServerMode(*config_result);
+        }
         if (!cli_options.positional.empty()) {
             // 单发模式/管道模式:不进向导(没有交互终端可问),缺配置直接
             // 报可读的错,指路三条配置途径。

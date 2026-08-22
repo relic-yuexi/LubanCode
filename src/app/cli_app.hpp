@@ -33,4 +33,8 @@ std::optional<lubancode::config::Config> RunInitialSetupWizard(std::optional<std
 // 的 dump() 时直接抛 type_error(316: invalid UTF-8 byte)崩掉。
 int RunCli(const std::vector<std::string>& args);
 
+// app-server 子模式(无界面后台协议):装配前奏(配置/i18n/hooks)已在
+// RunCli 里跑完,这里立服务进 stdio 主循环。stdout 从此是协议专线。
+int RunAppServerMode(const lubancode::config::ConfigResult& config_result);
+
 }  // namespace lubancode::app

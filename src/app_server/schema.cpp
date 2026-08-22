@@ -1,0 +1,357 @@
+// schema.hpp 的实现:纯函数,不碰 IO、不开线程,单测直喂直断。
+#include "app_server/schema.hpp"
+
+#include "platform/json_safe.hpp"
+
+namespace lubancode::app_server {
+
+// ---------------------------------------------------------------------------
+// 出站信封
+// ---------------------------------------------------------------------------
+
+nlohmann::json MakeEvent(std::string_view method, nlohmann::json params) {
+    nlohmann::json message = nlohmann::json::object();
+    if (kEmitJsonRpcField) {
+        message["jsonrpc"] = std::string(kJsonRpcVersion);
+    }
+    message["method"] = std::string(method);
+    message["params"] = std::move(params);
+    return message;
+}
+
+nlohmann::json MakeResult(std::int64_t id, nlohmann::json result) {
+    nlohmann::json message = nlohmann::json::object();
+    if (kEmitJsonRpcField) {
+        message["jsonrpc"] = std::string(kJsonRpcVersion);
+    }
+    message["id"] = id;
+    message["result"] = std::move(result);
+    return message;
+}
+
+nlohmann::json MakeError(std::int64_t id, int code, std::string_view message_text,
+                         const nlohmann::json& data) {
+    nlohmann::json error = nlohmann::json::object();
+    error["code"] = code;
+    error["message"] = std::string(message_text);
+    if (!data.is_null()) {
+        error["data"] = data;
+    }
+    nlohmann::json message = nlohmann::json::object();
+    if (kEmitJsonRpcField) {
+        message["jsonrpc"] = std::string(kJsonRpcVersion);
+    }
+    message["id"] = id;
+    message["error"] = std::move(error);
+    return message;
+}
+
+nlohmann::json MakeErrorForUnparseable(int code, std::string_view message_text) {
+    nlohmann::json error = nlohmann::json::object();
+    error["code"] = code;
+    error["message"] = std::string(message_text);
+    nlohmann::json message = nlohmann::json::object();
+    if (kEmitJsonRpcField) {
+        message["jsonrpc"] = std::string(kJsonRpcVersion);
+    }
+    message["id"] = nullptr; // id 无从捞起,按 JSON-RPC 的规矩回 null
+    message["error"] = std::move(error);
+    return message;
+}
+
+std::string SerializeMessage(const nlohmann::json& message) {
+    // DumpJsonSanitized 永不抛:出站行必须永远可解析,这是 stdout 分帧
+    // 纪律的底线。坏 UTF-8 被替换字符洗过,好过吐一行解不开的东西。
+    return platform::DumpJsonSanitized(message);
+}
+
+// ---------------------------------------------------------------------------
+// 入站信封
+// ---------------------------------------------------------------------------
+
+std::optional<IncomingMessage> ParseIncoming(const std::string& line, EnvelopeError& out_error) {
+    out_error = EnvelopeError{};
+
+    nlohmann::json parsed;
+    try {
+        parsed = nlohmann::json::parse(line);
+    } catch (const nlohmann::json::exception&) {
+        out_error.code = kErrParseError;
+        out_error.message = "报文不是合法 JSON";
+        return std::nullopt;
+    }
+
+    if (!parsed.is_object()) {
+        out_error.code = kErrParseError;
+        out_error.message = "报文不是 JSON 对象";
+        return std::nullopt;
+    }
+
+    // id:三态——没有(通知)、数字(请求/响应)、别的类型(坏)。
+    const bool has_id = parsed.contains("id");
+    std::int64_t id = 0;
+    if (has_id) {
+        const nlohmann::json& id_value = parsed["id"];
+        if (id_value.is_number_integer() || id_value.is_number_unsigned()) {
+            id = id_value.get<std::int64_t>();
+            out_error.has_id = true;
+            out_error.id = id;
+        } else if (id_value.is_null()) {
+            // null id 只在错误响应里合法;作为入站请求算坏。
+            out_error.code = kErrInvalidRequest;
+            out_error.message = "id 为 null";
+            return std::nullopt;
+        } else {
+            out_error.code = kErrInvalidRequest;
+            out_error.message = "id 必须是整数";
+            return std::nullopt;
+        }
+    }
+
+    const bool has_method = parsed.contains("method") && !parsed["method"].is_null();
+    const bool has_result = parsed.contains("result") && !parsed["result"].is_null();
+    const bool has_error = parsed.contains("error") && !parsed["error"].is_null();
+
+    IncomingMessage message;
+    if (has_id && has_method) {
+        if (!parsed["method"].is_string()) {
+            out_error.code = kErrInvalidRequest;
+            out_error.message = "method 必须是字符串";
+            return std::nullopt;
+        }
+        message.kind = IncomingMessage::Kind::Request;
+        message.request.id = id;
+        message.request.method = parsed["method"].get<std::string>();
+        if (parsed.contains("params") && !parsed["params"].is_null()) {
+            message.request.params = parsed["params"];
+        }
+        return message;
+    }
+    if (!has_id && has_method) {
+        if (!parsed["method"].is_string()) {
+            out_error.code = kErrInvalidRequest;
+            out_error.message = "method 必须是字符串";
+            return std::nullopt;
+        }
+        message.kind = IncomingMessage::Kind::Notification;
+        message.notification.method = parsed["method"].get<std::string>();
+        if (parsed.contains("params") && !parsed["params"].is_null()) {
+            message.notification.params = parsed["params"];
+        }
+        return message;
+    }
+    if (has_id && (has_result ^ has_error)) {
+        // 前端对服务端反向请求(审批/ask_user,骨架期只留位)的答复。
+        message.kind = IncomingMessage::Kind::Response;
+        message.response.id = id;
+        if (has_error) {
+            message.response.is_error = true;
+            message.response.result = parsed["error"];
+        } else {
+            message.response.result = parsed["result"];
+        }
+        return message;
+    }
+
+    out_error.code = kErrInvalidRequest;
+    out_error.message = has_id ? "带 id 却没有 method/result/error" : "没有 method 也不是响应";
+    return std::nullopt;
+}
+
+// ---------------------------------------------------------------------------
+// 参数表
+// ---------------------------------------------------------------------------
+
+ParamsCheck CheckParamsIsObject(const nlohmann::json& params, std::string_view method) {
+    if (!params.is_object()) {
+        return ParamsCheck{false, kErrInvalidParams, std::string(method) + ": params 必须是对象"};
+    }
+    return ParamsCheck{};
+}
+
+ParamsCheck CheckInitializeParams(const nlohmann::json& params) {
+    const ParamsCheck base = CheckParamsIsObject(params, kMethodInitialize);
+    if (!base.ok) {
+        return base;
+    }
+    // clientName/clientVersion 可选字符串,给了但类型不对才报。
+    for (const char* key : {"clientName", "clientVersion"}) {
+        if (params.contains(key) && !params[key].is_null() && !params[key].is_string()) {
+            return ParamsCheck{false, kErrInvalidParams, std::string(kMethodInitialize) + ": " + key + " 必须是字符串"};
+        }
+    }
+    return ParamsCheck{};
+}
+
+ParamsCheck CheckThreadStartParams(const nlohmann::json& params) {
+    const ParamsCheck base = CheckParamsIsObject(params, kMethodThreadStart);
+    if (!base.ok) {
+        return base;
+    }
+    if (params.contains("cwd") && !params["cwd"].is_null() && !params["cwd"].is_string()) {
+        return ParamsCheck{false, kErrInvalidParams, std::string(kMethodThreadStart) + ": cwd 必须是字符串"};
+    }
+    return ParamsCheck{};
+}
+
+namespace {
+
+// 取必填字符串字段。缺了/类型不对/空串都算参数错。
+ParamsCheck RequireString(const nlohmann::json& params, std::string_view key, std::string_view method,
+                          std::string& out_value) {
+    if (!params.contains(key) || params[key].is_null()) {
+        return ParamsCheck{false, kErrInvalidParams,
+                           std::string(method) + ": 缺必填字段 " + std::string(key)};
+    }
+    if (!params[key].is_string()) {
+        return ParamsCheck{false, kErrInvalidParams,
+                           std::string(method) + ": " + std::string(key) + " 必须是字符串"};
+    }
+    std::string value = params[key].get<std::string>();
+    if (value.empty()) {
+        return ParamsCheck{false, kErrInvalidParams,
+                           std::string(method) + ": " + std::string(key) + " 不许为空"};
+    }
+    out_value = std::move(value);
+    return ParamsCheck{};
+}
+
+}  // namespace
+
+ParamsCheck CheckTurnStartParams(const nlohmann::json& params, std::string& out_thread_id,
+                                 std::string& out_text) {
+    const ParamsCheck base = CheckParamsIsObject(params, kMethodTurnStart);
+    if (!base.ok) {
+        return base;
+    }
+    ParamsCheck check = RequireString(params, "threadId", kMethodTurnStart, out_thread_id);
+    if (!check.ok) {
+        return check;
+    }
+    check = RequireString(params, "text", kMethodTurnStart, out_text);
+    if (!check.ok) {
+        return check;
+    }
+    return ParamsCheck{};
+}
+
+ParamsCheck CheckThreadStopParams(const nlohmann::json& params, std::string& out_thread_id) {
+    const ParamsCheck base = CheckParamsIsObject(params, kMethodThreadStop);
+    if (!base.ok) {
+        return base;
+    }
+    return RequireString(params, "threadId", kMethodThreadStop, out_thread_id);
+}
+
+// ---------------------------------------------------------------------------
+// 出站事件参数
+// ---------------------------------------------------------------------------
+
+nlohmann::json MakeThreadStartedParams(const std::string& thread_id, const std::string& cwd) {
+    return nlohmann::json{{"threadId", thread_id}, {"cwd", cwd}};
+}
+
+nlohmann::json MakeThreadStoppedParams(const std::string& thread_id) {
+    return nlohmann::json{{"threadId", thread_id}};
+}
+
+nlohmann::json MakeTurnStartedParams(const std::string& thread_id, const std::string& turn_id) {
+    return nlohmann::json{{"threadId", thread_id}, {"turnId", turn_id}};
+}
+
+nlohmann::json MakeTurnCompletedParams(const std::string& thread_id, const std::string& turn_id,
+                                       std::string_view status, const std::string& error_message,
+                                       const nlohmann::json& usage, int steps_used) {
+    nlohmann::json params = nlohmann::json{{"threadId", thread_id},
+                                           {"turnId", turn_id},
+                                           {"status", std::string(status)},
+                                           {"usage", usage},
+                                           {"stepsUsed", steps_used}};
+    if (!error_message.empty()) {
+        params["error"] = error_message;
+    }
+    return params;
+}
+
+nlohmann::json MakeItemStartedParams(const std::string& thread_id, const std::string& turn_id,
+                                     const std::string& item_id, std::string_view item_type,
+                                     nlohmann::json payload) {
+    nlohmann::json item = nlohmann::json{{"id", item_id}, {"type", std::string(item_type)}};
+    if (payload.is_object()) {
+        for (auto it = payload.begin(); it != payload.end(); ++it) {
+            item[it.key()] = it.value();
+        }
+    }
+    return nlohmann::json{{"threadId", thread_id}, {"turnId", turn_id}, {"item", std::move(item)}};
+}
+
+nlohmann::json MakeItemDeltaParams(const std::string& thread_id, const std::string& turn_id,
+                                   const std::string& item_id, std::string_view delta_text) {
+    return nlohmann::json{{"threadId", thread_id},
+                          {"turnId", turn_id},
+                          {"itemId", item_id},
+                          {"delta", std::string(delta_text)}};
+}
+
+nlohmann::json MakeItemCompletedParams(const std::string& thread_id, const std::string& turn_id,
+                                       const std::string& item_id, nlohmann::json payload) {
+    nlohmann::json item = nlohmann::json{{"id", item_id}};
+    if (payload.is_object()) {
+        for (auto it = payload.begin(); it != payload.end(); ++it) {
+            item[it.key()] = it.value();
+        }
+    }
+    return nlohmann::json{{"threadId", thread_id}, {"turnId", turn_id}, {"item", std::move(item)}};
+}
+
+nlohmann::json MakeQueueOverflowParams(const std::string& thread_id, const std::string& turn_id,
+                                       std::uint64_t dropped, std::uint64_t coalesced) {
+    return nlohmann::json{{"threadId", thread_id},
+                          {"turnId", turn_id},
+                          {"dropped", dropped},
+                          {"coalesced", coalesced}};
+}
+
+// ---------------------------------------------------------------------------
+// initialize / thread/list 结果
+// ---------------------------------------------------------------------------
+
+nlohmann::json MakeInitializeResult(std::string_view lubancode_version, std::string_view platform) {
+    nlohmann::json capabilities = nlohmann::json::object();
+    // 骨架期已接线的方法面如实报;留位的名字也列在 pending 里,前端能分清
+    // "服务器认识但不接"与"压根没有"。
+    capabilities["methods"] = std::vector<std::string>{
+        std::string(kMethodInitialize), std::string(kMethodInitialized), std::string(kMethodShutdown),
+        std::string(kMethodThreadStart), std::string(kMethodThreadList), std::string(kMethodThreadStop),
+        std::string(kMethodTurnStart)};
+    capabilities["pending"] = std::vector<std::string>{
+        std::string(kMethodThreadResume), std::string(kMethodThreadRead), std::string(kMethodTurnSteer),
+        std::string(kMethodTurnInterrupt), std::string(kMethodModelList), std::string(kMethodConfigRead)};
+    // 审批与 ask_user 的反向请求:协议位占住,执行链等 Broker(另一条线)。
+    capabilities["serverRequests"] = std::vector<std::string>{std::string(kMethodPermissionRequest),
+                                                              std::string(kMethodUserAsk)};
+    // 事件账里给审批/打断/diff 留的类型与终态,一并报出去,前端画界面
+    // 好留坑。
+    capabilities["itemTypes"] = std::vector<std::string>{
+        std::string(kItemTypeText),      std::string(kItemTypeThinking),   std::string(kItemTypeTool),
+        std::string(kItemTypeCommand),   std::string(kItemTypeFileChange), std::string(kItemTypeQuestion),
+        std::string(kItemTypeAgent),     std::string(kItemTypeError)};
+    capabilities["turnStatuses"] = std::vector<std::string>{
+        std::string(kTurnStatusSuccess), std::string(kTurnStatusError), std::string(kTurnStatusCancelled),
+        std::string(kTurnStatusInterrupted), std::string(kTurnStatusRejected)};
+
+    return nlohmann::json{{"protocolVersion", std::string(kProtocolVersion)},
+                          {"lubancodeVersion", std::string(lubancode_version)},
+                          {"platform", std::string(platform)},
+                          {"capabilities", std::move(capabilities)}};
+}
+
+nlohmann::json MakeThreadListResult(const std::vector<nlohmann::json>& entries) {
+    return nlohmann::json{{"threads", entries}};
+}
+
+nlohmann::json MakeThreadStoppedResult() {
+    return nlohmann::json::object();
+}
+
+}  // namespace lubancode::app_server

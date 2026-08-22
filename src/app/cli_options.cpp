@@ -10,6 +10,15 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
     CliOptions& options = parsed.options;
     for (std::size_t i = 1; i < args.size(); ++i) {
         const std::string& arg = args[i];
+        // app-server 子命令:只认第一个位置参数是裸 "app-server" 的情形
+        // (子命令长这样,单子定调)。认到即设旗标;后续参数照旧并进
+        // positional(骨架期子命令不带参数,多给的当普通位置参数走
+        // 旧路,不拦)。--version 这些早退参数出现在它前面时,扫描次序
+        // 头一个生效的旧规矩不变——早退在先就早退,子命令在先就子命令。
+        if (arg == "app-server" && options.positional.empty()) {
+            options.app_server = true;
+            continue;
+        }
         if (arg == "--continue") {
             options.continue_last = true;
             continue;

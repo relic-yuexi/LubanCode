@@ -135,7 +135,14 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
             const lubancode::cli::Theme& theme, const std::string& persona, bool spinner_enabled,
             const lubancode::config::SettingsLocal& settings_local,
             const std::string& model_instructions, const std::string& soul_content) {
-    // M9:技能扫描,理由同 InteractiveLoop——单发模式也该能用技能。
+    // app-server 防守(app-server 单:绝不能把子命令当单发问题送进 AskOnce
+    // ——那会在协议管线上打出一坨终端文案,搅坏 stdout 分帧)。旗标在
+    // ParseCliArgs/RunCli 两层都拦了,这里守最后一道:问题正文恰是裸
+    // "app-server" 就明拒,退 2。
+    if (question == "app-server") {
+        std::cerr << "app-server 是子命令,不是问题;该走协议主循环,不进单发\n";
+        return 2;
+    }    // M9:技能扫描,理由同 InteractiveLoop——单发模式也该能用技能。
     const std::optional<std::string> home_dir = lubancode::config::HomeDir();
     const std::vector<lubancode::tools::SkillMeta> skills =
         lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir, lubancode::platform::OfficialSkillsDir());

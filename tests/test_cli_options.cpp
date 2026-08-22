@@ -74,3 +74,45 @@ TEST_CASE("不认识的参数不是错误:并进位置参数") {
     CHECK(parsed.action == CliAction::Proceed);
     CHECK(parsed.options.positional == "--nonsense 尾巴");
 }
+
+// ---------------------------------------------------------------------------
+// app-server 子命令(app-server 单:ParseCliArgs 正式识别,绝不能把它
+// 送给 one-shot)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("app-server 子命令:认到即设旗标,positional 不收它") {
+    const ParsedCliArgs parsed = ParseCliArgs(Args({"lubancode", "app-server"}));
+    CHECK(parsed.action == CliAction::Proceed); // 旗标路径,RunCli 进协议模式
+    CHECK(parsed.options.app_server);
+    CHECK(parsed.options.positional.empty());
+}
+
+TEST_CASE("app-server 与开关并存:旗标各自落位") {
+    const ParsedCliArgs parsed = ParseCliArgs(Args({"lubancode", "app-server", "--yes"}));
+    CHECK(parsed.options.app_server);
+    CHECK(parsed.options.auto_confirm);
+    CHECK(parsed.options.positional.empty());
+}
+
+TEST_CASE("早退参数在 app-server 之前:早退生效(扫描次序头一个说了算)") {
+    CHECK(ParseCliArgs(Args({"lubancode", "--version", "app-server"})).action == CliAction::PrintVersion);
+    CHECK(ParseCliArgs(Args({"lubancode", "--help", "app-server"})).action == CliAction::PrintHelp);
+}
+
+TEST_CASE("app-server 在早退参数之前:子命令先认到,后面的 --version 不再早退") {
+    const ParsedCliArgs parsed = ParseCliArgs(Args({"lubancode", "app-server", "--version"}));
+    CHECK(parsed.options.app_server);
+    // 早退规矩是"扫描次序头一个生效":--version 跟在子命令后头照样触发
+    // 早退(子命令只是个位置参数,不是模式切换开关),这是旧语义的
+    // 忠实延续——想要 app-server 就别在同一行里掺早退参数。
+    CHECK(parsed.action == CliAction::PrintVersion);
+}
+
+TEST_CASE("裸 app-server 落进位置参数(旧路):解析层就该拦下,不进单发") {
+    // 单词出现在位置参数流里且 positional 还是空的:一律当子命令认。
+    const ParsedCliArgs parsed = ParseCliArgs(Args({"lubancode", "问点啥", "app-server"}));
+    // 前面已有位置参数:app-server 并进 positional(旧语义,问题正文
+    // 里出现这个词不算子命令)。
+    CHECK_FALSE(parsed.options.app_server);
+    CHECK(parsed.options.positional == "问点啥 app-server");
+}

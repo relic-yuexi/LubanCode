@@ -428,6 +428,13 @@ add_library(lubancode_app STATIC
   src/app/tool_runtime.cpp
   src/app/turn_runner.cpp
   src/app/hook_runtime.cpp
+  src/app_server/protocol.hpp
+  src/app_server/schema.cpp
+  src/app_server/framing.cpp
+  src/app_server/outbox.cpp
+  src/app_server/dispatcher.cpp
+  src/app_server/connection.cpp
+  src/app_server/server.cpp
   src/app/commands/prompt_commands.cpp
   src/app/commands/session_commands.cpp
   src/app/commands/settings_commands.cpp
