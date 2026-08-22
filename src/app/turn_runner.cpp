@@ -919,7 +919,8 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                        const std::vector<std::string>& deny_commands,
                        lubancode::tools::AgentTool* completion_agent,
                        lubancode::agent::WorkflowRecorder* recorder, bool silent,
-                       lubancode::runtime::TurnUsageStats* usage_out) {
+                       lubancode::runtime::TurnUsageStats* usage_out,
+                       lubancode::runtime::TurnView* turn_view_out) {
     auto prepared_input = lubancode::cli::PrepareImageInput(user_input);
     if (!prepared_input.has_value()) {
         std::cerr << theme.error << tr("error.prefix") << ImageInputErrorText(prepared_input.error())
@@ -1213,6 +1214,9 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                 break;
         }
         view_collector.FinishTurn(view_status, wall_ms, /*approval_wait=*/0);
+        if (turn_view_out != nullptr) {
+            *turn_view_out = view_collector.view();  // 会话层存档:Crtl+L/resume 重放用
+        }
         // 静默档(查看态回流)不落:屏幕此刻归用户正看的查看帧。
         if (!silent) {
             PrintTurnFooter(theme, is_console, wall_ms, tone);

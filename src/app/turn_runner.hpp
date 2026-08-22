@@ -152,6 +152,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                        lubancode::tools::AgentTool* completion_agent = nullptr,
                        lubancode::agent::WorkflowRecorder* recorder = nullptr,
                        bool silent = false,
-                       lubancode::runtime::TurnUsageStats* usage_out = nullptr);
+                       lubancode::runtime::TurnUsageStats* usage_out = nullptr,
+                       lubancode::runtime::TurnView* turn_view_out = nullptr);
 
 }  // namespace lubancode::app

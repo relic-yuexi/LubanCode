@@ -68,8 +68,10 @@
 #include "app/commands/workflow_commands.hpp"
 #include "workflow/host_executors.hpp"
 #include "app/version.hpp"
+#include "cli/turn_renderer.hpp"
 #include "runtime/command_service.hpp"
 #include "runtime/session_runtime.hpp"
+#include "runtime/turn_view.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/diff.hpp"
@@ -472,6 +474,12 @@ private:
 
     // ---- UI 状态 ----
     std::vector<lubancode::cli::TranscriptItem> transcript;
+    // 每轮的 TurnView 存档(终端回合视觉收束单):Ctrl+L/resume 重放走
+    // 同一颗 TerminalTurnRenderer,与实时画面同源——除 Running 动态外终态
+    // 文本一致(单子验收最后一条)。最近 N 轮(重铺够用即可,长会话不
+    // 无界攒)。
+    std::vector<lubancode::runtime::TurnView> turn_views_;
+    static constexpr std::size_t kMaxArchivedTurnViews = 8;
     // @ 提及文件索引(第三批):按根缓存,根变了重扫(cwd/worktree 切换)。
     std::vector<lubancode::cli::FileMentionEntry> mention_index_;
     std::string mention_index_root_;
@@ -1534,12 +1542,28 @@ bool TerminalSessionController::HandleTranscriptUi(lubancode::cli::UiKeyAction a
             return true;
         }
         case cli::UiKeyAction::RepaintScreen: {
-            // Ctrl+L:终端层已清可视区、作废帧锚点;这里从 transcript 快照重铺
-            // 会话画面(session header 一份 + 最近条目),底栏由终端层随后画
-            // 回。这是 replace screen——可视区已清,不往 scrollback 叠第二份
-            // banner;数据都在,草稿/选择/收件目标在终端层状态里,不受影响。
+            // Ctrl+L:终端层已清可视区、作废帧锚点;这里重铺会话画面(session
+            // header 一份 + 最近轮次),底栏由终端层随后画回。replace screen
+            // ——可视区已清,不往 scrollback 叠第二份 banner。
+            // 有 TurnView 存档时优先走同一颗 TerminalTurnRenderer(与实时
+            // 画面同源,除 Running 动态外终态文本一致);没有(老轮次/纯
+            // slash)退回 transcript 快照。
             PrintBanner(config, theme);
-            PrintRecentItems(count > 0 ? 10 : 0);
+            if (!turn_views_.empty()) {
+                const int repaint_width = cli::DetectConsoleWidth().value_or(80);
+                cli::TurnRenderOptions render_options;
+                render_options.width = repaint_width;
+                render_options.plain = theme.reset.empty();
+                render_options.expanded = transcript_expanded;
+                for (const runtime::TurnView& turn_view : turn_views_) {
+                    const std::vector<std::string> lines = cli::RenderTurnView(turn_view, theme, render_options);
+                    for (const std::string& line : lines) {
+                        std::cout << line << "\n";
+                    }
+                }
+            } else {
+                PrintRecentItems(count > 0 ? 10 : 0);
+            }
             return true;
         }
         case cli::UiKeyAction::PrevUserTurn:
@@ -3479,11 +3503,16 @@ CommandFlow TerminalSessionController::RunUserTurn(const std::string& content, b
     // 不混进这里。
     lubancode::runtime::TurnUsageStats turn_usage;
     const auto turn_started = std::chrono::steady_clock::now();
+    turn_views_.emplace_back();
     const lubancode::app::RunTurnResult turn_result =
         RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
                 lubancode::app::HookRuntime(), spinner_enabled, transcript, todo_state(), &transcript_expanded,
                 settings_local.allow_commands, settings_local.deny_commands, session_agent_tool(),
-                recorder.has_value() ? &*recorder : nullptr, /*silent=*/false, &turn_usage);
+                recorder.has_value() ? &*recorder : nullptr, /*silent=*/false, &turn_usage, &turn_views_.back());
+    // 轮次视图存档封顶(最近 N 轮,重铺够用;不无界攒)。
+    if (turn_views_.size() > kMaxArchivedTurnViews) {
+        turn_views_.erase(turn_views_.begin());
+    }
     if (autosend_failed != nullptr) {
         *autosend_failed = turn_result.status != 0;  // 取走即消费单:失败信号原样递给会话泵
     }
