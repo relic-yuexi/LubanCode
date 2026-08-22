@@ -189,6 +189,9 @@ add_executable(lubancode_tests
   test_runtime_contract.cpp
   # 显示系统剥离单第五步:TurnItem 领域条目 + 中立 diff 行表(与 cli 算法同钉)。
   test_turn_item.cpp
+  # 终端回合视觉收束单:TurnView/TurnCollector(批次分组、状态账、metrics)、
+  # loop step/batch 边界回调、footer 尺子与带字横线、枚举稳定字符串。
+  test_turn_view.cpp
   # 第五步后半:同一假 backend 事件流喂 Terminal/Json 两 sink,同流同账。
   test_event_sinks.cpp
   # 第六步:SessionRuntime(存档账/权限账/thread 身份,脱离终端可单测)。
