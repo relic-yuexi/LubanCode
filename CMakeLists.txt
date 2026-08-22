@@ -216,6 +216,25 @@ add_custom_command(
   COMMENT "lubancode: 生成 embedded_prompts.hpp(提示词模块编译期嵌入)"
   VERBATIM)
 
+# 工具文案(模型可见:工具描述 + schema 参数说明)按语言分档嵌入:
+# src/prompts/tools/<语言码>/<工具名>.md 构建期由 cmake/embed_tool_text.cmake
+# 生成 <build>/generated/embedded_tool_text.hpp({语言, 工具, 键, 正文} 总表),
+# src/tools/tool_text.cpp 首次用时装载成全局查表,回退链 en → zh-CN → C++
+# 兜底原文案。与提示词模块同一套构建期生成的路子。
+set(_lubancode_tool_text_dir "${CMAKE_CURRENT_SOURCE_DIR}/src/prompts/tools")
+set(_lubancode_embedded_tool_text "${CMAKE_BINARY_DIR}/generated/embedded_tool_text.hpp")
+file(GLOB_RECURSE _lubancode_tool_text_modules CONFIGURE_DEPENDS
+  "${_lubancode_tool_text_dir}/*/*.md")
+add_custom_command(
+  OUTPUT "${_lubancode_embedded_tool_text}"
+  COMMAND ${CMAKE_COMMAND}
+          -DTOOLS_DIR=${_lubancode_tool_text_dir}
+          -DOUTPUT=${_lubancode_embedded_tool_text}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_tool_text.cmake
+  DEPENDS ${_lubancode_tool_text_modules} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_tool_text.cmake
+  COMMENT "lubancode: 生成 embedded_tool_text.hpp(工具文案按语言分档嵌入)"
+  VERBATIM)
+
 # 常见 provider / 模型目录也随 exe 带一份快照。运行时可从 GitHub 更新，
 # 断网或缓存损坏时仍回退这份构建时内容。
 set(_lubancode_provider_catalog "${CMAKE_CURRENT_SOURCE_DIR}/catalog/providers.json")
@@ -282,6 +301,7 @@ add_library(lubancode_core STATIC
   src/config/project_instructions.cpp
   src/config/skill_store.cpp
   src/tools/registry.cpp
+  src/tools/tool_text.cpp
   src/tools/read_file.cpp
   src/tools/run_command.cpp
   src/tools/background_tasks.cpp
@@ -337,6 +357,7 @@ add_library(lubancode_core STATIC
   src/ptc/bench.cpp
   src/agent/prompt_assembler.cpp
   "${_lubancode_embedded_prompts}"
+  "${_lubancode_embedded_tool_text}"
   "${_lubancode_embedded_provider_catalog}"
   src/agent/context.cpp
   src/agent/context_events.cpp

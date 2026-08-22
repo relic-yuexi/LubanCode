@@ -544,6 +544,17 @@ public:
             on_event(event);
         };
         auto result = inner_.send_stream(request, wrapped, cancel);
+        // 硬超时触发(cpr 并发挂死单):错误文案带 request_hard_timeout_secs
+        // 字样的,单独补一行埋点——这面墙落锤是稀罕事,真落了多半是本机
+        // 网络(代理/TUN 截胡回环)在作祟,现场要一眼认出来,好去对照
+        // docs/troubleshooting 的排查路数。
+        if (!result.has_value() &&
+            result.error().message.find("request_hard_timeout_secs") != std::string::npos) {
+            LogLine("hard_timeout seq=" + std::to_string(seq) +
+                    " elapsed_ms=" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           std::chrono::steady_clock::now() - request_started)
+                                           .count()));
+        }
         if (result.has_value()) {
             LogLine("stream_end seq=" + std::to_string(seq) + " ok events=" + std::to_string(events_total) +
                     " text_bytes=" + std::to_string(text_bytes) +
@@ -603,15 +614,48 @@ AgentTool::AgentTool(api::Backend& backend, ToolRegistry& sub_registry, std::str
       skills_segment_(std::move(skills_segment)) {}
 
 AgentTool::~AgentTool() {
+    // 退出兜底(cpr 并发挂死单):先广播取消,再给每只后台线程一枚有界
+    // join 窗口。旧代码是无界 join——子代理那枚请求若正卡在 cpr::Post 里
+    // (挂死绝境,连接/空闲两道闸都不触发),析构就跟着冻死,/exit 只能靠
+    // 外面杀进程。请求级硬墙钟(request_hard_timeout_secs)落进 client 之后,
+    // 正常现场线程都会在墙内回来;这里仍留一道保命:join 等不到的线程
+    // detach 掉放它走,绝不许一只挂死的后台请求把整个进程退出扣住。台账
+    // 已是终态(或由看门狗强制收账),detach 不丢账;线程闭包自持
+    // TaskRecord 的 shared_ptr,晚归也不悬垂。
     {
         std::lock_guard<std::mutex> lock(tasks_mutex_);
         for (const auto& task : tasks_) {
             task->cancel.store(true, std::memory_order_release);
         }
     }
+    // 有界 join 的窗口:比默认硬墙钟(300s)短得多——退出等不了那么久。
+    // std::thread 没有 try_join,只能短睡轮询探台账:每只线程最多等 10s,
+    // 台账全进终态就收(后台线程收尾最后一格是 finalized 置位 + watchdog
+    // join,多留一点余量);等不到的 detach 放走,真凶在请求侧,不在这边
+    // 干等。逐只线程各给一段窗口,不是全局一锅分。
     for (auto& thread : task_threads_) {
-        if (thread.joinable()) {
+        if (!thread.joinable()) {
+            continue;
+        }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        bool settled = false;
+        while (std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            {
+                std::lock_guard<std::mutex> lock(tasks_mutex_);
+                settled = std::none_of(tasks_.begin(), tasks_.end(), [](const auto& task) {
+                    return task->snapshot.state == AgentTaskState::Running;
+                });
+            }
+            if (settled) {
+                break;
+            }
+        }
+        if (settled) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));  // 给收尾尾格一点余量
             thread.join();
+        } else {
+            thread.detach();  // 挂死绝境:放线程走,不冻退出
         }
     }
 }

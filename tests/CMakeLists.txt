@@ -78,6 +78,9 @@ add_executable(lubancode_tests
   test_lsp_tool.cpp
   test_todo_tool.cpp
   test_tool_search.cpp
+  # 工具文案按语言分档(模型可见文字抽离 C++):三级回退、缺省零变化、
+  # en 生效、语言切换即时。
+  test_tool_text.cpp
   test_todo_render.cpp
   test_divider.cpp
   test_format_utils.cpp
@@ -211,6 +214,14 @@ if(WIN32)
 endif()
 
 add_test(NAME lubancode_tests COMMAND lubancode_tests)
+
+# 工具文案语言档端到端驱动(不进 ctest,验收手动跑):
+#   tool_text_lang_driver <zh-CN|en>
+# 把试点工具的模型可见文案按所选语言打到 stdout,供与迁移前原文逐字节
+# 比对(缺省 zh-CN)与英文档生效验证(en)。
+add_executable(tool_text_lang_driver EXCLUDE_FROM_ALL tool_text_lang_driver.cpp)
+target_link_libraries(tool_text_lang_driver PRIVATE lubancode_core)
+target_compile_features(tool_text_lang_driver PRIVATE cxx_std_23)
 
 # DeepSeek 真机 e2e(前缀缓存守恒单):opt-in,不进 ctest——没设
 # DEEPSEEK_API_KEY 自己就跳过(exit 0),要跑先导钥匙:
