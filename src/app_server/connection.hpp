@@ -49,6 +49,12 @@ public:
     // outbox.hpp 的 EventMustKeep——这里按 method 自动分型,调用方不用记。
     void EmitEvent(std::string_view method, const nlohmann::json& params);
 
+    // 反向请求响应的落点(阶段 2):装配层给,HandleResponse 的配对走
+    // 它。返回值约定见 DispatchContext::resolve_interaction。
+    void SetInteractionResolver(std::function<std::string(const IncomingResponse&)> resolver) {
+        resolve_interaction_ = std::move(resolver);
+    }
+
     BoundedOutbox& outbox() { return outbox_; }
     const std::shared_ptr<Dispatcher>& dispatcher() const { return dispatcher_; }
 
@@ -65,6 +71,7 @@ private:
     ChunkReader reader_;
     BoundedOutbox outbox_;
     LineFramer framer_;
+    std::function<std::string(const IncomingResponse&)> resolve_interaction_;
     std::atomic<bool> closed_{false};
 };
 
