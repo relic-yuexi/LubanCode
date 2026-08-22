@@ -193,7 +193,10 @@ private:
     };
 
     // 单节点全生命周期(含 retry)。返回 outcome(success/error/empty/skipped)。
-    std::string RunNode(const ExecutionContext& ctx, const WorkflowNode& node);
+    // committed_output 可空:非空时把落账产物当场交还(map 并发逐项跑 body,
+    // store 的 body 键是共用垫,回头 GetOutput 会拿到别人的那份)。
+    std::string RunNode(const ExecutionContext& ctx, const WorkflowNode& node,
+                        nlohmann::json* committed_output = nullptr);
     // 并行分支调度 + 汇合(第 3 批)。返回 join 后的 outcome
     // (success/error/skipped/cancelled);分支账进 store:<id>.outputs 按
     // 定义顺序、<id>.unavailable 记缺失。

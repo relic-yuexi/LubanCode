@@ -1,13 +1,17 @@
 // app-server 服务装配:把 Dispatcher、StdioConnection 与真家伙接起来。
-// 骨架期(thread runtime)接线的方法面:
+// 阶段 3/4 接线的方法面:
 //   - initialize/initialized/shutdown/exit(握手);
 //   - thread/start、thread/list、thread/stop(会话账,复用 SessionStore);
-//   - turn/start(假 backend 一整回合,事件账走 outbox);
-// 留位方法(resume/read/steer/interrupt/model/list/config/read)回
+//   - thread/archive、thread/unarchive、thread/delete(P9 收尾:走
+//     runtime::SessionCommandService,server 不另写扫盘路);
+//   - turn/start(图片输入 + 文本;工具条目带中立 diff 行表;usage/
+//     context 进度事件);
+//   - turn/interrupt(阶段 2);
+//   - workflow/query(wf 线的 run 快照 + 增量事件出口);
+// 留位方法(resume/read/steer/model/list/config/read/workflow/list)回
 // kErrMethodNotFound——名字认识、执行链没有。
 //
-// 审批反向请求(permission/request、user/ask)与打断:协议位在
-// protocol.hpp/schema.hpp 立住,执行链等 Broker(另一条线),本层不碰。
+// 审批反向请求(permission/request、user/ask)与打断:阶段 2 已接线。
 #pragma once
 
 #include <atomic>
@@ -30,6 +34,7 @@
 #include "app_server/interaction.hpp"
 #include "app_server/outbox.hpp"
 #include "app/version.hpp"
+#include "runtime/session_command_service.hpp"
 #include "tools/registry.hpp"
 
 namespace lubancode::app_server {
@@ -71,6 +76,13 @@ struct ServerOptions {
     std::string sessions_dir;     // 会话档目录(空 = 不落盘,纯内存跑)
     std::string cwd;              // 服务进程当前目录(事件里回给前端)
     std::string lubancode_version = std::string(app::kVersion);
+    // 会话档 meta 真值(阶段 3 冻结项:thread/start 的 meta 不再写占位)。
+    // wire 是 "anthropic"/"responses"/"chat",model 是配置里的模型名;
+    // 空串照写(纯内存/测试没有配置可读)。
+    std::string session_wire;
+    std::string session_model;
+    // workflow run 账根目录(workflow/query 用;空 = 该法子报没有)。
+    std::string workflow_runs_dir;
     // 出站队列容量(事件账的有界上限)。
     std::size_t outbox_capacity = 4096;
     // 审批悬停时限(毫秒)。0 = 不限(悬到断线/打断)。悬停不偷跑:时限
@@ -114,18 +126,36 @@ public:
 
     // thread/start 的处理体(单测直调)。
     nlohmann::json HandleThreadStart(const nlohmann::json& params, std::string& out_error_code);
-    // thread/list 的处理体。
-    nlohmann::json HandleThreadList();
+    // thread/list 的处理体(查询参数透传 SessionCommandService)。
+    nlohmann::json HandleThreadList(const nlohmann::json& params = nlohmann::json::object());
     // thread/stop 的处理体。
     nlohmann::json HandleThreadStop(const std::string& thread_id, std::string& out_error_code);
+    // thread/archive|unarchive|delete 的处理体(SessionCommandService 执行)。
+    // accepted=false 时 out_error_code/out_error_message 有值(稳定码,
+    // SessionCommandService 的错误码表)。out_state:archive 给
+    // "archived",unarchive 给 "active",delete 给空。
+    nlohmann::json HandleThreadLifecycle(const std::string& method, const std::string& thread_id,
+                                         const nlohmann::json& params, std::string& out_error_code,
+                                         std::string& out_error_message, std::string& out_state);
+    // workflow/query 的处理体:快照 + lastSeq+1 起的增量事件(事件走
+    // 返回值,不经 connection——协议 handler 拿去经 emit_event 出)。
+    // 错误:out_error_code 稳定码("not_found"/"no_workflow_dir")。
+    struct WorkflowQueryResult {
+        nlohmann::json snapshot;
+        std::vector<nlohmann::json> events; // 每条已是协议事件形状(method/params 内层)
+    };
+    WorkflowQueryResult HandleWorkflowQuery(const std::string& run_id, std::uint64_t last_seq,
+                                             std::string& out_error_code,
+                                             std::string& out_error_message);
     // turn/start 的处理体:同步跑完一整回合(假 backend 一趟即终),
-    // 事件从 emit 出去。返回 turn/completed 的 params。
+    // 事件从 emit 出去。返回 turn/completed 的 params。images 是
+    // CheckTurnStartParams 折出来的图片输入(空 = 纯文本)。
     nlohmann::json HandleTurnStart(const std::string& thread_id, const std::string& text,
-                                   std::string& out_error_code);
+                                   const std::vector<nlohmann::json>& images, std::string& out_error_code);
     // turn/start 的受理体(协议路径):立工作线程跑整回合,立即回
     // {threadId, turnId};终态走 turn/completed 事件。
     nlohmann::json AcceptTurnStart(const std::string& thread_id, const std::string& text,
-                                   std::string& out_error_code);
+                                   const std::vector<nlohmann::json>& images, std::string& out_error_code);
     // turn/interrupt 的处理体:置打断旗。turn_id 空 = 该 thread 当前在跑
     // 的回合;回合不在跑(收口了/没这回合)报 stale,不追旧账。
     // 返回空串 = 受理;否则 out_error_code 记原因("stale" = 迟到)。
@@ -142,7 +172,8 @@ private:
     void RegisterMethods();
     // 整回合驱动(工作线程体):审批/ask_user 悬停、打断旗、终态分型。
     void RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, const std::string& thread_id,
-                             const std::string& turn_id, const std::string& text);
+                             const std::string& turn_id, const std::string& text,
+                             const std::vector<nlohmann::json>& images);
 
     // 找一场 thread 的家当(锁内拷 shared_ptr)。
     std::shared_ptr<ThreadRecord> FindThread(const std::string& thread_id);
@@ -152,6 +183,9 @@ private:
     RegistryFactory registry_factory_;
     std::shared_ptr<Dispatcher> dispatcher_;
     std::unique_ptr<StdioConnection> connection_;
+    // P9 收尾:thread/list|archive|unarchive|delete 的执行体。server 不
+    // 另写扫盘路,全从这里走(sessions_dir 空 = 没建,搬删一律拒)。
+    std::unique_ptr<runtime::SessionCommandService> session_commands_;
 
     std::mutex threads_mutex_;
     std::map<std::string, std::shared_ptr<ThreadRecord>> threads_;

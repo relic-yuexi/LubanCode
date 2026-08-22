@@ -3,12 +3,12 @@
 // (带 id,二选一带 result 或 error)。坏报文折不成,给出稳定错误码与
 // 一句人话,交回连接层去回错、退线。
 //
-// 校验只查信封与各方法的参数表,不执行任何业务。jsonrpc:"2.0" 字段的
-// 去留未定(schema 冻结时一次定死):入站一律不校验(带不带都认),
-// 出站按 protocol.hpp 的 kEmitJsonRpcField 开关决定——两边不许各说各话。
+// 校验只查信封与各方法的参数表,不执行任何业务。jsonrpc:"2.0" 字段
+// 已冻结(阶段 3):入站一律不校验(带不带都认),出站不带
+// (kEmitJsonRpcField = false,翻它 = 协议破坏,须 bump 版本)。
 //
 // 测试不许把整条黄金报文写死成字符串比对:所有断言都 parse 之后逐字段
-// 查,给 jsonrpc 字段的去留留活口。
+// 查,给字段增减留活口。
 #pragma once
 
 #include <cstdint>
@@ -122,7 +122,11 @@ struct ThreadStartParams {
 
 struct TurnStartParams {
     std::string thread_id;   // 必填
-    std::string text;        // 必填(图片输入留位:schema 冻结时一并定)
+    std::string text;        // 必填(空串不合法;只发图片也得带一句说明文字)
+    // 图片输入(阶段 3 冻结):images 数组,元素形状对齐 api::ImageBlock——
+    // mediaType/data(不带 data URL 前缀的 base64)/可选 filename/width/
+    // height。不传或空数组 = 纯文本。
+    std::vector<nlohmann::json> images;
 };
 
 // 参数校验结果。ok=false 时 code/message 直接进错误响应。
@@ -141,12 +145,21 @@ ParamsCheck CheckInitializeParams(const nlohmann::json& params);
 // thread/start:无必填字段(cwd 可选)。
 ParamsCheck CheckThreadStartParams(const nlohmann::json& params);
 
-// turn/start:threadId(字符串)、text(字符串)两个必填。
+// turn/start:threadId(字符串)、text(字符串)两个必填;images 数组
+// 可选(元素须是对象,mediaType/data 是字符串——宽松校验,深校验归执行链)。
 ParamsCheck CheckTurnStartParams(const nlohmann::json& params, std::string& out_thread_id,
-                                 std::string& out_text);
+                                 std::string& out_text, std::vector<nlohmann::json>& out_images);
 
 // thread/stop:threadId(字符串)必填。
 ParamsCheck CheckThreadStopParams(const nlohmann::json& params, std::string& out_thread_id);
+
+// thread/archive|unarchive|delete 共用:threadId(字符串)必填(delete 另
+// 带 confirm 布尔,执行链查)。
+ParamsCheck CheckThreadLifecycleParams(const nlohmann::json& params, std::string& out_thread_id);
+
+// workflow/query:runId(字符串)必填;lastSeq 可选(0 = 全量)。
+ParamsCheck CheckWorkflowQueryParams(const nlohmann::json& params, std::string& out_run_id,
+                                     std::uint64_t& out_last_seq);
 
 // turn/interrupt:threadId(字符串)必填;turnId 可选(空 = 打断该 thread
 // 当前在跑的回合)。
@@ -190,9 +203,20 @@ nlohmann::json MakeItemCompletedParams(const std::string& thread_id, const std::
                                        const std::string& item_id, nlohmann::json payload);
 
 // queue/overflow 的 params。dropped 是这次丢掉的条目数;coalesced 是
-// 靠合并省下的条目数(骨架期恒 0)。
+// 靠合并省下的条目数(阶段 3 起真算)。
 nlohmann::json MakeQueueOverflowParams(const std::string& thread_id, const std::string& turn_id,
                                        std::uint64_t dropped, std::uint64_t coalesced);
+
+// turn/usage 的 params。usage 是五项 camelCase(与 turn/completed 同形)。
+nlohmann::json MakeTurnUsageParams(const std::string& thread_id, const std::string& turn_id,
+                                   const nlohmann::json& usage, const std::string& model);
+
+// turn/context 的 params(上下文压力通报,字段见 ContextPressure)。
+nlohmann::json MakeTurnContextParams(const std::string& thread_id, const std::string& turn_id,
+                                     const nlohmann::json& context);
+
+// thread/archive|unarchive|delete 的结果。
+nlohmann::json MakeThreadLifecycleResult(const std::string& thread_id, const std::string& state);
 
 // ---------------------------------------------------------------------------
 // initialize 结果(能力表)

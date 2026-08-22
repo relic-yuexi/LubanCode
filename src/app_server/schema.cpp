@@ -219,7 +219,7 @@ ParamsCheck RequireString(const nlohmann::json& params, std::string_view key, st
 }  // namespace
 
 ParamsCheck CheckTurnStartParams(const nlohmann::json& params, std::string& out_thread_id,
-                                 std::string& out_text) {
+                                 std::string& out_text, std::vector<nlohmann::json>& out_images) {
     const ParamsCheck base = CheckParamsIsObject(params, kMethodTurnStart);
     if (!base.ok) {
         return base;
@@ -232,6 +232,23 @@ ParamsCheck CheckTurnStartParams(const nlohmann::json& params, std::string& out_
     if (!check.ok) {
         return check;
     }
+    // images 可选:给了就必须是数组,元素须是对象且 mediaType/data 是
+    // 字符串(宽松;宽高/filename 不在校验层卡,执行链自管)。
+    if (params.contains("images") && !params["images"].is_null()) {
+        if (!params["images"].is_array()) {
+            return ParamsCheck{false, kErrInvalidParams,
+                               std::string(kMethodTurnStart) + ": images 必须是数组"};
+        }
+        for (const nlohmann::json& image : params["images"]) {
+            if (!image.is_object() || !image.contains("mediaType") || !image["mediaType"].is_string() ||
+                !image.contains("data") || !image["data"].is_string()) {
+                return ParamsCheck{false, kErrInvalidParams,
+                                   std::string(kMethodTurnStart) +
+                                       ": images 元素须是带 mediaType/data 字符串的对象"};
+            }
+            out_images.push_back(image);
+        }
+    }
     return ParamsCheck{};
 }
 
@@ -241,6 +258,43 @@ ParamsCheck CheckThreadStopParams(const nlohmann::json& params, std::string& out
         return base;
     }
     return RequireString(params, "threadId", kMethodThreadStop, out_thread_id);
+}
+
+ParamsCheck CheckThreadLifecycleParams(const nlohmann::json& params, std::string& out_thread_id) {
+    const ParamsCheck base = CheckParamsIsObject(params, kMethodThreadArchive);
+    if (!base.ok) {
+        return base;
+    }
+    return RequireString(params, "threadId", kMethodThreadArchive, out_thread_id);
+}
+
+ParamsCheck CheckWorkflowQueryParams(const nlohmann::json& params, std::string& out_run_id,
+                                     std::uint64_t& out_last_seq) {
+    out_last_seq = 0; // 缺省全量;调用方传入的旧值不沿用
+    const ParamsCheck base = CheckParamsIsObject(params, kMethodWorkflowQuery);
+    if (!base.ok) {
+        return base;
+    }
+    const ParamsCheck check = RequireString(params, "runId", kMethodWorkflowQuery, out_run_id);
+    if (!check.ok) {
+        return check;
+    }
+    // lastSeq 可选:给了须是非负整数(正数字面量在 nlohmann 里是
+    // number_integer,显式 unsigned 才是 number_unsigned——两种都认,
+    // 负数拒);缺省 0 = 全量事件。
+    if (params.contains("lastSeq") && !params["lastSeq"].is_null()) {
+        if (!params["lastSeq"].is_number_integer()) {
+            return ParamsCheck{false, kErrInvalidParams,
+                               std::string(kMethodWorkflowQuery) + ": lastSeq 必须是非负整数"};
+        }
+        const std::int64_t value = params["lastSeq"].get<std::int64_t>();
+        if (value < 0) {
+            return ParamsCheck{false, kErrInvalidParams,
+                               std::string(kMethodWorkflowQuery) + ": lastSeq 必须是非负整数"};
+        }
+        out_last_seq = static_cast<std::uint64_t>(value);
+    }
+    return ParamsCheck{};
 }
 
 ParamsCheck CheckTurnInterruptParams(const nlohmann::json& params, std::string& out_thread_id,
@@ -333,6 +387,28 @@ nlohmann::json MakeQueueOverflowParams(const std::string& thread_id, const std::
                           {"coalesced", coalesced}};
 }
 
+nlohmann::json MakeTurnUsageParams(const std::string& thread_id, const std::string& turn_id,
+                                   const nlohmann::json& usage, const std::string& model) {
+    nlohmann::json params = nlohmann::json{{"threadId", thread_id}, {"turnId", turn_id}, {"usage", usage}};
+    if (!model.empty()) {
+        params["model"] = model;
+    }
+    return params;
+}
+
+nlohmann::json MakeTurnContextParams(const std::string& thread_id, const std::string& turn_id,
+                                     const nlohmann::json& context) {
+    return nlohmann::json{{"threadId", thread_id}, {"turnId", turn_id}, {"context", context}};
+}
+
+nlohmann::json MakeThreadLifecycleResult(const std::string& thread_id, const std::string& state) {
+    nlohmann::json result = nlohmann::json{{"threadId", thread_id}};
+    if (!state.empty()) {
+        result["state"] = state;
+    }
+    return result;
+}
+
 // ---------------------------------------------------------------------------
 // initialize / thread/list 结果
 // ---------------------------------------------------------------------------
@@ -342,12 +418,16 @@ nlohmann::json MakeInitializeResult(std::string_view lubancode_version, std::str
     // 骨架期已接线的方法面如实报;留位的名字也列在 pending 里,前端能分清
     // "服务器认识但不接"与"压根没有"。
     capabilities["methods"] = std::vector<std::string>{
-        std::string(kMethodInitialize), std::string(kMethodInitialized), std::string(kMethodShutdown),
-        std::string(kMethodThreadStart), std::string(kMethodThreadList), std::string(kMethodThreadStop),
-        std::string(kMethodTurnStart), std::string(kMethodTurnInterrupt)};
+        std::string(kMethodInitialize),      std::string(kMethodInitialized),
+        std::string(kMethodShutdown),        std::string(kMethodThreadStart),
+        std::string(kMethodThreadList),      std::string(kMethodThreadStop),
+        std::string(kMethodThreadArchive),   std::string(kMethodThreadUnarchive),
+        std::string(kMethodThreadDelete),    std::string(kMethodTurnStart),
+        std::string(kMethodTurnInterrupt),   std::string(kMethodWorkflowQuery)};
     capabilities["pending"] = std::vector<std::string>{
-        std::string(kMethodThreadResume), std::string(kMethodThreadRead), std::string(kMethodTurnSteer),
-        std::string(kMethodModelList), std::string(kMethodConfigRead)};
+        std::string(kMethodThreadResume),    std::string(kMethodThreadRead),
+        std::string(kMethodTurnSteer),       std::string(kMethodModelList),
+        std::string(kMethodConfigRead),      std::string(kMethodWorkflowList)};
     // 审批与 ask_user 的反向请求:协议位占住,执行链等 Broker(另一条线)。
     capabilities["serverRequests"] = std::vector<std::string>{std::string(kMethodPermissionRequest),
                                                               std::string(kMethodUserAsk)};

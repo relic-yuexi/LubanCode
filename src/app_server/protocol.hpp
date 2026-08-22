@@ -20,13 +20,18 @@ namespace lubancode::app_server {
 // 往后任何报文形状变更必须 bump,前端拿它对表。
 inline constexpr std::string_view kProtocolVersion = "1.0";
 
-// jsonrpc:"2.0" 字段去留未定(单子明说 schema 冻结时一次定死):
-//   - 出站:按这个开关决定要不要带 "jsonrpc":"2.0";
-//   - 入站:一律不校验(带不带都认),收发两头不许各说各话的底线先立住。
-// 测试不许把整条黄金报文写死成字符串比对——断言一律 parse 后查字段,
-// 给这个开关留活口。
+// jsonrpc:"2.0" 字段去留已冻结(阶段 3,schema 定案):
+//   - 出站:不带。方法名/params/id 的形状自足,少一个字段少一分冗余;
+//   - 入站:一律不校验(带不带都认)。
+// 改这个开关 = 协议破坏,须 bump kProtocolVersion 并出兼容单,不许悄悄翻。
 inline constexpr bool kEmitJsonRpcField = false;
 inline constexpr std::string_view kJsonRpcVersion = "2.0";
+
+// 事件显式 seq 字段(阶段 3 冻结):每条事件(params 里)带 "seq"——
+// runtime::ProcessIdAuthority 的 NextSeq 发的进程内单调号,由连接层的
+// 出站口统一盖(一处盖,不许散着抄)。前端凭它排序、查漏;与事件的
+// 到达次序解耦。响应(result/error)按 id 配对,不带 seq。
+inline constexpr const char* kSeqField = "seq";
 
 // ---------------------------------------------------------------------------
 // 错误码(稳定,冻结前不许改号)
@@ -55,12 +60,19 @@ inline constexpr std::string_view kMethodInitialized = "initialized"; // 通知
 inline constexpr std::string_view kMethodShutdown = "shutdown";
 inline constexpr std::string_view kMethodExit = "exit"; // 通知
 
-// thread:会话的创建、列举、停场。resume/read 骨架期不接,名字先留。
+// thread:会话的创建、列举、停场、搬删。resume/read 留位,名字先留。
 inline constexpr std::string_view kMethodThreadStart = "thread/start";
 inline constexpr std::string_view kMethodThreadStop = "thread/stop";
 inline constexpr std::string_view kMethodThreadList = "thread/list";
+inline constexpr std::string_view kMethodThreadArchive = "thread/archive";
+inline constexpr std::string_view kMethodThreadUnarchive = "thread/unarchive";
+inline constexpr std::string_view kMethodThreadDelete = "thread/delete";
 inline constexpr std::string_view kMethodThreadResume = "thread/resume"; // 留位:存档恢复单
 inline constexpr std::string_view kMethodThreadRead = "thread/read";    // 留位:只读详情
+
+// workflow:run 账的只读查询(阶段 4:wf 线的事件出口,快照 + 增量)。
+inline constexpr std::string_view kMethodWorkflowList = "workflow/list";   // 留位
+inline constexpr std::string_view kMethodWorkflowQuery = "workflow/query"; // run 快照 + 增量事件
 
 // turn:一轮问答。steer 骨架期不接(SteeringQueue 另一张单在改),interrupt
 // 阶段 2 接线。
@@ -135,8 +147,22 @@ inline constexpr std::string_view kTurnStatusRejected = "rejected";       // 留
 // ---------------------------------------------------------------------------
 
 // 有界事件队列溢出时的明确通报(不许悄悄丢):params 带 dropped(这次
-// 丢掉的条目数)与 coalesced(骨架期恒 0——可合并 delta 的合并策略是
-// 后续阶段的活,先把通报的类型立住)。终态与审批不许走这条路丢。
+// 丢掉的条目数)与 coalesced(靠合并省下的条目数,阶段 3 起 delta 合并
+// 真发生,不再恒 0)。终态与审批不许走这条路丢。
 inline constexpr std::string_view kEventQueueOverflow = "queue/overflow";
+
+// ---------------------------------------------------------------------------
+// usage / context 事件(阶段 3:进度账)
+// ---------------------------------------------------------------------------
+
+// 每次到模型的请求收尾时发一次:params 带 usage 五项(camelCase,与
+// turn/completed 的 usage 同形)与 model。一回合可能多次(工具往返)。
+inline constexpr std::string_view kEventTurnUsage = "turn/usage";
+
+// 上下文压力通报(PreRequest 评估 / hard trim 之后):params 带 phase
+// ("pre_request"/"after_hard_trim")、projectedTokens、windowTokens、
+// projectedOverflow、hardTrimmedTurns、hardDroppedMessages、
+// hardTruncatedResults。前端画上下文水位条吃这个。
+inline constexpr std::string_view kEventTurnContext = "turn/context";
 
 }  // namespace lubancode::app_server

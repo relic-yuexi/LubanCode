@@ -13,7 +13,9 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <future>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -21,8 +23,12 @@
 #include "agent/session_catalog.hpp"
 #include "runtime/id_authority.hpp"
 #include "runtime/session_command_service.hpp"
+#include "runtime/turn_item.hpp"
 #include "tools/ask_user.hpp"
+#include "tools/path_utils.hpp"
 #include "tools/registry.hpp"
+#include "workflow/frontend.hpp"
+#include "workflow/journal.hpp"
 
 namespace lubancode::app_server {
 
@@ -39,6 +45,56 @@ nlohmann::json UsageToJson(const api::Usage& usage) {
                           {"cacheReadTokens", usage.cache_read_tokens},
                           {"cacheCreationTokens", usage.cache_creation_tokens},
                           {"outputReasoningTokens", usage.output_reasoning_tokens}};
+}
+
+// runtime::DiffTable -> 协议 JSON(阶段 3:diff 行表直转,零翻译——
+// 行就是行,渲染归前端)。字段名 camelCase,kind 是 "context"/"del"/
+// "add"(与 runtime::DiffRowKind 一一对应)。
+nlohmann::json DiffTableToJson(const runtime::DiffTable& table) {
+    nlohmann::json rows = nlohmann::json::array();
+    for (const runtime::DiffRow& row : table.rows) {
+        rows.push_back(nlohmann::json{
+            {"kind", row.kind == runtime::DiffRowKind::Context
+                         ? "context"
+                         : (row.kind == runtime::DiffRowKind::Del ? "del" : "add")},
+            {"text", row.text},
+            {"oldNo", row.old_no},
+            {"newNo", row.new_no},
+        });
+    }
+    nlohmann::json diff;
+    diff["path"] = table.path;
+    diff["located"] = table.located;
+    diff["replacedCount"] = table.replaced_count;
+    diff["oldExists"] = table.old_exists;
+    diff["addedLines"] = table.added_lines();
+    diff["removedLines"] = table.removed_lines();
+    diff["rows"] = std::move(rows);
+    return diff;
+}
+
+// workflow 的 journal 事件 -> 协议事件形状(阶段 4:wf 线的事件出口)。
+// wf 事件没有 turn/item 语义,不硬塞三层账;method 用专属的
+// workflow/event。两枚序号各归各:
+//   - eventSeq:journal 的 run 内单调号(快照的 lastSeq 对的就是它,
+//     前端增量补账用它筛);
+//   - seq:连接层统一盖的协议事件序号(所有事件都有,见 connection.cpp)。
+nlohmann::json WorkflowEventToProtocol(const workflow::JournalEvent& event, const std::string& run_id) {
+    nlohmann::json params;
+    params["runId"] = run_id;
+    params["eventSeq"] = event.seq;
+    params["type"] = event.type;
+    params["workflowId"] = event.workflow_id;
+    if (!event.node_id.empty()) {
+        params["nodeId"] = event.node_id;
+    }
+    if (event.attempt != 0) {
+        params["attempt"] = event.attempt;
+    }
+    if (!event.data.is_null() && !event.data.empty()) {
+        params["data"] = event.data;
+    }
+    return nlohmann::json{{"method", "workflow/event"}, {"params", std::move(params)}};
 }
 
 // 一回合聚合的 usage(各请求求和)。
@@ -74,6 +130,10 @@ Server::Server(ServerOptions options, BackendFactory backend_factory, RegistryFa
     dispatcher_ = std::make_shared<Dispatcher>();
     dispatcher_->SetInitializeResultFactory(
         [this]() { return MakeInitializeResult(options_.lubancode_version, PlatformId()); });
+    // P9 收尾:会话查询/搬删的执行体(sessions_dir 空 = 没建,list 给空表)。
+    if (!sessions_dir_.empty()) {
+        session_commands_ = std::make_unique<runtime::SessionCommandService>(sessions_dir_);
+    }
     RegisterMethods();
 }
 
@@ -113,10 +173,99 @@ void Server::RegisterMethods() {
             return MakeResult(request.id, result);
         });
 
-    // thread/list
+    // thread/list(P9:查询参数透传 SessionCommandService,server 不另写
+    // 扫盘路。旧响应形状 {threads:[...]} 不变,新加 total)。
     dispatcher_->RegisterMethod(
         kMethodThreadList, [this](const IncomingRequest& request, DispatchContext&)
-                             -> std::optional<nlohmann::json> { return MakeResult(request.id, HandleThreadList()); });
+                             -> std::optional<nlohmann::json> {
+            const ParamsCheck base = CheckParamsIsObject(request.params, kMethodThreadList);
+            if (!base.ok) {
+                return MakeError(request.id, base.code, base.message);
+            }
+            // 协议缺省与旧口径对齐:全量 scope + active + updated;不截
+            // (SessionCommandService 缺省 limit=20 是终端 picker 的口径,
+            // 协议侧默认给全量,前端自己分页)。
+            nlohmann::json query = request.params;
+            if (!query.contains("scope")) {
+                query["scope"] = "all";
+            }
+            if (!query.contains("limit")) {
+                query["limit"] = 1000000; // 不截
+            }
+            return MakeResult(request.id, HandleThreadList(query));
+        });
+
+    // thread/archive|unarchive|delete(P9 收尾:SessionCommandService 执行,
+    // 按命令分家——server 只折协议错误码)。
+    const auto lifecycle_handler =
+        [this](std::string_view method) -> MethodHandler {
+        return [this, method](const IncomingRequest& request, DispatchContext& context)
+            -> std::optional<nlohmann::json> {
+            std::string thread_id;
+            const ParamsCheck base = CheckThreadLifecycleParams(request.params, thread_id);
+            if (!base.ok) {
+                return MakeError(request.id, base.code, base.message);
+            }
+            std::string error_code;
+            std::string error_message;
+            std::string state;
+            const nlohmann::json result =
+                HandleThreadLifecycle(std::string(method), thread_id, request.params, error_code,
+                                      error_message, state);
+            if (!error_code.empty()) {
+                // delete 没带 confirm 是"要确认"不是失败:kErrInvalidParams
+                // 的口径太重,给参数错 + data 带 required=confirm,前端好
+                // 画确认框。其余(not_found/io_error)按 invalid params 折
+                // ——协议 v1 的错误码段还没有会话搬删专属码,拿 data 带
+                // 稳定串补。
+                return MakeError(request.id, kErrInvalidParams, error_message.empty()
+                                                                   ? std::string(method) + " 失败: " + error_code
+                                                                   : error_message,
+                                 nlohmann::json{{"reason", error_code}});
+            }
+            if (method == kMethodThreadDelete) {
+                context.emit_event("thread/deleted",
+                                   nlohmann::json{{"threadId", thread_id}}, true);
+            } else {
+                context.emit_event("thread/updated",
+                                   nlohmann::json{{"threadId", thread_id}, {"state", state}}, true);
+            }
+            return MakeResult(request.id, result);
+        };
+    };
+    dispatcher_->RegisterMethod(kMethodThreadArchive, lifecycle_handler(kMethodThreadArchive));
+    dispatcher_->RegisterMethod(kMethodThreadUnarchive, lifecycle_handler(kMethodThreadUnarchive));
+    dispatcher_->RegisterMethod(kMethodThreadDelete, lifecycle_handler(kMethodThreadDelete));
+
+    // workflow/query(wf 线的事件出口:LoadSnapshotFromDisk +
+    // BuildIncrementalEvents,server 只折协议形状)。
+    dispatcher_->RegisterMethod(
+        kMethodWorkflowQuery, [this](const IncomingRequest& request, DispatchContext& context)
+                              -> std::optional<nlohmann::json> {
+            std::string run_id;
+            std::uint64_t last_seq = 0;
+            const ParamsCheck base = CheckWorkflowQueryParams(request.params, run_id, last_seq);
+            if (!base.ok) {
+                return MakeError(request.id, base.code, base.message);
+            }
+            std::string error_code;
+            std::string error_message;
+            WorkflowQueryResult result =
+                HandleWorkflowQuery(run_id, last_seq, error_code, error_message);
+            if (!error_code.empty()) {
+                return MakeError(request.id, kErrInvalidParams,
+                                 error_message.empty() ? "workflow/query 失败: " + error_code
+                                                       : error_message,
+                                 nlohmann::json{{"reason", error_code}});
+            }
+            // 增量事件先出(emit_event),响应(快照)后出:前端先接事件
+            // 后拿快照对账,与 thread/started 先于响应的口径一致。
+            for (const nlohmann::json& event : result.events) {
+                context.emit_event(event.value("method", std::string()),
+                                   event.value("params", nlohmann::json::object()), false);
+            }
+            return MakeResult(request.id, result.snapshot);
+        });
 
     // thread/stop
     dispatcher_->RegisterMethod(
@@ -142,12 +291,14 @@ void Server::RegisterMethods() {
                           -> std::optional<nlohmann::json> {
             std::string thread_id;
             std::string text;
-            const ParamsCheck base = CheckTurnStartParams(request.params, thread_id, text);
+            std::vector<nlohmann::json> images;
+            const ParamsCheck base =
+                CheckTurnStartParams(request.params, thread_id, text, images);
             if (!base.ok) {
                 return MakeError(request.id, base.code, base.message);
             }
             std::string error_code;
-            const nlohmann::json accepted = AcceptTurnStart(thread_id, text, error_code);
+            const nlohmann::json accepted = AcceptTurnStart(thread_id, text, images, error_code);
             if (!error_code.empty()) {
                 if (error_code == "already_running") {
                     return MakeError(request.id, kErrTurnAlreadyRunning,
@@ -206,8 +357,11 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
     if (!sessions_dir_.empty()) {
         record->store = std::make_unique<agent::SessionStore>(sessions_dir_);
         agent::SessionMeta meta;
-        meta.wire = "app-server";
-        meta.model = std::string(); // 骨架期没有模型名可写(假 backend)
+        // 阶段 3 冻结项:meta 写真值。wire 是协议名(anthropic/responses/
+        // chat,配置四级合并的结果),model 是配置里的模型名;测试/纯内存
+        // 跑没有配置,空串照写(与 CLI 会话档同一张 meta 表)。
+        meta.wire = options_.session_wire;
+        meta.model = options_.session_model;
         meta.cwd = record->cwd;
         meta.started_at = agent::NowTimestamp();
         if (!record->store->Begin(meta, record->thread_id)) {
@@ -225,43 +379,130 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
     return nlohmann::json{{"threadId", record->thread_id}, {"cwd", record->cwd}};
 }
 
-nlohmann::json Server::HandleThreadList() {
-    // 列举走 SessionCatalog 的结构化摘要(会话管理器单第六步):与终端
-    // picker 共吃一碗饭——同一查询给同一份 id/顺序/状态,不各自重扫
-    // JSONL。默认 active(归档场不掺默认列表);createdAt/updatedAt 用
-    // 存档侧稳定串,前端按自己的 locale 画相对时间。
-    // TODO(显示系统剥离单第 5-8 步):Server 装配 SessionCommandService
-    // 后,thread/list 的查询参数(state/sort/search/分页)与
-    // thread.archive/unarchive/delete 方法从这里接线——协议方法名与
-    // runtime::ClientCommandKind 已对齐(thread.archive 等),装配层
-    // 换调用方即可,不要在 server 里另写第二条扫盘路。
-    std::vector<nlohmann::json> entries;
-    if (!sessions_dir_.empty()) {
-        agent::SessionCatalog catalog(sessions_dir_);
-        catalog.Scan();
-        agent::SessionQuery query;
-        query.scope = agent::SessionScope::All;
-        query.state = agent::SessionState::Active;
-        query.sort = agent::SessionSort::Updated;
-        query.limit = 100;
-        const auto page = catalog.Query(query);
-        for (const agent::SessionSummary& entry : page.entries) {
-            nlohmann::json item =
-                runtime::SessionSummaryToJson(entry.id, entry.title, entry.first_user_text, entry.cwd,
-                                              entry.model, entry.created_at, entry.updated_at,
-                                              entry.message_count,
-                                              entry.state == agent::SessionState::Archived
-                                                  ? "archived"
-                                                  : "active",
-                                              entry.health == agent::SessionHealth::Damaged
-                                                  ? "damaged"
-                                                  : "ok");
-            // 旧字段 startedAt 继续给(createdAt 同源),老前端不断。
-            item["startedAt"] = entry.created_at;
-            entries.push_back(std::move(item));
+nlohmann::json Server::HandleThreadList(const nlohmann::json& params) {
+    // P9 收尾:列举走 SessionCommandService(会话管理器单第六步)——与
+    // 终端 picker 共吃一碗饭,同一查询给同一份 id/顺序/状态,server 不
+    // 另写第二条扫盘路。sessions_dir 空(纯内存跑)给空表。
+    if (session_commands_ == nullptr) {
+        return MakeThreadListResult({});
+    }
+    const runtime::SessionCommandOutcome outcome = session_commands_->ListThreads(params);
+    if (!outcome.accepted) {
+        // ListThreads 现下不会拒(query 解析容错);防御给空表。
+        Diagnose("thread/list 拒绝: " + outcome.error_code);
+        return MakeThreadListResult({});
+    }
+    // 旧字段 startedAt 继续给(createdAt 同源),老前端不断。
+    nlohmann::json result = outcome.payload;
+    if (result.contains("threads") && result["threads"].is_array()) {
+        for (nlohmann::json& thread : result["threads"]) {
+            if (thread.contains("createdAt")) {
+                thread["startedAt"] = thread["createdAt"];
+            }
         }
     }
-    return MakeThreadListResult(entries);
+    return result;
+}
+
+nlohmann::json Server::HandleThreadLifecycle(const std::string& method, const std::string& thread_id,
+                                             const nlohmann::json& params, std::string& out_error_code,
+                                             std::string& out_error_message, std::string& out_state) {
+    out_error_code.clear();
+    out_error_message.clear();
+    out_state.clear();
+    if (session_commands_ == nullptr) {
+        out_error_code = "not_found";
+        out_error_message = "服务没有会话档目录,搬删一律不可用";
+        return nlohmann::json();
+    }
+    // 在跑的 thread 不许搬删(句柄在 SessionStore 手里,Windows 上 rename
+    // 会吃 sharing violation;协议侧明拒,不留给 IO 层炸)。
+    if (FindThread(thread_id) != nullptr) {
+        out_error_code = "active_thread";
+        out_error_message = "thread 还开着,先 thread/stop 再搬删";
+        return nlohmann::json();
+    }
+    runtime::SessionCommandOutcome outcome;
+    if (method == std::string(kMethodThreadArchive)) {
+        outcome = session_commands_->ArchiveThread(thread_id);
+        out_state = "archived";
+    } else if (method == std::string(kMethodThreadUnarchive)) {
+        outcome = session_commands_->UnarchiveThread(thread_id);
+        out_state = "active";
+    } else if (method == std::string(kMethodThreadDelete)) {
+        outcome = session_commands_->DeleteThread(thread_id, params);
+    } else {
+        out_error_code = "invalid_request";
+        out_error_message = "不认识的会话命令: " + method;
+        return nlohmann::json();
+    }
+    if (!outcome.accepted) {
+        out_error_code = outcome.error_code;
+        out_error_message = outcome.error_message;
+        out_state.clear();
+        return nlohmann::json();
+    }
+    return MakeThreadLifecycleResult(thread_id, out_state);
+}
+
+Server::WorkflowQueryResult Server::HandleWorkflowQuery(const std::string& run_id,
+                                                         std::uint64_t last_seq,
+                                                         std::string& out_error_code,
+                                                         std::string& out_error_message) {
+    out_error_code.clear();
+    out_error_message.clear();
+    WorkflowQueryResult result;
+    if (options_.workflow_runs_dir.empty()) {
+        out_error_code = "no_workflow_dir";
+        out_error_message = "服务没配 workflow run 账目录";
+        return result;
+    }
+    const std::filesystem::path runs_root =
+        tools::Utf8ToPath(options_.workflow_runs_dir);
+    const std::filesystem::path run_dir = runs_root / tools::Utf8ToPath(run_id);
+    std::error_code ec;
+    if (!std::filesystem::exists(run_dir, ec)) {
+        out_error_code = "not_found";
+        out_error_message = "run 不存在: " + run_id;
+        return result;
+    }
+    const std::optional<workflow::WorkflowRunSnapshot> snapshot =
+        workflow::LoadSnapshotFromDisk(run_dir);
+    if (!snapshot.has_value()) {
+        out_error_code = "not_found";
+        out_error_message = "run 账读不出(无事件账或损坏): " + run_id;
+        return result;
+    }
+    // 快照折 camelCase(协议惯例:threadId/turnId/lastSeq 一路 camel;
+    // snapshot 的 snake_case 是 wf 层存档口径,进协议转一层,字段一一
+    // 对应不丢)。
+    nlohmann::json raw = snapshot->ToJson();
+    nlohmann::json shaped;
+    shaped["runId"] = raw.value("run_id", std::string());
+    shaped["workflowId"] = raw.value("workflow_id", std::string());
+    shaped["workflowVersion"] = raw.value("workflow_version", std::string());
+    shaped["contentHash"] = raw.value("content_hash", std::string());
+    shaped["state"] = raw.value("state", std::string());
+    shaped["errorCode"] = raw.value("error_code", std::string());
+    shaped["errorMessage"] = raw.value("error_message", std::string());
+    shaped["result"] = raw.value("result", nlohmann::json::object());
+    shaped["durationMs"] = raw.value("duration_ms", std::int64_t{0});
+    shaped["tokensUsed"] = raw.value("tokens_used", std::uint64_t{0});
+    shaped["lastSeq"] = raw.value("last_seq", std::uint64_t{0});
+    if (raw.contains("nodes")) {
+        shaped["nodes"] = raw["nodes"];
+    }
+    result.snapshot = std::move(shaped);
+    // 增量事件:journal 事件从 last_seq+1 起(0 = 全量),直接折协议形状。
+    // 与 BuildIncrementalEvents 同一个筛法(单子口径:前端重连先取快照,
+    // 再从 last_seq+1 接事件);这里不走 ServerEvent 中转——wf 事件没有
+    // turn/item 语义,硬套三层账只会丢信息。
+    for (const workflow::JournalEvent& event : workflow::ReadJournalEvents(run_dir)) {
+        if (event.seq > last_seq) {
+            result.events.push_back(WorkflowEventToProtocol(event, run_id));
+        }
+    }
+    return result;
 }
 
 nlohmann::json Server::HandleThreadStop(const std::string& thread_id, std::string& out_error_code) {
@@ -303,6 +544,7 @@ nlohmann::json Server::HandleThreadStop(const std::string& thread_id, std::strin
 }
 
 nlohmann::json Server::AcceptTurnStart(const std::string& thread_id, const std::string& text,
+                                       const std::vector<nlohmann::json>& images,
                                        std::string& out_error_code) {
     out_error_code.clear();
 
@@ -329,18 +571,19 @@ nlohmann::json Server::AcceptTurnStart(const std::string& thread_id, const std::
     if (record->turn_worker.joinable()) {
         record->turn_worker.join(); // 上一轮的尾巴(正常已收,防御)
     }
-    record->turn_worker = std::thread([this, record, thread_id, turn_id, text] {
-        RunTurnToCompletion(record, thread_id, turn_id, text);
+    record->turn_worker = std::thread([this, record, thread_id, turn_id, text, images] {
+        RunTurnToCompletion(record, thread_id, turn_id, text, images);
     });
     return nlohmann::json{{"threadId", thread_id}, {"turnId", turn_id}};
 }
 
 nlohmann::json Server::HandleTurnStart(const std::string& thread_id, const std::string& text,
+                                       const std::vector<nlohmann::json>& images,
                                        std::string& out_error_code) {
     // 兼容直驱(单测与阶段 1 的口径):受理 + 等工作线程收尾,返回
     // turn/completed 的 params。协议路径(读线程)只调 AcceptTurnStart,
     // 立即回 turnId——这里给同步消费方留一条等完的路。
-    const nlohmann::json accepted = AcceptTurnStart(thread_id, text, out_error_code);
+    const nlohmann::json accepted = AcceptTurnStart(thread_id, text, images, out_error_code);
     if (!out_error_code.empty()) {
         return nlohmann::json();
     }
@@ -376,12 +619,25 @@ nlohmann::json Server::HandleTurnStart(const std::string& thread_id, const std::
 // 答复(HandleInteractionResponse)与打断(HandleTurnInterrupt);悬停的
 // future 靠 promise 被读线程唤醒,事件泵不堵。
 void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, const std::string& thread_id,
-                                 const std::string& turn_id, const std::string& text) {
+                                 const std::string& turn_id, const std::string& text,
+                                 const std::vector<nlohmann::json>& images) {
     connection_->EmitEvent(kEventTurnStarted, MakeTurnStartedParams(thread_id, turn_id));
+
+    // 用户消息:text + 图片(images 字段名与 api::ImageBlock 对齐,阶段 3
+    // 冻结)。图片原样入 history——下一轮、重放、会话恢复都带得上。
+    api::Message user_message;
+    user_message.role = api::Role::User;
+    user_message.content.push_back(api::TextBlock{text});
+    for (const nlohmann::json& image : images) {
+        api::ImageBlock block;
+        block.media_type = image.value("mediaType", std::string());
+        block.data = image.value("data", std::string());
+        block.filename = image.value("filename", std::string());
+        block.width = image.value("width", 0);
+        block.height = image.value("height", 0);
+        user_message.content.push_back(std::move(block));
+    }
     if (record->store != nullptr) {
-        api::Message user_message;
-        user_message.role = api::Role::User;
-        user_message.content.push_back(api::TextBlock{text});
         record->store->AppendMessage(user_message);
     }
 
@@ -427,8 +683,118 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
             connection_->EmitEvent(kEventItemDelta,
                                    MakeItemDeltaParams(thread_id, turn_id, thinking_item_id, delta));
         };
+
+        // ---- 工具条目(阶段 3:diff 行表直转) ----
+        // write_file/edit_file 的 item/started 带 "diff":runtime::DiffTable
+        // 中立行表直转(path/located/replacedCount/oldExists/addedLines/
+        // removedLines/rows[{kind,text,oldNo,newNo}])。别的工具不带该字段。
+        // 行表在 on_tool_start 算(预览语义:改动还没落盘,终端确认块同款);
+        // run_command 的条目类型用 command(输出整段落在 item/completed)。
+        const auto emit_tool_started = [&](const std::string& tool_use_id, const std::string& name,
+                                           const nlohmann::json& input) {
+            const std::string item_id = ids.NextItemId();
+            const std::string_view item_type =
+                name == "run_command" ? kItemTypeCommand : kItemTypeTool;
+            nlohmann::json payload;
+            payload["tool"] = name;
+            if (!tool_use_id.empty()) {
+                payload["toolUseId"] = tool_use_id;
+            }
+            if (input.is_object() && !input.empty()) {
+                payload["input"] = input;
+            }
+            if (const std::optional<runtime::DiffTable> table =
+                    runtime::BuildDiffTable(name, input)) {
+                payload["diff"] = DiffTableToJson(*table);
+            }
+            connection_->EmitEvent(kEventItemStarted,
+                                   MakeItemStartedParams(thread_id, turn_id, item_id, item_type,
+                                                         std::move(payload)));
+            return item_id;
+        };
+        std::map<std::string, std::string> open_tools; // tool_use_id -> item_id
+        callbacks.on_tool_start = [&](const std::string& tool_use_id, const std::string& name,
+                                      const nlohmann::json& input) {
+            if (!text_item_id.empty()) {
+                connection_->EmitEvent(
+                    kEventItemCompleted,
+                    MakeItemCompletedParams(thread_id, turn_id, text_item_id, nlohmann::json::object()));
+                text_item_id.clear();
+            }
+            if (!thinking_item_id.empty()) {
+                connection_->EmitEvent(
+                    kEventItemCompleted,
+                    MakeItemCompletedParams(thread_id, turn_id, thinking_item_id, nlohmann::json::object()));
+                thinking_item_id.clear();
+            }
+            open_tools[tool_use_id] = emit_tool_started(tool_use_id, name, input);
+        };
+        const auto finish_tool = [&](const std::string& tool_use_id, const nlohmann::json& payload) {
+            // 空兜底"最早一个进行中的"(与 ToolDisplay 同款);查不到 =
+            // 迟到/陌生,丢弃不误伤。
+            std::string item_id;
+            if (!tool_use_id.empty()) {
+                const auto it = open_tools.find(tool_use_id);
+                if (it == open_tools.end()) {
+                    return;
+                }
+                item_id = it->second;
+                open_tools.erase(it);
+            } else if (!open_tools.empty()) {
+                item_id = open_tools.begin()->second;
+                open_tools.erase(open_tools.begin());
+            } else {
+                return;
+            }
+            connection_->EmitEvent(kEventItemCompleted,
+                                   MakeItemCompletedParams(thread_id, turn_id, item_id, payload));
+        };
+        callbacks.on_tool_done = [&](const std::string& tool_use_id, const std::string& /*name*/,
+                                     const tools::Tool::Result& result) {
+            finish_tool(tool_use_id,
+                        nlohmann::json{{"result", result.content}, {"isError", result.is_error}});
+        };
+        callbacks.on_builtin_tool_start = [&](const std::string& tool_use_id, const std::string& name,
+                                              const nlohmann::json& input) {
+            if (!text_item_id.empty()) {
+                connection_->EmitEvent(
+                    kEventItemCompleted,
+                    MakeItemCompletedParams(thread_id, turn_id, text_item_id, nlohmann::json::object()));
+                text_item_id.clear();
+            }
+            open_tools[tool_use_id] = emit_tool_started(tool_use_id, name, input);
+        };
+        callbacks.on_builtin_tool_done = [&](const std::string& tool_use_id, const std::string& /*name*/,
+                                             const nlohmann::json& /*input*/, const std::string& summary,
+                                             bool is_error) {
+            finish_tool(tool_use_id, nlohmann::json{{"result", summary}, {"isError", is_error}});
+        };
+
+        // ---- usage / context 进度事件(阶段 3) ----
         std::vector<api::UsageReport> usage_reports;
-        callbacks.on_usage = [&](const api::UsageReport& report) { usage_reports.push_back(report); };
+        callbacks.on_usage = [&](const api::UsageReport& report) {
+            usage_reports.push_back(report);
+            // 每次到模型的请求收尾发一枚 turn/usage(前端画 token 账)。
+            connection_->EmitEvent(kEventTurnUsage, MakeTurnUsageParams(thread_id, turn_id,
+                                                                        UsageToJson(report.usage),
+                                                                        report.model));
+        };
+        loop.SetOnContextPressure([this, &thread_id, &turn_id](
+                                      const agent::ContextPressure& pressure) {
+            // 上下文压力通报:PreRequest 评估与 hard trim 之后各来一次。
+            nlohmann::json context;
+            context["phase"] = pressure.phase == agent::ContextPressure::Phase::PreRequest
+                                   ? "pre_request"
+                                   : "after_hard_trim";
+            context["projectedTokens"] = pressure.projected_tokens;
+            context["windowTokens"] = pressure.window_tokens;
+            context["projectedOverflow"] = pressure.projected_overflow;
+            context["hardTrimmedTurns"] = pressure.hard_trimmed_turns;
+            context["hardDroppedMessages"] = pressure.hard_dropped_messages;
+            context["hardTruncatedResults"] = pressure.hard_truncated_results;
+            connection_->EmitEvent(kEventTurnContext,
+                                   MakeTurnContextParams(thread_id, turn_id, std::move(context)));
+        });
 
         // ---- 审批接线(阶段 2 核心) ----
         // needs_confirm 的工具:先查会话级放行账(acceptForSession 记过
@@ -450,9 +816,9 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
                 auto future = std::static_pointer_cast<PendingFuture>(record->interactions->AskApproval(
                     mirrored, turn_id,
                     [this](std::string_view method, const nlohmann::json& params) {
-                        // must_keep:审批丢了客户端不知道要答。
-                        connection_->outbox().Push(SerializeMessage(MakeEvent(method, params)),
-                                                   EventMustKeep(method));
+                        // must_keep:审批丢了客户端不知道要答。EmitEvent
+                        // 统一盖 seq + 兜溢出通报。
+                        connection_->EmitEvent(method, params);
                     }));
                 if (options_.approval_timeout_ms > 0) {
                     // 限时悬停:超时按悬空收口,悬停不偷跑。
@@ -491,8 +857,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
                     auto future = record->interactions->AskQuestion(
                         request, turn_id, /*question_index=*/0,
                         [this](std::string_view method, const nlohmann::json& params) {
-                            connection_->outbox().Push(SerializeMessage(MakeEvent(method, params)),
-                                                       EventMustKeep(method));
+                            connection_->EmitEvent(method, params);
                         });
                     if (options_.approval_timeout_ms > 0) {
                         future->SetTimeout(std::chrono::milliseconds(options_.approval_timeout_ms));
@@ -518,8 +883,9 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         }
 
         // ---- 跑 ----
+        // 图片走 Message 入口(与字符串入口同义,图片原样入 history)。
         const std::expected<agent::RunOutcome, std::string> outcome =
-            loop.Run(text, callbacks, &record->interrupt_requested);
+            loop.Run(user_message, callbacks, &record->interrupt_requested);
         if (!text_item_id.empty()) {
             connection_->EmitEvent(
                 kEventItemCompleted,
@@ -530,6 +896,16 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
                 kEventItemCompleted,
                 MakeItemCompletedParams(thread_id, turn_id, thinking_item_id, nlohmann::json::object()));
         }
+        // 没自然终态的工具条目(打断/异常路径不会再有 on_tool_done):
+        // 统一按 cancelled 收口——条目不悬空,前端好对账。
+        for (const auto& [tool_use_id, item_id] : open_tools) {
+            (void)tool_use_id;
+            connection_->EmitEvent(kEventItemCompleted,
+                                   MakeItemCompletedParams(thread_id, turn_id, item_id,
+                                                           nlohmann::json{{"isError", false},
+                                                                          {"cancelled", true}}));
+        }
+        open_tools.clear();
 
         // acceptForSession 的放行记账在答复侧(HandleInteractionResponse)
         // 落,这里只收终态。
