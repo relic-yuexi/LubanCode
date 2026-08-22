@@ -105,8 +105,11 @@ std::string FileMtimeTimestamp(const std::string& file_path) {
     // now 之间隔了微秒级,对秒级展示时间戳无感。
     const auto sys_now = std::chrono::system_clock::now();
     const auto file_now = std::chrono::file_clock::now();
-    const std::time_t tt =
-        std::chrono::system_clock::to_time_t(sys_now - (file_now - mtime));
+    // file_clock 的差在 libc++ 上是 __int128 纳秒,隐式缩回 system_clock 的
+    // 微秒 duration 不许(又一轮 CI 实锤)——显式 duration_cast 落锤,截掉
+    // 的亚微秒对秒级时间戳无感。
+    const std::time_t tt = std::chrono::system_clock::to_time_t(
+        sys_now - std::chrono::duration_cast<std::chrono::system_clock::duration>(file_now - mtime));
     std::tm tm_buf{};
 #ifdef _WIN32
     localtime_s(&tm_buf, &tt);
