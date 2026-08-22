@@ -6,6 +6,7 @@
 
 #include "tools/isolation.hpp"
 #include "tools/path_utils.hpp"
+#include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
 
 namespace lubancode::tools {
 
@@ -14,9 +15,11 @@ std::string WriteFileTool::name() const {
 }
 
 std::string WriteFileTool::description() const {
-    return "把内容写入文件(UTF-8 编码)。文件已存在就整个覆盖,父目录不存在会自动建好。"
-           "路径可以是相对路径,也可以是绝对路径。适合新建文件或整篇重写;小范围改动用 "
-           "edit_file 更精准。执行前需要用户确认。";
+    // 文案在 src/prompts/tools/<语言>/write_file.md,兜底是迁移前的原文。
+    return ToolText("write_file", "description",
+                    "把内容写入文件(UTF-8 编码)。文件已存在就整个覆盖,父目录不存在会自动建好。"
+                    "路径可以是相对路径,也可以是绝对路径。适合新建文件或整篇重写;小范围改动用 "
+                    "edit_file 更精准。执行前需要用户确认。");
 }
 
 nlohmann::json WriteFileTool::input_schema() const {
@@ -27,12 +30,13 @@ nlohmann::json WriteFileTool::input_schema() const {
 
     nlohmann::json path_prop = nlohmann::json::object();
     path_prop["type"] = "string";
-    path_prop["description"] = "要写入的文件路径,相对或绝对均可";
+    path_prop["description"] = ToolText("write_file", "param.path", "要写入的文件路径,相对或绝对均可");
     properties["path"] = path_prop;
 
     nlohmann::json content_prop = nlohmann::json::object();
     content_prop["type"] = "string";
-    content_prop["description"] = "要写入的文件内容(UTF-8),会整体覆盖原文件";
+    content_prop["description"] =
+        ToolText("write_file", "param.content", "要写入的文件内容(UTF-8),会整体覆盖原文件");
     properties["content"] = content_prop;
 
     schema["properties"] = properties;
