@@ -404,6 +404,69 @@ std::optional<std::string> ParseCwdEvent(const std::string& line) {
 }
 
 // ---------------------------------------------------------------------------
+// queue 事件(排队消息落档)
+// ---------------------------------------------------------------------------
+
+std::string SerializeQueueEvent(const std::vector<ArchivedQueueItem>& items, const std::string& ts) {
+    nlohmann::json j;
+    j["type"] = "queue";
+    nlohmann::json array = nlohmann::json::array();
+    for (const auto& item : items) {
+        nlohmann::json entry;
+        entry["id"] = item.id;
+        entry["target"] = item.subagent ? ("#" + std::to_string(item.task_id)) : "main";
+        entry["text"] = item.text;
+        entry["attempts"] = item.attempts;
+        array.push_back(std::move(entry));
+    }
+    j["items"] = std::move(array);
+    j["ts"] = ts;
+    return platform::DumpJsonSanitized(j);  // 排队正文也是用户键入,坏串窄边界同消息行
+}
+
+std::optional<std::vector<ArchivedQueueItem>> ParseQueueEvent(const std::string& line) {
+    const nlohmann::json j = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+    if (!j.is_object() || j.value("type", std::string()) != "queue") {
+        return std::nullopt;
+    }
+    if (!j.contains("items") || !j["items"].is_array()) {
+        return std::nullopt;
+    }
+    std::vector<ArchivedQueueItem> out;
+    for (const auto& entry : j["items"]) {
+        if (!entry.is_object() || !entry.contains("text") || !entry["text"].is_string()) {
+            continue;  // 坏条目跳过,不废整份(事件行通用取舍)
+        }
+        ArchivedQueueItem item;
+        if (entry.contains("id") && entry["id"].is_number_unsigned()) {
+            item.id = entry["id"].get<std::uint64_t>();
+        }
+        item.text = entry["text"].get<std::string>();
+        if (item.text.empty() || item.id == 0) {
+            continue;  // 空正文/无 id 不是一条可恢复的排队消息
+        }
+        if (entry.contains("target") && entry["target"].is_string()) {
+            const std::string target = entry["target"].get<std::string>();
+            if (!target.empty() && target.front() == '#') {
+                item.subagent = true;
+                item.task_id = std::atoi(target.c_str() + 1);
+                if (item.task_id <= 0) {
+                    continue;  // "#abc" 这类认不出的目标号,救不了
+                }
+            }
+        }
+        if (entry.contains("attempts") && entry["attempts"].is_number_integer()) {
+            item.attempts = entry["attempts"].get<int>();
+            if (item.attempts < 0) {
+                item.attempts = 0;
+            }
+        }
+        out.push_back(std::move(item));
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // 会话 id
 // ---------------------------------------------------------------------------
 
@@ -688,6 +751,15 @@ std::optional<LoadedSession> ParseSessionFile(const std::string& content) {
                 }
                 continue;
             }
+            if (type == "queue") {
+                auto queued = ParseQueueEvent(line);
+                if (queued.has_value()) {
+                    session.queued_messages = std::move(*queued);  // 快照式,最后一条胜
+                } else {
+                    session.skipped_lines += 1;
+                }
+                continue;
+            }
             session.skipped_lines += 1;  // 认不得的事件类型,跳过
             continue;
         }
@@ -890,6 +962,15 @@ bool SessionStore::AppendCwdEvent(const std::string& cwd) {
     return out_.good();
 }
 
+bool SessionStore::AppendQueueEvent(const std::vector<ArchivedQueueItem>& items) {
+    if (!out_.is_open()) {
+        return false;
+    }
+    out_ << SerializeQueueEvent(items, NowTimestamp()) << "\n";
+    out_.flush();
+    return out_.good();
+}
+
 void SessionStore::Reset() {
     if (out_.is_open()) {
         out_.close();
@@ -1003,6 +1084,11 @@ std::vector<SessionListEntry> ListSessions(const std::string& sessions_dir, std:
             if (line.find("\"type\":\"cwd\"") != std::string::npos) {
                 if (ParseCwdEvent(line).has_value()) {
                     continue;  // 事件行不算消息
+                }
+            }
+            if (line.find("\"type\":\"queue\"") != std::string::npos) {
+                if (ParseQueueEvent(line).has_value()) {
+                    continue;  // 排队快照事件行,同样不算消息
                 }
             }
             entry.message_count += 1;

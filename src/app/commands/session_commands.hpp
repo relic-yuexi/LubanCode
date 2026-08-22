@@ -123,13 +123,18 @@ std::optional<std::string> PromptResumeTarget(const std::string& sessions_dir,
 // 一间还在的 worktree 房,验明正身后把会话搬回去;房没了回落启动目录并
 // 说一声;马甲房(.git 指回主仓那类)拒进并报原因。非空时成功恢复后由
 // 调用方做一次目录善后同步(重拼系统提示那条路)。
+// on_queue_restored(可空,取走即消费单路径二):恢复成功后收一份存档里
+// 最后一条 queue 事件快照(没排过队就是空表),会话层拿它重建
+// SessionSteeringQueue。不接就照旧丢弃(单测/旧调用点)。
 bool ResumeSession(const std::string& target, const std::string& sessions_dir,
                     lubancode::agent::AgentLoop& loop, lubancode::agent::SessionStore& store,
                     std::size_t& persisted_count, lubancode::agent::SessionMeta& session_meta,
                     std::string& session_title, const std::string& wire_str, const std::string& current_model,
                     const lubancode::cli::Theme& theme, bool quiet_if_none,
                     lubancode::cli::WorktreeSession* worktree_session = nullptr,
-                    int* compact_epoch_out = nullptr);
+                    int* compact_epoch_out = nullptr,
+                    const std::function<void(const std::vector<lubancode::agent::ArchivedQueueItem>&)>*
+                        on_queue_restored = nullptr);
 
 
 // /export [路径]:当前会话导出 Markdown,默认写 sessions/<id>.md。
@@ -174,6 +179,9 @@ struct SessionCommandState {
     // hooks 框架:/resume 成功后回调(SessionStart source=resume 的发射口,
     // 会话层接)。可空(单测不接)。
     std::function<void()> on_resumed;
+    // /resume 成功后的排队账重建(取走即消费单路径二):收存档最后一条
+    // queue 快照,会话层灌回 SessionSteeringQueue。可空(单测不接)。
+    std::function<void(const std::vector<lubancode::agent::ArchivedQueueItem>&)> on_queue_restored;
 };
 
 // /clear:丢历史重建、存档翻篇、标题翻篇。

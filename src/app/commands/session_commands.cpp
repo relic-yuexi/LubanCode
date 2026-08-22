@@ -381,7 +381,9 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
                     std::size_t& persisted_count, lubancode::agent::SessionMeta& session_meta,
                     std::string& session_title, const std::string& wire_str, const std::string& current_model,
                     const lubancode::cli::Theme& theme, bool quiet_if_none,
-                    lubancode::cli::WorktreeSession* worktree_session, int* compact_epoch_out) {
+                    lubancode::cli::WorktreeSession* worktree_session, int* compact_epoch_out,
+                    const std::function<void(const std::vector<lubancode::agent::ArchivedQueueItem>&)>*
+                        on_queue_restored) {
     if (sessions_dir.empty()) {
         std::cout << tr("session.no_home") << "\n";
         return false;
@@ -479,6 +481,15 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
         std::cout << trf("cmd.resume.skipped", session->skipped_lines);
     }
     std::cout << "。\n";
+    // 排队账重建(路径二):存档最后一条 queue 快照交还会话层;有货时给
+    // 用户一行,别让人以为排过的话凭空蒸发。
+    if (on_queue_restored != nullptr && *on_queue_restored) {
+        (*on_queue_restored)(session->queued_messages);
+        if (!session->queued_messages.empty()) {
+            std::cout << theme.stats << trf("cmd.resume.queue_restored", session->queued_messages.size())
+                      << theme.reset << "\n";
+        }
+    }
     // context 记账:真实 usage 得等恢复后第一次请求才校准,这里先按字符
     // 粗估打一行,心里有数。
     std::cout << trf("cmd.resume.estimate", EstimateHistoryTokens(session->messages)) << "\n";
@@ -666,7 +677,8 @@ CommandFlow HandleResumeCommand(SessionCommandState& state, const std::string& a
     }
     if (ResumeSession(target, state.sessions_dir, state.loop, state.store, state.persisted_count,
                       state.meta, state.title, state.wire_str, *state.current_model, theme,
-                      /*quiet_if_none=*/false, state.worktree_session, &state.compact_epoch)) {
+                      /*quiet_if_none=*/false, state.worktree_session, &state.compact_epoch,
+                      state.on_queue_restored ? &state.on_queue_restored : nullptr)) {
         state.store_broken = false;  // 换了场,存档失败的旧账翻篇
         state.title_pending = false;
         if (state.worktree_session != nullptr && state.worktree_session->active()) {
