@@ -170,6 +170,8 @@ struct WorkflowNode {
         std::string path;    // ${...} 引用
         nlohmann::json literal = nlohmann::json::object();  // 比较字面量
         std::string to;      // 命中后去的节点 id
+
+        bool operator==(const SwitchCase&) const = default;
     };
     std::vector<SwitchCase> conditions;
     std::string default_to;       // 可空 = 都不中时结束(outcome=skipped)

@@ -420,6 +420,8 @@ add_library(lubancode_core STATIC
   src/workflow/runtime.cpp
   src/workflow/host_executors.cpp
   src/workflow/compiler.cpp
+  src/workflow/planner.cpp
+  src/workflow/frontend.cpp
 )
 target_include_directories(lubancode_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src

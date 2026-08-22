@@ -319,6 +319,9 @@ ValidationResult ValidateDefinition(const WorkflowDefinition& def,
         }
         for (const auto& node : def.nodes) {
             if (!visited.count(node.id)) {
+                // planner 积木(label 前缀 "template:")不进执行路径,允许
+                // 不可达——它们是第 6 批受约束动态图的授权模板,不是步骤。
+                if (node.label.rfind("template:", 0) == 0) continue;
                 add("unreachable", node_path(node.id), "节点不可达(entry 出发到不了)");
             }
         }
