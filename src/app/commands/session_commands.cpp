@@ -293,6 +293,35 @@ void PrintSessionsCommand(const std::string& sessions_dir, const std::string& ar
         std::cout << tr("session.no_home") << "\n";
         return;
     }
+    // /sessions archived:归档只读入口(第四步)。列 archive/ 子目录,标明
+    // 这些场子不在默认列表里;想续聊先 `lubancode unarchive <id>`。
+    if (args == "archived") {
+        lubancode::agent::SessionCatalog catalog(sessions_dir);
+        catalog.Scan();
+        lubancode::agent::SessionQuery query;
+        query.scope = lubancode::agent::SessionScope::All;
+        query.state = lubancode::agent::SessionState::Archived;
+        query.sort = lubancode::agent::SessionSort::Updated;
+        query.limit = 0;
+        const auto page = catalog.Query(query);
+        if (page.entries.empty()) {
+            std::cout << tr("cmd.sessions.archived_none") << "\n";
+            return;
+        }
+        std::cout << trf("cmd.sessions.archived_header", page.total) << "\n";
+        for (const auto& entry : page.entries) {
+            const std::string& label = !entry.title.empty() ? entry.title : entry.first_user_text;
+            std::cout << "  " << entry.id << "\n"
+                      << trf("cmd.sessions.entry",
+                              entry.updated_at.empty() ? tr("cmd.sessions.unknown_time") : entry.updated_at,
+                              entry.message_count,
+                              label.empty() ? tr("cmd.sessions.no_text")
+                                             : lubancode::agent::TruncateUtf8Chars(label, 40))
+                      << "\n";
+        }
+        std::cout << tr("cmd.sessions.archived_hint") << "\n";
+        return;
+    }
     const bool all = args == "all";
     if (!args.empty() && !all) {
         std::cout << tr("cmd.sessions.usage") << "\n";
@@ -861,6 +890,244 @@ CommandFlow HandleResumeCommand(SessionCommandState& state, const std::string& a
         }
     }
     return CommandFlow::Continue;
+}
+
+// ---------------------------------------------------------------------------
+// 归档与永久删除(第四、五步):引用解析、确认屏、顶层命令与会话内命令。
+// 搬与删全经 agent::SessionLifecycle,这里不直接碰 filesystem。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// SessionCatalog 的摘要账 -> lifecycle 的候选账(标题从缓存补;只列
+// 活动会话——归档的场子要动,先 unarchive)。
+std::vector<lubancode::agent::SessionRefCandidate> MakeCandidates(const std::string& sessions_dir) {
+    lubancode::agent::SessionCatalog catalog(sessions_dir);
+    catalog.Scan();
+    lubancode::agent::SessionQuery query;
+    query.scope = lubancode::agent::SessionScope::All;
+    query.state = lubancode::agent::SessionState::Active;
+    query.limit = 0;
+    const auto page = catalog.Query(query);
+    std::vector<lubancode::agent::SessionRefCandidate> out;
+    out.reserve(page.entries.size());
+    for (const auto& entry : page.entries) {
+        out.push_back(lubancode::agent::SessionRefCandidate{entry.id, entry.file_path, entry.title});
+    }
+    return out;
+}
+
+// 短 id(列重名用):日期时刻段。
+std::string ShortSessionId(const std::string& id) {
+    if (id.size() >= 15 && id[8] == '-') {
+        return id.substr(0, 15);
+    }
+    return id;
+}
+
+// 读一行(确认屏输入)。stdin_line 回调优先(测试可钉);null 走 std::cin;
+// EOF 给空串 = 取消。
+std::string ReadConfirmLine(const std::function<std::string()>& stdin_line) {
+    if (stdin_line != nullptr) {
+        return stdin_line();
+    }
+    std::string line;
+    if (!std::getline(std::cin, line)) {
+        return std::string();  // EOF:按取消
+    }
+    return line;
+}
+
+// 确认答案归一:y/yes(大小写不敏感、剥尾空白)才算确认;空答/别的都取消。
+bool ConfirmAnswer(const std::string& answer) {
+    std::string lowered;
+    for (const char c : answer) {
+        lowered += c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+    }
+    while (!lowered.empty() && (lowered.back() == ' ' || lowered.back() == '\r' || lowered.back() == '\n')) {
+        lowered.pop_back();
+    }
+    return lowered == "y" || lowered == "yes";
+}
+
+}  // namespace
+
+bool ResolveSessionReference(const std::string& sessions_dir, const std::string& ref,
+                             const std::function<std::string()>& stdin_line, std::string& out_id,
+                             std::string& out_title, std::string& out_message, bool& ambiguous) {
+    (void)stdin_line;
+    ambiguous = false;
+    out_id.clear();
+    out_title.clear();
+    out_message.clear();
+    const auto candidates = MakeCandidates(sessions_dir);
+    const auto hits = lubancode::agent::ResolveSessionRef(candidates, ref, ambiguous);
+    if (!hits.has_value() || hits->empty()) {
+        out_message = trf("cmd.session.ref_not_found", ref);
+        return false;
+    }
+    if (ambiguous) {
+        // 重名/多义:列短 id,叫用户点明(绝不猜一场)。
+        std::string ids;
+        for (const auto& hit : *hits) {
+            if (!ids.empty()) {
+                ids += ", ";
+            }
+            ids += ShortSessionId(hit.id);
+        }
+        out_message = trf("cmd.session.ref_ambiguous", ref, ids);
+        return false;
+    }
+    out_id = hits->front().id;
+    out_title = hits->front().title;
+    return true;
+}
+
+int HandleSessionManagementCommand(const std::string& sessions_dir, int kind, const std::string& ref,
+                                   bool force, const lubancode::cli::Theme& theme,
+                                   const std::function<std::string()>& stdin_line) {
+    (void)theme;
+    if (sessions_dir.empty()) {
+        std::cout << tr("session.no_home") << "\n";
+        return 1;
+    }
+    const bool is_delete = kind == 2;
+    const bool is_archive = kind == 0;
+    if (ref.empty()) {
+        std::cout << tr(is_delete ? "cmd.session.delete.usage" : "cmd.session.archive.usage") << "\n";
+        return 1;
+    }
+    lubancode::agent::SessionLifecycle lifecycle(sessions_dir);
+
+    std::string id;
+    std::string title;
+    std::string message;
+    bool ambiguous = false;
+    if (!ResolveSessionReference(sessions_dir, ref, stdin_line, id, title, message, ambiguous)) {
+        std::cout << message << "\n";
+        return 1;
+    }
+
+    if (is_delete) {
+        // 摘要细节(确认屏要写标题/完整 id/cwd)。
+        lubancode::agent::SessionCatalog catalog(sessions_dir);
+        catalog.Scan();
+        const lubancode::agent::SessionSummary* summary = catalog.Find(id);
+        const std::string show_title = title.empty() && summary != nullptr ? summary->title : title;
+        const std::string cwd = summary != nullptr ? summary->cwd : std::string();
+        const std::string first_text = summary != nullptr ? summary->first_user_text : std::string();
+        const std::string label = !show_title.empty()
+                                      ? show_title
+                                      : (!first_text.empty() ? first_text : tr("cmd.sessions.no_text"));
+        // 确认屏:标题/完整 id/cwd/"永久删除"。缺省取消;EOF、空答皆取消。
+        // --force 只给脚本:跳过确认(帮助里写明不可恢复)。
+        bool confirmed = force;
+        if (!confirmed) {
+            std::cout << tr("cmd.session.delete.confirm_header") << "\n"
+                      << trf("cmd.session.delete.confirm_title",
+                             lubancode::agent::TruncateUtf8Chars(label, 60))
+                      << "\n"
+                      << trf("cmd.session.delete.confirm_id", id) << "\n"
+                      << trf("cmd.session.delete.confirm_cwd",
+                             cwd.empty() ? tr("cmd.sessions.dir_unknown")
+                                         : lubancode::agent::AbbreviateUtf8Middle(cwd, 60))
+                      << "\n"
+                      << tr("cmd.session.delete.confirm_prompt");
+            std::cout.flush();
+            confirmed = ConfirmAnswer(ReadConfirmLine(stdin_line));
+            if (!confirmed) {
+                std::cout << tr("cmd.session.delete.cancelled") << "\n";
+                return 1;
+            }
+        }
+        const auto result = lifecycle.DeleteSession(id, /*confirmed=*/true);
+        if (!result.ok()) {
+            std::cout << trf("cmd.session.delete.failed", id) << "\n";
+            return 1;
+        }
+        std::cout << trf("cmd.session.delete.done", id) << "\n";
+        return 0;
+    }
+
+    const auto result = is_archive ? lifecycle.ArchiveSession(id) : lifecycle.UnarchiveSession(id);
+    if (!result.ok()) {
+        std::cout << trf(is_archive ? "cmd.session.archive.failed" : "cmd.session.unarchive.failed", id)
+                  << "\n";
+        return 1;
+    }
+    std::cout << trf(is_archive ? "cmd.session.archive.done" : "cmd.session.unarchive.done", id) << "\n";
+    return 0;
+}
+
+bool ArchiveCurrentSession(const std::string& sessions_dir, lubancode::agent::SessionStore& store,
+                           const lubancode::cli::Theme& theme) {
+    (void)theme;
+    if (sessions_dir.empty()) {
+        std::cout << tr("session.no_home") << "\n";
+        return false;
+    }
+    if (!store.active() || store.session_id().empty()) {
+        std::cout << tr("cmd.archive.not_active") << "\n";
+        return false;
+    }
+    lubancode::agent::SessionLifecycle lifecycle(sessions_dir);
+    // 活动句柄:搬之前先刷盘收柄(Windows sharing violation 的闸)。目标
+    // 就是当前会话时,lifecycle 调这里的回调。
+    lifecycle.SetActiveFile(store.file_path(), [&store](const std::string&) {
+        store.Reset();  // ofstream close 自带 flush;RAII 收柄
+        return true;
+    });
+    const auto result = lifecycle.ArchiveSession(store.session_id());
+    if (!result.ok()) {
+        // 搬失败:句柄已收但文件还在原地,账没坏;如实告诉人。
+        std::cout << trf("cmd.session.archive.failed", store.session_id()) << "\n";
+        return false;
+    }
+    std::cout << trf("cmd.session.archive.done", store.session_id()) << "\n";
+    return true;
+}
+
+bool DeleteCurrentSession(const std::string& sessions_dir, lubancode::agent::SessionStore& store,
+                          const lubancode::agent::SessionMeta& meta, const std::string& title,
+                          const lubancode::cli::Theme& theme) {
+    (void)theme;
+    if (sessions_dir.empty()) {
+        std::cout << tr("session.no_home") << "\n";
+        return false;
+    }
+    if (!store.active() || store.session_id().empty()) {
+        std::cout << tr("cmd.delete.not_active") << "\n";
+        return false;
+    }
+    // 确认屏:标题/完整 id/cwd/"永久删除"。缺省取消;EOF、空答皆取消。
+    const std::string label =
+        !title.empty() ? title : (!meta.cwd.empty() ? meta.cwd : tr("cmd.sessions.no_text"));
+    std::cout << tr("cmd.session.delete.confirm_header") << "\n"
+              << trf("cmd.session.delete.confirm_title", lubancode::agent::TruncateUtf8Chars(label, 60))
+              << "\n"
+              << trf("cmd.session.delete.confirm_id", store.session_id()) << "\n"
+              << trf("cmd.session.delete.confirm_cwd",
+                     meta.cwd.empty() ? tr("cmd.sessions.dir_unknown")
+                                      : lubancode::agent::AbbreviateUtf8Middle(meta.cwd, 60))
+              << "\n"
+              << tr("cmd.session.delete.confirm_prompt");
+    std::cout.flush();
+    if (!ConfirmAnswer(ReadConfirmLine(nullptr))) {
+        std::cout << tr("cmd.session.delete.cancelled") << "\n";
+        return false;
+    }
+    lubancode::agent::SessionLifecycle lifecycle(sessions_dir);
+    lifecycle.SetActiveFile(store.file_path(), [&store](const std::string&) {
+        store.Reset();
+        return true;
+    });
+    const auto result = lifecycle.DeleteSession(store.session_id(), /*confirmed=*/true);
+    if (!result.ok()) {
+        std::cout << trf("cmd.session.delete.failed", store.session_id()) << "\n";
+        return false;
+    }
+    std::cout << trf("cmd.session.delete.done", store.session_id()) << "\n";
+    return true;
 }
 
 }  // namespace lubancode::app

@@ -34,6 +34,8 @@ enum class SlashCommand {
     Memory,   // /memory:项目记忆开关、查看、显式记忆、遗忘与重建
     Sessions,  // /sessions:列最近的会话存档(本目录;/sessions all 列全部目录)
     Resume,    // /resume <编号或id>:载入某场存档历史续聊
+    Archive,   // /archive:归档当前会话(刷盘关柄→搬 archive/→退出,第四步)
+    Delete,    // /delete:永久删除当前会话(先确认;回合在跑拒绝,第五步)
     Export,    // /export [路径]:当前会话导出 Markdown
     Copy,      // /copy [plain]:复制上一段完整答话(默认原始 Markdown,plain 纯文本)
     Title,     // /title [标题]:看/设当前会话标题(追加 title 事件行,最后一条胜)

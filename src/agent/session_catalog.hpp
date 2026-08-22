@@ -15,7 +15,8 @@
 // 指纹,变了才重读那一场。键盘搜索只筛内存,不因每敲一字重读盘。
 //
 // 坏档口径:坏 meta 只标那一场 damaged(health 字段),不拖垮整表。
-// state 眼下恒 active(archive 目录第 4 步才立,字段先占位)。
+// state(第四步起):根目录 = Active,archive/ 子目录 = Archived。查询按
+// state 筛——默认(active)不掺归档,Archived 视图另查。
 #pragma once
 
 #include <cstddef>

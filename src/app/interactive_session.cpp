@@ -3111,6 +3111,63 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
             case lubancode::cli::SlashCommand::Sessions:
                 PrintSessionsCommand(sessions_dir, parsed.args);
                 break;
+            case lubancode::cli::SlashCommand::Archive: {
+                // /archive(会话管理器单第四步):刷盘关柄→搬 archive/→退出。
+                // 后台子代理还在跑时拒绝——归档的是会话档,别把还在写档的
+                // 代理晾在半路。
+                if (!parsed.args.empty()) {
+                    std::cout << theme.error << tr("cmd.archive.usage") << theme.reset << "\n";
+                    break;
+                }
+                bool busy = false;
+                if (lubancode::tools::AgentTool* agent_tool = session_agent_tool();
+                    agent_tool != nullptr) {
+                    for (const auto& task : agent_tool->TaskSummaries()) {
+                        if (task.state == lubancode::tools::AgentTaskState::Running) {
+                            busy = true;
+                            break;
+                        }
+                    }
+                }
+                if (busy) {
+                    std::cout << theme.error << tr("cmd.archive.busy") << theme.reset << "\n";
+                    break;
+                }
+                if (ArchiveCurrentSession(sessions_dir, session_store, theme)) {
+                    std::cout << tr("cmd.archive.exiting") << "\n";
+                    return CommandFlow::Exit;
+                }
+                break;
+            }
+            case lubancode::cli::SlashCommand::Delete: {
+                // /delete(第五步):永久删除当前会话。回合在跑/工具在飞/
+                // 审批悬着时拒绝——slash 分派本身只在输入线程空闲时进,但
+                // 后台子代理可能在飞,这里如实拦。确认屏在 handler。
+                if (!parsed.args.empty()) {
+                    std::cout << theme.error << tr("cmd.delete.usage") << theme.reset << "\n";
+                    break;
+                }
+                bool busy = false;
+                if (lubancode::tools::AgentTool* agent_tool = session_agent_tool();
+                    agent_tool != nullptr) {
+                    for (const auto& task : agent_tool->TaskSummaries()) {
+                        if (task.state == lubancode::tools::AgentTaskState::Running) {
+                            busy = true;
+                            break;
+                        }
+                    }
+                }
+                if (busy) {
+                    std::cout << theme.error << tr("cmd.delete.busy") << theme.reset << "\n";
+                    break;
+                }
+                if (DeleteCurrentSession(sessions_dir, session_store, session_meta, session_title,
+                                         theme)) {
+                    std::cout << tr("cmd.delete.exiting") << "\n";
+                    return CommandFlow::Exit;
+                }
+                break;
+            }
             case lubancode::cli::SlashCommand::Resume: {
                 SessionCommandState session_state = MakeSessionCommandState();
                 return HandleResumeCommand(session_state, parsed.args, theme);
