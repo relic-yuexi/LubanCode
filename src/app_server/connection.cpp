@@ -2,7 +2,6 @@
 #include "app_server/connection.hpp"
 
 #include <utility>
-
 namespace lubancode::app_server {
 
 namespace {
@@ -44,6 +43,10 @@ void StdioConnection::ProcessLine(const std::string& line) {
     context.emit_event = [this](std::string_view method, const nlohmann::json& params, bool must_keep) {
         outbox_.Push(SerializeMessage(MakeEvent(method, params)), must_keep);
     };
+    // 反向请求响应的落点:装配层给了就用(审批/ask_user 悬起件的配对口)。
+    if (resolve_interaction_) {
+        context.resolve_interaction = resolve_interaction_;
+    }
 
     DispatchOutcome outcome;
     switch (message->kind) {

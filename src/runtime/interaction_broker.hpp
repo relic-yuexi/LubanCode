@@ -54,6 +54,9 @@ enum class InteractionDecision {
 // 原始 JSON(结构化 input 是 TurnItem 的真值,单子"四"),前端自己决定
 // 怎么摘要;这里不预先翻成终端文案。
 struct ApprovalRequest {
+    // P4:这次审批钉在哪个条目上(ToolUseBlock.id;ptc 合成的是 ptc-N)。
+    // 前端凭它把 permission/request 事件路由回条目,可空。
+    std::string tool_use_id;
     std::string tool_name;
     nlohmann::json input = nlohmann::json::object();
     // 提示理由(钩子 ask 的 reason、权限档说明等);可空。

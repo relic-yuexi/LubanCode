@@ -1,0 +1,845 @@
+# Workflows 自然语言编排:可复用 Agent 图与 Slash 命令 SOP
+
+状态:待做(2026-08-22 立项；先做静态、可审、可恢复的图，后放受约束的动态图)
+
+## 一句话
+
+用户把一套办事章法说给 LubanCode。LubanCode 追问缺口，编成一张有类型的
+执行图，先校验、预览、确认，再存成 Workflow。往后输入 `/论文检索 量子纠错`
+便可照图开工：先析题，并行查各路论文，汇合、去重、排序，末了写成 Markdown。
+
+```text
+自然语言 SOP
+    │  追问输入、产物、工具、并行、失败与审批规矩
+    ▼
+Workflow Draft ──► Schema/Graph/Permission 校验 ──► 人看图、看 diff、确认
+                                                           │
+                                                           ▼
+                                          .lubancode/workflows/<id>/
+                                                           │
+                          /<alias> <args> 或 /workflow run <id> ...
+                                                           │
+                                                           ▼
+                   WorkflowRuntime ──► Tool / Agent / Skill / Subflow
+                           │
+                           ├─ 并行、汇合、分支、循环、重试、回落
+                           ├─ 审批、取消、预算、断点、恢复
+                           └─ 结构化事件给 Terminal / Web / Tauri / app-server
+```
+
+## 先把名字说准
+
+截至 2026-08-22，Claude Code 官方文档里没有查到一台独立、名叫
+`/workflow` 的图运行时。它把可复用步骤放进 Skills；旧 custom slash commands
+也并入 Skills。Skill 可用 `/skill-name` 直唤，也可交给 subagent 跑。官方
+“Common workflows”则是一册用法，不是一套 DAG 引擎。
+
+用户这番设想并非照抄 Claude Code。它往前多走了一步：
+
+- Skill 写章法，模型临场照着办。步骤可松，可随上下文变。
+- Workflow 存执行合同。节点、边、输入、输出、并行、重试、审批都有明账。
+- Slash alias 只是入口。真正干活的是 WorkflowRuntime，不是把一大段 prompt
+  塞回主会话，听凭模型自行记步骤。
+
+这套东西可借 PocketFlow 的骨架：Node、带名字的边、Shared Store、嵌套 Flow、
+Batch、Async、Parallel、Retry 与 Fallback。却不能原样搬它的 Python API。LubanCode
+要接现成 ToolRegistry、AgentTool、SessionRuntime、权限、Hooks、会话存档与多前端
+事件，须有更硬的类型和恢复语义。
+
+参考：
+
+- Claude Code Skills: https://code.claude.com/docs/en/skills
+- Claude Code Common Workflows: https://code.claude.com/docs/en/common-workflows
+- PocketFlow Core Abstraction: https://github.com/the-pocket/PocketFlow/blob/main/docs/index.md
+- PocketFlow Node: https://github.com/the-pocket/PocketFlow/blob/main/docs/core_abstraction/node.md
+- PocketFlow Flow: https://github.com/the-pocket/PocketFlow/blob/main/docs/core_abstraction/flow.md
+- PocketFlow Batch / Async / Parallel:
+  https://github.com/the-pocket/PocketFlow/tree/main/docs/core_abstraction
+
+## 用户故事
+
+### 一、用话起草一张图
+
+```text
+> /workflow create 论文检索
+
+你想拿什么作输入？
+> 用户想查的论文领域，也可能带年份、语言与条数。
+
+最后交什么？
+> 一份 Markdown。先列摘要，再列去重后的论文、出处、年份、链接与入选理由。
+
+查哪几路？
+> arXiv、DBLP、Google Scholar、AnySearch。可以并行。
+
+某一路没配好或查挂了，整场停下，还是拿其余结果继续？
+> 其余三路够用便继续，在报告里写明缺失来源。
+
+草图：
+  parse_query
+       │
+       ├──── arxiv ──── normalize_arxiv ────┐
+       ├──── dblp ───── normalize_dblp ──────┤
+       ├──── scholar ── normalize_scholar ───┼─► dedupe ─► rank ─► markdown
+       └──── anysearch ─ normalize_anysearch ─┘
+
+入口：/论文检索 <领域或问题>
+并行上限：4；分支失败：all_settled；总时限：10m
+要写入项目级 workflow 吗？[确认/返回修改/取消]
+```
+
+问话不必照表全问。描述里已有的，直接填。只有会改变图、权限或结果的缺口才
+追问。创建过程须让用户看见：
+
+- 输入字段与默认值。
+- 最终产物落在哪儿，是否写文件。
+- 会调用哪些 Tool、Skill、Agent 或子 Workflow。
+- 哪些节点并行，怎样汇合。
+- 失败后重试、跳过、回落还是终止。
+- 哪些动作要审批。
+- 预算：并发、轮数、token、时间、工具调用数。
+- 安装范围：项目级或用户级。
+- 直呼 alias 是什么，若撞名怎样改。
+
+### 二、直接运行
+
+```text
+> /论文检索 graph neural networks --since 2024 --limit 40
+
+● 论文检索 · running · 18s
+  ✓ 析题
+  ├─ ● arXiv       31 条
+  ├─ ✓ DBLP        24 条
+  ├─ ! Scholar     未配置，已按规矩跳过
+  └─ ● AnySearch   18 条
+  ○ 去重
+  ○ 排序
+  ○ 写 Markdown
+```
+
+直呼 alias 走 Workflow 输入解析，不把整行当一坨 prompt。长参数、引号、路径、
+布尔、枚举与数组，均按 `input_schema` 解。也须保留一条不会撞名的正门：
+
+```text
+/workflow run paper-research --topic "graph neural networks" --since 2024
+```
+
+### 三、看图、改单、试跑
+
+```text
+/workflow list [project|home|all]
+/workflow show <id>
+/workflow graph <id> [ascii|mermaid|json]
+/workflow validate <id>
+/workflow test <id> [--fixture 路径]
+/workflow run <id> [参数...]
+/workflow resume <run_id>
+/workflow cancel <run_id>
+/workflow history <id>
+/workflow edit <id>
+/workflow enable|disable <id>
+/workflow remove <id>
+/workflow export|import <id> [路径]
+```
+
+`remove` 要确认。若已有运行历史，默认只移定义，不顺手抹运行账。删历史另设
+`/workflow history delete <run_id>`，也要确认。
+
+## 与现有三套东西怎样相处
+
+### Workflow 与 Skill
+
+| 项目 | Skill | Workflow |
+| --- | --- | --- |
+| 本体 | 指令、知识、参考资料、脚本 | 有版本的可执行图 |
+| 调度者 | 模型临场判断 | WorkflowRuntime |
+| 步骤 | 可省略、可改路 | 节点和边有明账 |
+| 并行/汇合 | 靠 prompt 约束 | 调度器硬执行 |
+| 重试/恢复 | 靠模型再做 | 节点策略与 checkpoint |
+| 适合 | 活法、研究法、写作法 | 固定流水线、批处理、审批流程 |
+
+- Workflow 节点可引用一份 Skill，给某只 agent 或 LLM 节点添专门章法。
+- Skill 不暗中变 Workflow。用户若要硬步骤，须经 `/workflow create` 编图并确认。
+- 现有 `/record` 录工具流水，归纳成 `SKILL.md`。它偏“做一遍，提炼经验”。
+  后续可添 `/record stop --workflow-draft`，把录制事件交编译器作参考；首版不改
+  `/record` 语义，更不能把历史工具调用原样当成可复跑脚本。
+- 直呼 alias 的 UX 可同 Skill 像，注册表却要分开。帮助页注明它是 skill 还是
+  workflow，免得两件东西同名时暗中抢路。
+
+### Workflow 与 Tool / Plugin / MCP
+
+- Tool 是一只手。Workflow 是派活与接账的掌柜。
+- Plugin、MCP、核心工具都归 ToolRegistry。Workflow 节点只按稳定 tool id 与
+  schema 调用，不关心工具从哪儿来。
+- 工具缺失时，定义仍可列出，状态标 `unavailable`；运行前做 capability check，
+  按定义里的 `on_unavailable` 走 `fail/skip/fallback/ask`。
+- 不把 arXiv、DBLP、Scholar、AnySearch 逻辑写死进 WorkflowRuntime。它们应由
+  Tool、Plugin 或 Skill 提供。运行时只管图。
+- Google Scholar 没有一条可默认倚仗的公开 API。创建向导须检查本机到底有
+  Scholar connector、浏览器工具还是别的受支持入口；没有便追问或禁用该分支，
+  不偷偷写爬虫冒充“已支持”。
+
+### Workflow 与 Agent
+
+- `agent` 节点复用现有 AgentTool/AgentLoop，不另造第二套模型循环。
+- 每个 agent 节点有 role、task、allowed_tools、step_limit、model_role、context
+  输入与输出 schema。
+- 现有子代理深度硬限 1。首版照守，不为嵌套 subflow 偷开无限孙代理。
+- 并行四路检索可用四只 agent，也可直接并行调四个 Tool。能用确定 Tool 的，
+  不必白费四只 agent；只有需要多步搜索、追读、判断时才派 agent。
+- WorkflowRun、AgentTask、ToolCall 三层 id 要串起来，前端才能从总图钻进某只
+  agent 的消息账。
+
+## 文件与安装范围
+
+项目级：
+
+```text
+<project>/.lubancode/workflows/<workflow-id>/
+  workflow.yaml
+  prompts/
+    parse-query.md
+    rank-papers.md
+  fixtures/
+    smoke.json
+  README.md                 # 可选，写输入与产物，不参与执行
+```
+
+用户级：
+
+```text
+<home>/.lubancode/workflows/<workflow-id>/...
+```
+
+定规如下：
+
+- `workflow.yaml` 是唯一执行入口。引用文件必须留在 workflow 目录内，路径按
+  目录根解析，拒绝 `..` 越界与符号链接逃逸。
+- 项目级同 id 胜用户级；须在 `/workflow list/show` 标来源，不能静默遮住。
+- 定义带 `schema_version` 与业务 `version`。解析器不认新 schema 就拒跑，不
+  猜意思。
+- 定义、prompt 与 fixture 一并算内容 hash。审批、缓存、恢复都认 hash，不只
+  认可改名的 id。
+- 密钥只写 `secret_ref` 或环境变量名，不落明文，不塞 prompt，不写运行账。
+- YAML 交现有 `yaml-cpp` 解析，再转成内部强类型；不得手搓缩进与 `${...}`。
+- 导入先落 staging，验完再原子换目录。半截包不进可用清单。
+
+## Workflow 定义草案
+
+首版用人能改的 YAML，宿主解析后立刻归一成强类型 `WorkflowDefinition`。下面只
+钉语义，不强钉最终字段拼法：
+
+```yaml
+schema_version: 1
+id: paper-research
+version: 1.0.0
+name: 论文检索
+description: 多源检索、去重、排序并写成 Markdown
+alias: 论文检索
+scope: project
+
+inputs:
+  type: object
+  required: [topic]
+  additionalProperties: false
+  properties:
+    topic: { type: string, minLength: 2, description: 领域或问题 }
+    since: { type: integer, minimum: 1900 }
+    limit: { type: integer, minimum: 1, maximum: 200, default: 40 }
+
+outputs:
+  type: object
+  required: [markdown, papers]
+  properties:
+    markdown: { type: string }
+    papers: { type: array }
+    unavailable_sources: { type: array, items: { type: string } }
+
+entry: parse_query
+limits:
+  max_concurrency: 4
+  max_nodes: 64
+  max_steps: 128
+  timeout: 10m
+  tool_calls: 100
+  tokens: 120000
+
+nodes:
+  parse_query:
+    type: llm
+    prompt: prompts/parse-query.md
+    input: { query: "${inputs.topic}", since: "${inputs.since}" }
+    output_schema: { $ref: "#/schemas/search_plan" }
+
+  search_sources:
+    type: parallel
+    branches: [arxiv, dblp, scholar, anysearch]
+    join: all_settled
+    max_concurrency: 4
+
+  arxiv:
+    type: tool
+    tool: plugin__papers__arxiv_search
+    input: { query: "${nodes.parse_query.output.query}", limit: "${inputs.limit}" }
+    retry: { attempts: 3, backoff: exponential, initial: 1s, max: 15s }
+    on_unavailable: skip
+
+  dblp:
+    type: tool
+    tool: plugin__papers__dblp_search
+    input: { query: "${nodes.parse_query.output.query}", limit: "${inputs.limit}" }
+    retry: { attempts: 2, backoff: fixed, initial: 2s }
+    on_unavailable: skip
+
+  scholar:
+    type: agent
+    role: research
+    task: prompts/search-scholar.md
+    allowed_tools: [browser_search, browser_open]
+    on_unavailable: skip
+
+  anysearch:
+    type: tool
+    tool: plugin__anysearch__search
+    input: { query: "${nodes.parse_query.output.query}" }
+    on_unavailable: skip
+
+  dedupe:
+    type: transform
+    operation: paper_deduplicate
+    input: "${nodes.search_sources.outputs}"
+
+  rank:
+    type: llm
+    prompt: prompts/rank-papers.md
+    input: "${nodes.dedupe.output}"
+
+  markdown:
+    type: template
+    template: prompts/report.md
+    input: "${nodes.rank.output}"
+
+edges:
+  - { from: parse_query, on: success, to: search_sources }
+  - { from: search_sources, on: joined, to: dedupe }
+  - { from: dedupe, on: success, to: rank }
+  - { from: rank, on: success, to: markdown }
+
+result:
+  markdown: "${nodes.markdown.output}"
+  papers: "${nodes.dedupe.output}"
+  unavailable_sources: "${nodes.search_sources.unavailable}"
+```
+
+示例里的 `paper_deduplicate` 不能是运行时暗藏的魔法字符串。它须解析成已注册
+transform/tool，带 schema 与版本；找不到便在 validate 阶段报错。
+
+## 图的核心模型
+
+### Node 生命周期
+
+可借 PocketFlow 的 `prep -> exec -> post` 分工，但内部不要求每种节点都暴露三
+个虚函数。对外统一成：
+
+```text
+ResolveInputs -> ValidateInputs -> Execute -> ValidateOutput -> CommitOutput -> EmitOutcome
+```
+
+- `ResolveInputs` 只从输入、变量与已完成节点读值。
+- `Execute` 不直接乱写全局 store，只产一份候选 output。
+- `CommitOutput` 原子落账。进程崩在 Execute 中途，恢复后不会看见半份 output。
+- `EmitOutcome` 产 `success/error/empty/approved/...`，边按 outcome 选下一站。
+- retry 只包 Execute。副作用节点若无幂等键，不可无脑重试。
+
+### Edge
+
+- 每条边写 `from + outcome + to`。一个节点同一 outcome 只能有一条普通出边；
+  fan-out 必须显式用 parallel/map 节点，免得“多条边”到底是并行还是歧义。
+- 条件边只读结构化值，走受限表达式或 JSON Logic 一类解析器。禁止 `eval`、
+  shell、Lua/Python 内联表达式。
+- 循环必须标 `max_iterations` 或耗用全局 `max_steps`。无界环校验不过。
+- 子 Workflow 可当节点。输入输出须映射，错误不能穿墙变成一串文本。
+
+### Store
+
+PocketFlow 用一只 Shared Store 传值，轻巧，却容易让并行节点互踩。LubanCode 改成
+有名分区：
+
+```text
+inputs                         本次运行输入，只读
+vars                           显式变量；写入须由 state/assign 节点声明
+nodes.<node_id>.output         节点终态输出，只写一次
+nodes.<node_id>.meta           attempt、时间、错误、缓存命中等
+artifacts.<artifact_id>        大文件、Markdown、下载件，只存引用与 hash
+run                            workflow/run/version/cwd 等只读元数据
+```
+
+- `${inputs.topic}`、`${nodes.arxiv.output.items}` 交结构化 resolver。解析失败须指到
+  节点、字段与期望类型。
+- 并行分支各写自己名下。Join 按声明顺序收，不按谁先回来排，保证复跑结果稳定。
+- 大结果不塞事件和 YAML。ArtifactStore 收正文，Store 留 id、mime、size、hash。
+- Secret 单独走 SecretResolver。Store、日志、错误、模板渲染一概只见脱敏值。
+
+## 首版节点种类
+
+### 干活节点
+
+- `tool`：调 ToolRegistry 中一只已注册工具。输入输出均验 schema。
+- `agent`：派一只现有子代理。可配 role、模型路由、工具白名单、轮数与预算。
+- `llm`：单次结构化模型调用。适合析题、分类、排序，不开完整 agent loop。
+- `skill`：把 Skill 装进一次 agent/llm 执行上下文；不可把 Skill 文本当代码跑。
+- `template`：按安全模板写 Markdown/JSON/text，不为排版再浪费一轮模型。
+- `transform`：调用宿主注册的纯数据变换。首版不许塞任意脚本源码。
+- `approval` / `ask_user`：经 InteractionBroker 悬起，等用户决定或补字段。
+- `subflow`：调用另一份有版本的 Workflow。
+
+### 控制节点
+
+- `parallel`：同时放行若干独立分支。
+- `join`：收束分支。策略认 `all`、`all_settled`、`any`、`quorum`、`race`。
+- `map`：把数组拆成多项，逐项跑一只节点或子图。
+- `reduce`：按稳定次序汇总 map/parallel 结果。
+- `switch`：按结构化条件选路。
+- `foreach`：顺次迭代，适合有依赖或易撞 rate limit 的活。
+- `checkpoint`：显式落断点；多数节点成功后也可自动 checkpoint。
+- `end`：写终态与 Workflow 输出。
+
+`parallel` 与 `map` 要分开。四个已知来源并发，是 parallel；把五十篇论文逐篇
+读摘要，是 map。前者分支形状早已写定，后者运行时才按数据扩开。
+
+## 并行与汇合规矩
+
+- `max_concurrency` 有全局、节点、provider/tool 三层帽，取最小值。
+- 调 LLM/API 多为 I/O 活，适合并发；CPU 重活交进程池或 Tool 自己管，不能靠
+  多开线程假装变快。
+- 同一 provider 要有 semaphore 与 rate-limit backoff。四路并行不等于四十路
+  横冲直撞。
+- `all`：一支失败便取消未起分支；已在跑的按 cancel policy 收口。
+- `all_settled`：全等完，成功与失败一并交下游。论文多源检索缺一路可用它。
+- `any`：首个成功便过关，其余可取消。
+- `race`：首个终态便过关，成功失败都算。用途窄，定义时明示。
+- `quorum`：满足 N 个成功便过关。若余下分支全成也凑不够，立刻失败。
+- 汇合结果按定义顺序排。完成时间只进 meta，不拿来改报告顺序。
+- 用户取消、预算耗尽、上游失败须沿 run/node cancellation token 传播。后台
+  agent、进程工具与网络请求都应收同一信号。
+
+## 重试、回落与幂等
+
+PocketFlow 的 `max_retries + wait + exec_fallback` 可借，LubanCode 再补全：
+
+```yaml
+retry:
+  attempts: 3
+  when: [timeout, rate_limited, transient_network]
+  backoff: exponential
+  initial: 1s
+  max: 30s
+  jitter: true
+fallback:
+  to: cached_search
+```
+
+- error 要有稳定 code。不能拿错误文案猜它是不是 rate limit。
+- 校验错、权限拒绝、工具不存在、用户取消默认不重试。
+- 写文件、发消息、提交代码等副作用调用，若工具没有 `idempotency_key` 或明确
+  声明可重试，attempts 只能是 1。
+- fallback 是一条明边或一只明节点。不得在 C++ 深处静默换工具。
+- 每次 attempt 都发事件、记耗时与错误；UI 默认折起，只报“重试 2/3”。
+- 重试预算算进总时限、tool_calls 与 token，不能另开一本免单账。
+
+## 自然语言编译器
+
+`/workflow create` 不是让模型直接写文件。它分五步：
+
+1. **提取意图**：把用户描述归成 WorkflowDraft。字段缺了便列 `unknowns`。
+2. **查能力**：从 ToolRegistry、SkillCatalog、WorkflowCatalog、模型角色与权限档
+   取一份只读能力表。模型不能凭空杜撰 `google_scholar_search`。
+3. **最少追问**：只问会改变输入、产物、失败语义、权限或图形的岔路。
+4. **编译与校验**：模型按严格 JSON Schema 产 AST；宿主再验 schema、引用、图、
+   类型、能力、预算、权限与路径。
+5. **预览与安装**：打印摘要、ASCII/Mermaid 图、将写文件的 diff 与警告；用户
+   确认后原子落盘并刷新 catalog。
+
+模型输出永远只是候选 AST。下列错误须由宿主抓住：
+
+- id 重复、entry 不存在、节点不可达、没有终点。
+- outcome 没接边，或同一 outcome 接了两条歧义边。
+- 环没有上限；展开后可能越过 `max_nodes/max_steps`。
+- `${...}` 指到未来节点、缺字段或类型接不上。
+- tool/skill/subflow 不存在，或版本不合。
+- tool 输入字段与它当下 schema 不合。
+- 并行分支同时写同一 mutable var。
+- 定义索取超出当前权限的工具、路径、网络或密钥。
+- alias 撞内建 slash、Skill、另一 Workflow，或含空白/控制字符。
+- prompt/template 越出包目录，或定义藏明文 secret。
+
+校验错误须落到人看得懂的位置：`nodes.arxiv.input.limit`，不要只吐
+“invalid workflow”。
+
+### 改 Workflow
+
+`/workflow edit` 也走 Draft -> Validate -> Diff -> Confirm。每次成功改动：
+
+- 业务 version 至少补 patch，内容 hash 必变。
+- 留一份可回滚旧定义，或交 Git 管项目级文件。
+- 正在跑的 WorkflowRun 固定旧 hash，不半途换图。
+- resume 必须找到同一 hash。若定义没了，运行目录中须留一份归一化快照。
+
+## 动态编排分两层做
+
+用户说“动态编排 agent”，这话有两种意思，不可揉在一起。
+
+### 第一层：静态图，动态数据
+
+图在开跑前定好。输入、条件分支、map 数量、agent 产物可变。这层已够办大半 SOP，
+又能预览、测试、恢复。首版只做这层。
+
+### 第二层：Planner 运行中生受限子图
+
+有些研究活须先看结果，再决定追哪篇、补哪路。后续可添 `planner` 节点：
+
+- planner 只能从定义列出的 node templates 与 tool allowlist 选积木。
+- 它输出一份 `GraphPatch`，不是 shell、源码或任意 tool name。
+- 宿主重跑全套图校验，查 max_nodes、max_depth、max_iterations 与预算。
+- 新图越过预批权限、添副作用节点、换密钥或扩路径时，必须再问用户。
+- GraphPatch 与批准结果写进 run journal，恢复时照旧图重放，不再问模型“当时
+  大概想了什么”。
+- planner 不得修改已成功节点，只可添后继、收窄未跑分支或明确取消待跑节点。
+
+这般做，图会长，却不失控。首版若一上来就让 agent 随手改 DAG，断点、审批、
+复现与安全全成空话。
+
+## 运行状态机
+
+WorkflowRun 终态：
+
+```text
+created -> validating -> ready -> running
+                              ├─ waiting_input
+                              ├─ waiting_approval
+                              ├─ paused
+                              ├─ succeeded
+                              ├─ failed
+                              ├─ cancelled
+                              └─ budget_exhausted
+```
+
+NodeRun 状态：
+
+```text
+pending -> ready -> running -> succeeded
+                    │        ├─ skipped
+                    │        ├─ failed
+                    │        └─ cancelled
+                    ├─ retry_wait -> ready
+                    ├─ waiting_input
+                    └─ waiting_approval
+```
+
+- 状态迁移写成纯函数与迁移表，非法迁移拒绝并记诊断，不静默改状态。
+- 每个节点每次 attempt 有独立 id、开始/结束时间与错误。
+- Scheduler 只看已提交状态与依赖，不从终端画面反推“谁跑完了”。
+- 进程重启后，`running` 节点归为 `interrupted`。纯节点可重跑；有副作用节点须
+  查幂等记录或问用户，不能自作主张再做一次。
+
+## Run Journal、断点与恢复
+
+```text
+<home>/.lubancode/workflow-runs/<run-id>/
+  manifest.json             workflow id/version/hash、cwd、开始时间、终态
+  definition.json           归一化定义快照
+  events.jsonl              只追加事件
+  checkpoints/<seq>.json    小型 Store 快照
+  artifacts/                大产物或其索引
+```
+
+- 每条事件带 `run_id、workflow_id、node_id、attempt、seq、ts、type、data`。
+- `seq` 在一场 run 内单调递增；append + flush，半截尾行照现有 recorder 规矩跳过。
+- 节点 output 先写临时件，算 hash，原子 rename，再追加 `node_succeeded`。恢复不会
+  捡到半份结果。
+- 默认每只节点终态后做轻 checkpoint；大 Store 只存引用，避免每步抄全本。
+- `/workflow resume <run_id>` 先验定义 hash、工具版本、cwd 与待决审批。状态不合
+  便给差异，不硬续。
+- 缓存键至少含 definition hash、node config hash、resolved input hash、tool/skill
+  version 与相关环境指纹。副作用节点默认不缓存。
+- “重跑某节点”另设调试命令，先把它和所有下游标 stale。不可留旧下游结果
+  冒充新跑成品。
+- 运行账可挂进现有 SessionStore，或由 session 只存 run 引用。不能把一整张
+  events.jsonl 再复制进会话 JSONL。
+
+## 审批、信任与权限
+
+- Workflow 不能授予权限。它只能声明需要什么；真正能不能做，仍由 Tool 权限、
+  hooks、confirm mode 与 InteractionBroker 裁决。
+- 创建时的“批准这张图”不等于永远批准图中每次危险 Tool。可加“本次/本定义
+  hash/本会话”三种授权范围，默认最窄。
+- 定义 hash 一变，旧授权即失效。项目 Workflow 从 Git 拉来，也须按项目信任
+  策略处理。
+- `approval` 节点可把一批将要发生的同类动作列清，一次问完；Tool 自己的硬安全
+  确认仍不得被它压住。
+- 并行分支同时要问话时，InteractionBroker 可挂多张 request，前端逐张答；TUI
+  可串行呈现，Runtime 不得锁住其余事件。
+- 搜索结果、网页、论文摘要全算不可信数据。它们可喂排序与摘要，不得变成新
+  tool、命令、路径或权限。Prompt 中要把“资料”和“指令”分栏。
+- 子 Workflow 只拿显式映射的输入和允许的能力，不默认继承父图全部 secret。
+- 运行日志须沿用 recorder/plugin 的脱敏规矩，authorization、cookie、token、
+  api_key、password 等入盘前打码。
+
+## Slash alias 与冲突规矩
+
+启动时建 `WorkflowCatalog`，列项目级、用户级 Workflow 及 alias。解析顺序：
+
+1. 内建 slash command 永远居首，如 `/help`、`/resume`、`/workflow`。
+2. 项目级 Workflow alias。
+3. 用户级 Workflow alias。
+4. Skill 直呼命令。
+
+这只是建议优先级；更稳的做法是发现任何跨类撞名便禁用直呼 alias，只留下
+`/workflow run <id>`，并在 `/workflow doctor` 报明白。首版采用这条更稳规矩，
+不靠阴影顺序猜用户想唤谁。
+
+- alias 只认 Unicode 字母、数字、`-`、`_` 与中文等正常文字；拒绝空白、斜杠、
+  控制符和路径字符。
+- autocomplete 同时提示参数 schema、默认值与一句说明。
+- `/help` 按 Built-in / Workflows / Skills 三栏列，来源一眼看清。
+- 非交互模式若缺必填输入，直接报结构化错；交互模式可通过 `ask_user` 补问。
+
+## Runtime 事件与多前端
+
+本单须接 `显示系统彻底剥离_统一SessionRuntime接TUI_Web_Tauri.todo` 已立的
+Command/Event 合同。不要让 WorkflowRuntime 自己 `cout` 一套画面。
+
+建议命令：
+
+```text
+CreateWorkflowDraft / ReviseWorkflowDraft / InstallWorkflow
+ListWorkflows / ReadWorkflow / ValidateWorkflow / RemoveWorkflow
+StartWorkflowRun / PauseWorkflowRun / ResumeWorkflowRun / CancelWorkflowRun
+AnswerWorkflowInput / ResolveApproval
+```
+
+建议事件：
+
+```text
+WorkflowDrafted / WorkflowValidated / WorkflowInstalled
+WorkflowRunStarted / WorkflowRunStateChanged / WorkflowRunCompleted
+WorkflowNodeQueued / WorkflowNodeStarted / WorkflowNodeProgress
+WorkflowNodeRetrying / WorkflowNodeWaiting / WorkflowNodeCompleted
+WorkflowBranchStarted / WorkflowJoinCompleted
+WorkflowGraphPatched
+WorkflowArtifactCreated
+```
+
+每条事件至少带：
+
+```text
+thread_id / turn_id（若从会话起）
+workflow_id / workflow_version / workflow_hash
+run_id / node_id / attempt / seq / timestamp
+```
+
+- 事件只放领域数据，不带 ANSI、缩进线、终端宽度或本地化成句。
+- Terminal 把图压成树行；Web/Tauri 可画真正 DAG；app-server 原样推 JSON-RPC。
+- UI 默认看总图与节点短状态。点开节点再看 agent transcript/tool calls，不能把
+  四路并行的每一条工具日志全泼在主画面。
+- `worked for`、总 token、命中缓存、成功/失败/跳过分支由 run summary 算，不
+  从散落的文本拼。
+- 前端重连先取 WorkflowRunSnapshot，再从 `last_seq + 1` 接事件。
+
+## 对论文检索例子的实打实拆法
+
+不要只画“并行搜四处 -> 汇总”六个框。各路数据形状不同，还会重名、漏 DOI、
+年份不齐。正经图至少分这些步：
+
+1. `parse_query`：从用户话里提主题、同义词、年份、语言、类型与条数；缺关键
+   范围时问一句。
+2. `capability_check`：查 arXiv、DBLP、Scholar、AnySearch 当下能不能用；缺一路
+   按策略问、跳或换 fallback。
+3. `search_*`：四路并行，各自受并发、超时、分页与 source limit 约束。
+4. `normalize_*`：各自映成统一 `PaperRecord`：title、authors、year、venue、doi、
+   arxiv_id、url、abstract、source、source_rank、retrieved_at。
+5. `join_sources`：用 all_settled 收齐；失败分支也留下结构化说明。
+6. `dedupe`：先 DOI/arXiv id，后规范化标题 + 年份 + 作者；合并来源与最佳字段，
+   不凭 LLM 肉眼删重。
+7. `filter`：按年份、语言、类型与用户硬条件筛。
+8. `rank`：模型按相关度、新近度、来源与用户偏好排；保留评分理由和原始位次。
+9. `enrich_top_k`：只给前 K 篇补摘要/全文元数据，控制费用；可 map 并发。
+10. `render_markdown`：模板写报告，列查询式、来源缺失、去重统计与可点击链接。
+11. `verify_output`：查 Markdown 非空、条数、必填字段、链接与引用归属；不合格
+    走一次修补或明确失败。
+
+统一 `PaperRecord` 与去重器该做成 Plugin/Tool 或纯 transform，不塞进 prompt。
+这样结果稳，也容易单测。
+
+## 现有代码可接之处
+
+- `src/cli/slash_commands.*`：只添 `/workflow` 解析及动态 alias lookup；具体业务
+  不塞进这个纯 parser。
+- `src/app/commands/*`：放 Terminal 命令薄壳；待 CommandService 成形后只作
+  typed command 适配。
+- `src/runtime/command.hpp`、`event.hpp`、`interaction_broker.hpp`：接 Workflow
+  命令、事件、审批与补问，不再另造同步 stdin 回调。
+- `src/app/tool_runtime.*`、`tools::ToolRegistry`：给 Workflow 节点作 capability
+  快照与 tool dispatch；调用仍走同一 hooks、确认与结果合同。
+- `src/tools/agent_tool.*`：承 agent 节点。补 parent run/node id、预算与 cancellation
+  传播，不复制 AgentTask 状态机。
+- `src/agent/workflow_recorder.*`：只可复用 JSONL、脱敏、半截尾行与原子落盘经验。
+  现有类名将来可改 `SkillWorkflowRecorder` 或写清注释，免得同新 Runtime 混名。
+- `src/agent/artifact_store.*`：收节点大产物；运行账只存引用。
+- `src/hooks/*`：Workflow 调 Tool 仍触发 pre/post_tool；日后可另加 workflow_run、
+  node_start/node_stop 事件，须沿现有信任与超时规矩。
+- `src/config/skill_store.*`：可借项目/用户双层扫描、原子安装与刷新路数，不能
+  直接把 Workflow 冒充 Skill 存进去。
+- `yaml-cpp` 已在工程中。Workflow YAML 复用它，解析结果转 `nlohmann::json` 或
+  强类型 AST 作 schema 校验。
+
+建议新增边界：
+
+```text
+src/workflow/
+  definition.*       强类型 AST、schema version
+  parser.*           YAML -> AST，路径与模板引用
+  validator.*        schema、图、类型、能力、预算、权限
+  catalog.*          project/home 扫描、冲突与 hash
+  compiler.*         Draft、追问缺口、模型结构化输出
+  scheduler.*        ready queue、并行、join、取消
+  executor.*         各 node executor 接现成 runtime
+  store.*            typed values、artifact refs
+  journal.*          event log、checkpoint、resume
+  events.*           领域事件，映到 runtime::ServerEvent
+```
+
+依赖只准这样走：
+
+```text
+frontend/app-server -> runtime command/event -> workflow runtime
+workflow runtime -> agent/tool/skill/artifact/interaction abstractions
+agent/tool 不反向 include workflow UI
+```
+
+## 分批落地
+
+### 第 1 批：定义、目录与校验器，不执行
+
+- 立 `WorkflowDefinition`、YAML parser、归一化 JSON 与内容 hash。
+- 立 `WorkflowCatalog`，扫项目级/用户级，报 id/alias 冲突与来源。
+- 做结构、引用、可达性、环上限、类型与能力校验。
+- `/workflow list/show/graph/validate` 可用；Mermaid 与 ASCII 均由纯图数据生成。
+- 用 fixture 钉坏 YAML、越界路径、撞名、缺 Tool、悬空边与无界环。
+
+### 第 2 批：顺序图最小闭环
+
+- 支持 `tool/llm/template/switch/end` 与普通 outcome 边。
+- 立 WorkflowRun、NodeRun、Store、Journal 与事件。
+- `/workflow run` 可跑顺序图，支持取消、超时、输出 schema 与 artifact。
+- 接 Runtime EventSink；Terminal 只做一层最小状态画法。
+
+### 第 3 批：并行、Map/Reduce 与预算
+
+- 支持 parallel/join/map/reduce/foreach。
+- 做 semaphore、provider/tool 并发帽、稳定汇合顺序与全链取消。
+- 补 retry/backoff/fallback、错误码、幂等限制与部分成功。
+- 用论文四路假工具跑通，不碰真网络也能复现竞态。
+
+### 第 4 批：Agent、Skill、审批与恢复
+
+- agent/skill/subflow/approval/ask_user 节点接现成设施。
+- run/node/tool/agent id 贯通；预算与取消传到底。
+- checkpoint、崩溃恢复、interrupted 副作用节点问话。
+- Terminal 展开节点时复用子代理消息账，不复制一套 transcript。
+
+### 第 5 批：自然语言创建与动态 alias
+
+- `/workflow create` 走 Intent -> Capability -> Clarify -> Compile -> Validate -> Diff。
+- 严格结构化模型输出，宿主验证，不让模型直接写最终文件。
+- 原子安装、编辑、版本、回滚、enable/disable/remove。
+- 注册 `/alias`，做 autocomplete、帮助分栏与跨类撞名阻断。
+
+### 第 6 批：受约束动态图与多前端
+
+- planner + GraphPatch + 二次校验/审批。
+- app-server 命令、snapshot 与事件补账。
+- Web/Tauri 画 DAG、节点详情、分支错误、审批与 artifact。
+- graph patch、断线重连、运行中升级与多客户端竞态测透后，方可叫“动态图”。
+
+## 测试清单
+
+### 纯逻辑
+
+- YAML/AST round-trip；归一化输出与 hash 在三平台一致。
+- 输入、输出、Tool schema 类型传播；`${...}` 好坏路径。
+- DAG 可达性、悬空边、outcome 歧义、环上限、subflow 环。
+- project/home 同 id 与 alias/Skill/内建 slash 撞名。
+- parallel/join 五种策略、稳定顺序、quorum 提前成功/提前失败。
+- retry 条件、backoff、jitter 的 fake clock；不可重试错误不误跑。
+- map 展开上限、foreach 顺序、reduce 结果。
+- Store 并行写冲突、atomic commit、artifact 引用与 secret 脱敏。
+
+### 运行时
+
+- 假 ToolRegistry 跑顺序、分支、并行、fallback 与 subflow。
+- 某一路快、某一路慢、某一路失败；all_settled 仍交完整分支账。
+- 用户 ESC/cancel 能打断等待、backoff、agent、进程工具与 join。
+- agent 节点超 step/token/time/tool-call 预算，run 收成 budget_exhausted。
+- 三只节点同时审批，request 不串；断线/取消后迟到回答失效。
+- 崩在 Execute、artifact rename 前后、event append 半行三处，均能恢复或明报。
+- 副作用节点无幂等键时不自动重跑；有键时不会做重。
+- workflow 定义运行中被改/删，旧 run 仍靠快照恢复。
+
+### 编译器
+
+- 同一自然语言描述产出的 AST 过严格 schema，不含虚构 Tool。
+- 缺输入时只追问关键缺口；非交互模式返回 `missing_inputs`。
+- 模型试图塞 command、越界 prompt、明文 token、无限环，宿主全拒。
+- 能力表少 Scholar 时，草稿标 unavailable/ask，不假装有工具。
+- preview 能列节点、边、权限、预算、缺失能力与将写文件的 diff。
+- 用户取消后目录无半截；确认后 catalog 立即可见。
+
+### 多前端
+
+- 同一假 run 喂 TerminalEventSink 与 JsonEventSink，run/node id、seq、终态一致。
+- 重连拿 snapshot + 增量事件，不重画、不漏节点、不把旧 retry 当新调用。
+- Terminal 收起图时一屏干净；展开节点能看完整 agent/tool 账。
+- Web/Tauri 不读 workflow-runs 私有目录，所有状态只从 query/snapshot/event 来。
+
+## 验收
+
+- 用户可用一句自然语言创建论文检索 Workflow。向导补齐关键缺口，展示图与警告，
+  确认后写进项目或用户目录。
+- `/论文检索 <主题>` 与 `/workflow run paper-research ...` 都能启动同一份定义。
+- arXiv、DBLP、Scholar、AnySearch 四路可真并行；少一路时按 all_settled 继续，
+  最终 Markdown 明写缺了谁。
+- 去重、排序、汇总各有节点与结构化中间值，不是一只 agent 背着大 prompt 从头
+  猜到尾。
+- 每只节点有状态、attempt、耗时、输入输出引用与错误；总图能暂停、取消、恢复。
+- Tool、Agent、Skill、Subflow 共用现成权限、Hooks、审批、预算与事件，不生旁门。
+- 定义坏、能力缺、alias 撞、引用错、无界环、越权、明文 secret，均在开跑前
+  报清位置。
+- 进程崩后可从安全 checkpoint 续；副作用节点不重复做。
+- Terminal、Web、Tauri、app-server 共吃同一 Workflow 事件，画法各异，账目一致。
+- 三平台单测与 CI 过关；调度器测试用 fake executor/fake clock，不靠 sleep 赌时序。
+
+## 明着不做
+
+- 不把“Workflow”做成另一种 Skill 名字，末了仍靠主模型记全套步骤。
+- 不在首版放任 agent 生成任意图并立即执行。先静态，后受约束 GraphPatch。
+- 不给 Workflow 一枚 `run arbitrary code` 万能节点。代码须先成为受信 Tool/Plugin。
+- 不在引擎里硬编码论文网站、CI、发布等具体业务。业务全由 Workflow 包和 Tool
+  组合出来。
+- 不把 YAML 当权限单。用户从 Git 拉来的 Workflow 仍是不可信项目内容。
+- 不承诺 bit-for-bit 复现 LLM 输出。要复现的是图、输入、版本、事件、分支与
+  副作用；模型采样本来就会变。
+- 不先做拖拽画布。定义、校验、运行、恢复与事件没立稳，画布只是一张好看的壳。
+
+## 最后的定案
+
+这功能值得做。它也确实像 PocketFlow，却不该只学“节点连线”四个字。
+
+LubanCode 要抓住三层：
+
+1. **Compiler**：把人话编成受约束、可读、可改的图。
+2. **Runtime**：按图调 Tool 与 Agent，管并行、汇合、失败、审批和恢复。
+3. **Frontend contract**：把同一场运行送到 Terminal、Web、Tauri 与 app-server。
+
+三层立住，`/xxxx xxx` 才不是一枚漂亮别名，而是一套真能反复办事、出了岔子
+也查得清账的 SOP。

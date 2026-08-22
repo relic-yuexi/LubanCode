@@ -438,6 +438,7 @@ add_library(lubancode_app STATIC
   src/app_server/outbox.cpp
   src/app_server/dispatcher.cpp
   src/app_server/connection.cpp
+  src/app_server/interaction.cpp
   src/app_server/server.cpp
   src/app/commands/prompt_commands.cpp
   src/app/commands/session_commands.cpp

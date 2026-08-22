@@ -169,6 +169,11 @@ add_executable(lubancode_tests
   test_app_server_connection.cpp
   test_app_server_dispatch.cpp
   test_app_server_turn.cpp
+  # app-server 阶段 2:审批与打断(permission/request 四态、悬停/超时/
+  # 打断、acceptForSession 免问、迟到失效、ask_user 的 user/ask)。
+  test_app_server_approval.cpp
+  # app-server 阶段 2:审批与打断(permission/request 四态、悬停/超时/
+  # 打断、acceptForSession 免问、迟到失效、ask_user 的 user/ask)。
   # 显示系统剥离单第一步:runtime 合同(Event/Command/Broker 形状与序列化
   # 往返保真、稳定枚举字符串、坏报文抛错)。
   test_runtime_contract.cpp

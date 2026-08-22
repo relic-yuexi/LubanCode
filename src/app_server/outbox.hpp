@@ -13,6 +13,8 @@
 // 这里的 coalesced 计数恒 0,类型先立住。
 #pragma once
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <mutex>
@@ -32,6 +34,8 @@ struct OutboundEntry {
 };
 
 // 有界出站队列。线程安全:Push/Drain 各持一把内部锁。
+// 阶段 2 起回合在工作线程跑、事件从写线程出,加条件变量让写线程安静地
+// 等(PopWait),不再靠轮询。
 class BoundedOutbox {
 public:
     explicit BoundedOutbox(std::size_t capacity) : capacity_(capacity == 0 ? 1 : capacity) {}
@@ -44,6 +48,12 @@ public:
 
     // 取走队列头部一条(队里已有 must_keep 挤出的 overflow 通报也算一条)。
     std::optional<std::string> Pop();
+
+    // 限时等一条:队列空时睡到有人 Push(Notify)或时限到。写线程用。
+    std::optional<std::string> PopWait(std::chrono::milliseconds timeout);
+
+    // 唤醒所有在 PopWait 里睡着的(收线时叫醒写线程退场)。
+    void Notify();
 
     // 把队列整个倒出来(关闭前的冲刷用),队里剩余按序返回。
     std::vector<std::string> PopAll();
@@ -59,6 +69,7 @@ public:
 
 private:
     mutable std::mutex mutex_;
+    std::condition_variable cv_;
     std::deque<OutboundEntry> queue_;
     const std::size_t capacity_;
     std::uint64_t dropped_ = 0;

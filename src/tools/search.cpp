@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "tools/path_utils.hpp"
+#include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
 
 namespace lubancode::tools {
 
@@ -282,10 +283,12 @@ std::string SearchTool::name() const {
 }
 
 std::string SearchTool::description() const {
-    return "在目录里搜索,两种模式:mode=\"grep\" 按正则(ECMAScript 语法)搜文件内容,"
-           "命中的行按 文件:行号:行内容 返回;mode=\"glob\" 按文件名通配(支持 * ? **)找文件,"
-           "返回相对路径列表。默认从当前工作目录开始搜,自动跳过 .git/、build/、"
-           "node_modules/ 和二进制文件。结果超过 100 条会截断并注明。";
+    // 文案在 src/prompts/tools/<语言>/search.md,兜底是迁移前的原文。
+    return ToolText("search", "description",
+                    "在目录里搜索,两种模式:mode=\"grep\" 按正则(ECMAScript 语法)搜文件内容,"
+                    "命中的行按 文件:行号:行内容 返回;mode=\"glob\" 按文件名通配(支持 * ? **)找文件,"
+                    "返回相对路径列表。默认从当前工作目录开始搜,自动跳过 .git/、build/、"
+                    "node_modules/ 和二进制文件。结果超过 100 条会截断并注明。");
 }
 
 nlohmann::json SearchTool::input_schema() const {
@@ -297,29 +300,32 @@ nlohmann::json SearchTool::input_schema() const {
     nlohmann::json mode_prop = nlohmann::json::object();
     mode_prop["type"] = "string";
     mode_prop["enum"] = nlohmann::json::array({"grep", "glob"});
-    mode_prop["description"] = "\"grep\" 搜文件内容(正则),\"glob\" 按文件名找文件(通配符)";
+    mode_prop["description"] = ToolText("search", "param.mode",
+                                        "\"grep\" 搜文件内容(正则),\"glob\" 按文件名找文件(通配符)");
     properties["mode"] = mode_prop;
 
     nlohmann::json pattern_prop = nlohmann::json::object();
     pattern_prop["type"] = "string";
     pattern_prop["description"] =
-        "mode=grep 时是 ECMAScript 正则表达式;mode=glob 时是文件名通配符(支持 * ? **)。"
-        "不带 '/' 的写法(如 *.md)按文件名匹配,会递归找出整个目录树下所有同名文件,"
-        "不管它在哪层子目录里;带 '/' 的写法(如 src/**/*.hpp、docs/**)按相对路径匹配,"
-        "'**/' 表示零层或多层目录,写在开头就是'不管在不在根目录都算'。";
+        ToolText("search", "param.pattern",
+                 "mode=grep 时是 ECMAScript 正则表达式;mode=glob 时是文件名通配符(支持 * ? **)。"
+                 "不带 '/' 的写法(如 *.md)按文件名匹配,会递归找出整个目录树下所有同名文件,"
+                 "不管它在哪层子目录里;带 '/' 的写法(如 src/**/*.hpp、docs/**)按相对路径匹配,"
+                 "'**/' 表示零层或多层目录,写在开头就是'不管在不在根目录都算'。");
     properties["pattern"] = pattern_prop;
 
     nlohmann::json path_prop = nlohmann::json::object();
     path_prop["type"] = "string";
-    path_prop["description"] = "从哪个目录开始搜,不填默认当前工作目录";
+    path_prop["description"] = ToolText("search", "param.path", "从哪个目录开始搜,不填默认当前工作目录");
     properties["path"] = path_prop;
 
     nlohmann::json glob_prop = nlohmann::json::object();
     glob_prop["type"] = "string";
     glob_prop["description"] =
-        "仅 mode=grep 有效:按文件名或路径过滤要搜索的文件,不填就搜所有非二进制文件。"
-        "语义跟 pattern 的 glob 写法一样:*.cpp 这种不带 '/' 的按文件名递归匹配任意目录下的文件;"
-        "src/**/*.hpp 这种带 '/' 的按相对路径匹配。";
+        ToolText("search", "param.glob",
+                 "仅 mode=grep 有效:按文件名或路径过滤要搜索的文件,不填就搜所有非二进制文件。"
+                 "语义跟 pattern 的 glob 写法一样:*.cpp 这种不带 '/' 的按文件名递归匹配任意目录下的文件;"
+                 "src/**/*.hpp 这种带 '/' 的按相对路径匹配。");
     properties["glob"] = glob_prop;
 
     schema["properties"] = properties;
