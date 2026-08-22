@@ -102,14 +102,15 @@ struct PluginMountInfo {
 // M7:扫两类插件(<主目录>/.lubancode/plugins 下的 *.dll 和 *.lua),挂进
 // 目标 registry——主表与子代理表都挂(子代理与 main 同能力,独立任务
 // agent 默认完成后退出,不是低配跑腿);Explore 只读表不挂。每个插件打
-// 一行 "[plugin] 名: N 个工具";坏 DLL / 坏 lua 打警告跳过,不崩。
+// 一行 "[plugin] 名: N 个工具";坏 DLL / 坏 lua 打警告跳过,不崩。report
+// 为 false 时只给另一张 registry 装独立 wrapper/state,不重复打印与记账。
 // plugin_host 由调用方持有,且必须声明在 registry 之前(PluginTool 手中的
 // luban_tool_def* 指向 DLL 静态数据,模块要活得比 registry 久,析构反序那
 // 一套,理由同 mcp_servers);LuaTool 连 lua_State 整个搬进 registry,没有
 // 这层讲究。mounted/warnings 由调用方持有,交互模式给 /plugins 命令用。
 void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::tools::ToolRegistry& registry,
                   const lubancode::cli::Theme& theme, std::vector<PluginMountInfo>& mounted,
-                  std::vector<std::string>& warnings);
+                  std::vector<std::string>& warnings, bool report = true);
 
 // 一场会话的工具全栈:主循环表、子代理表、(交互模式的)Explore 只读表,
 // 连同它们背后的拥有者——MCP 子进程(mcp_servers_)、插件宿主(plugin_host_)、

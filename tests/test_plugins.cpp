@@ -19,7 +19,10 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "tools/lua_tool.hpp"
 #include "tools/plugin_loader.hpp"
@@ -143,6 +146,12 @@ TEST_CASE("PluginHost: 真加载示例 DLL,api_version 不合的跳过并出警�
     // hello_plugin 挂上了。
     REQUIRE(host.plugins().size() == 1);
     CHECK(host.plugins()[0].stem == "hello_plugin");
+
+    // ToolRuntime 给 main/sub 两张表各装 wrapper 时会扫两遍同一目录。模块
+    // 只该载一份；坏版本那枚仍可各报一次警告。
+    const auto repeat_warnings = host.LoadDirectory(LUBANCODE_TEST_PLUGIN_DIR);
+    REQUIRE(repeat_warnings.size() == 1);
+    CHECK(host.plugins().size() == 1);
 
     std::vector<std::string> wrap_warnings;
     auto wrapped = host.WrapTools(wrap_warnings);
@@ -352,4 +361,41 @@ TEST_CASE("LuaTool: 两个工具各自独立 lua_State,全局变量互不串门"
     REQUIRE(b.has_value());
     CHECK((*a)->execute(nlohmann::json::object()).content == "甲");
     CHECK((*b)->execute(nlohmann::json::object()).content == "nil");  // 隔离:看不到别人的 G
+}
+
+TEST_CASE("LuaTool: 同一 state 被多线程调用时串行,计数不重不漏") {
+    auto loaded = tools::LuaTool::LoadFromScript(
+        R"lua(
+            local counter = 0
+            return {
+                name = 'counter',
+                execute = function(_)
+                    local before = counter
+                    for i = 1, 20000 do local square = i * i end
+                    counter = before + 1
+                    return counter
+                end,
+            }
+        )lua",
+        "counter");
+    REQUIRE(loaded.has_value());
+
+    constexpr int kThreads = 8;
+    std::vector<std::string> outputs(kThreads);
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+    for (int i = 0; i < kThreads; ++i) {
+        threads.emplace_back([&tool = **loaded, &outputs, i] {
+            outputs[i] = tool.execute(nlohmann::json::object()).content;
+        });
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    const std::set<std::string> unique(outputs.begin(), outputs.end());
+    CHECK(unique.size() == kThreads);
+    for (int i = 1; i <= kThreads; ++i) {
+        CHECK(unique.contains(std::to_string(i)));
+    }
 }

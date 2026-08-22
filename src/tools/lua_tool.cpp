@@ -307,6 +307,10 @@ std::string LuaTool::description() const { return description_; }
 nlohmann::json LuaTool::input_schema() const { return schema_; }
 
 Tool::Result LuaTool::execute(const nlohmann::json& input) {
+    // ToolRuntime 的 sub registry 会被多只后台子代理共享。Lua state 不具备
+    // 线程安全语义,同一工具的栈操作须串行；不同 LuaTool 各有 state 和锁,
+    // 仍能彼此并行。
+    const std::lock_guard<std::mutex> lock(execute_mutex_);
     lua_rawgeti(lua_, LUA_REGISTRYINDEX, execute_ref_);
     PushJsonToLua(lua_, input);
     if (lua_pcall(lua_, 1, 1, 0) != LUA_OK) {

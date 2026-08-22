@@ -116,6 +116,16 @@ std::vector<std::string> PluginHost::LoadDirectory(const std::filesystem::path& 
     });
     for (const auto& path : dll_files) {
         const std::string file_name = PathToUtf8(path.filename());
+        const std::string full_path = PathToUtf8(path);
+
+        // 主表与子代理表各装一份 PluginTool,底下却该共用同一枚已加载模块。
+        // MountPlugins 会扫两遍同一目录；这里按路径做幂等,免得 LoadLibrary
+        // 重加引用计数、plugins_ 重记一份,继而给子表包出重名工具。
+        if (std::any_of(plugins_.begin(), plugins_.end(), [&full_path](const LoadedPlugin& loaded) {
+                return loaded.path == full_path;
+            })) {
+            continue;
+        }
 
         // 坏 DLL(不是合法 PE)默认可能弹系统错误对话框,先把线程错误模式
         // 调成静默,加载完再还原——坏文件只该换来一行警告,不该卡个弹窗。
@@ -161,7 +171,7 @@ std::vector<std::string> PluginHost::LoadDirectory(const std::filesystem::path& 
 
         LoadedPlugin loaded;
         loaded.stem = PathToUtf8(path.stem());
-        loaded.path = PathToUtf8(path);
+        loaded.path = full_path;
         loaded.module = module;
         loaded.manifest = manifest;
         plugins_.push_back(std::move(loaded));

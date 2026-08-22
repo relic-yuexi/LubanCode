@@ -149,7 +149,7 @@ void RegisterMcpTools(std::vector<McpServerRuntime>& mcp_servers, lubancode::too
 
 void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::tools::ToolRegistry& registry,
                   const lubancode::cli::Theme& theme, std::vector<PluginMountInfo>& mounted,
-                  std::vector<std::string>& warnings) {
+                  std::vector<std::string>& warnings, bool report) {
     const auto home_dir = lubancode::config::HomeLubancodeDir();
     if (!home_dir.has_value()) {
         return;  // 找不到主目录,也就没有插件目录可扫
@@ -162,27 +162,37 @@ void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::tools::T
     // C ABI DLL 插件
     std::vector<std::string> new_warnings = plugin_host.LoadDirectory(plugins_dir);
     auto wrapped_plugins = plugin_host.WrapTools(new_warnings);
-    for (auto& warning : new_warnings) {
-        std::cout << theme.error << warning << theme.reset << "\n";
-        warnings.push_back(std::move(warning));
+    if (report) {
+        for (auto& warning : new_warnings) {
+            std::cout << theme.error << warning << theme.reset << "\n";
+            warnings.push_back(std::move(warning));
+        }
     }
     for (auto& wrapped : wrapped_plugins) {
-        std::cout << trf("plugin.mounted_line", wrapped.stem, wrapped.tools.size()) << "\n";
+        if (report) {
+            std::cout << trf("plugin.mounted_line", wrapped.stem, wrapped.tools.size()) << "\n";
+        }
         for (auto& tool : wrapped.tools) {
-            mounted.push_back({tool->name(), "DLL"});
+            if (report) {
+                mounted.push_back({tool->name(), "DLL"});
+            }
             registry.Register(std::move(tool));
         }
     }
 
     // Lua 插件
     auto lua_result = lubancode::tools::LoadLuaPlugins(plugins_dir);
-    for (auto& warning : lua_result.warnings) {
-        std::cout << theme.error << warning << theme.reset << "\n";
-        warnings.push_back(std::move(warning));
+    if (report) {
+        for (auto& warning : lua_result.warnings) {
+            std::cout << theme.error << warning << theme.reset << "\n";
+            warnings.push_back(std::move(warning));
+        }
     }
     for (auto& tool : lua_result.tools) {
-        std::cout << trf("plugin.mounted_line", tool->stem(), 1) << "\n";
-        mounted.push_back({tool->name(), "lua"});
+        if (report) {
+            std::cout << trf("plugin.mounted_line", tool->stem(), 1) << "\n";
+            mounted.push_back({tool->name(), "lua"});
+        }
         registry.Register(std::move(tool));
     }
 }
@@ -279,7 +289,7 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     // 插件工具主表 + 子表都挂(子代理与 main 同能力,独立任务 agent 默认
     // 完成后退出,不是低配跑腿),挂载行紧跟 [mcp] 那几行。
     MountPlugins(plugin_host_, main_registry_, theme, plugin_mounted_, plugin_warnings_);
-    MountPlugins(plugin_host_, sub_registry_, theme, plugin_mounted_, plugin_warnings_);
+    MountPlugins(plugin_host_, sub_registry_, theme, plugin_mounted_, plugin_warnings_, /*report=*/false);
 
     // tool_search(延迟挂载):全部工具(MCP/插件/LSP/agent/todo)都注册
     // 完了才数总数、定启停。loaded 集合是会话级的(/clear 不清),主会话

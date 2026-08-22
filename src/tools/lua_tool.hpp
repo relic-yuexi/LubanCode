@@ -18,6 +18,7 @@
 #include <expected>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -57,6 +58,7 @@ private:
 
     lua_State* lua_ = nullptr;
     int execute_ref_ = -1;  // execute 函数在 lua 注册表里的引用
+    std::mutex execute_mutex_;  // 同一 state 不许被并发子代理同时碰
     std::string stem_;
     std::string full_name_;
     std::string description_;
