@@ -36,6 +36,7 @@ tools::Tool::Result McpTool::execute(const nlohmann::json& input) {
         result.details["jsonrpc_request_id"] = jsonrpc_request_id;
         result.details["mcp_server"] = server_name_;
         result.details["mcp_tool"] = info_.name;
+        result.details["transport_generation"] = client_.transport_generation();
     }
     result.effect_summary = "mcp " + server_name_ + "/" + info_.name;
     return result;

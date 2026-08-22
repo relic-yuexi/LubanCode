@@ -107,6 +107,11 @@ public:
     // 传输层是否还活着。
     bool Alive() const;
 
+    // 逐枚追踪单:transport generation(第几代传输层)。StartProcess/
+    // AttachTransportForTest 每换一次 +1,从 1 起。外层 execution 拿它挂账:
+    // 迟到响应若来自旧代,账上分得清"哪个进程的哪个请求",不投给新调用。
+    std::uint64_t transport_generation() const;
+
     // 出错时给人看的 stderr 尾巴。
     std::string StderrTail() const;
 
@@ -142,6 +147,7 @@ private:
 
     std::function<void(std::int64_t)> late_response_sink_;
     std::string server_name_;
+    std::uint64_t transport_generation_ = 0;  // 换一代 +1,1 起(0 = 还没接过传输层)
 
     std::unique_ptr<StdioTransportAdapter> owned_transport_;  // StartProcess 路径下持有
     Transport* transport_ = nullptr;                          // 实际使用的传输层(生产/测试路径统一走这个指针)

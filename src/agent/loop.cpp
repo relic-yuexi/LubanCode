@@ -135,6 +135,12 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         event.error_code = result.error_code;
         event.fallback_message = result.content.empty() ? std::string() : result.content.substr(0, 200);
         event.details = result.details;
+        // MCP 内层账(逐枚追踪单"MCP 外层 execution 要挂内层"):jsonrpc id
+        // 与 transport generation 从 details 提升成一等字段,迟到响应事件
+        // 凭这对关联原 execution,不投给新调用。
+        if (result.details.contains("jsonrpc_request_id") && result.details["jsonrpc_request_id"].is_number_integer()) {
+            event.jsonrpc_request_id = result.details["jsonrpc_request_id"].get<std::int64_t>();
+        }
         event.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                 std::chrono::steady_clock::now() - started_at)
                                 .count();

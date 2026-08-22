@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 
 namespace lubancode::mcp {
 
@@ -32,12 +33,18 @@ TransportStartResult Client::StartProcess(const std::string& command, const std:
                                            const std::vector<std::pair<std::string, std::string>>& env) {
     owned_transport_ = std::make_unique<StdioTransportAdapter>();
     transport_ = owned_transport_.get();
+    ++transport_generation_;  // 逐枚追踪单:换一代记一笔(重启/换进程分得清)
     return owned_transport_->Start(command, args, env, [this](std::string line) { OnLine(std::move(line)); });
 }
 
 void Client::AttachTransportForTest(Transport* transport) {
     owned_transport_.reset();
     transport_ = transport;
+    ++transport_generation_;
+}
+
+std::uint64_t Client::transport_generation() const {
+    return transport_generation_;
 }
 
 void Client::OnLine(const std::string& line) {

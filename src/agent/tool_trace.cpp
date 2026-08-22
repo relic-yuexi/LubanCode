@@ -242,6 +242,15 @@ std::string SerializeToolTraceEvent(const ToolTraceEvent& event, const std::stri
             if (event.duration_ms > 0) {
                 j["duration_ms"] = event.duration_ms;
             }
+            // MCP 内层账(单子"外层 execution 要挂内层"):jsonrpc id 与
+            // transport generation 随 finished 落盘,迟到响应可关联。
+            if (event.jsonrpc_request_id >= 0) {
+                j["jsonrpc_request_id"] = event.jsonrpc_request_id;
+            }
+            if (const auto it = event.details.find("transport_generation");
+                it != event.details.end() && it->is_number_unsigned()) {
+                j["transport_generation"] = it->get<std::uint64_t>();
+            }
             nlohmann::json ref;
             ref["kind"] = ToString(event.result_ref.kind);
             PutStr(ref, "sha256", event.result_ref.sha256);
@@ -366,6 +375,9 @@ std::optional<ToolTraceEvent> ParseToolTraceEvent(const std::string& line) {
             }
             if (const auto it = j.find("duration_ms"); it != j.end() && it->is_number_integer()) {
                 event.duration_ms = it->get<std::int64_t>();
+            }
+            if (const auto it = j.find("jsonrpc_request_id"); it != j.end() && it->is_number_integer()) {
+                event.jsonrpc_request_id = it->get<std::int64_t>();
             }
             if (const auto it = j.find("result_ref"); it != j.end() && it->is_object()) {
                 const nlohmann::json& ref = *it;

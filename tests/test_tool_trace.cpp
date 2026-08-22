@@ -27,6 +27,7 @@
 #include "api/types.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
+#include "mcp/client.hpp"
 #include "tools/write_file.hpp"
 
 using namespace lubancode;
@@ -104,6 +105,24 @@ std::vector<api::StreamEvent> FiveToolScript(const std::vector<std::string>& ids
     script.push_back(api::MessageDone{"tool_use", api::Usage{}});
     return script;
 }
+
+// MCP 假传输层(与 test_mcp_client 同款;Client 析构摸 Shutdown,声明序
+// 保证 transport 活得比 client 久)。
+class FakeTransport : public mcp::Transport {
+public:
+    std::function<void(const std::string&)> on_write;
+    std::atomic<bool> alive{true};
+
+    bool WriteLine(const std::string& line) override {
+        if (on_write) {
+            on_write(line);
+        }
+        return true;
+    }
+    void Shutdown(int /*wait_ms*/) override { alive = false; }
+    bool IsAlive() const override { return alive; }
+    std::string StderrTail() const override { return std::string(); }
+};
 
 // 收 trace 事件的回调壳。
 struct TraceCollector {
@@ -803,4 +822,50 @@ TEST_CASE("可疑窗口: 验证点两侧;无验证点不编答案") {
     CHECK(window_ids.count("e3") == 1);
     CHECK(window_ids.count("e0") == 0);
     CHECK(window_ids.count("e1") == 0);
+}
+
+// ---------------------------------------------------------------------------
+// MCP transport generation(迟到响应关联旧请求的账)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("MCP: 换一代传输层 generation +1,jsonrpc id 随 CallTool 带出") {
+    // Client 层:代数递增与 jsonrpc id 出口(McpTool 再把这两样抄进
+    // Result.details,那里不重复测——编译期钉住)。
+    {
+        FakeTransport transport;
+        mcp::Client client("gen-test");
+        CHECK(client.transport_generation() == 0);  // 还没接过传输层
+        client.AttachTransportForTest(&transport);
+        const std::uint64_t gen1 = client.transport_generation();
+        CHECK(gen1 == 1);
+
+        std::int64_t last_jsonrpc_id = -1;
+        transport.on_write = [&](const std::string& line) {
+            const auto request = nlohmann::json::parse(line);
+            const auto id = request.at("id").get<std::int64_t>();
+            last_jsonrpc_id = id;
+            const nlohmann::json response = {{"jsonrpc", "2.0"},
+                                             {"id", id},
+                                             {"result", {{"content", nlohmann::json::array()}, {"isError", false}}}};
+            client.OnLine(response.dump());
+        };
+
+        std::int64_t seen_id = -1;
+        const auto result = client.CallTool("echo", nlohmann::json::object(), &seen_id);
+        CHECK_FALSE(result.is_error);
+        CHECK(seen_id == last_jsonrpc_id);
+        CHECK(seen_id >= 0);
+    }
+    // 换一代:generation 再 +1。声明序:transport 都在 client 之前
+    //(Client 析构摸 transport_->Shutdown(),晚声明的 transport 会先死
+    //——g++ 下 pure virtual called,见 test_mcp_client 的前车之鉴)。
+    {
+        FakeTransport transport;
+        FakeTransport transport2;
+        mcp::Client client("gen-test-2");
+        client.AttachTransportForTest(&transport);
+        CHECK(client.transport_generation() == 1);
+        client.AttachTransportForTest(&transport2);
+        CHECK(client.transport_generation() == 2);
+    }
 }
