@@ -10,6 +10,8 @@
 #pragma once
 
 #include <filesystem>
+#include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -17,6 +19,7 @@
 #include "cli/theme.hpp"
 #include "tools/registry.hpp"
 #include "workflow/catalog.hpp"
+#include "workflow/runtime.hpp"
 #include "workflow/validator.hpp"
 
 namespace lubancode::app {
@@ -41,13 +44,23 @@ enum class WorkflowCommandAction {
     Graph,  // graph <id> [ascii|mermaid|json]
     Validate,  // validate <id>
     Doctor,  // doctor:撞名/坏定义/缺失能力巡检
+    Run,    // run <id> [参数...]
+    Resume, // resume <run_id>
+    Cancel, // cancel <run_id>(首版:标记请求,跑动中的取消经 ESC 通道)
+    History,  // history <id> | history delete <run_id>
+    Enable,   // enable|disable <id>
+    Remove,   // remove <id>(要确认)
+    Create,   // create <描述...>(第 5 批:自然语言向导)
+    Alias,    // alias:列出直呼名与撞名账
 };
 
 struct ParsedWorkflowCommand {
     WorkflowCommandAction action = WorkflowCommandAction::Invalid;
-    std::string id;     // show/graph/validate 的目标
-    std::string format; // graph 的格式(空 = ascii)
-    std::string scope;  // list 的范围(空 = all)
+    std::string id;      // show/graph/validate/run 的目标
+    std::string format;  // graph 的格式(空 = ascii)
+    std::string scope;   // list 的范围(空 = all)
+    std::string rest;    // run 的剩余参数/create 的描述原文
+    bool confirm = false;  // remove/delete 的确认词(remove yes / delete yes)
 };
 
 // 纯解析(单测钉)。
@@ -55,6 +68,13 @@ ParsedWorkflowCommand ParseWorkflowCommand(const std::string& args);
 
 // 命令入口。返回 true = 交给会话层继续(恒 true;失败只打提示)。
 bool HandleWorkflowCommand(const std::string& args, const WorkflowCommandContext& context);
+
+// /workflow run 的执行装配:宿主(InteractiveSession)填执行器表;这里
+// 只做编排。返回 run 摘要文本(给人看的一屏)。
+std::string RunWorkflowById(const WorkflowCommandContext& context, const std::string& id,
+                            const std::string& raw_args,
+                            const std::map<lubancode::workflow::NodeKind,
+                                           std::shared_ptr<lubancode::workflow::NodeExecutor>>& executors);
 
 // 会话层给 alias 直呼用的查询:catalog 里有没有这个 alias;返回 workflow
 // id(撞名禁用/不存在给空串)。第 5 批把这里换成 autocomplete 同源。

@@ -3,9 +3,11 @@
 #include "app/commands/workflow_commands.hpp"
 
 #include <iostream>
+#include <sstream>
 
 #include "cli/slash_commands.hpp"
 #include "platform/paths.hpp"
+#include "workflow/compiler.hpp"
 #include "workflow/graph_view.hpp"
 
 namespace lubancode::app {
@@ -107,7 +109,59 @@ ParsedWorkflowCommand ParseWorkflowCommand(const std::string& args) {
         parsed.action = WorkflowCommandAction::Doctor;
         return parsed;
     }
-    // run/resume/cancel/history/edit/... 后续批次接线;先报"本版还没有"。
+    if (verb == "run") {
+        parsed.id = TrimWord(args, pos);
+        if (parsed.id.empty()) return parsed;
+        parsed.action = WorkflowCommandAction::Run;
+        while (pos < args.size() && (args[pos] == ' ' || args[pos] == '\t')) ++pos;
+        parsed.rest = args.substr(pos);
+        return parsed;
+    }
+    if (verb == "resume" || verb == "cancel") {
+        parsed.id = TrimWord(args, pos);
+        if (parsed.id.empty()) return parsed;
+        parsed.action = verb == "resume" ? WorkflowCommandAction::Resume : WorkflowCommandAction::Cancel;
+        return parsed;
+    }
+    if (verb == "history") {
+        parsed.action = WorkflowCommandAction::History;
+        const std::string sub = TrimWord(args, pos);
+        if (sub == "delete") {
+            parsed.id = TrimWord(args, pos);
+            const std::string yes = TrimWord(args, pos);
+            parsed.confirm = yes == "yes";
+            if (parsed.id.empty()) parsed.action = WorkflowCommandAction::Invalid;
+        } else if (!sub.empty()) {
+            parsed.id = sub;
+        }
+        return parsed;
+    }
+    if (verb == "enable" || verb == "disable") {
+        parsed.id = TrimWord(args, pos);
+        if (parsed.id.empty()) return parsed;
+        parsed.action = WorkflowCommandAction::Enable;
+        parsed.rest = verb;  // 复用:enable/disable 词
+        return parsed;
+    }
+    if (verb == "remove") {
+        parsed.id = TrimWord(args, pos);
+        if (parsed.id.empty()) return parsed;
+        const std::string yes = TrimWord(args, pos);
+        parsed.confirm = yes == "yes";
+        parsed.action = WorkflowCommandAction::Remove;
+        return parsed;
+    }
+    if (verb == "create") {
+        parsed.action = WorkflowCommandAction::Create;
+        while (pos < args.size() && (args[pos] == ' ' || args[pos] == '\t')) ++pos;
+        parsed.rest = args.substr(pos);
+        return parsed;
+    }
+    if (verb == "alias") {
+        parsed.action = WorkflowCommandAction::Alias;
+        return parsed;
+    }
+    // edit/export/import 后续接线(第 6 批/app-server 合同)。
     if (!verb.empty()) {
         parsed.id = verb;
     }
@@ -229,6 +283,109 @@ bool HandleWorkflowCommand(const std::string& args, const WorkflowCommandContext
                             lubancode::workflow::ValidateDefinition(entry->definition, caps), theme);
             break;
         }
+        case WorkflowCommandAction::Run: {
+            // 执行器由会话层经 ResolveWorkflowRunContext 注入(第 4 批的
+            // 宿主执行器);这里只做编排。没注入(如测试)给一句明话。
+            std::cout << theme.stats << "run <id> 的执行器装配由会话层注入;本路径给测试与 "
+                      << "app-server 用" << theme.reset << "\n";
+            break;
+        }
+        case WorkflowCommandAction::Resume: {
+            if (context.home_lubancode.has_value()) {
+                const std::filesystem::path run_dir =
+                    *context.home_lubancode / "workflow-runs" / parsed.id;
+                std::error_code ec;
+                if (!std::filesystem::exists(run_dir, ec)) {
+                    std::cout << theme.error << "run 不存在: " << parsed.id << theme.reset << "\n";
+                    break;
+                }
+                // 恢复也走会话层执行器装配;这里先给账面。
+                std::cout << theme.stats << "run " << parsed.id << " 可恢复;执行入口与 run 同一道装配"
+                          << theme.reset << "\n";
+            }
+            break;
+        }
+        case WorkflowCommandAction::Cancel: {
+            std::cout << theme.error << "cancel:跑动中的 run 经 ESC/打断通道取消(首版同步 run,"
+                      << "命令返回时 run 已终态)" << theme.reset << "\n";
+            break;
+        }
+        case WorkflowCommandAction::History: {
+            if (context.home_lubancode.has_value()) {
+                const std::filesystem::path runs_root = *context.home_lubancode / "workflow-runs";
+                const auto runs = lubancode::workflow::ListRuns(runs_root);
+                std::size_t shown = 0;
+                for (const auto& run : runs) {
+                    if (!parsed.id.empty() && run.workflow_id != parsed.id) continue;
+                    ++shown;
+                    std::cout << "  " << run.run_id << "  " << run.workflow_id << " v" << run.workflow_version
+                              << "  " << (run.final_state.empty() ? "(未完成)" : run.final_state) << "  "
+                              << run.started_at << "\n";
+                }
+                if (shown == 0) {
+                    std::cout << theme.stats << "(没有运行账)" << theme.reset << "\n";
+                }
+            }
+            break;
+        }
+        case WorkflowCommandAction::Enable: {
+            const lubancode::workflow::CatalogEntry* entry = catalog.Find(parsed.id);
+            if (entry == nullptr) {
+                std::cout << theme.error << "找不到 workflow: " << parsed.id << theme.reset << "\n";
+                break;
+            }
+            const bool enable = parsed.rest == "enable";
+            auto result = lubancode::workflow::SetWorkflowEnabled(entry->dir, enable);
+            if (result.has_value()) {
+                std::cout << theme.stats << (enable ? "已启用" : "已停用") << "(直呼 alias "
+                          << (enable ? "恢复" : "不再响应") << ")" << theme.reset << "\n";
+            } else {
+                std::cout << theme.error << result.error() << theme.reset << "\n";
+            }
+            break;
+        }
+        case WorkflowCommandAction::Remove: {
+            const lubancode::workflow::CatalogEntry* entry = catalog.Find(parsed.id);
+            if (entry == nullptr) {
+                std::cout << theme.error << "找不到 workflow: " << parsed.id << theme.reset << "\n";
+                break;
+            }
+            if (!parsed.confirm) {
+                std::cout << theme.error << "remove 要确认(只删定义,不动运行账): /workflow remove "
+                          << parsed.id << " yes" << theme.reset << "\n";
+                break;
+            }
+            auto result = lubancode::workflow::RemoveWorkflow(entry->dir);
+            if (result.has_value()) {
+                std::cout << theme.stats << "已移除定义: " << parsed.id << "(运行账另走 /workflow history)"
+                          << theme.reset << "\n";
+            } else {
+                std::cout << theme.error << result.error() << theme.reset << "\n";
+            }
+            break;
+        }
+        case WorkflowCommandAction::Create: {
+            // 第 5 批:向导走会话层的模型装配(意图提取经 IntentCompiler
+            // 注入);这里先给用法骨架,第 6 批接模型。
+            std::cout << "用法: /workflow create <自然语言描述>\n"
+                      << "  例: /workflow create 论文检索:四路并行查 arXiv/DBLP/Scholar/AnySearch,"
+                      << "去重排序写成 Markdown\n"
+                      << "  向导会追问缺口,预览图与将写文件,确认后落进项目或用户目录。\n";
+            break;
+        }
+        case WorkflowCommandAction::Alias: {
+            for (const auto& entry : catalog.entries) {
+                if (entry.broken || entry.definition.alias.empty()) continue;
+                const bool disabled = catalog.disabled_aliases.count(entry.definition.alias) > 0;
+                std::cout << "  /" << entry.definition.alias << " -> " << entry.definition.id << " ("
+                          << lubancode::workflow::ToString(entry.scope) << ")"
+                          << (disabled ? theme.error + " [禁用:跨类撞名]" + theme.reset : "") << "\n";
+            }
+            if (catalog.disabled_aliases.empty() && catalog.entries.empty()) {
+                std::cout << theme.stats << "(没有可直呼的 workflow alias)" << theme.reset << "\n";
+            }
+            break;
+        }
         case WorkflowCommandAction::Doctor: {
             std::size_t broken = 0;
             std::size_t ok = 0;
@@ -253,6 +410,117 @@ bool HandleWorkflowCommand(const std::string& args, const WorkflowCommandContext
         }
     }
     return true;
+}
+
+std::string RunWorkflowById(const WorkflowCommandContext& context, const std::string& id,
+                            const std::string& raw_args,
+                            const std::map<lubancode::workflow::NodeKind,
+                                           std::shared_ptr<lubancode::workflow::NodeExecutor>>& executors) {
+    const lubancode::cli::Theme& theme = *context.theme;
+    const lubancode::workflow::Catalog catalog =
+        lubancode::workflow::LoadCatalog(context.project_root, context.user_root);
+    const lubancode::workflow::CatalogEntry* entry = catalog.Find(id);
+    if (entry == nullptr) {
+        return theme.error + "找不到 workflow: " + id + theme.reset;
+    }
+
+    // 参数解析:按 input_schema 的 properties 逐个 --name value / 位置参
+    // (首个位置参给第一个 required 字段)。非交互缺必填给结构化错。
+    nlohmann::json inputs = nlohmann::json::object();
+    const auto& props = entry->definition.inputs.contains("properties")
+                            ? entry->definition.inputs["properties"]
+                            : nlohmann::json::object();
+    std::vector<std::string> positional;
+    std::size_t pos = 0;
+    while (pos < raw_args.size()) {
+        while (pos < raw_args.size() && (raw_args[pos] == ' ' || raw_args[pos] == '\t')) ++pos;
+        if (pos >= raw_args.size()) break;
+        if (raw_args.compare(pos, 2, "--") == 0) {
+            pos += 2;
+            const std::size_t name_start = pos;
+            while (pos < raw_args.size() && raw_args[pos] != ' ' && raw_args[pos] != '\t' &&
+                   raw_args[pos] != '=') {
+                ++pos;
+            }
+            std::string name = raw_args.substr(name_start, pos - name_start);
+            if (pos < raw_args.size() && raw_args[pos] == '=') ++pos;
+            while (pos < raw_args.size() && (raw_args[pos] == ' ' || raw_args[pos] == '\t')) ++pos;
+            const std::size_t value_start = pos;
+            const bool quoted = pos < raw_args.size() && raw_args[pos] == '"';
+            if (quoted) {
+                ++pos;
+                while (pos < raw_args.size() && raw_args[pos] != '"') ++pos;
+                if (pos < raw_args.size()) ++pos;
+            } else {
+                while (pos < raw_args.size() && raw_args[pos] != ' ' && raw_args[pos] != '\t') ++pos;
+            }
+            std::string value = raw_args.substr(value_start, pos - value_start);
+            if (quoted && value.size() >= 2) value = value.substr(1, value.size() - 2);
+            if (!name.empty()) inputs[name] = value;
+            continue;
+        }
+        const std::size_t start = pos;
+        const bool quoted = raw_args[pos] == '"';
+        if (quoted) {
+            ++pos;
+            while (pos < raw_args.size() && raw_args[pos] != '"') ++pos;
+            if (pos < raw_args.size()) ++pos;
+        } else {
+            while (pos < raw_args.size() && raw_args[pos] != ' ' && raw_args[pos] != '\t') ++pos;
+        }
+        std::string token = raw_args.substr(start, pos - start);
+        if (quoted && token.size() >= 2) token = token.substr(1, token.size() - 2);
+        positional.push_back(token);
+    }
+    // 位置参依序填 required 里还没值的字段。
+    if (entry->definition.inputs.contains("required") && entry->definition.inputs["required"].is_array()) {
+        std::size_t arg_index = 0;
+        for (const auto& field : entry->definition.inputs["required"]) {
+            if (!field.is_string()) continue;
+            const std::string name = field.get<std::string>();
+            if (inputs.contains(name) || arg_index >= positional.size()) continue;
+            inputs[name] = positional[arg_index++];
+        }
+    }
+    (void)props;
+
+    lubancode::workflow::RuntimeOptions options;
+    options.executors = executors;
+    if (context.home_lubancode.has_value()) {
+        options.runs_root = *context.home_lubancode / "workflow-runs";
+    }
+    lubancode::workflow::WorkflowRuntime runtime(std::move(options));
+    const lubancode::workflow::WorkflowRunSummary summary =
+        runtime.Run(entry->definition, lubancode::workflow::RunInputs(inputs));
+
+    std::ostringstream out;
+    out << entry->definition.name << " [" << entry->definition.id << "] " << theme.stats
+        << lubancode::workflow::ToString(summary.state) << theme.reset << " · "
+        << summary.duration_ms / 1000 << "." << (summary.duration_ms % 1000) / 100 << "s · tokens "
+        << summary.tokens_used << "\n";
+    for (const auto& [node_id, record] : summary.nodes) {
+        const char* mark = record.state == lubancode::workflow::NodeState::Succeeded  ? "[ok] "
+                           : record.state == lubancode::workflow::NodeState::Failed    ? "[!!] "
+                           : record.state == lubancode::workflow::NodeState::Skipped   ? "[skip] "
+                                                                                       : "[..] ";
+        out << "  " << mark << node_id;
+        if (!record.error_code.empty()) {
+            out << "  " << record.error_code << " " << record.error_message.substr(0, 120);
+        }
+        out << "\n";
+    }
+    if (!summary.unavailable_sources.empty()) {
+        out << theme.error << "  缺失来源: ";
+        for (const auto& source : summary.unavailable_sources) out << source << " ";
+        out << theme.reset << "\n";
+    }
+    if (!summary.result.empty()) {
+        out << theme.stats << "  结果: " << summary.result.dump().substr(0, 400) << theme.reset << "\n";
+    }
+    if (!summary.error_message.empty() && summary.state != lubancode::workflow::RunState::Succeeded) {
+        out << theme.error << "  " << summary.error_code << ": " << summary.error_message << theme.reset << "\n";
+    }
+    return out.str();
 }
 
 }  // namespace lubancode::app

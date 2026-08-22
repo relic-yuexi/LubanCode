@@ -208,6 +208,9 @@ add_executable(lubancode_tests
   # 第 4 批:宿主执行器(真 ToolRegistry/假 backend/即时 broker)、
   # subflow 结果映射与错误隔离、journal 断点恢复。
   test_workflow_agents.cpp
+  # 第 5 批:Draf 解析(杜撰工具/明文 secret 拦截)/追问计算/预览/
+  # staging+rename 原子安装/回滚件/enable/remove/命令与参数解析。
+  test_workflow_compiler.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)

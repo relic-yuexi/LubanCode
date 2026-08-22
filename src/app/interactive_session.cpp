@@ -65,6 +65,7 @@
 #include "app/commands/peer_commands.hpp"
 #include "app/commands/doctor_commands.hpp"
 #include "app/commands/workflow_commands.hpp"
+#include "workflow/host_executors.hpp"
 #include "app/version.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
@@ -3157,9 +3158,56 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                                        ? std::optional<std::filesystem::path>(
                                              lubancode::tools::Utf8ToPath(*home_dir))
                                        : std::nullopt;
+                wf_ctx.home_lubancode = home_lubancode.has_value()
+                                            ? std::optional<std::filesystem::path>(
+                                                  lubancode::tools::Utf8ToPath(*home_lubancode))
+                                            : std::nullopt;
                 wf_ctx.registry = &registry();
                 for (const auto& skill : skills) wf_ctx.skill_names.push_back(skill.name);
                 wf_ctx.theme = &theme;
+                const lubancode::app::ParsedWorkflowCommand wf_parsed =
+                    lubancode::app::ParseWorkflowCommand(parsed.args);
+                if (wf_parsed.action == lubancode::app::WorkflowCommandAction::Run) {
+                    // run:执行器装配(第 4 批宿主执行器)。transform/template
+                    // 用内建;tool/llm/approval/ask_user 接现成设施。llm 的
+                    // prompt 从 workflow 目录现读。
+                    std::map<lubancode::workflow::NodeKind,
+                             std::shared_ptr<lubancode::workflow::NodeExecutor>>
+                        executors;
+                    auto transform = std::make_shared<lubancode::workflow::TransformExecutor>();
+                    transform->Register("json_merge", [](const nlohmann::json& in) { return in; });
+                    executors[lubancode::workflow::NodeKind::Transform] = transform;
+                    executors[lubancode::workflow::NodeKind::Template] =
+                        std::make_shared<lubancode::workflow::TemplateExecutor>();
+                    executors[lubancode::workflow::NodeKind::Tool] =
+                        std::make_shared<lubancode::workflow::ToolExecutor>(&registry());
+                    {
+                        // prompt 从 workflow 目录读(包内相对路径;越界已被
+                        // validator 拦,这里只管读)。
+                        const lubancode::workflow::Catalog wf_catalog = lubancode::workflow::LoadCatalog(
+                            wf_ctx.project_root, wf_ctx.user_root);
+                        const lubancode::workflow::CatalogEntry* wf_entry = wf_catalog.Find(wf_parsed.id);
+                        const std::filesystem::path prompt_dir =
+                            wf_entry != nullptr ? wf_entry->dir : std::filesystem::path();
+                        lubancode::workflow::LlmExecutor::Options llm_options;
+                        llm_options.backend = &real_backend;
+                        llm_options.model = *current_model;
+                        llm_options.prompt_loader = [prompt_dir](const std::string& relative) {
+                            if (prompt_dir.empty()) return std::string();
+                            std::error_code ec;
+                            const std::filesystem::path file = prompt_dir / relative;
+                            if (!std::filesystem::exists(file, ec)) return std::string();
+                            std::ifstream in(file, std::ios::binary);
+                            std::ostringstream buffer;
+                            buffer << in.rdbuf();
+                            return buffer.str();
+                        };
+                        executors[lubancode::workflow::NodeKind::Llm] =
+                            std::make_shared<lubancode::workflow::LlmExecutor>(llm_options);
+                    }
+                    std::cout << lubancode::app::RunWorkflowById(wf_ctx, wf_parsed.id, wf_parsed.rest, executors);
+                    break;
+                }
                 HandleWorkflowCommand(parsed.args, wf_ctx);
                 break;
             }
@@ -3167,8 +3215,9 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                 return CommandFlow::Exit;
             case lubancode::cli::SlashCommand::Unknown: {
                 // Workflows 单:不认得的 / 词先查 WorkflowCatalog——查着了
-                // 是 /<alias> 直呼,查不着才打"不认得"。内建词永远居首,
-                // 撞名禁用的 alias 也不接(只留 /workflow run 正门)。
+                // 是 /<alias> 直呼(整行参数按 input_schema 解析,不当一坨
+                // prompt),查不着才打"不认得"。内建词永远居首,撞名禁用
+                // 的 alias 也不接(只留 /workflow run 正门)。
                 if (!parsed.alias_word.empty()) {
                     lubancode::app::WorkflowCommandContext wf_ctx;
                     wf_ctx.project_root = std::filesystem::current_path();
@@ -3176,11 +3225,48 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                                            ? std::optional<std::filesystem::path>(
                                                  lubancode::tools::Utf8ToPath(*home_dir))
                                            : std::nullopt;
+                    wf_ctx.home_lubancode = home_lubancode.has_value()
+                                                ? std::optional<std::filesystem::path>(
+                                                      lubancode::tools::Utf8ToPath(*home_lubancode))
+                                                : std::nullopt;
+                    wf_ctx.registry = &registry();
                     wf_ctx.theme = &theme;
                     const std::string wf_id = ResolveWorkflowAlias(wf_ctx, parsed.alias_word);
                     if (!wf_id.empty()) {
-                        std::cout << theme.stats << "直呼 /" << parsed.alias_word << " -> workflow " << wf_id
-                                  << ";运行入口随下一批接线,先 /workflow show " << wf_id << theme.reset << "\n";
+                        // 与 /workflow run 同一道执行器装配。
+                        std::map<lubancode::workflow::NodeKind,
+                                 std::shared_ptr<lubancode::workflow::NodeExecutor>>
+                            executors;
+                        auto transform = std::make_shared<lubancode::workflow::TransformExecutor>();
+                        transform->Register("json_merge", [](const nlohmann::json& in) { return in; });
+                        executors[lubancode::workflow::NodeKind::Transform] = transform;
+                        executors[lubancode::workflow::NodeKind::Template] =
+                            std::make_shared<lubancode::workflow::TemplateExecutor>();
+                        executors[lubancode::workflow::NodeKind::Tool] =
+                            std::make_shared<lubancode::workflow::ToolExecutor>(&registry());
+                        {
+                            const lubancode::workflow::Catalog wf_catalog = lubancode::workflow::LoadCatalog(
+                                wf_ctx.project_root, wf_ctx.user_root);
+                            const lubancode::workflow::CatalogEntry* wf_entry = wf_catalog.Find(wf_id);
+                            const std::filesystem::path prompt_dir =
+                                wf_entry != nullptr ? wf_entry->dir : std::filesystem::path();
+                            lubancode::workflow::LlmExecutor::Options llm_options;
+                            llm_options.backend = &real_backend;
+                            llm_options.model = *current_model;
+                            llm_options.prompt_loader = [prompt_dir](const std::string& relative) {
+                                if (prompt_dir.empty()) return std::string();
+                                std::error_code ec;
+                                const std::filesystem::path file = prompt_dir / relative;
+                                if (!std::filesystem::exists(file, ec)) return std::string();
+                                std::ifstream in(file, std::ios::binary);
+                                std::ostringstream buffer;
+                                buffer << in.rdbuf();
+                                return buffer.str();
+                            };
+                            executors[lubancode::workflow::NodeKind::Llm] =
+                                std::make_shared<lubancode::workflow::LlmExecutor>(llm_options);
+                        }
+                        std::cout << lubancode::app::RunWorkflowById(wf_ctx, wf_id, parsed.args, executors);
                         break;
                     }
                 }
