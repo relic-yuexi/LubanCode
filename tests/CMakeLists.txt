@@ -205,6 +205,9 @@ add_executable(lubancode_tests
   # 第 7 步(接 Runtime):adapter 的 call_id 走 ProcessIdAuthority、
   # LogSink 分流、SetCancel/SetCwd 装配口、registry 中立形状。
   test_plugin_runtime_mount.cpp
+  # 第 8 步(管理面与信任):env 整环境替换硬保证、PluginTrustStore 记账、
+  # 插件内容指纹、项目插件信任门。
+  test_plugin_admin.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)

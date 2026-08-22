@@ -12,12 +12,14 @@
 #pragma once
 
 #include <atomic>
+#include <expected>
 #include <functional>
 #include <memory>
 #include <string>
 
 #include <nlohmann/json.hpp>
 
+#include "config/plugin_trust.hpp"
 #include "runtime/plugin_contract.hpp"
 #include "tools/tool.hpp"
 
@@ -73,5 +75,17 @@ struct PluginScanResult {
 };
 
 PluginScanResult ScanPluginDirectories(const std::filesystem::path& dir);
+
+// 项目插件的内容指纹:插件目录里全部常规文件(排序稳定)的相对路径 +
+// 字节,过 SHA-256(实现复用 hooks/hash)。任一文件改了指纹就变,信任
+// 失效须重审(单子「零配置与兼容」:首次见到须按 manifest + 文件 hash 信任)。
+std::expected<std::string, std::string> ComputePluginContentHash(const std::filesystem::path& plugin_dir);
+
+// 项目级插件扫描(plugins 单第 8 步):扫 <project>/.lubancode/plugins/,
+// 逐插件算 content hash,查 PluginTrustStore。未信任/被禁用的跳过并写
+// 一条警告(点名怎么批准);信任的照常进 manifests。目录不存在静默空。
+// trust 传 nullptr = 全部当未信任处理(测试用)。
+PluginScanResult ScanProjectPluginDirectories(const std::filesystem::path& project_dir,
+                                              const config::PluginTrustStore* trust);
 
 }  // namespace lubancode::runtime

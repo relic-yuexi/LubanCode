@@ -3065,6 +3065,12 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
             case lubancode::cli::SlashCommand::Plugins:
                 PrintPluginsCommand(plugin_mounted(), plugin_warnings());
                 break;
+            case lubancode::cli::SlashCommand::Plugin:
+                HandlePluginCommand(parsed.args, plugin_mounted(),
+                                     tool_runtime_ ? tool_runtime_->process_manifests()
+                                                   : std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>{},
+                                     plugin_warnings());
+                break;
             case lubancode::cli::SlashCommand::Tools:
                 PrintToolsCommand(registry(), *loaded_tools(), main_deferral, tool_search_threshold);
                 break;

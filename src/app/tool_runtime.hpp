@@ -27,6 +27,7 @@
 #include "cli/theme.hpp"
 #include "cli/worktree.hpp"
 #include "config/config.hpp"
+#include "config/plugin_trust.hpp"
 #include "lsp/manager.hpp"
 #include "mcp/client.hpp"
 #include "memory/project_memory.hpp"
@@ -124,7 +125,9 @@ void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime:
                   std::vector<PluginMountInfo>& mounted, std::vector<std::string>& warnings, bool report = true,
                   std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& process_manifests =
                       detail::kEmptyPluginManifests,
-                  std::vector<std::string>& process_warnings = detail::kEmptyPluginWarnings);
+                  std::vector<std::string>& process_warnings = detail::kEmptyPluginWarnings,
+                  const std::string& project_root_utf8 = std::string(),
+                  const lubancode::config::PluginTrustStore* project_trust = nullptr);
 
 // 一场会话的工具全栈:主循环表、子代理表、(交互模式的)Explore 只读表,
 // 连同它们背后的拥有者——MCP 子进程(mcp_servers_)、插件宿主(plugin_host_)、
@@ -214,6 +217,8 @@ private:
     std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>> process_manifests_;
     std::vector<std::unique_ptr<lubancode::runtime::PluginToolAdapter>> process_adapters_;
     std::vector<std::string> process_plugin_warnings_;
+    // 项目插件的信任账(plugins 单第 8 步):启动装载一次,挂在拥有者区。
+    std::optional<lubancode::config::PluginTrustStore> project_plugin_trust_;
     std::optional<lubancode::lsp::Manager> lsp_manager_;
     // ---- 用户表:后声明,先析构 ----
     std::optional<lubancode::tools::ToolRegistry> explore_registry_;

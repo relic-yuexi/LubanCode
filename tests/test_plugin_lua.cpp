@@ -75,6 +75,7 @@ TEST_CASE("指令预算:死循环在预算内被 luaL_error 掐断,宿主不吊�
     const auto elapsed =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started)
             .count();
+    INFO(out);  // 失败时亮出脚本回的话,排查不用猜
     CHECK(out.find("cpu 指令预算耗尽") != std::string::npos);
     CHECK(elapsed < 5000);  // 有界落锤(正常在几十 ms;CI 慢机器给宽限)
 }

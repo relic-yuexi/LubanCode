@@ -103,8 +103,11 @@ void GuardHook(lua_State* L, lua_Debug*) {
     }
     if (guard->instruction_budget > 0 && guard->instructions_used >= guard->instruction_budget) {
         guard->budget_hit = true;
-        luaL_error(L, "cpu 指令预算耗尽(约 %llu 条虚拟机指令):改小输入或拆小任务",
-                   static_cast<unsigned long long>(guard->instruction_budget));
+        // luaL_error 走 lua_pushfstring,格式符只认 Lua 白名单(%d/%s/%f/%p/%I),
+        // C 的 %llu 不行——预算数先拼进字符串再交。
+        luaL_error(L, ("cpu 指令预算耗尽(约 " + std::to_string(guard->instruction_budget) +
+                       " 条虚拟机指令):改小输入或拆小任务")
+                          .c_str());
     }
 }
 

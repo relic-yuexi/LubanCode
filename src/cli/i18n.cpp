@@ -608,7 +608,9 @@ const Entry kZhCN[] = {
     {"slash.desc.mcp", "列出挂载的 MCP 服务器状态和工具清单"},
     {"slash.desc.lsp", "列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)"},
     {"slash.desc.todos", "查看当前待办清单"},
-    {"slash.desc.plugins", "列出挂载的插件工具(DLL + lua)和加载警告"},
+    {"slash.desc.plugins", "列出插件三路(native/Lua/process)的状态与加载警告"},
+    {"slash.desc.plugin",
+     "管单枚插件:inspect 看详情 / doctor 查环境 / test 试跑 / reload 重载 / enable|disable 开关"},
     {"slash.desc.tools", "列工具三态:核心(恒在)/已加载/延迟未加载(tool_search 延迟挂载)"},
     {"slash.desc.memory",
      "管理项目记忆;/memory on|off|use|learn|review|accept|edit|reject|list|remember|forget|rebuild|why"},
@@ -993,6 +995,33 @@ const Entry kZhCN[] = {
      "      execute=function(input) ... end } 一张表,示例在 examples/plugins/word_count.lua。"},
     {"cmd.plugins.mounted", "已挂载 {0} 个插件工具:"},
     {"cmd.plugins.warnings", "加载警告(这些没挂上):"},
+
+    // ---- /plugin 子命令(plugins 单第 8 步) ----
+    {"cmd.plugin.usage",
+     "用法: /plugin inspect <id> | doctor <id> | reload <id> | enable <id> | disable <id>。裸 /plugin <id> "
+     "视同 inspect。"},
+    {"cmd.plugin.not_found", "找不到插件 {0}(/plugins 看看挂载账)。"},
+    {"cmd.plugin.inspect.header", "插件 {0} v{1}(runtime={2}, language={3})"},
+    {"cmd.plugin.inspect.legacy_header", "插件 {0}(legacy {1} 插件,无 plugin.json,详情看文件本体):"},
+    {"cmd.plugin.inspect.dir", "目录: {0}"},
+    {"cmd.plugin.inspect.argv", "命令: {0}"},
+    {"cmd.plugin.inspect.timeout", "超时: {0}ms"},
+    {"cmd.plugin.inspect.env", "环境变量 allowlist: {0}"},
+    {"cmd.plugin.inspect.tools", "工具 {0} 件:"},
+    {"cmd.plugin.doctor.command_ok", "解释器可用: {0}({1})"},
+    {"cmd.plugin.doctor.command_bad", "解释器起不来: {0}({1})——检查 command 或装好解释器。"},
+    {"cmd.plugin.doctor.not_process", "这不是 process 插件,doctor 只查 process 的解释器环境。"},
+    {"cmd.plugin.doctor.legacy_ok", "{0} 插件在挂载账上(内嵌运行时,无外部环境依赖)。"},
+    {"cmd.plugin.test.hint",
+     "test 与模型调用同一条链(schema 验参、确认、超时),命令层不开无防护捷径——直接让模型调这件工具,"
+     "或用插件自带的测试脚本(如 python test_runner.py)离线自测。"},
+    {"cmd.plugin.reload.hint",
+     "v1 的 reload 以重启为口径:改完插件重启 LubanCode 即生效。Lua/process 的会话内热重载是后续批次,"
+     "不在这硬造半套。"},
+    {"cmd.plugin.toggle.hint",
+     "enable/disable 的持久账(逐插件开关,落 settings)是后续批次;v1 想临时停用,把插件目录挪出 "
+     "plugins/ 再重启即可。"},
+    {"cmd.plugin.unknown_sub", "不认得的子命令: {0}"},
 
     // ---- plugin init 子命令(plugins 单第 3 步) ----
     {"plugininit.no_home", "找不到用户主目录,无法定位插件目录。"},
@@ -2115,7 +2144,9 @@ const Entry kEn[] = {
     {"slash.desc.mcp", "list mounted MCP servers and their tools"},
     {"slash.desc.lsp", "list LSP server status per language"},
     {"slash.desc.todos", "show the current todo list"},
-    {"slash.desc.plugins", "list mounted plugin tools (DLL + lua) and load warnings"},
+    {"slash.desc.plugins", "list plugins of all three runtimes (native/Lua/process) with load warnings"},
+    {"slash.desc.plugin",
+     "manage one plugin: inspect / doctor / test / reload / enable|disable"},
     {"slash.desc.tools", "list tool states: core / loaded / deferred (tool_search)"},
     {"slash.desc.memory",
      "manage project memory; /memory on|off|use|learn|review|accept|edit|reject|list|remember|forget|"

@@ -19,24 +19,65 @@ namespace lubancode::runtime {
 
 namespace {
 
-// env 最小继承集(单子「进程执行与资源边界」):不把宿主整份环境连
-// API key 一锅递给陌生脚本。PATH 与 handful 系统变量保底,manifest
-// allowlist 点名的再加。ChildProcess 的 env 参数语义是"额外注入、同名
-// 覆盖",没法替换整份环境——所以这里反向操作:把不递的变量从注入表里
-// 排掉(缺省注入表 = 继承全部),仅由 allowlist 决定哪些额外可见。
-// 做不到"只递这几样"的强最小集(那需要 platform 层加一个整环境替换
-// 接口),v1 的口径是:manifest 没点名的一律不主动注入,systemd 之类的
-// 用户变量靠继承(不递密钥的强保证在第 8 批信任账里跟 platform 一起补)。
+// env 最小集(单子「进程执行与资源边界」+ 第 8 步的硬保证):子进程只见
+// 这张表里的变量——PATH 与必要系统变量保底,manifest allowlist 点名的
+// 再加,宿主整份环境(连 API key)一概不递。EnvMode::Replace 落的锤:
+// 不再是"继承全部 + 额外注入",而是清空后只给这几样。
+//   - PATH:解释器/脚本要按名找(python3 这类 command 全靠它);
+//   - Windows:SystemRoot/SystemDrive/COMSPEC/WINDIR(缺了 CRT/网络栈
+//     起不来);POSIX:LANG/LC_ALL 这类 locale 不递(脚本要中文输出自己
+//     reconfigure,协议线本就钉 UTF-8)。
+// manifest 没点名的用户变量不递;密钥一概不递。
 std::vector<std::pair<std::string, std::string>> BuildProcessEnv(const PluginManifest& manifest) {
     std::vector<std::pair<std::string, std::string>> env;
-    env.reserve(manifest.env_allowlist.size());
-    for (const std::string& name : manifest.env_allowlist) {
-        const auto value = platform::GetEnvVar(name.c_str());
+    auto add_if_present = [&env](const char* name) {
+        const auto value = platform::GetEnvVar(name);
         if (value.has_value()) {
             env.emplace_back(name, *value);
         }
+    };
+    add_if_present("PATH");
+#ifdef _WIN32
+    add_if_present("SystemRoot");
+    add_if_present("SystemDrive");
+    add_if_present("COMSPEC");
+    add_if_present("WINDIR");
+    add_if_present("TEMP");
+    add_if_present("TMP");
+#else
+    add_if_present("TMPDIR");
+    add_if_present("HOME");  // POSIX 工具链的常规预期;不含密钥
+#endif
+    for (const std::string& name : manifest.env_allowlist) {
+        const auto value = platform::GetEnvVar(name.c_str());
+        if (value.has_value()) {
+            // 同名覆盖保底集(PATH 之类被 allowlist 点名时按宿主值来)。
+            for (auto& [key, value_ref] : env) {
+                if (key == name) {
+                    value_ref = *value;
+                    break;
+                }
+            }
+            env.emplace_back(name, *value);
+        }
     }
-    return env;
+    // 同名条目去重(后写的赢;ChildProcess 的表是 vector,重复键行为未定)。
+    std::vector<std::pair<std::string, std::string>> dedup;
+    dedup.reserve(env.size());
+    for (auto& [key, value] : env) {
+        bool seen = false;
+        for (auto& [dk, dv] : dedup) {
+            if (dk == key) {
+                dv = value;
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) {
+            dedup.emplace_back(key, value);
+        }
+    }
+    return dedup;
 }
 
 }  // namespace
@@ -107,7 +148,7 @@ ProcessCallOutcome RunProcessToolCall(const PluginManifest& manifest,
     const std::vector<std::pair<std::string, std::string>> env = BuildProcessEnv(manifest);
     const auto spawn = child.Start(manifest.argv[0],
                                    std::vector<std::string>(manifest.argv.begin() + 1, manifest.argv.end()), env,
-                                   on_stdout, on_stderr, effective_cwd);
+                                   on_stdout, on_stderr, effective_cwd, platform::EnvMode::Replace);
     if (!spawn.success) {
         outcome.code = PluginErrorCode::SpawnFailed;
         outcome.detail = "起插件进程失败(" + manifest.argv[0] + "): " + spawn.error;

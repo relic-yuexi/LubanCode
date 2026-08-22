@@ -302,6 +302,7 @@ add_library(lubancode_core STATIC
   src/config/prompt_files.cpp
   src/config/project_instructions.cpp
   src/config/skill_store.cpp
+  src/config/plugin_trust.cpp
   src/tools/registry.cpp
   src/tools/tool_text.cpp
   src/tools/read_file.cpp

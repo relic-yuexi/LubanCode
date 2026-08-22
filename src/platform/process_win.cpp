@@ -62,6 +62,21 @@ void RestoreEnv(const std::vector<EnvBackup>& backups) {
     }
 }
 
+// Replace 模式的显式环境块:"KEY=VALUE\0KEY=VALUE\0\0" 的 UTF-16 串,交给
+// CreateProcessW 的 lpEnvironment——宿主环境一概不递(plugins 单第 8 步
+// 的最小环境硬保证)。空表 = 子进程一个变量都没有。
+std::wstring BuildExplicitEnvironment(const EnvPairs& env) {
+    std::wstring block;
+    for (const auto& [key, value] : env) {
+        block += Utf8ToWide(key);
+        block += L'=';
+        block += Utf8ToWide(value);
+        block += L'\0';
+    }
+    block += L'\0';  // 块尾双 \0
+    return block;
+}
+
 // Windows 命令行参数的标准转义算法(CommandLineToArgvW 的逆过程):没有
 // 空白/引号就原样返回,否则用双引号包起来,内部的反斜杠+引号按规则转义。
 // command/args 里任何一段带空格(比如子进程脚本路径含空格)都得靠这个才能
@@ -675,18 +690,25 @@ ChildProcess::~ChildProcess() {
 
 SpawnResult ChildProcess::Start(const std::string& command, const std::vector<std::string>& args,
                                   const EnvPairs& env, std::function<bool(std::string_view)> on_stdout,
-                                  std::function<void(std::string_view)> on_stderr, const std::string& cwd_utf8) {
-    return Start(command, args, env, std::move(on_stdout), std::move(on_stderr), SpawnConstraints{}, cwd_utf8);
+                                  std::function<void(std::string_view)> on_stderr, const std::string& cwd_utf8,
+                                  EnvMode env_mode) {
+    return Start(command, args, env, std::move(on_stdout), std::move(on_stderr), SpawnConstraints{}, cwd_utf8,
+                 env_mode);
 }
 
 SpawnResult ChildProcess::Start(const std::string& command, const std::vector<std::string>& args,
                                   const EnvPairs& env, std::function<bool(std::string_view)> on_stdout,
                                   std::function<void(std::string_view)> on_stderr,
-                                  const SpawnConstraints& constraints, const std::string& cwd_utf8) {
+                                  const SpawnConstraints& constraints, const std::string& cwd_utf8,
+                                  EnvMode env_mode) {
     on_stdout_ = std::move(on_stdout);
     on_stderr_ = std::move(on_stderr);
 
-    const std::vector<EnvBackup> backups = ApplyEnv(env);
+    // Inherit:老路(临时改宿主环境变量,起完还原)。Replace:显式环境块
+    // 交给 lpEnvironment,宿主环境一概不递,也不动宿主自己的环境变量。
+    const bool replace_env = env_mode == EnvMode::Replace;
+    const std::wstring explicit_env = replace_env ? BuildExplicitEnvironment(env) : std::wstring();
+    const std::vector<EnvBackup> backups = replace_env ? std::vector<EnvBackup>{} : ApplyEnv(env);
 
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
@@ -756,20 +778,30 @@ SpawnResult ChildProcess::Start(const std::string& command, const std::vector<st
         current_directory = cwd_wide.c_str();
     }
 
+    // lpEnvironment:Replace 模式交显式块(宿主环境不递);Inherit 传
+    // nullptr(继承快照,配合上面的 ApplyEnv/RestoreEnv 老路)。
+    // CREATE_UNICODE_ENVIRONMENT 告诉系统块是 UTF-16 的。
+    LPVOID environment = nullptr;
+    DWORD creation_flags = CREATE_NO_WINDOW | CREATE_SUSPENDED;
+    if (replace_env) {
+        environment = const_cast<wchar_t*>(explicit_env.c_str());
+        creation_flags |= CREATE_UNICODE_ENVIRONMENT;
+    }
+
     BOOL ok = FALSE;
     DWORD error_code = 0;
     if (child_token != nullptr) {
         ok = CreateProcessAsUserW(child_token, nullptr, cmdline_buf.data(), nullptr, nullptr, TRUE,
-                                  CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, current_directory, &si, &pi);
+                                  creation_flags, environment, current_directory, &si, &pi);
         CloseHandle(child_token);
         if (!ok) {
             // 受限 token 这条路走不通(策略/权限),降级回普通创建,不硬失败。
             ok = CreateProcessW(nullptr, cmdline_buf.data(), nullptr, nullptr, TRUE,
-                                CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, current_directory, &si, &pi);
+                                creation_flags, environment, current_directory, &si, &pi);
         }
     } else {
         ok = CreateProcessW(nullptr, cmdline_buf.data(), nullptr, nullptr, TRUE,
-                            CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, current_directory, &si, &pi);
+                            creation_flags, environment, current_directory, &si, &pi);
     }
     error_code = GetLastError();
 

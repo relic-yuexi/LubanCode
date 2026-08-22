@@ -16,7 +16,10 @@
 #include "cli/theme.hpp"
 #include "cli/worktree.hpp"
 #include "lsp/manager.hpp"
+#include "platform/process.hpp"
 #include "platform/text_encoding.hpp"
+#include "runtime/plugin_contract.hpp"
+#include "tools/path_utils.hpp"
 #include "tools/registry.hpp"
 
 namespace lubancode::app {
@@ -147,8 +150,9 @@ bool SameFilesystemPath(const std::filesystem::path& left, const std::filesystem
 
 // 打不打,这个函数本身不做 is_console 判断。
 
-// /plugins 命令:列已挂载的插件工具(完整工具名 + 类别)和启动时的加载
-// 警告;一个都没有时打印目录约定,顺带说明两类插件各自怎么写。
+// /plugins 命令:列已挂载的插件工具(完整工具名 + runtime)和启动时的加载
+// 警告;一个都没有时打印目录约定,顺带说明三路插件各自怎么写(plugins 单
+// 第 8 步:不再是"只列 Lua/DLL",process 插件一并入账)。
 void PrintPluginsCommand(const std::vector<PluginMountInfo>& mounted, const std::vector<std::string>& warnings) {
     if (mounted.empty() && warnings.empty()) {
         const auto home_dir = lubancode::config::HomeLubancodeDir();
@@ -169,6 +173,151 @@ void PrintPluginsCommand(const std::vector<PluginMountInfo>& mounted, const std:
             std::cout << "  - " << warning << "\n";
         }
     }
+}
+
+// /plugin 子命令(plugins 单第 8 步)的实现。三路插件的账都从调用方递
+// 进来:process 走 manifests,native/Lua 走 mounted(完整工具名前缀对
+// 得上插件 id)。doctor 只探环境不执行 tool;test 走与模型调用同一条
+// 执行链(这里给 v1 的最短版:经 ToolRuntime 的 registry 由调用方真跑,
+// 命令层只出说明——真跑要确认流,硬造一条免确认的捷径正是单子禁的)。
+void HandlePluginCommand(const std::string& args,
+                         const std::vector<PluginMountInfo>& mounted,
+                         const std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& manifests,
+                         const std::vector<std::string>& warnings) {
+    // 拆子命令与目标 id。
+    std::string sub = args;
+    std::string rest;
+    const std::size_t space = args.find_first_of(" \t");
+    if (space != std::string::npos) {
+        sub = args.substr(0, space);
+        rest = args.substr(space + 1);
+    }
+    // 去掉 rest 两端空白。
+    const auto begin = rest.find_first_not_of(" \t");
+    rest = begin == std::string::npos ? std::string() : rest.substr(begin);
+    const auto end = rest.find_last_not_of(" \t");
+    if (end != std::string::npos) {
+        rest = rest.substr(0, end + 1);
+    }
+
+    if (sub.empty()) {
+        std::cout << tr("cmd.plugin.usage") << "\n";
+        return;
+    }
+
+    // 形态一:/plugin inspect <id>(sub 是子动词,target 在 rest)。
+    // 形态二:/plugin <id>(裸 id,视同 inspect)。
+    const bool sub_is_verb =
+        sub == "inspect" || sub == "doctor" || sub == "reload" || sub == "enable" || sub == "disable" || sub == "test";
+    const std::string target_id = sub_is_verb ? rest : sub;
+    const std::string action = sub_is_verb ? sub : std::string("inspect");
+    const lubancode::runtime::PluginManifest* manifest = nullptr;
+    if (!target_id.empty()) {
+        for (const auto& m : manifests) {
+            if (m->id == target_id) {
+                manifest = m.get();
+            }
+        }
+    }
+
+    if (action == "inspect") {
+        if (manifest != nullptr) {
+            std::cout << trf("cmd.plugin.inspect.header", manifest->id, manifest->version,
+                             std::string(lubancode::runtime::RuntimeKindName(manifest->kind)),
+                             manifest->language.empty() ? std::string("-") : manifest->language)
+                      << "\n";
+            std::cout << trf("cmd.plugin.inspect.dir", lubancode::tools::PathToUtf8(manifest->plugin_dir)) << "\n";
+            if (manifest->kind == lubancode::runtime::RuntimeKind::Process) {
+                std::string argv_text;
+                for (const auto& a : manifest->argv) {
+                    argv_text += argv_text.empty() ? a : (" " + a);
+                }
+                std::cout << trf("cmd.plugin.inspect.argv", argv_text) << "\n";
+                std::cout << trf("cmd.plugin.inspect.timeout", manifest->timeout_ms) << "\n";
+                if (!manifest->env_allowlist.empty()) {
+                    std::string env_names;
+                    for (const auto& name : manifest->env_allowlist) {
+                        env_names += env_names.empty() ? name : (", " + name);
+                    }
+                    std::cout << trf("cmd.plugin.inspect.env", env_names) << "\n";
+                }
+            }
+            std::cout << trf("cmd.plugin.inspect.tools", manifest->tools.size()) << "\n";
+            for (const auto& tool : manifest->tools) {
+                std::cout << "  - " << tool.full_name << "\n";
+            }
+            return;
+        }
+        // native/Lua 的 inspect:mounted 里按前缀找。
+        const std::string prefix = "plugin__" + target_id + "__";
+        bool found = false;
+        for (const auto& info : mounted) {
+            if (info.tool_name.rfind(prefix, 0) == 0) {
+                if (!found) {
+                    std::cout << trf("cmd.plugin.inspect.legacy_header", target_id, info.kind) << "\n";
+                    found = true;
+                }
+                std::cout << "  - " << info.tool_name << "\n";
+            }
+        }
+        if (found) {
+            return;
+        }
+        std::cout << trf("cmd.plugin.not_found", target_id) << "\n";
+        return;
+    }
+
+    if (action == "doctor") {
+        // doctor:process 查解释器起不起得来;native/Lua 只报在不在账上。
+        if (manifest != nullptr) {
+            if (manifest->kind == lubancode::runtime::RuntimeKind::Process) {
+                const auto result = lubancode::platform::RunProcess({manifest->argv[0], "--version"}, 15000);
+                if (result.spawn_failed || result.exit_code != 0) {
+                    std::cout << trf("cmd.plugin.doctor.command_bad", manifest->argv[0],
+                                     result.spawn_failed ? result.spawn_error : std::to_string(result.exit_code))
+                              << "\n";
+                } else {
+                    std::string version = result.output;
+                    if (version.size() > 80) {
+                        version = version.substr(0, 80) + "...";
+                    }
+                    std::cout << trf("cmd.plugin.doctor.command_ok", manifest->argv[0], version) << "\n";
+                }
+            } else {
+                std::cout << tr("cmd.plugin.doctor.not_process") << "\n";
+            }
+            return;
+        }
+        for (const auto& info : mounted) {
+            const std::string prefix = "plugin__" + target_id + "__";
+            if (info.tool_name.rfind(prefix, 0) == 0) {
+                std::cout << trf("cmd.plugin.doctor.legacy_ok", info.kind) << "\n";
+                return;
+            }
+        }
+        std::cout << trf("cmd.plugin.not_found", target_id) << "\n";
+        return;
+    }
+
+    if (action == "test") {
+        // test 的口径:与模型调用同一条链(schema 验参、确认、timeout)。
+        // 确认流在交互层,命令层不另开无防护捷径——这里指路,真跑让模型
+        // 调(或用 scaffold 生成的 test_runner.py 离线自测)。
+        std::cout << tr("cmd.plugin.test.hint") << "\n";
+        return;
+    }
+
+    if (action == "reload") {
+        std::cout << tr("cmd.plugin.reload.hint") << "\n";
+        return;
+    }
+    if (action == "enable" || action == "disable") {
+        std::cout << tr("cmd.plugin.toggle.hint") << "\n";
+        return;
+    }
+
+    std::cout << trf("cmd.plugin.unknown_sub", sub) << "\n";
+    std::cout << tr("cmd.plugin.usage") << "\n";
 }
 
 // /mcp 命令:每个服务器一行状态(运行中/已退出)+ 工具数,底下缩进列出
