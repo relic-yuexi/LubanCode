@@ -3,6 +3,10 @@
 // 该长什么样"的纯逻辑(宽度怎么定、plain 主题下用什么字符),不碰真实
 // 控制台——真正探测控制台宽度、决定要不要打、拿什么颜色包这条线,都在
 // main.cpp(那边才知道 is_console、theme)。
+//
+// 回合视觉收束单新添 BuildTurnFooterLine:turn 尾那条带字的分界线
+// ("──── Worked for 6m 41s ────")。满宽线只认 turn 边界;文字嵌在横线左
+// 侧约两列处,余下横线填满安全宽度;窄于四十列只写文案,不硬塞左右长线。
 
 #pragma once
 
@@ -21,5 +25,19 @@ namespace lubancode::cli {
 // 恒等于 console_width - 1,即满宽随终端(留一列安全边界)。默认 80 只是
 // 给不关心上限的老调用点兜底。
 std::string BuildDividerLine(int console_width, bool plain, int max_width = 80);
+
+// turn 尾分界线(回合视觉收束单):"──── Worked for 6m 41s ────"。
+//   - text 嵌在线左:先 2 列横线,接 " text ",再横线填到安全宽
+//     (console_width - 1,与 BuildDividerLine 同一把尺);
+//   - 窄于 40 列(kTurnFooterMinColumns)只写文案本身,不硬塞长线——
+//     窄屏退化,不折行、不压字;
+//   - text 已超宽(比整条线还长)也只写文案;
+//   - plain 同 BuildDividerLine 用 "-";
+//   - 宽度 <= 0 或 text 为空:返回空串(空文案没有线,直接走裸线)。
+// 显示宽按 UTF-8 显示列算(文字可含中文/emoji),不切坏多字节。
+std::string BuildTurnFooterLine(const std::string& text, int console_width, bool plain);
+
+// 窄屏退化的门槛:比这窄就只写文案(单子:窄于四十列不硬塞左右长线)。
+inline constexpr int kTurnFooterMinColumns = 40;
 
 }  // namespace lubancode::cli

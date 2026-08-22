@@ -11,6 +11,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <expected>
 #include <set>
 #include <string>
@@ -22,6 +23,7 @@
 #include "agent/workflow_recorder.hpp"
 #include "api/types.hpp"
 #include "cli/context_tracker.hpp"
+#include "cli/format_utils.hpp"  // TurnFooterTone(Worked/Stopped/Failed)
 #include "cli/image_input.hpp"
 #include "cli/live_transcript.hpp"
 #include "cli/theme.hpp"
@@ -30,6 +32,7 @@
 #include "config/config.hpp"
 #include "hooks/dispatcher.hpp"
 #include "platform/paths.hpp"
+#include "runtime/turn_collector.hpp"
 #include "runtime/turn_runtime.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/ask_user.hpp"
@@ -50,6 +53,12 @@ using lubancode::platform::CurrentDirUtf8;
 // 是一条线,不带文字、不带花边。is_console 为假(管道/重定向)时直接
 // 什么都不打,不污染被重定向的输出。
 void PrintDivider(const lubancode::cli::Theme& theme, bool is_console);
+
+// turn 尾分界线(终端回合视觉收束单):"──── Worked for 6m 41s ────"。
+// 每个用户 turn 恰一枚;tone 三档(Worked/Stopped/Failed)对应完成/打断/
+// 失败;wall_ms 是整轮墙钟(steady_clock 差,毫秒)。窄屏退化成纯文案。
+void PrintTurnFooter(const lubancode::cli::Theme& theme, bool is_console, std::int64_t wall_ms,
+                     lubancode::cli::TurnFooterTone tone);
 
 // 打印一段文本的前几行,超过就注明省略了多少行。给确认前的改动摘要用。
 void PrintFirstLines(const std::string& text, int max_lines);
@@ -85,7 +94,8 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                             const std::vector<std::string>& allow_commands,
                                             const std::vector<std::string>& deny_commands,
                                             const std::atomic<bool>* cancel_flag = nullptr,
-                                            lubancode::agent::WorkflowRecorder* recorder = nullptr);
+                                            lubancode::agent::WorkflowRecorder* recorder = nullptr,
+                                            lubancode::runtime::TurnCollector* view_collector = nullptr);
 
 // RunTurn() 的结果:status 沿用老语义(0 成功、非 0 出错);cancelled 标记
 // 这一轮是不是被 ESC 打断的(打断不算错误,status 照样是 0)。
@@ -142,6 +152,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                        lubancode::tools::AgentTool* completion_agent = nullptr,
                        lubancode::agent::WorkflowRecorder* recorder = nullptr,
                        bool silent = false,
-                       lubancode::runtime::TurnUsageStats* usage_out = nullptr);
+                       lubancode::runtime::TurnUsageStats* usage_out = nullptr,
+                       lubancode::runtime::TurnView* turn_view_out = nullptr);
 
 }  // namespace lubancode::app

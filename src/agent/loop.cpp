@@ -329,6 +329,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
     // 等,不再靠解析错误文案猜。
     int steps_used = 0;
     std::string last_stop_reason;
+    // 本 Run() 已发出的批次序号(on_tool_batch_started 的 batch_index 用;
+    // 每个含工具的 step 消耗一枚,跨 step 不重号)。
+    std::size_t batches_emitted = 0;
     // 前缀记账(agent/prefix.hpp):本步请求与上一份的追加律判定结果,
     // 发请求前算好,报 usage 时随 UsageReport 交出去。
     bool step_prefix_append_only = true;
@@ -344,6 +347,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
     // 或者用户 ESC/Ctrl+C(cancel)收场,不靠这里的硬闸。profile_.max_steps_per_turn > 0
     // 时才是"到点就停"的老行为。
     for (int step_index = 0; profile_.max_steps_per_turn <= 0 || step_index < profile_.max_steps_per_turn; ++step_index) {
+        // 回合视觉收束:step 边界。请求还没发,先报"这一拍开始了"——
+        // 界面(工具批次分组)凭它知道上一批已换拍,两条 model step 之间
+        // 该留一口气。没设回调零影响。
+        if (callbacks.on_model_step_started) {
+            callbacks.on_model_step_started(step_index);
+        }
         // 跨会话传话的安全收件点:工具结果已攒完、下一次请求尚未发出——
         // 正是"不打断工具、步边界收信"的那个缝。step_index==0 不收:这一步
         // 的用户消息刚落下,空闲路径(main.cpp)在起 Run 之前已经收过一趟,
@@ -715,6 +724,25 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         // 结果)保住 tool_use/tool_result 的成对约束,再从 Run() 正常返回。
         bool interrupted = false;
         std::vector<api::ContentBlock> tool_results;
+        // 回合视觉收束:批次边界。遍历前把这一批的 tool_use id 按模型给的
+        // 顺序交出去(界面先全登记 Pending,再逐枚推进);遍历后(含打断
+        // 补账)报收。没设回调零影响;执行语义一字不动。
+        int batch_index_for_this_step = -1;
+        {
+            std::vector<std::string> batch_ids;
+            for (const auto& block : assistant_message.content) {
+                if (std::holds_alternative<api::ToolUseBlock>(block)) {
+                    batch_ids.push_back(std::get<api::ToolUseBlock>(block).id);
+                }
+            }
+            if (!batch_ids.empty() && callbacks.on_tool_batch_started) {
+                callbacks.on_tool_batch_started(step_index, static_cast<int>(batches_emitted), batch_ids);
+            }
+            if (!batch_ids.empty()) {
+                batch_index_for_this_step = static_cast<int>(batches_emitted);
+                ++batches_emitted;
+            }
+        }
         for (const auto& block : assistant_message.content) {
             if (!std::holds_alternative<api::ToolUseBlock>(block)) {
                 continue;
@@ -735,6 +763,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
             if (cancel != nullptr && cancel->load()) {
                 interrupted = true;
             }
+        }
+        if (batch_index_for_this_step >= 0 && callbacks.on_tool_batch_finished) {
+            callbacks.on_tool_batch_finished(batch_index_for_this_step, interrupted);
         }
 
         api::Message tool_result_message;

@@ -2,6 +2,12 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.35] - 2026-08-23
+
+- **一轮回答收成一册账。** 回合结尾落一道带字的分界线 `──── Worked for 6m 41s ────`，打断写 `Stopped after`、失败写 `Failed after`；错误与预算耗尽不再从中途裸退漏掉尾线，管道模式也落纯文案版（时间账属于 automation 契约）。
+- **工具看得出批次了。** 同一次模型响应吐的多枚工具先整批登记"本拍排队中"，再逐枚点亮执行；ESC 后跑完的照旧、跑着的记打断、没轮到的如实标"未执行"，屏上不缺枚。五行 PowerShell 只画一个条目，标题带 `+4 lines` 不再横铺。
+- **Working 计的是整轮了。** 活动条认 turn 不认单次请求：正文流、工具批次、下一次模型请求都不熄、秒数不归零；ESC 后换"正在停…"，终态落账才退场。Ctrl+E/Esc 返回不再追打横幅，token 长行退到详细态（Ctrl+O），Ctrl+L 重放与实时画面同一颗渲染器。
+
 ## [v0.26.34] - 2026-08-23
 
 - **无界面后台接口补齐了血肉。** 工具条目带中立 diff 行表、回合用量与上下文压力实时通报、图片输入入协议;出站队列的增量合并落了真(delta 并条、溢出通报带账);jsonrpc 字段去留、事件序号、图片字段名一并冻结成文。
@@ -108,6 +114,14 @@
 - **模型与扩展接成一体。** 接入 Anthropic Messages 与 OpenAI Responses，并提供上下文压缩、会话恢复、MCP、LSP、Skills、Lua、C ABI 插件和联网工具。
 - **三平台可以直接安装。** Windows、Linux 与 macOS 均有自动构建的发行包和安装脚本，CI 分别用 MSVC、GCC 与 Clang 编译测试。
 
+[v0.26.35]: https://github.com/relic-yuexi/LubanCode/compare/v0.26.34...v0.26.35
+[v0.26.34]: https://github.com/relic-yuexi/LubanCode/compare/v0.26.33...v0.26.34
+[v0.26.33]: https://github.com/relic-yuexi/LubanCode/compare/v0.26.32...v0.26.33
+[v0.26.32]: https://github.com/relic-yuexi/LubanCode/compare/v0.26.31...v0.26.32
+[v0.26.31]: https://github.com/relic-yuexi/LubanCode/compare/v0.26.30...v0.26.31
+[v0.26.30]: https://github.com/relic-yuexi/LubanCode/compare/v0.26.29...v0.26.30
+[v0.26.29]: https://github.com/relic-yuexi/LubanCode/compare/v0.26.28...v0.26.29
+[v0.26.28]: https://github.com/relic-yuexi/LubanCode/compare/v0.26.27...v0.26.28
 [v0.26.27]: https://github.com/relic-yuexi/LubanCode/compare/v0.26.0...v0.26.27
 [v0.26.0]: https://github.com/relic-yuexi/LubanCode/compare/v0.25.1...v0.26.0
 [v0.25.1]: https://github.com/relic-yuexi/LubanCode/compare/v0.25.0...v0.25.1
