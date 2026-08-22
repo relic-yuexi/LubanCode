@@ -252,10 +252,252 @@ std::expected<std::vector<std::string>, std::string> PromptAskUser(
     return answers;
 }
 
+// ---------------------------------------------------------------------------
+// P2(显示系统剥离单):确认问话的终端实现,包成 InteractionBroker 形状。
+//
+// ConfirmToolUse 是原来 BuildCallbacks 里那枚 on_tool_confirm 闭包的原文
+// 搬家(一个字没改,注释一并随行):会话级确认档(yolo/auto/confirm)、
+// settings.local.json 的 allow/deny 前缀、PreToolUse 归并决策、
+// PermissionRequest 钩子、三档菜单/[y/a/N]、settings.local.json 追问,全
+// 在这里。BuildCallbacks 的同步回调(async 缺位的回落路)与异步审批通道
+// (async 主路)共用这一份——同一颗脑子,两条门。
+//
+// ReadyApprovalFuture 是"当场问完"的 future:结果在构造时就绪,WaitApproval
+// 立即返回。远端前端(app-server/Web/Tauri)后续在同一枚
+// on_tool_confirm_async 挂接点上换"登记 request_id、等 ResolveApproval"
+// 的悬起实现,RunOneTool 与本文件都不用动。
+// ---------------------------------------------------------------------------
+namespace {
+
+class ReadyApprovalFuture final : public lubancode::agent::InteractionFuture {
+public:
+    explicit ReadyApprovalFuture(lubancode::agent::ApprovalResponse response) : response_(std::move(response)) {}
+
+    std::optional<lubancode::agent::ApprovalResponse> WaitApproval() override { return response_; }
+
+private:
+    lubancode::agent::ApprovalResponse response_;
+};
+
+}  // namespace
+
+// 确认问话的完整实现(原文自 BuildCallbacks 的旧闭包搬家,注释随行)。
+bool ConfirmToolUse(bool auto_confirm, std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
+                    lubancode::cli::ToolDisplay& display, const std::vector<std::string>& allow_commands,
+                    const std::vector<std::string>& deny_commands,
+                    lubancode::hooks::HookDispatcher* hook_dispatcher, const lubancode::agent::ToolHookDecision& pre,
+                    bool has_permission_hooks, const std::string& name, const nlohmann::json& input) {
+    // 会话级确认模式(Shift+Tab 循环切),跟 --yes/auto_confirm 叠加:
+    //   yolo  —— 全自动放行(auto_confirm 本来就是这个语义,这里再查一遍
+    //             CurrentConfirmMode() 是为了让 Shift+Tab 中途切到 yolo
+    //             也立刻生效,不用等下一轮 --yes)
+    //   auto  —— write_file/edit_file 自动放行;run_command 过一遍
+    //             ClassifyCommand(tools/command_safety.hpp)自动分析,
+    //             安全命令(只读/探查、无重定向、链上每段都安全)直接
+    //             放行,危险/不认识的照旧问;MCP/插件等外挂工具仍然问
+    //   confirm(默认)—— 老规矩,needs_confirm 的工具逐个问
+    // settings.local.json 的 permissions 叠加在这一层(不改 command_safety):
+    //   deny_commands 前缀命中 run_command → 永远问一句(压过 allow、压过
+    //     会话"总是允许");但 yolo/--yes 是显式全放,deny 不拦(只在
+    //     confirm/auto 档生效)。
+    //   allow_commands 前缀命中 → auto 档里等价 command_safety 判成 Safe。
+    // hooks 第三步:PreToolUse 的归并决策在这里收尾——
+    //   hook allow 跳过用户确认,但 deny_commands/权限策略照走(先算
+    //   policy 再看 hook,deny_hit 压过 hook allow,不许钩子越权);
+    //   hook ask 即使档位本来放行,也要问用户一句。
+    // 真要弹确认时先发 PermissionRequest 钩子:任一 deny -> 拒;任一
+    // allow -> 不弹;全不表态 -> 正常问用户。
+    const lubancode::cli::ConfirmMode mode = lubancode::cli::CurrentConfirmMode();
+    const bool file_tool = name == "write_file" || name == "edit_file";
+
+    std::string command;
+    std::string shell = "powershell";  // run_command 的默认 shell,语义同 execute()
+    if (name == "run_command") {
+        if (const auto it = input.find("command"); it != input.end() && it->is_string()) {
+            command = it->get<std::string>();
+        }
+        if (const auto it = input.find("shell"); it != input.end() && it->is_string()) {
+            shell = it->get<std::string>();
+        }
+    }
+
+    // permissions 裁定(deny 压 allow,纯函数,见 config 层)。注意这里
+    // 用的是钩子可能改写过的 input(updatedInput 重过 deny 规则——不许
+    // 借改参绕黑名单)。
+    const lubancode::config::CommandPermission perm =
+        name == "run_command"
+            ? lubancode::config::ClassifyCommandByPermissions(command, allow_commands, deny_commands)
+            : lubancode::config::CommandPermission::None;
+    // deny:只在 confirm/auto 档生效(yolo/--yes 显式全放不拦)。
+    const bool deny_hit =
+        perm == lubancode::config::CommandPermission::Deny && !auto_confirm && mode != lubancode::cli::ConfirmMode::Yolo;
+
+    bool safe_command = false;
+    if (mode == lubancode::cli::ConfirmMode::Auto && name == "run_command" && !deny_hit) {
+        // allow_commands 命中 → auto 档等价 command_safety 的 Safe(补白名单)。
+        safe_command = lubancode::tools::ClassifyCommand(command, shell) == lubancode::tools::CommandSafety::Safe ||
+                       perm == lubancode::config::CommandPermission::Allow;
+    }
+    // PreToolUse 钩子的表态参与裁决:deny_hit(策略黑名单)最高;钩子
+    // allow 只跳"问用户"这一步;钩子 ask 把"本来自动放行"拉回确认。
+    const bool hook_allow_skip =
+        pre.decision == lubancode::agent::ToolHookDecision::Decision::Allow && !deny_hit;
+    const bool hook_ask = pre.decision == lubancode::agent::ToolHookDecision::Decision::Ask;
+    const bool auto_pass = !deny_hit &&
+                           (auto_confirm || mode == lubancode::cli::ConfirmMode::Yolo ||
+                            (mode == lubancode::cli::ConfirmMode::Auto && (file_tool || safe_command)) ||
+                            always_allowed_tools.count(name) != 0 || hook_allow_skip);
+    if (auto_pass && !hook_ask) {
+        // UI-C:自动放行(--yes/yolo/auto 档的文件工具/选过 a)也把统一
+        // diff 预览打出来——用户看得见将要发生什么,但不停下等确认,
+        // 打完即执行;执行完预览被 TrimBelow 擦掉,条目只留 +N -M。
+        // 管道模式 ShowDiffPreview 内部直接返回,输出照旧是稳定纯文本。
+        if (file_tool) {
+            display.ShowDiffPreview(name, input, /*trim_on_done=*/true);
+        }
+        return true;
+    }
+
+    // ---- 真要问用户了:PermissionRequest 钩子先表态。----
+    if (has_permission_hooks) {
+        lubancode::hooks::HookPayload payload;
+        payload.event = lubancode::hooks::HookEvent::PermissionRequest;
+        payload.fields["tool_name"] = name;
+        payload.fields["tool_input"] = input.is_null() ? nlohmann::json::object() : input;
+        payload.match_value = name;
+        const auto merged = hook_dispatcher->Emit(lubancode::hooks::HookEvent::PermissionRequest, payload);
+        if (merged.permission == lubancode::hooks::HookEventResult::Permission::Deny) {
+            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+            std::cout << theme.error << "[hook] PermissionRequest 钩子拒绝执行 " << name << ": "
+                      << merged.permission_reason << theme.reset << "\n";
+            return false;
+        }
+        if (merged.permission == lubancode::hooks::HookEventResult::Permission::Allow) {
+            if (file_tool) {
+                display.ShowDiffPreview(name, input, /*trim_on_done=*/true);
+            }
+            return true;
+        }
+        // 全不表态 -> 正常问用户(落下去)。
+    }
+    // UI-B:真的要问了——条目先改成"待确认"态(黄灯 + 待确认),确认块
+    // (参数详情 + [y/a/N] 提示)跟在条目下面;答完确认块整个擦掉,
+    // 拒绝则条目原地改灰 Cancelled,允许则改回 Running 等终态。
+    // UI-C:edit_file/write_file 在真控制台下,参数详情换成统一 diff
+    // 预览(路径 + 行级 diff,- 红底 + 绿底),answered 后随确认块一起擦;
+    // 管道模式沿用老的参数摘要,不打 diff。
+    //
+    // v0.22.5 修复:确认交互落笔前必须先把流式脚注框挂起——不挂起的话
+    // 有两条真机实测过的病:1) 详情文字盖写在框的横线上,行尾旧字符不
+    // 清、横线残留;2) [y/a/N] 提示打出来之后,被 footer 心跳线程那
+    // 条 400ms 一次的 ticker(不管是不是在等确认都无条件重画脚注框)盖
+    // 没了,屏上只剩流式期的输入框。用 RAII 作用域,一次性盖住
+    // PrintConfirmDetails/ShowDiffPreview 两条路径 + 后面的 ReadLine +
+    // 下面 "chose_always" 那次追加确认,答完(或提前 return)自动摘挂起
+    // ——详见 cli/console_input.hpp StreamFooterSuspendScope 注释。
+    // ("ask_user 被子代理状态遮挡"一单起,这枚作用域同时收走子代理
+    // 状态块、挂起 ticker、让监听线程交出读权——确认菜单与 ask_user
+    // 菜单同一套屏面所有权,不另开第二条路。)
+    const lubancode::cli::StreamFooterSuspendScope footer_suspend;
+    const int pending_idx = display.OnConfirmRequest();
+    if (file_tool && display.is_console) {
+        display.ShowDiffPreview(name, input, /*trim_on_done=*/false);
+    } else {
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        PrintConfirmDetails(name, input);
+    }
+    // M10:esc_rejects=true——按 Esc 直接返回 nullopt，走到下面拒绝
+    // 分支，不留在输入行里继续等。
+    bool allowed = false;
+    bool chose_always = false;
+    const bool interactive_menu =
+        lubancode::platform::StdinIsInteractive() && lubancode::platform::ProbeStdoutConsole().is_console;
+    if (interactive_menu) {
+        // 方向键选择:本次允许 / 本会话总允许 / 拒绝。默认高亮"拒绝"
+        // (安全,等同原 [y/a/N] 回车=N)。Esc/Ctrl+C/EOF 也按拒绝。
+        std::vector<lubancode::cli::ChoiceMenuItem> items = {
+            {tr("confirm.opt.allow_once"), {}},
+            {tr("confirm.opt.always"), {}},
+            {tr("confirm.opt.deny"), {}},
+        };
+        lubancode::cli::ChoiceMenuOptions opts;
+        opts.hint = tr("confirm.menu.hint");
+        opts.initial_cursor = 2;  // 默认"拒绝"
+        const auto selected = lubancode::cli::ReadChoiceMenu(items, opts, theme);
+        if (selected.has_value() && !selected->selected_indices.empty()) {
+            const std::size_t idx = selected->selected_indices.front();
+            if (idx == 0) {
+                allowed = true;
+            } else if (idx == 1) {
+                always_allowed_tools.insert(name);
+                allowed = true;
+                chose_always = true;
+            }
+        }
+    } else {
+        // 管道/非交互:沿用 [y/a/N] 读一行(自动化场景照旧)。
+        const std::optional<std::string> answer = lubancode::cli::ReadLine(
+            theme.confirm + tr("confirm.prompt") + theme.reset, theme,
+            /*esc_rejects=*/true);
+        if (answer.has_value()) {
+            if (*answer == "a" || *answer == "A") {
+                always_allowed_tools.insert(name);
+                allowed = true;
+                chose_always = true;
+            } else {
+                allowed = (*answer == "y" || *answer == "Y");
+            }
+        }
+    }
+    display.OnConfirmAnswered(pending_idx, allowed);
+
+    // 按 a 之后多问一句:也永久写进项目 settings.local.json?管道/--yes 下
+    // 跳过(只进会话集合)——那些场景没法交互再问一遍。真控制台才追问。
+    if (chose_always && display.is_console && !auto_confirm) {
+        bool persist_yes = false;
+        if (interactive_menu) {
+            std::vector<lubancode::cli::ChoiceMenuItem> p_items = {
+                {tr("confirm.persist.no"), {}},
+                {tr("confirm.persist.yes"), {}},
+            };
+            lubancode::cli::ChoiceMenuOptions p_opts;
+            p_opts.hint = tr("confirm.persist.menu.hint");
+            p_opts.initial_cursor = 0;  // 默认"否"
+            const auto p_sel = lubancode::cli::ReadChoiceMenu(p_items, p_opts, theme);
+            persist_yes =
+                p_sel.has_value() && !p_sel->selected_indices.empty() && p_sel->selected_indices.front() == 1;
+        } else {
+            const std::optional<std::string> persist = lubancode::cli::ReadLine(
+                theme.confirm + tr("settings.local.persist_prompt") + theme.reset, theme,
+                /*esc_rejects=*/true);
+            persist_yes = persist.has_value() && (*persist == "y" || *persist == "Y");
+        }
+        if (persist_yes) {
+            const std::string cwd = CurrentDirUtf8();
+            const auto written = lubancode::config::AddAllowedToolToSettingsLocal(cwd, name);
+            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+            if (written.has_value()) {
+                std::cout << trf("settings.local.persisted", name) << "\n";
+                // 首次落地 settings.local.json 时,顺带保证 .gitignore 挡住它
+                // (追加了/已挡住/教用户手动加,都是一行反馈;空串 = 无需打)。
+                const std::string gi = lubancode::config::EnsureGitignoreCoversSettingsLocal(cwd);
+                if (!gi.empty()) {
+                    std::cout << gi << "\n";
+                }
+            } else {
+                std::cout << trf("settings.local.persist_failed", written.error()) << "\n";
+            }
+        }
+    }
+    return allowed;
+}
 
 // 交互循环、单发模式共用的回调:文本打字机打印(正文保持原色,不着色),
 // 工具调用打一行提示,needs_confirm 的工具按 auto_confirm 决定是自动放行
 // 还是问用户一句(三选:y 本次允许 / a 本会话总是允许该工具 / N 拒绝)。
+// 确认逻辑本体在 ConfirmToolUse(见上),这里只接两条门:同步回落
+// (on_tool_confirm,子代理/PTC 转发与单测走的旧路)与异步审批
+// (on_tool_confirm_async,Broker 的终端实现)。
 // always_allowed_tools 由调用方持有,跨多轮 Run() 保留,选过 a 的工具本
 // 会话内不会再问。usage_stats 由调用方持有,只在这一次 Run() 范围内累计
 // (RunTurn() 每次都会传一份新的进来)。registry 是这一轮实际在用的工具表——
@@ -400,210 +642,28 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
     callbacks.on_tool_confirm = [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands,
                                   &deny_commands, hook_dispatcher, pre_decision_slot,
                                   has_permission_hooks](const std::string& name, const nlohmann::json& input) -> bool {
-        // 会话级确认模式(Shift+Tab 循环切),跟 --yes/auto_confirm 叠加:
-        //   yolo  —— 全自动放行(auto_confirm 本来就是这个语义,这里再查一遍
-        //             CurrentConfirmMode() 是为了让 Shift+Tab 中途切到 yolo
-        //             也立刻生效,不用等下一轮 --yes)
-        //   auto  —— write_file/edit_file 自动放行;run_command 过一遍
-        //             ClassifyCommand(tools/command_safety.hpp)自动分析,
-        //             安全命令(只读/探查、无重定向、链上每段都安全)直接
-        //             放行,危险/不认识的照旧问;MCP/插件等外挂工具仍然问
-        //   confirm(默认)—— 老规矩,needs_confirm 的工具逐个问
-        // settings.local.json 的 permissions 叠加在这一层(不改 command_safety):
-        //   deny_commands 前缀命中 run_command → 永远问一句(压过 allow、压过
-        //     会话"总是允许");但 yolo/--yes 是显式全放,deny 不拦(只在
-        //     confirm/auto 档生效)。
-        //   allow_commands 前缀命中 → auto 档里等价 command_safety 判成 Safe。
-        // hooks 第三步:PreToolUse 的归并决策在这里收尾——
-        //   hook allow 跳过用户确认,但 deny_commands/权限策略照走(先算
-        //   policy 再看 hook,deny_hit 压过 hook allow,不许钩子越权);
-        //   hook ask 即使档位本来放行,也要问用户一句。
-        // 真要弹确认时先发 PermissionRequest 钩子:任一 deny -> 拒;任一
-        // allow -> 不弹;全不表态 -> 正常问用户。
-        const lubancode::agent::ToolHookDecision pre = *pre_decision_slot;
-        const lubancode::cli::ConfirmMode mode = lubancode::cli::CurrentConfirmMode();
-        const bool file_tool = name == "write_file" || name == "edit_file";
+        return ConfirmToolUse(auto_confirm, always_allowed_tools, theme, display, allow_commands, deny_commands,
+                              hook_dispatcher, *pre_decision_slot, has_permission_hooks, name, input);
+    };
 
-        std::string command;
-        std::string shell = "powershell";  // run_command 的默认 shell,语义同 execute()
-        if (name == "run_command") {
-            if (const auto it = input.find("command"); it != input.end() && it->is_string()) {
-                command = it->get<std::string>();
-            }
-            if (const auto it = input.find("shell"); it != input.end() && it->is_string()) {
-                shell = it->get<std::string>();
-            }
-        }
-
-        // permissions 裁定(deny 压 allow,纯函数,见 config 层)。注意这里
-        // 用的是钩子可能改写过的 input(updatedInput 重过 deny 规则——不许
-        // 借改参绕黑名单)。
-        const lubancode::config::CommandPermission perm =
-            name == "run_command"
-                ? lubancode::config::ClassifyCommandByPermissions(command, allow_commands, deny_commands)
-                : lubancode::config::CommandPermission::None;
-        // deny:只在 confirm/auto 档生效(yolo/--yes 显式全放不拦)。
-        const bool deny_hit = perm == lubancode::config::CommandPermission::Deny && !auto_confirm &&
-                              mode != lubancode::cli::ConfirmMode::Yolo;
-
-        bool safe_command = false;
-        if (mode == lubancode::cli::ConfirmMode::Auto && name == "run_command" && !deny_hit) {
-            // allow_commands 命中 → auto 档等价 command_safety 的 Safe(补白名单)。
-            safe_command = lubancode::tools::ClassifyCommand(command, shell) ==
-                               lubancode::tools::CommandSafety::Safe ||
-                           perm == lubancode::config::CommandPermission::Allow;
-        }
-        // PreToolUse 钩子的表态参与裁决:deny_hit(策略黑名单)最高;钩子
-        // allow 只跳"问用户"这一步;钩子 ask 把"本来自动放行"拉回确认。
-        const bool hook_allow_skip = pre.decision == lubancode::agent::ToolHookDecision::Decision::Allow && !deny_hit;
-        const bool hook_ask = pre.decision == lubancode::agent::ToolHookDecision::Decision::Ask;
-        const bool auto_pass = !deny_hit &&
-                               (auto_confirm || mode == lubancode::cli::ConfirmMode::Yolo ||
-                                (mode == lubancode::cli::ConfirmMode::Auto && (file_tool || safe_command)) ||
-                                always_allowed_tools.count(name) != 0 || hook_allow_skip);
-        if (auto_pass && !hook_ask) {
-            // UI-C:自动放行(--yes/yolo/auto 档的文件工具/选过 a)也把统一
-            // diff 预览打出来——用户看得见将要发生什么,但不停下等确认,
-            // 打完即执行;执行完预览被 TrimBelow 擦掉,条目只留 +N -M。
-            // 管道模式 ShowDiffPreview 内部直接返回,输出照旧是稳定纯文本。
-            if (file_tool) {
-                display.ShowDiffPreview(name, input, /*trim_on_done=*/true);
-            }
-            return true;
-        }
-
-        // ---- 真要问用户了:PermissionRequest 钩子先表态。----
-        if (has_permission_hooks) {
-            lubancode::hooks::HookPayload payload;
-            payload.event = lubancode::hooks::HookEvent::PermissionRequest;
-            payload.fields["tool_name"] = name;
-            payload.fields["tool_input"] = input.is_null() ? nlohmann::json::object() : input;
-            payload.match_value = name;
-            const auto merged = hook_dispatcher->Emit(lubancode::hooks::HookEvent::PermissionRequest, payload);
-            if (merged.permission == lubancode::hooks::HookEventResult::Permission::Deny) {
-                std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-                std::cout << theme.error << "[hook] PermissionRequest 钩子拒绝执行 " << name << ": "
-                          << merged.permission_reason << theme.reset << "\n";
-                return false;
-            }
-            if (merged.permission == lubancode::hooks::HookEventResult::Permission::Allow) {
-                if (file_tool) {
-                    display.ShowDiffPreview(name, input, /*trim_on_done=*/true);
-                }
-                return true;
-            }
-            // 全不表态 -> 正常问用户(落下去)。
-        }
-        // UI-B:真的要问了——条目先改成"待确认"态(黄灯 + 待确认),确认块
-        // (参数详情 + [y/a/N] 提示)跟在条目下面;答完确认块整个擦掉,
-        // 拒绝则条目原地改灰 Cancelled,允许则改回 Running 等终态。
-        // UI-C:edit_file/write_file 在真控制台下,参数详情换成统一 diff
-        // 预览(路径 + 行级 diff,- 红底 + 绿底),answered 后随确认块一起擦;
-        // 管道模式沿用老的参数摘要,不打 diff。
-        //
-        // v0.22.5 修复:确认交互落笔前必须先把流式脚注框挂起——不挂起的话
-        // 有两条真机实测过的病:1) 详情文字盖写在框的横线上,行尾旧字符不
-        // 清、横线残留;2) [y/a/N] 提示打出来之后,被 footer 心跳线程那
-        // 条 400ms 一次的 ticker(不管是不是在等确认都无条件重画脚注框)盖
-        // 没了,屏上只剩流式期的输入框。用 RAII 作用域,一次性盖住
-        // PrintConfirmDetails/ShowDiffPreview 两条路径 + 后面的 ReadLine +
-        // 下面 "chose_always" 那次追加确认,答完(或提前 return)自动摘挂起
-        // ——详见 cli/console_input.hpp StreamFooterSuspendScope 注释。
-        // ("ask_user 被子代理状态遮挡"一单起,这枚作用域同时收走子代理
-        // 状态块、挂起 ticker、让监听线程交出读权——确认菜单与 ask_user
-        // 菜单同一套屏面所有权,不另开第二条路。)
-        const lubancode::cli::StreamFooterSuspendScope footer_suspend;
-        const int pending_idx = display.OnConfirmRequest();
-        if (file_tool && display.is_console) {
-            display.ShowDiffPreview(name, input, /*trim_on_done=*/false);
-        } else {
-            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-            PrintConfirmDetails(name, input);
-        }
-        // M10:esc_rejects=true——按 Esc 直接返回 nullopt，走到下面拒绝
-        // 分支，不留在输入行里继续等。
-        bool allowed = false;
-        bool chose_always = false;
-        const bool interactive_menu = lubancode::platform::StdinIsInteractive() &&
-                                      lubancode::platform::ProbeStdoutConsole().is_console;
-        if (interactive_menu) {
-            // 方向键选择:本次允许 / 本会话总允许 / 拒绝。默认高亮"拒绝"
-            // (安全,等同原 [y/a/N] 回车=N)。Esc/Ctrl+C/EOF 也按拒绝。
-            std::vector<lubancode::cli::ChoiceMenuItem> items = {
-                {tr("confirm.opt.allow_once"), {}},
-                {tr("confirm.opt.always"), {}},
-                {tr("confirm.opt.deny"), {}},
-            };
-            lubancode::cli::ChoiceMenuOptions opts;
-            opts.hint = tr("confirm.menu.hint");
-            opts.initial_cursor = 2;  // 默认"拒绝"
-            const auto selected = lubancode::cli::ReadChoiceMenu(items, opts, theme);
-            if (selected.has_value() && !selected->selected_indices.empty()) {
-                const std::size_t idx = selected->selected_indices.front();
-                if (idx == 0) {
-                    allowed = true;
-                } else if (idx == 1) {
-                    always_allowed_tools.insert(name);
-                    allowed = true;
-                    chose_always = true;
-                }
-            }
-        } else {
-            // 管道/非交互:沿用 [y/a/N] 读一行(自动化场景照旧)。
-            const std::optional<std::string> answer = lubancode::cli::ReadLine(
-                theme.confirm + tr("confirm.prompt") + theme.reset, theme,
-                /*esc_rejects=*/true);
-            if (answer.has_value()) {
-                if (*answer == "a" || *answer == "A") {
-                    always_allowed_tools.insert(name);
-                    allowed = true;
-                    chose_always = true;
-                } else {
-                    allowed = (*answer == "y" || *answer == "Y");
-                }
-            }
-        }
-        display.OnConfirmAnswered(pending_idx, allowed);
-
-        // 按 a 之后多问一句:也永久写进项目 settings.local.json?管道/--yes 下
-        // 跳过(只进会话集合)——那些场景没法交互再问一遍。真控制台才追问。
-        if (chose_always && display.is_console && !auto_confirm) {
-            bool persist_yes = false;
-            if (interactive_menu) {
-                std::vector<lubancode::cli::ChoiceMenuItem> p_items = {
-                    {tr("confirm.persist.no"), {}},
-                    {tr("confirm.persist.yes"), {}},
-                };
-                lubancode::cli::ChoiceMenuOptions p_opts;
-                p_opts.hint = tr("confirm.persist.menu.hint");
-                p_opts.initial_cursor = 0;  // 默认"否"
-                const auto p_sel = lubancode::cli::ReadChoiceMenu(p_items, p_opts, theme);
-                persist_yes = p_sel.has_value() && !p_sel->selected_indices.empty() &&
-                              p_sel->selected_indices.front() == 1;
-            } else {
-                const std::optional<std::string> persist = lubancode::cli::ReadLine(
-                    theme.confirm + tr("settings.local.persist_prompt") + theme.reset, theme,
-                    /*esc_rejects=*/true);
-                persist_yes = persist.has_value() && (*persist == "y" || *persist == "Y");
-            }
-            if (persist_yes) {
-                const std::string cwd = CurrentDirUtf8();
-                const auto written = lubancode::config::AddAllowedToolToSettingsLocal(cwd, name);
-                std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-                if (written.has_value()) {
-                    std::cout << trf("settings.local.persisted", name) << "\n";
-                    // 首次落地 settings.local.json 时,顺带保证 .gitignore 挡住它
-                    // (追加了/已挡住/教用户手动加,都是一行反馈;空串 = 无需打)。
-                    const std::string gi = lubancode::config::EnsureGitignoreCoversSettingsLocal(cwd);
-                    if (!gi.empty()) {
-                        std::cout << gi << "\n";
-                    }
-                } else {
-                    std::cout << trf("settings.local.persist_failed", written.error()) << "\n";
-                }
-            }
-        }
-        return allowed;
+    // P2(显示系统剥离单):异步审批通道——同一份裁定与问话逻辑包成
+    // InteractionBroker 的终端实现。终端这条路是"当场问完"的同步短路:
+    // AskApproval 里直接跑完整段(档位裁定 + PermissionRequest 钩子 +
+    // 三档菜单/[y/a/N] + settings.local.json 追问),Wait 立刻拿结果,
+    // 行为与今日一字不差;远端前端(app-server/Web/Tauri)后续换成登记
+    // request_id 悬起的实现,内核零改动。on_tool_confirm_async 缺位的旧
+    // 路(子代理/PTC 转发、单测)不走这里,照旧同步、不许多线程化。
+    callbacks.on_tool_confirm_async =
+        [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands, &deny_commands, hook_dispatcher,
+         pre_decision_slot, has_permission_hooks](const lubancode::agent::ApprovalRequest& request)
+        -> std::shared_ptr<lubancode::agent::InteractionFuture> {
+        const bool allowed = ConfirmToolUse(auto_confirm, always_allowed_tools, theme, display, allow_commands,
+                                            deny_commands, hook_dispatcher, *pre_decision_slot,
+                                            has_permission_hooks, request.tool_name, request.input);
+        lubancode::agent::ApprovalResponse response;
+        response.decision = allowed ? lubancode::agent::ApprovalDecision::Accept
+                                    : lubancode::agent::ApprovalDecision::Decline;
+        return std::make_shared<ReadyApprovalFuture>(std::move(response));
     };
 
     callbacks.on_tool_done = [&display, &body_tracker, recorder](const std::string& name,
@@ -664,6 +724,10 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
     if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry.Find("agent"));
         agent_tool != nullptr) {
         lubancode::tools::AgentTool::Hooks hooks;
+        // P2(显示系统剥离单):确认转发走旧同步 on_tool_confirm——子代理
+        // 的任务线程不该吃 async future(那要 Broker 悬起表配合,后台任务
+        // "没人可问"的同步短路正是要保住的路径)。主轮回合有 async 就走
+        // async,子代理转发保持同步,两不串。
         hooks.on_tool_confirm = callbacks.on_tool_confirm;
         // ESC/Ctrl+C 打断信号透传:没这一行,子代理内部工具循环永远拿到
         // nullptr,顶层怎么置位 cancel_flag 都传不进去——子代理会一路跑到
@@ -732,6 +796,7 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
     if (auto* ptc_tool = dynamic_cast<lubancode::ptc::PtcTool*>(registry.Find("programmatic_tool_calling"));
         ptc_tool != nullptr) {
         lubancode::ptc::PtcTool::Hooks hooks;
+        // P2:同 agent 工具,转发走旧同步回调(PTC 脚本线程不吃 async future)。
         hooks.on_tool_confirm = callbacks.on_tool_confirm;
         hooks.on_pre_tool_use_hook = callbacks.on_pre_tool_use_hook;
         hooks.on_permission_request = callbacks.on_permission_request;

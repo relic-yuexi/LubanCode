@@ -115,8 +115,39 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
 
     if (tool->needs_confirm()) {
         phase(ToolPhase::WaitingPermission);
-        const bool allowed =
-            callbacks.on_tool_confirm ? callbacks.on_tool_confirm(call.name, effective_input) : true;
+        // P2(显示系统剥离单):异步审批通道优先——发 ApprovalRequest 拿
+        // future,原地 Wait。终端前端的 future 实现是"当场问完再给结果"
+        // (Wait 立即返回,与今日同步 on_tool_confirm 一字不差);远端前端
+        // 的实现悬起 request_id,这里阻塞等,事件泵/连接线程不跟堵。
+        // async 缺位回落到旧同步回调(子代理转发、单测、后台"没人可问"
+        // 的短路都还在旧路上,不许变慢、不许多线程化)。
+        bool allowed = true;
+        if (callbacks.on_tool_confirm_async) {
+            const std::shared_ptr<InteractionFuture> future =
+                callbacks.on_tool_confirm_async(ApprovalRequest{call.name, effective_input, std::string()});
+            const std::optional<ApprovalResponse> response =
+                future != nullptr ? future->WaitApproval() : std::nullopt;
+            if (!response.has_value()) {
+                // 悬空收口(cancel):等价拒绝,拒绝文案照"没人可答"写,
+                // 不冒充用户拒绝。
+                const std::string denial =
+                    callbacks.on_tool_denial_text ? callbacks.on_tool_denial_text(call.name)
+                                                  : std::string("审批请求悬空收口,未执行该工具");
+                return dispatch_done(call.name, tools::Tool::Result{denial, true});
+            }
+            switch (response->decision) {
+                case ApprovalDecision::Accept:
+                case ApprovalDecision::AcceptForSession:
+                    allowed = true;
+                    break;
+                case ApprovalDecision::Decline:
+                case ApprovalDecision::Cancel:
+                    allowed = false;
+                    break;
+            }
+        } else {
+            allowed = callbacks.on_tool_confirm ? callbacks.on_tool_confirm(call.name, effective_input) : true;
+        }
         if (!allowed) {
             // 拒绝文案可由回调层给(后台子代理的拒绝是"无法弹确认、未预放
             // 行",不是用户拒绝——缺省文案会把子代理的最终报告带偏成"均被

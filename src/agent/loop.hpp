@@ -8,6 +8,7 @@
 #include <atomic>
 #include <expected>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -27,6 +28,39 @@
 namespace lubancode::agent {
 
 class ContextArtifactStore;
+
+// ---- 异步审批(P2:显示系统剥离单)------------------------------------------
+// 审批请求与悬挂未来的中立形状。完整合同在 runtime/interaction_broker.hpp
+//(决定四态/悬空收口/迟到回答);agent/ 这边只认识这两枚类型,不 include
+// runtime/ 头——InteractionBroker 的装配在会话层,内核只管发请求、等
+// future、按四态收账。
+struct ApprovalRequest {
+    std::string tool_name;
+    nlohmann::json input = nlohmann::json::object();
+    std::string reason;  // 触发这次问话的线索(hook ask 的理由/权限档说明),可空
+};
+
+// 决定四态。与 runtime::InteractionDecision 语义一一对应,这里不 enum
+// 别名(避免拖头),用独立枚举 + 会话层的映射。
+enum class ApprovalDecision {
+    Accept,             // 本次允许
+    AcceptForSession,   // 本会话内该工具不再问(只写本场权限账,不落盘)
+    Decline,            // 拒绝
+    Cancel,             // 悬空收口(打断/断开/超时)——等价拒绝,但拒绝文案
+                        // 须写"没人可答",不冒充用户拒绝
+};
+
+struct ApprovalResponse {
+    ApprovalDecision decision = ApprovalDecision::Decline;
+    std::string reason;  // decline 的理由(给模型的拒绝文案线索),可空
+};
+
+// 审批的未来。WaitApproval 阻塞到有结果或悬空收口;收口返回 nullopt。
+class InteractionFuture {
+public:
+    virtual ~InteractionFuture() = default;
+    virtual std::optional<ApprovalResponse> WaitApproval() = 0;
+};
 
 // hooks 框架第三步:工具生命周期相位(UI 状态机 requested -> checking_hook
 // -> waiting_permission -> running -> done,被拦时停在 blocked,不冒充"运行
@@ -62,7 +96,24 @@ struct Callbacks {
 
     // 工具 needs_confirm() 为真时才会调用;返回 true 表示允许执行。
     // 没设这个回调、或者工具本来就不需要确认,都视为允许。
+    // 显示系统剥离单 P2:这是同步问话通道。新代码优先用下面的
+    // on_tool_confirm_async(异步审批,等 InteractionFuture);两个都设时
+    // async 优先,只有 async 缺位才回落到这里——回落规则与 on_pre_tool_
+    // hook 之于 on_pre_tool_use_hook 同款。既有消费方(子代理/PTC 转发、
+    // 单测)不动,行为一字不变。
     std::function<bool(const std::string& name, const nlohmann::json& input)> on_tool_confirm;
+
+    // 异步审批通道(P2):与 on_tool_confirm 同一个触发点(工具
+    // needs_confirm 且档位真要问用户),但把"问"变成"发请求、拿 future":
+    // 回调立即返回 future,RunOneTool 在原地 Wait(工作线程阻塞等,事件
+    // 泵/连接线程不跟着堵)。终端前端的实现还是当场问完(同步短路,行为
+    // 与今日一字不差);远端前端(app-server/Web/Tauri)的实现登记
+    // request_id 悬起,前端从任何线程 ResolveApproval 回答——审批从此
+    // 不再钉死在 stdin 上。
+    // 类型是 runtime/ 的中立合同(agent/ 不 include runtime/ 也行,但
+    // approval 的形状就是 InteractionBroker 那套四态;这里用前置声明 +
+    // shared_ptr,保持 agent 头不拖 runtime 头)。
+    std::function<std::shared_ptr<InteractionFuture>(const ApprovalRequest& request)> on_tool_confirm_async;
 
     // on_tool_confirm 返回 false(拒绝)后,给模型的 tool_result 文案从这里
     // 取;不设用缺省"用户拒绝执行该工具"。给后台子代理用——它没人可问,
