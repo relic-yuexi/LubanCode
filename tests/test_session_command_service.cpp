@@ -27,6 +27,13 @@ using namespace lubancode;
 
 namespace {
 
+// 文件名(可能含中文 id)走 u8 通道:窄串在 Windows 按 ACP 解码成乱码名,
+// 与 u8 的服务侧对不上账(HOT 单同款教训)。
+std::filesystem::path U8Name(const std::string& s) {
+    return std::filesystem::path(
+        std::u8string(reinterpret_cast<const char8_t*>(s.data()), s.size()));
+}
+
 std::string PathUtf8(const std::filesystem::path& p) {
     const std::u8string u8 = p.u8string();
     return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
@@ -63,7 +70,7 @@ void WriteSession(const TempSessionsDir& dir, const std::string& id, const std::
     if (!title.empty()) {
         content += agent::SerializeTitleEvent(title, started_at) + "\n";
     }
-    std::ofstream f(dir.base / (id + ".jsonl"), std::ios::binary);
+    std::ofstream f(dir.base / U8Name(id + ".jsonl"), std::ios::binary);
     f << content;
 }
 
