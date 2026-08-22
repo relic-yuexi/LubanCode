@@ -465,6 +465,10 @@ std::optional<KeyEvent> MapKey(const platform::KeyInput& key) {
             return KeyEvent::Simple(KeyKind::Esc);
         case PK::Delete:
             return KeyEvent::Simple(KeyKind::Delete);
+        case PK::PageUp:
+            return KeyEvent::Simple(KeyKind::PageUp);
+        case PK::PageDown:
+            return KeyEvent::Simple(KeyKind::PageDown);
     }
     return std::nullopt;
 }
@@ -3554,7 +3558,7 @@ void TurnInputListener::ThreadMain() {
         // 编辑器,composer 模式会把它翻成"进焦点态 + focus_move",而监听
         // 线程既不消费那个返回值、也不真切换焦点——画面没动,编辑器内部却
         // 换了暗状态,后续 Tab 的补全语义跟着遭殃。流式期间焦点浏览本就不
-        // 开(docs/terminal-ui.md),这里当场拦下;拦过之后再键入 /eff,第
+        // 开(docs/features/terminal/README.md),这里当场拦下;拦过之后再键入 /eff,第
         // 一下 Tab 照常补全,不受任何残留状态影响。
         if (key->kind == PK::Tab && editor.CurrentRenderState().line.empty()) {
             continue;

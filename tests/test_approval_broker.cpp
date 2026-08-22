@@ -124,7 +124,7 @@ TEST_CASE("异步审批:Accept 放行,工具真执行") {
         response.decision = agent::ApprovalDecision::Accept;
         return std::make_shared<ReadyFuture>(response);
     };
-    callbacks.on_tool_confirm = [&sync_asked](const std::string&, const nlohmann::json&) {
+    callbacks.on_tool_confirm = [&sync_asked](const std::string&, const std::string&, const nlohmann::json&) {
         ++sync_asked;
         return true;
     };
@@ -204,7 +204,7 @@ TEST_CASE("异步审批:悬空收口的文案可由 on_tool_denial_text 接管")
     callbacks.on_tool_confirm_async = [](const agent::ApprovalRequest&) {
         return std::make_shared<ReadyFuture>(std::nullopt);
     };
-    callbacks.on_tool_denial_text = [](const std::string& name) {
+    callbacks.on_tool_denial_text = [](const std::string&, const std::string& name) {
         return "连接断开," + name + " 未等到回答,已按取消收口。";
     };
 
@@ -280,7 +280,7 @@ TEST_CASE("同步回落:不设 async 时旧 on_tool_confirm 路径一字不变")
     agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
     agent::Callbacks callbacks;
     bool sync_asked = false;
-    callbacks.on_tool_confirm = [&](const std::string&, const nlohmann::json&) -> bool {
+    callbacks.on_tool_confirm = [&](const std::string&, const std::string&, const nlohmann::json&) -> bool {
         sync_asked = true;
         return false;
     };

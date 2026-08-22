@@ -368,10 +368,13 @@ add_library(lubancode_core STATIC
   src/agent/context_budget.cpp
   src/agent/microcompact.cpp
   src/agent/session_store.cpp
+  src/agent/session_catalog.cpp
   src/agent/workflow_recorder.cpp
   src/agent/skill_drafter.cpp
   # 显示系统剥离单第一步:runtime 合同(纯类型 + 序列化,零 cli/app 依赖)。
   src/runtime/runtime_contract.cpp
+  # 第三步:TurnRuntime 纯逻辑核(权限/hooks/usage/取消),cli/app 零依赖。
+  src/runtime/turn_runtime.cpp
   # plugins 本地 Tool 运行时(冻结合同 + process v1):manifest 强校验、
   # 进程协议帧、无 shell 进程执行、工具装配层。
   src/runtime/plugin_contract.cpp
@@ -400,6 +403,7 @@ add_library(lubancode_core STATIC
   src/cli/keymap.cpp
   src/cli/terminal_caps.cpp
   src/cli/history_search.cpp
+  src/cli/session_picker.cpp
   src/cli/mention_menu.cpp
   src/cli/markdown.cpp
   src/cli/latex_math.cpp
@@ -441,6 +445,7 @@ add_library(lubancode_app STATIC
   src/app_server/outbox.cpp
   src/app_server/dispatcher.cpp
   src/app_server/connection.cpp
+  src/app_server/interaction.cpp
   src/app_server/server.cpp
   src/app/commands/prompt_commands.cpp
   src/app/commands/session_commands.cpp
@@ -454,6 +459,7 @@ add_library(lubancode_app STATIC
   src/app/cli_options.cpp
   src/app/cli_app.cpp
   src/cli/console_input.cpp
+  src/cli/session_picker_panel.cpp
   src/cli/spinner.cpp
   src/cli/record_command.cpp)
 target_link_libraries(lubancode_app PUBLIC lubancode_core)
@@ -470,6 +476,7 @@ target_compile_features(lubancode PRIVATE cxx_std_23)
 
 install(TARGETS lubancode RUNTIME DESTINATION bin)
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/skills/" DESTINATION share/lubancode/skills)
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/docs/" DESTINATION share/lubancode/docs)
 
 # 官方技能不再编进 C++。开发构建每次把源码树 skills/ 镜到可执行文件旁；
 # 只改 Markdown 再跑 cmake --build 就会同步，不触发 C++ 重编。发行包也沿用
@@ -485,6 +492,21 @@ add_custom_target(lubancode_official_skills ALL
   COMMENT "lubancode: 同步官方 skills 到程序目录"
   VERBATIM)
 add_dependencies(lubancode_official_skills lubancode)
+
+# 官方 docs 与 skills 同版同行。开发构建把两棵资源树都镜到程序旁；便携包、
+# Windows 安装和 POSIX share/lubancode 安装由安装脚本保持同一相对布局，
+# lubancode-config 因而能从技能目录稳定找到 ../../docs。
+file(GLOB_RECURSE _lubancode_official_doc_files CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/docs/*")
+add_custom_target(lubancode_official_docs ALL
+  COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:lubancode>/docs"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${CMAKE_CURRENT_SOURCE_DIR}/docs"
+          "$<TARGET_FILE_DIR:lubancode>/docs"
+  DEPENDS ${_lubancode_official_doc_files}
+  COMMENT "lubancode: 同步官方 docs 到程序目录"
+  VERBATIM)
+add_dependencies(lubancode_official_docs lubancode)
 
 # ---------------------------------------------------------------------------
 # 测试:doctest 单头文件,同样走 FetchContent,走 codeload.github.com 镜像

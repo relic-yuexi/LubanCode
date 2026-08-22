@@ -221,6 +221,8 @@ tools::Tool::Result PtcTool::execute(const nlohmann::json& input) {
         std::lock_guard<std::mutex> lock(hooks_mutex_);
         hooks = hooks_;
     }
+    // P4:转发链原样(签名已带 tool_use_id——stub 调用的 id 是宿主合成的
+    // "ptc-N",见 executor 里 call.id)。
     agent::Callbacks chain;
     chain.on_tool_start = hooks.on_tool_start;
     chain.on_tool_confirm = hooks.on_tool_confirm;

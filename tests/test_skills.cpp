@@ -238,15 +238,15 @@ TEST_CASE("官方 lubancode-config SKILL.md 可解析且路由词齐全") {
     const auto loaded = tool.execute(nlohmann::json{{"name", "lubancode-config"}});
     REQUIRE_FALSE(loaded.is_error);
     CHECK(loaded.content.size() < 3000);
-    CHECK(loaded.content.find("references/soul-and-prompts.md") != std::string::npos);
+    CHECK(loaded.content.find("references/document-map.md") != std::string::npos);
+    CHECK(loaded.content.find("../../docs") != std::string::npos);
     CHECK(loaded.content.find("`mcpServers` 的键是服务器名") == std::string::npos);
 
-    for (const char* reference : {
-             "configuration.md", "providers-and-models.md", "mcp.md",
-             "hooks-and-permissions.md", "search.md", "lsp.md", "skills.md",
-             "soul-and-prompts.md", "sessions-and-ui.md", "update.md"}) {
-        CHECK(std::filesystem::is_regular_file(root / "lubancode-config" / "references" / reference));
-    }
+    const std::filesystem::path skill_dir = root / "lubancode-config";
+    CHECK(std::filesystem::is_regular_file(skill_dir / "references" / "document-map.md"));
+    CHECK(std::filesystem::weakly_canonical(skill_dir / ".." / ".." / "docs") ==
+          std::filesystem::weakly_canonical(root.parent_path() / "docs"));
+    CHECK(std::filesystem::is_regular_file(root.parent_path() / "docs" / "reference" / "configuration.md"));
 }
 
 TEST_CASE("LoadSkills: 一个技能都没有,返回空 vector") {

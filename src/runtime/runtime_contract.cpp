@@ -7,6 +7,7 @@
 
 #include "runtime/command.hpp"
 #include "runtime/event.hpp"
+#include "runtime/id_authority.hpp"
 #include "runtime/interaction_broker.hpp"
 
 #include <stdexcept>
@@ -14,6 +15,12 @@
 #include <utility>
 
 namespace lubancode::runtime {
+
+// 进程级发号局(第四步):static 局部,首次用到时构造,退出时自然收。
+IdAuthority& ProcessIdAuthority() {
+    static IdAuthority authority;
+    return authority;
+}
 
 // ---- 小工具 ----------------------------------------------------------------
 
@@ -388,15 +395,20 @@ bool ParseInteractionDecision(const std::string& s, InteractionDecision& out) {
 }
 
 nlohmann::json ApprovalRequest::to_json() const {
-    return nlohmann::json{
+    nlohmann::json j{
         {"tool_name", tool_name},
         {"input", input.is_null() ? nlohmann::json::object() : input},
         {"reason", reason},
     };
+    if (!tool_use_id.empty()) {
+        j["tool_use_id"] = tool_use_id;
+    }
+    return j;
 }
 
 ApprovalRequest ApprovalRequest::from_json(const nlohmann::json& j) {
     ApprovalRequest r;
+    r.tool_use_id = GetStr(j, "tool_use_id");
     r.tool_name = GetStr(j, "tool_name");
     r.input = GetObj(j, "input");
     r.reason = GetStr(j, "reason");

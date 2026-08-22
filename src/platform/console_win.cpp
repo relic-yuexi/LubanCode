@@ -607,6 +607,12 @@ std::optional<KeyInput> KeyReader::ReadOne() {
     } else if (ke.wVirtualKeyCode == VK_DOWN) {
         reset_text_run();
         out.kind = KeyInput::Kind::Down;
+    } else if (ke.wVirtualKeyCode == VK_PRIOR) {
+        reset_text_run();
+        out.kind = KeyInput::Kind::PageUp;
+    } else if (ke.wVirtualKeyCode == VK_NEXT) {
+        reset_text_run();
+        out.kind = KeyInput::Kind::PageDown;
     } else if (ke.wVirtualKeyCode == VK_DELETE) {
         reset_text_run();
         out.kind = KeyInput::Kind::Delete;

@@ -34,16 +34,22 @@ public:
     // 每轮由 BuildCallbacks 刷新的转发钩子(字段语义与 agent::Callbacks
     // 同名项一一对应;不设 = 不转发,工具照常执行)。
     struct Hooks {
-        std::function<void(const std::string& name, const nlohmann::json& input)> on_tool_start;
-        std::function<bool(const std::string& name, const nlohmann::json& input)> on_tool_confirm;
-        std::function<void(const std::string& name, const tools::Tool::Result& result)> on_tool_done;
-        std::function<agent::ToolHookDecision(const std::string& name, const nlohmann::json& input)>
+        std::function<void(const std::string& tool_use_id, const std::string& name,
+                          const nlohmann::json& input)> on_tool_start;
+        std::function<bool(const std::string& tool_use_id, const std::string& name,
+                           const nlohmann::json& input)> on_tool_confirm;
+        std::function<void(const std::string& tool_use_id, const std::string& name,
+                           const tools::Tool::Result& result)> on_tool_done;
+        std::function<agent::ToolHookDecision(const std::string& tool_use_id, const std::string& name,
+                                              const nlohmann::json& input)>
             on_pre_tool_use_hook;
-        std::function<agent::ToolHookDecision(const std::string& name, const nlohmann::json& input)>
+        std::function<agent::ToolHookDecision(const std::string& tool_use_id, const std::string& name,
+                                              const nlohmann::json& input)>
             on_permission_request;
-        std::function<void(const std::string& name, agent::ToolPhase phase)> on_tool_phase;
-        std::function<std::vector<std::string>(const std::string& name, const nlohmann::json& input,
-                                               const tools::Tool::Result& result)>
+        std::function<void(const std::string& tool_use_id, const std::string& name, agent::ToolPhase phase)>
+            on_tool_phase;
+        std::function<std::vector<std::string>(const std::string& tool_use_id, const std::string& name,
+                                               const nlohmann::json& input, const tools::Tool::Result& result)>
             on_post_tool_use_hook;
         const std::atomic<bool>* cancel = nullptr;  // Esc 取消链(每轮的旗子)
     };

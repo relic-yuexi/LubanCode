@@ -17,7 +17,7 @@
 #   由用户先在 Releases 页面选对平台包，脚本不在本机猜架构。
 #
 # 幂等:重复跑 = 直接覆盖安装。
-# 官方 skills 随包同行；重复安装时整包同步，不碰 ~/.lubancode/skills。
+# 官方 skills 与 docs 随包同行；重复安装时整包同步，不碰 ~/.lubancode/skills。
 
 set -eu
 
@@ -92,33 +92,44 @@ if ! chmod +x "$DEST"; then
     err "chmod +x $DEST 失败。"
 fi
 
-# bin 目录按常见前缀布局把数据放到 ../share/lubancode/skills；自定义目录
-# 若不叫 bin，则把 skills 放在可执行文件旁，程序两处都认。
-if [ -d "$SCRIPT_DIR/skills" ]; then
+# bin 目录按常见前缀布局把数据放到 ../share/lubancode/{skills,docs}；
+# 自定义目录若不叫 bin，则把两棵资源树放在可执行文件旁。两处都保持
+# skills/lubancode-config 到 docs 的相对路径是 ../../docs。
+sync_official_tree() {
+    tree_name=$1
+    display_name=$2
+    source_tree="$SCRIPT_DIR/$tree_name"
+
+    if [ ! -d "$source_tree" ]; then
+        info "安装包里没有 $tree_name 目录,保留已有$display_name 不动。"
+        return
+    fi
+
     if [ "$(basename -- "$INSTALL_DIR")" = "bin" ]; then
-        SKILLS_DEST="$(dirname -- "$INSTALL_DIR")/share/lubancode/skills"
+        destination="$(dirname -- "$INSTALL_DIR")/share/lubancode/$tree_name"
     else
-        SKILLS_DEST="$INSTALL_DIR/skills"
+        destination="$INSTALL_DIR/$tree_name"
     fi
-    SKILLS_PARENT=$(dirname -- "$SKILLS_DEST")
-    SKILLS_STAGE="$SKILLS_PARENT/.skills-new-$$"
-    if ! mkdir -p "$SKILLS_PARENT"; then
-        err "创建官方技能目录 $SKILLS_PARENT 失败。"
+    parent=$(dirname -- "$destination")
+    stage="$parent/.$tree_name-new-$$"
+    if ! mkdir -p "$parent"; then
+        err "创建$display_name 目录 $parent 失败。"
     fi
-    rm -rf "$SKILLS_STAGE"
-    if ! cp -R "$SCRIPT_DIR/skills" "$SKILLS_STAGE"; then
-        rm -rf "$SKILLS_STAGE"
-        err "复制官方技能失败。"
+    rm -rf "$stage"
+    if ! cp -R "$source_tree" "$stage"; then
+        rm -rf "$stage"
+        err "复制$display_name 失败。"
     fi
-    rm -rf "$SKILLS_DEST"
-    if ! mv "$SKILLS_STAGE" "$SKILLS_DEST"; then
-        rm -rf "$SKILLS_STAGE"
-        err "替换官方技能目录 $SKILLS_DEST 失败。"
+    rm -rf "$destination"
+    if ! mv "$stage" "$destination"; then
+        rm -rf "$stage"
+        err "替换$display_name 目录 $destination 失败。"
     fi
-    info "已同步官方技能:$SKILLS_DEST"
-else
-    info "安装包里没有 skills 目录,保留已有官方技能不动。"
-fi
+    info "已同步$display_name:$destination"
+}
+
+sync_official_tree skills "官方技能"
+sync_official_tree docs "官方文档"
 
 info "安装完成:$DEST"
 

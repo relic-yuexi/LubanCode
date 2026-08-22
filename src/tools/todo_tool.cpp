@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
+
 namespace lubancode::tools {
 
 std::optional<TodoStatus> ParseTodoStatus(const std::string& text) {
@@ -34,9 +36,11 @@ std::string TodoWriteTool::name() const {
 }
 
 std::string TodoWriteTool::description() const {
-    return "维护本次会话的待办清单,整表替换(每次调用都要传完整的清单,不是增量更新——"
-           "漏掉的项这次就没了)。多步骤任务开工前先列一份清单,每完成一步就把对应项的 "
-           "status 改成 completed 再整表传一次,让用户能看到进度。items 传空数组表示清空清单。";
+    // 文案在 src/prompts/tools/<语言>/todo_write.md,兜底是迁移前的原文。
+    return ToolText("todo_write", "description",
+                    "维护本次会话的待办清单,整表替换(每次调用都要传完整的清单,不是增量更新——"
+                    "漏掉的项这次就没了)。多步骤任务开工前先列一份清单,每完成一步就把对应项的 "
+                    "status 改成 completed 再整表传一次,让用户能看到进度。items 传空数组表示清空清单。");
 }
 
 nlohmann::json TodoWriteTool::input_schema() const {
@@ -49,13 +53,13 @@ nlohmann::json TodoWriteTool::input_schema() const {
 
     nlohmann::json content_prop = nlohmann::json::object();
     content_prop["type"] = "string";
-    content_prop["description"] = "这一项要做的事,一句话说清楚";
+    content_prop["description"] = ToolText("todo_write", "param.items.content", "这一项要做的事,一句话说清楚");
     item_properties["content"] = content_prop;
 
     nlohmann::json status_prop = nlohmann::json::object();
     status_prop["type"] = "string";
     status_prop["enum"] = nlohmann::json::array({"pending", "in_progress", "completed"});
-    status_prop["description"] = "这一项当前的状态";
+    status_prop["description"] = ToolText("todo_write", "param.items.status", "这一项当前的状态");
     item_properties["status"] = status_prop;
 
     item_schema["properties"] = item_properties;
@@ -64,7 +68,8 @@ nlohmann::json TodoWriteTool::input_schema() const {
     nlohmann::json properties = nlohmann::json::object();
     nlohmann::json items_prop = nlohmann::json::object();
     items_prop["type"] = "array";
-    items_prop["description"] = "完整的待办清单,整表替换(不是增量更新,每次都传全量列表)";
+    items_prop["description"] =
+        ToolText("todo_write", "param.items", "完整的待办清单,整表替换(不是增量更新,每次都传全量列表)");
     items_prop["items"] = item_schema;
     properties["items"] = items_prop;
 

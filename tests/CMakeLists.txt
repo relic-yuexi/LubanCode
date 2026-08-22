@@ -104,6 +104,12 @@ add_executable(lubancode_tests
   test_web_fetch.cpp
   test_web_search.cpp
   test_session_store.cpp
+  # 会话管理器单第一步:SessionCatalog 中立查询层(排序键/摘要/两排序/两
+  # scope/搜索/分页/坏档/空表/指纹缓存)。
+  test_session_catalog.cpp
+  # 第二步:SessionPicker 纯逻辑(焦点轮换/搜索/筛选排序切换/翻页边界/
+  # 选中保持/视口窗口账/渲染帧/空态/相对时间/百分比)。
+  test_session_picker.cpp
   test_prompt_files.cpp
   test_project_instructions.cpp
   test_project_memory.cpp
@@ -169,12 +175,20 @@ add_executable(lubancode_tests
   test_app_server_connection.cpp
   test_app_server_dispatch.cpp
   test_app_server_turn.cpp
+  # app-server 阶段 2:审批与打断(permission/request 四态、悬停/超时/
+  # 打断、acceptForSession 免问、迟到失效、ask_user 的 user/ask)。
   # 显示系统剥离单第一步:runtime 合同(Event/Command/Broker 形状与序列化
   # 往返保真、稳定枚举字符串、坏报文抛错)。
   test_runtime_contract.cpp
   # 显示系统剥离单 P2:AgentLoop 异步审批通道(async 优先/同步回落/四态
   # 收账/悬空收口文案)。
   test_approval_broker.cpp
+  # 显示系统剥离单 P3:TurnRuntime 纯逻辑核(权限裁定/取消/usage/prompt 门),
+  # 脱离终端可驱动。
+  test_turn_runtime.cpp
+  # 显示系统剥离单 P4:ToolDisplay 认 tool_use_id 不认下标(交错终态/迟到
+  # 事件/主子条目/确认块)。
+  test_tool_display_id.cpp
   # plugins 本地 Tool 运行时第 1 步(冻结合同):manifest 强校验/标识符/
   # ${plugin_dir} 圈禁/协议帧/入参 Schema 子集/模型可见性,纯函数直测。
   test_plugin_contract.cpp

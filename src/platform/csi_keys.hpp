@@ -55,14 +55,19 @@ inline KeyInput MapCsiToKey(const std::string& params, char final_byte) {
             out.kind = KeyInput::Kind::ShiftTab;
             break;
         case '~':
-            // VT 风格:1~/7~ = Home,4~/8~ = End,3~ = Delete;200~ 是
-            // bracketed paste 的开头,由 IO 层先拦,这里不认。
+            // VT 风格:1~/7~ = Home,4~/8~ = End,3~ = Delete,5~/6~ =
+            // PageUp/PageDown;200~ 是 bracketed paste 的开头,由 IO 层
+            // 先拦,这里不认。
             if (params == "1" || params == "7") {
                 out.kind = KeyInput::Kind::Home;
             } else if (params == "4" || params == "8") {
                 out.kind = KeyInput::Kind::End;
             } else if (params == "3") {
                 out.kind = KeyInput::Kind::Delete;
+            } else if (params == "5") {
+                out.kind = KeyInput::Kind::PageUp;
+            } else if (params == "6") {
+                out.kind = KeyInput::Kind::PageDown;
             }
             break;
         default:

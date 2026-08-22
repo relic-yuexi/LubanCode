@@ -86,7 +86,7 @@ PowerShell 5.1 及以上可直接拉取最新 Release：
 irm https://raw.githubusercontent.com/relic-yuexi/LubanCode/main/scripts/install.ps1 | iex
 ```
 
-程序会装到 `%LOCALAPPDATA%\Programs\lubancode`，并写入当前用户 PATH。无需管理员权限。重复执行便是覆盖升级。
+程序会装到 `%LOCALAPPDATA%\Programs\lubancode`，并写入当前用户 PATH。官方 `skills/` 与 `docs/` 跟程序一同安装、一道升级。无需管理员权限。重复执行便是覆盖升级。
 
 手工安装也成。到 [Releases](https://github.com/relic-yuexi/LubanCode/releases) 下载 `lubancode-vX.Y.Z-windows-x64.zip`，解压后运行：
 
@@ -104,7 +104,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ./install.sh
 ```
 
-若 `~/.local/bin` 已在 PATH，脚本便装到那里；否则转去 `/usr/local/bin`，需要时会提示 `sudo`。
+若 `~/.local/bin` 已在 PATH，脚本便装到那里；否则转去 `/usr/local/bin`，需要时会提示 `sudo`。官方 `skills/` 与 `docs/` 会成对落在同一 `share/lubancode/` 资源根下。
 
 | 平台 | 发行包 |
 | --- | --- |
@@ -187,13 +187,13 @@ git diff --cached | lubancode "替我审一遍这份改动"
 }
 ```
 
-把它存到 `~/.lubancode/config.json`，再设好 `WORK_MODEL_API_KEY`。`/provider switch work` 成功后也会自动写入 `active_provider`，下次启动仍走这一路。完整字段、优先级与厂商参数透传，见 [配置手册](docs/configuration.md)。
+把它存到 `~/.lubancode/config.json`，再设好 `WORK_MODEL_API_KEY`。`/provider switch work` 成功后也会自动写入 `active_provider`，下次启动仍走这一路。完整字段、优先级与厂商参数透传，见 [配置手册](docs/reference/configuration.md)。
 
 ## 项目指令
 
 进入仓库，敲一声 `/init`。LubanCode 会在 Git 根生成 `AGENTS.md`，填入项目布局、构建测试与改动规矩。已有文件便只读不改。文件写成后，当前会话立刻重载，主代理、子代理一并照办。
 
-启动时，LubanCode 从 Git 根一路走到当前目录。每层先看 `AGENTS.override.md`，再看 `AGENTS.md`；近处内容排在后头，能压过远处。空文件跳过，总量封顶 32 KiB。细则见 [项目指令](docs/project-instructions.md)。
+启动时，LubanCode 从 Git 根一路走到当前目录。每层先看 `AGENTS.override.md`，再看 `AGENTS.md`；近处内容排在后头，能压过远处。空文件跳过，总量封顶 32 KiB。细则见 [项目指令](docs/features/project-instructions/README.md)。
 
 ## 常用命令
 
@@ -234,20 +234,20 @@ LubanCode 留了四扇门：
 3. **Lua 插件**：一个 `.lua` 文件就是一件工具，适合轻量扩展。
 4. **C ABI 插件**：Windows DLL 同进程加载，适合原生能力与已有 C/C++ 库。
 
-写法、目录、示例与安全边界，见 [扩展指南](docs/extensions.md)。
+写法、目录、示例与安全边界，见 [扩展指南](docs/features/extensions/README.md)。
 
 ## 文档
 
 | 文档 | 讲什么 |
 | --- | --- |
 | [文档首页](docs/README.md) | 阅读路线、版本状态、各页入口。 |
-| [配置手册](docs/configuration.md) | 配置优先级、项目记忆、providers、hooks、MCP、搜索、LSP、models.json。 |
-| [Provider 目录](docs/provider-catalog.md) | 常见厂家预设、在线更新、缓存、Schema 与安全边界。 |
-| [项目记忆设计](docs/memory-system-design.md) | 目录、召回、后台更新、安全边界与后续路数。 |
-| [扩展指南](docs/extensions.md) | Skills、Lua、C ABI 插件、MCP 与 LSP。 |
-| [架构说明](docs/architecture.md) | 分层、请求链、双后端、工具与平台边界。 |
-| [终端交互](docs/terminal-ui.md) | 工作动画、消息队列、`ask_user`、确认与编辑匹配。 |
-| [项目指令](docs/project-instructions.md) | `/init`、`AGENTS.md` 层级、覆盖与大小边界。 |
+| [配置手册](docs/reference/configuration.md) | 配置优先级、项目记忆、providers、hooks、MCP、搜索、LSP、models.json。 |
+| [Provider 目录](docs/features/providers/catalog.md) | 常见厂家预设、在线更新、缓存、Schema 与安全边界。 |
+| [项目记忆设计](docs/architecture/memory/design.md) | 目录、召回、后台更新、安全边界与后续路数。 |
+| [扩展指南](docs/features/extensions/README.md) | Skills、Lua、C ABI 插件、MCP 与 LSP。 |
+| [架构说明](docs/architecture/README.md) | 分层、请求链、双后端、工具与平台边界。 |
+| [终端交互](docs/features/terminal/README.md) | 工作动画、消息队列、`ask_user`、确认与编辑匹配。 |
+| [项目指令](docs/features/project-instructions/README.md) | `/init`、`AGENTS.md` 层级、覆盖与大小边界。 |
 | [提示词模块](src/prompts/README.md) | 内置 prompt 如何拆分、嵌入与覆盖。 |
 
 ## CI 与发布

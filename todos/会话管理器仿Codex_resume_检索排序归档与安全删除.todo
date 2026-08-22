@@ -1,6 +1,6 @@
 # 会话管理器仿 Codex `/resume`:检索、筛选、排序、归档与安全删除
 
-状态:待做(2026-08-22 用户定调:LubanCode 照 Codex 的会话管理规矩设计)
+状态:第 1、2 步已并入(2026-08-22,0.26.23):SessionCatalog 查账层与 SessionPicker 全屏台账,裸 /resume 换新颜;第 3-7 步(查看态/archive/delete/Runtime 接线/文档)待做
 
 ## 一句话
 

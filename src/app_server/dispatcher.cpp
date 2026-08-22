@@ -15,6 +15,10 @@ void Diagnose(const std::string& text) {
     std::fprintf(stderr, "[app-server] %s\n", text.c_str());
 }
 
+// resolve_interaction 回报的错误码记号:参数错走 kErrInvalidParams,
+// 其余(迟到/失效)一律 kErrStaleRequestId。
+constexpr const char* kInvalidParamsToken = "invalid_params";
+
 }  // namespace
 
 Dispatcher::Dispatcher() = default;
@@ -139,11 +143,30 @@ DispatchOutcome Dispatcher::HandleNotification(const IncomingNotification& notif
     return outcome;
 }
 
-DispatchOutcome Dispatcher::HandleResponse(const IncomingResponse& response) {
-    // 骨架期没有在飞的反向请求(审批/ask_user 的执行链在 Broker 那条线)。
-    // 响应进来无处可配,丢弃 + 诊断;接线后这里把响应对回挂起的审批。
-    Diagnose("收到无处配对的响应(反向请求未接线),id=" + std::to_string(response.id));
-    return DispatchOutcome{};
+DispatchContext Dispatcher::kNullContext{};
+
+DispatchOutcome Dispatcher::HandleResponse(const IncomingResponse& response, DispatchContext& context) {
+    // 反向请求的响应(审批/ask_user 的前端答复):交悬起件配对。
+    if (!context.resolve_interaction) {
+        // 没接线(骨架期直驱的形状):丢弃 + 诊断。
+        Diagnose("收到反向请求响应,但 resolve 回调未装配,id=" + std::to_string(response.id));
+        return DispatchOutcome{};
+    }
+    const std::string error = context.resolve_interaction(response);
+    if (error.empty()) {
+        // 配对成功:回一条空 result,前端好收账。
+        DispatchOutcome outcome;
+        outcome.outbound.push_back(SerializeMessage(MakeResult(response.id, nlohmann::json::object())));
+        return outcome;
+    }
+    // 配不上:迟到/失效,稳定错误码;参数错(kErrInvalidParams)是报文
+    // 形状不对,不是迟到。
+    const int code = error == std::string(kInvalidParamsToken)
+                         ? kErrInvalidParams
+                         : kErrStaleRequestId;
+    DispatchOutcome outcome;
+    outcome.outbound.push_back(SerializeMessage(MakeError(response.id, code, "反向请求响应: " + error)));
+    return outcome;
 }
 
 }  // namespace lubancode::app_server

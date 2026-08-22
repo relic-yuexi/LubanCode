@@ -19,20 +19,26 @@
 #include "cli/i18n.hpp"
 #include "cli/transcript.hpp"  // CountUtf8Codepoints:活度账"多少字"的码点计数
 #include "platform/paths.hpp"
+#include "runtime/turn_runtime.hpp"  // MapPreToolDecision:PreToolUse 归并映射与主路径同一颗(P3)
 #include "tools/path_utils.hpp"
 #include "tools/todo_tool.hpp"
+#include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明/persona)查表,源头 prompts/tools/
 
 namespace lubancode::tools {
 
 namespace {
 
+// 子代理人格(模型可见文字):文案在 src/prompts/tools/<语言>/agent.md 的
+// persona.general / persona.explore 两节,查表现取,兜底是迁移前原文。
 std::string SubAgentPersona() {
-    return "你是 general-purpose 子代理,能搜索、分析并完成多步任务。专注给定任务,完成后直接给出结论,不要寒暄。";
+    return ToolText("agent", "persona.general",
+                    "你是 general-purpose 子代理,能搜索、分析并完成多步任务。专注给定任务,完成后直接给出结论,不要寒暄。");
 }
 
 std::string ExplorePersona() {
-    return "你是 Explore 子代理,专门快速搜索、阅读并分析代码库。只读,不得改文件、启动会改动环境的命令或做别的写操作。"
-           "完成后给出简明结论和具体文件位置,不要寒暄。";
+    return ToolText("agent", "persona.explore",
+                    "你是 Explore 子代理,专门快速搜索、阅读并分析代码库。只读,不得改文件、启动会改动环境的命令或做别的写操作。"
+                    "完成后给出简明结论和具体文件位置,不要寒暄。");
 }
 
 std::string ExtractLastText(const agent::AgentLoop& loop) {
@@ -665,14 +671,17 @@ std::string AgentTool::name() const {
 }
 
 std::string AgentTool::description() const {
-    return "把独立任务委托给子代理。先想一个 4~16 字(英文 2~6 个词)的语义短标题填 title——名词短语或短命令,能彼此区分,"
-           "不要照抄 prompt 首句、不要塞路径清单或套话;再把完整的任务说明写进 prompt。title 给人看(代理面板/日志),"
-           "prompt 给子代理执行,两者各司其职。agent_type=Explore 是只读代码搜索代理;general-purpose 能研究、执行多步任务和改代码。"
-           "子代理有独立上下文,只把结论交回主对话。执行模式看 execution_mode(缺省 auto):交互会话里探索、生成、写代码、"
-           "调研这类独立任务用缺省 auto 即可——后台独立跑,完成后结论自动交回,主对话还能继续干别的;不要为了拿结果"
-           "习惯性写 foreground,后台结果一样会回流,只有紧接着的下一步非等这份结果不可才显式写 foreground。"
-           "管道/单发场景 auto 等价前台(阻塞等结论)。后台任务不能弹权限确认,"
-           "未预先放行的操作会被拒绝。子代理看不见当前对话历史,prompt 必须自包含。";
+    // 文案在 src/prompts/tools/<语言>/agent.md,兜底是迁移前的原文。
+    return ToolText("agent", "description",
+                    "把独立任务委托给子代理。先想一个 4~16 字(英文 2~6 个词)的语义短标题填 title——名词短语或短命令,"
+                    "能彼此区分,不要照抄 prompt 首句、不要塞路径清单或套话;再把完整的任务说明写进 prompt。"
+                    "title 给人看(代理面板/日志),prompt 给子代理执行,两者各司其职。agent_type=Explore 是只读代码搜索代理;"
+                    "general-purpose 能研究、执行多步任务和改代码。子代理有独立上下文,只把结论交回主对话。"
+                    "执行模式看 execution_mode(缺省 auto):交互会话里探索、生成、写代码、调研这类独立任务用缺省 auto "
+                    "即可——后台独立跑,完成后结论自动交回,主对话还能继续干别的;不要为了拿结果习惯性写 foreground,"
+                    "后台结果一样会回流,只有紧接着的下一步非等这份结果不可才显式写 foreground。管道/单发场景 auto "
+                    "等价前台(阻塞等结论)。后台任务不能弹权限确认,未预先放行的操作会被拒绝。子代理看不见当前对话历史,"
+                    "prompt 必须自包含。");
 }
 
 nlohmann::json AgentTool::input_schema() const {
@@ -684,59 +693,67 @@ nlohmann::json AgentTool::input_schema() const {
     nlohmann::json title_prop = nlohmann::json::object();
     title_prop["type"] = "string";
     title_prop["description"] =
-        "任务短标题,必填。给人看的语义字段:中文 4~16 字、英文 2~6 个词,名词短语或短命令,能与其他任务区分。"
-        "不得照抄 prompt 首句,不得含路径清单/验收全文/换行/制表符,硬上限 40 显示列。先概括 title,再写完整 prompt。";
+        ToolText("agent", "param.title",
+                 "任务短标题,必填。给人看的语义字段:中文 4~16 字、英文 2~6 个词,名词短语或短命令,能与其他任务区分。"
+                 "不得照抄 prompt 首句,不得含路径清单/验收全文/换行/制表符,硬上限 40 显示列。先概括 title,再写完整 prompt。");
     properties["title"] = title_prop;
 
     nlohmann::json prompt_prop = nlohmann::json::object();
     prompt_prop["type"] = "string";
     prompt_prop["description"] =
-        "交给子代理的任务描述,必须自包含——子代理看不见主对话历史,任务目标、范围、期望的输出形式都要"
-        "写清楚。";
+        ToolText("agent", "param.prompt",
+                 "交给子代理的任务描述,必须自包含——子代理看不见主对话历史,任务目标、范围、期望的输出形式都要"
+                 "写清楚。");
     properties["prompt"] = prompt_prop;
 
     nlohmann::json max_steps_prop = nlohmann::json::object();
     max_steps_prop["type"] = "integer";
     max_steps_prop["description"] =
-        "子代理最多跑几步(一步 = 一次模型请求,一步可含多枚工具调用)。不填时用配置的默认:首选 "
-        "subagent.max_steps_per_turn,未设则继承 max_steps_per_turn(默认 0 = 不限步)。传 0 = 不设上限;"
-        "剩三步时会收到收口提醒,到限后返回 budget_exhausted 并带回检查点,不会笼统报失败。重试时先读"
-        "检查点缩小范围,不要原样重发任务、不要擅自抬高步数上限。";
+        ToolText("agent", "param.max_steps_per_turn",
+                 "子代理最多跑几步(一步 = 一次模型请求,一步可含多枚工具调用)。不填时用配置的默认:首选 "
+                 "subagent.max_steps_per_turn,未设则继承 max_steps_per_turn(默认 0 = 不限步)。传 0 = 不设上限;"
+                 "剩三步时会收到收口提醒,到限后返回 budget_exhausted 并带回检查点,不会笼统报失败。重试时先读"
+                 "检查点缩小范围,不要原样重发任务、不要擅自抬高步数上限。");
     properties["max_steps_per_turn"] = max_steps_prop;
 
     nlohmann::json type_prop = nlohmann::json::object();
     type_prop["type"] = "string";
     type_prop["enum"] = nlohmann::json::array({"general-purpose", "Explore"});
-    type_prop["description"] = "子代理类型:Explore 只读搜索分析;general-purpose 可做多步操作。默认 general-purpose。";
+    type_prop["description"] =
+        ToolText("agent", "param.agent_type",
+                 "子代理类型:Explore 只读搜索分析;general-purpose 可做多步操作。默认 general-purpose。");
     properties["agent_type"] = type_prop;
 
     nlohmann::json mode_prop = nlohmann::json::object();
     mode_prop["type"] = "string";
     mode_prop["enum"] = nlohmann::json::array({"auto", "foreground", "background"});
     mode_prop["description"] =
-        "执行模式,缺省 auto。auto:交互会话里默认后台独立跑(结论完成后自动交回主对话,"
-        "主对话可继续干别的)——不要习惯性写 foreground,只有下一步非等这份结果不可才显式写;"
-        "管道/单发场景 auto 等价前台(阻塞等结论)。"
-        "background:立刻返回任务编号,后台独立跑;background 任务不能弹权限确认,"
-        "未预先放行的操作会被拒绝。foreground:本次调用阻塞等子代理结论。"
-        "旧参数 run_in_background 仍认(true=background,false=foreground);"
-        "两者都给时,显式(非 auto)的 execution_mode 优先。";
+        ToolText("agent", "param.execution_mode",
+                 "执行模式,缺省 auto。auto:交互会话里默认后台独立跑(结论完成后自动交回主对话,"
+                 "主对话可继续干别的)——不要习惯性写 foreground,只有下一步非等这份结果不可才显式写;"
+                 "管道/单发场景 auto 等价前台(阻塞等结论)。"
+                 "background:立刻返回任务编号,后台独立跑;background 任务不能弹权限确认,"
+                 "未预先放行的操作会被拒绝。foreground:本次调用阻塞等子代理结论。"
+                 "旧参数 run_in_background 仍认(true=background,false=foreground);"
+                 "两者都给时,显式(非 auto)的 execution_mode 优先。");
     properties["execution_mode"] = mode_prop;
 
     nlohmann::json background_prop = nlohmann::json::object();
     background_prop["type"] = "boolean";
     background_prop["description"] =
-        "(兼容旧参)是否放到会话后台运行:true 等价 execution_mode=background,"
-        "false 等价 foreground。新调用建议用 execution_mode。";
+        ToolText("agent", "param.run_in_background",
+                 "(兼容旧参)是否放到会话后台运行:true 等价 execution_mode=background,"
+                 "false 等价 foreground。新调用建议用 execution_mode。");
     properties["run_in_background"] = background_prop;
 
     nlohmann::json isolation_prop = nlohmann::json::object();
     isolation_prop["type"] = "string";
     isolation_prop["enum"] = nlohmann::json::array({"none", "worktree"});
     isolation_prop["description"] =
-        "worktree = 给子代理单独开一间 git worktree 隔离房干活:写不碰主 checkout(文件/命令/git 三道闸拦),"
-        "干完没改动房自动删,有改动则保留并在结果里附房路径与分支,由主代理或用户收尾。"
-        "改代码的多步任务建议带上;只读摸排不必。缺省 none。";
+        ToolText("agent", "param.isolation",
+                 "worktree = 给子代理单独开一间 git worktree 隔离房干活:写不碰主 checkout(文件/命令/git 三道闸拦),"
+                 "干完没改动房自动删,有改动则保留并在结果里附房路径与分支,由主代理或用户收尾。"
+                 "改代码的多步任务建议带上;只读摸排不必。缺省 none。");
     properties["isolation"] = isolation_prop;
 
     schema["properties"] = properties;
@@ -1352,7 +1369,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             ++task->content_revision;
             touch_activity(AgentTaskActivity::Stage::Thinking);
         };
-        sub_callbacks.on_tool_start = [this, task, foreground_hooks](const std::string& tool_name,
+        sub_callbacks.on_tool_start = [this, task, foreground_hooks](const std::string& tool_use_id,
+                                                                     const std::string& tool_name,
                                                                      const nlohmann::json& tool_input) {
             {
                 std::lock_guard<std::mutex> lock(tasks_mutex_);
@@ -1364,8 +1382,10 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 event.tool_name = tool_name;
                 event.input_json = tool_input.dump();
                 AppendTaskEventLocked(task, std::move(event));
+                // P4:tool_use_id 一并入账——子代理面板/查看态以后凭它对条目,
+                // 不再按"最近一笔同名工具"倒着找。
                 task->snapshot.tool_calls.push_back(
-                    AgentTaskToolCall{tool_name, tool_input.dump(), std::string(), false, false});
+                    AgentTaskToolCall{tool_name, tool_input.dump(), std::string(), false, false, tool_use_id});
                 task->activity.stage = AgentTaskActivity::Stage::Tool;
                 task->activity.tool_name = tool_name;
                 task->activity.tool_started = std::chrono::steady_clock::now();
@@ -1373,18 +1393,33 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 TouchTasks();
             }
             if (foreground_hooks != nullptr && foreground_hooks->on_sub_tool_start) {
-                foreground_hooks->on_sub_tool_start(tool_name, tool_input);
+                foreground_hooks->on_sub_tool_start(tool_use_id, tool_name, tool_input);
             }
         };
-        sub_callbacks.on_tool_done = [this, task](const std::string& tool_name, const Result& result) {
+        sub_callbacks.on_tool_done = [this, task](const std::string& tool_use_id, const std::string& tool_name,
+                                                  const Result& result) {
             std::lock_guard<std::mutex> lock(tasks_mutex_);
             FlushPendingTaskTextLocked(task);  // 工具结果前若有残余正文,先入账
+            // P4:先按 tool_use_id 精确对账;老档(没存 id 的)退回"最近一笔
+            // 未完的同名工具"——两代数据都能收口。
+            bool matched_by_id = false;
             for (auto it = task->snapshot.tool_calls.rbegin(); it != task->snapshot.tool_calls.rend(); ++it) {
-                if (!it->done && it->name == tool_name) {
+                if (!it->done && !it->tool_use_id.empty() && it->tool_use_id == tool_use_id) {
                     it->done = true;
                     it->is_error = result.is_error;
                     it->result = result.content;
+                    matched_by_id = true;
                     break;
+                }
+            }
+            if (!matched_by_id) {
+                for (auto it = task->snapshot.tool_calls.rbegin(); it != task->snapshot.tool_calls.rend(); ++it) {
+                    if (!it->done && it->name == tool_name) {
+                        it->done = true;
+                        it->is_error = result.is_error;
+                        it->result = result.content;
+                        break;
+                    }
                 }
             }
             AgentTaskEvent event;
@@ -1415,7 +1450,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             const std::shared_ptr<lubancode::hooks::DetachedHookSession> hooks_session =
                 background_hooks != nullptr && !background_hooks->Empty() ? background_hooks : nullptr;
             sub_callbacks.on_tool_confirm = [this, task, hooks_session, &last_denial_hook_reason](
-                                                const std::string& name, const nlohmann::json& input) {
+                                                const std::string& /*tool_use_id*/, const std::string& name,
+                                                const nlohmann::json& input) {
                 last_denial_hook_reason.clear();
                 if (hooks_session != nullptr) {
                     lubancode::hooks::HookPayload payload;
@@ -1453,7 +1489,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             // 重派)。缺省那份"用户拒绝执行该工具"会把这个后台边界藏起来,
             // 子代理的最终报告便写成"均被用户拒绝"——既冤枉了用户,也把主模
             // 型的下一步带偏。
-            sub_callbacks.on_tool_denial_text = [&last_denial_hook_reason](const std::string& name) {
+            sub_callbacks.on_tool_denial_text = [&last_denial_hook_reason](const std::string& /*tool_use_id*/,
+                                                                           const std::string& name) {
                 std::string text = "后台任务无法弹出权限确认," + name + " 未预先放行,已被拒绝。";
                 if (!last_denial_hook_reason.empty()) {
                     text += "拒绝来自 PermissionRequest 钩子:" + last_denial_hook_reason + "。";
@@ -1500,7 +1537,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             //   PreToolUse/PostToolUse 两个口。
             const std::shared_ptr<lubancode::hooks::DetachedHookSession> hooks_session = background_hooks;
             sub_callbacks.on_pre_tool_use_hook =
-                [hooks_session](const std::string& name, const nlohmann::json& input) {
+                [hooks_session](const std::string& /*tool_use_id*/, const std::string& name,
+                                const nlohmann::json& input) {
                     lubancode::hooks::HookPayload payload;
                     payload.event = lubancode::hooks::HookEvent::PreToolUse;
                     payload.fields["tool_name"] = name;
@@ -1508,35 +1546,27 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                     payload.match_value = name;
                     const auto merged = hooks_session->Emit(lubancode::hooks::HookEvent::PreToolUse, payload);
 
-                    lubancode::agent::ToolHookDecision decision;
-                    switch (merged.permission) {
-                        case lubancode::hooks::HookEventResult::Permission::Deny:
-                            decision.decision = lubancode::agent::ToolHookDecision::Decision::Deny;
-                            decision.reason = "被 PreToolUse 钩子拦截: " + merged.permission_reason;
-                            break;
-                        case lubancode::hooks::HookEventResult::Permission::Ask:
-                            // 后台无终端,ask 降级为拒——明说,不装问过了。
-                            decision.decision = lubancode::agent::ToolHookDecision::Decision::Deny;
-                            decision.reason = "后台任务没有终端可问,PreToolUse 钩子的 ask 已降级为拒绝: " +
-                                              merged.permission_reason;
-                            hooks_session->PostWarning("后台子代理 #" +
-                                                       hooks_session->context().agent_id.value_or(std::string("?")) +
-                                                       " 的 PreToolUse 钩子表态 ask,后台无终端,已按拒绝降级(" +
-                                                       name + ")");
-                            break;
-                        case lubancode::hooks::HookEventResult::Permission::Allow:
-                            decision.decision = lubancode::agent::ToolHookDecision::Decision::Allow;
-                            decision.reason = merged.permission_reason;
-                            break;
-                        case lubancode::hooks::HookEventResult::Permission::None:
-                            break;
+                    // 归并映射归 runtime::MapPreToolDecision(P3:与主路径
+                    // 同一颗脑袋);后台特有的"ask 降级为拒"在这里叠加——
+                    // 后台无终端,明说,不装问过了。
+                    if (merged.permission == lubancode::hooks::HookEventResult::Permission::Ask) {
+                        lubancode::agent::ToolHookDecision decision;
+                        decision.decision = lubancode::agent::ToolHookDecision::Decision::Deny;
+                        decision.reason = "后台任务没有终端可问,PreToolUse 钩子的 ask 已降级为拒绝: " +
+                                          merged.permission_reason;
+                        hooks_session->PostWarning("后台子代理 #" +
+                                                   hooks_session->context().agent_id.value_or(std::string("?")) +
+                                                   " 的 PreToolUse 钩子表态 ask,后台无终端,已按拒绝降级(" +
+                                                   name + ")");
+                        decision.updated_input = merged.updated_input;
+                        decision.additional_context = merged.additional_context;
+                        return decision;
                     }
-                    decision.updated_input = merged.updated_input;
-                    decision.additional_context = merged.additional_context;
-                    return decision;
+                    return lubancode::runtime::MapPreToolDecision(merged);
                 };
             sub_callbacks.on_post_tool_use_hook =
-                [hooks_session](const std::string& name, const nlohmann::json& input, const Result& result) {
+                [hooks_session](const std::string& /*tool_use_id*/, const std::string& name,
+                                const nlohmann::json& input, const Result& result) {
                     lubancode::hooks::HookPayload payload;
                     payload.event = lubancode::hooks::HookEvent::PostToolUse;
                     payload.fields["tool_name"] = name;
@@ -1550,10 +1580,11 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         }
     } else if (foreground_hooks != nullptr) {
         // 没进台账的旧路径(测试直调 RunTask 等边缘):沿用旧回调。
-        sub_callbacks.on_tool_start = [foreground_hooks](const std::string& tool_name,
+        sub_callbacks.on_tool_start = [foreground_hooks](const std::string& tool_use_id,
+                                                          const std::string& tool_name,
                                                           const nlohmann::json& tool_input) {
             if (foreground_hooks->on_sub_tool_start) {
-                foreground_hooks->on_sub_tool_start(tool_name, tool_input);
+                foreground_hooks->on_sub_tool_start(tool_use_id, tool_name, tool_input);
             }
         };
         sub_callbacks.on_tool_confirm = foreground_hooks->on_tool_confirm;

@@ -139,6 +139,7 @@ struct AgentTaskToolCall {
     std::string result;
     bool done = false;
     bool is_error = false;
+    std::string tool_use_id;  // P4:模型给的调用 id,收账按它精确对条目
 };
 
 struct AgentTaskSnapshot {
@@ -302,12 +303,12 @@ public:
         // 子代理内部工具 needs_confirm() 为真时,原样转发给父级
         // on_tool_confirm——三档确认模式(yolo/auto/confirm)在父级那份
         // 回调里已经处理好了,这里不用重复实现。
-        std::function<bool(const std::string& name, const nlohmann::json& input)> on_tool_confirm;
+        std::function<bool(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input)> on_tool_confirm;
 
         // 子代理发起了一次工具调用(还没执行),给上层打一行提示用,比如
         // "  [子代理·工具] read_file {...}"。跟 on_tool_confirm 分开是因为
         // 这个纯粹用于展示,没有返回值、不影响子代理是否真的执行。
-        std::function<void(const std::string& name, const nlohmann::json& input)> on_sub_tool_start;
+        std::function<void(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input)> on_sub_tool_start;
 
         // 子代理每次独立请求结束的 usage(连同步号/请求 id 身份),原样
         // 转发给父级 on_usage——累计进本轮 token 统计与逐步流水账,请求
@@ -316,22 +317,27 @@ public:
 
         // M9:子代理内部的工具调用也要受 pre_tool/post_tool 钩子管——原样
         // 转发给父级的同名回调,子代理这边不重复实现匹配/执行逻辑。
-        std::function<std::optional<std::string>(const std::string& name, const nlohmann::json& input)>
+        std::function<std::optional<std::string>(const std::string& tool_use_id, const std::string& name,
+                                              const nlohmann::json& input)>
             on_pre_tool_hook;
-        std::function<void(const std::string& name, const nlohmann::json& input, const Tool::Result& result)>
+        std::function<void(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input,
+                          const Tool::Result& result)>
             on_post_tool_hook;
 
         // hooks 框架第三步:新回调同样原样转发(完整 PreToolUse 表态、
         // PermissionRequest、UI 相位、PostToolUse 反馈)。注意 on_pre_tool_
         // use_hook 捕获的"预决策槽"在父级闭包里,转发的是同一批 std::function,
         // 槽随行——子代理的确认回调读到的就是子代理当前那次工具调用的决策。
-        std::function<agent::ToolHookDecision(const std::string& name, const nlohmann::json& input)>
+        std::function<agent::ToolHookDecision(const std::string& tool_use_id, const std::string& name,
+                                              const nlohmann::json& input)>
             on_pre_tool_use_hook;
-        std::function<agent::ToolHookDecision(const std::string& name, const nlohmann::json& input)>
+        std::function<agent::ToolHookDecision(const std::string& tool_use_id, const std::string& name,
+                                              const nlohmann::json& input)>
             on_permission_request;
-        std::function<void(const std::string& name, agent::ToolPhase phase)> on_tool_phase;
-        std::function<std::vector<std::string>(const std::string& name, const nlohmann::json& input,
-                                               const Tool::Result& result)>
+        std::function<void(const std::string& tool_use_id, const std::string& name, agent::ToolPhase phase)>
+            on_tool_phase;
+        std::function<std::vector<std::string>(const std::string& tool_use_id, const std::string& name,
+                                               const nlohmann::json& input, const Tool::Result& result)>
             on_post_tool_use_hook;
 
         // ESC/Ctrl+C 打断信号(main.cpp 那份 cancel_flag 的地址)——子代理

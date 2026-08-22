@@ -49,7 +49,7 @@ std::string ReadFileTool::description() const {
 
 - read_file、write_file(基建批 + 文件工具第一批的两枚试点)
 - edit_file、search(文件工具批余量)
-- run_command、background_output、stop_background(命令族批)
+- run_command、background_output、stop_background;批3-5(0.26.21):agent、agent_message(含 persona.general/persona.explore)、ask_user、todo_write、lsp、context_search、context_read(命令族批)
 
 run_command 的描述与 command/shell 两个参数的平台分档文案,档里单列
 `(POSIX)` 节(如 `## description (POSIX)`),cpp 侧键名随 `#ifdef` 走;

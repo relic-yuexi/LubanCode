@@ -1,11 +1,10 @@
 ﻿#Requires -Version 5.1
 <#
-    install.ps1 / uninstall.ps1 里 PATH 纯逻辑函数的手工验证脚本。
+    install.ps1 / uninstall.ps1 的 PATH 纯逻辑与官方资源同步验证脚本。
 
     不进 ctest,手工跑:
         powershell -NoProfile -File scripts\tests\install.tests.ps1
 
-    只测"计算新 PATH 字符串"这部分纯函数(Get-UpdatedPathForAdd / Get-UpdatedPathForRemove),
     不碰真实 HKCU 注册表——通过点号(.)dot-source install.ps1,脚本内部靠
     "$MyInvocation.InvocationName -ne '.'" 这个判断,dot-source 时不会触发真正的安装动作。
 #>
@@ -147,24 +146,39 @@ $syncRoot = Join-Path $env:TEMP ("lubancode-skills-test-" + [Guid]::NewGuid().To
 try {
     $sourceDir = Join-Path $syncRoot 'source'
     $sourceSkills = Join-Path $sourceDir 'skills\lubancode-config\references'
+    $sourceDocs = Join-Path $sourceDir 'docs\reference'
     $installDir = Join-Path $syncRoot 'install'
     $oldSkills = Join-Path $installDir 'skills\lubancode-config'
+    $oldDocs = Join-Path $installDir 'docs'
     New-Item -ItemType Directory -Path $sourceSkills -Force | Out-Null
+    New-Item -ItemType Directory -Path $sourceDocs -Force | Out-Null
     New-Item -ItemType Directory -Path $oldSkills -Force | Out-Null
+    New-Item -ItemType Directory -Path $oldDocs -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $sourceDir 'lubancode.exe') -Value 'fake exe' -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $sourceDir 'skills\lubancode-config\SKILL.md') -Value 'new router' -Encoding UTF8
-    Set-Content -LiteralPath (Join-Path $sourceSkills 'soul-and-prompts.md') -Value 'new reference' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $sourceSkills 'document-map.md') -Value '../../docs' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $sourceDir 'docs\README.md') -Value 'docs index' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $sourceDocs 'configuration.md') -Value 'config reference' -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $oldSkills 'old.md') -Value 'old reference' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $oldDocs 'old.md') -Value 'old docs' -Encoding UTF8
 
     Sync-OfficialSkills -SourceExe (Join-Path $sourceDir 'lubancode.exe') -InstallDir $installDir
+    Sync-OfficialDocs -SourceExe (Join-Path $sourceDir 'lubancode.exe') -InstallDir $installDir
 
     Assert-True -Name '同步后入口技能存在' `
         -Actual (Test-Path -LiteralPath (Join-Path $installDir 'skills\lubancode-config\SKILL.md') -PathType Leaf)
     Assert-True -Name '同步后 reference 跟着过去' `
-        -Actual (Test-Path -LiteralPath (Join-Path $installDir 'skills\lubancode-config\references\soul-and-prompts.md') -PathType Leaf)
+        -Actual (Test-Path -LiteralPath (Join-Path $installDir 'skills\lubancode-config\references\document-map.md') -PathType Leaf)
     Assert-Equal -Name '旧官方技能文件已清掉' `
         -Expected $false `
         -Actual (Test-Path -LiteralPath (Join-Path $installDir 'skills\lubancode-config\old.md'))
+    Assert-True -Name '同步后文档首页存在' `
+        -Actual (Test-Path -LiteralPath (Join-Path $installDir 'docs\README.md') -PathType Leaf)
+    Assert-True -Name '同步后配置参考跟着过去' `
+        -Actual (Test-Path -LiteralPath (Join-Path $installDir 'docs\reference\configuration.md') -PathType Leaf)
+    Assert-Equal -Name '旧官方文档文件已清掉' `
+        -Expected $false `
+        -Actual (Test-Path -LiteralPath (Join-Path $installDir 'docs\old.md'))
 } finally {
     if (Test-Path -LiteralPath $syncRoot) {
         Remove-Item -LiteralPath $syncRoot -Recurse -Force -ErrorAction SilentlyContinue
