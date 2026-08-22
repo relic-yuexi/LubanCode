@@ -84,7 +84,7 @@ flowchart TB
 | Windows | `%USERPROFILE%\.lubancode\plugins\` |
 | Linux / macOS | `$HOME/.lubancode/plugins/` |
 
-启动时只扫这一层，不递归。`.lua` 三个平台都认；`.dll` 只在 Windows 加载。没有项目级插件目录，没有 `/plugin install`，也没有热重载。文件放好后须重启 LubanCode。
+启动时只扫这一层，不递归。`.lua` 三个平台都认；原生库按平台加载（Windows `.dll`、Linux `.so`、macOS `.dylib`）；`plugin.json` 子目录走 process 插件（Python/Rust/任意可执行程序）。项目级 `<项目>/.lubancode/plugins/` 也认，但项目插件按内容指纹过信任账（`~/.lubancode/plugin-trust.json`），首次见到须批准。没有 `/plugin install`，也没有热重载。文件放好后须重启 LubanCode。
 
 ### 安装现成 Lua 示例
 

@@ -1,0 +1,28 @@
+{
+  "manifest_version": 1,
+  "id": "local-math",
+  "version": "1.0.0",
+  "language": "python",
+  "runtime": {
+    "kind": "process",
+    "command": "python3",
+    "args": ["${plugin_dir}/runner.py"],
+    "timeout_ms": 30000
+  },
+  "tools": [
+    {
+      "name": "add",
+      "description": "把两个数字相加。入参 {\"a\": number, \"b\": number}。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "a": {"type": "number", "description": "左操作数"},
+          "b": {"type": "number", "description": "右操作数"}
+        },
+        "required": ["a", "b"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "permissions": {"network": false, "env": []}
+}

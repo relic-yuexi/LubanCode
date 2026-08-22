@@ -1,0 +1,26 @@
+{
+  "manifest_version": 1,
+  "id": "word-count-rs",
+  "version": "1.0.0",
+  "language": "rust",
+  "runtime": {
+    "kind": "process",
+    "command": "${plugin_dir}/target/release/word_count_tool",
+    "timeout_ms": 10000
+  },
+  "tools": [
+    {
+      "name": "word_count",
+      "description": "统计文本里的词数(连续非空白算一个词)。入参 {\"text\": string}。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": {"type": "string", "description": "要统计的文本"}
+        },
+        "required": ["text"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "permissions": {"network": false, "env": []}
+}

@@ -87,7 +87,9 @@ const Entry kZhCN[] = {
      "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
      "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
      "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
-     "  /plugins        列出挂载的插件工具(主目录 .lubancode/plugins 下的 *.dll 和 *.lua)\n"
+     "  /plugins        列出插件三路(native/Lua/process)的状态与加载警告\n"
+     "  /plugin         管单枚插件:inspect 看详情 / doctor 查环境 / test 试跑\n"
+     "                  (v1 以重启为 reload/enable/disable 的口径)\n"
      "  /tools          列工具三态:核心(恒在)/已加载/延迟未加载(工具总数超过配置文件\n"
      "                  tool_search_threshold(默认 20,0=永不延迟)时,MCP/插件等外挂工具\n"
      "                  延迟挂载,模型用 tool_search 检索后方可调用)\n"
@@ -189,7 +191,7 @@ const Entry kZhCN[] = {
      "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
      "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
      "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
-     "  /plugins        列出挂载的插件工具(DLL + lua)和加载警告\n"
+     "  /plugins        list plugins of all three runtimes (native/Lua/process) with load warnings\n"
      "  /hooks          hooks 台账:来源/命令/信任/禁用/最近结果;trust|untrust|disable|enable <#id>、runs [N]\n"
      "  /tools          列工具三态:核心(恒在)/已加载/延迟未加载(tool_search 延迟挂载)\n"
      "  /memory         管项目记忆;/memory on|off|use|learn|list|remember|forget|rebuild\n"
@@ -986,13 +988,17 @@ const Entry kZhCN[] = {
     {"cmd.plugins.empty",
      "没有挂载任何插件工具。\n\n"
      "插件目录约定(放进去,下次启动即挂载):\n"
-     "  C ABI DLL: {0}/*.dll\n"
-     "      导出 luban_plugin_entry(见仓库 include/luban_plugin.h),示例在\n"
-     "      examples/plugins/hello_plugin/。注意:DLL 跟宿主同进程,插件里崩了\n"
-     "      整个程序一起完蛋,装谁的插件风险自担。\n"
+     "  process:   {0}/<插件id>/plugin.json(Python/Rust/任意可执行程序;\n"
+     "      起步用 `lubancode plugin init python <名字>` 生成三件套,示例在\n"
+     "      examples/plugins/local_math/)\n"
      "  Lua:       {0}/*.lua\n"
      "      每个文件 return { name=..., description=..., input_schema=...,\n"
-     "      execute=function(input) ... end } 一张表,示例在 examples/plugins/word_count.lua。"},
+     "      execute=function(input) ... end } 一张表(缺省 pure 画像,关 io/\n"
+     "      os.execute;死循环有指令预算落锤),示例在 examples/plugins/word_count.lua\n"
+     "  native:    {0}/*.dll(Windows)/*.so(Linux)/*.dylib(macOS)\n"
+     "      导出 luban_plugin_entry(ABI v2,见 include/luban_plugin.h),示例在\n"
+     "      examples/plugins/hello_plugin/。库跟宿主同进程,插件里崩了整个程序\n"
+     "      一起完蛋,装谁的插件风险自担。"},
     {"cmd.plugins.mounted", "已挂载 {0} 个插件工具:"},
     {"cmd.plugins.warnings", "加载警告(这些没挂上):"},
 

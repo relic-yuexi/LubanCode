@@ -488,7 +488,8 @@ GLM 系模型用 `thinking.type` 开关思考模式,外加一个自定义分级 
   sessions/                           会话存档
   projects/<项目key>/memory/          项目记忆正文、index 与可重建 catalog
   memory-jobs/                        后台记忆任务的 pending/failed 队列
-  plugins/                            DLL 与 Lua 插件
+  plugins/                            插件（*.dll/*.so/*.dylib、*.lua、plugin.json 目录）
+  plugin-trust.json                   项目插件的内容指纹信任账
   skills/                            用户自装 Skill；同名时压过官方级
   languages/                          外部语言包(见 i18n.md)
 ```

@@ -173,9 +173,12 @@ usage 账分四态：`not_reported`（服务端没回 usage）/ `disabled`（met
 | `/skill` | 裸敲看用法；支持 `list/install/update/remove`。 |
 | `/mcp` | 列 MCP 服务存活状态与发现的工具。 |
 | `/lsp` | 列语言服务器的未启动、运行、闲置关闭状态。 |
-| `/plugins` | 列 Lua/DLL 工具及加载警告。 |
+| `/plugins` | 列三路插件（native/Lua/process）的工具与加载警告。 |
+| `/plugin` | 管单枚插件：`inspect <id>` 看详情、`doctor <id>` 探环境（不执行工具）、`reload`/`enable`/`disable` 以重启为口径。 |
 
 `/skill install` 可收 HTTP(S) 地址、本地目录、`SKILL.md` 或独立 Markdown。安装统一落到 `~/.lubancode/skills/<name>`，成功后本场立即刷新。
+
+生成 Python 插件脚手架走命令行子命令：`lubancode plugin init python [名字]`（plugin.json + runner.py + test_runner.py 三件套，落 `~/.lubancode/plugins/<名字>/`）。
 
 ## 项目记忆
 
