@@ -147,9 +147,9 @@ void RegisterMcpTools(std::vector<McpServerRuntime>& mcp_servers, lubancode::too
     }
 }
 
-void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::tools::ToolRegistry& registry,
-                  const lubancode::cli::Theme& theme, std::vector<PluginMountInfo>& mounted,
-                  std::vector<std::string>& warnings, bool report) {
+void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime::EmbeddedLuaRuntime& lua_runtime,
+                  lubancode::tools::ToolRegistry& registry, const lubancode::cli::Theme& theme,
+                  std::vector<PluginMountInfo>& mounted, std::vector<std::string>& warnings, bool report) {
     const auto home_dir = lubancode::config::HomeLubancodeDir();
     if (!home_dir.has_value()) {
         return;  // 找不到主目录,也就没有插件目录可扫
@@ -180,20 +180,22 @@ void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::tools::T
         }
     }
 
-    // Lua 插件
-    auto lua_result = lubancode::tools::LoadLuaPlugins(plugins_dir);
+    // Lua 插件:第 4 步起走 EmbeddedLuaRuntime(引擎不变:每文件一 state、
+    // mutex 串行、文件名稳定排序;新:profile 分级、指令预算、内存帽、
+    // 取消链)。第二遍调用(main/sub 各一遍)只造轻 adapter,不重扫。
+    std::vector<std::string> lua_warnings = lua_runtime.LoadDirectory(plugins_dir);
     if (report) {
-        for (auto& warning : lua_result.warnings) {
+        for (auto& warning : lua_warnings) {
             std::cout << theme.error << warning << theme.reset << "\n";
             warnings.push_back(std::move(warning));
         }
-    }
-    for (auto& tool : lua_result.tools) {
-        if (report) {
-            std::cout << trf("plugin.mounted_line", tool->stem(), 1) << "\n";
-            mounted.push_back({tool->name(), "lua"});
+        for (const auto& record : lua_runtime.records()) {
+            std::cout << trf("plugin.mounted_line", record.id, 1) << "\n";
+            mounted.push_back({record.tool_name, "lua"});
         }
-        registry.Register(std::move(tool));
+    }
+    for (auto& adapter : lua_runtime.MakeAdapters()) {
+        registry.Register(std::move(adapter));
     }
 }
 
@@ -288,8 +290,9 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     }
     // 插件工具主表 + 子表都挂(子代理与 main 同能力,独立任务 agent 默认
     // 完成后退出,不是低配跑腿),挂载行紧跟 [mcp] 那几行。
-    MountPlugins(plugin_host_, main_registry_, theme, plugin_mounted_, plugin_warnings_);
-    MountPlugins(plugin_host_, sub_registry_, theme, plugin_mounted_, plugin_warnings_, /*report=*/false);
+    MountPlugins(plugin_host_, lua_runtime_, main_registry_, theme, plugin_mounted_, plugin_warnings_);
+    MountPlugins(plugin_host_, lua_runtime_, sub_registry_, theme, plugin_mounted_, plugin_warnings_,
+                 /*report=*/false);
 
     // tool_search(延迟挂载):全部工具(MCP/插件/LSP/agent/todo)都注册
     // 完了才数总数、定启停。loaded 集合是会话级的(/clear 不清),主会话

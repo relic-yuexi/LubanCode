@@ -30,6 +30,7 @@
 #include "mcp/client.hpp"
 #include "memory/project_memory.hpp"
 #include "ptc/ptc_tool.hpp"
+#include "runtime/plugin_lua.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/ask_user.hpp"
 #include "tools/plugin_loader.hpp"
@@ -106,11 +107,12 @@ struct PluginMountInfo {
 // 为 false 时只给另一张 registry 装独立 wrapper/state,不重复打印与记账。
 // plugin_host 由调用方持有,且必须声明在 registry 之前(PluginTool 手中的
 // luban_tool_def* 指向 DLL 静态数据,模块要活得比 registry 久,析构反序那
-// 一套,理由同 mcp_servers);LuaTool 连 lua_State 整个搬进 registry,没有
-// 这层讲究。mounted/warnings 由调用方持有,交互模式给 /plugins 命令用。
-void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::tools::ToolRegistry& registry,
-                  const lubancode::cli::Theme& theme, std::vector<PluginMountInfo>& mounted,
-                  std::vector<std::string>& warnings, bool report = true);
+// 一套,理由同 mcp_servers);Lua 侧第 4 步起走 EmbeddedLuaRuntime(与
+// LegacyLuaTool 同一份 state 引擎,profile/预算/帽/取消链见 plugin_lua.hpp)。
+// mounted/warnings 由调用方持有,交互模式给 /plugins 命令用。
+void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime::EmbeddedLuaRuntime& lua_runtime,
+                  lubancode::tools::ToolRegistry& registry, const lubancode::cli::Theme& theme,
+                  std::vector<PluginMountInfo>& mounted, std::vector<std::string>& warnings, bool report = true);
 
 // 一场会话的工具全栈:主循环表、子代理表、(交互模式的)Explore 只读表,
 // 连同它们背后的拥有者——MCP 子进程(mcp_servers_)、插件宿主(plugin_host_)、
@@ -185,6 +187,7 @@ private:
     // ---- 拥有者:先声明,后析构(用户表先亡,引用不悬垂) ----
     std::vector<McpServerRuntime> mcp_servers_;
     lubancode::tools::PluginHost plugin_host_;
+    lubancode::runtime::EmbeddedLuaRuntime lua_runtime_;
     std::optional<lubancode::lsp::Manager> lsp_manager_;
     // ---- 用户表:后声明,先析构 ----
     std::optional<lubancode::tools::ToolRegistry> explore_registry_;
