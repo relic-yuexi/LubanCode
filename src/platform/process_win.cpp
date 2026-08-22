@@ -896,6 +896,14 @@ void ChildProcess::Kill() {
     }
 }
 
+void ChildProcess::CloseStdin() {
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    if (stdin_write_ != nullptr) {
+        CloseHandle(static_cast<HANDLE>(stdin_write_));
+        stdin_write_ = nullptr;
+    }
+}
+
 void ChildProcess::Shutdown(int wait_ms) {
     if (!started_ || shutdown_done_.exchange(true)) {
         return;
