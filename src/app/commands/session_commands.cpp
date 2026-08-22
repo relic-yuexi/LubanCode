@@ -4,6 +4,8 @@
 #include <cstdlib>
 #include <ctime>
 #include <iostream>
+#include <sstream>
+#include <vector>
 
 #include "agent/compact.hpp"
 #include "agent/artifact_store.hpp"
@@ -20,6 +22,7 @@
 #include "agent/loop.hpp"
 #include "agent/session_catalog.hpp"
 #include "agent/session_store.hpp"
+#include <nlohmann/json.hpp>
 #include "app/commands/settings_commands.hpp"
 #include "app/runtime_profile.hpp"
 #include "cli/console_input.hpp"
@@ -337,6 +340,9 @@ void PrintSessionsCommand(const std::string& sessions_dir, const std::string& ar
 
 namespace {
 
+// Ctrl+T 转录浮层取头尾各多少行(大文件按需读,掐中间)。
+constexpr std::size_t kTranscriptHalfRows = 60;
+
 // 存档时间串("yyyy-mm-dd HH:MM:SS")-> epoch 秒。本地时间口径(与落档
 // 同一时区);认不出的串折 0(相对时间按"很久以前"算,不炸)。
 long long SessionTsToEpoch(const std::string& ts) {
@@ -374,11 +380,91 @@ lubancode::cli::SessionPickerFeed MakePickerFeed(const std::vector<lubancode::ag
         row.updated_ago = lubancode::cli::FormatSessionAgo(now, SessionTsToEpoch(entry.updated_at));
         row.created_ago = lubancode::cli::FormatSessionAgo(now, SessionTsToEpoch(entry.created_at));
         row.damaged = entry.health == lubancode::agent::SessionHealth::Damaged;
+        // Ctrl+E 展开详情:摘要里现成的字段直转,不多读一盘。
+        row.created_at = entry.created_at;
+        row.updated_at = entry.updated_at;
+        row.model = entry.model;
+        row.message_count = entry.message_count;
         feed.entries.push_back(std::move(row));
     }
     feed.total = entries.size();
     feed.now_epoch = now;
     return feed;
+}
+
+// Ctrl+T 转录浮层的取数:整份读进来,取头尾各 max_half 行(大文件按需
+// 读——只在浮层开了且选中 id 变了时被调一回,不是每键读盘)。事件行
+// (compact/title/cwd/queue)不进转录,只摆消息行;用户/助手各按首块
+// 文本拼一行(工具调用摆 "[工具] 名字"),像一份压缩的流水。
+std::vector<std::string> MakeTranscriptExcerpt(const std::string& sessions_dir, const std::string& id,
+                                               std::size_t max_half) {
+    std::vector<std::string> lines;
+    const std::string file_path = sessions_dir + "/" + id + ".jsonl";
+    const auto content = lubancode::agent::ReadSessionFileBytes(file_path);
+    if (!content.has_value()) {
+        return lines;
+    }
+    std::istringstream iss(*content);
+    std::string line;
+    bool first = true;
+    while (std::getline(iss, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (line.empty()) {
+            continue;
+        }
+        if (first) {
+            first = false;
+            continue;  // meta 行不进转录
+        }
+        const nlohmann::json j = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+        if (!j.is_object()) {
+            continue;
+        }
+        if (j.contains("type")) {
+            continue;  // 事件行(compact/title/cwd/queue)不进转录
+        }
+        const auto message = lubancode::agent::DeserializeSessionMessage(line);
+        if (!message.has_value()) {
+            continue;
+        }
+        std::string text;
+        for (const auto& block : message->content) {
+            if (const auto* tb = std::get_if<lubancode::api::TextBlock>(&block); tb != nullptr) {
+                if (!tb->text.empty()) {
+                    text = tb->text.substr(0, tb->text.find('\n'));
+                    break;
+                }
+            }
+            if (const auto* use = std::get_if<lubancode::api::ToolUseBlock>(&block); use != nullptr) {
+                text = "[工具] " + use->name;
+                break;
+            }
+            if (std::get_if<lubancode::api::ToolResultBlock>(&block) != nullptr) {
+                text = "[工具结果]";
+                break;
+            }
+        }
+        if (text.empty()) {
+            continue;
+        }
+        const char* who = message->role == lubancode::api::Role::User ? "user" : "assistant";
+        std::istringstream text_stream(text);
+        std::string first_text_line;
+        std::getline(text_stream, first_text_line);
+        lines.push_back(std::string("  ") + who + " · " + first_text_line);
+    }
+    // 大文件取头尾:全量超了就掐中间,首尾各 max_half 行,断口插一行省略号。
+    if (lines.size() > max_half * 2) {
+        std::vector<std::string> trimmed;
+        trimmed.reserve(max_half * 2 + 1);
+        trimmed.insert(trimmed.end(), lines.begin(), lines.begin() + static_cast<std::ptrdiff_t>(max_half));
+        trimmed.push_back(std::string("  …(") + std::to_string(lines.size() - max_half * 2) + " 行省略)…");
+        trimmed.insert(trimmed.end(), lines.end() - static_cast<std::ptrdiff_t>(max_half), lines.end());
+        return trimmed;
+    }
+    return lines;
 }
 
 }  // namespace
@@ -425,8 +511,12 @@ std::optional<std::string> PromptResumeTarget(const std::string& sessions_dir,
                          : lubancode::agent::SessionSort::Created;
         const auto page = catalog.Query(query);
         const auto feed = MakePickerFeed(page.entries, 0);
+        // Ctrl+T 转录浮层:按需读盘(选中 id 变了面板才回调这一回)。
+        lubancode::cli::SessionTranscriptProvider transcript = [&catalog](const std::string& id) {
+            return MakeTranscriptExcerpt(catalog.sessions_dir(), id, kTranscriptHalfRows);
+        };
         const auto result =
-            lubancode::cli::RunSessionPickerPanel(feed, theme, scope, sort, keep_id);
+            lubancode::cli::RunSessionPickerPanel(feed, theme, scope, sort, keep_id, 12, transcript);
         if (!result.picked_id.has_value()) {
             if (result.scope != scope || result.sort != sort) {
                 // 只是换了形状:带着新形状重查再进面板,不算取消;

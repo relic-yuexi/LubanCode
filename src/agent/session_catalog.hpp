@@ -122,6 +122,9 @@ public:
     // 缓存里现有条数(测试/诊断用)。
     std::size_t size() const { return entries_.size(); }
 
+    // 台账看的会话根目录(转录浮层按 id 拼路径用;只读)。
+    const std::string& sessions_dir() const { return sessions_dir_; }
+
     // id -> 摘要(缓存里没有给 nullptr)。
     const SessionSummary* Find(const std::string& id) const;
 

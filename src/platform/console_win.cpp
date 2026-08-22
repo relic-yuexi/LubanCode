@@ -563,6 +563,9 @@ std::optional<KeyInput> KeyReader::ReadOne() {
     } else if (ctrl && ke.wVirtualKeyCode == 'E') {
         reset_text_run();
         out.kind = KeyInput::Kind::CtrlE;  // UI-D:聚焦查看
+    } else if (ctrl && ke.wVirtualKeyCode == 'T') {
+        reset_text_run();
+        out.kind = KeyInput::Kind::CtrlT;  // 会话选择器:转录浮层
     } else if (ctrl && ke.wVirtualKeyCode == 'X') {
         reset_text_run();
         out.kind = KeyInput::Kind::CtrlX;  // 子代理面板:停止全部(两段确认第一段)
