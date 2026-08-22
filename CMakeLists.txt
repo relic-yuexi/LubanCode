@@ -415,6 +415,9 @@ add_library(lubancode_core STATIC
   src/workflow/catalog.cpp
   src/workflow/validator.cpp
   src/workflow/graph_view.cpp
+  src/workflow/store.cpp
+  src/workflow/journal.cpp
+  src/workflow/runtime.cpp
 )
 target_include_directories(lubancode_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src

@@ -199,6 +199,9 @@ add_executable(lubancode_tests
   # Workflows 自然语言编排单第 1 批:定义/解析 round-trip/内容 hash/
   # catalog 两级扫描与遮蔽/校验器全错类/图渲染,纯逻辑。
   test_workflow_definition.cpp
+  # 第 2 批:Store/resolver、状态机迁移表、RunJournal 落盘与恢复、顺序图
+  # 最小闭环(fake executor/fake clock)、重试/取消/预算/fallback 边。
+  test_workflow_runtime.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)
