@@ -175,6 +175,9 @@ add_executable(lubancode_tests
   # 显示系统剥离单 P2:AgentLoop 异步审批通道(async 优先/同步回落/四态
   # 收账/悬空收口文案)。
   test_approval_broker.cpp
+  # 显示系统剥离单 P3:TurnRuntime 纯逻辑核(权限裁定/取消/usage/prompt 门),
+  # 脱离终端可驱动。
+  test_turn_runtime.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)

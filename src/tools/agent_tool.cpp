@@ -19,6 +19,7 @@
 #include "cli/i18n.hpp"
 #include "cli/transcript.hpp"  // CountUtf8Codepoints:活度账"多少字"的码点计数
 #include "platform/paths.hpp"
+#include "runtime/turn_runtime.hpp"  // MapPreToolDecision:PreToolUse 归并映射与主路径同一颗(P3)
 #include "tools/path_utils.hpp"
 #include "tools/todo_tool.hpp"
 
@@ -1508,32 +1509,23 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                     payload.match_value = name;
                     const auto merged = hooks_session->Emit(lubancode::hooks::HookEvent::PreToolUse, payload);
 
-                    lubancode::agent::ToolHookDecision decision;
-                    switch (merged.permission) {
-                        case lubancode::hooks::HookEventResult::Permission::Deny:
-                            decision.decision = lubancode::agent::ToolHookDecision::Decision::Deny;
-                            decision.reason = "被 PreToolUse 钩子拦截: " + merged.permission_reason;
-                            break;
-                        case lubancode::hooks::HookEventResult::Permission::Ask:
-                            // 后台无终端,ask 降级为拒——明说,不装问过了。
-                            decision.decision = lubancode::agent::ToolHookDecision::Decision::Deny;
-                            decision.reason = "后台任务没有终端可问,PreToolUse 钩子的 ask 已降级为拒绝: " +
-                                              merged.permission_reason;
-                            hooks_session->PostWarning("后台子代理 #" +
-                                                       hooks_session->context().agent_id.value_or(std::string("?")) +
-                                                       " 的 PreToolUse 钩子表态 ask,后台无终端,已按拒绝降级(" +
-                                                       name + ")");
-                            break;
-                        case lubancode::hooks::HookEventResult::Permission::Allow:
-                            decision.decision = lubancode::agent::ToolHookDecision::Decision::Allow;
-                            decision.reason = merged.permission_reason;
-                            break;
-                        case lubancode::hooks::HookEventResult::Permission::None:
-                            break;
+                    // 归并映射归 runtime::MapPreToolDecision(P3:与主路径
+                    // 同一颗脑袋);后台特有的"ask 降级为拒"在这里叠加——
+                    // 后台无终端,明说,不装问过了。
+                    if (merged.permission == lubancode::hooks::HookEventResult::Permission::Ask) {
+                        lubancode::agent::ToolHookDecision decision;
+                        decision.decision = lubancode::agent::ToolHookDecision::Decision::Deny;
+                        decision.reason = "后台任务没有终端可问,PreToolUse 钩子的 ask 已降级为拒绝: " +
+                                          merged.permission_reason;
+                        hooks_session->PostWarning("后台子代理 #" +
+                                                   hooks_session->context().agent_id.value_or(std::string("?")) +
+                                                   " 的 PreToolUse 钩子表态 ask,后台无终端,已按拒绝降级(" +
+                                                   name + ")");
+                        decision.updated_input = merged.updated_input;
+                        decision.additional_context = merged.additional_context;
+                        return decision;
                     }
-                    decision.updated_input = merged.updated_input;
-                    decision.additional_context = merged.additional_context;
-                    return decision;
+                    return lubancode::runtime::MapPreToolDecision(merged);
                 };
             sub_callbacks.on_post_tool_use_hook =
                 [hooks_session](const std::string& name, const nlohmann::json& input, const Result& result) {

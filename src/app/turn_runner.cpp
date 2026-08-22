@@ -282,6 +282,38 @@ private:
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// P3(显示系统剥离单):终端装配的档位翻译。cli::CurrentConfirmMode() 读的
+// 是 SharedEditor 那枚跨线程档位(Shift+Tab 流式切档),runtime 只认自己的
+// 中立枚举——映射在这里,一处。
+// ---------------------------------------------------------------------------
+namespace {
+
+lubancode::runtime::TurnRuntime::Options BuildTurnRuntimeOptions(
+    bool auto_confirm, std::set<std::string>& always_allowed_tools, const std::vector<std::string>& allow_commands,
+    const std::vector<std::string>& deny_commands, lubancode::hooks::HookDispatcher* hook_dispatcher) {
+    lubancode::runtime::TurnRuntime::Options options;
+    options.auto_confirm = auto_confirm;
+    switch (lubancode::cli::CurrentConfirmMode()) {
+        case lubancode::cli::ConfirmMode::Confirm:
+            options.permission_mode = lubancode::runtime::PermissionMode::Confirm;
+            break;
+        case lubancode::cli::ConfirmMode::Auto:
+            options.permission_mode = lubancode::runtime::PermissionMode::Auto;
+            break;
+        case lubancode::cli::ConfirmMode::Yolo:
+            options.permission_mode = lubancode::runtime::PermissionMode::Yolo;
+            break;
+    }
+    options.always_allowed = &always_allowed_tools;
+    options.allow_commands = allow_commands;
+    options.deny_commands = deny_commands;
+    options.hook_dispatcher = hook_dispatcher;
+    return options;
+}
+
+}  // namespace
+
 // 确认问话的完整实现(原文自 BuildCallbacks 的旧闭包搬家,注释随行)。
 // P3(显示系统剥离单):档位/黑名单/钩子表态的裁定已抽去
 // runtime::EvaluatePermission 与 runtime::EmitPermissionRequest(纯逻辑,
@@ -292,27 +324,19 @@ bool ConfirmToolUse(bool auto_confirm, std::set<std::string>& always_allowed_too
                     const std::vector<std::string>& deny_commands,
                     lubancode::hooks::HookDispatcher* hook_dispatcher, const lubancode::agent::ToolHookDecision& pre,
                     bool has_permission_hooks, const std::string& name, const nlohmann::json& input) {
-    const lubancode::cli::ConfirmMode mode = lubancode::cli::CurrentConfirmMode();
     const bool file_tool = name == "write_file" || name == "edit_file";
 
     // 裁定(纯逻辑,runtime 层):档位 + permissions 叠加 + PreToolUse 表态
-    // -> 放行还是问。auto_confirm/--yes 与 yolo 在里头一并判。
+    // -> 放行还是问。auto_confirm/--yes 与 yolo 在里头一并判。档位翻译复
+    // 用 BuildTurnRuntimeOptions(Confirm/Auto/Yolo 的映射一处定)。
+    const lubancode::runtime::TurnRuntime::Options core_options =
+        BuildTurnRuntimeOptions(auto_confirm, always_allowed_tools, allow_commands, deny_commands, hook_dispatcher);
     lubancode::runtime::PermissionContext permission;
-    permission.auto_confirm = auto_confirm;
-    switch (mode) {
-        case lubancode::cli::ConfirmMode::Confirm:
-            permission.mode = lubancode::runtime::PermissionMode::Confirm;
-            break;
-        case lubancode::cli::ConfirmMode::Auto:
-            permission.mode = lubancode::runtime::PermissionMode::Auto;
-            break;
-        case lubancode::cli::ConfirmMode::Yolo:
-            permission.mode = lubancode::runtime::PermissionMode::Yolo;
-            break;
-    }
-    permission.always_allowed = &always_allowed_tools;
-    permission.allow_commands = &allow_commands;
-    permission.deny_commands = &deny_commands;
+    permission.auto_confirm = core_options.auto_confirm;
+    permission.mode = core_options.permission_mode;
+    permission.always_allowed = core_options.always_allowed;
+    permission.allow_commands = &core_options.allow_commands;
+    permission.deny_commands = &core_options.deny_commands;
     const lubancode::runtime::PermissionVerdict verdict =
         lubancode::runtime::EvaluatePermission(permission, pre, name, input);
 
@@ -834,9 +858,14 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     // 一口收账,这里不再另发一遍。)
 
     UsageStats usage_stats;
-    // cancel_flag 先于 display/callbacks 建:ToolDisplay 要拿它判断"这一轮
-    // 是不是被 ESC 打断的"(打断态条目标 Interrupted)。
-    std::atomic<bool> cancel_flag{false};
+    // 轮级核(P3):cancel 旗挪进 runtime::TurnRuntime——监听线程写
+    // (request_interrupt)、Run 线程读(interrupted),acquire/release 语义
+    // 原文照搬。ToolDisplay/BuildCallbacks/loop.Run 收它的地址,行为与
+    // 从前那只裸 atomic<bool> 一字不差。
+    lubancode::runtime::TurnRuntime turn_core(BuildTurnRuntimeOptions(auto_confirm, always_allowed_tools,
+                                                                       allow_commands, deny_commands,
+                                                                       hook_dispatcher));
+    std::atomic<bool>& cancel_flag = turn_core.cancel;
     ToolDisplay display(transcript, theme, is_console, todo_state, &cancel_flag, transcript_expanded, silent);
     // markdown:正文两段式渲染的记账员。渲染只活在真控制台 + 彩色主题——
     // 管道/重定向(is_console 为假)和 plain 主题(theme.reset 空)全部
