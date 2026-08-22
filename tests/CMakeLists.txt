@@ -188,6 +188,8 @@ add_executable(lubancode_tests
   test_session_runtime.cpp
   # 第七步:CommandService(/model、/resume、审批回答三条 typed API)。
   test_command_service.cpp
+  # 第八步:依赖守门(engine/runtime 搜不到终端件;单子验收原文的 grep 钉成测试)。
+  test_app_boundary_gate.cpp
   # 显示系统剥离单 P2:AgentLoop 异步审批通道(async 优先/同步回落/四态
   # 收账/悬空收口文案)。
   test_approval_broker.cpp
@@ -206,6 +208,9 @@ add_executable(lubancode_tests
   test_plugin_process.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
+# 依赖守门(显示系统剥离单第八步):测试要现扫源码树,把源码根递进去。
+target_compile_definitions(lubancode_tests PRIVATE
+  LUBANCODE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/..")
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)
 target_precompile_headers(lubancode_tests PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/pch.hpp")

@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstdlib>
-#include <iostream>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -11,6 +10,7 @@
 #include "api/assembler.hpp"
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:工具结果的第一道编码关口
 #include "tools/schema_check.hpp"      // updatedInput 改写后的 schema 复检
+#include "platform/log_sink.hpp"
 
 namespace lubancode::agent {
 
@@ -33,7 +33,8 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     const auto dispatch_done = [&callbacks](const std::string& tool_use_id, const std::string& name,
                                              tools::Tool::Result result) {
         if (!platform::IsValidUtf8(result.content)) {
-            std::cerr << "[utf8] " << platform::DescribeUtf8Issue("tool_result:" + name, result.content) << "\n";
+            platform::LogSink::Instance().Warn(
+                "loop", platform::DescribeUtf8Issue("tool_result:" + name, result.content));
             result.content = platform::SanitizeExternalText(result.content);
         }
         if (callbacks.on_tool_done) {
@@ -490,15 +491,17 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
                 }
                 if (PrefixDebugEnabled()) {
                     // 诊断行:只带断因/位置/条数,不带任何正文与 hash 以外的东西。
-                    std::cerr << "[prefix] epoch " << cache_epoch_ << " step " << step_index
-                              << " append_only=" << (step_prefix_append_only ? "true" : "false");
+                    std::string prefix_diag = "[prefix] epoch " + std::to_string(cache_epoch_) + " step " +
+                                              std::to_string(step_index) + " append_only=" +
+                                              (step_prefix_append_only ? "true" : "false");
                     if (!step_prefix_append_only) {
-                        std::cerr << " reason=" << step_epoch_break_reason << " old_message_changed_at="
-                                  << diff.old_message_changed_at;
+                        prefix_diag += " reason=" + step_epoch_break_reason + " old_message_changed_at=" +
+                                       std::to_string(diff.old_message_changed_at);
                     }
-                    std::cerr << " appended_messages=" << diff.appended_messages
-                              << " system_hash=" << fingerprint.system_hash.substr(0, 8)
-                              << " tools_hash=" << fingerprint.tools_hash.substr(0, 8) << "\n";
+                    prefix_diag += " appended_messages=" + std::to_string(diff.appended_messages) +
+                                   " system_hash=" + fingerprint.system_hash.substr(0, 8) +
+                                   " tools_hash=" + fingerprint.tools_hash.substr(0, 8);
+                    platform::LogSink::Instance().Debug("loop", prefix_diag);
                 }
             }
             pending_epoch_break_reason_.clear();

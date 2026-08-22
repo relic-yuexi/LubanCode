@@ -1,8 +1,8 @@
 #include "tools/hooks.hpp"
 
-#include <iostream>
 
 #include "platform/process.hpp"
+#include "platform/log_sink.hpp"
 
 namespace lubancode::tools {
 
@@ -48,11 +48,13 @@ void RunSessionHooks(const std::vector<config::HookEntry>& entries, const char* 
     for (const auto& entry : entries) {
         const ProcessResult exec = ExecuteHookCommand(entry.command, {}, kDefaultHookTimeoutMs);
         if (exec.spawn_failed) {
-            std::cerr << "[hook] " << label << " 钩子起不来(" << entry.command << "): " << exec.spawn_error << "\n";
+            platform::LogSink::Instance().Warn("hooks",
+                std::string(label) + " 钩子起不来(" + entry.command + "): " + exec.spawn_error);
         } else if (exec.timed_out) {
-            std::cerr << "[hook] " << label << " 钩子超时(" << entry.command << ")\n";
+            platform::LogSink::Instance().Warn("hooks", std::string(label) + " 钩子超时(" + entry.command + ")");
         } else if (exec.exit_code != 0) {
-            std::cerr << "[hook] " << label << " 钩子退出码非 0(" << exec.exit_code << "): " << entry.command << "\n";
+            platform::LogSink::Instance().Warn("hooks",
+                std::string(label) + " 钩子退出码非 0(" + std::to_string(exec.exit_code) + "): " + entry.command);
         }
     }
 }
@@ -72,11 +74,13 @@ PreToolHookOutcome RunPreToolHooks(const config::HooksConfig& hooks, const std::
         };
         const ProcessResult exec = ExecuteHookCommand(entry.command, env, kDefaultHookTimeoutMs);
         if (exec.spawn_failed) {
-            std::cerr << "[hook] pre_tool 钩子起不来(" << entry.command << "): " << exec.spawn_error << "\n";
+            platform::LogSink::Instance().Warn("hooks",
+                "pre_tool 钩子起不来(" + entry.command + "): " + exec.spawn_error);
             continue;
         }
         if (exec.timed_out) {
-            std::cerr << "[hook] pre_tool 钩子超时(" << entry.command << "),按放行处理\n";
+            platform::LogSink::Instance().Warn("hooks",
+                "pre_tool 钩子超时(" + entry.command + "),按放行处理");
             continue;
         }
         if (exec.exit_code != 0) {
@@ -107,11 +111,13 @@ void RunPostToolHooks(const config::HooksConfig& hooks, const std::string& tool_
         };
         const ProcessResult exec = ExecuteHookCommand(entry.command, env, kDefaultHookTimeoutMs);
         if (exec.spawn_failed) {
-            std::cerr << "[hook] post_tool 钩子起不来(" << entry.command << "): " << exec.spawn_error << "\n";
+            platform::LogSink::Instance().Warn("hooks",
+                "post_tool 钩子起不来(" + entry.command + "): " + exec.spawn_error);
         } else if (exec.timed_out) {
-            std::cerr << "[hook] post_tool 钩子超时(" << entry.command << ")\n";
+            platform::LogSink::Instance().Warn("hooks", "post_tool 钩子超时(" + entry.command + ")");
         } else if (exec.exit_code != 0) {
-            std::cerr << "[hook] post_tool 钩子退出码非 0(" << exec.exit_code << "): " << entry.command << "\n";
+            platform::LogSink::Instance().Warn("hooks",
+                "post_tool 钩子退出码非 0(" + std::to_string(exec.exit_code) + "): " + entry.command);
         }
     }
 }

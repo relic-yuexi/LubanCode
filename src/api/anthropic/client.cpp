@@ -4,7 +4,6 @@
 #include <cctype>
 #include <charconv>
 #include <chrono>
-#include <iostream>
 #include <optional>
 #include <type_traits>
 #include <utility>
@@ -16,6 +15,7 @@
 #include "api/sse_framing.hpp"
 #include "cli/i18n.hpp"
 #include "platform/json_safe.hpp"  // DescribeDumpFailure:请求体 dump 的窄边界
+#include "platform/log_sink.hpp"
 
 namespace lubancode::api::anthropic {
 
@@ -95,7 +95,8 @@ std::optional<json> BuildThinkingJson(const Request& request) {
     } else if (lower == "max") {
         budget = 49152;   // 48k
     } else {
-        std::cerr << "[警告] anthropic 协议下无此档映射,已忽略: " << request.reasoning_effort << "\n";
+        platform::LogSink::Instance().Warn(
+            "anthropic", "协议下无此档映射,已忽略: " + request.reasoning_effort);
         return std::nullopt;
     }
 
@@ -278,7 +279,8 @@ std::expected<void, Error> AnthropicBackend::send_stream(
         // 往后每回合都在这里挂,会话等于砖死。响亮记一笔日志,坏串按
         // U+FFFD 清洗后照发(与落盘边界同一政策),会话活着、模型看得见
         // 替换符。
-        std::cerr << "[utf8] " << platform::DescribeDumpFailure(body, e) << " -> 已按 U+FFFD 清洗后发出\n";
+        platform::LogSink::Instance().Warn("anthropic",
+            platform::DescribeDumpFailure(body, e) + " -> 已按 U+FFFD 清洗后发出");
         body_str = platform::DumpJsonSanitized(body);
     }
 
