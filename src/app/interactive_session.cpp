@@ -3292,7 +3292,7 @@ CommandFlow TerminalSessionController::RunUserTurn(const std::string& content, b
     // usage 出账(模型分工第一期):整轮逐步 usage 带出来记进分角色台账
     // (普通 turn = normal 档);compact/抽取的后台采样在各自路径另记,
     // 不混进这里。
-    lubancode::app::UsageStats turn_usage;
+    lubancode::runtime::TurnUsageStats turn_usage;
     const auto turn_started = std::chrono::steady_clock::now();
     const lubancode::app::RunTurnResult turn_result =
         RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),

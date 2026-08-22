@@ -52,22 +52,10 @@ inline std::optional<int> FileLineCount(const std::string& path_utf8) {
     return lubancode::cli::CountLines(content);
 }
 
-// UI-C(0.13.0):读文件全文(二进制读入,当 UTF-8 字节串用),给 diff
-// 预览当"旧内容"。读不到(不存在/是目录/打不开)给 nullopt——write_file
-// 按新文件处理(全 + 新增),edit_file 走回退对比,绝不因此崩。
-inline std::optional<std::string> ReadFileBytes(const std::string& path_utf8) {
-    const std::filesystem::path path(
-        std::u8string(reinterpret_cast<const char8_t*>(path_utf8.data()), path_utf8.size()));
-    std::error_code ec;
-    if (!std::filesystem::exists(path, ec) || std::filesystem::is_directory(path, ec)) {
-        return std::nullopt;
-    }
-    std::ifstream file(path, std::ios::binary);
-    if (!file.is_open()) {
-        return std::nullopt;
-    }
-    return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-}
+// UI-C(0.13.0):读文件全文原先住这里给 diff 预览当"旧内容";P5(显示
+// 系统剥离单)diff 计算搬 runtime::BuildDiffTable(磁盘真值是领域数据),
+// 这份读档副本成了死代码,已删。FileLineCount(write_file 的 +N -M 摘要)
+// 还在终端侧用,保留。
 
 // UI-C:预览截断双限——超 400 行或 32KiB 就截,截了标注省略行数,完整版
 // 存进 TranscriptItem.full_output(那边另有 64KB 的库容上限)。

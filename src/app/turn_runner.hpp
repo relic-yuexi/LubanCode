@@ -45,13 +45,6 @@ using lubancode::cli::tr;
 using lubancode::cli::trf;
 using lubancode::platform::CurrentDirUtf8;
 
-// P3(显示系统剥离单):usage 台账本体已抽去 runtime::TurnUsageStats(纯
-// 逻辑,脱离终端可单测),StepUsageRecord 同搬(runtime::StepUsageRecord)。
-// app 这两个旧名是别名,既有消费方(InteractiveSession 的分角色记账、
-// 单测)一字不改;新代码认 runtime 那份。
-using StepUsageRecord = lubancode::runtime::StepUsageRecord;
-using UsageStats = lubancode::runtime::TurnUsageStats;
-
 // M11(0.10.0):输入/输出分界线。用户回车提交、模型真要开始作答那一刻打
 // 一条,回合结束的统计行之后再打一条,把一问一答从视觉上框出来——纯粹
 // 是一条线,不带文字、不带花边。is_console 为假(管道/重定向)时直接
@@ -84,7 +77,7 @@ std::expected<std::vector<std::string>, std::string> PromptAskUser(
 // 改写状态、管道模式的 [工具]/[工具完成] 稳定纯文本),todo_state 也归它
 // 持有。回调层只管把事件原样转进去。
 lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::string>& always_allowed_tools,
-                                            const lubancode::cli::Theme& theme, UsageStats& usage_stats,
+                                            const lubancode::cli::Theme& theme, lubancode::runtime::TurnUsageStats& usage_stats,
                                             lubancode::cli::ContextTracker& context_tracker,
                                             lubancode::tools::ToolRegistry& registry,
                                             lubancode::hooks::HookDispatcher* hook_dispatcher,
@@ -149,6 +142,6 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                        lubancode::tools::AgentTool* completion_agent = nullptr,
                        lubancode::agent::WorkflowRecorder* recorder = nullptr,
                        bool silent = false,
-                       UsageStats* usage_out = nullptr);
+                       lubancode::runtime::TurnUsageStats* usage_out = nullptr);
 
 }  // namespace lubancode::app
