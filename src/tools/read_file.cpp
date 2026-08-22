@@ -7,6 +7,7 @@
 #include <system_error>
 
 #include "platform/text_encoding.hpp"  // IsValidUtf8:文件编码的明规矩,见 execute 尾部
+#include "tools/tool_text.hpp"         // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
 
 namespace lubancode::tools {
 
@@ -29,11 +30,13 @@ std::string ReadFileTool::name() const {
 }
 
 std::string ReadFileTool::description() const {
-    return "读取文件内容,每行前面带上行号(类似 cat -n)。参数 offset/limit 可以只读文件的一部分;"
-           "limit 省略时默认最多读 2000 行,单次输出至多约 1MB,超出会截断并标注,可以用 offset "
-           "从截断处继续翻页。路径可以是相对路径,也可以是绝对路径。只收 UTF-8 文本(带不带 BOM "
-           "都行,BOM 不会混进正文);二进制文件或不是合法 UTF-8 的文件(比如 GBK 编码)会明确报错,"
-           "请先转存成 UTF-8 再读。";
+    // 文案在 src/prompts/tools/<语言>/read_file.md,兜底是迁移前的原文。
+    return ToolText("read_file", "description",
+                    "读取文件内容,每行前面带上行号(类似 cat -n)。参数 offset/limit 可以只读文件的一部分;"
+                    "limit 省略时默认最多读 2000 行,单次输出至多约 1MB,超出会截断并标注,可以用 offset "
+                    "从截断处继续翻页。路径可以是相对路径,也可以是绝对路径。只收 UTF-8 文本(带不带 BOM "
+                    "都行,BOM 不会混进正文);二进制文件或不是合法 UTF-8 的文件(比如 GBK 编码)会明确报错,"
+                    "请先转存成 UTF-8 再读。");
 }
 
 nlohmann::json ReadFileTool::input_schema() const {
@@ -44,17 +47,18 @@ nlohmann::json ReadFileTool::input_schema() const {
 
     nlohmann::json path_prop = nlohmann::json::object();
     path_prop["type"] = "string";
-    path_prop["description"] = "要读取的文件路径,相对或绝对均可";
+    path_prop["description"] = ToolText("read_file", "param.path", "要读取的文件路径,相对或绝对均可");
     properties["path"] = path_prop;
 
     nlohmann::json offset_prop = nlohmann::json::object();
     offset_prop["type"] = "integer";
-    offset_prop["description"] = "从第几行开始读(从 1 计数),不填就从第 1 行开始";
+    offset_prop["description"] =
+        ToolText("read_file", "param.offset", "从第几行开始读(从 1 计数),不填就从第 1 行开始");
     properties["offset"] = offset_prop;
 
     nlohmann::json limit_prop = nlohmann::json::object();
     limit_prop["type"] = "integer";
-    limit_prop["description"] = "最多读多少行,不填就读到文件末尾";
+    limit_prop["description"] = ToolText("read_file", "param.limit", "最多读多少行,不填就读到文件末尾");
     properties["limit"] = limit_prop;
 
     schema["properties"] = properties;
