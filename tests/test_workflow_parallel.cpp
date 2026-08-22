@@ -4,6 +4,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -24,6 +25,11 @@ public:
         std::string error_code;
         int delay_ms = 0;
         nlohmann::json output;
+        // map 逐项跑同一 body 时的按序延迟:第 index 项睡 base - index*step
+        // 毫秒(base 不够减就 0)——下标越靠后回来越快,逼出"后完成者
+        // 先落位"的错序竞态。
+        int delay_base_ms = 0;
+        int delay_step_ms = 0;
     };
 
     std::map<std::string, Behavior> behaviors;
@@ -45,8 +51,15 @@ public:
             if (it != behaviors.end()) behavior = it->second;
             calls.emplace_back(request.node->id, std::this_thread::get_id());
         }
-        if (behavior.delay_ms > 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(behavior.delay_ms));
+        int delay = behavior.delay_ms;
+        if (behavior.delay_base_ms > 0) {
+            const std::int64_t index = request.resolved_input.value("index", nlohmann::json(0));
+            const std::int64_t by_index =
+                behavior.delay_base_ms - index * behavior.delay_step_ms;
+            delay = static_cast<int>(std::max<std::int64_t>(0, by_index));
+        }
+        if (delay > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
         }
         if (behavior.fail) {
             result.error_code = behavior.error_code.empty() ? "boom" : behavior.error_code;
@@ -326,9 +339,12 @@ result:
     const WorkflowDefinition def = ParseOrDie(yaml);
 
     auto executor = std::make_shared<TrackingExecutor>();
-    // make_list:产 6 篇论文;read_one 按下标延迟(后面的先回来)。
+    // make_list:产 6 篇论文;read_one 按下标延迟——下标越靠后回来越快,
+    // 完成顺序与 items 顺序整个颠倒,逼出"落位错"的竞态(macOS CI 实锤:
+    // 并发 worker 共写 store 键再读回,后完成者覆写,先完成者取到别人的)。
     executor->behaviors["setup"] = {false, "", 0, nlohmann::json{{"papers", nlohmann::json::array({"p0", "p1", "p2", "p3", "p4", "p5"})}}};
-    executor->behaviors["read_one"] = {false, "", 0, nlohmann::json()};
+    executor->behaviors["read_one"] = {false, "", 0, nlohmann::json(), /*delay_base_ms=*/60,
+                                       /*delay_step_ms=*/10};
 
     RuntimeOptions options;
     options.executors[NodeKind::Transform] = executor;
@@ -337,11 +353,22 @@ result:
 
     REQUIRE(summary.state == RunState::Succeeded);
     const nlohmann::json& enriched = summary.result["enriched"];
+    // 尺寸守死:一项不多一项不少(槽位预分配,失败项填 null)。
     REQUIRE(enriched.size() == 6);
-    // items 顺序:每项的 item 字段对回原数组下标。
+    // items 顺序:每项非空(item/node 字段都在)且对回原数组下标。
+    // 只查"item 对"会漏掉"槽位空了但恰好别的下标也对"的错位。
     for (int i = 0; i < 6; ++i) {
+        REQUIRE(enriched[i].is_object());
+        CHECK_FALSE(enriched[i].empty());
         CHECK(enriched[i]["item"] == std::string("p") + std::to_string(i));
+        CHECK(enriched[i]["node"] == "read_one");
     }
+    // 全量再钉一道:六项一个不多不少,齐齐按序。
+    std::string joined;
+    for (int i = 0; i < 6; ++i) {
+        joined += enriched[i]["item"].get<std::string>();
+    }
+    CHECK(joined == "p0p1p2p3p4p5");
 }
 
 TEST_CASE("map 展开越 max_nodes 拒跑") {
