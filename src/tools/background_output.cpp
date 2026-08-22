@@ -4,6 +4,7 @@
 #include <string>
 
 #include "tools/background_tasks.hpp"
+#include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
 
 namespace lubancode::tools {
 
@@ -35,11 +36,13 @@ std::string BackgroundOutputTool::name() const {
 }
 
 std::string BackgroundOutputTool::description() const {
-    return "查后台命令(run_command run_in_background:true 起的那些)的运行状态和输出。"
-           "不给 task_id 就列出全部后台任务的摘要:task_id、状态(运行中/完成/失败/已停止)、"
-           "命令、PID、日志文件路径。给 task_id 就返回该任务的详情 + 日志文件尾部 tail_lines 行"
-           "(默认 50)。任务还在跑也能读,文件允许边写边读。"
-           "起完一个后台命令后,用它查进度/结果,不用自己再拼 tail 命令。";
+    // 文案在 src/prompts/tools/<语言>/background_output.md,兜底是迁移前的原文。
+    return ToolText("background_output", "description",
+                    "查后台命令(run_command run_in_background:true 起的那些)的运行状态和输出。"
+                    "不给 task_id 就列出全部后台任务的摘要:task_id、状态(运行中/完成/失败/已停止)、"
+                    "命令、PID、日志文件路径。给 task_id 就返回该任务的详情 + 日志文件尾部 tail_lines 行"
+                    "(默认 50)。任务还在跑也能读,文件允许边写边读。"
+                    "起完一个后台命令后,用它查进度/结果,不用自己再拼 tail 命令。");
 }
 
 nlohmann::json BackgroundOutputTool::input_schema() const {
@@ -50,13 +53,16 @@ nlohmann::json BackgroundOutputTool::input_schema() const {
 
     nlohmann::json task_id_prop = nlohmann::json::object();
     task_id_prop["type"] = "string";
-    task_id_prop["description"] = "要查的后台任务 id(run_command 后台返回的那个编号字符串)。"
-                                  "不给就列出所有后台任务的摘要。";
+    task_id_prop["description"] =
+        ToolText("background_output", "param.task_id",
+                 "要查的后台任务 id(run_command 后台返回的那个编号字符串)。"
+                 "不给就列出所有后台任务的摘要。");
     properties["task_id"] = task_id_prop;
 
     nlohmann::json tail_prop = nlohmann::json::object();
     tail_prop["type"] = "integer";
-    tail_prop["description"] = "读日志文件的末尾几行,默认 50。给 task_id 时才用;<=0 表示读全文(上限 64KB)。";
+    tail_prop["description"] = ToolText("background_output", "param.tail_lines",
+                                        "读日志文件的末尾几行,默认 50。给 task_id 时才用;<=0 表示读全文(上限 64KB)。");
     properties["tail_lines"] = tail_prop;
 
     schema["properties"] = properties;
@@ -122,9 +128,11 @@ std::string StopBackgroundTool::name() const {
 }
 
 std::string StopBackgroundTool::description() const {
-    return "停掉一个后台命令(run_command run_in_background:true 起的)。Windows 上 "
-           "TerminateProcess 根进程,POSIX 上 kill 杀整个进程组。已完成的任务不会重复杀。"
-           "长命进程(dev server、watch、build)跑够了、或者起错了想收掉,用它。";
+    // 文案在 src/prompts/tools/<语言>/stop_background.md,兜底是迁移前的原文。
+    return ToolText("stop_background", "description",
+                    "停掉一个后台命令(run_command run_in_background:true 起的)。Windows 上 "
+                    "TerminateProcess 根进程,POSIX 上 kill 杀整个进程组。已完成的任务不会重复杀。"
+                    "长命进程(dev server、watch、build)跑够了、或者起错了想收掉,用它。");
 }
 
 nlohmann::json StopBackgroundTool::input_schema() const {
@@ -134,7 +142,8 @@ nlohmann::json StopBackgroundTool::input_schema() const {
     nlohmann::json properties = nlohmann::json::object();
     nlohmann::json task_id_prop = nlohmann::json::object();
     task_id_prop["type"] = "string";
-    task_id_prop["description"] = "要停的后台任务 id(run_command 后台返回的那个编号字符串)。";
+    task_id_prop["description"] =
+        ToolText("stop_background", "param.task_id", "要停的后台任务 id(run_command 后台返回的那个编号字符串)。");
     properties["task_id"] = task_id_prop;
 
     schema["properties"] = properties;
