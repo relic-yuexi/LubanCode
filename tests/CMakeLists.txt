@@ -189,6 +189,13 @@ add_executable(lubancode_tests
   # 显示系统剥离单 P4:ToolDisplay 认 tool_use_id 不认下标(交错终态/迟到
   # 事件/主子条目/确认块)。
   test_tool_display_id.cpp
+  # plugins 本地 Tool 运行时第 1 步(冻结合同):manifest 强校验/标识符/
+  # ${plugin_dir} 圈禁/协议帧/入参 Schema 子集/模型可见性,纯函数直测。
+  test_plugin_contract.cpp
+  # 第 2 步(process v1):自带 Python helper 的真机终态矩阵——正常往返/
+  # 混日志/坏 JSON/call_id 不合/超时/ESC/非零退出/stderr 塞满/输出超限,
+  # 缺 Python 整文件 SKIP。
+  test_plugin_process.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)

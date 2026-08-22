@@ -225,6 +225,12 @@ public:
     // 已经退出/没起成功都返回 false。
     bool Write(const std::string& data);
 
+    // 关掉 stdin 写端(给子进程发 EOF)。与 Write 的锁共用,关掉后 Write
+    // 返回 false。插件进程协议(stdin 一份 JSON 写完即关,脚本读到 EOF)
+    // 与"行为良好的服务器见到 EOF 自己退"两条路都靠它;此前 Shutdown 里
+    // 才关,一次性请求等不起。幂等。
+    void CloseStdin();
+
     // 立刻强制终止根进程(不等、不关 stdin)。MCP 协议错误断连用;进程树
     // 的收尾(连带后代)还是要靠 Shutdown。
     void Kill();
