@@ -32,6 +32,7 @@
 #include "config/config.hpp"
 #include "hooks/dispatcher.hpp"
 #include "platform/paths.hpp"
+#include "runtime/turn_collector.hpp"
 #include "runtime/turn_runtime.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/ask_user.hpp"
@@ -93,7 +94,8 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                             const std::vector<std::string>& allow_commands,
                                             const std::vector<std::string>& deny_commands,
                                             const std::atomic<bool>* cancel_flag = nullptr,
-                                            lubancode::agent::WorkflowRecorder* recorder = nullptr);
+                                            lubancode::agent::WorkflowRecorder* recorder = nullptr,
+                                            lubancode::runtime::TurnCollector* view_collector = nullptr);
 
 // RunTurn() 的结果:status 沿用老语义(0 成功、非 0 出错);cancelled 标记
 // 这一轮是不是被 ESC 打断的(打断不算错误,status 照样是 0)。

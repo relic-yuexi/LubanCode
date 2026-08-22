@@ -18,12 +18,16 @@
 
 #include <atomic>
 #include <chrono>
+#include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "agent/loop.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
+#include "app/turn_runner.hpp"
+#include "cli/context_tracker.hpp"
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
 #include "cli/theme.hpp"
@@ -730,4 +734,145 @@ TEST_CASE("黄金画面:include_footer=false 时实时画面不重复画 footer"
     options.include_footer = false;
     const std::string text = JoinLines(lubancode::cli::RenderTurnView(view, theme, options));
     CHECK(text.find("Worked for") == std::string::npos);  // footer 由 RunTurn 收口单独落
+}
+
+// ---------------------------------------------------------------------------
+// RunTurn 集成(管道模式):footer 落屏恰一枚、统计行按档、批次入 transcript。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 与 test_status_refresh.cpp 同款的假后端(精简)。
+class RunBackend : public lubancode::api::Backend {
+public:
+    std::vector<std::vector<lubancode::api::StreamEvent>> scripts;
+    std::expected<void, lubancode::api::Error> send_stream(
+        const lubancode::api::Request&,
+        const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* = nullptr) override {
+        if (call_index >= scripts.size()) {
+            return std::unexpected(lubancode::api::Error{lubancode::api::ErrorKind::Api, "脚本用完", 0});
+        }
+        for (const auto& event : scripts[call_index]) {
+            on_event(event);
+        }
+        ++call_index;
+        return {};
+    }
+    std::size_t call_index = 0;
+};
+
+}  // namespace
+
+TEST_CASE("RunTurn 集成:正文轮落恰一枚 Worked footer;管道模式统计行照打") {
+    RunBackend backend;
+    backend.scripts = {TextScript("这是回答。")};
+    lubancode::tools::ToolRegistry registry;
+    lubancode::agent::AgentLoop loop(backend, registry, "m", "sys");
+    lubancode::cli::ContextTracker tracker(1000);
+    std::set<std::string> always_allowed;
+    std::vector<lubancode::cli::TranscriptItem> transcript;
+    std::atomic<bool> expanded{false};
+
+    std::ostringstream captured;
+    std::streambuf* const old_buf = std::cout.rdbuf(captured.rdbuf());
+    const lubancode::app::RunTurnResult result =
+        lubancode::app::RunTurn(loop, "问题", /*auto_confirm=*/true, always_allowed,
+                                lubancode::cli::BuiltinTheme("plain"), tracker, registry,
+                                /*hook_dispatcher=*/nullptr, /*is_console=*/false, transcript,
+                                /*todo_state=*/nullptr, &expanded);
+    std::cout.rdbuf(old_buf);
+
+    REQUIRE(result.status == 0);
+    CHECK_FALSE(result.cancelled);
+    const std::string out = captured.str();
+    // footer 恰一枚:数 "Worked for"。
+    std::size_t footer_count = 0;
+    std::size_t pos = 0;
+    while ((pos = out.find("Worked for", pos)) != std::string::npos) {
+        ++footer_count;
+        pos += 4;
+    }
+    CHECK(footer_count == 1);
+    // 管道模式没有状态栏:统计长行照打(automation 契约)。
+    CHECK(out.find("[tokens]") != std::string::npos);
+}
+
+TEST_CASE("RunTurn 集成:错误轮落 Failed footer,下一只 composer 不粘错误行") {
+    RunBackend backend;
+    backend.scripts = {};  // 脚本空:第一次请求即失败
+    lubancode::tools::ToolRegistry registry;
+    lubancode::agent::AgentLoop loop(backend, registry, "m", "sys");
+    lubancode::cli::ContextTracker tracker(1000);
+    std::set<std::string> always_allowed;
+    std::vector<lubancode::cli::TranscriptItem> transcript;
+    std::atomic<bool> expanded{false};
+
+    std::ostringstream captured;
+    std::streambuf* const old_buf = std::cerr.rdbuf(captured.rdbuf());
+    const lubancode::app::RunTurnResult result =
+        lubancode::app::RunTurn(loop, "问题", /*auto_confirm=*/true, always_allowed,
+                                lubancode::cli::BuiltinTheme("plain"), tracker, registry,
+                                /*hook_dispatcher=*/nullptr, /*is_console=*/false, transcript,
+                                /*todo_state=*/nullptr, &expanded);
+    std::cerr.rdbuf(old_buf);
+
+    CHECK(result.status == 1);
+    const std::string err = captured.str();
+    CHECK(err.find("脚本用完") != std::string::npos);  // 错误如实上屏
+}
+
+TEST_CASE("RunTurn 集成:同批三枚工具,transcript 里 Pending 先立、终态串行推进") {
+    class ProbeTool : public lubancode::tools::Tool {
+    public:
+        std::string name() const override { return "probe"; }
+        std::string description() const override { return "probe"; }
+        nlohmann::json input_schema() const override { return nlohmann::json::object(); }
+        bool needs_confirm() const override { return false; }
+        lubancode::tools::Tool::Result execute(const nlohmann::json&) override { return {"探针完成", false}; }
+    };
+
+    RunBackend backend;
+    // 第一拍:三枚 tool_use;第二拍:文本收口。
+    backend.scripts = {
+        MultiToolScript({"p1", "p2", "p3"}, "probe"),
+        TextScript("干完了。"),
+    };
+    lubancode::tools::ToolRegistry registry;
+    registry.Register(std::make_unique<ProbeTool>());
+    lubancode::agent::AgentLoop loop(backend, registry, "m", "sys");
+    lubancode::cli::ContextTracker tracker(1000);
+    std::set<std::string> always_allowed;
+    std::vector<lubancode::cli::TranscriptItem> transcript;
+    std::atomic<bool> expanded{false};
+
+    std::ostringstream captured;
+    std::streambuf* const old_buf = std::cout.rdbuf(captured.rdbuf());
+    const lubancode::app::RunTurnResult result =
+        lubancode::app::RunTurn(loop, "跑三枚", /*auto_confirm=*/true, always_allowed,
+                                lubancode::cli::BuiltinTheme("plain"), tracker, registry,
+                                /*hook_dispatcher=*/nullptr, /*is_console=*/false, transcript,
+                                /*todo_state=*/nullptr, &expanded);
+    std::cout.rdbuf(old_buf);
+
+    REQUIRE(result.status == 0);
+    // 三枚条目都入台账,终态 Ok(批次预告的 Pending 壳被 start 点亮、done
+    // 收终态,不留"排队中"骗人)。
+    int probe_items = 0;
+    for (const auto& item : transcript) {
+        if (item.tool_name == "probe") {
+            ++probe_items;
+            CHECK(item.status == lubancode::cli::TranscriptStatus::Ok);
+        }
+    }
+    CHECK(probe_items == 3);
+    // footer 恰一枚。
+    const std::string out = captured.str();
+    std::size_t footer_count = 0;
+    std::size_t pos = 0;
+    while ((pos = out.find("Worked for", pos)) != std::string::npos) {
+        ++footer_count;
+        pos += 4;
+    }
+    CHECK(footer_count == 1);
 }
