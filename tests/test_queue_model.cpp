@@ -1,7 +1,9 @@
 // 会话层排队队列 SteeringQueue(0.28.x"排队消息在工具边界送达并可
 // Shift+左键编辑")的纯逻辑测试:落队顺序与目标、投递按目标分账、编辑事务
 // (版本冲突/冻结/删除)、终态目标标注、立即送状态旗、显示成行(标题随
-// 状态变、三条窗口、编辑中标记)。全部走局部实例,不碰全局
+// 状态变、三条窗口、编辑中标记)。取走即消费单(2026-08)另钉:自动发送
+// 失败回队与防死循环闸、存档恢复(RestoreFromArchive)、清账告知成行
+// (BuildQueueDisposalRows)。全部走局部实例,不碰全局
 // SessionSteeringQueue。流式输入行的 slash 提示随 StreamSlashHintLines 删除
 // 改钉编辑器 RenderState(tests/test_line_editor.cpp 的忙碌路用例)。
 
@@ -12,6 +14,8 @@
 
 #include "cli/queue_model.hpp"
 
+using lubancode::cli::BuildQueueArchiveRows;
+using lubancode::cli::BuildQueueDisposalRows;
 using lubancode::cli::BuildSteeringQueueRows;
 using lubancode::cli::DeliveryMode;
 using lubancode::cli::MessageTarget;
@@ -223,6 +227,134 @@ TEST_CASE("收场处置:TakeAllForDisposal 一次交出全部并清空") {
     CHECK(q.empty());
     CHECK(q.TakeAllForDisposal().empty());
     CHECK_FALSE(q.immediate_delivery_requested());
+}
+
+// ---------------------------------------------------------------------------
+// 取走即消费单(2026-08):回合失败还队 + 存档恢复 + 清账告知
+// ---------------------------------------------------------------------------
+
+TEST_CASE("自动发送失败回队:回队首保 id,同一条最多自动重试一次") {
+    SteeringQueue q;
+    const auto id = q.Enqueue(MessageTarget::Main(), "等送达的");
+    q.Enqueue(MessageTarget::Main(), "第二条");
+
+    // 第一趟:取队头去发,那轮请求失败——还回队首,attempts 记 1。
+    auto first_take = q.TakeFirstAutoSendable(MessageTarget::Main());
+    REQUIRE(first_take.has_value());
+    CHECK(first_take->id == id);
+    q.ReturnToFront(std::move(*first_take));
+    auto after_return = q.Snapshot();
+    REQUIRE(after_return.size() == 2);
+    CHECK(after_return[0].id == id);  // 还回队首,还在第二条前头
+    CHECK(after_return[0].delivery_attempts == 1);
+    CHECK(after_return[0].state == QueueItemState::Queued);  // 还是健康条目,不是 Failed
+
+    // 第二趟:attempts=1 < 2,还肯自动再试一次(首发 + 一次重试)。
+    auto second_take = q.TakeFirstAutoSendable(MessageTarget::Main());
+    REQUIRE(second_take.has_value());
+    CHECK(second_take->id == id);
+    q.ReturnToFront(std::move(*second_take));  // 又失败,attempts=2,到顶
+
+    // 第三趟:这条不再自动发,泵跳过它去取下一条;原条目留队等用户处置。
+    auto third_take = q.TakeFirstAutoSendable(MessageTarget::Main());
+    REQUIRE(third_take.has_value());
+    CHECK(third_take->id != id);  // 跳过到顶的,取走第二条
+    CHECK(Find(q.Snapshot(), id).delivery_attempts == 2);
+    CHECK_FALSE(q.empty());  // 到顶那条还在队列里,没有无声消失
+
+    // 终态标注不影响回还账:TargetGone/Failed 条目本就不参与投递,跳过。
+    const auto failed_id = q.Enqueue(MessageTarget::Main(), "投错了的");
+    q.MarkFailed(failed_id, "x");
+    CHECK_FALSE(q.TakeFirstAutoSendable(MessageTarget::Main()).has_value());
+
+    // 用户亲手改写过的条目翻篇:attempts 归零,重新参与自动发送。
+    auto stale_handle = q.BeginEdit(failed_id);
+    REQUIRE(stale_handle.has_value());
+    REQUIRE(q.CommitEdit(*stale_handle, "改好的新话") == Status::Ok);
+    CHECK(Find(q.Snapshot(), failed_id).delivery_attempts == 0);
+    const auto revived = q.TakeFirstAutoSendable(MessageTarget::Main());
+    REQUIRE(revived.has_value());
+    CHECK(revived->id == failed_id);
+}
+
+TEST_CASE("存档恢复:RestoreFromArchive 保 id/次序/尝试次数,只收空队列") {
+    std::vector<QueuedMessage> archived;
+    QueuedMessage a;
+    a.id = 5;
+    a.target = MessageTarget::Main();
+    a.text = "旧话一";
+    QueuedMessage b;
+    b.id = 9;
+    b.target = MessageTarget::Agent(3);
+    b.text = "给三号的旧话";
+    QueuedMessage c;
+    c.id = 11;
+    c.target = MessageTarget::Main();
+    c.text = "失败回还过的";
+    c.delivery_attempts = 2;
+    archived.push_back(a);
+    archived.push_back(b);
+    archived.push_back(c);
+
+    SteeringQueue q;
+    CHECK(q.RestoreFromArchive(std::move(archived)));
+    auto snapshot = q.Snapshot();
+    REQUIRE(snapshot.size() == 3);
+    CHECK(snapshot[0].id == 5);   // 排队次序照存档
+    CHECK(snapshot[0].text == "旧话一");
+    CHECK(snapshot[1].target == MessageTarget::Agent(3));
+    CHECK(snapshot[2].delivery_attempts == 2);
+
+    // 回还到顶的恢复条目不自动重发(防死循环闸跨存档仍生效)……
+    auto head = q.TakeFirstAutoSendable(MessageTarget::Main());
+    REQUIRE(head.has_value());
+    CHECK(head->id == 5);  // 跳过 attempts=2 的 11 号,先取 5 号
+    // ……后续新落队的不与恢复的 id 撞号。
+    const auto fresh = q.Enqueue(MessageTarget::Main(), "resume 后新排的");
+    CHECK(fresh > 11);
+
+    // 队列非空时旧档不给盖:本场自己的账优先。
+    SteeringQueue busy;
+    busy.Enqueue(MessageTarget::Main(), "本场的");
+    std::vector<QueuedMessage> stale;
+    stale.push_back(a);
+    CHECK_FALSE(busy.RestoreFromArchive(std::move(stale)));
+    CHECK(busy.Snapshot().size() == 1);  // 原账没动
+}
+
+TEST_CASE("清账告知:BuildQueueDisposalRows 带条数与首条预览,空清账零输出") {
+    CHECK(BuildQueueDisposalRows({}).empty());
+
+    std::vector<QueuedMessage> discarded;
+    discarded.push_back(QueuedMessage{1, MessageTarget::Main(), "首条正文"});
+    discarded.push_back(QueuedMessage{2, MessageTarget::Agent(3), "第二条"});
+    const auto rows = BuildQueueDisposalRows(discarded);
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0].find("2") != std::string::npos);           // 条数
+    CHECK(rows[0].find("丢弃") != std::string::npos);         // 说清是倒掉
+    CHECK(rows[1].find("首条正文") != std::string::npos);     // 首条预览
+    CHECK(rows[1].find("第二条") == std::string::npos);       // 只摆首条
+    CHECK(rows[1].find("main") != std::string::npos);         // 目标短名
+
+    // 首条多行只摆一行;子代理目标带 # 短名。
+    std::vector<QueuedMessage> multi;
+    multi.push_back(QueuedMessage{3, MessageTarget::Agent(7), "行一\n行二"});
+    const auto multi_rows = BuildQueueDisposalRows(multi);
+    REQUIRE(multi_rows.size() == 2);
+    CHECK(multi_rows[1].find("行一") != std::string::npos);
+    CHECK(multi_rows[1].find("行二") == std::string::npos);
+    CHECK(multi_rows[1].find("#7") != std::string::npos);
+}
+
+TEST_CASE("退场告知:BuildQueueArchiveRows 说清随档带走,空队列零输出") {
+    CHECK(BuildQueueArchiveRows({}).empty());
+    std::vector<QueuedMessage> queued;
+    queued.push_back(QueuedMessage{1, MessageTarget::Main(), "还排着的"});
+    const auto rows = BuildQueueArchiveRows(queued);
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0].find("1") != std::string::npos);
+    CHECK(rows[0].find("resume") != std::string::npos);  // 去处说明
+    CHECK(rows[1].find("还排着的") != std::string::npos);
 }
 
 TEST_CASE("BuildSteeringQueueRows:空队列不画标题;标题随模式变") {

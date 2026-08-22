@@ -32,6 +32,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <optional>
 #include <string>
@@ -143,6 +144,39 @@ std::string SerializeCwdEvent(const std::string& cwd, const std::string& ts);
 std::optional<std::string> ParseCwdEvent(const std::string& line);
 
 // ---------------------------------------------------------------------------
+// queue 事件(取走即消费单路径二:排队消息落会话存档)
+//
+// 排队消息只活内存,排了没送走就 /exit 或崩掉,resume 载回来的是空队列
+// ——用户视角"消息不见了"。这里给存档添一种事件行,与 compact/title 同列:
+//   {"type":"queue","items":[{"id":1,"target":"main"|"#3","text":...,
+//                             "attempts":0},...],"ts":...}
+// 追加时机(append-only 快照式):排队账一变(进队/送达出队/失败回还)就
+// 追加一份全量快照,回放取**最后一条**。已送达的条目不在快照里,天然出档。
+// 目标用 short_label 的写法("main" / "#3"):子代理任务号本就带 #,解析时
+// 按前缀分型;存档里不引 cli 层类型,agent/ 不反向依赖的老规矩不破。
+// 老版本读到 queue 行当坏行跳过,消息账无损(事件行的通用约定)。
+// ---------------------------------------------------------------------------
+
+// 存档侧的排队条目(中立形状,不带 cli 层的编辑事务/状态机)。
+struct ArchivedQueueItem {
+    std::uint64_t id = 0;
+    bool subagent = false;   // false = main 会话,true = 子代理
+    int task_id = 0;         // subagent 时有效
+    std::string text;
+    int attempts = 0;        // 自动发送失败回还过的次数(0 = 没试过)
+};
+
+// 一份快照 -> 一行 JSON(不带换行符)。items 为空也给 nullopt 之外的空串?
+// 不:空账不落行(退出前队列已空就什么也不追加,回放侧最后一条胜的语义
+// 之下,"空"由"没有 queue 行"或"最后一条 queue 行 items 为空"两种写法都
+// 表达得了;写侧只在非空时追加)。
+std::string SerializeQueueEvent(const std::vector<ArchivedQueueItem>& items, const std::string& ts);
+
+// 一行 JSON -> 排队快照。type 不是 "queue"、缺 items 或不是数组,给
+// nullopt;单条里缺 text 或 id 非法,跳过那一条不废整份。
+std::optional<std::vector<ArchivedQueueItem>> ParseQueueEvent(const std::string& line);
+
+// ---------------------------------------------------------------------------
 // 会话 id
 // ---------------------------------------------------------------------------
 
@@ -200,6 +234,9 @@ struct LoadedSession {
     nlohmann::json last_compact_manifest;  // 最后一次压缩的 manifest(没有就 null)
     int repaired = 0;                    // 修补的孤儿 tool_use 块数
     int skipped_lines = 0;               // 解析不动、跳过的行数(坏事件行也算)
+    // 最后一条 queue 事件快照(排队消息落档单):没有 queue 行就是空表。
+    // /resume 拿它重建会话层 SteeringQueue(空表 = 档里没排队的账)。
+    std::vector<ArchivedQueueItem> queued_messages;
 };
 
 // 纯函数:整个 .jsonl 文件内容 -> meta + 有效态消息列表(事件已回放、已修补
@@ -251,6 +288,10 @@ public:
     // 追加一条 cwd 事件行(自动带 ts),append+flush。/worktree 进出房、
     // 会话目录搬迁时各追一条,/resume 回放取最后一条。
     bool AppendCwdEvent(const std::string& cwd);
+
+    // 追加一条排队消息快照事件行(自动带 ts),append+flush。排队账一变
+    // (进队/送达/回还)由会话层追一份全量快照;/resume 回放取最后一条。
+    bool AppendQueueEvent(const std::vector<ArchivedQueueItem>& items);
 
     // /clear:关掉当前文件(留在磁盘上),回到"没有活动会话"状态,下一条
     // 用户消息再 Begin 一场新的。

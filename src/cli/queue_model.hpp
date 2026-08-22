@@ -90,6 +90,11 @@ struct QueuedMessage {
     std::string note;         // TargetGone/Failed 的原因说明(展示用)
     std::uint64_t version = 1;  // 编辑事务版本:每次成功改写 +1
     bool edit_open = false;   // 编辑事务开着:投递冻结(见文件头注释)
+    // 自动发送失败回还账(取走即消费单):会话泵把这条拿去自动发送、那轮
+    // 却以请求失败收场时,ReturnToFront 原样还回队首并翻开这位。已试过一次
+    // 的条目不再自动重发(防死循环):会话泵见它跳过,留队等用户手动处置
+    // (Shift+← 取回改写再排,或删掉)。用户自己手动重排不算——那是新条目。
+    int delivery_attempts = 0;
 };
 
 // -----------------------------------------------------------------------
@@ -98,6 +103,11 @@ struct QueuedMessage {
 
 class SteeringQueue {
 public:
+    // 自动发送的重试上限(取走即消费单):同一条消息最多自动送 kMax-
+    // AutoSendAttempts 次(首发 + 失败回还后的那一次重试),再失败留队列
+    // 等用户手动处置——自动重发无穷尽就是死循环。
+    static constexpr int kMaxAutoSendAttempts = 2;
+
     // 编辑事务的凭据。BeginEdit 交出一份;Commit/Cancel/Delete 只认凭据里
     // 的版本,版本对不上就是 Conflict——"编辑期间恰逢边界送达"要么冻结、
     // 要么提交失败提示,绝不一边送旧文一边显示已保存。
@@ -112,6 +122,10 @@ public:
     // ---- 落队 / 查询 ----
     // 新消息入队(排队顺序 = 落队顺序)。空文本拒收,返回 0。
     QueueId Enqueue(MessageTarget target, std::string text);
+    // resume 重建队列用(会话存档 queue 事件行):带着原 id/正文/目标/尝试
+    // 次数整条放回,保留存档里的排队次序。只在会话起头(队列还空着)整批
+    // 灌;id 撞了或队列非空就不收——运行中的队列只归运行中的账本管。
+    bool RestoreFromArchive(std::vector<QueuedMessage> items);
     // 轻量快照(锁内拷一份)。UI 每帧现拉,不长期持锁。
     std::vector<QueuedMessage> Snapshot() const;
     bool empty() const;
@@ -127,6 +141,15 @@ public:
     // 只取队头一条(会话泵"一条一条自动发送"用;一次边界多条的批量注入
     // 走 TakeDeliverable)。没有可投递的给 nullopt。
     std::optional<QueuedMessage> TakeFirstDeliverable(MessageTarget target);
+    // 出路二的失败退还(取走即消费单):TakeFirstDeliverable 拿去自动发送
+    // 的那条,若那轮以请求失败收场,从这里塞回队首(attempts +1),原 id、
+    // 原状态都保住。队列在取走与还回之间又进了新条目也不碍事——塞在最前,
+    // 重发时它还是头一条。
+    void ReturnToFront(QueuedMessage item);
+    // 会话泵的防死循环闸:队头这条还该不该自动发(状态健康、没冻、没超
+    // 自动重试上限)。attempts 满了的那条跳过,泵往后找——找不着就轮空,
+    // 队列留给用户。
+    std::optional<QueuedMessage> TakeFirstAutoSendable(MessageTarget target);
     // 只问有没有,不动账(判"有没有可等的事"用)。
     bool HasDeliverable(MessageTarget target) const;
     // 任意目标还有没有可投递的(Esc"打断并立即送"要不要翻旗用)。
@@ -171,6 +194,18 @@ private:
 // /clear 与会话析构时 TakeAllForDisposal 清账。单测自建局部 SteeringQueue,
 // 不碰这份全局。
 SteeringQueue& SessionSteeringQueue();
+
+// -----------------------------------------------------------------------
+// 清账告知(取走即消费单路径三:淡字换醒目)
+// -----------------------------------------------------------------------
+
+// /clear 与退场倒队列时的成行:标题一行(条数 + 首条预览截一行),醒目色
+// 由调用方包(theme 那层不进纯逻辑)。空清账给空表,一行不打。
+std::vector<std::string> BuildQueueDisposalRows(const std::vector<QueuedMessage>& discarded);
+
+// 退场(不清账)时的成行:条数 + 首条预览 + "随存档带走,resume 接得回"。
+// 空队列给空表。
+std::vector<std::string> BuildQueueArchiveRows(const std::vector<QueuedMessage>& queued);
 
 // -----------------------------------------------------------------------
 // 显示(纯函数)

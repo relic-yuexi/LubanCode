@@ -321,7 +321,7 @@ private:
     std::vector<std::string> BuildAgentTaskTranscriptLines(int task_id, int width);
     // tail_rows>0 时只铺头三行+最近 N 行(实时流重铺拍,不刷滚屏)。
     void PrintViewedTranscript(int viewed_task_id, int tail_rows = 0);
-    void CleanupBackgroundAgents();
+    void CleanupBackgroundAgents(bool dispose_queue);
     bool HandleTranscriptUi(lubancode::cli::UiKeyAction action);
     void PrintRecentItems(std::size_t count);
     void RebuildLoop(bool preserve_history = false);
@@ -339,6 +339,13 @@ private:
     void RunPeerTurn(const std::string& text, bool silent = false,
                      memory::QueryOrigin origin = memory::QueryOrigin::User);
     void PumpSteeringToSubagents();
+    // 排队账落会话存档(取走即消费单路径二):queue 事件行,快照式,回放取
+    // 最后一条。排队账一变(进队/送达/回还/清账)都追一份;存档没建档或
+    // 已写坏就安静跳过——档是加层,不拦会话。
+    void PersistSteeringQueue();
+    // resume 重建队列:存档最后一条 queue 快照灌回 SessionSteeringQueue
+    // (空档/没行 = 空队列,照旧)。恢复的条目保 id/次序/尝试次数。
+    void RestoreSteeringQueueFrom(const std::vector<lubancode::agent::ArchivedQueueItem>& items);
     // Ctrl+R 提问历史搜索的数据源(0.30.x 第二批):只读 session 事件账
     // (存档 JSONL 的用户提问行)拼整份 PromptHistoryDataset。
     lubancode::cli::PromptHistoryDataset CollectPromptHistory();
@@ -367,9 +374,13 @@ private:
     // 过线(带迟滞)就请 cheap 渐次收拾几枚,失败退 L1 不删原文。
     void MaybeMicrocompact();
     void SyncWorktreeDirectory();
-    CommandFlow ProcessLine(const std::string& content);
+    // autosend_failed(可空出参):这一行若是普通正文回合且以请求失败收场
+    // (RunTurnResult.status != 0,含异常兜底),写给 true。会话泵的"排队
+    // 消息自动发送失败退还"判定就吃这个——不空口猜,拿 RunTurn 真给的
+    // 失败信号。
+    CommandFlow ProcessLine(const std::string& content, bool* autosend_failed = nullptr);
     CommandFlow DispatchSlashCommand(const lubancode::cli::ParsedSlashCommand& parsed);
-    CommandFlow RunUserTurn(const std::string& content);
+    CommandFlow RunUserTurn(const std::string& content, bool* autosend_failed = nullptr);
     // ---- 上下文压缩的会话现场路(0.27.x 分层压缩第一期) ----
     // 压缩参数现场收集:窗口预算认压缩模型自己的目录条目,活动待办(未完
     // 成 todo 条目原文)进守恒校验——摘要漏一项 pending 就拒收,历史不动。
@@ -896,9 +907,13 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
     // 一笔,后面 sync 定义好了再善后。
     bool resume_moved_into_worktree = false;
     if (opts_.continue_last) {
+        const std::function<void(const std::vector<lubancode::agent::ArchivedQueueItem>&)> queue_restorer =
+            [this](const std::vector<lubancode::agent::ArchivedQueueItem>& items) {
+                RestoreSteeringQueueFrom(items);
+            };
         if (ResumeSession("", sessions_dir, *loop, session_store, persisted_count, session_meta, session_title,
                           wire_str, *current_model, theme, /*quiet_if_none=*/true, &worktree_session,
-                          &session_compact_epoch)) {
+                          &session_compact_epoch, &queue_restorer)) {
             resume_moved_into_worktree = worktree_session.active();
             // 仓按恢复的那场开张(旧档若落过盘,artifact 继续可追)。
             OpenArtifactStore();
@@ -979,6 +994,10 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
                         "[用户排队消息] 用户在上一只工具执行期间补了话,按排队顺序接上,不另起新任务:\n" +
                         item.text});
                 }
+                // 送走的即出档(路径二):快照事件行记当前活队列,已注入的
+                // 不在里头,resume 不复活已送出的消息。崩在这之后的半轮里,
+                // 消息本体也已在 history 落盘路上(PersistNewMessages)。
+                PersistSteeringQueue();
                 return inject;
             }
             if (peer_inbox_poll) {
@@ -999,7 +1018,8 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
 InteractiveSession::~InteractiveSession() {
     // 定向介入收场(规格:退出/清场不能无声遗失):停全部、报未送达。任务
     // 线程由 AgentTool 析构统一 join(此刻 tool_runtime_ 还活着,先于成员析构)。
-    CleanupBackgroundAgents();
+    // 析构走"退场"档:排队账不倒(已落档,resume 接得回),只提示去处。
+    CleanupBackgroundAgents(/*dispose_queue=*/false);
     // 跨会话传话收尾:摘掉收件点(别让重建钩子再碰已停的 runtime),写
     // closing、摘名片、停 pipe——此后递来的信连不上,发送方拿 unavailable。
     reapply_peer_inbox = nullptr;
@@ -1868,6 +1888,7 @@ void InteractiveSession::RunPeerTurn(const std::string& text, bool silent, memor
             settings_local.allow_commands, settings_local.deny_commands, session_agent_tool(),
             /*recorder=*/nullptr, silent);
     PersistNewMessages();
+    PersistSteeringQueue();  // peer 轮里也可能进队/送走过(路径二,快照对齐)
     if (peer_started) {
         peer_runtime->SetStatus("idle");
     }
@@ -1879,6 +1900,7 @@ void InteractiveSession::RunPeerTurn(const std::string& text, bool silent, memor
 // 队列原位(屏上带"[目标已结束]"标记),等用户取回改目标或删掉,不改投
 // main。只在主线程调(会话泵/轮次边界)。
 void InteractiveSession::PumpSteeringToSubagents() {
+    bool queue_changed = false;
     for (const auto& item : SessionSteeringQueue().Snapshot()) {
         if (item.target.kind != lubancode::cli::MessageTarget::Kind::Subagent ||
             item.state != lubancode::cli::QueueItemState::Queued || item.edit_open) {
@@ -1887,6 +1909,7 @@ void InteractiveSession::PumpSteeringToSubagents() {
         lubancode::tools::AgentTool* agent_tool = session_agent_tool();
         if (agent_tool == nullptr) {
             SessionSteeringQueue().MarkFailed(item.id, "当前会话没有可用的子代理通道");
+            queue_changed = true;
             continue;
         }
         const lubancode::tools::TaskMessageStatus status =
@@ -1894,12 +1917,76 @@ void InteractiveSession::PumpSteeringToSubagents() {
         if (status == lubancode::tools::TaskMessageStatus::Queued) {
             // 已进任务 inbox,活队列退场(那边轮次边界自会送达)。
             SessionSteeringQueue().Remove(item.id);
+            queue_changed = true;
         } else {
             // 终态(Finished)或任务号认不出(NotFound):一律按"目标已结束"
             // 标注,原文留队,绝不改投 main(规格"队列按目标分账")。
             SessionSteeringQueue().MarkTargetGone(item.id, "目标子代理已结束");
+            queue_changed = true;
         }
     }
+    if (queue_changed) {
+        PersistSteeringQueue();  // 转投/标注也是排队账一变(路径二,快照对齐)
+    }
+}
+
+// 排队账 -> 存档快照事件行(路径二)。落不了档(没建档/写坏)只安静退:
+// 存档从来是加层,坏不到会话本体。TargetGone/Failed 的条目也一并进快照——
+// 它们是"等用户处置"的活账,resume 后还该看得见。
+void InteractiveSession::PersistSteeringQueue() {
+    if (sessions_dir.empty() || session_store_broken) {
+        return;
+    }
+    if (!session_store.active()) {
+        // 一条消息没发过就排了队、又直接 /exit:档还没建。拿队头那条当
+        // 首句建档(slug 用得上),排队账才有处落——不然这类场子的队列
+        // 依然落空。建不成档安静退,老规矩。
+        std::string first_text;
+        for (const auto& item : SessionSteeringQueue().Snapshot()) {
+            if (!item.text.empty()) {
+                first_text = item.text;
+                break;
+            }
+        }
+        if (first_text.empty() || !EnsureSessionBegun(first_text)) {
+            return;
+        }
+    }
+    const auto snapshot = SessionSteeringQueue().Snapshot();
+    std::vector<lubancode::agent::ArchivedQueueItem> items;
+    items.reserve(snapshot.size());
+    for (const auto& item : snapshot) {
+        lubancode::agent::ArchivedQueueItem archived;
+        archived.id = item.id;
+        archived.subagent = !item.target.is_main();
+        archived.task_id = item.target.task_id;
+        archived.text = item.text;
+        archived.attempts = item.delivery_attempts;
+        items.push_back(std::move(archived));
+    }
+    (void)session_store.AppendQueueEvent(items);  // 失败不告警:下一趟账变了再追
+}
+
+// 存档快照 -> 会话层队列(resume 路)。RestoreFromArchive 只在队列还空着时
+// 收(本场自己还没排队),运行中的账不给旧档盖。
+void InteractiveSession::RestoreSteeringQueueFrom(
+    const std::vector<lubancode::agent::ArchivedQueueItem>& items) {
+    if (items.empty()) {
+        return;
+    }
+    std::vector<lubancode::cli::QueuedMessage> restored;
+    restored.reserve(items.size());
+    for (const auto& archived : items) {
+        lubancode::cli::QueuedMessage item;
+        item.id = archived.id;
+        item.target = archived.subagent ? lubancode::cli::MessageTarget::Agent(archived.task_id)
+                                        : lubancode::cli::MessageTarget::Main();
+        item.text = archived.text;
+        item.state = lubancode::cli::QueueItemState::Queued;
+        item.delivery_attempts = archived.attempts;
+        restored.push_back(std::move(item));
+    }
+    SessionSteeringQueue().RestoreFromArchive(std::move(restored));
 }
 
 // Ctrl+R 提问历史搜索的数据源:只读 session 事件账。ListSessions 按新→旧
@@ -2688,7 +2775,7 @@ void InteractiveSession::SyncWorktreeDirectory() {
 // 路径共用这一份 slash 分支 + 自动 compact 检查 + RunTurn 调用,行为
 // 完全一致(spec 要求"队列里是 slash 命令也认")。返回 false 表示这一行
 // 触发了 /exit,外层循环该退出了。
-CommandFlow InteractiveSession::ProcessLine(const std::string& content) {
+CommandFlow InteractiveSession::ProcessLine(const std::string& content, bool* autosend_failed) {
     const lubancode::cli::ParsedSlashCommand parsed = lubancode::cli::ParseSlashCommand(content);
     // 会话级兜底(宽窄转换异常单):slash 命令、普通回合、回合收尾的起名/
     // 记忆抽取,任何 std::exception 都不再穿透顶层把整场掀了——错误上屏、
@@ -2701,8 +2788,11 @@ CommandFlow InteractiveSession::ProcessLine(const std::string& content) {
             return DispatchSlashCommand(parsed);
         }
         // 普通正文(含 peer 来信组包后的文字):自动压缩检查 + 发一轮。
-        return RunUserTurn(content);
+        return RunUserTurn(content, autosend_failed);
     } catch (const std::exception& e) {
+        if (autosend_failed != nullptr) {
+            *autosend_failed = true;  // 回合异常收场:排队消息按失败退还(路径一的兜底判定)
+        }
         {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
             std::cerr << "\n"
@@ -3069,7 +3159,9 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
 }
 
 // 发一轮用户正文:自动压缩检查 + 轮次材料 + RunTurn + 落盘 + 收排队。
-CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
+// autosend_failed(可空出参,会话泵路径一用):RunTurn 的 status != 0 就是
+// 请求失败(316/网络错/输出预算耗尽/步数闸),写给 true。
+CommandFlow InteractiveSession::RunUserTurn(const std::string& content, bool* autosend_failed) {
     // 建档提前到发轮之前(第二期):仓要拿 session id 开张,第一轮请求里
     // 的超长结果才有地方落盘。失败不拦会话,只是没有 artifact 可追。
     EnsureSessionBegun(content);
@@ -3092,6 +3184,9 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
     const auto [mention_error, mention_ledger] = BuildMentionLedger(content);
     if (!mention_error.empty()) {
         std::cout << theme.error << mention_error << theme.reset << "\n";
+        if (autosend_failed != nullptr) {
+            *autosend_failed = true;  // 这轮没发出去:自动发送的消息按"没送达"回队
+        }
         return CommandFlow::Continue;
     }
     std::string turn_suffix = mention_ledger;
@@ -3125,10 +3220,14 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
     // 不混进这里。
     lubancode::app::UsageStats turn_usage;
     const auto turn_started = std::chrono::steady_clock::now();
-    RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
-            lubancode::app::HookRuntime(), spinner_enabled, transcript, todo_state(), &transcript_expanded,
-            settings_local.allow_commands, settings_local.deny_commands, session_agent_tool(),
-            recorder.has_value() ? &*recorder : nullptr, /*silent=*/false, &turn_usage);
+    const lubancode::app::RunTurnResult turn_result =
+        RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
+                lubancode::app::HookRuntime(), spinner_enabled, transcript, todo_state(), &transcript_expanded,
+                settings_local.allow_commands, settings_local.deny_commands, session_agent_tool(),
+                recorder.has_value() ? &*recorder : nullptr, /*silent=*/false, &turn_usage);
+    if (autosend_failed != nullptr) {
+        *autosend_failed = turn_result.status != 0;  // 取走即消费单:失败信号原样递给会话泵
+    }
     for (const auto& step : turn_usage.steps) {
         api::Usage step_usage;
         step_usage.input_tokens = step.input_tokens;
@@ -3156,6 +3255,9 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content) {
     MaybeGenerateSessionTitle(lubancode::agent::TaskKind::SessionTitle);
     // 回合收尾总结与候选抽取(learn off 时是空操作)。
     ExtractTurnMemory(content, history_before);
+    // 排队账快照落档(路径二):轮内可能进过队/边界注入送走过,趁收尾把
+    // 最新一份快照追进存档,/exit 或崩掉后 resume 接得回来。
+    PersistSteeringQueue();
     return CommandFlow::Continue;
 }
 
@@ -3612,7 +3714,7 @@ SessionCommandState InteractiveSession::MakeSessionCommandState() {
             }
         },
         [this]() { SyncWorktreeDirectory(); },
-        [this]() { CleanupBackgroundAgents(); },
+        [this]() { CleanupBackgroundAgents(/*dispose_queue=*/true); },
         &worktree_session,
         sessions_dir,
         wire_str,
@@ -3623,6 +3725,10 @@ SessionCommandState InteractiveSession::MakeSessionCommandState() {
             EmitSessionHook(lubancode::hooks::HookEvent::SessionStart, nlohmann::json{{"source", "resume"}},
                             "resume");
             OpenArtifactStore();
+        },
+        // /resume 的排队账重建(路径二):存档快照灌回会话层队列。
+        [this](const std::vector<lubancode::agent::ArchivedQueueItem>& items) {
+            RestoreSteeringQueueFrom(items);
         }};
 }
 
@@ -3654,24 +3760,31 @@ void InteractiveSession::EmitSessionHook(lubancode::hooks::HookEvent event, nloh
     dispatcher->Emit(event, payload);
 }
 
-// /clear 与退出共用的清场:停全部子代理、报未送达,排队消息明确处置——
-// 一样不无声遗失(规格"数据与线程"节)。
-void InteractiveSession::CleanupBackgroundAgents() {
+// /clear 与退出共用的清场:停全部子代理、收面板。排队消息分两档
+// (取走即消费单):
+//   - dispose_queue=true(/clear):用户明说清场——全数倒掉,落空快照,
+//     醒目告知(条数 + 首条预览),"明确丢弃、不静默消失"。
+//   - dispose_queue=false(退出/析构):队列**不倒**。账在 Run() 退场前已
+//     落档(resume 接得回,验收"排队→/exit→resume 队列还在"),这里只
+//     提示一句"已存档几条";倒掉反而把刚落的档废了。
+void InteractiveSession::CleanupBackgroundAgents(bool dispose_queue) {
     // 面板收场:查看态/收件目标整份收干净,不给已收场的任务留悬空目标。
     lubancode::cli::ResetAgentPanelSession();
-    // 会话层排队消息:逐条列出后丢弃(目标短名 + 首行原文),处置看得见。
-    const auto discarded = SessionSteeringQueue().TakeAllForDisposal();
-    if (!discarded.empty()) {
-        std::cout << theme.stats << trf("queue.disposal_head", discarded.size()) << theme.reset << "\n";
-        for (const auto& item : discarded) {
-            std::string first_line = item.text;
-            first_line.erase(0, first_line.find_first_not_of("\r\n\t "));
-            const std::size_t cut = first_line.find('\n');
-            if (cut != std::string::npos) {
-                first_line.resize(cut);
+    if (dispose_queue) {
+        // 会话层排队消息:先倒账、再把"空快照"追进存档(resume 不复活已
+        // 倒掉的账),醒目告知(路径三:条数 + 首条预览,淡字换醒目色)。
+        const auto discarded = SessionSteeringQueue().TakeAllForDisposal();
+        if (!discarded.empty()) {
+            PersistSteeringQueue();
+            for (const std::string& row : lubancode::cli::BuildQueueDisposalRows(discarded)) {
+                std::cout << theme.error << row << theme.reset << "\n";
             }
-            std::cout << theme.stats << "  [" << item.target.short_label() << "] " << first_line << theme.reset
-                      << "\n";
+        }
+    } else if (!SessionSteeringQueue().empty()) {
+        // 退场:排队账已在 Run() 落档,这里只说一句去处,别让人以为丢了。
+        const auto snapshot = SessionSteeringQueue().Snapshot();
+        for (const std::string& row : lubancode::cli::BuildQueueArchiveRows(snapshot)) {
+            std::cout << theme.stats << row << theme.reset << "\n";
         }
     }
     if (session_agent_tool() == nullptr) {
@@ -3743,16 +3856,36 @@ void InteractiveSession::Run() {
         // 队头自动发送——本轮没再调工具自然收尾的场合,队列紧接着成为下一
         // 次请求的用户消息,不等用户再敲一下(规格)。用户自己的排队消息
         // 优先于 peer 来信与子代理完成回流,所以泵挂在它们前头。
+        //
+        // 取走即消费单(路径一):拿去自动发送的那条,若这一轮以请求失败
+        // 收场,原样还回队首并带"已试过一次"的账——同一条最多自动重试
+        // 一次,再失败留队列等用户手动(Shift+← 取回改写再排、或删掉),
+        // 错误文案旁明写一句"没送达,已回队",不再无声吞掉。
         PumpSteeringToSubagents();
-        if (auto head = SessionSteeringQueue().TakeFirstDeliverable(lubancode::cli::MessageTarget::Main())) {
+        if (auto head = SessionSteeringQueue().TakeFirstAutoSendable(lubancode::cli::MessageTarget::Main())) {
             std::cout << theme.prompt << "> " << theme.reset << head->text << "\n";
             if (peer_started) {
                 peer_runtime->SetStatus("busy");
             }
-            const CommandFlow flow = ProcessLine(head->text);
+            bool autosend_failed = false;
+            const CommandFlow flow = ProcessLine(head->text, &autosend_failed);
             if (peer_started) {
                 peer_runtime->SetStatus("idle");
             }
+            if (autosend_failed) {
+                // 失败退还:回队首(带 attempts+1),文案旁明说。还会再自动
+                // 试一次(attempts < 2);到顶的那次退还后队列里留着,泵的
+                // 防死循环闸跳过它,等用户处置。
+                std::string preview = head->text;  // 先留底,ReturnToFront 会 move 走
+                SessionSteeringQueue().ReturnToFront(std::move(*head));
+                preview.erase(0, preview.find_first_not_of("\r\n\t "));
+                const std::size_t preview_cut = preview.find('\n');
+                if (preview_cut != std::string::npos) {
+                    preview.resize(preview_cut);
+                }
+                std::cout << theme.error << trf("queue.autosend_returned", preview) << theme.reset << "\n";
+            }
+            PersistSteeringQueue();
             if (flow == CommandFlow::Exit) {
                 break;
             }
@@ -3848,6 +3981,7 @@ void InteractiveSession::Run() {
             if (lubancode::cli::ComposerStashHasContent()) {
                 std::cout << theme.stats << tr("stash.still_there") << theme.reset << "\n";
             }
+            PersistSteeringQueue();  // EOF 退场同路(路径二,"先留后清")
             break;  // EOF:Ctrl+Z 或管道读尽
         }
         if (line->empty()) {
@@ -3860,6 +3994,7 @@ void InteractiveSession::Run() {
             if (lubancode::cli::ComposerStashHasContent()) {
                 std::cout << theme.stats << tr("stash.still_there") << theme.reset << "\n";
             }
+            PersistSteeringQueue();  // 裸退场同样先留账(路径二,"先留后清")
             break;
         }
         // 定向介入(规格第七节):查看态 composer 提交的话直接进那只子代理
@@ -3885,6 +4020,10 @@ void InteractiveSession::Run() {
             peer_runtime->SetStatus("idle");
         }
         if (flow == CommandFlow::Exit) {
+            // 退出前把排队账最后一眼落档(路径二):/exit 这轮里可能还排着
+            // 没送走的话,resume 要接得回来。CleanupBackgroundAgents 里那趟
+            // 落的是清账后的空快照,先后次序就是"先留后清"。
+            PersistSteeringQueue();
             break;
         }
     }
