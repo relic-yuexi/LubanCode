@@ -48,6 +48,7 @@ std::string ReadFileTool::description() const {
 工具逐批搬进来,一批一枚 commit。已有档案:
 
 - read_file、write_file(基建批 + 文件工具第一批的两枚试点)
+- edit_file、search(文件工具批余量)
 
 其余工具的描述仍在各自 .cpp 里,后续批次照单子
 (`todos/工具描述与模型可见文案抽离C++按语言分档.todo`)搬。
