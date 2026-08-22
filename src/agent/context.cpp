@@ -5,6 +5,8 @@
 #include <type_traits>
 #include <variant>
 
+#include "platform/text_encoding.hpp"  // Utf8PrefixBoundary:截短不劈半个字
+
 namespace lubancode::agent {
 
 namespace {
@@ -87,7 +89,12 @@ std::vector<api::Message> ShrinkOversizedToolResults(std::vector<api::Message> m
             const std::size_t overage = total - max_chars;
             const std::size_t reducible = tool_result.content.size() - kMinKeepChars - mark_size;
             const std::size_t cut = overage < reducible ? overage + mark_size : reducible + mark_size;
-            tool_result.content.resize(tool_result.content.size() - cut);
+            // 刀口先对齐码点边界再砍:裸按字节 resize,砍进三字节汉字的腰上,
+            // 末尾悬半个字,合法 UTF-8 也会被截成非法——请求体 dump 当场
+            // type_error.316,整场会话每回合必挂(真机上掐死过)。
+            const std::size_t keep =
+                platform::Utf8PrefixBoundary(tool_result.content, tool_result.content.size() - cut);
+            tool_result.content.resize(keep);
             tool_result.content += kMark;
             if (report != nullptr) {
                 report->truncated_results = true;

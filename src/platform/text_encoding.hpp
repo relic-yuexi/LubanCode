@@ -54,6 +54,17 @@ std::string SanitizeExternalText(const std::string& text);
 // 十六进制窗口。编码出事时日志只记这些——不倒源码、不倒密钥、不倒正文。
 std::string DescribeUtf8Issue(const std::string& field, const std::string& text);
 
+// 按字节长度截 UTF-8 的两把安全尺(截短/截取的调用点一律先过它们,别拿
+// resize/substr 裸砍——砍进多字节序列的腰上,合法内容也会变非法,请求体
+// dump 当场 type_error.316):
+//   - Utf8PrefixBoundary(text, offset):offset 往退,退到多字节序列的
+//     开头之前;拿 text.substr(0, 返回值) 做前缀不劈半个字。
+//   - Utf8SuffixBoundary(text, offset):offset 往推,推过悬着的续字节;
+//     拿 text.substr(返回值) 做尾段不劈半个字。
+// 输入越界按 0/size 收口,空串安全。
+std::size_t Utf8PrefixBoundary(const std::string& text, std::size_t offset);
+std::size_t Utf8SuffixBoundary(const std::string& text, std::size_t offset);
+
 // 流式增量闸门(宽窄转换异常单):中转把模型流的 text/thinking delta 按
 // 自己的块边界切,多字节序列(emoji、生僻字)会被拦腰劈开——半截字节
 // 放给显示层,轻则屏上闪替换符,重则下游逐块做编码转换时踩进坏序列。

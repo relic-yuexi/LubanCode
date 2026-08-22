@@ -5,6 +5,7 @@
 #include <variant>
 
 #include "agent/artifact_store.hpp"
+#include "platform/text_encoding.hpp"  // Utf8*Boundary:预览头尾不劈半个字
 
 namespace lubancode::agent {
 
@@ -151,12 +152,19 @@ std::string RenderResultView(const NormalizedEvent& event, const ResultViewDecis
         case ResultViewKind::Full:
             return event.result_content;
         case ResultViewKind::Artifact: {
-            const std::size_t head = options.preview_bytes < event.result_content.size()
-                                         ? options.preview_bytes
-                                         : event.result_content.size();
-            const std::size_t tail_begin = event.result_content.size() > options.preview_bytes
-                                               ? event.result_content.size() - options.preview_bytes
-                                               : 0;
+            // 预览头尾都按码点边界对齐:preview_bytes 是字节数,裸 substr 砍进
+            // 多字节序列的腰上,拼出来的视图就是非法 UTF-8,而这个视图会顶替
+            // tool_result 进请求——dump 当场 type_error.316。
+            const std::size_t head =
+                platform::Utf8PrefixBoundary(event.result_content,
+                                             options.preview_bytes < event.result_content.size()
+                                                 ? options.preview_bytes
+                                                 : event.result_content.size());
+            const std::size_t tail_begin =
+                platform::Utf8SuffixBoundary(event.result_content,
+                                             event.result_content.size() > options.preview_bytes
+                                                 ? event.result_content.size() - options.preview_bytes
+                                                 : 0);
             // 第二期:落盘成功的 artifact 视图带稳定 id 与两把只读钥匙的
             // 指引——模型凭 id 能搜全文、能分块读,不再只是"存档里有"的
             // 一句空话(规格"给模型两把只读钥匙")。

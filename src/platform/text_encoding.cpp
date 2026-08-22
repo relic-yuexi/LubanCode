@@ -142,6 +142,31 @@ Utf8ScanStats ScanUtf8Stats(const std::string& text) {
 
 }  // namespace
 
+std::size_t Utf8PrefixBoundary(const std::string& text, std::size_t offset) {
+    if (text.empty()) {
+        return 0;
+    }
+    if (offset > text.size()) {
+        offset = text.size();
+    }
+    // 落在续字节(0x80~0xBF)上就是劈在序列腰里:退到序列开头之前。
+    while (offset > 0 && (static_cast<unsigned char>(text[offset]) & 0xC0) == 0x80) {
+        --offset;
+    }
+    return offset;
+}
+
+std::size_t Utf8SuffixBoundary(const std::string& text, std::size_t offset) {
+    if (offset > text.size()) {
+        return text.size();
+    }
+    // 尾段起点悬在续字节上:推过整段续字节,落在下一个序列的开头。
+    while (offset < text.size() && (static_cast<unsigned char>(text[offset]) & 0xC0) == 0x80) {
+        ++offset;
+    }
+    return offset;
+}
+
 std::string SanitizeExternalText(const std::string& text) {
     if (IsValidUtf8(text)) {
         return text;

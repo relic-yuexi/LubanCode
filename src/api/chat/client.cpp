@@ -2,6 +2,7 @@
 
 #include <charconv>
 #include <chrono>
+#include <iostream>
 #include <string_view>
 #include <utility>
 #include <variant>
@@ -65,9 +66,13 @@ std::expected<void, Error> ChatCompletionsBackend::send_stream(
     try {
         body = body_json.dump();
     } catch (const nlohmann::json::exception& e) {
-        // 请求序列化窄边界:历史里漏网的非法 UTF-8 在这里转成可回传的错误
-        // (AgentLoop 收到 unexpected 正常收场),不再穿透杀掉整场会话。
-        return std::unexpected(Error{ErrorKind::Parse, platform::DescribeDumpFailure(body_json, e), 0});
+        // 请求序列化的最后兜底:历史里漏网的非法 UTF-8(旧会话文件、上游
+        // 新开的口子)不再回传错误掐回合——那会把带病历史原样留在会话里,
+        // 往后每回合都在这里挂,会话等于砖死。响亮记一笔日志,坏串按
+        // U+FFFD 清洗后照发(与落盘边界同一政策),会话活着、模型看得见
+        // 替换符。
+        std::cerr << "[utf8] " << platform::DescribeDumpFailure(body_json, e) << " -> 已按 U+FFFD 清洗后发出\n";
+        body = platform::DumpJsonSanitized(body_json);
     }
     SseFramer framer;
     EventParser parser{options_.reasoning_delta_field};
