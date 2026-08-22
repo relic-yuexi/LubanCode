@@ -1,0 +1,382 @@
+# 终端回合视觉收束:工具批次分组、分界线与 `Worked for`
+
+状态:待做(2026-08-22 用户看图定调:界面要像 Codex 那样干净，一轮一块，
+工具有归属，收尾有分界线与总耗时)
+
+## 一句话
+
+别再让思考、工具、正文、统计、banner 各拿一支笔往滚动区里添。先把一轮
+回答收成一册账，再由终端一口气排版：开头认得用户，中间认得工具批次，
+末尾落一道线，写一句 `Worked for 6m 41s`。
+
+## 用户看到的病相
+
+- `思考 1.4s`、banner、cwd、工具、又一枚 banner、下一段思考挤在同一条
+  流水里。每行本身都能看，合在一起却没有主次。
+- `lubancode <version> [wire] model` 与 cwd 本该是会话 chrome，却会在回到
+  查看态、重绘等路径重新落进 scrollback。它看着像模型在每步重启。
+- 工具调用一枚接一枚，只有绿点与缩进。看不出哪些工具来自同一次模型响应，
+  哪些已经换了下一步思考。
+- 回合虽然已有首尾横线，横线只是裸 `cout`。正文、工具与统计不归它管，错误
+  和步数耗尽又能从中途早退，尾线有时压根不落。
+- 底下常驻状态栏塞版本、模型、cwd、分支、context、缓存与键位；滚动区还反复
+  打一遍相近信息。两处抢着报账，画面越看越满。
+- 工具各自会算耗时，整轮也已经记了 `turn_started`，却只拿它判断“超过三十秒
+  要不要响铃”。用户看不见这一轮到底忙了多久。
+- 底栏其实已有 `Working (Ns · Esc to interrupt)` 与 140ms 扫光动效，可它归
+  `SpinnerBackend` 管：每次模型请求新起，首个 stream event 一到便停。一轮里
+  若经历“模型 -> 工具 -> 模型”，计时会消失、重来，报的不是整轮用时。
+
+## 从三张图读出的规矩
+
+Codex 图里的结构，大致分三层：
+
+```text
+本轮用户输入
+
+  思考 / 工具条目 / 工具结果 / 助手正文
+  思考 / 下一批工具 / 工具结果 / 助手正文
+
+──────────── Worked for 6m 41s ────────────
+
+下一轮输入框
+```
+
+- 一枚 `Ran ...` 是一枚工具 item。它下面可折叠多行命令和输出。
+- 图三的 `$env:http_proxy=...`、`$env:https_proxy=...`、`+4 lines`，从画面看
+  是同一次 `run_command` 里的多行脚本，不是四五枚工具。折叠只收长内容，
+  不能把一枚工具误拆成几枚。
+- 一次模型响应可以吐多枚 `tool_use`。这几枚才算一批；LubanCode 现有
+  `AgentLoop` 也是遍历同一条 assistant message 里的 ToolUseBlock，再逐枚
+  串行执行。眼下回调只报单枚 start/done，批次边界走丢了。
+- 下一次模型请求回来，又是一枚 model step。它的思考、正文、工具不能与上一
+  批无缝黏住；要留一口气，但不必每步再画一条满宽横线。
+- 满宽分界线只认 turn 边界。`Worked for` 也是 turn 尾记，不是每批工具各写
+  一次。
+
+## 现状账(2026-08-22 已翻码)
+
+### 数据太平
+
+- `TranscriptKind` 只有 `Tool / SubTool / Thinking`。没有 User、AssistantText、
+  Turn、ModelStep、ToolBatch 或 TurnFooter。
+- `TranscriptItem` 只记单枚工具或思考的 id、标题、摘要、全文、状态与起止时间。
+  它不知道自己属于哪轮、哪步、哪批，也没有父子关系。
+- 主助手正文不进正常 transcript item。它由 `StreamBodyTracker` 直接流到屏幕；
+  只有 silent 回流才临时伪装成 tool item。故而 Ctrl+L、Ctrl+O、恢复历史与
+  实时画面不能靠一份结构重建。
+- `FormatTranscriptItems()` 只是顺序拼 item。紧凑态跳过 SubTool，除此之外
+  不分轮、不分组、不加块间节奏。
+
+### 输出分了五路
+
+- `PrintDivider()` 在 `RunTurn()` 开头和正常结尾直接写 stdout。
+- `ToolDisplay + TranscriptPainter` 另画工具和思考。
+- `StreamBodyTracker` 另画 Markdown 正文。
+- usage/token/cache 统计又在 `RunTurn()` 尾巴直接写 stdout。
+- `PrintBanner()` 在启动、离开聚焦态、Esc 返回、Ctrl+L 重绘等入口另打。
+
+这些都绕过统一 frame。某一路滚屏，别路的锚点便要猜；某一路早退，别路也
+不知道该补什么终态。
+
+### 已有可借的地基
+
+- `AgentLoop` 已按 assistant message 收齐 ToolUseBlock，再严格串行执行。加
+  batch start/end 回调即可，不必改工具语义或贸然并行。
+- 工具 item 已有 start/end、running/ok/error/cancelled/interrupted/blocked。
+- `InteractiveSession` 已在用户提交前记 `turn_started`，整轮收尾也能拿到
+  elapsed。只差把它交给 view model，而不是只拿去决定是否响铃。
+- Runtime 已有 thread/turn/item 与稳定 id、seq 的合同骨架。可往 item 添
+  step/batch 归属，不必再造第二套身份。
+- 终端已有行级 diff frame、stdout mutex、宽度探测、resize 重绘与 footer
+  事务。要改的是数据与所有权，不是推倒终端底盘。
+
+## 产品定案
+
+### 一、画面只认三块
+
+1. **Session chrome**：会话级身份。启动时打一次；底部状态栏常驻。它不属于
+   transcript，不随工具事件追加。
+2. **Turn transcript**：用户输入与本轮工作。思考、工具批次、正文都装进这
+   一轮，能整轮重画。
+3. **Composer chrome**：输入框、状态与键位。固定在下，不落进 scrollback。
+
+Ctrl+L 是“清可视区，再从当前 view model 重画”，不是“往旧 scrollback 后头
+再添一份 banner + 最近条目”。离开 Ctrl+E 聚焦态也只恢复原 viewport，不添
+新横幅。
+
+### 二、一轮的排法
+
+缺省紧凑态：
+
+```text
+> 用户问题正文
+
+• 思考 2.3s
+• read_file(path)
+  └ 读取 31 行
+• Ran Get-ChildItem ...
+  └ Done · 退出码 0 · 0.5s
+
+助手最后答复……
+
+──────────── Worked for 12.8s ────────────
+```
+
+- 用户输入只在提交后落一次。图片、提及与多行 prompt 另有摘要，不把隐藏动态
+  context 打出来。
+- 思考、工具与正文首行对齐同一视觉轴。绿点只表示状态，不拿五种图形争戏。
+- item 内部用 `└`/`⎿` 收结果。相邻 item 之间不乱塞空行；model step 换拍时
+  才加一行轻间隔。
+- 助手正文前若紧跟工具，留一空行；正文内部由 Markdown 自己排。
+- turn footer 始终一枚。它落在正文/错误/打断提示之后、下一只 composer 之前。
+
+### 三、工具批次
+
+领域结构定成：
+
+```text
+Turn
+  ModelStep #1
+    ThinkingItem
+    TextItem (可空)
+    ToolBatch #1
+      ToolItem A
+      ToolItem B
+  ModelStep #2
+    ThinkingItem
+    TextItem
+  TurnFooter
+```
+
+- `ToolBatch` 的边界取同一条 assistant message 里的连续 ToolUseBlock。执行仍
+  串行；本单不暗改为并行。
+- 一批只有一枚工具时，不显示“工具批次 1”这类废话。结构留在账里，画面只靠
+  连续缩进与间距让它成块。
+- 一批有多枚时，先把各枚标题都登记为 Pending，再按次序 Running -> 终态。
+  用户一眼能看出“模型这拍打算跑三件”，也能看出卡在哪一件。
+- ESC 后，已经跑完的照旧；正在跑的记 Interrupted；同批尚未开跑的记
+  Skipped。不能只给历史补合成 tool_result，屏上却少了那几枚。
+- PTC 一段脚本内的 stub 调用另算 ProgrammaticBatch，父 item 是 PTC；内部工具
+  缺省折叠，Ctrl+O 展开。子代理内层工具沿现有 SubTool 规则，挂在 AgentItem
+  下，不与 main 的 ToolBatch 混为一排。
+
+### 四、多行命令怎么收
+
+- `run_command` 标题只取首个非空逻辑行；末尾加 `+N lines`。不能把整段
+  PowerShell 横铺一百多列。
+- 紧凑态展开结果只留：终态、退出码、耗时、stdout/stderr 行数与头一行摘要。
+- Ctrl+O 展开当前 item，才看完整脚本与截断后的完整输出；Ctrl+E 看不截宽的
+  聚焦页。
+- `$env:*_proxy` 等命令可按 shell lexer/现有命令结构识别换行。不要拿分号随便
+  split；引号、here-string、管道、括号里的分号都不是命令边界。
+- 工具参数与输出各有上限与“另有 N 行”记号。折叠不丢 full_output，也不改
+  session JSONL。
+
+### 五、`Worked for`
+
+- 起点：用户输入通过本地校验、正式交给 turn runtime 的时刻。
+- 终点：本轮正文、工具、hooks、usage 与终态已经收账，footer 准备落笔的时刻。
+- 默认报 wall time，含模型、工具、审批等待与重试。另记 `approval_wait`；详细态
+  可写 `Worked for 2m 10s · waited 35s for approval`，缺省只留前半句。
+- 正常完成：`Worked for 1m 24s`。
+- 用户打断：`Stopped after 18.2s`。
+- 请求/工具链失败：`Failed after 7.6s`。
+- 未真正发起模型（本地校验失败、slash 命令）：不造一枚假的 Worked footer。
+- 格式：十秒内留一位小数；十至五十九秒取整；一分钟以上用 `Xm Ys`；一小时
+  以上用 `Xh Ym`。计时用 steady_clock，墙上时间只作日志字段。
+- footer 文字嵌在横线左侧约两列处，余下横线填满安全宽度。窄于四十列时只写
+  文案，不硬塞左右长线。
+
+### 六、turn 级 `Working` 活动条
+
+用户给的目标画面：
+
+```text
+• Working (52s · esc to interrupt)
+
+────────────────────────────────────
+> Summarize recent commits
+────────────────────────────────────
+gpt-5.6-sol high · D:\lubancode
+```
+
+- 活动条属于 BottomChrome，钉在 composer 上方。正文滚，它不滚；工具更新，
+  它不落进 transcript；frame 重画也只留一份。
+- 生命周期认整个 turn，不认单次 HTTP/model request。用户 prompt 通过校验、
+  `turn.started` 落账便亮；中间流正文、执行工具、模型续步、重试都不熄，也不
+  把秒数归零。
+- `turn.completed` 到来才熄。活动条退场后，同一只计时器的最终值交给
+  `Worked for / Stopped after / Failed after`，两边不得差一截。
+- 缺省文案只写 `Working`。内部虽有 waiting_model / thinking / running_tool /
+  waiting_approval 等 phase，默认不追着阶段换字，免得一行左右跳。详细模式或
+  无障碍接口可读 phase。
+- 动效要轻：只让圆点明暗脉冲，或让亮色沿 `Working` 七个字母缓缓扫过。字符
+  数与显示宽永远不变，不能拿 `- \\ | /` 换字符引起抖动。
+- 帧率取 120-180ms；窗口失焦、repaint suspend、非真 TTY 时停拍。无动画也要
+  保留静态 `Working (Ns)`，每秒刷新一回即可。
+- 时间一秒一跳，动画与计时分账。不能为刷 7fps 每拍重新构造整只代理面板、
+  队列和 slash 提示；只 diff Working 那一行，或凭 frame revision 跳过未变行。
+- `esc to interrupt` 用淡色，Working 用正文亮色，圆点用状态色。提示不抢模型、
+  cwd、context 的语义色。
+- composer 在 turn 期间仍可输入，Enter 进排队队列。活动条不得挡住输入光标，
+  不得把“键入并回车排队”再重复写第二遍。
+- 打开 ask_user/审批菜单时，BottomChrome 暂时让屏。菜单退场后活动条按原
+  `turn_started` 恢复，不能从 0s 重来；等待审批这段仍计入 wall time，同时
+  另累 `approval_wait`。
+- Esc 逐层退出编辑/查看态后才打断 turn 的现规矩保留。真正置 cancel 后，活动
+  条可立即换 `Stopping...`；终态落账后退场，不能瞬间消失让人以为已停，后台
+  却仍在跑。
+- 回合卡死时秒数照涨。超过可配置门槛只改淡色或添 WarningItem，不用闪烁、
+  蜂鸣连响。现有“超过 30 秒收尾响一声”仍只在最终收口触发一次。
+
+现有 `Spinner` 留给 `/compact`、模型目录抓取等单次后台活；正常聊天 turn 不再
+由 `SpinnerBackend` 掌活动条。新立 `TurnActivityState`，让 Runtime/Session
+持有 started_at/status/phase；BottomChrome 只订阅快照并画。
+
+### 七、统计降噪
+
+- 现有“输入 token / cache / 输出 token / 请求数 / context”长行不再每轮全摊。
+- context 与缓存命中常驻底部状态栏，只留最新值。
+- turn footer 紧凑态只写总耗时；Ctrl+O 或 `/usage` 才展开本轮模型请求数、
+  input/output/reasoning/cache、工具数、失败数与重试数。
+- 重要异常不藏：cache 配置错误、上下文逼线、输出预算耗尽仍在 turn body 画一
+  条 WarningItem；普通健康数字退到底栏。
+
+## 新的显示模型
+
+不能继续给 `TranscriptItem` 加几个 bool 糊过去。立中立模型：
+
+```text
+TurnView
+  turn_id, status, started_at, ended_at
+  user_item
+  steps[]
+  assistant_items[]
+  metrics
+
+ModelStepView
+  step_id, index, status
+  items[]
+
+TurnItemView
+  item_id, parent_item_id
+  step_id, batch_id, seq
+  kind: user | thinking | text | tool | warning | error
+  status, title, summary, detail_ref
+  started_at, ended_at
+
+TurnMetrics
+  wall_duration, approval_wait
+  request_count, tool_count, failed_tool_count
+  input/output/reasoning/cache tokens
+
+TurnActivityState
+  turn_id, status, phase
+  started_at, approval_wait_started_at
+  interrupt_requested
+```
+
+- Runtime/领域层产真值，不带 ANSI、不截终端宽、不写“● Done”。
+- `TerminalTurnRenderer` 把 TurnView 投影成 frame；Web/Tauri 可另投 DOM。
+- 现有 `TranscriptItem` 先做 terminal adapter，逐项迁走。迁完后不再承担协议、
+  存档与终端三份职责。
+- 正文也必须成 TextItem/增量事件。`StreamBodyTracker` 可以留作 Markdown 终端
+  painter，却不能再当正文唯一账本。
+
+## 事件与批次边界
+
+给 AgentLoop/Runtime 补齐：
+
+```text
+model_step.started(step_id, index)
+item.started / item.delta / item.completed
+tool_batch.started(batch_id, step_id, ordered_item_ids)
+tool_batch.completed(batch_id, status)
+model_step.completed(step_id, status)
+turn.completed(turn_id, status, metrics)
+```
+
+- AgentLoop 已在拿到完整 assistant message 后遍历 ToolUseBlock。就在遍历前发
+  batch.started，遍历后发 batch.completed；没有工具不发空 batch。
+- 每枚 tool_use id 映射稳定 item_id。不能再靠 `active_main` 猜“当前那枚”。
+  首批仍串行也要用 id 路由，为以后并行与 app-server 留路。
+- Thinking/Text 也带 step_id。一次响应先思考后正文再工具，原序按 seq 保住。
+- turn.completed 不论 success/error/interrupted/budget_exhausted 都只发一次；
+  TerminalTurnRenderer 只凭它落唯一 footer。
+
+## Banner 与重绘规矩
+
+- `PrintBanner()` 只准出现在 session startup 与真正换 provider/session 后的全屏
+  重建。普通 turn、工具 start/done、Ctrl+O、离开焦点态都不得调用。
+- Ctrl+L 清屏后可重画一份 session header，但这是 replace screen，不是 append
+  transcript。重画前废旧 frame，重画后 scrollback 不得叠三份 banner。
+- 回到 focus view 用保存的 viewport/turn id 重建。没有保存就画最近 N 个完整
+  TurnView，不能只拼最近 N 枚工具，免得半轮截头去尾。
+- 底栏版本/模型/cwd/branch 与顶部 banner 去重。缺省只留底栏；启动 banner
+  两行后不再重现。
+
+## 落地次序(一批一枚 commit)
+
+1. **钉黄金画面**：拿单工具、多工具一批、两次 model step、长命令、ask_user、
+   失败、ESC 七份 fixture，存 80/120/160 列纯文本黄金结果。
+2. **补 TurnView 身份**：turn/step/batch/item id 与 metrics 先入 Runtime；AgentLoop
+   发 batch 边界，工具执行语义不动。
+3. **正文入账**：Thinking、Text、Tool、Warning 都走 item 事件；保留现 painter
+   作 adapter，屏上先求逐字不变。
+4. **做 TurnRenderer**：按 TurnView 画一整轮，收回裸 PrintDivider、stats cout
+   与散落空行。正常、错误、打断三条路共用 finalize。
+5. **做批次排版**：Pending/Running/终态、批间距、多行命令 `+N lines`、PTC 与
+   SubTool 父子折叠。
+6. **收 Working 所有权**：从 SpinnerBackend 挪到 TurnActivityState；BottomChrome
+   整轮常驻、同钟计时，审批 suspend/恢复与 Stopping 状态钉测试。
+7. **加 Worked footer**：接 TurnActivityState 的 started_at、终态与 metrics；
+   完成/打断/失败三种文案和窄屏退化。
+8. **清 banner 重打**：Ctrl+L/focus/resize 改为 frame replace；删普通返回路径
+   的 PrintBanner append。
+9. **统计搬家**：健康数字进状态栏/详细态，WarningItem 留正文；补双语 i18n。
+10. **真机回归**：Windows Terminal、PowerShell、cmd、POSIX PTY，各跑 resize、
+   Ctrl+O/Ctrl+E、长输出滚屏、审批菜单、后台代理与 session resume。
+
+## 验收
+
+- 每个用户 turn 恰有一枚开头与一枚 footer；没有孤线，没有双 footer。
+- success/error/ESC/step limit/output budget exhausted/异常抛出都能落对应终态，
+  下一只 composer 不会粘在错误行后头。
+- 同一 assistant message 吐三枚 tool_use：画面先登记三枚，串行推进状态，同属
+  一个 batch；下一次模型响应另起 step，节奏看得出。
+- 一枚五行 PowerShell 只画一个 `Ran` item，标题带 `+4 lines`；展开后五行齐，
+  不按分号误切。
+- 普通一轮里 banner 不重复。Ctrl+O、Ctrl+E 返回、resize 都不往 scrollback
+  追加 banner。Ctrl+L 清屏后只见一份 header。
+- `Worked for` 计时覆盖模型 + 工具 + 审批 + 重试；与测试注入的 fake clock
+  对得上，不把各工具耗时相加冒充墙上耗时。
+- Working 从 turn.started 亮到 turn.completed：首字节、正文 delta、工具批次、
+  下一次模型请求都不灭、不归零；最终数字与 Worked footer 同钟一致。
+- Working 每拍不改行宽，不挪 composer 光标。动画线程停后能 join；菜单挂起、
+  resize、Ctrl+O、ESC 与异常退场都不留一条幽灵 Working。
+- 一轮含三次模型请求时只起一只 turn activity timer；`SpinnerBackend` 不再各
+  起三条 Working。`/compact` 的独立 spinner 仍照常工作。
+- 80/120/160 列下横线不折行，footer 不压文字；中文、emoji、ANSI、双宽字符
+  均按显示列截，不切坏 UTF-8。
+- 紧凑态一屏能扫完一轮；详细态仍能追回完整参数、输出、diff、思考与 token。
+- Ctrl+L、resume 历史重放与实时画面由同一 TurnRenderer 产，除 Running 动态
+  外，终态黄金文本一致。
+- Terminal 与 app-server 收到同一批 turn/step/batch/item id 与次序；前端只
+  改排版，不各自猜批次。
+
+## 与别单的边界
+
+- `显示系统彻底剥离_统一SessionRuntime接TUI_Web_Tauri.todo` 管依赖与协议大
+  边界；本单给 Terminal frontend 定具体 view model 与画面验收，两单相接。
+- `会话管理器仿Codex_resume_检索排序归档与安全删除.todo` 只管历史选择器，
+  不管一轮回答怎样铺。
+- app-server 单负责运事件，不决定横线、绿点、折叠或 Worked 文案。
+
+## 不做
+
+- 不只换颜色、加空行。没有 Turn/Step/Batch 结构，调 CSS 式参数治不了乱。
+- 不把同批工具偷偷并行。先把批次身份补齐，执行顺序另立性能单。
+- 不把每个 model step 都画满宽横线；满宽线只认 turn。
+- 不隐藏错误、审批、diff 或预算告警来换“干净”。干净靠归组与折叠，不靠删账。
+- 不照抄 Codex 私有字段与内部实现；只照用户看得见的层次、安全与节奏。
