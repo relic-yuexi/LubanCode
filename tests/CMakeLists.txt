@@ -180,6 +180,8 @@ add_executable(lubancode_tests
   # 显示系统剥离单第一步:runtime 合同(Event/Command/Broker 形状与序列化
   # 往返保真、稳定枚举字符串、坏报文抛错)。
   test_runtime_contract.cpp
+  # 显示系统剥离单第五步:TurnItem 领域条目 + 中立 diff 行表(与 cli 算法同钉)。
+  test_turn_item.cpp
   # 显示系统剥离单 P2:AgentLoop 异步审批通道(async 优先/同步回落/四态
   # 收账/悬空收口文案)。
   test_approval_broker.cpp

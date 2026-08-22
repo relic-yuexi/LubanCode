@@ -375,6 +375,8 @@ add_library(lubancode_core STATIC
   src/runtime/runtime_contract.cpp
   # 第三步:TurnRuntime 纯逻辑核(权限/hooks/usage/取消),cli/app 零依赖。
   src/runtime/turn_runtime.cpp
+  # 第五步:TurnItem 领域条目 + 中立 diff 行表(diff 计算移出 ToolDisplay)。
+  src/runtime/turn_item.cpp
   # plugins 本地 Tool 运行时(冻结合同 + process v1):manifest 强校验、
   # 进程协议帧、无 shell 进程执行、工具装配层。
   src/runtime/plugin_contract.cpp

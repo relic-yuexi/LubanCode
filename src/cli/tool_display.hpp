@@ -29,6 +29,7 @@
 #include "cli/theme.hpp"
 #include "cli/todo_render.hpp"
 #include "cli/transcript.hpp"
+#include "runtime/turn_item.hpp"
 #include "tools/todo_tool.hpp"
 #include "tools/tool.hpp"
 
@@ -91,36 +92,53 @@ struct FileDiffPreview {
     int line_count = 0;  // colored 的行数,ReserveRows 记账用
 };
 
-// 按 edit_file/write_file 的入参拼 diff 预览;别的工具给 nullopt。读旧
-// 文件在这一层做(tools/ 层一字不动):edit_file 拿真文件内容做整文替换
-// 后对比(变更处自带 ±3 行真实上下文和行号),找不到 old_string 回退成
-// 只比 old/new 两段;write_file 旧文件存在做行级对比,不存在全部算新增。
+// 按 edit_file/write_file 的入参拼 diff 预览;别的工具给 nullopt。
+// P5(显示系统剥离单:拆领域条目):行表改吃 runtime::BuildDiffTable 的
+// 中立 DiffRow(同一颗算法、同一份磁盘真值,单测两边同钉),这里只剩
+// "终端投影"——行表翻成 cli::DiffLine 交 FormatDiff 排版,事实摘要
+// (located/replaced/old_exists)翻成 i18n 文案。Web/Tauri/app-server 直接
+// 拿 DiffRow 造 DOM,不走这一层。
 inline std::optional<FileDiffPreview> BuildFileDiffPreview(const std::string& name, const nlohmann::json& input,
                                                      const lubancode::cli::Theme& theme) {
     namespace cli = lubancode::cli;
-    if (name != "write_file" && name != "edit_file") {
+    const auto table = lubancode::runtime::BuildDiffTable(name, input);
+    if (!table.has_value()) {
         return std::nullopt;
     }
-    const std::string path = input.value("path", std::string());
-    const std::optional<std::string> old_content = ReadFileBytes(path);
+    const std::string path = table->path;
 
     std::vector<cli::DiffLine> diff;
+    diff.reserve(table->rows.size());
+    for (const auto& row : table->rows) {
+        cli::DiffLine line;
+        switch (row.kind) {
+            case lubancode::runtime::DiffRowKind::Context:
+                line.kind = cli::DiffLineKind::Context;
+                break;
+            case lubancode::runtime::DiffRowKind::Del:
+                line.kind = cli::DiffLineKind::Del;
+                break;
+            case lubancode::runtime::DiffRowKind::Add:
+                line.kind = cli::DiffLineKind::Add;
+                break;
+        }
+        line.text = row.text;
+        line.old_no = row.old_no;
+        line.new_no = row.new_no;
+        diff.push_back(std::move(line));
+    }
     std::string header;
     if (name == "edit_file") {
         const bool replace_all = input.value("replace_all", false);
-        auto edit = cli::BuildEditDiff(old_content.value_or(std::string()), input.value("old_string", std::string()),
-                                        input.value("new_string", std::string()), replace_all);
-        diff = std::move(edit.lines);
-        if (!edit.located) {
+        if (!table->located) {
             header = tr("diff.not_located");
         } else if (replace_all) {
-            header = trf("diff.replace_all", edit.replaced_count);
+            header = trf("diff.replace_all", table->replaced_count);
         } else {
             header = tr("diff.plain");
         }
     } else {
-        diff = cli::BuildWriteDiff(old_content, input.value("content", std::string()));
-        header = old_content.has_value() ? tr("diff.overwrite") : tr("diff.new_file");
+        header = table->old_exists ? tr("diff.overwrite") : tr("diff.new_file");
     }
 
     const int width = cli::DetectConsoleWidth().value_or(80);
