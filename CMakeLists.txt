@@ -372,6 +372,8 @@ add_library(lubancode_core STATIC
   src/agent/skill_drafter.cpp
   # 显示系统剥离单第一步:runtime 合同(纯类型 + 序列化,零 cli/app 依赖)。
   src/runtime/runtime_contract.cpp
+  # 第三步:TurnRuntime 纯逻辑核(权限/hooks/usage/取消),cli/app 零依赖。
+  src/runtime/turn_runtime.cpp
   src/cli/i18n.cpp
   src/cli/image_input.cpp
   src/cli/setup_wizard.cpp
