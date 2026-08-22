@@ -303,7 +303,20 @@ $$
 
 ## 17. 会话恢复
 
-裸敲 `/resume` 会列出本目录最近会话。`↑` / `↓` 选择，`Enter` 恢复。熟悉编号或 id 时，也可直接写 `/resume 1` 或 `/resume <id>`。
+裸敲 `/resume` 打开全屏会话台账：
+
+| 按键 | 行为 |
+| --- | --- |
+| 直接输入 | 搜索标题 / 首句 / id / 目录，ASCII 不分大小写 |
+| `Tab` / `Shift+Tab` | 轮换 Search / Filter / Sort 焦点 |
+| `←` / `→` | 改当前焦点选项（Filter: Cwd/All；Sort: Updated/Created） |
+| `↑` / `↓` / `PageUp` / `PageDown` / `Home` / `End` | 浏览与翻页 |
+| `Ctrl+T` | 看所选会话的转录（大文件取头尾；`Esc` / `Ctrl+T` 收起回原行） |
+| `Ctrl+E` | 摊开选中场的长标题、目录、id、模型、消息数与创建/更新时间 |
+| `Ctrl+O` | 紧凑行 / 舒展行切换（只改画法，不动筛选与选中） |
+| `Enter` / `Esc` | 恢复所选 / 原路返回不动盘 |
+
+台账里没有删除键——浏览不兼任碎纸机。归档与删除见[会话与上下文](../sessions/README.md)的归档与永久删除两节。熟悉编号或 id 时，也可直接写 `/resume 1` 或 `/resume <id>` 跳过台账。
 
 终端按原顺序重放：
 
