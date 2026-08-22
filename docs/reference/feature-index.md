@@ -12,6 +12,7 @@
 | 续接会话 | `lubancode --continue` | 同交互会话 | 续写原 JSONL | 接着本目录最近一场工作 |
 | 单发任务 | `lubancode "问题"` | 无逐键菜单；工具仍可调用 | 不落交互会话 | 脚本、短任务、CI 辅助 |
 | 管道输入 | `git diff | lubancode "审查"` | plain 输出；不能现场提问 | 不落交互会话 | 串接 shell 工作流 |
+| 无界面后台 | `lubancode app-server` | 双向 JSON-RPC：审批与提问走反向请求 | 有 | 富客户端与 SSH 远程项目 |
 | 诊断模式 | `--config`、`--help`、`--version`、`--check-update` | 不请求模型 | 无 | 排错、版本检查与自动化探测 |
 
 ## 模型与协议
@@ -61,6 +62,8 @@
 | 项目指令 | 从 Git 根到 cwd 分层加载 `AGENTS.override.md` / `AGENTS.md`；主代理与子代理共用。 |
 | 隔离 worktree | 新建、列出、保留或移除工作树；会话切换到新 cwd 后重建项目上下文。 |
 | 项目记忆 | 默认关闭；本地召回；`off/review/auto` 三档学习；待审候选与正式写入分账。 |
+
+无界面后台协议（app-server）的方法面、事件账与 SSH 承载见 [app-server 手册](../features/app-server/README.md)：审批/提问走反向请求，diff 走中立行表，`workflow/query` 查 run 快照与增量事件。
 
 ## 终端界面
 

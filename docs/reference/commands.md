@@ -10,6 +10,7 @@
 lubancode [options]
 lubancode "问题"
 command | lubancode "补充要求"
+lubancode app-server
 lubancode archive <id|标题>
 lubancode unarchive <id>
 lubancode delete <id|标题> [--force]
@@ -20,6 +21,7 @@ lubancode delete <id|标题> [--force]
 | 无参数 | 进入交互会话；缺少模型配置时先跑初次向导。 |
 | 一个普通参数 | 作为单发问题；模型仍可调用适用工具。 |
 | stdin 有管道数据 | 管道正文与命令行问题一同交给模型；输出降为 plain。 |
+| `app-server` | 无界面后台协议模式：stdin/stdout 上逐行 JSON-RPC，不碰终端、不画界面（见 [app-server 协议](../features/app-server/README.md)）。SSH 远程项目经 `ssh <host> lubancode app-server` 拉起。 |
 | `archive` / `unarchive` / `delete` | 会话管理子命令，打完结果就退（见下）。 |
 | EOF | 交互模式退出；空行只重新显示提示符。 |
 

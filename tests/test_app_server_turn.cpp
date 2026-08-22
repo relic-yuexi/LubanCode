@@ -304,7 +304,7 @@ TEST_CASE("整回合:thread/start -> turn/start -> 文本流 -> turn/completed")
     thread_id = start_result["threadId"];
 
     const nlohmann::json completed =
-        harness.server->HandleTurnStart(thread_id, "打个招呼", error_code);
+        harness.server->HandleTurnStart(thread_id, "打个招呼", {}, error_code);
     REQUIRE(error_code.empty());
 
     // 回合收场:成功终态,带 usage 与步数。
@@ -316,10 +316,10 @@ TEST_CASE("整回合:thread/start -> turn/start -> 文本流 -> turn/completed")
     CHECK(completed["stepsUsed"] == 1);
 
     // 事件账:turn/started 在前,item/started -> item/delta -> item/completed
-    // 中间,turn/completed 唯一终态在尾。顺序逐条查(stdout 逐行可解析
-    // 的纪律就在这里钉:每一行都 parse)。
+    // 中间,turn/usage(MessageDone 时刻)与 turn/completed 唯一终态在尾。
+    // 顺序逐条查(stdout 逐行可解析的纪律就在这里钉:每一行都 parse)。
     const std::vector<std::string> lines = harness.DrainWritten();
-    REQUIRE(lines.size() == 5);
+    REQUIRE(lines.size() == 6);
 
     std::vector<std::string> methods;
     for (const std::string& line : lines) {
@@ -327,8 +327,10 @@ TEST_CASE("整回合:thread/start -> turn/start -> 文本流 -> turn/completed")
         REQUIRE(parsed.contains("method"));
         methods.push_back(parsed["method"]);
     }
-    CHECK(methods == std::vector<std::string>{
-                        "turn/started", "item/started", "item/delta", "item/completed", "turn/completed"});
+    INFO("actual methods: ", nlohmann::json(methods).dump());
+    // usage 在 MessageDone 时刻报,早于正文条目的收尾回调——顺序即此。
+    CHECK(methods == std::vector<std::string>{"turn/started", "item/started", "item/delta",
+                                              "turn/usage", "item/completed", "turn/completed"});
 
     // 条目字段:正文条目、增量内容。
     const nlohmann::json item_started = nlohmann::json::parse(lines[1]);
@@ -338,6 +340,25 @@ TEST_CASE("整回合:thread/start -> turn/start -> 文本流 -> turn/completed")
     const nlohmann::json item_delta = nlohmann::json::parse(lines[2]);
     CHECK(item_delta["params"]["delta"] == "你好,远方。");
     CHECK(item_delta["params"]["itemId"] == item_started["params"]["item"]["id"]);
+
+    // 进度事件(阶段 3):每条事件带显式 seq(单调);turn/usage 的账与
+    // turn/completed 的 usage 同源(同一份 UsageReport)。
+    std::uint64_t last_seq = 0;
+    bool seq_monotonic = true;
+    for (const std::string& line : lines) {
+        const nlohmann::json parsed = nlohmann::json::parse(line);
+        REQUIRE(parsed["params"].contains("seq"));
+        const std::uint64_t seq = parsed["params"]["seq"].get<std::uint64_t>();
+        if (seq <= last_seq) {
+            seq_monotonic = false;
+        }
+        last_seq = seq;
+    }
+    CHECK(seq_monotonic);
+    const nlohmann::json usage_event = nlohmann::json::parse(lines[3]);
+    CHECK(usage_event["params"]["usage"]["inputTokens"] == 10);
+    CHECK(usage_event["params"]["usage"]["outputTokens"] == 5);
+    CHECK(usage_event["params"]["model"] == "fake-model");
 
     // 终态唯一:turn/completed 只出现一次。
     int completed_count = 0;
@@ -384,7 +405,7 @@ TEST_CASE("整回合(模型报错):终态 error,错误文案带上") {
     REQUIRE(error_code.empty());
 
     const nlohmann::json completed =
-        harness.server->HandleTurnStart(start_result["threadId"], "问点啥", error_code);
+        harness.server->HandleTurnStart(start_result["threadId"], "问点啥", {}, error_code);
     REQUIRE(error_code.empty());
     CHECK(completed["status"] == "error");
     CHECK(completed.contains("error"));
@@ -406,7 +427,7 @@ TEST_CASE("整回合(模型报错):终态 error,错误文案带上") {
 TEST_CASE("turn/start 打不存在的 thread:参数错,不发终态假事件") {
     TestHarness harness{std::string()};
     std::string error_code;
-    const nlohmann::json completed = harness.server->HandleTurnStart("ghost", "问", error_code);
+    const nlohmann::json completed = harness.server->HandleTurnStart("ghost", "问", {}, error_code);
     CHECK_FALSE(error_code.empty());
     CHECK(completed.is_null());
     CHECK(harness.DrainWritten().empty());
@@ -421,10 +442,10 @@ TEST_CASE("同一 thread 同拍两轮:协议明拒 kErrTurnAlreadyRunning 的口
     const std::string thread_id = start_result["threadId"];
 
     // 第一轮同步跑完:turn_running 已复位,第二轮合法。
-    const nlohmann::json first = harness.server->HandleTurnStart(thread_id, "一", error_code);
+    const nlohmann::json first = harness.server->HandleTurnStart(thread_id, "一", {}, error_code);
     CHECK(error_code.empty());
     CHECK(first["status"] == "success");
-    const nlohmann::json second = harness.server->HandleTurnStart(thread_id, "二", error_code);
+    const nlohmann::json second = harness.server->HandleTurnStart(thread_id, "二", {}, error_code);
     CHECK(error_code.empty());
     CHECK(second["status"] == "success");
 

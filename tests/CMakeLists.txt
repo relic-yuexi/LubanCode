@@ -184,6 +184,15 @@ add_executable(lubancode_tests
   test_app_server_turn.cpp
   # app-server 阶段 2:审批与打断(permission/request 四态、悬停/超时/
   # 打断、acceptForSession 免问、迟到失效、ask_user 的 user/ask)。
+  test_app_server_approval.cpp
+  # app-server 阶段 3:diff/进度(diff 行表穿透、增量合并、命令条目、
+  # 事件 seq、图片输入、methods 冻结矩阵)。
+  test_app_server_progress.cpp
+  # app-server P9 收尾:thread/archive|unarchive|delete 三命令走
+  # SessionCommandService、workflow/query 快照与增量。
+  test_app_server_sessions.cpp
+  # app-server 阶段 4:真进程冒烟(stdio 管道替身;缺主程序的构建跳过)。
+  test_app_server_smoke.cpp
   # 显示系统剥离单第一步:runtime 合同(Event/Command/Broker 形状与序列化
   # 往返保真、稳定枚举字符串、坏报文抛错)。
   test_runtime_contract.cpp
@@ -269,7 +278,9 @@ endif()
 target_compile_definitions(lubancode_tests PRIVATE
   LUBANCODE_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
   LUBANCODE_TEST_OFFICIAL_SKILLS_DIR="${CMAKE_SOURCE_DIR}/skills"
-  LUBANCODE_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  LUBANCODE_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+  # app-server 冒烟(阶段 4):真进程测试要找到 build 树里的主程序。
+  LUBANCODE_BINARY_DIR="${CMAKE_BINARY_DIR}")
 
 # M7 起家,plugins 单第 5 步起三平台:真库加载测试的靶子——示例插件
 # hello_plugin(直接编 examples/ 里那份源码,顺带验证示例真的能编)+
