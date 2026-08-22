@@ -10,6 +10,9 @@
 lubancode [options]
 lubancode "问题"
 command | lubancode "补充要求"
+lubancode archive <id|标题>
+lubancode unarchive <id>
+lubancode delete <id|标题> [--force]
 ```
 
 | 形式 | 行为 |
@@ -17,7 +20,14 @@ command | lubancode "补充要求"
 | 无参数 | 进入交互会话；缺少模型配置时先跑初次向导。 |
 | 一个普通参数 | 作为单发问题；模型仍可调用适用工具。 |
 | stdin 有管道数据 | 管道正文与命令行问题一同交给模型；输出降为 plain。 |
+| `archive` / `unarchive` / `delete` | 会话管理子命令，打完结果就退（见下）。 |
 | EOF | 交互模式退出；空行只重新显示提示符。 |
+
+### 会话管理子命令
+
+- `lubancode archive <SESSION>`：把一场会话归档——JSONL 字节原样搬进 `~/.lubancode/sessions/archive/`。`SESSION` 认完整 id、唯一 id 前缀或唯一命中的标题；重名列短 id 叫你点明，绝不猜。归档后 `--continue`、`/sessions`、裸 `/resume` 略过它。
+- `lubancode unarchive <SESSION>`：取消归档，搬回 sessions 根，`/resume` 又能续聊。
+- `lubancode delete <SESSION>`：永久删除一场会话（根或归档里的都行）。交互终端先走确认屏（标题/完整 id/目录/「永久删除」，缺省取消，EOF、空答、别的答案都算取消）。`--force` 跳过确认——只给脚本显式使用，不可恢复。删除只碰目标那一份 `.jsonl`；artifact blob 按内容寻址、可能被别的会话引用，不连坐删。
 
 ## 启动参数
 
@@ -145,13 +155,21 @@ usage 账分四态：`not_reported`（服务端没回 usage）/ `disabled`（met
 
 立刻压缩旧历史。可在参数里补一句“这次必须保住什么”。压缩模型由 `compact_model` 决定，留空沿用会话模型。
 
-### `/sessions [all]`
+### `/sessions [all|archived]`
 
-默认列 cwd 下最近 20 场；`all` 跨目录列。列表含时间、标题、模型与 id。
+默认列 cwd 下最近 20 场；`all` 跨目录列；`archived` 只读列已归档的场子。列表含时间、标题、模型与 id。归档的在 `sessions/archive/` 下，字节原样；想续聊先 `lubancode unarchive <id>`。
 
 ### `/resume [编号|id]`
 
-裸敲打开方向键菜单。恢复时重放消息、工具摘要与压缩点，随后继续写回原 JSONL。直接给编号或 id 可跳过菜单。
+裸敲打开全屏会话台账：输入即搜（标题/首句/id/目录），Tab 轮换 Search/Filter/Sort 焦点，左右键改筛选与排序，上下浏览、PageUp/PageDown 翻页。三种查看态：`Ctrl+T` 看所选会话的转录（大文件取头尾，Esc 收起回原行）；`Ctrl+E` 摊开选中场的标题、目录、id、模型、消息数与创建/更新时间；`Ctrl+O` 在紧凑行与舒展行间切换，只改画法不动筛选与选中。Enter 恢复时重放消息、工具摘要与压缩点，随后继续写回原 JSONL；Esc 原路返回不动盘。直接给编号或 id 可跳过台账。
+
+### `/archive`
+
+归档当前会话：刷盘关句柄，把 JSONL 搬进 `~/.lubancode/sessions/archive/`，成功后退出交互。字节、id、标题、时间一字不动；`--continue`、`/sessions`、裸 `/resume` 从此略过它。后台子代理还在跑时拒绝。别的场子用顶层命令 `lubancode archive <id|标题>`。
+
+### `/delete`
+
+永久删除当前会话：先过确认屏（标题/完整 id/目录/「永久删除」四行，缺省取消，EOF、空答、别的答案都算取消），确认后关句柄、删文件、退出。后台子代理还在跑时拒绝。别的场子用顶层命令 `lubancode delete <id|标题>`。归档的场子也能删。artifact blob 按内容寻址、可能被别的会话引用，不连坐删。
 
 ### `/export [路径]`
 
@@ -272,6 +290,7 @@ usage 账分四态：`not_reported`（服务端没回 usage）/ `disabled`（met
 | 多选 | `↑/↓` 移动，Space 勾选，Enter 提交，Esc 取消。 |
 | 自由填写 | 移到“自己填写”后直接输入，Backspace 删除，Enter 提交。 |
 | `/model` 编号选择 | 空行选当前项，Esc 取消。 |
+| `/resume` 会话台账 | 输入即搜；`Tab`/`Shift+Tab` 轮换 Search/Filter/Sort 焦点，`←/→` 改选项；`↑/↓` 浏览，`PageUp/PageDown` 翻页，`Home/End` 到头尾；Enter 恢复，Esc 原路返回。查看态：`Ctrl+T` 转录（Esc/Ctrl+T 收起回原行），`Ctrl+E` 摊开选中场详情，`Ctrl+O` 紧凑/舒展切换。台账里没有删除键。 |
 
 ## 非交互降级
 

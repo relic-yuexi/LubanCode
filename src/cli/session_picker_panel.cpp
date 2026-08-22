@@ -15,6 +15,8 @@
 #include "cli/line_editor.hpp"
 #include "platform/console.hpp"
 
+#include <utility>
+
 namespace lubancode::cli {
 
 namespace {
@@ -59,6 +61,12 @@ std::optional<KeyEvent> MapPickerKey(const platform::KeyInput& key) {
             return KeyEvent::Simple(KeyKind::Enter);
         case PK::NewLine:
             return KeyEvent::Simple(KeyKind::NewLine);
+        case PK::CtrlO:
+            return KeyEvent::Simple(KeyKind::CtrlO);
+        case PK::CtrlE:
+            return KeyEvent::Simple(KeyKind::CtrlE);
+        case PK::CtrlT:
+            return KeyEvent::Simple(KeyKind::CtrlT);
         case PK::Esc:
             return KeyEvent::Simple(KeyKind::Esc);
         case PK::CtrlC:
@@ -76,7 +84,8 @@ std::optional<KeyEvent> MapPickerKey(const platform::KeyInput& key) {
 SessionPickerPanelResult RunSessionPickerPanel(const SessionPickerFeed& feed, const Theme& theme,
                                                SessionPickerScope initial_scope,
                                                SessionPickerSort initial_sort, const std::string& prefer_id,
-                                               std::size_t visible_capacity) {
+                                               std::size_t visible_capacity,
+                                               const SessionTranscriptProvider& transcript_provider) {
     SessionPickerPanelResult result;
     result.scope = initial_scope;
     result.sort = initial_sort;
@@ -104,6 +113,21 @@ SessionPickerPanelResult RunSessionPickerPanel(const SessionPickerFeed& feed, co
         return entry == nullptr ? std::string() : entry->id;
     };
 
+    // 转录浮层的账:开着的浮层显示哪场的转录 + 已取回的行。选中 id 变了
+    // (或头一回开浮层)才回调 provider 读一回盘——浮层开着时浏览键本就
+    // 落空(HandleKey 拦了),选中不会动,天然不会每键读盘。
+    std::string transcript_for_id;
+    std::vector<std::string> transcript_lines;
+    const auto refresh_transcript = [&](const std::string& id) {
+        if (transcript_provider == nullptr || id.empty()) {
+            transcript_lines.clear();
+            transcript_for_id = id;
+            return;
+        }
+        transcript_lines = transcript_provider(id);
+        transcript_for_id = id;
+    };
+
     auto draw = [&]() {
         std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
         const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
@@ -111,7 +135,20 @@ SessionPickerPanelResult RunSessionPickerPanel(const SessionPickerFeed& feed, co
             return false;
         }
         width = info->width > 8 ? info->width : 80;
-        const SessionPickerFrame frame = BuildSessionPickerFrame(core, width);
+        // 浮层开着画转录帧;关着画台账帧。转录按需取(选中 id 变了才读)。
+        const SessionPickerFrame frame = [&]() -> SessionPickerFrame {
+            if (!core.state().transcript_open) {
+                return BuildSessionPickerFrame(core, width);
+            }
+            const std::string id = selected_id_now();
+            if (id != transcript_for_id) {
+                refresh_transcript(id);
+            }
+            const std::string title =
+                id.empty() ? std::string(tr("picker.transcript.title"))
+                           : trf("picker.transcript.title", id);
+            return BuildSessionTranscriptFrame(title, transcript_lines, width);
+        }();
 
         const int rows_needed = static_cast<int>(frame.lines.size()) + 2;
         const int cursor_before = info->cursor_y;

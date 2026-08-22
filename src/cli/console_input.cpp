@@ -449,6 +449,10 @@ std::optional<KeyEvent> MapKey(const platform::KeyInput& key) {
             return KeyEvent::Simple(KeyKind::CtrlO);
         case PK::CtrlE:
             return KeyEvent::Simple(KeyKind::CtrlE);
+        case PK::CtrlT:
+            // 会话选择器的转录键:编辑器核心没有这个语义,照实搬运(死键),
+            // picker 面板自己认。
+            return KeyEvent::Simple(KeyKind::CtrlT);
         case PK::CtrlX:
         case PK::CtrlK:
             // 面板两段确认键:只在 ReadLineKeyByKey 的面板缝里消费,不该进

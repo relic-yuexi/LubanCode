@@ -108,8 +108,15 @@ add_executable(lubancode_tests
   # scope/搜索/分页/坏档/空表/指纹缓存)。
   test_session_catalog.cpp
   # 第二步:SessionPicker 纯逻辑(焦点轮换/搜索/筛选排序切换/翻页边界/
-  # 选中保持/视口窗口账/渲染帧/空态/相对时间/百分比)。
+  # 选中保持/视口窗口账/渲染帧/空态/相对时间/百分比);第三步:三种查看态
+  # (Ctrl+T 转录浮层/Ctrl+E 展开/Ctrl+O 紧凑舒展)。
   test_session_picker.cpp
+  # 第四五步:SessionLifecycle 搬与删的唯一收口(引用解析/archive 字节
+  # 原样/幂等/目标拒绝/路径校验/开句柄先关/归档视图不掺默认列表)。
+  test_session_lifecycle.cpp
+  # 第六步:SessionCommandService(runtime 侧命令服务,typed command 收口)
+  # 与合同枚举往返(thread.archive 等 + thread.deleted)。
+  test_session_command_service.cpp
   test_prompt_files.cpp
   test_project_instructions.cpp
   test_project_memory.cpp

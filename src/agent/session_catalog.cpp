@@ -288,28 +288,36 @@ SessionCatalog::SessionCatalog(std::string sessions_dir) : sessions_dir_(std::mo
 void SessionCatalog::Scan() {
     namespace fs = std::filesystem;
     std::error_code ec;
-    fs::directory_iterator it(Utf8Path(sessions_dir_), ec);
-    if (ec) {
-        return;  // 目录不存在:还没存过任何会话
-    }
     std::map<std::string, SessionSummary> fresh;
-    for (const auto& dir_entry : it) {
-        if (!dir_entry.is_regular_file(ec) || dir_entry.path().extension() != ".jsonl") {
-            continue;
+    // 两处扫:根(活动)与 archive/(归档,0.26.25 起 SessionLifecycle 立)。
+    // ListSessions/--continue/默认 /resume 只扫根——那是它们自己的口径;
+    // 这里两处都收进缓存,查询按 state 筛,Archived 视图才看得到。
+    const auto scan_dir = [&](const fs::path& dir, SessionState state) {
+        fs::directory_iterator it(dir, ec);
+        if (ec) {
+            return;  // 目录不存在:还没存过任何会话(archive 常年不立)
         }
-        SessionSummary entry;
-        entry.id = PathToUtf8(dir_entry.path().stem());
-        entry.file_path = PathToUtf8(dir_entry.path());
-        entry.state = SessionState::Active;  // archive 目录第 4 步才立
-        RefreshEntry(entry);
-        fresh[entry.id] = std::move(entry);
-    }
+        for (const auto& dir_entry : it) {
+            if (!dir_entry.is_regular_file(ec) || dir_entry.path().extension() != ".jsonl") {
+                continue;
+            }
+            SessionSummary entry;
+            entry.id = PathToUtf8(dir_entry.path().stem());
+            entry.file_path = PathToUtf8(dir_entry.path());
+            entry.state = state;
+            RefreshEntry(entry);
+            fresh[entry.id] = std::move(entry);
+        }
+    };
+    scan_dir(Utf8Path(sessions_dir_), SessionState::Active);
+    scan_dir(Utf8Path(sessions_dir_) / "archive", SessionState::Archived);
     entries_ = std::move(fresh);
 }
 
 void SessionCatalog::RefreshEntry(SessionSummary& entry) const {
     std::error_code ec;
     namespace fs = std::filesystem;
+    const SessionState state_before = entry.state;  // Scan 按目录写好;别让重读盖掉
     const fs::path path = Utf8Path(entry.file_path);
     const auto size = fs::file_size(path, ec);
     const auto mtime = fs::last_write_time(path, ec);
@@ -341,7 +349,9 @@ void SessionCatalog::RefreshEntry(SessionSummary& entry) const {
         entry.updated_at = FileMtimeTimestamp(entry.file_path);  // 账里没 ts,退 mtime
         entry.updated_at_key = SessionTimeSortKey(entry.updated_at);
     }
-    entry.state = SessionState::Active;
+    // SummarizeSessionContent 返回的 state 是默认 Active,会盖掉 Scan 按
+    // 目录写好的值——按指纹前的旧账还原(调用方给的才是真状态)。
+    entry.state = state_before;
     entry.file_fingerprint = fingerprint;
 }
 

@@ -384,10 +384,14 @@ add_library(lubancode_core STATIC
   src/agent/microcompact.cpp
   src/agent/session_store.cpp
   src/agent/session_catalog.cpp
+  # 会话管理器单第四五步:SessionLifecycle 搬与删的唯一收口(纯磁盘薄壳)。
+  src/agent/session_lifecycle.cpp
   src/agent/workflow_recorder.cpp
   src/agent/skill_drafter.cpp
   # 显示系统剥离单第一步:runtime 合同(纯类型 + 序列化,零 cli/app 依赖)。
   src/runtime/runtime_contract.cpp
+  # 会话管理器单第六步:会话查询/搬删的 runtime 侧命令服务(合同消费方)。
+  src/runtime/session_command_service.cpp
   # 第三步:TurnRuntime 纯逻辑核(权限/hooks/usage/取消),cli/app 零依赖。
   src/runtime/turn_runtime.cpp
   # plugins 本地 Tool 运行时(冻结合同 + process v1):manifest 强校验、

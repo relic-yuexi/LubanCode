@@ -416,6 +416,10 @@ std::optional<KeyInput> KeyReader::ReadOne() {
         out.kind = KeyInput::Kind::CtrlE;
         return out;
     }
+    if (b0 == 0x14) {
+        out.kind = KeyInput::Kind::CtrlT;  // 会话选择器:转录浮层
+        return out;
+    }
     if (b0 == 0x18) {
         out.kind = KeyInput::Kind::CtrlX;  // 子代理面板:停止全部(两段确认第一段)
         return out;

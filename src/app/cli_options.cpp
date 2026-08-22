@@ -19,6 +19,35 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
             options.app_server = true;
             continue;
         }
+        // 会话管理子命令(会话管理器单第四、五步):archive/unarchive/delete。
+        // 只认裸词打头、且此前没有位置参数(与 app-server 同规矩)。格式:
+        //   lubancode archive <SESSION> [--force 只 delete 认]
+        // 其余参数照旧并进 positional(不该有的参数不吞,老路兜底)。
+        if (options.positional.empty() &&
+            (arg == "archive" || arg == "unarchive" || arg == "delete")) {
+            SessionManagementCommand cmd;
+            cmd.kind = arg == "archive"       ? SessionManagementCommand::Kind::Archive
+                       : arg == "unarchive"   ? SessionManagementCommand::Kind::Unarchive
+                                              : SessionManagementCommand::Kind::Delete;
+            // 后续:引用 + 可选 --force(只在 delete 认;别处给了报用法,
+            // 不静默忽略)。
+            for (std::size_t j = i + 1; j < args.size(); ++j) {
+                if (args[j] == "--force") {
+                    cmd.force = true;
+                    continue;
+                }
+                if (!cmd.session_ref.empty()) {
+                    cmd.session_ref += " ";
+                }
+                cmd.session_ref += args[j];
+            }
+            if (cmd.force && cmd.kind != SessionManagementCommand::Kind::Delete) {
+                cmd.session_ref.clear();  // 别的子命令带 --force:按缺参报用法
+            }
+            parsed.action = CliAction::ManageSession;
+            parsed.session_command = cmd;
+            return parsed;
+        }
         if (arg == "--continue") {
             options.continue_last = true;
             continue;
