@@ -1,6 +1,6 @@
 # 显示系统彻底剥离:统一 SessionRuntime 接 TUI、Web 与 Tauri
 
-状态：待做（2026-08-22 用户定调）
+状态：第 1、2 步已并入(2026-08-22,0.26.17):runtime 合同(Event/Command/EventSink/Broker)与异步审批通道,TUI 行为零变化;第 3-10 步待做
 
 ## 一句话
 
