@@ -66,6 +66,7 @@
 #include "app/commands/peer_commands.hpp"
 #include "app/commands/doctor_commands.hpp"
 #include "app/version.hpp"
+#include "runtime/command_service.hpp"
 #include "runtime/session_runtime.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
@@ -2836,15 +2837,72 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 PrintSlashHelp();
                 break;
             case lubancode::cli::SlashCommand::Model: {
-                // /model roles 要打路由表:Table() 按值返回,存局部再取址。
-                const std::optional<lubancode::agent::ModelRouteTable> roles_table =
-                    model_router != nullptr
-                        ? std::optional<lubancode::agent::ModelRouteTable>(model_router->Table())
-                        : std::nullopt;
+                // P7(显示系统剥离单):typed API 在 runtime::CommandService,
+                // 终端这条是薄翻译——roles 短表与菜单/问话留在终端渲染层。
+                // 带参直切走 SetModel(写回照旧问一句);裸敲保留旧菜单路
+                // (清单选择 + 当前项高亮的交互是终端活),选定后同样经
+                // SetModel 提交,业务一处。
+                if (parsed.args == "roles") {
+                    const std::optional<lubancode::agent::ModelRouteTable> roles_table =
+                        model_router != nullptr
+                            ? std::optional<lubancode::agent::ModelRouteTable>(model_router->Table())
+                            : std::nullopt;
+                    HandleModelCommand("roles", config, current_model, config_file_path, model_catalog,
+                                        current_think, context_tracker, current_model_instructions,
+                                        /*offer_config_write=*/false,
+                                        roles_table.has_value() ? &*roles_table : nullptr);
+                    break;
+                }
+                lubancode::runtime::CommandService::Options command_options;
+                command_options.config = &config;
+                command_options.model_catalog = &model_catalog;
+                command_options.current_model = current_model;
+                command_options.current_think = current_think;
+                command_options.config_file_path = config_file_path;
+                command_options.fetch_models = [this]()
+                    -> std::expected<std::vector<std::pair<std::string, std::string>>, std::string> {
+                    const auto headers = lubancode::config::ResolveProviderHeaderTemplates(
+                        config.extra_headers, config.auth_token);
+                    auto listed = lubancode::api::ListModels(config.wire, config.base_url, config.auth_token,
+                                                             config.connect_timeout_ms,
+                                                             config.request_timeout_secs, headers);
+                    if (!listed.has_value()) {
+                        return std::unexpected(listed.error().message);
+                    }
+                    std::vector<std::pair<std::string, std::string>> out;
+                    for (const auto& info : *listed) {
+                        out.emplace_back(info.id, info.display_name);
+                    }
+                    return out;
+                };
+                lubancode::runtime::CommandService command_service(std::move(command_options));
+                if (!parsed.args.empty()) {
+                    // 直切:typed 提交,写回问一句(终端交互留在适配层)。
+                    bool write_config = false;
+                    if (active_provider.empty() && config_file_path.has_value()) {
+                        const auto answer = lubancode::cli::ReadLine(
+                            trf("cmd.write_config_prompt", *config_file_path));
+                        write_config = answer.has_value() && (*answer == "y" || *answer == "Y");
+                    } else if (active_provider.empty()) {
+                        std::cout << tr("cmd.session_only") << "\n";
+                    }
+                    const auto result = command_service.SetModel(parsed.args, write_config);
+                    if (result.switched) {
+                        std::cout << trf("cmd.model.switched", result.model) << "\n";
+                        if (write_config && result.config_written) {
+                            std::cout << trf("cmd.write_config.updated", *config_file_path) << "\n";
+                        } else if (write_config && !result.error.empty()) {
+                            std::cout << trf("cmd.write_config.failed", result.error) << "\n";
+                        }
+                    } else {
+                        std::cout << trf("cmd.model.fetch_failed", result.error) << "\n";
+                    }
+                    break;
+                }
+                // 裸敲:旧菜单路(交互留在终端),选定值经 SetModel 提交。
                 HandleModelCommand(parsed.args, config, current_model, config_file_path, model_catalog,
                                     current_think, context_tracker, current_model_instructions,
-                                    /*offer_config_write=*/active_provider.empty(),
-                                    roles_table.has_value() ? &*roles_table : nullptr);
+                                    /*offer_config_write=*/active_provider.empty(), nullptr);
                 break;
             }
             case lubancode::cli::SlashCommand::Provider:

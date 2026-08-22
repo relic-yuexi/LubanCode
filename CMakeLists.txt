@@ -394,6 +394,8 @@ add_library(lubancode_core STATIC
   src/runtime/turn_item.cpp
   # 第六步:SessionRuntime(会话存档账/权限账/thread 身份/事件接线)。
   src/runtime/session_runtime.cpp
+  # 第七步:CommandService(typed API:/model、/resume、审批回答)。
+  src/runtime/command_service.cpp
   # plugins 本地 Tool 运行时(冻结合同 + process v1):manifest 强校验、
   # 进程协议帧、无 shell 进程执行、工具装配层。
   src/runtime/plugin_contract.cpp
