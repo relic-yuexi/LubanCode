@@ -261,6 +261,7 @@ TEST_CASE("process v1:非零退出 = tool_exit_non_zero,stderr 尾巴带在 deta
     }
     TempPluginDir dir;
     dir.WriteFile("helper.py", R"py(import sys
+sys.stderr.reconfigure(encoding="utf-8")  # 管道下 Python 默认走本地代码页,中文会变 '?'——钉死 UTF-8
 sys.stdin.read()
 sys.stderr.write("爆炸现场日志\n")
 sys.exit(3)

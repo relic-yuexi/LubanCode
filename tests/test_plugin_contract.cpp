@@ -112,9 +112,17 @@ TEST_CASE("合法 process manifest 全字段解析") {
     CHECK(manifest->kind == RuntimeKind::Process);
     REQUIRE(manifest->argv.size() == 2);
     CHECK(manifest->argv[0] == "python3");
-    // ${plugin_dir} 已替换成 canonical 目录的 UTF-8 写法。
-    const std::string expected_arg = platform::PathToUtf8(dir.path) + "/add.py";
-    CHECK(manifest->argv[1] == expected_arg);
+    // ${plugin_dir} 已替换成 canonical 目录的 UTF-8 写法。逐字节比对在
+    // Windows 上不稳:临时目录的短名/长名(RUNNER~1)与分隔符方向都会岔,
+    // 拿 filesystem::equivalent 比目录、另比文件名,语义就是"替换结果指进
+    // 插件目录里的 add.py"。
+    {
+        const std::filesystem::path got = platform::Utf8ToPath(manifest->argv[1]);
+        std::error_code eq_ec;
+        CHECK(std::filesystem::equivalent(got.parent_path(), dir.path, eq_ec));
+        CHECK_FALSE(eq_ec);
+        CHECK(got.filename() == "add.py");
+    }
     CHECK(manifest->timeout_ms == 30000);
     REQUIRE(manifest->tools.size() == 1);
     CHECK(manifest->tools[0].name == "add");

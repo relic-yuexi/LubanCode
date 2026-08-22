@@ -99,11 +99,14 @@ std::string FileMtimeTimestamp(const std::string& file_path) {
     if (ec) {
         return std::string();
     }
-    // file_clock::to_sys 是 libstdc++ 的私有出口,libc++/MSVC 都没有这个
-    // 成员(CI 实锤:macOS/Windows 双挂)。C++20 的 clock_cast 是三家共用的
-    // 正路。
-    const std::time_t tt = std::chrono::system_clock::to_time_t(
-        std::chrono::clock_cast<std::chrono::system_clock>(mtime));
+    // file_clock 与 system_clock 的换算没有三家共用的成员出口:to_sys 是
+    // libstdc++ 私货,Apple libc++ 连 C++20 的 clock_cast 都没有(CI 实锤
+    // 过两轮)。用"两枚 now 的差"这个前 C++20 的老法子,三家都认;两枚
+    // now 之间隔了微秒级,对秒级展示时间戳无感。
+    const auto sys_now = std::chrono::system_clock::now();
+    const auto file_now = std::chrono::file_clock::now();
+    const std::time_t tt =
+        std::chrono::system_clock::to_time_t(sys_now - (file_now - mtime));
     std::tm tm_buf{};
 #ifdef _WIN32
     localtime_s(&tm_buf, &tt);

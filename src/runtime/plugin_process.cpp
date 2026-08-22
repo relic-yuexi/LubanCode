@@ -11,6 +11,7 @@
 
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
+#include "platform/text_encoding.hpp"  // SanitizeExternalText:stderr 尾巴的编码关口
 
 namespace lubancode::runtime {
 
@@ -208,7 +209,11 @@ ProcessCallOutcome RunProcessToolCall(const PluginManifest& manifest,
         outcome.code = PluginErrorCode::ToolExitNonZero;
         outcome.detail = "插件进程非零退出(" + std::to_string(exit_code) + ")";
         if (!outcome.stderr_tail.empty()) {
-            outcome.detail += ";stderr 尾巴: " + outcome.stderr_tail.substr(0, 512);
+            // stderr 是外来字节:中文 Windows 上插件走本地代码页吐字,原样
+            // 塞进 detail 就是非法 UTF-8 进 tool_result(316 砖死那类病)。
+            // 按仓库编码政策先过清洗(ACP 试转一把,转不动逐段 U+FFFD)。
+            outcome.detail += ";stderr 尾巴: " +
+                              platform::SanitizeExternalText(outcome.stderr_tail.substr(0, 512));
         }
         return outcome;
     }
