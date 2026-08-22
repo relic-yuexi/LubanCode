@@ -220,6 +220,13 @@ struct Callbacks {
     // 不 execute。不设 = 没有拦截源,照常执行。
     std::function<bool(const std::string& execution_id)> on_tool_trace_blocked;
 
+    // 补偿关系查询(逐枚追踪单第四期):工具 execute 之后、finished 栅栏
+    // 发射之前问一句"这枚补偿哪枚 execution"。undo/补偿类工具由装配层
+    // 把 last_compensates 报上来,关系边随 finished 落账(单子:"补偿
+    // 失败不得回头覆盖原调用",原调用的账不动,只在这里加边)。不设 =
+    // 没有补偿类工具,行为不变。
+    std::function<std::string(const std::string& execution_id, const std::string& tool_name)> on_tool_compensates;
+
     // ---- 逐枚追踪:消息落盘次序的三个关口(单子"消息落盘次序要改") ------
     // 1. assistant 消息组装完、刚入 history:装配层 append+flush 进 session。
     //    不设 = 老路(整轮收口后 PersistNewMessages),行为不变。

@@ -343,6 +343,8 @@ add_library(lubancode_engine STATIC
   src/tools/worktree_tool.cpp
   src/tools/write_file.cpp
   src/tools/edit_file.cpp
+  # 逐枚追踪单第四期:条件式撤销的执行侧(undo_file_edit)。
+  src/tools/undo_file_edit.cpp
   src/tools/ask_user.cpp
   src/tools/search.cpp
   src/tools/agent_tool.cpp

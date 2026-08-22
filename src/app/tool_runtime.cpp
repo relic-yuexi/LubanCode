@@ -4,6 +4,8 @@
 
 #include "app/tool_runtime.hpp"
 
+#include "tools/undo_file_edit.hpp"
+
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
@@ -542,6 +544,44 @@ void ToolRuntime::AttachMemoryTool(std::shared_ptr<lubancode::memory::ProjectMem
         main_registry_.Find("memory_save") == nullptr) {
         main_registry_.Register(std::make_unique<lubancode::memory::MemorySaveTool>(std::move(memory)));
     }
+}
+
+void ToolRuntime::AttachUndoTool(lubancode::runtime::ToolTraceHub* trace_hub) {
+    // 条件式撤销的执行侧(逐枚追踪单第四期):主表与子表都挂——undo 是
+    // 写操作,needs_confirm 恒真,与 write/edit 同一道确认门,子代理调它
+    // 一样要过自己的确认链。explore 只读表不挂。hub 为空 = 会话没装
+    // trace,工具挂了也查不到凭据,干脆不挂。
+    if (trace_hub == nullptr) {
+        return;
+    }
+    tools::UndoTokenLookup lookup;
+    lookup.find = [trace_hub](const std::string& execution_id) {
+        return trace_hub->FindUndoToken(execution_id);
+    };
+    lookup.owner_of = [trace_hub](const std::string& execution_id) {
+        return trace_hub->OwnerOfExecution(execution_id);
+    };
+    if (main_registry_.Find("undo_file_edit") == nullptr) {
+        main_registry_.Register(std::make_unique<lubancode::tools::UndoFileEditTool>(std::move(lookup)));
+    }
+    if (sub_registry_.Find("undo_file_edit") == nullptr) {
+        sub_registry_.Register(std::make_unique<lubancode::tools::UndoFileEditTool>(std::move(lookup)));
+    }
+}
+
+std::string ToolRuntime::LastCompensatesOf(const std::string& tool_use_id) const {
+    // undo 工具的 last_compensates 在 execute 里查;这里按工具实例取
+    // 最近一次的报账(补偿关系边随 finished 落账,时序上 execute 完成后
+    // 立即被问,不会串到下一枚)。
+    (void)tool_use_id;
+    if (const auto* tool = main_registry_.Find("undo_file_edit");
+        tool != nullptr) {
+        if (const auto* undo_tool = dynamic_cast<const lubancode::tools::UndoFileEditTool*>(tool);
+            undo_tool != nullptr) {
+            return undo_tool->last_compensates();
+        }
+    }
+    return std::string();
 }
 
 }  // namespace lubancode::app

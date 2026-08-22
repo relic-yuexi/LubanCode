@@ -746,6 +746,9 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     // (账只有一本,一边 active 另一边回 AlreadyActive)。
     tool_runtime_.emplace(config, theme, wrapped_backend, skills, skills_segment, CurrentDirUtf8(),
                           MakeRuntimeOptions());
+    // 逐枚追踪单第四期:hub 已安家,挂 undo_file_edit(条件式撤销:凭
+    // hub 的账本翻凭据,走与 write/edit 同一道确认门)。
+    tool_runtime_->AttachUndoTool(&*trace_hub_);
     // 可追回 artifact 的两把只读钥匙(第二期):main 与子代理同级都有——
     // 子代理的超长结果同样落仓,它自己也要能追回证据(角色跟 TaskKind 走,
     // 工具能力同理,不按身份裁)。

@@ -254,6 +254,47 @@ std::string ToolTraceHub::LastBatchSummary() const {
     return out.str();
 }
 
+std::optional<agent::ToolUndoToken> ToolTraceHub::FindUndoToken(const std::string& execution_id) const {
+    // 进程内账:折叠 recent_ 查。
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        agent::ToolExecutionLedger ledger;
+        for (const auto& event : recent_) {
+            ledger.Fold(event);
+        }
+        if (const auto* record = ledger.FindByExecution(execution_id); record != nullptr && !record->undo.path.empty()) {
+            return record->undo;
+        }
+    }
+    // 存档真本:重启后 recent_ 空,折叠 JSONL(调用方保证 store 活着)。
+    if (store_ != nullptr && store_->active()) {
+        const auto bytes = agent::ReadSessionFileBytes(store_->file_path());
+        if (bytes.has_value()) {
+            const auto loaded = agent::ParseSessionFile(*bytes);
+            if (loaded.has_value()) {
+                const auto ledger = BuildLedger(loaded->tool_trace_events);
+                if (const auto* record = ledger.FindByExecution(execution_id);
+                    record != nullptr && !record->undo.path.empty()) {
+                    return record->undo;
+                }
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+std::string ToolTraceHub::OwnerOfExecution(const std::string& execution_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    agent::ToolExecutionLedger ledger;
+    for (const auto& event : recent_) {
+        ledger.Fold(event);
+    }
+    if (const auto* record = ledger.FindByExecution(execution_id); record != nullptr) {
+        return record->execution_id;
+    }
+    return execution_id;
+}
+
 std::vector<std::string> ToolTraceHub::ErrorLines() const {
     std::lock_guard<std::mutex> lock(mutex_);
     agent::ToolExecutionLedger ledger;

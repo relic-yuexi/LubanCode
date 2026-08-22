@@ -33,6 +33,7 @@
 #include "memory/project_memory.hpp"
 #include "ptc/ptc_tool.hpp"
 #include "runtime/plugin_lua.hpp"
+#include "runtime/tool_trace_hub.hpp"
 #include "runtime/plugin_tool.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/ask_user.hpp"
@@ -206,6 +207,14 @@ public:
     // /memory on 的事后补挂:主表还没有 memory_save 就挂上(用的还是构造时
     // 那份 ProjectMemory,会话期间不换对象)。已挂过(构造时就挂了)则空操作。
     void AttachMemoryTool(std::shared_ptr<lubancode::memory::ProjectMemory> memory);
+
+    // 逐枚追踪单第四期:挂 undo_file_edit(条件式撤销的执行侧)。hub 由
+    // 会话层持有(与 ToolRuntime 同寿命或更久),工具凭它按 execution_id
+    // 翻撤销凭据。不挂 = 该会话没有撤销工具(旧路,行为不变)。
+    void AttachUndoTool(lubancode::runtime::ToolTraceHub* trace_hub);
+    // 上次某枚 undo 补偿了谁(execution_id -> owner);装配层喂给 AgentLoop
+    // 的 on_tool_compensates。没有 undo 工具时恒空。
+    std::string LastCompensatesOf(const std::string& tool_use_id) const;
 
 private:
     // ---- 拥有者:先声明,后析构(用户表先亡,引用不悬垂) ----

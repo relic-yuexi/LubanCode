@@ -25,6 +25,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -92,6 +93,15 @@ public:
     std::string LastBatchSummary() const;
     // 诊断:本 session 全部明确失败与 unknown(/trace errors)。
     std::vector<std::string> ErrorLines() const;
+
+    // 条件式撤销的查表口(undo_file_edit 用):按 execution_id 翻账本里
+    // 那枚执行留下的 undo token。进程内 recent_ 账优先,查不到回落折叠
+    // 存档真本(重启后 /trace 仍可查,撤销也仍可用)。nullopt = 没有。
+    std::optional<agent::ToolUndoToken> FindUndoToken(const std::string& execution_id) const;
+    // 一枚 undo 补偿的目标(token 的主人):recent_ 里 execution_id 对应
+    // 的记录若自己带 parent/retry 关系就顺着报,否则原样返回 execution_id
+    //(undo_file_edit 的 compensates 语义由调用方拼,这里只给账)。
+    std::string OwnerOfExecution(const std::string& execution_id) const;
 
 private:
     void EmitRuntimeEvent(const agent::ToolTraceEvent& event);
