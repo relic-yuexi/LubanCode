@@ -37,6 +37,9 @@ const Entry kZhCN[] = {
      "用法:\n"
      "  lubancode [选项]\n"
      "  lubancode \"问题\"          一次问答,能用工具就用工具\n"
+     "  lubancode plugin init python [名字]\n"
+     "                              生成 Python 插件脚手架(plugin.json + runner.py + 单测模板,\n"
+     "                              落 ~/.lubancode/plugins/<名字>/)\n"
      "  lubancode                  不带参数则进入交互循环;首次运行缺配置会先走一遍初次配置\n"
      "                              向导,配完直接进入会话,不用重启。exit/quit 或 EOF(Ctrl+Z /\n"
      "                              管道读尽)退出;空行只是重新给提示符,不退出\n"},
@@ -990,6 +993,19 @@ const Entry kZhCN[] = {
      "      execute=function(input) ... end } 一张表,示例在 examples/plugins/word_count.lua。"},
     {"cmd.plugins.mounted", "已挂载 {0} 个插件工具:"},
     {"cmd.plugins.warnings", "加载警告(这些没挂上):"},
+
+    // ---- plugin init 子命令(plugins 单第 3 步) ----
+    {"plugininit.no_home", "找不到用户主目录,无法定位插件目录。"},
+    {"plugininit.failed", "生成插件脚手架失败: {0}"},
+    {"plugininit.done", "已生成 Python 插件脚手架 {0}({1}):"},
+    {"plugininit.doctor_note", "提示: {0}"},
+    {"plugininit.next",
+     "下一步:改 runner.py 里的 HANDLERS 与 plugin.json 里的 tools,本地先跑 python test_runner.py "
+     "自测;重启 LubanCode 后 /plugins 可见。"},
+    {"plugininit.lua_hint",
+     "Lua 插件不需要脚手架:把 return {{ name=..., execute=function(input) ... end }} 的 .lua 文件"
+     "放进 {0} 即可,示例见 examples/plugins/word_count.lua。"},
+    {"plugininit.unknown_template", "不认得的插件模板: {0}(v1 只有 python)"},
 
     // ---- /mcp、/lsp ----
     {"cmd.mcp.empty", "没有挂载任何 MCP 服务器(config.json 里没写 mcpServers,或者配了但全部启动失败)。"},

@@ -116,3 +116,39 @@ TEST_CASE("裸 app-server 落进位置参数(旧路):解析层就该拦下,不�
     CHECK_FALSE(parsed.options.app_server);
     CHECK(parsed.options.positional == "问点啥 app-server");
 }
+
+// ---------------------------------------------------------------------------
+// plugin init 子命令(plugins 单第 3 步:Python scaffold 的参数解析)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("plugin init python:模板与名字落位,名字缺省取模板名") {
+    ParsedCliArgs parsed = ParseCliArgs(Args({"lubancode", "plugin", "init", "python"}));
+    CHECK(parsed.action == CliAction::RunPluginInit);
+    CHECK(parsed.plugin_init.template_name == "python");
+    CHECK(parsed.plugin_init.plugin_name == "python");
+
+    parsed = ParseCliArgs(Args({"lubancode", "plugin", "init", "python", "my_math"}));
+    CHECK(parsed.action == CliAction::RunPluginInit);
+    CHECK(parsed.plugin_init.template_name == "python");
+    CHECK(parsed.plugin_init.plugin_name == "my_math");
+}
+
+TEST_CASE("plugin init 参数形状不对:当场退,不当普通位置参数走单发") {
+    CHECK(ParseCliArgs(Args({"lubancode", "plugin"})).action == CliAction::BadPluginInit);
+    CHECK(ParseCliArgs(Args({"lubancode", "plugin", "install"})).action == CliAction::BadPluginInit);
+    CHECK(ParseCliArgs(Args({"lubancode", "plugin", "init"})).action == CliAction::BadPluginInit);
+    const ParsedCliArgs too_many = ParseCliArgs(Args({"lubancode", "plugin", "init", "python", "a", "b"}));
+    CHECK(too_many.action == CliAction::BadPluginInit);
+    CHECK_FALSE(too_many.error_text.empty());
+}
+
+TEST_CASE("plugin 出现在位置参数之后:当普通文本并进 positional(旧语义)") {
+    const ParsedCliArgs parsed = ParseCliArgs(Args({"lubancode", "问点啥", "plugin", "init", "python"}));
+    CHECK(parsed.action == CliAction::Proceed);
+    CHECK(parsed.options.positional == "问点啥 plugin init python");
+}
+
+TEST_CASE("早退参数在 plugin 之前:早退生效") {
+    CHECK(ParseCliArgs(Args({"lubancode", "--version", "plugin", "init", "python"})).action ==
+          CliAction::PrintVersion);
+}

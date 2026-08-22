@@ -265,6 +265,7 @@ if(WIN32)
   set(_lubancode_platform_sources
     src/platform/paths_win.cpp
     src/platform/process_win.cpp
+    src/platform/dynamic_library_win.cpp
     src/platform/console_win.cpp
     src/platform/peer_transport_win.cpp
     src/platform/clipboard_win.cpp)
@@ -272,6 +273,7 @@ else()
   set(_lubancode_platform_sources
     src/platform/paths_posix.cpp
     src/platform/process_posix.cpp
+    src/platform/dynamic_library_posix.cpp
     src/platform/console_posix.cpp
     src/platform/peer_transport_posix.cpp
     src/platform/clipboard_posix.cpp)
@@ -380,6 +382,7 @@ add_library(lubancode_core STATIC
   src/runtime/plugin_contract.cpp
   src/runtime/plugin_process.cpp
   src/runtime/plugin_tool.cpp
+  src/runtime/plugin_lua.cpp
   src/cli/i18n.cpp
   src/cli/image_input.cpp
   src/cli/setup_wizard.cpp
@@ -457,6 +460,7 @@ add_library(lubancode_app STATIC
   src/app/interactive_session.cpp
   src/app/one_shot.cpp
   src/app/cli_options.cpp
+  src/app/plugin_scaffold.cpp
   src/app/cli_app.cpp
   src/cli/console_input.cpp
   src/cli/session_picker_panel.cpp

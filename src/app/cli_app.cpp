@@ -4,6 +4,7 @@
 #include "app/cli_options.hpp"
 #include "app/interactive_session.hpp"
 #include "app/one_shot.hpp"
+#include "app/plugin_scaffold.hpp"
 #include "app_server/server.hpp"
 
 #include <algorithm>
@@ -209,6 +210,42 @@ private:
     lubancode::hooks::HookDispatcher* dispatcher_;
 };
 
+// `lubancode plugin init` 子命令(plugins 单第 3 步):生成插件脚手架后
+// 退出。不读配置、不进会话——纯落盘 + 环境诊断。i18n 早初始化在这之前
+// 跑过,tr() 可用;配置不加载(脚手架不该因为模型没配好而拒绝干活)。
+int HandlePluginInitCommand(const PluginInitArgs& init) {
+    const auto home_dir = lubancode::config::HomeLubancodeDir();
+    if (!home_dir.has_value()) {
+        std::cerr << tr("plugininit.no_home") << "\n";
+        return 1;
+    }
+    const std::string plugins_root = *home_dir + "/plugins";
+    if (init.template_name == "python") {
+        const auto result = lubancode::app::ScaffoldPythonPlugin(plugins_root, init.plugin_name, std::string());
+        if (!result.has_value()) {
+            std::cerr << trf("plugininit.failed", result.error()) << "\n";
+            return 1;
+        }
+        std::cout << trf("plugininit.done", result->plugin_name, result->target_dir_utf8) << "\n";
+        for (const std::string& file : result->files) {
+            std::cout << "  - " << file << "\n";
+        }
+        for (const std::string& note : result->doctor_notes) {
+            std::cout << trf("plugininit.doctor_note", note) << "\n";
+        }
+        std::cout << tr("plugininit.next") << "\n";
+        return 0;
+    }
+    // lua 模板:legacy .lua 一文件一工具本来就是零配置,生成也只是一份示例
+    // 脚本;v1 先指路不代写,免得两套模板各养一份文案。
+    if (init.template_name == "lua") {
+        std::cout << trf("plugininit.lua_hint", plugins_root) << "\n";
+        return 0;
+    }
+    std::cerr << trf("plugininit.unknown_template", init.template_name) << "\n";
+    return 1;
+}
+
 // app-server 子模式:无界面后台协议,stdio 上逐行 JSON。装配前奏(配置
 // 加载、i18n、hooks 装载)在 RunCli 里已经跑完——这里只把服务立起来进
 // 主循环。stdout 从这一刻起是协议专线,任何 std::cout 都不许再出现
@@ -264,6 +301,11 @@ int RunCli(const std::vector<std::string>& args) {
     // 加载之前当场退出。
     const ParsedCliArgs parsed_cli = ParseCliArgs(args);
     switch (parsed_cli.action) {
+        case CliAction::RunPluginInit:
+            return HandlePluginInitCommand(parsed_cli.plugin_init);
+        case CliAction::BadPluginInit:
+            std::cerr << parsed_cli.error_text << "\n";
+            return 1;
         case CliAction::PrintVersion:
             PrintVersion();
             return 0;
