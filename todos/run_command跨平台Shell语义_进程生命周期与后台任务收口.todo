@@ -1,0 +1,640 @@
+# run_command 跨平台 Shell 语义、进程生命周期与后台任务收口
+
+状态：待做（2026-08-22 源码巡检；先修 P0/P1，再谈新增 Bash/pwsh）
+
+## 一句话
+
+LubanCode 没有内置 Bash。`run_command` 在 Windows 默认唤起
+`powershell.exe`，也可选 `cmd.exe`；POSIX 唤起 `/bin/sh`。这条路眼下能用，
+也有测试护着常用场景。可一碰引号路径、后台快进程、并发 Hook、错误退出、
+无限日志、主动停止，几处缝便露出来。
+
+本单不只补两枚 if。要把“命令是什么”“在哪儿跑”“进程是否真起了”“怎样
+收树”“结果究竟成功、失败、超时、截断还是未知”各自立账。上层拿结构化结果，
+底层攥原生进程句柄。中间不靠 PID 猜生死，不靠拼 `cd` 改目录，也不把失败
+涂成成功。
+
+## 范围
+
+本单管这些入口：
+
+- `run_command` 的 PowerShell、cmd、POSIX sh 前台与后台分支；
+- `platform::RunProcess*`、`RunShellCommand*`、`BackgroundSpawnResult`；
+- `background_output`、`stop_background` 与 `BackgroundTaskRegistry`；
+- 共用进程层牵出的 Hook exec/shell form；
+- shell 选择、cwd、环境变量、stdin、输出、退出码、超时、取消、杀树与日志。
+
+本单不把 MCP、LSP、Plugin 协议推倒重写。它们若共用进程层，只随底座受益。
+
+## 先把现状说准
+
+| 调用 | Windows | Linux / macOS | 是否经过 shell |
+| --- | --- | --- | --- |
+| `run_command` 默认 | `powershell.exe -NoProfile -NonInteractive -EncodedCommand` | `/bin/sh -c` | 是 |
+| `run_command shell=cmd` | `cmd.exe /d /s /c` | 不支持 | 是 |
+| Hook v2 `command + args` | 直接 CreateProcess | 直接 execvp | 否 |
+| Hook 只写 `command` | `cmd.exe` | `/bin/sh` | 是 |
+| Plugin process runtime（规划中） | argv | argv | 应当不经过 |
+
+三句话要留在用户文档里：
+
+1. `/bin/sh` 不保证是 Bash。Ubuntu 常见 dash，Bash 数组、`[[ ]]`、`source`
+   不能想当然。
+2. `powershell.exe` 指 Windows PowerShell，通常是 5.1；它不是 PowerShell 7
+   的 `pwsh.exe`。二者语法和编码细节不可偷偷混用。
+3. 这些 shell 都由操作系统提供。LubanCode 只拉进程，不随包附送 Bash。
+
+## 证据分档
+
+- **已确认**：源码路径已经直接证明，或现有文档自己承认。
+- **高风险**：代码没有封住，须用定向测试复现；没复现前不写成线上事故。
+- **产品边界**：不是 bug，却常被用户当成 bug；须明写契约或另开能力。
+
+下文每条都标档。修时先写失败测试，再动实现。
+
+---
+
+## P0：后台台账有先起 watcher、后入表的竞态
+
+**档位：已确认。**
+
+`BackgroundTaskRegistry::Register` 先构造 `std::thread`，再把 entry 推进
+`entries_`。线程一旦构造便可开跑。它若抢先进入 `WatchThread`，会在表里找
+不到 task_id，径直 return。任务从此没人探活，永远显示“运行中”。短命的
+`echo`、启动后立刻退出的编译命令最容易撞上。
+
+源码注释说“entry 得先就位”，实际次序恰好反了。这不是概率可忽略的小事。
+
+### 方案
+
+- 先在锁内创建 entry、分配 task_id、放进表；再启动 watcher。
+- watcher 不该重新按 task_id 猜自己的对象。可持有稳定的共享状态
+  `shared_ptr<BackgroundTaskState>`，registry 只存这份状态。
+- 启动 watcher 失败要回滚 entry，不能留下无人照看的 Running。
+- 连跑数千枚 0 ms/1 ms 后台命令，逐枚都须进终态；用 barrier 特意放大旧竞态。
+
+---
+
+## P0：后台退出码丢失，还会把“不知道”写成成功
+
+**档位：已确认。**
+
+POSIX `RunProcessBackground` 起的仍是宿主子进程。平台层另开 detach 线程
+`waitpid` 收尸，却把 status 丢了。工具层 watcher 只拿 `kill(pid, 0)` 探活，
+进程一死便填 `exit_code=0`。头文件说未知时填 `-1`，实现却填 0；参考文档又
+写另一套说法。三处口径不一。
+
+Windows 后台 spawn 也立刻关掉 `pi.hProcess`。watcher 事后凭 PID 重新
+`OpenProcess`。快进程若已退出并被系统收走，句柄打不开，同样乐观填 0。
+故而 `exit 7` 可能被报成“完成（退出码 0）”。
+
+### 方案
+
+- `BackgroundSpawnResult` 不再只回 PID。它应交出一份可等待的
+  `BackgroundProcessHandle`。
+- Windows 长持 process handle 与 job handle，直接等 handle、读精确退出码。
+- POSIX 只留一处 `waitpid`。由统一 reaper 收 status，再写进共享完成态；
+  registry 不另拿 `kill(pid, 0)` 猜。
+- 退出码改成 `optional<int>`。不知道便是 `null`，状态显示 `unknown`，绝不
+  借 0 冒充成功。
+- POSIX 受信号终止另记 `signal`；若仍要给 shell 风格码，可派生展示
+  `128 + signal`，原始字段不可丢。
+- 文档、C++ 注释、工具输出、测试一并收成同一契约。
+
+---
+
+## P0：主动停止不保证收掉整棵树，却先报“已停止”
+
+**档位：已确认。**
+
+Windows `stop_background` 只 `TerminateProcess` 根进程。`npm run dev`、
+构建器、watcher 拉出的后代还能活，直到 LubanCode 自己退出、会话级 Job
+Object 关闭才可能被收走。
+
+POSIX 虽向进程组发 SIGTERM，却没有代码兑现注释所说的 SIGKILL 兜底。
+无论系统调用成功与否，registry 都立刻把任务标成 Stopped。如此会出现“界面
+说停了，端口还占着”的场面。
+
+更险一层：状态仍是 Running、原进程恰好已死、PID 又被复用时，按 PID 停止
+可能碰到不相干的新进程。
+
+### 方案
+
+- Stop 操作落到 `BackgroundProcessHandle::TerminateTree(grace)`，不再裸收 PID。
+- Windows 每项后台任务单独持 Job Object。停止时先发可选的体面信号；到期
+  `TerminateJobObject`。会话总 Job 只作宿主退出兜底。
+- POSIX 对原进程组发 SIGTERM，等一个短 grace，再发 SIGKILL；随后由唯一
+  reaper `waitpid` 收尸。
+- 状态改为 `Stopping -> Stopped`。系统调用失败记 `stop_failed`，仍活着便留
+  Running/Stopping，不能先盖章。
+- 测试命令须真拉一层孙进程，停止后根、子、孙与监听端口都消失。
+
+---
+
+## P0：Windows 环境变量注入会在并发 Hook 之间串值
+
+**档位：已确认的设计冲突，高风险数据错配。**
+
+Windows `ApplyEnv` 先修改 LubanCode 自身环境，再以 `lpEnvironment=nullptr`
+创建子进程，随即恢复。头文件要求调用方单线程。可 Hook dispatcher 明明给
+每个 handler 起一条线程并发跑。两只 Hook 同拍启动，A 可能继承 B 的值，
+宿主里其他线程也会短暂看见临时变量。
+
+这事不只关 Hook。往后 Plugin process、并发子代理若传 extra_env，也会撞上。
+
+### 方案
+
+- 绝不再改父进程环境。
+- Windows 从父环境构建一份排序过的 UTF-16 environment block，合并
+  `extra_env`，以 `CREATE_UNICODE_ENVIRONMENT` 传给 `CreateProcessW`。
+- 环境键按 Windows 大小写不敏感规则合并；保住 `=C:` 这类 drive-current-
+  directory 特殊项。
+- 拒绝键名含 NUL 或非法 `=`，拒绝值含 NUL；重复键给出确定规则。
+- 并发起百只子进程，每只只看见自己的 marker，父进程从头到尾不变。
+
+---
+
+## P1：Windows 后台 PowerShell 忘了使用 `command_with_cwd`
+
+**档位：已确认。**
+
+前台 PowerShell 编码 `command_with_cwd`。后台分支却编码原始 `command`。
+用户传了 `cwd`，目录先通过存在性与隔离检查，执行时却悄悄落回宿主目录。
+cmd 后台与 POSIX 后台没有这处漏接。
+
+### 眼前补法
+
+- 把后台 PowerShell 的 `BuildEncodedCommand(command)` 改成
+  `BuildEncodedCommand(command_with_cwd)`。
+- 加空格、中文、单引号目录的前后台对照测试。
+
+### 根治
+
+别再向命令文本前头拼 `cd`。把 cwd 放进 `ProcessSpec.cwd`：
+
+- Windows 传 `CreateProcessW(..., lpCurrentDirectory=...)`；
+- POSIX 子进程在 exec 前 `chdir/fchdir`，失败经 exec-error pipe 回父进程；
+- shell adapter 只管 shell 与参数，不再管目录。
+
+如此可一并消掉下面几条路径转义病。
+
+---
+
+## P1：POSIX 单引号路径转义写错；cmd 路径也会受 `%VAR%` 展开
+
+**档位：前者已确认，后者高风险。**
+
+现版把 POSIX 单引号当作 PowerShell 单引号处理，遇 `'` 便翻倍。POSIX sh
+单引号内不能这样转义。`/tmp/a'b` 会把 shell 串拆坏。严谨写法须把一枚单引号
+换成 `'"'"'` 那种闭合、插入、再打开的形状。
+
+cmd 用 `cd /d "<cwd>"`。NTFS 目录名虽不能含双引号，却能含 `%`。cmd 会先
+展开 `%NAME%`，目录名字可能被改掉。各家 shell 还有各家的元字符、换行与
+长度限制。继续补手写 quote，只会越补越厚。
+
+### 方案
+
+- 短修：修正 POSIX quote，并为 `'`、空格、tab、换行、`$`、`%`、`!`、
+  `&`、括号、非 ASCII 路径建测试表。
+- 正解：cwd 走操作系统参数，删掉 `ApplyWorkingDirectory`。
+- 校验目录之后到 spawn 之间仍有 TOCTOU。若安全边界真依赖目录身份，POSIX
+  应先开目录 fd 再 `fchdir`；普通主会话只须把失败说清，不必假装有快照。
+
+---
+
+## P1：PowerShell 退出码包装会误判
+
+**档位：已确认的逻辑缺口，须补最小复现。**
+
+包装脚本把用户命令接进：
+
+```powershell
+& { <command> } 2>&1 | Out-String -Stream | Write-Output
+if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE } else { if ($?) { exit 0 } else { exit 1 } }
+```
+
+这里有三只坑：
+
+- `Out-String` 与 `Write-Output` 会覆盖 `$?`。PowerShell cmdlet 报错、命令找
+  不到，而 `$LASTEXITCODE` 又是 null 时，尾巴很可能回 0。
+- `$LASTEXITCODE` 会保留最近一枚 native program 的码。前头 native 失败，
+  后头 cmdlet 成功，仍可能拿旧码判整段失败。
+- 用户命令本来就是任意 PowerShell 脚本。未配平的 `}`、解析期错误与显式
+  `exit` 会绕开包装脚本一部分逻辑。语法错误又发生在 UTF-8 设置生效之前。
+
+### 方案
+
+- 先定契约：多语句脚本以“PowerShell 脚本最终状态”为准；显式 `exit N`
+  必须原样；native 最后一条命令须保留 N；非终止错误是否判失败须写清。
+- 把状态捕获放在用户 scriptblock 返回的第一拍，之后才格式化输出。不要在
+  管道跑完后才读 `$?`。
+- 命令找不到、cmdlet `Write-Error`、`throw`、native exit 7、native 失败后
+  cmdlet 成功、cmdlet 失败后 native 成功、显式 exit、多行与解析错误，各钉
+  一案。
+- 若 PowerShell 5.1 无法给任意脚本造出稳定包装，便承认边界：用临时 `.ps1`
+  文件加明确 prologue/epilogue，或另设 PowerShell host；不可继续靠猜。
+
+---
+
+## P1：输出达到上限时命令被杀，结果却标成功
+
+**档位：已确认。**
+
+前台输出到 2 MiB，进程树会被强制终止。`run_command` 返回文字也明说“已
+强制终止”，可 `Tool::Result.is_error` 填 false。Agent Loop、workflow
+recorder、UI 与模型若只看布尔值，便会把半截构建当成成功。
+
+另有一处边界：读缓冲把正文恰好填到 `max_output_bytes` 时立刻置 overflow。
+命令总输出若刚好等于上限，也会被当作“超过”而杀。
+
+### 方案
+
+- `output_truncated` 必须是失败终态，至少令 `is_error=true`。
+- 平台层读到第 `limit + 1` 个字节才算超过。结果正文仍只留 limit。
+- 长远把文本结果换成结构化 `ProcessOutcome`，不要让上层从中文首行猜状态。
+- `max_output_bytes=0` 的语义明定为拒绝或“禁捕获”，不能悄悄全丢输出又不
+  触发截断。
+
+---
+
+## P1：后台日志编码不稳，64 KiB 尾读还可能从 UTF-8 半字起刀
+
+**档位：已确认的代码路径，高风险序列化故障。**
+
+前台 cmd 输出会按 ACP 转 UTF-8。后台 cmd 直接把原始字节写日志，
+`background_output` 再原样读回，没走转换。中文 Windows 上常见 GBK；放进
+JSON/history 时可能炸，也可能变成乱码。
+
+POSIX 也不能断言任意命令都吐 UTF-8。二进制程序、旧工具、错误 locale 都会
+吐坏字节。日志超过 64 KiB 后从任意字节位置读取，恰好可能切在一枚 UTF-8
+字符中间。
+
+### 方案
+
+- 日志保存原始 bytes，不在写入途中猜编码。
+- task 元数据记 `encoding_hint`：PowerShell wrapper 可写 `utf-8`；cmd 可写
+  当前 OEM/ACP；未知程序记 `unknown`。
+- `background_output` 出口统一产合法 UTF-8：按 hint 解码；未知时先严验
+  UTF-8，再以显式标记替换坏段。不得无声把任意字节猜成当前代码页。
+- 尾读从后往前找完整换行与 UTF-8 边界；首段若被截，添
+  `[日志前部已省略]`，不把半行冒充完整行。
+- NUL 与控制字做可见转义，别把终端和 JSON 搅乱。
+
+---
+
+## P1：后台日志可泄密、可占满磁盘，也没有清理账
+
+**档位：已确认。**
+
+POSIX 以 `0644` 建日志。受 umask 影响后通常是 0644 或 0640，同机其他账号
+可能读到命令输出。文件名又是时间戳加进程内计数器，可猜。`O_TRUNC` 没配
+`O_EXCL`，共享临时目录里还留着竞态与链接攻击面。
+
+两平台都让日志无限长。`background_output` 只限制读取 64 KiB，并不限制磁盘
+写入。任务表和已结束 watcher 也一直留到进程退出；一天跑几千枚后台短命令，
+账与线程对象只增不减。日志退出后也没人删。
+
+### 方案
+
+- POSIX 用 `mkstemp` 或 `open(O_CREAT|O_EXCL|O_NOFOLLOW, 0600)`；Windows
+  建带当前用户 DACL 的随机文件，拒绝 reparse point。
+- 日志按每任务上限、会话总上限双控。到顶可轮转、停止捕获，或按策略终止
+  任务；三者须选定并展示，不能静默吞。
+- 默认遮住工具返回里的绝对日志路径；查询走 task_id。调试档才展示路径。
+- 终态任务设数量与年龄保留上限。淘汰时 join/reap watcher，再删日志。
+- 会话正常退出清本会话日志；崩溃遗留由下次启动按前缀、owner、年龄清扫。
+- 命令文本可能含 token。列表与 transcript 应有脱敏/截断，原始值只留受限账。
+
+---
+
+## P1：命令、参数与整数没有完整边界校验
+
+**档位：高风险；几项由 API 形状可直接推出。**
+
+### 情形
+
+- JSON 字符串可含 NUL；C API 的 argv/command line 会在 NUL 处截断。界面确认
+  看的是全串，系统可能只执行前半串。
+- PowerShell `-EncodedCommand` 会把 UTF-8 命令转 UTF-16，再 Base64 膨胀。
+  Windows command line 有约 32767 UTF-16 code units 上限；长命令会起不来。
+- POSIX `/bin/sh -c` 也受 `ARG_MAX` 与环境块总长限制。
+- `timeout_ms`、`tail_lines` 先验“是整数”后直接 `get<int>()`。超出 int 范围
+  仍可能抛异常。极大值转 Windows DWORD 也会走样。
+- argv/env 的键值若含 NUL，exec/CreateProcess 只看前段；POSIX env key 若含
+  `=` 会改语义。
+
+### 方案
+
+- command、cwd、argv、env key/value 一律拒绝内嵌 NUL。
+- 数字先取 64 位，再做范围检查；错误文案写允许区间。
+- 设清楚命令字节上限。长脚本改走受限临时脚本文件或 stdin，不拿 Base64
+  硬顶系统命令行。
+- 临时脚本用随机独占文件、0600/当前用户 ACL；执行完清理，超时与崩溃也有
+  下次启动清扫。
+- 测试刚好卡边界、超过一字、超大 JSON integer 与 NUL 注入。
+
+---
+
+## P1：前台命令没有取消通道
+
+**档位：已确认的接口缺口。**
+
+`Tool::execute` 与 `RunProcess` 只收 timeout，不收 cancel token。用户按 ESC
+取消当前 Agent 轮，正在跑的命令未必随之停；它可能一直拖到 120 秒超时。
+耗时测试、挂住的包管理器，会叫用户误以为 ESC 失灵。
+
+### 方案
+
+- `ProcessSpec` 带 `CancellationToken`；Windows wait set 加 cancel event，
+  POSIX poll/wait 循环每拍查 token。
+- 取消与超时都收整棵树，却分开记 `cancelled`、`timed_out`。
+- Agent Loop 取消信号贯穿 Tool execute。旧插件接口暂不支持时须明示
+  `non_cancellable`，不能装作已停。
+- 测试 ESC 后短时间返回，孙进程也死，已捕获输出仍可查。
+
+---
+
+## P1：Windows Job、句柄继承与 spawn 错误有静默降级
+
+**档位：已确认的代码路径，高风险资源泄漏。**
+
+- 前台与后台绑定 Job Object 失败后只退回杀根进程，后代可逃。
+- 后台 `AssignProcessToJobObject` 的返回值压根没上报。
+- `ResumeThread`、`GetExitCodeProcess`、若干 wait 结果没有逐项检查。
+- `bInheritHandles=TRUE` 会让当时所有可继承句柄都有机会落进子进程。并发起
+  进程时，别处刚建的 pipe/file handle 可能被误继承，EOF 与隐私都受牵连。
+
+### 方案
+
+- 用 `STARTUPINFOEX` + `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`，只传 stdin、
+  stdout、stderr 三只指定句柄。
+- Job 创建、设限、绑定、resume、wait、取退出码逐步验错。失败时杀掉尚在
+  suspended 的进程，关齐句柄，回结构化 spawn error。
+- 若宿主已在不许嵌套的 Job 中，明确探测 nested-job 能力；可用时设 breakaway，
+  不可用便报“只能杀根”的 degraded grade，不能悄悄许诺收树。
+- Application Verifier/handle sanitizer 配一轮并发 spawn 压测。
+
+---
+
+## P1：POSIX 子进程建组、重定向失败没有回报
+
+**档位：已确认的代码路径。**
+
+子进程里的 `setpgid/setsid/open(/dev/null)/dup2` 多处没查返回值。若 setsid
+失败，后续 `kill(-pid, ...)` 未必能杀到预想的组；若 dup2 失败，输出可能落
+回不该去的终端或旧 fd。父进程只通过 exec-error pipe 得知 `execvp` 失败，
+前置 setup 错误没有协议。
+
+### 方案
+
+- 子进程 setup 每一步失败都把 `{stage, errno}` 写回同一条 CLOEXEC 状态管道，
+  然后 `_exit(127)`。
+- 父进程只有收到“exec 成功（管道 EOF）”才回 spawn success。
+- foreground 的 `setpgid` 父子两边都查结果；允许的竞态 errno 单列，别吞掉
+  真失败。
+- 用资源限制、fd 耗尽、权限与 setsid 失败夹具走故障注入测试。
+
+---
+
+## P2：shell 方言、版本、profile 与交互环境须明牌
+
+**档位：产品边界。**
+
+### 常见误会
+
+- 用户交互终端用 Bash/Zsh/Fish，`run_command` 却固定 `/bin/sh`。
+- Windows 装了 `pwsh`，工具仍固定 `powershell.exe` 5.1。
+- `-NoProfile`、非 login sh 不加载 alias、函数、rc 文件；“我终端里能跑”不
+  等于代理里能跑。
+- stdin 接 NUL 或 `/dev/null`，stdout/stderr 是 pipe/file，不是 TTY。sudo、
+  ssh 密码、交互安装器、全屏程序、依赖颜色/TTY 探测的 CLI 会失败或挂住。
+- PATH、locale、代码页与启动 LubanCode 的父进程一致，未必同用户另开的终端。
+
+### 方案
+
+- 工具描述与 `/doctor` 打印准确的 shell 路径、版本、是否 login、是否 TTY。
+- 不把 `sh` 偷换 Bash，不把 `powershell` 偷换 `pwsh`。若新增，显式给
+  `shell=bash`、`shell=pwsh`，先探可执行文件，再把能力放进动态 schema。
+- 自定义 shell 路径只从受信配置来，不许模型在参数里任指解释器。
+- 需要 PTY 的命令另开 `run_terminal`/interactive 能力，带人工接管与安全边界；
+  不往现有无头工具里塞半套伪终端。
+- 跨平台任务优先用项目已有脚本或 argv 工具。LubanCode 不做 PowerShell、
+  cmd、sh 之间的魔法翻译。
+
+---
+
+## P2：后台任务没有最长运行时间，也不能跨宿主恢复
+
+**档位：产品边界兼设计债。**
+
+后台模式会彻底忽略 `timeout_ms`。dev server 需要长活，这个默认有道理；可
+一次误起的死循环也能跑到用户发现为止。任务表只在内存里。LubanCode 重启后，
+旧日志还在，task_id、状态与完成通知都丢了。POSIX 被 SIGKILL 时 atexit 不跑，
+后台进程还可能成为孤儿。
+
+### 方案
+
+- 不要偷偷改变 `timeout_ms` 旧义。另加可选 `max_runtime_ms`；缺省无限，显式
+  传值便由后台 supervisor 到点收树。
+- 先把产品口径写成“同一宿主进程内可查询”，别叫 durable job queue。
+- 若要恢复，须落一份 session-owned task journal，含进程身份，不只 PID：
+  Windows 可记 creation time，Linux 可记 `/proc/<pid>/stat` starttime 或 pidfd。
+- 重启只收养能核对身份、日志 owner 与会话 id 的任务；核不准便标 orphaned，
+  不可贸然 kill。
+- POSIX 强恢复可另做小 supervisor 进程或 systemd/user service；本单 P0/P1
+  不为此造守护进程。
+
+---
+
+## P2：安全分类只是确认提示，不是 shell 沙箱
+
+**档位：产品边界。**
+
+`allow_commands/deny_commands` 与 `ClassifyCommand` 都在解析 shell 字符串。
+别名、变量、命令替换、脚本文件、编码、不同方言，足以绕过任何轻量词法器。
+它适合决定“要不要多问一句”，不适合证明命令无副作用。
+
+### 方案
+
+- 文档继续明写：分类器是 UX 风险分档，不是安全边界。
+- 确认框至少展示 shell、cwd、完整命令摘要与 Hook 改写痕迹。
+- 隔离要求高的工作流走 argv allowlist、受限 Plugin host、容器或 OS sandbox。
+- `run_command` 本质上就是执行任意代码；yolo 档须照此命名、照此告警。
+- 安全 corpus 收变量展开、嵌套 shell、换行、重定向、subexpression、encoded
+  command 与脚本间接调用。漏判一律回“需确认”，不追求聪明放行。
+
+---
+
+## 重构定案：一份 ProcessSpec，一份 ProcessOutcome
+
+眼下 cwd 在工具层拼，PowerShell 包装也在工具层，env 又在平台层临时改父
+进程，后台另起一套 PID watcher。责任散开，才会前台修了、后台漏掉。
+
+建议收成下面这副骨架：
+
+```text
+RunCommandTool
+  -> ShellResolver(shell id -> exact executable + argv contract)
+  -> ProcessSupervisor::Spawn(ProcessSpec)
+       cwd / env / stdin / timeout / cancel / output policy / background
+  -> ProcessHandle
+       wait / terminate_tree / read_status / native identity
+  -> ProcessOutcome
+       exited | spawn_failed | timed_out | cancelled | output_limit |
+       stop_failed | unknown
+  -> foreground formatter 或 BackgroundTaskRegistry
+```
+
+### `ProcessSpec` 至少要有
+
+```text
+mode: exec | shell
+executable + argv        # exec form
+shell_id + script        # shell form
+cwd: native path
+env_overlay
+stdin: null | bytes | inherit
+timeout / cancellation
+output: merged | split | file
+max_output_bytes / max_log_bytes
+background: bool
+```
+
+### `ProcessOutcome` 至少要有
+
+```text
+kind: exited | spawn_failed | timed_out | cancelled | output_limit |
+      stop_failed | unknown
+exit_code: optional<int>
+signal: optional<int>
+stdout/stderr 或 merged output
+output_truncated
+spawn_stage + os_error
+started_at / finished_at / duration
+tree_cleanup: complete | degraded | unknown
+```
+
+`Tool::Result.is_error` 只作旧接口投影：除 `exited + exit_code=0` 外，其余终态
+一律 true。后台 spawn 成功只表示“已接管”，不表示业务成功。
+
+## 重试规矩
+
+命令执行不设通用自动重试。
+
+- fork/CreateProcess 明确失败、且能证明没有子进程出生，调用方可按错误类型让
+  用户或模型重试；底层只处理 EINTR 这类同一系统调用续行。
+- 一旦 spawn 边界含糊，或进程可能已经跑过一条指令，绝不自动重启。`git
+  push`、迁移、发布、扣费脚本跑两遍，比报错更坏。
+- 超时、取消、输出超限、连接断开都不自动重试。先回结构化终态与已捕获输出。
+- Agent 若要重试，须重新作一枚可见 tool call，再过确认、Hook 与权限。
+- 将来若有 `idempotency_key`，也只能给明确支持幂等的 Plugin/远端服务用，
+  不能拿来替任意 shell 命令兜底。
+
+## 分期
+
+### 第一批：先止血
+
+- [ ] 修 Register 次序竞态。
+- [ ] Windows 后台 PowerShell 使用正确 cwd。
+- [ ] 修 POSIX 单引号路径；同时补临时测试，等 native cwd 落地后删拼接。
+- [ ] 输出超限改成错误；修“恰好等于上限”的 off-by-one。
+- [ ] 后台日志出口做 UTF-8 清洗与截断标记。
+- [ ] POSIX 日志改 0600 + 独占创建。
+- [ ] `timeout_ms/tail_lines` 做整数范围校验；所有字符串拒绝 NUL。
+
+### 第二批：收进程生命线
+
+- [ ] 引入 `ProcessSpec/ProcessOutcome/ProcessHandle`，cwd 改走原生参数。
+- [ ] 后台保留原生 handle/status，删 PID 轮询与重复 waitpid。
+- [ ] Stop 进入 Stopping，确认整树已死才进 Stopped。
+- [ ] Windows 改显式 environment block 与 handle allowlist。
+- [ ] Job/setpgid/setsid/dup2/resume/wait 全量验错。
+- [ ] 接通 cancel token。
+
+### 第三批：补产品契约
+
+- [ ] 后台日志大小、保留、清理与脱敏。
+- [ ] `max_runtime_ms`。
+- [ ] `/doctor` 展示 shell 路径、版本、TTY/profile 语义。
+- [ ] 评估显式 `bash`、`pwsh`；无安装便不进 schema。
+- [ ] 评估独立 `run_process` argv 工具，给不需管道/重定向的命令走无 shell 路。
+- [ ] 是否做持久后台任务另立单，不夹在本单里顺手造。
+
+## 测试矩阵
+
+### shell 与 cwd
+
+- [ ] PowerShell 5.1、pwsh（若支持）、cmd、dash、bash（若支持）。
+- [ ] 前台/后台各跑当前目录探针，结果一致。
+- [ ] cwd 含空格、中文、emoji、单引号、`%NAME%`、`!`、`$`、换行。
+- [ ] cwd 在校验后被删、改成文件、symlink 换向，错误能定位到 chdir stage。
+- [ ] `/bin/sh` 下 Bash-only 语法明确失败，不被宿主改写。
+
+### 退出与错误
+
+- [ ] exit 0、1、7、255；POSIX signal；Windows 大 DWORD exit code。
+- [ ] executable 不存在、shell 不存在、权限不足、格式错误。
+- [ ] PowerShell command-not-found、Write-Error、throw、解析错误、显式 exit。
+- [ ] stdout/stderr 交错；无输出；末尾无换行；二进制/NUL/坏 UTF-8。
+- [ ] 输出小于、等于、大于上限一字节。
+
+### 生命周期
+
+- [ ] timeout、cancel、output-limit 都杀根与孙进程。
+- [ ] stop 后端口释放；拒绝 SIGTERM 的进程会吃到 SIGKILL。
+- [ ] 快进程连起数千次，无永久 Running。
+- [ ] 后台 exit 7 稳定报 Failed/7，不许偶发 Completed/0。
+- [ ] Stop 与自然退出同拍，状态只进一个终态，不杀复用 PID。
+- [ ] 宿主正常退出、崩溃、SIGTERM/SIGKILL 后分别核对孤儿语义。
+
+### 并发与资源
+
+- [ ] 多 Hook 并发 extra_env 不串值，父环境不抖动。
+- [ ] 多子代理同拍起前台/后台命令，句柄不串、日志不撞名。
+- [ ] 文件描述符/handle 耗尽时不泄漏，不留 suspended process。
+- [ ] 日志撞上单任务与会话总上限，状态与提示准确。
+- [ ] 任务保留上限生效，线程对象与日志会回收。
+
+### 安全
+
+- [ ] command/cwd/argv/env 的 NUL 注入全拒。
+- [ ] 临时日志不可被其他用户读取，不跟随预置 symlink/reparse point。
+- [ ] 确认框展示的 shell、cwd、命令与真正执行项一致。
+- [ ] Hook `updatedInput` 后仍按最终命令做权限与隔离检查。
+
+## 验收口径
+
+- 没有任务永久卡在 Running；没有未知退出被写成 0。
+- stop/timeout/cancel/输出超限都能说明原因，也能收干净整棵树。
+- cwd 不再拼进 shell 字符串；前后台、四种方言共用同一份目录语义。
+- Windows 并发 spawn 不改父环境，不继承多余句柄。
+- 所有 Tool 出口皆为合法 UTF-8；后台日志有权限、容量与清理上限。
+- 结构化终态贯穿 platform、tools、UI、workflow 记录与文档。
+- 命令不会暗中重试。真要重跑，用户与 transcript 都看得见第二枚调用。
+- Windows 与 WSL/Linux 真机各跑一轮；macOS 至少由 CI 验 sh、cwd、进程组与
+  日志权限。没有真机证据的，不写“全平台已验证”。
+
+## 不做
+
+- 不内置 Bash，不把 `/bin/sh` 偷换成 Bash。
+- 不自动翻译 PowerShell、cmd、sh 脚本。
+- 不拿字符串分类器冒充沙箱。
+- 不对任意 shell 命令做透明重试。
+- 不把后台任务说成跨重启可靠队列。
+- 不为一枚 cwd 修复顺手引入 PTY；交互终端另立能力。
+
+## 源码入口
+
+| 责任 | 文件 / 符号 |
+| --- | --- |
+| 工具参数、PowerShell wrapper、cwd 拼接 | `src/tools/run_command.cpp` |
+| 前台/后台平台契约 | `src/platform/process.hpp` |
+| Windows CreateProcess、Job、env、日志 | `src/platform/process_win.cpp` |
+| POSIX fork/exec、进程组、atexit、日志 | `src/platform/process_posix.cpp` |
+| 后台任务状态、停止、尾读 | `src/tools/background_tasks.*` |
+| 后台查询工具 | `src/tools/background_output.cpp` |
+| Hook 并发进程调用 | `src/hooks/dispatcher.cpp` |
+| 命令确认分类 | `src/tools/command_safety.*` |
+| worktree 隔离检查 | `src/tools/isolation.*` |
+| 现有深挖 | `docs/architecture/tools/file-commands.md` |
+| 现有测试 | `tests/test_tools.cpp`、`tests/test_background_tasks.cpp`、`tests/test_hooks_dispatcher.cpp` |
