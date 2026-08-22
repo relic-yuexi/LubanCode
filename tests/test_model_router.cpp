@@ -11,6 +11,7 @@
 #include "agent/model_router.hpp"
 #include "app/model_router.hpp"
 #include "app/session_title.hpp"
+#include "cli/line_editor.hpp"
 #include "config/config.hpp"
 
 namespace {
@@ -254,6 +255,18 @@ TEST_CASE("/model roles 短表:回落行写明'回落到 normal'") {
     CHECK(lines[1].find("回落到 normal") != std::string::npos);
     CHECK(lines[2].find("m-normal") != std::string::npos);   // normal 自己
     CHECK(lines[3].find("m-lao") != std::string::npos);
+
+    // 中文表头按终端列宽占两格。各行 provider 列须从同一显示列起步，
+    // 不能拿 UTF-8 码点数冒充终端宽度。
+    const auto provider_column = [](const std::string& line, const std::string& value) {
+        const std::size_t offset = line.find(value);
+        REQUIRE(offset != std::string::npos);
+        return lubancode::cli::DisplayWidthUtf8(line.substr(0, offset));
+    };
+    const std::size_t expected_provider_column = provider_column(lines[0], "provider");
+    CHECK(provider_column(lines[1], "prov") == expected_provider_column);
+    CHECK(provider_column(lines[2], "prov") == expected_provider_column);
+    CHECK(provider_column(lines[3], "prov") == expected_provider_column);
 }
 
 TEST_CASE("标题清洗:剥围栏/引号、压空白、按码点限长") {

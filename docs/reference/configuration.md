@@ -120,6 +120,8 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 | `soul` | 空串 / `default` / `off` / `souls/` 下文件名(不带 `.md`) | 空串 | 风格叠加层。空串和 `default` 读 `SOUL.md`;`off` 不叠加。 |
 | `context_window` | 字符串或整数,支持 `256k`/`512k`/`1m` 或裸数字 | `256000` | 会话上下文窗口(token),`k=1000`、`m=1000000`(十进制)。 |
 | `compact_model` | 字符串,可留空 | 空串 | `/compact` 专用模型;空串就沿用会话模型。模型在目录里带 `context_window` 时,压缩输入按它单独算预算(窗口 − 输出预留 − 协议余量),装不下明确拒绝、不截史。 |
+| `normal_model` / `cheap_model` / `lao_model` | 字符串,可留空 | 空串 | 三档模型角色的简写，只换模型名并沿用当前 provider；未配置的 cheap/lao 回落 normal。 |
+| `model_roles` | JSON object | 空 object | 三档模型角色的完整路由，可分别指定 provider、model、effort、context window 与输出上限。见下节。 |
 | `max_context_chars` | 正整数 | `600000` | 旧的按字节硬切安全网,跟 `context_window` 不是一回事,两条防线互不依赖;真触发时终端打有损裁剪告警。 |
 | `max_steps_per_turn` | 非负整数 | `0`(无上限) | agent 主循环一个 turn 内的步数上限:一步 = 一次模型请求,一步可含多枚工具调用。不配或配 `0` = 不设上限,防跑飞靠 ESC/Ctrl+C;配正整数才是硬上限,超过就按预算耗尽收场。负数或非法值静默忽略。旧名 `max_turns` 仍可读入(兼容期,读到会打弃用提示);两者同现且值不同会明报冲突并采用新名。 |
 | `system_prompt_file` | 字符串,UTF-8 文本路径 | 无 | 人格段文件路径;没配就用内置人格,`--system-prompt` 命令行参数会压过它。 |
@@ -141,6 +143,28 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 | `request_hard_timeout_secs` | 非负整数(秒) | `300` | 每枚流式请求的硬墙钟,`0` = 不设。connect/idle 两道闸都不触发的挂死绝境(典型:本机代理/TUN 截胡回环连接)由它兜底掐断,收场翻成"请求硬超时"。长任务撞上就显式调大。与 `subagent.wall_clock_timeout_secs` 分工:那管一只任务整轮,这管一枚请求。 |
 
 `base_url`/`api_key`/`model` 没有内置默认值——lubancode 不绑死哪一家模型服务,三项都没配到:交互模式会自动走一遍初次配置向导;单发模式/管道模式会直接报错,提示三条配置途径。
+
+### 模型角色与 `/model roles`
+
+`normal` 管普通主会话，`cheap` 管压缩、记忆抽取、会话标题等小活，`lao` 管规划类任务。`/model roles` 会列出三档最终落到哪家 provider、哪个模型、哪档 effort，以及配置来源。
+
+```json
+{
+  "model_roles": {
+    "cheap": {
+      "provider": "deepseek",
+      "model": "deepseek-v4flash",
+      "effort": "low",
+      "context_window": "128k",
+      "max_output_tokens": "8k"
+    }
+  }
+}
+```
+
+`provider` 须与 `providers[]` 中的 `name` 对上。跨 provider 时，LubanCode 会按目标条目另建 backend，连 wire、base URL、鉴权、headers 与 extra body 一并切换，不是在当前连接上只改一串模型名。
+
+子代理眼下不走这三档路由。前台与后台子代理都跟随当前会话 provider、model 与 effort；`subagent` 段目前只管步数、输出、并发、深度与整轮超时。故而把 `cheap` 配成 `deepseek-v4flash`，会搬走压缩、抽取、标题等小活，不会把所有子代理搬过去。
 
 ### status_panel
 
