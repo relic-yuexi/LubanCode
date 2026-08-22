@@ -238,36 +238,59 @@ function Get-RemoteExe {
     return $exe.FullName
 }
 
-function Sync-OfficialSkills {
+function Sync-OfficialDirectory {
     param(
         [string]$SourceExe,
-        [string]$InstallDir
+        [string]$InstallDir,
+        [string]$DirectoryName,
+        [string]$DisplayName
     )
-    $sourceSkills = Join-Path (Split-Path -Parent $SourceExe) 'skills'
-    if (-not (Test-Path -LiteralPath $sourceSkills -PathType Container)) {
-        Write-Host "提示:安装来源里没有 skills 目录,保留现有官方技能不动。" -ForegroundColor Yellow
+    if ([string]::IsNullOrWhiteSpace($DirectoryName) -or $DirectoryName.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0 `
+        -or $DirectoryName.Contains('\') -or $DirectoryName.Contains('/')) {
+        throw "官方资源目录名不合法:$DirectoryName"
+    }
+
+    $sourceDirectory = Join-Path (Split-Path -Parent $SourceExe) $DirectoryName
+    if (-not (Test-Path -LiteralPath $sourceDirectory -PathType Container)) {
+        Write-Host "提示:安装来源里没有 $DirectoryName 目录,保留现有$DisplayName 不动。" -ForegroundColor Yellow
         return
     }
 
     $installRoot = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
-    $destSkills = [IO.Path]::GetFullPath((Join-Path $installRoot 'skills'))
-    if (-not $destSkills.StartsWith($installRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
-        throw "官方技能目标越出安装目录:$destSkills"
+    $destination = [IO.Path]::GetFullPath((Join-Path $installRoot $DirectoryName))
+    if (-not $destination.StartsWith($installRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "$DisplayName 目标越出安装目录:$destination"
     }
 
-    $staging = Join-Path $installRoot ('.skills-new-' + [Guid]::NewGuid().ToString('N'))
+    $staging = Join-Path $installRoot ('.' + $DirectoryName + '-new-' + [Guid]::NewGuid().ToString('N'))
     try {
-        Copy-Item -LiteralPath $sourceSkills -Destination $staging -Recurse -Force
-        if (Test-Path -LiteralPath $destSkills) {
-            Remove-Item -LiteralPath $destSkills -Recurse -Force
+        Copy-Item -LiteralPath $sourceDirectory -Destination $staging -Recurse -Force
+        if (Test-Path -LiteralPath $destination) {
+            Remove-Item -LiteralPath $destination -Recurse -Force
         }
-        Move-Item -LiteralPath $staging -Destination $destSkills
+        Move-Item -LiteralPath $staging -Destination $destination
     } finally {
         if (Test-Path -LiteralPath $staging) {
             Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
-    Write-Step "已同步官方技能:$destSkills"
+    Write-Step "已同步$DisplayName`:$destination"
+}
+
+function Sync-OfficialSkills {
+    param(
+        [string]$SourceExe,
+        [string]$InstallDir
+    )
+    Sync-OfficialDirectory -SourceExe $SourceExe -InstallDir $InstallDir -DirectoryName 'skills' -DisplayName '官方技能'
+}
+
+function Sync-OfficialDocs {
+    param(
+        [string]$SourceExe,
+        [string]$InstallDir
+    )
+    Sync-OfficialDirectory -SourceExe $SourceExe -InstallDir $InstallDir -DirectoryName 'docs' -DisplayName '官方文档'
 }
 
 # ===================== 主流程 =====================
@@ -323,8 +346,9 @@ function Invoke-Install {
             Copy-Item -LiteralPath $exeToInstall -Destination $destExe -Force
         }
         Sync-OfficialSkills -SourceExe $exeToInstall -InstallDir $InstallDir
+        Sync-OfficialDocs -SourceExe $exeToInstall -InstallDir $InstallDir
     } catch {
-        Write-ErrStep "同步程序或官方技能失败(是不是有旧的 lubancode 进程占着文件?先关掉再重试):$($_.Exception.Message)"
+        Write-ErrStep "同步程序、官方技能或文档失败(是不是有旧的 lubancode 进程占着文件?先关掉再重试):$($_.Exception.Message)"
         exit 1
     }
 

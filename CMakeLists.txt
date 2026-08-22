@@ -471,6 +471,7 @@ target_compile_features(lubancode PRIVATE cxx_std_23)
 
 install(TARGETS lubancode RUNTIME DESTINATION bin)
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/skills/" DESTINATION share/lubancode/skills)
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/docs/" DESTINATION share/lubancode/docs)
 
 # 官方技能不再编进 C++。开发构建每次把源码树 skills/ 镜到可执行文件旁；
 # 只改 Markdown 再跑 cmake --build 就会同步，不触发 C++ 重编。发行包也沿用
@@ -486,6 +487,21 @@ add_custom_target(lubancode_official_skills ALL
   COMMENT "lubancode: 同步官方 skills 到程序目录"
   VERBATIM)
 add_dependencies(lubancode_official_skills lubancode)
+
+# 官方 docs 与 skills 同版同行。开发构建把两棵资源树都镜到程序旁；便携包、
+# Windows 安装和 POSIX share/lubancode 安装由安装脚本保持同一相对布局，
+# lubancode-config 因而能从技能目录稳定找到 ../../docs。
+file(GLOB_RECURSE _lubancode_official_doc_files CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/docs/*")
+add_custom_target(lubancode_official_docs ALL
+  COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:lubancode>/docs"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${CMAKE_CURRENT_SOURCE_DIR}/docs"
+          "$<TARGET_FILE_DIR:lubancode>/docs"
+  DEPENDS ${_lubancode_official_doc_files}
+  COMMENT "lubancode: 同步官方 docs 到程序目录"
+  VERBATIM)
+add_dependencies(lubancode_official_docs lubancode)
 
 # ---------------------------------------------------------------------------
 # 测试:doctest 单头文件,同样走 FetchContent,走 codeload.github.com 镜像

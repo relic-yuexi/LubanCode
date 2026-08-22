@@ -1,0 +1,191 @@
+# 面试深挖导航
+
+[文档首页](../docs/README.md) · [高频技术面试追问题库](question-bank.md) · [开发难题与故障复盘](retrospectives/development-challenges.md) · [求职项目手册](portfolio.md) · [架构说明](../docs/architecture/README.md) · [Query 数据流](../docs/architecture/query-data-flow.md)
+
+这页不替产品文档重抄字段。它替面试答辩排路：先说结论，再画数据流，随后交代取舍、失败路、测试证据与现存欠账。面试官从哪一层往下钻，都能顺着链接摸到源码。
+
+## 先把项目说准
+
+LubanCode 是一只 C++23 终端 coding agent。它把三家模型协议翻进一套中立消息，把模型给出的工具调用交给本机控制器，再把结果成对送回模型。会话、上下文、项目记忆、MCP、Skill 与 Hook 都围着这条主循环生长。
+
+一句话架构：
+
+```text
+终端输入
+  -> prompt / 临时上下文装配
+  -> 中立 Request
+  -> Chat / Responses / Anthropic adapter
+  -> 流式中立事件
+  -> assistant 消息
+  -> 工具执行与结果回填
+  -> 下一次模型请求，或本轮收束
+```
+
+答题时先守住四个词：
+
+| 词 | 准话 |
+| --- | --- |
+| `turn` | 一条外层用户任务，从入队到最终收束。 |
+| `step` | turn 内一次模型请求与一条 assistant 回包。 |
+| `tool call` | assistant 回包里一枚带 id、名字与入参的调用。 |
+| `session` | JSONL 事件账，不等于模型眼前的 history。 |
+
+## 十二条深挖路线
+
+| 面试官从哪里问 | 先答什么 | 深读 |
+| --- | --- | --- |
+| Agent Loop 怎么转 | turn 里循环 step；无工具则收口，有工具则顺序执行、成对回填 | [Agent Loop、重试与恢复深挖](../docs/architecture/agent-loop/reliability.md)、[Query 数据流](../docs/architecture/query-data-flow.md) |
+| 失败会不会重试 | 主模型 transport 不自动重试；续跑、工具纠错、session 恢复各走各路 | [Agent Loop、重试与恢复深挖](../docs/architecture/agent-loop/reliability.md) |
+| 模型与 Schema 怎么管 | 端点判可用、目录补元数据、用户配置压默认；三种 Schema 分账 | [模型、Provider 与 JSON Schema 深挖](../docs/architecture/providers/schema.md)、[Provider 目录](../docs/features/providers/catalog.md) |
+| 开发中遇到什么问题 | 先讲现场与证据，再讲根因边界、分层修法、回归与未结欠账 | [开发难题与故障复盘](retrospectives/development-challenges.md) |
+| 上下文怎么管 | 四本账分开；长内容先在源头限流，再逐级压缩 | [上下文、长文本与记忆深挖](../docs/architecture/memory/context.md)、[Context 压缩算法深挖](../docs/architecture/context/compaction.md) |
+| 大文件怎么读 | 搜索先定位，`offset/limit` 分页，1 MiB 单次封顶；不是一口吞 | [文件读取与命令执行深挖](../docs/architecture/tools/file-commands.md) |
+| 命令怎么跑 | shell 语义、确认、超时、输出上限、杀进程树、后台台账各管一层 | [文件读取与命令执行深挖](../docs/architecture/tools/file-commands.md) |
+| 单工具、多工具怎么处理 | wire 各异，中立块相同；多枚现按出现次序执行，结果同批回填 | [工具协议与扩展运行时深挖](../docs/architecture/extensions/tool-extension.md)、[工具调用流程](../docs/architecture/tool-calling-flow.md) |
+| MCP 怎么接 | 长命 stdio 子进程，一行一帧 JSON-RPC；握手、发现、包装、确认、调用 | [工具协议与扩展运行时深挖](../docs/architecture/extensions/tool-extension.md) |
+| 插件有什么用 | 可信本地函数不必硬搭服务；Lua 走脚本，C ABI 接原生库，二者都同进程 | [进程内插件系统深挖](../docs/architecture/extensions/plugin-runtime.md)、[扩展指南](../docs/features/extensions/README.md) |
+| Skill 怎么触发 | 启动只注名称与摘要，命中任务后才按名加载正文；三级覆盖 | [工具协议与扩展运行时深挖](../docs/architecture/extensions/tool-extension.md)、[扩展指南](../docs/features/extensions/README.md) |
+| Hook 怎么守边界 | 事件发射、匹配、信任、并发执行、固定归并；事后 Hook 不能回滚副作用 | [工具协议与扩展运行时深挖](../docs/architecture/extensions/tool-extension.md)、[Hooks 流程](../docs/architecture/hooks-flow.md) |
+
+## 答一题的五步法
+
+### 1. 先定边界
+
+不要一上来报类名。先说这层管什么，不管什么。
+
+比如上下文：
+
+> history 管模型眼前的连续推理；session 留完整流水；memory 留跨会话事实；artifact 留可追回的大结果。压缩只动其中一部分，不能混叫。
+
+比如 MCP：
+
+> MCP 只把外部工具接进本地注册表。工具是否安全，不能由 MCP 名字担保，还要走确认、Hook 与结果清洗。
+
+### 2. 再走一遍成功路
+
+用一件具体任务说。比如“读 `README.md` 后跑测试”：
+
+```text
+用户消息
+-> step 1：模型调用 read_file
+-> 本机读文件，回 ToolResult
+-> step 2：模型调用 run_command
+-> 确认、起进程、捕获输出，回 ToolResult
+-> step 3：模型整理结论
+```
+
+这比“系统支持 tool use”有用。每一步都有数据形状，也有责任边界。
+
+### 3. 把失败路摆出来
+
+至少挑三类：
+
+- 输入坏：JSON 解析失败、字段类型错、路径越界。
+- 外部坏：进程起不来、MCP 死掉、Hook 超时、文件不是 UTF-8。
+- 状态坏：工具调用与结果失配、压缩摘要漏待办、后台任务退出码拿不到。
+
+说清“失败后哪本账仍可信”。例如 compact 失败，history 不动；命令超时，已捕获输出仍回填；MCP 响应迟到，pending id 已删，迟到包丢弃。
+
+### 4. 讲取舍，不背算法名
+
+可用这几组：
+
+| 取舍 | 当前选择 | 代价 |
+| --- | --- | --- |
+| 多工具执行 | 顺序执行 | 慢些；换来确认、Hook 与副作用顺序可审计 |
+| 记忆检索 | BM25 + 路径/符号硬命中 | 没有语义向量召回；本地、可解释、易失效 |
+| session | JSONL 追加 | 查询不如数据库灵活；崩溃后容易保住完整前缀 |
+| MCP 分帧 | newline-delimited JSON-RPC | 简单；服务器 stdout 不能混日志 |
+| Skill 装载 | 索引常驻、正文按需 | 降低常驻上下文；首次使用多一枚工具调用 |
+| 长工具结果 | artifact + 预览 | 多一层存储与追回逻辑；不必把整块塞进窗口 |
+
+### 5. 最后给证据
+
+证据按这次序报：
+
+1. 核心源码入口。
+2. 一条成功测试。
+3. 一条失败或边界测试。
+4. 现存欠账。
+
+只报“有很多测试”没有分量。要说“`tests/test_loop.cpp` 钉住 ESC 后当前工具收尾、后续工具补成对结果；`tests/test_tools.cpp` 钉住 2 MiB 输出上限与杀树”。
+
+## 高频追问速答
+
+横向题目先翻[高频技术面试追问题库](question-bank.md)。下面只留最常撞上的几问。
+
+### 模型目录是不是照搬 OpenCode
+
+不是。OpenCode/Models.dev 可作元数据分层与覆盖链的同类参照；LubanCode 没消费 Models.dev，也不兼容 OpenCode config schema。仓内直接可证的来源是 Codex model-catalog，provider 目录与 C++ parser 按本项目三 wire 另写。
+
+### 为什么不把全部历史都发给模型
+
+窗口、费用与缓存都会吃不消。更要紧的是，大段重复日志会淹没任务状态。LubanCode 先在工具处限输出，再把请求视图里的重复只读结果折成引用；冷结果可进 artifact 与微摘要；历史到线才做全局 compact。每层都有原文去处，不是一刀删掉。
+
+### 请求失败会不会自动重试
+
+当前不会。三家 client 每枚 step 只发一次 HTTP/SSE attempt。已经流出正文、tool use 或跑过副作用工具后，盲重试会重复输出、打乱 id，甚至把命令跑两遍。系统保住已成账 history 与 session，再明报失败。`max_tokens` 后追加宿主标记另开 step，算 continuation，不算 retry。
+
+### compact 时 system prompt 会怎样
+
+主会话 `system_prompt_` 不参与摘要，也不被改写。compact 另发一枚请求，吃专门的总结 system；验收成功后只换 history。项目指令、cwd 或模型显式变化时，应用可重建主 system，那是环境变更，不是 compact。
+
+### 很长的单条用户输入怎么办
+
+这正是难点。episode 分层不能把一轮从中劈开，最新用户轮又受热区保护。若单轮自身已超过硬限，程序明确拒绝，叫用户拆输入、先落文件再搜索，或另开会话。不能假装 compact 能救任何巨型输入。
+
+### 多个工具为何不并发
+
+有些只读调用可以并发，现版却统一顺序跑。确认框、Hook、终端转录与副作用次序因此只有一条账。若将来并发，至少要先做依赖分析、只读能力标注、并发确认策略、结果稳定排序与取消传播；不能见到多个 JSON 块就直接开线程。
+
+### JSON Schema 是不是安全边界
+
+不是。schema 只描述输入形状。路径范围、命令危险度、权限、Hook、OS 账户能力另有边界。现版还有一项明确欠账：Hook 给出的 `updatedInput` 会过统一 schema 复检；模型原始入参主要靠 provider 结构化调用与各工具自己的参数检查，尚未在 `RunOneTool` 入口统一验 schema。
+
+### MCP 工具和内置工具有何不同
+
+进入 `ToolRegistry` 以后，上层看见的接口一样：名字、说明、schema、确认属性、`execute`。不同之处藏在执行背后：内置工具直接调 C++；MCP 工具把入参转成 `tools/call` JSON-RPC，经长命 stdio 子进程拿结果。MCP 默认确认，服务端返回的非文本 content 现版只给“不支持”占位。
+
+### Skill 和 Hook 有何不同
+
+Skill 给模型一份做事说明，靠模型理解后调用普通工具。Hook 是宿主在生命周期边界直接起外部命令，可阻断、改参或添上下文。前者影响“模型想怎么做”，后者约束“宿主准不准做”。两者不能互相冒充。
+
+### 记忆何时触发
+
+读：每条外层用户消息到来时，若 `enabled/use` 开着，按当前问题重算一次；同一 turn 内各 step 沿用这份召回包。写：用户显式记、模型调 `memory_save`，或 turn 收尾抽取。收尾抽取又受 `learn=off/review/auto` 分流。
+
+### Hook 多只同时表态怎么办
+
+命中的同步 handler 并发跑，收齐后按定义次序归并。权限固定是 `deny > ask > allow > 无表态`；附加上下文全收；改参取最终允许时的最后一份。不能拿“谁先返回”决定权限。
+
+## 不该说满的话
+
+- 不说“支持任意编码文件”。`read_file` 只收 UTF-8，可剥 BOM；NUL 与非法 UTF-8 会拒绝。
+- 不说“多工具并行”。主工具循环现版顺序执行。
+- 不说“完整支持 MCP 一切 content 类型”。现版只拼 text，其他类型给占位。
+- 不说“向量记忆”。现版是本地 catalog、BM25 与硬命中。
+- 不说“Hook async 已落地”。现版只解析、展示并记 `skipped_async`。
+- 不说“所有工具参数统一过 JSON Schema”。原始入参尚未走宿主统一校验。
+- 不说“后台命令跨平台完全同语义”。POSIX 探活后拿不到准确退出码，异常退出时收尾也弱于 Windows Job Object。
+- 不说“模型请求会自动重试”。当前网络错、`429`、`5xx` 与流错误都直接返回；continuation 另算。
+- 不说“每一级 compact 都同样强验收”。严格 manifest 与待办守恒在终稿；map 与中间 pair merge 较松。
+- 不说“已经接入 OpenCode 或 Models.dev”。当前目录是 LubanCode 自有格式，仓内直接记载借鉴 Codex model-catalog。
+- 不说“模型 capability 都会自动拦截不兼容请求”。若干字段当前只解析、展示或留作后续接线。
+
+## 源码证据总索引
+
+| 题目 | 入口 | 关键测试 |
+| --- | --- | --- |
+| 主循环与多工具 | `src/agent/loop.cpp` | `tests/test_loop.cpp` |
+| 重试、取消与会话恢复 | `src/app/turn_runner.cpp`、`src/agent/session_store.cpp` | `tests/test_loop.cpp`、`test_session_store.cpp` |
+| 模型目录与 Provider schema | `src/config/model_catalog.cpp`、`provider_catalog.cpp` | `tests/test_model_catalog.cpp`、`test_provider_catalog.cpp` |
+| 中立消息与三协议 | `src/api/types.hpp`、`src/api/*/request.cpp` | `tests/test_chat_request.cpp`、`test_responses_request.cpp`、`test_anthropic_request.cpp` |
+| 大文件读取 | `src/tools/read_file.cpp` | `tests/test_tools.cpp`、`test_utf8_boundary.cpp` |
+| 命令与进程树 | `src/tools/run_command.cpp`、`src/platform/process_*.cpp` | `tests/test_tools.cpp`、`test_background_tasks.cpp` |
+| context / compact | `src/agent/context*.cpp`、`compact.cpp`、`microcompact.cpp` | `tests/test_context*.cpp`、`test_compact.cpp`、`test_microcompact.cpp` |
+| memory | `src/memory/project_memory.cpp`、`src/app/memory_extract.cpp` | `tests/test_project_memory.cpp`、`test_memory_retrieval.cpp` |
+| MCP | `src/mcp/client.cpp`、`transport.cpp`、`mcp_tool.cpp` | `tests/test_mcp_client.cpp`、`test_mcp_tool.cpp` |
+| Skill | `src/tools/skill_loader.cpp`、`skill_tool.cpp` | `tests/test_skills.cpp` |
+| Hook | `src/hooks/dispatcher.cpp`、`protocol.cpp` | `tests/test_hooks.cpp` |
+
+面试前再读一遍[求职项目手册](portfolio.md)。那页管项目介绍、故事与演示；本页管追问时怎样把技术账说透。

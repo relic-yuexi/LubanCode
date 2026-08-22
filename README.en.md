@@ -86,7 +86,7 @@ Run this from PowerShell 5.1 or newer. It downloads the latest Windows release, 
 irm https://raw.githubusercontent.com/relic-yuexi/LubanCode/main/scripts/install.ps1 | iex
 ```
 
-The default destination is `%LOCALAPPDATA%\Programs\lubancode`. No administrator shell is required. Running the installer again performs an in-place upgrade.
+The default destination is `%LOCALAPPDATA%\Programs\lubancode`. The bundled `skills/` and `docs/` are installed and upgraded with the executable. No administrator shell is required. Running the installer again performs an in-place upgrade.
 
 For a manual install, download `lubancode-vX.Y.Z-windows-x64.zip` from [Releases](https://github.com/relic-yuexi/LubanCode/releases), extract it, and run:
 
@@ -104,7 +104,7 @@ Download the matching archive from [Releases](https://github.com/relic-yuexi/Lub
 ./install.sh
 ```
 
-The script uses `~/.local/bin` when it is already on PATH. Otherwise it falls back to `/usr/local/bin` and tells you when `sudo` is needed.
+The script uses `~/.local/bin` when it is already on PATH. Otherwise it falls back to `/usr/local/bin` and tells you when `sudo` is needed. Bundled `skills/` and `docs/` are installed together under the matching `share/lubancode/` resource root.
 
 | Platform | Release asset |
 | --- | --- |
@@ -187,7 +187,7 @@ For multiple endpoints, run `/provider add`. Pick OpenAI, Anthropic, MiniMax, GL
 }
 ```
 
-Save it as `~/.lubancode/config.json`, then set `WORK_MODEL_API_KEY`. A successful `/provider switch work` also writes `active_provider`, so the next launch uses the same endpoint. The detailed [configuration guide](docs/configuration.md) is currently written in Chinese, but all field names and examples are language-neutral.
+Save it as `~/.lubancode/config.json`, then set `WORK_MODEL_API_KEY`. A successful `/provider switch work` also writes `active_provider`, so the next launch uses the same endpoint. The detailed [configuration guide](docs/reference/configuration.md) is currently written in Chinese, but all field names and examples are language-neutral.
 
 The catalog source lives in [`catalog/providers.json`](catalog/providers.json), with its schema in [`catalog/providers.schema.json`](catalog/providers.schema.json). The executable embeds a snapshot and caches validated updates under `~/.lubancode/cache/`.
 
@@ -195,7 +195,7 @@ The catalog source lives in [`catalog/providers.json`](catalog/providers.json), 
 
 Run `/init` inside a repository. LubanCode creates `AGENTS.md` at the Git root with a practical scaffold for layout, build, tests, and working rules. Existing instructions are never overwritten. The current main agent and sub-agents reload the file immediately.
 
-At startup, LubanCode walks from the Git root to the working directory. Each directory prefers `AGENTS.override.md`, then `AGENTS.md`; nearer files appear later and take precedence. Empty files are skipped, and combined instruction content is capped at 32 KiB. See [Project instructions](docs/project-instructions.md).
+At startup, LubanCode walks from the Git root to the working directory. Each directory prefers `AGENTS.override.md`, then `AGENTS.md`; nearer files appear later and take precedence. Empty files are skipped, and combined instruction content is capped at 32 KiB. See [Project instructions](docs/features/project-instructions/README.md).
 
 ## Everyday commands
 
@@ -236,18 +236,18 @@ There are four extension paths:
 3. **Lua plugins**: one Lua file becomes one model-callable tool.
 4. **C ABI plugins**: in-process Windows DLLs for native integrations.
 
-See the [extension guide](docs/extensions.md) for layouts, examples, namespacing, and security boundaries.
+See the [extension guide](docs/features/extensions/README.md) for layouts, examples, namespacing, and security boundaries.
 
 ## Documentation
 
 | Document | Contents |
 | --- | --- |
 | [Documentation index](docs/README.md) | Reading paths, status, and links to each guide. |
-| [Configuration](docs/configuration.md) | Providers, precedence, hooks, MCP, web search, LSP and model catalogs. Chinese. |
-| [Extensions](docs/extensions.md) | Skills, Lua, C ABI plugins, MCP and LSP. Chinese. |
-| [Architecture](docs/architecture.md) | Layers, request flow, API backends, tools and platform boundaries. Chinese. |
-| [Terminal UX](docs/terminal-ui.md) | Work animation, queued input, `ask_user`, approvals and edit matching. Chinese. |
-| [Project instructions](docs/project-instructions.md) | `/init`, `AGENTS.md` layering, overrides and size limits. Chinese. |
+| [Configuration](docs/reference/configuration.md) | Providers, precedence, hooks, MCP, web search, LSP and model catalogs. Chinese. |
+| [Extensions](docs/features/extensions/README.md) | Skills, Lua, C ABI plugins, MCP and LSP. Chinese. |
+| [Architecture](docs/architecture/README.md) | Layers, request flow, API backends, tools and platform boundaries. Chinese. |
+| [Terminal UX](docs/features/terminal/README.md) | Work animation, queued input, `ask_user`, approvals and edit matching. Chinese. |
+| [Project instructions](docs/features/project-instructions/README.md) | `/init`, `AGENTS.md` layering, overrides and size limits. Chinese. |
 | [Prompt modules](src/prompts/README.md) | How built-in prompts are split, embedded, seeded and overridden. Chinese. |
 
 ## CI and releases

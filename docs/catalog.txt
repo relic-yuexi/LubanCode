@@ -1,0 +1,88 @@
+# 官方文档。每行一页；路径从 docs/ 起算。
+DOC README.md
+
+# 上手与排错
+DOC getting-started/troubleshooting.md
+
+# 功能模块
+DOC features/README.md
+DOC features/context/compaction.md
+DOC features/extensions/README.md
+DOC features/extensions/hooks.md
+DOC features/project-instructions/README.md
+DOC features/providers/catalog.md
+DOC features/sessions/README.md
+DOC features/terminal/README.md
+DOC features/tools/ptc.md
+
+# 参考手册
+DOC reference/README.md
+DOC reference/commands.md
+DOC reference/configuration.md
+DOC reference/feature-index.md
+DOC reference/tools.md
+
+# 架构与内部机理
+DOC architecture/README.md
+DOC architecture/agent-loop/reliability.md
+DOC architecture/context/compaction.md
+DOC architecture/extensions/plugin-runtime.md
+DOC architecture/extensions/tool-extension.md
+DOC architecture/hooks-flow.md
+DOC architecture/memory/context.md
+DOC architecture/memory/design.md
+DOC architecture/memory/flow.md
+DOC architecture/providers/schema.md
+DOC architecture/query-data-flow.md
+DOC architecture/tool-calling-flow.md
+DOC architecture/tools/file-commands.md
+
+# 开发手册
+DOC development/README.md
+DOC development/build-and-release.md
+DOC development/documentation.md
+DOC development/i18n.md
+DOC development/naming.md
+DOC development/security.md
+DOC development/testing.md
+
+# 面试材料。路径从 interview/ 起算，不随发行包装走。
+INTERVIEW README.md
+INTERVIEW deep-dives.md
+INTERVIEW portfolio.md
+INTERVIEW question-bank.md
+INTERVIEW retrospectives/development-challenges.md
+
+# 官方配置 Skill 与 docs 的同包路由。
+SKILL_DIR skills/lubancode-config
+SKILL_DOCS ../../docs
+SKILL_MAP references/document-map.md
+
+ROUTE reference/configuration.md
+ROUTE features/providers/catalog.md
+ROUTE architecture/providers/schema.md
+ROUTE features/sessions/README.md
+ROUTE features/context/compaction.md
+ROUTE architecture/context/compaction.md
+ROUTE architecture/memory/design.md
+ROUTE architecture/memory/flow.md
+ROUTE architecture/memory/context.md
+ROUTE reference/tools.md
+ROUTE features/tools/ptc.md
+ROUTE architecture/tool-calling-flow.md
+ROUTE architecture/agent-loop/reliability.md
+ROUTE features/extensions/README.md
+ROUTE architecture/extensions/tool-extension.md
+ROUTE architecture/extensions/plugin-runtime.md
+ROUTE features/extensions/hooks.md
+ROUTE development/security.md
+ROUTE architecture/hooks-flow.md
+ROUTE features/terminal/README.md
+ROUTE reference/commands.md
+ROUTE architecture/query-data-flow.md
+ROUTE features/project-instructions/README.md
+ROUTE architecture/README.md
+ROUTE development/build-and-release.md
+ROUTE getting-started/troubleshooting.md
+ROUTE development/testing.md
+ROUTE reference/feature-index.md

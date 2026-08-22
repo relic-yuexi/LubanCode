@@ -958,9 +958,9 @@ TEST_CASE("ProjectMemory: scope 不符不注入,subtree 内加分可召回") {
 }
 
 // ---- 文档漂移(规格"验收":文档默认值与代码一致,并有测试守着) ----
-// docs/configuration.md 与 docs/memory-system-design.md 写的默认值、学习三档
-// 与命令面,须跟 config.hpp 的常量、/memory 的实际子命令对齐。改代码不改
-// 文档(或反过来)这里就会红。
+// docs/reference/configuration.md 与 docs/architecture/memory/design.md 写的
+// 默认值、学习三档与命令面,须跟 config.hpp 的常量、/memory 的实际子命令
+// 对齐。改代码不改文档(或反过来)这里就会红。
 namespace {
 std::string ReadDoc(const fs::path& base, const char* name) {
     std::ifstream file(base / "docs" / name, std::ios::binary);
@@ -971,8 +971,8 @@ std::string ReadDoc(const fs::path& base, const char* name) {
 
 TEST_CASE("文档漂移: 记忆默认值、学习三档与命令面跟代码对齐") {
     const fs::path source = LUBANCODE_TEST_SOURCE_DIR;
-    const std::string configuration = ReadDoc(source, "configuration.md");
-    const std::string design = ReadDoc(source, "memory-system-design.md");
+    const std::string configuration = ReadDoc(source, "reference/configuration.md");
+    const std::string design = ReadDoc(source, "architecture/memory/design.md");
     REQUIRE_FALSE(configuration.empty());
     REQUIRE_FALSE(design.empty());
 
