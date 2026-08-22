@@ -274,8 +274,10 @@ TEST_CASE("thread/start -> thread/list -> thread/stop:会话账走 SessionStore"
     }
     CHECK(file_found);
 
+    // 不抛的形态:柄没放净时记码不炸(Windows 上删开着的文件是不许的)。
+    std::error_code cleanup_ec;
     std::filesystem::remove_all(
-        std::filesystem::path(reinterpret_cast<const char8_t*>(sessions_dir.c_str())));
+        std::filesystem::path(reinterpret_cast<const char8_t*>(sessions_dir.c_str())), cleanup_ec);
 }
 
 TEST_CASE("thread/stop 不认识的 threadId:稳定参数错") {
@@ -362,7 +364,15 @@ TEST_CASE("整回合:thread/start -> turn/start -> 文本流 -> turn/completed")
     }
     CHECK(assistant_logged);
 
-    std::filesystem::remove_all(std::filesystem::path(u8_dir));
+    // 先正经停线程:SessionStore 还攥着 .jsonl 的追加柄,不停就删,Windows
+    // 不许(POSIX 删开着的文件没事,本地 WSL 全绿是这么来的)。
+    std::string stop_error;
+    harness.server->HandleThreadStop(thread_id, stop_error);
+    CHECK(stop_error.empty());
+    // 兜底用不抛的形态:真还有漏网的柄,记码不炸测试(目录留着,下趟
+    // MakeTempDir 起手自会清)。
+    std::error_code cleanup_ec;
+    std::filesystem::remove_all(std::filesystem::path(u8_dir), cleanup_ec);
 }
 
 TEST_CASE("整回合(模型报错):终态 error,错误文案带上") {
