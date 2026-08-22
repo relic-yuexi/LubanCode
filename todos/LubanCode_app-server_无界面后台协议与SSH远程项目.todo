@@ -1,6 +1,6 @@
 # LubanCode app-server:无界面后台协议与 SSH 远程项目
 
-状态：阶段 1 已并入(2026-08-22,0.26.16):协议骨架六件套/握手/假 backend 整回合/单测 68 案;阶段 2(审批反向请求 permission/request 四态、acceptForSession 会话级放行、悬停超时悬空收口、turn/interrupt 硬时限、ask_user 的 user/ask、迟到回答 kErrStaleRequestId)已做,待并;阶段 3-4(diff/进度、SSH 冒烟)待做
+状态：阶段 1 已并入(2026-08-22,0.26.16):协议骨架六件套/握手/假 backend 整回合/单测 68 案;阶段 2(审批反向请求 permission/request 四态、acceptForSession 会话级放行、悬停超时悬空收口、turn/interrupt 硬时限、ask_user 的 user/ask、迟到回答 kErrStaleRequestId)已并入(0.26.20);阶段 3-4(diff/进度、SSH 冒烟)待做
 
 ## 一句话
 
