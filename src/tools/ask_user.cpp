@@ -2,6 +2,8 @@
 
 #include <utility>
 
+#include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
+
 namespace lubancode::tools {
 
 AskUserTool::AskUserTool(AskUserHandler handler) : handler_(std::move(handler)) {}
@@ -11,8 +13,10 @@ std::string AskUserTool::name() const {
 }
 
 std::string AskUserTool::description() const {
-    return "当任务缺少会改变实现方向的用户选择时,用选择题向用户询问。一次可问 1 到 4 题,"
-           "每题给 2 到 4 个备选项;界面会自动追加“自己填写”。不要拿它询问可自行查明的细节。";
+    // 文案在 src/prompts/tools/<语言>/ask_user.md,兜底是迁移前的原文。
+    return ToolText("ask_user", "description",
+                    "当任务缺少会改变实现方向的用户选择时,用选择题向用户询问。一次可问 1 到 4 题,"
+                    "每题给 2 到 4 个备选项;界面会自动追加“自己填写”。不要拿它询问可自行查明的细节。");
 }
 
 nlohmann::json AskUserTool::input_schema() const {
@@ -33,11 +37,13 @@ nlohmann::json AskUserTool::input_schema() const {
     question["type"] = "object";
     question["properties"] = nlohmann::json::object();
     question["properties"]["header"] = {
-        {"type", "string"}, {"description", "简短题头,建议不超过 12 个字"}};
-    question["properties"]["question"] = {{"type", "string"}, {"description", "完整问题"}};
+        {"type", "string"},
+        {"description", ToolText("ask_user", "param.questions.header", "简短题头,建议不超过 12 个字")}};
+    question["properties"]["question"] = {
+        {"type", "string"}, {"description", ToolText("ask_user", "param.questions.question", "完整问题")}};
     question["properties"]["options"] = std::move(options);
     question["properties"]["multi_select"] = {
-        {"type", "boolean"}, {"description", "是否允许多选,默认 false"}};
+        {"type", "boolean"}, {"description", ToolText("ask_user", "param.questions.multi_select", "是否允许多选,默认 false")}};
     question["required"] = nlohmann::json::array({"question", "options"});
 
     nlohmann::json questions = nlohmann::json::object();
