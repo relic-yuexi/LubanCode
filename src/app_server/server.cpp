@@ -242,10 +242,9 @@ nlohmann::json Server::HandleTurnStart(const std::string& thread_id, const std::
         record->store->AppendMessage(user_message);
     }
 
-    // 事件账:三条 item 各自的 id(回合内单调:0,1,2...)。seq 由出站
+    // 事件账:条目 id 单调(见下方 next_item_seq);事件的 seq 由出站
     // 顺序天然保住(单写者:本线程),显式序号字段是 schema 冻结时的
-    // 待定项(见 protocol.hpp 的 kEventQueueOverflow 注释),骨架期靠
-    // 发送次序。
+    // 待定项,骨架期靠发送次序。
     nlohmann::json completed_params;
     {
         // 装配:假 backend + 空注册表(骨架期整回合就是模型文本流;工具
@@ -259,10 +258,14 @@ nlohmann::json Server::HandleTurnStart(const std::string& thread_id, const std::
         agent::AgentLoop loop(*backend, *registry, std::move(profile), std::string("lubancode app-server"));
 
         agent::Callbacks callbacks;
+        // 条目 id:回合内单调递增(单子协议底线第三节"每条事件带单调序号"
+        // 在骨架期的落法——item 级别用 id 计数,事件级靠出站次序;显式
+        // seq 字段是 schema 冻结时的待定项)。
+        std::uint64_t next_item_seq = 0;
         std::string text_item_id;
         callbacks.on_text_delta = [&](const std::string& delta) {
             if (text_item_id.empty()) {
-                text_item_id = "item-0";
+                text_item_id = "item-" + std::to_string(next_item_seq++);
                 connection_->EmitEvent(kEventItemStarted,
                                        MakeItemStartedParams(thread_id, turn_id, text_item_id, kItemTypeText,
                                                              nlohmann::json::object()));
@@ -273,7 +276,7 @@ nlohmann::json Server::HandleTurnStart(const std::string& thread_id, const std::
         std::string thinking_item_id;
         callbacks.on_thinking_delta = [&](const std::string& delta) {
             if (thinking_item_id.empty()) {
-                thinking_item_id = "item-t";
+                thinking_item_id = "item-" + std::to_string(next_item_seq++);
                 connection_->EmitEvent(kEventItemStarted,
                                        MakeItemStartedParams(thread_id, turn_id, thinking_item_id,
                                                              kItemTypeThinking, nlohmann::json::object()));
