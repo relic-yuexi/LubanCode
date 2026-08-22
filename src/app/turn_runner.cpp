@@ -22,9 +22,11 @@
 #include "cli/i18n.hpp"
 #include "platform/console.hpp"
 #include "ptc/ptc_tool.hpp"
+#include "runtime/plugin_tool.hpp"
 #include "runtime/turn_runtime.hpp"
 #include "tools/command_safety.hpp"
 #include "tools/hooks.hpp"
+#include "tools/lua_tool.hpp"
 
 namespace lubancode::app {
 
@@ -768,6 +770,21 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         hooks.on_post_tool_use_hook = callbacks.on_post_tool_use_hook;
         hooks.cancel = cancel_flag;
         ptc_tool->SetHooks(std::move(hooks));
+    }
+
+    // 插件工具(plugins 单第 7 步的 ESC 链):process 插件的 adapter
+    // (进程超时/取消同一落锤路)与 Lua 工具(hook 里查旗掐死循环)每轮
+    // 灌这一轮的取消旗。registry 是本轮实际在用的表(main/sub 都从这走)。
+    if (cancel_flag != nullptr) {
+        for (const auto& tool : registry.All()) {
+            if (auto* plugin_adapter = dynamic_cast<lubancode::runtime::PluginToolAdapter*>(tool.get());
+                plugin_adapter != nullptr) {
+                plugin_adapter->SetCancel(cancel_flag);
+            }
+            if (auto* lua_tool = dynamic_cast<lubancode::tools::LuaTool*>(tool.get()); lua_tool != nullptr) {
+                lua_tool->SetCancel(cancel_flag);
+            }
+        }
     }
 
     return callbacks;

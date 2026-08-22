@@ -2,22 +2,29 @@
 
 [文档首页](../../README.md) · [工具手册](../../reference/tools.md) · [进程内插件深挖](../../architecture/extensions/plugin-runtime.md) · [配置手册](../../reference/configuration.md) · [安全模型](../../development/security.md) · [测试手册](../../development/testing.md) · [排错手册](../../getting-started/troubleshooting.md) · [架构说明](../../architecture/README.md)
 
-LubanCode 留了六扇门：Skill、MCP、LSP、Lua、C ABI 插件、Hooks。分量不同，风险也不同。先挑最窄的一扇，够用便止。
+LubanCode 留了七扇门：Skill、MCP、LSP、Lua、process 插件、native 插件、Hooks。分量不同，风险也不同。先挑最窄的一扇，够用便止。
 
 ## 1. 怎么选
 
 | 路子 | 适合什么 | 运行位置 | 要不要重编主程序 | 风险 |
 | --- | --- | --- | --- | --- |
 | Skill | 教模型一套章法，附范例、模板、脚本 | 提示上下文；附带脚本另算 | 否 | 中 |
-| MCP | 接数据库、浏览器、云服务、已有工具生态 | 独立 stdio 子进程 | 否 | 中至高 |
+| MCP | 长驻服务、数据库连接池、已有 MCP 生态 | 独立 stdio 子进程 + JSON-RPC | 否 | 中至高 |
 | LSP | 查定义、引用、符号、诊断 | 语言服务器子进程 | 否 | 中 |
-| Lua | 写轻量本地工具 | LubanCode 进程内 | 否 | 高 |
-| C ABI | 接原生库、系统 API、高性能逻辑 | LubanCode 进程内 | 插件要编，主程序不用 | 最高 |
+| Lua | 写轻量本地工具，零依赖零编译 | LubanCode 进程内 | 否 | 高 |
+| process 插件 | Python/Rust/Go/Node/C++ 可执行程序当工具 | 短命子进程（stdin/stdout JSON） | 否 | 中 |
+| native 插件 | 接原生库、极低延迟、大数据量 | LubanCode 进程内（.dll/.so/.dylib） | 插件要编，主程序不用 | 最高 |
 | Hooks | 会话或工具前后跑命令，做审计与拦截 | 平台默认 shell 子进程 | 否 | 高 |
 
 只要是“告诉模型该怎么做”，先用 Skill。要把独立服务暴露成工具，用 MCP。只查代码语义，用 LSP。Lua 和原生插件都进宿主进程，须当可执行代码审查。
 
-若功能只有一枚可信本地函数，不必硬搭 MCP server。Lua 与 C ABI 正是这条短路：不拉子进程，不做 JSON-RPC；代价是失去进程隔离。设计动机、安装实证、ABI、并发与 corner case 见[进程内插件系统深挖](../../architecture/extensions/plugin-runtime.md)。
+若功能只有一枚可信本地函数，不必硬搭 MCP server。三条短路按风险从低到高挑：
+
+- **process 插件**（默认主路）：任何能从 stdin 读 JSON、往 stdout 写 JSON 的程序都能挂。Python 冷启动毫秒级，进程崩了只坏当次调用。写法见第 6 节。
+- **Lua**：零依赖零编译，`~/.lubancode/plugins/` 丢一枚 `.lua` 即挂。pure 画像缺省关 `io`/`os.execute`，死循环有指令预算落锤。见第 5 节。
+- **native 插件**：极低延迟、大数据不搬进程时才用；加载即执行库 constructor，崩了带倒宿主。ABI v2 三平台（Windows .dll / Linux .so / macOS .dylib）。见第 7 节。
+
+设计动机、安装实证、ABI、并发与 corner case 见[进程内插件系统深挖](../../architecture/extensions/plugin-runtime.md)。
 
 ## 2. Skills
 
@@ -215,44 +222,200 @@ plugin__word_count__word_count
 
 完整示例见 [examples/plugins/word_count.lua](../../../examples/plugins/word_count.lua)。插件在启动时扫描。改完 `.lua` 后要重启 LubanCode。
 
-Lua 与宿主同进程。死循环会卡住会话，耗尽内存会拖垮程序。插件工具默认需要确认，但确认只能挡“是否调用”，挡不住插件内部写坏内存或滥用已开放的库。
+Lua 与宿主同进程，风险用三道软墙兜底（`pure` 画像缺省生效）：
 
-## 6. C ABI 原生插件
+- **库关门**：`os.execute`、`os.exit`、`io`、`package.loadlib` 拿不到——要文件与命令能力的，改走 process 插件（进程隔离），不要悄悄开 trusted。
+- **指令预算**：死循环约 2 亿条虚拟机指令内被 `luaL_error` 掐断，报错文案自带预算数；ESC 也走同一条落锤路。
+- **内存帽**：狂吃内存按 OOM 报脚本错误，宿主堆不破。
 
-现版原生插件只在 Windows 加载 `.dll`。公共 ABI 头在 [include/luban_plugin.h](../../../include/luban_plugin.h)。插件须导出：
+三道墙都是软的：拦跑野的脚本，不是恶意绕洞。真不可信代码走 process 隔离。`trusted` 画像（全开）须显式批准。插件工具默认需要确认，但确认只能挡“是否调用”，挡不住插件内部写坏内存。
 
-```c
-const luban_plugin_manifest* luban_plugin_entry(void);
+## 6. process 插件（默认主路）
+
+任何能从 stdin 读一份 JSON、往 stdout 写一份 JSON 的程序都能当工具：Python、Rust、Go、Node、Deno、Ruby、C/C++ 可执行文件、shell wrapper 都一样。每次调用起一只短命进程，进程退出调用结束——无握手、无常驻 server、无 JSON-RPC。
+
+### 6.1 一插件一目录
+
+```text
+~/.lubancode/plugins/local-math/
+  plugin.json      # 静态真账：id/runtime/tools 的 manifest
+  runner.py        # 你的脚本
 ```
 
-示例构建：
+`plugin.json` 的全字段规矩（强校验，坏了整件拒绝加载，不悄悄宽化）见 `src/runtime/plugin_contract.hpp` 的注释。最小样例：
+
+```json
+{
+  "manifest_version": 1,
+  "id": "local-math",
+  "version": "1.0.0",
+  "language": "python",
+  "runtime": {
+    "kind": "process",
+    "command": "python3",
+    "args": ["${plugin_dir}/runner.py"],
+    "timeout_ms": 30000
+  },
+  "tools": [
+    {
+      "name": "add",
+      "description": "把两个数字相加。",
+      "input_schema": {
+        "type": "object",
+        "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
+        "required": ["a", "b"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "permissions": {"network": false, "env": []}
+}
+```
+
+生成脚手架最快：`lubancode plugin init python my-math` 生成 plugin.json + runner.py + test_runner.py 三件套，本地 `python test_runner.py` 先自测。
+
+### 6.2 协议 v1
+
+请求（stdin，恰好一份 JSON，写完即关，脚本可 `json.load(sys.stdin)` 读到 EOF）：
+
+```json
+{"protocol": 1, "call_id": "req-7", "plugin": "local-math", "tool": "add",
+ "arguments": {"a": 1, "b": 2}, "context": {"cwd": "D:/project"}}
+```
+
+响应（stdout，恰好一份 JSON）：
+
+```json
+{"protocol": 1, "call_id": "req-7", "ok": true,
+ "content": [{"type": "text", "text": "3"}], "structured": 3}
+```
+
+铁律：
+
+- stdout 是结果专线。日志只写 stderr；stdout 前后混任何字节，整次调用判协议错，不从字堆里猜 JSON。
+- `content` 首版只认 `type=text`；别的类型按协议错拒，不静默转字符串。
+- 非零退出、崩溃、超时、取消、坏 UTF-8、坏 JSON、call_id 不合、输出超限各有唯一宿主错误码，`/plugin doctor` 与错误文案对得上。
+- 超时到点先温和终止，过宽限期杀整棵进程树（Windows Job Object / POSIX 进程组）；ESC 走同一条取消路。
+- 入参在发送前先过 manifest 声明的 JSON Schema 子集验证；缺字段、类型不对在宿主侧就报清，不用等脚本炸。
+
+### 6.3 环境与边界
+
+- 起进程不用 shell：argv 直传，参数里的引号、空格、`&;|` 不可能变成命令。
+- 子进程环境是**最小集**：PATH 与必要系统变量 + manifest `permissions.env` allowlist 点名的；宿主整份环境（连 API key）一概不递。密钥要给就在 allowlist 里显式点名。
+- cwd 缺省项目根。
+- 进程崩溃只坏本次调用。进程隔离不等于安全沙箱——子进程仍有当前用户的文件与网络权限。
+
+### 6.4 各语言样例
+
+**Python**（`lubancode plugin init python` 生成的就是这份的成器版）：
+
+```python
+import json, sys
+for s in (sys.stdin, sys.stdout, sys.stderr):
+    try: s.reconfigure(encoding="utf-8")   # Windows 管道默认本地代码页
+    except Exception: pass
+request = json.load(sys.stdin)
+try:
+    value = request["arguments"]["a"] + request["arguments"]["b"]
+    json.dump({"protocol": 1, "call_id": request["call_id"], "ok": True,
+               "content": [{"type": "text", "text": str(value)}]}, sys.stdout)
+except Exception as e:
+    json.dump({"protocol": 1, "call_id": request.get("call_id", ""), "ok": False,
+               "error": {"code": "execution_failed", "message": str(e)}}, sys.stdout)
+```
+
+**Rust**（`cargo build --release` 出可执行文件，manifest 的 `command` 直接写它的绝对路径或 `${plugin_dir}/target/release/mytool`；用户机器不需要装 Rust）：
+
+```rust
+use std::io::{self, Read, Write};
+
+fn main() {
+    let mut input = String::new();
+    io::stdin().read_to_string(&mut input).unwrap();
+    let request: serde_json::Value = serde_json::from_str(&input).unwrap();
+    let a = request["arguments"]["a"].as_f64().unwrap_or(0.0);
+    let b = request["arguments"]["b"].as_f64().unwrap_or(0.0);
+    let response = serde_json::json!({
+        "protocol": 1,
+        "call_id": request["call_id"],
+        "ok": true,
+        "content": [{"type": "text", "text": (a + b).to_string()}],
+    });
+    io::stdout().write_all(response.to_string().as_bytes()).unwrap();
+}
+```
+
+**C 可执行文件**（源码不能直接跑，编成独立 executable 走同一条协议；用户机器不需要编译器）：
+
+```c
+#include <stdio.h>
+#include <string.h>
+
+/* 读全部 stdin，抽出 "a":N 与 "b":N（示例级解析，正经用 jsmn 之类小库） */
+int main(void) {
+    char buf[65536];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, stdin);
+    buf[n] = '\0';
+    double a = 0, b = 0;
+    sscanf(strstr(buf, "\"a\""), "\"a\":%lf", &a);
+    sscanf(strstr(buf, "\"b\""), "\"b\":%lf", &b);
+    char call_id[64] = "";
+    sscanf(strstr(buf, "\"call_id\""), "\"call_id\":\"%63[^\"]", call_id);
+    printf("{\"protocol\":1,\"call_id\":\"%s\",\"ok\":true,\"content\":[{\"type\":\"text\",\"text\":\"%g\"}]}",
+           call_id, a + b);
+    return 0;
+}
+```
+
+### 6.5 项目级插件与信任
+
+`<项目>/.lubancode/plugins/` 也认（一插件一目录，格式同上）。项目目录里的插件是外来代码——首次见到按内容指纹（全部文件的 SHA-256）查信任账 `~/.lubancode/plugin-trust.json`，未信任的跳过并警告，改一个字节指纹即变、须重审。用户主目录的插件是亲手放的，不进这本账。
+
+## 7. native 原生插件（三平台）
+
+三平台同一份纯 C ABI：Windows 加载 `.dll`、Linux 加载 `.so`、macOS 加载 `.dylib`。公共 ABI 头在 [include/luban_plugin.h](../../../include/luban_plugin.h)。插件导出同一枚符号：
+
+```c
+const void* luban_plugin_entry(void);
+```
+
+返回的 manifest 首字段判版本：`1` = ABI v1（legacy，宿主兼容读取，加载行明报）；`2` = ABI v2（当前）。其余值拒绝加载，不静默拿错结构体。
+
+示例构建（三平台各出各的产物）：
 
 ```bash
 cmake -S examples/plugins/hello_plugin -B build/hello-plugin
 cmake --build build/hello-plugin --config Release
+# Windows 出 hello_plugin.dll / Linux 出 libhello_plugin.so / macOS 出 libhello_plugin.dylib
 ```
 
-把主 DLL 与依赖 DLL 放进：
+放进主目录的插件目录：
 
 ```text
-%USERPROFILE%\.lubancode\plugins\
+%USERPROFILE%\.lubancode\plugins\        # Windows
+~/.lubancode/plugins/                    # Linux / macOS
 ```
 
-LubanCode 会略过没有 `luban_plugin_entry` 的依赖库。假设主文件叫 `hello_plugin.dll`，其中工具叫 `reverse_text`，最终名称为：
+宿主按当前平台扩展名扫描，会略过没有 `luban_plugin_entry` 的依赖库。工具名前缀取 v2 manifest 的 `plugin_id` 字段（v1 取文件名去扩展名）：
 
 ```text
 plugin__hello_plugin__reverse_text
 ```
 
-三条 ABI 硬规矩：
+ABI v2 的硬规矩：
 
-1. `api_version` 必须等于 `LUBAN_PLUGIN_API_VERSION`。
-2. `execute` 返回的 `content` 必须是 UTF-8，并以 `\0` 收尾。
-3. 谁分配，谁释放。插件须提供 `free_result`；宿主不跨 CRT 直接 `free`。
+1. `abi_tag` 必须是 `LUBAN_PLUGIN_ABI_V2`（v1 插件写 1，照挂）。
+2. `struct_size` 写 `sizeof(luban_plugin_manifest_v2)`——宿主按它前向兼容。
+3. `api_min`/`api_max` 与宿主的版本域须有交集。
+4. `execute` 返回的 `content` 必须是 UTF-8、`\0` 收尾。
+5. buffer 契约：content 是谁分配的，`free_result` 就还给谁。声明了 `CAP_HOST_ALLOCATOR` 的插件用 manifest 里 `host_callbacks.allocate` 拿 buffer，`free_result` 里 `release` 交还——跨 CRT 不混堆。
+6. `shutdown` 钩子（可空）在卸载前调一次，插件在这收自己的线程与资源。
 
-完整工程见 [examples/plugins/hello_plugin](../../../examples/plugins/hello_plugin)。原生插件可崩宿主，也能取得宿主进程权限。只加载信得过、版本对得上的二进制。
+一只包带多平台产物时按 OS + arch 分目录放（`bin/windows-x64/`、`bin/linux-x64/`……），manifest 指对当前 target；找不到就标 unavailable，不拿相近文件试载。完整工程见 [examples/plugins/hello_plugin](../../../examples/plugins/hello_plugin)。
 
-## 7. Hooks
+原生插件加载即执行库 constructor（Windows 的 DllMain 同理），崩了带倒宿主，也能取得宿主进程权限。只加载信得过、版本对得上的二进制；native 插件必须单独批准并记文件 hash（信任账见第 6.5 节）。
+
+## 8. Hooks
 
 Hooks 在会话或工具边界跑外部命令。适合审计、格式检查、策略拦截和通知。事件全表(PreToolUse/PermissionRequest/PostToolUse/SessionStart/End/UserPromptSubmit/Stop/Pre-PostCompact/SubagentStart-Stop)、stdin/stdout JSON 协议、决策归并、`/hooks` 管理面与信任模型见 **[Hooks 手册](hooks.md)**。这里只给速览。
 
@@ -289,7 +452,7 @@ Hooks 在会话或工具边界跑外部命令。适合审计、格式检查、�
 
 **信任**:全局与项目两层 hooks 相加,都跑;**项目级 hooks 须经 `/hooks` 信任审查(按定义哈希)才执行**——未信任的绝不启进程,命令一改须重审。信任账在用户主目录,仓库改不动它。
 
-## 8. 延迟挂载
+## 9. 延迟挂载
 
 注册表工具总数超过 `tool_search_threshold` 时，部分动态与低频工具先不把 schema 发给模型。模型只看见 `tool_search`，搜到工具后再挂载。
 
@@ -297,17 +460,17 @@ Hooks 在会话或工具边界跑外部命令。适合审计、格式检查、�
 
 `/tools` 可看已注册、已挂载与延迟工具。工具名没出现在本轮 schema，不等于插件没加载。
 
-## 9. 确认与权限
+## 10. 确认与权限
 
-- Lua、原生插件工具默认确认。
+- Lua、process、native 插件工具默认确认（外部代码一律先问）。
 - MCP 工具按外部工具处理，调用前可进入确认流程。
 - LSP 查询只读，通常不问。
 - Hooks 由配置直接触发，不另问。
 - Skill 不是工具；它引出的实际工具仍各走自己的确认。
 
-可信项目可在 `.lubancode/settings.local.json` 写 `allow_tools`、`allow_commands`、`deny_commands`。该文件是本机权限，不该提交。详见[配置手册](../../reference/configuration.md#七settingslocaljson项目级本地权限)。
+可信项目可在 `.lubancode/settings.local.json` 写 `allow_tools`、`allow_commands`、`deny_commands`。该文件是本机权限，不该提交。插件工具照走同一本账（`plugin__` 前缀全名写进 allowlist 即免确认），不另开第二套。详见[配置手册](../../reference/configuration.md#七settingslocaljson项目级本地权限)。
 
-## 10. 分发
+## 11. 分发
 
 **Skill**
 
@@ -319,31 +482,55 @@ Hooks 在会话或工具边界跑外部命令。适合审计、格式检查、�
 
 **Lua**
 
-一文件一工具最省事。文件名别轻易改；一改，命名空间也跟着变。
+一文件一工具最省事。文件名别轻易改；一改，命名空间也跟着变。声明只用 pure 画像认的库（string/table/math/os.time 之类），用户挂上即用，不必开 trusted。
+
+**process 插件**
+
+一插件一目录（plugin.json + 脚本 + 自带 venv/依赖）。`command` 写 venv 解释器或绝对路径，别假定目标机器 PATH 里有你的解释器。日志只写 stderr。跨平台发分别考虑 `python3`/`python`/`py -3` 或干脆把依赖冻结成可执行文件（PyInstaller、cargo build、go build——manifest 的 `command` 直接指产物，用户机器零依赖）。
 
 **原生插件**
 
-主 DLL 与依赖同目录。标明 ABI 版本、架构和 MSVC runtime。不要只发一枚来路不明的 DLL。
+按 OS + arch 分目录带多平台产物（`bin/windows-x64/*.dll`、`bin/linux-x64/*.so`、`bin/macos-arm64/*.dylib`……），manifest 指对当前 target。标明 ABI 版本（v2 的 `struct_size`/`api_min`/`api_max` 会自报）、架构与 CRT。不要只发一枚来路不明的库；二进制不能审查源码，更要走 hash 信任账。
 
 **Hooks**
 
 命令要短，要有超时意识。跨平台仓库分别考虑 `cmd.exe` 与 `/bin/sh` 语法。
 
-## 11. 发布前检查
+## 12. 发布前检查
 
 - 工具名稳定，说明与 schema 对得上。
 - 参数缺失、坏类型、外部服务退出都有清楚错误。
 - 没把 API key 写进源码、示例、Skill、日志或目录。
 - 写操作会触发正确确认。
 - 输出设了上限，不把几百兆数据塞回模型。
-- MCP stdout 没有日志。
-- Lua/C ABI 经坏输入、重复调用与退出清理测试。
+- MCP stdout 没有日志；process 插件 stdout 恰好一份 JSON、日志全在 stderr。
+- Lua/native 经坏输入、重复调用与退出清理测试；native 另在独立进程里测过崩溃路径。
+- process 插件带 `test_runner.py`（或同位自测脚本），作者本地能一条命令自测。
 - 文档写明安装路径、重载方式和卸载办法。
 
-## 12. 总排错
+## 13. 排错矩阵
 
-`/skills`、`/mcp`、`/lsp`、`/plugins`、`/tools` 五条命令先查状态。再看启动警告。
+`/skills`、`/mcp`、`/lsp`、`/plugins`、`/tools` 先查状态；单枚插件用 `/plugin inspect <id>` 看详情、`/plugin doctor <id>` 探环境。再看启动警告。
 
-扩展文件改了却不生效，要分门看：Skill 管理命令会热刷新；LSP 进程按需拉起；MCP、Lua、原生插件和 Hooks 改配置后要重启进程。
+扩展文件改了却不生效，要分门看：Skill 管理命令会热刷新；LSP 进程按需拉起；MCP、插件（三路）、Hooks 改配置后要重启进程。
+
+插件常见病症一张表：
+
+| 症状 | 多半是 | 怎么查 |
+| --- | --- | --- |
+| process 插件没挂上 | manifest 解析/校验失败 | 启动警告点名哪一项;`plugin.json` 的 JSON 文法与字段规矩(第 6.1 节) |
+| process 插件挂上但调用报 spawn_failed | 解释器不在或 command 写岔 | `/plugin doctor <id>` 真跑 `--version`;manifest 的 `command` 可写绝对路径或 venv 解释器 |
+| 调用报 bad_json | stdout 混了日志 | 日志只写 stderr;stdout 恰好一份 JSON(第 6.2 节) |
+| 调用报 call_id_mismatch | 脚本回显的 call_id 对不上 | 响应里原样回请求的 `call_id` |
+| 调用报 timed_out | 脚本比 timeout_ms 慢 | manifest 调 `timeout_ms`,或把慢路径拆小 |
+| 中文入参/出参变 `?` | Windows 管道默认本地代码页 | 脚本先 `reconfigure(encoding="utf-8")`(scaffold 生成的 runner.py 已带) |
+| Python 报缺依赖 | venv/依赖没装 | 插件自带 venv 并把 `command` 指到 venv 解释器;LubanCode 不代装 |
+| Lua 脚本用 io/os.execute 报 nil | pure 画像关了这些库 | 确要文件/命令能力:改走 process 插件(隔离),不悄悄开 trusted |
+| Lua 死循环被掐断 | 指令预算落锤(默认 2 亿条) | 拆小任务;报错文案自带预算数 |
+| native 库没挂上 | 扩展名/架构/ABI 不合 | 启动警告给 `abi_tag` 与错误码;`.dll`/`.so`/`.dylib` 按平台放(第 7 节) |
+| native 库挂上但调用崩宿主 | 插件野指针/ABI 错配 | native 插件崩了带倒宿主——先在独立进程里测插件本体 |
+| 项目插件没挂上 | 未经信任 | 警告给内容指纹;批准走 `~/.lubancode/plugin-trust.json`(第 6.5 节) |
+| 模型不调用已挂的工具 | 延迟挂载或 description 没说清时机 | `/tools` 看三态;description 写"何时该用" |
+| 调用总报参数错 | schema 与实现两张皮 | manifest 的 `input_schema` 就是合同,调用前宿主先验;两处对齐 |
 
 某件工具已加载却模型不调用，先看它是否延迟挂载，再看 description 是否说清触发条件。工具能调却总报参数错，多半是 schema 与实现两张皮。

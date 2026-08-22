@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "app/cli_options.hpp"
 #include "cli/theme.hpp"
 #include "config/config.hpp"
 
@@ -36,5 +37,10 @@ int RunCli(const std::vector<std::string>& args);
 // app-server 子模式(无界面后台协议):装配前奏(配置/i18n/hooks)已在
 // RunCli 里跑完,这里立服务进 stdio 主循环。stdout 从此是协议专线。
 int RunAppServerMode(const lubancode::config::ConfigResult& config_result);
+
+// `lubancode plugin init <模板> [名字]` 子命令(plugins 单第 3 步):生成
+// 插件脚手架后退出。i18n 已初始化,配置不加载——脚手架不该因为模型没配
+// 好而拒绝干活。
+int HandlePluginInitCommand(const PluginInitArgs& init);
 
 }  // namespace lubancode::app

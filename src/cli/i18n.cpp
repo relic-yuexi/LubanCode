@@ -37,6 +37,9 @@ const Entry kZhCN[] = {
      "用法:\n"
      "  lubancode [选项]\n"
      "  lubancode \"问题\"          一次问答,能用工具就用工具\n"
+     "  lubancode plugin init python [名字]\n"
+     "                              生成 Python 插件脚手架(plugin.json + runner.py + 单测模板,\n"
+     "                              落 ~/.lubancode/plugins/<名字>/)\n"
      "  lubancode                  不带参数则进入交互循环;首次运行缺配置会先走一遍初次配置\n"
      "                              向导,配完直接进入会话,不用重启。exit/quit 或 EOF(Ctrl+Z /\n"
      "                              管道读尽)退出;空行只是重新给提示符,不退出\n"
@@ -89,7 +92,9 @@ const Entry kZhCN[] = {
      "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
      "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
      "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
-     "  /plugins        列出挂载的插件工具(主目录 .lubancode/plugins 下的 *.dll 和 *.lua)\n"
+     "  /plugins        列出插件三路(native/Lua/process)的状态与加载警告\n"
+     "  /plugin         管单枚插件:inspect 看详情 / doctor 查环境 / test 试跑\n"
+     "                  (v1 以重启为 reload/enable/disable 的口径)\n"
      "  /tools          列工具三态:核心(恒在)/已加载/延迟未加载(工具总数超过配置文件\n"
      "                  tool_search_threshold(默认 20,0=永不延迟)时,MCP/插件等外挂工具\n"
      "                  延迟挂载,模型用 tool_search 检索后方可调用)\n"
@@ -192,7 +197,7 @@ const Entry kZhCN[] = {
      "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
      "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
      "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
-     "  /plugins        列出挂载的插件工具(DLL + lua)和加载警告\n"
+     "  /plugins        list plugins of all three runtimes (native/Lua/process) with load warnings\n"
      "  /hooks          hooks 台账:来源/命令/信任/禁用/最近结果;trust|untrust|disable|enable <#id>、runs [N]\n"
      "  /tools          列工具三态:核心(恒在)/已加载/延迟未加载(tool_search 延迟挂载)\n"
      "  /memory         管项目记忆;/memory on|off|use|learn|list|remember|forget|rebuild\n"
@@ -612,7 +617,9 @@ const Entry kZhCN[] = {
     {"slash.desc.mcp", "列出挂载的 MCP 服务器状态和工具清单"},
     {"slash.desc.lsp", "列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)"},
     {"slash.desc.todos", "查看当前待办清单"},
-    {"slash.desc.plugins", "列出挂载的插件工具(DLL + lua)和加载警告"},
+    {"slash.desc.plugins", "列出插件三路(native/Lua/process)的状态与加载警告"},
+    {"slash.desc.plugin",
+     "管单枚插件:inspect 看详情 / doctor 查环境 / test 试跑 / reload 重载 / enable|disable 开关"},
     {"slash.desc.tools", "列工具三态:核心(恒在)/已加载/延迟未加载(tool_search 延迟挂载)"},
     {"slash.desc.memory",
      "管理项目记忆;/memory on|off|use|learn|review|accept|edit|reject|list|remember|forget|rebuild|why"},
@@ -990,15 +997,59 @@ const Entry kZhCN[] = {
     {"cmd.plugins.empty",
      "没有挂载任何插件工具。\n\n"
      "插件目录约定(放进去,下次启动即挂载):\n"
-     "  C ABI DLL: {0}/*.dll\n"
-     "      导出 luban_plugin_entry(见仓库 include/luban_plugin.h),示例在\n"
-     "      examples/plugins/hello_plugin/。注意:DLL 跟宿主同进程,插件里崩了\n"
-     "      整个程序一起完蛋,装谁的插件风险自担。\n"
+     "  process:   {0}/<插件id>/plugin.json(Python/Rust/任意可执行程序;\n"
+     "      起步用 `lubancode plugin init python <名字>` 生成三件套,示例在\n"
+     "      examples/plugins/local_math/)\n"
      "  Lua:       {0}/*.lua\n"
      "      每个文件 return { name=..., description=..., input_schema=...,\n"
-     "      execute=function(input) ... end } 一张表,示例在 examples/plugins/word_count.lua。"},
+     "      execute=function(input) ... end } 一张表(缺省 pure 画像,关 io/\n"
+     "      os.execute;死循环有指令预算落锤),示例在 examples/plugins/word_count.lua\n"
+     "  native:    {0}/*.dll(Windows)/*.so(Linux)/*.dylib(macOS)\n"
+     "      导出 luban_plugin_entry(ABI v2,见 include/luban_plugin.h),示例在\n"
+     "      examples/plugins/hello_plugin/。库跟宿主同进程,插件里崩了整个程序\n"
+     "      一起完蛋,装谁的插件风险自担。"},
     {"cmd.plugins.mounted", "已挂载 {0} 个插件工具:"},
     {"cmd.plugins.warnings", "加载警告(这些没挂上):"},
+
+    // ---- /plugin 子命令(plugins 单第 8 步) ----
+    {"cmd.plugin.usage",
+     "用法: /plugin inspect <id> | doctor <id> | reload <id> | enable <id> | disable <id>。裸 /plugin <id> "
+     "视同 inspect。"},
+    {"cmd.plugin.not_found", "找不到插件 {0}(/plugins 看看挂载账)。"},
+    {"cmd.plugin.inspect.header", "插件 {0} v{1}(runtime={2}, language={3})"},
+    {"cmd.plugin.inspect.legacy_header", "插件 {0}(legacy {1} 插件,无 plugin.json,详情看文件本体):"},
+    {"cmd.plugin.inspect.dir", "目录: {0}"},
+    {"cmd.plugin.inspect.argv", "命令: {0}"},
+    {"cmd.plugin.inspect.timeout", "超时: {0}ms"},
+    {"cmd.plugin.inspect.env", "环境变量 allowlist: {0}"},
+    {"cmd.plugin.inspect.tools", "工具 {0} 件:"},
+    {"cmd.plugin.doctor.command_ok", "解释器可用: {0}({1})"},
+    {"cmd.plugin.doctor.command_bad", "解释器起不来: {0}({1})——检查 command 或装好解释器。"},
+    {"cmd.plugin.doctor.not_process", "这不是 process 插件,doctor 只查 process 的解释器环境。"},
+    {"cmd.plugin.doctor.legacy_ok", "{0} 插件在挂载账上(内嵌运行时,无外部环境依赖)。"},
+    {"cmd.plugin.test.hint",
+     "test 与模型调用同一条链(schema 验参、确认、超时),命令层不开无防护捷径——直接让模型调这件工具,"
+     "或用插件自带的测试脚本(如 python test_runner.py)离线自测。"},
+    {"cmd.plugin.reload.hint",
+     "v1 的 reload 以重启为口径:改完插件重启 LubanCode 即生效。Lua/process 的会话内热重载是后续批次,"
+     "不在这硬造半套。"},
+    {"cmd.plugin.toggle.hint",
+     "enable/disable 的持久账(逐插件开关,落 settings)是后续批次;v1 想临时停用,把插件目录挪出 "
+     "plugins/ 再重启即可。"},
+    {"cmd.plugin.unknown_sub", "不认得的子命令: {0}"},
+
+    // ---- plugin init 子命令(plugins 单第 3 步) ----
+    {"plugininit.no_home", "找不到用户主目录,无法定位插件目录。"},
+    {"plugininit.failed", "生成插件脚手架失败: {0}"},
+    {"plugininit.done", "已生成 Python 插件脚手架 {0}({1}):"},
+    {"plugininit.doctor_note", "提示: {0}"},
+    {"plugininit.next",
+     "下一步:改 runner.py 里的 HANDLERS 与 plugin.json 里的 tools,本地先跑 python test_runner.py "
+     "自测;重启 LubanCode 后 /plugins 可见。"},
+    {"plugininit.lua_hint",
+     "Lua 插件不需要脚手架:把 return {{ name=..., execute=function(input) ... end }} 的 .lua 文件"
+     "放进 {0} 即可,示例见 examples/plugins/word_count.lua。"},
+    {"plugininit.unknown_template", "不认得的插件模板: {0}(v1 只有 python)"},
 
     // ---- /mcp、/lsp ----
     {"cmd.mcp.empty", "没有挂载任何 MCP 服务器(config.json 里没写 mcpServers,或者配了但全部启动失败)。"},
@@ -2158,7 +2209,9 @@ const Entry kEn[] = {
     {"slash.desc.mcp", "list mounted MCP servers and their tools"},
     {"slash.desc.lsp", "list LSP server status per language"},
     {"slash.desc.todos", "show the current todo list"},
-    {"slash.desc.plugins", "list mounted plugin tools (DLL + lua) and load warnings"},
+    {"slash.desc.plugins", "list plugins of all three runtimes (native/Lua/process) with load warnings"},
+    {"slash.desc.plugin",
+     "manage one plugin: inspect / doctor / test / reload / enable|disable"},
     {"slash.desc.tools", "list tool states: core / loaded / deferred (tool_search)"},
     {"slash.desc.memory",
      "manage project memory; /memory on|off|use|learn|review|accept|edit|reject|list|remember|forget|"

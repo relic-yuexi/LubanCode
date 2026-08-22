@@ -221,6 +221,18 @@ add_executable(lubancode_tests
   # 第 6 批:受约束 GraphPatch(模板集/allowlist/append-only)、风险
   # 评定、WorkflowRunSnapshot 与增量事件(重连补账)。
   test_workflow_planner.cpp
+  # 第 3 步(Python scaffold):plugin init 生成物形状 + 生成的 runner.py
+  # 真机往返 + 单测模板真跑;缺 Python 的用例明确 SKIP。
+  test_plugin_scaffold.cpp
+  # 第 4 步(收现有 Lua):pure/trusted profile、指令预算、内存帽、取消链、
+  # EmbeddedLuaRuntime 台账与幂等。
+  test_plugin_lua.cpp
+  # 第 7 步(接 Runtime):adapter 的 call_id 走 ProcessIdAuthority、
+  # LogSink 分流、SetCancel/SetCwd 装配口、registry 中立形状。
+  test_plugin_runtime_mount.cpp
+  # 第 8 步(管理面与信任):env 整环境替换硬保证、PluginTrustStore 记账、
+  # 插件内容指纹、项目插件信任门。
+  test_plugin_admin.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)
@@ -246,24 +258,27 @@ target_compile_definitions(lubancode_tests PRIVATE
   LUBANCODE_TEST_OFFICIAL_SKILLS_DIR="${CMAKE_SOURCE_DIR}/skills"
   LUBANCODE_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
-# M7:真 DLL 加载测试的靶子——示例插件 hello_plugin(直接编 examples/ 里那
-# 份源码,顺带验证示例真的能编)+ api_version 填错的 bad_version_plugin。
-# 两个 DLL 落在同一个输出目录,目录路径喂给测试(LUBANCODE_TEST_PLUGIN_DIR),
-# PluginHost::LoadDirectory 真扫真载。
+# M7 起家,plugins 单第 5 步起三平台:真库加载测试的靶子——示例插件
+# hello_plugin(直接编 examples/ 里那份源码,顺带验证示例真的能编)+
+# abi_tag 填错的 bad_version_plugin。两个库落在同一个输出目录,目录路径
+# 喂给测试(LUBANCODE_TEST_PLUGIN_DIR),PluginHost::LoadDirectory 真扫
+# 真载。CI 的 windows/ubuntu/macos 三条腿各真编各平台的产物。
+add_library(hello_plugin_fixture SHARED
+  ${CMAKE_SOURCE_DIR}/examples/plugins/hello_plugin/hello_plugin.c)
+target_include_directories(hello_plugin_fixture PRIVATE ${CMAKE_SOURCE_DIR}/include)
 if(WIN32)
-  add_library(hello_plugin_fixture SHARED
-    ${CMAKE_SOURCE_DIR}/examples/plugins/hello_plugin/hello_plugin.c)
-  target_include_directories(hello_plugin_fixture PRIVATE ${CMAKE_SOURCE_DIR}/include)
   set_target_properties(hello_plugin_fixture PROPERTIES OUTPUT_NAME hello_plugin PREFIX "")
-
-  add_library(bad_version_plugin SHARED fixtures/bad_version_plugin.c)
-  target_include_directories(bad_version_plugin PRIVATE ${CMAKE_SOURCE_DIR}/include)
-  set_target_properties(bad_version_plugin PROPERTIES PREFIX "")
-
-  add_dependencies(lubancode_tests hello_plugin_fixture bad_version_plugin)
-  target_compile_definitions(lubancode_tests PRIVATE
-    LUBANCODE_TEST_PLUGIN_DIR="$<TARGET_FILE_DIR:hello_plugin_fixture>")
 endif()
+
+add_library(bad_version_plugin SHARED fixtures/bad_version_plugin.c)
+target_include_directories(bad_version_plugin PRIVATE ${CMAKE_SOURCE_DIR}/include)
+if(WIN32)
+  set_target_properties(bad_version_plugin PROPERTIES PREFIX "")
+endif()
+
+add_dependencies(lubancode_tests hello_plugin_fixture bad_version_plugin)
+target_compile_definitions(lubancode_tests PRIVATE
+  LUBANCODE_TEST_PLUGIN_DIR="$<TARGET_FILE_DIR:hello_plugin_fixture>")
 
 add_test(NAME lubancode_tests COMMAND lubancode_tests)
 

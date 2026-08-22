@@ -2,12 +2,17 @@
 #include "runtime/plugin_tool.hpp"
 
 #include <algorithm>
+#include <algorithm>
 #include <atomic>
 #include <fstream>
 #include <iterator>
 #include <set>
+#include <vector>
 
+#include "hooks/hash.hpp"
 #include "platform/paths.hpp"
+#include "platform/text_encoding.hpp"
+#include "runtime/id_authority.hpp"
 #include "runtime/plugin_process.hpp"
 
 namespace lubancode::runtime {
@@ -59,9 +64,12 @@ tools::Tool::Result PluginToolAdapter::execute(const nlohmann::json& input) {
     }
 
     if (manifest_->kind != RuntimeKind::Process) {
-        // embedded-lua/native-library 在后续批次接入;manifest 校验期已把
-        // native-library 拒了,这里兜 embedded-lua。
-        return {"插件运行时 " + std::string(RuntimeKindName(manifest_->kind)) + " 尚未接入本宿主", true};
+        // embedded-lua 走 runtime::EmbeddedLuaRuntime(legacy .lua 归宿),
+        // native-library 走 tools::PluginHost(ABI v1/v2);plugin.json 里写
+        // 这两种 kind 的 manifest 这里兜底明说,不静默瞎跑。
+        return {"插件运行时 " + std::string(RuntimeKindName(manifest_->kind)) +
+                    " 不走 process 通道(legacy .lua / 原生库各有各的挂载路)",
+                true};
     }
 
     plugin_protocol::ProcessRequest request;
@@ -70,15 +78,20 @@ tools::Tool::Result PluginToolAdapter::execute(const nlohmann::json& input) {
     request.entry = definition_->entry;
     request.arguments = input;
     request.context_cwd = cwd_utf8_;
-    // call_id:宿主生成的非敏感串(协议只要求回显对上;与 turn/item 的
-    // 对账在第 7 批接 Runtime/app-server 时换成真实 item id)。单调序号,
-    // 可读可对账,不泄任何上下文。
-    static std::atomic<std::uint64_t> call_seq{0};
-    request.call_id = "call_" + std::to_string(call_seq.fetch_add(1));
+    // call_id:进程级发号局的 req 号(plugins 单第 7 步:call_id 换
+    // runtime::ProcessIdAuthority() 的真 id,与 turn/item 的对账走同一本
+    // 账,不各处再造第二套)。非敏感串,可读可对账。
+    request.call_id = ProcessIdAuthority().NextRequestId();
 
     ProcessCallLimits limits;
     limits.timeout_ms = manifest_->timeout_ms;
     const auto outcome = RunProcessToolCall(*manifest_, request, cwd_utf8_, cancel_, limits);
+    // 日志分流:插件的 stderr 尾巴进 LogSink(终端/事件流各画各的),不进
+    // 模型结果;模型只看 BuildResultText 的正文。
+    if (log_sink_ && !outcome.stderr_tail.empty()) {
+        log_sink_("[plugin " + manifest_->id + "] " +
+                  platform::SanitizeExternalText(outcome.stderr_tail.substr(0, 1024)));
+    }
     // 唯一终态:错误码 + 人话一起交上层(ItemCompleted 一笔)。
     return {BuildResultText(outcome), outcome.code != PluginErrorCode::Ok};
 }
@@ -140,6 +153,83 @@ PluginScanResult ScanPluginDirectories(const std::filesystem::path& dir) {
         }
         result.manifests.push_back(std::make_shared<const PluginManifest>(std::move(*manifest)));
     }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// 项目插件:内容指纹 + 信任门(plugins 单第 8 步)
+// ---------------------------------------------------------------------------
+
+std::expected<std::string, std::string> ComputePluginContentHash(const std::filesystem::path& plugin_dir) {
+    std::error_code ec;
+    if (!std::filesystem::is_directory(plugin_dir, ec)) {
+        return std::unexpected("插件目录不存在: " + platform::PathToUtf8(plugin_dir));
+    }
+    // 先收全部常规文件的相对路径,排序钉死顺序(枚举次序随文件系统心情,
+    // 指纹要跨进程稳定)。
+    std::vector<std::filesystem::path> files;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(plugin_dir, ec)) {
+        if (ec) {
+            break;
+        }
+        std::error_code file_ec;
+        if (!entry.is_regular_file(file_ec) || file_ec) {
+            continue;  // 子目录/坏项:只哈希文件字节
+        }
+        files.push_back(std::filesystem::relative(entry.path(), plugin_dir, file_ec));
+    }
+    std::sort(files.begin(), files.end(), [](const auto& left, const auto& right) {
+        return platform::PathToUtf8(left) < platform::PathToUtf8(right);
+    });
+
+    // 相对路径 + 字节全部喂进同一口锅:改名/改内容/添删文件都变指纹。
+    std::string material;
+    for (const auto& file : files) {
+        material += platform::PathToUtf8(file);
+        material += '\0';
+        std::ifstream in(plugin_dir / file, std::ios::binary);
+        if (!in.is_open()) {
+            return std::unexpected("读不到文件: " + platform::PathToUtf8(plugin_dir / file));
+        }
+        material.append((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        material += '\0';
+    }
+    return hooks::Sha256Hex(material);
+}
+
+PluginScanResult ScanProjectPluginDirectories(const std::filesystem::path& project_dir,
+                                              const config::PluginTrustStore* trust) {
+    PluginScanResult result;
+    std::error_code ec;
+    const std::filesystem::path plugins_dir = project_dir / ".lubancode" / "plugins";
+    if (!std::filesystem::is_directory(plugins_dir, ec)) {
+        return result;  // 项目没配插件是常态
+    }
+    // 复用主扫描(解析 + 强校验 + 跨插件查重),再叠信任门。
+    const PluginScanResult scanned = ScanPluginDirectories(plugins_dir);
+    for (const auto& manifest : scanned.manifests) {
+        const auto content_hash = ComputePluginContentHash(manifest->plugin_dir);
+        if (!content_hash.has_value()) {
+            result.warnings.push_back("[plugin] " + manifest->id + ": " + content_hash.error() + ",跳过");
+            continue;
+        }
+        const std::string dir_utf8 = platform::PathToUtf8(manifest->plugin_dir);
+        if (trust != nullptr && trust->IsDisabled(dir_utf8, *content_hash)) {
+            result.warnings.push_back("[plugin] " + manifest->id + ": 已被禁用(信任账里标了 disable),跳过");
+            continue;
+        }
+        if (trust == nullptr || !trust->IsTrusted(dir_utf8, *content_hash)) {
+            result.warnings.push_back("[plugin] " + manifest->id + ": 项目插件未经信任(内容指纹 " +
+                                      hooks::DefinitionHashShort(*content_hash) +
+                                      "),跳过——项目目录里的插件是外来代码,放进目录就是执行代码;"
+                                      "批准后重载才挂(/plugin 的信任流后续批次接 UI,先手改 "
+                                      "~/.lubancode/plugin-trust.json)");
+            continue;
+        }
+        result.manifests.push_back(manifest);
+    }
+    // 解析期警告照传。
+    result.warnings.insert(result.warnings.end(), scanned.warnings.begin(), scanned.warnings.end());
     return result;
 }
 

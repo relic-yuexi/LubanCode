@@ -24,6 +24,7 @@
 #include <thread>
 #include <vector>
 
+#include "platform/dynamic_library.hpp"
 #include "tools/lua_tool.hpp"
 #include "tools/plugin_loader.hpp"
 #include "tools/registry.hpp"
@@ -129,23 +130,30 @@ TEST_CASE("PluginTool: 插件给的 schema 不是合法 JSON 时退化成宽对�
 }
 
 // ---------------------------------------------------------------------------
-// PluginHost:真 DLL(仅 Windows,DLL 由 tests/CMakeLists 编好)
+// PluginHost:真库加载(plugins 单第 5 步起三平台;库由 tests/CMakeLists
+// 按当前平台编好——Windows 出 hello_plugin.dll,Linux 出 libhello_plugin.so,
+// macOS 出 libhello_plugin.dylib,bad_version 同理)
 // ---------------------------------------------------------------------------
 
-#if defined(_WIN32) && defined(LUBANCODE_TEST_PLUGIN_DIR)
+#ifdef LUBANCODE_TEST_PLUGIN_DIR
 
-TEST_CASE("PluginHost: 真加载示例 DLL,api_version 不合的跳过并出警告") {
+TEST_CASE("PluginHost: 真加载示例库,abi_tag 不合的跳过并出警告") {
     tools::PluginHost host;
     const auto warnings = host.LoadDirectory(LUBANCODE_TEST_PLUGIN_DIR);
 
-    // bad_version_plugin 被跳过,警告里点名 + 提到 api_version。
+    // bad_version_plugin 被跳过,警告里点名 + 提到 abi_tag。
     REQUIRE(warnings.size() == 1);
     CHECK(warnings[0].find("bad_version_plugin") != std::string::npos);
-    CHECK(warnings[0].find("api_version") != std::string::npos);
+    CHECK(warnings[0].find("abi_tag") != std::string::npos);
 
-    // hello_plugin 挂上了。
+    // hello_plugin 挂上了(ABI v2)。stem 是文件名去扩展名(POSIX 带 lib
+    // 前缀);v2 工具名前缀走 plugin_id,那是真正的身份。
     REQUIRE(host.plugins().size() == 1);
-    CHECK(host.plugins()[0].stem == "hello_plugin");
+    CHECK(host.plugins()[0].stem.find("hello_plugin") != std::string::npos);
+    CHECK_FALSE(host.plugins()[0].legacy_v1);
+    CHECK(host.plugins()[0].abi_tag == LUBAN_PLUGIN_ABI_V2);
+    CHECK(host.plugins()[0].plugin_id == "hello_plugin");
+    CHECK(host.plugins()[0].plugin_version == "1.1.0");
 
     // ToolRuntime 给 main/sub 两张表各装 wrapper 时会扫两遍同一目录。模块
     // 只该载一份；坏版本那枚仍可各报一次警告。
@@ -181,22 +189,25 @@ TEST_CASE("PluginHost: 真加载示例 DLL,api_version 不合的跳过并出警�
     CHECK(result.is_error);
 }
 
-TEST_CASE("PluginHost: 坏 DLL(垃圾字节)打警告跳过,不崩") {
-    const auto dir = std::filesystem::temp_directory_path() / "lubancode_test_bad_dll";
+TEST_CASE("PluginHost: 坏库(垃圾字节)打警告跳过,不崩") {
+    const auto dir = std::filesystem::temp_directory_path() / "lubancode_test_bad_lib";
     std::filesystem::create_directories(dir);
     {
-        std::ofstream out(dir / "junk.dll", std::ios::binary);
-        out << "这压根不是一个 PE 文件";
+        // 当前平台认什么扩展名就投什么:Windows .dll / Linux .so / macOS .dylib。
+        std::ofstream out(dir / ("junk" + std::string(lubancode::platform::DynamicLibraryExtension())),
+                          std::ios::binary);
+        out << "这压根不是一个合法的动态库文件";
     }
     tools::PluginHost host;
     const auto warnings = host.LoadDirectory(dir);
     CHECK(host.plugins().empty());
     REQUIRE(warnings.size() == 1);
-    CHECK(warnings[0].find("junk.dll") != std::string::npos);
-    std::filesystem::remove_all(dir);
+    CHECK(warnings[0].find("junk") != std::string::npos);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
 }
 
-#endif  // _WIN32 && LUBANCODE_TEST_PLUGIN_DIR
+#endif  // LUBANCODE_TEST_PLUGIN_DIR
 
 TEST_CASE("PluginHost: 目录不存在时静默返回,不算错") {
     tools::PluginHost host;

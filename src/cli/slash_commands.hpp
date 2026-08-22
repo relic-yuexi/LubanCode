@@ -29,7 +29,8 @@ enum class SlashCommand {
     Mcp,      // /mcp:列出挂载的 MCP 服务器状态、工具清单(M8)
     Lsp,      // /lsp:列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)
     Todos,    // /todos:查看当前待办清单(M11/0.10.0)
-    Plugins,  // /plugins:列出挂载的插件工具(DLL + lua)和加载警告(M7)
+    Plugins,  // /plugins:列出插件三路(native/Lua/process)与加载警告(plugins 单第 8 步扩)
+    Plugin,   // /plugin inspect|doctor|test|reload|enable|disable <id>:单插件管理面
     Tools,    // /tools:列工具三态——核心(恒在)/已加载/延迟未加载(tool_search)
     Memory,   // /memory:项目记忆开关、查看、显式记忆、遗忘与重建
     Sessions,  // /sessions:列最近的会话存档(本目录;/sessions all 列全部目录)

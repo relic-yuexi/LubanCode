@@ -19,6 +19,7 @@
 #include "tools/edit_file.hpp"
 #include "tools/lua_tool.hpp"
 #include "tools/lsp_tool.hpp"
+#include "tools/path_utils.hpp"
 #include "tools/read_file.hpp"
 #include "tools/run_command.hpp"
 #include "tools/search.hpp"
@@ -147,9 +148,12 @@ void RegisterMcpTools(std::vector<McpServerRuntime>& mcp_servers, lubancode::too
     }
 }
 
-void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::tools::ToolRegistry& registry,
-                  const lubancode::cli::Theme& theme, std::vector<PluginMountInfo>& mounted,
-                  std::vector<std::string>& warnings, bool report) {
+void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime::EmbeddedLuaRuntime& lua_runtime,
+                  lubancode::tools::ToolRegistry& registry, const lubancode::cli::Theme& theme,
+                  std::vector<PluginMountInfo>& mounted, std::vector<std::string>& warnings, bool report,
+                  std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& process_manifests,
+                  std::vector<std::string>& process_warnings, const std::string& project_root_utf8,
+                  const lubancode::config::PluginTrustStore* project_trust) {
     const auto home_dir = lubancode::config::HomeLubancodeDir();
     if (!home_dir.has_value()) {
         return;  // 找不到主目录,也就没有插件目录可扫
@@ -180,20 +184,68 @@ void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::tools::T
         }
     }
 
-    // Lua 插件
-    auto lua_result = lubancode::tools::LoadLuaPlugins(plugins_dir);
+    // Lua 插件:第 4 步起走 EmbeddedLuaRuntime(引擎不变:每文件一 state、
+    // mutex 串行、文件名稳定排序;新:profile 分级、指令预算、内存帽、
+    // 取消链)。第二遍调用(main/sub 各一遍)只造轻 adapter,不重扫。
+    std::vector<std::string> lua_warnings = lua_runtime.LoadDirectory(plugins_dir);
     if (report) {
-        for (auto& warning : lua_result.warnings) {
+        for (auto& warning : lua_warnings) {
             std::cout << theme.error << warning << theme.reset << "\n";
             warnings.push_back(std::move(warning));
         }
-    }
-    for (auto& tool : lua_result.tools) {
-        if (report) {
-            std::cout << trf("plugin.mounted_line", tool->stem(), 1) << "\n";
-            mounted.push_back({tool->name(), "lua"});
+        for (const auto& record : lua_runtime.records()) {
+            std::cout << trf("plugin.mounted_line", record.id, 1) << "\n";
+            mounted.push_back({record.tool_name, "lua"});
         }
-        registry.Register(std::move(tool));
+    }
+    for (auto& adapter : lua_runtime.MakeAdapters()) {
+        registry.Register(std::move(adapter));
+    }
+
+    // process 插件(plugin.json 一插件一目录,plugins 单第 7 步挂进):Scan
+    // 一次(manifest 钉 shared_ptr),每张 registry 各造一枚 adapter。挂载
+    // 行/警告只在 report 遍打;manifests 由调用方持有,两张表共享同一批。
+    // 第 8 步:项目级 <cwd>/.lubancode/plugins/ 一并扫——先过信任门(内容
+    // hash 审批),未信任的跳过并警告。
+    if (process_manifests.empty()) {
+        const auto scan = lubancode::runtime::ScanPluginDirectories(plugins_dir);
+        process_manifests = scan.manifests;
+        process_warnings.insert(process_warnings.end(), scan.warnings.begin(), scan.warnings.end());
+        const std::filesystem::path project_dir = lubancode::tools::Utf8ToPath(project_root_utf8);
+        const auto project_scan = lubancode::runtime::ScanProjectPluginDirectories(project_dir, project_trust);
+        // 主目录与项目级重名:项目级让位(先到先得,主目录是用户亲手放的)。
+        std::set<std::string> home_ids;
+        for (const auto& m : process_manifests) {
+            home_ids.insert(m->id);
+        }
+        for (const auto& m : project_scan.manifests) {
+            if (home_ids.count(m->id) != 0) {
+                process_warnings.push_back("[plugin] " + m->id +
+                                           ": 与用户主目录插件重名,项目级让位,跳过");
+                continue;
+            }
+            process_manifests.push_back(m);
+        }
+        process_warnings.insert(process_warnings.end(), project_scan.warnings.begin(),
+                                project_scan.warnings.end());
+    }
+    if (report) {
+        for (const auto& warning : process_warnings) {
+            std::cout << theme.error << warning << theme.reset << "\n";
+            warnings.push_back(warning);
+        }
+        for (const auto& manifest : process_manifests) {
+            std::cout << trf("plugin.mounted_line", manifest->id, manifest->tools.size()) << "\n";
+            for (const auto& tool : manifest->tools) {
+                mounted.push_back(
+                    {tool.full_name, std::string(lubancode::runtime::RuntimeKindName(manifest->kind))});
+            }
+        }
+    }
+    for (const auto& manifest : process_manifests) {
+        for (const auto& tool : manifest->tools) {
+            registry.Register(std::make_unique<lubancode::runtime::PluginToolAdapter>(manifest, &tool));
+        }
     }
 }
 
@@ -287,9 +339,36 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
             *options.worktree_session, options.worktree_confirm, options.on_worktree_moved));
     }
     // 插件工具主表 + 子表都挂(子代理与 main 同能力,独立任务 agent 默认
-    // 完成后退出,不是低配跑腿),挂载行紧跟 [mcp] 那几行。
-    MountPlugins(plugin_host_, main_registry_, theme, plugin_mounted_, plugin_warnings_);
-    MountPlugins(plugin_host_, sub_registry_, theme, plugin_mounted_, plugin_warnings_, /*report=*/false);
+    // 完成后退出,不是低配跑腿),挂载行紧跟 [mcp] 那几行。process 插件
+    // (plugin.json)的 adapter 挂进各表后灌项目根(第 7 步:进程 cwd 缺省
+    // 项目根);取消链/LogSink 由 turn_runner 每轮灌(SetPluginCancel 等)。
+    // 项目插件信任账(plugins 单第 8 步):启动装载一次;读不动的警告当
+    // 空账(全部项目插件按未信任跳过,不带着一本读不动的账放行)。
+    if (const auto path = lubancode::config::PluginTrustStore::DefaultStorePath(); path.has_value()) {
+        auto [store, load_error] = lubancode::config::PluginTrustStore::Load(path);
+        if (load_error.has_value()) {
+            plugin_warnings_.push_back(*load_error);
+        }
+        project_plugin_trust_ = std::move(store);
+    }
+    MountPlugins(plugin_host_, lua_runtime_, main_registry_, theme, plugin_mounted_, plugin_warnings_,
+                 /*report=*/true, process_manifests_, process_plugin_warnings_, cwd_utf8,
+                 project_plugin_trust_.has_value() ? &*project_plugin_trust_ : nullptr);
+    MountPlugins(plugin_host_, lua_runtime_, sub_registry_, theme, plugin_mounted_, plugin_warnings_,
+                 /*report=*/false, process_manifests_, process_plugin_warnings_, cwd_utf8,
+                 project_plugin_trust_.has_value() ? &*project_plugin_trust_ : nullptr);
+    for (const auto& adapter : main_registry_.All()) {
+        if (auto* plugin_adapter = dynamic_cast<lubancode::runtime::PluginToolAdapter*>(adapter.get());
+            plugin_adapter != nullptr) {
+            plugin_adapter->SetCwd(cwd_utf8);
+        }
+    }
+    for (const auto& adapter : sub_registry_.All()) {
+        if (auto* plugin_adapter = dynamic_cast<lubancode::runtime::PluginToolAdapter*>(adapter.get());
+            plugin_adapter != nullptr) {
+            plugin_adapter->SetCwd(cwd_utf8);
+        }
+    }
 
     // tool_search(延迟挂载):全部工具(MCP/插件/LSP/agent/todo)都注册
     // 完了才数总数、定启停。loaded 集合是会话级的(/clear 不清),主会话
@@ -406,6 +485,54 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
             }
         }
         ptc_tool_ = registered;
+    }
+}
+
+void ToolRuntime::SetPluginCancel(const std::atomic<bool>* cancel) {
+    // 三路插件都要:process(adapter 的进程超时/取消同一落锤路)、Lua(hook
+    // 里查这面旗掐死循环)。turn_runner 每轮灌(plugins 单第 7 步的 ESC 链)。
+    lua_runtime_.SetCancel(cancel);
+    for (const auto& adapter : main_registry_.All()) {
+        if (auto* plugin_adapter = dynamic_cast<lubancode::runtime::PluginToolAdapter*>(adapter.get());
+            plugin_adapter != nullptr) {
+            plugin_adapter->SetCancel(cancel);
+        }
+    }
+    for (const auto& adapter : sub_registry_.All()) {
+        if (auto* plugin_adapter = dynamic_cast<lubancode::runtime::PluginToolAdapter*>(adapter.get());
+            plugin_adapter != nullptr) {
+            plugin_adapter->SetCancel(cancel);
+        }
+    }
+}
+
+void ToolRuntime::SetPluginCwd(std::string cwd_utf8) {
+    for (const auto& adapter : main_registry_.All()) {
+        if (auto* plugin_adapter = dynamic_cast<lubancode::runtime::PluginToolAdapter*>(adapter.get());
+            plugin_adapter != nullptr) {
+            plugin_adapter->SetCwd(cwd_utf8);
+        }
+    }
+    for (const auto& adapter : sub_registry_.All()) {
+        if (auto* plugin_adapter = dynamic_cast<lubancode::runtime::PluginToolAdapter*>(adapter.get());
+            plugin_adapter != nullptr) {
+            plugin_adapter->SetCwd(cwd_utf8);
+        }
+    }
+}
+
+void ToolRuntime::SetPluginLogSink(lubancode::runtime::PluginLogSink sink) {
+    for (const auto& adapter : main_registry_.All()) {
+        if (auto* plugin_adapter = dynamic_cast<lubancode::runtime::PluginToolAdapter*>(adapter.get());
+            plugin_adapter != nullptr) {
+            plugin_adapter->SetLogSink(sink);
+        }
+    }
+    for (const auto& adapter : sub_registry_.All()) {
+        if (auto* plugin_adapter = dynamic_cast<lubancode::runtime::PluginToolAdapter*>(adapter.get());
+            plugin_adapter != nullptr) {
+            plugin_adapter->SetLogSink(sink);
+        }
     }
 }
 

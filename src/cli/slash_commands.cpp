@@ -109,6 +109,8 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Todos;
     } else if (lower == "/plugins") {
         parsed.command = SlashCommand::Plugins;
+    } else if (lower == "/plugin") {
+        parsed.command = SlashCommand::Plugin;
     } else if (lower == "/hooks") {
         parsed.command = SlashCommand::Hooks;
     } else if (lower == "/tools") {
@@ -534,6 +536,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/lsp", tr("slash.desc.lsp")},
             {"/todos", tr("slash.desc.todos")},
             {"/plugins", tr("slash.desc.plugins")},
+            {"/plugin", tr("slash.desc.plugin")},
             {"/tools", tr("slash.desc.tools")},
             {"/memory", tr("slash.desc.memory")},
             {"/sessions", tr("slash.desc.sessions")},

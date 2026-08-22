@@ -52,30 +52,33 @@ void IgnoreSigpipeOnce() {
     (void)done;
 }
 
-// 预先拼好子进程环境块:当前 environ 里被 extra_env 覆盖的条目剔掉,再把
-// extra_env 追加进去。storage 持有字符串本体,ptrs 是交给 environ 的指针
-// 数组(以 nullptr 收尾)。必须在 fork 之前拼好——fork 之后的子进程上下文
-// 里不宜再 malloc。
+// 预先拼好子进程环境块:Inherit 模式把当前 environ 里被 extra_env 覆盖的
+// 条目剔掉再追加 extra_env;Replace 模式只放 extra_env(宿主环境一概不
+// 递——plugins 单第 8 步的最小环境硬保证)。storage 持有字符串本体,ptrs
+// 是交给 environ 的指针数组(以 nullptr 收尾)。必须在 fork 之前拼好——
+// fork 之后的子进程上下文里不宜再 malloc。
 struct EnvBlock {
     std::vector<std::string> storage;
     std::vector<char*> ptrs;
 };
 
-EnvBlock BuildEnvBlock(const EnvPairs& extra_env) {
+EnvBlock BuildEnvBlock(const EnvPairs& extra_env, EnvMode env_mode) {
     EnvBlock block;
-    for (char** p = environ; p != nullptr && *p != nullptr; ++p) {
-        const std::string entry(*p);
-        const std::size_t eq = entry.find('=');
-        const std::string key = eq == std::string::npos ? entry : entry.substr(0, eq);
-        bool overridden = false;
-        for (const auto& [k, v] : extra_env) {
-            if (k == key) {
-                overridden = true;
-                break;
+    if (env_mode == EnvMode::Inherit) {
+        for (char** p = environ; p != nullptr && *p != nullptr; ++p) {
+            const std::string entry(*p);
+            const std::size_t eq = entry.find('=');
+            const std::string key = eq == std::string::npos ? entry : entry.substr(0, eq);
+            bool overridden = false;
+            for (const auto& [k, v] : extra_env) {
+                if (k == key) {
+                    overridden = true;
+                    break;
+                }
             }
-        }
-        if (!overridden) {
-            block.storage.push_back(entry);
+            if (!overridden) {
+                block.storage.push_back(entry);
+            }
         }
     }
     for (const auto& [k, v] : extra_env) {
@@ -263,7 +266,7 @@ bool SpawnMergedOutput(std::vector<std::string> argv, const EnvPairs& extra_env,
     fcntl(out_pipe[0], F_SETFD, FD_CLOEXEC);
     fcntl(exec_pipe[0], F_SETFD, FD_CLOEXEC);
 
-    EnvBlock env_block = BuildEnvBlock(extra_env);
+    EnvBlock env_block = BuildEnvBlock(extra_env, EnvMode::Inherit);
     std::vector<char*> argv_ptrs = BuildArgvPtrs(argv);
 
     const pid_t pid = fork();
@@ -474,7 +477,7 @@ ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const st
     // stdin 写端留在父进程,不继承;读端给子进程。
     fcntl(in_pipe[1], F_SETFD, FD_CLOEXEC);
 
-    EnvBlock env_block = BuildEnvBlock(extra_env);
+    EnvBlock env_block = BuildEnvBlock(extra_env, EnvMode::Inherit);
     std::vector<char*> argv_ptrs = BuildArgvPtrs(argv);
 
     const pid_t pid = fork();
@@ -705,7 +708,7 @@ BackgroundSpawnResult RunProcessBackground(const std::vector<std::string>& argv,
     fcntl(exec_pipe[0], F_SETFD, FD_CLOEXEC);
     fcntl(exec_pipe[1], F_SETFD, FD_CLOEXEC);
 
-    EnvBlock env_block = BuildEnvBlock(extra_env);
+    EnvBlock env_block = BuildEnvBlock(extra_env, EnvMode::Inherit);
     std::vector<char*> argv_ptrs = BuildArgvPtrs(argv);
 
     const pid_t pid = fork();
@@ -785,14 +788,17 @@ ChildProcess::~ChildProcess() {
 
 SpawnResult ChildProcess::Start(const std::string& command, const std::vector<std::string>& args,
                                   const EnvPairs& env, std::function<bool(std::string_view)> on_stdout,
-                                  std::function<void(std::string_view)> on_stderr) {
-    return Start(command, args, env, std::move(on_stdout), std::move(on_stderr), SpawnConstraints{});
+                                  std::function<void(std::string_view)> on_stderr, const std::string& cwd_utf8,
+                                  EnvMode env_mode) {
+    return Start(command, args, env, std::move(on_stdout), std::move(on_stderr), SpawnConstraints{}, cwd_utf8,
+                 env_mode);
 }
 
 SpawnResult ChildProcess::Start(const std::string& command, const std::vector<std::string>& args,
                                   const EnvPairs& env, std::function<bool(std::string_view)> on_stdout,
                                   std::function<void(std::string_view)> on_stderr,
-                                  const SpawnConstraints& constraints) {
+                                  const SpawnConstraints& constraints, const std::string& cwd_utf8,
+                                  EnvMode env_mode) {
     IgnoreSigpipeOnce();
     on_stdout_ = std::move(on_stdout);
     on_stderr_ = std::move(on_stderr);
@@ -823,7 +829,7 @@ SpawnResult ChildProcess::Start(const std::string& command, const std::vector<st
     argv.reserve(args.size() + 1);
     argv.push_back(command);
     argv.insert(argv.end(), args.begin(), args.end());
-    EnvBlock env_block = BuildEnvBlock(env);
+    EnvBlock env_block = BuildEnvBlock(env, env_mode);
     std::vector<char*> argv_ptrs = BuildArgvPtrs(argv);
 
     const pid_t pid = fork();
@@ -841,6 +847,13 @@ SpawnResult ChildProcess::Start(const std::string& command, const std::vector<st
             if (fd > STDERR_FILENO) {
                 close(fd);
             }
+        }
+        // cwd:非空先切目录再 exec(UTF-8 路径,POSIX 字节串直通)。切不动
+        // 按起失败收场(exec_pipe 把 errno 带回父进程)。
+        if (!cwd_utf8.empty() && chdir(cwd_utf8.c_str()) != 0) {
+            const int err = errno;
+            (void)!write(exec_pipe[1], &err, sizeof(err));
+            _exit(127);
         }
         // PTC 沙箱:exec 前落资源墙。setrlimit 是 async-signal-safe 白名单外
         // 的调用,但 fork 后单线程 exec 前的窗口里可用(glibc 文档允许)。
