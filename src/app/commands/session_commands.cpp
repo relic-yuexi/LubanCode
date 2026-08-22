@@ -899,20 +899,27 @@ CommandFlow HandleResumeCommand(SessionCommandState& state, const std::string& a
 
 namespace {
 
-// SessionCatalog 的摘要账 -> lifecycle 的候选账(标题从缓存补;只列
-// 活动会话——归档的场子要动,先 unarchive)。
-std::vector<lubancode::agent::SessionRefCandidate> MakeCandidates(const std::string& sessions_dir) {
+// SessionCatalog 的摘要账 -> lifecycle 的候选账(标题从缓存补)。默认只列
+// 活动会话;include_archived 连归档场一起列(unarchive 的目标恰是归档场)。
+std::vector<lubancode::agent::SessionRefCandidate> MakeCandidates(const std::string& sessions_dir,
+                                                                  bool include_archived = false) {
     lubancode::agent::SessionCatalog catalog(sessions_dir);
     catalog.Scan();
-    lubancode::agent::SessionQuery query;
-    query.scope = lubancode::agent::SessionScope::All;
-    query.state = lubancode::agent::SessionState::Active;
-    query.limit = 0;
-    const auto page = catalog.Query(query);
     std::vector<lubancode::agent::SessionRefCandidate> out;
-    out.reserve(page.entries.size());
-    for (const auto& entry : page.entries) {
-        out.push_back(lubancode::agent::SessionRefCandidate{entry.id, entry.file_path, entry.title});
+    const auto collect = [&](lubancode::agent::SessionState state) {
+        lubancode::agent::SessionQuery query;
+        query.scope = lubancode::agent::SessionScope::All;
+        query.state = state;
+        query.limit = 0;
+        const auto page = catalog.Query(query);
+        out.reserve(out.size() + page.entries.size());
+        for (const auto& entry : page.entries) {
+            out.push_back(lubancode::agent::SessionRefCandidate{entry.id, entry.file_path, entry.title});
+        }
+    };
+    collect(lubancode::agent::SessionState::Active);
+    if (include_archived) {
+        collect(lubancode::agent::SessionState::Archived);
     }
     return out;
 }
@@ -955,12 +962,20 @@ bool ConfirmAnswer(const std::string& answer) {
 bool ResolveSessionReference(const std::string& sessions_dir, const std::string& ref,
                              const std::function<std::string()>& stdin_line, std::string& out_id,
                              std::string& out_title, std::string& out_message, bool& ambiguous) {
+    return ResolveSessionReference(sessions_dir, ref, stdin_line, /*include_archived=*/false, out_id,
+                                   out_title, out_message, ambiguous);
+}
+
+bool ResolveSessionReference(const std::string& sessions_dir, const std::string& ref,
+                             const std::function<std::string()>& stdin_line, bool include_archived,
+                             std::string& out_id, std::string& out_title, std::string& out_message,
+                             bool& ambiguous) {
     (void)stdin_line;
     ambiguous = false;
     out_id.clear();
     out_title.clear();
     out_message.clear();
-    const auto candidates = MakeCandidates(sessions_dir);
+    const auto candidates = MakeCandidates(sessions_dir, include_archived);
     const auto hits = lubancode::agent::ResolveSessionRef(candidates, ref, ambiguous);
     if (!hits.has_value() || hits->empty()) {
         out_message = trf("cmd.session.ref_not_found", ref);
@@ -1003,7 +1018,11 @@ int HandleSessionManagementCommand(const std::string& sessions_dir, int kind, co
     std::string title;
     std::string message;
     bool ambiguous = false;
-    if (!ResolveSessionReference(sessions_dir, ref, stdin_line, id, title, message, ambiguous)) {
+    // unarchive/delete 的目标可能在归档里(单子:删除只碰根或 archive
+    // 里验明的那一份):候选连归档一起列。archive 只在活动会话里解
+    // (已归档的重复归档无意义,幂等成功)。
+    if (!ResolveSessionReference(sessions_dir, ref, stdin_line, !is_archive, id, title,
+                                 message, ambiguous)) {
         std::cout << message << "\n";
         return 1;
     }

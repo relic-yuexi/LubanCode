@@ -115,10 +115,15 @@ void PrintSessionsCommand(const std::string& sessions_dir, const std::string& ar
 
 // 引用解析 + 消歧的共用壳:candidates 归 lifecycle 出,标题由 SessionCatalog
 // 补;重名列短 id 叫用户点明,绝不猜一场。命中唯一时填 out_id/out_title。
-// 返回 false = 没解出(人话已打好,调用方直接印)。
+// 返回 false = 没解出(人话已打好,调用方直接印)。include_archived 版
+// 连归档场一起列候选(unarchive 的目标恰是归档场)。
 bool ResolveSessionReference(const std::string& sessions_dir, const std::string& ref,
                              const std::function<std::string()>& stdin_line, std::string& out_id,
                              std::string& out_title, std::string& out_message, bool& ambiguous);
+bool ResolveSessionReference(const std::string& sessions_dir, const std::string& ref,
+                             const std::function<std::string()>& stdin_line, bool include_archived,
+                             std::string& out_id, std::string& out_title, std::string& out_message,
+                             bool& ambiguous);
 
 // 顶层 `lubancode archive <SESSION>` / `unarchive <SESSION>` /
 // `delete <SESSION> [--force]` 的执行体。stdin_line:读一行输入的回调

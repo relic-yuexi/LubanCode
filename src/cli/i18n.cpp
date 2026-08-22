@@ -39,7 +39,11 @@ const Entry kZhCN[] = {
      "  lubancode \"问题\"          一次问答,能用工具就用工具\n"
      "  lubancode                  不带参数则进入交互循环;首次运行缺配置会先走一遍初次配置\n"
      "                              向导,配完直接进入会话,不用重启。exit/quit 或 EOF(Ctrl+Z /\n"
-     "                              管道读尽)退出;空行只是重新给提示符,不退出\n"},
+     "                              管道读尽)退出;空行只是重新给提示符,不退出\n"
+     "  lubancode archive <id>    归档一场会话(搬进 sessions/archive/,字节原样,想恢复用\n"
+     "  lubancode unarchive <id>  unarchive;归了的场子不进默认列表)\n"
+     "  lubancode delete <id>     永久删除一场会话,交互确认后才删;--force 跳过确认,只给\n"
+     "                            脚本显式使用,不可恢复\n"},
     {"help.options",
      "选项:\n"
      "  --version              打印版本号\n"
@@ -1540,7 +1544,11 @@ const Entry kEn[] = {
      "  lubancode                  with no arguments, enters the interactive loop; on first run with\n"
      "                              missing config the setup wizard runs once, then the session starts\n"
      "                              without a restart. exit/quit or EOF (Ctrl+Z / pipe drained) quits;\n"
-     "                              an empty line just re-prompts\n"},
+     "                              an empty line just re-prompts\n"
+     "  lubancode archive <id>    archive a session (moved into sessions/archive/, bytes untouched;\n"
+     "  lubancode unarchive <id>  unarchive brings it back; archived ones stay out of the default list)\n"
+     "  lubancode delete <id>     permanently delete a session after an interactive confirmation;\n"
+     "                            --force skips the confirmation (scripts only), unrecoverable\n"},
     {"help.options",
      "Options:\n"
      "  --version              print the version\n"
