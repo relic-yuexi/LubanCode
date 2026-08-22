@@ -1,6 +1,6 @@
 # 工具描述与模型可见文案抽离 C++,按语言分档
 
-状态：基建与批1-2 已并入(2026-08-22,0.26.14/0.26.19):tool_text 查表回退链、embed 通道含 (POSIX) 分档节,read_file/write_file/edit_file/search/命令族入档,逐字节零差异;批3-5(代理族含 persona/交互/外接)在途
+状态：基建与批1-2 已并入(2026-08-22,0.26.14/0.26.19):tool_text 查表回退链、embed 通道含 (POSIX) 分档节,read_file/write_file/edit_file/search/命令族入档,逐字节零差异;批3-5 已并入(0.26.21);余量:memory/web/mcp 等零散工具另批
 
 ## 一句话
 
