@@ -202,6 +202,9 @@ add_executable(lubancode_tests
   # 第 4 步(收现有 Lua):pure/trusted profile、指令预算、内存帽、取消链、
   # EmbeddedLuaRuntime 台账与幂等。
   test_plugin_lua.cpp
+  # 第 7 步(接 Runtime):adapter 的 call_id 走 ProcessIdAuthority、
+  # LogSink 分流、SetCancel/SetCwd 装配口、registry 中立形状。
+  test_plugin_runtime_mount.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)

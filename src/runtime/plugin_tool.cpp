@@ -8,6 +8,8 @@
 #include <set>
 
 #include "platform/paths.hpp"
+#include "platform/text_encoding.hpp"
+#include "runtime/id_authority.hpp"
 #include "runtime/plugin_process.hpp"
 
 namespace lubancode::runtime {
@@ -59,9 +61,12 @@ tools::Tool::Result PluginToolAdapter::execute(const nlohmann::json& input) {
     }
 
     if (manifest_->kind != RuntimeKind::Process) {
-        // embedded-lua/native-library 在后续批次接入;manifest 校验期已把
-        // native-library 拒了,这里兜 embedded-lua。
-        return {"插件运行时 " + std::string(RuntimeKindName(manifest_->kind)) + " 尚未接入本宿主", true};
+        // embedded-lua 走 runtime::EmbeddedLuaRuntime(legacy .lua 归宿),
+        // native-library 走 tools::PluginHost(ABI v1/v2);plugin.json 里写
+        // 这两种 kind 的 manifest 这里兜底明说,不静默瞎跑。
+        return {"插件运行时 " + std::string(RuntimeKindName(manifest_->kind)) +
+                    " 不走 process 通道(legacy .lua / 原生库各有各的挂载路)",
+                true};
     }
 
     plugin_protocol::ProcessRequest request;
@@ -70,15 +75,20 @@ tools::Tool::Result PluginToolAdapter::execute(const nlohmann::json& input) {
     request.entry = definition_->entry;
     request.arguments = input;
     request.context_cwd = cwd_utf8_;
-    // call_id:宿主生成的非敏感串(协议只要求回显对上;与 turn/item 的
-    // 对账在第 7 批接 Runtime/app-server 时换成真实 item id)。单调序号,
-    // 可读可对账,不泄任何上下文。
-    static std::atomic<std::uint64_t> call_seq{0};
-    request.call_id = "call_" + std::to_string(call_seq.fetch_add(1));
+    // call_id:进程级发号局的 req 号(plugins 单第 7 步:call_id 换
+    // runtime::ProcessIdAuthority() 的真 id,与 turn/item 的对账走同一本
+    // 账,不各处再造第二套)。非敏感串,可读可对账。
+    request.call_id = ProcessIdAuthority().NextRequestId();
 
     ProcessCallLimits limits;
     limits.timeout_ms = manifest_->timeout_ms;
     const auto outcome = RunProcessToolCall(*manifest_, request, cwd_utf8_, cancel_, limits);
+    // 日志分流:插件的 stderr 尾巴进 LogSink(终端/事件流各画各的),不进
+    // 模型结果;模型只看 BuildResultText 的正文。
+    if (log_sink_ && !outcome.stderr_tail.empty()) {
+        log_sink_("[plugin " + manifest_->id + "] " +
+                  platform::SanitizeExternalText(outcome.stderr_tail.substr(0, 1024)));
+    }
     // 唯一终态:错误码 + 人话一起交上层(ItemCompleted 一笔)。
     return {BuildResultText(outcome), outcome.code != PluginErrorCode::Ok};
 }

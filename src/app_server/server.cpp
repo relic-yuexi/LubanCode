@@ -363,6 +363,10 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
     {
         // 装配:假 backend + 注册表(骨架期工具链由测试注入假工具;生产
         // 装配走 cli_app 的 registry_factory)。
+        // TODO(plugins 第 7 步的 app-server 侧收尾,另一线接手):插件工具
+        // 挂进这条 registry 后,ESC/取消链与 PluginLogSink(事件流日志)也
+        // 要照 ToolRuntime::SetPluginCancel/SetPluginLogSink 的口子接进来;
+        // 本线只做了 Terminal 侧,app-server 深度挂载不在这里展开。
         std::unique_ptr<api::Backend> backend = backend_factory_();
         std::unique_ptr<tools::ToolRegistry> registry =
             registry_factory_ ? registry_factory_() : std::make_unique<tools::ToolRegistry>();

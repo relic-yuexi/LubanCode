@@ -675,14 +675,14 @@ ChildProcess::~ChildProcess() {
 
 SpawnResult ChildProcess::Start(const std::string& command, const std::vector<std::string>& args,
                                   const EnvPairs& env, std::function<bool(std::string_view)> on_stdout,
-                                  std::function<void(std::string_view)> on_stderr) {
-    return Start(command, args, env, std::move(on_stdout), std::move(on_stderr), SpawnConstraints{});
+                                  std::function<void(std::string_view)> on_stderr, const std::string& cwd_utf8) {
+    return Start(command, args, env, std::move(on_stdout), std::move(on_stderr), SpawnConstraints{}, cwd_utf8);
 }
 
 SpawnResult ChildProcess::Start(const std::string& command, const std::vector<std::string>& args,
                                   const EnvPairs& env, std::function<bool(std::string_view)> on_stdout,
                                   std::function<void(std::string_view)> on_stderr,
-                                  const SpawnConstraints& constraints) {
+                                  const SpawnConstraints& constraints, const std::string& cwd_utf8) {
     on_stdout_ = std::move(on_stdout);
     on_stderr_ = std::move(on_stderr);
 
@@ -748,20 +748,28 @@ SpawnResult ChildProcess::Start(const std::string& command, const std::vector<st
         }
     }
 
+    // cwd:非空则子进程的工作目录指过去(UTF-8 转宽;空 = 继承本进程)。
+    std::wstring cwd_wide;
+    LPCWSTR current_directory = nullptr;
+    if (!cwd_utf8.empty()) {
+        cwd_wide = Utf8ToWide(cwd_utf8);
+        current_directory = cwd_wide.c_str();
+    }
+
     BOOL ok = FALSE;
     DWORD error_code = 0;
     if (child_token != nullptr) {
         ok = CreateProcessAsUserW(child_token, nullptr, cmdline_buf.data(), nullptr, nullptr, TRUE,
-                                  CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
+                                  CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, current_directory, &si, &pi);
         CloseHandle(child_token);
         if (!ok) {
             // 受限 token 这条路走不通(策略/权限),降级回普通创建,不硬失败。
             ok = CreateProcessW(nullptr, cmdline_buf.data(), nullptr, nullptr, TRUE,
-                                CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
+                                CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, current_directory, &si, &pi);
         }
     } else {
         ok = CreateProcessW(nullptr, cmdline_buf.data(), nullptr, nullptr, TRUE,
-                            CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
+                            CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, current_directory, &si, &pi);
     }
     error_code = GetLastError();
 

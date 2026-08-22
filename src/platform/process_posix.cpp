@@ -785,14 +785,14 @@ ChildProcess::~ChildProcess() {
 
 SpawnResult ChildProcess::Start(const std::string& command, const std::vector<std::string>& args,
                                   const EnvPairs& env, std::function<bool(std::string_view)> on_stdout,
-                                  std::function<void(std::string_view)> on_stderr) {
-    return Start(command, args, env, std::move(on_stdout), std::move(on_stderr), SpawnConstraints{});
+                                  std::function<void(std::string_view)> on_stderr, const std::string& cwd_utf8) {
+    return Start(command, args, env, std::move(on_stdout), std::move(on_stderr), SpawnConstraints{}, cwd_utf8);
 }
 
 SpawnResult ChildProcess::Start(const std::string& command, const std::vector<std::string>& args,
                                   const EnvPairs& env, std::function<bool(std::string_view)> on_stdout,
                                   std::function<void(std::string_view)> on_stderr,
-                                  const SpawnConstraints& constraints) {
+                                  const SpawnConstraints& constraints, const std::string& cwd_utf8) {
     IgnoreSigpipeOnce();
     on_stdout_ = std::move(on_stdout);
     on_stderr_ = std::move(on_stderr);
@@ -841,6 +841,13 @@ SpawnResult ChildProcess::Start(const std::string& command, const std::vector<st
             if (fd > STDERR_FILENO) {
                 close(fd);
             }
+        }
+        // cwd:非空先切目录再 exec(UTF-8 路径,POSIX 字节串直通)。切不动
+        // 按起失败收场(exec_pipe 把 errno 带回父进程)。
+        if (!cwd_utf8.empty() && chdir(cwd_utf8.c_str()) != 0) {
+            const int err = errno;
+            (void)!write(exec_pipe[1], &err, sizeof(err));
+            _exit(127);
         }
         // PTC 沙箱:exec 前落资源墙。setrlimit 是 async-signal-safe 白名单外
         // 的调用,但 fork 后单线程 exec 前的窗口里可用(glibc 文档允许)。

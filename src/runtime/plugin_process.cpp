@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -89,11 +91,23 @@ ProcessCallOutcome RunProcessToolCall(const PluginManifest& manifest,
     };
 
     // ---- 起进程 ----
+    // cwd:缺省项目根(调用方传)。目录不存在(项目根被删/单测环境差异)
+    // 时退回继承宿主 cwd,不起失败——cwd 是便利项不是安全边界,进程本就
+    // 拿着当前用户的全部权限。
+    std::string effective_cwd = cwd_utf8;
+    if (!effective_cwd.empty()) {
+        std::error_code cwd_ec;
+        const std::filesystem::path cwd_path = std::filesystem::path(std::u8string(
+            reinterpret_cast<const char8_t*>(effective_cwd.data()), effective_cwd.size()));
+        if (!std::filesystem::is_directory(cwd_path, cwd_ec)) {
+            effective_cwd.clear();
+        }
+    }
     platform::ChildProcess child;
     const std::vector<std::pair<std::string, std::string>> env = BuildProcessEnv(manifest);
     const auto spawn = child.Start(manifest.argv[0],
                                    std::vector<std::string>(manifest.argv.begin() + 1, manifest.argv.end()), env,
-                                   on_stdout, on_stderr);
+                                   on_stdout, on_stderr, effective_cwd);
     if (!spawn.success) {
         outcome.code = PluginErrorCode::SpawnFailed;
         outcome.detail = "起插件进程失败(" + manifest.argv[0] + "): " + spawn.error;

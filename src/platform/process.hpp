@@ -209,17 +209,20 @@ public:
 
     // 起子进程:command 是可执行文件(按 PATH 查找),args 是参数列表,env
     // 是要额外注入子进程环境的键值对(同名覆盖当前进程环境;注入方式同
-    // RunProcess 的注释)。
+    // RunProcess 的注释)。cwd_utf8 空 = 继承本进程当前目录;非空则子进程
+    // 在该目录里跑(插件进程的 cwd 缺省项目根,plugins 单第 7 步接上)。
     SpawnResult Start(const std::string& command, const std::vector<std::string>& args, const EnvPairs& env,
-                       std::function<bool(std::string_view)> on_stdout,
-                       std::function<void(std::string_view)> on_stderr);
+                      std::function<bool(std::string_view)> on_stdout,
+                      std::function<void(std::string_view)> on_stderr,
+                      const std::string& cwd_utf8 = std::string());
 
     // 同上,但带 PTC 沙箱约束(Job/rlimit 的 CPU、内存上限,Windows 受限
     // token)。constraints 全默认时与四参版本行为一致。job 限额设置失败只
     // 降级(照常起进程),由调用方拿 SandboxGrade 自己记档,不硬失败。
     SpawnResult Start(const std::string& command, const std::vector<std::string>& args, const EnvPairs& env,
-                       std::function<bool(std::string_view)> on_stdout,
-                       std::function<void(std::string_view)> on_stderr, const SpawnConstraints& constraints);
+                      std::function<bool(std::string_view)> on_stdout,
+                      std::function<void(std::string_view)> on_stderr, const SpawnConstraints& constraints,
+                      const std::string& cwd_utf8 = std::string());
 
     // 原始字节一次性写进子进程 stdin,内部加锁防止多个请求线程交错。进程
     // 已经退出/没起成功都返回 false。

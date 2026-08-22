@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -31,6 +32,7 @@
 #include "memory/project_memory.hpp"
 #include "ptc/ptc_tool.hpp"
 #include "runtime/plugin_lua.hpp"
+#include "runtime/plugin_tool.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/ask_user.hpp"
 #include "tools/plugin_loader.hpp"
@@ -40,6 +42,13 @@
 #include "tools/worktree_tool.hpp"
 
 namespace lubancode::app {
+
+// MountPlugins 的 process 插件出参缺省值(不想收 manifest 的调用方给空
+// 静态容器,行为上只是不回填)。
+namespace detail {
+inline std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>> kEmptyPluginManifests;
+inline std::vector<std::string> kEmptyPluginWarnings;
+}  // namespace detail
 
 lubancode::memory::Options MemoryOptionsFromConfig(const lubancode::config::MemoryConfig& config);
 
@@ -112,7 +121,10 @@ struct PluginMountInfo {
 // mounted/warnings 由调用方持有,交互模式给 /plugins 命令用。
 void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime::EmbeddedLuaRuntime& lua_runtime,
                   lubancode::tools::ToolRegistry& registry, const lubancode::cli::Theme& theme,
-                  std::vector<PluginMountInfo>& mounted, std::vector<std::string>& warnings, bool report = true);
+                  std::vector<PluginMountInfo>& mounted, std::vector<std::string>& warnings, bool report = true,
+                  std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& process_manifests =
+                      detail::kEmptyPluginManifests,
+                  std::vector<std::string>& process_warnings = detail::kEmptyPluginWarnings);
 
 // 一场会话的工具全栈:主循环表、子代理表、(交互模式的)Explore 只读表,
 // 连同它们背后的拥有者——MCP 子进程(mcp_servers_)、插件宿主(plugin_host_)、
@@ -175,6 +187,15 @@ public:
     const std::function<bool(const lubancode::tools::Tool&)>& sub_tool_filter() const { return sub_tool_filter_; }
     const std::vector<PluginMountInfo>& plugin_mounted() const { return plugin_mounted_; }
     const std::vector<std::string>& plugin_warnings() const { return plugin_warnings_; }
+    // process 插件(plugin.json)的已解析清单,/plugin inspect/doctor 用。
+    const std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& process_manifests() const {
+        return process_manifests_;
+    }
+    // ESC 取消链与项目根:每轮由 turn_runner 灌(plugins 单第 7 步)。
+    void SetPluginCancel(const std::atomic<bool>* cancel);
+    void SetPluginCwd(std::string cwd_utf8);
+    // 插件日志去处(LogSink:stderr 分流,不进模型结果)。
+    void SetPluginLogSink(lubancode::runtime::PluginLogSink sink);
     // /mcp、/lsp 命令展示用:只读巡检,不另开口子改状态。
     const std::vector<McpServerRuntime>& mcp_servers() const { return mcp_servers_; }
     std::optional<lubancode::lsp::Manager>& lsp_manager() { return lsp_manager_; }
@@ -188,6 +209,11 @@ private:
     std::vector<McpServerRuntime> mcp_servers_;
     lubancode::tools::PluginHost plugin_host_;
     lubancode::runtime::EmbeddedLuaRuntime lua_runtime_;
+    // process 插件(plugin.json)的清单与 adapter(plugins 单第 7 步挂进
+    // MountPlugins):manifest 由 shared_ptr 钉住,adapter 进各张 registry。
+    std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>> process_manifests_;
+    std::vector<std::unique_ptr<lubancode::runtime::PluginToolAdapter>> process_adapters_;
+    std::vector<std::string> process_plugin_warnings_;
     std::optional<lubancode::lsp::Manager> lsp_manager_;
     // ---- 用户表:后声明,先析构 ----
     std::optional<lubancode::tools::ToolRegistry> explore_registry_;

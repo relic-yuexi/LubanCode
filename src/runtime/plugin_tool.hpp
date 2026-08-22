@@ -12,6 +12,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -21,6 +22,11 @@
 #include "tools/tool.hpp"
 
 namespace lubancode::runtime {
+
+// 插件日志的去处(process 插件的 stderr 尾巴、Lua 的加载警告等)。stdout
+// 是模型的结果专线,日志进 sink——Terminal 走 stderr/界面日志,app-server
+// 走事件流,Runtime 不自己写 stdout(单子「Runtime 代码边界」)。
+using PluginLogSink = std::function<void(const std::string& line)>;
 
 class PluginToolAdapter : public tools::Tool {
 public:
@@ -39,6 +45,8 @@ public:
     void SetCancel(const std::atomic<bool>* cancel) { cancel_ = cancel; }
     // 项目根(进程 cwd 缺省值)。会话启动时设一次。
     void SetCwd(std::string cwd_utf8) { cwd_utf8_ = std::move(cwd_utf8); }
+    // 日志去处(不设 = 静默;插件 stderr 本来就主要是诊断)。
+    void SetLogSink(PluginLogSink sink) { log_sink_ = std::move(sink); }
 
     const PluginManifest& manifest() const { return *manifest_; }
     const PluginDefinition& definition() const { return *definition_; }
@@ -49,6 +57,7 @@ private:
     const PluginDefinition* definition_;
     std::string cwd_utf8_;
     const std::atomic<bool>* cancel_ = nullptr;
+    PluginLogSink log_sink_;
 };
 
 // 目录扫描:扫 <dir> 下每个子目录的 plugin.json(推荐一插件一目录,单子
