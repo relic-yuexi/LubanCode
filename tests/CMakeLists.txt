@@ -160,6 +160,9 @@ add_executable(lubancode_tests
   test_ptc_profile.cpp
   # PTC P2:LubanBench-Tool 八类场景离线层(题库/判卷/报告)。
   test_ptc_bench.cpp
+  # 显示系统剥离单第一步:runtime 合同(Event/Command/Broker 形状与序列化
+  # 往返保真、稳定枚举字符串、坏报文抛错)。
+  test_runtime_contract.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)
