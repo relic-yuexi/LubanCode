@@ -14,6 +14,7 @@ namespace lubancode::app_server {
 
 agent::ApprovalRequest MirrorApprovalRequest(const runtime::ApprovalRequest& request) {
     agent::ApprovalRequest mirrored;
+    mirrored.tool_use_id = request.tool_use_id;
     mirrored.tool_name = request.tool_name;
     mirrored.input = request.input;
     mirrored.reason = request.reason;
@@ -22,6 +23,7 @@ agent::ApprovalRequest MirrorApprovalRequest(const runtime::ApprovalRequest& req
 
 runtime::ApprovalRequest MirrorApprovalRequest(const agent::ApprovalRequest& request) {
     runtime::ApprovalRequest mirrored;
+    mirrored.tool_use_id = request.tool_use_id;
     mirrored.tool_name = request.tool_name;
     mirrored.input = request.input;
     mirrored.reason = request.reason;

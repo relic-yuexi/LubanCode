@@ -471,7 +471,7 @@ TEST_CASE("agent 工具:子代理调了个工具再返回,on_sub_tool_start 钩�
 
     std::vector<std::string> sub_tool_starts;
     tools::AgentTool::Hooks hooks;
-    hooks.on_sub_tool_start = [&](const std::string& name, const nlohmann::json&) {
+    hooks.on_sub_tool_start = [&](const std::string&, const std::string& name, const nlohmann::json&) {
         sub_tool_starts.push_back(name);
     };
     agent_tool.SetHooks(hooks);
@@ -677,7 +677,7 @@ TEST_CASE("agent 工具:确认回调转发——父拒绝,子内工具收到拒�
 
     bool confirm_asked = false;
     tools::AgentTool::Hooks hooks;
-    hooks.on_tool_confirm = [&](const std::string&, const nlohmann::json&) -> bool {
+    hooks.on_tool_confirm = [&](const std::string&, const std::string&, const nlohmann::json&) -> bool {
         confirm_asked = true;
         return false;  // 父级拒绝
     };

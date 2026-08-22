@@ -194,7 +194,7 @@ TEST_CASE("收件点:权限确认当口来信不作答——信只在确认收�
 
     bool confirm_asked = false;
     agent::Callbacks callbacks;
-    callbacks.on_tool_confirm = [&](const std::string&, const nlohmann::json&) {
+    callbacks.on_tool_confirm = [&](const std::string&, const std::string&, const nlohmann::json&) {
         confirm_asked = true;
         return true;
     };

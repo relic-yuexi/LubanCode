@@ -82,13 +82,14 @@ struct ToolFixture {
         registry.Register(std::make_unique<GuardedEchoTool>());
         tool = std::make_unique<PtcTool>(registry, nullptr, config);
         hooks.cancel = &cancel;
-        hooks.on_tool_start = [this](const std::string& name, const nlohmann::json&) {
+        hooks.on_tool_start = [this](const std::string&, const std::string& name, const nlohmann::json&) {
             events.push_back("start:" + name);
         };
-        hooks.on_tool_done = [this](const std::string& name, const lubancode::tools::Tool::Result& result) {
+        hooks.on_tool_done = [this](const std::string&, const std::string& name,
+                                    const lubancode::tools::Tool::Result& result) {
             events.push_back(std::string("done:") + name + (result.is_error ? ":err" : ":ok"));
         };
-        hooks.on_tool_confirm = [this](const std::string& name, const nlohmann::json&) {
+        hooks.on_tool_confirm = [this](const std::string&, const std::string& name, const nlohmann::json&) {
             events.push_back("confirm:" + name);
             return true;
         };
@@ -211,7 +212,7 @@ TEST_CASE("PreToolUse deny: 脚本内调用被钩子拦下,ToolCallError 可收�
     TempWorkspace workspace;
     ToolFixture fixture;
     PtcTool::Hooks denying = fixture.hooks;
-    denying.on_pre_tool_use_hook = [](const std::string&, const nlohmann::json&) {
+    denying.on_pre_tool_use_hook = [](const std::string&, const std::string&, const nlohmann::json&) {
         lubancode::agent::ToolHookDecision decision;
         decision.decision = lubancode::agent::ToolHookDecision::Decision::Deny;
         decision.reason = "测试钩子:一律拒绝";
@@ -244,7 +245,7 @@ TEST_CASE("PermissionRequest/确认链: 需确认工具用户拒绝 -> ToolCallE
     }
     ToolFixture fixture({"guarded_echo"});
     PtcTool::Hooks refusing = fixture.hooks;
-    refusing.on_tool_confirm = [&fixture](const std::string& name, const nlohmann::json&) {
+    refusing.on_tool_confirm = [&fixture](const std::string&, const std::string& name, const nlohmann::json&) {
         fixture.events.push_back("confirm:" + name);
         return false;  // 用户拒绝
     };
@@ -272,7 +273,8 @@ TEST_CASE("updatedInput 改写: PreToolUse allow + 改参,脚本看到改后的�
     TempWorkspace workspace;
     ToolFixture fixture;
     PtcTool::Hooks rewriting = fixture.hooks;
-    rewriting.on_pre_tool_use_hook = [&workspace](const std::string& name, const nlohmann::json& input) {
+    rewriting.on_pre_tool_use_hook = [&workspace](const std::string&, const std::string& name,
+                                                  const nlohmann::json& input) {
         lubancode::agent::ToolHookDecision decision;
         decision.decision = lubancode::agent::ToolHookDecision::Decision::Allow;
         if (name == "read_file") {

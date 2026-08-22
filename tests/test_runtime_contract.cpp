@@ -251,11 +251,15 @@ TEST_CASE("审批:决定四态往返,空串决定要抛") {
 
 TEST_CASE("审批:ApprovalRequest 带 input JSON 与理由往返") {
     rt::ApprovalRequest req;
+    req.tool_use_id = "toolu_P4";
     req.tool_name = "write_file";
     req.input = nlohmann::json{{"path", "src/main.cpp"}, {"content", "int main(){}"}};
     req.reason = "PreToolUse 钩子 ask:大改动";
 
-    const rt::ApprovalRequest back = rt::ApprovalRequest::from_json(req.to_json());
+    const nlohmann::json j = req.to_json();
+    CHECK(j["tool_use_id"] == "toolu_P4");  // P4:审批钉在条目上的身份随行
+    const rt::ApprovalRequest back = rt::ApprovalRequest::from_json(j);
+    CHECK(back.tool_use_id == req.tool_use_id);
     CHECK(back.tool_name == req.tool_name);
     CHECK(back.input == req.input);
     CHECK(back.reason == req.reason);

@@ -435,7 +435,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
             };
         // 悬空收口的拒绝文案:写明真因,不冒充用户拒绝(P2 工人接线
         // 注意 3)。interrupt 旗置位 = 打断;否则是超时/断线。
-        callbacks.on_tool_denial_text = [&record](const std::string& name) {
+        callbacks.on_tool_denial_text = [&record](const std::string& /*tool_use_id*/, const std::string& name) {
             if (record->interrupt_requested.load()) {
                 return "回合被 turn/interrupt 打断," + name + " 的审批按取消收口,未执行。";
             }

@@ -30,13 +30,14 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     // 每条收尾路共用的分发口:先清洗,再 on_tool_done,清洗版随返回值交给
     // 调用方(进 history / 下一轮请求)。日志只记字段名、长度、坏字节位置
     // 与前后几个十六进制字节,不倒正文。
-    const auto dispatch_done = [&callbacks](const std::string& name, tools::Tool::Result result) {
+    const auto dispatch_done = [&callbacks](const std::string& tool_use_id, const std::string& name,
+                                             tools::Tool::Result result) {
         if (!platform::IsValidUtf8(result.content)) {
             std::cerr << "[utf8] " << platform::DescribeUtf8Issue("tool_result:" + name, result.content) << "\n";
             result.content = platform::SanitizeExternalText(result.content);
         }
         if (callbacks.on_tool_done) {
-            callbacks.on_tool_done(name, result);
+            callbacks.on_tool_done(tool_use_id, name, result);
         }
         return result;
     };
@@ -44,7 +45,7 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     // 工具状态机相位通报(没设回调 = 没配 hooks,行为与从前逐字节一致)。
     const auto phase = [&callbacks, &call](ToolPhase p) {
         if (callbacks.on_tool_phase) {
-            callbacks.on_tool_phase(call.name, p);
+            callbacks.on_tool_phase(call.id, call.name, p);
         }
     };
     // 钩子拦截的统一收尾:停在 Blocked 相位(不冒充"运行过又失败"),
@@ -56,16 +57,16 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         for (const auto& ctx : extra_context) {
             content += "\n[钩子附注] " + ctx;
         }
-        return dispatch_done(call.name, tools::Tool::Result{content, true});
+        return dispatch_done(call.id, call.name, tools::Tool::Result{content, true});
     };
 
     if (callbacks.on_tool_start) {
-        callbacks.on_tool_start(call.name, call.input);
+        callbacks.on_tool_start(call.id, call.name, call.input);
     }
 
     tools::Tool* tool = registry.Find(call.name);
     if (tool == nullptr) {
-        return dispatch_done(call.name, tools::Tool::Result{"未知工具: " + call.name, true});
+        return dispatch_done(call.id, call.name, tools::Tool::Result{"未知工具: " + call.name, true});
     }
 
     // tool_search(延迟挂载):注册表里查得到,但过滤谓词不放行——延迟工具
@@ -77,7 +78,7 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
             filter_denial.empty()
                 ? "工具 " + call.name + " 存在但尚未挂载:请先用 tool_search 检索挂载,再调用。"
                 : "工具 " + call.name + ": " + filter_denial;
-        return dispatch_done(call.name, tools::Tool::Result{denial, true});
+        return dispatch_done(call.id, call.name, tools::Tool::Result{denial, true});
     }
 
     // ---- PreToolUse:在 UI 标记"真执行"之前、权限确认之前。deny -> 拦;
@@ -87,10 +88,10 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     phase(ToolPhase::CheckingHook);
     ToolHookDecision pre;
     if (callbacks.on_pre_tool_use_hook) {
-        pre = callbacks.on_pre_tool_use_hook(call.name, call.input);
+        pre = callbacks.on_pre_tool_use_hook(call.id, call.name, call.input);
     } else if (callbacks.on_pre_tool_hook) {
         // 旧回调兼容:非空 = deny。
-        const std::optional<std::string> legacy_blocked = callbacks.on_pre_tool_hook(call.name, call.input);
+        const std::optional<std::string> legacy_blocked = callbacks.on_pre_tool_hook(call.id, call.name, call.input);
         if (legacy_blocked.has_value()) {
             pre.decision = ToolHookDecision::Decision::Deny;
             pre.reason = *legacy_blocked;
@@ -124,16 +125,17 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         bool allowed = true;
         if (callbacks.on_tool_confirm_async) {
             const std::shared_ptr<InteractionFuture> future =
-                callbacks.on_tool_confirm_async(ApprovalRequest{call.name, effective_input, std::string()});
+                callbacks.on_tool_confirm_async(
+                    ApprovalRequest{call.id, call.name, effective_input, std::string()});
             const std::optional<ApprovalResponse> response =
                 future != nullptr ? future->WaitApproval() : std::nullopt;
             if (!response.has_value()) {
                 // 悬空收口(cancel):等价拒绝,拒绝文案照"没人可答"写,
                 // 不冒充用户拒绝。
                 const std::string denial =
-                    callbacks.on_tool_denial_text ? callbacks.on_tool_denial_text(call.name)
+                    callbacks.on_tool_denial_text ? callbacks.on_tool_denial_text(call.id, call.name)
                                                   : std::string("审批请求悬空收口,未执行该工具");
-                return dispatch_done(call.name, tools::Tool::Result{denial, true});
+                return dispatch_done(call.id, call.name, tools::Tool::Result{denial, true});
             }
             switch (response->decision) {
                 case ApprovalDecision::Accept:
@@ -146,15 +148,17 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
                     break;
             }
         } else {
-            allowed = callbacks.on_tool_confirm ? callbacks.on_tool_confirm(call.name, effective_input) : true;
+            allowed =
+                callbacks.on_tool_confirm ? callbacks.on_tool_confirm(call.id, call.name, effective_input) : true;
         }
         if (!allowed) {
             // 拒绝文案可由回调层给(后台子代理的拒绝是"无法弹确认、未预放
             // 行",不是用户拒绝——缺省文案会把子代理的最终报告带偏成"均被
             // 用户拒绝")。
-            const std::string denial = callbacks.on_tool_denial_text ? callbacks.on_tool_denial_text(call.name)
-                                                                     : std::string("用户拒绝执行该工具");
-            return dispatch_done(call.name, tools::Tool::Result{denial, true});
+            const std::string denial = callbacks.on_tool_denial_text
+                                           ? callbacks.on_tool_denial_text(call.id, call.name)
+                                           : std::string("用户拒绝执行该工具");
+            return dispatch_done(call.id, call.name, tools::Tool::Result{denial, true});
         }
     }
 
@@ -167,15 +171,16 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         result.content = platform::SanitizeExternalText(result.content);
     }
     if (callbacks.on_post_tool_use_hook) {
-        const std::vector<std::string> feedback = callbacks.on_post_tool_use_hook(call.name, effective_input, result);
+        const std::vector<std::string> feedback =
+            callbacks.on_post_tool_use_hook(call.id, call.name, effective_input, result);
         for (const auto& line : feedback) {
             result.content += "\n[post-tool-use hook 追加] " + line;
         }
     }
     if (callbacks.on_post_tool_hook) {
-        callbacks.on_post_tool_hook(call.name, effective_input, result);
+        callbacks.on_post_tool_hook(call.id, call.name, effective_input, result);
     }
-    return dispatch_done(call.name, std::move(result));
+    return dispatch_done(call.id, call.name, std::move(result));
 }
 
 namespace {
@@ -558,11 +563,11 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
                             stream_error_message = e.message;
                         } else if constexpr (std::is_same_v<T, api::BuiltinToolStart>) {
                             if (callbacks.on_builtin_tool_start) {
-                                callbacks.on_builtin_tool_start(e.name, e.input);
+                                callbacks.on_builtin_tool_start(e.id, e.name, e.input);
                             }
                         } else if constexpr (std::is_same_v<T, api::BuiltinToolDone>) {
                             if (callbacks.on_builtin_tool_done) {
-                                callbacks.on_builtin_tool_done(e.name, e.input, e.summary, e.is_error);
+                                callbacks.on_builtin_tool_done(e.id, e.name, e.input, e.summary, e.is_error);
                             }
                         }
                     },
