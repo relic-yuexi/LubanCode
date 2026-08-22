@@ -265,7 +265,7 @@ TEST_CASE("MakeQueueOverflowParams:dropped/coalesced 落位") {
 
 TEST_CASE("MakeInitializeResult:版本、平台、能力表(接线/留位分开报)") {
     const nlohmann::json result = MakeInitializeResult("0.99.0", "linux");
-    CHECK(result["protocolVersion"] == kProtocolVersion);
+    CHECK(result["protocolVersion"].get<std::string>() == kProtocolVersion);
     CHECK(result["lubancodeVersion"] == "0.99.0");
     CHECK(result["platform"] == "linux");
 

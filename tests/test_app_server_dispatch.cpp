@@ -74,7 +74,7 @@ TEST_CASE("握手三步:initialize -> initialized -> 业务放行") {
     // 第一条:initialize 的响应(parse 后逐字段查,不写死黄金报文)。
     const nlohmann::json init = ParseLine(io.written[0]);
     CHECK(init["id"] == 1);
-    CHECK(init["result"]["protocolVersion"] == kProtocolVersion);
+    CHECK(init["result"]["protocolVersion"].get<std::string>() == kProtocolVersion);
     CHECK(init["result"]["lubancodeVersion"] == "test");
     // 第二条:业务响应。
     const nlohmann::json echo = ParseLine(io.written[1]);
