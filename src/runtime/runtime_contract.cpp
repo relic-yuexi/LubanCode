@@ -86,6 +86,7 @@ std::string ToString(ServerEventKind kind) {
     switch (kind) {
         case ServerEventKind::ThreadStarted: return "thread.started";
         case ServerEventKind::ThreadUpdated: return "thread.updated";
+        case ServerEventKind::ThreadDeleted: return "thread.deleted";
         case ServerEventKind::TurnStarted: return "turn.started";
         case ServerEventKind::TurnCompleted: return "turn.completed";
         case ServerEventKind::ItemStarted: return "item.started";
@@ -137,6 +138,7 @@ std::string ToString(Outcome outcome) {
 bool ParseServerEventKind(const std::string& s, ServerEventKind& out) {
     if (s == "thread.started") { out = ServerEventKind::ThreadStarted; return true; }
     if (s == "thread.updated") { out = ServerEventKind::ThreadUpdated; return true; }
+    if (s == "thread.deleted") { out = ServerEventKind::ThreadDeleted; return true; }
     if (s == "turn.started") { out = ServerEventKind::TurnStarted; return true; }
     if (s == "turn.completed") { out = ServerEventKind::TurnCompleted; return true; }
     if (s == "item.started") { out = ServerEventKind::ItemStarted; return true; }
@@ -226,6 +228,7 @@ EventLayer LayerOf(const ServerEvent& event) {
     switch (event.kind) {
         case ServerEventKind::ThreadStarted:
         case ServerEventKind::ThreadUpdated:
+        case ServerEventKind::ThreadDeleted:
             return EventLayer::Thread;
         case ServerEventKind::TurnStarted:
         case ServerEventKind::TurnCompleted:
@@ -271,6 +274,9 @@ std::string ToString(ClientCommandKind kind) {
         case ClientCommandKind::ResumeThread: return "thread.resume";
         case ClientCommandKind::ListThreads: return "thread.list";
         case ClientCommandKind::ReadThread: return "thread.read";
+        case ClientCommandKind::ArchiveThread: return "thread.archive";
+        case ClientCommandKind::UnarchiveThread: return "thread.unarchive";
+        case ClientCommandKind::DeleteThread: return "thread.delete";
         case ClientCommandKind::StartTurn: return "turn.start";
         case ClientCommandKind::SteerTurn: return "turn.steer";
         case ClientCommandKind::InterruptTurn: return "turn.interrupt";
@@ -293,6 +299,9 @@ bool ParseClientCommandKind(const std::string& s, ClientCommandKind& out) {
     if (s == "thread.resume") { out = ClientCommandKind::ResumeThread; return true; }
     if (s == "thread.list") { out = ClientCommandKind::ListThreads; return true; }
     if (s == "thread.read") { out = ClientCommandKind::ReadThread; return true; }
+    if (s == "thread.archive") { out = ClientCommandKind::ArchiveThread; return true; }
+    if (s == "thread.unarchive") { out = ClientCommandKind::UnarchiveThread; return true; }
+    if (s == "thread.delete") { out = ClientCommandKind::DeleteThread; return true; }
     if (s == "turn.start") { out = ClientCommandKind::StartTurn; return true; }
     if (s == "turn.steer") { out = ClientCommandKind::SteerTurn; return true; }
     if (s == "turn.interrupt") { out = ClientCommandKind::InterruptTurn; return true; }

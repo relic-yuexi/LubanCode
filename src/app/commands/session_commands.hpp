@@ -10,11 +10,13 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include "agent/compact.hpp"
 #include "agent/context_budget.hpp"
 #include "agent/loop.hpp"
 #include "agent/session_store.hpp"
+#include "agent/session_lifecycle.hpp"
 #include "api/backend.hpp"
 #include "app/commands/command_flow.hpp"
 #include "config/config.hpp"
@@ -104,6 +106,43 @@ CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::ag
                                           lubancode::agent::BackgroundCallAccounting* accounting = nullptr);
 
 void PrintSessionsCommand(const std::string& sessions_dir, const std::string& args);
+
+// ---------------------------------------------------------------------------
+// 归档与永久删除(会话管理器单第四、五步)。搬与删全经
+// agent::SessionLifecycle——这里是接活的人:解析引用、列重名、走确认屏、
+// 报结果,不直接碰 filesystem。
+// ---------------------------------------------------------------------------
+
+// 引用解析 + 消歧的共用壳:candidates 归 lifecycle 出,标题由 SessionCatalog
+// 补;重名列短 id 叫用户点明,绝不猜一场。命中唯一时填 out_id/out_title。
+// 返回 false = 没解出(人话已打好,调用方直接印)。include_archived 版
+// 连归档场一起列候选(unarchive 的目标恰是归档场)。
+bool ResolveSessionReference(const std::string& sessions_dir, const std::string& ref,
+                             const std::function<std::string()>& stdin_line, std::string& out_id,
+                             std::string& out_title, std::string& out_message, bool& ambiguous);
+bool ResolveSessionReference(const std::string& sessions_dir, const std::string& ref,
+                             const std::function<std::string()>& stdin_line, bool include_archived,
+                             std::string& out_id, std::string& out_title, std::string& out_message,
+                             bool& ambiguous);
+
+// 顶层 `lubancode archive <SESSION>` / `unarchive <SESSION>` /
+// `delete <SESSION> [--force]` 的执行体。stdin_line:读一行输入的回调
+// (确认屏用;null = 非交互,delete 一律按缺确认拒绝)。force 只 delete 认。
+// 返回进程退出码(0 = 成功)。
+int HandleSessionManagementCommand(const std::string& sessions_dir, int kind, const std::string& ref,
+                                   bool force, const lubancode::cli::Theme& theme,
+                                   const std::function<std::string()>& stdin_line);
+
+// 会话内 /archive:只归档当前会话。先经 lifecycle 刷盘收柄再搬,成功后
+// 调用方退场(返回 true = 该退出交互会话)。
+bool ArchiveCurrentSession(const std::string& sessions_dir, lubancode::agent::SessionStore& store,
+                           const lubancode::cli::Theme& theme);
+
+// 会话内 /delete:只删当前会话。回合在跑/工具在飞/审批悬着时拒绝
+// (调用方先验);闲下来后走确认屏,再关柄、删文件。返回 true = 该退出。
+bool DeleteCurrentSession(const std::string& sessions_dir, lubancode::agent::SessionStore& store,
+                          const lubancode::agent::SessionMeta& meta, const std::string& title,
+                          const lubancode::cli::Theme& theme);
 
 
 // /resume 裸敲:本目录最近 20 场直接做成方向键菜单。显式编号/id 仍由

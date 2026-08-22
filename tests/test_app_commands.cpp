@@ -280,3 +280,132 @@ TEST_CASE("/send 与 /peerperm 状态账:off 档、空名册、权限档切换")
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
 }
+
+// ---------------------------------------------------------------------------
+// 会话管理命令(第四、五步):顶层 archive/unarchive/delete 的确认与消歧。
+// 搬删经 SessionLifecycle(单测见 test_session_lifecycle.cpp),这里钉
+// 接线层:确认屏(缺省取消/EOF 取消/y 才删)、--force、引用消歧、
+// /sessions archived 的只读列表。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::string CmdPathUtf8(const std::filesystem::path& p) {
+    const std::u8string u8 = p.u8string();
+    return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+}
+
+// 写一场带标题的会话(写完关柄)。返回文件路径。
+std::filesystem::path CmdWriteSession(const std::filesystem::path& dir, const std::string& id,
+                                      const std::string& title, const std::string& cwd) {
+    lubancode::agent::SessionMeta meta;
+    meta.wire = "anthropic";
+    meta.model = "m1";
+    meta.cwd = cwd;
+    meta.started_at = "2026-08-20 10:10:10";
+    lubancode::api::Message message;
+    message.role = lubancode::api::Role::User;
+    message.content.push_back(lubancode::api::TextBlock{"首句"});
+    const std::string content = lubancode::agent::SerializeSessionMeta(meta) + "\n" +
+                                lubancode::agent::SerializeSessionMessage(message, "2026-08-20 10:10:11") +
+                                "\n" +
+                                (title.empty() ? std::string()
+                                               : lubancode::agent::SerializeTitleEvent(title,
+                                                                                      "2026-08-20 10:10:12") +
+                                                     "\n");
+    const auto path = dir / (id + ".jsonl");
+    {  // MSVC:写完显式关柄
+        std::ofstream f(path, std::ios::binary);
+        f << content;
+    }
+    return path;
+}
+
+}  // namespace
+
+TEST_CASE("顶层 delete:确认屏 y 才删,空答/EOF/别答都取消不动盘") {
+    const auto dir = TempDir("delete_confirm");
+    const std::string sessions = CmdPathUtf8(dir);
+    const lubancode::cli::Theme theme;
+    const auto file = CmdWriteSession(dir, "20260820-101010-甲", "甲的场", "D:/房");
+    const std::string id = "20260820-101010-甲";
+
+    // 空答:取消,文件还在。
+    CHECK(HandleSessionManagementCommand(sessions, /*kind=delete=*/2, id, false, theme,
+                                         [] { return std::string(""); }) == 1);
+    CHECK(std::filesystem::exists(file));
+
+    // 别的答案(n):取消。
+    CHECK(HandleSessionManagementCommand(sessions, 2, id, false, theme,
+                                         [] { return std::string("n"); }) == 1);
+    CHECK(std::filesystem::exists(file));
+
+    // y:删掉。
+    CHECK(HandleSessionManagementCommand(sessions, 2, id, false, theme,
+                                         [] { return std::string("y"); }) == 0);
+    CHECK_FALSE(std::filesystem::exists(file));
+
+    // --force:跳过确认直接删(脚本路)。
+    const auto file_b = CmdWriteSession(dir, "20260821-111111-乙", "", "D:/房");
+    CHECK(HandleSessionManagementCommand(sessions, 2, "20260821-111111-乙", true, theme,
+                                         [] { return std::string(""); }) == 0);
+    CHECK_FALSE(std::filesystem::exists(file_b));
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("顶层 delete:引用按标题解,重名列短 id 拒绝,缺参报用法") {
+    const auto dir = TempDir("delete_ref");
+    const std::string sessions = CmdPathUtf8(dir);
+    const lubancode::cli::Theme theme;
+    CmdWriteSession(dir, "20260820-101010-甲", "唯一标题", "D:/房");
+
+    // 标题唯一命中。
+    CHECK(HandleSessionManagementCommand(sessions, 2, "唯一标题", true, theme, nullptr) == 0);
+
+    // 重名:两场同名,列短 id 拒绝(绝不猜一场)。
+    CmdWriteSession(dir, "20260821-111111-乙", "同名", "D:/房");
+    CmdWriteSession(dir, "20260822-121212-丙", "同名", "D:/房");
+    CHECK(HandleSessionManagementCommand(sessions, 2, "同名", true, theme, nullptr) == 1);
+    // 两场都还在(没连坐)。
+    CHECK(std::filesystem::exists(dir / "20260821-111111-乙.jsonl"));
+    CHECK(std::filesystem::exists(dir / "20260822-121212-丙.jsonl"));
+
+    // 认不出。
+    CHECK(HandleSessionManagementCommand(sessions, 2, "没这一场", true, theme, nullptr) == 1);
+
+    // 缺参:报用法退 1。
+    CHECK(HandleSessionManagementCommand(sessions, 2, "", true, theme, nullptr) == 1);
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("顶层 archive/unarchive 往返;归档后默认列表不见、archived 列表见") {
+    const auto dir = TempDir("archive_cli");
+    const std::string sessions = CmdPathUtf8(dir);
+    const lubancode::cli::Theme theme;
+    const auto file = CmdWriteSession(dir, "20260820-101010-甲", "甲的场", "D:/房");
+
+    // archive(标题命中)。
+    CHECK(HandleSessionManagementCommand(sessions, /*kind=archive=*/0, "甲的场", false, theme,
+                                         nullptr) == 0);
+    CHECK_FALSE(std::filesystem::exists(file));
+    CHECK(std::filesystem::exists(dir / "archive" / "20260820-101010-甲.jsonl"));
+
+    // ListSessions(默认列表/--continue 的口径)不掺归档:根里没有 .jsonl。
+    CHECK(lubancode::agent::ListSessions(sessions).empty());
+
+    // /sessions archived(只读入口)列得到。
+    PrintSessionsCommand(sessions, "archived");
+
+    // unarchive(完整 id)搬回根,老路又能列。
+    CHECK(HandleSessionManagementCommand(sessions, /*kind=unarchive=*/1, "20260820-101010-甲",
+                                         false, theme, nullptr) == 0);
+    CHECK(std::filesystem::exists(file));
+    CHECK(lubancode::agent::ListSessions(sessions).size() == 1);
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}

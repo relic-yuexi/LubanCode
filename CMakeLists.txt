@@ -397,6 +397,8 @@ add_library(lubancode_engine STATIC
   src/agent/microcompact.cpp
   src/agent/session_store.cpp
   src/agent/session_catalog.cpp
+  # 会话管理器单第四五步:SessionLifecycle 搬与删的唯一收口(纯磁盘薄壳)。
+  src/agent/session_lifecycle.cpp
   src/agent/workflow_recorder.cpp
   src/agent/skill_drafter.cpp
   # engine 引用的四个 cli 叶子(零标准流、零终端依赖,tools/config 都吃):
@@ -431,6 +433,8 @@ endif()
 add_library(lubancode_runtime STATIC
   # 显示系统剥离单第一步:runtime 合同(纯类型 + 序列化,零 cli/app 依赖)。
   src/runtime/runtime_contract.cpp
+  # 会话管理器单第六步:会话查询/搬删的 runtime 侧命令服务(合同消费方)。
+  src/runtime/session_command_service.cpp
   # 第三步:TurnRuntime 纯逻辑核(权限/hooks/usage/取消),cli/app 零依赖。
   src/runtime/turn_runtime.cpp
   # 第五步:TurnItem 领域条目 + 中立 diff 行表(diff 计算移出 ToolDisplay)。
@@ -486,6 +490,19 @@ add_library(lubancode_core STATIC
   src/cli/latex_math.cpp
   src/cli/diff.cpp
   src/cli/diff_syntax.cpp
+  # Workflows 自然语言编排单:定义/解析/校验/目录/图渲染,纯逻辑。
+  src/workflow/definition.cpp
+  src/workflow/parser.cpp
+  src/workflow/catalog.cpp
+  src/workflow/validator.cpp
+  src/workflow/graph_view.cpp
+  src/workflow/store.cpp
+  src/workflow/journal.cpp
+  src/workflow/runtime.cpp
+  src/workflow/host_executors.cpp
+  src/workflow/compiler.cpp
+  src/workflow/planner.cpp
+  src/workflow/frontend.cpp
 )
 target_include_directories(lubancode_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -527,6 +544,7 @@ add_library(lubancode_app STATIC
   src/app/commands/hook_commands.cpp
   src/app/commands/peer_commands.cpp
   src/app/commands/doctor_commands.cpp
+  src/app/commands/workflow_commands.cpp
   src/app/interactive_session.cpp
   src/app/one_shot.cpp
   src/app/cli_options.cpp

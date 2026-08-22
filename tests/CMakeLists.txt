@@ -108,8 +108,15 @@ add_executable(lubancode_tests
   # scope/搜索/分页/坏档/空表/指纹缓存)。
   test_session_catalog.cpp
   # 第二步:SessionPicker 纯逻辑(焦点轮换/搜索/筛选排序切换/翻页边界/
-  # 选中保持/视口窗口账/渲染帧/空态/相对时间/百分比)。
+  # 选中保持/视口窗口账/渲染帧/空态/相对时间/百分比);第三步:三种查看态
+  # (Ctrl+T 转录浮层/Ctrl+E 展开/Ctrl+O 紧凑舒展)。
   test_session_picker.cpp
+  # 第四五步:SessionLifecycle 搬与删的唯一收口(引用解析/archive 字节
+  # 原样/幂等/目标拒绝/路径校验/开句柄先关/归档视图不掺默认列表)。
+  test_session_lifecycle.cpp
+  # 第六步:SessionCommandService(runtime 侧命令服务,typed command 收口)
+  # 与合同枚举往返(thread.archive 等 + thread.deleted)。
+  test_session_command_service.cpp
   test_prompt_files.cpp
   test_project_instructions.cpp
   test_project_memory.cpp
@@ -206,6 +213,24 @@ add_executable(lubancode_tests
   # 混日志/坏 JSON/call_id 不合/超时/ESC/非零退出/stderr 塞满/输出超限,
   # 缺 Python 整文件 SKIP。
   test_plugin_process.cpp
+  # Workflows 自然语言编排单第 1 批:定义/解析 round-trip/内容 hash/
+  # catalog 两级扫描与遮蔽/校验器全错类/图渲染,纯逻辑。
+  test_workflow_definition.cpp
+  # 第 2 批:Store/resolver、状态机迁移表、RunJournal 落盘与恢复、顺序图
+  # 最小闭环(fake executor/fake clock)、重试/取消/预算/fallback 边。
+  test_workflow_runtime.cpp
+  # 第 3 批:parallel/join 五策略、稳定汇合顺序、并发帽、map/foreach/
+  # reduce、switch 条件选路、并行取消传播(论文四路假工具)。
+  test_workflow_parallel.cpp
+  # 第 4 批:宿主执行器(真 ToolRegistry/假 backend/即时 broker)、
+  # subflow 结果映射与错误隔离、journal 断点恢复。
+  test_workflow_agents.cpp
+  # 第 5 批:Draf 解析(杜撰工具/明文 secret 拦截)/追问计算/预览/
+  # staging+rename 原子安装/回滚件/enable/remove/命令与参数解析。
+  test_workflow_compiler.cpp
+  # 第 6 批:受约束 GraphPatch(模板集/allowlist/append-only)、风险
+  # 评定、WorkflowRunSnapshot 与增量事件(重连补账)。
+  test_workflow_planner.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 # 依赖守门(显示系统剥离单第八步):测试要现扫源码树,把源码根递进去。
