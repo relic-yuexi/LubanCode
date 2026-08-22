@@ -158,8 +158,8 @@ private:
 
     // 会话档目录(选项里给了才有)。
     std::string sessions_dir_;
-    // 回合计数(turnId 派生用)。
-    std::atomic<std::uint64_t> turn_counter_{0};
+    // turnId/itemId 派生:P9 起统一走 runtime::ProcessIdAuthority(进程级
+    // 单份,见 runtime/id_authority.hpp),这里的回合计数账已拆。
 };
 
 }  // namespace lubancode::app_server

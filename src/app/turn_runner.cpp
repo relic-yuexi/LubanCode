@@ -500,7 +500,7 @@ bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
 // 改写状态、管道模式的 [工具]/[工具完成] 稳定纯文本),todo_state 也归它
 // 持有。回调层只管把事件原样转进去。
 lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::string>& always_allowed_tools,
-                                            const lubancode::cli::Theme& theme, UsageStats& usage_stats,
+                                            const lubancode::cli::Theme& theme, lubancode::runtime::TurnUsageStats& usage_stats,
                                             lubancode::cli::ContextTracker& context_tracker,
                                             lubancode::tools::ToolRegistry& registry,
                                             lubancode::hooks::HookDispatcher* hook_dispatcher,
@@ -841,7 +841,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                        const std::vector<std::string>& deny_commands,
                        lubancode::tools::AgentTool* completion_agent,
                        lubancode::agent::WorkflowRecorder* recorder, bool silent,
-                       UsageStats* usage_out) {
+                       lubancode::runtime::TurnUsageStats* usage_out) {
     auto prepared_input = lubancode::cli::PrepareImageInput(user_input);
     if (!prepared_input.has_value()) {
         std::cerr << theme.error << tr("error.prefix") << ImageInputErrorText(prepared_input.error())
@@ -886,7 +886,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     // (UserPromptSubmit 与背景回流声明已在上面 runtime::ApplyUserPromptSubmit
     // 一口收账,这里不再另发一遍。)
 
-    UsageStats usage_stats;
+    lubancode::runtime::TurnUsageStats usage_stats;
     // 轮级核(P3):cancel 旗挪进 runtime::TurnRuntime——监听线程写
     // (request_interrupt)、Run 线程读(interrupted),acquire/release 语义
     // 原文照搬。ToolDisplay/BuildCallbacks/loop.Run 收它的地址,行为与

@@ -8,13 +8,15 @@
 
 #include <doctest/doctest.h>
 
-#include <iostream>
 #include <sstream>
+#include <vector>
 
 #include "api/anthropic/client.hpp"
 #include "api/types.hpp"
+#include "platform/log_sink.hpp"
 
 using namespace lubancode::api;
+namespace platform = lubancode::platform;
 using lubancode::api::anthropic::BuildRequestJson;
 
 TEST_CASE("reasoning_effort 为空串时不写 thinking 字段") {
@@ -110,19 +112,31 @@ TEST_CASE("reasoning_effort 档位名大小写不敏感") {
     CHECK(body.at("thinking").at("type") == "enabled");
 }
 
-TEST_CASE("reasoning_effort 是映射表之外的字符串:不写 thinking 字段,stderr 打警告") {
-    std::ostringstream captured;
-    std::streambuf* old_buf = std::cerr.rdbuf(captured.rdbuf());
+TEST_CASE("reasoning_effort 是映射表之外的字符串:不写 thinking 字段,LogSink 打警告") {
+    // 显示系统剥离单第八步:anthropic 的档位诊断改投 platform::LogSink,
+    // 不再裸写 stderr(engine 守门:engine 层零标准流)。这里挂一只录音
+    // 回调断言同一条诊断仍在。
+    std::vector<platform::LogRecord> logs;
+    platform::LogSink::Instance().SetWriter([&logs](const platform::LogRecord& record) {
+        logs.push_back(record);
+    });
 
     Request request;
     request.reasoning_effort = "extreme";
     const auto body = BuildRequestJson(request);
 
-    std::cerr.rdbuf(old_buf);
+    platform::LogSink::Instance().SetWriter(nullptr);
 
     CHECK_FALSE(body.contains("thinking"));
-    CHECK(captured.str().find("extreme") != std::string::npos);
-    CHECK(captured.str().find("警告") != std::string::npos);
+    REQUIRE_FALSE(logs.empty());
+    bool seen = false;
+    for (const auto& record : logs) {
+        if (record.message.find("extreme") != std::string::npos &&
+            record.message.find("映射") != std::string::npos) {
+            seen = true;
+        }
+    }
+    CHECK(seen);
 }
 
 // ---------------------------------------------------------------------------

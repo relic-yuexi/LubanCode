@@ -1,6 +1,7 @@
-// InteractiveSession:交互会话主循环的真对象。原先 main.cpp 的
-// InteractiveLoop 里那一把局部变量与大 lambda,全收成这里的成员与方法;
-// 头文件(interactive_session.hpp)只露 InteractiveSessionOptions 与
+// TerminalSessionController(原 InteractiveSession,显示系统剥离单第六步
+// 更名):交互会话主循环的终端控制器。原先 main.cpp 的 InteractiveLoop
+// 里那一把局部变量与大 lambda,全收成这里的成员与方法;头文件
+// (interactive_session.hpp)只露 InteractiveSessionOptions 与
 // RunInteractiveSession()。
 //
 // 寿命规矩写在成员声明旁:拥有者先声明(后析构),借用者后声明(先析
@@ -67,6 +68,8 @@
 #include "app/commands/workflow_commands.hpp"
 #include "workflow/host_executors.hpp"
 #include "app/version.hpp"
+#include "runtime/command_service.hpp"
+#include "runtime/session_runtime.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/diff.hpp"
@@ -288,13 +291,19 @@ std::string AgentStateWord(lubancode::tools::AgentTaskState state, int steps_use
 // 一场交互会话:整场可变状态按所有权收成成员。构造 = 原先
 // InteractiveLoop 进 while 之前的全部装配;Run() = 主循环;析构 = 原先
 // 函数尾的手工收尾(摘收件点、停 peer、摘 UI 回调),异常退场同路。
-class InteractiveSession {
+//
+// P6(显示系统剥离单):会话的"不碰画面"那半账本已搬去
+// runtime::SessionRuntime(存档账/权限账/thread 身份/事件接线),本类
+// 持一份并按引用续用老名字;存档成员(session_store/session_meta/
+// session_title/...)以引用别名指向 runtime 那份,寿命由 runtime 成员的
+// 声明位保住。工具栈/backend 栈/peer/面板仍住本类,后续批次再搬。
+class TerminalSessionController {
 public:
-    explicit InteractiveSession(const InteractiveSessionOptions& options);
-    ~InteractiveSession();
+    explicit TerminalSessionController(const InteractiveSessionOptions& options);
+    ~TerminalSessionController();
 
-    InteractiveSession(const InteractiveSession&) = delete;
-    InteractiveSession& operator=(const InteractiveSession&) = delete;
+    TerminalSessionController(const TerminalSessionController&) = delete;
+    TerminalSessionController& operator=(const TerminalSessionController&) = delete;
 
     // 主循环:读一行、分派一行,exit/quit 或 EOF 返回。
     void Run();
@@ -492,21 +501,27 @@ private:
     std::function<void()> reapply_peer_inbox;  // loop 重建后重灌收件点
     // loop 持 index_backend_/registry 引用,声明在后 = 先死,引用不悬垂。
     std::optional<lubancode::agent::AgentLoop> loop;
-    std::set<std::string> always_allowed_tools;
+    // P6:本体在 SessionRuntime.always_allowed(),这里引用别名(按 a 落
+    // 进来的同一本账,远端审批 accept_for_session 也写它)。
+    std::set<std::string>& always_allowed_tools;
     std::optional<std::string> config_file_path;  // /model、/language 可写回配置文件路径
 
-    // ---- 会话存档 ----
+    // ---- 会话存档与权限账(P6:本体在 runtime::SessionRuntime,这里引用) ----
+    // runtime 声明在前(先析构引用别名,本体后析构),引用一律指它。
+    lubancode::runtime::SessionRuntime session_runtime_;
     std::string wire_str;
-    const std::string sessions_dir;
-    lubancode::agent::SessionStore session_store;
-    lubancode::agent::SessionMeta session_meta;  // /export 用;Begin/resume 时填
+    const std::string& sessions_dir;
+    lubancode::agent::SessionStore& session_store;
+    lubancode::agent::SessionMeta& session_meta;  // /export 用;Begin/resume 时填
     std::string session_start_ts;
-    std::size_t persisted_count = 0;    // history 里前多少条已经落过盘
-    int session_compact_epoch = 0;      // 本场第几次压缩(v2 事件记序;resume 接旧账)
-    bool session_store_broken = false;  // 建档失败过,别每轮都再撞一次
-    std::string session_title;          // /title 设的标题;resume 时取存档里最后一条
-    bool session_title_pending = false;  // 建档前设了标题,建档成功后补写事件行
+    // session_meta 的构造绑定(引用成员):在初始化列表里接 runtime 那份。
+    std::size_t& persisted_count;       // history 里前多少条已经落过盘
+    int& session_compact_epoch;         // 本场第几次压缩(v2 事件记序;resume 接旧账)
+    bool& session_store_broken;         // 建档失败过,别每轮都再撞一次
+    std::string& session_title;         // /title 设的标题;resume 时取存档里最后一条
+    bool& session_title_pending;        // 建档前设了标题,建档成功后补写事件行
     bool session_title_auto_attempted = false;  // cheap 起名只试一次,失败不追着重试
+    // session_meta 本体在 runtime;引用别名绑过去(构造列表里)。
     // L2 microcompact(第三期)的迟滞活账:压完一趟后冷区字节再涨五成才压下一趟。
     lubancode::agent::MicrocompactHysteresis microcompact_hysteresis;
     // 最近一次 compact 的台账(第四期 /context"最近一次 compact 所用角色、
@@ -537,31 +552,31 @@ private:
     const lubancode::config::SearchConfig detached_search_;
 };
 
-lubancode::tools::ToolRegistry& InteractiveSession::registry() { return tool_runtime_->main_registry(); }
-lubancode::tools::ToolRegistry& InteractiveSession::sub_registry() { return tool_runtime_->sub_registry(); }
-lubancode::tools::AgentTool* InteractiveSession::session_agent_tool() { return tool_runtime_->agent_tool(); }
-const std::shared_ptr<lubancode::tools::TodoListState>& InteractiveSession::todo_state() {
+lubancode::tools::ToolRegistry& TerminalSessionController::registry() { return tool_runtime_->main_registry(); }
+lubancode::tools::ToolRegistry& TerminalSessionController::sub_registry() { return tool_runtime_->sub_registry(); }
+lubancode::tools::AgentTool* TerminalSessionController::session_agent_tool() { return tool_runtime_->agent_tool(); }
+const std::shared_ptr<lubancode::tools::TodoListState>& TerminalSessionController::todo_state() {
     return tool_runtime_->todo_state();
 }
-const std::shared_ptr<std::set<std::string>>& InteractiveSession::loaded_tools() {
+const std::shared_ptr<std::set<std::string>>& TerminalSessionController::loaded_tools() {
     return tool_runtime_->loaded_tools();
 }
-const std::vector<McpServerRuntime>& InteractiveSession::mcp_servers() { return tool_runtime_->mcp_servers(); }
-std::optional<lubancode::lsp::Manager>& InteractiveSession::lsp_manager() { return tool_runtime_->lsp_manager(); }
-const std::vector<PluginMountInfo>& InteractiveSession::plugin_mounted() {
+const std::vector<McpServerRuntime>& TerminalSessionController::mcp_servers() { return tool_runtime_->mcp_servers(); }
+std::optional<lubancode::lsp::Manager>& TerminalSessionController::lsp_manager() { return tool_runtime_->lsp_manager(); }
+const std::vector<PluginMountInfo>& TerminalSessionController::plugin_mounted() {
     return tool_runtime_->plugin_mounted();
 }
-const std::vector<std::string>& InteractiveSession::plugin_warnings() {
+const std::vector<std::string>& TerminalSessionController::plugin_warnings() {
     return tool_runtime_->plugin_warnings();
 }
-const std::function<bool(const lubancode::tools::Tool&)>& InteractiveSession::main_tool_filter() {
+const std::function<bool(const lubancode::tools::Tool&)>& TerminalSessionController::main_tool_filter() {
     return tool_runtime_->main_tool_filter();
 }
-const std::function<bool(const lubancode::tools::Tool&)>& InteractiveSession::sub_tool_filter() {
+const std::function<bool(const lubancode::tools::Tool&)>& TerminalSessionController::sub_tool_filter() {
     return tool_runtime_->sub_tool_filter();
 }
 
-lubancode::app::ToolRuntime::Options InteractiveSession::MakeRuntimeOptions() {
+lubancode::app::ToolRuntime::Options TerminalSessionController::MakeRuntimeOptions() {
     lubancode::app::ToolRuntime::Options runtime_options;
     runtime_options.with_explore = true;
     runtime_options.with_ask_user = spinner_enabled;
@@ -590,7 +605,7 @@ lubancode::app::ToolRuntime::Options InteractiveSession::MakeRuntimeOptions() {
     return runtime_options;
 }
 
-InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
+TerminalSessionController::TerminalSessionController(const InteractiveSessionOptions& options)
     : opts_(options),
       config_result_(options.config_result),
       config(config_result_.config),
@@ -627,10 +642,27 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
       wrapped_backend(instructions_backend, theme, spinner_enabled),
       context_tracker(config.context_window_tokens),
       config_file_path(config_result_.config_file_path),
+      always_allowed_tools(session_runtime_.always_allowed()),
+      // P6:存档账本体在 SessionRuntime;引用别名在此初始化列表里绑过去
+      //(wire_str 先落值,runtime 的 Options 要吃它)。
+      session_runtime_([&] {
+          lubancode::runtime::SessionRuntime::Options runtime_options;
+          runtime_options.sessions_dir =
+              home_lubancode.has_value() ? (*home_lubancode + "/sessions") : std::string();
+          runtime_options.wire_name = lubancode::config::ProviderWireName(config.wire);
+          runtime_options.start_ts = lubancode::agent::NowIdTimestamp();
+          return runtime_options;
+      }()),
       wire_str(lubancode::config::ProviderWireName(config.wire)),
-      sessions_dir(home_lubancode.has_value() ? (*home_lubancode + "/sessions") : std::string()),
-      session_store(sessions_dir),
-      session_start_ts(lubancode::agent::NowIdTimestamp()),
+      sessions_dir(session_runtime_.sessions_dir()),
+      session_store(session_runtime_.store()),
+      session_meta(session_runtime_.meta()),
+      session_start_ts(session_runtime_.start_ts()),
+      persisted_count(session_runtime_.persisted_count()),
+      session_compact_epoch(session_runtime_.compact_epoch()),
+      session_store_broken(session_runtime_.store_broken()),
+      session_title(session_runtime_.title()),
+      session_title_pending(session_runtime_.title_pending()),
       recordings_root(home_lubancode.has_value() ? lubancode::tools::Utf8ToPath(*home_lubancode) / "recordings"
                                                  : std::filesystem::path()),
       active_provider_write_path(
@@ -1017,7 +1049,7 @@ InteractiveSession::InteractiveSession(const InteractiveSessionOptions& options)
     }
 }
 
-InteractiveSession::~InteractiveSession() {
+TerminalSessionController::~TerminalSessionController() {
     // 定向介入收场(规格:退出/清场不能无声遗失):停全部、报未送达。任务
     // 线程由 AgentTool 析构统一 join(此刻 tool_runtime_ 还活着,先于成员析构)。
     // 析构走"退场"档:排队账不倒(已落档,resume 接得回),只提示去处。
@@ -1046,7 +1078,7 @@ InteractiveSession::~InteractiveSession() {
 // 后台子代理面板:轻量全量列表(0.28.x 起不截 8 只,详情另走 BuildAgentTaskDetail;
 // 统一台账后前台任务也在同一份列表里)。摘要行口径沿用 agent_status.* 那套
 // i18n,空闲与流式两处 painter 一个格式。
-std::vector<lubancode::cli::AgentPanelEntry> InteractiveSession::BuildAgentPanelEntries() {
+std::vector<lubancode::cli::AgentPanelEntry> TerminalSessionController::BuildAgentPanelEntries() {
     std::vector<lubancode::cli::AgentPanelEntry> out;
     lubancode::tools::AgentTool* agent_tool = session_agent_tool();
     if (agent_tool == nullptr) {
@@ -1111,7 +1143,7 @@ std::vector<lubancode::cli::AgentPanelEntry> InteractiveSession::BuildAgentPanel
 // SubTool/Thinking 条目(同一套折叠/宽字符/截断规矩),绝不在这里手搓
 // 第二套显示器。任务不在台账(被清理/演示假代理)时给一行占位;旧版派出
 // 的任务没有事件账,退铺结论并明说,不拿"任务说明+工具流水"冒充会话。
-std::vector<std::string> InteractiveSession::BuildAgentTaskTranscriptLines(int task_id, int width) {
+std::vector<std::string> TerminalSessionController::BuildAgentTaskTranscriptLines(int task_id, int width) {
     std::vector<std::string> lines;
     lubancode::tools::AgentTool* agent_tool = session_agent_tool();
     std::optional<lubancode::tools::AgentTaskSnapshot> snapshot;
@@ -1359,7 +1391,7 @@ std::vector<std::string> InteractiveSession::BuildAgentTaskTranscriptLines(int t
 // 环一直活着、键都进了编辑器,但帧没了、chrome 锚点在屏外,回显画在用户
 // 看不见的地方。驱动器第四幕"退场后键入立即回显 + /exit 退出码 0"钉死
 // 这一条。
-void InteractiveSession::PrintViewedTranscript(int viewed_task_id, int tail_rows) {
+void TerminalSessionController::PrintViewedTranscript(int viewed_task_id, int tail_rows) {
     std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
     lubancode::cli::EraseStreamFooterLocked();
     const int width = lubancode::cli::DetectConsoleWidth().value_or(80);
@@ -1406,7 +1438,7 @@ void InteractiveSession::PrintViewedTranscript(int viewed_task_id, int tail_rows
 }
 
 // 聚焦查看返回时的"简化重画":最近几条紧凑摘要(焦点标记照带)。
-void InteractiveSession::PrintRecentItems(std::size_t count) {
+void TerminalSessionController::PrintRecentItems(std::size_t count) {
     const int width = lubancode::cli::DetectConsoleWidth().value_or(80);
     const std::size_t from = transcript.size() > count ? transcript.size() - count : 0;
     for (std::size_t i = from; i < transcript.size(); ++i) {
@@ -1415,7 +1447,7 @@ void InteractiveSession::PrintRecentItems(std::size_t count) {
     }
 }
 
-bool InteractiveSession::HandleTranscriptUi(lubancode::cli::UiKeyAction action) {
+bool TerminalSessionController::HandleTranscriptUi(lubancode::cli::UiKeyAction action) {
     namespace cli = lubancode::cli;
     const int width = cli::DetectConsoleWidth().value_or(80);
     const int count = static_cast<int>(transcript.size());
@@ -1636,7 +1668,7 @@ bool InteractiveSession::HandleTranscriptUi(lubancode::cli::UiKeyAction action) 
     return false;
 }
 
-lubancode::tools::DetachedAgentBackend InteractiveSession::BuildDetachedBackend() const {
+lubancode::tools::DetachedAgentBackend TerminalSessionController::BuildDetachedBackend() const {
     lubancode::tools::DetachedAgentBackend out;
     out.backend = BuildBackend(config);
     out.model = *current_model;
@@ -1649,11 +1681,11 @@ lubancode::tools::DetachedAgentBackend InteractiveSession::BuildDetachedBackend(
     return out;
 }
 
-std::unique_ptr<lubancode::tools::ToolRegistry> InteractiveSession::BuildDetachedRegistry() const {
+std::unique_ptr<lubancode::tools::ToolRegistry> TerminalSessionController::BuildDetachedRegistry() const {
     return std::make_unique<lubancode::tools::ToolRegistry>(BuildBaseToolRegistry(detached_skills_, detached_search_));
 }
 
-void InteractiveSession::RebuildLoop(bool preserve_history) {
+void TerminalSessionController::RebuildLoop(bool preserve_history) {
     // 每次真正重建会话都重读项目指令。用户手改 AGENTS.md 后敲 /clear，
     // 不必退出进程；provider/技能触发的保历史重建也顺手吃到新内容。
     project_instructions = lubancode::config::LoadProjectInstructions(std::filesystem::current_path()).content;
@@ -1710,7 +1742,7 @@ void InteractiveSession::RebuildLoop(bool preserve_history) {
     }
 }
 
-void InteractiveSession::RefreshSkills() {
+void TerminalSessionController::RefreshSkills() {
     skills = lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir, official_skills_dir);
     skills_segment = lubancode::tools::BuildSkillsPromptSegment(skills);
     if (auto* tool = dynamic_cast<lubancode::tools::SkillTool*>(registry().Find("skill")); tool != nullptr) {
@@ -1726,7 +1758,7 @@ void InteractiveSession::RefreshSkills() {
     RebuildLoop(/*preserve_history=*/true);
 }
 
-void InteractiveSession::RefreshProjectInstructions() {
+void TerminalSessionController::RefreshProjectInstructions() {
     RebuildLoop(/*preserve_history=*/true);
 }
 
@@ -1734,40 +1766,31 @@ void InteractiveSession::RefreshProjectInstructions() {
 // session id 开张,超长结果在第一轮请求里就得能落盘,不能等回合收尾。首条
 // 文本做 slug;建档失败置 session_store_broken 照旧拦落盘,会话本身照跑。
 // 建档成功顺手开仓(开不成只告警:超长结果退回内存全文,不产生假引用)。
-bool InteractiveSession::EnsureSessionBegun(const std::string& first_text) {
-    if (session_store.active() || sessions_dir.empty() || session_store_broken) {
-        return session_store.active();
-    }
-    session_meta = lubancode::agent::SessionMeta{};
-    session_meta.wire = wire_str;
-    session_meta.model = *current_model;
-    session_meta.cwd = CurrentDirUtf8();
-    session_meta.started_at = lubancode::agent::NowTimestamp();
-    const std::string session_id = lubancode::agent::MakeSessionId(session_start_ts, first_text);
-    if (!session_store.Begin(session_meta, session_id)) {
-        session_store_broken = true;
+bool TerminalSessionController::EnsureSessionBegun(const std::string& first_text) {
+    // P6:建档本体在 SessionRuntime(错误不再自己打印,由这边按结果印)。
+    const auto result =
+        session_runtime_.EnsureBegun(first_text, *current_model, CurrentDirUtf8());
+    if (result == lubancode::runtime::SessionBeginResult::Failed) {
         std::cout << theme.error << trf("session.create_failed", sessions_dir) << theme.reset << "\n";
         return false;
+    }
+    if (result != lubancode::runtime::SessionBeginResult::Begun) {
+        return session_store.active();  // Active/Disabled:照旧语义
     }
     // hooks 上下文补真 session id 与转录路径(建档这一刻才齐)。
     if (lubancode::app::HookRuntime() != nullptr) {
         lubancode::hooks::HookContext hook_context = lubancode::app::HookRuntime()->context();
-        hook_context.session_id = session_id;
+        hook_context.session_id = session_store.session_id();
         hook_context.transcript_path = session_store.file_path();
         lubancode::app::UpdateHookRuntimeContext(hook_context);
     }
-    // 建档前 /title 设过标题:现在有文件了,把事件行补上。
-    if (session_title_pending && !session_title.empty()) {
-        session_store.AppendTitleEvent(session_title);
-    }
-    session_title_pending = false;
     OpenArtifactStore();
     return true;
 }
 
 // 开仓:<sessions_dir>/<session-id>/context(与 <session-id>.jsonl 并排,
 // /sessions 只扫 *.jsonl,互不干扰)。开不成只告警——仓是加层,不是依赖。
-void InteractiveSession::OpenArtifactStore() {
+void TerminalSessionController::OpenArtifactStore() {
     if (sessions_dir.empty() || !session_store.active()) {
         return;
     }
@@ -1780,18 +1803,22 @@ void InteractiveSession::OpenArtifactStore() {
 // 把 history 里 persisted_count 之后的消息逐条追加落盘(append+flush,
 // 崩溃安全)。history 被 ReplaceHistory 换短(/compact)的场合由调用处
 // 先把 persisted_count 收到新长度,这里只管"只增不减"的常态。
-void InteractiveSession::PersistNewMessages() {
-    if (sessions_dir.empty() || session_store_broken) {
+void TerminalSessionController::PersistNewMessages() {
+    // P6:增量落盘本体在 SessionRuntime(只增不减、兜底建档同旧路)。
+    // store 没开张时的兜底建档也在它那头(首条用户文本抽出来做 slug);
+    // 这边只在"Begun 且还没 active"的窗口补一句给用户的话与 hooks 上下文。
+    const auto result = session_runtime_.PersistNew(loop->History(), *current_model, CurrentDirUtf8());
+    if (result == lubancode::runtime::SessionPersistResult::BrokenNow) {
+        std::cout << theme.error << tr("session.append_failed") << theme.reset << "\n";
         return;
     }
-    const auto& history = loop->History();
-    if (history.size() <= persisted_count) {
-        return;
-    }
-    if (!session_store.active()) {
-        // 首条用户消息的第一段文本做 slug。
+    if (result == lubancode::runtime::SessionPersistResult::Nothing && !session_store.active() &&
+        !sessions_dir.empty() && !session_store_broken && !loop->History().empty()) {
+        // 落盘账没动而 store 仍没开张:按旧兜底路走一遍建档(给 hooks 与
+        // 仓一齐的机会)。PersistNew 里 EnsureBegun 只填账不碰 hooks,这里
+        // 补上与 EnsureSessionBegun 相同的那段。
         std::string first_text;
-        for (const auto& message : history) {
+        for (const auto& message : loop->History()) {
             if (message.role != lubancode::api::Role::User) {
                 continue;
             }
@@ -1807,24 +1834,14 @@ void InteractiveSession::PersistNewMessages() {
             }
             break;
         }
-        // 建档提前到发轮之前(RunUserTurn)已办;这里是兜底(peer 轮等
-        // 不经 RunUserTurn 的路径)。
-        if (!EnsureSessionBegun(first_text)) {
-            return;
+        if (!first_text.empty()) {
+            EnsureSessionBegun(first_text);
         }
     }
-    for (std::size_t i = persisted_count; i < history.size(); ++i) {
-        if (!session_store.AppendMessage(history[i])) {
-            session_store_broken = true;
-            std::cout << theme.error << tr("session.append_failed") << theme.reset << "\n";
-            return;
-        }
-    }
-    persisted_count = history.size();
 }
 
 // 把信箱里的信搬到轮内收件池(held 的另记,由空闲路径弹确认)。
-void InteractiveSession::RefillPeerPool() {
+void TerminalSessionController::RefillPeerPool() {
     for (auto& incoming : peer_runtime->DrainIncoming()) {
         if (incoming.held) {
             peer_held_stash.push_back(std::move(incoming.envelope));
@@ -1834,7 +1851,7 @@ void InteractiveSession::RefillPeerPool() {
     }
 }
 
-void InteractiveSession::CollectPeerMessages() {
+void TerminalSessionController::CollectPeerMessages() {
     if (!peer_started) {
         return;
     }
@@ -1862,7 +1879,7 @@ void InteractiveSession::CollectPeerMessages() {
 // silent:查看态下的后台回流轮用——轮子照常跑(消化/输出/usage),但所有
 // 输出只进 transcript 台账不上屏,用户正看的子代理视口零扰动(回流单规格
 // 第一节;语义细节见 turn_runner.hpp RunTurn 的 silent 注释)。
-void InteractiveSession::RunPeerTurn(const std::string& text, bool silent, memory::QueryOrigin origin) {
+void TerminalSessionController::RunPeerTurn(const std::string& text, bool silent, memory::QueryOrigin origin) {
     if (peer_started) {
         peer_runtime->SetStatus("busy");
     }
@@ -1901,7 +1918,7 @@ void InteractiveSession::RunPeerTurn(const std::string& text, bool silent, memor
 // 收尾、下一次请求未发"的边界收信)。终态明确拒收:标 TargetGone 留在
 // 队列原位(屏上带"[目标已结束]"标记),等用户取回改目标或删掉,不改投
 // main。只在主线程调(会话泵/轮次边界)。
-void InteractiveSession::PumpSteeringToSubagents() {
+void TerminalSessionController::PumpSteeringToSubagents() {
     bool queue_changed = false;
     for (const auto& item : SessionSteeringQueue().Snapshot()) {
         if (item.target.kind != lubancode::cli::MessageTarget::Kind::Subagent ||
@@ -1935,7 +1952,7 @@ void InteractiveSession::PumpSteeringToSubagents() {
 // 排队账 -> 存档快照事件行(路径二)。落不了档(没建档/写坏)只安静退:
 // 存档从来是加层,坏不到会话本体。TargetGone/Failed 的条目也一并进快照——
 // 它们是"等用户处置"的活账,resume 后还该看得见。
-void InteractiveSession::PersistSteeringQueue() {
+void TerminalSessionController::PersistSteeringQueue() {
     if (sessions_dir.empty() || session_store_broken) {
         return;
     }
@@ -1971,7 +1988,7 @@ void InteractiveSession::PersistSteeringQueue() {
 
 // 存档快照 -> 会话层队列(resume 路)。RestoreFromArchive 只在队列还空着时
 // 收(本场自己还没排队),运行中的账不给旧档盖。
-void InteractiveSession::RestoreSteeringQueueFrom(
+void TerminalSessionController::RestoreSteeringQueueFrom(
     const std::vector<lubancode::agent::ArchivedQueueItem>& items) {
     if (items.empty()) {
         return;
@@ -1995,7 +2012,7 @@ void InteractiveSession::RestoreSteeringQueueFrom(
 // 给场次,这里倒序遍历(整体旧→新,BuildHistorySearchIndex 认这个序);
 // 每场内部 ExtractPromptHistory 本就是旧→新。当前会话若还没建档(首条
 // 消息未落地),活 history 里的用户提问也并进来——同一只读规则。
-lubancode::cli::PromptHistoryDataset InteractiveSession::CollectPromptHistory() {
+lubancode::cli::PromptHistoryDataset TerminalSessionController::CollectPromptHistory() {
     lubancode::cli::PromptHistoryDataset data;
     data.current_session_id = session_store.session_id();
     data.current_project_key = lubancode::agent::NormalizePathForCompare(CurrentDirUtf8());
@@ -2054,7 +2071,7 @@ lubancode::cli::PromptHistoryDataset InteractiveSession::CollectPromptHistory() 
 // 这个命令只在回合收口、提示符回来之后才会被分派——不存在"流式中"的调
 // 用点。默认复制原始 Markdown(history 里的 TextBlock 本就无 ANSI、无
 // spinner、无 token 统计);plain 走 MarkdownToPlainText。
-void InteractiveSession::HandleCopyCommand(const std::string& raw_args) {
+void TerminalSessionController::HandleCopyCommand(const std::string& raw_args) {
     std::string args = raw_args;
     while (!args.empty() && (args.front() == ' ' || args.front() == '\t')) {
         args.erase(args.begin());
@@ -2117,7 +2134,7 @@ void InteractiveSession::HandleCopyCommand(const std::string& raw_args) {
 // 深度限 6、条目限 3000,排除 .git/构建产物/依赖目录/点目录。相对路径
 // 一律正斜杠。根没变就返回缓存(cwd/worktree 切换由 SyncWorktreeDirectory
 // 清缓存)。
-std::vector<lubancode::cli::FileMentionEntry> InteractiveSession::FileMentionIndexSnapshot() {
+std::vector<lubancode::cli::FileMentionEntry> TerminalSessionController::FileMentionIndexSnapshot() {
     const std::filesystem::path cwd = std::filesystem::current_path();
     const auto root = lubancode::cli::FindRepositoryRoot(cwd);
     const std::filesystem::path base = root.value_or(cwd);
@@ -2177,7 +2194,7 @@ std::vector<lubancode::cli::FileMentionEntry> InteractiveSession::FileMentionInd
 // 这轮不发。活着的提及附一份"相对 → 绝对"账给模型(turn context,不进
 // 永久 history),不叫模型猜裸路径。图片路径不进账——它们走
 // PrepareImageInput 的视觉附件路。
-std::pair<std::string, std::string> InteractiveSession::BuildMentionLedger(const std::string& content) {
+std::pair<std::string, std::string> TerminalSessionController::BuildMentionLedger(const std::string& content) {
     const std::vector<std::string> tokens = lubancode::cli::ExtractTextMentions(content);
     if (tokens.empty()) {
         return {};
@@ -2226,7 +2243,7 @@ std::pair<std::string, std::string> InteractiveSession::BuildMentionLedger(const
 }
 
 // 终端标题模板:项目短名 · 分支 · 状态词。纯拼串,可单测可不测(肉眼可核)。
-std::string InteractiveSession::BuildTerminalTitleText(const std::string& state_word) const {
+std::string TerminalSessionController::BuildTerminalTitleText(const std::string& state_word) const {
     std::string project;
     if (const auto root = lubancode::cli::FindRepositoryRoot(std::filesystem::current_path())) {
         project = lubancode::tools::PathToUtf8(root->filename());
@@ -2246,7 +2263,7 @@ std::string InteractiveSession::BuildTerminalTitleText(const std::string& state_
 // /keymap [set 动作 和弦 | reset [动作|all]]:列动作名/当前键/作用域/
 // 可否改绑;set 走 keymap 的冲突检查(同域撞车拒绝),落盘用户级
 // ~/.lubancode/keymap.json(项目配置不读不写,改键是全局的)。
-void InteractiveSession::HandleKeymapCommand(const std::string& raw_args) {
+void TerminalSessionController::HandleKeymapCommand(const std::string& raw_args) {
     namespace keymap = lubancode::cli::keymap;
     std::vector<std::string> words;
     std::string current;
@@ -2344,7 +2361,7 @@ void InteractiveSession::HandleKeymapCommand(const std::string& raw_args) {
     std::cout << theme.error << tr("keymap.usage") << theme.reset << "\n";
 }
 
-void InteractiveSession::EnsureMemoryTool() {
+void TerminalSessionController::EnsureMemoryTool() {
     // capability gate:全局未授权时 memory_save 不注册(双保险之一,另一道
     // 在 MemorySaveTool::execute 的运行时判定)。
     if (project_memory != nullptr && project_memory->generate_enabled() &&
@@ -2353,11 +2370,11 @@ void InteractiveSession::EnsureMemoryTool() {
     }
 }
 
-void InteractiveSession::PrintMemoryUsage() const {
+void TerminalSessionController::PrintMemoryUsage() const {
     std::cout << tr("cmd.memory.usage");
 }
 
-void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
+void TerminalSessionController::HandleMemoryCommand(const std::string& raw_args) {
     if (project_memory == nullptr) {
         std::cout << tr("cmd.memory.unavailable") << "\n";
         return;
@@ -2744,7 +2761,7 @@ void InteractiveSession::HandleMemoryCommand(const std::string& raw_args) {
     PrintMemoryUsage();
 }
 
-void InteractiveSession::SyncWorktreeDirectory() {
+void TerminalSessionController::SyncWorktreeDirectory() {
     // 切 worktree 收面板:查看态目标跟着旧房的任务走,别把消息投去旧目标。
     lubancode::cli::ResetAgentPanelSession();
     // @ 提及索引跟着根走:根变了重扫(下一拍 FileMentionIndexSnapshot 自办)。
@@ -2777,7 +2794,7 @@ void InteractiveSession::SyncWorktreeDirectory() {
 // 路径共用这一份 slash 分支 + 自动 compact 检查 + RunTurn 调用,行为
 // 完全一致(spec 要求"队列里是 slash 命令也认")。返回 false 表示这一行
 // 触发了 /exit,外层循环该退出了。
-CommandFlow InteractiveSession::ProcessLine(const std::string& content, bool* autosend_failed) {
+CommandFlow TerminalSessionController::ProcessLine(const std::string& content, bool* autosend_failed) {
     const lubancode::cli::ParsedSlashCommand parsed = lubancode::cli::ParseSlashCommand(content);
     // 会话级兜底(宽窄转换异常单):slash 命令、普通回合、回合收尾的起名/
     // 记忆抽取,任何 std::exception 都不再穿透顶层把整场掀了——错误上屏、
@@ -2813,7 +2830,7 @@ CommandFlow InteractiveSession::ProcessLine(const std::string& content, bool* au
 
 // slash 分派:顶层 switch 只做路由,肥 case 全在各领域 handler
 // (commands/ 下按窄状态接活)。返回 Exit 表示触发 /exit,外层循环该退。
-CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::ParsedSlashCommand& parsed) {
+CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli::ParsedSlashCommand& parsed) {
     switch (parsed.command) {
             case lubancode::cli::SlashCommand::Image:
                 // 进不来:ProcessLine 把 Image 截给图片路径,不进分派。
@@ -2822,15 +2839,72 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
                 PrintSlashHelp();
                 break;
             case lubancode::cli::SlashCommand::Model: {
-                // /model roles 要打路由表:Table() 按值返回,存局部再取址。
-                const std::optional<lubancode::agent::ModelRouteTable> roles_table =
-                    model_router != nullptr
-                        ? std::optional<lubancode::agent::ModelRouteTable>(model_router->Table())
-                        : std::nullopt;
+                // P7(显示系统剥离单):typed API 在 runtime::CommandService,
+                // 终端这条是薄翻译——roles 短表与菜单/问话留在终端渲染层。
+                // 带参直切走 SetModel(写回照旧问一句);裸敲保留旧菜单路
+                // (清单选择 + 当前项高亮的交互是终端活),选定后同样经
+                // SetModel 提交,业务一处。
+                if (parsed.args == "roles") {
+                    const std::optional<lubancode::agent::ModelRouteTable> roles_table =
+                        model_router != nullptr
+                            ? std::optional<lubancode::agent::ModelRouteTable>(model_router->Table())
+                            : std::nullopt;
+                    HandleModelCommand("roles", config, current_model, config_file_path, model_catalog,
+                                        current_think, context_tracker, current_model_instructions,
+                                        /*offer_config_write=*/false,
+                                        roles_table.has_value() ? &*roles_table : nullptr);
+                    break;
+                }
+                lubancode::runtime::CommandService::Options command_options;
+                command_options.config = &config;
+                command_options.model_catalog = &model_catalog;
+                command_options.current_model = current_model;
+                command_options.current_think = current_think;
+                command_options.config_file_path = config_file_path;
+                command_options.fetch_models = [this]()
+                    -> std::expected<std::vector<std::pair<std::string, std::string>>, std::string> {
+                    const auto headers = lubancode::config::ResolveProviderHeaderTemplates(
+                        config.extra_headers, config.auth_token);
+                    auto listed = lubancode::api::ListModels(config.wire, config.base_url, config.auth_token,
+                                                             config.connect_timeout_ms,
+                                                             config.request_timeout_secs, headers);
+                    if (!listed.has_value()) {
+                        return std::unexpected(listed.error().message);
+                    }
+                    std::vector<std::pair<std::string, std::string>> out;
+                    for (const auto& info : *listed) {
+                        out.emplace_back(info.id, info.display_name);
+                    }
+                    return out;
+                };
+                lubancode::runtime::CommandService command_service(std::move(command_options));
+                if (!parsed.args.empty()) {
+                    // 直切:typed 提交,写回问一句(终端交互留在适配层)。
+                    bool write_config = false;
+                    if (active_provider.empty() && config_file_path.has_value()) {
+                        const auto answer = lubancode::cli::ReadLine(
+                            trf("cmd.write_config_prompt", *config_file_path));
+                        write_config = answer.has_value() && (*answer == "y" || *answer == "Y");
+                    } else if (active_provider.empty()) {
+                        std::cout << tr("cmd.session_only") << "\n";
+                    }
+                    const auto result = command_service.SetModel(parsed.args, write_config);
+                    if (result.switched) {
+                        std::cout << trf("cmd.model.switched", result.model) << "\n";
+                        if (write_config && result.config_written) {
+                            std::cout << trf("cmd.write_config.updated", *config_file_path) << "\n";
+                        } else if (write_config && !result.error.empty()) {
+                            std::cout << trf("cmd.write_config.failed", result.error) << "\n";
+                        }
+                    } else {
+                        std::cout << trf("cmd.model.fetch_failed", result.error) << "\n";
+                    }
+                    break;
+                }
+                // 裸敲:旧菜单路(交互留在终端),选定值经 SetModel 提交。
                 HandleModelCommand(parsed.args, config, current_model, config_file_path, model_catalog,
                                     current_think, context_tracker, current_model_instructions,
-                                    /*offer_config_write=*/active_provider.empty(),
-                                    roles_table.has_value() ? &*roles_table : nullptr);
+                                    /*offer_config_write=*/active_provider.empty(), nullptr);
                 break;
             }
             case lubancode::cli::SlashCommand::Provider:
@@ -3345,7 +3419,7 @@ CommandFlow InteractiveSession::DispatchSlashCommand(const lubancode::cli::Parse
 // 发一轮用户正文:自动压缩检查 + 轮次材料 + RunTurn + 落盘 + 收排队。
 // autosend_failed(可空出参,会话泵路径一用):RunTurn 的 status != 0 就是
 // 请求失败(316/网络错/输出预算耗尽/步数闸),写给 true。
-CommandFlow InteractiveSession::RunUserTurn(const std::string& content, bool* autosend_failed) {
+CommandFlow TerminalSessionController::RunUserTurn(const std::string& content, bool* autosend_failed) {
     // 建档提前到发轮之前(第二期):仓要拿 session id 开张,第一轮请求里
     // 的超长结果才有地方落盘。失败不拦会话,只是没有 artifact 可追。
     EnsureSessionBegun(content);
@@ -3402,7 +3476,7 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content, bool* au
     // usage 出账(模型分工第一期):整轮逐步 usage 带出来记进分角色台账
     // (普通 turn = normal 档);compact/抽取的后台采样在各自路径另记,
     // 不混进这里。
-    lubancode::app::UsageStats turn_usage;
+    lubancode::runtime::TurnUsageStats turn_usage;
     const auto turn_started = std::chrono::steady_clock::now();
     const lubancode::app::RunTurnResult turn_result =
         RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
@@ -3448,7 +3522,7 @@ CommandFlow InteractiveSession::RunUserTurn(const std::string& content, bool* au
 // 回合收尾抽取:只看本轮增量,借当前主模型产严格 JSON;候选进待审区
 // (auto 档且证据齐的直写),检索扩展词留给下一轮召回。失败降级一行字,
 // 不影响主会话,也不重试。
-void InteractiveSession::ExtractTurnMemory(const std::string& user_text, std::size_t history_before) {
+void TerminalSessionController::ExtractTurnMemory(const std::string& user_text, std::size_t history_before) {
     if (project_memory == nullptr || !project_memory->generate_enabled()) return;
 
     const auto& history = loop->History();
@@ -3551,7 +3625,7 @@ void InteractiveSession::ExtractTurnMemory(const std::string& user_text, std::si
     }
 }
 
-void InteractiveSession::MaybeMicrocompact() {
+void TerminalSessionController::MaybeMicrocompact() {
     // L2 microcompact(第三期):回合收尾的冷区收拾。仓没开/路由拿不到
     // backend 都直接静默跳过——这是锦上添花的一层,不是关键路径。
     if (!artifact_store->active() || model_router == nullptr) {
@@ -3608,7 +3682,7 @@ void InteractiveSession::MaybeMicrocompact() {
     }
 }
 
-void InteractiveSession::MaybeGenerateSessionTitle(lubancode::agent::TaskKind kind) {
+void TerminalSessionController::MaybeGenerateSessionTitle(lubancode::agent::TaskKind kind) {
     if (session_title_auto_attempted || session_title_pending || !session_title.empty()) {
         return;
     }
@@ -3664,7 +3738,7 @@ void InteractiveSession::MaybeGenerateSessionTitle(lubancode::agent::TaskKind ki
 // 上下文压缩的会话现场路(0.27.x 分层压缩第一期)
 // ---------------------------------------------------------------------------
 
-lubancode::agent::CompactOptions InteractiveSession::BuildCompactOptions() {
+lubancode::agent::CompactOptions TerminalSessionController::BuildCompactOptions() {
     lubancode::agent::CompactOptions options;
     // 窗口预算认压缩路由自己的声明:高级段 model_roles 声明了 context_
     // window 就用它;没有再查模型目录条目;目录里也查不到(自定义模型、
@@ -3702,7 +3776,7 @@ lubancode::agent::CompactOptions InteractiveSession::BuildCompactOptions() {
     return options;
 }
 
-bool InteractiveSession::TryRunCompact(bool midturn) {
+bool TerminalSessionController::TryRunCompact(bool midturn) {
     // 压缩路由(模型分工第一期):cheap 角色的有效值;跨 provider 拿不到
     // backend 就直接走 normal 修一次的路(同一只),失败再报,不静默截史。
     auto compact_routed = model_router->Route(lubancode::agent::TaskKind::Compact);
@@ -3849,7 +3923,7 @@ bool InteractiveSession::TryRunCompact(bool midturn) {
     return true;
 }
 
-void InteractiveSession::HandleContextPressure(const lubancode::agent::ContextPressure& pressure) {
+void TerminalSessionController::HandleContextPressure(const lubancode::agent::ContextPressure& pressure) {
     if (pressure.phase == lubancode::agent::ContextPressure::Phase::PreRequest) {
         // 工具结果已攒完、请求尚未发出——正是不打断工具的安全点。撞线就
         // 在这里收一次历史,不再等下一条外层用户消息。
@@ -3868,7 +3942,7 @@ void InteractiveSession::HandleContextPressure(const lubancode::agent::ContextPr
     }
 }
 
-SessionCommandState InteractiveSession::MakeSessionCommandState() {
+SessionCommandState TerminalSessionController::MakeSessionCommandState() {
     return SessionCommandState{
         [this](bool preserve_history) { RebuildLoop(preserve_history); },
         *loop,
@@ -3916,7 +3990,7 @@ SessionCommandState InteractiveSession::MakeSessionCommandState() {
         }};
 }
 
-void InteractiveSession::EmitSessionHook(lubancode::hooks::HookEvent event, nlohmann::json fields,
+void TerminalSessionController::EmitSessionHook(lubancode::hooks::HookEvent event, nlohmann::json fields,
                                          const std::string& match_value) {
     lubancode::hooks::HookDispatcher* dispatcher = lubancode::app::HookRuntime();
     if (dispatcher == nullptr || dispatcher->Empty() || !dispatcher->HasHandlersFor(event)) {
@@ -3951,7 +4025,7 @@ void InteractiveSession::EmitSessionHook(lubancode::hooks::HookEvent event, nloh
 //   - dispose_queue=false(退出/析构):队列**不倒**。账在 Run() 退场前已
 //     落档(resume 接得回,验收"排队→/exit→resume 队列还在"),这里只
 //     提示一句"已存档几条";倒掉反而把刚落的档废了。
-void InteractiveSession::CleanupBackgroundAgents(bool dispose_queue) {
+void TerminalSessionController::CleanupBackgroundAgents(bool dispose_queue) {
     // 面板收场:查看态/收件目标整份收干净,不给已收场的任务留悬空目标。
     lubancode::cli::ResetAgentPanelSession();
     if (dispose_queue) {
@@ -3980,7 +4054,7 @@ void InteractiveSession::CleanupBackgroundAgents(bool dispose_queue) {
     }
 }
 
-void InteractiveSession::Run() {
+void TerminalSessionController::Run() {
     while (true) {
         // status panel 每圈都重取 cwd 与 Git 分支。/worktree、run_command
         // 切目录/分支，或队列紧接着发下一条时，都不会挂着上一帧的旧值。
@@ -4214,7 +4288,7 @@ void InteractiveSession::Run() {
 }
 
 int RunInteractiveSession(const InteractiveSessionOptions& options) {
-    InteractiveSession session(options);
+    TerminalSessionController session(options);
     session.Run();
     return 0;
 }

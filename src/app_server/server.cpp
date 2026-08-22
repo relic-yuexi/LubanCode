@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "agent/session_catalog.hpp"
+#include "runtime/id_authority.hpp"
 #include "runtime/session_command_service.hpp"
 #include "tools/ask_user.hpp"
 #include "tools/registry.hpp"
@@ -318,7 +319,9 @@ nlohmann::json Server::AcceptTurnStart(const std::string& thread_id, const std::
         return nlohmann::json();
     }
 
-    const std::string turn_id = "turn-" + std::to_string(++turn_counter_);
+    // P9(显示系统剥离单):统一发号换 runtime::ProcessIdAuthority——
+    // id_authority.hpp 定过的规矩:只此一家,不许各处再造第二套。
+    const std::string turn_id = runtime::ProcessIdAuthority().NextTurnId();
     record->turn_id = turn_id;
     record->interrupted_turn.clear();
     record->interrupt_requested.store(false);
@@ -382,8 +385,8 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         record->store->AppendMessage(user_message);
     }
 
-    // 事件账:条目 id 单调(见下方 next_item_seq);TODO(seq)回合内
-    // 计数凑合,runtime P4 的统一 seq 分配器落地后改挂 thread 级序号。
+    // 事件账:P9 起条目 id 与事件序号都从 runtime::ProcessIdAuthority 发
+    // (id_authority.hpp 的"只此一家"),旧 next_item_seq 回合内计数拆掉。
     nlohmann::json completed_params;
     {
         // 装配:假 backend + 注册表(骨架期工具链由测试注入假工具;生产
@@ -401,12 +404,11 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         agent::AgentLoop loop(*backend, *registry, std::move(profile), std::string("lubancode app-server"));
 
         agent::Callbacks callbacks;
-        // 条目 id:回合内单调递增。
-        std::uint64_t next_item_seq = 0;
+        runtime::IdAuthority& ids = runtime::ProcessIdAuthority();
         std::string text_item_id;
         callbacks.on_text_delta = [&](const std::string& delta) {
             if (text_item_id.empty()) {
-                text_item_id = "item-" + std::to_string(next_item_seq++);
+                text_item_id = ids.NextItemId();
                 connection_->EmitEvent(kEventItemStarted,
                                        MakeItemStartedParams(thread_id, turn_id, text_item_id, kItemTypeText,
                                                              nlohmann::json::object()));
@@ -417,7 +419,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         std::string thinking_item_id;
         callbacks.on_thinking_delta = [&](const std::string& delta) {
             if (thinking_item_id.empty()) {
-                thinking_item_id = "item-" + std::to_string(next_item_seq++);
+                thinking_item_id = ids.NextItemId();
                 connection_->EmitEvent(kEventItemStarted,
                                        MakeItemStartedParams(thread_id, turn_id, thinking_item_id,
                                                              kItemTypeThinking, nlohmann::json::object()));

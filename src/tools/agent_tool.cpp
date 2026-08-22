@@ -15,9 +15,9 @@
 #include "agent/loop.hpp"
 #include "agent/compact.hpp"
 #include "agent/prompts.hpp"
-#include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
-#include "cli/transcript.hpp"  // CountUtf8Codepoints:活度账"多少字"的码点计数
+#include "cli/line_editor.hpp"  // DisplayWidthUtf8:标题宽度(纯逻辑编辑核的零流符号)
+#include "tools/text_bits.hpp"  // CountUtf8Codepoints/FormatTokenCount:engine 侧纯函数(cli 同款)
 #include "platform/paths.hpp"
 #include "runtime/turn_runtime.hpp"  // MapPreToolDecision:PreToolUse 归并映射与主路径同一颗(P3)
 #include "tools/path_utils.hpp"
@@ -2030,8 +2030,8 @@ std::vector<AgentTaskSnapshot> AgentTool::TaskSnapshots(std::size_t max_entries)
         for (const auto& task : tasks_) {
             AgentTaskSnapshot snapshot = task->snapshot;
             snapshot.activity = task->activity;
-            snapshot.activity.reasoning_chars = cli::CountUtf8Codepoints(task->pending_reasoning);
-            snapshot.activity.text_chars = cli::CountUtf8Codepoints(task->pending_text);
+            snapshot.activity.reasoning_chars = tools::CountUtf8Codepoints(task->pending_reasoning);
+            snapshot.activity.text_chars = tools::CountUtf8Codepoints(task->pending_text);
             snapshot.content_revision = task->content_revision;
             out.push_back(std::move(snapshot));
         }
@@ -2059,8 +2059,8 @@ std::vector<AgentTaskSnapshot> AgentTool::TaskSnapshots(std::size_t max_entries)
         if (selected[i]) {
             AgentTaskSnapshot snapshot = tasks_[i]->snapshot;
             snapshot.activity = tasks_[i]->activity;
-            snapshot.activity.reasoning_chars = cli::CountUtf8Codepoints(tasks_[i]->pending_reasoning);
-            snapshot.activity.text_chars = cli::CountUtf8Codepoints(tasks_[i]->pending_text);
+            snapshot.activity.reasoning_chars = tools::CountUtf8Codepoints(tasks_[i]->pending_reasoning);
+            snapshot.activity.text_chars = tools::CountUtf8Codepoints(tasks_[i]->pending_text);
             snapshot.content_revision = tasks_[i]->content_revision;
             out.push_back(std::move(snapshot));
         }
@@ -2093,8 +2093,8 @@ std::vector<AgentTaskSummary> AgentTool::TaskSummaries() const {
         summary.delivered = task->snapshot.delivered;
         summary.tool_call_count = task->snapshot.tool_calls.size();
         summary.activity = task->activity;
-        summary.activity.reasoning_chars = cli::CountUtf8Codepoints(task->pending_reasoning);
-        summary.activity.text_chars = cli::CountUtf8Codepoints(task->pending_text);
+        summary.activity.reasoning_chars = tools::CountUtf8Codepoints(task->pending_reasoning);
+        summary.activity.text_chars = tools::CountUtf8Codepoints(task->pending_text);
         summary.content_revision = task->content_revision;
         std::lock_guard<std::mutex> inbox_lock(task->inbox_mutex);
         for (const auto& item : task->inbox) {
@@ -2113,8 +2113,8 @@ std::optional<AgentTaskSnapshot> AgentTool::TaskDetail(int task_id) const {
         if (task->snapshot.id == task_id) {
             AgentTaskSnapshot snapshot = task->snapshot;
             snapshot.activity = task->activity;
-            snapshot.activity.reasoning_chars = cli::CountUtf8Codepoints(task->pending_reasoning);
-            snapshot.activity.text_chars = cli::CountUtf8Codepoints(task->pending_text);
+            snapshot.activity.reasoning_chars = tools::CountUtf8Codepoints(task->pending_reasoning);
+            snapshot.activity.text_chars = tools::CountUtf8Codepoints(task->pending_text);
             snapshot.content_revision = task->content_revision;
             return snapshot;
         }
@@ -2439,7 +2439,7 @@ std::vector<std::string> AgentTool::CompletionNoticeLines() const {
         // "未报告";一步没跑才是真 0。不拿 0 冒充"服务端一枚 token 没烧"。
         const std::string token_text =
             snapshot.usage_reported || snapshot.steps_used == 0
-                ? lubancode::cli::FormatTokenCount(tokens)
+                ? lubancode::tools::FormatTokenCount(tokens)
                 : lubancode::cli::tr("agent_status.tokens_not_reported");
         // 短因先行(规格"现场三"):耗尽/停下/失败·接口报错一眼分得开。
         std::string label = StateShortLabel(snapshot.state);

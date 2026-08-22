@@ -225,7 +225,7 @@ TEST_CASE("BuildCallbacks::on_usage: 主请求 usage 更新 tracker 并发布状
                            " · ");
 
     cli::ContextTracker tracker(1000);
-    app::UsageStats stats;
+    runtime::TurnUsageStats stats;
     cli::Theme theme;
     std::vector<cli::TranscriptItem> transcript;
     std::atomic<bool> cancel_flag{false};
@@ -269,7 +269,7 @@ TEST_CASE("BuildCallbacks::on_usage: 主请求 usage 更新 tracker 并发布状
 TEST_CASE("BuildCallbacks::on_usage: 第二次请求覆盖发布,不累加;缺 usage 标旧值不清零") {
     cli::SetStatusLineData(BasePanelData(), {"context", "tokens"}, " · ");
     cli::ContextTracker tracker(1000);
-    app::UsageStats stats;
+    runtime::TurnUsageStats stats;
     cli::Theme theme;
     std::vector<cli::TranscriptItem> transcript;
     std::atomic<bool> cancel_flag{false};
@@ -308,7 +308,7 @@ TEST_CASE("BuildCallbacks::on_usage: 子代理 usage 只进累计花销,不碰 t
     tools::ToolRegistry sub_registry;
 
     cli::ContextTracker tracker(1000);
-    app::UsageStats stats;
+    runtime::TurnUsageStats stats;
     cli::Theme theme;
     std::vector<cli::TranscriptItem> transcript;
     std::atomic<bool> cancel_flag{false};
@@ -518,7 +518,7 @@ TEST_CASE("切档与空闲路同源:CurrentConfirmMode/SetConfirmMode 读写同�
 // ---------------------------------------------------------------------------
 
 TEST_CASE("UsageStats: 逐步流水账——三笔各有 step/request id,命中率按 token 总和重算") {
-    app::UsageStats stats;
+    runtime::TurnUsageStats stats;
     // 第一步:冷启动全 miss。
     stats.Add(api::UsageReport{api::Usage{50000, 80, 0, 0}, 0, "req_a", "deepseek-v4-pro"});
     // 第二步:工具往返,大命中(49k hit / 1k miss = 98%)。
@@ -556,7 +556,7 @@ TEST_CASE("UsageStats: 逐步流水账——三笔各有 step/request id,命中�
 }
 
 TEST_CASE("UsageStats: provider 不回 usage 记 unknown,不伪造 0%") {
-    app::UsageStats stats;
+    runtime::TurnUsageStats stats;
     // 四项全零 = provider 没在流末给 usage。
     stats.Add(api::UsageReport{api::Usage{}, 0, "", "m"});
     REQUIRE(stats.steps.size() == 1);

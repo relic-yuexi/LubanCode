@@ -7,11 +7,11 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <optional>
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include "platform/log_sink.hpp"
 
 namespace lubancode::agent {
 
@@ -495,7 +495,7 @@ void WorkflowRecorder::AppendEvent(const char* source, const char* type, nlohman
     if (!out_.good()) {
         broken_ = true;
         out_.close();
-        std::cerr << "[record] 写录制事件失败,本场录制件不完整\n";
+        platform::LogSink::Instance().Error("record", "写录制事件失败,本场录制件不完整");
     }
 }
 

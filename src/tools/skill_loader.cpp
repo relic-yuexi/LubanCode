@@ -3,12 +3,12 @@
 #include <cctype>
 #include <cstdint>
 #include <fstream>
-#include <iostream>
 #include <map>
 #include <sstream>
 #include <string_view>
 
 #include "tools/path_utils.hpp"
+#include "platform/log_sink.hpp"
 
 namespace lubancode::tools {
 
@@ -159,7 +159,7 @@ std::vector<SkillMeta> ScanSkillsDir(const std::filesystem::path& skills_root, c
 
         std::ifstream file(skill_md, std::ios::binary);
         if (!file.is_open()) {
-            std::cerr << "[skills] 打不开 " << PathToUtf8(skill_md) << ",跳过\n";
+            platform::LogSink::Instance().Warn("skills", "打不开 " + PathToUtf8(skill_md) + ",跳过");
             continue;
         }
         std::ostringstream buffer;
@@ -168,7 +168,8 @@ std::vector<SkillMeta> ScanSkillsDir(const std::filesystem::path& skills_root, c
 
         const auto parsed = ParseSkillMarkdown(content);
         if (!parsed.has_value()) {
-            std::cerr << "[skills] " << PathToUtf8(skill_md) << " 的 frontmatter 损坏(没有闭合的 ---),跳过\n";
+            platform::LogSink::Instance().Warn(
+                "skills", PathToUtf8(skill_md) + " 的 frontmatter 损坏(没有闭合的 ---),跳过");
             continue;
         }
 
