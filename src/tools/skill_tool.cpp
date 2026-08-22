@@ -5,6 +5,7 @@
 #include <sstream>
 
 #include "tools/path_utils.hpp"
+#include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
 
 namespace lubancode::tools {
 
@@ -13,9 +14,11 @@ std::string SkillTool::name() const {
 }
 
 std::string SkillTool::description() const {
-    return "按名字加载一份已发现的技能(SKILL.md),拿到它的完整使用说明。技能是预先写好的一套具体做法"
-           "(比如某种文体的写作规范、某类任务的固定流程),系统提示里列出的技能名/说明跟当前任务对得上时,"
-           "先调用这个工具把说明读进来,再照着做。";
+    // 文案在 src/prompts/tools/<语言>/skill.md,兜底是迁移前的原文。
+    return ToolText("skill", "description",
+                    "按名字加载一份已发现的技能(SKILL.md),拿到它的完整使用说明。技能是预先写好的一套具体做法"
+                    "(比如某种文体的写作规范、某类任务的固定流程),系统提示里列出的技能名/说明跟当前任务对得上时,"
+                    "先调用这个工具把说明读进来,再照着做。");
 }
 
 nlohmann::json SkillTool::input_schema() const {
@@ -25,7 +28,7 @@ nlohmann::json SkillTool::input_schema() const {
     nlohmann::json properties = nlohmann::json::object();
     nlohmann::json name_prop = nlohmann::json::object();
     name_prop["type"] = "string";
-    name_prop["description"] = "要加载的技能名,跟系统提示里列出的名字一致";
+    name_prop["description"] = ToolText("skill", "param.name", "要加载的技能名,跟系统提示里列出的名字一致");
     properties["name"] = name_prop;
 
     schema["properties"] = properties;

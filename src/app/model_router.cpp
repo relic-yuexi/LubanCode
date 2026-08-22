@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "app/backend_stack.hpp"
+#include "cli/line_editor.hpp"
 
 namespace lubancode::app {
 
@@ -145,14 +146,7 @@ std::vector<std::string> FormatModelRolesTable(const lubancode::agent::ModelRout
     };
 
     const auto pad = [](const std::string& text, std::size_t width) {
-        // 对齐只按显示列粗算:按 UTF-8 码点数补空格(中文列头与值混排,
-        // 不追求终端精确对齐,只求不挤成一团)。
-        std::size_t chars = 0;
-        for (const char c : text) {
-            if ((static_cast<unsigned char>(c) & 0xC0) != 0x80) {
-                ++chars;
-            }
-        }
+        const std::size_t chars = lubancode::cli::DisplayWidthUtf8(text);
         std::string out = text;
         out.append(chars < width ? width - chars : 0, ' ');
         return out;
@@ -167,21 +161,9 @@ std::vector<std::string> FormatModelRolesTable(const lubancode::agent::ModelRout
     };
     std::size_t widths[5] = {0, 0, 0, 0, 0};
     for (std::size_t i = 0; i < 5; ++i) {
-        std::size_t header_chars = 0;
-        for (const char c : std::string(columns[i].header)) {
-            if ((static_cast<unsigned char>(c) & 0xC0) != 0x80) {
-                ++header_chars;
-            }
-        }
-        widths[i] = header_chars;
+        widths[i] = lubancode::cli::DisplayWidthUtf8(columns[i].header);
         for (const auto& row : rows) {
-            std::size_t chars = 0;
-            for (const char c : row.*columns[i].field) {
-                if ((static_cast<unsigned char>(c) & 0xC0) != 0x80) {
-                    ++chars;
-                }
-            }
-            widths[i] = std::max(widths[i], chars);
+            widths[i] = std::max(widths[i], lubancode::cli::DisplayWidthUtf8(row.*columns[i].field));
         }
     }
 

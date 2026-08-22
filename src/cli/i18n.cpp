@@ -70,6 +70,7 @@ const Entry kZhCN[] = {
      "  /help           列出所有命令\n"
      "  /model          拉取模型列表,编号选择切换(默认第一个)\n"
      "  /model 名字     直接切到指定模型名,不用拉列表\n"
+     "  /model roles    查看 normal/cheap/lao 三档任务路由与配置来源\n"
      "  /provider       列已配服务端;/provider add|switch|edit|remove|set|refresh 管多端模型(refresh 刷厂家目录)\n"
      "  /config         打印当前生效配置(复用 --config 的逻辑),外加本会话实际在用的 model\n"
      "  /update         检查 GitHub 最新 Release；升级安装时一并同步官方技能\n"
@@ -175,6 +176,7 @@ const Entry kZhCN[] = {
      "  /help           列出所有命令\n"
      "  /model          拉取模型列表,编号选择切换(默认第一个)\n"
      "  /model 名字     直接切到指定模型名,不用拉列表\n"
+     "  /model roles    查看 normal/cheap/lao 三档任务路由与配置来源\n"
      "  /provider       列已配服务端;/provider add|switch|edit|remove|set|refresh 管多端模型(refresh 刷厂家目录)\n"
      "  /config         打印当前生效配置(api_key 打码),外加本会话实际在用的 model\n"
      "  /update         检查 GitHub 最新 Release；升级安装时一并同步官方技能\n"
@@ -590,7 +592,7 @@ const Entry kZhCN[] = {
 
     // ---- slash 命令描述表 ----
     {"slash.desc.help", "列出所有命令"},
-    {"slash.desc.model", "拉模型列表选,或 /model 名字 直接切"},
+    {"slash.desc.model", "拉模型列表选;/model 名字 直接切;/model roles 看任务路由"},
     {"slash.desc.provider", "列、添、切、删、改、刷模型服务端;/provider add|list|switch|remove|set|refresh"},
     {"slash.desc.config", "打印当前生效配置和本会话在用的 model"},
     {"slash.desc.update", "检查 GitHub 最新 Release；升级时同步程序与官方技能"},
@@ -1203,7 +1205,7 @@ const Entry kZhCN[] = {
     {"cmd.model.bad_number", "编号不对,取消切换。"},
     {"cmd.model.not_number", "没听懂,取消切换。"},
     {"cmd.model.switched", "已切换到模型: {0}(本会话生效)"},
-    {"cmd.model.roles_header", "三档模型角色(角色跟任务走,不跟 main/subagent 身份走;未配置的角色回落 normal):"},
+    {"cmd.model.roles_header", "三档模型角色(按任务路由;子代理当前随会话模型;未配置的角色回落 normal):"},
     {"cmd.model.roles_unavailable", "模型路由未建(单发/测试路径),/model roles 只在交互会话可用。"},
     {"cmd.write_config_prompt", "写进配置文件 {0}? [y/N]: "},
     {"cmd.write_config.updated", "已更新 {0}"},
@@ -1580,6 +1582,7 @@ const Entry kEn[] = {
      "  /help           list all commands\n"
      "  /model          fetch the model list and switch by number (default: first)\n"
      "  /model <name>   switch directly to a model name without fetching the list\n"
+     "  /model roles    show the normal/cheap/lao task routes and their config sources\n"
      "  /provider       list configured providers; /provider add|switch|edit|remove|set|refresh manages endpoints (refresh updates the catalog)\n"
      "  /config         print the effective configuration plus the model in use this session\n"
      "  /update         check the latest GitHub Release; installs also sync official skills\n"
@@ -1694,6 +1697,7 @@ const Entry kEn[] = {
      "  /help           list all commands\n"
      "  /model          fetch the model list and switch by number (default: first)\n"
      "  /model <name>   switch directly to a model name\n"
+     "  /model roles    show the normal/cheap/lao task routes and their config sources\n"
      "  /provider       list configured providers; /provider add|switch|edit|remove|set|refresh manages endpoints (refresh updates the catalog)\n"
      "  /config         print the effective configuration (api_key masked) plus the session model\n"
      "  /update         check the latest GitHub Release; installs also sync official skills\n"
@@ -2132,7 +2136,7 @@ const Entry kEn[] = {
 
     // ---- slash command descriptions ----
     {"slash.desc.help", "list all commands"},
-    {"slash.desc.model", "pick from the model list, or /model <name> to switch directly"},
+    {"slash.desc.model", "pick a model; /model <name> switches directly; /model roles shows task routing"},
     {"slash.desc.provider",
      "list, add, switch, remove, set, or refresh the provider catalog; /provider add|list|switch|remove|set|refresh"},
     {"slash.desc.config", "print the effective configuration and the session model"},
@@ -2753,6 +2757,13 @@ const Entry kEn[] = {
     {"cmd.provider.extra_body_not_object", "extra_body must be a JSON object (key-value pairs in braces), not "
                                              "some other type."},
     {"cmd.provider.extra_header_name_missing", "extra_header needs a header name, not just a value."},
+
+    // ---- model routing ----
+    {"cmd.model.roles_header",
+     "Three model roles (routed by task; sub-agents currently follow the session model; unconfigured roles fall "
+     "back to normal):"},
+    {"cmd.model.roles_unavailable",
+     "The model router is unavailable in this one-shot/test path; /model roles is interactive-only."},
 
     // cmd.context.* 大族仍按下面的 P1 清单回退 zh-CN,这两个口径说明键随
     // "context 状态栏回合内刷新"一起先补上英文,中英成对。

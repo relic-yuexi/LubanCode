@@ -7,6 +7,8 @@
 
 #include <cpr/cpr.h>
 
+#include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
+
 namespace lubancode::tools {
 
 namespace {
@@ -260,9 +262,11 @@ std::string WebFetchTool::name() const {
 }
 
 std::string WebFetchTool::description() const {
-    return "抓取一个网页(HTTP GET,跟随重定向)。HTML 会剥掉标签只留正文,普通文本原样返回,"
-           "二进制内容不支持。返回内容开头带一行 URL/状态码/类型说明。适合看文档、查资料;"
-           "需要深读多个长网页再总结时,把活交给 agent 子代理去做,别把整篇长文堆进主对话。";
+    // 文案在 src/prompts/tools/<语言>/web_fetch.md,兜底是迁移前的原文。
+    return ToolText("web_fetch", "description",
+                    "抓取一个网页(HTTP GET,跟随重定向)。HTML 会剥掉标签只留正文,普通文本原样返回,"
+                    "二进制内容不支持。返回内容开头带一行 URL/状态码/类型说明。适合看文档、查资料;"
+                    "需要深读多个长网页再总结时,把活交给 agent 子代理去做,别把整篇长文堆进主对话。");
 }
 
 nlohmann::json WebFetchTool::input_schema() const {
@@ -273,12 +277,14 @@ nlohmann::json WebFetchTool::input_schema() const {
 
     nlohmann::json url_prop = nlohmann::json::object();
     url_prop["type"] = "string";
-    url_prop["description"] = "要抓取的完整 URL,必须以 http:// 或 https:// 开头";
+    url_prop["description"] =
+        ToolText("web_fetch", "param.url", "要抓取的完整 URL,必须以 http:// 或 https:// 开头");
     properties["url"] = url_prop;
 
     nlohmann::json max_bytes_prop = nlohmann::json::object();
     max_bytes_prop["type"] = "integer";
-    max_bytes_prop["description"] = "返回正文的字节数上限,超出截断并标注。不填默认 102400(100KB)";
+    max_bytes_prop["description"] = ToolText("web_fetch", "param.max_bytes",
+                                             "返回正文的字节数上限,超出截断并标注。不填默认 102400(100KB)");
     properties["max_bytes"] = max_bytes_prop;
 
     schema["properties"] = properties;
