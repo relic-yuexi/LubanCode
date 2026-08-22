@@ -50,6 +50,14 @@ struct TempSessionsDir {
 };
 
 // 写一场会话(写完关柄——MSVC 下开着的句柄会卡 remove_all)。返回原内容。
+// 文件名一律走 u8string:窄串拼 path 在 MSVC 下按 ANSI 代码页解码,中文
+// slug 会写出乱码名(旧 PathOf 同错相抵才没现形);产品侧已全走 u8,
+// 夹具必须同口径,写出的才是真名。
+std::filesystem::path Utf8Name(const std::string& utf8) {
+    return std::filesystem::path(
+        std::u8string(reinterpret_cast<const char8_t*>(utf8.data()), utf8.size()));
+}
+
 std::string WriteSession(const TempSessionsDir& dir, const std::string& id, const std::string& cwd,
                          const std::string& started_at) {
     agent::SessionMeta meta;
@@ -66,7 +74,7 @@ std::string WriteSession(const TempSessionsDir& dir, const std::string& id, cons
         }(),
         started_at);
     const std::string content = agent::SerializeSessionMeta(meta) + "\n" + line + "\n";
-    std::ofstream f(dir.base / (id + ".jsonl"), std::ios::binary);
+    std::ofstream f(dir.base / Utf8Name(id + ".jsonl"), std::ios::binary);
     f << content;
     return content;
 }
@@ -139,19 +147,19 @@ TEST_CASE("archive: 根 -> archive/ 字节原样;重复归档幂等") {
     agent::SessionLifecycle lifecycle(dir.str());
     const auto result = lifecycle.ArchiveSession(id);
     REQUIRE(result.ok());
-    CHECK(result.file_path == PathUtf8(dir.archive() / (id + ".jsonl")));
+    CHECK(result.file_path == PathUtf8(dir.archive() / Utf8Name(id + ".jsonl")));
 
     // 文件真搬了,字节一字不差。
-    std::ifstream in(dir.archive() / (id + ".jsonl"), std::ios::binary);
+    std::ifstream in(dir.archive() / Utf8Name(id + ".jsonl"), std::ios::binary);
     std::string moved((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     CHECK(moved == content);
     std::error_code ec;
-    CHECK_FALSE(std::filesystem::exists(dir.base / (id + ".jsonl"), ec));
+    CHECK_FALSE(std::filesystem::exists(dir.base / Utf8Name(id + ".jsonl"), ec));
 
     // 重复归档:幂等成功,不搬第二次。
     const auto again = lifecycle.ArchiveSession(id);
     CHECK(again.ok());
-    CHECK_FALSE(std::filesystem::exists(dir.base / (id + ".jsonl"), ec));
+    CHECK_FALSE(std::filesystem::exists(dir.base / Utf8Name(id + ".jsonl"), ec));
 }
 
 TEST_CASE("archive: 目标同名拒绝覆盖,原文件不动") {
@@ -161,13 +169,13 @@ TEST_CASE("archive: 目标同名拒绝覆盖,原文件不动") {
     // archive 里先塞一份同名。
     std::error_code ec;
     std::filesystem::create_directories(dir.archive(), ec);
-    std::ofstream(dir.archive() / (id + ".jsonl"), std::ios::binary) << "别人先占的";
+    std::ofstream(dir.archive() / Utf8Name(id + ".jsonl"), std::ios::binary) << "别人先占的";
 
     agent::SessionLifecycle lifecycle(dir.str());
     const auto result = lifecycle.ArchiveSession(id);
     CHECK(result.code == agent::SessionLifecycleCode::TargetExists);
     // 原文件还在原地。
-    CHECK(std::filesystem::exists(dir.base / (id + ".jsonl"), ec));
+    CHECK(std::filesystem::exists(dir.base / Utf8Name(id + ".jsonl"), ec));
 }
 
 TEST_CASE("unarchive: 搬回根;根同名拒绝;归档场不掺默认列表") {
@@ -194,10 +202,10 @@ TEST_CASE("unarchive: 搬回根;根同名拒绝;归档场不掺默认列表") {
     // unarchive:字节一字不丢。
     const auto result = lifecycle.UnarchiveSession(id);
     REQUIRE(result.ok());
-    std::ifstream in(dir.base / (id + ".jsonl"), std::ios::binary);
+    std::ifstream in(dir.base / Utf8Name(id + ".jsonl"), std::ios::binary);
     std::string back((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     CHECK(back == content);
-    CHECK_FALSE(std::filesystem::exists(dir.archive() / (id + ".jsonl")));
+    CHECK_FALSE(std::filesystem::exists(dir.archive() / Utf8Name(id + ".jsonl")));
 
     // 归档场回去后:active 又见,Archived 不见。
     agent::SessionCatalog catalog2(dir.str());
@@ -210,10 +218,10 @@ TEST_CASE("unarchive: 搬回根;根同名拒绝;归档场不掺默认列表") {
     const std::string id_b = "20260821-111111-乙";
     WriteSession(dir, id_b, "D:/房", "2026-08-21 11:11:11");
     REQUIRE(lifecycle.ArchiveSession(id_b).ok());
-    std::ofstream(dir.base / (id_b + ".jsonl"), std::ios::binary) << "根里的同名";
+    std::ofstream(dir.base / Utf8Name(id_b + ".jsonl"), std::ios::binary) << "根里的同名";
     const auto unarchive_again = lifecycle.UnarchiveSession(id_b);
     CHECK(unarchive_again.ok());  // 已在根:无事可做,不覆盖根里那份
-    std::ifstream root_in(dir.base / (id_b + ".jsonl"), std::ios::binary);
+    std::ifstream root_in(dir.base / Utf8Name(id_b + ".jsonl"), std::ios::binary);
     std::string root_content((std::istreambuf_iterator<char>(root_in)), std::istreambuf_iterator<char>());
     CHECK(root_content == "根里的同名");
 }
@@ -230,18 +238,18 @@ TEST_CASE("delete: 缺确认不动盘;确认后只删目标一场") {
     CHECK(lifecycle.DeleteSession(id_a, false).code ==
           agent::SessionLifecycleCode::ConfirmationRequired);
     std::error_code ec;
-    CHECK(std::filesystem::exists(dir.base / (id_a + ".jsonl"), ec));
+    CHECK(std::filesystem::exists(dir.base / Utf8Name(id_a + ".jsonl"), ec));
 
     // 确认:只删甲,乙照在。
     const auto result = lifecycle.DeleteSession(id_a, true);
     REQUIRE(result.ok());
-    CHECK_FALSE(std::filesystem::exists(dir.base / (id_a + ".jsonl"), ec));
-    CHECK(std::filesystem::exists(dir.base / (id_b + ".jsonl"), ec));
+    CHECK_FALSE(std::filesystem::exists(dir.base / Utf8Name(id_a + ".jsonl"), ec));
+    CHECK(std::filesystem::exists(dir.base / Utf8Name(id_b + ".jsonl"), ec));
 
     // 归档场也能删。
     REQUIRE(lifecycle.ArchiveSession(id_b).ok());
     REQUIRE(lifecycle.DeleteSession(id_b, true).ok());
-    CHECK_FALSE(std::filesystem::exists(dir.archive() / (id_b + ".jsonl"), ec));
+    CHECK_FALSE(std::filesystem::exists(dir.archive() / Utf8Name(id_b + ".jsonl"), ec));
 
     // 删不存在的:NotFound。
     CHECK(lifecycle.DeleteSession("99999999-999999-无", true).code ==
@@ -292,7 +300,7 @@ TEST_CASE("Windows 开句柄回归: 活动句柄先关再搬,回调拒绝时不�
     REQUIRE(result.ok());
     CHECK(flush_called);
     CHECK_FALSE(store.active());
-    std::ifstream in(dir.archive() / (id + ".jsonl"), std::ios::binary);
+    std::ifstream in(dir.archive() / Utf8Name(id + ".jsonl"), std::ios::binary);
     std::string moved((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     CHECK(moved == content);
 
@@ -301,11 +309,55 @@ TEST_CASE("Windows 开句柄回归: 活动句柄先关再搬,回调拒绝时不�
     const std::string id2 = "20260820-101010-甲";
     WriteSession(dir2, id2, "D:/房", "2026-08-20 10:10:10");
     agent::SessionLifecycle lifecycle2(dir2.str());
-    lifecycle2.SetActiveFile(PathUtf8(dir2.base / (id2 + ".jsonl")), [](const std::string&) { return false; });
+    lifecycle2.SetActiveFile(PathUtf8(dir2.base / Utf8Name(id2 + ".jsonl")), [](const std::string&) { return false; });
     CHECK(lifecycle2.ArchiveSession(id2).code == agent::SessionLifecycleCode::IoError);
     std::error_code ec;
-    CHECK(std::filesystem::exists(dir2.base / (id2 + ".jsonl"), ec));
-    CHECK_FALSE(std::filesystem::exists(dir2.archive() / (id2 + ".jsonl"), ec));
+    CHECK(std::filesystem::exists(dir2.base / Utf8Name(id2 + ".jsonl"), ec));
+    CHECK_FALSE(std::filesystem::exists(dir2.archive() / Utf8Name(id2 + ".jsonl"), ec));
+}
+
+// Windows 语义的 delete 柄收口(0.26.29 Windows CI 挂掉的回归钉):
+// 目标是当前活动会话时,delete 先走 SetActiveFile 注入的收柄回调再
+// remove——Windows 上 append 句柄开着就删必吃 sharing violation。
+// 本地 WSL/Linux 验不了这条(remove 对开着的句柄也成),写成三平台都
+// 跑的形状:断言"回调被调过、删成了、盘上真没了",柄收口语义由
+// Windows 实机承担。
+TEST_CASE("delete 柄收口: 目标是活动会话时先收柄再删(Windows sharing violation 闸)") {
+    TempSessionsDir dir("delete_handle");
+    const std::string id = "20260820-101010-甲";
+
+    // 活动会话:SessionStore 建档开 append 句柄(Windows 上的真实形态)。
+    agent::SessionStore store(dir.str());
+    agent::SessionMeta meta;
+    meta.wire = "anthropic";
+    meta.cwd = "D:/房";
+    meta.started_at = "2026-08-20 10:10:10";
+    REQUIRE(store.Begin(meta, id));
+    CHECK(store.active());
+
+    agent::SessionLifecycle lifecycle(dir.str());
+    bool flush_called = false;
+    lifecycle.SetActiveFile(store.file_path(), [&](const std::string& path) {
+        flush_called = true;
+        store.Reset();  // 真关柄
+        return !path.empty();
+    });
+    const auto result = lifecycle.DeleteSession(id, /*confirmed=*/true);
+    REQUIRE(result.ok());
+    CHECK(flush_called);
+    CHECK_FALSE(store.active());
+    std::error_code ec;
+    CHECK_FALSE(std::filesystem::exists(dir.base / Utf8Name(id + ".jsonl"), ec));
+
+    // 回调说收柄失败:拒绝删,文件留在原地。
+    TempSessionsDir dir2("delete_handle_fail");
+    const std::string id2 = "20260820-101010-甲";
+    WriteSession(dir2, id2, "D:/房", "2026-08-20 10:10:10");
+    agent::SessionLifecycle lifecycle2(dir2.str());
+    lifecycle2.SetActiveFile(PathUtf8(dir2.base / Utf8Name(id2 + ".jsonl")),
+                             [](const std::string&) { return false; });
+    CHECK(lifecycle2.DeleteSession(id2, true).code == agent::SessionLifecycleCode::IoError);
+    CHECK(std::filesystem::exists(dir2.base / Utf8Name(id2 + ".jsonl"), ec));
 }
 
 TEST_CASE("catalog 的 updated 账在归档里也认: queue 事件行与 clock 换算不折损") {
@@ -322,7 +374,7 @@ TEST_CASE("catalog 的 updated 账在归档里也认: queue 事件行与 clock �
     items.push_back(item);
     content += agent::SerializeQueueEvent(items, "2026-08-21 12:00:00") + "\n";
     {
-        std::ofstream f(dir.base / (id + ".jsonl"), std::ios::binary);
+        std::ofstream f(dir.base / Utf8Name(id + ".jsonl"), std::ios::binary);
         f << content;
     }
     agent::SessionLifecycle lifecycle(dir.str());
