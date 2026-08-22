@@ -104,6 +104,9 @@ add_executable(lubancode_tests
   test_web_fetch.cpp
   test_web_search.cpp
   test_session_store.cpp
+  # 会话管理器单第一步:SessionCatalog 中立查询层(排序键/摘要/两排序/两
+  # scope/搜索/分页/坏档/空表/指纹缓存)。
+  test_session_catalog.cpp
   test_prompt_files.cpp
   test_project_instructions.cpp
   test_project_memory.cpp

@@ -368,6 +368,7 @@ add_library(lubancode_core STATIC
   src/agent/context_budget.cpp
   src/agent/microcompact.cpp
   src/agent/session_store.cpp
+  src/agent/session_catalog.cpp
   src/agent/workflow_recorder.cpp
   src/agent/skill_drafter.cpp
   # 显示系统剥离单第一步:runtime 合同(纯类型 + 序列化,零 cli/app 依赖)。
