@@ -263,6 +263,57 @@ struct ToolDisplay {
             tool_use_index.erase(it);
         }
     }
+    // 回合视觉收束:批次预告。同一条 assistant message 吐多枚 tool_use,
+    // 执行前先把整批条目立成 Pending(黄灯 + "排队中")——用户一眼看出
+    // "模型这拍打算跑几件",真开跑时 OnToolStart 逐枚点亮 Running。登记按
+    // tool_use_id 存名册(名字先空着,start 一到补),画也先画:批次里
+    // 排后面的条目本来就要在屏幕上排队。单枚批次不调这里(调用方已挡)。
+    // announce 的条目若后来没等到 start(ESC 打断),收口方
+    // OnBatchSkipped 把名册里剩下的按 Skipped 定格,不留在"排队中"骗人。
+    void OnBatchAnnounced(const std::vector<std::string>& ordered_tool_use_ids) {
+        const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
+        for (const std::string& tool_use_id : ordered_tool_use_ids) {
+            if (IndexOfToolUse(tool_use_id) >= 0) {
+                continue;  // 已登记(不该发生):不重复立
+            }
+            const int idx = NewItem(lubancode::cli::TranscriptKind::Tool, "", nlohmann::json::object());
+            auto& item = transcript[static_cast<std::size_t>(idx)];
+            item.title = lubancode::cli::tr("transcript.batch_pending");
+            item.status = lubancode::cli::TranscriptStatus::Pending;
+            RegisterToolUse(tool_use_id, idx);
+            UpdateSnapshotItem(idx);
+            if (is_console) {
+                painter.PaintNew(item);
+            }
+        }
+    }
+
+    // 批次没跑完就断了(ESC):名册里还 Pending 的条目定格 Skipped——
+    // 历史里 AgentLoop 已补了"未执行"的合成 tool_result,屏上不能少这几枚。
+    void OnBatchSkipped() {
+        const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
+        std::vector<int> pending;
+        for (const auto& [tool_use_id, idx] : tool_use_index) {
+            (void)tool_use_id;
+            if (transcript[static_cast<std::size_t>(idx)].kind == lubancode::cli::TranscriptKind::Tool) {
+                pending.push_back(idx);
+            }
+        }
+        for (const int idx : pending) {
+            auto& item = transcript[static_cast<std::size_t>(idx)];
+            if (item.status != lubancode::cli::TranscriptStatus::Pending) {
+                continue;
+            }
+            item.status = lubancode::cli::TranscriptStatus::Cancelled;
+            item.summary_lines = {lubancode::cli::tr("transcript.batch_skipped")};
+            item.end_time = std::chrono::steady_clock::now();
+            UpdateSnapshotItem(idx);
+            if (is_console) {
+                painter.Repaint(item);
+            }
+        }
+    }
+
     // todo_write 是一块“当前计划”，不是流水账。同一轮后续调用复用这
     // 个 transcript 条目和屏幕锚点；工具消息本身仍由 AgentLoop 完整保存。
     int reusable_todo_item = -1;
@@ -346,18 +397,36 @@ struct ToolDisplay {
                 }
             }
         } else {
-            active_main = NewItem(lubancode::cli::TranscriptKind::Tool, name, input);
-            auto& item = transcript[static_cast<std::size_t>(active_main)];
-            if (is_todo) {
-                reusable_todo_item = active_main;
-                if (todo_state->revision > 0) {
-                    item.title = lubancode::cli::BuildToolTitle("todo_update", input);
+            // 批次预告(OnBatchAnnounced)已立过这条的 Pending 壳:start
+            // 到了就点亮它,不另起第二条(那会一拍两枚)。
+            const int announced = IndexOfToolUse(tool_use_id);
+            if (announced >= 0) {
+                active_main = announced;
+                auto& item = transcript[static_cast<std::size_t>(active_main)];
+                item.tool_name = name;
+                item.title = lubancode::cli::BuildToolTitle(name, input);
+                item.input_json = input.is_null() ? std::string() : input.dump();
+                item.status = lubancode::cli::TranscriptStatus::Running;
+                item.summary_lines = {"Running..."};
+                item.start_time = std::chrono::steady_clock::now();
+                UpdateSnapshotItem(active_main);
+                if (is_console) {
+                    painter.Repaint(item);
                 }
-            }
-            UpdateSnapshotItem(active_main);
-            RegisterToolUse(tool_use_id, active_main);  // P4:id -> 条目登记
-            if (is_console) {
-                painter.PaintNew(item);
+            } else {
+                active_main = NewItem(lubancode::cli::TranscriptKind::Tool, name, input);
+                auto& item = transcript[static_cast<std::size_t>(active_main)];
+                if (is_todo) {
+                    reusable_todo_item = active_main;
+                    if (todo_state->revision > 0) {
+                        item.title = lubancode::cli::BuildToolTitle("todo_update", input);
+                    }
+                }
+                UpdateSnapshotItem(active_main);
+                RegisterToolUse(tool_use_id, active_main);  // P4:id -> 条目登记
+                if (is_console) {
+                    painter.PaintNew(item);
+                }
             }
         }
     }

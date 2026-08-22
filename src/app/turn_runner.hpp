@@ -11,6 +11,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <expected>
 #include <set>
 #include <string>
@@ -22,6 +23,7 @@
 #include "agent/workflow_recorder.hpp"
 #include "api/types.hpp"
 #include "cli/context_tracker.hpp"
+#include "cli/format_utils.hpp"  // TurnFooterTone(Worked/Stopped/Failed)
 #include "cli/image_input.hpp"
 #include "cli/live_transcript.hpp"
 #include "cli/theme.hpp"
@@ -50,6 +52,12 @@ using lubancode::platform::CurrentDirUtf8;
 // 是一条线,不带文字、不带花边。is_console 为假(管道/重定向)时直接
 // 什么都不打,不污染被重定向的输出。
 void PrintDivider(const lubancode::cli::Theme& theme, bool is_console);
+
+// turn 尾分界线(终端回合视觉收束单):"──── Worked for 6m 41s ────"。
+// 每个用户 turn 恰一枚;tone 三档(Worked/Stopped/Failed)对应完成/打断/
+// 失败;wall_ms 是整轮墙钟(steady_clock 差,毫秒)。窄屏退化成纯文案。
+void PrintTurnFooter(const lubancode::cli::Theme& theme, bool is_console, std::int64_t wall_ms,
+                     lubancode::cli::TurnFooterTone tone);
 
 // 打印一段文本的前几行,超过就注明省略了多少行。给确认前的改动摘要用。
 void PrintFirstLines(const std::string& text, int max_lines);
