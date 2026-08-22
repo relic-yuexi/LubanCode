@@ -5,6 +5,8 @@
 #include <sstream>
 #include <vector>
 
+#include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
+
 namespace lubancode::tools {
 
 namespace {
@@ -289,10 +291,12 @@ std::string LspTool::name() const {
 }
 
 std::string LspTool::description() const {
-    return "用 LSP 语言服务器做语义查询:mode=definition 查定义(需要 line/character),"
-           "mode=references 查引用(需要 line/character),mode=symbols 列文件里的符号,"
-           "mode=diagnostics 看文件的诊断(错误/警告)。line/character 是 1 基,跟编辑器显示一致。"
-           "只有 config 的 lsp 段配置过的语言(按文件扩展名路由)才能查。";
+    // 文案在 src/prompts/tools/<语言>/lsp.md,兜底是迁移前的原文。
+    return ToolText("lsp", "description",
+                    "用 LSP 语言服务器做语义查询:mode=definition 查定义(需要 line/character),"
+                    "mode=references 查引用(需要 line/character),mode=symbols 列文件里的符号,"
+                    "mode=diagnostics 看文件的诊断(错误/警告)。line/character 是 1 基,跟编辑器显示一致。"
+                    "只有 config 的 lsp 段配置过的语言(按文件扩展名路由)才能查。");
 }
 
 nlohmann::json LspTool::input_schema() const {
@@ -302,10 +306,15 @@ nlohmann::json LspTool::input_schema() const {
          {{"mode",
            {{"type", "string"},
             {"enum", {"definition", "references", "symbols", "diagnostics"}},
-            {"description", "查询类型"}}},
-          {"file", {{"type", "string"}, {"description", "要查询的文件路径(相对或绝对)"}}},
-          {"line", {{"type", "integer"}, {"description", "行号,1 基(definition/references 必填)"}}},
-          {"character", {{"type", "integer"}, {"description", "列号,1 基(definition/references 必填)"}}}}},
+            {"description", ToolText("lsp", "param.mode", "查询类型")}}},
+          {"file",
+           {{"type", "string"}, {"description", ToolText("lsp", "param.file", "要查询的文件路径(相对或绝对)")}}},
+          {"line",
+           {{"type", "integer"},
+            {"description", ToolText("lsp", "param.line", "行号,1 基(definition/references 必填)")}}},
+          {"character",
+           {{"type", "integer"},
+            {"description", ToolText("lsp", "param.character", "列号,1 基(definition/references 必填)")}}}}},
         {"required", {"mode", "file"}},
     };
 }

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <utility>
 
+#include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
+
 namespace lubancode::tools {
 
 namespace {
@@ -22,9 +24,11 @@ ContextSearchTool::ContextSearchTool(std::shared_ptr<lubancode::agent::ContextAr
     : store_(std::move(store)) {}
 
 std::string ContextSearchTool::description() const {
-    return "在先前工具输出的落盘全文(artifact)里按关键词检索。工具结果太长时,请求里只留"
-           "[artifact aNNNN ...] 引用(头尾预览);预览不够就用本工具搜全文,拿命中行号与块 id,"
-           "再用 context_read 读出上下文。不可把预览的省略号当全文。";
+    // 文案在 src/prompts/tools/<语言>/context_search.md,兜底是迁移前的原文。
+    return ToolText("context_search", "description",
+                    "在先前工具输出的落盘全文(artifact)里按关键词检索。工具结果太长时,请求里只留"
+                    "[artifact aNNNN ...] 引用(头尾预览);预览不够就用本工具搜全文,拿命中行号与块 id,"
+                    "再用 context_read 读出上下文。不可把预览的省略号当全文。");
 }
 
 nlohmann::json ContextSearchTool::input_schema() const {
@@ -33,10 +37,16 @@ nlohmann::json ContextSearchTool::input_schema() const {
         {"properties",
          {
              {"artifact_id",
-              {{"type", "string"}, {"description", "[artifact aNNNN ...] 标记里的 aNNNN"}}},
-             {"query", {{"type", "string"}, {"description", "关键词(ASCII 大小写不敏感,中文按原文)"}}},
+              {{"type", "string"},
+               {"description", ToolText("context_search", "param.artifact_id", "[artifact aNNNN ...] 标记里的 aNNNN")}}},
+             {"query",
+              {{"type", "string"},
+               {"description", ToolText("context_search", "param.query", "关键词(ASCII 大小写不敏感,中文按原文)")}}},
              {"max_results",
-              {{"type", "integer"}, {"minimum", 1}, {"maximum", 32}, {"description", "最多回几条命中(默认 8)"}}},
+              {{"type", "integer"},
+               {"minimum", 1},
+               {"maximum", 32},
+               {"description", ToolText("context_search", "param.max_results", "最多回几条命中(默认 8)")}}},
          }},
         {"required", {"artifact_id", "query"}},
     };
@@ -79,9 +89,11 @@ ContextReadTool::ContextReadTool(std::shared_ptr<lubancode::agent::ContextArtifa
     : store_(std::move(store)) {}
 
 std::string ContextReadTool::description() const {
-    return "按稳定 id 读先前工具输出落盘全文(artifact)的一段:给 chunk_id(context_search 命中给的)"
-           "或 line_start(1 起)+line_count。单次最多 32 KiB,超了会拒绝并给可用范围。"
-           "全文真本按 sha256 校验,hash 不合的内容不会被供给。";
+    // 文案在 src/prompts/tools/<语言>/context_read.md,兜底是迁移前的原文。
+    return ToolText("context_read", "description",
+                    "按稳定 id 读先前工具输出落盘全文(artifact)的一段:给 chunk_id(context_search 命中给的)"
+                    "或 line_start(1 起)+line_count。单次最多 32 KiB,超了会拒绝并给可用范围。"
+                    "全文真本按 sha256 校验,hash 不合的内容不会被供给。");
 }
 
 nlohmann::json ContextReadTool::input_schema() const {
@@ -90,11 +102,18 @@ nlohmann::json ContextReadTool::input_schema() const {
         {"properties",
          {
              {"artifact_id",
-              {{"type", "string"}, {"description", "[artifact aNNNN ...] 标记里的 aNNNN"}}},
-             {"chunk_id", {{"type", "string"}, {"description", "块 id(如 c0003);给了就按块读"}}},
-             {"line_start", {{"type", "integer"}, {"minimum", 1}, {"description", "起始行(1 起;与 chunk_id 二选一)"}}},
+              {{"type", "string"},
+               {"description", ToolText("context_read", "param.artifact_id", "[artifact aNNNN ...] 标记里的 aNNNN")}}},
+             {"chunk_id",
+              {{"type", "string"}, {"description", ToolText("context_read", "param.chunk_id", "块 id(如 c0003);给了就按块读")}}},
+             {"line_start",
+              {{"type", "integer"},
+               {"minimum", 1},
+               {"description", ToolText("context_read", "param.line_start", "起始行(1 起;与 chunk_id 二选一)")}}},
              {"line_count",
-              {{"type", "integer"}, {"minimum", 0}, {"description", "读几行;0 = 读到结尾"}}},
+              {{"type", "integer"},
+               {"minimum", 0},
+               {"description", ToolText("context_read", "param.line_count", "读几行;0 = 读到结尾")}}},
          }},
         {"required", {"artifact_id"}},
     };
