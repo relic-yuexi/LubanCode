@@ -2,6 +2,10 @@
 #include "app_server/connection.hpp"
 
 #include <utility>
+#include <vector>
+
+#include "runtime/id_authority.hpp"
+
 namespace lubancode::app_server {
 
 namespace {
@@ -18,7 +22,31 @@ StdioConnection::StdioConnection(std::shared_ptr<Dispatcher> dispatcher, LineWri
       outbox_(outbox_capacity) {}
 
 void StdioConnection::EmitEvent(std::string_view method, const nlohmann::json& params) {
-    outbox_.Push(SerializeMessage(MakeEvent(method, params)), EventMustKeep(method));
+    // 事件显式 seq(阶段 3 冻结):进程内单调号,连接层统一盖。params
+    // 是拷贝进(不污染调用方),盖完再序列化。
+    nlohmann::json stamped = params;
+    if (stamped.is_object()) {
+        stamped[kSeqField] = runtime::ProcessIdAuthority().NextSeq();
+    }
+    if (!outbox_.Push(SerializeMessage(MakeEvent(method, stamped)), EventMustKeep(method))) {
+        // 丢事件了(可丢事件撞满且合并救不下):补一条 queue/overflow
+        // 通报(它自己是 must_keep)。params 从被丢事件的 params 里借
+        // threadId/turnId,drop/coalesce 账用 outbox 的累计值。
+        const std::string thread_id = stamped.is_object() ? stamped.value("threadId", std::string())
+                                                          : std::string();
+        const std::string turn_id =
+            stamped.is_object() ? stamped.value("turnId", std::string()) : std::string();
+        nlohmann::json overflow_params;
+        overflow_params[kSeqField] = runtime::ProcessIdAuthority().NextSeq();
+        overflow_params["threadId"] = thread_id;
+        overflow_params["turnId"] = turn_id;
+        overflow_params["dropped"] = outbox_.dropped();
+        overflow_params["coalesced"] = outbox_.coalesced();
+        outbox_.Push(SerializeMessage(MakeEvent(kEventQueueOverflow, overflow_params)),
+                     EventMustKeep(kEventQueueOverflow));
+        Diagnose("出站队列溢出:累计丢 " + std::to_string(outbox_.dropped()) + " 条,合并救下 " +
+                 std::to_string(outbox_.coalesced()) + " 条");
+    }
 }
 
 void StdioConnection::ProcessLine(const std::string& line) {
@@ -41,7 +69,18 @@ void StdioConnection::ProcessLine(const std::string& line) {
 
     DispatchContext context;
     context.emit_event = [this](std::string_view method, const nlohmann::json& params, bool must_keep) {
-        outbox_.Push(SerializeMessage(MakeEvent(method, params)), must_keep);
+        if (must_keep == EventMustKeep(method)) {
+            // 分型一致:走统一出口(seq 盖章 + 溢出通报)。
+            EmitEvent(method, params);
+            return;
+        }
+        // 调用方给了与分型表不同的保全等级:尊重调用方(比如装配层
+        // 刻意放行的自定义事件),但 seq 照盖。
+        nlohmann::json stamped = params;
+        if (stamped.is_object()) {
+            stamped[kSeqField] = runtime::ProcessIdAuthority().NextSeq();
+        }
+        outbox_.Push(SerializeMessage(MakeEvent(method, stamped)), must_keep);
     };
     // 反向请求响应的落点:装配层给了就用(审批/ask_user 悬起件的配对口)。
     if (resolve_interaction_) {

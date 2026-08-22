@@ -29,6 +29,15 @@ std::string PathToUtf8(const std::filesystem::path& path) {
     return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
 }
 
+// UTF-8 文件名段 -> path:与 Utf8Path 同款转换。Windows 上直接拿
+// std::string 拼路径(operator/ 收窄串按 ANSI 代码页解码),"甲"的 UTF-8
+// 三字节会被解成乱码,exists/remove 全找错名——中文 slug 的会话档在
+// Windows 上删不掉的根因。文件名与目录一样,必须走 u8string。
+std::filesystem::path Utf8Name(const std::string& utf8_name) {
+    return std::filesystem::path(
+        std::u8string(reinterpret_cast<const char8_t*>(utf8_name.data()), utf8_name.size()));
+}
+
 // canonical 的稳妥版:文件在就 weakly_canonical;不在(还没建)退
 // lexically_normal。两种都不许抛——error_code 形态。
 std::filesystem::path NormalizedPath(const std::filesystem::path& path) {
@@ -144,11 +153,12 @@ std::string SessionLifecycle::PathOf(const std::string& session_id, bool& in_arc
         return std::string();
     }
     std::error_code ec;
-    const fs::path root_file = Utf8Path(sessions_dir_) / (session_id + ".jsonl");
+    const fs::path name = Utf8Name(session_id + ".jsonl");
+    const fs::path root_file = Utf8Path(sessions_dir_) / name;
     if (fs::exists(root_file, ec) && !ec) {
         return PathToUtf8(root_file);
     }
-    const fs::path archive_file = Utf8Path(sessions_dir_) / "archive" / (session_id + ".jsonl");
+    const fs::path archive_file = Utf8Path(sessions_dir_) / "archive" / name;
     if (fs::exists(archive_file, ec) && !ec) {
         in_archive = true;
         return PathToUtf8(archive_file);
@@ -183,7 +193,7 @@ SessionLifecycleResult SessionLifecycle::ArchiveSession(const std::string& sessi
 
     const fs::path source = Utf8Path(path);
     const fs::path archive_dir = Utf8Path(sessions_dir_) / "archive";
-    const fs::path target = archive_dir / (session_id + ".jsonl");
+    const fs::path target = archive_dir / Utf8Name(session_id + ".jsonl");
 
     // 路径校验:源在根内、后缀对。
     if (!PathInsideRoot(source, Utf8Path(sessions_dir_)) || source.extension() != ".jsonl") {
@@ -229,7 +239,7 @@ SessionLifecycleResult SessionLifecycle::UnarchiveSession(const std::string& ses
     }
 
     const fs::path source = Utf8Path(path);
-    const fs::path target = Utf8Path(sessions_dir_) / (session_id + ".jsonl");
+    const fs::path target = Utf8Path(sessions_dir_) / Utf8Name(session_id + ".jsonl");
     if (!PathInsideRoot(source, Utf8Path(sessions_dir_) / "archive") || source.extension() != ".jsonl") {
         result.code = SessionLifecycleCode::PathOutsideRoot;
         return result;

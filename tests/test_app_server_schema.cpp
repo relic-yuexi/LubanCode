@@ -183,21 +183,61 @@ TEST_CASE("ParseIncoming:坏请求里捞得出的数字 id 要带回去(响应�
 TEST_CASE("CheckTurnStartParams:threadId/text 都要,缺一个错一个") {
     std::string thread_id;
     std::string text;
-    CHECK(CheckTurnStartParams(nlohmann::json{{"threadId", "t"}, {"text", "问点啥"}}, thread_id, text).ok);
+    std::vector<nlohmann::json> images;
+    CHECK(CheckTurnStartParams(nlohmann::json{{"threadId", "t"}, {"text", "问点啥"}}, thread_id, text, images).ok);
     CHECK(thread_id == "t");
     CHECK(text == "问点啥");
+    CHECK(images.empty());
 
-    const ParamsCheck missing_text = CheckTurnStartParams(nlohmann::json{{"threadId", "t"}}, thread_id, text);
+    const ParamsCheck missing_text = CheckTurnStartParams(nlohmann::json{{"threadId", "t"}}, thread_id, text, images);
     CHECK_FALSE(missing_text.ok);
     CHECK(missing_text.code == kErrInvalidParams);
 
     const ParamsCheck wrong_type =
-        CheckTurnStartParams(nlohmann::json{{"threadId", 3}, {"text", "x"}}, thread_id, text);
+        CheckTurnStartParams(nlohmann::json{{"threadId", 3}, {"text", "x"}}, thread_id, text, images);
     CHECK_FALSE(wrong_type.ok);
     CHECK(wrong_type.code == kErrInvalidParams);
 
-    const ParamsCheck empty_id = CheckTurnStartParams(nlohmann::json{{"threadId", ""}, {"text", "x"}}, thread_id, text);
+    const ParamsCheck empty_id = CheckTurnStartParams(nlohmann::json{{"threadId", ""}, {"text", "x"}}, thread_id, text, images);
     CHECK_FALSE(empty_id.ok);
+}
+
+TEST_CASE("CheckTurnStartParams:images 数组(阶段 3 冻结的字段名)") {
+    std::string thread_id;
+    std::string text;
+    std::vector<nlohmann::json> images;
+    // 合形状:mediaType/data 字符串,宽高/filename 可选。
+    const ParamsCheck ok = CheckTurnStartParams(
+        nlohmann::json{{"threadId", "t"},
+                       {"text", "看图"},
+                       {"images", nlohmann::json::array({nlohmann::json{
+                           {"mediaType", "image/png"}, {"data", "aGk="}, {"filename", "shot.png"}}})}},
+        thread_id, text, images);
+    CHECK(ok.ok);
+    REQUIRE(images.size() == 1);
+    CHECK(images[0]["mediaType"] == "image/png");
+    CHECK(images[0]["data"] == "aGk=");
+
+    // 不是数组:参数错。
+    images.clear();
+    const ParamsCheck not_array = CheckTurnStartParams(
+        nlohmann::json{{"threadId", "t"}, {"text", "x"}, {"images", "png"}}, thread_id, text, images);
+    CHECK_FALSE(not_array.ok);
+    CHECK(not_array.code == kErrInvalidParams);
+
+    // 元素缺 data:参数错。
+    images.clear();
+    const ParamsCheck bad_element = CheckTurnStartParams(
+        nlohmann::json{{"threadId", "t"},
+                       {"text", "x"},
+                       {"images", nlohmann::json::array({nlohmann::json{{"mediaType", "image/png"}}})}},
+        thread_id, text, images);
+    CHECK_FALSE(bad_element.ok);
+
+    // 不给 images:合法(纯文本)。
+    images.clear();
+    CHECK(CheckTurnStartParams(nlohmann::json{{"threadId", "t"}, {"text", "x"}}, thread_id, text, images).ok);
+    CHECK(images.empty());
 }
 
 TEST_CASE("CheckThreadStopParams:threadId 必填字符串") {
@@ -206,6 +246,27 @@ TEST_CASE("CheckThreadStopParams:threadId 必填字符串") {
     const ParamsCheck missing = CheckThreadStopParams(nlohmann::json::object(), thread_id);
     CHECK_FALSE(missing.ok);
     CHECK(missing.code == kErrInvalidParams);
+}
+
+TEST_CASE("CheckThreadLifecycleParams / CheckWorkflowQueryParams:新方法参数表") {
+    std::string thread_id;
+    CHECK(CheckThreadLifecycleParams(nlohmann::json{{"threadId", "t"}}, thread_id).ok);
+    CHECK(thread_id == "t");
+    const ParamsCheck missing = CheckThreadLifecycleParams(nlohmann::json::object(), thread_id);
+    CHECK_FALSE(missing.ok);
+
+    std::string run_id;
+    std::uint64_t last_seq = 999;
+    CHECK(CheckWorkflowQueryParams(nlohmann::json{{"runId", "r1"}}, run_id, last_seq).ok);
+    CHECK(run_id == "r1");
+    CHECK(last_seq == 0); // 缺省归 0(全量)
+    CHECK(CheckWorkflowQueryParams(nlohmann::json{{"runId", "r1"}, {"lastSeq", 7}}, run_id, last_seq).ok);
+    CHECK(last_seq == 7);
+    const ParamsCheck bad_seq =
+        CheckWorkflowQueryParams(nlohmann::json{{"runId", "r1"}, {"lastSeq", -1}}, run_id, last_seq);
+    CHECK_FALSE(bad_seq.ok);
+    const ParamsCheck no_run = CheckWorkflowQueryParams(nlohmann::json::object(), run_id, last_seq);
+    CHECK_FALSE(no_run.ok);
 }
 
 TEST_CASE("CheckInitializeParams / CheckThreadStartParams:可选字段类型对了才过") {

@@ -250,14 +250,29 @@ int HandlePluginInitCommand(const PluginInitArgs& init) {
 // 加载、i18n、hooks 装载)在 RunCli 里已经跑完——这里只把服务立起来进
 // 主循环。stdout 从这一刻起是协议专线,任何 std::cout 都不许再出现
 // (诊断走 stderr,app_server 模块自己守规矩,这层也一样)。
-// 骨架期(协议骨架单):backend 走真装配(BuildBackend)——假 backend
-// 只在单测里注入;真回合执行链(审批/打断/steering)是后续单的活。
+// backend 走真装配(BuildBackend)——假 backend 只在单测里注入。
 int RunAppServerMode(const lubancode::config::ConfigResult& config_result) {
     lubancode::app_server::ServerOptions options;
     if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
         options.sessions_dir = *luban_dir + "/sessions";
+        // wf 线的 run 账根(workflow/query 的快照与增量事件从这里读)。
+        options.workflow_runs_dir = *luban_dir + "/workflow-runs";
     }
     options.cwd = CurrentDirUtf8();
+    // 会话档 meta 真值(阶段 3 冻结项):wire/model 用配置四级合并的
+    // 结果,与 CLI 会话档同一张表;不写占位话。
+    switch (config_result.config.wire) {
+        case lubancode::config::Wire::Anthropic:
+            options.session_wire = "anthropic";
+            break;
+        case lubancode::config::Wire::Responses:
+            options.session_wire = "responses";
+            break;
+        case lubancode::config::Wire::ChatCompletions:
+            options.session_wire = "chat";
+            break;
+    }
+    options.session_model = config_result.config.model;
     lubancode::app_server::Server server(
         std::move(options),
         [&config_result]() { return lubancode::app::BuildBackend(config_result.config); },
