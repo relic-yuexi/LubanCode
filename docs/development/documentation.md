@@ -60,10 +60,12 @@
 长期页面不要反复写“本页对应 vX.Y.Z”。当前版本只认：
 
 ```text
-CMakeLists.txt
 src/app/version.hpp
 CHANGELOG.md
 ```
+
+`src/app/version.hpp` 定当前源码版本，CMake 从它读取项目版本；`CHANGELOG.md`
+记已备妥的发行说明。不要再往 `CMakeLists.txt` 抄第二枚版本字面量。
 
 也不要在入口、架构、功能总览里硬写测试用例数、断言数、提交数或代码行数。这些数字一过提交便旧。确需展示时：
 

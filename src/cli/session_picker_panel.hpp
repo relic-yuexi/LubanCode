@@ -12,6 +12,7 @@
 // 不破。
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -30,6 +31,11 @@ struct SessionPickerFeed {
     long long now_epoch = 0;                  // 相对时间的"现在"(测试可钉)
 };
 
+// Ctrl+T 转录浮层的按需取数:id -> 要显示的那段行(已按窗口裁好)。
+// 大文件按需读归这条回调:面板只在浮层开着且选中 id 变了时调一回,不是
+// 每键都读盘。返回第一行是标题行以下的内容(标题行面板自己拼)。
+using SessionTranscriptProvider = std::function<std::vector<std::string>(const std::string& session_id)>;
+
 // 面板退出时把查询形状带出来:调用方(接线层)看见形状变了就重查
 // catalog、带着新数据再进面板(选中项按 id 留住);没变就是正常退出。
 struct SessionPickerPanelResult {
@@ -42,10 +48,13 @@ struct SessionPickerPanelResult {
 // 开面板。非 TTY(管道/重定向)给 picked_id 空、形状原样退回。空列表/
 // 搜索无命中也照样开(各有画面)。prefer_id:重进面板时想守住的选中项
 // (换筛选前选中的那场;不在新命中里就落到最近一行)。
+// transcript_provider(可空):Ctrl+T 转录浮层的数据源;空 = 浮层开不了
+// (键照收,画面给"没有转录"的空态,不崩)。
 SessionPickerPanelResult RunSessionPickerPanel(const SessionPickerFeed& feed, const Theme& theme,
                                                SessionPickerScope initial_scope,
                                                SessionPickerSort initial_sort,
                                                const std::string& prefer_id = std::string(),
-                                               std::size_t visible_capacity = 12);
+                                               std::size_t visible_capacity = 12,
+                                               const SessionTranscriptProvider& transcript_provider = {});
 
 }  // namespace lubancode::cli

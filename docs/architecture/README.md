@@ -2,7 +2,7 @@
 
 [文档首页](../README.md) · [功能总览](../reference/feature-index.md) · [工具手册](../reference/tools.md) · [会话与上下文](../features/sessions/README.md) · [配置手册](../reference/configuration.md)
 
-LubanCode 是一支 C++23 命令行程序。上层接人，下层接系统。中间摆一副代理循环，把模型、工具、会话串起来。本页讲当前主线架构；版本号看 `CMakeLists.txt` 与 `src/app/version.hpp`，测试口径看[测试指南](../development/testing.md)。
+LubanCode 是一支 C++23 命令行程序。上层接人，下层接系统。中间摆一副代理循环，把模型、工具、会话串起来。本页讲当前主线架构；版本号只认 `src/app/version.hpp`，测试口径看[测试指南](../development/testing.md)。
 
 ## 1. 总图
 

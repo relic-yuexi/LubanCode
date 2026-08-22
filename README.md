@@ -208,7 +208,8 @@ git diff --cached | lubancode "替我审一遍这份改动"
 | `/mcp` · `/lsp` · `/plugins` | 看外接工具与语言服务器状态。 |
 | `/tools` · `/todos` | 看工具挂载状态与待办清单。 |
 | `/memory` | 管本场项目记忆、同步召回与后台写入。 |
-| `/sessions` · `/resume` · `/export` | 上下选择旧会话，重放历史后续聊或导出。 |
+| `/sessions` · `/resume` · `/export` | 全屏会话台账：搜索、筛选、排序、三种查看态，重放历史续聊或导出。 |
+| `/archive` · `/delete` | 归档或永久删除当前会话；顶层另有 `lubancode archive/unarchive/delete <id>`。 |
 | `/worktree new\|list\|exit` | 在隔离工作树里干活。 |
 | `/soul` · `/prompt` | 调风格，或替换系统提示人格段。 |
 | `/language` · `/image` | 切界面语言，附本地图片。 |

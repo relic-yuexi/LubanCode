@@ -2,6 +2,8 @@
 
 #include <string>
 
+#include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
+
 namespace lubancode::memory {
 
 std::string MemorySaveTool::name() const {
@@ -9,11 +11,13 @@ std::string MemorySaveTool::name() const {
 }
 
 std::string MemorySaveTool::description() const {
-    return "把一条小而稳定的项目事实、用户明确偏好或用户明说的行事纠正排进后台记忆(正式入库,不经待审区)。"
-           "只在信息已经由源码、工具结果或用户明说证实时调用;fact 必须在 paths 或 evidence 里"
-           "给出可核验证据;feedback 只收用户当场明说的纠正(如版本节奏、验收习惯),confidence 须"
-           "user-stated,模型推断不得直写。不要保存当前任务进度、猜测、日志、网页/MCP 原文、密钥或个人数据。"
-           "已有同主题时沿用索引里的 id 做更新。自动候选走回合总结,不经过这个工具。";
+    // 文案在 src/prompts/tools/<语言>/memory_save.md,兜底是迁移前的原文。
+    return tools::ToolText("memory_save", "description",
+                    "把一条小而稳定的项目事实、用户明确偏好或用户明说的行事纠正排进后台记忆(正式入库,不经待审区)。"
+                    "只在信息已经由源码、工具结果或用户明说证实时调用;fact 必须在 paths 或 evidence 里"
+                    "给出可核验证据;feedback 只收用户当场明说的纠正(如版本节奏、验收习惯),confidence 须"
+                    "user-stated,模型推断不得直写。不要保存当前任务进度、猜测、日志、网页/MCP 原文、密钥或个人数据。"
+                    "已有同主题时沿用索引里的 id 做更新。自动候选走回合总结,不经过这个工具。");
 }
 
 nlohmann::json MemorySaveTool::input_schema() const {
@@ -22,41 +26,66 @@ nlohmann::json MemorySaveTool::input_schema() const {
         {"properties",
          {
              {"kind", {{"type", "string"}, {"enum", {"fact", "preference", "feedback"}},
-                       {"description", "fact=可核验的项目事实；preference=用户明确说出的本项目偏好；"
-                                       "feedback=用户明说的行事纠正(须 user-stated)"}}},
-             {"id", {{"type", "string"}, {"description", "可选。更新已有记忆时用索引里的稳定 id"}}},
-             {"title", {{"type", "string"}, {"description", "一个可独立更新的短主题"}}},
-             {"summary", {{"type", "string"}, {"description", "索引里的一行摘要"}}},
-             {"content", {{"type", "string"}, {"description", "精炼正文，写事实、证据与注意事项，不抄大段源码"}}},
+                       {"description", tools::ToolText("memory_save", "param.kind",
+                                                "fact=可核验的项目事实；preference=用户明确说出的本项目偏好；"
+                                                "feedback=用户明说的行事纠正(须 user-stated)")}}},
+             {"id", {{"type", "string"},
+                     {"description", tools::ToolText("memory_save", "param.id", "可选。更新已有记忆时用索引里的稳定 id")}}},
+             {"title", {{"type", "string"},
+                        {"description", tools::ToolText("memory_save", "param.title", "一个可独立更新的短主题")}}},
+             {"summary", {{"type", "string"},
+                          {"description", tools::ToolText("memory_save", "param.summary", "索引里的一行摘要")}}},
+             {"content",
+              {{"type", "string"},
+               {"description", tools::ToolText("memory_save", "param.content",
+                                        "精炼正文，写事实、证据与注意事项，不抄大段源码")}}},
              {"keywords", {{"type", "array"}, {"items", {{"type", "string"}}},
-                           {"description", "函数名、类名、命令等精确检索词，最多 16 项"}}},
+                           {"description", tools::ToolText("memory_save", "param.keywords",
+                                                    "函数名、类名、命令等精确检索词，最多 16 项")}}},
              {"paths", {{"type", "array"}, {"items", {{"type", "string"}}},
-                        {"description", "支撑事实的项目内相对路径，最多 24 项；fact 必填至少一项"}}},
+                        {"description", tools::ToolText("memory_save", "param.paths",
+                                                 "支撑事实的项目内相对路径，最多 24 项；fact 必填至少一项")}}},
              {"confidence", {{"type", "string"}, {"enum", {"user-stated", "verified", "inferred"}},
-                             {"description", "user-stated=用户明说的偏好；verified=已核验的事实；"
-                                             "inferred=推断(只该出现在待审候选，不该走本工具)"}}},
+                             {"description", tools::ToolText("memory_save", "param.confidence",
+                                                      "user-stated=用户明说的偏好；verified=已核验的事实；"
+                                                      "inferred=推断(只该出现在待审候选，不该走本工具)")}}},
              {"scope", {{"type", "object"},
                         {"properties",
                          {
-                             {"kind", {{"type", "string"}, {"enum", {"project", "subtree", "path", "user"}},
-                                       {"description", "记忆适用的范围；subtree/path 须配 value；"
-                                                       "user=跨项目用户记忆(仅 preference/feedback，"
-                                                       "不得带项目路径证据，须全局授权 memory.user_enabled)"}}},
-                             {"value", {{"type", "string"}, {"description", "项目内相对路径(subtree/path 时必填)"}}},
+                             {"kind",
+                              {{"type", "string"},
+                               {"enum", {"project", "subtree", "path", "user"}},
+                               {"description",
+                                tools::ToolText("memory_save", "param.scope.kind",
+                                         "记忆适用的范围；subtree/path 须配 value；"
+                                         "user=跨项目用户记忆(仅 preference/feedback，"
+                                         "不得带项目路径证据，须全局授权 memory.user_enabled)")}}},
+                             {"value",
+                              {{"type", "string"},
+                               {"description", tools::ToolText("memory_save", "param.scope.value",
+                                                        "项目内相对路径(subtree/path 时必填)")}}},
                          }},
-                        {"description", "可选。当前工作目录不在范围内时不注入，防串味"}}},
+                        {"description", tools::ToolText("memory_save", "param.scope",
+                                                 "可选。当前工作目录不在范围内时不注入，防串味")}}},
              {"evidence", {{"type", "array"},
                            {"items",
                             {{"type", "object"},
                              {"properties",
                               {
-                                  {"path", {{"type", "string"}, {"description", "项目内相对路径"}}},
-                                  {"symbol", {{"type", "string"}, {"description", "可选:函数/类/配置键"}}},
+                                  {"path", {{"type", "string"},
+                                            {"description", tools::ToolText("memory_save", "param.evidence.path",
+                                                                     "项目内相对路径")}}},
+                                  {"symbol", {{"type", "string"},
+                                              {"description", tools::ToolText("memory_save", "param.evidence.symbol",
+                                                                       "可选:函数/类/配置键")}}},
                               }},
                              {"required", {"path"}}}},
-                           {"description", "可选。可核验证据，最多 24 项；fact 建议给出"}}},
+                           {"description", tools::ToolText("memory_save", "param.evidence",
+                                                    "可选。可核验证据，最多 24 项；fact 建议给出")}}},
              {"expires_at", {{"type", "string"},
-                             {"description", "可选。临时规约的到期日(YYYY-MM-DD 或 ISO 时间);到期后不再召回"}}},
+                             {"description", tools::ToolText("memory_save", "param.expires_at",
+                                                      "可选。临时规约的到期日(YYYY-MM-DD 或 ISO 时间);"
+                                                      "到期后不再召回")}}},
          }},
         {"required", {"kind", "title", "summary", "content"}},
     };

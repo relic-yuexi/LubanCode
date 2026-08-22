@@ -1,0 +1,3 @@
+## description
+
+Orchestrate a Python script to call mounted read-only tools in bulk (read_file/search and the like): write variables, conditionals, loops, asyncio.gather fan-out; when the script finishes, the distilled summary from emit() comes back. Suits traversing a batch of files, long chains that query A first and then feed B/C, and dispatching several read-only calls in parallel before aggregating; for short tasks plain tools cost less. The inputs are purpose (a one-line intent, entered into the audit log) and script (Python source; import luban_tools for typed stubs; must end with emit).

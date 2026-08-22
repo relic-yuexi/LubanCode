@@ -325,3 +325,190 @@ TEST_CASE("百分比: 首尾 0/100,单条 0,空表 0") {
     CHECK(SessionPickerScrollPercent(0, 0) == 0);
     CHECK(SessionPickerScrollPercent(99, 10) == 100);  // 越界钳住
 }
+
+// ---------------------------------------------------------------------------
+// 第三步:三种查看态(Ctrl+T 转录 / Ctrl+E 展开 / Ctrl+O 紧凑舒展)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Ctrl+O 切紧凑/舒展: 只改画法,筛选与选中不动") {
+    SessionPickerCore core(4);
+    core.SetEntries({Entry("a", "", "x", "c"), Entry("b", "", "y", "c2")});
+    core.HandleKey(Key(K::Down));
+    REQUIRE(core.selected() == 1);
+
+    core.HandleKey(Key(K::CtrlO));
+    CHECK(core.state().layout == SessionPickerLayout::Comfortable);
+    // 筛选/排序/选中/视口一个没动。
+    CHECK(core.state().scope == SessionPickerScope::Cwd);
+    CHECK(core.state().sort == SessionPickerSort::Updated);
+    CHECK(core.selected() == 1);
+    CHECK(core.viewport_top() == 0);
+    CHECK_FALSE(core.state().submitted);
+    CHECK_FALSE(core.state().cancelled);
+
+    core.HandleKey(Key(K::CtrlO));
+    CHECK(core.state().layout == SessionPickerLayout::Compact);
+
+    // 舒展帧:每行多一行 cwd,行数翻倍;row_match_index 两行同源。
+    core.HandleKey(Key(K::CtrlO));
+    const auto comfy = BuildSessionPickerFrame(core, 80);
+    const auto compact = [&]() {
+        core.HandleKey(Key(K::CtrlO));
+        return BuildSessionPickerFrame(core, 80);
+    }();
+    CHECK(comfy.lines.size() == compact.lines.size() + 2);  // 两条各多一行 cwd
+    // 舒展帧第 5 行(第一条的第二行)是 cwd,match 下标与第一行相同。
+    CHECK(comfy.row_match_index[4] == 0);
+    CHECK(comfy.row_match_index[4] == comfy.row_match_index[5]);
+    bool cwd_seen = false;
+    for (const auto& line : comfy.lines) {
+        if (line.find("c2") != std::string::npos) {
+            cwd_seen = true;  // 舒展行把第二条的 cwd(c2)也摆出来了
+        }
+    }
+    CHECK(cwd_seen);
+}
+
+TEST_CASE("Ctrl+E 展开: 选中行摊出详情,再按收起;空表不开") {
+    SessionPickerCore core(4);
+    SessionPickerEntry a = Entry("20260820-1-a", "长标题", "x", "D:/房");
+    a.model = "glm-5.2";
+    a.message_count = 12;
+    a.created_at = "2026-08-20 09:00:00";
+    a.updated_at = "2026-08-21 10:00:00";
+    core.SetEntries({a});
+
+    core.HandleKey(Key(K::CtrlE));
+    CHECK(core.state().expanded);
+    const auto frame = BuildSessionPickerFrame(core, 80);
+    // 展开帧多出详情:标题/cwd/id/模型/创建更新各一行。
+    std::size_t detail_lines = 0;
+    for (const auto& line : frame.lines) {
+        if (line.find("id:") != std::string::npos || line.find("模型:") != std::string::npos ||
+            line.find("创建:") != std::string::npos) {
+            ++detail_lines;
+        }
+    }
+    CHECK(detail_lines == 3);
+    bool id_line = false;
+    bool model_line = false;
+    for (const auto& line : frame.lines) {
+        if (line.find("20260820-1-a") != std::string::npos && line.find("id:") != std::string::npos) {
+            id_line = true;
+        }
+        if (line.find("glm-5.2") != std::string::npos) {
+            model_line = true;
+        }
+    }
+    CHECK(id_line);
+    CHECK(model_line);
+
+    core.HandleKey(Key(K::CtrlE));
+    CHECK_FALSE(core.state().expanded);
+
+    // 空表按 Ctrl+E 不开。
+    SessionPickerCore empty(4);
+    empty.SetEntries({});
+    empty.HandleKey(Key(K::CtrlE));
+    CHECK_FALSE(empty.state().expanded);
+}
+
+TEST_CASE("Ctrl+T 转录浮层: 开/收,浏览键落空,Enter 仍提交,选中回原行") {
+    SessionPickerCore core(3);
+    std::vector<SessionPickerEntry> entries;
+    for (int i = 0; i < 5; ++i) {
+        entries.push_back(Entry("e" + std::to_string(i), "", "行", "c"));
+    }
+    core.SetEntries(entries);
+    core.HandleKey(Key(K::Down));
+    core.HandleKey(Key(K::Down));
+    REQUIRE(core.selected() == 2);
+
+    core.HandleKey(Key(K::CtrlT));
+    CHECK(core.state().transcript_open);
+
+    // 浮层里浏览/打字全落空:选中、搜索、筛选、视口一个不动。
+    core.HandleKey(Key(K::Down));
+    core.HandleKey(Key(K::Up));
+    core.HandleKey(Key(K::PageDown));
+    core.HandleKey(Key(K::Home));
+    core.HandleKey(Char(U'灰'));
+    core.HandleKey(Key(K::Tab));
+    core.HandleKey(Key(K::Left));
+    CHECK(core.selected() == 2);
+    CHECK(core.state().search.empty());
+    CHECK(core.state().scope == SessionPickerScope::Cwd);
+    CHECK(core.state().focus == SessionPickerFocus::Search);
+    CHECK(core.state().transcript_open);  // 浮层还开着
+
+    // Esc 收浮层不当取消;浮层收掉后选中还是原行。
+    core.HandleKey(Key(K::Esc));
+    CHECK_FALSE(core.state().transcript_open);
+    CHECK_FALSE(core.state().cancelled);
+    CHECK(core.selected() == 2);
+
+    // 再开一次,Ctrl+T 也收得了。
+    core.HandleKey(Key(K::CtrlT));
+    CHECK(core.state().transcript_open);
+    core.HandleKey(Key(K::CtrlT));
+    CHECK_FALSE(core.state().transcript_open);
+
+    // 开着浮层时 Enter 直接提交(选中的就是浮层看的那场)。
+    core.HandleKey(Key(K::CtrlT));
+    core.HandleKey(Key(K::Enter));
+    CHECK(core.state().submitted);
+
+    // 开着浮层时 Ctrl+C/Ctrl+D 收浮层,不当取消。
+    SessionPickerCore cc(3);
+    cc.SetEntries({Entry("a", "", "x", "c")});
+    cc.HandleKey(Key(K::CtrlT));
+    cc.HandleKey(Key(K::CtrlC));
+    CHECK_FALSE(cc.state().transcript_open);
+    CHECK_FALSE(cc.state().cancelled);
+
+    SessionPickerCore cd(3);
+    cd.SetEntries({Entry("a", "", "x", "c")});
+    cd.HandleKey(Key(K::CtrlT));
+    cd.HandleKey(Key(K::CtrlD));
+    CHECK_FALSE(cd.state().transcript_open);
+    CHECK_FALSE(cd.state().cancelled);
+
+    // 开着浮层时 Ctrl+E 也当收浮层(core 的第二个实例验)。
+    SessionPickerCore ce(3);
+    ce.SetEntries({Entry("a", "", "x", "c")});
+    ce.HandleKey(Key(K::CtrlT));
+    ce.HandleKey(Key(K::CtrlE));
+    CHECK_FALSE(ce.state().transcript_open);
+    CHECK_FALSE(ce.state().expanded);
+}
+
+TEST_CASE("转录浮层帧: 标题/内容/空态/底栏") {
+    const auto frame = BuildSessionTranscriptFrame("转录 · 20260820-1-a",
+                                                   {"  user · 你好", "  assistant · 在"}, 80);
+    REQUIRE(frame.lines.size() == frame.row_match_index.size());
+    CHECK(frame.lines.front().find("20260820-1-a") != std::string::npos);
+    bool has_user_line = false;
+    bool has_footer = false;
+    for (const auto& line : frame.lines) {
+        if (line.find("user · 你好") != std::string::npos) {
+            has_user_line = true;
+        }
+        if (line.find("enter resume") != std::string::npos) {
+            has_footer = true;
+        }
+    }
+    CHECK(has_user_line);
+    CHECK(has_footer);
+    for (const auto& index : frame.row_match_index) {
+        CHECK(index == SessionPickerFrame::kNoMatch);  // 浮层没有列表行
+    }
+
+    const auto empty_frame = BuildSessionTranscriptFrame("转录 · x", {}, 80);
+    bool empty_hint = false;
+    for (const auto& line : empty_frame.lines) {
+        if (line.find("还没有可显示的转录") != std::string::npos) {
+            empty_hint = true;
+        }
+    }
+    CHECK(empty_hint);
+}

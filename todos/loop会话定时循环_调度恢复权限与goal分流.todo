@@ -1,0 +1,805 @@
+# `/loop` 会话定时循环：调度、恢复、权限与 `/goal` 分流
+
+状态：待做（2026-08-23 查阅 Claude Code `/loop`、Codex `/goal` 官方资料，并
+巡检 LubanCode 主循环、空闲唤醒、消息队列、后台任务与 session JSONL）
+
+## 一句话
+
+给 LubanCode 添 `/loop [interval] [prompt]`。它在当前会话尚开着时，按钟点把
+同一项检查再送一轮，适合盯部署、等 CI、看日志、守 PR。定时器只敲钟，不直接
+碰 AgentLoop；主线程听见钟声，再从现有安全入口开 turn。这样 history、工具、
+权限、compact、resume 仍走一条正路。
+
+## 先答面试官
+
+面试官问：“`/loop` 不就是 while(true) + sleep 吗？”
+
+答：不是。真做进 coding agent，要处理这些账：
+
+- turn 正忙时，下一拍是排队、跳过，还是并发？
+- 用户没守在终端前，危险工具要问谁？
+- 进程休眠两小时，醒来补跑 24 次，还是只跑最新一拍？
+- session resume 后，旧任务要不要复活？过期怎么算？
+- loop prompt 自己是 `/clear`、`/exit`、`/resume`，能不能执行？
+- 每拍都把同一句塞进 history，context 涨满怎么办？
+- 一拍失败是 loop 失败，还是下一拍照常？网络错误要不要退避？
+- 用户按 ESC，停当前 turn，还是连后面的钟也一起摘掉？
+- 两只 loop 同时到点，谁先走？会不会把同一仓库踩成两半？
+
+一句短答可说：
+
+> `/loop` 是 session-scoped scheduler，不是 Bash 睡眠。时钟线程只产 due event，
+> 主线程按单飞、合并、权限与恢复规则消费。任务定义、tick、终态都写 append-only
+> 账；错过的拍不追债，有副作用的失败不暗中重试。
+
+## 外部资料核对
+
+### Claude Code 的 `/loop`
+
+官方文档写得很清楚：
+
+- 需要 Claude Code v2.1.72 或更高。
+- `/loop 5m check the deploy` 按固定间隔重跑 prompt。
+- `/loop check the deploy` 可由 Claude 每轮自定下一拍；某些 provider 会退成固定
+  10 分钟。
+- 裸 `/loop` 跑内置 maintenance prompt；若有 `.claude/loop.md`，项目文件优先，
+  再看用户级 `~/.claude/loop.md`。文件超过 25,000 bytes 截断。
+- prompt 也可是一条 slash command，如 `/loop 20m /review-pr 1234`。
+- 固定间隔会换成 cron expression。cron tool 有 Create/Delete/List。
+- 任务只属于当前 session。开新会话便停；`--resume` 可恢复未过期任务。
+- recurring task 七天后过期。最小间隔一分钟。
+- 等下一拍时按 ESC，会清掉 `/loop` 的 pending wakeup。
+- permission prompts 继承当前 session。
+- 动态场景可用 Monitor 工具守后台输出，事件一来便送消息，比轮询省 token。
+- 环境变量 `CLAUDE_CODE_DISABLE_CRON=1` 可整套关掉 scheduler。
+
+### Codex 没有同名 `/loop`
+
+截至本次查阅，Codex 官方 developer command 表列 `/plan`、`/goal`、`/ps`、
+`/stop` 等，没有 `/loop`。不能写成“Codex 也有 `/loop`”。
+
+Codex 相近能力是 `/goal`：
+
+- `/goal <objective>` 给当前 chat 一项 durable objective。
+- `/goal` 看状态；`edit/pause/resume/clear` 管生命周期。
+- 它跨 turn 续做，直到可验证终点；适合迁移、重构、实验与长跑任务。
+- 官方强调目标须有 stopping condition、验证命令与 checkpoint。
+- 目标最长 4,000 字；长说明放文件里再引用。
+
+二者触发条件不同：
+
+| 能力 | 下一轮何时起 | 何时停 |
+| --- | --- | --- |
+| `/loop` | 时间到或监控事件到 | 用户停、过期，或任务显式报告已完成 |
+| `/goal` | 上一轮收口且目标未达 | evaluator 判定终点成立 |
+| Stop Hook | 上一轮收口 | 用户脚本/模型规则判定 |
+
+LubanCode 首单只实现 `/loop`。状态模型须给未来 `/goal` 留接口，但不把 `/goal`
+偷偷做成 `/loop 0s`。零间隔会烧 token，也没有终点 evaluator。
+
+### 资料入口
+
+- Claude Code scheduled tasks：
+  `https://code.claude.com/docs/en/scheduled-tasks`
+- Claude Code commands：
+  `https://code.claude.com/docs/en/commands`
+- Claude Code goal 对比：
+  `https://code.claude.com/docs/en/goal`
+- Claude Code tools reference：
+  `https://code.claude.com/docs/en/tools-reference`
+- Codex developer commands：
+  `https://learn.chatgpt.com/docs/developer-commands?surface=cli`
+- Codex Follow a goal：
+  `https://learn.chatgpt.com/use-cases/follow-goals`
+
+## LubanCode 当前底子
+
+### 已经有的
+
+| 能力 | 现状 |
+| --- | --- |
+| 主会话泵 | `InteractiveSession::Run()` 单线程逐轮消费 |
+| 空闲唤醒 | composer 每约 100ms 问 `SetIdleWakeHook` |
+| 自动送信 | SteeringQueue 可在主线程取队头、调用 `ProcessLine` |
+| 运行中介入 | AgentLoop 在安全边界从 inbox 收消息 |
+| 后台子代理 | 完成后可唤醒空闲 composer，另起主 turn 回流 |
+| 后台命令 | Registry + watcher + status/output/stop |
+| 取消 | ESC/cancel flag，当前工具收口、后续工具补未执行结果 |
+| session | append-only JSONL；queue snapshot 可 resume |
+| compact | 手动/自动/中途压缩，session 有 compact event |
+| typed Runtime | Start/Steer/Interrupt turn 与事件合同已立 |
+| Hook | Stop Hook 已能在一轮末尾阻断停止并给 continuation prompt |
+
+### 欠的
+
+- `SetIdleWakeHook` 是单枚全局 callback。loop 若直接覆盖，会弄丢子代理完成唤醒。
+- 没有 Scheduler、LoopTask、interval parser、next_due 或 task id。
+- `ReadLine` 虽会周期刷新，非 TTY/one-shot 没有常驻空闲循环。
+- 背景任务 registry 是进程级、内存级，不适合拿来冒充 session 定时任务。
+- SteeringQueue 的条目是用户排队消息，语义没有 scheduler source、tick id、
+  coalescing key、expiry。
+- session queue event 只保存待送消息，不保存定时定义与运行次数。
+- slash command 直接进 `ProcessLine`。若 scheduled prompt 是 `/exit`，照送会把会话
+  关掉；必须另有解析边界。
+- 一轮末尾 Stop Hook 可续跑，但它按完成触发，不按时间触发，也没有 interval。
+- Runtime command/event 尚无定时任务类型。
+
+## 产品边界
+
+### 首版要做
+
+```text
+/loop 5m check whether CI is green
+/loop check whether CI is green       # 默认 10m，先不做模型自定
+/loop 15m                              # 用项目/用户 loop.md 或内置 maintenance prompt
+/loop                                  # 同上，默认 10m
+/loop list
+/loop status [id]
+/loop pause <id|all>
+/loop resume <id|all>
+/loop stop <id|all>
+/loop run <id>                         # 立即补一拍，不改原 cadence
+```
+
+### 首版不做
+
+- 不做完整五段 cron 语法。
+- 不做机器关着也能跑的 daemon/system scheduler。
+- 不做云端 scheduled task。
+- 不让模型自定下一拍；先用稳定默认值。以后接 Monitor/self-paced。
+- 不默认允许 loop prompt 调任意 slash command。
+- 不拿 `/loop` 代替 `/goal`。
+
+### 默认值
+
+```text
+default_interval       = 10m
+minimum_interval       = 1m
+maximum_interval       = 7d
+recurring_expiry       = created_at + 7d
+max_active_per_session = 8
+missed_tick_policy     = coalesce_latest
+overlap_policy         = single_flight
+```
+
+默认值进集中配置/常量与文档，不散在 parser、scheduler、UI 三处。
+
+## 命令解析
+
+### interval 语法
+
+首版只认一个正整数 + 单位：
+
+```text
+1m  5m  2h  1d
+```
+
+- 单位只认 `m/h/d`，大小写不敏感。
+- 不认秒。开发测试用依赖注入的 fake clock，不为测试开放 `/loop 1s` 生产后门。
+- `0m`、负数、小数、溢出、连写 `1h30m` 明报。
+- 计算统一转 `std::chrono::seconds`，先做 checked multiplication。
+- 绝对上限七天；不是说任务七天后仍一直活，任务本身也有 expiry。
+- prompt 开头恰是普通词 `5migrate`，不能误拆成 interval。
+
+### 子命令与 prompt 消歧
+
+- 第一个 token 严格等于 list/status/pause/resume/stop/run 时，当子命令。
+- 想让 prompt 以这些词开头，可写显式 `--`：`/loop -- stop deployment if red`。
+- `/loop 5m -- list open bugs` 中 `--` 后全算 prompt，保留空格与换行。
+- task id 用宿主单调发号，如 `loop-3`；用户输入裸 `3` 可作便利别名，展示恒用全 id。
+- 一场可有多只 task，`/loop` 裸敲的“创建”语义优先于“列状态”；查询统一走 list。
+
+### loop.md
+
+查找次序：
+
+```text
+<project-root>/.lubancode/loop.md
+<home>/.lubancode/loop.md
+内置 maintenance prompt
+```
+
+- project file 须过项目 trust。未信任便跳过并提示，不执行里面的话。
+- 文件 UTF-8，最大 25,000 bytes；超过拒绝或明确截断。首版建议拒绝，免得指令尾巴
+  正好被截没。
+- 每一拍现读。用户改文件，下一拍生效；task 事件记本拍 content hash。
+- inline prompt 永远压过 loop.md。
+- loop.md 只是一份默认 prompt，不是一张多任务配置表。
+
+### 内置 maintenance prompt
+
+只准在已经授权的工作范围内：
+
+1. 继续本会话尚未收口的工作。
+2. 检查当前分支已有 PR/CI/review 问题。
+3. 无待办时做只读健康检查，报“无事”。
+
+不得凭空开新功能，不得因裸 `/loop` 自行 push、发布、删文件。不可逆动作仍走当前
+权限与用户先前授权，maintenance prompt 自己不是授权。
+
+## 领域模型
+
+```cpp
+enum class LoopTaskState {
+    Active,
+    Paused,
+    Due,
+    Running,
+    WaitingPermission,
+    BackingOff,
+    Completed,
+    Cancelled,
+    Expired,
+    Broken
+};
+
+enum class MissedTickPolicy { CoalesceLatest };
+enum class OverlapPolicy { SingleFlight };
+
+struct LoopTask {
+    std::string task_id;
+    std::string session_id;
+    std::string prompt;
+    std::optional<std::string> prompt_file;
+    std::string prompt_sha256;
+    std::chrono::seconds interval;
+    WallTime created_at;
+    WallTime expires_at;
+    WallTime next_due_at;
+    LoopTaskState state;
+    std::uint64_t tick_seq;
+    std::uint64_t run_count;
+    std::uint64_t skipped_count;
+    std::uint64_t consecutive_failures;
+    std::optional<std::string> active_turn_id;
+};
+```
+
+另有 `LoopTick`：
+
+```text
+task_id / tick_id / scheduled_at / dispatched_at / finished_at
+prompt_hash / source(inline|project_file|user_file|builtin)
+turn_id / outcome / error_code / next_due_at
+```
+
+task 与 tick 分开。task 是长账；每拍是一次尝试。不能只在 task 上覆盖 last_error，
+把前面七次失败都抹掉。
+
+## 调度架构
+
+```text
+LoopScheduler（thread-safe state + clock）
+      │ timer 只算 due、发 wake signal
+      ▼
+IdleWakeCoordinator
+      │ composer 让位 / app-server event loop 被唤醒
+      ▼
+SessionRuntime 主线程 PumpScheduledTicks()
+      │ 选一只 due，产 synthetic scheduled message
+      ▼
+StartTurn -> AgentLoop -> tools -> normal persistence
+      │
+      └─ terminal outcome 回写 tick，算 next_due
+```
+
+### 铁规矩
+
+- timer thread 不碰 history，不调 `ProcessLine`，不画 TUI，不问权限。
+- 一场 session 同时只跑一枚主 turn。loop tick 与用户 turn 不并发。
+- due task 只进一只 scheduler queue；消费发生在现有主循环安全边界。
+- 所有状态变更先持 scheduler mutex，再 append 事件；磁盘 IO 不在锁内。
+- 前端只是消费者。TUI、app-server、以后 Web 都不各起一套定时器真本。
+
+### 空闲唤醒要改成多路
+
+现有 `SetIdleWakeHook` 只能装一枚 callback，已经给后台子代理占着。改成：
+
+```cpp
+class IdleWakeCoordinator {
+public:
+    Subscription AddSource(std::string name, std::function<bool()> ready);
+    bool AnyReady() const;
+};
+```
+
+或由 SessionRuntime 统一提供 `HasPendingWork()`：
+
+```text
+user steering queue
+peer inbox
+subagent completion
+loop due tick
+runtime command queue
+```
+
+订阅有 RAII token，session 析构自动摘。不得让 loop 注册覆盖旧 hook，也不得把全局
+callback 留着抓已析构的 `this`。
+
+## Tick 怎样变成模型输入
+
+不要把 scheduled prompt 伪装成用户刚键入的普通正文。模型须知道来源和时间：
+
+```text
+[定时循环 tick]
+task_id: loop-3
+tick: 7
+scheduled_at: ...
+missed_since_last: 2
+
+原始任务：
+检查 CI；若全绿，报告结果并结束这只 loop。
+```
+
+- API history 仍可用 user message，内容加不可混淆的宿主前缀。
+- Runtime item/turn metadata 另带 source=`scheduled_loop`；前端不靠解析中文认来源。
+- session 消息与 tick event 都落。消息供模型重放，event 供 scheduler 恢复。
+- prompt 文件每拍现读后先算 hash。读失败时本拍 Broken，不拿上一版内容暗跑。
+- scheduled message 不进用户 Ctrl+R prompt history，免得历史搜索满屏重复句。
+- memory learn 默认跳过 scheduler 触发的重复 prompt，防同一句被抽成项目记忆。
+
+## Slash prompt 的边界
+
+Claude Code 支持 `/loop 20m /review-pr 1234`。LubanCode 不能把后半串不分青红皂白
+丢回 `ProcessLine`。以下命令若定时执行会出事：
+
+```text
+/exit /clear /resume /provider /model /worktree /compact /record /plugins
+```
+
+首版规则：
+
+- inline prompt 以 `/` 开头时拒绝，提示改写成自然语言。
+- 后续接 `ScheduledActionResolver`，只允许声明 `schedulable=true` 的 Skill/Workflow
+  command；内建会话管理命令永不 schedulable。
+- 解析成 typed action 后再执行，不把 slash 字符串当内部 API。
+- action catalog 版本/hash 记进 task。恢复时命令已不存在，task 标 Broken。
+- 即使 Skill/Workflow 可调度，内部工具仍逐枚过权限、ModePolicy、Hook。
+
+## 单飞、错过与公平
+
+### single-flight
+
+- 同一 task 上一拍仍 Running，下一拍只记 `tick_coalesced`，不再开第二 turn。
+- 一场 session 有别的用户 turn 在跑，due 保留。回到安全边界再取。
+- 用户输入优先级最高；其次审批回答、peer/子代理完成；loop 最后。
+- 连续用户输入可能让 loop 饿死。超过 interval 两倍仍未消费，状态栏提示 delayed，
+  但不抢正在输入的 composer。
+
+### missed tick
+
+机器休眠、进程停顿、会话忙，都不补跑每个旧刻度：
+
+```text
+now >= next_due
+  -> 只造一枚 due tick
+  -> missed_count = floor((now-next_due)/interval)
+  -> next cadence 从原时间轴推进到第一个 future slot
+```
+
+这样 5 分钟任务睡两小时后只查一次，不连烧 24 轮。
+
+### 多 task 同时到点
+
+- 按 `next_due_at`，再按 task creation seq 稳定排序。
+- 每消费一枚 tick，回主循环顶重新检查用户/审批等高优先级来源。
+- 不一次把八枚 due 全倒进 SteeringQueue；否则用户按 stop 时已经来不及。
+- 可配全局每分钟 turn 上限，超过便延后并留 rate_limited 事件。
+
+## 时钟
+
+同时用两种钟：
+
+- `steady_clock` 管进程内等待，系统校时不会让 timer 倒走。
+- `system_clock` 写 next_due/created/expires，供 JSONL 与 resume。
+
+恢复时从 wall clock 重算剩余时间，再把 deadline 映到 steady clock。若系统时间向前
+跳很大，只合并一拍；向后跳时不让任务凭空多活七天，expiry 以持久 wall time 为准。
+
+时区对纯 interval 无影响。以后加 cron 才须钉 timezone/DST；首版不先背这笔债。
+
+## 权限与无人值守
+
+Loop 不授予权限。每拍继承**触发那一刻** session 的 CollaborationMode 与
+PermissionMode，而不是创建时快照：
+
+- Plan 中到点：只做 Plan 允许的读操作。
+- Confirm 中遇危险工具：进入 WaitingPermission，弹正常审批。
+- Auto 中按现有分类。
+- Yolo 只有用户此前明确启用才生效。
+
+WaitingPermission 规矩：
+
+- 当前 tick 悬着时，同 task 后续拍全 coalesce。
+- TUI 用户回来可答；app-server 断线按 Broker timeout/cancel 收口。
+- 无交互入口不可挂死：pipe/one-shot 默认禁 `/loop`；以后 daemon 必须配明确 non-
+  interactive permission policy。
+- 拒绝只让本拍 Declined。task 默认仍 Active，下一拍照常；若同一 denial 连续三拍，
+  自动 Pause 并提示，免得每十分钟弹同一张框。
+- “always allow this session”仍只属 session；task resume 到另一场不得继承。
+
+## 完成与停止
+
+### 用户控制
+
+- `/loop stop <id>`：若 Waiting，取消 wake；若 Running，先标 stop_requested，再按
+  当前 ESC/InterruptTurn 语义停 turn。
+- `Esc` 在空闲等下一拍时：只停止最近创建/当前选中的 loop，需要 UI 明示 task id；
+  多 task 时裸 Esc 不应全删，可弹选择或只取消 next wake。
+- `Ctrl+C`/进程退出：flush task 状态；不把 active task 写成 Cancelled，留 resume
+  判断 Interrupted。
+- `/loop pause` 保留定义，不排新 tick；resume 从 now + interval 起，不补旧账。
+
+### 模型声明已完成
+
+轮询常见终点是“部署已完成”。若模型只回一句“好了”，宿主不该靠自然语言猜。
+新增窄工具：
+
+```text
+loop_control({task_id, action:"complete", reason})
+```
+
+- 只在 scheduled tick 的动态 tool set 中露出。
+- 只能操作当前 task id，不能停别人的 loop。
+- `complete` 是正常终态；`pause` 可用于需要用户处理的情况。
+- 它不改项目，不需 permission，但写 scheduler/session 账。
+- 调用完成后本 tick 可继续收最终答话，下一拍不再排。
+- 普通用户 turn 调不到；伪造 task id 报 scope error。
+
+## `/loop`、重试、`/goal` 三者别混
+
+| 名称 | 原因 | 新不新建 turn | id 关系 |
+| --- | --- | --- | --- |
+| 下一拍 | 到了新时间点 | 是 | 新 tick、新 turn |
+| retry | 同一拍遇瞬时基础设施错误 | 可选 | 同 tick 新 attempt |
+| goal continuation | evaluator 说终点未达 | 是 | 同 goal iteration |
+
+- 工具业务失败不自动 retry；等下一拍便是新的观察。
+- Provider 连接失败可在同 tick 做有限退避重试，如 5s/15s，最多两次；不越过 expiry。
+- rate limit 若带 retry-after，task 进 BackingOff；不要同时又按原 interval 打一拍。
+- 有副作用工具结局 unknown 时不自动 retry，沿用工具追踪 TODO 的规矩。
+- 未来 `/goal` 须有独立 evaluator、achieved/blocked 状态、token/time budget。它可复用
+  Scheduler 的持久任务账与主线程 pump，却不复用 interval trigger。
+
+## session JSONL
+
+新增事件：
+
+```json
+{"type":"loop_task_v1","event":"created","task_id":"loop-3","interval_ms":300000,"prompt":"...","source":"inline","created_at_ms":1,"expires_at_ms":2,"next_due_at_ms":3,"ts":"..."}
+{"type":"loop_task_v1","event":"paused","task_id":"loop-3","reason":"user","ts":"..."}
+{"type":"loop_tick_v1","event":"due","task_id":"loop-3","tick":7,"scheduled_at_ms":1,"missed":2,"ts":"..."}
+{"type":"loop_tick_v1","event":"started","task_id":"loop-3","tick":7,"turn_id":"turn-9","prompt_sha256":"...","ts":"..."}
+{"type":"loop_tick_v1","event":"finished","task_id":"loop-3","tick":7,"outcome":"succeeded","next_due_at_ms":4,"ts":"..."}
+```
+
+### 写盘栅栏
+
+1. create event flush 成功，才向用户报 task 已创建。
+2. due event 可批量 flush；started 必须在 synthetic user message/turn 前落。
+3. turn 终态与 tick finished 均落；顺序统一，恢复器能补另一边。
+4. pause/stop/complete/expire 先落终态，再摘 timer。
+
+### 恢复
+
+- replay 同 task 的 event，最后合法状态胜；非法跃迁报 corrupt。
+- Active 且未过期：恢复，next_due 已过便合并一拍。
+- Paused/Completed/Cancelled/Expired：不复活。
+- Running 有 started、无 turn terminal：标 Interrupted。先恢复现有 turn；不能直接再发
+  一枚相同 prompt。
+- tick finished 有、task next_due update 缺：从 finished 事件补。
+- task file prompt 在 resume 时已变，下一拍用新内容并记新 hash；不改旧 tick。
+- 七天 expiry 已过，追加 expired event，不默默从列表消失。
+- `/clear` 开新 session，不继承 loop。
+- `/resume` 恢复该 session 未过期 loop。
+- `/fork` 默认不复制 active loop，避免两个 thread 同时轮询/写同一仓库；可显式 clone，
+  新 task id、新 expiry。
+
+## context 与成本
+
+每拍都进同一会话，history 必然长。要提前钉规矩：
+
+- tick 前走现有自动 compact 水位检查。
+- compact manifest 保留 active loop 摘要：task id、原 prompt/hash、最近结论、未决条件、
+  下一拍时间。不要把全 tick 日志抄进 summary。
+- 重复 tick 的原始大工具结果照 artifact/microcompact 卸载。
+- UI `/loop status` 从 scheduler 账读，不依赖被 compact 掉的消息。
+- 每 task 可设 `max_runs`、`max_tokens`、`max_duration`。首版至少留 schema，默认只用
+  七天 expiry 与全局 rate limit。
+- 每拍收 usage；`/loop status` 展总 run、token、失败、下一拍。
+- 到预算上限自动 Pause，不擅自清除；用户可加预算后 resume。
+
+## 与后台命令和 Monitor 的关系
+
+轮询“日志有无新行”很费 token。长期应加事件驱动 Monitor：
+
+```text
+Monitor watches process/file/HTTP adapter
+  -> event line
+  -> SessionRuntime enqueues reaction turn
+```
+
+- Monitor 不是让模型写 `while true; sleep` 的 Bash。
+- watcher 输出要限长、去抖、背压、脱敏。
+- 同一 source 短时间多事件合并，保留 count/first/last。
+- Monitor 生命周期可挂 LoopTask，但触发器记 `event`，不伪装 interval。
+- 后台 run_command 已有 Registry，可先接“任务进入终态”事件，减少用 `/loop` 反复查
+  `background_output`。
+- 首版只做定时 loop；TODO 中留这条接口，不顺手扩成一套通用 daemon。
+
+## Runtime 与多前端
+
+typed command：
+
+```text
+CreateLoopTask
+ListLoopTasks
+ReadLoopTask
+PauseLoopTask
+ResumeLoopTask
+CancelLoopTask
+RunLoopTaskNow
+```
+
+typed event：
+
+```text
+LoopTaskCreated
+LoopTaskStateChanged
+LoopTickDue
+LoopTickStarted
+LoopTickCompleted
+LoopTickCoalesced
+LoopTaskExpired
+```
+
+字段至少有：
+
+```text
+thread_id / task_id / tick_id / turn_id
+state / interval_ms / next_due_at_ms / expires_at_ms
+run_count / missed_count / consecutive_failures
+outcome / error_code / prompt_source / prompt_sha256
+```
+
+- slash parser 只译 typed command。app-server 不伪造 `/loop` 字符串。
+- TUI 状态栏可显示 `loop×2 · next 4m`；详情走 `/loop list`。
+- Web/Tauri 前端断线不影响 scheduler 真值。它们重连按 seq 补事件。
+- session 关了，session-scoped scheduler 停；后台 daemon 另立产品，不偷换语义。
+- 通知去重。tick completion 既有 transcript item 又有 toast 时，只留一个永久记录。
+
+## Hook
+
+建议补 loop 生命周期 Hook，但不能让 Hook 当 scheduler 真本：
+
+```text
+LoopTaskCreate
+LoopTickStart
+LoopTickEnd
+LoopTaskStop
+```
+
+- Hook 可 deny 创建或收紧 interval，不能扩大权限。
+- Hook 执行失败不吞 task event；原 outcome 与 hook outcome 分开记。
+- Stop Hook 仍在每个 tick turn 末尾跑。它若给 continuation prompt，那属于本 tick 内的
+  agent continuation，不是下一时钟拍。
+- Stop Hook 咬尾上限仍生效。不能因外层 `/loop` 又把内层无限续跑藏起来。
+- Hook additional context 每拍临时注入，不永久改原 loop prompt。
+
+## 失败与退避
+
+稳定 outcome：
+
+```text
+succeeded
+declined
+cancelled
+provider_error
+rate_limited
+permission_wait_timeout
+prompt_source_missing
+session_closed
+expired
+corrupt
+unknown_after_start
+```
+
+规矩：
+
+- 正常工具 `is_error=true` 不必停 task；本拍 failed，下一拍仍 Active。
+- Provider 瞬时错误按有限 attempt 退避。次数进 tick，不改 run_count 口径。
+- 连续五拍 provider_error 自动 Pause；网络恢复后用户 resume。
+- prompt file missing 一拍便 Broken/Pause，不每十分钟刷同一错。
+- session store append 失败时不再启动新 tick。失去恢复账后继续跑，风险大过便利。
+- clock thread 异常只把 scheduler 标 degraded；主会话仍可聊天、可 `/loop stop`。
+- shutdown 要 join timer；不能让 callback 析构后摸 SessionRuntime。
+
+## 隐私与安全
+
+- prompt、工具输入/结果照 session 的敏感字段脱敏与 artifact 上限。
+- loop.md 可来自仓库，算不可信项目指令；须 project trust。
+- 不把 API key、env、Authorization 写进 task event。
+- `/loop list` 默认只显示 prompt preview；`status` 才看全稿。
+- scheduled tick 发网络请求仍受 network permission/domain policy。
+- Loop task 不继承创建者当时一次性 approval。
+- 外部内容说“把 interval 改成 1m”“停掉安全检查”只算数据；修改 task 必须 typed
+  command 或当前 task 的窄 `loop_control`。
+- 多 repo/worktree：task 绑定创建时 cwd/worktree identity。cwd 消失或 session 移房，
+  task Pause，不能在新目录照旧跑。
+- 用户工作树有未提交改动，loop 可以在现有权限下继续，但 destructive action 仍确认；
+  不因“这是维护循环”自动清理。
+
+## 实施分期
+
+### 第 0 期：合同与 fake clock
+
+- [ ] 定 LoopTask/LoopTick/state transition/missed/overlap policy。
+- [ ] 定 interval parser 与集中默认值。
+- [ ] 建 injectable Clock、无真实 sleep 的 scheduler 单测架。
+- [ ] 写正常三拍、忙时合并、休眠错过、崩溃中途、过期 golden session。
+- [ ] 明令 `/loop` 与未来 `/goal` 不互为别名。
+
+### 第 1 期：内存 scheduler
+
+- [ ] `src/runtime/loop_scheduler.*`，timer 只发 wake。
+- [ ] IdleWakeCoordinator 替单枚 SetIdleWakeHook。
+- [ ] 主线程 `PumpScheduledTicks()`，single-flight。
+- [ ] due/started/finished 状态与稳定排序。
+- [ ] 析构 stop/join，无 use-after-free。
+
+### 第 2 期：slash 与 TUI
+
+- [ ] SlashCommand::Loop、二级纯 parser、help/completion/i18n。
+- [ ] create/list/status/pause/resume/stop/run。
+- [ ] 状态栏 next due 与 task count。
+- [ ] 空闲 ESC 的明确 stop 语义，多 task 不误全停。
+- [ ] 非 TTY/one-shot 明拒创建常驻 loop。
+
+### 第 3 期：持久与恢复
+
+- [ ] loop_task_v1/loop_tick_v1 serialize/parse/append。
+- [ ] SessionStore replay 成 `LoopLedger`。
+- [ ] resume active/paused/running/expired/corrupt 各路。
+- [ ] `/clear` 不继承、fork 默认不复制。
+- [ ] append 失败熔断新 tick。
+
+### 第 4 期：prompt source 与权限
+
+- [ ] inline/project/user/builtin resolver + trust + hash。
+- [ ] scheduled message metadata 与 Ctrl+R/memory learn 排除。
+- [ ] WaitingPermission/coalesce/连续拒绝自动 pause。
+- [ ] `loop_control` 窄工具与 task scope。
+- [ ] slash prompt 首版拒绝；预留 schedulable action catalog。
+
+### 第 5 期：Runtime/app-server
+
+- [ ] typed loop commands/events 接 EventSink。
+- [ ] app-server schema、重连 replay、迟到 command 测试。
+- [ ] TUI handler 退成 adapter，不在 DispatchSlashCommand 存业务状态。
+- [ ] metrics/usage/budget/status query。
+
+### 第 6 期：退避与事件驱动
+
+- [ ] provider retry-after、指数退避、全局 rate cap。
+- [ ] 后台命令终态接 event trigger。
+- [ ] Monitor tool 的去抖、背压、输出上限与生命周期。
+- [ ] self-paced next interval 只收结构化值并夹在 min/max，不读自然语言猜。
+
+### 第 7 期：独立 `/goal`
+
+- [ ] GoalTask/GoalIteration/evaluator outcome。
+- [ ] achieved/blocked/budget/time limit 与 checkpoint。
+- [ ] 复用持久 task ledger、主线程 pump、Runtime events。
+- [ ] evaluator 不调用工具，只评模型已上报证据；防自说自话达标。
+- [ ] `/goal` 与 `/loop` 并存时统一公平调度，不互相递归。
+
+## 测试矩阵
+
+### parser
+
+- [ ] `1m/5m/2h/1d`；大小写；前后空白；多行 prompt。
+- [ ] 0、负数、小数、溢出、无单位、秒、超过 7d。
+- [ ] list/status/pause/resume/stop/run 与 `--` 消歧。
+- [ ] prompt 以 `5migrate` 开头不误当 interval。
+- [ ] task id 不存在、all、裸数字别名。
+
+### scheduler/clock
+
+- [ ] 准点一拍，不早跑。
+- [ ] system clock 前跳/后跳，steady wait 不乱。
+- [ ] 休眠两小时只合并一拍，missed count 对。
+- [ ] 同 task 不 overlap。
+- [ ] 多 task 同刻按 due/creation seq。
+- [ ] 用户 turn、审批、peer、子代理结果优先。
+- [ ] pause/resume 从 now 重排，不补旧账。
+- [ ] expiry 边界恰等于 now。
+
+### 主循环
+
+- [ ] loop wake 与现有 subagent idle wake 都活，不互相覆盖。
+- [ ] timer thread 不调用 ProcessLine/AgentLoop/history。
+- [ ] due tick 只在主线程开 turn。
+- [ ] composer 正在输入时不吞字、不撕画面。
+- [ ] session 析构后 timer callback 不触碰 this。
+- [ ] current turn ESC 后 task 后续状态符合 stop/cancel 选择。
+
+### 权限
+
+- [ ] Confirm 危险工具进入 WaitingPermission，后续拍 coalesce。
+- [ ] Auto/Yolo 读取触发时刻状态，不拿创建时旧档。
+- [ ] Plan mode tick 仍受 Plan 硬闸。
+- [ ] 一次性 approval 不跨 tick。
+- [ ] 连续 denial 达阈值自动 Pause。
+- [ ] 无交互入口不挂死。
+
+### session/recovery
+
+- [ ] create flush 失败不报成功。
+- [ ] 崩在 due、started、turn 中、turn terminal、finished 各点。
+- [ ] Running 恢复不重复发 prompt。
+- [ ] 尾行截断、重复 event、非法跃迁、未知版本。
+- [ ] 老 session 无 loop event 正常。
+- [ ] resume 未过期任务；过期只记 expired。
+- [ ] clear/fork/worktree/cwd 绑定。
+
+### prompt/command
+
+- [ ] inline 压 loop.md；项目压用户；缺文件退内置。
+- [ ] 未信任 project loop.md 不执行。
+- [ ] 文件超限/非 UTF-8/删除/修改 hash。
+- [ ] `/exit` 等 slash prompt 被拒。
+- [ ] loop_control 只能管当前 task。
+- [ ] scheduled prompt 不进 Ctrl+R，不反复写 memory。
+
+### 失败/成本
+
+- [ ] provider 瞬时错有限 retry，业务 tool error 不暗重试。
+- [ ] retry-after 压过 cadence，不双发。
+- [ ] 连续 provider error 自动 pause。
+- [ ] context 过线先 compact，active task 摘要守恒。
+- [ ] usage/budget/max runs/expiry 收口。
+- [ ] session append 失败熔断 scheduler。
+
+## 验收
+
+- `/loop 5m 检查 CI` 可在当前会话单飞运行；用户继续聊天时不并发踩 history。
+- 空闲到点会自己唤醒，不用用户再敲一行；后台子代理唤醒照常可用。
+- 机器休眠或会话忙只合并一拍，不追跑旧刻度。
+- 每只 task/tick 有 id、状态、时间、turn、outcome；crash/resume 后不重复执行。
+- 权限逐拍照常生效。无人可答时不挂死，不把 loop 当授权。
+- loop.md、内置 prompt、inline prompt 的优先级、trust、hash 与上限说得清。
+- `/loop` 与 `/goal` 的触发/终止语义分清；文档不声称 Codex 有同名 `/loop`。
+- TUI 与 app-server 共用 Scheduler/typed event；终端 slash 只是一层翻译。
+
+## 不做
+
+- 不在 shell 里拼 `while true; sleep`。
+- 不从 timer thread 直接调用 AgentLoop。
+- 不让同一 session 两只主 turn 并发。
+- 不补跑所有 missed tick。
+- 不把 queue message 当完整 scheduler 真本。
+- 不让 scheduled prompt 执行任意 slash command。
+- 不继承一次性 approval，不默认 Yolo。
+- 不把自然语言“已经完成”当 stop；用 loop_control/用户命令。
+- 不把 `/goal` 做成零间隔 loop。
+- 不在首版承诺关机、退出 session 后仍可靠运行。
+- 不让 Workflow、Hook、Plugin 另藏一只定时器旁路。
+
+## 源码入口
+
+| 责任 | 文件 / 符号 |
+| --- | --- |
+| 主会话泵 | `src/app/interactive_session.cpp`，`InteractiveSession::Run` |
+| 输入与 idle wake | `src/cli/console_input.*` |
+| slash 解析 | `src/cli/slash_commands.*` |
+| 自动消息队列 | `src/cli/queue_model.*` |
+| Agent Loop/inbox | `src/agent/loop.*` |
+| 一轮装配/Stop Hook | `src/app/turn_runner.cpp` |
+| 后台命令 watcher | `src/tools/background_tasks.*` |
+| 后台子代理 | `src/tools/agent_tool.*` |
+| session JSONL | `src/agent/session_store.*` |
+| compact | `src/agent/compact.*`、`microcompact.*` |
+| typed command/event | `src/runtime/command.hpp`、`event.hpp` |
+| Runtime 大单 | `todos/显示系统彻底剥离_统一SessionRuntime接TUI_Web_Tauri.todo` |
+| Workflow 调度参考 | `todos/Workflows自然语言编排_可复用Agent图与Slash命令SOP.todo` |
+| 工具失败恢复 | `todos/工具调用逐枚追踪_五工具故障归因崩溃恢复与副作用补偿.todo` |

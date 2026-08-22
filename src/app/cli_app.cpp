@@ -343,6 +343,22 @@ int RunCli(const std::vector<std::string>& args) {
         }
         case CliAction::Proceed:
             break;
+        case CliAction::ManageSession: {
+            // 会话管理子命令(archive/unarchive/delete):不进会话,打完
+            // 结果就退。i18n 已在函数头初始化;确认屏在 handler 里。
+            const auto luban_dir = lubancode::config::HomeLubancodeDir();
+            if (!luban_dir.has_value()) {
+                std::cerr << tr("session.no_home") << "\n";
+                return 1;
+            }
+            const lubancode::cli::Theme manage_theme = lubancode::cli::ResolveTheme(
+                std::string(), lubancode::cli::DetectConsoleCapability().colors_enabled);
+            return HandleSessionManagementCommand(*luban_dir + "/sessions",
+                                                  static_cast<int>(parsed_cli.session_command.kind),
+                                                  parsed_cli.session_command.session_ref,
+                                                  parsed_cli.session_command.force, manage_theme,
+                                                  nullptr);
+        }
     }
     const CliOptions& cli_options = parsed_cli.options;
 

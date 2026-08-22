@@ -121,6 +121,10 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Sessions;
     } else if (lower == "/resume") {
         parsed.command = SlashCommand::Resume;
+    } else if (lower == "/archive") {
+        parsed.command = SlashCommand::Archive;
+    } else if (lower == "/delete") {
+        parsed.command = SlashCommand::Delete;
     } else if (lower == "/export") {
         parsed.command = SlashCommand::Export;
     } else if (lower == "/copy") {
@@ -528,6 +532,8 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/memory", tr("slash.desc.memory")},
             {"/sessions", tr("slash.desc.sessions")},
             {"/resume", tr("slash.desc.resume")},
+            {"/archive", tr("slash.desc.archive")},
+            {"/delete", tr("slash.desc.delete")},
             {"/export", tr("slash.desc.export")},
             {"/copy", tr("slash.desc.copy")},
             {"/title", tr("slash.desc.title")},

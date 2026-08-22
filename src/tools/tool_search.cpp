@@ -5,6 +5,8 @@
 #include <sstream>
 #include <vector>
 
+#include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
+
 namespace lubancode::tools {
 
 namespace {
@@ -124,9 +126,11 @@ std::string ToolSearchTool::name() const {
 }
 
 std::string ToolSearchTool::description() const {
-    return "按关键词检索延迟挂载的工具(MCP/插件等外挂工具不直接进工具表,只在系统提示的索引段里露名字)。"
-           "对工具名和描述做大小写不敏感的分词匹配,命中的工具立即挂载,本轮之后即可直接调用。"
-           "当索引段里有你需要的能力、或怀疑有外挂工具能干这件事时,先用这个搜。";
+    // 文案在 src/prompts/tools/<语言>/tool_search.md,兜底是迁移前的原文。
+    return ToolText("tool_search", "description",
+                    "按关键词检索延迟挂载的工具(MCP/插件等外挂工具不直接进工具表,只在系统提示的索引段里露名字)。"
+                    "对工具名和描述做大小写不敏感的分词匹配,命中的工具立即挂载,本轮之后即可直接调用。"
+                    "当索引段里有你需要的能力、或怀疑有外挂工具能干这件事时,先用这个搜。");
 }
 
 nlohmann::json ToolSearchTool::input_schema() const {
@@ -137,13 +141,15 @@ nlohmann::json ToolSearchTool::input_schema() const {
 
     nlohmann::json query_prop = nlohmann::json::object();
     query_prop["type"] = "string";
-    query_prop["description"] = "关键词,空格分隔多个词;对延迟工具的名字和描述做大小写不敏感的子串匹配,"
-                                "按命中词数排序。";
+    query_prop["description"] =
+        ToolText("tool_search", "param.query",
+                 "关键词,空格分隔多个词;对延迟工具的名字和描述做大小写不敏感的子串匹配,"
+                 "按命中词数排序。");
     properties["query"] = query_prop;
 
     nlohmann::json limit_prop = nlohmann::json::object();
     limit_prop["type"] = "integer";
-    limit_prop["description"] = "最多返回并挂载几个,不填默认 5。";
+    limit_prop["description"] = ToolText("tool_search", "param.limit", "最多返回并挂载几个,不填默认 5。");
     properties["limit"] = limit_prop;
 
     schema["properties"] = properties;

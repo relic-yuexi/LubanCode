@@ -80,6 +80,8 @@ enum class ServerEventKind {
     // thread 层
     ThreadStarted,
     ThreadUpdated,
+    // thread 永久删除(SessionLifecycle 删成后发;payload 带 thread_id)。
+    ThreadDeleted,
     // turn 层
     TurnStarted,
     TurnCompleted,

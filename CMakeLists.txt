@@ -1,6 +1,21 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(lubancode VERSION 0.26.13 LANGUAGES CXX)
+# src/app/version.hpp 是版本号唯一出处。CMake 读取它来填 PROJECT_VERSION，
+# 免得构建元数据与程序 --version 各挂一块旧牌子。
+file(READ "${CMAKE_CURRENT_LIST_DIR}/src/app/version.hpp" _lubancode_version_header)
+string(REGEX MATCH
+  "kVersion[ \t]*=[ \t]*\"([0-9]+\\.[0-9]+\\.[0-9]+)\""
+  _lubancode_version_match
+  "${_lubancode_version_header}")
+if(NOT CMAKE_MATCH_1)
+  message(FATAL_ERROR "无法从 src/app/version.hpp 读取 LubanCode SemVer")
+endif()
+set(LUBANCODE_VERSION "${CMAKE_MATCH_1}")
+
+project(lubancode VERSION "${LUBANCODE_VERSION}" LANGUAGES CXX)
+
+unset(_lubancode_version_header)
+unset(_lubancode_version_match)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -372,10 +387,14 @@ add_library(lubancode_core STATIC
   src/agent/microcompact.cpp
   src/agent/session_store.cpp
   src/agent/session_catalog.cpp
+  # 会话管理器单第四五步:SessionLifecycle 搬与删的唯一收口(纯磁盘薄壳)。
+  src/agent/session_lifecycle.cpp
   src/agent/workflow_recorder.cpp
   src/agent/skill_drafter.cpp
   # 显示系统剥离单第一步:runtime 合同(纯类型 + 序列化,零 cli/app 依赖)。
   src/runtime/runtime_contract.cpp
+  # 会话管理器单第六步:会话查询/搬删的 runtime 侧命令服务(合同消费方)。
+  src/runtime/session_command_service.cpp
   # 第三步:TurnRuntime 纯逻辑核(权限/hooks/usage/取消),cli/app 零依赖。
   src/runtime/turn_runtime.cpp
   # plugins 本地 Tool 运行时(冻结合同 + process v1):manifest 强校验、
