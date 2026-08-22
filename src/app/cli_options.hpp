@@ -15,12 +15,14 @@ struct CliOptions {
     bool auto_confirm = false;      // --yes
     bool print_config = false;      // --config
     bool continue_last = false;     // --continue
+    bool app_server = false;        // app-server 子命令:无界面后台协议(stdio)
     std::string system_prompt_file_arg;  // --system-prompt <文件>(空 = 没给)
 };
 
 // 解析结果:action 不是 Proceed 时,RunCli 兑现完动作就退,不进会话。
 enum class CliAction {
     Proceed,                  // 正常路径:按 options 继续启动
+    RunAppServer,             // app-server 子命令:stdio 后台协议主循环
     PrintVersion,             // --version
     PrintHelp,                // --help
     CheckUpdate,              // --check-update

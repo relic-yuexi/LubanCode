@@ -160,6 +160,12 @@ add_executable(lubancode_tests
   test_ptc_profile.cpp
   # PTC P2:LubanBench-Tool 八类场景离线层(题库/判卷/报告)。
   test_ptc_bench.cpp
+  # app-server 无界面后台协议(阶段 1:协议骨架):schema 信封与错误码、
+  # 分帧/有界出站队列、握手状态机与假连接整线、假 backend 整回合。
+  test_app_server_schema.cpp
+  test_app_server_connection.cpp
+  test_app_server_dispatch.cpp
+  test_app_server_turn.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)
