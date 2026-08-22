@@ -8,6 +8,7 @@
 
 #include "agent/context.hpp"
 #include "api/types.hpp"
+#include "platform/text_encoding.hpp"  // IsValidUtf8:截断回归的判据
 
 using namespace lubancode;
 
@@ -301,6 +302,29 @@ TEST_CASE("TrimHistory: 截断有下限,不会把 tool_result 截成空壳") {
     const auto& tool_result = std::get<api::ToolResultBlock>(trimmed[2].content[0]);
     CHECK(tool_result.content.size() >= 1024);
     CHECK(tool_result.content.find('x') != std::string::npos);
+}
+
+// 回归:截短按字节裸砍,刀口落进三字节汉字的腰上,合法 UTF-8 也被截成
+// 非法——请求体 dump 当场 type_error.316,会话每回合必挂(真机实锤:
+// messages[6].content[0].content 的 0xA6 悬空续字节)。
+TEST_CASE("TrimHistory: 中文超长 tool_result 截断后仍是合法 UTF-8") {
+    std::vector<api::Message> history;
+    history.push_back(UserText("输入"));
+    history.push_back(AssistantToolUse("tool_cn", "t"));
+    // 三字节汉字铺满:刀口无论落在哪儿都在多字节序列里。
+    std::string big;
+    for (int i = 0; i < 20000; ++i) {
+        big += "码";
+    }
+    history.push_back(UserToolResult("tool_cn", big));
+
+    const auto trimmed = agent::TrimHistory(history, /*max_chars=*/10000, /*keep_recent_turns=*/3);
+
+    REQUIRE(trimmed.size() == history.size());
+    const auto& tool_result = std::get<api::ToolResultBlock>(trimmed[2].content[0]);
+    CHECK(tool_result.content.size() < big.size());
+    CHECK(tool_result.content.find("[内容过长已截断]") != std::string::npos);
+    CHECK(platform::IsValidUtf8(tool_result.content));  // 不劈半个字
 }
 
 // ---------------------------------------------------------------------------

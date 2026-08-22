@@ -11,6 +11,7 @@
 #include "agent/context.hpp"
 #include "agent/context_events.hpp"
 #include "api/types.hpp"
+#include "platform/text_encoding.hpp"  // IsValidUtf8:预览截取回归的判据
 
 using namespace lubancode;
 
@@ -203,6 +204,35 @@ TEST_CASE("CompressWorkingView: 超长冷结果换 artifact 引用,头尾预览�
     CHECK(stub.size() < content.size());
     // JSONL 真账不动:原 history 里正文还在。
     CHECK(ResultTextAt(history, 2, "t1") == content);
+}
+
+// 回归:预览头尾按字节裸 substr,刀口落进三字节汉字的腰上,拼出来的
+// 视图就是非法 UTF-8——而这个视图会顶替 tool_result 进请求,dump 当场
+// type_error.316。
+TEST_CASE("CompressWorkingView: 中文超长结果的预览头尾不劈半个字") {
+    std::vector<api::Message> history;
+    history.push_back(UserText("第一问"));
+    nlohmann::json input;
+    input["mode"] = "grep";
+    input["pattern"] = "TODO";
+    history.push_back(AssistantToolUse("t1", "search", input));
+    // 三字节汉字铺满:预览边界无论落哪儿都在多字节序列里。
+    std::string content;
+    for (int i = 0; i < 20000; ++i) {
+        content += "汉";
+    }
+    history.push_back(UserToolResult("t1", content));
+    history.push_back(UserText("第二问"));
+    history.push_back(AssistantText("收工"));
+
+    agent::StructuralCompressionOptions options;
+    agent::StructuralCompressionStats stats;
+    const auto view = agent::CompressWorkingView(history, options, stats);
+
+    const std::string stub = ResultTextAt(view, 2, "t1");
+    CHECK(stats.offloaded_results == 1);
+    CHECK(stub.find("[artifact") == 0);
+    CHECK(platform::IsValidUtf8(stub));  // 头尾预览都不劈半个字
 }
 
 TEST_CASE("CompressWorkingView: 热区不再豁免——首次定形,要么首次就预览要么一直全文") {

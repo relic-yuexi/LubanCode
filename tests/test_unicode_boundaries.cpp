@@ -127,6 +127,44 @@ TEST_CASE("Utf8DeltaGate:合法文本原样透传") {
     CHECK(gate.Flush().empty());
 }
 
+// 截短对齐码点边界的两把尺(截断把合法内容砍出非法 UTF-8 的回归:
+// 请求体 dump 当场 type_error.316,会话每回合必挂)。
+TEST_CASE("Utf8PrefixBoundary:前缀刀口退到多字节序列开头之前") {
+    const std::string text = "abc你好";  // 3 ASCII + 2 个三字节汉字(共 9 字节)
+    CHECK(platform::Utf8PrefixBoundary(text, 0) == 0);
+    CHECK(platform::Utf8PrefixBoundary(text, 3) == 3);   // 落在 ASCII/序列头,原样
+    CHECK(platform::Utf8PrefixBoundary(text, 4) == 3);   // 劈在"你"的腰上,退到 3
+    CHECK(platform::Utf8PrefixBoundary(text, 5) == 3);
+    CHECK(platform::Utf8PrefixBoundary(text, 6) == 6);   // "你"完整,"好"的开头
+    CHECK(platform::Utf8PrefixBoundary(text, 8) == 6);
+    CHECK(platform::Utf8PrefixBoundary(text, 9) == 9);   // 末尾
+    CHECK(platform::Utf8PrefixBoundary(text, 100) == 9);  // 越界收口到 size
+    CHECK(platform::Utf8PrefixBoundary("", 5) == 0);      // 空串安全
+    // 四字节 emoji 同样不劈。
+    const std::string with_emoji = std::string("x") + kEmoji + "y";
+    CHECK(platform::Utf8PrefixBoundary(with_emoji, 3) == 1);  // 劈在 emoji 中间,退到 1
+    // 出口前缀一定合法。
+    for (std::size_t i = 0; i <= text.size(); ++i) {
+        CHECK(platform::IsValidUtf8(text.substr(0, platform::Utf8PrefixBoundary(text, i))));
+    }
+}
+
+TEST_CASE("Utf8SuffixBoundary:尾段起点推过悬着的续字节") {
+    const std::string text = "abc你好";
+    CHECK(platform::Utf8SuffixBoundary(text, 0) == 0);
+    CHECK(platform::Utf8SuffixBoundary(text, 3) == 3);
+    CHECK(platform::Utf8SuffixBoundary(text, 4) == 6);  // 悬在"你"的腰上,推到"好"
+    CHECK(platform::Utf8SuffixBoundary(text, 5) == 6);
+    CHECK(platform::Utf8SuffixBoundary(text, 6) == 6);
+    CHECK(platform::Utf8SuffixBoundary(text, 9) == 9);
+    CHECK(platform::Utf8SuffixBoundary(text, 100) == 9);  // 越界收口到 size
+    CHECK(platform::Utf8SuffixBoundary("", 3) == 0);
+    // 出口尾段一定合法。
+    for (std::size_t i = 0; i <= text.size(); ++i) {
+        CHECK(platform::IsValidUtf8(text.substr(platform::Utf8SuffixBoundary(text, i))));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 1b. AgentLoop 集成:劈半 delta 流,显示回调只见完整 UTF-8,history 拼齐
 // ---------------------------------------------------------------------------
