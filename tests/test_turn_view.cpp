@@ -29,6 +29,7 @@
 #include "cli/theme.hpp"
 #include "cli/tool_display.hpp"
 #include "cli/transcript.hpp"
+#include "cli/turn_renderer.hpp"
 #include "runtime/id_authority.hpp"
 #include "runtime/turn_collector.hpp"
 #include "runtime/turn_view.hpp"
@@ -553,4 +554,180 @@ TEST_CASE("ToolDisplay 批次预告:三枚先登记 Pending,start 点亮、终�
     CHECK(transcript[0].status == lubancode::cli::TranscriptStatus::Cancelled);
     CHECK(transcript[2].status == lubancode::cli::TranscriptStatus::Cancelled);
     CHECK(transcript[1].status == lubancode::cli::TranscriptStatus::Ok);  // 已终态的不动
+}
+
+// ---------------------------------------------------------------------------
+// 黄金画面(落地次序第 1 步):TerminalTurnRenderer 的行组快照。
+// 七景里离线可钉的五景:单工具、多工具一批、两次 model step、长命令、
+// 失败;ask_user 与 ESC 的画面手测(画面类测不了的,controller/行组纯逻辑
+// 必须有单测——单子验收口径)。80 列代表;120/160 只是宽度参数,排版公式
+// 同一颗。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 攒一轮两拍的账:step0 思考+两工具一批,step1 长命令;正常收口。
+lubancode::runtime::TurnView BuildTurnForRender() {
+    lubancode::runtime::IdAuthority ids;
+    lubancode::runtime::TurnCollector collector(ids, "turn-g");
+    collector.StartTurn("总结最近的提交", 1000);
+
+    collector.OnModelStepStarted(0);
+    collector.OnTextDelta("先看看日志", /*thinking=*/true);
+    collector.CloseTextItems();
+    collector.OnToolBatchStarted(0, 0, {"g1", "g2"});
+    collector.OnToolStarted("g1", "run_command", nlohmann::json{{"command", "git log --oneline -3"}});
+    collector.OnToolFinished("g1", "[退出码 0]\nabc123 fix\ndef456 feat", false);
+    collector.OnToolStarted("g2", "read_file", nlohmann::json{{"path", "README.md"}});
+    collector.OnToolFinished("g2", "第一行\n第二行", false);
+    collector.OnToolBatchFinished(0, false);
+
+    collector.OnModelStepStarted(1);
+    collector.OnToolBatchStarted(1, 1, {"g3"});
+    collector.OnToolStarted("g3", "run_command",
+                            nlohmann::json{{"command", "$env:http_proxy='http://127.0.0.1:10808'\n"
+                                                       "$env:https_proxy=$env:http_proxy\n"
+                                                       "git fetch origin"}});
+    collector.OnToolFinished("g3", "[退出码 0]\n拉取完成", false);
+    collector.OnToolBatchFinished(1, false);
+
+    collector.FinishTurn(lubancode::runtime::TurnItemViewState::Succeeded, 12800, 0);
+    return collector.take_view();
+}
+
+std::string JoinLines(const std::vector<std::string>& lines) {
+    std::string out;
+    for (const std::string& line : lines) {
+        out += line + "\n";
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("黄金画面:单轮两拍(思考 + 两工具一批 -> 换拍 -> 长命令)80 列") {
+    const lubancode::runtime::TurnView view = BuildTurnForRender();
+    lubancode::cli::Theme theme = lubancode::cli::BuiltinTheme("plain");
+    lubancode::cli::TurnRenderOptions options;
+    options.width = 80;
+    options.plain = true;
+    const std::vector<std::string> lines = lubancode::cli::RenderTurnView(view, theme, options);
+    const std::string text = JoinLines(lines);
+
+    // 用户条目在头一行。
+    REQUIRE(!lines.empty());
+    CHECK(lines.front().find("总结最近的提交") != std::string::npos);
+
+    // 思考条目:思考 Xs 一行。
+    bool saw_thinking = false;
+    for (const std::string& line : lines) {
+        if (line.find("思考 ") != std::string::npos) {
+            saw_thinking = true;
+            break;
+        }
+    }
+    CHECK(saw_thinking);
+
+    // 两枚工具一批:同拍条目之间不垫空行。
+    const std::size_t g1 = text.find("run_command(git log");
+    const std::size_t g2 = text.find("read_file(README.md)");
+    REQUIRE(g1 != std::string::npos);
+    REQUIRE(g2 != std::string::npos);
+    const std::string between = text.substr(g1, g2 - g1);
+    CHECK(between.find("退出码 0") != std::string::npos);
+    CHECK(between.find("\n\n") == std::string::npos);  // 同拍无空行
+
+    // 换拍:step 1 的条目前有一空行(轻间隔),不是满宽横线。
+    const std::size_t g3_title = text.find("run_command($env:http_proxy");
+    REQUIRE(g3_title != std::string::npos);
+    // 该条目所在行之前应有空行(行组里 lines 相邻两条,前一条为空串)。
+    bool gap_before_step2 = false;
+    for (std::size_t i = 1; i < lines.size(); ++i) {
+        if (lines[i].find("run_command($env:http_proxy") != std::string::npos && lines[i - 1].empty()) {
+            gap_before_step2 = true;
+            break;
+        }
+    }
+    CHECK(gap_before_step2);
+    CHECK(text.find("────") == std::string::npos);  // step 边界不画满宽横线
+
+    // 长命令:+2 lines 记号,首行不横铺。
+    CHECK(text.find("$env:http_proxy='http://127.0.0.1:10808' +2 lines") != std::string::npos);
+    CHECK(text.find("git fetch origin") == std::string::npos);  // 后续行不进标题
+
+    // footer:恰一枚,带总耗时(12.8s 按尺子取整成 12s:十至五十九秒取整)。
+    std::size_t footer_count = 0;
+    for (const std::string& line : lines) {
+        if (line.find("Worked for") != std::string::npos) {
+            ++footer_count;
+        }
+    }
+    CHECK(footer_count == 1);
+    CHECK(text.find("Worked for 12s") != std::string::npos);
+}
+
+TEST_CASE("黄金画面:打断轮 footer 用 Stopped after,失败轮用 Failed after") {
+    lubancode::runtime::IdAuthority ids;
+    lubancode::runtime::TurnCollector collector(ids, "turn-s");
+    collector.StartTurn("问", 0);
+    collector.OnModelStepStarted(0);
+    collector.OnToolBatchStarted(0, 0, {"s1", "s2"});
+    collector.OnToolStarted("s1", "run_command", nlohmann::json{{"command", "ping localhost"}});
+    collector.OnToolFinished("s1", "打断", true, lubancode::runtime::TurnItemViewState::Interrupted);
+    collector.MarkRunningInterrupted();
+    collector.OnToolBatchFinished(0, true);
+    collector.FinishTurn(lubancode::runtime::TurnItemViewState::Interrupted, 18200, 0);
+
+    lubancode::cli::Theme theme = lubancode::cli::BuiltinTheme("plain");
+    lubancode::cli::TurnRenderOptions options;
+    options.width = 80;
+    options.plain = true;
+    const std::vector<std::string> lines = lubancode::cli::RenderTurnView(collector.view(), theme, options);
+    const std::string text = JoinLines(lines);
+    CHECK(text.find("Stopped after 18s") != std::string::npos);
+    CHECK(text.find("Worked for") == std::string::npos);
+    // 未开跑的那枚:标题可见(屏上不缺枚)。
+    CHECK(text.find("run_command(ping localhost)") != std::string::npos);
+
+    // 失败轮。
+    lubancode::runtime::TurnCollector failed(ids, "turn-f");
+    failed.StartTurn("问", 0);
+    failed.OnModelStepStarted(0);
+    failed.FinishTurn(lubancode::runtime::TurnItemViewState::Failed, 7600, 0);
+    const std::vector<std::string> flines =
+        lubancode::cli::RenderTurnView(failed.view(), theme, options);
+    CHECK(JoinLines(flines).find("Failed after 7.6s") != std::string::npos);
+}
+
+TEST_CASE("黄金画面:审批等待的详细态附注,缺省不写") {
+    lubancode::runtime::IdAuthority ids;
+    lubancode::runtime::TurnCollector collector(ids, "turn-w");
+    collector.StartTurn("问", 0);
+    collector.FinishTurn(lubancode::runtime::TurnItemViewState::Succeeded, 130000, 35000);
+
+    lubancode::cli::Theme theme = lubancode::cli::BuiltinTheme("plain");
+    lubancode::cli::TurnRenderOptions options;
+    options.width = 120;
+    options.plain = true;
+    const std::string text = JoinLines(lubancode::cli::RenderTurnView(collector.view(), theme, options));
+    CHECK(text.find("Worked for 2m 10s") != std::string::npos);
+    CHECK(text.find("waited 35s for approval") != std::string::npos);
+
+    // 缺省(approval_wait 为 0)不写附注。
+    lubancode::runtime::TurnCollector nowait(ids, "turn-w2");
+    nowait.StartTurn("问", 0);
+    nowait.FinishTurn(lubancode::runtime::TurnItemViewState::Succeeded, 130000, 0);
+    const std::string text2 = JoinLines(lubancode::cli::RenderTurnView(nowait.view(), theme, options));
+    CHECK(text2.find("waited") == std::string::npos);
+}
+
+TEST_CASE("黄金画面:include_footer=false 时实时画面不重复画 footer") {
+    const lubancode::runtime::TurnView view = BuildTurnForRender();
+    lubancode::cli::Theme theme = lubancode::cli::BuiltinTheme("plain");
+    lubancode::cli::TurnRenderOptions options;
+    options.width = 80;
+    options.plain = true;
+    options.include_footer = false;
+    const std::string text = JoinLines(lubancode::cli::RenderTurnView(view, theme, options));
+    CHECK(text.find("Worked for") == std::string::npos);  // footer 由 RunTurn 收口单独落
 }

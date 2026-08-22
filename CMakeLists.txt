@@ -489,6 +489,9 @@ add_library(lubancode_core STATIC
   src/cli/format_utils.cpp
   src/cli/todo_render.cpp
   src/cli/transcript.cpp
+  # 终端回合视觉收束单:TerminalTurnRenderer(TurnView -> 行组,纯函数;
+  # 条目措辞复用 FormatTranscriptItem,这里只管轮的骨架与 footer)。
+  src/cli/turn_renderer.cpp
   src/cli/agent_panel.cpp
   src/cli/bottom_chrome.cpp
   src/cli/keymap.cpp
