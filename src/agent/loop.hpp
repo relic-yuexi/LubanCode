@@ -199,6 +199,23 @@ struct Callbacks {
     std::function<std::vector<std::string>(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input,
                                            const tools::Tool::Result& result)>
         on_post_tool_use_hook;
+
+    // ---- 回合视觉收束(终端回合视觉收束单):step/batch 边界 --------------
+    // 眼下回调只报单枚工具 start/done,批次边界走丢了——同一条 assistant
+    // message 吐三枚 tool_use,界面看不出它们同属一拍。这三枚回调补边界:
+    //   - on_model_step_started:每次模型请求发出之前(循环顶)触发,
+    //     step_index 是 0 起的步号;整轮 Run() 第一次发请求必发一枚;
+    //   - on_tool_batch_started:拿到完整 assistant message、遍历
+    //     ToolUseBlock 之前触发。batch_index 是本 Run() 内的批次序号(0 起,
+    //     每个含工具的 step 一枚),ordered_tool_use_ids 是模型给的顺序;
+    //   - on_tool_batch_finished:遍历完(含 ESC 中断时"未执行"的补账)后
+    //     触发,interrupted 为真表示这批没收完就被打断。
+    // 没工具的 step 不发空 batch(单子:没有工具不发空 batch)。不设这些
+    // 回调行为与从前逐字节一致;工具执行语义(串行、确认、hooks)不动。
+    std::function<void(int step_index)> on_model_step_started;
+    std::function<void(int step_index, int batch_index, const std::vector<std::string>& ordered_tool_use_ids)>
+        on_tool_batch_started;
+    std::function<void(int batch_index, bool interrupted)> on_tool_batch_finished;
 };
 
 // 输出预算耗尽的明细账(规格根因四):max_tokens 从普通 end turn 里拆出来

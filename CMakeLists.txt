@@ -444,6 +444,9 @@ add_library(lubancode_runtime STATIC
   src/runtime/turn_runtime.cpp
   # 第五步:TurnItem 领域条目 + 中立 diff 行表(diff 计算移出 ToolDisplay)。
   src/runtime/turn_item.cpp
+  # 终端回合视觉收束单:TurnView 中立视图模型(turn/step/batch/item 四层
+  # + metrics + turn 活动态),零 cli 依赖,枚举序列化同钉。
+  src/runtime/turn_view.cpp
   # 第六步:SessionRuntime(会话存档账/权限账/thread 身份/事件接线)。
   src/runtime/session_runtime.cpp
   # 第七步:CommandService(typed API:/model、/resume、审批回答)。
