@@ -19,6 +19,16 @@ struct CliOptions {
     std::string system_prompt_file_arg;  // --system-prompt <文件>(空 = 没给)
 };
 
+// 会话管理子命令(archive/unarchive/delete):session 引用是 id(完整或
+// 唯一前缀)或标题;delete 的 --force 只给脚本显式使用(帮助里写明
+// 不可恢复),交互终端缺它必走确认。
+struct SessionManagementCommand {
+    enum class Kind { Archive, Unarchive, Delete };
+    Kind kind = Kind::Archive;
+    std::string session_ref;  // 会话引用;空 = 缺参(报用法)
+    bool force = false;       // delete --force:跳过确认(脚本用)
+};
+
 // 解析结果:action 不是 Proceed 时,RunCli 兑现完动作就退,不进会话。
 enum class CliAction {
     Proceed,                  // 正常路径:按 options 继续启动
@@ -28,11 +38,13 @@ enum class CliAction {
     CheckUpdate,              // --check-update
     ResetSystemPrompt,        // --reset-system-prompt
     MissingSystemPromptValue, // --system-prompt 没带值:报错退 1
+    ManageSession,            // archive/unarchive/delete 子命令
 };
 
 struct ParsedCliArgs {
     CliAction action = CliAction::Proceed;
     CliOptions options;
+    SessionManagementCommand session_command;  // action == ManageSession 时有效
 };
 
 // args[0] 是程序名,实参从 args[1] 起。多个早退参数同时出现时,按扫描

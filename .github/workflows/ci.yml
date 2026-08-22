@@ -45,6 +45,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Check release metadata
+        shell: bash
+        run: bash scripts/check_release.sh
+
       # vcpkg manifest 优先:runner 自带的 vcpkg 在 VCPKG_INSTALLATION_ROOT。
       # configure 失败(vcpkg 缺包/版本冲突等)就清掉构建目录、去掉工具链
       # 回退 FetchContent 源码构建——顶层 CMakeLists 对两条路都支持。

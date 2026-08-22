@@ -78,6 +78,10 @@ int TempPluginDir::counter_ = 0;
 const char* kHelperScript = R"py(
 import json, sys
 
+sys.stdin.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 request = json.load(sys.stdin)
 response = None
 try:

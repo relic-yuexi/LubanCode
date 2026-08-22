@@ -163,6 +163,26 @@ const SessionPickerCore::State& SessionPickerCore::HandleKey(const KeyEvent& eve
     if (state_.submitted || state_.cancelled) {
         return state_;
     }
+    // 转录浮层开着:除 Enter(提交)、Esc/Ctrl+C/Ctrl+D/Ctrl+T/Ctrl+E(收
+    // 浮层)外全部落空——上下浏览、翻页、打字都不动列表状态,看完回原行。
+    if (state_.transcript_open) {
+        switch (event.kind) {
+            case KeyKind::Enter:
+            case KeyKind::NewLine:
+                state_.submitted = !matches_.empty();
+                break;
+            case KeyKind::Esc:
+            case KeyKind::CtrlC:
+            case KeyKind::CtrlD:
+            case KeyKind::CtrlT:
+            case KeyKind::CtrlE:
+                state_.transcript_open = false;
+                break;
+            default:
+                break;  // 浮层里其余键落空
+        }
+        return state_;
+    }
     switch (event.kind) {
         case KeyKind::Tab:
             state_.focus = NextFocus(state_.focus);
@@ -241,9 +261,37 @@ const SessionPickerCore::State& SessionPickerCore::HandleKey(const KeyEvent& eve
         case KeyKind::NewLine:
             state_.submitted = !matches_.empty();  // 空表 Enter 不当提交
             break;
+        case KeyKind::CtrlO:
+            // 紧凑/舒展:只改画法,筛选结果与选中项一个不动(单子口径)。
+            state_.layout = state_.layout == SessionPickerLayout::Compact
+                                ? SessionPickerLayout::Comfortable
+                                : SessionPickerLayout::Compact;
+            break;
+        case KeyKind::CtrlE:
+            if (state_.transcript_open) {
+                state_.transcript_open = false;  // 转录浮层里 Ctrl+E 也当收浮层
+                break;
+            }
+            state_.expanded = !state_.expanded && !matches_.empty();
+            break;
+        case KeyKind::CtrlT:
+            // 转录浮层开/收。开着时再按一次收掉;关着时开(空表开了也只
+            // 是空浮层,接线层给"没有会话"的画面,不拦)。
+            state_.transcript_open = !state_.transcript_open;
+            break;
         case KeyKind::Esc:
+            if (state_.transcript_open) {
+                state_.transcript_open = false;  // 转录浮层:Esc 先收浮层,不当取消
+                break;
+            }
+            state_.cancelled = true;
+            break;
         case KeyKind::CtrlC:
         case KeyKind::CtrlD:
+            if (state_.transcript_open) {
+                state_.transcript_open = false;  // 同 Esc:收浮层,不当取消
+                break;
+            }
             state_.cancelled = true;
             break;
         default:
@@ -291,6 +339,30 @@ int SessionPickerScrollPercent(std::size_t selected, std::size_t total) {
     }
     const std::size_t index = (std::min)(selected, total - 1);
     return static_cast<int>(index * 100 / (total - 1));
+}
+
+SessionPickerFrame BuildSessionTranscriptFrame(const std::string& title_line,
+                                               const std::vector<std::string>& excerpt_lines, int width) {
+    (void)width;  // 宽度截断归终端层
+    SessionPickerFrame frame;
+    frame.lines.push_back(title_line);
+    frame.row_match_index.push_back(SessionPickerFrame::kNoMatch);
+    frame.lines.push_back(std::string());
+    frame.row_match_index.push_back(SessionPickerFrame::kNoMatch);
+    if (excerpt_lines.empty()) {
+        frame.lines.push_back(std::string("  ") + tr("picker.transcript.empty"));
+        frame.row_match_index.push_back(SessionPickerFrame::kNoMatch);
+    } else {
+        for (const std::string& line : excerpt_lines) {
+            frame.lines.push_back(line.empty() ? std::string(" ") : line);
+            frame.row_match_index.push_back(SessionPickerFrame::kNoMatch);
+        }
+    }
+    frame.lines.push_back(std::string());
+    frame.row_match_index.push_back(SessionPickerFrame::kNoMatch);
+    frame.lines.push_back(tr("picker.transcript.footer"));
+    frame.row_match_index.push_back(SessionPickerFrame::kNoMatch);
+    return frame;
 }
 
 SessionPickerFrame BuildSessionPickerFrame(const SessionPickerCore& core, int width) {
@@ -351,6 +423,46 @@ SessionPickerFrame BuildSessionPickerFrame(const SessionPickerCore& core, int wi
             if (entry.damaged) {
                 line += "  [" + std::string(tr("picker.damaged")) + "]";
             }
+            // 舒展行(Ctrl+O):选中行与普通行都多一行 cwd(选中行多了才看
+            // 得出"现在指着哪间房");展开详情(Ctrl+E)另算,见下。
+            if (state.layout == SessionPickerLayout::Comfortable) {
+                frame.lines.push_back(line);
+                frame.row_match_index.push_back(index);
+                const std::string cwd = entry.cwd.empty() ? std::string(tr("picker.unknown_dir"))
+                                                          : entry.cwd;
+                frame.lines.push_back(std::string("      ") + cwd);
+                // 舒展行第二行也指回同一 match(上色/选中账用同一份)。
+                frame.row_match_index.push_back(index);
+                continue;
+            }
+            // 展开详情(Ctrl+E):只摊当前选中行,长标题(截断前的原文)、
+            // cwd、id、模型、消息数、创建/更新时间各一行。
+            if (state.expanded && selected_row) {
+                frame.lines.push_back(line);
+                frame.row_match_index.push_back(index);
+                const std::string full_title =
+                    label.empty() ? std::string(tr("picker.no_text")) : label;
+                frame.lines.push_back(std::string("      ") + tr("picker.expand.title") + " " + full_title);
+                frame.row_match_index.push_back(SessionPickerFrame::kNoMatch);
+                frame.lines.push_back(std::string("      ") + tr("picker.expand.cwd") + " " +
+                                      (entry.cwd.empty() ? std::string(tr("picker.unknown_dir")) : entry.cwd));
+                frame.row_match_index.push_back(SessionPickerFrame::kNoMatch);
+                frame.lines.push_back(std::string("      ") + tr("picker.expand.id") + " " + entry.id);
+                frame.row_match_index.push_back(SessionPickerFrame::kNoMatch);
+                frame.lines.push_back(
+                    std::string("      ") + tr("picker.expand.model") + " " +
+                    (entry.model.empty() ? std::string(tr("picker.unknown_model")) : entry.model) + " · " +
+                    trf("picker.expand.messages", entry.message_count));
+                frame.row_match_index.push_back(SessionPickerFrame::kNoMatch);
+                frame.lines.push_back(std::string("      ") + tr("picker.expand.created") + " " +
+                                      (entry.created_at.empty() ? std::string(tr("picker.unknown_time"))
+                                                                : entry.created_at) +
+                                      " · " + tr("picker.expand.updated") + " " +
+                                      (entry.updated_at.empty() ? std::string(tr("picker.unknown_time"))
+                                                                : entry.updated_at));
+                frame.row_match_index.push_back(SessionPickerFrame::kNoMatch);
+                continue;
+            }
             frame.lines.push_back(line);
             frame.row_match_index.push_back(index);
         }
@@ -367,7 +479,7 @@ SessionPickerFrame BuildSessionPickerFrame(const SessionPickerCore& core, int wi
         status = trf("picker.status", core.selected() + 1, total,
                      SessionPickerScrollPercent(core.selected(), total));
     }
-    frame.lines.push_back(tr("picker.footer"));
+    frame.lines.push_back(state.transcript_open ? tr("picker.transcript.footer") : tr("picker.footer"));
     frame.row_match_index.push_back(SessionPickerFrame::kNoMatch);
     frame.lines.push_back(status);
     frame.row_match_index.push_back(SessionPickerFrame::kNoMatch);

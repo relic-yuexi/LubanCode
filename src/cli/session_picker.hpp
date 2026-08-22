@@ -1,8 +1,9 @@
-// SessionPicker(会话管理器单第二步)的纯逻辑层:焦点轮换、搜索词、
-// 筛选/排序切换、选中保持与视口翻页。不碰终端、不碰磁盘、不知道存档在
-// 哪——数据由调用方从 agent::SessionCatalog 摘好喂进来,resume 结果只是
-// 一枚 id。没有 delete;Ctrl+O/T/E 三种查看态是第三步的事,本层不绑
-// (键落空,不做"未实现"提示,免得占着键位骗人)。
+// SessionPicker(会话管理器单第二、三步)的纯逻辑层:焦点轮换、搜索词、
+// 筛选/排序切换、选中保持与视口翻页;Ctrl+T 转录查看、Ctrl+E 展开详情、
+// Ctrl+O 紧凑/舒展三种查看态也是本层的状态机。不碰终端、不碰磁盘、
+// 不知道存档在哪——数据由调用方从 agent::SessionCatalog 摘好喂进来,
+// resume 结果只是一枚 id。没有 delete;转录内容(excerpt 行)同样由
+// 调用方按需读好带进来(大文件按需读的"按需"归接线层管)。
 //
 // 终端绘制(TTY 面板)在 app/commands/session_commands.cpp,与
 // provider_switch 同一层路数:platform 原语画帧、行级清重画,不手写
@@ -23,12 +24,18 @@ namespace lubancode::cli {
 struct SessionPickerEntry {
     std::string id;
     std::string title;           // 没设标题就空,展示层回退 preview
-    std::string preview;         // 首句预览(截不截由渲染层做,这里给原文)
+    std::string preview;         // 镇句预览(截不截由渲染层做,这里给原文)
     std::string cwd;             // 原样;窄窗时先收这格
     std::string updated_ago;     // 相对时间文字("1m ago" 那类,接线层算)
     std::string created_ago;     // 同上(排序为 Created 时用)
     bool damaged = false;        // 坏档:行尾标 damaged,照样能选(Enter 后
                                  // 由 resume 路报"认不得格式",不在这拦)
+    // Ctrl+E 展开详情(接线层从 SessionSummary 直转,不用额外读盘):
+    // created/updated 用存档侧稳定串,模型名原样;空串由渲染层回退占位。
+    std::string created_at;      // "yyyy-mm-dd HH:MM:SS"
+    std::string updated_at;
+    std::string model;
+    std::size_t message_count = 0;
 };
 
 // 筛选/排序两枚开关。
@@ -37,6 +44,10 @@ enum class SessionPickerSort { Updated, Created };
 
 // Tab 轮换的三格焦点。
 enum class SessionPickerFocus { Search, Filter, Sort };
+
+// 查看态(第三步):紧凑/舒展只改画法;展开钉在"当前选中行";转录是
+// 一块独立浮层(看完原路回列表,选中行不动)。
+enum class SessionPickerLayout { Compact, Comfortable };
 
 // 搜索命中规则:title/preview/id/cwd 四路,ASCII 不分大小写,中文按原字
 // (与 agent::SessionMatchesQuery 同一口径;这里对着喂进来的行数据再筛
@@ -53,6 +64,9 @@ public:
         std::string search;
         SessionPickerScope scope = SessionPickerScope::Cwd;
         SessionPickerSort sort = SessionPickerSort::Updated;
+        SessionPickerLayout layout = SessionPickerLayout::Compact;  // Ctrl+O
+        bool expanded = false;   // Ctrl+E:选中行的详情摊开(再按收起)
+        bool transcript_open = false;  // Ctrl+T:转录浮层开着
         bool submitted = false;
         bool cancelled = false;
     };
@@ -80,8 +94,10 @@ public:
 
     // 喂一个键。search 焦点下可打字/退格;filter/sort 焦点下左右改选项;
     // Tab/ShiftTab 轮焦点;上下浏览;PageUp/PageDown 翻页;Home/End 到头尾;
-    // Enter 提交;Esc/Ctrl+C/Ctrl+D 取消。查询形状变了(搜索/筛选)由
-    // 接线层重新 SetEntries(数据同源,只是重筛)。
+    // Enter 提交;Esc/Ctrl+C/Ctrl+D 取消。查看态:Ctrl+O 切紧凑/舒展(只改
+    // 画法,不动筛选与选中);Ctrl+E 摊开/收起选中行详情;Ctrl+T 开转录
+    // 浮层(转录开着时 Esc/Ctrl+T/Ctrl+E 收浮层回列表,Enter 仍提交,
+    // 其余键落空——浏览键不动选中行,看完回原行)。
     const State& HandleKey(const KeyEvent& event);
 
     // 视口行:从 matches 切出 [viewport_top_, viewport_top_+capacity)。
@@ -115,6 +131,14 @@ struct SessionPickerFrame {
 };
 
 SessionPickerFrame BuildSessionPickerFrame(const SessionPickerCore& core, int width);
+
+// 转录浮层一帧(Ctrl+T)。excerpt_lines 由接线层按需读档拼好(大文件取
+// 头尾若干行);这里只排版:标题行 + 内容行 + 底栏。滚动归接线层
+// (excerpt 已是当前窗口要显示的那段),浮层本身不记滚动账——看完
+// Esc 回列表,选中行原样。
+SessionPickerFrame BuildSessionTranscriptFrame(const std::string& title_line,
+                                               const std::vector<std::string>& excerpt_lines,
+                                               int width);
 
 // 相对时间(now 距 updated 的差):<60s "just now"、<60m "Nm ago"、
 // <24h "Nh ago"、再久 "Nd ago"。相对时间只在渲染层算(单子"代码边界"

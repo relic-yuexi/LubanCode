@@ -92,7 +92,10 @@
 | 独立压缩模型 | `compact_model` 留空则沿用会话模型。 |
 | 字符硬限 | `max_context_chars` 是 token 窗口之外的第二道安全网。 |
 | JSONL 存档 | 会话事件逐行追加，含 meta、消息、工具、usage、标题与压缩点。 |
+| 会话台账 | 裸 `/resume` 打全屏台账：搜索、Cwd/All 筛选、Updated/Created 排序、翻页与三种查看态（转录 / 展开 / 舒展）。 |
 | 列出与恢复 | `/sessions`、`/resume`；按 cwd 筛选，恢复后继续写回原文件。 |
+| 归档 | `/archive`、`lubancode archive/unarchive <id>`：字节原样搬进 `sessions/archive/`，默认列表略过，`/sessions archived` 查看。 |
+| 永久删除 | `/delete`、`lubancode delete <id> [--force]`：确认屏 + 路径校验 + 活动回合拒绝，只删目标一场。 |
 | Markdown 导出 | `/export` 导出全量流水，压缩点保留标记。 |
 | 项目记忆 | 住在用户目录，不进仓库，不混进 session，也不随导出外带。 |
 

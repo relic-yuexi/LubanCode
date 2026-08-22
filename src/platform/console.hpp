@@ -124,6 +124,9 @@ struct KeyInput {
         CtrlD,
         CtrlO,
         CtrlE,
+        // 会话选择器 Ctrl+T:看所选会话的转录浮层(开/收都在 picker 这一处
+        // 消费,别处按死键处理,跟 Ctrl+O/Ctrl+E 的规矩一样)。
+        CtrlT,
         // 0.28.x 子代理面板:Ctrl+X -> Ctrl+K 两段确认"停止全部代理"。
         // 只在面板这一处消费,别处按 Ctrl+X/Ctrl+K 仍是死键,跟升级前一样。
         CtrlX,
