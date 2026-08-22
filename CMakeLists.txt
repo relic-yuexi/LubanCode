@@ -1,6 +1,21 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(lubancode VERSION 0.26.13 LANGUAGES CXX)
+# src/app/version.hpp 是版本号唯一出处。CMake 读取它来填 PROJECT_VERSION，
+# 免得构建元数据与程序 --version 各挂一块旧牌子。
+file(READ "${CMAKE_CURRENT_LIST_DIR}/src/app/version.hpp" _lubancode_version_header)
+string(REGEX MATCH
+  "kVersion[ \t]*=[ \t]*\"([0-9]+\\.[0-9]+\\.[0-9]+)\""
+  _lubancode_version_match
+  "${_lubancode_version_header}")
+if(NOT CMAKE_MATCH_1)
+  message(FATAL_ERROR "无法从 src/app/version.hpp 读取 LubanCode SemVer")
+endif()
+set(LUBANCODE_VERSION "${CMAKE_MATCH_1}")
+
+project(lubancode VERSION "${LUBANCODE_VERSION}" LANGUAGES CXX)
+
+unset(_lubancode_version_header)
+unset(_lubancode_version_match)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

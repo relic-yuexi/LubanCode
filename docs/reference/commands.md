@@ -2,7 +2,7 @@
 
 [文档首页](../README.md) · [功能全览](feature-index.md) · [终端交互](../features/terminal/README.md) · [配置手册](configuration.md)
 
-本页按当前主线源码整理。启动参数只在进程起手时解析；slash 命令只在交互会话里解析。命令词大小写不敏感，参数原样保留。版本号看 `CMakeLists.txt` 与 `src/app/version.hpp`。
+本页按当前主线源码整理。启动参数只在进程起手时解析；slash 命令只在交互会话里解析。命令词大小写不敏感，参数原样保留。版本号只认 `src/app/version.hpp`；CMake 从这里读取项目版本。
 
 ## 启动形式
 

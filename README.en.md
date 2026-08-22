@@ -22,7 +22,7 @@ LubanCode connects natively to Anthropic Messages, OpenAI Responses, and OpenAI-
 
 The name comes from Lu Ban, the traditional Chinese master craftsman. The idea is simple: measure first, cut second, and always show the work.
 
-> Current release line: `v0.26.0`. The full suite builds and runs on Windows, Ubuntu, and macOS.
+> Latest published binaries live on [GitHub Releases](https://github.com/relic-yuexi/LubanCode/releases/latest). The `main` branch may be ahead of that release.
 
 ## Why LubanCode
 

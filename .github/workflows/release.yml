@@ -38,6 +38,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Check release metadata and tag
+        shell: bash
+        run: bash scripts/check_release.sh "${{ github.ref_name }}"
+
       - name: Check documentation layout and links
         shell: bash
         run: bash scripts/check_docs.sh
@@ -49,6 +53,16 @@ jobs:
       - name: Build
         shell: bash
         run: cmake --build build --config Release --target lubancode -j 4
+
+      - name: Verify packaged executable version
+        shell: bash
+        run: |
+          expected="lubancode ${GITHUB_REF_NAME#v}"
+          actual=$("${{ matrix.exe }}" --version | tr -d '\r')
+          test "$actual" = "$expected" || {
+            echo "version mismatch: expected '$expected', got '$actual'" >&2
+            exit 1
+          }
 
       - name: Package
         shell: bash
