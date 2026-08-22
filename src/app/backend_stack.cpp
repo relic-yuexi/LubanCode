@@ -15,13 +15,14 @@ namespace lubancode::app {
 
 std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::Config& config) {
     // M11:连接超时 / 流式空闲读超时用 Config 里实际生效的值(四级合并结果,
-    // 没配就是内置默认值),不是每次都硬编码默认值。
+    // 没配就是内置默认值),不是每次都硬编码默认值。request_hard_timeout_secs
+    // (cpr 并发挂死单)同样从配置来:每枚流式请求的硬墙钟,挂死兜底。
     const auto headers = lubancode::config::ResolveProviderHeaderTemplates(config.extra_headers,
                                                                             config.auth_token);
     if (config.wire == lubancode::config::Wire::Responses) {
         return std::make_unique<lubancode::api::responses::ResponsesBackend>(
             config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs,
-            config.native_web_search, config.extra_body, headers);
+            config.native_web_search, config.extra_body, headers, config.request_hard_timeout_secs);
     }
     if (config.wire == lubancode::config::Wire::ChatCompletions) {
         // stream_usage/reasoning_replay 都是 provider capability(目录声明),
@@ -37,11 +38,11 @@ std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::C
                 : lubancode::api::chat::ReasoningReplayPolicy::Never;
         return std::make_unique<lubancode::api::chat::ChatCompletionsBackend>(
             config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs,
-            config.extra_body, headers, std::move(chat_options));
+            config.extra_body, headers, std::move(chat_options), config.request_hard_timeout_secs);
     }
     return std::make_unique<lubancode::api::anthropic::AnthropicBackend>(
         config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs,
-        config.native_web_search, config.extra_body, headers);
+        config.native_web_search, config.extra_body, headers, config.request_hard_timeout_secs);
 }
 
 RebuildableBackend::RebuildableBackend(const lubancode::config::Config& config) { Rebuild(config); }

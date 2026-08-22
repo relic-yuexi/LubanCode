@@ -1866,6 +1866,67 @@ TEST_CASE("ParseFileConfigJson: 三个超时字段正常解析,负数/零/非整
     CHECK_FALSE(config::ParseFileConfigJson(R"({"request_timeout_secs": -5})", "x.json").has_value());
 }
 
+// ---------------------------------------------------------------------------
+// 流式请求硬墙钟(cpr 并发挂死单):request_hard_timeout_secs。与上面三个
+// 超时字段同住一块,但 0 是合法值(显式不设墙)——解析收非负整数,合并
+// 走同一套"项目级 > 全局 > 默认"三级。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseFileConfigJson: request_hard_timeout_secs 解析,0 合法(不设墙),负数/非整数报错") {
+    const auto ok = config::ParseFileConfigJson(
+        R"({"request_hard_timeout_secs": 600})", "x.json");
+    REQUIRE(ok.has_value());
+    REQUIRE(ok->request_hard_timeout_secs.has_value());
+    CHECK(*ok->request_hard_timeout_secs == 600);
+
+    const auto zero = config::ParseFileConfigJson(R"({"request_hard_timeout_secs": 0})", "x.json");
+    REQUIRE(zero.has_value());
+    REQUIRE(zero->request_hard_timeout_secs.has_value());
+    CHECK(*zero->request_hard_timeout_secs == 0);  // 0 = 显式不设墙,不是"没写"
+
+    const auto missing = config::ParseFileConfigJson(R"({})", "x.json");
+    REQUIRE(missing.has_value());
+    CHECK_FALSE(missing->request_hard_timeout_secs.has_value());
+
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"request_hard_timeout_secs": -1})", "x.json").has_value());
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"request_hard_timeout_secs": 2.5})", "x.json").has_value());
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"request_hard_timeout_secs": "600"})", "x.json").has_value());
+}
+
+TEST_CASE("MergeConfig: request_hard_timeout_secs 项目级压全局压默认,显式 0 也照收") {
+    const auto defaulted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    REQUIRE(defaulted.has_value());
+    CHECK(defaulted->config.request_hard_timeout_secs == config::kDefaultRequestHardTimeoutSecs);
+    CHECK(defaulted->sources.request_hard_timeout_secs == config::Source::Default);
+
+    config::FileConfig file;
+    file.request_hard_timeout_secs = 600;
+    const auto from_file = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE(from_file.has_value());
+    CHECK(from_file->config.request_hard_timeout_secs == 600);
+    CHECK(from_file->sources.request_hard_timeout_secs == config::Source::ProjectConfigFile);
+
+    config::FileConfig global_file;
+    global_file.request_hard_timeout_secs = 90;
+    const auto from_global = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global_file,
+                                                 EmptyGenericEnv());
+    REQUIRE(from_global.has_value());
+    CHECK(from_global->config.request_hard_timeout_secs == 90);
+    CHECK(from_global->sources.request_hard_timeout_secs == config::Source::GlobalConfigFile);
+
+    // 项目级 0 压全局 90:显式"不设墙"胜过全局的墙,不是被全局顶掉。
+    const auto zero_over_global = config::MergeConfig(EmptyLubancodeEnv(), file, global_file,
+                                                      EmptyGenericEnv());
+    REQUIRE(zero_over_global.has_value());
+    CHECK(zero_over_global->config.request_hard_timeout_secs == 600);  // file 是 600
+    config::FileConfig zero_file;
+    zero_file.request_hard_timeout_secs = 0;
+    const auto zero_wins = config::MergeConfig(EmptyLubancodeEnv(), zero_file, global_file, EmptyGenericEnv());
+    REQUIRE(zero_wins.has_value());
+    CHECK(zero_wins->config.request_hard_timeout_secs == 0);
+    CHECK(zero_wins->sources.request_hard_timeout_secs == config::Source::ProjectConfigFile);
+}
+
 TEST_CASE("MergeConfig: 三个超时字段配置文件压过默认值,没写走内置默认") {
     const auto defaulted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
     REQUIRE(defaulted.has_value());

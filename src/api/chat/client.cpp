@@ -31,7 +31,13 @@ int ExtractStatusCode(std::string_view line) {
     return parsed.ec == std::errc{} ? code : 0;
 }
 
-std::string NetworkError(const cpr::Error& error, bool received, int connect_ms, int idle_secs) {
+std::string NetworkError(const cpr::Error& error, bool received, int connect_ms, int idle_secs,
+                         bool hard_timeout_hit, int hard_timeout_secs) {
+    // 硬墙钟触发(我们自己在 ProgressCallback 里掐的流,cpr 报共用的
+    // ABORTED_BY_CALLBACK)优先分型——见 send_stream 里 progress_cb 注释。
+    if (hard_timeout_hit) {
+        return cli::trf("error.network.hard_timeout", hard_timeout_secs);
+    }
     if (error.code == cpr::ErrorCode::OPERATION_TIMEDOUT) {
         return received ? cli::trf("error.network.stream_idle_timeout", idle_secs)
                         : cli::trf("error.network.connect_timeout", connect_ms / 1000);
@@ -49,14 +55,15 @@ ChatCompletionsBackend::ChatCompletionsBackend(std::string base_url, std::string
                                                int connect_timeout_ms, int stream_idle_timeout_secs,
                                                nlohmann::json extra_body,
                                                std::map<std::string, std::string> extra_headers,
-                                               ChatRequestOptions options)
+                                               ChatRequestOptions options, int request_hard_timeout_secs)
     : base_url_(std::move(base_url)),
       auth_token_(std::move(auth_token)),
       connect_timeout_ms_(connect_timeout_ms),
       stream_idle_timeout_secs_(stream_idle_timeout_secs),
       extra_body_(std::move(extra_body)),
       extra_headers_(std::move(extra_headers)),
-      options_(std::move(options)) {}
+      options_(std::move(options)),
+      request_hard_timeout_secs_(request_hard_timeout_secs) {}
 
 std::expected<void, Error> ChatCompletionsBackend::send_stream(
     const Request& request, const std::function<void(const StreamEvent&)>& on_event,
@@ -84,6 +91,8 @@ std::expected<void, Error> ChatCompletionsBackend::send_stream(
     bool received = false;
     bool saw_done = false;
     bool saw_stream_error = false;
+    // 硬墙钟触发标志(cpr 并发挂死单):分型用,见 NetworkError 注释。
+    bool hard_timeout_hit = false;
 
     const auto dispatch = [&](const std::vector<StreamEvent>& events) {
         for (const auto& event : events) {
@@ -119,10 +128,21 @@ std::expected<void, Error> ChatCompletionsBackend::send_stream(
         }
         return true;
     });
+    // 硬墙钟(cpr 并发挂死单)挂在 ProgressCallback:request_hard_timeout_secs_
+    // > 0 时对 steady_clock 记一枚期限,超期返回 false 掐流。libcurl 周期性调
+    // 这个回调(连接死寂也醒,见 anthropic/client.cpp 同一处注释的考证),
+    // 所以挂死绝境里这面墙照样落锤。不用 cpr::Timeout:那会把正常长流砍断。
+    const bool hard_wall_on = request_hard_timeout_secs_ > 0;
+    const auto hard_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(request_hard_timeout_secs_);
     cpr::ProgressCallback progress_cb(
         [&](cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, intptr_t) {
             if (cancel != nullptr && cancel->load()) {
                 cancelled = true;
+                return false;
+            }
+            if (hard_wall_on && std::chrono::steady_clock::now() >= hard_deadline) {
+                hard_timeout_hit = true;
                 return false;
             }
             return true;
@@ -160,7 +180,8 @@ std::expected<void, Error> ChatCompletionsBackend::send_stream(
     if (response.error) {
         return std::unexpected(Error{ErrorKind::Network,
                                      NetworkError(response.error, received, connect_timeout_ms_,
-                                                  stream_idle_timeout_secs_),
+                                                  stream_idle_timeout_secs_, hard_timeout_hit,
+                                                  request_hard_timeout_secs_),
                                      0});
     }
     const int final_status = static_cast<int>(response.status_code);

@@ -227,9 +227,15 @@ int ExtractStatusCode(std::string_view header_line) {
 // 字节)这个旁证区分:一个字节都没收到,大概率是连接/握手阶段卡死;收到
 // 过数据又停了,是流中途假死。COULDNT_CONNECT/COULDNT_RESOLVE_HOST/
 // COULDNT_RESOLVE_PROXY 是明确的"连不上"类错误,原始 curl 错误信息拼进去
-// 不丢细节。别的错误码原样透传 curl 的 message(留着排查用,不做过度包装)。
+// 不丢细节。ABORTED_BY_CALLBACK 是我们自己在 ProgressCallback 里掐流的
+// 结果(cpr 并发挂死单的硬墙钟,与 WriteCallback 掐流共用这个码),须与
+// "用户取消"分开报——硬超时_hit 标志就是为这一步分型留的旁证。别的错误码
+// 原样透传 curl 的 message(留着排查用,不做过度包装)。
 std::string ClassifyNetworkError(const cpr::Error& error, bool received_any_bytes, int connect_timeout_ms,
-                                  int stream_idle_timeout_secs) {
+                                  int stream_idle_timeout_secs, bool hard_timeout_hit, int hard_timeout_secs) {
+    if (hard_timeout_hit) {
+        return cli::trf("error.network.hard_timeout", hard_timeout_secs);
+    }
     if (error.code == cpr::ErrorCode::OPERATION_TIMEDOUT) {
         if (received_any_bytes) {
             return cli::trf("error.network.stream_idle_timeout", stream_idle_timeout_secs);
@@ -247,14 +253,16 @@ std::string ClassifyNetworkError(const cpr::Error& error, bool received_any_byte
 
 AnthropicBackend::AnthropicBackend(std::string base_url, std::string auth_token, int connect_timeout_ms,
                                     int stream_idle_timeout_secs, bool native_web_search,
-                                    nlohmann::json extra_body, std::map<std::string, std::string> extra_headers)
+                                    nlohmann::json extra_body, std::map<std::string, std::string> extra_headers,
+                                    int request_hard_timeout_secs)
     : base_url_(std::move(base_url)),
       auth_token_(std::move(auth_token)),
       connect_timeout_ms_(connect_timeout_ms),
       stream_idle_timeout_secs_(stream_idle_timeout_secs),
       native_web_search_(native_web_search),
       extra_body_(std::move(extra_body)),
-      extra_headers_(std::move(extra_headers)) {}
+      extra_headers_(std::move(extra_headers)),
+      request_hard_timeout_secs_(request_hard_timeout_secs) {}
 
 std::expected<void, Error> AnthropicBackend::send_stream(
     const Request& request,
@@ -285,6 +293,10 @@ std::expected<void, Error> AnthropicBackend::send_stream(
     // M11:有没有收到过响应体的第一个字节——网络错误发生时靠这个旁证分清
     // 是连接阶段就卡死了,还是流中途假死(见 ClassifyNetworkError 注释)。
     bool received_any_bytes = false;
+    // 硬墙钟触发标志(cpr 并发挂死单):ProgressCallback 里比期限掐流后
+    // 置位,收场分型据此把"我们主动杀的流"与 curl 自报的网络错分开——
+    // cpr 只给一个共用的 ABORTED_BY_CALLBACK,不分青红皂白。
+    bool hard_timeout_hit = false;
 
     cpr::HeaderCallback header_cb(
         [&](const std::string_view& header, intptr_t) -> bool {
@@ -334,10 +346,24 @@ std::expected<void, Error> AnthropicBackend::send_stream(
     // 返回 false 即中止——WriteCallback 只有数据到达才触发,光靠它,ESC 在
     // 连不上的服务器面前毫无办法。总超时不设死(流式回复可以很长),连接
     // 阶段单独给 connect_timeout_ms_ 上限(M11:可配,默认 15s)。
+    // 硬墙钟(cpr 并发挂死单)也挂在这里:request_hard_timeout_secs_ > 0 时
+    // 对 steady_clock 记一枚期限,超期返回 false 掐流。真机现场(本机代理/
+    // TUN 截胡 127.0.0.1 回环)出现过请求进 cpr::Post 再不返、connect/idle
+    // 两道闸都不触发的挂死——libcurl 的 easy_transfer 循环每至多 1s 醒一拍
+    // 调 Curl_pgrsUpdate,连接死寂也照醒,所以这道墙在"一个字节都不来"的
+    // 绝境里也走得动。不用 cpr::Timeout 实现:那是 CURLOPT_TIMEOUT,会把
+    // 正常的长流拦腰砍断,墙必须只掐"挂死",不掐"长"。
+    const bool hard_wall_on = request_hard_timeout_secs_ > 0;
+    const auto hard_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(request_hard_timeout_secs_);
     cpr::ProgressCallback progress_cb(
         [&](cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, intptr_t) -> bool {
             if (cancel != nullptr && cancel->load()) {
                 cancelled = true;
+                return false;
+            }
+            if (hard_wall_on && std::chrono::steady_clock::now() >= hard_deadline) {
+                hard_timeout_hit = true;
                 return false;
             }
             return true;
@@ -387,8 +413,9 @@ std::expected<void, Error> AnthropicBackend::send_stream(
     }
 
     if (response.error) {
-        const std::string message =
-            ClassifyNetworkError(response.error, received_any_bytes, connect_timeout_ms_, stream_idle_timeout_secs_);
+        const std::string message = ClassifyNetworkError(response.error, received_any_bytes, connect_timeout_ms_,
+                                                         stream_idle_timeout_secs_, hard_timeout_hit,
+                                                         request_hard_timeout_secs_);
         return std::unexpected(Error{ErrorKind::Network, message, 0});
     }
 

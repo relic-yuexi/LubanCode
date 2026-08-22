@@ -527,7 +527,8 @@ void RunStreamUsageProbe(const DoctorContext& context) {
     lubancode::api::chat::ChatCompletionsBackend backend(config.base_url, config.auth_token,
                                                          config.connect_timeout_ms,
                                                          config.stream_idle_timeout_secs, config.extra_body,
-                                                         headers, std::move(options));
+                                                         headers, std::move(options),
+                                                         config.request_hard_timeout_secs);
     const api::Request probe = BuildEffortProbeRequest(context.current_model, context.current_think);
     const ProbeOutcome outcome = RunProbe(backend, probe);
     if (!outcome.error.empty()) {

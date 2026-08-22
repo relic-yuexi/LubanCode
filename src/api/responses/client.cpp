@@ -45,9 +45,13 @@ int ExtractStatusCode(std::string_view header_line) {
 
 // 把 cpr 的网络错误翻成人话。(跟 anthropic/client.cpp 里的同名函数逻辑一样,
 // 两边各自小巧,没必要为了共用几行代码搭一个新的公共头——理由同
-// ExtractStatusCode。)
+// ExtractStatusCode。硬墙钟分型是 cpr 并发挂死单加的:我们自己掐的流在
+// cpr 那边只报共用的 ABORTED_BY_CALLBACK,靠 hard_timeout_hit 旁证分开。)
 std::string ClassifyNetworkError(const cpr::Error& error, bool received_any_bytes, int connect_timeout_ms,
-                                  int stream_idle_timeout_secs) {
+                                  int stream_idle_timeout_secs, bool hard_timeout_hit, int hard_timeout_secs) {
+    if (hard_timeout_hit) {
+        return cli::trf("error.network.hard_timeout", hard_timeout_secs);
+    }
     if (error.code == cpr::ErrorCode::OPERATION_TIMEDOUT) {
         if (received_any_bytes) {
             return cli::trf("error.network.stream_idle_timeout", stream_idle_timeout_secs);
@@ -74,14 +78,16 @@ std::map<std::string, std::string> ApplyExtraHeaders(std::map<std::string, std::
 
 ResponsesBackend::ResponsesBackend(std::string base_url, std::string auth_token, int connect_timeout_ms,
                                     int stream_idle_timeout_secs, bool native_web_search,
-                                    nlohmann::json extra_body, std::map<std::string, std::string> extra_headers)
+                                    nlohmann::json extra_body, std::map<std::string, std::string> extra_headers,
+                                    int request_hard_timeout_secs)
     : base_url_(std::move(base_url)),
       auth_token_(std::move(auth_token)),
       connect_timeout_ms_(connect_timeout_ms),
       stream_idle_timeout_secs_(stream_idle_timeout_secs),
       native_web_search_(native_web_search),
       extra_body_(std::move(extra_body)),
-      extra_headers_(std::move(extra_headers)) {}
+      extra_headers_(std::move(extra_headers)),
+      request_hard_timeout_secs_(request_hard_timeout_secs) {}
 
 std::expected<void, Error> ResponsesBackend::send_stream(
     const Request& request,
@@ -112,6 +118,8 @@ std::expected<void, Error> ResponsesBackend::send_stream(
     // M11:有没有收到过响应体的第一个字节——网络错误发生时靠这个旁证分清
     // 是连接阶段就卡死了,还是流中途假死(见 ClassifyNetworkError 注释)。
     bool received_any_bytes = false;
+    // 硬墙钟触发标志(cpr 并发挂死单):分型用,见 ClassifyNetworkError 注释。
+    bool hard_timeout_hit = false;
 
     cpr::HeaderCallback header_cb(
         [&](const std::string_view& header, intptr_t) -> bool {
@@ -158,10 +166,20 @@ std::expected<void, Error> ResponsesBackend::send_stream(
     // 返回 false 即中止——WriteCallback 只有数据到达才触发,光靠它,ESC 在
     // 连不上的服务器面前毫无办法。总超时不设死(流式回复可以很长),连接
     // 阶段单独给 connect_timeout_ms_ 上限(M11:可配,默认 15s)。
+    // 硬墙钟(cpr 并发挂死单)也挂在这里,考证与理由见 anthropic/client.cpp
+    // 同一处注释——libcurl 周期性调回调,连接死寂也醒;不用 cpr::Timeout,
+    // 那会把正常长流拦腰砍断。
+    const bool hard_wall_on = request_hard_timeout_secs_ > 0;
+    const auto hard_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(request_hard_timeout_secs_);
     cpr::ProgressCallback progress_cb(
         [&](cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, intptr_t) -> bool {
             if (cancel != nullptr && cancel->load()) {
                 cancelled = true;
+                return false;
+            }
+            if (hard_wall_on && std::chrono::steady_clock::now() >= hard_deadline) {
+                hard_timeout_hit = true;
                 return false;
             }
             return true;
@@ -209,8 +227,9 @@ std::expected<void, Error> ResponsesBackend::send_stream(
     }
 
     if (response.error) {
-        const std::string message =
-            ClassifyNetworkError(response.error, received_any_bytes, connect_timeout_ms_, stream_idle_timeout_secs_);
+        const std::string message = ClassifyNetworkError(response.error, received_any_bytes, connect_timeout_ms_,
+                                                         stream_idle_timeout_secs_, hard_timeout_hit,
+                                                         request_hard_timeout_secs_);
         return std::unexpected(Error{ErrorKind::Network, message, 0});
     }
 

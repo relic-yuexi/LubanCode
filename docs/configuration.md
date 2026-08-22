@@ -37,6 +37,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
   "connect_timeout_ms": 15000,
   "stream_idle_timeout_secs": 60,
   "request_timeout_secs": 30,
+  "request_hard_timeout_secs": 300,
   "status_panel": {
     "items": ["permission_mode", "provider", "model", "cwd", "git_branch", "context", "tokens"],
     "separator": " · "
@@ -94,7 +95,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 4. **通用环境变量**(向后兼容,跟 Claude Code、Codex 等工具共用同名变量容易撞车,建议改用第 1 级):`wire=anthropic` 时读 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_MODEL`;`wire=responses` 或 `chat_completions` 时读 `OPENAI_BASE_URL`/`OPENAI_API_KEY`/`OPENAI_MODEL`。
 5. **内置默认值**。
 
-逐字段合并:项目级写了某字段就用项目级那一份,项目级缺的字段回退全局,全局也缺再往下一级找。`mcpServers`、`search`、`lsp`、`status_panel` 这几段是**整段回退**(不做键级混合)——项目级写了就用项目级那一整段,否则用全局那一整段。例外是 `hooks`:全局与项目两层**相加**(两层都跑,项目级删不掉全局的钩子;项目级钩子须经信任审查,见 [Hooks 手册](hooks.md))。`tool_search_threshold`、`connect_timeout_ms`、`stream_idle_timeout_secs`、`request_timeout_secs` 只从配置文件(项目级 > 全局)或内置默认值来,没有环境变量这一级。
+逐字段合并:项目级写了某字段就用项目级那一份,项目级缺的字段回退全局,全局也缺再往下一级找。`mcpServers`、`search`、`lsp`、`status_panel` 这几段是**整段回退**(不做键级混合)——项目级写了就用项目级那一整段,否则用全局那一整段。例外是 `hooks`:全局与项目两层**相加**(两层都跑,项目级删不掉全局的钩子;项目级钩子须经信任审查,见 [Hooks 手册](hooks.md))。`tool_search_threshold`、`connect_timeout_ms`、`stream_idle_timeout_secs`、`request_timeout_secs`、`request_hard_timeout_secs` 只从配置文件(项目级 > 全局)或内置默认值来,没有环境变量这一级。
 
 `/config`(或 `lubancode --config`)会打出每个字段最终来自哪一级,排查配置问题用。
 
@@ -137,6 +138,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 | `connect_timeout_ms` | 正整数(毫秒) | `15000` | TCP+TLS 握手阶段超时上限。 |
 | `stream_idle_timeout_secs` | 正整数(秒) | `60` | 流式(SSE)读空闲超时——连续这么多秒没收到字节就判定假死。 |
 | `request_timeout_secs` | 正整数(秒) | `30` | 非流式请求(如拉模型列表)的整体超时。 |
+| `request_hard_timeout_secs` | 非负整数(秒) | `300` | 每枚流式请求的硬墙钟,`0` = 不设。connect/idle 两道闸都不触发的挂死绝境(典型:本机代理/TUN 截胡回环连接)由它兜底掐断,收场翻成"请求硬超时"。长任务撞上就显式调大。与 `subagent.wall_clock_timeout_secs` 分工:那管一只任务整轮,这管一枚请求。 |
 
 `base_url`/`api_key`/`model` 没有内置默认值——lubancode 不绑死哪一家模型服务,三项都没配到:交互模式会自动走一遍初次配置向导;单发模式/管道模式会直接报错,提示三条配置途径。
 
@@ -270,7 +272,7 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 | `LUBANCODE_FORCE_COLOR` | 终端颜色开关 | 设为 `1` 时,管道/重定向也强制尝试输出颜色;不写入 `config.json`。 |
 | `LUBANCODE_CONFIRM_MODE` | 会话起手确认档 | `confirm`、`auto` 或 `yolo`；不写入 `config.json`，优先级低于 `--yes`，高于 `settings.local.json`。 |
 
-环境变量设为空串,按没设处理。`hooks`、`mcpServers`、`search`、`lsp`、`tool_search_threshold`、`connect_timeout_ms`、`stream_idle_timeout_secs`、`request_timeout_secs` 没有对应的 `LUBANCODE_*` 变量,只能写配置文件。
+环境变量设为空串,按没设处理。`hooks`、`mcpServers`、`search`、`lsp`、`tool_search_threshold`、`connect_timeout_ms`、`stream_idle_timeout_secs`、`request_timeout_secs`、`request_hard_timeout_secs` 没有对应的 `LUBANCODE_*` 变量,只能写配置文件。
 
 交互命令 `/update` 使用当前配置的 `connect_timeout_ms` 与 `request_timeout_secs`。启动参数 `--check-update` 在加载配置前执行，故用内置默认超时。两者都只访问 GitHub Release API，不带模型密钥。
 
