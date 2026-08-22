@@ -377,6 +377,8 @@ add_library(lubancode_core STATIC
   src/runtime/turn_runtime.cpp
   # 第五步:TurnItem 领域条目 + 中立 diff 行表(diff 计算移出 ToolDisplay)。
   src/runtime/turn_item.cpp
+  # 第六步:SessionRuntime(会话存档账/权限账/thread 身份/事件接线)。
+  src/runtime/session_runtime.cpp
   # plugins 本地 Tool 运行时(冻结合同 + process v1):manifest 强校验、
   # 进程协议帧、无 shell 进程执行、工具装配层。
   src/runtime/plugin_contract.cpp

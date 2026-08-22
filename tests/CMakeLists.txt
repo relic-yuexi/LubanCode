@@ -184,6 +184,8 @@ add_executable(lubancode_tests
   test_turn_item.cpp
   # 第五步后半:同一假 backend 事件流喂 Terminal/Json 两 sink,同流同账。
   test_event_sinks.cpp
+  # 第六步:SessionRuntime(存档账/权限账/thread 身份,脱离终端可单测)。
+  test_session_runtime.cpp
   # 显示系统剥离单 P2:AgentLoop 异步审批通道(async 优先/同步回落/四态
   # 收账/悬空收口文案)。
   test_approval_broker.cpp
