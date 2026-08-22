@@ -361,7 +361,8 @@ TEST_CASE("tool_use 一轮 -> 执行工具 -> 第二次请求历史带 tool_resu
 
     std::vector<std::string> started_tools;
     agent::Callbacks callbacks;
-    callbacks.on_tool_start = [&](const std::string& name, const nlohmann::json&) { started_tools.push_back(name); };
+    callbacks.on_tool_start = [&](const std::string&, const std::string& name,
+                                 const nlohmann::json&) { started_tools.push_back(name); };
 
     const auto result = loop.Run("帮我用一下工具", callbacks);
 
@@ -431,7 +432,7 @@ TEST_CASE("用户拒绝确认:工具不执行,tool_result 是 is_error") {
 
     bool confirm_asked = false;
     agent::Callbacks callbacks;
-    callbacks.on_tool_confirm = [&](const std::string&, const nlohmann::json&) -> bool {
+    callbacks.on_tool_confirm = [&](const std::string&, const std::string&, const nlohmann::json&) -> bool {
         confirm_asked = true;
         return false;  // 拒绝
     };
@@ -466,8 +467,10 @@ TEST_CASE("拒绝文案回调:设了 on_tool_denial_text 用回调的,没设用�
 
         agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
         agent::Callbacks callbacks;
-        callbacks.on_tool_confirm = [](const std::string&, const nlohmann::json&) -> bool { return false; };
-        callbacks.on_tool_denial_text = [](const std::string& name) {
+        callbacks.on_tool_confirm = [](const std::string&, const std::string&, const nlohmann::json&) -> bool {
+            return false;
+        };
+        callbacks.on_tool_denial_text = [](const std::string&, const std::string& name) {
             return "后台任务无法弹权限确认," + name + " 未预先放行,已被拒绝。";
         };
         REQUIRE(loop.Run("去写个文件", callbacks).has_value());
@@ -492,7 +495,9 @@ TEST_CASE("拒绝文案回调:设了 on_tool_denial_text 用回调的,没设用�
 
         agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
         agent::Callbacks callbacks;
-        callbacks.on_tool_confirm = [](const std::string&, const nlohmann::json&) -> bool { return false; };
+        callbacks.on_tool_confirm = [](const std::string&, const std::string&, const nlohmann::json&) -> bool {
+            return false;
+        };
         REQUIRE(loop.Run("去写个文件", callbacks).has_value());
 
         const auto& tool_result = std::get<api::ToolResultBlock>(loop.history()[2].content[0]);

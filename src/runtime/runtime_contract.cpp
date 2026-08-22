@@ -7,6 +7,7 @@
 
 #include "runtime/command.hpp"
 #include "runtime/event.hpp"
+#include "runtime/id_authority.hpp"
 #include "runtime/interaction_broker.hpp"
 
 #include <stdexcept>
@@ -14,6 +15,12 @@
 #include <utility>
 
 namespace lubancode::runtime {
+
+// 进程级发号局(第四步):static 局部,首次用到时构造,退出时自然收。
+IdAuthority& ProcessIdAuthority() {
+    static IdAuthority authority;
+    return authority;
+}
 
 // ---- 小工具 ----------------------------------------------------------------
 

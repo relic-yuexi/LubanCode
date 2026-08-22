@@ -35,6 +35,7 @@ class ContextArtifactStore;
 // runtime/ 头——InteractionBroker 的装配在会话层,内核只管发请求、等
 // future、按四态收账。
 struct ApprovalRequest {
+    std::string tool_use_id;  // P4:这次审批钉在哪个条目上(ToolUseBlock.id)
     std::string tool_name;
     nlohmann::json input = nlohmann::json::object();
     std::string reason;  // 触发这次问话的线索(hook ask 的理由/权限档说明),可空
@@ -83,6 +84,13 @@ struct ToolHookDecision {
 };
 
 struct Callbacks {
+    // 显示系统剥离单 P4(补稳定 id):工具生命周期的回调首参一律带
+    // tool_use_id(模型给的 ToolUseBlock.id;PTC stub 调用是宿主合成的
+    // "ptc-N")。ToolDisplay 与未来的 EventSink 都认它路由条目,不再靠
+    // "当前主/子条目"的下标猜——多 thread、并行 turn 一来,隐式槽位会串账。
+    // 旧回调仍以 name 为首参的,名字挪到第二位;签名变化由编译器盯住,
+    // 不会有静默漏改。
+
     // 流式文本增量,打字机效果打印用。
     std::function<void(const std::string& text)> on_text_delta;
 
@@ -92,7 +100,8 @@ struct Callbacks {
 
     // 模型发起了一次工具调用,还没执行,给上层显示用(比如打印
     // `[工具] read_file {"path":...}`)。
-    std::function<void(const std::string& name, const nlohmann::json& input)> on_tool_start;
+    std::function<void(const std::string& tool_use_id, const std::string& name,
+                       const nlohmann::json& input)> on_tool_start;
 
     // 工具 needs_confirm() 为真时才会调用;返回 true 表示允许执行。
     // 没设这个回调、或者工具本来就不需要确认,都视为允许。
@@ -101,7 +110,8 @@ struct Callbacks {
     // async 优先,只有 async 缺位才回落到这里——回落规则与 on_pre_tool_
     // hook 之于 on_pre_tool_use_hook 同款。既有消费方(子代理/PTC 转发、
     // 单测)不动,行为一字不变。
-    std::function<bool(const std::string& name, const nlohmann::json& input)> on_tool_confirm;
+    std::function<bool(const std::string& tool_use_id, const std::string& name,
+                       const nlohmann::json& input)> on_tool_confirm;
 
     // 异步审批通道(P2):与 on_tool_confirm 同一个触发点(工具
     // needs_confirm 且档位真要问用户),但把"问"变成"发请求、拿 future":
@@ -113,6 +123,7 @@ struct Callbacks {
     // 类型是 runtime/ 的中立合同(agent/ 不 include runtime/ 也行,但
     // approval 的形状就是 InteractionBroker 那套四态;这里用前置声明 +
     // shared_ptr,保持 agent 头不拖 runtime 头)。
+    // P4:ApprovalRequest 带 tool_use_id,远端前端凭它把审批事件钉回条目。
     std::function<std::shared_ptr<InteractionFuture>(const ApprovalRequest& request)> on_tool_confirm_async;
 
     // on_tool_confirm 返回 false(拒绝)后,给模型的 tool_result 文案从这里
@@ -121,16 +132,20 @@ struct Callbacks {
     // 文案汇报,最终报告就会写成"均被用户拒绝",误导派工的主模型
     //(后台代理权限拒绝无告知单,2026-08-17)。与 on_tool_confirm 同线程
     // 先后调用,回调层可以拿同一份局部状态区分拒绝原因。
-    std::function<std::string(const std::string& name)> on_tool_denial_text;
+    std::function<std::string(const std::string& tool_use_id, const std::string& name)> on_tool_denial_text;
 
     // 工具跑完了(不管成功、失败、被拒绝、还是压根没找到这个工具),都会调用一次。
-    std::function<void(const std::string& name, const tools::Tool::Result& result)> on_tool_done;
+    std::function<void(const std::string& tool_use_id, const std::string& name,
+                       const tools::Tool::Result& result)> on_tool_done;
 
     // 服务端内置工具只展示，不经本地 registry 执行。比如 Responses 的
     // web_search_call；两枚回调保证界面也有 running -> done 轨迹。
-    std::function<void(const std::string& name, const nlohmann::json& input)> on_builtin_tool_start;
-    std::function<void(const std::string& name, const nlohmann::json& input, const std::string& summary,
-                       bool is_error)>
+    // P4:首参带服务端给的 id(BuiltinToolStart/Done 的 e.id),可空——
+    // 条目路由与 ToolUseBlock 同一套规矩。
+    std::function<void(const std::string& tool_use_id, const std::string& name,
+                       const nlohmann::json& input)> on_builtin_tool_start;
+    std::function<void(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input,
+                       const std::string& summary, bool is_error)>
         on_builtin_tool_done;
 
     // 每一次到模型的独立请求结束时(MessageDone 到达那一刻)都会调用一次,
@@ -152,35 +167,36 @@ struct Callbacks {
     // hooks 框架第三步:新代码请用下面的 on_pre_tool_use_hook(带决策/
     // updatedInput/additionalContext 的完整表态);这个旧回调保留作兼容,
     // 两者都设时新回调优先,只有新回调缺位才回落到旧回调。
-    std::function<std::optional<std::string>(const std::string& name, const nlohmann::json& input)> on_pre_tool_hook;
+    std::function<std::optional<std::string>(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input)> on_pre_tool_hook;
 
     // hooks 框架:PreToolUse 的完整表态。deny -> 工具不执行(确认也不问);
     // ask -> 即使确认档本来放行,也要问用户;allow -> 跳过用户确认,但
     // deny_commands/权限规则照走(在确认回调里,不许钩子越权);updatedInput
     // 只与 allow 同返,RunOneTool 会先过一遍工具 schema,改写打回即拦。
-    std::function<ToolHookDecision(const std::string& name, const nlohmann::json& input)> on_pre_tool_use_hook;
+    std::function<ToolHookDecision(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input)> on_pre_tool_use_hook;
 
     // hooks 框架:PermissionRequest。只有宿主本来要问用户确认时才触发
     // (RunOneTool 在调 on_tool_confirm 前把这个相位交给确认回调那一层,
     // 由它判断"真要弹确认"再发射)。deny -> 拒绝执行;allow -> 不弹确认;
     // 不表态 -> 正常问用户。
-    std::function<ToolHookDecision(const std::string& name, const nlohmann::json& input)> on_permission_request;
+    std::function<ToolHookDecision(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input)> on_permission_request;
 
     // hooks 框架:UI 工具状态机的相位通报。没配 hooks 的会话不设这个回调,
     // 展示行为与从前逐字节一致。
-    std::function<void(const std::string& name, ToolPhase phase)> on_tool_phase;
+    std::function<void(const std::string& tool_use_id, const std::string& name, ToolPhase phase)> on_tool_phase;
 
     // M9:hooks.post_tool。工具真的执行完了(拿到 Result)才调用一次;不会
     // 影响返回给模型的结果,单纯给上层一个"跑一下 post_tool 命令"的机会。
     // 不设就跳过。
-    std::function<void(const std::string& name, const nlohmann::json& input, const tools::Tool::Result& result)>
+    std::function<void(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input,
+                       const tools::Tool::Result& result)>
         on_post_tool_hook;
 
     // hooks 框架:PostToolUse 的完整版。与旧回调的差别:在工具结果清洗成
     // 合法 UTF-8 之后触发(旧回调吃原始结果),返回的每段文本追加进模型
     // 所见的 tool_result(副作用已经发生,不能撤销,只许追加反馈;原始
     // 结果照旧进审计账)。不设就跳过。
-    std::function<std::vector<std::string>(const std::string& name, const nlohmann::json& input,
+    std::function<std::vector<std::string>(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input,
                                            const tools::Tool::Result& result)>
         on_post_tool_use_hook;
 };

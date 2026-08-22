@@ -240,7 +240,8 @@ TEST_CASE("AgentLoop 往返: on_pre_tool_hook 拦截后,模型在下一轮 tool_
     agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
 
     agent::Callbacks callbacks;
-    callbacks.on_pre_tool_hook = [](const std::string& name, const nlohmann::json&) -> std::optional<std::string> {
+    callbacks.on_pre_tool_hook = [](const std::string&, const std::string& name,
+                                     const nlohmann::json&) -> std::optional<std::string> {
         if (name == "write_file") {
             return "被 pre_tool 钩子拦截(退出码 1): 检测到危险操作";
         }
@@ -277,12 +278,14 @@ TEST_CASE("AgentLoop 往返: on_pre_tool_hook 放行(nullopt)时工具正常执�
 
     agent::Callbacks callbacks;
     bool hook_called = false;
-    callbacks.on_pre_tool_hook = [&](const std::string&, const nlohmann::json&) -> std::optional<std::string> {
+    callbacks.on_pre_tool_hook = [&](const std::string&, const std::string&,
+                                     const nlohmann::json&) -> std::optional<std::string> {
         hook_called = true;
         return std::nullopt;
     };
     bool post_hook_called = false;
-    callbacks.on_post_tool_hook = [&](const std::string&, const nlohmann::json&, const tools::Tool::Result&) {
+    callbacks.on_post_tool_hook = [&](const std::string&, const std::string&, const nlohmann::json&,
+                                      const tools::Tool::Result&) {
         post_hook_called = true;
     };
 
@@ -311,8 +314,9 @@ TEST_CASE("RunOneTool 状态机: 相位序列 requested->checking_hook->running-
 
     std::vector<agent::ToolPhase> phases;
     agent::Callbacks callbacks;
-    callbacks.on_tool_phase = [&phases](const std::string&, agent::ToolPhase phase) { phases.push_back(phase); };
-    callbacks.on_pre_tool_use_hook = [](const std::string&,
+    callbacks.on_tool_phase = [&phases](const std::string&, const std::string&,
+                                        agent::ToolPhase phase) { phases.push_back(phase); };
+    callbacks.on_pre_tool_use_hook = [](const std::string& /*tool_use_id*/, const std::string&,
                                         const nlohmann::json&) -> agent::ToolHookDecision {
         agent::ToolHookDecision decision;
         decision.decision = agent::ToolHookDecision::Decision::Deny;
@@ -348,7 +352,7 @@ TEST_CASE("RunOneTool: updatedInput 合法时按改写后的入参执行") {
     agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
 
     agent::Callbacks callbacks;
-    callbacks.on_pre_tool_use_hook = [](const std::string&,
+    callbacks.on_pre_tool_use_hook = [](const std::string& /*tool_use_id*/, const std::string&,
                                         const nlohmann::json& input) -> agent::ToolHookDecision {
         agent::ToolHookDecision decision;
         decision.decision = agent::ToolHookDecision::Decision::Allow;
@@ -402,7 +406,7 @@ TEST_CASE("RunOneTool: updatedInput 不过工具 schema = 打回并拦截,不按
     agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
 
     agent::Callbacks callbacks;
-    callbacks.on_pre_tool_use_hook = [](const std::string&,
+    callbacks.on_pre_tool_use_hook = [](const std::string& /*tool_use_id*/, const std::string&,
                                         const nlohmann::json&) -> agent::ToolHookDecision {
         agent::ToolHookDecision decision;
         decision.decision = agent::ToolHookDecision::Decision::Allow;
@@ -433,10 +437,11 @@ TEST_CASE("RunOneTool: PostToolUse 反馈追加进模型所见 tool_result") {
 
     agent::Callbacks callbacks;
     bool post_hook_called = false;
-    callbacks.on_post_tool_hook = [&](const std::string&, const nlohmann::json&, const tools::Tool::Result&) {
+    callbacks.on_post_tool_hook = [&](const std::string&, const std::string&, const nlohmann::json&,
+                                      const tools::Tool::Result&) {
         post_hook_called = true;  // 旧回调照旧在
     };
-    callbacks.on_post_tool_use_hook = [](const std::string&, const nlohmann::json&,
+    callbacks.on_post_tool_use_hook = [](const std::string&, const std::string&, const nlohmann::json&,
                                          const tools::Tool::Result&) -> std::vector<std::string> {
         return {"格式检查通过", "行尾有多余空格"};
     };
@@ -472,13 +477,14 @@ TEST_CASE("RunOneTool: ask 决策时仍走确认回调(钩子不越过确认,确
 
     bool confirm_asked = false;
     agent::Callbacks callbacks;
-    callbacks.on_pre_tool_use_hook = [](const std::string&, const nlohmann::json&) -> agent::ToolHookDecision {
+    callbacks.on_pre_tool_use_hook =
+        [](const std::string&, const std::string&, const nlohmann::json&) -> agent::ToolHookDecision {
         agent::ToolHookDecision decision;
         decision.decision = agent::ToolHookDecision::Decision::Ask;
         decision.reason = "这命令得问问";
         return decision;
     };
-    callbacks.on_tool_confirm = [&confirm_asked](const std::string&, const nlohmann::json&) {
+    callbacks.on_tool_confirm = [&confirm_asked](const std::string&, const std::string&, const nlohmann::json&) {
         confirm_asked = true;
         return true;  // 用户(测试替身)允许
     };

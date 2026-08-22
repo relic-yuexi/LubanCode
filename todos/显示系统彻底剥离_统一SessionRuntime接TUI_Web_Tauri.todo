@@ -1,6 +1,6 @@
 # 显示系统彻底剥离:统一 SessionRuntime 接 TUI、Web 与 Tauri
 
-状态：第 1、2 步已并入(2026-08-22,0.26.17):runtime 合同(Event/Command/EventSink/Broker)与异步审批通道,TUI 行为零变化;第 3-10 步待做
+状态：第 1、2 步已并入(2026-08-22,0.26.17):runtime 合同(Event/Command/EventSink/Broker)与异步审批通道,TUI 行为零变化。第 3 步(TurnRuntime 拆出:权限裁定/hooks 决策/usage/取消/prompt 门在 src/runtime/turn_runtime.{hpp,cpp},终端侧只留画面;cancel 旗入轮核,agent_tool 后台 PreToolUse 映射与主路径归一)与第 4 步(稳定 id:src/runtime/id_authority.hpp 统一发 thread/turn/item/request/seq;AgentLoop 工具生命周期回调首参带 tool_use_id,ApprovalRequest 同带;ToolDisplay 认 id 不认下标,迟到/陌生终态丢弃不误伤)已落同一 worktree 待并;第 5-10 步待做。
 
 ## 一句话
 

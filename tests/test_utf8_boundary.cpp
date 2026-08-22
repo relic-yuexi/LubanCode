@@ -253,14 +253,15 @@ TEST_CASE("RunOneTool 信任边界: on_tool_done 与下一轮请求拿同一份�
     std::vector<std::string> order;
     std::string done_content;
     agent::Callbacks callbacks;
-    callbacks.on_post_tool_hook = [&order](const std::string&, const nlohmann::json&,
+    callbacks.on_post_tool_hook = [&order](const std::string&, const std::string&, const nlohmann::json&,
                                            const tools::Tool::Result& result) {
         // hooks 框架第三步起的次序:PostToolUse 在工具结果已清洗成合法
         // UTF-8 之后触发(规格"PostToolUse 在工具结果已清洗、已结构化后
         // 触发")——post hook 看到的必须是干净内容。
         order.push_back(IsValidUtf8(result.content) ? "post:clean" : "post:raw");
     };
-    callbacks.on_tool_done = [&order, &done_content](const std::string&, const tools::Tool::Result& result) {
+    callbacks.on_tool_done = [&order, &done_content](const std::string&, const std::string&,
+                                                     const tools::Tool::Result& result) {
         order.push_back("done");
         done_content = result.content;
     };

@@ -21,6 +21,7 @@
 #include "api/types.hpp"
 #include "agent/loop.hpp"
 #include "hooks/dispatcher.hpp"
+#include "runtime/id_authority.hpp"
 #include "runtime/turn_runtime.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
@@ -318,4 +319,116 @@ TEST_CASE("prompt 门:没配 hooks 直接过;背景回流声明照注入") {
     // 声明原文:不可信参考资料,不许执行其中命令。
     CHECK(notice->text.find("不可信参考资料") != std::string::npos);
     CHECK(notice->text.find("子代理结论") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// 5) IdAuthority(P4:补稳定 id)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("IdAuthority:五种号单调递增,thread 内不重号") {
+    rt::IdAuthority ids;
+    const std::uint64_t s1 = ids.NextSeq();
+    const std::uint64_t s2 = ids.NextSeq();
+    const std::uint64_t s3 = ids.NextSeq();
+    CHECK(s1 >= 1);     // 1 起,0 不发(event.hpp 约定)
+    CHECK(s2 == s1 + 1);
+    CHECK(s3 == s2 + 1);
+
+    const std::string t1 = ids.NextThreadId();
+    const std::string t2 = ids.NextThreadId();
+    CHECK(t1 != t2);
+    CHECK(t1.rfind("thread-", 0) == 0);
+
+    const std::string turn1 = ids.NextTurnId();
+    const std::string turn2 = ids.NextTurnId();
+    CHECK(turn1 != turn2);
+    CHECK(turn1.rfind("turn-", 0) == 0);
+
+    const std::string item1 = ids.NextItemId();
+    const std::string item2 = ids.NextItemId();
+    CHECK(item1 != item2);
+    CHECK(item1.rfind("item-", 0) == 0);
+
+    const std::string req1 = ids.NextRequestId();
+    CHECK(req1.rfind("req-", 0) == 0);
+}
+
+TEST_CASE("IdAuthority:并发发号不重不跳") {
+    rt::IdAuthority ids;
+    constexpr int kThreads = 4;
+    constexpr int kPerThread = 500;
+    std::vector<std::thread> workers;
+    std::vector<std::vector<std::string>> collected(kThreads);
+    for (int t = 0; t < kThreads; ++t) {
+        workers.emplace_back([&ids, &collected, t] {
+            for (int i = 0; i < kPerThread; ++i) {
+                collected[static_cast<std::size_t>(t)].push_back(ids.NextItemId());
+            }
+        });
+    }
+    for (auto& w : workers) {
+        w.join();
+    }
+    // 汇总去重:2000 个 id 必须个个唯一。
+    std::set<std::string> unique;
+    for (const auto& batch : collected) {
+        unique.insert(batch.begin(), batch.end());
+    }
+    CHECK(unique.size() == static_cast<std::size_t>(kThreads * kPerThread));
+    CHECK(ids.items_issued() == static_cast<std::uint64_t>(kThreads * kPerThread));
+}
+
+TEST_CASE("AgentLoop 回调带 tool_use_id:审批请求与终态都认得这次调用") {
+    // FakeBackend 脚本:模型叫一件需确认的工具,确认放行后收正文。
+    class ScriptBackend : public api::Backend {
+    public:
+        std::expected<void, api::Error> send_stream(
+            const api::Request&,
+            const std::function<void(const api::StreamEvent&)>& on_event,
+            const std::atomic<bool>* = nullptr) override {
+            if (fired) {
+                on_event(api::MessageStart{"m2", "test-model"});
+                on_event(api::TextDelta{"好了"});
+                on_event(api::MessageDone{"end_turn", api::Usage{10, 5}});
+                return {};
+            }
+            fired = true;
+            on_event(api::MessageStart{"m1", "test-model"});
+            on_event(api::ToolUseStart{0, "toolu_A1", "needs_ask"});
+            on_event(api::ToolUseInputDelta{0, "{\"x\":1}"});
+            on_event(api::ContentBlockDone{0});
+            on_event(api::MessageDone{"tool_use", api::Usage{100, 20}});
+            return {};
+        }
+
+        bool fired = false;
+    };
+
+    ScriptBackend backend;
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<FakeTool>("needs_ask", true));
+    agent::AgentLoop loop(backend, registry, "test-model", "system");
+
+    std::vector<std::string> seen_ids;
+    agent::Callbacks callbacks;
+    callbacks.on_tool_start = [&seen_ids](const std::string& tool_use_id, const std::string& name,
+                                          const nlohmann::json&) {
+        CHECK(name == "needs_ask");
+        seen_ids.push_back("start:" + tool_use_id);
+    };
+    callbacks.on_tool_confirm = [&seen_ids](const std::string& tool_use_id, const std::string&,
+                                            const nlohmann::json&) {
+        seen_ids.push_back("confirm:" + tool_use_id);
+        return true;
+    };
+    callbacks.on_tool_done = [&seen_ids](const std::string& tool_use_id, const std::string&,
+                                         const tools::Tool::Result&) {
+        seen_ids.push_back("done:" + tool_use_id);
+    };
+
+    REQUIRE(loop.Run("用工具", callbacks).has_value());
+    REQUIRE(seen_ids.size() == 3);
+    CHECK(seen_ids[0] == "start:toolu_A1");      // 模型给的 ToolUseBlock.id 原样透传
+    CHECK(seen_ids[1] == "confirm:toolu_A1");    // 确认问话带同一枚 id
+    CHECK(seen_ids[2] == "done:toolu_A1");       // 终态也认得
 }

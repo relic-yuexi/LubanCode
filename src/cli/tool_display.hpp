@@ -17,6 +17,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -220,11 +221,42 @@ struct ToolDisplay {
     // 面板(空闲 composer 上方 + 流式 footer)一处画,ToolDisplay 不再自
     // 己另记一本账。
 
-    // 主工具、子代理内层工具都是严格串行的,各留一个"进行中"槽位就够
-    // (agent 工具执行期间 active_main 指着 agent 条目,active_sub 指着
-    // 它肚子里正在跑的那个)。
-    int active_main = -1;  // transcript 下标,-1 = 没有进行中的主工具
-    int active_sub = -1;
+    // P4(显示系统剥离单:补稳定 id):条目身份认 tool_use_id,不认下标。
+    // tool_use_index:模型给的调用 id -> transcript 下标。终态一到即摘除,
+    // 表里只留进行中的;同名/同 id 的迟到事件查不到就丢弃,不串账。
+    // active_main/active_sub 降级为"最近一个进行中条目"的渲染兜底:老路
+    // (todo 复用、确认块定位)还靠它,但身份判定(谁的终态、谁被拦)
+    // 一律走 id。
+    std::unordered_map<std::string, int> tool_use_index;
+    int active_main = -1;  // 最近一个进行中的主工具下标(渲染兜底,-1 = 无)
+    int active_sub = -1;   // 最近一个进行中的子工具下标(渲染兜底,-1 = 无)
+
+    // 按 tool_use_id 找进行中条目的下标;没有(未登记/已终态)给 -1。
+    int IndexOfToolUse(const std::string& tool_use_id) const {
+        if (tool_use_id.empty()) {
+            return -1;
+        }
+        const auto it = tool_use_index.find(tool_use_id);
+        return it != tool_use_index.end() ? it->second : -1;
+    }
+
+    // id -> 下标的登记/摘除(-1 或空 id 是空操作)。
+    void RegisterToolUse(const std::string& tool_use_id, int index) {
+        if (tool_use_id.empty() || index < 0) {
+            return;
+        }
+        tool_use_index[tool_use_id] = index;
+    }
+
+    void UnregisterToolUse(const std::string& tool_use_id, int index) {
+        if (tool_use_id.empty()) {
+            return;
+        }
+        const auto it = tool_use_index.find(tool_use_id);
+        if (it != tool_use_index.end() && it->second == index) {
+            tool_use_index.erase(it);
+        }
+    }
     // todo_write 是一块“当前计划”，不是流水账。同一轮后续调用复用这
     // 个 transcript 条目和屏幕锚点；工具消息本身仍由 AgentLoop 完整保存。
     int reusable_todo_item = -1;
@@ -251,7 +283,7 @@ struct ToolDisplay {
     bool main_preview_below = false;
     bool sub_preview_below = false;
 
-    void OnToolStart(const std::string& name, const nlohmann::json& input) {
+    void OnToolStart(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input) {
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
         if (!is_console && !silent_) {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
@@ -284,6 +316,7 @@ struct ToolDisplay {
                 (std::max<std::size_t>)(1, todo_item_count);
         if (can_reuse_todo) {
             active_main = reusable_todo_item;
+            RegisterToolUse(tool_use_id, active_main);  // P4:复用条目同样按 id 登记
             auto& item = transcript[static_cast<std::size_t>(active_main)];
             // 旧计划下面可能早已垫着别的工具输出。此时若先把 N 行清单
             // 缩成一行 Running，完成时便不能向下长回去，会盖住后文。
@@ -316,6 +349,7 @@ struct ToolDisplay {
                 }
             }
             UpdateSnapshotItem(active_main);
+            RegisterToolUse(tool_use_id, active_main);  // P4:id -> 条目登记
             if (is_console) {
                 painter.PaintNew(item);
             }
@@ -327,8 +361,9 @@ struct ToolDisplay {
     // 条目)。CheckingHook 把那行 "Running..." 换成钩子检查中(单行换单行,
     // 锚点行数不乱);Blocked 标记"被钩子拦下,没有执行"——终态渲染据此
     // 区分"拦下"与"跑过又失败",不冒充。没配 hooks 的会话不会走到这里。
-    void OnHookCheckingText() {
-        const int idx = active_sub >= 0 ? active_sub : active_main;
+    void OnHookCheckingText(const std::string& tool_use_id = std::string()) {
+        const int idx = tool_use_id.empty() ? (active_sub >= 0 ? active_sub : active_main)
+                                            : IndexOfToolUse(tool_use_id);
         if (idx < 0) {
             return;
         }
@@ -347,12 +382,14 @@ struct ToolDisplay {
         }
     }
 
-    void OnHookMarkBlocked() {
-        const bool sub = active_sub >= 0;
-        const int idx = sub ? active_sub : active_main;
+    void OnHookMarkBlocked(const std::string& tool_use_id = std::string()) {
+        const int idx = tool_use_id.empty() ? (active_sub >= 0 ? active_sub : active_main)
+                                            : IndexOfToolUse(tool_use_id);
         if (idx < 0) {
             return;
         }
+        const bool sub = transcript[static_cast<std::size_t>(idx)].kind ==
+                         lubancode::cli::TranscriptKind::SubTool;
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
         auto& item = transcript[static_cast<std::size_t>(idx)];
         item.status = lubancode::cli::TranscriptStatus::Blocked;
@@ -365,19 +402,27 @@ struct ToolDisplay {
             }
             if (sub) {
                 RetractIfCompact(item);
+                UnregisterToolUse(tool_use_id, idx);  // 拦下的不再有终态,登记就地摘除
                 active_sub = -1;  // 拦下的子工具不会再有 post 钩子,槽位在这儿收掉
             }
         } else if (sub) {
+            UnregisterToolUse(tool_use_id, idx);
             active_sub = -1;
         }
     }
 
-    void OnToolDone(const std::string& name, const lubancode::tools::Tool::Result& result) {
-        if (active_main < 0) {
+    void OnToolDone(const std::string& tool_use_id, const std::string& name,
+                    const lubancode::tools::Tool::Result& result) {
+        // P4:终态认 id。空 id(旧调用方/兜底路)退回 active_main 下标,与
+        // 从前一致;id 非空却查不到 = 迟到或陌生的终态,丢弃不兜底——兜底
+        // 会误伤当前进行中的条目(串行轮里这正是"收错账"的窗口)。
+        const int idx = IndexOfToolUse(tool_use_id);
+        const int resolved = idx >= 0 ? idx : (tool_use_id.empty() ? active_main : -1);
+        if (resolved < 0) {
             return;
         }
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
-        auto& item = transcript[static_cast<std::size_t>(active_main)];
+        auto& item = transcript[static_cast<std::size_t>(resolved)];
         // UI-C:自动放行时垫在条目下面的 diff 预览,执行完了就擦——终态只
         // 留 "新增 N 行,删除 M 行" 简短摘要,不铺屏(确认路子的预览已被
         // OnConfirmAnswered 的 TrimBelow 带走,标记不会是 true)。
@@ -387,7 +432,11 @@ struct ToolDisplay {
         main_preview_below = false;
         FinalizeItem(item, name, main_input, result, main_write_old_lines, agent_step_count, agent_sub_tools,
                       main_diff_full, main_diff_final);
-        UpdateSnapshotItem(active_main);
+        UpdateSnapshotItem(resolved);
+        UnregisterToolUse(tool_use_id, resolved);  // 终态已到,id 摘除
+        if (resolved == active_main) {
+            active_main = -1;
+        }
         if (is_console) {
             painter.Repaint(item);
         } else if (!silent_) {
@@ -400,20 +449,24 @@ struct ToolDisplay {
             }
             std::cout.flush();
         }
-        active_main = -1;
+        if (resolved == active_main) {
+            active_main = -1;
+        }
     }
 
-    void OnBuiltinToolDone(const std::string& name, const nlohmann::json& final_input,
-                           const lubancode::tools::Tool::Result& result) {
+    void OnBuiltinToolDone(const std::string& tool_use_id, const std::string& name,
+                           const nlohmann::json& final_input, const lubancode::tools::Tool::Result& result) {
         // Responses 兼容端常在 output_item.added 只给空 action，到 done
         // 才补 query。用终态参数回填同一条记录，免得绿灯后标题仍是 {}。
-        if (active_main >= 0 && final_input.is_object() && !final_input.empty()) {
+        const int idx = IndexOfToolUse(tool_use_id);
+        const int resolved = idx >= 0 ? idx : (tool_use_id.empty() ? active_main : -1);
+        if (resolved >= 0 && final_input.is_object() && !final_input.empty()) {
             main_input = final_input;
-            auto& item = transcript[static_cast<std::size_t>(active_main)];
+            auto& item = transcript[static_cast<std::size_t>(resolved)];
             item.title = lubancode::cli::BuildToolTitle(name, final_input);
             item.input_json = final_input.dump();
         }
-        OnToolDone(name, result);
+        OnToolDone(tool_use_id, name, result);
     }
 
     // ---- 思考折叠块 -------------------------------------------------------
@@ -487,7 +540,7 @@ struct ToolDisplay {
 
     bool HasActiveThinking() const { return active_thinking >= 0; }
 
-    void OnSubToolStart(const std::string& name, const nlohmann::json& input) {
+    void OnSubToolStart(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input) {
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
         agent_sub_tools += 1;
         if (!is_console && !silent_) {
@@ -504,6 +557,7 @@ struct ToolDisplay {
         sub_diff_final.clear();
         sub_preview_below = false;
         active_sub = NewItem(lubancode::cli::TranscriptKind::SubTool, name, input);
+        RegisterToolUse(tool_use_id, active_sub);  // P4:id -> 子条目登记
         // UI-D 折叠(#三,修订):紧凑态(默认)下,子工具"开始执行"这一刻
         // 就不画明细了——之前只在收尾(OnSubToolResult/OnSubBlocked)的
         // Retract 才把它收走,真机 dogfood 发现子工具执行慢时(比如
@@ -525,20 +579,26 @@ struct ToolDisplay {
     // 子工具真执行完(agent 工具转发的 post_tool 钩子)——终态回写。拒绝
     // 那条路走不到这里(post_tool 只在真执行后触发),由 OnConfirmAnswered
     // 定格成 Cancelled。
-    void OnSubToolResult(const std::string& name, const nlohmann::json& input,
+    void OnSubToolResult(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input,
                           const lubancode::tools::Tool::Result& result) {
         (void)input;
-        if (active_sub < 0) {
+        const int idx = IndexOfToolUse(tool_use_id);
+        const int resolved = idx >= 0 ? idx : (tool_use_id.empty() ? active_sub : -1);
+        if (resolved < 0) {
             return;
         }
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
-        auto& item = transcript[static_cast<std::size_t>(active_sub)];
+        auto& item = transcript[static_cast<std::size_t>(resolved)];
         if (sub_preview_below && is_console) {
             painter.TrimBelow(item.id);  // 理由同 OnToolDone
         }
         sub_preview_below = false;
         FinalizeItem(item, name, sub_input, result, sub_write_old_lines, 0, 0, sub_diff_full, sub_diff_final);
-        UpdateSnapshotItem(active_sub);
+        UpdateSnapshotItem(resolved);
+        UnregisterToolUse(tool_use_id, resolved);  // 终态已到,id 摘除
+        if (resolved == active_sub) {
+            active_sub = -1;
+        }
         if (is_console) {
             // 紧凑态下 OnSubToolStart 压根没画(没有 PaintNew、没有锚点)——
             // 这里若无脑调 Repaint,会撞进 TranscriptPainter::Repaint 的
@@ -552,21 +612,26 @@ struct ToolDisplay {
             }
             RetractIfCompact(item);  // UI-D 折叠(#三):见函数注释
         }
-        active_sub = -1;
+        if (resolved == active_sub) {
+            active_sub = -1;
+        }
     }
 
     // 子工具被 pre_tool 钩子拦截(post_tool 不会再来了)——条目定格成失败态。
-    void OnSubBlocked(const std::string& message) {
-        if (active_sub < 0) {
+    void OnSubBlocked(const std::string& tool_use_id, const std::string& message) {
+        const int idx = IndexOfToolUse(tool_use_id);
+        const int resolved = idx >= 0 ? idx : (tool_use_id.empty() ? active_sub : -1);
+        if (resolved < 0) {
             return;
         }
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
-        auto& item = transcript[static_cast<std::size_t>(active_sub)];
+        auto& item = transcript[static_cast<std::size_t>(resolved)];
         item.status = lubancode::cli::TranscriptStatus::Error;
         item.summary_lines = lubancode::cli::ErrorSummaryLines(item.tool_name, message);
         item.full_output = lubancode::cli::TruncateUtf8Bytes(message, lubancode::cli::kFullOutputCapBytes);
         item.end_time = std::chrono::steady_clock::now();
-        UpdateSnapshotItem(active_sub);
+        UpdateSnapshotItem(resolved);
+        UnregisterToolUse(tool_use_id, resolved);
         if (is_console) {
             // 理由同 OnSubToolResult:紧凑态下开头没画、没锚点,Repaint 会
             // 掉进兜底追加打印分支,得跳过。
@@ -575,7 +640,9 @@ struct ToolDisplay {
             }
             RetractIfCompact(item);  // UI-D 折叠(#三):见函数注释
         }
-        active_sub = -1;
+        if (resolved == active_sub) {
+            active_sub = -1;
+        }
     }
 
     // UI-C:edit_file/write_file 确认前的统一 diff 预览,画在当前条目
@@ -584,7 +651,8 @@ struct ToolDisplay {
     // 里 TrimBelow 擦掉;false 是确认路子,预览随确认块一起被
     // OnConfirmAnswered 的 TrimBelow 带走。管道模式(is_console 为假)
     // 整个不打,保持稳定纯文本输出。
-    void ShowDiffPreview(const std::string& name, const nlohmann::json& input, bool trim_on_done) {
+    void ShowDiffPreview(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input,
+                         bool trim_on_done) {
         if (!is_console || silent_) {
             return;  // 管道模式保持稳定纯文本;静默档不铺预览(数据进 full_output 不丢)
         }
@@ -593,7 +661,10 @@ struct ToolDisplay {
         if (!preview.has_value()) {
             return;
         }
-        const bool sub = active_sub >= 0;
+        const int idx = IndexOfToolUse(tool_use_id);
+        const bool sub = idx >= 0 ? transcript[static_cast<std::size_t>(idx)].kind ==
+                                       lubancode::cli::TranscriptKind::SubTool
+                                  : active_sub >= 0;
         (sub ? sub_diff_full : main_diff_full) = preview->full;
         (sub ? sub_diff_final : main_diff_final) = preview->final_lines;
         // 预览可能有几百行,先在缓冲区底部把行数留够(外加确认块的余量),
@@ -613,9 +684,11 @@ struct ToolDisplay {
     // 确认真的要问出口了(自动放行的几条路都没走到)——条目改成"待确认"态,
     // 确认块(参数详情 + [y/a/N])跟在条目下面打。返回该条目的 transcript
     // 下标,答完交回 OnConfirmAnswered。
-    int OnConfirmRequest() {
+    int OnConfirmRequest(const std::string& tool_use_id = std::string()) {
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
-        const int idx = active_sub >= 0 ? active_sub : active_main;
+        const int idx = tool_use_id.empty() ? (active_sub >= 0 ? active_sub : active_main)
+                                            : (IndexOfToolUse(tool_use_id) >= 0 ? IndexOfToolUse(tool_use_id)
+                                                               : (active_sub >= 0 ? active_sub : active_main));
         if (idx >= 0) {
             auto& item = transcript[static_cast<std::size_t>(idx)];
             item.status = lubancode::cli::TranscriptStatus::Pending;
@@ -631,12 +704,16 @@ struct ToolDisplay {
         return idx;
     }
 
-    void OnConfirmAnswered(int idx, bool allowed) {
+    void OnConfirmAnswered(int idx, bool allowed, const std::string& tool_use_id = std::string()) {
         if (idx < 0) {
             return;
         }
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
         auto& item = transcript[static_cast<std::size_t>(idx)];
+        // 拒绝即终态:post 钩子不会再来,id 摘除;放行是过渡态,登记留着。
+        if (!allowed) {
+            UnregisterToolUse(tool_use_id, idx);
+        }
         const bool was_sub = idx == active_sub;  // Cancelled 分支下面会把 active_sub 收掉,先记住
         if (is_console) {
             painter.TrimBelow(item.id);  // 确认块用完就擦,条目回到屏幕末尾

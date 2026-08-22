@@ -178,6 +178,9 @@ add_executable(lubancode_tests
   # 显示系统剥离单 P3:TurnRuntime 纯逻辑核(权限裁定/取消/usage/prompt 门),
   # 脱离终端可驱动。
   test_turn_runtime.cpp
+  # 显示系统剥离单 P4:ToolDisplay 认 tool_use_id 不认下标(交错终态/迟到
+  # 事件/主子条目/确认块)。
+  test_tool_display_id.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)

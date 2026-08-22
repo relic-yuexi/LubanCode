@@ -319,7 +319,8 @@ lubancode::runtime::TurnRuntime::Options BuildTurnRuntimeOptions(
 // runtime::EvaluatePermission 与 runtime::EmitPermissionRequest(纯逻辑,
 // 可脱离终端单测),这里只剩"把决定落到画面上"的活:diff 预览、三档菜单、
 // settings.local.json 追问。裁定次序的完整注释见 runtime/turn_runtime.hpp。
-bool ConfirmToolUse(bool auto_confirm, std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
+bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
+                    std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
                     lubancode::cli::ToolDisplay& display, const std::vector<std::string>& allow_commands,
                     const std::vector<std::string>& deny_commands,
                     lubancode::hooks::HookDispatcher* hook_dispatcher, const lubancode::agent::ToolHookDecision& pre,
@@ -346,7 +347,7 @@ bool ConfirmToolUse(bool auto_confirm, std::set<std::string>& always_allowed_too
         // 打完即执行;执行完预览被 TrimBelow 擦掉,条目只留 +N -M。
         // 管道模式 ShowDiffPreview 内部直接返回,输出照旧是稳定纯文本。
         if (file_tool) {
-            display.ShowDiffPreview(name, input, /*trim_on_done=*/true);
+            display.ShowDiffPreview(tool_use_id, name, input, /*trim_on_done=*/true);
         }
         return true;
     }
@@ -363,7 +364,7 @@ bool ConfirmToolUse(bool auto_confirm, std::set<std::string>& always_allowed_too
         }
         if (hook.reply == lubancode::runtime::PermissionHookReply::Allow) {
             if (file_tool) {
-                display.ShowDiffPreview(name, input, /*trim_on_done=*/true);
+                display.ShowDiffPreview(tool_use_id, name, input, /*trim_on_done=*/true);
             }
             return true;
         }
@@ -388,9 +389,9 @@ bool ConfirmToolUse(bool auto_confirm, std::set<std::string>& always_allowed_too
     // 状态块、挂起 ticker、让监听线程交出读权——确认菜单与 ask_user
     // 菜单同一套屏面所有权,不另开第二条路。)
     const lubancode::cli::StreamFooterSuspendScope footer_suspend;
-    const int pending_idx = display.OnConfirmRequest();
+    const int pending_idx = display.OnConfirmRequest(tool_use_id);
     if (file_tool && display.is_console) {
-        display.ShowDiffPreview(name, input, /*trim_on_done=*/false);
+        display.ShowDiffPreview(tool_use_id, name, input, /*trim_on_done=*/false);
     } else {
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         PrintConfirmDetails(name, input);
@@ -438,7 +439,7 @@ bool ConfirmToolUse(bool auto_confirm, std::set<std::string>& always_allowed_too
             }
         }
     }
-    display.OnConfirmAnswered(pending_idx, allowed);
+    display.OnConfirmAnswered(pending_idx, allowed, tool_use_id);
 
     // 按 a 之后多问一句:也永久写进项目 settings.local.json?管道/--yes 下
     // 跳过(只进会话集合)——那些场景没法交互再问一遍。真控制台才追问。
@@ -522,7 +523,7 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
     auto pre_decision_slot = std::make_shared<lubancode::agent::ToolHookDecision>();
     if (has_tool_hooks) {
         callbacks.on_pre_tool_use_hook = [hook_dispatcher, pre_decision_slot](
-                                             const std::string& name,
+                                             const std::string& /*tool_use_id*/, const std::string& name,
                                              const nlohmann::json& input) -> lubancode::agent::ToolHookDecision {
             lubancode::agent::ToolHookDecision decision =
                 lubancode::runtime::EmitPreToolUse(hook_dispatcher, name, input);
@@ -531,22 +532,24 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         };
 
         callbacks.on_post_tool_use_hook = [hook_dispatcher](
-                                              const std::string& name, const nlohmann::json& input,
+                                              const std::string& /*tool_use_id*/, const std::string& name,
+                                              const nlohmann::json& input,
                                               const lubancode::tools::Tool::Result&
                                               result) -> std::vector<std::string> {
             return lubancode::runtime::EmitPostToolUse(hook_dispatcher, name, input, result);
         };
 
-        // UI 相位:checking_hook/blocked 由 ToolDisplay 按当前主/子条目路由
-        // (子代理工具执行期 active_sub 活着,自动落到子条目上);等权限/
-        // 运行的过渡由既有 OnConfirmRequest/终态渲染覆盖,不重复画。
-        callbacks.on_tool_phase = [&display](const std::string& /*name*/, lubancode::agent::ToolPhase phase) {
+        // UI 相位:checking_hook/blocked 由 ToolDisplay 按 tool_use_id 路由到
+        // 对应条目(P4;子代理工具的 id 在转发链上随行);等权限/运行的过渡
+        // 由既有 OnConfirmRequest/终态渲染覆盖,不重复画。
+        callbacks.on_tool_phase = [&display](const std::string& tool_use_id, const std::string& /*name*/,
+                                            lubancode::agent::ToolPhase phase) {
             switch (phase) {
                 case lubancode::agent::ToolPhase::CheckingHook:
-                    display.OnHookCheckingText();
+                    display.OnHookCheckingText(tool_use_id);
                     break;
                 case lubancode::agent::ToolPhase::Blocked:
-                    display.OnHookMarkBlocked();
+                    display.OnHookMarkBlocked(tool_use_id);
                     break;
                 case lubancode::agent::ToolPhase::WaitingPermission:
                 case lubancode::agent::ToolPhase::Running:
@@ -581,21 +584,23 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
     // markdown:条目要开画了,正文当前块到此为止(保持原样,不重画)。
     // recorder:录一遍生成技能(0.25.x)的监听挂点——只在这里旁听事件,
     // 不改工具本身的执行路径;没在录(nullptr)零影响。
-    callbacks.on_tool_start = [&display, &body_tracker, recorder](const std::string& name,
+    callbacks.on_tool_start = [&display, &body_tracker, recorder](const std::string& tool_use_id,
+                                                                  const std::string& name,
                                                                   const nlohmann::json& input) {
         if (recorder != nullptr) {
             recorder->RecordToolCall(name, input);
         }
         display.OnThinkingDone();  // 思考块若有,先收尾
         body_tracker.OnBlockBreak();
-        display.OnToolStart(name, input);
+        display.OnToolStart(tool_use_id, name, input);
     };
 
     callbacks.on_tool_confirm = [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands,
                                   &deny_commands, hook_dispatcher, pre_decision_slot,
-                                  has_permission_hooks](const std::string& name, const nlohmann::json& input) -> bool {
-        return ConfirmToolUse(auto_confirm, always_allowed_tools, theme, display, allow_commands, deny_commands,
-                              hook_dispatcher, *pre_decision_slot, has_permission_hooks, name, input);
+                                  has_permission_hooks](const std::string& tool_use_id, const std::string& name,
+                                                        const nlohmann::json& input) -> bool {
+        return ConfirmToolUse(tool_use_id, auto_confirm, always_allowed_tools, theme, display, allow_commands,
+                              deny_commands, hook_dispatcher, *pre_decision_slot, has_permission_hooks, name, input);
     };
 
     // P2(显示系统剥离单):异步审批通道——同一份裁定与问话逻辑包成
@@ -609,34 +614,38 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands, &deny_commands, hook_dispatcher,
          pre_decision_slot, has_permission_hooks](const lubancode::agent::ApprovalRequest& request)
         -> std::shared_ptr<lubancode::agent::InteractionFuture> {
-        const bool allowed = ConfirmToolUse(auto_confirm, always_allowed_tools, theme, display, allow_commands,
-                                            deny_commands, hook_dispatcher, *pre_decision_slot,
-                                            has_permission_hooks, request.tool_name, request.input);
+        const bool allowed =
+            ConfirmToolUse(request.tool_use_id, auto_confirm, always_allowed_tools, theme, display, allow_commands,
+                           deny_commands, hook_dispatcher, *pre_decision_slot, has_permission_hooks,
+                           request.tool_name, request.input);
         lubancode::agent::ApprovalResponse response;
         response.decision = allowed ? lubancode::agent::ApprovalDecision::Accept
                                     : lubancode::agent::ApprovalDecision::Decline;
         return std::make_shared<ReadyApprovalFuture>(std::move(response));
     };
 
-    callbacks.on_tool_done = [&display, &body_tracker, recorder](const std::string& name,
+    callbacks.on_tool_done = [&display, &body_tracker, recorder](const std::string& tool_use_id,
+                                                                 const std::string& name,
                                                                  const lubancode::tools::Tool::Result& result) {
         if (recorder != nullptr) {
             recorder->RecordToolResult(name, result.is_error, result.content);
         }
-        display.OnToolDone(name, result);
+        display.OnToolDone(tool_use_id, name, result);
         body_tracker.OnToolBlockDone();
     };
 
-    callbacks.on_builtin_tool_start = [&display, &body_tracker](const std::string& name,
+    callbacks.on_builtin_tool_start = [&display, &body_tracker](const std::string& tool_use_id,
+                                                                 const std::string& name,
                                                                  const nlohmann::json& input) {
         display.OnThinkingDone();  // 思考块若有,先收尾
         body_tracker.OnBlockBreak();
-        display.OnToolStart(name, input);
+        display.OnToolStart(tool_use_id, name, input);
     };
-    callbacks.on_builtin_tool_done = [&display, &body_tracker](const std::string& name,
+    callbacks.on_builtin_tool_done = [&display, &body_tracker](const std::string& tool_use_id,
+                                                                const std::string& name,
                                                                 const nlohmann::json& input,
                                                                 const std::string& summary, bool is_error) {
-        display.OnBuiltinToolDone(name, input, lubancode::tools::Tool::Result{summary, is_error});
+        display.OnBuiltinToolDone(tool_use_id, name, input, lubancode::tools::Tool::Result{summary, is_error});
         body_tracker.OnToolBlockDone();
     };
 
@@ -690,8 +699,9 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         // 钩子(agent 工具没有单独的"子工具结束"回调,post_tool 正好在真
         // 执行完之后带着 Result 触发一次,借它回写;拒绝那条路在确认回调里
         // 已经定格,pre_tool 拦截另包一层)。
-        hooks.on_sub_tool_start = [&display](const std::string& name, const nlohmann::json& input) {
-            display.OnSubToolStart(name, input);
+        hooks.on_sub_tool_start = [&display](const std::string& tool_use_id, const std::string& name,
+                                            const nlohmann::json& input) {
+            display.OnSubToolStart(tool_use_id, name, input);
         };
         hooks.on_usage = [&usage_stats, &display](const lubancode::api::UsageReport& report) {
             usage_stats.Add(report);
@@ -703,11 +713,11 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         // 一层,给子工具条目回写终态/拦截态用。
         if (callbacks.on_pre_tool_hook) {
             hooks.on_pre_tool_hook = [&display, base = callbacks.on_pre_tool_hook](
-                                          const std::string& name,
+                                          const std::string& tool_use_id, const std::string& name,
                                           const nlohmann::json& input) -> std::optional<std::string> {
-                std::optional<std::string> blocked = base(name, input);
+                std::optional<std::string> blocked = base(tool_use_id, name, input);
                 if (blocked.has_value()) {
-                    display.OnSubBlocked(*blocked);
+                    display.OnSubBlocked(tool_use_id, *blocked);
                 }
                 return blocked;
             };
@@ -720,21 +730,23 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         hooks.hook_dispatcher = hook_dispatcher;
         if (callbacks.on_post_tool_use_hook) {
             hooks.on_post_tool_use_hook = [&display, base = callbacks.on_post_tool_use_hook](
-                                              const std::string& name, const nlohmann::json& input,
+                                              const std::string& tool_use_id, const std::string& name,
+                                              const nlohmann::json& input,
                                               const lubancode::tools::Tool::Result&
                                               result) -> std::vector<std::string> {
-                const std::vector<std::string> feedback = base(name, input, result);
-                display.OnSubToolResult(name, input, result);
+                const std::vector<std::string> feedback = base(tool_use_id, name, input, result);
+                display.OnSubToolResult(tool_use_id, name, input, result);
                 return feedback;
             };
         }
         hooks.on_post_tool_hook = [&display, base = callbacks.on_post_tool_hook](
-                                       const std::string& name, const nlohmann::json& input,
+                                       const std::string& tool_use_id, const std::string& name,
+                                       const nlohmann::json& input,
                                        const lubancode::tools::Tool::Result& result) {
             if (base) {
-                base(name, input, result);
+                base(tool_use_id, name, input, result);
             }
-            display.OnSubToolResult(name, input, result);
+            display.OnSubToolResult(tool_use_id, name, input, result);
         };
         agent_tool->SetHooks(std::move(hooks));
     }

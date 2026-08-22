@@ -1353,7 +1353,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             ++task->content_revision;
             touch_activity(AgentTaskActivity::Stage::Thinking);
         };
-        sub_callbacks.on_tool_start = [this, task, foreground_hooks](const std::string& tool_name,
+        sub_callbacks.on_tool_start = [this, task, foreground_hooks](const std::string& tool_use_id,
+                                                                     const std::string& tool_name,
                                                                      const nlohmann::json& tool_input) {
             {
                 std::lock_guard<std::mutex> lock(tasks_mutex_);
@@ -1365,8 +1366,10 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 event.tool_name = tool_name;
                 event.input_json = tool_input.dump();
                 AppendTaskEventLocked(task, std::move(event));
+                // P4:tool_use_id 一并入账——子代理面板/查看态以后凭它对条目,
+                // 不再按"最近一笔同名工具"倒着找。
                 task->snapshot.tool_calls.push_back(
-                    AgentTaskToolCall{tool_name, tool_input.dump(), std::string(), false, false});
+                    AgentTaskToolCall{tool_name, tool_input.dump(), std::string(), false, false, tool_use_id});
                 task->activity.stage = AgentTaskActivity::Stage::Tool;
                 task->activity.tool_name = tool_name;
                 task->activity.tool_started = std::chrono::steady_clock::now();
@@ -1374,18 +1377,33 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 TouchTasks();
             }
             if (foreground_hooks != nullptr && foreground_hooks->on_sub_tool_start) {
-                foreground_hooks->on_sub_tool_start(tool_name, tool_input);
+                foreground_hooks->on_sub_tool_start(tool_use_id, tool_name, tool_input);
             }
         };
-        sub_callbacks.on_tool_done = [this, task](const std::string& tool_name, const Result& result) {
+        sub_callbacks.on_tool_done = [this, task](const std::string& tool_use_id, const std::string& tool_name,
+                                                  const Result& result) {
             std::lock_guard<std::mutex> lock(tasks_mutex_);
             FlushPendingTaskTextLocked(task);  // 工具结果前若有残余正文,先入账
+            // P4:先按 tool_use_id 精确对账;老档(没存 id 的)退回"最近一笔
+            // 未完的同名工具"——两代数据都能收口。
+            bool matched_by_id = false;
             for (auto it = task->snapshot.tool_calls.rbegin(); it != task->snapshot.tool_calls.rend(); ++it) {
-                if (!it->done && it->name == tool_name) {
+                if (!it->done && !it->tool_use_id.empty() && it->tool_use_id == tool_use_id) {
                     it->done = true;
                     it->is_error = result.is_error;
                     it->result = result.content;
+                    matched_by_id = true;
                     break;
+                }
+            }
+            if (!matched_by_id) {
+                for (auto it = task->snapshot.tool_calls.rbegin(); it != task->snapshot.tool_calls.rend(); ++it) {
+                    if (!it->done && it->name == tool_name) {
+                        it->done = true;
+                        it->is_error = result.is_error;
+                        it->result = result.content;
+                        break;
+                    }
                 }
             }
             AgentTaskEvent event;
@@ -1416,7 +1434,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             const std::shared_ptr<lubancode::hooks::DetachedHookSession> hooks_session =
                 background_hooks != nullptr && !background_hooks->Empty() ? background_hooks : nullptr;
             sub_callbacks.on_tool_confirm = [this, task, hooks_session, &last_denial_hook_reason](
-                                                const std::string& name, const nlohmann::json& input) {
+                                                const std::string& /*tool_use_id*/, const std::string& name,
+                                                const nlohmann::json& input) {
                 last_denial_hook_reason.clear();
                 if (hooks_session != nullptr) {
                     lubancode::hooks::HookPayload payload;
@@ -1454,7 +1473,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             // 重派)。缺省那份"用户拒绝执行该工具"会把这个后台边界藏起来,
             // 子代理的最终报告便写成"均被用户拒绝"——既冤枉了用户,也把主模
             // 型的下一步带偏。
-            sub_callbacks.on_tool_denial_text = [&last_denial_hook_reason](const std::string& name) {
+            sub_callbacks.on_tool_denial_text = [&last_denial_hook_reason](const std::string& /*tool_use_id*/,
+                                                                           const std::string& name) {
                 std::string text = "后台任务无法弹出权限确认," + name + " 未预先放行,已被拒绝。";
                 if (!last_denial_hook_reason.empty()) {
                     text += "拒绝来自 PermissionRequest 钩子:" + last_denial_hook_reason + "。";
@@ -1501,7 +1521,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             //   PreToolUse/PostToolUse 两个口。
             const std::shared_ptr<lubancode::hooks::DetachedHookSession> hooks_session = background_hooks;
             sub_callbacks.on_pre_tool_use_hook =
-                [hooks_session](const std::string& name, const nlohmann::json& input) {
+                [hooks_session](const std::string& /*tool_use_id*/, const std::string& name,
+                                const nlohmann::json& input) {
                     lubancode::hooks::HookPayload payload;
                     payload.event = lubancode::hooks::HookEvent::PreToolUse;
                     payload.fields["tool_name"] = name;
@@ -1528,7 +1549,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                     return lubancode::runtime::MapPreToolDecision(merged);
                 };
             sub_callbacks.on_post_tool_use_hook =
-                [hooks_session](const std::string& name, const nlohmann::json& input, const Result& result) {
+                [hooks_session](const std::string& /*tool_use_id*/, const std::string& name,
+                                const nlohmann::json& input, const Result& result) {
                     lubancode::hooks::HookPayload payload;
                     payload.event = lubancode::hooks::HookEvent::PostToolUse;
                     payload.fields["tool_name"] = name;
@@ -1542,10 +1564,11 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         }
     } else if (foreground_hooks != nullptr) {
         // 没进台账的旧路径(测试直调 RunTask 等边缘):沿用旧回调。
-        sub_callbacks.on_tool_start = [foreground_hooks](const std::string& tool_name,
+        sub_callbacks.on_tool_start = [foreground_hooks](const std::string& tool_use_id,
+                                                          const std::string& tool_name,
                                                           const nlohmann::json& tool_input) {
             if (foreground_hooks->on_sub_tool_start) {
-                foreground_hooks->on_sub_tool_start(tool_name, tool_input);
+                foreground_hooks->on_sub_tool_start(tool_use_id, tool_name, tool_input);
             }
         };
         sub_callbacks.on_tool_confirm = foreground_hooks->on_tool_confirm;

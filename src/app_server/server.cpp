@@ -289,7 +289,8 @@ nlohmann::json Server::HandleTurnStart(const std::string& thread_id, const std::
         // 工具审批:协议位留着(item/started + permission/request 反向请求),
         // 执行链等 Broker;骨架期没有工具可调(注册表空/假工具免确认),
         // 这里返回 false = 拒绝一切需确认工具,不许偷偷执行(单子底线)。
-        callbacks.on_tool_confirm = [](const std::string&, const nlohmann::json&) { return false; };
+        callbacks.on_tool_confirm = [](const std::string& /*tool_use_id*/, const std::string&,
+                                       const nlohmann::json&) { return false; };
 
         const std::expected<agent::RunOutcome, std::string> outcome = loop.Run(text, callbacks);
         if (!text_item_id.empty()) {
