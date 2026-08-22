@@ -396,6 +396,7 @@ add_library(lubancode_core STATIC
   src/cli/keymap.cpp
   src/cli/terminal_caps.cpp
   src/cli/history_search.cpp
+  src/cli/session_picker.cpp
   src/cli/mention_menu.cpp
   src/cli/markdown.cpp
   src/cli/latex_math.cpp
@@ -450,6 +451,7 @@ add_library(lubancode_app STATIC
   src/app/cli_options.cpp
   src/app/cli_app.cpp
   src/cli/console_input.cpp
+  src/cli/session_picker_panel.cpp
   src/cli/spinner.cpp
   src/cli/record_command.cpp)
 target_link_libraries(lubancode_app PUBLIC lubancode_core)

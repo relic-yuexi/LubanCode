@@ -107,6 +107,9 @@ add_executable(lubancode_tests
   # 会话管理器单第一步:SessionCatalog 中立查询层(排序键/摘要/两排序/两
   # scope/搜索/分页/坏档/空表/指纹缓存)。
   test_session_catalog.cpp
+  # 第二步:SessionPicker 纯逻辑(焦点轮换/搜索/筛选排序切换/翻页边界/
+  # 选中保持/视口窗口账/渲染帧/空态/相对时间/百分比)。
+  test_session_picker.cpp
   test_prompt_files.cpp
   test_project_instructions.cpp
   test_project_memory.cpp

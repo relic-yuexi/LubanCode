@@ -60,6 +60,9 @@ TEST_CASE("MapCsiToKey:方向键/Home/End/ShiftTab/VT 数字键照旧") {
     CHECK(MapCsiToKey("7", '~').kind == K::Home);
     CHECK(MapCsiToKey("4", '~').kind == K::End);
     CHECK(MapCsiToKey("3", '~').kind == K::Delete);
+    // PageUp/PageDown(会话选择器翻页):CSI 5~ / 6~。
+    CHECK(MapCsiToKey("5", '~').kind == K::PageUp);
+    CHECK(MapCsiToKey("6", '~').kind == K::PageDown);
 }
 
 TEST_CASE("MapCsiToKey:Shift+Left = CSI 1;2D,Ctrl+Left = CSI 1;5D") {
