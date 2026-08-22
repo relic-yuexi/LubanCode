@@ -266,7 +266,8 @@ std::expected<nlohmann::json, ResolveError> WorkflowRuntime::BuildResult(const W
     return out;
 }
 
-std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const WorkflowNode& node) {
+std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const WorkflowNode& node,
+                                     nlohmann::json* committed_output) {
     WorkflowRunSummary& account = *ctx.account;
     // 并行分支共写 account.nodes:持锁落记录。单线程路径(顺序图)锁空着,
     // 裸引用照旧——顺序图不为并行付锁钱。
@@ -392,6 +393,9 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
     // 这里一次性换入。
     if (result.ok) {
         ctx.store->CommitOutputOverwrite(node.id, result.output);
+        // 本项产物当场交还调用方(map 并发用):store 的 body 键在并发下是
+        // 共用垫,回头 GetOutput 取到的是"最后一只 commit 的",不是自己那份。
+        if (committed_output != nullptr) *committed_output = result.output;
         record.state = NodeState::Succeeded;
         if (ctx.journal != nullptr) {
             ctx.journal->Append(kEventNodeCompleted, node.id, record.attempt,
@@ -677,29 +681,39 @@ std::string WorkflowRuntime::RunMap(const ExecutionContext& ctx, const WorkflowN
         return "error";
     }
 
-    nlohmann::json mapped = nlohmann::json::array();
-    nlohmann::json meta_times = nlohmann::json::array();
+    // 落位规矩(跨平台实锤过的一课):worker 不共写 store 键再读回——
+    // RunNode 末尾的 CommitOutputOverwrite(body.id) 在并发下会互相覆写,
+    // 随后 GetOutput(body.id) 取到的是"最后一只 commit 的",不是自己那份,
+    // mapped 槽位就错。每只 worker 各写各的下标槽(slot.outputs),全 join
+    // 完再按 items 顺序拼装;store 里那只 body 键只当最后一项的落账。
+    struct MapSlot {
+        nlohmann::json output;   // 本项产物(items 顺序落位,不按完成时间)
+        bool done = false;       // 本项终态(success/empty)与否
+    };
+    std::vector<MapSlot> slots(count);  // 预分配,worker 只写自己的下标
     int failures = 0;
     const bool sequential = node.kind == NodeKind::Foreach;
-    std::mutex mapped_mutex;  // mapped 数组并发按下标写也要互斥(json 非线程安全)
+    std::mutex slots_mutex;  // failures 计数与诊断类共写互斥(json 非线程安全)
 
     const auto run_item = [&](std::size_t index) -> bool {
         if (ctx.cancel != nullptr && ctx.cancel->load()) return false;
         // 逐项把 item 塞进 body 的 input(item 字段),跑一遍 body 链。
+        // body 拷贝只在 RunNode 期间有效:产物当场取走落进自己槽,
+        // 不回头读 store(body 键在并发下是共用垫,读它会拿别人的)。
         WorkflowNode body = body_it->second;  // 拷一份:input 覆写 item
         nlohmann::json item_input = body.input.is_object() ? body.input : nlohmann::json::object();
         item_input["item"] = (*items)[index];
         item_input["index"] = index;
         body.input = item_input;
-        const std::string outcome = RunNode(ctx, body);
+        const std::string outcome = RunNode(ctx, body, &slots[index].output);
         if (outcome == "success" || outcome == "empty") {
-            auto output = ctx.store->GetOutput(body.id);
-            std::lock_guard<std::mutex> lock(mapped_mutex);
-            mapped[index] = output.has_value() ? *output : nlohmann::json();  // items 顺序,不是完成顺序
+            slots[index].done = true;
             return true;
         }
-        std::lock_guard<std::mutex> lock(mapped_mutex);
-        failures += 1;
+        {
+            std::lock_guard<std::mutex> lock(slots_mutex);
+            failures += 1;
+        }
         return false;
     };
 
@@ -719,17 +733,13 @@ std::string WorkflowRuntime::RunMap(const ExecutionContext& ctx, const WorkflowN
                                  node.max_concurrency > 0 ? node.max_concurrency
                                                           : std::max(1, def.limits.max_concurrency));
         std::atomic<std::size_t> next_index{0};
-        std::mutex write_mutex;
         std::vector<std::thread> pool;
         const std::size_t threads = std::min<std::size_t>(static_cast<std::size_t>(cap), count);
-        // 预填 null,保证下标写不越界。
-        for (std::size_t i = 0; i < count; ++i) mapped.push_back(nlohmann::json());
         const auto worker = [&]() {
             while (true) {
                 const std::size_t index = next_index.fetch_add(1);
                 if (index >= count) return;
-                const bool ok = run_item(index);
-                (void)ok;
+                (void)run_item(index);
                 if (ctx.cancel != nullptr && ctx.cancel->load()) return;
             }
         };
@@ -741,6 +751,12 @@ std::string WorkflowRuntime::RunMap(const ExecutionContext& ctx, const WorkflowN
     if (ctx.cancel != nullptr && ctx.cancel->load()) {
         record.state = NodeState::Cancelled;
         return "cancelled";
+    }
+    // join 后拼装:预分配的 array,逐槽按下标落——不靠 operator[] 的
+    // 缺省插入语义(libstdc++/libc++ 行为虽同,显式 resize 更不给巧合留门)。
+    nlohmann::json mapped = nlohmann::json::array();
+    for (std::size_t i = 0; i < count; ++i) {
+        mapped.push_back(slots[i].done ? std::move(slots[i].output) : nlohmann::json());
     }
     ctx.store->CommitOutputOverwrite(node.id,
                                      nlohmann::json{{"items", mapped}, {"failures", failures}});
