@@ -49,11 +49,12 @@ struct EventEnvelope {
 // layer=Turn 时 item_id 为空;layer=Thread 时只带 thread_id(在 envelope)。
 enum class EventLayer { Thread, Turn, Item };
 
-// 条目种类:工具、思考、正文、命令、diff、todo、计划、子代理——都落成
-// item,前端按种类挑组件,不另开旁路事件。Plan 是计划成品(PlanDocument)
+// 条目种类:工具、思考、正文、命令、diff、todo、计划、子代理、goal——都
+// 落成 item,前端按种类挑组件,不另开旁路事件。Plan 是计划成品(PlanDocument)
 // 的独立条目(只读研究硬闸单):不拿 Text/Todo 顶替——Web/Tauri 要凭它开
-// 计划审阅器,delta 流式到完整 item/completed 才可审。
-enum class ItemKind { Tool, Thinking, Text, Command, Diff, Todo, Plan, Subagent };
+// 计划审阅器,delta 流式到完整 item/completed 才可审。Goal 是持久目标单的
+// 目标条目(状态/判词走 payload,不把整份 objective 塞 title)。
+enum class ItemKind { Tool, Thinking, Text, Command, Diff, Todo, Plan, Subagent, Goal };
 
 // 终态四分(文件头约定 3)。前置状态不叫终态,叫"进行中"。
 enum class Outcome { Succeeded, Failed, Declined, Cancelled };
@@ -105,6 +106,17 @@ enum class ServerEventKind {
     CollaborationModeChanged,
     PlanReviewRequested,
     PlanReviewResolved,
+    // /loop 会话定时循环(loop 单):thread 层事件,账面在
+    // payload(task_id/tick_id/state/interval_ms/next_due_at_ms/run_count/
+    // outcome/…)。前端凭 payload 画状态栏与任务行,不解析
+    // slash 字符串。
+    LoopTaskCreated,
+    LoopTaskStateChanged,
+    LoopTickDue,
+    LoopTickStarted,
+    LoopTickCompleted,
+    LoopTickCoalesced,
+    LoopTaskExpired,
     // 记账与杂项
     UsageUpdated,
     ContextUpdated,

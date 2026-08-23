@@ -1083,4 +1083,13 @@ TEST_CASE("ExtractPromptHistory:只收用户纯文本提问,事件行/工具回�
     const auto records2 = agent::ExtractPromptHistory(jsonl2);
     REQUIRE(records2.size() == 1);
     CHECK(records2[0].text == "第一行\n第二行");
+
+    // loop 单:scheduled tick 的宿主前缀消息与 goal synthetic 不进
+    // (Ctrl+R 满屏重复句的防线)。
+    const api::Message loop_tick =
+        api::Message{api::Role::User, {api::TextBlock{"[定时循环 tick]\ntask_id: loop-3\n..."}}};
+    const api::Message goal_turn = api::Message{api::Role::User, {api::TextBlock{"[goal goal-3 r1 iteration 2]\n目标:..."}}};
+    const std::string jsonl3 =
+        SerializeSessionMessage(loop_tick, "ts3") + "\n" + SerializeSessionMessage(goal_turn, "ts4") + "\n";
+    CHECK(agent::ExtractPromptHistory(jsonl3).empty());
 }

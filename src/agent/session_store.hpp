@@ -40,6 +40,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agent/goal_session.hpp"
 #include "agent/tool_trace.hpp"
 #include "api/types.hpp"
 
@@ -312,6 +313,10 @@ struct LoadedSession {
     // trace-aware 修复从这份账折叠 ToolExecutionLedger;老档没这些行,
     // 空表 = 走旧逻辑(RepairToolPairs 补洞),向后兼容。
     std::vector<ToolTraceEvent> tool_trace_events;
+    // goal 事件(goal_v1 族),按文件序。持久目标单:/resume 从这份账
+    // 重建 GoalCoordinator(ReplayEvent);老档没这些行,空表 = 没有 goal,
+    // 不影响消息账。
+    std::vector<GoalSessionEvent> goal_events;
     // Plan 模式单:最后一条 mode 事件(空 mode = 老档,按 Default);
     // plan 逐稿(plan_id -> 最高 revision,全量留);最后一条有效审批。
     ModeEvent last_mode_event;
@@ -381,6 +386,18 @@ public:
     // 的落点,写失败即知(process-crash durable 的口径,见单子 Durability 节)。
     bool AppendToolTraceEvent(const ToolTraceEvent& event);
 
+    // 追加一条原始 JSON 事件行(loop 单:loop_task_v1/loop_tick_v1 一族;
+    // 调用方拼好 json,这里只做 append+flush 的薄壳,不校验 schema——坏
+    // 形状的责任在调用方,回放侧坏行跳过不废整场)。
+    bool AppendRawLine(const std::string& json_line);
+
+    // 追加一条 goal 事件行(goal_v1 族,自动带 ts),append+flush。持久
+    // 目标单:GoalCoordinator 的 LedgerSink 接到这里,九道写盘栅栏的
+    // "先落才改内存"靠 append+flush 的同步性。
+    bool AppendGoalEvent(const GoalSessionEvent& event);
+
+    // 追加一条 goal 证据行(goal_evidence_v1,自动带 ts),append+flush。
+    bool AppendGoalEvidence(const GoalEvidenceRecord& evidence);
     // Plan 模式单:mode/plan/plan_review 事件行,同 append+flush 口径。
     bool AppendModeEvent(const ModeEvent& event);
     bool AppendPlanEvent(const PlanEvent& event);

@@ -56,6 +56,8 @@ enum class TaskKind {
     Classification,
     SessionTitle,
     ResumeSummary,
+    // 持久目标单:goal 终点判定的独立 evaluator 调用(无工具,另起 request)。
+    GoalEvaluate,
 };
 
 std::string ToString(ModelRole role);

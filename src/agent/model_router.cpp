@@ -58,6 +58,10 @@ ModelRole DefaultRoleForTask(TaskKind kind) {
         case TaskKind::SessionTitle:
         case TaskKind::ResumeSummary:
             return ModelRole::Cheap;
+        // goal evaluator 可配独立模型(未配回落 normal);默认 normal 档,
+        // 不拿 cheap 冒充验收——判错方向的代价高于省钱。
+        case TaskKind::GoalEvaluate:
+            return ModelRole::Normal;
     }
     return ModelRole::Normal;
 }

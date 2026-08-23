@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <optional>
 #include <sstream>
 #include <string_view>
@@ -159,6 +160,14 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Keymap;
     } else if (lower == "/trace") {
         parsed.command = SlashCommand::Trace;
+    } else if (lower == "/goal") {
+        // 持久目标单:/goal 是正门(objective/status/edit/pause/resume/clear
+        // 的二级解析在 ParseGoalCommand,这里只认词)。
+        parsed.command = SlashCommand::Goal;
+    } else if (lower == "/loop") {
+        // loop 单:/loop 是正门([interval] [prompt] 与
+        // list/status/pause/resume/stop/run 的二级解析在 ParseLoopCommand)。
+        parsed.command = SlashCommand::Loop;
     } else if (lower == "/plan") {
         // Plan 模式单:/plan 是正门(裸敲/status/off/review/带正文)。
         parsed.command = SlashCommand::Plan;
@@ -511,6 +520,269 @@ ParsedRecordCommand ParseRecordCommand(const std::string& args) {
     return parsed;  // 认不得的动作,保持 Invalid
 }
 
+ParsedGoalCommand ParseGoalCommand(const std::string& args) {
+    ParsedGoalCommand parsed;
+    const std::string trimmed = Trim(args);
+
+    // 裸敲 /goal:看账,不发模型。
+    if (trimmed.empty()) {
+        parsed.action = GoalCommandAction::View;
+        return parsed;
+    }
+
+    // `--` 消歧:"/goal -- pause all jobs" 里 pause 是正文不是子命令。
+    if (trimmed == "--" || trimmed.rfind("-- ", 0) == 0) {
+        parsed.dashdash = true;
+        parsed.objective = Trim(trimmed.substr(2));
+        if (parsed.objective.empty()) {
+            parsed.action = GoalCommandAction::Invalid;
+            parsed.bad_word = "--";
+            return parsed;
+        }
+        parsed.action = GoalCommandAction::Create;
+        return parsed;
+    }
+
+    // 第一个词按空白切。
+    const std::size_t space = trimmed.find_first_of(" 	");
+    const std::string first = (space == std::string::npos) ? trimmed : trimmed.substr(0, space);
+    const std::string rest = (space == std::string::npos) ? std::string() : Trim(trimmed.substr(space + 1));
+    const std::string lower = ToLower(first);
+    parsed.bad_word = first;
+
+    if (lower == "status") {
+        // status 无参;带尾巴按 Invalid(避免 "status of migration" 的正文
+        // 歧义——要写正文用 `--`)。
+        if (!rest.empty()) {
+            parsed.action = GoalCommandAction::Invalid;
+            return parsed;
+        }
+        parsed.action = GoalCommandAction::Status;
+        return parsed;
+    }
+    if (lower == "pause") {
+        parsed.action = GoalCommandAction::Pause;
+        return parsed;
+    }
+    if (lower == "resume") {
+        parsed.action = GoalCommandAction::Resume;
+        return parsed;
+    }
+    if (lower == "clear") {
+        parsed.action = GoalCommandAction::Clear;
+        return parsed;
+    }
+    if (lower == "edit") {
+        // /goal edit -- <text>:-- 后全算正文;不带 -- 时正文若恰以 -- 起
+        // (用户想写 "--fix" 这类)不误吞。
+        std::string body = rest;
+        bool dd = false;
+        if (body == "--" || body.rfind("-- ", 0) == 0) {
+            dd = true;
+            body = Trim(body.substr(2));
+        }
+        if (body.empty()) {
+            parsed.action = GoalCommandAction::Invalid;
+            return parsed;
+        }
+        parsed.action = GoalCommandAction::Edit;
+        parsed.objective = body;
+        parsed.dashdash = dd;
+        return parsed;
+    }
+    // 其余一切:objective 正文(含以 pause/edit 开头的正文——那是要靠 `--`
+    // 之外的普通目标文本,原样收)。
+    parsed.action = GoalCommandAction::Create;
+    parsed.objective = trimmed;
+    return parsed;
+}
+
+namespace {
+// token 是不是合法 interval 形状(正整数 + m/h/d，单位后到头)。
+// 与 runtime::loop::ParseLoopInterval 同规矩，但不引 runtime 头——cli 层
+// 零实现依赖，数值校验(1m..7d)这里先验一道，会话层拿
+// ParseLoopInterval 再验第二道。
+bool LooksLikeLoopIntervalToken(const std::string& token) {
+    if (token.size() < 2) {
+        return false;
+    }
+    std::size_t i = 0;
+    while (i < token.size() && token[i] >= '0' && token[i] <= '9') {
+        ++i;
+    }
+    if (i == 0 || i + 1 != token.size()) {
+        return false;
+    }
+    const char unit = static_cast<char>(std::tolower(static_cast<unsigned char>(token[i])));
+    if (unit != 'm' && unit != 'h' && unit != 'd') {
+        return false;
+    }
+    const std::string digits = token.substr(0, token.size() - 1);
+    if (digits.size() > 9) {
+        return false;
+    }
+    const long long value = std::strtoll(digits.c_str(), nullptr, 10);
+    if (value <= 0) {
+        return false;
+    }
+    long long seconds = value;
+    if (unit == 'm') {
+        seconds = value * 60;
+    } else if (unit == 'h') {
+        seconds = value * 3600;
+    } else {
+        seconds = value * 86400;
+    }
+    return seconds >= 60 && seconds <= 604800;  // 1m..7d
+}
+
+// token 是不是“长得像 interval 但不合法”(数字起头、后面跟字母):
+// 0m/8d/1h30m/30s/超大数——这些明报，不静默当 prompt。
+bool LooksLikeBrokenInterval(const std::string& token) {
+    // 负数起头(-5m):第二位是数字就算坏 interval(否则可能是普通 "--" 开头的正文,那条路已在前面收过)。
+    if (token.size() >= 3 && token[0] == '-' && token[1] >= '0' && token[1] <= '9') {
+        return true;
+    }
+    if (token.empty() || !(token[0] >= '0' && token[0] <= '9')) {
+        return false;
+    }
+    // 数字后跟字母或小数点(0m/8d/1h30m/30s/1.5h/超大数):
+    // 这些长得像 interval 但不合法,明报不静默当 prompt。
+    const std::size_t digits = token.find_first_not_of("0123456789");
+    if (digits == std::string::npos || digits == 0) {
+        return false;
+    }
+    // 数字后恰一个字母且不是 m/h/d(30s/5x):明报。
+    // 数字后多个字母(5migrate/5unix):是普通词,不咬。
+    // 数字后非字母非数字(1.5h/1h30m 的那个点/字母串):明报。
+    const unsigned char c = static_cast<unsigned char>(token[digits]);
+    if (std::isalpha(c) != 0) {
+        if (token.size() == digits + 1) {
+            const char unit = static_cast<char>(std::tolower(c));
+            if (unit != 'm' && unit != 'h' && unit != 'd') {
+                return true;  // 30s/5x:单位不认
+            }
+            // 单位是 m/h/d 但数值越界(0m/8d/超大数):明报,
+            // 不静默当 prompt。
+            if (digits > 9) {
+                return true;  // 溢出前先拒
+            }
+            const long long v = std::strtoll(token.substr(0, digits).c_str(), nullptr, 10);
+            long long secs = v;
+            if (unit == 'm') {
+                secs = v * 60;
+            } else if (unit == 'h') {
+                secs = v * 3600;
+            } else {
+                secs = v * 86400;
+            }
+            return v <= 0 || secs < 60 || secs > 604800;
+        }
+        // 多个字母:再看后面有没有数字(1h30m 连写报坏;
+        // 5migrate 这类普通词不咬)。
+        const std::size_t more =
+            token.find_first_of("0123456789", digits + 1);
+        return more != std::string::npos;
+    }
+    return c == '.';  // 1.5h
+}
+}  // namespace
+
+ParsedLoopCommand ParseLoopCommand(const std::string& args) {
+    ParsedLoopCommand parsed;
+    const std::string trimmed = Trim(args);
+
+    // 裸敲 /loop:默认 10m + loop.md/内置 prompt(裸敲的"创建"语义优先于
+    // "列状态";查询统一走 list)。
+    if (trimmed.empty()) {
+        parsed.action = LoopCommandAction::Create;
+        return parsed;
+    }
+
+    // `--` 消歧:后面全算 prompt。
+    if (trimmed == "--" || trimmed.rfind("-- ", 0) == 0) {
+        parsed.dashdash = true;
+        parsed.prompt = Trim(trimmed.substr(2));
+        if (parsed.prompt.empty()) {
+            parsed.action = LoopCommandAction::Invalid;
+            parsed.bad_word = "--";
+            parsed.error_hint = "-- 后面要有正文";
+            return parsed;
+        }
+        parsed.action = LoopCommandAction::Create;
+        return parsed;
+    }
+
+    std::size_t pos = 0;
+    const auto first = NextToken(args, pos);
+    if (!first.has_value()) {
+        parsed.action = LoopCommandAction::Create;
+        return parsed;
+    }
+    const std::string lower = ToLower(*first);
+    parsed.bad_word = *first;
+    const std::string rest = Trim(args.substr(pos));
+
+    // 子命令:严格等于这六个词(status/pause/resume/stop/run 需带目标)。
+    if (lower == "list") {
+        if (!rest.empty()) {
+            parsed.error_hint = "list 不带参数";
+            return parsed;
+        }
+        parsed.action = LoopCommandAction::List;
+        return parsed;
+    }
+    if (lower == "status" || lower == "pause" || lower == "resume" || lower == "stop" ||
+        lower == "run") {
+        if (rest.empty()) {
+            parsed.error_hint = lower + " 要带 task id 或 all";
+            return parsed;
+        }
+        // 目标只收一个词(全 id/裸数字/all);多词当 Invalid(防把 prompt
+        // 误吞成 id)。
+        std::size_t pos2 = 0;
+        const auto target = NextToken(rest, pos2);
+        if (!target.has_value() || Trim(rest.substr(pos2)) != "") {
+            parsed.error_hint = "目标只收一个 task id 或 all";
+            return parsed;
+        }
+        parsed.task_ref = *target;
+        parsed.action = lower == "status" ? LoopCommandAction::Status
+                        : lower == "pause" ? LoopCommandAction::Pause
+                        : lower == "resume" ? LoopCommandAction::Resume
+                        : lower == "stop"  ? LoopCommandAction::Stop
+                                            : LoopCommandAction::Run;
+        return parsed;
+    }
+
+    // interval 形状:LooksLike 且能解出合法值才当间隔;歪形状给 Invalid
+    //(用户想写 interval 但写错了,别静默当 prompt)。
+    if (LooksLikeLoopIntervalToken(*first)) {
+        parsed.interval_text = *first;
+        if (!rest.empty() && rest.rfind("-- ", 0) == 0) {
+            parsed.dashdash = true;
+            parsed.prompt = Trim(rest.substr(3));
+        } else if (rest == "--") {
+            parsed.error_hint = "-- 后面要有正文";
+            return parsed;
+        } else {
+            parsed.prompt = rest;
+        }
+        parsed.action = LoopCommandAction::Create;
+        return parsed;
+    }
+    // 数字+错单位/超限这类"像 interval 但不合法"的,明报不静默。
+    if (LooksLikeBrokenInterval(*first)) {
+        parsed.error_hint = "interval 只认 <正整数>m|h|d,最小 1m,最大 7d";
+        return parsed;
+    }
+
+    // 其余一切:默认间隔的 prompt 正文。
+    parsed.prompt = trimmed;
+    parsed.action = LoopCommandAction::Create;
+    return parsed;
+}
+
 ParsedPlanCommand ParsePlanCommand(const std::string& args) {
     ParsedPlanCommand parsed;
     const std::string trimmed = Trim(args);
@@ -594,6 +866,8 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/doctor", tr("slash.desc.doctor")},
             {"/keymap", tr("slash.desc.keymap")},
             {"/workflow", tr("slash.desc.workflow")},
+            {"/goal", tr("slash.desc.goal")},
+            {"/loop", tr("slash.desc.loop")},
             {"/plan", tr("slash.desc.plan")},
         };
     }

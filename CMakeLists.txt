@@ -347,6 +347,10 @@ add_library(lubancode_engine STATIC
   src/tools/edit_file.cpp
   # 逐枚追踪单第四期:条件式撤销的执行侧(undo_file_edit)。
   src/tools/undo_file_edit.cpp
+  # 持久目标单:goal 执行轮的检查点工具(schema 校验/证据白名单/状态门槛)。
+  src/tools/goal_checkpoint_tool.cpp
+  # loop 单:scheduled tick 里模型声明完成的窄口(scope 校验/两档动作)。
+  src/tools/loop_control_tool.cpp
   src/tools/ask_user.cpp
   src/tools/search.cpp
   src/tools/agent_tool.cpp
@@ -403,6 +407,8 @@ add_library(lubancode_engine STATIC
   src/agent/context_budget.cpp
   src/agent/microcompact.cpp
   src/agent/session_store.cpp
+  # 持久目标单:goal 事件行(goal_v1 族)的 serialize/parse 纯函数。
+  src/agent/goal_session.cpp
   # 逐枚追踪单:工具生命周期栅栏事件、恢复账本(纯函数)。
   src/agent/tool_trace.cpp
   src/agent/session_catalog.cpp
@@ -466,6 +472,24 @@ add_library(lubancode_runtime STATIC
   src/runtime/plugin_lua.cpp
   # 逐枚追踪单:canonical 工具事件的装配层分线器(持久栅栏/UI 投影/录制)。
   src/runtime/tool_trace_hub.cpp
+  # /goal 持久目标单:领域类型/状态机转换表/objective 计数/序列化。
+  src/runtime/goal_types.cpp
+  # /goal 持久目标单:目标状态机唯一写口(命令面/预算闸/防空转/硬门槛/回放)。
+  src/runtime/goal_coordinator.cpp
+  # /goal 持久目标单:独立无工具的终点判定模型调用(strict schema/一次 repair)。
+  src/runtime/goal_evaluator.cpp
+  # /goal 持久目标单:每轮喂执行模型的动态 GoalContext(纯函数)。
+  src/runtime/goal_context.cpp
+  # /goal 持久目标单:compact 守恒的 goal snapshot(拼装/校验/hash)。
+  src/runtime/goal_compact.cpp
+  # /loop 会话定时循环单:领域类型/状态机转换表/interval 解析/错过合并账。
+  src/runtime/loop_types.cpp
+  # /loop 会话定时循环单:内存 scheduler(timer 只发 wake/泵取件/退避/expiry)。
+  src/runtime/loop_scheduler.cpp
+  # /loop 会话定时循环单:空闲唤醒多路总口(替单枚 SetIdleWakeHook)。
+  src/runtime/idle_wake.cpp
+  # loop 单:goal 单立的会话工作分流合同在这里实装(公平泵 PumpNextWork)。
+  src/runtime/session_work_scheduler.cpp
   # Plan 模式(只读研究硬闸单):CollaborationMode/ModePolicy/PlanDocument
   # 合同与纯函数(ModePolicy 硬闸、Plan shell 分类、<proposed_plan> 扫描)。
   src/runtime/plan_mode.cpp
@@ -568,6 +592,10 @@ add_library(lubancode_app STATIC
   src/app/commands/hook_commands.cpp
   src/app/commands/peer_commands.cpp
   src/app/commands/doctor_commands.cpp
+  # /goal 持久目标单:终端 slash 的排版/gate/二次确认文案。
+  src/app/commands/goal_commands.cpp
+  # /loop 会话定时循环单:slash 业务面(列表/状态/暂停/补拍的终端行)。
+  src/app/commands/loop_commands.cpp
   src/app/commands/workflow_commands.cpp
   src/app/interactive_session.cpp
   src/app/one_shot.cpp

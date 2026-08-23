@@ -55,6 +55,8 @@ enum class SlashCommand {
     Keymap,  // /keymap [set 动作 和弦|reset [动作|all]]:看/改键位(用户级落盘)
     Workflow,  // /workflow list|show|graph|validate|run|resume|cancel|history|...:自然语言编排的图
     Trace,     // /trace [errors|<execution_id>|toolu <id>|turn <id>]:工具逐枚追踪账(逐枚追踪单)
+    Goal,      // /goal [objective|status|edit|pause|resume|clear]:持久目标(持久目标单)
+    Loop,      // /loop [interval] [prompt]|list/status/pause/resume/stop/run:会话定时循环(loop 单)
     Plan,      // /plan [正文|status|off|review]:只读研究模式(Plan 模式单)
     WorkflowAlias,  // /<workflow-alias> <args>:直呼已装 Workflow(运行时查 catalog)
     Unknown,  // 以 / 开头,但不认得这个命令
@@ -170,6 +172,67 @@ struct ParsedRecordCommand {
 ParsedRecordCommand ParseRecordCommand(const std::string& args);
 
 // ---------------------------------------------------------------------------
+// /goal 的二级参数(持久目标单)。纯解析:拆出动作与 objective 正文,不管
+// 目标建不建、状态机怎么走。`--` 消歧("/goal -- pause all jobs" 里 pause
+// 是正文不是子命令);objective 保留换行与大小写,不做 shell 拆词、不展开
+// $VAR/反引号/@file。空 objective、认不得的子命令一律 Invalid。
+// ---------------------------------------------------------------------------
+enum class GoalCommandAction {
+    Invalid,
+    View,     // 裸 /goal:看账,不发模型
+    Status,   // /goal status:同 View(结构化全账)
+    Create,   // /goal <objective>:创建并启动
+    Edit,     // /goal edit <objective>:改目标(revision+1)
+    Pause,    // /goal pause:停排新 iteration
+    Resume,   // /goal resume:从最后 checkpoint 续
+    Clear,    // /goal clear:先确认再摘掉
+};
+
+struct ParsedGoalCommand {
+    GoalCommandAction action = GoalCommandAction::Invalid;
+    std::string objective;   // Create/Edit 的正文(保留多行);其余动作空
+    bool dashdash = false;   // 用过 `--` 消歧
+    std::string bad_word;    // Invalid 时第一词的原始拼写(容错提示用)
+};
+
+ParsedGoalCommand ParseGoalCommand(const std::string& args);
+
+// ---------------------------------------------------------------------------
+// /loop 的二级参数(loop 单)。纯解析:拆出动作、interval、prompt 正文,
+// 不管 task 建不建、scheduler 怎么走。规矩(单子"命令解析"节):
+//   - 第一个 token 严格等于 list/status/pause/resume/stop/run 时当子命令
+//     (status 需带 id 或 all;pause/resume/stop/run 需带 id 或 all)。
+//   - `--` 消歧:"/loop -- stop deployment if red" 里 stop 是正文;
+//     "/loop 5m -- list open bugs" 的 -- 后全算 prompt,保留空白。
+//   - 第一个 token 是 interval 形状(5m/2h/1d,大小写不敏感)才当间隔;
+//     "5migrate" 这类普通词不当 interval。interval 后没正文 = 用
+//     loop.md/内置 prompt(prompt_source=File 兜底,装配层现解析)。
+//   - 没 interval 的正文按默认 10m 创建。
+//   - inline prompt 以 '/' 开头拒绝(首版不许调度 slash 命令)。
+//   - task id 收宿主全 id(loop-3)或裸数字(3);展示恒用全 id。
+// ---------------------------------------------------------------------------
+enum class LoopCommandAction {
+    Invalid,
+    List,     // /loop list:列全部 task
+    Status,   // /loop status <id|all>:看一只/全部的账
+    Pause,    // /loop pause <id|all>
+    Resume,   // /loop resume <id|all>
+    Stop,     // /loop stop <id|all>
+    Run,      // /loop run <id>:立即补一拍
+    Create,   // /loop [interval] [prompt]:建定时任务
+};
+
+struct ParsedLoopCommand {
+    LoopCommandAction action = LoopCommandAction::Invalid;
+    std::string task_ref;    // 子命令的目标 id("loop-3"/"3"/"all");Create 空
+    std::string prompt;      // Create 的正文(保留多行);空 = 用 loop.md/内置
+    std::string interval_text;  // 原始 interval token("5m");空 = 默认 10m
+    bool dashdash = false;   // 用过 `--` 消歧
+    std::string bad_word;    // Invalid 时第一词的原始拼写(容错提示用)
+    std::string error_hint;  // Invalid 时的人话(给 usage 提示用)
+};
+
+ParsedLoopCommand ParseLoopCommand(const std::string& args);
 // /plan 的二级参数(Plan 模式单):纯解析,语义分四路——
 //   Enter          裸敲 /plan:切进 Plan;description 留空
 //   EnterWithTask  /plan <正文>:切进 Plan 并把正文当规划请求(description)
