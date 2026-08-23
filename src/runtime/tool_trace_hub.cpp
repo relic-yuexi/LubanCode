@@ -303,6 +303,21 @@ void ToolTraceHub::set_current_agent_execution(std::string execution_id) {
     current_agent_execution_ = std::move(execution_id);
 }
 
+std::vector<agent::ToolTraceEvent> ToolTraceHub::FinishedEventsOfTurn(const std::string& turn_id) const {
+    std::vector<agent::ToolTraceEvent> out;
+    if (turn_id.empty()) {
+        return out;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& event : recent_) {
+        if (event.turn_id == turn_id &&
+            event.kind == agent::ToolTraceEventKind::ExecutionFinished) {
+            out.push_back(event);
+        }
+    }
+    return out;
+}
+
 std::string ToolTraceHub::OwnerOfExecution(const std::string& execution_id) const {
     std::lock_guard<std::mutex> lock(mutex_);
     agent::ToolExecutionLedger ledger;

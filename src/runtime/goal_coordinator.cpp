@@ -891,6 +891,33 @@ void GoalCoordinator::NoteProviderOutcome(bool succeeded) {
     }
 }
 
+GoalCommandResult GoalCoordinator::NoteEvaluatorFailed(const std::string& error, std::int64_t now_ms) {
+    if (!task_.has_value()) return Fail(kErrGoalNotFound, "没有活动目标");
+    if (IsGoalTerminal(task_->state)) {
+        return Fail(kErrGoalTerminal, "目标已收账,evaluator 失败只留审计");
+    }
+    GoalCoordinatorEvent ev;
+    ev.event = "paused";
+    ev.goal_id = task_->id;
+    ev.revision = task_->revision;
+    ev.payload["reason"] = "evaluator_failed";
+    ev.payload["error"] = error;
+    ev.timestamp_ms = now_ms;
+    if (!Emit(ev)) {
+        FailClosed(now_ms, "evaluator_failed 写盘失败");
+        return Fail(kErrGoalStoreUnavailable, "evaluator_failed 事件写盘失败");
+    }
+    task_->state = GoalState::Paused;
+    task_->updated_at_ms = now_ms;
+    ready_.reset();
+    ready_dedupe_.clear();
+    GoalCommandResult r;
+    r.ok = true;
+    r.payload["state"] = ToString(task_->state);
+    r.payload["reason"] = "evaluator_failed";
+    return r;
+}
+
 // ---------------------------------------------------------------------------
 // 恢复回放
 // ---------------------------------------------------------------------------
@@ -1148,6 +1175,16 @@ const GoalEvidence* GoalCoordinator::FindEvidence(const std::string& id) const {
 void GoalCoordinator::MarkEvidenceStale(const std::string& id) {
     const auto it = evidence_.find(id);
     if (it != evidence_.end()) it->second.fresh = false;
+}
+
+std::vector<std::string> GoalCoordinator::EvidenceIds() const {
+    std::vector<std::string> ids;
+    ids.reserve(evidence_.size());
+    for (const auto& [id, evidence] : evidence_) {
+        (void)evidence;
+        ids.push_back(id);
+    }
+    return ids;
 }
 
 }  // namespace lubancode::runtime::goal

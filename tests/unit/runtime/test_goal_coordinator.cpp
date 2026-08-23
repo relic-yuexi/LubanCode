@@ -576,3 +576,50 @@ TEST_CASE("provider 连败:撞上限 Paused,成功清零") {
     g.NoteProviderOutcome(true);
     CHECK(g.task()->counters.consecutive_provider_failures == 0);
 }
+
+TEST_CASE("evaluator 失败:goal 进 Paused(evaluator_failed),不默认 achieved") {
+    GoalCoordinator g(EnabledOptions());
+    MakeActive(g);
+    REQUIRE(g.ScheduleNextIteration(1200).ok);
+    REQUIRE(g.TakeReadyIteration("t-1", "", 1300).ok);
+    REQUIRE(g.CheckpointReached(GoalCoordinator::MakeMissingCheckpoint(), 1400).ok);
+    CHECK(g.task()->state == GoalState::Evaluating);
+    const auto r = g.NoteEvaluatorFailed("evaluator_failed: 两次都坏", 1500);
+    REQUIRE(r.ok);
+    CHECK(g.task()->state == GoalState::Paused);
+    CHECK_FALSE(g.HasReadyContinuation());
+    // resume 可解(单子:evaluator 失败不是 terminal)。
+    REQUIRE(g.Resume(0, 1600).ok);
+    CHECK(g.task()->state == GoalState::Active);
+}
+
+TEST_CASE("evaluator 失败写盘失败:fail closed,不开下一轮") {
+    GoalCoordinator::Options options = EnabledOptions();
+    GoalCoordinator g(options);
+    g.SetLedgerSink([](const lubancode::runtime::goal::GoalCoordinatorEvent& event) {
+        return event.event != "paused";  // paused 那笔写不落
+    });
+    MakeActive(g);
+    REQUIRE(g.ScheduleNextIteration(1200).ok);
+    REQUIRE(g.TakeReadyIteration("t-1", "", 1300).ok);
+    REQUIRE(g.CheckpointReached(GoalCoordinator::MakeMissingCheckpoint(), 1400).ok);
+    const auto r = g.NoteEvaluatorFailed("两次都坏", 1500);
+    CHECK_FALSE(r.ok);
+    CHECK(g.task()->state == GoalState::Failed);  // fail closed
+    CHECK_FALSE(g.HasReadyContinuation());
+}
+
+TEST_CASE("证据账:RecordEvidence 只认本 goal,EvidenceIds 全列,stale 翻旧") {
+    GoalCoordinator g(EnabledOptions());
+    REQUIRE(g.Create("目标", "/r", "id", 1000).ok);
+    g.RecordEvidence(MakeEvidence("ev-1", "goal-1"));
+    g.RecordEvidence(MakeEvidence("ev-2", "goal-9"));  // 跨 goal:不收
+    CHECK(g.evidence_count() == 1);
+    const auto ids = g.EvidenceIds();
+    REQUIRE(ids.size() == 1);
+    CHECK(ids[0] == "ev-1");
+    CHECK(g.FindEvidence("ev-1") != nullptr);
+    CHECK(g.FindEvidence("ev-2") == nullptr);
+    g.MarkEvidenceStale("ev-1");
+    CHECK_FALSE(g.FindEvidence("ev-1")->fresh);
+}

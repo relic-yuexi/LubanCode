@@ -109,6 +109,12 @@ public:
     std::string current_agent_execution() const;
     void set_current_agent_execution(std::string execution_id);
 
+    // 某一轮 turn 的 finished 执行快照(goal 采证用):按投递序拷出
+    // recent_ 里 turn_id 匹配、kind=ExecutionFinished 的事件。进程内账
+    // 有界(512 枚),老轮次走 BuildLedger 折叠存档——采证发生在轮收口
+    // 当拍,recent_ 必然覆盖。轮 id 为空给空表。
+    std::vector<agent::ToolTraceEvent> FinishedEventsOfTurn(const std::string& turn_id) const;
+
 private:
     void EmitRuntimeEvent(const agent::ToolTraceEvent& event);
     // started 栅栏是否拦执行:副作用未知/不可逆档写不落即拦;只读档放行

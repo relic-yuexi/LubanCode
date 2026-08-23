@@ -192,6 +192,11 @@ public:
     //(provider_failures)。成功一次清零。
     void NoteProviderOutcome(bool succeeded);
 
+    // evaluator 两坏/请求失败的外部收口(单子"evaluator 失败"节:目标进
+    // Paused,reason=evaluator_failed;不默认 achieved,不盲开下一轮)。
+    // 事件行由这里落账;goal 若已 terminal 则只留审计。
+    GoalCommandResult NoteEvaluatorFailed(const std::string& error, std::int64_t now_ms);
+
     // ---- 恢复(第 4 期回放器入口) -------------------------------------------
     // 从事件账重建(装配层 replay 出的事件序)。坏事件跳过,不废整场。
     void ReplayEvent(const GoalCoordinatorEvent& event);
@@ -231,6 +236,9 @@ public:
     std::size_t evidence_count() const { return evidence_.size(); }
     // 证据失效翻 stale(相关改动后旧 validation 要按影响范围翻)。
     void MarkEvidenceStale(const std::string& id);
+    // 现存证据 id 清单(装配层翻 stale 用:写盘级工具落完后,把该标旧的
+    // 种类交给 EvidenceStalesOnWrite 分档,逐枚 MarkEvidenceStale)。
+    std::vector<std::string> EvidenceIds() const;
 
 private:
     bool Emit(const GoalCoordinatorEvent& event);  // 落账失败 → FailClosed
