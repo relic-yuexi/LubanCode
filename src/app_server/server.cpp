@@ -455,6 +455,42 @@ void Server::RegisterMethods() {
             }
             return MakeResult(request.id, result);
         });
+
+    // goal/loop/plan 的 typed 命令面(goal 单合流批):一个 handler 吃
+    // 全部十六枚方法——参数表与命令折算都在 HandleTypedDomainCommand,
+    // 错误码走 data.reason 带稳定串(goal.*/loop.*/plan.*/confirmation_
+    // required/stale_request_id),协议 v1 的错误码段没有这些专属号。
+    const auto domain_handler = [this](const IncomingRequest& request, DispatchContext&)
+                                     -> std::optional<nlohmann::json> {
+        bool error = false;
+        std::string error_code;
+        std::string error_message;
+        const nlohmann::json result =
+            HandleTypedDomainCommand(request, error, error_code, error_message);
+        if (error) {
+            return MakeError(request.id, kErrInvalidParams,
+                             error_message.empty() ? std::string(request.method) + " 失败: " + error_code
+                                                   : error_message,
+                             nlohmann::json{{"reason", error_code}});
+        }
+        return MakeResult(request.id, result);
+    };
+    dispatcher_->RegisterMethod(kMethodGoalCreate, domain_handler);
+    dispatcher_->RegisterMethod(kMethodGoalGet, domain_handler);
+    dispatcher_->RegisterMethod(kMethodGoalEdit, domain_handler);
+    dispatcher_->RegisterMethod(kMethodGoalPause, domain_handler);
+    dispatcher_->RegisterMethod(kMethodGoalResume, domain_handler);
+    dispatcher_->RegisterMethod(kMethodGoalClear, domain_handler);
+    dispatcher_->RegisterMethod(kMethodLoopCreate, domain_handler);
+    dispatcher_->RegisterMethod(kMethodLoopList, domain_handler);
+    dispatcher_->RegisterMethod(kMethodLoopRead, domain_handler);
+    dispatcher_->RegisterMethod(kMethodLoopPause, domain_handler);
+    dispatcher_->RegisterMethod(kMethodLoopResume, domain_handler);
+    dispatcher_->RegisterMethod(kMethodLoopCancel, domain_handler);
+    dispatcher_->RegisterMethod(kMethodLoopRunNow, domain_handler);
+    dispatcher_->RegisterMethod(kMethodPlanSetMode, domain_handler);
+    dispatcher_->RegisterMethod(kMethodPlanReview, domain_handler);
+    dispatcher_->RegisterMethod(kMethodPlanReopen, domain_handler);
 }
 
 std::size_t Server::active_thread_count() {
@@ -495,6 +531,20 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
     {
         std::lock_guard<std::mutex> lock(threads_mutex_);
         threads_[record->thread_id] = record;
+    }
+    // goal 单合流批:typed 命令面的会话级状态按 thread 各起一本。goal/
+    // loop 的 feature 门从 options 折(关着也建实例——命令面回稳定禁用
+    // 码,存档侧不碰);Plan 的 SessionRuntime 纯内存跑(sessions_dir 空,
+    // 存档走 record->store 自己那条,不掺和)。
+    {
+        runtime::goal::GoalCoordinator::Options goal_options;
+        goal_options.goals_enabled = options_.features_goal;
+        record->goal_coordinator = std::make_unique<runtime::goal::GoalCoordinator>(goal_options);
+        runtime::loop::LoopScheduler::Options loop_options;
+        loop_options.enabled = options_.features_loop;
+        record->loop_scheduler = std::make_unique<runtime::loop::LoopScheduler>(loop_options);
+        runtime::SessionRuntime::Options runtime_options;  // sessions_dir 空 = 纯内存
+        record->session_runtime = std::make_unique<runtime::SessionRuntime>(runtime_options);
     }
     Diagnose("thread 已建: " + record->thread_id);
     return nlohmann::json{{"threadId", record->thread_id}, {"cwd", record->cwd}};
@@ -1094,8 +1144,144 @@ nlohmann::json Server::HandleTurnInterrupt(const std::string& thread_id, const s
     return nlohmann::json{{"threadId", thread_id}, {"turnId", record->turn_id}, {"accepted", true}};
 }
 
-InteractionResolution Server::HandleInteractionResponse(const IncomingResponse& response) {
-    // requestId -> 哪场 thread:先扫各 thread 的悬起件(骨架期 thread 数
+// goal/loop/plan 的 typed 命令执行体(goal 单合流批)。方法名 ->
+// ClientCommandKind 的映射在这里;参数已由 schema 层查过,这里折
+// ClientCommand 交 CommandService(执行体只有一份,终端与远端同吃)。
+// 线程模型:读线程跑(与 turn 工作线程不并发碰 goal/loop 状态——turn
+// 收口的续跑泵在终端那条线,app-server 的 goal 续跑属于会话泵线,本批
+// 只接命令面,泵线另立)。
+nlohmann::json Server::HandleTypedDomainCommand(const IncomingRequest& request, bool& out_error,
+                                                std::string& out_error_code,
+                                                std::string& out_error_message) {
+    out_error = false;
+    out_error_code.clear();
+    out_error_message.clear();
+    const std::string method = std::string(request.method);
+
+    // 参数表分家:goal/loop/plan 三组各查各的。
+    std::string thread_id;
+    std::string text;
+    std::string task_id;
+    ParamsCheck base = CheckParamsIsObject(request.params, request.method);
+    if (!base.ok) {
+        out_error = true;
+        out_error_code = "invalid_params";
+        out_error_message = base.message;
+        return nlohmann::json();
+    }
+    const bool is_goal = method.rfind("goal/", 0) == 0;
+    const bool is_loop = method.rfind("loop/", 0) == 0;
+    const bool is_plan = method.rfind("plan/", 0) == 0;
+    if (is_goal) {
+        base = CheckGoalMutationParams(request.params, request.method, thread_id, text);
+    } else if (is_loop) {
+        base = CheckLoopMutationParams(request.params, request.method, thread_id, task_id, text);
+    } else if (is_plan) {
+        base = CheckPlanMutationParams(request.params, request.method, thread_id);
+    } else {
+        out_error = true;
+        out_error_code = "invalid_params";
+        out_error_message = "不认识的域命令: " + method;
+        return nlohmann::json();
+    }
+    if (!base.ok) {
+        out_error = true;
+        out_error_code = "invalid_params";
+        out_error_message = base.message;
+        return nlohmann::json();
+    }
+
+    const std::shared_ptr<ThreadRecord> record = FindThread(thread_id);
+    if (record == nullptr) {
+        out_error = true;
+        out_error_code = "not_found";
+        out_error_message = "不认识的 threadId: " + thread_id;
+        return nlohmann::json();
+    }
+
+    // 协议方法名 -> ClientCommandKind(camelCase 参数 -> payload 字段)。
+    runtime::ClientCommand command;
+    command.thread_id = thread_id;
+    command.text = text;
+    command.value = task_id;
+    if (method == std::string(kMethodGoalCreate)) {
+        command.kind = runtime::ClientCommandKind::CreateGoal;
+    } else if (method == std::string(kMethodGoalGet)) {
+        command.kind = runtime::ClientCommandKind::GetGoal;
+    } else if (method == std::string(kMethodGoalEdit)) {
+        command.kind = runtime::ClientCommandKind::EditGoal;
+        command.payload["expected_revision"] = request.params.value("expectedRevision", 0);
+    } else if (method == std::string(kMethodGoalPause)) {
+        command.kind = runtime::ClientCommandKind::PauseGoal;
+    } else if (method == std::string(kMethodGoalResume)) {
+        command.kind = runtime::ClientCommandKind::ResumeGoal;
+        command.payload["expected_revision"] = request.params.value("expectedRevision", 0);
+    } else if (method == std::string(kMethodGoalClear)) {
+        command.kind = runtime::ClientCommandKind::ClearGoal;
+        command.payload["confirm"] = request.params.value("confirm", false);
+    } else if (method == std::string(kMethodLoopCreate)) {
+        command.kind = runtime::ClientCommandKind::CreateLoopTask;
+        command.payload["interval_ms"] = request.params.value("intervalMs", 0);
+    } else if (method == std::string(kMethodLoopList)) {
+        command.kind = runtime::ClientCommandKind::ListLoopTasks;
+    } else if (method == std::string(kMethodLoopRead)) {
+        command.kind = runtime::ClientCommandKind::ReadLoopTask;
+    } else if (method == std::string(kMethodLoopPause)) {
+        command.kind = runtime::ClientCommandKind::PauseLoopTask;
+    } else if (method == std::string(kMethodLoopResume)) {
+        command.kind = runtime::ClientCommandKind::ResumeLoopTask;
+    } else if (method == std::string(kMethodLoopCancel)) {
+        command.kind = runtime::ClientCommandKind::CancelLoopTask;
+    } else if (method == std::string(kMethodLoopRunNow)) {
+        command.kind = runtime::ClientCommandKind::RunLoopTaskNow;
+    } else if (method == std::string(kMethodPlanSetMode)) {
+        command.kind = runtime::ClientCommandKind::SetCollaborationMode;
+        command.value = request.params.value("mode", std::string());
+        command.payload["reason"] = request.params.value("reason", std::string("remote"));
+        command.payload["permission_before_plan"] =
+            request.params.value("permissionBeforePlan", std::string());
+    } else if (method == std::string(kMethodPlanReview)) {
+        command.kind = runtime::ClientCommandKind::ReviewPlan;
+        command.payload["plan_id"] = request.params.value("planId", std::string());
+        command.payload["plan_revision"] = request.params.value("planRevision", 0);
+        command.payload["sha256"] = request.params.value("sha256", std::string());
+        command.payload["decision"] = request.params.value("decision", std::string());
+    } else if (method == std::string(kMethodPlanReopen)) {
+        command.kind = runtime::ClientCommandKind::ReopenPlanReview;
+    } else {
+        out_error = true;
+        out_error_code = "invalid_params";
+        out_error_message = "不认识的域命令: " + method;
+        return nlohmann::json();
+    }
+
+    // 执行:goal/loop/plan 各交各的状态机(实例按 thread 起,读线程单碰)。
+    static runtime::CommandService kDomainService(runtime::CommandService::Options{});
+    const auto now_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    }();
+    runtime::ClientReceipt receipt;
+    if (is_goal) {
+        receipt = kDomainService.HandleGoalCommand(command, record->goal_coordinator.get(),
+                                                   record->cwd, now_ms);
+    } else if (is_loop) {
+        receipt = kDomainService.HandleLoopCommand(command, record->loop_scheduler.get(), record->cwd,
+                                                   record->thread_id, now_ms);
+    } else {
+        receipt = kDomainService.HandlePlanCommand(command, record->session_runtime.get());
+    }
+    if (!receipt.accepted) {
+        out_error = true;
+        out_error_code = receipt.error_code;
+        out_error_message = receipt.error_message;
+        return nlohmann::json();
+    }
+    return receipt.payload;
+}
+
+InteractionResolution Server::HandleInteractionResponse(const IncomingResponse& response) {    // requestId -> 哪场 thread:先扫各 thread 的悬起件(骨架期 thread 数
     // 少,线性可忍;TODO(seq/runtime P4)统一 id 后按 id 前缀直路由)。
     std::vector<std::shared_ptr<ThreadRecord>> records;
     {

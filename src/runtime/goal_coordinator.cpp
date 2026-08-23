@@ -49,6 +49,15 @@ void GoalCoordinator::FailClosed(std::int64_t now_ms, const std::string& reason)
 GoalCommandResult GoalCoordinator::Create(const std::string& objective, const std::string& workspace_root,
                                           const std::string& workspace_identity, std::int64_t now_ms,
                                           std::function<std::string()> id_issuer) {
+    return CreateWithLineage(objective, workspace_root, workspace_identity, /*parent_goal_id=*/std::string(),
+                             now_ms, std::move(id_issuer));
+}
+
+GoalCommandResult GoalCoordinator::CreateWithLineage(const std::string& objective,
+                                                     const std::string& workspace_root,
+                                                     const std::string& workspace_identity,
+                                                     const std::string& parent_goal_id, std::int64_t now_ms,
+                                                     std::function<std::string()> id_issuer) {
     if (!options_.goals_enabled) {
         GoalCommandResult r = Fail(kErrGoalStoreUnavailable, "goals 功能未开启(features.goals)");
         r.payload["disabled"] = true;
@@ -65,6 +74,7 @@ GoalCommandResult GoalCoordinator::Create(const std::string& objective, const st
     ++goal_seq_;
     GoalTask t;
     t.id = id_issuer ? id_issuer() : "goal-" + std::to_string(goal_seq_);
+    t.parent_goal_id = parent_goal_id;  // fork lineage:只记账,不构成复活/共享
     t.revision = 1;
     t.objective = objective;
     t.objective_sha256 = hooks::Sha256Hex(objective);
@@ -89,6 +99,9 @@ GoalCommandResult GoalCoordinator::Create(const std::string& objective, const st
     ev.payload["budget"] = t.budget.to_json();
     ev.payload["workspace_root"] = t.workspace_root;
     ev.payload["workspace_identity"] = t.workspace_identity;
+    if (!t.parent_goal_id.empty()) {
+        ev.payload["parent_goal_id"] = t.parent_goal_id;  // lineage 随 created 落档
+    }
     ev.timestamp_ms = now_ms;
     if (!Emit(ev)) {
         FailClosed(now_ms, "created 写盘失败");
@@ -101,6 +114,58 @@ GoalCommandResult GoalCoordinator::Create(const std::string& objective, const st
     r.ok = true;
     r.payload["goal_id"] = task_->id;
     r.payload["state"] = ToString(task_->state);
+    if (!task_->parent_goal_id.empty()) {
+        r.payload["parent_goal_id"] = task_->parent_goal_id;
+    }
+    return r;
+}
+
+GoalCommandResult GoalCoordinator::ForkFrom(const GoalTask& source, const std::string& workspace_root,
+                                            const std::string& workspace_identity, std::int64_t now_ms,
+                                            std::function<std::string()> id_issuer) {
+    // fork 单子的三条边界(单子"crash、resume、fork、clear thread"节):
+    //   - fork 复制 goal snapshot,新分支状态设 Paused(不默认两边一起续跑);
+    //   - 原 thread 与 fork 不共享同一 active goal id(新 id 由发号口出,
+    //     lineage 记 source id);
+    //   - 复制的是合同/预算/计数器/最近 checkpoint 的账面;usage 从零起
+    //     (新 thread 的消耗自己记),evidence 不搬(证据钉在旧 iteration,
+    //     跨 thread 引用查无对账)。
+    // terminal 的源也收——fork 不是复活,是把账面抄去新处;源的状态不追改。
+    GoalCommandResult r = CreateWithLineage(source.objective, workspace_root, workspace_identity, source.id,
+                                            now_ms, std::move(id_issuer));
+    if (!r.ok) {
+        return r;
+    }
+    // 抄账面:合同(冻结态与 hash 一并)、预算、计数器、checkpoint。
+    task_->contract = source.contract;
+    task_->contract_frozen = source.contract_frozen;
+    task_->contract_sha256 = source.contract_sha256;
+    task_->budget = source.budget;
+    task_->counters = source.counters;
+    task_->counters.last_progress_fingerprint.clear();  // 新处起算防空转误判
+    task_->checkpoint = source.checkpoint;
+    task_->state = GoalState::Paused;  // 用户明确 resume 才跑
+    GoalCoordinatorEvent ev;
+    ev.event = "forked";
+    ev.goal_id = task_->id;
+    ev.revision = task_->revision;
+    ev.payload["parent_goal_id"] = source.id;
+    ev.payload["source_state"] = ToString(source.state);
+    ev.payload["state"] = ToString(task_->state);
+    // 抄去的账面随事件落档(回放侧凭这一份重建 fork 的 snapshot,不必
+    // 去源 thread 的存档翻)。
+    ev.payload["contract"] = task_->contract.to_json();
+    ev.payload["contract_frozen"] = task_->contract_frozen;
+    ev.payload["contract_sha256"] = task_->contract_sha256;
+    ev.payload["budget"] = task_->budget.to_json();
+    ev.payload["checkpoint"] = task_->checkpoint.to_json();
+    ev.timestamp_ms = now_ms;
+    if (!Emit(ev)) {
+        FailClosed(now_ms, "forked 写盘失败");
+        return Fail(kErrGoalStoreUnavailable, "forked 事件写盘失败");
+    }
+    r.payload["state"] = ToString(task_->state);
+    r.payload["parent_goal_id"] = source.id;
     return r;
 }
 
@@ -891,6 +956,33 @@ void GoalCoordinator::NoteProviderOutcome(bool succeeded) {
     }
 }
 
+GoalCommandResult GoalCoordinator::NoteEvaluatorFailed(const std::string& error, std::int64_t now_ms) {
+    if (!task_.has_value()) return Fail(kErrGoalNotFound, "没有活动目标");
+    if (IsGoalTerminal(task_->state)) {
+        return Fail(kErrGoalTerminal, "目标已收账,evaluator 失败只留审计");
+    }
+    GoalCoordinatorEvent ev;
+    ev.event = "paused";
+    ev.goal_id = task_->id;
+    ev.revision = task_->revision;
+    ev.payload["reason"] = "evaluator_failed";
+    ev.payload["error"] = error;
+    ev.timestamp_ms = now_ms;
+    if (!Emit(ev)) {
+        FailClosed(now_ms, "evaluator_failed 写盘失败");
+        return Fail(kErrGoalStoreUnavailable, "evaluator_failed 事件写盘失败");
+    }
+    task_->state = GoalState::Paused;
+    task_->updated_at_ms = now_ms;
+    ready_.reset();
+    ready_dedupe_.clear();
+    GoalCommandResult r;
+    r.ok = true;
+    r.payload["state"] = ToString(task_->state);
+    r.payload["reason"] = "evaluator_failed";
+    return r;
+}
+
 // ---------------------------------------------------------------------------
 // 恢复回放
 // ---------------------------------------------------------------------------
@@ -906,6 +998,9 @@ void GoalCoordinator::ReplayEvent(const GoalCoordinatorEvent& event) {
         }
         if (event.payload.contains("objective_sha256")) {
             t.objective_sha256 = event.payload.at("objective_sha256").get<std::string>();
+        }
+        if (event.payload.contains("parent_goal_id")) {
+            t.parent_goal_id = event.payload.at("parent_goal_id").get<std::string>();
         }
         if (event.payload.contains("budget")) t.budget = GoalBudget::from_json(event.payload.at("budget"));
         if (event.payload.contains("workspace_root")) {
@@ -1025,6 +1120,32 @@ void GoalCoordinator::ReplayEvent(const GoalCoordinatorEvent& event) {
                     break;
             }
         }
+        return;
+    }
+    if (event.event == "forked") {
+        // fork 账回放:lineage、Paused 落点与抄来的账面(created 已建 task;
+        // 抄去的合同/预算/checkpoint 在 forked 事件的 payload 里)。
+        if (event.payload.contains("parent_goal_id")) {
+            task_->parent_goal_id = event.payload.at("parent_goal_id").get<std::string>();
+        }
+        if (event.payload.contains("contract")) {
+            task_->contract = GoalContract::from_json(event.payload.at("contract"));
+        }
+        if (event.payload.contains("contract_frozen")) {
+            task_->contract_frozen = event.payload.at("contract_frozen").get<bool>();
+        }
+        if (event.payload.contains("contract_sha256")) {
+            task_->contract_sha256 = event.payload.at("contract_sha256").get<std::string>();
+        }
+        if (event.payload.contains("budget")) {
+            task_->budget = GoalBudget::from_json(event.payload.at("budget"));
+        }
+        if (event.payload.contains("checkpoint")) {
+            task_->checkpoint = GoalCheckpoint::from_json(event.payload.at("checkpoint"));
+        }
+        if (!IsGoalTerminal(task_->state)) task_->state = GoalState::Paused;
+        ready_.reset();
+        ready_dedupe_.clear();
         return;
     }
     if (event.event == "pause_requested" || event.event == "paused") {
@@ -1148,6 +1269,16 @@ const GoalEvidence* GoalCoordinator::FindEvidence(const std::string& id) const {
 void GoalCoordinator::MarkEvidenceStale(const std::string& id) {
     const auto it = evidence_.find(id);
     if (it != evidence_.end()) it->second.fresh = false;
+}
+
+std::vector<std::string> GoalCoordinator::EvidenceIds() const {
+    std::vector<std::string> ids;
+    ids.reserve(evidence_.size());
+    for (const auto& [id, evidence] : evidence_) {
+        (void)evidence;
+        ids.push_back(id);
+    }
+    return ids;
 }
 
 }  // namespace lubancode::runtime::goal

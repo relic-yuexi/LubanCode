@@ -295,6 +295,11 @@ struct GoalCounters {
 // GoalTask:一场 thread 同时只许一只非终态(active pointer 在 coordinator)。
 struct GoalTask {
     std::string id;  // goal-<session-local monotonic id>
+    // fork lineage(单子"crash、resume、fork、clear thread"节):fork 复制
+    // 聊天与 goal snapshot 时,新分支记下源 goal 的 id。空 = 本 thread 原生。
+    // 只是账——lineage 不构成复活、不共享 active goal(两边各自管各自的
+    // 状态机;审计沿它追根)。
+    std::string parent_goal_id;
     int revision = 1;
     std::string objective;
     std::string objective_sha256;

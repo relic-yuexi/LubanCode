@@ -243,4 +243,251 @@ CommandService::InteractionAnswerResult CommandService::AnswerQuestion(
     return out;
 }
 
+// ---- /goal + /loop + plan.review(typed 兑现) ---------------------------------
+
+namespace {
+
+// 稳定码折回执:成功给 payload,失败给 code + 人话兜底。
+ClientReceipt MakeTypedReceipt(bool ok, const std::string& error_code, const std::string& error_message,
+                               nlohmann::json payload = nlohmann::json::object()) {
+    ClientReceipt receipt;
+    receipt.accepted = ok;
+    receipt.error_code = ok ? std::string() : error_code;
+    receipt.error_message = ok ? std::string() : error_message;
+    receipt.payload = std::move(payload);
+    return receipt;
+}
+
+// LoopScheduler 的 TaskView -> JSON(loop.list/read 的结构化账;字段名与
+// loop 单的 session 事件行同口径 snake_case,前端自己翻)。
+nlohmann::json LoopTaskViewToJson(const loop::LoopScheduler::TaskView& view) {
+    nlohmann::json j;
+    j["task_id"] = view.task.task_id;
+    j["prompt"] = view.task.prompt;
+    j["interval_ms"] = static_cast<std::int64_t>(view.task.interval.count()) * 1000;
+    j["state"] = loop::ToString(view.task.state);
+    j["next_due_at_ms"] = view.task.next_due_at_ms;
+    j["expires_at_ms"] = view.task.expires_at_ms;
+    j["run_count"] = view.task.run_count;
+    j["skipped_count"] = view.task.skipped_count;
+    j["prompt_source"] = loop::ToString(view.task.prompt_source);
+    j["delayed"] = view.delayed;
+    if (view.has_current_tick) {
+        j["current_tick_id"] = view.current_tick.tick_id;
+    }
+    if (view.task.state == loop::LoopTaskState::BackingOff) {
+        j["backoff_until_ms"] = view.backoff_until_ms;
+    }
+    return j;
+}
+
+}  // namespace
+
+ClientReceipt CommandService::HandleGoalCommand(const ClientCommand& command,
+                                                goal::GoalCoordinator* coordinator,
+                                                const std::string& workspace_root, std::int64_t now_ms) {
+    using K = ClientCommandKind;
+    using goal::GoalCommandResult;
+    if (coordinator == nullptr) {
+        return MakeTypedReceipt(false, "goal.disabled", "goals 功能未装配(features.goals 未开启)");
+    }
+    // 六枚命令之外的不收(防误投)。
+    switch (command.kind) {
+        case K::CreateGoal:
+        case K::GetGoal:
+        case K::EditGoal:
+        case K::PauseGoal:
+        case K::ResumeGoal:
+        case K::ClearGoal:
+            break;
+        default:
+            return MakeTypedReceipt(false, "invalid_request", "不是 goal 命令: " + ToString(command.kind));
+    }
+    const std::string workspace_identity = workspace_root;  // 首版 identity = root
+    GoalCommandResult result;
+    switch (command.kind) {
+        case K::CreateGoal:
+            result = coordinator->Create(command.text, workspace_root, workspace_identity, now_ms);
+            break;
+        case K::GetGoal: {
+            // 查账纯本地输出,不发模型(单子"状态查询不发模型")。
+            nlohmann::json status = coordinator->Status(now_ms);
+            return MakeTypedReceipt(true, std::string(), std::string(), std::move(status));
+        }
+        case K::EditGoal: {
+            const int expected = command.payload.value("expected_revision", 0);
+            result = coordinator->Edit(command.text, expected, now_ms);
+            break;
+        }
+        case K::PauseGoal:
+            result = coordinator->Pause(now_ms);
+            break;
+        case K::ResumeGoal: {
+            const int expected = command.payload.value("expected_revision", 0);
+            result = coordinator->Resume(expected, now_ms);
+            break;
+        }
+        case K::ClearGoal: {
+            // confirm 归调用方(终端确认屏/GUI 对话框),协议不替人决定;
+            // 没带 confirm 一律 confirmation_required,不动账。
+            if (!command.payload.value("confirm", false)) {
+                return MakeTypedReceipt(false, "confirmation_required",
+                                        "clear 需要二次确认(payload.confirm = true 才动手)");
+            }
+            result = coordinator->Clear(now_ms);
+            break;
+        }
+        default:
+            break;
+    }
+    return MakeTypedReceipt(result.ok, result.error_code, result.error_message, result.payload);
+}
+
+ClientReceipt CommandService::HandleLoopCommand(const ClientCommand& command,
+                                                loop::LoopScheduler* scheduler, const std::string& cwd_identity,
+                                                const std::string& session_id, std::int64_t now_ms) {
+    using K = ClientCommandKind;
+    if (scheduler == nullptr) {
+        return MakeTypedReceipt(false, "loop.disabled", "loop 功能未装配(features.loop 未开启)");
+    }
+    switch (command.kind) {
+        case K::CreateLoopTask: {
+            // interval_ms 可选(0 = 默认 10m);prompt 在 text(空 = loop.md/
+            // 内置源,由泵每拍现读)。
+            const int interval_ms = command.payload.value("interval_ms", 0);
+            const auto interval = interval_ms > 0
+                                      ? std::chrono::seconds(interval_ms / 1000)
+                                      : loop::LoopDefaults::kDefaultInterval;
+            const auto result = scheduler->Create(command.text, interval, now_ms, cwd_identity, session_id,
+                                                  loop::LoopPromptSource::Inline);
+            return MakeTypedReceipt(result.ok, result.error_code, result.error_message, result.payload);
+        }
+        case K::ListLoopTasks: {
+            nlohmann::json tasks = nlohmann::json::array();
+            for (const auto& view : scheduler->Snapshot(now_ms)) {
+                tasks.push_back(LoopTaskViewToJson(view));
+            }
+            return MakeTypedReceipt(true, std::string(), std::string(),
+                                    nlohmann::json{{"tasks", std::move(tasks)}});
+        }
+        case K::ReadLoopTask: {
+            const std::string id = scheduler->ResolveTaskId(command.value);
+            const auto view = scheduler->Find(id, now_ms);
+            if (!view.has_value()) {
+                return MakeTypedReceipt(false, "loop.not_found", "任务不存在: " + command.value);
+            }
+            return MakeTypedReceipt(true, std::string(), std::string(),
+                                    nlohmann::json{{"task", LoopTaskViewToJson(*view)}});
+        }
+        case K::PauseLoopTask: {
+            const std::string id = command.value == "all" ? std::string("all")
+                                                          : scheduler->ResolveTaskId(command.value);
+            const auto result = scheduler->Pause(id, now_ms, "remote");
+            return MakeTypedReceipt(result.ok, result.error_code, result.error_message, result.payload);
+        }
+        case K::ResumeLoopTask: {
+            const std::string id = command.value == "all" ? std::string("all")
+                                                          : scheduler->ResolveTaskId(command.value);
+            const auto result = scheduler->Resume(id, now_ms);
+            return MakeTypedReceipt(result.ok, result.error_code, result.error_message, result.payload);
+        }
+        case K::CancelLoopTask: {
+            const std::string id = command.value == "all" ? std::string("all")
+                                                          : scheduler->ResolveTaskId(command.value);
+            const auto result = scheduler->Stop(id, now_ms, "remote");
+            return MakeTypedReceipt(result.ok, result.error_code, result.error_message, result.payload);
+        }
+        case K::RunLoopTaskNow: {
+            if (command.value == "all") {
+                return MakeTypedReceipt(false, "loop.invalid_request", "run 不收 all,点名一只任务");
+            }
+            const auto result = scheduler->RunNow(scheduler->ResolveTaskId(command.value), now_ms);
+            return MakeTypedReceipt(result.ok, result.error_code, result.error_message, result.payload);
+        }
+        default:
+            return MakeTypedReceipt(false, "invalid_request", "不是 loop 命令: " + ToString(command.kind));
+    }
+}
+
+ClientReceipt CommandService::HandlePlanCommand(const ClientCommand& command, SessionRuntime* runtime) {
+    using K = ClientCommandKind;
+    if (runtime == nullptr) {
+        return MakeTypedReceipt(false, "plan.disabled", "Plan 模式未装配(没有 SessionRuntime)");
+    }
+    if (command.kind == K::SetCollaborationMode) {
+        // value: "plan"/"default";reason 是稳定短码(remote/approved/off)。
+        runtime::CollaborationMode mode = runtime::CollaborationMode::Default;
+        if (command.value == "plan") {
+            mode = runtime::CollaborationMode::Plan;
+        } else if (command.value != "default") {
+            return MakeTypedReceipt(false, "plan.invalid_mode", "mode 只认 plan/default: " + command.value);
+        }
+        const std::string reason = command.payload.value("reason", std::string("remote"));
+        const std::string permission_before =
+            command.payload.value("permission_before_plan", std::string());
+        const bool switched = runtime->SetCollaborationMode(mode, reason, permission_before);
+        nlohmann::json payload;
+        payload["mode"] = command.value;
+        payload["switched"] = switched;  // 同档重复切 false,不是错误
+        payload["revision"] = runtime->mode_state().revision;
+        return MakeTypedReceipt(true, std::string(), std::string(), std::move(payload));
+    }
+    if (command.kind == K::ReviewPlan) {
+        // payload: plan_id/plan_revision/sha256 + decision(approved_confirm/
+        // approved_auto/rejected/continued)。批准/拒绝须同时匹配 id/
+        // revision/hash;continued 只留痕,不动计划账。
+        const auto* plan = runtime->latest_plan();
+        if (plan == nullptr) {
+            return MakeTypedReceipt(false, "plan.no_plan", "本场还没有计划成品");
+        }
+        const std::string plan_id = command.payload.value("plan_id", std::string());
+        const std::uint64_t revision = command.payload.value("plan_revision", 0);
+        const std::string sha256 = command.payload.value("sha256", std::string());
+        const std::string decision = command.payload.value("decision", std::string());
+        if (decision != "approved_confirm" && decision != "approved_auto" && decision != "rejected" &&
+            decision != "continued") {
+            return MakeTypedReceipt(false, "plan.invalid_decision",
+                                    "decision 只认 approved_confirm/approved_auto/rejected/continued");
+        }
+        if (decision == "continued") {
+            // 继续规划:不动账,只回执(留痕由前端自己记)。
+            return MakeTypedReceipt(true, std::string(), std::string(),
+                                    nlohmann::json{{"decision", "continued"}});
+        }
+        if (plan->plan_id != plan_id || plan->revision != revision || plan->content_sha256 != sha256) {
+            // 三对不匹配:旧 dialog 的迟到回答(单子:批准须同时匹配)。
+            return MakeTypedReceipt(false, "stale_request_id",
+                                    "计划已换稿或不是这份(id/revision/hash 对不上)");
+        }
+        const bool approve = decision != "rejected";
+        const auto outcome = runtime->ReviewPlan(plan_id, revision, sha256, approve);
+        switch (outcome) {
+            case SessionRuntime::PlanReviewOutcome::Stale:
+                return MakeTypedReceipt(false, "stale_request_id", "审批落账时计划已换稿");
+            case SessionRuntime::PlanReviewOutcome::Approved:
+                return MakeTypedReceipt(true, std::string(), std::string(),
+                                        nlohmann::json{{"decision", "approved"},
+                                                       {"permission_mode",
+                                                        decision == "approved_auto" ? "auto" : "confirm"}});
+            case SessionRuntime::PlanReviewOutcome::Rejected:
+                return MakeTypedReceipt(true, std::string(), std::string(),
+                                        nlohmann::json{{"decision", "rejected"}});
+        }
+        return MakeTypedReceipt(false, "plan.internal", "审批分路落空");
+    }
+    if (command.kind == K::ReopenPlanReview) {
+        // 重开审阅:有稿才受理(前端拿 latest 自己画框;这里只报有没有)。
+        const auto* plan = runtime->latest_plan();
+        if (plan == nullptr) {
+            return MakeTypedReceipt(false, "plan.no_plan", "本场还没有计划成品");
+        }
+        nlohmann::json payload;
+        payload["plan_id"] = plan->plan_id;
+        payload["plan_revision"] = plan->revision;
+        payload["sha256"] = plan->content_sha256;
+        return MakeTypedReceipt(true, std::string(), std::string(), std::move(payload));
+    }
+    return MakeTypedReceipt(false, "invalid_request", "不是 plan 命令: " + ToString(command.kind));
+}
+
 }  // namespace lubancode::runtime

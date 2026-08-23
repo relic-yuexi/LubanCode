@@ -100,6 +100,11 @@ std::vector<StatusPanelSegment> BuildStatusPanelSegments(
     if (!data.plan_mode.empty()) {
         out.push_back({"plan", data.plan_mode});
     }
+    // goal/loop 会话状态段(goal 单合流):非空恒挂一段,不进 items 配置
+    // (理由见 StatusPanelData::goal_loop 注释)。文字应用层拼好递进来。
+    if (!data.goal_loop.empty()) {
+        out.push_back({"goal_loop", data.goal_loop});
+    }
     for (const std::string& key : items) {
         std::string text;
         if (key == "permission_mode") {

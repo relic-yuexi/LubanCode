@@ -74,6 +74,15 @@ struct StatusPanelData {
     // permission_mode 并列,如 "plan · ⏵⏵ 确认模式"),不进 items 配置——
     // 只读硬闸开没开是安全状态,用户没配也得看得见。空串 = Default,零影响。
     std::string plan_mode;
+    // goal/loop 会话状态段(goal 单合流 + loop 单的终端面):非空时恒亮
+    // 一段,形如 "goal r2·iter3 · loop×2 next 4m"。goal 部分给
+    // "goal <state 短码>·iter<N>"(状态短码:run/eval/pause/blocked/done/
+    // budget);loop 部分给 "loop×<活任务数> next <最近一拍还差>"(没有
+    // next 的场合省略)。两样都空 = 整段不挂,零影响。不进 items 配置:
+    // 有没有常驻自动工作在跑是"背景会自己动"的状态,用户没配也得看得见
+    // (与 REC/WT/tools/plan 同待遇)。文字由应用层拼好递进来,这里只管
+    // 摆——渲染层不做 goal/loop 的状态机翻译。
+    std::string goal_loop;
 };
 
 // 状态行数据的局部更新:只改 context/tokens 两段的数字、旧值标记与缓存

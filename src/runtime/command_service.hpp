@@ -37,7 +37,9 @@
 #include "config/config.hpp"
 #include "config/model_catalog.hpp"
 #include "runtime/command.hpp"
+#include "runtime/goal_coordinator.hpp"
 #include "runtime/interaction_broker.hpp"
+#include "runtime/loop_scheduler.hpp"
 #include "runtime/session_runtime.hpp"
 
 namespace lubancode::runtime {
@@ -157,6 +159,24 @@ public:
                                             const ApprovalResponse& response) const;
     InteractionAnswerResult AnswerQuestion(InteractionBroker* broker, const std::string& request_id,
                                            const QuestionResponse& response) const;
+
+    // ---- /goal 六命令 + /loop 七命令 + plan.review(typed 兑现) --------------
+    // 单子"Runtime 与多前端合同"的执行体:前端只发 typed ClientCommand,
+    // 不拼 slash 字符串。goal/loop 的状态机真值由装配层注入(coordinator/
+    // scheduler),这里只做命令翻译与回执拼装——不持有、不创建;空指针 =
+    // 该域未装配,回 goal_disabled/loop_disabled 的稳定码,不冒充成功。
+    // Plan 的审批走 SessionRuntime(调用方给),批准/拒绝须同时匹配 id/
+    // revision/hash(不匹配 stale_request_id)。
+    //
+    // 返回的 ClientReceipt:error_code 是稳定码(goal.*/loop.*/plan.* 或
+    // unsupported),payload 带结构化账(GetGoal 的 Status()/ListLoopTasks
+    // 的 Snapshot() 折 JSON)。
+    ClientReceipt HandleGoalCommand(const ClientCommand& command, goal::GoalCoordinator* coordinator,
+                                    const std::string& workspace_root, std::int64_t now_ms);
+    ClientReceipt HandleLoopCommand(const ClientCommand& command, loop::LoopScheduler* scheduler,
+                                     const std::string& cwd_identity, const std::string& session_id,
+                                     std::int64_t now_ms);
+    ClientReceipt HandlePlanCommand(const ClientCommand& command, SessionRuntime* runtime);
 
 private:
     Options options_;

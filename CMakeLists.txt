@@ -482,6 +482,8 @@ add_library(lubancode_runtime STATIC
   src/runtime/goal_context.cpp
   # /goal 持久目标单:compact 守恒的 goal snapshot(拼装/校验/hash)。
   src/runtime/goal_compact.cpp
+  # /goal 持久目标单:ToolTraceHub 事件 -> GoalEvidence 的采证适配器(纯函数)。
+  src/runtime/goal_evidence.cpp
   # /loop 会话定时循环单:领域类型/状态机转换表/interval 解析/错过合并账。
   src/runtime/loop_types.cpp
   # /loop 会话定时循环单:内存 scheduler(timer 只发 wake/泵取件/退避/expiry)。
@@ -490,6 +492,8 @@ add_library(lubancode_runtime STATIC
   src/runtime/idle_wake.cpp
   # loop 单:goal 单立的会话工作分流合同在这里实装(公平泵 PumpNextWork)。
   src/runtime/session_work_scheduler.cpp
+  # loop 单遗留(骨架):scheduled prompt -> 安全动作的 catalog 与 resolver。
+  src/runtime/scheduled_action.cpp
   # Plan 模式(只读研究硬闸单):CollaborationMode/ModePolicy/PlanDocument
   # 合同与纯函数(ModePolicy 硬闸、Plan shell 分类、<proposed_plan> 扫描)。
   src/runtime/plan_mode.cpp

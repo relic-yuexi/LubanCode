@@ -34,7 +34,11 @@
 #include "app_server/interaction.hpp"
 #include "app_server/outbox.hpp"
 #include "app/version.hpp"
+#include "runtime/command_service.hpp"
+#include "runtime/goal_coordinator.hpp"
+#include "runtime/loop_scheduler.hpp"
 #include "runtime/session_command_service.hpp"
+#include "runtime/session_runtime.hpp"
 #include "tools/registry.hpp"
 
 namespace lubancode::app_server {
@@ -67,6 +71,15 @@ struct ThreadRecord {
     // 场次存档句柄(落盘由它管;失败不拦协议,只打 stderr)。
     std::unique_ptr<agent::SessionStore> store;
 
+    // goal 单合流批:typed 命令面(goal 六 + loop 七 + plan 三)的会话级
+    // 状态。goal/loop 的状态机真值按 thread 各一本(一场 thread 一只
+    // active goal/一组 loop task,与终端会话同规矩);Plan 走
+    // SessionRuntime(mode 真值 + 计划成品账)。coordinator 的 goals_enabled
+    // 与 scheduler 的 enabled 由装配层从 options.features_goal/loop 折。
+    std::unique_ptr<runtime::goal::GoalCoordinator> goal_coordinator;
+    std::unique_ptr<runtime::loop::LoopScheduler> loop_scheduler;
+    std::unique_ptr<runtime::SessionRuntime> session_runtime;
+
     explicit ThreadRecord(std::string id)
         : thread_id(std::move(id)) {}
 };
@@ -93,6 +106,11 @@ struct ServerOptions {
     // 有卡死不看的(长命令/卡住的外部进程),硬时限一到强制收线,终态照
     // 发 interrupted,不留挂着回合。0 = 不设硬时限(只靠 cancel 旗)。
     int interrupt_hard_deadline_ms = 15000;
+    // goal/loop 的 feature 门(goal 单合流批):false 时 typed 命令面回
+    // goal.disabled/loop.disabled 稳定码(不冒充成功);缺省关(与终端
+    // 的 features.goals/features.loop 缺省一致,装配层显式开)。
+    bool features_goal = false;
+    bool features_loop = false;
 };
 
 // 一台 app-server。一个进程一台;装配好后 Run() 进 stdio 主循环。
@@ -164,6 +182,15 @@ public:
     // 反向请求响应的处理体(审批/ask_user 的前端答复):对到 thread 的
     // 悬起件上。result 只在 ok 时有意义。
     InteractionResolution HandleInteractionResponse(const IncomingResponse& response);
+
+    // goal/loop/plan 的 typed 命令执行体(goal 单合流批):折成
+    // ClientCommand 交 CommandService,回执折协议响应。线程模型:goal/
+    // loop 的内存状态机自带锁(scheduler)/只归读线程碰(coordinator 与
+    // 会话泵同线程——app-server 的会话泵就是读线程,turn 工作线程不碰
+    // 它们)。error 时错误码走 data.reason 带稳定串(协议 v1 的错误码段
+    // 没有 goal.*/loop.*/plan.* 专属号)。
+    nlohmann::json HandleTypedDomainCommand(const IncomingRequest& request, bool& out_error,
+                                            std::string& out_error_code, std::string& out_error_message);
 
     // 当前活着的 thread 数(测试断言用)。
     std::size_t active_thread_count();

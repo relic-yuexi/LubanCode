@@ -19,6 +19,7 @@ using lubancode::runtime::goal::GoalDecision;
 using lubancode::runtime::goal::GoalEvaluation;
 using lubancode::runtime::goal::GoalEvidence;
 using lubancode::runtime::goal::GoalState;
+using lubancode::runtime::goal::GoalTask;
 using lubancode::runtime::goal::GoalUsage;
 
 namespace {
@@ -421,6 +422,83 @@ TEST_CASE("usage 未报告:token 闸不拿 0 冒充,iteration 闸照收") {
     CHECK(next.error_code == lubancode::runtime::goal::kErrGoalBudgetExhausted);
 }
 
+TEST_CASE("fork lineage:新 id 记 parent,落 Paused,合同账面抄去,usage 从零") {
+    GoalCoordinator src(EnabledOptions());
+    MakeActive(src);
+    // 给源攒一点账:usage 与 no-progress 计数。
+    GoalUsage used;
+    used.input_tokens = 500;
+    used.request_count = 2;
+    used.usage_reported = true;
+    src.AddUsage(used);
+    src.NoteProgressFingerprint("fp-1", 1500);
+    const GoalTask source = *src.task();
+
+    GoalCoordinator forked(EnabledOptions());
+    const auto r = forked.ForkFrom(source, "/repo", "repo@main", 2000,
+                                   [] { return "goal-7"; });
+    REQUIRE(r.ok);
+    REQUIRE(forked.task() != nullptr);
+    CHECK(forked.task()->id == "goal-7");               // 新 id,不共享
+    CHECK(forked.task()->parent_goal_id == "goal-1");   // lineage 记源
+    CHECK(forked.task()->state == GoalState::Paused);   // 不默认续跑
+    CHECK_FALSE(forked.HasReadyContinuation());
+    // 账面抄去:合同冻结、预算、checkpoint;防空转指纹新处起算。
+    CHECK(forked.task()->contract_frozen);
+    CHECK(forked.task()->contract_sha256 == source.contract_sha256);
+    CHECK(forked.task()->budget.max_iterations == source.budget.max_iterations);
+    CHECK(forked.task()->counters.last_progress_fingerprint.empty());
+    // usage 从零,evidence 不搬。
+    CHECK(forked.task()->usage.input_tokens == 0);
+    CHECK(forked.evidence_count() == 0);
+    // 源不被动:状态与账面照旧(fork 不是复活,也不是改动)。
+    CHECK(src.task()->state == GoalState::Active);
+    CHECK(src.task()->usage.input_tokens == 500);
+    // resume 才跑。
+    REQUIRE(forked.Resume(0, 2100).ok);
+    CHECK(forked.task()->state == GoalState::Active);
+    // 序列化 roundtrip:lineage 字段不丢。
+    const GoalTask round = GoalTask::from_json(forked.task()->to_json());
+    CHECK(round.parent_goal_id == "goal-1");
+}
+
+TEST_CASE("fork lineage:已有非终态 goal 时 fork 拒 already_active") {
+    GoalCoordinator src(EnabledOptions());
+    MakeActive(src);
+    GoalCoordinator forked(EnabledOptions());
+    MakeActive(forked);
+    const auto r = forked.ForkFrom(*src.task(), "/repo", "repo@main", 2000);
+    CHECK_FALSE(r.ok);
+    CHECK(r.error_code == lubancode::runtime::goal::kErrGoalAlreadyActive);
+}
+
+TEST_CASE("fork lineage:created/forked 事件回放出同一只账") {
+    std::vector<lubancode::runtime::goal::GoalCoordinatorEvent> events;
+    GoalCoordinator::Options options = EnabledOptions();
+    GoalCoordinator src(options);
+    src.SetLedgerSink([&](const lubancode::runtime::goal::GoalCoordinatorEvent& event) {
+        events.push_back(event);
+        return true;
+    });
+    MakeActive(src);
+    std::vector<lubancode::runtime::goal::GoalCoordinatorEvent> fork_events;
+    GoalCoordinator forked(options);
+    forked.SetLedgerSink([&](const lubancode::runtime::goal::GoalCoordinatorEvent& event) {
+        fork_events.push_back(event);
+        return true;
+    });
+    REQUIRE(forked.ForkFrom(*src.task(), "/repo", "repo@main", 2000, [] { return "goal-2"; }).ok);
+
+    GoalCoordinator replayed(options);
+    for (const auto& event : fork_events) {
+        replayed.ReplayEvent(event);
+    }
+    REQUIRE(replayed.task() != nullptr);
+    CHECK(replayed.task()->parent_goal_id == "goal-1");
+    CHECK(replayed.task()->state == GoalState::Paused);
+    CHECK(replayed.task()->contract_frozen);  // contract_ready 事件带的冻结态
+}
+
 TEST_CASE("edit:revision+1、回 Preparing、streak 清零;Running 时拒 busy") {
     GoalCoordinator g(EnabledOptions());
     MakeActive(g);
@@ -575,4 +653,51 @@ TEST_CASE("provider 连败:撞上限 Paused,成功清零") {
     REQUIRE(g.Resume(0, 2000).ok);
     g.NoteProviderOutcome(true);
     CHECK(g.task()->counters.consecutive_provider_failures == 0);
+}
+
+TEST_CASE("evaluator 失败:goal 进 Paused(evaluator_failed),不默认 achieved") {
+    GoalCoordinator g(EnabledOptions());
+    MakeActive(g);
+    REQUIRE(g.ScheduleNextIteration(1200).ok);
+    REQUIRE(g.TakeReadyIteration("t-1", "", 1300).ok);
+    REQUIRE(g.CheckpointReached(GoalCoordinator::MakeMissingCheckpoint(), 1400).ok);
+    CHECK(g.task()->state == GoalState::Evaluating);
+    const auto r = g.NoteEvaluatorFailed("evaluator_failed: 两次都坏", 1500);
+    REQUIRE(r.ok);
+    CHECK(g.task()->state == GoalState::Paused);
+    CHECK_FALSE(g.HasReadyContinuation());
+    // resume 可解(单子:evaluator 失败不是 terminal)。
+    REQUIRE(g.Resume(0, 1600).ok);
+    CHECK(g.task()->state == GoalState::Active);
+}
+
+TEST_CASE("evaluator 失败写盘失败:fail closed,不开下一轮") {
+    GoalCoordinator::Options options = EnabledOptions();
+    GoalCoordinator g(options);
+    g.SetLedgerSink([](const lubancode::runtime::goal::GoalCoordinatorEvent& event) {
+        return event.event != "paused";  // paused 那笔写不落
+    });
+    MakeActive(g);
+    REQUIRE(g.ScheduleNextIteration(1200).ok);
+    REQUIRE(g.TakeReadyIteration("t-1", "", 1300).ok);
+    REQUIRE(g.CheckpointReached(GoalCoordinator::MakeMissingCheckpoint(), 1400).ok);
+    const auto r = g.NoteEvaluatorFailed("两次都坏", 1500);
+    CHECK_FALSE(r.ok);
+    CHECK(g.task()->state == GoalState::Failed);  // fail closed
+    CHECK_FALSE(g.HasReadyContinuation());
+}
+
+TEST_CASE("证据账:RecordEvidence 只认本 goal,EvidenceIds 全列,stale 翻旧") {
+    GoalCoordinator g(EnabledOptions());
+    REQUIRE(g.Create("目标", "/r", "id", 1000).ok);
+    g.RecordEvidence(MakeEvidence("ev-1", "goal-1"));
+    g.RecordEvidence(MakeEvidence("ev-2", "goal-9"));  // 跨 goal:不收
+    CHECK(g.evidence_count() == 1);
+    const auto ids = g.EvidenceIds();
+    REQUIRE(ids.size() == 1);
+    CHECK(ids[0] == "ev-1");
+    CHECK(g.FindEvidence("ev-1") != nullptr);
+    CHECK(g.FindEvidence("ev-2") == nullptr);
+    g.MarkEvidenceStale("ev-1");
+    CHECK_FALSE(g.FindEvidence("ev-1")->fresh);
 }
