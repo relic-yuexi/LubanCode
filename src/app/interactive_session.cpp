@@ -459,6 +459,10 @@ private:
     // Achieved)。fields 带 goal_id/revision 一类对账字段。
     void EmitGoalHook(lubancode::hooks::HookEvent event, nlohmann::json fields,
                       const std::string& match_value);
+    // 状态栏的 goal/loop 段(goal 单合流):"goal <短码>·iter<N> · loop×<N>
+    // next <差>"。两样都没有给空串(整段不挂)。短码不做状态机翻译的
+    // 第二处——从 GoalState 现折,loop 用 scheduler 快照。
+    std::string BuildGoalLoopStatusSegment();
     // 拍子收口:turn 终态回写 tick,算 outcome/退避/连败账。
     void FinishLoopTick(const std::string& tick_id, bool turn_failed, bool cancelled);
     // scheduler 攒的事件账落盘(append+flush);失败即 FailStore 熔断。
@@ -5350,9 +5354,106 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
         }};
 }
 
+std::string TerminalSessionController::BuildGoalLoopStatusSegment() {
+    // 状态栏的 goal/loop 段(goal 单合流)。短码口径(不是第二套状态机,
+    // 只是 GoalState 的显示投影):
+    //   run=Running/Preparing/Active·Pausing  eval=Evaluating
+    //   pause=Paused/AwaitingApproval/AwaitingUser/SuspendedByPolicy
+    //   blocked=Blocked  done=Achieved  budget=BudgetExhausted  x=Failed/Cleared
+    // loop 只数非终态非 Paused 的活任务;next 给最近一拍还差多少(已到点/
+    // 没有排程时省略)。
+    const auto now_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    }();
+    std::string goal_part;
+    if (goal_coordinator_.has_value() && goal_coordinator_->task() != nullptr) {
+        using GS = lubancode::runtime::goal::GoalState;
+        const auto* task = goal_coordinator_->task();
+        const char* code = "x";
+        switch (task->state) {
+            case GS::Preparing:
+            case GS::Active:
+            case GS::Running:
+            case GS::Pausing:
+                code = "run";
+                break;
+            case GS::Evaluating:
+                code = "eval";
+                break;
+            case GS::Paused:
+            case GS::AwaitingApproval:
+            case GS::AwaitingUser:
+            case GS::SuspendedByPolicy:
+                code = "pause";
+                break;
+            case GS::Blocked:
+                code = "blocked";
+                break;
+            case GS::Achieved:
+                code = "done";
+                break;
+            case GS::BudgetExhausted:
+                code = "budget";
+                break;
+            case GS::Failed:
+            case GS::Cleared:
+                code = "x";
+                break;
+        }
+        goal_part = std::string("goal ") + code;
+        if (task->counters.iterations_started > 0) {
+            goal_part += "·iter" + std::to_string(task->counters.iterations_started);
+        }
+        if (task->revision > 1) {
+            goal_part += "·r" + std::to_string(task->revision);
+        }
+    }
+    std::string loop_part;
+    if (loop_scheduler_.has_value()) {
+        int active = 0;
+        std::int64_t next_due = 0;
+        bool has_next = false;
+        for (const auto& view : loop_scheduler_->Snapshot(now_ms)) {
+            if (lubancode::runtime::loop::IsLoopTerminal(view.task.state) ||
+                view.task.state == lubancode::runtime::loop::LoopTaskState::Paused) {
+                continue;
+            }
+            ++active;
+            if (!has_next || view.task.next_due_at_ms < next_due) {
+                next_due = view.task.next_due_at_ms;
+                has_next = true;
+            }
+        }
+        if (active > 0) {
+            loop_part = "loop×" + std::to_string(active);
+            if (has_next && next_due > now_ms) {
+                const std::int64_t secs = (next_due - now_ms) / 1000;
+                if (secs < 60) {
+                    loop_part += " next " + std::to_string(secs) + "s";
+                } else if (secs < 3600) {
+                    loop_part += " next " + std::to_string(secs / 60) + "m";
+                } else {
+                    loop_part += " next " + std::to_string(secs / 3600) + "h";
+                }
+            }
+        }
+    }
+    if (goal_part.empty() && loop_part.empty()) {
+        return std::string();
+    }
+    if (goal_part.empty()) {
+        return loop_part;
+    }
+    if (loop_part.empty()) {
+        return goal_part;
+    }
+    return goal_part + " · " + loop_part;
+}
+
 void TerminalSessionController::EmitGoalHook(lubancode::hooks::HookEvent event, nlohmann::json fields,
                                              const std::string& match_value) {
-    // goal 单"Hooks"节:中立事件面,matcher 可订阅;全部只给审计与
     // additionalContext(OutputCapabilities 已在 events.hpp 定死:没有
     // permission_decision、can_block 恒 false——Hook 不可直接写 Achieved,
     // GoalCompleted 失败不把 Achieved 改回 Active)。goal_id/revision 由
@@ -5864,6 +5965,8 @@ void TerminalSessionController::Run() {
         if (session_runtime_.collaboration_mode() == lubancode::runtime::CollaborationMode::Plan) {
             status_data.plan_mode = tr("plan.mode_label");
         }
+        // goal/loop 会话状态段(goal 单合流):有常驻自动工作在跑才挂。
+        status_data.goal_loop = BuildGoalLoopStatusSegment();
         lubancode::cli::SetStatusLineData(status_data, config.status_panel.items, config.status_panel.separator);
 
         // 后台命令完成通知:每圈开头取一次"新进入终态"的任务,有就打一行淡色

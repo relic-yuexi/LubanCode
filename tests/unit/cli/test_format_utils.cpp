@@ -151,6 +151,35 @@ TEST_CASE("StatusPanel: provider、effort 与 permission mode 可按需启用") 
     CHECK(text.find("auto") != std::string::npos);
 }
 
+TEST_CASE("StatusPanel: goal/loop 段非空恒挂,不进 items 配置") {
+    // 空 = 整段不挂(没立 goal 也没 loop 的会话零影响)。
+    {
+        StatusPanelData data;
+        data.model = "gpt-test";
+        const auto segments = BuildStatusPanelSegments({"model"}, ConfirmMode::Confirm, data);
+        bool seen = false;
+        for (const auto& segment : segments) {
+            if (segment.key == "goal_loop") seen = true;
+        }
+        CHECK_FALSE(seen);
+    }
+    // 非空 = 恒挂,items 没配也挂(与 REC/WT/tools/plan 同待遇)。
+    {
+        StatusPanelData data;
+        data.model = "gpt-test";
+        data.goal_loop = "goal run·iter3·r2 · loop×2 next 4m";
+        const auto segments = BuildStatusPanelSegments({"model"}, ConfirmMode::Confirm, data);
+        bool seen = false;
+        for (const auto& segment : segments) {
+            if (segment.key == "goal_loop") {
+                seen = true;
+                CHECK(segment.text == "goal run·iter3·r2 · loop×2 next 4m");
+            }
+        }
+        CHECK(seen);
+    }
+}
+
 TEST_CASE("CompactStatusPath: 长路径从左收起，保住盘符和末级目录") {
     CHECK(CompactStatusPath("D:\\very\\long\\folder\\project", 15) == "D:\\…\\project");
     CHECK(CompactStatusPath("/home/user/very/long/project", 12) == "/…/project");
