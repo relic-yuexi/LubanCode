@@ -393,3 +393,84 @@ TEST_CASE("catalog 的 updated 账在归档里也认: queue 事件行与 clock �
     CHECK(page.entries[0].message_count == 1);  // queue 行不是消息
     CHECK(page.entries[0].health == agent::SessionHealth::Ok);
 }
+
+// ---------------------------------------------------------------------------
+// 逐枚追踪单第 5 期:retention 联动(context 目录随 archive/delete 走)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("lifecycle: context 目录(artifact 仓)随 archive 搬、随 delete 删") {
+    const TempSessionsDir dir("lifecycle_retention");
+    const std::string id = "retention-session";
+    WriteSession(dir, id, "/tmp", "2026-08-23 10:00:00");
+
+    // 造 context 目录:与 <id>.jsonl 并排的 <id>/context。
+    std::error_code ec;
+    const std::filesystem::path context = dir.base / id / "context";
+    std::filesystem::create_directories(context, ec);
+    {
+        std::ofstream blob(context / "blob-0001", std::ios::binary);
+        blob << "payload";
+    }
+    REQUIRE(std::filesystem::exists(context));
+
+    // archive:jsonl 与 context 一起进 archive/。
+    {
+        agent::SessionLifecycle lifecycle(PathUtf8(dir.base));
+        const auto result = lifecycle.ArchiveSession(id);
+        REQUIRE(result.ok());
+        const std::filesystem::path archived_context =
+            dir.base / "archive" / id / "context";
+        CHECK(std::filesystem::exists(archived_context));
+        CHECK_FALSE(std::filesystem::exists(context));
+        CHECK(result.detail.empty());
+    }
+
+    // unarchive:一起搬回根。
+    {
+        agent::SessionLifecycle lifecycle(PathUtf8(dir.base));
+        const auto result = lifecycle.UnarchiveSession(id);
+        REQUIRE(result.ok());
+        CHECK(std::filesystem::exists(context));
+    }
+
+    // delete:一起删。
+    {
+        agent::SessionLifecycle lifecycle(PathUtf8(dir.base));
+        const auto result = lifecycle.DeleteSession(id, true);
+        REQUIRE(result.ok());
+        CHECK_FALSE(std::filesystem::exists(dir.base / (id + ".jsonl")));
+        CHECK_FALSE(std::filesystem::exists(context));
+        CHECK(result.detail.empty());
+    }
+
+    // TempSessionsDir 析构自清
+
+}
+
+TEST_CASE("lifecycle: 没 context 目录的会话照常 archive/delete(空过不报)") {
+    const TempSessionsDir dir("lifecycle_retention_bare");
+    const std::string id = "bare-session";
+    WriteSession(dir, id, "/tmp", "2026-08-23 10:00:00");
+
+    {
+        agent::SessionLifecycle lifecycle(PathUtf8(dir.base));
+        const auto result = lifecycle.ArchiveSession(id);
+        REQUIRE(result.ok());
+        CHECK(result.detail.empty());
+    }
+    {
+        agent::SessionLifecycle lifecycle(PathUtf8(dir.base));
+        const auto result = lifecycle.UnarchiveSession(id);
+        REQUIRE(result.ok());
+    }
+    {
+        agent::SessionLifecycle lifecycle(PathUtf8(dir.base));
+        const auto result = lifecycle.DeleteSession(id, true);
+        REQUIRE(result.ok());
+        CHECK(result.detail.empty());
+    }
+
+    std::error_code ec;
+    // TempSessionsDir 析构自清
+
+}

@@ -561,16 +561,25 @@ std::expected<void, std::string> WorkflowRecorder::Note(const std::string& text)
     return {};
 }
 
-void WorkflowRecorder::RecordToolCall(const std::string& tool_name, const nlohmann::json& input) {
+void WorkflowRecorder::RecordToolCall(const std::string& tool_name, const nlohmann::json& input,
+                                        const std::string& execution_id, const std::string& tool_use_id) {
     if (state_ != RecorderState::Recording) {
         return;  // 暂停期间的动作不录;静默跳过,不算错
     }
-    AppendEvent("model", kEventToolCall,
-                {{"tool", tool_name}, {"input", SanitizeToolInput(input)}});
+    nlohmann::json data = {{"tool", tool_name}, {"input", SanitizeToolInput(input)}};
+    // 逐枚追踪单:身份随行(可空——老调用方没身份时录制件照旧只有名字)。
+    if (!execution_id.empty()) {
+        data["execution_id"] = execution_id;
+    }
+    if (!tool_use_id.empty()) {
+        data["tool_use_id"] = tool_use_id;
+    }
+    AppendEvent("model", kEventToolCall, std::move(data));
 }
 
 void WorkflowRecorder::RecordToolResult(const std::string& tool_name, bool is_error,
-                                        const std::string& content) {
+                                        const std::string& content, const std::string& outcome,
+                                        const std::string& error_code, const std::string& execution_id) {
     if (state_ != RecorderState::Recording) {
         return;
     }
@@ -581,8 +590,19 @@ void WorkflowRecorder::RecordToolResult(const std::string& tool_name, bool is_er
         line_end = content.size();
     }
     std::string summary = content.substr(0, (std::min)(line_end, std::size_t{200}));
-    AppendEvent("model", kEventToolResult,
-                {{"tool", tool_name}, {"ok", !is_error}, {"summary", RedactSecrets(std::move(summary))}});
+    nlohmann::json data = {{"tool", tool_name},
+                           {"ok", !is_error},
+                           {"summary", RedactSecrets(std::move(summary))}};
+    if (!outcome.empty()) {
+        data["outcome"] = outcome;
+    }
+    if (!error_code.empty()) {
+        data["error_code"] = error_code;
+    }
+    if (!execution_id.empty()) {
+        data["execution_id"] = execution_id;
+    }
+    AppendEvent("model", kEventToolResult, std::move(data));
 }
 
 // ---------------------------------------------------------------------------

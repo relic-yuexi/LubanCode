@@ -68,10 +68,9 @@
 #include "app/commands/workflow_commands.hpp"
 #include "workflow/host_executors.hpp"
 #include "app/version.hpp"
-#include "cli/turn_renderer.hpp"
 #include "runtime/command_service.hpp"
 #include "runtime/session_runtime.hpp"
-#include "runtime/turn_view.hpp"
+#include "runtime/tool_trace_hub.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/diff.hpp"
@@ -92,6 +91,7 @@
 #include "cli/spinner.hpp"
 #include "cli/terminal_frame.hpp"
 #include "cli/theme.hpp"
+#include "cli/turn_renderer.hpp"
 #include "cli/todo_render.hpp"
 #include "cli/tool_display.hpp"
 #include "cli/transcript.hpp"
@@ -474,12 +474,6 @@ private:
 
     // ---- UI 状态 ----
     std::vector<lubancode::cli::TranscriptItem> transcript;
-    // 每轮的 TurnView 存档(终端回合视觉收束单):Ctrl+L/resume 重放走
-    // 同一颗 TerminalTurnRenderer,与实时画面同源——除 Running 动态外终态
-    // 文本一致(单子验收最后一条)。最近 N 轮(重铺够用即可,长会话不
-    // 无界攒)。
-    std::vector<lubancode::runtime::TurnView> turn_views_;
-    static constexpr std::size_t kMaxArchivedTurnViews = 8;
     // @ 提及文件索引(第三批):按根缓存,根变了重扫(cwd/worktree 切换)。
     std::vector<lubancode::cli::FileMentionEntry> mention_index_;
     std::string mention_index_root_;
@@ -517,6 +511,15 @@ private:
     // ---- 会话存档与权限账(P6:本体在 runtime::SessionRuntime,这里引用) ----
     // runtime 声明在前(先析构引用别名,本体后析构),引用一律指它。
     lubancode::runtime::SessionRuntime session_runtime_;
+    // 逐枚追踪单:canonical 工具事件的分线器(持久栅栏落 session、UI 投影
+    // 待接 EventSink、录制投影由 RunTurn 挂)。与 session_runtime_ 同寿命。
+    // 逐枚追踪单:hub 要抓 session_runtime_ 的 ids/store 引用,构造体里
+    // 安家(初始化列表里绑引用不稳,成员序也保证不了先 runtime 后 hub)。
+    std::optional<lubancode::runtime::ToolTraceHub> trace_hub_;
+    // 每轮的 TurnView 存档(终端回合视觉收束单):Ctrl+L/resume 重放走
+    // 同一颗渲染器,与实时画面同账。最近 N 轮,不无界攒。
+    std::vector<lubancode::runtime::TurnView> turn_views_;
+    static constexpr std::size_t kMaxArchivedTurnViews = 8;
     std::string wire_str;
     const std::string& sessions_dir;
     lubancode::agent::SessionStore& session_store;
@@ -692,6 +695,10 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         }
     }
 
+    // 逐枚追踪单:trace hub 安家(抓 session_runtime_ 的 ids/store 引用;
+    // 分线 canonical 工具事件到 session 栅栏/录制投影/UI 投影)。
+    trace_hub_.emplace(session_runtime_.ids(), &session_runtime_.store());
+
     // 统一模型路由(模型分工第一期):后台小活(压缩/抽取/标题)按
     // TaskKind 取路由,usage 分角色记账。配置有歧义(compact_model 与
     // cheap_model 同写之类)时把 MergeConfig 记的提示打出来——路由看得见。
@@ -744,6 +751,9 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     // (账只有一本,一边 active 另一边回 AlreadyActive)。
     tool_runtime_.emplace(config, theme, wrapped_backend, skills, skills_segment, CurrentDirUtf8(),
                           MakeRuntimeOptions());
+    // 逐枚追踪单第四期:hub 已安家,挂 undo_file_edit(条件式撤销:凭
+    // hub 的账本翻凭据,走与 write/edit 同一道确认门)。
+    tool_runtime_->AttachUndoTool(&*trace_hub_);
     // 可追回 artifact 的两把只读钥匙(第二期):main 与子代理同级都有——
     // 子代理的超长结果同样落仓,它自己也要能追回证据(角色跟 TaskKind 走,
     // 工具能力同理,不按身份裁)。
@@ -1510,12 +1520,11 @@ bool TerminalSessionController::HandleTranscriptUi(lubancode::cli::UiKeyAction a
         }
         case cli::UiKeyAction::FocusView: {
             if (focus_view_active) {
-                // 再按 Ctrl+E:返回。恢复最近条目(聚焦画面留在滚动历史
-                // 里)。回合视觉收束单:不再追打 banner——会话 chrome 只在
-                // 启动与真正换 provider/session 时出现,普通返回路径追加
-                // banner 会看着像模型每步重启。
+                // 再按 Ctrl+E:返回。简化重画:横幅 + 最近几条摘要,
+                // 聚焦画面留在滚动历史里。
                 focus_view_active = false;
                 std::cout << "\n" << theme.stats << tr("ui.back") << theme.reset << "\n";
+                PrintBanner(config, theme);
                 PrintRecentItems(5);
                 return true;
             }
@@ -1538,7 +1547,8 @@ bool TerminalSessionController::HandleTranscriptUi(lubancode::cli::UiKeyAction a
             }
             focus_view_active = false;
             std::cout << "\n" << theme.stats << tr("ui.back") << theme.reset << "\n";
-            PrintRecentItems(5);  // 不追打 banner(同 FocusView 返回路)
+            PrintBanner(config, theme);
+            PrintRecentItems(5);
             return true;
         }
         case cli::UiKeyAction::RepaintScreen: {
@@ -3183,7 +3193,173 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
             case lubancode::cli::SlashCommand::Keymap:
                 HandleKeymapCommand(parsed.args);
                 break;
-            case lubancode::cli::SlashCommand::Doctor: {
+            case lubancode::cli::SlashCommand::Trace: {
+                    // 逐枚追踪单:只读诊断入口。batch(缺省)/errors 两档吃 hub 的
+                    // 进程内最近账;详细档(execution_id/toolu/turn)翻 session 存档
+                    // 的真本(重启后仍有账可查)。
+                    if (parsed.args.rfind("export", 0) == 0) {
+                        // /trace export <路径>(逐枚追踪单第 5 期):脱敏诊断包。
+                        // 内容 = meta + 全部 execution 的遮敏摘要(outcome/
+                        // error_code/来源/关系边/恢复结论/耗时/字节与 sha/
+                        // preview),不带 inline 原文、不带完整 stderr/env
+                        //(单子"隐私与脱敏")。默认遮敏;--raw 不放行——
+                        // 本会话虽是 TTY,导出件会离开本机,交互确认的
+                        // 语义没法带到文件上,一律脱敏(要比对的拿 preview
+                        // 与 sha 自己对)。
+                        std::string out_path = parsed.args.substr(6);
+                        while (!out_path.empty() && (out_path.front() == ' ' || out_path.front() == '\t')) {
+                            out_path.erase(out_path.begin());
+                        }
+                        if (out_path == "--raw" || out_path.rfind("--raw ", 0) == 0) {
+                            std::cout << theme.error
+                                      << "导出件会离开本机,一律脱敏,没有 --raw 档。" << theme.reset << "\n";
+                            break;
+                        }
+                        if (out_path.empty()) {
+                            std::cout << theme.error << "用法: /trace export <路径>" << theme.reset << "\n";
+                            break;
+                        }
+                        if (!session_store.active()) {
+                            std::cout << theme.error << "本会话没有存档,没有可导出的追踪账。" << theme.reset
+                                      << "\n";
+                            break;
+                        }
+                        const auto bytes = lubancode::agent::ReadSessionFileBytes(session_store.file_path());
+                        if (!bytes.has_value()) {
+                            std::cout << theme.error << "会话档读不到: " << session_store.file_path() << theme.reset
+                                      << "\n";
+                            break;
+                        }
+                        const auto loaded = lubancode::agent::ParseSessionFile(*bytes);
+                        if (!loaded.has_value()) {
+                            std::cout << theme.error << "会话档解析失败。" << theme.reset << "\n";
+                            break;
+                        }
+                        const auto ledger =
+                            lubancode::runtime::ToolTraceHub::BuildLedger(loaded->tool_trace_events);
+                        nlohmann::json bundle;
+                        bundle["schema"] = "tool_trace_export_v1";
+                        bundle["session"] = session_store.session_id();
+                        bundle["exportedAt"] = lubancode::agent::NowTimestamp();
+                        bundle["note"] = "脱敏诊断包:只有遮敏摘要,无正文原文";
+                        nlohmann::json items = nlohmann::json::array();
+                        for (const auto& record : ledger.executions()) {
+                            nlohmann::json item;
+                            item["executionId"] = record.execution_id;
+                            item["toolUseId"] = record.tool_use_id;
+                            item["toolName"] = record.tool_name;
+                            item["turnId"] = record.turn_id;
+                            item["batchId"] = record.batch_id;
+                            item["sequenceInBatch"] = record.sequence_in_batch;
+                            item["source"] = lubancode::agent::ToString(record.source_kind);
+                            item["sourceInstance"] = record.source_instance;
+                            item["parentExecutionId"] = record.parent_execution_id;
+                            item["retryOf"] = record.retry_of;
+                            item["blockedBy"] = record.blocked_by;
+                            item["compensates"] = record.compensates;
+                            item["outcome"] = lubancode::agent::ToString(record.outcome);
+                            item["errorCode"] = record.error_code;
+                            item["durationMs"] = record.duration_ms;
+                            item["recovery"] = lubancode::agent::ToString(record.Classify());
+                            item["corrupt"] = record.corrupt;
+                            item["resultBytes"] = record.result_ref.bytes;
+                            item["resultSha256"] = record.result_ref.sha256;
+                            item["resultPreview"] = record.result_ref.preview;  // BuildTracePreview 已过 RedactSecrets
+                            if (!record.result_ref.artifact_id.empty()) {
+                                item["resultArtifactId"] = record.result_ref.artifact_id;
+                            }
+                            items.push_back(std::move(item));
+                        }
+                        bundle["executions"] = std::move(items);
+                        bundle["verificationCount"] = ledger.verifications().size();
+                        bundle["corruptCount"] = ledger.corrupt_count();
+
+                        std::ofstream out_file(lubancode::platform::Utf8ToPath(out_path), std::ios::binary | std::ios::trunc);
+                        if (!out_file.is_open()) {
+                            std::cout << theme.error << "导出文件打不开: " << out_path << theme.reset << "\n";
+                            break;
+                        }
+                        const std::string body = bundle.dump(2);
+                        out_file.write(body.data(), static_cast<std::streamsize>(body.size()));
+                        out_file.close();
+                        std::cout << theme.stats << "已导出脱敏追踪账(" << ledger.executions().size()
+                                  << " 枚 execution): " << out_path << theme.reset << "\n";
+                        break;
+                    }
+                    if (parsed.args == "errors") {
+                        const auto lines = trace_hub_->ErrorLines();
+                        if (lines.empty()) {
+                            std::cout << theme.stats << "本会话没有明确失败或 unknown 的工具调用。" << theme.reset << "\n";
+                        } else {
+                            for (const std::string& line : lines) {
+                                std::cout << theme.stats << line << theme.reset << "\n";
+                            }
+                        }
+                        break;
+                    }
+                    const bool detail_query = parsed.args.rfind("toolu ", 0) == 0 || parsed.args.rfind("turn ", 0) == 0 ||
+                                              (!parsed.args.empty() && parsed.args != "errors" && parsed.args != "--raw" &&
+                                               parsed.args.find(' ') == std::string::npos);
+                    if (detail_query) {
+                        if (session_store.active()) {
+                            const auto bytes = lubancode::agent::ReadSessionFileBytes(session_store.file_path());
+                            if (bytes.has_value()) {
+                                const auto loaded = lubancode::agent::ParseSessionFile(*bytes);
+                                if (loaded.has_value()) {
+                                    const auto ledger =
+                                        lubancode::runtime::ToolTraceHub::BuildLedger(loaded->tool_trace_events);
+                                    if (parsed.args.rfind("toolu ", 0) == 0) {
+                                        const std::string id = parsed.args.substr(6);
+                                        for (const auto* record : ledger.FindByToolUse(id)) {
+                                            std::cout << theme.stats
+                                                      << lubancode::agent::FormatExecutionSummaryLine(*record, false)
+                                                      << theme.reset << "\n";
+                                        }
+                                    } else if (parsed.args.rfind("turn ", 0) == 0) {
+                                        const std::string id = parsed.args.substr(5);
+                                        for (const auto& record : ledger.executions()) {
+                                            if (record.turn_id == id) {
+                                                std::cout << theme.stats
+                                                          << lubancode::agent::FormatExecutionSummaryLine(record, false)
+                                                          << theme.reset << "\n";
+                                            }
+                                        }
+                                    } else {
+                                        const auto* record = ledger.FindByExecution(parsed.args);
+                                        if (record != nullptr) {
+                                            std::cout << theme.stats
+                                                      << lubancode::agent::FormatExecutionSummaryLine(*record, false)
+                                                      << theme.reset << "\n";
+                                            if (!record->error_code.empty()) {
+                                                std::cout << theme.stats << "  error_code: " << record->error_code
+                                                          << theme.reset << "\n";
+                                            }
+                                            if (!record->source_instance.empty()) {
+                                                std::cout << theme.stats << "  source: " << record->source_instance
+                                                          << theme.reset << "\n";
+                                            }
+                                            std::cout << theme.stats << "  recovery: "
+                                                      << lubancode::agent::ToString(record->Classify()) << theme.reset
+                                                      << "\n";
+                                        } else {
+                                            std::cout << theme.stats << "没有这枚 execution 的账: " << parsed.args
+                                                      << theme.reset << "\n";
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    const std::string summary = trace_hub_->LastBatchSummary();
+                    if (summary.empty()) {
+                        std::cout << theme.stats << "还没有工具调用的追踪账(本会话尚未跑过工具)。" << theme.reset << "\n";
+                    } else {
+                        std::cout << theme.stats << summary << theme.reset;
+                    }
+                    break;
+            }
+                        case lubancode::cli::SlashCommand::Doctor: {
                 // 本地兼容端 Effort/前缀缓存诊断。探针自己建临时 backend,
                 // 与会话 backend 无关;stream_usage 探针写回 config 后这里
                 // 顺手重建 real_backend,新能力下一次请求就带上。
@@ -3503,12 +3679,15 @@ CommandFlow TerminalSessionController::RunUserTurn(const std::string& content, b
     // 不混进这里。
     lubancode::runtime::TurnUsageStats turn_usage;
     const auto turn_started = std::chrono::steady_clock::now();
+    const std::string trace_turn_id = session_runtime_.ids().NextTurnId();
     turn_views_.emplace_back();
     const lubancode::app::RunTurnResult turn_result =
         RunTurn(*loop, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
                 lubancode::app::HookRuntime(), spinner_enabled, transcript, todo_state(), &transcript_expanded,
                 settings_local.allow_commands, settings_local.deny_commands, session_agent_tool(),
-                recorder.has_value() ? &*recorder : nullptr, /*silent=*/false, &turn_usage, &turn_views_.back());
+                recorder.has_value() ? &*recorder : nullptr, /*silent=*/false, &turn_usage,
+                /*trace_hub=*/&*trace_hub_, session_runtime_.thread_id(), trace_turn_id,
+                /*turn_view_out=*/&turn_views_.back());
     // 轮次视图存档封顶(最近 N 轮,重铺够用;不无界攒)。
     if (turn_views_.size() > kMaxArchivedTurnViews) {
         turn_views_.erase(turn_views_.begin());

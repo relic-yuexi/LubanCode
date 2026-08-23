@@ -130,6 +130,10 @@ struct HookContext {
     std::optional<std::string> agent_id;
     std::optional<std::string> agent_type;
     std::optional<std::string> parent_agent_id;
+    // 逐枚追踪单:本次 Emit 钉在哪枚工具执行上(可空)。dispatcher 把它
+    // 抄进每条 HookRunRecord.tool_execution_id,工具 trace 侧只记引用,
+    // 不把 /hooks runs 全文复制五遍。
+    std::string tool_execution_id;
 };
 
 // ---------------------------------------------------------------------------
@@ -164,6 +168,10 @@ struct HookRunRecord {
     bool stderr_truncated = false;   // stderr 超首段上限被截
     std::string stderr_encoding;     // "utf-8" / "cp936" / "unknown"
     std::int64_t timestamp_unix = 0;  // 落账时刻(秒)
+    // 逐枚追踪单:这次运行钉在哪枚工具执行上(可空——非工具事件
+    // UserPromptSubmit/Stop 类的运行没有 execution)。工具 trace 只记
+    // 引用(pre/post_hook_run_ids),不复制全文五遍。
+    std::string tool_execution_id;
 
     // stderr 首段的展示上限(字节)。够放一段 PowerShell 报错,又不至于刷屏。
     static constexpr std::size_t kStderrHeadBytes = 512;

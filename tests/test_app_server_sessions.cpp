@@ -352,3 +352,106 @@ TEST_CASE("workflow/query:不存在的 run 与没配目录") {
         std::filesystem::remove_all(U8(runs), cleanup_ec);
     }
 }
+
+// ---------------------------------------------------------------------------
+// trace/query(逐枚追踪单第 5 期:断线补账与冷回放)
+// ---------------------------------------------------------------------------
+
+// 往一场存档里追加 tool_trace_v1 行(直接拼 JSONL,不经 hub——冷回放
+// 测的就是"从盘上折叠")。
+void SeedTraceLines(const std::string& sessions_dir, const std::string& thread_id,
+                    const std::vector<std::string>& lines) {
+    std::ofstream out(U8(sessions_dir + "/" + thread_id + ".jsonl"),
+                      std::ios::binary | std::ios::app);
+    for (const std::string& line : lines) {
+        out << line << "\n";
+    }
+}
+
+TEST_CASE("trace/query: 冷回放全量 + lastSeq 增量补账") {
+    const std::string dir = MakeTempDir("lubancode_test_app_server_trace");
+    const std::string thread_id = SeedSession(dir, "t");
+    SeedTraceLines(dir, thread_id,
+                   {R"({"type":"tool_trace_v1","event":"scheduled","execution_id":"item-1","tool_use_id":"u1","tool_name":"probe","seq":10})",
+                    R"({"type":"tool_trace_v1","event":"execution_started","execution_id":"item-1","seq":11})",
+                    R"({"type":"tool_trace_v1","event":"execution_finished","execution_id":"item-1","outcome":"succeeded","seq":12,"result_ref":{"kind":"inline","sha256":"aa","bytes":3,"content":"ok","preview":"ok"}})",
+                    R"({"type":"tool_trace_v1","event":"result_committed","execution_id":"item-1","seq":13})",
+                    R"({"type":"tool_trace_v1","event":"scheduled","execution_id":"item-2","tool_use_id":"u2","tool_name":"run_command","seq":20})",
+                    R"({"type":"tool_trace_v1","event":"execution_started","execution_id":"item-2","seq":21})",
+                    R"({"type":"tool_trace_v1","event":"execution_finished","execution_id":"item-2","outcome":"timed_out","error_code":"process.timeout","seq":22,"result_ref":{"kind":"unavailable"}})"});
+
+    // 全量:两枚 execution,item-1 finished、item-2 result_recoverable。
+    {
+        SessionHarness harness{dir};
+        const nlohmann::json full = harness.Call("trace/query", {{"threadId", thread_id}});
+        CHECK(full.contains("result"));
+        CHECK(full["result"]["count"] == 2);
+        CHECK(full["result"]["lastSeq"] == 20);
+        const auto& executions = full["result"]["executions"];
+        CHECK(executions[0]["executionId"] == "item-1");
+        CHECK(executions[0]["outcome"] == "succeeded");
+        CHECK(executions[0]["recovery"] == "finished");
+        CHECK(executions[1]["executionId"] == "item-2");
+        CHECK(executions[1]["outcome"] == "timed_out");
+        CHECK(executions[1]["errorCode"] == "process.timeout");
+        CHECK(executions[1]["recovery"] == "result_recoverable");
+        // 遮敏:不回 inline 原文,只回摘要。
+        CHECK_FALSE(executions[0].contains("resultContent"));
+        CHECK(executions[0]["resultBytes"] == 3);
+        CHECK(executions[0]["resultSha256"] == "aa");
+    }
+
+    // 增量:lastSeq=15 只给 item-2(它的 scheduled seq=20 > 15)。
+    {
+        SessionHarness harness{dir};
+        const nlohmann::json inc = harness.Call("trace/query", {{"threadId", thread_id}, {"lastSeq", 15}});
+        CHECK(inc["result"]["count"] == 1);
+        CHECK(inc["result"]["executions"][0]["executionId"] == "item-2");
+    }
+
+    // errorsOnly:只回 timed_out 那枚。
+    {
+        SessionHarness harness{dir};
+        const nlohmann::json errors =
+            harness.Call("trace/query", {{"threadId", thread_id}, {"errorsOnly", true}});
+        CHECK(errors["result"]["count"] == 1);
+        CHECK(errors["result"]["executions"][0]["executionId"] == "item-2");
+    }
+
+    // toolUseId 过滤:重复 tool_use_id 的账不串(这里单枚直验)。
+    {
+        SessionHarness harness{dir};
+        const nlohmann::json by_toolu =
+            harness.Call("trace/query", {{"threadId", thread_id}, {"toolUseId", "u1"}});
+        CHECK(by_toolu["result"]["count"] == 1);
+        CHECK(by_toolu["result"]["executions"][0]["executionId"] == "item-1");
+    }
+
+    std::error_code cleanup_ec;
+    std::filesystem::remove_all(U8(dir), cleanup_ec);
+}
+
+TEST_CASE("trace/query: 参数错与档读不到") {
+    const std::string dir = MakeTempDir("lubancode_test_app_server_trace_err");
+    // 没 threadId:invalid params。
+    {
+        SessionHarness harness{dir};
+        const nlohmann::json missing = harness.Call("trace/query", nlohmann::json::object());
+        CHECK(missing.contains("error"));
+    }
+    // 不存在的 thread:档读不到(文件不在)。
+    {
+        SessionHarness harness{dir};
+        const nlohmann::json gone = harness.Call("trace/query", {{"threadId", "ghost-thread"}});
+        CHECK(gone.contains("error"));
+    }
+    // 没配 sessions_dir:没有存档可查。
+    {
+        SessionHarness harness{std::string()};
+        const nlohmann::json no_dir = harness.Call("trace/query", {{"threadId", "any"}});
+        CHECK(no_dir.contains("error"));
+    }
+
+    std::error_code cleanup_ec;
+    std::filesystem::remove_all(U8(dir), cleanup_ec);
+}

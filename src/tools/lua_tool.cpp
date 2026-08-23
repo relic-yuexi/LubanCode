@@ -465,7 +465,13 @@ Tool::Result LuaTool::execute(const nlohmann::json& input) {
         std::string message =
             lua_tostring(lua_, -1) != nullptr ? lua_tostring(lua_, -1) : "(没有错误信息)";
         lua_pop(lua_, 1);
-        return {"lua 执行出错: " + message, true};
+        // 逐枚追踪单:compile/load 与 runtime error 分开(单子"Lua
+        // compile/load/runtime error 分开"——load 段在 LoadFromFile,这里
+        // 是 runtime 段),稳定码不靠中文正文分辨。
+        Result lua_error{"lua 执行出错: " + message, true};
+        lua_error.outcome = "plugin_exception";
+        lua_error.error_code = "plugin.lua_error";
+        return lua_error;
     }
 
     // 返回值字符串化:字符串原样收,数字/布尔转文本,表转 JSON,nil 算错

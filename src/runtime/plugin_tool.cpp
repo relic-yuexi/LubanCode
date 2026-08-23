@@ -93,7 +93,28 @@ tools::Tool::Result PluginToolAdapter::execute(const nlohmann::json& input) {
                   platform::SanitizeExternalText(outcome.stderr_tail.substr(0, 1024)));
     }
     // 唯一终态:错误码 + 人话一起交上层(ItemCompleted 一笔)。
-    return {BuildResultText(outcome), outcome.code != PluginErrorCode::Ok};
+    // 逐枚追踪单:process 协议自己的稳定码(超时/取消/坏 JSON/输出超限)
+    // 原样透传,trace 里 outcome/error_code 分得开;宿主不伪造插件内部
+    // 细节(单子"native ABI 能回的只有 is_error 时,不伪造 exception 细节")。
+    Tool::Result result{BuildResultText(outcome), outcome.code != PluginErrorCode::Ok};
+    if (outcome.code == PluginErrorCode::TimedOut) {
+        result.outcome = "timed_out";
+        result.error_code = "plugin.timeout";
+    } else if (outcome.code != PluginErrorCode::Ok) {
+        result.outcome = "plugin_exception";
+        result.error_code = "plugin.process_error";
+        if (!outcome.plugin_error_code.empty()) {
+            result.error_code = "plugin." + outcome.plugin_error_code;
+        }
+    } else {
+        result.outcome = "succeeded";
+    }
+    result.details = nlohmann::json{{"plugin", manifest_->id}, {"tool", definition_->name}};
+    if (outcome.exit_code >= 0) {
+        result.details["exit_code"] = outcome.exit_code;
+    }
+    result.effect_summary = "plugin " + manifest_->id + "/" + definition_->name;
+    return result;
 }
 
 PluginScanResult ScanPluginDirectories(const std::filesystem::path& dir) {

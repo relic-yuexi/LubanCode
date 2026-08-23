@@ -157,6 +157,8 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Doctor;
     } else if (lower == "/keymap") {
         parsed.command = SlashCommand::Keymap;
+    } else if (lower == "/trace") {
+        parsed.command = SlashCommand::Trace;
     } else if (lower == "/workflow") {
         // Workflows 自然语言编排单:/workflow 是正门(list/show/graph/
         // validate/run/...),子命令解析在 workflow 层,这里只认词。

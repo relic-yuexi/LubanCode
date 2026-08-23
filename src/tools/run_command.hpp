@@ -18,6 +18,10 @@ namespace lubancode::tools {
 // 都走这个模式。timeout_ms 对后台模式无意义,会被忽略。
 class RunCommandTool : public Tool {
 public:
+
+    // 逐枚追踪单:注册元数据声明。
+    lubancode::tools::EffectClass effect_class() const override { return lubancode::tools::EffectClass::LocalProcessUnknown; }
+    lubancode::tools::Idempotency idempotency() const override { return lubancode::tools::Idempotency::NonIdempotent; }
     std::string name() const override;
     std::string description() const override;
     nlohmann::json input_schema() const override;
