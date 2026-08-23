@@ -349,6 +349,8 @@ add_library(lubancode_engine STATIC
   src/tools/undo_file_edit.cpp
   # 持久目标单:goal 执行轮的检查点工具(schema 校验/证据白名单/状态门槛)。
   src/tools/goal_checkpoint_tool.cpp
+  # loop 单:scheduled tick 里模型声明完成的窄口(scope 校验/两档动作)。
+  src/tools/loop_control_tool.cpp
   src/tools/ask_user.cpp
   src/tools/search.cpp
   src/tools/agent_tool.cpp

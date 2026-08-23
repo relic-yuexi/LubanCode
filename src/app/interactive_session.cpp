@@ -78,6 +78,7 @@
 #include "runtime/goal_compact.hpp"
 #include "runtime/goal_coordinator.hpp"
 #include "tools/goal_checkpoint_tool.hpp"
+#include "tools/loop_control_tool.hpp"
 // loop 单:会话定时循环(scheduler、空闲唤醒多路、终端排版)。
 #include "app/commands/loop_commands.hpp"
 #include "runtime/idle_wake.hpp"
@@ -622,6 +623,9 @@ private:
     lubancode::runtime::FairnessCounter goal_fairness_;
     // 当前在跑的 goal iteration(收口时 NoteGoalRan/NoteOtherWorkRan)。
     std::string goal_active_iteration_;
+    // loop_control 窄工具的会话级状态(tick turn 灌 task_id,收口消费
+    // complete/pause 声明;普通 turn 不注册工具,状态空着就拒)。
+    std::shared_ptr<lubancode::tools::LoopControlState> loop_control_state_;
     // 每轮的 TurnView 存档(终端回合视觉收束单):Ctrl+L/resume 重放走
     // 同一颗渲染器,与实时画面同账。最近 N 轮,不无界攒。
     std::vector<lubancode::runtime::TurnView> turn_views_;
@@ -4014,6 +4018,7 @@ void TerminalSessionController::EnsureLoopScheduler() {
         return loop_scheduler_.has_value() && loop_scheduler_->ShouldWakeNow();
     });
     loop_scheduler_->StartTimer();
+    loop_control_state_ = std::make_shared<lubancode::tools::LoopControlState>();
 }
 
 void TerminalSessionController::FlushLoopEvents() {
