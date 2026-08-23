@@ -5,6 +5,9 @@ add_executable(lubancode_tests
   test_assembler.cpp
   test_tools.cpp
   test_background_tasks.cpp
+  # run_command 跨平台 Shell 语义/进程生命周期单:输出超限终态、off-by-one、
+  # NUL/整数边界、POSIX 单引号 cwd、后台 PowerShell cwd、后台日志权限。
+  test_run_command_process.cpp
   test_command_safety.cpp
   test_loop.cpp
   # 宽窄转换异常单(未映射 Unicode 字符掐死会话):SSE 劈半 delta 闸门、

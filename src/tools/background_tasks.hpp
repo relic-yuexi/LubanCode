@@ -1,35 +1,25 @@
 // 后台任务注册表:进程级单例,管所有 run_in_background 起出来的后台命令。
 //
-// 现状(改造前):run_command 的后台分支 spawn 完就把 PID + 日志路径甩回给模型,
-// 之后再也不管——命令跑没跑完、什么时候完、输出长啥样,模型和用户都两眼一抹黑,
-// 想看只能自己再起一条普通命令去 tail 日志。这就是"spawn 完就忘"。
-//
-// 这一层补上三件 Claude Code 的 BashBackground 本来就有的本事:
+// 进程生命线单(P0/P1)之后的形态:
 //   1. 任务台账:每个后台命令登记一条,带 task_id(单调递增字符串 "1"/"2")、
-//      命令文本、PID、日志路径、状态(running/completed/failed/stopped)、
-//      退出码、起止时间。模型和 slash 命令随时能查。
-//   2. 完成监控:登记时起一条 watcher 线程轮询探活(IsPidAlive),进程一结束
-//      就记下退出码、标终态;主循环每轮开头 DrainCompleted() 把"新完成"的
-//      任务取走,打一行通知给用户看。不阻塞对话流。
-//   3. 输出读取:ReadOutput 按任务读日志文件尾部 N 行(模型经 background_output
-//      工具调),不用自己拼 tail 命令。
+//      命令文本、PID、日志路径、状态(running/stopping/completed/failed/
+//      stopped/stop_failed)、退出码(optional:不知道便是 nullopt,绝不借
+//      0 冒充成功)、起止时间。
+//   2. 完成监控:Register 先建 entry 进表、再起 watcher(次序反过来是 P0
+//      竞态:watcher 抢先跑起来在表里找不到自己,任务永远 Running)。
+//      watcher 持有 BackgroundProcessHandle 的共享状态,不再拿 PID 猜
+//      生死——Wait 阻塞在原生句柄上,退出码由唯一收尸方写进完成态。
+//   3. 停止:Stop 落 handle->TerminateTree(Windows 每任务专属 Job 的
+//      TerminateJobObject;POSIX 组 SIGTERM→grace→SIGKILL),状态先进
+//      Stopping,树死透了才进 Stopped;收不动如实进 stop_failed,不先盖章。
+//   4. 输出读取:ReadOutput 按任务读日志尾部 N 行,出口保证合法 UTF-8
+//      (按 encoding_hint 决定清洗策略),64KB 尾读从完整换行与 UTF-8 边界
+//      起刀,首段被截加标记。
 //
-// 跨平台探活:
-//   - Windows:OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) + GetExitCodeProcess,
-//     STILL_ACTIVE 是活着,别的值就是退出码(精确)。
-//   - POSIX:后台子进程 setsid() 脱离了 lubancode 的会话,父进程没有 waitpid
-//     的权利(不是它的子进程),只能 kill(pid, 0) 探活——活着/死了能分清,
-//     退出码拿不到(进程结束信息已被内核收走),exit_code 标 -1(未知)。
-//   - 两边都有 PID 复用的理论风险(进程死后 PID 被新进程占用),但 watcher
-//     在 spawn 返回的瞬间就起、200ms 一探,落到这个窗口里的概率极低,不额外
-//     对冲(对冲要长持句柄,得改 platform 层 spawn 签名,破坏面太大)。
-//
-// 线程模型:Instance() 是 magic static(线程安全初始化)。entries_ 每条带自己
-// 的 watcher 线程;对 entries_ 的所有读写都在 mutex_ 里。watcher 线程通过
-// task_id 在锁里找自己的 entry(不持有 Entry* 指针,vector 扩容也不怕悬垂)。
-// 析构(程序退出)时 stop_all_ 置位,所有 watcher 在 200ms 内自己退出,主线程
-// 逐个 join——join 不持锁,watcher 最后一次抢锁释放后检查 stop_all_ 即返回,
-// 不死锁。
+// 线程模型:Instance() 是 magic static。entry 持 shared_ptr<BackgroundTaskState>
+// (watcher 与 registry 共享,扩容不悬垂);对 entries_ 的读写都在 mutex_ 里。
+// 析构(程序退出)时 stop_all_ 置位,watcher 在 Wait 的短周期里醒来自己退出,
+// 主线程逐个 join。
 #pragma once
 
 #include <atomic>
@@ -41,13 +31,23 @@
 #include <thread>
 #include <vector>
 
+#include "platform/process.hpp"
+
 namespace lubancode::tools {
 
 enum class BackgroundTaskStatus {
     Running,
+    Stopping,     // Stop 已发出,树还没死透
     Completed,    // 进程自己退出,退出码 == 0
-    Failed,       // 进程自己退出,退出码 != 0
-    Stopped,      // 被 Stop() 主动杀掉
+    Failed,       // 进程自己退出,退出码 != 0(或退出码未知:不借 0 冒充成功)
+    Stopped,      // 被 Stop() 主动收掉,树已死透
+    StopFailed,   // Stop 的系统调用链失败,进程可能还活着
+};
+
+// 退出码账:不知道便是 nullopt。三处口径(文档/注释/工具输出)收成这一份。
+struct BackgroundExit {
+    std::optional<int> exit_code;  // WIFEXITED / Windows 精确码
+    std::optional<int> signal;     // POSIX 受信号终止(WIFSIGNALED),Windows 恒空
 };
 
 struct BackgroundTaskInfo {
@@ -57,19 +57,29 @@ struct BackgroundTaskInfo {
     unsigned long pid = 0;
     std::string log_path;       // 合并 stdout/stderr 的日志文件(UTF-8 路径)
     BackgroundTaskStatus status = BackgroundTaskStatus::Running;
-    int exit_code = 0;          // 完成后填;POSIX 脱离子进程拿不到,标 -1
+    BackgroundExit exit;        // 终态时填;不知道便是 nullopt
+    std::string encoding_hint;  // 日志字节的编码线索(powershell=utf-8 等)
     std::chrono::system_clock::time_point start_time;
     std::chrono::system_clock::time_point finish_time;  // 终态时填
     bool completed_reported = false;  // 这条"新完成"是否已被 DrainCompleted 取走
 };
 
+// 人话标签(List/detail/通知共用一份,别再两处各写一套)。
+const char* BackgroundTaskStatusLabel(BackgroundTaskStatus s);
+
 class BackgroundTaskRegistry {
 public:
     static BackgroundTaskRegistry& Instance();
 
-    // 登记一个已经 spawn 成功的后台任务(run_command 后台分支调)。起一条
-    // watcher 线程轮询探活。返回单调递增的 task_id("1"/"2"/...)。
-    std::string Register(std::string command, std::string shell, unsigned long pid, std::string log_path);
+    // 登记一个已经 spawn 成功的后台任务(run_command 后台分支调)。先建
+    // entry 进表、再起 watcher——反过来就是 P0 竞态。watcher 持 handle 的
+    // 共享状态探活,不再按 task_id 回表里找自己。
+    // max_runtime_ms:可选最长运行时间(进程生命线单 P2)。0 = 无限(dev
+    // server 缺省);显式传值由 watcher 到点收树(TerminateTree),状态进
+    // Stopped。不改 timeout_ms 旧义(后台照旧忽略它)。
+    std::string Register(std::string command, std::string shell, unsigned long pid, std::string log_path,
+                         std::shared_ptr<platform::BackgroundProcessHandle> handle = nullptr,
+                         long long max_runtime_ms = 0);
 
     // 当前所有任务的快照(线程安全拷贝一份)。按 task_id 数字升序。
     std::vector<BackgroundTaskInfo> List();
@@ -80,17 +90,18 @@ public:
     // 读日志文件尾部 tail_lines 行。task_id 找不到/文件读不了返回空串。
     // tail_lines <= 0 表示读全文(上限 64KB 防爆);>0 时按行切取后 N 行
     // (内部也是先读最后 64KB 再切行,日志再大也不把内存吃光)。
+    // 出口保证合法 UTF-8:按 encoding_hint 清洗,64KB 起刀处先退到完整
+    // UTF-8 边界与换行边界,首段被截加 [日志前部已省略] 标记。
     std::string ReadOutput(const std::string& task_id, int tail_lines = 50);
 
-    // 杀掉指定任务。Windows 上 TerminateProcess 根进程;POSIX 上
-    // kill(-pid, SIGTERM) 杀整个进程组(后台子进程 setsid 后 pid 就是 pgid)。
-    // 已终态的任务不重复杀。返回是否认得这个 task_id(true 不保证真杀掉,
-    // 只保证表里有这一条)。
+    // 杀掉指定任务:落 handle->TerminateTree(整棵树),状态 Stopping ->
+    // Stopped;收不动如实进 StopFailed,不先盖章。没有 handle 的旧调用
+    // (测试直接 Register)退化成 PID 探活那条老路。
+    // 返回是否认得这个 task_id。
     bool Stop(const std::string& task_id);
 
     // 取走"自上次 drain 以来新进入终态"的任务,按完成先后顺序。调用后这些
-    // 任务标 completed_reported=true,不会重复吐。主循环每轮开头调一次,
-    // 有内容就打一行"[后台任务 #N 完成]"通知给用户。
+    // 任务标 completed_reported=true,不会重复吐。
     std::vector<BackgroundTaskInfo> DrainCompleted();
 
 private:
@@ -99,15 +110,32 @@ private:
     BackgroundTaskRegistry(const BackgroundTaskRegistry&) = delete;
     BackgroundTaskRegistry& operator=(const BackgroundTaskRegistry&) = delete;
 
-    // watcher 线程主循环:轮询探活,进程结束就锁住表标终态。
-    void WatchThread(std::string task_id);
+    // watcher 持的共享状态:不进 entries_ 也能安全读写生命周期字段。
+    struct TaskState {
+        std::mutex mutex;
+        BackgroundTaskStatus status = BackgroundTaskStatus::Running;
+        BackgroundExit exit;
+        std::chrono::system_clock::time_point finish_time{};
+        bool completed_reported = false;
+        std::string log_path;  // watcher 的日志截断用(不回表抢 mutex_)
+    };
 
-    // 跨平台探活。alive=true 表示还活着;alive=false 表示已结束,exit_code_out
-    // 填退出码(Windows 精确,POSIX 拿不到填 -1)。
-    static bool IsPidAlive(unsigned long pid, int& exit_code_out);
+    // 终态保留上限的淘汰(见 WatchThread 末尾调用):删日志、出表。
+    void PruneTerminalTasks();
+
+    // watcher 线程主循环:等在 handle 上(或退化轮询),进程结束就写终态。
+    // max_runtime_ms > 0 时到点 TerminateTree 收树(状态进 Stopped)。
+    void WatchThread(std::shared_ptr<TaskState> state,
+                     std::shared_ptr<platform::BackgroundProcessHandle> handle, unsigned long pid,
+                     std::string task_id, long long max_runtime_ms);
+
+    // 退化探活(没有 handle 的旧调用):alive=true 还活着;false 已结束。
+    static bool IsPidAlive(unsigned long pid);
 
     struct Entry {
         BackgroundTaskInfo info;
+        std::shared_ptr<TaskState> state;
+        std::shared_ptr<platform::BackgroundProcessHandle> handle;  // 可空(旧调用)
         std::thread watcher;
     };
 

@@ -1,5 +1,6 @@
 #include "tools/background_output.hpp"
 
+#include <cstdint>
 #include <sstream>
 #include <string>
 
@@ -10,21 +11,21 @@ namespace lubancode::tools {
 
 namespace {
 
-const char* StatusLabel(BackgroundTaskStatus s) {
-    switch (s) {
-        case BackgroundTaskStatus::Running: return "运行中";
-        case BackgroundTaskStatus::Completed: return "完成(退出码 0)";
-        case BackgroundTaskStatus::Failed: return "失败(非零退出码)";
-        case BackgroundTaskStatus::Stopped: return "已停止";
-    }
-    return "未知";
-}
-
-// 把一条任务的摘要拼成一行文本(List/detail 共用)。
+// 把一条任务的摘要拼成一行文本(List/detail 共用)。退出码不知道便写
+// unknown——不借 0 冒充成功(进程生命线单 P0 的口径)。
 void AppendTaskSummary(std::ostringstream& oss, const BackgroundTaskInfo& t) {
-    oss << "[#" << t.task_id << "] " << StatusLabel(t.status);
-    if (t.status != BackgroundTaskStatus::Running) {
-        oss << " (exit " << t.exit_code << ")";
+    oss << "[#" << t.task_id << "] " << BackgroundTaskStatusLabel(t.status);
+    if (t.status != BackgroundTaskStatus::Running && t.status != BackgroundTaskStatus::Stopping) {
+        oss << " (exit ";
+        if (t.exit.exit_code.has_value()) {
+            oss << *t.exit.exit_code;
+        } else {
+            oss << "unknown";
+        }
+        if (t.exit.signal.has_value()) {
+            oss << ", signal " << *t.exit.signal;
+        }
+        oss << ")";
     }
     oss << "  PID=" << t.pid << "\n  命令: " << t.command << "\n  日志: " << t.log_path << "\n";
 }
@@ -80,10 +81,20 @@ Tool::Result BackgroundOutputTool::execute(const nlohmann::json& input) {
 
     int tail_lines = 50;
     if (auto it = input.find("tail_lines"); it != input.end() && !it->is_null()) {
+        // 64 位取值 + 范围检查:JSON 装得下超大整数,直接 get<int> 会窄化
+        // 走样;负值语义是"读全文",超大的正值夹到单任务读取上限(64KB 语义
+        // 上限,再大也没东西可读)。
         if (!it->is_number_integer()) {
             return {"tail_lines 得是整数", true};
         }
-        tail_lines = it->get<int>();
+        const std::int64_t raw = it->get<std::int64_t>();
+        if (raw < 0) {
+            tail_lines = 0;  // 与"<=0 读全文(上限 64KB)"的既有语义对齐
+        } else if (raw > 1000000) {
+            tail_lines = 1000000;  // 64KB 读档里塞不下更多行,夹紧即可
+        } else {
+            tail_lines = static_cast<int>(raw);
+        }
     }
 
     auto& registry = BackgroundTaskRegistry::Instance();

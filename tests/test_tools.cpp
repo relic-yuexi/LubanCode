@@ -355,7 +355,9 @@ TEST_CASE("run_command: shell 参数写了不认得的值,报错不崩") {
     RunCommandTool tool;
     nlohmann::json input;
     input["command"] = "echo hi";
-    input["shell"] = "bash";
+    // fish/zsh 这类从没进过白名单的(进程生命线单之后 POSIX 侧认 sh 与
+    // 装了的 bash,bash 在装了 bash 的机器上是合法值,不再拿它当坏值)。
+    input["shell"] = "fish";
     const Tool::Result result = tool.execute(input);
 
     CHECK(result.is_error);
