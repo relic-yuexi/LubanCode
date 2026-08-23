@@ -55,6 +55,7 @@ enum class SlashCommand {
     Keymap,  // /keymap [set 动作 和弦|reset [动作|all]]:看/改键位(用户级落盘)
     Workflow,  // /workflow list|show|graph|validate|run|resume|cancel|history|...:自然语言编排的图
     Trace,     // /trace [errors|<execution_id>|toolu <id>|turn <id>]:工具逐枚追踪账(逐枚追踪单)
+    Goal,      // /goal [objective|status|edit|pause|resume|clear]:持久目标(持久目标单)
     Plan,      // /plan [正文|status|off|review]:只读研究模式(Plan 模式单)
     WorkflowAlias,  // /<workflow-alias> <args>:直呼已装 Workflow(运行时查 catalog)
     Unknown,  // 以 / 开头,但不认得这个命令
@@ -170,6 +171,30 @@ struct ParsedRecordCommand {
 ParsedRecordCommand ParseRecordCommand(const std::string& args);
 
 // ---------------------------------------------------------------------------
+// /goal 的二级参数(持久目标单)。纯解析:拆出动作与 objective 正文,不管
+// 目标建不建、状态机怎么走。`--` 消歧("/goal -- pause all jobs" 里 pause
+// 是正文不是子命令);objective 保留换行与大小写,不做 shell 拆词、不展开
+// $VAR/反引号/@file。空 objective、认不得的子命令一律 Invalid。
+// ---------------------------------------------------------------------------
+enum class GoalCommandAction {
+    Invalid,
+    View,     // 裸 /goal:看账,不发模型
+    Status,   // /goal status:同 View(结构化全账)
+    Create,   // /goal <objective>:创建并启动
+    Edit,     // /goal edit <objective>:改目标(revision+1)
+    Pause,    // /goal pause:停排新 iteration
+    Resume,   // /goal resume:从最后 checkpoint 续
+    Clear,    // /goal clear:先确认再摘掉
+};
+
+struct ParsedGoalCommand {
+    GoalCommandAction action = GoalCommandAction::Invalid;
+    std::string objective;   // Create/Edit 的正文(保留多行);其余动作空
+    bool dashdash = false;   // 用过 `--` 消歧
+    std::string bad_word;    // Invalid 时第一词的原始拼写(容错提示用)
+};
+
+ParsedGoalCommand ParseGoalCommand(const std::string& args);
 // /plan 的二级参数(Plan 模式单):纯解析,语义分四路——
 //   Enter          裸敲 /plan:切进 Plan;description 留空
 //   EnterWithTask  /plan <正文>:切进 Plan 并把正文当规划请求(description)

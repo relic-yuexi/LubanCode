@@ -25,3 +25,6 @@ vcpkg_installed/
 
 # Claude 会话与 worktree
 .claude/
+
+# worktree 内的本地构建树(MSVC 临时编验用)
+build-msvc/

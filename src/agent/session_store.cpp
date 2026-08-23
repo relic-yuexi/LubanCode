@@ -983,6 +983,18 @@ std::optional<LoadedSession> ParseSessionFile(const std::string& content) {
                 }
                 continue;
             }
+            if (type.rfind("goal_", 0) == 0) {
+                // 持久目标:goal_v1 族事件按文件序整收(状态机重建在
+                // /resume 侧 GoalCoordinator::ReplayEvent);坏行跳过,老档
+                // 空 = 没有 goal,消息账无损。
+                auto goal_event = ParseGoalEvent(line);
+                if (goal_event.has_value()) {
+                    session.goal_events.push_back(std::move(*goal_event));
+                } else {
+                    session.skipped_lines += 1;
+                }
+                continue;
+            }
             if (type == "mode_v1") {
                 // Plan 模式单:最后一条胜,决定 resume 档位。坏行跳过——mode
                 // 已写 Plan、这行坏了,按上一条有效 mode 恢复,不废整场。
@@ -1247,11 +1259,29 @@ bool SessionStore::AppendToolTraceEvent(const ToolTraceEvent& event) {
     return out_.good();
 }
 
+bool SessionStore::AppendGoalEvent(const GoalSessionEvent& event) {
+    if (!out_.is_open()) {
+        return false;
+    }
+    out_ << SerializeGoalEvent(event, NowTimestamp()) << "\n";
+    out_.flush();
+    return out_.good();
+}
+
 bool SessionStore::AppendModeEvent(const ModeEvent& event) {
     if (!out_.is_open()) {
         return false;
     }
     out_ << SerializeModeEvent(event, NowTimestamp()) << "\n";
+    out_.flush();
+    return out_.good();
+}
+
+bool SessionStore::AppendGoalEvidence(const GoalEvidenceRecord& evidence) {
+    if (!out_.is_open()) {
+        return false;
+    }
+    out_ << SerializeGoalEvidence(evidence, NowTimestamp()) << "\n";
     out_.flush();
     return out_.good();
 }

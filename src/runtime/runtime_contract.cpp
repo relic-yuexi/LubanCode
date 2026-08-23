@@ -116,6 +116,7 @@ std::string ToString(ItemKind kind) {
         case ItemKind::Todo: return "todo";
         case ItemKind::Plan: return "plan";
         case ItemKind::Subagent: return "subagent";
+        case ItemKind::Goal: return "goal";
     }
     return "tool";
 }
@@ -170,6 +171,7 @@ bool ParseItemKind(const std::string& s, ItemKind& out) {
     if (s == "todo") { out = ItemKind::Todo; return true; }
     if (s == "plan") { out = ItemKind::Plan; return true; }
     if (s == "subagent") { out = ItemKind::Subagent; return true; }
+    if (s == "goal") { out = ItemKind::Goal; return true; }
     return false;
 }
 
@@ -303,6 +305,12 @@ std::string ToString(ClientCommandKind kind) {
         case ClientCommandKind::SetTitle: return "thread.set_title";
         case ClientCommandKind::Compact: return "thread.compact";
         case ClientCommandKind::Export: return "thread.export";
+        case ClientCommandKind::CreateGoal: return "goal.create";
+        case ClientCommandKind::GetGoal: return "goal.get";
+        case ClientCommandKind::EditGoal: return "goal.edit";
+        case ClientCommandKind::PauseGoal: return "goal.pause";
+        case ClientCommandKind::ResumeGoal: return "goal.resume";
+        case ClientCommandKind::ClearGoal: return "goal.clear";
         case ClientCommandKind::SetCollaborationMode: return "mode.set";
         case ClientCommandKind::ReviewPlan: return "plan.review";
         case ClientCommandKind::ReopenPlanReview: return "plan.review_reopen";
@@ -331,6 +339,12 @@ bool ParseClientCommandKind(const std::string& s, ClientCommandKind& out) {
     if (s == "thread.set_title") { out = ClientCommandKind::SetTitle; return true; }
     if (s == "thread.compact") { out = ClientCommandKind::Compact; return true; }
     if (s == "thread.export") { out = ClientCommandKind::Export; return true; }
+    if (s == "goal.create") { out = ClientCommandKind::CreateGoal; return true; }
+    if (s == "goal.get") { out = ClientCommandKind::GetGoal; return true; }
+    if (s == "goal.edit") { out = ClientCommandKind::EditGoal; return true; }
+    if (s == "goal.pause") { out = ClientCommandKind::PauseGoal; return true; }
+    if (s == "goal.resume") { out = ClientCommandKind::ResumeGoal; return true; }
+    if (s == "goal.clear") { out = ClientCommandKind::ClearGoal; return true; }
     if (s == "mode.set") { out = ClientCommandKind::SetCollaborationMode; return true; }
     if (s == "plan.review") { out = ClientCommandKind::ReviewPlan; return true; }
     if (s == "plan.review_reopen") { out = ClientCommandKind::ReopenPlanReview; return true; }

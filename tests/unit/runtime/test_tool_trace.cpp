@@ -14,6 +14,8 @@
 
 #include <doctest/doctest.h>
 
+#include "platform/paths.hpp"
+
 #include <atomic>
 #include <cstdint>
 #include <filesystem>

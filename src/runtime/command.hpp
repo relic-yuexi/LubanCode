@@ -56,6 +56,15 @@ enum class ClientCommandKind {
     SetTitle,
     Compact,
     Export,
+    // /goal 持久目标(持久目标单):typed 命令面,前端不拼 slash 字符串。
+    // payload 形状见下(PauseGoal 可随时收;Create/Edit/Clear 带
+    // expected_revision 做 optimistic concurrency)。
+    CreateGoal,
+    GetGoal,
+    EditGoal,
+    PauseGoal,
+    ResumeGoal,
+    ClearGoal,
     // Plan 模式(只读研究硬闸单):协作模式切换与计划审阅。slash 的 /plan
     // 在终端适配层翻成这里的命令;远端前端直接发 typed 命令,不复制业务。
     SetCollaborationMode,
@@ -84,6 +93,12 @@ struct ClientCommand {
     //   AnswerQuestion.answers  选择题答案
     //   SetModel.value / SetThink.value / SetProvider.value / SetLanguage.value
     //   SetTitle.value / Export.value(目标路径)
+    //   CreateGoal.text objective 正文(<=4000 码点);payload.expected_revision
+    //     0 = 不比;budget 可带 per-goal override(payload.budget)
+    //   EditGoal.text 新 objective;payload.expected_revision CAS
+    //   PauseGoal/ResumeGoal/ClearGoal payload.expected_revision 同上;
+    //     ClearGoal.payload.confirm == true 才动手(确认策略归调用方)
+    //   GetGoal 回执 payload.goal = coordinator.Status() 的结构化账
     //   SetCollaborationMode.value   "plan"/"default";payload.reason 是稳定
     //     短码(slash/approved/off);切入 Plan 时 payload.permission_before_plan
     //     带当前确认档(restore 用)。
