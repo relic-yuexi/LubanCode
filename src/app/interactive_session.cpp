@@ -74,6 +74,7 @@
 // 持久目标单:goal 状态机(coordinator)、GoalContext 注入、终端排版。
 #include "app/commands/goal_commands.hpp"
 #include "runtime/goal_context.hpp"
+#include "runtime/goal_compact.hpp"
 #include "runtime/goal_coordinator.hpp"
 #include "tools/goal_checkpoint_tool.hpp"
 #include "cli/console_input.hpp"
@@ -408,6 +409,9 @@ private:
     // /resume 后从存档的 goal 事件账回放重建(默认 paused;feature 关时
     // active goal 落 SuspendedByPolicy)。
     void RestoreGoalFromArchive();
+    // compact_v2 事件落盘前补 goal snapshot(有 goal 才带;manifest 守恒的
+    // goal 面,resume 时与 goal ledger 对账)。
+    void AttachGoalSnapshotToCompact(lubancode::agent::CompactV2Event& event);
     // ---- 上下文压缩的会话现场路(0.27.x 分层压缩第一期) ----
     // 压缩参数现场收集:窗口预算认压缩模型自己的目录条目,活动待办(未完
     // 成 todo 条目原文)进守恒校验——摘要漏一项 pending 就拒收,历史不动。
@@ -3156,7 +3160,11 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 if (compact_result.event.has_value() && session_store.active() && !session_store_broken) {
                     // 写盘校验:compact 事件没落盘,存档里就没有压缩记录,
                     // /resume 会按全量流水回放到压缩前状态——打警告说明白。
-                    if (!session_store.AppendCompactV2Event(*compact_result.event)) {
+                    // 取非 const 副本补 goal snapshot(metrics 是加层,不动
+                    // 压缩正账)。
+                    auto compact_event_with_goal = *compact_result.event;
+                    AttachGoalSnapshotToCompact(compact_event_with_goal);
+                    if (!session_store.AppendCompactV2Event(compact_event_with_goal)) {
                         std::cout << theme.error << tr("session.compact_event_failed") << theme.reset << "\n";
                     }
                 }
@@ -3710,6 +3718,16 @@ void TerminalSessionController::RestoreGoalFromArchive() {
                   << "goals 功能当前未开启:目标挂起(SuspendedByPolicy),可查、可导出、可 clear,不自动跑。"
                   << theme.reset << "\n";
     }
+}
+
+void TerminalSessionController::AttachGoalSnapshotToCompact(lubancode::agent::CompactV2Event& event) {
+    EnsureGoalCoordinator();
+    const auto snapshot = lubancode::runtime::goal::BuildGoalSnapshot(*goal_coordinator_);
+    if (!snapshot.has_value()) return;  // 没 goal:不带,普通会话照旧
+    nlohmann::json goal_metrics;
+    goal_metrics["snapshot"] = snapshot->to_json();
+    goal_metrics["conservation_sha256"] = lubancode::runtime::goal::GoalSnapshotConservationSha256(*snapshot);
+    event.metrics["goal"] = std::move(goal_metrics);
 }
 
 CommandFlow TerminalSessionController::HandleGoalCommand(const lubancode::cli::ParsedGoalCommand& goal) {
@@ -4309,13 +4327,14 @@ bool TerminalSessionController::TryRunCompact(bool midturn) {
     metrics_json["pre_tokens"] = before_tokens;
     metrics_json["post_tokens"] = after_tokens;
     metrics_json["trigger"] = midturn ? "midturn" : "pre-turn";
-    const auto compact_event = lubancode::agent::UpgradeToV2(base_event, session_compact_epoch,
-                                                             std::move(manifest_json), std::move(metrics_json));
+    auto compact_event = lubancode::agent::UpgradeToV2(base_event, session_compact_epoch,
+                                                       std::move(manifest_json), std::move(metrics_json));
 
     // 落盘基线收到新长度,补写 compact 事件,理由同 /compact 分支。
     persisted_count = (std::min)(persisted_count, loop->History().size());
     if (session_store.active() && !session_store_broken) {
         // 写盘校验,理由同 /compact 分支。
+        AttachGoalSnapshotToCompact(compact_event);
         if (!session_store.AppendCompactV2Event(compact_event)) {
             std::cout << theme.error << tr("session.compact_event_failed") << theme.reset << "\n";
         }
