@@ -428,6 +428,10 @@ private:
     // compact_v2 事件落盘前补 goal snapshot(有 goal 才带;manifest 守恒的
     // goal 面,resume 时与 goal ledger 对账)。
     void AttachGoalSnapshotToCompact(lubancode::agent::CompactV2Event& event);
+    // loop 单:compact 事件衡接 active loop 摘要(守恒面:task id/
+    // prompt hash/间隔/状态/下一拍时间;不抄全 tick 日志进
+    // summary,单子"tick 前走现有自动 compact 水位检查" + 摘要守恒)。
+    void AttachLoopSnapshotToCompact(lubancode::agent::CompactV2Event& event);
     // ---- /loop 会话定时循环(loop 单) ----
     // /loop 命令组的终端接线:create 走 prompt 源解析(inline 压 loop.md、
     // trust、hash),其余动作走 loop_commands 的排版;非交互入口明拒。
@@ -3297,6 +3301,7 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                     // 压缩正账)。
                     auto compact_event_with_goal = *compact_result.event;
                     AttachGoalSnapshotToCompact(compact_event_with_goal);
+                    AttachLoopSnapshotToCompact(compact_event_with_goal);
                     if (!session_store.AppendCompactV2Event(compact_event_with_goal)) {
                         std::cout << theme.error << tr("session.compact_event_failed") << theme.reset << "\n";
                     }
@@ -3882,6 +3887,39 @@ void TerminalSessionController::AttachGoalSnapshotToCompact(lubancode::agent::Co
     goal_metrics["snapshot"] = snapshot->to_json();
     goal_metrics["conservation_sha256"] = lubancode::runtime::goal::GoalSnapshotConservationSha256(*snapshot);
     event.metrics["goal"] = std::move(goal_metrics);
+}
+
+void TerminalSessionController::AttachLoopSnapshotToCompact(lubancode::agent::CompactV2Event& event) {
+    if (!loop_scheduler_.has_value()) {
+        return;
+    }
+    const auto now_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    }();
+    const auto views = loop_scheduler_->Snapshot(now_ms);
+    nlohmann::json tasks = nlohmann::json::array();
+    for (const auto& v : views) {
+        if (lubancode::runtime::loop::IsLoopTerminal(v.task.state)) {
+            continue;  // 只守活任务:终态的账在事件行里
+        }
+        nlohmann::json t;
+        t["task_id"] = v.task.task_id;
+        t["prompt_sha256"] = v.task.prompt_sha256;
+        t["interval_ms"] = static_cast<std::int64_t>(v.task.interval.count()) * 1000;
+        t["state"] = lubancode::runtime::loop::ToString(v.task.state);
+        t["next_due_at_ms"] = v.task.next_due_at_ms;
+        t["run_count"] = v.task.run_count;
+        t["prompt_source"] = lubancode::runtime::loop::ToString(v.task.prompt_source);
+        tasks.push_back(std::move(t));
+    }
+    if (tasks.empty()) {
+        return;  // 没活 loop:不带,普通会话照旧
+    }
+    nlohmann::json loop_metrics;
+    loop_metrics["active_tasks"] = std::move(tasks);
+    event.metrics["loop"] = std::move(loop_metrics);
 }
 
 CommandFlow TerminalSessionController::HandleGoalCommand(const lubancode::cli::ParsedGoalCommand& goal) {

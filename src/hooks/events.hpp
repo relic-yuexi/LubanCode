@@ -23,6 +23,14 @@ enum class HookEvent {
     SubagentStart,
     SubagentStop,
     Stop,
+    // loop 单的生命周期四事件:创建可 deny(拒建/收紧
+    // interval,不能扩大权限);拍起止只能给反馈不能拦;
+    // Stop 在每拍 turn 末尾照跑(它的 continuation prompt 属于本拍内
+    // 的 agent continuation,不是下一时钟拍)。
+    LoopTaskCreate,
+    LoopTickStart,
+    LoopTickEnd,
+    LoopTaskStop,
 };
 
 // 配置键/协议字段里的规范名。
@@ -50,6 +58,14 @@ constexpr std::string_view ToString(HookEvent event) {
             return "SubagentStop";
         case HookEvent::Stop:
             return "Stop";
+        case HookEvent::LoopTaskCreate:
+            return "LoopTaskCreate";
+        case HookEvent::LoopTickStart:
+            return "LoopTickStart";
+        case HookEvent::LoopTickEnd:
+            return "LoopTickEnd";
+        case HookEvent::LoopTaskStop:
+            return "LoopTaskStop";
     }
     return "Unknown";
 }
@@ -78,6 +94,14 @@ constexpr bool ParseHookEvent(std::string_view name, HookEvent& out) {
         out = HookEvent::SubagentStop;
     } else if (name == "Stop") {
         out = HookEvent::Stop;
+    } else if (name == "LoopTaskCreate") {
+        out = HookEvent::LoopTaskCreate;
+    } else if (name == "LoopTickStart") {
+        out = HookEvent::LoopTickStart;
+    } else if (name == "LoopTickEnd") {
+        out = HookEvent::LoopTickEnd;
+    } else if (name == "LoopTaskStop") {
+        out = HookEvent::LoopTaskStop;
     } else {
         return false;
     }
@@ -107,11 +131,18 @@ constexpr bool EventHasMatcherField(HookEvent event) {
         case HookEvent::SessionEnd:
         case HookEvent::PreCompact:
         case HookEvent::PostCompact:
+        // loop 单:LoopTaskCreate 匹配 prompt 源(source),LoopTickEnd
+        // 匹配 outcome。
+        case HookEvent::LoopTaskCreate:
+        case HookEvent::LoopTickEnd:
             return true;
         case HookEvent::UserPromptSubmit:
         case HookEvent::SubagentStart:
         case HookEvent::SubagentStop:
         case HookEvent::Stop:
+        // loop 单:拍起止/停任务没有匹配对象。
+        case HookEvent::LoopTickStart:
+        case HookEvent::LoopTaskStop:
             return false;
     }
     return false;
@@ -161,6 +192,16 @@ constexpr EventOutputCapabilities OutputCapabilities(HookEvent event) {
             return {false, false, true, true};
         case HookEvent::Stop:
             return {false, false, true, true};
+        case HookEvent::LoopTaskCreate:
+            // deny 创建/收紧 interval:可拦。不能扩大权限
+            // (permission_decision 恒 false)。
+            return {false, false, true, true};
+        case HookEvent::LoopTickStart:
+        case HookEvent::LoopTickEnd:
+        case HookEvent::LoopTaskStop:
+            // 拍已起/止:事实已发生,只能给反馈与
+            // 追加上下文,不能倒回去。
+            return {false, false, true, false};
     }
     return {};
 }
