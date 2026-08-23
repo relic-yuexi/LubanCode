@@ -176,19 +176,12 @@ powershell.exe -NoProfile -NonInteractive -EncodedCommand <base64>
 
 ## 八、工作目录与隔离
 
-工具不改宿主进程 cwd。后台命令的 cwd 走操作系统参数(Windows
-`lpCurrentDirectory`；POSIX exec 前 `chdir`，失败经 exec-error 管道回报
-spawn_failed)——命令文本里不拼 `cd`，路径里的引号、`%`、`!` 各家 shell
-的坑一并绕开。前台命令仍由 shell 原生命令承担：
-
-```text
-PowerShell  Set-Location -LiteralPath '<cwd>' ; <command>
-cmd         cd /d "<cwd>" && <command>
-sh/bash     cd -- '<cwd>' && <command>
-```
-
-单引号转义各按各家语法：PowerShell 翻倍；POSIX sh/bash 用闭合-插入-再
-打开(`'` → `'''`)。这样多会话、子代理与后台线程不会争一只进程级 cwd。
+工具不改宿主进程 cwd。命令的 cwd 一律走操作系统参数(前台后台同一份)：
+Windows 落 `CreateProcessW` 的 `lpCurrentDirectory`；POSIX 子进程 exec 前
+`chdir`，失败经 exec-error 管道回报 spawn_failed。命令文本不拼 `cd` /
+`Set-Location`——路径里的引号、`%`(cmd 展开)、`!`、`$` 各家 shell 的坑
+整个类别绕开，也不用再维护各家的手写 quote。多会话、子代理与后台线程
+不会争一只进程级 cwd。
 
 隔离 worktree 还有两道闸：
 
