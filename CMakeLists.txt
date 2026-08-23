@@ -448,6 +448,9 @@ add_library(lubancode_runtime STATIC
   src/runtime/turn_runtime.cpp
   # 第五步:TurnItem 领域条目 + 中立 diff 行表(diff 计算移出 ToolDisplay)。
   src/runtime/turn_item.cpp
+  # 终端回合视觉收束单:TurnView 中立视图模型(turn/step/batch/item 四层
+  # + metrics + turn 活动态),零 cli 依赖,枚举序列化同钉。
+  src/runtime/turn_view.cpp
   # 第六步:SessionRuntime(会话存档账/权限账/thread 身份/事件接线)。
   src/runtime/session_runtime.cpp
   # 第七步:CommandService(typed API:/model、/resume、审批回答)。
@@ -492,6 +495,9 @@ add_library(lubancode_core STATIC
   src/cli/format_utils.cpp
   src/cli/todo_render.cpp
   src/cli/transcript.cpp
+  # 终端回合视觉收束单:TerminalTurnRenderer(TurnView -> 行组,纯函数;
+  # 条目措辞复用 FormatTranscriptItem,这里只管轮的骨架与 footer)。
+  src/cli/turn_renderer.cpp
   src/cli/agent_panel.cpp
   src/cli/bottom_chrome.cpp
   src/cli/keymap.cpp

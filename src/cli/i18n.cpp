@@ -265,6 +265,7 @@ const Entry kZhCN[] = {
     {"stream.interrupt", "\xe2\x8e\x8b 打断"},
     {"stream.interrupt.plain", "ESC 打断"},
     {"spinner.thinking", "思考中"},
+    {"spinner.stopping", "正在停…"},
     {"spinner.interrupt_hint", "Esc 可打断"},
 
     // ---- 子代理状态条(#52,#三:凑齐工具次数/token/耗时三个数字) ----
@@ -932,6 +933,9 @@ const Entry kZhCN[] = {
     {"transcript.thinking_done", "思考 {0}"},
     {"transcript.thinking_chars", " · {0} 字"},
     {"transcript.thinking_stream_more", "……共 {0} 行,思考结束后 Ctrl+O 看全文"},
+    {"transcript.batch_pending", "(本拍排队中)"},
+    {"transcript.batch_skipped", "本拍未执行(已打断)"},
+    {"transcript.more_lines", " +{0} lines"},
     {"todo.empty", "没有待办。"},
 
     // ---- 统计行 ----
@@ -1835,6 +1839,7 @@ const Entry kEn[] = {
     {"stream.interrupt", "\xe2\x8e\x8b interrupt"},
     {"stream.interrupt.plain", "ESC interrupt"},
     {"spinner.thinking", "Working"},
+    {"spinner.stopping", "Stopping..."},
     {"spinner.interrupt_hint", "Esc to interrupt"},
     {"ask_user.other", "Other (type your own answer)"},
     {"ask_user.select_prompt", "Choose a number (Esc to cancel): "},
@@ -2602,6 +2607,9 @@ const Entry kEn[] = {
     {"transcript.thinking_done", "Thought {0}"},
     {"transcript.thinking_chars", " · {0} chars"},
     {"transcript.thinking_stream_more", "… {0} lines so far — press Ctrl+O again after thinking finishes for the full text"},
+    {"transcript.batch_pending", "(queued in this step)"},
+    {"transcript.batch_skipped", "not run this step (interrupted)"},
+    {"transcript.more_lines", " +{0} lines"},
     {"todo.empty", "No todos."},
 
     // ---- stats line ----

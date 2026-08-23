@@ -27,6 +27,13 @@ using namespace lubancode;
 
 namespace {
 
+// 文件名(可能含中文 id)走 u8 通道:窄串在 Windows 按 ACP 解码成乱码名,
+// 与 u8 的服务侧对不上账(HOT 单同款教训)。
+std::filesystem::path U8Name(const std::string& s) {
+    return std::filesystem::path(
+        std::u8string(reinterpret_cast<const char8_t*>(s.data()), s.size()));
+}
+
 std::string PathUtf8(const std::filesystem::path& p) {
     const std::u8string u8 = p.u8string();
     return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
@@ -63,7 +70,7 @@ void WriteSession(const TempSessionsDir& dir, const std::string& id, const std::
     if (!title.empty()) {
         content += agent::SerializeTitleEvent(title, started_at) + "\n";
     }
-    std::ofstream f(dir.base / (id + ".jsonl"), std::ios::binary);
+    std::ofstream f(dir.base / U8Name(id + ".jsonl"), std::ios::binary);
     f << content;
 }
 
@@ -157,7 +164,7 @@ TEST_CASE("thread.archive/unarchive/delete: typed command 收口与错误码") {
     auto outcome = service.ArchiveThread("20260820-101010-甲");
     REQUIRE(outcome.accepted);
     CHECK(outcome.payload.at("state") == "archived");
-    CHECK(std::filesystem::exists(dir.base / "archive" / "20260820-101010-甲.jsonl"));
+    CHECK(std::filesystem::exists(dir.base / "archive" / U8Name("20260820-101010-甲.jsonl")));
 
     // 归档后 list(active)不见,archived 见。
     const runtime::SessionCommandService const_view(dir.str());
@@ -176,14 +183,14 @@ TEST_CASE("thread.archive/unarchive/delete: typed command 收口与错误码") {
     const auto refused = service.HandleCommand(no_confirm);
     CHECK_FALSE(refused.accepted);
     CHECK(refused.error_code == "confirmation_required");
-    CHECK(std::filesystem::exists(dir.base / "20260820-101010-甲.jsonl"));
+    CHECK(std::filesystem::exists(dir.base / U8Name("20260820-101010-甲.jsonl")));
 
     // 带 confirm:删掉。
     runtime::ClientCommand confirmed = no_confirm;
     confirmed.payload = {{"confirm", true}};
     const auto deleted = service.HandleCommand(confirmed);
     CHECK(deleted.accepted);
-    CHECK_FALSE(std::filesystem::exists(dir.base / "20260820-101010-甲.jsonl"));
+    CHECK_FALSE(std::filesystem::exists(dir.base / U8Name("20260820-101010-甲.jsonl")));
 
     // not_found:删不存在的。
     const auto missing = service.DeleteThread("99999999-000000-无", {{"confirm", true}});

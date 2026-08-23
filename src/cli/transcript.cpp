@@ -213,7 +213,24 @@ std::string FormatTranscriptItems(const std::vector<TranscriptItem>& items, cons
 std::string BuildToolTitle(const std::string& name, const nlohmann::json& input) {
     std::string arg;
     if (name == "run_command") {
-        arg = input.value("command", std::string());
+        // 回合视觉收束单第四节:多行命令只取首个非空逻辑行,末尾加
+        // "+N lines"——不能把整段 PowerShell 横铺一百多列。N 是"首行之
+        // 外还有几行"(空行计入,如实报)。完整脚本在 Ctrl+O 展开版与
+        // input_json 里,一个字不丢。
+        const std::string command = input.value("command", std::string());
+        const std::vector<std::string> lines = SplitLines(command);
+        std::size_t first = 0;
+        while (first < lines.size() &&
+               lines[first].find_first_not_of(" \t\r") == std::string::npos) {
+            ++first;  // 跳过前导空行/纯空白行(首行是"逻辑行",空行不算数)
+        }
+        if (first < lines.size()) {
+            arg = lines[first];
+            const std::size_t rest = lines.size() - first - 1;
+            if (rest > 0) {
+                arg += trf("transcript.more_lines", static_cast<int>(rest));
+            }
+        }
     } else if (name == "read_file" || name == "write_file" || name == "edit_file") {
         arg = input.value("path", std::string());
     } else if (name == "agent") {
