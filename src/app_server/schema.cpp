@@ -455,7 +455,16 @@ nlohmann::json MakeInitializeResult(std::string_view lubancode_version, std::str
         std::string(kMethodThreadList),      std::string(kMethodThreadStop),
         std::string(kMethodThreadArchive),   std::string(kMethodThreadUnarchive),
         std::string(kMethodThreadDelete),    std::string(kMethodTurnStart),
-        std::string(kMethodTurnInterrupt),   std::string(kMethodWorkflowQuery)};
+        std::string(kMethodTurnInterrupt),   std::string(kMethodWorkflowQuery),
+        // goal 单合流批:typed 命令面(goal 六 + loop 七 + plan 三)。
+        std::string(kMethodGoalCreate),      std::string(kMethodGoalGet),
+        std::string(kMethodGoalEdit),        std::string(kMethodGoalPause),
+        std::string(kMethodGoalResume),      std::string(kMethodGoalClear),
+        std::string(kMethodLoopCreate),      std::string(kMethodLoopList),
+        std::string(kMethodLoopRead),        std::string(kMethodLoopPause),
+        std::string(kMethodLoopResume),      std::string(kMethodLoopCancel),
+        std::string(kMethodLoopRunNow),      std::string(kMethodPlanSetMode),
+        std::string(kMethodPlanReview),      std::string(kMethodPlanReopen)};
     capabilities["pending"] = std::vector<std::string>{
         std::string(kMethodThreadResume),    std::string(kMethodThreadRead),
         std::string(kMethodTurnSteer),       std::string(kMethodModelList),
@@ -485,6 +494,123 @@ nlohmann::json MakeThreadListResult(const std::vector<nlohmann::json>& entries) 
 
 nlohmann::json MakeThreadStoppedResult() {
     return nlohmann::json::object();
+}
+
+// ---------------------------------------------------------------------------
+// goal/loop/plan 参数表(goal 单合流批)
+// ---------------------------------------------------------------------------
+
+ParamsCheck CheckGoalMutationParams(const nlohmann::json& params, std::string_view method,
+                                    std::string& out_thread_id, std::string& out_text) {
+    const ParamsCheck base = CheckParamsIsObject(params, method);
+    if (!base.ok) {
+        return base;
+    }
+    ParamsCheck check = RequireString(params, "threadId", method, out_thread_id);
+    if (!check.ok) {
+        return check;
+    }
+    if (method == kMethodGoalCreate || method == kMethodGoalEdit) {
+        // objective 正文必填(create/edit 同口径;空串在 RequireString 拒)。
+        check = RequireString(params, "text", method, out_text);
+        if (!check.ok) {
+            return check;
+        }
+        if (params.contains("expectedRevision") && !params["expectedRevision"].is_null()) {
+            if (!params["expectedRevision"].is_number_integer() ||
+                params["expectedRevision"].get<std::int64_t>() < 0) {
+                return ParamsCheck{false, kErrInvalidParams,
+                                   std::string(method) + ": expectedRevision 必须是非负整数"};
+            }
+        }
+    }
+    return ParamsCheck{};
+}
+
+ParamsCheck CheckLoopMutationParams(const nlohmann::json& params, std::string_view method,
+                                    std::string& out_thread_id, std::string& out_task_id,
+                                    std::string& out_text) {
+    const ParamsCheck base = CheckParamsIsObject(params, method);
+    if (!base.ok) {
+        return base;
+    }
+    ParamsCheck check = RequireString(params, "threadId", method, out_thread_id);
+    if (!check.ok) {
+        return check;
+    }
+    if (method == kMethodLoopCreate) {
+        // text(prompt)可选:空 = loop.md/内置源(泵每拍现读)。
+        if (params.contains("text") && !params["text"].is_null()) {
+            if (!params["text"].is_string()) {
+                return ParamsCheck{false, kErrInvalidParams, std::string(method) + ": text 必须是字符串"};
+            }
+            out_text = params["text"].get<std::string>();
+        }
+        if (params.contains("intervalMs") && !params["intervalMs"].is_null()) {
+            if (!params["intervalMs"].is_number_integer() ||
+                params["intervalMs"].get<std::int64_t>() < 0) {
+                return ParamsCheck{false, kErrInvalidParams,
+                                   std::string(method) + ": intervalMs 必须是非负整数"};
+            }
+        }
+        return ParamsCheck{};
+    }
+    if (method == kMethodLoopList) {
+        return ParamsCheck{};  // 只查 threadId
+    }
+    // read/pause/resume/cancel/run:taskId 必填。
+    return RequireString(params, "taskId", method, out_task_id);
+}
+
+ParamsCheck CheckPlanMutationParams(const nlohmann::json& params, std::string_view method,
+                                    std::string& out_thread_id) {
+    const ParamsCheck base = CheckParamsIsObject(params, method);
+    if (!base.ok) {
+        return base;
+    }
+    ParamsCheck check = RequireString(params, "threadId", method, out_thread_id);
+    if (!check.ok) {
+        return check;
+    }
+    if (method == kMethodPlanSetMode) {
+        std::string mode;
+        check = RequireString(params, "mode", method, mode);
+        if (!check.ok) {
+            return check;
+        }
+        if (mode != "plan" && mode != "default") {
+            return ParamsCheck{false, kErrInvalidParams, std::string(method) + ": mode 只认 plan/default"};
+        }
+        return ParamsCheck{};
+    }
+    if (method == kMethodPlanReview) {
+        std::string plan_id;
+        check = RequireString(params, "planId", method, plan_id);
+        if (!check.ok) {
+            return check;
+        }
+        if (!params.contains("planRevision") || !params["planRevision"].is_number_integer() ||
+            params["planRevision"].get<std::int64_t>() < 1) {
+            return ParamsCheck{false, kErrInvalidParams, std::string(method) + ": planRevision 必须是正整数"};
+        }
+        std::string sha;
+        check = RequireString(params, "sha256", method, sha);
+        if (!check.ok) {
+            return check;
+        }
+        std::string decision;
+        check = RequireString(params, "decision", method, decision);
+        if (!check.ok) {
+            return check;
+        }
+        if (decision != "approved_confirm" && decision != "approved_auto" && decision != "rejected" &&
+            decision != "continued") {
+            return ParamsCheck{
+                false, kErrInvalidParams,
+                std::string(method) + ": decision 只认 approved_confirm/approved_auto/rejected/continued"};
+        }
+    }
+    return ParamsCheck{};  // reopen 只查 threadId
 }
 
 }  // namespace lubancode::app_server

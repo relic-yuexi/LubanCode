@@ -91,6 +91,32 @@ inline constexpr std::string_view kMethodModelList = "model/list";   // 留位
 inline constexpr std::string_view kMethodConfigRead = "config/read"; // 留位
 
 // ---------------------------------------------------------------------------
+// /goal 持久目标 + /loop 会话定时循环 + Plan 审阅(goal 单合流批:typed
+// 命令面挂上 server)。方法名与 ClientCommandKind 的稳定串对齐(goal.*
+// / loop.* / plan.*),payload 形状见 command.hpp 的注释——前端发的是
+// typed 命令的参数,不是 slash 字符串。
+// ---------------------------------------------------------------------------
+
+inline constexpr std::string_view kMethodGoalCreate = "goal/create";
+inline constexpr std::string_view kMethodGoalGet = "goal/get";
+inline constexpr std::string_view kMethodGoalEdit = "goal/edit";
+inline constexpr std::string_view kMethodGoalPause = "goal/pause";
+inline constexpr std::string_view kMethodGoalResume = "goal/resume";
+inline constexpr std::string_view kMethodGoalClear = "goal/clear";
+
+inline constexpr std::string_view kMethodLoopCreate = "loop/create";
+inline constexpr std::string_view kMethodLoopList = "loop/list";
+inline constexpr std::string_view kMethodLoopRead = "loop/read";
+inline constexpr std::string_view kMethodLoopPause = "loop/pause";
+inline constexpr std::string_view kMethodLoopResume = "loop/resume";
+inline constexpr std::string_view kMethodLoopCancel = "loop/cancel";
+inline constexpr std::string_view kMethodLoopRunNow = "loop/run";
+
+inline constexpr std::string_view kMethodPlanSetMode = "plan/set_mode";
+inline constexpr std::string_view kMethodPlanReview = "plan/review";
+inline constexpr std::string_view kMethodPlanReopen = "plan/reopen";
+
+// ---------------------------------------------------------------------------
 // 服务端反向请求(骨架期只留名字与形状,不接线)
 //
 // 审批与 ask_user 是服务端发给前端的双向请求:请求带 threadId/turnId/

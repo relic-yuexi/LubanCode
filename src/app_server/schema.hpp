@@ -172,6 +172,27 @@ ParamsCheck CheckTraceQueryParams(const nlohmann::json& params, std::string& out
 ParamsCheck CheckTurnInterruptParams(const nlohmann::json& params, std::string& out_thread_id,
                                      std::string& out_turn_id);
 
+// goal/create|edit:threadId 与 text(objective 正文)必填;edit 另带
+// 可选 expectedRevision(数字,0 = 不比)。goal/pause|resume|clear 共用:
+// threadId 必填;clear 的 confirm 布尔由执行链查(没带回
+// confirmation_required)。goal/get 只查 threadId。
+ParamsCheck CheckGoalMutationParams(const nlohmann::json& params, std::string_view method,
+                                    std::string& out_thread_id, std::string& out_text);
+
+// loop/create:threadId 必填,text(prompt,空 = loop.md/内置源)可选,
+// intervalMs 可选(非负,0 = 默认 10m)。loop/list 只查 threadId;
+// loop/read|pause|resume|cancel|run 共用:threadId 与 taskId 必填(run
+// 不收 "all" 由执行链查)。
+ParamsCheck CheckLoopMutationParams(const nlohmann::json& params, std::string_view method,
+                                    std::string& out_thread_id, std::string& out_task_id,
+                                    std::string& out_text);
+
+// plan/review:threadId 必填;planId(字符串)/planRevision(正整数)/
+// sha256(字符串)/decision(四枚之一)必填。plan/set_mode:threadId 与
+// mode("plan"/"default")必填。plan/reopen 只查 threadId。
+ParamsCheck CheckPlanMutationParams(const nlohmann::json& params, std::string_view method,
+                                    std::string& out_thread_id);
+
 // ---------------------------------------------------------------------------
 // 出站事件参数的拼装助手(一处拼、处处用,字段名冻结前不许散着抄)
 // ---------------------------------------------------------------------------
