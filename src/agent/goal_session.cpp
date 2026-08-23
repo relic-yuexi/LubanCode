@@ -63,6 +63,13 @@ std::optional<GoalSessionEvent> ParseGoalEvent(const std::string& line) {
     if (j.contains("timestamp_ms") && j.at("timestamp_ms").is_number()) {
         event.timestamp_ms = j.at("timestamp_ms").get<std::int64_t>();
     }
+    // 证据行(goal_evidence_v1)的领域字段在顶层(evidence_id/kind/facts/
+    // sha256/…):镜像进 payload,消费方(回放重建证据账)按 payload 取,
+    // 不必二次解析原文。
+    for (const char* key : {"evidence_id", "kind", "tool_use_id", "producer", "facts", "sha256",
+                            "observed_at_ms", "fresh", "truncated", "goal_id", "iteration_id"}) {
+        if (j.contains(key)) event.payload[key] = j.at(key);
+    }
     return event;
 }
 

@@ -469,6 +469,26 @@ struct PtcFileConfig {
     std::optional<std::vector<std::string>> tools;
 };
 
+// goals 段的文件形状(全字段可选;duration 用字符串,解析进 MergeConfig)。
+// 持久目标单:features.goals 与 goals 段都只从配置文件来(项目级压全局),
+// 没有环境变量、没有内置默认值这两级(默认值在 GoalsConfig)。
+struct GoalsFileConfig {
+    std::optional<std::string> max_elapsed;          // "2h" / "90m" / 裸秒数
+    std::optional<int> max_iterations;
+    std::optional<int> max_no_progress_iterations;
+    std::optional<int> max_same_blocker_iterations;
+    std::optional<int> max_consecutive_provider_failures;
+};
+
+// goals 段的运行配置(预算默认值)。
+struct GoalsConfig {
+    std::int64_t max_elapsed_ms = 2 * 60 * 60 * 1000;  // 2h
+    int max_iterations = 40;
+    int max_no_progress_iterations = 3;
+    int max_same_blocker_iterations = 3;
+    int max_consecutive_provider_failures = 3;
+};
+
 // ---------------------------------------------------------------------------
 // 三档模型角色(渐进式上下文装载与 cheap/normal/lao 模型分工,第一期)
 // ---------------------------------------------------------------------------
@@ -606,6 +626,13 @@ struct Config {
     ToolCallingMode tool_calling = ToolCallingMode::Json;
     // PTC:运行限额与解释器。没配 ptc 段就是内置默认。
     PtcConfig ptc;
+    // 持久目标单:feature gate。features.goals 只从配置文件来(项目级压
+    // 全局),没配就是 false(首版藏起来);环境变量 LUBANCODE_DISABLE_
+    // GOALS=1 是总闸,装配层读(只关功能不改存档,不开第二只来源)。
+    bool features_goals = false;
+    // goals 段:预算默认值(只从配置文件来,项目级压全局;CLI /goal 首版
+    // 不塞 budget flag,全从这读)。没配的字段落 GoalsConfig 里的内置默认。
+    GoalsConfig goals;
     // M11(网络超时):三个字段只从配置文件读(项目级 > 全局,跟
     // tool_search_threshold 同样待遇,没有环境变量这一级),没配就是上面
     // 那三个内置默认值。connect_timeout_ms 单位毫秒,另外两个单位秒。
@@ -660,6 +687,7 @@ struct ConfigSources {
     Source agent = Source::Default;      // agent 段:配置文件或默认
     Source tool_calling = Source::Default;  // PTC 调用档:配置文件或默认(json)
     Source ptc = Source::Default;           // PTC 段:配置文件或默认
+    Source goals = Source::Default;         // goals 段/features.goals:配置文件或默认
     Source memory = Source::Default;
 };
 
@@ -792,6 +820,9 @@ struct FileConfig {
     std::optional<int> request_hard_timeout_secs;
     std::optional<std::string> active_provider;
     std::optional<std::vector<ProviderConfig>> providers;
+    // 持久目标单:features.goals(布尔)与 goals 段(整段回退)。
+    std::optional<bool> features_goals;
+    std::optional<GoalsFileConfig> goals;
     std::optional<MemoryFileConfig> memory;
     std::string source_path;
     // 这份 FileConfig 是不是从"旧位置迁移到新位置"这个动作里读出来的;

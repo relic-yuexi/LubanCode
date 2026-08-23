@@ -51,7 +51,7 @@ enum class EventLayer { Thread, Turn, Item };
 
 // 条目种类:工具、思考、正文、命令、diff、todo、子代理——都落成 item,
 // 前端按种类挑组件,不另开旁路事件。
-enum class ItemKind { Tool, Thinking, Text, Command, Diff, Todo, Subagent };
+enum class ItemKind { Tool, Thinking, Text, Command, Diff, Todo, Subagent, Goal };
 
 // 终态四分(文件头约定 3)。前置状态不叫终态,叫"进行中"。
 enum class Outcome { Succeeded, Failed, Declined, Cancelled };

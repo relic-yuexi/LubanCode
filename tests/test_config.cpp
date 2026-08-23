@@ -3283,3 +3283,73 @@ TEST_CASE("SetProviderStreamUsage: 改值并置声明位,找不到名字返回 f
     CHECK(providers[0].stream_usage_declared == true);
     CHECK_FALSE(config::SetProviderStreamUsage(providers, "no-such", true));
 }
+
+// ---------------------------------------------------------------------------
+// goals 段与 features.goals(持久目标单):duration 折毫秒、坏值按默认收、
+// 段类型不对报错。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("goals 配置:默认关、默认预算;features.goals 打开") {
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.features_goals == false);
+    CHECK(result->config.goals.max_elapsed_ms == 2 * 60 * 60 * 1000);
+    CHECK(result->config.goals.max_iterations == 40);
+    CHECK(result->config.goals.max_no_progress_iterations == 3);
+    CHECK(result->config.goals.max_same_blocker_iterations == 3);
+    CHECK(result->config.goals.max_consecutive_provider_failures == 3);
+    CHECK(result->sources.goals == config::Source::Default);
+
+    const auto parsed = config::ParseFileConfigJson(
+        R"({"features":{"goals":true},"goals":{"max_elapsed":"90m","max_iterations":12,"max_no_progress_iterations":2}})",
+        "test.json");
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->features_goals.has_value());
+    CHECK(*parsed->features_goals == true);
+    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), *parsed, EmptyGenericEnv());
+    REQUIRE(merged.has_value());
+    CHECK(merged->config.features_goals == true);
+    CHECK(merged->config.goals.max_elapsed_ms == 90 * 60 * 1000);
+    CHECK(merged->config.goals.max_iterations == 12);
+    CHECK(merged->config.goals.max_no_progress_iterations == 2);
+    CHECK(merged->config.goals.max_same_blocker_iterations == 3);
+    CHECK(merged->sources.goals == config::Source::ProjectConfigFile);
+}
+
+TEST_CASE("goals 配置:duration 各单位与坏值") {
+    struct Case {
+        const char* text;
+        std::int64_t expect_ms;
+    };
+    const Case cases[] = {
+        {"2h", 7200000}, {"90m", 5400000}, {"45s", 45000}, {"30", 30000},
+        {"1d", 86400000}, {"  10m  ", 600000},
+    };
+    for (const auto& c : cases) {
+        const auto parsed = config::ParseFileConfigJson(
+            std::string(R"({"goals":{"max_elapsed":")") + c.text + R"("}})", "t.json");
+        REQUIRE(parsed.has_value());
+        const auto merged = config::MergeConfig(EmptyLubancodeEnv(), *parsed, EmptyGenericEnv());
+        REQUIRE(merged.has_value());
+        CHECK(merged->config.goals.max_elapsed_ms == c.expect_ms);
+    }
+    for (const char* bad : {"abc", "m", ""}) {
+        const auto parsed = config::ParseFileConfigJson(
+            std::string(R"({"goals":{"max_elapsed":")") + bad + R"("}})", "t.json");
+        REQUIRE(parsed.has_value());
+        const auto merged = config::MergeConfig(EmptyLubancodeEnv(), *parsed, EmptyGenericEnv());
+        REQUIRE(merged.has_value());
+        CHECK(merged->config.goals.max_elapsed_ms == 2 * 60 * 60 * 1000);
+    }
+}
+
+TEST_CASE("goals 配置:段类型不对报错") {
+    const auto bad = config::ParseFileConfigJson(R"({"features":"on"})", "t.json");
+    CHECK_FALSE(bad.has_value());
+    const auto bad2 = config::ParseFileConfigJson(R"({"goals":[1]})", "t.json");
+    CHECK_FALSE(bad2.has_value());
+    const auto bad3 = config::ParseFileConfigJson(R"({"features":{"goals":"yes"}})", "t.json");
+    CHECK_FALSE(bad3.has_value());
+    const auto bad4 = config::ParseFileConfigJson(R"({"goals":{"max_iterations":-1}})", "t.json");
+    CHECK_FALSE(bad4.has_value());
+}

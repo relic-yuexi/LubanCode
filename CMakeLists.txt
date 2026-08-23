@@ -474,6 +474,8 @@ add_library(lubancode_runtime STATIC
   src/runtime/goal_coordinator.cpp
   # /goal 持久目标单:独立无工具的终点判定模型调用(strict schema/一次 repair)。
   src/runtime/goal_evaluator.cpp
+  # /goal 持久目标单:每轮喂执行模型的动态 GoalContext(纯函数)。
+  src/runtime/goal_context.cpp
 )
 target_include_directories(lubancode_runtime PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -573,6 +575,8 @@ add_library(lubancode_app STATIC
   src/app/commands/hook_commands.cpp
   src/app/commands/peer_commands.cpp
   src/app/commands/doctor_commands.cpp
+  # /goal 持久目标单:终端 slash 的排版/gate/二次确认文案。
+  src/app/commands/goal_commands.cpp
   src/app/commands/workflow_commands.cpp
   src/app/interactive_session.cpp
   src/app/one_shot.cpp

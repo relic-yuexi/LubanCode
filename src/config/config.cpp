@@ -34,6 +34,44 @@ std::optional<std::string> GetEnv(const char* name) {
 // 全部等价于同一个具名空间,提前声明、后面定义没问题。
 nlohmann::json ProvidersToJson(const std::vector<ProviderConfig>& providers);
 
+// goals 段的时长字符串("2h"/"90m"/"45s"/裸秒数)折毫秒。纯函数,单测钉;
+// 认不得的形状返回 false,调用方按默认收(救命阀取舍)。
+bool ParseDurationToMillis(const std::string& text, std::int64_t& out_ms) {
+    std::size_t i = 0;
+    while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) ++i;
+    if (i >= text.size()) return false;
+    std::int64_t number = 0;
+    bool any_digit = false;
+    while (i < text.size() && std::isdigit(static_cast<unsigned char>(text[i]))) {
+        number = number * 10 + (text[i] - '0');
+        any_digit = true;
+        ++i;
+    }
+    if (!any_digit) return false;
+    while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) ++i;
+    std::string unit;
+    while (i < text.size()) {
+        const char c = text[i];
+        ++i;
+        if (std::isspace(static_cast<unsigned char>(c))) continue;  // 尾空格不进 unit
+        unit += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    std::int64_t multiplier = 0;
+    if (unit.empty() || unit == "s" || unit == "sec" || unit == "secs" || unit == "seconds") {
+        multiplier = 1000;
+    } else if (unit == "m" || unit == "min" || unit == "mins" || unit == "minutes") {
+        multiplier = 60 * 1000;
+    } else if (unit == "h" || unit == "hr" || unit == "hrs" || unit == "hours") {
+        multiplier = 60 * 60 * 1000;
+    } else if (unit == "d" || unit == "days") {
+        multiplier = 24 * 60 * 60 * 1000;
+    } else {
+        return false;
+    }
+    out_ms = number * multiplier;
+    return true;
+}
+
 }  // namespace
 
 std::optional<std::string> HomeDir() {
@@ -1572,6 +1610,66 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
             return std::unexpected(result.error());
         config.memory = std::move(memory);
     }
+    // 持久目标单:features.goals 布尔(段缺 goals 键按未配处理)。
+    if (parsed.contains("features")) {
+        const auto& field = parsed["features"];
+        if (!field.is_object()) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                   " 里的 features 字段必须是 JSON object");
+        }
+        if (field.contains("goals")) {
+            if (!field["goals"].is_boolean()) {
+                return std::unexpected("配置文件 " + file_path_for_error +
+                                       " 里的 features.goals 必须是布尔值");
+            }
+            config.features_goals = field["goals"].get<bool>();
+        }
+    }
+    // goals 段:预算默认值(整段回退;duration 收原始字符串)。
+    if (parsed.contains("goals")) {
+        const auto& field = parsed["goals"];
+        if (!field.is_object()) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                   " 里的 goals 字段必须是 JSON object");
+        }
+        GoalsFileConfig goals;
+        const auto parse_nonneg = [&](const char* name, std::optional<int>& target)
+            -> std::expected<void, std::string> {
+            if (!field.contains(name)) return {};
+            if ((!field[name].is_number_integer() && !field[name].is_number_unsigned()) ||
+                field[name].get<long long>() < 0) {
+                return std::unexpected("配置文件 " + file_path_for_error + " 里的 goals." + name +
+                                       " 必须是非负整数");
+            }
+            target = static_cast<int>(field[name].get<long long>());
+            return {};
+        };
+        if (field.contains("max_elapsed")) {
+            if (!field["max_elapsed"].is_string() && !field["max_elapsed"].is_number_integer() &&
+                !field["max_elapsed"].is_number_unsigned()) {
+                return std::unexpected("配置文件 " + file_path_for_error +
+                                       " 里的 goals.max_elapsed 必须是时长字符串(如 \"2h\")或秒数");
+            }
+            if (field["max_elapsed"].is_string()) {
+                goals.max_elapsed = field["max_elapsed"].get<std::string>();
+            } else {
+                goals.max_elapsed = std::to_string(field["max_elapsed"].get<long long>());
+            }
+        }
+        if (auto result = parse_nonneg("max_iterations", goals.max_iterations); !result.has_value())
+            return std::unexpected(result.error());
+        if (auto result = parse_nonneg("max_no_progress_iterations", goals.max_no_progress_iterations);
+            !result.has_value())
+            return std::unexpected(result.error());
+        if (auto result = parse_nonneg("max_same_blocker_iterations", goals.max_same_blocker_iterations);
+            !result.has_value())
+            return std::unexpected(result.error());
+        if (auto result = parse_nonneg("max_consecutive_provider_failures",
+                                       goals.max_consecutive_provider_failures);
+            !result.has_value())
+            return std::unexpected(result.error());
+        config.goals = std::move(goals);
+    }
     if (parsed.contains("connect_timeout_ms")) {
         const auto& field = parsed["connect_timeout_ms"];
         if ((!field.is_number_integer() && !field.is_number_unsigned()) || field.get<long long>() <= 0) {
@@ -2290,6 +2388,48 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.sources.ptc = ptc_file == project_ptr ? Source::ProjectConfigFile : Source::GlobalConfigFile;
     } else {
         result.sources.ptc = Source::Default;
+    }
+
+    // ---- goals(持久目标单):feature gate 与预算默认值,项目级压全局。
+    // duration 字符串("2h"/"90m"/裸秒)折毫秒;坏值按默认收(救命阀字段,
+    // 配置写错不拦人开工),不在这里报错。
+    {
+        const FileConfig* features_file =
+            project_ptr != nullptr && project_ptr->features_goals.has_value()
+                ? project_ptr
+                : (global_ptr != nullptr && global_ptr->features_goals.has_value() ? global_ptr : nullptr);
+        if (features_file != nullptr) {
+            result.config.features_goals = *features_file->features_goals;
+        }
+        const FileConfig* goals_file = project_ptr != nullptr && project_ptr->goals.has_value()
+                                           ? project_ptr
+                                           : (global_ptr != nullptr && global_ptr->goals.has_value()
+                                                  ? global_ptr
+                                                  : nullptr);
+        if (goals_file != nullptr) {
+            const GoalsFileConfig& goals = *goals_file->goals;
+            if (goals.max_elapsed.has_value()) {
+                std::int64_t ms = -1;
+                if (ParseDurationToMillis(*goals.max_elapsed, ms)) {
+                    result.config.goals.max_elapsed_ms = ms;
+                }
+            }
+            if (goals.max_iterations.has_value()) result.config.goals.max_iterations = *goals.max_iterations;
+            if (goals.max_no_progress_iterations.has_value()) {
+                result.config.goals.max_no_progress_iterations = *goals.max_no_progress_iterations;
+            }
+            if (goals.max_same_blocker_iterations.has_value()) {
+                result.config.goals.max_same_blocker_iterations = *goals.max_same_blocker_iterations;
+            }
+            if (goals.max_consecutive_provider_failures.has_value()) {
+                result.config.goals.max_consecutive_provider_failures =
+                    *goals.max_consecutive_provider_failures;
+            }
+            result.sources.goals =
+                goals_file == project_ptr ? Source::ProjectConfigFile : Source::GlobalConfigFile;
+        } else {
+            result.sources.goals = Source::Default;
+        }
     }
 
     // ---- memory:默认关闭。只有用户主目录的全局配置能打开；受版本控制的

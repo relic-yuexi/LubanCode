@@ -56,6 +56,15 @@ enum class ClientCommandKind {
     SetTitle,
     Compact,
     Export,
+    // /goal 持久目标(持久目标单):typed 命令面,前端不拼 slash 字符串。
+    // payload 形状见下(PauseGoal 可随时收;Create/Edit/Clear 带
+    // expected_revision 做 optimistic concurrency)。
+    CreateGoal,
+    GetGoal,
+    EditGoal,
+    PauseGoal,
+    ResumeGoal,
+    ClearGoal,
     // 终端专属动作(/copy、清屏、焦点……)不进协议,留在前端,这里没有
     // 它们的位置——单子"五"定死的边界。
 };
@@ -79,6 +88,12 @@ struct ClientCommand {
     //   AnswerQuestion.answers  选择题答案
     //   SetModel.value / SetThink.value / SetProvider.value / SetLanguage.value
     //   SetTitle.value / Export.value(目标路径)
+    //   CreateGoal.text objective 正文(<=4000 码点);payload.expected_revision
+    //     0 = 不比;budget 可带 per-goal override(payload.budget)
+    //   EditGoal.text 新 objective;payload.expected_revision CAS
+    //   PauseGoal/ResumeGoal/ClearGoal payload.expected_revision 同上;
+    //     ClearGoal.payload.confirm == true 才动手(确认策略归调用方)
+    //   GetGoal 回执 payload.goal = coordinator.Status() 的结构化账
     // 不匹配 kind 的字段序列化照带,消费方按 kind 取用。
     std::string text;
     std::string value;

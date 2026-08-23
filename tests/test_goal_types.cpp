@@ -73,8 +73,10 @@ TEST_CASE("objective 计数:按码点,不拿 bytes 冒充") {
     CHECK(CountGoalObjectiveChars("迁移") == 2);
     // emoji(4 字节)算 1 个 character。
     CHECK(CountGoalObjectiveChars("🔥") == 1);
-    // 组合字符按码点各自计数(Unicode scalar value 口径)。
-    CHECK(CountGoalObjectiveChars("é") == 2);  // e + U+0301
+    // 组合字符按码点各自计数(Unicode scalar value 口径):e + U+0301
+    // (combining acute)是两枚码点;预组合的 é(U+00E9)是一枚。
+    CHECK(CountGoalObjectiveChars(std::string("é", 3)) == 2);  // e + U+0301
+    CHECK(CountGoalObjectiveChars(std::string("é", 2)) == 1);   // 预组合 U+00E9
     // 换行收:各算各。
     CHECK(CountGoalObjectiveChars("a\nb") == 3);
     // 非法首字节按 1 前进,不死循环。

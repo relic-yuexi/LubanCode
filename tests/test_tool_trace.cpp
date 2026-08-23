@@ -14,6 +14,8 @@
 
 #include <doctest/doctest.h>
 
+#include "platform/paths.hpp"
+
 #include <atomic>
 #include <filesystem>
 #include <fstream>
@@ -588,6 +590,8 @@ TEST_CASE("trace-aware 修补: unknown 补 [会话恢复] 结果,老档回落 le
 TEST_CASE("session: tool_trace_v1 行落盘与回读;老版本读档不坏") {
     const std::string dir = agent::MakeSessionSlug("trace 测试") + "-dir";
     std::filesystem::path tmp = std::filesystem::temp_directory_path() / dir;
+    std::error_code clean_ec;
+    std::filesystem::remove_all(tmp, clean_ec);  // 上一轮的残留先清,新建判定才可靠
     std::filesystem::create_directories(tmp);
     const std::string file = (tmp / "s.jsonl").string();
 
@@ -754,9 +758,14 @@ TEST_CASE("RunOneTool: 来源/错误码随 trace 落账(unknown_tool/hook_denied
 
 TEST_CASE("write_file/edit_file: 结果带 undo token(pre/post 哈希)") {
     const std::string dir = agent::MakeSessionSlug("undo 测试") + "-dir";
-    std::filesystem::path tmp = std::filesystem::temp_directory_path() / dir;
+    // 窄 path 构造在 MSVC 下按系统码页解 UTF-8 字节,写与删会对不上;统一走
+    // platform 的 UTF-8 转换。
+    const std::filesystem::path tmp =
+        std::filesystem::temp_directory_path() / platform::Utf8ToPath(dir);
+    std::error_code clean_ec;
+    std::filesystem::remove_all(tmp, clean_ec);  // 上一轮的残留先清,新建判定才可靠
     std::filesystem::create_directories(tmp);
-    const std::string target = (tmp / "f.txt").string();
+    const std::string target = platform::PathToUtf8(tmp / "f.txt");
 
     tools::WriteFileTool writer;
     nlohmann::json input;
@@ -885,6 +894,8 @@ TEST_CASE("MCP: 换一代传输层 generation +1,jsonrpc id 随 CallTool 带出"
 TEST_CASE("undo_file_edit: 改后未再动,恢复 preimage") {
     const std::string dir = agent::MakeSessionSlug("undo exec") + "-dir";
     std::filesystem::path tmp = std::filesystem::temp_directory_path() / dir;
+    std::error_code clean_ec;
+    std::filesystem::remove_all(tmp, clean_ec);  // 上一轮的残留先清,新建判定才可靠
     std::filesystem::create_directories(tmp);
     const std::string target = (tmp / "f.txt").string();
 
@@ -924,6 +935,8 @@ TEST_CASE("undo_file_edit: 改后未再动,恢复 preimage") {
 TEST_CASE("undo_file_edit: 改后用户又改,拒绝自动撤销并给三方对照") {
     const std::string dir = agent::MakeSessionSlug("undo refuse") + "-dir";
     std::filesystem::path tmp = std::filesystem::temp_directory_path() / dir;
+    std::error_code clean_ec;
+    std::filesystem::remove_all(tmp, clean_ec);  // 上一轮的残留先清,新建判定才可靠
     std::filesystem::create_directories(tmp);
     const std::string target = (tmp / "f.txt").string();
 
@@ -967,6 +980,8 @@ TEST_CASE("undo_file_edit: 改后用户又改,拒绝自动撤销并给三方对�
 TEST_CASE("undo_file_edit: 新建文件内容未再变,整枚移走") {
     const std::string dir = agent::MakeSessionSlug("undo newfile") + "-dir";
     std::filesystem::path tmp = std::filesystem::temp_directory_path() / dir;
+    std::error_code clean_ec;
+    std::filesystem::remove_all(tmp, clean_ec);  // 上一轮的残留先清,新建判定才可靠
     std::filesystem::create_directories(tmp);
     const std::string target = (tmp / "new.txt").string();
 

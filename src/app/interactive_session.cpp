@@ -71,6 +71,11 @@
 #include "runtime/command_service.hpp"
 #include "runtime/session_runtime.hpp"
 #include "runtime/tool_trace_hub.hpp"
+// 持久目标单:goal 状态机(coordinator)、GoalContext 注入、终端排版。
+#include "app/commands/goal_commands.hpp"
+#include "runtime/goal_context.hpp"
+#include "runtime/goal_coordinator.hpp"
+#include "tools/goal_checkpoint_tool.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/diff.hpp"
@@ -394,6 +399,12 @@ private:
     CommandFlow ProcessLine(const std::string& content, bool* autosend_failed = nullptr);
     CommandFlow DispatchSlashCommand(const lubancode::cli::ParsedSlashCommand& parsed);
     CommandFlow RunUserTurn(const std::string& content, bool* autosend_failed = nullptr);
+    // ---- /goal 持久目标(持久目标单) ----
+    // /goal 七动作的终端接线:coordinator 调用 + 排版。clear 走二次确认。
+    CommandFlow HandleGoalCommand(const lubancode::cli::ParsedGoalCommand& goal);
+    // goal 装配:coordinator 从 config+env 折 Options 安家,LedgerSink 接
+    // session 存档(goal 事件行 append+flush;九道写盘栅栏的同步性)。
+    void EnsureGoalCoordinator();
     // ---- 上下文压缩的会话现场路(0.27.x 分层压缩第一期) ----
     // 压缩参数现场收集:窗口预算认压缩模型自己的目录条目,活动待办(未完
     // 成 todo 条目原文)进守恒校验——摘要漏一项 pending 就拒收,历史不动。
@@ -516,6 +527,11 @@ private:
     // 逐枚追踪单:hub 要抓 session_runtime_ 的 ids/store 引用,构造体里
     // 安家(初始化列表里绑引用不稳,成员序也保证不了先 runtime 后 hub)。
     std::optional<lubancode::runtime::ToolTraceHub> trace_hub_;
+    // 持久目标单:目标状态机(与 session_runtime_ 同寿命;feature 关时
+    // goals_enabled=false,命令面全拒,存档不受影响)。goal_checkpoint
+    // 工具的会话级状态也在(goal turn 才注册,普通轮不露面)。
+    std::optional<lubancode::runtime::goal::GoalCoordinator> goal_coordinator_;
+    std::shared_ptr<lubancode::tools::GoalCheckpointState> goal_checkpoint_state_;
     // 每轮的 TurnView 存档(终端回合视觉收束单):Ctrl+L/resume 重放走
     // 同一颗渲染器,与实时画面同账。最近 N 轮,不无界攒。
     std::vector<lubancode::runtime::TurnView> turn_views_;
@@ -3379,6 +3395,24 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 real_backend.Rebuild(config);
                 break;
             }
+            case lubancode::cli::SlashCommand::Goal: {
+                // 持久目标单:二级纯解析在 cli 层,业务在这(状态机唯一写口
+                // 是 GoalCoordinator;排版/gate/确认文案在 commands/goal_commands)。
+                const lubancode::cli::ParsedGoalCommand goal =
+                    lubancode::cli::ParseGoalCommand(parsed.args);
+                if (goal.action == lubancode::cli::GoalCommandAction::Invalid) {
+                    std::cout << theme.error;
+                    if (goal.bad_word.empty()) {
+                        std::cout << "用法: /goal <objective> | status | edit <objective> | pause | resume | clear";
+                    } else {
+                        std::cout << "子命令或参数不对: " << goal.bad_word
+                                  << "。正文以子命令词开头时用 /goal -- <正文>";
+                    }
+                    std::cout << theme.reset << "\n";
+                    break;
+                }
+                return HandleGoalCommand(goal);
+            }
             case lubancode::cli::SlashCommand::Memory:
                 HandleMemoryCommand(parsed.args);
                 break;
@@ -3620,6 +3654,152 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
 // 发一轮用户正文:自动压缩检查 + 轮次材料 + RunTurn + 落盘 + 收排队。
 // autosend_failed(可空出参,会话泵路径一用):RunTurn 的 status != 0 就是
 // 请求失败(316/网络错/输出预算耗尽/步数闸),写给 true。
+// ---- /goal 持久目标(持久目标单) -------------------------------------------
+
+void TerminalSessionController::EnsureGoalCoordinator() {
+    if (goal_coordinator_.has_value()) return;
+    auto options = lubancode::app::GoalOptionsFromConfig(config.features_goals, config.goals);
+    goal_coordinator_.emplace(std::move(options));
+    // LedgerSink:goal 事件行 append+flush 进 session 存档。store 没开张时
+    // 返回 true(没建档的会话照常吃命令,事件只进内存——建档后新事件落盘;
+    // 单子写盘栅栏管的是"已建档的会话",这里同取舍)。
+    goal_coordinator_->SetLedgerSink([this](const lubancode::runtime::goal::GoalCoordinatorEvent& event) {
+        if (!session_store.active()) return true;
+        lubancode::agent::GoalSessionEvent line;
+        line.event = event.event;
+        line.goal_id = event.goal_id;
+        line.iteration_id = event.iteration_id;
+        line.revision = event.revision;
+        line.payload = event.payload;
+        line.timestamp_ms = event.timestamp_ms;
+        // type 分族:iteration 级事件走 goal_iteration_v1,其余 goal_v1。
+        if (!event.iteration_id.empty()) {
+            line.type = "goal_iteration_v1";
+        } else {
+            line.type = "goal_v1";
+        }
+        return session_store.AppendGoalEvent(line);
+    });
+    goal_checkpoint_state_ = std::make_shared<lubancode::tools::GoalCheckpointState>();
+}
+
+CommandFlow TerminalSessionController::HandleGoalCommand(const lubancode::cli::ParsedGoalCommand& goal) {
+    EnsureGoalCoordinator();
+    const auto now_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    }();
+    const std::string workspace_root = CurrentDirUtf8();
+
+    using Action = lubancode::cli::GoalCommandAction;
+    if (goal.action == Action::View || goal.action == Action::Status) {
+        // 查账纯本地输出,不发模型(单子"状态查询不发模型")。
+        const auto outcome = lubancode::app::FormatGoalStatus(*goal_coordinator_, now_ms);
+        for (const std::string& line : outcome.lines) {
+            std::cout << theme.stats << line << theme.reset << "\n";
+        }
+        return CommandFlow::Continue;
+    }
+
+    if (goal.action == Action::Create) {
+        const auto result = goal_coordinator_->Create(goal.objective, workspace_root,
+                                                      workspace_root, now_ms);
+        if (!result.ok) {
+            std::cout << theme.error
+                      << lubancode::app::DescribeGoalErrorCode(result.error_code, result.error_message)
+                      << theme.reset << "\n";
+            if (result.error_code == lubancode::runtime::goal::kErrGoalStoreUnavailable) {
+                std::cout << theme.stats
+                          << "开启:配置文件里 [features] goals = true(环境变量 LUBANCODE_DISABLE_GOALS=1 是总闸)"
+                          << theme.reset << "\n";
+            }
+            return CommandFlow::Continue;
+        }
+        std::cout << theme.stats << "目标已立: " << result.payload.value("goal_id", std::string())
+                  << "(状态 " << result.payload.value("state", std::string())
+                  << ")。首轮将先拟合同(做什么/不动什么/拿什么验/何时停),合同冻结后才开始排轮。"
+                  << theme.reset << "\n";
+        return CommandFlow::Continue;
+    }
+
+    if (goal.action == Action::Edit) {
+        const auto* task = goal_coordinator_->task();
+        const int expected = task != nullptr ? task->revision : 0;
+        const auto result = goal_coordinator_->Edit(goal.objective, expected, now_ms);
+        if (!result.ok) {
+            std::cout << theme.error
+                      << lubancode::app::DescribeGoalErrorCode(result.error_code, result.error_message)
+                      << theme.reset << "\n";
+            return CommandFlow::Continue;
+        }
+        std::cout << theme.stats << "目标已改(revision " << result.payload.value("revision", 0)
+                  << ");合同重拟,防空转连击清零,用量账保留。" << theme.reset << "\n";
+        return CommandFlow::Continue;
+    }
+
+    if (goal.action == Action::Pause) {
+        const auto result = goal_coordinator_->Pause(now_ms);
+        if (!result.ok) {
+            std::cout << theme.error
+                      << lubancode::app::DescribeGoalErrorCode(result.error_code, result.error_message)
+                      << theme.reset << "\n";
+            return CommandFlow::Continue;
+        }
+        std::cout << theme.stats;
+        if (result.payload.value("immediate", true)) {
+            std::cout << "目标已暂停;checkpoint/预算/防空转账都留着。";
+        } else {
+            std::cout << "pause 已请求;正在跑的轮在下一安全边界收口。";
+        }
+        std::cout << theme.reset << "\n";
+        return CommandFlow::Continue;
+    }
+
+    if (goal.action == Action::Resume) {
+        const auto* task = goal_coordinator_->task();
+        const int expected = task != nullptr ? task->revision : 0;
+        const auto result = goal_coordinator_->Resume(expected, now_ms);
+        if (!result.ok) {
+            std::cout << theme.error
+                      << lubancode::app::DescribeGoalErrorCode(result.error_code, result.error_message)
+                      << theme.reset << "\n";
+            return CommandFlow::Continue;
+        }
+        std::cout << theme.stats << "目标已续(从最后 checkpoint 起,不重放旧 iteration)。"
+                  << theme.reset << "\n";
+        return CommandFlow::Continue;
+    }
+
+    if (goal.action == Action::Clear) {
+        const auto* task = goal_coordinator_->task();
+        if (task == nullptr) {
+            std::cout << theme.stats << "当前会话没有目标。" << theme.reset << "\n";
+            return CommandFlow::Continue;
+        }
+        for (const std::string& line : lubancode::app::BuildGoalClearConfirmLines(*task)) {
+            std::cout << theme.stats << line << theme.reset << "\n";
+        }
+        const std::optional<std::string> answer =
+            lubancode::cli::ReadLine("y/N", theme, true);
+        if (!answer.has_value() || !(*answer == "y" || *answer == "Y" || *answer == "yes")) {
+            std::cout << theme.stats << "未清除,目标照旧。" << theme.reset << "\n";
+            return CommandFlow::Continue;
+        }
+        const auto result = goal_coordinator_->Clear(now_ms);
+        if (!result.ok) {
+            std::cout << theme.error
+                      << lubancode::app::DescribeGoalErrorCode(result.error_code, result.error_message)
+                      << theme.reset << "\n";
+            return CommandFlow::Continue;
+        }
+        std::cout << theme.stats << "目标已清除;审计账保留在会话存档,已改文件不撤销。" << theme.reset
+                  << "\n";
+        return CommandFlow::Continue;
+    }
+    return CommandFlow::Continue;
+}
+
 CommandFlow TerminalSessionController::RunUserTurn(const std::string& content, bool* autosend_failed) {
     // 建档提前到发轮之前(第二期):仓要拿 session id 开张,第一轮请求里
     // 的超长结果才有地方落盘。失败不拦会话,只是没有 artifact 可追。

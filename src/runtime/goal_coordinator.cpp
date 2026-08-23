@@ -396,22 +396,18 @@ PreflightVerdict GoalCoordinator::PreflightContract(const GoalContract& contract
             break;
         }
     }
+    // 单子 corner case 钉死:"目标要求永不停止:preflight 拒绝"——比空话
+    // 目标(一般性 NeedsUser)更硬,先判。
+    const std::string obj = contract.objective;
+    const bool open_ended = obj.find("永不停止") != std::string::npos ||
+                            obj.find("永远不要停") != std::string::npos;
+    if (open_ended && !has_required) {
+        set_reason("目标要求永不停止:必须改成可验证终点");
+        return PreflightVerdict::Reject;
+    }
     if (!has_required) {
         set_reason("必需 criteria 为空:终点判不了");
         return PreflightVerdict::NeedsUser;
-    }
-    // 空话目标(把项目做完/持续优化一类):没写可验证终点的拒绝自动长跑。
-    const std::string obj = contract.objective;
-    const bool open_ended = obj.find("永不停止") != std::string::npos ||
-                            obj.find("一直做") != std::string::npos ||
-                            obj.find("不停") != std::string::npos;
-    bool verifiable = false;
-    for (const auto& c : contract.criteria) {
-        if (c.required) verifiable = true;
-    }
-    if (open_ended && !verifiable) {
-        set_reason("目标要求永不停止:必须改成可验证终点");
-        return PreflightVerdict::Reject;
     }
     return PreflightVerdict::Ready;
 }
@@ -1000,6 +996,10 @@ void GoalCoordinator::ReplayEvent(const GoalCoordinatorEvent& event) {
         if (ready_.has_value()) {
             ready_->phase = GoalIterationPhase::Finished;
             ready_->finished_at_ms = event.timestamp_ms;
+            // iteration 已收账:ready 位清空,恢复侧 ScheduleNextIteration
+            // 才能补下一枚(否则幂等分支把旧 iteration 当在排)。
+            ready_.reset();
+            ready_dedupe_.clear();
         }
         if (task_->last_evaluation.has_value()) {
             switch (task_->last_evaluation->decision) {

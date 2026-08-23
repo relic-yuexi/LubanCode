@@ -353,15 +353,19 @@ TEST_CASE("预算闸:iteration 上限与 elapsed") {
     GoalCoordinator g2(o2);
     REQUIRE(g2.Create("目标", "/r", "id", 1000).ok);
     REQUIRE(g2.SubmitContract(ValidContract(), 1100).ok);
+    // started_at 在 SubmitContract 冻结合同时落(1100);elapsed 从那起算。
     std::int64_t over = 0;
-    CHECK_FALSE(g2.ElapsedExceeded(1500, &over));
-    CHECK(g2.ElapsedExceeded(2500, &over));
-    CHECK(over == 500);
+    CHECK_FALSE(g2.ElapsedExceeded(1800, &over));  // 700 < 1000
+    CHECK(g2.ElapsedExceeded(2500, &over));        // 1400 > 1000
+    CHECK(over == 400);
 }
 
 TEST_CASE("防空转:同 fingerprint 连续三轮 → Paused(no_progress)") {
     GoalCoordinator g(EnabledOptions());
     MakeActive(g);
+    // 首枚指纹相对空指纹算进展(第一枚 checkpoint 本就是新信息),随后
+    // 三轮同值才触发:共喂四次。
+    g.NoteProgressFingerprint("same-fp", 1100);
     bool tripped = false;
     for (int i = 0; i < 3; ++i) {
         const auto check = g.NoteProgressFingerprint("same-fp", 1200 + i);
@@ -405,8 +409,16 @@ TEST_CASE("usage 未报告:token 闸不拿 0 冒充,iteration 闸照收") {
     std::string reason;
     CHECK(g.CheckBudgetHeadroom(1150, &reason));  // iteration 1 还能开
     REQUIRE(g.ScheduleNextIteration(1200).ok);
+    // 取走并发一轮(只排不取不计 iterations_started,预算闸看的是已开轮数)。
+    REQUIRE(g.TakeReadyIteration("t-1", "fp", 1220).ok);
+    GoalCheckpoint cp;
+    REQUIRE(g.CheckpointReached(cp, 1250).ok);
+    GoalEvaluation ev;
+    ev.decision = GoalDecision::Continue;
+    REQUIRE(g.ApplyEvaluation(ev, 1280).ok);
     const auto next = g.ScheduleNextIteration(1300);
     CHECK_FALSE(next.ok);  // iteration 上限照收(不依赖 token 报数)
+    CHECK(next.error_code == lubancode::runtime::goal::kErrGoalBudgetExhausted);
 }
 
 TEST_CASE("edit:revision+1、回 Preparing、streak 清零;Running 时拒 busy") {
@@ -554,13 +566,13 @@ TEST_CASE("missing checkpoint:模型没调工具,宿主合成,不谎成完成") 
 
 TEST_CASE("provider 连败:撞上限 Paused,成功清零") {
     GoalCoordinator g(EnabledOptions());
+    REQUIRE(g.Create("目标", "/r", "id", 1000).ok);
     g.NoteProviderOutcome(false);
     g.NoteProviderOutcome(false);
     CHECK(g.task()->state == GoalState::Preparing);  // 还没撞
     g.NoteProviderOutcome(false);                    // 第三次
-    // Preparing 是非终态,provider failure 闸也收口(fail closed 思路)。
-    CHECK(g.task()->state == GoalState::Paused);
-    g.Resume(0, 2000);
+    CHECK(g.task()->state == GoalState::Paused);     // 闸收口(fail closed)
+    REQUIRE(g.Resume(0, 2000).ok);
     g.NoteProviderOutcome(true);
     CHECK(g.task()->counters.consecutive_provider_failures == 0);
 }

@@ -264,6 +264,14 @@ add_executable(lubancode_tests
   test_goal_coordinator.cpp
   # /goal 持久目标单:goal 事件行 serialize/parse、SessionStore 落盘回放。
   test_goal_session.cpp
+  # /goal 持久目标单:slash 命令面(二级解析/`--` 消歧/多行正文/help 表)。
+  test_goal_slash.cpp
+  # /goal 持久目标单:GoalContext 注入(合同原样/预算/未报告 token/上限)。
+  test_goal_context.cpp
+  # /goal 持久目标单:evaluator strict schema/一次 repair/无工具请求/坏 JSON。
+  test_goal_evaluator.cpp
+  # /goal 持久目标单:goal_checkpoint 工具(schema 门槛/证据白名单/旁路拒)。
+  test_goal_checkpoint_tool.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 # 依赖守门(显示系统剥离单第八步):测试要现扫源码树,把源码根递进去。

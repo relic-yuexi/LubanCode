@@ -543,6 +543,12 @@ ParsedGoalCommand ParseGoalCommand(const std::string& args) {
     parsed.bad_word = first;
 
     if (lower == "status") {
+        // status 无参;带尾巴按 Invalid(避免 "status of migration" 的正文
+        // 歧义——要写正文用 `--`)。
+        if (!rest.empty()) {
+            parsed.action = GoalCommandAction::Invalid;
+            return parsed;
+        }
         parsed.action = GoalCommandAction::Status;
         return parsed;
     }

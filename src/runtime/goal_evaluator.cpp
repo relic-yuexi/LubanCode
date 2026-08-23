@@ -2,6 +2,8 @@
 
 #include "runtime/goal_evaluator.hpp"
 
+#include "api/assembler.hpp"
+
 #include <atomic>
 #include <sstream>
 #include <thread>
