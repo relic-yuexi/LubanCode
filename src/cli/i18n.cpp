@@ -37,9 +37,16 @@ const Entry kZhCN[] = {
      "用法:\n"
      "  lubancode [选项]\n"
      "  lubancode \"问题\"          一次问答,能用工具就用工具\n"
+     "  lubancode plugin init python [名字]\n"
+     "                              生成 Python 插件脚手架(plugin.json + runner.py + 单测模板,\n"
+     "                              落 ~/.lubancode/plugins/<名字>/)\n"
      "  lubancode                  不带参数则进入交互循环;首次运行缺配置会先走一遍初次配置\n"
      "                              向导,配完直接进入会话,不用重启。exit/quit 或 EOF(Ctrl+Z /\n"
-     "                              管道读尽)退出;空行只是重新给提示符,不退出\n"},
+     "                              管道读尽)退出;空行只是重新给提示符,不退出\n"
+     "  lubancode archive <id>    归档一场会话(搬进 sessions/archive/,字节原样,想恢复用\n"
+     "  lubancode unarchive <id>  unarchive;归了的场子不进默认列表)\n"
+     "  lubancode delete <id>     永久删除一场会话,交互确认后才删;--force 跳过确认,只给\n"
+     "                            脚本显式使用,不可恢复\n"},
     {"help.options",
      "选项:\n"
      "  --version              打印版本号\n"
@@ -85,7 +92,9 @@ const Entry kZhCN[] = {
      "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
      "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
      "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
-     "  /plugins        列出挂载的插件工具(主目录 .lubancode/plugins 下的 *.dll 和 *.lua)\n"
+     "  /plugins        列出插件三路(native/Lua/process)的状态与加载警告\n"
+     "  /plugin         管单枚插件:inspect 看详情 / doctor 查环境 / test 试跑\n"
+     "                  (v1 以重启为 reload/enable/disable 的口径)\n"
      "  /tools          列工具三态:核心(恒在)/已加载/延迟未加载(工具总数超过配置文件\n"
      "                  tool_search_threshold(默认 20,0=永不延迟)时,MCP/插件等外挂工具\n"
      "                  延迟挂载,模型用 tool_search 检索后方可调用)\n"
@@ -188,7 +197,7 @@ const Entry kZhCN[] = {
      "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
      "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
      "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
-     "  /plugins        列出挂载的插件工具(DLL + lua)和加载警告\n"
+     "  /plugins        list plugins of all three runtimes (native/Lua/process) with load warnings\n"
      "  /hooks          hooks 台账:来源/命令/信任/禁用/最近结果;trust|untrust|disable|enable <#id>、runs [N]\n"
      "  /tools          列工具三态:核心(恒在)/已加载/延迟未加载(tool_search 延迟挂载)\n"
      "  /memory         管项目记忆;/memory on|off|use|learn|list|remember|forget|rebuild\n"
@@ -256,6 +265,7 @@ const Entry kZhCN[] = {
     {"stream.interrupt", "\xe2\x8e\x8b 打断"},
     {"stream.interrupt.plain", "ESC 打断"},
     {"spinner.thinking", "思考中"},
+    {"spinner.stopping", "正在停…"},
     {"spinner.interrupt_hint", "Esc 可打断"},
 
     // ---- 子代理状态条(#52,#三:凑齐工具次数/token/耗时三个数字) ----
@@ -395,6 +405,7 @@ const Entry kZhCN[] = {
     {"keymap.fixed_suffix", "(固定)"},
     {"keymap.unbound_suffix", "(未绑键)"},
     {"slash.desc.keymap", "看/改键位(/keymap set 动作 和弦,用户级落盘)"},
+    {"slash.desc.workflow", "可复用 Workflow 图:list/show/graph/validate/run/resume/cancel"},
     {"image.pasted", "剪贴板图片已备好({0} KB,路径已插入,提交时随消息附上)"},
     {"image.paste_failed", "贴图不成:{0}"},
     {"transcript.assistant_bg_title", "后台回流 · 分析"},
@@ -607,11 +618,15 @@ const Entry kZhCN[] = {
     {"slash.desc.mcp", "列出挂载的 MCP 服务器状态和工具清单"},
     {"slash.desc.lsp", "列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)"},
     {"slash.desc.todos", "查看当前待办清单"},
-    {"slash.desc.plugins", "列出挂载的插件工具(DLL + lua)和加载警告"},
+    {"slash.desc.plugins", "列出插件三路(native/Lua/process)的状态与加载警告"},
+    {"slash.desc.plugin",
+     "管单枚插件:inspect 看详情 / doctor 查环境 / test 试跑 / reload 重载 / enable|disable 开关"},
     {"slash.desc.tools", "列工具三态:核心(恒在)/已加载/延迟未加载(tool_search 延迟挂载)"},
     {"slash.desc.memory",
      "管理项目记忆;/memory on|off|use|learn|review|accept|edit|reject|list|remember|forget|rebuild|why"},
-    {"slash.desc.sessions", "列本目录最近 20 场会话存档,倒序编号;/sessions all 列全部目录"},
+    {"slash.desc.sessions", "列本目录最近 20 场会话存档,倒序编号;/sessions all 列全部目录;/sessions archived 看归档"},
+    {"slash.desc.archive", "归档当前会话(搬进 sessions/archive/ 后退出;想恢复先 lubancode unarchive <id>)"},
+    {"slash.desc.delete", "永久删除当前会话(先确认;回合在跑/审批悬着时拒绝)"},
     {"slash.desc.resume", "打开会话台账:搜索/筛选/排序后续聊(也可跟编号或 id)"},
     {"slash.desc.export", "当前会话导出 Markdown;/export 路径 可指定输出文件"},
     {"slash.desc.title", "看当前会话标题;/title 标题 给本场起名,/sessions 列表和导出都用它"},
@@ -918,6 +933,9 @@ const Entry kZhCN[] = {
     {"transcript.thinking_done", "思考 {0}"},
     {"transcript.thinking_chars", " · {0} 字"},
     {"transcript.thinking_stream_more", "……共 {0} 行,思考结束后 Ctrl+O 看全文"},
+    {"transcript.batch_pending", "(本拍排队中)"},
+    {"transcript.batch_skipped", "本拍未执行(已打断)"},
+    {"transcript.more_lines", " +{0} lines"},
     {"todo.empty", "没有待办。"},
 
     // ---- 统计行 ----
@@ -983,15 +1001,59 @@ const Entry kZhCN[] = {
     {"cmd.plugins.empty",
      "没有挂载任何插件工具。\n\n"
      "插件目录约定(放进去,下次启动即挂载):\n"
-     "  C ABI DLL: {0}/*.dll\n"
-     "      导出 luban_plugin_entry(见仓库 include/luban_plugin.h),示例在\n"
-     "      examples/plugins/hello_plugin/。注意:DLL 跟宿主同进程,插件里崩了\n"
-     "      整个程序一起完蛋,装谁的插件风险自担。\n"
+     "  process:   {0}/<插件id>/plugin.json(Python/Rust/任意可执行程序;\n"
+     "      起步用 `lubancode plugin init python <名字>` 生成三件套,示例在\n"
+     "      examples/plugins/local_math/)\n"
      "  Lua:       {0}/*.lua\n"
      "      每个文件 return { name=..., description=..., input_schema=...,\n"
-     "      execute=function(input) ... end } 一张表,示例在 examples/plugins/word_count.lua。"},
+     "      execute=function(input) ... end } 一张表(缺省 pure 画像,关 io/\n"
+     "      os.execute;死循环有指令预算落锤),示例在 examples/plugins/word_count.lua\n"
+     "  native:    {0}/*.dll(Windows)/*.so(Linux)/*.dylib(macOS)\n"
+     "      导出 luban_plugin_entry(ABI v2,见 include/luban_plugin.h),示例在\n"
+     "      examples/plugins/hello_plugin/。库跟宿主同进程,插件里崩了整个程序\n"
+     "      一起完蛋,装谁的插件风险自担。"},
     {"cmd.plugins.mounted", "已挂载 {0} 个插件工具:"},
     {"cmd.plugins.warnings", "加载警告(这些没挂上):"},
+
+    // ---- /plugin 子命令(plugins 单第 8 步) ----
+    {"cmd.plugin.usage",
+     "用法: /plugin inspect <id> | doctor <id> | reload <id> | enable <id> | disable <id>。裸 /plugin <id> "
+     "视同 inspect。"},
+    {"cmd.plugin.not_found", "找不到插件 {0}(/plugins 看看挂载账)。"},
+    {"cmd.plugin.inspect.header", "插件 {0} v{1}(runtime={2}, language={3})"},
+    {"cmd.plugin.inspect.legacy_header", "插件 {0}(legacy {1} 插件,无 plugin.json,详情看文件本体):"},
+    {"cmd.plugin.inspect.dir", "目录: {0}"},
+    {"cmd.plugin.inspect.argv", "命令: {0}"},
+    {"cmd.plugin.inspect.timeout", "超时: {0}ms"},
+    {"cmd.plugin.inspect.env", "环境变量 allowlist: {0}"},
+    {"cmd.plugin.inspect.tools", "工具 {0} 件:"},
+    {"cmd.plugin.doctor.command_ok", "解释器可用: {0}({1})"},
+    {"cmd.plugin.doctor.command_bad", "解释器起不来: {0}({1})——检查 command 或装好解释器。"},
+    {"cmd.plugin.doctor.not_process", "这不是 process 插件,doctor 只查 process 的解释器环境。"},
+    {"cmd.plugin.doctor.legacy_ok", "{0} 插件在挂载账上(内嵌运行时,无外部环境依赖)。"},
+    {"cmd.plugin.test.hint",
+     "test 与模型调用同一条链(schema 验参、确认、超时),命令层不开无防护捷径——直接让模型调这件工具,"
+     "或用插件自带的测试脚本(如 python test_runner.py)离线自测。"},
+    {"cmd.plugin.reload.hint",
+     "v1 的 reload 以重启为口径:改完插件重启 LubanCode 即生效。Lua/process 的会话内热重载是后续批次,"
+     "不在这硬造半套。"},
+    {"cmd.plugin.toggle.hint",
+     "enable/disable 的持久账(逐插件开关,落 settings)是后续批次;v1 想临时停用,把插件目录挪出 "
+     "plugins/ 再重启即可。"},
+    {"cmd.plugin.unknown_sub", "不认得的子命令: {0}"},
+
+    // ---- plugin init 子命令(plugins 单第 3 步) ----
+    {"plugininit.no_home", "找不到用户主目录,无法定位插件目录。"},
+    {"plugininit.failed", "生成插件脚手架失败: {0}"},
+    {"plugininit.done", "已生成 Python 插件脚手架 {0}({1}):"},
+    {"plugininit.doctor_note", "提示: {0}"},
+    {"plugininit.next",
+     "下一步:改 runner.py 里的 HANDLERS 与 plugin.json 里的 tools,本地先跑 python test_runner.py "
+     "自测;重启 LubanCode 后 /plugins 可见。"},
+    {"plugininit.lua_hint",
+     "Lua 插件不需要脚手架:把 return {{ name=..., execute=function(input) ... end }} 的 .lua 文件"
+     "放进 {0} 即可,示例见 examples/plugins/word_count.lua。"},
+    {"plugininit.unknown_template", "不认得的插件模板: {0}(v1 只有 python)"},
 
     // ---- /mcp、/lsp ----
     {"cmd.mcp.empty", "没有挂载任何 MCP 服务器(config.json 里没写 mcpServers,或者配了但全部启动失败)。"},
@@ -1374,6 +1436,9 @@ const Entry kZhCN[] = {
     {"cmd.sessions.no_text", "(没有用户文本)"},
     {"cmd.sessions.dir_line", "      目录: {0}"},
     {"cmd.sessions.dir_unknown", "(未知)"},
+    {"cmd.sessions.archived_none", "还没有归档的会话(/archive 归档,归了的场子不进默认列表)。"},
+    {"cmd.sessions.archived_header", "已归档 {0} 场(只读列表;想续聊先 lubancode unarchive <id>):"},
+    {"cmd.sessions.archived_hint", "这些场子在 ~/.lubancode/sessions/archive/ 下,字节原样保留。"},
     {"cmd.resume.usage", "用法:/resume(全屏选择器) | /resume 编号 | /resume id"},
     {"cmd.resume.cancelled", "已取消恢复。"},
     {"cmd.resume.none", "本目录还没有会话存档,没什么可恢复(/sessions all 看全部目录)。"},
@@ -1394,6 +1459,32 @@ const Entry kZhCN[] = {
     {"cmd.resume.wire_mismatch", "[提醒] 存档时用的 wire 是 {0},当前是 {1}。"},
     {"cmd.resume.history.header", "恢复历史 · {0}"},
     {"cmd.resume.history.end", "── 历史到此,可接着聊 ──"},
+    // ---- 归档与永久删除(会话管理器单第四、五步) ----
+    {"cmd.session.archive.usage", "用法:lubancode archive <id|标题> · lubancode unarchive <id>"},
+    {"cmd.session.delete.usage",
+     "用法:lubancode delete <id|标题> [--force]。永久删除,不可恢复;--force 跳过确认,只给脚本。"},
+    {"cmd.session.ref_not_found", "找不到会话 {0}(按 id 或标题解;先 /sessions 看一眼)。"},
+    {"cmd.session.ref_ambiguous", "引用 {0} 命中多场,请用完整 id 点明: {1}"},
+    {"cmd.session.archive.done", "已归档 {0}(搬进 sessions/archive/,字节原样)。"},
+    {"cmd.session.archive.failed", "归档 {0} 失败:文件没动,原账可用。"},
+    {"cmd.session.unarchive.done", "已取消归档 {0}(搬回 sessions/ 根,可 /resume 续聊)。"},
+    {"cmd.session.unarchive.failed", "取消归档 {0} 失败:文件没动,原账可用。"},
+    {"cmd.session.delete.confirm_header", "永久删除确认"},
+    {"cmd.session.delete.confirm_title", "  标题: {0}"},
+    {"cmd.session.delete.confirm_id", "  id: {0}"},
+    {"cmd.session.delete.confirm_cwd", "  目录: {0}"},
+    {"cmd.session.delete.confirm_prompt", "这是永久删除,不可恢复。确认请输 y,缺省取消: "},
+    {"cmd.session.delete.cancelled", "已取消,什么都没删。"},
+    {"cmd.session.delete.done", "已永久删除 {0}(只删这一场;artifact blob 按内容寻址,别的会话还可能引用)。"},
+    {"cmd.session.delete.failed", "删除 {0} 失败:文件没动。"},
+    {"cmd.archive.not_active", "当前会话还没落盘(没建过档),没什么可归档。"},
+    {"cmd.delete.not_active", "当前会话还没落盘(没建过档),没什么可删。"},
+    {"cmd.archive.exiting", "已归档当前会话,退出。"},
+    {"cmd.delete.exiting", "已删除当前会话,退出。"},
+    {"cmd.archive.usage", "用法:/archive(不带参数;归档的是当前会话,别的场子用 lubancode archive <id>)"},
+    {"cmd.archive.busy", "还有后台子代理在跑,先等它们收尾(或 /agents 面板停掉)再归档。"},
+    {"cmd.delete.usage", "用法:/delete(不带参数;删的是当前会话,别的场子用 lubancode delete <id>)"},
+    {"cmd.delete.busy", "还有后台子代理在跑,先等它们收尾(或 /agents 面板停掉)再删。"},
     {"cmd.resume.history.user", "你"},
     {"cmd.resume.history.assistant", "助手"},
     {"cmd.resume.history.image", "[图片] {0} ({1}x{2})"},
@@ -1455,9 +1546,23 @@ const Entry kZhCN[] = {
     {"picker.empty.search", "没有命中: {0}"},
     {"picker.no_text", "(没有用户文本)"},
     {"picker.damaged", "damaged"},
+    {"picker.unknown_dir", "(目录未知)"},
+    {"picker.unknown_model", "(模型未知)"},
+    {"picker.unknown_time", "(时间未知)"},
+    {"picker.expand.title", "标题:"},
+    {"picker.expand.cwd", "目录:"},
+    {"picker.expand.id", "id:"},
+    {"picker.expand.model", "模型:"},
+    {"picker.expand.messages", "{0} 条消息"},
+    {"picker.expand.created", "创建:"},
+    {"picker.expand.updated", "更新:"},
+    {"picker.transcript.title", "转录 · {0}"},
+    {"picker.transcript.empty", "(这场会话还没有可显示的转录)"},
+    {"picker.transcript.footer",
+     "esc/ctrl+t 收起回列表 · enter resume · 上下不动选中,看完回原行"},
     {"picker.footer",
      "enter resume · esc exit · tab focus · </> change option · up/down browse · pgup/pgdn page · "
-     "home/end jump"},
+     "home/end jump · ctrl+o comfortable · ctrl+t transcript · ctrl+e expand"},
     {"picker.status", "{0} / {1} · {2}%"},
     {"picker.status.empty", "0 / 0 · 0%"},
     {"picker.ago.now", "just now"},
@@ -1497,7 +1602,11 @@ const Entry kEn[] = {
      "  lubancode                  with no arguments, enters the interactive loop; on first run with\n"
      "                              missing config the setup wizard runs once, then the session starts\n"
      "                              without a restart. exit/quit or EOF (Ctrl+Z / pipe drained) quits;\n"
-     "                              an empty line just re-prompts\n"},
+     "                              an empty line just re-prompts\n"
+     "  lubancode archive <id>    archive a session (moved into sessions/archive/, bytes untouched;\n"
+     "  lubancode unarchive <id>  unarchive brings it back; archived ones stay out of the default list)\n"
+     "  lubancode delete <id>     permanently delete a session after an interactive confirmation;\n"
+     "                            --force skips the confirmation (scripts only), unrecoverable\n"},
     {"help.options",
      "Options:\n"
      "  --version              print the version\n"
@@ -1730,6 +1839,7 @@ const Entry kEn[] = {
     {"stream.interrupt", "\xe2\x8e\x8b interrupt"},
     {"stream.interrupt.plain", "ESC interrupt"},
     {"spinner.thinking", "Working"},
+    {"spinner.stopping", "Stopping..."},
     {"spinner.interrupt_hint", "Esc to interrupt"},
     {"ask_user.other", "Other (type your own answer)"},
     {"ask_user.select_prompt", "Choose a number (Esc to cancel): "},
@@ -1892,6 +2002,7 @@ const Entry kEn[] = {
     {"keymap.fixed_suffix", " (fixed)"},
     {"keymap.unbound_suffix", " (unbound)"},
     {"slash.desc.keymap", "Show or rebind keys (/keymap set action chord; saved user-level)"},
+    {"slash.desc.workflow", "Reusable workflow graphs: list/show/graph/validate/run/resume/cancel"},
     {"image.pasted", "Clipboard image ready ({0} KB; path inserted, attaches on send)"},
     {"image.paste_failed", "Paste failed: {0}"},
     {"transcript.assistant_bg_title", "background reflow · analysis"},
@@ -2103,12 +2214,19 @@ const Entry kEn[] = {
     {"slash.desc.mcp", "list mounted MCP servers and their tools"},
     {"slash.desc.lsp", "list LSP server status per language"},
     {"slash.desc.todos", "show the current todo list"},
-    {"slash.desc.plugins", "list mounted plugin tools (DLL + lua) and load warnings"},
+    {"slash.desc.plugins", "list plugins of all three runtimes (native/Lua/process) with load warnings"},
+    {"slash.desc.plugin",
+     "manage one plugin: inspect / doctor / test / reload / enable|disable"},
     {"slash.desc.tools", "list tool states: core / loaded / deferred (tool_search)"},
     {"slash.desc.memory",
      "manage project memory; /memory on|off|use|learn|review|accept|edit|reject|list|remember|forget|"
      "rebuild|why"},
     {"slash.desc.sessions", "list the 20 most recent session archives here; /sessions all for every dir"},
+    {"cmd.sessions.archived_none", "No archived sessions yet (/archive archives; archived ones stay out of the default list)."},
+    {"slash.desc.archive", "archive this session (moved into sessions/archive/, then exits; lubancode unarchive <id> to bring it back)"},
+    {"slash.desc.delete", "permanently delete this session (asks first; refused while a turn is running or an approval is pending)"},
+    {"cmd.sessions.archived_header", "{0} session(s) archived (read-only list; lubancode unarchive <id> to resume):"},
+    {"cmd.sessions.archived_hint", "These live under ~/.lubancode/sessions/archive/, bytes untouched."},
     {"slash.desc.resume", "open the session picker: search/filter/sort, then resume (or pass a number/id)"},
     {"slash.desc.export", "export this session as Markdown; /export <path> picks the output file"},
     {"slash.desc.title", "show the session title; /title <title> names this session"},
@@ -2489,6 +2607,9 @@ const Entry kEn[] = {
     {"transcript.thinking_done", "Thought {0}"},
     {"transcript.thinking_chars", " · {0} chars"},
     {"transcript.thinking_stream_more", "… {0} lines so far — press Ctrl+O again after thinking finishes for the full text"},
+    {"transcript.batch_pending", "(queued in this step)"},
+    {"transcript.batch_skipped", "not run this step (interrupted)"},
+    {"transcript.more_lines", " +{0} lines"},
     {"todo.empty", "No todos."},
 
     // ---- stats line ----
@@ -2526,6 +2647,33 @@ const Entry kEn[] = {
     {"cmd.resume.worktree_back", "Moved back into the session worktree: {0}"},
     {"cmd.resume.history.header", "Restored history · {0}"},
     {"cmd.resume.history.end", "── End of history; continue below ──"},
+    // ---- Archive & permanent delete (session manager, steps 4-5) ----
+    {"cmd.session.archive.usage", "Usage: lubancode archive <id|title> · lubancode unarchive <id>"},
+    {"cmd.session.delete.usage",
+     "Usage: lubancode delete <id|title> [--force]. Permanent, unrecoverable; --force skips the "
+     "confirmation (scripts only)."},
+    {"cmd.session.ref_not_found", "No session matches {0} (by id or title; try /sessions first)."},
+    {"cmd.session.ref_ambiguous", "Reference {0} matches several sessions; name the full id: {1}"},
+    {"cmd.session.archive.done", "Archived {0} (moved into sessions/archive/, bytes untouched)."},
+    {"cmd.session.archive.failed", "Archiving {0} failed; the file is untouched and still usable."},
+    {"cmd.session.unarchive.done", "Unarchived {0} (back in sessions/, resumable)."},
+    {"cmd.session.unarchive.failed", "Unarchiving {0} failed; the file is untouched and still usable."},
+    {"cmd.session.delete.confirm_header", "Permanent deletion"},
+    {"cmd.session.delete.confirm_title", "  Title: {0}"},
+    {"cmd.session.delete.confirm_id", "  id: {0}"},
+    {"cmd.session.delete.confirm_cwd", "  Cwd: {0}"},
+    {"cmd.session.delete.confirm_prompt", "This permanently deletes the session and cannot be undone. Type y to confirm, anything else cancels: "},
+    {"cmd.session.delete.cancelled", "Cancelled; nothing was deleted."},
+    {"cmd.session.delete.done", "Permanently deleted {0} (this session only; artifact blobs are content-addressed and may be shared)."},
+    {"cmd.session.delete.failed", "Deleting {0} failed; the file is untouched."},
+    {"cmd.archive.not_active", "This session has never been persisted; there is nothing to archive."},
+    {"cmd.delete.not_active", "This session has never been persisted; there is nothing to delete."},
+    {"cmd.archive.exiting", "Current session archived; exiting."},
+    {"cmd.delete.exiting", "Current session deleted; exiting."},
+    {"cmd.archive.usage", "Usage: /archive (no arguments; it archives THIS session; use lubancode archive <id> for another one)"},
+    {"cmd.archive.busy", "Background subagents are still running; let them finish (or stop them from the /agents panel) before archiving."},
+    {"cmd.delete.usage", "Usage: /delete (no arguments; it deletes THIS session; use lubancode delete <id> for another one)"},
+    {"cmd.delete.busy", "Background subagents are still running; let them finish (or stop them from the /agents panel) before deleting."},
     {"cmd.resume.history.user", "You"},
     {"cmd.resume.history.assistant", "Assistant"},
     {"cmd.resume.history.image", "[Image] {0} ({1}x{2})"},
@@ -2715,9 +2863,23 @@ const Entry kEn[] = {
     {"picker.empty.search", "No match: {0}"},
     {"picker.no_text", "(no user text)"},
     {"picker.damaged", "damaged"},
+    {"picker.unknown_dir", "(unknown dir)"},
+    {"picker.unknown_model", "(unknown model)"},
+    {"picker.unknown_time", "(unknown time)"},
+    {"picker.expand.title", "Title:"},
+    {"picker.expand.cwd", "Cwd:"},
+    {"picker.expand.id", "id:"},
+    {"picker.expand.model", "Model:"},
+    {"picker.expand.messages", "{0} messages"},
+    {"picker.expand.created", "Created:"},
+    {"picker.expand.updated", "Updated:"},
+    {"picker.transcript.title", "Transcript · {0}"},
+    {"picker.transcript.empty", "(no transcript to show for this session)"},
+    {"picker.transcript.footer",
+     "esc/ctrl+t close, back to the list · enter resume · arrows leave the selection alone"},
     {"picker.footer",
      "enter resume · esc exit · tab focus · </> change option · up/down browse · pgup/pgdn page · "
-     "home/end jump"},
+     "home/end jump · ctrl+o comfortable · ctrl+t transcript · ctrl+e expand"},
     {"picker.status", "{0} / {1} · {2}%"},
     {"picker.status.empty", "0 / 0 · 0%"},
     {"picker.ago.now", "just now"},

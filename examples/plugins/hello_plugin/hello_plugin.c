@@ -1,20 +1,27 @@
-/* hello_plugin - lubancode C ABI 插件示例(M7)。
+/* hello_plugin - lubancode C ABI 插件示例(ABI v2,plugins 单第 5/6 步)。
  *
  * 提供一个 reverse_text 工具:入参 {"text": "..."},把文本按 UTF-8 字符
  * 倒序返回(按字符不按字节,中文倒完还是合法 UTF-8)。
  *
- * 编译(独立小工程,见同目录 CMakeLists.txt):
- *   cmake -S . -B build && cmake --build build --config Release
- * 编出来的 hello_plugin.dll 放进 <主目录>/.lubancode/plugins/ 即挂载,
- * 工具名是 plugin__hello_plugin__reverse_text。
+ * 编译(独立小工程,见同目录 CMakeLists.txt;三平台各出各的产物):
+ *   Windows: hello_plugin.dll / Linux: libhello_plugin.so / macOS: libhello_plugin.dylib
+ * 放进 <主目录>/.lubancode/plugins/ 即挂载,工具名是
+ * plugin__hello_plugin__reverse_text(v2 的 plugin_id 字段定前缀)。
  *
- * 内存规矩:execute 返回的 content 用本 DLL 的 malloc 分配,宿主拷贝完
- * 回调 free_result,由本 DLL 自己 free——谁分配谁释放,不跨堆。
+ * 内存规矩(buffer 契约,luban_plugin.h):content 是谁分配的,free_result
+ * 就还给谁。本示例声明 CAP_HOST_ALLOCATOR,结果 buffer 从宿主堆拿
+ * (host_callbacks.allocate),free_result 里 release 交还——就算两边链
+ * 不同的 CRT 也不跨堆。
  */
 #include <stdlib.h>
 #include <string.h>
 
 #include "luban_plugin.h"
+
+/* v2:宿主在加载后、首次 execute 前把回调灌进 manifest 的 host_callbacks
+ * 字段——所以 manifest 不能放 .rodata:这里不带 const(工具表 k_tools
+ * 仍是 const,不会被宿主动)。execute 路径从这里取回调。 */
+static luban_plugin_manifest_v2 k_manifest;
 
 /* ------------------------------------------------------------------ */
 /* 极简 JSON 取值:从 {"text":"..."} 里抠出 text 字段的字符串值。
@@ -150,12 +157,23 @@ static char* reverse_utf8(const char* text) {
     return out;
 }
 
+/* 在宿主堆上复制一份文本(buffer 契约的拿;还的对在 free_result 里)。
+ * 宿主没灌回调的异常路径退回自己的 malloc——两头对称,不混堆。 */
+static char* dup_on_host(const char* text) {
+    size_t n = strlen(text);
+    char* buffer;
+    if (k_manifest.host_callbacks.allocate != NULL) {
+        buffer = (char*)k_manifest.host_callbacks.allocate(n + 1);
+    } else {
+        buffer = (char*)malloc(n + 1);
+    }
+    if (buffer != NULL) memcpy(buffer, text, n + 1);
+    return buffer;
+}
+
 static luban_tool_result make_error(const char* message) {
     luban_tool_result r;
-    size_t n = strlen(message);
-    char* copy = (char*)malloc(n + 1);
-    if (copy != NULL) memcpy(copy, message, n + 1);
-    r.content = copy;
+    r.content = dup_on_host(message);
     r.is_error = 1;
     return r;
 }
@@ -170,20 +188,27 @@ static luban_tool_result reverse_execute(const char* input_json) {
     reversed = reverse_utf8(text);
     free(text);
     if (reversed == NULL) return make_error("内存分配失败");
-    r.content = reversed;
+    /* 倒序结果也搬到宿主堆:free_result 只走 release 一条路,不混堆。 */
+    r.content = dup_on_host(reversed);
+    free(reversed);
+    if (r.content == NULL) return make_error("内存分配失败");
     r.is_error = 0;
     return r;
 }
 
 static void free_result(luban_tool_result* result) {
     if (result != NULL && result->content != NULL) {
-        free((void*)result->content);
+        if (k_manifest.host_callbacks.release != NULL) {
+            k_manifest.host_callbacks.release((void*)result->content);
+        } else {
+            free((void*)result->content); /* 与 dup_on_host 的退路对称 */
+        }
         result->content = NULL;
     }
 }
 
 /* ------------------------------------------------------------------ */
-/* manifest + 入口                                                     */
+/* v2 manifest + 入口                                                  */
 /* ------------------------------------------------------------------ */
 
 static const luban_tool_def k_tools[] = {
@@ -197,15 +222,25 @@ static const luban_tool_def k_tools[] = {
     },
 };
 
-static const luban_plugin_manifest k_manifest = {
-    LUBAN_PLUGIN_API_VERSION,
+static luban_plugin_manifest_v2 k_manifest = {
+    LUBAN_PLUGIN_ABI_V2,                   /* abi_tag:宿主按首字段判版本 */
+    (int)sizeof(luban_plugin_manifest_v2), /* struct_size:前向兼容的尺 */
+    LUBAN_PLUGIN_V2_API_MIN,               /* api_min */
+    LUBAN_PLUGIN_V2_API_MAX,               /* api_max */
+    "hello_plugin",                        /* plugin_id:工具名前缀取这个 */
+    "1.1.0",                               /* plugin_version */
     (int)(sizeof(k_tools) / sizeof(k_tools[0])),
     k_tools,
+    LUBAN_PLUGIN_CAP_HOST_ALLOCATOR, /* capability_flags:结果 buffer 走宿主堆 */
+    {NULL, NULL},                    /* host_callbacks:宿主加载后灌 */
+    NULL,                            /* shutdown:示例没有要收的资源 */
 };
 
-#ifdef _WIN32
+#if defined(_WIN32)
 __declspec(dllexport)
+#elif defined(__GNUC__)
+__attribute__((visibility("default")))
 #endif
-const luban_plugin_manifest* luban_plugin_entry(void) {
+const void* luban_plugin_entry(void) {
     return &k_manifest;
 }

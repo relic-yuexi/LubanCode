@@ -15,8 +15,10 @@
 
 #include <atomic>
 #include <expected>
+#include <filesystem>
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -25,20 +27,32 @@
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "cli/i18n.hpp"
+#include "cli/worktree.hpp"
+#include "config/config.hpp"
 #include "lsp/manager.hpp"
+#include "memory/memory_tool.hpp"
+#include "memory/project_memory.hpp"
+#include "ptc/ptc_tool.hpp"
 #include "tools/agent_message_tool.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/ask_user.hpp"
 #include "tools/background_output.hpp"
 #include "tools/context_tools.hpp"
 #include "tools/edit_file.hpp"
+#include "tools/list_sessions_tool.hpp"
 #include "tools/lsp_tool.hpp"
 #include "tools/read_file.hpp"
 #include "tools/registry.hpp"
 #include "tools/run_command.hpp"
 #include "tools/search.hpp"
+#include "tools/send_session_message_tool.hpp"
+#include "tools/skill_tool.hpp"
+#include "tools/tool_search.hpp"
 #include "tools/tool_text.hpp"
 #include "tools/todo_tool.hpp"
+#include "tools/web_fetch.hpp"
+#include "tools/web_search.hpp"
+#include "tools/worktree_tool.hpp"
 #include "tools/write_file.hpp"
 
 using lubancode::tools::AgentMessageTool;
@@ -574,4 +588,245 @@ TEST_CASE("批5 外接: en 下 description 与参数说明都是英文") {
     CHECK(read.description().find("Read a segment of the spilled full text") == 0);
     CHECK(read.input_schema()["properties"]["chunk_id"]["description"] ==
           "Chunk id (e.g. c0003); when given, read by chunk");
+}
+
+// ---------------------------------------------------------------------------
+// 清底批:余量九件——web_search/web_fetch/tool_search/skill(网络与外挂检索)、
+// list_sessions/send_session_message/worktree(会话与房)、memory_save、
+// programmatic_tool_calling。改前原文逐字节从 cpp 字面量抄出,与 zh-CN 档
+// (缺省)逐字节钉死;en 档抽特征词验生效。PtcTool 的 schema 里
+// purpose/script 两参数本就没有 description 字段,只有 description 一个键。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const char* kWebSearchDescBefore =
+    "网络搜索,返回编号列表(标题/URL/摘要)。适合查最新资讯、找文档地址;拿到 URL 之后"
+    "用 web_fetch 抓正文。需要搜好几轮、读好几篇再总结的活,交给 agent 子代理去干。";
+
+const char* kWebFetchDescBefore =
+    "抓取一个网页(HTTP GET,跟随重定向)。HTML 会剥掉标签只留正文,普通文本原样返回,"
+    "二进制内容不支持。返回内容开头带一行 URL/状态码/类型说明。适合看文档、查资料;"
+    "需要深读多个长网页再总结时,把活交给 agent 子代理去做,别把整篇长文堆进主对话。";
+
+const char* kToolSearchDescBefore =
+    "按关键词检索延迟挂载的工具(MCP/插件等外挂工具不直接进工具表,只在系统提示的索引段里露名字)。"
+    "对工具名和描述做大小写不敏感的分词匹配,命中的工具立即挂载,本轮之后即可直接调用。"
+    "当索引段里有你需要的能力、或怀疑有外挂工具能干这件事时,先用这个搜。";
+
+const char* kSkillDescBefore =
+    "按名字加载一份已发现的技能(SKILL.md),拿到它的完整使用说明。技能是预先写好的一套具体做法"
+    "(比如某种文体的写作规范、某类任务的固定流程),系统提示里列出的技能名/说明跟当前任务对得上时,"
+    "先调用这个工具把说明读进来,再照着做。";
+
+const char* kListSessionsDescBefore =
+    "列出同一台机器上当前用户开启的其它 Lubancode 会话(不跨机器、不跨用户)。"
+    "每场会话给出 peer_id(短 id,发送消息时用来定人)、名字、状态(空闲/忙/等待)、"
+    "工作目录。只有在手头的结论会影响另一场活会话时才需要查它;不要闲聊、不要催问成环。";
+
+const char* kSendSessionMessageDescBefore =
+    "给同一台机器上另一场 Lubancode 会话递一条纯文本消息(不传文件、不传聊天记录,只递一张字条)。"
+    "target 填对方的名字或 peer_id(list_sessions 可查)。对端正忙时消息会在两次工具调用之间送达,"
+    "不打断它手头的工具;对端空闲则另起一轮。只有在手头结论会影响另一场活会话时才发送;"
+    "不许闲聊,不许催问成环。";
+
+const char* kWorktreeDescBefore =
+    "住进隔离的 git worktree 里干活,不碰主 checkout。大改动先 worktree enter(缺省名字自动生成,"
+    "基准 fresh=远端默认分支或 head=当前 HEAD),整场会话搬进房里:读写、命令都在房内,"
+    "状态行会亮房名;干完 worktree exit keep(留房)或 exit remove(干净才删,脏了要用户确认)。"
+    "worktree status 看在不在房里、脏没脏;worktree list 列全部工作树。"
+    "别把构建产物提交进房里;房里的改动最终仍要合回主分支。";
+
+const char* kMemorySaveDescBefore =
+    "把一条小而稳定的项目事实、用户明确偏好或用户明说的行事纠正排进后台记忆(正式入库,不经待审区)。"
+    "只在信息已经由源码、工具结果或用户明说证实时调用;fact 必须在 paths 或 evidence 里"
+    "给出可核验证据;feedback 只收用户当场明说的纠正(如版本节奏、验收习惯),confidence 须"
+    "user-stated,模型推断不得直写。不要保存当前任务进度、猜测、日志、网页/MCP 原文、密钥或个人数据。"
+    "已有同主题时沿用索引里的 id 做更新。自动候选走回合总结,不经过这个工具。";
+
+const char* kPtcDescBefore =
+    "编排一段 Python 脚本批量调用已挂载的只读工具(read_file/search 等):写变量、条件、循环、"
+    "asyncio.gather 扇出,一段脚本收完把 emit() 的精简摘要送回。适合遍历一批文件、先查 A 再喂 "
+    "B/C 的长链、同时派多路只读调用后聚合;短任务直接用普通工具更省。输入给 purpose(一句话"
+    "目的,进审计账)与 script(Python 源码,import luban_tools 拿 typed stubs,结尾必须 emit)。";
+
+}  // namespace
+
+TEST_CASE("清底批: 缺省(zh-CN)与改前一字不差") {
+    LangGuard guard;
+    lubancode::cli::SetLanguage("zh-CN");
+
+    lubancode::config::SearchConfig search_config;
+    search_config.provider = "tavily";
+    search_config.api_key = "test";
+    lubancode::tools::WebSearchTool web_search(search_config);
+    CHECK(web_search.description() == kWebSearchDescBefore);
+    const nlohmann::json wss = web_search.input_schema();
+    CHECK(wss["properties"]["query"]["description"] == "搜索关键词或问题");
+    CHECK(wss["properties"]["count"]["description"] == "想要几条结果,不填默认 5,上限 10");
+    CHECK(wss["required"] == nlohmann::json::array({"query"}));
+
+    lubancode::tools::WebFetchTool web_fetch;
+    CHECK(web_fetch.description() == kWebFetchDescBefore);
+    const nlohmann::json wfs = web_fetch.input_schema();
+    CHECK(wfs["properties"]["url"]["description"] == "要抓取的完整 URL,必须以 http:// 或 https:// 开头");
+    CHECK(wfs["properties"]["max_bytes"]["description"] ==
+          "返回正文的字节数上限,超出截断并标注。不填默认 102400(100KB)");
+    CHECK(wfs["required"] == nlohmann::json::array({"url"}));
+
+    lubancode::tools::ToolRegistry clearance_registry;
+    auto loaded = std::make_shared<std::set<std::string>>();
+    lubancode::tools::ToolSearchTool tool_search(clearance_registry, loaded);
+    CHECK(tool_search.description() == kToolSearchDescBefore);
+    const nlohmann::json tss = tool_search.input_schema();
+    CHECK(tss["properties"]["query"]["description"] ==
+          "关键词,空格分隔多个词;对延迟工具的名字和描述做大小写不敏感的子串匹配,"
+          "按命中词数排序。");
+    CHECK(tss["properties"]["limit"]["description"] == "最多返回并挂载几个,不填默认 5。");
+    CHECK(tss["required"] == nlohmann::json::array({"query"}));
+
+    lubancode::tools::SkillTool skill(std::vector<lubancode::tools::SkillMeta>{});
+    CHECK(skill.description() == kSkillDescBefore);
+    CHECK(skill.input_schema()["properties"]["name"]["description"] ==
+          "要加载的技能名,跟系统提示里列出的名字一致");
+    CHECK(skill.input_schema()["required"] == nlohmann::json::array({"name"}));
+
+    lubancode::tools::ListSessionsTool list_sessions(
+        [] { return std::vector<lubancode::agent::PeerCard>{}; }, "self");
+    CHECK(list_sessions.description() == kListSessionsDescBefore);
+    CHECK(list_sessions.input_schema() == nlohmann::json::object());
+
+    lubancode::tools::SendSessionMessageTool send_session(
+        [] { return std::vector<lubancode::agent::PeerCard>{}; },
+        [](const lubancode::agent::PeerCard&, const std::string&) {
+            return lubancode::agent::PeerDelivery::Delivered;
+        });
+    CHECK(send_session.description() == kSendSessionMessageDescBefore);
+    const nlohmann::json sms = send_session.input_schema();
+    CHECK(sms["properties"]["target"]["description"] == "对方会话的名字或 peer_id");
+    CHECK(sms["properties"]["text"]["description"] == "纯文本正文");
+    CHECK(sms["required"] == nlohmann::json::array({"target", "text"}));
+
+    lubancode::cli::WorktreeSession worktree_session;
+    lubancode::tools::WorktreeTool worktree(worktree_session, nullptr, nullptr);
+    CHECK(worktree.description() == kWorktreeDescBefore);
+    const nlohmann::json wts = worktree.input_schema();
+    CHECK(wts["properties"]["action"]["description"] ==
+          "enter=建房或进已有房(整场会话搬进去);status=房内状态;list=列工作树;"
+          "exit=搬回原处(配 mode)");
+    CHECK(wts["properties"]["name"]["description"] ==
+          "enter 时的房名(字母数字-_),不填自动生成;也可传已有 worktree 的名字或路径,"
+          "园子(.lubancode/worktrees)之外的房要先经用户确认");
+    CHECK(wts["properties"]["base"]["description"] ==
+          "enter 建新房的基准:fresh=远端默认分支(缺省,fetch 5 秒封顶失败回落本地);"
+          "head=当前 HEAD");
+    CHECK(wts["properties"]["mode"]["description"] ==
+          "exit 的方式:keep=房留在盘上;remove=干净才删(脏了必须用户确认,别替用户点头)");
+    CHECK(wts["required"] == nlohmann::json::array({"action"}));
+
+    lubancode::memory::Options memory_options;
+    lubancode::memory::ProjectIdentity memory_identity;
+    auto memory_store = std::make_shared<lubancode::memory::ProjectMemory>(
+        memory_identity, std::filesystem::path("D:\\never\\used"), memory_options);
+    lubancode::memory::MemorySaveTool memory_save(memory_store);
+    CHECK(memory_save.description() == kMemorySaveDescBefore);
+    const nlohmann::json mss = memory_save.input_schema();
+    CHECK(mss["properties"]["kind"]["description"] ==
+          "fact=可核验的项目事实；preference=用户明确说出的本项目偏好；"
+          "feedback=用户明说的行事纠正(须 user-stated)");
+    CHECK(mss["properties"]["id"]["description"] == "可选。更新已有记忆时用索引里的稳定 id");
+    CHECK(mss["properties"]["title"]["description"] == "一个可独立更新的短主题");
+    CHECK(mss["properties"]["summary"]["description"] == "索引里的一行摘要");
+    CHECK(mss["properties"]["content"]["description"] ==
+          "精炼正文，写事实、证据与注意事项，不抄大段源码");
+    CHECK(mss["properties"]["keywords"]["description"] ==
+          "函数名、类名、命令等精确检索词，最多 16 项");
+    CHECK(mss["properties"]["paths"]["description"] ==
+          "支撑事实的项目内相对路径，最多 24 项；fact 必填至少一项");
+    CHECK(mss["properties"]["confidence"]["description"] ==
+          "user-stated=用户明说的偏好；verified=已核验的事实；"
+          "inferred=推断(只该出现在待审候选，不该走本工具)");
+    CHECK(mss["properties"]["scope"]["description"] == "可选。当前工作目录不在范围内时不注入，防串味");
+    CHECK(mss["properties"]["scope"]["properties"]["kind"]["description"] ==
+          "记忆适用的范围；subtree/path 须配 value；"
+          "user=跨项目用户记忆(仅 preference/feedback，"
+          "不得带项目路径证据，须全局授权 memory.user_enabled)");
+    CHECK(mss["properties"]["scope"]["properties"]["value"]["description"] ==
+          "项目内相对路径(subtree/path 时必填)");
+    CHECK(mss["properties"]["evidence"]["description"] == "可选。可核验证据，最多 24 项；fact 建议给出");
+    CHECK(mss["properties"]["evidence"]["items"]["properties"]["path"]["description"] == "项目内相对路径");
+    CHECK(mss["properties"]["evidence"]["items"]["properties"]["symbol"]["description"] ==
+          "可选:函数/类/配置键");
+    CHECK(mss["properties"]["expires_at"]["description"] ==
+          "可选。临时规约的到期日(YYYY-MM-DD 或 ISO 时间);到期后不再召回");
+    CHECK(mss["required"] == nlohmann::json::array({"kind", "title", "summary", "content"}));
+
+    lubancode::ptc::PtcTool ptc(clearance_registry, nullptr, lubancode::ptc::PtcTool::Config{});
+    CHECK(ptc.description() == kPtcDescBefore);
+}
+
+TEST_CASE("清底批: en 下 description 与参数说明都是英文") {
+    LangGuard guard;
+    lubancode::cli::SetLanguage("en");
+
+    lubancode::config::SearchConfig search_config;
+    search_config.provider = "tavily";
+    search_config.api_key = "test";
+    lubancode::tools::WebSearchTool web_search(search_config);
+    CHECK(web_search.description().find("Web search; returns a numbered list") == 0);
+    const nlohmann::json wss = web_search.input_schema();
+    CHECK(wss["properties"]["query"]["description"] == "Search keywords or question");
+    CHECK(wss["properties"]["count"]["description"].get<std::string>().find(
+              "omit for the default 5") != std::string::npos);
+
+    lubancode::tools::WebFetchTool web_fetch;
+    CHECK(web_fetch.description().find("Fetch a web page") == 0);
+    CHECK(web_fetch.input_schema()["properties"]["url"]["description"].get<std::string>().find(
+              "must start with http:// or https://") != std::string::npos);
+
+    lubancode::tools::ToolRegistry clearance_registry;
+    auto loaded = std::make_shared<std::set<std::string>>();
+    lubancode::tools::ToolSearchTool tool_search(clearance_registry, loaded);
+    CHECK(tool_search.description().find("Search deferred-mounted tools by keyword") == 0);
+    CHECK(tool_search.input_schema()["properties"]["limit"]["description"].get<std::string>().find(
+              "omit for the default 5") != std::string::npos);
+
+    lubancode::tools::SkillTool skill(std::vector<lubancode::tools::SkillMeta>{});
+    CHECK(skill.description().find("Load a discovered skill") == 0);
+    CHECK(skill.input_schema()["properties"]["name"]["description"].get<std::string>().find(
+              "the same name as listed in the system prompt") != std::string::npos);
+
+    lubancode::tools::ListSessionsTool list_sessions(
+        [] { return std::vector<lubancode::agent::PeerCard>{}; }, "self");
+    CHECK(list_sessions.description().find(
+              "List the other Lubancode sessions the current user has open") == 0);
+
+    lubancode::tools::SendSessionMessageTool send_session(
+        [] { return std::vector<lubancode::agent::PeerCard>{}; },
+        [](const lubancode::agent::PeerCard&, const std::string&) {
+            return lubancode::agent::PeerDelivery::Delivered;
+        });
+    CHECK(send_session.description().find("Hand a plain-text message to another Lubancode session") == 0);
+    CHECK(send_session.input_schema()["properties"]["text"]["description"] == "Plain-text body");
+
+    lubancode::cli::WorktreeSession worktree_session;
+    lubancode::tools::WorktreeTool worktree(worktree_session, nullptr, nullptr);
+    CHECK(worktree.description().find("Work inside an isolated git worktree") == 0);
+    CHECK(worktree.input_schema()["properties"]["mode"]["description"].get<std::string>().find(
+              "deleted only if clean") != std::string::npos);
+
+    lubancode::memory::Options memory_options;
+    lubancode::memory::ProjectIdentity memory_identity;
+    auto memory_store = std::make_shared<lubancode::memory::ProjectMemory>(
+        memory_identity, std::filesystem::path("D:\\never\\used"), memory_options);
+    lubancode::memory::MemorySaveTool memory_save(memory_store);
+    CHECK(memory_save.description().find("Queue a small, stable project fact") == 0);
+    const nlohmann::json mss = memory_save.input_schema();
+    CHECK(mss["properties"]["kind"]["description"].get<std::string>().find(
+              "fact=a verifiable project fact") == 0);
+    CHECK(mss["properties"]["scope"]["properties"]["kind"]["description"].get<std::string>().find(
+              "requires the global authorization memory.user_enabled") != std::string::npos);
+
+    lubancode::ptc::PtcTool ptc(clearance_registry, nullptr, lubancode::ptc::PtcTool::Config{});
+    CHECK(ptc.description().find("Orchestrate a Python script to call mounted read-only tools") == 0);
 }

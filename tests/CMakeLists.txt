@@ -108,8 +108,15 @@ add_executable(lubancode_tests
   # scope/搜索/分页/坏档/空表/指纹缓存)。
   test_session_catalog.cpp
   # 第二步:SessionPicker 纯逻辑(焦点轮换/搜索/筛选排序切换/翻页边界/
-  # 选中保持/视口窗口账/渲染帧/空态/相对时间/百分比)。
+  # 选中保持/视口窗口账/渲染帧/空态/相对时间/百分比);第三步:三种查看态
+  # (Ctrl+T 转录浮层/Ctrl+E 展开/Ctrl+O 紧凑舒展)。
   test_session_picker.cpp
+  # 第四五步:SessionLifecycle 搬与删的唯一收口(引用解析/archive 字节
+  # 原样/幂等/目标拒绝/路径校验/开句柄先关/归档视图不掺默认列表)。
+  test_session_lifecycle.cpp
+  # 第六步:SessionCommandService(runtime 侧命令服务,typed command 收口)
+  # 与合同枚举往返(thread.archive 等 + thread.deleted)。
+  test_session_command_service.cpp
   test_prompt_files.cpp
   test_project_instructions.cpp
   test_project_memory.cpp
@@ -177,9 +184,31 @@ add_executable(lubancode_tests
   test_app_server_turn.cpp
   # app-server 阶段 2:审批与打断(permission/request 四态、悬停/超时/
   # 打断、acceptForSession 免问、迟到失效、ask_user 的 user/ask)。
+  test_app_server_approval.cpp
+  # app-server 阶段 3:diff/进度(diff 行表穿透、增量合并、命令条目、
+  # 事件 seq、图片输入、methods 冻结矩阵)。
+  test_app_server_progress.cpp
+  # app-server P9 收尾:thread/archive|unarchive|delete 三命令走
+  # SessionCommandService、workflow/query 快照与增量。
+  test_app_server_sessions.cpp
+  # app-server 阶段 4:真进程冒烟(stdio 管道替身;缺主程序的构建跳过)。
+  test_app_server_smoke.cpp
   # 显示系统剥离单第一步:runtime 合同(Event/Command/Broker 形状与序列化
   # 往返保真、稳定枚举字符串、坏报文抛错)。
   test_runtime_contract.cpp
+  # 显示系统剥离单第五步:TurnItem 领域条目 + 中立 diff 行表(与 cli 算法同钉)。
+  test_turn_item.cpp
+  # 终端回合视觉收束单:TurnView/TurnCollector(批次分组、状态账、metrics)、
+  # loop step/batch 边界回调、footer 尺子与带字横线、枚举稳定字符串。
+  test_turn_view.cpp
+  # 第五步后半:同一假 backend 事件流喂 Terminal/Json 两 sink,同流同账。
+  test_event_sinks.cpp
+  # 第六步:SessionRuntime(存档账/权限账/thread 身份,脱离终端可单测)。
+  test_session_runtime.cpp
+  # 第七步:CommandService(/model、/resume、审批回答三条 typed API)。
+  test_command_service.cpp
+  # 第八步:依赖守门(engine/runtime 搜不到终端件;单子验收原文的 grep 钉成测试)。
+  test_app_boundary_gate.cpp
   # 显示系统剥离单 P2:AgentLoop 异步审批通道(async 优先/同步回落/四态
   # 收账/悬空收口文案)。
   test_approval_broker.cpp
@@ -196,8 +225,44 @@ add_executable(lubancode_tests
   # 混日志/坏 JSON/call_id 不合/超时/ESC/非零退出/stderr 塞满/输出超限,
   # 缺 Python 整文件 SKIP。
   test_plugin_process.cpp
+  # Workflows 自然语言编排单第 1 批:定义/解析 round-trip/内容 hash/
+  # catalog 两级扫描与遮蔽/校验器全错类/图渲染,纯逻辑。
+  test_workflow_definition.cpp
+  # 第 2 批:Store/resolver、状态机迁移表、RunJournal 落盘与恢复、顺序图
+  # 最小闭环(fake executor/fake clock)、重试/取消/预算/fallback 边。
+  test_workflow_runtime.cpp
+  # 第 3 批:parallel/join 五策略、稳定汇合顺序、并发帽、map/foreach/
+  # reduce、switch 条件选路、并行取消传播(论文四路假工具)。
+  test_workflow_parallel.cpp
+  # 第 4 批:宿主执行器(真 ToolRegistry/假 backend/即时 broker)、
+  # subflow 结果映射与错误隔离、journal 断点恢复。
+  test_workflow_agents.cpp
+  # 第 5 批:Draf 解析(杜撰工具/明文 secret 拦截)/追问计算/预览/
+  # staging+rename 原子安装/回滚件/enable/remove/命令与参数解析。
+  test_workflow_compiler.cpp
+  # 第 6 批:受约束 GraphPatch(模板集/allowlist/append-only)、风险
+  # 评定、WorkflowRunSnapshot 与增量事件(重连补账)。
+  test_workflow_planner.cpp
+  # 第 3 步(Python scaffold):plugin init 生成物形状 + 生成的 runner.py
+  # 真机往返 + 单测模板真跑;缺 Python 的用例明确 SKIP。
+  test_plugin_scaffold.cpp
+  # 第 4 步(收现有 Lua):pure/trusted profile、指令预算、内存帽、取消链、
+  # EmbeddedLuaRuntime 台账与幂等。
+  test_plugin_lua.cpp
+  # 第 7 步(接 Runtime):adapter 的 call_id 走 ProcessIdAuthority、
+  # LogSink 分流、SetCancel/SetCwd 装配口、registry 中立形状。
+  test_plugin_runtime_mount.cpp
+  # 第 8 步(管理面与信任):env 整环境替换硬保证、PluginTrustStore 记账、
+  # 插件内容指纹、项目插件信任门。
+  test_plugin_admin.cpp
+  # 工具调用逐枚追踪单:五工具批次/崩溃注入九窗口四档恢复/幂等与冲突/
+  # trace-aware 修补/落盘次序/来源与错误码/undo token/可疑窗口。
+  test_tool_trace.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
+# 依赖守门(显示系统剥离单第八步):测试要现扫源码树,把源码根递进去。
+target_compile_definitions(lubancode_tests PRIVATE
+  LUBANCODE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/..")
 target_compile_features(lubancode_tests PRIVATE cxx_std_23)
 target_precompile_headers(lubancode_tests PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/pch.hpp")
@@ -219,26 +284,31 @@ endif()
 target_compile_definitions(lubancode_tests PRIVATE
   LUBANCODE_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
   LUBANCODE_TEST_OFFICIAL_SKILLS_DIR="${CMAKE_SOURCE_DIR}/skills"
-  LUBANCODE_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  LUBANCODE_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+  # app-server 冒烟(阶段 4):真进程测试要找到 build 树里的主程序。
+  LUBANCODE_BINARY_DIR="${CMAKE_BINARY_DIR}")
 
-# M7:真 DLL 加载测试的靶子——示例插件 hello_plugin(直接编 examples/ 里那
-# 份源码,顺带验证示例真的能编)+ api_version 填错的 bad_version_plugin。
-# 两个 DLL 落在同一个输出目录,目录路径喂给测试(LUBANCODE_TEST_PLUGIN_DIR),
-# PluginHost::LoadDirectory 真扫真载。
+# M7 起家,plugins 单第 5 步起三平台:真库加载测试的靶子——示例插件
+# hello_plugin(直接编 examples/ 里那份源码,顺带验证示例真的能编)+
+# abi_tag 填错的 bad_version_plugin。两个库落在同一个输出目录,目录路径
+# 喂给测试(LUBANCODE_TEST_PLUGIN_DIR),PluginHost::LoadDirectory 真扫
+# 真载。CI 的 windows/ubuntu/macos 三条腿各真编各平台的产物。
+add_library(hello_plugin_fixture SHARED
+  ${CMAKE_SOURCE_DIR}/examples/plugins/hello_plugin/hello_plugin.c)
+target_include_directories(hello_plugin_fixture PRIVATE ${CMAKE_SOURCE_DIR}/include)
 if(WIN32)
-  add_library(hello_plugin_fixture SHARED
-    ${CMAKE_SOURCE_DIR}/examples/plugins/hello_plugin/hello_plugin.c)
-  target_include_directories(hello_plugin_fixture PRIVATE ${CMAKE_SOURCE_DIR}/include)
   set_target_properties(hello_plugin_fixture PROPERTIES OUTPUT_NAME hello_plugin PREFIX "")
-
-  add_library(bad_version_plugin SHARED fixtures/bad_version_plugin.c)
-  target_include_directories(bad_version_plugin PRIVATE ${CMAKE_SOURCE_DIR}/include)
-  set_target_properties(bad_version_plugin PROPERTIES PREFIX "")
-
-  add_dependencies(lubancode_tests hello_plugin_fixture bad_version_plugin)
-  target_compile_definitions(lubancode_tests PRIVATE
-    LUBANCODE_TEST_PLUGIN_DIR="$<TARGET_FILE_DIR:hello_plugin_fixture>")
 endif()
+
+add_library(bad_version_plugin SHARED fixtures/bad_version_plugin.c)
+target_include_directories(bad_version_plugin PRIVATE ${CMAKE_SOURCE_DIR}/include)
+if(WIN32)
+  set_target_properties(bad_version_plugin PROPERTIES PREFIX "")
+endif()
+
+add_dependencies(lubancode_tests hello_plugin_fixture bad_version_plugin)
+target_compile_definitions(lubancode_tests PRIVATE
+  LUBANCODE_TEST_PLUGIN_DIR="$<TARGET_FILE_DIR:hello_plugin_fixture>")
 
 add_test(NAME lubancode_tests COMMAND lubancode_tests)
 

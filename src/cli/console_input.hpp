@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -403,6 +404,27 @@ bool StartStreamFooterWorking(const std::string& label);
 void UpdateStreamFooterWorking(const std::string& label, std::size_t highlighted_glyph,
                                long long elapsed_seconds);
 void StopStreamFooterWorking();
+
+// ---- turn 级 Working 活动条(终端回合视觉收束单) ------------------------
+// 现有 Start/Update/Stop 那组归 SpinnerBackend 管:每次模型请求新起、首个
+// stream event 一到便停——一轮里"模型 -> 工具 -> 模型"计时会消失重来,
+// 报的不是整轮用时。这组认整个 turn:
+//   BeginTurnActivity:用户 prompt 过了本地校验、turn.started 落账那一刻亮。
+//     started_at 是 turn 起点(epoch 毫秒);此后正文 delta、工具批次、
+//     下一次模型请求、重试都不熄、秒数不归零。
+//   UpdateTurnActivityElapsed:计时一秒一跳(或动画线程每拍报同一秒),
+//     highlighted_glyph 走字扫光,字符数与显示宽恒不变。
+//   SetTurnActivityInterruptRequested:ESC 置了 cancel,文案换 "Stopping..."
+//     (终态落账后由 EndTurnActivity 退场,不瞬间消失)。
+//   EndTurnActivity:turn.completed 一到就熄;返回最终显示的整秒数,交
+//     Worked footer 对账(两边同一只钟,不得差一截)。
+// 没起过的 EndTurn 返回 -1(不误伤 /compact 那类单次 spinner)。
+void BeginTurnActivity(const std::string& label, std::int64_t started_at_ms);
+void UpdateTurnActivityElapsed(std::size_t highlighted_glyph, std::int64_t elapsed_seconds);
+void SetTurnActivityInterruptRequested();
+long long EndTurnActivity();
+// 当前 turn 活动条是否亮着(装配层判断要不要抢 Spinner 的绘制权)。
+bool TurnActivityActive();
 
 // 0.22.5:工具确认交互(main.cpp 的 PrintConfirmDetails/ShowDiffPreview 到
 // ReadLine([y/a/N] 提示)那一整段)期间,流式脚注框必须让路——真机实测

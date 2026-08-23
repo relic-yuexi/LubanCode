@@ -22,9 +22,13 @@
 #include "cli/i18n.hpp"
 #include "platform/console.hpp"
 #include "ptc/ptc_tool.hpp"
+#include "runtime/plugin_tool.hpp"
+#include "runtime/tool_trace_hub.hpp"
 #include "runtime/turn_runtime.hpp"
 #include "tools/command_safety.hpp"
+#include "tools/undo_file_edit.hpp"
 #include "tools/hooks.hpp"
+#include "tools/lua_tool.hpp"
 
 namespace lubancode::app {
 
@@ -46,6 +50,27 @@ void PrintDivider(const lubancode::cli::Theme& theme, bool is_console) {
     // 80 列上限;探测失败按 80 兜底不变。
     const int detected = width.value_or(80);
     const std::string line = lubancode::cli::BuildDividerLine(detected, plain, detected);
+    if (line.empty()) {
+        return;
+    }
+    std::cout << theme.stats << line << theme.reset << "\n";
+    std::cout.flush();
+}
+
+// turn 尾分界线(终端回合视觉收束单):"──── Worked for 6m 41s ────"。
+// 每个用户 turn 恰一枚,落在正文/错误/打断提示之后、下一只 composer 之前。
+// tone 按终态挑:正常 Worked、打断 Stopped、失败/预算耗尽 Failed。墙钟
+// 由调用方按 steady_clock 算好递进来(毫秒)。
+// is_console 为假(管道/重定向)也落——只是退成纯文案(不带横线装饰):
+// 这是回合的时间账,automation 的 stdout 契约里该有它;开头那条裸分界线
+// 沿老规矩只在真控制台打,两者口径不同(那条是装饰,这条是账)。
+void PrintTurnFooter(const lubancode::cli::Theme& theme, bool is_console, std::int64_t wall_ms,
+                     lubancode::cli::TurnFooterTone tone) {
+    const bool plain = theme.reset.empty() || !is_console;
+    const std::optional<int> width = lubancode::cli::DetectConsoleWidth();
+    const int detected = width.value_or(80);
+    const std::string text = lubancode::cli::FormatTurnFooterText(wall_ms, tone);
+    const std::string line = lubancode::cli::BuildTurnFooterLine(text, detected, plain);
     if (line.empty()) {
         return;
     }
@@ -498,7 +523,7 @@ bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
 // 改写状态、管道模式的 [工具]/[工具完成] 稳定纯文本),todo_state 也归它
 // 持有。回调层只管把事件原样转进去。
 lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::string>& always_allowed_tools,
-                                            const lubancode::cli::Theme& theme, UsageStats& usage_stats,
+                                            const lubancode::cli::Theme& theme, lubancode::runtime::TurnUsageStats& usage_stats,
                                             lubancode::cli::ContextTracker& context_tracker,
                                             lubancode::tools::ToolRegistry& registry,
                                             lubancode::hooks::HookDispatcher* hook_dispatcher,
@@ -506,8 +531,15 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                             const std::vector<std::string>& allow_commands,
                                             const std::vector<std::string>& deny_commands,
                                             const std::atomic<bool>* cancel_flag,
-                                            lubancode::agent::WorkflowRecorder* recorder) {
+                                            lubancode::agent::WorkflowRecorder* recorder,
+                                            lubancode::runtime::ToolTraceHub* trace_hub,
+                                            lubancode::runtime::TurnCollector* view_collector) {
     lubancode::agent::Callbacks callbacks;
+
+    // 逐枚追踪单:装了 hub 的轮次,recorder 吃 canonical trace 的投影
+    // (hub.AttachProjection),不走 on_tool_start/on_tool_done 各自手打——
+    // 一份事件,两路消费,次序不再分叉。
+    const bool trace_projection_installed = trace_hub != nullptr;
 
     // hooks:dispatcher 为空指针或没有工具事件的定义是常态(没配 hooks 的
     // 用户占多数),这时候干脆不设这些回调——跟"没有 hooks 系统"时行为
@@ -563,7 +595,11 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
     // 拿):正文照旧逐字原样打,顺带给回合收束后的 markdown 重画记账;
     // 管道模式/plain 主题下 tracker 不启用,OnDelta 就是原来那三行。
     // 先收掉正在展示的思考折叠块(如果有),再加分隔,最后打正文。
-    callbacks.on_text_delta = [&display, &body_tracker](const std::string& text) {
+    // view_collector(回合视觉收束):旁路入账,屏上一个字节不变。
+    callbacks.on_text_delta = [&display, &body_tracker, view_collector](const std::string& text) {
+        if (view_collector != nullptr) {
+            view_collector->OnTextDelta(text, /*thinking=*/false);
+        }
         if (display.HasActiveThinking()) {
             display.OnThinkingDone();
             body_tracker.OnToolBlockDone();  // 下一段正文前垫一空行,别粘在思考条目上
@@ -573,7 +609,10 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
 
     // 思考增量(thinking/reasoning):首 delta 断开正文块 + PaintNew "思考中…",
     // 后续 delta 只攒正文不刷屏。结束时标题换成 "思考 Xs"。
-    callbacks.on_thinking_delta = [&display, &body_tracker](const std::string& text) {
+    callbacks.on_thinking_delta = [&display, &body_tracker, view_collector](const std::string& text) {
+        if (view_collector != nullptr) {
+            view_collector->OnTextDelta(text, /*thinking=*/true);
+        }
         if (!display.HasActiveThinking()) {
             body_tracker.OnBlockBreak();
         }
@@ -584,11 +623,15 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
     // markdown:条目要开画了,正文当前块到此为止(保持原样,不重画)。
     // recorder:录一遍生成技能(0.25.x)的监听挂点——只在这里旁听事件,
     // 不改工具本身的执行路径;没在录(nullptr)零影响。
-    callbacks.on_tool_start = [&display, &body_tracker, recorder](const std::string& tool_use_id,
+    callbacks.on_tool_start = [&display, &body_tracker, recorder, view_collector, trace_projection_installed](
+                                  const std::string& tool_use_id,
                                                                   const std::string& name,
                                                                   const nlohmann::json& input) {
-        if (recorder != nullptr) {
+        if (recorder != nullptr && !trace_projection_installed) {
             recorder->RecordToolCall(name, input);
+        }
+        if (view_collector != nullptr) {
+            view_collector->OnToolStarted(tool_use_id, name, input);
         }
         display.OnThinkingDone();  // 思考块若有,先收尾
         body_tracker.OnBlockBreak();
@@ -624,11 +667,55 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         return std::make_shared<ReadyApprovalFuture>(std::move(response));
     };
 
-    callbacks.on_tool_done = [&display, &body_tracker, recorder](const std::string& tool_use_id,
+    // 回合视觉收束:step 边界入账(批次边界在下面)。零成本旁路,不设
+    // 回调的既有消费方(单测)行为不变。
+    callbacks.on_model_step_started = [view_collector](int step_index) {
+        if (view_collector != nullptr) {
+            view_collector->OnModelStepStarted(step_index);
+        }
+    };
+
+    // 回合视觉收束:批次边界接线。同一条 assistant message 吐多枚 tool_use
+    // 时,batch.started 先到——把整批条目都立成 Pending(绿点变黄灯"排队
+    // 中"),工具一枚枚真开跑时逐枚点亮 Running。单子"工具批次"节:用户
+    // 一眼能看出"模型这拍打算跑三件",也能看出卡在哪一件。单枚批次画面
+    // 不变(登记随即被 start 覆盖)。
+    callbacks.on_tool_batch_started = [&display, view_collector](int step_index, int batch_index,
+                                                 const std::vector<std::string>& ordered_tool_use_ids) {
+        if (view_collector != nullptr) {
+            view_collector->OnToolBatchStarted(step_index, batch_index, ordered_tool_use_ids);
+        }
+        if (ordered_tool_use_ids.size() <= 1) {
+            return;  // 一枚不算批:结构留在账里,画面只靠连续缩进与间距成块
+        }
+        display.OnBatchAnnounced(ordered_tool_use_ids);
+    };
+
+    callbacks.on_tool_batch_finished = [&display, view_collector](int batch_index, bool interrupted) {
+        if (view_collector != nullptr) {
+            view_collector->OnToolBatchFinished(batch_index, interrupted);
+        }
+        if (interrupted) {
+            display.OnBatchSkipped();  // 还 Pending 的按 Skipped 定格,屏上不缺枚
+        }
+    };
+
+    callbacks.on_tool_done = [&display, &body_tracker, recorder, view_collector, cancel_flag,
+                              trace_projection_installed](
+                                                                 const std::string& tool_use_id,
                                                                  const std::string& name,
                                                                  const lubancode::tools::Tool::Result& result) {
-        if (recorder != nullptr) {
+        if (recorder != nullptr && !trace_projection_installed) {
             recorder->RecordToolResult(name, result.is_error, result.content);
+        }
+        if (view_collector != nullptr) {
+            // ESC 后补的合成结果(is_error 且 cancel 已置)按 Interrupted 记,
+            // 不冒充跑过又失败;真失败照 Failed。
+            std::optional<lubancode::runtime::TurnItemViewState> forced;
+            if (result.is_error && cancel_flag != nullptr && cancel_flag->load()) {
+                forced = lubancode::runtime::TurnItemViewState::Interrupted;
+            }
+            view_collector->OnToolFinished(tool_use_id, result.content, result.is_error, forced);
         }
         display.OnToolDone(tool_use_id, name, result);
         body_tracker.OnToolBlockDone();
@@ -649,10 +736,13 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         body_tracker.OnToolBlockDone();
     };
 
-    callbacks.on_usage = [&display, &usage_stats, &context_tracker](const lubancode::api::UsageReport& report) {
+    callbacks.on_usage = [&display, &usage_stats, &context_tracker, view_collector](const lubancode::api::UsageReport& report) {
         // 请求结束:思考块若无后续文本/工具接上(只思考不回答的极端情况),
         // 在这里收尾。有后续时 OnThinkingDone 是幂等空操作。
         display.OnThinkingDone();
+        if (view_collector != nullptr) {
+            view_collector->OnUsage(report);
+        }
         usage_stats.Add(report);
         // ContextTracker 只认"最近一次请求"的真实用量,整个覆盖,不跟着
         // usage_stats 一起累加——语义区别见 cli/context_tracker.hpp 文件头。
@@ -728,6 +818,18 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         hooks.on_permission_request = callbacks.on_permission_request;
         hooks.on_tool_phase = callbacks.on_tool_phase;
         hooks.hook_dispatcher = hook_dispatcher;
+        // 逐枚追踪单:子代理内层工具事件并轨进主会话的 trace hub。hub 的
+        // OnTrace 自带锁与单 writer 落盘,子代理任务线程投递不会跟主
+        // JSONL 交错(单子 agent/PTC 节)。parent_execution_id 延迟取值
+        // (agent 工具真正开跑时才由 hub 钉)。
+        if (trace_hub != nullptr) {
+            hooks.on_tool_trace = [trace_hub](const lubancode::agent::ToolTraceEvent& event) {
+                trace_hub->OnTrace(event);
+            };
+            hooks.parent_execution_id_getter = [trace_hub]() {
+                return trace_hub->current_agent_execution();
+            };
+        }
         if (callbacks.on_post_tool_use_hook) {
             hooks.on_post_tool_use_hook = [&display, base = callbacks.on_post_tool_use_hook](
                                               const std::string& tool_use_id, const std::string& name,
@@ -768,6 +870,21 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         hooks.on_post_tool_use_hook = callbacks.on_post_tool_use_hook;
         hooks.cancel = cancel_flag;
         ptc_tool->SetHooks(std::move(hooks));
+    }
+
+    // 插件工具(plugins 单第 7 步的 ESC 链):process 插件的 adapter
+    // (进程超时/取消同一落锤路)与 Lua 工具(hook 里查旗掐死循环)每轮
+    // 灌这一轮的取消旗。registry 是本轮实际在用的表(main/sub 都从这走)。
+    if (cancel_flag != nullptr) {
+        for (const auto& tool : registry.All()) {
+            if (auto* plugin_adapter = dynamic_cast<lubancode::runtime::PluginToolAdapter*>(tool.get());
+                plugin_adapter != nullptr) {
+                plugin_adapter->SetCancel(cancel_flag);
+            }
+            if (auto* lua_tool = dynamic_cast<lubancode::tools::LuaTool*>(tool.get()); lua_tool != nullptr) {
+                lua_tool->SetCancel(cancel_flag);
+            }
+        }
     }
 
     return callbacks;
@@ -824,7 +941,10 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                        const std::vector<std::string>& deny_commands,
                        lubancode::tools::AgentTool* completion_agent,
                        lubancode::agent::WorkflowRecorder* recorder, bool silent,
-                       UsageStats* usage_out) {
+                       lubancode::runtime::TurnUsageStats* usage_out,
+                       lubancode::runtime::ToolTraceHub* turn_trace_hub,
+                       std::string thread_id_for_trace, std::string turn_id_for_trace,
+                       lubancode::runtime::TurnView* turn_view_out) {
     auto prepared_input = lubancode::cli::PrepareImageInput(user_input);
     if (!prepared_input.has_value()) {
         std::cerr << theme.error << tr("error.prefix") << ImageInputErrorText(prepared_input.error())
@@ -869,7 +989,17 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     // (UserPromptSubmit 与背景回流声明已在上面 runtime::ApplyUserPromptSubmit
     // 一口收账,这里不再另发一遍。)
 
-    UsageStats usage_stats;
+    lubancode::runtime::TurnUsageStats usage_stats;
+    // 视图账(终端回合视觉收束单第 3 步:正文入账):TurnCollector 与
+    // ToolDisplay 并行记账——屏上逐字不变(现有 painter 一根毛不动),
+    // collector 攒 TurnView 给 Ctrl+L/resume 重放与将来的 TerminalTurnRenderer
+    // 整轮重画。slash/本地校验失败的轮到不了这里,不造假账。
+    lubancode::runtime::IdAuthority& view_ids = lubancode::runtime::ProcessIdAuthority();
+    lubancode::runtime::TurnCollector view_collector(view_ids, view_ids.NextTurnId());
+    view_collector.StartTurn(
+        user_input, std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count());
     // 轮级核(P3):cancel 旗挪进 runtime::TurnRuntime——监听线程写
     // (request_interrupt)、Run 线程读(interrupted),acquire/release 语义
     // 原文照搬。ToolDisplay/BuildCallbacks/loop.Run 收它的地址,行为与
@@ -892,10 +1022,45 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
         turn_context.permission_mode = lubancode::app::HookPermissionModeText();
         hook_dispatcher->UpdateContext(std::move(turn_context));
     }
-    const lubancode::agent::Callbacks callbacks =
+    lubancode::agent::Callbacks callbacks =
         BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker, registry,
                         hook_dispatcher, display, body_tracker, allow_commands, deny_commands, &cancel_flag,
-                        recorder);
+                        recorder, turn_trace_hub, &view_collector);
+    if (turn_trace_hub != nullptr) {
+        if (recorder != nullptr) {
+            turn_trace_hub->AttachProjection(
+                [recorder](const lubancode::agent::ToolTraceEvent& event) {
+                    if (event.kind == lubancode::agent::ToolTraceEventKind::Scheduled) {
+                        recorder->RecordToolCall(event.tool_name, nlohmann::json::object(), event.execution_id,
+                                                 event.tool_use_id);
+                    } else if (event.kind == lubancode::agent::ToolTraceEventKind::ExecutionFinished) {
+                        recorder->RecordToolResult(event.tool_name,
+                                                   event.outcome != lubancode::agent::ToolOutcome::Succeeded,
+                                                   event.fallback_message, lubancode::agent::ToString(event.outcome),
+                                                   event.error_code, event.execution_id);
+                    }
+                });
+        }
+        turn_trace_hub->Install(loop, callbacks, thread_id_for_trace, turn_id_for_trace);
+        // 补偿关系边(单子第四期):undo_file_edit execute 后报"这枚补偿
+        // 谁",finished 栅栏随账落 compensates。
+        callbacks.on_tool_compensates = [&registry](const std::string& /*execution_id*/,
+                                                    const std::string& tool_name) -> std::string {
+            if (tool_name != "undo_file_edit") {
+                return std::string();
+            }
+            const auto* tool = registry.Find(tool_name);
+            if (tool == nullptr) {
+                return std::string();
+            }
+            const auto* undo_tool = dynamic_cast<const lubancode::tools::UndoFileEditTool*>(tool);
+            return undo_tool != nullptr ? undo_tool->last_compensates() : std::string();
+        };
+    }
+
+    // 逐枚追踪单:hub 装进 callbacks(canonical 事件出口 + 消息落盘次序
+    // 关口);recorder 挂成投影,只吃 execution_id/outcome/摘要。
+
 
     // markdown × M10:监听线程随时可能在流式正文当中插打 [已排队]/[已打断]
     // 整行——这几行不在 body_tracker 的行数账里,不通气的话收束重画会把
@@ -912,6 +1077,22 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     // 提示符那一行之后、模型正文开始打字机输出之前。
     PrintDivider(theme, is_console && !silent);
 
+    // turn 墙钟(终端回合视觉收束单):起点是"用户输入过了本地校验、正式
+    // 交给 turn runtime"那一刻(本函数顶上的 prepared/gate 都已过,这里就
+    // 是起跑线);终点在 footer 落笔前。steady_clock,不受系统改钟影响;
+    // 墙上时间只作日志字段。
+    const std::chrono::steady_clock::time_point turn_wall_start = std::chrono::steady_clock::now();
+    // turn 级 Working 活动条:认整个 turn,不认单次模型请求(单子第六节)。
+    // 正文流、工具批次、下一次模型请求、重试都不熄、不归零;EndTurnActivity
+    // 在收口时熄,同一只钟交给 Worked footer。
+    if (is_console && lubancode::platform::SupportsScreenRepaint() && !silent) {
+        lubancode::cli::BeginTurnActivity(
+            lubancode::cli::tr("spinner.thinking"),
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count());
+    }
+
     // 0.21.x 流式脚注:流式期间在正文下方常驻一行"⎋ 打断 · 键入并回车 排队
     // 下一条",让用户看见能 ESC 打断、能键入排队(回归前屏上啥都没有)。只在
     // Windows 真控制台开——footer 要随时查光标位,POSIX 走 DSR 6n 会跟监听
@@ -925,22 +1106,45 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     // 醒——这里起一只轻量心跳线程,200ms 一拍调 RedrawStreamFooterLocked
     // (内部自己看挂起/事务计数,菜单占屏时零输出),Running 的耗时与灯才
     // 会走。只活 loop.Run() 这一段,Run() 一返回就停。
+    // 回合视觉收束:心跳同管 turn 活动条——秒数从 turn_wall_start 现算
+    // (一秒一跳),走字扫光沿 "Working" 七个字母缓扫(帧率 200ms 一拍,
+    // 字符数与显示宽恒不变,不拿 -\|/ 换字符引起抖动)。
     const class FooterHeartbeat {
     public:
-        explicit FooterHeartbeat(bool enabled) {
+        explicit FooterHeartbeat(bool enabled, const std::chrono::steady_clock::time_point* turn_start,
+                                 const std::atomic<bool>* cancel_ptr) {
             if (!enabled) {
                 return;
             }
-            thread_ = std::thread([this] {
+            thread_ = std::thread([this, turn_start, cancel_ptr] {
+                std::size_t frame = 0;
+                bool stopping_reported = false;
                 while (!stop_.load(std::memory_order_acquire)) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(200));
                     if (stop_.load(std::memory_order_acquire)) {
                         return;
                     }
                     std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-                    if (!lubancode::cli::RepaintSuspendedLocked()) {
+                    if (lubancode::cli::RepaintSuspendedLocked()) {
+                        continue;  // 菜单占屏/挂起:零输出,秒数照走(账不丢)
+                    }
+                    if (lubancode::cli::TurnActivityActive()) {
+                        const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                                 std::chrono::steady_clock::now() - *turn_start)
+                                                 .count();
+                        // ESC 真置了 cancel:活动条换 Stopping(终态落账后才
+                        // 退场,不瞬间消失让人以为已停、后台却还在跑)。
+                        if (cancel_ptr != nullptr && cancel_ptr->load(std::memory_order_acquire)) {
+                            if (!stopping_reported) {
+                                lubancode::cli::SetTurnActivityInterruptRequested();
+                                stopping_reported = true;
+                            }
+                        }
+                        lubancode::cli::UpdateTurnActivityElapsed(frame, elapsed);
+                    } else {
                         lubancode::cli::RedrawStreamFooterLocked();
                     }
+                    ++frame;
                 }
             });
         }
@@ -956,7 +1160,8 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     private:
         std::atomic<bool> stop_{false};
         std::thread thread_;
-    } footer_heartbeat(is_console && lubancode::platform::SupportsScreenRepaint() && !silent);
+    } footer_heartbeat(is_console && lubancode::platform::SupportsScreenRepaint() && !silent, &turn_wall_start,
+                      &cancel_flag);
 
     // 监听线程:流式期间的面板按键、排队/打断都在它手里(键位优先级见
     // TurnInputListener::ThreadMain)。
@@ -1045,6 +1250,38 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
         std::cout << "\n";
     }
 
+    // turn 收口的共用半段(终端回合视觉收束单):熄活动条、算墙钟、收
+    // 视图账。三条路(错误早退/打断/正常)都从这里过——footer 恰一枚,
+    // 不再从中途裸退。
+    const auto finish_turn_chrome = [&](lubancode::cli::TurnFooterTone tone) {
+        const long long activity_seconds = lubancode::cli::EndTurnActivity();
+        (void)activity_seconds;  // Working 秒数与 footer 同钟(同一只 steady 钟),
+                                 // 单测钉口径;这里不再二次对账,免得双写。
+        const auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - turn_wall_start)
+                                 .count();
+        using lubancode::runtime::TurnItemViewState;
+        TurnItemViewState view_status = TurnItemViewState::Succeeded;
+        switch (tone) {
+            case lubancode::cli::TurnFooterTone::Stopped:
+                view_status = TurnItemViewState::Interrupted;
+                break;
+            case lubancode::cli::TurnFooterTone::Failed:
+                view_status = TurnItemViewState::Failed;
+                break;
+            case lubancode::cli::TurnFooterTone::Worked:
+                break;
+        }
+        view_collector.FinishTurn(view_status, wall_ms, /*approval_wait=*/0);
+        if (turn_view_out != nullptr) {
+            *turn_view_out = view_collector.view();  // 会话层存档:Crtl+L/resume 重放用
+        }
+        // 静默档(查看态回流)不落:屏幕此刻归用户正看的查看帧。
+        if (!silent) {
+            PrintTurnFooter(theme, is_console, wall_ms, tone);
+        }
+    };
+
     if (!result.has_value()) {
         // 错误必须让人看见(本地兼容端 Effort 诊断单:xhigh 那次瞬时 exit 1,
         // transport 错误被屏上重画搅得若有若无)。三道保险:拿
@@ -1058,6 +1295,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
             std::cout.flush();
         }
         out.status = 1;
+        finish_turn_chrome(lubancode::cli::TurnFooterTone::Failed);  // Failed after Xs
         return out;
     }
     if (result->hit_step_limit) {
@@ -1067,9 +1305,13 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
         std::cerr << theme.error << tr("error.prefix")
                   << trf("error.step_limit", result->steps_used) << theme.reset << "\n";
         out.status = 1;
+        finish_turn_chrome(lubancode::cli::TurnFooterTone::Failed);  // 预算耗尽也是 Failed
         return out;
     }
     out.cancelled = result->cancelled;
+    // 输出预算耗尽也是失败收场(footer 词干用 Failed after),单立旗子
+    // 免得跟 cancelled 互相盖。
+    bool turn_failed = false;
 
     // 输出预算耗尽且正文为空(reasoning 吃光 max_tokens):明报,不留一片
     // 空白。规格根因四:结构化失败页——实际上限、已续次数、usage 是否
@@ -1106,6 +1348,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
         std::cout << theme.stats << tr("agent_outcome.output_budget.escapes") << theme.reset << "\n";
         std::cout.flush();
         out.status = 1;  // 一个字都没回,按失败收场——但话说清楚了,不是哑巴 1
+        turn_failed = true;  // 收口 tone 用 Failed after,不用 Worked 糊
     }
 
     // Stop:主回合正常收束(没被打断、没撞预算、没报错)准备停时触发。
@@ -1158,7 +1401,13 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
         }
     }
 
-    if (usage_stats.request_count() > 0 && !silent) {
+    // 统计降噪(终端回合视觉收束单第七节):输入/缓存/输出/请求数/context
+    // 长行不再每轮全摊——context 与缓存命中常驻底部状态栏(UpdateStatusLine
+    // Context 已在 on_usage 局部发布),紧凑态 footer 只写总耗时;详细态
+    // (Ctrl+O)才展开这行。管道/重定向(is_console 为假)没有状态栏,长行
+    // 照打——稳定纯文本输出是 automation 的契约,不能静默吞。
+    const bool stats_verbose = (transcript_expanded != nullptr && transcript_expanded->load()) || !is_console;
+    if (usage_stats.request_count() > 0 && !silent && stats_verbose) {
         // 0.17.0:token 数字统一 k 化(cli::FormatTokenCount),超过 10k 的
         // 数字不再铺一长串数位。i18n:整行进表(stats.line),缓存那一节
         // 先拼好塞进 {1}。
@@ -1199,7 +1448,13 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     if (usage_out != nullptr) {
         *usage_out = usage_stats;
     }
-    PrintDivider(theme, is_console && !silent);
+    // turn 尾分界线(终端回合视觉收束单):Worked for X(正常)/ Stopped
+    // after X(ESC 打断)/ Failed after X(输出预算耗尽)。统计行在前、footer
+    // 在后,跟开头那条首尾呼应——但带上了总耗时,用户看得见这一轮到底
+    // 忙了多久。
+    finish_turn_chrome(turn_failed        ? lubancode::cli::TurnFooterTone::Failed
+                       : out.cancelled    ? lubancode::cli::TurnFooterTone::Stopped
+                                          : lubancode::cli::TurnFooterTone::Worked);
     return out;
 }
 

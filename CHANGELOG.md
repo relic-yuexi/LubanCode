@@ -2,6 +2,58 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.36] - 2026-08-23
+
+- **每枚工具调用都有了一本生命周期账。** 何时收到、越过权限闸、踏进副作用、拿到结果、写回历史,五道栅栏逐枚落进会话档;崩溃后重启按账判定「没跑/跑完/可恢复/结局未知」,能重放的才重放,/trace 五档查询连重启前的账都翻得出。
+- **改错的文件能撤了。** write_file/edit_file 自动留 preimage 凭据,新工具 undo_file_edit 走正常确认门做条件式撤销——当前内容对得上才动手,被改过就给三方对照拒绝;补偿意图(谁想撤谁)无论成败都记账,审计有迹可循。
+- **多方吃同一本账。** MCP 换传输层的代数入账、jsonrpc id 成一等字段;子代理的内层工具事件经只读汇并轨,带父子边不交错写盘;app-server 新增 trace/query 断线补账与脱敏导出,归档/删除连 context 仓一起搬。
+
+## [v0.26.35] - 2026-08-23
+
+- **一轮回答收成一册账。** 回合结尾落一道带字的分界线 `──── Worked for 6m 41s ────`，打断写 `Stopped after`、失败写 `Failed after`；错误与预算耗尽不再从中途裸退漏掉尾线，管道模式也落纯文案版（时间账属于 automation 契约）。
+- **工具看得出批次了。** 同一次模型响应吐的多枚工具先整批登记"本拍排队中"，再逐枚点亮执行；ESC 后跑完的照旧、跑着的记打断、没轮到的如实标"未执行"，屏上不缺枚。五行 PowerShell 只画一个条目，标题带 `+4 lines` 不再横铺。
+- **Working 计的是整轮了。** 活动条认 turn 不认单次请求：正文流、工具批次、下一次模型请求都不熄、秒数不归零；ESC 后换"正在停…"，终态落账才退场。Ctrl+E/Esc 返回不再追打横幅，token 长行退到详细态（Ctrl+O），Ctrl+L 重放与实时画面同一颗渲染器。
+
+## [v0.26.34] - 2026-08-23
+
+- **无界面后台接口补齐了血肉。** 工具条目带中立 diff 行表、回合用量与上下文压力实时通报、图片输入入协议;出站队列的增量合并落了真(delta 并条、溢出通报带账);jsonrpc 字段去留、事件序号、图片字段名一并冻结成文。
+- **后台也能管会话了。** thread/archive、unarchive、delete 三法接通统一收口,开着的热线程拒绝动;thread/list 与终端同吃一碗结构化摘要,/workflow 的运行快照与增量事件也从同一扇门出来。
+- **SSH 承载有了实跑口径。** 本机管道冒烟六项全过(握手/坏报文/协议纯度/断线退场/无孤儿);真 SSH 的手测口径与完整协议文档落 docs,三平台方法面一览无余。
+
+## [v0.26.33] - 2026-08-23
+
+- **Workflow 并行 map 的产物不再串位。** 并发分支的产物落位改预分配槽、各写各的下标,收拢后按 items 顺序拼装;修掉了共键覆写导致的乱序取值(libc++ 时序下现形的竞态,TSan 已清)。
+- **中文名会话在 Windows 上删得掉了。** 会话搬删的档名拼装改走 UTF-8 通道,不再被 ANSI 代码页解成乱码名——此前中文档在 Windows 上删除/归档一直 NotFound,是真产品 bug;相关测试夹具一并改掉「写找同错相抵」的侥幸,柄收口回归补齐。
+
+## [v0.26.32] - 2026-08-23
+
+- **显示与业务分家(地基)。** 引擎按 engine/runtime/terminal 拆开编译：工具改动的行级 diff 有了中立行表，Web 与终端吃同一份数据；事件流合同落地，终端与 JSON 两只事件出口同流同账，后续 Web/Tauri 接同一颗运行时，不再复制终端逻辑。
+- **会话内核可脱离终端单测。** 会话存档、权限与发号搬进 SessionRuntime；`/model`、`/resume` 与审批回答有了类型化接口，远程前端不再伪造 slash 字符串；交互会话类更名终端控制器，只管画面接线。
+- **引擎日志不再裸写标准流。** 模型端与钩子的诊断改投统一日志出口，app-server 的 stdout 从此只剩协议字节；依赖边界进了测试账，引擎层混入终端件直接编不过测试。
+
+## [v0.26.31] - 2026-08-23
+
+- **本地插件一站齐活。** lubancode plugin init python 一键生成插件三件套;Lua 插件进统一台账并加三道软墙(pure 档缺省关 io/os/package、指令预算防死循环、内存帽);原生插件三平台一个形状(Windows/Linux/macOS 真编真载),ABI 升 v2(版本协商/shutdown/宿主分配器)且兼容读 v1。
+- **插件跑在最小环境里。** 进程插件整环境替换:只递 PATH 与声明的几个变量,宿主的密钥一概到不了插件;项目级 .lubancode/plugins/ 要过内容指纹信任门,改一字节就得重新批;/plugin inspect|doctor|test 一套管理面看得见状态。
+- **常驻进程有据不做。** 冷启动实测 Python 全协议往返 14~50ms,占整次调用 1%~4%——重依赖该修插件设计,不是宿主先造握手心跳,数字与依据落进架构文档,哪天变了再立单。
+
+## [v0.26.30] - 2026-08-23
+
+- **办事章法能存成一张图了。** 新增 Workflow:把一套流程说给 LubanCode,追问缺口、生成有类型的执行图(先校验、预览、确认再装进 .lubancode/workflows/),往后 /<别名> <参数> 照图开工;图有 ASCII 与 Mermaid 两种画法,项目级遮用户级、撞名别名禁直呼。
+- **引擎一条龙:并行汇合、重试回落、断点恢复。** 五种 join 策略(all/all_settled/any/quorum/race)、map/reduce、取消与步数·时限·token 三道预算;审批与补问走 Broker 悬起,journal 落盘带脱敏,断点续跑已成功的节点不重跑;副作用节点没幂等键不许重试,secret 明文直接拒载。
+- **动态有缰绳。** 规划器只许用图里标注 template: 的积木补图,补丁 append-only、悬边越权全拒、动到既有节点或新增交互要再问一道;运行态出结构化快照与增量事件,终端与将来的 Web/Tauri/app-server 同吃一碗饭。
+
+## [v0.26.29] - 2026-08-23
+
+- **会话台账三副眼镜。** /resume 台账里 Ctrl+T 看整场转录(大文件只取头尾,收起回原行)、Ctrl+E 摊开标题/目录/id/模型/消息数与更新时间、Ctrl+O 紧凑舒展两种画法;浏览全程不动盘。
+- **归档先行,删除另开明路。** 新增 lubancode archive/unarchive/delete 顶层命令与会话内 /archive、/delete:归档字节原样搬进 sessions/archive/ 且默认列表不再打扰;永久删除要过确认屏(标题+完整 id+目录,缺省取消),标题重名列短 id 绝不猜,路径越界一律拒;回合在跑、后台子代理在忙都拒绝动手。
+- **搬删只此一家。** SessionLifecycle 统一收口,终端 slash、顶层命令与 app-server 同吃一碗结构化账(thread.list 结构化摘要、archive/delete 走 typed 命令),代码里搜不到第二条私搬私删路径;Windows 开句柄先收柄再动文件的回归有测试钉着。
+
+## [v0.26.28] - 2026-08-23
+
+- **工具文案全量双语收官。** 剩余九件工具(网页搜索/抓取、tool_search、skill、会话列举与跨会话传话、worktree、项目记忆、PTC)的描述与参数说明全部迁入语言分档;英文会话拿到全英文工具表,缺省中文与旧版逐字节一致,`LUBANCODE_LANG` 切换即时生效。
+- **文案一致性进了测试账。** 语言驱动器扩到 100 节中英双语逐字节比对;工具源码不再容得下游离中文描述,grep 检查与负例钉进回归,后续新工具照此门进。
+
 ## [v0.26.27] - 2026-08-23
 
 - **无界面后台接口接通。** `codex app-server` 同类能力落到 LubanCode：JSON-RPC stdio、thread/turn 生命周期、流式事件、审批反向请求、取消与硬超时已经接上；终端与后台接口共用运行时合同，不再各养一套 Agent 逻辑。
@@ -68,6 +120,14 @@
 - **模型与扩展接成一体。** 接入 Anthropic Messages 与 OpenAI Responses，并提供上下文压缩、会话恢复、MCP、LSP、Skills、Lua、C ABI 插件和联网工具。
 - **三平台可以直接安装。** Windows、Linux 与 macOS 均有自动构建的发行包和安装脚本，CI 分别用 MSVC、GCC 与 Clang 编译测试。
 
+[v0.26.35]: https://github.com/relic-yuexi/LubanCode/compare/v0.26.34...v0.26.35
+[v0.26.34]: https://github.com/relic-yuexi/LubanCode/compare/v0.26.33...v0.26.34
+[v0.26.33]: https://github.com/relic-yuexi/LubanCode/compare/v0.26.32...v0.26.33
+[v0.26.32]: https://github.com/relic-yuexi/LubanCode/compare/v0.26.31...v0.26.32
+[v0.26.31]: https://github.com/relic-yuexi/LubanCode/compare/v0.26.30...v0.26.31
+[v0.26.30]: https://github.com/relic-yuexi/LubanCode/compare/v0.26.29...v0.26.30
+[v0.26.29]: https://github.com/relic-yuexi/LubanCode/compare/v0.26.28...v0.26.29
+[v0.26.28]: https://github.com/relic-yuexi/LubanCode/compare/v0.26.27...v0.26.28
 [v0.26.27]: https://github.com/relic-yuexi/LubanCode/compare/v0.26.0...v0.26.27
 [v0.26.0]: https://github.com/relic-yuexi/LubanCode/compare/v0.25.1...v0.26.0
 [v0.25.1]: https://github.com/relic-yuexi/LubanCode/compare/v0.25.0...v0.25.1

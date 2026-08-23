@@ -6,6 +6,8 @@
 #include <utility>
 #include <vector>
 
+#include "runtime/id_authority.hpp"
+
 namespace lubancode::app_server {
 
 // ---------------------------------------------------------------------------
@@ -179,6 +181,11 @@ nlohmann::json MakePermissionRequestParams(const std::string& thread_id, const s
         {"tool", request.tool_name},
         {"input", request.input.is_null() ? nlohmann::json::object() : request.input},
     };
+    // P4/P9 贯通:审批钉在哪枚条目上(tool_use_id),前端凭它把
+    // permission/request 路由回条目;空 = 没有条目身份(旧调用方)。
+    if (!request.tool_use_id.empty()) {
+        params["toolUseId"] = request.tool_use_id;
+    }
     if (!request.reason.empty()) {
         params["reason"] = request.reason;
     }
@@ -207,10 +214,9 @@ nlohmann::json MakeUserAskParams(const std::string& thread_id, const std::string
 std::shared_ptr<agent::InteractionFuture> InteractionLedger::AskApproval(
     const runtime::ApprovalRequest& request, const std::string& turn_id,
     const std::function<void(std::string_view method, const nlohmann::json& params)>& emit) {
-    // request_id:TODO(seq)骨架期回合内计数凑合,runtime P4 的统一 seq
-    // 分配器落地后改挂 thread 级单调序号。
-    static std::atomic<std::uint64_t> next_request_seq{0};
-    const std::string request_id = "req-" + std::to_string(++next_request_seq);
+    // request_id:P9 起统一走 runtime::ProcessIdAuthority(id_authority.hpp
+    // 的 NextRequestId,前缀 req-),骨架期的回合内计数账拆掉。
+    const std::string request_id = runtime::ProcessIdAuthority().NextRequestId();
 
     auto future = std::make_shared<PendingFuture>();
     future->approval_promise =
@@ -234,8 +240,9 @@ std::shared_ptr<agent::InteractionFuture> InteractionLedger::AskApproval(
 std::shared_ptr<PendingFuture> InteractionLedger::AskQuestion(
     const runtime::QuestionRequest& request, const std::string& turn_id, int question_index,
     const std::function<void(std::string_view method, const nlohmann::json& params)>& emit) {
-    static std::atomic<std::uint64_t> next_request_seq{0};
-    const std::string request_id = "ask-" + std::to_string(++next_request_seq);
+    // 提问与审批共用同一发号局(同一张 pending 表、同一套四态,单子原文);
+    // 前缀同为 req-,前端不须按前缀分拣。
+    const std::string request_id = runtime::ProcessIdAuthority().NextRequestId();
 
     auto future = std::make_shared<PendingFuture>();
     future->question_promise = std::make_shared<std::promise<std::optional<runtime::QuestionResponse>>>();

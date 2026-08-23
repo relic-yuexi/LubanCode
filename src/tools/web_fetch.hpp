@@ -34,6 +34,9 @@ std::string SanitizeUtf8(const std::string& text);
 
 class WebFetchTool : public Tool {
 public:
+
+    // 逐枚追踪单:注册元数据声明。
+    lubancode::tools::EffectClass effect_class() const override { return lubancode::tools::EffectClass::ReadOnlyRemote; }
     // user_agent 是 HTTP 请求头里报的身份(main.cpp 传 "lubancode/版本号");
     // 默认值只给单测和忘了传的调用方兜底。
     explicit WebFetchTool(std::string user_agent = "lubancode");

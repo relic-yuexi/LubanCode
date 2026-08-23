@@ -9,3 +9,4 @@
 - [命令与按键](commands.md)：启动参数、slash 命令和键位。
 - [配置手册](configuration.md)：来源优先级、字段、环境变量与目录。
 - [工具参考](tools.md)：工具 schema、确认、上限、结果与错误。
+- [app-server 协议](../features/app-server/README.md)：无界面后台协议的方法面、事件账、diff 行表与 SSH 承载。

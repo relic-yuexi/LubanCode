@@ -116,3 +116,103 @@ TEST_CASE("裸 app-server 落进位置参数(旧路):解析层就该拦下,不�
     CHECK_FALSE(parsed.options.app_server);
     CHECK(parsed.options.positional == "问点啥 app-server");
 }
+
+// ---------------------------------------------------------------------------
+// plugin init 子命令(plugins 单第 3 步:Python scaffold 的参数解析)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("plugin init python:模板与名字落位,名字缺省取模板名") {
+    ParsedCliArgs parsed = ParseCliArgs(Args({"lubancode", "plugin", "init", "python"}));
+    CHECK(parsed.action == CliAction::RunPluginInit);
+    CHECK(parsed.plugin_init.template_name == "python");
+    CHECK(parsed.plugin_init.plugin_name == "python");
+
+    parsed = ParseCliArgs(Args({"lubancode", "plugin", "init", "python", "my_math"}));
+    CHECK(parsed.action == CliAction::RunPluginInit);
+    CHECK(parsed.plugin_init.template_name == "python");
+    CHECK(parsed.plugin_init.plugin_name == "my_math");
+}
+
+TEST_CASE("plugin init 参数形状不对:当场退,不当普通位置参数走单发") {
+    CHECK(ParseCliArgs(Args({"lubancode", "plugin"})).action == CliAction::BadPluginInit);
+    CHECK(ParseCliArgs(Args({"lubancode", "plugin", "install"})).action == CliAction::BadPluginInit);
+    CHECK(ParseCliArgs(Args({"lubancode", "plugin", "init"})).action == CliAction::BadPluginInit);
+    const ParsedCliArgs too_many = ParseCliArgs(Args({"lubancode", "plugin", "init", "python", "a", "b"}));
+    CHECK(too_many.action == CliAction::BadPluginInit);
+    CHECK_FALSE(too_many.error_text.empty());
+}
+
+TEST_CASE("plugin 出现在位置参数之后:当普通文本并进 positional(旧语义)") {
+    const ParsedCliArgs parsed = ParseCliArgs(Args({"lubancode", "问点啥", "plugin", "init", "python"}));
+    CHECK(parsed.action == CliAction::Proceed);
+    CHECK(parsed.options.positional == "问点啥 plugin init python");
+}
+
+TEST_CASE("早退参数在 plugin 之前:早退生效") {
+    CHECK(ParseCliArgs(Args({"lubancode", "--version", "plugin", "init", "python"})).action ==
+          CliAction::PrintVersion);
+}
+
+// ---------------------------------------------------------------------------
+// 会话管理子命令(会话管理器单第四、五步):archive/unarchive/delete
+// ---------------------------------------------------------------------------
+
+TEST_CASE("archive/unarchive/delete 子命令:kind 与引用落位") {
+    const auto archive = ParseCliArgs(Args({"lubancode", "archive", "20260820-101010-甲"}));
+    CHECK(archive.action == CliAction::ManageSession);
+    CHECK(archive.session_command.kind == SessionManagementCommand::Kind::Archive);
+    CHECK(archive.session_command.session_ref == "20260820-101010-甲");
+    CHECK_FALSE(archive.session_command.force);
+
+    const auto unarchive = ParseCliArgs(Args({"lubancode", "unarchive", "20260820"}));
+    CHECK(unarchive.action == CliAction::ManageSession);
+    CHECK(unarchive.session_command.kind == SessionManagementCommand::Kind::Unarchive);
+    CHECK(unarchive.session_command.session_ref == "20260820");
+
+    const auto del = ParseCliArgs(Args({"lubancode", "delete", "房甲的场"}));
+    CHECK(del.action == CliAction::ManageSession);
+    CHECK(del.session_command.kind == SessionManagementCommand::Kind::Delete);
+    CHECK(del.session_command.session_ref == "房甲的场");
+    CHECK_FALSE(del.session_command.force);
+}
+
+TEST_CASE("delete --force 只给脚本;别的子命令带 --force 按缺参报用法") {
+    const auto forced = ParseCliArgs(Args({"lubancode", "delete", "20260820", "--force"}));
+    CHECK(forced.action == CliAction::ManageSession);
+    CHECK(forced.session_command.kind == SessionManagementCommand::Kind::Delete);
+    CHECK(forced.session_command.force);
+    CHECK(forced.session_command.session_ref == "20260820");
+
+    // --force 在引用前头也认(顺序不挑)。
+    const auto forced_first = ParseCliArgs(Args({"lubancode", "delete", "--force", "x"}));
+    CHECK(forced_first.session_command.force);
+    CHECK(forced_first.session_command.session_ref == "x");
+
+    // archive/unarchive 不认 --force:按缺参落(handler 报用法)。
+    const auto bad = ParseCliArgs(Args({"lubancode", "archive", "x", "--force"}));
+    CHECK(bad.action == CliAction::ManageSession);
+    CHECK(bad.session_command.session_ref.empty());
+}
+
+TEST_CASE("会话管理子命令缺引用:session_ref 空,handler 层报用法") {
+    const auto archive = ParseCliArgs(Args({"lubancode", "archive"}));
+    CHECK(archive.action == CliAction::ManageSession);
+    CHECK(archive.session_command.session_ref.empty());
+
+    const auto del = ParseCliArgs(Args({"lubancode", "delete"}));
+    CHECK(del.action == CliAction::ManageSession);
+    CHECK(del.session_command.session_ref.empty());
+}
+
+TEST_CASE("子命令在位置参数之后不认:老路兜底进单发") {
+    const ParsedCliArgs parsed = ParseCliArgs(Args({"lubancode", "问点啥", "archive"}));
+    CHECK(parsed.action == CliAction::Proceed);
+    CHECK(parsed.options.positional == "问点啥 archive");
+}
+
+TEST_CASE("标题带空格的引用:多词并成一个引用") {
+    const ParsedCliArgs parsed =
+        ParseCliArgs(Args({"lubancode", "archive", "房甲", "的场"}));
+    CHECK(parsed.action == CliAction::ManageSession);
+    CHECK(parsed.session_command.session_ref == "房甲 的场");
+}

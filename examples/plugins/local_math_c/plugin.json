@@ -1,0 +1,27 @@
+{
+  "manifest_version": 1,
+  "id": "local-math-c",
+  "version": "1.0.0",
+  "language": "c",
+  "runtime": {
+    "kind": "process",
+    "command": "${plugin_dir}/local_math_c",
+    "timeout_ms": 10000
+  },
+  "tools": [
+    {
+      "name": "add",
+      "description": "把两个数字相加(C 可执行文件版示例)。入参 {\"a\": number, \"b\": number}。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "a": {"type": "number"},
+          "b": {"type": "number"}
+        },
+        "required": ["a", "b"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "permissions": {"network": false, "env": []}
+}

@@ -29,11 +29,14 @@ enum class SlashCommand {
     Mcp,      // /mcp:列出挂载的 MCP 服务器状态、工具清单(M8)
     Lsp,      // /lsp:列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)
     Todos,    // /todos:查看当前待办清单(M11/0.10.0)
-    Plugins,  // /plugins:列出挂载的插件工具(DLL + lua)和加载警告(M7)
+    Plugins,  // /plugins:列出插件三路(native/Lua/process)与加载警告(plugins 单第 8 步扩)
+    Plugin,   // /plugin inspect|doctor|test|reload|enable|disable <id>:单插件管理面
     Tools,    // /tools:列工具三态——核心(恒在)/已加载/延迟未加载(tool_search)
     Memory,   // /memory:项目记忆开关、查看、显式记忆、遗忘与重建
     Sessions,  // /sessions:列最近的会话存档(本目录;/sessions all 列全部目录)
     Resume,    // /resume <编号或id>:载入某场存档历史续聊
+    Archive,   // /archive:归档当前会话(刷盘关柄→搬 archive/→退出,第四步)
+    Delete,    // /delete:永久删除当前会话(先确认;回合在跑拒绝,第五步)
     Export,    // /export [路径]:当前会话导出 Markdown
     Copy,      // /copy [plain]:复制上一段完整答话(默认原始 Markdown,plain 纯文本)
     Title,     // /title [标题]:看/设当前会话标题(追加 title 事件行,最后一条胜)
@@ -50,6 +53,9 @@ enum class SlashCommand {
     Peerperm,  // /peerperm auto|accept|hold|refuse:跨会话来信的权限档
     Doctor,  // /doctor effort|cache:本地兼容端 Effort/前缀缓存诊断(探针要发请求)
     Keymap,  // /keymap [set 动作 和弦|reset [动作|all]]:看/改键位(用户级落盘)
+    Workflow,  // /workflow list|show|graph|validate|run|resume|cancel|history|...:自然语言编排的图
+    Trace,     // /trace [errors|<execution_id>|toolu <id>|turn <id>]:工具逐枚追踪账(逐枚追踪单)
+    WorkflowAlias,  // /<workflow-alias> <args>:直呼已装 Workflow(运行时查 catalog)
     Unknown,  // 以 / 开头,但不认得这个命令
 };
 
@@ -57,6 +63,10 @@ struct ParsedSlashCommand {
     SlashCommand command = SlashCommand::NotSlash;
     std::string args;      // 命令词后面剩下的部分,已剥两端空白;没有就是空串
     std::string raw_word;  // 原始命令词(小写化之前),Unknown 时用来提示"XXX 不认得"
+    // WorkflowAlias 时:命令词剥掉 '/' 后的原文(保留大小写,alias 是
+    // Unicode 敏感的);具体查不查得进 catalog 由会话层定,parser 只认
+    // "不是内建词"这一件事。
+    std::string alias_word;
 };
 
 // 纯函数:识别一行输入是不是 slash 命令、是哪一个、参数是什么。

@@ -109,6 +109,8 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Todos;
     } else if (lower == "/plugins") {
         parsed.command = SlashCommand::Plugins;
+    } else if (lower == "/plugin") {
+        parsed.command = SlashCommand::Plugin;
     } else if (lower == "/hooks") {
         parsed.command = SlashCommand::Hooks;
     } else if (lower == "/tools") {
@@ -119,6 +121,10 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Sessions;
     } else if (lower == "/resume") {
         parsed.command = SlashCommand::Resume;
+    } else if (lower == "/archive") {
+        parsed.command = SlashCommand::Archive;
+    } else if (lower == "/delete") {
+        parsed.command = SlashCommand::Delete;
     } else if (lower == "/export") {
         parsed.command = SlashCommand::Export;
     } else if (lower == "/copy") {
@@ -151,8 +157,19 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Doctor;
     } else if (lower == "/keymap") {
         parsed.command = SlashCommand::Keymap;
+    } else if (lower == "/trace") {
+        parsed.command = SlashCommand::Trace;
+    } else if (lower == "/workflow") {
+        // Workflows 自然语言编排单:/workflow 是正门(list/show/graph/
+        // validate/run/...),子命令解析在 workflow 层,这里只认词。
+        parsed.command = SlashCommand::Workflow;
     } else {
+        // 不认得的 / 词:仍是 Unknown(语义不变),但把剥掉 / 的原词记在
+        // alias_word 里——会话层对 Unknown 先查 WorkflowCatalog,查着了
+        // 走 /<alias> 直呼,查不着照旧打"XXX 不认得"。内建词永远居首,
+        // 这条路只兜"不认得"的尾巴(单子"Slash alias 与冲突规矩")。
         parsed.command = SlashCommand::Unknown;
+        parsed.alias_word = word.substr(1);
     }
     return parsed;
 }
@@ -521,10 +538,13 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/lsp", tr("slash.desc.lsp")},
             {"/todos", tr("slash.desc.todos")},
             {"/plugins", tr("slash.desc.plugins")},
+            {"/plugin", tr("slash.desc.plugin")},
             {"/tools", tr("slash.desc.tools")},
             {"/memory", tr("slash.desc.memory")},
             {"/sessions", tr("slash.desc.sessions")},
             {"/resume", tr("slash.desc.resume")},
+            {"/archive", tr("slash.desc.archive")},
+            {"/delete", tr("slash.desc.delete")},
             {"/export", tr("slash.desc.export")},
             {"/copy", tr("slash.desc.copy")},
             {"/title", tr("slash.desc.title")},
@@ -537,6 +557,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/peerperm", tr("slash.desc.peerperm")},
             {"/doctor", tr("slash.desc.doctor")},
             {"/keymap", tr("slash.desc.keymap")},
+            {"/workflow", tr("slash.desc.workflow")},
         };
     }
     return commands;

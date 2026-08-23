@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <utility>
 
 #include "cli/context_tracker.hpp"  // kAutoCompactThresholdPercent
@@ -356,6 +357,52 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
     lines.push_back("  " + PadRightCols(label_remaining, label_cols) + TokenText(remaining));
     lines.push_back("  " + tr(have_measured ? "cmd.context.bd.note.measured" : "cmd.context.bd.note.est"));
     return lines;
+}
+
+// ---- 回合视觉收束:耗时人话与 turn footer(纯函数,单测主战场) --------
+
+std::string FormatTurnDuration(std::int64_t milliseconds) {
+    if (milliseconds < 0) {
+        milliseconds = 0;
+    }
+    // 十秒内留一位小数(9.4s);十至五十九秒取整(42s)。
+    if (milliseconds < 10'000) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.1fs", static_cast<double>(milliseconds) / 1000.0);
+        return std::string(buf);
+    }
+    if (milliseconds < 60'000) {
+        return std::to_string(milliseconds / 1000) + "s";
+    }
+    const std::int64_t total_seconds = milliseconds / 1000;
+    const std::int64_t minutes = total_seconds / 60;
+    const std::int64_t seconds_in_minute = total_seconds % 60;
+    // 一小时以上 Xh Ym;一分钟以上 Xm Ys。
+    if (minutes >= 60) {
+        const std::int64_t hours = minutes / 60;
+        return std::to_string(hours) + "h " + std::to_string(minutes % 60) + "m";
+    }
+    return std::to_string(minutes) + "m " + std::to_string(seconds_in_minute) + "s";
+}
+
+std::string FormatTurnFooterText(std::int64_t milliseconds, TurnFooterTone tone) {
+    const std::string duration = FormatTurnDuration(milliseconds);
+    switch (tone) {
+        case TurnFooterTone::Stopped:
+            return "Stopped after " + duration;
+        case TurnFooterTone::Failed:
+            return "Failed after " + duration;
+        case TurnFooterTone::Worked:
+            break;
+    }
+    return "Worked for " + duration;
+}
+
+std::string FormatApprovalWaitNote(std::int64_t approval_wait_ms) {
+    if (approval_wait_ms <= 0) {
+        return std::string();
+    }
+    return " · waited " + FormatTurnDuration(approval_wait_ms) + " for approval";
 }
 
 }  // namespace lubancode::cli

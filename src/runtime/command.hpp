@@ -35,6 +35,10 @@ enum class ClientCommandKind {
     ResumeThread,
     ListThreads,
     ReadThread,
+    // thread 搬与删(会话管理器单:全经 SessionLifecycle,稳定错误码)
+    ArchiveThread,
+    UnarchiveThread,
+    DeleteThread,
     // turn
     StartTurn,
     SteerTurn,
@@ -65,6 +69,12 @@ struct ClientCommand {
     //   SteerTurn.text          追加指令(不打断当前请求)
     //   ResumeThread.thread_ref 存档引用(id 或列表序号)
     //   ReadThread.thread_ref / .from_seq  读档起点(重连补账:from_seq+1 起)
+    //   ArchiveThread/UnarchiveThread/DeleteThread.thread_id 目标会话 id;
+    //     DeleteThread.payload.confirm == true 才动手(确认策略归调用方,
+    //     协议不替人决定);拒绝走 error_code(confirmation_required 等)
+    //   ListThreads.payload     查询形状(scope/state/sort/search/cursor/
+    //     limit,单子 SessionQuery 同款);receipt.payload.threads 是结构化
+    //     SessionSummary 数组
     //   ResolveApproval.*       见 interaction_broker.hpp 的决定四态
     //   AnswerQuestion.answers  选择题答案
     //   SetModel.value / SetThink.value / SetProvider.value / SetLanguage.value

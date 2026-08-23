@@ -12,6 +12,7 @@
 | 续接会话 | `lubancode --continue` | 同交互会话 | 续写原 JSONL | 接着本目录最近一场工作 |
 | 单发任务 | `lubancode "问题"` | 无逐键菜单；工具仍可调用 | 不落交互会话 | 脚本、短任务、CI 辅助 |
 | 管道输入 | `git diff | lubancode "审查"` | plain 输出；不能现场提问 | 不落交互会话 | 串接 shell 工作流 |
+| 无界面后台 | `lubancode app-server` | 双向 JSON-RPC：审批与提问走反向请求 | 有 | 富客户端与 SSH 远程项目 |
 | 诊断模式 | `--config`、`--help`、`--version`、`--check-update` | 不请求模型 | 无 | 排错、版本检查与自动化探测 |
 
 ## 模型与协议
@@ -62,6 +63,8 @@
 | 隔离 worktree | 新建、列出、保留或移除工作树；会话切换到新 cwd 后重建项目上下文。 |
 | 项目记忆 | 默认关闭；本地召回；`off/review/auto` 三档学习；待审候选与正式写入分账。 |
 
+无界面后台协议（app-server）的方法面、事件账与 SSH 承载见 [app-server 手册](../features/app-server/README.md)：审批/提问走反向请求，diff 走中立行表，`workflow/query` 查 run 快照与增量事件。
+
 ## 终端界面
 
 | 功能 | 行为 |
@@ -92,7 +95,10 @@
 | 独立压缩模型 | `compact_model` 留空则沿用会话模型。 |
 | 字符硬限 | `max_context_chars` 是 token 窗口之外的第二道安全网。 |
 | JSONL 存档 | 会话事件逐行追加，含 meta、消息、工具、usage、标题与压缩点。 |
+| 会话台账 | 裸 `/resume` 打全屏台账：搜索、Cwd/All 筛选、Updated/Created 排序、翻页与三种查看态（转录 / 展开 / 舒展）。 |
 | 列出与恢复 | `/sessions`、`/resume`；按 cwd 筛选，恢复后继续写回原文件。 |
+| 归档 | `/archive`、`lubancode archive/unarchive <id>`：字节原样搬进 `sessions/archive/`，默认列表略过，`/sessions archived` 查看。 |
+| 永久删除 | `/delete`、`lubancode delete <id> [--force]`：确认屏 + 路径校验 + 活动回合拒绝，只删目标一场。 |
 | Markdown 导出 | `/export` 导出全量流水，压缩点保留标记。 |
 | 项目记忆 | 住在用户目录，不进仓库，不混进 session，也不随导出外带。 |
 

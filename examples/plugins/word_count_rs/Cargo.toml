@@ -1,0 +1,13 @@
+[package]
+name = "word_count_tool"
+version = "0.1.0"
+edition = "2021"
+
+# word_count_tool — Rust process 插件示例(plugins 单第 9 步)。
+# cargo build --release 出可执行文件;manifest 的 command 指产物绝对路径
+# (或 ${plugin_dir}/target/release/word_count_tool),用户机器不需要装 Rust。
+#
+# 只用 serde_json 解请求拼响应;业务逻辑零依赖。
+
+[dependencies]
+serde_json = "1"

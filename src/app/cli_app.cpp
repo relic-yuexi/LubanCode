@@ -4,6 +4,7 @@
 #include "app/cli_options.hpp"
 #include "app/interactive_session.hpp"
 #include "app/one_shot.hpp"
+#include "app/plugin_scaffold.hpp"
 #include "app_server/server.hpp"
 
 #include <algorithm>
@@ -209,18 +210,69 @@ private:
     lubancode::hooks::HookDispatcher* dispatcher_;
 };
 
+// `lubancode plugin init` 子命令(plugins 单第 3 步):生成插件脚手架后
+// 退出。不读配置、不进会话——纯落盘 + 环境诊断。i18n 早初始化在这之前
+// 跑过,tr() 可用;配置不加载(脚手架不该因为模型没配好而拒绝干活)。
+int HandlePluginInitCommand(const PluginInitArgs& init) {
+    const auto home_dir = lubancode::config::HomeLubancodeDir();
+    if (!home_dir.has_value()) {
+        std::cerr << tr("plugininit.no_home") << "\n";
+        return 1;
+    }
+    const std::string plugins_root = *home_dir + "/plugins";
+    if (init.template_name == "python") {
+        const auto result = lubancode::app::ScaffoldPythonPlugin(plugins_root, init.plugin_name, std::string());
+        if (!result.has_value()) {
+            std::cerr << trf("plugininit.failed", result.error()) << "\n";
+            return 1;
+        }
+        std::cout << trf("plugininit.done", result->plugin_name, result->target_dir_utf8) << "\n";
+        for (const std::string& file : result->files) {
+            std::cout << "  - " << file << "\n";
+        }
+        for (const std::string& note : result->doctor_notes) {
+            std::cout << trf("plugininit.doctor_note", note) << "\n";
+        }
+        std::cout << tr("plugininit.next") << "\n";
+        return 0;
+    }
+    // lua 模板:legacy .lua 一文件一工具本来就是零配置,生成也只是一份示例
+    // 脚本;v1 先指路不代写,免得两套模板各养一份文案。
+    if (init.template_name == "lua") {
+        std::cout << trf("plugininit.lua_hint", plugins_root) << "\n";
+        return 0;
+    }
+    std::cerr << trf("plugininit.unknown_template", init.template_name) << "\n";
+    return 1;
+}
+
 // app-server 子模式:无界面后台协议,stdio 上逐行 JSON。装配前奏(配置
 // 加载、i18n、hooks 装载)在 RunCli 里已经跑完——这里只把服务立起来进
 // 主循环。stdout 从这一刻起是协议专线,任何 std::cout 都不许再出现
 // (诊断走 stderr,app_server 模块自己守规矩,这层也一样)。
-// 骨架期(协议骨架单):backend 走真装配(BuildBackend)——假 backend
-// 只在单测里注入;真回合执行链(审批/打断/steering)是后续单的活。
+// backend 走真装配(BuildBackend)——假 backend 只在单测里注入。
 int RunAppServerMode(const lubancode::config::ConfigResult& config_result) {
     lubancode::app_server::ServerOptions options;
     if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
         options.sessions_dir = *luban_dir + "/sessions";
+        // wf 线的 run 账根(workflow/query 的快照与增量事件从这里读)。
+        options.workflow_runs_dir = *luban_dir + "/workflow-runs";
     }
     options.cwd = CurrentDirUtf8();
+    // 会话档 meta 真值(阶段 3 冻结项):wire/model 用配置四级合并的
+    // 结果,与 CLI 会话档同一张表;不写占位话。
+    switch (config_result.config.wire) {
+        case lubancode::config::Wire::Anthropic:
+            options.session_wire = "anthropic";
+            break;
+        case lubancode::config::Wire::Responses:
+            options.session_wire = "responses";
+            break;
+        case lubancode::config::Wire::ChatCompletions:
+            options.session_wire = "chat";
+            break;
+    }
+    options.session_model = config_result.config.model;
     lubancode::app_server::Server server(
         std::move(options),
         [&config_result]() { return lubancode::app::BuildBackend(config_result.config); },
@@ -264,6 +316,11 @@ int RunCli(const std::vector<std::string>& args) {
     // 加载之前当场退出。
     const ParsedCliArgs parsed_cli = ParseCliArgs(args);
     switch (parsed_cli.action) {
+        case CliAction::RunPluginInit:
+            return HandlePluginInitCommand(parsed_cli.plugin_init);
+        case CliAction::BadPluginInit:
+            std::cerr << parsed_cli.error_text << "\n";
+            return 1;
         case CliAction::PrintVersion:
             PrintVersion();
             return 0;
@@ -301,6 +358,22 @@ int RunCli(const std::vector<std::string>& args) {
         }
         case CliAction::Proceed:
             break;
+        case CliAction::ManageSession: {
+            // 会话管理子命令(archive/unarchive/delete):不进会话,打完
+            // 结果就退。i18n 已在函数头初始化;确认屏在 handler 里。
+            const auto luban_dir = lubancode::config::HomeLubancodeDir();
+            if (!luban_dir.has_value()) {
+                std::cerr << tr("session.no_home") << "\n";
+                return 1;
+            }
+            const lubancode::cli::Theme manage_theme = lubancode::cli::ResolveTheme(
+                std::string(), lubancode::cli::DetectConsoleCapability().colors_enabled);
+            return HandleSessionManagementCommand(*luban_dir + "/sessions",
+                                                  static_cast<int>(parsed_cli.session_command.kind),
+                                                  parsed_cli.session_command.session_ref,
+                                                  parsed_cli.session_command.force, manage_theme,
+                                                  nullptr);
+        }
     }
     const CliOptions& cli_options = parsed_cli.options;
 

@@ -1,6 +1,7 @@
 #include "agent/session_store.hpp"
 
 #include <algorithm>
+#include <iterator>
 #include <chrono>
 #include <ctime>
 #include <filesystem>
@@ -671,6 +672,98 @@ int RepairToolPairs(std::vector<api::Message>& history) {
 }
 
 // ---------------------------------------------------------------------------
+// trace-aware 成对修补(逐枚追踪单)
+// ---------------------------------------------------------------------------
+
+TraceRepairReport RepairToolPairsWithTrace(std::vector<api::Message>& history,
+                                            const ToolExecutionLedger& ledger) {
+    TraceRepairReport report;
+    // 先按 trace 账修:扫全部 tool_use,查 ledger 里这枚 tool_use_id 的账。
+    // Provider 给重复/空 tool_use id 时按 execution 序全列,不串账(单子:
+    // 宿主不让两枚结果串账)。
+    std::set<std::string> answered_by_trace;
+    for (auto& message : history) {
+        if (message.role != api::Role::Assistant) {
+            continue;
+        }
+        std::vector<std::pair<std::string, api::ToolResultBlock>> patches;
+        for (auto& block : message.content) {
+            const auto* use = std::get_if<api::ToolUseBlock>(&block);
+            if (use == nullptr || use->id.empty()) {
+                continue;
+            }
+            const auto records = ledger.FindByToolUse(use->id);
+            if (records.empty()) {
+                continue;  // 没挂 trace 的(老档/内层),留给 legacy 补洞
+            }
+            answered_by_trace.insert(use->id);
+            const ToolExecutionRecord& record = *records.front();
+            api::ToolResultBlock patch;
+            patch.tool_use_id = use->id;
+            patch.content = BuildRecoveredResultText(record);
+            patch.is_error = record.Classify() != RecoveryClass::Finished ||
+                             record.outcome != ToolOutcome::Succeeded;
+            switch (record.Classify()) {
+                case RecoveryClass::Finished:
+                    if (record.outcome == ToolOutcome::Succeeded &&
+                        record.result_ref.kind == ToolResultRef::Kind::Inline) {
+                        ++report.result_recovered;
+                    }
+                    break;
+                case RecoveryClass::ResultRecoverable:
+                    ++report.result_recovered;
+                    break;
+                case RecoveryClass::UnknownAfterStart:
+                    ++report.unknown_after_start;
+                    break;
+                case RecoveryClass::NotStarted:
+                    ++report.not_started;
+                    break;
+            }
+            patches.emplace_back(use->id, std::move(patch));
+        }
+        if (patches.empty()) {
+            continue;
+        }
+        // 补进紧随的 user 消息(tool_result 块排前头,anthropic 要求紧跟
+        // tool_use);没有就插一条新 user 消息——与 legacy 同款形状。
+        const bool next_is_user =
+            (&message != &history.back()) && (&message + 1)->role == api::Role::User;
+        if (next_is_user) {
+            auto& target = (&message + 1)->content;
+            // 已有同 id 的 result(没缺)不重复补。
+            for (const auto& [id, patch] : patches) {
+                const bool already = std::any_of(target.begin(), target.end(), [&id](const api::ContentBlock& b) {
+                    const auto* result = std::get_if<api::ToolResultBlock>(&b);
+                    return result != nullptr && result->tool_use_id == id;
+                });
+                if (already) {
+                    continue;
+                }
+                target.insert(target.begin(), patch);
+                ++report.repaired;
+                ++report.trace_matched;
+            }
+        } else {
+            api::Message filler;
+            filler.role = api::Role::User;
+            for (const auto& [id, patch] : patches) {
+                filler.content.push_back(patch);
+                ++report.repaired;
+                ++report.trace_matched;
+            }
+            history.insert(std::next(history.begin(), std::distance(history.data(), &message) +
+                                                        static_cast<std::ptrdiff_t>(1)),
+                           std::move(filler));
+        }
+    }
+    // legacy 兜底:其余孤儿(老档、trace 没挂上的)走老逻辑补洞。
+    const int legacy = RepairToolPairs(history);
+    report.repaired += legacy;
+    return report;
+}
+
+// ---------------------------------------------------------------------------
 // 整文件解析 / 导出
 // ---------------------------------------------------------------------------
 
@@ -760,6 +853,17 @@ std::optional<LoadedSession> ParseSessionFile(const std::string& content) {
                 }
                 continue;
             }
+            if (type == "tool_trace_v1") {
+                // 逐枚追踪:栅栏事件按文件序整收(账本折叠在 /resume 侧做,
+                // 这里只管收行);坏行跳过不废整场(事件行通用约定)。
+                auto traced = ParseToolTraceEvent(line);
+                if (traced.has_value()) {
+                    session.tool_trace_events.push_back(std::move(*traced));
+                } else {
+                    session.skipped_lines += 1;
+                }
+                continue;
+            }
             session.skipped_lines += 1;  // 认不得的事件类型,跳过
             continue;
         }
@@ -771,7 +875,20 @@ std::optional<LoadedSession> ParseSessionFile(const std::string& content) {
             session.skipped_lines += 1;
         }
     }
-    session.repaired = RepairToolPairs(session.messages);
+    // 逐枚追踪单:有 trace 账的档先按四档结论修(能恢复原始结果的恢复,
+    // unknown 标 unknown,未执行标未执行),legacy 补洞兜底;老档没 trace
+    // 行,走的还是纯老逻辑,一个不坏。
+    if (!session.tool_trace_events.empty()) {
+        ToolExecutionLedger ledger;
+        for (const auto& event : session.tool_trace_events) {
+            ledger.Fold(event);
+        }
+        const TraceRepairReport report = RepairToolPairsWithTrace(session.messages, ledger);
+        session.repaired = report.repaired;
+        session.trace_repair = report;
+    } else {
+        session.repaired = RepairToolPairs(session.messages);
+    }
     return session;
 }
 
@@ -967,6 +1084,15 @@ bool SessionStore::AppendQueueEvent(const std::vector<ArchivedQueueItem>& items)
         return false;
     }
     out_ << SerializeQueueEvent(items, NowTimestamp()) << "\n";
+    out_.flush();
+    return out_.good();
+}
+
+bool SessionStore::AppendToolTraceEvent(const ToolTraceEvent& event) {
+    if (!out_.is_open()) {
+        return false;
+    }
+    out_ << SerializeToolTraceEvent(event, NowTimestamp()) << "\n";
     out_.flush();
     return out_.good();
 }

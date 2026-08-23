@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -26,10 +27,14 @@
 #include "cli/theme.hpp"
 #include "cli/worktree.hpp"
 #include "config/config.hpp"
+#include "config/plugin_trust.hpp"
 #include "lsp/manager.hpp"
 #include "mcp/client.hpp"
 #include "memory/project_memory.hpp"
 #include "ptc/ptc_tool.hpp"
+#include "runtime/plugin_lua.hpp"
+#include "runtime/tool_trace_hub.hpp"
+#include "runtime/plugin_tool.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/ask_user.hpp"
 #include "tools/plugin_loader.hpp"
@@ -39,6 +44,13 @@
 #include "tools/worktree_tool.hpp"
 
 namespace lubancode::app {
+
+// MountPlugins 的 process 插件出参缺省值(不想收 manifest 的调用方给空
+// 静态容器,行为上只是不回填)。
+namespace detail {
+inline std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>> kEmptyPluginManifests;
+inline std::vector<std::string> kEmptyPluginWarnings;
+}  // namespace detail
 
 lubancode::memory::Options MemoryOptionsFromConfig(const lubancode::config::MemoryConfig& config);
 
@@ -106,11 +118,17 @@ struct PluginMountInfo {
 // 为 false 时只给另一张 registry 装独立 wrapper/state,不重复打印与记账。
 // plugin_host 由调用方持有,且必须声明在 registry 之前(PluginTool 手中的
 // luban_tool_def* 指向 DLL 静态数据,模块要活得比 registry 久,析构反序那
-// 一套,理由同 mcp_servers);LuaTool 连 lua_State 整个搬进 registry,没有
-// 这层讲究。mounted/warnings 由调用方持有,交互模式给 /plugins 命令用。
-void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::tools::ToolRegistry& registry,
-                  const lubancode::cli::Theme& theme, std::vector<PluginMountInfo>& mounted,
-                  std::vector<std::string>& warnings, bool report = true);
+// 一套,理由同 mcp_servers);Lua 侧第 4 步起走 EmbeddedLuaRuntime(与
+// LegacyLuaTool 同一份 state 引擎,profile/预算/帽/取消链见 plugin_lua.hpp)。
+// mounted/warnings 由调用方持有,交互模式给 /plugins 命令用。
+void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime::EmbeddedLuaRuntime& lua_runtime,
+                  lubancode::tools::ToolRegistry& registry, const lubancode::cli::Theme& theme,
+                  std::vector<PluginMountInfo>& mounted, std::vector<std::string>& warnings, bool report = true,
+                  std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& process_manifests =
+                      detail::kEmptyPluginManifests,
+                  std::vector<std::string>& process_warnings = detail::kEmptyPluginWarnings,
+                  const std::string& project_root_utf8 = std::string(),
+                  const lubancode::config::PluginTrustStore* project_trust = nullptr);
 
 // 一场会话的工具全栈:主循环表、子代理表、(交互模式的)Explore 只读表,
 // 连同它们背后的拥有者——MCP 子进程(mcp_servers_)、插件宿主(plugin_host_)、
@@ -173,6 +191,15 @@ public:
     const std::function<bool(const lubancode::tools::Tool&)>& sub_tool_filter() const { return sub_tool_filter_; }
     const std::vector<PluginMountInfo>& plugin_mounted() const { return plugin_mounted_; }
     const std::vector<std::string>& plugin_warnings() const { return plugin_warnings_; }
+    // process 插件(plugin.json)的已解析清单,/plugin inspect/doctor 用。
+    const std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& process_manifests() const {
+        return process_manifests_;
+    }
+    // ESC 取消链与项目根:每轮由 turn_runner 灌(plugins 单第 7 步)。
+    void SetPluginCancel(const std::atomic<bool>* cancel);
+    void SetPluginCwd(std::string cwd_utf8);
+    // 插件日志去处(LogSink:stderr 分流,不进模型结果)。
+    void SetPluginLogSink(lubancode::runtime::PluginLogSink sink);
     // /mcp、/lsp 命令展示用:只读巡检,不另开口子改状态。
     const std::vector<McpServerRuntime>& mcp_servers() const { return mcp_servers_; }
     std::optional<lubancode::lsp::Manager>& lsp_manager() { return lsp_manager_; }
@@ -181,10 +208,26 @@ public:
     // 那份 ProjectMemory,会话期间不换对象)。已挂过(构造时就挂了)则空操作。
     void AttachMemoryTool(std::shared_ptr<lubancode::memory::ProjectMemory> memory);
 
+    // 逐枚追踪单第四期:挂 undo_file_edit(条件式撤销的执行侧)。hub 由
+    // 会话层持有(与 ToolRuntime 同寿命或更久),工具凭它按 execution_id
+    // 翻撤销凭据。不挂 = 该会话没有撤销工具(旧路,行为不变)。
+    void AttachUndoTool(lubancode::runtime::ToolTraceHub* trace_hub);
+    // 上次某枚 undo 补偿了谁(execution_id -> owner);装配层喂给 AgentLoop
+    // 的 on_tool_compensates。没有 undo 工具时恒空。
+    std::string LastCompensatesOf(const std::string& tool_use_id) const;
+
 private:
     // ---- 拥有者:先声明,后析构(用户表先亡,引用不悬垂) ----
     std::vector<McpServerRuntime> mcp_servers_;
     lubancode::tools::PluginHost plugin_host_;
+    lubancode::runtime::EmbeddedLuaRuntime lua_runtime_;
+    // process 插件(plugin.json)的清单与 adapter(plugins 单第 7 步挂进
+    // MountPlugins):manifest 由 shared_ptr 钉住,adapter 进各张 registry。
+    std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>> process_manifests_;
+    std::vector<std::unique_ptr<lubancode::runtime::PluginToolAdapter>> process_adapters_;
+    std::vector<std::string> process_plugin_warnings_;
+    // 项目插件的信任账(plugins 单第 8 步):启动装载一次,挂在拥有者区。
+    std::optional<lubancode::config::PluginTrustStore> project_plugin_trust_;
     std::optional<lubancode::lsp::Manager> lsp_manager_;
     // ---- 用户表:后声明,先析构 ----
     std::optional<lubancode::tools::ToolRegistry> explore_registry_;

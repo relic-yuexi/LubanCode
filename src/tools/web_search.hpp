@@ -35,6 +35,9 @@ int ClampSearchCount(int requested);
 
 class WebSearchTool : public Tool {
 public:
+
+    // 逐枚追踪单:注册元数据声明。
+    lubancode::tools::EffectClass effect_class() const override { return lubancode::tools::EffectClass::ReadOnlyRemote; }
     explicit WebSearchTool(config::SearchConfig search);
 
     std::string name() const override;

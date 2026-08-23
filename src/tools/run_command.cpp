@@ -405,8 +405,13 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
     // 对话历史。
     proc.output = platform::SanitizeUtf8(proc.output);
 
+    // 逐枚追踪单:稳定 outcome/error_code 不靠中文正文分辨(spawn/超时/
+    // 非零退出/输出超限各自有码;人话照旧给模型)。
     if (proc.spawn_failed) {
-        return {proc.spawn_error, true};
+        Tool::Result spawn{proc.spawn_error, true};
+        spawn.outcome = "spawn_failed";
+        spawn.error_code = "process.spawn_failed";
+        return spawn;
     }
     if (proc.timed_out) {
         std::ostringstream oss;
@@ -414,17 +419,31 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
         if (!proc.output.empty()) {
             oss << "终止前捕获到的输出:\n" << proc.output;
         }
-        return {oss.str(), true};
+        Tool::Result timed{oss.str(), true};
+        timed.outcome = "timed_out";
+        timed.error_code = "process.timeout";
+        return timed;
     }
     if (proc.output_truncated) {
         std::ostringstream oss;
         oss << "[输出超过上限(2MB)已截断,命令已被强制终止。以下是截断前捕获到的输出]\n" << proc.output;
-        return {oss.str(), false};
+        Tool::Result truncated{oss.str(), false};
+        truncated.outcome = "output_limit";
+        return truncated;
     }
 
     std::ostringstream oss;
     oss << "[退出码 " << proc.exit_code << "]\n" << proc.output;
-    return {oss.str(), proc.exit_code != 0};
+    Tool::Result exited{oss.str(), proc.exit_code != 0};
+    if (proc.exit_code != 0) {
+        exited.outcome = "process_exit_nonzero";
+        exited.error_code = "process.exit_nonzero";
+    } else {
+        exited.outcome = "succeeded";
+    }
+    exited.details = nlohmann::json{{"exit_code", proc.exit_code}};
+    exited.effect_summary = "run (exit=" + std::to_string(proc.exit_code) + ")";
+    return exited;
 }
 
 }  // namespace lubancode::tools

@@ -139,4 +139,24 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens, std::siz
                                                  const Theme& theme, int bar_width = 16,
                                                  int cache_hit_percent = -1);
 
+// ---- 回合视觉收束(终端回合视觉收束单):耗时人话与 turn footer ----------
+
+// 耗时人话(单子第五节):十秒内留一位小数;十至五十九秒取整;一分钟以上
+// Xm Ys;一小时以上 Xh Ym。输入毫秒,输出不带 ANSI。Working 活动条与
+// Worked footer 同用这一把尺——同一只计时器,两边不得差一截。
+// 例:9400 -> "9.4s";42300 -> "42s";401000 -> "6m 41s";5400000 -> "1h 30m"。
+std::string FormatTurnDuration(std::int64_t milliseconds);
+
+// turn footer 的词干:按终态挑动词——正常完成 "Worked for X"、用户打断
+// "Stopped after X"、失败/预算耗尽 "Failed after X"。秒表数字走
+// FormatTurnDuration 同一把尺。动词不进 i18n 表(中英同形,Codex 风格的
+// 画面签名);status 只认三档:cancelled/interrupted -> Stopped,failed ->
+// Failed,其余 -> Worked。
+enum class TurnFooterTone { Worked, Stopped, Failed };
+std::string FormatTurnFooterText(std::int64_t milliseconds, TurnFooterTone tone);
+
+// 详细态的审批等待附注:"waited 35s for approval";approval_wait_ms <= 0
+// 给空串(缺省不写,单子:缺省只留前半句)。
+std::string FormatApprovalWaitNote(std::int64_t approval_wait_ms);
+
 }  // namespace lubancode::cli

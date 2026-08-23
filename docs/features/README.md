@@ -9,6 +9,7 @@
 | [会话](sessions/README.md) | history、session、恢复、导出、token 与缓存 |
 | [上下文压缩](context/compaction.md) | 结构压缩、语义摘要、分层归并与回放 |
 | [终端界面](terminal/README.md) | composer、排队、转录、diff 与子代理面板 |
+| [app-server](app-server/README.md) | 无界面后台协议、SSH 远程项目、审批与 diff 事件 |
 | [项目指令](project-instructions/README.md) | `/init`、AGENTS 层级、覆盖与大小边界 |
 | [Provider 目录](providers/catalog.md) | 厂家预设、缓存、Schema 与在线更新 |
 | [扩展](extensions/README.md) | Skills、Plugins、MCP、LSP 与 Hooks |

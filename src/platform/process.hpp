@@ -54,6 +54,18 @@ constexpr std::size_t kDefaultMaxOutputBytes = 2 * 1024 * 1024;
 
 using EnvPairs = std::vector<std::pair<std::string, std::string>>;
 
+// 子进程环境的两条路(plugins 单第 8 步:整环境替换的硬保证):
+//   Inherit —— 继承宿主全部环境 + extra_env 覆盖/追加(历史行为,MCP/LSP/
+//              hooks/run_command 共用,不动)。
+//   Replace —— 清空宿主环境,子进程只见 extra_env 里列的条目。宿主的
+//              API key、用户变量一概不递(插件进程的最小环境合同)。
+// 调用方自己负责把 PATH 之类必要变量挑进 extra_env(Replace 模式不偷偷
+// 补,补了就不是最小集了;要不要 PATH 是策略,不是平台层的事)。
+enum class EnvMode {
+    Inherit,
+    Replace,
+};
+
 // 后台模式(v0.22.x,run_command 的 run_in_background):spawn 成功立刻
 // 返回,不等命令跑完、不捕获输出进内存——stdout/stderr 直接重定向到磁盘上
 // 的日志文件。子进程挂进"会话级"存活域(跟一次性捕获那种"命令收尾就
@@ -208,18 +220,24 @@ public:
     ChildProcess& operator=(const ChildProcess&) = delete;
 
     // 起子进程:command 是可执行文件(按 PATH 查找),args 是参数列表,env
-    // 是要额外注入子进程环境的键值对(同名覆盖当前进程环境;注入方式同
-    // RunProcess 的注释)。
+    // 是要注入子进程的环境键值对(Inherit 模式 = 继承全部 + 同名覆盖;
+    // Replace 模式 = 只见 env 里列的,宿主环境一概不递)。cwd_utf8 空 =
+    // 继承本进程当前目录;非空则子进程在该目录里跑(插件进程的 cwd 缺省
+    // 项目根,plugins 单第 7 步接上)。
     SpawnResult Start(const std::string& command, const std::vector<std::string>& args, const EnvPairs& env,
-                       std::function<bool(std::string_view)> on_stdout,
-                       std::function<void(std::string_view)> on_stderr);
+                      std::function<bool(std::string_view)> on_stdout,
+                      std::function<void(std::string_view)> on_stderr,
+                      const std::string& cwd_utf8 = std::string(),
+                      EnvMode env_mode = EnvMode::Inherit);
 
     // 同上,但带 PTC 沙箱约束(Job/rlimit 的 CPU、内存上限,Windows 受限
     // token)。constraints 全默认时与四参版本行为一致。job 限额设置失败只
     // 降级(照常起进程),由调用方拿 SandboxGrade 自己记档,不硬失败。
     SpawnResult Start(const std::string& command, const std::vector<std::string>& args, const EnvPairs& env,
-                       std::function<bool(std::string_view)> on_stdout,
-                       std::function<void(std::string_view)> on_stderr, const SpawnConstraints& constraints);
+                      std::function<bool(std::string_view)> on_stdout,
+                      std::function<void(std::string_view)> on_stderr, const SpawnConstraints& constraints,
+                      const std::string& cwd_utf8 = std::string(),
+                      EnvMode env_mode = EnvMode::Inherit);
 
     // 原始字节一次性写进子进程 stdin,内部加锁防止多个请求线程交错。进程
     // 已经退出/没起成功都返回 false。

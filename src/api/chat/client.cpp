@@ -2,7 +2,6 @@
 
 #include <charconv>
 #include <chrono>
-#include <iostream>
 #include <string_view>
 #include <utility>
 #include <variant>
@@ -14,6 +13,7 @@
 #include "api/sse_framing.hpp"
 #include "cli/i18n.hpp"
 #include "platform/json_safe.hpp"  // DescribeDumpFailure:请求体 dump 的窄边界
+#include "platform/log_sink.hpp"
 
 namespace lubancode::api::chat {
 
@@ -78,7 +78,8 @@ std::expected<void, Error> ChatCompletionsBackend::send_stream(
         // 往后每回合都在这里挂,会话等于砖死。响亮记一笔日志,坏串按
         // U+FFFD 清洗后照发(与落盘边界同一政策),会话活着、模型看得见
         // 替换符。
-        std::cerr << "[utf8] " << platform::DescribeDumpFailure(body_json, e) << " -> 已按 U+FFFD 清洗后发出\n";
+        platform::LogSink::Instance().Warn("chat",
+            platform::DescribeDumpFailure(body_json, e) + " -> 已按 U+FFFD 清洗后发出");
         body = platform::DumpJsonSanitized(body_json);
     }
     SseFramer framer;

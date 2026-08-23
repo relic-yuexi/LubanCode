@@ -288,6 +288,13 @@ struct StreamFooterState {
     std::string working_label;
     std::size_t working_highlight = 0;
     long long working_seconds = 0;
+    // turn 级活动条(终端回合视觉收束单):认整个 turn,不认单次模型请求。
+    // Spinner 那组 Start/Update/Stop 只在 turn_working 为假时才有绘制权
+    //(正常聊天 turn 不再由 SpinnerBackend 掌活动条;/compact 等单次后台
+    // 活照旧走 Spinner)。
+    bool turn_working = false;
+    std::int64_t turn_started_at_ms = 0;   // turn 起点(epoch ms);秒数从这里算,不归零
+    bool turn_interrupt_requested = false; // ESC 已置 cancel:文案换 Stopping...
     int row = -1;             // 整块 footer 顶行,-1 = 没画
     int rows = 0;             // 上次实际画了几行(队列区会让高度变化)
     int body_x = -1;          // footer 下方藏着的正文续写位置
@@ -358,15 +365,27 @@ std::vector<std::string> FooterUtf8Glyphs(const std::string& text) {
 }
 
 std::string BuildFooterWorkingLine(const StreamFooterState& f, int width) {
-    const std::vector<std::string> glyphs = FooterUtf8Glyphs(f.working_label);
+    // Stopping 态标签换词(走字扫光的字符数随之变一次,此后恒定——换词
+    // 只发生在置 cancel 那一拍,不逐帧抖)。
+    const std::string label =
+        f.turn_working && f.turn_interrupt_requested ? tr("spinner.stopping") : f.working_label;
+    const std::vector<std::string> glyphs = FooterUtf8Glyphs(label);
+    // Stopping 态(turn 级活动条专属):文案换 Stopping...,Esc 提示摘掉
+    //(真置了 cancel 之后"esc to interrupt"就是废话);字符数与显示宽
+    // 仍恒定,不引起抖动。
+    const std::string suffix =
+        f.turn_working && f.turn_interrupt_requested
+            ? std::string(" (") + std::to_string(f.working_seconds) + "s)"
+            : " (" + std::to_string(f.working_seconds) + "s · " + tr("spinner.interrupt_hint") + ")";
     const std::string prefix = "• ";
-    const std::string suffix = " (" + std::to_string(f.working_seconds) + "s · " +
-                               tr("spinner.interrupt_hint") + ")";
     const int prefix_width = static_cast<int>(DisplayWidthUtf8(prefix));
     const int suffix_width = static_cast<int>(DisplayWidthUtf8(suffix));
     const int label_room = (std::max)(0, width - 1 - prefix_width - suffix_width);
 
-    std::string line = f.theme.spinner + prefix + f.reset;
+    // 圆点按 turn 级态上色:Stopping 用 error 色(用户看得见"真置了"),
+    // 常态用 spinner 色;字符本体不变。
+    const std::string& dot_color = (f.turn_working && f.turn_interrupt_requested) ? f.theme.error : f.theme.spinner;
+    std::string line = dot_color + prefix + f.reset;
     int used = 0;
     for (std::size_t i = 0; i < glyphs.size(); ++i) {
         const int glyph_width = static_cast<int>(DisplayWidthUtf8(glyphs[i]));
@@ -449,6 +468,10 @@ std::optional<KeyEvent> MapKey(const platform::KeyInput& key) {
             return KeyEvent::Simple(KeyKind::CtrlO);
         case PK::CtrlE:
             return KeyEvent::Simple(KeyKind::CtrlE);
+        case PK::CtrlT:
+            // 会话选择器的转录键:编辑器核心没有这个语义,照实搬运(死键),
+            // picker 面板自己认。
+            return KeyEvent::Simple(KeyKind::CtrlT);
         case PK::CtrlX:
         case PK::CtrlK:
             // 面板两段确认键:只在 ReadLineKeyByKey 的面板缝里消费,不该进
@@ -2908,6 +2931,11 @@ void EndStreamFooter() {
     f.hint.clear();
     f.working = false;
     f.working_label.clear();
+    // turn 活动条随 footer 一并收(这条路只在轮收口后走;正常路径由
+    // EndTurnActivity 先熄,这里兜异常退场的底,不留幽灵 Working)。
+    f.turn_working = false;
+    f.turn_started_at_ms = 0;
+    f.turn_interrupt_requested = false;
     f.suspend_depth = 0;
     f.paint_depth = 0;
 }
@@ -2917,6 +2945,13 @@ bool StartStreamFooterWorking(const std::string& label) {
     StreamFooterState& f = FooterSlot();
     if (!f.enabled) {
         return false;
+    }
+    // turn 级活动条亮着时,SpinnerBackend(每次模型请求新起一只)不许抢
+    // 绘制权——它的 Stop 会把整轮计时熄掉,报的就不是整轮用时(单子第
+    // 六节的病根)。Start 照样返回 true(那只 Spinner 以为自己占了 footer,
+    // 便不再走独立单行路,不花屏),但它的一切实时帧在 Update 里被挡掉。
+    if (f.turn_working) {
+        return true;
     }
     f.working = true;
     f.working_label = label;
@@ -2933,6 +2968,9 @@ void UpdateStreamFooterWorking(const std::string& label, std::size_t highlighted
     if (!f.enabled || !f.working) {
         return;
     }
+    if (f.turn_working) {
+        return;  // turn 活动条当家:Spinner 的帧不进(含它的"从 0 重数")
+    }
     f.working_label = label;
     f.working_highlight = highlighted_glyph;
     f.working_seconds = elapsed_seconds;
@@ -2945,11 +2983,81 @@ void StopStreamFooterWorking() {
     if (!f.working) {
         return;
     }
+    if (f.turn_working) {
+        return;  // turn 活动条当家:Spinner 的"首个流事件一到便停"不许熄它
+    }
     f.working = false;
     f.working_label.clear();
     f.working_highlight = 0;
     f.working_seconds = 0;
     RedrawStreamFooterLocked();
+}
+
+// ---- turn 级 Working 活动条(终端回合视觉收束单) --------------------------
+// 单子第六节:活动条属于 BottomChrome,钉在 composer 上方;生命周期认整个
+// turn,不认单次 HTTP/model request。这里是"账"的那半——绘制复用 footer
+// 的 working 行(同一行、同一布局),但秒数从 turn_started_at_ms 现算,
+// Spinner 的 StopStreamFooterWorking 不碰它(Start 那边见下面的让位逻辑)。
+
+void BeginTurnActivity(const std::string& label, std::int64_t started_at_ms) {
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    StreamFooterState& f = FooterSlot();
+    if (!f.enabled) {
+        return;
+    }
+    f.turn_working = true;
+    f.turn_started_at_ms = started_at_ms;
+    f.turn_interrupt_requested = false;
+    f.working = true;
+    f.working_label = label;
+    f.working_highlight = 0;
+    f.working_seconds = 0;
+    RedrawStreamFooterLocked();
+}
+
+void UpdateTurnActivityElapsed(std::size_t highlighted_glyph, std::int64_t elapsed_seconds) {
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    StreamFooterState& f = FooterSlot();
+    if (!f.enabled || !f.turn_working) {
+        return;
+    }
+    f.working = true;
+    f.working_highlight = highlighted_glyph;
+    f.working_seconds = static_cast<long long>(elapsed_seconds);
+    RedrawStreamFooterLocked();
+}
+
+void SetTurnActivityInterruptRequested() {
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    StreamFooterState& f = FooterSlot();
+    if (!f.enabled || !f.turn_working) {
+        return;
+    }
+    f.turn_interrupt_requested = true;
+    RedrawStreamFooterLocked();
+}
+
+long long EndTurnActivity() {
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    StreamFooterState& f = FooterSlot();
+    if (!f.turn_working) {
+        return -1;
+    }
+    const long long final_seconds = f.working_seconds;
+    f.turn_working = false;
+    f.turn_started_at_ms = 0;
+    f.turn_interrupt_requested = false;
+    f.working = false;
+    f.working_label.clear();
+    f.working_highlight = 0;
+    f.working_seconds = 0;
+    RedrawStreamFooterLocked();
+    return final_seconds;
+}
+
+bool TurnActivityActive() {
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    return FooterSlot().turn_working;
 }
 
 // 见 console_input.hpp StreamFooterSuspendScope 的注释。构造/析构各自只在

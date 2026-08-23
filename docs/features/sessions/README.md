@@ -33,12 +33,52 @@ worktree 是独立路径，故 session 仍按各自 cwd 分开列；项目记忆
 /resume 20260806-...
 ```
 
+裸 `/resume` 在真终端打开全屏会话台账：
+
+- **搜索**：输入即搜，命中标题、首句、session id 与目录；ASCII 不分大小写，中文按原字。搜索只筛内存，不因每敲一字重读盘。
+- **筛选与排序**：`Tab` 轮换 Search / Filter / Sort 焦点，`←/→` 改选项。Filter 认 `Cwd | All`；Sort 认 `Updated | Created`（Updated 取最后一条合法事件的 ts，缺了退文件 mtime；Created 取 meta.started_at，再缺退 id 时间）。
+- **浏览**：`↑/↓` 移动，`PageUp/PageDown` 翻页，`Home/End` 到头尾。换筛选后按 id 留住选中项，它消失了才落到最近一行。
+- **查看态**：`Ctrl+T` 看所选会话的转录（大文件按需读、取头尾各一段，`Esc`/`Ctrl+T` 收起回原行）；`Ctrl+E` 摊开选中场的长标题、目录、id、模型、消息数与创建/更新时间；`Ctrl+O` 在紧凑行与舒展行间切换，只改画法，不动筛选与选中。
+- **恢复**：Enter 重放并接管原文件；Esc 原路返回，不改当前会话。台账里没有删除键——浏览不兼任碎纸机。
+
 恢复分两步：
 
 1. 读 JSONL，重建消息历史、标题、工具转录与最近 usage。
 2. 按原顺序把用户、助手 Markdown、工具摘要和压缩点画回终端。
 
-之后的新消息继续追加到原文件，不另开一场“看起来像续聊、实际断档”的 session。裸命令在真终端打开方向键菜单；Esc 取消，不改当前会话。
+之后的新消息继续追加到原文件，不另开一场“看起来像续聊、实际断档”的 session。
+
+## 归档：日常收拾
+
+不想要的场子先归档，转录仍留着：
+
+```text
+lubancode archive <id|标题>    # 顶层命令,归档任意一场
+lubancode unarchive <id>       # 搬回 sessions 根
+/archive                       # 会话内:归档当前这场,成功后退出
+/sessions archived             # 只读列表,看归档了哪些
+```
+
+- 归档把 JSONL 字节原样搬进 `~/.lubancode/sessions/archive/`——id、标题、时间、消息一字不动。搬运用 rename（同盘原子），半路失败原文件仍在原地可用，不会两头各剩半份。
+- 归档后 `--continue`、`/sessions`、裸 `/resume` 一概略过它；`/sessions archived` 看得见，想续聊先 `lubancode unarchive <id>`。
+- 会话内 `/archive` 先刷盘、关句柄，再搬、退出——Windows 上 append 句柄开着就动文件会吃 sharing violation，这条由生命周期服务统一收口。后台子代理还在跑时拒绝。
+- 引用认完整 id、唯一 id 前缀或唯一命中的标题；重名便列出短 id 叫你点明，绝不猜一场。
+
+## 永久删除：另开明路
+
+当真不要了，再显式删：
+
+```text
+lubancode delete <id|标题>           # 顶层命令,交互确认
+lubancode delete <id|标题> --force   # 跳过确认——只给脚本,不可恢复
+/delete                              # 会话内:删当前这场,确认后退出
+```
+
+- 确认屏写标题、完整 id、目录与「永久删除」；缺省取消，EOF、Esc、空答、别的答案都算取消，只有整行 `y`/`yes` 才动手。
+- 回合正在流、后台子代理还在跑时拒绝；等它们收尾再删。
+- 删除只碰验明位于 sessions 根或 archive 子目录里的那一份 `.jsonl`。路径越界、符号链接绕出根、后缀不对，一律拒绝。
+- context artifact 按 hash 共用，可能被别的会话引用——删除不连坐删 blob；引用计数与 GC 另做。
+- 归档不是删除，删除也不可逆。日常收拾先 archive。
 
 ## 标题
 
@@ -157,7 +197,8 @@ worktree 是独立路径，故 session 仍按各自 cwd 分开列；项目记忆
 | --- | --- | --- |
 | `/clear` | 当前内存 history 与当前屏面 | 磁盘 session、项目记忆、配置 |
 | `/memory forget` | 一条项目记忆移入 archive | 会话历史 |
-| 删除 JSONL | 一场磁盘会话 | 其他会话、记忆 |
+| `/archive`、`lubancode archive` | 一场会话移出默认列表（搬进 `sessions/archive/`，字节原样，unarchive 可回） | 会话内容本身、记忆 |
+| `/delete`、`lubancode delete` | 一场磁盘会话（永久，先确认） | 其他会话、记忆、artifact blob |
 | `/worktree exit remove` | 工作树目录与分支（须满足安全条件） | 主仓库、共享项目记忆 |
 
 ## 并发与落盘

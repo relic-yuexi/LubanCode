@@ -1,8 +1,9 @@
 #include "api/chat/events.hpp"
 
-#include <iostream>
+#include <string>
 
 #include <nlohmann/json.hpp>
+#include "platform/log_sink.hpp"
 
 namespace lubancode::api::chat {
 
@@ -49,8 +50,10 @@ Usage ParseUsage(const nlohmann::json& usage) {
         if (prompt_total > 0 && hit + miss != prompt_total) {
             // 服务端账目不合:以 hit/miss 为准(它俩才是缓存口径的分项),
             // 保留原数、只记诊断,绝不崩会话。
-            std::cerr << "[usage] DeepSeek prompt_cache_hit(" << hit << ")+miss(" << miss
-                      << ") != prompt_tokens(" << prompt_total << "),按 hit/miss 记账\n";
+            platform::LogSink::Instance().Warn(
+                "chat", "DeepSeek prompt_cache_hit(" + std::to_string(hit) + ")+miss(" +
+                            std::to_string(miss) + ") != prompt_tokens(" + std::to_string(prompt_total) +
+                            "),按 hit/miss 记账");
         }
         out.input_tokens = miss;
         out.cache_read_tokens = hit;
@@ -147,8 +150,10 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
                 if (!canonical.empty() && !alias.empty() && canonical != alias &&
                     !reasoning_conflict_diagnostic_printed_) {
                     reasoning_conflict_diagnostic_printed_ = true;
-                    std::cerr << "[reasoning] 同一 chunk 里 reasoning_content 与 reasoning 内容不同,"
-                              << "按固定优先级取 reasoning_content,弃 reasoning(此诊断整场只报一次)\n";
+                    platform::LogSink::Instance().Warn(
+                        "chat",
+                        "同一 chunk 里 reasoning_content 与 reasoning 内容不同,"
+                        "按固定优先级取 reasoning_content,弃 reasoning(此诊断整场只报一次)");
                 }
                 reasoning_text = !canonical.empty() ? canonical : alias;
             }
@@ -214,9 +219,10 @@ std::vector<StreamEvent> EventParser::Finish() {
     // 不让"模型回了结构化思考、客户端一个字没接"这件事无声发生。
     if (reasoning_details_blocks_ > 0 && !reasoning_details_diagnostic_printed_) {
         reasoning_details_diagnostic_printed_ = true;
-        std::cerr << "[reasoning] 收到 " << reasoning_details_blocks_
-                  << " 个结构化 reasoning_details 块,当前版本未映射成 thinking(计入思考链的映射另定),"
-                  << "未混入正文\n";
+        platform::LogSink::Instance().Info(
+            "chat", "收到 " + std::to_string(reasoning_details_blocks_) +
+                        " 个结构化 reasoning_details 块,当前版本未映射成 thinking"
+                        "(计入思考链的映射另定),未混入正文");
     }
     return events;
 }

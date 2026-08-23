@@ -280,6 +280,7 @@ if(WIN32)
   set(_lubancode_platform_sources
     src/platform/paths_win.cpp
     src/platform/process_win.cpp
+    src/platform/dynamic_library_win.cpp
     src/platform/console_win.cpp
     src/platform/peer_transport_win.cpp
     src/platform/clipboard_win.cpp)
@@ -287,12 +288,26 @@ else()
   set(_lubancode_platform_sources
     src/platform/paths_posix.cpp
     src/platform/process_posix.cpp
+    src/platform/dynamic_library_posix.cpp
     src/platform/console_posix.cpp
     src/platform/peer_transport_posix.cpp
     src/platform/clipboard_posix.cpp)
 endif()
 
-add_library(lubancode_core STATIC
+# ---------------------------------------------------------------------------
+# 显示系统剥离单第八步:target 按层拆开,依赖单向(单子"CMake 拆 target"原文)。
+#   lubancode_engine   api + agent + tools + config + memory + hooks + mcp +
+#                      lsp + ptc + platform + i18n/theme/worktree 三个零流叶子
+#   lubancode_runtime  合同(Event/Command/Sink/Broker)+ TurnRuntime/SessionRuntime/
+#                      CommandService/TurnItem(事件编排,不认终端)
+#   lubancode_core     engine + runtime + cli 纯逻辑(旧名兼容层,老消费方
+#                      [tests/deepseek_e2e 等]不断链)
+#   lubancode_app      装配层 + commands + app_server + 终端交互
+# 依赖方向:runtime -> engine,core -> runtime -> engine,app -> core。反向
+# include(engine/runtime 里 include cli 终端件/app)由 tests/gate 层的守门
+# 测试(test_app_boundary_gate.cpp)在 CI 里钉死。
+# ---------------------------------------------------------------------------
+add_library(lubancode_engine STATIC
   ${_lubancode_platform_sources}
   src/platform/terminal_batch.cpp
   src/platform/text_encoding.cpp
@@ -315,6 +330,7 @@ add_library(lubancode_core STATIC
   src/config/prompt_files.cpp
   src/config/project_instructions.cpp
   src/config/skill_store.cpp
+  src/config/plugin_trust.cpp
   src/tools/registry.cpp
   src/tools/tool_text.cpp
   src/tools/read_file.cpp
@@ -327,6 +343,8 @@ add_library(lubancode_core STATIC
   src/tools/worktree_tool.cpp
   src/tools/write_file.cpp
   src/tools/edit_file.cpp
+  # 逐枚追踪单第四期:条件式撤销的执行侧(undo_file_edit)。
+  src/tools/undo_file_edit.cpp
   src/tools/ask_user.cpp
   src/tools/search.cpp
   src/tools/agent_tool.cpp
@@ -383,29 +401,93 @@ add_library(lubancode_core STATIC
   src/agent/context_budget.cpp
   src/agent/microcompact.cpp
   src/agent/session_store.cpp
+  # 逐枚追踪单:工具生命周期栅栏事件、恢复账本(纯函数)。
+  src/agent/tool_trace.cpp
   src/agent/session_catalog.cpp
+  # 会话管理器单第四五步:SessionLifecycle 搬与删的唯一收口(纯磁盘薄壳)。
+  src/agent/session_lifecycle.cpp
   src/agent/workflow_recorder.cpp
   src/agent/skill_drafter.cpp
+  # engine 引用的四个 cli 叶子(零标准流、零终端依赖,tools/config 都吃):
+  # i18n(字符串表)、theme(配色值)、worktree(git 房务原语)、line_editor
+  # (纯逻辑编辑核,agent_tool 吃 DisplayWidthUtf8)。它们留在 src/cli/
+  # 目录,但编进 engine——单子守门名单(cin/cout/cerr/ReadLine/ChoiceMenu/
+  # TranscriptPainter)不含这四个文件,守门测试同钉。
+  src/cli/i18n.cpp
+  src/cli/theme.cpp
+  src/cli/worktree.cpp
+  src/cli/line_editor.cpp
+)
+target_include_directories(lubancode_engine PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_BINARY_DIR}/generated)
+target_link_libraries(lubancode_engine PUBLIC cpr::cpr nlohmann_json::nlohmann_json)
+if(WIN32)
+  target_link_libraries(lubancode_engine PRIVATE windowscodecs)
+endif()
+target_link_libraries(lubancode_engine PRIVATE lubancode_lua)
+# yaml-cpp 走 PUBLIC:engine 的头(memory/front matter)把 yaml 头递给
+# 消费方,拆 target 后 core/workflow 那层也直接吃,PRIVATE 会断 include 路径。
+target_link_libraries(lubancode_engine PUBLIC yaml-cpp::yaml-cpp)
+target_compile_features(lubancode_engine PUBLIC cxx_std_23)
+target_precompile_headers(lubancode_engine PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
+if(MSVC)
+  target_compile_options(lubancode_engine PRIVATE /MP)
+endif()
+
+# runtime:事件合同 + 会话/轮次/命令编排。不认终端(守门见
+# test_app_boundary_gate.cpp),链 engine(agent/config/tools 的内核件)。
+add_library(lubancode_runtime STATIC
   # 显示系统剥离单第一步:runtime 合同(纯类型 + 序列化,零 cli/app 依赖)。
   src/runtime/runtime_contract.cpp
+  # 会话管理器单第六步:会话查询/搬删的 runtime 侧命令服务(合同消费方)。
+  src/runtime/session_command_service.cpp
   # 第三步:TurnRuntime 纯逻辑核(权限/hooks/usage/取消),cli/app 零依赖。
   src/runtime/turn_runtime.cpp
+  # 第五步:TurnItem 领域条目 + 中立 diff 行表(diff 计算移出 ToolDisplay)。
+  src/runtime/turn_item.cpp
+  # 终端回合视觉收束单:TurnView 中立视图模型(turn/step/batch/item 四层
+  # + metrics + turn 活动态),零 cli 依赖,枚举序列化同钉。
+  src/runtime/turn_view.cpp
+  # 第六步:SessionRuntime(会话存档账/权限账/thread 身份/事件接线)。
+  src/runtime/session_runtime.cpp
+  # 第七步:CommandService(typed API:/model、/resume、审批回答)。
+  src/runtime/command_service.cpp
   # plugins 本地 Tool 运行时(冻结合同 + process v1):manifest 强校验、
   # 进程协议帧、无 shell 进程执行、工具装配层。
   src/runtime/plugin_contract.cpp
   src/runtime/plugin_process.cpp
   src/runtime/plugin_tool.cpp
-  src/cli/i18n.cpp
+  # plugins 第 4 步:内嵌 Lua 进 RuntimeManager(三道软墙)。
+  src/runtime/plugin_lua.cpp
+  # 逐枚追踪单:canonical 工具事件的装配层分线器(持久栅栏/UI 投影/录制)。
+  src/runtime/tool_trace_hub.cpp
+)
+target_include_directories(lubancode_runtime PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_BINARY_DIR}/generated)
+target_link_libraries(lubancode_runtime PUBLIC lubancode_engine)
+target_compile_features(lubancode_runtime PUBLIC cxx_std_23)
+target_precompile_headers(lubancode_runtime PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
+if(MSVC)
+  target_compile_options(lubancode_runtime PRIVATE /MP)
+endif()
+
+# core:旧名兼容层 = engine + runtime + cli 纯逻辑(不碰键盘/控制台的那半)。
+# cli/setup_wizard.cpp、cli/slash_commands.cpp 等在 cli/ 目录下但逻辑本身
+# 不碰真实 IO(打印/读一行都是注入函数),与从前同待遇放这层。
+add_library(lubancode_core STATIC
   src/cli/image_input.cpp
   src/cli/setup_wizard.cpp
   src/cli/provider_wizard.cpp
   src/cli/provider_switch.cpp
   src/cli/wizard_panel.cpp
   src/cli/slash_commands.cpp
-  src/cli/worktree.cpp
-  src/cli/theme.cpp
   src/cli/choice_menu.cpp
-  src/cli/line_editor.cpp
   src/cli/queue_model.cpp
   src/cli/terminal_frame.cpp
   src/cli/context_tracker.cpp
@@ -413,6 +495,9 @@ add_library(lubancode_core STATIC
   src/cli/format_utils.cpp
   src/cli/todo_render.cpp
   src/cli/transcript.cpp
+  # 终端回合视觉收束单:TerminalTurnRenderer(TurnView -> 行组,纯函数;
+  # 条目措辞复用 FormatTranscriptItem,这里只管轮的骨架与 footer)。
+  src/cli/turn_renderer.cpp
   src/cli/agent_panel.cpp
   src/cli/bottom_chrome.cpp
   src/cli/keymap.cpp
@@ -424,18 +509,27 @@ add_library(lubancode_core STATIC
   src/cli/latex_math.cpp
   src/cli/diff.cpp
   src/cli/diff_syntax.cpp
+  # Workflows 自然语言编排单:定义/解析/校验/目录/图渲染,纯逻辑。
+  src/workflow/definition.cpp
+  src/workflow/parser.cpp
+  src/workflow/catalog.cpp
+  src/workflow/validator.cpp
+  src/workflow/graph_view.cpp
+  src/workflow/store.cpp
+  src/workflow/journal.cpp
+  src/workflow/runtime.cpp
+  src/workflow/host_executors.cpp
+  src/workflow/compiler.cpp
+  src/workflow/planner.cpp
+  src/workflow/frontend.cpp
 )
 target_include_directories(lubancode_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_SOURCE_DIR}/include   # M7:C ABI 插件对外头文件 luban_plugin.h
   ${CMAKE_BINARY_DIR}/generated)        # 0.19.x:embedded_prompts.hpp(提示词嵌入)
-target_link_libraries(lubancode_core PUBLIC cpr::cpr nlohmann_json::nlohmann_json)
-if(WIN32)
-  # WIC(Windows Imaging Component):剪贴板位图 CF_DIB -> PNG 转码(Alt+V 直贴)。
-  target_link_libraries(lubancode_core PRIVATE windowscodecs)
-endif()
-target_link_libraries(lubancode_core PRIVATE lubancode_lua)  # M7:Lua 插件运行时
-target_link_libraries(lubancode_core PRIVATE yaml-cpp::yaml-cpp)  # 项目记忆 front matter(schema 3)
+# core = engine + runtime + cli 纯逻辑:引擎与运行时的传递依赖从这两层
+# PUBLIC 递过来(cpr/json/lua/yaml 在 engine 上,这里不再重复挂)。
+target_link_libraries(lubancode_core PUBLIC lubancode_runtime)
 target_compile_features(lubancode_core PUBLIC cxx_std_23)
 target_precompile_headers(lubancode_core PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
@@ -469,9 +563,11 @@ add_library(lubancode_app STATIC
   src/app/commands/hook_commands.cpp
   src/app/commands/peer_commands.cpp
   src/app/commands/doctor_commands.cpp
+  src/app/commands/workflow_commands.cpp
   src/app/interactive_session.cpp
   src/app/one_shot.cpp
   src/app/cli_options.cpp
+  src/app/plugin_scaffold.cpp
   src/app/cli_app.cpp
   src/cli/console_input.cpp
   src/cli/session_picker_panel.cpp
