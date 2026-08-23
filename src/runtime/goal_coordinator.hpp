@@ -95,6 +95,21 @@ public:
                              const std::string& workspace_identity, std::int64_t now_ms,
                              std::function<std::string()> id_issuer = nullptr);
 
+    // 带 lineage 的创建(fork 路用):parent_goal_id 记进 task 与 created
+    // 事件行。lineage 只是账——不构成复活、不共享 active goal。
+    GoalCommandResult CreateWithLineage(const std::string& objective, const std::string& workspace_root,
+                                        const std::string& workspace_identity,
+                                        const std::string& parent_goal_id, std::int64_t now_ms,
+                                        std::function<std::string()> id_issuer = nullptr);
+
+    // fork:复制 goal snapshot 到本 thread,新 id + lineage 记 source;新分支
+    // 状态落 Paused(单子:用户明确 resume 才跑,不默认两边一起续)。抄的是
+    // 合同/预算/计数器/checkpoint 账面;usage 从零起、evidence 不搬。terminal
+    // 的源也收(fork 不是复活,源状态不追改)。
+    GoalCommandResult ForkFrom(const GoalTask& source, const std::string& workspace_root,
+                               const std::string& workspace_identity, std::int64_t now_ms,
+                               std::function<std::string()> id_issuer = nullptr);
+
     // 裸 /goal 与 /goal status 的原材料:结构化全账,人话由前端拼。
     nlohmann::json Status(std::int64_t now_ms) const;
 

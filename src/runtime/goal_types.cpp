@@ -595,6 +595,7 @@ GoalCounters GoalCounters::from_json(const nlohmann::json& j) {
 nlohmann::json GoalTask::to_json() const {
     nlohmann::json j;
     j["id"] = id;
+    if (!parent_goal_id.empty()) j["parent_goal_id"] = parent_goal_id;
     j["revision"] = revision;
     j["objective"] = objective;
     j["objective_sha256"] = objective_sha256;
@@ -622,6 +623,7 @@ GoalTask GoalTask::from_json(const nlohmann::json& j) {
         if (j.contains(key) && j.at(key).is_string()) out = j.at(key).get<std::string>();
     };
     read_str("id", t.id);
+    read_str("parent_goal_id", t.parent_goal_id);
     if (j.contains("revision") && j.at("revision").is_number_integer()) t.revision = j.at("revision").get<int>();
     read_str("objective", t.objective);
     read_str("objective_sha256", t.objective_sha256);
