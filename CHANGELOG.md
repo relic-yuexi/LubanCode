@@ -2,6 +2,12 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.41] - 2026-08-23
+
+- **goal 真的会自己跑了。** 回合收口自动采证(工具账里只取 hash 与事实,不抄正文)、过 checkpoint、走独立 evaluator 判定,continue 才续跑下一迭代;子代理的完成与用量回流进 goal 的账,fork 记 lineage 不复活;goal/loop 的十六枚 typed 命令挂上 app-server,终端与远端同一份执行体。
+- **后台自动活儿看得见了。** 状态栏恒亮「goal run·iter3·r2 · loop×2 next 4m」;goal 六枚生命周期事件进 hook 分发(只许看不许改判定);loop 事件接 EventSink、审批等待接 broker、ESC 空闲态一键停全部活循环;/loop list 的预览不再切半个汉字。
+- **/plan 的审阅远端也能答了。** plan.review 挂上协议面,三对 id+revision+sha 匹配才落账,批准回执带执行档;迟到的答复报失效不冒充。
+
 ## [v0.26.40] - 2026-08-23
 
 - **/loop 定时循环立起来了(features.loop 门,默认关)。** 到点自动起一轮、single-flight 不叠拍、失败退避、连败熔断;错过的时间窗合并记账不补跑成灾,崩溃各点恢复后默认暂停等人发话;Ctrl+R 历史里不混 scheduled 消息。
