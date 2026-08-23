@@ -456,6 +456,7 @@ nlohmann::json MakeInitializeResult(std::string_view lubancode_version, std::str
         std::string(kMethodThreadArchive),   std::string(kMethodThreadUnarchive),
         std::string(kMethodThreadDelete),    std::string(kMethodTurnStart),
         std::string(kMethodTurnInterrupt),   std::string(kMethodWorkflowQuery),
+        std::string(kMethodTraceQuery),
         // goal 单合流批:typed 命令面(goal 六 + loop 七 + plan 三)。
         std::string(kMethodGoalCreate),      std::string(kMethodGoalGet),
         std::string(kMethodGoalEdit),        std::string(kMethodGoalPause),

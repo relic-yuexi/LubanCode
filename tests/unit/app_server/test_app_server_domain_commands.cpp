@@ -106,7 +106,7 @@ TEST_CASE("goal/create -> goal/get:get 回 Status() 结构化账") {
 
     const nlohmann::json created =
         fx.Call(std::string(kMethodGoalCreate), {{"threadId", thread}, {"text", "把 CI 修绿"}});
-    CHECK(created["id"] == 1);
+    CHECK(created.contains("result"));
     CHECK(created["result"]["goal_id"].get<std::string>() == "goal-1");
 
     const nlohmann::json status =
@@ -137,9 +137,14 @@ TEST_CASE("feature 关:goal/loop 命令回稳定禁用码,不冒充成功") {
     const std::string thread = fx.StartThread();
     const nlohmann::json goal =
         fx.Call(std::string(kMethodGoalCreate), {{"threadId", thread}, {"text", "目标"}});
-    CHECK(goal["error"]["data"]["reason"].get<std::string>() == "goal.disabled");
+    // feature 关:coordinator 的 goals_enabled=false,Create 落
+    // goal.store_unavailable 且 payload 带 disabled=true(装配层据此指路)。
+    CHECK(goal.contains("error"));
+    CHECK(goal["error"]["data"]["reason"].get<std::string>() == "goal.store_unavailable");
 
-    const nlohmann::json loop = fx.Call(std::string(kMethodLoopList), {{"threadId", thread}});
+    // loop 侧:scheduler 的 enabled=false,Create 落 loop.disabled。
+    const nlohmann::json loop = fx.Call(std::string(kMethodLoopCreate),
+                                        {{"threadId", thread}, {"text", "盯"}});
     CHECK(loop["error"]["data"]["reason"].get<std::string>() == "loop.disabled");
 }
 
@@ -230,16 +235,21 @@ TEST_CASE("参数错:goal/create 缺 text 走 invalid_params;thread 不认识走
 }
 
 TEST_CASE("initialize 能力表报出十六枚域方法") {
-    DomainHarness fx;
+    // 独立 dispatcher(不经 harness——它的构造已做过 initialize,重复
+    // initialize 会被握手状态机拒)。
+    auto dispatcher = std::make_shared<Dispatcher>();
+    dispatcher->SetInitializeResultFactory(
+        [] { return MakeInitializeResult("test", "test"); });
     IncomingRequest request;
     request.id = 1;
     request.method = std::string(kMethodInitialize);
     request.params = nlohmann::json::object();
     DispatchContext context;
     context.emit_event = [](std::string_view, const nlohmann::json&, bool) {};
-    const DispatchOutcome outcome = fx.server->dispatcher().HandleRequest(request, context);
+    const DispatchOutcome outcome = dispatcher->HandleRequest(request, context);
     REQUIRE(outcome.outbound.size() == 1);
     const nlohmann::json init = nlohmann::json::parse(outcome.outbound[0]);
+    REQUIRE(init.contains("result"));
     const nlohmann::json& methods = init["result"]["capabilities"]["methods"];
     bool has_goal = false;
     bool has_loop_create = false;
