@@ -320,7 +320,8 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const EnvP
 }
 
 ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std::atomic<bool>* cancel,
-                         const EnvPairs& extra_env, std::size_t max_output_bytes) {
+                         const EnvPairs& extra_env, std::size_t max_output_bytes,
+                         const std::string& cwd_utf8) {
     ProcessResult result;
 
     // 显式环境块(P0 并发修复):不再临时改宿主环境再还原——Hook
@@ -364,10 +365,18 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
     std::vector<wchar_t> cmdline_buf(cmdline.begin(), cmdline.end());
     cmdline_buf.push_back(L'\0');
 
+    // cwd 走 lpCurrentDirectory(P1 根治,前台半边):不向命令文本拼 cd。
+    std::wstring cwd_wide;
+    LPCWSTR current_directory = nullptr;
+    if (!cwd_utf8.empty()) {
+        cwd_wide = Utf8ToWide(cwd_utf8);
+        current_directory = cwd_wide.c_str();
+    }
+
     const BOOL ok = CreateProcessW(
         nullptr, cmdline_buf.data(), nullptr, nullptr, TRUE,
         CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
-        const_cast<LPWSTR>(env_block.c_str()), nullptr, &si, &pi);
+        const_cast<LPWSTR>(env_block.c_str()), current_directory, &si, &pi);
 
     // 子进程已经拿到了自己那份继承来的句柄,父进程这边的可以关了。
     CloseHandle(write_pipe);
@@ -535,7 +544,7 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
 }
 
 ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, const std::atomic<bool>* cancel,
-                         const EnvPairs& extra_env, std::size_t max_output_bytes) {
+                         const EnvPairs& extra_env, std::size_t max_output_bytes, const std::string& cwd_utf8) {
     if (argv.empty()) {
         ProcessResult result;
         result.spawn_failed = true;
@@ -543,7 +552,7 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
         return result;
     }
     return RunProcess(BuildProcessCommandLine(argv[0], std::vector<std::string>(argv.begin() + 1, argv.end())),
-                       timeout_ms, cancel, extra_env, max_output_bytes);
+                       timeout_ms, cancel, extra_env, max_output_bytes, cwd_utf8);
 }
 
 ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, const EnvPairs& extra_env,
@@ -556,8 +565,10 @@ ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, c
 }
 
 ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, const std::atomic<bool>* cancel,
-                              const EnvPairs& extra_env, std::size_t max_output_bytes) {
-    ProcessResult result = RunProcess(BuildCmdCommandLine(command_utf8), timeout_ms, cancel, extra_env, max_output_bytes);
+                              const EnvPairs& extra_env, std::size_t max_output_bytes,
+                              const std::string& cwd_utf8) {
+    ProcessResult result =
+        RunProcess(BuildCmdCommandLine(command_utf8), timeout_ms, cancel, extra_env, max_output_bytes, cwd_utf8);
     result.output = AcpBytesToUtf8(result.output);
     return result;
 }

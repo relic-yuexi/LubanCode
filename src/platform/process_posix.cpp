@@ -412,8 +412,8 @@ struct SpawnedMerged {
 };
 
 // 起一个"合并输出、stdin 接 /dev/null"的子进程。失败时 result 里带人话。
-bool SpawnMergedOutput(std::vector<std::string> argv, const EnvPairs& extra_env, SpawnedMerged* spawned,
-                        ProcessResult* result) {
+bool SpawnMergedOutput(std::vector<std::string> argv, const EnvPairs& extra_env, const std::string& cwd_utf8,
+                        SpawnedMerged* spawned, ProcessResult* result) {
     IgnoreSigpipeOnce();
 
     int out_pipe[2] = {-1, -1};
@@ -477,6 +477,10 @@ bool SpawnMergedOutput(std::vector<std::string> argv, const EnvPairs& extra_env,
         if (out_pipe[1] > STDERR_FILENO) {
             close(out_pipe[1]);
         }
+        // cwd(P1 根治,前台半边):exec 前 chdir,失败回报,不向命令文本拼 cd。
+        if (!cwd_utf8.empty() && chdir(cwd_utf8.c_str()) != 0) {
+            die(errno);
+        }
         environ = env_block.ptrs.data();
         execvp(argv_ptrs[0], argv_ptrs.data());
         die(errno);
@@ -521,7 +525,7 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
 }
 
 ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, const std::atomic<bool>* cancel,
-                          const EnvPairs& extra_env, std::size_t max_output_bytes) {
+                          const EnvPairs& extra_env, std::size_t max_output_bytes, const std::string& cwd_utf8) {
     ProcessResult result;
     if (argv.empty()) {
         result.spawn_failed = true;
@@ -535,7 +539,7 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
     }
 
     SpawnedMerged spawned;
-    if (!SpawnMergedOutput(argv, extra_env, &spawned, &result)) {
+    if (!SpawnMergedOutput(argv, extra_env, cwd_utf8, &spawned, &result)) {
         return result;
     }
 
@@ -656,8 +660,9 @@ ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, c
 }
 
 ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, const std::atomic<bool>* cancel,
-                              const EnvPairs& extra_env, std::size_t max_output_bytes) {
-    return RunProcess({"/bin/sh", "-c", command_utf8}, timeout_ms, cancel, extra_env, max_output_bytes);
+                              const EnvPairs& extra_env, std::size_t max_output_bytes,
+                              const std::string& cwd_utf8) {
+    return RunProcess({"/bin/sh", "-c", command_utf8}, timeout_ms, cancel, extra_env, max_output_bytes, cwd_utf8);
 }
 
 ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const std::string& stdin_data,

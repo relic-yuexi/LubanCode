@@ -42,52 +42,9 @@ constexpr int kMaxTimeoutMs = 86400000;  // 24 小时
 // ARG_MAX 同一张表(典型 2MB,22000 远在墙内)。
 constexpr std::size_t kMaxCommandBytes = 22000;
 
-// 把"命令跑在哪个目录"翻译进各 shell 的命令串:起手先 cd 到位,再跑原命令。
-// 隔离子代理靠这层把自己的命令钉在自己的房里(进程 cwd 全进程一份,不能
-// chdir);主代理也可显式传 cwd。引号各按各家语法转义。
-std::string QuotePowerShellSingle(const std::string& path) {
-    std::string out = path;
-    for (std::size_t pos = 0; pos < out.size(); ++pos) {
-        if (out[pos] == '\'') {
-            out.insert(pos, 1, '\'');
-            ++pos;
-        }
-    }
-    return out;
-}
-
-std::string QuotePosixSingle(const std::string& path) {
-    // POSIX sh 的单引号里没有转义这一说:翻倍两枚单引号会被解成两枚字面
-    // 单引号,串就拆坏了。严谨写法是闭合、插入一枚转义过的单引号、再打开:
-    //   'it' -> '\''  (即: '...' + "'" + '...')
-    std::string out = "'";
-    for (const char c : path) {
-        if (c == '\'') {
-            out += "'\\''";  // 闭单引号 + 转义单引号 + 开单引号
-        } else {
-            out.push_back(c);
-        }
-    }
-    out += "'";
-    return out;
-}
-
-std::string ApplyWorkingDirectory(const std::string& command, const std::string& cwd_utf8,
-                                  const std::string& shell) {
-    if (cwd_utf8.empty()) {
-        return command;
-    }
-    if (shell == "cmd") {
-        return "cd /d \"" + cwd_utf8 + "\" && " + command;
-    }
-    if (shell == "sh" || shell == "bash") {
-        // QuotePosixSingle 自己带首尾单引号(见它内部对单引号的处理)。
-        return "cd -- " + QuotePosixSingle(cwd_utf8) + " && " + command;
-    }
-    // PowerShell(5.1 与 pwsh 同语法):Set-Location 在 & { ... } 外面先跑,
-    // 后面的命令都在新目录里。
-    return "Set-Location -LiteralPath '" + QuotePowerShellSingle(cwd_utf8) + "' ; " + command;
-}
+// (进程生命线单 P1 根治:cwd 一律走操作系统参数,命令文本不拼 cd。
+// ApplyWorkingDirectory 与 QuotePowerShellSingle/QuotePosixSingle 已删,
+// 见 execute() 里的注释。)
 
 // ---------------------------------------------------------------------------
 // ShellResolver(进程生命线单 P2"评估显式 bash、pwsh"):可移植 shell 探测。
@@ -504,12 +461,11 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
             return {"[隔离] " + *violation, true};
         }
     }
-    // cwd 走操作系统参数(进程生命线单 P1 根治):Windows 落
+    // cwd 走操作系统参数(进程生命线单 P1 根治,前台后台全量):Windows 落
     // CreateProcessW 的 lpCurrentDirectory,POSIX 子进程 exec 前 chdir,
-    // 失败经 exec-error 管道回报。不再向命令文本前拼 cd——路径含引号、
-    // '%'、'!' 各家 shell 各有各的坑,拼字符串只会越补越厚。
-    // ApplyWorkingDirectory 留给前台这条老入口兜底(它的调用方还在用),
-    // 后台一律走原生 cwd。
+    // 失败经 exec-error 管道回报 spawn_failed。命令文本一律不拼 cd——
+    // 路径含引号、'%'、'!'、'$' 各家 shell 各有各的坑,拼字符串只会越补
+    // 越厚;ApplyWorkingDirectory 与两枚 Quote*Single 已删。
 
 #ifdef _WIN32
     std::string shell = "powershell";
@@ -572,17 +528,15 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
         // RunShellCommand 内部已把 cmd.exe 的系统 ANSI 代码页输出转成 UTF-8
         // (跟 PowerShell 路径不一样,那边脚本里显式设了
         // [Console]::OutputEncoding=UTF8),这里拿到手就是合法 UTF-8。
-        // 前台还没有原生 cwd 入口,继续走拼 cd 的老路(ApplyWorkingDirectory
-        // 的 cmd 分支只引一层双引号,NTFS 目录名不含双引号;后台已根治)。
-        proc = platform::RunShellCommand(ApplyWorkingDirectory(command, effective_cwd, shell_value), timeout_ms,
-                                         cancel_, {});
+        // cwd 走 lpCurrentDirectory(P1 根治:cmd 的 %VAR% 展开坑一并绕开)。
+        proc = platform::RunShellCommand(command, timeout_ms, cancel_, {}, kDefaultMaxOutputBytes, effective_cwd);
     } else {
-        // 前台 PowerShell 同上:cwd 仍由 wrapper 前置 Set-Location 承担
-        //(Set-Location -LiteralPath 单引号转义对引号安全)。
-        const std::string command_with_cwd = ApplyWorkingDirectory(command, effective_cwd, shell_value);
+        // 前台 PowerShell 同上:cwd 走 lpCurrentDirectory,命令本体只保留
+        // wrapper 的编码设置,不再前置 Set-Location。
         const std::wstring cmdline = std::wstring(ps_exe) + L" -NoProfile -NonInteractive -EncodedCommand " +
-                                      platform::Utf8ToWide(BuildEncodedCommand(command_with_cwd));
-        proc = platform::RunProcess(cmdline, timeout_ms);
+                                      platform::Utf8ToWide(BuildEncodedCommand(command));
+        proc = platform::RunProcess(cmdline, timeout_ms, /*cancel=*/nullptr, {}, kDefaultMaxOutputBytes,
+                                    effective_cwd);
     }
 #else
     // POSIX:默认 /bin/sh -c;本机装了 bash 时显式 shell=bash 可选(装了才
@@ -627,18 +581,15 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
         return {oss.str(), false};
     }
 
-    // 前台 POSIX:cwd 走原生参数(RunShellCommand 的 cancel 重载),不拼 cd。
+    // 前台 POSIX:cwd 走操作系统参数(子进程 exec 前 chdir),命令文本不
+    // 拼 cd——验收口径"cwd 不再拼进 shell 字符串"的前台半边。
     platform::ProcessResult proc;
-    {
-        // RunShellCommand 的 cancel 重载还没有原生 cwd 参数(超时/取消/树杀
-        // 才是它的职责面),前台仍用拼 cd 的老路;POSIX 单引号转义已修,
-        // 后台已根治。bash 与 sh 的单引号转义同规则(QuotePosixSingle)。
-        const std::string command_with_cwd = ApplyWorkingDirectory(command, effective_cwd, shell_value);
-        if (shell == "bash") {
-            proc = platform::RunProcess({shell_exe, "-c", command_with_cwd}, timeout_ms, cancel_);
-        } else {
-            proc = platform::RunShellCommand(command_with_cwd, timeout_ms, cancel_, {});
-        }
+    if (shell == "bash") {
+        proc = platform::RunProcess({shell_exe, "-c", command}, timeout_ms, cancel_, {},
+                                    platform::kDefaultMaxOutputBytes, effective_cwd);
+    } else {
+        proc = platform::RunShellCommand(command, timeout_ms, cancel_, {}, platform::kDefaultMaxOutputBytes,
+                                         effective_cwd);
     }
 #endif
 

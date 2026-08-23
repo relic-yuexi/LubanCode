@@ -167,14 +167,20 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms,
 // 进程生命线单(P1:前台取消通道):同 RunProcess,但等待循环每拍查 cancel
 // 旗。置位即收整棵树,result 里 cancelled=true(与 timed_out 分开记账,
 // 两者都收树,但终态语义不同)。cancel 为空/未置位时行为与上面完全一致。
+// cwd_utf8 非空则走操作系统参数(Windows lpCurrentDirectory;POSIX exec 前
+// chdir,失败回 spawn_failed)——不向命令文本拼 cd,验收口径"cwd 不再拼
+// 进 shell 字符串"的前台半边。
 ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, const std::atomic<bool>* cancel,
-                          const EnvPairs& extra_env = {}, std::size_t max_output_bytes = kDefaultMaxOutputBytes);
+                          const EnvPairs& extra_env = {}, std::size_t max_output_bytes = kDefaultMaxOutputBytes,
+                          const std::string& cwd_utf8 = std::string());
 #ifdef _WIN32
 ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std::atomic<bool>* cancel,
-                         const EnvPairs& extra_env = {}, std::size_t max_output_bytes = kDefaultMaxOutputBytes);
+                         const EnvPairs& extra_env = {}, std::size_t max_output_bytes = kDefaultMaxOutputBytes,
+                         const std::string& cwd_utf8 = std::string());
 #endif
 ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, const std::atomic<bool>* cancel,
-                              const EnvPairs& extra_env = {}, std::size_t max_output_bytes = kDefaultMaxOutputBytes);
+                              const EnvPairs& extra_env = {}, std::size_t max_output_bytes = kDefaultMaxOutputBytes,
+                              const std::string& cwd_utf8 = std::string());
 
 // 按平台默认 shell 跑一条命令:Windows 是 `cmd.exe /d /s /c "<command>"`
 // (输出按系统 ANSI 代码页转成 UTF-8,原因见 paths.hpp 的 AcpBytesToUtf8),
