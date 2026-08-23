@@ -590,6 +590,8 @@ add_library(lubancode_app STATIC
   src/app/commands/doctor_commands.cpp
   # /goal 持久目标单:终端 slash 的排版/gate/二次确认文案。
   src/app/commands/goal_commands.cpp
+  # /loop 会话定时循环单:slash 业务面(列表/状态/暂停/补拍的终端行)。
+  src/app/commands/loop_commands.cpp
   src/app/commands/workflow_commands.cpp
   src/app/interactive_session.cpp
   src/app/one_shot.cpp

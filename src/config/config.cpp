@@ -1624,6 +1624,13 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
             }
             config.features_goals = field["goals"].get<bool>();
         }
+        if (field.contains("loop")) {
+            if (!field["loop"].is_boolean()) {
+                return std::unexpected("配置文件 " + file_path_for_error +
+                                       " 里的 features.loop 必须是布尔值");
+            }
+            config.features_loop = field["loop"].get<bool>();
+        }
     }
     // goals 段:预算默认值(整段回退;duration 收原始字符串)。
     if (parsed.contains("goals")) {
@@ -2400,6 +2407,13 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
                 : (global_ptr != nullptr && global_ptr->features_goals.has_value() ? global_ptr : nullptr);
         if (features_file != nullptr) {
             result.config.features_goals = *features_file->features_goals;
+        }
+        const FileConfig* loop_file =
+            project_ptr != nullptr && project_ptr->features_loop.has_value()
+                ? project_ptr
+                : (global_ptr != nullptr && global_ptr->features_loop.has_value() ? global_ptr : nullptr);
+        if (loop_file != nullptr) {
+            result.config.features_loop = *loop_file->features_loop;
         }
         const FileConfig* goals_file = project_ptr != nullptr && project_ptr->goals.has_value()
                                            ? project_ptr
