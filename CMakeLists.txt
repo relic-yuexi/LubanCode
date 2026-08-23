@@ -482,6 +482,8 @@ add_library(lubancode_runtime STATIC
   src/runtime/goal_context.cpp
   # /goal 持久目标单:compact 守恒的 goal snapshot(拼装/校验/hash)。
   src/runtime/goal_compact.cpp
+  # /goal 持久目标单:ToolTraceHub 事件 -> GoalEvidence 的采证适配器(纯函数)。
+  src/runtime/goal_evidence.cpp
   # /loop 会话定时循环单:领域类型/状态机转换表/interval 解析/错过合并账。
   src/runtime/loop_types.cpp
   # /loop 会话定时循环单:内存 scheduler(timer 只发 wake/泵取件/退避/expiry)。
