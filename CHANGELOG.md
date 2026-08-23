@@ -2,6 +2,18 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.40] - 2026-08-23
+
+- **/loop 定时循环立起来了(features.loop 门,默认关)。** 到点自动起一轮、single-flight 不叠拍、失败退避、连败熔断;错过的时间窗合并记账不补跑成灾,崩溃各点恢复后默认暂停等人发话;Ctrl+R 历史里不混 scheduled 消息。
+- **与 goal 同一口泵吃饭。** 五档优先级调度(用户排队与待交互最高,goal 续跑与 loop 拍同档,维护最低),公平计数「连跑三轮让一拍」;timer 只发唤醒,泵位在用户排队与 peer/子代理回流之后,谁也别想霸场。
+- **typed 合同与持久账齐了。** loop 七命令七事件进 Runtime 合同,loop_control 窄工具只认本拍任务;全生命周期落 session 档、老档兼容,goal 的续跑请求经同一只调度泵分流。
+
+## [v0.26.39] - 2026-08-23
+
+- **/goal 持久目标落了地基(默认关,配置里 [features] goals = true 才露)。** 一只 active goal 的状态机与 revision CAS、七动作 slash 面、goal 事件行五种进会话档;resume 整场重建,feature 关落 SuspendedByPolicy,终态不复活。
+- **预算与防空转是硬闸。** elapsed/迭代数/token 三道预算(usage 未报告不冒充)、无进展三轮自动暂停、同一堵点三轮转 Blocked、provider 连败另有闸;goal 的判定证据走独立 evaluator 请求,achieved 要准则全过+新鲜证据+remaining 清空,差一样都不算成。
+- **compact 带着目标走。** compact_v2 事件带 goal 快照与守恒 hash,resume 逐项对账;与 loop 的分流合同口已立(五档优先级、公平计数「连跑三轮让一拍」),timer 与泵归 loop 单接线。
+
 ## [v0.26.38] - 2026-08-23
 
 - **命令进程有了一条生命线。** 起没起、活着没、怎么退的,各自立账:退出码不再丢也不再借 0(unknown 如实说),Stop 先杀整棵进程树再盖章,后台注册的先起后表的竞态与并发环境串值一并修死;原生句柄台账 + 每任务 Job,POSIX 走唯一收尸线程。
