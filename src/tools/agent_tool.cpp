@@ -1545,6 +1545,9 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             sub_callbacks.on_permission_request = foreground_hooks->on_permission_request;
             sub_callbacks.on_tool_phase = foreground_hooks->on_tool_phase;
             sub_callbacks.on_post_tool_use_hook = foreground_hooks->on_post_tool_use_hook;
+            // Plan 模式:子代理同样过 ModePolicy(Explore 拿更窄表,不因独立
+            // context 逃闸;单子明令)。
+            sub_callbacks.on_mode_policy = foreground_hooks->on_mode_policy;
         } else if (background_hooks != nullptr && !background_hooks->Empty()) {
             // 后台 hooks:同步决策用只读策略快照真跑,不静默绕过。
             //   PreToolUse:deny 拒、allow 放(带 updatedInput);ask 在后台
@@ -1612,6 +1615,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         sub_callbacks.on_permission_request = foreground_hooks->on_permission_request;
         sub_callbacks.on_tool_phase = foreground_hooks->on_tool_phase;
         sub_callbacks.on_post_tool_use_hook = foreground_hooks->on_post_tool_use_hook;
+        sub_callbacks.on_mode_policy = foreground_hooks->on_mode_policy;
     }
 
     // 打断信号:前台任务有两根——面板 x 置的 task->cancel 与父轮 ESC 置的

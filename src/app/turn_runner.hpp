@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <set>
 #include <string>
 #include <vector>
@@ -97,7 +98,9 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                             const std::atomic<bool>* cancel_flag = nullptr,
                                             lubancode::agent::WorkflowRecorder* recorder = nullptr,
                                             lubancode::runtime::ToolTraceHub* trace_hub = nullptr,
-                                            lubancode::runtime::TurnCollector* view_collector = nullptr);
+                                            lubancode::runtime::TurnCollector* view_collector = nullptr,
+                                            std::function<std::string(const std::string&, const nlohmann::json&)>
+                                                mode_gate = {});
 
 // RunTurn() 的结果:status 沿用老语义(0 成功、非 0 出错);cancelled 标记
 // 这一轮是不是被 ESC 打断的(打断不算错误,status 照样是 0)。
@@ -158,6 +161,8 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                        lubancode::runtime::ToolTraceHub* trace_hub = nullptr,
                        std::string thread_id_for_trace = std::string(),
                        std::string turn_id_for_trace = std::string(),
-                       lubancode::runtime::TurnView* turn_view_out = nullptr);
+                       lubancode::runtime::TurnView* turn_view_out = nullptr,
+                       std::function<std::string(const std::string&, const nlohmann::json&)>
+                           mode_gate = {});
 
 }  // namespace lubancode::app
