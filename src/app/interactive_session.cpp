@@ -83,6 +83,7 @@
 #include "runtime/idle_wake.hpp"
 #include "runtime/loop_scheduler.hpp"
 #include "runtime/loop_types.hpp"
+#include "runtime/session_work_scheduler.hpp"
 #include "hooks/hash.hpp"  // Sha256Hex:PlanDocument 内容锚
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
@@ -435,7 +436,12 @@ private:
     void EnsureLoopScheduler();
     // 主循环泵:到点取一枚 due tick,拼 scheduled message 开 turn(单飞:
     // 一场 session 同时只跑一枚主 turn)。返回 true = 本圈消费了一拍。
+    // goal 分流合流后这里也是 goal continuation 的取件口(PumpNextWork
+    // 定 goal 与 loop 谁先走)。
     bool PumpLoopTicks();
+    // goal ready continuation 的消费:TakeReadyIteration 落 started 事件,
+    // synthetic text 开 turn(公平账 NoteGoalRan 在这记)。
+    void PumpGoalContinuation(std::int64_t now_ms);
     // 拍子收口:turn 终态回写 tick,算 outcome/退避/连败账。
     void FinishLoopTick(const std::string& tick_id, bool turn_failed, bool cancelled);
     // scheduler 攒的事件账落盘(append+flush);失败即 FailStore 熔断。
@@ -609,6 +615,13 @@ private:
     lubancode::runtime::IdleWakeCoordinator::Subscription loop_wake_token_;
     // 当前在跑的 loop tick(拍执行中;turn 收口时回写)。
     std::string loop_active_tick_id_;
+    // goal 分流合流(loop 单):GoalWorkSource 喂 ready continuation 进泵,
+    // FairnessCounter 管"goal 连跑三轮让一枚 due loop tick"。goal 与 loop
+    // 不共用 trigger(evaluator 判终点 vs 时钟到点),共用这只泵(单飞)。
+    lubancode::runtime::GoalWorkSource goal_work_source_;
+    lubancode::runtime::FairnessCounter goal_fairness_;
+    // 当前在跑的 goal iteration(收口时 NoteGoalRan/NoteOtherWorkRan)。
+    std::string goal_active_iteration_;
     // 每轮的 TurnView 存档(终端回合视觉收束单):Ctrl+L/resume 重放走
     // 同一颗渲染器,与实时画面同账。最近 N 轮,不无界攒。
     std::vector<lubancode::runtime::TurnView> turn_views_;
@@ -3818,6 +3831,21 @@ void TerminalSessionController::EnsureGoalCoordinator() {
         return session_store.AppendGoalEvent(line);
     });
     goal_checkpoint_state_ = std::make_shared<lubancode::tools::GoalCheckpointState>();
+    // loop 单分流合流:coordinator 的 ready continuation 经 GoalWorkSource
+    // 进泵(泵问 ProbeWork;选中后装配层 TakeReadyIteration 发 synthetic
+    // turn)。trigger 各归各(evaluator 判终点 vs 时钟到点),泵共用。
+    goal_work_source_.SetProbe([this]() -> std::optional<lubancode::runtime::SessionWork> {
+        if (!goal_coordinator_.has_value() || !goal_coordinator_->HasReadyContinuation()) {
+            return std::nullopt;
+        }
+        lubancode::runtime::SessionWork work;
+        work.kind = lubancode::runtime::WorkKind::GoalContinuation;
+        work.id = goal_coordinator_->ready_dedupe_key();
+        work.payload["goal_id"] = goal_coordinator_->task() != nullptr
+                                      ? goal_coordinator_->task()->id
+                                      : std::string();
+        return work;
+    });
 }
 
 void TerminalSessionController::RestoreGoalFromArchive() {
@@ -4177,16 +4205,47 @@ CommandFlow TerminalSessionController::HandleLoopCommand(
 }
 
 bool TerminalSessionController::PumpLoopTicks() {
-    if (!loop_scheduler_.has_value() || !loop_scheduler_->HasActiveTasks()) {
-        return false;
-    }
     const auto now_ms = [] {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
                    std::chrono::system_clock::now().time_since_epoch())
             .count();
     }();
-    // expiry 扫一圈:过期的落事件,不默默消失。
-    loop_scheduler_->SweepExpiry(now_ms);
+    // goal 分流合流(loop 单):goal ready continuation 与 due loop tick
+    // 不共用 trigger,共用这只泵。先各问一句,凑候选表,PumpNextWork 按
+    // 优先级 + 公平账定谁走;user queue / pending interaction 已在泵前
+    // 面的主循环各分支消费过,这里只收自动工作两类。
+    std::vector<lubancode::runtime::SessionWork> candidates;
+    if (goal_coordinator_.has_value() && goal_work_source_.ProbeWork().has_value()) {
+        // 有 ready continuation:候选里放一枚占位,真取件(TakeReadyIteration
+        // 落 started 事件)等选中后再做——没选中就不动 goal 的账。
+        lubancode::runtime::SessionWork work;
+        work.kind = lubancode::runtime::WorkKind::GoalContinuation;
+        work.id = "goal-continuation";
+        candidates.push_back(work);
+    }
+    bool loop_due = false;
+    if (loop_scheduler_.has_value() && loop_scheduler_->HasActiveTasks()) {
+        loop_scheduler_->SweepExpiry(now_ms);
+        loop_due = loop_scheduler_->HasDueWork(now_ms);
+        if (loop_due) {
+            lubancode::runtime::SessionWork work;
+            work.kind = lubancode::runtime::WorkKind::LoopTick;
+            work.id = "loop-tick";
+            candidates.push_back(work);
+        }
+    }
+    const auto picked = lubancode::runtime::PumpNextWork(candidates, goal_fairness_);
+    if (!picked.has_value()) {
+        FlushLoopEvents();
+        return false;
+    }
+    if (picked->kind == lubancode::runtime::WorkKind::GoalContinuation) {
+        PumpGoalContinuation(now_ms);
+        return true;
+    }
+    if (!loop_scheduler_.has_value() || !loop_scheduler_->HasActiveTasks()) {
+        return false;
+    }
     const auto tick = loop_scheduler_->PumpDueTick(now_ms, "loop-turn");
     if (!tick.has_value()) {
         FlushLoopEvents();
@@ -4233,6 +4292,32 @@ bool TerminalSessionController::PumpLoopTicks() {
     RunUserTurn(message, &turn_failed);
     FinishLoopTick(tick->tick.tick_id, turn_failed, /*cancelled=*/false);
     return true;
+}
+
+void TerminalSessionController::PumpGoalContinuation(std::int64_t now_ms) {
+    // goal 的 ready continuation 开一轮 synthetic turn(单飞:与 loop 同泵,
+    // 一场 session 同时只跑一枚主 turn)。TakeReadyIteration 落 started
+    // 事件(带 turn_id/dedupe_key);失败(goal 单测过)静默返回,下一圈
+    // 再问。
+    if (!goal_coordinator_.has_value() ||
+        !goal_coordinator_->HasReadyContinuation()) {
+        return;
+    }
+    const auto started = goal_coordinator_->TakeReadyIteration("goal-turn", /*before_fingerprint=*/"", now_ms);
+    if (!started.ok) {
+        return;
+    }
+    goal_active_iteration_ = started.dedupe_key;
+    goal_fairness_.NoteGoalRan();
+    std::cout << theme.stats << "[goal " << started.iteration.goal_id << " iteration "
+              << started.iteration.index << "]" << theme.reset << "\n";
+    bool turn_failed = false;
+    RunUserTurn(started.synthetic_text, &turn_failed);
+    // 收口:goal 侧 evaluator 的判词由 goal 单的收口路接(checkpoint/
+    // ApplyEvaluation);这里只清活跃账与公平账。turn 失败记 provider 账。
+    (void)turn_failed;
+    goal_active_iteration_.clear();
+    goal_fairness_.NoteOtherWorkRan();
 }
 
 void TerminalSessionController::FinishLoopTick(const std::string& tick_id, bool turn_failed,

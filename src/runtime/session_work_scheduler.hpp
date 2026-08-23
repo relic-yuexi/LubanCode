@@ -80,4 +80,12 @@ private:
     int goal_streak_limit_ = 3;
 };
 
+// 公平泵(loop 单实装):从一组候选里取下一枚工作。
+//   - 按 WorkPriority 升序,同档保序(stable,即到达次序 FIFO)。
+//   - fairness.LoopShouldPreemptGoal() 立着且候选里有 due loop tick 时,
+//     loop 先(防 goal 饿死同档的 loop)。
+// 装配层每圈把各源现拼的候选传进来,取走一枚、跑完回来再问下一圈。
+std::optional<SessionWork> PumpNextWork(const std::vector<SessionWork>& candidates,
+                                        const FairnessCounter& fairness);
+
 }  // namespace lubancode::runtime

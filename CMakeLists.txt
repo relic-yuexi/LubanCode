@@ -486,6 +486,8 @@ add_library(lubancode_runtime STATIC
   src/runtime/loop_scheduler.cpp
   # /loop 会话定时循环单:空闲唤醒多路总口(替单枚 SetIdleWakeHook)。
   src/runtime/idle_wake.cpp
+  # loop 单:goal 单立的会话工作分流合同在这里实装(公平泵 PumpNextWork)。
+  src/runtime/session_work_scheduler.cpp
   # Plan 模式(只读研究硬闸单):CollaborationMode/ModePolicy/PlanDocument
   # 合同与纯函数(ModePolicy 硬闸、Plan shell 分类、<proposed_plan> 扫描)。
   src/runtime/plan_mode.cpp
