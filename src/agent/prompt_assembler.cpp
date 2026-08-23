@@ -213,7 +213,20 @@ std::string AssembleSystemPrompt(const PromptOptions& options) {
     } else if (options.wire == "chat_completions") {
         append(ModuleByPath(options.prompts_dir, "platforms/chat_completions.md"));
     }
+
+    // 模式段殿后(Plan 模式单):宿主内置,不看用户目录。Default 也注——
+    // 模板里明说"旧 Plan 指令已结束",防模型带着上一档的规矩跑(单子:
+    // Codex 公开 issue 出过这类残留)。
+    append(ModeInstructionSegment(options.plan_mode));
     return prompt;
+}
+
+std::string ModeInstructionSegment(bool plan_mode) {
+    // modes/ 组不走 kAllModules 的"用户文件优先"回路——嵌入版即真值
+    //(单子:mode instructions 宿主内置,不给项目覆盖)。embed 脚本按文件名
+    // 生成 kMode_<stem>(plan/default),这里按名字直取;构建期 GLOB 保证
+    // 在,防御分支返回空串,拼装侧空段不 append。
+    return std::string(plan_mode ? embedded::kMode_plan : embedded::kMode_default);
 }
 
 }  // namespace lubancode::agent
