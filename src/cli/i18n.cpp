@@ -1189,7 +1189,7 @@ const Entry kZhCN[] = {
     {"cmd.think.undeclared", "提示: 模型目录未声明该档,仍会发送。"},
 
     // ---- /doctor:本地兼容端 Effort 与前缀缓存诊断(2026-08 单) ----
-    {"doctor.usage.usage_line", "用法: /doctor effort [档位|unset] | /doctor cache [probe|usage] | /doctor agents"},
+    {"doctor.usage.usage_line", "用法: /doctor effort [档位|unset] | /doctor cache [probe|usage] | /doctor agents | /doctor shell"},
     {"doctor.overview.header", "诊断概览(不发请求,只看当前声明与结论):"},
     {"doctor.overview.effort", "  当前档位: "},
     {"doctor.overview.declared", "  档位声明: "},
