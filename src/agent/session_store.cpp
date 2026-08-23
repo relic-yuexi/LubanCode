@@ -1259,6 +1259,15 @@ bool SessionStore::AppendToolTraceEvent(const ToolTraceEvent& event) {
     return out_.good();
 }
 
+bool SessionStore::AppendRawLine(const std::string& json_line) {
+    if (!out_.is_open()) {
+        return false;
+    }
+    out_ << json_line << "\n";
+    out_.flush();
+    return out_.good();
+}
+
 bool SessionStore::AppendGoalEvent(const GoalSessionEvent& event) {
     if (!out_.is_open()) {
         return false;

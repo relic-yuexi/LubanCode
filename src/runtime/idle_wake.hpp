@@ -29,7 +29,7 @@ public:
     // 不留悬垂。
     class Subscription {
     public:
-        Subscription() = default;
+        Subscription();
         Subscription(const Subscription&) = delete;
         Subscription& operator=(const Subscription&) = delete;
         Subscription(Subscription&& other) noexcept;

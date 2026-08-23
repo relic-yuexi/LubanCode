@@ -9,6 +9,8 @@ struct IdleWakeCoordinator::Subscription::Impl {
     std::string name;
 };
 
+IdleWakeCoordinator::Subscription::Subscription() = default;
+
 IdleWakeCoordinator::Subscription::~Subscription() { reset(); }
 
 IdleWakeCoordinator::Subscription::Subscription(Subscription&& other) noexcept

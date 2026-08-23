@@ -386,6 +386,11 @@ public:
     // 的落点,写失败即知(process-crash durable 的口径,见单子 Durability 节)。
     bool AppendToolTraceEvent(const ToolTraceEvent& event);
 
+    // 追加一条原始 JSON 事件行(loop 单:loop_task_v1/loop_tick_v1 一族;
+    // 调用方拼好 json,这里只做 append+flush 的薄壳,不校验 schema——坏
+    // 形状的责任在调用方,回放侧坏行跳过不废整场)。
+    bool AppendRawLine(const std::string& json_line);
+
     // 追加一条 goal 事件行(goal_v1 族,自动带 ts),append+flush。持久
     // 目标单:GoalCoordinator 的 LedgerSink 接到这里,九道写盘栅栏的
     // "先落才改内存"靠 append+flush 的同步性。
