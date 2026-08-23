@@ -473,6 +473,16 @@ private:
     void FinishLoopTick(const std::string& tick_id, bool turn_failed, bool cancelled);
     // scheduler 攒的事件账落盘(append+flush);失败即 FailStore 熔断。
     void FlushLoopEvents();
+    // loop 事件 -> ServerEvent 投影(loop 单遗留:EventSink 面已立,这里
+    // 灌)。sink 没挂零影响(终端老路);挂了(JsonEventSink/app-server)
+    // 前端凭 payload 画状态栏与任务行。
+    void EmitLoopServerEvents(const std::vector<lubancode::runtime::loop::LoopSchedulerEvent>& events);
+    // WaitingPermission 真接线(loop 单遗留:scheduler 侧口已备):审批真要
+    // 问用户时 asked=true,答完 asked=false 带 allowed。有 loop 拍在跑才
+    // 记账——task 转 WaitingPermission(等审批不烧 iteration,悬起期间后续
+    // 拍 coalesce),答回转 Running,拒了走 declined 账(连三拍自动 Pause)。
+    // 不在 loop turn 零影响(普通轮的审批不动 scheduler)。
+    void NoteLoopPermissionWait(bool asked, bool allowed);
     // /resume 后从存档 loop 事件账回放重建(默认 paused-on-resume 不自动
     // 烧 token,用户 /loop resume 显式续)。
     void RestoreLoopFromArchive();
@@ -1731,14 +1741,45 @@ bool TerminalSessionController::HandleTranscriptUi(lubancode::cli::UiKeyAction a
             return true;
         }
         case cli::UiKeyAction::Escape: {
-            if (!focus_view_active) {
-                return false;  // 不在聚焦查看态:ESC 还给编辑器,维持"清空输入"老语义
+            if (focus_view_active) {
+                focus_view_active = false;
+                std::cout << "\n" << theme.stats << tr("ui.back") << theme.reset << "\n";
+                PrintBanner(config, theme);
+                PrintRecentItems(5);
+                return true;
             }
-            focus_view_active = false;
-            std::cout << "\n" << theme.stats << tr("ui.back") << theme.reset << "\n";
-            PrintBanner(config, theme);
-            PrintRecentItems(5);
-            return true;
+            // loop 单遗留:空闲态停 loop 键位。聚焦查看态之外,ESC 的老
+            // 语义是"清空输入"。这里加一档:composer 空(没在敲字)且有
+            // 活 loop(非终态非 Paused 的任务在排)时,ESC 停全部活 loop
+            // ——"背景会自己动"的东西得有一枚一键急停(与状态栏恒亮段
+            // 配套)。composer 有字(或 stash 有货)照旧还给编辑器,半敲
+            // 的话不吞。
+            if (!lubancode::cli::ComposerStashHasContent() && loop_scheduler_.has_value()) {
+                const auto now_ms = [] {
+                    return std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                        .count();
+                }();
+                int stopped = 0;
+                for (const auto& view : loop_scheduler_->Snapshot(now_ms)) {
+                    if (lubancode::runtime::loop::IsLoopTerminal(view.task.state) ||
+                        view.task.state == lubancode::runtime::loop::LoopTaskState::Paused) {
+                        continue;
+                    }
+                    if (loop_scheduler_->Stop(view.task.task_id, now_ms, "user_esc").ok) {
+                        ++stopped;
+                    }
+                }
+                if (stopped > 0) {
+                    FlushLoopEvents();
+                    std::cout << theme.stats
+                              << "已停 " << stopped
+                              << " 只 loop 任务(ESC;定义保留,续跑 /loop resume <id>)。" << theme.reset
+                              << "\n";
+                    return true;
+                }
+            }
+            return false;  // 没有活 loop:ESC 还给编辑器,老语义不动
         }
         case cli::UiKeyAction::RepaintScreen: {
             // Ctrl+L:终端层已清可视区、作废帧锚点;这里重铺会话画面(session
@@ -4122,6 +4163,11 @@ void TerminalSessionController::FlushLoopEvents() {
     if (events.empty()) {
         return;
     }
+    // EventSink 投影(loop 单遗留:ServerEvent 面已立未灌):loop 的状态
+    // 变更折 thread 层 ServerEvent 给挂了的 sink——前端凭 payload 画
+    // 状态栏与任务行,不解析 slash 字符串(单子"前端凭 payload 画")。
+    // 投影不拦落盘:UI 失败不拦工具的规矩在这里同款。
+    EmitLoopServerEvents(events);
     if (!session_store.active()) {
         return;  // 没建档的会话照常跑,事件只进内存
     }
@@ -4143,6 +4189,70 @@ void TerminalSessionController::FlushLoopEvents() {
                       << theme.reset << "\n";
             return;
         }
+    }
+}
+
+void TerminalSessionController::NoteLoopPermissionWait(bool asked, bool allowed) {
+    // WaitingPermission 真接线:只在 loop 拍的 turn 里记账(普通轮的审批
+    // 与 scheduler 无关)。RunTurn 的审批旁听口从 RunUserTurn 进来,这里
+    // 拿 loop_active_tick_id_ 认"这一轮是不是 loop 的轮"。
+    if (loop_active_tick_id_.empty() || !loop_scheduler_.has_value()) {
+        return;
+    }
+    const auto now_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    }();
+    if (asked) {
+        loop_scheduler_->NotePermissionWait(loop_active_tick_id_, now_ms);
+        FlushLoopEvents();
+        return;
+    }
+    // 答完:allowed 走 resolved(本拍继续),拒走 declined(连三拍自动
+    // Pause 的账在 FinishTick 的 Declined 分支;这里只记事件)。
+    if (allowed) {
+        loop_scheduler_->NotePermissionResolved(loop_active_tick_id_, now_ms);
+    } else {
+        loop_scheduler_->NotePermissionDeclined(loop_active_tick_id_, now_ms);
+    }
+    FlushLoopEvents();
+}
+
+void TerminalSessionController::EmitLoopServerEvents(
+    const std::vector<lubancode::runtime::loop::LoopSchedulerEvent>& events) {    lubancode::runtime::EventSink* sink = session_runtime_.sink();
+    if (sink == nullptr) {
+        return;  // 终端老路不接事件流,零影响
+    }
+    for (const auto& e : events) {
+        lubancode::runtime::ServerEvent event;
+        event.envelope.thread_id = session_runtime_.thread_id();
+        event.envelope.seq = session_runtime_.ids().NextSeq();
+        event.envelope.timestamp_ms = e.timestamp_ms;
+        // 事件分族:task 级状态变更走 LoopTaskStateChanged,tick 级按动词
+        // 分(due/started/finished)。family 里 task/tick 的分法与 scheduler
+        // 的 EmitLocked 同源,这里只做协议投影。
+        event.kind = lubancode::runtime::ServerEventKind::LoopTaskStateChanged;
+        if (e.family == "loop_tick_v1") {
+            if (e.event == "due") {
+                event.kind = lubancode::runtime::ServerEventKind::LoopTickDue;
+            } else if (e.event == "started") {
+                event.kind = lubancode::runtime::ServerEventKind::LoopTickStarted;
+            } else if (e.event == "finished") {
+                event.kind = lubancode::runtime::ServerEventKind::LoopTickCompleted;
+            }
+        } else if (e.event == "expired") {
+            event.kind = lubancode::runtime::ServerEventKind::LoopTaskExpired;
+        } else if (e.event == "created") {
+            event.kind = lubancode::runtime::ServerEventKind::LoopTaskCreated;
+        }
+        event.payload["task_id"] = e.task_id;
+        if (!e.tick_id.empty()) {
+            event.payload["tick_id"] = e.tick_id;
+        }
+        event.payload["event"] = e.event;
+        event.payload["data"] = e.payload;
+        sink->Emit(event);
     }
 }
 
@@ -4832,6 +4942,9 @@ CommandFlow TerminalSessionController::RunUserTurn(const std::string& content, b
                 /*turn_view_out=*/&turn_views_.back(),
                 /*mode_gate=*/[this](const std::string& tool_name, const nlohmann::json& input) {
                     return EvaluatePlanGate(tool_name, input);
+                },
+                /*approval_observer=*/[this](bool asked, bool allowed) {
+                    NoteLoopPermissionWait(asked, allowed);
                 });
     // 轮次视图存档封顶(最近 N 轮,重铺够用;不无界攒)。
     if (turn_views_.size() > kMaxArchivedTurnViews) {

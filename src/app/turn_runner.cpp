@@ -360,7 +360,8 @@ bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
                     lubancode::cli::ToolDisplay& display, const std::vector<std::string>& allow_commands,
                     const std::vector<std::string>& deny_commands,
                     lubancode::hooks::HookDispatcher* hook_dispatcher, const lubancode::agent::ToolHookDecision& pre,
-                    bool has_permission_hooks, const std::string& name, const nlohmann::json& input) {
+                    bool has_permission_hooks, const std::string& name, const nlohmann::json& input,
+                    const std::function<void(bool asked, bool allowed)>& approval_observer = {}) {
     const bool file_tool = name == "write_file" || name == "edit_file";
 
     // 裁定(纯逻辑,runtime 层):档位 + permissions 叠加 + PreToolUse 表态
@@ -426,6 +427,12 @@ bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
     // 菜单同一套屏面所有权,不另开第二条路。)
     const lubancode::cli::StreamFooterSuspendScope footer_suspend;
     const int pending_idx = display.OnConfirmRequest(tool_use_id);
+    // 审批悬起旁听(loop 单遗留:WaitingPermission 真接线):真要问用户了,
+    // 先报 asked;答完在收尾处报 answered。装配层拿它推 scheduler 的
+    // WaitingPermission 账(等审批不烧 iteration,悬起期间后续拍 coalesce)。
+    if (approval_observer) {
+        approval_observer(/*asked=*/true, /*allowed=*/false);
+    }
     if (file_tool && display.is_console) {
         display.ShowDiffPreview(tool_use_id, name, input, /*trim_on_done=*/false);
     } else {
@@ -476,6 +483,10 @@ bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
         }
     }
     display.OnConfirmAnswered(pending_idx, allowed, tool_use_id);
+    // 审批悬起旁听:答完了(asked=false 那一枚),allowed 是裁定。
+    if (approval_observer) {
+        approval_observer(/*asked=*/false, allowed);
+    }
 
     // 按 a 之后多问一句:也永久写进项目 settings.local.json?管道/--yes 下
     // 跳过(只进会话集合)——那些场景没法交互再问一遍。真控制台才追问。
@@ -546,7 +557,8 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                             lubancode::runtime::ToolTraceHub* trace_hub,
                                             lubancode::runtime::TurnCollector* view_collector,
                                             std::function<std::string(const std::string&, const nlohmann::json&)>
-                                                mode_gate) {
+                                                mode_gate,
+                                            std::function<void(bool asked, bool allowed)> approval_observer) {
     lubancode::agent::Callbacks callbacks;
 
     // Plan 模式(只读研究硬闸单):ModePolicy 接到 RunOneTool 的
@@ -657,10 +669,12 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
 
     callbacks.on_tool_confirm = [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands,
                                   &deny_commands, hook_dispatcher, pre_decision_slot,
-                                  has_permission_hooks](const std::string& tool_use_id, const std::string& name,
-                                                        const nlohmann::json& input) -> bool {
+                                  has_permission_hooks, approval_observer](const std::string& tool_use_id,
+                                                                          const std::string& name,
+                                                                          const nlohmann::json& input) -> bool {
         return ConfirmToolUse(tool_use_id, auto_confirm, always_allowed_tools, theme, display, allow_commands,
-                              deny_commands, hook_dispatcher, *pre_decision_slot, has_permission_hooks, name, input);
+                              deny_commands, hook_dispatcher, *pre_decision_slot, has_permission_hooks, name, input,
+                              approval_observer);
     };
 
     // P2(显示系统剥离单):异步审批通道——同一份裁定与问话逻辑包成
@@ -672,12 +686,12 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
     // 路(子代理/PTC 转发、单测)不走这里,照旧同步、不许多线程化。
     callbacks.on_tool_confirm_async =
         [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands, &deny_commands, hook_dispatcher,
-         pre_decision_slot, has_permission_hooks](const lubancode::agent::ApprovalRequest& request)
+         pre_decision_slot, has_permission_hooks, approval_observer](const lubancode::agent::ApprovalRequest& request)
         -> std::shared_ptr<lubancode::agent::InteractionFuture> {
         const bool allowed =
             ConfirmToolUse(request.tool_use_id, auto_confirm, always_allowed_tools, theme, display, allow_commands,
                            deny_commands, hook_dispatcher, *pre_decision_slot, has_permission_hooks,
-                           request.tool_name, request.input);
+                           request.tool_name, request.input, approval_observer);
         lubancode::agent::ApprovalResponse response;
         response.decision = allowed ? lubancode::agent::ApprovalDecision::Accept
                                     : lubancode::agent::ApprovalDecision::Decline;
@@ -973,7 +987,8 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                        lubancode::runtime::ToolTraceHub* turn_trace_hub,
                        std::string thread_id_for_trace, std::string turn_id_for_trace,
                        lubancode::runtime::TurnView* turn_view_out,
-                       std::function<std::string(const std::string&, const nlohmann::json&)> mode_gate) {
+                       std::function<std::string(const std::string&, const nlohmann::json&)> mode_gate,
+                       std::function<void(bool asked, bool allowed)> approval_observer) {
     auto prepared_input = lubancode::cli::PrepareImageInput(user_input);
     if (!prepared_input.has_value()) {
         std::cerr << theme.error << tr("error.prefix") << ImageInputErrorText(prepared_input.error())
@@ -1054,7 +1069,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     lubancode::agent::Callbacks callbacks =
         BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker, registry,
                         hook_dispatcher, display, body_tracker, allow_commands, deny_commands, &cancel_flag,
-                        recorder, turn_trace_hub, &view_collector, mode_gate);
+                        recorder, turn_trace_hub, &view_collector, mode_gate, approval_observer);
     if (turn_trace_hub != nullptr) {
         if (recorder != nullptr) {
             turn_trace_hub->AttachProjection(

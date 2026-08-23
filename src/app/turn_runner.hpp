@@ -99,7 +99,8 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                             lubancode::runtime::ToolTraceHub* trace_hub = nullptr,
                                             lubancode::runtime::TurnCollector* view_collector = nullptr,
                                             std::function<std::string(const std::string&, const nlohmann::json&)>
-                                                mode_gate = {});
+                                                mode_gate = {},
+                                            std::function<void(bool asked, bool allowed)> approval_observer = {});
 
 // RunTurn() 的结果:status 沿用老语义(0 成功、非 0 出错);cancelled 标记
 // 这一轮是不是被 ESC 打断的(打断不算错误,status 照样是 0)。
@@ -162,6 +163,13 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                        std::string turn_id_for_trace = std::string(),
                        lubancode::runtime::TurnView* turn_view_out = nullptr,
                        std::function<std::string(const std::string&, const nlohmann::json&)>
-                           mode_gate = {});
+                           mode_gate = {},
+                       // loop 单遗留:审批悬起的旁听口(WaitingPermission 真接线)。
+                       // 每次真要问用户前 asked(true, 工具名先在另一参) 来,
+                       // 答完 answered(allowed) 后到——装配层拿它把 loop
+                       // scheduler 的 WaitingPermission 账推起来(单子:等
+                       // 审批不算无进展也不烧 iteration,悬起期间后续拍
+                       // coalesce)。可空 = 不旁听,行为不变。
+                       std::function<void(bool asked, bool allowed)> approval_observer = {});
 
 }  // namespace lubancode::app

@@ -492,6 +492,8 @@ add_library(lubancode_runtime STATIC
   src/runtime/idle_wake.cpp
   # loop 单:goal 单立的会话工作分流合同在这里实装(公平泵 PumpNextWork)。
   src/runtime/session_work_scheduler.cpp
+  # loop 单遗留(骨架):scheduled prompt -> 安全动作的 catalog 与 resolver。
+  src/runtime/scheduled_action.cpp
   # Plan 模式(只读研究硬闸单):CollaborationMode/ModePolicy/PlanDocument
   # 合同与纯函数(ModePolicy 硬闸、Plan shell 分类、<proposed_plan> 扫描)。
   src/runtime/plan_mode.cpp

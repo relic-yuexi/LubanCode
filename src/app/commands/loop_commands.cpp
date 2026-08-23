@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 
+#include "cli/line_editor.hpp"
 #include "platform/paths.hpp"
 
 namespace lubancode::app {
@@ -83,18 +84,23 @@ std::string StateLabel(LoopTaskState state) {
     return ToString(state);
 }
 
-// prompt 预览:首行截 30 字(list 默认只给 preview,status 给全稿)。
+// prompt 预览:首行按显示宽度截 30 列(list 默认只给 preview,status 给
+// 全稿)。用 TruncateUtf8ToDisplayWidth——CJK 一字两列、绝不切半个字;
+// 旧实现按字节截,汉字 prompt 会被拦腰截出非法 UTF-8。
 std::string PromptPreview(const std::string& prompt) {
     std::string first = prompt;
     const std::size_t cut = first.find('\n');
     if (cut != std::string::npos) {
         first.resize(cut);
     }
-    if (first.size() > 60) {
-        first.resize(57);
-        first += "...";
+    if (first.empty()) {
+        return "(来自 loop.md/内置维护提示)";
     }
-    return first.empty() ? "(来自 loop.md/内置维护提示)" : first;
+    std::string clipped = lubancode::cli::TruncateUtf8ToDisplayWidth(first, 30);
+    if (clipped != first) {
+        clipped += "…";
+    }
+    return clipped;
 }
 
 }  // namespace
