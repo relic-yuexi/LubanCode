@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include "tools/tool.hpp"
 
 namespace lubancode::tools {
@@ -27,6 +29,15 @@ public:
     nlohmann::json input_schema() const override;
     bool needs_confirm() const override { return true; }
     Result execute(const nlohmann::json& input) override;
+
+    // 进程生命线单(P1:前台取消通道):ESC 取消链。turn_runner 每轮灌
+    //(与插件的 SetPluginCancel 同一条链)。置位后前台命令的等待循环每拍
+    // 查旗,收整棵树、分型 cancelled(与超时分开记账)。不灌 = 行为与旧版
+    // 完全一致。
+    void SetCancel(const std::atomic<bool>* cancel) { cancel_ = cancel; }
+
+private:
+    const std::atomic<bool>* cancel_ = nullptr;
 };
 
 }  // namespace lubancode::tools

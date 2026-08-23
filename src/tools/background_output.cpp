@@ -11,21 +11,21 @@ namespace lubancode::tools {
 
 namespace {
 
-const char* StatusLabel(BackgroundTaskStatus s) {
-    switch (s) {
-        case BackgroundTaskStatus::Running: return "运行中";
-        case BackgroundTaskStatus::Completed: return "完成(退出码 0)";
-        case BackgroundTaskStatus::Failed: return "失败(非零退出码)";
-        case BackgroundTaskStatus::Stopped: return "已停止";
-    }
-    return "未知";
-}
-
-// 把一条任务的摘要拼成一行文本(List/detail 共用)。
+// 把一条任务的摘要拼成一行文本(List/detail 共用)。退出码不知道便写
+// unknown——不借 0 冒充成功(进程生命线单 P0 的口径)。
 void AppendTaskSummary(std::ostringstream& oss, const BackgroundTaskInfo& t) {
-    oss << "[#" << t.task_id << "] " << StatusLabel(t.status);
-    if (t.status != BackgroundTaskStatus::Running) {
-        oss << " (exit " << t.exit_code << ")";
+    oss << "[#" << t.task_id << "] " << BackgroundTaskStatusLabel(t.status);
+    if (t.status != BackgroundTaskStatus::Running && t.status != BackgroundTaskStatus::Stopping) {
+        oss << " (exit ";
+        if (t.exit.exit_code.has_value()) {
+            oss << *t.exit.exit_code;
+        } else {
+            oss << "unknown";
+        }
+        if (t.exit.signal.has_value()) {
+            oss << ", signal " << *t.exit.signal;
+        }
+        oss << ")";
     }
     oss << "  PID=" << t.pid << "\n  命令: " << t.command << "\n  日志: " << t.log_path << "\n";
 }

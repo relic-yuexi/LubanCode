@@ -4308,11 +4308,14 @@ void TerminalSessionController::Run() {
                     case lubancode::tools::BackgroundTaskStatus::Completed: label = "完成(退出码 0)"; break;
                     case lubancode::tools::BackgroundTaskStatus::Failed: label = "失败"; break;
                     case lubancode::tools::BackgroundTaskStatus::Stopped: label = "已停止"; break;
+                    case lubancode::tools::BackgroundTaskStatus::StopFailed: label = "停止失败"; break;
                     default: break;
                 }
                 std::cout << theme.stats << "[后台任务 #" << t.task_id << " " << label << "]";
                 if (t.status != lubancode::tools::BackgroundTaskStatus::Completed) {
-                    std::cout << " (exit " << t.exit_code << ")";
+                    std::cout << " (exit "
+                              << (t.exit.exit_code.has_value() ? std::to_string(*t.exit.exit_code) : "unknown")
+                              << ")";
                 }
                 std::cout << " " << t.command << theme.reset << "\n";
             }

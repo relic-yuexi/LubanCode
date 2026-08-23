@@ -7,8 +7,8 @@
 //   - 一次性捕获:合并 stdout/stderr 进同一条管道,输出超上限截断保留前段、
 //     杀树、继续读空到 EOF(不读的话子进程卡在写上死不掉)。
 //   - env 注入:fork 后在子进程里把预先拼好的 envp 赋给 environ 再 exec,
-//     不碰父进程环境(比 Windows 的"临时改了再还原"更干净,但语义按更严
-//     的那边算,调用方仍然单线程顺序调用)。
+//     不碰父进程环境(Windows 侧进程生命线单 P0 之后同样不改父环境,两
+//     平台一张合同:并发调用不串值)。
 //   - exec 失败检测:一条 O_CLOEXEC 管道,exec 成了自动关闭、父进程读到
 //     EOF;exec 败了子进程把 errno 写回来,父进程借此分清"命令不存在"
 //     (ENOENT -> command_not_found,LSP 层要给友好报错)和其他失败。
@@ -62,8 +62,27 @@ struct EnvBlock {
     std::vector<char*> ptrs;
 };
 
+// env 条目合法性预检(与 Windows 同一张合同):键空/含 '='/含 NUL,值含
+// NUL —— 一律 spawn_failed,人话写明哪条。返回空串 = 全部合法。
+std::string ValidateEnvPairs(const EnvPairs& extra_env) {
+    for (const auto& [k, v] : extra_env) {
+        if (k.empty() || k.find('=') != std::string::npos || k.find('\0') != std::string::npos) {
+            return "环境变量名非法(空/含 '=' 或 NUL): " + k;
+        }
+        if (v.find('\0') != std::string::npos) {
+            return "环境变量值含 NUL: " + k;
+        }
+    }
+    return std::string();
+}
+
 EnvBlock BuildEnvBlock(const EnvPairs& extra_env, EnvMode env_mode) {
     EnvBlock block;
+    // 预检(与 Windows 的 BuildMergedEnvironmentBlock 同一张合同):键名空/
+    // 含 '='(POSIX env key 的 '=' 会改语义)/含 NUL,值含 NUL,一律拒绝。
+    // BuildEnvBlock 没有 error 出口,非法条目直接丢弃——调用方(RunProcess
+    // 一族)在 fork 之前另行预检并报 spawn_failed,这里只保底不把坏条目
+    // 塞进子进程环境。
     if (env_mode == EnvMode::Inherit) {
         for (char** p = environ; p != nullptr && *p != nullptr; ++p) {
             const std::string entry(*p);
@@ -82,6 +101,10 @@ EnvBlock BuildEnvBlock(const EnvPairs& extra_env, EnvMode env_mode) {
         }
     }
     for (const auto& [k, v] : extra_env) {
+        if (k.empty() || k.find('=') != std::string::npos || k.find('\0') != std::string::npos ||
+            v.find('\0') != std::string::npos) {
+            continue;  // 非法条目丢弃(调用方预检在先,这里保底)
+        }
         block.storage.push_back(k + "=" + v);
     }
     block.ptrs.reserve(block.storage.size() + 1);
@@ -268,6 +291,121 @@ int OpenBackgroundLogExclusive(const std::string& path) {
     return open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
 }
 
+// ---------------------------------------------------------------------------
+// BackgroundProcessHandle(进程生命线单 P0):POSIX 侧。子进程照旧 setsid
+// 脱离会话(后台长命的语义不变),waitpid 只留一处——由 spawn 时起的
+// 唯一收尸线程做,退出状态写进共享完成态、广播给所有等待方;registry 的
+// watcher/Stop 只读完成态与发信号,不再抢收尸、不再 kill(pid,0) 猜。
+// ---------------------------------------------------------------------------
+
+}  // namespace
+
+struct BackgroundProcessHandle::Impl {
+    pid_t pid = -1;
+    // 收尸线程广播完成用(Wait 挂在这上面,不轮询不抢 waitpid)。
+    std::condition_variable done_cv;
+};
+
+BackgroundProcessHandle::BackgroundProcessHandle() : impl(std::make_unique<Impl>()) {}
+
+BackgroundProcessHandle::~BackgroundProcessHandle() {
+    // 析构时进程可能还活着(dev server 这类)。会话级 atexit 注册表还记着
+    // 它,lubancode 退出时统一收尾;这里不做析构即杀(句柄语义 = 观察窗,
+    // 不是所有权——Stop 才是杀的口)。
+}
+
+bool BackgroundProcessHandle::Wait(int timeout_ms) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (impl->pid <= 0) {
+        return true;  // 没起过
+    }
+    if (timeout_ms <= 0) {
+        return completion_known_;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (!completion_known_) {
+        if (impl->done_cv.wait_until(lock, deadline) == std::cv_status::timeout) {
+            break;
+        }
+    }
+    return completion_known_;
+}
+
+void BackgroundProcessHandle::RecordExit(int status) {
+    // 唯一收尸线程调用:status 是 waitpid 的原样返回(失败的调用方走
+    // MarkUnknown,不许把 -1 之类塞进来——WIF* 宏会把它解成信号)。
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (completion_known_) {
+        return;
+    }
+    if (WIFEXITED(status)) {
+        completion_.known = true;
+        completion_.exit_code = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        completion_.known = true;
+        completion_.signal = WTERMSIG(status);
+        // shell 风格展示码可派生 128+signal,原始字段(signal)保留不丢。
+        completion_.exit_code = 128 + WTERMSIG(status);
+    } else {
+        completion_.known = false;
+    }
+    completion_known_ = true;
+    impl->done_cv.notify_all();
+}
+
+void BackgroundProcessHandle::MarkUnknown() {
+    // 收尸方拿不到状态(收不到/ECHILD):如实标未知,绝不借 0 冒充成功。
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!completion_known_) {
+        completion_.known = false;
+        completion_known_ = true;
+        impl->done_cv.notify_all();
+    }
+}
+
+BackgroundProcessHandle::Completion BackgroundProcessHandle::Peek() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return completion_;
+}
+
+bool BackgroundProcessHandle::IsAlive() {
+    if (impl->pid <= 0) {
+        return false;
+    }
+    return !Peek().known;
+}
+
+bool BackgroundProcessHandle::TerminateTree(int grace_ms) {
+    if (impl->pid <= 0) {
+        return true;
+    }
+    // 子进程 setsid 了,pid 就是它自己的进程组 id。先 SIGTERM 整组,等一个
+    // 短 grace(树内进程可自行清理),再 SIGKILL 整组。收尸由唯一收尸线程
+    // 做(它阻塞在 waitpid 上,进程一退自然返回),这里只等完成态翻面。
+    if (kill(-impl->pid, SIGTERM) != 0) {
+        // 组发不动(极少见):单发根。
+        kill(impl->pid, SIGTERM);
+    }
+    const int grace = grace_ms > 0 ? grace_ms : 0;
+    if (Wait(grace)) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        completion_.terminated_by_stop = true;
+        kill(-impl->pid, SIGKILL);  // 根退了也补一记,清残留后代
+        return true;
+    }
+    kill(-impl->pid, SIGKILL);
+    kill(impl->pid, SIGKILL);
+    // SIGKILL 后必退:收尸线程会把完成态广播过来,限时等它。
+    if (Wait(5000)) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        completion_.terminated_by_stop = true;
+        return true;
+    }
+    return false;  // 5 秒还没死透:如实报,调用方进 stop_failed
+}
+
+namespace {
+
 struct SpawnedMerged {
     pid_t pid = -1;
     int output_fd = -1;  // 合并的 stdout+stderr 读端
@@ -358,10 +496,20 @@ bool SpawnMergedOutput(std::vector<std::string> argv, const EnvPairs& extra_env,
 
 ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, const EnvPairs& extra_env,
                           std::size_t max_output_bytes) {
+    return RunProcess(argv, timeout_ms, /*cancel=*/nullptr, extra_env, max_output_bytes);
+}
+
+ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, const std::atomic<bool>* cancel,
+                          const EnvPairs& extra_env, std::size_t max_output_bytes) {
     ProcessResult result;
     if (argv.empty()) {
         result.spawn_failed = true;
         result.spawn_error = "argv 不能为空";
+        return result;
+    }
+    if (const std::string env_error = ValidateEnvPairs(extra_env); !env_error.empty()) {
+        result.spawn_failed = true;
+        result.spawn_error = env_error;
         return result;
     }
 
@@ -414,7 +562,7 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
         reader_done.store(true);
     });
 
-    // 主循环:等退出 / 超时 / 输出超限,三个条件谁先到算谁的。
+    // 主循环:等退出 / 超时 / 取消 / 输出超限,四个条件谁先到算谁的。
     const bool has_timeout = timeout_ms > 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(has_timeout ? timeout_ms : 0);
     int exit_status = 0;
@@ -431,6 +579,13 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
             break;  // 不该发生;当已退出处理,exit_status 保持 0
         }
         if (output_over_limit.load()) {
+            KillProcessGroup(spawned.pid, 2000, &exit_status);
+            exited = true;
+            break;
+        }
+        // 取消(进程生命线单):ESC 置旗即收整棵树,与超时分开记账。
+        if (cancel != nullptr && cancel->load()) {
+            result.cancelled = true;
             KillProcessGroup(spawned.pid, 2000, &exit_status);
             exited = true;
             break;
@@ -479,12 +634,22 @@ ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, c
     return RunProcess({"/bin/sh", "-c", command_utf8}, timeout_ms, extra_env, max_output_bytes);
 }
 
+ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, const std::atomic<bool>* cancel,
+                              const EnvPairs& extra_env, std::size_t max_output_bytes) {
+    return RunProcess({"/bin/sh", "-c", command_utf8}, timeout_ms, cancel, extra_env, max_output_bytes);
+}
+
 ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const std::string& stdin_data,
                                   int timeout_ms, const EnvPairs& extra_env, std::size_t max_output_bytes) {
     ProcessResult result;
     if (argv.empty()) {
         result.spawn_failed = true;
         result.spawn_error = "argv 不能为空";
+        return result;
+    }
+    if (const std::string env_error = ValidateEnvPairs(extra_env); !env_error.empty()) {
+        result.spawn_failed = true;
+        result.spawn_error = env_error;
         return result;
     }
 
@@ -723,9 +888,18 @@ ProcessResult RunShellCommandWithStdin(const std::string& command_utf8, const st
 // ---------------------------------------------------------------------------
 
 BackgroundSpawnResult RunProcessBackground(const std::vector<std::string>& argv, const EnvPairs& extra_env) {
+    return RunProcessBackground(argv, std::string(), extra_env);
+}
+
+BackgroundSpawnResult RunProcessBackground(const std::vector<std::string>& argv, const std::string& cwd_utf8,
+                                            const EnvPairs& extra_env) {
     BackgroundSpawnResult result;
     if (argv.empty()) {
         result.error = "argv 不能为空";
+        return result;
+    }
+    if (const std::string env_error = ValidateEnvPairs(extra_env); !env_error.empty()) {
+        result.error = env_error;
         return result;
     }
     IgnoreSigpipeOnce();
@@ -769,18 +943,34 @@ BackgroundSpawnResult RunProcessBackground(const std::vector<std::string>& argv,
         // 自成一个新会话(pid 同时成了新会话的会话首 = 新进程组的组长)。
         // 这样 lubancode 退出/它所在终端挂断,不会顺带给这个后台子进程
         // 发 SIGHUP,也不会被"杀当前进程组"这类操作连坐。
-        setsid();
-        const int devnull = open("/dev/null", O_RDONLY);
-        if (devnull >= 0) {
-            dup2(devnull, STDIN_FILENO);
-            if (devnull > STDERR_FILENO) {
-                close(devnull);
-            }
+        // 全量验错(P1):setsid/open/dup2/chdir 每步失败都经 exec_pipe 把
+        // errno 送回父进程——前置 setup 错误不再无声吞掉。
+        const auto report_and_die = [&](int err) {
+            (void)!write(exec_pipe[1], &err, sizeof(err));
+            _exit(127);
+        };
+        if (setsid() < 0 && errno != EPERM) {
+            report_and_die(errno);
         }
-        dup2(log_fd, STDOUT_FILENO);
-        dup2(log_fd, STDERR_FILENO);
+        const int devnull = open("/dev/null", O_RDONLY);
+        if (devnull < 0) {
+            report_and_die(errno);
+        }
+        if (dup2(devnull, STDIN_FILENO) < 0) {
+            report_and_die(errno);
+        }
+        if (devnull > STDERR_FILENO) {
+            close(devnull);
+        }
+        if (dup2(log_fd, STDOUT_FILENO) < 0 || dup2(log_fd, STDERR_FILENO) < 0) {
+            report_and_die(errno);
+        }
         if (log_fd > STDERR_FILENO) {
             close(log_fd);
+        }
+        // cwd(P1 根治):exec 前 chdir,失败回报,不再向命令文本拼 cd。
+        if (!cwd_utf8.empty() && chdir(cwd_utf8.c_str()) != 0) {
+            report_and_die(errno);
         }
         environ = env_block.ptrs.data();
         execvp(argv_ptrs[0], argv_ptrs.data());
@@ -802,25 +992,49 @@ BackgroundSpawnResult RunProcessBackground(const std::vector<std::string>& argv,
         return result;
     }
 
+    // 会话级注册表:atexit 兜底收尾照旧(handle 之外的第二道保险)。
     RegisterBackgroundPid(pid);
+
+    auto handle = std::make_shared<BackgroundProcessHandle>();
+    handle->impl->pid = pid;
     // 收尸线程:一次性 detach 的 waitpid,防止子进程结束后没人收尸变成
     // 僵尸(lubancode 还没退出、atexit 钩子还没跑之前,子进程可能早就
-    // 退出了)。退出时把自己从会话级注册表摘掉,免得 atexit 钩子对着一个
-    // 早就死透、pid 可能已被系统回收复用的号码瞎杀。
-    std::thread([pid] {
+    // 退出了)。拿到 status 立刻写进 handle 的共享完成态——退出码从此不
+    // 丢。退出时把自己从会话级注册表摘掉,免得 atexit 钩子对着一个早就
+    // 死透、pid 可能已被系统回收复用的号码瞎杀。
+    std::thread([pid, handle] {
         int status = 0;
-        waitpid(pid, &status, 0);
+        const pid_t r = waitpid(pid, &status, 0);
+        if (r == pid) {
+            handle->RecordExit(status);
+        } else {
+            // 收不到(EINTR 之外的不该发生):如实标未知,绝不借 0 冒充成功。
+            // (注意不能把 -1 当 status 传进 RecordExit——宏会把它解成信号。)
+            handle->MarkUnknown();
+        }
         UnregisterBackgroundPid(pid);
     }).detach();
 
     result.success = true;
     result.pid = static_cast<unsigned long>(pid);
     result.log_path = log_path;
+    result.handle = std::move(handle);
     return result;
 }
 
 BackgroundSpawnResult RunShellCommandBackground(const std::string& command_utf8, const EnvPairs& extra_env) {
-    return RunProcessBackground({"/bin/sh", "-c", command_utf8}, extra_env);
+    return RunShellCommandBackground(command_utf8, std::string(), extra_env);
+}
+
+BackgroundSpawnResult RunShellCommandBackground(const std::string& command_utf8, const std::string& cwd_utf8,
+                                                 const EnvPairs& extra_env) {
+    BackgroundSpawnResult result = RunProcessBackground({"/bin/sh", "-c", command_utf8}, cwd_utf8, extra_env);
+    if (result.success) {
+        // /bin/sh 约定 UTF-8 但不保证(二进制程序/旧工具/坏 locale 都可能
+        // 吐坏字节);出口按"先验后洗"处理。
+        result.handle->encoding_hint = "utf-8-assumed";
+    }
+    return result;
 }
 
 // ---------------------------------------------------------------------------

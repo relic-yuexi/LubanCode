@@ -22,9 +22,12 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -43,6 +46,7 @@ struct ProcessResult {
     std::string stderr_bytes;
     unsigned long exit_code = 0;
     bool timed_out = false;
+    bool cancelled = false;          // 进程生命线单:cancel 旗置位,树已收,cancelled 与超时分开记账
     bool spawn_failed = false;
     bool output_truncated = false;   // 输出超过上限被截断,进程树已被强制终止
     std::string spawn_error;
@@ -83,22 +87,94 @@ struct BackgroundSpawnResult {
     std::string error;
     unsigned long pid = 0;    // 子进程 PID,给模型回填进结果文本,方便之后 kill/Stop-Process
     std::string log_path;     // 合并 stdout/stderr 写入的日志文件路径(UTF-8,临时目录下)
+    // 进程生命线单(P0):可等待的原生句柄,不再只回 PID。Watch/Stop 都落到
+    // 这份句柄上——不凭 PID 猜生死,退出码由唯一收尸方写进共享完成态。
+    // success=false 时为空。
+    std::shared_ptr<struct BackgroundProcessHandle> handle;
+};
+
+// 后台子进程的可等待原生句柄(进程生命线单 P0)。约定:
+//   - Wait(timeout_ms):等进程退出。true = 已退出(完成态已填);false = 还
+//     活着/超时。退出码经 ExitCode() 取,不知道便是 nullopt——绝不借 0
+//     冒充成功。
+//   - Signal():POSIX 受信号终止另记 signal;Windows 没有这层,恒 nullopt。
+//   - TerminateTree(grace_ms):收整棵进程树。Windows 每任务一个 Job
+//     Object(创建时挂上),TerminateJobObject 一锅端;POSIX 对原进程组
+//     先 SIGTERM 等 grace 再 SIGKILL。返回值 = 收口是否有把握(系统调用
+//     失败如实报 false,调用方据此进 stop_failed/留 Running,不先盖章)。
+//   - 线程安全:Wait/ExitCode/TerminateTree 可从多线程调(registry 的
+//     watcher 与 Stop 并发)。
+struct BackgroundProcessHandle {
+  public:
+    BackgroundProcessHandle();
+    ~BackgroundProcessHandle();
+    BackgroundProcessHandle(const BackgroundProcessHandle&) = delete;
+    BackgroundProcessHandle& operator=(const BackgroundProcessHandle&) = delete;
+
+    struct Completion {
+        bool known = false;             // 收尸方到底拿到退出状态没有
+        int exit_code = 0;              // known && WIFEXITED 时有效
+        int signal = 0;                 // known && WIFSIGNALED(POSIX)时有效,信号号
+        bool terminated_by_stop = false;  // TerminateTree 收掉的(退出码无业务含义)
+    };
+
+    // 等进程退出(带超时;timeout_ms<=0 只查一眼)。已退出后调立刻返回 true。
+    bool Wait(int timeout_ms);
+    // 完成态快照。进程还没退出时 known=false。
+    Completion Peek() const;
+    // 进程是否还活着(以完成态/句柄为准,不查 PID)。
+    bool IsAlive();
+
+    // 收整棵树。Windows:TerminateJobObject(体面信号这层 Windows 没有,
+    // grace 只给树内自清理留一点时间再硬杀)。POSIX:SIGTERM → 等 grace →
+    // SIGKILL,waitpid 由本对象独占收。返回 true = 收口调用链没报错。
+    bool TerminateTree(int grace_ms);
+
+    // POSIX 收尸出口:waitpid 拿到 status 后落完成态(唯一收尸方调用)。
+    void RecordExit(int status);
+    // 收不到状态时如实标未知(实现侧用)。
+    void MarkUnknown();
+
+    // 日志编码提示(后台日志单):shell 种类决定 background_output 出口怎么
+    // 清洗。powershell wrapper 落盘的是 UTF-8;cmd 落盘 OEM/ACP;POSIX sh
+    // 约定 UTF-8 但不保证;unknown = 未知程序。
+    std::string encoding_hint;
+
+    // 平台实现持有原生身份(句柄/pid),定义在 process_win/posix.cpp。
+    struct Impl;
+    std::unique_ptr<Impl> impl;
+
+  private:
+    mutable std::mutex mutex_;
+    Completion completion_;
+    bool completion_known_ = false;
 };
 
 // 可移植入口:按 argv 数组起一个子进程(argv[0] 是可执行文件,按 PATH 查
 // 找;不经过 shell,参数原样传递),合并捕获 stdout/stderr,超时杀树。
 //
-// extra_env 是要临时注入子进程环境的键值对(UTF-8,同名覆盖当前进程环境)。
-// Windows 实现上是"临时 SetEnvironmentVariableW -> 起子进程 -> 立刻还原"
-// 这个套路,要求调用方单线程顺序调用(tools 层的工具执行、钩子执行本来
-// 就是顺序跑的,见 agent/loop.cpp);POSIX 是 fork 后在子进程里改 environ,
-// 不碰父进程,没有这层约束,但语义按更严的 Windows 算。
+// extra_env 是要注入子进程环境的键值对(UTF-8,同名覆盖当前进程环境)。
+// 两平台都不改父进程环境(进程生命线单 P0 的并发修复):Windows 构建显式
+// UTF-16 environment block 交给 lpEnvironment,POSIX 在 fork 后的子进程里
+// 改 environ——Hook dispatcher 给每只 handler 一条线程并发跑,也不会串值。
 //
 // max_output_bytes:捕获输出的上限,超过就截断保留前段、置 output_truncated
 // 并强制终止整棵进程树。测试用小值,生产路径用默认值即可。
 ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms,
                           const EnvPairs& extra_env = {},
                           std::size_t max_output_bytes = kDefaultMaxOutputBytes);
+
+// 进程生命线单(P1:前台取消通道):同 RunProcess,但等待循环每拍查 cancel
+// 旗。置位即收整棵树,result 里 cancelled=true(与 timed_out 分开记账,
+// 两者都收树,但终态语义不同)。cancel 为空/未置位时行为与上面完全一致。
+ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, const std::atomic<bool>* cancel,
+                          const EnvPairs& extra_env = {}, std::size_t max_output_bytes = kDefaultMaxOutputBytes);
+#ifdef _WIN32
+ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std::atomic<bool>* cancel,
+                         const EnvPairs& extra_env = {}, std::size_t max_output_bytes = kDefaultMaxOutputBytes);
+#endif
+ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, const std::atomic<bool>* cancel,
+                              const EnvPairs& extra_env = {}, std::size_t max_output_bytes = kDefaultMaxOutputBytes);
 
 // 按平台默认 shell 跑一条命令:Windows 是 `cmd.exe /d /s /c "<command>"`
 // (输出按系统 ANSI 代码页转成 UTF-8,原因见 paths.hpp 的 AcpBytesToUtf8),
@@ -173,6 +249,19 @@ BackgroundSpawnResult RunProcessBackground(const std::vector<std::string>& argv,
 // 按平台默认 shell 后台跑一条命令,语义同 RunShellCommand 但不等待完成:
 // Windows 是 `cmd.exe /d /s /c "<command>"`,POSIX 是 `/bin/sh -c '<command>'`。
 BackgroundSpawnResult RunShellCommandBackground(const std::string& command_utf8, const EnvPairs& extra_env = {});
+
+// 进程生命线单(P1 根治:cwd 走操作系统参数,不拼 cd):带 cwd 的后台起进程。
+// Windows 落 CreateProcessW 的 lpCurrentDirectory;POSIX 子进程 exec 前
+// chdir,失败经 exec-error 管道回报(spawn_failed)。cwd 为空 = 继承本进程。
+BackgroundSpawnResult RunProcessBackground(const std::vector<std::string>& argv, const std::string& cwd_utf8,
+                                            const EnvPairs& extra_env = {});
+BackgroundSpawnResult RunShellCommandBackground(const std::string& command_utf8, const std::string& cwd_utf8,
+                                                 const EnvPairs& extra_env = {});
+#ifdef _WIN32
+// Windows 专属:完整命令行(调用方拼好)+ 原生 cwd(不拼 cd)。
+BackgroundSpawnResult RunProcessBackground(const std::wstring& cmdline, const std::string& cwd_utf8,
+                                            const EnvPairs& extra_env);
+#endif
 
 // 一次启动长命子进程的结果。
 struct SpawnResult {

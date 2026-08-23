@@ -493,17 +493,26 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
 void ToolRuntime::SetPluginCancel(const std::atomic<bool>* cancel) {
     // 三路插件都要:process(adapter 的进程超时/取消同一落锤路)、Lua(hook
     // 里查这面旗掐死循环)。turn_runner 每轮灌(plugins 单第 7 步的 ESC 链)。
+    // run_command 同链(进程生命线单 P1:前台命令的取消通道)。
     lua_runtime_.SetCancel(cancel);
     for (const auto& adapter : main_registry_.All()) {
         if (auto* plugin_adapter = dynamic_cast<lubancode::runtime::PluginToolAdapter*>(adapter.get());
             plugin_adapter != nullptr) {
             plugin_adapter->SetCancel(cancel);
         }
+        if (auto* run_command = dynamic_cast<lubancode::tools::RunCommandTool*>(adapter.get());
+            run_command != nullptr) {
+            run_command->SetCancel(cancel);
+        }
     }
     for (const auto& adapter : sub_registry_.All()) {
         if (auto* plugin_adapter = dynamic_cast<lubancode::runtime::PluginToolAdapter*>(adapter.get());
             plugin_adapter != nullptr) {
             plugin_adapter->SetCancel(cancel);
+        }
+        if (auto* run_command = dynamic_cast<lubancode::tools::RunCommandTool*>(adapter.get());
+            run_command != nullptr) {
+            run_command->SetCancel(cancel);
         }
     }
 }

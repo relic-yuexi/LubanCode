@@ -422,12 +422,15 @@ CommandFlow HandleBackgroundCommand(const lubancode::cli::Theme& theme) {
         const char* label = "未知";
         switch (t.status) {
             case lubancode::tools::BackgroundTaskStatus::Running: label = "运行中"; break;
+            case lubancode::tools::BackgroundTaskStatus::Stopping: label = "停止中"; break;
             case lubancode::tools::BackgroundTaskStatus::Completed: label = "完成"; break;
             case lubancode::tools::BackgroundTaskStatus::Failed: label = "失败"; break;
             case lubancode::tools::BackgroundTaskStatus::Stopped: label = "已停止"; break;
+            case lubancode::tools::BackgroundTaskStatus::StopFailed: label = "停止失败"; break;
         }
         // 时长:运行中 = now - start;终态 = finish - start(拿不到按 0)。
-        const auto span_end = t.status == lubancode::tools::BackgroundTaskStatus::Running
+        const auto span_end = t.status == lubancode::tools::BackgroundTaskStatus::Running ||
+                                      t.status == lubancode::tools::BackgroundTaskStatus::Stopping
                                   ? std::chrono::system_clock::now()
                                   : t.finish_time;
         const long long secs =
@@ -435,8 +438,10 @@ CommandFlow HandleBackgroundCommand(const lubancode::cli::Theme& theme) {
                 ? std::chrono::duration_cast<std::chrono::seconds>(span_end - t.start_time).count()
                 : 0;
         std::cout << theme.tool_line << "[#" << t.task_id << "] " << label;
-        if (t.status != lubancode::tools::BackgroundTaskStatus::Running) {
-            std::cout << " (exit " << t.exit_code << ")";
+        if (t.status != lubancode::tools::BackgroundTaskStatus::Running &&
+            t.status != lubancode::tools::BackgroundTaskStatus::Stopping) {
+            std::cout << " (exit "
+                      << (t.exit.exit_code.has_value() ? std::to_string(*t.exit.exit_code) : "unknown") << ")";
         }
         std::cout << theme.reset << "  PID=" << t.pid << "  已跑 " << secs << "s" << "\n"
                   << theme.stats << "  命令: " << t.command << theme.reset << "\n"

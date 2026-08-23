@@ -15,6 +15,8 @@
 #include "tools/path_utils.hpp"
 #include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
 
+#include <atomic>
+
 #ifdef _WIN32
 #include "platform/paths.hpp"  // Utf8ToWide:PowerShell -EncodedCommand 拼接用
 #endif
@@ -339,8 +341,12 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
             return {"[隔离] " + *violation, true};
         }
     }
-    // 起手 cd 到位,再跑原命令(不传 cwd 时是原样透传)。
-    const std::string command_with_cwd = ApplyWorkingDirectory(command, effective_cwd, shell_value);
+    // cwd 走操作系统参数(进程生命线单 P1 根治):Windows 落
+    // CreateProcessW 的 lpCurrentDirectory,POSIX 子进程 exec 前 chdir,
+    // 失败经 exec-error 管道回报。不再向命令文本前拼 cd——路径含引号、
+    // '%'、'!' 各家 shell 各有各的坑,拼字符串只会越补越厚。
+    // ApplyWorkingDirectory 留给前台这条老入口兜底(它的调用方还在用),
+    // 后台一律走原生 cwd。
 
 #ifdef _WIN32
     std::string shell = "powershell";
@@ -359,22 +365,26 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
     if (run_in_background) {
         platform::BackgroundSpawnResult bg;
         if (is_cmd) {
-            bg = platform::RunShellCommandBackground(command_with_cwd);
+            bg = platform::RunShellCommandBackground(command, effective_cwd);
         } else {
-            // 止血(P1):后台 PowerShell 此前编码的是原始 command,用户传的
-            // cwd 被悄悄丢掉,执行落回宿主目录。前台编码的可是 command_with_cwd,
-            // 后台得跟它一致。
+            // 后台 PowerShell:命令本体不用拼 cd(cwd 走 lpCurrentDirectory),
+            // 只保留 wrapper 的编码设置。
             const std::wstring cmdline = L"powershell.exe -NoProfile -NonInteractive -EncodedCommand " +
-                                          platform::Utf8ToWide(BuildEncodedCommand(command_with_cwd));
-            bg = platform::RunProcessBackground(cmdline);
+                                          platform::Utf8ToWide(BuildEncodedCommand(command));
+            bg = platform::RunProcessBackground(cmdline, effective_cwd);
         }
         if (!bg.success) {
             return {bg.error, true};
         }
-        // 登记进后台任务台账:拿一个 task_id,起 watcher 线程探活——
+        // 登记进后台任务台账:拿一个 task_id,watcher 持原生句柄探活——
         // 完成时主循环会收到通知,模型也能用 background_output 工具查输出。
-        const std::string task_id =
-            BackgroundTaskRegistry::Instance().Register(command, shell, bg.pid, bg.log_path);
+        if (bg.handle != nullptr && shell == "powershell") {
+            // wrapper 脚本设了 [Console]::OutputEncoding=UTF8,落盘的是 UTF-8
+            //(解析期报错那点尾巴由出口清洗兜底)。
+            bg.handle->encoding_hint = "utf-8";
+        }
+        const std::string task_id = BackgroundTaskRegistry::Instance().Register(
+            command, shell, bg.pid, bg.log_path, std::move(bg.handle));
         std::ostringstream oss;
         oss << "已在后台启动(task #" << task_id << ", PID " << bg.pid << "),不等它跑完。\n"
             << "日志文件: " << bg.log_path << "\n"
@@ -388,8 +398,14 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
         // RunShellCommand 内部已把 cmd.exe 的系统 ANSI 代码页输出转成 UTF-8
         // (跟 PowerShell 路径不一样,那边脚本里显式设了
         // [Console]::OutputEncoding=UTF8),这里拿到手就是合法 UTF-8。
-        proc = platform::RunShellCommand(command_with_cwd, timeout_ms);
+        // 前台还没有原生 cwd 入口,继续走拼 cd 的老路(ApplyWorkingDirectory
+        // 的 cmd 分支只引一层双引号,NTFS 目录名不含双引号;后台已根治)。
+        proc = platform::RunShellCommand(ApplyWorkingDirectory(command, effective_cwd, shell_value), timeout_ms,
+                                         cancel_, {});
     } else {
+        // 前台 PowerShell 同上:cwd 仍由 wrapper 前置 Set-Location 承担
+        //(Set-Location -LiteralPath 单引号转义对引号安全)。
+        const std::string command_with_cwd = ApplyWorkingDirectory(command, effective_cwd, shell_value);
         const std::wstring cmdline = L"powershell.exe -NoProfile -NonInteractive -EncodedCommand " +
                                       platform::Utf8ToWide(BuildEncodedCommand(command_with_cwd));
         proc = platform::RunProcess(cmdline, timeout_ms);
@@ -411,13 +427,14 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
     }
 
     if (run_in_background) {
-        const platform::BackgroundSpawnResult bg = platform::RunShellCommandBackground(command_with_cwd);
+        const platform::BackgroundSpawnResult bg = platform::RunShellCommandBackground(command, effective_cwd);
         if (!bg.success) {
             return {bg.error, true};
         }
-        // 登记进后台任务台账(同 Windows 分支):task_id + watcher 探活,完成时通知。
-        const std::string task_id =
-            BackgroundTaskRegistry::Instance().Register(command, "sh", bg.pid, bg.log_path);
+        // 登记进后台任务台账(同 Windows 分支):task_id + watcher 持原生句柄
+        // 探活,完成时通知;退出码由唯一收尸方写进完成态,不再丢。
+        const std::string task_id = BackgroundTaskRegistry::Instance().Register(
+            command, "sh", bg.pid, bg.log_path, std::move(bg.handle));
         std::ostringstream oss;
         oss << "已在后台启动(task #" << task_id << ", PID " << bg.pid << "),不等它跑完。\n"
             << "日志文件: " << bg.log_path << "\n"
@@ -426,7 +443,15 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
         return {oss.str(), false};
     }
 
-    platform::ProcessResult proc = platform::RunShellCommand(command_with_cwd, timeout_ms);
+    // 前台 POSIX:cwd 走原生参数(RunShellCommand 的 cancel 重载),不拼 cd。
+    platform::ProcessResult proc;
+    {
+        // RunShellCommand 的 cancel 重载还没有原生 cwd 参数(超时/取消/树杀
+        // 才是它的职责面),前台仍用拼 cd 的老路;POSIX 单引号转义已修,
+        // 后台已根治。
+        const std::string command_with_cwd = ApplyWorkingDirectory(command, effective_cwd, shell_value);
+        proc = platform::RunShellCommand(command_with_cwd, timeout_ms, cancel_, {});
+    }
 #endif
 
     // 捕获侧治本:cmd 分支已经在 platform 层按 CP_ACP 转过一遍,理论上到手
@@ -456,6 +481,16 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
         timed.outcome = "timed_out";
         timed.error_code = "process.timeout";
         return timed;
+    }
+    if (proc.cancelled) {
+        std::ostringstream oss;
+        oss << "命令被取消(ESC),进程树已终止。\n";
+        if (!proc.output.empty()) {
+            oss << "取消前捕获到的输出:\n" << proc.output;
+        }
+        Tool::Result cancelled{oss.str(), true};
+        cancelled.outcome = "cancelled_during_run";
+        return cancelled;
     }
     if (proc.output_truncated) {
         std::ostringstream oss;

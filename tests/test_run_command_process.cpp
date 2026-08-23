@@ -12,6 +12,7 @@
 
 #include <doctest/doctest.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -21,6 +22,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -317,3 +319,274 @@ TEST_CASE("run_command(Windows): 后台 PowerShell 用对 cwd(前后台目录探
 }
 
 #endif  // _WIN32
+
+// ---------------------------------------------------------------------------
+// 进程生命线批(P0/P1):Register 竞态、退出码不丢、Stop 整树收口、
+// 快进程连起不留永久 Running、UTF-8 尾读边界、前台取消。
+// ---------------------------------------------------------------------------
+
+#ifndef _WIN32
+
+TEST_CASE("background(POSIX): 后台 exit 7 稳定报 7,不再偶发 Completed/0") {
+    auto& reg = BackgroundTaskRegistry::Instance();
+    // 修前:平台层 detach 线程 waitpid 丢了 status,watcher kill(pid,0) 探活,
+    // 进程一死 exit_code 乐观填 0 —— exit 7 报成"完成(退出码 0)"。
+    const auto bg = lubancode::platform::RunShellCommandBackground("exit 7");
+    REQUIRE(bg.success);
+    REQUIRE(bg.handle != nullptr);
+
+    const std::string task_id = reg.Register("exit 7", "sh", bg.pid, bg.log_path, bg.handle);
+
+    const bool finished = WaitUntil(
+        [&] {
+            const auto info = reg.Get(task_id);
+            return info.has_value() && info->status != BackgroundTaskStatus::Running &&
+                   info->status != BackgroundTaskStatus::Stopping;
+        },
+        8000);
+    REQUIRE(finished);
+
+    const auto info = reg.Get(task_id);
+    REQUIRE(info.has_value());
+    CHECK(info->status == BackgroundTaskStatus::Failed);
+    REQUIRE(info->exit.exit_code.has_value());
+    CHECK(*info->exit.exit_code == 7);
+    CHECK_FALSE(info->exit.signal.has_value());
+}
+
+TEST_CASE("background(POSIX): 快进程连起数百枚,每枚都进终态,无永久 Running") {
+    auto& reg = BackgroundTaskRegistry::Instance();
+    constexpr int kCount = 300;
+    std::vector<std::string> task_ids;
+    task_ids.reserve(kCount);
+    for (int i = 0; i < kCount; ++i) {
+        // 0ms/1ms 短命命令:最容易撞上"watcher 抢先跑,表里找不到自己"
+        // 那枚 P0 竞态(修前次序是先起线程后进表)。
+        const auto bg = lubancode::platform::RunShellCommandBackground("true");
+        REQUIRE(bg.success);
+        task_ids.push_back(reg.Register("true", "sh", bg.pid, bg.log_path, bg.handle));
+    }
+    const bool all_terminal = WaitUntil(
+        [&] {
+            for (const auto& id : task_ids) {
+                const auto info = reg.Get(id);
+                if (!info.has_value() || info->status == BackgroundTaskStatus::Running ||
+                    info->status == BackgroundTaskStatus::Stopping) {
+                    return false;
+                }
+            }
+            return true;
+        },
+        /*timeout_ms=*/20000);
+    CHECK(all_terminal);
+    // 而且都是真终态:exit 0 的 Completed,不是未知的退化账。
+    int completed = 0;
+    for (const auto& id : task_ids) {
+        const auto info = reg.Get(id);
+        if (info.has_value() && info->status == BackgroundTaskStatus::Completed) {
+            ++completed;
+        }
+    }
+    CHECK(completed == kCount);
+}
+
+TEST_CASE("background(POSIX): Stop 收掉整棵树(根、子、孙),孙进程真死透") {
+    auto& reg = BackgroundTaskRegistry::Instance();
+    // sh -> sleep(子) -> sleep(孙):杀根进程组,两代都得死。
+    const auto bg = lubancode::platform::RunShellCommandBackground(
+        "sleep 30 & sleep 30 & wait");
+    REQUIRE(bg.success);
+    REQUIRE(bg.handle != nullptr);
+    const std::string task_id = reg.Register("sleep tree", "sh", bg.pid, bg.log_path, bg.handle);
+
+    // 给 sh 一拍把两个子进程拉起来。
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    {
+        const auto info = reg.Get(task_id);
+        REQUIRE(info.has_value());
+        CHECK(info->status == BackgroundTaskStatus::Running);
+    }
+
+    CHECK(reg.Stop(task_id));
+
+    const bool stopped = WaitUntil(
+        [&] {
+            const auto info = reg.Get(task_id);
+            return info.has_value() && info->status == BackgroundTaskStatus::Stopped;
+        },
+        8000);
+    CHECK(stopped);
+
+    // 根进程真死了(setsid 的 pid,kill(pid,0) 探不到 = 死)。
+    CHECK_FALSE(lubancode::platform::IsProcessAlive(bg.pid));
+}
+
+TEST_CASE("background(POSIX): ReadOutput 尾读从换行边界起刀,半行加省略标记") {
+    auto& reg = BackgroundTaskRegistry::Instance();
+    // 造一份超 64KB 的日志:一行超长的(没有换行可退,只能从 UTF-8 边界退)
+    // 加几行短的。首段被截必须带标记。
+    std::string content;
+    content += "pad";
+    content.append(70 * 1024, 'x');  // 70KB 无换行:64KB 尾读必从中间切
+    content += "\nline-tail-1\nline-tail-2\n";
+    std::string log_path = (std::filesystem::temp_directory_path() / "lubancode_bg_tail_test.log").string();
+    {
+        std::ofstream file(log_path, std::ios::binary);
+        file << content;
+    }
+    const std::string task_id = reg.Register("tail probe", "sh", /*pid=*/1, log_path);
+
+    const std::string tail = reg.ReadOutput(task_id, /*tail_lines=*/0);
+    CHECK(tail.find("[日志前部已省略]") != std::string::npos);
+    CHECK(tail.find("line-tail-1") != std::string::npos);
+    CHECK(tail.find("line-tail-2") != std::string::npos);
+    // 出口必须合法 UTF-8。
+    CHECK(lubancode::platform::IsValidUtf8(tail));
+    CHECK(tail.size() <= 64 * 1024 + 256);
+
+    std::error_code ec;
+    std::filesystem::remove(std::filesystem::u8path(reinterpret_cast<const char8_t*>(log_path.data())), ec);
+}
+
+TEST_CASE("background(POSIX): ReadOutput 坏 UTF-8 日志清洗后出口合法") {
+    auto& reg = BackgroundTaskRegistry::Instance();
+    const std::string bad = std::string("ok\xC4\xE3\xBA\xC3gbk-tail\n", 16) + std::string("tail-end\n");
+    std::string log_path = (std::filesystem::temp_directory_path() / "lubancode_bg_bad_utf8.log").string();
+    {
+        std::ofstream file(log_path, std::ios::binary);
+        file << bad;
+    }
+    const std::string task_id = reg.Register("bad utf8", "sh", /*pid=*/1, log_path);
+    const std::string out = reg.ReadOutput(task_id, 0);
+    CHECK(lubancode::platform::IsValidUtf8(out));
+    CHECK(out.find("tail-end") != std::string::npos);
+
+    std::error_code ec;
+    std::filesystem::remove(std::filesystem::u8path(reinterpret_cast<const char8_t*>(log_path.data())), ec);
+}
+
+TEST_CASE("run_command(POSIX): 前台命令带 cancel 旗,置位即收树返回 cancelled") {
+    RunCommandTool tool;
+    std::atomic<bool> cancel_flag{false};
+    tool.SetCancel(&cancel_flag);
+
+    // 1 秒后另一线程置取消旗;命令本身要跑 30 秒。
+    std::thread setter([&cancel_flag] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        cancel_flag.store(true);
+    });
+
+    nlohmann::json input;
+    input["command"] = "sleep 30";
+    input["timeout_ms"] = 60000;  // 超时墙足够远:被取消而不是超时
+    const auto started = std::chrono::steady_clock::now();
+    const Tool::Result result = tool.execute(input);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    setter.join();
+
+    CHECK(result.is_error);
+    CHECK(result.content.find("取消") != std::string::npos);
+    CHECK(result.outcome == "cancelled_during_run");
+    // ESC 后短时间返回(远小于 30 秒命令时长)。
+    CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() < 10000);
+}
+
+TEST_CASE("RunProcess(POSIX): cwd 原生参数,不存在时报 spawn 失败定位到目录") {
+    const auto result = lubancode::platform::RunShellCommandBackground(
+        "pwd", "/definitely/not/a/real/dir/lubancode-test-zzz");
+    CHECK_FALSE(result.success);
+    CHECK(result.error.find("启动子进程失败") != std::string::npos);
+}
+
+TEST_CASE("RunProcessBackground(POSIX): 原生 cwd 真生效(不拼 cd)") {
+    TempDir dir("-native-cwd");
+    const auto bg = lubancode::platform::RunShellCommandBackground("pwd", dir.Utf8Path());
+    REQUIRE(bg.success);
+    const bool landed = WaitUntil(
+        [&] {
+            std::ifstream file(bg.log_path, std::ios::binary);
+            std::ostringstream ss;
+            ss << file.rdbuf();
+            return ss.str().find(dir.Utf8Path()) != std::string::npos;
+        },
+        8000);
+    CHECK(landed);
+    std::error_code ec;
+    std::filesystem::remove(std::filesystem::u8path(reinterpret_cast<const char8_t*>(bg.log_path.data())), ec);
+}
+
+TEST_CASE("BackgroundProcessHandle(POSIX): Wait/Peek/TerminateTree 的完成态口径") {
+    const auto bg = lubancode::platform::RunShellCommandBackground("exit 9");
+    REQUIRE(bg.success);
+    REQUIRE(bg.handle != nullptr);
+    CHECK(bg.handle->Wait(8000));
+    const auto completion = bg.handle->Peek();
+    CHECK(completion.known);
+    CHECK(completion.exit_code == 9);
+    CHECK_FALSE(completion.terminated_by_stop);
+
+    // 长命进程走 TerminateTree:SIGTERM 那一拍就退,SIGKILL 兜底不用等。
+    const auto bg2 = lubancode::platform::RunShellCommandBackground("sleep 30");
+    REQUIRE(bg2.success);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(bg2.handle->TerminateTree(1500));
+    const auto completion2 = bg2.handle->Peek();
+    CHECK(completion2.known);
+    const bool signaled_or_nonzero = completion2.signal != 0 || completion2.exit_code != 0;
+    CHECK(signaled_or_nonzero);
+    CHECK(completion2.terminated_by_stop);
+}
+
+TEST_CASE("RunProcess: 并发 extra_env 不串值(P0 并发契约)") {
+    using lubancode::platform::EnvPairs;
+    using lubancode::platform::RunShellCommand;
+    // 8 只"hook"并发跑,每只只该看见自己的 marker。老路(Windows 临时改
+    // 父环境再还原)同拍启动会串值;新契约下任何平台都不许串。
+    constexpr int kWorkers = 8;
+    std::vector<std::thread> workers;
+    std::vector<std::string> seen(kWorkers);
+    std::atomic<int> mismatches{0};
+    for (int i = 0; i < kWorkers; ++i) {
+        workers.emplace_back([&, i] {
+            const EnvPairs env{{"LUBANCODE_TEST_MARKER", "worker-" + std::to_string(i)}};
+            const auto result = RunShellCommand("echo $LUBANCODE_TEST_MARKER", 30000, env);
+            seen[static_cast<std::size_t>(i)] = result.output;
+            if (result.output.find("worker-" + std::to_string(i)) == std::string::npos) {
+                mismatches.fetch_add(1);
+            }
+        });
+    }
+    for (auto& w : workers) {
+        w.join();
+    }
+    CHECK(mismatches.load() == 0);
+    // 串值的实锤形态:A 的 marker 出现在 B 的输出里。
+    for (int i = 0; i < kWorkers; ++i) {
+        for (int j = 0; j < kWorkers; ++j) {
+            if (i != j && seen[static_cast<std::size_t>(j)].find("worker-" + std::to_string(i)) != std::string::npos) {
+                FAIL("并发 extra_env 串值: worker ", j, " 看到了 worker ", i, " 的 marker");
+            }
+        }
+    }
+}
+
+TEST_CASE("RunProcess: env 值含 NUL 被拒(Windows 键名非法同拒)") {
+    using lubancode::platform::EnvPairs;
+    using lubancode::platform::RunShellCommand;
+    {
+        std::string value = "v";
+        value.push_back('\0');
+        const auto r = RunShellCommand("echo hi", 5000, EnvPairs{{"K", value}});
+        CHECK(r.spawn_failed);
+    }
+#ifdef _WIN32
+    {
+        const auto r1 = RunShellCommand("echo hi", 5000, EnvPairs{{"BAD=KEY", "v"}});
+        CHECK(r1.spawn_failed);
+        const auto r2 = RunShellCommand("echo hi", 5000, EnvPairs{{"", "v"}});
+        CHECK(r2.spawn_failed);
+    }
+#endif
+}
+
+#endif  // !_WIN32

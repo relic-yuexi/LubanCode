@@ -5,6 +5,8 @@
 #include <fstream>
 #include <sstream>
 
+#include "platform/text_encoding.hpp"
+
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -19,26 +21,26 @@ namespace lubancode::tools {
 
 namespace {
 
-// 探活轮询间隔。200ms 对"人感知不到延迟 + 不烧 CPU"两头都够用——后台命令
-// 通常是秒级以上的长跑任务,差这一拍没人察觉。
+// 退化探活(watcher 没有 handle 时的兜底)轮询间隔。
 constexpr int kPollIntervalMs = 200;
 
 // ReadOutput 一次读多少字节上限。日志文件可能被长命进程写得很大,读全文
 // 不限会吃光内存;超过就只取末尾这一段(尾部正是最新输出,最该看的部分)。
 constexpr std::streamoff kReadCapBytes = 64 * 1024;
 
-// 把一条任务的状态翻成人能读的中文标签(给结果文本/通知用)。
-const char* StatusLabel(BackgroundTaskStatus s) {
+}  // namespace
+
+const char* BackgroundTaskStatusLabel(BackgroundTaskStatus s) {
     switch (s) {
         case BackgroundTaskStatus::Running: return "运行中";
+        case BackgroundTaskStatus::Stopping: return "停止中";
         case BackgroundTaskStatus::Completed: return "完成(退出码 0)";
-        case BackgroundTaskStatus::Failed: return "失败(非零退出码)";
+        case BackgroundTaskStatus::Failed: return "失败(非零或未知退出码)";
         case BackgroundTaskStatus::Stopped: return "已停止";
+        case BackgroundTaskStatus::StopFailed: return "停止失败(进程可能还活着)";
     }
     return "未知";
 }
-
-}  // namespace
 
 BackgroundTaskRegistry& BackgroundTaskRegistry::Instance() {
     // magic static:线程安全初始化,第一次调用才构造,程序退出时自动析构
@@ -48,9 +50,6 @@ BackgroundTaskRegistry& BackgroundTaskRegistry::Instance() {
 }
 
 BackgroundTaskRegistry::~BackgroundTaskRegistry() {
-    // 跟所有 watcher 打招呼"别再探了",然后逐个 join。join 不持 mutex_——
-    // watcher 最后一次抢锁释放后看到 stop_all_ 就 return,主线程这一头干等
-    // 它退出即可,不会死锁(临界区里只改了几个字段,极短)。
     stop_all_.store(true);
     for (auto& entry : entries_) {
         if (entry->watcher.joinable()) {
@@ -60,7 +59,12 @@ BackgroundTaskRegistry::~BackgroundTaskRegistry() {
 }
 
 std::string BackgroundTaskRegistry::Register(std::string command, std::string shell, unsigned long pid,
-                                              std::string log_path) {
+                                              std::string log_path,
+                                              std::shared_ptr<platform::BackgroundProcessHandle> handle) {
+    // P0 次序修复:先在锁内建 entry、分配 task_id、放进表,再起 watcher。
+    // watcher 持 TaskState/handle 的共享指针,不回表里按 task_id 找自己——
+    // 线程构造慢一点也无所谓,状态对象早就就位了。
+    auto state = std::make_shared<TaskState>();
     auto entry = std::make_unique<Entry>();
     entry->info.task_id = std::to_string(next_id_.fetch_add(1));
     entry->info.command = std::move(command);
@@ -68,18 +72,40 @@ std::string BackgroundTaskRegistry::Register(std::string command, std::string sh
     entry->info.pid = pid;
     entry->info.log_path = std::move(log_path);
     entry->info.status = BackgroundTaskStatus::Running;
+    entry->info.encoding_hint = handle ? handle->encoding_hint : std::string();
     entry->info.start_time = std::chrono::system_clock::now();
+    entry->state = state;
+    entry->handle = std::move(handle);
 
     const std::string task_id = entry->info.task_id;
-
-    // watcher 线程得在 entry 落进 vector 之后再起——它一启动就会拿着 task_id
-    // 去表里找自己。这里先 std::move(thread) 进 entry,再把 entry push 进表,
-    // 顺序很关键:thread 对象一旦构造就开始跑了,所以 entry 得先就位。
-    entry->watcher = std::thread([this, task_id] { WatchThread(task_id); });
-
     {
         std::lock_guard<std::mutex> lock(mutex_);
         entries_.push_back(std::move(entry));
+    }
+
+    // 表里就位了才起 watcher;起失败(std::thread 构造抛)要回滚 entry,
+    // 不能留一条没人照看的 Running(P0 方案里的硬要求)。
+    auto* stored = [&]() -> Entry* {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto& e : entries_) {
+            if (e->info.task_id == task_id) {
+                return e.get();
+            }
+        }
+        return nullptr;
+    }();
+    if (stored == nullptr) {
+        return task_id;  // 防御,不该发生
+    }
+    try {
+        stored->watcher = std::thread([this, state, handle = stored->handle, pid, task_id] {
+            WatchThread(state, handle, pid, task_id);
+        });
+    } catch (...) {
+        // 回滚:entry 出表。任务进程还挂着(会话级收尾兜底),但台账不留
+        // 一条永远 Running 的死账。
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::erase_if(entries_, [&](const std::unique_ptr<Entry>& e) { return e->info.task_id == task_id; });
     }
     return task_id;
 }
@@ -89,7 +115,15 @@ std::vector<BackgroundTaskInfo> BackgroundTaskRegistry::List() {
     std::vector<BackgroundTaskInfo> out;
     out.reserve(entries_.size());
     for (const auto& entry : entries_) {
-        out.push_back(entry->info);
+        BackgroundTaskInfo info = entry->info;
+        // 状态从共享 TaskState 拿最新值(watcher 随时在写)。
+        {
+            std::lock_guard<std::mutex> slock(entry->state->mutex);
+            info.status = entry->state->status;
+            info.exit = entry->state->exit;
+            info.finish_time = entry->state->finish_time;
+        }
+        out.push_back(std::move(info));
     }
     // 按 task_id 数字升序排(List 给人看,顺序稳定好认)。
     std::sort(out.begin(), out.end(),
@@ -103,7 +137,14 @@ std::optional<BackgroundTaskInfo> BackgroundTaskRegistry::Get(const std::string&
     std::lock_guard<std::mutex> lock(mutex_);
     for (const auto& entry : entries_) {
         if (entry->info.task_id == task_id) {
-            return entry->info;
+            BackgroundTaskInfo info = entry->info;
+            {
+                std::lock_guard<std::mutex> slock(entry->state->mutex);
+                info.status = entry->state->status;
+                info.exit = entry->state->exit;
+                info.finish_time = entry->state->finish_time;
+            }
+            return info;
         }
     }
     return std::nullopt;
@@ -111,11 +152,13 @@ std::optional<BackgroundTaskInfo> BackgroundTaskRegistry::Get(const std::string&
 
 std::string BackgroundTaskRegistry::ReadOutput(const std::string& task_id, int tail_lines) {
     std::string log_path;
+    std::string encoding_hint;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         for (const auto& entry : entries_) {
             if (entry->info.task_id == task_id) {
                 log_path = entry->info.log_path;
+                encoding_hint = entry->info.encoding_hint;
                 break;
             }
         }
@@ -145,8 +188,34 @@ std::string BackgroundTaskRegistry::ReadOutput(const std::string& task_id, int t
     }
     data.resize(static_cast<std::size_t>(file.gcount()));
 
+    // 64KB 起刀处先退到完整换行:不把半行冒充完整行(首段若被截,后面加
+    // 标记)。再退到 UTF-8 边界(清洗之后不会再有半字)。
+    bool head_omitted = false;
+    if (read_from > 0) {
+        const auto first_nl = data.find('\n');
+        if (first_nl != std::string::npos && first_nl + 1 < data.size()) {
+            data = data.substr(first_nl + 1);
+            head_omitted = true;
+        } else if (first_nl != std::string::npos) {
+            data.clear();
+            head_omitted = true;
+        }
+    }
+
+    // 编码出口(后台日志单):日志按原始字节落盘,这里按 hint 清洗。
+    //   utf-8(powershell wrapper)      -> SanitizeUtf8(已合法则原样)
+    //   oem-ansi(cmd)/unknown/空 hint  -> SanitizeUtf8:先验 UTF-8,非法时
+    //      Windows 上按 ACP 重解(cmd 的 OEM/ANSI 字节那条路),再不行
+    //      逐段替换 U+FFFD;非 Windows 直接逐段替换。不无声猜代码页。
+    data = platform::SanitizeUtf8(data);
+
+    std::string prefix;
+    if (head_omitted) {
+        prefix = "[日志前部已省略]\n";
+    }
+
     if (tail_lines <= 0) {
-        return data;  // 全文(已截断到末尾 64KB)
+        return prefix + data;  // 全文(已截断到末尾 64KB)
     }
 
     // 按行切,取末尾 tail_lines 行。
@@ -166,14 +235,14 @@ std::string BackgroundTaskRegistry::ReadOutput(const std::string& task_id, int t
             lines.push_back(std::move(current));  // 末尾不带回车的残行
         }
     }
+    std::ostringstream oss;
+    oss << prefix;
     if (static_cast<int>(lines.size()) <= tail_lines) {
-        std::ostringstream oss;
         for (const auto& l : lines) {
             oss << l;
         }
         return oss.str();
     }
-    std::ostringstream oss;
     const std::size_t start = lines.size() - static_cast<std::size_t>(tail_lines);
     for (std::size_t i = start; i < lines.size(); ++i) {
         oss << lines[i];
@@ -182,56 +251,76 @@ std::string BackgroundTaskRegistry::ReadOutput(const std::string& task_id, int t
 }
 
 bool BackgroundTaskRegistry::Stop(const std::string& task_id) {
+    std::shared_ptr<TaskState> state;
+    std::shared_ptr<platform::BackgroundProcessHandle> handle;
     unsigned long pid = 0;
-    bool found = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         for (auto& entry : entries_) {
             if (entry->info.task_id == task_id) {
-                found = true;
-                if (entry->info.status != BackgroundTaskStatus::Running) {
+                std::lock_guard<std::mutex> slock(entry->state->mutex);
+                if (entry->state->status != BackgroundTaskStatus::Running &&
+                    entry->state->status != BackgroundTaskStatus::Stopping &&
+                    entry->state->status != BackgroundTaskStatus::StopFailed) {
                     return true;  // 已终态,不重复杀
                 }
+                state = entry->state;
+                handle = entry->handle;
                 pid = entry->info.pid;
                 break;
             }
         }
     }
-    if (!found || pid == 0) {
+    if (state == nullptr) {
         return false;
     }
 
+    // 有 handle:Stop 落 TerminateTree(整棵树)。状态先 Stopping,树死透了
+    // 才 Stopped;收不动如实 StopFailed,不先盖章。
+    if (handle != nullptr) {
+        {
+            std::lock_guard<std::mutex> slock(state->mutex);
+            state->status = BackgroundTaskStatus::Stopping;
+        }
+        const bool killed = handle->TerminateTree(2000);
+        std::lock_guard<std::mutex> slock(state->mutex);
+        if (killed) {
+            state->status = BackgroundTaskStatus::Stopped;
+            const auto completion = handle->Peek();
+            if (completion.known) {
+                state->exit.exit_code = completion.exit_code;
+                if (completion.signal != 0) {
+                    state->exit.signal = completion.signal;
+                }
+            } else {
+                state->exit.exit_code = std::nullopt;  // 不知道便是不知道
+            }
+        } else {
+            state->status = BackgroundTaskStatus::StopFailed;
+            state->exit.exit_code = std::nullopt;
+        }
+        state->finish_time = std::chrono::system_clock::now();
+        state->completed_reported = false;
+        return true;
+    }
+
+    // 退化老路(测试直接 Register 没给 handle):PID 杀,标 Stopped。
 #ifdef _WIN32
-    // Windows:TerminateProcess 根进程。会话级 Job 在 lubancode 退出时才兜底
-    // 杀后代;用户主动停只杀根——多数后台命令是单进程,根死了就完了。根有
-    // 子进程(npm start 起 node 之类)时后代可能逃逸,是已知局限,不在这层解。
     if (HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid)); h != nullptr) {
         TerminateProcess(h, 1);
         CloseHandle(h);
     }
 #else
-    // POSIX:后台子进程 setsid() 了,pid 就是它自己的进程组 id。kill(-pid) 发
-    // 给整组,连带子进程一起收(对齐 platform 层会话级收尾的 kill(-pid) 用法)。
-    // 先 SIGTERM 客气一下,顽固的进程不管会再补 SIGKILL——但这里单次调用不
-    // 等,先把 SIGTERM 发出去,实际收尾由 watcher 探活发现进程没了后标 Stopped。
     if (kill(-static_cast<pid_t>(pid), SIGTERM) != 0) {
-        kill(static_cast<pid_t>(pid), SIGTERM);  // 进程组发不动就单发根
+        kill(static_cast<pid_t>(pid), SIGTERM);
     }
 #endif
-
-    // 标终态:Stop 是用户/模型主动行为,退出码本来就不代表命令本身的成败,
-    // 统一标 Stopped、exit_code=-1(被外部终止,非自然退出)。
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (auto& entry : entries_) {
-            if (entry->info.task_id == task_id && entry->info.status == BackgroundTaskStatus::Running) {
-                entry->info.status = BackgroundTaskStatus::Stopped;
-                entry->info.exit_code = -1;
-                entry->info.finish_time = std::chrono::system_clock::now();
-                entry->info.completed_reported = false;
-                break;
-            }
-        }
+        std::lock_guard<std::mutex> slock(state->mutex);
+        state->status = BackgroundTaskStatus::Stopped;
+        state->exit.exit_code = std::nullopt;
+        state->finish_time = std::chrono::system_clock::now();
+        state->completed_reported = false;
     }
     return true;
 }
@@ -240,46 +329,65 @@ std::vector<BackgroundTaskInfo> BackgroundTaskRegistry::DrainCompleted() {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<BackgroundTaskInfo> out;
     for (auto& entry : entries_) {
-        if (entry->info.status != BackgroundTaskStatus::Running && !entry->info.completed_reported) {
-            entry->info.completed_reported = true;
-            out.push_back(entry->info);
+        std::lock_guard<std::mutex> slock(entry->state->mutex);
+        const bool terminal = entry->state->status != BackgroundTaskStatus::Running &&
+                              entry->state->status != BackgroundTaskStatus::Stopping &&
+                              entry->state->status != BackgroundTaskStatus::StopFailed;
+        if (terminal && !entry->state->completed_reported) {
+            entry->state->completed_reported = true;
+            BackgroundTaskInfo info = entry->info;
+            info.status = entry->state->status;
+            info.exit = entry->state->exit;
+            info.finish_time = entry->state->finish_time;
+            out.push_back(std::move(info));
         }
     }
     return out;
 }
 
-void BackgroundTaskRegistry::WatchThread(std::string task_id) {
-    unsigned long pid = 0;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (const auto& entry : entries_) {
-            if (entry->info.task_id == task_id) {
-                pid = entry->info.pid;
-                break;
+void BackgroundTaskRegistry::WatchThread(std::shared_ptr<TaskState> state,
+                                          std::shared_ptr<platform::BackgroundProcessHandle> handle,
+                                          unsigned long pid, std::string task_id) {
+    (void)task_id;
+    // 有 handle:等在原生句柄上(200ms 一片,好响应 stop_all_),退出码由
+    // 唯一收尸方写进完成态——不拿 PID 猜,不把不知道涂成 0。
+    if (handle != nullptr) {
+        while (!stop_all_.load()) {
+            if (handle->Wait(kPollIntervalMs)) {
+                const auto completion = handle->Peek();
+                std::lock_guard<std::mutex> slock(state->mutex);
+                if (state->status == BackgroundTaskStatus::Running) {
+                    if (completion.known) {
+                        state->exit.exit_code = completion.exit_code;
+                        if (completion.signal != 0) {
+                            state->exit.signal = completion.signal;
+                        }
+                        state->status = (completion.exit_code == 0 && completion.signal == 0)
+                                            ? BackgroundTaskStatus::Completed
+                                            : BackgroundTaskStatus::Failed;
+                    } else {
+                        // 收尸方没拿到状态:如实 Failed + nullopt,不借 0 冒充成功。
+                        state->exit.exit_code = std::nullopt;
+                        state->status = BackgroundTaskStatus::Failed;
+                    }
+                    state->finish_time = std::chrono::system_clock::now();
+                    state->completed_reported = false;
+                }
+                return;
             }
         }
-    }
-    if (pid == 0) {
-        return;  // 防御:登记后表里居然找不到自己,不跑
+        return;
     }
 
-    // 轮询探活。stop_all_ 在析构时置位,这一拍检测到就立刻退出(不会超过
-    // kPollIntervalMs 的延迟)。
+    // 退化老路(没有 handle):轮询 PID 探活。退出码拿不到就 nullopt。
     while (!stop_all_.load()) {
-        int exit_code = 0;
-        if (!IsPidAlive(pid, exit_code)) {
-            // 进程结束了。标终态——再次确认表里这条还在 Running(可能 Stop()
-            // 已经先一步把它标成 Stopped 了,那就别覆盖)。
-            std::lock_guard<std::mutex> lock(mutex_);
-            for (auto& entry : entries_) {
-                if (entry->info.task_id == task_id && entry->info.status == BackgroundTaskStatus::Running) {
-                    entry->info.exit_code = exit_code;
-                    entry->info.status = (exit_code == 0) ? BackgroundTaskStatus::Completed
-                                                          : BackgroundTaskStatus::Failed;
-                    entry->info.finish_time = std::chrono::system_clock::now();
-                    entry->info.completed_reported = false;
-                    break;
-                }
+        if (!IsPidAlive(pid)) {
+            std::lock_guard<std::mutex> slock(state->mutex);
+            if (state->status == BackgroundTaskStatus::Running) {
+                state->exit.exit_code = std::nullopt;
+                state->status = BackgroundTaskStatus::Failed;  // 未知:不冒充 Completed
+                state->finish_time = std::chrono::system_clock::now();
+                state->completed_reported = false;
             }
             return;
         }
@@ -287,42 +395,21 @@ void BackgroundTaskRegistry::WatchThread(std::string task_id) {
     }
 }
 
-bool BackgroundTaskRegistry::IsPidAlive(unsigned long pid, int& exit_code_out) {
+bool BackgroundTaskRegistry::IsPidAlive(unsigned long pid) {
 #ifdef _WIN32
-    // OpenProcess 拿查询句柄;GetExitCodeProcess 在进程还活着时返回 STILL_ACTIVE
-    // (259),结束返回的就是退出码(精确)。句柄打不开(进程已死且 pid 已被
-    // 回收、权限不够)当成"已结束"——这种情况下真实退出码已经拿不到了
-    // (进程对象没了),乐观标 0(Completed):分不清成败时按成功算,模型读
-    // 输出自己判断,跟 POSIX 脱离进程那条路语义对齐。
     const HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
     if (h == nullptr) {
-        exit_code_out = 0;
         return false;
     }
     DWORD code = 0;
     const bool ok = GetExitCodeProcess(h, &code) != 0;
     CloseHandle(h);
     if (!ok) {
-        exit_code_out = 0;
         return false;
     }
-    if (code == STILL_ACTIVE) {
-        return true;
-    }
-    exit_code_out = static_cast<int>(code);
-    return false;
+    return code == STILL_ACTIVE;
 #else
-    // kill(pid, 0):0 信号不真发,只探测 pid 存不存在/能不能给它发信号。
-    // 返回 0 = 活着;ESRCH = pid 不存在(进程结束了);EPERM = 存在但不归
-    // 当前用户管(极少见,当活着等它自己了结)。脱离会话的后台进程退出码
-    // 这里拿不到(不是当前进程的子进程,waitpid 不认)——分不清是真成功还是
-    // 失败退出,乐观按 0(Completed)算:status 不误报成 Failed,模型读输出
-    // 自己判断命令到底成没成。比起"分不清就当失败",对用户更友好。
-    if (kill(static_cast<pid_t>(pid), 0) == 0) {
-        return true;
-    }
-    exit_code_out = 0;
-    return false;
+    return kill(static_cast<pid_t>(pid), 0) == 0;
 #endif
 }
 

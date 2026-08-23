@@ -26,6 +26,7 @@
 #include "runtime/tool_trace_hub.hpp"
 #include "runtime/turn_runtime.hpp"
 #include "tools/command_safety.hpp"
+#include "tools/run_command.hpp"
 #include "tools/undo_file_edit.hpp"
 #include "tools/hooks.hpp"
 #include "tools/lua_tool.hpp"
@@ -875,6 +876,8 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
     // 插件工具(plugins 单第 7 步的 ESC 链):process 插件的 adapter
     // (进程超时/取消同一落锤路)与 Lua 工具(hook 里查旗掐死循环)每轮
     // 灌这一轮的取消旗。registry 是本轮实际在用的表(main/sub 都从这走)。
+    // run_command 同链(进程生命线单 P1:前台命令的取消通道——ESC 不再
+    // 只能等 120 秒超时)。
     if (cancel_flag != nullptr) {
         for (const auto& tool : registry.All()) {
             if (auto* plugin_adapter = dynamic_cast<lubancode::runtime::PluginToolAdapter*>(tool.get());
@@ -883,6 +886,10 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
             }
             if (auto* lua_tool = dynamic_cast<lubancode::tools::LuaTool*>(tool.get()); lua_tool != nullptr) {
                 lua_tool->SetCancel(cancel_flag);
+            }
+            if (auto* run_command = dynamic_cast<lubancode::tools::RunCommandTool*>(tool.get());
+                run_command != nullptr) {
+                run_command->SetCancel(cancel_flag);
             }
         }
     }
