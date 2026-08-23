@@ -164,7 +164,7 @@ TEST_CASE("thread.archive/unarchive/delete: typed command 收口与错误码") {
     auto outcome = service.ArchiveThread("20260820-101010-甲");
     REQUIRE(outcome.accepted);
     CHECK(outcome.payload.at("state") == "archived");
-    CHECK(std::filesystem::exists(dir.base / "archive" / "20260820-101010-甲.jsonl"));
+    CHECK(std::filesystem::exists(dir.base / "archive" / U8Name("20260820-101010-甲.jsonl")));
 
     // 归档后 list(active)不见,archived 见。
     const runtime::SessionCommandService const_view(dir.str());
@@ -183,14 +183,14 @@ TEST_CASE("thread.archive/unarchive/delete: typed command 收口与错误码") {
     const auto refused = service.HandleCommand(no_confirm);
     CHECK_FALSE(refused.accepted);
     CHECK(refused.error_code == "confirmation_required");
-    CHECK(std::filesystem::exists(dir.base / "20260820-101010-甲.jsonl"));
+    CHECK(std::filesystem::exists(dir.base / U8Name("20260820-101010-甲.jsonl")));
 
     // 带 confirm:删掉。
     runtime::ClientCommand confirmed = no_confirm;
     confirmed.payload = {{"confirm", true}};
     const auto deleted = service.HandleCommand(confirmed);
     CHECK(deleted.accepted);
-    CHECK_FALSE(std::filesystem::exists(dir.base / "20260820-101010-甲.jsonl"));
+    CHECK_FALSE(std::filesystem::exists(dir.base / U8Name("20260820-101010-甲.jsonl")));
 
     // not_found:删不存在的。
     const auto missing = service.DeleteThread("99999999-000000-无", {{"confirm", true}});
