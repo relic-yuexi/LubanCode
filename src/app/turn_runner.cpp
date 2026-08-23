@@ -544,8 +544,14 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                             const std::atomic<bool>* cancel_flag,
                                             lubancode::agent::WorkflowRecorder* recorder,
                                             lubancode::runtime::ToolTraceHub* trace_hub,
-                                            lubancode::runtime::TurnCollector* view_collector) {
+                                            lubancode::runtime::TurnCollector* view_collector,
+                                            std::function<std::string(const std::string&, const nlohmann::json&)>
+                                                mode_gate) {
     lubancode::agent::Callbacks callbacks;
+
+    // Plan 模式(只读研究硬闸单):ModePolicy 接到 RunOneTool 的
+    // on_mode_policy 挂点。空 gate = 没装 Plan 闸(单测/子代理旧路)。
+    callbacks.on_mode_policy = mode_gate;
 
     // 逐枚追踪单:装了 hub 的轮次,recorder 吃 canonical trace 的投影
     // (hub.AttachProjection),不走 on_tool_start/on_tool_done 各自手打——
@@ -828,6 +834,9 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         hooks.on_pre_tool_use_hook = callbacks.on_pre_tool_use_hook;
         hooks.on_permission_request = callbacks.on_permission_request;
         hooks.on_tool_phase = callbacks.on_tool_phase;
+        // Plan 模式:子代理同过 ModePolicy(单子:Explore 子代理拿同一
+        // Plan mode + 更窄 allowlist,不因独立 context 逃闸)。
+        hooks.on_mode_policy = callbacks.on_mode_policy;
         hooks.hook_dispatcher = hook_dispatcher;
         // 逐枚追踪单:子代理内层工具事件并轨进主会话的 trace hub。hub 的
         // OnTrace 自带锁与单 writer 落盘,子代理任务线程投递不会跟主
@@ -879,6 +888,8 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         hooks.on_permission_request = callbacks.on_permission_request;
         hooks.on_tool_phase = callbacks.on_tool_phase;
         hooks.on_post_tool_use_hook = callbacks.on_post_tool_use_hook;
+        // Plan 模式:stub 调用同过 ModePolicy(单子明令)。
+        hooks.on_mode_policy = callbacks.on_mode_policy;
         hooks.cancel = cancel_flag;
         ptc_tool->SetHooks(std::move(hooks));
     }
@@ -961,7 +972,8 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                        lubancode::runtime::TurnUsageStats* usage_out,
                        lubancode::runtime::ToolTraceHub* turn_trace_hub,
                        std::string thread_id_for_trace, std::string turn_id_for_trace,
-                       lubancode::runtime::TurnView* turn_view_out) {
+                       lubancode::runtime::TurnView* turn_view_out,
+                       std::function<std::string(const std::string&, const nlohmann::json&)> mode_gate) {
     auto prepared_input = lubancode::cli::PrepareImageInput(user_input);
     if (!prepared_input.has_value()) {
         std::cerr << theme.error << tr("error.prefix") << ImageInputErrorText(prepared_input.error())
@@ -1042,7 +1054,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     lubancode::agent::Callbacks callbacks =
         BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker, registry,
                         hook_dispatcher, display, body_tracker, allow_commands, deny_commands, &cancel_flag,
-                        recorder, turn_trace_hub, &view_collector);
+                        recorder, turn_trace_hub, &view_collector, mode_gate);
     if (turn_trace_hub != nullptr) {
         if (recorder != nullptr) {
             turn_trace_hub->AttachProjection(

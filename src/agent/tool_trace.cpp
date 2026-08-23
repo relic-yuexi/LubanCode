@@ -75,6 +75,7 @@ std::string ToString(ToolOutcome outcome) {
         case ToolOutcome::SchemaRejected: return "schema_rejected";
         case ToolOutcome::HookDenied: return "hook_denied";
         case ToolOutcome::PermissionDeclined: return "permission_declined";
+        case ToolOutcome::ModeDenied: return "mode_denied";
         case ToolOutcome::CancelledBeforeStart: return "cancelled_before_start";
         case ToolOutcome::CancelledDuringRun: return "cancelled_during_run";
         case ToolOutcome::SpawnFailed: return "spawn_failed";
@@ -100,6 +101,7 @@ bool ParseToolOutcome(const std::string& s, ToolOutcome& out) {
         {"schema_rejected", ToolOutcome::SchemaRejected},
         {"hook_denied", ToolOutcome::HookDenied},
         {"permission_declined", ToolOutcome::PermissionDeclined},
+        {"mode_denied", ToolOutcome::ModeDenied},
         {"cancelled_before_start", ToolOutcome::CancelledBeforeStart},
         {"cancelled_during_run", ToolOutcome::CancelledDuringRun},
         {"spawn_failed", ToolOutcome::SpawnFailed},
@@ -126,6 +128,7 @@ bool OutcomeNeverStarted(ToolOutcome outcome) {
     switch (outcome) {
         case ToolOutcome::HookDenied:
         case ToolOutcome::PermissionDeclined:
+        case ToolOutcome::ModeDenied:
         case ToolOutcome::CancelledBeforeStart:
         case ToolOutcome::UnknownTool:
         case ToolOutcome::Unavailable:

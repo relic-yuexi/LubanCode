@@ -111,7 +111,7 @@ TEST_CASE("同一假 backend 脚本:Terminal 与 Json 两 sink 同流同账") {
     rt::JsonEventSink json_sink([&json_out](const std::string& line) { json_out << line; });
 
     // 一只三通适配器:同一事件流同时进录音机、终端账本、JSON 落笔。
-    rt::TurnEventAdapter adapter("th-same", loop, rt::ProcessIdAuthority());
+    rt::TurnEventAdapter adapter("th-same", rt::ProcessIdAuthority());
     adapter.Attach([&](const rt::ServerEvent& event) {
         recorder.Emit(event);
         terminal_sink.Emit(event);

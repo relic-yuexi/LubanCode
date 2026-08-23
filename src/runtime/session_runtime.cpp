@@ -16,11 +16,11 @@ SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)), 
 
 SessionRuntime::~SessionRuntime() = default;
 
-TurnEventAdapter SessionRuntime::MakeTurnAdapter(agent::AgentLoop& loop) {
+TurnEventAdapter SessionRuntime::MakeTurnAdapter() {
     // 适配器按值构造会拷 map/串——MoveCallbacks 的正确姿势是调用方写
-    // auto adapter = runtime.MakeTurnAdapter(loop);。构造函数捕获 thread_id_
+    // auto adapter = runtime.MakeTurnAdapter();。构造函数捕获 thread_id_
     // 与 ids_ 引用,轮内不再变。
-    return TurnEventAdapter(thread_id_, loop, ids_);
+    return TurnEventAdapter(thread_id_, ids_);
 }
 
 SessionBeginResult SessionRuntime::EnsureBegun(const std::string& first_text, const std::string& model,
@@ -46,6 +46,11 @@ SessionBeginResult SessionRuntime::EnsureBegun(const std::string& first_text, co
         store_.AppendTitleEvent(title_);
     }
     title_pending_ = false;
+    // Plan 模式单:建档前切过的协作档(存档未开时只记了内存)补落 mode_v1。
+    if (pending_mode_event_.has_value()) {
+        store_.AppendModeEvent(*pending_mode_event_);
+        pending_mode_event_.reset();
+    }
     return SessionBeginResult::Begun;
 }
 
@@ -96,6 +101,84 @@ void SessionRuntime::ClampPersisted(std::size_t history_size) {
     if (persisted_count_ > history_size) {
         persisted_count_ = history_size;
     }
+}
+
+bool SessionRuntime::SetCollaborationMode(CollaborationMode mode, const std::string& reason,
+                                          const std::string& permission_before_plan) {
+    if (mode_state_.active == mode) {
+        return false;  // 同档重复切:不动账、不落事件行
+    }
+    mode_state_.active = mode;
+    mode_state_.revision += 1;
+    if (mode == CollaborationMode::Plan) {
+        mode_state_.permission_before_plan = permission_before_plan;
+    }
+    // 存档活跃就落 mode_v1(append+flush);没建档先挂起(EnsureBegun 补落),
+    // 写坏不拦切档——内存真值在,档是加层(与 queue 事件同取舍)。
+    agent::ModeEvent event;
+    event.mode = ToString(mode);
+    event.reason = reason;
+    event.revision = mode_state_.revision;
+    if (store_.active() && !store_broken_) {
+        store_.AppendModeEvent(event);
+    } else {
+        pending_mode_event_ = event;
+    }
+    return true;
+}
+
+void SessionRuntime::RecordPlanDocument(const PlanDocument& plan) {
+    // 新稿 supersede 旧稿(旧账仍在 session 事件行,不删)。
+    if (latest_plan_.has_value() && latest_plan_->plan_id == plan.plan_id &&
+        latest_plan_->state == PlanReviewState::Presented) {
+        PlanDocument superseded = *latest_plan_;
+        superseded.state = PlanReviewState::Superseded;
+        latest_plan_ = superseded;
+        // supersede 也留一行账:审阅历史看得见"哪稿被哪稿顶了"。
+        if (store_.active() && !store_broken_) {
+            agent::PlanEvent event;
+            event.plan_id = superseded.plan_id;
+            event.revision = superseded.revision;
+            event.state = ToString(superseded.state);
+            event.sha256 = superseded.content_sha256;
+            event.turn_id = superseded.source_turn_id;
+            store_.AppendPlanEvent(event);
+        }
+    }
+    latest_plan_ = plan;
+    mode_state_.latest_plan_id = plan.plan_id;
+    if (store_.active() && !store_broken_) {
+        agent::PlanEvent event;
+        event.plan_id = plan.plan_id;
+        event.revision = plan.revision;
+        event.state = ToString(plan.state);
+        event.sha256 = plan.content_sha256;
+        // 内联上限:超限不塞事件行(装配层已落 artifact,这里带引用)。
+        if (plan.markdown.size() <= kPlanMarkdownInlineCap) {
+            event.markdown = plan.markdown;
+        } else {
+            event.artifact_ref = plan.artifact_ref;
+        }
+        event.turn_id = plan.source_turn_id;
+        store_.AppendPlanEvent(event);
+    }
+}
+
+SessionRuntime::PlanReviewOutcome SessionRuntime::ReviewPlan(const std::string& plan_id, std::uint64_t revision,
+                                                             const std::string& sha256, bool approve) {
+    if (!latest_plan_.has_value() || latest_plan_->plan_id != plan_id ||
+        latest_plan_->revision != revision || latest_plan_->content_sha256 != sha256) {
+        return PlanReviewOutcome::Stale;  // 旧 dialog 的迟到回答,不落账
+    }
+    latest_plan_->state = approve ? PlanReviewState::Approved : PlanReviewState::Rejected;
+    if (store_.active() && !store_broken_) {
+        agent::PlanReviewEvent event;
+        event.plan_id = plan_id;
+        event.revision = revision;
+        event.decision = approve ? "approved" : "rejected";
+        store_.AppendPlanReviewEvent(event);
+    }
+    return approve ? PlanReviewOutcome::Approved : PlanReviewOutcome::Rejected;
 }
 
 }  // namespace lubancode::runtime

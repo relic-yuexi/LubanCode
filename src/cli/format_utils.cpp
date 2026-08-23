@@ -95,6 +95,11 @@ std::vector<StatusPanelSegment> BuildStatusPanelSegments(
     if (!data.tools.empty()) {
         out.push_back({"tools", "tools " + data.tools});
     }
+    // Plan 模式标记(只读研究硬闸单):非空恒挂一段,不进 items 配置(理由
+    // 见 StatusPanelData::plan_mode 注释)。纯文本 "plan"。
+    if (!data.plan_mode.empty()) {
+        out.push_back({"plan", data.plan_mode});
+    }
     for (const std::string& key : items) {
         std::string text;
         if (key == "permission_mode") {

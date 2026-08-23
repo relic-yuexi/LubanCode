@@ -49,9 +49,11 @@ struct EventEnvelope {
 // layer=Turn 时 item_id 为空;layer=Thread 时只带 thread_id(在 envelope)。
 enum class EventLayer { Thread, Turn, Item };
 
-// 条目种类:工具、思考、正文、命令、diff、todo、子代理——都落成 item,
-// 前端按种类挑组件,不另开旁路事件。
-enum class ItemKind { Tool, Thinking, Text, Command, Diff, Todo, Subagent };
+// 条目种类:工具、思考、正文、命令、diff、todo、计划、子代理——都落成
+// item,前端按种类挑组件,不另开旁路事件。Plan 是计划成品(PlanDocument)
+// 的独立条目(只读研究硬闸单):不拿 Text/Todo 顶替——Web/Tauri 要凭它开
+// 计划审阅器,delta 流式到完整 item/completed 才可审。
+enum class ItemKind { Tool, Thinking, Text, Command, Diff, Todo, Plan, Subagent };
 
 // 终态四分(文件头约定 3)。前置状态不叫终态,叫"进行中"。
 enum class Outcome { Succeeded, Failed, Declined, Cancelled };
@@ -93,6 +95,16 @@ enum class ServerEventKind {
     ApprovalRequested,
     QuestionRequested,
     InteractionResolved,
+    // Plan 模式(只读研究硬闸单):模式切换与计划审阅,thread 层事件。
+    //   CollaborationModeChanged:payload 带 mode/previous_mode/reason/revision。
+    //   PlanReviewRequested:Plan turn 收口且见完整 PlanDocument 后由空闲层
+    //     发,payload 带 plan_id/plan_revision/sha256/artifact_ref/available_
+    //     decisions。不冒充普通 tool approval(单子:专用事件)。
+    //   PlanReviewResolved:用户答完,payload 带 decision 与所选
+    //     selected_permission_mode(批准时)。
+    CollaborationModeChanged,
+    PlanReviewRequested,
+    PlanReviewResolved,
     // 记账与杂项
     UsageUpdated,
     ContextUpdated,

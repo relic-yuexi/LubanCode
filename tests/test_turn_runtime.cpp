@@ -58,7 +58,7 @@ public:
     nlohmann::json input_schema() const override { return nlohmann::json::object(); }
     bool needs_confirm() const override { return needs_confirm_flag_; }
 
-    tools::Tool::Result execute(const nlohmann::json& input) override {
+    tools::Tool::Result execute(const nlohmann::json&) override {
         ++calls;
         return {name_ + " 执行了", false};
     }

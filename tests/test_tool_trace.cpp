@@ -15,6 +15,7 @@
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -39,6 +40,28 @@
 using namespace lubancode;
 
 namespace {
+
+class TempDir {
+public:
+    explicit TempDir(const std::string& label) {
+        path_ = std::filesystem::temp_directory_path() /
+                ("lubancode_tool_trace_" + label + "_" +
+                 std::to_string(reinterpret_cast<std::uintptr_t>(this)));
+        std::error_code ec;
+        std::filesystem::remove_all(path_, ec);
+        std::filesystem::create_directories(path_, ec);
+    }
+
+    ~TempDir() {
+        std::error_code ec;
+        std::filesystem::remove_all(path_, ec);
+    }
+
+    const std::filesystem::path& Get() const { return path_; }
+
+private:
+    std::filesystem::path path_;
+};
 
 class FakeBackend : public api::Backend {
 public:
@@ -586,13 +609,11 @@ TEST_CASE("trace-aware 修补: unknown 补 [会话恢复] 结果,老档回落 le
 }
 
 TEST_CASE("session: tool_trace_v1 行落盘与回读;老版本读档不坏") {
-    const std::string dir = agent::MakeSessionSlug("trace 测试") + "-dir";
-    std::filesystem::path tmp = std::filesystem::temp_directory_path() / dir;
-    std::filesystem::create_directories(tmp);
-    const std::string file = (tmp / "s.jsonl").string();
+    TempDir tmp("session");
+    const std::string file = (tmp.Get() / "s.jsonl").string();
 
     {
-        agent::SessionStore store(tmp.string());
+        agent::SessionStore store(tmp.Get().string());
         agent::SessionMeta meta;
         meta.wire = "anthropic";
         meta.model = "m";
@@ -617,8 +638,6 @@ TEST_CASE("session: tool_trace_v1 行落盘与回读;老版本读档不坏") {
     CHECK(loaded->tool_trace_events[0].kind == agent::ToolTraceEventKind::Scheduled);
     CHECK(loaded->tool_trace_events[1].kind == agent::ToolTraceEventKind::ExecutionStarted);
 
-    std::error_code cleanup_ec;
-    std::filesystem::remove_all(tmp, cleanup_ec);
 }
 
 TEST_CASE("消息落盘次序: assistant 先落、五结果一条 user message 后落") {
@@ -753,10 +772,8 @@ TEST_CASE("RunOneTool: 来源/错误码随 trace 落账(unknown_tool/hook_denied
 // ---------------------------------------------------------------------------
 
 TEST_CASE("write_file/edit_file: 结果带 undo token(pre/post 哈希)") {
-    const std::string dir = agent::MakeSessionSlug("undo 测试") + "-dir";
-    std::filesystem::path tmp = std::filesystem::temp_directory_path() / dir;
-    std::filesystem::create_directories(tmp);
-    const std::string target = (tmp / "f.txt").string();
+    TempDir tmp("undo_token");
+    const std::string target = (tmp.Get() / "f.txt").string();
 
     tools::WriteFileTool writer;
     nlohmann::json input;
@@ -775,8 +792,6 @@ TEST_CASE("write_file/edit_file: 结果带 undo token(pre/post 哈希)") {
     CHECK_FALSE(rewritten.undo_preimage.empty());
     CHECK(rewritten.undo_preimage == "first");
 
-    std::error_code cleanup_ec;
-    std::filesystem::remove_all(tmp, cleanup_ec);
 }
 
 // ---------------------------------------------------------------------------
@@ -883,10 +898,8 @@ TEST_CASE("MCP: 换一代传输层 generation +1,jsonrpc id 随 CallTool 带出"
 // ---------------------------------------------------------------------------
 
 TEST_CASE("undo_file_edit: 改后未再动,恢复 preimage") {
-    const std::string dir = agent::MakeSessionSlug("undo exec") + "-dir";
-    std::filesystem::path tmp = std::filesystem::temp_directory_path() / dir;
-    std::filesystem::create_directories(tmp);
-    const std::string target = (tmp / "f.txt").string();
+    TempDir tmp("undo_exec");
+    const std::string target = (tmp.Get() / "f.txt").string();
 
     // write 两枚(第一枚新建,第二枚覆盖——token 是"first -> second"这
     // 枚覆盖,preimage 才有正文),再按 token 撤销。
@@ -917,15 +930,11 @@ TEST_CASE("undo_file_edit: 改后未再动,恢复 preimage") {
     buffer << in.rdbuf();
     CHECK(buffer.str() == written.undo_preimage);
 
-    std::error_code ec;
-    std::filesystem::remove_all(tmp, ec);
 }
 
 TEST_CASE("undo_file_edit: 改后用户又改,拒绝自动撤销并给三方对照") {
-    const std::string dir = agent::MakeSessionSlug("undo refuse") + "-dir";
-    std::filesystem::path tmp = std::filesystem::temp_directory_path() / dir;
-    std::filesystem::create_directories(tmp);
-    const std::string target = (tmp / "f.txt").string();
+    TempDir tmp("undo_refuse");
+    const std::string target = (tmp.Get() / "f.txt").string();
 
     tools::WriteFileTool writer;
     nlohmann::json input;
@@ -960,15 +969,11 @@ TEST_CASE("undo_file_edit: 改后用户又改,拒绝自动撤销并给三方对�
         CHECK(buffer.str() == "third-party edit");
     }
 
-    std::error_code ec;
-    std::filesystem::remove_all(tmp, ec);
 }
 
 TEST_CASE("undo_file_edit: 新建文件内容未再变,整枚移走") {
-    const std::string dir = agent::MakeSessionSlug("undo newfile") + "-dir";
-    std::filesystem::path tmp = std::filesystem::temp_directory_path() / dir;
-    std::filesystem::create_directories(tmp);
-    const std::string target = (tmp / "new.txt").string();
+    TempDir tmp("undo_newfile");
+    const std::string target = (tmp.Get() / "new.txt").string();
 
     tools::WriteFileTool writer;
     nlohmann::json input;
@@ -987,8 +992,6 @@ TEST_CASE("undo_file_edit: 新建文件内容未再变,整枚移走") {
     CHECK(removed.performed);
     CHECK_FALSE(std::filesystem::exists(std::filesystem::path(target)));
 
-    std::error_code ec;
-    std::filesystem::remove_all(tmp, ec);
 }
 
 TEST_CASE("undo_file_edit: 账本查不到凭据/凭据不完整,如实说不猜") {

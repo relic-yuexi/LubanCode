@@ -59,8 +59,7 @@ void PrintPluginsCommand(const std::vector<PluginMountInfo>& mounted, const std:
 // "提示重启"为口径:Lua/process 可热重载的钩子另立批次,不在这硬造。
 void HandlePluginCommand(const std::string& args,
                          const std::vector<PluginMountInfo>& mounted,
-                         const std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& manifests,
-                         const std::vector<std::string>& warnings);
+                         const std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& manifests);
 
 
 // /mcp 命令:每个服务器一行状态(运行中/已退出)+ 工具数,底下缩进列出

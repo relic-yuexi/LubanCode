@@ -486,9 +486,9 @@ TEST_CASE("methods 冻结矩阵:能力表如实报接线面") {
     CHECK(actual == expected);
 
     // 留位的:与 methods 不相交。
-    for (const std::string& pending : caps["pending"]) {
+    for (const auto& pending : caps["pending"]) {
         bool leak = false;
-        for (const std::string& wired : caps["methods"]) {
+        for (const auto& wired : caps["methods"]) {
             if (pending == wired) {
                 leak = true;
             }

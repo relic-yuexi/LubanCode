@@ -182,8 +182,7 @@ void PrintPluginsCommand(const std::vector<PluginMountInfo>& mounted, const std:
 // 命令层只出说明——真跑要确认流,硬造一条免确认的捷径正是单子禁的)。
 void HandlePluginCommand(const std::string& args,
                          const std::vector<PluginMountInfo>& mounted,
-                         const std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& manifests,
-                         const std::vector<std::string>& warnings) {
+                         const std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& manifests) {
     // 拆子命令与目标 id。
     std::string sub = args;
     std::string rest;
@@ -482,4 +481,3 @@ CommandFlow HandleBackgroundCommand(const lubancode::cli::Theme& theme) {
 }
 
 }  // namespace lubancode::app
-

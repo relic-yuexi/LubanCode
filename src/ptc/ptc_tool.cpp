@@ -234,6 +234,8 @@ tools::Tool::Result PtcTool::execute(const nlohmann::json& input) {
     chain.on_permission_request = hooks.on_permission_request;
     chain.on_tool_phase = hooks.on_tool_phase;
     chain.on_post_tool_use_hook = hooks.on_post_tool_use_hook;
+    // Plan 模式:stub 调用走同一 ModePolicy(单子明令,不另开旁路)。
+    chain.on_mode_policy = hooks.on_mode_policy;
 
     PtcRunner::Options options;
     options.python_cmd = config_.python_cmd;

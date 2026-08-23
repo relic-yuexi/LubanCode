@@ -149,7 +149,7 @@ public:
     // 发一枚提问(user/ask)。返回的 future 只用得到 WaitQuestion,类型
     // 是 PendingFuture(带超时/打断的 SetTimeout/WatchInterrupt 口)。
     std::shared_ptr<PendingFuture> AskQuestion(
-        const runtime::QuestionRequest& request, const std::string& turn_id, int question_index,
+        const runtime::QuestionRequest& request, const std::string& turn_id,
         const std::function<void(std::string_view method, const nlohmann::json& params)>& emit);
 
     // ---- 答复侧(读线程,HandleResponse 进来) ----
