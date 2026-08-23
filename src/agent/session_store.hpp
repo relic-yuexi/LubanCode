@@ -178,6 +178,58 @@ std::string SerializeQueueEvent(const std::vector<ArchivedQueueItem>& items, con
 std::optional<std::vector<ArchivedQueueItem>> ParseQueueEvent(const std::string& line);
 
 // ---------------------------------------------------------------------------
+// mode / plan / plan_review 事件(Plan 模式单):协作模式与计划成品的
+// append-only 账。
+//
+//   {"type":"mode_v1","mode":"plan","reason":"slash","revision":1,"ts":"..."}
+//   {"type":"plan_v1","plan_id":"plan-1","revision":1,"state":"presented",
+//    "sha256":"...","markdown":"...","turn_id":"...","ts":"..."}
+//   {"type":"plan_review_v1","plan_id":"plan-1","revision":1,
+//    "decision":"approved","execution_permission":"confirm","ts":"..."}
+//
+// 回放语义:
+//   - mode_v1 最后一条胜,决定 resume 档位;老档没有 mode 行按 Default。
+//   - plan_v1 逐稿留账(新稿 supersede 旧稿,旧行不删);回放取每 plan_id
+//     的最高 revision,全部保留供审阅历史。
+//   - plan_review_v1 的 decision/approved 须同时匹配 plan_id+revision+sha256
+//     (写入侧把关);回放只认与最新稿匹配的 approved,不匹配的当废票。
+//   - 尾行截断按事件行通用约定跳过,不废整场;mode 已写 Plan、计划行坏了,
+//     恢复仍在 Plan,只提示成品损坏。
+// ---------------------------------------------------------------------------
+
+struct ModeEvent {
+    std::string mode;    // "plan" / "default"
+    std::string reason;  // "slash" / "approved" / "off" / "resume" / "clear"
+    std::uint64_t revision = 0;
+};
+
+std::string SerializeModeEvent(const ModeEvent& event, const std::string& ts);
+std::optional<ModeEvent> ParseModeEvent(const std::string& line);
+
+struct PlanEvent {
+    std::string plan_id;
+    std::uint64_t revision = 1;
+    std::string state;        // draft/presented/approved/rejected/superseded
+    std::string sha256;       // markdown 的 SHA-256
+    std::string markdown;     // 超限时为空(artifact_ref 接手)
+    std::string artifact_ref; // 超限落仓的引用;空 = 正文内联
+    std::string turn_id;
+};
+
+std::string SerializePlanEvent(const PlanEvent& event, const std::string& ts);
+std::optional<PlanEvent> ParsePlanEvent(const std::string& line);
+
+struct PlanReviewEvent {
+    std::string plan_id;
+    std::uint64_t revision = 1;
+    std::string decision;               // approved / rejected / continued
+    std::string execution_permission;   // approved 时:confirm/auto/yolo
+};
+
+std::string SerializePlanReviewEvent(const PlanReviewEvent& event, const std::string& ts);
+std::optional<PlanReviewEvent> ParsePlanReviewEvent(const std::string& line);
+
+// ---------------------------------------------------------------------------
 // 会话 id
 // ---------------------------------------------------------------------------
 
@@ -260,6 +312,11 @@ struct LoadedSession {
     // trace-aware 修复从这份账折叠 ToolExecutionLedger;老档没这些行,
     // 空表 = 走旧逻辑(RepairToolPairs 补洞),向后兼容。
     std::vector<ToolTraceEvent> tool_trace_events;
+    // Plan 模式单:最后一条 mode 事件(空 mode = 老档,按 Default);
+    // plan 逐稿(plan_id -> 最高 revision,全量留);最后一条有效审批。
+    ModeEvent last_mode_event;
+    std::vector<PlanEvent> plan_events;
+    std::optional<PlanReviewEvent> last_plan_review;
     // trace-aware 修复的分档账(没有 trace 行的档全零):/resume 按它告知
     // 用户"几枚未执行、几枚副作用未知、几枚恢复了原始结果"。
     TraceRepairReport trace_repair;
@@ -323,6 +380,11 @@ public:
     // 逐枚追踪单:一行一栅栏,append-only;这是 durable started/finished
     // 的落点,写失败即知(process-crash durable 的口径,见单子 Durability 节)。
     bool AppendToolTraceEvent(const ToolTraceEvent& event);
+
+    // Plan 模式单:mode/plan/plan_review 事件行,同 append+flush 口径。
+    bool AppendModeEvent(const ModeEvent& event);
+    bool AppendPlanEvent(const PlanEvent& event);
+    bool AppendPlanReviewEvent(const PlanReviewEvent& event);
 
     // /clear:关掉当前文件(留在磁盘上),回到"没有活动会话"状态,下一条
     // 用户消息再 Begin 一场新的。

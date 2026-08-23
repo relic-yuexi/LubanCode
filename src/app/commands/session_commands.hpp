@@ -165,6 +165,9 @@ std::optional<std::string> PromptResumeTarget(const std::string& sessions_dir,
 // on_queue_restored(可空,取走即消费单路径二):恢复成功后收一份存档里
 // 最后一条 queue 事件快照(没排过队就是空表),会话层拿它重建
 // SessionSteeringQueue。不接就照旧丢弃(单测/旧调用点)。
+// on_mode_restored(可空,Plan 模式单):恢复成功后收存档的 mode/plan/review
+// 账(老档没 mode 行给 Default 与空表),会话层拿它恢复协作模式档位与
+// 最近计划成品。不接照旧丢弃。
 bool ResumeSession(const std::string& target, const std::string& sessions_dir,
                     lubancode::agent::AgentLoop& loop, lubancode::agent::SessionStore& store,
                     std::size_t& persisted_count, lubancode::agent::SessionMeta& session_meta,
@@ -173,7 +176,11 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
                     lubancode::cli::WorktreeSession* worktree_session = nullptr,
                     int* compact_epoch_out = nullptr,
                     const std::function<void(const std::vector<lubancode::agent::ArchivedQueueItem>&)>*
-                        on_queue_restored = nullptr);
+                        on_queue_restored = nullptr,
+                    const std::function<void(const std::optional<lubancode::agent::ModeEvent>&,
+                                             const std::vector<lubancode::agent::PlanEvent>&,
+                                             const std::optional<lubancode::agent::PlanReviewEvent>&)>*
+                        on_mode_restored = nullptr);
 
 
 // /export [路径]:当前会话导出 Markdown,默认写 sessions/<id>.md。
@@ -221,6 +228,12 @@ struct SessionCommandState {
     // /resume 成功后的排队账重建(取走即消费单路径二):收存档最后一条
     // queue 快照,会话层灌回 SessionSteeringQueue。可空(单测不接)。
     std::function<void(const std::vector<lubancode::agent::ArchivedQueueItem>&)> on_queue_restored;
+    // Plan 模式单:/resume 成功后的 mode/plan/review 账恢复。可空(单测
+    // 不接;不接就丢弃,老档行为)。
+    std::function<void(const std::optional<lubancode::agent::ModeEvent>&,
+                       const std::vector<lubancode::agent::PlanEvent>&,
+                       const std::optional<lubancode::agent::PlanReviewEvent>&)>
+        on_mode_restored;
 };
 
 // /clear:丢历史重建、存档翻篇、标题翻篇。

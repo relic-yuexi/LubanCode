@@ -32,6 +32,7 @@
 #include "api/types.hpp"
 #include "runtime/event_sink.hpp"
 #include "runtime/id_authority.hpp"
+#include "runtime/plan_mode.hpp"
 #include "runtime/turn_event_adapter.hpp"
 
 namespace lubancode::runtime {
@@ -94,6 +95,9 @@ public:
 
     // 建档:meta 填账 + Begin + 建档前挂起的标题补事件行。失败置 broken。
     // 首条文本做 slug;model/cwd 由调用方给(会话模型与目录是控制器的活)。
+    // Plan 模式单:建档前切过的协作档(存档未开时 SetCollaborationMode 只
+    // 记内存)在这里补落 mode_v1——起手 --mode plan 的场子,档里第一行
+    // 用户消息之前就有 mode 账,resume 才接得回档位。
     SessionBeginResult EnsureBegun(const std::string& first_text, const std::string& model,
                                    const std::string& cwd);
 
@@ -111,6 +115,45 @@ public:
     // 本场该工具免问。settings.local.json 的 allow_tools 由装配层注入。
     std::set<std::string>& always_allowed() { return always_allowed_; }
 
+    // ---- 协作模式账(Plan 模式单:两根轴的会话级真值) ------------------------
+    // ModeState 归本类所有(单子:"不塞进 LineEditor 的 ConfirmMode 原子"),
+    // 前端只读快照。切档走 SetCollaborationMode——它顺手落 mode_v1 事件行
+    // (存档活跃时),/resume 按"最后一条 mode 事件"恢复档位。
+    const ModeState& mode_state() const { return mode_state_; }
+    CollaborationMode collaboration_mode() const { return mode_state_.active; }
+
+    // 切档。reason 是稳定短码("slash"/"approved"/"resume"/"clear"),随事件
+    // 行落账。permission_before_plan 在切入 Plan 时由调用方传当前确认档
+    // ("confirm"/"auto"/"yolo");切回 Default 时本类不动确认档——批准框选的
+    // 新档只改本 session,由装配层落。
+    // 返回值:切换是否真的发生(同档重复切给 false,不落事件行)。
+    bool SetCollaborationMode(CollaborationMode mode, const std::string& reason,
+                              const std::string& permission_before_plan = std::string());
+    // resume 专用:只回内存真值,不落 mode 事件行(档位是回放出来的,再落
+    // 一行会把 resume 当一次切换记账)。
+    void RestoreCollaborationMode(CollaborationMode mode, std::uint64_t revision) {
+        mode_state_.active = mode;
+        mode_state_.revision = revision;
+    }
+
+    // ---- 计划成品账 -----------------------------------------------------------
+    // 最近一份 PlanDocument(按 revision supersede;旧稿仍在 session 事件
+    // 行里,/resume 按 plan_v1 行重建全账)。null = 本场还没交过计划。
+    void RecordPlanDocument(const PlanDocument& plan);
+    // resume 专用:只回内存真值,不落 plan 事件行(账已在档里,重复落会
+    // 翻倍),也不做 supersede 侧写。
+    void RestorePlanDocument(const PlanDocument& plan) {
+        latest_plan_ = plan;
+        mode_state_.latest_plan_id = plan.plan_id;
+    }
+    const PlanDocument* latest_plan() const { return latest_plan_.has_value() ? &*latest_plan_ : nullptr; }
+
+    // 计划审批:批准/拒绝/继续规划。批准须同时匹配 id/revision/hash(单子:
+    // "用户审的是哪一稿,账上写清");不匹配给 stale,不落账。
+    enum class PlanReviewOutcome { Approved, Rejected, Stale };
+    PlanReviewOutcome ReviewPlan(const std::string& plan_id, std::uint64_t revision, const std::string& sha256,
+                                 bool approve);
+
 private:
     Options options_;
     IdAuthority ids_;
@@ -126,6 +169,12 @@ private:
     bool store_broken_ = false;
 
     std::set<std::string> always_allowed_;
+
+    // Plan 模式单:两轴真值与计划成品账。
+    ModeState mode_state_;
+    // 存档未开时切过的档(起手 --mode plan):建档那一刻补落。
+    std::optional<agent::ModeEvent> pending_mode_event_;
+    std::optional<PlanDocument> latest_plan_;
 };
 
 }  // namespace lubancode::runtime
