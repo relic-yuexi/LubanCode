@@ -706,16 +706,17 @@ TEST_CASE("run_command(POSIX): shell=bash 装了就真用 bash(Bash 语法跑通
     CHECK(result.content.find("[退出码 0]") != std::string::npos);
 }
 
-TEST_CASE("run_command(POSIX): 默认 sh 不偷换 bash(bash 专属变量在 sh 下为空)") {
+TEST_CASE("run_command(POSIX): 默认 shell 固定走 /bin/sh,不偷换 /bin/bash") {
     RunCommandTool tool;
     nlohmann::json input;
-    // $BASH_VERSION 只有真 bash 才有值;dash(/bin/sh)下是空串。宿主若
-    // 偷偷把 sh 换成 bash,这条探针立刻露馅。
-    input["command"] = "echo \"bashver=[$BASH_VERSION]\"";
+    // macOS 的 /bin/sh 本就由 Bash 提供,BASH_VERSION 并不为空;拿实现
+    // 特征判断会冤枉它。$0 则是调用入口:若宿主把默认 shell 偷换成
+    // /bin/bash,这里会直接露出 /bin/bash。
+    input["command"] = "printf 'shell0=[%s]\\n' \"$0\"";
     const Tool::Result result = tool.execute(input);
     CHECK_FALSE(result.is_error);
     CHECK(result.content.find("[退出码 0]") != std::string::npos);
-    CHECK(result.content.find("bashver=[]") != std::string::npos);
+    CHECK(result.content.find("shell0=[/bin/sh]") != std::string::npos);
 }
 
 #endif  // !_WIN32
