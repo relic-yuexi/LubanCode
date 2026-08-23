@@ -1,4 +1,4 @@
-// 0.22.x 流式脚注框化专用的"刮屏驱动器":跟 tests/screen_driver.cpp 同一套
+// 0.22.x 流式脚注框化专用的"刮屏驱动器":跟 tests/manual/screen_driver.cpp 同一套
 // 手艺(AllocConsole + WriteConsoleInputW + ReadConsoleOutputW),验的是这轮
 // 新加的东西——流式期间正文下方常驻的框(上横线/输入行/下横线/状态行)、
 // Working 动态着色、输入光标、常驻队列、ESC 打断、长输出滚屏时框还贴得住。

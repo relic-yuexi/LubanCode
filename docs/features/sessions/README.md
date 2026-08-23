@@ -230,8 +230,8 @@ lubancode delete <id|标题> --force   # 跳过确认——只给脚本,不可�
 
 服务端缓存本就是尽力而为，但先把自家的账管住了再谈服务端。LubanCode 请求前缀守恒有三条规矩：
 
-- **追加律**：已经发给模型的 system、工具表与旧消息不追改，新材料只往尾部添。默认工具往返里，后一份请求就是前一份的原样追加版（`tests/test_request_prefix.cpp` 钉死，断前缀会被点名 `model_changed` / `system_changed` / `tools_changed` / `old_message_changed`）。动态材料（项目记忆召回、子代理名册、步数收尾提醒）随本轮用户消息尾部进请求，不再每回合改 system。
+- **追加律**：已经发给模型的 system、工具表与旧消息不追改，新材料只往尾部添。默认工具往返里，后一份请求就是前一份的原样追加版（`tests/unit/api/test_request_prefix.cpp` 钉死，断前缀会被点名 `model_changed` / `system_changed` / `tools_changed` / `old_message_changed`）。动态材料（项目记忆召回、子代理名册、步数收尾提醒）随本轮用户消息尾部进请求，不再每回合改 system。
 - **cache epoch**：一场会话不是只有一份前缀。换模型/换 provider、改工具表（如 tool_search 挂载）、compact、有损硬裁都显式开新 epoch 并记下断因——`/context` 显示当前 epoch，回合统计的逐步流水账记每一笔断因，不无名无姓地断。
 - **首次定形**：工具结果第一次进请求视图时定形（超长首次就是预览，重复只自述引用，新版本只自述替代），此后这个 epoch 内一个字节不改；有损硬裁后的视图钉住，裁剪窗口不随回合滑动。compact 是唯一常规全量重写点，压完开新 epoch。
 
-真没命中时也有两种账：前缀不等（客户端的断因，`DiffRequests` 说得出断在哪）与前缀相等但服务端未命中（服务端尽力缓存的失手）。opt-in 真机 e2e（`tests/deepseek_e2e.cpp`，设 `DEEPSEEK_API_KEY` 才跑）把这两种分开报。LubanCode 只展示远端报告，不伪造命中数；服务端没回报 usage 时显示“未回报”，不拿 0 冒充。
+真没命中时也有两种账：前缀不等（客户端的断因，`DiffRequests` 说得出断在哪）与前缀相等但服务端未命中（服务端尽力缓存的失手）。opt-in 真机 e2e（`tests/manual/deepseek_e2e.cpp`，设 `DEEPSEEK_API_KEY` 才跑）把这两种分开报。LubanCode 只展示远端报告，不伪造命中数；服务端没回报 usage 时显示“未回报”，不拿 0 冒充。

@@ -83,7 +83,7 @@ flowchart LR
 
 ### 验收
 
-`tests/test_tools.cpp` 留下 GBK 样本、垃圾字节、残缺序列与真实 PowerShell 解析错误。测试不仅查“没有崩”，还把结果再塞进 JSON，确认 `dump()` 不抛。
+`tests/unit/tools/test_tools.cpp` 留下 GBK 样本、垃圾字节、残缺序列与真实 PowerShell 解析错误。测试不仅查“没有崩”，还把结果再塞进 JSON，确认 `dump()` 不抛。
 
 ### 面试时怎样收口
 
@@ -117,7 +117,7 @@ history assembler 可以攒原始块。相邻两块合起来，字符自然复�
 
 ### 验收
 
-`tests/test_unicode_boundaries.cpp` 穷举前后缀刀口，还模拟劈半 emoji 的流。每一枚 UI delta 都须合法，最终 history 又须还原完整字符。`tests/test_utf8_boundary.cpp` 再钉文件与 JSON 边界。
+`tests/unit/api/test_unicode_boundaries.cpp` 穷举前后缀刀口，还模拟劈半 emoji 的流。每一枚 UI delta 都须合法，最终 history 又须还原完整字符。`tests/unit/cli/test_utf8_boundary.cpp` 再钉文件与 JSON 边界。
 
 ## ⏳ 难题三：连接超时、空闲超时都有，为何请求还能永挂
 
@@ -147,7 +147,7 @@ history assembler 可以攒原始块。相邻两块合起来，字符自然复�
 
 ### 验收
 
-`tests/test_network_timeout.cpp` 起一只裸 socket。它收下连接，连响应头也不回。三家 client 各跑一遍，须由 2 秒硬墙钟收口。低速超时故意设到 25 秒，用来证明落锤的不是它。
+`tests/integration/process/test_network_timeout.cpp` 起一只裸 socket。它收下连接，连响应头也不回。三家 client 各跑一遍，须由 2 秒硬墙钟收口。低速超时故意设到 25 秒，用来证明落锤的不是它。
 
 ## 🧵 难题四：一枚悬垂引用为何只在 Linux 炸
 
@@ -167,7 +167,7 @@ MSVC 的栈布局没立刻踩坏，看着无事。Linux 上第一回调用就 SI
 - “某平台没崩”不等于没有未定义行为。
 - ASAN 给的是犯罪现场，仍要顺着作用域解释为何会悬空。
 
-源码落在 `src/tools/agent_tool.cpp`。后台拒权回归在 `tests/test_agent_tool.cpp`。
+源码落在 `src/tools/agent_tool.cpp`。后台拒权回归在 `tests/unit/agent/test_agent_tool.cpp`。
 
 ## 🔌 难题五：子进程明明没启动，为何被报成退出码 127
 
@@ -188,7 +188,7 @@ POSIX 上父进程 fork 后，要分清两件事：
 
 把 `exec_pipe[1]` 从关闭列表摘出来。成功路交给 `CLOEXEC`；失败路先写 errno，再关。
 
-这件事会波及 Hooks exec form、MCP、LSP 与 PTC。`tests/test_hooks_dispatcher.cpp` 钉 `spawn_failed`，`tests/test_ptc_runner.cpp` 钉不存在的解释器须报 Spawn。
+这件事会波及 Hooks exec form、MCP、LSP 与 PTC。`tests/integration/hooks/test_hooks_dispatcher.cpp` 钉 `spawn_failed`，`tests/integration/ptc/test_ptc_runner.cpp` 钉不存在的解释器须报 Spawn。
 
 ### 面试时可讲的取舍
 
@@ -205,7 +205,7 @@ App-server 整回合测试会落一场 session JSONL。断言完便 `remove_all`
 1. 先走 `thread/stop`，让运行时正经放柄。
 2. 清理改用 `error_code` 形态。测试清理失败不该盖住前头真正的断言结果。
 
-回归在 `tests/test_app_server_turn.cpp`。
+回归在 `tests/unit/app_server/test_app_server_turn.cpp`。
 
 这题能带出一条工程经验：跨平台测试不只查业务结果，还要查资源释放语义。POSIX 允许的事，Windows 未必认。
 
@@ -227,7 +227,7 @@ console 层记着 `view_body_top`，退场时先擦一遍。app 层又记着 `vi
 
 ### 验收
 
-普通单测只验不了真终端。`tests/agent_stream_driver.cpp` 真起控制台，盯一只后台任务从运行到退场，再查：
+普通单测只验不了真终端。`tests/manual/agent_stream_driver.cpp` 真起控制台，盯一只后台任务从运行到退场，再查：
 
 - main 复位行仍在。
 - composer 恰有一份。
@@ -246,7 +246,7 @@ console 层记着 `view_body_top`，退场时先擦一遍。app 层又记着 `vi
 1. 拒绝发生时，立刻写入 `permission_denial_notices_`。main 会话取走后弹 toast，并把事件记入 transcript。
 2. 给子代理的工具结果明说“后台未预放行，并非用户拒绝；重试同一操作不会成功”。这样模型该停就停，不再空转。
 
-`tests/test_agent_tool.cpp` 查三件事：工具没有真执行；通知账里有归属；结果不再出现“用户拒绝执行该工具”。真终端驱动又查 toast 是否当场出现。
+`tests/unit/agent/test_agent_tool.cpp` 查三件事：工具没有真执行；通知账里有归属；结果不再出现“用户拒绝执行该工具”。真终端驱动又查 toast 是否当场出现。
 
 这桩问题值得在面试里讲。安全策略若只会挡，不会说，用户就分不清“系统不许”“Hook 拒绝”与“自己点了拒绝”。可审计性本就是权限系统的一半。
 
@@ -262,7 +262,7 @@ Lua 走的是另一条险路。每个 registry 确有独立 `LuaTool`，可多�
 2. 只有主表装配时打印并写 `/plugins` 账；子表静默装能力。
 3. 每只 `LuaTool` 加 per-state mutex。同一工具串行，不同工具仍可并行。
 
-`tests/test_plugins.cpp` 先重复扫描真 DLL，断言 `PluginHost` 仍只留一份；又用八条线程同打一只带状态的 Lua 计数工具，结果须恰好覆盖 1 到 8，不重不漏。
+`tests/integration/plugins/test_plugins.cpp` 先重复扫描真 DLL，断言 `PluginHost` 仍只留一份；又用八条线程同打一只带状态的 Lua 计数工具，结果须恰好覆盖 1 到 8，不重不漏。
 
 这题能带出一句要紧话：
 
@@ -294,7 +294,7 @@ Lua 走的是另一条险路。每个 registry 确有独立 `LuaTool`，可多�
 
 排队消息可能触发写文件、发请求或启动命令。宿主若不知道上一轮是否已产生副作用，盲重发会重复执行。恢复协议须先定义 durable state 与 ack 边界。
 
-当前代码在 `src/cli/queue_model.hpp`、`src/app/interactive_session.cpp`；已有内存队列测试在 `tests/test_queue_model.cpp`，耐久化与失败回队尚待补齐。
+当前代码在 `src/cli/queue_model.hpp`、`src/app/interactive_session.cpp`；已有内存队列测试在 `tests/unit/agent/test_queue_model.cpp`，耐久化与失败回队尚待补齐。
 
 ## 🧪 怎样把一次修复变成工程能力
 
@@ -343,12 +343,12 @@ Unicode 现场先怀疑模型流与控制台，最后有一部分根因落在 `f
 
 | 主题 | 源码 | 测试 |
 | --- | --- | --- |
-| UTF-8 清洗与边界 | `src/platform/text_encoding.cpp`、`src/agent/loop.cpp` | `tests/test_tools.cpp`、`tests/test_unicode_boundaries.cpp`、`tests/test_utf8_boundary.cpp` |
-| 三协议硬墙钟 | `src/api/anthropic/client.cpp`、`src/api/chat/client.cpp`、`src/api/responses/client.cpp` | `tests/test_network_timeout.cpp`、`tests/test_config.cpp` |
-| 后台生命周期与拒权 | `src/tools/agent_tool.cpp` | `tests/test_agent_tool.cpp`、`tests/agent_stream_driver.cpp` |
-| POSIX 子进程 | `src/platform/process_posix.cpp` | `tests/test_hooks_dispatcher.cpp`、`tests/test_ptc_runner.cpp` |
-| App-server 文件柄 | `src/app_server/server.cpp` | `tests/test_app_server_turn.cpp` |
-| 进程内插件 | `src/tools/plugin_loader.cpp`、`src/tools/lua_tool.cpp`、`src/app/tool_runtime.cpp` | `tests/test_plugins.cpp` |
-| 排队消息 | `src/cli/queue_model.hpp`、`src/app/interactive_session.cpp` | `tests/test_queue_model.cpp`、`tests/test_queue_keys.cpp` |
+| UTF-8 清洗与边界 | `src/platform/text_encoding.cpp`、`src/agent/loop.cpp` | `tests/unit/tools/test_tools.cpp`、`tests/unit/api/test_unicode_boundaries.cpp`、`tests/unit/cli/test_utf8_boundary.cpp` |
+| 三协议硬墙钟 | `src/api/anthropic/client.cpp`、`src/api/chat/client.cpp`、`src/api/responses/client.cpp` | `tests/integration/process/test_network_timeout.cpp`、`tests/unit/config/test_config.cpp` |
+| 后台生命周期与拒权 | `src/tools/agent_tool.cpp` | `tests/unit/agent/test_agent_tool.cpp`、`tests/manual/agent_stream_driver.cpp` |
+| POSIX 子进程 | `src/platform/process_posix.cpp` | `tests/integration/hooks/test_hooks_dispatcher.cpp`、`tests/integration/ptc/test_ptc_runner.cpp` |
+| App-server 文件柄 | `src/app_server/server.cpp` | `tests/unit/app_server/test_app_server_turn.cpp` |
+| 进程内插件 | `src/tools/plugin_loader.cpp`、`src/tools/lua_tool.cpp`、`src/app/tool_runtime.cpp` | `tests/integration/plugins/test_plugins.cpp` |
+| 排队消息 | `src/cli/queue_model.hpp`、`src/app/interactive_session.cpp` | `tests/unit/agent/test_queue_model.cpp`、`tests/unit/agent/test_queue_keys.cpp` |
 
 相关提交可从 `1953c3f`、`160f78a`、`c4a3dc6`、`f8f67c5`、`0d44eb8`、`4d2ef82`、`c850ec2` 往下追。它们不是装饰用编号。每一笔都能还原当时怎样定位、怎样改、怎样验。

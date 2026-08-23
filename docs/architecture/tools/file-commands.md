@@ -312,7 +312,7 @@ ESC 置位的取消旗贯穿 `RunCommandTool::SetCancel` 进平台层等待循�
 | worktree 命令闸 | `src/tools/command_safety.cpp`、`isolation.cpp` |
 | UTF-8 清洗 | `src/platform/text_encoding.cpp` |
 
-关键测试在 `tests/test_tools.cpp`、`tests/test_utf8_boundary.cpp`、`tests/test_background_tasks.cpp` 与平台进程测试。
+关键测试在 `tests/unit/tools/test_tools.cpp`、`tests/unit/cli/test_utf8_boundary.cpp`、`tests/integration/process/test_background_tasks.cpp` 与平台进程测试。
 
 ## 十三、run_command 进程生命线单的评估落定(2026-08)
 

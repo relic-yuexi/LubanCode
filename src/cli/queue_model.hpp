@@ -9,7 +9,7 @@
 //     目标由会话泵转投 AgentTool 的任务 inbox(SendTaskMessage 那套);
 //   - UI(流式 footer 与空闲 composer)每次重画现拉轻量快照,不长期持锁。
 //
-// 纯逻辑、不认终端(单测直接钉,tests/test_queue_model.cpp);线程安全靠
+// 纯逻辑、不认终端(单测直接钉,tests/unit/agent/test_queue_model.cpp);线程安全靠
 // 内部一把互斥,所有公开方法都能跨线程调。
 //
 // 编辑事务带版本号(规格"数据与线程"节):BeginEdit 取出条目正文与版本,

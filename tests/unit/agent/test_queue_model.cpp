@@ -5,7 +5,7 @@
 // 失败回队与防死循环闸、存档恢复(RestoreFromArchive)、清账告知成行
 // (BuildQueueDisposalRows)。全部走局部实例,不碰全局
 // SessionSteeringQueue。流式输入行的 slash 提示随 StreamSlashHintLines 删除
-// 改钉编辑器 RenderState(tests/test_line_editor.cpp 的忙碌路用例)。
+// 改钉编辑器 RenderState(tests/unit/cli/test_line_editor.cpp 的忙碌路用例)。
 
 #include <doctest/doctest.h>
 

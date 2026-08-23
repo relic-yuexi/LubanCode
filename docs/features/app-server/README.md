@@ -152,7 +152,7 @@ ssh <host> lubancode app-server
 
 验证口径:
 
-- 单测 `tests/test_app_server_smoke.cpp`:真进程 + stdio 管道替身(SSH 通道的进程形状),验 stdout 逐行可解析、握手一条线、坏 JSON 不炸、EOF 自退。
+- 单测 `tests/integration/app_server/test_app_server_smoke.cpp`:真进程 + stdio 管道替身(SSH 通道的进程形状),验 stdout 逐行可解析、握手一条线、坏 JSON 不炸、EOF 自退。
 - 手测脚本 `scripts/tests/app_server_ssh_smoke.sh`:真 SSH 通道(`ssh localhost` 起手;无 sshd 的机器 `--local` 走本机管道)。验 login shell 拉起、stderr 隔离、断线后远端不留孤儿。
 
 ```bash

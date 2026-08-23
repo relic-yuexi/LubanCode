@@ -1,6 +1,6 @@
 // 会话层排队队列(SteeringQueue)与队列区成行(BuildSteeringQueueRows)。
 // 设计说明见 queue_model.hpp 文件头;键位/编辑事务/窗口化的规则全在这里,
-// 不认终端、不认线程,单测钉在 tests/test_queue_model.cpp。
+// 不认终端、不认线程,单测钉在 tests/unit/agent/test_queue_model.cpp。
 
 #include "cli/queue_model.hpp"
 

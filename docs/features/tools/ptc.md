@@ -104,7 +104,7 @@ PTC 的资源墙与受限 token 不是强化沙箱。威胁边界见[安全模�
 4. **异常收口**:一枚失败,其余与摘要仍有账;
 5. **编码**:中文/emoji/反斜杠/引号/换行穿透脚本与 RPC。
 
-前四项的离线判卷在 `tests/test_ptc_bench.cpp` 与 LubanBench-Tool 离线层;
+前四项的离线判卷在 `tests/integration/ptc/test_ptc_bench.cpp` 与 LubanBench-Tool 离线层;
 **带真模型的探针要手跑**(见下)。
 
 运行时熔断器:连续 3 次语法错/空脚本/RPC 协议错,本场降回 JSON,不再升回;

@@ -12,7 +12,7 @@
 //     形式,尖括号内允许空白;
 //   - Backspace 在词元尾按下删整枚(编辑器核心 DeleteBackward 认这一条)。
 //
-// 纯逻辑,不碰终端/磁盘;tests/test_mention_menu.cpp 钉死。
+// 纯逻辑,不碰终端/磁盘;tests/unit/cli/test_mention_menu.cpp 钉死。
 #pragma once
 
 #include <cstddef>

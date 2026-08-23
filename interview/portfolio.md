@@ -261,8 +261,8 @@ Skill 是提示与资源，不在进程内执行。MCP/LSP 是子进程。Lua �
 - [`src/cli/transcript.cpp`](../src/cli/transcript.cpp)
 - [`src/cli/latex_math.cpp`](../src/cli/latex_math.cpp)
 - [`src/main.cpp`](../src/main.cpp)
-- [`tests/latex_box_experiment.cpp`](../tests/latex_box_experiment.cpp)
-- [`tests/fold_dup_clear_driver.cpp`](../tests/fold_dup_clear_driver.cpp)
+- [`tests/manual/latex_box_experiment.cpp`](../tests/manual/latex_box_experiment.cpp)
+- [`tests/manual/fold_dup_clear_driver.cpp`](../tests/manual/fold_dup_clear_driver.cpp)
 
 ### 4. 跨平台进程管理讲语义，不讲 API 名字
 
@@ -538,14 +538,14 @@ ctest --test-dir build/release -C Release --output-on-failure
 | MCP | [`src/mcp/client.cpp`](../src/mcp/client.cpp) | [`src/mcp/transport.cpp`](../src/mcp/transport.cpp) |
 | LSP | [`src/lsp/client.cpp`](../src/lsp/client.cpp) | [`src/tools/lsp_tool.cpp`](../src/tools/lsp_tool.cpp) |
 | 终端输入 | [`src/cli/console_input.cpp`](../src/cli/console_input.cpp) | [`src/cli/line_editor.cpp`](../src/cli/line_editor.cpp) |
-| 工具条目 | [`src/cli/transcript.cpp`](../src/cli/transcript.cpp) | [`tests/test_transcript.cpp`](../tests/test_transcript.cpp) |
+| 工具条目 | [`src/cli/transcript.cpp`](../src/cli/transcript.cpp) | [`tests/unit/cli/test_transcript.cpp`](../tests/unit/cli/test_transcript.cpp) |
 | Markdown 与 LaTeX | [`src/cli/markdown.cpp`](../src/cli/markdown.cpp) | [`src/cli/latex_math.cpp`](../src/cli/latex_math.cpp) |
 | 进程抽象 | [`src/platform/process.hpp`](../src/platform/process.hpp) | Win/POSIX 两份实现 |
-| 会话恢复 | [`src/agent/session_store.cpp`](../src/agent/session_store.cpp) | [`tests/test_session_store.cpp`](../tests/test_session_store.cpp) |
+| 会话恢复 | [`src/agent/session_store.cpp`](../src/agent/session_store.cpp) | [`tests/unit/sessions/test_session_store.cpp`](../tests/unit/sessions/test_session_store.cpp) |
 | 项目记忆 | [`src/memory/project_memory.cpp`](../src/memory/project_memory.cpp) | [`docs/architecture/memory/design.md`](../docs/architecture/memory/design.md) |
 | 插件 | [`include/luban_plugin.h`](../include/luban_plugin.h) | [`src/tools/plugin_loader.cpp`](../src/tools/plugin_loader.cpp) |
 | 构建测试 | [`CMakeLists.txt`](../CMakeLists.txt) | [`tests/CMakeLists.txt`](../tests/CMakeLists.txt) |
-| 更新检查 | [`src/config/update_checker.cpp`](../src/config/update_checker.cpp) | [`tests/test_update_checker.cpp`](../tests/test_update_checker.cpp) |
+| 更新检查 | [`src/config/update_checker.cpp`](../src/config/update_checker.cpp) | [`tests/unit/config/test_update_checker.cpp`](../tests/unit/config/test_update_checker.cpp) |
 
 ## 十二、按 JD 改写
 

@@ -26,7 +26,7 @@
 // RenderState 重画)。这一步没法在当前 headless 环境里自动化敲键盘验证
 // (见上面"复现条件"),已经过编译告警检查(/W4 /permissive- 无告警)、
 // 逐行代码走查、以及 LineEditorCore 纯逻辑部分的完整单测(见
-// tests/test_line_editor.cpp)。原始逐键模式进不去(极少见,比如某些非标准
+// tests/unit/cli/test_line_editor.cpp)。原始逐键模式进不去(极少见,比如某些非标准
 // 终端模拟器)时,退回到整行读入(没有补全/历史/模式切换,但至少能用)。
 //
 // 补丁记录:用户实测报过 slash 补全提示"越敲越堆、清不干净"——病根有二:
@@ -414,7 +414,7 @@ void PrintFooterWorkingLine(const StreamFooterState& f, int width) {
 // 编辑器/菜单不在读的窗口期"这条要求不用靠回调层层传参去手动维护,两边
 // 天然靠锁互斥错开——工具确认提示 [y/a/N] 与 ask_user 选择菜单走的也是
 // 这条路,天然一并受益,不用另外接管。定义在下面公共区(声明在
-// console_input.hpp),规约由 tests/test_repaint_coord.cpp 钉死。
+// console_input.hpp),规约由 tests/unit/cli/test_repaint_coord.cpp 钉死。
 
 // platform 层的语义按键 -> 核心层 KeyEvent。两个枚举一一平行(platform 不
 // 依赖 cli,镜像了一份),这里只是搬运;None 翻成 nullopt,调用方 continue。
@@ -900,7 +900,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     platform::KeyReader key_reader;
     // 面板状态机:会话级 AgentPanelSession(纯逻辑在 cli/agent_panel,键位缝在
     // MapToPanelKey:选择/查看/x 停止清除/Ctrl+X Ctrl+K 两段确认全在里面,单测
-    // 钉在 tests/test_agent_panel.cpp)。空闲与流式监听共用同一份,选择按稳定
+    // 钉在 tests/unit/agent/test_agent_panel.cpp)。空闲与流式监听共用同一份,选择按稳定
     // task id 记。
     AgentPanelSession& panel_session = PanelSessionSlot();
     std::string panel_fingerprint;  // 上一帧面板指纹(条目+状态机+成行),变了才重画

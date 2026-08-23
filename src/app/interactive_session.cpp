@@ -859,7 +859,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     };
     lubancode::cli::SetAgentPanelActions(panel_actions);
 
-    // 刮屏驱动器专用(tests/agent_panel_driver.cpp,不进 ctest):设
+    // 刮屏驱动器专用(tests/manual/agent_panel_driver.cpp,不进 ctest):设
     // LUBANCODE_AGENT_PANEL_DEMO=N 时面板显示 N 只假代理,便于真控制台断言
     // 导航坞贴底与残帧计数。正常启动不设这个变量,provider 还是真数据。
     // LUBANCODE_AGENT_PANEL_DEMO_IDLE=K 让前 K 只处于完成态,驱动闲置折叠

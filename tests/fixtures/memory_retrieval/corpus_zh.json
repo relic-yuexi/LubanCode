@@ -195,7 +195,7 @@
         "中文命名"
       ],
       "paths": [
-        "tests/test_config.cpp"
+        "tests/unit/config/test_config.cpp"
       ]
     },
     {
@@ -283,7 +283,7 @@
         "mock"
       ],
       "paths": [
-        "tests/test_project_memory.cpp"
+        "tests/unit/memory/test_project_memory.cpp"
       ]
     },
     {

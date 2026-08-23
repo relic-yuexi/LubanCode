@@ -455,5 +455,5 @@ capability / reason / outcome
 | AgentLoop 与 `RunOneTool` 工具边界 | `src/agent/loop.*` |
 | 工具执行合同 | `src/tools/tool.hpp`、`src/tools/registry.hpp` |
 | 命令进程树 | `src/tools/run_command.*`、platform process 层 |
-| 逻辑测试 | `tests/test_agent_panel.cpp`、`tests/test_agent_activity.cpp` |
-| 真机驱动 | `tests/agent_panel_driver.cpp`、`tests/agent_stream_driver.cpp` |
+| 逻辑测试 | `tests/unit/agent/test_agent_panel.cpp`、`tests/unit/agent/test_agent_activity.cpp` |
+| 真机驱动 | `tests/manual/agent_panel_driver.cpp`、`tests/manual/agent_stream_driver.cpp` |

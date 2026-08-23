@@ -181,4 +181,4 @@ legacy `pre_tool` 的非零退出仍按旧语义拦截；其他 legacy 失败只
 - `src/hooks/detached.cpp`：后台子代理的只读快照与记录回收。
 - `src/agent/loop.cpp`：工具调用边界采用 Hook 结果。
 
-相关测试集中在 `tests/test_hooks.cpp`、`tests/test_agent_tool.cpp`、`tests/test_ptc_tool.cpp` 与 app 会话事件测试。
+相关测试集中在 `tests/unit/hooks/test_hooks.cpp`、`tests/unit/agent/test_agent_tool.cpp`、`tests/integration/ptc/test_ptc_tool.cpp` 与 app 会话事件测试。

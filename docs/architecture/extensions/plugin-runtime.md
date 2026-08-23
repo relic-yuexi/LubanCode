@@ -142,7 +142,7 @@ Copy-Item $dll.FullName $pluginDir
 plugin__hello_plugin__reverse_text  (DLL)
 ```
 
-这不是纸面示例。`tests/CMakeLists.txt` 会把同一份 `hello_plugin.c` 真编成 DLL，`tests/test_plugins.cpp` 再用 `LoadLibraryW` 真加载、真调用，还拿中文 `你好ab` 验出 `ba好你`。
+这不是纸面示例。`tests/CMakeLists.txt` 会把同一份 `hello_plugin.c` 真编成 DLL，`tests/integration/plugins/test_plugins.cpp` 再用 `LoadLibraryW` 真加载、真调用，还拿中文 `你好ab` 验出 `ba好你`。
 
 ### 眼下“安装”还缺什么
 
@@ -451,6 +451,6 @@ process 插件每次调用起一只短命进程,"冷启动很贵"的担心要拿
 | 启动挂载 | `src/app/tool_runtime.cpp` |
 | Lua 示例 | `examples/plugins/word_count.lua` |
 | C 示例 | `examples/plugins/hello_plugin/hello_plugin.c`、`examples/plugins/hello_plugin/CMakeLists.txt` |
-| 真加载与转换测试 | `tests/test_plugins.cpp`、`tests/CMakeLists.txt` |
+| 真加载与转换测试 | `tests/integration/plugins/test_plugins.cpp`、`tests/CMakeLists.txt` |
 
 往提交史追，可从 `7fb871d` 看初版全貌，从 `cf1e4ae` 看插件排序为何牵动请求前缀缓存。用户手册只看安装与字段，回[扩展指南](../../features/extensions/README.md)；要看插件与 MCP、Skill、Hook 怎样共用工具流水，接着读[工具协议与扩展运行时](tool-extension.md)。

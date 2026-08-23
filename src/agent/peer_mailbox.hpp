@@ -6,7 +6,7 @@
 // 硬上限——过了才进线程安全的待读队列;主线程在轮次边界取走
 // (agent/loop 的安全收件点 + main.cpp 的空闲收件)。
 //
-// 全部是纯逻辑(时钟由调用方注入),单测钉在 tests/test_peer_mailbox.cpp。
+// 全部是纯逻辑(时钟由调用方注入),单测钉在 tests/unit/peer/test_peer_mailbox.cpp。
 #pragma once
 
 #include <cstdint>

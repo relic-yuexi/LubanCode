@@ -10,7 +10,7 @@
 //
 // 本机(Windows 主场)编不了这份文件,CMake 按平台门控;逻辑刻意与
 // peer_transport_win.cpp 镜像对齐,留待 Linux CI 编译 + 集成测试
-// (tests/test_peer_transport.cpp 两平台同一套断言)验证。macOS 未经真机
+// (tests/integration/peer/test_peer_transport.cpp 两平台同一套断言)验证。macOS 未经真机
 // 验证,与 console_posix.cpp 同一待遇。
 
 #ifndef _WIN32

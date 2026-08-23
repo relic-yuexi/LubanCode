@@ -13,7 +13,7 @@
 // /config 可贴进 bug 单。
 //
 // 纯逻辑 + 一次平台探针,不向终端写任何查询序列;单测直接喂环境变量
-// 快照钉行为(tests/test_terminal_caps.cpp)。
+// 快照钉行为(tests/unit/cli/test_terminal_caps.cpp)。
 #pragma once
 
 #include <string>

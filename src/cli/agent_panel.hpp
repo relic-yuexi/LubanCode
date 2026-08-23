@@ -1,7 +1,7 @@
 // 子代理导航坞的纯逻辑层(0.29.x"导航贴底并整帧去重"一单):条目数据、
 // 按键状态机(选择/查看/停止/两段确认/闲置汇总展开)、折叠与窗口化布局、
 // 结构化行渲染(身份/中段/右状态三列)、输入框上横线右端的代理短标签,
-// 全收在这一个不碰终端的模块里,单测钉在 tests/test_agent_panel.cpp。
+// 全收在这一个不碰终端的模块里,单测钉在 tests/unit/agent/test_agent_panel.cpp。
 // 终端层(console_input.cpp)只做三件事:把 platform 按键翻成 PanelKey(唯一
 // 的键位缝,日后接 keymap 只动那一处)、每拍调 LayoutAgentDock 拿行、把
 // 状态机的动作转给应用层接好的 AgentTool 正式接口。

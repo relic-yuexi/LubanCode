@@ -213,4 +213,4 @@ worker 依次做这些事：
 - `src/app/interactive_session.cpp`：外层 turn 的召回、收尾抽取与 slash 命令接线。
 - `src/app/memory_extract.cpp`：本轮转写、候选 JSON 请求与解析。
 
-相关测试集中在 `tests/test_project_memory.cpp`、`tests/test_memory_retrieval.cpp` 与记忆候选、迁移、worker 测试。
+相关测试集中在 `tests/unit/memory/test_project_memory.cpp`、`tests/unit/memory/test_memory_retrieval.cpp` 与记忆候选、迁移、worker 测试。

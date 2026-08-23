@@ -1,4 +1,4 @@
-// 子代理导航贴底(0.29.x)专用的"刮屏驱动器":跟 tests/stream_footer_driver.cpp
+// 子代理导航贴底(0.29.x)专用的"刮屏驱动器":跟 tests/manual/stream_footer_driver.cpp
 // 同一套手艺(AllocConsole + WriteConsoleInputW + ReadConsoleOutputW),验的
 // 是这轮的新东西——空闲 composer 的代理导航坞画在 composer 下横线与状态行
 // 之后贴底、任意状态转换后每种导航行至多一份(残帧计数)、闲置汇总折叠、

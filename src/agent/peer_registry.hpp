@@ -10,7 +10,7 @@
 // 清掉。
 //
 // 纯逻辑(卡片 JSON 序列化/解析、陈条判定)与文件操作分开,单测在
-// tests/test_peer_registry.cpp。
+// tests/unit/peer/test_peer_registry.cpp。
 #pragma once
 
 #include <cstdint>

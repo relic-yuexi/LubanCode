@@ -146,4 +146,4 @@ user:      ToolResult(a), ToolResult(b), ToolResult(c)
 - `src/tools/tool_search.cpp`：延迟工具检索与挂载。
 - `src/ptc/`：程序化调用 runner；最终回到 `RunOneTool`。
 
-相关测试集中在 `tests/test_loop.cpp`、`tests/test_agent_tool.cpp`、`tests/test_tool_search.cpp`、`tests/test_ptc_tool.cpp`、`tests/test_request_prefix.cpp` 与各 wire 请求测试。
+相关测试集中在 `tests/unit/agent/test_loop.cpp`、`tests/unit/agent/test_agent_tool.cpp`、`tests/unit/tools/test_tool_search.cpp`、`tests/integration/ptc/test_ptc_tool.cpp`、`tests/unit/api/test_request_prefix.cpp` 与各 wire 请求测试。

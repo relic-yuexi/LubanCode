@@ -4,7 +4,7 @@
 // session 事件账现抽——工具结果、密钥、未发送草稿压根不在账里,天然混
 // 不进来(见 agent/session_store.hpp 的 ExtractPromptHistory)。
 //
-// 纯逻辑:不碰终端、不碰磁盘,tests/test_history_search.cpp 钉死。
+// 纯逻辑:不碰终端、不碰磁盘,tests/unit/cli/test_history_search.cpp 钉死。
 #pragma once
 
 #include <cstddef>

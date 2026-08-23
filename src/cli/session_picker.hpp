@@ -7,7 +7,7 @@
 //
 // 终端绘制(TTY 面板)在 app/commands/session_commands.cpp,与
 // provider_switch 同一层路数:platform 原语画帧、行级清重画,不手写
-// 转义序列。测试钉在这层(tests/test_session_picker.cpp)。
+// 转义序列。测试钉在这层(tests/unit/sessions/test_session_picker.cpp)。
 #pragma once
 
 #include <cstddef>

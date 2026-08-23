@@ -4,7 +4,7 @@
 // format_utils.cpp),tools/agent_tool.cpp 的活度账与最终报告要吃。那两份
 // cli 文件的依赖链(context_tracker/theme/terminal_caps)是终端层的,engine
 // 引不动——这里放 engine 自己的一份实现,算法与 cli 侧逐句相同,漂移由
-// tests/test_turn_item.cpp 的"与 cli 同款"用例两边同钉(见 CountUtf8Codepoints
+// tests/unit/runtime/test_turn_item.cpp 的"与 cli 同款"用例两边同钉(见 CountUtf8Codepoints
 // 的对账断言)。
 //
 // 零依赖:只认标准库。新代码在 engine 层要数字 k 化/数码点,认这里,不引 cli。

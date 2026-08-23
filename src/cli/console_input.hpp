@@ -319,7 +319,7 @@ void SetStreamScreenScrollHook(std::function<void(int)> hook);
 // "ask_user 被子代理状态遮挡"一单的 repaint 协调层:阻塞式交互菜单
 // (StreamFooterSuspendScope 存活期)取得整块屏面所有权,期间——脚注框
 // (含框里的代理面板)不重画、心跳线程零输出、控制台输入不归监听线程。
-// 规约全部钉在这几个入口上,单测见 tests/test_repaint_coord.cpp:
+// 规约全部钉在这几个入口上,单测见 tests/unit/cli/test_repaint_coord.cpp:
 // -----------------------------------------------------------------------
 
 // 全局 repaint 挂起计数(footer 的 suspend_depth / paint_depth 合起来看)。
@@ -339,7 +339,7 @@ int StreamFooterSuspendDepthForTest();
 // M10:"谁在真的逐键读键盘,谁先拿这把锁"。ReadLineKeyByKey()/ReadChoiceMenu
 // 整个调用期间攥着它,TurnInputListener 的监听线程只在 try_lock 抢到的
 // 间隙才读一次——阻塞式菜单持锁等输入时,监听线程绝不消费方向键/Enter/
-// Esc/普通字符,这条规约靠它保证(单测钉死:tests/test_repaint_coord.cpp)。
+// Esc/普通字符,这条规约靠它保证(单测钉死:tests/unit/cli/test_repaint_coord.cpp)。
 std::mutex& ConsoleReadMutex();
 
 // -----------------------------------------------------------------------

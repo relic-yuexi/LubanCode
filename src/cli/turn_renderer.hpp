@@ -15,7 +15,7 @@
 //   助手最后答复……
 //   ──── Worked for 12.8s ────
 //
-// 黄金画面:tests/test_turn_view.cpp 的快照幕直接钉这里产出的行组
+// 黄金画面:tests/unit/runtime/test_turn_view.cpp 的快照幕直接钉这里产出的行组
 // (80/120/160 列纯文本),Resize/Ctrl+L/resume 重放都从同一颗 renderer 出,
 // 除 Running 动态外终态文本一致(单子验收最后一条)。
 

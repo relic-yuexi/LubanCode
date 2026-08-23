@@ -16,7 +16,7 @@
 //     它们是编辑器的一部分,不是语义动作;表里只收"可发现、可换皮"的
 //     那批。既有安全键(Ctrl+C/Ctrl+D)同理不入表。
 //
-// 纯逻辑:不碰 Win32/POSIX/终端,可脱离控制台单测(tests/test_keymap.cpp)。
+// 纯逻辑:不碰 Win32/POSIX/终端,可脱离控制台单测(tests/unit/cli/test_keymap.cpp)。
 // platform::KeyInput -> KeyChord 的转换也收在这层(ChordFromKeyInput),
 // platform 的语义按键枚举(KeyInput::Kind)是它唯一认的"物理世界"。
 #pragma once

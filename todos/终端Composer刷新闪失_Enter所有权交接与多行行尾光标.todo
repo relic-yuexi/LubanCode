@@ -382,5 +382,5 @@ handoff_latency_ms
 | VT/Win32 批量绘制 | `src/platform/terminal_batch.*`、`src/platform/console_*` |
 | session 判路 | `src/app/interactive_session.cpp` |
 | turn/footer 接手 | `src/app/turn_runner.cpp` |
-| 逻辑测试 | `tests/test_terminal_frame.cpp`、`tests/test_line_editor.cpp` |
-| 真屏驱动 | `tests/screen_driver.cpp`、`tests/stream_footer_driver.cpp`、新增 composer driver |
+| 逻辑测试 | `tests/unit/cli/test_terminal_frame.cpp`、`tests/unit/cli/test_line_editor.cpp` |
+| 真屏驱动 | `tests/manual/screen_driver.cpp`、`tests/manual/stream_footer_driver.cpp`、新增 composer driver |

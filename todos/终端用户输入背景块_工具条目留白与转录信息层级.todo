@@ -381,5 +381,5 @@ Runtime 产 block event；terminal renderer 维护 block tree 与 frame。stdout
 | 工具生命周期 adapter | `src/cli/tool_display.hpp` |
 | composer handoff | `src/cli/console_input.*` |
 | turn 事件与正文 | `src/app/turn_runner.cpp`、后续 runtime view model |
-| 单元 golden | `tests/test_transcript.cpp`、`tests/test_terminal_frame.cpp` |
-| 真屏 driver | `tests/screen_driver.cpp`、`tests/agent_stream_driver.cpp` |
+| 单元 golden | `tests/unit/cli/test_transcript.cpp`、`tests/unit/cli/test_terminal_frame.cpp` |
+| 真屏 driver | `tests/manual/screen_driver.cpp`、`tests/manual/agent_stream_driver.cpp` |

@@ -487,12 +487,12 @@ stdout 会按事件逐字段验。`updatedInput` 只许 `PreToolUse`；没有权
 
 | 责任 | 源码 | 测试 |
 | --- | --- | --- |
-| 中立类型与 assembler | `src/api/types.hpp`、`assembler.cpp` | `tests/test_assembler.cpp` |
+| 中立类型与 assembler | `src/api/types.hpp`、`assembler.cpp` | `tests/unit/api/test_assembler.cpp` |
 | 三 wire 请求 | `src/api/chat/request.cpp`、`responses/request.cpp`、`anthropic/client.cpp` | 三套 request 测试 |
-| 工具循环 | `src/agent/loop.cpp` | `tests/test_loop.cpp` |
-| registry/schema/deferred | `src/tools/registry.cpp`、`schema_check.cpp`、`tool_search.cpp` | `tests/test_tool_search.cpp` |
-| MCP client/transport/wrapper | `src/mcp/client.cpp`、`transport.cpp`、`mcp_tool.cpp` | `tests/test_mcp_client.cpp`、`test_mcp_tool.cpp` |
-| Skill | `src/tools/skill_loader.cpp`、`skill_tool.cpp` | `tests/test_skills.cpp` |
-| Hook | `src/hooks/loader.cpp`、`dispatcher.cpp`、`protocol.cpp` | `tests/test_hooks.cpp` |
+| 工具循环 | `src/agent/loop.cpp` | `tests/unit/agent/test_loop.cpp` |
+| registry/schema/deferred | `src/tools/registry.cpp`、`schema_check.cpp`、`tool_search.cpp` | `tests/unit/tools/test_tool_search.cpp` |
+| MCP client/transport/wrapper | `src/mcp/client.cpp`、`transport.cpp`、`mcp_tool.cpp` | `tests/integration/protocols/test_mcp_client.cpp`、`test_mcp_tool.cpp` |
+| Skill | `src/tools/skill_loader.cpp`、`skill_tool.cpp` | `tests/unit/config/test_skills.cpp` |
+| Hook | `src/hooks/loader.cpp`、`dispatcher.cpp`、`protocol.cpp` | `tests/unit/hooks/test_hooks.cpp` |
 
 若要看一条用户输入怎样把这几层全串起来，再读[Query 数据流](../query-data-flow.md)。

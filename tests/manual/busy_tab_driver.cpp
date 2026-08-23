@@ -1,5 +1,5 @@
 // 忙碌排队输入框 Tab 补全(0.30.x)专用的"刮屏驱动器":跟
-// tests/stream_footer_driver.cpp 同一套手艺(AllocConsole + WriteConsoleInputW
+// tests/manual/stream_footer_driver.cpp 同一套手艺(AllocConsole + WriteConsoleInputW
 // + ReadConsoleOutputW),验的是模型流式期间底部排队输入框的 Tab 补全链路——
 // 候选可见、Tab 当场补全、提示随完成收起、连按轮转带 "> " 标记、空正文 Tab
 // 是明确 no-op(不留暗焦点态)、排队消息由轮末队列泵按 slash 命令分派(不当

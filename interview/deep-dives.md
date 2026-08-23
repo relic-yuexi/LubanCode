@@ -108,7 +108,7 @@ LubanCode 是一只 C++23 终端 coding agent。它把三家模型协议翻进�
 3. 一条失败或边界测试。
 4. 现存欠账。
 
-只报“有很多测试”没有分量。要说“`tests/test_loop.cpp` 钉住 ESC 后当前工具收尾、后续工具补成对结果；`tests/test_tools.cpp` 钉住 2 MiB 输出上限与杀树”。
+只报“有很多测试”没有分量。要说“`tests/unit/agent/test_loop.cpp` 钉住 ESC 后当前工具收尾、后续工具补成对结果；`tests/unit/tools/test_tools.cpp` 钉住 2 MiB 输出上限与杀树”。
 
 ## 高频追问速答
 
@@ -176,16 +176,16 @@ Skill 给模型一份做事说明，靠模型理解后调用普通工具。Hook 
 
 | 题目 | 入口 | 关键测试 |
 | --- | --- | --- |
-| 主循环与多工具 | `src/agent/loop.cpp` | `tests/test_loop.cpp` |
-| 重试、取消与会话恢复 | `src/app/turn_runner.cpp`、`src/agent/session_store.cpp` | `tests/test_loop.cpp`、`test_session_store.cpp` |
-| 模型目录与 Provider schema | `src/config/model_catalog.cpp`、`provider_catalog.cpp` | `tests/test_model_catalog.cpp`、`test_provider_catalog.cpp` |
-| 中立消息与三协议 | `src/api/types.hpp`、`src/api/*/request.cpp` | `tests/test_chat_request.cpp`、`test_responses_request.cpp`、`test_anthropic_request.cpp` |
-| 大文件读取 | `src/tools/read_file.cpp` | `tests/test_tools.cpp`、`test_utf8_boundary.cpp` |
-| 命令与进程树 | `src/tools/run_command.cpp`、`src/platform/process_*.cpp` | `tests/test_tools.cpp`、`test_background_tasks.cpp` |
+| 主循环与多工具 | `src/agent/loop.cpp` | `tests/unit/agent/test_loop.cpp` |
+| 重试、取消与会话恢复 | `src/app/turn_runner.cpp`、`src/agent/session_store.cpp` | `tests/unit/agent/test_loop.cpp`、`test_session_store.cpp` |
+| 模型目录与 Provider schema | `src/config/model_catalog.cpp`、`provider_catalog.cpp` | `tests/unit/config/test_model_catalog.cpp`、`test_provider_catalog.cpp` |
+| 中立消息与三协议 | `src/api/types.hpp`、`src/api/*/request.cpp` | `tests/unit/api/test_chat_request.cpp`、`test_responses_request.cpp`、`test_anthropic_request.cpp` |
+| 大文件读取 | `src/tools/read_file.cpp` | `tests/unit/tools/test_tools.cpp`、`test_utf8_boundary.cpp` |
+| 命令与进程树 | `src/tools/run_command.cpp`、`src/platform/process_*.cpp` | `tests/unit/tools/test_tools.cpp`、`test_background_tasks.cpp` |
 | context / compact | `src/agent/context*.cpp`、`compact.cpp`、`microcompact.cpp` | `tests/test_context*.cpp`、`test_compact.cpp`、`test_microcompact.cpp` |
-| memory | `src/memory/project_memory.cpp`、`src/app/memory_extract.cpp` | `tests/test_project_memory.cpp`、`test_memory_retrieval.cpp` |
-| MCP | `src/mcp/client.cpp`、`transport.cpp`、`mcp_tool.cpp` | `tests/test_mcp_client.cpp`、`test_mcp_tool.cpp` |
-| Skill | `src/tools/skill_loader.cpp`、`skill_tool.cpp` | `tests/test_skills.cpp` |
-| Hook | `src/hooks/dispatcher.cpp`、`protocol.cpp` | `tests/test_hooks.cpp` |
+| memory | `src/memory/project_memory.cpp`、`src/app/memory_extract.cpp` | `tests/unit/memory/test_project_memory.cpp`、`test_memory_retrieval.cpp` |
+| MCP | `src/mcp/client.cpp`、`transport.cpp`、`mcp_tool.cpp` | `tests/integration/protocols/test_mcp_client.cpp`、`test_mcp_tool.cpp` |
+| Skill | `src/tools/skill_loader.cpp`、`skill_tool.cpp` | `tests/unit/config/test_skills.cpp` |
+| Hook | `src/hooks/dispatcher.cpp`、`protocol.cpp` | `tests/unit/hooks/test_hooks.cpp` |
 
 面试前再读一遍[求职项目手册](portfolio.md)。那页管项目介绍、故事与演示；本页管追问时怎样把技术账说透。

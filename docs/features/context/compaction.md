@@ -173,4 +173,4 @@ JSON manifest
 - `src/agent/context_events.cpp`：L1 结构压缩、artifact/重复/版本视图。
 - `src/agent/microcompact.cpp`：L2 候选、迟滞、局部摘要与回退。
 
-相关测试集中在 `tests/test_compact.cpp`、`tests/test_microcompact.cpp`、`tests/test_context.cpp`、`tests/test_context_events.cpp`、`tests/test_session_store.cpp`、`tests/test_request_prefix.cpp` 与 `tests/test_artifact_store.cpp`。
+相关测试集中在 `tests/unit/agent/test_compact.cpp`、`tests/unit/memory/test_microcompact.cpp`、`tests/unit/api/test_context.cpp`、`tests/unit/api/test_context_events.cpp`、`tests/unit/sessions/test_session_store.cpp`、`tests/unit/api/test_request_prefix.cpp` 与 `tests/unit/memory/test_artifact_store.cpp`。

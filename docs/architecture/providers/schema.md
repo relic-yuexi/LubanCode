@@ -421,15 +421,15 @@ schema 给编辑器、CI 与读者；C++ parser 是发行时真正安全边界�
 
 | 题目 | 源码入口 | 关键测试 |
 | --- | --- | --- |
-| provider schema | `catalog/providers.schema.json` | `tests/test_provider_catalog.cpp` |
-| provider 解析与缓存 | `src/config/provider_catalog.cpp` | `tests/test_provider_catalog.cpp` |
-| 本地模型目录 | `src/config/model_catalog.cpp` | `tests/test_model_catalog.cpp` |
-| `/models` 端点 | `src/api/models.cpp` | `tests/test_models.cpp` |
-| 模型应用与 system 段 | `src/app/commands/settings_commands.cpp`、`src/agent/prompts.hpp` | `tests/test_model_catalog.cpp` |
-| 输出预算优先级 | `src/agent/runtime_profile.hpp`、`src/app/runtime_profile.cpp` | `tests/test_runtime_profile.cpp` |
-| 模型角色路由 | `src/agent/model_router.cpp`、`src/app/model_router.cpp` | `tests/test_model_router.cpp` |
+| provider schema | `catalog/providers.schema.json` | `tests/unit/config/test_provider_catalog.cpp` |
+| provider 解析与缓存 | `src/config/provider_catalog.cpp` | `tests/unit/config/test_provider_catalog.cpp` |
+| 本地模型目录 | `src/config/model_catalog.cpp` | `tests/unit/config/test_model_catalog.cpp` |
+| `/models` 端点 | `src/api/models.cpp` | `tests/unit/config/test_models.cpp` |
+| 模型应用与 system 段 | `src/app/commands/settings_commands.cpp`、`src/agent/prompts.hpp` | `tests/unit/config/test_model_catalog.cpp` |
+| 输出预算优先级 | `src/agent/runtime_profile.hpp`、`src/app/runtime_profile.cpp` | `tests/unit/config/test_runtime_profile.cpp` |
+| 模型角色路由 | `src/agent/model_router.cpp`、`src/app/model_router.cpp` | `tests/unit/memory/test_model_router.cpp` |
 | variant 请求覆盖 | `src/app/backend_stack.cpp`、`src/api/*/request.cpp` | 三协议 request 测试 |
-| 工具 schema 子集 | `src/tools/schema_check.cpp` | `tests/test_hooks.cpp` |
+| 工具 schema 子集 | `src/tools/schema_check.cpp` | `tests/unit/hooks/test_hooks.cpp` |
 
 面试题的横向清单见[高频技术面试追问题库](../../../interview/question-bank.md)。
 
