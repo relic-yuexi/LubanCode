@@ -451,28 +451,49 @@ bool SpawnMergedOutput(std::vector<std::string> argv, const EnvPairs& extra_env,
     if (pid == 0) {
         // 子进程:自立进程组(超时好一锅端),stdin 接 /dev/null,stdout/
         // stderr 都指到管道写端。只用 async-signal-safe 的调用。
-        setpgid(0, 0);
-        const int devnull = open("/dev/null", O_RDONLY);
-        if (devnull >= 0) {
-            dup2(devnull, STDIN_FILENO);
-            if (devnull > STDERR_FILENO) {
-                close(devnull);
-            }
+        // 全量验错(P1:前置 setup 错误原先无声吞掉,父进程只认得 execvp
+        // 一处的失败):每步失败都经 exec_pipe 送回 errno 再 _exit(127)。
+        const auto die = [&](int err) {
+            (void)!write(exec_pipe[1], &err, sizeof(err));
+            _exit(127);
+        };
+        if (setpgid(0, 0) != 0 && errno != EPERM) {
+            // EPERM = 已经是组长(fork 竞态里父进程那边先 set 好了),不算失败。
+            die(errno);
         }
-        dup2(out_pipe[1], STDOUT_FILENO);
-        dup2(out_pipe[1], STDERR_FILENO);
+        const int devnull = open("/dev/null", O_RDONLY);
+        if (devnull < 0) {
+            die(errno);
+        }
+        if (dup2(devnull, STDIN_FILENO) < 0) {
+            die(errno);
+        }
+        if (devnull > STDERR_FILENO) {
+            close(devnull);
+        }
+        if (dup2(out_pipe[1], STDOUT_FILENO) < 0 || dup2(out_pipe[1], STDERR_FILENO) < 0) {
+            die(errno);
+        }
         if (out_pipe[1] > STDERR_FILENO) {
             close(out_pipe[1]);
         }
         environ = env_block.ptrs.data();
         execvp(argv_ptrs[0], argv_ptrs.data());
-        const int err = errno;
-        (void)!write(exec_pipe[1], &err, sizeof(err));
-        _exit(127);
+        die(errno);
     }
 
-    // 父进程:setpgid 两头都调,谁先跑到都不留窗口。
-    setpgid(pid, pid);
+    // 父进程:setpgid 两头都调,谁先跑到都不留窗口(允许的竞态 EACCES/EPERM
+    // 单列,别吞真失败)。
+    if (setpgid(pid, pid) != 0 && errno != EACCES && errno != EPERM) {
+        // 罕见:子进程已退/被收。清管道、报 spawn 失败,不带坏账往下走。
+        close(out_pipe[0]);
+        close(out_pipe[1]);
+        close(exec_pipe[0]);
+        close(exec_pipe[1]);
+        result->spawn_failed = true;
+        result->spawn_error = std::string("建进程组失败: ") + std::strerror(errno);
+        return false;
+    }
     close(out_pipe[1]);
     close(exec_pipe[1]);
 
@@ -693,11 +714,21 @@ ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const st
     }
     if (pid == 0) {
         // 子进程:自立进程组,stdin 接管道读端,stdout/stderr 各接各的管道
-        // 写端(hooks 层要分开解码,不混作一锅)。只用 async-signal-safe 的调用。
-        setpgid(0, 0);
-        dup2(in_pipe[0], STDIN_FILENO);
-        dup2(out_pipe[1], STDOUT_FILENO);
-        dup2(err_pipe[1], STDERR_FILENO);
+        // 写端(hooks 层要分开解码,不混作一锅)。只用 async-signal-safe 的
+        // 调用。全量验错(P1):每步失败经 exec_pipe 送回 errno 再 _exit(127),
+        // 前置 setup 错误不再无声吞掉(dup2 失败会把输出落回旧 fd,父进程
+        // 拿到的是错位的流,比报错更坏)。
+        const auto die = [&](int err) {
+            (void)!write(exec_pipe[1], &err, sizeof(err));
+            _exit(127);
+        };
+        if (setpgid(0, 0) != 0 && errno != EPERM) {
+            die(errno);
+        }
+        if (dup2(in_pipe[0], STDIN_FILENO) < 0 || dup2(out_pipe[1], STDOUT_FILENO) < 0 ||
+            dup2(err_pipe[1], STDERR_FILENO) < 0) {
+            die(errno);
+        }
         // 注意:exec_pipe[1] 不关——execvp 失败后还要靠它把 errno 送回父进程
         // (这里关了,父进程只读到 EOF,启动失败就误报成"跑了但退出码 127")。
         // exec 成功那头由预先置好的 CLOEXEC 自动收口。
@@ -708,13 +739,23 @@ ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const st
         }
         environ = env_block.ptrs.data();
         execvp(argv_ptrs[0], argv_ptrs.data());
-        const int err = errno;
-        (void)!write(exec_pipe[1], &err, sizeof(err));
-        _exit(127);
+        die(errno);
     }
 
-    // 父进程:setpgid 两头都调,谁先跑到都不留窗口。
-    setpgid(pid, pid);
+    // 父进程:setpgid 两头都调,谁先跑到都不留窗口(竞态 errno 单列)。
+    if (setpgid(pid, pid) != 0 && errno != EACCES && errno != EPERM) {
+        close(out_pipe[0]);
+        close(out_pipe[1]);
+        close(err_pipe[0]);
+        close(err_pipe[1]);
+        close(in_pipe[0]);
+        close(in_pipe[1]);
+        close(exec_pipe[0]);
+        close(exec_pipe[1]);
+        result.spawn_failed = true;
+        result.spawn_error = std::string("建进程组失败: ") + std::strerror(errno);
+        return result;
+    }
     close(out_pipe[1]);
     close(err_pipe[1]);
     close(in_pipe[0]);
@@ -1098,10 +1139,18 @@ SpawnResult ChildProcess::Start(const std::string& command, const std::vector<st
         return SpawnResult{false, "fork 失败: " + err, false};
     }
     if (pid == 0) {
-        setpgid(0, 0);
-        dup2(in_pipe[0], STDIN_FILENO);
-        dup2(out_pipe[1], STDOUT_FILENO);
-        dup2(err_pipe[1], STDERR_FILENO);
+        // 全量验错(P1):setup 每步失败经 exec_pipe 送回 errno 再 _exit(127)。
+        const auto die = [&](int err) {
+            (void)!write(exec_pipe[1], &err, sizeof(err));
+            _exit(127);
+        };
+        if (setpgid(0, 0) != 0 && errno != EPERM) {
+            die(errno);
+        }
+        if (dup2(in_pipe[0], STDIN_FILENO) < 0 || dup2(out_pipe[1], STDOUT_FILENO) < 0 ||
+            dup2(err_pipe[1], STDERR_FILENO) < 0) {
+            die(errno);
+        }
         for (int fd : {in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1], err_pipe[0], err_pipe[1]}) {
             if (fd > STDERR_FILENO) {
                 close(fd);
@@ -1130,12 +1179,14 @@ SpawnResult ChildProcess::Start(const std::string& command, const std::vector<st
         }
         environ = env_block.ptrs.data();
         execvp(argv_ptrs[0], argv_ptrs.data());
-        const int err = errno;
-        (void)!write(exec_pipe[1], &err, sizeof(err));
-        _exit(127);
+        die(errno);
     }
 
-    setpgid(pid, pid);
+    // 父进程:setpgid 两头都调,谁先跑到都不留窗口(竞态 errno 单列)。
+    if (setpgid(pid, pid) != 0 && errno != EACCES && errno != EPERM) {
+        close_all();
+        return SpawnResult{false, std::string("建进程组失败: ") + std::strerror(errno), false};
+    }
     close(in_pipe[0]);
     close(out_pipe[1]);
     close(err_pipe[1]);
