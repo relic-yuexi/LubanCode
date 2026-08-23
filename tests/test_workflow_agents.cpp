@@ -438,11 +438,11 @@ result:
 
     // 第一场:x 成功后"崩"(y 不跑)。
     auto echo = std::make_shared<TransformExecutor>();
-    echo->Register("echo", [](const nlohmann::json& in) {
+    echo->Register("echo", [](const nlohmann::json&) {
         return nlohmann::json{{"ran", true}};
     });
     auto fail_after_x = std::make_shared<TransformExecutor>();
-    fail_after_x->Register("echo", [](const nlohmann::json& in) {
+    fail_after_x->Register("echo", [](const nlohmann::json&) {
         return nlohmann::json{{"ran", true}};
     });
 
@@ -475,7 +475,7 @@ result:
 
     // 恢复:y 跑,x 不再跑(x 的调用次数=0)。
     auto counting = std::make_shared<TransformExecutor>();
-    counting->Register("echo", [](const nlohmann::json& in) {
+    counting->Register("echo", [](const nlohmann::json&) {
         return nlohmann::json{{"ran", true}};
     });
     // 用 Scripted 同款:这里直接数 TransformExecutor 不行,换 Tracking 思路

@@ -43,8 +43,8 @@ public:
     // sink:事件落点(实现自管线程安全,见 event_sink.hpp 合同)。
     // thread_id:哪场会话;turn_id 不带 id_authority 的可让 Runtime 发
     // (Start 里现发一枚)。
-    TurnEventAdapter(std::string thread_id, agent::AgentLoop& loop, IdAuthority& ids)
-        : thread_id_(std::move(thread_id)), loop_(loop), ids_(ids) {}
+    TurnEventAdapter(std::string thread_id, IdAuthority& ids)
+        : thread_id_(std::move(thread_id)), ids_(ids) {}
 
     TurnEventAdapter(const TurnEventAdapter&) = delete;
     TurnEventAdapter& operator=(const TurnEventAdapter&) = delete;
@@ -263,7 +263,6 @@ private:
     }
 
     std::string thread_id_;
-    agent::AgentLoop& loop_;  // 历史对账用;当前实现未直接用,接线 SessionRuntime 时用
     IdAuthority& ids_;
     std::function<void(const ServerEvent&)> sink_;
     std::string turn_id_;
