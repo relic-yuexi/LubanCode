@@ -451,6 +451,8 @@ const Entry kZhCN[] = {
     {"confirm.detail.old", "    - 旧文本:"},
     {"confirm.detail.new", "    + 新文本:"},
     {"confirm.detail.command", "    命令({0}): {1}"},
+    {"confirm.detail.workdir", "    工作目录: {0}"},
+    {"confirm.detail.background", "    (后台运行:spawn 后立刻返回,输出写日志文件)"},
     {"confirm.detail.args", "    参数: {0}"},
     {"confirm.detail.omitted", "      ...(共 {0} 行,已省略其余)"},
 
@@ -2045,6 +2047,8 @@ const Entry kEn[] = {
     {"confirm.detail.old", "    - old text:"},
     {"confirm.detail.new", "    + new text:"},
     {"confirm.detail.command", "    command ({0}): {1}"},
+    {"confirm.detail.workdir", "    working directory: {0}"},
+    {"confirm.detail.background", "    (run in background: returns right after spawn, output goes to a log file)"},
     {"confirm.detail.args", "    args: {0}"},
     {"confirm.detail.omitted", "      ... ({0} lines total, rest omitted)"},
 

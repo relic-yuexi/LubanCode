@@ -166,6 +166,16 @@ TEST_CASE("run_command: cwd 含 NUL 被拒") {
     CHECK(result.content.find("NUL") != std::string::npos);
 }
 
+TEST_CASE("run_command: command 超长被拒,不硬顶系统命令行") {
+    RunCommandTool tool;
+    nlohmann::json input;
+    input["command"] = std::string(30000, 'x');
+    const Tool::Result result = tool.execute(input);
+    CHECK(result.is_error);
+    CHECK(result.content.find("太长") != std::string::npos);
+    CHECK(result.content.find("write_file") != std::string::npos);
+}
+
 TEST_CASE("run_command: timeout_ms 超出 int 范围,体面报错不抛异常") {
     RunCommandTool tool;
     nlohmann::json input;

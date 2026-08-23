@@ -35,6 +35,12 @@ constexpr int kDefaultTimeoutMs = 120000;
 // timeout_ms 的合法上限(int 全域放进来没意义:Windows 的 DWORD 等得起,
 // 会话也早没了)。超大值体面报错,不窄化走样。
 constexpr int kMaxTimeoutMs = 86400000;  // 24 小时
+// 命令字节上限(进程生命线单 P1):Windows 命令行 32767 个 UTF-16 码位,
+// wrapper 头尾约 300 字符 + base64 膨胀 4/3,故用户命令压到 22000 字节
+// (UTF-8 字节数;多字节字符折成码位更少,余量足够)。超长提前拒绝并给
+// 可操作的说法,不让 CreateProcessW/exec 吞一个莫名错误码。POSIX 的
+// ARG_MAX 同一张表(典型 2MB,22000 远在墙内)。
+constexpr std::size_t kMaxCommandBytes = 22000;
 
 // 把"命令跑在哪个目录"翻译进各 shell 的命令串:起手先 cd 到位,再跑原命令。
 // 隔离子代理靠这层把自己的命令钉在自己的房里(进程 cwd 全进程一份,不能
@@ -393,6 +399,13 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
     // 系统执行的却是前半串。一律拒绝,不猜。
     if (command.find('\0') != std::string::npos) {
         return {"command 里带 NUL 字符,系统命令行会在 NUL 处截断,拒绝执行", true};
+    }
+    // 命令字节上限:见 kMaxCommandBytes 的注。长脚本请先写进文件再调用
+    // 脚本文件,不要硬顶系统命令行。
+    if (command.size() > kMaxCommandBytes) {
+        return {"command 太长(" + std::to_string(command.size()) + " 字节,上限 " +
+                    std::to_string(kMaxCommandBytes) + ")。长脚本请先用 write_file 写成脚本文件,再执行该文件",
+                true};
     }
 
     bool run_in_background = false;

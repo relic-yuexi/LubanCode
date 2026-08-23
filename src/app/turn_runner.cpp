@@ -130,6 +130,16 @@ void PrintConfirmDetails(const std::string& name, const nlohmann::json& input) {
         const std::string command = input.value("command", std::string());
         const std::string shell = input.value("shell", std::string("powershell"));
         std::cout << trf("confirm.detail.command", shell, command) << "\n";
+        // 进程生命线单 P2:确认框至少展示 shell、cwd 与完整命令——用户
+        // 确认的是"在哪跑什么",不是只看半张票。cwd 不填时也明示
+        //(当前会话目录),别让人误以为进了别处。
+        const std::string cwd = input.value("cwd", std::string());
+        if (!cwd.empty()) {
+            std::cout << trf("confirm.detail.workdir", cwd) << "\n";
+        }
+        if (input.value("run_in_background", false)) {
+            std::cout << tr("confirm.detail.background") << "\n";
+        }
     } else {
         std::cout << trf("confirm.detail.args", input.dump()) << "\n";
     }
