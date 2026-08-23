@@ -160,6 +160,18 @@ nlohmann::json RunCommandTool::input_schema() const {
                  "完整输出和退出码)。");
     properties["run_in_background"] = background_prop;
 
+    // 进程生命线单 P2:后台任务的可选最长运行时间。另立参数,不改
+    // timeout_ms 旧义(后台照旧忽略 timeout_ms——dev server 缺省无限活)。
+    // 显式传值便由后台 supervisor 到点收整棵树。
+    nlohmann::json max_runtime_prop = nlohmann::json::object();
+    max_runtime_prop["type"] = "integer";
+    max_runtime_prop["description"] =
+        ToolText("run_command", "param.max_runtime_ms",
+                 "后台任务最长运行时间(毫秒),只对 run_in_background=true 有意义。不填 = 无限"
+                 "(dev server 这类长命进程的缺省);显式传值则到点自动收掉整棵进程树,防止误起的"
+                 "死循环一直跑。前台命令用 timeout_ms,不要传这个。");
+    properties["max_runtime_ms"] = max_runtime_prop;
+
     nlohmann::json cwd_prop = nlohmann::json::object();
     cwd_prop["type"] = "string";
     cwd_prop["description"] =
@@ -267,6 +279,22 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
             return {"run_in_background 参数必须是布尔值", true};
         }
         run_in_background = it->get<bool>();
+    }
+
+    // 后台最长运行时间(P2):64 位解析 + 范围检查,与 timeout_ms 同一张
+    // 边界表。前台命令不吃这个参数(传了也只在后台分支使用)。
+    long long max_runtime_ms = 0;
+    if (auto it = input.find("max_runtime_ms"); it != input.end() && !it->is_null()) {
+        if (!it->is_number_integer()) {
+            return {"max_runtime_ms 得是整数(毫秒)", true};
+        }
+        const std::int64_t raw = it->get<std::int64_t>();
+        if (raw < 0 || raw > static_cast<std::int64_t>(kMaxTimeoutMs)) {
+            return {"max_runtime_ms 得在 0~" + std::to_string(kMaxTimeoutMs) + " 毫秒之间(0 = 不限;写的是 " +
+                        std::to_string(raw) + ")",
+                    true};
+        }
+        max_runtime_ms = raw;
     }
 
     // timeout_ms 对后台模式没有意义(spawn 完就返回,根本不等),背景模式下
@@ -384,12 +412,15 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
             bg.handle->encoding_hint = "utf-8";
         }
         const std::string task_id = BackgroundTaskRegistry::Instance().Register(
-            command, shell, bg.pid, bg.log_path, std::move(bg.handle));
+            command, shell, bg.pid, bg.log_path, std::move(bg.handle), max_runtime_ms);
         std::ostringstream oss;
         oss << "已在后台启动(task #" << task_id << ", PID " << bg.pid << "),不等它跑完。\n"
             << "日志文件: " << bg.log_path << "\n"
             << "查状态/输出: 用 background_output 工具(传 task_id=" << task_id << ")。\n"
             << "收掉它: 用 stop_background 工具,或 Stop-Process -Id " << bg.pid << " -Force";
+        if (max_runtime_ms > 0) {
+            oss << "\n最长运行 " << max_runtime_ms << " 毫秒,到点自动收树。";
+        }
         return {oss.str(), false};
     }
 
@@ -434,12 +465,15 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
         // 登记进后台任务台账(同 Windows 分支):task_id + watcher 持原生句柄
         // 探活,完成时通知;退出码由唯一收尸方写进完成态,不再丢。
         const std::string task_id = BackgroundTaskRegistry::Instance().Register(
-            command, "sh", bg.pid, bg.log_path, std::move(bg.handle));
+            command, "sh", bg.pid, bg.log_path, std::move(bg.handle), max_runtime_ms);
         std::ostringstream oss;
         oss << "已在后台启动(task #" << task_id << ", PID " << bg.pid << "),不等它跑完。\n"
             << "日志文件: " << bg.log_path << "\n"
             << "查状态/输出: 用 background_output 工具(传 task_id=" << task_id << ")。\n"
             << "收掉它: 用 stop_background 工具,或 kill " << bg.pid << "(不行就 kill -9 " << bg.pid << ")";
+        if (max_runtime_ms > 0) {
+            oss << "\n最长运行 " << max_runtime_ms << " 毫秒,到点自动收树。";
+        }
         return {oss.str(), false};
     }
 

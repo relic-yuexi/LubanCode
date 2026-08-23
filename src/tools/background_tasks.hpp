@@ -74,8 +74,12 @@ public:
     // 登记一个已经 spawn 成功的后台任务(run_command 后台分支调)。先建
     // entry 进表、再起 watcher——反过来就是 P0 竞态。watcher 持 handle 的
     // 共享状态探活,不再按 task_id 回表里找自己。
+    // max_runtime_ms:可选最长运行时间(进程生命线单 P2)。0 = 无限(dev
+    // server 缺省);显式传值由 watcher 到点收树(TerminateTree),状态进
+    // Stopped。不改 timeout_ms 旧义(后台照旧忽略它)。
     std::string Register(std::string command, std::string shell, unsigned long pid, std::string log_path,
-                         std::shared_ptr<platform::BackgroundProcessHandle> handle = nullptr);
+                         std::shared_ptr<platform::BackgroundProcessHandle> handle = nullptr,
+                         long long max_runtime_ms = 0);
 
     // 当前所有任务的快照(线程安全拷贝一份)。按 task_id 数字升序。
     std::vector<BackgroundTaskInfo> List();
@@ -113,14 +117,17 @@ private:
         BackgroundExit exit;
         std::chrono::system_clock::time_point finish_time{};
         bool completed_reported = false;
-        platform::BackgroundProcessHandle::Completion last_completion{};
-        bool completion_seen = false;
+        std::string log_path;  // watcher 的日志截断用(不回表抢 mutex_)
     };
 
+    // 终态保留上限的淘汰(见 WatchThread 末尾调用):删日志、出表。
+    void PruneTerminalTasks();
+
     // watcher 线程主循环:等在 handle 上(或退化轮询),进程结束就写终态。
+    // max_runtime_ms > 0 时到点 TerminateTree 收树(状态进 Stopped)。
     void WatchThread(std::shared_ptr<TaskState> state,
                      std::shared_ptr<platform::BackgroundProcessHandle> handle, unsigned long pid,
-                     std::string task_id);
+                     std::string task_id, long long max_runtime_ms);
 
     // 退化探活(没有 handle 的旧调用):alive=true 还活着;false 已结束。
     static bool IsPidAlive(unsigned long pid);

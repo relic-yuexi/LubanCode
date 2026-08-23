@@ -336,6 +336,7 @@ add_library(lubancode_engine STATIC
   src/tools/read_file.cpp
   src/tools/run_command.cpp
   src/tools/background_tasks.cpp
+  src/tools/shell_info.cpp
   src/tools/background_output.cpp
   src/tools/command_safety.cpp
   src/tools/schema_check.cpp

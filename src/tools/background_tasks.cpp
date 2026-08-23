@@ -1,7 +1,9 @@
 #include "tools/background_tasks.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
@@ -27,6 +29,16 @@ constexpr int kPollIntervalMs = 200;
 // ReadOutput 一次读多少字节上限。日志文件可能被长命进程写得很大,读全文
 // 不限会吃光内存;超过就只取末尾这一段(尾部正是最新输出,最该看的部分)。
 constexpr std::streamoff kReadCapBytes = 64 * 1024;
+
+// 单任务日志的磁盘上限(进程生命线单 P1"日志可占满磁盘"):到顶截断保留
+// 尾部一段(最新输出最该看),文件里追加一行标记说清"已到上限、前部已丢"。
+// 策略三选一(轮转/停捕获/终止任务),这里选"截断保留尾部":不杀用户的
+// dev server,也不放任磁盘被一条命令写满。watcher 每拍顺手查一眼。
+constexpr std::uintmax_t kPerTaskLogCapBytes = 8 * 1024 * 1024;
+
+// 终态任务保留上限(进程生命线单 P1"任务表与线程对象只增不减"):最多留
+// 这么多条终态账;超出的最老一条删日志文件、出表。运行中任务永不淘汰。
+constexpr std::size_t kTerminalRetention = 200;
 
 }  // namespace
 
@@ -60,7 +72,8 @@ BackgroundTaskRegistry::~BackgroundTaskRegistry() {
 
 std::string BackgroundTaskRegistry::Register(std::string command, std::string shell, unsigned long pid,
                                               std::string log_path,
-                                              std::shared_ptr<platform::BackgroundProcessHandle> handle) {
+                                              std::shared_ptr<platform::BackgroundProcessHandle> handle,
+                                              long long max_runtime_ms) {
     // P0 次序修复:先在锁内建 entry、分配 task_id、放进表,再起 watcher。
     // watcher 持 TaskState/handle 的共享指针,不回表里按 task_id 找自己——
     // 线程构造慢一点也无所谓,状态对象早就就位了。
@@ -76,6 +89,7 @@ std::string BackgroundTaskRegistry::Register(std::string command, std::string sh
     entry->info.start_time = std::chrono::system_clock::now();
     entry->state = state;
     entry->handle = std::move(handle);
+    state->log_path = entry->info.log_path;
 
     const std::string task_id = entry->info.task_id;
     {
@@ -98,9 +112,10 @@ std::string BackgroundTaskRegistry::Register(std::string command, std::string sh
         return task_id;  // 防御,不该发生
     }
     try {
-        stored->watcher = std::thread([this, state, handle = stored->handle, pid, task_id] {
-            WatchThread(state, handle, pid, task_id);
-        });
+        stored->watcher = std::thread(
+            [this, state, handle = stored->handle, pid, task_id, max_runtime_ms] {
+                WatchThread(state, handle, pid, task_id, max_runtime_ms);
+            });
     } catch (...) {
         // 回滚:entry 出表。任务进程还挂着(会话级收尾兜底),但台账不留
         // 一条永远 Running 的死账。
@@ -347,33 +362,98 @@ std::vector<BackgroundTaskInfo> BackgroundTaskRegistry::DrainCompleted() {
 
 void BackgroundTaskRegistry::WatchThread(std::shared_ptr<TaskState> state,
                                           std::shared_ptr<platform::BackgroundProcessHandle> handle,
-                                          unsigned long pid, std::string task_id) {
-    (void)task_id;
+                                          unsigned long pid, std::string task_id, long long max_runtime_ms) {
+    // 单任务日志截断(策略:到顶截断保留尾部 + 标记,不杀任务不轮转)。
+    // log_path 在 Register 时就写进 state、之后不变, watcher 只读。
+    const std::string log_path_copy = state->log_path;
+    const auto cap_log = [&log_path_copy] {
+        if (log_path_copy.empty()) {
+            return;
+        }
+        std::error_code ec;
+        const auto log_fs_path =
+            std::filesystem::u8path(reinterpret_cast<const char8_t*>(log_path_copy.data()));
+        const auto size = std::filesystem::file_size(log_fs_path, ec);
+        if (ec || size <= kPerTaskLogCapBytes) {
+            return;
+        }
+        // 截断:保留尾部 3/4(上限内),重写文件,追加标记行。进程还在写
+        // 也没关系——truncate 后的追加写继续落在新尾部,不劈内容语义。
+        std::ifstream in(log_fs_path, std::ios::binary | std::ios::ate);
+        if (!in.is_open()) {
+            return;
+        }
+        const auto keep = static_cast<std::streamoff>(kPerTaskLogCapBytes / 4 * 3);
+        in.seekg(-keep, std::ios::end);
+        std::string tail(static_cast<std::size_t>(keep), '\0');
+        in.read(tail.data(), keep);
+        tail.resize(static_cast<std::size_t>(in.gcount()));
+        // 头一枚换行起刀,不把半行冒充完整行。
+        const auto first_nl = tail.find('\n');
+        if (first_nl != std::string::npos && first_nl + 1 < tail.size()) {
+            tail = tail.substr(first_nl + 1);
+        }
+        std::ofstream out(log_fs_path, std::ios::binary | std::ios::trunc);
+        out << "[日志超过单任务上限 8MB,已截断保留尾部]\n" << tail;
+    };
+
+    const auto started_at = std::chrono::steady_clock::now();
+    const bool has_max_runtime = max_runtime_ms > 0;
+
     // 有 handle:等在原生句柄上(200ms 一片,好响应 stop_all_),退出码由
     // 唯一收尸方写进完成态——不拿 PID 猜,不把不知道涂成 0。
     if (handle != nullptr) {
         while (!stop_all_.load()) {
             if (handle->Wait(kPollIntervalMs)) {
                 const auto completion = handle->Peek();
-                std::lock_guard<std::mutex> slock(state->mutex);
-                if (state->status == BackgroundTaskStatus::Running) {
-                    if (completion.known) {
-                        state->exit.exit_code = completion.exit_code;
-                        if (completion.signal != 0) {
-                            state->exit.signal = completion.signal;
+                {
+                    std::lock_guard<std::mutex> slock(state->mutex);
+                    if (state->status == BackgroundTaskStatus::Running) {
+                        if (completion.known) {
+                            state->exit.exit_code = completion.exit_code;
+                            if (completion.signal != 0) {
+                                state->exit.signal = completion.signal;
+                            }
+                            state->status = (completion.exit_code == 0 && completion.signal == 0)
+                                                ? BackgroundTaskStatus::Completed
+                                                : BackgroundTaskStatus::Failed;
+                        } else {
+                            // 收尸方没拿到状态:如实 Failed + nullopt,不借 0 冒充成功。
+                            state->exit.exit_code = std::nullopt;
+                            state->status = BackgroundTaskStatus::Failed;
                         }
-                        state->status = (completion.exit_code == 0 && completion.signal == 0)
-                                            ? BackgroundTaskStatus::Completed
-                                            : BackgroundTaskStatus::Failed;
-                    } else {
-                        // 收尸方没拿到状态:如实 Failed + nullopt,不借 0 冒充成功。
-                        state->exit.exit_code = std::nullopt;
-                        state->status = BackgroundTaskStatus::Failed;
+                        state->finish_time = std::chrono::system_clock::now();
+                        state->completed_reported = false;
                     }
-                    state->finish_time = std::chrono::system_clock::now();
-                    state->completed_reported = false;
                 }
+                // 锁序:PruneTerminalTasks 内部拿 mutex_ + 各 entry 的
+                // state->mutex,与 List/Get(先 mutex_ 后 state->mutex)同
+                // 序——但绝不能在本条 state->mutex 还攥着时调,否则和
+                // 正在 List 的线程对锁死。出了上面的作用域再调。
+                PruneTerminalTasks();
                 return;
+            }
+            cap_log();
+            // max_runtime_ms 到点收树(P2:不改 timeout_ms 旧义,另立的墙)。
+            if (has_max_runtime) {
+                const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now() - started_at)
+                                         .count();
+                if (elapsed >= max_runtime_ms && handle->TerminateTree(2000)) {
+                    {
+                        std::lock_guard<std::mutex> slock(state->mutex);
+                        if (state->status == BackgroundTaskStatus::Running) {
+                            state->status = BackgroundTaskStatus::Stopped;
+                            const auto completion = handle->Peek();
+                            state->exit.exit_code =
+                                completion.known ? std::optional<int>(completion.exit_code) : std::nullopt;
+                            state->finish_time = std::chrono::system_clock::now();
+                            state->completed_reported = false;
+                        }
+                    }
+                    PruneTerminalTasks();  // 同上:出了 state->mutex 作用域再调
+                    return;
+                }
             }
         }
         return;
@@ -392,6 +472,75 @@ void BackgroundTaskRegistry::WatchThread(std::shared_ptr<TaskState> state,
             return;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(kPollIntervalMs));
+    }
+}
+
+// 终态任务保留上限:超出的最老终态条目删日志、出表。运行中任务永不淘汰;
+// 被淘汰的条目如果还没被 DrainCompleted 取走,通知就没了——所以只淘汰
+// completed_reported=true 的(取走通知之后的收尾动作)。
+void BackgroundTaskRegistry::PruneTerminalTasks() {
+    // 两段式:锁内只做"挑出要淘汰的条目并出表"(快);锁外 join watcher
+    // 线程、删日志文件(慢,且 join 绝不能攥着 mutex_——被 join 的线程
+    // 若正要进来抢 mutex_ 做自己的收尾,就互相等死)。
+    std::vector<std::unique_ptr<Entry>> evicted;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::size_t terminal = 0;
+        for (const auto& e : entries_) {
+            std::lock_guard<std::mutex> slock(e->state->mutex);
+            if (e->state->status != BackgroundTaskStatus::Running &&
+                e->state->status != BackgroundTaskStatus::Stopping &&
+                e->state->status != BackgroundTaskStatus::StopFailed) {
+                ++terminal;
+            }
+        }
+        if (terminal <= kTerminalRetention) {
+            return;
+        }
+        // 终态里挑最老的 task_id(数字最小)淘汰,直到回到上限。只淘汰
+        // completed_reported=true 的(通知已取走;没取走的留着,别吞通知)。
+        std::size_t to_remove = terminal - kTerminalRetention;
+        std::vector<std::unique_ptr<Entry>> kept;
+        kept.reserve(entries_.size());
+        // 先按 task_id 升序排一份视图,老的最先走。
+        std::vector<Entry*> by_id;
+        by_id.reserve(entries_.size());
+        for (auto& e : entries_) {
+            by_id.push_back(e.get());
+        }
+        std::sort(by_id.begin(), by_id.end(), [](const Entry* a, const Entry* b) {
+            return std::stoull(a->info.task_id) < std::stoull(b->info.task_id);
+        });
+        for (Entry* candidate : by_id) {
+            if (to_remove == 0) {
+                break;
+            }
+            std::lock_guard<std::mutex> slock(candidate->state->mutex);
+            const bool terminal_state = candidate->state->status != BackgroundTaskStatus::Running &&
+                                        candidate->state->status != BackgroundTaskStatus::Stopping &&
+                                        candidate->state->status != BackgroundTaskStatus::StopFailed;
+            if (terminal_state && candidate->state->completed_reported) {
+                evicted.emplace_back();
+                // 从 entries_ 里找到这个指针,移走所有权。
+                for (auto& e : entries_) {
+                    if (e.get() == candidate) {
+                        evicted.back() = std::move(e);
+                        break;
+                    }
+                }
+                --to_remove;
+            }
+        }
+        std::erase_if(entries_, [](const std::unique_ptr<Entry>& e) { return e == nullptr; });
+    }
+    // 锁外收尾:join(被淘汰条目的 watcher 都已 return,join 即回)再删日志。
+    for (auto& entry : evicted) {
+        if (entry->watcher.joinable()) {
+            entry->watcher.join();
+        }
+        std::error_code ec;
+        std::filesystem::remove(std::filesystem::u8path(reinterpret_cast<const char8_t*>(entry->info.log_path.data())),
+                                ec);
     }
 }
 

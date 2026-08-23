@@ -31,6 +31,7 @@
 #include "tools/background_output.hpp"
 #include "tools/background_tasks.hpp"
 #include "tools/run_command.hpp"
+#include "tools/shell_info.hpp"
 
 #ifndef _WIN32
 #include <sys/stat.h>
@@ -587,6 +588,62 @@ TEST_CASE("RunProcess: env 值含 NUL 被拒(Windows 键名非法同拒)") {
         CHECK(r2.spawn_failed);
     }
 #endif
+}
+
+TEST_CASE("background(POSIX): max_runtime_ms 到点自动收树,状态进 Stopped") {
+    auto& reg = BackgroundTaskRegistry::Instance();
+    const auto bg = lubancode::platform::RunShellCommandBackground("sleep 30");
+    REQUIRE(bg.success);
+    // 1 秒的墙:到点收树,不再等 30 秒,也不改 timeout_ms 旧义。
+    const std::string task_id = reg.Register("sleep 30", "sh", bg.pid, bg.log_path, bg.handle,
+                                             /*max_runtime_ms=*/1000);
+    const bool stopped = WaitUntil(
+        [&] {
+            const auto info = reg.Get(task_id);
+            return info.has_value() && info->status == BackgroundTaskStatus::Stopped;
+        },
+        /*timeout_ms=*/8000);
+    CHECK(stopped);
+    CHECK_FALSE(lubancode::platform::IsProcessAlive(bg.pid));
+}
+
+TEST_CASE("run_command: max_runtime_ms 传垃圾值体面报错") {
+    RunCommandTool tool;
+    nlohmann::json input;
+    input["command"] = "echo hi";
+    input["run_in_background"] = true;
+    input["max_runtime_ms"] = "soon";
+    Tool::Result result{"", false};
+    CHECK_NOTHROW(result = tool.execute(input));
+    CHECK(result.is_error);
+    CHECK(result.content.find("max_runtime_ms") != std::string::npos);
+
+    nlohmann::json input2;
+    input2["command"] = "echo hi";
+    input2["run_in_background"] = true;
+    input2["max_runtime_ms"] = 99999999999LL;
+    Tool::Result result2{"", false};
+    CHECK_NOTHROW(result2 = tool.execute(input2));
+    CHECK(result2.is_error);
+}
+
+TEST_CASE("ProbeShells: 报出本平台的 shell 画像(版本/TTY 语义明牌)") {
+    const auto shells = lubancode::tools::ProbeShells();
+    REQUIRE_FALSE(shells.empty());
+#ifdef _WIN32
+    REQUIRE(shells.size() >= 2);
+#else
+    REQUIRE(shells.size() >= 1);
+    CHECK(shells[0].id == "sh");
+    CHECK(shells[0].executable == "/bin/sh");
+#endif
+    // 工具路径下 stdin/stdout 都不是 TTY(无头契约),profile 不加载。
+    for (const auto& s : shells) {
+        CHECK_FALSE(s.stdin_is_tty);
+        CHECK_FALSE(s.stdout_is_tty);
+        CHECK_FALSE(s.profile_loaded);
+        CHECK_FALSE(s.notes.empty());
+    }
 }
 
 #endif  // !_WIN32
