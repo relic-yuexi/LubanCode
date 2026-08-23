@@ -89,3 +89,12 @@ jobs:
           else
             echo "::error title=CTest failed::LastTestsFailed.log was not written"
           fi
+
+          test_log="build/Testing/Temporary/LastTest.log"
+          if [ -f "$test_log" ]; then
+            failure_detail="$(tail -c 48000 "$test_log")"
+            failure_detail="${failure_detail//'%'/'%25'}"
+            failure_detail="${failure_detail//$'\r'/'%0D'}"
+            failure_detail="${failure_detail//$'\n'/'%0A'}"
+            echo "::error title=CTest failure details::$failure_detail"
+          fi
