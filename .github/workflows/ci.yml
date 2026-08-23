@@ -73,5 +73,19 @@ jobs:
           cmake --build build --config Release --target lubancode_tests -j 4
 
       - name: Test
+        id: test
         shell: bash
         run: ctest --test-dir build -C Release --parallel 4 --output-on-failure --no-tests=error
+
+      - name: Report failed CTest cases
+        if: ${{ failure() && steps.test.outcome == 'failure' }}
+        shell: bash
+        run: |
+          failed_log="build/Testing/Temporary/LastTestsFailed.log"
+          if [ -f "$failed_log" ]; then
+            failed_cases="$(tr '\n' ';' < "$failed_log")"
+            echo "::error title=Failed CTest cases::$failed_cases"
+            cat "$failed_log"
+          else
+            echo "::error title=CTest failed::LastTestsFailed.log was not written"
+          fi
