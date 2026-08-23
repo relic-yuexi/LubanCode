@@ -159,6 +159,10 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Keymap;
     } else if (lower == "/trace") {
         parsed.command = SlashCommand::Trace;
+    } else if (lower == "/goal") {
+        // 持久目标单:/goal 是正门(objective/status/edit/pause/resume/clear
+        // 的二级解析在 ParseGoalCommand,这里只认词)。
+        parsed.command = SlashCommand::Goal;
     } else if (lower == "/workflow") {
         // Workflows 自然语言编排单:/workflow 是正门(list/show/graph/
         // validate/run/...),子命令解析在 workflow 层,这里只认词。
@@ -508,6 +512,77 @@ ParsedRecordCommand ParseRecordCommand(const std::string& args) {
     return parsed;  // 认不得的动作,保持 Invalid
 }
 
+ParsedGoalCommand ParseGoalCommand(const std::string& args) {
+    ParsedGoalCommand parsed;
+    const std::string trimmed = Trim(args);
+
+    // 裸敲 /goal:看账,不发模型。
+    if (trimmed.empty()) {
+        parsed.action = GoalCommandAction::View;
+        return parsed;
+    }
+
+    // `--` 消歧:"/goal -- pause all jobs" 里 pause 是正文不是子命令。
+    if (trimmed == "--" || trimmed.rfind("-- ", 0) == 0) {
+        parsed.dashdash = true;
+        parsed.objective = Trim(trimmed.substr(2));
+        if (parsed.objective.empty()) {
+            parsed.action = GoalCommandAction::Invalid;
+            parsed.bad_word = "--";
+            return parsed;
+        }
+        parsed.action = GoalCommandAction::Create;
+        return parsed;
+    }
+
+    // 第一个词按空白切。
+    const std::size_t space = trimmed.find_first_of(" 	");
+    const std::string first = (space == std::string::npos) ? trimmed : trimmed.substr(0, space);
+    const std::string rest = (space == std::string::npos) ? std::string() : Trim(trimmed.substr(space + 1));
+    const std::string lower = ToLower(first);
+    parsed.bad_word = first;
+
+    if (lower == "status") {
+        parsed.action = GoalCommandAction::Status;
+        return parsed;
+    }
+    if (lower == "pause") {
+        parsed.action = GoalCommandAction::Pause;
+        return parsed;
+    }
+    if (lower == "resume") {
+        parsed.action = GoalCommandAction::Resume;
+        return parsed;
+    }
+    if (lower == "clear") {
+        parsed.action = GoalCommandAction::Clear;
+        return parsed;
+    }
+    if (lower == "edit") {
+        // /goal edit -- <text>:-- 后全算正文;不带 -- 时正文若恰以 -- 起
+        // (用户想写 "--fix" 这类)不误吞。
+        std::string body = rest;
+        bool dd = false;
+        if (body == "--" || body.rfind("-- ", 0) == 0) {
+            dd = true;
+            body = Trim(body.substr(2));
+        }
+        if (body.empty()) {
+            parsed.action = GoalCommandAction::Invalid;
+            return parsed;
+        }
+        parsed.action = GoalCommandAction::Edit;
+        parsed.objective = body;
+        parsed.dashdash = dd;
+        return parsed;
+    }
+    // 其余一切:objective 正文(含以 pause/edit 开头的正文——那是要靠 `--`
+    // 之外的普通目标文本,原样收)。
+    parsed.action = GoalCommandAction::Create;
+    parsed.objective = trimmed;
+    return parsed;
+}
+
 const std::vector<SlashCommandInfo>& AllSlashCommands() {
     // i18n:说明文字按当前语言现查(tr),语言切换后惰性重建——静态表 +
     // 记住"上次是按哪种语言建的",不一致就重来一遍。交互循环是单线程消费
@@ -558,6 +633,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/doctor", tr("slash.desc.doctor")},
             {"/keymap", tr("slash.desc.keymap")},
             {"/workflow", tr("slash.desc.workflow")},
+            {"/goal", tr("slash.desc.goal")},
         };
     }
     return commands;

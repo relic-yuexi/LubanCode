@@ -40,6 +40,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agent/goal_session.hpp"
 #include "agent/tool_trace.hpp"
 #include "api/types.hpp"
 
@@ -260,6 +261,10 @@ struct LoadedSession {
     // trace-aware 修复从这份账折叠 ToolExecutionLedger;老档没这些行,
     // 空表 = 走旧逻辑(RepairToolPairs 补洞),向后兼容。
     std::vector<ToolTraceEvent> tool_trace_events;
+    // goal 事件(goal_v1 族),按文件序。持久目标单:/resume 从这份账
+    // 重建 GoalCoordinator(ReplayEvent);老档没这些行,空表 = 没有 goal,
+    // 不影响消息账。
+    std::vector<GoalSessionEvent> goal_events;
     // trace-aware 修复的分档账(没有 trace 行的档全零):/resume 按它告知
     // 用户"几枚未执行、几枚副作用未知、几枚恢复了原始结果"。
     TraceRepairReport trace_repair;
@@ -323,6 +328,14 @@ public:
     // 逐枚追踪单:一行一栅栏,append-only;这是 durable started/finished
     // 的落点,写失败即知(process-crash durable 的口径,见单子 Durability 节)。
     bool AppendToolTraceEvent(const ToolTraceEvent& event);
+
+    // 追加一条 goal 事件行(goal_v1 族,自动带 ts),append+flush。持久
+    // 目标单:GoalCoordinator 的 LedgerSink 接到这里,九道写盘栅栏的
+    // "先落才改内存"靠 append+flush 的同步性。
+    bool AppendGoalEvent(const GoalSessionEvent& event);
+
+    // 追加一条 goal 证据行(goal_evidence_v1,自动带 ts),append+flush。
+    bool AppendGoalEvidence(const GoalEvidenceRecord& evidence);
 
     // /clear:关掉当前文件(留在磁盘上),回到"没有活动会话"状态,下一条
     // 用户消息再 Begin 一场新的。

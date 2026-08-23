@@ -258,6 +258,12 @@ add_executable(lubancode_tests
   # 工具调用逐枚追踪单:五工具批次/崩溃注入九窗口四档恢复/幂等与冲突/
   # trace-aware 修补/落盘次序/来源与错误码/undo token/可疑窗口。
   test_tool_trace.cpp
+  # /goal 持久目标单:领域类型/状态机转换表/objective 计数/序列化往返。
+  test_goal_types.cpp
+  # /goal 持久目标单:coordinator 命令面/预算闸/防空转/硬门槛/回放重建。
+  test_goal_coordinator.cpp
+  # /goal 持久目标单:goal 事件行 serialize/parse、SessionStore 落盘回放。
+  test_goal_session.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 # 依赖守门(显示系统剥离单第八步):测试要现扫源码树,把源码根递进去。

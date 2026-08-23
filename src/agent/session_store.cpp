@@ -864,6 +864,18 @@ std::optional<LoadedSession> ParseSessionFile(const std::string& content) {
                 }
                 continue;
             }
+            if (type.rfind("goal_", 0) == 0) {
+                // 持久目标:goal_v1 族事件按文件序整收(状态机重建在
+                // /resume 侧 GoalCoordinator::ReplayEvent);坏行跳过,老档
+                // 空 = 没有 goal,消息账无损。
+                auto goal_event = ParseGoalEvent(line);
+                if (goal_event.has_value()) {
+                    session.goal_events.push_back(std::move(*goal_event));
+                } else {
+                    session.skipped_lines += 1;
+                }
+                continue;
+            }
             session.skipped_lines += 1;  // 认不得的事件类型,跳过
             continue;
         }
@@ -1093,6 +1105,24 @@ bool SessionStore::AppendToolTraceEvent(const ToolTraceEvent& event) {
         return false;
     }
     out_ << SerializeToolTraceEvent(event, NowTimestamp()) << "\n";
+    out_.flush();
+    return out_.good();
+}
+
+bool SessionStore::AppendGoalEvent(const GoalSessionEvent& event) {
+    if (!out_.is_open()) {
+        return false;
+    }
+    out_ << SerializeGoalEvent(event, NowTimestamp()) << "\n";
+    out_.flush();
+    return out_.good();
+}
+
+bool SessionStore::AppendGoalEvidence(const GoalEvidenceRecord& evidence) {
+    if (!out_.is_open()) {
+        return false;
+    }
+    out_ << SerializeGoalEvidence(evidence, NowTimestamp()) << "\n";
     out_.flush();
     return out_.good();
 }
