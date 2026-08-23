@@ -127,7 +127,7 @@ private:
     // max_runtime_ms > 0 时到点 TerminateTree 收树(状态进 Stopped)。
     void WatchThread(std::shared_ptr<TaskState> state,
                      std::shared_ptr<platform::BackgroundProcessHandle> handle, unsigned long pid,
-                     std::string task_id, long long max_runtime_ms);
+                     long long max_runtime_ms);
 
     // 退化探活(没有 handle 的旧调用):alive=true 还活着;false 已结束。
     static bool IsPidAlive(unsigned long pid);

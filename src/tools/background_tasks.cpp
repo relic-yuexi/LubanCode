@@ -8,6 +8,7 @@
 #include <sstream>
 
 #include "platform/text_encoding.hpp"
+#include "tools/path_utils.hpp"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -112,10 +113,9 @@ std::string BackgroundTaskRegistry::Register(std::string command, std::string sh
         return task_id;  // 防御,不该发生
     }
     try {
-        stored->watcher = std::thread(
-            [this, state, handle = stored->handle, pid, task_id, max_runtime_ms] {
-                WatchThread(state, handle, pid, task_id, max_runtime_ms);
-            });
+        stored->watcher = std::thread([this, state, handle = stored->handle, pid, max_runtime_ms] {
+            WatchThread(state, handle, pid, max_runtime_ms);
+        });
     } catch (...) {
         // 回滚:entry 出表。任务进程还挂着(会话级收尾兜底),但台账不留
         // 一条永远 Running 的死账。
@@ -362,7 +362,7 @@ std::vector<BackgroundTaskInfo> BackgroundTaskRegistry::DrainCompleted() {
 
 void BackgroundTaskRegistry::WatchThread(std::shared_ptr<TaskState> state,
                                           std::shared_ptr<platform::BackgroundProcessHandle> handle,
-                                          unsigned long pid, std::string task_id, long long max_runtime_ms) {
+                                          unsigned long pid, long long max_runtime_ms) {
     // 单任务日志截断(策略:到顶截断保留尾部 + 标记,不杀任务不轮转)。
     // log_path 在 Register 时就写进 state、之后不变, watcher 只读。
     const std::string log_path_copy = state->log_path;
@@ -371,8 +371,7 @@ void BackgroundTaskRegistry::WatchThread(std::shared_ptr<TaskState> state,
             return;
         }
         std::error_code ec;
-        const auto log_fs_path =
-            std::filesystem::u8path(reinterpret_cast<const char8_t*>(log_path_copy.data()));
+        const auto log_fs_path = Utf8ToPath(log_path_copy);
         const auto size = std::filesystem::file_size(log_fs_path, ec);
         if (ec || size <= kPerTaskLogCapBytes) {
             return;
@@ -539,8 +538,7 @@ void BackgroundTaskRegistry::PruneTerminalTasks() {
             entry->watcher.join();
         }
         std::error_code ec;
-        std::filesystem::remove(std::filesystem::u8path(reinterpret_cast<const char8_t*>(entry->info.log_path.data())),
-                                ec);
+        std::filesystem::remove(Utf8ToPath(entry->info.log_path), ec);
     }
 }
 

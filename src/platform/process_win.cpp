@@ -199,6 +199,8 @@ std::wstring BuildBackgroundLogPathW() {
     return (dir / filename).wstring();
 }
 
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // BackgroundProcessHandle(进程生命线单 P0):Windows 每个后台任务一个
 // 专属 Job Object + 长持进程句柄。Stop 落 TerminateJobObject(整棵树),
@@ -303,8 +305,6 @@ bool BackgroundProcessHandle::TerminateTree(int grace_ms) {
     }
     return ok;
 }
-
-}  // namespace
 
 std::wstring BuildCmdCommandLine(const std::string& user_command_utf8) {
     const std::wstring wide_script = Utf8ToWide(user_command_utf8);
@@ -454,8 +454,14 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
     DWORD wait_result = WAIT_FAILED;
     bool hit_cancel = false;
     while (true) {
-        const DWORD slice =
-            (cancel != nullptr && (wait_ms == INFINITE || wait_ms > 100)) ? 100 : wait_ms;
+        if (output_over_limit.load()) {
+            wait_result = WAIT_OBJECT_0 + 1;
+            break;
+        }
+        // CreateEventW 在句柄紧张时会失败。那时不能一觉睡满 timeout：
+        // 读线程仍会写 output_over_limit，主线程改为短轮询兜底。
+        const bool needs_poll = cancel != nullptr || overflow_event == nullptr;
+        const DWORD slice = needs_poll && (wait_ms == INFINITE || wait_ms > 100) ? 100 : wait_ms;
         wait_result = WaitForMultipleObjects(wait_count, wait_handles, FALSE, slice);
         if (wait_result == WAIT_OBJECT_0) {
             break;  // 进程退出

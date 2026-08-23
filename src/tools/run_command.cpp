@@ -95,6 +95,26 @@ std::optional<std::string> FindOnPath(const std::string& name_utf8, const char* 
     return std::nullopt;
 }
 
+std::optional<std::string> ReadEnvironmentVariable(const char* name) {
+#ifdef _WIN32
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) {
+        std::free(value);
+        return std::nullopt;
+    }
+    std::string result(value);
+    std::free(value);
+    return result;
+#else
+    const char* value = std::getenv(name);
+    if (value == nullptr) {
+        return std::nullopt;
+    }
+    return std::string(value);
+#endif
+}
+
 // 本机装没装 bash(POSIX)/pwsh(Windows)。结果缓存。
 bool OptionalShellAvailable(const std::string& shell_id) {
     static const bool bash_ok = [] {
@@ -102,15 +122,17 @@ bool OptionalShellAvailable(const std::string& shell_id) {
         return false;  // bash 是 POSIX 侧的可选 shell;Windows 不认(WSL 那只 bash 不是宿主 shell)
 #else
         // 常见落点先直查(/bin/bash、/usr/bin/bash),再走 PATH。
+        const auto path = ReadEnvironmentVariable("PATH");
         return ShellExecutableExists("/bin/bash") || ShellExecutableExists("/usr/bin/bash") ||
-               FindOnPath("bash", getenv("PATH")).has_value();
+               (path.has_value() && FindOnPath("bash", path->c_str()).has_value());
 #endif
     }();
     static const bool pwsh_ok = [] {
 #ifdef _WIN32
         // pwsh 按名字过 PATH 找(PowerShell 7 默认装进 Program Files 并入 PATH;
         // 没装(只有 Windows PowerShell 5.1)就找不到,如实不可用)。
-        return FindOnPath("pwsh", getenv("PATH")).has_value();
+        const auto path = ReadEnvironmentVariable("PATH");
+        return path.has_value() && FindOnPath("pwsh", path->c_str()).has_value();
 #else
         return false;  // pwsh 是 Windows 侧的可选 shell;POSIX 不认(装了 pwsh 的 Linux 用户极少,不替他们猜)
 #endif
@@ -529,13 +551,15 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
         // (跟 PowerShell 路径不一样,那边脚本里显式设了
         // [Console]::OutputEncoding=UTF8),这里拿到手就是合法 UTF-8。
         // cwd 走 lpCurrentDirectory(P1 根治:cmd 的 %VAR% 展开坑一并绕开)。
-        proc = platform::RunShellCommand(command, timeout_ms, cancel_, {}, kDefaultMaxOutputBytes, effective_cwd);
+        proc = platform::RunShellCommand(command, timeout_ms, cancel_, {}, platform::kDefaultMaxOutputBytes,
+                                         effective_cwd);
     } else {
         // 前台 PowerShell 同上:cwd 走 lpCurrentDirectory,命令本体只保留
         // wrapper 的编码设置,不再前置 Set-Location。
         const std::wstring cmdline = std::wstring(ps_exe) + L" -NoProfile -NonInteractive -EncodedCommand " +
                                       platform::Utf8ToWide(BuildEncodedCommand(command));
-        proc = platform::RunProcess(cmdline, timeout_ms, /*cancel=*/nullptr, {}, kDefaultMaxOutputBytes,
+        proc = platform::RunProcess(cmdline, timeout_ms, /*cancel=*/nullptr, {},
+                                    platform::kDefaultMaxOutputBytes,
                                     effective_cwd);
     }
 #else

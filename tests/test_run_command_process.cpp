@@ -30,6 +30,7 @@
 #include "platform/text_encoding.hpp"
 #include "tools/background_output.hpp"
 #include "tools/background_tasks.hpp"
+#include "tools/path_utils.hpp"
 #include "tools/run_command.hpp"
 #include "tools/shell_info.hpp"
 
@@ -83,11 +84,27 @@ private:
 };
 
 std::string ReadAllBytes(const std::string& path_utf8) {
-    std::ifstream file(std::filesystem::u8path(reinterpret_cast<const char8_t*>(path_utf8.data())),
-                       std::ios::binary);
+    std::ifstream file(lubancode::tools::Utf8ToPath(path_utf8), std::ios::binary);
     std::ostringstream ss;
     ss << file.rdbuf();
     return ss.str();
+}
+
+bool RefersToPath(const std::string& output_utf8, const std::filesystem::path& expected) {
+    std::istringstream lines(output_utf8);
+    for (std::string line; std::getline(lines, line);) {
+        const auto first = line.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) {
+            continue;
+        }
+        const auto last = line.find_last_not_of(" \t\r\n");
+        line = line.substr(first, last - first + 1);
+        std::error_code ec;
+        if (std::filesystem::equivalent(lubancode::tools::Utf8ToPath(line), expected, ec) && !ec) {
+            return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace
@@ -315,18 +332,22 @@ TEST_CASE("run_command(Windows): 后台 PowerShell 用对 cwd(前后台目录探
     }
     REQUIRE_FALSE(task_id.empty());
 
+    std::string observed_background;
     const bool landed = WaitUntil(
         [&] {
             const auto info = reg.Get(task_id);
             if (!info.has_value() || info->log_path.empty()) {
                 return false;
             }
-            const std::string data = ReadAllBytes(info->log_path);
-            return data.find(dir.Utf8Path()) != std::string::npos;
+            observed_background = ReadAllBytes(info->log_path);
+            return RefersToPath(observed_background, dir.Path());
         },
         8000);
+    CAPTURE(dir.Utf8Path());
+    CAPTURE(fg_location);
+    CAPTURE(observed_background);
     CHECK(landed);
-    CHECK(fg_location.find(dir.Utf8Path()) != std::string::npos);
+    CHECK(RefersToPath(fg_location, dir.Path()));
 }
 
 #endif  // _WIN32
@@ -456,7 +477,7 @@ TEST_CASE("background(POSIX): ReadOutput 尾读从换行边界起刀,半行加�
     CHECK(tail.size() <= 64 * 1024 + 256);
 
     std::error_code ec;
-    std::filesystem::remove(std::filesystem::u8path(reinterpret_cast<const char8_t*>(log_path.data())), ec);
+    std::filesystem::remove(lubancode::tools::Utf8ToPath(log_path), ec);
 }
 
 TEST_CASE("background(POSIX): ReadOutput 坏 UTF-8 日志清洗后出口合法") {
@@ -473,7 +494,7 @@ TEST_CASE("background(POSIX): ReadOutput 坏 UTF-8 日志清洗后出口合法")
     CHECK(out.find("tail-end") != std::string::npos);
 
     std::error_code ec;
-    std::filesystem::remove(std::filesystem::u8path(reinterpret_cast<const char8_t*>(log_path.data())), ec);
+    std::filesystem::remove(lubancode::tools::Utf8ToPath(log_path), ec);
 }
 
 TEST_CASE("run_command(POSIX): 前台命令带 cancel 旗,置位即收树返回 cancelled") {
@@ -523,7 +544,7 @@ TEST_CASE("RunProcessBackground(POSIX): 原生 cwd 真生效(不拼 cd)") {
         8000);
     CHECK(landed);
     std::error_code ec;
-    std::filesystem::remove(std::filesystem::u8path(reinterpret_cast<const char8_t*>(bg.log_path.data())), ec);
+    std::filesystem::remove(lubancode::tools::Utf8ToPath(bg.log_path), ec);
 }
 
 TEST_CASE("BackgroundProcessHandle(POSIX): Wait/Peek/TerminateTree 的完成态口径") {
@@ -562,7 +583,11 @@ TEST_CASE("RunProcess: 并发 extra_env 不串值(P0 并发契约)") {
     for (int i = 0; i < kWorkers; ++i) {
         workers.emplace_back([&, i] {
             const EnvPairs env{{"LUBANCODE_TEST_MARKER", "worker-" + std::to_string(i)}};
+#ifdef _WIN32
+            const auto result = RunShellCommand("echo %LUBANCODE_TEST_MARKER%", 30000, env);
+#else
             const auto result = RunShellCommand("echo $LUBANCODE_TEST_MARKER", 30000, env);
+#endif
             seen[static_cast<std::size_t>(i)] = result.output;
             if (result.output.find("worker-" + std::to_string(i)) == std::string::npos) {
                 mismatches.fetch_add(1);
