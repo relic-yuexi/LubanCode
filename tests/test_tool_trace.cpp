@@ -103,10 +103,12 @@ std::vector<api::StreamEvent> ToolUseScript(const std::string& tool_id, const st
 // 五枚工具一批的脚本。
 std::vector<api::StreamEvent> FiveToolScript(const std::vector<std::string>& ids, const std::string& name) {
     std::vector<api::StreamEvent> script{api::MessageStart{"msg", "model"}};
+    // 块序号字段是 int:花括号初始化里 size_t->int 是窄化,MSVC/clang
+    // 当错拦(gcc 只警告)——显式转。
     for (std::size_t i = 0; i < ids.size(); ++i) {
-        script.push_back(api::ToolUseStart{i, ids[i], name});
-        script.push_back(api::ToolUseInputDelta{i, "{}"});
-        script.push_back(api::ContentBlockDone{i});
+        script.push_back(api::ToolUseStart{static_cast<int>(i), ids[i], name});
+        script.push_back(api::ToolUseInputDelta{static_cast<int>(i), "{}"});
+        script.push_back(api::ContentBlockDone{static_cast<int>(i)});
     }
     script.push_back(api::MessageDone{"tool_use", api::Usage{}});
     return script;
