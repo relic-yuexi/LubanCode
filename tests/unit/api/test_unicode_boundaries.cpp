@@ -13,7 +13,9 @@
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -39,6 +41,22 @@ namespace {
 
 constexpr const char* kEmoji = "\xF0\x9F\x93\x9A";  // 📚(四字节)
 constexpr const char* kReplacement = "\xEF\xBF\xBD";  // U+FFFD
+
+class StreamCapture {
+public:
+    explicit StreamCapture(std::ostream& stream) : stream_(stream), old_buffer_(stream.rdbuf(buffer_.rdbuf())) {}
+    ~StreamCapture() { stream_.rdbuf(old_buffer_); }
+
+    StreamCapture(const StreamCapture&) = delete;
+    StreamCapture& operator=(const StreamCapture&) = delete;
+
+    std::string str() const { return buffer_.str(); }
+
+private:
+    std::ostream& stream_;
+    std::ostringstream buffer_;
+    std::streambuf* old_buffer_;
+};
 
 // 按脚本吐事件的假后端(test_loop.cpp 同款,这里要的是劈半 delta 脚本)。
 class ScriptBackend : public api::Backend {
@@ -299,12 +317,19 @@ TEST_CASE("RunTurn:后端抛 1113 异常,回合按失败收口,不掀进程") {
     std::set<std::string> always_allowed;
     std::vector<lubancode::cli::TranscriptItem> transcript;
 
-    const lubancode::app::RunTurnResult out =
-        lubancode::app::RunTurn(loop, "问 LIS 的 nlogn 做法", /*auto_confirm=*/true, always_allowed, theme,
-                                context_tracker, registry, /*hook_dispatcher=*/nullptr,
-                                /*is_console=*/false, transcript);
+    lubancode::app::RunTurnResult out;
+    std::string rendered;
+    {
+        StreamCapture stdout_capture(std::cout);
+        StreamCapture stderr_capture(std::cerr);
+        out = lubancode::app::RunTurn(loop, "问 LIS 的 nlogn 做法", /*auto_confirm=*/true, always_allowed, theme,
+                                     context_tracker, registry, /*hook_dispatcher=*/nullptr,
+                                     /*is_console=*/false, transcript);
+        rendered = stdout_capture.str() + stderr_capture.str();
+    }
     CHECK(out.status == 1);
     CHECK_FALSE(out.cancelled);
+    CHECK(rendered.find("No mapping for the Unicode character") != std::string::npos);
     // 用户消息已入 history(落盘/resume 的账都在)。
     REQUIRE_FALSE(loop.history().empty());
     CHECK(loop.history().front().role == api::Role::User);
