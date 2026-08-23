@@ -53,6 +53,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -3121,7 +3122,25 @@ TurnInputListener::TurnInputListener(std::atomic<bool>& cancel_flag, const Theme
       expand_renderer_(std::move(expand_renderer)) {
     if (platform::StdinIsInteractive()) {
         enabled_ = true;
-        thread_ = std::thread([this] { ThreadMain(); });
+        thread_ = std::thread([this] {
+            try {
+                ThreadMain();
+            } catch (const std::exception& e) {
+                // 监听线程里漏出异常时,std::thread 会直接 std::terminate；
+                // Windows 上便是 0xC0000409,整场连同会话一起倒下。这里先
+                // 收掉 footer,用不抛异常的窄 stdio 留下原始病名。主线程仍
+                // 能收束本轮、回到下一枚提示符。
+                std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+                FooterSlot().enabled = false;
+                std::fprintf(stderr, "\n[input-listener] %s\n", e.what());
+                std::fflush(stderr);
+            } catch (...) {
+                std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+                FooterSlot().enabled = false;
+                std::fprintf(stderr, "\n[input-listener] unknown exception\n");
+                std::fflush(stderr);
+            }
+        });
     }
 }
 
@@ -3146,8 +3165,9 @@ void TurnInputListener::Stop() {
 }
 
 void TurnInputListener::ThreadMain() {
-    // POSIX 下监听期间要进 termios 原始模式才能逐键拿到(Windows 的
-    // ReadConsoleInputW 不用改模式,这个 scope 在那边是空操作)。
+    // 监听期间两端都进逐键、无回显模式。Windows 虽用
+    // ReadConsoleInputW，也得关 LINE/ECHO；否则字符仍躺到回车才放行，
+    // conhost 还会把它画到 footer 的物理光标处。
     platform::KeyListenScope listen_scope;
     platform::KeyReader key_reader;  // 跨事件状态(代理对配对)整条线程存活
 

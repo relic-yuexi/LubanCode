@@ -6,6 +6,7 @@
 
 #include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -1161,34 +1162,48 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
                 return;
             }
             thread_ = std::thread([this, turn_start, cancel_ptr] {
-                std::size_t frame = 0;
-                bool stopping_reported = false;
-                while (!stop_.load(std::memory_order_acquire)) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                    if (stop_.load(std::memory_order_acquire)) {
-                        return;
-                    }
-                    std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-                    if (lubancode::cli::RepaintSuspendedLocked()) {
-                        continue;  // 菜单占屏/挂起:零输出,秒数照走(账不丢)
-                    }
-                    if (lubancode::cli::TurnActivityActive()) {
-                        const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                                                 std::chrono::steady_clock::now() - *turn_start)
-                                                 .count();
-                        // ESC 真置了 cancel:活动条换 Stopping(终态落账后才
-                        // 退场,不瞬间消失让人以为已停、后台却还在跑)。
-                        if (cancel_ptr != nullptr && cancel_ptr->load(std::memory_order_acquire)) {
-                            if (!stopping_reported) {
-                                lubancode::cli::SetTurnActivityInterruptRequested();
-                                stopping_reported = true;
-                            }
+                try {
+                    std::size_t frame = 0;
+                    bool stopping_reported = false;
+                    while (!stop_.load(std::memory_order_acquire)) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                        if (stop_.load(std::memory_order_acquire)) {
+                            return;
                         }
-                        lubancode::cli::UpdateTurnActivityElapsed(frame, elapsed);
-                    } else {
-                        lubancode::cli::RedrawStreamFooterLocked();
+                        // TurnActivityActive/Set/Update 都自带 StdoutWriteMutex。
+                        // 旧代码先在这里攥锁，再调它们，MSVC 会以
+                        // resource_deadlock_would_occur 报同线程二次上锁；异常
+                        // 又从 std::thread 顶漏出，整进程便以 0xC0000409 快退。
+                        // 活动态只走自带锁的公开口。非活动态才在本层拿锁，
+                        // 调用约定为“调用方已持锁”的 Redraw...Locked。
+                        if (lubancode::cli::TurnActivityActive()) {
+                            const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                                     std::chrono::steady_clock::now() - *turn_start)
+                                                     .count();
+                            // ESC 真置了 cancel:活动条换 Stopping(终态落账后才
+                            // 退场,不瞬间消失让人以为已停、后台却还在跑)。
+                            if (cancel_ptr != nullptr && cancel_ptr->load(std::memory_order_acquire)) {
+                                if (!stopping_reported) {
+                                    lubancode::cli::SetTurnActivityInterruptRequested();
+                                    stopping_reported = true;
+                                }
+                            }
+                            lubancode::cli::UpdateTurnActivityElapsed(frame, elapsed);
+                        } else {
+                            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+                            if (lubancode::cli::RepaintSuspendedLocked()) {
+                                continue;  // 菜单占屏/挂起:零输出,秒数照走(账不丢)
+                            }
+                            lubancode::cli::RedrawStreamFooterLocked();
+                        }
+                        ++frame;
                     }
-                    ++frame;
+                } catch (const std::exception& e) {
+                    std::fprintf(stderr, "\n[footer-heartbeat] %s\n", e.what());
+                    std::fflush(stderr);
+                } catch (...) {
+                    std::fprintf(stderr, "\n[footer-heartbeat] unknown exception\n");
+                    std::fflush(stderr);
                 }
             });
         }

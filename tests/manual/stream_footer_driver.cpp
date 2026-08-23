@@ -20,6 +20,9 @@ HANDLE g_conin = INVALID_HANDLE_VALUE;
 HANDLE g_conout = INVALID_HANDLE_VALUE;
 std::ofstream g_report;
 int g_failures = 0;
+HANDLE g_child = nullptr;
+
+std::string ReadRow(int row);
 
 void Log(const std::string& line) {
     g_report << line << "\n";
@@ -33,6 +36,27 @@ void Check(bool ok, const std::string& what) {
         Log("FAIL: " + what);
         ++g_failures;
     }
+}
+
+bool ChildStillRunning(const std::string& stage) {
+    DWORD exit_code = 0;
+    if (g_child == nullptr || !GetExitCodeProcess(g_child, &exit_code)) {
+        Log("FAIL: " + stage + " 无法读取子进程状态,error=" + std::to_string(GetLastError()));
+        ++g_failures;
+        return false;
+    }
+    if (exit_code == STILL_ACTIVE) {
+        return true;
+    }
+    Log("FAIL: " + stage + " 子进程已退出,exit=" + std::to_string(exit_code));
+    for (int row = 0; row < 30; ++row) {
+        const std::string text = ReadRow(row);
+        if (!text.empty()) {
+            Log("INFO: " + stage + " 退出现场 row[" + std::to_string(row) + "]=" + text);
+        }
+    }
+    ++g_failures;
+    return false;
 }
 
 std::string WideToUtf8(const std::wstring& w) {
@@ -283,6 +307,7 @@ int wmain(int argc, wchar_t** argv) {
         return 1;
     }
     CloseHandle(pi.hThread);
+    g_child = pi.hProcess;
 
     // ---- 开场帧:composer 的框先出来,确认程序正常起来了 ----
     Check(WaitForText("shift+tab", 30000), "开场:composer 状态行出现(30s 内)");
@@ -319,6 +344,7 @@ int wmain(int argc, wchar_t** argv) {
           "G0 Working 与输入框同帧可见,输入框不再被 spinner 挂起");
     Check(working_cursor_in_composer,
           "G0 Working 动画期间物理光标仍停在输入框");
+    ChildStillRunning("G0 Working");
     // 输入行靠结构定位(上横线/`> `输入行/下横线/状态行四连),不靠占位
     // 提示文案——文案改版不再连坐。
     int input_row = -1;
@@ -344,6 +370,7 @@ int wmain(int argc, wchar_t** argv) {
     SendText("你好排队");
     const bool g2_echo_seen = WaitForText("你好排队", 8000);
     Check(g2_echo_seen, "G2 排队回显:输入行实时显示已键入内容(8s 内出现 '你好排队')");
+    ChildStillRunning("G2 排队回显");
     if (g2_echo_seen) {
         const int echo_row = FindLastRow("你好排队");
         Check(CursorRow() == echo_row && CursorColumn() > 2,
@@ -598,6 +625,7 @@ int wmain(int argc, wchar_t** argv) {
         TerminateProcess(pi.hProcess, 9);
     }
     CloseHandle(pi.hProcess);
+    g_child = nullptr;
 
     Log(g_failures == 0 ? "RESULT: ALL PASS" : "RESULT: " + std::to_string(g_failures) + " FAIL");
     return g_failures == 0 ? 0 : 1;

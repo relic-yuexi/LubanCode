@@ -202,9 +202,10 @@ private:
 // 监听线程探测:timeout_ms 内 stdin 有没有输入事件可读(只问不消费)。
 bool WaitForKeyEvent(int timeout_ms);
 
-// M10 监听线程的会话档位:Windows 下 ReadConsoleInputW 不需要改控制台模式
-// 就能读到按键事件,这里是空操作;POSIX 下必须进 termios 原始模式才能逐键
-// 拿到(否则字符躺在行规程里等回车、还会回显),RAII 进出。
+// M10 监听线程的会话档位:两边都须进逐键、无回显模式。Windows 虽用
+// ReadConsoleInputW,但 ENABLE_LINE_INPUT/ECHO_INPUT 留着时字符仍会等回车
+// 才放行,还会被控制台自行画到 footer 光标处;POSIX 同理受 termios 行规程
+// 管。RAII 进出,监听收场后原样恢复。
 class KeyListenScope {
 public:
     KeyListenScope();
@@ -214,8 +215,10 @@ public:
     KeyListenScope& operator=(const KeyListenScope&) = delete;
 
 private:
-#ifndef _WIN32
     bool active_ = false;
+#ifdef _WIN32
+    unsigned long original_mode_ = 0;
+#else
     struct termios original_termios_ {};
 #endif
 };

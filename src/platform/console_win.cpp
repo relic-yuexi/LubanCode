@@ -705,8 +705,32 @@ bool WaitForKeyEvent(int timeout_ms) {
     return WaitForSingleObject(h_in, timeout_ms > 0 ? static_cast<DWORD>(timeout_ms) : 0) == WAIT_OBJECT_0;
 }
 
-KeyListenScope::KeyListenScope() = default;
-KeyListenScope::~KeyListenScope() = default;
+KeyListenScope::KeyListenScope() {
+    const HANDLE h_in = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD original_mode = 0;
+    if (!GetConsoleMode(h_in, &original_mode)) {
+        return;
+    }
+    // ReadConsoleInputW 也受控制台输入模式约束。若留着 LINE/ECHO，流式
+    // footer 期间敲下的字会躺到回车才交付，并由 conhost/Terminal 自行
+    // 回显到当前物理光标处，看起来像 PowerShell 提示符闯回了 TUI。
+    // PROCESSED 一并关掉，让 Ctrl+C 仍以 KEY_EVENT 交给监听线程按
+    // “单击打断、双击退出”处理，不越过应用直接发控制信号。
+    const DWORD listen_mode =
+        original_mode & ~static_cast<DWORD>(ENABLE_LINE_INPUT) & ~static_cast<DWORD>(ENABLE_ECHO_INPUT) &
+        ~static_cast<DWORD>(ENABLE_PROCESSED_INPUT);
+    if (!SetConsoleMode(h_in, listen_mode)) {
+        return;
+    }
+    original_mode_ = original_mode;
+    active_ = true;
+}
+
+KeyListenScope::~KeyListenScope() {
+    if (active_) {
+        SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), static_cast<DWORD>(original_mode_));
+    }
+}
 
 std::optional<std::string> ReadLineCooked() {
     const HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
