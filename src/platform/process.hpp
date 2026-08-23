@@ -266,7 +266,7 @@ BackgroundSpawnResult RunShellCommandBackground(const std::string& command_utf8,
 #ifdef _WIN32
 // Windows 专属:完整命令行(调用方拼好)+ 原生 cwd(不拼 cd)。
 BackgroundSpawnResult RunProcessBackground(const std::wstring& cmdline, const std::string& cwd_utf8,
-                                            const EnvPairs& extra_env);
+                                            const EnvPairs& extra_env = {});
 #endif
 
 // 一次启动长命子进程的结果。

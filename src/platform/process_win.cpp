@@ -199,6 +199,8 @@ std::wstring BuildBackgroundLogPathW() {
     return (dir / filename).wstring();
 }
 
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // BackgroundProcessHandle(进程生命线单 P0):Windows 每个后台任务一个
 // 专属 Job Object + 长持进程句柄。Stop 落 TerminateJobObject(整棵树),
@@ -303,8 +305,6 @@ bool BackgroundProcessHandle::TerminateTree(int grace_ms) {
     }
     return ok;
 }
-
-}  // namespace
 
 std::wstring BuildCmdCommandLine(const std::string& user_command_utf8) {
     const std::wstring wide_script = Utf8ToWide(user_command_utf8);

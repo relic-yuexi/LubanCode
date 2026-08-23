@@ -529,13 +529,15 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
         // (跟 PowerShell 路径不一样,那边脚本里显式设了
         // [Console]::OutputEncoding=UTF8),这里拿到手就是合法 UTF-8。
         // cwd 走 lpCurrentDirectory(P1 根治:cmd 的 %VAR% 展开坑一并绕开)。
-        proc = platform::RunShellCommand(command, timeout_ms, cancel_, {}, kDefaultMaxOutputBytes, effective_cwd);
+        proc = platform::RunShellCommand(command, timeout_ms, cancel_, {}, platform::kDefaultMaxOutputBytes,
+                                         effective_cwd);
     } else {
         // 前台 PowerShell 同上:cwd 走 lpCurrentDirectory,命令本体只保留
         // wrapper 的编码设置,不再前置 Set-Location。
         const std::wstring cmdline = std::wstring(ps_exe) + L" -NoProfile -NonInteractive -EncodedCommand " +
                                       platform::Utf8ToWide(BuildEncodedCommand(command));
-        proc = platform::RunProcess(cmdline, timeout_ms, /*cancel=*/nullptr, {}, kDefaultMaxOutputBytes,
+        proc = platform::RunProcess(cmdline, timeout_ms, /*cancel=*/nullptr, {},
+                                    platform::kDefaultMaxOutputBytes,
                                     effective_cwd);
     }
 #else
