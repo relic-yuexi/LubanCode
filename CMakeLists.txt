@@ -482,6 +482,10 @@ add_library(lubancode_runtime STATIC
   src/runtime/goal_compact.cpp
   # /loop 会话定时循环单:领域类型/状态机转换表/interval 解析/错过合并账。
   src/runtime/loop_types.cpp
+  # /loop 会话定时循环单:内存 scheduler(timer 只发 wake/泵取件/退避/expiry)。
+  src/runtime/loop_scheduler.cpp
+  # /loop 会话定时循环单:空闲唤醒多路总口(替单枚 SetIdleWakeHook)。
+  src/runtime/idle_wake.cpp
   # Plan 模式(只读研究硬闸单):CollaborationMode/ModePolicy/PlanDocument
   # 合同与纯函数(ModePolicy 硬闸、Plan shell 分类、<proposed_plan> 扫描)。
   src/runtime/plan_mode.cpp
