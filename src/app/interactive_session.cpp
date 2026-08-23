@@ -463,6 +463,12 @@ private:
     // next <差>"。两样都没有给空串(整段不挂)。短码不做状态机翻译的
     // 第二处——从 GoalState 现折,loop 用 scheduler 快照。
     std::string BuildGoalLoopStatusSegment();
+    // 子代理回流进 goal 的账(goal 单"预算与刹车/子代理"节):后台子代理
+    // 完成时,它的结果折一枚二级证据(ToolResult,producer 标 subagent、
+    // facts 带子任务 id——单子:仅"子代理说通过了"仍是二级证据,hard gate
+    // 不凭它放行 achieved),usage 折进 goal 的 usage 账(子代理由该
+    // iteration 派生,其消耗归 goal)。有 goal 在跑才记,没有零影响。
+    void NoteSubagentCompletionForGoal();
     // 拍子收口:turn 终态回写 tick,算 outcome/退避/连败账。
     void FinishLoopTick(const std::string& tick_id, bool turn_failed, bool cancelled);
     // scheduler 攒的事件账落盘(append+flush);失败即 FailStore 熔断。
@@ -5354,8 +5360,108 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
         }};
 }
 
+void TerminalSessionController::NoteSubagentCompletionForGoal() {
+    // 子代理完成事件喂 goal 的证据/进度账(goal 单合流项)。没有活跃 goal
+    // 或没有待回流完成,零影响。
+    if (!goal_coordinator_.has_value() || session_agent_tool() == nullptr) {
+        return;
+    }
+    const auto* task = goal_coordinator_->task();
+    if (task == nullptr || lubancode::runtime::goal::IsGoalTerminal(task->state)) {
+        return;  // terminal 后迟到的子代理结果:只留审计,不喂账(单子)
+    }
+    const std::vector<int> ids = session_agent_tool()->UndeliveredCompletionTaskIds();
+    if (ids.empty()) {
+        return;
+    }
+    const auto now_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    }();
+    const std::string iteration_id =
+        task->id + "/iter-" + std::to_string(task->counters.iterations_started);
+    int evidence_seq = static_cast<int>(goal_coordinator_->evidence_count());
+    for (const int subagent_id : ids) {
+        const auto detail = session_agent_tool()->TaskDetail(subagent_id);
+        if (!detail.has_value()) {
+            continue;  // 台账里没有了:跳过不误伤
+        }
+        // usage 归 goal(单子:"子代理由该 iteration 派生,其 usage 归 goal")。
+        lubancode::runtime::goal::GoalUsage sub_usage;
+        sub_usage.input_tokens = detail->input_tokens;
+        sub_usage.output_tokens = detail->output_tokens;
+        sub_usage.cache_read_tokens = detail->cache_read_tokens;
+        sub_usage.cache_creation_tokens = detail->cache_creation_tokens;
+        sub_usage.request_count = detail->steps_used;
+        sub_usage.usage_reported = detail->usage_reported;
+        goal_coordinator_->AddUsage(sub_usage);
+        // 结果折二级证据:producer 标 subagent,facts 带子任务 id 与 agent
+        // 类型;content 锚用结果正文的 hash(有结果才立;空结果不立证据,
+        // 免得查表里堆空壳)。单子:仅"子代理说通过了"仍是二级证据——
+        // HardGateAchieved 只认 fresh 的一级证据,criterion 拿它顶数会在
+        // 查表时露馅(goal_id 对得上,fresh 对得上,但 checkpoint 引用与
+        // evaluator 判词另有一致性检查)。
+        if (detail->result.empty()) {
+            continue;
+        }
+        lubancode::runtime::goal::GoalEvidence evidence;
+        evidence.id = "ev-" + std::to_string(++evidence_seq);
+        evidence.kind = lubancode::runtime::goal::EvidenceKind::ToolResult;
+        evidence.goal_id = task->id;
+        evidence.iteration_id = iteration_id;
+        evidence.tool_use_id = "subagent-" + std::to_string(subagent_id);
+        evidence.producer = "subagent:" + detail->agent_type;
+        evidence.facts["subagent_task_id"] = subagent_id;
+        evidence.facts["agent_type"] = detail->agent_type;
+        evidence.facts["title"] = detail->title;
+        evidence.facts["steps_used"] = detail->steps_used;
+        evidence.facts["tool_call_count"] = detail->tool_calls.size();
+        // 终态枚举翻稳定串(翻不出的给数字兜底,不冒充)。
+        switch (detail->state) {
+            case lubancode::tools::AgentTaskState::Running:
+                evidence.facts["state"] = "running";
+                break;
+            case lubancode::tools::AgentTaskState::Done:
+                evidence.facts["state"] = "done";
+                break;
+            case lubancode::tools::AgentTaskState::Failed:
+                evidence.facts["state"] = "failed";
+                break;
+            case lubancode::tools::AgentTaskState::Cancelled:
+                evidence.facts["state"] = "cancelled";
+                break;
+            case lubancode::tools::AgentTaskState::BudgetExhausted:
+                evidence.facts["state"] = "budget_exhausted";
+                break;
+        }
+        evidence.content_sha256 = lubancode::hooks::Sha256Hex(detail->result);
+        evidence.observed_at_ms = now_ms;
+        evidence.fresh = true;
+        // 事件行(goal_evidence_v1)先落再进账,与工具采证同序。
+        lubancode::agent::GoalSessionEvent line;
+        line.type = "goal_evidence_v1";
+        line.event = "observed";
+        line.goal_id = evidence.goal_id;
+        line.iteration_id = evidence.iteration_id;
+        line.revision = task->revision;
+        nlohmann::json payload;
+        payload["evidence"] = evidence.to_json();
+        line.payload = std::move(payload);
+        line.timestamp_ms = now_ms;
+        if (session_store.active()) {
+            (void)session_store.AppendGoalEvent(line);
+        }
+        goal_coordinator_->RecordEvidence(evidence);
+        // 白名单顺手补(checkpoint 工具可引用它)。
+        if (goal_checkpoint_state_ != nullptr &&
+            goal_checkpoint_state_->iteration_id == iteration_id) {
+            goal_checkpoint_state_->valid_evidence_ids.push_back(evidence.id);
+        }
+    }
+}
+
 std::string TerminalSessionController::BuildGoalLoopStatusSegment() {
-    // 状态栏的 goal/loop 段(goal 单合流)。短码口径(不是第二套状态机,
     // 只是 GoalState 的显示投影):
     //   run=Running/Preparing/Active·Pausing  eval=Evaluating
     //   pause=Paused/AwaitingApproval/AwaitingUser/SuspendedByPolicy
@@ -6095,6 +6201,10 @@ void TerminalSessionController::Run() {
                 }
             }
             const std::vector<std::string> notices = session_agent_tool()->CompletionNoticeLines();
+            // goal 合流:子代理完成喂 goal 的证据/usage 账(没有活跃 goal
+            // 零影响);在 RunPeerTurn 之前记,证据落在"消化回流"那轮的
+            // 采证之前,checkpoint 引用得着。
+            NoteSubagentCompletionForGoal();
             {
                 lubancode::cli::TranscriptItem item;
                 item.id = static_cast<int>(transcript.size()) + 1;
