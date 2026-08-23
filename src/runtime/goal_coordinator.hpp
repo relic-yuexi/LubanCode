@@ -29,6 +29,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agent/goal_session.hpp"
 #include "runtime/goal_types.hpp"
 
 namespace lubancode::runtime::goal {
@@ -194,6 +195,16 @@ public:
     // ---- 恢复(第 4 期回放器入口) -------------------------------------------
     // 从事件账重建(装配层 replay 出的事件序)。坏事件跳过,不废整场。
     void ReplayEvent(const GoalCoordinatorEvent& event);
+
+    // 便捷口:/resume 从 LoadedSession::goal_events(存档行形状)整批回放。
+    // 返回 {回放条数, 跳过条数};feature 关时读到 active goal 落
+    // SuspendedByPolicy(不自动续跑,用户仍可查/导出/clear)。
+    struct ReplayStats {
+        int replayed = 0;
+        int skipped = 0;
+        bool suspended_by_policy = false;
+    };
+    ReplayStats RestoreFromArchive(const std::vector<lubancode::agent::GoalSessionEvent>& events);
 
     // 迟到事件(terminal 后到的旧 evaluator/子代理/Hook):只留账,不改
     // 状态。返回 true = 已吸收(留审计),false = 拒。

@@ -272,6 +272,10 @@ add_executable(lubancode_tests
   test_goal_evaluator.cpp
   # /goal 持久目标单:goal_checkpoint 工具(schema 门槛/证据白名单/旁路拒)。
   test_goal_checkpoint_tool.cpp
+  # /goal 持久目标单:compact 守恒的 goal snapshot(拼装/逐项校验/hash)。
+  test_goal_compact.cpp
+  # /goal 持久目标单:存档事件回放重建/feature 关挂起/terminal 不复活。
+  test_goal_restore.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 # 依赖守门(显示系统剥离单第八步):测试要现扫源码树,把源码根递进去。

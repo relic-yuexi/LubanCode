@@ -405,6 +405,9 @@ private:
     // goal 装配:coordinator 从 config+env 折 Options 安家,LedgerSink 接
     // session 存档(goal 事件行 append+flush;九道写盘栅栏的同步性)。
     void EnsureGoalCoordinator();
+    // /resume 后从存档的 goal 事件账回放重建(默认 paused;feature 关时
+    // active goal 落 SuspendedByPolicy)。
+    void RestoreGoalFromArchive();
     // ---- 上下文压缩的会话现场路(0.27.x 分层压缩第一期) ----
     // 压缩参数现场收集:窗口预算认压缩模型自己的目录条目,活动待办(未完
     // 成 todo 条目原文)进守恒校验——摘要漏一项 pending 就拒收,历史不动。
@@ -985,6 +988,10 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
             resume_moved_into_worktree = worktree_session.active();
             // 仓按恢复的那场开张(旧档若落过盘,artifact 继续可追)。
             OpenArtifactStore();
+            // 持久目标单:goal 事件账随档恢复(replay 重建 coordinator;默认
+            // paused-on-resume,不自动续跑,用户 /goal status 看账、/goal
+            // resume 显式续)。
+            RestoreGoalFromArchive();
             // resume 进来的旧档没标题:cheap 角色给续聊点个名(规格"会话标题
             // 与 resume 列表摘要"归 cheap)。
             MaybeGenerateSessionTitle(lubancode::agent::TaskKind::ResumeSummary);
@@ -3683,6 +3690,28 @@ void TerminalSessionController::EnsureGoalCoordinator() {
     goal_checkpoint_state_ = std::make_shared<lubancode::tools::GoalCheckpointState>();
 }
 
+void TerminalSessionController::RestoreGoalFromArchive() {
+    EnsureGoalCoordinator();
+    if (!session_store.active()) return;  // 没档可恢复
+    const auto bytes = lubancode::agent::ReadSessionFileBytes(session_store.file_path());
+    if (!bytes.has_value()) return;
+    const auto loaded = lubancode::agent::ParseSessionFile(*bytes);
+    if (!loaded.has_value() || loaded->goal_events.empty()) return;
+    const auto stats = goal_coordinator_->RestoreFromArchive(loaded->goal_events);
+    if (stats.replayed == 0 && stats.skipped == 0) return;
+    std::cout << theme.stats
+              << "目标账已随会话恢复(" << stats.replayed << " 条事件";
+    if (stats.skipped > 0) {
+        std::cout << "," << stats.skipped << " 条坏行跳过";
+    }
+    std::cout << ")。默认暂停续跑;查看 /goal status,续跑 /goal resume。" << theme.reset << "\n";
+    if (stats.suspended_by_policy) {
+        std::cout << theme.stats
+                  << "goals 功能当前未开启:目标挂起(SuspendedByPolicy),可查、可导出、可 clear,不自动跑。"
+                  << theme.reset << "\n";
+    }
+}
+
 CommandFlow TerminalSessionController::HandleGoalCommand(const lubancode::cli::ParsedGoalCommand& goal) {
     EnsureGoalCoordinator();
     const auto now_ms = [] {
@@ -4372,6 +4401,8 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
             EmitSessionHook(lubancode::hooks::HookEvent::SessionStart, nlohmann::json{{"source", "resume"}},
                             "resume");
             OpenArtifactStore();
+            // 持久目标单:goal 事件账随档恢复(默认 paused-on-resume)。
+            RestoreGoalFromArchive();
         },
         // /resume 的排队账重建(路径二):存档快照灌回会话层队列。
         [this](const std::vector<lubancode::agent::ArchivedQueueItem>& items) {

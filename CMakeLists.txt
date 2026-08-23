@@ -476,6 +476,8 @@ add_library(lubancode_runtime STATIC
   src/runtime/goal_evaluator.cpp
   # /goal 持久目标单:每轮喂执行模型的动态 GoalContext(纯函数)。
   src/runtime/goal_context.cpp
+  # /goal 持久目标单:compact 守恒的 goal snapshot(拼装/校验/hash)。
+  src/runtime/goal_compact.cpp
 )
 target_include_directories(lubancode_runtime PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src

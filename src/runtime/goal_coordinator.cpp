@@ -1092,6 +1092,37 @@ void GoalCoordinator::ReplayEvent(const GoalCoordinatorEvent& event) {
     // 未知未来事件:跳过(兼容)。
 }
 
+GoalCoordinator::ReplayStats GoalCoordinator::RestoreFromArchive(
+    const std::vector<lubancode::agent::GoalSessionEvent>& events) {
+    ReplayStats stats;
+    for (const auto& line : events) {
+        GoalCoordinatorEvent event;
+        event.event = line.event;
+        event.goal_id = line.goal_id;
+        event.iteration_id = line.iteration_id;
+        event.revision = line.revision;
+        event.payload = line.payload;
+        event.timestamp_ms = line.timestamp_ms;
+        try {
+            ReplayEvent(event);
+            stats.replayed += 1;
+        } catch (...) {
+            stats.skipped += 1;  // 坏事件跳过,不废整场
+        }
+    }
+    // feature 关:resume 读到非终态 goal 落 SuspendedByPolicy(可查/导出/
+    // clear,不自动续跑)。
+    if (!options_.goals_enabled && task_.has_value() && !IsGoalTerminal(task_->state)) {
+        task_->state = GoalState::SuspendedByPolicy;
+        task_->terminal_at_ms = 0;
+        task_->updated_at_ms = 0;
+        ready_.reset();
+        ready_dedupe_.clear();
+        stats.suspended_by_policy = true;
+    }
+    return stats;
+}
+
 bool GoalCoordinator::AbsorbLateArrival(const GoalCoordinatorEvent& event) {
     if (!task_.has_value() || !IsGoalTerminal(task_->state)) return false;
     late_arrivals_.push_back(event);
