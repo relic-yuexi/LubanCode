@@ -285,9 +285,10 @@ CommandSafety ClassifySegment(const std::string& segment, bool is_powershell, bo
 }  // namespace
 
 CommandSafety ClassifyCommand(const std::string& command, const std::string& shell) {
-    const bool is_powershell = (shell == "powershell");
+    const bool is_powershell = (shell == "powershell" || shell == "pwsh");
     if (!is_powershell && shell != "cmd") {
-        return CommandSafety::NeedsConfirm;  // 不认识的 shell,不猜
+        return CommandSafety::NeedsConfirm;  // 不认识的 shell(sh/bash 含),不猜——
+        // POSIX 侧走的是隔离确认链,不是这套 Windows 白名单;宁多问一句。
     }
     const bool single_quotes = is_powershell;  // cmd 不把单引号当引号,见顶注释
 
@@ -332,13 +333,14 @@ bool TokenHitsMainRoot(const std::string& token, const IsolationScope& scope) {
 
 std::optional<std::string> FindIsolationGitRedirect(const std::string& command, const std::string& shell,
                                                     const IsolationScope& scope) {
-    const bool is_powershell = (shell == "powershell");
-    if (!is_powershell && shell != "cmd" && shell != "sh") {
+    const bool is_powershell = (shell == "powershell" || shell == "pwsh");
+    if (!is_powershell && shell != "cmd" && shell != "sh" && shell != "bash") {
         // 认不得的 shell 不猜——但这里不是安全分类,是隔离识别;run_command
-        // 层已经按 shell 白名单拦过,走到这儿的只有这三种。
+        // 层已经按 shell 白名单拦过,走到这儿的只有这四种(pwsh 与 powershell
+        // 单引号语法同,bash 与 sh 同)。
         return std::nullopt;
     }
-    const bool single_quotes = is_powershell || shell == "sh";
+    const bool single_quotes = is_powershell || shell == "sh" || shell == "bash";
     const std::vector<std::string> segments = SplitSegments(command, single_quotes);
 
     // 先把每段切成词,顺便记下"这段首词是不是 git / cd"。

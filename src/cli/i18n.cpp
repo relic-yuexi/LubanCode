@@ -452,6 +452,8 @@ const Entry kZhCN[] = {
     {"confirm.detail.old", "    - 旧文本:"},
     {"confirm.detail.new", "    + 新文本:"},
     {"confirm.detail.command", "    命令({0}): {1}"},
+    {"confirm.detail.workdir", "    工作目录: {0}"},
+    {"confirm.detail.background", "    (后台运行:spawn 后立刻返回,输出写日志文件)"},
     {"confirm.detail.args", "    参数: {0}"},
     {"confirm.detail.omitted", "      ...(共 {0} 行,已省略其余)"},
 
@@ -1222,7 +1224,7 @@ const Entry kZhCN[] = {
     {"cmd.think.undeclared", "提示: 模型目录未声明该档,仍会发送。"},
 
     // ---- /doctor:本地兼容端 Effort 与前缀缓存诊断(2026-08 单) ----
-    {"doctor.usage.usage_line", "用法: /doctor effort [档位|unset] | /doctor cache [probe|usage] | /doctor agents"},
+    {"doctor.usage.usage_line", "用法: /doctor effort [档位|unset] | /doctor cache [probe|usage] | /doctor agents | /doctor shell"},
     {"doctor.overview.header", "诊断概览(不发请求,只看当前声明与结论):"},
     {"doctor.overview.effort", "  当前档位: "},
     {"doctor.overview.declared", "  档位声明: "},
@@ -2081,6 +2083,8 @@ const Entry kEn[] = {
     {"confirm.detail.old", "    - old text:"},
     {"confirm.detail.new", "    + new text:"},
     {"confirm.detail.command", "    command ({0}): {1}"},
+    {"confirm.detail.workdir", "    working directory: {0}"},
+    {"confirm.detail.background", "    (run in background: returns right after spawn, output goes to a log file)"},
     {"confirm.detail.args", "    args: {0}"},
     {"confirm.detail.omitted", "      ... ({0} lines total, rest omitted)"},
 

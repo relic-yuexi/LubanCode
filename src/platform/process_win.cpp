@@ -23,45 +23,6 @@ namespace lubancode::platform {
 
 namespace {
 
-// 读一个环境变量的当前值(找不到就是 std::nullopt)。RunProcess/Start 临时
-// 改 extra_env 之前先备份旧值,起完子进程立刻还原用。
-std::optional<std::wstring> GetEnvVarW(const std::wstring& name) {
-    const DWORD size = GetEnvironmentVariableW(name.c_str(), nullptr, 0);
-    if (size == 0) {
-        return std::nullopt;  // 不存在(或者是空串,简化处理不细分,还原时按"删掉"处理没什么大碍)
-    }
-    std::wstring buf(size, L'\0');
-    const DWORD written = GetEnvironmentVariableW(name.c_str(), buf.data(), size);
-    buf.resize(written);
-    return buf;
-}
-
-// 临时把 env 写进当前进程的环境变量。CreateProcessW 的 lpEnvironment 传
-// nullptr 时,子进程会继承父进程环境的一份快照——子进程一创建,这份快照
-// 就跟父进程后续怎么改环境变量没关系了,所以用完立刻还原不会影响已经起来
-// 的子进程。要求调用方单线程顺序调用,见头文件里的说明。
-struct EnvBackup {
-    std::wstring name;
-    std::optional<std::wstring> old_value;
-};
-
-std::vector<EnvBackup> ApplyEnv(const EnvPairs& extra_env) {
-    std::vector<EnvBackup> backups;
-    backups.reserve(extra_env.size());
-    for (const auto& [key, value] : extra_env) {
-        const std::wstring wkey = Utf8ToWide(key);
-        backups.push_back(EnvBackup{wkey, GetEnvVarW(wkey)});
-        SetEnvironmentVariableW(wkey.c_str(), Utf8ToWide(value).c_str());
-    }
-    return backups;
-}
-
-void RestoreEnv(const std::vector<EnvBackup>& backups) {
-    for (const auto& backup : backups) {
-        SetEnvironmentVariableW(backup.name.c_str(), backup.old_value.has_value() ? backup.old_value->c_str() : nullptr);
-    }
-}
-
 // Replace 模式的显式环境块:"KEY=VALUE\0KEY=VALUE\0\0" 的 UTF-16 串,交给
 // CreateProcessW 的 lpEnvironment——宿主环境一概不递(plugins 单第 8 步
 // 的最小环境硬保证)。空表 = 子进程一个变量都没有。
@@ -71,6 +32,87 @@ std::wstring BuildExplicitEnvironment(const EnvPairs& env) {
         block += Utf8ToWide(key);
         block += L'=';
         block += Utf8ToWide(value);
+        block += L'\0';
+    }
+    block += L'\0';  // 块尾双 \0
+    return block;
+}
+
+// 显式环境块(Inherit 模式,进程生命线单 P0 的并发修复):从父进程环境
+// 拷一份,按 Windows 大小写不敏感规则合并 extra_env,拼成排序过的
+// UTF-16 environment block 交给 lpEnvironment + CREATE_UNICODE_ENVIRONMENT。
+// 绝不改父进程环境——两只 Hook 同拍起进程也不会串值,宿主里其他线程也
+// 看不见临时变量。保住 "=C:" 这类 drive-current-directory 特殊项(它们
+// 没有值段,key 以 '=' 开头)。键名含 NUL/非法 '='、值含 NUL 一律拒绝,
+// 调用方收 spawn_failed。
+std::wstring BuildMergedEnvironmentBlock(const EnvPairs& extra_env, std::string* error_out) {
+    // 1) 父环境快照:GetEnvironmentStringsW 自带快照语义,不碰父进程。
+    std::vector<std::wstring> raw_entries;
+    const LPWCH parent_env = GetEnvironmentStringsW();
+    if (parent_env != nullptr) {
+        for (LPWCH p = parent_env; *p != L'\0'; p += wcslen(p) + 1) {
+            raw_entries.emplace_back(p);
+        }
+        FreeEnvironmentStringsW(parent_env);
+    }
+    // 2) extra_env 预检:键名带 NUL/空、含 '='(Windows 键名不许),值带 NUL。
+    for (const auto& [k, v] : extra_env) {
+        if (k.empty() || k.find('=') != std::string::npos || k.find('\0') != std::string::npos) {
+            if (error_out != nullptr) {
+                *error_out = "环境变量名非法(空/含 '=' 或 NUL): " + k;
+            }
+            return std::wstring();
+        }
+        if (v.find('\0') != std::string::npos) {
+            if (error_out != nullptr) {
+                *error_out = "环境变量值含 NUL: " + k;
+            }
+            return std::wstring();
+        }
+    }
+    // 3) 合并:普通项拆成 (key, value),extra_env 的键按大小写不敏感规则
+    // 覆盖父环境同键;"=C:" 这类 drive-current-directory 特殊项(key 以
+    // '=' 开头)没有值段,原样整串保留,不参与覆盖。
+    std::vector<std::pair<std::wstring, std::wstring>> merged;  // (key原样, value;特殊项 value 为空串且带 special 标记)
+    merged.reserve(raw_entries.size() + extra_env.size());
+    std::vector<std::wstring> special_entries;
+    for (const std::wstring& entry : raw_entries) {
+        const std::size_t eq = entry.find(L'=');
+        if (eq == std::wstring::npos || eq == 0) {
+            special_entries.push_back(entry);  // "=C:=D:\\path" 或无 '=' 的怪项
+            continue;
+        }
+        merged.emplace_back(entry.substr(0, eq), entry.substr(eq + 1));
+    }
+    for (const auto& [k, v] : extra_env) {
+        const std::wstring wk = Utf8ToWide(k);
+        const std::wstring wv = Utf8ToWide(v);
+        bool replaced = false;
+        for (auto& [mk, mv] : merged) {
+            if (mk.size() == wk.size() && _wcsicmp(mk.c_str(), wk.c_str()) == 0) {
+                mv = wv;
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) {
+            merged.emplace_back(wk, wv);
+        }
+    }
+    // 4) 排序(键大小写不敏感)后拼块:特殊项不带 '='(原串自带),普通项
+    // "KEY=VALUE"。块尾双 \0。
+    std::sort(merged.begin(), merged.end(), [](const auto& a, const auto& b) {
+        return _wcsicmp(a.first.c_str(), b.first.c_str()) < 0;
+    });
+    std::wstring block;
+    for (const std::wstring& special : special_entries) {
+        block += special;
+        block += L'\0';
+    }
+    for (const auto& [k, v] : merged) {
+        block += k;
+        block += L'=';
+        block += v;
         block += L'\0';
     }
     block += L'\0';  // 块尾双 \0
@@ -157,6 +199,111 @@ std::wstring BuildBackgroundLogPathW() {
     return (dir / filename).wstring();
 }
 
+// ---------------------------------------------------------------------------
+// BackgroundProcessHandle(进程生命线单 P0):Windows 每个后台任务一个
+// 专属 Job Object + 长持进程句柄。Stop 落 TerminateJobObject(整棵树),
+// Wait 落 WaitForSingleObject(句柄,不是 PID),退出码 GetExitCodeProcess
+// 精确可读——快进程死了也不怕句柄被系统收走。
+// ---------------------------------------------------------------------------
+
+struct BackgroundProcessHandle::Impl {
+    HANDLE process = nullptr;  // 长持:进程退出后仍可查询,直到本对象析构
+    HANDLE job = nullptr;      // 每任务专属 job:TerminateTree 收整棵树
+};
+
+BackgroundProcessHandle::BackgroundProcessHandle() : impl(std::make_unique<Impl>()) {}
+
+BackgroundProcessHandle::~BackgroundProcessHandle() {
+    if (impl->job != nullptr) {
+        CloseHandle(impl->job);
+    }
+    if (impl->process != nullptr) {
+        CloseHandle(impl->process);
+    }
+}
+
+bool BackgroundProcessHandle::Wait(int timeout_ms) {
+    if (impl->process == nullptr) {
+        return true;  // 没起过/已被收口:按已退出算,调用方读完成态
+    }
+    const DWORD wait_result =
+        WaitForSingleObject(impl->process, timeout_ms > 0 ? static_cast<DWORD>(timeout_ms) : 0);
+    if (wait_result != WAIT_OBJECT_0) {
+        return false;
+    }
+    // 退出:读精确退出码进完成态(一次)。
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!completion_known_) {
+        DWORD code = 0;
+        if (GetExitCodeProcess(impl->process, &code)) {
+            completion_.known = true;
+            completion_.exit_code = static_cast<int>(code);
+        } else {
+            // 读不到:如实标未知,绝不借 0 冒充成功。
+            completion_.known = false;
+        }
+        completion_known_ = true;
+    }
+    return true;
+}
+
+BackgroundProcessHandle::Completion BackgroundProcessHandle::Peek() const {
+    // 先查一眼(不阻塞),已退出还能顺手把完成态落了。
+    if (impl->process != nullptr) {
+        const DWORD wait_result = WaitForSingleObject(impl->process, 0);
+        if (wait_result == WAIT_OBJECT_0) {
+            const_cast<BackgroundProcessHandle*>(this)->Wait(0);
+        }
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    return completion_;
+}
+
+bool BackgroundProcessHandle::IsAlive() {
+    if (impl->process == nullptr) {
+        return false;
+    }
+    const DWORD wait_result = WaitForSingleObject(impl->process, 0);
+    if (wait_result == WAIT_OBJECT_0) {
+        Wait(0);
+        return false;
+    }
+    return true;
+}
+
+bool BackgroundProcessHandle::TerminateTree(int grace_ms) {
+    // 体面信号 Windows 没有 SIGTERM 那一层;grace_ms 只是给调用方语义上的
+    // 宽限(期间树内进程可自行清理——这里不另发 CTRL_BREAK,那需要控制台
+    // 共享,后台 NO_WINDOW 进程吃不到)。到点 TerminateJobObject 一锅端。
+    if (grace_ms > 0 && IsAlive()) {
+        const DWORD wait_result =
+            WaitForSingleObject(impl->process, static_cast<DWORD>(grace_ms));
+        if (wait_result == WAIT_OBJECT_0) {
+            Wait(0);  // 自己退了,收尾完成态
+            std::lock_guard<std::mutex> lock(mutex_);
+            completion_.terminated_by_stop = true;
+            return true;
+        }
+    }
+    bool ok = true;
+    if (impl->job != nullptr) {
+        if (!TerminateJobObject(impl->job, 1)) {
+            ok = false;  // 杀不动:如实报,调用方进 stop_failed 不盖章
+        }
+    } else if (impl->process != nullptr) {
+        if (!TerminateProcess(impl->process, 1)) {
+            ok = false;
+        }
+    }
+    if (ok && impl->process != nullptr) {
+        WaitForSingleObject(impl->process, 5000);
+        Wait(0);
+        std::lock_guard<std::mutex> lock(mutex_);
+        completion_.terminated_by_stop = true;
+    }
+    return ok;
+}
+
 }  // namespace
 
 std::wstring BuildCmdCommandLine(const std::string& user_command_utf8) {
@@ -169,9 +316,24 @@ std::wstring BuildCmdCommandLine(const std::string& user_command_utf8) {
 
 ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const EnvPairs& extra_env,
                           std::size_t max_output_bytes) {
+    return RunProcess(cmdline, timeout_ms, /*cancel=*/nullptr, extra_env, max_output_bytes);
+}
+
+ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std::atomic<bool>* cancel,
+                         const EnvPairs& extra_env, std::size_t max_output_bytes,
+                         const std::string& cwd_utf8) {
     ProcessResult result;
 
-    const std::vector<EnvBackup> backups = ApplyEnv(extra_env);
+    // 显式环境块(P0 并发修复):不再临时改宿主环境再还原——Hook
+    // dispatcher 给每只 handler 一条线程,老路并发会串值,宿主里其他线程
+    // 也会短暂看见临时变量。键值非法(含 NUL/键含 '=')直接 spawn_failed。
+    std::string env_error;
+    const std::wstring env_block = BuildMergedEnvironmentBlock(extra_env, &env_error);
+    if (!env_error.empty()) {
+        result.spawn_failed = true;
+        result.spawn_error = env_error;
+        return result;
+    }
 
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
@@ -183,7 +345,6 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const EnvP
     if (!CreatePipe(&read_pipe, &write_pipe, &sa, 0)) {
         result.spawn_failed = true;
         result.spawn_error = "创建管道失败(错误码 " + std::to_string(GetLastError()) + ")";
-        RestoreEnv(backups);
         return result;
     }
     // 父进程这边留着的读端不能被子进程继承,不然子进程退出后管道写端还有一份
@@ -204,13 +365,18 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const EnvP
     std::vector<wchar_t> cmdline_buf(cmdline.begin(), cmdline.end());
     cmdline_buf.push_back(L'\0');
 
+    // cwd 走 lpCurrentDirectory(P1 根治,前台半边):不向命令文本拼 cd。
+    std::wstring cwd_wide;
+    LPCWSTR current_directory = nullptr;
+    if (!cwd_utf8.empty()) {
+        cwd_wide = Utf8ToWide(cwd_utf8);
+        current_directory = cwd_wide.c_str();
+    }
+
     const BOOL ok = CreateProcessW(
         nullptr, cmdline_buf.data(), nullptr, nullptr, TRUE,
-        CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
-
-    // 子进程该拿到的句柄已经拿到了(继承来的),这里可以还原环境变量了——
-    // 不用等子进程跑完。
-    RestoreEnv(backups);
+        CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+        const_cast<LPWSTR>(env_block.c_str()), current_directory, &si, &pi);
 
     // 子进程已经拿到了自己那份继承来的句柄,父进程这边的可以关了。
     CloseHandle(write_pipe);
@@ -255,12 +421,20 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const EnvP
         while (!reader_stop.load() && ReadFile(read_pipe, buf, sizeof(buf), &n, nullptr) && n > 0) {
             if (output.size() < max_output_bytes) {
                 const std::size_t room = max_output_bytes - output.size();
-                output.append(buf, std::min<std::size_t>(n, room));
-                if (output.size() >= max_output_bytes && !output_over_limit.load()) {
+                const std::size_t take = std::min<std::size_t>(n, room);
+                output.append(buf, take);
+                // off-by-one 修正:恰好填到 max_output_bytes 不算"超过"。
+                // 读到了第 limit+1 个字节(总长超出一字节)才置 overflow。
+                if (static_cast<std::size_t>(n) > take && !output_over_limit.load()) {
                     output_over_limit.store(true);
                     if (overflow_event != nullptr) {
                         SetEvent(overflow_event);
                     }
+                }
+            } else if (!output_over_limit.load()) {
+                output_over_limit.store(true);
+                if (overflow_event != nullptr) {
+                    SetEvent(overflow_event);
                 }
             }
             // 超限之后继续读但直接丢弃——不读的话管道缓冲区一满,子进程会
@@ -269,13 +443,42 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const EnvP
         reader_done.store(true);
     });
 
+    // 取消旗是原子布尔,不是内核对象——不能直接进 WaitForMultipleObjects。
+    // cancel 非空时把等待切成 100ms 一片,每片醒来查一眼旗(与 POSIX 的
+    // 10ms 轮询同语义,粒度放宽到 100ms:ESC 到杀树的延迟人感知不到)。
+    // cancel 为空时保持原样的一次性等待。
     const DWORD wait_ms = timeout_ms > 0 ? static_cast<DWORD>(timeout_ms) : INFINITE;
     HANDLE wait_handles[2] = {pi.hProcess, overflow_event};
     const DWORD wait_count = overflow_event != nullptr ? 2 : 1;
-    const DWORD wait_result = WaitForMultipleObjects(wait_count, wait_handles, FALSE, wait_ms);
-    if (wait_result == WAIT_TIMEOUT || wait_result == WAIT_OBJECT_0 + 1) {
-        // 超时,或者输出超上限:都要把整个 Job 杀干净。
-        if (wait_result == WAIT_TIMEOUT) {
+    const auto started_at = std::chrono::steady_clock::now();
+    DWORD wait_result = WAIT_FAILED;
+    bool hit_cancel = false;
+    while (true) {
+        const DWORD slice =
+            (cancel != nullptr && (wait_ms == INFINITE || wait_ms > 100)) ? 100 : wait_ms;
+        wait_result = WaitForMultipleObjects(wait_count, wait_handles, FALSE, slice);
+        if (wait_result == WAIT_OBJECT_0) {
+            break;  // 进程退出
+        }
+        if (cancel != nullptr && cancel->load()) {
+            hit_cancel = true;
+            break;
+        }
+        if (wait_result == WAIT_TIMEOUT && slice != INFINITE && slice == wait_ms) {
+            break;  // 整段超时到点(cancel 为空的老路径)
+        }
+        if (wait_ms != INFINITE &&
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started_at)
+                    .count() >= static_cast<long long>(wait_ms)) {
+            wait_result = WAIT_TIMEOUT;
+            break;
+        }
+    }
+    if (hit_cancel || wait_result == WAIT_TIMEOUT || wait_result == WAIT_OBJECT_0 + 1) {
+        // 取消、超时,或者输出超上限:都要把整个 Job 杀干净。
+        if (hit_cancel) {
+            result.cancelled = true;
+        } else if (wait_result == WAIT_TIMEOUT) {
             result.timed_out = true;
         }
         if (job != nullptr) {
@@ -340,11 +543,32 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
                        timeout_ms, extra_env, max_output_bytes);
 }
 
+ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, const std::atomic<bool>* cancel,
+                         const EnvPairs& extra_env, std::size_t max_output_bytes, const std::string& cwd_utf8) {
+    if (argv.empty()) {
+        ProcessResult result;
+        result.spawn_failed = true;
+        result.spawn_error = "argv 不能为空";
+        return result;
+    }
+    return RunProcess(BuildProcessCommandLine(argv[0], std::vector<std::string>(argv.begin() + 1, argv.end())),
+                       timeout_ms, cancel, extra_env, max_output_bytes, cwd_utf8);
+}
+
 ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, const EnvPairs& extra_env,
                                std::size_t max_output_bytes) {
     ProcessResult result = RunProcess(BuildCmdCommandLine(command_utf8), timeout_ms, extra_env, max_output_bytes);
     // cmd.exe 走的是系统 ANSI 代码页(国内机器上是 GBK)往管道里写字节,
     // 捕获回来的原始字节要单独转一道才是合法 UTF-8。
+    result.output = AcpBytesToUtf8(result.output);
+    return result;
+}
+
+ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, const std::atomic<bool>* cancel,
+                              const EnvPairs& extra_env, std::size_t max_output_bytes,
+                              const std::string& cwd_utf8) {
+    ProcessResult result =
+        RunProcess(BuildCmdCommandLine(command_utf8), timeout_ms, cancel, extra_env, max_output_bytes, cwd_utf8);
     result.output = AcpBytesToUtf8(result.output);
     return result;
 }
@@ -358,7 +582,15 @@ static ProcessResult RunProcessWithStdinImpl(const std::wstring& cmdline, const 
                                              int timeout_ms, const EnvPairs& extra_env,
                                              std::size_t max_output_bytes) {
     ProcessResult result;
-    const std::vector<EnvBackup> backups = ApplyEnv(extra_env);
+    // 显式环境块(P0 并发修复,与 RunProcess/后台路径同一条):不改宿主
+    // 环境。Hook dispatcher 给每只 handler 一条线程,v2 hooks 走这条路。
+    std::string env_error;
+    const std::wstring env_block = BuildMergedEnvironmentBlock(extra_env, &env_error);
+    if (!env_error.empty()) {
+        result.spawn_failed = true;
+        result.spawn_error = env_error;
+        return result;
+    }
 
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
@@ -383,7 +615,6 @@ static ProcessResult RunProcessWithStdinImpl(const std::wstring& cmdline, const 
                 CloseHandle(h);
             }
         }
-        RestoreEnv(backups);
         return result;
     }
     // 父进程这边留着的读端不能被子进程继承,不然子进程退出后管道写端还有一份
@@ -400,7 +631,6 @@ static ProcessResult RunProcessWithStdinImpl(const std::wstring& cmdline, const 
         for (HANDLE h : {out_read, out_write, err_read, err_write}) {
             CloseHandle(h);
         }
-        RestoreEnv(backups);
         return result;
     }
     SetHandleInformation(stdin_write, HANDLE_FLAG_INHERIT, 0);
@@ -419,9 +649,8 @@ static ProcessResult RunProcessWithStdinImpl(const std::wstring& cmdline, const 
 
     const BOOL ok = CreateProcessW(
         nullptr, cmdline_buf.data(), nullptr, nullptr, TRUE,
-        CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
-
-    RestoreEnv(backups);
+        CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+        const_cast<LPWSTR>(env_block.c_str()), nullptr, &si, &pi);
 
     // 子进程已经拿到了自己那份继承来的句柄,这里可以关了。
     CloseHandle(out_write);
@@ -485,7 +714,9 @@ static ProcessResult RunProcessWithStdinImpl(const std::wstring& cmdline, const 
             if (!output_over_limit.load()) {
                 sink->append(buf, n);
                 const std::size_t total = captured_total.fetch_add(n) + n;
-                if (total >= max_output_bytes) {
+                // off-by-one 对齐:total == limit 不算超限;读到第 limit+1 个
+                // 字节(total > limit)才算。
+                if (total > max_output_bytes) {
                     output_over_limit.store(true);
                     if (overflow_event != nullptr) {
                         SetEvent(overflow_event);
@@ -601,10 +832,18 @@ ProcessResult RunShellCommandWithStdin(const std::string& command_utf8, const st
 // 日志文件的句柄上(CreateProcessW 层面重定向,不经过管道/读线程)。
 // ---------------------------------------------------------------------------
 
-BackgroundSpawnResult RunProcessBackground(const std::wstring& cmdline, const EnvPairs& extra_env) {
+BackgroundSpawnResult RunProcessBackground(const std::wstring& cmdline, const std::string& cwd_utf8,
+                                            const EnvPairs& extra_env) {
     BackgroundSpawnResult result;
 
-    const std::vector<EnvBackup> backups = ApplyEnv(extra_env);
+    // 显式环境块(P0 并发修复):不再临时改宿主环境。Hook dispatcher 给每只
+    // handler 一条线程,老路(改父环境→起子进程→还原)并发时会串值。
+    std::string env_error;
+    const std::wstring env_block = BuildMergedEnvironmentBlock(extra_env, &env_error);
+    if (!env_error.empty()) {
+        result.error = env_error;
+        return result;
+    }
 
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
@@ -614,70 +853,163 @@ BackgroundSpawnResult RunProcessBackground(const std::wstring& cmdline, const En
     const std::wstring log_path_w = BuildBackgroundLogPathW();
     // FILE_SHARE_READ:日志还在写的时候,模型那边"用普通命令看日志"
     // (Get-Content 之类)要能同时打开读,不能被这里的写句柄独占锁死。
-    HANDLE log_file = CreateFileW(log_path_w.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS,
+    // CREATE_NEW(独占):文件名虽带时间戳+计数器,共享临时目录里被人预置
+    // 同名/reparse point 时不沿用别人的文件;撞名换一个再来。
+    HANDLE log_file = CreateFileW(log_path_w.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_NEW,
                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+    std::wstring log_path_actual = log_path_w;
+    if (log_file == INVALID_HANDLE_VALUE) {
+        log_file = CreateFileW(BuildBackgroundLogPathW().c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_NEW,
+                               FILE_ATTRIBUTE_NORMAL, nullptr);
+        log_path_actual = BuildBackgroundLogPathW();
+    }
     if (log_file == INVALID_HANDLE_VALUE) {
         result.error = "创建日志文件失败(错误码 " + std::to_string(GetLastError()) + ")";
-        RestoreEnv(backups);
         return result;
     }
 
     HANDLE stdin_null = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ, &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdOutput = log_file;
-    si.hStdError = log_file;
-    si.hStdInput = stdin_null;
+    // 句柄白名单(P1):bInheritHandles=TRUE 会让当时所有可继承句柄都有机会
+    // 落进子进程;并发起进程时别处刚建的 pipe/file 可能被误继承。用
+    // STARTUPINFOEX + PROC_THREAD_ATTRIBUTE_HANDLE_LIST 只传 stdin/stdout/
+    // stderr 三只指定句柄。
+    STARTUPINFOEXW si{};
+    si.StartupInfo.cb = sizeof(si);
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdOutput = log_file;
+    si.StartupInfo.hStdError = log_file;
+    si.StartupInfo.hStdInput = stdin_null;
+
+    SIZE_T attr_size = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
+    std::vector<char> attr_buf(attr_size);
+    if (!InitializeProcThreadAttributeList(reinterpret_cast<PPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.data()), 1, 0,
+                                           &attr_size)) {
+        CloseHandle(log_file);
+        if (stdin_null != nullptr && stdin_null != INVALID_HANDLE_VALUE) {
+            CloseHandle(stdin_null);
+        }
+        result.error = "初始化进程属性表失败(错误码 " + std::to_string(GetLastError()) + ")";
+        return result;
+    }
+    HANDLE inherit_list[3] = {log_file, log_file, stdin_null};
+    const bool attr_ok = UpdateProcThreadAttribute(
+        reinterpret_cast<PPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.data()), 0,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit_list, sizeof(inherit_list), nullptr, nullptr) != FALSE;
 
     PROCESS_INFORMATION pi{};
     std::vector<wchar_t> cmdline_buf(cmdline.begin(), cmdline.end());
     cmdline_buf.push_back(L'\0');
 
-    const BOOL ok = CreateProcessW(nullptr, cmdline_buf.data(), nullptr, nullptr, TRUE,
-                                    CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
+    // cwd 走 lpCurrentDirectory(P1 根治):不再向命令文本前拼 cd。
+    std::wstring cwd_wide;
+    LPCWSTR current_directory = nullptr;
+    if (!cwd_utf8.empty()) {
+        cwd_wide = Utf8ToWide(cwd_utf8);
+        current_directory = cwd_wide.c_str();
+    }
 
-    RestoreEnv(backups);
+    BOOL ok = FALSE;
+    DWORD last_error = 0;
+    if (attr_ok) {
+        ok = CreateProcessW(nullptr, cmdline_buf.data(), nullptr, nullptr, TRUE,
+                            CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+                            const_cast<LPWSTR>(env_block.c_str()), current_directory,
+                            &si.StartupInfo, &pi);
+        last_error = GetLastError();
+    } else {
+        // 属性表更新失败(老系统):退化成普通继承,照常起(降级,不硬失败)。
+        ok = CreateProcessW(nullptr, cmdline_buf.data(), nullptr, nullptr, TRUE,
+                            CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+                            const_cast<LPWSTR>(env_block.c_str()), current_directory, &si.StartupInfo, &pi);
+        last_error = GetLastError();
+    }
+    DeleteProcThreadAttributeList(reinterpret_cast<PPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.data()));
     CloseHandle(log_file);
     if (stdin_null != nullptr && stdin_null != INVALID_HANDLE_VALUE) {
         CloseHandle(stdin_null);
     }
 
     if (!ok) {
-        result.error = "启动子进程失败(错误码 " + std::to_string(GetLastError()) + ")";
+        result.error = "启动子进程失败(错误码 " + std::to_string(last_error) + ")";
         return result;
     }
 
-    // 挂进会话级 job(懒创建的进程级单例,句柄不主动关,见其定义处注释),
-    // 不是命令级"用完就杀"的临时 job——这个子进程要活到模型自己收掉,或者
-    // lubancode 进程终止为止。AssignProcessToJobObject 失败也不致命,顶多
-    // 这个子进程逃逸出会话级收尾(比如它自己又被套进了别的 job),不影响
-    // 正常起停流程。
+    // 每任务专属 Job(P0):Stop 落 TerminateJobObject 收整棵树(npm run dev
+    // 的后代一起死)。会话级 Job 仍然挂一道(宿主退出兜底);进程可以同时
+    // 属于嵌套 Job(Vista+ 语义,Windows 8+ 默认允许)。绑不上专属 Job 时
+    // 如实降级——Stop 只能杀根,handle 上的树级杀不动。
+    auto handle = std::make_shared<BackgroundProcessHandle>();
+    handle->impl->process = pi.hProcess;
+    HANDLE task_job = CreateJobObjectW(nullptr, nullptr);
+    bool job_ok = false;
+    if (task_job != nullptr) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limit{};
+        limit.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (SetInformationJobObject(task_job, JobObjectExtendedLimitInformation, &limit, sizeof(limit))) {
+            job_ok = AssignProcessToJobObject(task_job, pi.hProcess) != FALSE;
+        }
+        if (!job_ok) {
+            CloseHandle(task_job);
+            task_job = nullptr;
+        }
+    }
+    handle->impl->job = task_job;
+    // 会话级兜底 job:宿主退出时收掉漏网的。失败不致命(顶多这条兜底没有)。
     AssignProcessToJobObject(GetBackgroundSessionJob(), pi.hProcess);
-    ResumeThread(pi.hThread);
+    if (ResumeThread(pi.hThread) == static_cast<DWORD>(-1)) {
+        // resume 失败(P1 全量验错):进程吊在 suspended,杀掉、关句柄、回错。
+        if (task_job != nullptr) {
+            TerminateJobObject(task_job, 1);
+        } else {
+            TerminateProcess(pi.hProcess, 1);
+        }
+        WaitForSingleObject(pi.hProcess, 3000);
+        result.error = "恢复子进程线程失败(错误码 " + std::to_string(GetLastError()) + ")";
+        return result;
+    }
     CloseHandle(pi.hThread);
 
     result.success = true;
     result.pid = pi.dwProcessId;
-    result.log_path = WideToUtf8(log_path_w);
-    // 会话级 job 已经接管这个子进程的生死,父进程这份进程句柄不需要留着。
-    CloseHandle(pi.hProcess);
+    result.log_path = WideToUtf8(log_path_actual);
+    result.handle = std::move(handle);
     return result;
 }
 
 BackgroundSpawnResult RunProcessBackground(const std::vector<std::string>& argv, const EnvPairs& extra_env) {
+    return RunProcessBackground(argv, std::string(), extra_env);
+}
+
+BackgroundSpawnResult RunProcessBackground(const std::wstring& cmdline, const EnvPairs& extra_env) {
+    return RunProcessBackground(cmdline, std::string(), extra_env);
+}
+
+BackgroundSpawnResult RunShellCommandBackground(const std::string& command_utf8, const EnvPairs& extra_env) {
+    return RunShellCommandBackground(command_utf8, std::string(), extra_env);
+}
+
+BackgroundSpawnResult RunProcessBackground(const std::vector<std::string>& argv, const std::string& cwd_utf8,
+                                            const EnvPairs& extra_env) {
     if (argv.empty()) {
         BackgroundSpawnResult result;
         result.error = "argv 不能为空";
         return result;
     }
     return RunProcessBackground(
-        BuildProcessCommandLine(argv[0], std::vector<std::string>(argv.begin() + 1, argv.end())), extra_env);
+        BuildProcessCommandLine(argv[0], std::vector<std::string>(argv.begin() + 1, argv.end())), cwd_utf8,
+        extra_env);
 }
 
-BackgroundSpawnResult RunShellCommandBackground(const std::string& command_utf8, const EnvPairs& extra_env) {
-    return RunProcessBackground(BuildCmdCommandLine(command_utf8), extra_env);
+BackgroundSpawnResult RunShellCommandBackground(const std::string& command_utf8, const std::string& cwd_utf8,
+                                                 const EnvPairs& extra_env) {
+    BackgroundSpawnResult result = RunProcessBackground(BuildCmdCommandLine(command_utf8), cwd_utf8, extra_env);
+    if (result.success) {
+        // cmd.exe 落盘的是 OEM/ACP 字节,background_output 出口按这个洗。
+        result.handle->encoding_hint = "oem-ansi";
+    }
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -704,11 +1036,21 @@ SpawnResult ChildProcess::Start(const std::string& command, const std::vector<st
     on_stdout_ = std::move(on_stdout);
     on_stderr_ = std::move(on_stderr);
 
-    // Inherit:老路(临时改宿主环境变量,起完还原)。Replace:显式环境块
-    // 交给 lpEnvironment,宿主环境一概不递,也不动宿主自己的环境变量。
+    // 环境块两种模式都走 lpEnvironment,不再动宿主环境变量(P0 并发修复:
+    // MCP/LSP 起多条长命子进程与 Hook 并发 spawn 同住一个宿主,老路会串值):
+    //   Replace:只含 env 条目(plugins 单第 8 步的最小环境硬保证);
+    //   Inherit:父环境快照 + env 覆盖(BuildMergedEnvironmentBlock)。
     const bool replace_env = env_mode == EnvMode::Replace;
-    const std::wstring explicit_env = replace_env ? BuildExplicitEnvironment(env) : std::wstring();
-    const std::vector<EnvBackup> backups = replace_env ? std::vector<EnvBackup>{} : ApplyEnv(env);
+    std::wstring explicit_env;
+    if (replace_env) {
+        explicit_env = BuildExplicitEnvironment(env);
+    } else {
+        std::string env_error;
+        explicit_env = BuildMergedEnvironmentBlock(env, &env_error);
+        if (!env_error.empty()) {
+            return SpawnResult{false, env_error, false};
+        }
+    }
 
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
@@ -723,13 +1065,11 @@ SpawnResult ChildProcess::Start(const std::string& command, const std::vector<st
     HANDLE stderr_read = nullptr;
 
     if (!CreatePipe(&stdin_read, &stdin_write, &sa, 0)) {
-        RestoreEnv(backups);
         return SpawnResult{false, "创建 stdin 管道失败(错误码 " + std::to_string(GetLastError()) + ")", false};
     }
     SetHandleInformation(stdin_write, HANDLE_FLAG_INHERIT, 0);
 
     if (!CreatePipe(&stdout_read, &stdout_write, &sa, 0)) {
-        RestoreEnv(backups);
         CloseHandle(stdin_read);
         CloseHandle(stdin_write);
         return SpawnResult{false, "创建 stdout 管道失败(错误码 " + std::to_string(GetLastError()) + ")", false};
@@ -737,7 +1077,6 @@ SpawnResult ChildProcess::Start(const std::string& command, const std::vector<st
     SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0);
 
     if (!CreatePipe(&stderr_read, &stderr_write, &sa, 0)) {
-        RestoreEnv(backups);
         CloseHandle(stdin_read);
         CloseHandle(stdin_write);
         CloseHandle(stdout_read);
@@ -778,15 +1117,9 @@ SpawnResult ChildProcess::Start(const std::string& command, const std::vector<st
         current_directory = cwd_wide.c_str();
     }
 
-    // lpEnvironment:Replace 模式交显式块(宿主环境不递);Inherit 传
-    // nullptr(继承快照,配合上面的 ApplyEnv/RestoreEnv 老路)。
-    // CREATE_UNICODE_ENVIRONMENT 告诉系统块是 UTF-16 的。
-    LPVOID environment = nullptr;
-    DWORD creation_flags = CREATE_NO_WINDOW | CREATE_SUSPENDED;
-    if (replace_env) {
-        environment = const_cast<wchar_t*>(explicit_env.c_str());
-        creation_flags |= CREATE_UNICODE_ENVIRONMENT;
-    }
+    // lpEnvironment:两种模式都交显式块(CREATE_UNICODE_ENVIRONMENT)。
+    LPVOID environment = const_cast<wchar_t*>(explicit_env.c_str());
+    DWORD creation_flags = CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT;
 
     BOOL ok = FALSE;
     DWORD error_code = 0;
@@ -804,8 +1137,6 @@ SpawnResult ChildProcess::Start(const std::string& command, const std::vector<st
                             creation_flags, environment, current_directory, &si, &pi);
     }
     error_code = GetLastError();
-
-    RestoreEnv(backups);
 
     // 子进程该拿到的句柄已经拿到了(继承来的),父进程这边的可以关了。
     CloseHandle(stdin_read);

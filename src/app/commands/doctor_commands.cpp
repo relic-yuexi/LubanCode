@@ -29,6 +29,7 @@
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
 #include "config/provider_catalog.hpp"
+#include "tools/shell_info.hpp"
 
 namespace lubancode::app {
 
@@ -666,6 +667,30 @@ void HandleDoctorCommand(const std::string& args, const DoctorContext& context) 
     }
     if (subcommand == "agents") {
         PrintAgentsMatrix(context);
+        return;
+    }
+    if (subcommand == "shell") {
+        // 进程生命线单 P2:shell 方言、版本、profile、TTY 语义明牌。
+        // 这些是产品边界,不是 bug——用户拿交互终端(Bash/Zsh/Fish、pwsh)
+        // 的经验套 run_command,落差在这里摊开说清。
+        std::cout << context.theme.stats << "run_command 的 shell 环境:" << context.theme.reset << "\n";
+        for (const auto& shell : lubancode::tools::ProbeShells()) {
+            std::cout << "  [" << shell.id << "] " << shell.executable;
+            if (!shell.version.empty()) {
+                std::cout << "  版本: " << shell.version;
+            }
+            std::cout << "\n";
+            std::cout << "    login shell: " << (shell.login_shell ? "是" : "否")
+                      << "  加载 profile: " << (shell.profile_loaded ? "是" : "否")
+                      << "  stdin TTY: " << (shell.stdin_is_tty ? "是" : "否")
+                      << "  stdout TTY: " << (shell.stdout_is_tty ? "是" : "否") << "\n";
+            if (!shell.notes.empty()) {
+                std::cout << "    " << shell.notes << "\n";
+            }
+        }
+        std::cout << "  shell 由操作系统提供,LubanCode 只拉进程,不随包附送 Bash;"
+                     "也不把 sh 偷换成 Bash、不把 powershell 偷换成 pwsh。\n";
+        std::cout.flush();
         return;
     }
     if (subcommand.empty()) {
