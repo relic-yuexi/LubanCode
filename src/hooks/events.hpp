@@ -31,6 +31,21 @@ enum class HookEvent {
     LoopTickStart,
     LoopTickEnd,
     LoopTaskStop,
+    // goal 单的生命周期事件(goal 单"Hooks"节的中立事件面):GoalCreated
+    // 在 created 事件已落后发(可 deny = 不许再往下走?——单子边界:Hook
+    // 不可直接写 Achieved,这里全部只给 additionalContext 与审计,没有
+    // permission_decision);GoalIterationStart/End 钉 iteration 的起止;
+    // GoalEvaluated 在判词落地后发;GoalPaused 是可恢复暂停的审计点;
+    // GoalCompleted 在 terminal 事件已落后跑(它失败不把 Achieved 改回
+    // Active,单子原文)。匹配字段:GoalCreated/GoalEvaluated/GoalPaused/
+    // GoalCompleted 匹配稳定短码(state/decision/reason),Iteration 起止
+    // 没有匹配对象。
+    GoalCreated,
+    GoalIterationStart,
+    GoalIterationEnd,
+    GoalEvaluated,
+    GoalPaused,
+    GoalCompleted,
 };
 
 // 配置键/协议字段里的规范名。
@@ -66,6 +81,18 @@ constexpr std::string_view ToString(HookEvent event) {
             return "LoopTickEnd";
         case HookEvent::LoopTaskStop:
             return "LoopTaskStop";
+        case HookEvent::GoalCreated:
+            return "GoalCreated";
+        case HookEvent::GoalIterationStart:
+            return "GoalIterationStart";
+        case HookEvent::GoalIterationEnd:
+            return "GoalIterationEnd";
+        case HookEvent::GoalEvaluated:
+            return "GoalEvaluated";
+        case HookEvent::GoalPaused:
+            return "GoalPaused";
+        case HookEvent::GoalCompleted:
+            return "GoalCompleted";
     }
     return "Unknown";
 }
@@ -102,6 +129,18 @@ constexpr bool ParseHookEvent(std::string_view name, HookEvent& out) {
         out = HookEvent::LoopTickEnd;
     } else if (name == "LoopTaskStop") {
         out = HookEvent::LoopTaskStop;
+    } else if (name == "GoalCreated") {
+        out = HookEvent::GoalCreated;
+    } else if (name == "GoalIterationStart") {
+        out = HookEvent::GoalIterationStart;
+    } else if (name == "GoalIterationEnd") {
+        out = HookEvent::GoalIterationEnd;
+    } else if (name == "GoalEvaluated") {
+        out = HookEvent::GoalEvaluated;
+    } else if (name == "GoalPaused") {
+        out = HookEvent::GoalPaused;
+    } else if (name == "GoalCompleted") {
+        out = HookEvent::GoalCompleted;
     } else {
         return false;
     }
@@ -135,6 +174,14 @@ constexpr bool EventHasMatcherField(HookEvent event) {
         // 匹配 outcome。
         case HookEvent::LoopTaskCreate:
         case HookEvent::LoopTickEnd:
+        // goal 单:GoalEvaluated 匹配 decision(continue/achieved/blocked/
+        // needs_user),GoalPaused 匹配 reason(no_progress/evaluator_failed/
+        // provider_failures/user/...),GoalCreated/GoalCompleted 匹配 state
+        // 稳定串。Iteration 起止没有匹配对象。
+        case HookEvent::GoalCreated:
+        case HookEvent::GoalEvaluated:
+        case HookEvent::GoalPaused:
+        case HookEvent::GoalCompleted:
             return true;
         case HookEvent::UserPromptSubmit:
         case HookEvent::SubagentStart:
@@ -143,6 +190,9 @@ constexpr bool EventHasMatcherField(HookEvent event) {
         // loop 单:拍起止/停任务没有匹配对象。
         case HookEvent::LoopTickStart:
         case HookEvent::LoopTaskStop:
+        // goal 单:iteration 起止没有匹配对象。
+        case HookEvent::GoalIterationStart:
+        case HookEvent::GoalIterationEnd:
             return false;
     }
     return false;
@@ -201,6 +251,18 @@ constexpr EventOutputCapabilities OutputCapabilities(HookEvent event) {
         case HookEvent::LoopTaskStop:
             // 拍已起/止:事实已发生,只能给反馈与
             // 追加上下文,不能倒回去。
+            return {false, false, true, false};
+        case HookEvent::GoalCreated:
+        case HookEvent::GoalIterationStart:
+        case HookEvent::GoalIterationEnd:
+        case HookEvent::GoalEvaluated:
+        case HookEvent::GoalPaused:
+        case HookEvent::GoalCompleted:
+            // goal 单边界:Hook 可补 additional context(下一轮的
+            // GoalContext 里带上)、留审计,不可拦(事件描述的是已落账的
+            // 状态变更,拦也拦不回),更不可直接写 Achieved(单子:仍要过
+            // evaluator 与硬门槛)。GoalCompleted 失败不把 Achieved 改回
+            // Active——can_block 恒 false 正是这条边界的类型化表达。
             return {false, false, true, false};
     }
     return {};

@@ -454,6 +454,11 @@ private:
     // 就合成 missing)→ 独立 evaluator → ApplyEvaluation → continue 则
     // ScheduleNextIteration。都在主线程安全边界跑,不开新轮(单飞铁律)。
     void CloseGoalIteration(const std::string& turn_id, bool turn_failed);
+    // goal 生命周期进 hook 分发(goal 单"Hooks"节):全部只给审计与
+    // additionalContext,没有 permission_decision(单子:Hook 不可直接写
+    // Achieved)。fields 带 goal_id/revision 一类对账字段。
+    void EmitGoalHook(lubancode::hooks::HookEvent event, nlohmann::json fields,
+                      const std::string& match_value);
     // 拍子收口:turn 终态回写 tick,算 outcome/退避/连败账。
     void FinishLoopTick(const std::string& tick_id, bool turn_failed, bool cancelled);
     // scheduler 攒的事件账落盘(append+flush);失败即 FailStore 熔断。
@@ -3990,6 +3995,10 @@ CommandFlow TerminalSessionController::HandleGoalCommand(const lubancode::cli::P
                   << "(状态 " << result.payload.value("state", std::string())
                   << ")。首轮将先拟合同(做什么/不动什么/拿什么验/何时停),合同冻结后才开始排轮。"
                   << theme.reset << "\n";
+        EmitGoalHook(lubancode::hooks::HookEvent::GoalCreated,
+                     nlohmann::json{{"goal_id", result.payload.value("goal_id", std::string())},
+                                    {"objective_preview", goal.objective.substr(0, 120)}},
+                     /*match_value=*/result.payload.value("state", std::string()));
         return CommandFlow::Continue;
     }
 
@@ -4023,6 +4032,12 @@ CommandFlow TerminalSessionController::HandleGoalCommand(const lubancode::cli::P
             std::cout << "pause 已请求;正在跑的轮在下一安全边界收口。";
         }
         std::cout << theme.reset << "\n";
+        EmitGoalHook(lubancode::hooks::HookEvent::GoalPaused,
+                     nlohmann::json{{"goal_id", goal_coordinator_->task() != nullptr
+                                                     ? goal_coordinator_->task()->id
+                                                     : std::string()},
+                                    {"immediate", result.payload.value("immediate", true)}},
+                     /*match_value=*/"user");
         return CommandFlow::Continue;
     }
 
@@ -4398,6 +4413,12 @@ void TerminalSessionController::PumpGoalContinuation(std::int64_t now_ms) {
     }
     std::cout << theme.stats << "[goal " << started.iteration.goal_id << " iteration "
               << started.iteration.index << "]" << theme.reset << "\n";
+    EmitGoalHook(lubancode::hooks::HookEvent::GoalIterationStart,
+                 nlohmann::json{{"goal_id", started.iteration.goal_id},
+                                {"iteration_id", started.iteration.id},
+                                {"iteration_index", started.iteration.index},
+                                {"dedupe_key", started.dedupe_key}},
+                 /*match_value=*/std::string());
     bool turn_failed = false;
     RunUserTurn(started.synthetic_text, &turn_failed);
     // 收口:completion-driven 泵的真接线——采证/checkpoint/evaluator/
@@ -4405,6 +4426,12 @@ void TerminalSessionController::PumpGoalContinuation(std::int64_t now_ms) {
     CloseGoalIteration("goal-turn", turn_failed);
     goal_active_iteration_.clear();
     goal_fairness_.NoteOtherWorkRan();
+    EmitGoalHook(lubancode::hooks::HookEvent::GoalIterationEnd,
+                 nlohmann::json{{"goal_id", started.iteration.goal_id},
+                                {"iteration_id", started.iteration.id},
+                                {"iteration_index", started.iteration.index},
+                                {"turn_failed", turn_failed}},
+                 /*match_value=*/std::string());
 }
 
 void TerminalSessionController::CloseGoalIteration(const std::string& turn_id, bool turn_failed) {
@@ -4562,6 +4589,9 @@ void TerminalSessionController::CloseGoalIteration(const std::string& turn_id, b
         std::cout << theme.error << "goal evaluator 失败: " << evaluation.error()
                   << ";目标转暂停(/goal resume 续)。" << theme.reset << "\n";
         (void)goal_coordinator_->NoteEvaluatorFailed(evaluation.error(), now_ms);
+        EmitGoalHook(lubancode::hooks::HookEvent::GoalPaused,
+                     nlohmann::json{{"goal_id", task_now->id}, {"error", evaluation.error()}},
+                     /*match_value=*/"evaluator_failed");
         return;
     }
     goal_coordinator_->AddUsage(evaluation->usage);
@@ -4579,6 +4609,23 @@ void TerminalSessionController::CloseGoalIteration(const std::string& turn_id, b
     if (evaluation->evaluation.overridden_achieved) {
         std::cout << theme.stats << "  (evaluator 判 achieved 被程序门槛改判 continue: "
                   << evaluation->evaluation.override_reason << ")" << theme.reset << "\n";
+    }
+    EmitGoalHook(lubancode::hooks::HookEvent::GoalEvaluated,
+                 nlohmann::json{{"goal_id", task_now->id},
+                                {"iteration_id", checkpoint_result.payload.value("iteration_id", std::string())},
+                                {"summary", evaluation->evaluation.summary.substr(0, 600)},
+                                {"confidence", evaluation->evaluation.confidence}},
+                 /*match_value=*/decision);
+    const auto* after = goal_coordinator_->task();
+    if (after != nullptr && lubancode::runtime::goal::IsGoalTerminal(after->state)) {
+        // terminal 事件已落,GoalCompleted 在其后跑(单子:它失败不把
+        // Achieved 改回 Active——OutputCapabilities 的 can_block=false
+        // 正是这条边界)。
+        EmitGoalHook(lubancode::hooks::HookEvent::GoalCompleted,
+                     nlohmann::json{{"goal_id", after->id},
+                                    {"decision", decision},
+                                    {"iterations", after->counters.iterations_started}},
+                     /*match_value=*/lubancode::runtime::goal::ToString(after->state));
     }
     if (applied.payload.value("schedule_next", false)) {
         const auto schedule = goal_coordinator_->ScheduleNextIteration(now_ms);
@@ -5301,6 +5348,27 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
                const std::optional<lubancode::agent::PlanReviewEvent>& review) {
             RestorePlanStateFrom(mode_event, plans, review);
         }};
+}
+
+void TerminalSessionController::EmitGoalHook(lubancode::hooks::HookEvent event, nlohmann::json fields,
+                                             const std::string& match_value) {
+    // goal 单"Hooks"节:中立事件面,matcher 可订阅;全部只给审计与
+    // additionalContext(OutputCapabilities 已在 events.hpp 定死:没有
+    // permission_decision、can_block 恒 false——Hook 不可直接写 Achieved,
+    // GoalCompleted 失败不把 Achieved 改回 Active)。goal_id/revision 由
+    // 调用方塞进 fields,这里只管空定义表早退。
+    lubancode::hooks::HookDispatcher* dispatcher = lubancode::app::HookRuntime();
+    if (dispatcher == nullptr || dispatcher->Empty() || !dispatcher->HasHandlersFor(event)) {
+        return;
+    }
+    if (session_store.active()) {
+        fields["session_id"] = session_store.session_id();
+    }
+    lubancode::hooks::HookPayload payload;
+    payload.event = event;
+    payload.fields = std::move(fields);
+    payload.match_value = match_value;
+    dispatcher->Emit(event, payload);
 }
 
 void TerminalSessionController::EmitSessionHook(lubancode::hooks::HookEvent event, nlohmann::json fields,
