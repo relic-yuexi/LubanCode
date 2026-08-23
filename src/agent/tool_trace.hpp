@@ -66,6 +66,7 @@ enum class ToolOutcome {
     SchemaRejected,
     HookDenied,
     PermissionDeclined,
+    ModeDenied,           // Plan 模式硬闸拒绝(只读研究单):不冒充用户拒绝
     CancelledBeforeStart, // 未轮到(ESC)或闸前被收掉:没越过执行边界
     CancelledDuringRun,
     SpawnFailed,

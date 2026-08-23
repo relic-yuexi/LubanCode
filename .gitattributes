@@ -1,6 +1,12 @@
 # 仓库内统一 LF,检出不转换,跨平台不吵架
 * text=auto eol=lf
 
+# C/C++ 源码须强制按文本归一；text=auto 会把混入裸 CR 的大文件误判成二进制。
+*.c text eol=lf
+*.h text eol=lf
+*.cpp text eol=lf
+*.hpp text eol=lf
+
 # Windows 专属文件保留 CRLF
 *.bat text eol=crlf
 *.cmd text eol=crlf

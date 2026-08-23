@@ -56,6 +56,7 @@ enum class SlashCommand {
     Workflow,  // /workflow list|show|graph|validate|run|resume|cancel|history|...:自然语言编排的图
     Trace,     // /trace [errors|<execution_id>|toolu <id>|turn <id>]:工具逐枚追踪账(逐枚追踪单)
     Goal,      // /goal [objective|status|edit|pause|resume|clear]:持久目标(持久目标单)
+    Plan,      // /plan [正文|status|off|review]:只读研究模式(Plan 模式单)
     WorkflowAlias,  // /<workflow-alias> <args>:直呼已装 Workflow(运行时查 catalog)
     Unknown,  // 以 / 开头,但不认得这个命令
 };
@@ -194,6 +195,23 @@ struct ParsedGoalCommand {
 };
 
 ParsedGoalCommand ParseGoalCommand(const std::string& args);
+// /plan 的二级参数(Plan 模式单):纯解析,语义分四路——
+//   Enter          裸敲 /plan:切进 Plan;description 留空
+//   EnterWithTask  /plan <正文>:切进 Plan 并把正文当规划请求(description)
+//   Status         /plan status:看当前档、最近计划与审批状态
+//   Off            /plan off:不批准计划,单纯退到 Default
+//   Review         /plan review:重开最近计划的审阅框
+//   Invalid        认不得的子词(usage 交调用方打)
+// 命令只在空闲 composer 生效;任务跑着时不半腰切(会话层拦,这里只拆词)。
+// ---------------------------------------------------------------------------
+enum class PlanCommandAction { Invalid, Enter, EnterWithTask, Status, Off, Review };
+
+struct ParsedPlanCommand {
+    PlanCommandAction action = PlanCommandAction::Invalid;
+    std::string description;  // EnterWithTask 时的规划请求正文(保留空白)
+};
+
+ParsedPlanCommand ParsePlanCommand(const std::string& args);
 
 // /provider remove 的会话级护栏。拆成纯函数，命令处理与单测共用，免得
 // "当前端不许删"这条规矩散在 main 的 IO 分支里。

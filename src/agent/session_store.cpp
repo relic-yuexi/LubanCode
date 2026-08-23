@@ -468,6 +468,125 @@ std::optional<std::vector<ArchivedQueueItem>> ParseQueueEvent(const std::string&
 }
 
 // ---------------------------------------------------------------------------
+// mode / plan / plan_review 事件(Plan 模式单)
+// ---------------------------------------------------------------------------
+
+std::string SerializeModeEvent(const ModeEvent& event, const std::string& ts) {
+    nlohmann::json j;
+    j["type"] = "mode_v1";
+    j["mode"] = event.mode;
+    j["reason"] = event.reason;
+    j["revision"] = event.revision;
+    j["ts"] = ts;
+    return platform::DumpJsonSanitized(j);
+}
+
+std::optional<ModeEvent> ParseModeEvent(const std::string& line) {
+    const nlohmann::json j = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+    if (!j.is_object() || j.value("type", std::string()) != "mode_v1") {
+        return std::nullopt;
+    }
+    ModeEvent event;
+    if (!j.contains("mode") || !j["mode"].is_string()) {
+        return std::nullopt;
+    }
+    event.mode = j["mode"].get<std::string>();
+    if (event.mode != "plan" && event.mode != "default") {
+        return std::nullopt;  // 认不得的档位当坏行,不猜
+    }
+    if (j.contains("reason") && j["reason"].is_string()) {
+        event.reason = j["reason"].get<std::string>();
+    }
+    if (j.contains("revision") && j["revision"].is_number_unsigned()) {
+        event.revision = j["revision"].get<std::uint64_t>();
+    }
+    return event;
+}
+
+std::string SerializePlanEvent(const PlanEvent& event, const std::string& ts) {
+    nlohmann::json j;
+    j["type"] = "plan_v1";
+    j["plan_id"] = event.plan_id;
+    j["revision"] = event.revision;
+    j["state"] = event.state;
+    j["sha256"] = event.sha256;
+    if (!event.markdown.empty()) {
+        j["markdown"] = event.markdown;
+    }
+    if (!event.artifact_ref.empty()) {
+        j["artifact_ref"] = event.artifact_ref;
+    }
+    if (!event.turn_id.empty()) {
+        j["turn_id"] = event.turn_id;
+    }
+    j["ts"] = ts;
+    return platform::DumpJsonSanitized(j);  // 计划正文是模型产出,坏串窄边界同消息行
+}
+
+std::optional<PlanEvent> ParsePlanEvent(const std::string& line) {
+    const nlohmann::json j = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+    if (!j.is_object() || j.value("type", std::string()) != "plan_v1") {
+        return std::nullopt;
+    }
+    PlanEvent event;
+    const auto read_str = [&j](const char* key, std::string& out) {
+        if (j.contains(key) && j[key].is_string()) {
+            out = j[key].get<std::string>();
+        }
+    };
+    read_str("plan_id", event.plan_id);
+    read_str("state", event.state);
+    read_str("sha256", event.sha256);
+    read_str("markdown", event.markdown);
+    read_str("artifact_ref", event.artifact_ref);
+    read_str("turn_id", event.turn_id);
+    if (event.plan_id.empty() || event.sha256.empty()) {
+        return std::nullopt;  // 没身份/没锚的计划行救不了,跳行不废场
+    }
+    if (j.contains("revision") && j["revision"].is_number_unsigned()) {
+        event.revision = j["revision"].get<std::uint64_t>();
+    }
+    return event;
+}
+
+std::string SerializePlanReviewEvent(const PlanReviewEvent& event, const std::string& ts) {
+    nlohmann::json j;
+    j["type"] = "plan_review_v1";
+    j["plan_id"] = event.plan_id;
+    j["revision"] = event.revision;
+    j["decision"] = event.decision;
+    if (!event.execution_permission.empty()) {
+        j["execution_permission"] = event.execution_permission;
+    }
+    j["ts"] = ts;
+    return platform::DumpJsonSanitized(j);
+}
+
+std::optional<PlanReviewEvent> ParsePlanReviewEvent(const std::string& line) {
+    const nlohmann::json j = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+    if (!j.is_object() || j.value("type", std::string()) != "plan_review_v1") {
+        return std::nullopt;
+    }
+    PlanReviewEvent event;
+    const auto read_str = [&j](const char* key, std::string& out) {
+        if (j.contains(key) && j[key].is_string()) {
+            out = j[key].get<std::string>();
+        }
+    };
+    read_str("plan_id", event.plan_id);
+    read_str("decision", event.decision);
+    read_str("execution_permission", event.execution_permission);
+    if (event.plan_id.empty() ||
+        (event.decision != "approved" && event.decision != "rejected" && event.decision != "continued")) {
+        return std::nullopt;
+    }
+    if (j.contains("revision") && j["revision"].is_number_unsigned()) {
+        event.revision = j["revision"].get<std::uint64_t>();
+    }
+    return event;
+}
+
+// ---------------------------------------------------------------------------
 // 会话 id
 // ---------------------------------------------------------------------------
 
@@ -871,6 +990,32 @@ std::optional<LoadedSession> ParseSessionFile(const std::string& content) {
                 auto goal_event = ParseGoalEvent(line);
                 if (goal_event.has_value()) {
                     session.goal_events.push_back(std::move(*goal_event));
+            if (type == "mode_v1") {
+                // Plan 模式单:最后一条胜,决定 resume 档位。坏行跳过——mode
+                // 已写 Plan、这行坏了,按上一条有效 mode 恢复,不废整场。
+                auto mode = ParseModeEvent(line);
+                if (mode.has_value()) {
+                    session.last_mode_event = std::move(*mode);
+                } else {
+                    session.skipped_lines += 1;
+                }
+                continue;
+            }
+            if (type == "plan_v1") {
+                // 计划成品逐稿留账(全部收,/resume 侧按 plan_id 取最高
+                // revision 并对审批做 stale 判定);坏行跳过不废整场。
+                auto plan = ParsePlanEvent(line);
+                if (plan.has_value()) {
+                    session.plan_events.push_back(std::move(*plan));
+                } else {
+                    session.skipped_lines += 1;
+                }
+                continue;
+            }
+            if (type == "plan_review_v1") {
+                auto review = ParsePlanReviewEvent(line);
+                if (review.has_value()) {
+                    session.last_plan_review = std::move(*review);
                 } else {
                     session.skipped_lines += 1;
                 }
@@ -1114,6 +1259,11 @@ bool SessionStore::AppendGoalEvent(const GoalSessionEvent& event) {
         return false;
     }
     out_ << SerializeGoalEvent(event, NowTimestamp()) << "\n";
+bool SessionStore::AppendModeEvent(const ModeEvent& event) {
+    if (!out_.is_open()) {
+        return false;
+    }
+    out_ << SerializeModeEvent(event, NowTimestamp()) << "\n";
     out_.flush();
     return out_.good();
 }
@@ -1123,6 +1273,20 @@ bool SessionStore::AppendGoalEvidence(const GoalEvidenceRecord& evidence) {
         return false;
     }
     out_ << SerializeGoalEvidence(evidence, NowTimestamp()) << "\n";
+bool SessionStore::AppendPlanEvent(const PlanEvent& event) {
+    if (!out_.is_open()) {
+        return false;
+    }
+    out_ << SerializePlanEvent(event, NowTimestamp()) << "\n";
+    out_.flush();
+    return out_.good();
+}
+
+bool SessionStore::AppendPlanReviewEvent(const PlanReviewEvent& event) {
+    if (!out_.is_open()) {
+        return false;
+    }
+    out_ << SerializePlanReviewEvent(event, NowTimestamp()) << "\n";
     out_.flush();
     return out_.good();
 }

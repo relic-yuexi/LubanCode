@@ -65,6 +65,11 @@ enum class ClientCommandKind {
     PauseGoal,
     ResumeGoal,
     ClearGoal,
+    // Plan 模式(只读研究硬闸单):协作模式切换与计划审阅。slash 的 /plan
+    // 在终端适配层翻成这里的命令;远端前端直接发 typed 命令,不复制业务。
+    SetCollaborationMode,
+    ReviewPlan,
+    ReopenPlanReview,
     // 终端专属动作(/copy、清屏、焦点……)不进协议,留在前端,这里没有
     // 它们的位置——单子"五"定死的边界。
 };
@@ -94,6 +99,13 @@ struct ClientCommand {
     //   PauseGoal/ResumeGoal/ClearGoal payload.expected_revision 同上;
     //     ClearGoal.payload.confirm == true 才动手(确认策略归调用方)
     //   GetGoal 回执 payload.goal = coordinator.Status() 的结构化账
+    //   SetCollaborationMode.value   "plan"/"default";payload.reason 是稳定
+    //     短码(slash/approved/off);切入 Plan 时 payload.permission_before_plan
+    //     带当前确认档(restore 用)。
+    //   ReviewPlan.payload  plan_id/plan_revision/sha256 + decision
+    //     ("approved_confirm"/"approved_auto"/"rejected"/"continued");批准
+    //     须同时匹配 id/revision/hash,不匹配 receipt 回 stale_request_id。
+    //   ReopenPlanReview  无参:重开最近计划的审阅框(有稿才受理)。
     // 不匹配 kind 的字段序列化照带,消费方按 kind 取用。
     std::string text;
     std::string value;

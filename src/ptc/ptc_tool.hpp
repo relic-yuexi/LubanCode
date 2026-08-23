@@ -51,6 +51,10 @@ public:
         std::function<std::vector<std::string>(const std::string& tool_use_id, const std::string& name,
                                                const nlohmann::json& input, const tools::Tool::Result& result)>
             on_post_tool_use_hook;
+        // Plan 模式(只读研究硬闸单):PTC 生成的 stub 调用走同一 ModePolicy
+        // ——单子明令"PTC 生成的调用也走 RunOneTool 与 ModePolicy,不能只
+        // 拦 JSON tool calling"。不设 = 不转发(旧行为)。
+        std::function<std::string(const std::string& tool_name, const nlohmann::json& input)> on_mode_policy;
         const std::atomic<bool>* cancel = nullptr;  // Esc 取消链(每轮的旗子)
     };
 

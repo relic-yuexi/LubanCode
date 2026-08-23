@@ -19,7 +19,13 @@ string(APPEND _header "namespace lubancode::agent::embedded {\n\n")
 
 # 一组模块:group_prefix 是常量名前缀(kCore/kFeature/kPlatform),subdir 是
 # src/prompts 下的子目录;array_name 非空时,额外生成该组的指针数组。
+# in_all_modules(FALSE) 时不进 kAllModules(用户可改回路)——modes/ 的
+# 模式模板用这一档:拼装侧恒用嵌入版,不播种用户目录(单子:mode
+# instructions 宿主内置,不给项目覆盖)。
 function(embed_group group_prefix subdir array_name)
+  set(_options "")
+  set(_one_value IN_ALL_MODULES)
+  cmake_parse_arguments(PARSE_ARGV 3 ARG "${_options}" "${_one_value}" "")
   file(GLOB _files "${PROMPTS_DIR}/${subdir}/*.md")
   list(SORT _files)
   set(_names "")
@@ -42,7 +48,9 @@ function(embed_group group_prefix subdir array_name)
     list(APPEND _names "${_name}")
     string(APPEND _local "// ${subdir}/${_stem}.md\n")
     string(APPEND _local "inline constexpr const char ${_name}[] = R\"LUBAN_MD(${_content})LUBAN_MD\";\n\n")
-    string(APPEND _local_entries "    {\"${subdir}/${_stem}.md\", ${_name}},\n")
+    if(NOT DEFINED ARG_IN_ALL_MODULES OR ARG_IN_ALL_MODULES)
+      string(APPEND _local_entries "    {\"${subdir}/${_stem}.md\", ${_name}},\n")
+    endif()
   endforeach()
   if(NOT _names)
     message(FATAL_ERROR "目录里一个可嵌入的 .md 都没有: ${PROMPTS_DIR}/${subdir}")
@@ -61,6 +69,10 @@ set(_entries "")
 embed_group(kCore core kCoreModules)
 embed_group(kFeature features "")
 embed_group(kPlatform platforms "")
+# Plan 模式单:modes/ 的两份模式模板(default/plan)。不进 kAllModules 的
+# "用户文件优先"回路——拼装侧(ModeInstructionSegment)恒用嵌入版,不播种
+# 用户目录(单子:mode instructions 宿主内置,不给项目覆盖)。
+embed_group(kMode modes kModeModules IN_ALL_MODULES FALSE)
 
 string(APPEND _header "${_body}")
 string(APPEND _header "// 全部模块的 {相对路径, 嵌入正文} 总表,分组内按文件名排序、组序\n")

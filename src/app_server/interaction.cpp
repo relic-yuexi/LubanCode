@@ -238,7 +238,7 @@ std::shared_ptr<agent::InteractionFuture> InteractionLedger::AskApproval(
 }
 
 std::shared_ptr<PendingFuture> InteractionLedger::AskQuestion(
-    const runtime::QuestionRequest& request, const std::string& turn_id, int question_index,
+    const runtime::QuestionRequest& request, const std::string& turn_id,
     const std::function<void(std::string_view method, const nlohmann::json& params)>& emit) {
     // 提问与审批共用同一发号局(同一张 pending 表、同一套四态,单子原文);
     // 前缀同为 req-,前端不须按前缀分拣。

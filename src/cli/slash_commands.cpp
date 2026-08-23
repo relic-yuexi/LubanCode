@@ -163,6 +163,9 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         // 持久目标单:/goal 是正门(objective/status/edit/pause/resume/clear
         // 的二级解析在 ParseGoalCommand,这里只认词)。
         parsed.command = SlashCommand::Goal;
+    } else if (lower == "/plan") {
+        // Plan 模式单:/plan 是正门(裸敲/status/off/review/带正文)。
+        parsed.command = SlashCommand::Plan;
     } else if (lower == "/workflow") {
         // Workflows 自然语言编排单:/workflow 是正门(list/show/graph/
         // validate/run/...),子命令解析在 workflow 层,这里只认词。
@@ -586,6 +589,36 @@ ParsedGoalCommand ParseGoalCommand(const std::string& args) {
     // 之外的普通目标文本,原样收)。
     parsed.action = GoalCommandAction::Create;
     parsed.objective = trimmed;
+ParsedPlanCommand ParsePlanCommand(const std::string& args) {
+    ParsedPlanCommand parsed;
+    const std::string trimmed = Trim(args);
+    if (trimmed.empty()) {
+        parsed.action = PlanCommandAction::Enter;
+        return parsed;
+    }
+    // 第一个词是子命令就分路;认不得的子词按"带正文的规划请求"处理——
+    // "/plan 帮我设计缓存层"的正文首个词不是四枚子词,照 EnterWithTask。
+    const std::size_t space = trimmed.find_first_of(" \t");
+    const std::string first = ToLower(space == std::string::npos ? trimmed : trimmed.substr(0, space));
+    if (space == std::string::npos) {
+        // 单词:只可能是子命令(带正文至少俩词,正文本身一个词的场合见下)。
+        if (first == "status" || first == "off" || first == "review") {
+            parsed.action = first == "status"  ? PlanCommandAction::Status
+                            : first == "off"   ? PlanCommandAction::Off
+                                                 : PlanCommandAction::Review;
+            return parsed;
+        }
+        // 整个 args 是一个词但不是子词:当规划请求正文(如 "/plan 查登录死锁")。
+        parsed.action = PlanCommandAction::EnterWithTask;
+        parsed.description = trimmed;
+        return parsed;
+    }
+    if (first == "status" || first == "off" || first == "review") {
+        // 子词后面还有词:usage 说不过去,Invalid(不悄悄把 "status foo" 当正文)。
+        return parsed;
+    }
+    parsed.action = PlanCommandAction::EnterWithTask;
+    parsed.description = trimmed;
     return parsed;
 }
 
@@ -640,6 +673,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/keymap", tr("slash.desc.keymap")},
             {"/workflow", tr("slash.desc.workflow")},
             {"/goal", tr("slash.desc.goal")},
+            {"/plan", tr("slash.desc.plan")},
         };
     }
     return commands;

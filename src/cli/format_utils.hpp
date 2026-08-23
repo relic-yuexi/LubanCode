@@ -70,6 +70,10 @@ struct StatusPanelData {
     // 也该看得见;规格 UI 节)。取值 "ptc" / "auto→json" / "auto→ptc" /
     // "ptc→json(原因)"。tool_calling=json(默认)时留空,状态行零变化。
     std::string tools;
+    // Plan 模式标记(只读研究硬闸单):非空时恒亮一段 "plan"(与
+    // permission_mode 并列,如 "plan · ⏵⏵ 确认模式"),不进 items 配置——
+    // 只读硬闸开没开是安全状态,用户没配也得看得见。空串 = Default,零影响。
+    std::string plan_mode;
 };
 
 // 状态行数据的局部更新:只改 context/tokens 两段的数字、旧值标记与缓存

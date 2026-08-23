@@ -220,7 +220,8 @@ set(_lubancode_embedded_prompts "${CMAKE_BINARY_DIR}/generated/embedded_prompts.
 file(GLOB _lubancode_prompt_modules CONFIGURE_DEPENDS
   "${_lubancode_prompts_dir}/core/*.md"
   "${_lubancode_prompts_dir}/features/*.md"
-  "${_lubancode_prompts_dir}/platforms/*.md")
+  "${_lubancode_prompts_dir}/platforms/*.md"
+  "${_lubancode_prompts_dir}/modes/*.md")
 add_custom_command(
   OUTPUT "${_lubancode_embedded_prompts}"
   COMMAND ${CMAKE_COMMAND}
@@ -478,6 +479,9 @@ add_library(lubancode_runtime STATIC
   src/runtime/goal_context.cpp
   # /goal 持久目标单:compact 守恒的 goal snapshot(拼装/校验/hash)。
   src/runtime/goal_compact.cpp
+  # Plan 模式(只读研究硬闸单):CollaborationMode/ModePolicy/PlanDocument
+  # 合同与纯函数(ModePolicy 硬闸、Plan shell 分类、<proposed_plan> 扫描)。
+  src/runtime/plan_mode.cpp
 )
 target_include_directories(lubancode_runtime PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src

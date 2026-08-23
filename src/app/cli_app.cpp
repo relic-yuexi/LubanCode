@@ -126,6 +126,39 @@ void PrintVersion() {
     std::cout << "lubancode " << kVersion << "\n";
 }
 
+// Plan 模式单:起手协作档的优先级(高到低):--mode > LUBANCODE_COLLABORATION_
+// MODE > settings.local.json 的 default_collaboration_mode > Default。
+// CLI 的非法值已在解析层退 BadMode;env/settings 的非法值明报到 stderr
+// 并按 Default 走(单子:"认不得的值报错,不能安静落回 Default"——CLI
+// 能退出,env/settings 是持久配置,硬退会把人挡在门外,只报不退)。
+bool ResolveStartupPlanMode(const CliOptions& cli_options, const config::SettingsLocal& settings_local) {
+    if (cli_options.mode_given) {
+        return cli_options.mode == "plan";
+    }
+    if (const auto env_mode = lubancode::platform::GetEnvVar("LUBANCODE_COLLABORATION_MODE");
+        env_mode.has_value() && !env_mode->empty()) {
+        if (*env_mode == "plan") {
+            return true;
+        }
+        if (*env_mode == "default") {
+            return false;
+        }
+        std::cerr << trf("plan.env.bad_mode", *env_mode) << "\n";
+        return false;
+    }
+    if (settings_local.default_collaboration_mode.has_value()) {
+        const std::string& value = *settings_local.default_collaboration_mode;
+        if (value == "plan") {
+            return true;
+        }
+        if (value == "default") {
+            return false;
+        }
+        std::cerr << trf("plan.settings.bad_mode", value) << "\n";
+    }
+    return false;
+}
+
 // i18n:帮助文本按节进表(help.title/usage/options/scaffold/slash/config),
 // 版本号、三个内置默认值走占位符。zh-CN 表的值与旧字面文案一致。
 void PrintHelp() {
@@ -334,6 +367,11 @@ int RunCli(const std::vector<std::string>& args) {
                        : 1;
         case CliAction::MissingSystemPromptValue:
             std::cerr << tr("error.system_prompt_arg") << "\n";
+            return 1;
+        case CliAction::BadMode:
+            // Plan 模式单:--mode 认不得,明报退出——不静默落回 Default(单
+            // 子:不能让用户误以为只读保护已经开了)。
+            std::cerr << parsed_cli.error_text << "\n";
             return 1;
         case CliAction::ResetSystemPrompt: {
             // 跟 /prompt reset 同效,只是不进交互、不二次确认(命令行参数
@@ -635,7 +673,7 @@ int RunCli(const std::vector<std::string>& args) {
         const lubancode::app::InteractiveSessionOptions session_options{
             effective, theme, model_catalog, settings_local,
             cli_options.auto_confirm, persona, spinner_enabled, cli_options.continue_last, law_source,
-            executable};
+            executable, ResolveStartupPlanMode(cli_options, settings_local)};
         RunInteractiveSession(session_options);
     } catch (const std::exception& e) {
         // 最后防线:到这里的是启动期/会话外层的真 fatal,退进程;交互会话

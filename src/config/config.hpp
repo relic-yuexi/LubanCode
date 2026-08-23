@@ -708,10 +708,13 @@ struct SettingsLocal {
     std::vector<std::string> allow_commands;
     std::vector<std::string> deny_commands;
     std::optional<std::string> default_confirm_mode;  // auto / yolo / confirm
+    // Plan 模式单:起手协作档(plan / default)。优先级低于 --mode 与
+    // LUBANCODE_COLLABORATION_MODE(RunCli 的 ResolveStartupPlanMode)。
+    std::optional<std::string> default_collaboration_mode;
 
     bool Empty() const {
         return allow_tools.empty() && allow_commands.empty() && deny_commands.empty() &&
-               !default_confirm_mode.has_value();
+               !default_confirm_mode.has_value() && !default_collaboration_mode.has_value();
     }
 };
 

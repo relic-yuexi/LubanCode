@@ -79,6 +79,7 @@ lubancode::workflow::WorkflowDefinition ParseOrDie(const char* yaml) {
     auto parsed = lubancode::workflow::ParseWorkflowYaml(yaml);
     if (!parsed.has_value()) {
         for (const auto& issue : parsed.error()) {
+            MESSAGE("parse issue: ", issue.location, ": ", issue.message);
         }
     }
     REQUIRE(parsed.has_value());
@@ -493,7 +494,7 @@ result:
     // add 节点:吃 acc+item,吐和。TrackingExecutor 的 output 是脚本,这里
     // 用 transform 注册表做真累加。
     auto transform = std::make_shared<TransformExecutor>();
-    transform->Register("make_list", [](const nlohmann::json& in) {
+    transform->Register("make_list", [](const nlohmann::json&) {
         return nlohmann::json{{"counts", nlohmann::json::array({1, 2, 3, 4})}};
     });
     transform->Register("fetch", [](const nlohmann::json& in) {

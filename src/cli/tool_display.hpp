@@ -195,8 +195,8 @@ struct ToolDisplay {
           painter(theme_ref, console && !silent, expanded),
           todo_state(std::move(todo)),
           cancel_flag(cancel),
-          expanded_(expanded),
           silent_(silent),
+          expanded_(expanded),
           transcript_snapshot_(transcript_ref) {}
 
     std::vector<lubancode::cli::TranscriptItem>& transcript;
@@ -1014,4 +1014,3 @@ private:
 };
 
 }  // namespace lubancode::cli
-
