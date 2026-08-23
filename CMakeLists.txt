@@ -480,6 +480,8 @@ add_library(lubancode_runtime STATIC
   src/runtime/goal_context.cpp
   # /goal 持久目标单:compact 守恒的 goal snapshot(拼装/校验/hash)。
   src/runtime/goal_compact.cpp
+  # /loop 会话定时循环单:领域类型/状态机转换表/interval 解析/错过合并账。
+  src/runtime/loop_types.cpp
   # Plan 模式(只读研究硬闸单):CollaborationMode/ModePolicy/PlanDocument
   # 合同与纯函数(ModePolicy 硬闸、Plan shell 分类、<proposed_plan> 扫描)。
   src/runtime/plan_mode.cpp
