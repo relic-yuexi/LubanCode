@@ -194,6 +194,10 @@ SessionLifecycleResult SessionLifecycle::ArchiveSession(const std::string& sessi
     const fs::path source = Utf8Path(path);
     const fs::path archive_dir = Utf8Path(sessions_dir_) / "archive";
     const fs::path target = archive_dir / Utf8Name(session_id + ".jsonl");
+    // 逐枚追踪单第 5 期(retention 联动):context 目录(artifact 仓)与
+    // jsonl 并排搬进 archive——归档的语义是"整套带走",blob 留在原地铁定
+    // 变孤儿。搬不动只在 detail 里记账,归档本体不受阻(jsonl 已挪成,
+    // 回头搬回去反而不一致);unarchive 同款对称。
 
     // 路径校验:源在根内、后缀对。
     if (!PathInsideRoot(source, Utf8Path(sessions_dir_)) || source.extension() != ".jsonl") {
@@ -216,6 +220,22 @@ SessionLifecycleResult SessionLifecycle::ArchiveSession(const std::string& sessi
     if (ec) {
         result.code = SessionLifecycleCode::IoError;
         return result;
+    }
+    // context 目录(artifact 仓)随迁:与 jsonl 同名并排,搬进
+    // archive/<session-id>/context。失败只记账(jsonl 已挪成,归档本体
+    // 成立);目录不在(没开过仓的会话)空过。
+    {
+        const fs::path context_source = source.parent_path() / Utf8Name(session_id) / "context";
+        const fs::path context_target = archive_dir / Utf8Name(session_id) / "context";
+        std::error_code context_ec;
+        if (fs::exists(context_source, context_ec) && !context_ec) {
+            fs::create_directories(context_target.parent_path(), context_ec);
+            fs::rename(context_source, context_target, context_ec);
+            if (context_ec) {
+                result.detail = "context 目录随迁失败(" + context_ec.message() +
+                                "),artifact 留在原地,归档本体不受阻";
+            }
+        }
     }
     result.file_path = PathToUtf8(target);
     return result;
@@ -253,6 +273,21 @@ SessionLifecycleResult SessionLifecycle::UnarchiveSession(const std::string& ses
     if (ec) {
         result.code = SessionLifecycleCode::IoError;
         return result;
+    }
+    // context 目录(artifact 仓)随迁回根(逐枚追踪单 retention 联动,
+    // 与 ArchiveSession 对称):失败只记 detail,本体不受阻。
+    {
+        const fs::path context_source = source.parent_path() / Utf8Name(session_id) / "context";
+        const fs::path context_target = target.parent_path() / Utf8Name(session_id) / "context";
+        std::error_code context_ec;
+        if (fs::exists(context_source, context_ec) && !context_ec) {
+            fs::create_directories(context_target.parent_path(), context_ec);
+            fs::rename(context_source, context_target, context_ec);
+            if (context_ec) {
+                result.detail = "context 目录随迁失败(" + context_ec.message() +
+                                "),artifact 留在 archive,本体不受阻";
+            }
+        }
     }
     result.file_path = PathToUtf8(target);
     return result;
@@ -292,6 +327,20 @@ SessionLifecycleResult SessionLifecycle::DeleteSession(const std::string& sessio
     if (ec) {
         result.code = SessionLifecycleCode::IoError;
         return result;
+    }
+    // 逐枚追踪单第 5 期(retention 联动):会话删了,它的 context 目录
+    // (artifact 仓:blob/chunks/index,与 <id>.jsonl 并排)一并删——
+    // 单子"retention、artifact 清理、session 删除联动"。删不动只记
+    // 账(孤儿 blob 由仓的清理路兜),不把删除判成失败:会话本体已删
+    // 成,回滚没有意义。
+    const fs::path context_dir = target.parent_path() / Utf8Name(session_id) / "context";
+    std::error_code context_ec;
+    if (fs::exists(context_dir, context_ec)) {
+        fs::remove_all(context_dir, context_ec);
+        if (context_ec) {
+            result.detail = "context 目录删除失败(" + context_ec.message() +
+                            "),孤儿 artifact 留待清理路兜底";
+        }
     }
     result.file_path = path;  // 删除前的旧路径(报账用)
     return result;

@@ -3175,6 +3175,95 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                     // 逐枚追踪单:只读诊断入口。batch(缺省)/errors 两档吃 hub 的
                     // 进程内最近账;详细档(execution_id/toolu/turn)翻 session 存档
                     // 的真本(重启后仍有账可查)。
+                    if (parsed.args.rfind("export", 0) == 0) {
+                        // /trace export <路径>(逐枚追踪单第 5 期):脱敏诊断包。
+                        // 内容 = meta + 全部 execution 的遮敏摘要(outcome/
+                        // error_code/来源/关系边/恢复结论/耗时/字节与 sha/
+                        // preview),不带 inline 原文、不带完整 stderr/env
+                        //(单子"隐私与脱敏")。默认遮敏;--raw 不放行——
+                        // 本会话虽是 TTY,导出件会离开本机,交互确认的
+                        // 语义没法带到文件上,一律脱敏(要比对的拿 preview
+                        // 与 sha 自己对)。
+                        std::string out_path = parsed.args.substr(6);
+                        while (!out_path.empty() && (out_path.front() == ' ' || out_path.front() == '\t')) {
+                            out_path.erase(out_path.begin());
+                        }
+                        if (out_path == "--raw" || out_path.rfind("--raw ", 0) == 0) {
+                            std::cout << theme.error
+                                      << "导出件会离开本机,一律脱敏,没有 --raw 档。" << theme.reset << "\n";
+                            break;
+                        }
+                        if (out_path.empty()) {
+                            std::cout << theme.error << "用法: /trace export <路径>" << theme.reset << "\n";
+                            break;
+                        }
+                        if (!session_store.active()) {
+                            std::cout << theme.error << "本会话没有存档,没有可导出的追踪账。" << theme.reset
+                                      << "\n";
+                            break;
+                        }
+                        const auto bytes = lubancode::agent::ReadSessionFileBytes(session_store.file_path());
+                        if (!bytes.has_value()) {
+                            std::cout << theme.error << "会话档读不到: " << session_store.file_path() << theme.reset
+                                      << "\n";
+                            break;
+                        }
+                        const auto loaded = lubancode::agent::ParseSessionFile(*bytes);
+                        if (!loaded.has_value()) {
+                            std::cout << theme.error << "会话档解析失败。" << theme.reset << "\n";
+                            break;
+                        }
+                        const auto ledger =
+                            lubancode::runtime::ToolTraceHub::BuildLedger(loaded->tool_trace_events);
+                        nlohmann::json bundle;
+                        bundle["schema"] = "tool_trace_export_v1";
+                        bundle["session"] = session_store.session_id();
+                        bundle["exportedAt"] = lubancode::agent::NowTimestamp();
+                        bundle["note"] = "脱敏诊断包:只有遮敏摘要,无正文原文";
+                        nlohmann::json items = nlohmann::json::array();
+                        for (const auto& record : ledger.executions()) {
+                            nlohmann::json item;
+                            item["executionId"] = record.execution_id;
+                            item["toolUseId"] = record.tool_use_id;
+                            item["toolName"] = record.tool_name;
+                            item["turnId"] = record.turn_id;
+                            item["batchId"] = record.batch_id;
+                            item["sequenceInBatch"] = record.sequence_in_batch;
+                            item["source"] = lubancode::agent::ToString(record.source_kind);
+                            item["sourceInstance"] = record.source_instance;
+                            item["parentExecutionId"] = record.parent_execution_id;
+                            item["retryOf"] = record.retry_of;
+                            item["blockedBy"] = record.blocked_by;
+                            item["compensates"] = record.compensates;
+                            item["outcome"] = lubancode::agent::ToString(record.outcome);
+                            item["errorCode"] = record.error_code;
+                            item["durationMs"] = record.duration_ms;
+                            item["recovery"] = lubancode::agent::ToString(record.Classify());
+                            item["corrupt"] = record.corrupt;
+                            item["resultBytes"] = record.result_ref.bytes;
+                            item["resultSha256"] = record.result_ref.sha256;
+                            item["resultPreview"] = record.result_ref.preview;  // BuildTracePreview 已过 RedactSecrets
+                            if (!record.result_ref.artifact_id.empty()) {
+                                item["resultArtifactId"] = record.result_ref.artifact_id;
+                            }
+                            items.push_back(std::move(item));
+                        }
+                        bundle["executions"] = std::move(items);
+                        bundle["verificationCount"] = ledger.verifications().size();
+                        bundle["corruptCount"] = ledger.corrupt_count();
+
+                        std::ofstream out_file(lubancode::platform::Utf8ToPath(out_path), std::ios::binary | std::ios::trunc);
+                        if (!out_file.is_open()) {
+                            std::cout << theme.error << "导出文件打不开: " << out_path << theme.reset << "\n";
+                            break;
+                        }
+                        const std::string body = bundle.dump(2);
+                        out_file.write(body.data(), static_cast<std::streamsize>(body.size()));
+                        out_file.close();
+                        std::cout << theme.stats << "已导出脱敏追踪账(" << ledger.executions().size()
+                                  << " 枚 execution): " << out_path << theme.reset << "\n";
+                        break;
+                    }
                     if (parsed.args == "errors") {
                         const auto lines = trace_hub_->ErrorLines();
                         if (lines.empty()) {
