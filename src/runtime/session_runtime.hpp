@@ -77,7 +77,7 @@ public:
 
     // 开一轮的事件适配器:把 loop 的回调翻成 ServerEvent 流,落到 AttachSink
     // 挂的那只 sink(没挂就只发号不落笔)。每轮各开一只,轮间不共用状态。
-    TurnEventAdapter MakeTurnAdapter(agent::AgentLoop& loop);
+    TurnEventAdapter MakeTurnAdapter();
 
     // ---- 会话存档账(本类持有,控制器按引用续用) ----------------------------
     agent::SessionStore& store() { return store_; }

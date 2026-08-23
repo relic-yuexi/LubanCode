@@ -16,11 +16,11 @@ SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)), 
 
 SessionRuntime::~SessionRuntime() = default;
 
-TurnEventAdapter SessionRuntime::MakeTurnAdapter(agent::AgentLoop& loop) {
+TurnEventAdapter SessionRuntime::MakeTurnAdapter() {
     // 适配器按值构造会拷 map/串——MoveCallbacks 的正确姿势是调用方写
-    // auto adapter = runtime.MakeTurnAdapter(loop);。构造函数捕获 thread_id_
+    // auto adapter = runtime.MakeTurnAdapter();。构造函数捕获 thread_id_
     // 与 ids_ 引用,轮内不再变。
-    return TurnEventAdapter(thread_id_, loop, ids_);
+    return TurnEventAdapter(thread_id_, ids_);
 }
 
 SessionBeginResult SessionRuntime::EnsureBegun(const std::string& first_text, const std::string& model,

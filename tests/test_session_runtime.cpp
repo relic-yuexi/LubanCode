@@ -154,23 +154,7 @@ TEST_CASE("SessionRuntime:MakeTurnAdapter 共用 thread_id 与发号局,事件�
     RecordingSink sink;
     runtime.AttachSink(&sink);
 
-    // loop 只当适配器的挂点,不真发请求——Start/Finish 就够对账。空注册表
-    // 加一只空请求的假 backend 即可构造。
-    class NullBackend : public api::Backend {
-    public:
-        std::expected<void, api::Error> send_stream(
-            const api::Request&,
-            const std::function<void(const api::StreamEvent&)>&,
-            const std::atomic<bool>* = nullptr) override {
-            return std::unexpected(api::Error{api::ErrorKind::Api, "null", 0});
-        }
-    };
-    NullBackend backend;
-    tools::ToolRegistry registry;
-    agent::AgentRuntimeProfile profile;
-    agent::AgentLoop loop(backend, registry, std::move(profile), std::string("session-runtime-test"));
-
-    auto adapter = runtime.MakeTurnAdapter(loop);
+    auto adapter = runtime.MakeTurnAdapter();
     adapter.Attach([&](const rt::ServerEvent& event) { sink.Emit(event); });
     const std::string turn_id = adapter.Start();
     CHECK(turn_id.rfind("turn-", 0) == 0);

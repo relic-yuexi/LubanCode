@@ -126,17 +126,17 @@ struct TestHarness {
             if (message->kind == app_server::IncomingMessage::Kind::Request) {
                 app_server::DispatchContext context;
                 context.emit_event = [this](std::string_view method, const nlohmann::json& params,
-                                            bool must_keep) {
+                                            bool) {
                     server->connection().EmitEvent(method, params);
                 };
                 const auto outcome = server->dispatcher().HandleRequest(message->request, context);
-                for (const std::string& line : outcome.outbound) {
-                    io.written.push_back(line);
+                for (const std::string& outbound_line : outcome.outbound) {
+                    io.written.push_back(outbound_line);
                 }
             } else if (message->kind == app_server::IncomingMessage::Kind::Notification) {
                 app_server::DispatchContext context;
                 context.emit_event = [this](std::string_view method, const nlohmann::json& params,
-                                            bool must_keep) {
+                                            bool) {
                     server->connection().EmitEvent(method, params);
                 };
                 server->dispatcher().HandleNotification(message->notification, context);

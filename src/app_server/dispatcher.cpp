@@ -122,7 +122,7 @@ DispatchOutcome Dispatcher::HandleRequest(const IncomingRequest& request, Dispat
 }
 
 DispatchOutcome Dispatcher::HandleNotification(const IncomingNotification& notification,
-                                               DispatchContext& context) {
+                                               DispatchContext&) {
     DispatchOutcome outcome;
     if (notification.method == kMethodInitialized) {
         if (state_ == HandshakeState::WaitingInitialized) {
