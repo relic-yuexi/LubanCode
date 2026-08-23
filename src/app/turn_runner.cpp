@@ -741,6 +741,20 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         hooks.on_permission_request = callbacks.on_permission_request;
         hooks.on_tool_phase = callbacks.on_tool_phase;
         hooks.hook_dispatcher = hook_dispatcher;
+        // 逐枚追踪单:子代理内层工具事件并轨进主会话的 trace hub。hub 的
+        // OnTrace 自带锁与单 writer 落盘,子代理任务线程投递不会跟主
+        // JSONL 交错(单子 agent/PTC 节)。parent_execution_id 在主会话
+        // 批次推进时由 hub 记账回填(hub->CurrentAgentExecution)。
+        if (trace_hub != nullptr) {
+            hooks.on_tool_trace = [trace_hub](const lubancode::agent::ToolTraceEvent& event) {
+                trace_hub->OnTrace(event);
+            };
+            // parent 边延迟取值:装配在这里,值在 agent 工具真正开跑时
+            // 才由 hub 钉(set_current_agent_execution)。
+            hooks.parent_execution_id_getter = [trace_hub]() {
+                return trace_hub->current_agent_execution();
+            };
+        }
         if (callbacks.on_post_tool_use_hook) {
             hooks.on_post_tool_use_hook = [&display, base = callbacks.on_post_tool_use_hook](
                                               const std::string& tool_use_id, const std::string& name,
