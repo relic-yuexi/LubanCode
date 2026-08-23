@@ -86,6 +86,16 @@ TEST_CASE("ServerEvent:每 kind 往返一轮,枚举字符串全覆盖") {
         rt::ServerEventKind::QuestionRequested,  rt::ServerEventKind::InteractionResolved,
         rt::ServerEventKind::UsageUpdated,       rt::ServerEventKind::ContextUpdated,
         rt::ServerEventKind::Warning,            rt::ServerEventKind::Error,
+        rt::ServerEventKind::CollaborationModeChanged,
+        rt::ServerEventKind::PlanReviewRequested,
+        rt::ServerEventKind::PlanReviewResolved,
+        rt::ServerEventKind::LoopTaskCreated,
+        rt::ServerEventKind::LoopTaskStateChanged,
+        rt::ServerEventKind::LoopTickDue,
+        rt::ServerEventKind::LoopTickStarted,
+        rt::ServerEventKind::LoopTickCompleted,
+        rt::ServerEventKind::LoopTickCoalesced,
+        rt::ServerEventKind::LoopTaskExpired,
     };
     for (const rt::ServerEventKind kind : kinds) {
         rt::ServerEvent e;
@@ -190,6 +200,13 @@ TEST_CASE("ClientCommand:各 kind 往返,领域字段保真") {
         rt::ClientCommandKind::SetLanguage,     rt::ClientCommandKind::ClearThread,
         rt::ClientCommandKind::SetTitle,        rt::ClientCommandKind::Compact,
         rt::ClientCommandKind::Export,
+        rt::ClientCommandKind::CreateGoal,      rt::ClientCommandKind::GetGoal,
+        rt::ClientCommandKind::EditGoal,        rt::ClientCommandKind::PauseGoal,
+        rt::ClientCommandKind::ResumeGoal,      rt::ClientCommandKind::ClearGoal,
+        rt::ClientCommandKind::CreateLoopTask,  rt::ClientCommandKind::ListLoopTasks,
+        rt::ClientCommandKind::ReadLoopTask,    rt::ClientCommandKind::PauseLoopTask,
+        rt::ClientCommandKind::ResumeLoopTask,  rt::ClientCommandKind::CancelLoopTask,
+        rt::ClientCommandKind::RunLoopTaskNow,
     };
     for (const rt::ClientCommandKind kind : kinds) {
         rt::ClientCommand c;

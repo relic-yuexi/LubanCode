@@ -102,6 +102,13 @@ std::string ToString(ServerEventKind kind) {
         case ServerEventKind::ContextUpdated: return "context.updated";
         case ServerEventKind::Warning: return "warning";
         case ServerEventKind::Error: return "error";
+        case ServerEventKind::LoopTaskCreated: return "loop.task_created";
+        case ServerEventKind::LoopTaskStateChanged: return "loop.task_state_changed";
+        case ServerEventKind::LoopTickDue: return "loop.tick_due";
+        case ServerEventKind::LoopTickStarted: return "loop.tick_started";
+        case ServerEventKind::LoopTickCompleted: return "loop.tick_completed";
+        case ServerEventKind::LoopTickCoalesced: return "loop.tick_coalesced";
+        case ServerEventKind::LoopTaskExpired: return "loop.task_expired";
     }
     return "error";
 }
@@ -159,6 +166,13 @@ bool ParseServerEventKind(const std::string& s, ServerEventKind& out) {
     if (s == "context.updated") { out = ServerEventKind::ContextUpdated; return true; }
     if (s == "warning") { out = ServerEventKind::Warning; return true; }
     if (s == "error") { out = ServerEventKind::Error; return true; }
+    if (s == "loop.task_created") { out = ServerEventKind::LoopTaskCreated; return true; }
+    if (s == "loop.task_state_changed") { out = ServerEventKind::LoopTaskStateChanged; return true; }
+    if (s == "loop.tick_due") { out = ServerEventKind::LoopTickDue; return true; }
+    if (s == "loop.tick_started") { out = ServerEventKind::LoopTickStarted; return true; }
+    if (s == "loop.tick_completed") { out = ServerEventKind::LoopTickCompleted; return true; }
+    if (s == "loop.tick_coalesced") { out = ServerEventKind::LoopTickCoalesced; return true; }
+    if (s == "loop.task_expired") { out = ServerEventKind::LoopTaskExpired; return true; }
     return false;
 }
 
@@ -244,6 +258,14 @@ EventLayer LayerOf(const ServerEvent& event) {
         case ServerEventKind::CollaborationModeChanged:
         case ServerEventKind::PlanReviewRequested:
         case ServerEventKind::PlanReviewResolved:
+        // loop 单:任务与拍子的账都是 thread 级状态(前端状态栏/任务行)。
+        case ServerEventKind::LoopTaskCreated:
+        case ServerEventKind::LoopTaskStateChanged:
+        case ServerEventKind::LoopTickDue:
+        case ServerEventKind::LoopTickStarted:
+        case ServerEventKind::LoopTickCompleted:
+        case ServerEventKind::LoopTickCoalesced:
+        case ServerEventKind::LoopTaskExpired:
             return EventLayer::Thread;
         case ServerEventKind::TurnStarted:
         case ServerEventKind::TurnCompleted:
@@ -311,6 +333,13 @@ std::string ToString(ClientCommandKind kind) {
         case ClientCommandKind::PauseGoal: return "goal.pause";
         case ClientCommandKind::ResumeGoal: return "goal.resume";
         case ClientCommandKind::ClearGoal: return "goal.clear";
+        case ClientCommandKind::CreateLoopTask: return "loop.create";
+        case ClientCommandKind::ListLoopTasks: return "loop.list";
+        case ClientCommandKind::ReadLoopTask: return "loop.read";
+        case ClientCommandKind::PauseLoopTask: return "loop.pause";
+        case ClientCommandKind::ResumeLoopTask: return "loop.resume";
+        case ClientCommandKind::CancelLoopTask: return "loop.cancel";
+        case ClientCommandKind::RunLoopTaskNow: return "loop.run_now";
         case ClientCommandKind::SetCollaborationMode: return "mode.set";
         case ClientCommandKind::ReviewPlan: return "plan.review";
         case ClientCommandKind::ReopenPlanReview: return "plan.review_reopen";
@@ -345,6 +374,13 @@ bool ParseClientCommandKind(const std::string& s, ClientCommandKind& out) {
     if (s == "goal.pause") { out = ClientCommandKind::PauseGoal; return true; }
     if (s == "goal.resume") { out = ClientCommandKind::ResumeGoal; return true; }
     if (s == "goal.clear") { out = ClientCommandKind::ClearGoal; return true; }
+    if (s == "loop.create") { out = ClientCommandKind::CreateLoopTask; return true; }
+    if (s == "loop.list") { out = ClientCommandKind::ListLoopTasks; return true; }
+    if (s == "loop.read") { out = ClientCommandKind::ReadLoopTask; return true; }
+    if (s == "loop.pause") { out = ClientCommandKind::PauseLoopTask; return true; }
+    if (s == "loop.resume") { out = ClientCommandKind::ResumeLoopTask; return true; }
+    if (s == "loop.cancel") { out = ClientCommandKind::CancelLoopTask; return true; }
+    if (s == "loop.run_now") { out = ClientCommandKind::RunLoopTaskNow; return true; }
     if (s == "mode.set") { out = ClientCommandKind::SetCollaborationMode; return true; }
     if (s == "plan.review") { out = ClientCommandKind::ReviewPlan; return true; }
     if (s == "plan.review_reopen") { out = ClientCommandKind::ReopenPlanReview; return true; }

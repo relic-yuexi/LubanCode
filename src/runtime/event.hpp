@@ -106,6 +106,17 @@ enum class ServerEventKind {
     CollaborationModeChanged,
     PlanReviewRequested,
     PlanReviewResolved,
+    // /loop 会话定时循环(loop 单):thread 层事件,账面在
+    // payload(task_id/tick_id/state/interval_ms/next_due_at_ms/run_count/
+    // outcome/…)。前端凭 payload 画状态栏与任务行,不解析
+    // slash 字符串。
+    LoopTaskCreated,
+    LoopTaskStateChanged,
+    LoopTickDue,
+    LoopTickStarted,
+    LoopTickCompleted,
+    LoopTickCoalesced,
+    LoopTaskExpired,
     // 记账与杂项
     UsageUpdated,
     ContextUpdated,

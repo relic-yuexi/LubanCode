@@ -65,6 +65,16 @@ enum class ClientCommandKind {
     PauseGoal,
     ResumeGoal,
     ClearGoal,
+    // /loop 会话定时循环(loop 单):typed 命令面,前端不拼 slash 字符串。
+    // payload 形状见下(interval_ms/task_ref;CreateLoopTask 的
+    // prompt 在 text)。前端断线重连按 seq 补事件,命令幂等。
+    CreateLoopTask,
+    ListLoopTasks,
+    ReadLoopTask,
+    PauseLoopTask,
+    ResumeLoopTask,
+    CancelLoopTask,
+    RunLoopTaskNow,
     // Plan 模式(只读研究硬闸单):协作模式切换与计划审阅。slash 的 /plan
     // 在终端适配层翻成这里的命令;远端前端直接发 typed 命令,不复制业务。
     SetCollaborationMode,
@@ -99,6 +109,12 @@ struct ClientCommand {
     //   PauseGoal/ResumeGoal/ClearGoal payload.expected_revision 同上;
     //     ClearGoal.payload.confirm == true 才动手(确认策略归调用方)
     //   GetGoal 回执 payload.goal = coordinator.Status() 的结构化账
+    //   CreateLoopTask.text prompt 正文(空 = 用 loop.md/内置源);
+    //     payload.interval_ms 间隔(0 = 默认 10m)
+    //   ListLoopTasks 回执 payload.tasks = scheduler.Snapshot() 结构化数组
+    //   ReadLoopTask.value task id;回执 payload.task
+    //   PauseLoopTask/ResumeLoopTask/CancelLoopTask/RunLoopTaskNow.value
+    //     task id 或 "all"(run 不收 all)
     //   SetCollaborationMode.value   "plan"/"default";payload.reason 是稳定
     //     短码(slash/approved/off);切入 Plan 时 payload.permission_before_plan
     //     带当前确认档(restore 用)。
