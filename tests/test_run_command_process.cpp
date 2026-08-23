@@ -538,6 +538,8 @@ TEST_CASE("BackgroundProcessHandle(POSIX): Wait/Peek/TerminateTree 的完成态�
     CHECK(completion2.terminated_by_stop);
 }
 
+#endif  // !_WIN32
+
 TEST_CASE("RunProcess: 并发 extra_env 不串值(P0 并发契约)") {
     using lubancode::platform::EnvPairs;
     using lubancode::platform::RunShellCommand;
@@ -590,6 +592,8 @@ TEST_CASE("RunProcess: env 值含 NUL 被拒(Windows 键名非法同拒)") {
 #endif
 }
 
+#ifndef _WIN32
+
 TEST_CASE("background(POSIX): max_runtime_ms 到点自动收树,状态进 Stopped") {
     auto& reg = BackgroundTaskRegistry::Instance();
     const auto bg = lubancode::platform::RunShellCommandBackground("sleep 30");
@@ -606,6 +610,8 @@ TEST_CASE("background(POSIX): max_runtime_ms 到点自动收树,状态进 Stoppe
     CHECK(stopped);
     CHECK_FALSE(lubancode::platform::IsProcessAlive(bg.pid));
 }
+
+#endif  // !_WIN32
 
 TEST_CASE("run_command: max_runtime_ms 传垃圾值体面报错") {
     RunCommandTool tool;
@@ -646,4 +652,56 @@ TEST_CASE("ProbeShells: 报出本平台的 shell 画像(版本/TTY 语义明牌)
     }
 }
 
+#ifndef _WIN32
+
+TEST_CASE("run_command(POSIX): shell=bash 装了就真用 bash(Bash 语法跑通)") {
+    // 本测试机装了 bash(没装的 CI 环境整条跳过——"无安装便不进 schema")。
+    const auto probe = lubancode::platform::RunProcess({"/bin/bash", "-c", "echo ok"}, 5000);
+    if (probe.spawn_failed) {
+        return;  // 没装 bash:不测(契约允许)
+    }
+    RunCommandTool tool;
+    nlohmann::json input;
+    // [[ ]] 是 bash/dash 分水岭:dash 不认(语法错,非零退出)。
+    input["command"] = "if [[ -n hello ]]; then echo bash-arrives; fi";
+    input["shell"] = "bash";
+    const Tool::Result result = tool.execute(input);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("bash-arrives") != std::string::npos);
+    CHECK(result.content.find("[退出码 0]") != std::string::npos);
+}
+
+TEST_CASE("run_command(POSIX): 默认 sh 不偷换 bash(bash 专属变量在 sh 下为空)") {
+    RunCommandTool tool;
+    nlohmann::json input;
+    // $BASH_VERSION 只有真 bash 才有值;dash(/bin/sh)下是空串。宿主若
+    // 偷偷把 sh 换成 bash,这条探针立刻露馅。
+    input["command"] = "echo \"bashver=[$BASH_VERSION]\"";
+    const Tool::Result result = tool.execute(input);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("[退出码 0]") != std::string::npos);
+    CHECK(result.content.find("bashver=[]") != std::string::npos);
+}
+
 #endif  // !_WIN32
+
+#ifdef _WIN32
+
+TEST_CASE("run_command(Windows): shell=pwsh 装了就真用 pwsh 7") {
+    // 先探本机装没装(没装整条跳过——"无安装便不进 schema")。
+    const auto probe = lubancode::platform::RunProcess(
+        lubancode::platform::BuildCmdCommandLine("where pwsh"), 10000);
+    if (probe.output.find("pwsh.exe") == std::string::npos) {
+        return;
+    }
+    RunCommandTool tool;
+    nlohmann::json input;
+    // ?? 运算符是 PowerShell 7 的语法(5.1 不认)。
+    input["command"] = "$v = $null; $v ?? 'pwsh-arrives'";
+    input["shell"] = "pwsh";
+    const Tool::Result result = tool.execute(input);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("pwsh-arrives") != std::string::npos);
+}
+
+#endif  // _WIN32

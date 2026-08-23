@@ -1,11 +1,17 @@
 #include "tools/run_command.hpp"
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <system_error>
+
+#ifndef _WIN32
+#include <unistd.h>  // access(X_OK):PATH 里探 bash 用
+#endif
 
 #include "platform/process.hpp"
 #include "tools/background_tasks.hpp"  // BackgroundTaskRegistry:后台模式登记 task_id + 起 watcher 探活
@@ -68,12 +74,91 @@ std::string ApplyWorkingDirectory(const std::string& command, const std::string&
     if (shell == "cmd") {
         return "cd /d \"" + cwd_utf8 + "\" && " + command;
     }
-    if (shell == "sh") {
+    if (shell == "sh" || shell == "bash") {
         // QuotePosixSingle 自己带首尾单引号(见它内部对单引号的处理)。
         return "cd -- " + QuotePosixSingle(cwd_utf8) + " && " + command;
     }
-    // PowerShell:Set-Location 在 & { ... } 外面先跑,后面的命令都在新目录里。
+    // PowerShell(5.1 与 pwsh 同语法):Set-Location 在 & { ... } 外面先跑,
+    // 后面的命令都在新目录里。
     return "Set-Location -LiteralPath '" + QuotePowerShellSingle(cwd_utf8) + "' ; " + command;
+}
+
+// ---------------------------------------------------------------------------
+// ShellResolver(进程生命线单 P2"评估显式 bash、pwsh"):可移植 shell 探测。
+// bash/pwsh 不随包附送——装了才进 schema、才认得;没装就当不存在,不猜
+// 路径、不偷换 shell。探测结果进程内缓存(spool 一次即可,PATH 不会中途变)。
+// ---------------------------------------------------------------------------
+
+bool ShellExecutableExists(const std::string& path_utf8) {
+    std::error_code ec;
+    const std::filesystem::path p = Utf8ToPath(path_utf8);
+    return std::filesystem::exists(p, ec) && !std::filesystem::is_directory(p, ec);
+}
+
+// PATH 里找一枚可执行文件(POSIX 查 x 位,Windows 查 PATH 目录里的 .exe)。
+// 找到返回它的 UTF-8 完整路径;找不到 nullopt。
+std::optional<std::string> FindOnPath(const std::string& name_utf8, const char* path_env) {
+    if (path_env == nullptr || *path_env == '\0') {
+        return std::nullopt;
+    }
+    const char sep =
+#ifdef _WIN32
+        ';';
+#else
+        ':';
+#endif
+    std::stringstream ss(path_env);
+    std::string dir;
+    while (std::getline(ss, dir, sep)) {
+        if (dir.empty()) {
+            continue;
+        }
+        std::error_code ec;
+        const std::filesystem::path base = Utf8ToPath(dir);
+#ifdef _WIN32
+        const std::filesystem::path candidate = base / (name_utf8 + ".exe");
+        if (std::filesystem::exists(candidate, ec) && !std::filesystem::is_directory(candidate, ec)) {
+            const std::u8string u8 = candidate.u8string();
+            return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+        }
+#else
+        const std::filesystem::path candidate = base / name_utf8;
+        if (access(candidate.c_str(), X_OK) == 0) {
+            const std::u8string u8 = candidate.u8string();
+            return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+        }
+#endif
+    }
+    return std::nullopt;
+}
+
+// 本机装没装 bash(POSIX)/pwsh(Windows)。结果缓存。
+bool OptionalShellAvailable(const std::string& shell_id) {
+    static const bool bash_ok = [] {
+#ifdef _WIN32
+        return false;  // bash 是 POSIX 侧的可选 shell;Windows 不认(WSL 那只 bash 不是宿主 shell)
+#else
+        // 常见落点先直查(/bin/bash、/usr/bin/bash),再走 PATH。
+        return ShellExecutableExists("/bin/bash") || ShellExecutableExists("/usr/bin/bash") ||
+               FindOnPath("bash", getenv("PATH")).has_value();
+#endif
+    }();
+    static const bool pwsh_ok = [] {
+#ifdef _WIN32
+        // pwsh 按名字过 PATH 找(PowerShell 7 默认装进 Program Files 并入 PATH;
+        // 没装(只有 Windows PowerShell 5.1)就找不到,如实不可用)。
+        return FindOnPath("pwsh", getenv("PATH")).has_value();
+#else
+        return false;  // pwsh 是 Windows 侧的可选 shell;POSIX 不认(装了 pwsh 的 Linux 用户极少,不替他们猜)
+#endif
+    }();
+    if (shell_id == "bash") {
+        return bash_ok;
+    }
+    if (shell_id == "pwsh") {
+        return pwsh_ok;
+    }
+    return false;
 }
 
 }  // namespace
@@ -134,13 +219,32 @@ nlohmann::json RunCommandTool::input_schema() const {
     nlohmann::json shell_prop = nlohmann::json::object();
     shell_prop["type"] = "string";
 #ifdef _WIN32
-    shell_prop["enum"] = nlohmann::json::array({"powershell", "cmd"});
-    shell_prop["description"] = ToolText("run_command", "param.shell", "用哪个 shell 执行,不填默认 powershell");
+    {
+        nlohmann::json shell_enum = nlohmann::json::array({"powershell", "cmd"});
+        // pwsh(PowerShell 7):装了才进 schema(P2"无安装便不进 schema"),
+        // 不装不提——模型见不着这个选项就不会拿 pwsh 专属语法来赌。
+        if (OptionalShellAvailable("pwsh")) {
+            shell_enum.push_back("pwsh");
+        }
+        shell_prop["enum"] = std::move(shell_enum);
+        shell_prop["description"] =
+            ToolText("run_command", "param.shell",
+                     "用哪个 shell 执行,不填默认 powershell(Windows PowerShell 5.1)。pwsh 只在本机"
+                     "装了 PowerShell 7 时可选。三者语法与编码细节不同,不可混用。");
+    }
 #else
-    shell_prop["enum"] = nlohmann::json::array({"sh"});
-    shell_prop["description"] =
-        ToolText("run_command", "param.shell (POSIX)",
-                 "用哪个 shell 执行,本平台只有 sh(/bin/sh);powershell/cmd 是 Windows 专属");
+    {
+        nlohmann::json shell_enum = nlohmann::json::array({"sh"});
+        // bash:装了才进 schema;/bin/sh 不偷换成 bash(单子"不做"节)。
+        if (OptionalShellAvailable("bash")) {
+            shell_enum.push_back("bash");
+        }
+        shell_prop["enum"] = std::move(shell_enum);
+        shell_prop["description"] =
+            ToolText("run_command", "param.shell (POSIX)",
+                     "用哪个 shell 执行,默认 sh(/bin/sh,不保证是 Bash,Ubuntu 常见 dash);"
+                     "本机装了 bash 时可选 bash。powershell/cmd 是 Windows 专属");
+    }
 #endif
     properties["shell"] = shell_prop;
 
@@ -383,12 +487,20 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
             return {"shell 参数必须是字符串", true};
         }
         shell = it->get<std::string>();
-        if (shell != "powershell" && shell != "cmd") {
+        const bool legal = (shell == "powershell" || shell == "cmd" ||
+                            (shell == "pwsh" && OptionalShellAvailable("pwsh")));
+        if (!legal) {
+            if (shell == "pwsh") {
+                return {"shell=pwsh 需要本机装有 PowerShell 7(pwsh.exe);没装,请用默认 powershell", true};
+            }
             return {"shell 参数只认得 powershell 或 cmd,写的是: " + shell, true};
         }
     }
 
     const bool is_cmd = (shell == "cmd");
+    // pwsh 与 powershell 5.1 共用同一套 -EncodedCommand wrapper 与单引号
+    // 语法;差异只在可执行名(pwsh.exe)与版本语义(文档里明说,不偷偷混)。
+    const wchar_t* ps_exe = (shell == "pwsh") ? L"pwsh.exe" : L"powershell.exe";
 
     if (run_in_background) {
         platform::BackgroundSpawnResult bg;
@@ -397,7 +509,7 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
         } else {
             // 后台 PowerShell:命令本体不用拼 cd(cwd 走 lpCurrentDirectory),
             // 只保留 wrapper 的编码设置。
-            const std::wstring cmdline = L"powershell.exe -NoProfile -NonInteractive -EncodedCommand " +
+            const std::wstring cmdline = std::wstring(ps_exe) + L" -NoProfile -NonInteractive -EncodedCommand " +
                                           platform::Utf8ToWide(BuildEncodedCommand(command));
             bg = platform::RunProcessBackground(cmdline, effective_cwd);
         }
@@ -406,7 +518,7 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
         }
         // 登记进后台任务台账:拿一个 task_id,watcher 持原生句柄探活——
         // 完成时主循环会收到通知,模型也能用 background_output 工具查输出。
-        if (bg.handle != nullptr && shell == "powershell") {
+        if (bg.handle != nullptr && !is_cmd) {
             // wrapper 脚本设了 [Console]::OutputEncoding=UTF8,落盘的是 UTF-8
             //(解析期报错那点尾巴由出口清洗兜底)。
             bg.handle->encoding_hint = "utf-8";
@@ -437,35 +549,42 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
         // 前台 PowerShell 同上:cwd 仍由 wrapper 前置 Set-Location 承担
         //(Set-Location -LiteralPath 单引号转义对引号安全)。
         const std::string command_with_cwd = ApplyWorkingDirectory(command, effective_cwd, shell_value);
-        const std::wstring cmdline = L"powershell.exe -NoProfile -NonInteractive -EncodedCommand " +
+        const std::wstring cmdline = std::wstring(ps_exe) + L" -NoProfile -NonInteractive -EncodedCommand " +
                                       platform::Utf8ToWide(BuildEncodedCommand(command_with_cwd));
         proc = platform::RunProcess(cmdline, timeout_ms);
     }
 #else
-    // POSIX:shell 一律 /bin/sh -c。powershell/cmd 是 Windows 专属选项,
-    // 模型带着旧习惯传过来就明说不支持,别悄悄换 shell 让语义走样。
+    // POSIX:默认 /bin/sh -c;本机装了 bash 时显式 shell=bash 可选(装了才
+    // 认,不装不猜)。powershell/cmd 是 Windows 专属选项,模型带着旧习惯
+    // 传过来就明说不支持,别悄悄换 shell 让语义走样。
+    std::string shell = "sh";
     if (auto it = input.find("shell"); it != input.end() && !it->is_null()) {
         if (!it->is_string()) {
             return {"shell 参数必须是字符串", true};
         }
-        const std::string shell = it->get<std::string>();
+        shell = it->get<std::string>();
         if (shell == "powershell" || shell == "cmd") {
             return {"shell=" + shell + " 是 Windows 专属,本平台请用 sh(/bin/sh)", true};
         }
-        if (shell != "sh") {
-            return {"shell 参数只认得 sh,写的是: " + shell, true};
+        if (shell != "sh" && shell != "bash") {
+            return {"shell 参数只认得 sh 或 bash,写的是: " + shell, true};
+        }
+        if (shell == "bash" && !OptionalShellAvailable("bash")) {
+            return {"shell=bash 需要本机装有 bash;没装,请用默认 sh(/bin/sh)", true};
         }
     }
+    const std::string shell_exe = (shell == "bash") ? "/bin/bash" : "/bin/sh";
 
     if (run_in_background) {
-        const platform::BackgroundSpawnResult bg = platform::RunShellCommandBackground(command, effective_cwd);
+        const platform::BackgroundSpawnResult bg =
+            platform::RunProcessBackground({shell_exe, "-c", command}, effective_cwd);
         if (!bg.success) {
             return {bg.error, true};
         }
         // 登记进后台任务台账(同 Windows 分支):task_id + watcher 持原生句柄
         // 探活,完成时通知;退出码由唯一收尸方写进完成态,不再丢。
         const std::string task_id = BackgroundTaskRegistry::Instance().Register(
-            command, "sh", bg.pid, bg.log_path, std::move(bg.handle), max_runtime_ms);
+            command, shell, bg.pid, bg.log_path, std::move(bg.handle), max_runtime_ms);
         std::ostringstream oss;
         oss << "已在后台启动(task #" << task_id << ", PID " << bg.pid << "),不等它跑完。\n"
             << "日志文件: " << bg.log_path << "\n"
@@ -482,9 +601,13 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
     {
         // RunShellCommand 的 cancel 重载还没有原生 cwd 参数(超时/取消/树杀
         // 才是它的职责面),前台仍用拼 cd 的老路;POSIX 单引号转义已修,
-        // 后台已根治。
+        // 后台已根治。bash 与 sh 的单引号转义同规则(QuotePosixSingle)。
         const std::string command_with_cwd = ApplyWorkingDirectory(command, effective_cwd, shell_value);
-        proc = platform::RunShellCommand(command_with_cwd, timeout_ms, cancel_, {});
+        if (shell == "bash") {
+            proc = platform::RunProcess({shell_exe, "-c", command_with_cwd}, timeout_ms, cancel_);
+        } else {
+            proc = platform::RunShellCommand(command_with_cwd, timeout_ms, cancel_, {});
+        }
     }
 #endif
 
