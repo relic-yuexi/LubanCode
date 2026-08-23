@@ -687,6 +687,42 @@ TEST_CASE("run_command(POSIX): 默认 sh 不偷换 bash(bash 专属变量在 sh 
 
 #ifdef _WIN32
 
+// ---------------------------------------------------------------------------
+// P1:PowerShell 退出码包装(状态在 scriptblock 返回的第一拍捕获,输出
+// 格式化不再盖掉 $?)。单子钉的各案:命令找不到、Write-Error、throw、
+// native exit 7、native 失败后 cmdlet 成功、cmdlet 失败后 native 成功、
+// 显式 exit、多行与解析错误。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("run_command(Windows): PowerShell 退出码契约各案") {
+    struct Case {
+        const char* name;
+        const char* command;
+        bool expect_error;
+    };
+    // native 案用 powershell.exe 而不是 cmd.exe:部分机器的策略(AppLocker
+    // 类)限制 powershell 起 cmd.exe,用 cmd 会把"策略拦"误判成 wrapper 错。
+    const Case cases[] = {
+        {"命令找不到", "Get-Command definitely-not-a-cmdlet-zzz", true},
+        {"cmdlet Write-Error", "Write-Error 'planned failure'", true},
+        {"throw", "throw 'planned throw'", true},
+        {"native exit 7", "powershell -NoProfile -Command \"exit 7\"", true},
+        {"native 失败后 cmdlet 成功", "powershell -NoProfile -Command \"exit 5\"; Get-Date > $null", true},   // 末次 native 码保留
+        {"cmdlet 失败后 native 成功", "Write-Error 'x'; powershell -NoProfile -Command \"exit 0\"", false},  // 末次 native = 0
+        {"显式 exit 0", "exit 0", false},
+        {"显式 exit 9", "exit 9", true},
+        {"多语句末条成功", "Write-Output first; Get-Date > $null", false},
+    };
+    for (const auto& c : cases) {
+        CAPTURE(c.name);
+        RunCommandTool tool;
+        nlohmann::json input;
+        input["command"] = c.command;
+        const Tool::Result result = tool.execute(input);
+        CHECK(result.is_error == c.expect_error);
+    }
+}
+
 TEST_CASE("run_command(Windows): shell=pwsh 装了就真用 pwsh 7") {
     // 先探本机装没装(没装整条跳过——"无安装便不进 schema")。
     const auto probe = lubancode::platform::RunProcess(

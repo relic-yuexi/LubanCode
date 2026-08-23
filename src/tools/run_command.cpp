@@ -349,11 +349,29 @@ std::string Base64Encode(const unsigned char* data, std::size_t len) {
 //      所以退出码改靠 $LASTEXITCODE(外部程序、或者脚本里显式 exit N)来判断,
 //      查不到 $LASTEXITCODE 时才退回去看 $?。
 std::string BuildEncodedCommand(const std::string& user_command_utf8) {
+    // 退出码契约(进程生命线单 P1"PowerShell 退出码包装会误判"),先定后写:
+    //   1. 显式 exit N —— 原样(N 直接终止进程,下面的判定碰不到它);
+    //   2. 用户脚本跑过 native 程序 —— $LASTEXITCODE 的末次值优先保留;
+    //   3. 没跑过 native —— 捕获流里含 ErrorRecord(cmdlet 报错/找不到
+    //      命令)则 exit 1,否则 exit 0。throw 自会终止脚本进程(exit 1)。
+    // 三只坑的解法:
+    //   - Out-String/Write-Output 会盖掉 $?——状态在 scriptblock 返回的
+    //     第一拍捕获(先收进 $oco,之后才格式化输出);
+    //   - $LASTEXITCODE 保留最近一只 native 的码——先清账($LASTEXITCODE
+    //     = $null),末次值才算数;
+    //   - "cmdlet 失败被 2>&1 合并后 $? = true"是 5.1 的实情——不能只
+    //     靠 $?,逐枚检查捕获流里有没有 ErrorRecord。
     const std::string script_utf8 =
         "$ProgressPreference='SilentlyContinue'\r\n"
         "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\r\n"
-        "& { " + user_command_utf8 + " } 2>&1 | Out-String -Stream | Write-Output\r\n"
-        "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE } else { if ($?) { exit 0 } else { exit 1 } }\r\n";
+        "$LASTEXITCODE = $null\r\n"  // 清账:别让宿主/前一只 native 的旧码冒充本段的退出码
+        "$oco = & { " + user_command_utf8 + " } 2>&1\r\n"  // scriptblock 返回的第一拍捕获
+        "$lec = $LASTEXITCODE\r\n"
+        "$errseen = $false\r\n"
+        "foreach ($it in @($oco)) { if ($it -is [System.Management.Automation.ErrorRecord]) { $errseen = $true } }\r\n"
+        "$oco | Out-String -Stream | Write-Output\r\n"  // 之后才格式化输出
+        "if ($lec -ne $null) { exit $lec }\r\n"  // 末次 native 的码优先
+        "if ($errseen) { exit 1 } else { exit 0 }\r\n";  // cmdlet 报错/找不到命令 vs 干净
 
     const std::wstring wide = platform::Utf8ToWide(script_utf8);
     return Base64Encode(reinterpret_cast<const unsigned char*>(wide.data()), wide.size() * sizeof(wchar_t));
