@@ -1,7 +1,24 @@
 # `/goal` 持久目标：终点判定、跨轮续跑、预算、恢复与防空转
 
-状态：待做（2026-08-23 查阅 OpenAI Codex `/goal` 官方文档，并巡检
-LubanCode slash、Agent Loop、TurnRuntime、usage、session JSONL、compact 与消息泵）
+状态：地基已落（2026-08-23 施工,四批 commit 于 worktree 分支
+worktree-agent-a782b40a496484d81）。已落地:goal_types 全家桶与状态机转换
+表 / GoalCoordinator 命令面(单 active goal、revision CAS、幂等 pause/
+clear、写盘栅栏 fail-closed、预算闸 elapsed+iterations+token、防空转
+no-progress 与 same-blocker、achieved 硬门槛)、goal 事件行(goal_v1 族)
+serialize/parse/append/回放重建(feature 关落 SuspendedByPolicy)、
+goal_checkpoint 工具(schema 原样、evidence 白名单)、evaluator(独立无
+工具请求、strict schema、一次 repair)、GoalContext 注入、config 门
+(features.goals + goals 段 + env 总闸)、slash 七动作与终端接线、
+Runtime 合同六命令 + ItemKind::Goal、compact_v2 带 goal snapshot 守恒
+hash、SessionWorkScheduler 分流合同口(给 loop 单接)。测试 10 枚文件,
+全量 2360 例绿。
+剩余(合流接线,依赖 loop 单/app-server 单落地):主泵 completion-driven
+续跑真接线(evaluator 收口后自动 ScheduleNextIteration+TakeReadyIteration
+发 synthetic turn)、GoalEvidence 适配器(从 ToolTraceHub 采证喂
+coordinator)、Typed goal command 在 CommandService/app-server 兑现、TUI
+状态栏与审批/问答卡、Goal Hook 事件(GoalCreated/IterationStart/...)、
+fork lineage(PausedFork)、子代理 usage/evidence 回主 iteration。
+原始调研全文保留于下,勿删。
 
 ## 一句话
 
