@@ -255,12 +255,20 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const EnvP
         while (!reader_stop.load() && ReadFile(read_pipe, buf, sizeof(buf), &n, nullptr) && n > 0) {
             if (output.size() < max_output_bytes) {
                 const std::size_t room = max_output_bytes - output.size();
-                output.append(buf, std::min<std::size_t>(n, room));
-                if (output.size() >= max_output_bytes && !output_over_limit.load()) {
+                const std::size_t take = std::min<std::size_t>(n, room);
+                output.append(buf, take);
+                // off-by-one 修正:恰好填到 max_output_bytes 不算"超过"。
+                // 读到了第 limit+1 个字节(总长超出一字节)才置 overflow。
+                if (static_cast<std::size_t>(n) > take && !output_over_limit.load()) {
                     output_over_limit.store(true);
                     if (overflow_event != nullptr) {
                         SetEvent(overflow_event);
                     }
+                }
+            } else if (!output_over_limit.load()) {
+                output_over_limit.store(true);
+                if (overflow_event != nullptr) {
+                    SetEvent(overflow_event);
                 }
             }
             // 超限之后继续读但直接丢弃——不读的话管道缓冲区一满,子进程会
@@ -485,7 +493,9 @@ static ProcessResult RunProcessWithStdinImpl(const std::wstring& cmdline, const 
             if (!output_over_limit.load()) {
                 sink->append(buf, n);
                 const std::size_t total = captured_total.fetch_add(n) + n;
-                if (total >= max_output_bytes) {
+                // off-by-one 对齐:total == limit 不算超限;读到第 limit+1 个
+                // 字节(total > limit)才算。
+                if (total > max_output_bytes) {
                     output_over_limit.store(true);
                     if (overflow_event != nullptr) {
                         SetEvent(overflow_event);

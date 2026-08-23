@@ -95,6 +95,7 @@ inline constexpr const char* kErrHookUpdatedInputInvalid = "hook.updated_input.i
 inline constexpr const char* kErrPermissionDeclined = "permission.declined";
 inline constexpr const char* kErrProcessSpawnFailed = "process.spawn_failed";
 inline constexpr const char* kErrProcessTimeout = "process.timeout";
+inline constexpr const char* kErrProcessOutputLimit = "process.output_limit";
 inline constexpr const char* kErrProcessExitNonzero = "process.exit_nonzero";
 inline constexpr const char* kErrMcpTransportClosed = "mcp.transport_closed";
 inline constexpr const char* kErrMcpTimeout = "mcp.timeout";

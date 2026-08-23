@@ -222,19 +222,50 @@ void UnregisterBackgroundPid(pid_t pid) {
     state.pids.erase(std::remove(state.pids.begin(), state.pids.end(), pid), state.pids.end());
 }
 
-// 后台日志文件路径:系统临时目录下,文件名带毫秒时间戳 + 单调计数器,
-// 两者叠加保证同一毫秒内并发起多个后台命令也不会撞名。
+// 后台日志文件路径:系统临时目录下,文件名带毫秒时间戳 + 单调计数器 + 一段
+// 随机尾巴,三者叠加保证同一毫秒内并发起多个后台命令也不撞名(也堵住
+// "文件名可猜 + O_TRUNC 无 O_EXCL"的共享临时目录竞态/链接攻击面)。
 std::string BuildBackgroundLogPath() {
     static std::atomic<unsigned long long> counter{0};
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::system_clock::now().time_since_epoch())
                         .count();
     const unsigned long long seq = counter.fetch_add(1);
+    // 随机尾巴:mkstemp 风格的不可猜后缀。/dev/urandom 读不到就退化为
+    // pid + steady_clock 计数(仍是进程内单调,只是可猜;O_EXCL 兜底不撞)。
+    char rand_suffix[16] = {};
+    bool have_rand = false;
+    const int urnd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (urnd >= 0) {
+        have_rand = read(urnd, rand_suffix, sizeof(rand_suffix)) == static_cast<ssize_t>(sizeof(rand_suffix));
+        close(urnd);
+    }
+    std::string suffix;
+    if (have_rand) {
+        static const char kHex[] = "0123456789abcdef";
+        suffix.reserve(sizeof(rand_suffix) * 2);
+        for (const char c : rand_suffix) {
+            suffix.push_back(kHex[(static_cast<unsigned char>(c) >> 4) & 0xF]);
+            suffix.push_back(kHex[static_cast<unsigned char>(c) & 0xF]);
+        }
+    } else {
+        suffix = std::to_string(static_cast<unsigned long long>(::getpid())) + "_" +
+                 std::to_string(static_cast<unsigned long long>(
+                                    std::chrono::steady_clock::now().time_since_epoch().count()));
+    }
     const std::filesystem::path dir = std::filesystem::temp_directory_path();
-    const std::string filename = "lubancode_bg_" + std::to_string(ms) + "_" + std::to_string(seq) + ".log";
+    const std::string filename =
+        "lubancode_bg_" + std::to_string(ms) + "_" + std::to_string(seq) + "_" + suffix + ".log";
     // POSIX 例外:path 的窄口就是本机字节串(UTF-8),.string() 在这里既
     // 正确又必要,不换成 PathToUtf8(那是 Windows ACP 窄口的保险)。
     return (dir / filename).string();
+}
+
+// 以 0600 独占创建后台日志(O_CREAT|O_EXCL|O_NOFOLLOW:文件已存在/被人预置
+// symlink 就换名重来,不开别人的文件)。命令输出可能带 token,0644 会让
+// 同机其他账号读到——权限这道墙必须落。
+int OpenBackgroundLogExclusive(const std::string& path) {
+    return open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
 }
 
 struct SpawnedMerged {
@@ -368,10 +399,15 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
             }
             if (output.size() < max_output_bytes) {
                 const std::size_t room = max_output_bytes - output.size();
-                output.append(buf, std::min(static_cast<std::size_t>(n), room));
-                if (output.size() >= max_output_bytes) {
+                const std::size_t take = std::min(static_cast<std::size_t>(n), room);
+                output.append(buf, take);
+                // off-by-one 修正:恰好填到 max_output_bytes 不算"超过"。
+                // 读到了第 limit+1 个字节(总长超出一字节)才置 overflow。
+                if (static_cast<std::size_t>(n) > take) {
                     output_over_limit.store(true);
                 }
+            } else {
+                output_over_limit.store(true);
             }
             // 超限之后继续读但直接丢弃——别让子进程卡在写上,读空到 EOF。
         }
@@ -588,7 +624,9 @@ ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const st
                 sink->append(buf, static_cast<std::size_t>(n));
                 const std::size_t total = captured_total.fetch_add(static_cast<std::size_t>(n)) +
                                           static_cast<std::size_t>(n);
-                if (total >= max_output_bytes) {
+                // off-by-one 对齐:total == limit 不算超限;读到第 limit+1 个
+                // 字节(total > limit)才算。
+                if (total > max_output_bytes) {
                     output_over_limit.store(true);
                 }
             }
@@ -692,8 +730,15 @@ BackgroundSpawnResult RunProcessBackground(const std::vector<std::string>& argv,
     }
     IgnoreSigpipeOnce();
 
-    const std::string log_path = BuildBackgroundLogPath();
-    const int log_fd = open(log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    // 独占创建 + 0600:文件名可猜的 O_TRUNC 在共享临时目录里有预置文件/
+    // symlink 的攻击面;命令输出可能带 token,别的账号不许读。
+    std::string log_path = BuildBackgroundLogPath();
+    int log_fd = OpenBackgroundLogExclusive(log_path);
+    if (log_fd < 0) {
+        // 撞名/被人预置(O_EXCL|O_NOFOLLOW 拒了):换一个名字再来一把。
+        log_path = BuildBackgroundLogPath();
+        log_fd = OpenBackgroundLogExclusive(log_path);
+    }
     if (log_fd < 0) {
         result.error = std::string("创建日志文件失败: ") + std::strerror(errno);
         return result;

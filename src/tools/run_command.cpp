@@ -1,5 +1,7 @@
 #include "tools/run_command.hpp"
 
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <sstream>
 #include <string>
@@ -22,6 +24,9 @@ namespace lubancode::tools {
 namespace {
 
 constexpr int kDefaultTimeoutMs = 120000;
+// timeout_ms 的合法上限(int 全域放进来没意义:Windows 的 DWORD 等得起,
+// 会话也早没了)。超大值体面报错,不窄化走样。
+constexpr int kMaxTimeoutMs = 86400000;  // 24 小时
 
 // 把"命令跑在哪个目录"翻译进各 shell 的命令串:起手先 cd 到位,再跑原命令。
 // 隔离子代理靠这层把自己的命令钉在自己的房里(进程 cwd 全进程一份,不能
@@ -38,7 +43,19 @@ std::string QuotePowerShellSingle(const std::string& path) {
 }
 
 std::string QuotePosixSingle(const std::string& path) {
-    return QuotePowerShellSingle(path);  // 单引号转义规则同 PowerShell:翻倍
+    // POSIX sh 的单引号里没有转义这一说:翻倍两枚单引号会被解成两枚字面
+    // 单引号,串就拆坏了。严谨写法是闭合、插入一枚转义过的单引号、再打开:
+    //   'it' -> '\''  (即: '...' + "'" + '...')
+    std::string out = "'";
+    for (const char c : path) {
+        if (c == '\'') {
+            out += "'\\''";  // 闭单引号 + 转义单引号 + 开单引号
+        } else {
+            out.push_back(c);
+        }
+    }
+    out += "'";
+    return out;
 }
 
 std::string ApplyWorkingDirectory(const std::string& command, const std::string& cwd_utf8,
@@ -50,7 +67,8 @@ std::string ApplyWorkingDirectory(const std::string& command, const std::string&
         return "cd /d \"" + cwd_utf8 + "\" && " + command;
     }
     if (shell == "sh") {
-        return "cd -- '" + QuotePosixSingle(cwd_utf8) + "' && " + command;
+        // QuotePosixSingle 自己带首尾单引号(见它内部对单引号的处理)。
+        return "cd -- " + QuotePosixSingle(cwd_utf8) + " && " + command;
     }
     // PowerShell:Set-Location 在 & { ... } 外面先跑,后面的命令都在新目录里。
     return "Set-Location -LiteralPath '" + QuotePowerShellSingle(cwd_utf8) + "' ; " + command;
@@ -235,6 +253,11 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
     if (command.empty()) {
         return {"command 不能是空字符串", true};
     }
+    // JSON 字符串可含 NUL;C API 的命令行在 NUL 处截断,界面看到的是全串、
+    // 系统执行的却是前半串。一律拒绝,不猜。
+    if (command.find('\0') != std::string::npos) {
+        return {"command 里带 NUL 字符,系统命令行会在 NUL 处截断,拒绝执行", true};
+    }
 
     bool run_in_background = false;
     if (auto it = input.find("run_in_background"); it != input.end() && !it->is_null()) {
@@ -250,15 +273,19 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
     int timeout_ms = kDefaultTimeoutMs;
     if (!run_in_background) {
         if (auto it = input.find("timeout_ms"); it != input.end() && !it->is_null()) {
-            // 模型偶尔会把数字发成字符串/数组,直接 get<int>() 会抛异常穿透出去,
-            // 这里先验类型,不合就体面报错。
+            // 模型偶尔会把数字发成字符串/数组;直接 get<int>() 遇到超范围的
+            // JSON integer 会抛异常穿透出去。先按 64 位取,再做范围检查,
+            // 超出 int 的体面报错并写明允许区间。
             if (!it->is_number_integer()) {
                 return {"timeout_ms 得是整数(毫秒)", true};
             }
-            timeout_ms = it->get<int>();
-            if (timeout_ms <= 0) {
-                timeout_ms = kDefaultTimeoutMs;
+            const std::int64_t raw = it->get<std::int64_t>();
+            if (raw < 1 || raw > static_cast<std::int64_t>(kMaxTimeoutMs)) {
+                return {"timeout_ms 得在 1~" + std::to_string(kMaxTimeoutMs) + " 毫秒之间(写的是 " +
+                            std::to_string(raw) + ")",
+                        true};
             }
+            timeout_ms = static_cast<int>(raw);
         }
     }
 
@@ -279,6 +306,9 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
             return {"cwd 得是字符串(目录路径)", true};
         }
         effective_cwd = it->get<std::string>();
+        if (effective_cwd.find('\0') != std::string::npos) {
+            return {"cwd 里带 NUL 字符,系统路径会在 NUL 处截断,拒绝执行", true};
+        }
     }
 
     // 隔离的 cwd 闸 + git 改道闸:住在 worktree 房里的会话/子代理,命令不得
@@ -331,8 +361,11 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
         if (is_cmd) {
             bg = platform::RunShellCommandBackground(command_with_cwd);
         } else {
+            // 止血(P1):后台 PowerShell 此前编码的是原始 command,用户传的
+            // cwd 被悄悄丢掉,执行落回宿主目录。前台编码的可是 command_with_cwd,
+            // 后台得跟它一致。
             const std::wstring cmdline = L"powershell.exe -NoProfile -NonInteractive -EncodedCommand " +
-                                          platform::Utf8ToWide(BuildEncodedCommand(command));
+                                          platform::Utf8ToWide(BuildEncodedCommand(command_with_cwd));
             bg = platform::RunProcessBackground(cmdline);
         }
         if (!bg.success) {
@@ -427,8 +460,11 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
     if (proc.output_truncated) {
         std::ostringstream oss;
         oss << "[输出超过上限(2MB)已截断,命令已被强制终止。以下是截断前捕获到的输出]\n" << proc.output;
-        Tool::Result truncated{oss.str(), false};
+        // 单子的硬话:输出超限 = 命令被杀,结果不是成功。Agent Loop、workflow
+        // recorder、UI 只看布尔值时也不许把半截构建当成功。
+        Tool::Result truncated{oss.str(), true};
         truncated.outcome = "output_limit";
+        truncated.error_code = "process.output_limit";
         return truncated;
     }
 
