@@ -95,6 +95,9 @@ std::string ToString(ServerEventKind kind) {
         case ServerEventKind::ApprovalRequested: return "interaction.approval_requested";
         case ServerEventKind::QuestionRequested: return "interaction.question_requested";
         case ServerEventKind::InteractionResolved: return "interaction.resolved";
+        case ServerEventKind::CollaborationModeChanged: return "mode.changed";
+        case ServerEventKind::PlanReviewRequested: return "plan.review_requested";
+        case ServerEventKind::PlanReviewResolved: return "plan.review_resolved";
         case ServerEventKind::UsageUpdated: return "usage.updated";
         case ServerEventKind::ContextUpdated: return "context.updated";
         case ServerEventKind::Warning: return "warning";
@@ -111,6 +114,7 @@ std::string ToString(ItemKind kind) {
         case ItemKind::Command: return "command";
         case ItemKind::Diff: return "diff";
         case ItemKind::Todo: return "todo";
+        case ItemKind::Plan: return "plan";
         case ItemKind::Subagent: return "subagent";
     }
     return "tool";
@@ -147,6 +151,9 @@ bool ParseServerEventKind(const std::string& s, ServerEventKind& out) {
     if (s == "interaction.approval_requested") { out = ServerEventKind::ApprovalRequested; return true; }
     if (s == "interaction.question_requested") { out = ServerEventKind::QuestionRequested; return true; }
     if (s == "interaction.resolved") { out = ServerEventKind::InteractionResolved; return true; }
+    if (s == "mode.changed") { out = ServerEventKind::CollaborationModeChanged; return true; }
+    if (s == "plan.review_requested") { out = ServerEventKind::PlanReviewRequested; return true; }
+    if (s == "plan.review_resolved") { out = ServerEventKind::PlanReviewResolved; return true; }
     if (s == "usage.updated") { out = ServerEventKind::UsageUpdated; return true; }
     if (s == "context.updated") { out = ServerEventKind::ContextUpdated; return true; }
     if (s == "warning") { out = ServerEventKind::Warning; return true; }
@@ -161,6 +168,7 @@ bool ParseItemKind(const std::string& s, ItemKind& out) {
     if (s == "command") { out = ItemKind::Command; return true; }
     if (s == "diff") { out = ItemKind::Diff; return true; }
     if (s == "todo") { out = ItemKind::Todo; return true; }
+    if (s == "plan") { out = ItemKind::Plan; return true; }
     if (s == "subagent") { out = ItemKind::Subagent; return true; }
     return false;
 }
@@ -229,6 +237,11 @@ EventLayer LayerOf(const ServerEvent& event) {
         case ServerEventKind::ThreadStarted:
         case ServerEventKind::ThreadUpdated:
         case ServerEventKind::ThreadDeleted:
+        // Plan 模式:模式切换与计划审阅都是 thread 级状态(Plan turn 收口后
+        // 由空闲层发,不钉在某条 item 上)。
+        case ServerEventKind::CollaborationModeChanged:
+        case ServerEventKind::PlanReviewRequested:
+        case ServerEventKind::PlanReviewResolved:
             return EventLayer::Thread;
         case ServerEventKind::TurnStarted:
         case ServerEventKind::TurnCompleted:
@@ -290,6 +303,9 @@ std::string ToString(ClientCommandKind kind) {
         case ClientCommandKind::SetTitle: return "thread.set_title";
         case ClientCommandKind::Compact: return "thread.compact";
         case ClientCommandKind::Export: return "thread.export";
+        case ClientCommandKind::SetCollaborationMode: return "mode.set";
+        case ClientCommandKind::ReviewPlan: return "plan.review";
+        case ClientCommandKind::ReopenPlanReview: return "plan.review_reopen";
     }
     return "turn.start";
 }
@@ -315,6 +331,9 @@ bool ParseClientCommandKind(const std::string& s, ClientCommandKind& out) {
     if (s == "thread.set_title") { out = ClientCommandKind::SetTitle; return true; }
     if (s == "thread.compact") { out = ClientCommandKind::Compact; return true; }
     if (s == "thread.export") { out = ClientCommandKind::Export; return true; }
+    if (s == "mode.set") { out = ClientCommandKind::SetCollaborationMode; return true; }
+    if (s == "plan.review") { out = ClientCommandKind::ReviewPlan; return true; }
+    if (s == "plan.review_reopen") { out = ClientCommandKind::ReopenPlanReview; return true; }
     return false;
 }
 

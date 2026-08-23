@@ -12,6 +12,7 @@
 #include "api/assembler.hpp"
 #include "hooks/hash.hpp"  // Sha256Hex:trace 的入参/结果摘要锚
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:工具结果的第一道编码关口
+#include "runtime/plan_mode.hpp"       // kErrModeDenied:Plan 硬闸的稳定码
 #include "tools/schema_check.hpp"      // updatedInput 改写后的 schema 复检
 #include "platform/log_sink.hpp"
 
@@ -258,6 +259,33 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         unavailable.error_code = kErrRegistryNotMounted;
         finish(unavailable, source_kind, source_instance, effect_class);
         return dispatch_done(call.id, call.name, std::move(unavailable));
+    }
+
+    // ---- Plan 模式(只读研究硬闸单):ModePolicy 在 PreToolUse Hook 之前。
+    // 拒绝时 Hook 不跑、确认不问、工具不执行——Plan 拒绝压过 Hook 与
+    // Yolo(单子:先过 Plan capability gate,再过 Hook/schema,再过
+    // permission)。终态 ModeDenied,错误码 mode.denied*(装配层给的稳定
+    // 细码),不冒充"没挂载"也不冒充"用户拒绝"。
+    if (callbacks.on_mode_policy) {
+        const std::string mode_denial = callbacks.on_mode_policy(call.name, call.input);
+        if (!mode_denial.empty()) {
+            phase(ToolPhase::Blocked);
+            // 回调交回的是"细码|人话"两截(细码给账,人话给模型与用户);
+            // 只有一截就整段当人话,码退回通用 mode.denied。
+            const std::size_t split = mode_denial.find('|');
+            std::string code = runtime::kErrModeDenied;
+            std::string reason = mode_denial;
+            if (split != std::string::npos && !mode_denial.substr(0, split).empty()) {
+                code = mode_denial.substr(0, split);
+                reason = mode_denial.substr(split + 1);
+            }
+            tools::Tool::Result denied{reason, true};
+            denied.outcome = ToString(ToolOutcome::ModeDenied);
+            denied.error_code = code;
+            denied.details = nlohmann::json{{"mode", "plan"}};
+            finish(denied, source_kind, source_instance, effect_class);
+            return dispatch_done(call.id, call.name, std::move(denied));
+        }
     }
 
     // ---- PreToolUse:在 UI 标记"真执行"之前、权限确认之前。deny -> 拦;

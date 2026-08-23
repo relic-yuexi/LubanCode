@@ -105,6 +105,25 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
             options.system_prompt_file_arg = args[++i];
             continue;
         }
+        if (arg == "--mode") {
+            // Plan 模式单:--mode <plan|default>。缺值/认不得当场退——
+            // 认不得的值报错,不静默落回 Default(单子:不能让用户误以为
+            // 只读保护已经开了)。
+            if (i + 1 >= args.size()) {
+                parsed.action = CliAction::BadMode;
+                parsed.error_text = "--mode 需要一个值:--mode plan 或 --mode default";
+                return parsed;
+            }
+            const std::string& value = args[++i];
+            if (value != "plan" && value != "default") {
+                parsed.action = CliAction::BadMode;
+                parsed.error_text = "--mode 认不得 \"" + value + "\":只认 plan 或 default";
+                return parsed;
+            }
+            options.mode = value;
+            options.mode_given = true;
+            continue;
+        }
         if (arg == "--reset-system-prompt") {
             // 跟 /prompt reset 同效,只是不进交互、不二次确认(命令行参数
             // 本身就是明确意图),RunCli 打完结果就退。

@@ -34,6 +34,11 @@ struct PromptOptions {
     std::string wire;            // 三种正式 wire 名 / 空(不注平台段)
     std::string current_date;    // 空 = 拼装时取本机日期(YYYY-MM-DD);测试注入用
     std::string prompts_dir;     // 用户模块目录(~/.lubancode/prompts);空 = 只用嵌入版
+    // Plan 模式(只读研究硬闸单):拼装末尾注入的模式段。空串 = Default
+    // 模式,同样注 Default 模板(明令结束旧 Plan 指令,防切档残留)。段恒用
+    // 嵌入版——用户/项目目录里的同名文件不覆盖(单子:mode instructions
+    // 宿主内置,不给项目覆盖)。
+    bool plan_mode = false;
 };
 
 // 按上述规则拼一份完整系统提示(不含模型指令/魂/延迟索引那几层)。
@@ -73,5 +78,11 @@ std::string BuildEnvironmentSegment(const std::string& cwd, const std::string& c
 // 空串。给系统提示之外的提示词消费方用(如 memory 回合总结的分型提示词
 // features/memory-summary-*.md),同一套"用户可改、内置兜底"规矩。
 std::string ModuleTextByPath(const std::string& prompts_dir, const std::string& rel_path);
+
+// 模式段(Plan 模式单):modes/default.md 或 modes/plan.md 的**嵌入版**
+// 正文。恒不读用户目录——mode instructions 是宿主内置合同,项目提示不许
+// 覆盖(单子:用户覆盖 prompts 不能删 Plan 硬指令)。plan_mode=false 给
+// Default 模板(内含"旧 Plan 指令已结束"的明令,防切档残留)。
+std::string ModeInstructionSegment(bool plan_mode);
 
 }  // namespace lubancode::agent

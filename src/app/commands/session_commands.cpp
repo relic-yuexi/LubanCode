@@ -581,7 +581,11 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
                     const lubancode::cli::Theme& theme, bool quiet_if_none,
                     lubancode::cli::WorktreeSession* worktree_session, int* compact_epoch_out,
                     const std::function<void(const std::vector<lubancode::agent::ArchivedQueueItem>&)>*
-                        on_queue_restored) {
+                        on_queue_restored,
+                    const std::function<void(const std::optional<lubancode::agent::ModeEvent>&,
+                                             const std::vector<lubancode::agent::PlanEvent>&,
+                                             const std::optional<lubancode::agent::PlanReviewEvent>&)>*
+                        on_mode_restored) {
     if (sessions_dir.empty()) {
         std::cout << tr("session.no_home") << "\n";
         return false;
@@ -687,6 +691,15 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
             std::cout << theme.stats << trf("cmd.resume.queue_restored", session->queued_messages.size())
                       << theme.reset << "\n";
         }
+    }
+    // Plan 模式单:mode/plan/review 账交还会话层。老档没 mode 行给
+    // nullopt(按 Default),会话层自己判;恢复 Plan 档时由它打一行提示。
+    if (on_mode_restored != nullptr && *on_mode_restored) {
+        const std::optional<lubancode::agent::ModeEvent> mode_event =
+            session->last_mode_event.mode.empty()
+                ? std::nullopt
+                : std::optional<lubancode::agent::ModeEvent>(session->last_mode_event);
+        (*on_mode_restored)(mode_event, session->plan_events, session->last_plan_review);
     }
     // context 记账:真实 usage 得等恢复后第一次请求才校准,这里先按字符
     // 粗估打一行,心里有数。
@@ -876,7 +889,8 @@ CommandFlow HandleResumeCommand(SessionCommandState& state, const std::string& a
     if (ResumeSession(target, state.sessions_dir, state.loop, state.store, state.persisted_count,
                       state.meta, state.title, state.wire_str, *state.current_model, theme,
                       /*quiet_if_none=*/false, state.worktree_session, &state.compact_epoch,
-                      state.on_queue_restored ? &state.on_queue_restored : nullptr)) {
+                      state.on_queue_restored ? &state.on_queue_restored : nullptr,
+                      state.on_mode_restored ? &state.on_mode_restored : nullptr)) {
         state.store_broken = false;  // 换了场,存档失败的旧账翻篇
         state.title_pending = false;
         if (state.worktree_session != nullptr && state.worktree_session->active()) {

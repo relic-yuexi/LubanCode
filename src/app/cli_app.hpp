@@ -43,4 +43,10 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result);
 // 好而拒绝干活。
 int HandlePluginInitCommand(const PluginInitArgs& init);
 
+// Plan 模式单:起手协作档的优先级(高到低):--mode >
+// LUBANCODE_COLLABORATION_MODE > settings.local.json 的
+// default_collaboration_mode > Default。CLI 的非法值已在解析层退 BadMode;
+// env/settings 的非法值明报到 stderr 并按 Default 走。
+bool ResolveStartupPlanMode(const CliOptions& cli_options, const config::SettingsLocal& settings_local);
+
 }  // namespace lubancode::app

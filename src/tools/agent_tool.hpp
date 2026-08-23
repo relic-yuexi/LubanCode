@@ -360,7 +360,13 @@ public:
         // 语义。不设(默认 nullptr)= 子代理收不到外部打断,行为跟从前一样。
         const std::atomic<bool>* cancel = nullptr;
 
-        // hooks 框架第四五步:进程级 dispatcher。前台子代理用它发
+        // Plan 模式(只读研究硬闸单):子代理内部工具的 ModePolicy 闸。
+        // 转发父级同名回调——子代理不因独立 context 逃闸(单子:Explore
+        // 子代理拿同一 Plan mode + 更窄 allowlist)。不设 = 子代理不过
+        // Plan 闸(旧路)。
+        std::function<std::string(const std::string& tool_name, const nlohmann::json& input)> on_mode_policy;
+
+                // hooks 框架第四五步:进程级 dispatcher。前台子代理用它发
         // SubagentStart/SubagentStop,并把 dispatcher 的上下文换成这只子代理
         // 的 agent_id/agent_type(跑完还原)——工具事件的 stdin JSON 就分得清
         // 主代理与子代理。后台子代理不接 hooks(线程模型见 dispatcher 注释),

@@ -227,6 +227,18 @@ struct Callbacks {
     // 没有补偿类工具,行为不变。
     std::function<std::string(const std::string& execution_id, const std::string& tool_name)> on_tool_compensates;
 
+    // ---- Plan 模式（只读研究硬闸单）:ModePolicy 硬闸 ------------------------
+    // RunOneTool 在 deferred/tool_search 可见性之后、PreToolUse Hook 之前
+    // 调它（单子"调用次序":registry find -> deferred visibility -> ModePolicy
+    // -> PreToolUse Hook -> schema -> permission -> execute）。返回空串 =
+    // 放行（含 Default 模式）;非空 = 稳定拒绝码，工具不执行、Hook 不跑、
+    // 确认不问，tool_result 带"Plan 模式禁止"语义，终态 ModeDenied。
+    // 拒绝不冒充"工具没加载"也不冒充"用户拒绝"——装配层给稳定
+    // mode.denied 细码。不设 = 没装 Plan 闸（单测/子代理旧路），行为不变。
+    // 入参是工具名 + 原始 input（装配层凭注册表查 capability;run_command
+    // 的 shell 细判、agent 的角色细判都在装配层的这枚回调里做）。
+    std::function<std::string(const std::string& tool_name, const nlohmann::json& input)> on_mode_policy;
+
     // ---- 逐枚追踪:消息落盘次序的三个关口(单子"消息落盘次序要改") ------
     // 1. assistant 消息组装完、刚入 history:装配层 append+flush 进 session。
     //    不设 = 老路(整轮收口后 PersistNewMessages),行为不变。
