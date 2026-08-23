@@ -1507,7 +1507,12 @@ std::vector<PromptHistoryRecord> ExtractPromptHistory(const std::string& jsonl_c
                                                  text.back() == '\n' || text.back() == '\r')) {
                             text.pop_back();
                         }
-                        if (!text.empty() && text.front() != '/') {
+                        // 定时循环 tick 的 scheduled message(loop 单):定时
+                        // 触发的重复句不算提问,不进 Ctrl+R
+                        // 历史搜索(免得满屏重复)。
+                        if (!text.empty() && text.front() != '/' &&
+                            !text.starts_with("[定时循环 tick]") &&
+                            !text.starts_with("[goal ")) {
                             out.push_back(PromptHistoryRecord{std::move(text),
                                                               parsed.value("ts", std::string())});
                         }
