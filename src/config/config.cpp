@@ -3345,6 +3345,14 @@ std::expected<SettingsLocal, std::string> ParseSettingsLocal(const std::string& 
             out.default_confirm_mode = std::move(mode);  // auto/yolo/confirm,别的值交给调用方判
         }
     }
+    // Plan 模式单:起手协作档。plan/default 之外的值交给调用方判(RunCli
+    // 明报到 stderr)。
+    if (perms.contains("default_collaboration_mode") && perms["default_collaboration_mode"].is_string()) {
+        std::string mode = perms["default_collaboration_mode"].get<std::string>();
+        if (!mode.empty()) {
+            out.default_collaboration_mode = std::move(mode);
+        }
+    }
     return out;
 }
 

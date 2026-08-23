@@ -17,6 +17,11 @@ struct CliOptions {
     bool continue_last = false;     // --continue
     bool app_server = false;        // app-server 子命令:无界面后台协议(stdio)
     std::string system_prompt_file_arg;  // --system-prompt <文件>(空 = 没给)
+    // Plan 模式单:--mode plan(只认 "plan";"default" 等价没给)。非法值
+    // 在解析层就退 BadMode——认不得的值报错,不静默落回 Default(单子:
+    // "不能安静落回 Default,让用户误以为只读保护已经开了")。
+    std::string mode;               // "--mode <plan|default>";空 = 没给
+    bool mode_given = false;
 };
 
 // `lubancode plugin init <模板> [名字]` 子命令(plugins 单第 3 步:Python
@@ -49,6 +54,7 @@ enum class CliAction {
     MissingSystemPromptValue, // --system-prompt 没带值:报错退 1
     BadPluginInit,            // plugin init 的参数不对:人话已塞进 error_text
     ManageSession,            // archive/unarchive/delete 子命令
+    BadMode,                  // --mode 认不得:人话已塞进 error_text(Plan 单)
 };
 
 struct ParsedCliArgs {
