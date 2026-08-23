@@ -589,6 +589,9 @@ ParsedGoalCommand ParseGoalCommand(const std::string& args) {
     // 之外的普通目标文本,原样收)。
     parsed.action = GoalCommandAction::Create;
     parsed.objective = trimmed;
+    return parsed;
+}
+
 ParsedPlanCommand ParsePlanCommand(const std::string& args) {
     ParsedPlanCommand parsed;
     const std::string trimmed = Trim(args);
