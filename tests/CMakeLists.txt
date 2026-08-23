@@ -258,6 +258,10 @@ add_executable(lubancode_tests
   # 工具调用逐枚追踪单:五工具批次/崩溃注入九窗口四档恢复/幂等与冲突/
   # trace-aware 修补/落盘次序/来源与错误码/undo token/可疑窗口。
   test_tool_trace.cpp
+  # Plan 模式(只读研究硬闸单):ModePolicy 硬闸、Plan shell 分类、
+  # <proposed_plan> 扫描、mode/plan/review 事件回放、/plan 解析、提示词
+  # 模式段、合同枚举新值。
+  test_plan_mode.cpp
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 # 依赖守门(显示系统剥离单第八步):测试要现扫源码树,把源码根递进去。
