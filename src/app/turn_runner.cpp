@@ -1120,34 +1120,21 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
 
     // 用户这一行已经提交、真要开始等模型作答了——分界线打在这儿,紧跟在
     // 提示符那一行之后、模型正文开始打字机输出之前。
-    // 用户输入背景块(终端用户输入背景块单):CollapseBoxOnSubmit 已把
-    // composer 收成裸 `> 内容`,这里在同一帧里把它擦净、由同一颗
-    // FormatUserPromptBlock(与 resume/Ctrl+L 重放同源)铺成整行淡底色块,
-    // 块后按间距表垫一口气——live/恢复/重画三路一个脸。真控制台才铺;
-    // 管道/重定向保持稳定纯文本(`> 内容` 一行,不夹 ANSI)。
+    // 用户输入背景块(终端用户输入背景块单):真控制台的 user surface 已由
+    // composer 收框那一笔落下(CollapseBoxOnSubmit 直接铺 FormatUserPromptBlock,
+    // 与 resume/Ctrl+L 同源——同一笔 transaction 退 editing chrome、落背景,
+    // 不先收成裸文本再回头涂),这里只按间距表垫一口块后气口(UserPrompt ->
+    // 任意 = 1),信息收尾不贴脸。管道/重定向没有 composer 收框,保持稳定
+    // 纯文本,不补这一口。
     PrintDivider(theme, is_console && !silent);
     if (is_console && !silent && !user_input.empty()) {
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-        const int block_width = lubancode::cli::DetectConsoleWidth().value_or(80);
-        // 收起 composer 留下的裸 `> 内容` 行:那是编辑态的残影,背景块接
-        // 同一片 frame(与 Enter 修复单的 handoff transaction 同一笔)。
-        // 擦不干净也不赌——背景块从当前光标行起新铺,旧行留在上面只多
-        // 一份回显,不覆盖任何新内容。正文只取用户真实提交的文本(TextBlock
-        // 首块);@路径塞进模型的 ImageBlock 不展,图片摘要另有
-        // image.attached 一行(上面已打)。
-        std::string user_text;
-        for (const auto& block : prepared_input->message.content) {
-            if (const auto* text = std::get_if<lubancode::api::TextBlock>(&block)) {
-                user_text = text->text;
-                break;
-            }
+        for (int g = 0;
+             g < lubancode::cli::GapBetween(lubancode::cli::BlockRole::UserPrompt,
+                                            lubancode::cli::BlockRole::Thinking);
+             ++g) {
+            std::cout << "\n";
         }
-        if (user_text.empty()) {
-            user_text = user_input;
-        }
-        std::cout << "\n";
-        std::cout << lubancode::cli::FormatUserPromptBlock(user_text, theme, block_width);
-        std::cout << "\n";
         std::cout.flush();
     }
 
