@@ -28,6 +28,7 @@
 #include "agent/loop.hpp"
 #include "agent/session_store.hpp"
 #include "agent/tool_trace.hpp"
+#include "platform/text_encoding.hpp"
 #include "runtime/id_authority.hpp"
 #include "runtime/tool_trace_hub.hpp"
 #include "api/backend.hpp"
@@ -217,6 +218,57 @@ TEST_CASE("tool_trace: 序列化往返保真") {
     CHECK(parsed->result_ref.kind == agent::ToolResultRef::Kind::Inline);
     CHECK(parsed->result_ref.content == "hello");
     CHECK(parsed->seq == 7);
+}
+
+TEST_CASE("tool_trace: 中文结果截头尾不劈 UTF-8,完成事件仍可序列化") {
+    // 160 字节刀口落在“先”字腰上,200 字节刀口落在“后”字腰上。
+    // 旧代码先留下 E5 85,再接省略号 E2 80 A6,复现 type_error.316:
+    // invalid UTF-8 byte at index 160: 0xE2。
+    const std::string content = std::string(158, 'a') + "先" + std::string(37, 'b') + "后" +
+                                std::string(200, 'c');
+    REQUIRE(content.size() > 320);
+
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<FakeTool>("probe", tools::Tool::Result{content, false}));
+    api::ToolUseBlock call;
+    call.id = "u_utf8";
+    call.name = "probe";
+    call.input = nlohmann::json::object();
+
+    TraceCollector collector;
+    agent::Callbacks callbacks = collector.Decorate({});
+    agent::ToolTraceContext ctx;
+    ctx.execution_id = "e_utf8";
+    ctx.batch_id = "b_utf8";
+    ctx.sequence_in_batch = 0;
+    const auto result = agent::RunOneTool(registry, call, callbacks, nullptr, "", &ctx);
+    CHECK_FALSE(result.is_error);
+    REQUIRE(collector.events.size() == 2);
+
+    const auto& finished = collector.events.back();
+    REQUIRE(finished.kind == agent::ToolTraceEventKind::ExecutionFinished);
+    CHECK(platform::IsValidUtf8(finished.fallback_message));
+    CHECK(platform::IsValidUtf8(finished.result_ref.preview));
+    CHECK(finished.fallback_message.size() == 198);
+
+    const std::string line = agent::SerializeToolTraceEvent(finished, "2026-08-24 11:23:37");
+    CHECK(platform::IsValidUtf8(line));
+    CHECK(agent::ParseToolTraceEvent(line).has_value());
+}
+
+TEST_CASE("tool_trace: 序列化出口会清洗漏入事件的坏 UTF-8") {
+    agent::ToolTraceEvent event;
+    event.kind = agent::ToolTraceEventKind::ExecutionFinished;
+    event.execution_id = "e_bad_utf8";
+    event.tool_name = "foreign_tool";
+    event.outcome = agent::ToolOutcome::Succeeded;
+    event.fallback_message = std::string("外来结果") + static_cast<char>(0xE2);
+    event.result_ref.kind = agent::ToolResultRef::Kind::Inline;
+    event.result_ref.content = event.fallback_message;
+
+    const std::string line = agent::SerializeToolTraceEvent(event, "2026-08-24 11:23:37");
+    CHECK(platform::IsValidUtf8(line));
+    CHECK(agent::ParseToolTraceEvent(line).has_value());
 }
 
 TEST_CASE("tool_trace: 坏行/缺主键给 nullopt,不抛") {

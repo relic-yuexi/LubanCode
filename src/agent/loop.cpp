@@ -138,7 +138,10 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
             event.outcome = result.is_error ? ToolOutcome::ToolError : ToolOutcome::Succeeded;
         }
         event.error_code = result.error_code;
-        event.fallback_message = result.content.empty() ? std::string() : result.content.substr(0, 200);
+        event.fallback_message =
+            result.content.size() <= 200
+                ? result.content
+                : result.content.substr(0, platform::Utf8PrefixBoundary(result.content, 200));
         event.details = result.details;
         // MCP 内层账(逐枚追踪单"MCP 外层 execution 要挂内层"):jsonrpc id
         // 与 transport generation 从 details 提升成一等字段,迟到响应事件
