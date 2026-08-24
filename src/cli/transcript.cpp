@@ -52,6 +52,26 @@ std::vector<std::string> SplitLines(const std::string& text) {
     return lines;
 }
 
+// read_file 的正文行固定是“右对齐行号<Tab>正文”。结果末尾还可能跟一行
+// 截断提示，不能拿普通文本总行数冒充真正读到的源码行数。
+std::size_t CountReadFileSourceLines(const std::string& content) {
+    std::size_t count = 0;
+    for (const std::string& line : SplitLines(content)) {
+        std::size_t pos = 0;
+        while (pos < line.size() && line[pos] == ' ') {
+            ++pos;
+        }
+        const std::size_t digits_begin = pos;
+        while (pos < line.size() && line[pos] >= '0' && line[pos] <= '9') {
+            ++pos;
+        }
+        if (pos > digits_begin && pos < line.size() && line[pos] == '\t') {
+            ++count;
+        }
+    }
+    return count;
+}
+
 // 超宽截断 + "..."。已在宽度内就原样返回;max_width 太小放不下省略号时
 // 直接给 "..." 的能放下的部分。
 std::string TruncateWithEllipsis(const std::string& utf8, int max_width) {
@@ -231,7 +251,15 @@ std::string BuildToolTitle(const std::string& name, const nlohmann::json& input)
                 arg += trf("transcript.more_lines", static_cast<int>(rest));
             }
         }
-    } else if (name == "read_file" || name == "write_file" || name == "edit_file") {
+    } else if (name == "read_file") {
+        arg = input.value("path", std::string());
+        for (const char* key : {"offset", "limit"}) {
+            const auto value = input.find(key);
+            if (value != input.end() && value->is_number_integer()) {
+                arg += ", " + std::string(key) + "=" + std::to_string(value->get<long long>());
+            }
+        }
+    } else if (name == "write_file" || name == "edit_file") {
         arg = input.value("path", std::string());
     } else if (name == "agent") {
         // 工具条目标题只认真正短 title(入参必填);不拿 prompt 片段冒充。
@@ -549,7 +577,7 @@ std::string ReadFileDoneSummary(const std::string& content) {
     if (content.compare(0, kEmptyFile.size(), kEmptyFile) == 0) {
         return trf("transcript.read_lines", 0);
     }
-    return trf("transcript.read_lines", CountLines(content));
+    return trf("transcript.read_lines", CountReadFileSourceLines(content));
 }
 
 std::string WriteDiffSummary(int added_lines, std::optional<int> removed_lines) {

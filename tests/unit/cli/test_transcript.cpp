@@ -256,9 +256,15 @@ TEST_CASE("FormatTranscriptItem: width<=0 不截断") {
 
 // ---- BuildToolTitle:各工具的参数摘要 --------------------------------------
 
-TEST_CASE("BuildToolTitle: run_command 显示命令,read/write/edit 显示路径") {
+TEST_CASE("BuildToolTitle: run_command 显示命令,read 显示路径与分页,write/edit 显示路径") {
     CHECK(BuildToolTitle("run_command", {{"command", "git status"}}) == "run_command(git status)");
     CHECK(BuildToolTitle("read_file", {{"path", "src/main.cpp"}}) == "read_file(src/main.cpp)");
+    CHECK(BuildToolTitle("read_file", {{"path", "src/main.cpp"}, {"offset", 60}}) ==
+          "read_file(src/main.cpp, offset=60)");
+    CHECK(BuildToolTitle("read_file", {{"path", "src/main.cpp"}, {"limit", 80}}) ==
+          "read_file(src/main.cpp, limit=80)");
+    CHECK(BuildToolTitle("read_file", {{"path", "src/main.cpp"}, {"offset", 60}, {"limit", 80}}) ==
+          "read_file(src/main.cpp, offset=60, limit=80)");
     CHECK(BuildToolTitle("write_file", {{"path", "a.txt"}, {"content", "xxx"}}) == "write_file(a.txt)");
     CHECK(BuildToolTitle("edit_file", {{"path", "b.txt"}, {"old_string", "o"}, {"new_string", "n"}}) ==
           "edit_file(b.txt)");
@@ -362,9 +368,12 @@ TEST_CASE("RunCommandDoneSummary: 退出码 + 耗时") {
     CHECK(RunCommandDoneSummary("没有退出码前缀", 0.5) == "Done · 0.5s");
 }
 
-TEST_CASE("ReadFileDoneSummary: 行数;空文件 0 行") {
+TEST_CASE("ReadFileDoneSummary: 只数源码行,不把截断提示算进去") {
     CHECK(ReadFileDoneSummary("     1\ta\n     2\tb\n") == "读取 2 行");
+    CHECK(ReadFileDoneSummary("    60\ta\n    61\tb\n[内容过长已截断,只读到第 61 行;继续读请用 offset=62]\n") ==
+          "读取 2 行");
     CHECK(ReadFileDoneSummary("(空文件)") == "读取 0 行");
+    CHECK(ReadFileDoneSummary("(offset 超过了文件总行数 10)") == "读取 0 行");
 }
 
 TEST_CASE("WriteDiffSummary: 新增 N 行,删除 M 行;新文件只有新增") {
