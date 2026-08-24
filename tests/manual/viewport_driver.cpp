@@ -382,6 +382,7 @@ std::vector<std::string> ToolUseTurn(const std::string& tool_id, const std::stri
 // 剧本锚文本(UTF-8 字面量,与 agent_stream_driver 同一套写法)。
 const char* kUserPromptReal =
     "\xe5\x9b\x9e\xe5\xbd\x92\xe5\x8f\xaf\xe8\xa7\x86\xe5\x8c\xba\xe4\xb8\x80\xe6\x9c\xac\xe8\xb4\xa6";  // 回归可视区一本账
+const char* kWidthPrompt = "width-resize-footer-regression";
 const char* kAgentA = "\xe6\x85\xa2\xe6\x9f\xa5\xe7\x94\xb2\xe8\xa7\x86\xe5\x8f\xa3\xe8\xb4\xa6";  // 慢查甲视口账
 const char* kAgentB = "\xe6\x85\xa2\xe6\x9f\xa5\xe4\xb9\x99\xe8\xa7\x86\xe5\x8f\xa3\xe8\xb4\xa6";  // 慢查乙视口账
 const char* kTitleA = "\xe7\x94\xb2\xe7\x9a\x84\xe8\xa7\x86\xe5\x8f\xa3\xe8\xb4\xa6";  // 甲的视口账
@@ -500,7 +501,10 @@ int StartFakeAnthropicServer() {
             const std::size_t last_user = body.rfind("\"role\":\"user\"");
             return last_user != std::string::npos && body.find(needle, last_user) != std::string::npos;
         };
-        if (sub_agent_request) {
+        if (!sub_agent_request && has(kWidthPrompt)) {
+            // 专用改宽幕:一条 2.5 秒慢流，活动栏稳稳跨过 120 -> 80 -> 120。
+            RespondSseSlow(client_fd, TextTurn(kBodyTail), 500);
+        } else if (sub_agent_request) {
             if (g_thinking_scene.load()) {
                 // 幕六:甲 = 慢思考流(20 段 × 400ms),乙不出场。
                 RespondSseSlow(client_fd, ThinkingStreamTurn(), 400);
@@ -583,6 +587,29 @@ void SetSceneSize(int width, int window_rows, int buffer_rows) {
     SetConsoleScreenBufferSize(g_conout, COORD{static_cast<SHORT>(width), static_cast<SHORT>(buffer_rows)});
     SMALL_RECT window{0, 0, static_cast<SHORT>(width - 1), static_cast<SHORT>(window_rows - 1)};
     SetConsoleWindowInfo(g_conout, TRUE, &window);
+}
+
+int CountBusyFooterRows() {
+    const std::string working = "\xe6\x80\x9d\xe8\x80\x83\xe4\xb8\xad";  // 思考中
+    int count = 0;
+    for (int row = 0; row < BufferHeight(); ++row) {
+        const std::string text = ReadRow(row);
+        if (text.find(working) != std::string::npos && text.find("Esc") != std::string::npos) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+bool WaitForSingleBusyFooter(int timeout_ms) {
+    const DWORD deadline = GetTickCount() + static_cast<DWORD>(timeout_ms);
+    while (GetTickCount() < deadline) {
+        if (CountBusyFooterRows() == 1) {
+            return true;
+        }
+        Sleep(100);
+    }
+    return CountBusyFooterRows() == 1;
 }
 
 // 十轮改字号(疑案复现尝试):原字号与大小字号来回切,末了还原。
@@ -759,6 +786,53 @@ void RunScenario(const std::string& name, const std::wstring& exe_path, const st
     }
 }
 
+void RunWidthResizeScene(const std::wstring& exe_path, const std::wstring& workdir) {
+    Log("==== 幕:忙碌栏运行中改宽 ====");
+    if (g_reset_server_state) {
+        g_reset_server_state();
+    }
+    ChildGuard guard;
+    if (!SpawnChild(exe_path, workdir, guard)) {
+        return;
+    }
+    Check(WaitForText("\xe9\x94\xae\xe5\x85\xa5\xe5\xb9\xb6\xe5\x9b\x9e\xe8\xbd\xa6", 30000) ||
+              FindComposerInputRow() > 0,
+          "改宽: 开场空闲 composer 出现");  // 键入并回车
+    SendText(kWidthPrompt);
+    SendKey(VK_RETURN, L'\r', 0);
+
+    Check(WaitForSingleBusyFooter(10000), "改宽前恰有一条忙碌活动栏");
+    SetSceneSize(80, 30, 400);
+    Sleep(800);  // 至少跨过四拍 200ms heartbeat，让改宽路径确实落笔。
+    const int narrow_count = CountBusyFooterRows();
+    Check(narrow_count == 1,
+          "拉窄后忙碌活动栏仍只有一条(实得 " + std::to_string(narrow_count) + ")");
+    SetSceneSize(120, 30, 400);
+    Sleep(800);
+    const int wide_count = CountBusyFooterRows();
+    Check(wide_count == 1,
+          "拉宽后忙碌活动栏仍只有一条(实得 " + std::to_string(wide_count) + ")");
+    DumpViewport("width-running");
+
+    Check(WaitForText(kBodyTail, 10000), "改宽后当前回合仍能收口");
+    const DWORD idle_deadline = GetTickCount() + 10000;
+    while (GetTickCount() < idle_deadline && CountBusyFooterRows() != 0) {
+        Sleep(100);
+    }
+    Check(CountBusyFooterRows() == 0, "改宽回合活动栏按时收走");
+    SendText("exit");
+    SendKey(VK_RETURN, L'\r', 0);
+    if (WaitForSingleObject(guard.pi.hProcess, 15000) == WAIT_OBJECT_0) {
+        DWORD code = 0;
+        GetExitCodeProcess(guard.pi.hProcess, &code);
+        Check(code == 0, "改宽幕干净退出码 0(实得 " + std::to_string(code) + ")");
+        CloseHandle(guard.pi.hProcess);
+        guard.pi.hProcess = nullptr;
+    } else {
+        Check(false, "改宽幕 15 秒内没退出");
+    }
+}
+
 // ---- 幕六(追加需求"查看态实时思考流"):思考流期间进查看态,字数在长 ----
 // 剧本:主回合派甲(后台);甲按 500ms 一段慢慢吐 40 段思考(约 20s 窗口)。
 // 断言:1) 坞行出"思考中 · N 字"(不再是死秒表);2) Down+Enter 进查看态
@@ -911,6 +985,14 @@ int wmain(int argc, wchar_t** argv) {
         return 1;
     }
 
+    if (argc >= 5 && std::wstring(argv[4]) == L"--width-only") {
+        SetSceneSize(120, 30, 400);
+        RunWidthResizeScene(exe_path, workdir);
+        Log(g_failures == 0 ? "ALL PASS" : ("FAILURES: " + std::to_string(g_failures)));
+        FreeConsole();
+        return g_failures == 0 ? 0 : 1;
+    }
+
     // 幕一:80×24 窄矮窗(缓冲 80×400,长缓冲 + 绝对定位画帧的老病灶现场)。
     SetSceneSize(80, 24, 400);
     RunScenario("80x24", exe_path, workdir, ScenarioHooks{});
@@ -958,6 +1040,10 @@ int wmain(int argc, wchar_t** argv) {
         hooks.scroll_up_before_reflow = true;
         RunScenario("scroll-nonbottom", exe_path, workdir, hooks);
     }
+
+    // 追加幕:主回合活动栏亮着时收窄再放宽，旧帧不能留在历史区。
+    SetSceneSize(120, 30, 400);
+    RunWidthResizeScene(exe_path, workdir);
 
     // 幕六(追加需求"查看态实时思考流"):子代理慢思考流期间进查看态,
     // 坞行与视口的"思考中 · N 字"逐秒增长。

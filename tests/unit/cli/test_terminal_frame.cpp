@@ -152,3 +152,45 @@ TEST_CASE("viewport reveal: 退化入参不炸——零行需求/零高缓冲/�
     CHECK(clamped.pan_rows == 0);
     CHECK(clamped.scroll_rows == 5);
 }
+
+TEST_CASE("footer resize:经典控制台未 reflow 时沿用旧绝对坐标") {
+    const std::vector<int> rows{18, 119, 12, 119, 90};
+    const auto plan = lubancode::cli::ComputeFooterResizeRecovery(
+        /*previous_top_row=*/20, /*previous_input_row=*/22, /*current_cursor_row=*/22,
+        rows, /*input_row_index=*/2, /*input_cursor_column=*/12, /*current_width=*/80);
+    CHECK(plan.top_row == 20);
+    CHECK(plan.rows_to_clear == 5);
+    CHECK_FALSE(plan.cursor_reflowed);
+}
+
+TEST_CASE("footer resize:Windows Terminal reflow 后从输入光标反推旧框") {
+    // 120 -> 80:上横线、下横线、状态行各折成两行。输入行由 22 移到 23，
+    // 反推后旧框仍从 20 起，共占 8 行；不能丢锚后另画一份。
+    const std::vector<int> rows{18, 119, 12, 119, 90};
+    const auto plan = lubancode::cli::ComputeFooterResizeRecovery(
+        /*previous_top_row=*/20, /*previous_input_row=*/22, /*current_cursor_row=*/23,
+        rows, /*input_row_index=*/2, /*input_cursor_column=*/12, /*current_width=*/80);
+    CHECK(plan.top_row == 20);
+    CHECK(plan.rows_to_clear == 8);
+    CHECK(plan.cursor_reflowed);
+}
+
+TEST_CASE("footer resize:放宽时连同上方正文位移反推新顶行") {
+    const std::vector<int> rows{18, 79, 12, 79, 70};
+    const auto plan = lubancode::cli::ComputeFooterResizeRecovery(
+        /*previous_top_row=*/20, /*previous_input_row=*/22, /*current_cursor_row=*/18,
+        rows, /*input_row_index=*/2, /*input_cursor_column=*/12, /*current_width=*/120);
+    CHECK(plan.top_row == 16);
+    CHECK(plan.rows_to_clear == 5);
+    CHECK(plan.cursor_reflowed);
+}
+
+TEST_CASE("footer resize:输入光标自身折行也计入反推") {
+    const std::vector<int> rows{20, 99, 95, 99, 80};
+    const auto plan = lubancode::cli::ComputeFooterResizeRecovery(
+        /*previous_top_row=*/10, /*previous_input_row=*/12, /*current_cursor_row=*/14,
+        rows, /*input_row_index=*/2, /*input_cursor_column=*/95, /*current_width=*/60);
+    CHECK(plan.top_row == 10);  // 前两行占 1+2，输入光标又折 1 行：14-3-1
+    CHECK(plan.rows_to_clear == 9);
+    CHECK(plan.cursor_reflowed);
+}

@@ -128,4 +128,39 @@ ViewportRevealPlan ComputeViewportReveal(int buffer_height, int viewport_y, int 
     return plan;
 }
 
+FooterResizeRecoveryPlan ComputeFooterResizeRecovery(
+    int previous_top_row, int previous_input_row, int current_cursor_row,
+    const std::vector<int>& previous_row_widths, std::size_t input_row_index,
+    int input_cursor_column, int current_width) {
+    FooterResizeRecoveryPlan plan;
+    plan.top_row = (std::max)(0, previous_top_row);
+    plan.rows_to_clear = static_cast<int>(previous_row_widths.size());
+    if (current_width <= 0 || previous_row_widths.empty()) {
+        return plan;
+    }
+
+    // 经典控制台改 buffer 宽时不一定 reflow；光标行未动便说明旧绝对账仍真。
+    if (current_cursor_row == previous_input_row) {
+        return plan;
+    }
+
+    const auto wrapped_rows = [current_width](int display_width) {
+        const int cells = (std::max)(0, display_width);
+        return (std::max)(1, (cells + current_width - 1) / current_width);
+    };
+    const std::size_t safe_input_index = (std::min)(input_row_index, previous_row_widths.size());
+    int rows_before_input = 0;
+    for (std::size_t i = 0; i < safe_input_index; ++i) {
+        rows_before_input += wrapped_rows(previous_row_widths[i]);
+    }
+    const int cursor_wrap_rows = (std::max)(0, input_cursor_column) / current_width;
+    plan.top_row = (std::max)(0, current_cursor_row - rows_before_input - cursor_wrap_rows);
+    plan.rows_to_clear = 0;
+    for (const int width : previous_row_widths) {
+        plan.rows_to_clear += wrapped_rows(width);
+    }
+    plan.cursor_reflowed = true;
+    return plan;
+}
+
 }  // namespace lubancode::cli

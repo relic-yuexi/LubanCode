@@ -301,7 +301,11 @@ struct StreamFooterState {
     int rows = 0;             // 上次实际画了几行(队列区会让高度变化)
     int body_x = -1;          // footer 下方藏着的正文续写位置
     int body_y = -1;
-    int last_width = -1;      // 上一帧的终端列宽;变了说明 resize 过,旧锚点作废
+    int last_width = -1;      // 上一帧的终端列宽
+    int input_row = -1;       // 上一帧输入行的绝对坐标(改宽后拿它追 reflow)
+    std::size_t input_row_index = 0;
+    int input_cursor_column = 0;
+    std::vector<int> painted_row_widths;  // 上一帧各逻辑行的纯文本显示宽
     // 两枚深度都只在 StdoutWriteMutex 内改。确认/ask_user 可嵌套挂起；
     // 工具条目重画也可套着状态块重画。任何一层尚未退完，Redraw 都只记
     // 状态不落笔，最外层析构负责补回完整帧。
@@ -311,6 +315,17 @@ struct StreamFooterState {
 StreamFooterState& FooterSlot() {
     static StreamFooterState f;
     return f;
+}
+
+void ForgetStreamFooterFrame(StreamFooterState& f) {
+    f.row = -1;
+    f.rows = 0;
+    f.body_x = -1;
+    f.body_y = -1;
+    f.input_row = -1;
+    f.input_row_index = 0;
+    f.input_cursor_column = 0;
+    f.painted_row_widths.clear();
 }
 
 // 0.22.x 流式脚注框化:跟 composer 视觉一致的完整框——上横线 + 输入行
@@ -345,6 +360,29 @@ void ClearStreamFooterRowsAt(int top_row, int rows, int width, int height) {
         }
         platform::ClearRowHardFrom(0, y, width);
     }
+}
+
+std::string StripAnsiForDisplayWidth(const std::string& text) {
+    std::string plain;
+    plain.reserve(text.size());
+    for (std::size_t i = 0; i < text.size();) {
+        if (text[i] == '\x1b' && i + 1 < text.size() && text[i + 1] == '[') {
+            i += 2;
+            while (i < text.size()) {
+                const unsigned char ch = static_cast<unsigned char>(text[i++]);
+                if (ch >= 0x40U && ch <= 0x7EU) {
+                    break;
+                }
+            }
+            continue;
+        }
+        plain.push_back(text[i++]);
+    }
+    return plain;
+}
+
+int FooterRowDisplayWidth(const std::string& text) {
+    return static_cast<int>(DisplayWidthUtf8(StripAnsiForDisplayWidth(text)));
 }
 
 std::vector<std::string> FooterUtf8Glyphs(const std::string& text) {
@@ -404,10 +442,6 @@ std::string BuildFooterWorkingLine(const StreamFooterState& f, int width) {
     }
     line += f.reset;
     return line;
-}
-
-void PrintFooterWorkingLine(const StreamFooterState& f, int width) {
-    std::cout << BuildFooterWorkingLine(f, width);
 }
 
 // M10:谁在真的逐键读键盘,谁就得先拿到这把锁——ReadLineKeyByKey()/
@@ -604,10 +638,6 @@ std::string BuildStatusLine(const BoxChrome& chrome, int max_width) {
         emitted = true;
     }
     return line;
-}
-
-void PrintStatusLine(const BoxChrome& chrome, int max_width) {
-    std::cout << BuildStatusLine(chrome, max_width);
 }
 
 void PaintInlineFrameLegacy(const InlineFrame* previous, const InlineFrame& next,
@@ -3191,18 +3221,31 @@ void EraseStreamFooterLocked() {
     if (const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo(); info.has_value()) {
         // 屏上光标停在输入行；正文续写点另存在 state 里。擦完须拨回
         // 正文，下一笔流式文字才能接对地方。
-        const int bx = f.body_x >= 0 ? f.body_x : info->cursor_x;
-        const int by = f.body_y >= 0 ? f.body_y : info->cursor_y;
+        int bx = f.body_x >= 0 ? f.body_x : info->cursor_x;
+        int by = f.body_y >= 0 ? f.body_y : info->cursor_y;
         std::cout << kSyncOutputBegin;
-        ClearStreamFooterRowsAt(f.row, f.rows, info->width, info->height);
+        if (f.last_width != -1 && f.last_width != info->width &&
+            f.input_row >= 0 && !f.painted_row_widths.empty()) {
+            // 正文 delta 可能抢在 200ms heartbeat 前到。Erase 自己也要追
+            // resize 后的旧框，不能只指望下一次 Redraw 来收残局。
+            const FooterResizeRecoveryPlan recovery = ComputeFooterResizeRecovery(
+                f.row, f.input_row, info->cursor_y, f.painted_row_widths,
+                f.input_row_index, f.input_cursor_column, info->width);
+            ClearStreamFooterRowsAt(recovery.top_row, recovery.rows_to_clear,
+                                    info->width, info->height);
+            if (recovery.cursor_reflowed) {
+                bx = 0;
+                by = recovery.top_row;
+            }
+        } else {
+            ClearStreamFooterRowsAt(f.row, f.rows, info->width, info->height);
+        }
         std::cout << kSyncOutputEnd;
         std::cout.flush();
         platform::SetCursorPos(bx, by);
+        f.last_width = info->width;
     }
-    f.row = -1;
-    f.rows = 0;
-    f.body_x = -1;
-    f.body_y = -1;
+    ForgetStreamFooterFrame(f);
 }
 
 void RedrawStreamFooterLocked() {
@@ -3214,16 +3257,6 @@ void RedrawStreamFooterLocked() {
     if (!info.has_value()) {
         return;  // 拿不到屏幕信息这一笔就不画,下一笔再来
     }
-    if (f.last_width != -1 && f.last_width != info->width) {
-        // resize:conhost 把宽行重排成了多行,上一帧的绝对锚点(顶行/正文
-        // 续写位)全部失准——按旧 f.row/f.rows 擦会擦错行。当作没画过,
-        // 从当前光标重新认领正文位置,整帧重画。
-        f.row = -1;
-        f.rows = 0;
-        f.body_x = -1;
-        f.body_y = -1;
-    }
-    f.last_width = info->width;
     // footer 已在屏上时，物理光标位于输入行；正文落笔位要从 state 取。
     // 第一次画才从当前光标认领正文位置。
     int bx = f.row >= 0 && f.body_x >= 0 ? f.body_x : info->cursor_x;
@@ -3231,11 +3264,28 @@ void RedrawStreamFooterLocked() {
 
     std::cout << kSyncOutputBegin;  // 擦旧框 + 画新框整个当一帧提交,别让半路的画面露出来
 
+    if (f.last_width != -1 && f.last_width != info->width && f.row >= 0 &&
+        f.input_row >= 0 && !f.painted_row_widths.empty()) {
+        // Windows Terminal 改宽会把屏上旧行重排。旧 top_row 失效，却能借
+        // 仍停在输入框里的物理光标反推新 top_row。先擦 reflow 后的整块旧
+        // 帧，再从那里续画；不再把旧帧丢在历史里。
+        const FooterResizeRecoveryPlan recovery = ComputeFooterResizeRecovery(
+            f.row, f.input_row, info->cursor_y, f.painted_row_widths,
+            f.input_row_index, f.input_cursor_column, info->width);
+        ClearStreamFooterRowsAt(recovery.top_row, recovery.rows_to_clear,
+                                info->width, info->height);
+        if (recovery.cursor_reflowed) {
+            bx = 0;
+            by = recovery.top_row;
+        }
+        ForgetStreamFooterFrame(f);
+    }
+    f.last_width = info->width;
+
     // 先擦掉旧框(正文可能已把它顶走 / 输入行内容变了)。
     if (f.row >= 0) {
         ClearStreamFooterRowsAt(f.row, f.rows, info->width, info->height);
-        f.row = -1;
-        f.rows = 0;
+        ForgetStreamFooterFrame(f);
     }
 
     if (f.hint.empty() && f.echo.empty()) {
@@ -3288,7 +3338,6 @@ void RedrawStreamFooterLocked() {
             SetComposerTarget(std::nullopt);
         }
     }
-    const int panel_rows = static_cast<int>(dock_rows_text.size());
     // 待发区行:现拉会话层队列的轻量快照(标题模式随状态变:Esc 立即送/
     // 编辑中/等下一个工具边界),行怎么摆是 BuildSteeringQueueRows 的纯逻辑,
     // 单测钉在那边。空队列连标题都不画(规格)。
@@ -3305,7 +3354,6 @@ void RedrawStreamFooterLocked() {
         steering_snapshot.empty()
             ? std::vector<std::string>{}
             : BuildSteeringQueueRows(steering_snapshot, queue_view);
-    const int queue_rows = static_cast<int>(queue_rows_text.size());
     // 一本帧账(与空闲 composer 同一只 BottomChromeFrame):队列在上横线之
     // 上、坞在状态栏之下、slash 提示垫最底。高度全部从 frame 报——探底滚
     // 屏、旧框擦除(都按 f.rows 报账)随之生效。
@@ -3339,51 +3387,43 @@ void RedrawStreamFooterLocked() {
 
     const int width = info->width;
     const BoxChrome chrome{true, &f.theme, SharedEditor().confirm_mode()};
-    int box_top = target;
-
+    std::vector<std::string> rendered_rows;
+    rendered_rows.reserve(static_cast<std::size_t>(total_rows));
     if (f.working) {
-        platform::SetCursorPos(0, box_top);
-        PrintFooterWorkingLine(f, width);
-        box_top += working_rows;
+        rendered_rows.push_back(BuildFooterWorkingLine(f, width));
     }
 
     // 待发队列:上横线之上、Working 之下(它是即将发送的内容,不属代理导航)。
-    for (std::size_t i = 0; i < frame.queue_rows.size(); ++i) {
-        platform::SetCursorPos(0, box_top + static_cast<int>(i));
-        const int room = (std::max)(0, width - 1);
-        std::cout << f.color << TruncateUtf8ToDisplayWidth(frame.queue_rows[i], room) << f.reset;
-    }
-    if (!frame.queue_rows.empty()) {
-        box_top += queue_rows;
+    const int room = (std::max)(0, width - 1);
+    for (const std::string& queue_row : frame.queue_rows) {
+        rendered_rows.push_back(f.color + TruncateUtf8ToDisplayWidth(queue_row, room) + f.reset);
     }
 
-    platform::SetCursorPos(0, box_top);
     // 上横线:查看态挂着子代理时右端挂它的 title(规格六),横线保底宽度、
     // 塞不下退整线——BuildRuleWithTag 自己会算。
-    std::cout << (footer_rule_tag.empty() ? BoxRuleLine(f.theme, width)
-                                          : BuildRuleWithTag(f.theme.stats, f.theme.reset, footer_rule_tag,
-                                                             width));
+    rendered_rows.push_back(
+        footer_rule_tag.empty()
+            ? BoxRuleLine(f.theme, width)
+            : BuildRuleWithTag(f.theme.stats, f.theme.reset, footer_rule_tag, width));
 
     // 输入行:"> " + 已键入内容(纯文本,照真实输入的样子);空闲时 "> " +
-    // 淡色占位提示,充当"这里能打字"的可发现性提示(取代老版本单独一行
-    // hint)。截断跟 PrintStatusLine 一个道理——夹着 ANSI 的整行不能整个截,
-    // 先截纯文本内容,颜色包在截完的文本外头。
-    platform::SetCursorPos(0, box_top + 1);
+    // 淡色占位提示。整帧先装进 vector，既能一气画完，也能把各行真实宽度
+    // 记下，供下一次 resize 追旧框。
+    const std::size_t input_row_index = rendered_rows.size();
     const std::string prefix = "> ";
     const int content_width = width - 1 - static_cast<int>(DisplayWidthUtf8(prefix));
-    std::cout << prefix;
+    std::string input_line = prefix;
     if (content_width > 0) {
         if (!f.echo.empty()) {
-            std::cout << TruncateUtf8ToDisplayWidth(f.echo, content_width);
+            input_line += TruncateUtf8ToDisplayWidth(f.echo, content_width);
         } else {
-            std::cout << f.color << TruncateUtf8ToDisplayWidth(f.hint, content_width) << f.reset;
+            input_line += f.color + TruncateUtf8ToDisplayWidth(f.hint, content_width) + f.reset;
         }
     }
+    rendered_rows.push_back(std::move(input_line));
 
-    platform::SetCursorPos(0, box_top + 2);
-    std::cout << BoxRuleLine(f.theme, width);
+    rendered_rows.push_back(BoxRuleLine(f.theme, width));
 
-    platform::SetCursorPos(0, box_top + 3);
     // 状态行 = 常规状态段 + "Esc 打断"提示(规格:打断提示进状态行,不许
     // 挤进输入行)。先按留出的余量截常规段,再以纯文本段追加——两段各自
     // 包色,不做整行截断,跟 PrintStatusLine 的分段截断一个路数。plain 主题
@@ -3391,26 +3431,28 @@ void RedrawStreamFooterLocked() {
     {
         const std::string interrupt = StreamFooterInterruptText(f.reset.empty());
         const int interrupt_cols = 3 + static_cast<int>(DisplayWidthUtf8(interrupt));  // " · " + 提示
-        PrintStatusLine(chrome, (std::max)(20, width - 1 - interrupt_cols));
-        std::cout << f.color << " · " << interrupt << f.reset;
+        rendered_rows.push_back(
+            BuildStatusLine(chrome, (std::max)(20, width - 1 - interrupt_cols)) +
+            f.color + " · " + interrupt + f.reset);
     }
 
     // 导航坞:状态栏之下贴底(0.29.x 层级反转),逐行摆、按屏宽截断(渲染
     // 出的行不带 ANSI,plain 主题天然纯文本)。上横线起整块框从唯一锚点
     // 一次画完,擦除按上一帧 f.rows 报账——坞增高时旧帧整个先擦净,不留
     // 第二份提示或 main。
-    int dock_top = box_top + 4;
-    for (std::size_t i = 0; i < frame.agent_dock_rows.size(); ++i) {
-        platform::SetCursorPos(0, dock_top + static_cast<int>(i));
-        const int room = (std::max)(0, width - 1);
-        std::cout << f.color << TruncateUtf8ToDisplayWidth(frame.agent_dock_rows[i], room) << f.reset;
+    for (const std::string& dock_row : frame.agent_dock_rows) {
+        rendered_rows.push_back(f.color + TruncateUtf8ToDisplayWidth(dock_row, room) + f.reset);
     }
 
     // slash 提示行:导航坞之下垫最底(短命 UI),纯文本、按屏宽截断(跟
     // ReadLineKeyByKey 画 hint_lines 一个路数);plain 主题不夹 ANSI。
-    for (std::size_t i = 0; i < frame.transient_rows.size(); ++i) {
-        platform::SetCursorPos(0, dock_top + panel_rows + static_cast<int>(i));
-        std::cout << TruncateUtf8ToDisplayWidth(frame.transient_rows[i], (std::max)(0, width - 1));
+    for (const std::string& transient_row : frame.transient_rows) {
+        rendered_rows.push_back(TruncateUtf8ToDisplayWidth(transient_row, room));
+    }
+
+    for (std::size_t i = 0; i < rendered_rows.size(); ++i) {
+        platform::SetCursorPos(0, target + static_cast<int>(i));
+        std::cout << rendered_rows[i];
     }
 
     std::cout << kSyncOutputEnd;
@@ -3418,21 +3460,29 @@ void RedrawStreamFooterLocked() {
     // 正文位置藏起来，肉眼所见的光标留在输入框。下一笔正文来时
     // EraseStreamFooterLocked 会先拨回 bx/by。
     const int typed_width = f.echo.empty() ? 0 : static_cast<int>(DisplayWidthUtf8(f.echo));
-    platform::SetCursorPos((std::min)(width - 1, 2 + typed_width), box_top + 1);
+    const int input_cursor_column = (std::min)(width - 1, 2 + typed_width);
+    const int input_row = target + static_cast<int>(input_row_index);
+    platform::SetCursorPos(input_cursor_column, input_row);
     f.row = target;
-    f.rows = total_rows;
+    f.rows = static_cast<int>(rendered_rows.size());
     f.body_x = bx;
     f.body_y = by;
+    f.input_row = input_row;
+    f.input_row_index = input_row_index;
+    f.input_cursor_column = input_cursor_column;
+    f.painted_row_widths.clear();
+    f.painted_row_widths.reserve(rendered_rows.size());
+    for (const std::string& row : rendered_rows) {
+        f.painted_row_widths.push_back(FooterRowDisplayWidth(row));
+    }
 }
 
 void BeginStreamFooter(const Theme& theme, bool enabled) {
     std::lock_guard<std::mutex> lock(StdoutWriteMutex());
     StreamFooterState& f = FooterSlot();
     f.enabled = enabled;
-    f.row = -1;
-    f.rows = 0;
-    f.body_x = -1;
-    f.body_y = -1;
+    ForgetStreamFooterFrame(f);
+    f.last_width = -1;
     f.echo.clear();
     f.hints.clear();
     f.working = false;

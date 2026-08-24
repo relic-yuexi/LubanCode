@@ -72,4 +72,20 @@ struct ViewportRevealPlan {
 ViewportRevealPlan ComputeViewportReveal(int buffer_height, int viewport_y, int viewport_height, int top_row,
                                          int rows_needed);
 
+// 忙碌 footer 遇到终端改宽后的旧帧清理计划。Windows Terminal 会把旧行
+// reflow，原先的绝对 top_row 随即失效；物理光标却仍跟着输入行走。拿上一
+// 帧各逻辑行的显示宽、输入行下标与当前光标行，便能反推出旧框现处，并算
+// 出它在新宽度下占了多少物理行。经典控制台若没有 reflow(cursor_y 未动)，
+// 仍沿用旧坐标，免得凭空上移。
+struct FooterResizeRecoveryPlan {
+    int top_row = 0;
+    int rows_to_clear = 0;
+    bool cursor_reflowed = false;
+};
+
+FooterResizeRecoveryPlan ComputeFooterResizeRecovery(
+    int previous_top_row, int previous_input_row, int current_cursor_row,
+    const std::vector<int>& previous_row_widths, std::size_t input_row_index,
+    int input_cursor_column, int current_width);
+
 }  // namespace lubancode::cli
