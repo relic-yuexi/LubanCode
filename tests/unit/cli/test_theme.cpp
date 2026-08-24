@@ -32,6 +32,10 @@ TEST_CASE("BuiltinTheme: dark 是默认主题,着色字段非空") {
     CHECK_FALSE(t.diff_syntax_comment.empty());
     CHECK_FALSE(t.diff_syntax_type.empty());
     CHECK_FALSE(t.diff_syntax_function.empty());
+    // 用户输入背景块 token(终端用户输入背景块单):dark 铺中性灰底。
+    CHECK_FALSE(t.surface_user_bg.empty());
+    CHECK_FALSE(t.surface_user_marker.empty());
+    CHECK_FALSE(t.surface_padding.empty());
 }
 
 TEST_CASE("BuiltinTheme: light 主题着色字段非空,且跟 dark 不完全一样") {
@@ -42,6 +46,9 @@ TEST_CASE("BuiltinTheme: light 主题着色字段非空,且跟 dark 不完全一
     CHECK_FALSE(light.diff_add_bg.empty());
     CHECK_FALSE(light.diff_del_bg.empty());
     CHECK_FALSE(light.diff_line_no.empty());
+    // 用户块底色也各有一份,且 dark 与 light 不同(深浅终端各配各的灰)。
+    CHECK_FALSE(light.surface_user_bg.empty());
+    CHECK(dark.surface_user_bg != light.surface_user_bg);
     // 两套主题不能是同一份配色(不然分两套毫无意义)。
     CHECK((dark.banner != light.banner || dark.prompt != light.prompt || dark.stats != light.stats));
     CHECK(dark.diff_add_bg != light.diff_add_bg);
@@ -68,6 +75,11 @@ TEST_CASE("BuiltinTheme: plain 主题所有字段都是空串") {
     CHECK(t.diff_syntax_comment.empty());
     CHECK(t.diff_syntax_type.empty());
     CHECK(t.diff_syntax_function.empty());
+    // 用户块 token 全空:plain/no-color/重定向不夹一个转义字节。
+    CHECK(t.surface_user_bg.empty());
+    CHECK(t.surface_user_fg.empty());
+    CHECK(t.surface_user_marker.empty());
+    CHECK(t.surface_padding.empty());
 }
 
 TEST_CASE("BuiltinTheme: 不认得的名字兜底成 dark") {

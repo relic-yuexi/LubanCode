@@ -44,6 +44,14 @@ struct Theme {
     std::string diff_syntax_comment;
     std::string diff_syntax_type;
     std::string diff_syntax_function;
+
+    // 用户输入背景块(终端用户输入背景块单):已提交输入铺一层克制底色,
+    // 整行承托、不只染字。语义 token 四枚,不在 renderer 里写死 ANSI——
+    // plain/no-color 全空串,退化成 "> " 标记 + 块后空行,不夹一个转义字节。
+    std::string surface_user_bg;      // 用户块整行底色(逐行开、逐行关)
+    std::string surface_user_fg;      // 用户块正文前景(保对比;空 = 默认前景)
+    std::string surface_user_marker;  // "> " 提示符前景(与正文区分)
+    std::string surface_padding;      // 块左右留白格的底色(缺省同 bg,可空)
 };
 
 // 按名字取内置主题;不认得的名字(不是 dark/light/plain)按 dark 处理,
