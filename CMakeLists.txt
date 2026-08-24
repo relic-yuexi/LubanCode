@@ -280,6 +280,7 @@ add_custom_command(
 if(WIN32)
   set(_lubancode_platform_sources
     src/platform/paths_win.cpp
+    src/platform/network_proxy_win.cpp
     src/platform/process_win.cpp
     src/platform/dynamic_library_win.cpp
     src/platform/console_win.cpp
@@ -288,6 +289,7 @@ if(WIN32)
 else()
   set(_lubancode_platform_sources
     src/platform/paths_posix.cpp
+    src/platform/network_proxy_posix.cpp
     src/platform/process_posix.cpp
     src/platform/dynamic_library_posix.cpp
     src/platform/console_posix.cpp
@@ -310,6 +312,7 @@ endif()
 # ---------------------------------------------------------------------------
 add_library(lubancode_engine STATIC
   ${_lubancode_platform_sources}
+  src/platform/network_proxy.cpp
   src/platform/terminal_batch.cpp
   src/platform/text_encoding.cpp
   src/platform/json_safe.cpp
@@ -432,7 +435,7 @@ target_include_directories(lubancode_engine PUBLIC
   ${CMAKE_BINARY_DIR}/generated)
 target_link_libraries(lubancode_engine PUBLIC cpr::cpr nlohmann_json::nlohmann_json)
 if(WIN32)
-  target_link_libraries(lubancode_engine PRIVATE windowscodecs)
+  target_link_libraries(lubancode_engine PRIVATE advapi32 windowscodecs)
 endif()
 target_link_libraries(lubancode_engine PRIVATE lubancode_lua)
 # yaml-cpp 走 PUBLIC:engine 的头(memory/front matter)把 yaml 头递给

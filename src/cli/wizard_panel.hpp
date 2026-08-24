@@ -51,6 +51,7 @@ private:
     int prompt_row_ = -1; // 文本帧的输入行号(相对面板首行);选择帧为 -1
     int menu_top_ = -1;   // 选择帧预留区首行(相对面板首行);文本帧为 -1
     int width_ = 80;      // 最近一帧的终端宽度
+    std::string prompt_;  // ReadLine 重画输入行时须带回这段静态前缀
 };
 
 }  // namespace lubancode::cli

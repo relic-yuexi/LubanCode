@@ -97,6 +97,7 @@ void WizardPanel::Draw(const WizardFrame& frame, int reserve_rows) {
     }
     prompt_row_ = -1;
     menu_top_ = -1;
+    prompt_ = frame.prompt;
     if (!frame.prompt.empty()) {
         lines.push_back("");
         prompt_row_ = static_cast<int>(lines.size());
@@ -115,10 +116,15 @@ void WizardPanel::Draw(const WizardFrame& frame, int reserve_rows) {
     lines.push_back(PanelRule(width_));
 
     // 预留整帧(外加两行余量:ReadLine 提交要打一个换行,菜单还带一行
-    // 提示)。预留可能把缓冲区顶滚:预留前后各看一眼光标行,差多少就把
-    // 面板起点往上挪多少——帧反正要整帧重画,锚点对齐就行。
+    // 提示)。若预留把缓冲区顶滚,EnsureStreamScreenRowsLocked 会把锚点
+    // 随内容一同上移;只平移 viewport 时绝对行号不动。
     const int rows_needed = static_cast<int>(lines.size()) + 2;
-    const int cursor_before = info->cursor_y;
+    // 后续帧从旧面板锚点探底。光标平时停在输入行或菜单首行，若拿它
+    // 当整帧起点，下面预留会算重；更不能把“光标在帧内”误判成滚屏，
+    // 否则 start_row_ 会每帧往上漂，旧 footer 便留在原处。
+    if (rows_drawn_ > 0) {
+        platform::SetCursorPos(0, start_row_);
+    }
     if (!EnsureStreamScreenRowsLocked(rows_needed)) {
         active_ = false;
         return;
@@ -128,18 +134,10 @@ void WizardPanel::Draw(const WizardFrame& frame, int reserve_rows) {
         active_ = false;
         return;
     }
-    if (rows_drawn_ == 0) {
-        start_row_ = info->cursor_y;
-    } else {
-        const int expected_end = start_row_ + rows_drawn_;
-        const int actual_end = info->cursor_y;
-        if (actual_end < expected_end && cursor_before < expected_end) {
-            start_row_ -= (expected_end - actual_end);
-            if (start_row_ < 0) {
-                start_row_ = 0;
-            }
-        }
-    }
+    // EnsureStreamScreenRowsLocked 若真滚了内容，会把刚才那枚锚点按滚动量
+    // 上移后再放回光标；若只平移 viewport，绝对行号不动。两种情形都以
+    // 此刻光标行为准，旧帧与新帧便落在同一处。
+    start_row_ = info->cursor_y;
 
     // 清旧画新:旧区域逐行硬清(连背景属性一起还原),再从同一处画回。
     const int rows_to_draw = static_cast<int>(lines.size());
@@ -170,11 +168,15 @@ void WizardPanel::Draw(const WizardFrame& frame, int reserve_rows) {
 }
 
 std::optional<std::string> WizardPanel::ReadText(ReadExitReason* reason) {
-    // ReadLine 传空 prompt:prompt 文字已由 Draw 印在面板里,不让它再打。
-    // 真面板(active_)与非面板(POSIX 无重画支持的交互终端)都走它——
-    // 前者从面板 prompt 行编辑,后者在当前光标处起一行。
-    const std::optional<std::string> line =
-        cli::ReadLine("", Theme{}, /*esc_rejects=*/true, /*composer=*/false, reason);
+    // 行编辑器每次按键都会清整行再画。须把 prompt 原文交给它；只把光标
+    // 留在 prompt 末尾、却传空串，会把“名字: ”擦掉，正文落到第 0 列，
+    // 光标仍按静态前缀宽度计算，遂出现字在左、光标在右。
+    if (active_ && prompt_row_ >= 0) {
+        platform::SetCursorPos(0, start_row_ + prompt_row_);
+    }
+    const std::optional<std::string> line = cli::ReadLine(
+        active_ && prompt_row_ >= 0 ? prompt_ : std::string(), Theme{},
+        /*esc_rejects=*/true, /*composer=*/false, reason);
     // 提交/退场的换行占了 prompt 行的下一行,记进账里,下一帧清场一并擦。
     if (active_ && prompt_row_ >= 0) {
         rows_drawn_ = (std::max)(rows_drawn_, prompt_row_ + 2);
@@ -201,6 +203,7 @@ void WizardPanel::Finish() {
     rows_drawn_ = 0;
     prompt_row_ = -1;
     menu_top_ = -1;
+    prompt_.clear();
     active_ = false;
 }
 

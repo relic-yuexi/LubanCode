@@ -649,6 +649,7 @@ private:
     // 空闲唤醒多路总口(loop 与子代理完成两路并存;session 构造时装好,
     // 单枚 SetIdleWakeHook 的总钩只问它)。
     lubancode::runtime::IdleWakeCoordinator idle_wakes_;
+    lubancode::runtime::IdleWakeCoordinator::Subscription subagent_wake_token_;
     lubancode::runtime::IdleWakeCoordinator::Subscription loop_wake_token_;
     // 当前在跑的 loop tick(拍执行中;turn 收口时回写)。
     std::string loop_active_tick_id_;
@@ -1037,7 +1038,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     // 的完成结果就让位,主循环顶另起一轮把结果交回主代理。
     // loop 单起改多路:子代理与 loop 的 due 都挂进 IdleWakeCoordinator,
     // 单枚 SetIdleWakeHook 只装"问总口"的一枚总钩,谁也不覆盖谁。
-    idle_wakes_.AddSource("subagent", [this]() {
+    subagent_wake_token_ = idle_wakes_.AddSource("subagent", [this]() {
         return session_agent_tool() != nullptr && session_agent_tool()->HasUndeliveredCompletions();
     });
     lubancode::cli::SetIdleWakeHook([this]() { return idle_wakes_.AnyReady(); });
@@ -1284,8 +1285,9 @@ TerminalSessionController::~TerminalSessionController() {
     lubancode::cli::SetBackgroundNoticeHook(nullptr);
     lubancode::cli::SetPromptHistoryProvider(nullptr);
     lubancode::cli::SetFileMentionProvider(nullptr);
-    // loop 单收尾:多路源先摘(token 析构),再停 timer/join(shutdown 要
-    // join,不能让 callback 析构后摸 this)。
+    // 空闲唤醒源先摘;loop 随后停 timer/join(shutdown 要 join,不能让
+    // callback 析构后摸 this)。
+    subagent_wake_token_.reset();
     loop_wake_token_.reset();
     if (loop_scheduler_.has_value()) {
         loop_scheduler_->StopTimer();

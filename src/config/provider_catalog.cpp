@@ -17,6 +17,7 @@
 #endif
 
 #include "embedded_provider_catalog.hpp"
+#include "platform/network_proxy.hpp"
 #include "platform/paths.hpp"  // PathToUtf8:缓存路径不走 ACP 窄口
 
 namespace lubancode::config {
@@ -412,9 +413,15 @@ std::expected<ProviderCatalogRefresh, std::string> RefreshProviderCatalog(int co
     if (old_meta.contains("etag") && old_meta["etag"].is_string() && !old_meta["etag"].get<std::string>().empty()) {
         headers["If-None-Match"] = old_meta["etag"].get<std::string>();
     }
-    const cpr::Response response = cpr::Get(cpr::Url{kProviderCatalogUrl}, headers,
-                                             cpr::ConnectTimeout{std::chrono::milliseconds(connect_timeout_ms)},
-                                             cpr::Timeout{std::chrono::seconds(request_timeout_secs)});
+    cpr::Session session;
+    session.SetUrl(cpr::Url{kProviderCatalogUrl});
+    session.SetHeader(headers);
+    session.SetConnectTimeout(cpr::ConnectTimeout{std::chrono::milliseconds(connect_timeout_ms)});
+    session.SetTimeout(cpr::Timeout{std::chrono::seconds(request_timeout_secs)});
+    if (const auto proxy = platform::SystemProxyForScheme("https"); proxy.has_value()) {
+        session.SetProxies(cpr::Proxies{{"https", *proxy}});
+    }
+    const cpr::Response response = session.Get();
     if (response.error) return std::unexpected("拉取 provider 目录失败: " + response.error.message);
 
     ProviderCatalogRefresh result;
