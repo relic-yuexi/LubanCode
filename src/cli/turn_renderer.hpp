@@ -37,6 +37,12 @@ struct TurnRenderOptions {
     bool include_user = true;   // 画不画 user 条目(resume 重放可能自带)
     bool include_footer = true; // 画不画 turn footer(紧凑态实时画面不画,
                                 // footer 由 RunTurn 收口时单独落)
+    // 用户条目之前画不画一道横线(turn 分隔,克制样式:stats 淡色满宽线,
+    // 与 BuildDividerLine 同款)。多轮重放(Ctrl+L)时由调用方从第二轮起
+    // 置真——"上面有没有前一轮"这件事只有 caller 知道,renderer 的局部
+    // 状态带不过轮;首轮(会话开头)不画,实时画面那道由 RunTurn 的
+    // PrintDivider 自己落,不双打。
+    bool leading_turn_divider = false;
 };
 
 // TurnView -> 行组(每行已含 ANSI 或纯文本,不含行尾换行)。

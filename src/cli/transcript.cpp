@@ -5,7 +5,7 @@
 #include <string_view>
 
 #include "cli/i18n.hpp"
-#include "cli/line_editor.hpp"  // TruncateUtf8ToDisplayWidth
+#include "cli/line_editor.hpp"  // TruncateUtf8ToDisplayWidth / WrapToDisplayWidth / DisplayWidth
 #include "cli/markdown.hpp"
 
 namespace lubancode::cli {
@@ -318,11 +318,25 @@ std::string FormatRestoredHistory(const std::vector<api::Message>& messages, con
 
         separate();
         const bool assistant = message.role == api::Role::Assistant;
-        out += (assistant ? theme.banner + "● " + tr("cmd.resume.history.assistant")
-                          : theme.confirm + "> " + tr("cmd.resume.history.user")) +
-               theme.reset + "\n";
+        if (assistant) {
+            out += theme.banner + "● " + tr("cmd.resume.history.assistant") + theme.reset + "\n";
+        } else {
+            // 用户消息:不再印一行 "> 你" 标头,正文直接铺成背景块——与
+            // live 提交、Ctrl+L 重画同一颗 formatter(单子"live、恢复、重画
+            // 必须同源")。只含工具结果的 user 消息不会走到这里(上面
+            // has_visible_content 已挡);真用户文本逐块铺,多块之间照旧
+            // 由 Markdown 自己排。
+            for (const auto& block : message.content) {
+                if (const auto* text = std::get_if<api::TextBlock>(&block)) {
+                    out += FormatUserPromptBlock(text->text, theme, width);
+                }
+            }
+        }
         for (const auto& block : message.content) {
             if (const auto* text = std::get_if<api::TextBlock>(&block)) {
+                if (!assistant) {
+                    continue;  // 用户文本已在上面铺成背景块,不另走 Markdown
+                }
                 append_markdown(text->text);
                 continue;
             }
@@ -378,6 +392,122 @@ int CountLines(const std::string& text) {
         ++count;
     }
     return count;
+}
+
+UserPromptLayout LayoutUserPromptBlock(const std::string& text, const Theme& theme, int width) {
+    UserPromptLayout layout;
+    const int safe_width = width > 0 ? width : 80;
+    // 窄屏(<20 列)先保提示符与正文,舍左右 padding(单子 corner case 节)。
+    const int padding = safe_width < 20 ? 0 : kUserPromptPadding;
+    // 色面铺到安全宽:末列留一格,不在最后一列写字符再触发隐式 wrap、把
+    // 背景漏到下一行(单子:最后一列不能写字符后再触发隐式 wrap)。
+    const int block_width = safe_width - 1;
+    if (block_width <= 0) {
+        return layout;
+    }
+    // 空白 prompt 不生成空色块:只有空白(全空白算没提交)就一片 rows 都不给。
+    bool has_content = false;
+    for (const char c : text) {
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
+            has_content = true;
+            break;
+        }
+    }
+    if (!has_content) {
+        return layout;
+    }
+    const int content_width = (std::max)(1, block_width - padding * 2 - kUserPromptMarkerWidth);
+
+    // 逻辑行 -> 折行:首行容提示符,续行缩进(与 composer 续行同款两格)。
+    // WrapUtf8ToDisplayWidth 按码点宽度断(CJK/emoji 友好,不切半个宽字)。
+    std::vector<std::u32string> logical;
+    {
+        std::size_t pos = 0;
+        while (pos <= text.size()) {
+            const std::size_t nl = text.find('\n', pos);
+            const std::size_t end = nl == std::string::npos ? text.size() : nl;
+            logical.push_back(Utf8ToUtf32(text.substr(pos, end - pos)));
+            if (nl == std::string::npos) {
+                break;
+            }
+            pos = nl + 1;
+        }
+    }
+
+    const std::string pad(padding, ' ');
+    const std::string indent(kUserPromptIndent, ' ');
+    auto push_row = [&](const std::string& body, int body_cols, bool first) {
+        // 每行:bg + 左 padding + 提示符/缩进 + 正文 + 右侧补到 block_width。
+        // 背景 ANSI 每行开、每行关——不靠软换行把背景带到下一行。
+        // plain 主题(surface_* 全空串)自动退化成 "> 正文" / "  正文" 的裸
+        // 文本,右侧不补空格(尾部空格只会给重定向文件添噪音)。
+        const bool plain = theme.surface_user_bg.empty() && theme.surface_padding.empty();
+        const int lead_cols = padding + (first ? kUserPromptMarkerWidth : kUserPromptIndent);
+        const int fill_cols = (std::max)(0, block_width - lead_cols - body_cols - padding);
+        std::string line;
+        if (!plain) {
+            line = theme.surface_user_bg + pad;
+        }
+        if (first) {
+            line += theme.surface_user_marker + "> " + theme.reset;
+            if (!plain) {
+                line += theme.surface_user_bg;
+            }
+        } else {
+            line += indent;
+        }
+        line += theme.surface_user_fg + body + theme.reset;
+        if (!plain) {
+            line += theme.surface_padding + std::string(fill_cols + padding, ' ') + theme.reset;
+        }
+        layout.rows.push_back(UserPromptRow{std::move(line), block_width});
+    };
+
+    bool first_logical = true;
+    for (const std::u32string& logical_line : logical) {
+        // 空逻辑行也占一行色面(用户自己敲的空行,不是块外 gap)。
+        if (logical_line.empty()) {
+            push_row(std::string(), 0, first_logical);
+            first_logical = false;
+            continue;
+        }
+        // 首行容提示符("> " 两列),续行容缩进(同为两列)——两条容量一致,
+        // 折行宽度统一走 content_width,与 composer 的首行/续行同宽规矩对齐。
+        const std::vector<std::u32string> wrapped = WrapToDisplayWidth(logical_line, content_width);
+        for (std::size_t i = 0; i < wrapped.size(); ++i) {
+            push_row(Utf32ToUtf8(wrapped[i]),
+                     static_cast<int>(DisplayWidth(wrapped[i])), first_logical && i == 0);
+        }
+        first_logical = false;
+    }
+    layout.block_width = block_width;
+    layout.content_width = content_width;
+    return layout;
+}
+
+std::string FormatUserPromptBlock(const std::string& text, const Theme& theme, int width) {
+    const UserPromptLayout layout = LayoutUserPromptBlock(text, theme, width);
+    std::string out;
+    for (const UserPromptRow& row : layout.rows) {
+        out += row.text;
+        out += "\n";
+    }
+    return out;
+}
+
+int GapBetween(BlockRole before, BlockRole after) {
+    // 子项贴父项、同父批次紧排:0。
+    if (before == BlockRole::Tool && after == BlockRole::SubTool) {
+        return 0;
+    }
+    if (before == BlockRole::SubTool && after == BlockRole::SubTool) {
+        return 0;
+    }
+    // 表外一律 1:UserPrompt -> 任意、Tool -> Tool、Tool -> AssistantText、
+    // AssistantText -> Tool、Warning/Error 不黏正文、任意 -> TurnFooter。
+    (void)before;
+    (void)after;
+    return 1;
 }
 
 std::optional<int> ParseRunCommandExitCode(const std::string& content) {

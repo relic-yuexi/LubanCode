@@ -16,14 +16,19 @@
 #include "cli/theme.hpp"
 #include "cli/tool_display.hpp"
 #include "cli/transcript.hpp"
+#include "cli/line_editor.hpp"  // DisplayWidthUtf8
 
 using lubancode::cli::AgentDoneSummary;
+using lubancode::cli::BlockRole;
 using lubancode::cli::BuildToolTitle;
 using lubancode::cli::BuiltinTheme;
 using lubancode::cli::CountLines;
 using lubancode::cli::ErrorSummaryLines;
-using lubancode::cli::FormatTranscriptItem;
 using lubancode::cli::FormatRestoredHistory;
+using lubancode::cli::FormatTranscriptItem;
+using lubancode::cli::FormatUserPromptBlock;
+using lubancode::cli::GapBetween;
+using lubancode::cli::LayoutUserPromptBlock;
 using lubancode::cli::ParseRunCommandExitCode;
 using lubancode::cli::ReadFileDoneSummary;
 using lubancode::cli::RunCommandDoneSummary;
@@ -53,6 +58,112 @@ TranscriptItem MakeItem(TranscriptStatus status, TranscriptKind kind = Transcrip
 }
 
 }  // namespace
+
+// ---- 用户输入背景块(终端用户输入背景块单) --------------------------------
+
+TEST_CASE("LayoutUserPromptBlock: plain 主题一行输入铺「> 正文」,无 ANSI") {
+    const auto layout = LayoutUserPromptBlock("你好", BuiltinTheme("plain"), 80);
+    REQUIRE(layout.rows.size() == 1);
+    CHECK(layout.rows[0].text == "> 你好");
+    CHECK(layout.block_width == 79);
+}
+
+TEST_CASE("LayoutUserPromptBlock: 彩色主题整行铺背景,每行开/关,不只染字") {
+    const auto dark = BuiltinTheme("dark");
+    const auto layout = LayoutUserPromptBlock("两行输入", dark, 80);
+    REQUIRE(layout.rows.size() == 1);
+    const std::string& line = layout.rows[0].text;
+    CHECK(line.find(dark.surface_user_bg) == 0);        // 行首开背景
+    // 提示符在底色上:bg + marker + "> "(marker 自带前景色,不另起背景)。
+    CHECK(line.find(dark.surface_user_marker + "> ") != std::string::npos);
+    CHECK(line.find(dark.surface_user_bg + dark.surface_user_fg + "两行输入") != std::string::npos);
+    CHECK(line.find("\x1b[0m") != std::string::npos);   // 有关色
+    CHECK(line.find("\x1b[0m") != line.size() - 4);     // 关色之后还有 padding 收尾
+    // 整行铺满到 block_width:去掉 ANSI 后的可见字符数(空格也算)应到 79 列。
+    std::string visible;
+    bool in_esc = false;
+    for (const char c : line) {
+        if (c == '\x1b') {
+            in_esc = true;
+            continue;
+        }
+        if (in_esc) {
+            if (c == 'm') {
+                in_esc = false;
+            }
+            continue;
+        }
+        visible += c;
+    }
+    CHECK(lubancode::cli::DisplayWidthUtf8(visible) == 79U);
+}
+
+TEST_CASE("LayoutUserPromptBlock: 多行逐行补齐,末行也补齐;空白 prompt 无色块") {
+    const auto layout = LayoutUserPromptBlock("第一行\n第二行", BuiltinTheme("plain"), 80);
+    REQUIRE(layout.rows.size() == 2);
+    CHECK(layout.rows[0].text == "> 第一行");
+    CHECK(layout.rows[1].text == "  第二行");  // 续行缩进两格(composer 同款)
+
+    // 全空白输入:不生成空色块。
+    CHECK(LayoutUserPromptBlock("  \n \t", BuiltinTheme("plain"), 80).rows.empty());
+    CHECK(LayoutUserPromptBlock("", BuiltinTheme("plain"), 80).rows.empty());
+}
+
+TEST_CASE("LayoutUserPromptBlock: CJK 长行按显示宽折行,不切半个宽字") {
+    const std::string long_line(60, 'A');  // 60 列 ASCII,75 列容量内不折
+    const auto single = LayoutUserPromptBlock(long_line, BuiltinTheme("plain"), 80);
+    REQUIRE(single.rows.size() == 1);
+    CHECK(single.content_width == 75);  // 79 - padding*2 - 提示符 2
+
+    const std::string wide(80, U'好');  // 80 个汉字 = 160 显示列,必折
+    const auto layout = LayoutUserPromptBlock(wide, BuiltinTheme("plain"), 80);
+    REQUIRE(layout.rows.size() >= 2);
+    // 每行 "> " 或 "  " 前缀(各两列) + 正文,正文显示宽不超容量。
+    for (const auto& row : layout.rows) {
+        REQUIRE(row.text.size() >= 2);
+        const std::string body = row.text.substr(2);
+        CHECK(lubancode::cli::DisplayWidthUtf8(body) <= layout.content_width);
+    }
+    // 拼回去一个字不少(折行不丢字)。
+    std::string joined;
+    for (std::size_t i = 0; i < layout.rows.size(); ++i) {
+        joined += layout.rows[i].text.substr(2);
+    }
+    CHECK(joined == wide);
+}
+
+TEST_CASE("LayoutUserPromptBlock: plain 无一个转义字节;彩色多行每行各自开背景") {
+    const auto dark = BuiltinTheme("dark");
+    const auto layout = LayoutUserPromptBlock("甲\n乙", dark, 80);
+    REQUIRE(layout.rows.size() == 2);
+    for (const auto& row : layout.rows) {
+        CHECK(row.text.find(dark.surface_user_bg) != std::string::npos);
+        CHECK(row.text.find("\x1b[0m") != std::string::npos);
+    }
+    const auto plain_layout = LayoutUserPromptBlock("甲\n乙", BuiltinTheme("plain"), 80);
+    for (const auto& row : plain_layout.rows) {
+        CHECK(row.text.find('\x1b') == std::string::npos);
+    }
+}
+
+TEST_CASE("FormatUserPromptBlock: 每行以换行收尾,块后不多垫空行") {
+    const std::string text = FormatUserPromptBlock("问\n答", BuiltinTheme("plain"), 80);
+    CHECK(text == "> 问\n  答\n");
+}
+
+TEST_CASE("GapBetween: 间距表——子项贴父项 0,其余留一口气 1") {
+    CHECK(GapBetween(BlockRole::Tool, BlockRole::SubTool) == 0);
+    CHECK(GapBetween(BlockRole::SubTool, BlockRole::SubTool) == 0);
+    CHECK(GapBetween(BlockRole::UserPrompt, BlockRole::Thinking) == 1);
+    CHECK(GapBetween(BlockRole::UserPrompt, BlockRole::Tool) == 1);
+    CHECK(GapBetween(BlockRole::UserPrompt, BlockRole::AssistantText) == 1);
+    CHECK(GapBetween(BlockRole::Tool, BlockRole::Tool) == 1);
+    CHECK(GapBetween(BlockRole::Tool, BlockRole::AssistantText) == 1);
+    CHECK(GapBetween(BlockRole::AssistantText, BlockRole::Tool) == 1);
+    CHECK(GapBetween(BlockRole::Error, BlockRole::AssistantText) == 1);
+    CHECK(GapBetween(BlockRole::AssistantText, BlockRole::TurnFooter) == 1);
+}
+
 
 // ---- FormatTranscriptItem:五种状态 × 彩色/plain ---------------------------
 
@@ -176,7 +287,7 @@ TEST_CASE("BuildToolTitle: web_search 显示查询词，起点参数未到时不
           "web_search(2 queries)");
 }
 
-TEST_CASE("FormatRestoredHistory: 重放用户、助手 Markdown 与配对工具，不把结果消息画成用户") {
+TEST_CASE("FormatRestoredHistory: 重放用户背景块、助手 Markdown 与配对工具，不把结果消息画成用户") {
     std::vector<lubancode::api::Message> messages;
     messages.push_back({lubancode::api::Role::User, {lubancode::api::TextBlock{"帮我读文件"}}});
     lubancode::api::Message assistant;
@@ -191,7 +302,9 @@ TEST_CASE("FormatRestoredHistory: 重放用户、助手 Markdown 与配对工具
         {lubancode::api::Role::Assistant, {lubancode::api::TextBlock{"看完了。"}}});
 
     const std::string out = FormatRestoredHistory(messages, BuiltinTheme("plain"), 120, {2});
-    CHECK(out.find("> 你") != std::string::npos);
+    // 用户消息铺成背景块:"> " 提示符 + 正文(与 live/Ctrl+L 同一颗
+    // FormatUserPromptBlock),不再印 "> 你" 标头。
+    CHECK(out.find("> 帮我读文件") != std::string::npos);
     CHECK(out.find("帮我读文件") != std::string::npos);
     CHECK(out.find("● 助手") != std::string::npos);
     CHECK(out.find("正在查看") != std::string::npos);
@@ -202,7 +315,8 @@ TEST_CASE("FormatRestoredHistory: 重放用户、助手 Markdown 与配对工具
     CHECK(out.find("看完了") != std::string::npos);
 
     std::size_t user_headers = 0;
-    for (std::size_t pos = out.find("> 你"); pos != std::string::npos; pos = out.find("> 你", pos + 1)) {
+    for (std::size_t pos = out.find("> 帮我读文件"); pos != std::string::npos;
+         pos = out.find("> 帮我读文件", pos + 1)) {
         ++user_headers;
     }
     CHECK(user_headers == 1);

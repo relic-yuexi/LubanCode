@@ -71,6 +71,7 @@
 #include "cli/queue_model.hpp"
 #include "cli/slash_commands.hpp"
 #include "cli/terminal_frame.hpp"
+#include "cli/transcript.hpp"  // FormatUserPromptBlock/CountLines(提交收框铺用户块)
 #include "platform/clipboard.hpp"
 #include "platform/console.hpp"
 #include "platform/paths.hpp"
@@ -774,12 +775,20 @@ void RedrawEditArea(int& start_row, int& prompt_end_col, const std::string& prom
 // 0.16.0 的历史观感一致,框只属于"正在输入"这一刻。
 //
 // 做法:把整个框(0.28.x 起含上横线之上的代理面板行,帧顶即 frame_top =
-// prev_frame_origin)统统清掉,从帧顶起重打提交内容(`> ` 第一行、两空格
-// 续行,每个逻辑行照 composer 的宽度铺成物理行),光标停在末行末尾,调用
-// 方接着换行。面板行随提交收走,滚动历史里只留干净的问题,代理的最终
+// prev_frame_origin)统统清掉,从帧顶起重打提交内容,光标停在末行末尾,
+// 调用方接着换行。面板行随提交收走,滚动历史里只留干净的问题,代理的最终
 // 结论照旧走 transcript,不在面板里留残骸。
+//
+// 用户输入背景块单(0.31.x):重打的那份不再印裸 `> 内容`,改由
+// cli::FormatUserPromptBlock 铺成整行淡底色块——与 resume/Ctrl+L 重放同一
+// 颗 formatter,同一笔 transaction 里退 editing chrome、落 user surface
+// (规格单"与 Enter 修复的交接":不先收成裸文本再回头涂背景,那会闪、
+// 会在 scrollback 里重打一份)。折行宽度与 composer 同一套(LayoutComposer
+// Rows 与 LayoutUserPromptBlock 都按显示宽断,CJK/emoji 不切半个宽字),
+// 提交前后不忽然换行。plain 主题(Theme 全空 token)自动退化成老样子。
 void CollapseBoxOnSubmit(int frame_top, int prompt_width, int prev_body_row_count,
-                         const RenderState& state, const std::string& prompt, bool vt_enabled) {
+                         const RenderState& state, const std::string& prompt, bool vt_enabled,
+                         const Theme& theme) {
     const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
     if (!info.has_value()) {
         return;  // 拿不到屏幕信息就不收尾了,提交帧画面已经在屏上,不算坏
@@ -794,6 +803,11 @@ void CollapseBoxOnSubmit(int frame_top, int prompt_width, int prev_body_row_coun
     const WrappedComposerLayout layout = LayoutComposerRows(
         state.lines, state.cursor_row, state.cursor_col, buffer_width - prompt_width - 1,
         buffer_width - kContinuationIndent - 1);
+    // 用户块:同一颗 formatter 铺整行底色(plain 主题退成裸 "> 内容")。
+    // 折行宽度与 composer 一致(首行容 "> ",续行缩两格,容量同为
+    // buffer_width - 1 - padding*2 - 2),提交前后不忽然换行。
+    const std::string block_text = FormatUserPromptBlock(Utf32ToUtf8(state.line), theme, buffer_width);
+    const int block_rows = CountLines(block_text);
     const auto row_text = [&](std::size_t i) {
         return i == 0 ? prompt + Utf32ToUtf8(layout.rows[i].text)
                       : std::string(kContinuationIndent, ' ') + Utf32ToUtf8(layout.rows[i].text);
@@ -808,9 +822,15 @@ void CollapseBoxOnSubmit(int frame_top, int prompt_width, int prev_body_row_coun
         for (int r = top; r <= bottom; ++r) {
             batch.ClearRowHardFrom(0, r, buffer_width);
         }
-        for (std::size_t i = 0; i < layout.rows.size(); ++i) {
-            batch.MoveTo(0, top + static_cast<int>(i));
-            batch.Write(row_text(i));
+        if (block_text.empty()) {
+            // 空白提交退老路:裸 "> 内容" 一行(空块连色面都不给)。
+            for (std::size_t i = 0; i < layout.rows.size(); ++i) {
+                batch.MoveTo(0, top + static_cast<int>(i));
+                batch.Write(row_text(i));
+            }
+        } else {
+            batch.MoveTo(0, top);
+            batch.Write(block_text);
         }
         batch.MoveTo(final_x, final_y);
         batch.Flush();
@@ -820,9 +840,15 @@ void CollapseBoxOnSubmit(int frame_top, int prompt_width, int prev_body_row_coun
     for (int r = top; r <= bottom; ++r) {
         platform::ClearRowHardFrom(0, r, buffer_width);
     }
-    for (std::size_t i = 0; i < layout.rows.size(); ++i) {
-        platform::SetCursorPos(0, top + static_cast<int>(i));
-        std::cout << row_text(i);
+    if (block_text.empty()) {
+        for (std::size_t i = 0; i < layout.rows.size(); ++i) {
+            platform::SetCursorPos(0, top + static_cast<int>(i));
+            std::cout << row_text(i);
+            std::cout.flush();
+        }
+    } else {
+        platform::SetCursorPos(0, top);
+        std::cout << block_text;
         std::cout.flush();
     }
     platform::SetCursorPos(final_x, final_y);
@@ -1794,7 +1820,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                     const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Enter));
                     if (box) {
                         CollapseBoxOnSubmit(prev_frame_origin, prompt_end_col, prev_body_row_count,
-                                            state, prompt, vt_enabled);
+                                            state, prompt, vt_enabled, theme);
                     }
                     std::cout << "\n";
                     if (exit_reason != nullptr) {
@@ -2174,11 +2200,11 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         // 自然带上新档),屏上零新增行。
 
         if (box && state.submitted) {
-            // 0.17.0 输入框化的提交收尾:横线/状态行/面板行擦掉,只留
-            // `> 内容`,换行收尾——取舍见 CollapseBoxOnSubmit 注释。帧顶用
-            // 上一帧记的绝对帧顶(含面板行与上横线)。
+            // 0.17.0 输入框化的提交收尾:横线/状态行/面板行擦掉,提交内容
+            // 铺成用户输入背景块(与 resume/Ctrl+L 同源,见 CollapseBoxOnSubmit
+            // 注释)。帧顶用上一帧记的绝对帧顶(含面板行与上横线)。
             CollapseBoxOnSubmit(prev_frame_origin, prompt_end_col, prev_body_row_count, state, prompt,
-                                vt_enabled);
+                                vt_enabled, theme);
             std::cout << "\n";
             if (exit_reason != nullptr) {
                 *exit_reason = ReadExitReason::Submitted;

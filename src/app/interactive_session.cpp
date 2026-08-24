@@ -1795,7 +1795,13 @@ bool TerminalSessionController::HandleTranscriptUi(lubancode::cli::UiKeyAction a
                 render_options.width = repaint_width;
                 render_options.plain = theme.reset.empty();
                 render_options.expanded = transcript_expanded;
+                // 轮界横线(用户输入背景块单):从第二轮起,用户块之前画
+                // 一道克制横线把 turn 分开——"上面有没有前一轮"是这里的账
+                // (多轮循环),renderer 只照 leading_turn_divider 办事。
+                bool first_turn = true;
                 for (const runtime::TurnView& turn_view : turn_views_) {
+                    render_options.leading_turn_divider = !first_turn;
+                    first_turn = false;
                     const std::vector<std::string> lines = cli::RenderTurnView(turn_view, theme, render_options);
                     for (const std::string& line : lines) {
                         std::cout << line << "\n";

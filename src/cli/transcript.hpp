@@ -93,6 +93,56 @@ std::string FormatTranscriptItems(const std::vector<TranscriptItem>& items, cons
 // plain 主题下的状态文字([RUNNING]/[OK]/…),渲染和单测共用一份映射。
 std::string TranscriptStatusWord(TranscriptStatus status);
 
+// ---- 用户输入背景块(终端用户输入背景块单) --------------------------------
+//
+// 已提交的用户输入是一块有身份的 surface:整行铺淡底色(不只染字),多行
+// 逐行补齐,左右各留一格 padding,块后留一空行。live 提交(CollapseBoxOnSubmit
+// 之后)、resume 重放(FormatRestoredHistory)、Ctrl+L 重画(RenderTurnView)
+// 三路共用这一个纯函数——一处定样子,三处一个脸。
+
+// 一块用户输入的物理行:每行自带背景开/关(背景 ANSI 每行开、每行关,不靠
+// 软换行把颜色带去下一行)。text 已含 padding 与提示符,拼进屏幕时逐行落。
+struct UserPromptRow {
+    std::string text;  // 整行内容(bg + padding + marker + 正文 + padding + reset)
+    int display_width = 0;  // 这一行占的显示列(含 padding,不含 ANSI)
+};
+
+struct UserPromptLayout {
+    std::vector<UserPromptRow> rows;
+    int block_width = 0;   // 色面铺到的安全宽度(列;含右 padding)
+    int content_width = 0; // 正文可用宽度(安全宽减左右 padding 与提示符)
+};
+
+// 折行宽度:首行容下提示符("> ")后的窄区,续行统一缩进 kUserPromptIndent。
+// 与 composer(LayoutComposerRows)同一套 grapheme/cell 宽度算法
+// (CharDisplayWidth/DisplayWidth),提交前后不忽然换行。
+inline constexpr int kUserPromptMarkerWidth = 2;  // "> "
+inline constexpr int kUserPromptIndent = 2;       // 续行缩进(与 composer 续行同款)
+inline constexpr int kUserPromptPadding = 1;      // 左右各留一格;窄屏(<20 列)可降为 0
+
+// 把已提交的用户文本排成背景块。text 先按 \n 拆逻辑行,再按显示宽折行;
+// width <= 0 按 80 兜底。空白文本返回空 rows(空 prompt 不生成空色块)。
+// 用户文本里的 ANSI/ESC 按字节原样进正文——调用方(会话主路)拿到的都是
+// 本程序自己拼的 UTF-8,不带控制序列;外部粘贴进来的内容由 composer 的
+// 编辑路径先行过滤,这里不再做第二遍转义。
+UserPromptLayout LayoutUserPromptBlock(const std::string& text, const Theme& theme, int width);
+
+// 一块的整段渲染(每行以 \n 收尾,块后不再多垫空行——gap 归调用方的
+// 间距表管)。live/resume/重画共用。
+std::string FormatUserPromptBlock(const std::string& text, const Theme& theme, int width);
+
+// ---- 间距表(单子"间距不是换行,是布局数据") ------------------------------
+//
+// 空白物理行数由前后块的相邻关系定,首版硬编码在这张表里,最终收口成
+// GapBetween 纯函数。block 角色只取间距表用得着的几枚(完整 RenderBlock
+// 模型留给 TurnView 合流的后续单,这里先给"谁挨着谁"的账)。
+
+enum class BlockRole { UserPrompt, Thinking, Tool, SubTool, AssistantText, Warning, Error, TurnFooter, SystemNotice };
+
+// 前块 -> 后块的默认间距(空白物理行数)。表外的组合一律 1(异常不黏正文)。
+// SubTool 贴父项/同父批次紧排是 0,其余块与块之间留一口气。
+int GapBetween(BlockRole before, BlockRole after);
+
 // ---- 首行参数摘要 ------------------------------------------------------
 
 // 按工具名挑关键参数拼首行:run_command 显示命令;read/write/edit 显示

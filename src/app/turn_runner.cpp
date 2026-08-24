@@ -1120,7 +1120,23 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
 
     // 用户这一行已经提交、真要开始等模型作答了——分界线打在这儿,紧跟在
     // 提示符那一行之后、模型正文开始打字机输出之前。
+    // 用户输入背景块(终端用户输入背景块单):真控制台的 user surface 已由
+    // composer 收框那一笔落下(CollapseBoxOnSubmit 直接铺 FormatUserPromptBlock,
+    // 与 resume/Ctrl+L 同源——同一笔 transaction 退 editing chrome、落背景,
+    // 不先收成裸文本再回头涂),这里只按间距表垫一口块后气口(UserPrompt ->
+    // 任意 = 1),信息收尾不贴脸。管道/重定向没有 composer 收框,保持稳定
+    // 纯文本,不补这一口。
     PrintDivider(theme, is_console && !silent);
+    if (is_console && !silent && !user_input.empty()) {
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        for (int g = 0;
+             g < lubancode::cli::GapBetween(lubancode::cli::BlockRole::UserPrompt,
+                                            lubancode::cli::BlockRole::Thinking);
+             ++g) {
+            std::cout << "\n";
+        }
+        std::cout.flush();
+    }
 
     // turn 墙钟(终端回合视觉收束单):起点是"用户输入过了本地校验、正式
     // 交给 turn runtime"那一刻(本函数顶上的 prepared/gate 都已过,这里就

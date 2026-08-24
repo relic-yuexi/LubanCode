@@ -29,6 +29,12 @@ Theme DarkTheme() {
     t.diff_syntax_comment = "\x1b[38;5;244m";  // 灰
     t.diff_syntax_type = "\x1b[38;5;81m";      // 青
     t.diff_syntax_function = "\x1b[38;5;75m";  // 蓝
+    // 用户块:中性灰,略亮于深色终端底(236),不用蓝紫大色块。前景按默认
+    // (不设),靠底色承托;提示符沿用 stats 一档淡色,与正文区分。
+    t.surface_user_bg = "\x1b[48;5;236m";
+    t.surface_user_fg = std::string();
+    t.surface_user_marker = t.stats;
+    t.surface_padding = t.surface_user_bg;
     return t;
 }
 
@@ -52,6 +58,11 @@ Theme LightTheme() {
     t.diff_syntax_comment = "\x1b[38;5;102m";
     t.diff_syntax_type = "\x1b[38;5;25m";
     t.diff_syntax_function = "\x1b[38;5;27m";
+    // 用户块:浅灰,深色前景在它上面仍够对比(与 light 底色拉开一档)。
+    t.surface_user_bg = "\x1b[48;5;251m";
+    t.surface_user_fg = std::string();
+    t.surface_user_marker = t.stats;
+    t.surface_padding = t.surface_user_bg;
     return t;
 }
 
