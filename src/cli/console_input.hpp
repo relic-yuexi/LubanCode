@@ -84,6 +84,14 @@ struct ChoiceMenuOptions {
     std::string invalid_hint;
     std::string editable_hint;
     std::string editable_placeholder = "____________";
+    // provider 预设目录从 9 家涨到 75 家那单:条目超过这个数,菜单进"搜索+
+    // 分页"模式——顶部一行搜索框,键入即本地过滤(label/description 不区分
+    // 大小写的子串匹配),列表只画窗口内条目,窗口围绕选中项滚动(照
+    // /resume 会话选择器的体验)。等于或低于阈值走原来的整单直列路径,
+    // 一个字节不变;多选/行内编辑菜单条目通常不多,天然落回老路径。
+    std::size_t search_threshold = 12;
+    // 测试/特殊场合显式开搜索+分页,绕过阈值判断。
+    bool always_search = false;
 };
 
 struct ChoiceMenuResult {
@@ -91,8 +99,72 @@ struct ChoiceMenuResult {
     std::optional<std::string> custom_text;
 };
 
+// 长菜单(items 超过 ChoiceMenuOptions::search_threshold)的"搜索 + 分页"
+// 状态机,与绘制分离、可直接单测(照 ChoiceMenuCore 的路数,单测同在
+// tests/unit/cli/test_choice_menu.cpp)。ChoiceMenuCore 本体住在
+// cli/choice_menu.hpp,这层不复用其实例、复用其语义:多选空格勾选、
+// editable 项行内文本、Enter 提交/invalid、Esc 取消的规则与
+// ChoiceMenuCore::HandleKey 逐条对齐;新添的是搜索词、过滤视图(命中项
+// 的原索引数组)与窗口(scroll() 是窗口首行在 view() 里的偏移)。
+//
+// 键分派(搜索模式):
+//   - 可打印字符:光标正落在 editable 项上时照旧进它的行内文本;不在其上
+//     才追加进搜索词并重筛,光标跳到过滤后第一项。多选空格仍勾选当前项
+//     (selected 按原索引写回)。
+//   - Backspace:在 editable 项上删行内文本尾字符;否则删搜索词尾字符重筛
+//     (当前项仍在命中里就守住它,不在了才落到过滤视图第一项)。
+//   - Up/Down 在过滤视图内移动(到头不绕圈,与 /resume 选择器同口径),
+//     超出窗口边界滚窗;PageUp/PageDown 按窗口高翻页;Home/End 跳首尾。
+//   - Enter 提交当前项(单选)/已勾选项(多选);Esc/Ctrl+C/Ctrl+D 取消,
+//     语义与老路径一致。
+//   - editable 项恒显示不过滤,光标可以走到它。
+class ChoiceMenuSearchCore {
+public:
+    ChoiceMenuSearchCore(std::vector<ChoiceMenuItem> items, bool multi_select,
+                         std::optional<std::size_t> editable_index = std::nullopt,
+                         std::size_t initial_cursor = 0);
+
+    // 绘制层按屏幕可用行数算好喂进来(通常 viewport_height 减搜索行与
+    // hint 行);0 当 1。菜单存活期间可改(终端 resize),窗口围绕当前项
+    // 重新对齐。默认值是条目总数——没喂之前不过滤也不分页。
+    void SetWindowRows(std::size_t rows);
+
+    const ChoiceMenuState& HandleKey(const KeyEvent& event);
+
+    // 与 ChoiceMenuCore::state() 同账:selected 按原索引、custom_text/
+    // submitted/cancelled/invalid 一并在此;cursor 恒等于 view()[view_cursor()]
+    // (view 空时保持最后一次同步的值)。绘制层画高亮请认 view_cursor()。
+    const ChoiceMenuState& state() const { return state_; }
+    const std::string& search() const { return search_; }
+    // 过滤视图:命中项(含恒显的 editable 项)在原列表里的索引,按下标序。
+    const std::vector<std::size_t>& view() const { return view_; }
+    std::size_t view_cursor() const { return view_cursor_; }
+    std::size_t scroll() const { return scroll_; }  // 窗口首行(view_ 偏移)
+    std::size_t window_rows() const { return window_rows_; }
+    bool scrollable() const { return view_.size() > window_rows_; }  // hint 行该给翻页提示
+    bool cursor_on_editable() const;
+    std::vector<std::size_t> SelectedIndices() const;
+
+private:
+    void Refilter(std::optional<std::size_t> keep_original);  // nullopt = 跳到过滤视图第一项
+    void ClampScroll();
+    void SyncCursor();
+
+    std::vector<ChoiceMenuItem> items_;
+    bool multi_select_ = false;
+    std::optional<std::size_t> editable_index_;
+    ChoiceMenuState state_;
+    std::string search_;
+    std::vector<std::size_t> view_;
+    std::size_t view_cursor_ = 0;
+    std::size_t scroll_ = 0;
+    std::size_t window_rows_ = 1;
+};
+
 // 真终端绘制原地选择菜单。editable_index 指向的末项可直接键入文字，
-// 返回普通选中项与行内文本；Esc/Ctrl+C/EOF 返回 nullopt。exit_reason
+// 返回普通选中项与行内文本；Esc/Ctrl+C/EOF 返回 nullopt。条目超过
+// options.search_threshold(或 always_search)时进搜索+分页模式,体验照
+// /resume 会话选择器:顶部搜索行、键入即过滤、列表开窗。exit_reason
 // (向导重排单)可选:Esc 填 Esc(向导当"返回上一步"),Ctrl+C/Ctrl+D/EOF
 // 填 Cancel;选中则填 Submitted。不传行为一字不变。
 std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>& items,

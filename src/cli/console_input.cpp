@@ -2284,6 +2284,473 @@ std::optional<std::string> ReadLine(const std::string& prompt, const Theme& them
     return line;
 }
 
+// -----------------------------------------------------------------------
+// 长菜单的搜索+分页:ChoiceMenuSearchCore 的实现与搜索路径的绘制。
+// provider 预设目录从 9 家涨到 75 家,方向键整单直列一屏列不下,照
+// /resume 会话选择器(cli/session_picker_panel.cpp + SessionPickerCore)
+// 的体验加搜索行与窗口分页。ReadChoiceMenu 按 search_threshold 分流,
+// 阈值以下的老路径(ChoiceMenuCore 整单直列)一个字节不动。
+// -----------------------------------------------------------------------
+
+namespace {
+
+// 与 cli/choice_menu.cpp、session_picker.cpp 文件内私货同款的几个小工具,
+// 这里就地再备一份(那边都是各自的匿名 namespace,够不着)。
+void AppendMenuUtf8(std::string& out, char32_t cp) {
+    if (cp <= 0x7F) {
+        out.push_back(static_cast<char>(cp));
+    } else if (cp <= 0x7FF) {
+        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (cp <= 0xFFFF) {
+        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (cp <= 0x10FFFF) {
+        out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    }
+}
+
+void EraseMenuLastUtf8(std::string& text) {
+    if (text.empty()) {
+        return;
+    }
+    std::size_t pos = text.size() - 1;
+    while (pos > 0 && (static_cast<unsigned char>(text[pos]) & 0xC0) == 0x80) {
+        --pos;
+    }
+    text.erase(pos);
+}
+
+bool MenuHasVisibleText(const std::string& text) {
+    return std::any_of(text.begin(), text.end(), [](unsigned char ch) { return ch > 0x20 && ch != 0x7F; });
+}
+
+void AppendMenuSearchPasted(std::string& out, const std::string& pasted) {
+    for (const char ch : pasted) {
+        if (ch == '\r' || ch == '\n' || ch == '\t') {
+            out.push_back(' ');
+        } else if (ch != '\0') {
+            out.push_back(ch);
+        }
+    }
+}
+
+std::string MenuToLowerAscii(std::string text) {
+    for (char& c : text) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    return text;
+}
+
+// 能翻页时的 hint(调用方传的 hint 描述不了翻页):走 i18n 得动 i18n.cpp
+// 的语言档,本单不碰那个文件,先与调用方 hint 同一挂法直书写在绘制层。
+constexpr const char* kChoiceMenuPagingHint = "上/下移动 · PgUp/PgDn 翻页 · 输入即搜索 · Enter 确认";
+
+}  // namespace
+
+ChoiceMenuSearchCore::ChoiceMenuSearchCore(std::vector<ChoiceMenuItem> items, bool multi_select,
+                                           std::optional<std::size_t> editable_index,
+                                           std::size_t initial_cursor)
+    : items_(std::move(items)), multi_select_(multi_select), editable_index_(editable_index) {
+    state_.selected.assign(items_.size(), false);
+    if (editable_index_.has_value() && *editable_index_ >= items_.size()) {
+        editable_index_.reset();
+    }
+    window_rows_ = items_.empty() ? 1 : items_.size();
+    // 初始光标按原索引定位;搜索词为空,视图即全量(视图位 == 原索引)。
+    // 越界钳到首项——与 ChoiceMenuCore 构造同款。
+    const std::size_t initial = !items_.empty() && initial_cursor < items_.size() ? initial_cursor : 0;
+    Refilter(initial);
+}
+
+void ChoiceMenuSearchCore::SetWindowRows(std::size_t rows) {
+    window_rows_ = rows == 0 ? 1 : rows;
+    ClampScroll();
+}
+
+const ChoiceMenuState& ChoiceMenuSearchCore::HandleKey(const KeyEvent& event) {
+    if (state_.submitted || state_.cancelled || state_.selected.empty()) {
+        return state_;
+    }
+    state_.invalid = false;
+    const std::size_t current = view_.empty() ? state_.cursor : view_[view_cursor_];
+    const bool on_editable = editable_index_.has_value() && current == *editable_index_;
+    switch (event.kind) {
+        case KeyKind::Up:
+        case KeyKind::ShiftTab:
+            // 到头不绕圈(与 /resume 选择器同口径,老路径的循环移动只属于
+            // 一屏列得下的短单)。
+            if (view_cursor_ > 0) {
+                --view_cursor_;
+                ClampScroll();
+            }
+            break;
+        case KeyKind::Down:
+        case KeyKind::Tab:
+            if (view_cursor_ + 1 < view_.size()) {
+                ++view_cursor_;
+                ClampScroll();
+            }
+            break;
+        case KeyKind::Home:
+            view_cursor_ = 0;
+            scroll_ = 0;
+            break;
+        case KeyKind::End:
+            if (!view_.empty()) {
+                view_cursor_ = view_.size() - 1;
+                ClampScroll();
+            }
+            break;
+        case KeyKind::PageUp:
+            view_cursor_ = view_cursor_ > window_rows_ ? view_cursor_ - window_rows_ : 0;
+            ClampScroll();
+            break;
+        case KeyKind::PageDown:
+            if (!view_.empty()) {
+                view_cursor_ = (std::min)(view_cursor_ + window_rows_, view_.size() - 1);
+                ClampScroll();
+            }
+            break;
+        case KeyKind::Char:
+            if (multi_select_ && event.ch == U' ' && !view_.empty() && !on_editable) {
+                // 勾选作用于过滤视图当前项,账写回原索引。
+                state_.selected[current] = !state_.selected[current];
+            } else if (on_editable && event.ch >= 0x20 && event.ch != 0x7F) {
+                // 光标在 editable 项上:照老路径的行内文本走。
+                AppendMenuUtf8(state_.custom_text, event.ch);
+            } else if (event.ch >= 0x20 && event.ch != 0x7F && !event.ctrl && !event.alt) {
+                // 不在 editable 上:进搜索词,重筛后选中跳到过滤视图第一项。
+                AppendMenuUtf8(search_, event.ch);
+                Refilter(std::nullopt);
+            }
+            break;
+        case KeyKind::Paste:
+            if (on_editable) {
+                AppendMenuSearchPasted(state_.custom_text, event.text);
+            } else {
+                AppendMenuSearchPasted(search_, event.text);
+                Refilter(std::nullopt);
+            }
+            break;
+        case KeyKind::Backspace:
+            if (on_editable) {
+                EraseMenuLastUtf8(state_.custom_text);
+            } else if (!search_.empty()) {
+                EraseMenuLastUtf8(search_);
+                // 尽量守住当前项(新搜索词是旧词的前缀,命中只会变多,当前
+                // 项几乎必在);真不在了由 Refilter 落到过滤视图第一项。
+                Refilter(view_.empty() ? std::nullopt : std::optional<std::size_t>(view_[view_cursor_]));
+            }
+            break;
+        case KeyKind::Enter:
+        case KeyKind::NewLine:
+            if (on_editable) {
+                state_.custom_submitted = MenuHasVisibleText(state_.custom_text);
+                state_.submitted = state_.custom_submitted;
+                state_.invalid = !state_.submitted;
+            } else if (view_.empty()) {
+                state_.invalid = true;  // 搜空且无 editable:没东西可交,不当提交
+            } else if (!multi_select_) {
+                state_.selected[view_[view_cursor_]] = true;
+                state_.submitted = true;
+            } else {
+                state_.submitted =
+                    std::find(state_.selected.begin(), state_.selected.end(), true) != state_.selected.end();
+                state_.invalid = !state_.submitted;
+            }
+            break;
+        case KeyKind::Esc:
+        case KeyKind::CtrlC:
+        case KeyKind::CtrlD:
+            state_.cancelled = true;
+            break;
+        default:
+            break;
+    }
+    SyncCursor();
+    return state_;
+}
+
+bool ChoiceMenuSearchCore::cursor_on_editable() const {
+    return editable_index_.has_value() && !view_.empty() && view_[view_cursor_] == *editable_index_;
+}
+
+std::vector<std::size_t> ChoiceMenuSearchCore::SelectedIndices() const {
+    std::vector<std::size_t> out;
+    for (std::size_t i = 0; i < state_.selected.size(); ++i) {
+        if (state_.selected[i]) {
+            out.push_back(i);
+        }
+    }
+    return out;
+}
+
+void ChoiceMenuSearchCore::Refilter(std::optional<std::size_t> keep_original) {
+    view_.clear();
+    const std::string needle = MenuToLowerAscii(search_);
+    for (std::size_t i = 0; i < items_.size(); ++i) {
+        const bool editable = editable_index_.has_value() && i == *editable_index_;
+        // editable 项恒显示不过滤;其余按 label/description 大小写不敏感的
+        // 子串匹配本地筛。搜索词空 = 全量。
+        if (editable || needle.empty() ||
+            MenuToLowerAscii(items_[i].label).find(needle) != std::string::npos ||
+            MenuToLowerAscii(items_[i].description).find(needle) != std::string::npos) {
+            view_.push_back(i);
+        }
+    }
+    std::size_t want = 0;
+    if (keep_original.has_value()) {
+        for (std::size_t i = 0; i < view_.size(); ++i) {
+            if (view_[i] == *keep_original) {
+                want = i;
+                break;
+            }
+        }
+        // 原选中项不在新命中里:落到过滤视图第一项(want 保持 0)。
+    }
+    view_cursor_ = view_.empty() ? 0 : (std::min)(want, view_.size() - 1);
+    ClampScroll();
+    SyncCursor();
+}
+
+void ChoiceMenuSearchCore::ClampScroll() {
+    if (view_.empty()) {
+        view_cursor_ = 0;
+        scroll_ = 0;
+        return;
+    }
+    if (view_cursor_ >= view_.size()) {
+        view_cursor_ = view_.size() - 1;
+    }
+    if (view_cursor_ < scroll_) {
+        scroll_ = view_cursor_;
+    } else if (view_cursor_ >= scroll_ + window_rows_) {
+        scroll_ = view_cursor_ + 1 > window_rows_ ? view_cursor_ + 1 - window_rows_ : 0;
+    }
+    if (scroll_ + window_rows_ > view_.size()) {
+        scroll_ = view_.size() > window_rows_ ? view_.size() - window_rows_ : 0;
+    }
+}
+
+void ChoiceMenuSearchCore::SyncCursor() {
+    if (!view_.empty()) {
+        state_.cursor = view_[view_cursor_];
+    }
+}
+
+namespace {
+
+// 搜索+分页路径的绘制与帧循环,规矩照 ReadChoiceMenu 老路径:StdoutWriteMutex
+// + synchronized output(kSyncOutputBegin/End,同一匿名 namespace)单帧事务、
+// 藏光标、ClearRowHardFrom 清行、EnsureStreamScreenRowsLocked 腾位、
+// ConsoleReadMutex 攥到底。帧的行账:搜索行(1) + 列表窗口(命中数与
+// 窗口高的较小者;搜空画一行"无匹配项") + hint 行(1)。进门按最坏总
+// 行数(全量时)一次腾够——此后过滤只会收窄,超不过它;每帧重画先清
+// max(上一帧行数, 本帧行数) 行,窗口缩了旧尾巴也擦得净。
+std::optional<ChoiceMenuResult> ReadChoiceMenuSearch(const std::vector<ChoiceMenuItem>& items,
+                                                     const ChoiceMenuOptions& options, const Theme& theme,
+                                                     ReadExitReason* exit_reason) {
+    std::lock_guard<std::mutex> console_read_lock(ConsoleReadMutex());
+    platform::RawInputScope raw_scope;
+    if (!raw_scope.ok()) {
+        if (exit_reason != nullptr) {
+            *exit_reason = ReadExitReason::Cancel;
+        }
+        return std::nullopt;
+    }
+
+    int start_row = 0;
+    int frame_rows = 0;
+    std::size_t window_budget = 1;
+    {
+        std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+        const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
+        if (!info.has_value()) {
+            if (exit_reason != nullptr) {
+                *exit_reason = ReadExitReason::Cancel;
+            }
+            return std::nullopt;
+        }
+        // 窗口高 = 可视行数减搜索行与 hint 行,不写死;查不到可视高退
+        // 缓冲高(ScreenInfo 的约定),至少留一行。
+        const int viewport_rows = info->viewport_height > 0 ? info->viewport_height : info->height;
+        window_budget = static_cast<std::size_t>((std::max)(1, viewport_rows - 2));
+        const int worst_rows = 2 + static_cast<int>((std::min)(items.size(), window_budget));
+        if (!EnsureStreamScreenRowsLocked(worst_rows)) {
+            if (exit_reason != nullptr) {
+                *exit_reason = ReadExitReason::Cancel;
+            }
+            return std::nullopt;
+        }
+        const std::optional<platform::ScreenInfo> after = platform::GetScreenInfo();
+        if (!after.has_value()) {
+            if (exit_reason != nullptr) {
+                *exit_reason = ReadExitReason::Cancel;
+            }
+            return std::nullopt;
+        }
+        start_row = after->cursor_y;
+    }
+
+    ChoiceMenuSearchCore menu(items, options.multi_select, options.editable_index,
+                              options.initial_cursor.value_or(0));
+    menu.SetWindowRows(window_budget);
+
+    auto draw = [&]() -> bool {
+        std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+        const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
+        if (!info.has_value()) {
+            return false;
+        }
+        const int width = info->width;
+        const std::vector<std::size_t>& view = menu.view();
+        const std::size_t visible =
+            view.empty() ? 0 : (std::min)(view.size() - menu.scroll(), menu.window_rows());
+        const int rows_now = 2 + (view.empty() ? 1 : static_cast<int>(visible));
+        const int clear_rows = (std::max)(frame_rows, rows_now);
+        std::cout << kSyncOutputBegin << "\x1b[?25l";
+        for (int r = 0; r < clear_rows; ++r) {
+            platform::ClearRowHardFrom(0, start_row + r, width);
+        }
+        // 搜索行:词尾下划线当光标,命中数/总数跟上,淡色。
+        const std::string search_line = "搜索: " + menu.search() + "_ (" + std::to_string(view.size()) +
+                                        "/" + std::to_string(items.size()) + ")";
+        platform::SetCursorPos(0, start_row);
+        std::cout << theme.stats << TruncateUtf8ToDisplayWidth(search_line, width - 1) << theme.reset;
+        // 窗口内条目:行样式与老路径一字同款(> 前缀、多选 [x]、选中高亮、
+        // description 同行尾随、editable 行内文本)。
+        for (std::size_t row = 0; row < visible; ++row) {
+            const std::size_t index = menu.scroll() + row;  // 过滤视图偏移
+            const std::size_t original = view[index];       // 原索引
+            const bool active = index == menu.view_cursor();
+            const bool editable = options.editable_index.has_value() && original == *options.editable_index;
+            std::string prefix = active ? "> " : "  ";
+            if (options.multi_select && !editable) {
+                prefix += menu.state().selected[original] ? "[x] " : "[ ] ";
+            } else if (options.multi_select) {
+                prefix += "    ";
+            }
+            const int room = (std::max)(0, width - static_cast<int>(DisplayWidthUtf8(prefix)) - 1);
+            std::string raw_label = items[original].label;
+            if (editable) {
+                raw_label += ": ";
+                raw_label += menu.state().custom_text.empty()
+                                 ? options.editable_placeholder
+                                 : menu.state().custom_text + (active ? "_" : "");
+            }
+            const std::string label = TruncateUtf8ToDisplayWidth(raw_label, room);
+            int description_room = room - static_cast<int>(DisplayWidthUtf8(label)) - 3;
+
+            platform::SetCursorPos(0, start_row + 1 + static_cast<int>(row));
+            if (active) {
+                std::cout << theme.confirm;
+            }
+            std::cout << prefix << label << theme.reset;
+            if (!items[original].description.empty() && description_room > 0) {
+                std::cout << theme.stats << " - "
+                          << TruncateUtf8ToDisplayWidth(items[original].description, description_room)
+                          << theme.reset;
+            }
+        }
+        if (view.empty()) {
+            platform::SetCursorPos(0, start_row + 1);
+            std::cout << theme.stats << TruncateUtf8ToDisplayWidth(std::string("无匹配项"), width - 1)
+                      << theme.reset;
+        }
+        // hint 行:invalid 最优先,editable 行内编辑次之,能翻页给翻页提示,
+        // 其余照老规则用调用方的 hint。
+        platform::SetCursorPos(0, start_row + rows_now - 1);
+        std::string hint;
+        if (menu.state().invalid) {
+            hint = options.invalid_hint;
+        } else if (menu.cursor_on_editable()) {
+            hint = options.editable_hint;
+        } else if (menu.scrollable()) {
+            hint = kChoiceMenuPagingHint;
+        } else {
+            hint = options.hint;
+        }
+        std::cout << (menu.state().invalid ? theme.error : theme.stats)
+                  << TruncateUtf8ToDisplayWidth(hint, width - 1) << theme.reset << kSyncOutputEnd;
+        std::cout.flush();
+        frame_rows = rows_now;
+        return true;
+    };
+
+    auto clear = [&] {
+        std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+        const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
+        if (info.has_value()) {
+            std::cout << kSyncOutputBegin;
+            for (int r = 0; r < frame_rows; ++r) {
+                platform::ClearRowHardFrom(0, start_row + r, info->width);
+            }
+            platform::SetCursorPos(0, start_row);
+            std::cout << "\x1b[?25h" << kSyncOutputEnd;
+            std::cout.flush();
+        } else {
+            std::cout << "\x1b[?25h" << std::flush;
+        }
+    };
+
+    if (!draw()) {
+        if (exit_reason != nullptr) {
+            *exit_reason = ReadExitReason::Cancel;
+        }
+        return std::nullopt;
+    }
+    platform::KeyReader key_reader;
+    bool cancel_was_esc = false;
+    while (!menu.state().submitted && !menu.state().cancelled) {
+        const std::optional<platform::KeyInput> raw_key = key_reader.ReadOne();
+        if (!raw_key.has_value()) {
+            clear();
+            if (exit_reason != nullptr) {
+                *exit_reason = ReadExitReason::Cancel;
+            }
+            return std::nullopt;
+        }
+        const std::optional<KeyEvent> mapped = MapKey(*raw_key);
+        if (!mapped.has_value()) {
+            continue;
+        }
+        menu.HandleKey(*mapped);
+        if (menu.state().cancelled && mapped->kind == KeyKind::Esc) {
+            cancel_was_esc = true;
+        }
+        if (!menu.state().submitted && !menu.state().cancelled) {
+            if (!draw()) {
+                clear();
+                if (exit_reason != nullptr) {
+                    *exit_reason = ReadExitReason::Cancel;
+                }
+                return std::nullopt;
+            }
+        }
+    }
+    const bool cancelled = menu.state().cancelled;
+    ChoiceMenuResult result;
+    result.selected_indices = menu.SelectedIndices();
+    if (menu.state().custom_submitted) {
+        result.custom_text = menu.state().custom_text;
+    }
+    clear();
+    if (exit_reason != nullptr) {
+        *exit_reason = cancelled ? (cancel_was_esc ? ReadExitReason::Esc : ReadExitReason::Cancel)
+                                 : ReadExitReason::Submitted;
+    }
+    return cancelled ? std::nullopt : std::optional<ChoiceMenuResult>(std::move(result));
+}
+
+}  // namespace
+
 std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>& items,
                                                 const ChoiceMenuOptions& options, const Theme& theme,
                                                 ReadExitReason* exit_reason) {
@@ -2292,6 +2759,11 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
             *exit_reason = ReadExitReason::Cancel;
         }
         return std::nullopt;
+    }
+    // 条目超过阈值(或显式 always_search):走搜索+分页路径;等于/低于阈值
+    // 仍是下面的整单直列老路径,一个字节不动。
+    if (options.always_search || items.size() > options.search_threshold) {
+        return ReadChoiceMenuSearch(items, options, theme, exit_reason);
     }
     std::lock_guard<std::mutex> console_read_lock(ConsoleReadMutex());
     platform::RawInputScope raw_scope;
