@@ -340,7 +340,11 @@ ProviderSwitchResult RunProviderSwitchPicker(const std::vector<config::ProviderC
         lines.push_back(PanelRule(width));
 
         const int rows_needed = static_cast<int>(lines.size()) + 2;
-        const int cursor_before = info->cursor_y;
+        // 首帧从当前光标起画。后续重画先回旧帧顶再核空间；若从上一帧
+        // 末尾探底，每按一键都会在旧帧下面另起一块，旧列表便留在屏上。
+        if (rows_drawn > 0) {
+            platform::SetCursorPos(0, start_row);
+        }
         if (!EnsureStreamScreenRowsLocked(rows_needed)) {
             return false;
         }
@@ -348,18 +352,9 @@ ProviderSwitchResult RunProviderSwitchPicker(const std::vector<config::ProviderC
         if (!after.has_value()) {
             return false;
         }
-        if (rows_drawn == 0) {
-            start_row = after->cursor_y;
-        } else {
-            const int expected_end = start_row + rows_drawn;
-            const int actual_end = after->cursor_y;
-            if (actual_end < expected_end && cursor_before < expected_end) {
-                start_row -= (expected_end - actual_end);
-                if (start_row < 0) {
-                    start_row = 0;
-                }
-            }
-        }
+        // Ensure... 若贴底滚了内容，会把光标拨回滚后的真实位置；没滚时
+        // 仍在旧 start_row。两种情形都拿它作新帧顶，原地清旧画新。
+        start_row = after->cursor_y;
         const int rows_to_draw = static_cast<int>(lines.size());
         const int clear_rows = (std::max)(rows_drawn, rows_to_draw);
         std::cout << "\x1b[?2026h\x1b[?25l";

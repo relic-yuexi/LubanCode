@@ -34,7 +34,7 @@
 //
 // 用法: fold_dup_clear_driver <lubancode.exe 路径> <子进程工作目录> <报告文件路径>
 //                             [要验证清屏的 provider 名]
-//                             [--provider-only|--ask-user-only|--resume-only|--skill-help-only|--edit-color-only]
+//                             [--provider-only|--provider-picker-only|--ask-user-only|--resume-only|--skill-help-only|--edit-color-only]
 // 环境变量(LUBANCODE_BASE_URL/LUBANCODE_API_KEY/LUBANCODE_MODEL 或者走
 // 子进程工作目录/USERPROFILE 下现成的 config.json)由调用方设好,子进程
 // 原样继承。
@@ -292,6 +292,7 @@ int wmain(int argc, wchar_t** argv) {
     const std::wstring workdir = argv[2];
     const std::string provider_name = argc >= 5 ? WideToUtf8(argv[4]) : std::string();
     const bool provider_only = argc >= 6 && std::wstring(argv[5]) == L"--provider-only";
+    const bool provider_picker_only = argc >= 6 && std::wstring(argv[5]) == L"--provider-picker-only";
     const bool ask_user_only = argc >= 6 && std::wstring(argv[5]) == L"--ask-user-only";
     const bool resume_only = argc >= 6 && std::wstring(argv[5]) == L"--resume-only";
     const bool skill_help_only = argc >= 6 && std::wstring(argv[5]) == L"--skill-help-only";
@@ -377,6 +378,29 @@ int wmain(int argc, wchar_t** argv) {
     const auto icon_rows_at_start = FindAllRows("\xe5\x8c\xa0\xe5\xbf\x83\xe8\xbf\x90\xe6\x96\xa4", height);  // "匠心运斤"
     Check(icon_rows_at_start.size() == 1,
           "#四 启动:图标出现且只出现一次(实际 " + std::to_string(icon_rows_at_start.size()) + " 次)");
+
+    // ---- #十二:/provider switch 方向键重画仍只有一块面板 ----
+    if (provider_picker_only) {
+        SendText("/provider switch");
+        SendKey(VK_RETURN, L'\r', 0);
+        Check(WaitForText("切换 provider", 10000, height),
+              "#十二 /provider switch:裸敲出现 provider 选择面板");
+        Sleep(300);
+        const std::vector<int> title_rows_before = FindAllRows("切换 provider", height);
+        Check(title_rows_before.size() == 1,
+              "#十二 /provider switch:首帧标题只有一份");
+        SendKey(VK_DOWN, 0, 0);
+        Sleep(500);
+        const std::vector<int> title_rows_after = FindAllRows("切换 provider", height);
+        Check(title_rows_after.size() == 1,
+              "#十二 /provider switch:Down 后标题仍只有一份");
+        Check(title_rows_before.size() == 1 && title_rows_after.size() == 1 &&
+                  title_rows_before.front() == title_rows_after.front(),
+              "#十二 /provider switch:Down 后面板在原行覆盖");
+        SendKey(VK_ESCAPE, 0, 0);
+        Sleep(300);
+        return finish();
+    }
 
     // ---- #十:/resume 裸敲菜单 + 历史重放 ----
     if (resume_only) {
