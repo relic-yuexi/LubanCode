@@ -54,8 +54,6 @@ void AlignOutputToUtf8Boundary(std::string& output, std::size_t max_output_bytes
     }
 }
 
-}  // namespace
-
 // Replace 模式的显式环境块:"KEY=VALUE\0KEY=VALUE\0\0" 的 UTF-16 串,交给
 // CreateProcessW 的 lpEnvironment——宿主环境一概不递(plugins 单第 8 步
 // 的最小环境硬保证)。空表 = 子进程一个变量都没有。
