@@ -260,16 +260,23 @@ StepResult RunNameStep(WizardIO& io, ProviderWizardState& state) {
 }
 
 StepResult RunWireStep(WizardIO& io, ProviderWizardState& state) {
+    // 第四项(Gemini 原生)的文案不走 i18n 表:前四家的 opt/desc 本就是
+    // 协议名 + 端点形状这类中英通吃的字面量,新键等 i18n 表那册一并补,
+    // 这里先直书,不给翻译表留缺口。
     std::vector<WizardChoiceItem> items = {
         {tr("provider_wizard.wire.opt1"), tr("provider_wizard.wire.desc1")},
         {tr("provider_wizard.wire.opt2"), tr("provider_wizard.wire.desc2")},
         {tr("provider_wizard.wire.opt3"), tr("provider_wizard.wire.desc3")},
+        {"Google Generate Content (Gemini)",
+         "POST {base}/v1beta/models/{model}:streamGenerateContent · GET {base}/v1beta/models"},
     };
     std::size_t default_index = 0;
     if (state.wire_set) {
         default_index = state.draft.wire == config::Wire::Responses
                             ? 1
-                            : (state.draft.wire == config::Wire::ChatCompletions ? 2 : 0);
+                            : (state.draft.wire == config::Wire::ChatCompletions
+                                   ? 2
+                                   : (state.draft.wire == config::Wire::GoogleGenerateContent ? 3 : 0));
     }
 
     WizardFrame frame;
@@ -290,9 +297,20 @@ StepResult RunWireStep(WizardIO& io, ProviderWizardState& state) {
         }
         return Cancel();
     }
-    const config::Wire wire =
-        *choice.index == 1 ? config::Wire::Responses
-                           : (*choice.index == 2 ? config::Wire::ChatCompletions : config::Wire::Anthropic);
+    config::Wire wire = config::Wire::Anthropic;
+    switch (*choice.index) {
+        case 1:
+            wire = config::Wire::Responses;
+            break;
+        case 2:
+            wire = config::Wire::ChatCompletions;
+            break;
+        case 3:
+            wire = config::Wire::GoogleGenerateContent;
+            break;
+        default:
+            break;
+    }
     if (state.wire_set && wire != state.draft.wire) {
         state.models_valid = false;  // 探测路径变了,旧列表作废
     }
@@ -339,9 +357,12 @@ StepResult RunBaseUrlStep(WizardIO& io, ProviderWizardState& state) {
         return Stay();
     }
     // OpenAI 兼容格式没带 /v1:当场提示"这个服务通常还要 /v1",给采用与否
-    // 两个选项。只建议,不暗改——有些服务确实不用这层路径。
+    // 两个选项。只建议,不暗改——有些服务确实不用这层路径。Gemini 原生
+    // wire 的路径是 /v1beta,不吃这条建议。
+    const bool is_openai_compatible = state.draft.wire == config::Wire::Responses ||
+                                      state.draft.wire == config::Wire::ChatCompletions;
     std::string chosen = url;
-    if (state.draft.wire != config::Wire::Anthropic && url.find("/v1") == std::string::npos) {
+    if (is_openai_compatible && url.find("/v1") == std::string::npos) {
         const std::string with_v1 = url + "/v1";
         WizardFrame offer;
         offer.title = WizardTitle(state);
@@ -647,9 +668,12 @@ StepResult TryFetchAndPick(WizardIO& io, ProviderWizardState& state) {
 StepResult RunModelFetchFailed(WizardIO& io, ProviderWizardState& state, const api::Error& error) {
     const std::string summary = trf("provider_wizard.model.fetch_failed", ShortModelError(error));
     // OpenAI 兼容地址没带 /v1 又吃了 404:给"加上 /v1 后重试"这一项,把改后
-    // 的完整探测 URL 摆出来,用户确认后才改值。
+    // 的完整探测 URL 摆出来,用户确认后才改值。Gemini 原生 wire(/v1beta)
+    // 不吃这条补救。
+    const bool is_openai_compatible = state.draft.wire == config::Wire::Responses ||
+                                      state.draft.wire == config::Wire::ChatCompletions;
     const bool offer_add_v1 = error.kind == api::ErrorKind::HttpStatus && error.http_status == 404 &&
-                              state.draft.wire != config::Wire::Anthropic &&
+                              is_openai_compatible &&
                               state.draft.base_url.find("/v1") == std::string::npos;
 
     while (true) {
@@ -967,7 +991,13 @@ std::string SuggestProviderSlug(const std::string& raw) {
 }
 
 std::string DefaultKeyEnvForWire(config::Wire wire) {
-    return wire == config::Wire::Anthropic ? "ANTHROPIC_AUTH_TOKEN" : "OPENAI_API_KEY";
+    if (wire == config::Wire::Anthropic) {
+        return "ANTHROPIC_AUTH_TOKEN";
+    }
+    if (wire == config::Wire::GoogleGenerateContent) {
+        return "GEMINI_API_KEY";
+    }
+    return "OPENAI_API_KEY";
 }
 
 bool IsLocalBaseUrl(const std::string& base_url) {

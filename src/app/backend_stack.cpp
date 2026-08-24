@@ -7,6 +7,7 @@
 #include "agent/prompts.hpp"
 #include "api/anthropic/client.hpp"
 #include "api/chat/client.hpp"
+#include "api/gemini/client.hpp"
 #include "api/responses/client.hpp"
 #include "cli/spinner.hpp"
 #include "config/provider_catalog.hpp"
@@ -23,6 +24,15 @@ std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::C
         return std::make_unique<lubancode::api::responses::ResponsesBackend>(
             config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs,
             config.native_web_search, config.extra_body, headers, config.request_hard_timeout_secs);
+    }
+    if (config.wire == lubancode::config::Wire::GoogleGenerateContent) {
+        // Gemini 原生 wire:鉴权走 x-goog-api-key(client 里自理),stream_usage/
+        // reasoning_replay 这类 Chat 私有的 capability 都不沾;思考开关经
+        // reasoning_effort 翻成 generationConfig.thinkingConfig,档位私有参数
+        // (thinkingBudget)由目录 variants 的 extra_body 透传。
+        return std::make_unique<lubancode::api::gemini::GeminiBackend>(
+            config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs,
+            config.extra_body, headers, config.request_hard_timeout_secs);
     }
     if (config.wire == lubancode::config::Wire::ChatCompletions) {
         // stream_usage/reasoning_replay 都是 provider capability(目录声明),

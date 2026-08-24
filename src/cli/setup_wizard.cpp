@@ -247,10 +247,13 @@ std::optional<WizardOutcome> RunSetupWizard(WizardIO& io) {
 
     // ---- 1) wire ----
     io.print(tr("wizard.wire.title"));
+    // 第四项(Gemini 原生)的文案不走 i18n 表:wire 名 + 官方端点本就是
+    // 中英通吃的字面量,新键等 i18n 表那册一并补,这里先直书。
     std::vector<WizardChoiceItem> wire_items = {
         {tr("wizard.wire.opt1"), {}},
         {tr("wizard.wire.opt2"), {}},
         {tr("wizard.wire.opt3"), {}},
+        {"google-generate-content (Gemini)", {}},
     };
     config::Wire wire = config::Wire::Anthropic;
     {
@@ -258,8 +261,19 @@ std::optional<WizardOutcome> RunSetupWizard(WizardIO& io) {
         if (!choice.has_value()) {
             return std::nullopt;
         }
-        wire = *choice == 1 ? config::Wire::Responses
-                            : (*choice == 2 ? config::Wire::ChatCompletions : config::Wire::Anthropic);
+        switch (*choice) {
+            case 1:
+                wire = config::Wire::Responses;
+                break;
+            case 2:
+                wire = config::Wire::ChatCompletions;
+                break;
+            case 3:
+                wire = config::Wire::GoogleGenerateContent;
+                break;
+            default:
+                break;
+        }
     }
     io.print("");
 
@@ -267,6 +281,8 @@ std::optional<WizardOutcome> RunSetupWizard(WizardIO& io) {
     io.print(tr("wizard.base_url.title"));
     if (wire == config::Wire::Anthropic) {
         io.print("  https://api.minimaxi.com/anthropic");
+    } else if (wire == config::Wire::GoogleGenerateContent) {
+        io.print("  https://generativelanguage.googleapis.com");
     } else {
         io.print("  https://api.minimaxi.com/v1");
     }

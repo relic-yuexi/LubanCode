@@ -105,29 +105,40 @@ std::filesystem::path OldConfigPathFor(const std::filesystem::path& base_dir) {
     return base_dir / ".lubancode.json";
 }
 
+// wire 规范名(wire 更名单,2026-08):跟业内叫法对齐;旧名
+// 永久当别名认——用户已有的配置文件里写的是旧名,解析不许崩,但落盘/展示
+// 一律走 ProviderWireName 的规范名。
 std::expected<Wire, std::string> ParseProviderWire(const std::string& raw) {
-    if (raw == "anthropic") {
+    if (raw == "anthropic-messages" || raw == "anthropic") {
         return Wire::Anthropic;
     }
-    if (raw == "responses") {
+    if (raw == "openai-responses" || raw == "responses") {
         return Wire::Responses;
     }
-    if (raw == "chat_completions" || raw == "chat") {
+    if (raw == "openai-chat-completions" || raw == "chat_completions" || raw == "chat") {
         return Wire::ChatCompletions;
     }
-    return std::unexpected("只认得 anthropic、responses 或 chat_completions,写的是: " + raw);
+    if (raw == "google-generate-content") {
+        return Wire::GoogleGenerateContent;
+    }
+    return std::unexpected(
+        "只认得 anthropic-messages、openai-responses、openai-chat-completions 或 google-generate-content"
+        "(旧名 anthropic/responses/chat_completions 也认),写的是: " +
+        raw);
 }
 
 std::string ProviderWireName(Wire wire) {
     switch (wire) {
         case Wire::Anthropic:
-            return "anthropic";
+            return "anthropic-messages";
         case Wire::Responses:
-            return "responses";
+            return "openai-responses";
         case Wire::ChatCompletions:
-            return "chat_completions";
+            return "openai-chat-completions";
+        case Wire::GoogleGenerateContent:
+            return "google-generate-content";
     }
-    return "anthropic";
+    return "anthropic-messages";
 }
 
 std::expected<bool, std::string> ParseBoolToggle(const std::string& raw) {

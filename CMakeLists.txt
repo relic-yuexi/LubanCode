@@ -325,6 +325,9 @@ add_library(lubancode_engine STATIC
   src/api/responses/client.cpp
   src/api/responses/events.cpp
   src/api/responses/request.cpp
+  src/api/gemini/client.cpp
+  src/api/gemini/events.cpp
+  src/api/gemini/request.cpp
   src/api/assembler.cpp
   src/api/models.cpp
   src/config/config.cpp

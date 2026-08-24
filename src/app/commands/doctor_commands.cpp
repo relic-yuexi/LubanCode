@@ -23,6 +23,7 @@
 #include "api/anthropic/client.hpp"
 #include "api/chat/client.hpp"
 #include "api/chat/request.hpp"
+#include "api/gemini/request.hpp"
 #include "api/responses/client.hpp"
 #include "api/responses/request.hpp"
 #include "app/backend_stack.hpp"
@@ -162,6 +163,18 @@ std::string DescribeRequestEffort(lubancode::config::Wire wire, const api::Reque
             return "reasoning.effort = " + (*it)["effort"].dump();
         }
         return trf("doctor.effort.field_absent", std::string("reasoning.effort"));
+    }
+    if (wire == lubancode::config::Wire::GoogleGenerateContent) {
+        // Gemini:思考开关/档位都在 generationConfig.thinkingConfig 里,如实
+        // dump 整只(includeThoughts、目录 extra_body 透传的 thinkingBudget
+        // 之类一并列出)。
+        const nlohmann::json body = lubancode::api::gemini::BuildRequestJson(request, extra_body);
+        if (auto it = body.find("generationConfig"); it != body.end() && it->is_object()) {
+            if (auto thinking = it->find("thinkingConfig"); thinking != it->end() && thinking->is_object()) {
+                return "generationConfig.thinkingConfig = " + thinking->dump();
+            }
+        }
+        return trf("doctor.effort.field_absent", std::string("generationConfig.thinkingConfig"));
     }
     const nlohmann::json body = lubancode::api::anthropic::BuildRequestJson(request, false, extra_body);
     if (auto it = body.find("thinking"); it != body.end() && it->is_object()) {
@@ -468,6 +481,9 @@ void RunCacheProbe(const DoctorContext& context) {
         } else if (config.wire == lubancode::config::Wire::Responses) {
             dump1 = lubancode::api::responses::BuildRequestJson(pair.round1).dump();
             dump2 = lubancode::api::responses::BuildRequestJson(pair.round2).dump();
+        } else if (config.wire == lubancode::config::Wire::GoogleGenerateContent) {
+            dump1 = lubancode::api::gemini::BuildRequestJson(pair.round1, config.extra_body).dump();
+            dump2 = lubancode::api::gemini::BuildRequestJson(pair.round2, config.extra_body).dump();
         } else {
             dump1 = lubancode::api::anthropic::BuildRequestJson(pair.round1, false, config.extra_body).dump();
             dump2 = lubancode::api::anthropic::BuildRequestJson(pair.round2, false, config.extra_body).dump();

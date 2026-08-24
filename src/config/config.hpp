@@ -41,9 +41,18 @@
 
 namespace lubancode::config {
 
-// 说哪种"方言"跟模型对话:Anthropic 的 Messages API,还是 OpenAI 的
-// Responses API，还是兼容面最广的 OpenAI Chat Completions。默认 anthropic。
-enum class Wire { Anthropic, Responses, ChatCompletions };
+// 说哪种"方言"跟模型对话:Anthropic 的 Messages API、OpenAI 的 Responses
+// API、兼容面最广的 OpenAI Chat Completions,还是 Google Gemini 的
+// Generate Content API。默认 anthropic。
+//
+// 命名规范(wire 更名单,2026-08):配置里的规范名跟业内叫法
+// 对齐——anthropic-messages / openai-responses / openai-chat-completions /
+// google-generate-content,ProviderWireName 一律吐这四个;旧名(anthropic /
+// responses / chat_completions / chat)在 ParseProviderWire 里永久当别名
+// 认,老配置文件不许崩。枚举成员名保持 Anthropic/Responses/ChatCompletions
+// 原样不动——配置字符串层换规范名是一回事,源码里几十处 Wire:: 引用(含
+// provider_catalog 等旁人正在改的文件)没必要陪着翻一遍。
+enum class Wire { Anthropic, Responses, ChatCompletions, GoogleGenerateContent };
 
 // 一个字段的值最终是从哪一级配置来的,--config 诊断输出用。
 // 配置文件分两级:项目级 <cwd>/.lubancode/config.json 压过全局
@@ -905,7 +914,9 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
 // "环境变量 LUBANCODE_CONTEXT_WINDOW 里的" 这类前缀)。
 std::expected<std::size_t, std::string> ParseContextWindowTokens(const std::string& raw);
 
-// provider 的 wire 写法沿用既有配置字段：anthropic / responses / chat_completions。
+// provider 的 wire 规范名:anthropic-messages / openai-responses /
+// openai-chat-completions / google-generate-content;旧名(anthropic /
+// responses / chat_completions / chat)当别名认,映射到同一枚枚举。
 std::expected<Wire, std::string> ParseProviderWire(const std::string& raw);
 std::string ProviderWireName(Wire wire);
 

@@ -2337,11 +2337,86 @@ TEST_CASE("ParseFileConfigJson: providers 解出默认 key_env 与上下文窗�
     CHECK(provider.context_window_tokens == 1000000);
 }
 
-TEST_CASE("ParseProviderWire: chat_completions 是正式名，chat 是兼容别名") {
-    REQUIRE(config::ParseProviderWire("chat_completions").has_value());
+TEST_CASE("ParseProviderWire: 规范名四枚齐认,ProviderWireName 一律吐规范名") {
+    CHECK(*config::ParseProviderWire("anthropic-messages") == config::Wire::Anthropic);
+    CHECK(*config::ParseProviderWire("openai-responses") == config::Wire::Responses);
+    CHECK(*config::ParseProviderWire("openai-chat-completions") == config::Wire::ChatCompletions);
+    CHECK(*config::ParseProviderWire("google-generate-content") == config::Wire::GoogleGenerateContent);
+
+    CHECK(config::ProviderWireName(config::Wire::Anthropic) == "anthropic-messages");
+    CHECK(config::ProviderWireName(config::Wire::Responses) == "openai-responses");
+    CHECK(config::ProviderWireName(config::Wire::ChatCompletions) == "openai-chat-completions");
+    CHECK(config::ProviderWireName(config::Wire::GoogleGenerateContent) == "google-generate-content");
+
+    // 认不得的值报错,错误信息把四枚规范名列全。
+    const auto bad = config::ParseProviderWire("grpc");
+    CHECK_FALSE(bad.has_value());
+    CHECK(bad.error().find("google-generate-content") != std::string::npos);
+}
+
+TEST_CASE("ParseProviderWire: 旧名(anthropic/responses/chat_completions/chat)永久当别名认") {
+    CHECK(*config::ParseProviderWire("anthropic") == config::Wire::Anthropic);
+    CHECK(*config::ParseProviderWire("responses") == config::Wire::Responses);
     CHECK(*config::ParseProviderWire("chat_completions") == config::Wire::ChatCompletions);
     CHECK(*config::ParseProviderWire("chat") == config::Wire::ChatCompletions);
-    CHECK(config::ProviderWireName(config::Wire::ChatCompletions) == "chat_completions");
+}
+
+TEST_CASE("wire 更名迁移: 旧名配置读入→保存→再读,文件里已升成新规范名") {
+    TempCwdDir cwd;
+    const std::filesystem::path path = std::filesystem::path(cwd.Path()) / ".lubancode" / "config.json";
+    // 一份旧写法的配置:四家 wire 三旧一新,加载与保存链路都要各归各位。
+    cwd.WriteFile(".lubancode/config.json", R"({"providers":[)"
+                                             R"({"name":"legacy-chat","base_url":"https://a.test","wire":"chat_completions"},)"
+                                             R"({"name":"legacy-alias","base_url":"https://a2.test","wire":"chat"},)"
+                                             R"({"name":"legacy-responses","base_url":"https://b.test","wire":"responses"},)"
+                                             R"({"name":"legacy-anthropic","base_url":"https://c.test","wire":"anthropic"},)"
+                                             R"({"name":"fresh-gemini","base_url":"https://d.test","wire":"google-generate-content"}]})");
+
+    // 1) 加载:旧名/别名/新名全部解析成同一批枚举,语义不变。
+    const auto loaded = config::ParseProvidersConfig(
+        nlohmann::json::parse(cwd.ReadFile(".lubancode/config.json"))["providers"], path.string());
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->size() == 5);
+    CHECK((*loaded)[0].wire == config::Wire::ChatCompletions);
+    CHECK((*loaded)[1].wire == config::Wire::ChatCompletions);
+    CHECK((*loaded)[2].wire == config::Wire::Responses);
+    CHECK((*loaded)[3].wire == config::Wire::Anthropic);
+    CHECK((*loaded)[4].wire == config::Wire::GoogleGenerateContent);
+
+    // 2) 保存(回写走 ProvidersToJson,wire 一律 ProviderWireName):文件里
+    //    的旧名就地升成新名,迁移静默完成。
+    REQUIRE(config::UpdateProvidersInConfigFile(path.string(), *loaded).has_value());
+    const nlohmann::json written = nlohmann::json::parse(cwd.ReadFile(".lubancode/config.json"));
+    CHECK(written["providers"][0]["wire"] == "openai-chat-completions");
+    CHECK(written["providers"][1]["wire"] == "openai-chat-completions");
+    CHECK(written["providers"][2]["wire"] == "openai-responses");
+    CHECK(written["providers"][3]["wire"] == "anthropic-messages");
+    CHECK(written["providers"][4]["wire"] == "google-generate-content");
+
+    // 3) 再读:新名解析回同一批枚举,来回一个来回语义没漂。
+    const auto reloaded = config::ParseProvidersConfig(written["providers"], path.string());
+    REQUIRE(reloaded.has_value());
+    REQUIRE(reloaded->size() == loaded->size());
+    for (std::size_t i = 0; i < loaded->size(); ++i) {
+        CHECK((*reloaded)[i].name == (*loaded)[i].name);
+        CHECK((*reloaded)[i].wire == (*loaded)[i].wire);
+    }
+}
+
+TEST_CASE("wire 更名迁移: 顶层单 provider 旧写法经 MergeConfig 归一,落盘路径只认规范名") {
+    config::FileConfig file;
+    file.source_path = "/tmp/config.json";
+    file.wire = "chat_completions";
+    file.base_url = "https://a.test";
+    file.api_key = "sk-x";
+    file.model = "m";
+
+    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE(merged.has_value());
+    CHECK(merged->config.wire == config::Wire::ChatCompletions);
+    // SaveConfigFile 的写盘值出自 ProviderWireName(枚举唯一出口),顶层
+    // 旧写法同样在第一次保存时就地升名。
+    CHECK(config::ProviderWireName(merged->config.wire) == "openai-chat-completions");
 }
 
 TEST_CASE("ParseFileConfigJson: providers 坏地址、坏协议与重名都拦下") {

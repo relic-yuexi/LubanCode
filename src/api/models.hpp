@@ -3,10 +3,14 @@
 // 是配置阶段(初次配置向导、/model 命令)用得上的另一件事,没必要塞进
 // send_stream 那套接口里搅在一起。
 //
-// Anthropic 与 OpenAI 兼容 wire 的端点、响应体格式不一样:
+// 各家 wire 的端点、响应体格式不一样:
 //   - anthropic wire:GET {base_url}/v1/models,响应 {"data":[{"id","display_name",...}]}
 //   - responses/chat_completions wire:GET {base_url}/models,响应 {"object":"list","data":[{"id",...}]}
-// JSON 解析拆成两个纯函数(ParseAnthropicModelsResponse / ParseResponsesModelsResponse),
+//   - google-generate-content wire:GET {base_url}/v1beta/models,响应
+//     {"models":[{"name":"models/gemini-...","supportedGenerationMethods":[...]}]},
+//     只留支持 generateContent 的条目,name 去掉 "models/" 前缀当 id
+// JSON 解析拆成三个纯函数(ParseAnthropicModelsResponse /
+// ParseResponsesModelsResponse / ParseGeminiModelsResponse),
 // 不碰网络,好单测;ListModels 才是真正发 HTTP GET 的地方。
 
 #pragma once
@@ -38,22 +42,32 @@ std::expected<std::vector<ModelInfo>, std::string> ParseAnthropicModelsResponse(
 // id 当 display_name。
 std::expected<std::vector<ModelInfo>, std::string> ParseResponsesModelsResponse(const std::string& json_text);
 
+// 纯函数:解析 google-generate-content wire 的 GET /v1beta/models 响应体
+// ({"models":[{"name":"models/gemini-...","displayName":...,
+// "supportedGenerationMethods":["generateContent",...]}]})。name 去 "models/"
+// 前缀当 id,displayName 缺省用 name 兜底;supportedGenerationMethods 不含
+// "generateContent" 的条目(embedding、aqa 这类)整个跳过——列出来也调不动。
+std::expected<std::vector<ModelInfo>, std::string> ParseGeminiModelsResponse(const std::string& json_text);
+
 // 纯函数(向导重排单):算"探测模型列表要打的完整 URL"。anthropic wire 补
-// /v1/models,responses/chat_completions 补 /models;anthropic 且 base_url
-// 已带 /v1 结尾时不重复再补一份(否则会拼出 /v1/v1/models)。向导界面展示
-// 的探测地址与 ListModels 实际请求的地址同出这一份,不许两处各算各的。
+// /v1/models,responses/chat_completions 补 /models,google-generate-content
+// 补 /v1beta/models;anthropic 且 base_url 已带 /v1 结尾、gemini 且已带
+// /v1beta 结尾时不重复再补一份(否则会拼出 /v1/v1/models 这类双节地址)。
+// 向导界面展示的探测地址与 ListModels 实际请求的地址同出这一份,不许两处
+// 各算各的。
 std::string ModelsUrl(config::Wire wire, const std::string& base_url);
 
-// 纯函数:ListModels 的请求头。api_key 非空给 Authorization: Bearer;为空
-// (鉴权三态 none/缺 env)彻底不带,不发空 Bearer。extra_headers 空值删头、
-// 非空覆盖。header 单测钉在这(三套正式 client 的同款规矩在
-// api::RequestBaseHeaders)。
+// 纯函数:ListModels 的请求头。gemini wire 走 x-goog-api-key(为空彻底不
+// 带),其余 wire 走 Authorization: Bearer;api_key 为空(鉴权三态 none/
+// 缺 env)都彻底不带,不发空头。extra_headers 空值删头、非空覆盖。header
+// 单测钉在这(gemini client 的同款规矩在 api/gemini/client.cpp 的
+// GeminiBaseHeaders,OpenAI 系三件在 api::RequestBaseHeaders)。
 std::map<std::string, std::string> ModelsRequestHeaders(
-    const std::string& api_key, const std::map<std::string, std::string>& extra_headers);
+    config::Wire wire, const std::string& api_key,
+    const std::map<std::string, std::string>& extra_headers);
 
-// 真正发请求:按 wire 挑端点和解析函数(地址统一出自 ModelsUrl),GET
-// 请求带 `Authorization: Bearer {api_key}`;api_key 为空(鉴权三态的
-// none/缺 env)时彻底不带这个头,不发空 Bearer。网络错、HTTP 非 2xx、
+// 真正发请求:按 wire 挑端点、请求头和解析函数(地址统一出自 ModelsUrl,
+// 头统一出自 ModelsRequestHeaders),网络错、HTTP 非 2xx、
 // 响应体解析失败,统一走 Error 返回(跟 Backend::send_stream 用同一套
 // Error 类型)。
 // M11(网络超时):这是个非流式请求(响应体就是一个模型列表,不会很大),

@@ -205,12 +205,16 @@ std::string AssembleSystemPrompt(const PromptOptions& options) {
         append(ModuleByPath(options.prompts_dir, "features/lsp.md"));
     }
 
-    // 平台段按 wire 注一个;认不出的 wire 不注,不瞎猜。
-    if (options.wire == "anthropic") {
+    // 平台段按 wire 注一个;认不出的 wire 不注,不瞎猜。wire 名以
+    // ProviderWireName 的规范名(wire 更名单,2026-08)为准,旧名一并认——
+    // 这里吃的是字符串,调用方(喂 ProviderWireName 的那三处)与规范名
+    // 之间的口径差不许把平台段悄悄漏掉。
+    if (options.wire == "anthropic-messages" || options.wire == "anthropic") {
         append(ModuleByPath(options.prompts_dir, "platforms/anthropic.md"));
-    } else if (options.wire == "responses") {
+    } else if (options.wire == "openai-responses" || options.wire == "responses") {
         append(ModuleByPath(options.prompts_dir, "platforms/responses.md"));
-    } else if (options.wire == "chat_completions") {
+    } else if (options.wire == "openai-chat-completions" || options.wire == "chat_completions" ||
+               options.wire == "chat") {
         append(ModuleByPath(options.prompts_dir, "platforms/chat_completions.md"));
     }
 
