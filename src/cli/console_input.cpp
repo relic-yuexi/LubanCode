@@ -1489,8 +1489,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         redraw_with_panel(editor.CurrentRenderState(), panel_entries());
     };
 
-    // resize 探测:宽高一变就走整屏重建(下一拍内完成),不能等指纹——
+    // resize 探测:宽变了走整屏重建(下一拍内完成),不能等指纹——
     // 尺寸不在指纹里,而 conhost 重排过的旧行靠增量 diff 擦不净。
+    // 高变了只重画底栏,不清历史——拉高窗口时保留滚动缓冲区的对话记录。
     int last_screen_width = -1;
     int last_screen_height = -1;
 
@@ -1519,9 +1520,18 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         if (!platform::WaitForKeyEvent(100)) {
             if (const std::optional<platform::ScreenInfo> size_info = platform::GetScreenInfo();
                 size_info.has_value()) {
-                if (last_screen_width != -1 &&
-                    (size_info->width != last_screen_width || size_info->height != last_screen_height)) {
-                    rebuild_screen();
+                if (last_screen_width != -1) {
+                    const bool width_changed = size_info->width != last_screen_width;
+                    const bool height_changed = size_info->height != last_screen_height;
+                    if (width_changed) {
+                        // 宽度变了:conhost 会重排旧行,必须整屏重建
+                        rebuild_screen();
+                    } else if (height_changed) {
+                        // 只是高度变了:重画当前输入框与底栏,不清历史滚动记录
+                        previous_frame.reset();
+                        prev_frame_origin = -1;
+                        redraw_with_panel(editor.CurrentRenderState(), panel_entries());
+                    }
                 }
                 last_screen_width = size_info->width;
                 last_screen_height = size_info->height;
