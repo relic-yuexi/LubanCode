@@ -707,20 +707,13 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         }
     };
 
-    // 回合视觉收束:批次边界接线。同一条 assistant message 吐多枚 tool_use
-    // 时,batch.started 先到——把整批条目都立成 Pending(绿点变黄灯"排队
-    // 中"),工具一枚枚真开跑时逐枚点亮 Running。单子"工具批次"节:用户
-    // 一眼能看出"模型这拍打算跑三件",也能看出卡在哪一件。单枚批次画面
-    // 不变(登记随即被 start 覆盖)。
-    callbacks.on_tool_batch_started = [&display, view_collector](int step_index, int batch_index,
-                                                 const std::vector<std::string>& ordered_tool_use_ids) {
+    // 批次边界照常进结构化账,供 app-server/Web 等前端自行编排。终端不抢画
+    // 无名 Pending 空壳;等 tool_start 带来名字和参数后再落条目。
+    callbacks.on_tool_batch_started = [view_collector](int step_index, int batch_index,
+                                                        const std::vector<std::string>& ordered_tool_use_ids) {
         if (view_collector != nullptr) {
             view_collector->OnToolBatchStarted(step_index, batch_index, ordered_tool_use_ids);
         }
-        if (ordered_tool_use_ids.size() <= 1) {
-            return;  // 一枚不算批:结构留在账里,画面只靠连续缩进与间距成块
-        }
-        display.OnBatchAnnounced(ordered_tool_use_ids);
     };
 
     callbacks.on_tool_batch_finished = [&display, view_collector](int batch_index, bool interrupted) {
@@ -728,7 +721,7 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
             view_collector->OnToolBatchFinished(batch_index, interrupted);
         }
         if (interrupted) {
-            display.OnBatchSkipped();  // 还 Pending 的按 Skipped 定格,屏上不缺枚
+            display.OnBatchSkipped();  // 已露脸却尚未执行的确认条目按 Skipped 收口
         }
     };
 

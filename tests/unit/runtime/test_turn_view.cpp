@@ -531,34 +531,23 @@ TEST_CASE("多行 run_command 标题:只取首个非空逻辑行,末尾 +N lines
     CHECK(BuildToolTitle("run_command", {{"command", semicolons}}).find("echo \"a;b;c\"") != std::string::npos);
 }
 
-TEST_CASE("ToolDisplay 批次预告:三枚先登记 Pending,start 点亮、终态各归各") {
+TEST_CASE("ToolDisplay 工具未 start 不立无名 Pending,start 后才落具名条目") {
     std::vector<lubancode::cli::TranscriptItem> transcript;
     std::atomic<bool> cancel{false};
     lubancode::cli::Theme theme;
     lubancode::cli::ToolDisplay display(transcript, theme, /*console=*/false, nullptr, &cancel);
 
-    display.OnBatchAnnounced({"b1", "b2", "b3"});
-    REQUIRE(transcript.size() == 3);
-    CHECK(transcript[0].status == lubancode::cli::TranscriptStatus::Pending);
-    CHECK(transcript[1].status == lubancode::cli::TranscriptStatus::Pending);
-    CHECK(transcript[2].status == lubancode::cli::TranscriptStatus::Pending);
+    display.OnBatchSkipped();
+    CHECK(transcript.empty());
 
-    // start 到了:点亮预告的那条,不另起一枚。
     display.OnToolStart("b2", "read_file", nlohmann::json{{"path", "x"}});
-    REQUIRE(transcript.size() == 3);
-    CHECK(transcript[0].status == lubancode::cli::TranscriptStatus::Pending);
-    CHECK(transcript[1].status == lubancode::cli::TranscriptStatus::Running);
-    CHECK(transcript[1].tool_name == "read_file");
-    CHECK(transcript[1].title.find("read_file") != std::string::npos);
+    REQUIRE(transcript.size() == 1);
+    CHECK(transcript[0].status == lubancode::cli::TranscriptStatus::Running);
+    CHECK(transcript[0].tool_name == "read_file");
+    CHECK(transcript[0].title.find("read_file") != std::string::npos);
 
     display.OnToolDone("b2", "read_file", lubancode::tools::Tool::Result{"ok", false});
-    CHECK(transcript[1].status == lubancode::cli::TranscriptStatus::Ok);
-
-    // 未 start 的那两枚按 Skipped 定格(ESC 路)。
-    display.OnBatchSkipped();
-    CHECK(transcript[0].status == lubancode::cli::TranscriptStatus::Cancelled);
-    CHECK(transcript[2].status == lubancode::cli::TranscriptStatus::Cancelled);
-    CHECK(transcript[1].status == lubancode::cli::TranscriptStatus::Ok);  // 已终态的不动
+    CHECK(transcript[0].status == lubancode::cli::TranscriptStatus::Ok);
 }
 
 // ---------------------------------------------------------------------------
@@ -899,7 +888,7 @@ TEST_CASE("RunTurn 集成:错误轮落 Failed footer,下一只 composer 不粘�
     CHECK(err.find("脚本用完") != std::string::npos);  // 错误如实上屏
 }
 
-TEST_CASE("RunTurn 集成:同批三枚工具,transcript 里 Pending 先立、终态串行推进") {
+TEST_CASE("RunTurn 集成:同批三枚工具,start 后才进 transcript、终态串行推进") {
     class ProbeTool : public lubancode::tools::Tool {
     public:
         std::string name() const override { return "probe"; }
@@ -933,8 +922,7 @@ TEST_CASE("RunTurn 集成:同批三枚工具,transcript 里 Pending 先立、终
     std::cout.rdbuf(old_buf);
 
     REQUIRE(result.status == 0);
-    // 三枚条目都入台账,终态 Ok(批次预告的 Pending 壳被 start 点亮、done
-    // 收终态,不留"排队中"骗人)。
+    // 工具 start 后才入终端账,三枚终态皆为 Ok,不曾留下无名 Pending 壳。
     int probe_items = 0;
     for (const auto& item : transcript) {
         if (item.tool_name == "probe") {
