@@ -14,6 +14,8 @@
 #include "cli/i18n.hpp"
 #include "cli/transcript.hpp"
 
+#include <string>
+
 namespace lubancode::cli {
 
 namespace {
@@ -137,6 +139,46 @@ std::vector<std::string> RenderTurnView(const lubancode::runtime::TurnView& view
         if (item.kind == lubancode::runtime::TurnItemViewKind::Text) {
             continue;  // 正文走 markdown 正文流(实时 painter);重放另拼
         }
+        // 用户条目:背景块(与 live 提交、resume 重放同一颗 formatter),不再
+        // 折成工具条目样。块前按间距表垫一口气,块后再垫一口(UserPrompt ->
+        // 任意 = 1);turn_divider 开着时,用户块之前再画一道满宽横线(轮界,
+        // 克制样式:stats 淡色,与 PrintDivider 同一根线)。
+        if (item.kind == lubancode::runtime::TurnItemViewKind::User) {
+            const std::string block =
+                lubancode::cli::FormatUserPromptBlock(item.result_text, theme, width);
+            if (!block.empty()) {
+                // 轮界横线:caller(多轮重放循环)从第二轮起置
+                // leading_turn_divider,这里只照办——"上面有没有前一轮"是
+                // 调用方的账,本函数的局部状态带不过轮。
+                if (options.leading_turn_divider) {
+                    for (int g = 0; g < lubancode::cli::GapBetween(lubancode::cli::BlockRole::TurnFooter,
+                                                                   lubancode::cli::BlockRole::UserPrompt);
+                         ++g) {
+                        lines.push_back(std::string());
+                    }
+                    lines.push_back(theme.stats +
+                                    lubancode::cli::BuildDividerLine(width, options.plain, width) +
+                                    theme.reset);
+                }
+                std::size_t pos = 0;
+                while (pos < block.size()) {
+                    const std::size_t nl = block.find('\n', pos);
+                    const std::size_t end = nl == std::string::npos ? block.size() : nl;
+                    lines.push_back(block.substr(pos, end - pos));
+                    if (nl == std::string::npos) {
+                        break;
+                    }
+                    pos = nl + 1;
+                }
+                for (int g = 0; g < lubancode::cli::GapBetween(lubancode::cli::BlockRole::UserPrompt,
+                                                               lubancode::cli::BlockRole::Thinking);
+                     ++g) {
+                    lines.push_back(std::string());
+                }
+                first_printed = true;
+            }
+            continue;
+        }
         // step 换拍:垫轻间隔(首条之前不垫)。
         if (first_printed && !item.step_id.empty() && item.step_id != previous_step) {
             lines.push_back(std::string());
@@ -161,7 +203,8 @@ std::vector<std::string> RenderTurnView(const lubancode::runtime::TurnView& view
     (void)ordered;
 
     // turn footer:恰一枚。终态词按 view.status 挑;墙钟走
-    // metrics.wall_duration_ms(与 Working 活动条同一只钟的账)。
+    // metrics.wall_duration_ms(与 Working 活动条同一只钟的账)。footer 与
+    // 末枚条目之间按间距表垫一口气(任意正文 -> TurnFooter = 1)。
     if (options.include_footer && view.finished) {
         using lubancode::runtime::TurnItemViewState;
         lubancode::cli::TurnFooterTone tone = lubancode::cli::TurnFooterTone::Worked;
@@ -169,6 +212,13 @@ std::vector<std::string> RenderTurnView(const lubancode::runtime::TurnView& view
             tone = lubancode::cli::TurnFooterTone::Stopped;
         } else if (view.status == TurnItemViewState::Failed) {
             tone = lubancode::cli::TurnFooterTone::Failed;
+        }
+        if (first_printed) {
+            for (int g = 0; g < lubancode::cli::GapBetween(lubancode::cli::BlockRole::Tool,
+                                                           lubancode::cli::BlockRole::TurnFooter);
+                 ++g) {
+                lines.push_back(std::string());
+            }
         }
         const std::string text =
             lubancode::cli::FormatTurnFooterText(view.metrics.wall_duration_ms, tone) +

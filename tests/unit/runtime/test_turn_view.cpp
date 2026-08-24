@@ -619,9 +619,12 @@ TEST_CASE("黄金画面:单轮两拍(思考 + 两工具一批 -> 换拍 -> 长�
     const std::vector<std::string> lines = lubancode::cli::RenderTurnView(view, theme, options);
     const std::string text = JoinLines(lines);
 
-    // 用户条目在头一行。
+    // 用户条目在头一行:背景块格式("> " 提示符,与 live/resume 同一颗
+    // FormatUserPromptBlock),不再是工具条目样。块后按间距表垫一口。
     REQUIRE(!lines.empty());
-    CHECK(lines.front().find("总结最近的提交") != std::string::npos);
+    CHECK(lines.front() == "> 总结最近的提交");
+    REQUIRE(lines.size() >= 2);
+    CHECK(lines[1].empty());  // UserPrompt -> 下一块 = 1 行气口
 
     // 思考条目:思考 Xs 一行。
     bool saw_thinking = false;
@@ -654,7 +657,15 @@ TEST_CASE("黄金画面:单轮两拍(思考 + 两工具一批 -> 换拍 -> 长�
         }
     }
     CHECK(gap_before_step2);
-    CHECK(text.find("────") == std::string::npos);  // step 边界不画满宽横线
+    // step 边界不画满宽横线;turn 分隔线只在多轮重放的用户块之前画,单轮
+    // (lines 起手为空)不画——本景单轮,全篇不得见独立的横线行(footer 那
+    // 行的字嵌在线里,不算独立横线,另查)。
+    CHECK(text.find("────") == std::string::npos);
+    for (const std::string& line : lines) {
+        const bool pure_rule =
+            !line.empty() && line.find_first_not_of('-') == std::string::npos;
+        CHECK_FALSE(pure_rule);
+    }
 
     // 长命令:+2 lines 记号,首行不横铺。
     CHECK(text.find("$env:http_proxy='http://127.0.0.1:10808' +2 lines") != std::string::npos);
@@ -669,6 +680,71 @@ TEST_CASE("黄金画面:单轮两拍(思考 + 两工具一批 -> 换拍 -> 长�
     }
     CHECK(footer_count == 1);
     CHECK(text.find("Worked for 12s") != std::string::npos);
+}
+
+TEST_CASE("黄金画面:多轮重放用户块之前有 turn 分隔线,单轮不画") {
+    // 两轮:第一轮收口,第二轮紧随。多轮重放(Ctrl+L)由调用方从第二轮起
+    // 置 leading_turn_divider——"上面有没有前一轮"是 caller 的账(renderer
+    // 无跨轮记忆),renderer 只照办在用户块之前画一道克制横线。
+    lubancode::runtime::IdAuthority ids;
+    lubancode::runtime::TurnCollector first(ids, "turn-d1");
+    first.StartTurn("第一个问题", 0);
+    first.OnModelStepStarted(0);
+    first.FinishTurn(lubancode::runtime::TurnItemViewState::Succeeded, 5000, 0);
+    lubancode::runtime::TurnCollector second(ids, "turn-d2");
+    second.StartTurn("第二个问题", 6000);
+    second.OnModelStepStarted(0);
+    second.FinishTurn(lubancode::runtime::TurnItemViewState::Succeeded, 7000, 0);
+
+    lubancode::cli::Theme theme = lubancode::cli::BuiltinTheme("plain");
+    lubancode::cli::TurnRenderOptions options;
+    options.width = 80;
+    options.plain = true;
+
+    // 模拟 Ctrl+L 的多轮循环:首轮不带横线,次轮起各带一道。
+    std::vector<std::string> all;
+    bool first_turn = true;
+    for (const lubancode::runtime::TurnView* view : {&first.view(), &second.view()}) {
+        options.leading_turn_divider = !first_turn;
+        first_turn = false;
+        for (const std::string& line : lubancode::cli::RenderTurnView(*view, theme, options)) {
+            all.push_back(line);
+        }
+    }
+    // 第二轮用户块之前:footer 之后隔一口 + 一道横线(plain 用 '-')。
+    std::size_t second_user = std::string::npos;
+    int divider_seen = 0;
+    for (std::size_t i = 0; i < all.size(); ++i) {
+        if (all[i] == "> 第二个问题") {
+            second_user = i;
+            break;
+        }
+    }
+    REQUIRE(second_user != std::string::npos);
+    for (std::size_t i = 0; i < second_user; ++i) {
+        // 独立横线行:非空、只有 '-'。footer 行字嵌线里,不算。
+        if (!all[i].empty() && all[i].find_first_not_of('-') == std::string::npos) {
+            ++divider_seen;
+        }
+    }
+    CHECK(divider_seen == 1);  // 恰一道:首轮(会话开头)不画
+    // 横线紧贴用户块:横线行的下一行就是用户块(中间不再垫空行)。
+    for (std::size_t i = 1; i < second_user; ++i) {
+        if (!all[i].empty() && all[i].find_first_not_of('-') == std::string::npos) {
+            CHECK(i + 1 == second_user);
+        }
+    }
+
+    // 首轮不开 leading_turn_divider(缺省):独立横线全无(footer 行字嵌
+    // 线里,不在此列)。
+    lubancode::cli::TurnRenderOptions no_divider = options;
+    no_divider.leading_turn_divider = false;
+    const std::vector<std::string> single =
+        lubancode::cli::RenderTurnView(first.view(), theme, no_divider);
+    for (const std::string& line : single) {
+        const bool pure_rule = !line.empty() && line.find_first_not_of('-') == std::string::npos;
+        CHECK_FALSE(pure_rule);
+    }
 }
 
 TEST_CASE("黄金画面:打断轮 footer 用 Stopped after,失败轮用 Failed after") {
