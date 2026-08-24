@@ -151,7 +151,12 @@ SessionPickerPanelResult RunSessionPickerPanel(const SessionPickerFeed& feed, co
         }();
 
         const int rows_needed = static_cast<int>(frame.lines.size()) + 2;
-        const int cursor_before = info->cursor_y;
+        // 首帧从当前光标起画。后续重画须先回旧帧顶再核空间;旧代码拿
+        // “上一帧末尾”的光标作起点,每按一键便在旧帧下方再预留整屏,
+        // 终端只得滚动,旧标题遂一副副沉进回滚区。
+        if (rows_drawn > 0) {
+            platform::SetCursorPos(0, start_row);
+        }
         if (!EnsureStreamScreenRowsLocked(rows_needed)) {
             return false;
         }
@@ -159,20 +164,9 @@ SessionPickerPanelResult RunSessionPickerPanel(const SessionPickerFeed& feed, co
         if (!after.has_value()) {
             return false;
         }
-        if (rows_drawn == 0) {
-            start_row = after->cursor_y;
-        } else {
-            // 终端高度变了(resize 后缓冲滚动):按光标实际位置对齐帧顶,
-            // 不残行——与 provider_switch 同一套账。
-            const int expected_end = start_row + rows_drawn;
-            const int actual_end = after->cursor_y;
-            if (actual_end < expected_end && cursor_before < expected_end) {
-                start_row -= (expected_end - actual_end);
-                if (start_row < 0) {
-                    start_row = 0;
-                }
-            }
-        }
+        // Ensure... 若因贴底而滚了内容,会把光标拨回滚后的真实位置;
+        // 这就是新帧顶。没滚时仍是旧 start_row,自然原地覆盖。
+        start_row = after->cursor_y;
         const int rows_to_draw = static_cast<int>(frame.lines.size());
         const int clear_rows = (std::max)(rows_drawn, rows_to_draw);
         std::cout << "\x1b[?2026h\x1b[?25l";  // 单帧事务 + 藏光标,不闪屏
