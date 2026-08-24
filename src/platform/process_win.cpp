@@ -18,10 +18,43 @@
 #include <optional>
 
 #include "platform/paths.hpp"
+#include "platform/text_encoding.hpp"  // Utf8PrefixBoundary:输出帽对齐 UTF-8 边界
 
 namespace lubancode::platform {
 
 namespace {
+
+// 输出帽是字节刀,但刀口不许劈进多字节序列的腰里——中文输出恰好在
+// limit 上断成 0xE5 开头的半截汉字,这坨字节流到 nlohmann::json 序列化
+// 就是 type_error.316(0.26.41 真机崩的根因)。截断后对齐到码点边界。
+// 两条路:
+//   - output 超过帽(WithStdin 全量攒再置旗那路):Utf8PrefixBoundary
+//     正常语义,退到截断点前的整字边界。
+//   - output 恰好满帽(主路径 reader 的 take 填满即停):offset ==
+//     size 时帮手直接返回 size,得换姿势——先看整段是否合法,非法且
+//     首个坏字节落在"去掉最后一字节的安全前缀"之外(即只在尾巴上),
+//     才退到安全前缀。正文中间就有坏字节的(整段 GBK 那类)不动——
+//     清洗归调用方(run_command 的 SanitizeUtf8 那道关),这里只治
+//     "自己这刀劈出来的悬空"。
+void AlignOutputToUtf8Boundary(std::string& output, std::size_t max_output_bytes) {
+    if (output.size() > max_output_bytes) {
+        output.resize(Utf8PrefixBoundary(output, max_output_bytes));
+        return;
+    }
+    if (output.size() < 2 || output.size() != max_output_bytes) {
+        return;  // 没满帽:整段完整交付,悬空只可能来自子进程自己,不归这刀管
+    }
+    const std::size_t first_bad = FirstInvalidUtf8Offset(output);
+    if (first_bad == std::string::npos) {
+        return;  // 满帽且合法:刀口恰好落在字缝上
+    }
+    const std::size_t tail_safe = Utf8PrefixBoundary(output, output.size() - 1);
+    if (first_bad >= tail_safe) {
+        output.resize(tail_safe);  // 坏在尾巴:退掉悬空的半截字
+    }
+}
+
+}  // namespace
 
 // Replace 模式的显式环境块:"KEY=VALUE\0KEY=VALUE\0\0" 的 UTF-16 串,交给
 // CreateProcessW 的 lpEnvironment——宿主环境一概不递(plugins 单第 8 步
@@ -522,6 +555,8 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
     DWORD exit_code = 0;
     GetExitCodeProcess(pi.hProcess, &exit_code);
     result.exit_code = exit_code;
+    // 截断的刀口对齐 UTF-8 码点边界(见文件头 AlignOutputToUtf8Boundary)。
+    AlignOutputToUtf8Boundary(output, max_output_bytes);
     result.output = std::move(output);
     result.output_truncated = output_over_limit.load();
 
@@ -797,6 +832,10 @@ static ProcessResult RunProcessWithStdinImpl(const std::wstring& cmdline, const 
     DWORD exit_code = 0;
     GetExitCodeProcess(pi.hProcess, &exit_code);
     result.exit_code = exit_code;
+    // 两路各自对齐 UTF-8 边界(超限判定按两路合计,帽是合计帽:先合再对齐
+    // 会把 stderr 的刀口错落在 stdout 尾上,所以各切各的)。
+    AlignOutputToUtf8Boundary(stdout_bytes, max_output_bytes);
+    AlignOutputToUtf8Boundary(stderr_bytes, max_output_bytes);
     result.output = stdout_bytes + stderr_bytes;  // 合并账(stdout 在前,保序可用)
     result.stdout_bytes = std::move(stdout_bytes);
     result.stderr_bytes = std::move(stderr_bytes);
