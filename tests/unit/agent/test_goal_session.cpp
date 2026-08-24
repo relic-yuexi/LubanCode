@@ -13,6 +13,7 @@
 
 #include "agent/goal_session.hpp"
 #include "agent/session_store.hpp"
+#include "platform/text_encoding.hpp"  // IsValidUtf8:坏串落档行的出口校验
 
 using lubancode::agent::GoalEvidenceRecord;
 using lubancode::agent::GoalSessionEvent;
@@ -95,6 +96,49 @@ TEST_CASE("goal 事件行:iteration 类带 iteration_id,五种 type 全认") {
         CHECK(parsed->type == type);
         CHECK(parsed->iteration_id == "goal-1/iter-2");
     }
+}
+
+TEST_CASE("goal 事件行:payload 夹坏 UTF-8 不抛 316,清洗后落档行仍可解析") {
+    // 0.26.41 真机崩的兜底面:工具输出被字节帽劈进字腰(0xE5 开头的半截
+    // 汉字)流进 payload,裸 dump 当场 type_error.316 穿透顶层。落档行
+    // 走 DumpJsonSanitized:不抛、出口合法、重新 parse 收得回。
+    GoalSessionEvent e = MakeCreated();
+    // "迁"(U+8FC1 = E8 BF 81)劈掉后两个续字节只留首字节 0xE8;note 里
+    // 再单放一枚汉字首字节 0xE5(真机崩报的就是它)。std::string(...) 拼
+    // 装避开字符串字面量里悬空续字节跟后文字节粘连的歧义。
+    std::string objective = "迁移";
+    objective.push_back('\xE8');
+    objective += "认证层";
+    e.payload["objective"] = objective;
+    e.payload["note"] = std::string("半截字:") + std::string(1, '\xE5');
+
+    std::string line;
+    REQUIRE_NOTHROW(line = SerializeGoalEvent(e, "ts"));
+    CHECK(lubancode::platform::IsValidUtf8(line));
+    const auto parsed = ParseGoalEvent(line);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->goal_id == "goal-3");
+    CHECK(lubancode::platform::IsValidUtf8(parsed->payload.at("objective").get<std::string>()));
+    // 坏字节如实替换成 U+FFFD,好字节不动(合法片段原样保留)。
+    CHECK(parsed->payload.at("objective").get<std::string>().find("认证层") != std::string::npos);
+}
+
+TEST_CASE("goal 证据行:facts 夹坏 UTF-8 同款不抛,清洗后仍可解析") {
+    GoalEvidenceRecord e;
+    e.id = "ev-bad";
+    e.kind = "command_exit";
+    e.goal_id = "goal-3";
+    e.producer = "run_command";
+    e.facts["head"] = std::string("输出前段:") + std::string(1, '\xE5');  // 汉字首字节悬空
+    e.content_sha256 = "sha-x";
+
+    std::string line;
+    REQUIRE_NOTHROW(line = SerializeGoalEvidence(e, "ts"));
+    CHECK(lubancode::platform::IsValidUtf8(line));
+    const auto parsed = ParseGoalEvidence(line);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->id == "ev-bad");
+    CHECK(lubancode::platform::IsValidUtf8(parsed->facts.at("head").get<std::string>()));
 }
 
 TEST_CASE("goal 事件行:坏行跳过,不废整场") {

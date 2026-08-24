@@ -2,6 +2,8 @@
 
 #include "agent/goal_session.hpp"
 
+#include "platform/json_safe.hpp"  // DumpJsonSanitized:落档行的编码窄边界
+
 namespace lubancode::agent {
 
 namespace {
@@ -35,7 +37,10 @@ std::string SerializeGoalEvent(const GoalSessionEvent& event, const std::string&
     j["payload"] = event.payload;
     j["ts"] = ts;
     if (event.timestamp_ms != 0) j["timestamp_ms"] = event.timestamp_ms;
-    return j.dump();
+    // 落档行(session JSONL,要被 /resume 重新读):坏串窄边界,同
+    // SerializeSessionMessage 的成例——payload 里混进坏 UTF-8(工具输出
+    // 截断劈进字腰那类)不许抛 316 穿透顶层,宁可替换字符洗过。
+    return platform::DumpJsonSanitized(j);
 }
 
 std::optional<GoalSessionEvent> ParseGoalEvent(const std::string& line) {
@@ -89,7 +94,8 @@ std::string SerializeGoalEvidence(const GoalEvidenceRecord& evidence, const std:
     j["fresh"] = evidence.fresh;
     j["truncated"] = evidence.truncated;
     j["ts"] = ts;
-    return j.dump();
+    // 证据行同样是落档行:facts 从工具输出采来,坏串窄边界同上。
+    return platform::DumpJsonSanitized(j);
 }
 
 std::optional<GoalEvidenceRecord> ParseGoalEvidence(const std::string& line) {

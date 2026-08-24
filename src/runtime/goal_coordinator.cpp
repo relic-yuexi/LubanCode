@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "hooks/hash.hpp"
+#include "platform/json_safe.hpp"  // DumpJsonSanitized:goal 事件落档的编码窄边界
 
 namespace lubancode::runtime::goal {
 
@@ -422,7 +423,9 @@ GoalCommandResult GoalCoordinator::SubmitContract(const GoalContract& contract, 
     }
 
     // 写盘栅栏 2:contract_ready 成功,才开首轮有副作用工具。
-    const std::string contract_json = contract.to_json().dump();
+    // contract 的 objective/描述是用户键入与模型产出,坏串窄边界:dump
+    // 不许抛 316(裸 dump 遇坏串直接穿透,顶层就是"未预料的异常")。
+    const std::string contract_json = platform::DumpJsonSanitized(contract.to_json());
     GoalCoordinatorEvent ev;
     ev.event = "contract_ready";
     ev.goal_id = task_->id;
@@ -613,7 +616,7 @@ GoalCommandResult GoalCoordinator::CheckpointReached(const GoalCheckpoint& check
     ev.iteration_id = ready_->id;
     ev.revision = ready_->goal_revision;
     ev.payload["checkpoint"] = checkpoint.to_json();
-    ev.payload["sha256"] = hooks::Sha256Hex(checkpoint.to_json().dump());
+    ev.payload["sha256"] = hooks::Sha256Hex(platform::DumpJsonSanitized(checkpoint.to_json()));
     ev.timestamp_ms = now_ms;
     if (!Emit(ev)) {
         FailClosed(now_ms, "checkpoint 写盘失败");
@@ -746,7 +749,7 @@ GoalCommandResult GoalCoordinator::ApplyEvaluation(const GoalEvaluation& evaluat
     ev.iteration_id = ready_->id;
     ev.revision = ready_->goal_revision;
     ev.payload["evaluation"] = final_eval.to_json();
-    ev.payload["evidence_sha256"] = hooks::Sha256Hex(final_eval.to_json().dump());
+    ev.payload["evidence_sha256"] = hooks::Sha256Hex(platform::DumpJsonSanitized(final_eval.to_json()));
     ev.timestamp_ms = now_ms;
     if (!Emit(ev)) {
         FailClosed(now_ms, "evaluation 写盘失败");

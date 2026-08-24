@@ -158,6 +158,52 @@ TEST_CASE("RunProcess(POSIX): 输出恰好等于上限不算超限;多一字节�
 
 #endif
 
+TEST_CASE("RunProcess: 输出帽的刀口对齐 UTF-8 边界,中文不劈半个字(316 根因)") {
+    using lubancode::platform::RunShellCommand;
+    // 修前:字节刀把三字节汉字拦腰斩断,0xE5 开头的半截汉字流进
+    // nlohmann::json 序列化就是 type_error.316(0.26.41 真机崩)。
+    // 造一段中文字流,让帽恰好压在某个汉字的腰上:截断后必须仍是合法
+    // UTF-8 且长度 <= 上限。
+    // 409 个"汉"字 = 1227 字节,帽压在 1024:第 342 个汉字被劈(1024 =
+    // 341*3 + 1,第 342 字只吃到首字节 0xE5)。
+    {
+        const auto result = RunShellCommand("i=0; while [ $i -lt 409 ]; do printf '汉'; i=$((i+1)); done",
+                                            30000, {}, 1024);
+        REQUIRE_FALSE(result.spawn_failed);
+        CHECK(result.output_truncated);
+        CHECK(result.output.size() <= 1024);
+        CHECK(result.output.size() % 3 == 0);  // 整字收口,没有半截尾巴
+        CHECK(lubancode::platform::IsValidUtf8(result.output));
+        // 刀口还给了上限,但不多给:1024 压在字腰上,退到 1023(341 个整字)。
+        CHECK(result.output.size() == 1023);
+    }
+    // 帽恰好落在字缝上(1023 = 341*3):一字节不退,照旧满帽。
+    {
+        const auto result = RunShellCommand("i=0; while [ $i -lt 409 ]; do printf '汉'; i=$((i+1)); done",
+                                            30000, {}, 1023);
+        REQUIRE_FALSE(result.spawn_failed);
+        CHECK(result.output_truncated);
+        CHECK(result.output.size() == 1023);
+        CHECK(lubancode::platform::IsValidUtf8(result.output));
+    }
+    // WithStdin 路径(hooks v2 / RunProcessWithStdin)同款刀口:那一路是全量
+    // 攒、超限置旗后再对齐,stdout 与 stderr 各自 <= 帽且合法。
+    {
+        const auto result = lubancode::platform::RunShellCommandWithStdin(
+            "i=0; while [ $i -lt 409 ]; do printf '汉'; i=$((i+1)); done; printf '汉' >&2", "",
+            30000, {}, 1024);
+        REQUIRE_FALSE(result.spawn_failed);
+        CHECK(result.output_truncated);
+        CHECK(result.stdout_bytes.size() <= 1024);
+        CHECK(result.stderr_bytes.size() <= 1024);
+        CHECK(lubancode::platform::IsValidUtf8(result.stdout_bytes));
+        CHECK(lubancode::platform::IsValidUtf8(result.stderr_bytes));
+        // 汉字三字节整除:整字收口,没有半截尾巴。
+        CHECK(result.stdout_bytes.size() % 3 == 0);
+        CHECK(result.stderr_bytes.size() % 3 == 0);
+    }
+}
+
 TEST_CASE("run_command: command 含 NUL 被拒,不是截断后照跑") {
     RunCommandTool tool;
     nlohmann::json input;
