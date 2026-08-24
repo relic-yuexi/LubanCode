@@ -14,6 +14,7 @@
 
 #include "api/models.hpp"
 #include "cli/i18n.hpp"
+#include "cli/line_editor.hpp"
 #include "config/config.hpp"
 #include "platform/paths.hpp"
 
@@ -27,6 +28,32 @@ namespace {
 
 std::string TrimCopy(const std::string& s) {
     return WizardTrim(s);
+}
+
+std::optional<int> ParseConfirmItemNumber(const std::string& text) {
+    const std::u32string chars = Utf8ToUtf32(text);
+    int number = 0;
+    bool saw_digit = false;
+    for (char32_t cp : chars) {
+        // 中文输入法可能送全角数字与全角空格；确认页照数字本意收下。
+        if (cp <= U' ' || cp == U'\u00a0' || cp == U'\u3000') {
+            continue;
+        }
+        int digit = -1;
+        if (cp >= U'0' && cp <= U'9') {
+            digit = static_cast<int>(cp - U'0');
+        } else if (cp >= U'\uff10' && cp <= U'\uff19') {
+            digit = static_cast<int>(cp - U'\uff10');
+        } else {
+            return std::nullopt;
+        }
+        saw_digit = true;
+        number = number * 10 + digit;
+        if (number > 99) {
+            return std::nullopt;
+        }
+    }
+    return saw_digit ? std::optional<int>(number) : std::nullopt;
 }
 
 // 探测地址展示行:模型列表将从 {url} 读取。
@@ -857,22 +884,13 @@ StepResult RunConfirmStep(WizardIO& io, ProviderWizardState& state) {
             return NoSave();
         }
         // 数字 = 跳回对应单项改,改完回汇总,后续无关步骤不重走。
-        bool is_number = !event.text.empty() &&
-                         event.text.find_first_not_of("0123456789") == std::string::npos;
-        if (!is_number) {
+        // 中文输入法送来的全角 １..７ 也认，免得看着是数字却报坏输入。
+        const std::optional<int> item_number = ParseConfirmItemNumber(event.text);
+        if (!item_number.has_value() || *item_number < 1 || *item_number > 7) {
             state.last_error = tr("provider_wizard.confirm.bad_number");
             continue;
         }
-        int n = 0;
-        try {
-            n = std::stoi(event.text);
-        } catch (...) {
-            n = 0;
-        }
-        if (n < 1 || n > 7) {
-            state.last_error = tr("provider_wizard.confirm.bad_number");
-            continue;
-        }
+        const int n = *item_number;
         state.last_error.clear();
         if (state.edit_mode && n == 1) {
             // 名字锁死:第 1 项不给跳,明说不支持改名(规格:改名=删旧建新,

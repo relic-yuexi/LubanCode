@@ -7,6 +7,7 @@ using lubancode::cli::ChoiceMenuCore;
 using lubancode::cli::ChoiceMenuItem;
 using lubancode::cli::ChoiceMenuOptions;
 using lubancode::cli::ChoiceMenuSearchCore;
+using lubancode::cli::ChoiceMenuSearchWindowRows;
 using lubancode::cli::KeyEvent;
 using lubancode::cli::KeyKind;
 
@@ -96,10 +97,18 @@ TEST_CASE("choice menu: 多选的普通勾选与末项自填可一并提交") {
 // 老测试原样全过就是"行为不变"的证明)。
 // ---------------------------------------------------------------------------
 
-TEST_CASE("choice menu options: 搜索阈值默认 12,默认不开 always_search") {
+TEST_CASE("choice menu options: 搜索阈值默认 12,默认不开 always_search 且不限制窗口") {
     ChoiceMenuOptions options;
     CHECK(options.search_threshold == 12);
     CHECK_FALSE(options.always_search);
+    CHECK_FALSE(options.max_visible_rows.has_value());
+}
+
+TEST_CASE("choice menu search: 向导上限钳住选项窗并给搜索栏与 hint 留位") {
+    CHECK(ChoiceMenuSearchWindowRows(27, std::nullopt) == 25);
+    CHECK(ChoiceMenuSearchWindowRows(27, 10) == 10);
+    CHECK(ChoiceMenuSearchWindowRows(8, 10) == 6);
+    CHECK(ChoiceMenuSearchWindowRows(2, 0) == 1);
 }
 
 TEST_CASE("choice menu search: 键入过滤、退格恢复、Enter 返回原索引") {
@@ -223,6 +232,20 @@ TEST_CASE("choice menu search: 大小写不敏感,description 也参与匹配") 
     menu.HandleKey(KeyEvent::Char(U'L'));
     CHECK(menu.search() == "CL");
     CHECK(menu.view() == std::vector<std::size_t>{1});  // 命中 description "claude"
+}
+
+TEST_CASE("choice menu search: OpenRouter 全词留下两种 wire") {
+    std::vector<ChoiceMenuItem> items{{"OpenRouter", "OpenAI-compatible Chat API"},
+                                      {"OpenRouter (Anthropic)", "Anthropic Messages API"},
+                                      {"Perplexity", "OpenAI-compatible Chat API"}};
+    ChoiceMenuSearchCore menu(items, false);
+    for (const char ch : std::string("openrouter")) {
+        menu.HandleKey(KeyEvent::Char(static_cast<char32_t>(ch)));
+    }
+
+    CHECK(menu.search() == "openrouter");
+    CHECK(menu.view() == std::vector<std::size_t>{0, 1});
+    CHECK(menu.view_cursor() == 0);
 }
 
 TEST_CASE("choice menu search: 搜空 Enter 不提交,Esc 取消") {

@@ -1067,6 +1067,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     int mention_selected = 0;
     bool mention_dismissed = false;
     const auto queue_rows_now = [&]() -> std::vector<std::string> {
+        if (!composer) {
+            return {};  // 向导/确认提示是单行输入，不得把主 composer 的待发区带进面板
+        }
         const auto snapshot = steering.Snapshot();
         if (snapshot.empty()) {
             return {};
@@ -1132,6 +1135,14 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     };
 
     const auto apply_search_hints = [&](RenderState& state) {
+        if (!composer) {
+            // `/provider add` 等向导也复用 ReadLine。主 composer 的键位速览、
+            // slash 候选与临时菜单若漏进来，会占掉 WizardPanel 的输入余量，
+            // 下一帧便可能按错锚点。单行读取只画 prompt 与正文。
+            state.hint_lines.clear();
+            state.selected_index = -1;
+            return;
+        }
         if (history_search.active()) {
             const std::string query = Utf32ToUtf8(state.line);
             if (query != history_search_last_query) {
@@ -2348,11 +2359,19 @@ std::string MenuToLowerAscii(std::string text) {
     return text;
 }
 
-// 能翻页时的 hint(调用方传的 hint 描述不了翻页):走 i18n 得动 i18n.cpp
-// 的语言档,本单不碰那个文件,先与调用方 hint 同一挂法直书写在绘制层。
-constexpr const char* kChoiceMenuPagingHint = "上/下移动 · PgUp/PgDn 翻页 · 输入即搜索 · Enter 确认";
+// 能翻页时的 hint。把匹配字段当面说清，免得用户只见列表变化，却猜不出
+// 搜的是显示名、说明、id 还是模型名。
+constexpr const char* kChoiceMenuPagingHint =
+    "上/下移动 · PgUp/PgDn 翻页 · 输入搜索名称/说明 · Enter 确认";
 
 }  // namespace
+
+std::size_t ChoiceMenuSearchWindowRows(int viewport_rows, std::optional<std::size_t> max_visible_rows) {
+    const std::size_t viewport_budget = static_cast<std::size_t>((std::max)(1, viewport_rows - 2));
+    return max_visible_rows.has_value()
+               ? (std::min)(viewport_budget, (std::max)(std::size_t{1}, *max_visible_rows))
+               : viewport_budget;
+}
 
 ChoiceMenuSearchCore::ChoiceMenuSearchCore(std::vector<ChoiceMenuItem> items, bool multi_select,
                                            std::optional<std::size_t> editable_index,
@@ -2581,7 +2600,7 @@ std::optional<ChoiceMenuResult> ReadChoiceMenuSearch(const std::vector<ChoiceMen
         // 窗口高 = 可视行数减搜索行与 hint 行,不写死;查不到可视高退
         // 缓冲高(ScreenInfo 的约定),至少留一行。
         const int viewport_rows = info->viewport_height > 0 ? info->viewport_height : info->height;
-        window_budget = static_cast<std::size_t>((std::max)(1, viewport_rows - 2));
+        window_budget = ChoiceMenuSearchWindowRows(viewport_rows, options.max_visible_rows);
         const int worst_rows = 2 + static_cast<int>((std::min)(items.size(), window_budget));
         if (!EnsureStreamScreenRowsLocked(worst_rows)) {
             if (exit_reason != nullptr) {
@@ -2620,8 +2639,8 @@ std::optional<ChoiceMenuResult> ReadChoiceMenuSearch(const std::vector<ChoiceMen
             platform::ClearRowHardFrom(0, start_row + r, width);
         }
         // 搜索行:词尾下划线当光标,命中数/总数跟上,淡色。
-        const std::string search_line = "搜索: " + menu.search() + "_ (" + std::to_string(view.size()) +
-                                        "/" + std::to_string(items.size()) + ")";
+        const std::string search_line = "搜索名称/说明: " + menu.search() + "_ (" +
+                                        std::to_string(view.size()) + "/" + std::to_string(items.size()) + ")";
         platform::SetCursorPos(0, start_row);
         std::cout << theme.stats << TruncateUtf8ToDisplayWidth(search_line, width - 1) << theme.reset;
         // 窗口内条目:行样式与老路径一字同款(> 前缀、多选 [x]、选中高亮、

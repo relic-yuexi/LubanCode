@@ -42,6 +42,17 @@ namespace lubancode::app {
 using lubancode::platform::CurrentDirUtf8;
 using lubancode::cli::tr;
 using lubancode::cli::trf;
+
+namespace {
+
+// WizardPanel 给选择菜单留 12 行。短菜单至多 11 项再带一行 hint；长菜单
+// 固定拿两行画搜索栏与 hint，中间十行翻页。三处共用一把尺，不能各算各的。
+constexpr int kWizardChoiceReserveRows = 12;
+constexpr std::size_t kWizardChoiceSearchRows = static_cast<std::size_t>(kWizardChoiceReserveRows - 2);
+constexpr std::size_t kWizardChoicePlainRows = static_cast<std::size_t>(kWizardChoiceReserveRows - 1);
+
+}  // namespace
+
 void PrintLubanIcon(const lubancode::cli::Theme& theme) {
     std::cout << theme.banner << "╭───────────────────────╮" << theme.reset << "\n";
     std::cout << theme.banner << "│  鲁 班 code           │" << theme.reset << "\n";
@@ -94,7 +105,7 @@ lubancode::cli::WizardIO MakeInteractiveWizardIO(const lubancode::cli::Theme& th
         }
         // 选择帧给选项数+1 行预留(菜单还带一行提示),面板把 footer 画在
         // 预留区之下,菜单画进预留区,滚屏风险一并堵住。
-        panel->Draw(frame, frame.prompt.empty() ? 12 : 0);
+        panel->Draw(frame, frame.prompt.empty() ? kWizardChoiceReserveRows : 0);
     };
     io.read_event = [panel, panel_active]() -> lubancode::cli::WizardInputEvent {
         lubancode::cli::ReadExitReason reason = lubancode::cli::ReadExitReason::Submitted;
@@ -122,6 +133,10 @@ lubancode::cli::WizardIO MakeInteractiveWizardIO(const lubancode::cli::Theme& th
         lubancode::cli::ChoiceMenuOptions opts;
         opts.hint = hint;
         opts.initial_cursor = default_index;  // 初始高亮落在默认项,回车即选中默认
+        // 面板只留了 kWizardChoiceReserveRows 行。超过短单容量便走搜索分页，
+        // 且选项窗口锁在十行内；搜索栏、筛后结果与 hint 才能始终留在屏上。
+        opts.search_threshold = kWizardChoicePlainRows;
+        opts.max_visible_rows = kWizardChoiceSearchRows;
         lubancode::cli::ReadExitReason reason = lubancode::cli::ReadExitReason::Submitted;
         const auto selected = lubancode::cli::ReadChoiceMenu(menu_items, opts, theme, &reason);
         if (cancel_kind != nullptr && !selected.has_value()) {

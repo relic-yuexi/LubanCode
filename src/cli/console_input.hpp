@@ -92,12 +92,20 @@ struct ChoiceMenuOptions {
     std::size_t search_threshold = 12;
     // 测试/特殊场合显式开搜索+分页,绕过阈值判断。
     bool always_search = false;
+    // 搜索分页路径最多画几行选项；不设则吃满当前 viewport。嵌在
+    // WizardPanel 这类已有固定预留区的调用方必须给上，免得菜单拿整屏
+    // 高度另起一本账，把搜索行与筛后结果挤出面板。
+    std::optional<std::size_t> max_visible_rows;
 };
 
 struct ChoiceMenuResult {
     std::vector<std::size_t> selected_indices;
     std::optional<std::string> custom_text;
 };
+
+// 搜索菜单除选项外还要占搜索栏、hint 两行。调用方若给 max_visible_rows，
+// 选项窗再受它钳制；0 也至少留一行。纯布局算法露出来给终端回归单钉住。
+std::size_t ChoiceMenuSearchWindowRows(int viewport_rows, std::optional<std::size_t> max_visible_rows);
 
 // 长菜单(items 超过 ChoiceMenuOptions::search_threshold)的"搜索 + 分页"
 // 状态机,与绘制分离、可直接单测(照 ChoiceMenuCore 的路数,单测同在

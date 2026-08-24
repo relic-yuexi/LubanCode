@@ -710,6 +710,20 @@ TEST_CASE("RunProviderEditWizard: 失效——改了地址也不发请求,模型
     CHECK(scripted.fetch_calls == 0);  // 地址作废也轮不到拉列表:edit 模式压根不发请求
 }
 
+TEST_CASE("RunProviderEditWizard: 汇总页兼收全角 ５ 并跳回模型项") {
+    ScriptedIO scripted;
+    scripted.Say("５");
+    scripted.Say("fullwidth-selected-model");
+    scripted.Say("Y");
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderEditWizard(io, EditableProvider());
+
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->save_requested);
+    CHECK(outcome->provider.model == "fullwidth-selected-model");
+    CHECK(scripted.fetch_calls == 0);
+}
+
 TEST_CASE("RunProviderEditWizard: 取消——Ctrl+C 与 EOF 都返回 nullopt,不写盘") {
     SUBCASE("汇总页 Ctrl+C") {
         ScriptedIO scripted;
