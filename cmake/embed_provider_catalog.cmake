@@ -8,9 +8,62 @@ if(_content MATCHES "\\)LUBAN_CATALOG\"")
   message(FATAL_ERROR "provider catalog 撞上 raw string 定界符")
 endif()
 
-set(_header "// 自动生成，源头是 catalog/providers.json。\n#pragma once\n\n")
+# MSVC 单条字符串字面量上限约 16KB(C2026), 目录已长到几百 KB——切成 ~8KB
+# 块, 块间用 std::string 的 + 拼接, 字节流与整条一致。切点若落在多字节
+# 字符中间, 尾部回退到字符边界(UTF-8 续字节最多 3 个)。
+# 正文含分号与花括号, 禁用 list 系命令(string(FIND) 也无起点参数)。
+set(_body "")
+set(_pos 0)
+string(LENGTH "${_content}" _len)
+while(_pos LESS _len)
+  math(EXPR _clen "${_len} - ${_pos}")
+  if(_clen GREATER 8000)
+    set(_clen 8000)
+  endif()
+  string(SUBSTRING "${_content}" ${_pos} ${_clen} _chunk)
+  math(EXPR _pos "${_pos} + ${_clen}")
+  # 块尾不能落在多字节字符中间。从尾字节回扫: ASCII(<0x80)收尾最干净;
+  # 续字节(0x80-0xBF)一律退; 首字节(>=0xC0)说明该字符被劈开, 退掉它就到
+  # 上一字符边界。guard 4 封顶(UTF-8 最长 4 字节)。
+  # CMake regex 不认 \x 转义, 尾字节经 string(HEX) 转两位十六进制, 查表
+  # 折成数值再比范围。
+  set(_guard 0)
+  while(_guard LESS 4)
+    math(EXPR _lastpos "${_clen} - 1")
+    string(SUBSTRING "${_chunk}" ${_lastpos} 1 _lc)
+    string(HEX "${_lc}" _lh)
+    string(TOLOWER "${_lh}" _lh)
+    string(SUBSTRING "${_lh}" 0 1 _h0)
+    string(SUBSTRING "${_lh}" 1 1 _h1)
+    string(FIND "0123456789abcdef" "${_h0}" _d0)
+    string(FIND "0123456789abcdef" "${_h1}" _d1)
+    if(_d0 LESS 0 OR _d1 LESS 0)
+      break()
+    endif()
+    math(EXPR _byte "${_d0} * 16 + ${_d1}")
+    if(_byte LESS 128)
+      break()
+    endif()
+    math(EXPR _clen "${_clen} - 1")
+    math(EXPR _guard "${_guard} + 1")
+    if(_byte GREATER_EQUAL 192)
+      break()
+    endif()
+  endwhile()
+  if(_guard GREATER 0)
+    string(SUBSTRING "${_chunk}" 0 ${_clen} _chunk)
+    math(EXPR _pos "${_pos} - ${_guard}")
+  endif()
+  string(APPEND _body "    std::string(R\"LUBAN_CATALOG(${_chunk})LUBAN_CATALOG\") +\n")
+endwhile()
+# 尾块多一个 +, 换成收尾的空串分号
+string(APPEND _body "    std::string();\n")
+
+set(_header "// 自动生成，源头是 catalog/providers.json。不要手改。\n")
+string(APPEND _header "// 目录超 MSVC 单字面量上限, 按 8KB 分块拼接(见 cmake/embed_provider_catalog.cmake)。\n")
+string(APPEND _header "#pragma once\n\n#include <string>\n\n")
 string(APPEND _header "namespace lubancode::config::embedded {\n")
-string(APPEND _header "inline constexpr const char kProviderCatalogJson[] = R\"LUBAN_CATALOG(${_content})LUBAN_CATALOG\";\n")
+string(APPEND _header "inline const std::string kProviderCatalogJson =\n${_body}")
 string(APPEND _header "}  // namespace lubancode::config::embedded\n")
 
 set(_old "")
