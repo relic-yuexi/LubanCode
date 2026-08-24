@@ -12,6 +12,7 @@
 
 #include "agent/artifact_store.hpp"
 #include "agent/context_events.hpp"
+#include "platform/text_encoding.hpp"
 #include "tools/context_tools.hpp"
 
 namespace {
@@ -103,6 +104,15 @@ TEST_CASE("分块:日志按行窗,UTF-8 绝不从码点中腰劈开") {
     CHECK(reassembled == content);
 }
 
+TEST_CASE("分块:语义标题按字节截短不劈 UTF-8 码点") {
+    const std::string content = std::string(59, 'a') + "笔:usage\n下一行\n";
+    const auto chunks = lubancode::agent::ChunkArtifact(content, ArtifactContentKind::SourceCode);
+    REQUIRE(!chunks.empty());
+    CHECK(chunks[0].heading == std::string(59, 'a'));
+    CHECK(lubancode::platform::IsValidUtf8(chunks[0].heading));
+    CHECK_NOTHROW(chunks[0].ToJson().dump());
+}
+
 TEST_CASE("分块:JSON 按顶层结构行,数组元素窗口不劈括号") {
     const std::string content = R"({
   "items": [
@@ -183,6 +193,23 @@ TEST_CASE("仓:原子落盘、幂等、断点重开、Close") {
     reopened.Close();
     CHECK(!reopened.active());
     CHECK(reopened.Find("a1") == nullptr);
+}
+
+TEST_CASE("仓:首行预览卡在汉字起始字节仍能写入索引") {
+    TempStoreDir dir("lubancode-artifact-store-utf8-preview");
+    ContextArtifactStore store;
+    REQUIRE(store.Open((dir.path() / "ctx").string(), "sess-utf8"));
+
+    // 第 80 个字节(下标 79)是“笔”的首字节 E7,复刻 type_error.316 现场。
+    const std::string content = std::string(79, 'a') + "笔:usage\n下一行\n";
+    REQUIRE(static_cast<unsigned char>(content[79]) == 0xE7);
+    const auto ref = store.Offload("toolu-utf8", "search", content, 1);
+
+    REQUIRE(ref.has_value());
+    CHECK(ref->preview == std::string(79, 'a'));
+    CHECK(lubancode::platform::IsValidUtf8(ref->preview));
+    CHECK_NOTHROW(ref->ToJson().dump());
+    CHECK(std::filesystem::exists(dir.path() / "ctx" / "index.jsonl"));
 }
 
 TEST_CASE("仓:hash 不合立即隔离,读不到不供给") {

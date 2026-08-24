@@ -282,7 +282,10 @@ std::vector<ArtifactChunk> ChunkArtifact(const std::string& content, ArtifactCon
             if (kind == ArtifactContentKind::Markdown && !LooksLikeMarkdownHeading(stripped)) {
                 continue;
             }
-            chunk.heading = std::string(stripped.substr(0, std::min<std::size_t>(stripped.size(), 60)));
+            const std::string heading(stripped);
+            chunk.heading = heading.substr(
+                0, lubancode::platform::Utf8PrefixBoundary(
+                       heading, std::min<std::size_t>(heading.size(), 60)));
             break;
         }
         chunks.push_back(std::move(chunk));
@@ -527,10 +530,7 @@ std::optional<ArtifactRef> ContextArtifactStore::Offload(const std::string& tool
             first_line.pop_back();
         }
         if (first_line.size() > 80) {
-            first_line.resize(80);
-            while (!first_line.empty() && (static_cast<unsigned char>(first_line.back()) & 0xC0) == 0x80) {
-                first_line.pop_back();
-            }
+            first_line.resize(lubancode::platform::Utf8PrefixBoundary(first_line, 80));
         }
         ref.preview = std::move(first_line);
     }
