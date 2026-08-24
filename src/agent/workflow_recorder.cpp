@@ -12,6 +12,7 @@
 #include <system_error>
 #include <utility>
 #include "platform/log_sink.hpp"
+#include "platform/text_encoding.hpp"
 
 namespace lubancode::agent {
 
@@ -345,7 +346,7 @@ nlohmann::json SanitizeToolInput(const nlohmann::json& input) {
         value = RedactSecrets(std::move(value));
         constexpr std::size_t kMaxParamChars = 1000;  // 长参数只留前段,录制件要小
         if (value.size() > kMaxParamChars) {
-            value.resize(kMaxParamChars);
+            value.resize(lubancode::platform::Utf8PrefixBoundary(value, kMaxParamChars));
             value += "…";
         }
         return value;

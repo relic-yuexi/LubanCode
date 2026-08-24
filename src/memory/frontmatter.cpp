@@ -10,6 +10,8 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include "platform/text_encoding.hpp"
+
 namespace lubancode::memory::frontmatter {
 
 namespace {
@@ -32,7 +34,7 @@ std::string OneLine(std::string value, std::size_t max_bytes) {
     }
     value = TrimWhitespace(std::move(value));
     if (value.size() > max_bytes) {
-        value.resize(max_bytes);
+        value.resize(lubancode::platform::Utf8PrefixBoundary(value, max_bytes));
         value += "...";
     }
     return value;

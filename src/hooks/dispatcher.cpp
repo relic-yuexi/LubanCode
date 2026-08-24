@@ -7,6 +7,7 @@
 #include <thread>
 
 #include "platform/process.hpp"
+#include "platform/text_encoding.hpp"
 
 namespace lubancode::hooks {
 
@@ -76,7 +77,7 @@ ProcessResult ExecuteLegacy(const HookDefinition& def, const HookPayload& payloa
 std::string FirstLines(const std::string& text, std::size_t max_bytes) {
     std::string snippet = text;
     if (snippet.size() > max_bytes) {
-        snippet.resize(max_bytes);
+        snippet.resize(lubancode::platform::Utf8PrefixBoundary(snippet, max_bytes));
     }
     // 只要前 5 行,拦截说明带一点上下文又不至于刷屏(与 M9 同款)。
     std::string out;

@@ -3,6 +3,7 @@
 
 #include "platform/process.hpp"
 #include "platform/log_sink.hpp"
+#include "platform/text_encoding.hpp"
 
 namespace lubancode::tools {
 
@@ -101,7 +102,7 @@ void RunPostToolHooks(const config::HooksConfig& hooks, const std::string& tool_
         }
         std::string result_snippet = result.content;
         if (result_snippet.size() > 8192) {
-            result_snippet.resize(8192);
+            result_snippet.resize(lubancode::platform::Utf8PrefixBoundary(result_snippet, 8192));
         }
         const std::vector<std::pair<std::string, std::string>> env = {
             {"LUBAN_TOOL_NAME", tool_name},

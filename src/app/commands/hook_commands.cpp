@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "app/hook_runtime.hpp"
+#include "platform/text_encoding.hpp"
 
 namespace lubancode::app {
 
@@ -37,7 +38,7 @@ std::string OutcomeText(const HookRunRecord* record) {
     if (!record->detail.empty()) {
         std::string detail = record->detail;
         if (detail.size() > 120) {
-            detail.resize(120);
+            detail.resize(lubancode::platform::Utf8PrefixBoundary(detail, 120));
             detail += "…";
         }
         out << " | " << detail;
@@ -99,7 +100,7 @@ void PrintRunRecords(HookDispatcher& dispatcher, int limit) {
         if (!record.detail.empty()) {
             std::string detail = record.detail;
             if (detail.size() > 160) {
-                detail.resize(160);
+                detail.resize(lubancode::platform::Utf8PrefixBoundary(detail, 160));
                 detail += "…";
             }
             std::cout << "      " << detail << "\n";

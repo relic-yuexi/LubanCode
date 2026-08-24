@@ -21,6 +21,7 @@
 #include "memory/frontmatter.hpp"
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
+#include "platform/text_encoding.hpp"
 
 namespace lubancode::memory {
 
@@ -698,7 +699,7 @@ std::string OneLine(std::string value, std::size_t max_bytes = 240) {
     }
     value = Trim(std::move(value));
     if (value.size() > max_bytes) {
-        value.resize(max_bytes);
+        value.resize(lubancode::platform::Utf8PrefixBoundary(value, max_bytes));
         value += "...";
     }
     return value;

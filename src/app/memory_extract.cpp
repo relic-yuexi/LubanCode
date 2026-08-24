@@ -15,6 +15,7 @@
 #include "agent/prompt_assembler.hpp"
 #include "api/assembler.hpp"
 #include "api/backend.hpp"
+#include "platform/text_encoding.hpp"
 
 namespace lubancode::app {
 
@@ -27,7 +28,7 @@ constexpr std::size_t kMaxToolResultBytes = 240;
 
 std::string ClipBytes(std::string text, std::size_t max_bytes) {
     if (text.size() <= max_bytes) return text;
-    text.resize(max_bytes);
+    text.resize(lubancode::platform::Utf8PrefixBoundary(text, max_bytes));
     return text + "...(截断)";
 }
 
@@ -81,7 +82,7 @@ std::string BuildTurnTranscript(const std::vector<api::Message>& messages, std::
         if (out.size() >= max_bytes) return;
         if (out.size() + line.size() + 1 > max_bytes) {
             const std::size_t room = max_bytes - out.size() - 1;
-            if (room > 20) line.resize(room);  // 留一点才截,不然白占一行
+            if (room > 20) line.resize(lubancode::platform::Utf8PrefixBoundary(line, room));
             else line.clear();
         }
         if (!line.empty()) {
