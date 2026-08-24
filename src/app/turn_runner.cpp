@@ -76,6 +76,17 @@ void PrintTurnFooter(const lubancode::cli::Theme& theme, bool is_console, std::i
     if (line.empty()) {
         return;
     }
+    // 正文末尾那枚 '\n' 只负责把光标送到下一行,不算空白行。真终端按
+    // 区块间距表再垫一口气,免得 Worked/Stopped/Failed 横线贴住末句。
+    // 管道输出守原契约,不额外插空行。
+    if (is_console) {
+        for (int gap = 0;
+             gap < lubancode::cli::GapBetween(lubancode::cli::BlockRole::AssistantText,
+                                               lubancode::cli::BlockRole::TurnFooter);
+             ++gap) {
+            std::cout << "\n";
+        }
+    }
     std::cout << theme.stats << line << theme.reset << "\n";
     std::cout.flush();
 }
@@ -1136,10 +1147,18 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     // 是起跑线);终点在 footer 落笔前。steady_clock,不受系统改钟影响;
     // 墙上时间只作日志字段。
     const std::chrono::steady_clock::time_point turn_wall_start = std::chrono::steady_clock::now();
+    const bool stream_footer_enabled =
+        is_console && lubancode::platform::SupportsScreenRepaint() && !silent;
+
+    // 先立 footer 的状态与画布,再点亮 turn 活动条。旧次序倒着调:
+    // BeginTurnActivity 看见 footer 尚未启用便直接返回,随后 BeginStreamFooter
+    // 又清空活动态,首个网络字节到来前便只剩一片空白。
+    lubancode::cli::BeginStreamFooter(theme, stream_footer_enabled);
+
     // turn 级 Working 活动条:认整个 turn,不认单次模型请求(单子第六节)。
     // 正文流、工具批次、下一次模型请求、重试都不熄、不归零;EndTurnActivity
     // 在收口时熄,同一只钟交给 Worked footer。
-    if (is_console && lubancode::platform::SupportsScreenRepaint() && !silent) {
+    if (stream_footer_enabled) {
         lubancode::cli::BeginTurnActivity(
             lubancode::cli::tr("spinner.thinking"),
             std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1152,8 +1171,6 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     // Windows 真控制台开——footer 要随时查光标位,POSIX 走 DSR 6n 会跟监听
     // 线程抢 stdin,跟 StreamBodyTracker 的重画一样诚实关掉。静默档不起
     // footer:屏幕此刻归用户正看的查看帧,main 的回流轮一个字节不铺。
-    lubancode::cli::BeginStreamFooter(theme, is_console && lubancode::platform::SupportsScreenRepaint() && !silent);
-
     // 子代理状态的心跳:旧 AgentStatusBoard/AgentStatusPainter 那套 400ms
     // ticker 已删,前台/后台子代理状态全在 AgentTool 统一台账里、由 footer
     // 的代理面板画。长工具调用期间没有正文增量、没有按键,footer 不会自己
@@ -1228,8 +1245,7 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     private:
         std::atomic<bool> stop_{false};
         std::thread thread_;
-    } footer_heartbeat(is_console && lubancode::platform::SupportsScreenRepaint() && !silent, &turn_wall_start,
-                      &cancel_flag);
+    } footer_heartbeat(stream_footer_enabled, &turn_wall_start, &cancel_flag);
 
     // 监听线程:流式期间的面板按键、排队/打断都在它手里(键位优先级见
     // TurnInputListener::ThreadMain)。
@@ -1264,6 +1280,9 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     //      ——长缓冲平移视口、贴底滚内容,不许靠改字号/滚轮/Ctrl+End 救场。
     // 本函数只管前三步;第四步在 console_input 的 composer 首帧里,帧账
     // 一处收口(规格《多智能体真机回归_可视区重排与查看态》)。
+    // 与开场相反:先让活动条收账,再拆 footer。旧次序先拆 footer,会把
+    // turn_working 抹掉,随后 EndTurnActivity 只能误报“没起过”。
+    const long long activity_seconds = lubancode::cli::EndTurnActivity();
     lubancode::cli::EndStreamFooter();
     lubancode::cli::SetStreamScreenScrollHook(nullptr);
 
@@ -1322,7 +1341,6 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
     // 视图账。三条路(错误早退/打断/正常)都从这里过——footer 恰一枚,
     // 不再从中途裸退。
     const auto finish_turn_chrome = [&](lubancode::cli::TurnFooterTone tone) {
-        const long long activity_seconds = lubancode::cli::EndTurnActivity();
         (void)activity_seconds;  // Working 秒数与 footer 同钟(同一只 steady 钟),
                                  // 单测钉口径;这里不再二次对账,免得双写。
         const auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(

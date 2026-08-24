@@ -475,6 +475,27 @@ TEST_CASE("BuildTurnFooterLine:文字嵌线、窄屏退化、中文按显示列"
     CHECK(BuildTurnFooterLine("", 80, false).empty());
 }
 
+TEST_CASE("PrintTurnFooter:真终端在 Worked 横线前留一行,管道不改契约") {
+    const lubancode::cli::Theme theme = lubancode::cli::BuiltinTheme("plain");
+    std::ostringstream captured;
+    std::streambuf* const old_buf = std::cout.rdbuf(captured.rdbuf());
+
+    lubancode::app::PrintTurnFooter(theme, /*is_console=*/true, 15000,
+                                    lubancode::cli::TurnFooterTone::Worked);
+    const std::string console = captured.str();
+    captured.str({});
+    captured.clear();
+    lubancode::app::PrintTurnFooter(theme, /*is_console=*/false, 15000,
+                                    lubancode::cli::TurnFooterTone::Worked);
+    const std::string pipe = captured.str();
+    std::cout.rdbuf(old_buf);
+
+    CHECK(console.starts_with("\n"));
+    CHECK(console.find("Worked for 15s") != std::string::npos);
+    CHECK_FALSE(pipe.starts_with("\n"));
+    CHECK(pipe.find("Worked for 15s") != std::string::npos);
+}
+
 // ---------------------------------------------------------------------------
 // 枚举稳定字符串
 // ---------------------------------------------------------------------------
@@ -959,4 +980,17 @@ TEST_CASE("turn 活动条:footer 未启用时 Begin/Update/End 全链空操作")
     lubancode::cli::SetTurnActivityInterruptRequested();
     CHECK(lubancode::cli::EndTurnActivity() == -1);     // 没起过的 End 返回 -1
     CHECK_FALSE(lubancode::cli::TurnActivityActive());
+}
+
+TEST_CASE("turn 活动条:footer 先启用,首个流事件前也立即亮起并正常收账") {
+    lubancode::cli::BeginStreamFooter(lubancode::cli::Theme{}, /*enabled=*/true);
+    CHECK_FALSE(lubancode::cli::TurnActivityActive());
+
+    lubancode::cli::BeginTurnActivity("Working", 1000);
+    CHECK(lubancode::cli::TurnActivityActive());
+    lubancode::cli::UpdateTurnActivityElapsed(2, 5);
+    CHECK(lubancode::cli::EndTurnActivity() == 5);
+    CHECK_FALSE(lubancode::cli::TurnActivityActive());
+
+    lubancode::cli::EndStreamFooter();
 }
