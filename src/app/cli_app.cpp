@@ -304,6 +304,9 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result) {
         case lubancode::config::Wire::ChatCompletions:
             options.session_wire = "chat";
             break;
+        case lubancode::config::Wire::GoogleGenerateContent:
+            options.session_wire = "google-generate-content";
+            break;
     }
     options.session_model = config_result.config.model;
     lubancode::app_server::Server server(
@@ -435,7 +438,7 @@ int RunCli(const std::vector<std::string>& args) {
                                      ? lubancode::cli::DetectSystemLanguage()
                                      : config_result->config.language);
     for (const auto& warning : language_pack_warnings) {
-        std::cout << trf("i18n.pack_warning", warning) << "\n";
+        std::cerr << trf("i18n.pack_warning", warning) << "\n";
     }
 
     // 魂法分家(0.16.x)+ 提示词运行时化(0.21.x):每次启动查漏补缺——
@@ -450,10 +453,11 @@ int RunCli(const std::vector<std::string>& args) {
     }
 
     // 模型目录(models.json):启动时读一次,坏 JSON/坏条目只打警告跳过,
-    // 文件不存在就是空目录,一切回退现状,绝不拦人。
+    // 文件不存在就是空目录,一切回退现状,绝不拦人。警告走 stderr:
+    // app-server/管道模式下 stdout 是协议口/数据口,一行不糟蹋。
     const lubancode::config::ModelCatalog model_catalog = lubancode::config::LoadModelCatalog();
     for (const auto& warning : model_catalog.warnings) {
-        std::cout << trf("catalog.warning", warning) << "\n";
+        std::cerr << trf("catalog.warning", warning) << "\n";
     }
 
     // 用户键位覆盖(~/.lubancode/keymap.json,交互抛光总账的 keymap 层):
@@ -461,7 +465,7 @@ int RunCli(const std::vector<std::string>& args) {
     // 目录——键位是用户全局的,项目配置不许暗改(规格第 10 条)。
     if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
         for (const auto& warning : lubancode::cli::keymap::LoadActiveKeymapOverrides(*luban_dir)) {
-            std::cout << trf("keymap.override_warning", warning) << "\n";
+            std::cerr << trf("keymap.override_warning", warning) << "\n";
         }
     }
 
