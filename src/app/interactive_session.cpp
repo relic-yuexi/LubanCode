@@ -5206,7 +5206,8 @@ void TerminalSessionController::MaybeGenerateSessionTitle(lubancode::agent::Task
     session_title = *title;
     if (session_store.AppendTitleEvent(session_title)) {
         std::cout << theme.stats
-                  << trf("router.task_flash", tr("cmd.title.set_pending"), "cheap:" + routed.route.model)
+                  << trf("router.task_flash", trf("cmd.title.set", session_title),
+                         "cheap:" + routed.route.model)
                   << theme.reset << "\n";
     } else {
         std::cout << theme.error << tr("cmd.title.write_failed") << theme.reset << "\n";

@@ -77,6 +77,16 @@ TEST_CASE("TrFormat: {0}/{1} 按序替换,JSON 花括号不受牵连,缺实参�
     CHECK(cli::trf("transcript.added_removed", 3) == "新增 3 行,删除 {1} 行");
 }
 
+TEST_CASE("自动会话标题提示:标题先填入,再附 cheap 路由,不漏占位符") {
+    LangGuard guard;
+    cli::SetLanguage("zh-CN");
+    const std::string notice =
+        cli::trf("router.task_flash", cli::trf("cmd.title.set", "New Session"), "cheap:glm-5.2");
+    CHECK(notice == "标题已设为: New Session · cheap:glm-5.2");
+    CHECK(notice.find("{0}") == std::string::npos);
+    CHECK(notice.find("首条消息落盘后") == std::string::npos);
+}
+
 TEST_CASE("/model 编号提示写明 Esc 可取消") {
     LangGuard guard;
     cli::SetLanguage("zh-CN");
