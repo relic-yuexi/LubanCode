@@ -123,6 +123,30 @@ std::optional<lubancode::config::Config> ModelRouterService::ConfigForProvider(
     return derived;
 }
 
+ModelRouterService::SampleOutcome ModelRouterService::Sample(lubancode::agent::TaskKind kind,
+                                                             const SampleCall& call,
+                                                             const lubancode::agent::SampleOptions& options) const {
+    SampleOutcome outcome;
+    outcome.route = RouteInfo(kind);
+    outcome.backend = BackendForProvider(outcome.route.provider);
+    if (outcome.backend == nullptr) {
+        // 路由落空:不发不记(调用方按旧口径自行兜底,如需补零账自己记)。
+        return outcome;
+    }
+    lubancode::agent::SampleRequest sample;
+    sample.model = outcome.route.model;
+    sample.system = call.system;
+    sample.messages = call.messages;
+    sample.max_tokens = call.max_tokens;
+    sample.reasoning_effort = outcome.route.effort;
+    outcome.result = lubancode::agent::SampleModel(*outcome.backend, sample, options);
+    // 记账:角色按默认映射;采样成没成都记(旧口径:调用点先记账再判错)。
+    ledger_.Record(lubancode::agent::DefaultRoleForTask(kind), outcome.route.model, outcome.result.usage,
+                   outcome.result.duration_ms, outcome.result.usage_reported);
+    outcome.recorded = true;
+    return outcome;
+}
+
 lubancode::api::Backend* ModelRouterService::BackendForProvider(const std::string& provider) const {
     if (provider.empty() || provider == active_provider_) {
         return &main_backend_;

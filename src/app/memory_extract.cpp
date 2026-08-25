@@ -3,17 +3,14 @@
 
 #include "app/memory_extract.hpp"
 
-#include <atomic>
-#include <chrono>
 #include <initializer_list>
-#include <thread>
 #include <utility>
 #include <variant>
 
 #include <nlohmann/json.hpp>
 
 #include "agent/prompt_assembler.hpp"
-#include "api/assembler.hpp"
+#include "agent/sample_model.hpp"  // SampleModel 原语:采样的公共路(批一·病四)
 #include "api/backend.hpp"
 #include "platform/text_encoding.hpp"
 
@@ -188,71 +185,40 @@ std::expected<MemoryExtraction, std::string> RunMemoryExtraction(api::Backend& b
                                                                  int timeout_secs,
                                                                  const std::string& reasoning_effort,
                                                                  agent::BackgroundCallAccounting* accounting) {
-    api::Request request;
-    request.model = model;
-    request.system = system_prompt;
-    request.reasoning_effort = reasoning_effort;
+    // 采样走 SampleModel 原语(批一·病四):攒流/usage/兜错/看门狗的路只有
+    // 一份,这里只剩提示拼装与解析;错误只回 message(旧口径)。
+    agent::SampleRequest sample;
+    sample.model = model;
+    sample.system = system_prompt;
+    sample.reasoning_effort = reasoning_effort;
     api::Message message;
     message.role = api::Role::User;
     message.content.push_back(api::TextBlock{transcript});
-    request.messages.push_back(std::move(message));
-    request.max_tokens = 1500;
-    const auto started = std::chrono::steady_clock::now();
+    sample.messages.push_back(std::move(message));
+    sample.max_tokens = 1500;
 
-    // 看门狗:到点还没收工就拉取消旗,客户端读流响应它;主路径结束先
-    // 置 done 再 join,看门狗不误伤。
-    std::atomic<bool> cancel{false};
-    std::atomic<bool> done{false};
-    std::thread watchdog([&cancel, &done, timeout_secs]() {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_secs);
-        while (!done.load() && std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-        if (!done.load()) cancel = true;
-    });
-
-    api::MessageAssembler assembler;
-    bool stream_error = false;
-    std::string stream_error_message;
-
-    auto send_result = backend.send_stream(
-        request,
-        [&](const api::StreamEvent& event) {
-            assembler.Feed(event);
-            if (const auto* error = std::get_if<api::StreamError>(&event)) {
-                stream_error = true;
-                stream_error_message = error->message;
-            }
-        },
-        &cancel);
-    done = true;
-    watchdog.join();
+    agent::SampleOptions sample_options;
+    sample_options.timeout_secs = timeout_secs;
+    const agent::SampleResult sampled = agent::SampleModel(backend, sample, sample_options);
 
     // usage 出账(分角色记账):抽取这轮采样不混普通 turn 的账。
     if (accounting != nullptr) {
-        const api::Usage& usage = assembler.usage();
-        accounting->usage.input_tokens += usage.input_tokens;
-        accounting->usage.cache_read_tokens += usage.cache_read_tokens;
-        accounting->usage.cache_creation_tokens += usage.cache_creation_tokens;
-        accounting->usage.output_tokens += usage.output_tokens;
-        accounting->usage.output_reasoning_tokens += usage.output_reasoning_tokens;
-        accounting->usage_reported = usage.input_tokens > 0 || usage.output_tokens > 0 ||
-                                     usage.cache_read_tokens > 0 || usage.cache_creation_tokens > 0;
-        accounting->duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                      std::chrono::steady_clock::now() - started)
-                                      .count();
+        accounting->usage.input_tokens += sampled.usage.input_tokens;
+        accounting->usage.cache_read_tokens += sampled.usage.cache_read_tokens;
+        accounting->usage.cache_creation_tokens += sampled.usage.cache_creation_tokens;
+        accounting->usage.output_tokens += sampled.usage.output_tokens;
+        accounting->usage.output_reasoning_tokens += sampled.usage.output_reasoning_tokens;
+        accounting->usage_reported = sampled.usage_reported;
+        accounting->duration_ms = sampled.duration_ms;
     }
 
-    if (!send_result.has_value()) return std::unexpected(send_result.error().message);
-    if (stream_error) return std::unexpected(stream_error_message);
+    return FinishMemoryExtraction(sampled);
+}
 
-    const api::Message reply = assembler.BuildMessage();
-    std::string reply_text;
-    for (const auto& block : reply.content) {
-        if (const auto* text = std::get_if<api::TextBlock>(&block)) reply_text += text->text;
-    }
-    if (reply_text.empty()) return std::unexpected("抽取输出为空");
-    return ParseExtractionJson(reply_text);
+std::expected<MemoryExtraction, std::string> FinishMemoryExtraction(const agent::SampleResult& sampled) {
+    if (!sampled.ok) return std::unexpected(sampled.error.message);
+    if (sampled.text.empty()) return std::unexpected("抽取输出为空");
+    return ParseExtractionJson(sampled.text);
 }
 
 }  // namespace lubancode::app

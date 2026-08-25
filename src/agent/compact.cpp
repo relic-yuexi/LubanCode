@@ -10,7 +10,7 @@
 
 #include "agent/context.hpp"       // 统一 token 估算口径
 #include "agent/context_events.hpp"  // 事件账:evidence_refs 的来源区间
-#include "api/assembler.hpp"
+#include "agent/sample_model.hpp"  // SampleModel 原语:两处采样的公共路(批一·病四)
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:摘要文本进历史前的编码关口
 
 namespace lubancode::agent {
@@ -145,66 +145,35 @@ bool HasTodoWrite(const api::Message& message) {
 // 发一次"给我摘要"请求:system 指令 + 消息列表,收一段纯文本回来。
 // 失败(请求失败/流内错误)原样透传;正文交调用方再验。reasoning_effort
 // 非空时带上(cheap 路由的 effort 档);accounting 非空时把这次子请求的
-// usage 累进去。
+// usage 累进去。采样走 SampleModel 原语(批一·病四):攒流/usage/兜错
+// 的路只有一份,这里只剩提示拼装;无看门狗无取消、usage 累加、时长
+// 不记,都是本处旧口径。
 std::expected<std::string, api::Error> RequestSummaryText(api::Backend& backend, const std::string& model,
                                                           const std::string& system,
                                                           const std::vector<api::Message>& messages,
                                                           int max_tokens,
                                                           const std::string& reasoning_effort = std::string(),
                                                           BackgroundCallAccounting* accounting = nullptr) {
-    api::Request request;
-    request.model = model;
-    request.system = system;
-    request.messages = messages;
-    request.reasoning_effort = reasoning_effort;
+    SampleRequest sample;
+    sample.model = model;
+    sample.system = system;
+    sample.messages = messages;
+    sample.reasoning_effort = reasoning_effort;
     // 老坑同前:末条 assistant 会被当 prefill continuation,补一条 user 收尾。
-    if (!request.messages.empty() && request.messages.back().role == api::Role::Assistant) {
+    if (!sample.messages.empty() && sample.messages.back().role == api::Role::Assistant) {
         api::Message trailer;
         trailer.role = api::Role::User;
         trailer.content.push_back(api::TextBlock{"请开始,直接给出要求的正文。"});
-        request.messages.push_back(trailer);
+        sample.messages.push_back(trailer);
     }
-    request.max_tokens = max_tokens;
+    sample.max_tokens = max_tokens;
 
-    api::MessageAssembler assembler;
-    bool stream_error = false;
-    std::string stream_error_message;
-    const auto send_result = backend.send_stream(request, [&](const api::StreamEvent& event) {
-        assembler.Feed(event);
-        std::visit(
-            [&](const auto& e) {
-                using T = std::decay_t<decltype(e)>;
-                if constexpr (std::is_same_v<T, api::StreamError>) {
-                    stream_error = true;
-                    stream_error_message = e.message;
-                }
-            },
-            event);
-    });
-    if (accounting != nullptr) {
-        const api::Usage& usage = assembler.usage();
-        accounting->usage.input_tokens += usage.input_tokens;
-        accounting->usage.cache_read_tokens += usage.cache_read_tokens;
-        accounting->usage.cache_creation_tokens += usage.cache_creation_tokens;
-        accounting->usage.output_tokens += usage.output_tokens;
-        accounting->usage.output_reasoning_tokens += usage.output_reasoning_tokens;
-        accounting->usage_reported =
-            accounting->usage_reported || usage.input_tokens > 0 || usage.output_tokens > 0 ||
-            usage.cache_read_tokens > 0 || usage.cache_creation_tokens > 0;
+    const SampleResult result = SampleModel(backend, sample);
+    AddSampleAccounting(accounting, result);
+    if (!result.ok) {
+        return std::unexpected(result.error);
     }
-    if (!send_result.has_value()) {
-        return std::unexpected(send_result.error());
-    }
-    if (stream_error) {
-        return std::unexpected(api::Error{api::ErrorKind::Api, stream_error_message, 0});
-    }
-    std::string text;
-    for (const auto& block : assembler.BuildMessage().content) {
-        if (std::holds_alternative<api::TextBlock>(block)) {
-            text += std::get<api::TextBlock>(block).text;
-        }
-    }
-    return text;
+    return result.text;
 }
 
 // 消息区间的事件号区间("e12-e45"):从事件账里找该消息区间覆盖的 ToolExchange/
@@ -805,11 +774,13 @@ std::expected<CompactSummary, api::Error> Compact(api::Backend& backend, const s
         }
     }
 
-    api::Request request;
-    request.model = model;
-    request.system = instruction;
-    request.messages = history;
-    request.reasoning_effort = reasoning_effort;
+    // 采样走 SampleModel 原语(批一·病四):无看门狗无取消、usage 累加、
+    // 时长首包覆盖,全是本处旧口径。
+    SampleRequest sample;
+    sample.model = model;
+    sample.system = instruction;
+    sample.messages = history;
+    sample.reasoning_effort = reasoning_effort;
 
     // 踩过的坑:history 最后一条常常是 assistant 消息,原样发出去会被
     // Anthropic/Responses 两边当成"续写最后这条 assistant 消息"(prefill
@@ -817,63 +788,27 @@ std::expected<CompactSummary, api::Error> Compact(api::Backend& backend, const s
     // 内容随手接几个字——实测出过压缩正文只有孤零零一个"2"字的情况。
     // 补一条 user 消息收尾,让模型明确进入"该我说话、按 system 指令办"
     // 的状态。末条本来就是 user(比如工具结果)时天然该轮到它开口,不补。
-    if (!request.messages.empty() && request.messages.back().role == api::Role::Assistant) {
+    if (!sample.messages.empty() && sample.messages.back().role == api::Role::Assistant) {
         api::Message trailer;
         trailer.role = api::Role::User;
         trailer.content.push_back(api::TextBlock{"请开始压缩,直接给出存档正文与末尾的 JSON manifest,不要重复原对话内容。"});
-        request.messages.push_back(trailer);
+        sample.messages.push_back(trailer);
     }
-    request.max_tokens = static_cast<int>(options.budget.output_reserve_tokens);
+    sample.max_tokens = static_cast<int>(options.budget.output_reserve_tokens);
 
-    api::MessageAssembler assembler;
-    bool stream_error = false;
-    std::string stream_error_message;
-
-    const auto started = std::chrono::steady_clock::now();
-    const auto send_result = backend.send_stream(request, [&](const api::StreamEvent& event) {
-        assembler.Feed(event);
-        std::visit(
-            [&](const auto& e) {
-                using T = std::decay_t<decltype(e)>;
-                if constexpr (std::is_same_v<T, api::StreamError>) {
-                    stream_error = true;
-                    stream_error_message = e.message;
-                }
-            },
-            event);
-    });
+    const SampleResult sampled = SampleModel(backend, sample);
 
     // usage 出账(分角色记账):压缩额外花的这轮采样不混进普通 turn 的账,
     // 交给调用方记进 ModelUsageLedger。
+    AddSampleAccounting(accounting, sampled);
     if (accounting != nullptr) {
-        const api::Usage& usage = assembler.usage();
-        accounting->usage.input_tokens += usage.input_tokens;
-        accounting->usage.cache_read_tokens += usage.cache_read_tokens;
-        accounting->usage.cache_creation_tokens += usage.cache_creation_tokens;
-        accounting->usage.output_tokens += usage.output_tokens;
-        accounting->usage.output_reasoning_tokens += usage.output_reasoning_tokens;
-        accounting->usage_reported = accounting->usage_reported || usage.input_tokens > 0 ||
-                                     usage.output_tokens > 0 || usage.cache_read_tokens > 0 ||
-                                     usage.cache_creation_tokens > 0;
-        accounting->duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                      std::chrono::steady_clock::now() - started)
-                                      .count();
+        accounting->duration_ms = sampled.duration_ms;
     }
 
-    if (!send_result.has_value()) {
-        return std::unexpected(send_result.error());
+    if (!sampled.ok) {
+        return std::unexpected(sampled.error);
     }
-    if (stream_error) {
-        return std::unexpected(api::Error{api::ErrorKind::Api, stream_error_message, 0});
-    }
-
-    const api::Message summary_message = assembler.BuildMessage();
-    std::string summary_text;
-    for (const auto& block : summary_message.content) {
-        if (std::holds_alternative<api::TextBlock>(block)) {
-            summary_text += std::get<api::TextBlock>(block).text;
-        }
-    }
+    const std::string& summary_text = sampled.text;
 
     // 第一道防呆:空/过短整份拒收。
     if (CountUtf8Chars(TrimWhitespace(summary_text)) < kMinSummaryChars) {

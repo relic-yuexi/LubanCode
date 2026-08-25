@@ -1,15 +1,12 @@
 #include "agent/microcompact.hpp"
 
 #include <atomic>
-#include <chrono>
 #include <sstream>
-#include <thread>
-#include <type_traits>
 #include <utility>
 #include <variant>
 
 #include "agent/context.hpp"  // EstimateUtf8Tokens(输入估算用)
-#include "api/assembler.hpp"
+#include "agent/sample_model.hpp"  // SampleModel 原语:采样的公共路(批一·病四)
 
 namespace lubancode::agent {
 
@@ -102,10 +99,13 @@ std::expected<MicrocompactSummary, std::string> RunMicrocompact(
                 input.substr(tail_begin);
     }
 
-    api::Request request;
-    request.model = model;
-    request.reasoning_effort = reasoning_effort;
-    request.system =
+    // 采样走 SampleModel 原语(批一·病四):外部取消链 + 超时看门狗都交
+    // 给原语(旧口径:到点拉旗;外部链取消的传播由原语直连,不再多绕
+    // 100ms 轮询一道手)。
+    SampleRequest sample;
+    sample.model = model;
+    sample.reasoning_effort = reasoning_effort;
+    sample.system =
         "以下是一次工具调用的完整输出(可能中段省略)。请把它收成一份局部摘要,严格输出一个 JSON 对象"
         "(不要围栏、不要解释),键名逐字照写:\n"
         "{\"summary\": \"三五句话:这次调用做了什么、结论是什么\", "
@@ -116,67 +116,28 @@ std::expected<MicrocompactSummary, std::string> RunMicrocompact(
     message.role = api::Role::User;
     message.content.push_back(
         api::TextBlock{"工具 " + ref.tool_name + "(调用 " + ref.tool_use_id + ")的输出:\n\n" + input});
-    request.messages.push_back(std::move(message));
-    request.max_tokens = 1024;
-    const auto started = std::chrono::steady_clock::now();
+    sample.messages.push_back(std::move(message));
+    sample.max_tokens = 1024;
 
-    std::atomic<bool> cancel{false};
-    std::atomic<bool> done{false};
-    std::thread watchdog([&cancel, &done, external_cancel, timeout = options.timeout_secs]() {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout);
-        while (!done.load() && std::chrono::steady_clock::now() < deadline) {
-            if (external_cancel != nullptr && external_cancel->load()) {
-                cancel = true;
-                return;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-        if (!done.load()) cancel = true;
-    });
-
-    api::MessageAssembler assembler;
-    bool stream_error = false;
-    std::string stream_error_message;
-    auto send_result = backend.send_stream(
-        request,
-        [&](const api::StreamEvent& event) {
-            assembler.Feed(event);
-            if (const auto* error = std::get_if<api::StreamError>(&event)) {
-                stream_error = true;
-                stream_error_message = error->message;
-            }
-        },
-        &cancel);
-    done = true;
-    watchdog.join();
+    SampleOptions sample_options;
+    sample_options.cancel = external_cancel;
+    sample_options.timeout_secs = options.timeout_secs;
+    const SampleResult sampled = SampleModel(backend, sample, sample_options);
 
     if (accounting != nullptr) {
-        const api::Usage& usage = assembler.usage();
-        accounting->usage.input_tokens += usage.input_tokens;
-        accounting->usage.cache_read_tokens += usage.cache_read_tokens;
-        accounting->usage.cache_creation_tokens += usage.cache_creation_tokens;
-        accounting->usage.output_tokens += usage.output_tokens;
-        accounting->usage.output_reasoning_tokens += usage.output_reasoning_tokens;
-        accounting->usage_reported = usage.input_tokens > 0 || usage.output_tokens > 0 ||
-                                     usage.cache_read_tokens > 0 || usage.cache_creation_tokens > 0;
-        accounting->duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                      std::chrono::steady_clock::now() - started)
-                                      .count();
+        accounting->usage.input_tokens += sampled.usage.input_tokens;
+        accounting->usage.cache_read_tokens += sampled.usage.cache_read_tokens;
+        accounting->usage.cache_creation_tokens += sampled.usage.cache_creation_tokens;
+        accounting->usage.output_tokens += sampled.usage.output_tokens;
+        accounting->usage.output_reasoning_tokens += sampled.usage.output_reasoning_tokens;
+        accounting->usage_reported = sampled.usage_reported;
+        accounting->duration_ms = sampled.duration_ms;
     }
 
-    if (!send_result.has_value()) {
-        return std::unexpected(send_result.error().message);
+    if (!sampled.ok) {
+        return std::unexpected(sampled.error.message);
     }
-    if (stream_error) {
-        return std::unexpected(stream_error_message);
-    }
-    std::string reply;
-    for (const auto& block : assembler.BuildMessage().content) {
-        if (const auto* text = std::get_if<api::TextBlock>(&block)) {
-            reply += text->text;
-        }
-    }
-    auto summary = ParseMicrocompactSummary(reply, ref.artifact_id);
+    auto summary = ParseMicrocompactSummary(sampled.text, ref.artifact_id);
     if (!summary.has_value()) {
         return std::unexpected("cheap 输出不是合法摘要 JSON;旧 artifact 与原文未改");
     }

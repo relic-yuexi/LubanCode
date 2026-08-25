@@ -10,8 +10,8 @@
 //     next_action 必填;坏 JSON/Schema 同一 evaluation 做一次 repair;再坏
 //     报 evaluator_failed(由 coordinator 进 Paused,不默认 achieved)。
 //
-// 独立请求的形状与 app/session_title.cpp 同款(直拼 api::Request 走
-// backend.send_stream);usage 走 BackgroundCallAccounting 口径回填 GoalUsage。
+// 独立请求走 agent::SampleModel 原语(骨架拆解批一·病四:与起名/压缩/
+// 抽取同一条采样路);usage 走 BackgroundCallAccounting 口径回填 GoalUsage。
 
 #pragma once
 

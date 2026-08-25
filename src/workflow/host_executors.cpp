@@ -1,10 +1,15 @@
-// 宿主侧执行器实现(自然语言编排单第 4 批)。
+// 宿主侧执行器实现(自然语言编排单第 4 批;批一封暗道:tool 走
+// agent::RunOneTool 正门,llm 走 agent::SampleModel 原语)。
 
 #include "workflow/host_executors.hpp"
 
+#include <chrono>
 #include <set>
 #include <utility>
 #include <variant>
+
+#include "agent/sample_model.hpp"
+#include "agent/tool_trace.hpp"  // kErrPermissionDeclined:旧稳定码的映射锚
 
 namespace lubancode::workflow {
 
@@ -12,17 +17,21 @@ namespace lubancode::workflow {
 // tool
 // ---------------------------------------------------------------------------
 
-ToolExecutor::ToolExecutor(const tools::ToolRegistry* registry, ToolConfirmGate confirm)
-    : registry_(registry), confirm_(std::move(confirm)) {}
+ToolExecutor::ToolExecutor(Options options) : options_(std::move(options)) {}
+
+ToolExecutor::ToolExecutor(tools::ToolRegistry* registry, ToolConfirmGate confirm) {
+    options_.registry = registry;
+    options_.confirm = std::move(confirm);
+}
 
 NodeExecResult ToolExecutor::Execute(const NodeExecRequest& request) {
     NodeExecResult result;
-    if (registry_ == nullptr) {
+    if (options_.registry == nullptr) {
         result.error_code = "not_configured";
         result.error_message = "ToolRegistry 没装配";
         return result;
     }
-    tools::Tool* tool = registry_->Find(request.node->tool);
+    tools::Tool* tool = options_.registry->Find(request.node->tool);
     if (tool == nullptr) {
         // capability check 的运行时半边:定义列得出,跑时没有。
         // on_unavailable 由 runtime 按定义走 fail/skip/fallback/ask。
@@ -30,21 +39,69 @@ NodeExecResult ToolExecutor::Execute(const NodeExecRequest& request) {
         result.error_message = "工具未注册: " + request.node->tool;
         return result;
     }
-    if (tool->needs_confirm()) {
-        if (!confirm_) {
-            result.error_code = "not_configured";
-            result.error_message = "工具要确认,但没人管确认门: " + request.node->tool;
-            return result;
-        }
-        if (!confirm_(request.node->tool, request.resolved_input)) {
-            result.error_code = "permission_denied";
-            result.error_message = "工具被确认门拒绝: " + request.node->tool;
-            return result;
-        }
+
+    // 装配链:宿主带来的钩子/权限/trace 原样用;旧 confirm gate 只在宿主
+    // 没给确认口时兜底(不越权覆盖正门装配)。
+    agent::Callbacks chain = options_.callbacks;
+    if (!chain.on_tool_confirm && !chain.on_tool_confirm_async && options_.confirm) {
+        chain.on_tool_confirm = [gate = options_.confirm](const std::string&, const std::string& name,
+                                                          const nlohmann::json& input) {
+            return gate(name, input);
+        };
     }
-    const tools::Tool::Result tool_result = tool->execute(request.resolved_input);
+    // 旧路的守门语义照旧:needs_confirm 的工具既没有宿主确认口也没有旧
+    // gate 时,明拒 not_configured——RunOneTool 缺省放行,这里不许静默跟放。
+    if (tool->needs_confirm() && !chain.on_tool_confirm && !chain.on_tool_confirm_async) {
+        result.error_code = "not_configured";
+        result.error_message = "工具要确认,但没人管确认门: " + request.node->tool;
+        return result;
+    }
+
+    // trace 上下文:发号口与事件口都装上才追踪(缺一 = 没装配,全空操作)。
+    const bool trace_armed = options_.execution_id_issuer && chain.on_tool_trace;
+    agent::ToolTraceContext trace_ctx;
+    if (trace_armed) {
+        trace_ctx.execution_id = options_.execution_id_issuer();
+        trace_ctx.thread_id = options_.thread_id;
+        trace_ctx.turn_id = !options_.turn_id.empty() ? options_.turn_id : request.run_id;
+        trace_ctx.batch_id = request.node_run_id;
+        trace_ctx.sequence_in_batch = 0;
+        // 排队栅栏先落一枚(与 AgentLoop 的批次头同款):/trace 的批次账
+        // 与恢复侧都靠它认批。
+        agent::ToolTraceEvent scheduled;
+        scheduled.kind = agent::ToolTraceEventKind::Scheduled;
+        scheduled.execution_id = trace_ctx.execution_id;
+        scheduled.item_id = trace_ctx.execution_id;
+        scheduled.tool_use_id = request.node_run_id;
+        scheduled.tool_name = request.node->tool;
+        scheduled.batch_id = trace_ctx.batch_id;
+        scheduled.sequence_in_batch = 0;
+        scheduled.turn_id = trace_ctx.turn_id;
+        scheduled.thread_id = trace_ctx.thread_id;
+        scheduled.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::system_clock::now().time_since_epoch())
+                                     .count();
+        chain.on_tool_trace(scheduled);
+    }
+
+    // 正门一发:PreToolUse(schema 复检)/Plan 闸/确认档/执行/PostToolUse/
+    // 编码清洗/finished 栅栏全在这条链里。tool_use_id 用本 attempt 的
+    // node_run_id 宿主合成(模型没给,与 PTC 的 "ptc-N" 同一作法)。
+    api::ToolUseBlock call;
+    call.id = !request.node_run_id.empty() ? request.node_run_id : "wf-" + request.node->id;
+    call.name = request.node->tool;
+    call.input = request.resolved_input;
+    const tools::Tool::Result tool_result = agent::RunOneTool(
+        *options_.registry, call, chain, /*tool_filter=*/nullptr, std::string(),
+        trace_armed ? &trace_ctx : nullptr);
     if (tool_result.is_error) {
-        result.error_code = "tool_error";
+        // 稳定码映射:旧两码(permission_denied/tool_error)不动,新路才有
+        // 的失败形态(钩子拦/Plan 拒/schema 打回)按 RunOneTool 给的稳定码
+        // 透传,journal 与 on_error 边看得见细因。
+        result.error_code = tool_result.error_code == agent::kErrPermissionDeclined
+                                ? std::string("permission_denied")
+                                : (tool_result.error_code.empty() ? std::string("tool_error")
+                                                                  : tool_result.error_code);
         result.error_message = tool_result.content.substr(0, 500);
         return result;
     }
@@ -191,43 +248,37 @@ NodeExecResult LlmExecutor::ExecuteWithPrompt(const NodeExecRequest& request, co
         return result;
     }
 
-    api::Request req;
-    req.model = options_.model;
-    req.system = prompt_text;
+    // 采样走 SampleModel 原语(批一·病四):路只有一条,提示拼装仍在本层。
+    // 旧路的语义原样:无看门狗、无取消;流错折 Api;Cancelled 单列。
+    agent::SampleRequest sample;
+    sample.model = options_.model;
+    sample.system = prompt_text;
     if (options_.max_output_tokens > 0) {
-        req.max_tokens = static_cast<int>(options_.max_output_tokens);
+        sample.max_tokens = static_cast<int>(options_.max_output_tokens);
     }
     api::Message user;
     user.role = api::Role::User;
     user.content.push_back(api::TextBlock{request.resolved_input.dump()});
-    req.messages.push_back(std::move(user));
+    sample.messages.push_back(std::move(user));
 
-    std::string assembled;
-    api::Usage usage;
-    const auto on_event = [&](const api::StreamEvent& event) {
-        if (const auto* text = std::get_if<api::TextDelta>(&event)) {
-            assembled += text->text;
-        } else if (const auto* done = std::get_if<api::MessageDone>(&event)) {
-            usage = done->usage;
-        }
-    };
-    const auto sent = options_.backend->send_stream(req, on_event, nullptr);
-    if (!sent.has_value()) {
-        result.error_code = sent.error().kind == api::ErrorKind::Cancelled ? "cancelled" : "api_error";
-        result.error_message = sent.error().message.substr(0, 500);
+    const agent::SampleResult sampled = agent::SampleModel(*options_.backend, sample);
+    if (!sampled.ok) {
+        result.error_code =
+            sampled.error.kind == api::ErrorKind::Cancelled ? "cancelled" : "api_error";
+        result.error_message = sampled.error.message.substr(0, 500);
         return result;
     }
     // token 账:输入+输出都计入 run 预算(重试也计,不开免单账)。
-    result.tokens_used = api::TotalInputTokens(usage) + usage.output_tokens;
+    result.tokens_used = api::TotalInputTokens(sampled.usage) + sampled.usage.output_tokens;
 
     nlohmann::json parsed = nlohmann::json::object();
     bool parsed_ok = false;
     try {
-        parsed = nlohmann::json::parse(assembled);
+        parsed = nlohmann::json::parse(sampled.text);
         parsed_ok = true;
     } catch (...) {
     }
-    result.output = parsed_ok ? parsed : nlohmann::json{{"content", assembled}};
+    result.output = parsed_ok ? parsed : nlohmann::json{{"content", sampled.text}};
     result.ok = true;
     return result;
 }
