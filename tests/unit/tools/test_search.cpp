@@ -1,5 +1,6 @@
 // search 工具:grep 模式命中带行号、glob 过滤、上限截断注明、跳过
-// build/.git、二进制跳过、中文内容命中;glob 模式按文件名找文件。
+// build/.git、二进制跳过、中文内容命中;glob 模式按文件名找文件;
+// path 给单个文件时只搜这一个。
 
 #include <doctest/doctest.h>
 
@@ -184,6 +185,55 @@ TEST_CASE("search glob: 按文件名通配找文件") {
     CHECK(result.content.find("foo.cpp") != std::string::npos);
     CHECK(result.content.find("baz.cpp") != std::string::npos);
     CHECK(result.content.find("bar.hpp") == std::string::npos);
+}
+
+TEST_CASE("search grep: path 给单个文件,只搜这一个") {
+    TempDir dir;
+    dir.WriteFile("a.txt", "needle here\n");
+    dir.WriteFile("b.txt", "needle elsewhere\n");
+
+    SearchTool tool;
+    nlohmann::json input;
+    input["mode"] = "grep";
+    input["pattern"] = "needle";
+    input["path"] = dir.Utf8Path("b.txt");
+    const Tool::Result result = tool.execute(input);
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("b.txt:1:needle elsewhere") != std::string::npos);
+    CHECK(result.content.find("a.txt") == std::string::npos);
+}
+
+TEST_CASE("search grep: 单文件 path 照样吃 glob 过滤,配不上就不搜") {
+    TempDir dir;
+    dir.WriteFile("keep.cpp", "target_word\n");
+
+    SearchTool tool;
+    nlohmann::json input;
+    input["mode"] = "grep";
+    input["pattern"] = "target_word";
+    input["path"] = dir.Utf8Path("keep.cpp");
+    input["glob"] = "*.txt";
+    const Tool::Result result = tool.execute(input);
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("keep.cpp") == std::string::npos);
+    CHECK(result.content.find("没搜到匹配的内容") != std::string::npos);
+}
+
+TEST_CASE("search glob: path 给单个文件,文件名配得上就返回它") {
+    TempDir dir;
+    dir.WriteFile("foo.cpp", "");
+
+    SearchTool tool;
+    nlohmann::json input;
+    input["mode"] = "glob";
+    input["pattern"] = "*.cpp";
+    input["path"] = dir.Utf8Path("foo.cpp");
+    const Tool::Result result = tool.execute(input);
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("foo.cpp") != std::string::npos);
 }
 
 TEST_CASE("search glob: **/*.md 既中根目录文件,也中子目录文件") {

@@ -191,7 +191,7 @@ const char* kEditFileDescBefore =
     "适合小范围、精准的改动,不适合整篇重写(整篇重写用 write_file)。执行前需要用户确认。";
 
 const char* kSearchDescBefore =
-    "在目录里搜索,两种模式:mode=\"grep\" 按正则(ECMAScript 语法)搜文件内容,"
+    "在目录或单个文件里搜索,两种模式:mode=\"grep\" 按正则(ECMAScript 语法)搜文件内容,"
     "命中的行按 文件:行号:行内容 返回;mode=\"glob\" 按文件名通配(支持 * ? **)找文件,"
     "返回相对路径列表。默认从当前工作目录开始搜,自动跳过 .git/、build/、"
     "node_modules/ 和二进制文件。结果超过 100 条会截断并注明。";
@@ -253,7 +253,8 @@ TEST_CASE("文件工具批余量: edit_file/search 缺省与改前一字不差")
           "不带 '/' 的写法(如 *.md)按文件名匹配,会递归找出整个目录树下所有同名文件,"
           "不管它在哪层子目录里;带 '/' 的写法(如 src/**/*.hpp、docs/**)按相对路径匹配,"
           "'**/' 表示零层或多层目录,写在开头就是'不管在不在根目录都算'。");
-    CHECK(ss["properties"]["path"]["description"] == "从哪个目录开始搜,不填默认当前工作目录");
+    CHECK(ss["properties"]["path"]["description"] ==
+          "从哪里开始搜:给目录就递归遍历,给单个文件就只搜这一个。不填默认当前工作目录");
     CHECK(ss["properties"]["glob"]["description"] ==
           "仅 mode=grep 有效:按文件名或路径过滤要搜索的文件,不填就搜所有非二进制文件。"
           "语义跟 pattern 的 glob 写法一样:*.cpp 这种不带 '/' 的按文件名递归匹配任意目录下的文件;"
@@ -271,7 +272,7 @@ TEST_CASE("文件工具批余量: en 下 edit_file/search 出英文") {
               "The original text to be replaced") == 0);
 
     SearchTool search;
-    CHECK(search.description().find("Search inside a directory") == 0);
+    CHECK(search.description().find("Search a directory or a single file") == 0);
     const nlohmann::json ss = search.input_schema();
     CHECK(ss["properties"]["pattern"]["description"].get<std::string>().find(
               "With mode=grep this is an ECMAScript regular expression") == 0);

@@ -125,6 +125,7 @@ std::string NormalizeSlashes(std::string s) {
 // 递归遍历 root 下所有文件,跳过 .git/build/node_modules 目录,把每个文件的
 // (绝对路径, 相对 root 的路径) 丢给 visit。visit 返回 false 表示"够了,别再
 // 找了"(用来在拿满上限结果之后尽早收手,免得大仓库遍历半天)。
+// root 不是目录(不存在、或是单个文件)时由调用方另行分发,这里只管目录。
 template <typename Visit>
 void WalkFiles(const std::filesystem::path& root, const Visit& visit) {
     std::error_code ec;
@@ -164,6 +165,20 @@ void WalkFiles(const std::filesystem::path& root, const Visit& visit) {
     }
 }
 
+// 统一的取文件入口:root 是目录就走 WalkFiles 递归遍历;是单个文件就只看
+// 它这一个(rel 即文件名)。模型揣着具体文件路径来搜是常有的事(ripgrep 也认
+// rg pattern file.cpp),与其报错把人挡回去,不如把单文件当作"只含它自己的
+// 搜索范围"。grep/glob 两种模式共用这一套分发。
+template <typename Visit>
+void CollectSearchFiles(const std::filesystem::path& root, const Visit& visit) {
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(root, ec)) {
+        visit(root, root.filename());
+        return;
+    }
+    WalkFiles(root, visit);
+}
+
 Tool::Result RunGrep(const std::filesystem::path& root, const std::string& pattern_str, const std::string& glob_filter) {
     std::regex pattern;
     try {
@@ -189,7 +204,7 @@ Tool::Result RunGrep(const std::filesystem::path& root, const std::string& patte
     std::size_t hit_count = 0;
     bool truncated = false;
 
-    WalkFiles(root, [&](const std::filesystem::path& abs_path, const std::filesystem::path& rel_path) -> bool {
+    CollectSearchFiles(root, [&](const std::filesystem::path& abs_path, const std::filesystem::path& rel_path) -> bool {
         if (hit_count >= kMaxResults) {
             truncated = true;
             return false;
@@ -250,7 +265,7 @@ Tool::Result RunGlobSearch(const std::filesystem::path& root, const std::string&
     std::vector<std::string> hits;
     bool truncated = false;
 
-    WalkFiles(root, [&](const std::filesystem::path& abs_path, const std::filesystem::path& rel_path) -> bool {
+    CollectSearchFiles(root, [&](const std::filesystem::path& abs_path, const std::filesystem::path& rel_path) -> bool {
         if (hits.size() >= kMaxResults) {
             truncated = true;
             return false;
@@ -283,9 +298,9 @@ std::string SearchTool::name() const {
 }
 
 std::string SearchTool::description() const {
-    // 文案在 src/prompts/tools/<语言>/search.md,兜底是迁移前的原文。
+    // 文案在 src/prompts/tools/<语言>/search.md,兜底与 zh-CN 档同文。
     return ToolText("search", "description",
-                    "在目录里搜索,两种模式:mode=\"grep\" 按正则(ECMAScript 语法)搜文件内容,"
+                    "在目录或单个文件里搜索,两种模式:mode=\"grep\" 按正则(ECMAScript 语法)搜文件内容,"
                     "命中的行按 文件:行号:行内容 返回;mode=\"glob\" 按文件名通配(支持 * ? **)找文件,"
                     "返回相对路径列表。默认从当前工作目录开始搜,自动跳过 .git/、build/、"
                     "node_modules/ 和二进制文件。结果超过 100 条会截断并注明。");
@@ -316,7 +331,9 @@ nlohmann::json SearchTool::input_schema() const {
 
     nlohmann::json path_prop = nlohmann::json::object();
     path_prop["type"] = "string";
-    path_prop["description"] = ToolText("search", "param.path", "从哪个目录开始搜,不填默认当前工作目录");
+    path_prop["description"] = ToolText("search", "param.path",
+                                        "从哪里开始搜:给目录就递归遍历,给单个文件就只搜这一个。"
+                                        "不填默认当前工作目录");
     properties["path"] = path_prop;
 
     nlohmann::json glob_prop = nlohmann::json::object();
@@ -359,9 +376,7 @@ Tool::Result SearchTool::execute(const nlohmann::json& input) {
     if (!std::filesystem::exists(root, ec)) {
         return {"path 不存在: " + PathToUtf8(root), true};
     }
-    if (!std::filesystem::is_directory(root, ec)) {
-        return {"path 得是个目录: " + PathToUtf8(root), true};
-    }
+    // 目录、单个文件都收:分发逻辑见 CollectSearchFiles。
 
     if (mode == "grep") {
         std::string glob_filter;
