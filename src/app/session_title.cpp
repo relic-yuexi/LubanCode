@@ -8,6 +8,7 @@
 #include <variant>
 
 #include "api/assembler.hpp"
+#include "platform/text_encoding.hpp"
 
 namespace lubancode::app {
 namespace {
@@ -119,14 +120,12 @@ std::expected<std::string, std::string> GenerateSessionTitle(lubancode::api::Bac
     for (const auto& message : head) {
         for (const auto& block : message.content) {
             if (const auto* text = std::get_if<lubancode::api::TextBlock>(&block)) {
-                std::string piece = text->text.substr(0, 600);
-                if (text->text.size() > 600) {
-                    // 截尾不劈半个字:退到完整码点边界。
-                    while (!piece.empty() &&
-                           (static_cast<unsigned char>(piece.back()) & 0xC0) == 0x80) {
-                        piece.pop_back();
-                    }
-                }
+                // 刀口必须在原串上算。旧写法先 substr(0, 600)，再从成品
+                // 尾部删续字节；若刀口落进三字节汉字，删完会剩一枚孤立
+                // 首字节，随后拼入的 '\n' 就成了 nlohmann 报出的 0x0A。
+                constexpr std::size_t kExcerptMaxBytes = 600;
+                const std::size_t cut = lubancode::platform::Utf8PrefixBoundary(text->text, kExcerptMaxBytes);
+                std::string piece = text->text.substr(0, cut);
                 transcript += (message.role == lubancode::api::Role::User ? "用户: " : "助手: ") + piece + "\n";
             }
         }

@@ -41,15 +41,21 @@ void SanitizeContentBlock(ContentBlock& block) {
             using T = std::decay_t<decltype(b)>;
             if constexpr (std::is_same_v<T, TextBlock>) {
                 b.text = platform::SanitizeExternalText(b.text);
+            } else if constexpr (std::is_same_v<T, ImageBlock>) {
+                b.media_type = platform::SanitizeExternalText(b.media_type);
+                b.data = platform::SanitizeExternalText(b.data);
+                b.filename = platform::SanitizeExternalText(b.filename);
             } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
+                b.id = platform::SanitizeExternalText(b.id);
+                b.name = platform::SanitizeExternalText(b.name);
                 SanitizeJsonTree(b.input);
             } else if constexpr (std::is_same_v<T, ToolResultBlock>) {
+                b.tool_use_id = platform::SanitizeExternalText(b.tool_use_id);
                 b.content = platform::SanitizeExternalText(b.content);
             } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
                 b.text = platform::SanitizeExternalText(b.text);
                 b.signature = platform::SanitizeExternalText(b.signature);
             }
-            // ImageBlock:data 是 base64,不经清洗,也不该洗。
         },
         block);
 }
@@ -58,6 +64,21 @@ void SanitizeMessage(Message& message) {
     for (auto& block : message.content) {
         SanitizeContentBlock(block);
     }
+}
+
+void SanitizeRequest(Request& request) {
+    request.model = platform::SanitizeExternalText(request.model);
+    request.system = platform::SanitizeExternalText(request.system);
+    request.reasoning_effort = platform::SanitizeExternalText(request.reasoning_effort);
+    for (auto& message : request.messages) {
+        SanitizeMessage(message);
+    }
+    for (auto& tool : request.tools) {
+        tool.name = platform::SanitizeExternalText(tool.name);
+        tool.description = platform::SanitizeExternalText(tool.description);
+        SanitizeJsonTree(tool.input_schema);
+    }
+    SanitizeJsonTree(request.extra_body);
 }
 
 }  // namespace lubancode::api

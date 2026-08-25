@@ -231,3 +231,49 @@ TEST_CASE("SanitizeMessage:合法内容原样不动,坏字节按 U+FFFD 清洗")
             block);
     }
 }
+
+TEST_CASE("SanitizeRequest:所有 wire 字符串出口一并清洗") {
+    const std::string bad = "前\xE4\xB8后";
+    REQUIRE_FALSE(lubancode::platform::IsValidUtf8(bad));
+
+    Request request;
+    request.model = bad;
+    request.system = bad;
+    request.reasoning_effort = bad;
+    request.messages.push_back(Message{
+        Role::User,
+        {TextBlock{bad}, ToolUseBlock{bad, bad, nlohmann::json{{"path", bad}}},
+         ToolResultBlock{bad, bad, false}, ThinkingBlock{bad, bad}}});
+    request.tools.push_back(ToolDefinition{bad, bad, nlohmann::json{{"type", "object"}, {"title", bad}}});
+    request.extra_body = nlohmann::json{{"vendor", nlohmann::json{{"note", bad}}}};
+
+    SanitizeRequest(request);
+
+    CHECK(lubancode::platform::IsValidUtf8(request.model));
+    CHECK(lubancode::platform::IsValidUtf8(request.system));
+    CHECK(lubancode::platform::IsValidUtf8(request.reasoning_effort));
+    for (const auto& block : request.messages[0].content) {
+        std::visit(
+            [](const auto& b) {
+                using T = std::decay_t<decltype(b)>;
+                if constexpr (std::is_same_v<T, TextBlock>) {
+                    CHECK(lubancode::platform::IsValidUtf8(b.text));
+                } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
+                    CHECK(lubancode::platform::IsValidUtf8(b.id));
+                    CHECK(lubancode::platform::IsValidUtf8(b.name));
+                    CHECK(lubancode::platform::IsValidUtf8(b.input.at("path").get<std::string>()));
+                } else if constexpr (std::is_same_v<T, ToolResultBlock>) {
+                    CHECK(lubancode::platform::IsValidUtf8(b.tool_use_id));
+                    CHECK(lubancode::platform::IsValidUtf8(b.content));
+                } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
+                    CHECK(lubancode::platform::IsValidUtf8(b.text));
+                    CHECK(lubancode::platform::IsValidUtf8(b.signature));
+                }
+            },
+            block);
+    }
+    CHECK(lubancode::platform::IsValidUtf8(request.tools[0].name));
+    CHECK(lubancode::platform::IsValidUtf8(request.tools[0].description));
+    CHECK(lubancode::platform::IsValidUtf8(request.tools[0].input_schema.at("title").get<std::string>()));
+    CHECK(lubancode::platform::IsValidUtf8(request.extra_body["vendor"]["note"].get<std::string>()));
+}

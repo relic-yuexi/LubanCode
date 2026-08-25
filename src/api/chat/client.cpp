@@ -68,7 +68,9 @@ ChatCompletionsBackend::ChatCompletionsBackend(std::string base_url, std::string
 std::expected<void, Error> ChatCompletionsBackend::send_stream(
     const Request& request, const std::function<void(const StreamEvent&)>& on_event,
     const std::atomic<bool>* cancel) {
-    const nlohmann::json body_json = BuildRequestJson(request, extra_body_, options_);
+    Request sanitized_request = request;
+    SanitizeRequest(sanitized_request);
+    const nlohmann::json body_json = BuildRequestJson(sanitized_request, extra_body_, options_);
     std::string body;
     try {
         body = body_json.dump();

@@ -13,6 +13,7 @@
 #include "app/session_title.hpp"
 #include "cli/line_editor.hpp"
 #include "config/config.hpp"
+#include "platform/text_encoding.hpp"
 
 namespace {
 
@@ -279,6 +280,39 @@ TEST_CASE("标题清洗:剥围栏/引号、压空白、按码点限长") {
     // 中文按码点截断:5 个字限 3,绝不在多字节中腰劈开。
     const std::string truncated = SanitizeTitle("一二三四五", 3);
     CHECK(truncated == "一二三");
+}
+
+TEST_CASE("会话标题转写:600 字节刀口不留下半个汉字") {
+    struct CaptureBackend final : lubancode::api::Backend {
+        lubancode::api::Request captured;
+
+        std::expected<void, lubancode::api::Error> send_stream(
+            const lubancode::api::Request& request,
+            const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
+            const std::atomic<bool>*) override {
+            captured = request;
+            on_event(lubancode::api::TextDelta{"边界安全"});
+            on_event(lubancode::api::ContentBlockDone{0});
+            on_event(lubancode::api::MessageDone{"end_turn", {}});
+            return {};
+        }
+    } backend;
+
+    std::string text(599, 'a');
+    text += "中";  // 第 600 字节正落在这枚三字节字符的腰上。
+    lubancode::api::Message message;
+    message.role = lubancode::api::Role::User;
+    message.content.push_back(lubancode::api::TextBlock{text});
+
+    const auto title = lubancode::app::GenerateSessionTitle(
+        backend, "test-model", "", {message}, /*timeout_secs=*/2, /*accounting=*/nullptr);
+    REQUIRE(title.has_value());
+    CHECK(*title == "边界安全");
+    REQUIRE(backend.captured.messages.size() == 1);
+    REQUIRE(backend.captured.messages[0].content.size() == 1);
+    const auto& sent = std::get<lubancode::api::TextBlock>(backend.captured.messages[0].content[0]).text;
+    CHECK(lubancode::platform::IsValidUtf8(sent));
+    CHECK(sent == "用户: " + std::string(599, 'a') + "\n");
 }
 
 TEST_CASE("ModelRouterService:同 provider 走主 backend,跨 provider 建裸 client") {

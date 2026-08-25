@@ -269,7 +269,9 @@ std::expected<void, Error> AnthropicBackend::send_stream(
     const Request& request,
     const std::function<void(const StreamEvent&)>& on_event,
     const std::atomic<bool>* cancel) {
-    const json body = BuildRequestJson(request, native_web_search_, extra_body_);
+    Request sanitized_request = request;
+    SanitizeRequest(sanitized_request);
+    const json body = BuildRequestJson(sanitized_request, native_web_search_, extra_body_);
     std::string body_str;
     try {
         body_str = body.dump();

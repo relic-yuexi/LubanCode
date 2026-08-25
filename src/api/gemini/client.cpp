@@ -77,7 +77,9 @@ GeminiBackend::GeminiBackend(std::string base_url, std::string auth_token, int c
 std::expected<void, Error> GeminiBackend::send_stream(
     const Request& request, const std::function<void(const StreamEvent&)>& on_event,
     const std::atomic<bool>* cancel) {
-    const nlohmann::json body_json = BuildRequestJson(request, extra_body_);
+    Request sanitized_request = request;
+    SanitizeRequest(sanitized_request);
+    const nlohmann::json body_json = BuildRequestJson(sanitized_request, extra_body_);
     std::string body;
     try {
         body = body_json.dump();

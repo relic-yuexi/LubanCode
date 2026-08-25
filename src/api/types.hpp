@@ -153,6 +153,12 @@ struct Request {
     nlohmann::json extra_body = nlohmann::json::object();
 };
 
+// 整份请求的 UTF-8 出门关。所有真实 backend 在拼 wire JSON 前都要过
+// 一遍：system/messages/tool schema/extra_body 连同各枚标识一并清洗。
+// AgentLoop 里的早期清洗仍留着，用来治驻留历史；这里管所有绕过 loop 的
+// 后台请求（标题、压缩、记忆抽取等），免得哪条支路漏洗便触发 dump 316。
+void SanitizeRequest(Request& request);
+
 // ---------------------------------------------------------------------------
 // 流式事件
 // ---------------------------------------------------------------------------
