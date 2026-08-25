@@ -718,13 +718,29 @@ RenderState LineEditorCore::BuildRenderState(bool submitted, bool cleared, bool 
         } else if (tab_cycle_.has_value()) {
             matches = tab_cycle_->matches;
             selected_index = tab_cycle_->index;
-        } else if (lines_[0].find(U' ') == std::u32string::npos) {
-            // 还在敲命令词(整行没空格)才现算候选。命令词后面已带尾巴——
-            // 补成 "/effort " 的唯一命中完成态、或用户已敲参数进了参数区
-            // ——提示收起,不留小尾巴;这跟 HandleTab"光标越过命令词就不补"
-            // 是同一把门槛。轮转/菜单态各有进入那一刻存好的名单,不走这道
-            // 门,选中标记照常跟随。
-            matches = MatchingCandidateNames(lines_[0]);
+        } else {
+            const std::size_t space = lines_[0].find(U' ');
+            if (space == std::u32string::npos) {
+                // 还在敲命令词(整行没空格):按前缀现算候选。
+                matches = MatchingCandidateNames(lines_[0]);
+            } else {
+                // 命令词已敲完(词后跟着空格):取第一个词做大小写不敏感的
+                // 整词匹配,命中就把该命令的单行提示留在下面。Tab 唯一命中
+                // 会把行补成 "/record ",用户自己敲空格也进参数区——这时候
+                // 把提示整个收走,命令怎么用就没人提醒了(此前只能退格删掉
+                // 空格再看一眼);描述本身带用法("/copy plain 复制纯文本"),
+                // 留一行正合适。多义前缀("/c x")认不出是哪条命令,照旧
+                // 收起。轮转/菜单态各有进入那一刻存好的名单,不走这道门,
+                // 选中标记照常跟随。
+                const std::string word =
+                    ToLowerAscii(Utf32ToUtf8(lines_[0].substr(0, space)));
+                for (const auto& cand : slash_candidates_) {
+                    if (ToLowerAscii(cand.name) == word) {
+                        matches.push_back(cand.name);
+                        break;
+                    }
+                }
+            }
         }
         state.hint_lines = BuildHintLines(matches, selected_index);
         state.selected_index = selected_index;

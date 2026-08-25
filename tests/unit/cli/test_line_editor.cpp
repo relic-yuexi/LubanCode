@@ -527,7 +527,7 @@ TEST_CASE("BuildSlashCompletionCandidates: 与 AllSlashCommands 逐条对齐,/th
     CHECK(has_effort);
 }
 
-TEST_CASE("忙碌路同款 editor: /eff 出提示,Tab 一补成 /effort ,提示收起") {
+TEST_CASE("忙碌路同款 editor: /eff 出提示,Tab 一补成 /effort ,该命令用法行留住") {
     LineEditorCore editor(BuildSlashCompletionCandidates());
     editor.BeginLine(/*composer=*/true);
     TypeString(editor, "/eff");
@@ -538,7 +538,16 @@ TEST_CASE("忙碌路同款 editor: /eff 出提示,Tab 一补成 /effort ,提示�
     const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
     CHECK(state.line == U"/effort ");  // 按得着:一下补成整名 + 空格
     CHECK(state.cursor == state.line.size());
-    CHECK(state.hint_lines.empty());  // 补全带空格即收,不留 /effort 小尾巴
+    // 补全进参数区,用法行不收:命令词整词命中,单行提示还挂在下面。
+    REQUIRE(state.hint_lines.size() == 1);
+    CHECK(state.hint_lines[0].find("/effort") != std::string::npos);
+    CHECK(state.hint_lines[0].rfind("  ", 0) == 0);  // 非轮转/菜单态,无 "> " 标记
+
+    // 继续敲参数,提示行一直在——不用退格删空格才能看一眼用法。
+    const RenderState typing = editor.HandleKey(KeyEvent::Char(U'x'));
+    CHECK(typing.line == U"/effort x");
+    REQUIRE(typing.hint_lines.size() == 1);
+    CHECK(typing.hint_lines[0].find("/effort") != std::string::npos);
 }
 
 TEST_CASE("忙碌路同款 editor: 大小写不敏感,候选名写回规范小写") {
@@ -593,7 +602,9 @@ TEST_CASE("忙碌路同款 editor: 三枚同前缀,公共前缀 → 连续轮转
 
     state = editor.HandleKey(KeyEvent::Char(U'x'));  // 打字打断轮转会话
     CHECK(state.line == U"/alpha x");
-    CHECK(state.hint_lines.empty());  // 命令词后带尾巴,提示收起
+    REQUIRE(state.hint_lines.size() == 1);  // 命令词 /alpha 整词命中,用法行还在
+    CHECK(state.hint_lines[0].find("/alpha") != std::string::npos);
+    CHECK(state.hint_lines[0].find("/alpine") == std::string::npos);  // 不再列同前缀兄弟
     const std::u32string frozen = state.line;
     state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
     CHECK(state.line == frozen);  // 光标在参数区,旧轮转会话已失效,不乱补
