@@ -224,15 +224,49 @@ bool IsRuleRow(int row) {
 }
 
 // 结构化找 footer 的输入行(0.25.x 起排队界面定位不靠文案——文案一改便全
-// 倒,规矩是"按结构认框"):上横线(r) / 以 '>' 起的输入行(r+1) / 下横线
-// (r+2) / 非横线的状态行(r+3),四行连成框才算数。从底往上扫,命中最近
-// 的一个(流式期间最底下那个框就是 footer,不是上面滚动历史里的旧框)。
+// 倒,规矩是"按结构认框")。Composer 合流(P1)后框随内容长高:上横线、
+// 上留白、以 '>' 起的输入区、下补空、下横线、状态行——不再假定输入行紧贴
+// 横线。认法:输入行上头 4 行内有一根横线、下头 6 行内有一根横线且横线下
+// 不是横线(状态行)。从底往上扫,命中最近的一个(流式期间最底下那个框就
+// 是 footer;待发队列的 "> 消息" 行虽然也以 '>' 起,却在更上方,扫不到
+// 前就被真输入行截住)。
 int FindFooterInputRow(int max_rows = 400) {
-    for (int r = max_rows - 5; r >= 0; --r) {
-        const std::string input_text = ReadRow(r + 1);
-        if (IsRuleRow(r) && !input_text.empty() && input_text[0] == '>' && IsRuleRow(r + 2) &&
-            !IsRuleRow(r + 3)) {
-            return r + 1;
+    for (int i = max_rows - 2; i >= 0; --i) {
+        const std::string input_text = ReadRow(i);
+        if (input_text.empty() || input_text[0] != '>') {
+            continue;
+        }
+        bool rule_above = false;
+        for (int r = i - 1; r >= i - 4 && r >= 0; --r) {
+            rule_above = rule_above || IsRuleRow(r);
+        }
+        if (!rule_above) {
+            continue;
+        }
+        for (int b = i + 1; b <= i + 6 && b + 1 < 400; ++b) {
+            if (IsRuleRow(b) && !IsRuleRow(b + 1)) {
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+
+// 输入行上方的第一根横线(上横线):队列区就在它上头。下方的第一根横线是
+// 下横线,再下一行是状态行。
+int FindRuleAboveInput(int input_row) {
+    for (int r = input_row - 1; r >= input_row - 4 && r >= 0; --r) {
+        if (IsRuleRow(r)) {
+            return r;
+        }
+    }
+    return -1;
+}
+
+int FindRuleBelowInput(int input_row) {
+    for (int r = input_row + 1; r <= input_row + 6 && r < 400; ++r) {
+        if (IsRuleRow(r)) {
+            return r;
         }
     }
     return -1;
@@ -350,9 +384,11 @@ int wmain(int argc, wchar_t** argv) {
     int input_row = -1;
     Check(WaitForFooterInputRow(60000, &input_row), "G1 流式期间:框出现(60s 内,结构定位输入行)");
     if (input_row >= 0) {
-        const int top_rule_row = input_row - 1;
-        const int bottom_rule_row = input_row + 1;
-        const int status_row = input_row + 2;
+        const int top_rule_row = FindRuleAboveInput(input_row);
+        const int bottom_rule_row = FindRuleBelowInput(input_row);
+        const int status_row = bottom_rule_row + 1;
+        Check(top_rule_row == input_row - 2, "G1 上横线在输入行上方(隔一行留白)");
+        Check(bottom_rule_row >= 0, "G1 下横线在输入区之下");
         Check(IsRuleRow(top_rule_row), "G1 上横线在输入行上一行");
         Check(IsRuleRow(bottom_rule_row), "G1 下横线在输入行下一行(状态行上一行)");
         const std::string input_text = ReadRow(input_row);
@@ -391,15 +427,17 @@ int wmain(int argc, wchar_t** argv) {
     }
     SendKey(VK_RETURN, L'\r', 0);
     // 落队后:正文挪进输入框上方的队列区。0.28.x 起队列区带标题行,行序
-    // (自上而下)= 消息行、标题行、上横线、输入行;输入行清空回占位提示。
-    // 只有一条时不写"另有 N 条"(结构:消息行 = 输入行-3,标题行 = 输入行-2,
-    // 上横线行 = 输入行-1)。
+    // (自上而下)= 标题行、消息行、上横线、(留白)、输入行(BuildSteering
+    // QueueRows 的真序:标题在前);输入行清空回占位提示。只有一条时不写
+    // "另有 N 条"。位置全按上横线相对算(Composer 合流后输入行与横线之间
+    // 隔着留白行,不再紧贴)。
     bool g2_queued_row_seen = false;
     const DWORD g2_queue_deadline = GetTickCount() + 8000;
     while (GetTickCount() < g2_queue_deadline) {
         const int row = FindFooterInputRow();
-        if (row >= 3 && ReadRow(row - 3).find("你好排队") != std::string::npos &&
-            ReadRow(row - 2).find("送出") != std::string::npos && IsRuleRow(row - 1) &&
+        const int rule = row >= 0 ? FindRuleAboveInput(row) : -1;
+        if (rule >= 2 && ReadRow(rule - 1).find("你好排队") != std::string::npos &&
+            ReadRow(rule - 2).find("送出") != std::string::npos &&
             ReadRow(row).find("你好排队") == std::string::npos) {
             g2_queued_row_seen = true;
             break;
@@ -426,8 +464,9 @@ int wmain(int argc, wchar_t** argv) {
         const DWORD recall_deadline = GetTickCount() + 6000;
         while (GetTickCount() < recall_deadline) {
             const int row = FindFooterInputRow();
-            if (row >= 3 && ReadRow(row).find("你好排队") != std::string::npos &&
-                ReadRow(row - 3).find("编辑中") != std::string::npos) {
+            const int rule = row >= 0 ? FindRuleAboveInput(row) : -1;
+            if (rule >= 2 && ReadRow(row).find("你好排队") != std::string::npos &&
+                ReadRow(rule - 2).find("编辑中") != std::string::npos) {
                 recalled = true;
                 break;
             }
@@ -441,8 +480,9 @@ int wmain(int argc, wchar_t** argv) {
             const DWORD replace_deadline = GetTickCount() + 6000;
             while (GetTickCount() < replace_deadline) {
                 const int row = FindFooterInputRow();
-                if (row >= 3 && ReadRow(row - 3).find("你好排队过") != std::string::npos &&
-                    ReadRow(row - 3).find("编辑中") == std::string::npos &&
+                const int rule = row >= 0 ? FindRuleAboveInput(row) : -1;
+                if (rule >= 2 && ReadRow(rule - 1).find("你好排队过") != std::string::npos &&
+                    ReadRow(rule - 2).find("编辑中") == std::string::npos &&
                     ReadRow(row).find("你好排队过") == std::string::npos) {
                     replaced = true;
                     break;
@@ -459,7 +499,8 @@ int wmain(int argc, wchar_t** argv) {
         Check(WaitForText("shift+tab", 10000, &status_row2), "G2 落队后:状态行仍在(框没被冲散)");
         if (status_row2 >= 0) {
             Check(IsRuleRow(status_row2 - 1), "G2 落队后:下横线还在状态行上一行");
-            Check(IsRuleRow(status_row2 - 3), "G2 落队后:上横线还在(框结构完整,没有残影/错位)");
+            Check(!IsRuleRow(status_row2 - 2), "G2 落队后:下横线之上是补空(框随留白长高)");
+            Check(IsRuleRow(status_row2 - 5), "G2 落队后:上横线还在(框结构完整,没有残影/错位)");
         }
     }
 
@@ -475,7 +516,8 @@ int wmain(int argc, wchar_t** argv) {
         const DWORD hint_deadline = GetTickCount() + 15000;
         while (GetTickCount() < hint_deadline) {
             const int row = FindFooterInputRow();
-            if (row >= 3 && ReadRow(row - 3).find("你好排队") != std::string::npos) {
+            const int rule = row >= 0 ? FindRuleAboveInput(row) : -1;
+            if (rule >= 2 && ReadRow(rule - 1).find("你好排队") != std::string::npos) {
                 const std::string input_text = ReadRow(row);  // 输入行 "> /"(打了一个 '/')
                 int hint_count = 0;
                 for (int r = row + 3; r < row + 11 && r < 400; ++r) {
@@ -569,16 +611,19 @@ int wmain(int argc, wchar_t** argv) {
         Sleep(300);
         int post_status = FindLastRow("shift+tab");
         if (post_status >= 0) {
-            // composer 新框的标准版式:上横线(status-3) / 输入行(status-2) /
-            // 下横线(status-1) / 状态行(status)。"没有叠影残留"精确验成
-            // "紧邻状态行的这四行严丝合缝,不多不少"——下横线正下方(status-1)
-            // 是根线,它上面(status-2,输入行)不是线,再上面(status-3)又是
-            // 根线;这三行的形状跟流式框叠一份出来的"线-线-输入-线-线"完全
-            // 不同,足够分辨有没有叠影,不受"屏幕上方还有更早几轮遗留的框"
-            // 干扰(那些是正常的历史记录,不是这一次打断留下的残留)。
+            // composer 新框的标准版式(Composer 合流后与流式框同款,随留白
+            // 长高):上横线(status-5) / 上留白(status-4) / 输入行(status-3) /
+            // 下补空(status-2) / 下横线(status-1) / 状态行(status)。"没有叠影
+            // 残留"精确验成"这六行严丝合缝,不多不少"——输入行两侧都不是线,
+            // 上下横线各只有一根;叠一份旧框出来的"线贴线"形状跟它完全不同,
+            // 足够分辨有没有叠影,不受"屏幕上方还有更早几轮遗留的框"干扰
+            //(那些是正常的历史记录,不是这一次打断留下的残留)。
             Check(IsRuleRow(post_status - 1), "G3 打断后:composer 下横线正常(没有残留的流式框横线叠加)");
-            Check(!IsRuleRow(post_status - 2), "G3 打断后:下横线正上方是输入行,不是另一根线(没有双线叠影)");
-            Check(IsRuleRow(post_status - 3), "G3 打断后:上横线在正确位置(框形状完整,不多不少)");
+            Check(!IsRuleRow(post_status - 2), "G3 打断后:下横线正上方是补空,不是另一根线(没有双线叠影)");
+            Check(!IsRuleRow(post_status - 3) && !ReadRow(post_status - 3).empty() &&
+                      ReadRow(post_status - 3)[0] == '>',
+                  "G3 打断后:补空之上是 '> ' 输入行(框形状完整,不多不少)");
+            Check(IsRuleRow(post_status - 5), "G3 打断后:上横线在正确位置(留白之上)");
             for (int r = post_status - 6; r <= post_status; ++r) {
                 const std::string row_text = ReadRow(r);
                 if (!row_text.empty()) {

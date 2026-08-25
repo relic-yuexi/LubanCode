@@ -95,10 +95,10 @@ std::vector<CompletionCandidate> BuildSlashCompletionCandidates() {
 
 namespace {
 
-// 主 composer 的正文区至少一行：单行正文紧贴上下横线，不加空白。
-// 内容增多时自然向下长高。
-constexpr int kComposerTopPaddingRows = 0;
-constexpr int kComposerMinBodyRows = 1;
+// Composer 合流 P1:输入区的上下留白/最小正文高度常量挪去 bottom_chrome.hpp
+// (kComposerTopPaddingRows/kComposerMinBodyRows),Idle 与 Busy 同源取值。
+// 本地那份 0/1 是 b4834b6 顺手退掉的旧值,与 ReadLineKeyByKey 开框时打的
+// "\n\n"(上横线+一行留白)对不上账,合流时一并归位成 1/3。
 
 void StripTrailingCrLf(std::string& s) {
     while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) {
@@ -281,7 +281,17 @@ StatusLineData& StatusDataSlot() {
 struct StreamFooterState {
     bool enabled = false;   // 只有 Windows 真控制台 + 开了重画才为真
     std::string hint;       // 空闲占位提示(BeginStreamFooter 按主题 plain 与否建好)
-    std::string echo;       // 排队实时回显文本;空串 = 输入行显示占位提示
+    // 迁移注记(Composer 合流 P1):echo/hints 是编辑器状态的旧镜像,布局
+    // 已改读下面那份完整 RenderState(多行软换行/光标/提示全从它来),这两
+    // 个字段不再有人写、也不再有人读。留在这儿是给 P5 的删除清单对账,
+    // 在那之前不许往里添新能力,也不许让新代码再依赖它们。
+    std::string echo;       // (废弃,见上;P5 删)
+    std::vector<std::string> hints;  // (废弃,见上;P5 删)
+    // 忙时 composer 的完整镜像:TurnInputListener::refresh_footer 每次编辑
+    // 后整份写入,RedrawStreamFooterLocked 组 BottomChromeModel 时直接带上。
+    // P1 之前 footer 只拿首行回显加"另有 N 行"顶数,多行光标全靠猜——
+    // 这份镜像就是那条捷径的替代。
+    RenderState composer;
     std::string color;      // 淡色前缀(theme.stats);plain 主题为空串
     std::string reset;      // theme.reset;plain 主题为空串
     Theme theme;             // 完整主题:画框(BoxRuleLine)、状态行(PrintStatusLine)
@@ -289,8 +299,6 @@ struct StreamFooterState {
     // 0.28.x:队列区不再在 footer 里存副本——每帧重画时现拉
     // SessionSteeringQueue() 的轻量快照(锁内拷贝、用完即放),工具边界
     // 送达/打断收场动了账,下一帧自然对上,不会挂着旧条目。
-    std::vector<std::string> hints;   // 流式输入行的 slash 命令提示行(画在状态行
-                                      // 之下,跟空闲 composer 同一层级),空 = 没有提示
     bool working = false;             // true 时在输入框上方合成 Working 动画
     std::string working_label;
     std::size_t working_highlight = 0;
@@ -334,9 +342,13 @@ void ForgetStreamFooterFrame(StreamFooterState& f) {
 }
 
 // 0.22.x 流式脚注框化:跟 composer 视觉一致的完整框——上横线 + 输入行
-// (`> ` + 已键入内容 / 空闲占位提示) + 下横线 + 状态行,基础 4 行；有
-// 排队消息时再在上方加常驻队列区。上下横线复用 BoxRuleLine、状态行复用
-// PrintStatusLine(定义见下面 composer 输入框那节),不重写一份画法。
+// (`> ` + 已键入内容 / 空闲占位提示) + 下横线 + 状态行;有排队消息时再在
+// 上方加常驻队列区。上下横线复用 BoxRuleLine、状态行复用 BuildStatusLine,
+// 不重写一份画法。
+// 迁移注记(Composer 合流 P1):kStreamFooterBoxRows(基础 4 行的固定高度
+// 假设)已无引用——框高改由 BuildBottomChromeLayout 按真实物理行 + 留白
+// 报账。常量本体 P5 随收尾删除清单一并清走,在那之前不许再拿"框永远四行"
+// 当前提写新代码。
 constexpr int kStreamFooterBoxRows = 4;
 constexpr std::size_t kMaxVisibleQueuedLines = 3;
 // 导航坞常态最多单列几只代理(仿 Claude Code 的窗口密度);再多便开窗,
@@ -354,7 +366,7 @@ constexpr int kDockMaxVisibleEntries = 5;
 constexpr const char* kSyncOutputBegin = "\x1b[?2026h";
 constexpr const char* kSyncOutputEnd = "\x1b[?2026l";
 
-// 把 top_row 起 kStreamFooterBoxRows 行清空(连字符属性一起还原,不留主题色
+// 把 top_row 起 rows 行清空(连字符属性一起还原,不留主题色
 // 残底,同 CollapseBoxOnSubmit 的取舍)——越界的行(贴着缓冲区顶/底)直接
 // 跳过,不是错误。
 void ClearStreamFooterRowsAt(int top_row, int rows, int width, int height) {
@@ -367,28 +379,9 @@ void ClearStreamFooterRowsAt(int top_row, int rows, int width, int height) {
     }
 }
 
-std::string StripAnsiForDisplayWidth(const std::string& text) {
-    std::string plain;
-    plain.reserve(text.size());
-    for (std::size_t i = 0; i < text.size();) {
-        if (text[i] == '\x1b' && i + 1 < text.size() && text[i + 1] == '[') {
-            i += 2;
-            while (i < text.size()) {
-                const unsigned char ch = static_cast<unsigned char>(text[i++]);
-                if (ch >= 0x40U && ch <= 0x7EU) {
-                    break;
-                }
-            }
-            continue;
-        }
-        plain.push_back(text[i++]);
-    }
-    return plain;
-}
-
-int FooterRowDisplayWidth(const std::string& text) {
-    return static_cast<int>(DisplayWidthUtf8(StripAnsiForDisplayWidth(text)));
-}
+// Composer 合流 P1:StripAnsiForDisplayWidth/FooterRowDisplayWidth(逐行量
+// 显示宽)随行拼装一并挪去 cli/bottom_chrome.cpp 的 PlainDisplayWidth——
+// footer 不再自己拼行,自然不再自己量行。
 
 std::vector<std::string> FooterUtf8Glyphs(const std::string& text) {
     std::vector<std::string> out;
@@ -569,14 +562,8 @@ struct BoxChrome {
     ConfirmMode mode = ConfirmMode::Confirm;
 };
 
-// 一根框线(带主题淡色;plain 主题 theme.stats/reset 都是空串,自动退化成
-// 无色 '-' 线,不用另判断)。0.21.x:去掉旧的 100 列上限,框线满终端宽
-// (console_width - 1)随终端跑——max_width 传 console_width 自身,
-// min(console_width - 1, console_width) 恒等于 console_width - 1。
-std::string BoxRuleLine(const Theme& theme, int console_width) {
-    const bool plain = theme.reset.empty();
-    return theme.stats + BuildDividerLine(console_width, plain, console_width) + theme.reset;
-}
+// BoxRuleLine 挪去 cli/bottom_chrome.cpp(布局函数画横线要用,不能留在
+// 终端层);这里经 bottom_chrome.hpp 直接用。
 
 // 状态行:模式段按档配色(确认=默认色、auto=stats、yolo=error),信息段
 // 恒 stats 淡色。0.21.x 起状态行是档位的唯一去处(提示符不再带前缀)。文本拼装是
@@ -677,25 +664,23 @@ void PaintInlineFrameLegacy(const InlineFrame* previous, const InlineFrame& next
     platform::SetCursorPos(next.cursor_x, origin_y + next.cursor_row);
 }
 
-// composer 先排成物理行，再拿新旧两帧逐行比较。提示符后的第一行窄些，
-// 续行留两格缩进；正文软换行，不再水平滚。VT 终端把擦行、落字、归光标
-// 攒进一段字节，一次 write + flush。老终端仍走 Console API 兼容路。
+// 空闲路的底栏重画(Composer 合流 P1 起收成薄 adapter):这里只管锚点、
+// 滚屏腾位与落笔,输入行拼装、软换行、padding、最小正文高度、光标全部
+// 交给唯一的 BuildBottomChromeLayout——忙时那条路(RedrawStreamFooter
+// Locked)组的是同一只 BottomChromeModel,两条路不再各拼一套行序。
 //
-// 0.29.x"导航贴底"一单:整帧记账的次序定为 规格"固定布局"——
-//   rows_above(待发队列) → 上横线(带查看态右端短标签 rule_tag)→ composer
-//   → 下横线 → 状态行 → rows_below(代理导航坞) → slash 提示。
-// 导航坞挪到 composer 与状态栏之后贴底,不再从输入框上方向上长;待发队列
-// 仍属 composer 上方(它是即将发送的内容,不属代理导航)。锚点 start_row 仍
-// 是 composer 首行(提示符行),帧顶 = start_row - rows_above - 1 由这里推;
-// 上一帧的绝对帧顶记在 prev_frame_origin,面板增减/终端缩放/滚屏挪了位就
-// 对不上,整帧重画。提示符并进首行文本(x=0),不再靠进函数前那一次
-// std::cout 存活。
-void RedrawEditArea(int& start_row, int& prompt_end_col, const std::string& prompt,
-                    const RenderState& state, const std::vector<std::string>& rows_above,
-                    const std::vector<std::string>& rows_below,
-                    const std::string& rule_tag, int& prev_body_row_count,
-                    std::optional<InlineFrame>& previous_frame, int& prev_frame_origin,
-                    bool vt_enabled, const BoxChrome& chrome = BoxChrome{}) {
+// 0.29.x"导航贴底"一单定下的行次序(队列 → 上横线 → composer → 下横线 →
+// 状态行 → 代理坞 → slash 提示)如今写在 bottom_chrome.cpp 的布局函数里。
+// 锚点 start_row 仍是 composer 首行(提示符行),帧顶 = start_row - 上方
+// 行数 - 横线/留白 由这里推;上一帧的绝对帧顶记在 prev_frame_origin,面板
+// 增减/终端缩放/滚屏挪了位就对不上,整帧重画。
+//
+// chrome_out 回传行数账(含 composer 摘要指纹):100ms 拍的指纹比较与
+// 真画那一帧必须出自同一颗布局函数,不然"tick 拿 slash 提示算指纹、屏上
+// 画的是搜索行"这类账目错位又会回来。
+void RedrawEditArea(int& start_row, const BottomChromeModel& model, const Theme& theme,
+                    int& prev_body_row_count, std::optional<InlineFrame>& previous_frame,
+                    int& prev_frame_origin, bool vt_enabled, BottomChromeFrame* chrome_out = nullptr) {
     const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
     if (!info.has_value()) {
         return;  // 拿不到屏幕信息就没法定位,这一帧放弃重画,下一帧再试
@@ -703,89 +688,28 @@ void RedrawEditArea(int& start_row, int& prompt_end_col, const std::string& prom
     const int buffer_width = info->width;
     const int buffer_height = info->height;
 
-    constexpr int kContinuationIndent = 2;
-    const std::vector<std::u32string> fallback_lines{std::u32string()};
-    const std::vector<std::u32string>& edit_lines = state.lines.empty() ? fallback_lines : state.lines;
-    const WrappedComposerLayout layout = LayoutComposerRows(
-        edit_lines, state.cursor_row, state.cursor_col,
-        buffer_width - prompt_end_col - 1, buffer_width - kContinuationIndent - 1);
-
-    const bool with_rule = chrome.enabled;
-    const int top_padding = chrome.enabled ? kComposerTopPaddingRows : 0;
-    const int bottom_padding = chrome.enabled
-                                   ? (std::max)(0, kComposerMinBodyRows - top_padding -
-                                                      static_cast<int>(layout.rows.size()))
-                                   : 0;
-    int above_count = static_cast<int>(rows_above.size());
-    const int fixed_rows_above_input = (with_rule ? 1 : 0) + top_padding;
+    // 贴缓冲顶时舍弃最老的队列行(锚点 start_row 上方摆不下),与合流前
+    // 同一条护栏;裁完再进布局函数。
+    BottomChromeModel effective = model;
+    const int fixed_rows_above_input =
+            (model.framed ? 1 : 0) + (model.framed ? model.composer.top_padding_rows : 0);
+    int above_count = static_cast<int>(effective.queue_rows.size());
     if (above_count + fixed_rows_above_input > start_row) {
         above_count = std::max(0, start_row - fixed_rows_above_input);
+        effective.queue_rows.erase(effective.queue_rows.begin(),
+                                   effective.queue_rows.end() - above_count);
     }
-    const int first_above = static_cast<int>(rows_above.size()) - above_count;
     int frame_top = start_row - above_count - fixed_rows_above_input;
     if (frame_top < 0) {
         frame_top = 0;  // 理论到不了(box 模式提示符行上方至少有一行),防越界
     }
 
-    InlineFrame next;
-    next.rows.reserve(above_count + layout.rows.size() + (chrome.enabled ? 3U : 0U) +
-                      static_cast<std::size_t>(top_padding + bottom_padding) +
-                      rows_below.size() + state.hint_lines.size());
-    for (int i = first_above; i < static_cast<int>(rows_above.size()); ++i) {
-        next.rows.push_back(InlineFrameRow{
-            0, buffer_width, false, TruncateUtf8ToDisplayWidth(rows_above[i], buffer_width - 1)});
-    }
-    if (with_rule) {
-        const std::string rule =
-            rule_tag.empty()
-                ? BoxRuleLine(*chrome.theme, buffer_width)
-                : BuildRuleWithTag(chrome.theme->stats, chrome.theme->reset, rule_tag, buffer_width);
-        next.rows.push_back(InlineFrameRow{0, buffer_width, true, rule});
-    }
-    for (int i = 0; i < top_padding; ++i) {
-        next.rows.push_back(InlineFrameRow{0, buffer_width, true, {}});
-    }
-    for (std::size_t i = 0; i < layout.rows.size(); ++i) {
-        const bool first = i == 0;
-        InlineFrameRow row;
-        // 续行缩进只落在文本里。若再把绘制起点右移两格，屏上会缩进四格，
-        // 光标却仍按两格算，末字便被方块光标压住。
-        row.x = 0;
-        row.clear_width = buffer_width;
-        row.text = first ? prompt + Utf32ToUtf8(layout.rows[i].text)
-                         : std::string(kContinuationIndent, ' ') + Utf32ToUtf8(layout.rows[i].text);
-        next.rows.push_back(std::move(row));
-    }
-    for (int i = 0; i < bottom_padding; ++i) {
-        next.rows.push_back(InlineFrameRow{0, buffer_width, true, {}});
-    }
+    const BottomChromeLayout layout = BuildBottomChromeLayout(effective, theme, buffer_width);
+    const InlineFrame& next = layout.frame;
 
-    if (chrome.enabled) {
-        next.rows.push_back(InlineFrameRow{0, buffer_width, true,
-                                           BoxRuleLine(*chrome.theme, buffer_width)});
-        next.rows.push_back(InlineFrameRow{0, buffer_width, true,
-                                           BuildStatusLine(chrome, buffer_width - 1)});
-    }
-    // 导航坞:状态行之下贴底(0.29.x 层级反转);slash 提示是短命 UI,垫最底。
-    for (const auto& dock : rows_below) {
-        next.rows.push_back(InlineFrameRow{
-            0, buffer_width, false, TruncateUtf8ToDisplayWidth(dock, buffer_width - 1)});
-    }
-    for (const auto& hint : state.hint_lines) {
-        next.rows.push_back(InlineFrameRow{
-            0, buffer_width, false, TruncateUtf8ToDisplayWidth(hint, buffer_width - 1)});
-    }
-
-    const int above_total = above_count + fixed_rows_above_input;
-    next.cursor_x = layout.cursor_row == 0
-                        ? prompt_end_col + layout.cursor_col
-                        : kContinuationIndent + layout.cursor_col;
-    next.cursor_row = above_total + static_cast<int>(layout.cursor_row);
-
-    const int hint_count = static_cast<int>(state.hint_lines.size());
-    const int box_rows = chrome.enabled ? 2 : 0;
-    const int body_rows = static_cast<int>(layout.rows.size()) - 1 + box_rows + hint_count +
-                           above_total + bottom_padding + static_cast<int>(rows_below.size());
+    // 锚点(提示符行)之下、帧顶之上还有队列行与横线留白;body_rows 记
+    // "帧顶之下共几行"(整帧账,retire/collapse 按它擦旧帧)。
+    const int body_rows = std::max(0, static_cast<int>(next.rows.size()) - 1);
     const int rows_to_touch = std::max(body_rows, prev_body_row_count);
     const int total_rows = std::max(1, static_cast<int>(next.rows.size()));
     int frame_origin = frame_top;
@@ -804,6 +728,8 @@ void RedrawEditArea(int& start_row, int& prompt_end_col, const std::string& prom
     }
 
     // 上一帧的绝对帧顶对不上(面板增减/滚屏/换锚)就不比了,整帧重画。
+    // VT 终端把擦行、落字、归光标攒进一段字节,一次 write + flush;老终端
+    // 仍走 Console API 兼容路。
     const InlineFrame* previous =
         previous_frame.has_value() && prev_frame_origin == frame_top ? &*previous_frame : nullptr;
     if (vt_enabled) {
@@ -816,6 +742,9 @@ void RedrawEditArea(int& start_row, int& prompt_end_col, const std::string& prom
     previous_frame = std::move(next);
     prev_frame_origin = frame_top;
     prev_body_row_count = body_rows;
+    if (chrome_out != nullptr) {
+        *chrome_out = layout.chrome;
+    }
 }
 
 // 0.17.0 输入框化的提交收尾:横线擦掉、提交行保留。取舍:两个方案里选了
@@ -1133,20 +1062,37 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     };
 
     // 一本帧账:待发队列在 composer 上横线之上,导航坞在状态栏之下贴底,
-    // slash 提示垫最底。空闲 composer 与流式 footer 认的是同一只
-    // BottomChromeFrame(同一套 LayoutAgentDock + BuildSteeringQueueRows),
-    // 两条路不许各拼一套行序。
-    const auto build_frame = [&](const std::vector<std::string>& queue_rows,
-                                 const std::vector<std::string>& dock, const RenderState& state,
+    // slash 提示垫最底。Composer 合流 P1 起空闲路组的是 BottomChromeModel,
+    // 行数账与指纹都出自唯一的 BuildBottomChromeLayout——与流式 footer 同
+    // 一颗布局函数,两条路不许再各拼一套行序,也不许一边按逻辑行数报高、
+    // 一边写死一行。
+    const auto build_model = [&](const RenderState& state, const std::vector<std::string>& queue_rows,
+                                 const std::vector<std::string>& dock, const std::string& tag,
                                  int selected_task_id) {
-        BottomChromeFrame frame;
-        frame.queue_rows = queue_rows;
-        frame.agent_dock_rows = dock;
-        frame.transient_rows = state.hint_lines;
-        frame.composer_rows = std::max(1, static_cast<int>(state.lines.size()));
-        frame.selected_task_id = selected_task_id;
-        frame.revision = BottomChromeRevision(frame);
-        return frame;
+        BottomChromeModel model;
+        model.framed = box;
+        model.queue_rows = queue_rows;
+        model.agent_dock_rows = dock;
+        model.transient_rows = state.hint_lines;
+        model.rule_tag = tag;
+        model.selected_task_id = selected_task_id;
+        model.composer.editor = state;
+        model.composer.prompt = prompt;
+        model.composer.mode = ComposerMode::Idle;
+        model.composer.confirm_mode = editor.confirm_mode();
+        if (box) {
+            const std::optional<platform::ScreenInfo> info_now = platform::GetScreenInfo();
+            const int width = info_now.has_value() ? info_now->width : 80;
+            model.status_rows = {BuildStatusLine(chrome, width - 1)};
+        }
+        return model;
+    };
+    // 只算行数账不落笔(100ms 拍的指纹比较用);与真画那一帧出自同一颗
+    // 布局函数,指纹才与画面一致。状态行文本不进指纹,宽一点窄一点无妨。
+    const auto build_frame = [&](const BottomChromeModel& model) {
+        const std::optional<platform::ScreenInfo> info_now = platform::GetScreenInfo();
+        const int width = info_now.has_value() ? info_now->width : 80;
+        return BuildBottomChromeLayout(model, theme, width).chrome;
     };
 
     // 搜索开着时把 RenderState 的提示行换成命中清单;查询变化就地重跑
@@ -1247,11 +1193,12 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         const std::vector<std::string> dock = build_dock(entries, tag);
         const std::vector<std::string> queue_rows = queue_rows_now();
         const AgentPanelSession::Snapshot snapshot = panel_session.SnapshotFor(nav_ids_for(entries));
-        const BottomChromeFrame frame =
-            build_frame(queue_rows, dock, state, snapshot.selected_task_id);
         chrome.mode = editor.confirm_mode();
-        RedrawEditArea(start_row, prompt_end_col, prompt, state, frame.queue_rows, frame.agent_dock_rows,
-                       tag, prev_body_row_count, previous_frame, prev_frame_origin, vt_enabled, chrome);
+        const BottomChromeModel model =
+            build_model(state, queue_rows, dock, tag, snapshot.selected_task_id);
+        BottomChromeFrame frame;
+        RedrawEditArea(start_row, model, theme, prev_body_row_count, previous_frame,
+                       prev_frame_origin, vt_enabled, &frame);
         panel_fingerprint = fingerprint_of(entries, frame, snapshot);
     };
 
@@ -1604,8 +1551,8 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             const AgentPanelSession::Snapshot snapshot = panel_session.SnapshotFor(nav_ids_for(entries));
             RenderState tick_state = editor.CurrentRenderState();
             apply_search_hints(tick_state);  // 搜索行进指纹,与真画的那份同一账
-            const BottomChromeFrame frame = build_frame(queue_rows, dock, tick_state,
-                                                         snapshot.selected_task_id);
+            const BottomChromeFrame frame =
+                build_frame(build_model(tick_state, queue_rows, dock, tag, snapshot.selected_task_id));
             if (viewed_before_tick != 0 && snapshot.viewed_task_id == 0) {
                 // 正在查看的任务完成退场(结果交回 main)/被清理:原子回
                 // main——上方视口换源、composer 目标回 main、选择落相邻运行
@@ -3316,7 +3263,7 @@ void RedrawStreamFooterLocked() {
         ForgetStreamFooterFrame(f);
     }
 
-    if (f.hint.empty() && f.echo.empty()) {
+    if (f.hint.empty() && f.composer.line.empty() && f.composer.hint_lines.empty()) {
         // 没启用 / 还没准备好文案:跟老逻辑一样,这一笔不画。
         std::cout << kSyncOutputEnd;
         std::cout.flush();
@@ -3324,7 +3271,6 @@ void RedrawStreamFooterLocked() {
         return;
     }
 
-    const int working_rows = f.working ? 1 : 0;
     // 代理导航坞(0.29.x 层级反转):正文/Working > 待发队列 > 上横线(右端挂
     // 当前代理 title)> composer > 下横线 > 状态栏 > 导航坞 > slash 提示。
     // 数据与状态机跟空闲同源(AgentPanelProvider + 会话级 AgentPanelSession +
@@ -3382,17 +3328,35 @@ void RedrawStreamFooterLocked() {
         steering_snapshot.empty()
             ? std::vector<std::string>{}
             : BuildSteeringQueueRows(steering_snapshot, queue_view);
-    // 一本帧账(与空闲 composer 同一只 BottomChromeFrame):队列在上横线之
-    // 上、坞在状态栏之下、slash 提示垫最底。高度全部从 frame 报——探底滚
-    // 屏、旧框擦除(都按 f.rows 报账)随之生效。
-    BottomChromeFrame frame;
-    frame.queue_rows = queue_rows_text;
-    frame.agent_dock_rows = dock_rows_text;
-    frame.transient_rows = f.hints;
-    frame.composer_rows = 1;  // footer 输入行单行会计(多行尾巴只写行数提示)
-    frame.selected_task_id = dock_selected_task_id;
-    frame.revision = BottomChromeRevision(frame);
-    const int total_rows = working_rows + frame.TotalRows();
+
+    // Composer 合流 P1:footer 与空闲 composer 组同一只 BottomChromeModel、
+    // 调唯一的 BuildBottomChromeLayout。输入区不再单行会计——完整 RenderState
+    // (全部逻辑行、软换行、真实光标)进布局,placeholder 沿用 f.hint;状态
+    // 行尾部照旧多一段 Esc 打断提示,由这里拼好递给布局摆位。
+    const int width = info->width;
+    const BoxChrome chrome{true, &f.theme, SharedEditor().confirm_mode()};
+    BottomChromeModel model;
+    if (f.working) {
+        model.activity_rows = {BuildFooterWorkingLine(f, width)};
+    }
+    model.queue_rows = queue_rows_text;
+    model.agent_dock_rows = dock_rows_text;
+    model.transient_rows = f.composer.hint_lines;
+    model.rule_tag = footer_rule_tag;
+    model.selected_task_id = dock_selected_task_id;
+    model.composer.editor = f.composer;
+    model.composer.prompt = "> ";
+    model.composer.placeholder = f.hint;
+    model.composer.mode = ComposerMode::BusyQueue;
+    model.composer.confirm_mode = chrome.mode;
+    {
+        const std::string interrupt = StreamFooterInterruptText(f.reset.empty());
+        const int interrupt_cols = 3 + static_cast<int>(DisplayWidthUtf8(interrupt));  // " · " + 提示
+        model.status_rows = {BuildStatusLine(chrome, (std::max)(20, width - 1 - interrupt_cols)) +
+                             f.color + " · " + interrupt + f.reset};
+    }
+    const BottomChromeLayout layout = BuildBottomChromeLayout(model, f.theme, width);
+    const int total_rows = static_cast<int>(layout.frame.rows.size());
 
     // 框落在正文光标的下一行:正文停在行中(bx>0)就 by+1,正文刚换行
     // 停在行首(bx==0)就落在 by 这空行上——两种都是"正文当前底部的下一行"。
@@ -3413,96 +3377,28 @@ void RedrawStreamFooterLocked() {
     }
     const int target = by + (bx > 0 ? 1 : 0);
 
-    const int width = info->width;
-    const BoxChrome chrome{true, &f.theme, SharedEditor().confirm_mode()};
-    std::vector<std::string> rendered_rows;
-    rendered_rows.reserve(static_cast<std::size_t>(total_rows));
-    if (f.working) {
-        rendered_rows.push_back(BuildFooterWorkingLine(f, width));
-    }
-
-    // 待发队列:上横线之上、Working 之下(它是即将发送的内容,不属代理导航)。
-    const int room = (std::max)(0, width - 1);
-    for (const std::string& queue_row : frame.queue_rows) {
-        rendered_rows.push_back(f.color + TruncateUtf8ToDisplayWidth(queue_row, room) + f.reset);
-    }
-
-    // 上横线:查看态挂着子代理时右端挂它的 title(规格六),横线保底宽度、
-    // 塞不下退整线——BuildRuleWithTag 自己会算。
-    rendered_rows.push_back(
-        footer_rule_tag.empty()
-            ? BoxRuleLine(f.theme, width)
-            : BuildRuleWithTag(f.theme.stats, f.theme.reset, footer_rule_tag, width));
-
-    // 输入行:"> " + 已键入内容(纯文本,照真实输入的样子);空闲时 "> " +
-    // 淡色占位提示。整帧先装进 vector，既能一气画完，也能把各行真实宽度
-    // 记下，供下一次 resize 追旧框。
-    const std::size_t input_row_index = rendered_rows.size();
-    const std::string prefix = "> ";
-    const int content_width = width - 1 - static_cast<int>(DisplayWidthUtf8(prefix));
-    std::string input_line = prefix;
-    if (content_width > 0) {
-        if (!f.echo.empty()) {
-            input_line += TruncateUtf8ToDisplayWidth(f.echo, content_width);
-        } else {
-            input_line += f.color + TruncateUtf8ToDisplayWidth(f.hint, content_width) + f.reset;
-        }
-    }
-    rendered_rows.push_back(std::move(input_line));
-
-    rendered_rows.push_back(BoxRuleLine(f.theme, width));
-
-    // 状态行 = 常规状态段 + "Esc 打断"提示(规格:打断提示进状态行,不许
-    // 挤进输入行)。先按留出的余量截常规段,再以纯文本段追加——两段各自
-    // 包色,不做整行截断,跟 PrintStatusLine 的分段截断一个路数。plain 主题
-    // f.color/f.reset 均为空串,自然无 ANSI。
-    {
-        const std::string interrupt = StreamFooterInterruptText(f.reset.empty());
-        const int interrupt_cols = 3 + static_cast<int>(DisplayWidthUtf8(interrupt));  // " · " + 提示
-        rendered_rows.push_back(
-            BuildStatusLine(chrome, (std::max)(20, width - 1 - interrupt_cols)) +
-            f.color + " · " + interrupt + f.reset);
-    }
-
-    // 导航坞:状态栏之下贴底(0.29.x 层级反转),逐行摆、按屏宽截断(渲染
-    // 出的行不带 ANSI,plain 主题天然纯文本)。上横线起整块框从唯一锚点
-    // 一次画完,擦除按上一帧 f.rows 报账——坞增高时旧帧整个先擦净,不留
-    // 第二份提示或 main。
-    for (const std::string& dock_row : frame.agent_dock_rows) {
-        rendered_rows.push_back(f.color + TruncateUtf8ToDisplayWidth(dock_row, room) + f.reset);
-    }
-
-    // slash 提示行:导航坞之下垫最底(短命 UI),纯文本、按屏宽截断(跟
-    // ReadLineKeyByKey 画 hint_lines 一个路数);plain 主题不夹 ANSI。
-    for (const std::string& transient_row : frame.transient_rows) {
-        rendered_rows.push_back(TruncateUtf8ToDisplayWidth(transient_row, room));
-    }
-
-    for (std::size_t i = 0; i < rendered_rows.size(); ++i) {
+    for (std::size_t i = 0; i < layout.frame.rows.size(); ++i) {
         platform::SetCursorPos(0, target + static_cast<int>(i));
-        std::cout << rendered_rows[i];
+        std::cout << layout.frame.rows[i].text;
     }
 
     std::cout << kSyncOutputEnd;
     std::cout.flush();
     // 正文位置藏起来，肉眼所见的光标留在输入框。下一笔正文来时
-    // EraseStreamFooterLocked 会先拨回 bx/by。
-    const int typed_width = f.echo.empty() ? 0 : static_cast<int>(DisplayWidthUtf8(f.echo));
-    const int input_cursor_column = (std::min)(width - 1, 2 + typed_width);
-    const int input_row = target + static_cast<int>(input_row_index);
-    platform::SetCursorPos(input_cursor_column, input_row);
+    // EraseStreamFooterLocked 会先拨回 bx/by。光标来自布局(真实软换行位置),
+    // 不再按首行回显宽度猜;resize 追踪跟着光标行走(ComputeFooterResize
+    // Recovery 的"input row"语义即"光标所在行",多行输入也成立)。
+    const int cursor_row = layout.cursor_row;
+    const int cursor_column = layout.cursor_x;
+    platform::SetCursorPos(cursor_column, target + cursor_row);
     f.row = target;
-    f.rows = static_cast<int>(rendered_rows.size());
+    f.rows = total_rows;
     f.body_x = bx;
     f.body_y = by;
-    f.input_row = input_row;
-    f.input_row_index = input_row_index;
-    f.input_cursor_column = input_cursor_column;
-    f.painted_row_widths.clear();
-    f.painted_row_widths.reserve(rendered_rows.size());
-    for (const std::string& row : rendered_rows) {
-        f.painted_row_widths.push_back(FooterRowDisplayWidth(row));
-    }
+    f.input_row = target + cursor_row;
+    f.input_row_index = static_cast<std::size_t>(cursor_row);
+    f.input_cursor_column = cursor_column;
+    f.painted_row_widths = layout.painted_row_widths;
 }
 
 void BeginStreamFooter(const Theme& theme, bool enabled) {
@@ -3511,7 +3407,8 @@ void BeginStreamFooter(const Theme& theme, bool enabled) {
     f.enabled = enabled;
     ForgetStreamFooterFrame(f);
     f.last_width = -1;
-    f.echo.clear();
+    f.composer = RenderState{};  // 忙时草稿从空开始(取回编辑除外,那由取回方写)
+    f.echo.clear();   // 废弃镜像(见 StreamFooterState 迁移注记),归零防旧值漏读
     f.hints.clear();
     f.working = false;
     f.working_label.clear();
@@ -3532,6 +3429,7 @@ void EndStreamFooter() {
     StreamFooterState& f = FooterSlot();
     EraseStreamFooterLocked();  // 擦掉常驻那行,免得残留在 markdown 收束重画区之外
     f.enabled = false;
+    f.composer = RenderState{};
     f.echo.clear();
     f.hints.clear();
     f.hint.clear();
@@ -3883,22 +3781,17 @@ void TurnInputListener::ThreadMain() {
         }
     };
 
-    // footer 快照:输入行回显 + slash 提示,全部取本地编辑器同一份
-    // RenderState(队列区在 RedrawStreamFooterLocked 里现拉 SteeringQueue
-    // 快照,这里不用搬)。回显多行正文只摆首行、尾巴带行数提示(完整正文在
-    // 取回编辑器里看/改;footer 的输入行是单行会计,不能塞换行)。slash 提示
-    // 直接用编辑器的 hint_lines:候选名单、Tab 轮转的 "> " 选中标记、收起门槛
-    // (还在敲命令词才列,补成 "/effort " 这类带空格的完成态就收)全在编辑器
-    // 一处记账,footer 不拿回显文本另算一份没有状态的菜单。Windows 真控制台
-    // 之外(footer.enabled 为假)这些都是空操作,退回老的"不回显、只 Enter
-    // 时整条落队"。
+    // footer 快照:整份 RenderState 搬进 footer 状态(队列区在
+    // RedrawStreamFooterLocked 里现拉 SteeringQueue 快照,这里不用搬)。
+    // Composer 合流 P1 起 footer 不再压成"首行 + 另有 N 行"——布局函数拿
+    // 完整逻辑行画软换行、算真实光标,与空闲 composer 同一颗脑袋。slash
+    // 提示也随 RenderState 带过去(hint_lines:候选名单、Tab 轮转的 "> "
+    // 选中标记、收起门槛全在编辑器一处记账,footer 不另算一份没有状态的
+    // 菜单)。Windows 真控制台之外(footer.enabled 为假)这些都是空操作,
+    // 退回老的"不回显、只 Enter 时整条落队"。
     auto refresh_footer = [&] {
         std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
-        const RenderState state = editor.CurrentRenderState();
-        const std::string first = Utf32ToUtf8(state.lines.empty() ? std::u32string() : state.lines[0]);
-        FooterSlot().echo =
-            state.lines.size() <= 1 ? first : first + trf("queue.echo_more_lines", state.lines.size() - 1);
-        FooterSlot().hints = state.hint_lines;
+        FooterSlot().composer = editor.CurrentRenderState();
         RedrawStreamFooterLocked();
     };
 

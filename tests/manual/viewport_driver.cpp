@@ -195,13 +195,28 @@ bool IsRuleRow(int row) {
     return false;
 }
 
-// 从底往上按结构认 composer 框(上横线 r / '>' 起输入行 r+1 / 下横线 r+2 /
-// 非横线状态行 r+3),返回输入行行号;找不到 -1。
+// 从底往上按结构认 composer 框,返回输入行行号;找不到 -1。Composer 合流
+// (P1)后框随内容长高:上横线、上留白、'>' 起输入区、下补空、下横线、状态行,
+// 不再假定输入行紧贴横线——认"输入行上下各有一根横线、下横线之下不是横线
+// (状态行)"。
 int FindComposerInputRow() {
-    for (int r = BufferHeight() - 5; r >= 0; --r) {
-        const std::string input_text = ReadRow(r + 1);
-        if (IsRuleRow(r) && !input_text.empty() && input_text[0] == '>' && IsRuleRow(r + 2) && !IsRuleRow(r + 3)) {
-            return r + 1;
+    const int max_rows = BufferHeight();
+    for (int i = max_rows - 2; i >= 0; --i) {
+        const std::string input_text = ReadRow(i);
+        if (input_text.empty() || input_text[0] != '>') {
+            continue;
+        }
+        bool rule_above = false;
+        for (int r = i - 1; r >= i - 4 && r >= 0; --r) {
+            rule_above = rule_above || IsRuleRow(r);
+        }
+        if (!rule_above) {
+            continue;
+        }
+        for (int b = i + 1; b <= i + 6 && b + 1 < max_rows; ++b) {
+            if (IsRuleRow(b) && !IsRuleRow(b + 1)) {
+                return i;
+            }
         }
     }
     return -1;
@@ -215,7 +230,18 @@ bool TryComposerFrameInViewport(int* rule_row_out, int* frame_bottom_out, std::s
         *why = "按结构找不到 composer 框";
         return false;
     }
-    const int rule_row = input_row - 1;
+    // 上横线在输入行上方(合流后隔着留白,不紧贴):向上找第一根。
+    int rule_row = -1;
+    for (int r = input_row - 1; r >= input_row - 4 && r >= 0; --r) {
+        if (IsRuleRow(r)) {
+            rule_row = r;
+            break;
+        }
+    }
+    if (rule_row < 0) {
+        *why = "输入行上方找不到上横线";
+        return false;
+    }
     int bottom = rule_row;
     for (int r = rule_row + 1; r < BufferHeight(); ++r) {
         if (!ReadRow(r).empty()) {

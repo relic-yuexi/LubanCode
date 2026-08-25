@@ -186,26 +186,67 @@ bool IsRuleRow(int row) {
     return false;
 }
 
-// 按结构认 composer 框(不靠文案):上横线(r) / '>' 起的输入行(r+1) /
-// 下横线(r+2) / 非横线状态行(r+3)。从底往上扫,最近的一个就是当前框。
+// 按结构认 composer 框(不靠文案)。Composer 合流(P1)后框随内容长高:
+// 上横线、上留白、'>' 起输入区、下补空、下横线、状态行——不再假定输入行
+// 紧贴横线,认"输入行上下各有一根横线、下横线之下不是横线(状态行)"。
+// 从底往上扫,最近的一个就是当前框。
 int FindComposerInputRow(int max_rows = 400) {
-    for (int r = max_rows - 5; r >= 0; --r) {
-        const std::string input_text = ReadRow(r + 1);
-        if (IsRuleRow(r) && !input_text.empty() && input_text[0] == '>' && IsRuleRow(r + 2) && !IsRuleRow(r + 3)) {
-            return r + 1;
+    for (int i = max_rows - 2; i >= 0; --i) {
+        const std::string input_text = ReadRow(i);
+        if (input_text.empty() || input_text[0] != '>') {
+            continue;
+        }
+        bool rule_above = false;
+        for (int r = i - 1; r >= i - 4 && r >= 0; --r) {
+            rule_above = rule_above || IsRuleRow(r);
+        }
+        if (!rule_above) {
+            continue;
+        }
+        for (int b = i + 1; b <= i + 6 && b + 1 < max_rows; ++b) {
+            if (IsRuleRow(b) && !IsRuleRow(b + 1)) {
+                return i;
+            }
         }
     }
     return -1;
 }
+// 输入行上方的第一根横线(上横线):残帧账从它之下起算(合流后输入行与
+// 上横线之间隔着留白,不再紧贴)。
+int FindRuleAboveInput(int input_row) {
+    for (int r = input_row - 1; r >= input_row - 4 && r >= 0; --r) {
+        if (IsRuleRow(r)) {
+            return r;
+        }
+    }
+    return -1;
+}
+int ComposerTopRuleNow() {
+    const int input = FindComposerInputRow();
+    return input > 0 ? FindRuleAboveInput(input) : -1;
+}
 
-// 当前缓冲区按结构认出的 composer 框数:上横线/'> ' 输入行/下横线/非横线
-// 状态行成套才算一份。切换与重画都得多不出一份。
+// 当前缓冲区按结构认出的 composer 框数(可变高形状,上下横线不必紧贴
+// 输入行):切换与重画都得多不出一份。
 int CountVisibleComposers() {
     int count = 0;
-    for (int r = 370; r >= 0; --r) {
-        const std::string input_text = ReadRow(r + 1);
-        if (IsRuleRow(r) && !input_text.empty() && input_text[0] == '>' && IsRuleRow(r + 2) && !IsRuleRow(r + 3)) {
-            ++count;
+    for (int i = 370; i >= 0; --i) {
+        const std::string input_text = ReadRow(i);
+        if (input_text.empty() || input_text[0] != '>') {
+            continue;
+        }
+        bool rule_above = false;
+        for (int r = i - 1; r >= i - 4 && r >= 0; --r) {
+            rule_above = rule_above || IsRuleRow(r);
+        }
+        if (!rule_above) {
+            continue;
+        }
+        for (int b = i + 1; b <= i + 6 && b + 1 < 400; ++b) {
+            if (IsRuleRow(b) && !IsRuleRow(b + 1)) {
+                ++count;
+                break;
+            }
         }
     }
     return count;
@@ -368,7 +409,7 @@ int wmain(int argc, wchar_t** argv) {
           "Enter 展开闲置:第 4 只完成态回到列表");
     Check(CountRowsWith("\xe9\x97\xb2\xe7\xbd\xae\xe4\xbb\xa3\xe7\x90\x86") == 0,
           "Enter 展开后:汇总行收走,没有第二份");
-    Check(DockLedgerClean(FindComposerInputRow() - 1), "展开后残帧账干净");
+    Check(DockLedgerClean(ComposerTopRuleNow()), "展开后残帧账干净");
     for (int r = 0; r < 44; ++r) {
         const std::string row = ReadRow(r);
         if (!row.empty()) {
@@ -387,7 +428,7 @@ int wmain(int argc, wchar_t** argv) {
         Sleep(60);
     }
     Sleep(400);
-    Check(DockLedgerClean(FindComposerInputRow() - 1), "连按 20 次上下后残帧账干净(提示/main 各一份)");
+    Check(DockLedgerClean(ComposerTopRuleNow()), "连按 20 次上下后残帧账干净(提示/main 各一份)");
 
     // ---- Enter 真切会话:上方视口换源成该代理 transcript,坞里无长正文 ----
     SendKey(VK_DOWN, 0, 0);
@@ -398,7 +439,7 @@ int wmain(int argc, wchar_t** argv) {
           "Enter:上方视口出现 #1 的查看头行(真切换,不是坞下展开)");  // 查看 general-purpose #1
     {
         const int view_header_row = FindLastRow("\xe6\x9f\xa5\xe7\x9c\x8b general-purpose #1");
-        const int rule_now = FindComposerInputRow() - 1;
+        const int rule_now = ComposerTopRuleNow();
         Check(view_header_row >= 0 && view_header_row < rule_now,
               "Enter:查看头行在 composer 上横线之上(正文区)");
         Check(CountVisibleComposers() == 1, "Enter 后:屏上 composer 恰好一份");
@@ -458,7 +499,7 @@ int wmain(int argc, wchar_t** argv) {
     Check(CountVisibleComposers() == 1, "往返 20 次:composer 恰好一份");
     Check(FindLastRow("\xe4\xbb\xbb\xe5\x8a\xa1\xe8\xaf\xb4\xe6\x98\x8e") < 0,
           "Enter/Esc 往返 20 次:导航坞不再出现'任务说明'长正文");  // 任务说明
-    Check(DockLedgerClean(FindComposerInputRow() - 1), "往返 20 次后残帧账干净");
+    Check(DockLedgerClean(ComposerTopRuleNow()), "往返 20 次后残帧账干净");
     SendKey(VK_ESCAPE, 0, 0);
     WaitForTextGone("\xe2\x9d\xaf", 3000);
 
@@ -473,7 +514,7 @@ int wmain(int argc, wchar_t** argv) {
     int input_after = FindComposerInputRow();
     Check(input_after > 0 && ReadRow(input_after).find("\xe8\x8d\x89\xe7\xa8\xbf") != std::string::npos,
           "Ctrl+L:composer 草稿还在(不吞输入)");
-    Check(DockLedgerClean(FindComposerInputRow() - 1), "Ctrl+L:重复行归零,残帧账干净");
+    Check(DockLedgerClean(ComposerTopRuleNow()), "Ctrl+L:重复行归零,残帧账干净");
     // 清草稿(Ctrl+C 有字先清字,空闲路已有实现,顺手回归)。
     SendKey('C', 0, LEFT_CTRL_PRESSED);
     Sleep(400);
@@ -495,12 +536,12 @@ int wmain(int argc, wchar_t** argv) {
             Log("NARROW " + std::to_string(r) + ": " + row);
         }
     }
-    Check(DockLedgerClean(FindComposerInputRow() - 1), "resize 拉窄后残帧账干净");
+    Check(DockLedgerClean(ComposerTopRuleNow()), "resize 拉窄后残帧账干净");
     SetConsoleScreenBufferSize(g_conout, COORD{120, 400});
     SMALL_RECT wide{0, 0, 119, 29};
     SetConsoleWindowInfo(g_conout, TRUE, &wide);
     Sleep(800);
-    Check(DockLedgerClean(FindComposerInputRow() - 1), "resize 拉宽后残帧账干净");
+    Check(DockLedgerClean(ComposerTopRuleNow()), "resize 拉宽后残帧账干净");
 
     // ---- 两段确认:Ctrl+X 亮确认提示,Esc 撤销,不误杀 ----
     SendKey('X', 0, LEFT_CTRL_PRESSED);
