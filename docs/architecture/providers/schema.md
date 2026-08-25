@@ -64,14 +64,14 @@ LubanCode 与这条路有相似处：
 `catalog/providers.schema.json` 用 JSON Schema Draft 2020-12 描述离线目录。它管：
 
 - 顶层必须有 `schema_version`、`revision`、`providers`
-- `schema_version` 只能为 `1`
+- `schema_version` 只能为 `2`
 - `revision` 形如 `YYYY-MM-DD`
 - provider 必须有 `name`、`wire`、`base_url`、`key_env`、`default_model`、`models`
-- `wire` 只能三选一
+- `wire` 只能在 Messages、Responses、Chat Completions、Gemini 四套协议中选一
 - `base_url` 与 `docs_url` 必须以 HTTPS 开头
 - `key_env` 须像合法大写环境变量名
 - model 至少有 `name`
-- variant 只认 `description` 与 `extra_body`
+- model 可直接声明 `reasoning.controls`、`supportedEfforts` 与 `wireDialect`
 - 多层 `additionalProperties: false`，拼错字段立即拒绝
 
 它是一份静态数据契约。编辑器、CI 与人都能读。
@@ -279,31 +279,31 @@ agent.max_output_tokens
 
 `unset` 不是 `0`。请求对象里的 `max_tokens` 是 optional。没声明便不发这字段，不能擅猜一个固定上限。
 
-### variant 与 extra_body
+### reasoning 与 extra_body
 
-variant 不改模型 ID。它只是给同一模型选一套请求参数。当前推理档对应的 `extra_body` 会进入 request 级覆盖。
+推理档位直接写在模型条目里。不同模型各报各的档位；例如 GPT 5.6 可报六档，GLM 5.3 只报 `low/high/max`。运行时把这份档案带进中立 Request，各 wire 再翻成自己的正式字段。
 
 请求体大致按这次序浅合并：
 
 ```text
 协议内置字段
   <- provider extra_body
-  <- 当前 model variant / request extra_body
+  <- request extra_body
 ```
 
-后者同名顶层键压前者。是浅合并，不递归深合并。若 provider 有：
+后者同名顶层键压前者。是浅合并，不递归深合并。`extra_body` 只留给目录尚未建模的厂商私有字段，不再承载 effort、thinking 开关或 budget。若 provider 有：
 
 ```json
-{ "thinking": { "type": "enabled", "budget": 1024 } }
+{ "temperature": 0.2, "vendor_flag": true }
 ```
 
-variant 给：
+request 另给：
 
 ```json
-{ "thinking": { "type": "disabled" } }
+{ "temperature": 0.5 }
 ```
 
-最终整枚 `thinking` object 被替换，`budget` 不会留下。
+最终 `temperature` 为 `0.5`。
 
 这处可预测，也容易踩坑。目录维护者得写完整顶层对象。
 

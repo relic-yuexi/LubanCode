@@ -344,7 +344,7 @@ TEST_CASE("启用延迟: 请求 tools = 核心 + tool_search,不带未加载的�
     ScriptBackend backend;
     backend.scripts = {TextScript("好")};
 
-    agent::AgentLoop loop(backend, setup.registry, "m", "sys");
+    agent::Agent loop(backend, setup.registry, "m", "sys");
     loop.SetToolFilter(setup.Filter());
 
     agent::Callbacks callbacks;
@@ -374,7 +374,7 @@ TEST_CASE("一次 Run() 中途 tool_search 挂载:下一轮请求立即带上新
         TextScript("42"),
     };
 
-    agent::AgentLoop loop(backend, setup.registry, "m", "sys");
+    agent::Agent loop(backend, setup.registry, "m", "sys");
     loop.SetToolFilter(setup.Filter());
 
     agent::Callbacks callbacks;
@@ -404,7 +404,7 @@ TEST_CASE("未挂载的延迟工具被直接调用:不执行,友好错误指路 
         TextScript("好吧,我先搜"),
     };
 
-    agent::AgentLoop loop(backend, setup.registry, "m", "sys");
+    agent::Agent loop(backend, setup.registry, "m", "sys");
     loop.SetToolFilter(setup.Filter());
 
     agent::Callbacks callbacks;
@@ -422,7 +422,7 @@ TEST_CASE("不设过滤谓词: 全量直挂,延迟标记不影响任何行为(�
     ScriptBackend backend;
     backend.scripts = {ToolCallScript("t1", "mcp__test__add", R"({"a":1,"b":2})"), TextScript("好")};
 
-    agent::AgentLoop loop(backend, setup.registry, "m", "sys");
+    agent::Agent loop(backend, setup.registry, "m", "sys");
     agent::Callbacks callbacks;
     REQUIRE(loop.Run("算", callbacks).has_value());
 

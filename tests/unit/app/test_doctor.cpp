@@ -257,7 +257,7 @@ TEST_CASE("/think 模型目录声明优先于 provider 声明") {
     cli::SetLanguage("zh-CN");
     config::ModelCatalogEntry entry;
     entry.slug = "qwen-cat";
-    entry.supported_think_levels = {{"high", "认真想", nlohmann::json::object()}};
+    entry.supported_think_levels = {{"high", "认真想"}};
     auto current_think = std::make_shared<std::string>("high");
     CoutCapture capture;
     app::HandleThinkCommand("", current_think, &entry, {"low"}, "");

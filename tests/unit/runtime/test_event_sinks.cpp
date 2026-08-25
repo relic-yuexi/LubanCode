@@ -103,7 +103,7 @@ TEST_CASE("同一假 backend 脚本:Terminal 与 Json 两 sink 同流同账") {
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>());
     agent::AgentRuntimeProfile profile;
-    agent::AgentLoop loop(backend, registry, std::move(profile), std::string("same-stream-test"));
+    agent::Agent loop(backend, registry, std::move(profile), std::string("same-stream-test"));
 
     RecordingSink recorder;
     rt::TerminalEventSink terminal_sink;

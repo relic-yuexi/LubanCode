@@ -22,7 +22,7 @@ std::string ToolTraceHub::NextExecutionId() {
     return ids_.NextItemId();
 }
 
-void ToolTraceHub::Install(agent::AgentLoop& loop, agent::Callbacks& callbacks, const std::string& thread_id,
+void ToolTraceHub::Install(agent::Agent& loop, agent::Callbacks& callbacks, const std::string& thread_id,
                            const std::string& turn_id) {
     // execution 发号:与 Runtime item id 同源(单子:不可再造第二只计数器)。
     loop.SetExecutionIdIssuer([this] { return NextExecutionId(); });

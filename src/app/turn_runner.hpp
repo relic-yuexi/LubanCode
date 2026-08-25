@@ -145,7 +145,7 @@ std::string ImageInputErrorText(const lubancode::cli::ImageInputError& error);
 // 线/统计行不打、流式 footer 不起、心跳不跳、正文与工具卡只进 transcript
 // 台账(StreamBodyTracker 攒正文,收口时归档成一条 assistant 条目),回
 // main 时重铺可见。错误路径的 std::cerr 照打——错要让人看见,不静默吞。
-RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bool auto_confirm,
+RunTurnResult RunTurn(lubancode::agent::Agent& loop, const std::string& user_input, bool auto_confirm,
                        std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
                        lubancode::cli::ContextTracker& context_tracker, lubancode::tools::ToolRegistry& registry,
                        lubancode::hooks::HookDispatcher* hook_dispatcher, bool is_console,

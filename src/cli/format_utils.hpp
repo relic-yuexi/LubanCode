@@ -113,10 +113,7 @@ std::string CompactStatusPath(std::string_view path, int max_width);
 // 0.21.x 流式脚注文本(纯函数,i18n 驱动,不夹 ANSI/不认 IO)。
 // StreamHintText:输入行空闲(没在键入)时的淡色占位提示——只提"键入并
 // 回车排队",不再捎带打断说明(0.25.x 起"Esc 打断"挪进状态行)。
-// StreamFooterInterruptText:状态行末尾追加的打断提示。plain 为真(plain
-// 主题/不支持 ANSI)时两者都去掉 ⎋ 符号、退回纯 "ESC" 文字。
 std::string StreamHintText(bool plain);
-std::string StreamFooterInterruptText(bool plain);
 
 // tokens 段尾部的缓存注记(缓存诊断单,2026-08):cached_tokens 有则摆
 // "缓存命中 X(Y%)"(本场累计口径,见 ContextTracker);最近一次没回 usage

@@ -97,7 +97,7 @@ struct CompactCommandResult {
 // 待办;accounting 非空时收回本次压缩的 usage/时长(分角色记账)。
 // 压缩模型窗口装不下(分块也救不了)时明确拒绝、不静默截史;manifest
 // 校验不过同样旧 history 不动。
-CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::agent::AgentLoop& loop,
+CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::agent::Agent& loop,
                                           lubancode::api::Backend& raw_backend,
                                           const lubancode::agent::ModelRoute& compact_route,
                                           const lubancode::cli::Theme& theme, bool spinner_enabled,
@@ -168,7 +168,7 @@ std::optional<std::string> PromptResumeTarget(const std::string& sessions_dir,
 // 账(老档没 mode 行给 Default 与空表),会话层拿它恢复协作模式档位与
 // 最近计划成品。不接照旧丢弃。
 bool ResumeSession(const std::string& target, const std::string& sessions_dir,
-                    lubancode::agent::AgentLoop& loop, lubancode::agent::SessionStore& store,
+                    lubancode::agent::Agent& loop, lubancode::agent::SessionStore& store,
                     std::size_t& persisted_count, lubancode::agent::SessionMeta& session_meta,
                     std::string& session_title, const std::string& wire_str, const std::string& current_model,
                     const lubancode::cli::Theme& theme, bool quiet_if_none,
@@ -188,7 +188,7 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
 // artifact_store(可空,第二期):非空且有落盘时追加"可追回 artifact"附录
 // ——id/工具/字节/sha 指纹/真本路径,导出内容里被折叠的结果按 id 对得上
 // 真本(规格"/export 必须说明哪些内容来自 artifact")。
-void HandleExportCommand(const std::string& args, const lubancode::agent::AgentLoop& loop,
+void HandleExportCommand(const std::string& args, const lubancode::agent::Agent& loop,
                           const lubancode::agent::SessionStore& store, const std::string& sessions_dir,
                           const lubancode::agent::SessionMeta& session_meta, const std::string& session_title,
                           const lubancode::agent::ContextArtifactStore* artifact_store = nullptr);
@@ -202,7 +202,7 @@ void HandleExportCommand(const std::string& args, const lubancode::agent::AgentL
 // (InteractiveSession)在命令执行期间保证存活。
 struct SessionCommandState {
     std::function<void(bool)> rebuild_loop;  // /clear 传 false = 丢历史重建
-    lubancode::agent::AgentLoop& loop;        // /compact /resume /export 用
+    lubancode::agent::Agent& loop;        // /compact /resume /export 用
     lubancode::agent::SessionStore& store;
     std::size_t& persisted_count;             // 落盘基线
     int& compact_epoch;                       // 压缩序号(/resume 接旧账,/compact 进出两头用)

@@ -113,7 +113,7 @@ TEST_CASE("异步审批:Accept 放行,工具真执行") {
     auto* tool = new FakeTool("dangerous_tool", tools::Tool::Result{"结果", false}, true);
     registry.Register(std::unique_ptr<FakeTool>(tool));
 
-    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, "test-model", "system prompt");
     agent::Callbacks callbacks;
     int async_asked = 0;
     int sync_asked = 0;
@@ -145,7 +145,7 @@ TEST_CASE("异步审批:Decline 拒绝,tool_result 是 is_error 且用缺省拒�
     auto* tool = new FakeTool("dangerous_tool", tools::Tool::Result{"不该被看到的结果", false}, true);
     registry.Register(std::unique_ptr<FakeTool>(tool));
 
-    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, "test-model", "system prompt");
     agent::Callbacks callbacks;
     callbacks.on_tool_confirm_async = [](const agent::ApprovalRequest&) {
         agent::ApprovalResponse response;
@@ -173,7 +173,7 @@ TEST_CASE("异步审批:悬空收口(nullopt)= 拒绝,缺省文案不冒充用�
     auto* tool = new FakeTool("dangerous_tool", tools::Tool::Result{"不该被看到的结果", false}, true);
     registry.Register(std::unique_ptr<FakeTool>(tool));
 
-    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, "test-model", "system prompt");
     agent::Callbacks callbacks;
     // future 悬空收口:断开/打断/超时之后 Broker 统一按 cancel 收口的形状。
     callbacks.on_tool_confirm_async = [](const agent::ApprovalRequest&) {
@@ -199,7 +199,7 @@ TEST_CASE("异步审批:悬空收口的文案可由 on_tool_denial_text 接管")
     registry.Register(
         std::make_unique<FakeTool>("dangerous_tool", tools::Tool::Result{"不该被看到的结果", false}, true));
 
-    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, "test-model", "system prompt");
     agent::Callbacks callbacks;
     callbacks.on_tool_confirm_async = [](const agent::ApprovalRequest&) {
         return std::make_shared<ReadyFuture>(std::nullopt);
@@ -221,7 +221,7 @@ TEST_CASE("异步审批:AcceptForSession 放行,Cancel 拒(四态各归各位)")
         tools::ToolRegistry registry;
         auto* tool = new FakeTool("dangerous_tool", tools::Tool::Result{"ok", false}, true);
         registry.Register(std::unique_ptr<FakeTool>(tool));
-        agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+        agent::Agent loop(backend, registry, "test-model", "system prompt");
         agent::Callbacks callbacks;
         callbacks.on_tool_confirm_async = [](const agent::ApprovalRequest&) {
             agent::ApprovalResponse response;
@@ -237,7 +237,7 @@ TEST_CASE("异步审批:AcceptForSession 放行,Cancel 拒(四态各归各位)")
         tools::ToolRegistry registry;
         auto* tool = new FakeTool("dangerous_tool", tools::Tool::Result{"ok", false}, true);
         registry.Register(std::unique_ptr<FakeTool>(tool));
-        agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+        agent::Agent loop(backend, registry, "test-model", "system prompt");
         agent::Callbacks callbacks;
         callbacks.on_tool_confirm_async = [](const agent::ApprovalRequest&) {
             agent::ApprovalResponse response;
@@ -257,7 +257,7 @@ TEST_CASE("异步审批:async 回调返回空 future = 悬空收口,不炸") {
     tools::ToolRegistry registry;
     auto* tool = new FakeTool("dangerous_tool", tools::Tool::Result{"ok", false}, true);
     registry.Register(std::unique_ptr<FakeTool>(tool));
-    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, "test-model", "system prompt");
     agent::Callbacks callbacks;
     callbacks.on_tool_confirm_async = [](const agent::ApprovalRequest&) { return nullptr; };
     REQUIRE(loop.Run("去办", callbacks).has_value());
@@ -277,7 +277,7 @@ TEST_CASE("同步回落:不设 async 时旧 on_tool_confirm 路径一字不变")
     auto* tool = new FakeTool("dangerous_tool", tools::Tool::Result{"结果", false}, true);
     registry.Register(std::unique_ptr<FakeTool>(tool));
 
-    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, "test-model", "system prompt");
     agent::Callbacks callbacks;
     bool sync_asked = false;
     callbacks.on_tool_confirm = [&](const std::string&, const std::string&, const nlohmann::json&) -> bool {
@@ -299,7 +299,7 @@ TEST_CASE("审批请求带工具名与入参(hook 改写后的 effective input)"
     tools::ToolRegistry registry;
     registry.Register(
         std::make_unique<FakeTool>("dangerous_tool", tools::Tool::Result{"ok", false}, true));
-    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, "test-model", "system prompt");
     agent::Callbacks callbacks;
 
     std::string seen_name;

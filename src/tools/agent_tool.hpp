@@ -1,5 +1,5 @@
 // 内置 "agent" 工具:把一个独立子任务委托给子代理执行。子代理是一个全新
-// 的、空历史的 agent::AgentLoop,只有它自己知道任务细节——主对话历史里
+// 的、空历史的 agent::Agent,只有它自己知道任务细节——主对话历史里
 // 只留一次工具调用的入参(prompt)和一段 Result.content(子代理的最终
 // 结论),中间的搜索/试错/来回工具调用过程都不会挤占主对话的上下文,
 // 这是这个工具存在的全部意义。
@@ -264,14 +264,14 @@ enum class TaskMessageSource { User, MainAgent };
 
 // 后台子代理不能借主回合那条 Backend：主回合会重画 spinner，切 provider
 // 时还会替换内部 client。工厂在 launch 当口造一份独立快照，线程随后只
-// 握自己的 client、模型和提示词叠加层。
+// 握自己的 client、请求档案和提示词叠加层。它跑的仍是 agent::Agent；
+// 此结构只管跨线程所需的不可变材料，不是另一种 Agent。
 struct DetachedAgentBackend {
     std::unique_ptr<api::Backend> backend;
-    std::string model;
-    std::string reasoning_effort;
+    std::string provider;
+    api::RequestProfile request_profile;
     std::string model_instructions;
     std::string soul;
-    nlohmann::json request_extra_body = nlohmann::json::object();
 };
 
 // 同级派工的转发壳(规格"递归派工不能再靠拿掉工具解决"):子代理工具表
@@ -489,7 +489,17 @@ public:
     // 进来——输出上限、上下文安全网、续跑次数与 main 同一份,子代理不再
     // 另藏 4096,也不再落回环境默认的 max_context_chars。未灌(旧测试
     // 直调)时用默认 profile:输出上限 unset、字符安全网取 agent 层默认。
-    void SetRuntimeProfile(agent::AgentRuntimeProfile profile) { runtime_profile_ = std::move(profile); }
+    void SetRuntimeProfile(agent::AgentRuntimeProfile profile) {
+        runtime_profile_ = profile;
+        agent_profile_.runtime = std::move(profile);
+    }
+    void SetAgentProfile(agent::AgentProfile profile) {
+        agent_profile_ = std::move(profile);
+        runtime_profile_ = agent_profile_.runtime;
+        if (!agent_profile_.request.model.empty()) {
+            model_ = agent_profile_.request.model;
+        }
+    }
 
     // 派工治理(规格"递归派工不能再靠拿掉工具解决"):
     //   max_active  全局并发槽:同时跑着的子代理任务(前台 + 后台)上限,
@@ -683,6 +693,7 @@ private:
     lubancode::cli::GitRunner git_runner_;                    // isolation 房务;空 = 真 git
     std::size_t context_window_tokens_ = 0;                   // 子代理 mid-turn 压缩评估;0 = 未知
     agent::AgentRuntimeProfile runtime_profile_;              // 运行策略:与 main 同一份(默认 unset,无 4096)
+    agent::AgentProfile agent_profile_;                       // main/sub/workflow 共用的代理属性形状
     // 派工治理(规格"递归派工"):全局并发槽与前台深度账。
     int max_active_dispatches_ = 8;  // 与 kDefaultSubagentMaxActive 同值;会话层从配置灌
     int max_dispatch_depth_ = 3;     // 与 kDefaultSubagentMaxDepth 同值;1 = 子代理不再往下派

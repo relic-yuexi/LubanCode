@@ -13,6 +13,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "api/reasoning.hpp"
+
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:消息内容上 wire 前的编码关口
 
 namespace lubancode::api {
@@ -148,10 +150,26 @@ struct Request {
     // "type":"disabled"),映射关系见 anthropic/client.cpp 里的
     // BuildThinkingJson 注释。
     std::string reasoning_effort;
-    // 当前模型 variant 的请求级私有参数。provider 级 extra_body 先合并，
-    // 这里后合并；同名顶层键由 variant 覆盖。
+    // 当前模型声明的推理控制能力。空 = 旧式兼容路径；非空时，各 wire
+    // 按规范字段翻译，不借 request.extra_body 偷渡档位或开关。
+    ReasoningConfig reasoning;
+    // 调用方显式给出的请求级私有参数。推理档位不走这里；provider 级
+    // extra_body 先合并，这里后合并，同名顶层键由请求覆盖。
     nlohmann::json extra_body = nlohmann::json::object();
 };
+
+// 一次代理运行所用的请求档案。主会话每次发送前现取当前值；后台任务在
+// 派出时抄成快照。两条路都用 ApplyRequestProfile 落进 Request，免得各自
+// 再写一套 model / effort / reasoning 覆盖规矩。
+struct RequestProfile {
+    std::string model;
+    std::string reasoning_effort;
+    ReasoningConfig reasoning;
+};
+
+// model 为空时保留 Request 原值（后台测试和少数调用方会沿用 loop 模型）；
+// effort 与 reasoning 总按档案覆盖，空值也算明示“不发推理参数”。
+void ApplyRequestProfile(Request& request, const RequestProfile& profile);
 
 // 整份请求的 UTF-8 出门关。所有真实 backend 在拼 wire JSON 前都要过
 // 一遍：system/messages/tool schema/extra_body 连同各枚标识一并清洗。

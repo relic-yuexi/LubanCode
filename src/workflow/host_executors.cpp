@@ -2,7 +2,9 @@
 
 #include "workflow/host_executors.hpp"
 
+#include <set>
 #include <utility>
+#include <variant>
 
 namespace lubancode::workflow {
 
@@ -55,6 +57,109 @@ NodeExecResult ToolExecutor::Execute(const NodeExecRequest& request) {
     } catch (...) {
     }
     result.output = parsed_ok ? parsed : nlohmann::json{{"content", tool_result.content}};
+    result.ok = true;
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// agent
+// ---------------------------------------------------------------------------
+
+AgentExecutor::AgentExecutor(Options options) : options_(std::move(options)) {}
+
+NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
+    NodeExecResult result;
+    if (options_.registry == nullptr) {
+        result.error_code = "not_configured";
+        result.error_message = "agent 节点没有 ToolRegistry";
+        return result;
+    }
+
+    std::optional<Binding> resolved;
+    if (options_.resolve_binding) {
+        resolved = options_.resolve_binding(*request.node);
+    }
+    Binding binding = resolved.has_value() ? std::move(*resolved) : options_.default_binding;
+    if (binding.backend == nullptr) {
+        result.error_code = "not_configured";
+        result.error_message = "agent 节点没有 backend";
+        return result;
+    }
+
+    const std::string task_prompt = options_.task_loader ? options_.task_loader(request.node->task) : std::string();
+    if (task_prompt.empty()) {
+        result.error_code = "prompt_unreadable";
+        result.error_message = "task 读不到: " + request.node->task;
+        return result;
+    }
+    binding.profile.system_prompt = task_prompt;
+    if (request.node->step_limit > 0) {
+        binding.profile.runtime.max_steps_per_turn = request.node->step_limit;
+    }
+    if (binding.profile.request.model.empty()) {
+        binding.profile.request.model = binding.profile.runtime.model;
+    }
+
+    agent::Agent task_agent(*binding.backend, *options_.registry, std::move(binding.profile));
+    if (!request.node->allowed_tools.empty()) {
+        const auto allowed = std::make_shared<const std::set<std::string>>(
+            request.node->allowed_tools.begin(), request.node->allowed_tools.end());
+        task_agent.SetToolFilter([allowed](const tools::Tool& tool) {
+            return allowed->contains(tool.name());
+        });
+        task_agent.SetToolFilterDenial("此工具不在 workflow agent 节点的 allowed_tools 里。");
+    }
+
+    std::string text;
+    std::int64_t tokens = 0;
+    agent::Callbacks callbacks = options_.callbacks;
+    const auto outer_text = callbacks.on_text_delta;
+    callbacks.on_text_delta = [&](const std::string& delta) {
+        text += delta;
+        if (outer_text) outer_text(delta);
+    };
+    const auto outer_usage = callbacks.on_usage;
+    callbacks.on_usage = [&](const api::UsageReport& report) {
+        tokens += api::TotalInputTokens(report.usage) + report.usage.output_tokens;
+        if (outer_usage) outer_usage(report);
+    };
+    // workflow 没接审批宿主时，危险工具明拒；不能因回调空着便默认放行。
+    if (!callbacks.on_tool_confirm && !callbacks.on_tool_confirm_async) {
+        callbacks.on_tool_confirm = [](const std::string&, const std::string&, const nlohmann::json&) {
+            return false;
+        };
+    }
+
+    const auto outcome = task_agent.Run(request.resolved_input.dump(), callbacks, nullptr);
+    result.tokens_used = tokens;
+    if (!outcome.has_value()) {
+        result.error_code = "agent_error";
+        result.error_message = outcome.error().substr(0, 500);
+        return result;
+    }
+    if (outcome->hit_step_limit) {
+        result.error_code = "budget_exhausted";
+        result.error_message = "agent 节点达到 step_limit";
+        return result;
+    }
+    if (outcome->length_empty_output) {
+        result.error_code = "output_budget_exhausted";
+        result.error_message = "agent 节点输出预算耗尽，未产出正文";
+        return result;
+    }
+
+    // 有的后端不逐段吐 TextDelta，只在历史收口；以 Agent 的真历史兜底。
+    if (text.empty() && !task_agent.History().empty()) {
+        for (const auto& block : task_agent.History().back().content) {
+            if (const auto* body = std::get_if<api::TextBlock>(&block)) text += body->text;
+        }
+    }
+    try {
+        result.output = nlohmann::json::parse(text);
+    } catch (...) {
+        result.output = nlohmann::json{{"content", text}};
+    }
+    result.empty = text.empty();
     result.ok = true;
     return result;
 }

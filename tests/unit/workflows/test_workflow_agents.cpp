@@ -92,6 +92,34 @@ public:
     }
 };
 
+class AgentBackend : public lubancode::api::Backend {
+public:
+    std::vector<lubancode::api::Request> requests;
+
+    std::expected<void, lubancode::api::Error> send_stream(
+        const lubancode::api::Request& request,
+        const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* cancel) override {
+        (void)cancel;
+        requests.push_back(request);
+        lubancode::api::Usage usage;
+        usage.input_tokens = 10;
+        usage.output_tokens = 5;
+        on_event(lubancode::api::MessageStart{"msg", request.model});
+        if (requests.size() == 1) {
+            on_event(lubancode::api::ToolUseStart{0, "tool-1", "reader"});
+            on_event(lubancode::api::ToolUseInputDelta{0, "{}"});
+            on_event(lubancode::api::ContentBlockDone{0});
+            on_event(lubancode::api::MessageDone{"tool_use", usage});
+        } else {
+            on_event(lubancode::api::TextDelta{R"({"answer":"ok"})"});
+            on_event(lubancode::api::ContentBlockDone{0});
+            on_event(lubancode::api::MessageDone{"end_turn", usage});
+        }
+        return {};
+    }
+};
+
 // 即时 broker:不等前端,当场给决定。
 class InstantBroker final : public lubancode::runtime::InteractionBroker {
 public:
@@ -264,6 +292,59 @@ result:
     CHECK(summary.result["plan"] == "ok");
     CHECK(summary.tokens_used == 150);  // 100 in + 50 out
     CHECK(backend.calls == 1);
+}
+
+TEST_CASE("agent 节点:同一 Agent 吃 profile、工具白名单并跑完整工具循环") {
+    using namespace lubancode::workflow;
+    lubancode::tools::ToolRegistry registry;
+    auto* reader = new FakeTool("reader", R"({"read":true})", false, false);
+    registry.Register(std::unique_ptr<lubancode::tools::Tool>(reader));
+    registry.Register(std::make_unique<FakeTool>("editor", "edited", false, false));
+    AgentBackend backend;
+
+    AgentExecutor::Options options;
+    options.default_binding.backend = &backend;
+    options.default_binding.profile.provider = "zai";
+    options.default_binding.profile.request.model = "glm-5.3";
+    options.default_binding.profile.request.reasoning_effort = "high";
+    options.default_binding.profile.request.reasoning.supports_effort = true;
+    options.default_binding.profile.runtime.model = "glm-5.3";
+    options.registry = &registry;
+    options.task_loader = [](const std::string& path) {
+        CHECK(path == "prompts/explore.md");
+        return std::string("只读探索");
+    };
+    AgentExecutor executor(std::move(options));
+
+    const WorkflowDefinition def = ParseOrDie(R"YAML(
+schema_version: 1
+id: agent-flow
+version: 1.0.0
+entry: explore
+nodes:
+  explore:
+    type: agent
+    task: prompts/explore.md
+    allowed_tools: [reader]
+    step_limit: 4
+)YAML");
+    NodeExecRequest request;
+    request.definition = &def;
+    request.node = &def.node_map.at("explore");
+    request.resolved_input = nlohmann::json{{"topic", "木构"}};
+
+    const NodeExecResult result = executor.Execute(request);
+    REQUIRE(result.ok);
+    CHECK(result.output["answer"] == "ok");
+    CHECK(result.tokens_used == 30);
+    CHECK(reader->calls == 1);
+    REQUIRE(backend.requests.size() == 2);
+    CHECK(backend.requests[0].model == "glm-5.3");
+    CHECK(backend.requests[0].reasoning_effort == "high");
+    CHECK(backend.requests[0].reasoning.supports_effort);
+    CHECK(backend.requests[0].system == "只读探索");
+    REQUIRE(backend.requests[0].tools.size() == 1);
+    CHECK(backend.requests[0].tools[0].name == "reader");
 }
 
 TEST_CASE("approval 节点:accept 过、decline 拒、没 broker 明报") {

@@ -135,7 +135,7 @@ TEST_CASE("收件点:工具轮回之间来信,注进 history 并出现在下一�
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>());
 
-    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, "test-model", "system prompt");
     int inbox_calls = 0;
     loop.SetInbox([&]() -> std::optional<api::Message> {
         ++inbox_calls;
@@ -180,7 +180,7 @@ TEST_CASE("收件点:权限确认当口来信不作答——信只在确认收�
     };
     registry.Register(std::make_unique<ConfirmTool>());
 
-    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, "test-model", "system prompt");
     // 第一次边界(首个请求之前)就把信备着:即便信早就到了,第一个请求
     // (含权限确认那次工具往返)也不带它——注入只发生在工具结果攒完、
     // 下一请求尚未发出的边界,确认回调里根本没有看见它的路。
@@ -224,7 +224,7 @@ TEST_CASE("收件点:不设或交空,行为跟从前完全一致") {
     FakeBackend backend;
     backend.scripts = {TextOnlyScript("好")};
     tools::ToolRegistry registry;
-    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, "test-model", "system prompt");
     loop.SetInbox([]() -> std::optional<api::Message> { return std::nullopt; });
     REQUIRE(loop.Run("问", agent::Callbacks{}).has_value());
     REQUIRE(loop.history().size() == 2);
@@ -241,7 +241,7 @@ TEST_CASE("收件点:同一边界多条排队消息,按落队顺序一并注入�
     };
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>());
-    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, "test-model", "system prompt");
     loop.SetInbox([&]() -> std::optional<api::Message> {
         api::Message batch;
         batch.role = api::Role::User;
@@ -279,7 +279,7 @@ TEST_CASE("收件点:无工具自然收尾,本轮不注入——排队消息留�
     FakeBackend backend;
     backend.scripts = {TextOnlyScript("答完了")};
     tools::ToolRegistry registry;
-    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, "test-model", "system prompt");
     int inbox_calls = 0;
     loop.SetInbox([&]() -> std::optional<api::Message> {
         ++inbox_calls;

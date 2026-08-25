@@ -14,15 +14,23 @@
 #include <doctest/doctest.h>
 
 #include <future>
+#include <iostream>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 #include "cli/console_input.hpp"
 #include "cli/theme.hpp"
 #include "platform/console.hpp"
 
 using lubancode::cli::ConsoleReadMutex;
+using lubancode::cli::EchoDeliveredQueuedMessages;
+using lubancode::cli::MessageTarget;
+using lubancode::cli::QueuedMessage;
 using lubancode::cli::RepaintSuspendActive;
+using lubancode::cli::SetStreamScreenPrintHook;
 using lubancode::cli::StreamFooterPaintScope;
 using lubancode::cli::StreamFooterSuspendScope;
 using lubancode::cli::StreamFooterSuspendDepthForTest;
@@ -120,4 +128,40 @@ TEST_CASE("输入所有权:挂起计数>0 期间监听侧按 RepaintSuspendActiv
         CHECK(RepaintSuspendActive());  // 监听线程看到真值,连空窗期都不读键
     }
     CHECK_FALSE(RepaintSuspendActive());
+}
+
+// ---- 已送达 queue 的持久回显 ----------------------------------------------
+
+TEST_CASE("工具边界送达 queue:正文留下持久用户回显并作废流式正文锚点") {
+    std::vector<QueuedMessage> delivered(2);
+    delivered[0].id = 1;
+    delivered[0].target = MessageTarget::Main();
+    delivered[0].text = "第一条";
+    delivered[1].id = 2;
+    delivered[1].target = MessageTarget::Main();
+    delivered[1].text = "第二条\n续行";
+
+    int print_hook_calls = 0;
+    SetStreamScreenPrintHook([&] { ++print_hook_calls; });
+    std::ostringstream captured;
+    std::streambuf* const old_buf = std::cout.rdbuf(captured.rdbuf());
+    EchoDeliveredQueuedMessages(delivered, lubancode::cli::Theme{});
+    std::cout.rdbuf(old_buf);
+    SetStreamScreenPrintHook(nullptr);
+
+    CHECK(captured.str() == "> 第一条\n> 第二条\n续行\n");
+    CHECK(print_hook_calls == 1);
+}
+
+TEST_CASE("工具边界送达 queue:空批次不打印也不触发屏幕钩子") {
+    int print_hook_calls = 0;
+    SetStreamScreenPrintHook([&] { ++print_hook_calls; });
+    std::ostringstream captured;
+    std::streambuf* const old_buf = std::cout.rdbuf(captured.rdbuf());
+    EchoDeliveredQueuedMessages({}, lubancode::cli::Theme{});
+    std::cout.rdbuf(old_buf);
+    SetStreamScreenPrintHook(nullptr);
+
+    CHECK(captured.str().empty());
+    CHECK(print_hook_calls == 0);
 }

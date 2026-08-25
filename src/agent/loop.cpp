@@ -520,29 +520,46 @@ bool ShouldNudgeStepLimit(int step_index, int max_steps_per_turn) {
     return (max_steps_per_turn - step_index) == (std::min)(max_steps_per_turn, kStepLimitNudgeThreshold);
 }
 
-AgentLoop::AgentLoop(api::Backend& backend, tools::ToolRegistry& registry, AgentRuntimeProfile profile,
-                     std::string system_prompt)
+Agent::Agent(api::Backend& backend, tools::ToolRegistry& registry, AgentProfile agent_profile)
     : backend_(backend),
       registry_(registry),
-      model_(std::move(profile.model)),
-      system_prompt_(std::move(system_prompt)),
-      profile_(std::move(profile)) {}
+      provider_(std::move(agent_profile.provider)),
+      request_profile_(std::move(agent_profile.request)),
+      system_prompt_(std::move(agent_profile.system_prompt)),
+      profile_(std::move(agent_profile.runtime)) {
+    if (request_profile_.model.empty()) {
+        request_profile_.model = profile_.model;
+    } else {
+        profile_.model = request_profile_.model;
+    }
+}
 
-AgentLoop::AgentLoop(api::Backend& backend, tools::ToolRegistry& registry, std::string model,
-                      std::string system_prompt, std::optional<int> max_tokens, int max_steps_per_turn,
-                      std::size_t max_context_chars)
-    : AgentLoop(backend, registry,
-                [&]() {
-                    AgentRuntimeProfile profile;
-                    profile.model = std::move(model);
-                    profile.max_output_tokens = std::move(max_tokens);
-                    profile.max_steps_per_turn = max_steps_per_turn;
-                    profile.max_context_chars = max_context_chars;
-                    return profile;
-                }(),
-                std::move(system_prompt)) {}
+Agent::Agent(api::Backend& backend, tools::ToolRegistry& registry, AgentRuntimeProfile profile,
+             std::string system_prompt)
+    : Agent(backend, registry,
+            [&]() {
+                AgentProfile out;
+                out.request.model = profile.model;
+                out.runtime = std::move(profile);
+                out.system_prompt = std::move(system_prompt);
+                return out;
+            }()) {}
 
-std::vector<api::ToolDefinition> AgentLoop::BuildToolDefinitions() const {
+Agent::Agent(api::Backend& backend, tools::ToolRegistry& registry, std::string model,
+             std::string system_prompt, std::optional<int> max_tokens, int max_steps_per_turn,
+             std::size_t max_context_chars)
+    : Agent(backend, registry,
+            [&]() {
+                AgentRuntimeProfile profile;
+                profile.model = std::move(model);
+                profile.max_output_tokens = std::move(max_tokens);
+                profile.max_steps_per_turn = max_steps_per_turn;
+                profile.max_context_chars = max_context_chars;
+                return profile;
+            }(),
+            std::move(system_prompt)) {}
+
+std::vector<api::ToolDefinition> Agent::BuildToolDefinitions() const {
     std::vector<api::ToolDefinition> defs;
     defs.reserve(registry_.All().size());
     for (const auto& tool : registry_.All()) {
@@ -556,16 +573,50 @@ std::vector<api::ToolDefinition> AgentLoop::BuildToolDefinitions() const {
     return defs;
 }
 
-std::expected<RunOutcome, std::string> AgentLoop::Run(const std::string& user_input, const Callbacks& callbacks,
-                                                        const std::atomic<bool>* cancel) {
+std::expected<RunOutcome, std::string> Agent::Run(const std::string& user_input, const Callbacks& callbacks,
+                                                  const std::atomic<bool>* cancel) {
     api::Message user_message;
     user_message.role = api::Role::User;
     user_message.content.push_back(api::TextBlock{user_input});
-    return Run(std::move(user_message), callbacks, cancel);
+    return AgentLoop::Run(*this, std::move(user_message), callbacks, cancel);
 }
 
-std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message, const Callbacks& callbacks,
-                                                        const std::atomic<bool>* cancel) {
+std::expected<RunOutcome, std::string> Agent::Run(api::Message user_message, const Callbacks& callbacks,
+                                                  const std::atomic<bool>* cancel) {
+    return AgentLoop::Run(*this, std::move(user_message), callbacks, cancel);
+}
+
+std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message user_message,
+                                                       const Callbacks& callbacks,
+                                                       const std::atomic<bool>* cancel) {
+    auto& backend_ = agent.backend_;
+    auto& registry_ = agent.registry_;
+    auto& model_ = agent.request_profile_.model;
+    auto& system_prompt_ = agent.system_prompt_;
+    auto& turn_context_ = agent.turn_context_;
+    auto& active_turn_context_ = agent.active_turn_context_;
+    auto& run_active_ = agent.run_active_;
+    auto& profile_ = agent.profile_;
+    auto& structural_compression_enabled_ = agent.structural_compression_enabled_;
+    auto& structural_options_ = agent.structural_options_;
+    auto& structural_stats_ = agent.structural_stats_;
+    auto& artifact_store_ = agent.artifact_store_;
+    auto& history_ = agent.history_;
+    auto& request_history_ = agent.request_history_;
+    auto& last_prefix_ = agent.last_prefix_;
+    auto& cache_epoch_ = agent.cache_epoch_;
+    auto& pending_epoch_break_reason_ = agent.pending_epoch_break_reason_;
+    auto& result_view_memo_ = agent.result_view_memo_;
+    auto& sticky_view_ = agent.sticky_view_;
+    auto& sticky_base_history_size_ = agent.sticky_base_history_size_;
+    auto& on_context_pressure_ = agent.on_context_pressure_;
+    auto& tool_filter_ = agent.tool_filter_;
+    auto& tool_filter_denial_ = agent.tool_filter_denial_;
+    auto& inbox_ = agent.inbox_;
+    auto& batch_counter_ = agent.batch_counter_;
+    const auto BuildToolDefinitions = [&agent]() { return agent.BuildToolDefinitions(); };
+    const auto issue_execution_id = [&agent]() { return agent.issue_execution_id(); };
+
     if (user_message.role != api::Role::User || user_message.content.empty()) {
         return std::unexpected("用户消息为空，无法发送。");
     }
@@ -635,6 +686,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
         api::Request request;
         request.model = model_;
         request.system = system_prompt_;
+        api::ApplyRequestProfile(request, agent.request_profile_);
         // 步数将尽提醒(第五期):固定文案,在"剩余步数第一次降到阈值"那一步
         // 追加进尚未发出的尾部消息(user 输入或刚攒完的 tool result),随
         // history 留住——不改 system,不撤旧提醒,追加律不破。ShouldNudge-

@@ -86,7 +86,7 @@ constexpr const char* kDefaultTheme = "dark";
 constexpr std::size_t kDefaultContextWindowTokens = 256000;
 
 // max_steps_per_turn(agent 主循环一个 turn 内跟模型来回的步数上限;旧配置
-// 名 max_turns)的内置默认值。数值上跟 agent::AgentLoop 构造函数的默认参数
+// 名 max_turns)的内置默认值。数值上跟 agent::Agent 构造函数的默认参数
 // 保持一致,但 config 层不依赖 agent 层(同 kDefaultMaxContextChars 的理由,
 // 依赖只许单向)。
 //
@@ -401,7 +401,7 @@ struct LspServerConfig {
 // 全局同名段。内置字段不执行 shell，刷新时不会卡住输入框。
 struct StatusPanelConfig {
     std::vector<std::string> items{
-        "permission_mode", "model", "cwd", "git_branch", "context", "tokens"};
+        "permission_mode", "model", "effort", "cwd", "git_branch", "context", "tokens"};
     std::string separator = " · ";
 };
 

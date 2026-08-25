@@ -133,7 +133,7 @@ TEST_CASE("/title 状态账:建档前挂起,建档后补写,再设当场落事�
     lubancode::agent::SessionStore store(dir.string());
     lubancode::tools::ToolRegistry registry;
     NullBackend backend;
-    lubancode::agent::AgentLoop loop(backend, registry, "test-model", "system");
+    lubancode::agent::Agent loop(backend, registry, "test-model", "system");
 
     std::string title;
     bool title_pending = false;
@@ -184,7 +184,7 @@ TEST_CASE("/clear 状态账:重建不带历史、存档翻篇、标题清空") {
     lubancode::agent::SessionStore store(dir.string());
     lubancode::tools::ToolRegistry registry;
     NullBackend backend;
-    lubancode::agent::AgentLoop loop(backend, registry, "test-model", "system");
+    lubancode::agent::Agent loop(backend, registry, "test-model", "system");
     lubancode::agent::SessionMeta begin_meta;
     REQUIRE(store.Begin(begin_meta, "sess-clear-test"));
     store.AppendTitleEvent("旧标题");

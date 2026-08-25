@@ -526,7 +526,7 @@ TEST_CASE("RunProviderAddWizard: 回到密钥步不回显明文 key") {
 
 TEST_CASE("RunProviderPresetWizard: 选预设只问密钥与确认,参数全带上") {
     const auto catalog = config::ParseProviderCatalogJson(
-        R"({"schema_version":1,"revision":"2026-07-25","providers":{"glm":{"name":"GLM","description":"Chat","wire":"chat_completions","base_url":"https://api.test/v1","key_env":"GLM_KEY","default_model":"glm-x","model_reasoning_effort":"max","extra_body":{"tool_stream":true},"models":{"glm-x":{"name":"GLM X","context_window":"1m"}}}}})",
+        R"({"schema_version":2,"revision":"2026-07-25","providers":{"glm":{"name":"GLM","description":"Chat","wire":"chat_completions","base_url":"https://api.test/v1","key_env":"GLM_KEY","default_model":"glm-x","model_reasoning_effort":"max","extra_body":{"tool_stream":true},"models":{"glm-x":{"name":"GLM X","context_window":"1m"}}}}})",
         "p");
     REQUIRE(catalog.has_value());
     ScriptedIO scripted;
@@ -551,7 +551,7 @@ TEST_CASE("RunProviderPresetWizard: 选预设只问密钥与确认,参数全带�
 
 TEST_CASE("RunProviderPresetWizard: 汇总页编号真能跳回改单项,改完仍可回车保存") {
     const auto catalog = config::ParseProviderCatalogJson(
-        R"({"schema_version":1,"revision":"2026-07-25","providers":{"p":{"name":"P","wire":"responses","base_url":"https://api.test/v1","key_env":"P_KEY","default_model":"m","models":{"m":{"name":"M"}}}}})",
+        R"({"schema_version":2,"revision":"2026-07-25","providers":{"p":{"name":"P","wire":"responses","base_url":"https://api.test/v1","key_env":"P_KEY","default_model":"m","models":{"m":{"name":"M"}}}}})",
         "p");
     REQUIRE(catalog.has_value());
     ScriptedIO scripted;
@@ -570,7 +570,7 @@ TEST_CASE("RunProviderPresetWizard: 汇总页编号真能跳回改单项,改完�
 
 TEST_CASE("RunProviderPresetWizard: 预设也认'无需鉴权'") {
     const auto catalog = config::ParseProviderCatalogJson(
-        R"({"schema_version":1,"revision":"2026-07-25","providers":{"p":{"name":"P","wire":"responses","base_url":"https://api.test/v1","key_env":"P_KEY","default_model":"m","models":{"m":{"name":"M"}}}}})",
+        R"({"schema_version":2,"revision":"2026-07-25","providers":{"p":{"name":"P","wire":"responses","base_url":"https://api.test/v1","key_env":"P_KEY","default_model":"m","models":{"m":{"name":"M"}}}}})",
         "p");
     REQUIRE(catalog.has_value());
     ScriptedIO scripted;
@@ -585,7 +585,7 @@ TEST_CASE("RunProviderPresetWizard: 预设也认'无需鉴权'") {
 
 TEST_CASE("RunProviderPresetWizard: 末项回到全手填向导(新次序)") {
     const auto catalog = config::ParseProviderCatalogJson(
-        R"({"schema_version":1,"revision":"2026-07-25","providers":{"p":{"name":"P","wire":"responses","base_url":"https://api.test/v1","key_env":"P_KEY","default_model":"m","models":{"m":{"name":"M"}}}}})",
+        R"({"schema_version":2,"revision":"2026-07-25","providers":{"p":{"name":"P","wire":"responses","base_url":"https://api.test/v1","key_env":"P_KEY","default_model":"m","models":{"m":{"name":"M"}}}}})",
         "p");
     REQUIRE(catalog.has_value());
     ScriptedIO scripted;

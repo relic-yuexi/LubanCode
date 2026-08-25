@@ -109,7 +109,7 @@ int main() {
     const nlohmann::json as = agent.input_schema();
     DumpParam(as, "title", "agent.param.title");
     DumpParam(as, "prompt", "agent.param.prompt");
-    DumpParam(as, "max_steps_per_turn", "agent.param.max_steps_per_turn");
+    // max_steps_per_turn 不再出 schema(限步走配置,不给模型旋钮),故不转录。
     DumpParam(as, "agent_type", "agent.param.agent_type");
     DumpParam(as, "execution_mode", "agent.param.execution_mode");
     DumpParam(as, "run_in_background", "agent.param.run_in_background");

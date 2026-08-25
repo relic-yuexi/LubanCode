@@ -977,7 +977,7 @@ std::string ImageInputErrorText(const lubancode::cli::ImageInputError& error) {
 // 还没看见),换成 atomic<bool> 用 load/store 的 acquire/release 语义堵上。
 // allow_commands/deny_commands:settings.local.json 的 run_command 前缀白/黑
 // 名单,原样递给 BuildCallbacks 的确认回调叠加判定(缺省空表 = 无叠加)。
-RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user_input, bool auto_confirm,
+RunTurnResult RunTurn(lubancode::agent::Agent& loop, const std::string& user_input, bool auto_confirm,
                        std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
                        lubancode::cli::ContextTracker& context_tracker, lubancode::tools::ToolRegistry& registry,
                        lubancode::hooks::HookDispatcher* hook_dispatcher, bool is_console,

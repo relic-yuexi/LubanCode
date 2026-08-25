@@ -1021,7 +1021,7 @@ TEST_CASE("status_panel: 项目级整段压过全局，没配置走内置字段"
     const auto defaults = config::MergeConfig({}, std::nullopt, std::nullopt, {});
     REQUIRE(defaults.has_value());
     CHECK(defaults->config.status_panel.items ==
-          std::vector<std::string>{"permission_mode", "model", "cwd", "git_branch", "context", "tokens"});
+          std::vector<std::string>{"permission_mode", "model", "effort", "cwd", "git_branch", "context", "tokens"});
     CHECK(defaults->sources.status_panel == config::Source::Default);
 }
 

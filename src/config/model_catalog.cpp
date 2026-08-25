@@ -95,14 +95,8 @@ std::optional<ModelCatalogEntry> ParseEntry(const nlohmann::json& item, std::str
                 error_out = "supported_think_levels[" + std::to_string(i) + "] 的 description 字段必须是字符串";
                 return std::nullopt;
             }
-            if (level.contains("extra_body")) {
-                if (!level["extra_body"].is_object()) {
-                    error_out = "supported_think_levels[" + std::to_string(i) + "] 的 extra_body 字段必须是 object";
-                    return std::nullopt;
-                }
-                parsed_level.extra_body = level["extra_body"];
-            }
             entry.supported_think_levels.push_back(std::move(parsed_level));
+            entry.reasoning.supported_efforts.push_back(entry.supported_think_levels.back().effort);
         }
     }
 
@@ -180,24 +174,17 @@ ModelCatalog BuiltinModelsFromProviderCatalog() {
     catalog.warnings = providers.warnings;
     for (const auto& provider : providers.providers) {
         for (const auto& model : provider.models) {
-            bool duplicate = false;
-            for (const auto& existing : catalog.models) {
-                if (existing.slug == model.id) {
-                    duplicate = true;
-                    break;
-                }
-            }
-            if (duplicate) continue;
             ModelCatalogEntry entry;
+            entry.provider_id = provider.id;
             entry.slug = model.id;
             entry.display_name = model.name;
             entry.description = model.description;
             entry.default_think = model.default_think;
             entry.context_window_tokens = model.context_window_tokens;
             entry.max_output_tokens = model.max_output_tokens;
-            for (const auto& variant : model.variants) {
-                entry.supported_think_levels.push_back(
-                    ThinkLevel{variant.id, variant.description, variant.extra_body});
+            entry.reasoning = model.reasoning;
+            for (const auto& effort : model.reasoning.supported_efforts) {
+                entry.supported_think_levels.push_back(ThinkLevel{effort, {}});
             }
             catalog.models.push_back(std::move(entry));
         }
@@ -214,6 +201,18 @@ const ModelCatalogEntry* ModelCatalog::FindBySlug(const std::string& slug) const
         }
     }
     return nullptr;
+}
+
+const ModelCatalogEntry* ModelCatalog::FindByProviderAndSlug(const std::string& provider,
+                                                              const std::string& slug) const {
+    // 用户目录条目没有 provider_id，照旧压过内置档案。
+    for (const auto& entry : models) {
+        if (entry.provider_id.empty() && entry.slug == slug) return &entry;
+    }
+    for (const auto& entry : models) {
+        if (entry.provider_id == provider && entry.slug == slug) return &entry;
+    }
+    return FindBySlug(slug);
 }
 
 std::optional<std::string> ModelCatalogPath() {
@@ -281,7 +280,7 @@ ModelCatalog LoadModelCatalog() {
     std::ostringstream buffer;
     buffer << file.rdbuf();
     ModelCatalog user = ParseModelCatalogJson(buffer.str(), *path);
-    // 用户 models.json 优先；只把没被用户同 slug 覆盖的内置条目补在后头。
+    // 用户 models.json 优先；同 slug 的用户条目压过各家内置条目。
     for (const auto& entry : builtin.models) {
         if (user.FindBySlug(entry.slug) == nullptr) user.models.push_back(entry);
     }
@@ -312,15 +311,6 @@ bool ThinkLevelDeclared(const ModelCatalogEntry& entry, const std::string& level
         }
     }
     return false;
-}
-
-nlohmann::json ThinkLevelExtraBody(const ModelCatalogEntry* entry, const std::string& level) {
-    if (entry == nullptr) return nlohmann::json::object();
-    const std::string wanted = ToLowerAscii(level);
-    for (const auto& declared : entry->supported_think_levels) {
-        if (ToLowerAscii(declared.effort) == wanted) return declared.extra_body;
-    }
-    return nlohmann::json::object();
 }
 
 CatalogApplication ComputeCatalogApplication(const ModelCatalog& catalog, const std::string& slug,

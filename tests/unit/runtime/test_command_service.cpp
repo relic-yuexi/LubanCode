@@ -404,7 +404,7 @@ TEST_CASE("ResumeThread:序号、id、空串三条解析路,旧账接上") {
     NullBackend backend;
     tools::ToolRegistry registry;
     agent::AgentRuntimeProfile profile;
-    agent::AgentLoop loop(backend, registry, std::move(profile), std::string("resume-test"));
+    agent::Agent loop(backend, registry, std::move(profile), std::string("resume-test"));
     rt::SessionRuntime runtime({dir.path(), "anthropic", "20260823-130000"});
 
     rt::CommandService::Options options = BaseOptions();

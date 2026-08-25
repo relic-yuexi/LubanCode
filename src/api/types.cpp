@@ -1,10 +1,55 @@
 #include "api/types.hpp"
 
+#include <algorithm>
+#include <cctype>
+
 #include <variant>
 
 #include "platform/json_safe.hpp"  // SanitizeJsonStrings:工具入参/结果这类 JSON 树字段的递归清洗
 
 namespace lubancode::api {
+
+std::string LowerReasoningEffort(std::string effort) {
+    for (char& c : effort) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return effort;
+}
+
+bool ReasoningEffortIsOff(const std::string& effort) {
+    const std::string lower = LowerReasoningEffort(effort);
+    return lower == "none" || lower == "minimal";
+}
+
+int ReasoningBudgetForEffort(const ReasoningConfig& config, const std::string& effort,
+                             int max_tokens) {
+    const std::string lower = LowerReasoningEffort(effort);
+    if (!config.budget_min.has_value() && !config.budget_max.has_value()) {
+        int legacy = 16384;
+        if (lower == "low") legacy = 1024;
+        else if (lower == "medium" || lower == "auto") legacy = 4096;
+        else if (lower == "xhigh" || lower == "extra") legacy = 32768;
+        else if (lower == "max") legacy = 49152;
+        if (max_tokens > 0 && legacy >= max_tokens) {
+            legacy = max_tokens > 256 ? max_tokens - 256 : max_tokens / 2;
+        }
+        return std::max(1, legacy);
+    }
+    const int configured_min = config.budget_min.value_or(1024);
+    const int configured_max = config.budget_max.value_or(49152);
+    const int minimum = std::max(1, configured_min);
+    const int maximum = std::max(minimum, configured_max);
+    int rank = 2;
+    if (lower == "low") rank = 0;
+    else if (lower == "medium") rank = 1;
+    else if (lower == "high") rank = 2;
+    else if (lower == "xhigh" || lower == "extra") rank = 3;
+    else if (lower == "max") rank = 4;
+    const long long span = static_cast<long long>(maximum) - minimum;
+    int budget = minimum + static_cast<int>((span * rank) / 4);
+    if (max_tokens > 0 && budget >= max_tokens) {
+        budget = max_tokens > 256 ? max_tokens - 256 : max_tokens / 2;
+    }
+    return std::max(1, budget);
+}
 
 namespace {
 
@@ -64,6 +109,14 @@ void SanitizeMessage(Message& message) {
     for (auto& block : message.content) {
         SanitizeContentBlock(block);
     }
+}
+
+void ApplyRequestProfile(Request& request, const RequestProfile& profile) {
+    if (!profile.model.empty()) {
+        request.model = profile.model;
+    }
+    request.reasoning_effort = profile.reasoning_effort;
+    request.reasoning = profile.reasoning;
 }
 
 void SanitizeRequest(Request& request) {

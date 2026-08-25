@@ -189,10 +189,6 @@ std::string StreamHintText(bool plain) {
     return tr(plain ? "stream.hint.plain" : "stream.hint");
 }
 
-std::string StreamFooterInterruptText(bool plain) {
-    return tr(plain ? "stream.interrupt.plain" : "stream.interrupt");
-}
-
 std::string BuildCacheNote(const ContextTracker& tracker, bool last_usage_reported) {
     // 状态栏缓存注记:显示"最近一次请求"的命中,不显示会话累计——累计
     // 分母每轮都重复加进过去所有输入,数字越大越接近 100%,容易误读成

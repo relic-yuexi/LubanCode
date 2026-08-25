@@ -28,8 +28,7 @@ std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::C
     if (config.wire == lubancode::config::Wire::GoogleGenerateContent) {
         // Gemini 原生 wire:鉴权走 x-goog-api-key(client 里自理),stream_usage/
         // reasoning_replay 这类 Chat 私有的 capability 都不沾;思考开关经
-        // reasoning_effort 翻成 generationConfig.thinkingConfig,档位私有参数
-        // (thinkingBudget)由目录 variants 的 extra_body 透传。
+        // reasoning_effort 与模型推理档案一同翻成 thinkingConfig。
         return std::make_unique<lubancode::api::gemini::GeminiBackend>(
             config.base_url, config.auth_token, config.connect_timeout_ms, config.stream_idle_timeout_secs,
             config.extra_body, headers, config.request_hard_timeout_secs);
@@ -82,25 +81,31 @@ std::expected<void, lubancode::api::Error> ModelOverrideBackend::send_stream(
 ThinkOverrideBackend::ThinkOverrideBackend(lubancode::api::Backend& inner,
                                            std::shared_ptr<std::string> current_think,
                                            std::shared_ptr<std::string> current_model,
-                                           const lubancode::config::ModelCatalog* catalog)
+                                           const lubancode::config::ModelCatalog* catalog,
+                                           const std::string* current_provider)
     : inner_(inner),
       current_think_(std::move(current_think)),
       current_model_(std::move(current_model)),
-      catalog_(catalog) {}
+      catalog_(catalog),
+      current_provider_(current_provider) {}
 
 std::expected<void, lubancode::api::Error> ThinkOverrideBackend::send_stream(
     const lubancode::api::Request& request,
     const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
     const std::atomic<bool>* cancel) {
     lubancode::api::Request patched = request;
-    patched.reasoning_effort = *current_think_;
+    lubancode::api::RequestProfile profile;
+    profile.model = patched.model;
+    profile.reasoning_effort = *current_think_;
     if (catalog_ != nullptr) {
-        const auto body = lubancode::config::ThinkLevelExtraBody(
-            catalog_->FindBySlug(*current_model_), *current_think_);
-        for (auto it = body.begin(); it != body.end(); ++it) {
-            patched.extra_body[it.key()] = it.value();
+        const auto* entry = current_provider_ == nullptr
+                                ? catalog_->FindBySlug(*current_model_)
+                                : catalog_->FindByProviderAndSlug(*current_provider_, *current_model_);
+        if (entry != nullptr) {
+            profile.reasoning = entry->reasoning;
         }
     }
+    lubancode::api::ApplyRequestProfile(patched, profile);
     return inner_.send_stream(patched, on_event, cancel);
 }
 

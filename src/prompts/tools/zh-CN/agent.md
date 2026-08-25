@@ -10,10 +10,6 @@
 
 交给子代理的任务描述,必须自包含——子代理看不见主对话历史,任务目标、范围、期望的输出形式都要写清楚。
 
-## param.max_steps_per_turn
-
-子代理最多跑几步(一步 = 一次模型请求,一步可含多枚工具调用)。不填时用配置的默认:首选 subagent.max_steps_per_turn,未设则继承 max_steps_per_turn(默认 0 = 不限步)。传 0 = 不设上限;剩三步时会收到收口提醒,到限后返回 budget_exhausted 并带回检查点,不会笼统报失败。重试时先读检查点缩小范围,不要原样重发任务、不要擅自抬高步数上限。
-
 ## param.agent_type
 
 子代理类型:Explore 只读搜索分析;general-purpose 可做多步操作。默认 general-purpose。

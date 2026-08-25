@@ -24,12 +24,17 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agent/loop.hpp"
 #include "api/backend.hpp"
 #include "runtime/interaction_broker.hpp"
 #include "tools/registry.hpp"
 #include "workflow/runtime.hpp"
 
 namespace lubancode::workflow {
+
+// prompt 装配器:定义里的 prompt/task 是包内相对路径,宿主读文件拼系统段。
+// 返回完整 prompt 文本;空串 = 读不到(报错)。
+using PromptLoader = std::function<std::string(const std::string& package_relative_path)>;
 
 // ---------------------------------------------------------------------------
 // tool 节点
@@ -52,12 +57,35 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// llm 节点
+// agent 节点：与 main/subagent 共用 agent::Agent
 // ---------------------------------------------------------------------------
 
-// prompt 装配器:定义里的 prompt 是包内相对路径,宿主读文件拼系统段。
-// 返回完整 prompt 文本;空串 = 读不到(报错)。
-using PromptLoader = std::function<std::string(const std::string& package_relative_path)>;
+class AgentExecutor : public NodeExecutor {
+public:
+    struct Binding {
+        api::Backend* backend = nullptr;
+        agent::AgentProfile profile;
+    };
+    using BindingResolver = std::function<std::optional<Binding>(const WorkflowNode& node)>;
+
+    struct Options {
+        Binding default_binding;
+        BindingResolver resolve_binding;  // model_role/provider 路由；空则用 default
+        tools::ToolRegistry* registry = nullptr;
+        PromptLoader task_loader;
+        agent::Callbacks callbacks;
+    };
+
+    explicit AgentExecutor(Options options);
+    NodeExecResult Execute(const NodeExecRequest& request) override;
+
+private:
+    Options options_;
+};
+
+// ---------------------------------------------------------------------------
+// llm 节点
+// ---------------------------------------------------------------------------
 
 class LlmExecutor : public NodeExecutor {
 public:

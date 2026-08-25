@@ -9,7 +9,7 @@ using namespace lubancode;
 
 namespace {
 constexpr const char* kCatalog = R"({
-  "schema_version": 1,
+  "schema_version": 2,
   "revision": "2026-07-25",
   "providers": {
     "demo": {
@@ -30,9 +30,9 @@ constexpr const char* kCatalog = R"({
           "max_output": 128000,
           "default_think": "high",
           "capabilities": {"reasoning": true, "tools": true},
-          "variants": {
-            "low": {"description": "快"},
-            "high": {"description": "深", "extra_body": {"thinking": true}}
+          "reasoning": {
+            "controls": [{"kind": "effort", "values": ["low", "high"]}, {"kind": "toggle"}],
+            "supportedEfforts": ["low", "high"]
           }
         }
       }
@@ -41,7 +41,7 @@ constexpr const char* kCatalog = R"({
 })";
 }
 
-TEST_CASE("provider catalog: 严格解析 provider、模型与 variants") {
+TEST_CASE("provider catalog: 严格解析 provider、模型与 reasoning") {
     const auto catalog = config::ParseProviderCatalogJson(kCatalog, "catalog.json");
     REQUIRE(catalog.has_value());
     CHECK(catalog->revision == "2026-07-25");
@@ -59,17 +59,15 @@ TEST_CASE("provider catalog: 严格解析 provider、模型与 variants") {
     CHECK(model->context_window_tokens == 1000000);
     CHECK(model->max_output_tokens == 128000);
     CHECK(model->capabilities.at("reasoning"));
-    REQUIRE(model->variants.size() == 2);
-    const auto high = std::find_if(model->variants.begin(), model->variants.end(),
-                                   [](const auto& variant) { return variant.id == "high"; });
-    REQUIRE(high != model->variants.end());
-    CHECK(high->extra_body["thinking"] == true);
+    CHECK(model->reasoning.supports_effort);
+    CHECK(model->reasoning.supports_toggle);
+    CHECK(model->reasoning.supported_efforts == std::vector<std::string>{"low", "high"});
 }
 
 TEST_CASE("provider catalog: schema、地址、默认模型和字段类型坏了都拒绝整份") {
     CHECK_FALSE(config::ParseProviderCatalogJson("{}", "p").has_value());
     CHECK_FALSE(config::ParseProviderCatalogJson(
-        R"({"schema_version":2,"revision":"2026-07-25","providers":{}})", "p").has_value());
+        R"({"schema_version":1,"revision":"2026-07-25","providers":{}})", "p").has_value());
     std::string bad = kCatalog;
     bad.replace(bad.find("https://"), 8, "http://");
     CHECK_FALSE(config::ParseProviderCatalogJson(bad, "p").has_value());
@@ -96,7 +94,7 @@ TEST_CASE("ResolveProviderHeaderTemplates: 只在发请求前替换 key 占位�
     CHECK(headers.at("X-Mix") == "a-secret-b");
 }
 
-TEST_CASE("内置 Claude 5 档位齐全，Sonnet 默认 medium、Opus 默认 high") {
+TEST_CASE("内置 Claude 5 档位直接写在模型 reasoning 里") {
     const auto catalog = config::ParseProviderCatalogJson(
         config::embedded::kProviderCatalogJson, "<embedded>");
     REQUIRE(catalog.has_value());
@@ -105,15 +103,26 @@ TEST_CASE("内置 Claude 5 档位齐全，Sonnet 默认 medium、Opus 默认 hig
     const auto* opus = anthropic->FindModel("claude-opus-5");
     REQUIRE(opus != nullptr);
     CHECK(opus->default_think == "high");
-    std::vector<std::string> levels;
-    for (const auto& variant : opus->variants) levels.push_back(variant.id);
-    CHECK(levels == std::vector<std::string>{"low", "medium", "high", "extra", "max"});
+    CHECK(opus->reasoning.supported_efforts ==
+          std::vector<std::string>{"low", "medium", "high", "xhigh", "max"});
 
     const auto* sonnet = anthropic->FindModel("claude-sonnet-5");
     REQUIRE(sonnet != nullptr);
     CHECK(sonnet->default_think == "medium");
     CHECK(sonnet->capabilities.at("reasoning"));
-    levels.clear();
-    for (const auto& variant : sonnet->variants) levels.push_back(variant.id);
-    CHECK(levels == std::vector<std::string>{"low", "medium", "high", "extra", "max"});
+    CHECK(sonnet->reasoning.supported_efforts ==
+          std::vector<std::string>{"low", "medium", "high", "xhigh", "max", "none"});
+}
+
+TEST_CASE("内置 GPT 5.6 与 GLM 5.3 各自声明不同 effort") {
+    const auto catalog = config::ParseProviderCatalogJson(
+        config::embedded::kProviderCatalogJson, "<embedded>");
+    REQUIRE(catalog.has_value());
+    const auto* terra = catalog->FindProvider("openai")->FindModel("gpt-5.6-terra");
+    REQUIRE(terra != nullptr);
+    CHECK(terra->reasoning.supported_efforts ==
+          std::vector<std::string>{"none", "low", "medium", "high", "xhigh", "max"});
+    const auto* glm = catalog->FindProvider("zai")->FindModel("glm-5.3");
+    REQUIRE(glm != nullptr);
+    CHECK(glm->reasoning.supported_efforts == std::vector<std::string>{"low", "high", "max"});
 }

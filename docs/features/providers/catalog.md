@@ -67,7 +67,7 @@ ETag 另存一份。下次刷新发送条件请求；远端没变，便不重写
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "revision": "2026-08-06",
   "providers": {
     "example": {}
@@ -77,7 +77,7 @@ ETag 另存一份。下次刷新发送条件请求；远端没变，便不重写
 
 | 字段 | 规矩 |
 | --- | --- |
-| `schema_version` | 当前只能是 `1` |
+| `schema_version` | 当前只能是 `2` |
 | `revision` | `YYYY-MM-DD` |
 | `providers` | 以稳定 ID 为键，至少一项 |
 
@@ -117,7 +117,7 @@ ETag 另存一份。下次刷新发送条件请求；远端没变，便不重写
 
 目录里的 `chat_completions` 会映射到运行配置所见的 Chat 后端。两处名字略有不同：前者是目录 schema，后者是程序内部枚举与展示。
 
-## 6. 模型与 variant
+## 6. 模型与 reasoning
 
 模型项只强制一个 `name`，其余按需写：
 
@@ -129,14 +129,13 @@ ETag 另存一份。下次刷新发送条件请求；远端没变，便不重写
   "max_output": 32768,
   "default_think": "medium",
   "capabilities": {
-    "vision": true,
-    "tools": true
+    "image": true,
+    "tools": true,
+    "reasoning": true
   },
-  "variants": {
-    "fast": {
-      "description": "低延迟",
-      "extra_body": { "service_tier": "priority" }
-    }
+  "reasoning": {
+    "controls": [{"kind": "effort", "values": ["low", "medium", "high"]}],
+    "supportedEfforts": ["low", "medium", "high"]
   }
 }
 ```
@@ -147,9 +146,9 @@ ETag 另存一份。下次刷新发送条件请求；远端没变，便不重写
 | `max_output` | 最大输出 token |
 | `default_think` | 默认推理档 |
 | `capabilities` | 能力名到布尔值；供展示和选择使用 |
-| `variants` | 同一模型的请求变体 |
+| `reasoning` | 该模型支持的 effort、toggle、budget 与 wire 方言 |
 
-variant 不另造模型 ID。用户仍选同一模型，再选变体；变体的 `extra_body` 最后合并，能压过 Provider 级同名字段。
+推理控制按模型直写。`/think` 只展示当前模型声明的档位，请求层也读同一份档案。
 
 ## 7. 默认值怎么落进配置
 
@@ -158,13 +157,13 @@ variant 不另造模型 ID。用户仍选同一模型，再选变体；变体的
 ```text
 协议内置请求字段
   ← Provider extra_body
-  ← 当前模型 variant extra_body
+  ← Request extra_body
 ```
 
 对于用户可见资料，则按这一路取：
 
 1. 用户本地 Provider 配置。
-2. 当前模型与 variant 参数。
+2. 当前模型的 reasoning 与能力参数。
 3. 在线缓存目录。
 4. 可执行文件内置快照。
 5. 程序保守默认值。

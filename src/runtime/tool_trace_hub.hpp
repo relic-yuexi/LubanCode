@@ -79,7 +79,7 @@ public:
     // 返回 false 的 started(副作用工具写不落)会在 OnTrace 里直接拦:
     // 拦的方式是抛出 kErrSessionTraceAppendFailed 的拦执行信号——见
     // OnTrace 的注释,AgentLoop 侧由 RunOneTool 在 execute 前查询。
-    void Install(agent::AgentLoop& loop, agent::Callbacks& callbacks, const std::string& thread_id,
+    void Install(agent::Agent& loop, agent::Callbacks& callbacks, const std::string& thread_id,
                  const std::string& turn_id);
 
     // 单笔分发(Install 之外的手工投递口:恢复侧、测试、后台子代理的

@@ -131,6 +131,25 @@ TEST_CASE("Gemini request: max_tokens 与思考档位进 generationConfig") {
     CHECK(api::gemini::BuildRequestJson(off)["generationConfig"]["thinkingConfig"]["includeThoughts"] == false);
 }
 
+TEST_CASE("Gemini request: effort/budget 档案分别写 thinkingLevel/thinkingBudget") {
+    api::Request effort = SampleConversation();
+    effort.reasoning_effort = "high";
+    effort.reasoning.supports_effort = true;
+    effort.reasoning.wire_dialect = "effort";
+    const auto effort_body = api::gemini::BuildRequestJson(effort);
+    CHECK(effort_body["generationConfig"]["thinkingConfig"]["thinkingLevel"] == "high");
+
+    api::Request budget = SampleConversation();
+    budget.reasoning_effort = "auto";
+    budget.reasoning.supports_toggle = true;
+    budget.reasoning.budget_min = 128;
+    budget.reasoning.budget_max = 32768;
+    budget.reasoning.wire_dialect = "budget";
+    const auto budget_body = api::gemini::BuildRequestJson(budget);
+    CHECK(budget_body["generationConfig"]["thinkingConfig"]["thinkingBudget"] == -1);
+    CHECK(budget.extra_body.empty());
+}
+
 TEST_CASE("Gemini request: max_tokens 未设且档位为空时整个不带 generationConfig") {
     api::Request request;
     request.model = "m";

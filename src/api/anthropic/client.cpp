@@ -75,26 +75,21 @@ std::optional<json> BuildThinkingJson(const Request& request) {
     if (request.reasoning_effort.empty()) {
         return std::nullopt;
     }
-    std::string lower = request.reasoning_effort;
-    for (char& c : lower) {
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
-    if (lower == "none") {
+    const std::string lower = LowerReasoningEffort(request.reasoning_effort);
+    if (ReasoningEffortIsOff(lower)) {
         return json{{"type", "disabled"}};
     }
 
-    int budget = 0;
-    if (lower == "low") {
-        budget = 1024;    // 1k
-    } else if (lower == "medium") {
-        budget = 4096;    // 4k
-    } else if (lower == "high") {
-        budget = 16384;   // 16k
-    } else if (lower == "xhigh") {
-        budget = 32768;   // 32k
-    } else if (lower == "max") {
-        budget = 49152;   // 48k
-    } else {
+    // 新式 Claude Messages 用 adaptive thinking + output_config.effort。
+    // output_config 在 BuildRequestJson 里写；这里先落 thinking 开关。
+    if (request.reasoning.wire_dialect == "effort") {
+        return json{{"type", "adaptive"}};
+    }
+
+    const bool known_legacy = lower == "low" || lower == "medium" || lower == "high" ||
+                              lower == "xhigh" || lower == "extra" || lower == "max" ||
+                              lower == "auto";
+    if (request.reasoning.empty() && !known_legacy) {
         platform::LogSink::Instance().Warn(
             "anthropic", "协议下无此档映射,已忽略: " + request.reasoning_effort);
         return std::nullopt;
@@ -104,12 +99,7 @@ std::optional<json> BuildThinkingJson(const Request& request) {
     // kRequiredMaxOutputTokensFallback 注释),预算夹逼拿兜底后的有效值算。
     const int effective_max_tokens = request.max_tokens.value_or(kRequiredMaxOutputTokensFallback);
 
-    if (budget >= effective_max_tokens) {
-        budget = effective_max_tokens > 256 ? effective_max_tokens - 256 : effective_max_tokens / 2;
-        if (budget < 1) {
-            budget = 1;
-        }
-    }
+    const int budget = ReasoningBudgetForEffort(request.reasoning, lower, effective_max_tokens);
 
     return json{{"type", "enabled"}, {"budget_tokens", budget}};
 }
@@ -133,6 +123,12 @@ json BuildRequestJson(const Request& request, bool native_web_search, const json
 
     if (const auto thinking = BuildThinkingJson(request); thinking.has_value()) {
         body["thinking"] = *thinking;
+    }
+    if (!request.reasoning_effort.empty() && request.reasoning.wire_dialect == "effort" &&
+        !ReasoningEffortIsOff(request.reasoning_effort)) {
+        std::string effort = LowerReasoningEffort(request.reasoning_effort);
+        if (effort == "extra") effort = "xhigh";
+        body["output_config"] = json{{"effort", effort}};
     }
 
     json messages = json::array();

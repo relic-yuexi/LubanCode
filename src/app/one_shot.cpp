@@ -175,7 +175,8 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     auto current_think = std::make_shared<std::string>(config.think);
     const lubancode::config::ModelCatalog once_catalog = lubancode::config::LoadModelCatalog();
     auto once_model = std::make_shared<std::string>(config.model);
-    ThinkOverrideBackend think_backend(*backend, current_think, once_model, &once_catalog);
+    ThinkOverrideBackend think_backend(*backend, current_think, once_model, &once_catalog,
+                                       &config.active_provider);
     SpinnerBackend wrapped_backend(think_backend, theme, spinner_enabled);
 
     // 工具全栈与 InteractiveLoop 共用一套 ToolRuntime 装配(差异收在
@@ -238,12 +239,20 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     // 函数,单发不再单写一枚 4096。
     const lubancode::agent::AgentRuntimeProfile main_profile =
         lubancode::app::BuildMainRuntimeProfile(config, &once_catalog, config.model);
-    lubancode::agent::AgentLoop loop(
-        index_backend, registry, main_profile,
-        lubancode::agent::WithSoul(
-            lubancode::agent::WithModelInstructions(
-                lubancode::agent::AssembleSystemPrompt(prompt_options), model_instructions),
-            soul_content));
+    lubancode::agent::AgentProfile once_agent_profile;
+    once_agent_profile.provider = config.active_provider;
+    once_agent_profile.request.model = config.model;
+    once_agent_profile.request.reasoning_effort = config.think;
+    if (const auto* entry = once_catalog.FindByProviderAndSlug(config.active_provider, config.model);
+        entry != nullptr) {
+        once_agent_profile.request.reasoning = entry->reasoning;
+    }
+    once_agent_profile.runtime = main_profile;
+    once_agent_profile.system_prompt = lubancode::agent::WithSoul(
+        lubancode::agent::WithModelInstructions(
+            lubancode::agent::AssembleSystemPrompt(prompt_options), model_instructions),
+        soul_content);
+    lubancode::agent::Agent loop(index_backend, registry, std::move(once_agent_profile));
     if (main_deferral) {
         loop.SetToolFilter(tool_runtime.main_tool_filter());
     }

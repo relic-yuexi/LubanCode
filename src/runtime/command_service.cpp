@@ -212,7 +212,7 @@ std::vector<ThreadListEntry> CommandService::ListThreads(std::size_t limit) cons
     return out;
 }
 
-ResumeResult CommandService::ResumeThread(agent::AgentLoop& loop, SessionRuntime& runtime,
+ResumeResult CommandService::ResumeThread(agent::Agent& loop, SessionRuntime& runtime,
                                           const std::string& thread_ref, const std::string& cwd) {
     ResumeResult out;
     if (runtime.sessions_dir().empty()) {

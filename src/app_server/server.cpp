@@ -831,7 +831,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
 
         agent::AgentRuntimeProfile profile;
         profile.max_steps_per_turn = 32; // 骨架期防跑飞;真配置线接进来再换
-        agent::AgentLoop loop(*backend, *registry, std::move(profile), std::string("lubancode app-server"));
+        agent::Agent loop(*backend, *registry, std::move(profile), std::string("lubancode app-server"));
 
         agent::Callbacks callbacks;
         runtime::IdAuthority& ids = runtime::ProcessIdAuthority();

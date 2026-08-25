@@ -127,11 +127,24 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) 
     if (request.max_tokens.has_value()) {
         generation_config["maxOutputTokens"] = *request.max_tokens;
     }
-    // 思考开关:档位字符串非空就显式声明 includeThoughts(none 关、其余开),
-    // 思考正文才会以 thought part 流回来。thinkingBudget 这类按模型分档的
-    // 参数不在这猜——目录 variants 的 extra_body 透传(见函数头注释)。
+    // 推理档案决定写 thinkingLevel 还是 thinkingBudget；none/minimal 关。
     if (!request.reasoning_effort.empty()) {
-        generation_config["thinkingConfig"] = json{{"includeThoughts", request.reasoning_effort != "none"}};
+        const bool off = ReasoningEffortIsOff(request.reasoning_effort);
+        json thinking_config{{"includeThoughts", !off}};
+        if (off && request.reasoning.supports_toggle) {
+            thinking_config["thinkingBudget"] = 0;
+        } else if (!off && (request.reasoning.wire_dialect == "effort" ||
+                            request.reasoning.supports_effort)) {
+            thinking_config["thinkingLevel"] = LowerReasoningEffort(request.reasoning_effort);
+        } else if (!off && (request.reasoning.wire_dialect == "budget" ||
+                            request.reasoning.budget_max.has_value())) {
+            thinking_config["thinkingBudget"] =
+                LowerReasoningEffort(request.reasoning_effort) == "auto"
+                    ? -1
+                    : ReasoningBudgetForEffort(request.reasoning, request.reasoning_effort,
+                                               request.max_tokens.value_or(0));
+        }
+        generation_config["thinkingConfig"] = std::move(thinking_config);
     }
     if (!generation_config.empty()) {
         body["generationConfig"] = std::move(generation_config);

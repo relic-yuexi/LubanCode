@@ -248,7 +248,7 @@ TEST_CASE("RunOneTool 信任边界: on_tool_done 与下一轮请求拿同一份�
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<BadOutputTool>("好开头 " + std::string("\xC4\xE3\xBA\xC3") + " 尾巴"));
 
-    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, "test-model", "system prompt");
 
     std::vector<std::string> order;
     std::string done_content;

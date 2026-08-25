@@ -48,7 +48,7 @@ flowchart LR
 
 1. 解析命令行参数，定下工作目录、非交互输入与确认模式。
 2. 读取用户配置、项目配置和环境变量，按字段选出最终值。
-3. 加载 provider 目录与模型 variant，建好协议后端。
+3. 加载 provider 目录与模型 reasoning 档案，建好协议后端。
 4. 从发行包、用户目录、项目目录合并 Skill；再拼内置模块、用户 prompt、`SOUL.md`、项目指令与 Skill 摘要。
 5. 注册核心工具，再按配置接 MCP、LSP、网页搜索与插件。
 6. 打开或恢复会话，算出上下文预算。
@@ -118,7 +118,7 @@ src/api/
 
 中立事件包括文本增量、思考增量、工具调用、usage、结束和错误。Agent 只认这些事件。切换 `wire` 时，重建后端便成。
 
-provider 的 `extra_body` 先并入请求，模型 variant 的 `extra_body` 后压上。`extra_headers` 也在出网前合并。厂商私有字段由配置带入，无须在后端里写一长串特判。
+provider 的 `extra_body` 先并入请求，request 的 `extra_body` 后压上。`extra_headers` 也在出网前合并。推理档位由模型档案驱动，各 wire 写各自正式字段。
 
 模型目录从 `catalog/providers.json` 来。构建时嵌一份，离线也能选。运行时又可下载新版，拿 ETag 做条件请求，验过 schema 和大小才原子替换缓存。详情见 [Provider 目录](../features/providers/catalog.md)。
 

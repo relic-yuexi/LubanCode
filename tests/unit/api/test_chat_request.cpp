@@ -254,6 +254,32 @@ TEST_CASE("Chat request: 档位参数名按 provider 声明走,空档位字段�
     }
 }
 
+TEST_CASE("Chat request: 模型声明 effort+toggle 时写正式字段,不用 extra_body") {
+    api::Request request;
+    request.model = "glm-5.2";
+    request.reasoning_effort = "max";
+    request.reasoning.supports_effort = true;
+    request.reasoning.supports_toggle = true;
+    const auto body = api::chat::BuildRequestJson(request);
+    CHECK(body["reasoning_effort"] == "max");
+    CHECK(body["thinking"]["type"] == "enabled");
+    CHECK(request.extra_body.empty());
+
+    request.reasoning_effort = "none";
+    const auto off = api::chat::BuildRequestJson(request);
+    CHECK(off["reasoning_effort"] == "none");
+    CHECK(off["thinking"]["type"] == "disabled");
+}
+
+TEST_CASE("Chat request: toggle-only 模型只写 thinking,不乱发 reasoning_effort") {
+    api::Request request;
+    request.reasoning_effort = "auto";
+    request.reasoning.supports_toggle = true;
+    const auto body = api::chat::BuildRequestJson(request);
+    CHECK(body["thinking"]["type"] == "enabled");
+    CHECK_FALSE(body.contains("reasoning_effort"));
+}
+
 // ---------------------------------------------------------------------------
 // reasoning 回传字段名(reasoning_replay_field,vLLM/Qwen 单):回传历史
 // 时不许想当然把所有服务都写成 reasoning_content——DeepSeek 协议要

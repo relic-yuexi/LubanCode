@@ -21,16 +21,13 @@ namespace lubancode::api::gemini {
 //   - 思考块(ThinkingBlock)不回传:Gemini 的 thought 是一次性的,续会话
 //     不重放(与 responses wire 同一取舍);
 //   - max_tokens -> generationConfig.maxOutputTokens;
-//   - reasoning_effort 非空 -> generationConfig.thinkingConfig.includeThoughts
-//     (none 档显式关,别的档显式开);thinkingBudget 这类模型私有的档位
-//     参数不在这里猜,交给模型目录 variants 的 extra_body 透传。
+//   - reasoning_effort 非空 -> generationConfig.thinkingConfig；模型档案的
+//     wireDialect 决定写 thinkingLevel 或 thinkingBudget，none/minimal 关。
 //
 // extra_body(provider 级先合并,Request::extra_body 后合并)顶层浅合并、
 // 同名键整个覆盖——唯独 "generationConfig" 一键例外:两家都是 object 时按
 // 一层深合并(user 的子键压过内置子键,内置的 maxOutputTokens/
-// thinkingConfig 不被整块冲掉)。目录 variants 的思考档位全走
-// {"generationConfig":{"thinkingConfig":{...}}} 这副形状,浅合并会把
-// maxOutputTokens 一起埋了,所以这一键必须深一层。
+// thinkingConfig 不被整块冲掉)，所以这一键必须深一层。
 nlohmann::json BuildRequestJson(const Request& request,
                                 const nlohmann::json& extra_body = nlohmann::json::object());
 

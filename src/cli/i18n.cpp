@@ -261,11 +261,8 @@ const Entry kZhCN[] = {
     {"input.ctrlc_exit", "[已退出]"},
     {"stream.hint", "键入并回车 排队下一条"},
     {"stream.hint.plain", "键入并回车排队"},
-    {"stream.interrupt", "\xe2\x8e\x8b 打断"},
-    {"stream.interrupt.plain", "ESC 打断"},
     {"spinner.thinking", "思考中"},
     {"spinner.stopping", "正在停…"},
-    {"spinner.interrupt_hint", "Esc 可打断"},
 
     // ---- 子代理状态条(#52,#三:凑齐工具次数/token/耗时三个数字) ----
     {"agent_status.state_running", "运行中"},
@@ -579,8 +576,8 @@ const Entry kZhCN[] = {
     {"provider_wizard.effort.prompt", "effort: "},
     {"provider_wizard.effort.unset", "(未设置)"},
     {"provider_wizard.extra_body.hint",
-     "额外请求参数(JSON object,直接回车跳过。例如 GLM 的思考开关加分级 effort:"
-     " {\"thinking\":{\"type\":\"enabled\"},\"reasoning_effort\":\"max\"}):"},
+     "额外请求参数(JSON object,直接回车跳过；只放目录未建模的厂商私有字段，例如:"
+     " {\"temperature\":0.2}):"},
     {"provider_wizard.extra_body.prompt", "extra_body: "},
     {"provider_wizard.extra_body.invalid_json", "不是合法 JSON: {0},再输一遍(直接回车跳过)。"},
     {"provider_wizard.extra_body.not_object", "得是一个 JSON object(花括号包着的键值对),再输一遍(直接回车跳过)。"},
@@ -1890,11 +1887,8 @@ const Entry kEn[] = {
     {"input.ctrlc_exit", "[exited]"},
     {"stream.hint", "type + Enter to queue next"},
     {"stream.hint.plain", "type + Enter to queue next"},
-    {"stream.interrupt", "\xe2\x8e\x8b interrupt"},
-    {"stream.interrupt.plain", "ESC interrupt"},
     {"spinner.thinking", "Working"},
     {"spinner.stopping", "Stopping..."},
-    {"spinner.interrupt_hint", "Esc to interrupt"},
     {"ask_user.other", "Other (type your own answer)"},
     {"ask_user.select_prompt", "Choose a number (Esc to cancel): "},
     {"ask_user.multi_prompt", "Choose numbers separated by commas (Esc to cancel): "},
@@ -2228,8 +2222,8 @@ const Entry kEn[] = {
     {"provider_wizard.effort.prompt", "effort: "},
     {"provider_wizard.effort.unset", "(not set)"},
     {"provider_wizard.extra_body.hint",
-     "Extra request parameters (JSON object, leave blank to skip; e.g. GLM's thinking toggle plus a tiered "
-     "effort: {\"thinking\":{\"type\":\"enabled\"},\"reasoning_effort\":\"max\"}):"},
+     "Extra request parameters (JSON object, leave blank to skip; only for provider fields not modeled by "
+     "the catalog, e.g. {\"temperature\":0.2}):"},
     {"provider_wizard.extra_body.prompt", "extra_body: "},
     {"provider_wizard.extra_body.invalid_json", "Not valid JSON: {0}; try again (leave blank to skip)."},
     {"provider_wizard.extra_body.not_object",

@@ -45,13 +45,6 @@ bool ValidRevision(const std::string& revision) {
     return true;
 }
 
-int VariantRank(const std::string& id) {
-    static const std::vector<std::string> order{
-        "none", "minimal", "low", "medium", "high", "extra", "xhigh", "max"};
-    const auto it = std::find(order.begin(), order.end(), id);
-    return it == order.end() ? 100 : static_cast<int>(it - order.begin());
-}
-
 std::expected<std::string, std::string> RequiredString(const json& object, const char* field,
                                                         const std::string& where) {
     auto it = object.find(field);
@@ -74,11 +67,102 @@ std::expected<std::optional<std::size_t>, std::string> OptionalTokenCount(
     return std::optional<std::size_t>{*parsed};
 }
 
+std::expected<lubancode::api::ReasoningConfig, std::string> ParseReasoning(
+    const json& value, const std::string& where) {
+    if (!value.is_object()) return std::unexpected(where + " 必须是 object");
+    if (auto known = RejectUnknown(value, {"controls", "supportedEfforts", "thinkingTokenLimits",
+                                           "wireDialect"}, where);
+        !known.has_value()) return std::unexpected(known.error());
+
+    lubancode::api::ReasoningConfig out;
+    if (value.contains("supportedEfforts")) {
+        if (!value["supportedEfforts"].is_array()) {
+            return std::unexpected(where + ".supportedEfforts 必须是字符串数组");
+        }
+        for (const auto& effort : value["supportedEfforts"]) {
+            if (!effort.is_string() || effort.get<std::string>().empty()) {
+                return std::unexpected(where + ".supportedEfforts 必须是非空字符串数组");
+            }
+            out.supported_efforts.push_back(effort.get<std::string>());
+        }
+    }
+    if (value.contains("wireDialect")) {
+        if (!value["wireDialect"].is_string()) {
+            return std::unexpected(where + ".wireDialect 必须是字符串");
+        }
+        out.wire_dialect = value["wireDialect"].get<std::string>();
+        if (out.wire_dialect != "effort" && out.wire_dialect != "budget") {
+            return std::unexpected(where + ".wireDialect 只认 effort/budget");
+        }
+    }
+
+    const auto read_limits = [&](const json& limits, const std::string& limits_where)
+        -> std::expected<void, std::string> {
+        if (!limits.is_object()) return std::unexpected(limits_where + " 必须是 object");
+        for (const char* field : {"min", "max"}) {
+            if (!limits.contains(field)) continue;
+            if (!limits[field].is_number_integer()) {
+                return std::unexpected(limits_where + "." + field + " 必须是整数");
+            }
+            const int number = limits[field].get<int>();
+            if (number < 0) return std::unexpected(limits_where + "." + field + " 不能小于 0");
+            if (std::string(field) == "min") out.budget_min = number;
+            else out.budget_max = number;
+        }
+        return {};
+    };
+    if (value.contains("thinkingTokenLimits")) {
+        if (auto known = RejectUnknown(value["thinkingTokenLimits"], {"min", "max"},
+                                       where + ".thinkingTokenLimits"); !known.has_value()) {
+            return std::unexpected(known.error());
+        }
+        auto parsed = read_limits(value["thinkingTokenLimits"], where + ".thinkingTokenLimits");
+        if (!parsed.has_value()) return std::unexpected(parsed.error());
+    }
+    if (value.contains("controls")) {
+        if (!value["controls"].is_array()) return std::unexpected(where + ".controls 必须是数组");
+        for (std::size_t i = 0; i < value["controls"].size(); ++i) {
+            const auto& control = value["controls"][i];
+            const std::string control_where = where + ".controls[" + std::to_string(i) + "]";
+            if (!control.is_object()) return std::unexpected(control_where + " 必须是 object");
+            if (auto known = RejectUnknown(control, {"kind", "values", "min", "max"}, control_where);
+                !known.has_value()) return std::unexpected(known.error());
+            auto kind = RequiredString(control, "kind", control_where);
+            if (!kind.has_value()) return std::unexpected(kind.error());
+            if (*kind == "toggle") {
+                out.supports_toggle = true;
+            } else if (*kind == "budget") {
+                auto parsed = read_limits(control, control_where);
+                if (!parsed.has_value()) return std::unexpected(parsed.error());
+            } else if (*kind == "effort") {
+                out.supports_effort = true;
+                if (!control.contains("values") || !control["values"].is_array()) {
+                    return std::unexpected(control_where + ".values 必须是字符串数组");
+                }
+                if (out.supported_efforts.empty()) {
+                    for (const auto& effort : control["values"]) {
+                        if (!effort.is_string() || effort.get<std::string>().empty()) {
+                            return std::unexpected(control_where + ".values 必须是非空字符串数组");
+                        }
+                        out.supported_efforts.push_back(effort.get<std::string>());
+                    }
+                }
+            } else {
+                return std::unexpected(control_where + ".kind 不认识: " + *kind);
+            }
+        }
+    }
+    if (out.budget_min.has_value() && out.budget_max.has_value() && *out.budget_min > *out.budget_max) {
+        return std::unexpected(where + " 的 budget min 不能大于 max");
+    }
+    return out;
+}
+
 std::expected<ProviderCatalogModel, std::string> ParseModel(const std::string& id, const json& value,
                                                             const std::string& where) {
     if (!value.is_object()) return std::unexpected(where + " 必须是 JSON object");
     if (auto known = RejectUnknown(value, {"name", "description", "context_window", "max_output",
-                                           "default_think", "capabilities", "variants"}, where);
+                                           "default_think", "capabilities", "reasoning"}, where);
         !known.has_value()) return std::unexpected(known.error());
     ProviderCatalogModel model;
     model.id = id;
@@ -108,34 +192,10 @@ std::expected<ProviderCatalogModel, std::string> ParseModel(const std::string& i
             model.capabilities[it.key()] = it.value().get<bool>();
         }
     }
-    if (value.contains("variants")) {
-        if (!value["variants"].is_object()) return std::unexpected(where + ".variants 必须是 JSON object");
-        for (auto it = value["variants"].begin(); it != value["variants"].end(); ++it) {
-            if (!it.value().is_object()) return std::unexpected(where + ".variants." + it.key() + " 必须是 object");
-            if (auto known = RejectUnknown(it.value(), {"description", "extra_body"},
-                                           where + ".variants." + it.key());
-                !known.has_value()) return std::unexpected(known.error());
-            ProviderCatalogVariant variant;
-            variant.id = it.key();
-            if (it.value().contains("description")) {
-                if (!it.value()["description"].is_string()) {
-                    return std::unexpected(where + ".variants." + it.key() + ".description 必须是字符串");
-                }
-                variant.description = it.value()["description"].get<std::string>();
-            }
-            if (it.value().contains("extra_body")) {
-                if (!it.value()["extra_body"].is_object()) {
-                    return std::unexpected(where + ".variants." + it.key() + ".extra_body 必须是 object");
-                }
-                variant.extra_body = it.value()["extra_body"];
-            }
-            model.variants.push_back(std::move(variant));
-        }
-        std::stable_sort(model.variants.begin(), model.variants.end(), [](const auto& left, const auto& right) {
-            const int left_rank = VariantRank(left.id);
-            const int right_rank = VariantRank(right.id);
-            return left_rank != right_rank ? left_rank < right_rank : left.id < right.id;
-        });
+    if (value.contains("reasoning")) {
+        auto reasoning = ParseReasoning(value["reasoning"], where + ".reasoning");
+        if (!reasoning.has_value()) return std::unexpected(reasoning.error());
+        model.reasoning = std::move(*reasoning);
     }
     return model;
 }

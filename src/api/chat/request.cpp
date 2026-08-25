@@ -188,12 +188,17 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
         body["stream_options"] = json{{"include_usage", true}};
     }
 
-    if (!request.reasoning_effort.empty()) {
+    if (!request.reasoning_effort.empty() &&
+        (request.reasoning.empty() || request.reasoning.supports_effort)) {
         // 参数名按 provider 声明走(默认 reasoning_effort);空档位仍然整个
         // 缺席字段——"不填"就是真的不发,不偷偷塞默认档。
         const std::string param = options.reasoning_param.empty() ? std::string("reasoning_effort")
                                                                   : options.reasoning_param;
         body[param] = request.reasoning_effort;
+    }
+    if (!request.reasoning_effort.empty() && request.reasoning.supports_toggle) {
+        body["thinking"] = json{{"type", ReasoningEffortIsOff(request.reasoning_effort)
+                                             ? "disabled" : "enabled"}};
     }
 
     if (!request.tools.empty()) {

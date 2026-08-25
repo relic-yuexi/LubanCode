@@ -181,7 +181,7 @@ public:
     // cwd 只在本目录的场子里数(与 ResumeSession 同规矩);直接给 id 全局
     // 能找。成功后 runtime 的存档账被接管,persisted_count/title/compact_
     // epoch 都已接旧账,history 经 loop 换入。
-    ResumeResult ResumeThread(agent::AgentLoop& loop, SessionRuntime& runtime,
+    ResumeResult ResumeThread(agent::Agent& loop, SessionRuntime& runtime,
                               const std::string& thread_ref, const std::string& cwd);
 
     // ---- 审批/提问回答 --------------------------------------------------------

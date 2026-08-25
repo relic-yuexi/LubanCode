@@ -216,7 +216,7 @@ TEST_CASE("TurnRuntime::EvaluatePermission:options 携带的黑名单同纯函�
 TEST_CASE("取消:另一线程 request_interrupt,Run 线程可见,loop 真打断") {
     HangUntilCancelBackend backend;
     tools::ToolRegistry registry;
-    agent::AgentLoop loop(backend, registry, "test-model", "system");
+    agent::Agent loop(backend, registry, "test-model", "system");
 
     rt::TurnRuntime core(rt::TurnRuntime::Options{});
     CHECK_FALSE(core.interrupted());
@@ -244,7 +244,7 @@ TEST_CASE("取消:另一线程 request_interrupt,Run 线程可见,loop 真打断
 TEST_CASE("取消:未置位时旗子恒假(正常轮不受影响)") {
     HangUntilCancelBackend backend;
     tools::ToolRegistry registry;
-    agent::AgentLoop loop(backend, registry, "test-model", "system");
+    agent::Agent loop(backend, registry, "test-model", "system");
     rt::TurnRuntime core(rt::TurnRuntime::Options{});
     // 直接打断后收口,验证旗子状态可读、复位语义明确(轮对象随轮生灭)。
     core.request_interrupt();
@@ -407,7 +407,7 @@ TEST_CASE("AgentLoop 回调带 tool_use_id:审批请求与终态都认得这次�
     ScriptBackend backend;
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>("needs_ask", true));
-    agent::AgentLoop loop(backend, registry, "test-model", "system");
+    agent::Agent loop(backend, registry, "test-model", "system");
 
     std::vector<std::string> seen_ids;
     agent::Callbacks callbacks;

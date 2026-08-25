@@ -222,7 +222,7 @@ TEST_CASE("ProjectMemory: uv 与 yarn 偏好按问题召回并注入完整请求
 
     CaptureBackend backend;
     tools::ToolRegistry registry;
-    agent::AgentLoop loop(backend, registry, "test-model", "stable system");
+    agent::Agent loop(backend, registry, "test-model", "stable system");
     loop.SetTurnContext(python_context);
     const auto outcome = loop.Run(python_query, agent::Callbacks{});
     REQUIRE(outcome.has_value());
@@ -263,7 +263,7 @@ TEST_CASE("ProjectMemory: 端到端 captured request——无命中不含索引,
     {
         CaptureBackend backend;
         tools::ToolRegistry registry;
-        agent::AgentLoop loop(backend, registry, "test-model", "stable system");
+        agent::Agent loop(backend, registry, "test-model", "stable system");
         loop.SetTurnContext(store.BuildTurnContext("部署到树莓派怎么做", repo));
         REQUIRE(loop.Run("部署到树莓派怎么做", agent::Callbacks{}).has_value());
         REQUIRE(backend.requests.size() == 1);
@@ -276,7 +276,7 @@ TEST_CASE("ProjectMemory: 端到端 captured request——无命中不含索引,
     {
         CaptureBackend backend;
         tools::ToolRegistry registry;
-        agent::AgentLoop loop(backend, registry, "test-model", "stable system");
+        agent::Agent loop(backend, registry, "test-model", "stable system");
         loop.SetTurnContext(store.BuildTurnContext("用 uv 加依赖", repo));
         REQUIRE(loop.Run("用 uv 加依赖", agent::Callbacks{}).has_value());
         REQUIRE(backend.requests.size() >= 1);

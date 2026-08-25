@@ -42,7 +42,7 @@ std::string ExplorePersona() {
                     "完成后给出简明结论和具体文件位置,不要寒暄。");
 }
 
-std::string ExtractLastText(const agent::AgentLoop& loop) {
+std::string ExtractLastText(const agent::Agent& loop) {
     const auto& history = loop.History();
     if (history.empty()) {
         return std::string();
@@ -65,13 +65,7 @@ public:
         const std::function<void(const api::StreamEvent&)>& on_event,
         const std::atomic<bool>* cancel = nullptr) override {
         api::Request patched = request;
-        if (!detached_.model.empty()) {
-            patched.model = detached_.model;
-        }
-        patched.reasoning_effort = detached_.reasoning_effort;
-        for (auto it = detached_.request_extra_body.begin(); it != detached_.request_extra_body.end(); ++it) {
-            patched.extra_body[it.key()] = it.value();
-        }
+        api::ApplyRequestProfile(patched, detached_.request_profile);
         return detached_.backend->send_stream(patched, on_event, cancel);
     }
 
@@ -618,7 +612,10 @@ AgentTool::AgentTool(api::Backend& backend, ToolRegistry& sub_registry, std::str
       cwd_(std::move(cwd)),
       model_(std::move(model)),
       default_max_steps_per_turn_(default_max_steps_per_turn),
-      skills_segment_(std::move(skills_segment)) {}
+      skills_segment_(std::move(skills_segment)) {
+    agent_profile_.request.model = model_;
+    agent_profile_.runtime.model = model_;
+}
 
 AgentTool::~AgentTool() {
     // 退出兜底(cpr 并发挂死单):先广播取消,再给每只后台线程一枚有界
@@ -707,15 +704,13 @@ nlohmann::json AgentTool::input_schema() const {
                  "写清楚。");
     properties["prompt"] = prompt_prop;
 
-    nlohmann::json max_steps_prop = nlohmann::json::object();
-    max_steps_prop["type"] = "integer";
-    max_steps_prop["description"] =
-        ToolText("agent", "param.max_steps_per_turn",
-                 "子代理最多跑几步(一步 = 一次模型请求,一步可含多枚工具调用)。不填时用配置的默认:首选 "
-                 "subagent.max_steps_per_turn,未设则继承 max_steps_per_turn(默认 0 = 不限步)。传 0 = 不设上限;"
-                 "剩三步时会收到收口提醒,到限后返回 budget_exhausted 并带回检查点,不会笼统报失败。重试时先读"
-                 "检查点缩小范围,不要原样重发任务、不要擅自抬高步数上限。");
-    properties["max_steps_per_turn"] = max_steps_prop;
+    // 步数预算不出 schema(规格"现场四"收尾):默认 0 = 不限步是产品判断——
+    // 限步不是常态,不该摆在模型每次派工都要过一遍的参数表里。旧版把它敞给
+    // 模型,结果模型见字段就填(实测给一趟深挖竞态的活派了 12 步,跑到第 12
+    // 步撞墙返回 budget_exhausted),等于把拆掉的代码暗闸搬进了模型脑子里。
+    // 要收窄预算走配置(subagent.max_steps_per_turn / max_steps_per_turn),
+    // 那本来就是配置该管的事。解析层仍收这两个键(见 execute 的入参双读),
+    // 手写 JSON、老脚本照旧能用。
 
     nlohmann::json type_prop = nlohmann::json::object();
     type_prop["type"] = "string";
@@ -839,9 +834,10 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
     }
     const bool isolate = isolation == "worktree";
 
-    // 入参双读(命名规范第二批):schema 只出新名 max_steps_per_turn,旧名
-    // max_turns 仍收(兼容期,映射到同一字段);两者同现取新名——schema 里
-    // 本来就只有新名,同现只可能出自手写 JSON,新名优先即可。
+    // 入参双读(命名规范第二批):两个键都不出 schema(见 input_schema 的
+    // 说明——模型见字段就填,索性不给),但解析层照旧收:手写 JSON、老脚本、
+    // 测试都还走这条路。新名 max_steps_per_turn 优先,旧名 max_turns 兼容;
+    // 两者同现取新名。没给就用 default_max_steps_per_turn_(配置来的)。
     int max_steps_per_turn = default_max_steps_per_turn_;
     const auto steps_arg = input.find("max_steps_per_turn");
     const auto turns_arg = input.find("max_turns");
@@ -1202,7 +1198,9 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     // 通报,在"工具结果攒完、请求未发"的安全点把旧探索压成检查点式存档,
     // 不另造第二套摘要协议(规格"长任务还缺 compact")。窗口未知(0)时
     // loop 不做 projected 评估,行为与从前一致;TrimHistory 字符安全网照旧。
-    const std::string task_model = detached != nullptr && !detached->model.empty() ? detached->model : model_;
+    const std::string task_model = detached != nullptr && !detached->request_profile.model.empty()
+                                       ? detached->request_profile.model
+                                       : model_;
     // 运行策略与 main 同一份(规格根因一):输出上限、字符安全网、续跑
     // 次数从 runtime_profile_(会话重建时由 BuildSubagentRuntimeProfile 灌
     // 入)继承,模型换成这只任务的,步数用派出时的预算。默认 profile 的
@@ -1214,7 +1212,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         task_profile.context_window_tokens = context_window_tokens_;
     }
     // 活度账 + 诊断日志的包装后端:子代理的每次模型请求都从这里过(请求
-    // 发出/首事件/逐事件/收场错误)。必须在 sub_loop 之前声明(它引用的
+    // 发出/首事件/逐事件/收场错误)。必须在 sub_agent 之前声明(它引用的
     // 寿命盖过 loop);上下文压缩那一路(CompactHierarchical)仍用原 backend,
     // 不混进任务的阶段账。没进台账的旧边缘路径(task 为空)原样透传。
     std::optional<TraceBackend> traced_storage;
@@ -1222,23 +1220,33 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         traced_storage.emplace(backend, *this, task);
     }
     api::Backend& loop_backend = traced_storage.has_value() ? *traced_storage : backend;
-    agent::AgentLoop sub_loop(loop_backend, effective_registry, std::move(task_profile), system_prompt);
+    agent::AgentProfile task_agent_profile = agent_profile_;
+    task_agent_profile.runtime = std::move(task_profile);
+    task_agent_profile.system_prompt = system_prompt;
+    if (detached != nullptr) {
+        task_agent_profile.provider = detached->provider;
+        task_agent_profile.request = detached->request_profile;
+    }
+    if (task_agent_profile.request.model.empty()) {
+        task_agent_profile.request.model = task_model;
+    }
+    agent::Agent sub_agent(loop_backend, effective_registry, std::move(task_agent_profile));
     // 子代理的项目记忆召回(规格"同级能力审计"):按这只任务的 prompt 独立
     // 检索,同预算同安全声明;provider 没设(旧调用方)就不注入,行为不变。
     if (turn_context_provider_) {
-        sub_loop.SetTurnContext(turn_context_provider_(prompt));
+        sub_agent.SetTurnContext(turn_context_provider_(prompt));
     }
     if (context_window_tokens_ > 0) {
-        sub_loop.SetOnContextPressure([this, &sub_loop, &backend, &task_model, task](
+        sub_agent.SetOnContextPressure([this, &sub_agent, &backend, &task_model, task](
                                           const agent::ContextPressure& pressure) {
             if (pressure.phase != agent::ContextPressure::Phase::PreRequest || !pressure.projected_overflow) {
                 return;  // AfterHardTrim 是纯通报;安全网丢的东西压缩救不回
             }
             agent::CompactOptions options;  // 子代理没有守恒待办,manifest 只做结构校验
             if (const auto compacted =
-                    agent::CompactHierarchical(backend, task_model, sub_loop.History(), options);
+                    agent::CompactHierarchical(backend, task_model, sub_agent.History(), options);
                 compacted.has_value()) {
-                sub_loop.ReplaceHistory(agent::BuildCompactedHistory(sub_loop.History(), compacted->archive));
+                sub_agent.ReplaceHistory(agent::BuildCompactedHistory(sub_agent.History(), compacted->archive));
                 if (task != nullptr) {
                     // 消息账记一枚压缩检查点:查看态里看得到"前情进存档"的
                     // 边界,不是只剩最终一句(规格 transcript 单测第 5 条)。
@@ -1259,23 +1267,23 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         });
     }
     if (agent_type == "Explore") {
-        sub_loop.SetToolFilter([](const Tool& tool) { return ExploreAllows(tool); });
+        sub_agent.SetToolFilter([](const Tool& tool) { return ExploreAllows(tool); });
         // 角色限制明说(规格:错误说明写"角色限制"):模型撞到这堵墙时,
         // 文案写清限制来自只读角色,并给出角色内的替代去路。
-        sub_loop.SetToolFilterDenial(
+        sub_agent.SetToolFilterDenial(
             "此工具不在 Explore 角色的只读白名单内(角色限制):请改用只读工具(read_file/search/web_fetch/"
             "web_search/lsp)完成调查;确需写入,把改动建议写进结论交回主代理执行。");
     } else if (detached == nullptr && tool_filter_) {
-        sub_loop.SetToolFilter(tool_filter_);
+        sub_agent.SetToolFilter(tool_filter_);
     }
 
     // 定向介入收件口:这只任务自己的 inbox(前台后台同款)。AgentLoop 在
     // "工具结果攒完、下一次请求未发"的轮次边界来取(InjectIncomingMessage
     // 的注入规矩),工具跑着不打断、刚产出的 tool result 不丢。每只任务的
-    // sub_loop 只接自己这只 TaskRecord,与主会话的 peer 收件点(跨会话传话)
+    // sub_agent 只接自己这只 TaskRecord,与主会话的 peer 收件点(跨会话传话)
     // 是两码事,文案也分开——这边明写"主会话用户介入"。
     if (task != nullptr) {
-        sub_loop.SetInbox([this, task]() -> std::optional<api::Message> {
+        sub_agent.SetInbox([this, task]() -> std::optional<api::Message> {
             std::string text;
             TaskMessageSource source = TaskMessageSource::User;
             {
@@ -1321,7 +1329,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     // 最近一次拒绝的原因(on_tool_confirm 与 on_tool_denial_text 同线程
     // 先后调,RunTask 栈上局部共享):空 = 未预放行;非空 = 钩子 deny 的
     // 理由。声明必须罩住两个 lambda 的整段存活期——sub_callbacks 的装配
-    // 块(下面 if (task != nullptr))在 sub_loop.Run 之前就收口,放块里
+    // 块(下面 if (task != nullptr))在 sub_agent.Run 之前就收口,放块里
     // 必成悬垂引用:MSVC 栈布局侥幸不炸,POSIX 上当场 SIGSEGV(ASAN:
     // stack-use-after-scope)。
     std::string last_denial_hook_reason;
@@ -1787,7 +1795,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     // 按下标退回未送,收尾账注照列原文。
     DrainedInbox inflight_drained;
     for (;;) {
-        const auto outcome = sub_loop.Run(run_input, sub_callbacks, cancel);
+        const auto outcome = sub_agent.Run(run_input, sub_callbacks, cancel);
         if (!outcome.has_value()) {
             RestoreDrainedInbox(task, inflight_drained);
             run_error = outcome.error();
@@ -1877,7 +1885,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             stop_hooks_on_foreground ? sub_hook_dispatcher->context() : background_hooks->context();
         bool stop_hook_active = false;
         for (int round = 0; round < 2; ++round) {
-            std::string last_text = ExtractLastText(sub_loop);
+            std::string last_text = ExtractLastText(sub_agent);
             lubancode::hooks::HookPayload stop;
             stop.event = lubancode::hooks::HookEvent::SubagentStop;
             stop.fields["agent_id"] = sub_context.agent_id.value_or(std::string());
@@ -1893,7 +1901,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 break;  // 没人要求续,或已经续过一次(不许无限续)
             }
             const auto continuation =
-                sub_loop.Run("[SubagentStop 钩子续跑,非用户输入] " + merged.block_reason, sub_callbacks, cancel);
+                sub_agent.Run("[SubagentStop 钩子续跑,非用户输入] " + merged.block_reason, sub_callbacks, cancel);
             if (!continuation.has_value() || continuation->cancelled || continuation->hit_step_limit) {
                 break;
             }
@@ -1925,7 +1933,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 " 字节思考,末段: " + FirstLineOf(run_output_budget->thinking_tail);
         }
     }
-    const std::string text = ExtractLastText(sub_loop);
+    const std::string text = ExtractLastText(sub_agent);
     std::string snapshot_fallback;
     if (task != nullptr) {
         std::lock_guard<std::mutex> lock(tasks_mutex_);
@@ -1978,7 +1986,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         task_outcome.message = run_error;
         task_outcome.partial_result = partial;
         run_result = {"子代理执行失败: " + run_error + "\n" + ComposeOutcomeText(task_outcome), true};
-    } else if (sub_loop.History().empty()) {
+    } else if (sub_agent.History().empty()) {
         task_outcome.status = TaskOutcomeStatus::Failed;
         task_outcome.reason = TaskOutcomeReason::ProtocolError;
         task_outcome.message = "子代理没有给出任何结论(连一次应答都没有)";

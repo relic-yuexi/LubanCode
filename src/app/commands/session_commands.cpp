@@ -233,7 +233,7 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
 
 // /compact 命令:窗口预算 + manifest 守恒校验 + 热区保留,一条路走到底。
 // --dry-run 只算结构压缩的可回收量与钉住项,不发请求、不改历史。
-CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::agent::AgentLoop& loop,
+CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::agent::Agent& loop,
                                           lubancode::api::Backend& raw_backend,
                                           const lubancode::agent::ModelRoute& compact_route,
                                           const lubancode::cli::Theme& theme, bool spinner_enabled,
@@ -614,7 +614,7 @@ std::optional<std::string> PromptResumeTarget(const std::string& sessions_dir,
 // 说一声;马甲房(.git 指回主仓那类)拒进并报原因。非空时成功恢复后由
 // 调用方做一次目录善后同步(重拼系统提示那条路)。
 bool ResumeSession(const std::string& target, const std::string& sessions_dir,
-                    lubancode::agent::AgentLoop& loop, lubancode::agent::SessionStore& store,
+                    lubancode::agent::Agent& loop, lubancode::agent::SessionStore& store,
                     std::size_t& persisted_count, lubancode::agent::SessionMeta& session_meta,
                     std::string& session_title, const std::string& wire_str, const std::string& current_model,
                     const lubancode::cli::Theme& theme, bool quiet_if_none,
@@ -780,7 +780,7 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
 // /export [路径]:当前会话导出 Markdown,默认写 sessions/<id>.md。
 // 有存档文件就从文件读**全量流水**导出(压缩不丢内容,发生点插一行标注);
 // 没有存档文件(没落过盘)退回导内存里这份历史。/title 设过的标题当大标题。
-void HandleExportCommand(const std::string& args, const lubancode::agent::AgentLoop& loop,
+void HandleExportCommand(const std::string& args, const lubancode::agent::Agent& loop,
                           const lubancode::agent::SessionStore& store, const std::string& sessions_dir,
                           const lubancode::agent::SessionMeta& session_meta, const std::string& session_title,
                           const lubancode::agent::ContextArtifactStore* artifact_store) {

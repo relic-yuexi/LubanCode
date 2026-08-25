@@ -128,7 +128,7 @@ int main() {
         "你是测试会话里的被测模型。回答保持极短。以下是一段稳定填充材料,用于撑起前缀缓存:\n" +
         stable_block + "\n填充材料结束。";
 
-    agent::AgentLoop loop(backend, registry, model, system_prompt,
+    agent::Agent loop(backend, registry, model, system_prompt,
                           /*max_tokens=*/512, /*max_steps_per_turn=*/0);
 
     std::vector<StepLog> steps;

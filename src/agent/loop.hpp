@@ -397,14 +397,37 @@ void InjectIncomingMessage(std::vector<api::Message>& history, api::Message inco
 
 using InboxPoll = std::function<std::optional<api::Message>()>;
 
+// Agent 的完整装配档案。宿主只需换这份数据，便能得到 main、Explore、
+// general-purpose 或 workflow agent；不靠继承分叉实现。
+struct AgentProfile {
+    std::string provider;
+    api::RequestProfile request;
+    AgentRuntimeProfile runtime;
+    std::string system_prompt;
+};
+
+class Agent;
+
+// 无状态的轮次推进器。Agent 握身份、模型、提示、工具与历史；Loop 只把
+// 一轮从“发请求”推到“工具收口”，不代表另一种代理。
 class AgentLoop {
+public:
+    static std::expected<RunOutcome, std::string> Run(Agent& agent, api::Message user_message,
+                                                       const Callbacks& callbacks,
+                                                       const std::atomic<bool>* cancel = nullptr);
+};
+
+class Agent {
 public:
     // 正门(规格根因一):吃一份不可变 AgentRuntimeProfile——输出预算、
     // 上下文预算、窗口、步数、length 续跑次数全从这一份来。main、
     // general-purpose 子代理、后台子代理、单发模式各自声明覆盖什么,其余
     // 继承,不再一串易漏的裸参数。system_prompt 单独给(它随 /clear 等重建)。
-    AgentLoop(api::Backend& backend, tools::ToolRegistry& registry, AgentRuntimeProfile profile,
-              std::string system_prompt);
+    Agent(api::Backend& backend, tools::ToolRegistry& registry, AgentProfile profile);
+
+    // 兼容门：旧调用方尚未声明 provider/effort 时，仍可只给运行策略与提示。
+    Agent(api::Backend& backend, tools::ToolRegistry& registry, AgentRuntimeProfile profile,
+          std::string system_prompt);
 
     // 兼容门(单测与既有调用方):裸参数版,内部折成一份 profile。
     // max_tokens 不再有 4096 默认——nullopt = unset(chat/responses 不发
@@ -421,9 +444,19 @@ public:
     // 调用方(单测、未来的其它入口)。
     // max_context_chars:发给模型前 history 裁剪的阈值(字符数),默认读
     // 环境变量 LUBANCODE_MAX_CONTEXT(没设置就是 kDefaultMaxContextChars)。
-    AgentLoop(api::Backend& backend, tools::ToolRegistry& registry, std::string model,
-              std::string system_prompt, std::optional<int> max_tokens = std::nullopt,
-              int max_steps_per_turn = 0, std::size_t max_context_chars = MaxContextCharsFromEnv());
+    Agent(api::Backend& backend, tools::ToolRegistry& registry, std::string model,
+          std::string system_prompt, std::optional<int> max_tokens = std::nullopt,
+          int max_steps_per_turn = 0, std::size_t max_context_chars = MaxContextCharsFromEnv());
+
+    const std::string& provider() const { return provider_; }
+    const api::RequestProfile& request_profile() const { return request_profile_; }
+    void SetProvider(std::string provider) { provider_ = std::move(provider); }
+    void SetRequestProfile(api::RequestProfile request_profile) {
+        request_profile_ = std::move(request_profile);
+        if (!request_profile_.model.empty()) {
+            profile_.model = request_profile_.model;
+        }
+    }
 
     // 只读访问:运行期诊断(/context、agent 查看态)要展示"这份 loop 实际
     // 吃到的预算与来源",不再让各处自己猜。
@@ -556,9 +589,12 @@ public:
     void SetExecutionIdIssuer(std::function<std::string()> issuer) { execution_id_issuer_ = std::move(issuer); }
 
 private:
+    friend class AgentLoop;
+
     api::Backend& backend_;
     tools::ToolRegistry& registry_;
-    std::string model_;
+    std::string provider_;
+    api::RequestProfile request_profile_;
     std::string system_prompt_;
     std::string turn_context_;
     std::string active_turn_context_;  // 只在 Run() 活着时给 mid-turn compact 重注入

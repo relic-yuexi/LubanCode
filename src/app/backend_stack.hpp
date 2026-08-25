@@ -78,7 +78,8 @@ class ThinkOverrideBackend : public lubancode::api::Backend {
 public:
     ThinkOverrideBackend(lubancode::api::Backend& inner, std::shared_ptr<std::string> current_think,
                          std::shared_ptr<std::string> current_model,
-                         const lubancode::config::ModelCatalog* catalog);
+                         const lubancode::config::ModelCatalog* catalog,
+                         const std::string* current_provider = nullptr);
 
     std::expected<void, lubancode::api::Error> send_stream(
         const lubancode::api::Request& request,
@@ -90,6 +91,7 @@ private:
     std::shared_ptr<std::string> current_think_;
     std::shared_ptr<std::string> current_model_;
     const lubancode::config::ModelCatalog* catalog_ = nullptr;
+    const std::string* current_provider_ = nullptr;
 };
 
 // 包一层 Backend:真正发请求前,把模型目录(models.json)里当前模型的

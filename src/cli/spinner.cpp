@@ -64,7 +64,7 @@ Spinner::Spinner(const Theme& theme, bool enabled) : enabled_(enabled), stopped_
                     const bool lit = !theme.reset.empty() && i == frame % glyphs.size();
                     std::cout << (lit ? theme.spinner : theme.stats) << glyphs[i];
                 }
-                std::cout << theme.stats << " (" << seconds << "s · " << tr("spinner.interrupt_hint") << ")"
+                std::cout << theme.stats << " (" << seconds << "s)"
                           << theme.reset << std::flush;
             }
             ++frame;

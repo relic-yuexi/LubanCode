@@ -210,9 +210,9 @@ api::Request{
 这份 request 发出前还会被包装层改几笔：
 
 - `/model` 选中的模型盖过初始 model。
-- `/think` 写入推理档位和模型 variant 私有参数。
+- `/think` 写入推理档位，并带上当前模型的 reasoning 档案。
 - 延迟工具索引、模型专属指令与魂接到 system 尾部。
-- provider `extra_body` 与模型 variant `extra_body` 最后做顶层浅合并；同名键以后者为准。
+- provider 与 request 的 `extra_body` 最后做顶层浅合并；推理参数不走这条扩展口。
 
 历史若太长，`TrimHistory` 只裁“发给模型看的副本”。它保住最早一个用户 turn 与最近三个用户 turn，整段丢掉中间旧账；工具调用与结果同进同退。单条工具结果仍太大，才截正文并加标记。`history_` 本身不因这道硬裁剪而缩短；真正改活历史的是 `/compact` 或自动 compact。
 

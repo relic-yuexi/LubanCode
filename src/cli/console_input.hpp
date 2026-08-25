@@ -391,6 +391,12 @@ std::mutex& StdoutWriteMutex();
 // 活过它抓引用的对象。
 void SetStreamScreenPrintHook(std::function<void()> hook);
 
+// 工具边界从活队列取走消息后，把用户正文落成一条持久终端记录。必须在
+// 出队后立即调用：即使消息入队时 footer 因终端隐藏/屏幕查询失败从未成功
+// 画出，用户仍能看见这条已经送达的话。实现会与流式 footer 共用输出锁，
+// 依次擦框、打印、作废正文重画锚点并补画 footer。
+void EchoDeliveredQueuedMessages(const std::vector<QueuedMessage>& messages, const Theme& theme);
+
 // footer / 状态块贴到缓冲区底时会主动滚屏。滚了几行，须让正文块与工具
 // 条目的绝对锚点一同上移。钩子在持有 StdoutWriteMutex 时调用，不得重锁。
 void SetStreamScreenScrollHook(std::function<void(int)> hook);

@@ -112,6 +112,17 @@ TEST_CASE("reasoning_effort 档位名大小写不敏感") {
     CHECK(body.at("thinking").at("type") == "enabled");
 }
 
+TEST_CASE("Anthropic Messages: effort 方言写 adaptive thinking + output_config.effort") {
+    Request request;
+    request.reasoning_effort = "xhigh";
+    request.reasoning.supports_effort = true;
+    request.reasoning.wire_dialect = "effort";
+    const auto body = BuildRequestJson(request);
+    CHECK(body["thinking"]["type"] == "adaptive");
+    CHECK(body["output_config"]["effort"] == "xhigh");
+    CHECK(request.extra_body.empty());
+}
+
 TEST_CASE("reasoning_effort 是映射表之外的字符串:不写 thinking 字段,LogSink 打警告") {
     // 显示系统剥离单第八步:anthropic 的档位诊断改投 platform::LogSink,
     // 不再裸写 stderr(engine 守门:engine 层零标准流)。这里挂一只录音

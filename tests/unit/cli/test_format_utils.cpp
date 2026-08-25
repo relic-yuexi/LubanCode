@@ -21,7 +21,6 @@ using lubancode::cli::FormatTokenCount;
 using lubancode::cli::StatusLineInfoSegment;
 using lubancode::cli::StatusLineModeSegment;
 using lubancode::cli::StatusPanelData;
-using lubancode::cli::StreamFooterInterruptText;
 using lubancode::cli::StreamHintText;
 
 namespace {
@@ -103,15 +102,6 @@ TEST_CASE("StreamHintText: 输入行占位只提排队,不再捎带打断说明"
     const std::string plain = StreamHintText(/*plain=*/true);
     CHECK(plain.find("排队") != std::string::npos);
     CHECK(plain.find("\xe2\x8e\x8b") == std::string::npos);
-}
-
-TEST_CASE("StreamFooterInterruptText: 打断提示进状态行,plain 回退纯 ESC 文字") {
-    const std::string rich = StreamFooterInterruptText(/*plain=*/false);
-    // ⎋ = U+238B, UTF-8 = E2 8E 8B。
-    CHECK(rich.find("\xe2\x8e\x8b") != std::string::npos);
-    const std::string plain = StreamFooterInterruptText(/*plain=*/true);
-    CHECK(plain.find("\xe2\x8e\x8b") == std::string::npos);  // plain 不夹 ⎋
-    CHECK(plain.find("ESC") != std::string::npos);
 }
 
 TEST_CASE("BuildStatusLineText: 整行 = 模式段 + 信息段") {

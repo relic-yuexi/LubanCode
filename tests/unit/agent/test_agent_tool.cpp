@@ -593,7 +593,7 @@ TEST_CASE("agent 工具:接口报错按 failed/api_error 分型,不再混进笼�
     CHECK(snapshots[0].outcome.reason == tools::TaskOutcomeReason::ApiError);
 }
 
-TEST_CASE("agent 工具:入参新名 max_steps_per_turn 生效,schema 只出新名、旧名 max_turns 仍收") {
+TEST_CASE("agent 工具:入参新名 max_steps_per_turn 解析层仍生效,但两个键都不出 schema") {
     FakeBackend backend;
     for (int i = 0; i < 6; ++i) {
         backend.scripts.push_back(ToolUseScript("toolu_step", "fake_tool"));
@@ -615,11 +615,17 @@ TEST_CASE("agent 工具:入参新名 max_steps_per_turn 生效,schema 只出新�
     CHECK_FALSE(result.is_error);
     CHECK(backend.captured_requests.size() == 7);  // 6 次工具步 + 1 次收尾,新名生效
 
-    // schema 只出新名,旧名不在(兼容只在解析层)。
+    // 步数预算两个键都不出 schema:限步走配置,不给模型旋钮——敞着它模型就
+    // 见字段填数,把配置里"不限步"的默认给悄悄夺了。解析层照旧收(上面那趟
+    // 7 步就是从入参进来的),手写 JSON、老脚本不受影响。
     const nlohmann::json schema = agent_tool.input_schema();
-    const std::string dumped = schema.dump();
-    CHECK(dumped.find("max_steps_per_turn") != std::string::npos);
-    CHECK(dumped.find("\"max_turns\"") == std::string::npos);
+    const nlohmann::json& props = schema.at("properties");
+    CHECK_FALSE(props.contains("max_steps_per_turn"));
+    CHECK_FALSE(props.contains("max_turns"));
+    // 别的参数还在,别把整张表误删了。
+    CHECK(props.contains("title"));
+    CHECK(props.contains("prompt"));
+    CHECK(props.contains("agent_type"));
 }
 
 TEST_CASE("agent 工具:入参 max_turns=0 透传给子代理,子代理循环按无上限跑,不会被截断") {
@@ -1059,9 +1065,9 @@ TEST_CASE("后台子代理立即交回任务号,独立跑完,结果只投递一�
     agent_tool.SetDetachedBackendFactory([state]() {
         tools::DetachedAgentBackend detached;
         detached.backend = std::make_unique<BlockingBackend>(state);
-        detached.model = "detached-model";
-        detached.reasoning_effort = "high";
-        detached.request_extra_body["temperature"] = 0;
+        detached.request_profile.model = "detached-model";
+        detached.request_profile.reasoning_effort = "high";
+        detached.request_profile.reasoning.supports_effort = true;
         return detached;
     });
 
@@ -1100,7 +1106,7 @@ TEST_CASE("后台子代理立即交回任务号,独立跑完,结果只投递一�
         REQUIRE(state->captured_requests.size() == 1);
         CHECK(state->captured_requests[0].model == "detached-model");
         CHECK(state->captured_requests[0].reasoning_effort == "high");
-        CHECK(state->captured_requests[0].extra_body["temperature"] == 0);
+        CHECK(state->captured_requests[0].reasoning.supports_effort);
     }
 
     const std::string first_notice = agent_tool.DrainCompletionNotices();

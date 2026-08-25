@@ -9,20 +9,15 @@
 
 #include <nlohmann/json.hpp>
 
+#include "api/reasoning.hpp"
 #include "config/config.hpp"
 
 namespace lubancode::config {
 
-inline constexpr int kProviderCatalogSchemaVersion = 1;
+inline constexpr int kProviderCatalogSchemaVersion = 2;
 inline constexpr std::size_t kProviderCatalogMaxBytes = 2 * 1024 * 1024;
 inline constexpr const char* kProviderCatalogUrl =
     "https://raw.githubusercontent.com/relic-yuexi/LubanCode/main/catalog/providers.json";
-
-struct ProviderCatalogVariant {
-    std::string id;
-    std::string description;
-    nlohmann::json extra_body = nlohmann::json::object();
-};
 
 struct ProviderCatalogModel {
     std::string id;
@@ -32,7 +27,7 @@ struct ProviderCatalogModel {
     std::optional<std::size_t> max_output_tokens;
     std::string default_think;
     std::map<std::string, bool> capabilities;
-    std::vector<ProviderCatalogVariant> variants;
+    lubancode::api::ReasoningConfig reasoning;
 };
 
 struct ProviderPreset {

@@ -382,15 +382,15 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 
 ## 五、extra_body / extra_headers:任意模型特殊参数
 
-有的模型服务藏着自家专属开关——GLM 的 `thinking` 思考开关、别家的分级 `reasoning_effort`、某个厂商才认的顶层字段——lubancode 不会挨个内置,靠这两个字段自己往请求上加。顶层单 provider 配置、`providers` 数组里的每一条,都认这两个字段。
+有的模型服务藏着自家专属字段。目录尚未建模的那一小撮，仍可用这两个扩展口。推理档位、thinking 开关与 budget 已由模型目录和四套 wire 正式处理，不走 `extra_body`。
 
-- **`extra_body`**:JSON object。每次请求都浅合并进请求体顶层——同名键**整个覆盖**内置逻辑(`thinking`、`native_web_search` 的 `tools` 声明等)算出来的值,不做深合并。provider 配置先合并，模型目录当前 variant 的 `extra_body` 最后拍板。
+- **`extra_body`**:JSON object。每次请求都浅合并进请求体顶层，同名键**整个覆盖**内置逻辑，不做深合并。只宜放目录未建模的厂商私有字段。
 - **`extra_headers`**:JSON object,值必须是字符串。每次请求追加/覆盖 HTTP 头,同名覆盖内置头(包括 `Authorization`——自己配自己认);值留空表示删掉这条头。
 
 不想手改 JSON,`/provider set` 也能改(`extra_body` 是整段替换语义,不是往里加键;设成 `{}` 或留空清掉):
 
 ```
-/provider set glm extra_body {"thinking":{"type":"enabled"},"reasoning_effort":"max"}
+/provider set demo extra_body {"temperature":0.2}
 /provider set glm extra_header X-Api-Version 2024-06-01
 ```
 
@@ -420,9 +420,9 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 /provider add minimax https://api.minimaxi.com/anthropic anthropic --key-env MINIMAX_API_KEY --model MiniMax-M3
 ```
 
-### 例二:GLM,Chat Completions + extra_body 思考参数
+### 例二:GLM,Chat Completions + 正式推理参数
 
-GLM 系模型用 `thinking.type` 开关思考模式,外加一个自定义分级 `reasoning_effort`,两者都不是 lubancode 内置字段,走 `extra_body` 透传:
+GLM 模型档位已经写进 provider 目录。`glm-5.2` 认 `max/xhigh/high/medium/low/minimal/none`；`glm-5.3` 只认 `low/high/max`。Chat 后端按档案写 `thinking.type` 与顶层 `reasoning_effort`：
 
 ```json
 {
@@ -434,7 +434,7 @@ GLM 系模型用 `thinking.type` 开关思考模式,外加一个自定义分级 
       "key_env": "GLM_API_KEY",
       "model": "glm-5.2",
       "model_reasoning_effort": "max",
-      "extra_body": { "thinking": { "type": "enabled" }, "tool_stream": true },
+      "extra_body": { "tool_stream": true },
       "extra_headers": { "X-Api-Version": "2024-06-01" }
     }
   ]

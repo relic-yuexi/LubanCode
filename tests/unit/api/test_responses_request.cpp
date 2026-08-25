@@ -205,6 +205,16 @@ TEST_CASE("reasoning_effort 非空时映射成 reasoning.effort") {
     CHECK(body.at("reasoning").at("effort") == "high");
 }
 
+TEST_CASE("Responses request: GPT 模型档案仍落 reasoning.effort,不用 extra_body") {
+    Request request;
+    request.reasoning_effort = "xhigh";
+    request.reasoning.supports_effort = true;
+    const auto body = BuildRequestJson(request);
+    CHECK(body["reasoning"]["effort"] == "xhigh");
+    CHECK_FALSE(body.contains("reasoning_effort"));
+    CHECK(request.extra_body.empty());
+}
+
 TEST_CASE("reasoning_effort 支持 none/low/medium/high 四档,原样透传不做限制") {
     for (const std::string level : {"none", "low", "medium", "high"}) {  // 按值:初始化列表元素是 const char*,引用绑临时会招 -Wrange-loop-construct
         Request request;

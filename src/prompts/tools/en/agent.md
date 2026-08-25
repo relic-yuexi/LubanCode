@@ -10,10 +10,6 @@ Short task title, required. A semantic field for humans: 4~16 Chinese characters
 
 The task description handed to the subagent; it must be self-contained—the subagent cannot see the main conversation history, so the goal, the scope, and the expected output form must all be spelled out.
 
-## param.max_steps_per_turn
-
-Maximum number of steps the subagent may run (one step = one model request; a step may contain multiple tool calls). When omitted, the configured default applies: subagent.max_steps_per_turn first, otherwise max_steps_per_turn is inherited (default 0 = no step limit). Passing 0 = no limit; a wrap-up reminder arrives when three steps remain, and at the limit the result is budget_exhausted with a checkpoint included—not a vague failure. When retrying, read the checkpoint first and narrow the scope; do not resend the same task verbatim and do not raise the step limit on your own.
-
 ## param.agent_type
 
 Subagent type: Explore is read-only search and analysis; general-purpose can perform multi-step operations. Default general-purpose.

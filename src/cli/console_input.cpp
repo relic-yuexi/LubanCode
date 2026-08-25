@@ -408,13 +408,7 @@ std::string BuildFooterWorkingLine(const StreamFooterState& f, int width) {
     const std::string label =
         f.turn_working && f.turn_interrupt_requested ? tr("spinner.stopping") : f.working_label;
     const std::vector<std::string> glyphs = FooterUtf8Glyphs(label);
-    // Stopping 态(turn 级活动条专属):文案换 Stopping...,Esc 提示摘掉
-    //(真置了 cancel 之后"esc to interrupt"就是废话);字符数与显示宽
-    // 仍恒定,不引起抖动。
-    const std::string suffix =
-        f.turn_working && f.turn_interrupt_requested
-            ? std::string(" (") + std::to_string(f.working_seconds) + "s)"
-            : " (" + std::to_string(f.working_seconds) + "s · " + tr("spinner.interrupt_hint") + ")";
+    const std::string suffix = " (" + std::to_string(f.working_seconds) + "s)";
     const std::string prefix = "• ";
     const int prefix_width = static_cast<int>(DisplayWidthUtf8(prefix));
     const int suffix_width = static_cast<int>(DisplayWidthUtf8(suffix));
@@ -3118,6 +3112,22 @@ void SetStreamScreenScrollHook(std::function<void(int)> hook) {
     StreamScreenScrollHookSlot() = std::move(hook);
 }
 
+void EchoDeliveredQueuedMessages(const std::vector<QueuedMessage>& messages, const Theme& theme) {
+    if (messages.empty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+    EraseStreamFooterLocked();
+    for (const auto& message : messages) {
+        std::cout << theme.prompt << "> " << theme.reset << message.text << "\n";
+    }
+    std::cout.flush();
+    if (const auto& hook = StreamScreenPrintHookSlot()) {
+        hook();  // 持久插入不在流式正文行数账里，旧 Markdown 锚点不能再重画
+    }
+    RedrawStreamFooterLocked();
+}
+
 // 帧账的"保锚可见"原语(规格见 console_input.hpp):全程序独此一处管
 // "要画的行必须落在可视区里"。从 top_row 起 rows_needed 行若伸出可视窗
 // 口底,先平移视口(经典 conhost 长缓冲:窗口之下还有缓冲行,内容与绝对
@@ -3357,12 +3367,7 @@ void RedrawStreamFooterLocked() {
     model.composer.placeholder = f.hint;
     model.composer.mode = ComposerMode::BusyQueue;
     model.composer.confirm_mode = chrome.mode;
-    {
-        const std::string interrupt = StreamFooterInterruptText(f.reset.empty());
-        const int interrupt_cols = 3 + static_cast<int>(DisplayWidthUtf8(interrupt));  // " · " + 提示
-        model.status_rows = {BuildStatusLine(chrome, (std::max)(20, width - 1 - interrupt_cols)) +
-                             f.color + " · " + interrupt + f.reset};
-    }
+    model.status_rows = {BuildStatusLine(chrome, (std::max)(20, width - 1))};
     const BottomChromeLayout layout = BuildBottomChromeLayout(model, f.theme, width);
     const int total_rows = static_cast<int>(layout.frame.rows.size());
 
