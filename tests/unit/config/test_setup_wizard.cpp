@@ -99,6 +99,8 @@ TEST_CASE("RunSetupEntryWizard: TTY 用稳定面板画两步,方向键选择可�
     CHECK(frames[0].progress.find("1 / 2") != std::string::npos);
     CHECK(frames[1].progress.find("2 / 2") != std::string::npos);
     CHECK(frames[1].body[1].find("主界面") != std::string::npos);
+    CHECK(frames[0].footer.empty());
+    CHECK(frames[1].footer.empty());
     CHECK(frames[1].choice_rows == 3);
 }
 

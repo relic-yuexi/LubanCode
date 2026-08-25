@@ -244,7 +244,6 @@ std::optional<SetupEntryOutcome> RunSetupEntryWizard(WizardIO& io) {
                             .title = tr("setup.entry.title"),
                             .progress = tr("setup.entry.language_progress"),
                             .body = {tr("setup.entry.language_body")},
-                            .footer = tr("wizard.choose.hint"),
                             .choice_rows = static_cast<int>(language_items.size()) + 1,
                         });
     const auto language_choice =
@@ -259,7 +258,6 @@ std::optional<SetupEntryOutcome> RunSetupEntryWizard(WizardIO& io) {
                             .title = tr("setup.entry.title"),
                             .progress = tr("setup.entry.method_progress"),
                             .body = {tr("setup.entry.method_body"), tr("setup.entry.method_hint")},
-                            .footer = tr("wizard.choose.hint"),
                             .choice_rows = 3,
                         });
     const std::vector<WizardChoiceItem> actions = {
