@@ -106,7 +106,7 @@ public:
     SessionPersistResult PersistNew(const std::vector<api::Message>& history, const std::string& model,
                                     const std::string& cwd);
 
-    // 落盘基线收到新长度(/compact、microcompact 换史后由调用方校正;
+    // 落盘基线收到新长度(/compact 换史后由调用方校正;
     // 只收不放,防旧账重写)。
     void ClampPersisted(std::size_t history_size);
 

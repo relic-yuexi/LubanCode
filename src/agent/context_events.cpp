@@ -196,15 +196,6 @@ std::string RenderResultView(const NormalizedEvent& event, const ResultViewDecis
             }
             return "[此读取替代事件 " + decision.ref_event_id + " 的旧版本]\n" + event.result_content;
         }
-        case ResultViewKind::MicrocompactSummary: {
-            // L2(第三期):局部语义摘要换掉 L1 预览。原文不丢——仓里的
-            // blob 原样,摘要里写明追回路径;摘要≠全文,不许把摘要当证据
-            // 的终点(规格 L2 节)。
-            return "[microcompact 摘要 · 原文 artifact " + decision.artifact_id + " · 事件 " + event.id +
-                   " · 由 cheap:" + decision.summary_model + " 生成 · 摘要不等于全文,"
-                   "需要证据用 context_read(artifact_id=\"" + decision.artifact_id + "\") 追回原文]\n" +
-                   decision.summary_text;
-        }
     }
     return event.result_content;
 }

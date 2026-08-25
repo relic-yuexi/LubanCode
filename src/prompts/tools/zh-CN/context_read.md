@@ -17,3 +17,11 @@
 ## param.line_count
 
 读几行;0 = 读到结尾
+
+## summarize_guidance
+
+只有原文很长、逐段读取代价更高时,才可设 summarize=true 请 cheap 模型按需摘要;这会额外消耗模型 token。摘要作为本次工具结果追加,不改旧消息。
+
+## param.summarize
+
+按需调用 cheap 模型摘要整枚 artifact;会额外消耗 token,不可与 chunk_id/行窗同用

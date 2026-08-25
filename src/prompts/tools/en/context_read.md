@@ -17,3 +17,11 @@ Starting line (1-based; either this or chunk_id)
 ## param.line_count
 
 How many lines to read; 0 = read to the end
+
+## summarize_guidance
+
+Set summarize=true only when the artifact is long enough that reading it in segments would cost more. This makes an extra cheap-model call. The summary is appended as this tool result and never rewrites an old message.
+
+## param.summarize
+
+Summarize the whole artifact on demand with the cheap model; costs extra tokens and cannot be combined with chunk_id or a line window

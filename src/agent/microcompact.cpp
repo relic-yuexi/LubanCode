@@ -1,6 +1,5 @@
 #include "agent/microcompact.hpp"
 
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <sstream>
@@ -32,77 +31,8 @@ std::string TrimWhitespace(const std::string& text) {
 
 }  // namespace
 
-std::size_t ColdArtifactBytes(const std::vector<api::Message>& history, const ResultViewMemo& memo) {
-    // 口径:事件账里"冷区 + Artifact/L2 视图"的结果原文累计字节。
-    const std::size_t hot_start = HotZoneStartIndex(history);
-    std::size_t total = 0;
-    const auto ledger = BuildEventLedger(history);
-    for (const auto& event : ledger) {
-        if (event.message_index >= hot_start) {
-            continue;  // 热区不碰
-        }
-        const auto it = memo.decisions.find(event.tool_use_id);
-        if (it == memo.decisions.end() ||
-            (it->second.kind != ResultViewKind::Artifact && it->second.kind != ResultViewKind::MicrocompactSummary)) {
-            continue;
-        }
-        total += event.result_content.size();
-    }
-    return total;
-}
-
-std::vector<MicrocompactCandidate> PickMicrocompactCandidates(const std::vector<api::Message>& history,
-                                                              const ResultViewMemo& memo,
-                                                              const MicrocompactOptions& options,
-                                                              const MicrocompactHysteresis& hysteresis) {
-    std::vector<MicrocompactCandidate> candidates;
-    const std::size_t cold_bytes = ColdArtifactBytes(history, memo);
-    // 触发线 + 迟滞:没过线不压;上趟压过后,冷区要比上趟再涨 cooldown_growth_percent
-    // 才准再压(免得刚压完又立刻重压,规格"用迟滞避免刚压完又立刻重压")。
-    if (cold_bytes < options.cold_trigger_bytes) {
-        return candidates;
-    }
-    if (hysteresis.pass_attempted) {
-        const std::size_t threshold =
-            hysteresis.last_pass_cold_bytes +
-            hysteresis.last_pass_cold_bytes * static_cast<std::size_t>(options.cooldown_growth_percent) / 100;
-        if (cold_bytes < threshold) {
-            return candidates;
-        }
-    }
-
-    const std::size_t hot_start = HotZoneStartIndex(history);
-    const auto ledger = BuildEventLedger(history);
-    for (const auto& event : ledger) {
-        if (event.message_index >= hot_start) {
-            continue;  // 热区绝不碰
-        }
-        const auto it = memo.decisions.find(event.tool_use_id);
-        if (it == memo.decisions.end() || it->second.kind != ResultViewKind::Artifact ||
-            it->second.artifact_id.empty()) {
-            continue;  // 只收拾"已落盘、还是 L1 预览"的;已是 L2 的不重做
-        }
-        MicrocompactCandidate candidate;
-        candidate.tool_use_id = event.tool_use_id;
-        candidate.artifact_id = it->second.artifact_id;
-        candidate.event_id = event.id;
-        candidate.tool_name = event.tool_name;
-        candidate.content_bytes = event.result_content.size();
-        candidates.push_back(std::move(candidate));
-    }
-    std::sort(candidates.begin(), candidates.end(),
-              [](const MicrocompactCandidate& a, const MicrocompactCandidate& b) {
-                  return a.content_bytes > b.content_bytes;  // 大头先收拾
-              });
-    if (candidates.size() > static_cast<std::size_t>(options.max_per_pass)) {
-        candidates.resize(static_cast<std::size_t>(options.max_per_pass));
-    }
-    return candidates;
-}
-
 std::optional<MicrocompactSummary> ParseMicrocompactSummary(const std::string& text,
-                                                            const std::string& artifact_id,
-                                                            const std::string& event_id) {
+                                                            const std::string& artifact_id) {
     // 剥 ```json 围栏;没有围栏就取首 { 到末 }。
     std::size_t begin = text.find('{');
     std::size_t end = text.rfind('}');
@@ -121,7 +51,7 @@ std::optional<MicrocompactSummary> ParseMicrocompactSummary(const std::string& t
     MicrocompactSummary summary;
     summary.summary = TrimWhitespace(root["summary"].get<std::string>());
     if (summary.summary.empty() || summary.summary.size() < 20) {
-        return std::nullopt;  // 残次摘要拒收,退 L1
+        return std::nullopt;  // 残次摘要拒收,旧消息不动
     }
     if (root.contains("key_facts") && root["key_facts"].is_array()) {
         for (const auto& item : root["key_facts"]) {
@@ -131,23 +61,22 @@ std::optional<MicrocompactSummary> ParseMicrocompactSummary(const std::string& t
         }
     }
     summary.source_artifact_id = artifact_id;
-    summary.source_event_id = event_id;
     return summary;
 }
 
 std::expected<MicrocompactSummary, std::string> RunMicrocompact(
     api::Backend& backend, const std::string& model, const std::string& reasoning_effort,
-    const ContextArtifactStore& store, const ArtifactRef& ref, const std::string& event_id,
-    const MicrocompactOptions& options, BackgroundCallAccounting* accounting,
+    const ContextArtifactStore& store, const ArtifactRef& ref, const MicrocompactOptions& options,
+    BackgroundCallAccounting* accounting,
     const std::atomic<bool>* external_cancel) {
     if (external_cancel != nullptr && external_cancel->load()) {
-        return std::unexpected("后台微压缩已取消");
+        return std::unexpected("按需摘要已取消");
     }
     // 输入永远从 blob 原文来:hash 门在 ReadBlobVerified,不合/读不到就跳过
-    // 这枚(退 L1),绝不拿旧摘要再摘要。
+    // 这枚,绝不拿旧摘要再摘要。
     const auto original = store.ReadBlobVerified(ref);
     if (!original.has_value()) {
-        return std::unexpected("原文 blob 读不到/hash 不合,跳过这枚(保持 L1 预览)");
+        return std::unexpected("原文 blob 读不到/hash 不合,无法生成按需摘要");
     }
     // 头尾各半截到 input_cap_bytes:行边界截,不劈码点。
     std::string input = *original;
@@ -185,7 +114,8 @@ std::expected<MicrocompactSummary, std::string> RunMicrocompact(
         "错误行、失败原因、退出码、文件路径一个都不能丢——摘要给后续工作接力用。";
     api::Message message;
     message.role = api::Role::User;
-    message.content.push_back(api::TextBlock{"工具 " + ref.tool_name + "(事件 " + event_id + ")的输出:\n\n" + input});
+    message.content.push_back(
+        api::TextBlock{"工具 " + ref.tool_name + "(调用 " + ref.tool_use_id + ")的输出:\n\n" + input});
     request.messages.push_back(std::move(message));
     request.max_tokens = 1024;
     const auto started = std::chrono::steady_clock::now();
@@ -246,36 +176,13 @@ std::expected<MicrocompactSummary, std::string> RunMicrocompact(
             reply += text->text;
         }
     }
-    auto summary = ParseMicrocompactSummary(reply, ref.artifact_id, event_id);
+    auto summary = ParseMicrocompactSummary(reply, ref.artifact_id);
     if (!summary.has_value()) {
-        return std::unexpected("cheap 输出不是合法摘要 JSON,退回 L1");
+        return std::unexpected("cheap 输出不是合法摘要 JSON;旧 artifact 与原文未改");
     }
     summary->model = model;
     summary->derived_from_summary = false;  // 输入永远来自 blob 原文
     return *summary;
-}
-
-int ApplyMicrocompactSummaries(ResultViewMemo& memo,
-                               const std::map<std::string, MicrocompactSummary>& summaries) {
-    int applied = 0;
-    for (const auto& [tool_use_id, summary] : summaries) {
-        auto it = memo.decisions.find(tool_use_id);
-        if (it == memo.decisions.end() || it->second.kind != ResultViewKind::Artifact) {
-            continue;  // 决策不在/已不是 L1 形态:不动(绝不改 Full/重复引用)
-        }
-        it->second.kind = ResultViewKind::MicrocompactSummary;
-        it->second.summary_text = summary.summary;
-        it->second.summary_model = summary.model;
-        // key_facts 并进正文(一行一条),摘要与事实单都在视图里。
-        if (!summary.key_facts.empty()) {
-            it->second.summary_text += "\n关键事实:";
-            for (const auto& fact : summary.key_facts) {
-                it->second.summary_text += "\n- " + fact;
-            }
-        }
-        ++applied;
-    }
-    return applied;
 }
 
 }  // namespace lubancode::agent

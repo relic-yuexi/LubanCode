@@ -9,6 +9,8 @@
 //   - blob hash 不合立即隔离(不在工具层兜,是仓的 ReadBlobVerified 门)。
 #pragma once
 
+#include <expected>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -36,7 +38,11 @@ private:
 
 class ContextReadTool final : public Tool {
 public:
-    explicit ContextReadTool(std::shared_ptr<lubancode::agent::ContextArtifactStore> store);
+    using SummarizeArtifact = std::function<std::expected<std::string, std::string>(
+        const lubancode::agent::ArtifactRef&)>;
+
+    explicit ContextReadTool(std::shared_ptr<lubancode::agent::ContextArtifactStore> store,
+                             SummarizeArtifact summarize = {});
 
     std::string name() const override { return "context_read"; }
     std::string description() const override;
@@ -45,6 +51,7 @@ public:
 
 private:
     std::shared_ptr<lubancode::agent::ContextArtifactStore> store_;
+    SummarizeArtifact summarize_;
 };
 
 }  // namespace lubancode::tools

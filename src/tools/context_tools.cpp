@@ -1,6 +1,7 @@
 #include "tools/context_tools.hpp"
 
 #include <algorithm>
+#include <exception>
 #include <utility>
 
 #include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
@@ -85,19 +86,27 @@ tools::Tool::Result ContextSearchTool::execute(const nlohmann::json& input) {
     return {out, false};
 }
 
-ContextReadTool::ContextReadTool(std::shared_ptr<lubancode::agent::ContextArtifactStore> store)
-    : store_(std::move(store)) {}
+ContextReadTool::ContextReadTool(std::shared_ptr<lubancode::agent::ContextArtifactStore> store,
+                                 SummarizeArtifact summarize)
+    : store_(std::move(store)), summarize_(std::move(summarize)) {}
 
 std::string ContextReadTool::description() const {
     // 文案在 src/prompts/tools/<语言>/context_read.md,兜底是迁移前的原文。
-    return ToolText("context_read", "description",
-                    "按稳定 id 读先前工具输出落盘全文(artifact)的一段:给 chunk_id(context_search 命中给的)"
-                    "或 line_start(1 起)+line_count。单次最多 32 KiB,超了会拒绝并给可用范围。"
-                    "全文真本按 sha256 校验,hash 不合的内容不会被供给。");
+    std::string text = ToolText(
+        "context_read", "description",
+        "按稳定 id 读先前工具输出落盘全文(artifact)的一段:给 chunk_id(context_search 命中给的)"
+        "或 line_start(1 起)+line_count。单次最多 32 KiB,超了会拒绝并给可用范围。"
+        "全文真本按 sha256 校验,hash 不合的内容不会被供给。");
+    if (summarize_) {
+        text += " " + ToolText("context_read", "summarize_guidance",
+                                "只有原文很长、逐段读取代价更高时,才可设 summarize=true 请 cheap 模型按需摘要;"
+                                "这会额外消耗模型 token。摘要作为本次工具结果追加,不改旧消息。");
+    }
+    return text;
 }
 
 nlohmann::json ContextReadTool::input_schema() const {
-    return nlohmann::json{
+    nlohmann::json schema{
         {"type", "object"},
         {"properties",
          {
@@ -117,6 +126,15 @@ nlohmann::json ContextReadTool::input_schema() const {
          }},
         {"required", {"artifact_id"}},
     };
+    if (summarize_) {
+        schema["properties"]["summarize"] = {
+            {"type", "boolean"},
+            {"description",
+             ToolText("context_read", "param.summarize",
+                      "按需调用 cheap 模型摘要整枚 artifact;会额外消耗 token,不可与 chunk_id/行窗同用")},
+        };
+    }
+    return schema;
 }
 
 tools::Tool::Result ContextReadTool::execute(const nlohmann::json& input) {
@@ -127,12 +145,33 @@ tools::Tool::Result ContextReadTool::execute(const nlohmann::json& input) {
     const std::string chunk_id = input.value("chunk_id", std::string());
     const long long line_start = input.value("line_start", 0LL);
     const long long line_count = input.value("line_count", 0LL);
+    if (input.contains("summarize") && !input["summarize"].is_boolean()) {
+        return {"summarize 必须是布尔值。", true};
+    }
+    const bool summarize = input.value("summarize", false);
     if (artifact_id.empty()) {
         return {"artifact_id 必填。", true};
     }
     const auto* ref = store_->Find(artifact_id);
     if (ref == nullptr) {
         return {NotFoundText(artifact_id), true};
+    }
+    if (summarize) {
+        if (!summarize_) {
+            return {"当前执行环境没有按需摘要能力;请用 chunk_id 或行窗读取原文。", true};
+        }
+        if (!chunk_id.empty() || input.contains("line_start") || input.contains("line_count")) {
+            return {"summarize=true 时不可再给 chunk_id、line_start 或 line_count。", true};
+        }
+        try {
+            auto summary = summarize_(*ref);
+            return summary.has_value() ? Result{std::move(*summary), false}
+                                       : Result{summary.error(), true};
+        } catch (const std::exception& error) {
+            return {std::string("按需摘要失败:") + error.what(), true};
+        } catch (...) {
+            return {"按需摘要失败:未知异常", true};
+        }
     }
     if (chunk_id.empty() && line_start < 1) {
         return {"chunk_id 与 line_start 至少给一个(line_start 从 1 起)。", true};

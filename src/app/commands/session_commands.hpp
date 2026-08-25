@@ -56,7 +56,6 @@ std::size_t EstimateHistoryTokens(const std::vector<lubancode::api::Message>& hi
 struct ContextLayersReport {
     std::size_t inline_full_results = 0;      // 视图里全文的结果枚数(L0)
     std::size_t artifact_previews = 0;        // L1 预览枚数
-    std::size_t microcompact_summaries = 0;   // L2 摘要枚数(原文数 = artifact 预览+摘要)
     std::size_t reclaimable_bytes = 0;        // 结构压缩最近一次请求省下的字节
     std::optional<lubancode::agent::ContextBudgetPlan> budget;
     // 最近一次 compact:"cheap:m · 62k→18k · 3.2s · 校验通过";空 = 没压过。

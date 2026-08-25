@@ -24,28 +24,28 @@
 | --- | --- | --- | --- | --- |
 | L0 | 原样与按需装载 | 结果尚短 | 请求视图照放 | history、session 原样 |
 | L1 | snip / 结构压缩 | 每次拼请求视图 | 重复引用、版本标记、artifact 预览 | history、session 原样；长结果另存 artifact |
-| L2 | microcompact | 回合收尾，冷区过线 | 用局部语义摘要替掉 L1 预览 | artifact 与 session 原文都留着 |
+| L2 | 按需 microcompact | 模型显式调用 `context_read(summarize=true)` | 在历史尾部追加局部摘要工具结果 | artifact 与 session 原文都留着 |
 | L3 | global compact | 手工、回合前或回合中达到窗口线 | 用存档替换冷 history，留下热区 | session 旧账仍在 |
 | L4 | hard trim | L3 没赶上或失败，工作视图仍过大 | 裁请求视图 | session 原文仍在；终端告警 |
 
 L1 先收拾工具结果。相同只读结果只留一份正文，后来者改成引用；旧版本留下预览，新版本照常保留；超长结果换成 artifact 引用。带副作用的工具结果不判重。
 
-L2 与 L3 都会请模型写摘要，分量却不同。L2 一次只收一枚冷工具结果，不改 history；L3 收整段旧对话，会换活 history。L4 连活 history 也不改，只钉住一份较短工作视图。四层不可混叫。
+L2 与 L3 都会请模型写摘要，分量却不同。L2 一次只收调用方点名的一枚 artifact，把摘要当新工具结果添在 history 尾部；L3 收整段旧对话，会换活 history。L4 连活 history 也不改，只钉住一份较短工作视图。四层不可混叫。
 
 ## L2：工具结果微压缩
 
-每轮收尾，程序查看冷区里已落成 artifact、仍停在 L1 预览的工具结果。冷区累计原文字节达到 32 KiB，才挑候选；按体积从大到小，每趟至多收三枚。
+程序默认不跑 L2。L1 artifact 预览不够时，模型先用 `context_search`、`context_read` 找证据。只有原文很长，逐段读取反倒更贵，才显式调用 `context_read(artifact_id="aNNNN", summarize=true)`。
 
-它默认走 cheap 模型。单枚输入最多取 24 KiB，超出便从原文头尾各取一半，并在行边界收口。模型须回严格 JSON：`summary` 与 `key_facts`。摘要少于 20 字节、JSON 坏、请求失败或 45 秒超时，这一枚便退回 L1 预览。
+这次调用走 cheap 模型。单枚输入最多取 24 KiB，超出便从原文头尾各取一半，并在行边界收口。模型须回严格 JSON：`summary` 与 `key_facts`。摘要少于 20 字节、JSON 坏、请求失败或 45 秒超时，工具便报错；旧消息、L1 预览与 artifact 原文一概不动。
 
 L2 守四条规矩：
 
-- 热区不碰。热区从最后一条用户文本输入起算。
+- 不扫描冷区，不在回合收尾自动花 token。
 - 输入永远从 artifact blob 原文来，不拿旧摘要再摘要。
-- 摘要带 source artifact id、事件 id 与产出模型。证据不够时可用 `context_read` 追回全文。
-- 成败都不删 blob，也不改 session JSONL。
+- 摘要带 source artifact id 与产出模型，作为新的 `tool_result` 追加。证据不够时可用 `context_read` 追回全文。
+- 成败都不删 blob，也不改 session 旧行；本次工具调用与结果照常追加。
 
-一趟尝试过后，冷区须比上趟再长 50%，才准跑下一趟。这样可挡住刚压完又重压、白烧模型额度。
+`summarize=true` 不可与 `chunk_id`、`line_start`、`line_count` 混用。子代理只拿到普通 `context_read`，不露摘要参数，免得几路 cheap 请求同时抢账。
 
 ## 何时触发
 
@@ -159,7 +159,7 @@ JSON manifest
 | 压缩输入超过模型窗口 | 不发请求，明报预算不足 | `compact_model`、模型目录里的窗口 |
 | 摘要漏待办或 manifest 坏 | 拒收摘要 | 压缩错误与活动 todo |
 | 单轮巨型历史无法分块 | 明报拒绝 | 缩小单次输入，或另开会话 |
-| microcompact 请求或 JSON 失败 | 保持 L1 artifact 预览，原文不动 | cheap 路由与微压缩提示 |
+| 按需摘要请求或 JSON 失败 | 工具报错；旧消息、L1 artifact 预览与原文不动 | cheap 路由与工具结果 |
 | 语义压缩失败后仍过大 | 字符硬裁兜底，终端告警 | `/export` 查完整流水 |
 
 `/compact --dry-run` 只看结构压缩能省多少、哪些内容被钉住。它不发模型请求，也不改 history。
@@ -171,6 +171,6 @@ JSON manifest
 - `src/agent/context.cpp`：轮级裁剪与工具结果截断。
 - `src/agent/session_store.cpp`：`compact` / `compact_v2` 的写入与回放。
 - `src/agent/context_events.cpp`：L1 结构压缩、artifact/重复/版本视图。
-- `src/agent/microcompact.cpp`：L2 候选、迟滞、局部摘要与回退。
+- `src/agent/microcompact.cpp`：L2 按需局部摘要、输入裁面与格式校验。
 
 相关测试集中在 `tests/unit/agent/test_compact.cpp`、`tests/unit/memory/test_microcompact.cpp`、`tests/unit/api/test_context.cpp`、`tests/unit/api/test_context_events.cpp`、`tests/unit/sessions/test_session_store.cpp`、`tests/unit/api/test_request_prefix.cpp` 与 `tests/unit/memory/test_artifact_store.cpp`。

@@ -229,6 +229,35 @@ TEST_CASE("前缀: 默认工具往返,后一份请求是前一份的原样追加
     CHECK(reports[1].epoch_break_reason.empty());
 }
 
+TEST_CASE("前缀: 按需 artifact 摘要只追加 tool result,不追改旧消息") {
+    CaptureBackend backend;
+    backend.scripts = {
+        ToolUseScript("call_summary", "context_read"),
+        TextScript("我看完摘要了"),
+    };
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<FixedTool>(
+        "context_read", "artifact a0001 按需摘要:构建通过。原文未改。"));
+
+    agent::AgentLoop loop(backend, registry, "test-model", "system prompt");
+    agent::Callbacks callbacks;
+    std::vector<api::UsageReport> reports;
+    callbacks.on_usage = [&](const api::UsageReport& report) { reports.push_back(report); };
+
+    REQUIRE(loop.Run("摘要这枚 artifact", callbacks).has_value());
+    REQUIRE(backend.captured.size() == 2);
+    CHECK(IsAppendOnlySuccessor(backend.captured[0], backend.captured[1]));
+    CHECK(agent::DiffRequests(backend.captured[0], backend.captured[1]).break_reason().empty());
+    REQUIRE(backend.captured[1].messages.size() == backend.captured[0].messages.size() + 2);
+    const auto* result = std::get_if<api::ToolResultBlock>(
+        &backend.captured[1].messages.back().content.front());
+    REQUIRE(result != nullptr);
+    CHECK(result->content.find("按需摘要") != std::string::npos);
+    REQUIRE(reports.size() == 2);
+    CHECK(reports[1].cache_epoch == 1);
+    CHECK(reports[1].prefix_append_only);
+}
+
 // ---------------------------------------------------------------------------
 // 断裂源一(已修):记忆 suffix 与任务名册不再改 system——第五期起随本轮
 // user 消息尾部进请求视图,发过即钉住,新一轮再往尾部添新快照。旧前缀

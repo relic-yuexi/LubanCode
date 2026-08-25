@@ -567,6 +567,14 @@ TEST_CASE("批5 外接: 缺省(zh-CN)与改前一字不差") {
     CHECK(rschema["properties"]["line_start"]["description"] == "起始行(1 起;与 chunk_id 二选一)");
     CHECK(rschema["properties"]["line_count"]["description"] == "读几行;0 = 读到结尾");
     CHECK(rschema["required"] == nlohmann::json::array({"artifact_id"}));
+    CHECK(!rschema["properties"].contains("summarize"));
+
+    ContextReadTool summarizing_read(
+        nullptr, [](const lubancode::agent::ArtifactRef&)
+                     -> std::expected<std::string, std::string> { return "摘要"; });
+    CHECK(summarizing_read.description().find("额外消耗模型 token") != std::string::npos);
+    CHECK(summarizing_read.input_schema()["properties"]["summarize"]["description"] ==
+          "按需调用 cheap 模型摘要整枚 artifact;会额外消耗 token,不可与 chunk_id/行窗同用");
 }
 
 TEST_CASE("批5 外接: en 下 description 与参数说明都是英文") {
@@ -589,6 +597,12 @@ TEST_CASE("批5 外接: en 下 description 与参数说明都是英文") {
     CHECK(read.description().find("Read a segment of the spilled full text") == 0);
     CHECK(read.input_schema()["properties"]["chunk_id"]["description"] ==
           "Chunk id (e.g. c0003); when given, read by chunk");
+    ContextReadTool summarizing_read(
+        nullptr, [](const lubancode::agent::ArtifactRef&)
+                     -> std::expected<std::string, std::string> { return "summary"; });
+    CHECK(summarizing_read.description().find("extra cheap-model call") != std::string::npos);
+    CHECK(summarizing_read.input_schema()["properties"]["summarize"]["description"] ==
+          "Summarize the whole artifact on demand with the cheap model; costs extra tokens and cannot be combined with chunk_id or a line window");
 }
 
 // ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@
 // 只读钥匙的 scope(规格"测试"节)。
 #include <doctest/doctest.h>
 
+#include <expected>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -380,6 +381,14 @@ TEST_CASE("两把只读钥匙:scope 只认稳定 id") {
     REQUIRE(store->Open((dir.path() / "ctx").string(), "sess-1"));
     const auto ref = store->Offload("toolu-1", "run_command", MakeLongLog(300), 1);
     REQUIRE(ref.has_value());
+    bool summarize_called = false;
+    lubancode::tools::ContextReadTool summarizing_read(
+        store, [&](const lubancode::agent::ArtifactRef& requested)
+                   -> std::expected<std::string, std::string> {
+            summarize_called = true;
+            CHECK(requested.artifact_id == ref->artifact_id);
+            return "artifact a0001 按需摘要:构建完成。原文未改。";
+        });
 
     SUBCASE("别的会话/不存在的 id 查不到") {
         const auto result = search.execute(nlohmann::json{{"artifact_id", "a999"}, {"query", "build"}});
@@ -404,5 +413,26 @@ TEST_CASE("两把只读钥匙:scope 只认稳定 id") {
                                                         {"path", "C:/Windows/system.ini"}});
         REQUIRE(!result.is_error);
         CHECK(result.content.find("system.ini") == std::string::npos);
+    }
+    SUBCASE("按需摘要只在接了回调的 main 工具开放") {
+        CHECK(!read.input_schema()["properties"].contains("summarize"));
+        REQUIRE(summarizing_read.input_schema()["properties"].contains("summarize"));
+        CHECK(summarizing_read.input_schema()["properties"]["summarize"]["type"] == "boolean");
+
+        const auto result = summarizing_read.execute(
+            nlohmann::json{{"artifact_id", ref->artifact_id}, {"summarize", true}});
+        REQUIRE(!result.is_error);
+        CHECK(summarize_called);
+        CHECK(result.content.find("构建完成") != std::string::npos);
+        CHECK(result.content.find("原文未改") != std::string::npos);
+    }
+    SUBCASE("按需摘要不可与原文行窗混用") {
+        const auto result = summarizing_read.execute(
+            nlohmann::json{{"artifact_id", ref->artifact_id},
+                           {"summarize", true},
+                           {"line_start", 1}});
+        CHECK(result.is_error);
+        CHECK(!summarize_called);
+        CHECK(result.content.find("不可再给") != std::string::npos);
     }
 }

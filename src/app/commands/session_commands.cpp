@@ -142,8 +142,8 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
             }
         }
         if (layers != nullptr) {
-            std::cout << "  " << trf("cmd.context.layers", layers->inline_full_results, layers->artifact_previews,
-                                     layers->microcompact_summaries)
+            std::cout << "  " << trf("cmd.context.layers", layers->inline_full_results,
+                                     layers->artifact_previews)
                       << "\n";
             if (layers->reclaimable_bytes > 0) {
                 std::cout << "  " << trf("cmd.context.reclaimable", layers->reclaimable_bytes) << "\n";
@@ -1223,4 +1223,3 @@ bool DeleteCurrentSession(const std::string& sessions_dir, lubancode::agent::Ses
 }
 
 }  // namespace lubancode::app
-

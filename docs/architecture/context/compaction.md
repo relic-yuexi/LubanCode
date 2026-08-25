@@ -97,11 +97,11 @@ project memory 不在这四本里。它跨会话存稳定事实，每条新用�
 | --- | --- | --- | --- | --- |
 | L0 | 原样、分页、按需加载 | 否 | 否 | history/session |
 | L1 | 结构去重、版本标记、artifact 预览 | 否 | 否 | history/session/artifact |
-| L2 | 冷工具结果 microcompact | 是 | 否 | session/artifact |
+| L2 | 点名 artifact 的按需 microcompact | 是 | 否，只往尾部添工具结果 | session/artifact |
 | L3 | 全局 semantic compact | 是 | 是 | session |
 | L4 | sticky hard trim | 否 | 否，只改请求视图 | session/history |
 
-L1 与 L2 都只改请求视图的表示。L3 才真正换活 history。L4 是最后拦网，带损失，必须告警。
+L1 只改请求视图的表示。L2 不改旧表示，只在工具调用处添一条新摘要。L3 才真正换活 history。L4 是最后拦网，带损失，必须告警。
 
 ## ⚙️ 程序先怎样过滤
 
@@ -136,21 +136,19 @@ L1 的决策在 cache epoch 内钉住。已发过的旧结果不会下一 step �
 
 ### L2 microcompact
 
-L2 只盯冷区里已经落 artifact、仍停在 L1 预览的工具结果。默认规则：
+L2 默认不开工。模型须点名 artifact，显式调用 `context_read(summarize=true)`。宿主才另建一只独占 backend，走 cheap 路由写一份局部摘要。它不扫冷区，不在回合收尾猜哪枚值得花钱。
 
 | 项 | 当前值 |
 | --- | ---: |
-| 冷区累计门槛 | `32 KiB` |
-| 每趟最多候选 | `3` |
+| 单次处理 | 调用方点名的 `1` 枚 artifact |
 | 单枚模型输入上限 | `24 KiB` |
 | cheap 请求超时 | `45 s` |
-| 下一趟增长门槛 | `50%` |
 
-候选按原文字节从大到小取。输入从 artifact blob 重新读，不拿旧摘要再摘要。超过 `24 KiB` 时取头尾各半，再沿行边界与 UTF-8 码点边界收口。
+输入从 artifact blob 重新读，不拿旧摘要再摘要。超过 `24 KiB` 时取头尾各半，再沿行边界与 UTF-8 码点边界收口。
 
-模型要回严格 JSON，至少带 `summary` 与 `key_facts`。解析失败、摘要过短、超时、blob hash 不对，便退回 L1。原文不删，memo 不换。
+模型要回严格 JSON，至少带 `summary` 与 `key_facts`。解析失败、摘要过短、超时、blob hash 不对，工具返回错误。原文不删，memo 不换。
 
-无论这一趟成没成，迟滞都会生效。冷区须比上趟再长 50%，才准重开。它挡住失败后每轮立刻重试，免得白烧 cheap 模型。
+成功摘要随本次 `context_read` 的 `tool_result` 追加到历史尾部。已发旧消息逐字不动，cache epoch 也不因 L2 改写。`summarize=true` 不可与块 id 或行窗同用。
 
 ## 🎯 L3 何时触发
 
@@ -356,7 +354,7 @@ final text 过短、manifest 解析失败、goal 空、活动待办漏项，整�
 
 ### L2 失败
 
-单枚 microcompact 失败，只保留原 L1 预览。blob 与 session 原文都在。迟滞挡住立刻再烧一次。
+单枚按需摘要失败，工具把错误回给模型。原 L1 预览、blob 与 session 原文都在；程序不会自动重试。
 
 ### compact event 写盘失败
 
@@ -410,7 +408,7 @@ sticky 视图自己再超限时，才重裁一次，开新 cache epoch。
 | final manifest 漏 active todo | 整场拒收 | 待办守恒高于省 token |
 | 摘要比原文长 | 单次路径拒收 | 没压缩收益 |
 | compact 中 turn context 存在 | 换史后重新注入请求视图 | 临时上下文不丢也不永久化 |
-| artifact blob 损坏 | L2 退回 L1 | 不拿坏原文造摘要 |
+| artifact blob 损坏 | 按需摘要工具报错 | 不拿坏原文造摘要，旧 L1 预览不动 |
 
 ## 🎓 面试追问答法
 

@@ -1206,14 +1206,8 @@ const Entry kZhCN[] = {
     {"cmd.context.artifacts", "artifact 层:{0} 枚落盘 · 全文共 {1} 字节可追回(context_search/context_read 按 id 检索)"},
     {"cmd.context.artifacts_none", "artifact 层:本会话尚无落盘的超长工具结果。"},
 
-    // ---- L2 microcompact(第三期):冷区局部语义压缩 ----
-    {"microcompact.background", "微压缩 {0} 枚已转后台"},
-    {"microcompact.done", "[microcompact] 冷区收拾:{0} 枚换成 cheap 摘要(原文在仓,context_read 可追);{1} 枚退回 L1 预览。"},
-    {"microcompact.all_failed", "[microcompact] 本趟全部失败,冷区保持 L1 预览,原文未动。"},
-    {"microcompact.failure_detail", "[microcompact] 首条失败原因:{0}"},
-
     // ---- ContextBudgetPlan 与分层占用(第四期,/context 展示) ----
-    {"cmd.context.layers", "分层占用:inline 全文 {0} 枚 · artifact 预览(L1){1} 枚 · microcompact 摘要(L2){2} 枚"},
+    {"cmd.context.layers", "分层占用:inline 全文 {0} 枚 · artifact 预览(L1){1} 枚"},
     {"cmd.context.reclaimable", "结构压缩最近一次请求回收 ~{0} 字节(重复收敛 + 长结果外置)"},
     {"cmd.context.budget", "预算总账:窗口 {0} · 开销 {2} · 可压缩历史 {1}(统一估算口径)"},
     {"cmd.context.budget_detail", "  开销明细:system+模型指令 {0} · 工具声明 {1} · 热区 {2} · 输出预留 {3} · 压缩指令+协议 {4} · 估算误差边 {5}"},

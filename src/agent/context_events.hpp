@@ -111,11 +111,6 @@ enum class ResultViewKind {
     Artifact,      // 超长,首次即换成 artifact 引用(头尾预览)
     DuplicateRef,  // 同键同 hash 的后来者,自述"与事件 eN 相同"
     NewVersion,    // 同键不同 hash 的新版本,自述"替代事件 eN",原文照发
-    // L2 microcompact(第三期):冷区 artifact 换成 cheap 生成的局部语义
-    // 摘要(带 source refs;原文仍在仓里,可 context_read 追回)。决策由
-    // ApplyMicrocompactSummaries 显式改写——这是比"首次定形"更高一层的
-    // 收拾动作,视图变化记 epoch 断因(microcompact),不冒充无事发生。
-    MicrocompactSummary,
 };
 
 struct ResultViewDecision {
@@ -127,9 +122,6 @@ struct ResultViewDecision {
     // 落盘失败,后者决策已退回 Full)。
     std::string artifact_id;
     std::string artifact_sha;
-    // L2(第三期):摘要正文与产出模型(kind=MicrocompactSummary 时有效)。
-    std::string summary_text;
-    std::string summary_model;
 };
 
 // 决策台账:tool_use_id -> 首次定形的决策。AgentLoop 每个 epoch 持一份

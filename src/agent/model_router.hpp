@@ -1,9 +1,9 @@
 // 统一模型路由(渐进式上下文装载与 cheap/normal/lao 模型分工,第一期)。
 //
 // 三根梁:
-//   1. 任务分三档角色——cheap(后台小活)/ normal(普通对话与实现)/
+//   1. 任务分三档角色——cheap(低成本小活)/ normal(普通对话与实现)/
 //      lao(计划与架构)。角色跟着 TaskKind 走,不跟 main/subagent 身份走:
-//      子代理做计划也走 lao,main 触发后台摘要也走 cheap(规格"子代理仍
+//      子代理做计划也走 lao,main 点名生成局部摘要也走 cheap(规格"子代理仍
 //      与 main 同级")。
 //   2. 回退链钉死:effective_normal = normal ?? 会话 model;
 //      effective_cheap = cheap ?? normal;effective_lao = lao ?? normal。
@@ -39,7 +39,7 @@ enum class ModelRole { Cheap, Normal, Lao };
 //                     Plan Mode,本枚举先钉口径,接线点到位即走 lao)。
 //   Compact           /compact 与 auto compact 的 map/reduce 与默认终稿。
 //   CompactRepair     compact 校验失败后的修补或回退(normal)。
-//   Microcompact      冷区 tool result 的局部语义压缩(cheap)。
+//   Microcompact      点名 artifact 的按需局部摘要(cheap)。
 //   MemoryExtract     回合记忆候选抽取(cheap)。
 //   RetrievalExpansion 检索扩展词(cheap;与抽取同轮产出时同路)。
 //   Classification    低风险分类(cheap)。
