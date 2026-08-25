@@ -3144,19 +3144,15 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 break;
             case lubancode::cli::SlashCommand::Model: {
                 // P7(显示系统剥离单):typed API 在 runtime::CommandService,
-                // 终端这条是薄翻译——roles 短表与菜单/问话留在终端渲染层。
-                // 带参直切走 SetModel(写回照旧问一句);裸敲保留旧菜单路
-                // (清单选择 + 当前项高亮的交互是终端活),选定后同样经
-                // SetModel 提交,业务一处。
+                // 终端这条是薄翻译——roles 短表、清单菜单与写回问话留在终端
+                // 渲染层。带参直切与裸敲菜单选出的是同一个 id,选定后同走
+                // SetModel 提交,业务一处(两条输入路不许再分叉)。
                 if (parsed.args == "roles") {
                     const std::optional<lubancode::agent::ModelRouteTable> roles_table =
                         model_router != nullptr
                             ? std::optional<lubancode::agent::ModelRouteTable>(model_router->Table())
                             : std::nullopt;
-                    HandleModelCommand("roles", config, current_model, config_file_path, model_catalog,
-                                        current_think, context_tracker, current_model_instructions,
-                                        /*offer_config_write=*/false,
-                                        roles_table.has_value() ? &*roles_table : nullptr);
+                    PrintModelRolesTable(roles_table.has_value() ? &*roles_table : nullptr);
                     break;
                 }
                 lubancode::runtime::CommandService::Options command_options;
@@ -3164,6 +3160,12 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 command_options.model_catalog = &model_catalog;
                 command_options.current_model = current_model;
                 command_options.current_think = current_think;
+                command_options.current_model_instructions = current_model_instructions;
+                // 目录窗口生效口:runtime 不认得 cli 的 ContextTracker,回调
+                // 里替它把会话窗口落账。
+                command_options.apply_context_window = [this](std::size_t tokens) {
+                    context_tracker.set_window_tokens(tokens);
+                };
                 // 写回目标默认全局(2026-08-25 改):模型跟人走,不跟项目走,
                 // 免得换个项目就冒出一份钉死的旧模型;项目级要钉,手编
                 // <项目>/.lubancode/config.json。没有全局文件时退 merged
@@ -3234,37 +3236,62 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                             }
                         }
                     }
-                    // 直切:typed 提交。落盘目标默认全局(write_target 见上):
-                    // 模型跟人走,不跟项目走——换个项目不该冒出一份钉死的
-                    // 旧模型,项目级要钉请手编 <项目>/.lubancode/config.json。
-                    // 问一句才写;active_provider 在场时 service 会把模型写进
-                    // provider 条目(每个 provider 各记各的,切走再切回来还是
-                    // 它),顶层 model 字段会被活跃端镜像压过,单写没用。
-                    bool write_config = false;
-                    if (write_target.has_value()) {
-                        const auto answer =
-                            lubancode::cli::ReadLine(trf("cmd.write_config_prompt", *write_target));
-                        write_config = answer.has_value() && (*answer == "y" || *answer == "Y");
-                    } else {
-                        std::cout << tr("cmd.session_only") << "\n";
+                }
+                // 选定模型 id:带参直切用参数;裸敲先拉清单,菜单(交互)或
+                // 编号(管道)选一项。到这里两条输入路合流。
+                std::string chosen = parsed.args;
+                if (chosen.empty()) {
+                    const auto query = command_service.QueryModels();
+                    if (query.fetch_failed) {
+                        std::cout << trf("cmd.model.fetch_failed", query.fetch_error) << "\n";
+                        break;
                     }
-                    const auto result = command_service.SetModel(parsed.args, write_config);
-                    if (result.switched) {
-                        std::cout << trf("cmd.model.switched", result.model) << "\n";
-                        if (write_config && result.config_written) {
-                            std::cout << trf("cmd.write_config.updated", *write_target) << "\n";
-                        } else if (write_config && !result.error.empty()) {
-                            std::cout << trf("cmd.write_config.failed", result.error) << "\n";
-                        }
-                    } else {
-                        std::cout << trf("cmd.model.fetch_failed", result.error) << "\n";
+                    if (query.models.empty()) {
+                        std::cout << tr("cmd.model.list_empty") << "\n";
+                        break;
                     }
+                    const std::optional<std::string> picked = ChooseModelId(query, model_catalog);
+                    if (!picked.has_value()) {
+                        break;  // 取消/编号作废,提示已就地打出。
+                    }
+                    chosen = *picked;
+                }
+                // 统一提交:先切换 + 应用目录条目(回执就地排版),随后问一
+                // 句是否写盘。写盘时 active_provider 在场,service 会把模型写
+                // 进 provider 条目(每个 provider 各记各的,切走再切回来还是
+                // 它);顶层 model 字段会被活跃端镜像压过,单写没用。落盘目标
+                // 默认全局(write_target 见上):模型跟人走,不跟项目走——
+                // 换个项目不该冒出一份钉死的旧模型,项目级要钉请手编
+                // <项目>/.lubancode/config.json。
+                const auto result = command_service.SetModel(chosen, /*write_config=*/false);
+                if (!result.switched) {
+                    std::cout << trf("cmd.model.fetch_failed", result.error) << "\n";
                     break;
                 }
-                // 裸敲:旧菜单路(交互留在终端),选定值经 SetModel 提交。
-                HandleModelCommand(parsed.args, config, current_model, config_file_path, model_catalog,
-                                    current_think, context_tracker, current_model_instructions,
-                                    /*offer_config_write=*/active_provider.empty(), nullptr);
+                std::cout << trf("cmd.model.switched", result.model) << "\n";
+                if (result.think_from_catalog) {
+                    std::cout << trf("catalog.apply_think", result.think) << "\n";
+                }
+                if (result.applied_context_window.has_value()) {
+                    std::cout << trf("catalog.apply_window", *result.applied_context_window) << "\n";
+                }
+                if (result.instructions_replaced) {
+                    std::cout << trf("catalog.apply_instructions", result.model) << "\n";
+                }
+                if (write_target.has_value()) {
+                    const auto answer =
+                        lubancode::cli::ReadLine(trf("cmd.write_config_prompt", *write_target));
+                    if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
+                        const auto written = command_service.WriteModelToConfig(result.model);
+                        if (written.has_value()) {
+                            std::cout << trf("cmd.write_config.updated", *write_target) << "\n";
+                        } else {
+                            std::cout << trf("cmd.write_config.failed", written.error()) << "\n";
+                        }
+                    }
+                } else {
+                    std::cout << tr("cmd.session_only") << "\n";
+                }
                 break;
             }
             case lubancode::cli::SlashCommand::Provider:

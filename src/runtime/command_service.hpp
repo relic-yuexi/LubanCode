@@ -72,8 +72,13 @@ struct SetModelResult {
     bool switched = false;      // 没切(清单空/网络败)为 false
     std::string model;          // 切完后的会话模型
     std::string think;          // 目录条目应用后的档位
+    // 目录条目应用回执(有值才说明这次切换真动了它,前端照此排版,与启动时
+    // ApplyModelCatalog 的回显同款):
+    bool think_from_catalog = false;              // 目录 default_think 生效(think 即新值)
+    std::optional<std::size_t> applied_context_window;  // 目录窗口生效(同时已调 apply_context_window)
+    bool instructions_replaced = false;           // 目录 base_instructions 非空且与旧值不同,已注入
     bool config_written = false;  // 写回配置文件成功
-    std::string error;          // 空 = 成功;非空人话
+    std::string error;            // 空 = 成功;非空人话
 };
 
 // SetRoleModel 的结果(/model <role> <id>)。
@@ -125,8 +130,15 @@ public:
         const config::ModelCatalog* model_catalog = nullptr; // 模型目录(条目应用)
         std::shared_ptr<std::string> current_model;        // 会话模型(与 backend 栈共内存)
         std::shared_ptr<std::string> current_think;        // 会话档位(同上)
+        // 目录条目 base_instructions 的落点(与提示词包装层共内存):切到
+        // 条目带指令的模型就整个替换,切到目录外/无指令条目就清空——回执
+        // instructions_replaced 只在"换成了非空指令"时报真。
+        std::shared_ptr<std::string> current_model_instructions;
         std::optional<std::string> config_file_path;         // /model 可写回的文件
-        std::size_t context_window_tokens = 0;               // 目录条目应用后回填(0 = 不动)
+        // 目录条目窗口生效口:runtime 不 include cli,ContextTracker 由调用方
+        // 经回调接上(终端接 context_tracker.set_window_tokens)。可空 = 窗口
+        // 只进回执不落账。
+        std::function<void(std::size_t)> apply_context_window;
         const agent::ModelRouteTable* roles_table = nullptr; // 可空:路由表原样外带
         ModelFetcher fetch_models;                            // 可空:query 时拿不到清单
         std::string sessions_dir;                             // ListThreads 的扫档目录(空 = 空清单)
@@ -148,6 +160,11 @@ public:
     // 的模型,切走再切回来还是它;顶层字段会被活跃端镜像压过),条目不在
     // 目标文件里才退回写顶层 model 字段。
     SetModelResult SetModel(const std::string& model_id, bool write_config);
+
+    // 已切换后的单独写盘:与 SetModel(write_config=true) 走同一段落盘逻辑,
+    // 给"先切、看回执、再问要不要写"的前端用(终端两条输入路统一成这个
+    // 顺序)。没有 config_file_path 或写失败如实报错,不装成功。
+    std::expected<void, std::string> WriteModelToConfig(const std::string& model_id);
 
     // 提交角色模型(/model <role> <id>):改内存 shorthand 字段——路由表
     // 每次 Route() 现折 config,下一笔后台小活立即生效。write_config 为

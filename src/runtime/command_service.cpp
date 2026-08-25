@@ -1,9 +1,10 @@
 // CommandService 的实现(显示系统剥离单第七步)。
 //
-// 三条 typed API 的执行体,业务规则原文自 app/commands 的 HandleModelCommand
+// 三条 typed API 的执行体,业务规则原文自 app/commands 的旧模型命令路
 // 与 ResumeSession 搬来(清单拼装、条目应用、序号解析、回放接管),剥掉
-// 打印与交互问话——那半留在终端适配层。依赖铁律:不 include cli/app,
-// 不碰标准流。
+// 打印与交互问话——那半留在终端适配层。/model 的切换提交如今只剩这一条
+// 路:终端菜单选出的 id 与带参直切都经 SetModel 进来。依赖铁律:不 include
+// cli/app,不碰标准流。
 
 #include "runtime/command_service.hpp"
 
@@ -65,7 +66,8 @@ SetModelResult CommandService::SetModel(const std::string& model_id, bool write_
     out.switched = true;
 
     // 模型目录应用(主动切换:目录声明了就用,用户显式配过的不动——两个
-    // explicit 都 false,与终端 HandleModelCommand 同一规矩)。
+    // explicit 都 false,与启动时终端 ApplyModelCatalog 同一规矩)。think/
+    // 窗口/模型指令各自落账并写回执,前端照回执排版——runtime 不打印。
     if (options_.model_catalog != nullptr) {
         const config::CatalogApplication application =
             config::ComputeCatalogApplication(*options_.model_catalog, model_id,
@@ -73,42 +75,62 @@ SetModelResult CommandService::SetModel(const std::string& model_id, bool write_
                                               /*window_explicitly_configured=*/false);
         if (application.think.has_value() && options_.current_think != nullptr) {
             *options_.current_think = *application.think;
+            out.think_from_catalog = true;
         }
         if (application.context_window_tokens.has_value()) {
-            options_.context_window_tokens = *application.context_window_tokens;
+            if (options_.apply_context_window) {
+                options_.apply_context_window(*application.context_window_tokens);
+            }
+            out.applied_context_window = *application.context_window_tokens;
         }
-        if (options_.current_think != nullptr) {
-            out.think = *options_.current_think;
+        // base_instructions 永远整体覆盖:切到目录外模型时旧模型的指令自然
+        // 被清空,回退现状;回执只在"换成了非空指令"时报真。
+        if (options_.current_model_instructions != nullptr &&
+            *options_.current_model_instructions != application.base_instructions) {
+            out.instructions_replaced = !application.base_instructions.empty();
+            *options_.current_model_instructions = application.base_instructions;
         }
+    }
+    if (options_.current_think != nullptr) {
+        out.think = *options_.current_think;  // 应用后的最终档位(没动就是原档)
     }
 
     // 写回配置文件是显式一笔(终端问过才传 true;GUI 分立按钮)。
     if (write_config && options_.config_file_path.has_value()) {
-        const std::string& target = *options_.config_file_path;
-        // 活跃 provider 在场:模型写进 provider 条目——每个 provider 各记
-        // 各的,切走再切回来还是这个模型;且活跃端镜像会拿条目的 model
-        // 压过顶层字段,只写顶层等于白写。条目不在这份文件里才退回顶层。
-        bool wrote_entry = false;
-        if (options_.config != nullptr && !options_.config->active_provider.empty()) {
-            const auto entry =
-                config::UpdateProviderModelInConfigFile(target, options_.config->active_provider, model_id);
-            if (!entry.has_value()) {
-                out.error = "config_write_failed: " + entry.error();
-            } else if (*entry) {
-                wrote_entry = true;
-                out.config_written = true;
-            }
-        }
-        if (!wrote_entry && out.error.empty()) {
-            const auto updated = config::UpdateModelInConfigFile(target, model_id);
-            if (updated.has_value()) {
-                out.config_written = true;
-            } else {
-                out.error = "config_write_failed: " + updated.error();
-            }
+        const auto written = WriteModelToConfig(model_id);
+        if (written.has_value()) {
+            out.config_written = true;
+        } else {
+            out.error = "config_write_failed: " + written.error();
         }
     }
     return out;
+}
+
+std::expected<void, std::string> CommandService::WriteModelToConfig(const std::string& model_id) {
+    if (!options_.config_file_path.has_value()) {
+        return std::unexpected("no_config_file");
+    }
+    const std::string& target = *options_.config_file_path;
+    // 活跃 provider 在场:模型写进 provider 条目——每个 provider 各记
+    // 各的,切走再切回来还是这个模型;且活跃端镜像会拿条目的 model
+    // 压过顶层字段,只写顶层等于白写。条目不在这份文件里才退回顶层。
+    bool wrote_entry = false;
+    if (options_.config != nullptr && !options_.config->active_provider.empty()) {
+        const auto entry =
+            config::UpdateProviderModelInConfigFile(target, options_.config->active_provider, model_id);
+        if (!entry.has_value()) {
+            return std::unexpected(entry.error());
+        }
+        wrote_entry = *entry;
+    }
+    if (!wrote_entry) {
+        const auto updated = config::UpdateModelInConfigFile(target, model_id);
+        if (!updated.has_value()) {
+            return std::unexpected(updated.error());
+        }
+    }
+    return {};
 }
 
 // ---- SetRoleModel ------------------------------------------------------------

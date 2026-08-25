@@ -177,11 +177,89 @@ TEST_CASE("SetModel:目录条目应用 default_think") {
     const auto result = service.SetModel("m2", false);
     CHECK(result.switched);
     CHECK(result.think == "high");
+    CHECK(result.think_from_catalog);
     CHECK(*options.current_think == "high");
-    // 不在目录的模型:think 不动。
+    // 不在目录的模型:think 不动,回执不报。
     const auto stay = service.SetModel("m1", false);
     CHECK(stay.switched);
     CHECK(*options.current_think == "high");
+    CHECK_FALSE(stay.think_from_catalog);
+}
+
+TEST_CASE("SetModel:目录窗口经回调落账,base_instructions 整体替换") {
+    config::ModelCatalog catalog;
+    config::ModelCatalogEntry entry;
+    entry.slug = "m2";
+    entry.default_think = "max";
+    entry.context_window_tokens = 1048576;
+    entry.base_instructions = "m2 专属指令";
+    catalog.models.push_back(entry);
+
+    config::Config config;
+    rt::CommandService::Options options = BaseOptions();
+    options.config = &config;
+    options.model_catalog = &catalog;
+    options.current_model_instructions = std::make_shared<std::string>("旧模型指令");
+    std::size_t applied_window = 0;
+    options.apply_context_window = [&](std::size_t tokens) { applied_window = tokens; };
+    rt::CommandService service(options);
+
+    const auto result = service.SetModel("m2", false);
+    REQUIRE(result.switched);
+    CHECK(result.applied_context_window == std::optional<std::size_t>(1048576U));
+    CHECK(applied_window == 1048576U);  // 回调真被调过,不只是回执报数
+    CHECK(result.instructions_replaced);
+    CHECK(*options.current_model_instructions == "m2 专属指令");
+
+    // 切到目录外:窗口不再动(回调不响),旧指令被清空但不算"替换成新指令"。
+    const auto outside = service.SetModel("m9", false);
+    REQUIRE(outside.switched);
+    CHECK_FALSE(outside.think_from_catalog);
+    CHECK_FALSE(outside.applied_context_window.has_value());
+    CHECK(applied_window == 1048576U);
+    CHECK_FALSE(outside.instructions_replaced);
+    CHECK(options.current_model_instructions->empty());
+}
+
+TEST_CASE("WriteModelToConfig:先切后写两步走,provider 条目吃下模型") {
+    TempSessionsDir dir;
+    const std::string cfg_path = dir.path() + "/config.json";
+    {
+        std::ofstream out(cfg_path, std::ios::binary | std::ios::trunc);
+        REQUIRE(out.is_open());
+        out << "{\"model\":\"top-m\",\"active_provider\":\"ds\",\"providers\":["
+               "{\"name\":\"ds\",\"wire\":\"anthropic-messages\",\"base_url\":\"http://x\",\"model\":\"ds-old\"}]}";
+    }
+
+    config::Config config;
+    config.model = "top-m";
+    config.active_provider = "ds";
+    rt::CommandService::Options options = BaseOptions();
+    options.config = &config;
+    options.config_file_path = cfg_path;
+    rt::CommandService service(options);
+
+    // 第一步:只切不写。
+    const auto result = service.SetModel("ds-flash", /*write_config=*/false);
+    REQUIRE(result.switched);
+    CHECK_FALSE(result.config_written);
+    // 第二步:问完 y 再单独落盘——与 SetModel(write=true) 同一段写盘逻辑。
+    const auto written = service.WriteModelToConfig("ds-flash");
+    REQUIRE(written.has_value());
+    {
+        std::ifstream in(cfg_path, std::ios::binary);
+        std::ostringstream buffer;
+        buffer << in.rdbuf();
+        const auto parsed = nlohmann::json::parse(buffer.str());
+        CHECK(parsed["providers"][0]["model"] == "ds-flash");
+        CHECK(parsed["model"] == "top-m");  // 顶层不动:活跃端镜像压过它
+    }
+
+    // 没配 config_file_path 的 service:如实报错,不装成功。
+    rt::CommandService::Options bare_options = BaseOptions();
+    bare_options.config = &config;
+    rt::CommandService bare_service(bare_options);
+    CHECK_FALSE(bare_service.WriteModelToConfig("m1").has_value());
 }
 
 TEST_CASE("SetRoleModel:改内存 shorthand,角色名归一,不认的名字如实报") {

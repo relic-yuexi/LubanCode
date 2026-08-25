@@ -430,134 +430,85 @@ void ApplyModelCatalog(const lubancode::config::ModelCatalog& catalog, const std
     }
 }
 
-// /model 命令的执行逻辑:带参数直接切;不带参数拉列表编号选。切完了,
-// 有配置文件才问"写进配置文件?",没有就只提示本会话生效。
-// catalog:模型目录——列表里优先显示目录条目的 display_name(其次接口
-// 给的 display_name,最后 id 兜底);切换成功后按目录条目应用
-// default_think / context_window / base_instructions(见 ApplyModelCatalog)。
-void HandleModelCommand(const std::string& args, lubancode::config::Config& config,
-                         const std::shared_ptr<std::string>& current_model,
-                         std::optional<std::string>& config_file_path,
-                         const lubancode::config::ModelCatalog& catalog,
-                         const std::shared_ptr<std::string>& current_think,
-                         lubancode::cli::ContextTracker& context_tracker,
-                         const std::shared_ptr<std::string>& current_model_instructions,
-                         bool offer_config_write, const lubancode::agent::ModelRouteTable* roles_table) {
-    // /model roles:三角色路由短表(模型分工第一期)。回落行写明
-    // "回落到 normal",不把同名重印一遍(规格"界面"节)。
-    if (args == "roles") {
-        if (roles_table == nullptr) {
-            std::cout << tr("cmd.model.roles_unavailable") << "\n";
-            return;
-        }
-        std::cout << tr("cmd.model.roles_header") << "\n";
-        for (const std::string& line : lubancode::app::FormatModelRolesTable(*roles_table)) {
-            std::cout << "  " << line << "\n";
-        }
+// /model roles:三角色路由短表(模型分工第一期)。回落行写明
+// "回落到 normal",不把同名重印一遍(规格"界面"节)。
+void PrintModelRolesTable(const lubancode::agent::ModelRouteTable* roles_table) {
+    if (roles_table == nullptr) {
+        std::cout << tr("cmd.model.roles_unavailable") << "\n";
         return;
     }
+    std::cout << tr("cmd.model.roles_header") << "\n";
+    for (const std::string& line : lubancode::app::FormatModelRolesTable(*roles_table)) {
+        std::cout << "  " << line << "\n";
+    }
+}
 
-    std::string chosen;
-
-    if (!args.empty()) {
-        chosen = args;
-    } else {
-        const auto headers = lubancode::config::ResolveProviderHeaderTemplates(config.extra_headers,
-                                                                                config.auth_token);
-        const auto list_result = lubancode::api::ListModels(
-            config.wire, config.base_url, config.auth_token, config.connect_timeout_ms,
-            config.request_timeout_secs, headers);
-        if (!list_result.has_value()) {
-            std::cout << trf("cmd.model.fetch_failed", list_result.error().message) << "\n";
-            return;
-        }
-        if (list_result->empty()) {
-            std::cout << tr("cmd.model.list_empty") << "\n";
-            return;
-        }
-        std::size_t default_idx = 0;
-        std::vector<lubancode::cli::ChoiceMenuItem> items;
-        items.reserve(list_result->size());
-        for (std::size_t i = 0; i < list_result->size(); ++i) {
-            const auto& m = (*list_result)[i];
-            const bool current = m.id == *current_model;
-            if (current) default_idx = i;
-            const auto* entry = catalog.FindBySlug(m.id);
-            std::string label;
-            if (entry != nullptr && !entry->display_name.empty()) {
-                // 目录条目的 display_name 优先,后面括号带上 slug——选完切换
-                // 用的还是 API 模型名,展示名和真名对得上号。
-                label = entry->display_name + "(" + m.id + ")";
-            } else {
-                label = m.display_name.empty() ? m.id : m.display_name;
-            }
-            items.push_back({label, current ? tr("cmd.model.current") : std::string{}});
-        }
-        std::size_t idx = default_idx;
-        const bool interactive_menu = lubancode::platform::StdinIsInteractive() &&
-                                      lubancode::platform::ProbeStdoutConsole().is_console;
-        if (interactive_menu) {
-            lubancode::cli::ChoiceMenuOptions opts;
-            opts.hint = tr("confirm.menu.hint");
-            opts.initial_cursor = default_idx;
-            const auto sel = lubancode::cli::ReadChoiceMenu(items, opts, lubancode::cli::Theme{});
-            if (!sel.has_value()) {
-                std::cout << tr("cmd.model.cancelled") << "\n";
-                return;
-            }
-            idx = sel->selected_indices.empty() ? default_idx : sel->selected_indices.front();
+// /model 裸敲的清单选择(全注释见头文件):交互菜单/非交互编号选一项,
+// 只返回 id——不切换、不碰配置,提交统一走 runtime::CommandService::SetModel,
+// 与带参直切同一条路。
+std::optional<std::string> ChooseModelId(const lubancode::runtime::ModelQueryResult& query,
+                                         const lubancode::config::ModelCatalog& catalog) {
+    std::size_t default_idx = 0;
+    std::vector<std::string> ids;
+    std::vector<lubancode::cli::ChoiceMenuItem> items;
+    ids.reserve(query.models.size());
+    items.reserve(query.models.size());
+    for (std::size_t i = 0; i < query.models.size(); ++i) {
+        const auto& m = query.models[i];
+        const bool current = m.id == query.current_model;
+        if (current) default_idx = i;
+        const auto* entry = catalog.FindBySlug(m.id);
+        std::string label;
+        if (entry != nullptr && !entry->display_name.empty()) {
+            // 目录条目的 display_name 优先,后面括号带上 slug——选完切换
+            // 用的还是 API 模型名,展示名和真名对得上号。
+            label = entry->display_name + "(" + m.id + ")";
         } else {
-            for (std::size_t i = 0; i < items.size(); ++i) {
-                std::cout << "  " << (i + 1) << ") " << items[i].label
-                          << (items[i].description.empty() ? "" : "  " + items[i].description) << "\n";
-            }
-            const std::optional<std::string> selection = lubancode::cli::ReadLine(
-                trf("cmd.model.choose", default_idx + 1), {}, /*esc_rejects=*/true);
-            if (!selection.has_value()) {
-                std::cout << tr("cmd.model.cancelled") << "\n";
-                return;
-            }
-            if (!selection->empty()) {
-                try {
-                    std::size_t consumed = 0;
-                    const int n = std::stoi(*selection, &consumed);
-                    if (consumed != selection->size() || n < 1 || static_cast<std::size_t>(n) > list_result->size()) {
-                        std::cout << tr("cmd.model.bad_number") << "\n";
-                        return;
-                    }
-                    idx = static_cast<std::size_t>(n - 1);
-                } catch (...) {
-                    std::cout << tr("cmd.model.not_number") << "\n";
-                    return;
+            label = m.display_name.empty() ? m.id : m.display_name;
+        }
+        ids.push_back(m.id);
+        items.push_back({label, current ? tr("cmd.model.current") : std::string{}});
+    }
+    std::size_t idx = default_idx;
+    const bool interactive_menu = lubancode::platform::StdinIsInteractive() &&
+                                  lubancode::platform::ProbeStdoutConsole().is_console;
+    if (interactive_menu) {
+        lubancode::cli::ChoiceMenuOptions opts;
+        opts.hint = tr("confirm.menu.hint");
+        opts.initial_cursor = default_idx;
+        const auto sel = lubancode::cli::ReadChoiceMenu(items, opts, lubancode::cli::Theme{});
+        if (!sel.has_value()) {
+            std::cout << tr("cmd.model.cancelled") << "\n";
+            return std::nullopt;
+        }
+        idx = sel->selected_indices.empty() ? default_idx : sel->selected_indices.front();
+    } else {
+        for (std::size_t i = 0; i < items.size(); ++i) {
+            std::cout << "  " << (i + 1) << ") " << items[i].label
+                      << (items[i].description.empty() ? "" : "  " + items[i].description) << "\n";
+        }
+        const std::optional<std::string> selection = lubancode::cli::ReadLine(
+            trf("cmd.model.choose", default_idx + 1), {}, /*esc_rejects=*/true);
+        if (!selection.has_value()) {
+            std::cout << tr("cmd.model.cancelled") << "\n";
+            return std::nullopt;
+        }
+        if (!selection->empty()) {
+            try {
+                std::size_t consumed = 0;
+                const int n = std::stoi(*selection, &consumed);
+                if (consumed != selection->size() || n < 1 || static_cast<std::size_t>(n) > ids.size()) {
+                    std::cout << tr("cmd.model.bad_number") << "\n";
+                    return std::nullopt;
                 }
+                idx = static_cast<std::size_t>(n - 1);
+            } catch (...) {
+                std::cout << tr("cmd.model.not_number") << "\n";
+                return std::nullopt;
             }
         }
-        chosen = (*list_result)[idx].id;
     }
-
-    *current_model = chosen;
-    config.model = chosen;
-    std::cout << trf("cmd.model.switched", chosen) << "\n";
-
-    // 模型目录应用:主动切换,目录声明了就用(两个 explicit 都传 false);
-    // 切到目录外的名字时这一步什么都不动(base_instructions 清空),回退现状。
-    ApplyModelCatalog(catalog, chosen, /*think_explicit=*/false, /*window_explicit=*/false, current_think,
-                       context_tracker, current_model_instructions);
-
-    if (offer_config_write && config_file_path.has_value()) {
-        const std::optional<std::string> answer =
-            lubancode::cli::ReadLine(trf("cmd.write_config_prompt", *config_file_path));
-        if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
-            const auto updated = lubancode::config::UpdateModelInConfigFile(*config_file_path, chosen);
-            if (updated.has_value()) {
-                std::cout << trf("cmd.write_config.updated", *config_file_path) << "\n";
-            } else {
-                std::cout << trf("cmd.write_config.failed", updated.error()) << "\n";
-            }
-        }
-    } else if (offer_config_write) {
-        std::cout << tr("cmd.session_only") << "\n";
-    }
+    return ids[idx];
 }
 void PrintProviderList(const std::vector<lubancode::config::ProviderConfig>& providers,
                        const lubancode::config::Config& current_config,

@@ -33,6 +33,7 @@
 #include "config/provider_catalog.hpp"
 #include "config/skill_store.hpp"
 #include "config/update_checker.hpp"
+#include "runtime/command_service.hpp"
 #include "tools/skill_loader.hpp"
 
 namespace lubancode::app {
@@ -104,23 +105,20 @@ void ApplyModelCatalog(const lubancode::config::ModelCatalog& catalog, const std
                         const std::shared_ptr<std::string>& current_model_instructions);
 
 
-// /model 命令的执行逻辑:带参数直接切;不带参数拉列表编号选;参数是
-// "roles" 时打三角色路由短表(模型分工第一期)。切完了,有配置文件才问
-// "写进配置文件?",没有就只提示本会话生效。
-// catalog:模型目录——列表里优先显示目录条目的 display_name(其次接口
-// 给的 display_name,最后 id 兜底);切换成功后按目录条目应用
-// default_think / context_window / base_instructions(见 ApplyModelCatalog)。
-// roles_table(可空):会话的 ModelRouterService 路由表,空指针时 /model
-// roles 打"路由未建(单发/测试路径)"——不装没事发生。
-void HandleModelCommand(const std::string& args, lubancode::config::Config& config,
-                         const std::shared_ptr<std::string>& current_model,
-                         std::optional<std::string>& config_file_path,
-                         const lubancode::config::ModelCatalog& catalog,
-                         const std::shared_ptr<std::string>& current_think,
-                         lubancode::cli::ContextTracker& context_tracker,
-                         const std::shared_ptr<std::string>& current_model_instructions,
-                         bool offer_config_write = true,
-                         const lubancode::agent::ModelRouteTable* roles_table = nullptr);
+// /model roles:打三档模型角色路由短表(模型分工第一期)。roles_table 是
+// 会话 ModelRouter 的路由表,空指针时打"路由未建(单发/测试路径)"——不装
+// 没事发生。
+void PrintModelRolesTable(const lubancode::agent::ModelRouteTable* roles_table);
+
+
+// /model 裸敲的清单选择:拿 QueryModels 的结果(终端侧取数已由调用方做完),
+// 交互菜单/非交互编号选一项,返回选中的模型 id;取消或编号作废返回空
+// (提示语已就地打出)。只管选——不切换、不碰配置,提交统一走
+// runtime::CommandService::SetModel,与带参直切同一条路。
+// catalog:列表优先显示目录条目的 display_name(其次接口给的
+// display_name,最后 id 兜底),选完切换用的仍是 API 模型名。
+std::optional<std::string> ChooseModelId(const lubancode::runtime::ModelQueryResult& query,
+                                         const lubancode::config::ModelCatalog& catalog);
 
 void PrintProviderList(const std::vector<lubancode::config::ProviderConfig>& providers,
                        const lubancode::config::Config& current_config,
