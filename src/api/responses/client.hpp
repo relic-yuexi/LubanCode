@@ -17,9 +17,11 @@
 
 namespace lubancode::api::responses {
 
-// 纯函数:把 extra_headers 覆盖/追加到一份基础 HTTP 头表里。(跟
-// anthropic/client.hpp 里的同名函数逻辑一样,两边各自小巧,没必要为了
-// 共用几行代码搭一个新的公共头——理由同 ExtractStatusCode。)
+// 纯函数:把 extra_headers 覆盖/追加到一份基础 HTTP 头表里。批六(API
+// 传输合流)起,实现收拢在 api/types.hpp 的 api::ApplyExtraHeaders(四家
+// wire 共用一份),这里保留这个公开名字当薄壳——单测钉着它。当年"两边
+// 各自小巧,不为共用几行代码搭公共头"的局部决定,四份 client 过了临界,
+// 翻篇了。
 std::map<std::string, std::string> ApplyExtraHeaders(std::map<std::string, std::string> base,
                                                         const std::map<std::string, std::string>& extra_headers);
 

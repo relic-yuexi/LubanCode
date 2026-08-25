@@ -8,6 +8,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -339,6 +340,40 @@ inline std::map<std::string, std::string> RequestBaseHeaders(const std::string& 
         headers["Authorization"] = "Bearer " + auth_token;
     }
     return headers;
+}
+
+// extra_headers 覆盖/追加到一份基础 HTTP 头表:值非空 = 覆盖/追加同名头,
+// 空值 = 删除该头(key 精确匹配大小写;真正发送时 cpr::Header 自身还会再做
+// 一层大小写不敏感的去重,这里只管"配置里写的头名对不对得上基础头哪一条"
+// 这一步)。批六归一的共用件:四家 wire 都拿它合头;anthropic/responses 的
+// 同名公开函数(单测钉着名字)是这份的薄壳。
+inline std::map<std::string, std::string> ApplyExtraHeaders(std::map<std::string, std::string> base,
+                                                             const std::map<std::string, std::string>& extra_headers) {
+    for (const auto& [name, value] : extra_headers) {
+        if (value.empty()) base.erase(name);
+        else base[name] = value;
+    }
+    return base;
+}
+
+// Role -> wire 角色名。user 一角四家都叫 "user";另一角各家叫法不同
+// (anthropic/responses 叫 assistant,gemini 叫 model),由调用方给。chat
+// wire 不走这个(它的 role 集合另有 system/tool,直拼字符串)。
+inline std::string RoleToString(Role role, std::string_view other_role) {
+    return role == Role::User ? std::string("user") : std::string(other_role);
+}
+
+// extra_body 顶层浅合并(wire 请求体拼装的共同收尾):source 是 object 才
+// 合并,同名键整个覆盖,不深合并。provider 级与请求级(Request::
+// extra_body)各调一次,后者压前者。gemini 的 generationConfig 一键深一层
+// 是它自家的特例,不走这个。
+inline void MergeExtraBody(nlohmann::json& body, const nlohmann::json& source) {
+    if (!source.is_object()) {
+        return;
+    }
+    for (auto it = source.begin(); it != source.end(); ++it) {
+        body[it.key()] = it.value();
+    }
 }
 
 }  // namespace lubancode::api

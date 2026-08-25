@@ -10,8 +10,9 @@ namespace {
 
 using nlohmann::json;
 
-std::string RoleToString(Role role) {
-    return role == Role::User ? "user" : "model";
+// Role -> wire 角色名,共用件(批六归一):gemini 的另一角叫 "model"。
+std::string WireRole(Role role) {
+    return RoleToString(role, "model");
 }
 
 // 工具结果回传(functionResponse)只认函数名,中立层 ToolResultBlock 里却
@@ -72,7 +73,7 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) 
         json parts = json::array();
         const auto flush_parts = [&] {
             if (!parts.empty()) {
-                contents.push_back(json{{"role", RoleToString(message.role)}, {"parts", std::move(parts)}});
+                contents.push_back(json{{"role", WireRole(message.role)}, {"parts", std::move(parts)}});
                 parts = json::array();
             }
         };
