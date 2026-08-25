@@ -47,6 +47,8 @@ TEST_CASE("inline frame diff: unchanged rows are skipped and all changes share o
     CHECK(stats.emitted);
     CHECK(bytes.find("old") == std::string::npos);
     CHECK(bytes.find("new") != std::string::npos);
+    CHECK(bytes.find("\x1b[?25l") < bytes.find("new"));
+    CHECK(bytes.find("\x1b[?25h") > bytes.find("new"));
     CHECK(bytes.find("\x1b[8;3H") != std::string::npos);  // origin 7 + row 0, x=2
     CHECK(bytes.find("\x1b[?2026h") == 0);
     CHECK(bytes.ends_with("\x1b[?2026l"));

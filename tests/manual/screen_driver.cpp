@@ -320,7 +320,7 @@ int wmain(int argc, wchar_t** argv) {
     Check(WaitForText("shift+tab", 30000, &status_row), "F1 开场:状态行出现(30s 内)");
     Sleep(300);
     status_row = FindLastRow("shift+tab");
-    const int prompt_row = status_row - 2;  // 版式:提示行 / 下横线 / 状态行
+    const int prompt_row = status_row - 3;  // 三行正文区:上留白 / 提示行 / 下留白
     {
         const std::string status = ReadRow(status_row);
         Check(status.find("\xe2\x8f\xb5\xe2\x8f\xb5") != std::string::npos, "F1 状态行有 ⏵⏵ 前缀");
@@ -329,14 +329,16 @@ int wmain(int argc, wchar_t** argv) {
             Check(status.find("MiniMax-M3") != std::string::npos, "F1 状态行显示模型名");
         }
         Check(status.find("context ") != std::string::npos, "F1 状态行显示 context 占比");
-        Check(IsRuleRow(prompt_row - 1), "F1 上横线在提示行上一行");
-        Check(IsRuleRow(prompt_row + 1), "F1 下横线在提示行下一行");
+        Check(IsRuleRow(prompt_row - 2), "F1 上横线在正文区上方");
+        Check(ReadRow(prompt_row - 1).empty(), "F1 提示行上方留一行空白");
+        Check(ReadRow(prompt_row + 1).empty(), "F1 提示行下方留一行空白");
+        Check(IsRuleRow(prompt_row + 2), "F1 下横线在正文区下方");
         // 0.21.x:框线满终端宽(BufferWidth - 1),不再卡 100 列上限。
         const int full = BufferWidth() - 1;
-        Check(RuleGlyphWidth(prompt_row - 1) == full,
-              "F1 上横线满终端宽(" + std::to_string(RuleGlyphWidth(prompt_row - 1)) + "==" +
+        Check(RuleGlyphWidth(prompt_row - 2) == full,
+              "F1 上横线满终端宽(" + std::to_string(RuleGlyphWidth(prompt_row - 2)) + "==" +
                   std::to_string(full) + ")");
-        Check(RuleGlyphWidth(prompt_row + 1) == full, "F1 下横线满终端宽");
+        Check(RuleGlyphWidth(prompt_row + 2) == full, "F1 下横线满终端宽");
         // 空 composer 的提示行只剩 "> ",行尾空白被 ReadRow 剪掉,按裸 ">" 认。
         const std::string prompt_text = ReadRow(prompt_row);
         Check(!prompt_text.empty() && prompt_text.back() == '>', "F1 提示行有 '> '");
@@ -387,13 +389,31 @@ int wmain(int argc, wchar_t** argv) {
     SendKey(VK_TAB, 0, SHIFT_PRESSED);
     Check(WaitForRowText(status_row, "确认模式", 5000), "F3 切档:转回确认档");
 
-    // ---- F4 多行帧:Shift+Enter 框长高一行 ----
+    // ---- F4 多行帧:第二行先吃掉下沿留白，首行与框高都不跳 ----
     SendKey(VK_RETURN, L'\r', SHIFT_PRESSED);
     Sleep(400);
-    Check(IsRuleRow(prompt_row + 2), "F4 多行:下横线随框长高挪到 +2");
-    Check(FindLastRow("shift+tab") == status_row + 1, "F4 多行:状态行跟着下移一行");
+    Check(IsRuleRow(prompt_row + 2), "F4 多行:第二行吃掉下沿留白，框高不变");
+    Check(FindLastRow("shift+tab") == status_row, "F4 多行:第二行时状态行不跳");
     SendText("def");
     Check(WaitForRowText(prompt_row + 1, "def", 5000), "F4 多行:续行显示 def(两空格缩进)");
+    {
+        const COORD cursor = CursorPosition();
+        Check(cursor.Y == prompt_row + 1 && cursor.X == 5,
+              "F4 多行:Shift+Enter 后光标落在第二行末尾");
+    }
+
+    // F4a 截图回归:续行里混排 ASCII/CJK。11 枚汉字各占两格，连同 j 与
+    // 两格续行缩进，光标应落在第 25 列的空白格，不能压住末字“有”。
+    SendKey('C', 3, LEFT_CTRL_PRESSED);
+    SendKey(VK_RETURN, L'\r', SHIFT_PRESSED);
+    SendText("j就你看看人家的那个会有");
+    Check(WaitForRowText(prompt_row + 1, "j就你看看人家的那个会有", 5000),
+          "F4a 多行中英混排:续行文字完整");
+    {
+        const COORD cursor = CursorPosition();
+        Check(cursor.Y == prompt_row + 1 && cursor.X == 25,
+              "F4a 多行中英混排:光标落在末字后一格");
+    }
 
     // ---- F4b 软换行:长逻辑行铺成两行，光标、下横线一同下移 ----
     SendKey('C', 3, LEFT_CTRL_PRESSED);
@@ -402,17 +422,29 @@ int wmain(int argc, wchar_t** argv) {
     SendText(long_line);
     Sleep(400);
     Check(ReadRow(prompt_row).size() == 119, "F4b 软换行:首行吃满提示符后的 117 列");
-    Check(ReadRow(prompt_row + 1) == "  " + std::string(23, 'w'),
+    const std::string wrapped_remainder = ReadRow(prompt_row + 1);
+    Check(wrapped_remainder == "  " + std::string(23, 'w'),
           "F4b 软换行:余下 23 字落到带两格缩进的续行");
     Check(IsRuleRow(prompt_row + 2), "F4b 软换行:下横线随物理行下移");
     const COORD wrapped_cursor = CursorPosition();
     Check(wrapped_cursor.Y == prompt_row + 1 && wrapped_cursor.X == 25,
           "F4b 软换行:光标落在续行末尾");
 
+    // 第三行起才越过三行最低正文区，框与状态栏各向下长一行。
+    SendKey(VK_RETURN, L'\r', SHIFT_PRESSED);
+    Sleep(400);
+    {
+        const COORD cursor = CursorPosition();
+        Check(cursor.Y == prompt_row + 2 && cursor.X == 2,
+              "F4c 三行:光标落在第三行两格缩进后");
+    }
+    Check(IsRuleRow(prompt_row + 3), "F4c 三行:下横线向下长一行");
+    Check(FindLastRow("shift+tab") == status_row + 1, "F4c 三行:状态行向下长一行");
+
     // ---- F5 键位矫正:Ctrl+C 清空,Tab(空框)进焦点态无条目退回,Shift+Tab 仍切档 ----
     SendKey('C', 3, LEFT_CTRL_PRESSED);
     Sleep(400);
-    Check(IsRuleRow(prompt_row + 1), "F5 清空:框缩回单行");
+    Check(IsRuleRow(prompt_row + 2), "F5 清空:框缩回三行正文区");
     SendKey(VK_TAB, 0, 0);  // 空框 Tab:transcript 还是空的,焦点请求没人接,状态机得退回来
     Sleep(300);
     SendKey(VK_TAB, 0, SHIFT_PRESSED);

@@ -67,6 +67,13 @@ InlineFrameDiffStats QueueInlineFrameDiff(platform::TerminalBatch& batch,
                                           const InlineFrame* previous,
                                           const InlineFrame& next, int origin_y) {
     InlineFrameDiffStats stats;
+    bool cursor_hidden = false;
+    const auto hide_cursor = [&]() {
+        if (!cursor_hidden) {
+            batch.HideCursor();
+            cursor_hidden = true;
+        }
+    };
     const std::size_t old_size = previous == nullptr ? 0 : previous->rows.size();
     stats.compared_rows = (std::max)(old_size, next.rows.size());
 
@@ -78,6 +85,7 @@ InlineFrameDiffStats QueueInlineFrameDiff(platform::TerminalBatch& batch,
         }
 
         ++stats.changed_rows;
+        hide_cursor();
         int clear_x = new_row != nullptr ? new_row->x : old_row->x;
         int clear_end = clear_x + (new_row != nullptr ? new_row->clear_width : old_row->clear_width);
         bool hard_clear = (new_row != nullptr && new_row->hard_clear) ||
@@ -101,7 +109,9 @@ InlineFrameDiffStats QueueInlineFrameDiff(platform::TerminalBatch& batch,
                            previous->cursor_row != next.cursor_row;
     stats.emitted = stats.changed_rows > 0 || stats.cursor_changed;
     if (stats.emitted) {
+        hide_cursor();
         batch.MoveTo(next.cursor_x, origin_y + next.cursor_row);
+        batch.ShowCursor();
     }
     return stats;
 }
