@@ -33,6 +33,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agent/loop.hpp"
+#include "agent/model_router.hpp"
 #include "agent/session_store.hpp"
 #include "config/config.hpp"
 #include "config/model_catalog.hpp"
