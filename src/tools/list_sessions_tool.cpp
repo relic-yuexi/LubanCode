@@ -39,7 +39,10 @@ std::string ListSessionsTool::description() const {
 }
 
 nlohmann::json ListSessionsTool::input_schema() const {
-    return nlohmann::json::object();  // 无参数
+    // 不收参数,但空对象 {} 不算合法 schema:严格端(OpenAI 档)按 type 取值
+    // 取了个空就回 "got 'type: null'",整轮请求连带被拒。壳子照规矩给全。
+    // wire 层还有 ToolSchemaForWire 兜底(api/types.hpp),这里不靠它。
+    return nlohmann::json{{"type", "object"}, {"properties", nlohmann::json::object()}};
 }
 
 Tool::Result ListSessionsTool::execute(const nlohmann::json& /*input*/) {

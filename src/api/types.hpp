@@ -84,6 +84,36 @@ struct ToolDefinition {
     nlohmann::json input_schema;
 };
 
+// 工具 schema 上 wire 前的归一化。四家 wire(chat/responses/gemini/anthropic)
+// 都得过这道手,原样照抄就是把病带出门。
+//
+// 缘起:不收参数的工具图省事回了个空对象 {},里头既没 type 也没 properties。
+// 宽松端收得下,严格端(OpenAI 档、DeepSeek 随之)按 type 取值取了个空,当场
+// 回 "schema must be a JSON Schema of 'type: \"object\"', got 'type: null'"。
+// 工具表是整份发的,一件不合规整轮请求被拒——模型的面都见不着。
+//
+// 更要紧的是野 schema 的来路:MCP server、插件 manifest、Lua 脚本自己声明的
+// schema 都不受本仓管束(mcp_tool.cpp / plugin_loader.cpp / lua_tool.cpp 三处
+// 都是外来直传)。指望每个来路都守规矩不如在出门这道关上统一兑正。
+//
+// 兑法从宽:认不得的形状(非 object、缺 type、type 不是 "object")一概兑成
+// 最小合法壳 {"type":"object","properties":{}};已经合规的原样放行,不动人家
+// 的 required/additionalProperties/嵌套声明。properties 那只空壳也得给——有的
+// 严格档校验器认了 type 还要认 properties。
+inline nlohmann::json ToolSchemaForWire(const nlohmann::json& schema) {
+    const bool declared_object = schema.is_object() && schema.contains("type") &&
+                                 schema["type"].is_string() && schema["type"].get<std::string>() == "object";
+    if (!declared_object) {
+        return nlohmann::json{{"type", "object"}, {"properties", nlohmann::json::object()}};
+    }
+    if (!schema.contains("properties") || !schema["properties"].is_object()) {
+        nlohmann::json fixed = schema;
+        fixed["properties"] = nlohmann::json::object();
+        return fixed;
+    }
+    return schema;
+}
+
 // ---------------------------------------------------------------------------
 // 请求
 // ---------------------------------------------------------------------------

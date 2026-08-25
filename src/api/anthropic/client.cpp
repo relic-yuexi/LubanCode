@@ -155,7 +155,7 @@ json BuildRequestJson(const Request& request, bool native_web_search, const json
             tools.push_back(json{
                 {"name", tool.name},
                 {"description", tool.description},
-                {"input_schema", tool.input_schema},
+                {"input_schema", ToolSchemaForWire(tool.input_schema)},
             });
         }
         if (native_web_search) {

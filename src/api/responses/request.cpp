@@ -136,7 +136,7 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
                 {"type", "function"},
                 {"name", tool.name},
                 {"description", tool.description},
-                {"parameters", tool.input_schema},
+                {"parameters", ToolSchemaForWire(tool.input_schema)},
             });
         }
         if (native_web_search) {

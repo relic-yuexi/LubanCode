@@ -116,7 +116,7 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) 
         for (const auto& tool : request.tools) {
             declarations.push_back(json{{"name", tool.name},
                                         {"description", tool.description},
-                                        {"parameters", tool.input_schema}});
+                                        {"parameters", ToolSchemaForWire(tool.input_schema)}});
         }
         body["tools"] = json::array({json{{"functionDeclarations", std::move(declarations)}}});
     }

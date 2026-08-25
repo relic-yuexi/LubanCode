@@ -282,3 +282,20 @@ TEST_CASE("用户图片映射成 Anthropic image/base64 block") {
     CHECK(content.at(1).at("source").at("media_type") == "image/png");
     CHECK(content.at(1).at("source").at("data") == "aGVsbG8=");
 }
+
+// 工具 schema 归一化:空 schema 出门前兑成最小合法壳(缘起与四家共用的
+// 兑法见 api/types.hpp 的 ToolSchemaForWire 注释)。Anthropic 这家字段名是
+// input_schema,不是 parameters。
+TEST_CASE("工具空 schema 兑成 type=object,合规的原样放行") {
+    Request request;
+    request.tools.push_back({"list_sessions", "列会话", nlohmann::json::object()});
+    const auto good = nlohmann::json{{"type", "object"},
+                                     {"properties", {{"path", {{"type", "string"}}}}},
+                                     {"required", nlohmann::json::array({"path"})}};
+    request.tools.push_back({"read_file", "读文件", good});
+
+    const auto body = BuildRequestJson(request);
+    CHECK(body.at("tools").at(0).at("input_schema").at("type") == "object");
+    CHECK(body.at("tools").at(0).at("input_schema").at("properties").is_object());
+    CHECK(body.at("tools").at(1).at("input_schema") == good);
+}

@@ -202,7 +202,7 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
             tools.push_back(json{{"type", "function"},
                                  {"function", json{{"name", tool.name},
                                                    {"description", tool.description},
-                                                   {"parameters", tool.input_schema}}}});
+                                                   {"parameters", ToolSchemaForWire(tool.input_schema)}}}});
         }
         body["tools"] = std::move(tools);
     }

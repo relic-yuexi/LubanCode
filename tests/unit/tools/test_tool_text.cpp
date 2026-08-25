@@ -695,7 +695,12 @@ TEST_CASE("清底批: 缺省(zh-CN)与改前一字不差") {
     lubancode::tools::ListSessionsTool list_sessions(
         [] { return std::vector<lubancode::agent::PeerCard>{}; }, "self");
     CHECK(list_sessions.description() == kListSessionsDescBefore);
-    CHECK(list_sessions.input_schema() == nlohmann::json::object());
+    // 无参工具没有参数说明可钉,这里钉"壳合法且确实无参"。从前钉的是
+    // "整份 schema == 空对象",把不合规的形状连带钉成了基准:严格端按 type
+    // 取值取了个空就整轮拒请求(见 api/types.hpp 的 ToolSchemaForWire)。
+    const nlohmann::json lss = list_sessions.input_schema();
+    CHECK(lss["type"] == "object");
+    CHECK(lss["properties"] == nlohmann::json::object());
 
     lubancode::tools::SendSessionMessageTool send_session(
         [] { return std::vector<lubancode::agent::PeerCard>{}; },

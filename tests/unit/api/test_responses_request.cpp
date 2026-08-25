@@ -348,3 +348,19 @@ TEST_CASE("用户图片映射成 Responses input_image data URL") {
     CHECK(content.at(1).at("type") == "input_image");
     CHECK(content.at(1).at("image_url") == "data:image/png;base64,aGVsbG8=");
 }
+
+// 工具 schema 归一化:空 schema 出门前兑成最小合法壳(缘起与四家共用的
+// 兑法见 api/types.hpp 的 ToolSchemaForWire 注释)。
+TEST_CASE("工具空 schema 兑成 type=object,合规的原样放行") {
+    Request request;
+    request.tools.push_back({"list_sessions", "列会话", nlohmann::json::object()});
+    const auto good = nlohmann::json{{"type", "object"},
+                                     {"properties", {{"path", {{"type", "string"}}}}},
+                                     {"required", nlohmann::json::array({"path"})}};
+    request.tools.push_back({"read_file", "读文件", good});
+
+    const auto body = BuildRequestJson(request);
+    CHECK(body.at("tools").at(0).at("parameters").at("type") == "object");
+    CHECK(body.at("tools").at(0).at("parameters").at("properties").is_object());
+    CHECK(body.at("tools").at(1).at("parameters") == good);
+}

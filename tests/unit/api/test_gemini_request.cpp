@@ -180,3 +180,21 @@ TEST_CASE("Gemini request: StreamUrl 拼 v1beta 端点,剥 models/ 前缀与尾�
     CHECK(api::gemini::StreamUrl("https://proxy.example.test", "gemini-3-pro/") ==
           "https://proxy.example.test/v1beta/models/gemini-3-pro:streamGenerateContent?alt=sse");
 }
+
+// 工具 schema 归一化:空 schema 出门前兑成最小合法壳(缘起与四家共用的
+// 兑法见 api/types.hpp 的 ToolSchemaForWire 注释)。
+TEST_CASE("Gemini request: 工具空 schema 兑成 type=object,合规的原样放行") {
+    api::Request request;
+    request.model = "gemini-2.5-pro";
+    request.tools.push_back({"list_sessions", "列会话", nlohmann::json::object()});
+    const auto good = nlohmann::json{{"type", "object"},
+                                     {"properties", {{"path", {{"type", "string"}}}}},
+                                     {"required", nlohmann::json::array({"path"})}};
+    request.tools.push_back({"read_file", "读文件", good});
+
+    const auto body = api::gemini::BuildRequestJson(request);
+    const auto& decls = body["tools"][0]["functionDeclarations"];
+    CHECK(decls[0]["parameters"]["type"] == "object");
+    CHECK(decls[0]["parameters"]["properties"].is_object());
+    CHECK(decls[1]["parameters"] == good);
+}

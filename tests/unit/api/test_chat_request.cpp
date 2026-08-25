@@ -297,3 +297,52 @@ TEST_CASE("Chat request: 回传字段名按 provider 声明走,默认仍是 reas
         CHECK_FALSE(body["messages"][1].contains("reasoning_content"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// 工具 schema 归一化(ToolSchemaForWire):不收参数的工具从前回空对象 {},
+// 严格端按 type 取值取了个空,当场回 "got 'type: null'",整轮请求连带被拒。
+// 四家 wire 出门前都得兑正,这里钉 chat 这一家。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Chat request: 空 schema 兑成最小合法壳,不让严格端吃 type: null") {
+    api::Request request;
+    request.model = "deepseek-v4-flash";
+    request.tools.push_back({"list_sessions", "列会话", nlohmann::json::object()});
+
+    const auto body = api::chat::BuildRequestJson(request);
+    const auto& params = body["tools"][0]["function"]["parameters"];
+    CHECK(params["type"] == "object");
+    CHECK(params["properties"].is_object());
+    CHECK(params["properties"].empty());
+}
+
+TEST_CASE("Chat request: 缺 type / type 不是 object / 非对象 schema 一概兑正") {
+    api::Request request;
+    request.model = "m";
+    request.tools.push_back({"a", "缺 type", nlohmann::json{{"properties", nlohmann::json::object()}}});
+    request.tools.push_back({"b", "type 不是 object", nlohmann::json{{"type", "string"}}});
+    request.tools.push_back({"c", "压根儿不是对象", nlohmann::json::array()});
+    request.tools.push_back({"d", "null", nlohmann::json()});
+
+    const auto body = api::chat::BuildRequestJson(request);
+    for (int i = 0; i < 4; ++i) {
+        const auto& params = body["tools"][i]["function"]["parameters"];
+        CHECK(params["type"] == "object");
+        CHECK(params["properties"].is_object());
+    }
+}
+
+TEST_CASE("Chat request: 已合规的 schema 原样放行,不动 required 与嵌套声明") {
+    api::Request request;
+    request.model = "m";
+    const auto schema = nlohmann::json{
+        {"type", "object"},
+        {"properties", {{"path", {{"type", "string"}}}}},
+        {"required", nlohmann::json::array({"path"})},
+        {"additionalProperties", false},
+    };
+    request.tools.push_back({"read_file", "读文件", schema});
+
+    const auto body = api::chat::BuildRequestJson(request);
+    CHECK(body["tools"][0]["function"]["parameters"] == schema);
+}

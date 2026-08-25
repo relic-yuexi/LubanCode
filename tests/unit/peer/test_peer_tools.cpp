@@ -103,3 +103,16 @@ TEST_CASE("send_session_message:缺参数/空正文/找不到目标都是 is_err
     CHECK(result.content.find("nobody") != std::string::npos);
     CHECK(result.content.find("list_sessions") != std::string::npos);
 }
+
+// list_sessions 不收参数,可 schema 不能是空对象 {}——严格端(OpenAI 档)
+// 按 type 取值取了个空就整轮拒请求。wire 层另有 ToolSchemaForWire 兜底,
+// 工具自己也得把壳给全。
+TEST_CASE("list_sessions:无参也要给合法 schema 壳,不能是空对象") {
+    tools::ListSessionsTool tool([] { return SamplePeers(); }, "self0000");
+    const auto schema = tool.input_schema();
+    REQUIRE(schema.is_object());
+    CHECK(schema.contains("type"));
+    CHECK(schema["type"] == "object");
+    REQUIRE(schema.contains("properties"));
+    CHECK(schema["properties"].is_object());
+}
