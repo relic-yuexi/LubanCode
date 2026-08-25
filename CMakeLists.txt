@@ -312,6 +312,7 @@ endif()
 # ---------------------------------------------------------------------------
 add_library(lubancode_engine STATIC
   ${_lubancode_platform_sources}
+  src/platform/console_common.cpp
   src/platform/network_proxy.cpp
   src/platform/terminal_batch.cpp
   src/platform/text_encoding.cpp

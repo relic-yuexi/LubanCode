@@ -13,11 +13,13 @@
 
 #include <doctest/doctest.h>
 
+#include <future>
 #include <mutex>
 #include <stdexcept>
 
 #include "cli/console_input.hpp"
 #include "cli/theme.hpp"
+#include "platform/console.hpp"
 
 using lubancode::cli::ConsoleReadMutex;
 using lubancode::cli::RepaintSuspendActive;
@@ -89,14 +91,26 @@ TEST_CASE("挂起判定:屏幕事务(PaintScope)也算挂起,退出即恢复") {
 
 TEST_CASE("输入所有权:菜单持读权时监听侧 try_lock 拿不到,退出后恢复") {
     {
-        std::unique_lock<std::mutex> menu(ConsoleReadMutex());  // ReadChoiceMenu 全程攥着它
-        std::unique_lock<std::mutex> listener(ConsoleReadMutex(), std::try_to_lock);
-        CHECK_FALSE(listener.owns_lock());  // 监听线程抢不到,一枚键都消费不了
+        std::unique_lock<std::recursive_timed_mutex> menu(ConsoleReadMutex());  // 菜单全程攥着它
+        // 递归锁只放同线程重入；监听者在另一线程，照旧一枚键也抢不到。
+        auto listener = std::async(std::launch::async, [] {
+            std::unique_lock<std::recursive_timed_mutex> lock(ConsoleReadMutex(), std::try_to_lock);
+            return lock.owns_lock();
+        });
+        CHECK_FALSE(listener.get());
     }
     {
-        std::unique_lock<std::mutex> listener(ConsoleReadMutex(), std::try_to_lock);
+        std::unique_lock<std::recursive_timed_mutex> listener(ConsoleReadMutex(), std::try_to_lock);
         CHECK(listener.owns_lock());  // 菜单退出,读权回到监听侧
     }
+}
+
+TEST_CASE("输入所有权:平台 DSR 与 cli 逐键读取共用同一把锁") {
+    CHECK(&ConsoleReadMutex() == &lubancode::platform::ConsoleInputMutex());
+    std::unique_lock<std::recursive_timed_mutex> editor(ConsoleReadMutex());
+    std::unique_lock<std::recursive_timed_mutex> dsr(lubancode::platform::ConsoleInputMutex(),
+                                                     std::try_to_lock);
+    CHECK(dsr.owns_lock());  // 同线程查询光标可以重入，不把行编辑器锁死
 }
 
 TEST_CASE("输入所有权:挂起计数>0 期间监听侧按 RepaintSuspendActive 让出") {

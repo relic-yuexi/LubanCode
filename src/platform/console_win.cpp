@@ -23,6 +23,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <chrono>
 #include <iostream>
 #include <iterator>
 #include <deque>
@@ -698,8 +699,17 @@ std::optional<KeyInput> KeyReader::ReadOne() {
 bool WaitForKeyEvent(int timeout_ms) {
     // 粘贴探测把事件吸干又还进了内部缓冲，这些事件不再让控制台句柄有信号。
     // 缓冲里还有货就算有键，别去干等句柄（输入法整词提交/快打连击会中招）。
-    if (!PendingInputRecords().empty()) {
-        return true;
+    // 监听线程会先等事件、后抢读权；这里限时拿共用锁护住内部队列。
+    // 前台编辑器已持锁时，同线程递归可入；别的线程至多候本次等待时限，
+    // 免得菜单持锁时监听线程空转烧 CPU。
+    {
+        std::unique_lock<std::recursive_timed_mutex> input_lock(ConsoleInputMutex(), std::defer_lock);
+        if (!input_lock.try_lock_for(std::chrono::milliseconds(timeout_ms > 0 ? timeout_ms : 0))) {
+            return false;
+        }
+        if (!PendingInputRecords().empty()) {
+            return true;
+        }
     }
     const HANDLE h_in = GetStdHandle(STD_INPUT_HANDLE);
     return WaitForSingleObject(h_in, timeout_ms > 0 ? static_cast<DWORD>(timeout_ms) : 0) == WAIT_OBJECT_0;

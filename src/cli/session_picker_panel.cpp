@@ -94,7 +94,7 @@ SessionPickerPanelResult RunSessionPickerPanel(const SessionPickerFeed& feed, co
         return result;  // 非 TTY/管道:不开面板,调用方打短用法
     }
 
-    std::lock_guard<std::mutex> console_read_lock(ConsoleReadMutex());
+    std::lock_guard<std::recursive_timed_mutex> console_read_lock(ConsoleReadMutex());
     platform::RawInputScope raw_scope;
     if (!raw_scope.ok()) {
         return result;

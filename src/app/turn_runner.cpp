@@ -1168,9 +1168,9 @@ RunTurnResult RunTurn(lubancode::agent::AgentLoop& loop, const std::string& user
 
     // 0.21.x 流式脚注:流式期间在正文下方常驻一行"⎋ 打断 · 键入并回车 排队
     // 下一条",让用户看见能 ESC 打断、能键入排队(回归前屏上啥都没有)。只在
-    // Windows 真控制台开——footer 要随时查光标位,POSIX 走 DSR 6n 会跟监听
-    // 线程抢 stdin,跟 StreamBodyTracker 的重画一样诚实关掉。静默档不起
-    // footer:屏幕此刻归用户正看的查看帧,main 的回流轮一个字节不铺。
+    // 能可靠定位光标的真终端才开。Windows 走控制台 API；POSIX 启动时
+    // 用 DSR 真探，查询与监听共用输入锁，不再互吞 CPR/按键。静默档不起
+    // footer：屏幕此刻归用户正看的查看帧，main 的回流轮一个字节不铺。
     // 子代理状态的心跳:旧 AgentStatusBoard/AgentStatusPainter 那套 400ms
     // ticker 已删,前台/后台子代理状态全在 AgentTool 统一台账里、由 footer
     // 的代理面板画。长工具调用期间没有正文增量、没有按键,footer 不会自己

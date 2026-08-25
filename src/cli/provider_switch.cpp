@@ -285,7 +285,7 @@ ProviderSwitchResult RunProviderSwitchPicker(const std::vector<config::ProviderC
         }
     }
 
-    std::lock_guard<std::mutex> console_read_lock(ConsoleReadMutex());
+    std::lock_guard<std::recursive_timed_mutex> console_read_lock(ConsoleReadMutex());
     platform::RawInputScope raw_scope;
     if (!raw_scope.ok()) {
         return result;

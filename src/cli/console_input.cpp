@@ -279,7 +279,7 @@ StatusLineData& StatusDataSlot() {
 // 回显)、StreamBodyTracker::OnDelta(每笔正文前后 Erase/Redraw)三处都先
 // 拿锁再碰它,故字段本身不用再套原子。
 struct StreamFooterState {
-    bool enabled = false;   // 只有 Windows 真控制台 + 开了重画才为真
+    bool enabled = false;   // 只有能可靠重画的真终端才为真
     std::string hint;       // 空闲占位提示(BeginStreamFooter 按主题 plain 与否建好)
     // 迁移注记(Composer 合流 P1):echo/hints 是编辑器状态的旧镜像,布局
     // 已改读下面那份完整 RenderState(多行软换行/光标/提示全从它来),这两
@@ -860,7 +860,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     // 整个函数体都攥着这把锁:M10 的 TurnInputListener 监听线程只在抢到锁
     // 的间隙才读控制台输入,这一行锁一上,就等于宣布"编辑器正在读",监听
     // 线程会自动让出、不跟这里抢同一份键盘输入。
-    std::lock_guard<std::mutex> console_read_lock(ConsoleReadMutex());
+    std::lock_guard<std::recursive_timed_mutex> console_read_lock(ConsoleReadMutex());
 
     // 原始逐键模式进不去(极少见,非标准终端)就退回整行读入。
     platform::RawInputScope raw_scope;
@@ -2600,7 +2600,7 @@ namespace {
 std::optional<ChoiceMenuResult> ReadChoiceMenuSearch(const std::vector<ChoiceMenuItem>& items,
                                                      const ChoiceMenuOptions& options, const Theme& theme,
                                                      ReadExitReason* exit_reason) {
-    std::lock_guard<std::mutex> console_read_lock(ConsoleReadMutex());
+    std::lock_guard<std::recursive_timed_mutex> console_read_lock(ConsoleReadMutex());
     platform::RawInputScope raw_scope;
     if (!raw_scope.ok()) {
         if (exit_reason != nullptr) {
@@ -2808,7 +2808,7 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
     if (options.always_search || items.size() > options.search_threshold) {
         return ReadChoiceMenuSearch(items, options, theme, exit_reason);
     }
-    std::lock_guard<std::mutex> console_read_lock(ConsoleReadMutex());
+    std::lock_guard<std::recursive_timed_mutex> console_read_lock(ConsoleReadMutex());
     platform::RawInputScope raw_scope;
     if (!raw_scope.ok()) {
         if (exit_reason != nullptr) {
@@ -3067,9 +3067,8 @@ std::mutex& StdoutWriteMutex() {
     return m;
 }
 
-std::mutex& ConsoleReadMutex() {
-    static std::mutex m;
-    return m;
+std::recursive_timed_mutex& ConsoleReadMutex() {
+    return platform::ConsoleInputMutex();
 }
 
 // -----------------------------------------------------------------------
@@ -3700,7 +3699,7 @@ void TurnInputListener::ThreadMain() {
 
     // 代理面板(规格三/四):流式期间与空闲 composer 共用同一枚会话级
     // AgentPanelSession,选择按稳定 task id。面板交互只在 footer 真画得动的
-    // 场合(Windows 真控制台)承诺;plain/管道 footer 不开,键位照旧归队列
+    // 场合(能力实探通过的真终端)承诺;plain/管道 footer 不开,键位照旧归队列
     // 编辑与历史,不承诺交互切换。
     auto panel_ids_now = [&]() -> std::vector<int> {
         if (!FooterSlot().enabled) {
@@ -3796,7 +3795,7 @@ void TurnInputListener::ThreadMain() {
     // 完整逻辑行画软换行、算真实光标,与空闲 composer 同一颗脑袋。slash
     // 提示也随 RenderState 带过去(hint_lines:候选名单、Tab 轮转的 "> "
     // 选中标记、收起门槛全在编辑器一处记账,footer 不另算一份没有状态的
-    // 菜单)。Windows 真控制台之外(footer.enabled 为假)这些都是空操作,
+    // 菜单)。footer.enabled 为假时这些都是空操作,
     // 退回老的"不回显、只 Enter 时整条落队"。
     auto refresh_footer = [&] {
         std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
@@ -3881,10 +3880,17 @@ void TurnInputListener::ThreadMain() {
     constexpr auto kCtrlCDoubleTapWindow = std::chrono::milliseconds(1200);
 
     while (!stop_requested_.load()) {
+        // 先等“有键可读”，再去抢输入权。旧代码把这 50ms 等待也攥在锁
+        // 里，POSIX 的 DSR 光标查询便无门可入；更糟的是监听线程可能先
+        // 吞掉 CPR 应答。poll 不消费字节，等完再抢锁；若前台编辑器或
+        // DSR 已接手，try_lock 失败就让过这一拍。
+        if (!platform::WaitForKeyEvent(50)) {
+            continue;
+        }
         // try_lock:抢不到就说明编辑器(ReadLineKeyByKey,含工具确认提示)
         // 正在读,乖乖让出、睡一下再抢,绝不跟前台读键盘的那次调用抢同一份
         // 控制台输入。
-        std::unique_lock<std::mutex> read_lock(ConsoleReadMutex(), std::try_to_lock);
+        std::unique_lock<std::recursive_timed_mutex> read_lock(ConsoleReadMutex(), std::try_to_lock);
         if (!read_lock.owns_lock()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             continue;
@@ -3897,12 +3903,6 @@ void TurnInputListener::ThreadMain() {
         if (RepaintSuspendActive()) {
             read_lock.unlock();
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            continue;
-        }
-        // WaitForKeyEvent 只是问"有没有事件可读",不消费——真正消费在
-        // 下面的 ReadOne。超时就松开锁、回到循环顶部重新抢,好让出机会给
-        // 这段时间可能开始的前台读取。
-        if (!platform::WaitForKeyEvent(50)) {
             continue;
         }
         if (stop_requested_.load()) {
@@ -4036,7 +4036,7 @@ void TurnInputListener::ThreadMain() {
             // (对齐空闲路 M11 的取舍)。Tab 与它分工:Shift+Tab 只切档,非空
             // 的 Tab 落进本地编辑器走 slash 补全,空正文 Tab 在下面明拦 no-op。
             {
-                std::unique_lock<std::mutex> mode_lock(ConsoleReadMutex(), std::try_to_lock);
+                std::unique_lock<std::recursive_timed_mutex> mode_lock(ConsoleReadMutex(), std::try_to_lock);
                 if (!mode_lock.owns_lock()) {
                     continue;
                 }

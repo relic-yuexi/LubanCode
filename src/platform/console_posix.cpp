@@ -7,12 +7,12 @@
 // 转义序列/DSR 应答都走 stdin,跟用户按键混在同一条流里:所有从 stdin 读
 // 字节的路径共用一个进程级的回压队列(PendingBytes)——DSR 等应答时读到
 // 的用户按键先存进队列,KeyReader 下次优先从队列取,不丢键。队列只在
-// "持有 cli::ConsoleReadMutex 的读取路径"上被碰(编辑器循环、监听线程
-// 抢锁后的单次读),天然串行,不再加锁。
+// 持有 platform::ConsoleInputMutex 的读取路径上被碰(编辑器循环、监听
+// 线程抢锁后的单次读、DSR 查询),天然串行,不再加锁。
 //
-// SupportsScreenRepaint() 恒假:流式期间的原地重画要随时查光标位,DSR
-// 应答会跟监听线程抢 stdin,这个赛点没堵之前诚实关掉(输出退化成纯流式,
-// 跟管道模式一致);逐键行编辑不受限,编辑期间监听线程被互斥锁挡在门外。
+// 流式原地重画开不开,启动时用一次 DSR 真探。GetScreenInfo 发问到收答
+// 全程攥 ConsoleInputMutex；监听线程只在真有键可读后才来抢锁，故不会
+// 把 CPR 应答吃成用户输入。终端不答便退回纯流式。
 //
 // 验证状态:WSL Ubuntu 26.04(g++ 15.2)真机编译、单测通过;交互路径经
 // 两道 pty 冒烟——script(1)(终端不答 DSR,验证 ws_col=0/无应答时降级到
@@ -22,9 +22,12 @@
 #include "platform/console.hpp"
 #include "platform/csi_keys.hpp"
 
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <iostream>
+#include <mutex>
 #include <string_view>
 #include <utility>
 
@@ -205,7 +208,16 @@ std::optional<int> ConsoleWidth() {
 }
 
 bool SupportsScreenRepaint() {
-    return false;  // 原因见文件头:DSR 应答与监听线程抢 stdin 的赛点没堵
+    static const bool supported = [] {
+        const char* term = std::getenv("TERM");
+        if (term != nullptr && std::string_view(term) == "dumb") {
+            return false;
+        }
+        // 不凭 isatty 猜本事：发一回 CPR，能拿到光标位才许上原地重画。
+        // 静态局部只探一次，免得每处能力判断都多问终端一遍。
+        return GetScreenInfo().has_value();
+    }();
+    return supported;
 }
 
 std::optional<ScreenInfo> GetScreenInfo() {
@@ -214,6 +226,14 @@ std::optional<ScreenInfo> GetScreenInfo() {
     }
     struct winsize ws{};
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != 0 || ws.ws_col == 0 || ws.ws_row == 0) {
+        return std::nullopt;
+    }
+
+    // 流式画屏调用本函数时已经持 stdout 锁；前台菜单却是先持输入锁再
+    // 画 stdout。这里限时等，堵住短促的单键读取，又不跟长菜单反向死等。
+    // 逐键编辑器本就持有同一把递归锁，同线程重入会立刻成功。
+    std::unique_lock<std::recursive_timed_mutex> input_lock(ConsoleInputMutex(), std::defer_lock);
+    if (!input_lock.try_lock_for(std::chrono::milliseconds(75))) {
         return std::nullopt;
     }
 
@@ -483,8 +503,17 @@ std::optional<KeyInput> KeyReader::ReadOne() {
 }
 
 bool WaitForKeyEvent(int timeout_ms) {
-    if (!PendingBytes().empty()) {
-        return true;
+    // PendingBytes 与 DSR 查询共账，先短拿一下所有权。抢不到说明别处正
+    // 在读输入；最多候本次 poll 的同等时限再退，免得菜单持锁时监听线程
+    // 空转烧 CPU。
+    {
+        std::unique_lock<std::recursive_timed_mutex> input_lock(ConsoleInputMutex(), std::defer_lock);
+        if (!input_lock.try_lock_for(std::chrono::milliseconds(timeout_ms > 0 ? timeout_ms : 0))) {
+            return false;
+        }
+        if (!PendingBytes().empty()) {
+            return true;
+        }
     }
     struct pollfd pfd{STDIN_FILENO, POLLIN, 0};
     return poll(&pfd, 1, timeout_ms) > 0;

@@ -470,9 +470,8 @@ private:
 // ---------------------------------------------------------------------------
 class StreamBodyTracker {
 public:
-    // 原地重画不开的平台(POSIX,见 platform::SupportsScreenRepaint 注释)
-    // 直接按 enabled=false 走:OnDelta 退化成"拿锁原样打印",信息不丢,
-    // 跟老版本非 Windows 分支逐字节一致。
+    // 原地重画能力探不到时直接按 enabled=false 走：OnDelta 退化成“拿锁
+    // 原样打印”，信息不丢。POSIX 会先发一次 DSR 真探，不凭平台名猜。
     // silent(查看态回流单):正文一个字节都不上屏——只攒进 silent_body_,
     // 收口时由调用方取走进台账。用户此刻正看别的子代理的查看帧,main 的
     // 回流输出不能糊上去;数据不能丢,回 main 重铺要看得见。
@@ -500,7 +499,7 @@ public:
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         // 0.21.x 流式脚注:正文落笔前先把脚注那行擦掉(免得跟正文抢行/被正文
         // 顶到中间),落笔后再重画到正文下方——见 console_input.hpp 注释。
-        // footer 没启用(非 Windows 真控制台)时这两句是空操作。
+        // footer 没启用(非真终端或能力探测失败)时这两句是空操作。
         lubancode::cli::EraseStreamFooterLocked();
         // 工具终态行本身以换行收尾。下一段正文若直接落笔，视觉上便会
         // 贴住最后一条工具；这里另起一空行，且不把它塞进 Markdown 缓冲，
@@ -749,4 +748,3 @@ private:
 };
 
 }  // namespace lubancode::cli
-

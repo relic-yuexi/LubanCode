@@ -14,6 +14,7 @@
 #pragma once
 
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <string>
 
@@ -43,12 +44,19 @@ StdoutConsoleProbe ProbeStdoutConsole();
 // 调用方按 80 列兜底。
 std::optional<int> ConsoleWidth();
 
+// stdin 字节流的进程级所有权。POSIX 的按键与 DSR 光标应答走同一条
+// 输入流，逐键编辑器、后台监听和 GetScreenInfo 必须共用这把锁；Windows
+// 也走同一接口，免得 cli 层另养一把平台外的锁。
+//
+// 用 recursive_timed_mutex 有两层缘故：逐键编辑器会持锁调用
+// GetScreenInfo，同线程须能重入；流式画屏彼时已持 stdout 锁，若前台菜单
+// 正攥着输入锁，DSR 查询只候一小会儿便退，不能反向等成死锁。
+std::recursive_timed_mutex& ConsoleInputMutex();
+
 // 流式期间的原地重画(TranscriptPainter 工具条目改写、StreamBodyTracker
-// markdown 收束重画)在这个平台上开不开。Windows 真控制台:开。POSIX:
-// 暂不开——重画要随时查光标位(DSR 6n 应答走 stdin),会跟流式期间的
-// 后台按键监听线程抢同一条输入流,赛点没堵之前诚实关掉,输出退化成纯
-// 流式(跟管道模式一致,信息不丢)。逐键行编辑不受此限(编辑期间监听
-// 线程被互斥锁挡在门外,DSR 应答安全)。
+// markdown 收束重画)在这个平台上开不开。Windows 用控制台 API 真探；
+// POSIX 真终端发一次 DSR 实探，答得上才开。DSR 与按键的输入争用由
+// ConsoleInputMutex 串开，探不到便退回纯流式，信息不丢。
 bool SupportsScreenRepaint();
 
 // ---------------------------------------------------------------------------

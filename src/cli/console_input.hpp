@@ -420,7 +420,7 @@ int StreamFooterSuspendDepthForTest();
 // 整个调用期间攥着它,TurnInputListener 的监听线程只在 try_lock 抢到的
 // 间隙才读一次——阻塞式菜单持锁等输入时,监听线程绝不消费方向键/Enter/
 // Esc/普通字符,这条规约靠它保证(单测钉死:tests/unit/cli/test_repaint_coord.cpp)。
-std::mutex& ConsoleReadMutex();
+std::recursive_timed_mutex& ConsoleReadMutex();
 
 // -----------------------------------------------------------------------
 // 0.21.x 流式脚注(footer),0.22.x 升级成跟 composer 视觉一致的完整框:
@@ -443,9 +443,9 @@ std::mutex& ConsoleReadMutex();
 // 全程在 StdoutWriteMutex 之内,每次重画都拿 synchronized output
 // (DEC 2026,`\x1b[?2026h`/`l`)包一层,避免终端半途刷出半帧。
 //
-// enabled:只在 is_console && platform::SupportsScreenRepaint()(即 Windows
-// 真控制台)下为真——footer 要随时查光标位定位,POSIX 走 DSR 6n 会跟监听
-// 线程抢 stdin,跟 StreamBodyTracker 的重画一样诚实关掉(退回纯流式)。
+// enabled:只在 is_console && platform::SupportsScreenRepaint() 下为真。
+// Windows 走控制台 API；POSIX 用 DSR 实探并与按键监听共用输入锁。能力
+// 不足的终端退回纯流式。
 void BeginStreamFooter(const Theme& theme, bool enabled);
 void EndStreamFooter();
 // 下面两个要求调用方已持有 StdoutWriteMutex(OnDelta/OnBlockBreak 正持着)。
