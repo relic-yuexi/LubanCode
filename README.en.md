@@ -14,34 +14,41 @@
   <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml/badge.svg" alt="Release"></a>
   <img src="https://img.shields.io/badge/C%2B%2B-23-00599C?logo=cplusplus&logoColor=white" alt="C++23">
-  <img src="https://img.shields.io/badge/version-0.26.0-CB2C31" alt="v0.26.0">
+  <img src="https://img.shields.io/badge/version-0.26.47-CB2C31" alt="v0.26.47">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-444444" alt="Windows, Linux and macOS">
 </p>
 
-LubanCode connects natively to Anthropic Messages, OpenAI Responses, and OpenAI-compatible Chat Completions. It can inspect a repository, edit files, run commands, search the web, delegate work, and use MCP or LSP tools. Its terminal UI includes streaming Markdown, diff previews, approval modes, session history, and context compaction.
+LubanCode connects natively to Anthropic Messages, OpenAI Responses, and OpenAI-compatible Chat Completions. It can inspect a repository, edit files, run commands, search the web, delegate work, and use MCP or LSP tools. A searchable catalog includes presets for 75 providers. Streaming Markdown, diffs, the agent dock, queued input, and session history all live in the terminal.
 
 The name comes from Lu Ban, the traditional Chinese master craftsman. The idea is simple: measure first, cut second, and always show the work.
 
-> Latest published binaries live on [GitHub Releases](https://github.com/relic-yuexi/LubanCode/releases/latest). The `main` branch may be ahead of that release.
+> Current source version: `v0.26.47`. Windows, Ubuntu, and macOS CI build the project and run the full test suite.
+
+## Real terminal captures
+
+These frames came from the Windows Release binary connected to a local test provider. No mockup and no real API key were used.
+
+<p align="center">
+  <img src="docs/assets/screenshots/agent-queue.png" alt="LubanCode agent dock, busy composer, queued input, and status bar" width="100%">
+</p>
+<p align="center"><sub>Keep typing while the main agent works; sub-agents, queued input, and status stay on one screen.</sub></p>
+
+<p align="center">
+  <img src="docs/assets/screenshots/markdown-session.png" alt="LubanCode rendering a Markdown heading, table, and code block in the terminal" width="100%">
+</p>
+<p align="center"><sub>Markdown headings, tables, and code blocks render directly in the terminal.</sub></p>
 
 ## Why LubanCode
 
-Five things we push further than anyone else.
+Five things worth putting up front.
 
-### 1. Download and run — zero runtime dependencies
+### 1. Download and run — no separate runtime
 
-No Node.js. No Python. No `npm install`. Statically linked CRT — a single 3.3 MB executable is all there is. Windows pulls it with one command and runs immediately; Linux / macOS decompress and go. No `node_modules`, no dependency hell, no version mismatches.
+No Node.js. No Python. No `npm install`. The Windows x64 `v0.26.47` Release executable is about 8.2 MiB. One native binary is enough to start; the release archive carries the official skills and documentation beside it.
 
-### 2. Radically lightweight
+### 2. Keep typing while work is in flight
 
-Pure C++23, natively compiled — no Node.js runtime, no bloated Rust toolchain artifacts. Measured on Windows, same `--version` path, peak memory sampled at 5 ms intervals:
-
-| | LubanCode | Codex (Rust binary) | Codex (Node.js) |
-| --- | --- | --- | --- |
-| **Install size** | **3.3 MB** | 342 MB | 353 MB |
-| **Peak private memory** | **0.8 MB** | 5.6 MB | 54.1 MB |
-
-A 3 MB executable, under 1 MB of private memory. Installs in a flash, runs feather-light — on old hardware or a remote box alike.
+Type the next message while the model is still thinking. Press Enter and it joins the queue; when the current turn closes, the next one starts. The agent dock shows which sub-agent is running, how long it has worked, and how many tools it has called. The terminal acts like a work surface, not a scrolling log.
 
 ### 3. Soul / Law prompt separation
 
@@ -68,12 +75,12 @@ The terminal deserves more than plain text.
 
 | Area | What is included |
 | --- | --- |
-| **Model access** | Anthropic, Responses, and Chat Completions; a bundled provider catalog; remembered endpoint switching. |
+| **Model access** | Anthropic, Responses, and Chat Completions; presets for 75 providers; remembered endpoint switching. |
 | **Coding tools** | Read, write, tolerant block editing, file search, foreground and background commands, diff-first approval. |
 | **Semantic tools** | LSP definitions, references, symbols and diagnostics; MCP stdio; web search and fetch. |
-| **Agent workflow** | Sub-agents, todo tracking, `ask_user` questions, `AGENTS.md` project instructions, deferred tools, worktrees and project permissions. |
+| **Agent workflow** | Sub-agents, role-based model routes, Plan mode, todo tracking, `ask_user`, `AGENTS.md`, worktrees, and project permissions. |
 | **Terminal UX** | Incremental Markdown rendering, animated work status, a persistent queue, collapsed multiline paste, focused views and compact output. |
-| **Context and sessions** | Token breakdowns, automatic compaction, a dedicated compaction model, resume, titles, Markdown export, and opt-in project memory. |
+| **Context and sessions** | Token breakdowns, deterministic trimming, recoverable artifacts, on-demand artifact summaries, resume, titles, and Markdown export. |
 | **Extensibility** | Skills, Lua tools, C ABI DLL plugins, hooks, themes, i18n, souls and system prompt overrides. |
 
 ## Installation
@@ -141,16 +148,17 @@ sudo apt-get install -y build-essential cmake ninja-build libssl-dev
 
 ## Quick start
 
-Run `lubancode` without arguments. When no provider has been configured, the setup wizard asks for a language, wire protocol, base URL, API key, and model, then opens the interactive session immediately.
+Run `lubancode` without arguments. With no model connection configured, the first screen offers two paths: add a provider now, or skip setup and enter the main screen. Skipping does not write a dummy connection. Run `/provider` or `/provider add` whenever you are ready.
 
 ```text
 $ lubancode
-=== lubancode first-run setup ===
-Language: 1) 中文  2) English
-Wire protocol: 1) anthropic  2) responses  3) chat_completions
-base_url: https://your-provider.example/v1
-api_key: sk-...
-model: your-model
+Getting started with lubancode
+
+No model connection is configured yet.
+Add a Provider now, or enter the main screen first.
+
+> Add Provider  - choose from the catalog and enter a key
+  Skip for now  - configure later with /provider or /provider add
 ```
 
 Common entry points:
@@ -169,7 +177,7 @@ lubancode --continue
 git diff --cached | lubancode "Review this change"
 ```
 
-For multiple endpoints, run `/provider add`. Pick OpenAI, Anthropic, MiniMax, GLM, Qwen, DeepSeek, Kimi, or Grok, then enter the key; the repository catalog supplies the URL, wire, default model, limits, and provider options. The final menu item keeps the fully custom wizard. Hand-written configuration remains supported:
+For multiple endpoints, run `/provider add`. The 75 presets open in a searchable picker. Type a provider name, select it, and enter the key; the catalog supplies the URL, wire, default model, limits, and provider options. The final item keeps the fully custom wizard. Hand-written configuration remains supported:
 
 ```json
 {
@@ -203,12 +211,15 @@ At startup, LubanCode walks from the Git root to the working directory. Each dir
 | --- | --- |
 | `/provider` | Add from the catalog, refresh it, list, switch, edit, or remove endpoints. |
 | `/init` | Create and load project-level `AGENTS.md`. |
-| `/model` · `/think` | Change the active model and reasoning effort. |
+| `/model` · `/think` | Change model and effort; `/model roles` shows all routes, while `/model <role> <id>` updates one route. |
 | `/doctor` | Diagnose a local OpenAI-compatible endpoint: `effort` sends a tiny probe (actual field sent, usage split); `cache` reads server metrics and audits fixed-prefix hit rates. |
 | `/context` · `/compact` | Inspect context use (usage of the most recent main-session request, sub-agent tokens not included) and compact conversation history. |
 | `/skills` · `/skill` | Manage skills under `~/.lubancode/skills`; run `/skill` bare for install examples. |
 | `/mcp` · `/lsp` · `/plugins` | Inspect external tools and language servers. |
 | `/tools` · `/todos` | Inspect tool loading state and the current task list. |
+| `/plan` | Enter read-only planning mode, inspect first, then review the plan before execution. |
+| `/trace` | Inspect the tool lifecycle ledger; `undo_file_edit` can restore an edit when its preimage still matches. |
+| `/goal` · `/loop` | Manage persistent goals and scheduled loops when their feature gates are enabled. |
 | `/memory` | Manage per-session project memory, synchronous retrieval, and background writes. |
 | `/sessions` · `/resume` · `/export` | Pick an older session, replay it, continue, or export it. |
 | `/worktree new\|list\|exit` | Work in isolated Git worktrees. |
@@ -261,8 +272,8 @@ Every push and pull request is built and tested on:
 Pushing a `v*` tag builds all three release archives, creates a GitHub Release, generates release notes, and uploads the binaries:
 
 ```bash
-git tag -a v0.26.0 -m "v0.26.0"
-git push origin v0.26.0
+git tag -a v0.26.47 -m "v0.26.47"
+git push origin v0.26.47
 ```
 
 ## License

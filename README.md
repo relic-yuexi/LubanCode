@@ -14,34 +14,41 @@
   <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml/badge.svg" alt="Release"></a>
   <img src="https://img.shields.io/badge/C%2B%2B-23-00599C?logo=cplusplus&logoColor=white" alt="C++23">
-  <img src="https://img.shields.io/badge/version-0.26.0-CB2C31" alt="v0.26.0">
+  <img src="https://img.shields.io/badge/version-0.26.47-CB2C31" alt="v0.26.47">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-444444" alt="Windows, Linux and macOS">
 </p>
 
-LubanCode 原生支持 Anthropic Messages、OpenAI Responses 与 Chat Completions 兼容接口。模型能读文件、改代码、跑命令、查资料，也能调度子代理、MCP 与 LSP。界面不只是几行日志。流式正文、Markdown、diff、确认档、会话存档、上下文压缩，都在终端里铺开。
+LubanCode 原生支持 Anthropic Messages、OpenAI Responses 与 Chat Completions 兼容接口。模型能读文件、改代码、跑命令、查资料，也能调度子代理、MCP 与 LSP。75 家 Provider 预设装在目录里，搜到便可配置。流式正文、Markdown、diff、代理坞、消息队列、会话存档，也都在终端里铺开。
 
 鲁班造物，先正绳墨，再下斧凿。LubanCode 也守这条规矩：先看清，再动手；改了什么，明明白白摆给你看。
 
-> 当前版本：`v0.26.0`。Windows、Ubuntu、macOS 三路 CI 均会编译并跑全量测试。
+> 当前源码版本：`v0.26.47`。Windows、Ubuntu、macOS 三路 CI 均会编译并跑全量测试。
+
+## 真机界面
+
+下面两张图由 Windows Release 二进制接本地测试 Provider 实机截取。没有设计稿，也没放真密钥。
+
+<p align="center">
+  <img src="docs/assets/screenshots/agent-queue.png" alt="LubanCode 子代理、忙时输入框、消息队列与状态栏" width="100%">
+</p>
+<p align="center"><sub>主代理工作时仍可输入下一条；子代理、队列与状态栏同屏。</sub></p>
+
+<p align="center">
+  <img src="docs/assets/screenshots/markdown-session.png" alt="LubanCode 在终端中渲染 Markdown 标题、表格与代码块" width="100%">
+</p>
+<p align="center"><sub>Markdown 标题、表格与代码块直接画在终端里。</sub></p>
 
 ## 为什么是 LubanCode
 
-五件事，做到别人做不到的地步。
+五件事，先摆在桌上。
 
-### 1. 下载即用，零运行时依赖
+### 1. 下载即用，不用另装运行时
 
-不需要 Node.js。不需要 Python。不需要 `npm install`。静态链接 CRT，一个 3.3 MB 的可执行文件就是全部。Windows 一行命令拉下来直接跑，Linux / macOS 解压即用。没有 `node_modules`，没有依赖地狱，没有版本对不上。
+不需要 Node.js。不需要 Python。不需要 `npm install`。Windows x64 的 `v0.26.47` Release 主程序约 8.2 MiB，一份原生二进制便能起跑。Windows 一行命令安装，Linux / macOS 解压即用。官方 skills 与文档另随发行包一道带上。
 
-### 2. 极致轻量
+### 2. 忙时也能接着输入
 
-纯 C++23 原生编译，没有 Node.js 运行时，没有 Rust 编译器的臃肿产物。实测对比（Windows，相同 `--version` 路径，峰值内存密集采样）：
-
-| | LubanCode | Codex (Rust 二进制) | Codex (Node.js) |
-| --- | --- | --- | --- |
-| **安装体积** | **3.3 MB** | 342 MB | 353 MB |
-| **运行内存** | **0.8 MB** | 5.6 MB | 54.1 MB |
-
-3 MB 的可执行文件，不到 1 MB 的私有内存。装得快，跑得轻，老机器和远程盒子都不费劲。
+模型还在思考，你照样可以键入下一条。回车一按，消息进队列；当前回合收口，下一条自己接上。子代理另有一片导航坞，谁在跑、跑了多久、用了几件工具，一眼便知。终端不是日志瀑布，是一张能办事的桌子。
 
 ### 3. 魂/法分离的提示词系统
 
@@ -68,12 +75,12 @@ LubanCode 会记住你的项目事实与偏好——构建命令、代码风格�
 
 | | 能力 |
 | --- | --- |
-| **模型接入** | Anthropic / Responses / Chat Completions 三协议；内置常见厂家目录；多 provider 随时切换并记住上次选择。 |
+| **模型接入** | Anthropic / Responses / Chat Completions 三协议；75 家 Provider 目录；多路连接随时切换并记住上次选择。 |
 | **代码工具** | 读、写、容错编辑、搜索文件；前台或后台跑命令；改动先看 diff，再落盘。 |
 | **语义与外接工具** | LSP 定义、引用、符号、诊断；MCP stdio；联网搜索与网页抓取。 |
-| **代理工作流** | 子代理、待办清单、`ask_user` 选择题、`AGENTS.md` 项目指令、工具延迟挂载、隔离 worktree、项目级权限。 |
+| **代理工作流** | 子代理、三档角色模型、Plan 模式、待办清单、`ask_user`、`AGENTS.md`、隔离 worktree 与项目级权限。 |
 | **终端体验** | 分段 Markdown 渲染、动态工作状态、常驻消息队列、智能粘贴折叠、逐键编辑、折叠与聚焦、三档确认。 |
-| **上下文与存档** | token 占用分析、自动压缩、独立压缩模型、会话恢复、标题、Markdown 导出、默认关闭的项目记忆。 |
+| **上下文与存档** | token 占用分析、确定性裁面、可追回 artifact、按需局部摘要、会话恢复、标题、Markdown 导出。 |
 | **扩展与定制** | Skills、Lua 工具、C ABI DLL 插件、hooks、主题、i18n、soul 与 system prompt。 |
 
 ## 安装
@@ -141,16 +148,17 @@ sudo apt-get install -y build-essential cmake ninja-build libssl-dev
 
 ## 快速上手
 
-第一次运行，不带参数即可。缺少模型配置时，向导会问语言、协议、地址、密钥与模型，写好配置后径直进会话。
+第一次运行，不带参数即可。还没配模型时，开局给两条路：当场添加 Provider，或先跳过、径直进主界面。跳过不会写一份假连接；稍后敲 `/provider` 或 `/provider add` 再配也成。
 
 ```text
 $ lubancode
-=== lubancode 初次配置向导 ===
-界面语言 / Language: 1) 中文  2) English
-接口格式: 1) anthropic  2) responses  3) chat_completions
-base_url: https://your-provider.example/v1
-api_key: sk-...
-model: your-model
+开始使用 lubancode
+
+还没有可用的模型连接。
+现在可以添加 Provider，也可以先进入主界面。
+
+> 添加 Provider  - 从服务商目录选择，填好密钥后立即使用
+  暂时跳过      - 稍后用 /provider 或 /provider add 配置
 ```
 
 往后可这样用：
@@ -169,7 +177,7 @@ lubancode --continue
 git diff --cached | lubancode "替我审一遍这份改动"
 ```
 
-若你管着多家模型服务，直接敲 `/provider add`。先选 OpenAI、Anthropic、MiniMax、GLM、Qwen、DeepSeek、Kimi 或 Grok，再填 Key；地址、协议、默认模型和推理参数由仓库目录带上。全手填仍留在最后一项。手写配置也照旧可用：
+若你管着多家模型服务，直接敲 `/provider add`。75 家预设会自动进搜索页；键入厂家名，选中，再填 Key。地址、协议、默认模型和推理参数由目录带上。全手填仍留在最后一项。手写配置也照旧可用：
 
 ```json
 {
@@ -201,12 +209,15 @@ git diff --cached | lubancode "替我审一遍这份改动"
 | --- | --- |
 | `/provider` | 从厂家目录添加、更新目录、列出、切换、删除模型服务。 |
 | `/init` | 生成并载入项目级 `AGENTS.md`。 |
-| `/model` · `/think` | 切模型与推理强度。 |
+| `/model` · `/think` | 切模型与推理强度；`/model roles` 看三档路由，`/model <role> <id>` 直接改某一档。 |
 | `/doctor` | 诊断本地兼容端：`effort` 发极小探针看档位实发值与 usage 拆账，`cache` 读服务端指标、对账固定前缀命中率。 |
 | `/context` · `/compact` | 看上下文占用（最近一次主请求的占用，不含子代理累计），手工压缩历史。 |
 | `/skills` · `/skill` | 管理 `~/.lubancode/skills` 里的技能；裸敲 `/skill` 看完整安装示例。 |
 | `/mcp` · `/lsp` · `/plugins` | 看外接工具与语言服务器状态。 |
 | `/tools` · `/todos` | 看工具挂载状态与待办清单。 |
+| `/plan` | 进只读规划档，先查清、列计划，再审后执行。 |
+| `/trace` | 翻工具生命周期账；文件改错后可由 `undo_file_edit` 按凭据撤回。 |
+| `/goal` · `/loop` | 管持久目标与定时循环；两项均由 feature gate 控制。 |
 | `/memory` | 管本场项目记忆、同步召回与后台写入。 |
 | `/sessions` · `/resume` · `/export` | 全屏会话台账：搜索、筛选、排序、三种查看态，重放历史续聊或导出。 |
 | `/archive` · `/delete` | 归档或永久删除当前会话；顶层另有 `lubancode archive/unarchive/delete <id>`。 |
@@ -262,8 +273,8 @@ LubanCode 留了四扇门：
 推送 `v*` 标签会触发发布流水线。三平台分别打包，随后自动创建 GitHub Release、生成发布说明并上传产物：
 
 ```bash
-git tag -a v0.26.0 -m "v0.26.0"
-git push origin v0.26.0
+git tag -a v0.26.47 -m "v0.26.47"
+git push origin v0.26.47
 ```
 
 ## 许可
