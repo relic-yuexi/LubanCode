@@ -19,6 +19,7 @@
 //     percent 才准再压——免得刚压完又立刻重压。
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <map>
 #include <optional>
@@ -100,7 +101,8 @@ std::optional<MicrocompactSummary> ParseMicrocompactSummary(const std::string& t
 std::expected<MicrocompactSummary, std::string> RunMicrocompact(
     api::Backend& backend, const std::string& model, const std::string& reasoning_effort,
     const ContextArtifactStore& store, const ArtifactRef& ref, const std::string& event_id,
-    const MicrocompactOptions& options, BackgroundCallAccounting* accounting = nullptr);
+    const MicrocompactOptions& options, BackgroundCallAccounting* accounting = nullptr,
+    const std::atomic<bool>* external_cancel = nullptr);
 
 // 应用一趟产物(视图换摘要,原文不动):更新 memo 里对应决策为 L2 视图。
 // 返回换掉的枚数。已应用过的(无 artifact_id 匹配)自然跳过。

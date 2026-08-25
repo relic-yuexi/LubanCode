@@ -5,6 +5,7 @@
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -12,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "agent/artifact_store.hpp"
@@ -46,14 +48,21 @@ class FakeBackend : public api::Backend {
 public:
     std::vector<api::StreamEvent> script;
     bool fail = false;
+    bool wait_for_cancel = false;
     std::string fail_message;
     std::vector<api::Request> captured_requests;
 
     std::expected<void, api::Error> send_stream(
         const api::Request& request,
         const std::function<void(const api::StreamEvent&)>& on_event,
-        const std::atomic<bool>* /*cancel*/ = nullptr) override {
+        const std::atomic<bool>* cancel = nullptr) override {
         captured_requests.push_back(request);
+        if (wait_for_cancel) {
+            while (cancel != nullptr && !cancel->load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            return std::unexpected(api::Error{api::ErrorKind::Network, "cancelled", 0});
+        }
         if (fail) {
             return std::unexpected(api::Error{api::ErrorKind::Network, fail_message, 0});
         }
@@ -246,6 +255,27 @@ TEST_CASE("RunMicrocompact:输入来自 blob 原文;失败只报错不删原文"
         const auto blob = fx.store->ReadBlobVerified(*ref);
         REQUIRE(blob.has_value());
         CHECK(*blob == fx.cold_content);
+    }
+    SUBCASE("后台任务起跑前已取消:不碰 backend") {
+        std::atomic<bool> cancel{true};
+        const auto failed = agent::RunMicrocompact(backend, "cheap-m", "", *fx.store, *ref, "e1",
+                                                   agent::MicrocompactOptions{}, nullptr, &cancel);
+        CHECK(!failed.has_value());
+        CHECK(failed.error().find("取消") != std::string::npos);
+        CHECK(backend.captured_requests.empty());
+    }
+    SUBCASE("后台任务跑到半截收到取消:外部信号传进 backend") {
+        backend.wait_for_cancel = true;
+        std::atomic<bool> cancel{false};
+        std::thread canceller([&cancel]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            cancel = true;
+        });
+        const auto failed = agent::RunMicrocompact(backend, "cheap-m", "", *fx.store, *ref, "e1",
+                                                   agent::MicrocompactOptions{}, nullptr, &cancel);
+        canceller.join();
+        CHECK(!failed.has_value());
+        CHECK(backend.captured_requests.size() == 1);
     }
     SUBCASE("坏 JSON 输出:退 L1") {
         backend.script = ReplyScript("瞎写的,不是 JSON");

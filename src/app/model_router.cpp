@@ -86,24 +86,29 @@ ModelRouterService::Routed ModelRouterService::Route(lubancode::agent::TaskKind 
     return routed;
 }
 
-lubancode::api::Backend* ModelRouterService::BackendForProvider(const std::string& provider) const {
-    if (provider.empty() || provider == active_provider_) {
-        return &main_backend_;
+ModelRouterService::DetachedRouted ModelRouterService::RouteDetached(
+    lubancode::agent::TaskKind kind) const {
+    DetachedRouted routed;
+    routed.route = RouteInfo(kind);
+    auto derived = ConfigForProvider(routed.route.provider);
+    if (!derived.has_value()) {
+        return routed;
     }
-    const auto cached = provider_backends_.find(provider);
-    if (cached != provider_backends_.end()) {
-        return cached->second.get();
+    routed.backend = lubancode::app::BuildBackend(*derived);
+    return routed;
+}
+
+std::optional<lubancode::config::Config> ModelRouterService::ConfigForProvider(
+    const std::string& provider) const {
+    lubancode::config::Config derived = config_result_.config;
+    if (provider.empty() || provider == active_provider_) {
+        return derived;
     }
     const lubancode::config::ProviderConfig* entry =
         lubancode::config::FindProvider(config_result_.config.providers, provider);
     if (entry == nullptr) {
-        return nullptr;
+        return std::nullopt;
     }
-    // 跨 provider:按条目展开一份运行配置再造裸 client(与
-    // ApplyConfiguredActiveProvider 同一套展开,但这里是派生配置,不管
-    // 来源记账)。展开后的 extra_body/extra_headers/鉴权全按目标端来,
-    // 不把当前端的私货带过去。
-    lubancode::config::Config derived = config_result_.config;
     derived.wire = entry->wire;
     derived.base_url = entry->base_url;
     derived.auth_mode = entry->auth;
@@ -115,7 +120,26 @@ lubancode::api::Backend* ModelRouterService::BackendForProvider(const std::strin
     derived.reasoning_replay = entry->reasoning_replay;
     derived.reasoning_delta_field = entry->reasoning_delta_field;
     derived.reasoning_replay_field = entry->reasoning_replay_field;
-    auto backend = lubancode::app::BuildBackend(derived);
+    return derived;
+}
+
+lubancode::api::Backend* ModelRouterService::BackendForProvider(const std::string& provider) const {
+    if (provider.empty() || provider == active_provider_) {
+        return &main_backend_;
+    }
+    const auto cached = provider_backends_.find(provider);
+    if (cached != provider_backends_.end()) {
+        return cached->second.get();
+    }
+    auto derived = ConfigForProvider(provider);
+    if (!derived.has_value()) {
+        return nullptr;
+    }
+    // 跨 provider:按条目展开一份运行配置再造裸 client(与
+    // ApplyConfiguredActiveProvider 同一套展开,但这里是派生配置,不管
+    // 来源记账)。展开后的 extra_body/extra_headers/鉴权全按目标端来,
+    // 不把当前端的私货带过去。
+    auto backend = lubancode::app::BuildBackend(*derived);
     lubancode::api::Backend* raw = backend.get();
     provider_backends_.emplace(provider, std::move(backend));
     return raw;

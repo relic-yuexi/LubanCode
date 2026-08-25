@@ -28,12 +28,15 @@
 #include <functional>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -156,6 +159,7 @@
 #include "platform/terminal_batch.hpp"
 #include "platform/paths.hpp"
 #include "platform/clipboard.hpp"
+#include "platform/text_encoding.hpp"
 
 namespace lubancode::app {
 
@@ -317,6 +321,29 @@ std::string AgentStateWord(lubancode::tools::AgentTaskState state, int steps_use
     return trf("agent_status.state_failed_reason", OutcomeReasonText(outcome_reason));
 }
 
+// microcompact 的 worker 只认这包副本。AgentLoop、路由台账、终端都留在
+// 主线程；后台只读 blob、发独占 backend、攒摘要，完工后由主循环接账。
+struct MicrocompactWorkItem {
+    std::string tool_use_id;
+    lubancode::agent::ArtifactRef ref;
+    std::string event_id;
+};
+
+struct MicrocompactJobResult {
+    int requested = 0;
+    int failed = 0;
+    std::string model;
+    std::map<std::string, lubancode::agent::MicrocompactSummary> summaries;
+    std::vector<lubancode::agent::BackgroundCallAccounting> accounting;
+    std::vector<std::string> errors;
+};
+
+struct MicrocompactJobState {
+    std::atomic<bool> cancel{false};
+    std::atomic<bool> done{false};
+    std::optional<MicrocompactJobResult> result;
+};
+
 }  // namespace
 
 // 一场交互会话:整场可变状态按所有权收成成员。构造 = 原先
@@ -420,8 +447,10 @@ private:
     // 失败安静降级(/sessions 继续用首句摘要)。一场只试一次,不追着重试。
     void MaybeGenerateSessionTitle(lubancode::agent::TaskKind kind);
     // L2 microcompact(第三期):回合收尾看一眼冷区——冷区 artifact 累计字节
-    // 过线(带迟滞)就请 cheap 渐次收拾几枚,失败退 L1 不删原文。
+    // 过线(带迟滞)就把 cheap 小活投到后台,失败退 L1 不删原文。
     void MaybeMicrocompact();
+    void DrainMicrocompact();
+    void StopMicrocompact();
     void SyncWorktreeDirectory();
     // autosend_failed(可空出参):这一行若是普通正文回合且以请求失败收场
     // (RunTurnResult.status != 0,含异常兜底),写给 true。会话泵的"排队
@@ -663,6 +692,7 @@ private:
     lubancode::runtime::IdleWakeCoordinator idle_wakes_;
     lubancode::runtime::IdleWakeCoordinator::Subscription subagent_wake_token_;
     lubancode::runtime::IdleWakeCoordinator::Subscription loop_wake_token_;
+    lubancode::runtime::IdleWakeCoordinator::Subscription microcompact_wake_token_;
     // 当前在跑的 loop tick(拍执行中;turn 收口时回写)。
     std::string loop_active_tick_id_;
     // goal 分流合流(loop 单):GoalWorkSource 喂 ready continuation 进泵,
@@ -694,6 +724,10 @@ private:
     // session_meta 本体在 runtime;引用别名绑过去(构造列表里)。
     // L2 microcompact(第三期)的迟滞活账:压完一趟后冷区字节再涨五成才压下一趟。
     lubancode::agent::MicrocompactHysteresis microcompact_hysteresis;
+    // L2 不再堵回合收尾:独占 backend 住 worker,结果经 idle wake 回主线程
+    // 应用。state 不抓 this,退出时置 cancel 再 join,不留悬线。
+    std::shared_ptr<MicrocompactJobState> microcompact_job_;
+    std::thread microcompact_thread_;
     // 最近一次 compact 的台账(第四期 /context"最近一次 compact 所用角色、
     // 模型、前后 token、耗时和校验结果"):一行人话,由压缩路径写。
     std::string last_compact_line;
@@ -1053,6 +1087,9 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     subagent_wake_token_ = idle_wakes_.AddSource("subagent", [this]() {
         return session_agent_tool() != nullptr && session_agent_tool()->HasUndeliveredCompletions();
     });
+    microcompact_wake_token_ = idle_wakes_.AddSource("microcompact", [this]() {
+        return microcompact_job_ != nullptr && microcompact_job_->done.load(std::memory_order_acquire);
+    });
     lubancode::cli::SetIdleWakeHook([this]() { return idle_wakes_.AnyReady(); });
 
     // 后台代理权限拒绝的当场告知(后台代理权限拒绝无告知单,2026-08-17):
@@ -1274,6 +1311,9 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
 }
 
 TerminalSessionController::~TerminalSessionController() {
+    // L2 worker 不抓 this,仍须先发取消再 join:别让独占 backend 与 artifact
+    // store 活过会话。正常网络 client 收到 cancel 后很快退场。
+    StopMicrocompact();
     // 定向介入收场(规格:退出/清场不能无声遗失):停全部、报未送达。任务
     // 线程由 AgentTool 析构统一 join(此刻 tool_runtime_ 还活着,先于成员析构)。
     // 析构走"退场"档:排队账不倒(已落档,resume 接得回),只提示去处。
@@ -1301,6 +1341,7 @@ TerminalSessionController::~TerminalSessionController() {
     // callback 析构后摸 this)。
     subagent_wake_token_.reset();
     loop_wake_token_.reset();
+    microcompact_wake_token_.reset();
     if (loop_scheduler_.has_value()) {
         loop_scheduler_->StopTimer();
     }
@@ -2092,6 +2133,9 @@ bool TerminalSessionController::EnsureSessionBegun(const std::string& first_text
 // 开仓:<sessions_dir>/<session-id>/context(与 <session-id>.jsonl 并排,
 // /sessions 只扫 *.jsonl,互不干扰)。开不成只告警——仓是加层,不是依赖。
 void TerminalSessionController::OpenArtifactStore() {
+    // /resume 会把同一只 store 改指新会话。旧场若还有 L2 在读,先撤单收线,
+    // 免得 worker 与 Open() 同时摸 root/refs。
+    StopMicrocompact();
     if (sessions_dir.empty() || !session_store.active()) {
         return;
     }
@@ -5178,9 +5222,9 @@ void TerminalSessionController::ExtractTurnMemory(const std::string& user_text, 
 }
 
 void TerminalSessionController::MaybeMicrocompact() {
-    // L2 microcompact(第三期):回合收尾的冷区收拾。仓没开/路由拿不到
-    // backend 都直接静默跳过——这是锦上添花的一层,不是关键路径。
-    if (!artifact_store->active() || model_router == nullptr) {
+    // 同一时刻只跑一趟。上一趟没交账前不再起第二根线,免得同一枚 artifact
+    // 重复花钱、两份摘要争着落 memo。
+    if (microcompact_job_ != nullptr || !artifact_store->active() || model_router == nullptr) {
         return;
     }
     const lubancode::agent::MicrocompactOptions options;
@@ -5189,49 +5233,132 @@ void TerminalSessionController::MaybeMicrocompact() {
     if (candidates.empty()) {
         return;
     }
-    // 迟滞:这一趟尝试了(成没成都算)就记账,冷区要比这趟再涨五成才有
-    // 下一趟——免得刚压完又立刻重压。
-    microcompact_hysteresis.pass_attempted = true;
-    microcompact_hysteresis.last_pass_cold_bytes =
-        lubancode::agent::ColdArtifactBytes(loop->History(), loop->result_view_memo());
-
-    const auto routed = model_router->Route(lubancode::agent::TaskKind::Microcompact);
+    auto routed = model_router->RouteDetached(lubancode::agent::TaskKind::Microcompact);
     if (routed.backend == nullptr) {
         return;
     }
-    std::cout << theme.stats
-              << trf("router.task_flash", "微压缩 " + std::to_string(candidates.size()) + " 枚",
-                     "cheap:" + routed.route.model)
-              << theme.reset << "\n";
 
-    std::map<std::string, lubancode::agent::MicrocompactSummary> summaries;
-    int failed = 0;
+    std::vector<MicrocompactWorkItem> work;
+    std::vector<std::string> initial_errors;
+    work.reserve(candidates.size());
     for (const auto& candidate : candidates) {
         const auto* ref = artifact_store->Find(candidate.artifact_id);
         if (ref == nullptr) {
-            ++failed;
+            initial_errors.push_back("artifact " + candidate.artifact_id + " 已不在索引里");
             continue;
         }
-        lubancode::agent::BackgroundCallAccounting accounting;
-        auto summary =
-            lubancode::agent::RunMicrocompact(*routed.backend, routed.route.model, routed.route.effort,
-                                              *artifact_store, *ref, candidate.event_id, options, &accounting);
-        model_router->ledger().Record(lubancode::agent::ModelRole::Cheap, routed.route.model, accounting.usage,
-                                      accounting.duration_ms, accounting.usage_reported);
-        if (summary.has_value()) {
-            summaries.emplace(candidate.tool_use_id, std::move(*summary));
-        } else {
-            ++failed;  // 失败退 L1:决策不动,视图照旧预览,原文不删
+        work.push_back(MicrocompactWorkItem{candidate.tool_use_id, *ref, candidate.event_id});
+    }
+    if (work.empty()) {
+        std::cout << theme.stats << tr("microcompact.all_failed") << theme.reset << "\n";
+        return;
+    }
+
+    auto state = std::make_shared<MicrocompactJobState>();
+    const int requested = static_cast<int>(candidates.size());
+    const std::string model = routed.route.model;
+    const std::string effort = routed.route.effort;
+    auto store = artifact_store;
+    try {
+        microcompact_thread_ = std::thread(
+            [state, backend = std::move(routed.backend), store = std::move(store), work = std::move(work),
+             initial_errors = std::move(initial_errors), options, requested, model, effort]() mutable {
+                MicrocompactJobResult result;
+                result.requested = requested;
+                result.model = model;
+                result.errors = std::move(initial_errors);
+                try {
+                    for (const auto& item : work) {
+                        if (state->cancel.load()) {
+                            break;
+                        }
+                        lubancode::agent::BackgroundCallAccounting accounting;
+                        auto summary = lubancode::agent::RunMicrocompact(
+                            *backend, model, effort, *store, item.ref, item.event_id, options, &accounting,
+                            &state->cancel);
+                        result.accounting.push_back(accounting);
+                        if (summary.has_value()) {
+                            result.summaries.emplace(item.tool_use_id, std::move(*summary));
+                        } else {
+                            result.errors.push_back(summary.error());
+                        }
+                    }
+                } catch (const std::exception& error) {
+                    result.errors.push_back(error.what());
+                } catch (...) {
+                    result.errors.push_back("后台微压缩抛出未知异常");
+                }
+                result.failed = result.requested - static_cast<int>(result.summaries.size());
+                state->result = std::move(result);
+                state->done.store(true, std::memory_order_release);
+            });
+    } catch (const std::exception& error) {
+        std::cout << theme.stats << tr("microcompact.all_failed") << theme.reset << "\n"
+                  << theme.stats << trf("microcompact.failure_detail", error.what()) << theme.reset << "\n";
+        return;
+    }
+
+    microcompact_job_ = std::move(state);
+    // 迟滞从真正投递成功这一刻起算。成没成都冷却,免得 cheap 挂了便每轮
+    // 追打；worker 不再挡住这轮后面的标题/记忆与下一只 composer。
+    microcompact_hysteresis.pass_attempted = true;
+    microcompact_hysteresis.last_pass_cold_bytes =
+        lubancode::agent::ColdArtifactBytes(loop->History(), loop->result_view_memo());
+    std::cout << theme.stats
+              << trf("router.task_flash", trf("microcompact.background", candidates.size()),
+                     "cheap:" + model)
+              << theme.reset << "\n";
+}
+
+void TerminalSessionController::DrainMicrocompact() {
+    if (microcompact_job_ == nullptr ||
+        !microcompact_job_->done.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (microcompact_thread_.joinable()) {
+        microcompact_thread_.join();
+    }
+    auto state = std::move(microcompact_job_);
+    microcompact_job_.reset();
+    if (!state->result.has_value()) {
+        return;
+    }
+    MicrocompactJobResult result = std::move(*state->result);
+    if (model_router != nullptr) {
+        for (const auto& accounting : result.accounting) {
+            model_router->ledger().Record(lubancode::agent::ModelRole::Cheap, result.model, accounting.usage,
+                                          accounting.duration_ms, accounting.usage_reported);
         }
     }
-    const int applied = loop->ApplyMicrocompactSummaries(summaries);
+    const int applied = loop.has_value() ? loop->ApplyMicrocompactSummaries(result.summaries) : 0;
     if (applied > 0) {
         std::cout << theme.stats
-                  << trf("microcompact.done", applied, candidates.size() - static_cast<std::size_t>(applied))
+                  << trf("microcompact.done", applied, result.requested - applied)
                   << theme.reset << "\n";
-    } else if (failed > 0) {
+    } else if (result.failed > 0) {
         std::cout << theme.stats << tr("microcompact.all_failed") << theme.reset << "\n";
     }
+    if (!result.errors.empty()) {
+        std::string detail = lubancode::platform::SanitizeUtf8(result.errors.front());
+        if (const std::size_t newline = detail.find_first_of("\r\n"); newline != std::string::npos) {
+            detail.resize(newline);
+        }
+        if (detail.size() > 240) {
+            detail = lubancode::cli::TruncateUtf8Bytes(detail, 240);
+            detail += "...";
+        }
+        std::cout << theme.stats << trf("microcompact.failure_detail", detail) << theme.reset << "\n";
+    }
+}
+
+void TerminalSessionController::StopMicrocompact() {
+    if (microcompact_job_ != nullptr) {
+        microcompact_job_->cancel.store(true);
+    }
+    if (microcompact_thread_.joinable()) {
+        microcompact_thread_.join();
+    }
+    microcompact_job_.reset();
 }
 
 void TerminalSessionController::MaybeGenerateSessionTitle(lubancode::agent::TaskKind kind) {
@@ -6231,6 +6358,9 @@ void TerminalSessionController::LaunchApprovedPlanExecution(lubancode::runtime::
 
 void TerminalSessionController::Run() {
     while (true) {
+        // composer 因 L2 完工而让位时,先在主线程落摘要与 usage,再画下一
+        // 副状态栏。worker 从不碰 AgentLoop/终端,屏账只此一条门。
+        DrainMicrocompact();
         // status panel 每圈都重取 cwd 与 Git 分支。/worktree、run_command
         // 切目录/分支，或队列紧接着发下一条时，都不会挂着上一帧的旧值。
         lubancode::cli::StatusPanelData status_data;
@@ -6446,6 +6576,9 @@ void TerminalSessionController::Run() {
         if (line->empty()) {
             continue;  // 空行不退出,重新给提示符
         }
+        // 用户打字时 idle wake 不抢半截 composer；回车交稿这一刻再收一眼,
+        // 若 L2 已完便先应用,让紧接着的请求吃到新摘要。
+        DrainMicrocompact();
         content = *line;
         composer_target = lubancode::cli::CurrentComposerAgentTarget();
 

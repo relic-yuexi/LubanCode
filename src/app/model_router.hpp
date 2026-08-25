@@ -16,6 +16,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -43,9 +44,20 @@ public:
         lubancode::api::Backend* backend = nullptr;
     };
 
+    // 后台线程专用:按同一路由另造一只裸 backend,不与主会话/别的后台
+    // 小活共用 client。请求在后台慢慢跑,主 composer 可先回来。
+    struct DetachedRouted {
+        lubancode::agent::ModelRoute route;
+        std::unique_ptr<lubancode::api::Backend> backend;
+    };
+
     // 每次 Route() 现折路由表:配置与会话模型都可能中途变(三级来源、
     // /model 切换),现折最便宜也最诚实。kind 决定角色与 compact 兼容别名。
     Routed Route(lubancode::agent::TaskKind kind) const;
+
+    // Route() 交借用指针,只准主线程回合边界同步用;这一路交独占 backend,
+    // 可移进 worker。provider 找不到时 backend 为空,不偷偷换回当前端。
+    DetachedRouted RouteDetached(lubancode::agent::TaskKind kind) const;
 
     // 同上,但只问"该用谁",不要 backend(诊断、/model roles、预算计算用)。
     lubancode::agent::ModelRoute RouteInfo(lubancode::agent::TaskKind kind) const;
@@ -56,8 +68,12 @@ public:
     lubancode::agent::ModelUsageLedger& ledger() const { return ledger_; }
 
 private:
+    // 把目标 provider 展开成可直接交 BuildBackend 的运行配置。同步缓存
+    // 与 detached worker 共用这一口,鉴权/header/reasoning 字段不走岔。
+    std::optional<lubancode::config::Config> ConfigForProvider(const std::string& provider) const;
     // 跨 provider 的裸 client 缓存。mutable:Route 逻辑上只读,缓存是实现
-    // 细节;不会并发调用(后台小活都在回合边界的主线程发起)。
+    // 细节;同步小活仍只在主线程用。真进 worker 的任务须走 RouteDetached,
+    // 不许借这份缓存并发发请求。
     lubancode::api::Backend* BackendForProvider(const std::string& provider) const;
 
     const lubancode::config::ConfigResult& config_result_;

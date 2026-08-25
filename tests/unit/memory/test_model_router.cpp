@@ -322,6 +322,17 @@ TEST_CASE("ModelRouterService:同 provider 走主 backend,跨 provider 建裸 cl
         CHECK(routed.route.model == "session-model");
         CHECK(routed.backend == &main_backend);
     }
+    SUBCASE("后台路由另造独占 backend,当前端也不借主 client") {
+        auto routed = service.RouteDetached(TaskKind::Microcompact);
+        REQUIRE(routed.backend != nullptr);
+        CHECK(routed.route.model == "fast-m");
+        CHECK(routed.route.provider == "local_fast");
+
+        auto normal = service.RouteDetached(TaskKind::NormalTurn);
+        REQUIRE(normal.backend != nullptr);
+        CHECK(normal.route.model == "session-model");
+        CHECK(normal.backend.get() != &main_backend);
+    }
     SUBCASE("provider 名找不到条目:backend 交空,不静默换名") {
         auto broken = MergeFromJson(R"({
             "providers": [{"name": "local", "base_url": "http://localhost:1", "wire": "anthropic", "model": "n1"}],
@@ -332,5 +343,7 @@ TEST_CASE("ModelRouterService:同 provider 走主 backend,跨 provider 建裸 cl
         const auto routed = ghost_service.Route(TaskKind::Compact);
         CHECK(routed.route.model == "m");
         CHECK(routed.backend == nullptr);
+        auto detached = ghost_service.RouteDetached(TaskKind::Microcompact);
+        CHECK(detached.backend == nullptr);
     }
 }

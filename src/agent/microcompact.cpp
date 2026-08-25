@@ -138,7 +138,11 @@ std::optional<MicrocompactSummary> ParseMicrocompactSummary(const std::string& t
 std::expected<MicrocompactSummary, std::string> RunMicrocompact(
     api::Backend& backend, const std::string& model, const std::string& reasoning_effort,
     const ContextArtifactStore& store, const ArtifactRef& ref, const std::string& event_id,
-    const MicrocompactOptions& options, BackgroundCallAccounting* accounting) {
+    const MicrocompactOptions& options, BackgroundCallAccounting* accounting,
+    const std::atomic<bool>* external_cancel) {
+    if (external_cancel != nullptr && external_cancel->load()) {
+        return std::unexpected("后台微压缩已取消");
+    }
     // 输入永远从 blob 原文来:hash 门在 ReadBlobVerified,不合/读不到就跳过
     // 这枚(退 L1),绝不拿旧摘要再摘要。
     const auto original = store.ReadBlobVerified(ref);
@@ -188,9 +192,13 @@ std::expected<MicrocompactSummary, std::string> RunMicrocompact(
 
     std::atomic<bool> cancel{false};
     std::atomic<bool> done{false};
-    std::thread watchdog([&cancel, &done, timeout = options.timeout_secs]() {
+    std::thread watchdog([&cancel, &done, external_cancel, timeout = options.timeout_secs]() {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout);
         while (!done.load() && std::chrono::steady_clock::now() < deadline) {
+            if (external_cancel != nullptr && external_cancel->load()) {
+                cancel = true;
+                return;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         if (!done.load()) cancel = true;
