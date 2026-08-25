@@ -432,6 +432,10 @@ private:
     // 失败信号。
     CommandFlow ProcessLine(const std::string& content, bool* autosend_failed = nullptr);
     CommandFlow DispatchSlashCommand(const lubancode::cli::ParsedSlashCommand& parsed);
+    // /workflow run 的 tool 执行器装配(骨架拆解批一·封暗道):工具节点走
+    // agent::RunOneTool 正门,PreToolUse/PostToolUse 钩子、Plan 闸、逐枚
+    // trace 与主回合同一条链,两处装配点(/workflow run 与 alias 直呼)共用。
+    lubancode::workflow::ToolExecutor::Options BuildWorkflowToolOptions();
     CommandFlow RunUserTurn(const std::string& content, bool* autosend_failed = nullptr);
     // ---- /goal 持久目标(持久目标单) ----
     // /goal 七动作的终端接线:coordinator 调用 + 排版。clear 走二次确认。
@@ -754,6 +758,44 @@ const std::function<bool(const lubancode::tools::Tool&)>& TerminalSessionControl
 }
 const std::function<bool(const lubancode::tools::Tool&)>& TerminalSessionController::sub_tool_filter() {
     return tool_runtime_->sub_tool_filter();
+}
+
+lubancode::workflow::ToolExecutor::Options TerminalSessionController::BuildWorkflowToolOptions() {
+    // 封暗道(骨架拆解批一·病二):workflow 工具节点不再直捅
+    // tool->execute(),改走 agent::RunOneTool 正门。这里把主回合那套横切
+    // 链原样接上:hooks(PreToolUse/PostToolUse)、Plan 闸、逐枚 trace
+    //(发号 + 分线 + 副作用闸)。确认门暂不接(会话层 /workflow 还没有
+    // 审批宿主),ToolExecutor 自守"needs_confirm 无门明拒"的旧语义。
+    lubancode::workflow::ToolExecutor::Options options;
+    options.registry = &registry();
+    options.thread_id = session_runtime_.thread_id();
+    if (trace_hub_.has_value()) {
+        lubancode::runtime::ToolTraceHub* hub = &*trace_hub_;
+        options.execution_id_issuer = [hub] { return hub->NextExecutionId(); };
+        options.callbacks.on_tool_trace = [hub](const lubancode::agent::ToolTraceEvent& event) {
+            hub->OnTrace(event);
+        };
+        options.callbacks.on_tool_trace_blocked = [hub](const std::string& execution_id) {
+            return hub->IsExecutionBlocked(execution_id);
+        };
+    }
+    lubancode::hooks::HookDispatcher* dispatcher = lubancode::app::HookRuntime();
+    if (dispatcher != nullptr && lubancode::runtime::HasToolHooks(dispatcher)) {
+        options.callbacks.on_pre_tool_use_hook =
+            [dispatcher](const std::string&, const std::string& name, const nlohmann::json& input) {
+                return lubancode::runtime::EmitPreToolUse(dispatcher, name, input);
+            };
+        options.callbacks.on_post_tool_use_hook =
+            [dispatcher](const std::string&, const std::string& name, const nlohmann::json& input,
+                         const lubancode::tools::Tool::Result& result) {
+                return lubancode::runtime::EmitPostToolUse(dispatcher, name, input, result);
+            };
+    }
+    // Plan 闸:workflow 工具节点同过 ModePolicy(单子:不另开旁路)。
+    options.callbacks.on_mode_policy = [this](const std::string& tool_name, const nlohmann::json& input) {
+        return EvaluatePlanGate(tool_name, input);
+    };
+    return options;
 }
 
 lubancode::app::ToolRuntime::Options TerminalSessionController::MakeRuntimeOptions() {
@@ -3919,7 +3961,7 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                     executors[lubancode::workflow::NodeKind::Template] =
                         std::make_shared<lubancode::workflow::TemplateExecutor>();
                     executors[lubancode::workflow::NodeKind::Tool] =
-                        std::make_shared<lubancode::workflow::ToolExecutor>(&registry());
+                        std::make_shared<lubancode::workflow::ToolExecutor>(BuildWorkflowToolOptions());
                     {
                         // prompt 从 workflow 目录读(包内相对路径;越界已被
                         // validator 拦,这里只管读)。
@@ -3998,7 +4040,7 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                         executors[lubancode::workflow::NodeKind::Template] =
                             std::make_shared<lubancode::workflow::TemplateExecutor>();
                         executors[lubancode::workflow::NodeKind::Tool] =
-                            std::make_shared<lubancode::workflow::ToolExecutor>(&registry());
+                            std::make_shared<lubancode::workflow::ToolExecutor>(BuildWorkflowToolOptions());
                         {
                             const lubancode::workflow::Catalog wf_catalog = lubancode::workflow::LoadCatalog(
                                 wf_ctx.project_root, wf_ctx.user_root);
@@ -5181,23 +5223,35 @@ void TerminalSessionController::ExtractTurnMemory(const std::string& user_text, 
 
     // 抽取走 cheap 角色(模型分工第一期):低风险后台小活,配了 cheap_model
     // 用便宜的,没配回落 normal(与 main 同模型,行为与从前一致)。状态栏
-    // 短闪一行:任务种类 + 角色:模型(规格"运行提示")。
-    const auto extract_routed = model_router->Route(lubancode::agent::TaskKind::MemoryExtract);
+    // 短闪一行:任务种类 + 角色:模型(规格"运行提示")。采样走
+    // ModelRouterService::Sample 一站(批一·病四):路由/采样/记账一扇门。
+    const auto extract_route = model_router->RouteInfo(lubancode::agent::TaskKind::MemoryExtract);
     std::cout << theme.stats
               << trf("router.task_flash", trf("memory.extract.running", task_type),
-                     "cheap:" + extract_routed.route.model)
+                     "cheap:" + extract_route.model)
               << theme.reset << "\n";
-    lubancode::agent::BackgroundCallAccounting extract_accounting;
-    const auto extraction =
-        extract_routed.backend != nullptr
-            ? RunMemoryExtraction(*extract_routed.backend, extract_routed.route.model, system_prompt,
-                                  turn_transcript, /*timeout_secs=*/45, extract_routed.route.effort,
-                                  &extract_accounting)
-            : std::expected<MemoryExtraction, std::string>(
-                  std::unexpected("cheap 路由找不到 provider \"" + extract_routed.route.provider + "\""));
-    model_router->ledger().Record(lubancode::agent::ModelRole::Cheap, extract_routed.route.model,
-                                  extract_accounting.usage, extract_accounting.duration_ms,
-                                  extract_accounting.usage_reported);
+    lubancode::app::ModelRouterService::SampleCall sample_call;
+    sample_call.system = system_prompt;
+    {
+        api::Message message;
+        message.role = api::Role::User;
+        message.content.push_back(api::TextBlock{turn_transcript});
+        sample_call.messages.push_back(std::move(message));
+        sample_call.max_tokens = 1500;
+    }
+    lubancode::agent::SampleOptions sample_options;
+    sample_options.timeout_secs = 45;
+    const auto sampled =
+        model_router->Sample(lubancode::agent::TaskKind::MemoryExtract, sample_call, sample_options);
+    std::expected<MemoryExtraction, std::string> extraction;
+    if (sampled.backend == nullptr) {
+        // 路由落空:旧口径也记一笔零账(calls=1,零 token,"未报告"),不吞。
+        model_router->ledger().Record(lubancode::agent::ModelRole::Cheap, sampled.route.model,
+                                      lubancode::api::Usage{}, /*duration_ms=*/0, /*reported=*/false);
+        extraction = std::unexpected("cheap 路由找不到 provider \"" + sampled.route.provider + "\"");
+    } else {
+        extraction = FinishMemoryExtraction(sampled.result);
+    }
     if (!extraction.has_value()) {
         std::cout << theme.stats << trf("memory.extract.failed", extraction.error()) << theme.reset << "\n";
         return;

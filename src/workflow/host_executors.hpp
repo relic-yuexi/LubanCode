@@ -6,9 +6,10 @@
 // cli/app(依赖只准 workflow runtime -> agent/tool/skill/interaction
 // abstractions,单子"现有代码可接之处")。
 //
-// tool:调 ToolRegistry 已注册工具,输入输出验 schema 交给工具自身;
-// needs_confirm 的工具走 TurnRuntime 同一套确认(经 ConfirmGate 注入)。
-// llm:单次结构化模型调用(api::Backend),不开完整 agent loop。
+// tool:经 agent::RunOneTool 正门调 ToolRegistry 已注册工具——PreToolUse/
+// PostToolUse 钩子、确认档、Plan 闸、逐枚 trace 与主回合同一条链(批一
+// 封暗道);旧 ConfirmGate 保留作确认缺省。llm:单次结构化模型调用,采样
+// 走 agent::SampleModel 原语(批一·病四),不开完整 agent loop。
 // approval:经 InteractionBroker 悬起,等用户决定(accept/decline/cancel)。
 // ask_user:经 InteractionBroker 问一句,答案写进 output。
 // skill:把 Skill 的 SKILL.md 正文装进 llm 执行的上下文(同一只 llm 执行
@@ -45,15 +46,36 @@ using PromptLoader = std::function<std::string(const std::string& package_relati
 // 不挂死,单子第 2 批的规矩)。
 using ToolConfirmGate = std::function<bool(const std::string& tool_name, const nlohmann::json& input)>;
 
+// tool 节点(骨架拆解单批一·病二):执行走 agent::RunOneTool 这条全仓正门
+// ——PreToolUse 钩子(含 updatedInput 的 schema 复检)、确认档、Plan 闸、
+// PostToolUse、逐枚 trace、编码清洗一个不少,与 JSON 后端/PTC 同一条代码
+// 路,不再有第二条绕过 hooks 的暗道。旧路自带的 confirm gate 保留成
+// Callbacks::on_tool_confirm 的缺省兜底;钩子/trace 由宿主经 callbacks 带入。
 class ToolExecutor : public NodeExecutor {
 public:
-    explicit ToolExecutor(const tools::ToolRegistry* registry, ToolConfirmGate confirm = nullptr);
+    struct Options {
+        tools::ToolRegistry* registry = nullptr;  // RunOneTool 要可写引用
+        ToolConfirmGate confirm;                  // 旧确认门(缺省兜底)
+        // 宿主的钩子/权限/trace 链(与主回合同一份装配):on_pre_tool_use_hook/
+        // on_post_tool_use_hook/on_mode_policy/on_tool_phase/on_tool_trace/
+        // on_tool_trace_blocked/on_tool_confirm(_async)。空装 = 没配,行为
+        // 与旧路一致(needs_confirm 仍走旧 gate 或明拒)。
+        agent::Callbacks callbacks;
+        // trace 发号(ToolTraceHub::NextExecutionId 那口)。空或 on_tool_trace
+        // 缺席 = 不追踪,栅栏事件全空操作(旧行为)。
+        std::function<std::string()> execution_id_issuer;
+        std::string thread_id;  // trace 上下文的会话名(可空)
+        std::string turn_id;    // trace 上下文的轮名(可空;缺省用 run_id)
+    };
+
+    explicit ToolExecutor(Options options);
+    // 兼容门:只给 registry(+旧确认门),钩子链空装(单测/旧装配)。
+    explicit ToolExecutor(tools::ToolRegistry* registry, ToolConfirmGate confirm = nullptr);
 
     NodeExecResult Execute(const NodeExecRequest& request) override;
 
 private:
-    const tools::ToolRegistry* registry_;
-    ToolConfirmGate confirm_;
+    Options options_;
 };
 
 // ---------------------------------------------------------------------------

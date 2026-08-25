@@ -2,7 +2,7 @@
 
 #include "runtime/goal_evaluator.hpp"
 
-#include "api/assembler.hpp"
+#include "agent/sample_model.hpp"  // SampleModel 原语:采样的公共路(批一·病四)
 
 #include <atomic>
 #include <sstream>
@@ -244,12 +244,14 @@ std::expected<GoalEvaluationOutput, std::string> RunGoalEvaluation(
 
     const auto started = std::chrono::steady_clock::now();
     std::string last_error;  // 初判的解析错误,喂给 repair 轮
-    // 两次机会:初判 + 一次 repair(单子 evaluator 失败节)。
+    // 两次机会:初判 + 一次 repair(单子 evaluator 失败节)。每轮采样走
+    // SampleModel 原语(批一·病四);看门狗留在本层——它的预算横跨两轮
+    // (到点拉旗,两轮一起断),原语按次起钟,装不下这个共享口径。
     for (int attempt = 0; attempt < 2; ++attempt) {
-        api::Request request;
-        request.model = options.model;
-        request.reasoning_effort = options.reasoning_effort;
-        request.system = BuildGoalEvaluationPrompt(material);
+        agent::SampleRequest sample;
+        sample.model = options.model;
+        sample.reasoning_effort = options.reasoning_effort;
+        sample.system = BuildGoalEvaluationPrompt(material);
         // 不带 tools:evaluator 无工具,不给 write/shell/MCP/Skill/agent/memory。
         api::Message message;
         message.role = api::Role::User;
@@ -261,48 +263,28 @@ std::expected<GoalEvaluationOutput, std::string> RunGoalEvaluation(
             repair += last_error;
             message.content.push_back(api::TextBlock{repair});
         }
-        request.messages.push_back(std::move(message));
-        request.max_tokens = static_cast<int>(options.max_tokens);
+        sample.messages.push_back(std::move(message));
+        sample.max_tokens = static_cast<int>(options.max_tokens);
 
-        api::MessageAssembler assembler;
-        bool stream_error = false;
-        std::string stream_error_message;
-        const std::atomic<bool>* effective_cancel = cancel != nullptr ? cancel : &local_cancel;
-        auto send_result = backend.send_stream(
-            request,
-            [&](const api::StreamEvent& event) {
-                assembler.Feed(event);
-                if (const auto* error = std::get_if<api::StreamError>(&event)) {
-                    stream_error = true;
-                    stream_error_message = error->message;
-                }
-            },
-            effective_cancel);
-        if (!send_result.has_value()) {
+        // 外部取消链在场时看门狗不抢断(旧口径):取消口 = 外部链 ?: 本地旗。
+        agent::SampleOptions sample_options;
+        sample_options.cancel = cancel != nullptr ? cancel : &local_cancel;
+        const agent::SampleResult sampled = agent::SampleModel(backend, sample, sample_options);
+        if (!sampled.ok) {
             done = true;
             watchdog.join();
-            return std::unexpected(send_result.error().message);
+            return std::unexpected(sampled.error.message);
         }
-        if (stream_error) {
-            done = true;
-            watchdog.join();
-            return std::unexpected(stream_error_message);
-        }
-        std::string reply;
-        for (const auto& block : assembler.BuildMessage().content) {
-            if (const auto* text = std::get_if<api::TextBlock>(&block)) {
-                reply += text->text;
-            }
-        }
+        const std::string& reply = sampled.text;
         GoalEvaluation evaluation;
         std::string parse_error;
         if (ParseGoalEvaluationReply(reply, evaluation, &parse_error)) {
             done = true;
-            // usage 回填(assembler 的账)。
+            // usage 回填(本轮采样的账;旧口径:不跨轮累加,末轮为准)。
             GoalEvaluationOutput out;
             out.evaluation = std::move(evaluation);
             out.schema_repaired = attempt > 0;
-            const api::Usage& usage = assembler.usage();
+            const api::Usage& usage = sampled.usage;
             out.usage.input_tokens = usage.input_tokens;
             out.usage.output_tokens = usage.output_tokens;
             out.usage.cache_read_tokens = usage.cache_read_tokens;

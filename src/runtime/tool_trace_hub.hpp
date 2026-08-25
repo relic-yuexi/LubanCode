@@ -86,6 +86,12 @@ public:
     // 只读 sink 并轨)。
     void OnTrace(const agent::ToolTraceEvent& event);
 
+    // 拦截查询(Install 给 AgentLoop 装的那只 on_tool_trace_blocked 的公开
+    // 口):started 写盘失败且副作用档时,RunOneTool 在 execute 前问这一句,
+    // 答真即拦。骨架拆解批一:workflow 的 ToolExecutor 走 RunOneTool 正门,
+    // 从这里接同一道闸。
+    bool IsExecutionBlocked(const std::string& execution_id) const;
+
     // 恢复:从 LoadedSession 的 trace 事件折叠账本(/resume 侧调)。
     static agent::ToolExecutionLedger BuildLedger(const std::vector<agent::ToolTraceEvent>& events);
 

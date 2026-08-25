@@ -12,6 +12,12 @@
 //
 // usage 分角色记账也住这:每个调用点收到 usage 后 ledger().Record() 一笔;
 // /context 与 /model roles 翻的就是这本账。
+//
+// 骨架拆解批一·病四:Route 之外加 Sample 一站——"路由 + 采样 + 记账"的
+// 小模型活一扇门。简单后台活(记忆抽取这类"路由即发、发完记账"的形状)
+// 直接走它;路由策略特殊的调用方(compact 的动态角色回退、microcompact
+// 的独占 backend、evaluator 的 goal 侧账)仍用 Route/RouteDetached 拿路由,
+// 采样一律走 agent::SampleModel 原语。
 #pragma once
 
 #include <map>
@@ -21,6 +27,7 @@
 #include <vector>
 
 #include "agent/model_router.hpp"
+#include "agent/sample_model.hpp"
 #include "api/backend.hpp"
 #include "config/config.hpp"
 
@@ -61,6 +68,24 @@ public:
 
     // 同上,但只问"该用谁",不要 backend(诊断、/model roles、预算计算用)。
     lubancode::agent::ModelRoute RouteInfo(lubancode::agent::TaskKind kind) const;
+
+    // Sample 一站(批一·病四):按 TaskKind 路由 → agent::SampleModel 采样
+    // → ledger 记账(角色按 DefaultRoleForTask)。model/effort 从路由来,
+    // 调用方不再自己拼。backend 落空(跨 provider 名字找不到条目)时不发
+    // 不记,调用方按"该任务暂不可发"自行兜底并按旧口径补零账(如有)。
+    struct SampleCall {
+        std::string system;                    // 调用方拼好的指令
+        std::vector<lubancode::api::Message> messages;  // 一般就一条 user
+        std::optional<int> max_tokens;         // 空 = 不带上限字段
+    };
+    struct SampleOutcome {
+        lubancode::agent::ModelRoute route;    // 实际用的路由(来源/回退标记齐)
+        lubancode::api::Backend* backend = nullptr;  // 空 = 路由落空,没采
+        lubancode::agent::SampleResult result; // 采样产物(backend 非空时有效)
+        bool recorded = false;                 // ledger 是否已记这笔账
+    };
+    SampleOutcome Sample(lubancode::agent::TaskKind kind, const SampleCall& call,
+                         const lubancode::agent::SampleOptions& options = {}) const;
 
     // 完整路由表(/model roles 的短表从这里画)。
     lubancode::agent::ModelRouteTable Table() const;

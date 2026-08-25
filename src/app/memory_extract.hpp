@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "agent/model_router.hpp"  // BackgroundCallAccounting(usage 出账)
+#include "agent/sample_model.hpp"  // SampleResult(抽取侧收口的入参)
 #include "api/backend.hpp"
 #include "api/types.hpp"
 
@@ -55,6 +56,7 @@ std::expected<MemoryExtraction, std::string> ParseExtractionJson(const std::stri
 // 发一次抽取请求(同步,带看门狗取消)。失败只返回错误,调用方降级。
 // reasoning_effort 非空时随请求带上(cheap 路由的档位);accounting 非空时
 // 把这次调用的 usage/时长记进去(分角色记账,不混普通 turn 的账)。
+// 采样走 agent::SampleModel 原语(批一·病四)。
 std::expected<MemoryExtraction, std::string> RunMemoryExtraction(api::Backend& backend,
                                                                  const std::string& model,
                                                                  const std::string& system_prompt,
@@ -62,5 +64,9 @@ std::expected<MemoryExtraction, std::string> RunMemoryExtraction(api::Backend& b
                                                                  int timeout_secs,
                                                                  const std::string& reasoning_effort = std::string(),
                                                                  agent::BackgroundCallAccounting* accounting = nullptr);
+
+// 采样结果的抽取侧收口:RunMemoryExtraction 与走 ModelRouterService::Sample
+// 一站的调用方共用——失败回 message、空文回"抽取输出为空"、成功交解析。
+std::expected<MemoryExtraction, std::string> FinishMemoryExtraction(const agent::SampleResult& sampled);
 
 }  // namespace lubancode::app

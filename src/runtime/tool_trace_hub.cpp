@@ -293,6 +293,11 @@ std::optional<agent::ToolUndoToken> ToolTraceHub::FindUndoToken(const std::strin
     return std::nullopt;
 }
 
+bool ToolTraceHub::IsExecutionBlocked(const std::string& execution_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return blocked_executions_.count(execution_id) != 0;
+}
+
 std::string ToolTraceHub::current_agent_execution() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return current_agent_execution_;
