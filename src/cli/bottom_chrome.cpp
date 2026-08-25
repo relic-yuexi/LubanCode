@@ -86,7 +86,9 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
                                             int terminal_width) {
     const int width = (std::max)(1, terminal_width);
     const ComposerViewModel& composer = model.composer;
-    const int prompt_width = static_cast<int>(DisplayWidthUtf8(composer.prompt));
+    // prompt 常带主题 ANSI 颜色码。这里只认屏上列宽；若拿原字符串量，
+    // 转义字节会把光标凭空推到正文右边。
+    const int prompt_width = PlainDisplayWidth(composer.prompt);
 
     // 软换行:首物理行容下提示符后的窄区,续行统一走续行宽度(与合流前
     // Idle 的 RedrawEditArea 同一把尺;Busy 此前没有这一步,只有单行截断)。

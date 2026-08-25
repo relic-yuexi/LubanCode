@@ -225,8 +225,8 @@ bool IsRuleRow(int row) {
 
 // 结构化找 footer 的输入行(0.25.x 起排队界面定位不靠文案——文案一改便全
 // 倒,规矩是"按结构认框")。Composer 合流(P1)后框随内容长高:上横线、
-// 上留白、以 '>' 起的输入区、下补空、下横线、状态行——不再假定输入行紧贴
-// 横线。认法:输入行上头 4 行内有一根横线、下头 6 行内有一根横线且横线下
+// 以 '>' 起的输入区、下横线、状态行。自定义 padding 可以插空行,故不写死
+// 相邻关系。认法:输入行上头 4 行内有一根横线、下头 6 行内有一根横线且横线下
 // 不是横线(状态行)。从底往上扫,命中最近的一个(流式期间最底下那个框就
 // 是 footer;待发队列的 "> 消息" 行虽然也以 '>' 起,却在更上方,扫不到
 // 前就被真输入行截住)。
@@ -611,20 +611,17 @@ int wmain(int argc, wchar_t** argv) {
         Sleep(300);
         int post_status = FindLastRow("shift+tab");
         if (post_status >= 0) {
-            // composer 新框的标准版式(Composer 合流后与流式框同款,随留白
-            // 长高):上横线(status-5) / 上留白(status-4) / 输入行(status-3) /
-            // 下补空(status-2) / 下横线(status-1) / 状态行(status)。"没有叠影
-            // 残留"精确验成"这六行严丝合缝,不多不少"——输入行两侧都不是线,
-            // 上下横线各只有一根;叠一份旧框出来的"线贴线"形状跟它完全不同,
+            // composer 新框的标准版式:上横线(status-3) / 输入行(status-2) /
+            // 下横线(status-1) / 状态行(status)。"没有叠影残留"精确验成这
+            // 四行严丝合缝——上下横线各只有一根;叠一份旧框出来的"线贴线"形状跟它完全不同,
             // 足够分辨有没有叠影,不受"屏幕上方还有更早几轮遗留的框"干扰
             //(那些是正常的历史记录,不是这一次打断留下的残留)。
             Check(IsRuleRow(post_status - 1), "G3 打断后:composer 下横线正常(没有残留的流式框横线叠加)");
-            Check(!IsRuleRow(post_status - 2), "G3 打断后:下横线正上方是补空,不是另一根线(没有双线叠影)");
-            Check(!IsRuleRow(post_status - 3) && !ReadRow(post_status - 3).empty() &&
-                      ReadRow(post_status - 3)[0] == '>',
-                  "G3 打断后:补空之上是 '> ' 输入行(框形状完整,不多不少)");
-            Check(IsRuleRow(post_status - 5), "G3 打断后:上横线在正确位置(留白之上)");
-            for (int r = post_status - 6; r <= post_status; ++r) {
+            Check(!ReadRow(post_status - 2).empty() && ReadRow(post_status - 2)[0] == '>',
+                  "G3 打断后:下横线正上方是 '> ' 输入行(框形状完整,不多不少)");
+            Check(IsRuleRow(post_status - 3), "G3 打断后:上横线紧贴输入行");
+            Check(!IsRuleRow(post_status - 4), "G3 打断后:上横线之上没有旧框横线叠加");
+            for (int r = post_status - 4; r <= post_status; ++r) {
                 const std::string row_text = ReadRow(r);
                 if (!row_text.empty()) {
                     Log("INFO: G3 诊断 row[" + std::to_string(r) + "]=" + row_text);

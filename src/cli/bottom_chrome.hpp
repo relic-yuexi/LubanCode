@@ -63,12 +63,11 @@ enum class ComposerMode {
     BusyQueue,  // 忙时:Enter 入 SteeringQueue
 };
 
-// 主 composer 的正文区至少三行:上留一行,单行正文居中,下面再留一行。
-// 内容增多时先吃掉下沿空白,再自然向下长高;首行不跳动。Idle 与 Busy
-// 共用这一对常量——改高度只许改这里,两条路同拍生效(这正是本单要堵的
-// "空闲常量、footer 固定行数各改各的"那类维护坑)。
-inline constexpr int kComposerTopPaddingRows = 1;
-inline constexpr int kComposerMinBodyRows = 3;
+// 主 composer 默认只占一行正文,紧贴上下横线。多行与软换行出现时再
+// 自然长高。Idle 与 Busy 共用这一对常量——改高度只许改这里,两条路
+// 同拍生效。
+inline constexpr int kComposerTopPaddingRows = 0;
+inline constexpr int kComposerMinBodyRows = 1;
 
 // 输入区的完整视图模型:布局只认这一份,不认 echo 摘要、不认行数整数。
 // editor 带全部逻辑行与光标;placeholder 只在主草稿真空时显示(空串 =

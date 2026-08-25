@@ -876,7 +876,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     LineEditorCore& editor = SharedEditor();
     editor.BeginLine(composer);
 
-    // 0.17.0:composer 读取开输入框(上横线 + 三行起步的正文区 + 下横线 +
+    // 0.17.0:composer 读取开输入框(上横线 + 按内容长高的正文区 + 下横线 +
     // 状态行)。0.29.x 起状态行之下还有代理导航坞贴底(整帧记账,见
     // RedrawEditArea);导航在下方长,EnsureRoomForRows 探底滚屏自会腾位,
     // 不再需要"锚点上方预留面板行数"那一步。
@@ -885,7 +885,10 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     if (box) {
         const std::optional<platform::ScreenInfo> pre_info = platform::GetScreenInfo();
         const int console_width = pre_info.has_value() ? pre_info->width : 80;
-        std::cout << BoxRuleLine(theme, console_width) << "\n\n";
+        std::cout << BoxRuleLine(theme, console_width) << "\n";
+        for (int i = 0; i < kComposerTopPaddingRows; ++i) {
+            std::cout << "\n";
+        }
     }
 
     // 0.21.x:提示符统一回归 `> `,不再冠 [auto]/[yolo] 档位前缀——档位改
@@ -1208,7 +1211,10 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         if (box) {
             const std::optional<platform::ScreenInfo> rule_info = platform::GetScreenInfo();
             const int console_width = rule_info.has_value() ? rule_info->width : 80;
-            std::cout << BoxRuleLine(theme, console_width) << "\n\n";
+            std::cout << BoxRuleLine(theme, console_width) << "\n";
+            for (int i = 0; i < kComposerTopPaddingRows; ++i) {
+                std::cout << "\n";
+            }
         }
         std::cout << prompt;
         std::cout.flush();
@@ -1474,7 +1480,10 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         if (box) {
             const std::optional<platform::ScreenInfo> rule_info = platform::GetScreenInfo();
             const int console_width = rule_info.has_value() ? rule_info->width : 80;
-            std::cout << BoxRuleLine(theme, console_width) << "\n\n";
+            std::cout << BoxRuleLine(theme, console_width) << "\n";
+            for (int i = 0; i < kComposerTopPaddingRows; ++i) {
+                std::cout << "\n";
+            }
         }
         std::cout << prompt;
         std::cout.flush();
@@ -2248,8 +2257,8 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         if (state.eof_requested) {
             // Ctrl+D/Ctrl+Z 可能按在多行 composer 中间某一行,框下面还垫着
             // 横线/状态行:先把光标挪到整帧最下面一行再换行,免得接下来的
-            // 输出打在残留画面身上。帧顶不能拿 start_row 代替——三行正文区
-            // 在它上头还留了一行空白。
+            // 输出打在残留画面身上。帧顶不能拿 start_row 代替——队列或
+            // 自定义 padding 仍可能压在输入行上头。
             if (queue_edit.has_value()) {
                 // 整次读取要退场了:未提交的编辑按 Esc 同款还原,不留冻结条目。
                 steering.CancelEdit(*queue_edit);
