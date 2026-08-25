@@ -229,7 +229,9 @@ TEST_CASE("AllSlashCommands: /language 在表里,语言切换后描述跟着换"
 TEST_CASE("transcript 摘要词: en 下出英文(彩色主题摘要进表)") {
     LangGuard guard;
     cli::SetLanguage("en");
-    CHECK(cli::ReadFileDoneSummary("a\nb\n") == "Read 2 lines");
+    // read_file 正文排版是"右对齐行号<Tab>正文"(ca5ac71 起按此数真实源码行),
+    // 这里得喂同款格式,别拿白文喂。
+    CHECK(cli::ReadFileDoneSummary("     1\ta\n     2\tb\n") == "Read 2 lines");
     CHECK(cli::WriteDiffSummary(3, 5) == "Added 3 lines, removed 5 lines");
     CHECK(cli::SearchDoneSummary("a.cpp:1:x\n") == "1 matches");
     CHECK(cli::AgentDoneSummary(2, 4) == "Subagent 2 steps · 4 tool calls");
