@@ -188,15 +188,40 @@ bool IsRuleRow(int row) {
     return false;
 }
 
-// 结构化找 footer/composer 的输入行:上横线(r) / 以 '>' 起的输入行(r+1) /
-// 下横线(r+2) / 非横线的状态行(r+3),四行连成框才算数。从底往上扫,命中
-// 最近的一个(流式期间最底下那个框就是 footer;空闲后是主 composer)。
+// 结构化找 footer/composer 的输入行:Composer 合流(P1)后框随内容长高——
+// 上横线、上留白、以 '>' 起的输入区、下补空、下横线、状态行,不再假定
+// 输入行紧贴横线。认法:输入行上头 4 行内有一根横线、下头 6 行内有一根
+// 横线且横线下不是横线(状态行)。从底往上扫,命中最近的一个(流式期间
+// 最底下那个框就是 footer;空闲后是主 composer;待发队列的 "> 消息" 行
+// 虽然也以 '>' 起,却在更上方,扫不到前就被真输入行截住)。
 int FindFooterInputRow(int max_rows = 400) {
-    for (int r = max_rows - 5; r >= 0; --r) {
-        const std::string input_text = ReadRow(r + 1);
-        if (IsRuleRow(r) && !input_text.empty() && input_text[0] == '>' && IsRuleRow(r + 2) &&
-            !IsRuleRow(r + 3)) {
-            return r + 1;
+    for (int i = max_rows - 2; i >= 0; --i) {
+        const std::string input_text = ReadRow(i);
+        if (input_text.empty() || input_text[0] != '>') {
+            continue;
+        }
+        bool rule_above = false;
+        for (int r = i - 1; r >= i - 4 && r >= 0; --r) {
+            rule_above = rule_above || IsRuleRow(r);
+        }
+        if (!rule_above) {
+            continue;
+        }
+        for (int b = i + 1; b <= i + 6 && b + 1 < 400; ++b) {
+            if (IsRuleRow(b) && !IsRuleRow(b + 1)) {
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+
+// 输入行上方的第一根横线(上横线):队列区就在它上头(标题 rule-2、消息
+// rule-1,BuildSteeringQueueRows 的真序)。
+int FindRuleAboveInput(int input_row) {
+    for (int r = input_row - 1; r >= input_row - 4 && r >= 0; --r) {
+        if (IsRuleRow(r)) {
+            return r;
         }
     }
     return -1;
@@ -384,8 +409,9 @@ int wmain(int argc, wchar_t** argv) {
         const DWORD deadline = GetTickCount() + 8000;
         while (GetTickCount() < deadline) {
             const int row = FindFooterInputRow();
-            if (row >= 3 && ReadRow(row - 2).find("/effort xhigh") != std::string::npos &&
-                ReadRow(row - 3).find("送出") != std::string::npos &&
+            const int rule = row >= 0 ? FindRuleAboveInput(row) : -1;
+            if (rule >= 2 && ReadRow(rule - 1).find("/effort xhigh") != std::string::npos &&
+                ReadRow(rule - 2).find("送出") != std::string::npos &&
                 ReadRow(row).find("/effort") == std::string::npos) {
                 queued = true;
                 break;
@@ -404,8 +430,9 @@ int wmain(int argc, wchar_t** argv) {
         const DWORD deadline = GetTickCount() + 6000;
         while (GetTickCount() < deadline) {
             const int row = FindFooterInputRow();
-            if (row >= 3 && ReadRow(row).find("/effort xhigh") != std::string::npos &&
-                ReadRow(row - 2).find("编辑中") != std::string::npos) {
+            const int rule = row >= 0 ? FindRuleAboveInput(row) : -1;
+            if (rule >= 2 && ReadRow(row).find("/effort xhigh") != std::string::npos &&
+                ReadRow(rule - 2).find("编辑中") != std::string::npos) {
                 recalled = true;
                 break;
             }
@@ -422,9 +449,10 @@ int wmain(int argc, wchar_t** argv) {
         const DWORD replace_deadline = GetTickCount() + 8000;
         while (GetTickCount() < replace_deadline) {
             const int row = FindFooterInputRow();
-            if (row >= 3 && ReadRow(row - 2).find("/effort") != std::string::npos &&
-                ReadRow(row - 2).find("xhigh") == std::string::npos &&
-                ReadRow(row - 2).find("编辑中") == std::string::npos &&
+            const int rule = row >= 0 ? FindRuleAboveInput(row) : -1;
+            if (rule >= 2 && ReadRow(rule - 1).find("/effort") != std::string::npos &&
+                ReadRow(rule - 1).find("xhigh") == std::string::npos &&
+                ReadRow(rule - 2).find("编辑中") == std::string::npos &&
                 ReadRow(row).find("/effort") == std::string::npos) {
                 replaced = true;
                 break;
@@ -512,8 +540,10 @@ int wmain(int argc, wchar_t** argv) {
             // 队列应已清空:等 footer/composer 输入行回来,且队列区没有 /effort 残留。
             int idle_row = -1;
             Check(WaitForFooterInputRow(30000, &idle_row), "T9 轮末:输入框回到可用状态");
-            if (idle_row >= 3) {
-                Check(ReadRow(idle_row - 2).find("/effort") == std::string::npos, "T9 队列已清空,/effort 不残留");
+            const int idle_rule = idle_row >= 0 ? FindRuleAboveInput(idle_row) : -1;
+            if (idle_rule >= 2) {
+                const std::string queue_area = ReadRow(idle_rule - 1) + " " + ReadRow(idle_rule - 2);
+                Check(queue_area.find("/effort") == std::string::npos, "T9 队列已清空,/effort 不残留");
             }
         }
     }

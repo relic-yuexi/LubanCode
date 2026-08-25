@@ -199,16 +199,47 @@ bool IsRuleRow(int row) {
     return false;
 }
 
-// 按结构认 footer 的 composer 框(流式期间最底下那个):上横线(r)/ '>' 起的
-// 输入行(r+1)/ 下横线(r+2)/ 非横线状态行(r+3)。
+// 按结构认 footer 的 composer 框(流式期间最底下那个)。Composer 合流(P1)
+// 后框随内容长高:上横线、上留白、'>' 起的输入区、下补空、下横线、状态行,
+// 不再假定输入行紧贴横线——认"输入行上下各有一根横线、下横线之下不是
+// 横线(状态行)"。从底往上扫,命中最近的一个。
 int FindFooterInputRow(int max_rows = 400) {
-    for (int r = max_rows - 5; r >= 0; --r) {
-        const std::string input_text = ReadRow(r + 1);
-        if (IsRuleRow(r) && !input_text.empty() && input_text[0] == '>' && IsRuleRow(r + 2) && !IsRuleRow(r + 3)) {
-            return r + 1;
+    for (int i = max_rows - 2; i >= 0; --i) {
+        const std::string input_text = ReadRow(i);
+        if (input_text.empty() || input_text[0] != '>') {
+            continue;
+        }
+        bool rule_above = false;
+        for (int r = i - 1; r >= i - 4 && r >= 0; --r) {
+            rule_above = rule_above || IsRuleRow(r);
+        }
+        if (!rule_above) {
+            continue;
+        }
+        for (int b = i + 1; b <= i + 6 && b + 1 < 400; ++b) {
+            if (IsRuleRow(b) && !IsRuleRow(b + 1)) {
+                return i;
+            }
         }
     }
     return -1;
+}
+
+// 输入行上方的第一根横线(上横线):坞区计数从它之下起算。
+int FindRuleAboveInput(int input_row) {
+    for (int r = input_row - 1; r >= input_row - 4 && r >= 0; --r) {
+        if (IsRuleRow(r)) {
+            return r;
+        }
+    }
+    return -1;
+}
+
+// "最底下那个框的上横线"的一次取用(老代码拿输入行-1 冒充,合流后输入行
+// 与上横线之间隔着留白,统一走这里)。
+int ComposerTopRuleNow() {
+    const int input = FindFooterInputRow();
+    return input > 0 ? FindRuleAboveInput(input) : -1;
 }
 
 // 坞区计数:只数 composer 上横线之下的行——上横线之上出现的同名文本是
@@ -249,15 +280,29 @@ int CountViewportRowsWith(const std::string& needle) {
     return count;
 }
 
-// 全缓冲区按结构认出的 composer 框数(上横线/'>' 空输入行/下横线/状态行
-// 成套):完成唤醒后旧底栏该已退场,只剩一副。输入行须为空——"分界线+
-// > 已提交正文 + 分界线"是历史回显,不是 composer,不误计。
+// 全缓冲区按结构认出的 composer 框数(横线/'>' 空输入行/横线/状态行成套,
+// Composer 合流后框随留白长高,不要求紧贴):完成唤醒后旧底栏该已退场,
+// 只剩一副。输入行须为空——"分界线+> 已提交正文+分界线"是历史回显,不是
+// composer,不误计(它上下没有成对的横线加状态行)。
 int CountVisibleComposers() {
     int count = 0;
-    for (int r = 396; r >= 0; --r) {
-        const std::string input_text = ReadRow(r + 1);
-        if (IsRuleRow(r) && input_text == ">" && IsRuleRow(r + 2) && !IsRuleRow(r + 3)) {
-            ++count;
+    for (int i = 396; i >= 0; --i) {
+        const std::string input_text = ReadRow(i);
+        if (input_text != ">") {
+            continue;
+        }
+        bool rule_above = false;
+        for (int r = i - 1; r >= i - 4 && r >= 0; --r) {
+            rule_above = rule_above || IsRuleRow(r);
+        }
+        if (!rule_above) {
+            continue;
+        }
+        for (int b = i + 1; b <= i + 6 && b + 1 < 400; ++b) {
+            if (IsRuleRow(b) && !IsRuleRow(b + 1)) {
+                ++count;
+                break;
+            }
         }
     }
     return count;
@@ -880,12 +925,9 @@ int wmain(int argc, wchar_t** argv) {
     int title_row = -1;
     Check(WaitForText(kTitle, 15000, &title_row), "流式:坞行出现真正短 title");
     int rule_row = -1;
-    for (int r = 398; r >= 0; --r) {
-        const std::string input_text = ReadRow(r + 1);
-        if (IsRuleRow(r) && !input_text.empty() && input_text[0] == '>' && IsRuleRow(r + 2) && !IsRuleRow(r + 3)) {
-            rule_row = r;
-            break;
-        }
+    {
+        const int input_now = FindFooterInputRow();
+        rule_row = input_now > 0 ? FindRuleAboveInput(input_now) : -1;
     }
     Check(rule_row > 0, "流式:composer 上横线定位到");
     // 位置断言同样不是原子快照:footer 重画挪位时首判可能失准,隔 300ms
@@ -895,15 +937,8 @@ int wmain(int argc, wchar_t** argv) {
         if (!below) {
             Sleep(300);
             title_row = FindLastRow(kTitle);
-            rule_row = -1;
-            for (int r = 398; r >= 0; --r) {
-                const std::string input_text = ReadRow(r + 1);
-                if (IsRuleRow(r) && !input_text.empty() && input_text[0] == '>' && IsRuleRow(r + 2) &&
-                    !IsRuleRow(r + 3)) {
-                    rule_row = r;
-                    break;
-                }
-            }
+            const int input_retry = FindFooterInputRow();
+            rule_row = input_retry > 0 ? FindRuleAboveInput(input_retry) : -1;
             below = title_row >= 0 && rule_row > 0 && title_row > rule_row + 3;
         }
         Check(below, "流式:title 行在状态栏之下(导航坞贴底)");
@@ -947,13 +982,9 @@ int wmain(int argc, wchar_t** argv) {
           "流式:Enter 后上方正文区出现该代理的查看头行");  // 查看 general-purpose
     {
         int rule_with_tag = -1;
-        for (int r = 398; r >= 0; --r) {
-            const std::string input_text = ReadRow(r + 1);
-            if (IsRuleRow(r) && !input_text.empty() && input_text[0] == '>' && IsRuleRow(r + 2) &&
-                !IsRuleRow(r + 3)) {
-                rule_with_tag = r;
-                break;
-            }
+        {
+            const int input_now = FindFooterInputRow();
+            rule_with_tag = input_now > 0 ? FindRuleAboveInput(input_now) : -1;
         }
         Check(rule_with_tag > 0 && ReadRow(rule_with_tag).find(kTitle) != std::string::npos,
               "流式:查看态输入框上横线右端挂 title");
@@ -998,13 +1029,9 @@ int wmain(int argc, wchar_t** argv) {
         // transcript 行留在滚屏,那是有归属的正文,不算残帧)。
         Sleep(600);
         int rule_after_view = -1;
-        for (int r = 398; r >= 0; --r) {
-            const std::string input_text = ReadRow(r + 1);
-            if (IsRuleRow(r) && !input_text.empty() && input_text[0] == '>' && IsRuleRow(r + 2) &&
-                !IsRuleRow(r + 3)) {
-                rule_after_view = r;
-                break;
-            }
+        {
+            const int input_now = FindFooterInputRow();
+            rule_after_view = input_now > 0 ? FindRuleAboveInput(input_now) : -1;
         }
         Check(rule_after_view > 0 && FindLastRow(kTitle) >= 0 &&
                   ReadRow(rule_after_view).find(kTitle) == std::string::npos,
@@ -1014,7 +1041,7 @@ int wmain(int argc, wchar_t** argv) {
     Check(WaitForTextGone("\xe2\x9d\xaf", 3000), "流式:再 Esc 退代理焦点");
     Check(FindLastRow(kTitle) >= 0 && FindLastRow("\xe5\xb7\xb2\xe6\x89\x93\xe6\x96\xad") < 0,
           "流式:两下 Esc 都没有打断整轮(坞还在)");
-    Check(CountDockRowsWith("general-purpose", FindFooterInputRow() - 1) <= 1,
+    Check(CountDockRowsWith("general-purpose", ComposerTopRuleNow()) <= 1,
           "流式:退查看态后坞行至多一份(标签已摘)");
 
     // ---- 放开子代理:ping 跑完,Running 原地变完成,回合收场回空闲 ----
@@ -1029,7 +1056,8 @@ int wmain(int argc, wchar_t** argv) {
     Check(WaitForIdleComposer(15000), "空闲:composer 真画出来再数账");
     Sleep(700);  // 等收尾的最后一帧整帧画稳(耗时/token 跳动的那一拍)
     {
-        const int idle_rule = FindFooterInputRow() - 1;
+        const int idle_input = FindFooterInputRow();
+        const int idle_rule = idle_input > 0 ? FindRuleAboveInput(idle_input) : -1;
         Check(CountDockRowsWith("general-purpose", idle_rule) == 1, "空闲:坞行恰好一份(残帧归零)");
         Check(CountDockRowsWith("\xe2\x97\x8f main", idle_rule) == 1, "空闲:main 恰好一份");
         Check(FindLastDockRow(kTitle, idle_rule) > idle_rule + 3, "空闲:终态 title 仍在状态栏之下贴底");
@@ -1044,13 +1072,18 @@ int wmain(int argc, wchar_t** argv) {
     Check(WaitForText(kBgTitle, 15000), "后台幕:空闲后坞里出现第二只任务(运行中)");
     Check(WaitForIdleComposer(15000), "后台幕:空闲 composer 画出");
     Sleep(700);  // 等末帧画稳
-    Check(CountDockRowsWith("general-purpose", FindFooterInputRow() - 1) == 1,
-          "后台幕:坞里只剩第二只任务一行(前台那只已退场)");
+    {
+        const int bg_input = FindFooterInputRow();
+        const int bg_rule = bg_input > 0 ? FindRuleAboveInput(bg_input) : -1;
+        Check(CountDockRowsWith("general-purpose", bg_rule) == 1,
+              "后台幕:坞里只剩第二只任务一行(前台那只已退场)");
+    }
     {
         bool bg_docked = false;
         for (int attempt = 0; attempt < 3 && !bg_docked; ++attempt) {
             const int idle_input2 = FindFooterInputRow();
-            bg_docked = idle_input2 > 0 && FindLastDockRow(kBgTitle, idle_input2 - 1) > idle_input2 + 3;
+            const int idle_rule2 = idle_input2 > 0 ? FindRuleAboveInput(idle_input2) : -1;
+            bg_docked = idle_input2 > 0 && FindLastDockRow(kBgTitle, idle_rule2) > idle_input2 + 3;
             if (!bg_docked) {
                 Sleep(300);  // 重画挪位的空窗:重测一次再定罪
             }
@@ -1081,18 +1114,22 @@ int wmain(int argc, wchar_t** argv) {
     // 退场链(查看态回流单):结果交回 main 置 delivered,导航坞行随即退场
     // ——此刻两只任务都 done+delivered,导航表空了,整坞随之消失(0 只代理
     // 整坞不出场是既有规矩),代理行归零。
-    Check(CountDockRowsWith("general-purpose", FindFooterInputRow() - 1) == 0,
-          "后台完成唤醒:完成任务的坞行已退场(不再赖在坞里)");
+    {
+        const int wake_input = FindFooterInputRow();
+        const int wake_rule = wake_input > 0 ? FindRuleAboveInput(wake_input) : -1;
+        Check(CountDockRowsWith("general-purpose", wake_rule) == 0,
+              "后台完成唤醒:完成任务的坞行已退场(不再赖在坞里)");
+    }
     // 完成通知有且只有一条,归 main(在 transcript 区,composer 上横线之上)。
     Check(CountRowsWith("\xe5\x90\x8e\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86\xe5\xae\x8c\xe6\x88\x90") == 1,
           "后台完成唤醒:完成通知恰好一条");  // 后台子代理完成
     {
         const int notice_row = FindLastRow("\xe5\x90\x8e\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86"
                                            "\xe5\xae\x8c\xe6\x88\x90");
-        const int rule_end = FindFooterInputRow() - 1;
+        const int rule_end = ComposerTopRuleNow();
         Check(notice_row >= 0 && notice_row < rule_end, "后台完成唤醒:通知在 transcript 区(chrome 之上)");
     }
-    Check(CountDockRowsWith(kBgTitle, FindFooterInputRow() - 1) == 0,
+    Check(CountDockRowsWith(kBgTitle, ComposerTopRuleNow()) == 0,
           "后台完成唤醒:第二只任务的导航行也已退场(台账保留,坞里无痕)");
 
     // ---- 第三幕(查看态回流单):看 #4 时 #3 完成——回流静默、查看帧零扰动、
@@ -1112,7 +1149,7 @@ int wmain(int argc, wchar_t** argv) {
         // 重画挪位的空窗:重测三次再定罪。
         int docked = -1;
         for (int attempt = 0; attempt < 3 && docked != 2; ++attempt) {
-            docked = CountDockRowsWith("general-purpose", FindFooterInputRow() - 1);
+            docked = CountDockRowsWith("general-purpose", ComposerTopRuleNow());
             if (docked != 2) {
                 Sleep(300);
             }
@@ -1139,7 +1176,7 @@ int wmain(int argc, wchar_t** argv) {
           "第三幕:上方视口出现 #4 的查看头行");  // 查看 general-purpose #4
     int slow_prompt_row = -1;
     {
-        const int rule_now = FindFooterInputRow() - 1;
+        const int rule_now = ComposerTopRuleNow();
         slow_prompt_row = FindLastRow(kSlowPrompt);
         Check(slow_prompt_row >= 0 && slow_prompt_row < rule_now, "第三幕:#4 的 prompt 在查看视口里");
         Check(CountRowsWith("\xe6\x9f\xa5\xe7\x9c\x8b general-purpose #4") == 1, "第三幕:查看头行恰好一份");
@@ -1151,7 +1188,7 @@ int wmain(int argc, wchar_t** argv) {
     {
         const DWORD fast_deadline = GetTickCount() + 30000;
         while (GetTickCount() < fast_deadline) {
-            const int r = FindLastDockRow(kFastTitle, FindFooterInputRow() - 1);
+            const int r = FindLastDockRow(kFastTitle, ComposerTopRuleNow());
             if (r >= 0 && ReadRow(r).find("\xe5\xae\x8c\xe6\x88\x90(") != std::string::npos) {  // 完成(
                 fast_done_docked = true;
                 break;
@@ -1178,7 +1215,7 @@ int wmain(int argc, wchar_t** argv) {
         Check(CountRowsWith("\xe6\x9f\xa5\xe7\x9c\x8b general-purpose #4") == 1,
               "第三幕:查看头行仍恰好一份(没有第二帧)");
         Check(FindLastRow(kReflowText) < 0, "第三幕:回流正文没上屏(静默收货,零侵入)");
-        const int rule4 = FindFooterInputRow() - 1;
+        const int rule4 = ComposerTopRuleNow();
         Check(CountDockRowsWith(kFastTitle, rule4) == 0, "第三幕:#3 坞行已退场(done+delivered)");
         Check(CountDockRowsWith(kSlowTitle, rule4) == 1, "第三幕:#4 坞行还在(查看目标纹丝不动)");
         Check(FindLastDockRow(kToastText, rule4) > rule4, "第三幕:toast 挂在坞区(不抢正文)");
@@ -1209,7 +1246,7 @@ int wmain(int argc, wchar_t** argv) {
         const DWORD stop_deadline = GetTickCount() + 15000;
         bool dock_empty = false;
         while (GetTickCount() < stop_deadline) {
-            const int rule_now = FindFooterInputRow() - 1;
+            const int rule_now = ComposerTopRuleNow();
             if (rule_now > 0 && CountDockRowsWith("general-purpose", rule_now) == 0) {
                 dock_empty = true;
                 break;
@@ -1220,8 +1257,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     Sleep(600);
     SendText(kAct4User);  // 再盯一只后台从生到死
-    SendKey(VK_RETURN, L'
-', 0);
+    SendKey(VK_RETURN, L'', 0);
     Check(WaitForText(kWatchTitle, 15000), "第四幕:#5 入坞(盯退场的慢工)");
     Check(WaitForText(kAct4Wrap, 30000), "第四幕:主回合收口(慢工已派妥,回空闲)");
     Check(WaitForIdleComposer(15000), "第四幕:空闲 composer 画出");
@@ -1230,8 +1266,7 @@ int wmain(int argc, wchar_t** argv) {
     // 睡眠等 100ms 拍消化按键。
     SendKey(VK_DOWN, 0, 0);
     Sleep(600);
-    SendKey(VK_RETURN, L'
-', 0);
+    SendKey(VK_RETURN, L'', 0);
     Check(WaitForText("æ¥ç general-purpose #5", 15000),
           "第四幕:切看 #5(查看头行出现)");  // 查看 general-purpose #5
     // 完成退场:#5 交卷 -> 查看态静默回流 -> 坞行退场 -> 查看目标消失 ->
@@ -1258,7 +1293,7 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
     {
-        const int rule5 = FindFooterInputRow() - 1;
+        const int rule5 = ComposerTopRuleNow();
         Check(rule5 > 0, "第四幕:退场后 composer 按结构找到");
         Check(CountVisibleComposers() == 1, "第四幕:退场后 composer 恰好一份");
         Check(CountDockRowsWith(kWatchTitle, rule5) == 0, "第四幕:Dock 无已完成行(#5 已退场)");
@@ -1292,15 +1327,13 @@ int wmain(int argc, wchar_t** argv) {
     SendKey('C', 0, LEFT_CTRL_PRESSED);  // 清回显草稿
     Sleep(400);
     SendText(kDenyUser);  // 再派一只后台去写材料
-    SendKey(VK_RETURN, L'
-', 0);
+    SendKey(VK_RETURN, L'', 0);
     Check(WaitForText(kDenyTitle, 20000), "第五幕:#6 入坞(写材料的后台)");
     Check(WaitForIdleComposer(20000), "第五幕:空闲 composer 画出");
     Sleep(500);
     SendKey(VK_DOWN, 0, 0);
     Sleep(600);
-    SendKey(VK_RETURN, L'
-', 0);
+    SendKey(VK_RETURN, L'', 0);
     Check(WaitForText("æ¥ç general-purpose #6", 15000),
           "第五幕:切看 #6(查看头行出现)");  // 查看 general-purpose #6
     // 拒权当场告知:#6 第二轮 write_file 被拒,toast 几秒自收,轮询抓现挂。
@@ -1323,8 +1356,7 @@ int wmain(int argc, wchar_t** argv) {
 
     // ---- 退出子进程 ----(草稿已在第五幕开头清过;这里直接 /exit)
     SendText("/exit");
-    SendKey(VK_RETURN, L'
-', 0);
+    SendKey(VK_RETURN, L'', 0);
     if (WaitForSingleObject(pi.hProcess, 15000) == WAIT_OBJECT_0) {
         DWORD exit_code = STILL_ACTIVE;
         GetExitCodeProcess(pi.hProcess, &exit_code);

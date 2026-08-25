@@ -197,7 +197,9 @@ TEST_CASE("FormatContextBreakdown: 三类正常,token 直传(统一口径),占�
     const auto lines = FormatContextBreakdown(10000, 5000, 20000, /*cache_read=*/0,
                                                /*window=*/256000, /*measured=*/0, BuiltinTheme("dark"), 16);
     REQUIRE(lines.size() == 9);
-    CHECK(lines[0].find("上下文占用分析") != std::string::npos);
+    // d1a148c 起 /context 改分组卡片式,表头从"上下文占用分析(窗口 N)"换成
+    // "── 占用 ──(窗口 N)"(cmd.context.group.usage);此处按新表头认。
+    CHECK(lines[0].find("占用") != std::string::npos);
     CHECK(lines[0].find("256k") != std::string::npos);
 
     // 系统提示:10000/256000 ≈ 3.9% → 4%;条形 0.625 格 → 1 实心 15 空。
