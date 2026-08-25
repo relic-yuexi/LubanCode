@@ -1151,6 +1151,11 @@ const Entry kZhCN[] = {
     {"cmd.context.usage", "上下文占用: {0} / {1} tokens ({2}%)"},
     {"cmd.context.compact_hint", "  —— 接近上限了,建议 /compact 一下"},
     {"cmd.context.window_changed", "上下文窗口已改成 {0} tokens(只本会话生效,没改配置文件)。"},
+    // /context 裸敲的分组标题(第四期起分组卡片式布局)。
+    {"cmd.context.group.usage", "占用"},
+    {"cmd.context.group.cache", "缓存"},
+    {"cmd.context.group.structure", "结构与回收"},
+    {"cmd.context.group.budget", "预算与角色账"},
     // /context 裸敲的分类占用分析(拼装规则见 FormatContextBreakdown)。
     {"cmd.context.bd.header", "上下文占用分析(窗口 {0})"},
     {"cmd.context.bd.system", "系统提示"},
@@ -1161,7 +1166,7 @@ const Entry kZhCN[] = {
     {"cmd.context.bd.remaining", "剩余"},
     {"cmd.context.bd.cache", "(缓存命中 {0},{1}%)"},
     {"cmd.context.bd.cache_no_ratio", "(缓存命中 {0})"},
-    {"cmd.context.epoch", "缓存前缀 epoch {0}:最近一次请求命中 {1} / 总输入 {2}({3}%)——epoch 断因(工具表/系统提示/历史改写等)见回合统计与逐步流水账"},
+    {"cmd.context.epoch", "前缀 epoch {0}:命中 {1} / 总输入 {2}({3}%)"},
     {"cmd.context.bd.measured", "(实测)"},
     {"cmd.context.bd.history_derived", "(=实测总量−系统−工具)"},
     {"cmd.context.bd.note.measured", "(总量为上一轮实测 token;系统提示/工具为字符估,历史为实测总量反推)"},
@@ -1200,8 +1205,10 @@ const Entry kZhCN[] = {
     {"cmd.context.artifacts_none", "artifact 层:本会话尚无落盘的超长工具结果。"},
 
     // ---- L2 microcompact(第三期):冷区局部语义压缩 ----
+    {"microcompact.background", "微压缩 {0} 枚已转后台"},
     {"microcompact.done", "[microcompact] 冷区收拾:{0} 枚换成 cheap 摘要(原文在仓,context_read 可追);{1} 枚退回 L1 预览。"},
     {"microcompact.all_failed", "[microcompact] 本趟全部失败,冷区保持 L1 预览,原文未动。"},
+    {"microcompact.failure_detail", "[microcompact] 首条失败原因:{0}"},
 
     // ---- ContextBudgetPlan 与分层占用(第四期,/context 展示) ----
     {"cmd.context.layers", "分层占用:inline 全文 {0} 枚 · artifact 预览(L1){1} 枚 · microcompact 摘要(L2){2} 枚"},

@@ -328,7 +328,8 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
     };
 
     std::vector<std::string> lines;
-    lines.push_back(trf("cmd.context.bd.header", TokenText(window_tokens)));
+    // 占用卡片表头,与其他分组(── 缓存 ── / ── 结构与回收 ──)同一风格。
+    lines.push_back("── " + tr("cmd.context.group.usage") + " ──(窗口 " + TokenText(window_tokens) + ")");
     // 系统提示/工具永远是字符估(可单独算,但口径仍是字符/3),带 ~。
     lines.push_back(category_row(label_sys, sys_tokens, /*estimated=*/true));
     lines.push_back(category_row(label_tools, tools_tokens, /*estimated=*/true));
