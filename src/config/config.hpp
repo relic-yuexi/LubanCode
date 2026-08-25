@@ -1081,6 +1081,15 @@ std::expected<void, std::string> UpdateRoleModelInConfigFile(const std::string& 
 // 字段一个都不碰。
 std::expected<void, std::string> UpdateSoulInConfigFile(const std::string& file_path, const std::string& soul);
 
+// 更新配置文件 providers 数组里某个条目(按 name 匹配)的 model 字段,条目
+// 里其余键与别的条目原样保留。/model 直切在 active_provider 在场时走这里:
+// 每个 provider 各记各的模型,切走再切回来还是它;顶层 model 字段会被
+// 活跃端镜像压过去,只写顶层等于白写。条目不在这份文件里返回 false 且
+// 不动文件,由调用方退回写顶层。
+std::expected<bool, std::string> UpdateProviderModelInConfigFile(const std::string& file_path,
+                                                                  const std::string& provider_name,
+                                                                  const std::string& model);
+
 // 同上,只更新 language 字段(/language 切换后问"写进配置文件?"选是时
 // 调用,沿用 /model 那套写回)。
 std::expected<void, std::string> UpdateLanguageInConfigFile(const std::string& file_path,

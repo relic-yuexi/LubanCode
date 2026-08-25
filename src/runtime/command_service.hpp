@@ -142,7 +142,10 @@ public:
     ModelQueryResult QueryModels() const;
 
     // 提交:SetModel.value 是模型 id(空 = 不切,只回清单)。写回配置文件
-    // 由 write_config 显式给(终端问一句再传 true;GUI 按钮分立)。
+    // 由 write_config 显式给(终端问一句再传 true;GUI 按钮分立)。写回时
+    // active_provider 在场就写 provider 条目的 model(每个 provider 各记各
+    // 的模型,切走再切回来还是它;顶层字段会被活跃端镜像压过),条目不在
+    // 目标文件里才退回写顶层 model 字段。
     SetModelResult SetModel(const std::string& model_id, bool write_config);
 
     // 提交角色模型(/model <role> <id>):改内存 shorthand 字段——路由表

@@ -84,11 +84,28 @@ SetModelResult CommandService::SetModel(const std::string& model_id, bool write_
 
     // 写回配置文件是显式一笔(终端问过才传 true;GUI 分立按钮)。
     if (write_config && options_.config_file_path.has_value()) {
-        const auto updated = config::UpdateModelInConfigFile(*options_.config_file_path, model_id);
-        if (updated.has_value()) {
-            out.config_written = true;
-        } else {
-            out.error = "config_write_failed: " + updated.error();
+        const std::string& target = *options_.config_file_path;
+        // 活跃 provider 在场:模型写进 provider 条目——每个 provider 各记
+        // 各的,切走再切回来还是这个模型;且活跃端镜像会拿条目的 model
+        // 压过顶层字段,只写顶层等于白写。条目不在这份文件里才退回顶层。
+        bool wrote_entry = false;
+        if (options_.config != nullptr && !options_.config->active_provider.empty()) {
+            const auto entry =
+                config::UpdateProviderModelInConfigFile(target, options_.config->active_provider, model_id);
+            if (!entry.has_value()) {
+                out.error = "config_write_failed: " + entry.error();
+            } else if (*entry) {
+                wrote_entry = true;
+                out.config_written = true;
+            }
+        }
+        if (!wrote_entry && out.error.empty()) {
+            const auto updated = config::UpdateModelInConfigFile(target, model_id);
+            if (updated.has_value()) {
+                out.config_written = true;
+            } else {
+                out.error = "config_write_failed: " + updated.error();
+            }
         }
     }
     return out;

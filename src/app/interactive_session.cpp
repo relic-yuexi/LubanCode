@@ -3205,7 +3205,15 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 command_options.model_catalog = &model_catalog;
                 command_options.current_model = current_model;
                 command_options.current_think = current_think;
-                command_options.config_file_path = config_file_path;
+                // 写回目标默认全局(2026-08-25 改):模型跟人走,不跟项目走,
+                // 免得换个项目就冒出一份钉死的旧模型;项目级要钉,手编
+                // <项目>/.lubancode/config.json。没有全局文件时退 merged
+                // 路径(只剩项目级的情形)。
+                command_options.config_file_path = config_result_.global_config_file_path.has_value()
+                                                       ? config_result_.global_config_file_path
+                                                       : config_file_path;
+                // 问话/回显要与 service 实际写的同一份文件,先抄一份。
+                const std::optional<std::string> write_target = command_options.config_file_path;
                 command_options.fetch_models = [this]()
                     -> std::expected<std::vector<std::pair<std::string, std::string>>, std::string> {
                     const auto headers = lubancode::config::ResolveProviderHeaderTemplates(
@@ -3229,9 +3237,9 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                     // SetRoleModel 认定,不认的如实报错——不然
                     // "/model turbo x9" 会被当成模型名叫"turbo x9"的直切,
                     // 垃圾名悄悄写进配置。单段(比如 /model cheap)仍当直切
-                    // 的模型名处理,不冒充角色命令。落盘规矩与直切同一套:
-                    // 项目级文件在就静默写项目级,没有项目级问全局,都没有
-                    // 只活本会话。
+                    // 的模型名处理,不冒充角色命令。落盘与直切同一套:默认
+                    // 全局,问一句才写(write_target 见上),没有可写的就只
+                    // 活本会话。
                     {
                         const std::size_t space = parsed.args.find_first_of(" \t");
                         if (space != std::string::npos) {
@@ -3242,15 +3250,10 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                             const std::string rest = TrimAscii(parsed.args.substr(space + 1));
                             if (!rest.empty()) {
                                 bool write_config = false;
-                                std::string write_path;
-                                if (config_result_.project_config_file_path.has_value()) {
-                                    write_config = true;
-                                    write_path = *config_result_.project_config_file_path;
-                                } else if (config_file_path.has_value()) {
+                                if (write_target.has_value()) {
                                     const auto answer = lubancode::cli::ReadLine(
-                                        trf("cmd.write_config_prompt", *config_file_path));
+                                        trf("cmd.write_config_prompt", *write_target));
                                     write_config = answer.has_value() && (*answer == "y" || *answer == "Y");
-                                    write_path = config_file_path.value_or(std::string());
                                 } else {
                                     std::cout << tr("cmd.session_only") << "\n";
                                 }
@@ -3259,7 +3262,7 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                                     std::cout << trf("cmd.model.role_switched", result.role, result.model)
                                               << "\n";
                                     if (write_config && result.config_written) {
-                                        std::cout << trf("cmd.write_config.updated", write_path) << "\n";
+                                        std::cout << trf("cmd.write_config.updated", *write_target) << "\n";
                                     } else if (write_config && !result.error.empty()) {
                                         std::cout << trf("cmd.write_config.failed", result.error) << "\n";
                                     }
@@ -3272,22 +3275,17 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                             }
                         }
                     }
-                    // 直切:typed 提交。落盘规矩(2026-08 改):项目级配置
-                    // 文件在,就静默写进项目级——模型是项目该钉住的选择,
-                    // 每回都问一遍只会让人下意识按 y。没有项目级文件时保
-                    // 留旧问法(全局文件要不要写,用户点头才动);provider
-                    // 模式不再挡写盘:active_provider 记在哪个文件,模型就
-                    // 跟着写哪个文件(与 /provider switch 的"记住"同一份)。
+                    // 直切:typed 提交。落盘目标默认全局(write_target 见上):
+                    // 模型跟人走,不跟项目走——换个项目不该冒出一份钉死的
+                    // 旧模型,项目级要钉请手编 <项目>/.lubancode/config.json。
+                    // 问一句才写;active_provider 在场时 service 会把模型写进
+                    // provider 条目(每个 provider 各记各的,切走再切回来还是
+                    // 它),顶层 model 字段会被活跃端镜像压过,单写没用。
                     bool write_config = false;
-                    std::string write_path;
-                    if (config_result_.project_config_file_path.has_value()) {
-                        write_config = true;
-                        write_path = *config_result_.project_config_file_path;
-                    } else if (config_file_path.has_value()) {
-                        const auto answer = lubancode::cli::ReadLine(
-                            trf("cmd.write_config_prompt", *config_file_path));
+                    if (write_target.has_value()) {
+                        const auto answer =
+                            lubancode::cli::ReadLine(trf("cmd.write_config_prompt", *write_target));
                         write_config = answer.has_value() && (*answer == "y" || *answer == "Y");
-                        write_path = config_file_path.value_or(std::string());
                     } else {
                         std::cout << tr("cmd.session_only") << "\n";
                     }
@@ -3295,7 +3293,7 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                     if (result.switched) {
                         std::cout << trf("cmd.model.switched", result.model) << "\n";
                         if (write_config && result.config_written) {
-                            std::cout << trf("cmd.write_config.updated", write_path) << "\n";
+                            std::cout << trf("cmd.write_config.updated", *write_target) << "\n";
                         } else if (write_config && !result.error.empty()) {
                             std::cout << trf("cmd.write_config.failed", result.error) << "\n";
                         }

@@ -2987,6 +2987,35 @@ std::expected<void, std::string> UpdateSoulInConfigFile(const std::string& file_
     return UpdateStringFieldInConfigFile(file_path, "soul", soul);
 }
 
+std::expected<bool, std::string> UpdateProviderModelInConfigFile(const std::string& file_path,
+                                                                  const std::string& provider_name,
+                                                                  const std::string& model) {
+    if (provider_name.empty()) {
+        return false;
+    }
+    auto root = ReadConfigObjectForUpdate(file_path);
+    if (!root.has_value()) {
+        return std::unexpected(root.error());
+    }
+    if (!root->contains("providers") || !(*root)["providers"].is_array()) {
+        return false;
+    }
+    // 只动匹配条目的 model 一个键,条目里其余键(base_url/鉴权/effort…)和
+    // 数组里别的条目原样保留——这份文件可能手编过,不许整段重排。
+    for (nlohmann::json& item : (*root)["providers"]) {
+        if (item.is_object() && item.contains("name") && item["name"].is_string() &&
+            item["name"].get<std::string>() == provider_name) {
+            item["model"] = model;
+            const auto written = WriteConfigObject(file_path, *root);
+            if (!written.has_value()) {
+                return std::unexpected(written.error());
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
 std::expected<void, std::string> UpdateLanguageInConfigFile(const std::string& file_path,
                                                               const std::string& language) {
     return UpdateStringFieldInConfigFile(file_path, "language", language);

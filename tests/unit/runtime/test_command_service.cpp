@@ -268,6 +268,56 @@ TEST_CASE("SetRoleModel:落盘 shorthand;高级段在场且该格已配时改高
     }
 }
 
+TEST_CASE("SetModel:active_provider 在场写 provider 条目,各记各的模型") {
+    TempSessionsDir dir;
+    const std::string cfg_path = dir.path() + "/config.json";
+    {
+        std::ofstream out(cfg_path, std::ios::binary | std::ios::trunc);
+        REQUIRE(out.is_open());
+        out << "{\"model\":\"top-m\",\"active_provider\":\"ds\",\"providers\":["
+               "{\"name\":\"ds\",\"wire\":\"anthropic-messages\",\"base_url\":\"http://x\",\"model\":\"ds-old\"},"
+               "{\"name\":\"glm\",\"wire\":\"anthropic-messages\",\"base_url\":\"http://y\",\"model\":\"glm-old\"}]}";
+    }
+
+    config::Config config;
+    config.model = "top-m";
+    config.active_provider = "ds";
+    rt::CommandService::Options options = BaseOptions();
+    options.config = &config;
+    options.config_file_path = cfg_path;
+    rt::CommandService service(options);
+
+    // 活跃端在场:写 ds 条目的 model,顶层 model 与别的条目一概不动。
+    const auto entry = service.SetModel("ds-flash", /*write_config=*/true);
+    REQUIRE(entry.switched);
+    CHECK(entry.config_written);
+    {
+        std::ifstream in(cfg_path, std::ios::binary);
+        std::ostringstream buffer;
+        buffer << in.rdbuf();
+        const auto parsed = nlohmann::json::parse(buffer.str());
+        CHECK(parsed["providers"][0]["model"] == "ds-flash");
+        CHECK(parsed["providers"][0]["base_url"] == "http://x");  // 其余键保留
+        CHECK(parsed["providers"][1]["model"] == "glm-old");
+        CHECK(parsed["model"] == "top-m");
+        CHECK(parsed["active_provider"] == "ds");
+    }
+
+    // active_provider 空:退回写顶层 model。
+    config.active_provider = "";
+    const auto top = service.SetModel("top-new", true);
+    REQUIRE(top.switched);
+    CHECK(top.config_written);
+    {
+        std::ifstream in(cfg_path, std::ios::binary);
+        std::ostringstream buffer;
+        buffer << in.rdbuf();
+        const auto parsed = nlohmann::json::parse(buffer.str());
+        CHECK(parsed["model"] == "top-new");
+        CHECK(parsed["providers"][0]["model"] == "ds-flash");  // 条目不再被动
+    }
+}
+
 TEST_CASE("ResumeThread:序号、id、空串三条解析路,旧账接上") {
     TempSessionsDir dir;
     const std::string id_a = WriteSampleSession(dir.path(), "第一场");
