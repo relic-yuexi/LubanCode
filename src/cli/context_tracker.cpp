@@ -31,6 +31,12 @@ void ContextTracker::ApplyUsage(const api::Usage& usage) {
         // 本场累计(命中率分子分母):只认实测到的这笔,跨轮不清零。
         session_cache_read_total_ += usage.cache_read_tokens > 0 ? usage.cache_read_tokens : 0;
         session_input_total_ += api::TotalInputTokens(usage);
+        // 逐轮历史:环形缓冲,保留最近 kCacheHistorySize 轮。
+        cache_history_.push_back(CacheTurn{api::TotalInputTokens(usage),
+                                           usage.cache_read_tokens > 0 ? usage.cache_read_tokens : 0});
+        if (cache_history_.size() > kCacheHistorySize) {
+            cache_history_.erase(cache_history_.begin());
+        }
         usage_stale_ = false;
         return;
     }

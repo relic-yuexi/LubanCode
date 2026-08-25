@@ -90,6 +90,32 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                                      lubancode::cli::FormatTokenCount(context_tracker.last_total_input_tokens()),
                                      hit_percent >= 0 ? std::to_string(hit_percent) : std::string("?"))
                       << "\n";
+            // 会话累计总账:Σ命中 / Σ输入。跟单轮口径分开,并明确标注
+            // "会话累计"——它回答"整个 session 发了多少输入、多少走了
+            // 缓存读",不是"每轮都这么多"。
+            if (context_tracker.session_input_total() > 0) {
+                const int session_percent = context_tracker.session_cache_hit_percent();
+                std::cout << "  "
+                          << trf("cmd.context.cache_session",
+                                 lubancode::cli::FormatTokenCount(context_tracker.session_cache_read_total()),
+                                 lubancode::cli::FormatTokenCount(context_tracker.session_input_total()),
+                                 session_percent >= 0 ? std::to_string(session_percent) : std::string("?"))
+                          << "\n";
+            }
+            // 逐轮命中率趋势:最近 kCacheHistorySize 轮,每轮一行,最旧在前。
+            // 命中率掉的时候一眼看出是哪一轮、什么操作导致的。
+            const auto& history = context_tracker.cache_history();
+            if (!history.empty()) {
+                std::cout << "  " << trf("cmd.context.cache_history_header", history.size()) << "\n";
+                for (const auto& turn : history) {
+                    const int pct = turn.hit_percent();
+                    std::cout << "    " << trf("cmd.context.cache_history_row",
+                                               lubancode::cli::FormatTokenCount(turn.input_tokens),
+                                               lubancode::cli::FormatTokenCount(turn.cache_read_tokens),
+                                               pct >= 0 ? std::to_string(pct) : std::string("?"))
+                              << "\n";
+                }
+            }
         }
 
         // 口径说明(挂在占用卡片末尾,不再散落):状态栏与这里读的是同一只

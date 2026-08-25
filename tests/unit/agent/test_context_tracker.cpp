@@ -117,6 +117,42 @@ TEST_CASE("ContextTracker: 本场累计命中率跨请求累加,与最近一次�
     CHECK(tracker.usage_stale());
 }
 
+TEST_CASE("ContextTracker: 逐轮命中历史按轮记、环形保留最近 N 轮") {
+    cli::ContextTracker tracker(1000);
+    CHECK(tracker.cache_history().empty());  // 一次实测都没有
+    // 三轮:冷 miss、吃缓存、半命中。历史按时间序,每轮分子分母独立。
+    tracker.ApplyUsage(api::Usage{1000, 10, 0, 0});       // 输入 1k,命中 0
+    tracker.ApplyUsage(api::Usage{1000, 10, 1000, 0});    // 输入 2k,命中 1k
+    tracker.ApplyUsage(api::Usage{500, 10, 500, 0});      // 输入 1k,命中 0.5k
+    REQUIRE(tracker.cache_history().size() == 3);
+    CHECK(tracker.cache_history()[0].input_tokens == 1000);
+    CHECK(tracker.cache_history()[0].cache_read_tokens == 0);
+    CHECK(tracker.cache_history()[0].hit_percent() == 0);
+    CHECK(tracker.cache_history()[1].input_tokens == 2000);
+    CHECK(tracker.cache_history()[1].cache_read_tokens == 1000);
+    CHECK(tracker.cache_history()[1].hit_percent() == 50);
+    CHECK(tracker.cache_history()[2].input_tokens == 1000);
+    CHECK(tracker.cache_history()[2].cache_read_tokens == 500);
+    CHECK(tracker.cache_history()[2].hit_percent() == 50);
+    // 第 4 轮:未到环形上限(12),4 条都保留,按时间序。
+    tracker.ApplyUsage(api::Usage{100, 0, 900, 0});
+    REQUIRE(tracker.cache_history().size() == 4);
+    CHECK(tracker.cache_history()[0].input_tokens == 1000);  // 第一轮还在
+    CHECK(tracker.cache_history()[3].input_tokens == 1000);  // 新轮在末尾
+    // 全零 usage(没实测)不进历史。
+    tracker.ApplyUsage(api::Usage{});
+    REQUIRE(tracker.cache_history().size() == 4);
+    // 超出环形上限:保留最近 kCacheHistorySize 轮。
+    cli::ContextTracker big(1000);
+    for (int i = 0; i < 20; ++i) {
+        big.ApplyUsage(api::Usage{100, 0, 100, 0});
+    }
+    REQUIRE(big.cache_history().size() == cli::ContextTracker::kCacheHistorySize);
+    CHECK(big.cache_history().front().input_tokens == 200);  // 最旧 = 第 9 轮
+    CHECK(big.cache_history().back().input_tokens == 200);
+}
+
+
 TEST_CASE("ContextTracker: 服务端前缀缓存结论三态,默认未验证") {
     cli::ContextTracker tracker(1000);
     CHECK_FALSE(tracker.server_prefix_caching().has_value());  // 没读过 metrics

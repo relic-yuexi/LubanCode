@@ -194,12 +194,15 @@ std::string StreamFooterInterruptText(bool plain) {
 }
 
 std::string BuildCacheNote(const ContextTracker& tracker, bool last_usage_reported) {
-    if (tracker.session_input_total() <= 0) {
+    // 状态栏缓存注记:显示"最近一次请求"的命中,不显示会话累计——累计
+    // 分母每轮都重复加进过去所有输入,数字越大越接近 100%,容易误读成
+    // "每轮都 99%"。单轮口径才对应"现在这一下花了多少钱"。
+    if (tracker.last_total_input_tokens() <= 0) {
         return {};  // 一次实测都没有:整段不挂
     }
-    if (tracker.session_cache_read_total() > 0) {
-        const int percent = tracker.session_cache_hit_percent();
-        return trf("status.cache_note_hit", FormatTokenCount(tracker.session_cache_read_total()),
+    if (tracker.last_cache_read_tokens() > 0) {
+        const int percent = tracker.last_cache_hit_percent();
+        return trf("status.cache_note_hit", FormatTokenCount(tracker.last_cache_read_tokens()),
                    percent >= 0 ? std::to_string(percent) : std::string("?"));
     }
     if (!last_usage_reported) {

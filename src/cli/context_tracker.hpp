@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 #include "api/types.hpp"
 
@@ -92,6 +93,32 @@ public:
         return static_cast<int>(ratio + 0.5);
     }
 
+    // 逐轮缓存命中历史:每笔实测 usage 记一条"该轮完整输入 / 该轮命中",
+    // 环形缓冲,保留最近 kCacheHistorySize 轮。分子分母都是"那一轮"的,
+    // 不加总、不掺跨轮重复——跟 session_* 累计口径互补:累计口径回答
+    // "整个 session 我发了多少输入、多少走了缓存读",逐轮口径回答
+    // "每一轮各自命中多少"。命中率掉的时候,一眼看出是哪一轮、什么
+    // 操作导致的(epoch 断因在回合统计/流水账里另有细账)。
+    static constexpr std::size_t kCacheHistorySize = 12;
+
+    struct CacheTurn {
+        std::int64_t input_tokens = 0;      // 该轮完整输入(TotalInputTokens)
+        std::int64_t cache_read_tokens = 0; // 该轮缓存命中
+        // 该轮命中率(百分比,四舍五入);input 为 0 时返回 -1(未实测)。
+        int hit_percent() const {
+            if (input_tokens <= 0) {
+                return -1;
+            }
+            const double ratio = static_cast<double>(cache_read_tokens) /
+                                 static_cast<double>(input_tokens) * 100.0;
+            return static_cast<int>(ratio + 0.5);
+        }
+    };
+
+    // 最近 kCacheHistorySize 轮,按时间顺序(最旧在前)。不满一轮时
+    // 也按序排好;一次实测都没有时为空。调用方直接读,显示层负责截断。
+    const std::vector<CacheTurn>& cache_history() const { return cache_history_; }
+
     // /context <档位> 用:会话级临时改窗口大小,不改配置文件。
     void set_window_tokens(std::size_t window_tokens) { window_tokens_ = window_tokens; }
 
@@ -111,6 +138,7 @@ private:
     std::optional<bool> server_prefix_caching_;
     std::int64_t session_cache_read_total_ = 0;
     std::int64_t session_input_total_ = 0;
+    std::vector<CacheTurn> cache_history_;
 };
 
 }  // namespace lubancode::cli

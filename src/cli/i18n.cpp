@@ -1167,6 +1167,8 @@ const Entry kZhCN[] = {
     {"cmd.context.bd.cache", "(缓存命中 {0},{1}%)"},
     {"cmd.context.bd.cache_no_ratio", "(缓存命中 {0})"},
     {"cmd.context.epoch", "前缀 epoch {0}:命中 {1} / 总输入 {2}({3}%)"},
+    {"cmd.context.cache_session", "会话累计:命中 {0} / 总输入 {1}({2}%)"},
+    {"cmd.context.cache_history_header", "逐轮命中(最近 {0} 轮,最旧在前):"},    {"cmd.context.cache_history_row", "输入 {0} / 命中 {1}({2}%)"},
     {"cmd.context.bd.measured", "(实测)"},
     {"cmd.context.bd.history_derived", "(=实测总量−系统−工具)"},
     {"cmd.context.bd.note.measured", "(总量为上一轮实测 token;系统提示/工具为字符估,历史为实测总量反推)"},
