@@ -94,6 +94,59 @@ SetModelResult CommandService::SetModel(const std::string& model_id, bool write_
     return out;
 }
 
+// ---- SetRoleModel ------------------------------------------------------------
+
+SetRoleModelResult CommandService::SetRoleModel(const std::string& role_name, const std::string& model_id,
+                                                bool write_config) {
+    SetRoleModelResult out;
+    // 角色名归一:小写、认别名 plan→lao。不认的名字如实报,不猜。
+    std::string role;
+    for (const char c : role_name) {
+        role += static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    }
+    if (role == "plan") {
+        role = "lao";  // lao 角色的对外别名(计划与架构档)
+    }
+    if (role != "normal" && role != "cheap" && role != "lao") {
+        out.error = "unknown_role";
+        return out;
+    }
+    if (model_id.empty()) {
+        out.error = "empty_model";
+        return out;
+    }
+    if (options_.config == nullptr) {
+        out.error = "not_configured";
+        return out;
+    }
+
+    // 内存生效一笔:改 shorthand 字段。路由表每次 Route() 现折 config
+    // (BuildRoleSpecs 直读这份内存),下一笔后台小活就走新模型;高级段
+    // (model_roles.<role>)优先级高于 shorthand,用户配了高级段时内存里
+    // 仍以高级段为准——落盘那一笔会改到高级段,重启后两边一致。
+    if (role == "normal") {
+        options_.config->normal_model = model_id;
+    } else if (role == "cheap") {
+        options_.config->cheap_model = model_id;
+    } else {
+        options_.config->lao_model = model_id;
+    }
+    out.role = role;
+    out.model = model_id;
+    out.switched = true;
+
+    if (write_config && options_.config_file_path.has_value()) {
+        const auto updated =
+            config::UpdateRoleModelInConfigFile(*options_.config_file_path, role, model_id);
+        if (updated.has_value()) {
+            out.config_written = true;
+        } else {
+            out.error = "config_write_failed: " + updated.error();
+        }
+    }
+    return out;
+}
+
 // ---- ResumeThread -------------------------------------------------------------
 
 std::vector<ThreadListEntry> CommandService::ListThreads(std::size_t limit) const {

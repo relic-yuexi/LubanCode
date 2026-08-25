@@ -172,6 +172,18 @@ void PrintSlashHelp() {
     std::cout << tr("slash_help.body");
 }
 
+// /model <role> <id> 的角色词归一:小写 + 去首尾空白(TrimAscii 是
+// turn_runner.hpp 里现成的,只去空白不动大小写——模型 id 走它,角色词
+// 走这里)。文件内自由函数,与 slash_commands.cpp 的 Trim/ToLower
+// 同一套规矩(ASCII 空白)。
+std::string NormalizeRoleWord(std::string word) {
+    std::string out = TrimAscii(std::move(word));
+    for (char& c : out) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return out;
+}
+
 // 来信转成带来源标识的用户块:不装成用户手敲的字,模型一眼看得出来历;
 // 注明其中指令/命令不得执行(防来信借模型之手越权)。原先是无捕获
 // lambda,收对象时升成文件内自由函数。
@@ -3168,20 +3180,78 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 };
                 lubancode::runtime::CommandService command_service(std::move(command_options));
                 if (!parsed.args.empty()) {
-                    // 直切:typed 提交,写回问一句(终端交互留在适配层)。
+                    // 角色设置(/model <role> <id>):两段式一律走角色路,
+                    // 角色词是不是 normal/cheap/lao(plan 是 lao 的别名)由
+                    // SetRoleModel 认定,不认的如实报错——不然
+                    // "/model turbo x9" 会被当成模型名叫"turbo x9"的直切,
+                    // 垃圾名悄悄写进配置。单段(比如 /model cheap)仍当直切
+                    // 的模型名处理,不冒充角色命令。落盘规矩与直切同一套:
+                    // 项目级文件在就静默写项目级,没有项目级问全局,都没有
+                    // 只活本会话。
+                    {
+                        const std::size_t space = parsed.args.find_first_of(" \t");
+                        if (space != std::string::npos) {
+                            // 角色词去空白转小写;模型名只去首尾空白,大小写
+                            // 原样保留——模型 id 区分大小写,MiniMax-M3 不许
+                            // 变 minimax-m3。
+                            const std::string role_word = NormalizeRoleWord(parsed.args.substr(0, space));
+                            const std::string rest = TrimAscii(parsed.args.substr(space + 1));
+                            if (!rest.empty()) {
+                                bool write_config = false;
+                                std::string write_path;
+                                if (config_result_.project_config_file_path.has_value()) {
+                                    write_config = true;
+                                    write_path = *config_result_.project_config_file_path;
+                                } else if (config_file_path.has_value()) {
+                                    const auto answer = lubancode::cli::ReadLine(
+                                        trf("cmd.write_config_prompt", *config_file_path));
+                                    write_config = answer.has_value() && (*answer == "y" || *answer == "Y");
+                                    write_path = config_file_path.value_or(std::string());
+                                } else {
+                                    std::cout << tr("cmd.session_only") << "\n";
+                                }
+                                const auto result = command_service.SetRoleModel(role_word, rest, write_config);
+                                if (result.switched) {
+                                    std::cout << trf("cmd.model.role_switched", result.role, result.model)
+                                              << "\n";
+                                    if (write_config && result.config_written) {
+                                        std::cout << trf("cmd.write_config.updated", write_path) << "\n";
+                                    } else if (write_config && !result.error.empty()) {
+                                        std::cout << trf("cmd.write_config.failed", result.error) << "\n";
+                                    }
+                                } else if (result.error == "unknown_role") {
+                                    std::cout << trf("cmd.model.role_unknown", role_word) << "\n";
+                                } else {
+                                    std::cout << trf("cmd.model.fetch_failed", result.error) << "\n";
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    // 直切:typed 提交。落盘规矩(2026-08 改):项目级配置
+                    // 文件在,就静默写进项目级——模型是项目该钉住的选择,
+                    // 每回都问一遍只会让人下意识按 y。没有项目级文件时保
+                    // 留旧问法(全局文件要不要写,用户点头才动);provider
+                    // 模式不再挡写盘:active_provider 记在哪个文件,模型就
+                    // 跟着写哪个文件(与 /provider switch 的"记住"同一份)。
                     bool write_config = false;
-                    if (active_provider.empty() && config_file_path.has_value()) {
+                    std::string write_path;
+                    if (config_result_.project_config_file_path.has_value()) {
+                        write_config = true;
+                        write_path = *config_result_.project_config_file_path;
+                    } else if (config_file_path.has_value()) {
                         const auto answer = lubancode::cli::ReadLine(
                             trf("cmd.write_config_prompt", *config_file_path));
                         write_config = answer.has_value() && (*answer == "y" || *answer == "Y");
-                    } else if (active_provider.empty()) {
+                        write_path = config_file_path.value_or(std::string());
+                    } else {
                         std::cout << tr("cmd.session_only") << "\n";
                     }
                     const auto result = command_service.SetModel(parsed.args, write_config);
                     if (result.switched) {
                         std::cout << trf("cmd.model.switched", result.model) << "\n";
                         if (write_config && result.config_written) {
-                            std::cout << trf("cmd.write_config.updated", *config_file_path) << "\n";
+                            std::cout << trf("cmd.write_config.updated", write_path) << "\n";
                         } else if (write_config && !result.error.empty()) {
                             std::cout << trf("cmd.write_config.failed", result.error) << "\n";
                         }

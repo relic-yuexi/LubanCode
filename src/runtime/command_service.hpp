@@ -75,6 +75,15 @@ struct SetModelResult {
     std::string error;          // 空 = 成功;非空人话
 };
 
+// SetRoleModel 的结果(/model <role> <id>)。
+struct SetRoleModelResult {
+    bool switched = false;        // 角色名不认/模型名为空为 false
+    std::string role;             // 归一后的角色名(normal/cheap/lao)
+    std::string model;            // 设置后的模型名
+    bool config_written = false;  // 写回配置文件成功
+    std::string error;            // 空 = 成功;非空人话(稳定码前缀)
+};
+
 // ---------------------------------------------------------------------------
 // ResumeThread
 // ---------------------------------------------------------------------------
@@ -135,6 +144,13 @@ public:
     // 提交:SetModel.value 是模型 id(空 = 不切,只回清单)。写回配置文件
     // 由 write_config 显式给(终端问一句再传 true;GUI 按钮分立)。
     SetModelResult SetModel(const std::string& model_id, bool write_config);
+
+    // 提交角色模型(/model <role> <id>):改内存 shorthand 字段——路由表
+    // 每次 Route() 现折 config,下一笔后台小活立即生效。write_config 为
+    // true 时经 UpdateRoleModelInConfigFile 落盘(高级段在场且该格已配就
+    // 改高级段,否则写 shorthand;文件不存在报错,不代建)。
+    SetRoleModelResult SetRoleModel(const std::string& role_name, const std::string& model_id,
+                                    bool write_config);
 
     // ---- ResumeThread ---------------------------------------------------------
     // 列档(sessions_dir 从 runtime 来;limit 常规 20)。

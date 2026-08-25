@@ -2870,8 +2870,11 @@ namespace {
 
 // 只更新一份已存在配置文件里的某个字符串字段,其余字段(哪怕是 FileConfig
 // 不认得的)原样保留——直接读原始 JSON、改一个键、写回去。
-// UpdateModelInConfigFile / UpdateSoulInConfigFile 共用这一份。
-std::expected<void, std::string> UpdateStringFieldInConfigFile(const std::string& file_path, const char* field,
+// UpdateModelInConfigFile / UpdateSoulInConfigFile 共用这一份。field 收
+// std::string 而非 const char*:UpdateRoleModelInConfigFile 要拼
+// "<role>_model" 这种动态字段名。
+std::expected<void, std::string> UpdateStringFieldInConfigFile(const std::string& file_path,
+                                                                 const std::string& field,
                                                                  const std::string& value) {
     std::ifstream in(file_path, std::ios::binary);
     if (!in.is_open()) {
@@ -2900,10 +2903,84 @@ std::expected<void, std::string> UpdateStringFieldInConfigFile(const std::string
     return {};
 }
 
+// 读整份配置文件的原始 JSON(供改完再整体写回的调用方用)。文件不存在
+// 返回空 object(调用方自己决定要不要建);读得到但顶层不是 object、或
+// 内容不是合法 JSON,都报错。
+std::expected<nlohmann::json, std::string> ReadConfigObjectForUpdate(const std::string& file_path) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::exists(fs::path(file_path), ec) && !ec) {
+        return nlohmann::json::object();
+    }
+    if (ec) {
+        return std::unexpected("检查配置文件 " + file_path + " 失败: " + ec.message());
+    }
+
+    std::ifstream in(file_path, std::ios::binary);
+    if (!in.is_open()) {
+        return std::unexpected("配置文件 " + file_path + " 打不开(检查一下权限)");
+    }
+    std::ostringstream buffer;
+    buffer << in.rdbuf();
+    try {
+        nlohmann::json root = nlohmann::json::parse(buffer.str());
+        if (!root.is_object()) {
+            return std::unexpected("配置文件 " + file_path + " 顶层必须是一个 JSON object(花括号包起来的那种)");
+        }
+        return root;
+    } catch (const nlohmann::json::parse_error& e) {
+        return std::unexpected("配置文件 " + file_path + " 不是合法 JSON: " + std::string(e.what()));
+    }
+}
+
+// 把整份 JSON 写回配置文件(父目录缺了顺手建好)。与
+// UpdateStringFieldInConfigFile 的"只动一个键"相对,这对函数管整读整写。
+std::expected<void, std::string> WriteConfigObject(const std::string& file_path, const nlohmann::json& root) {
+    namespace fs = std::filesystem;
+    const fs::path path(file_path);
+    std::error_code ec;
+    if (!path.parent_path().empty()) {
+        fs::create_directories(path.parent_path(), ec);
+        if (ec) {
+            return std::unexpected("建目录 " + platform::PathToUtf8(path.parent_path()) + " 失败: " + ec.message());
+        }
+    }
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+        return std::unexpected("配置文件 " + file_path + " 打不开写入(检查一下权限)");
+    }
+    out << root.dump(2);
+    if (!out.good()) {
+        return std::unexpected("配置文件 " + file_path + " 写入失败(检查一下磁盘/权限)");
+    }
+    return {};
+}
+
 }  // namespace
 
 std::expected<void, std::string> UpdateModelInConfigFile(const std::string& file_path, const std::string& model) {
     return UpdateStringFieldInConfigFile(file_path, "model", model);
+}
+
+std::expected<void, std::string> UpdateRoleModelInConfigFile(const std::string& file_path,
+                                                             const std::string& role_name,
+                                                             const std::string& model) {
+    auto root = ReadConfigObjectForUpdate(file_path);
+    if (!root.has_value()) {
+        return std::unexpected(root.error());
+    }
+    // 高级段该格已配(model 非空)就改高级段——BuildRoleSpecs 里高级段压过
+    // shorthand,只写 shorthand 会看不见。格内其余字段原样保留。
+    if (root->contains("model_roles") && (*root)["model_roles"].is_object()) {
+        nlohmann::json& roles = (*root)["model_roles"];
+        if (roles.contains(role_name) && roles[role_name].is_object() && roles[role_name].contains("model") &&
+            roles[role_name]["model"].is_string() && !roles[role_name]["model"].get<std::string>().empty()) {
+            roles[role_name]["model"] = model;
+            return WriteConfigObject(file_path, *root);
+        }
+    }
+    // 没有高级段或该格未配:落 shorthand 字段(与顶层单字段同一套读端)。
+    return UpdateStringFieldInConfigFile(file_path, role_name + "_model", model);
 }
 
 std::expected<void, std::string> UpdateSoulInConfigFile(const std::string& file_path, const std::string& soul) {
@@ -2990,54 +3067,6 @@ nlohmann::json ProvidersToJson(const std::vector<ProviderConfig>& providers) {
         out.push_back(std::move(item));
     }
     return out;
-}
-
-std::expected<nlohmann::json, std::string> ReadConfigObjectForUpdate(const std::string& file_path) {
-    namespace fs = std::filesystem;
-    std::error_code ec;
-    if (!fs::exists(fs::path(file_path), ec) && !ec) {
-        return nlohmann::json::object();
-    }
-    if (ec) {
-        return std::unexpected("检查配置文件 " + file_path + " 失败: " + ec.message());
-    }
-
-    std::ifstream in(file_path, std::ios::binary);
-    if (!in.is_open()) {
-        return std::unexpected("配置文件 " + file_path + " 打不开(检查一下权限)");
-    }
-    std::ostringstream buffer;
-    buffer << in.rdbuf();
-    try {
-        nlohmann::json root = nlohmann::json::parse(buffer.str());
-        if (!root.is_object()) {
-            return std::unexpected("配置文件 " + file_path + " 顶层必须是一个 JSON object(花括号包起来的那种)");
-        }
-        return root;
-    } catch (const nlohmann::json::parse_error& e) {
-        return std::unexpected("配置文件 " + file_path + " 不是合法 JSON: " + std::string(e.what()));
-    }
-}
-
-std::expected<void, std::string> WriteConfigObject(const std::string& file_path, const nlohmann::json& root) {
-    namespace fs = std::filesystem;
-    const fs::path path(file_path);
-    std::error_code ec;
-    if (!path.parent_path().empty()) {
-        fs::create_directories(path.parent_path(), ec);
-        if (ec) {
-            return std::unexpected("建目录 " + platform::PathToUtf8(path.parent_path()) + " 失败: " + ec.message());
-        }
-    }
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out.is_open()) {
-        return std::unexpected("配置文件 " + file_path + " 打不开写入(检查一下权限)");
-    }
-    out << root.dump(2);
-    if (!out.good()) {
-        return std::unexpected("配置文件 " + file_path + " 写入失败(检查一下磁盘/权限)");
-    }
-    return {};
 }
 
 std::expected<std::vector<ProviderConfig>, std::string> ProvidersInConfigObject(const nlohmann::json& root,

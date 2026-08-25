@@ -16,8 +16,11 @@
 #include <fstream>
 #include <functional>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include "agent/loop.hpp"
 #include "agent/session_store.hpp"
@@ -179,6 +182,90 @@ TEST_CASE("SetModel:目录条目应用 default_think") {
     const auto stay = service.SetModel("m1", false);
     CHECK(stay.switched);
     CHECK(*options.current_think == "high");
+}
+
+TEST_CASE("SetRoleModel:改内存 shorthand,角色名归一,不认的名字如实报") {
+    config::Config config;
+    config.model = "m1";
+    rt::CommandService::Options options = BaseOptions();
+    options.config = &config;
+
+    rt::CommandService service(options);
+
+    // cheap 设置 + 大写归一。
+    const auto cheap = service.SetRoleModel("CHEAP", "mini-1", /*write_config=*/false);
+    REQUIRE(cheap.switched);
+    CHECK(cheap.role == "cheap");
+    CHECK(cheap.model == "mini-1");
+    CHECK(config.cheap_model == "mini-1");
+
+    // plan 是 lao 的别名。
+    const auto lao = service.SetRoleModel("plan", "big-1", false);
+    REQUIRE(lao.switched);
+    CHECK(lao.role == "lao");
+    CHECK(config.lao_model == "big-1");
+
+    // normal 同路。
+    const auto normal = service.SetRoleModel("Normal", "m2", false);
+    REQUIRE(normal.switched);
+    CHECK(config.normal_model == "m2");
+
+    // 不认的角色名/空模型名:不切、带稳定码。
+    const auto bad = service.SetRoleModel("turbo", "x", false);
+    CHECK_FALSE(bad.switched);
+    CHECK(bad.error == "unknown_role");
+    const auto empty = service.SetRoleModel("cheap", "", false);
+    CHECK_FALSE(empty.switched);
+    CHECK(empty.error == "empty_model");
+}
+
+TEST_CASE("SetRoleModel:落盘 shorthand;高级段在场且该格已配时改高级段") {
+    TempSessionsDir dir;  // 借它的临时目录,存配置文件
+    const std::string cfg_path = dir.path() + "/config.json";
+
+    {  // 先造一份带 model_roles 高级段(仅 normal 格)的文件
+        std::ofstream out(cfg_path, std::ios::binary | std::ios::trunc);
+        REQUIRE(out.is_open());
+        out << "{\"model\":\"m1\","
+               "\"model_roles\":{\"normal\":{\"model\":\"n-1\",\"effort\":\"low\"}}}";
+    }
+
+    config::Config config;
+    config.model = "m1";
+    rt::CommandService::Options options = BaseOptions();
+    options.config = &config;
+    options.config_file_path = cfg_path;
+    rt::CommandService service(options);
+
+    // cheap 没有高级段格:落 shorthand 字段。
+    const auto cheap = service.SetRoleModel("cheap", "mini-9", /*write_config=*/true);
+    REQUIRE(cheap.switched);
+    CHECK(cheap.config_written);
+    {
+        std::ifstream in(cfg_path, std::ios::binary);
+        std::ostringstream buffer;
+        buffer << in.rdbuf();
+        const auto parsed = nlohmann::json::parse(buffer.str());
+        CHECK(parsed["cheap_model"] == "mini-9");
+        CHECK(parsed["model"] == "m1");  // 别的字段原样保留
+        // 高级段只有 normal 格,没被动过。
+        CHECK(parsed["model_roles"]["normal"]["model"] == "n-1");
+        CHECK(parsed["model_roles"]["normal"]["effort"] == "low");
+    }
+
+    // normal 高级段已配:改高级段那格,不写 shorthand。
+    const auto normal = service.SetRoleModel("normal", "n-2", true);
+    REQUIRE(normal.switched);
+    CHECK(normal.config_written);
+    {
+        std::ifstream in(cfg_path, std::ios::binary);
+        std::ostringstream buffer;
+        buffer << in.rdbuf();
+        const auto parsed = nlohmann::json::parse(buffer.str());
+        CHECK(parsed["model_roles"]["normal"]["model"] == "n-2");
+        CHECK(parsed["model_roles"]["normal"]["effort"] == "low");  // 其余字段保留
+        CHECK_FALSE(parsed.contains("normal_model"));
+    }
 }
 
 TEST_CASE("ResumeThread:序号、id、空串三条解析路,旧账接上") {

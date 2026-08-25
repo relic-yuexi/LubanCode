@@ -1069,6 +1069,14 @@ std::expected<std::string, std::string> SaveConfigFile(const Config& config);
 // 文件?"选是,就调这个。file_path 打不开、内容不是合法 JSON,都报错。
 std::expected<void, std::string> UpdateModelInConfigFile(const std::string& file_path, const std::string& model);
 
+// /model <role> <id> 落盘用:写 shorthand 字段(cheap_model/normal_model/
+// lao_model)。若该文件里已有 model_roles 高级段且对应角色的 model 非空
+// (高级段优先于 shorthand,写 shorthand 会看不见),则改写高级段那格的
+// model,其余字段(provider/effort/窗口)原样保留;两处都没写就落 shorthand。
+std::expected<void, std::string> UpdateRoleModelInConfigFile(const std::string& file_path,
+                                                             const std::string& role_name,
+                                                             const std::string& model);
+
 // 同上,只更新 soul 字段(/soul 切换后问"写进配置?"选是时调用),其余
 // 字段一个都不碰。
 std::expected<void, std::string> UpdateSoulInConfigFile(const std::string& file_path, const std::string& soul);

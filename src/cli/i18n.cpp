@@ -603,7 +603,7 @@ const Entry kZhCN[] = {
 
     // ---- slash 命令描述表 ----
     {"slash.desc.help", "列出所有命令"},
-    {"slash.desc.model", "拉模型列表选;/model 名字 直接切;/model roles 看任务路由"},
+    {"slash.desc.model", "拉模型列表选;/model 名字 直接切;/model cheap 名字 设后台档;/model roles 看任务路由"},
     {"slash.desc.provider", "列、添、切、删、改、刷模型服务端;/provider add|list|switch|remove|set|refresh"},
     {"slash.desc.config", "打印当前生效配置和本会话在用的 model"},
     {"slash.desc.update", "检查 GitHub 最新 Release；升级时同步程序与官方技能"},
@@ -1299,6 +1299,8 @@ const Entry kZhCN[] = {
     {"cmd.model.bad_number", "编号不对,取消切换。"},
     {"cmd.model.not_number", "没听懂,取消切换。"},
     {"cmd.model.switched", "已切换到模型: {0}(本会话生效)"},
+    {"cmd.model.role_switched", "{0} 角色 → {1}(本会话生效)"},
+    {"cmd.model.role_unknown", "不认得模型角色: {0}(只认 normal/cheap/lao,plan 是 lao 的别名)。"},
     {"cmd.model.roles_header", "三档模型角色(按任务路由;子代理当前随会话模型;未配置的角色回落 normal):"},
     {"cmd.model.roles_unavailable", "模型路由未建(单发/测试路径),/model roles 只在交互会话可用。"},
     {"cmd.write_config_prompt", "写进配置文件 {0}? [y/N]: "},
@@ -2236,7 +2238,9 @@ const Entry kEn[] = {
 
     // ---- slash command descriptions ----
     {"slash.desc.help", "list all commands"},
-    {"slash.desc.model", "pick a model; /model <name> switches directly; /model roles shows task routing"},
+    {"slash.desc.model",
+     "pick a model; /model <name> switches directly; /model cheap <name> sets the background role; /model roles "
+     "shows task routing"},
     {"slash.desc.provider",
      "list, add, switch, remove, set, or refresh the provider catalog; /provider add|list|switch|remove|set|refresh"},
     {"slash.desc.config", "print the effective configuration and the session model"},
@@ -2903,6 +2907,9 @@ const Entry kEn[] = {
      "back to normal):"},
     {"cmd.model.roles_unavailable",
      "The model router is unavailable in this one-shot/test path; /model roles is interactive-only."},
+    {"cmd.model.role_switched", "{0} role -> {1} (this session only)"},
+    {"cmd.model.role_unknown",
+     "Unknown model role: {0} (only normal/cheap/lao are recognized; plan is an alias of lao)."},
 
     // cmd.context.* 大族仍按下面的 P1 清单回退 zh-CN,这两个口径说明键随
     // "context 状态栏回合内刷新"一起先补上英文,中英成对。
