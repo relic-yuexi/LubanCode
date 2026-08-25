@@ -545,6 +545,27 @@ TEST_CASE("RunProviderPresetWizard: 选预设只问密钥与确认,参数全带�
     CHECK(outcome->provider.api_key == "sk-demo");
     CHECK(outcome->provider.extra_body["tool_stream"] == true);
     CHECK(outcome->provider.key_env == "GLM_KEY");
+    CHECK(scripted.AnyPrintedContains("Enter 直接保存当前配置"));
+    CHECK(scripted.AnyPrintedContains("选择（直接回车保存）"));
+}
+
+TEST_CASE("RunProviderPresetWizard: 汇总页编号真能跳回改单项,改完仍可回车保存") {
+    const auto catalog = config::ParseProviderCatalogJson(
+        R"({"schema_version":1,"revision":"2026-07-25","providers":{"p":{"name":"P","wire":"responses","base_url":"https://api.test/v1","key_env":"P_KEY","default_model":"m","models":{"m":{"name":"M"}}}}})",
+        "p");
+    REQUIRE(catalog.has_value());
+    ScriptedIO scripted;
+    scripted.lines = {"1", "1"};  // 目录选 p,auth=none
+    scripted.Say("6");             // 汇总页跳回 effort
+    scripted.Say("high");          // 改完拿回程票,直回汇总
+    scripted.Say("");              // 不再修改,直接保存
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderPresetWizard(io, *catalog, "", {});
+
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->save_requested);
+    CHECK(outcome->provider.model_reasoning_effort == "high");
+    CHECK(scripted.fetch_calls == 0);
 }
 
 TEST_CASE("RunProviderPresetWizard: 预设也认'无需鉴权'") {

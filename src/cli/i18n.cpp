@@ -594,9 +594,9 @@ const Entry kZhCN[] = {
     {"provider_wizard.summary.effort", "6) effort     = {0}"},
     {"provider_wizard.summary.extra_body", "7) extra_body = {0}"},
     {"provider_wizard.summary.window", "   window     = {0}"},
-    {"provider_wizard.confirm.hint", "输入项号跳回修改;回车确认写入。"},
-    {"provider_wizard.confirm.prompt", "改哪项(1-7),回车确认写入 [Y/n]: "},
-    {"provider_wizard.confirm.bad_number", "认 1-7 的项号,回车确认写入,n 放弃。"},
+    {"provider_wizard.confirm.hint", "Enter 直接保存当前配置 · 1-7 修改对应项 · n 放弃"},
+    {"provider_wizard.confirm.prompt", "选择（直接回车保存）: "},
+    {"provider_wizard.confirm.bad_number", "请输入 1-7;不修改就直接回车保存,输入 n 放弃。"},
 
     // ---- /provider edit 向导(容错单):同一套八步面板,全字段预填 ----
     {"provider_wizard.edit.title", "编辑 provider"},
@@ -2244,9 +2244,9 @@ const Entry kEn[] = {
     {"provider_wizard.summary.effort", "6) effort     = {0}"},
     {"provider_wizard.summary.extra_body", "7) extra_body = {0}"},
     {"provider_wizard.summary.window", "   window     = {0}"},
-    {"provider_wizard.confirm.hint", "Type an item number to jump back and edit; Enter confirms."},
-    {"provider_wizard.confirm.prompt", "Item to edit (1-7), Enter to confirm [Y/n]: "},
-    {"provider_wizard.confirm.bad_number", "Enter an item number 1-7, or press Enter to confirm, or n to abort."},
+    {"provider_wizard.confirm.hint", "Enter saves the current settings · 1-7 edits an item · n aborts"},
+    {"provider_wizard.confirm.prompt", "Choose (press Enter to save): "},
+    {"provider_wizard.confirm.bad_number", "Enter 1-7; press Enter without typing to save, or enter n to abort."},
 
     // ---- /provider edit wizard (typo unit): same eight panels, prefilled ----
     {"provider_wizard.edit.title", "Edit provider"},

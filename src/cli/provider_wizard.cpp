@@ -844,7 +844,7 @@ std::vector<std::string> SummaryLines(const ProviderWizardState& state) {
         return ProviderEditDiffLines(state.original, state.draft);
     }
     const config::ProviderConfig& p = state.draft;
-    return {
+    std::vector<std::string> lines = {
         trf("provider_wizard.summary.name", p.name),
         trf("provider_wizard.summary.wire", config::ProviderWireName(p.wire)),
         trf("provider_wizard.summary.base_url", p.base_url),
@@ -855,8 +855,12 @@ std::vector<std::string> SummaryLines(const ProviderWizardState& state) {
                                              : p.model_reasoning_effort),
         trf("provider_wizard.summary.extra_body",
             p.extra_body.empty() ? tr("provider_wizard.extra_body.unset")
-                                 : trf("provider_wizard.extra_body.summary", p.extra_body.size())),
+                                  : trf("provider_wizard.extra_body.summary", p.extra_body.size())),
     };
+    if (p.context_window_tokens > 0) {
+        lines.push_back(trf("provider_wizard.summary.window", p.context_window_tokens));
+    }
+    return lines;
 }
 
 StepResult RunConfirmStep(WizardIO& io, ProviderWizardState& state) {
@@ -1129,8 +1133,8 @@ std::vector<std::string> ProviderEditDiffLines(const config::ProviderConfig& ori
 }
 
 // ---------------------------------------------------------------------------
-// 预设向导:目录选厂家 → 名字 → 密钥来源(三态)→ 确认。复用同一套
-// 导航原语(事件/帧/选择);不带返回,先把 provider add 做稳。
+// 预设向导:目录选厂家 → 名字 → 密钥来源(三态)→ 确认。确认页接回完整
+// 状态机:回车直接保存,也能按项号改单项,不另养一套半残的确认逻辑。
 // ---------------------------------------------------------------------------
 
 std::optional<ProviderWizardOutcome> RunProviderPresetWizard(
@@ -1201,32 +1205,26 @@ std::optional<ProviderWizardOutcome> RunProviderPresetWizard(
         }
         provider = auth_state.draft;
 
-        // 确认。
+        // 把预设填成一份完整状态,交回同一套汇总/单项编辑循环。目录自带
+        // 模型直接当缓存用;wire/base_url/auth 一旦改动,各步骤会照常作废它。
         ProviderWizardState confirm_state;
         confirm_state.draft = provider;
-        while (true) {
-            WizardFrame confirm_frame;
-            confirm_frame.title = tr("provider_wizard.title");
-            confirm_frame.progress = trf("provider_wizard.progress", 8, kProviderWizardStepCount);
-            confirm_frame.body = SummaryLines(confirm_state);
-            confirm_frame.body.push_back(trf("provider_wizard.summary.window",
-                                             provider.context_window_tokens));
-            confirm_frame.body.push_back(tr("provider_wizard.confirm.hint"));
-            confirm_frame.error = confirm_state.last_error;
-            confirm_frame.prompt = tr("provider_wizard.confirm.prompt");
-            confirm_frame.footer = tr("provider_wizard.footer.back");
-            const WizardInputEvent event = ReadTextEvent(io, confirm_frame);
-            if (event.kind != WizardInputEvent::Kind::Submitted) {
-                return std::nullopt;
-            }
-            if (event.text.empty() || event.text == "y" || event.text == "Y") {
-                return ProviderWizardOutcome{provider, true};
-            }
-            if (event.text == "n" || event.text == "N") {
-                return ProviderWizardOutcome{provider, false};
-            }
-            confirm_state.last_error = tr("provider_wizard.confirm.bad_number");
+        confirm_state.existing = existing;
+        confirm_state.name_set = true;
+        confirm_state.wire_set = true;
+        confirm_state.base_url_set = true;
+        confirm_state.auth_set = true;
+        confirm_state.model_set = true;
+        confirm_state.effort_set = true;
+        confirm_state.extra_body_set = true;
+        confirm_state.key_env_explicit = true;
+        confirm_state.models.reserve(preset.models.size());
+        for (const auto& model : preset.models) {
+            confirm_state.models.push_back({model.id, model.name});
         }
+        confirm_state.models_valid = !confirm_state.models.empty();
+        confirm_state.step = ProviderWizardStep::Confirm;
+        return RunWizardLoop(io, confirm_state);
     }
 }
 

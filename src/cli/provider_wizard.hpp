@@ -82,7 +82,7 @@ std::optional<ProviderWizardOutcome> RunProviderAddWizard(WizardIO& io, const st
 
 // 带在线目录的入口：先选常见厂家，最后一项仍可走全手填旧向导。选中预设后
 // base_url/wire/model/窗口/私有参数全带上，密钥来源与确认复用新向导的
-// 同一套导航原语(无退选件,做稳为先)。
+// 同一套导航原语。确认页可直接保存,也可按 1-7 跳回改单项。
 std::optional<ProviderWizardOutcome> RunProviderPresetWizard(
     WizardIO& io, const config::ProviderCatalog& catalog, const std::string& name_prefill,
     const std::vector<config::ProviderConfig>& existing);
