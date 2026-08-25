@@ -391,12 +391,12 @@ bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
         lubancode::runtime::EvaluatePermission(permission, pre, name, input);
 
     if (verdict.action == lubancode::runtime::PermissionVerdict::Action::Allow) {
-        // UI-C:自动放行(--yes/yolo/auto 档的文件工具/选过 a)也把统一
-        // diff 预览打出来——用户看得见将要发生什么,但不停下等确认,
-        // 打完即执行;执行完预览被 TrimBelow 擦掉,条目只留 +N -M。
+        // UI-C:自动放行(--yes/yolo/auto 档的文件工具/选过 a)先算统一
+        // diff，存进条目；不再铺一块马上擦掉的临时预览，免得白滚视口、
+        // 滚失 Running 锚点。工具完成后在原锚点一次画出留存 diff。
         // 管道模式 ShowDiffPreview 内部直接返回,输出照旧是稳定纯文本。
         if (file_tool) {
-            display.ShowDiffPreview(tool_use_id, name, input, /*trim_on_done=*/true);
+            display.ShowDiffPreview(tool_use_id, name, input, /*automatic=*/true);
         }
         return true;
     }
@@ -413,7 +413,7 @@ bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
         }
         if (hook.reply == lubancode::runtime::PermissionHookReply::Allow) {
             if (file_tool) {
-                display.ShowDiffPreview(tool_use_id, name, input, /*trim_on_done=*/true);
+                display.ShowDiffPreview(tool_use_id, name, input, /*automatic=*/true);
             }
             return true;
         }
@@ -446,7 +446,7 @@ bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
         approval_observer(/*asked=*/true, /*allowed=*/false);
     }
     if (file_tool && display.is_console) {
-        display.ShowDiffPreview(tool_use_id, name, input, /*trim_on_done=*/false);
+        display.ShowDiffPreview(tool_use_id, name, input, /*automatic=*/false);
     } else {
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         PrintConfirmDetails(name, input);

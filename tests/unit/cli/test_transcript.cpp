@@ -24,6 +24,7 @@ using lubancode::cli::BuildToolTitle;
 using lubancode::cli::BuiltinTheme;
 using lubancode::cli::CountLines;
 using lubancode::cli::ErrorSummaryLines;
+using lubancode::cli::PlanFileDiffPreviewPresentation;
 using lubancode::cli::FormatRestoredHistory;
 using lubancode::cli::FormatTranscriptItem;
 using lubancode::cli::FormatUserPromptBlock;
@@ -40,6 +41,19 @@ using lubancode::cli::TranscriptStatusWord;
 using lubancode::cli::TruncateUtf8Bytes;
 using lubancode::cli::TruncateUtf8Codepoints;
 using lubancode::cli::WriteDiffSummary;
+
+TEST_CASE("文件 diff 预览占位:自动路零滚屏,确认路留预览实高加确认区") {
+    const auto automatic = PlanFileDiffPreviewPresentation(/*preview_rows=*/17, /*automatic=*/true);
+    CHECK_FALSE(automatic.paint_preview);
+    CHECK(automatic.reserve_rows == 0);
+
+    const auto confirmation = PlanFileDiffPreviewPresentation(/*preview_rows=*/17, /*automatic=*/false);
+    CHECK(confirmation.paint_preview);
+    CHECK(confirmation.reserve_rows == 17 + lubancode::cli::kConfirmInteractionReserveRows);
+
+    const auto defensive = PlanFileDiffPreviewPresentation(/*preview_rows=*/-4, /*automatic=*/false);
+    CHECK(defensive.reserve_rows == lubancode::cli::kConfirmInteractionReserveRows);
+}
 
 namespace {
 

@@ -67,6 +67,26 @@ constexpr std::size_t kDiffPreviewMaxBytes = 32 * 1024;
 constexpr int kDiffFinalMaxLines = 24;
 constexpr std::size_t kDiffFinalMaxBytes = 8 * 1024;
 
+// 文件 diff 预览的屏面计划。自动放行没有确认框，也没有让用户拦下这次
+// 修改的机会；此时若先把完整预览铺到 Running 条目下面，工具收尾又立刻
+// 擦掉，不但白滚一趟视口，还可能把 Running 的绝对锚点滚失。自动路只存
+// diff 数据，等终态在原锚点一次画出 kDiffFinalMaxLines 行以内的留存版。
+// 真正确认路才画临时预览，并为随后出现的详情/输入区留 24 行。
+constexpr int kConfirmInteractionReserveRows = 24;
+
+struct FileDiffPreviewPresentation {
+    bool paint_preview = false;
+    int reserve_rows = 0;
+};
+
+inline FileDiffPreviewPresentation PlanFileDiffPreviewPresentation(int preview_rows, bool automatic) {
+    if (automatic) {
+        return {};
+    }
+    return FileDiffPreviewPresentation{
+        true, (std::max)(0, preview_rows) + kConfirmInteractionReserveRows};
+}
+
 // UI-C:一份拼装好的 diff 预览。colored 是直接可打印的整块(路径行 +
 // diff 标题行 + diff 正文,每行缩进四空格、带主题色、按宽/行/字节截断);
 // full 是 plain 全量(不截行、不截字节、不带色),终态并进 full_output
@@ -305,15 +325,13 @@ struct ToolDisplay {
     std::string thinking_buffer;
     // UI-C:确认前 diff 预览的记账。*_diff_full 存 plain 全量,终态并进
     // full_output;*_diff_final 是终态条目摘要里留存的 diff 行(git 那种
-    // 效果,成功后 diff 挂在 ⎿ 块底下不消失);*_preview_below 标记"自动
-    // 放行路子里预览还垫在条目下面",工具执行完 TrimBelow 擦掉(确认路子
-    // 的预览由 OnConfirmAnswered 的 TrimBelow 顺手带走,不用这个标记)。
+    // 效果,成功后 diff 挂在 ⎿ 块底下不消失)。自动放行不再铺一块马上
+    // 又擦掉的临时预览，见 PlanFileDiffPreviewPresentation 注释；确认路
+    // 的预览由 OnConfirmAnswered 的 TrimBelow 收走。
     std::string main_diff_full;
     std::string sub_diff_full;
     std::vector<std::string> main_diff_final;
     std::vector<std::string> sub_diff_final;
-    bool main_preview_below = false;
-    bool sub_preview_below = false;
 
     void OnToolStart(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input) {
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
@@ -328,7 +346,6 @@ struct ToolDisplay {
             name == "write_file" ? FileLineCount(input.value("path", std::string())) : std::nullopt;
         main_diff_full.clear();
         main_diff_final.clear();
-        main_preview_below = false;
         if (name == "agent") {
             agent_step_count = 0;
             agent_sub_tools = 0;
@@ -472,13 +489,6 @@ struct ToolDisplay {
         }
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
         auto& item = transcript[static_cast<std::size_t>(resolved)];
-        // UI-C:自动放行时垫在条目下面的 diff 预览,执行完了就擦——终态只
-        // 留 "新增 N 行,删除 M 行" 简短摘要,不铺屏(确认路子的预览已被
-        // OnConfirmAnswered 的 TrimBelow 带走,标记不会是 true)。
-        if (main_preview_below && is_console) {
-            painter.TrimBelow(item.id);
-        }
-        main_preview_below = false;
         FinalizeItem(item, name, main_input, result, main_write_old_lines, agent_step_count, agent_sub_tools,
                       main_diff_full, main_diff_final);
         UpdateSnapshotItem(resolved);
@@ -604,7 +614,6 @@ struct ToolDisplay {
             name == "write_file" ? FileLineCount(input.value("path", std::string())) : std::nullopt;
         sub_diff_full.clear();
         sub_diff_final.clear();
-        sub_preview_below = false;
         active_sub = NewItem(lubancode::cli::TranscriptKind::SubTool, name, input);
         RegisterToolUse(tool_use_id, active_sub);  // P4:id -> 子条目登记
         // UI-D 折叠(#三,修订):紧凑态(默认)下,子工具"开始执行"这一刻
@@ -638,10 +647,6 @@ struct ToolDisplay {
         }
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
         auto& item = transcript[static_cast<std::size_t>(resolved)];
-        if (sub_preview_below && is_console) {
-            painter.TrimBelow(item.id);  // 理由同 OnToolDone
-        }
-        sub_preview_below = false;
         FinalizeItem(item, name, sub_input, result, sub_write_old_lines, 0, 0, sub_diff_full, sub_diff_final);
         UpdateSnapshotItem(resolved);
         UnregisterToolUse(tool_use_id, resolved);  // 终态已到,id 摘除
@@ -695,17 +700,16 @@ struct ToolDisplay {
     }
 
     // UI-C:edit_file/write_file 确认前的统一 diff 预览,画在当前条目
-    // (子工具优先)下面。trim_on_done=true 是自动放行那条路(auto/yolo/
-    // --yes/选过 a)——打完不等确认,工具执行完 OnToolDone/OnSubToolResult
-    // 里 TrimBelow 擦掉;false 是确认路子,预览随确认块一起被
-    // OnConfirmAnswered 的 TrimBelow 带走。管道模式(is_console 为假)
-    // 整个不打,保持稳定纯文本输出。
+    // (子工具优先)下面。automatic=true 是自动放行那条路(auto/yolo/
+    // --yes/选过 a):只把 full/final 两份 diff 存进条目，不碰屏；工具
+    // 完成后，终态在原 Running 锚点一次画出留存版。false 才是确认路，
+    // 临时预览随确认块一起被 OnConfirmAnswered::TrimBelow 带走。管道模式
+    // 不碰屏，仍保稳定纯文本输出。
     void ShowDiffPreview(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input,
-                         bool trim_on_done) {
+                         bool automatic) {
         if (!is_console || silent_) {
             return;  // 管道模式保持稳定纯文本;静默档不铺预览(数据进 full_output 不丢)
         }
-        const lubancode::cli::StreamFooterPaintScope footer_paint;
         const auto preview = BuildFileDiffPreview(name, input, theme);
         if (!preview.has_value()) {
             return;
@@ -716,17 +720,21 @@ struct ToolDisplay {
                                   : active_sub >= 0;
         (sub ? sub_diff_full : main_diff_full) = preview->full;
         (sub ? sub_diff_final : main_diff_final) = preview->final_lines;
-        // 预览可能有几百行,先在缓冲区底部把行数留够(外加确认块的余量),
-        // 免得打印期间自然滚屏把锚点推歪。ReserveRows 自己拿 stdout 锁,
-        // 不能包在下面那把锁里(std::mutex 不可重入)。
-        painter.ReserveRows(preview->line_count + 24);
+        const FileDiffPreviewPresentation presentation =
+            PlanFileDiffPreviewPresentation(preview->line_count, automatic);
+        if (!presentation.paint_preview) {
+            return;
+        }
+
+        const lubancode::cli::StreamFooterPaintScope footer_paint;
+        // 预览可能有几百行。确认路一次留足“预览实高 + 确认区”，免得
+        // 打印期间自然滚屏把锚点推歪。ReserveRows 只保底，不会和
+        // OnConfirmRequest 的确认区兜底叠加；它自己拿 stdout 锁，不能套进下锁。
+        painter.ReserveRows(presentation.reserve_rows);
         {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
             std::cout << preview->colored;
             std::cout.flush();
-        }
-        if (trim_on_done) {
-            (sub ? sub_preview_below : main_preview_below) = true;
         }
     }
 
@@ -745,9 +753,9 @@ struct ToolDisplay {
             UpdateSnapshotItem(idx);
             if (is_console) {
                 painter.Repaint(item);
-                // 确认块 + 编辑器提示行撑死二十来行,先在缓冲区底部预留好,
-                // 免得交互期间自然滚屏把锚点推歪。
-                painter.ReserveRows(24);
+                // 确认块 + 编辑器提示行撑死二十来行，先在缓冲区底部留好。
+                // 文件工具稍后还会按预览实高扩展；这里只作无预览时的兜底。
+                painter.ReserveRows(kConfirmInteractionReserveRows);
             }
         }
         return idx;
