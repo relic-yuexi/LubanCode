@@ -9,8 +9,9 @@ namespace {
 
 using nlohmann::json;
 
-std::string RoleToString(Role role) {
-    return role == Role::User ? "user" : "assistant";
+// Role -> wire 角色名,共用件(批六归一):responses 的另一角叫 "assistant"。
+std::string WireRole(Role role) {
+    return RoleToString(role, "assistant");
 }
 
 // 没有图片的旧消息继续沿用逐块转 item 的写法，避免把既有请求形状悄悄
@@ -22,11 +23,11 @@ json ContentBlockToItem(const ContentBlock& block, Role role) {
             if constexpr (std::is_same_v<T, TextBlock>) {
                 const char* text_type = role == Role::User ? "input_text" : "output_text";
                 return json{{"type", "message"},
-                            {"role", RoleToString(role)},
+                            {"role", WireRole(role)},
                             {"content", json::array({json{{"type", text_type}, {"text", b.text}}})}};
             } else if constexpr (std::is_same_v<T, ImageBlock>) {
                 return json{{"type", "message"},
-                            {"role", RoleToString(role)},
+                            {"role", WireRole(role)},
                             {"content", json::array({json{{"type", "input_image"},
                                                        {"image_url", "data:" + b.media_type + ";base64," + b.data}}})}};
             } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
@@ -97,7 +98,7 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
             if (content.empty()) {
                 return;
             }
-            input.push_back(json{{"type", "message"}, {"role", RoleToString(message.role)}, {"content", content}});
+            input.push_back(json{{"type", "message"}, {"role", WireRole(message.role)}, {"content", content}});
             content = json::array();
         };
         for (const auto& block : message.content) {
@@ -146,17 +147,10 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
     }
 
     // extra_body 永远在最后合并(见 client.hpp 里 BuildRequestJson 的注释):
-    // 键冲突时整个覆盖前面算出来的值,只做顶层浅合并,不做深合并。
-    if (extra_body.is_object()) {
-        for (auto it = extra_body.begin(); it != extra_body.end(); ++it) {
-            body[it.key()] = it.value();
-        }
-    }
-    if (request.extra_body.is_object()) {
-        for (auto it = request.extra_body.begin(); it != request.extra_body.end(); ++it) {
-            body[it.key()] = it.value();
-        }
-    }
+    // 键冲突时整个覆盖前面算出来的值,只做顶层浅合并,不做深合并(共用件
+    // api::MergeExtraBody,provider 级先、variant 级后)。
+    MergeExtraBody(body, extra_body);
+    MergeExtraBody(body, request.extra_body);
 
     return body;
 }

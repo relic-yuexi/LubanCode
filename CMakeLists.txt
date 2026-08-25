@@ -318,6 +318,7 @@ add_library(lubancode_engine STATIC
   src/platform/text_encoding.cpp
   src/platform/json_safe.cpp
   src/api/sse_framing.cpp
+  src/api/http_stream_transport.cpp  # 批六:四家 wire client 共用的 cpr 传输骨架
   src/api/anthropic/client.cpp
   src/api/anthropic/events.cpp
   src/api/chat/client.cpp

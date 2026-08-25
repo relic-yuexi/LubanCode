@@ -1,55 +1,14 @@
 #include "api/chat/client.hpp"
 
-#include <charconv>
-#include <chrono>
-#include <string_view>
 #include <utility>
 #include <variant>
 
-#include <cpr/cpr.h>
-
 #include "api/chat/events.hpp"
 #include "api/chat/request.hpp"
+#include "api/http_stream_transport.hpp"  // 批六:PostSseStream/DumpRequestBody,四家共用的传输骨架
 #include "api/sse_framing.hpp"
-#include "cli/i18n.hpp"
-#include "platform/json_safe.hpp"  // DescribeDumpFailure:请求体 dump 的窄边界
-#include "platform/log_sink.hpp"
 
 namespace lubancode::api::chat {
-
-namespace {
-
-int ExtractStatusCode(std::string_view line) {
-    if (line.rfind("HTTP/", 0) != 0) return 0;
-    const std::size_t first = line.find(' ');
-    if (first == std::string_view::npos) return 0;
-    const std::size_t second = line.find(' ', first + 1);
-    const std::string_view raw = line.substr(first + 1, second == std::string_view::npos ? std::string_view::npos
-                                                                                         : second - first - 1);
-    int code = 0;
-    const auto parsed = std::from_chars(raw.data(), raw.data() + raw.size(), code);
-    return parsed.ec == std::errc{} ? code : 0;
-}
-
-std::string NetworkError(const cpr::Error& error, bool received, int connect_ms, int idle_secs,
-                         bool hard_timeout_hit, int hard_timeout_secs) {
-    // 硬墙钟触发(我们自己在 ProgressCallback 里掐的流,cpr 报共用的
-    // ABORTED_BY_CALLBACK)优先分型——见 send_stream 里 progress_cb 注释。
-    if (hard_timeout_hit) {
-        return cli::trf("error.network.hard_timeout", hard_timeout_secs);
-    }
-    if (error.code == cpr::ErrorCode::OPERATION_TIMEDOUT) {
-        return received ? cli::trf("error.network.stream_idle_timeout", idle_secs)
-                        : cli::trf("error.network.connect_timeout", connect_ms / 1000);
-    }
-    if (error.code == cpr::ErrorCode::COULDNT_CONNECT || error.code == cpr::ErrorCode::COULDNT_RESOLVE_HOST ||
-        error.code == cpr::ErrorCode::COULDNT_RESOLVE_PROXY) {
-        return cli::trf("error.network.connect_failed", error.message);
-    }
-    return error.message;
-}
-
-}  // namespace
 
 ChatCompletionsBackend::ChatCompletionsBackend(std::string base_url, std::string auth_token,
                                                int connect_timeout_ms, int stream_idle_timeout_secs,
@@ -71,32 +30,13 @@ std::expected<void, Error> ChatCompletionsBackend::send_stream(
     Request sanitized_request = request;
     SanitizeRequest(sanitized_request);
     const nlohmann::json body_json = BuildRequestJson(sanitized_request, extra_body_, options_);
-    std::string body;
-    try {
-        body = body_json.dump();
-    } catch (const nlohmann::json::exception& e) {
-        // 请求序列化的最后兜底:历史里漏网的非法 UTF-8(旧会话文件、上游
-        // 新开的口子)不再回传错误掐回合——那会把带病历史原样留在会话里,
-        // 往后每回合都在这里挂,会话等于砖死。响亮记一笔日志,坏串按
-        // U+FFFD 清洗后照发(与落盘边界同一政策),会话活着、模型看得见
-        // 替换符。
-        platform::LogSink::Instance().Warn("chat",
-            platform::DescribeDumpFailure(body_json, e) + " -> 已按 U+FFFD 清洗后发出");
-        body = platform::DumpJsonSanitized(body_json);
-    }
+    const std::string body = DumpRequestBody("chat", body_json);
+
+    // 2xx 响应体 -> 分帧 -> 事件。终止事件/流错误两枚标志给收尾那段检查。
     SseFramer framer;
     EventParser parser{options_.reasoning_delta_field};
-    std::string error_body;
-    int status_code = 0;
-    bool status_known = false;
-    bool cancelled = false;
-    bool overflow = false;
-    bool received = false;
     bool saw_done = false;
     bool saw_stream_error = false;
-    // 硬墙钟触发标志(cpr 并发挂死单):分型用,见 NetworkError 注释。
-    bool hard_timeout_hit = false;
-
     const auto dispatch = [&](const std::vector<StreamEvent>& events) {
         for (const auto& event : events) {
             saw_done = saw_done || std::holds_alternative<MessageDone>(event);
@@ -104,94 +44,27 @@ std::expected<void, Error> ChatCompletionsBackend::send_stream(
             on_event(event);
         }
     };
-
-    cpr::HeaderCallback header_cb([&](const std::string_view& header, intptr_t) {
-        if (const int code = ExtractStatusCode(header); code != 0) {
-            status_code = code;
-            status_known = true;
-        }
-        return true;
-    });
-    cpr::WriteCallback write_cb([&](const std::string_view& chunk, intptr_t) {
-        received = true;
-        if (cancel != nullptr && cancel->load()) {
-            cancelled = true;
-            return false;
-        }
-        if (!(status_known && status_code >= 200 && status_code < 300)) {
-            error_body.append(chunk);
-            return true;
-        }
+    const StreamDataSink sink = [&](std::string_view chunk) -> bool {
         for (const auto& frame : framer.feed(chunk)) {
             dispatch(parser.Consume(frame));
         }
-        if (framer.overflowed()) {
-            overflow = true;
-            return false;
-        }
-        return true;
-    });
-    // 硬墙钟(cpr 并发挂死单)挂在 ProgressCallback:request_hard_timeout_secs_
-    // > 0 时对 steady_clock 记一枚期限,超期返回 false 掐流。libcurl 周期性调
-    // 这个回调(连接死寂也醒,见 anthropic/client.cpp 同一处注释的考证),
-    // 所以挂死绝境里这面墙照样落锤。不用 cpr::Timeout:那会把正常长流砍断。
-    const bool hard_wall_on = request_hard_timeout_secs_ > 0;
-    const auto hard_deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds(request_hard_timeout_secs_);
-    cpr::ProgressCallback progress_cb(
-        [&](cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, intptr_t) {
-            if (cancel != nullptr && cancel->load()) {
-                cancelled = true;
-                return false;
-            }
-            if (hard_wall_on && std::chrono::steady_clock::now() >= hard_deadline) {
-                hard_timeout_hit = true;
-                return false;
-            }
-            return true;
-        });
+        // 单帧超过上限,协议已不可信:返回 false 让传输层掐断。
+        return !framer.overflowed();
+    };
 
     // 鉴权三态:auth_token 空(无鉴权)时基础头里压根没有 Authorization,
     // 不发空 Bearer(与 anthropic/responses/ListModels 同一份规矩)。
-    std::map<std::string, std::string> headers = RequestBaseHeaders(auth_token_);
-    for (const auto& [name, value] : extra_headers_) {
-        if (value.empty()) headers.erase(name);
-        else headers[name] = value;
-    }
-    cpr::Header cpr_headers;
-    for (const auto& [name, value] : headers) cpr_headers[name] = value;
+    HttpStreamCall call;
+    call.url = base_url_ + "/chat/completions";
+    call.headers = ApplyExtraHeaders(RequestBaseHeaders(auth_token_), extra_headers_);
+    call.body = body;
+    call.connect_timeout_ms = connect_timeout_ms_;
+    call.stream_idle_timeout_secs = stream_idle_timeout_secs_;
+    call.request_hard_timeout_secs = request_hard_timeout_secs_;
 
-    const cpr::Response response = cpr::Post(
-        cpr::Url{base_url_ + "/chat/completions"}, cpr_headers, cpr::Body{body},
-        cpr::ConnectTimeout{std::chrono::milliseconds(connect_timeout_ms_)},
-        #if defined(_MSC_VER)
-#pragma warning(push)
-#pragma warning(disable : 4996)  // 新版 cpr 弃用 int 构造改 chrono;vendored 1.11 只有 int 形,值两边通用
-#endif
-        cpr::LowSpeed{1, stream_idle_timeout_secs_}
-#if defined(_MSC_VER)
-#pragma warning(pop)
-#endif
-, header_cb, write_cb, progress_cb);
-
-    if (cancelled || (cancel != nullptr && cancel->load())) {
-        return std::unexpected(Error{ErrorKind::Cancelled, "用户按 ESC 打断了这次请求", 0});
-    }
-    if (overflow) {
-        return std::unexpected(Error{ErrorKind::Parse, "SSE 单帧超过大小上限(8MB),协议错误,已断开", 0});
-    }
-    if (response.error) {
-        return std::unexpected(Error{ErrorKind::Network,
-                                     NetworkError(response.error, received, connect_timeout_ms_,
-                                                  stream_idle_timeout_secs_, hard_timeout_hit,
-                                                  request_hard_timeout_secs_),
-                                     0});
-    }
-    const int final_status = static_cast<int>(response.status_code);
-    if (final_status < 200 || final_status >= 300) {
-        std::string message = !error_body.empty() ? error_body : response.text;
-        if (message.empty()) message = "服务端返回了非 200 状态码,但响应体是空的";
-        return std::unexpected(Error{ErrorKind::HttpStatus, std::move(message), final_status});
+    auto streamed = PostSseStream(call, sink, cancel);
+    if (!streamed.has_value()) {
+        return std::unexpected(std::move(streamed.error()));
     }
 
     if (!parser.finished()) dispatch(parser.Finish());

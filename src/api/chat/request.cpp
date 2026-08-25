@@ -207,16 +207,10 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
         body["tools"] = std::move(tools);
     }
 
-    if (extra_body.is_object()) {
-        for (auto it = extra_body.begin(); it != extra_body.end(); ++it) {
-            body[it.key()] = it.value();
-        }
-    }
-    if (request.extra_body.is_object()) {
-        for (auto it = request.extra_body.begin(); it != request.extra_body.end(); ++it) {
-            body[it.key()] = it.value();
-        }
-    }
+    // extra_body 在最后浅合并:provider 级先、Request::extra_body(模型
+    // variant)后,同名顶层键后者压前者(共用件 api::MergeExtraBody)。
+    MergeExtraBody(body, extra_body);
+    MergeExtraBody(body, request.extra_body);
     return body;
 }
 
