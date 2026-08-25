@@ -20,12 +20,11 @@ void PrintVersion();
 // 版本号、三个内置默认值走占位符。zh-CN 表的值与旧字面文案一致。
 void PrintHelp();
 
-// 初次配置向导:接 cli::ReadLine 做输入、std::cout 做输出、api::ListModels
-// 做模型列表拉取。用户中途 EOF(Ctrl+Z / 管道读尽)放弃时返回 std::nullopt。
-// 用户选择保存时,把保存后的路径写进 out_config_file_path,好让接下来的
-// /model 命令知道"有配置文件"。
-std::optional<lubancode::config::Config> RunInitialSetupWizard(std::optional<std::string>& out_config_file_path,
-                                                                const lubancode::cli::Theme& theme);
+// 初次启动页:可直接进 /provider add 同款目录向导，也可明选“暂时跳过”后
+// 进入主界面。只有 EOF/Ctrl+C/Esc 才返回 nullopt；跳过会返回原配置，不再
+// 被当作“向导未完成”。
+std::optional<lubancode::config::ConfigResult> RunInitialSetupWizard(
+    const lubancode::config::ConfigResult& current, const lubancode::cli::Theme& theme);
 
 // 真正的入口逻辑,跟平台无关:args[0] 是程序名,args[1..] 是实参。
 // Windows 下 argv 单独处理(见 main.cpp),是为了绕开 Windows 那套

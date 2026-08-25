@@ -6,7 +6,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 
 ## 先跑起来
 
-最省事的路，是直接运行 `lubancode`，跟着初次向导走。若要手写一份最小配置，可放在 `~/.lubancode/config.json`：
+最省事的路，是直接运行 `lubancode`，在开场页选“添加 Provider”。它会打开与 `/provider add` 相同的目录向导。也可选“暂时跳过”，先进入主界面，稍后再用 `/provider` 配置。若要手写一份最小配置，可放在 `~/.lubancode/config.json`：
 
 ```json
 {
@@ -142,7 +142,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 | `request_timeout_secs` | 正整数(秒) | `30` | 非流式请求(如拉模型列表)的整体超时。 |
 | `request_hard_timeout_secs` | 非负整数(秒) | `300` | 每枚流式请求的硬墙钟,`0` = 不设。connect/idle 两道闸都不触发的挂死绝境(典型:本机代理/TUN 截胡回环连接)由它兜底掐断,收场翻成"请求硬超时"。长任务撞上就显式调大。与 `subagent.wall_clock_timeout_secs` 分工:那管一只任务整轮,这管一枚请求。 |
 
-`base_url`/`api_key`/`model` 没有内置默认值——lubancode 不绑死哪一家模型服务,三项都没配到:交互模式会自动走一遍初次配置向导;单发模式/管道模式会直接报错,提示三条配置途径。
+`base_url`/`api_key`/`model` 没有内置默认值——lubancode 不绑死哪一家模型服务。交互模式缺连接时会打开两项开场页：可直接添加 Provider，也可暂时跳过。跳过后 `/provider`、`/help` 等命令照常可用；发送普通消息时只提示先配置，不会拿空地址发请求。单发模式/管道模式仍直接报错，提示缺了哪些字段。
 
 ### 模型角色与 `/model roles`
 

@@ -3,6 +3,7 @@
 
 #include <doctest/doctest.h>
 
+#include "cli/i18n.hpp"
 #include "cli/setup_wizard.hpp"
 
 using namespace lubancode;
@@ -45,6 +46,61 @@ struct ScriptedIO {
 };
 
 }  // namespace
+
+TEST_CASE("RunSetupEntryWizard: 默认直接进 provider add 路") {
+    cli::SetLanguage("zh-CN");
+    ScriptedIO scripted;
+    scripted.inputs = {
+        "",  // 语言保持当前值
+        "",  // 开始方式取默认第一项
+    };
+    auto io = scripted.Build();
+    const auto outcome = cli::RunSetupEntryWizard(io);
+
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->action == cli::SetupEntryAction::AddProvider);
+    CHECK(outcome->language == "zh-CN");
+    CHECK(scripted.AnyPrintedContains("添加 Provider"));
+}
+
+TEST_CASE("RunSetupEntryWizard: 明选暂时跳过,提示稍后可用 provider 命令") {
+    cli::SetLanguage("zh-CN");
+    ScriptedIO scripted;
+    scripted.inputs = {
+        "",   // 语言保持当前值
+        "2",  // 暂时跳过
+    };
+    auto io = scripted.Build();
+    const auto outcome = cli::RunSetupEntryWizard(io);
+
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->action == cli::SetupEntryAction::Skip);
+    CHECK(scripted.AnyPrintedContains("/provider add"));
+}
+
+TEST_CASE("RunSetupEntryWizard: TTY 用稳定面板画两步,方向键选择可跳过") {
+    cli::SetLanguage("zh-CN");
+    ScriptedIO scripted;
+    auto io = scripted.Build();
+    io.interactive = true;
+    std::vector<cli::WizardFrame> frames;
+    io.draw_frame = [&](const cli::WizardFrame& frame) { frames.push_back(frame); };
+    std::vector<std::size_t> picks = {0, 1};
+    std::size_t next_pick = 0;
+    io.choose = [&](const std::vector<cli::WizardChoiceItem>&, std::size_t,
+                    const std::string&, cli::WizardInputEvent::Kind*) -> std::optional<std::size_t> {
+        return picks[next_pick++];
+    };
+
+    const auto outcome = cli::RunSetupEntryWizard(io);
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->action == cli::SetupEntryAction::Skip);
+    REQUIRE(frames.size() == 2);
+    CHECK(frames[0].progress.find("1 / 2") != std::string::npos);
+    CHECK(frames[1].progress.find("2 / 2") != std::string::npos);
+    CHECK(frames[1].body[1].find("主界面") != std::string::npos);
+    CHECK(frames[1].choice_rows == 3);
+}
 
 TEST_CASE("RunSetupWizard: 全部手填,直接输入模型名,默认保存") {
     ScriptedIO scripted;

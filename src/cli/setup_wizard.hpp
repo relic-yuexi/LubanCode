@@ -67,6 +67,9 @@ struct WizardFrame {
     std::string error;              // 当前步骤错误,可空;换步/改正后清
     std::string prompt;             // 文本步骤的输入提示;选择步骤为空
     std::string footer;             // 按键提示,如"Esc 上一步  Ctrl+C 取消"
+    // 选择页给菜单预留的行数(含菜单自己的 hint),0 = 调用方用默认上限。
+    // 短菜单填实际行数,免得两项欢迎页也撑出一大片空白。
+    int choice_rows = 0;
 };
 
 using WizardDrawFrameFn = std::function<void(const WizardFrame&)>;
@@ -106,6 +109,21 @@ struct WizardIO {
     // 自己拼好传进来(通常是 config::HomeDir() 拼出来的 .lubancode.json 路径)。
     std::string home_config_display_path = "<主目录>/.lubancode.json";
 };
+
+// 初次启动只问“现在添 provider，还是先进去”。连接参数不再横在门口逐项
+// 强填；选择 AddProvider 后由 /provider add 同款目录向导接手，选择 Skip
+// 则照常进入主界面，稍后再配。
+enum class SetupEntryAction { AddProvider, Skip };
+
+struct SetupEntryOutcome {
+    SetupEntryAction action = SetupEntryAction::AddProvider;
+    std::string language;
+};
+
+// 初次启动的两步欢迎页：先选界面语言，再选“添加 Provider / 暂时跳过”。
+// EOF/Ctrl+C/Esc 返回 nullopt；“暂时跳过”是菜单里的明白选项，不再借取消
+// 键冒充。
+std::optional<SetupEntryOutcome> RunSetupEntryWizard(WizardIO& io);
 
 struct WizardOutcome {
     config::Config config;

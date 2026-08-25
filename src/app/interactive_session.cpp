@@ -4976,6 +4976,15 @@ void TerminalSessionController::RestoreLoopFromArchive() {
 }
 
 CommandFlow TerminalSessionController::RunUserTurn(const std::string& content, bool* autosend_failed) {
+    // 欢迎页允许空配置进主界面；slash 命令在 ProcessLine 上一层已先分流。
+    // 普通正文到这里才拦，免得拿空 base_url 真发请求、落下一场假会话。
+    if (!lubancode::config::RequireConfigured(config_result_).has_value()) {
+        std::cout << theme.error << tr("setup.turn.blocked") << theme.reset << "\n";
+        if (autosend_failed != nullptr) {
+            *autosend_failed = true;
+        }
+        return CommandFlow::Continue;
+    }
     // 建档提前到发轮之前(第二期):仓要拿 session id 开张,第一轮请求里
     // 的超长结果才有地方落盘。失败不拦会话,只是没有 artifact 可追。
     EnsureSessionBegun(content);

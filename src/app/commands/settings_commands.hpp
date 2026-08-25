@@ -130,8 +130,11 @@ void PrintProviderList(const std::vector<lubancode::config::ProviderConfig>& pro
 // 任何东西。问出来的是一条 ProviderConfig,写盘复用一行式旧用法同一条路径
 // (AddProviderToGlobalConfig)。用户中途 EOF、或者最后一问回答 n,都当"整个
 // 添加动作被取消"处理:不改 config.providers、不写盘。
-void RunProviderAddWizardInteractive(const std::string& name_prefill, lubancode::config::Config& config,
-                                     const lubancode::cli::Theme& theme);
+// 成功写入后返回新 provider 名；取消或保存失败返回 nullopt。调用方可据此
+// 在“尚无可用连接”的会话里当场切过去。
+std::optional<std::string> RunProviderAddWizardInteractive(const std::string& name_prefill,
+                                                            lubancode::config::Config& config,
+                                                            const lubancode::cli::Theme& theme);
 
 
 // /provider:添端只写全局配置；项目级若自行写了 providers，加载时仍按既有

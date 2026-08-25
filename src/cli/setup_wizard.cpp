@@ -228,6 +228,54 @@ std::optional<std::string> ResolveLanguage(WizardIO& io) {
 
 }  // namespace
 
+std::optional<SetupEntryOutcome> RunSetupEntryWizard(WizardIO& io) {
+    const std::vector<std::string> languages = AvailableLanguages();
+    std::vector<WizardChoiceItem> language_items;
+    language_items.reserve(languages.size());
+    std::size_t language_default = 0;
+    for (std::size_t i = 0; i < languages.size(); ++i) {
+        language_items.push_back({LanguageDisplayName(languages[i]), std::string()});
+        if (languages[i] == CurrentLanguage()) {
+            language_default = i;
+        }
+    }
+
+    DrawWizardFrame(io, WizardFrame{
+                            .title = tr("setup.entry.title"),
+                            .progress = tr("setup.entry.language_progress"),
+                            .body = {tr("setup.entry.language_body")},
+                            .footer = tr("wizard.choose.hint"),
+                            .choice_rows = static_cast<int>(language_items.size()) + 1,
+                        });
+    const auto language_choice =
+        ReadChoice(io, language_items, language_default, tr("wizard.choose.hint"));
+    if (!language_choice.has_value()) {
+        return std::nullopt;
+    }
+    const std::string language = languages[*language_choice];
+    SetLanguage(language);
+
+    DrawWizardFrame(io, WizardFrame{
+                            .title = tr("setup.entry.title"),
+                            .progress = tr("setup.entry.method_progress"),
+                            .body = {tr("setup.entry.method_body"), tr("setup.entry.method_hint")},
+                            .footer = tr("wizard.choose.hint"),
+                            .choice_rows = 3,
+                        });
+    const std::vector<WizardChoiceItem> actions = {
+        {tr("setup.entry.add"), tr("setup.entry.add_desc")},
+        {tr("setup.entry.skip"), tr("setup.entry.skip_desc")},
+    };
+    const auto action = ReadChoice(io, actions, 0, tr("wizard.choose.hint"));
+    if (!action.has_value()) {
+        return std::nullopt;
+    }
+    return SetupEntryOutcome{
+        .action = *action == 0 ? SetupEntryAction::AddProvider : SetupEntryAction::Skip,
+        .language = language,
+    };
+}
+
 std::optional<WizardOutcome> RunSetupWizard(WizardIO& io) {
     io.print(tr("wizard.title"));
     io.print(tr("wizard.subtitle"));

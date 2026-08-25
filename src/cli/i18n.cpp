@@ -485,6 +485,19 @@ const Entry kZhCN[] = {
     {"wizard.save_prompt", "保存到 {0}? [Y/n]: "},
     {"wizard.saved", "已保存到 {0}"},
     {"wizard.save_failed", "保存失败: {0}(不影响本次继续用,只是这份配置这次没记住)"},
+    {"setup.entry.title", "开始使用 lubancode"},
+    {"setup.entry.language_progress", "第 1 / 2 步"},
+    {"setup.entry.language_body", "先选界面语言。进主界面后仍可用 /language 更改。"},
+    {"setup.entry.method_progress", "第 2 / 2 步"},
+    {"setup.entry.method_body", "还没有可用的模型连接。"},
+    {"setup.entry.method_hint", "现在可以添加 Provider，也可以先进入主界面。"},
+    {"setup.entry.add", "添加 Provider"},
+    {"setup.entry.add_desc", "从服务商目录选择，填好密钥后立即使用"},
+    {"setup.entry.skip", "暂时跳过"},
+    {"setup.entry.skip_desc", "稍后用 /provider 或 /provider add 配置"},
+    {"setup.session.hint", "输入 /provider add 添加，或用 /provider 管理已有配置。"},
+    {"setup.turn.blocked", "还没有可用的 Provider。先用 /provider add 添加，或用 /provider 切换已有配置。"},
+    {"banner.not_connected", "尚未连接"},
 
     // ---- /provider add 向导(裸敲 /provider add 或 /provider add 名字 触发;
     //      向导重排单后八步可回退,鉴权三态) ----
@@ -2121,6 +2134,19 @@ const Entry kEn[] = {
     {"wizard.save_prompt", "Save to {0}? [Y/n]: "},
     {"wizard.saved", "Saved to {0}"},
     {"wizard.save_failed", "Save failed: {0} (this run continues; the config just was not persisted)"},
+    {"setup.entry.title", "Get started with lubancode"},
+    {"setup.entry.language_progress", "Step 1 / 2"},
+    {"setup.entry.language_body", "Choose the interface language. You can change it later with /language."},
+    {"setup.entry.method_progress", "Step 2 / 2"},
+    {"setup.entry.method_body", "No model provider is configured yet."},
+    {"setup.entry.method_hint", "Add one now, or enter the main screen and configure it later."},
+    {"setup.entry.add", "Add Provider"},
+    {"setup.entry.add_desc", "Choose a service, add credentials, and start using it"},
+    {"setup.entry.skip", "Skip for now"},
+    {"setup.entry.skip_desc", "Configure later with /provider or /provider add"},
+    {"setup.session.hint", "Run /provider add to add one, or /provider to manage existing providers."},
+    {"setup.turn.blocked", "No Provider is ready. Run /provider add, or use /provider to switch to an existing one."},
+    {"banner.not_connected", "not connected"},
 
     // ---- /provider add wizard (triggered by a bare /provider add, or /provider
     //      add <name>; wizard reorder adds back navigation and auth tri-state) ----

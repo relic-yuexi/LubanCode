@@ -63,9 +63,18 @@ void PrintLubanIcon(const lubancode::cli::Theme& theme) {
 // 交互模式启动横幅:一眼看全版本、wire、当前模型、工作目录,两行,不啰嗦。
 void PrintBanner(const lubancode::config::Config& config, const lubancode::cli::Theme& theme) {
     const std::string wire_str = lubancode::config::ProviderWireName(config.wire);
-    std::cout << theme.banner << "lubancode " << kVersion << "  [" << wire_str << "] " << config.model << theme.reset
-              << "\n";
-    std::cout << theme.stats << "cwd: " << CurrentDirUtf8() << "  ·  " << tr("banner.hint") << theme.reset << "\n";
+    const bool connected = !config.base_url.empty() && !config.model.empty() &&
+                           (!config.auth_token.empty() ||
+                            config.auth_mode == lubancode::config::ProviderAuthMode::None);
+    std::cout << theme.banner << "lubancode " << kVersion << "  ";
+    if (connected) {
+        std::cout << "[" << wire_str << "] " << config.model;
+    } else {
+        std::cout << "[" << tr("banner.not_connected") << "]";
+    }
+    std::cout << theme.reset << "\n";
+    std::cout << theme.stats << "cwd: " << CurrentDirUtf8() << "  ·  "
+              << tr(connected ? "banner.hint" : "setup.session.hint") << theme.reset << "\n";
 }
 
 // 换会话边界或 provider 后重开一张干净屏面。调用方先判定真控制台，
@@ -99,14 +108,17 @@ lubancode::cli::WizardIO MakeInteractiveWizardIO(const lubancode::cli::Theme& th
     };
     io.interactive = lubancode::platform::StdinIsInteractive() &&
                      lubancode::platform::ProbeStdoutConsole().is_console;
-    io.draw_frame = [panel, panel_active](const lubancode::cli::WizardFrame& frame) {
-        if (!panel_active) {
-            return;  // 面板开不了:setup_wizard 的朴素逐行回落兜着
-        }
-        // 选择帧给选项数+1 行预留(菜单还带一行提示),面板把 footer 画在
-        // 预留区之下,菜单画进预留区,滚屏风险一并堵住。
-        panel->Draw(frame, frame.prompt.empty() ? kWizardChoiceReserveRows : 0);
-    };
+    if (panel_active) {
+        io.draw_frame = [panel](const lubancode::cli::WizardFrame& frame) {
+            // 选择帧给选项数+1 行预留(菜单还带一行提示),面板把 footer 画在
+            // 预留区之下,菜单画进预留区,滚屏风险一并堵住。
+            const int requested = frame.choice_rows > 0 ? frame.choice_rows : kWizardChoiceReserveRows;
+            const int reserve_rows = frame.prompt.empty()
+                                         ? (std::min)(kWizardChoiceReserveRows, (std::max)(2, requested))
+                                         : 0;
+            panel->Draw(frame, reserve_rows);
+        };
+    }
     io.read_event = [panel, panel_active]() -> lubancode::cli::WizardInputEvent {
         lubancode::cli::ReadExitReason reason = lubancode::cli::ReadExitReason::Submitted;
         const std::optional<std::string> line = panel_active ? panel->ReadText(&reason)
@@ -563,8 +575,9 @@ void PrintProviderList(const std::vector<lubancode::config::ProviderConfig>& pro
 // 任何东西。问出来的是一条 ProviderConfig,写盘复用一行式旧用法同一条路径
 // (AddProviderToGlobalConfig)。用户中途 EOF、或者最后一问回答 n,都当"整个
 // 添加动作被取消"处理:不改 config.providers、不写盘。
-void RunProviderAddWizardInteractive(const std::string& name_prefill, lubancode::config::Config& config,
-                                     const lubancode::cli::Theme& theme) {
+std::optional<std::string> RunProviderAddWizardInteractive(const std::string& name_prefill,
+                                                            lubancode::config::Config& config,
+                                                            const lubancode::cli::Theme& theme) {
     lubancode::cli::WizardIO io = MakeInteractiveWizardIO(theme);
 
     if (lubancode::config::ProviderCatalogCacheIsStale()) {
@@ -582,16 +595,17 @@ void RunProviderAddWizardInteractive(const std::string& name_prefill, lubancode:
         lubancode::cli::RunProviderPresetWizard(io, provider_catalog, name_prefill, config.providers);
     if (!outcome.has_value() || !outcome->save_requested) {
         std::cout << tr("cmd.provider.add_cancelled") << "\n";
-        return;
+        return std::nullopt;
     }
 
     const auto saved = lubancode::config::AddProviderToGlobalConfig(outcome->provider);
     if (!saved.has_value()) {
         std::cout << trf("cmd.provider.add_failed", saved.error()) << "\n";
-        return;
+        return std::nullopt;
     }
     config.providers.push_back(outcome->provider);
     std::cout << trf("cmd.provider.added", outcome->provider.name, *saved) << "\n";
+    return outcome->provider.name;
 }
 
 // /provider:添端只写全局配置；项目级若自行写了 providers，加载时仍按既有
@@ -621,12 +635,6 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             std::cout << trf("cmd.provider.not_found", switch_name) << "\n";
             return;
         }
-        const lubancode::config::ProviderAuthResolution auth =
-            lubancode::config::ResolveProviderAuth(*provider);
-        const std::string api_key = auth.status ==
-                                            lubancode::config::ProviderAuthResolution::Status::Ready
-                                        ? *auth.key
-                                        : std::string();
         // 项目配置显式写了 active_provider 就继续写回项目；其余场景
         // 记到用户全局配置。只存名字，不复制密钥或 endpoint。
         const auto remembered = [&]() -> std::expected<std::string, std::string> {
@@ -641,25 +649,11 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             return lubancode::config::SetActiveProviderInGlobalConfig(provider->name);
         }();
 
-        config.wire = provider->wire;
-        config.base_url = provider->base_url;
-        config.auth_token = api_key;
-        config.auth_mode = provider->auth;  // none 时空 auth_token 是合法态
-        config.model = switch_model.empty() ? provider->model : switch_model;
-        config.context_window_tokens = provider->context_window_tokens;
-        config.native_web_search = provider->native_web_search;
-        config.stream_usage = provider->stream_usage;
-        config.reasoning_replay = provider->reasoning_replay;
-        config.extra_body = provider->extra_body;
-        config.extra_headers = provider->extra_headers;
-        // Effort/缓存诊断声明镜像(Effort 诊断单):provider 是唯一来源。
-        config.provider_think_levels = provider->supported_think_levels;
-        config.think_param = provider->think_param;
-        config.think_passthrough = provider->think_passthrough;
-        config.metrics_url = provider->metrics_url;
-        config.stream_usage_declared = provider->stream_usage_declared;
+        lubancode::config::ApplyProviderToRuntimeConfig(config, *provider);
+        if (!switch_model.empty()) {
+            config.model = switch_model;
+        }
         *current_model = config.model;
-        config.active_provider = provider->name;
         active_provider = provider->name;
         session_wire = lubancode::config::ProviderWireName(config.wire);
         real_backend.Rebuild(config);
@@ -881,10 +875,26 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             return;
         }
         case lubancode::cli::ProviderCommandAction::Add: {
+            const bool needs_connection =
+                config.base_url.empty() || config.model.empty() ||
+                (config.auth_token.empty() &&
+                 config.auth_mode != lubancode::config::ProviderAuthMode::None);
             if (command.wizard) {
                 // 裸敲 /provider add,或者 /provider add <名字>(名字先给上,
                 // 跳过向导第一问)——走分步向导,不进下面的一行式解析路径。
-                RunProviderAddWizardInteractive(command.name, config, theme);
+                // 空配置会话里,添成后顺手切过去;已有连接时只添不抢。
+                const auto added = RunProviderAddWizardInteractive(command.name, config, theme);
+                if (added.has_value() && needs_connection) {
+                    const lubancode::config::ProviderConfig* provider =
+                        lubancode::config::FindProvider(config.providers, *added);
+                    if (provider != nullptr &&
+                        lubancode::config::ResolveProviderAuth(*provider).status ==
+                            lubancode::config::ProviderAuthResolution::Status::Missing &&
+                        !remediate_missing_auth(*added)) {
+                        return;
+                    }
+                    execute_switch(*added, "");
+                }
                 return;
             }
             const auto wire = lubancode::config::ParseProviderWire(command.wire);
@@ -927,6 +937,17 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             }
             config.providers.push_back(std::move(provider));
             std::cout << trf("cmd.provider.added", command.name, *saved) << "\n";
+            if (needs_connection) {
+                const lubancode::config::ProviderConfig* added =
+                    lubancode::config::FindProvider(config.providers, command.name);
+                if (added != nullptr &&
+                    lubancode::config::ResolveProviderAuth(*added).status ==
+                        lubancode::config::ProviderAuthResolution::Status::Missing &&
+                    !remediate_missing_auth(command.name)) {
+                    return;
+                }
+                execute_switch(command.name, "");
+            }
             return;
         }
         case lubancode::cli::ProviderCommandAction::Switch: {

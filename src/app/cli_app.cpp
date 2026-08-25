@@ -173,35 +173,91 @@ void PrintHelp() {
 
 // /tools 命令:列工具三态——核心(恒在)/已加载的延迟工具/延迟未加载,
 
-// 初次配置向导:接 cli::ReadLine 做输入、std::cout 做输出、api::ListModels
-// 做模型列表拉取。用户中途 EOF(Ctrl+Z / 管道读尽)放弃时返回 std::nullopt。
-// 用户选择保存时,把保存后的路径写进 out_config_file_path,好让接下来的
-// /model 命令知道"有配置文件"。
+// 初次启动不再强填 base_url/api_key/model。欢迎页只分两路：直接接
+// /provider add 同款目录向导，或先进入主界面。面板活着时不往它脚下插
+// 普通输出；告警与保存回执攒到 WizardIO 析构清场后再打。
+std::optional<lubancode::config::ConfigResult> RunInitialSetupWizard(
+    const lubancode::config::ConfigResult& current, const lubancode::cli::Theme& theme) {
+    lubancode::config::ConfigResult result = current;
+    std::optional<lubancode::cli::ProviderWizardOutcome> provider_outcome;
+    std::vector<std::string> notices;
 
-std::optional<lubancode::config::Config> RunInitialSetupWizard(std::optional<std::string>& out_config_file_path,
-                                                                const lubancode::cli::Theme& theme) {
-    lubancode::cli::WizardIO io = MakeInteractiveWizardIO(theme);
+    {
+        lubancode::cli::WizardIO io = MakeInteractiveWizardIO(theme);
+        const auto home_lubancode_dir = lubancode::config::HomeLubancodeDir();
+        io.home_config_display_path =
+            (home_lubancode_dir.has_value() ? *home_lubancode_dir : tr("path.no_home") + "/.lubancode") +
+            "/config.json";
 
-    const auto home_lubancode_dir = lubancode::config::HomeLubancodeDir();
-    io.home_config_display_path =
-        (home_lubancode_dir.has_value() ? *home_lubancode_dir : tr("path.no_home") + "/.lubancode") +
-        "/config.json";
+        while (true) {
+            const auto entry = lubancode::cli::RunSetupEntryWizard(io);
+            if (!entry.has_value()) {
+                return std::nullopt;
+            }
+            result.config.language = entry->language;
+            if (entry->action == lubancode::cli::SetupEntryAction::Skip) {
+                break;
+            }
 
-    const auto outcome = lubancode::cli::RunSetupWizard(io);
-    if (!outcome.has_value()) {
-        return std::nullopt;
-    }
-
-    if (outcome->save_requested) {
-        const auto saved = lubancode::config::SaveConfigFile(outcome->config);
-        if (saved.has_value()) {
-            std::cout << trf("wizard.saved", *saved) << "\n";
-            out_config_file_path = *saved;
-        } else {
-            std::cout << trf("wizard.save_failed", saved.error()) << "\n";
+            // 开局只读本地缓存/内置快照。目录刷新留给 /provider refresh；
+            // 不能为一张欢迎页先赌十秒网络超时。
+            const lubancode::config::ProviderCatalog catalog = lubancode::config::LoadProviderCatalog();
+            for (const std::string& warning : catalog.warnings) {
+                notices.push_back(trf("provider_catalog.warning", warning));
+            }
+            const auto picked = lubancode::cli::RunProviderPresetWizard(
+                io, catalog, std::string(), result.config.providers);
+            if (!picked.has_value() || !picked->save_requested) {
+                continue;  // 从 provider 向导退回欢迎页，仍有“暂时跳过”可走
+            }
+            provider_outcome = *picked;
+            break;
         }
     }
-    return outcome->config;
+
+    for (const std::string& notice : notices) {
+        std::cout << notice << "\n";
+    }
+    if (!provider_outcome.has_value()) {
+        return result;  // 明选跳过：主界面照开，配置一个字也不写
+    }
+
+    const lubancode::config::ProviderConfig& provider = provider_outcome->provider;
+    const auto saved = lubancode::config::AddProviderToGlobalConfig(provider);
+    if (saved.has_value()) {
+        std::cout << trf("cmd.provider.added", provider.name, *saved) << "\n";
+        result.global_config_file_path = *saved;
+        if (!result.project_config_file_path.has_value()) {
+            result.config_file_path = *saved;
+        }
+        result.sources.providers = lubancode::config::Source::GlobalConfigFile;
+        const auto remembered = lubancode::config::SetActiveProviderInGlobalConfig(provider.name);
+        if (remembered.has_value()) {
+            result.sources.active_provider = lubancode::config::Source::GlobalConfigFile;
+        } else {
+            std::cout << trf("cmd.provider.remember_failed", remembered.error()) << "\n";
+        }
+        if (const auto language_saved =
+                lubancode::config::UpdateLanguageInConfigFile(*saved, result.config.language);
+            !language_saved.has_value()) {
+            std::cout << trf("wizard.save_failed", language_saved.error()) << "\n";
+        } else {
+            result.sources.language = lubancode::config::Source::GlobalConfigFile;
+        }
+    } else {
+        std::cout << trf("wizard.save_failed", saved.error()) << "\n";
+    }
+
+    // 写盘失败也不糟蹋刚填完的结果：本次会话先能用。用户刚刚明选了
+    // provider，这个会话动作须整套压过启动时残留的半套环境变量。
+    result.config.providers.push_back(provider);
+    lubancode::config::ApplyProviderToRuntimeConfig(result.config, provider);
+    if (!provider.model_reasoning_effort.empty()) {
+        result.config.think = provider.model_reasoning_effort;
+        result.sources.think = saved.has_value() ? lubancode::config::Source::GlobalConfigFile
+                                                 : lubancode::config::Source::Default;
+    }
+    return result;
 }
 
 // M9 -> hooks 框架:session_start/session_end 钩子的生命周期跟"这一次 CLI
@@ -636,37 +692,16 @@ int RunCli(const std::vector<std::string>& args) {
                             settings_local, catalog_apply.base_instructions, soul_content);
         }
 
-        // 交互模式:base_url/api_key/model 有一个解不出来,就先走一遍初次
-        // 配置向导——三个字段都没有内置默认值,任何一个空着都没法真的
-        // 跟模型对话,不如趁手就问清楚(即便本次规矩里描述的触发条件只提了
-        // base_url/api_key,这里多加一条 model 判断更稳妥,免得 env 只配了
-        // base_url/api_key 漏了 model,走进会话却发不出请求)。
+        // 交互模式缺连接时开欢迎页。用户可以直接添 provider，也可以明选
+        // “暂时跳过”进主界面；只有真发普通消息时才拦，/provider 等命令照走。
         lubancode::config::ConfigResult effective = *config_result;
-        // auth=none 的当前激活端:空 key 合法(RequireApiKey 同款例外),不该被
-        // 拉进初次配置向导——base_url/model 仍须齐。
-        if (effective.config.base_url.empty() ||
-            (effective.config.auth_token.empty() &&
-             effective.config.auth_mode != lubancode::config::ProviderAuthMode::None) ||
-            effective.config.model.empty()) {
-            const auto wizard_config = RunInitialSetupWizard(effective.config_file_path, theme);
-            if (!wizard_config.has_value()) {
+        if (!lubancode::config::RequireConfigured(effective).has_value()) {
+            const auto setup = RunInitialSetupWizard(effective, theme);
+            if (!setup.has_value()) {
                 std::cerr << tr("error.wizard_incomplete") << "\n";
                 return 1;
             }
-            const auto memory_config = effective.config.memory;
-            effective.config = *wizard_config;
-            effective.config.memory = memory_config;
-            // 向导给出的这份配置,来源标记简化成两种:保存了就算"全局配置
-            // 文件"来源(向导写的是主目录 ~/.lubancode/config.json),没保存
-            // 就算"内置默认值"(最接近"临时值,没有更合适的持久来源"这个
-            // 语义)——/config 展示用,不影响实际发请求。
-            const lubancode::config::Source marked = effective.config_file_path.has_value()
-                                                          ? lubancode::config::Source::GlobalConfigFile
-                                                          : lubancode::config::Source::Default;
-            effective.sources.wire = marked;
-            effective.sources.base_url = marked;
-            effective.sources.auth_token = marked;
-            effective.sources.model = marked;
+            effective = *setup;
         }
         std::string executable;
         if (!args.empty()) {

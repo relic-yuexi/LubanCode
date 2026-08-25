@@ -278,6 +278,30 @@ const ProviderConfig* FindProvider(const std::vector<ProviderConfig>& providers,
     return nullptr;
 }
 
+void ApplyProviderToRuntimeConfig(Config& config, const ProviderConfig& provider) {
+    const ProviderAuthResolution auth = ResolveProviderAuth(provider);
+    config.wire = provider.wire;
+    config.base_url = provider.base_url;
+    config.auth_token = auth.status == ProviderAuthResolution::Status::Ready ? *auth.key : std::string();
+    config.auth_mode = provider.auth;
+    config.model = provider.model;
+    config.context_window_tokens = provider.context_window_tokens;
+    config.native_web_search = provider.native_web_search;
+    config.stream_usage = provider.stream_usage;
+    config.reasoning_replay = provider.reasoning_replay;
+    config.reasoning_delta_field = provider.reasoning_delta_field;
+    config.reasoning_replay_field = provider.reasoning_replay_field;
+    config.extra_body = provider.extra_body;
+    config.extra_headers = provider.extra_headers;
+    config.provider_think_levels = provider.supported_think_levels;
+    config.think_param = provider.think_param;
+    config.think_passthrough = provider.think_passthrough;
+    config.metrics_url = provider.metrics_url;
+    config.provider_max_output_tokens = provider.max_output_tokens;
+    config.stream_usage_declared = provider.stream_usage_declared;
+    config.active_provider = provider.name;
+}
+
 bool ApplyConfiguredActiveProvider(ConfigResult& result) {
     if (result.config.active_provider.empty()) {
         return false;

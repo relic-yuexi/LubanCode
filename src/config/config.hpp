@@ -961,6 +961,11 @@ std::optional<std::string> ProviderApiKey(const ProviderConfig& provider);
 
 const ProviderConfig* FindProvider(const std::vector<ProviderConfig>& providers, const std::string& name);
 
+// 用户在会话里明确选中一条 provider 时，把整套连接字段装进当前 Config。
+// 这是运行时动作，压过启动期合并出来的旧端点；初次向导与 /provider switch
+// 共用，免得一边漏 reasoning 字段、一边又被半套环境变量拆散。
+void ApplyProviderToRuntimeConfig(Config& config, const ProviderConfig& provider);
+
 // 把 Config::active_provider 指向的条目展开到当前运行配置。provider 条目
 // 所在配置层级只压过同级或更低字段；LUBANCODE_* 仍居最上。找不到名字
 // 时清掉本次运行态选择并返回 false，不让一条旧记录拦住启动。

@@ -18,7 +18,7 @@ lubancode delete <id|标题> [--force]
 
 | 形式 | 行为 |
 | --- | --- |
-| 无参数 | 进入交互会话；缺少模型配置时先跑初次向导。 |
+| 无参数 | 进入交互会话；缺少模型配置时可直接添加 Provider，也可跳过后稍后配置。 |
 | 一个普通参数 | 作为单发问题；模型仍可调用适用工具。 |
 | stdin 有管道数据 | 管道正文与命令行问题一同交给模型；输出降为 plain。 |
 | `app-server` | 无界面后台协议模式：stdin/stdout 上逐行 JSON-RPC，不碰终端、不画界面（见 [app-server 协议](../features/app-server/README.md)）。SSH 远程项目经 `ssh <host> lubancode app-server` 拉起。 |
@@ -84,7 +84,7 @@ lubancode delete <id|标题> [--force]
 /provider set <名字> extra_header <头名> <值>
 ```
 
-裸敲与 `list` 同义。`add` 参数少于一整行时进入分步向导；向导先给厂家预设，末项才是自定义。当前 provider 不许直接删除。`switch` 成功后保存 `active_provider`。
+裸敲与 `list` 同义。`add` 参数少于一整行时进入分步向导；向导先给厂家预设，末项才是自定义。会话还没有可用连接时，添加成功便自动切到新 Provider；已有连接时只添加，不抢当前端。当前 provider 不许直接删除。`switch` 成功后保存 `active_provider`。
 
 ### `/think [档位]`、`/effort [档位]`
 

@@ -2462,6 +2462,49 @@ TEST_CASE("MergeConfig: 项目级 providers 整段压过全局") {
     CHECK(merged->sources.providers == config::Source::ProjectConfigFile);
 }
 
+TEST_CASE("provider runtime: 明选一端便整套覆盖旧连接与能力字段") {
+    config::Config current;
+    current.base_url = "https://stale.example/v1";
+    current.model = "stale-model";
+    current.auth_token = "stale-key";
+
+    config::ProviderConfig provider;
+    provider.name = "fresh";
+    provider.base_url = "https://fresh.example/v1";
+    provider.wire = config::Wire::Responses;
+    provider.auth = config::ProviderAuthMode::Inline;
+    provider.api_key = "fresh-key";
+    provider.model = "fresh-model";
+    provider.context_window_tokens = 131072;
+    provider.native_web_search = true;
+    provider.stream_usage = true;
+    provider.stream_usage_declared = true;
+    provider.reasoning_replay = "tool_episode";
+    provider.reasoning_delta_field = "reasoning_content";
+    provider.reasoning_replay_field = "reasoning";
+    provider.supported_think_levels = {"low", "high"};
+    provider.think_param = "effort";
+    provider.think_passthrough = true;
+    provider.metrics_url = "http://127.0.0.1:9000/metrics";
+    provider.max_output_tokens = 8192;
+    provider.extra_body = nlohmann::json{{"reasoning", true}};
+    provider.extra_headers = {{"X-Api-Version", "2026-08-25"}};
+
+    config::ApplyProviderToRuntimeConfig(current, provider);
+
+    CHECK(current.active_provider == "fresh");
+    CHECK(current.base_url == provider.base_url);
+    CHECK(current.wire == provider.wire);
+    CHECK(current.auth_token == "fresh-key");
+    CHECK(current.model == "fresh-model");
+    CHECK(current.context_window_tokens == 131072);
+    CHECK(current.reasoning_delta_field == "reasoning_content");
+    CHECK(current.reasoning_replay_field == "reasoning");
+    CHECK(current.provider_max_output_tokens == 8192);
+    CHECK(current.extra_body == provider.extra_body);
+    CHECK(current.extra_headers == provider.extra_headers);
+}
+
 TEST_CASE("active_provider: 解析、分层并展开对应 provider") {
     const auto parsed = config::ParseFileConfigJson(R"({"active_provider":"sub-openai"})", "/tmp/config.json");
     REQUIRE(parsed.has_value());

@@ -26,7 +26,7 @@ git status --short
 
 | 现象 | 先查 | 再做 |
 | --- | --- | --- |
-| 启动即报缺模型 | `--config` 的 model 来源 | 跑向导或补 provider/model |
+| 开场显示“尚未连接” | `--config` 的 provider/model 来源 | 用 `/provider add` 添加，或 `/provider` 切换已有配置 |
 | 报缺 key | provider 的 `auth` 三态与 `key_env` | 设环境变量；无鉴权须显式 `auth=none` |
 | 项目里行为不同 | cwd 下 `.lubancode/config.json` | 对照来源，不先删全局配置 |
 | JSON 解析失败 | 报错路径与行列 | 用 JSON parser 校验，别往 JSON 写注释 |
