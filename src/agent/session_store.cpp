@@ -13,6 +13,7 @@
 #include <nlohmann/json.hpp>
 
 #include "platform/json_safe.hpp"  // DumpJsonSanitized:落盘行的编码窄边界
+#include "platform/text_encoding.hpp"  // SanitizeExternalText:旧会话档读入时的编码关口
 
 namespace lubancode::agent {
 
@@ -37,6 +38,33 @@ std::size_t Utf8CharLen(unsigned char lead) {
     if ((lead & 0xF0U) == 0xE0U) return 3;
     if ((lead & 0xF8U) == 0xF0U) return 4;
     return 1;
+}
+
+// 递归把 JSON 树里所有字符串字段过一遍 SanitizeExternalText(合法时零
+// 成本)。工具入参这类任意 JSON 从旧档读入时用它洗,免得坏串漏到 wire。
+// 返回 false 表示这棵树连结构都坏了(根不是 object/array,或清洗后仍
+// 无法作为工具入参),调用方给个空对象兜底。
+bool SanitizeJsonTree(nlohmann::json& value) {
+    if (value.is_string()) {
+        std::string text = value.get<std::string>();
+        if (!platform::IsValidUtf8(text)) {
+            value = platform::SanitizeExternalText(text);
+        }
+        return true;
+    }
+    if (value.is_array()) {
+        for (auto& item : value) {
+            SanitizeJsonTree(item);
+        }
+        return true;
+    }
+    if (value.is_object()) {
+        for (auto& item : value) {
+            SanitizeJsonTree(item);
+        }
+        return true;
+    }
+    return false;
 }
 
 nlohmann::json BlockToJson(const api::ContentBlock& block) {
@@ -81,7 +109,7 @@ std::optional<api::ContentBlock> BlockFromJson(const nlohmann::json& j) {
     const std::string type = j.value("type", std::string());
     if (type == "text") {
         api::TextBlock b;
-        b.text = j.value("text", std::string());
+        b.text = platform::SanitizeExternalText(j.value("text", std::string()));
         return api::ContentBlock{std::move(b)};
     }
     if (type == "image") {
@@ -98,22 +126,27 @@ std::optional<api::ContentBlock> BlockFromJson(const nlohmann::json& j) {
     }
     if (type == "tool_use") {
         api::ToolUseBlock b;
-        b.id = j.value("id", std::string());
-        b.name = j.value("name", std::string());
+        b.id = platform::SanitizeExternalText(j.value("id", std::string()));
+        b.name = platform::SanitizeExternalText(j.value("name", std::string()));
         b.input = j.contains("input") ? j["input"] : nlohmann::json::object();
+        // 工具入参是任意 JSON,递归洗掉里面的坏串(旧档/崩溃截断行
+        // 带进来的),免得漏到 wire 上触发 316 兜底。
+        if (!SanitizeJsonTree(b.input)) {
+            b.input = nlohmann::json::object();
+        }
         return api::ContentBlock{std::move(b)};
     }
     if (type == "tool_result") {
         api::ToolResultBlock b;
-        b.tool_use_id = j.value("tool_use_id", std::string());
-        b.content = j.value("content", std::string());
+        b.tool_use_id = platform::SanitizeExternalText(j.value("tool_use_id", std::string()));
+        b.content = platform::SanitizeExternalText(j.value("content", std::string()));
         b.is_error = j.value("is_error", false);
         return api::ContentBlock{std::move(b)};
     }
     if (type == "thinking") {
         api::ThinkingBlock b;
-        b.text = j.value("text", std::string());
-        b.signature = j.value("signature", std::string());
+        b.text = platform::SanitizeExternalText(j.value("text", std::string()));
+        b.signature = platform::SanitizeExternalText(j.value("signature", std::string()));
         return api::ContentBlock{std::move(b)};
     }
     return std::nullopt;  // 认不得的块类型

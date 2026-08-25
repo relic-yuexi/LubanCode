@@ -6,6 +6,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "platform/text_encoding.hpp"  // SanitizeExternalText:模型输出进历史前的编码关口
+
 namespace lubancode::api {
 
 void MessageAssembler::FinalizeCurrent() {
@@ -23,10 +25,14 @@ void MessageAssembler::FinalizeCurrent() {
         content_.push_back(ToolUseBlock{open_tool_->id, open_tool_->name, std::move(input)});
         open_tool_.reset();
     } else if (open_thinking_.has_value()) {
-        content_.push_back(ThinkingBlock{std::move(open_thinking_->text), std::move(open_thinking_->signature)});
+        // 模型流里的思考正文/签名可能带坏串(服务端或中转的问题),进历史
+        // 前洗掉,免得下一轮重放时 wire 序列化 316。
+        content_.push_back(ThinkingBlock{platform::SanitizeExternalText(open_thinking_->text),
+                                         platform::SanitizeExternalText(open_thinking_->signature)});
         open_thinking_.reset();
     } else if (open_text_.has_value()) {
-        content_.push_back(TextBlock{std::move(open_text_->text)});
+        // 同上:模型输出的文本块进历史前清洗。
+        content_.push_back(TextBlock{platform::SanitizeExternalText(open_text_->text)});
         open_text_.reset();
     }
 }

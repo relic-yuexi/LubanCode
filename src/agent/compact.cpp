@@ -11,6 +11,7 @@
 #include "agent/context.hpp"       // 统一 token 估算口径
 #include "agent/context_events.hpp"  // 事件账:evidence_refs 的来源区间
 #include "api/assembler.hpp"
+#include "platform/text_encoding.hpp"  // SanitizeExternalText:摘要文本进历史前的编码关口
 
 namespace lubancode::agent {
 
@@ -912,7 +913,10 @@ std::expected<CompactSummary, api::Error> Compact(api::Backend& backend, const s
 
     api::Message archive;
     archive.role = api::Role::User;
-    archive.content.push_back(api::TextBlock{"[对话存档,此前内容已压缩] " + summary_text});
+    // 摘要文本是模型输出的,可能带坏串,进历史前清洗(和 assembler 收块
+    // 同一道关口,防止下一轮 wire 序列化 316)。
+    archive.content.push_back(api::TextBlock{
+        "[对话存档,此前内容已压缩] " + platform::SanitizeExternalText(summary_text)});
     return CompactSummary{std::move(archive), *manifest};
 }
 

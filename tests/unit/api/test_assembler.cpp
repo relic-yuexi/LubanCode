@@ -8,6 +8,7 @@
 
 #include "api/assembler.hpp"
 #include "api/types.hpp"
+#include "platform/text_encoding.hpp"  // IsValidUtf8:清洗结果断言
 
 using namespace lubancode::api;
 
@@ -158,4 +159,75 @@ TEST_CASE("chat wire 过渡:thinking 后接 text,没有 ContentBlockDone 也能�
     CHECK(std::get<ThinkingBlock>(message.content[0]).text == "先想想");
     REQUIRE(std::holds_alternative<TextBlock>(message.content[1]));
     CHECK(std::get<TextBlock>(message.content[1]).text == "再回答");
+}
+
+TEST_CASE("SanitizeMessage:合法内容原样不动,坏字节按 U+FFFD 清洗") {
+    // 合法 UTF-8:一字不动。
+    Message clean;
+    clean.role = Role::User;
+    clean.content.push_back(TextBlock{"你好,世界"});
+    clean.content.push_back(ToolUseBlock{"call_1", "read_file", nlohmann::json{{"path", "a.txt"}}});
+    clean.content.push_back(ToolResultBlock{"call_1", "工具输出:正常内容", false});
+    clean.content.push_back(ThinkingBlock{"思考一下", "sig_01"});
+    Message clean_copy = clean;
+    SanitizeMessage(clean);
+    // 合法内容清洗后必须一字不动。
+    REQUIRE(clean.content.size() == clean_copy.content.size());
+    for (std::size_t i = 0; i < clean.content.size(); ++i) {
+        const auto& a = clean.content[i];
+        const auto& b = clean_copy.content[i];
+        REQUIRE(a.index() == b.index());
+        std::visit(
+            [&](const auto& av) {
+                using T = std::decay_t<decltype(av)>;
+                const auto& bv = std::get<T>(b);
+                if constexpr (std::is_same_v<T, TextBlock>) {
+                    CHECK(av.text == bv.text);
+                } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
+                    CHECK(av.id == bv.id);
+                    CHECK(av.name == bv.name);
+                    CHECK(av.input == bv.input);
+                } else if constexpr (std::is_same_v<T, ToolResultBlock>) {
+                    CHECK(av.tool_use_id == bv.tool_use_id);
+                    CHECK(av.content == bv.content);
+                    CHECK(av.is_error == bv.is_error);
+                } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
+                    CHECK(av.text == bv.text);
+                    CHECK(av.signature == bv.signature);
+                }
+            },
+            a);
+    }
+
+    // 非法 UTF-8(夹着 0xE4 开头的残序列):清洗后必须是合法 UTF-8,
+    // 且合法片段保留、坏字节变成 U+FFFD。
+    const std::string bad = "前\xE4\xB8后";  // \xE4\xB8 是"中"的前两字节,缺第三字节
+    REQUIRE_FALSE(lubancode::platform::IsValidUtf8(bad));
+    Message dirty;
+    dirty.role = Role::User;
+    dirty.content.push_back(TextBlock{bad});
+    dirty.content.push_back(ToolUseBlock{"call_2", "search", nlohmann::json{{"path", bad}, {"pattern", "ok"}}});
+    dirty.content.push_back(ToolResultBlock{"call_2", bad, false});
+    dirty.content.push_back(ThinkingBlock{bad, bad});
+
+    SanitizeMessage(dirty);
+    for (const auto& block : dirty.content) {
+        std::visit(
+            [](const auto& b) {
+                using T = std::decay_t<decltype(b)>;
+                if constexpr (std::is_same_v<T, TextBlock>) {
+                    CHECK(lubancode::platform::IsValidUtf8(b.text));
+                    CHECK(b.text.find("\xEF\xBF\xBD") != std::string::npos);  // U+FFFD
+                    CHECK(b.text.find("后") != std::string::npos);            // 合法片段保留
+                } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
+                    CHECK(lubancode::platform::IsValidUtf8(b.input.at("path").get<std::string>()));
+                } else if constexpr (std::is_same_v<T, ToolResultBlock>) {
+                    CHECK(lubancode::platform::IsValidUtf8(b.content));
+                } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
+                    CHECK(lubancode::platform::IsValidUtf8(b.text));
+                    CHECK(lubancode::platform::IsValidUtf8(b.signature));
+                }
+            },
+            block);
+    }
 }

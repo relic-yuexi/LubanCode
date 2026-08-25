@@ -330,6 +330,7 @@ add_library(lubancode_engine STATIC
   src/api/gemini/request.cpp
   src/api/assembler.cpp
   src/api/models.cpp
+  src/api/types.cpp
   src/config/config.cpp
   src/config/model_catalog.cpp
   src/config/provider_catalog.cpp

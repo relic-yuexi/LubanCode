@@ -23,6 +23,7 @@
 #include "tools/path_utils.hpp"
 #include "tools/todo_tool.hpp"
 #include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明/persona)查表,源头 prompts/tools/
+#include "platform/text_encoding.hpp"  // SanitizeExternalText:inbox 投递文本的编码关口
 
 namespace lubancode::tools {
 
@@ -1306,7 +1307,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             }
             api::Message message;
             message.role = api::Role::User;
-            message.content.push_back(api::TextBlock{FormatInboxDelivery(text, source)});
+            // 介入文本可能带坏串(跨会话传话/外部投递),进子代理历史前洗掉。
+            message.content.push_back(api::TextBlock{FormatInboxDelivery(platform::SanitizeExternalText(text), source)});
             return message;
         });
     }

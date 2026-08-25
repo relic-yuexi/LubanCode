@@ -13,6 +13,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "platform/text_encoding.hpp"  // SanitizeExternalText:消息内容上 wire 前的编码关口
+
 namespace lubancode::api {
 
 // anthropic wire 必填 max_tokens 时的公开兜底:模型/provider/配置三级都
@@ -75,6 +77,17 @@ struct Message {
     Role role = Role::User;
     std::vector<ContentBlock> content;
 };
+
+// 把一块内容里的文本字段全部过一遍 SanitizeExternalText(合法时零成本
+// 原样返回)。wire 序列化前的编码关口:坏串(会话旧档、管道输入、外部
+// 文本)到这里就该被洗掉,不许漏到四个后端去触发 type_error.316 兜底。
+// 工具入参/结果是 JSON 树,洗它要走 SanitizeMessage 那层,别在这一块
+// 里硬解。
+void SanitizeContentBlock(ContentBlock& block);
+
+// 把一条消息的所有内容块清洗一遍(含 ToolUseBlock.input / ToolResultBlock
+// 等 JSON 树字段的递归清洗)。合法时零成本,不会改动任何内容。
+void SanitizeMessage(Message& message);
 
 // 工具定义,交给模型看的 JSON Schema。M1 阶段 Request::tools 恒为空,
 // 这里先把形状定好,留给 M2 用。

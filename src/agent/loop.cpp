@@ -715,6 +715,14 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(api::Message user_message,
             }
             request.messages = std::move(trimmed);
         }
+        // 编码关口(兜底前的主动闸):消息内容上 wire 前统一过一遍清洗,
+        // 合法内容零成本原样返回。旧会话档/管道输入/外部文本带进来的
+        // 坏串到这里就该被洗掉——四个 wire client 的 dump() 316 兜底
+        // 只洗发往网络的拷贝,内存里的坏串留驻会每轮重打日志,这里才是
+        // 治本的一刀。
+        for (auto& message : request.messages) {
+            api::SanitizeMessage(message);
+        }
         request.max_tokens = profile_.max_output_tokens;  // nullopt = unset,交服务端默认
         // 有损硬裁发生了(丢轮/截结果),显式通报——静默降级会让用户以为语
         // 义压缩已成功,模型其实已经看不到那段原文。

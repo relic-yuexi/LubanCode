@@ -30,6 +30,7 @@
 #include "tools/registry.hpp"
 #include "workflow/frontend.hpp"
 #include "workflow/journal.hpp"
+#include "platform/text_encoding.hpp"  // SanitizeExternalText:入站用户文本的编码关口
 
 namespace lubancode::app_server {
 
@@ -798,7 +799,9 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
     // 冻结)。图片原样入 history——下一轮、重放、会话恢复都带得上。
     api::Message user_message;
     user_message.role = api::Role::User;
-    user_message.content.push_back(api::TextBlock{text});
+    // 入站用户文本:JSON parse 不校验 UTF-8,前端/代理可能带进坏串,
+    // 进 history 前洗掉。
+    user_message.content.push_back(api::TextBlock{platform::SanitizeExternalText(text)});
     for (const nlohmann::json& image : images) {
         api::ImageBlock block;
         block.media_type = image.value("mediaType", std::string());

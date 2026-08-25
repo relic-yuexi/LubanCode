@@ -95,10 +95,10 @@ std::vector<CompletionCandidate> BuildSlashCompletionCandidates() {
 
 namespace {
 
-// 主 composer 的正文区至少三行：上留一行，单行正文居中，下面再留一行。
-// 内容增多时先吃掉下沿空白，再自然向下长高；首行不跳动。
-constexpr int kComposerTopPaddingRows = 1;
-constexpr int kComposerMinBodyRows = 3;
+// 主 composer 的正文区至少一行：单行正文紧贴上下横线，不加空白。
+// 内容增多时自然向下长高。
+constexpr int kComposerTopPaddingRows = 0;
+constexpr int kComposerMinBodyRows = 1;
 
 void StripTrailingCrLf(std::string& s) {
     while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) {
@@ -2354,6 +2354,9 @@ std::optional<std::string> ReadLine(const std::string& prompt, const Theme& them
         return std::nullopt;
     }
     StripTrailingCrLf(line);
+    // 管道/重定向进来的字节可能不是 UTF-8(GBK/ANSI 原样透传),先洗成
+    // 合法 UTF-8 再当用户输入用,免得带病进历史、wire 序列化 316。
+    line = platform::SanitizeUtf8(line);
     if (exit_reason != nullptr) {
         *exit_reason = ReadExitReason::Submitted;
     }
