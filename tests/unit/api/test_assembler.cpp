@@ -220,7 +220,8 @@ TEST_CASE("SanitizeMessage:合法内容原样不动,坏字节按 U+FFFD 清洗")
                     CHECK(b.text.find("\xEF\xBF\xBD") != std::string::npos);  // U+FFFD
                     CHECK(b.text.find("后") != std::string::npos);            // 合法片段保留
                 } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
-                    CHECK(lubancode::platform::IsValidUtf8(b.input.at("path").get<std::string>()));
+                    CHECK(lubancode::platform::IsValidUtf8(
+                        b.input.at("path").template get<std::string>()));
                 } else if constexpr (std::is_same_v<T, ToolResultBlock>) {
                     CHECK(lubancode::platform::IsValidUtf8(b.content));
                 } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
@@ -261,7 +262,8 @@ TEST_CASE("SanitizeRequest:所有 wire 字符串出口一并清洗") {
                 } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
                     CHECK(lubancode::platform::IsValidUtf8(b.id));
                     CHECK(lubancode::platform::IsValidUtf8(b.name));
-                    CHECK(lubancode::platform::IsValidUtf8(b.input.at("path").get<std::string>()));
+                    CHECK(lubancode::platform::IsValidUtf8(
+                        b.input.at("path").template get<std::string>()));
                 } else if constexpr (std::is_same_v<T, ToolResultBlock>) {
                     CHECK(lubancode::platform::IsValidUtf8(b.tool_use_id));
                     CHECK(lubancode::platform::IsValidUtf8(b.content));
