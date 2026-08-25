@@ -1,6 +1,6 @@
 // backend_stack.hpp 的实现:各请求改写层的函数体全在这只 translation
-// unit 里,具体 client(anthropic/chat/responses)、prompts 拼接与 cli::Spinner
-// 的依赖不再从公开头漏出去。
+// unit 里,具体 client(anthropic/chat/responses)与 prompts 拼接的依赖
+// 不再从公开头漏出去。(SpinnerBackend 批二挪去了 cli/spinner_backend.cpp。)
 
 #include "app/backend_stack.hpp"
 
@@ -147,29 +147,6 @@ std::expected<void, lubancode::api::Error> DeferredIndexBackend::send_stream(
     patched.system = lubancode::agent::WithDeferredToolsIndex(
         request.system, index_provider_ ? index_provider_() : std::string());
     return inner_.send_stream(patched, on_event, cancel);
-}
-
-SpinnerBackend::SpinnerBackend(lubancode::api::Backend& inner, const lubancode::cli::Theme& theme,
-                               bool spinner_enabled)
-    : inner_(inner), theme_(theme), spinner_enabled_(spinner_enabled) {}
-
-std::expected<void, lubancode::api::Error> SpinnerBackend::send_stream(
-    const lubancode::api::Request& request,
-    const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
-    const std::atomic<bool>* cancel) {
-    lubancode::cli::Spinner spinner(theme_, spinner_enabled_);
-    bool stopped = false;
-    const auto wrapped = [&](const lubancode::api::StreamEvent& event) {
-        if (!stopped) {
-            spinner.Stop();
-            stopped = true;
-        }
-        on_event(event);
-    };
-    return inner_.send_stream(request, wrapped, cancel);
-    // spinner 在这里析构,Stop() 兜底再调一次也是安全的(空操作)——
-    // 万一 send_stream 直接失败、一个事件都没吐(比如连都没连上),
-    // 转轮不会一直转着。
 }
 
 }  // namespace lubancode::app

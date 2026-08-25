@@ -570,7 +570,8 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                             lubancode::runtime::TurnCollector* view_collector,
                                             std::function<std::string(const std::string&, const nlohmann::json&)>
                                                 mode_gate,
-                                            std::function<void(bool asked, bool allowed)> approval_observer) {
+                                            std::function<void(bool asked, bool allowed)> approval_observer,
+                                            const lubancode::agent::Callbacks* event_callbacks) {
     lubancode::agent::Callbacks callbacks;
 
     // Plan 模式(只读研究硬闸单):ModePolicy 接到 RunOneTool 的
@@ -801,6 +802,13 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
             lubancode::cli::BuildCacheNote(context_tracker, report.reported()));
     };
 
+    // 批二(事件流升正房):显示回调先过事件流(TurnEventAdapter 翻的
+    // ServerEvent 流,落会话 sink),再落终端老路——一份事件、两路消费,
+    // 屏上一个字节不变。只并 void 出水口;确认/钩子/权限这些控制口不并。
+    if (event_callbacks != nullptr) {
+        lubancode::runtime::ComposeDisplayCallbacks(callbacks, *event_callbacks);
+    }
+
     // agent 工具(注册了的话)需要这一轮现算好的转发逻辑:确认回调直接
     // 转发父级那份(三档确认模式照管子代理);usage 累进 usage_stats(统计
     // 行的请求次数、输入输出 token 都要算上子代理那几次请求)但不动
@@ -825,8 +833,14 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         // 钩子(agent 工具没有单独的"子工具结束"回调,post_tool 正好在真
         // 执行完之后带着 Result 触发一次,借它回写;拒绝那条路在确认回调里
         // 已经定格,pre_tool 拦截另包一层)。
-        hooks.on_sub_tool_start = [&display](const std::string& tool_use_id, const std::string& name,
+        hooks.on_sub_tool_start = [&display, event_callbacks](const std::string& tool_use_id,
+                                            const std::string& name,
                                             const nlohmann::json& input) {
+            // 批二:前台子代理的内层工具先上事件流(宿主这轮的 adapter,同一
+            // 本 item 账),再画终端子条目;后台任务没人调这枚钩子,不涉。
+            if (event_callbacks != nullptr && event_callbacks->on_tool_start) {
+                event_callbacks->on_tool_start(tool_use_id, name, input);
+            }
             display.OnSubToolStart(tool_use_id, name, input);
         };
         hooks.on_usage = [&usage_stats, &display](const lubancode::api::UsageReport& report) {
@@ -880,12 +894,18 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                 return feedback;
             };
         }
-        hooks.on_post_tool_hook = [&display, base = callbacks.on_post_tool_hook](
+        hooks.on_post_tool_hook = [&display, base = callbacks.on_post_tool_hook, event_callbacks](
                                        const std::string& tool_use_id, const std::string& name,
                                        const nlohmann::json& input,
                                        const lubancode::tools::Tool::Result& result) {
             if (base) {
                 base(tool_use_id, name, input, result);
+            }
+            // 批二:真执行完的内层工具在事件流上收口(与 on_sub_tool_start
+            // 开的条目成对;被拒/被拦的那批没有 post 钩子,条目在收口时按
+            // Cancelled 兜底,终态唯一不悬空)。
+            if (event_callbacks != nullptr && event_callbacks->on_tool_done) {
+                event_callbacks->on_tool_done(tool_use_id, name, result);
             }
             display.OnSubToolResult(tool_use_id, name, input, result);
         };
@@ -909,6 +929,13 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         hooks.on_post_tool_use_hook = callbacks.on_post_tool_use_hook;
         // Plan 模式:stub 调用同过 ModePolicy(单子明令)。
         hooks.on_mode_policy = callbacks.on_mode_policy;
+        // 批二(事件流升正房):stub 调用上事件流——16 枚同构调用在 sink 账
+        // 上逐枚有起止;终端画面照旧只画一张外层卡(规格"不刷满屏"是画面
+        // 的规矩,不是账的规矩)。
+        if (event_callbacks != nullptr) {
+            hooks.on_tool_start = event_callbacks->on_tool_start;
+            hooks.on_tool_done = event_callbacks->on_tool_done;
+        }
         hooks.cancel = cancel_flag;
         ptc_tool->SetHooks(std::move(hooks));
     }
@@ -993,7 +1020,8 @@ RunTurnResult RunTurn(lubancode::agent::Agent& loop, const std::string& user_inp
                        std::string thread_id_for_trace, std::string turn_id_for_trace,
                        lubancode::runtime::TurnView* turn_view_out,
                        std::function<std::string(const std::string&, const nlohmann::json&)> mode_gate,
-                       std::function<void(bool asked, bool allowed)> approval_observer) {
+                       std::function<void(bool asked, bool allowed)> approval_observer,
+                       lubancode::runtime::TurnEventAdapter* turn_events) {
     auto prepared_input = lubancode::cli::PrepareImageInput(user_input);
     if (!prepared_input.has_value()) {
         std::cerr << theme.error << tr("error.prefix") << ImageInputErrorText(prepared_input.error())
@@ -1071,10 +1099,21 @@ RunTurnResult RunTurn(lubancode::agent::Agent& loop, const std::string& user_inp
         turn_context.permission_mode = lubancode::app::HookPermissionModeText();
         hook_dispatcher->UpdateContext(std::move(turn_context));
     }
+    // 事件流(骨架拆解批二):装了适配器的轮次,Start 先行(turn_id 复用
+    // trace 口径那枚,宿主没给就现发),显示回调经 BuildCallbacks 并轨;收
+    // 口在 finish_turn_chrome 三条路共用的漏斗里 Finish。Stop 钩子续跑的
+    // 那轮 Run 并进同一 turn 的账(终端 footer 也只有一枚,口径一致)。
+    // 没装(单发/单测)零开销,行为与从前一致。
+    lubancode::agent::Callbacks event_callbacks_storage;
+    if (turn_events != nullptr) {
+        turn_events->Start(turn_id_for_trace);
+        event_callbacks_storage = turn_events->MakeCallbacks();
+    }
     lubancode::agent::Callbacks callbacks =
         BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker, registry,
                         hook_dispatcher, display, body_tracker, allow_commands, deny_commands, &cancel_flag,
-                        recorder, turn_trace_hub, &view_collector, mode_gate, approval_observer);
+                        recorder, turn_trace_hub, &view_collector, mode_gate, approval_observer,
+                        turn_events != nullptr ? &event_callbacks_storage : nullptr);
     if (turn_trace_hub != nullptr) {
         if (recorder != nullptr) {
             turn_trace_hub->AttachProjection(
@@ -1339,8 +1378,19 @@ RunTurnResult RunTurn(lubancode::agent::Agent& loop, const std::string& user_inp
 
     // turn 收口的共用半段(终端回合视觉收束单):熄活动条、算墙钟、收
     // 视图账。三条路(错误早退/打断/正常)都从这里过——footer 恰一枚,
-    // 不再从中途裸退。
+    // 不再从中途裸退。事件流(批二)也在这收口:tone 三档映射终态,错误
+    // 文案随 Failed 带上;没收尾的条目由适配器按 Cancelled 兜底。
+    const std::string turn_error_text = result.has_value() ? std::string() : result.error();
     const auto finish_turn_chrome = [&](lubancode::cli::TurnFooterTone tone) {
+        if (turn_events != nullptr) {
+            turn_events->Finish(tone == lubancode::cli::TurnFooterTone::Worked
+                                    ? lubancode::runtime::Outcome::Succeeded
+                                : tone == lubancode::cli::TurnFooterTone::Stopped
+                                    ? lubancode::runtime::Outcome::Cancelled
+                                    : lubancode::runtime::Outcome::Failed,
+                                tone == lubancode::cli::TurnFooterTone::Failed ? turn_error_text
+                                                                              : std::string());
+        }
         (void)activity_seconds;  // Working 秒数与 footer 同钟(同一只 steady 钟),
                                  // 单测钉口径;这里不再二次对账,免得双写。
         const auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(

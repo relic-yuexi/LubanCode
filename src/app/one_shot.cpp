@@ -64,6 +64,7 @@
 #include "cli/setup_wizard.hpp"
 #include "cli/slash_commands.hpp"
 #include "cli/spinner.hpp"
+#include "cli/spinner_backend.hpp"
 #include "cli/terminal_frame.hpp"
 #include "cli/theme.hpp"
 #include "cli/todo_render.hpp"
@@ -118,7 +119,7 @@ using lubancode::app::BuildBaseToolRegistry;
 using lubancode::app::BuildBackend;
 using lubancode::app::ThinkOverrideBackend;
 using lubancode::app::DeferredIndexBackend;
-using lubancode::app::SpinnerBackend;
+using lubancode::cli::SpinnerBackend;
 
 // 单发模式(位置参数):也走 agent loop,同样支持工具,只是只问这一句。
 // 管道/单发场景下 spinner_enabled 传进来的必然是 false(RunCli 里按

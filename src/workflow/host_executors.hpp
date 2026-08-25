@@ -14,6 +14,11 @@
 // ask_user:经 InteractionBroker 问一句,答案写进 output。
 // skill:把 Skill 的 SKILL.md 正文装进 llm 执行的上下文(同一只 llm 执行
 // 器带 skill 前缀),不把 Skill 文本当代码跑。
+//
+// 事件流(骨架拆解批二):agent 节点装 event_sink 后,整段嵌套回合经
+// TurnEventAdapter 翻成 ServerEvent 落会话 sink(与主回合同一只出水口)。
+// tool 节点不另配 adapter——它的工具事件走 trace 分线(hub 的 UI 投影),
+// 同一枚执行不记两本 item 账。
 
 #pragma once
 
@@ -27,6 +32,8 @@
 
 #include "agent/loop.hpp"
 #include "api/backend.hpp"
+#include "runtime/event_sink.hpp"
+#include "runtime/id_authority.hpp"
 #include "runtime/interaction_broker.hpp"
 #include "tools/registry.hpp"
 #include "workflow/runtime.hpp"
@@ -96,6 +103,12 @@ public:
         tools::ToolRegistry* registry = nullptr;
         PromptLoader task_loader;
         agent::Callbacks callbacks;
+        // 批二(事件流升正房):装了 sink 的节点,显示回调经 TurnEventAdapter
+        // 上事件流。ids/thread_id 用宿主会话的(与主回合同源,seq 才单调);
+        // ids 缺省落 ProcessIdAuthority(单测)。不装 = 不上事件流(旧行为)。
+        runtime::EventSink* event_sink = nullptr;
+        runtime::IdAuthority* ids = nullptr;
+        std::string thread_id;
     };
 
     explicit AgentExecutor(Options options);

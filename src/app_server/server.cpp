@@ -24,6 +24,7 @@
 #include "runtime/id_authority.hpp"
 #include "runtime/session_command_service.hpp"
 #include "runtime/tool_trace_hub.hpp"
+#include "runtime/turn_event_adapter.hpp"
 #include "runtime/turn_item.hpp"
 #include "tools/ask_user.hpp"
 #include "tools/path_utils.hpp"
@@ -111,6 +112,113 @@ api::Usage SumUsage(const std::vector<api::UsageReport>& reports) {
     }
     return total;
 }
+
+// ServerEvent -> app-server 协议事件的桥(骨架拆解批二:回合驱动的显示
+// 回调整装切到 TurnEventAdapter,这只 sink 负责把 ServerEvent 翻成冻结的
+// item/started、item/delta、item/completed、turn/usage 形状)。事件本体
+// 不改写——id 从事件里原样取,次序照投递序,载荷按下表的口径对译:
+//   ItemStarted   -> item/started(item.type 按 ItemKind,工具名 run_command
+//                    折 command;diff 行表照旧在 started 时算)
+//   ItemDelta     -> item/delta
+//   ItemCompleted -> item/completed(正文/思考不带载荷;Cancelled 的工具
+//                    带 isError=false+cancelled=true;其余带 result+isError)
+//   UsageUpdated  -> turn/usage(五项 camelCase + model;顺带累进整轮
+//                    usage 汇总,turn/completed 的账与事件同源)
+// TurnStarted/TurnCompleted 不在桥上发——回合驱动自己按终态分型发,带
+// status/usage 汇总/steps,口径比事件层全。
+class ProtocolBridgeSink final : public runtime::EventSink {
+public:
+    using Emitter = std::function<void(std::string_view, const nlohmann::json&)>;
+
+    ProtocolBridgeSink(Emitter emit, std::vector<api::UsageReport>& usage_out)
+        : emit_(std::move(emit)), usage_out_(&usage_out) {}
+
+    void Emit(const runtime::ServerEvent& event) override {
+        switch (event.kind) {
+            case runtime::ServerEventKind::ItemStarted: {
+                const std::string tool_name = event.payload.value("tool_name", std::string());
+                std::string_view item_type = kItemTypeTool;
+                switch (event.item_kind) {
+                    case runtime::ItemKind::Text:
+                        item_type = kItemTypeText;
+                        break;
+                    case runtime::ItemKind::Thinking:
+                        item_type = kItemTypeThinking;
+                        break;
+                    default:
+                        item_type = tool_name == "run_command" ? kItemTypeCommand : kItemTypeTool;
+                        break;
+                }
+                nlohmann::json payload = nlohmann::json::object();
+                if (!tool_name.empty()) {
+                    payload["tool"] = tool_name;
+                    const std::string tool_use_id = event.payload.value("tool_use_id", std::string());
+                    if (!tool_use_id.empty()) {
+                        payload["toolUseId"] = tool_use_id;
+                    }
+                    const nlohmann::json input =
+                        event.payload.contains("input") ? event.payload["input"] : nlohmann::json::object();
+                    if (input.is_object() && !input.empty()) {
+                        payload["input"] = input;
+                    }
+                    if (const std::optional<runtime::DiffTable> table =
+                            runtime::BuildDiffTable(tool_name, input)) {
+                        payload["diff"] = DiffTableToJson(*table);
+                    }
+                }
+                emit_(kEventItemStarted,
+                      MakeItemStartedParams(event.envelope.thread_id, event.turn_id, event.item_id, item_type,
+                                            std::move(payload)));
+                break;
+            }
+            case runtime::ServerEventKind::ItemDelta:
+                emit_(kEventItemDelta,
+                      MakeItemDeltaParams(event.envelope.thread_id, event.turn_id, event.item_id, event.text));
+                break;
+            case runtime::ServerEventKind::ItemCompleted: {
+                nlohmann::json payload = nlohmann::json::object();
+                if (event.item_kind == runtime::ItemKind::Text ||
+                    event.item_kind == runtime::ItemKind::Thinking) {
+                    // 正文/思考条目的收尾不带载荷(旧口径)。
+                } else if (event.outcome == runtime::Outcome::Cancelled) {
+                    payload["isError"] = false;
+                    payload["cancelled"] = true;
+                } else {
+                    payload["result"] = event.payload.value("result", std::string());
+                    payload["isError"] = event.payload.value("is_error", false);
+                }
+                emit_(kEventItemCompleted,
+                      MakeItemCompletedParams(event.envelope.thread_id, event.turn_id, event.item_id,
+                                              std::move(payload)));
+                break;
+            }
+            case runtime::ServerEventKind::UsageUpdated: {
+                api::Usage usage;
+                usage.input_tokens = event.payload.value("input_tokens", std::int64_t{0});
+                usage.output_tokens = event.payload.value("output_tokens", std::int64_t{0});
+                usage.cache_read_tokens = event.payload.value("cache_read_tokens", std::int64_t{0});
+                usage.cache_creation_tokens = event.payload.value("cache_creation_tokens", std::int64_t{0});
+                usage.output_reasoning_tokens = event.payload.value("reasoning_tokens", std::int64_t{0});
+                const std::string model = event.payload.value("model", std::string());
+                if (usage_out_ != nullptr) {
+                    api::UsageReport report;
+                    report.usage = usage;
+                    report.model = model;
+                    usage_out_->push_back(std::move(report));
+                }
+                emit_(kEventTurnUsage, MakeTurnUsageParams(event.envelope.thread_id, event.turn_id,
+                                                           UsageToJson(usage), model));
+                break;
+            }
+            default:
+                break;  // thread/turn 层事件归回合驱动,不在桥上翻
+        }
+    }
+
+private:
+    Emitter emit_;
+    std::vector<api::UsageReport>* usage_out_;
+};
 
 }  // namespace
 
@@ -833,126 +941,21 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         profile.max_steps_per_turn = 32; // 骨架期防跑飞;真配置线接进来再换
         agent::Agent loop(*backend, *registry, std::move(profile), std::string("lubancode app-server"));
 
-        agent::Callbacks callbacks;
-        runtime::IdAuthority& ids = runtime::ProcessIdAuthority();
-        std::string text_item_id;
-        callbacks.on_text_delta = [&](const std::string& delta) {
-            if (text_item_id.empty()) {
-                text_item_id = ids.NextItemId();
-                connection_->EmitEvent(kEventItemStarted,
-                                       MakeItemStartedParams(thread_id, turn_id, text_item_id, kItemTypeText,
-                                                             nlohmann::json::object()));
-            }
-            connection_->EmitEvent(kEventItemDelta,
-                                   MakeItemDeltaParams(thread_id, turn_id, text_item_id, delta));
-        };
-        std::string thinking_item_id;
-        callbacks.on_thinking_delta = [&](const std::string& delta) {
-            if (thinking_item_id.empty()) {
-                thinking_item_id = ids.NextItemId();
-                connection_->EmitEvent(kEventItemStarted,
-                                       MakeItemStartedParams(thread_id, turn_id, thinking_item_id,
-                                                             kItemTypeThinking, nlohmann::json::object()));
-            }
-            connection_->EmitEvent(kEventItemDelta,
-                                   MakeItemDeltaParams(thread_id, turn_id, thinking_item_id, delta));
-        };
-
-        // ---- 工具条目(阶段 3:diff 行表直转) ----
-        // write_file/edit_file 的 item/started 带 "diff":runtime::DiffTable
-        // 中立行表直转(path/located/replacedCount/oldExists/addedLines/
-        // removedLines/rows[{kind,text,oldNo,newNo}])。别的工具不带该字段。
-        // 行表在 on_tool_start 算(预览语义:改动还没落盘,终端确认块同款);
-        // run_command 的条目类型用 command(输出整段落在 item/completed)。
-        const auto emit_tool_started = [&](const std::string& tool_use_id, const std::string& name,
-                                           const nlohmann::json& input) {
-            const std::string item_id = ids.NextItemId();
-            const std::string_view item_type =
-                name == "run_command" ? kItemTypeCommand : kItemTypeTool;
-            nlohmann::json payload;
-            payload["tool"] = name;
-            if (!tool_use_id.empty()) {
-                payload["toolUseId"] = tool_use_id;
-            }
-            if (input.is_object() && !input.empty()) {
-                payload["input"] = input;
-            }
-            if (const std::optional<runtime::DiffTable> table =
-                    runtime::BuildDiffTable(name, input)) {
-                payload["diff"] = DiffTableToJson(*table);
-            }
-            connection_->EmitEvent(kEventItemStarted,
-                                   MakeItemStartedParams(thread_id, turn_id, item_id, item_type,
-                                                         std::move(payload)));
-            return item_id;
-        };
-        std::map<std::string, std::string> open_tools; // tool_use_id -> item_id
-        callbacks.on_tool_start = [&](const std::string& tool_use_id, const std::string& name,
-                                      const nlohmann::json& input) {
-            if (!text_item_id.empty()) {
-                connection_->EmitEvent(
-                    kEventItemCompleted,
-                    MakeItemCompletedParams(thread_id, turn_id, text_item_id, nlohmann::json::object()));
-                text_item_id.clear();
-            }
-            if (!thinking_item_id.empty()) {
-                connection_->EmitEvent(
-                    kEventItemCompleted,
-                    MakeItemCompletedParams(thread_id, turn_id, thinking_item_id, nlohmann::json::object()));
-                thinking_item_id.clear();
-            }
-            open_tools[tool_use_id] = emit_tool_started(tool_use_id, name, input);
-        };
-        const auto finish_tool = [&](const std::string& tool_use_id, const nlohmann::json& payload) {
-            // 空兜底"最早一个进行中的"(与 ToolDisplay 同款);查不到 =
-            // 迟到/陌生,丢弃不误伤。
-            std::string item_id;
-            if (!tool_use_id.empty()) {
-                const auto it = open_tools.find(tool_use_id);
-                if (it == open_tools.end()) {
-                    return;
-                }
-                item_id = it->second;
-                open_tools.erase(it);
-            } else if (!open_tools.empty()) {
-                item_id = open_tools.begin()->second;
-                open_tools.erase(open_tools.begin());
-            } else {
-                return;
-            }
-            connection_->EmitEvent(kEventItemCompleted,
-                                   MakeItemCompletedParams(thread_id, turn_id, item_id, payload));
-        };
-        callbacks.on_tool_done = [&](const std::string& tool_use_id, const std::string& /*name*/,
-                                     const tools::Tool::Result& result) {
-            finish_tool(tool_use_id,
-                        nlohmann::json{{"result", result.content}, {"isError", result.is_error}});
-        };
-        callbacks.on_builtin_tool_start = [&](const std::string& tool_use_id, const std::string& name,
-                                              const nlohmann::json& input) {
-            if (!text_item_id.empty()) {
-                connection_->EmitEvent(
-                    kEventItemCompleted,
-                    MakeItemCompletedParams(thread_id, turn_id, text_item_id, nlohmann::json::object()));
-                text_item_id.clear();
-            }
-            open_tools[tool_use_id] = emit_tool_started(tool_use_id, name, input);
-        };
-        callbacks.on_builtin_tool_done = [&](const std::string& tool_use_id, const std::string& /*name*/,
-                                             const nlohmann::json& /*input*/, const std::string& summary,
-                                             bool is_error) {
-            finish_tool(tool_use_id, nlohmann::json{{"result", summary}, {"isError", is_error}});
-        };
-
-        // ---- usage / context 进度事件(阶段 3) ----
+        // ---- 事件流(骨架拆解批二:整装切到 TurnEventAdapter) ----
+        // 旧路在本地手拼 text/thinking 懒起条、open_tools 对账、收口补账,
+        // 与适配器各养一份;现在显示回调全从适配器出,协议形状由
+        // ProtocolBridgeSink 对译(id 照旧 ProcessIdAuthority 发,turn_id 用
+        // AcceptTurnStart 发的那枚,行为与旧路逐事件对得上)。
         std::vector<api::UsageReport> usage_reports;
-        callbacks.on_usage = [&](const api::UsageReport& report) {
-            usage_reports.push_back(report);
-            // 每次到模型的请求收尾发一枚 turn/usage(前端画 token 账)。
-            connection_->EmitEvent(kEventTurnUsage, MakeTurnUsageParams(thread_id, turn_id,
-                                                                        UsageToJson(report.usage),
-                                                                        report.model));
-        };
+        ProtocolBridgeSink bridge(
+            [this](std::string_view method, const nlohmann::json& params) {
+                connection_->EmitEvent(method, params);
+            },
+            usage_reports);
+        runtime::TurnEventAdapter turn_events(thread_id, runtime::ProcessIdAuthority());
+        turn_events.Attach([&bridge](const runtime::ServerEvent& event) { bridge.Emit(event); });
+        turn_events.Start(turn_id);
+        agent::Callbacks callbacks = turn_events.MakeCallbacks();
         loop.SetOnContextPressure([this, &thread_id, &turn_id](
                                       const agent::ContextPressure& pressure) {
             // 上下文压力通报:PreRequest 评估与 hard trim 之后各来一次。
@@ -1060,26 +1063,12 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         // 图片走 Message 入口(与字符串入口同义,图片原样入 history)。
         const std::expected<agent::RunOutcome, std::string> outcome =
             loop.Run(user_message, callbacks, &record->interrupt_requested);
-        if (!text_item_id.empty()) {
-            connection_->EmitEvent(
-                kEventItemCompleted,
-                MakeItemCompletedParams(thread_id, turn_id, text_item_id, nlohmann::json::object()));
-        }
-        if (!thinking_item_id.empty()) {
-            connection_->EmitEvent(
-                kEventItemCompleted,
-                MakeItemCompletedParams(thread_id, turn_id, thinking_item_id, nlohmann::json::object()));
-        }
-        // 没自然终态的工具条目(打断/异常路径不会再有 on_tool_done):
-        // 统一按 cancelled 收口——条目不悬空,前端好对账。
-        for (const auto& [tool_use_id, item_id] : open_tools) {
-            (void)tool_use_id;
-            connection_->EmitEvent(kEventItemCompleted,
-                                   MakeItemCompletedParams(thread_id, turn_id, item_id,
-                                                           nlohmann::json{{"isError", false},
-                                                                          {"cancelled", true}}));
-        }
-        open_tools.clear();
+        // 事件流收口:没收尾的条目(正文/思考/没终态的工具)由适配器统一
+        // 按 Cancelled 补账——条目不悬空,前端好对账;终态分型随本地账。
+        turn_events.Finish(!outcome.has_value() ? runtime::Outcome::Failed
+                          : outcome->cancelled  ? runtime::Outcome::Cancelled
+                                                : runtime::Outcome::Succeeded,
+                           !outcome.has_value() ? outcome.error() : std::string());
 
         // acceptForSession 的放行记账在答复侧(HandleInteractionResponse)
         // 落,这里只收终态。

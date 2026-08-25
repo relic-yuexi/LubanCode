@@ -33,6 +33,7 @@
 #include "hooks/dispatcher.hpp"
 #include "platform/paths.hpp"
 #include "runtime/turn_collector.hpp"
+#include "runtime/turn_event_adapter.hpp"
 #include "runtime/turn_runtime.hpp"
 #include "runtime/tool_trace_hub.hpp"
 #include "tools/agent_tool.hpp"
@@ -86,6 +87,10 @@ std::expected<std::vector<std::string>, std::string> PromptAskUser(
 // display:UI-B(0.12.0)新增,这一轮的工具条目展示总管(建条目、原地
 // 改写状态、管道模式的 [工具]/[工具完成] 稳定纯文本),todo_state 也归它
 // 持有。回调层只管把事件原样转进去。
+// event_callbacks(骨架拆解批二):TurnEventAdapter::MakeCallbacks 出的
+// 显示回调。给了就并进终端回调前头(一份事件先落事件流、再画屏,两轨
+// 并行),并把 agent/PTC 工具的转发钩子也喂上事件账;缺省 nullptr = 单发/
+// 单测不上事件流,行为与从前一致。
 lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::string>& always_allowed_tools,
                                             const lubancode::cli::Theme& theme, lubancode::runtime::TurnUsageStats& usage_stats,
                                             lubancode::cli::ContextTracker& context_tracker,
@@ -100,7 +105,8 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                                             lubancode::runtime::TurnCollector* view_collector = nullptr,
                                             std::function<std::string(const std::string&, const nlohmann::json&)>
                                                 mode_gate = {},
-                                            std::function<void(bool asked, bool allowed)> approval_observer = {});
+                                            std::function<void(bool asked, bool allowed)> approval_observer = {},
+                                            const lubancode::agent::Callbacks* event_callbacks = nullptr);
 
 // RunTurn() 的结果:status 沿用老语义(0 成功、非 0 出错);cancelled 标记
 // 这一轮是不是被 ESC 打断的(打断不算错误,status 照样是 0)。
@@ -170,6 +176,12 @@ RunTurnResult RunTurn(lubancode::agent::Agent& loop, const std::string& user_inp
                        // scheduler 的 WaitingPermission 账推起来(单子:等
                        // 审批不算无进展也不烧 iteration,悬起期间后续拍
                        // coalesce)。可空 = 不旁听,行为不变。
-                       std::function<void(bool asked, bool allowed)> approval_observer = {});
+                       std::function<void(bool asked, bool allowed)> approval_observer = {},
+                       // 事件流出口(骨架拆解批二):SessionRuntime::MakeTurnAdapter()
+                       // 造的那只。给了就 Start(复用 trace 口径的 turn_id)→
+                       // 显示回调并进终端回调 → 收口 Finish(三档 tone 映射
+                       // 终态),Stop 钩子续跑轮并入同一 turn 的账;缺省
+                       // nullptr = 不上事件流,行为与从前一致。
+                       lubancode::runtime::TurnEventAdapter* turn_events = nullptr);
 
 }  // namespace lubancode::app

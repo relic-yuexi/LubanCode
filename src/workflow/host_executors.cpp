@@ -10,6 +10,7 @@
 
 #include "agent/sample_model.hpp"
 #include "agent/tool_trace.hpp"  // kErrPermissionDeclined:旧稳定码的映射锚
+#include "runtime/turn_event_adapter.hpp"
 
 namespace lubancode::workflow {
 
@@ -170,6 +171,18 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
     std::string text;
     std::int64_t tokens = 0;
     agent::Callbacks callbacks = options_.callbacks;
+    // 事件流(批二):装了 sink 的节点,嵌套回合经 TurnEventAdapter 翻成
+    // ServerEvent 落会话 sink——turn_id 用本次 run 的 run_id(节点嵌套轮,
+    // 与 ToolExecutor 的 trace 上下文同口径)。没装(单测/旧装配)零开销。
+    std::optional<runtime::TurnEventAdapter> events;
+    if (options_.event_sink != nullptr) {
+        events.emplace(!options_.thread_id.empty() ? options_.thread_id : std::string("workflow"),
+                       options_.ids != nullptr ? *options_.ids : runtime::ProcessIdAuthority());
+        runtime::EventSink* sink = options_.event_sink;
+        events->Attach([sink](const runtime::ServerEvent& event) { sink->Emit(event); });
+        events->Start(request.run_id);
+        runtime::ComposeDisplayCallbacks(callbacks, events->MakeCallbacks());
+    }
     const auto outer_text = callbacks.on_text_delta;
     callbacks.on_text_delta = [&](const std::string& delta) {
         text += delta;
@@ -188,6 +201,16 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
     }
 
     const auto outcome = task_agent.Run(request.resolved_input.dump(), callbacks, nullptr);
+    // 事件流收口:Run 一返回就按收场分型 Finish(后面的早退分支各走各的
+    // error_code,终态映射在这定死:报错/预算尽 = Failed,打断 = Cancelled,
+    // 其余 Succeeded)。
+    if (events.has_value()) {
+        events->Finish(!outcome.has_value() || outcome->hit_step_limit || outcome->length_empty_output
+                           ? runtime::Outcome::Failed
+                       : outcome->cancelled ? runtime::Outcome::Cancelled
+                                            : runtime::Outcome::Succeeded,
+                       outcome.has_value() ? std::string() : outcome.error());
+    }
     result.tokens_used = tokens;
     if (!outcome.has_value()) {
         result.error_code = "agent_error";

@@ -1,15 +1,16 @@
 // 会话后端栈:按 wire 造真实 client(BuildBackend),再按固定次序包若干层
 // 请求改写器——切 provider 不换引用(RebuildableBackend)、/model 与 /think
 // 即时生效(Model/ThinkOverrideBackend)、模型目录专属指令与"魂"追加进
-// 系统提示(压轴次序见各类注释)、延迟工具索引段(tool_search)、最外层
-// 起停"思考中"转轮(SpinnerBackend)。
+// 系统提示(压轴次序见各类注释)、延迟工具索引段(tool_search)。
 //
 // 这一层只认 api/config/agent/cli 的既有抽象,不 include 交互会话的东西;
-// SpinnerBackend 依赖真终端的 cli::Spinner(实现编在可执行文件一侧),
-// 链接 lubancode_core 的单测不要构造它,其余各层可直测。
+// 各层可直测。
 //
 // 实现在 backend_stack.cpp(编译边界:头文件只放类形状与函数声明,具体
-// client、prompts、Spinner 的依赖都留在 .cpp 一侧)。
+// client、prompts 的依赖都留在 .cpp 一侧)。
+//
+// SpinnerBackend 原先住这(最外层起停"思考中"转轮);骨架拆解批二把它
+// 挪去了 cli/spinner_backend.hpp——UI 件不混传输层。
 
 #pragma once
 
@@ -155,28 +156,6 @@ public:
 private:
     lubancode::api::Backend& inner_;
     std::function<std::string()> index_provider_;
-};
-
-// 包一层 Backend:发起真正的网络请求前起一个"思考中"转轮(cli::Spinner),
-// 收到第一个流事件就停。转轮跟着 send_stream 这一次调用走——AgentLoop 一次
-// Run() 里可能因为工具调用来回好几趟,每趟各自单独调一次 send_stream,
-// 工具执行发生在两次 send_stream 之间(loop.cpp 里,不在这层包装范围内),
-// 天然满足"工具执行期间不转,发下一轮请求再转"这条要求,不用改
-// agent/loop.cpp 一个字。spinner_enabled 由调用方按"stdout 是不是真控制台"
-// 算好传进来——管道模式下这层直接透传,不起线程、不输出任何转轮字符。
-class SpinnerBackend : public lubancode::api::Backend {
-public:
-    SpinnerBackend(lubancode::api::Backend& inner, const lubancode::cli::Theme& theme, bool spinner_enabled);
-
-    std::expected<void, lubancode::api::Error> send_stream(
-        const lubancode::api::Request& request,
-        const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
-        const std::atomic<bool>* cancel = nullptr) override;
-
-private:
-    lubancode::api::Backend& inner_;
-    const lubancode::cli::Theme& theme_;
-    bool spinner_enabled_;
 };
 
 }  // namespace lubancode::app

@@ -1,4 +1,6 @@
-// TurnEventAdapter(显示系统剥离单第五步后半)。
+// TurnEventAdapter(显示系统剥离单第五步后半;骨架拆解批二升正房:装配
+// 点的显示回调从各挑各的 Callbacks 子集,改成这适配器一份翻译、sink 列表
+// 多路消费)。
 //
 // agent::Callbacks -> ServerEvent 流的适配器:一轮 Run() 里模型给的正文/
 // 思考/工具起止/usage,逐枚翻成带 seq/thread_id/turn_id/item_id 的
@@ -6,12 +8,10 @@
 // (JsonEventSink)、Web/Tauri 都从这只适配器手上拿同一份事件流——
 // "内核只吐结构化事件"的单子边界,这只就是出水口。
 //
-// 与 app/turn_runner.cpp 的 BuildCallbacks 的分工(第六步接线后的格局):
-//   - BuildCallbacks 住终端装配层,直接喂 ToolDisplay 画现有 TUI(行为
-//     逐字不变的老路,过渡期两轨并行);
-//   - 本适配器住 runtime 层,零 cli 依赖,给远端前端与同流验收测试;
-//   - SessionRuntime(第六步)立起来后,终端的老路逐步改吃事件流,这只
-//     适配器升正房。
+// 两轨并行(批二的格局):终端装配(turn_runner 的 BuildCallbacks)保住
+// 现有 TUI 逐字节不变,同时经 ComposeDisplayCallbacks 把本适配器的回调
+// 并在终端回调前头——一份事件先落账、再画屏;app-server 一侧已整装切到
+// 这只适配器(旧的手拼回调拆掉)。终终端渲染改吃事件流后,老路退役。
 //
 // id 规矩(event.hpp 文件头):thread_id 会话级、turn_id 一轮、item_id
 // 一条;全部从 IdAuthority 发,seq thread 内单调。正文/思考各占一枚
@@ -48,18 +48,27 @@ public:
 
     TurnEventAdapter(const TurnEventAdapter&) = delete;
     TurnEventAdapter& operator=(const TurnEventAdapter&) = delete;
+    // 移动允许:MakeTurnAdapter 按值造好带回来(命名返回 NRVO 不是保证,
+    // 拷贝禁着,移动是唯一路)。移动后的旧壳不许再用——闭包里的 this 已
+    // 指向新家,旧壳只待析构。
+    TurnEventAdapter(TurnEventAdapter&&) = default;
+    TurnEventAdapter& operator=(TurnEventAdapter&&) = default;
 
     // 挂事件落点(可换多次;每次 MakeCallbacks 之前挂好)。
     void Attach(std::function<void(const ServerEvent&)> sink) { sink_ = std::move(sink); }
 
     // 一轮开始:发 turn_id、TurnStarted;返回这轮的 turn_id(调用方对账)。
     // 每轮调一次;上一轮没收尾的条目在这里统一按 Cancelled 收口(打断/
-    // 异常路径不会再有自然终态)。
-    std::string Start() {
-        turn_id_ = ids_.NextTurnId();
+    // 异常路径不会再有自然终态)。turn_id 可显式给(宿主已为这轮发过号的,
+    // 比如 trace 口径同一枚,不另 mint 一枚对不上账);空 = 现发。
+    std::string Start(const std::string& turn_id = std::string()) {
+        turn_id_ = !turn_id.empty() ? turn_id : ids_.NextTurnId();
         text_item_id_.clear();
         thinking_item_id_.clear();
         open_tools_.clear();
+        // 复用同一只适配器开第二轮(Stop 钩子续跑、workflow 节点连轴):上一轮
+        // 的收口旗翻回去,新一轮的 TurnCompleted 才发得出来。
+        turn_finished_ = false;
         Emit(MakeEvent(ServerEventKind::TurnStarted));
         return turn_id_;
     }
@@ -271,5 +280,34 @@ private:
     std::map<std::string, std::string> open_tools_;  // tool_use_id -> item_id
     bool turn_finished_ = false;
 };
+
+// 两轨并行的装配笔(骨架拆解批二):把 events(适配器 MakeCallbacks 出的
+// 显示回调)并进 target(既有消费方的回调)——每个出水口先走 events
+// (事件流,canonical 账)再走 target,次序稳定;任一侧缺省就只走另一侧。
+// 只并 void 出水口(正文/思考增量、工具起止、服务端内置工具、usage);
+// 确认/钩子/权限/拦截查询这些控制口有返回值、不是出水口,不并——它们
+// 仍归各装配点自己配。
+inline void ComposeDisplayCallbacks(agent::Callbacks& target, const agent::Callbacks& events) {
+    const auto compose = [](auto& target_fn, const auto& events_fn) {
+        if (!events_fn) {
+            return;
+        }
+        if (!target_fn) {
+            target_fn = events_fn;
+            return;
+        }
+        target_fn = [front = events_fn, back = std::move(target_fn)](auto&&... args) -> void {
+            front(args...);
+            back(std::forward<decltype(args)>(args)...);
+        };
+    };
+    compose(target.on_text_delta, events.on_text_delta);
+    compose(target.on_thinking_delta, events.on_thinking_delta);
+    compose(target.on_tool_start, events.on_tool_start);
+    compose(target.on_tool_done, events.on_tool_done);
+    compose(target.on_builtin_tool_start, events.on_builtin_tool_start);
+    compose(target.on_builtin_tool_done, events.on_builtin_tool_done);
+    compose(target.on_usage, events.on_usage);
+}
 
 }  // namespace lubancode::runtime

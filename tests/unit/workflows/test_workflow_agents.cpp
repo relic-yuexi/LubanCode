@@ -11,6 +11,8 @@
 #include <mutex>
 
 #include "api/backend.hpp"
+#include "runtime/event.hpp"
+#include "runtime/event_sink.hpp"
 #include "runtime/interaction_broker.hpp"
 #include "tools/registry.hpp"
 #include "workflow/host_executors.hpp"
@@ -180,6 +182,13 @@ lubancode::workflow::WorkflowDefinition ParseOrDie(const char* yaml) {
     return *parsed;
 }
 
+// 事件录音机(骨架拆解批二:agent 节点上事件流的验收)。
+class RecordingSink final : public lubancode::runtime::EventSink {
+public:
+    void Emit(const lubancode::runtime::ServerEvent& event) override { events.push_back(event); }
+    std::vector<lubancode::runtime::ServerEvent> events;
+};
+
 }  // namespace
 
 TEST_SUITE("workflows-agents") {
@@ -345,6 +354,81 @@ nodes:
     CHECK(backend.requests[0].system == "只读探索");
     REQUIRE(backend.requests[0].tools.size() == 1);
     CHECK(backend.requests[0].tools[0].name == "reader");
+}
+
+TEST_CASE("agent 节点:装了 event_sink 的嵌套回合经 TurnEventAdapter 上事件流") {
+    using namespace lubancode::workflow;
+    lubancode::tools::ToolRegistry registry;
+    auto* reader = new FakeTool("reader", R"({"read":true})", false, false);
+    registry.Register(std::unique_ptr<lubancode::tools::Tool>(reader));
+    AgentBackend backend;
+    RecordingSink sink;
+
+    AgentExecutor::Options options;
+    options.default_binding.backend = &backend;
+    options.default_binding.profile.provider = "zai";
+    options.default_binding.profile.request.model = "glm-5.3";
+    options.default_binding.profile.runtime.model = "glm-5.3";
+    options.registry = &registry;
+    options.task_loader = [](const std::string&) { return std::string("只读探索"); };
+    // 批二:sink 配置(没给 ids 落 ProcessIdAuthority——生产装配给会话的)。
+    options.event_sink = &sink;
+    options.thread_id = "wf-th";
+    AgentExecutor executor(std::move(options));
+
+    const WorkflowDefinition def = ParseOrDie(R"YAML(
+schema_version: 1
+id: agent-events-flow
+version: 1.0.0
+entry: explore
+nodes:
+  explore:
+    type: agent
+    task: prompts/explore.md
+    allowed_tools: [reader]
+)YAML");
+    NodeExecRequest request;
+    request.definition = &def;
+    request.node = &def.node_map.at("explore");
+    request.resolved_input = nlohmann::json{{"topic", "事件流"}};
+    request.run_id = "run-wf-1";
+
+    const NodeExecResult result = executor.Execute(request);
+    REQUIRE(result.ok);
+
+    // 事件账:TurnStarted(run_id 当 turn_id)→ 两轮请求各一枚 UsageUpdated,
+    // 工具与正文条目有起有终,TurnCompleted(Succeeded) 收口;seq 单调、
+    // thread_id 透传、领域数据(工具名/结果)在场。
+    using lubancode::runtime::ServerEventKind;
+    using lubancode::runtime::ItemKind;
+    using lubancode::runtime::Outcome;
+    REQUIRE(sink.events.size() == 9);
+    CHECK(sink.events[0].kind == ServerEventKind::TurnStarted);
+    CHECK(sink.events[0].turn_id == "run-wf-1");
+    CHECK(sink.events[1].kind == ServerEventKind::UsageUpdated);
+    CHECK(sink.events[2].kind == ServerEventKind::ItemStarted);
+    CHECK(sink.events[2].item_kind == ItemKind::Tool);
+    CHECK(sink.events[2].payload.value("tool_name", std::string()) == "reader");
+    CHECK(sink.events[3].kind == ServerEventKind::ItemCompleted);
+    CHECK(sink.events[3].payload.value("result", std::string()) == R"({"read":true})");
+    // 第二轮请求:流式 delta 先于 MessageDone 的 usage(流式次序,如实钉)。
+    CHECK(sink.events[4].kind == ServerEventKind::ItemStarted);
+    CHECK(sink.events[4].item_kind == ItemKind::Text);
+    CHECK(sink.events[5].kind == ServerEventKind::ItemDelta);
+    CHECK(sink.events[5].text == R"({"answer":"ok"})");
+    CHECK(sink.events[6].kind == ServerEventKind::UsageUpdated);
+    CHECK(sink.events[7].kind == ServerEventKind::ItemCompleted);
+    CHECK(sink.events[7].outcome == Outcome::Succeeded);
+    CHECK(sink.events[8].kind == ServerEventKind::TurnCompleted);
+    CHECK(sink.events[8].outcome == Outcome::Succeeded);
+
+    std::uint64_t last_seq = 0;
+    for (const auto& event : sink.events) {
+        CHECK(event.envelope.thread_id == "wf-th");
+        CHECK(event.turn_id == "run-wf-1");
+        CHECK(event.envelope.seq > last_seq);
+        last_seq = event.envelope.seq;
+    }
 }
 
 TEST_CASE("approval 节点:accept 过、decline 拒、没 broker 明报") {

@@ -620,6 +620,8 @@ add_library(lubancode_app STATIC
   src/cli/console_input.cpp
   src/cli/session_picker_panel.cpp
   src/cli/spinner.cpp
+  # 骨架拆解批二:SpinnerBackend 自 backend_stack 挪来(UI 件归显示层)。
+  src/cli/spinner_backend.cpp
   src/cli/record_command.cpp)
 target_link_libraries(lubancode_app PUBLIC lubancode_core)
 target_compile_features(lubancode_app PUBLIC cxx_std_23)

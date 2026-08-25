@@ -12,6 +12,9 @@
 #pragma once
 
 #include <functional>
+#include <mutex>
+#include <utility>
+#include <vector>
 
 #include "runtime/event.hpp"
 
@@ -39,6 +42,38 @@ public:
 
 private:
     std::function<void(const ServerEvent&)> fn_;
+};
+
+// 一份事件流喂多家(骨架拆解批二:装配点"配 sink 列表"配的就是它)。
+// Add 任意时刻可调(装配期挂满是常态);Emit 在产生事件的线程上被调,
+// 逐家转发——各家自己管线程安全(合同第 1 条),这里只保次序不重排。
+// 空表 = 黑洞:装配未完成期的事件安静丢弃,不炸、不攒。
+class FanoutEventSink final : public EventSink {
+public:
+    void Add(EventSink* sink) {
+        if (sink == nullptr) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        sinks_.push_back(sink);
+    }
+
+    void Emit(const ServerEvent& event) override {
+        // 拷一份再投:投递期间另一线程 Add 不互相卡锁;sink 指针的存活期
+        // 由装配方保证(与 AttachSink 同一规矩)。
+        std::vector<EventSink*> sinks;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            sinks = sinks_;
+        }
+        for (EventSink* sink : sinks) {
+            sink->Emit(event);
+        }
+    }
+
+private:
+    std::mutex mutex_;
+    std::vector<EventSink*> sinks_;
 };
 
 }  // namespace lubancode::runtime

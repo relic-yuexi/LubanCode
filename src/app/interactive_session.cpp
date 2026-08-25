@@ -71,6 +71,7 @@
 #include "workflow/host_executors.hpp"
 #include "app/version.hpp"
 #include "runtime/command_service.hpp"
+#include "runtime/event_sinks.hpp"
 #include "runtime/plan_mode.hpp"
 #include "runtime/session_runtime.hpp"
 #include "runtime/tool_trace_hub.hpp"
@@ -108,6 +109,7 @@
 #include "cli/setup_wizard.hpp"
 #include "cli/slash_commands.hpp"
 #include "cli/spinner.hpp"
+#include "cli/spinner_backend.hpp"
 #include "cli/terminal_frame.hpp"
 #include "cli/theme.hpp"
 #include "cli/turn_renderer.hpp"
@@ -599,7 +601,9 @@ private:
     ThinkOverrideBackend think_backend;
     SoulOverlayBackend soul_backend;
     ModelInstructionsBackend instructions_backend;
-    SpinnerBackend wrapped_backend;
+    // UI 件住显示层(批二自 backend_stack 挪来):装配次序不变,只是门牌
+    // 从传输层换到 cli。
+    lubancode::cli::SpinnerBackend wrapped_backend;
     lubancode::cli::ContextTracker context_tracker;
 
     // ---- 工具全栈(worktree_session 必须先于 ToolRuntime:worktree 工具
@@ -657,6 +661,14 @@ private:
     // 逐枚追踪单:hub 要抓 session_runtime_ 的 ids/store 引用,构造体里
     // 安家(初始化列表里绑引用不稳,成员序也保证不了先 runtime 后 hub)。
     std::optional<lubancode::runtime::ToolTraceHub> trace_hub_;
+    // 事件流(骨架拆解批二:装配点配 sink 列表):会话级分线器。终端账本
+    // (TerminalEventSink)先挂一只——事件照单全收逐条记账,渲染接线随
+    // 显示剥离后续批次挂;app-server/脚本桥那路(JsonEventSink)以后往这
+    // 串。SessionRuntime(TurnEventAdapter)与 TraceHub 的投影都落这里。
+    // 声明序保证:fanout 先死、账本后死、再 hub、再 runtime(持裸指针的
+    // 先退场)。
+    lubancode::runtime::TerminalEventSink terminal_event_ledger_;
+    lubancode::runtime::FanoutEventSink session_events_;
     // 持久目标单:目标状态机(与 session_runtime_ 同寿命;feature 关时
     // goals_enabled=false,命令面全拒,存档不受影响)。goal_checkpoint
     // 工具的会话级状态也在(goal turn 才注册,普通轮不露面)。
@@ -909,6 +921,13 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     // 逐枚追踪单:trace hub 安家(抓 session_runtime_ 的 ids/store 引用;
     // 分线 canonical 工具事件到 session 栅栏/录制投影/UI 投影)。
     trace_hub_.emplace(session_runtime_.ids(), &session_runtime_.store());
+    // 事件流接线(骨架拆解批二,补显示剥离第六步停下的那段):sink 列表
+    // 一处配齐——终端账本先挂;SessionRuntime 的每轮 adapter 与 hub 的
+    // trace 投影都落到这串。往后加消费方(app-server 直出、脚本桥)只往
+    // fanout 里 Add,装配点不再各挑回调。
+    session_events_.Add(&terminal_event_ledger_);
+    session_runtime_.AttachSink(&session_events_);
+    trace_hub_->AttachSink(&session_events_);
 
     // 统一模型路由(模型分工第一期):后台小活(压缩/抽取/标题)按
     // TaskKind 取路由,usage 分角色记账。配置有歧义(compact_model 与
@@ -2262,12 +2281,18 @@ void TerminalSessionController::RunPeerTurn(const std::string& text, bool silent
         turn_suffix += tool_runtime_->ptc_tool()->GuideSegment();
     }
     main_agent->SetTurnContext(std::move(turn_suffix));
+    // 批二:peer 轮同样上事件流(turn_id 由适配器现发——这轮没有 trace
+    // 口径的现成号)。
+    lubancode::runtime::TurnEventAdapter turn_events = session_runtime_.MakeTurnAdapter();
     // RunTurnResult 只剩 status/cancelled,peer 来信轮两边都不看;排队消息
     // 走会话层 SteeringQueue,不在这里收。直接调,不接没人用的返回值。
     RunTurn(*main_agent, text, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
             lubancode::app::HookRuntime(), spinner_enabled, transcript, todo_state(), &transcript_expanded,
             settings_local.allow_commands, settings_local.deny_commands, session_agent_tool(),
-            /*recorder=*/nullptr, silent);
+            /*recorder=*/nullptr, silent, /*usage_out=*/nullptr, /*trace_hub=*/nullptr,
+            /*thread_id_for_trace=*/std::string(), /*turn_id_for_trace=*/std::string(),
+            /*turn_view_out=*/nullptr, /*mode_gate=*/{}, /*approval_observer=*/{},
+            /*turn_events=*/&turn_events);
     PersistNewMessages();
     PersistSteeringQueue();  // peer 轮里也可能进队/送走过(路径二,快照对齐)
     if (peer_started) {
@@ -3993,6 +4018,11 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                         agent_options.default_binding.profile.runtime = main_agent->runtime_profile();
                         agent_options.registry = &registry();
                         agent_options.task_loader = workflow_prompt_loader;
+                        // 批二:agent 节点上事件流(会话 sink,seq 与主回合
+                        // 同源)。
+                        agent_options.event_sink = &session_events_;
+                        agent_options.thread_id = session_runtime_.thread_id();
+                        agent_options.ids = &session_runtime_.ids();
                         executors[lubancode::workflow::NodeKind::Agent] =
                             std::make_shared<lubancode::workflow::AgentExecutor>(std::move(agent_options));
                         lubancode::workflow::LlmExecutor::Options llm_options;
@@ -4070,6 +4100,10 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                             agent_options.default_binding.profile.runtime = main_agent->runtime_profile();
                             agent_options.registry = &registry();
                             agent_options.task_loader = workflow_prompt_loader;
+                            // 批二:agent 节点上事件流(与 /workflow run 同一道装配)。
+                            agent_options.event_sink = &session_events_;
+                            agent_options.thread_id = session_runtime_.thread_id();
+                            agent_options.ids = &session_runtime_.ids();
                             executors[lubancode::workflow::NodeKind::Agent] =
                                 std::make_shared<lubancode::workflow::AgentExecutor>(std::move(agent_options));
                             lubancode::workflow::LlmExecutor::Options llm_options;
@@ -5136,6 +5170,9 @@ CommandFlow TerminalSessionController::RunUserTurn(const std::string& content, b
     const auto turn_started = std::chrono::steady_clock::now();
     const std::string trace_turn_id = session_runtime_.ids().NextTurnId();
     turn_views_.emplace_back();
+    // 批二:这轮的事件适配器(sink 已在 SessionRuntime 上配好;turn_id 复
+    // 用 trace 那枚,两本账对得上)。
+    lubancode::runtime::TurnEventAdapter turn_events = session_runtime_.MakeTurnAdapter();
     const lubancode::app::RunTurnResult turn_result =
         RunTurn(*main_agent, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
                 lubancode::app::HookRuntime(), spinner_enabled, transcript, todo_state(), &transcript_expanded,
@@ -5148,7 +5185,8 @@ CommandFlow TerminalSessionController::RunUserTurn(const std::string& content, b
                 },
                 /*approval_observer=*/[this](bool asked, bool allowed) {
                     NoteLoopPermissionWait(asked, allowed);
-                });
+                },
+                /*turn_events=*/&turn_events);
     // 轮次视图存档封顶(最近 N 轮,重铺够用;不无界攒)。
     if (turn_views_.size() > kMaxArchivedTurnViews) {
         turn_views_.erase(turn_views_.begin());

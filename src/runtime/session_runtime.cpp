@@ -20,7 +20,14 @@ TurnEventAdapter SessionRuntime::MakeTurnAdapter() {
     // 适配器按值构造会拷 map/串——MoveCallbacks 的正确姿势是调用方写
     // auto adapter = runtime.MakeTurnAdapter();。构造函数捕获 thread_id_
     // 与 ids_ 引用,轮内不再变。
-    return TurnEventAdapter(thread_id_, ids_);
+    // 批二接线补完:落点自动挂到 AttachSink 装的那只(没挂就只发号不落
+    // 笔)。装配点从此只管配 sink,不再各自手拼回调。
+    TurnEventAdapter adapter(thread_id_, ids_);
+    if (sink_ != nullptr) {
+        EventSink* sink = sink_;
+        adapter.Attach([sink](const ServerEvent& event) { sink->Emit(event); });
+    }
+    return adapter;
 }
 
 SessionBeginResult SessionRuntime::EnsureBegun(const std::string& first_text, const std::string& model,
