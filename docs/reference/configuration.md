@@ -10,7 +10,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 
 ```json
 {
-  "wire": "responses",
+  "wire": "openai-responses",
   "base_url": "https://your-provider.example/v1",
   "api_key": "sk-...",
   "model": "your-model"
@@ -46,7 +46,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
     {
       "name": "openai",
       "base_url": "https://api.openai.com/v1",
-      "wire": "responses",
+      "wire": "openai-responses",
       "key_env": "OPENAI_API_KEY",
       "model": "gpt-5.4",
       "context_window": "256k"
@@ -92,7 +92,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 1. **`LUBANCODE_*` 专属环境变量**。
 2. **项目级** `config.json`。
 3. **全局** `config.json`。
-4. **通用环境变量**(向后兼容,跟 Claude Code、Codex 等工具共用同名变量容易撞车,建议改用第 1 级):`wire=anthropic` 时读 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_MODEL`;`wire=responses` 或 `chat_completions` 时读 `OPENAI_BASE_URL`/`OPENAI_API_KEY`/`OPENAI_MODEL`。
+4. **通用环境变量**(向后兼容,跟 Claude Code、Codex 等工具共用同名变量容易撞车,建议改用第 1 级):`wire=anthropic-messages` 时读 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_MODEL`;其余 wire 读 `OPENAI_BASE_URL`/`OPENAI_API_KEY`/`OPENAI_MODEL`。Gemini 预设另可用自己的 `key_env`，内置目录写的是 `GEMINI_API_KEY`。
 5. **内置默认值**。
 
 逐字段合并:项目级写了某字段就用项目级那一份,项目级缺的字段回退全局,全局也缺再往下一级找。`mcpServers`、`search`、`lsp`、`status_panel` 这几段是**整段回退**(不做键级混合)——项目级写了就用项目级那一整段,否则用全局那一整段。例外是 `hooks`:全局与项目两层**相加**(两层都跑,项目级删不掉全局的钩子;项目级钩子须经信任审查,见 [Hooks 手册](../features/extensions/hooks.md))。`tool_search_threshold`、`connect_timeout_ms`、`stream_idle_timeout_secs`、`request_timeout_secs`、`request_hard_timeout_secs` 只从配置文件(项目级 > 全局)或内置默认值来,没有环境变量这一级。
@@ -109,7 +109,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 
 | 字段 | 类型与取值 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `wire` | `anthropic` / `responses` / `chat_completions` | `anthropic` | 选择 Anthropic Messages、OpenAI Responses 或 OpenAI Chat Completions 兼容接口。`chat` 也认，写回时统一成 `chat_completions`。 |
+| `wire` | `anthropic-messages` / `openai-responses` / `openai-chat-completions` / `google-generate-content` | `anthropic-messages` | 选择四条 wire。旧名 `anthropic`、`responses`、`chat_completions`、`chat` 仍可读；展示与写回用规范名。 |
 | `base_url` | 字符串 | 无内置默认值 | 模型服务根地址。 |
 | `api_key` | 字符串 | 无内置默认值 | 模型服务认证值,别提交进仓库。 |
 | `model` | 字符串 | 无内置默认值 | 发请求所用模型名。 |
@@ -233,7 +233,7 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 | --- | --- | --- |
 | `name` | 字符串,必填 | provider 名字,`/provider switch <名字>` 用。 |
 | `base_url` | 字符串,必填 | 服务根地址。 |
-| `wire` | `anthropic` / `responses` / `chat_completions` | 协议。 |
+| `wire` | `anthropic-messages` / `openai-responses` / `openai-chat-completions` / `google-generate-content` | 协议；旧名只作兼容输入。 |
 | `key_env` | 字符串 | 密钥所在环境变量名(默认只记名字,不落明文密钥)。 |
 | `api_key` | 字符串,可选 | 非空时优先于 `key_env`(`/provider add` 向导贴明文密钥走这条,展示/日志一律打码)。 |
 | `model` | 字符串,可选 | 默认模型,留空仍可 `/model` 选。 |
@@ -255,7 +255,7 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 /provider refresh                       从 GitHub 更新常见厂家目录
 /provider add                          从常见厂家目录选择；末项为全手填
 /provider add <名字>                    同上，预填本地 provider 名
-/provider add <名字> <base_url> <anthropic|responses|chat_completions> [--key-env 变量名] [--key 明文key] [--model 模型] [--effort 档位] [--window 大小]
+/provider add <名字> <base_url> <规范 wire> [--key-env 变量名] [--key 明文key] [--model 模型] [--effort 档位] [--window 大小]
 /provider switch <名字> [模型]
 /provider remove <名字>
 /provider set <名字> native_web_search on|off
@@ -280,7 +280,7 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 
 | 环境变量 | 对应字段 | 取值 |
 | --- | --- | --- |
-| `LUBANCODE_WIRE` | `wire` | `anthropic`、`responses` 或 `chat_completions`。 |
+| `LUBANCODE_WIRE` | `wire` | 四条规范名；旧名 `anthropic`、`responses`、`chat_completions`、`chat` 也认。 |
 | `LUBANCODE_BASE_URL` | `base_url` | 模型服务根地址。 |
 | `LUBANCODE_API_KEY` | `api_key` | 模型服务认证值。 |
 | `LUBANCODE_MODEL` | `model` | 模型名。 |
@@ -406,7 +406,7 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
     {
       "name": "minimax",
       "base_url": "https://api.minimaxi.com/anthropic",
-      "wire": "anthropic",
+      "wire": "anthropic-messages",
       "key_env": "MINIMAX_API_KEY",
       "model": "MiniMax-M3"
     }
@@ -417,7 +417,7 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 配好环境变量 `MINIMAX_API_KEY`,`/provider switch minimax` 即可切过去;也可以用 `/provider add` 向导一步步填,或者一行式:
 
 ```
-/provider add minimax https://api.minimaxi.com/anthropic anthropic --key-env MINIMAX_API_KEY --model MiniMax-M3
+/provider add minimax https://api.minimaxi.com/anthropic anthropic-messages --key-env MINIMAX_API_KEY --model MiniMax-M3
 ```
 
 ### 例二:GLM,Chat Completions + 正式推理参数
@@ -430,7 +430,7 @@ GLM 模型档位已经写进 provider 目录。`glm-5.2` 认 `max/xhigh/high/med
     {
       "name": "glm",
       "base_url": "https://open.bigmodel.cn/api/paas/v4",
-      "wire": "chat_completions",
+      "wire": "openai-chat-completions",
       "key_env": "GLM_API_KEY",
       "model": "glm-5.2",
       "model_reasoning_effort": "max",

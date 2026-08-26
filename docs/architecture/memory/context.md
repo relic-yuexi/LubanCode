@@ -8,8 +8,8 @@
 
 | 账 | 活多久 | 装什么 | 谁会改它 |
 | --- | --- | --- | --- |
-| `history_` | 当前会话 | 用户、assistant、工具调用与结果、compact 存档 | `AgentLoop` 追加；语义 compact 可替换旧段 |
-| `request_history_` | 当前会话的请求视图 | history 加本轮临时上下文与宿主标记 | 每个 turn/step 组装；不落 session |
+| `history_` | 当前会话 | 用户、assistant、工具调用与结果、compact 存档 | `ContextManager` 追加；`Agent::ReplaceHistory` 可替换旧段 |
+| `request_history_` | 当前会话的请求视图 | history 加本轮临时上下文与宿主标记 | `ContextManager` 随 turn/step 维护；不落 session |
 | session JSONL | 跨进程 | 完整事件流水与 compact marker | 只追加，不因 compact 删除旧消息 |
 | project memory | 跨会话 | 稳定项目事实、偏好、反馈 | memory worker 原子写主题 Markdown |
 
@@ -25,10 +25,12 @@
 
 ```mermaid
 sequenceDiagram
+    accTitle: 单轮上下文组装
+    accDescr: 用户消息先召回项目记忆，再交给 Agent 与 ContextManager；每个模型步骤都沿用本轮上下文，执行工具并回填结果。
     participant U as 用户
-    participant App as InteractiveSession
+    participant App as RunSessionTurn
     participant M as ProjectMemory
-    participant L as AgentLoop
+    participant L as Agent / ContextManager
     participant API as Provider
     U->>App: 外层消息
     App->>M: BuildTurnContext(query, cwd, User)
@@ -44,7 +46,7 @@ sequenceDiagram
     end
 ```
 
-`AgentLoop::Run` 开头把 `turn_context_` 复制进 `active_turn_context_`。这一步叫“钉住”：同一 turn 内，模型哪怕走十个 step，看到的仍是同一份记忆包。中途磁盘记忆变化，不追改已发前缀。
+`AgentLoop::Run` 开头把 `Agent` 里的 `turn_context_` 复制进 `active_turn_context_`。这一步叫“钉住”：同一 turn 内，模型哪怕走十个 step，看到的仍是同一份记忆包。中途磁盘记忆变化，不追改已发前缀。
 
 turn 结束，guard 清掉活动上下文。下一条外层用户消息再按新问题召回。
 
@@ -278,7 +280,7 @@ worker 在后台：
 
 | 问题 | 源码 | 测试 |
 | --- | --- | --- |
-| turn context 与 mid-turn 压力 | `src/agent/loop.cpp`、`src/app/interactive_session.cpp` | `tests/unit/agent/test_loop.cpp`、`test_request_prefix.cpp` |
+| turn context 与 mid-turn 压力 | `src/agent/loop.cpp`、`context_manager.cpp`、`src/app/interactive_session.cpp` | `tests/unit/agent/test_loop.cpp`、`test_request_prefix.cpp` |
 | hard trim | `src/agent/context.cpp` | `tests/unit/api/test_context.cpp` |
 | L1 与 artifact | `src/agent/context_events.cpp`、`artifact_store.cpp` | `tests/unit/api/test_context_events.cpp`、`test_artifact_store.cpp` |
 | L2 microcompact | `src/agent/microcompact.cpp` | `tests/unit/memory/test_microcompact.cpp` |

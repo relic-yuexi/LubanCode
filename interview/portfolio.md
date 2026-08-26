@@ -128,6 +128,8 @@ GitHub Actions / cross-platform CI / doctest / release automation
 
 ```mermaid
 flowchart LR
+    accTitle: LubanCode 分层总图
+    accDescr: 用户输入经 CLI 进入 Agent loop，再分流到 provider 后端、工具注册表、上下文与会话设施；配置、平台和提示词支撑各层。
     U[用户与终端] --> C[CLI 与交互渲染]
     C --> A[Agent loop]
     A --> B[中立 Backend 接口]
@@ -155,6 +157,8 @@ flowchart LR
 
 ```mermaid
 sequenceDiagram
+    accTitle: 一轮模型与工具往返
+    accDescr: 用户输入交给 AgentLoop；循环请求 provider、转发文本或执行工具并回填结果，收束后把用量、终态与会话数据交回 CLI。
     participant User as User
     participant CLI as CLI
     participant Loop as AgentLoop
@@ -311,7 +315,7 @@ Skill 是提示与资源，不在进程内执行。MCP/LSP 是子进程。Lua �
 **源码证据**
 
 - [`src/agent/compact.cpp`](../src/agent/compact.cpp)
-- [`src/agent/session_store.cpp`](../src/agent/session_store.cpp)
+- [`src/sessions/session_store.cpp`](../src/sessions/session_store.cpp)
 - [`src/memory/project_memory.cpp`](../src/memory/project_memory.cpp)
 - [`docs/architecture/memory/design.md`](../docs/architecture/memory/design.md)
 
@@ -541,7 +545,7 @@ ctest --test-dir build/release -C Release --output-on-failure
 | 工具条目 | [`src/cli/transcript.cpp`](../src/cli/transcript.cpp) | [`tests/unit/cli/test_transcript.cpp`](../tests/unit/cli/test_transcript.cpp) |
 | Markdown 与 LaTeX | [`src/cli/markdown.cpp`](../src/cli/markdown.cpp) | [`src/cli/latex_math.cpp`](../src/cli/latex_math.cpp) |
 | 进程抽象 | [`src/platform/process.hpp`](../src/platform/process.hpp) | Win/POSIX 两份实现 |
-| 会话恢复 | [`src/agent/session_store.cpp`](../src/agent/session_store.cpp) | [`tests/unit/sessions/test_session_store.cpp`](../tests/unit/sessions/test_session_store.cpp) |
+| 会话恢复 | [`src/sessions/session_store.cpp`](../src/sessions/session_store.cpp) | [`tests/unit/sessions/test_session_store.cpp`](../tests/unit/sessions/test_session_store.cpp) |
 | 项目记忆 | [`src/memory/project_memory.cpp`](../src/memory/project_memory.cpp) | [`docs/architecture/memory/design.md`](../docs/architecture/memory/design.md) |
 | 插件 | [`include/luban_plugin.h`](../include/luban_plugin.h) | [`src/tools/plugin_loader.cpp`](../src/tools/plugin_loader.cpp) |
 | 构建测试 | [`CMakeLists.txt`](../CMakeLists.txt) | [`tests/CMakeLists.txt`](../tests/CMakeLists.txt) |

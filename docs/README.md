@@ -2,8 +2,8 @@
 
 [根 README](../README.md) · [功能目录](features/README.md) · [参考手册](reference/README.md) · [架构说明](architecture/README.md) · [开发手册](development/README.md)
 
-这里只收产品、架构与开发文档。版本号以 `CMakeLists.txt` 和
-`src/app/version.hpp` 为准；已发布变化看 [CHANGELOG](../CHANGELOG.md)。文档若
+这里只收产品、架构与开发文档。版本号只认 `src/app/version.hpp`，
+`CMakeLists.txt` 从中读取；已发布变化看 [CHANGELOG](../CHANGELOG.md)。文档若
 与程序输出、源码或测试冲突，以后三者为准，并把错页补回来。
 
 求职手册、问题库与复盘已经移到仓库顶层 [interview/](../interview/README.md)。
@@ -19,7 +19,7 @@
 | 查命令、字段、工具参数 | [参考手册](reference/README.md) | [安全模型](development/security.md) |
 | 恢复、压缩或管理上下文 | [会话](features/sessions/README.md) | [压缩机制](features/context/compaction.md) |
 | 接 Provider、Skill、Hook、MCP、LSP 或插件 | [扩展指南](features/extensions/README.md) | [配置手册](reference/configuration.md) |
-| 看请求、工具、Agent 怎样运转 | [架构说明](architecture/README.md) | [Query 数据流](architecture/query-data-flow.md) |
+| 看请求、工具、Agent 怎样运转 | [架构说明](architecture/README.md) | [会话编排](architecture/session-orchestration.md) · [Query 数据流](architecture/query-data-flow.md) |
 | 编译、测试、发版 | [开发手册](development/README.md) | [测试指南](development/testing.md) |
 
 ## 目录规矩

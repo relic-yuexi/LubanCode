@@ -2,7 +2,7 @@
 
 [文档首页](../README.md) · [工具参考](../reference/tools.md) · [Query 数据流](query-data-flow.md) · [Hooks 流程](hooks-flow.md) · [PTC 手册](../features/tools/ptc.md)
 
-这页讲一枚工具调用怎样从模型手里落到本机，又怎样把结果送回模型。工具名、参数与输出上限见[工具参考](../reference/tools.md)；三种 wire 的报文差异见[Query 数据流](query-data-flow.md)。
+这页讲一枚工具调用怎样从模型手里落到本机，又怎样把结果送回模型。工具名、参数与输出上限见[工具参考](../reference/tools.md)；四种 wire 的报文差异见[Query 数据流](query-data-flow.md)。
 
 ## 四个计数别混
 
@@ -17,6 +17,8 @@
 
 ```mermaid
 flowchart TD
+    accTitle: 工具调用总流程
+    accDescr: 宿主组装请求并接收模型消息；若消息含工具调用，便逐枚执行、收齐结果、追加历史，再发下一步请求。
     U[用户消息] --> B[组装 system / history / tools]
     B --> API[向模型发请求]
     API --> A[流式拼成 assistant 消息]
@@ -43,7 +45,7 @@ flowchart TD
 
 ## 模型回包：先拼消息
 
-三种 provider wire 各有各的流事件。assembler 把文字、思考、工具名与分段 JSON 参数攒成一条中立 assistant 消息。Agent loop 只认中立块，不把 OpenAI、Anthropic、Responses 三套细节带进执行层。
+四种 provider wire 各有各的流事件。assembler 把文字、思考、工具名与 JSON 参数攒成一条中立 assistant 消息。Agent loop 只认中立块，不把 Chat、Anthropic、Responses、Gemini 四套细节带进执行层。
 
 终止帧偶尔会写 `end_turn`，消息里却已有工具块。此时信消息内容：照样执行工具。若只信终止原因，history 里便会留下孤零零的调用块，下一次请求容易被远端拒绝。
 
@@ -51,6 +53,8 @@ flowchart TD
 
 ```mermaid
 flowchart TD
+    accTitle: 单枚工具执行闸门
+    accDescr: 工具调用依次经过注册、挂载、权限、参数、确认与 Hook 检查，放行后执行并清洗结果，再回填模型。
     C[ToolUseBlock] --> F{注册表找得到?}
     F -- 否 --> E1[回未知工具错误]
     F -- 是 --> M{已挂载且本角色可用?}

@@ -2,7 +2,7 @@
 
 [面试深挖导航](../../../interview/deep-dives.md) · [Query 数据流](../query-data-flow.md) · [工具调用流程](../tool-calling-flow.md) · [扩展指南](../../features/extensions/README.md) · [进程内插件深挖](plugin-runtime.md) · [Hooks 流程](../hooks-flow.md)
 
-这页把单工具、多工具、三家 wire、中立层、MCP、Skill 与 Hook 串在一处。它专讲数据怎样走、失败怎样收、几套扩展为何不能混成一类。
+这页把单工具、多工具、四家 wire、中立层、MCP、Skill 与 Hook 串在一处。它专讲数据怎样走、失败怎样收、几套扩展为何不能混成一类。
 
 ## 一、工具的最小抽象
 
@@ -42,9 +42,9 @@ ToolDefinition{name, description, input_schema}
 
 好处不只“少写重复代码”。更要紧的是：session 能按中立格式落盘，恢复后可换 provider；工具循环不必知道 Anthropic 没有 `role=tool`，Responses 又没有 `messages`。
 
-代价也摆着：中立层只能表达三家共同语义与明确保留的扩展。某家专属字段若没进 `ContentBlock`，跨 provider 重放时便留不住。
+代价也摆着：中立层只能表达四家共同语义与明确保留的扩展。某家专属字段若没进 `ContentBlock`，跨 provider 重放时便留不住。
 
-## 三、工具定义在三家请求里长什么样
+## 三、工具定义在四家请求里长什么样
 
 同一份中立定义：
 
@@ -71,8 +71,9 @@ ToolDefinition{name, description, input_schema}
 | Chat Completions | `tools[].type=function`，内套 `function.name/description/parameters` |
 | Anthropic Messages | `tools[].name/description/input_schema` |
 | OpenAI Responses | `tools[].type=function`，平铺 `name/description/parameters` |
+| Gemini Generate Content | `tools[].functionDeclarations[]`，内放 `name/description/parameters` |
 
-所以“工具入参是不是 JSON”要分两层答：宿主中立层是 `nlohmann::json` 对象；wire 上 Chat 与 Responses 的调用 arguments 是 JSON 字符串，Anthropic 的 `input` 是 JSON 对象。流式回来后都拼成同一对象。
+所以“工具入参是不是 JSON”要分两层答：宿主中立层是 `nlohmann::json` 对象；wire 上 Chat 与 Responses 的 arguments 是 JSON 字符串，Anthropic 的 `input`、Gemini 的 `args` 是 JSON 对象。流式回来后都拼成同一对象。
 
 ## 四、单工具调用的完整往返
 
@@ -158,7 +159,37 @@ ToolDefinition{name, description, input_schema}
 }
 ```
 
-Chat 与 Responses wire 没有稳定的 `is_error` 布尔位置。错误语义主要靠结果正文与下一轮模型理解；Anthropic 可显式带 `is_error=true`。中立层仍保留布尔值，给本地 UI、Hook 与 session 使用。
+### Gemini Generate Content
+
+```json
+{
+  "role": "model",
+  "parts": [{
+    "functionCall": {
+      "name": "read_file",
+      "args": {"path": "README.md"}
+    }
+  }]
+}
+```
+
+结果用函数名对账，不用调用 id：
+
+```json
+{
+  "role": "user",
+  "parts": [{
+    "functionResponse": {
+      "name": "read_file",
+      "response": {"result": "     1\t# LubanCode\n"}
+    }
+  }]
+}
+```
+
+中立层的 `ToolResultBlock` 只有 `tool_use_id`。Gemini adapter 会先扫历史，把 id 对回函数名。结果正文若是 JSON object，便原样放进 `response`；否则包成 `{"result": ...}`，错误则包成 `{"error": ...}`。
+
+Chat、Responses 与 Gemini wire 没有稳定的 `is_error` 布尔位置。错误语义主要靠结果正文与下一轮模型理解；Anthropic 可显式带 `is_error=true`。中立层仍保留布尔值，给本地 UI、Hook 与 session 使用。
 
 ## 五、流式 arguments 怎样拼
 
@@ -216,6 +247,8 @@ schema 目前有三种用途：
 
 ```mermaid
 flowchart TD
+    accTitle: 单枚工具执行状态机
+    accDescr: 工具调用先查注册表与角色权限，再经过 Hook、参数复检和用户确认，放行后执行、清洗并回填结果。
     C[ToolUseBlock] --> N{registry 命中?}
     N -- 否 --> E1[未知工具结果]
     N -- 是 --> F{当前角色/挂载允许?}
@@ -290,6 +323,8 @@ Responses / Anthropic 可声明厂商内置 web search。服务端自己执行�
 
 ```mermaid
 flowchart LR
+    accTitle: MCP 工具接入链
+    accDescr: 配置启动 MCP 子进程并完成初始化，随后拉取工具、包装进注册表；执行时再经 RunOneTool 发出 tools/call。
     CFG[config mcpServers] --> SP[StartProcess]
     SP --> INIT[initialize]
     INIT --> READY[notifications/initialized]
@@ -488,7 +523,7 @@ stdout 会按事件逐字段验。`updatedInput` 只许 `PreToolUse`；没有权
 | 责任 | 源码 | 测试 |
 | --- | --- | --- |
 | 中立类型与 assembler | `src/api/types.hpp`、`assembler.cpp` | `tests/unit/api/test_assembler.cpp` |
-| 三 wire 请求 | `src/api/chat/request.cpp`、`responses/request.cpp`、`anthropic/client.cpp` | 三套 request 测试 |
+| 四 wire 请求 | `src/api/chat/request.cpp`、`responses/request.cpp`、`anthropic/client.cpp`、`gemini/request.cpp` | 四套 request 测试 |
 | 工具循环 | `src/agent/loop.cpp` | `tests/unit/agent/test_loop.cpp` |
 | registry/schema/deferred | `src/tools/registry.cpp`、`schema_check.cpp`、`tool_search.cpp` | `tests/unit/tools/test_tool_search.cpp` |
 | MCP client/transport/wrapper | `src/mcp/client.cpp`、`transport.cpp`、`mcp_tool.cpp` | `tests/integration/protocols/test_mcp_client.cpp`、`test_mcp_tool.cpp` |

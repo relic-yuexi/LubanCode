@@ -1,12 +1,14 @@
 # 一条 Query 怎样走完一个 Turn
 
+[架构总览](README.md) · [会话编排](session-orchestration.md) · [Agent Loop](agent-loop/reliability.md)
+
 这篇只追一条输入：
 
 ```text
 帮我看一下当前项目
 ```
 
-读者只须熟悉 OpenAI Chat Completions：`messages`、`system`、`assistant`、`tool_calls`、`role=tool`。下文拿它作底稿，再看 Anthropic Messages 与 OpenAI Responses 怎样换一身衣裳。
+读者只须熟悉 OpenAI Chat Completions：`messages`、`system`、`assistant`、`tool_calls`、`role=tool`。下文拿它作底稿，再看 Anthropic Messages、OpenAI Responses 与 Gemini Generate Content 怎样换一身衣裳。
 
 先把结论说破：**底座仍是多轮对话，执行却分 `turn` 与 `step` 两层。**
 
@@ -14,7 +16,7 @@
 
 | 名字 | 从哪里起 | 到哪里止 | 当前源码入口 |
 | --- | --- | --- | --- |
-| `turn`（用户轮次） | 接纳一条用户输入 | 助手交出最终正文，或本轮报错、取消 | `RunUserTurn -> RunTurn -> AgentLoop::Run` |
+| `turn`（用户轮次） | 接纳一条用户输入 | 助手交出最终正文，或本轮报错、取消 | `RunSessionTurn -> RunTurn -> Agent::Run -> AgentLoop::Run` |
 | `step`（模型步骤） | 拼请求并调用一次模型 | 收齐 assistant 消息；若含工具调用，再执行并回填结果 | `AgentLoop::Run` 内部循环 |
 | `tool call`（工具调用） | assistant 发出一枚调用块 | 本机产出对应结果块 | 一个 step 可有零到多枚 |
 | `request attempt`（请求尝试） | 一次 HTTP/SSE 尝试 | 成功、失败或取消 | 当前没有自动重试，故一次 step 恰有一次 attempt |
@@ -37,15 +39,16 @@
 
 本文按当前源码写。JSON 里的字段、角色与拼接次序都是真实现；模型选哪个工具、流式分成几片，却没有定数。下文拿 `read_file("README.md")` 模拟一条常见支路，免得把随机输出冒充真实抓包。
 
-## 先认三层数据
+## 先认四层数据
 
-LubanCode 不让主循环直接拼三家 JSON。中间横着一层自家的数据结构：
+LubanCode 不让主循环直接拼四家 JSON。中间横着一层自家的数据结构：
 
 | 层 | 手里拿什么 | 谁来管 |
 | --- | --- | --- |
-| 会话层 | `api::Message`、`TextBlock`、`ToolUseBlock`、`ToolResultBlock` | `AgentLoop` |
-| 协议层 | Chat `messages`、Responses `input`、Anthropic `content` | 三家 adapter |
-| 界面层 | 文本增量、思考增量、工具状态、统计行 | `RunTurn` 与 TUI |
+| 会话层 | `api::Message`、`TextBlock`、`ToolUseBlock`、`ToolResultBlock` | `Agent` / `ContextManager` |
+| 协议层 | Chat `messages`、Responses `input`、Anthropic `content`、Gemini `contents` | 四家 adapter |
+| 事件层 | `ServerEvent`、item/turn id、usage、交互请求 | `TurnEventAdapter` / `EventSink` |
+| 界面层 | 文本增量、思考增量、工具状态、统计行 | 终端或 app-server 投影 |
 
 会话层只认两种角色：`User` 与 `Assistant`。工具结果在这层仍是一条 `User` 消息，只是内容块不是文字，而是 `ToolResultBlock`。等到协议层，Chat adapter 才把它翻成 `role: "tool"`。
 
@@ -55,37 +58,39 @@ LubanCode 不让主循环直接拼三家 JSON。中间横着一层自家的数�
 
 ```mermaid
 sequenceDiagram
+    accTitle: 两步工具回合
+    accDescr: 用户消息先触发模型工具调用，宿主执行并回填结果，再发第二次模型请求，收束后持久化本轮记录。
     actor User as 用户
-    participant UI as Composer / RunTurn
-    participant Loop as AgentLoop
+    participant Session as Session / RunTurn
+    participant Agent as Agent / AgentLoop
     participant Wire as 协议 Adapter
     participant API as 模型 API
     participant Tools as ToolRegistry
     participant Store as SessionStore
 
-    User->>UI: 帮我看一下当前项目
-    UI->>Loop: api::Message(User, TextBlock)
-    Loop->>Loop: 追加到 history
-    Note over UI,Store: turn 开始
-    Note over Loop,Tools: step 1
-    Loop->>Loop: 拼 system、裁 history、列 tools
-    Loop->>Wire: 中立 api::Request
+    User->>Session: 帮我看一下当前项目
+    Session->>Agent: api::Message + TurnWiring
+    Agent->>Agent: 追加 durable/request history
+    Note over Session,Store: turn 开始
+    Note over Agent,Tools: step 1
+    Agent->>Agent: 拼 system、取 working view、列 tools
+    Agent->>Wire: 中立 api::Request
     Wire->>API: 第 1 次 HTTP + SSE
     API-->>Wire: tool call 增量
-    Wire-->>Loop: ToolUseStart / InputDelta / MessageDone
-    Loop->>Loop: 拼成 Assistant + ToolUseBlock
-    Loop->>Tools: read_file({path: README.md})
-    Tools-->>Loop: 文件正文
-    Loop->>Loop: 追加 User + ToolResultBlock
-    Note over Loop,Tools: step 2
-    Loop->>Wire: 中立 api::Request（带完整新历史）
+    Wire-->>Agent: ToolUseStart / InputDelta / MessageDone
+    Agent->>Agent: 拼成 Assistant + ToolUseBlock
+    Agent->>Tools: read_file({path: README.md})
+    Tools-->>Agent: 文件正文
+    Agent->>Agent: 追加 User + ToolResultBlock
+    Note over Agent,Tools: step 2
+    Agent->>Wire: 中立 api::Request（带完整新历史）
     Wire->>API: 第 2 次 HTTP + SSE
     API-->>Wire: 最终正文增量
-    Wire-->>Loop: TextDelta / MessageDone
-    Loop->>Loop: 追加最终 Assistant
-    Loop-->>UI: Run 返回
-    UI->>Store: 把本轮新增 history 逐条写进 JSONL
-    Note over UI,Store: turn 收口
+    Wire-->>Agent: TextDelta / MessageDone
+    Agent->>Agent: 追加最终 Assistant
+    Agent-->>Session: RunOutcome
+    Session->>Store: 把本轮新增 history 逐条写进 JSONL
+    Note over Session,Store: turn 收口
 ```
 
 上图有两处容易看岔：
@@ -102,7 +107,7 @@ sequenceDiagram
 1. 上下文超过阈值时，先自动压缩。
 2. 若开了项目记忆，拿 query 检索一次，把命中内容拼进本轮 `turn_context`。
 3. `RunTurn` 处理图片附件、后台子代理完成通知、ESC 与排队输入。
-4. 最后才调用 `AgentLoop::Run(message)`。
+4. `RunSessionTurn` 组好 `TurnContext`，`RunTurn` 再调用 `Agent::Run(message, wiring)`。
 
 纯文本输入在中立层长这样：
 
@@ -115,7 +120,7 @@ api::Message{
 }
 ```
 
-`AgentLoop` 先把它压进 `history_`。若是新会话，此刻历史只有一条：
+`Agent::Run` 交给 `ContextManager` 同时记两本账：耐久历史收用户原文，请求视图再附本轮临时上下文。若是新会话，此刻耐久历史只有一条：
 
 ```text
 history_[0]
@@ -163,11 +168,11 @@ step 预算将尽提醒                        （max_steps_per_turn，旧名 ma
 
 | 内容 | 何时算 |
 | --- | --- |
-| 人格、环境、项目指令、feature、platform | 建立或重建 `AgentLoop` 时拼 |
+| 人格、环境、项目指令、feature、platform、mode | 建立或重建 `Agent` 时拼 |
 | 项目记忆、step 预算提醒 | 每个外层 turn 或内部 step 按需算，随尚未发送的 user / tool-result 消息尾部添 |
-| 延迟工具索引、模型专属指令、魂、think/model override | 真发请求前由 backend 包装层现添 |
+| 延迟工具索引、模型专属指令、魂、think/model | 真发请求前由 `AgentProfile` 落入 `api::Request` |
 
-项目记忆不再改 `system`。它带“只作线索、不是新指令”的声明，随本轮用户消息尾部进入请求视图；本次 `AgentLoop::Run` 的后续内部请求原样重放这份消息，下一条外层用户消息再算新包。
+项目记忆不再改 `system`。它带“只作线索、不是新指令”的声明，随本轮用户消息尾部进入请求视图；本次 `Agent::Run` 的后续内部请求原样重放这份消息，下一条外层用户消息再算新包。
 
 工具定义也不靠 prompt 里手写。`ToolRegistry` 每个 step 现列一遍，再变成独立的 `request.tools`。这使 JSON Schema 真正受协议约束，也让 `tool_search` 新挂载的工具能在下一个 step 立刻出现。
 
@@ -207,14 +212,16 @@ api::Request{
 
 默认主工具表不止这些。基础表含 `read_file`、`run_command`、后台命令工具、写改文件、`search`、`skill`、`web_fetch`；配置齐全时再挂 `web_search`、MCP、LSP、插件。主会话另有 `agent`、`todo_write`、交互态下的 `ask_user`，项目记忆可写时还有 `memory_save`。
 
-这份 request 发出前还会被包装层改几笔：
+这份 request 发出前，Agent 还会从 `AgentProfile` 落几笔：
 
 - `/model` 选中的模型盖过初始 model。
 - `/think` 写入推理档位，并带上当前模型的 reasoning 档案。
-- 延迟工具索引、模型专属指令与魂接到 system 尾部。
+- 延迟工具索引、模型专属指令与魂按固定次序接到 system 尾部。
 - provider 与 request 的 `extra_body` 最后做顶层浅合并；推理参数不走这条扩展口。
 
-历史若太长，`TrimHistory` 只裁“发给模型看的副本”。它保住最早一个用户 turn 与最近三个用户 turn，整段丢掉中间旧账；工具调用与结果同进同退。单条工具结果仍太大，才截正文并加标记。`history_` 本身不因这道硬裁剪而缩短；真正改活历史的是 `/compact` 或自动 compact。
+这些字段都在 Agent 拼请求时生效，也进前缀指纹。后端只管传输，不再套模型、think、指令、魂、延迟索引五层改写壳。
+
+历史若太长，hard trim 只裁“发给模型看的副本”。它保住最早一个用户 turn 与最近几个用户 turn，整段丢掉中间旧账；工具调用与结果同进同退。单条工具结果仍太大，才截正文并加标记。耐久历史本身不因这道裁剪缩短；真正改活历史的是 `/compact` 或自动 compact。
 
 请求拼装前还有两道工序：先是**无损结构压缩**（agent/context_events）——从历史派生规范化事件账，冷区里同键同指纹的只读工具结果（重复读取、重复搜索）只留一份正文加引用计数，被新版本覆盖的旧读取保头部预览并标注，超长结果换 artifact 引用；这层只改"发给模型的视图"，活历史与 session JSONL 一字不动，副作用工具不判重、绝不因此跳执行。再是 mid-turn 评估：系统提示 + 工具定义 + 全份历史 + 输出预留（统一 token 口径：ASCII 4 字符约 1 token，非 ASCII 每字约 1.5 token）估过有效窗口的 80%，就在这个"工具结果已攒完、请求尚未发出"的安全点先做一次语义压缩，不再等下一条用户消息。turn 级硬裁真丢了东西（丢 turn 或截结果）时，会向终端发一条显式告警——有损降级不许静默发生。
 
@@ -307,7 +314,7 @@ api::Message{
 }
 ```
 
-这条 assistant 消息立刻写进 `history_`。此时还没有最终答话，`RunTurn` 也没有返回。
+这条 assistant 消息立刻经 `ContextManager::PushMessage` 写进耐久历史与请求历史。此时还没有最终答话，`RunTurn` 也没有返回。
 
 ## 环节 5：本机执行工具，再把结果装成下一条消息
 
@@ -503,36 +510,62 @@ Responses API 不叫 `messages`，叫 `input`。函数调用与函数结果各�
 
 `store: false` 写得明白：LubanCode 不靠 `previous_response_id` 串会话，也不指望服务端替它记账。每次请求都从本地 history 重新展开。Responses 的 reasoning 也按一次性内容处置，不塞回下一次 `input`。
 
-三家对照如下：
+## 同一份历史，Gemini 怎样穿
 
-| 中立含义 | Chat Completions | Anthropic Messages | OpenAI Responses |
-| --- | --- | --- | --- |
-| 系统提示 | `messages[0].role=system` | 顶层 `system` | 顶层 `instructions` |
-| 用户文字 | `role=user` | `role=user` + `type=text` | `type=message` + `input_text` |
-| 工具定义 | `type=function.function.parameters` | `name + input_schema` | 平铺 `type=function + parameters` |
-| 模型叫工具 | assistant `tool_calls` | assistant `tool_use` block | `function_call` item |
-| 工具结果 | `role=tool` | user `tool_result` block | `function_call_output` item |
-| 会话状态 | 每次重发 history | 每次重发 history | `store:false`，每次重发 history |
+Gemini Generate Content 把对话放进 `contents`。assistant 角色改叫 `model`，工具调用与回执各占一枚 part：
+
+```json
+{
+  "systemInstruction": {"parts": [{"text": "<完整 system 文本>"}]},
+  "contents": [
+    {"role": "user", "parts": [{"text": "帮我看一下当前项目"}]},
+    {"role": "model", "parts": [{"functionCall": {
+      "name": "read_file", "args": {"path": "README.md"}
+    }}]},
+    {"role": "user", "parts": [{"functionResponse": {
+      "name": "read_file", "response": {"result": "     1\t# LubanCode\n"}
+    }}]}
+  ],
+  "tools": [{"functionDeclarations": [{
+    "name": "read_file",
+    "description": "读取文件内容……",
+    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}
+  }]}]
+}
+```
+
+地址是 `<base_url>/v1beta/models/<model>:streamGenerateContent?alt=sse`。Gemini 的 `functionResponse` 只认函数名，adapter 会先用中立 `tool_use_id` 找回原调用名。思考块不拿去续传。
+
+四家对照如下：
+
+| 中立含义 | Chat Completions | Anthropic Messages | OpenAI Responses | Gemini Generate Content |
+| --- | --- | --- | --- | --- |
+| 系统提示 | `messages[0].role=system` | 顶层 `system` | 顶层 `instructions` | `systemInstruction` |
+| 用户文字 | `role=user` | `role=user` + `type=text` | `message` + `input_text` | user `parts[].text` |
+| 工具定义 | `function.parameters` | `name + input_schema` | 平铺 `function + parameters` | `functionDeclarations[].parameters` |
+| 模型叫工具 | assistant `tool_calls` | assistant `tool_use` | `function_call` item | model `functionCall` part |
+| 工具结果 | `role=tool` | user `tool_result` | `function_call_output` item | user `functionResponse` part |
+| 会话状态 | 每次重发 history | 每次重发 history | `store:false`，每次重发 history | 每次重发 `contents` |
 
 ## 环节 7：step 2 返回最终正文
 
 模型读过 README，若资料够了，就开始吐正文。Chat SSE 大致如此：
 
 ```text
-data: {"choices":[{"delta":{"content":"这是个 C++20 写的终端 coding agent。"}}]}
+data: {"choices":[{"delta":{"content":"这是个 C++23 写的终端 coding agent。"}}]}
 
-data: {"choices":[{"delta":{"content":"主入口在 src/main.cpp，模型协议分三套……"}}]}
+data: {"choices":[{"delta":{"content":"主入口在 src/main.cpp，模型协议分四套……"}}]}
 
 data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1234,"completion_tokens":180}}
 
 data: [DONE]
 ```
 
-adapter 把三家各异的 SSE 归一成：
+adapter 把四家各异的 SSE 归一成：
 
 ```text
-TextDelta("这是个 C++20 写的终端 coding agent。")
-TextDelta("主入口在 src/main.cpp，模型协议分三套……")
+TextDelta("这是个 C++23 写的终端 coding agent。")
+TextDelta("主入口在 src/main.cpp，模型协议分四套……")
 MessageDone(stop_reason="end_turn", usage={...})
 ```
 
@@ -542,7 +575,7 @@ MessageDone(stop_reason="end_turn", usage={...})
 api::Message{
     .role = Assistant,
     .content = {
-        TextBlock{"这是个 C++20 写的终端 coding agent。主入口在 src/main.cpp，模型协议分三套……"}
+        TextBlock{"这是个 C++23 写的终端 coding agent。主入口在 src/main.cpp，模型协议分四套……"}
     }
 }
 ```
@@ -555,7 +588,7 @@ api::Message{
 0  User       Text("帮我看一下当前项目")
 1  Assistant  ToolUse(call_01, read_file, ...)
 2  User       ToolResult(call_01, README 正文, ok)
-3  Assistant  Text("这是个 C++20 写的……")
+3  Assistant  Text("这是个 C++23 写的……")
 ```
 
 交互模式随后把这四条新增消息逐条 append + flush 到：
@@ -567,11 +600,11 @@ api::Message{
 文件首行是会话 meta，往后每行一条中立消息。上面的模拟落盘后，大致如下；`ts`、model 与工具正文按实值写：
 
 ```jsonl
-{"version":1,"wire":"chat_completions","model":"<当前模型>","cwd":"D:\\lubancode","started_at":"<时间>"}
+{"version":1,"wire":"openai-chat-completions","model":"<当前模型>","cwd":"D:\\lubancode","started_at":"<时间>"}
 {"role":"user","content":[{"type":"text","text":"帮我看一下当前项目"}],"ts":"<时间>"}
 {"role":"assistant","content":[{"type":"tool_use","id":"call_01","name":"read_file","input":{"path":"README.md"}}],"ts":"<时间>"}
 {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_01","content":"     1\t# LubanCode\n     2\t...","is_error":false}],"ts":"<时间>"}
-{"role":"assistant","content":[{"type":"text","text":"这是个 C++20 写的终端 coding agent……"}],"ts":"<时间>"}
+{"role":"assistant","content":[{"type":"text","text":"这是个 C++23 写的终端 coding agent……"}],"ts":"<时间>"}
 ```
 
 存档用的是中立格式，不是某一家 wire 的原始 JSON。故而恢复以后还能切 provider，再由新 adapter 把同一份 history 翻出去。
@@ -592,7 +625,7 @@ api::Message{
 User("帮我看一下当前项目")
 Assistant(ToolUse read_file)
 User(ToolResult README)
-Assistant("这是个 C++20……")
+Assistant("这是个 C++23……")
 User("那它怎么切 provider？")
 ```
 
@@ -655,7 +688,7 @@ Responses 与 Anthropic 还可声明 provider 自带的 web search。它在服�
 
 ### 排队输入
 
-模型流式输出时，用户键入下一句，只进 `pending_queue`。当前 `AgentLoop::Run` 收口后，交互循环再按顺序取出，仍走同一套 `process_line -> RunTurn`。它不会悄悄插进正在发的 HTTP 请求。
+模型流式输出时，用户键入下一句，只进 `pending_queue`。当前 `AgentLoop::Run` 收口后，交互循环再按顺序取出，仍走同一套 `ProcessLine -> RunSessionTurn -> RunTurn`。它不会悄悄插进正在发的 HTTP 请求。
 
 ### 跨会话来信
 
@@ -674,7 +707,7 @@ system + history + tools -> assistant -> tool result -> assistant
 | 普通 Chat 示例常由业务代码自己补 | LubanCode 已经包办 |
 | --- | --- |
 | 手工保存 `messages` | 中立 history + JSONL session |
-| 手工识别 `tool_calls` | 三家 SSE 统一成 `StreamEvent` |
+| 手工识别 `tool_calls` | 四家 SSE 统一成 `StreamEvent`，再投成 `ServerEvent` |
 | 手工执行函数 | ToolRegistry、确认、hooks、结果清洗 |
 | 手工再次请求模型 | `AgentLoop` 自动循环到 `end_turn` |
 | 静态 system prompt | 人格、项目指令、能力、模型、魂逐层拼；记忆走本轮 `turn_context` |
@@ -686,8 +719,11 @@ system + history + tools -> assistant -> tool result -> assistant
 
 | 想追什么 | 文件 |
 | --- | --- |
-| 外层 turn、prompt 装配、落盘 | [`src/app/interactive_session.cpp`](../../src/app/interactive_session.cpp)、[`turn_runner.cpp`](../../src/app/turn_runner.cpp) |
-| 内部 step 循环、history、工具回填 | [`src/agent/loop.cpp`](../../src/agent/loop.cpp) |
+| 组合根与会话长寿件 | [`src/app/session_stack.cpp`](../../src/app/session_stack.cpp) |
+| 外层 turn、会话泵与命令路由 | [`src/app/interactive_session.cpp`](../../src/app/interactive_session.cpp)、[`command_registry.cpp`](../../src/app/commands/command_registry.cpp) |
+| 回合宿主、事件接线与终端收口 | [`src/app/turn_runner.cpp`](../../src/app/turn_runner.cpp) |
+| Agent 状态、内部 step 与工具回填 | [`src/agent/agent.cpp`](../../src/agent/agent.cpp)、[`loop.cpp`](../../src/agent/loop.cpp) |
+| durable/request history 与 working view | [`src/agent/context_manager.cpp`](../../src/agent/context_manager.cpp) |
 | 中立消息、内容块、流事件 | [`src/api/types.hpp`](../../src/api/types.hpp) |
 | 流事件拼成 assistant 消息 | [`src/api/assembler.cpp`](../../src/api/assembler.cpp) |
 | system prompt 模块次序 | [`src/agent/prompt_assembler.cpp`](../../src/agent/prompt_assembler.cpp) |
@@ -696,5 +732,6 @@ system + history + tools -> assistant -> tool result -> assistant
 | Chat 请求与回包 | [`src/api/chat/request.cpp`](../../src/api/chat/request.cpp)、[`events.cpp`](../../src/api/chat/events.cpp) |
 | Responses 请求与回包 | [`src/api/responses/request.cpp`](../../src/api/responses/request.cpp)、[`events.cpp`](../../src/api/responses/events.cpp) |
 | Anthropic 请求与回包 | [`src/api/anthropic/client.cpp`](../../src/api/anthropic/client.cpp)、[`events.cpp`](../../src/api/anthropic/events.cpp) |
+| Gemini 请求与回包 | [`src/api/gemini/request.cpp`](../../src/api/gemini/request.cpp)、[`events.cpp`](../../src/api/gemini/events.cpp) |
 | 子代理与 Explore | [`src/tools/agent_tool.cpp`](../../src/tools/agent_tool.cpp) |
 | JSONL 会话 | [`src/sessions/session_store.cpp`](../../src/sessions/session_store.cpp) |

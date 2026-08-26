@@ -442,6 +442,6 @@ sticky 视图自己再超限时，才重裁一次，开新 cache epoch。
 | L2 microcompact | `src/agent/microcompact.cpp`、`microcompact.hpp` | `tests/unit/memory/test_microcompact.cpp` |
 | 中途压力与换史 | `src/agent/loop.cpp` | `tests/unit/agent/test_loop.cpp`、`test_request_prefix.cpp` |
 | compact event 回放 | `src/sessions/session_store.cpp` | `tests/unit/sessions/test_session_store.cpp` |
-| 自动触发与待办守恒 | `src/app/interactive_session.cpp` | compact 与 session 相关测试 |
+| 自动触发、命令与待办守恒 | `src/app/interactive_session.cpp`、`src/app/commands/session_commands.cpp` | compact 与 session 相关测试 |
 
 产品层概览见[上下文压缩机制](../../features/context/compaction.md)。四本账、长文件与 memory 触发，见[上下文、长文本与记忆深挖](../memory/context.md)。

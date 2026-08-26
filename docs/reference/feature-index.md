@@ -19,9 +19,10 @@
 
 | 功能 | 现状 | 入口与说明 |
 | --- | --- | --- |
-| Anthropic Messages | 原生请求与流事件解析 | `wire=anthropic` |
-| OpenAI Responses | 原生请求、工具调用、服务端搜索事件 | `wire=responses` |
-| Chat Completions | OpenAI 兼容聊天与工具调用 | `wire=chat_completions`，`chat` 也认 |
+| Anthropic Messages | 原生请求与流事件解析 | `wire=anthropic-messages` |
+| OpenAI Responses | 原生请求、工具调用、服务端搜索事件 | `wire=openai-responses` |
+| Chat Completions | OpenAI 兼容聊天与工具调用 | `wire=openai-chat-completions` |
+| Gemini Generate Content | 原生 `streamGenerateContent`、工具调用与 thinking | `wire=google-generate-content` |
 | 多 provider | 每条保存协议、地址、密钥来源、模型、窗口与私有参数 | `/provider`、[配置手册](configuration.md) |
 | Provider 目录 | 内置快照、在线缓存、ETag、断网回退 | `/provider add`、`/provider refresh`、[Provider 目录](../features/providers/catalog.md) |
 | 模型目录 | 展示名、上下文窗口、推理档位、模型指令与 variant 参数 | `~/.lubancode/models.json` |
@@ -31,7 +32,7 @@
 | 原生联网搜索 | Anthropic/Responses 可声明服务端搜索工具 | provider 的 `native_web_search` |
 | 程序化工具调用 | 模型写受限 Python，经 typed stub 与宿主 RPC 批量编排只读工具 | `tool_calling=programmatic`；默认仍为 `json`，见 [PTC 手册](../features/tools/ptc.md) |
 
-模型地址与密钥没有内置默认值。交互模式缺配置会打开开场页，可直接添加 Provider，也可跳过后进主界面再用 `/provider` 配置；单发与管道模式直接报缺项。配置来源与覆盖顺序见[配置手册](configuration.md)。
+模型地址与密钥没有内置默认值。`anthropic`、`responses`、`chat_completions`、`chat` 仍作旧配置别名读入，展示与写回一律用上表规范名。交互模式缺配置会打开开场页，可直接添加 Provider，也可跳过后进主界面再用 `/provider` 配置；单发与管道模式直接报缺项。配置来源与覆盖顺序见[配置手册](configuration.md)。
 
 ## 代码与系统工具
 

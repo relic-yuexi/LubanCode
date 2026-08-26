@@ -90,7 +90,7 @@ ETag 另存一份。下次刷新发送条件请求；远端没变，便不重写
 ```json
 {
   "name": "Example AI",
-  "wire": "responses",
+  "wire": "openai-responses",
   "base_url": "https://api.example.com/v1",
   "key_env": "EXAMPLE_API_KEY",
   "default_model": "example-pro",
@@ -103,7 +103,7 @@ ETag 另存一份。下次刷新发送条件请求；远端没变，便不重写
 | 字段 | 必填 | 含义 |
 | --- | --- | --- |
 | `name` | 是 | 向导展示名 |
-| `wire` | 是 | `anthropic`、`responses` 或 `chat_completions` |
+| `wire` | 是 | `anthropic-messages`、`openai-responses`、`openai-chat-completions` 或 `google-generate-content` |
 | `base_url` | 是 | HTTPS API 根地址 |
 | `key_env` | 是 | 推荐保存密钥的环境变量名 |
 | `default_model` | 是 | 添加后默认启用的模型 ID |
@@ -115,7 +115,7 @@ ETag 另存一份。下次刷新发送条件请求；远端没变，便不重写
 | `extra_body` | 否 | 并入每次请求顶层的 JSON |
 | `extra_headers` | 否 | 额外 HTTP headers |
 
-目录里的 `chat_completions` 会映射到运行配置所见的 Chat 后端。两处名字略有不同：前者是目录 schema，后者是程序内部枚举与展示。
+目录与运行配置共用四条规范名。旧配置里的 `anthropic`、`responses`、`chat_completions`、`chat` 仍可读；目录 schema 不收旧名，程序展示与写回也只吐规范名。
 
 ## 6. 模型与 reasoning
 

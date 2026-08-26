@@ -4,7 +4,7 @@ _面向技术面试与源码走查：讲清模型元数据从哪来，Schema 管
 
 ---
 
-[面试深挖导航](../../../interview/deep-dives.md) · [Provider 目录](../../features/providers/catalog.md) · [配置手册](../../reference/configuration.md) · [三协议数据流](../query-data-flow.md)
+[面试深挖导航](../../../interview/deep-dives.md) · [Provider 目录](../../features/providers/catalog.md) · [配置手册](../../reference/configuration.md) · [四协议数据流](../query-data-flow.md)
 
 ## 📋 先把故事说准
 
@@ -44,14 +44,14 @@ LubanCode 与这条路有相似处：
 | 数据来源 | Models.dev 生成快照 | 仓库自维护 `providers.json` |
 | 运行时网络 | OpenCode 实现可刷新 Models.dev 缓存 | 只在显式/过期刷新 provider catalog |
 | 配置格式 | OpenCode 自家 config schema | LubanCode 自家 config 与目录格式 |
-| 协议层 | 基于其 provider/SDK 体系 | 三套自写 C++ wire adapter |
+| 协议层 | 基于其 provider/SDK 体系 | 四套自写 C++ wire adapter |
 | 价格估算 | 元数据含价格 | 当前没有模型价格账 |
 
 仓库内能证实的直接来源还有一条：提交 `3bb0f79` 与 `src/config/model_catalog.hpp` 注释写着“借鉴 Codex model-catalog”。仓内没有找到 `OpenCode` 或 `models.dev` 的历史字样。
 
 所以最稳的说法是：
 
-> 模型元数据驱动这条思路参考过 Codex，也可拿 OpenCode/Models.dev 作同类方案对照。LubanCode 没照搬 OpenCode schema，也不与 Models.dev 数据兼容；provider 目录、缓存策略和 C++ 解析器都是按本项目三协议边界重写的。
+> 模型元数据驱动这条思路参考过 Codex，也可拿 OpenCode/Models.dev 作同类方案对照。LubanCode 没照搬 OpenCode schema，也不与 Models.dev 数据兼容；provider 目录、缓存策略和 C++ 解析器都按本项目四条 wire 边界来写。
 
 若你本人确实在设计时看过 OpenCode，可以说“参考过分层与覆盖思路”。不要说“接入了 OpenCode 的模型库”，源码并不支持这句话。
 
@@ -78,7 +78,7 @@ LubanCode 与这条路有相似处：
 
 ### Tool input schema
 
-每件工具另有 `input_schema`。它告诉模型参数叫什么、何种类型、哪些必填。三家 wire 会把中立 schema 翻成各自 function/tool 定义。
+每件工具另有 `input_schema`。它告诉模型参数叫什么、何种类型、哪些必填。四家 wire 会把中立 schema 翻成各自 function/tool 定义。
 
 这份 schema 不管模型目录。它管的是某一枚工具调用的 JSON 入参。
 
@@ -428,7 +428,7 @@ schema 给编辑器、CI 与读者；C++ parser 是发行时真正安全边界�
 | 模型应用与 system 段 | `src/app/commands/settings_commands.cpp`、`src/agent/prompts.hpp` | `tests/unit/config/test_model_catalog.cpp` |
 | 输出预算优先级 | `src/agent/runtime_profile.hpp`、`src/app/runtime_profile.cpp` | `tests/unit/config/test_runtime_profile.cpp` |
 | 模型角色路由 | `src/agent/model_router.cpp`、`src/app/model_router.cpp` | `tests/unit/memory/test_model_router.cpp` |
-| variant 请求覆盖 | `src/app/backend_stack.cpp`、`src/api/*/request.cpp` | 三协议 request 测试 |
+| variant 请求覆盖 | `src/app/backend_stack.cpp`、`src/api/*/request.cpp` | 四协议 request 测试 |
 | 工具 schema 子集 | `src/tools/schema_check.cpp` | `tests/unit/hooks/test_hooks.cpp` |
 
 面试题的横向清单见[高频技术面试追问题库](../../../interview/question-bank.md)。

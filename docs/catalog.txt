@@ -35,6 +35,7 @@ DOC architecture/memory/design.md
 DOC architecture/memory/flow.md
 DOC architecture/providers/schema.md
 DOC architecture/query-data-flow.md
+DOC architecture/session-orchestration.md
 DOC architecture/tool-calling-flow.md
 DOC architecture/tools/file-commands.md
 

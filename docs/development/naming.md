@@ -36,7 +36,7 @@ session
 
 - 不把一次工具调用叫 step。一个 step 可含多枚工具调用,多开只增 `tool_call_count`。
 - 不把一次请求重试叫 step。重试只增 `attempt_count` 与 `request_count`,`step_count` 不动。
-- `AgentLoop::Run` 内一次 `send_stream` 就是一个 step;外层 `InteractiveSession::RunUserTurn` 才是一个 turn。`TrimHistory` 按 user turn 切段,不按模型请求数切。
+- `AgentLoop::Run` 内一次 `send_stream` 就是一枚 step；外层 `TerminalSessionController::RunSessionTurn` 才管一轮 turn。`Agent::Run` 夹在两者之间，持跨 step 状态，不另造层级名。history 裁剪按 user turn 切段，不按模型请求数切。
 
 ## 计数器都带单位
 

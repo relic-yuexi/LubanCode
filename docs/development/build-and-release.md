@@ -67,8 +67,11 @@ CI 会显式传 `-DLUBANCODE_USE_CODELOAD=OFF` 走 GitHub 官方地址。本机�
 | 目录 | 现职 | 常见改动 |
 | --- | --- | --- |
 | `src/app/` | 应用编排、交互会话、slash handler、运行时接线 | 新命令、会话流程、跨模块状态 |
-| `src/agent/` | AgentLoop、上下文、compact、session、prompt 拼装 | 工具循环、历史视图、压缩 |
-| `src/api/` | 中立消息与三种 wire | 请求 JSON、SSE 事件、usage |
+| `src/agent/` | 有状态 Agent、AgentLoop、上下文、compact、prompt 拼装 | 工具循环、历史视图、压缩 |
+| `src/api/` | 中立消息与四种 wire | 请求 JSON、SSE 事件、usage |
+| `src/runtime/` | 中立回合事件、调度器、goal/loop 服务 | 跨宿主回合语义、排程、重试 |
+| `src/sessions/` | 会话存档、目录与生命周期 | JSONL 写入、恢复、归档 |
+| `src/workflow/` | workflow 定义、编译、执行与 journal | 图校验、节点调度、恢复 |
 | `src/cli/` | 输入、footer、转录、Markdown、diff、i18n | 键位、布局、渲染 |
 | `src/config/` | 配置、Provider/模型目录、项目指令 | 字段、默认值、合并 |
 | `src/tools/` | 内置工具、子代理、插件桥 | schema、确认、执行 |
@@ -154,7 +157,7 @@ git status --short
 
 ## 8. 协议改动
 
-三种 wire 各自编码请求、解析事件，Agent 层只认中立类型。改一家的私有字段时：
+四种 wire 各自编码请求、解析事件，Agent 层只认中立类型。改一家的私有字段时：
 
 - 先问能否由 `extra_body` / `extra_headers` 解决。
 - 通用能力才进中立层。

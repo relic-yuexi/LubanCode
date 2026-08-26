@@ -10,7 +10,7 @@ _面向技术面试与源码走查：讲清一轮代理怎样推进，失败后�
 
 LubanCode 的主循环是一只同步状态机。一条外层用户消息叫 `turn`。turn 里每发一次模型请求，叫一枚 `step`。模型若只回正文，turn 收口；若回工具调用，宿主顺序执行，攒齐结果，再开下一枚 step。
 
-当前主模型请求没有自动 HTTP/SSE 重试。三家 client 都只发一次 `cpr::Post`。网络错、HTTP 非 2xx、流解析错、API 错，照实返回。`429`、`5xx` 也不会在 client 里退避重发。
+当前主模型请求没有自动 HTTP/SSE 重试。四家 client 每枚 attempt 都只发一次 HTTP 流请求。网络错、HTTP 非 2xx、流解析错、API 错，照实返回。`429`、`5xx` 也不会在 client 里退避重发。
 
 这并非“完全不恢复”。系统把恢复拆成四路：
 
@@ -37,8 +37,8 @@ sequenceDiagram
     accDescr: A user turn advances through repeated model steps, sequential tool execution, result refill, and a final assistant response, with persistence after every turn outcome.
 
     participant user as User
-    participant session as InteractiveSession
-    participant loop as AgentLoop
+    participant session as TerminalSessionController
+    participant loop as Agent / AgentLoop
     participant model as Provider
     participant tools as ToolRegistry
     participant store as SessionStore
@@ -219,7 +219,7 @@ SSE delta 可能恰好从一个多字节字符腰上断开。显示层先把不�
 
 ### 写盘策略
 
-用户消息一进 `AgentLoop::Run`，便先入 history。turn 无论成功、报错还是 ESC，`RunUserTurn` 最后都调 `PersistNewMessages`。
+用户消息一进 `AgentLoop::Run`，便先入 history。turn 无论成功、报错还是 ESC，`RunSessionTurn` 最后都调 `PersistNewMessages`。
 
 `SessionStore` 逐条 append，逐条 flush。崩溃若发生在一行中间，前头完整 JSONL 行仍在。代价是写盘次数多；换来恢复边界清楚。
 
@@ -335,7 +335,7 @@ compact 先在内存里验收并替换 history，后往 session 追加 `compact_
 | turn 异常与 UI 收口 | `src/app/turn_runner.cpp` | `tests/unit/agent/test_loop.cpp` 与交互回归测试 |
 | 会话泵与落盘 | `src/app/interactive_session.cpp` | `tests/unit/sessions/test_session_store.cpp` |
 | JSONL 回放与配对修补 | `src/sessions/session_store.cpp` | `tests/unit/sessions/test_session_store.cpp` |
-| 三协议单 attempt | `src/api/chat/client.cpp`、`responses/client.cpp`、`anthropic/client.cpp` | 各 provider client/request 测试 |
+| 四协议单 attempt | `src/api/chat/client.cpp`、`responses/client.cpp`、`anthropic/client.cpp`、`gemini/client.cpp` | 各 provider client/request 测试 |
 | MCP pending 与 timeout | `src/mcp/client.cpp`、`transport.cpp` | `tests/integration/protocols/test_mcp_client.cpp` |
 | memory durable jobs | `src/memory/project_memory.cpp` | `tests/unit/memory/test_project_memory.cpp` |
 | hard trim | `src/agent/context.cpp` | `tests/unit/api/test_context.cpp` |

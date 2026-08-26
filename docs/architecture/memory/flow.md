@@ -18,6 +18,8 @@
 
 ```mermaid
 flowchart TD
+    accTitle: 项目记忆读写流程
+    accDescr: 外层消息先检索并筛选项目记忆，再随本轮请求入模；回合收尾抽取候选，审过后交后台 worker 落盘并重建索引。
     U[外层用户消息] --> ID[解析项目身份]
     ID --> G{全局授权且本场 enabled/use?}
     G -- 否 --> N[零召回]
@@ -137,6 +139,8 @@ Markdown 主题才是真本。catalog 与 index 都能重建。
 
 ```mermaid
 stateDiagram-v2
+    accTitle: 记忆候选生命周期
+    accDescr: 回合抽取生成候选；用户可编辑、接纳或拒绝，后台写入成功后成为主题，也可因遗忘或陈旧离开活跃状态。
     [*] --> Candidate: 回合抽取
     Candidate --> PendingJob: accept
     Candidate --> Candidate: edit
@@ -210,7 +214,9 @@ worker 依次做这些事：
 - `src/memory/project_memory.cpp`：身份、排级、召回、候选、队列与 worker。
 - `src/memory/frontmatter.cpp`：schema 3 主题读写。
 - `src/memory/memory_tool.cpp`：`memory_save` 参数与排队。
-- `src/app/interactive_session.cpp`：外层 turn 的召回、收尾抽取与 slash 命令接线。
+- `src/app/interactive_session.cpp`：外层 turn 的召回与收尾调用。
+- `src/app/commands/memory_commands.cpp`：`/memory` 分派、候选操作与回合尾抽取。
+- `src/app/interactive_session_wiring.cpp`：记忆工具、子代理召回与会话材料接线。
 - `src/app/memory_extract.cpp`：本轮转写、候选 JSON 请求与解析。
 
 相关测试集中在 `tests/unit/memory/test_project_memory.cpp`、`tests/unit/memory/test_memory_retrieval.cpp` 与记忆候选、迁移、worker 测试。
