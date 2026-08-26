@@ -1137,6 +1137,24 @@ std::vector<std::string> ProviderEditDiffLines(const config::ProviderConfig& ori
 // 状态机:回车直接保存,也能按项号改单项,不另养一套半残的确认逻辑。
 // ---------------------------------------------------------------------------
 
+std::vector<WizardChoiceItem> PresetChoiceItems(const config::ProviderCatalog& catalog) {
+    std::vector<WizardChoiceItem> items;
+    items.reserve(catalog.providers.size() + 1);
+    // 自定义(全手填)顶在最前,目录预设依次在后;光标默认落哪由
+    // PresetChoiceDefaultIndex 另算(自定义在顶但不抢光标)。
+    items.push_back({tr("provider_catalog.choose.custom"), {}});
+    for (const auto& preset : catalog.providers) {
+        items.push_back({preset.name, preset.description});
+    }
+    return items;
+}
+
+std::size_t PresetChoiceDefaultIndex(const config::ProviderCatalog& catalog) {
+    // 有预设:光标落第一预设。多数人进来是挑现成厂家,自定义全手填是
+    // 少数场景,占顶即可,不该一回车就误进去。
+    return catalog.providers.empty() ? kPresetChoiceCustomIndex : kPresetChoiceCustomIndex + 1;
+}
+
 std::optional<ProviderWizardOutcome> RunProviderPresetWizard(
     WizardIO& io, const config::ProviderCatalog& catalog, const std::string& name_prefill,
     const std::vector<config::ProviderConfig>& existing) {
@@ -1145,23 +1163,18 @@ std::optional<ProviderWizardOutcome> RunProviderPresetWizard(
     }
 
     {
-        std::vector<WizardChoiceItem> items;
-        items.reserve(catalog.providers.size() + 1);
-        for (const auto& preset : catalog.providers) {
-            items.push_back({preset.name, preset.description});
-        }
-        items.push_back({tr("provider_catalog.choose.custom"), {}});
+        const std::vector<WizardChoiceItem> items = PresetChoiceItems(catalog);
         WizardFrame frame;
         frame.title = tr("provider_catalog.choose.title");
         frame.footer = tr("provider_wizard.footer.first");
-        const ChoiceNav choice = ReadChoiceNav(io, frame, items, 0);
+        const ChoiceNav choice = ReadChoiceNav(io, frame, items, PresetChoiceDefaultIndex(catalog));
         if (!choice.index.has_value()) {
             return std::nullopt;
         }
-        if (*choice.index == catalog.providers.size()) {
+        if (*choice.index == kPresetChoiceCustomIndex) {
             return RunProviderAddWizard(io, name_prefill, existing);
         }
-        const config::ProviderPreset& preset = catalog.providers[*choice.index];
+        const config::ProviderPreset& preset = catalog.providers[*choice.index - 1];
         config::ProviderConfig provider = config::ProviderConfigFromPreset(preset);
 
         // 名字:默认用预设 id,回车确认。
