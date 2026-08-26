@@ -1042,7 +1042,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         if (tools::Tool* raw_ask = registry->Find("ask_user"); raw_ask != nullptr) {
             if (auto* ask_tool = dynamic_cast<tools::AskUserTool*>(raw_ask); ask_tool != nullptr) {
                 ask_tool->SetHandler([this, record, turn_id](const tools::AskUserQuestion& question)
-                                         -> std::expected<std::vector<std::string>, std::string> {
+                                         -> std::expected<tools::AskUserResponse, std::string> {
                     runtime::QuestionRequest request;
                     request.header = question.header;
                     request.question = question.question;
@@ -1073,7 +1073,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
                     if (answer->answers.empty()) {
                         return std::unexpected("用户没有选择答案");
                     }
-                    return answer->answers;
+                    return tools::AskUserResponse::Answered(answer->answers);
                 });
             }
         }

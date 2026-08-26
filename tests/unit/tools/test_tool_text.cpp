@@ -476,7 +476,8 @@ TEST_CASE("批4 交互: 缺省(zh-CN)与改前一字不差") {
     LangGuard guard;
     lubancode::cli::SetLanguage("zh-CN");
     AskUserTool ask([](const lubancode::tools::AskUserQuestion&) {
-        return std::expected<std::vector<std::string>, std::string>{std::vector<std::string>{"a"}};
+        return std::expected<lubancode::tools::AskUserResponse, std::string>{
+            lubancode::tools::AskUserResponse::Answered({"a"})};
     });
     CHECK(ask.description() == kAskUserDescBefore);
     const nlohmann::json aschema = ask.input_schema();
@@ -501,7 +502,8 @@ TEST_CASE("批4 交互: en 下 description 与参数说明都是英文") {
     LangGuard guard;
     lubancode::cli::SetLanguage("en");
     AskUserTool ask([](const lubancode::tools::AskUserQuestion&) {
-        return std::expected<std::vector<std::string>, std::string>{std::vector<std::string>{"a"}};
+        return std::expected<lubancode::tools::AskUserResponse, std::string>{
+            lubancode::tools::AskUserResponse::Answered({"a"})};
     });
     CHECK(ask.description().find("When a task hinges on a user choice") == 0);
     const nlohmann::json aschema = ask.input_schema();

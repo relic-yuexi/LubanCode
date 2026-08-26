@@ -76,10 +76,24 @@ struct ChoiceMenuItem {
     std::string description;
 };
 
+// ask_user 专用的问题面板。通用 ChoiceMenu 默认不带这层皮肤；调用方给了
+// panel，短菜单才把题头、问题、编号选项与上下横线收进同一块动态帧里。
+// 如此 /model、安装向导等旧菜单仍按原样画，不会跟着改版。
+struct ChoiceMenuQuestionPanel {
+    std::string header;
+    std::string question;
+};
+
 struct ChoiceMenuOptions {
     bool multi_select = false;
     std::optional<std::size_t> editable_index;
     std::optional<std::size_t> initial_cursor;  // 初始高亮项(0-based);不设则从首项起
+    std::optional<ChoiceMenuQuestionPanel> question_panel;
+    // 在这一项上按 Enter 立即提交；多选菜单也不要求先用空格勾它。给
+    // ask_user 的“聊聊这个问题”这类动作项用。
+    std::optional<std::size_t> immediate_submit_index;
+    // 在指定项前另画一根横线，把回答项与动作项分开。只影响问题面板。
+    std::optional<std::size_t> separator_before_index;
     std::string hint;
     std::string invalid_hint;
     std::string editable_hint;

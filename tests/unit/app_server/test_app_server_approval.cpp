@@ -568,7 +568,7 @@ TEST_CASE("ask_user:user/ask 反向请求,answers 送回原回合") {
         []() -> std::unique_ptr<tools::ToolRegistry> {
             auto registry = std::make_unique<tools::ToolRegistry>();
             registry->Register(std::make_unique<tools::AskUserTool>(
-                [](const tools::AskUserQuestion&) -> std::expected<std::vector<std::string>, std::string> {
+                [](const tools::AskUserQuestion&) -> std::expected<tools::AskUserResponse, std::string> {
                     return std::unexpected("当前入口不能与用户交互"); // 占位,server 会换掉
                 }));
             return registry;

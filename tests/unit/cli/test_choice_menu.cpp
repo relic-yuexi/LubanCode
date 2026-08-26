@@ -6,6 +6,7 @@
 using lubancode::cli::ChoiceMenuCore;
 using lubancode::cli::ChoiceMenuItem;
 using lubancode::cli::ChoiceMenuOptions;
+using lubancode::cli::ChoiceMenuQuestionPanel;
 using lubancode::cli::ChoiceMenuSearchCore;
 using lubancode::cli::ChoiceMenuSearchWindowRows;
 using lubancode::cli::KeyEvent;
@@ -92,6 +93,18 @@ TEST_CASE("choice menu: 多选的普通勾选与末项自填可一并提交") {
     CHECK(menu.state().custom_text == "补充选项");
 }
 
+TEST_CASE("choice menu: 多选菜单的动作项按 Enter 立即提交并舍弃旧勾选") {
+    ChoiceMenuCore menu(4, true, 2, 0, 3);
+    menu.HandleKey(KeyEvent::Char(U' '));  // 先勾一项
+    menu.HandleKey(KeyEvent::Simple(KeyKind::End));
+    menu.HandleKey(KeyEvent::Char(U' '));  // 动作项不响应空格
+    CHECK(menu.SelectedIndices() == std::vector<std::size_t>{0});
+
+    menu.HandleKey(KeyEvent::Simple(KeyKind::Enter));
+    CHECK(menu.state().submitted);
+    CHECK(menu.SelectedIndices() == std::vector<std::size_t>{3});
+}
+
 // ---------------------------------------------------------------------------
 // 搜索 + 分页(ChoiceMenuSearchCore,长菜单用;阈值以下仍走上面的老路径,
 // 老测试原样全过就是"行为不变"的证明)。
@@ -102,6 +115,23 @@ TEST_CASE("choice menu options: 搜索阈值默认 12,默认不开 always_search
     CHECK(options.search_threshold == 12);
     CHECK_FALSE(options.always_search);
     CHECK_FALSE(options.max_visible_rows.has_value());
+    CHECK_FALSE(options.question_panel.has_value());
+    CHECK_FALSE(options.immediate_submit_index.has_value());
+    CHECK_FALSE(options.separator_before_index.has_value());
+}
+
+TEST_CASE("choice menu options: 问题面板显式携带题头与问题,不改菜单状态语义") {
+    ChoiceMenuOptions options;
+    options.question_panel = ChoiceMenuQuestionPanel{"发布方式", "这次要怎样上线?"};
+
+    REQUIRE(options.question_panel.has_value());
+    CHECK(options.question_panel->header == "发布方式");
+    CHECK(options.question_panel->question == "这次要怎样上线?");
+
+    ChoiceMenuCore menu(3, false, 2);
+    menu.HandleKey(KeyEvent::Simple(KeyKind::Down));
+    menu.HandleKey(KeyEvent::Simple(KeyKind::Enter));
+    CHECK(menu.SelectedIndices() == std::vector<std::size_t>{1});
 }
 
 TEST_CASE("choice menu search: 向导上限钳住选项窗并给搜索栏与 hint 留位") {

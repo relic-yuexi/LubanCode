@@ -3,17 +3,18 @@
 #include "tools/ask_user.hpp"
 
 using lubancode::tools::AskUserQuestion;
+using lubancode::tools::AskUserResponse;
 using lubancode::tools::AskUserTool;
 
 TEST_CASE("ask_user: 顺次调用 handler 并把单选、多选答案回给模型") {
     int calls = 0;
     AskUserTool tool([&](const AskUserQuestion& question)
-                         -> std::expected<std::vector<std::string>, std::string> {
+                         -> std::expected<AskUserResponse, std::string> {
         ++calls;
         if (question.multi_select) {
-            return std::vector<std::string>{"Windows", "Linux"};
+            return AskUserResponse::Answered({"Windows", "Linux"});
         }
-        return std::vector<std::string>{question.options.front().label};
+        return AskUserResponse::Answered({question.options.front().label});
     });
     const nlohmann::json input = {
         {"questions",
@@ -37,9 +38,9 @@ TEST_CASE("ask_user: 顺次调用 handler 并把单选、多选答案回给模�
 
 TEST_CASE("ask_user: 坏题目在调用 handler 前拦下") {
     int calls = 0;
-    AskUserTool tool([&](const AskUserQuestion&) -> std::expected<std::vector<std::string>, std::string> {
+    AskUserTool tool([&](const AskUserQuestion&) -> std::expected<AskUserResponse, std::string> {
         ++calls;
-        return std::vector<std::string>{"x"};
+        return AskUserResponse::Answered({"x"});
     });
 
     const auto no_questions = tool.execute(nlohmann::json::object());
@@ -53,8 +54,8 @@ TEST_CASE("ask_user: 坏题目在调用 handler 前拦下") {
     CHECK(calls == 0);
 }
 
-TEST_CASE("ask_user: 用户取消时返回错误") {
-    AskUserTool tool([](const AskUserQuestion&) -> std::expected<std::vector<std::string>, std::string> {
+TEST_CASE("ask_user: 前端故障仍返回错误") {
+    AskUserTool tool([](const AskUserQuestion&) -> std::expected<AskUserResponse, std::string> {
         return std::unexpected("用户取消了选择");
     });
     const nlohmann::json input = {
@@ -65,4 +66,51 @@ TEST_CASE("ask_user: 用户取消时返回错误") {
     const auto result = tool.execute(input);
     CHECK(result.is_error);
     CHECK(result.content.find("取消") != std::string::npos);
+}
+
+TEST_CASE("ask_user: 用户拒答是正常结果,不是工具错误") {
+    AskUserTool tool([](const AskUserQuestion&) -> std::expected<AskUserResponse, std::string> {
+        return AskUserResponse::Declined();
+    });
+    const nlohmann::json input = {
+        {"questions", nlohmann::json::array({{{"question", "继续?"},
+                                               {"options", nlohmann::json::array({{{"label", "是"}},
+                                                                                  {{"label", "否"}}})}}})},
+    };
+
+    const auto result = tool.execute(input);
+    REQUIRE_FALSE(result.is_error);
+    CHECK(nlohmann::json::parse(result.content)["status"] == "declined");
+}
+
+TEST_CASE("ask_user: 转为讨论把补充原文交回模型") {
+    AskUserTool tool([](const AskUserQuestion&) -> std::expected<AskUserResponse, std::string> {
+        return AskUserResponse::Discuss("先说说两种方案的风险");
+    });
+    const nlohmann::json input = {
+        {"questions", nlohmann::json::array({{{"question", "继续?"},
+                                               {"options", nlohmann::json::array({{{"label", "是"}},
+                                                                                  {{"label", "否"}}})}}})},
+    };
+
+    const auto result = tool.execute(input);
+    REQUIRE_FALSE(result.is_error);
+    const nlohmann::json output = nlohmann::json::parse(result.content);
+    CHECK(output["status"] == "discussion");
+    CHECK(output["message"] == "先说说两种方案的风险");
+}
+
+TEST_CASE("ask_user: 转为讨论却没有补充原文时守门") {
+    AskUserTool tool([](const AskUserQuestion&) -> std::expected<AskUserResponse, std::string> {
+        return AskUserResponse::Discuss({});
+    });
+    const nlohmann::json input = {
+        {"questions", nlohmann::json::array({{{"question", "继续?"},
+                                               {"options", nlohmann::json::array({{{"label", "是"}},
+                                                                                  {{"label", "否"}}})}}})},
+    };
+
+    const auto result = tool.execute(input);
+    CHECK(result.is_error);
+    CHECK(result.content.find("补充内容") != std::string::npos);
 }

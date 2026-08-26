@@ -173,7 +173,24 @@ std::string TrimAscii(std::string value) {
     return value;
 }
 
-std::expected<std::vector<std::string>, std::string> PromptAskUser(
+void PrintAskUserDeclined(const lubancode::tools::AskUserQuestion& question,
+                          const lubancode::cli::Theme& theme,
+                          const std::optional<std::string>& discussion = std::nullopt) {
+    std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+    TermOut() << theme.stats << "• " << tr("ask_user.declined") << theme.reset << "\n";
+    TermOut() << theme.stats << "  └─ " << question.question << " (";
+    for (std::size_t i = 0; i < question.options.size(); ++i) {
+        TermOut() << (i == 0 ? "" : " / ") << question.options[i].label;
+    }
+    TermOut() << ")" << theme.reset << "\n";
+    if (discussion.has_value()) {
+        TermOut() << theme.stats << "     " << tr("ask_user.discussion_recorded") << theme.reset
+                  << " " << *discussion << "\n";
+    }
+    TermOut().flush();
+}
+
+std::expected<lubancode::tools::AskUserResponse, std::string> PromptAskUser(
     const lubancode::tools::AskUserQuestion& question, const lubancode::cli::Theme& theme) {
     // 交互菜单取得整块屏面所有权:脚注框收起 + 子代理状态块整块收走 +
     // ticker 挂起(零输出)+ 监听线程让出读权,全程一个作用域管到底;
@@ -186,11 +203,11 @@ std::expected<std::vector<std::string>, std::string> PromptAskUser(
     {
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         TermOut() << "\n";
-        if (!question.header.empty()) {
-            TermOut() << theme.banner << question.header << theme.reset << "\n";
-        }
-        TermOut() << question.question << "\n";
         if (!interactive_menu) {
+            if (!question.header.empty()) {
+                TermOut() << theme.banner << question.header << theme.reset << "\n";
+            }
+            TermOut() << question.question << "\n";
             for (std::size_t i = 0; i < question.options.size(); ++i) {
                 TermOut() << "  " << (i + 1) << ". " << question.options[i].label;
                 if (!question.options[i].description.empty()) {
@@ -199,6 +216,7 @@ std::expected<std::vector<std::string>, std::string> PromptAskUser(
                 TermOut() << "\n";
             }
             TermOut() << "  " << (question.options.size() + 1) << ". " << tr("ask_user.other") << "\n";
+            TermOut() << "  " << (question.options.size() + 2) << ". " << tr("ask_user.discuss") << "\n";
         }
         TermOut().flush();
     }
@@ -207,19 +225,31 @@ std::expected<std::vector<std::string>, std::string> PromptAskUser(
     std::optional<std::string> inline_custom_answer;
     if (interactive_menu) {
         std::vector<lubancode::cli::ChoiceMenuItem> items;
-        items.reserve(question.options.size() + 1);
+        items.reserve(question.options.size() + 2);
         for (const auto& option : question.options) {
             items.push_back({option.label, option.description});
         }
         items.push_back({tr("ask_user.other"), {}});
+        items.push_back({tr("ask_user.discuss"), {}});
         lubancode::cli::ChoiceMenuOptions menu_options;
         menu_options.multi_select = question.multi_select;
-        menu_options.editable_index = items.size() - 1;
+        menu_options.editable_index = question.options.size();
+        menu_options.immediate_submit_index = items.size() - 1;
+        menu_options.separator_before_index = items.size() - 1;
+        menu_options.question_panel = lubancode::cli::ChoiceMenuQuestionPanel{
+            question.header.empty() ? tr("ask_user.panel_title") : question.header,
+            question.question,
+        };
         menu_options.hint = tr(question.multi_select ? "ask_user.menu_multi_hint" : "ask_user.menu_hint");
         menu_options.invalid_hint = tr("ask_user.menu_select_one");
         menu_options.editable_hint = tr("ask_user.menu_edit_hint");
-        const auto selected = lubancode::cli::ReadChoiceMenu(items, menu_options, theme);
+        lubancode::cli::ReadExitReason menu_exit = lubancode::cli::ReadExitReason::Cancel;
+        const auto selected = lubancode::cli::ReadChoiceMenu(items, menu_options, theme, &menu_exit);
         if (!selected.has_value()) {
+            if (menu_exit == lubancode::cli::ReadExitReason::Esc) {
+                PrintAskUserDeclined(question, theme);
+                return lubancode::tools::AskUserResponse::Declined();
+            }
             return std::unexpected(tr("ask_user.cancelled"));
         }
         indexes = selected->selected_indices;
@@ -228,12 +258,21 @@ std::expected<std::vector<std::string>, std::string> PromptAskUser(
         }
     } else {
         for (;;) {
+            lubancode::cli::ReadExitReason read_exit = lubancode::cli::ReadExitReason::Cancel;
             const std::optional<std::string> raw = lubancode::cli::ReadLine(
                 theme.confirm + tr(question.multi_select ? "ask_user.multi_prompt" : "ask_user.select_prompt") +
                     theme.reset,
-                theme, /*esc_rejects=*/true);
-            if (!raw.has_value() || TrimAscii(*raw).empty()) {
-                return std::unexpected(tr("ask_user.cancelled"));
+                theme, /*esc_rejects=*/true, /*composer=*/false, &read_exit);
+            if (!raw.has_value()) {
+                if (read_exit != lubancode::cli::ReadExitReason::Esc) {
+                    return std::unexpected(tr("ask_user.cancelled"));
+                }
+                PrintAskUserDeclined(question, theme);
+                return lubancode::tools::AskUserResponse::Declined();
+            }
+            if (TrimAscii(*raw).empty()) {
+                PrintAskUserDeclined(question, theme);
+                return lubancode::tools::AskUserResponse::Declined();
             }
 
             indexes.clear();
@@ -246,7 +285,7 @@ std::expected<std::vector<std::string>, std::string> PromptAskUser(
                     std::size_t consumed = 0;
                     const int index = std::stoi(part, &consumed);
                     if (consumed != part.size() || index < 1 ||
-                        index > static_cast<int>(question.options.size() + 1)) {
+                        index > static_cast<int>(question.options.size() + 2)) {
                         valid = false;
                         break;
                     }
@@ -272,6 +311,30 @@ std::expected<std::vector<std::string>, std::string> PromptAskUser(
         }
     }
 
+    const std::size_t discuss_index = question.options.size() + 1;
+    if (std::find(indexes.begin(), indexes.end(), discuss_index) != indexes.end()) {
+        for (;;) {
+            lubancode::cli::ReadExitReason read_exit = lubancode::cli::ReadExitReason::Cancel;
+            const std::optional<std::string> discussion = lubancode::cli::ReadLine(
+                theme.confirm + tr("ask_user.discuss_prompt") + theme.reset, theme,
+                /*esc_rejects=*/true, /*composer=*/false, &read_exit);
+            if (!discussion.has_value()) {
+                if (read_exit != lubancode::cli::ReadExitReason::Esc) {
+                    return std::unexpected(tr("ask_user.cancelled"));
+                }
+                PrintAskUserDeclined(question, theme);
+                return lubancode::tools::AskUserResponse::Declined();
+            }
+            const std::string value = TrimAscii(*discussion);
+            if (!value.empty()) {
+                PrintAskUserDeclined(question, theme, value);
+                return lubancode::tools::AskUserResponse::Discuss(value);
+            }
+            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+            TermOut() << theme.error << tr("ask_user.discuss_empty") << theme.reset << "\n";
+        }
+    }
+
     std::vector<std::string> answers;
     for (const std::size_t index : indexes) {
         if (index < question.options.size()) {
@@ -279,11 +342,16 @@ std::expected<std::vector<std::string>, std::string> PromptAskUser(
             continue;
         }
         for (;;) {
+            lubancode::cli::ReadExitReason read_exit = lubancode::cli::ReadExitReason::Cancel;
             const std::optional<std::string> custom = lubancode::cli::ReadLine(
                 theme.confirm + tr("ask_user.custom_prompt") + theme.reset, theme,
-                /*esc_rejects=*/true);
+                /*esc_rejects=*/true, /*composer=*/false, &read_exit);
             if (!custom.has_value()) {
-                return std::unexpected(tr("ask_user.cancelled"));
+                if (read_exit != lubancode::cli::ReadExitReason::Esc) {
+                    return std::unexpected(tr("ask_user.cancelled"));
+                }
+                PrintAskUserDeclined(question, theme);
+                return lubancode::tools::AskUserResponse::Declined();
             }
             const std::string value = TrimAscii(*custom);
             if (!value.empty()) {
@@ -300,13 +368,15 @@ std::expected<std::vector<std::string>, std::string> PromptAskUser(
 
     {
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-        TermOut() << theme.stats << tr("ask_user.recorded") << theme.reset;
+        TermOut() << theme.banner << "✓ "
+                  << (question.header.empty() ? tr("ask_user.panel_title") : question.header)
+                  << theme.reset << theme.stats << " ->" << theme.reset;
         for (std::size_t i = 0; i < answers.size(); ++i) {
             TermOut() << (i == 0 ? " " : ", ") << answers[i];
         }
         TermOut() << "\n";
     }
-    return answers;
+    return lubancode::tools::AskUserResponse::Answered(std::move(answers));
 }
 
 // ---------------------------------------------------------------------------

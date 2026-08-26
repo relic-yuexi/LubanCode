@@ -122,14 +122,32 @@ Tool::Result AskUserTool::execute(const nlohmann::json& input) {
             question.multi_select = it->get<bool>();
         }
 
-        auto selected = handler_(question);
-        if (!selected.has_value()) {
-            return {selected.error(), true};
+        auto response = handler_(question);
+        if (!response.has_value()) {
+            return {response.error(), true};
         }
-        if (selected->empty()) {
+        if (response->kind == AskUserResponseKind::Declined) {
+            return {nlohmann::json{{"status", "declined"},
+                                   {"question", question.question},
+                                   {"answers", std::move(answers)}}
+                        .dump(),
+                    false};
+        }
+        if (response->kind == AskUserResponseKind::Discuss) {
+            if (response->message.empty()) {
+                return {"用户选择讨论,但没有给出补充内容", true};
+            }
+            return {nlohmann::json{{"status", "discussion"},
+                                   {"question", question.question},
+                                   {"message", response->message},
+                                   {"answers", std::move(answers)}}
+                        .dump(),
+                    false};
+        }
+        if (response->answers.empty()) {
             return {"用户没有选择答案", true};
         }
-        answers.push_back({{"question", question.question}, {"answers", *selected}});
+        answers.push_back({{"question", question.question}, {"answers", response->answers}});
     }
 
     return {nlohmann::json{{"answers", std::move(answers)}}.dump(), false};

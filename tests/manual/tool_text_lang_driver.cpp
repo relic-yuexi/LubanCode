@@ -133,7 +133,8 @@ int main() {
     // ---- 批4:交互(ask_user / todo_write)----
     lubancode::tools::AskUserTool ask(
         [](const lubancode::tools::AskUserQuestion&) {
-            return std::expected<std::vector<std::string>, std::string>{std::vector<std::string>{"a"}};
+            return std::expected<lubancode::tools::AskUserResponse, std::string>{
+                lubancode::tools::AskUserResponse::Answered({"a"})};
         });
     std::cout << "== ask_user.description ==\n" << ask.description() << "\n";
     const nlohmann::json ks = ask.input_schema();

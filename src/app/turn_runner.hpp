@@ -76,7 +76,7 @@ void PrintConfirmDetails(const std::string& name, const nlohmann::json& input);
 
 std::string TrimAscii(std::string value);
 
-std::expected<std::vector<std::string>, std::string> PromptAskUser(
+std::expected<lubancode::tools::AskUserResponse, std::string> PromptAskUser(
     const lubancode::tools::AskUserQuestion& question, const lubancode::cli::Theme& theme);
 
 // ---------------------------------------------------------------------------

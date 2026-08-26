@@ -2802,7 +2802,8 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
     }
     // 条目超过阈值(或显式 always_search):走搜索+分页路径;等于/低于阈值
     // 仍是下面的整单直列老路径,一个字节不动。
-    if (options.always_search || items.size() > options.search_threshold) {
+    if (!options.question_panel.has_value() &&
+        (options.always_search || items.size() > options.search_threshold)) {
         return ReadChoiceMenuSearch(items, options, theme, exit_reason);
     }
     std::lock_guard<std::recursive_timed_mutex> console_read_lock(ConsoleReadMutex());
@@ -2815,7 +2816,25 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
     }
 
     int start_row = 0;
-    const int menu_rows = static_cast<int>(items.size()) + 1;
+    const bool question_panel = options.question_panel.has_value();
+    const bool panel_has_separator =
+        question_panel && options.separator_before_index.has_value() &&
+        *options.separator_before_index > 0 && *options.separator_before_index < items.size();
+    int menu_rows = static_cast<int>(items.size()) + 1;
+    if (question_panel) {
+        // 顶横线、问题、两处留白、选项与 hint；有题头、有说明或动作分隔线
+        // 时再各加一行。没有动作分隔线的普通问题面板补一根底横线。
+        menu_rows = 5 + static_cast<int>(items.size());
+        if (!options.question_panel->header.empty()) {
+            menu_rows += 2;  // 题头 + 题头后的留白
+        }
+        ++menu_rows;  // 动作分隔线，或普通面板的底横线
+        for (const ChoiceMenuItem& item : items) {
+            if (!item.description.empty()) {
+                ++menu_rows;
+            }
+        }
+    }
     {
         std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
         if (!EnsureStreamScreenRowsLocked(menu_rows)) {
@@ -2829,7 +2848,7 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
     }
 
     ChoiceMenuCore menu(items.size(), options.multi_select, options.editable_index,
-                        options.initial_cursor.value_or(0));
+                        options.initial_cursor.value_or(0), options.immediate_submit_index);
     auto draw = [&] {
         std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
         const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
@@ -2838,39 +2857,100 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
         }
         const int width = info->width;
         TermOut() << kSyncOutputBegin << "\x1b[?25l";
+        int row = 0;
+        if (question_panel) {
+            platform::ClearRowHardFrom(0, start_row + row, width);
+            platform::SetCursorPos(0, start_row + row++);
+            TermOut() << BoxRuleLine(theme, width);
+            if (!options.question_panel->header.empty()) {
+                platform::ClearRowHardFrom(0, start_row + row, width);
+                platform::SetCursorPos(0, start_row + row++);
+                TermOut() << theme.banner
+                          << TruncateUtf8ToDisplayWidth("□ " + options.question_panel->header, width - 1)
+                          << theme.reset;
+                platform::ClearRowHardFrom(0, start_row + row, width);
+                ++row;
+            }
+            platform::ClearRowHardFrom(0, start_row + row, width);
+            platform::SetCursorPos(0, start_row + row++);
+            TermOut() << TruncateUtf8ToDisplayWidth(options.question_panel->question, width - 1);
+            platform::ClearRowHardFrom(0, start_row + row, width);
+            ++row;
+        }
         for (std::size_t i = 0; i < items.size(); ++i) {
+            if (panel_has_separator && i == *options.separator_before_index) {
+                platform::ClearRowHardFrom(0, start_row + row, width);
+                platform::SetCursorPos(0, start_row + row++);
+                TermOut() << BoxRuleLine(theme, width);
+            }
             const bool active = i == menu.state().cursor;
             const bool editable = options.editable_index.has_value() && i == *options.editable_index;
+            const bool immediate = options.immediate_submit_index.has_value() &&
+                                   i == *options.immediate_submit_index;
             std::string prefix = active ? "> " : "  ";
-            if (options.multi_select && !editable) {
+            if (options.multi_select && !editable && !immediate) {
                 prefix += menu.state().selected[i] ? "[x] " : "[ ] ";
             } else if (options.multi_select) {
                 prefix += "    ";
             }
+            if (question_panel) {
+                prefix += std::to_string(i + 1) + ". ";
+            }
             const int room = (std::max)(0, width - static_cast<int>(DisplayWidthUtf8(prefix)) - 1);
             std::string raw_label = items[i].label;
             if (editable) {
-                raw_label += ": ";
-                raw_label += menu.state().custom_text.empty() ? options.editable_placeholder
-                                                               : menu.state().custom_text + (active ? "_" : "");
+                if (question_panel) {
+                    if (!menu.state().custom_text.empty()) {
+                        raw_label += ": " + menu.state().custom_text + (active ? "_" : "");
+                    } else if (active) {
+                        raw_label += ": _";
+                    }
+                } else {
+                    raw_label += ": ";
+                    raw_label += menu.state().custom_text.empty()
+                                     ? options.editable_placeholder
+                                     : menu.state().custom_text + (active ? "_" : "");
+                }
             }
             const std::string label = TruncateUtf8ToDisplayWidth(raw_label, room);
-            int description_room = room - static_cast<int>(DisplayWidthUtf8(label)) - 3;
 
-            platform::ClearRowHardFrom(0, start_row + static_cast<int>(i), width);
-            platform::SetCursorPos(0, start_row + static_cast<int>(i));
+            platform::ClearRowHardFrom(0, start_row + row, width);
+            platform::SetCursorPos(0, start_row + row++);
             if (active) {
-                TermOut() << theme.confirm;
+                TermOut() << (question_panel ? theme.banner : theme.confirm);
             }
             TermOut() << prefix << label << theme.reset;
-            if (!items[i].description.empty() && description_room > 0) {
-                TermOut() << theme.stats << " - "
-                          << TruncateUtf8ToDisplayWidth(items[i].description, description_room)
-                          << theme.reset;
+            if (!items[i].description.empty()) {
+                if (question_panel) {
+                    const std::string indent(static_cast<std::size_t>(options.multi_select ? 9 : 5), ' ');
+                    platform::ClearRowHardFrom(0, start_row + row, width);
+                    platform::SetCursorPos(0, start_row + row++);
+                    TermOut() << theme.stats << indent
+                              << TruncateUtf8ToDisplayWidth(
+                                     items[i].description,
+                                     (std::max)(0, width - static_cast<int>(indent.size()) - 1))
+                              << theme.reset;
+                } else {
+                    const int description_room = room - static_cast<int>(DisplayWidthUtf8(label)) - 3;
+                    if (description_room > 0) {
+                        TermOut() << theme.stats << " - "
+                                  << TruncateUtf8ToDisplayWidth(items[i].description, description_room)
+                                  << theme.reset;
+                    }
+                }
             }
         }
-        platform::ClearRowHardFrom(0, start_row + static_cast<int>(items.size()), width);
-        platform::SetCursorPos(0, start_row + static_cast<int>(items.size()));
+        if (question_panel && !panel_has_separator) {
+            platform::ClearRowHardFrom(0, start_row + row, width);
+            platform::SetCursorPos(0, start_row + row++);
+            TermOut() << BoxRuleLine(theme, width);
+        }
+        if (question_panel) {
+            platform::ClearRowHardFrom(0, start_row + row, width);
+            ++row;
+        }
+        platform::ClearRowHardFrom(0, start_row + row, width);
+        platform::SetCursorPos(0, start_row + row);
         std::string hint;
         if (menu.state().invalid) {
             hint = options.invalid_hint;

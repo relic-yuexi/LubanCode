@@ -23,7 +23,8 @@ class ChoiceMenuCore {
 public:
     ChoiceMenuCore(std::size_t item_count, bool multi_select,
                    std::optional<std::size_t> editable_index = std::nullopt,
-                   std::size_t initial_cursor = 0);
+                   std::size_t initial_cursor = 0,
+                   std::optional<std::size_t> immediate_submit_index = std::nullopt);
 
     const ChoiceMenuState& state() const { return state_; }
     const ChoiceMenuState& HandleKey(const KeyEvent& event);
@@ -33,6 +34,7 @@ public:
 private:
     bool multi_select_ = false;
     std::optional<std::size_t> editable_index_;
+    std::optional<std::size_t> immediate_submit_index_;
     ChoiceMenuState state_;
 };
 
