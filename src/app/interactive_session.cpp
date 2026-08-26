@@ -117,6 +117,7 @@
 #include "cli/todo_render.hpp"
 #include "cli/tool_display.hpp"
 #include "cli/transcript.hpp"
+#include "cli/transcript_controller.hpp"
 #include "config/config.hpp"
 #include "config/model_catalog.hpp"
 #include "config/provider_catalog.hpp"
@@ -370,11 +371,7 @@ private:
     // transcript(prompt/工具调用/结果/错误)整块铺进上方;0 = 重铺 main
     // 最近条目。导航坞里不再有长正文。
     std::vector<std::string> BuildAgentTaskTranscriptLines(int task_id, int width);
-    // tail_rows>0 时只铺头三行+最近 N 行(实时流重铺拍,不刷滚屏)。
-    void PrintViewedTranscript(int viewed_task_id, int tail_rows = 0);
     void CleanupBackgroundAgents(bool dispose_queue);
-    bool HandleTranscriptUi(lubancode::cli::UiKeyAction action);
-    void PrintRecentItems(std::size_t count);
     void RebuildLoop(bool preserve_history = false);
     // 会话级请求策略的同步口(批四·病十一其三:五层后端退役,/model、
     // /think、/soul 改完会话状态后把皮上的 request 档案与叠层刷新一遍,
@@ -626,30 +623,16 @@ private:
     int tool_search_threshold = 0;
 
     // ---- UI 状态 ----
-    std::vector<lubancode::cli::TranscriptItem> transcript;
+    // transcript 接线收尾单:导航/查看态/条目账/展开档全归这只控制器
+    // (cli/transcript_controller),本类只装配钩子(查看态视口、横幅重画、
+    // ESC 急停、活历史、轮视图存档)并转发按键。条目账本体在它那——
+    // ToolDisplay/RunTurn/通知入账共用同一份(transcript_ui_.items())。
+    lubancode::cli::TranscriptUiController transcript_ui_;
     // @ 提及文件索引(第三批):按根缓存,根变了重扫(cwd/worktree 切换)。
     std::vector<lubancode::cli::FileMentionEntry> mention_index_;
     std::string mention_index_root_;
     std::uint64_t agent_panel_revision_ = 0;  // SetAgentPanelProvider 的缓存
     std::vector<lubancode::tools::AgentTaskSummary> agent_panel_tasks_;  // 轻量全量(不截 8 只)
-    // Ctrl+O 全局开关,RunTurn 里新条目也按它画。atomic<bool>:回合执行期间
-    // TurnInputListener 的监听线程也会翻它,真机驱动器实测踩到过普通 bool
-    // 在这条跨线程路径上的可见性问题。
-    std::atomic<bool> transcript_expanded{false};
-    int focus_index = -1;                    // 焦点条目的 transcript 下标,-1 = 无焦点
-    int nav_turn_index_ = -1;                // { } 轮次导航的当前轮(-1 = 未开始,起手最近一轮)
-    bool focus_view_active = false;          // 正在聚焦查看
-    std::atomic<bool> expand_latest{false};  // Ctrl+O:inline 展开最近一条
-    // 子代理查看态的 Ctrl+O(追加需求"查看态实时思考流"):查看帧里流式
-    // 思考/正文尾巴的展开开关。只在主线程(HandleTranscriptUi)翻,构建
-    // 查看帧时读;Esc/切换查看目标时复位。
-    bool agent_view_expanded_ = false;
-    // 查看帧没有 app 侧擦账(查看态完成退场花屏单,2026-08-17):旧帧擦除
-    // 只认终端层 console_input 那本 view_body_top——铺帧前现记现擦,不跨
-    // 调用攒绝对行号。这里(PrintViewedTranscript)只从终端层摆好的光标处
-    // 起打印。旧版 app 侧另记一份"绝对行顶/物理行数/视口顶"的帧账,被
-    // 实时流重铺/滚屏弄失准后进门一擦,擦花刚铺好的帧、光标带偏——两本
-    // 账并存即出事,已拆。
 
     // ---- 主 AgentLoop 与轮次材料 ----
     lubancode::agent::PromptOptions prompt_options;
@@ -852,6 +835,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
       config_result_(options.config_result),
       config(config_result_.config),
       theme(options.theme),
+      transcript_ui_(theme),
       auto_confirm(options.auto_confirm),
       persona(options.persona),
       spinner_enabled(options.spinner_enabled),
@@ -1045,7 +1029,9 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     // viewed_task_id 现取,整块换进上方会话视口——导航坞只放导航。
     lubancode::cli::SetAgentPanelProvider([this]() { return BuildAgentPanelEntries(); });
     lubancode::cli::SetAgentViewSwitchHook(
-        [this](int viewed_task_id, int tail_rows) { PrintViewedTranscript(viewed_task_id, tail_rows); });
+        [this](int viewed_task_id, int tail_rows) {
+            transcript_ui_.PrintViewedTranscript(viewed_task_id, tail_rows);
+        });
 
     // 面板动作接线(x 停止/清除、Ctrl+X Ctrl+K 两段确认停全部):只发信号/
     // 清台账,面板等任务线程报终态的那一拍自己改灯。
@@ -1132,6 +1118,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         }
         for (const std::string& notice : notices) {
             lubancode::cli::ShowPanelToast(notice);
+            auto& transcript = transcript_ui_.items();
             transcript.push_back(lubancode::cli::MakeNoticeItem(
                 static_cast<int>(transcript.size()) + 1, tr("agent_panel.denial_notice_title"),
                 lubancode::cli::TranscriptStatus::Error, {notice}));
@@ -1149,12 +1136,54 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     // -----------------------------------------------------------------------
     // UI-D(0.16.0):Ctrl+O 紧凑/详细 + 焦点导航 + Ctrl+E 聚焦查看。
     // 按键语义翻译在 LineEditorCore(composer 空不空、键是什么),转发管道
-    // 在 console_input 的 SetTranscriptUiHandler,真正打印重画全在
-    // HandleTranscriptUi 里。只在等输入时会被调(流式期间监听线程天然吞
-    // 不进这些键);管道模式走不到逐键路径,整套无感。
+    // 在 console_input 的 SetTranscriptUiHandler。导航/查看态/重画的本体在
+    // cli::TranscriptUiController(终端接线收尾单自大类搬出),这里只装钩子
+    // (查看态视口/横幅重画/ESC 急停/活历史/轮视图存档)并转发按键。只在等
+    // 输入时会被调(流式期间监听线程天然吞不进这些键);管道模式走不到逐键
+    // 路径,整套无感。
     // -----------------------------------------------------------------------
+    {
+        lubancode::cli::TranscriptUiController::Hooks transcript_hooks;
+        transcript_hooks.build_task_transcript = [this](int task_id, int width) {
+            return BuildAgentTaskTranscriptLines(task_id, width);
+        };
+        transcript_hooks.repaint_banner = [this]() { PrintBanner(config, theme); };
+        // ESC 急停(空闲态、composer 空):活 loop 一键全停,定义保留,
+        // 续跑 /loop resume <id>。停了的账落档(FlushLoopEvents)。
+        transcript_hooks.stop_active_loops = [this]() -> int {
+            if (!loop_scheduler_.has_value()) {
+                return 0;
+            }
+            const auto now_ms = [] {
+                return std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::system_clock::now().time_since_epoch())
+                    .count();
+            }();
+            int stopped = 0;
+            for (const auto& view : loop_scheduler_->Snapshot(now_ms)) {
+                if (lubancode::runtime::loop::IsLoopTerminal(view.task.state) ||
+                    view.task.state == lubancode::runtime::loop::LoopTaskState::Paused) {
+                    continue;
+                }
+                if (loop_scheduler_->Stop(view.task.task_id, now_ms, "user_esc").ok) {
+                    ++stopped;
+                }
+            }
+            if (stopped > 0) {
+                FlushLoopEvents();
+            }
+            return stopped;
+        };
+        transcript_hooks.history = [this]() -> const std::vector<lubancode::api::Message>* {
+            return main_agent.has_value() ? &main_agent->History() : nullptr;
+        };
+        transcript_hooks.turn_views = [this]() -> const std::vector<lubancode::runtime::TurnView>* {
+            return &turn_views_;
+        };
+        transcript_ui_.SetHooks(std::move(transcript_hooks));
+    }
     lubancode::cli::SetTranscriptUiHandler(
-        [this](lubancode::cli::UiKeyAction action) -> bool { return HandleTranscriptUi(action); });
+        [this](lubancode::cli::UiKeyAction action) -> bool { return transcript_ui_.HandleKey(action); });
 
     // 0.19.x 提示词模块化:系统提示按会话实际启用的能力条件拼装——
     // skills 有技能才注、mcp/web/lsp 配了才注、平台段按 wire。法(persona)
@@ -1576,7 +1605,7 @@ std::vector<std::string> TerminalSessionController::BuildAgentTaskTranscriptLine
                 const lubancode::cli::TranscriptItem item =
                     lubancode::cli::MakeAgentTaskThinkingItem(next_item_id++, event.text, event.streaming);
                 push_rendered(lubancode::cli::FormatTranscriptItem(item, theme, width,
-                                                                   /*expanded=*/event.streaming && agent_view_expanded_));
+                                                                   /*expanded=*/event.streaming && transcript_ui_.agent_view_expanded()));
                 break;
             }
             case lubancode::tools::AgentTaskEventKind::ToolStart:
@@ -1633,360 +1662,6 @@ std::vector<std::string> TerminalSessionController::BuildAgentTaskTranscriptLine
         }
     }
     return lines;
-}
-
-// 视图切换钩子(空闲路与流式监听共用,见 console_input.hpp):viewed_task_id
-// 变了就铺"此刻该看的会话正文"。tail_rows>0 是实时流的重铺拍(追加需求
-// "查看态实时思考流"):只保头三行(标题/来源/统计)+ 最近 tail 行,长会话
-// 不往滚屏里一秒刷一遍;tail_rows=0(真切会话)仍整份铺。持
-// StdoutWriteMutex——流式期间先擦 footer 再铺、铺完画回;空闲路两步都是
-// 空操作,正文从旧 chrome 之下接着铺。
-//
-// 只打印,不擦旧帧(查看态完成退场花屏单,2026-08-17):旧帧擦账归终端层
-// console_input 的 view_body_top(每次铺帧前现记现擦,绝不跨调用攒绝对行
-// 号)。这里曾经自记一份"绝对行顶/物理行数/视口顶"的帧账、进门先按它擦
-// 一矩形——账被实时流重铺/滚屏/平移弄失准后,这一擦轻则漏擦留残影,重则
-// 擦掉刚铺好的帧、把光标带偏到别处(查看态盯完后台任务、完成退场回 main
-// 那拍整屏空白卡死,即此病)。调用方(空闲 tick/流式监听/Ctrl+O 重铺)都已
-// 先擦净再把光标摆到帧顶,本函数从光标处起铺即可。
-//
-// "卡死"定性(驱动器复现后):不是线程死锁——本函数持 StdoutWriteMutex
-// 后只再拿 AgentTool 的 tasks_mutex_(TaskEvents),全程序锁序恒为
-// StdoutWriteMutex → tasks_mutex_(流式 footer 心跳线程、空闲 tick、监听
-// 线程同序);任务线程的回调在 tasks_mutex_ 作用域内不反向拿输出锁,无
-// ABBA。真机上的"按键无响应"是双重擦账把画面与光标账擦崩:ReadLine 循
-// 环一直活着、键都进了编辑器,但帧没了、chrome 锚点在屏外,回显画在用户
-// 看不见的地方。驱动器第四幕"退场后键入立即回显 + /exit 退出码 0"钉死
-// 这一条。
-void TerminalSessionController::PrintViewedTranscript(int viewed_task_id, int tail_rows) {
-    std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-    lubancode::cli::EraseStreamFooterLocked();
-    const int width = lubancode::cli::DetectConsoleWidth().value_or(80);
-
-    const auto print_line = [&](const std::string& line) { TermOut() << line << "\n"; };
-
-    if (viewed_task_id == 0) {
-        // 回 main:首个可辨标题写明 main(规格"Esc 回 main"五条件),最近
-        // 几条摘要重铺,视口/标题/收件目标一同复位。
-        print_line(theme.stats + tr("agent_panel.main_header") + theme.reset);
-        print_line(theme.stats + tr("agent_panel.back_to_main") + theme.reset);
-        const int width_for_items = width;
-        const std::size_t from = transcript.size() > 5 ? transcript.size() - 5 : 0;
-        for (std::size_t i = from; i < transcript.size(); ++i) {
-            print_line(lubancode::cli::FormatTranscriptItem(
-                transcript[i], theme, width_for_items, /*expanded=*/false,
-                static_cast<int>(i) == focus_index));
-        }
-    } else {
-        std::vector<std::string> body = BuildAgentTaskTranscriptLines(viewed_task_id, width);
-        if (tail_rows > 0 && static_cast<int>(body.size()) > tail_rows) {
-            // 头三行(标题/来源/统计)钉住,其余取最近 tail_rows-3 行:滚屏
-            // 不刷屏,正在长的尾巴永远在视口里。
-            constexpr int kHeadLines = 3;
-            std::vector<std::string> tailed;
-            tailed.reserve(static_cast<std::size_t>(tail_rows));
-            for (int i = 0; i < kHeadLines && i < static_cast<int>(body.size()); ++i) {
-                tailed.push_back(std::move(body[static_cast<std::size_t>(i)]));
-            }
-            const int keep = tail_rows - kHeadLines;
-            for (int i = static_cast<int>(body.size()) - keep; i < static_cast<int>(body.size()); ++i) {
-                if (i >= kHeadLines) {
-                    tailed.push_back(std::move(body[static_cast<std::size_t>(i)]));
-                }
-            }
-            body = std::move(tailed);
-        }
-        for (const auto& line : body) {
-            print_line(line);
-        }
-    }
-    TermOut().flush();
-    lubancode::cli::RedrawStreamFooterLocked();
-}
-
-// 聚焦查看返回时的"简化重画":最近几条紧凑摘要(焦点标记照带)。
-void TerminalSessionController::PrintRecentItems(std::size_t count) {
-    const int width = lubancode::cli::DetectConsoleWidth().value_or(80);
-    const std::size_t from = transcript.size() > count ? transcript.size() - count : 0;
-    for (std::size_t i = from; i < transcript.size(); ++i) {
-        TermOut() << lubancode::cli::FormatTranscriptItem(transcript[i], theme, width, /*expanded=*/false,
-                                                           static_cast<int>(i) == focus_index);
-    }
-}
-
-bool TerminalSessionController::HandleTranscriptUi(lubancode::cli::UiKeyAction action) {
-    namespace cli = lubancode::cli;
-    const int width = cli::DetectConsoleWidth().value_or(80);
-    const int count = static_cast<int>(transcript.size());
-    switch (action) {
-        case cli::UiKeyAction::ToggleExpand: {
-            // 子代理查看态的 Ctrl+O(追加需求"查看态实时思考流"):展开/收起
-            // 查看帧里流式的思考/正文尾巴,与 main 流式思考同款折叠规矩——
-            // 展开档铺"思考中 · N 字"的正文(约一屏,超了截断收口),紧凑
-            // 档只留头行。main 聚焦查看不受影响。
-            const int viewed_task = cli::CurrentAgentViewedTaskId();
-            if (viewed_task != 0) {
-                agent_view_expanded_ = !agent_view_expanded_;
-                TermOut() << "\n"
-                          << theme.stats
-                          << (agent_view_expanded_ ? tr("ui.expanded") : tr("ui.compact")) << theme.reset << "\n";
-                PrintViewedTranscript(viewed_task, /*tail_rows=*/0);
-                return true;
-            }
-            // Ctrl+O:展开/收起最近一条(Claude Code 风格),不再全局全展开。
-            // expanded_index 落在最近一条,FormatTranscriptItems 只展开它。
-            focus_view_active = false;
-            if (count == 0) {
-                expand_latest = false;
-                TermOut() << "\n" << theme.stats << tr("ui.no_items") << theme.reset << "\n";
-                return true;
-            }
-            expand_latest = !expand_latest;
-            TermOut() << "\n" << theme.stats << (expand_latest ? tr("ui.expanded") : tr("ui.compact"))
-                      << theme.reset << "\n";
-            TermOut() << cli::FormatTranscriptItems(transcript, theme, width, transcript_expanded, focus_index,
-                                                    expand_latest ? count - 1 : -1);
-            return true;
-        }
-        case cli::UiKeyAction::FocusOlder:
-        case cli::UiKeyAction::FocusNewer: {
-            if (count == 0) {
-                return false;  // 没条目,键还回去(本来也无事发生)
-            }
-            if (focus_index < 0) {
-                focus_index = count - 1;  // 起手落在最近一条
-            } else if (action == cli::UiKeyAction::FocusOlder) {
-                if (focus_index > 0) {
-                    --focus_index;  // 到最老一条停住
-                }
-            } else if (focus_index + 1 < count) {
-                ++focus_index;  // 到最新一条停住
-            }
-            TermOut() << "\n" << theme.stats << trf("ui.focus", focus_index + 1, count) << theme.reset << "\n";
-            TermOut() << cli::FormatTranscriptItem(transcript[static_cast<std::size_t>(focus_index)], theme,
-                                                    width, /*expanded=*/false, /*focused=*/true);
-            return true;
-        }
-        case cli::UiKeyAction::FocusView: {
-            if (focus_view_active) {
-                // 再按 Ctrl+E:返回。简化重画:横幅 + 最近几条摘要,
-                // 聚焦画面留在滚动历史里。
-                focus_view_active = false;
-                TermOut() << "\n" << theme.stats << tr("ui.back") << theme.reset << "\n";
-                PrintBanner(config, theme);
-                PrintRecentItems(5);
-                return true;
-            }
-            if (count == 0) {
-                return false;
-            }
-            const int idx = focus_index >= 0 ? focus_index : count - 1;
-            focus_view_active = true;
-            TermOut() << "\n" << theme.banner << trf("ui.focus_view", idx + 1, count) << theme.reset << "\n";
-            // width=0:标题 + 完整参数 + full_output 全文如实铺,不截宽,
-            // 超长靠终端自然折行/滚动(不真清屏——conhost 的滚回缓冲跟
-            // 屏幕缓冲是同一块,真清会把历史一并抹掉,取舍见报告)。
-            TermOut() << cli::FormatTranscriptItem(transcript[static_cast<std::size_t>(idx)], theme,
-                                                    /*width=*/0, /*expanded=*/true);
-            return true;
-        }
-        case cli::UiKeyAction::Escape: {
-            if (focus_view_active) {
-                focus_view_active = false;
-                TermOut() << "\n" << theme.stats << tr("ui.back") << theme.reset << "\n";
-                PrintBanner(config, theme);
-                PrintRecentItems(5);
-                return true;
-            }
-            // loop 单遗留:空闲态停 loop 键位。聚焦查看态之外,ESC 的老
-            // 语义是"清空输入"。这里加一档:composer 空(没在敲字)且有
-            // 活 loop(非终态非 Paused 的任务在排)时,ESC 停全部活 loop
-            // ——"背景会自己动"的东西得有一枚一键急停(与状态栏恒亮段
-            // 配套)。composer 有字(或 stash 有货)照旧还给编辑器,半敲
-            // 的话不吞。
-            if (!lubancode::cli::ComposerStashHasContent() && loop_scheduler_.has_value()) {
-                const auto now_ms = [] {
-                    return std::chrono::duration_cast<std::chrono::milliseconds>(
-                               std::chrono::system_clock::now().time_since_epoch())
-                        .count();
-                }();
-                int stopped = 0;
-                for (const auto& view : loop_scheduler_->Snapshot(now_ms)) {
-                    if (lubancode::runtime::loop::IsLoopTerminal(view.task.state) ||
-                        view.task.state == lubancode::runtime::loop::LoopTaskState::Paused) {
-                        continue;
-                    }
-                    if (loop_scheduler_->Stop(view.task.task_id, now_ms, "user_esc").ok) {
-                        ++stopped;
-                    }
-                }
-                if (stopped > 0) {
-                    FlushLoopEvents();
-                    TermOut() << theme.stats
-                              << "已停 " << stopped
-                              << " 只 loop 任务(ESC;定义保留,续跑 /loop resume <id>)。" << theme.reset
-                              << "\n";
-                    return true;
-                }
-            }
-            return false;  // 没有活 loop:ESC 还给编辑器,老语义不动
-        }
-        case cli::UiKeyAction::RepaintScreen: {
-            // Ctrl+L:终端层已清可视区、作废帧锚点;这里重铺会话画面(session
-            // header 一份 + 最近轮次),底栏由终端层随后画回。replace screen
-            // ——可视区已清,不往 scrollback 叠第二份 banner。
-            // 有 TurnView 存档时优先走同一颗 TerminalTurnRenderer(与实时
-            // 画面同源,除 Running 动态外终态文本一致);没有(老轮次/纯
-            // slash)退回 transcript 快照。
-            PrintBanner(config, theme);
-            if (!turn_views_.empty()) {
-                const int repaint_width = cli::DetectConsoleWidth().value_or(80);
-                cli::TurnRenderOptions render_options;
-                render_options.width = repaint_width;
-                render_options.plain = theme.reset.empty();
-                render_options.expanded = transcript_expanded;
-                // 轮界横线(用户输入背景块单):从第二轮起,用户块之前画
-                // 一道克制横线把 turn 分开——"上面有没有前一轮"是这里的账
-                // (多轮循环),renderer 只照 leading_turn_divider 办事。
-                bool first_turn = true;
-                for (const runtime::TurnView& turn_view : turn_views_) {
-                    render_options.leading_turn_divider = !first_turn;
-                    first_turn = false;
-                    const std::vector<std::string> lines = cli::RenderTurnView(turn_view, theme, render_options);
-                    for (const std::string& line : lines) {
-                        TermOut() << line << "\n";
-                    }
-                }
-            } else {
-                PrintRecentItems(count > 0 ? 10 : 0);
-            }
-            return true;
-        }
-        case cli::UiKeyAction::PrevUserTurn:
-        case cli::UiKeyAction::NextUserTurn: {
-            // { / }:在用户提问(轮次)之间走。轮次从活 history 数(非 slash
-            // 的用户消息),屏幕上给选中轮的正文摘要,状态行写"第 N/M 轮"。
-            std::vector<std::size_t> turn_indexes;
-            for (std::size_t i = 0; i < main_agent->History().size(); ++i) {
-                const auto& message = main_agent->History()[i];
-                if (message.role != lubancode::api::Role::User || message.content.empty()) {
-                    continue;
-                }
-                const auto* text = std::get_if<lubancode::api::TextBlock>(&message.content.front());
-                if (text == nullptr || text->text.empty() || text->text.front() == '/') {
-                    continue;
-                }
-                bool has_tool_result = false;
-                for (const auto& block : message.content) {
-                    if (std::holds_alternative<lubancode::api::ToolResultBlock>(block)) {
-                        has_tool_result = true;
-                        break;
-                    }
-                }
-                if (!has_tool_result) {
-                    turn_indexes.push_back(i);
-                }
-            }
-            if (turn_indexes.empty()) {
-                return false;
-            }
-            const bool older = action == cli::UiKeyAction::PrevUserTurn;
-            if (nav_turn_index_ < 0) {
-                nav_turn_index_ = static_cast<int>(turn_indexes.size()) - 1;  // 起手最近一轮
-            } else if (older && nav_turn_index_ > 0) {
-                --nav_turn_index_;
-            } else if (!older && nav_turn_index_ + 1 < static_cast<int>(turn_indexes.size())) {
-                ++nav_turn_index_;
-            }
-            const std::size_t turn = turn_indexes[static_cast<std::size_t>(nav_turn_index_)];
-            const auto& message = main_agent->History()[turn];
-            const auto* text = std::get_if<lubancode::api::TextBlock>(&message.content.front());
-            TermOut() << "\n"
-                      << theme.stats
-                      << trf("ui.turn_nav", nav_turn_index_ + 1, turn_indexes.size()) << theme.reset << "\n";
-            if (text != nullptr) {
-                const std::string clipped = text->text.substr(0, 400);
-                TermOut() << theme.stats << clipped << (text->text.size() > 400 ? "…" : "")
-                          << theme.reset << "\n";
-            }
-            return true;
-        }
-        case cli::UiKeyAction::ToScrollback: {
-            // [:完整转录写进终端 scrollback——用终端自带搜索找路。条目按
-            // 当前展开档铺,压缩点/截断在 FormatTranscriptItems 里自带标注;
-            // 这只是查看,不改活 history(正式存档走 /export)。
-            if (count == 0) {
-                return false;
-            }
-            TermOut() << "\n"
-                      << theme.stats << tr("ui.to_scrollback") << theme.reset << "\n";
-            TermOut() << cli::FormatTranscriptItems(transcript, theme, width, transcript_expanded);
-            TermOut().flush();
-            return true;
-        }
-        case cli::UiKeyAction::ViewInEditor: {
-            // v:转录写临时 Markdown,交 $VISUAL/$EDITOR 只读查看。看完回来
-            // composer 与光标原样(终端层已收帧重画)。
-            std::string markdown;
-            for (const auto& message : main_agent->History()) {
-                const char* role_word =
-                    message.role == lubancode::api::Role::User ? "## 用户" : "## 助手";
-                markdown += role_word;
-                markdown += "\n\n";
-                for (const auto& block : message.content) {
-                    if (const auto* text = std::get_if<lubancode::api::TextBlock>(&block)) {
-                        markdown += text->text + "\n\n";
-                    } else if (const auto* use = std::get_if<lubancode::api::ToolUseBlock>(&block)) {
-                        markdown += "> 工具调用: " + use->name + "\n\n";
-                    } else if (const auto* result = std::get_if<lubancode::api::ToolResultBlock>(&block)) {
-                        markdown += "> 工具结果: " +
-                                    result->content.substr(0, 2000) +
-                                    (result->content.size() > 2000 ? "…(截断)" : "") + "\n\n";
-                    }
-                }
-            }
-            if (markdown.empty()) {
-                return false;
-            }
-            std::string editor_cmd;
-            if (const auto visual = lubancode::platform::GetEnvVar("VISUAL");
-                visual.has_value() && !visual->empty()) {
-                editor_cmd = *visual;
-            } else if (const auto ed = lubancode::platform::GetEnvVar("EDITOR");
-                       ed.has_value() && !ed->empty()) {
-                editor_cmd = *ed;
-            } else {
-#ifdef _WIN32
-                editor_cmd = "notepad";
-#else
-                editor_cmd = "vi";
-#endif
-            }
-            std::filesystem::path file;
-            try {
-                file = std::filesystem::temp_directory_path() /
-                       ("lubancode-transcript-" +
-                        std::to_string(lubancode::platform::CurrentProcessId()) + ".md");
-            } catch (const std::exception&) {
-                TermOut() << theme.error << tr("editor.no_temp") << theme.reset << "\n";
-                return true;
-            }
-            {
-                std::ofstream out(file, std::ios::binary | std::ios::trunc);
-                if (!out) {
-                    TermOut() << theme.error << tr("editor.write_failed") << theme.reset << "\n";
-                    return true;
-                }
-                out << markdown;
-            }
-            TermOut() << theme.stats << trf("ui.view_in_editor", editor_cmd) << theme.reset << "\n";
-            TermOut().flush();
-            (void)lubancode::platform::RunInteractiveCommand(editor_cmd + " \"" +
-                                                             lubancode::tools::PathToUtf8(file) + "\"");
-            return true;
-        }
-    }
-    return false;
 }
 
 lubancode::tools::DetachedAgentBackend TerminalSessionController::BuildDetachedBackend() const {
@@ -2272,7 +1947,7 @@ void TerminalSessionController::RunPeerTurn(const std::string& text, bool silent
     if (peer_started) {
         peer_runtime->SetStatus("busy");
     }
-    focus_view_active = false;
+    transcript_ui_.ExitFocusView();
     std::string turn_suffix =
         project_memory != nullptr
             ? project_memory->BuildTurnContext(text, std::filesystem::current_path(), origin)
@@ -2306,9 +1981,9 @@ void TerminalSessionController::RunPeerTurn(const std::string& text, bool silent
         turn.registry = &registry();
         turn.hook_dispatcher = lubancode::app::HookRuntime();
         turn.is_console = spinner_enabled;
-        turn.transcript = &transcript;
+        turn.transcript = &transcript_ui_.items();
         turn.todo_state = todo_state();
-        turn.transcript_expanded = &transcript_expanded;
+        turn.transcript_expanded = transcript_ui_.expanded_flag();
         turn.allow_commands = settings_local.allow_commands;
         turn.deny_commands = settings_local.deny_commands;
         turn.completion_agent = session_agent_tool();
@@ -5160,7 +4835,7 @@ CommandFlow TerminalSessionController::RunUserTurn(const std::string& content, b
     // 人在聚焦查看画面里直接敲了正文发送:视为离开聚焦态(新一轮输出
     // 马上往下铺,聚焦画面已经不是"当前画面"了),下次 Ctrl+E 是重新
     // 聚焦,不是"返回"。
-    focus_view_active = false;
+    transcript_ui_.ExitFocusView();
     // @ 提及校验(0.30.x 第三批):目标消失/越出项目根,明报错拦下这轮;
     // 活着的提及附账进 turn context(不进永久 history)。
     const auto [mention_error, mention_ledger] = BuildMentionLedger(content);
@@ -5218,9 +4893,9 @@ CommandFlow TerminalSessionController::RunUserTurn(const std::string& content, b
     turn.registry = &registry();
     turn.hook_dispatcher = lubancode::app::HookRuntime();
     turn.is_console = spinner_enabled;
-    turn.transcript = &transcript;
+    turn.transcript = &transcript_ui_.items();
     turn.todo_state = todo_state();
-    turn.transcript_expanded = &transcript_expanded;
+    turn.transcript_expanded = transcript_ui_.expanded_flag();
     turn.allow_commands = settings_local.allow_commands;
     turn.deny_commands = settings_local.deny_commands;
     turn.completion_agent = session_agent_tool();
@@ -6601,6 +6276,7 @@ void TerminalSessionController::Run() {
             // 采证之前,checkpoint 引用得着。
             NoteSubagentCompletionForGoal();
             {
+                auto& transcript = transcript_ui_.items();
                 lubancode::cli::TranscriptItem item = lubancode::cli::MakeNoticeItem(
                     static_cast<int>(transcript.size()) + 1, tr("agent_panel.completion_notice"),
                     lubancode::cli::TranscriptStatus::Ok, notices);

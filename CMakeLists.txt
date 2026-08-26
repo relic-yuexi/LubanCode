@@ -555,6 +555,8 @@ add_library(lubancode_core STATIC
   src/cli/terminal_frame.cpp
   # 终端接线收尾单:输出端口(stdout/stderr 的唯一改道口,进程级一只)。
   src/cli/terminal_port.cpp
+  # 终端接线收尾单:transcript 控制器(导航/查看态/条目账,自大类搬出)。
+  src/cli/transcript_controller.cpp
   src/cli/context_tracker.cpp
   src/cli/divider.cpp
   src/cli/format_utils.cpp
