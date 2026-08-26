@@ -689,4 +689,90 @@ int CountUtf8Codepoints(const std::string& text) {
     return count;
 }
 
+// ---- 条目工厂(终端接线收尾单):实现与原先各处手工拼的代码逐字对齐,
+// 行为零变——只是把"怎么拼"收进一处。 -------------------------------
+
+TranscriptItem MakeNoticeItem(int id, const std::string& title, TranscriptStatus status,
+                              std::vector<std::string> summary_lines) {
+    TranscriptItem item;
+    item.id = id;
+    item.kind = TranscriptKind::Tool;
+    item.tool_name = "agent_notice";
+    item.title = title;
+    item.status = status;
+    item.start_time = item.end_time = std::chrono::steady_clock::now();
+    item.summary_lines = std::move(summary_lines);
+    return item;
+}
+
+TranscriptItem MakeAssistantArchiveItem(int id, std::string body, TranscriptStatus status) {
+    TranscriptItem item;
+    item.id = id;
+    item.kind = TranscriptKind::Tool;
+    item.tool_name = "assistant";
+    item.title = tr("transcript.assistant_bg_title");
+    item.status = status;
+    item.start_time = item.end_time = std::chrono::steady_clock::now();
+    // 紧凑档摘要:正文头两行,每行掐 120 码点——渲染层还会按终端宽截,
+    // 这里先兜住 Ctrl+E(不截宽)那一路。
+    std::size_t cursor = 0;
+    for (int taken = 0; taken < 2 && cursor < body.size(); ++taken) {
+        std::size_t cut = body.find('\n', cursor);
+        const std::string line =
+            body.substr(cursor, cut == std::string::npos ? std::string::npos : cut - cursor);
+        if (!line.empty()) {
+            item.summary_lines.push_back(TruncateUtf8Codepoints(line, 120));
+        }
+        if (cut == std::string::npos) {
+            break;
+        }
+        cursor = cut + 1;
+    }
+    item.full_output = std::move(body);
+    return item;
+}
+
+TranscriptItem MakeAgentTaskToolItem(int id, const std::string& tool_name, const std::string& input_json,
+                                     bool done, bool is_error, const std::string& result) {
+    TranscriptItem item;
+    item.id = id;
+    item.kind = TranscriptKind::SubTool;
+    item.tool_name = tool_name;
+    item.input_json = input_json;
+    nlohmann::json parsed;
+    try {
+        parsed = nlohmann::json::parse(input_json);
+    } catch (...) {
+    }
+    item.title = BuildToolTitle(tool_name, parsed);
+    if (done) {
+        item.status = is_error ? TranscriptStatus::Error : TranscriptStatus::Ok;
+        item.full_output = result;
+        item.end_time = std::chrono::steady_clock::now();
+    } else {
+        item.status = TranscriptStatus::Running;  // 还在跑
+    }
+    item.start_time = std::chrono::steady_clock::now();
+    return item;
+}
+
+TranscriptItem MakeAgentTaskThinkingItem(int id, const std::string& text, bool streaming) {
+    TranscriptItem item;
+    item.id = id;
+    item.kind = TranscriptKind::Thinking;
+    item.tool_name = "thinking";
+    item.full_output = text;
+    if (streaming) {
+        // 流式思考尾巴:与 main 流式思考同款折叠规矩——Running 条目,头行
+        // 「思考中 · N 字」随重铺拍跳动;Ctrl+O 展开看长文。
+        item.status = TranscriptStatus::Running;
+        item.title = trf("agent_activity.thinking", CountUtf8Codepoints(text));
+    } else {
+        item.status = TranscriptStatus::Ok;
+        item.title = tr("agent_panel.event_thinking");
+    }
+    item.start_time = std::chrono::steady_clock::now();
+    return item;
+}
+
 }  // namespace lubancode::cli

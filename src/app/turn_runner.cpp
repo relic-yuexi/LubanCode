@@ -22,6 +22,7 @@
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
+#include "cli/terminal_port.hpp"
 #include "platform/console.hpp"
 #include "ptc/ptc_tool.hpp"
 #include "runtime/plugin_tool.hpp"
@@ -34,6 +35,11 @@
 #include "tools/lua_tool.hpp"
 
 namespace lubancode::app {
+
+// 终端接线收尾单:本文件的 stdout/stderr 写全走输出端口(TermOut/
+// TermErr),散打清零——改道与锁规矩见 cli/terminal_port.hpp。
+using lubancode::cli::TermOut;
+using lubancode::cli::TermErr;
 
 // M11(0.10.0):输入/输出分界线。用户回车提交、模型真要开始作答那一刻打
 // 一条,回合结束的统计行之后再打一条,把一问一答从视觉上框出来——纯粹
@@ -56,8 +62,8 @@ void PrintDivider(const lubancode::cli::Theme& theme, bool is_console) {
     if (line.empty()) {
         return;
     }
-    std::cout << theme.stats << line << theme.reset << "\n";
-    std::cout.flush();
+    TermOut() << theme.stats << line << theme.reset << "\n";
+    TermOut().flush();
 }
 
 // turn 尾分界线(终端回合视觉收束单):"──── Worked for 6m 41s ────"。
@@ -85,11 +91,11 @@ void PrintTurnFooter(const lubancode::cli::Theme& theme, bool is_console, std::i
              gap < lubancode::cli::GapBetween(lubancode::cli::BlockRole::AssistantText,
                                                lubancode::cli::BlockRole::TurnFooter);
              ++gap) {
-            std::cout << "\n";
+            TermOut() << "\n";
         }
     }
-    std::cout << theme.stats << line << theme.reset << "\n";
-    std::cout.flush();
+    TermOut() << theme.stats << line << theme.reset << "\n";
+    TermOut().flush();
 }
 
 // 鲁班图标:启动、/clear 后各打一次,纯装饰,不承载信息(信息在紧跟着的
@@ -111,10 +117,10 @@ void PrintFirstLines(const std::string& text, int max_lines) {
     }
     const int total = static_cast<int>(lines.size());
     for (int i = 0; i < total && i < max_lines; ++i) {
-        std::cout << "      " << lines[static_cast<std::size_t>(i)] << "\n";
+        TermOut() << "      " << lines[static_cast<std::size_t>(i)] << "\n";
     }
     if (total > max_lines) {
-        std::cout << trf("confirm.detail.omitted", total) << "\n";
+        TermOut() << trf("confirm.detail.omitted", total) << "\n";
     }
 }
 
@@ -125,38 +131,38 @@ void PrintConfirmDetails(const std::string& name, const nlohmann::json& input) {
     if (name == "write_file") {
         const std::string path = input.value("path", std::string());
         const std::string content = input.value("content", std::string());
-        std::cout << trf("confirm.detail.path", path) << "\n";
-        std::cout << trf("confirm.detail.content", content.size()) << "\n";
+        TermOut() << trf("confirm.detail.path", path) << "\n";
+        TermOut() << trf("confirm.detail.content", content.size()) << "\n";
         PrintFirstLines(content, 5);
     } else if (name == "edit_file") {
         const std::string path = input.value("path", std::string());
         const std::string old_s = input.value("old_string", std::string());
         const std::string new_s = input.value("new_string", std::string());
         const bool replace_all = input.value("replace_all", false);
-        std::cout << trf("confirm.detail.path", path) << (replace_all ? tr("confirm.detail.replace_all") : "")
+        TermOut() << trf("confirm.detail.path", path) << (replace_all ? tr("confirm.detail.replace_all") : "")
                   << "\n";
-        std::cout << tr("confirm.detail.old") << "\n";
+        TermOut() << tr("confirm.detail.old") << "\n";
         PrintFirstLines(old_s, 3);
-        std::cout << tr("confirm.detail.new") << "\n";
+        TermOut() << tr("confirm.detail.new") << "\n";
         PrintFirstLines(new_s, 3);
     } else if (name == "run_command") {
         const std::string command = input.value("command", std::string());
         const std::string shell = input.value("shell", std::string("powershell"));
-        std::cout << trf("confirm.detail.command", shell, command) << "\n";
+        TermOut() << trf("confirm.detail.command", shell, command) << "\n";
         // 进程生命线单 P2:确认框至少展示 shell、cwd 与完整命令——用户
         // 确认的是"在哪跑什么",不是只看半张票。cwd 不填时也明示
         //(当前会话目录),别让人误以为进了别处。
         const std::string cwd = input.value("cwd", std::string());
         if (!cwd.empty()) {
-            std::cout << trf("confirm.detail.workdir", cwd) << "\n";
+            TermOut() << trf("confirm.detail.workdir", cwd) << "\n";
         }
         if (input.value("run_in_background", false)) {
-            std::cout << tr("confirm.detail.background") << "\n";
+            TermOut() << tr("confirm.detail.background") << "\n";
         }
     } else {
-        std::cout << trf("confirm.detail.args", input.dump()) << "\n";
+        TermOut() << trf("confirm.detail.args", input.dump()) << "\n";
     }
-    std::cout.flush();
+    TermOut().flush();
 }
 
 std::string TrimAscii(std::string value) {
@@ -178,22 +184,22 @@ std::expected<std::vector<std::string>, std::string> PromptAskUser(
                                   lubancode::platform::ProbeStdoutConsole().is_console;
     {
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-        std::cout << "\n";
+        TermOut() << "\n";
         if (!question.header.empty()) {
-            std::cout << theme.banner << question.header << theme.reset << "\n";
+            TermOut() << theme.banner << question.header << theme.reset << "\n";
         }
-        std::cout << question.question << "\n";
+        TermOut() << question.question << "\n";
         if (!interactive_menu) {
             for (std::size_t i = 0; i < question.options.size(); ++i) {
-                std::cout << "  " << (i + 1) << ". " << question.options[i].label;
+                TermOut() << "  " << (i + 1) << ". " << question.options[i].label;
                 if (!question.options[i].description.empty()) {
-                    std::cout << theme.stats << " - " << question.options[i].description << theme.reset;
+                    TermOut() << theme.stats << " - " << question.options[i].description << theme.reset;
                 }
-                std::cout << "\n";
+                TermOut() << "\n";
             }
-            std::cout << "  " << (question.options.size() + 1) << ". " << tr("ask_user.other") << "\n";
+            TermOut() << "  " << (question.options.size() + 1) << ". " << tr("ask_user.other") << "\n";
         }
-        std::cout.flush();
+        TermOut().flush();
     }
 
     std::vector<std::size_t> indexes;
@@ -261,7 +267,7 @@ std::expected<std::vector<std::string>, std::string> PromptAskUser(
                 break;
             }
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-            std::cout << theme.error << tr("ask_user.invalid") << theme.reset << "\n";
+            TermOut() << theme.error << tr("ask_user.invalid") << theme.reset << "\n";
         }
     }
 
@@ -284,7 +290,7 @@ std::expected<std::vector<std::string>, std::string> PromptAskUser(
                 break;
             }
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-            std::cout << theme.error << tr("ask_user.custom_empty") << theme.reset << "\n";
+            TermOut() << theme.error << tr("ask_user.custom_empty") << theme.reset << "\n";
         }
     }
     if (inline_custom_answer.has_value() && !inline_custom_answer->empty()) {
@@ -293,11 +299,11 @@ std::expected<std::vector<std::string>, std::string> PromptAskUser(
 
     {
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-        std::cout << theme.stats << tr("ask_user.recorded") << theme.reset;
+        TermOut() << theme.stats << tr("ask_user.recorded") << theme.reset;
         for (std::size_t i = 0; i < answers.size(); ++i) {
-            std::cout << (i == 0 ? " " : ", ") << answers[i];
+            TermOut() << (i == 0 ? " " : ", ") << answers[i];
         }
-        std::cout << "\n";
+        TermOut() << "\n";
     }
     return answers;
 }
@@ -411,7 +417,7 @@ bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
             lubancode::runtime::EmitPermissionRequest(hook_dispatcher, name, input);
         if (hook.reply == lubancode::runtime::PermissionHookReply::Deny) {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-            std::cout << theme.error << "[hook] PermissionRequest 钩子拒绝执行 " << name << ": " << hook.reason
+            TermOut() << theme.error << "[hook] PermissionRequest 钩子拒绝执行 " << name << ": " << hook.reason
                       << theme.reset << "\n";
             return false;
         }
@@ -530,15 +536,15 @@ bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
             const auto written = lubancode::config::AddAllowedToolToSettingsLocal(cwd, name);
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
             if (written.has_value()) {
-                std::cout << trf("settings.local.persisted", name) << "\n";
+                TermOut() << trf("settings.local.persisted", name) << "\n";
                 // 首次落地 settings.local.json 时,顺带保证 .gitignore 挡住它
                 // (追加了/已挡住/教用户手动加,都是一行反馈;空串 = 无需打)。
                 const std::string gi = lubancode::config::EnsureGitignoreCoversSettingsLocal(cwd);
                 if (!gi.empty()) {
-                    std::cout << gi << "\n";
+                    TermOut() << gi << "\n";
                 }
             } else {
-                std::cout << trf("settings.local.persist_failed", written.error()) << "\n";
+                TermOut() << trf("settings.local.persist_failed", written.error()) << "\n";
             }
         }
     }
@@ -635,7 +641,7 @@ lubancode::agent::Callbacks BuildCallbacks(TurnContext& ctx, TurnWiring wiring) 
         };
     }
 
-    // M10:流式期间的 std::cout 写要拿 StdoutWriteMutex 跟监听线程错开——
+    // M10:流式期间的 TermOut() 写要拿 StdoutWriteMutex 跟监听线程错开——
     // 这条规矩没变,只是打印挪进了 StreamBodyTracker::OnDelta(锁在它里面
     // 拿):正文照旧逐字原样打,顺带给回合收束后的 markdown 重画记账;
     // 管道模式/plain 主题下 tracker 不启用,OnDelta 就是原来那三行。
@@ -1035,13 +1041,13 @@ RunTurnResult RunTurn(TurnContext ctx) {
 
     auto prepared_input = lubancode::cli::PrepareImageInput(user_input);
     if (!prepared_input.has_value()) {
-        std::cerr << theme.error << tr("error.prefix") << ImageInputErrorText(prepared_input.error())
+        TermErr() << theme.error << tr("error.prefix") << ImageInputErrorText(prepared_input.error())
                   << theme.reset << "\n";
         return RunTurnResult{1};
     }
     for (const auto& image : prepared_input->attachments) {
         if (!silent) {
-            std::cout << theme.stats << trf("image.attached", image.filename, image.width, image.height)
+            TermOut() << theme.stats << trf("image.attached", image.filename, image.width, image.height)
                       << theme.reset << "\n";
         }
     }
@@ -1056,7 +1062,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
     const lubancode::runtime::PromptGate gate = lubancode::runtime::ApplyUserPromptSubmit(
         hook_dispatcher, user_input, background_results, prepared_input->message);
     if (gate.blocked) {
-        std::cerr << theme.error << tr("error.prefix") << "UserPromptSubmit 钩子阻断本轮: " << gate.block_reason
+        TermErr() << theme.error << tr("error.prefix") << "UserPromptSubmit 钩子阻断本轮: " << gate.block_reason
                   << theme.reset << "\n";
         return RunTurnResult{0};
     }
@@ -1068,9 +1074,9 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // stderr(静默档也要让人看见降级),信息行只在非静默档打。
     for (const std::string& notice : lubancode::app::AdoptBackgroundHookRecordNotices()) {
         if (!silent) {
-            std::cout << theme.stats << "[hooks] " << notice << theme.reset << "\n";
+            TermOut() << theme.stats << "[hooks] " << notice << theme.reset << "\n";
         } else {
-            std::cerr << "[hooks] " << notice << "\n";
+            TermErr() << "[hooks] " << notice << "\n";
         }
     }
 
@@ -1190,9 +1196,9 @@ RunTurnResult RunTurn(TurnContext ctx) {
              g < lubancode::cli::GapBetween(lubancode::cli::BlockRole::UserPrompt,
                                             lubancode::cli::BlockRole::Thinking);
              ++g) {
-            std::cout << "\n";
+            TermOut() << "\n";
         }
-        std::cout.flush();
+        TermOut().flush();
     }
 
     // turn 墙钟(终端回合视觉收束单):起点是"用户输入过了本地校验、正式
@@ -1278,11 +1284,11 @@ RunTurnResult RunTurn(TurnContext ctx) {
                         ++frame;
                     }
                 } catch (const std::exception& e) {
-                    std::fprintf(stderr, "\n[footer-heartbeat] %s\n", e.what());
-                    std::fflush(stderr);
+                    TermErr() << "\n[footer-heartbeat] " << e.what() << "\n";
+                    TermErr().flush();
                 } catch (...) {
-                    std::fprintf(stderr, "\n[footer-heartbeat] unknown exception\n");
-                    std::fflush(stderr);
+                    TermErr() << "\n[footer-heartbeat] unknown exception\n";
+                    TermErr().flush();
                 }
             });
         }
@@ -1372,43 +1378,22 @@ RunTurnResult RunTurn(TurnContext ctx) {
 
     // 静默档收尾:正文一个字都没上过屏,但一个字也不能丢——整段归档成一条
     // transcript 条目(工具条目与思考块本来就进了台账),回 main 重铺/Ctrl+E
-    // 聚焦查看全都能看见。打断/报错的半截话照归,状态如实标。
+    // 聚焦查看全都能看见。打断/报错的半截话照归,状态如实标。拼条目的活
+    // 交公共工厂(cli::MakeAssistantArchiveItem:头两行 120 码点折摘要)。
     if (silent) {
         std::string silent_body = body_tracker.TakeSilentBody();
         if (!silent_body.empty()) {
-            lubancode::cli::TranscriptItem item;
-            item.id = static_cast<int>(transcript.size()) + 1;
-            item.kind = lubancode::cli::TranscriptKind::Tool;
-            item.tool_name = "assistant";
-            item.title = tr("transcript.assistant_bg_title");
-            item.status = !result.has_value() ? lubancode::cli::TranscriptStatus::Error
-                          : result->cancelled ? lubancode::cli::TranscriptStatus::Interrupted
-                                              : lubancode::cli::TranscriptStatus::Ok;
-            item.start_time = item.end_time = std::chrono::steady_clock::now();
-            item.full_output = std::move(silent_body);
-            // 紧凑档摘要:正文头两行,每行掐 120 码点——渲染层还会按终端宽
-            // 截,这里先兜住 Ctrl+E(不截宽)那一路。
-            std::size_t cursor = 0;
-            for (int taken = 0; taken < 2 && cursor < item.full_output.size(); ++taken) {
-                std::size_t cut = item.full_output.find('\n', cursor);
-                const std::string line = item.full_output.substr(cursor, cut == std::string::npos
-                                                                            ? std::string::npos
-                                                                            : cut - cursor);
-                if (!line.empty()) {
-                    item.summary_lines.push_back(
-                        lubancode::cli::TruncateUtf8Codepoints(line, 120));
-                }
-                if (cut == std::string::npos) {
-                    break;
-                }
-                cursor = cut + 1;
-            }
-            transcript.push_back(std::move(item));
+            transcript.push_back(lubancode::cli::MakeAssistantArchiveItem(
+                static_cast<int>(transcript.size()) + 1, std::move(silent_body),
+                !result.has_value()
+                    ? lubancode::cli::TranscriptStatus::Error
+                    : result->cancelled ? lubancode::cli::TranscriptStatus::Interrupted
+                                        : lubancode::cli::TranscriptStatus::Ok));
         }
     }
 
     if (!silent) {
-        std::cout << "\n";
+        TermOut() << "\n";
     }
 
     // turn 收口的共用半段(终端回合视觉收束单):熄活动条、算墙钟、收
@@ -1460,10 +1445,10 @@ RunTurnResult RunTurn(TurnContext ctx) {
         // 无缓冲但 Windows 终端重定向下未必);行前垫换行,别粘在残留帧上。
         {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-            std::cerr << "\n"
+            TermErr() << "\n"
                       << theme.error << tr("error.prefix") << result.error() << theme.reset << "\n";
-            std::cerr.flush();
-            std::cout.flush();
+            TermErr().flush();
+            TermOut().flush();
         }
         out.status = 1;
         finish_turn_chrome(lubancode::cli::TurnFooterTone::Failed);  // Failed after Xs
@@ -1473,7 +1458,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
         // 主循环的步数硬闸(0.30.x 起从"报错"改为"预算耗尽"):loop 把它当
         // RunOutcome 而不是 error 交回来,这里按老口径打一行、记 status,不
         // 影响子代理那边按 budget_exhausted 收账带走部分结果。
-        std::cerr << theme.error << tr("error.prefix")
+        TermErr() << theme.error << tr("error.prefix")
                   << trf("error.step_limit", result->steps_used) << theme.reset << "\n";
         out.status = 1;
         finish_turn_chrome(lubancode::cli::TurnFooterTone::Failed);  // 预算耗尽也是 Failed
@@ -1491,33 +1476,33 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // "未拆账"说,不猜 0。
     if (result->length_empty_output) {
         const std::int64_t reasoning_total = usage_stats.reasoning_tokens();
-        std::cout << theme.error << trf("agent_outcome.output_budget.head", result->output_budget.continuations_used)
+        TermOut() << theme.error << trf("agent_outcome.output_budget.head", result->output_budget.continuations_used)
                   << theme.reset << "\n";
         if (result->output_budget.limit_tokens > 0) {
-            std::cout << theme.stats << trf("agent_outcome.output_budget.limit", result->output_budget.limit_tokens)
+            TermOut() << theme.stats << trf("agent_outcome.output_budget.limit", result->output_budget.limit_tokens)
                       << theme.reset << "\n";
         } else {
-            std::cout << theme.stats << tr("agent_outcome.output_budget.limit_unset") << theme.reset << "\n";
+            TermOut() << theme.stats << tr("agent_outcome.output_budget.limit_unset") << theme.reset << "\n";
         }
-        std::cout << theme.stats
+        TermOut() << theme.stats
                   << trf("agent_outcome.output_budget.continuations", result->output_budget.continuations_used)
                   << theme.reset << "\n";
-        std::cout << theme.stats
+        TermOut() << theme.stats
                   << tr(result->output_budget.usage_reported ? "agent_outcome.output_budget.usage_reported"
                                                              : "agent_outcome.output_budget.usage_not_reported")
                   << theme.reset << "\n";
         if (result->output_budget.thinking_bytes > 0) {
-            std::cout << theme.stats
+            TermOut() << theme.stats
                       << trf("error.length_empty_reasoning_bytes", result->output_budget.thinking_bytes)
                       << theme.reset << "\n";
         }
-        std::cout << theme.stats
+        TermOut() << theme.stats
                   << (reasoning_total > 0
                           ? trf("error.length_empty_reasoning", reasoning_total)
                           : tr("error.length_empty_no_split"))
                   << theme.reset << "\n";
-        std::cout << theme.stats << tr("agent_outcome.output_budget.escapes") << theme.reset << "\n";
-        std::cout.flush();
+        TermOut() << theme.stats << tr("agent_outcome.output_budget.escapes") << theme.reset << "\n";
+        TermOut().flush();
         out.status = 1;  // 一个字都没回,按失败收场——但话说清楚了,不是哑巴 1
         turn_failed = true;  // 收口 tone 用 Failed after,不用 Worked 糊
     }
@@ -1550,7 +1535,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
         stop_options.label = "[stop 钩子续跑,非用户输入] ";
         stop_options.final_text = [&last_assistant_text]() { return last_assistant_text; };
         stop_options.on_continue_request = [&theme](const std::string& reason) {
-            std::cout << theme.stats << "[stop 钩子] 要求再收口一轮: " << reason << theme.reset << "\n";
+            TermOut() << theme.stats << "[stop 钩子] 要求再收口一轮: " << reason << theme.reset << "\n";
         };
         stop_options.emit = [hook_dispatcher](bool stop_hook_active, const std::string& last_text) {
             lubancode::hooks::HookPayload payload;
@@ -1566,9 +1551,9 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // 安全点(轮收):后台子代理这轮攒下的 hooks 记录归并落账,报信一行。
     for (const std::string& notice : lubancode::app::AdoptBackgroundHookRecordNotices()) {
         if (!silent) {
-            std::cout << theme.stats << "[hooks] " << notice << theme.reset << "\n";
+            TermOut() << theme.stats << "[hooks] " << notice << theme.reset << "\n";
         } else {
-            std::cerr << "[hooks] " << notice << "\n";
+            TermErr() << "[hooks] " << notice << "\n";
         }
     }
 
@@ -1605,7 +1590,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
             return server_enabled.has_value() ? tr("stats.cache_no_hit_enabled")
                                               : tr("stats.cache_no_hit_unverified");
         }();
-        std::cout << theme.stats
+        TermOut() << theme.stats
                   << trf("stats.line", lubancode::cli::FormatTokenCount(usage_stats.total_input_tokens()),
                          cache_part, lubancode::cli::FormatTokenCount(usage_stats.output_tokens()),
                          usage_stats.request_count(), context_tracker.UsagePercent())

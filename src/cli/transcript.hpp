@@ -200,4 +200,30 @@ std::string TruncateUtf8Codepoints(const std::string& text, std::size_t max_code
 // 数一段 UTF-8 文本有几个码点(思考条目展开档标题的「· N 字」用)。
 int CountUtf8Codepoints(const std::string& text);
 
+// ---- 条目工厂(终端接线收尾单:手工拼 TranscriptItem 的口子全仓清零) ----
+//
+// 病灶四(用户查账原文):公共投影(TurnItemView→TranscriptItem 的
+// ProjectTurnItem)之外,各事件源(通知/静默归档/查看态事件账)仍在
+// 手工拼条目、各写一遍状态映射——改状态映射时多处跟改。工厂收口:
+// 状态与字段怎么落,这里一处定;调用方只给事实数据。id 由调用方的
+// transcript 账本现发(工厂不碰账本)。
+
+// 通知类条目(后台子代理完成/权限拒绝一类):标题 + 状态 + 摘要行。
+TranscriptItem MakeNoticeItem(int id, const std::string& title, TranscriptStatus status,
+                              std::vector<std::string> summary_lines);
+
+// 静默档正文归档条目(查看态回流轮):正文全文入库,头两行各 120 码点
+// 折成紧凑档摘要(渲染层还会按终端宽再截)。
+TranscriptItem MakeAssistantArchiveItem(int id, std::string body, TranscriptStatus status);
+
+// 查看态工具卡(子代理事件账的 start/done 配对折一条 SubTool 条目):
+// done=false 是还在跑的 Running 卡;input_json 解析不出对象时标题退
+// "名字(...)"的老兜底(BuildToolTitle 自带)。
+TranscriptItem MakeAgentTaskToolItem(int id, const std::string& tool_name, const std::string& input_json,
+                                     bool done, bool is_error, const std::string& result);
+
+// 查看态思考卡:streaming=true 折 Running 卡(标题「思考中 · N 字」随
+// 重铺拍跳),false 折收定 Ok 卡。
+TranscriptItem MakeAgentTaskThinkingItem(int id, const std::string& text, bool streaming);
+
 }  // namespace lubancode::cli

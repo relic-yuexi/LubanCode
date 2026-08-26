@@ -553,6 +553,8 @@ add_library(lubancode_core STATIC
   src/cli/choice_menu.cpp
   src/cli/queue_model.cpp
   src/cli/terminal_frame.cpp
+  # 终端接线收尾单:输出端口(stdout/stderr 的唯一改道口,进程级一只)。
+  src/cli/terminal_port.cpp
   src/cli/context_tracker.cpp
   src/cli/divider.cpp
   src/cli/format_utils.cpp

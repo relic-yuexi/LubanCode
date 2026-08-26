@@ -108,6 +108,7 @@
 #include "cli/record_command.hpp"
 #include "cli/setup_wizard.hpp"
 #include "cli/slash_commands.hpp"
+#include "cli/terminal_port.hpp"
 #include "cli/spinner.hpp"
 #include "cli/spinner_backend.hpp"
 #include "cli/terminal_frame.hpp"
@@ -167,13 +168,17 @@ using lubancode::app::kVersion;
 using lubancode::platform::CurrentDirUtf8;
 using lubancode::cli::tr;
 using lubancode::cli::trf;
+// 终端接线收尾单:本文件(会话控制器)的 stdout/stderr 写全走输出端口
+// (TermOut/TermErr),散打清零——改道与锁规矩见 cli/terminal_port.hpp。
+using lubancode::cli::TermOut;
+using lubancode::cli::TermErr;
 // 会话层排队消息账本(0.28.x):流式监听线程落队、会话泵投递,共用这一只。
 using lubancode::cli::SessionSteeringQueue;
 
 namespace {
 
 void PrintSlashHelp() {
-    std::cout << tr("slash_help.body");
+    TermOut() << tr("slash_help.body");
 }
 
 // /model <role> <id> 的角色词归一:小写 + 去首尾空白(TrimAscii 是
@@ -215,11 +220,11 @@ std::shared_ptr<lubancode::memory::ProjectMemory> BuildProjectMemory(
                 MemoryOptionsFromConfig(config.memory), executable);
             if (project_memory->generate_enabled()) {
                 if (const auto launched = project_memory->LaunchWorker(); !launched.has_value()) {
-                    std::cout << trf("cmd.memory.worker_failed", launched.error()) << "\n";
+                    TermOut() << trf("cmd.memory.worker_failed", launched.error()) << "\n";
                 }
             }
         } else if (config.memory.enabled) {
-            std::cout << trf("cmd.memory.project_failed", identity.error()) << "\n";
+            TermOut() << trf("cmd.memory.project_failed", identity.error()) << "\n";
         }
     }
     return project_memory;
@@ -934,7 +939,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     model_router = std::make_unique<lubancode::app::ModelRouterService>(config_result_, real_backend,
                                                                         current_model, active_provider);
     for (const std::string& notice : config_result_.model_role_notices) {
-        std::cout << theme.stats << "[模型路由] " << notice << theme.reset << "\n";
+        TermOut() << theme.stats << "[模型路由] " << notice << theme.reset << "\n";
     }
 
     // 图标只在真控制台打(管道/重定向不打装饰字符,理由同 ClearScreen 的
@@ -960,7 +965,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     // 只提醒,不发请求——能力探针(/doctor cache usage)由用户显式触发,
     // 结论写回 provider 配置,下次启动这一行就闭嘴。
     if (config.wire == lubancode::config::Wire::ChatCompletions && !config.stream_usage_declared) {
-        std::cout << theme.stats << tr("doctor.startup.stream_usage_hint") << theme.reset << "\n";
+        TermOut() << theme.stats << tr("doctor.startup.stream_usage_hint") << theme.reset << "\n";
     }
 
     // 陈房清扫(0.27.x):只清 agent- 前缀、超过 3 天没动静的隔离子代理房;
@@ -969,7 +974,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     if (const auto stale_root = lubancode::cli::FindRepositoryRoot(std::filesystem::current_path())) {
         const auto cleanup = lubancode::cli::CleanStaleAgentWorktrees(*stale_root, std::chrono::hours(72));
         if (cleanup.removed > 0) {
-            std::cout << theme.stats << trf("cmd.worktree.cleaned", cleanup.removed) << theme.reset << "\n";
+            TermOut() << theme.stats << trf("cmd.worktree.cleaned", cleanup.removed) << theme.reset << "\n";
         }
     }
 
@@ -1032,7 +1037,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         }
     }
     if (main_deferral) {
-        std::cout << theme.stats << trf("tool_search.enabled", tool_search_threshold) << theme.reset << "\n";
+        TermOut() << theme.stats << trf("tool_search.enabled", tool_search_threshold) << theme.reset << "\n";
     }
 
     // 后台子代理面板的数据源(缓存 + 修订号,面板每 100ms 拉一次)。列表走
@@ -1088,17 +1093,17 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         lubancode::cli::SetAgentViewSwitchHook([demo_count, demo_idle, this](int viewed_task_id, int tail_rows) {
             (void)tail_rows;  // 演示代理没有实时流,重铺拍与整铺同款
             std::lock_guard<std::mutex> stdout_lock(lubancode::cli::StdoutWriteMutex());
-            std::cout << "\n";
+            TermOut() << "\n";
             if (viewed_task_id == 0) {
-                std::cout << theme.stats << tr("agent_panel.main_header") << theme.reset << "\n";
-                std::cout << theme.stats << tr("agent_panel.back_to_main") << theme.reset << "\n";
+                TermOut() << theme.stats << tr("agent_panel.main_header") << theme.reset << "\n";
+                TermOut() << theme.stats << tr("agent_panel.back_to_main") << theme.reset << "\n";
             } else if (viewed_task_id >= 1 && viewed_task_id <= demo_count) {
-                std::cout << trf("agent_panel.view_header", "general-purpose #" + std::to_string(viewed_task_id),
+                TermOut() << trf("agent_panel.view_header", "general-purpose #" + std::to_string(viewed_task_id),
                                  "演示任务 " + std::to_string(viewed_task_id))
                           << "\n"
                           << "  [" << (viewed_task_id > demo_idle ? "后台" : "完成") << "] 演示条目,无 transcript 台账\n";
             }
-            std::cout.flush();
+            TermOut().flush();
         });
     }
 
@@ -1127,15 +1132,9 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         }
         for (const std::string& notice : notices) {
             lubancode::cli::ShowPanelToast(notice);
-            lubancode::cli::TranscriptItem item;
-            item.id = static_cast<int>(transcript.size()) + 1;
-            item.kind = lubancode::cli::TranscriptKind::Tool;
-            item.tool_name = "agent_notice";
-            item.title = tr("agent_panel.denial_notice_title");
-            item.status = lubancode::cli::TranscriptStatus::Error;
-            item.start_time = item.end_time = std::chrono::steady_clock::now();
-            item.summary_lines = {notice};
-            transcript.push_back(std::move(item));
+            transcript.push_back(lubancode::cli::MakeNoticeItem(
+                static_cast<int>(transcript.size()) + 1, tr("agent_panel.denial_notice_title"),
+                lubancode::cli::TranscriptStatus::Error, {notice}));
         }
     });
 
@@ -1254,7 +1253,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         std::string peer_error;
         peer_started = peer_runtime->Start(&peer_error);
         if (!peer_started) {
-            std::cout << theme.error << trf("cmd.peers.start_failed", peer_error) << theme.reset << "\n";
+            TermOut() << theme.error << trf("cmd.peers.start_failed", peer_error) << theme.reset << "\n";
         }
     }
     std::function<std::optional<lubancode::api::Message>()> peer_inbox_poll;
@@ -1548,27 +1547,9 @@ std::vector<std::string> TerminalSessionController::BuildAgentTaskTranscriptLine
     };
     const auto tool_item = [&](const lubancode::tools::AgentTaskEvent& start,
                                const lubancode::tools::AgentTaskEvent* done) {
-        lubancode::cli::TranscriptItem item;
-        item.id = next_item_id++;
-        item.kind = lubancode::cli::TranscriptKind::SubTool;
-        item.tool_name = start.tool_name;
-        item.input_json = start.input_json;
-        nlohmann::json input_json;
-        try {
-            input_json = nlohmann::json::parse(start.input_json);
-        } catch (...) {
-        }
-        item.title = lubancode::cli::BuildToolTitle(start.tool_name, input_json);
-        if (done != nullptr) {
-            item.status = done->is_error ? lubancode::cli::TranscriptStatus::Error
-                                         : lubancode::cli::TranscriptStatus::Ok;
-            item.full_output = done->result;
-            item.end_time = std::chrono::steady_clock::now();
-        } else {
-            item.status = lubancode::cli::TranscriptStatus::Running;  // 还在跑
-        }
-        item.start_time = std::chrono::steady_clock::now();
-        return item;
+        return lubancode::cli::MakeAgentTaskToolItem(
+            next_item_id++, start.tool_name, start.input_json, done != nullptr,
+            done != nullptr && done->is_error, done != nullptr ? done->result : std::string());
     };
 
     // 工具卡配对:ToolStart 等 ToolResult 成一张终态卡;流尾没等到的画
@@ -1588,23 +1569,12 @@ std::vector<std::string> TerminalSessionController::BuildAgentTaskTranscriptLine
                 push_markdown(theme.banner + "● " + tr("cmd.resume.history.assistant") + theme.reset, event.text);
                 break;
             case lubancode::tools::AgentTaskEventKind::AssistantReasoning: {
-                lubancode::cli::TranscriptItem item;
-                item.id = next_item_id++;
-                item.kind = lubancode::cli::TranscriptKind::Thinking;
-                item.tool_name = "thinking";
-                item.full_output = event.text;
-                if (event.streaming) {
-                    // 流式思考尾巴(追加需求"查看态实时思考流"):与 main 流式
-                    // 思考同款折叠规矩——Running 条目,头行"思考中 · N 字"
-                    // 随重铺拍跳动;Ctrl+O 展开看长文(FormatTranscriptItem 的
-                    // thinking_live 分支自带"约一屏后截断收口")。
-                    item.status = lubancode::cli::TranscriptStatus::Running;
-                    item.title = trf("agent_activity.thinking",
-                                     static_cast<int>(lubancode::cli::CountUtf8Codepoints(event.text)));
-                } else {
-                    item.status = lubancode::cli::TranscriptStatus::Ok;
-                    item.title = tr("agent_panel.event_thinking");
-                }
+                // 流式思考尾巴(追加需求"查看态实时思考流"):工厂折成与 main
+                // 流式思考同款折叠规矩的条目——Running 头行「思考中 · N 字」
+                // 随重铺拍跳动;Ctrl+O 展开看长文(FormatTranscriptItem 的
+                // thinking_live 分支自带"约一屏后截断收口")。
+                const lubancode::cli::TranscriptItem item =
+                    lubancode::cli::MakeAgentTaskThinkingItem(next_item_id++, event.text, event.streaming);
                 push_rendered(lubancode::cli::FormatTranscriptItem(item, theme, width,
                                                                    /*expanded=*/event.streaming && agent_view_expanded_));
                 break;
@@ -1693,7 +1663,7 @@ void TerminalSessionController::PrintViewedTranscript(int viewed_task_id, int ta
     lubancode::cli::EraseStreamFooterLocked();
     const int width = lubancode::cli::DetectConsoleWidth().value_or(80);
 
-    const auto print_line = [&](const std::string& line) { std::cout << line << "\n"; };
+    const auto print_line = [&](const std::string& line) { TermOut() << line << "\n"; };
 
     if (viewed_task_id == 0) {
         // 回 main:首个可辨标题写明 main(规格"Esc 回 main"五条件),最近
@@ -1730,7 +1700,7 @@ void TerminalSessionController::PrintViewedTranscript(int viewed_task_id, int ta
             print_line(line);
         }
     }
-    std::cout.flush();
+    TermOut().flush();
     lubancode::cli::RedrawStreamFooterLocked();
 }
 
@@ -1739,7 +1709,7 @@ void TerminalSessionController::PrintRecentItems(std::size_t count) {
     const int width = lubancode::cli::DetectConsoleWidth().value_or(80);
     const std::size_t from = transcript.size() > count ? transcript.size() - count : 0;
     for (std::size_t i = from; i < transcript.size(); ++i) {
-        std::cout << lubancode::cli::FormatTranscriptItem(transcript[i], theme, width, /*expanded=*/false,
+        TermOut() << lubancode::cli::FormatTranscriptItem(transcript[i], theme, width, /*expanded=*/false,
                                                            static_cast<int>(i) == focus_index);
     }
 }
@@ -1757,7 +1727,7 @@ bool TerminalSessionController::HandleTranscriptUi(lubancode::cli::UiKeyAction a
             const int viewed_task = cli::CurrentAgentViewedTaskId();
             if (viewed_task != 0) {
                 agent_view_expanded_ = !agent_view_expanded_;
-                std::cout << "\n"
+                TermOut() << "\n"
                           << theme.stats
                           << (agent_view_expanded_ ? tr("ui.expanded") : tr("ui.compact")) << theme.reset << "\n";
                 PrintViewedTranscript(viewed_task, /*tail_rows=*/0);
@@ -1768,13 +1738,13 @@ bool TerminalSessionController::HandleTranscriptUi(lubancode::cli::UiKeyAction a
             focus_view_active = false;
             if (count == 0) {
                 expand_latest = false;
-                std::cout << "\n" << theme.stats << tr("ui.no_items") << theme.reset << "\n";
+                TermOut() << "\n" << theme.stats << tr("ui.no_items") << theme.reset << "\n";
                 return true;
             }
             expand_latest = !expand_latest;
-            std::cout << "\n" << theme.stats << (expand_latest ? tr("ui.expanded") : tr("ui.compact"))
+            TermOut() << "\n" << theme.stats << (expand_latest ? tr("ui.expanded") : tr("ui.compact"))
                       << theme.reset << "\n";
-            std::cout << cli::FormatTranscriptItems(transcript, theme, width, transcript_expanded, focus_index,
+            TermOut() << cli::FormatTranscriptItems(transcript, theme, width, transcript_expanded, focus_index,
                                                     expand_latest ? count - 1 : -1);
             return true;
         }
@@ -1792,8 +1762,8 @@ bool TerminalSessionController::HandleTranscriptUi(lubancode::cli::UiKeyAction a
             } else if (focus_index + 1 < count) {
                 ++focus_index;  // 到最新一条停住
             }
-            std::cout << "\n" << theme.stats << trf("ui.focus", focus_index + 1, count) << theme.reset << "\n";
-            std::cout << cli::FormatTranscriptItem(transcript[static_cast<std::size_t>(focus_index)], theme,
+            TermOut() << "\n" << theme.stats << trf("ui.focus", focus_index + 1, count) << theme.reset << "\n";
+            TermOut() << cli::FormatTranscriptItem(transcript[static_cast<std::size_t>(focus_index)], theme,
                                                     width, /*expanded=*/false, /*focused=*/true);
             return true;
         }
@@ -1802,7 +1772,7 @@ bool TerminalSessionController::HandleTranscriptUi(lubancode::cli::UiKeyAction a
                 // 再按 Ctrl+E:返回。简化重画:横幅 + 最近几条摘要,
                 // 聚焦画面留在滚动历史里。
                 focus_view_active = false;
-                std::cout << "\n" << theme.stats << tr("ui.back") << theme.reset << "\n";
+                TermOut() << "\n" << theme.stats << tr("ui.back") << theme.reset << "\n";
                 PrintBanner(config, theme);
                 PrintRecentItems(5);
                 return true;
@@ -1812,18 +1782,18 @@ bool TerminalSessionController::HandleTranscriptUi(lubancode::cli::UiKeyAction a
             }
             const int idx = focus_index >= 0 ? focus_index : count - 1;
             focus_view_active = true;
-            std::cout << "\n" << theme.banner << trf("ui.focus_view", idx + 1, count) << theme.reset << "\n";
+            TermOut() << "\n" << theme.banner << trf("ui.focus_view", idx + 1, count) << theme.reset << "\n";
             // width=0:标题 + 完整参数 + full_output 全文如实铺,不截宽,
             // 超长靠终端自然折行/滚动(不真清屏——conhost 的滚回缓冲跟
             // 屏幕缓冲是同一块,真清会把历史一并抹掉,取舍见报告)。
-            std::cout << cli::FormatTranscriptItem(transcript[static_cast<std::size_t>(idx)], theme,
+            TermOut() << cli::FormatTranscriptItem(transcript[static_cast<std::size_t>(idx)], theme,
                                                     /*width=*/0, /*expanded=*/true);
             return true;
         }
         case cli::UiKeyAction::Escape: {
             if (focus_view_active) {
                 focus_view_active = false;
-                std::cout << "\n" << theme.stats << tr("ui.back") << theme.reset << "\n";
+                TermOut() << "\n" << theme.stats << tr("ui.back") << theme.reset << "\n";
                 PrintBanner(config, theme);
                 PrintRecentItems(5);
                 return true;
@@ -1852,7 +1822,7 @@ bool TerminalSessionController::HandleTranscriptUi(lubancode::cli::UiKeyAction a
                 }
                 if (stopped > 0) {
                     FlushLoopEvents();
-                    std::cout << theme.stats
+                    TermOut() << theme.stats
                               << "已停 " << stopped
                               << " 只 loop 任务(ESC;定义保留,续跑 /loop resume <id>)。" << theme.reset
                               << "\n";
@@ -1884,7 +1854,7 @@ bool TerminalSessionController::HandleTranscriptUi(lubancode::cli::UiKeyAction a
                     first_turn = false;
                     const std::vector<std::string> lines = cli::RenderTurnView(turn_view, theme, render_options);
                     for (const std::string& line : lines) {
-                        std::cout << line << "\n";
+                        TermOut() << line << "\n";
                     }
                 }
             } else {
@@ -1931,12 +1901,12 @@ bool TerminalSessionController::HandleTranscriptUi(lubancode::cli::UiKeyAction a
             const std::size_t turn = turn_indexes[static_cast<std::size_t>(nav_turn_index_)];
             const auto& message = main_agent->History()[turn];
             const auto* text = std::get_if<lubancode::api::TextBlock>(&message.content.front());
-            std::cout << "\n"
+            TermOut() << "\n"
                       << theme.stats
                       << trf("ui.turn_nav", nav_turn_index_ + 1, turn_indexes.size()) << theme.reset << "\n";
             if (text != nullptr) {
                 const std::string clipped = text->text.substr(0, 400);
-                std::cout << theme.stats << clipped << (text->text.size() > 400 ? "…" : "")
+                TermOut() << theme.stats << clipped << (text->text.size() > 400 ? "…" : "")
                           << theme.reset << "\n";
             }
             return true;
@@ -1948,10 +1918,10 @@ bool TerminalSessionController::HandleTranscriptUi(lubancode::cli::UiKeyAction a
             if (count == 0) {
                 return false;
             }
-            std::cout << "\n"
+            TermOut() << "\n"
                       << theme.stats << tr("ui.to_scrollback") << theme.reset << "\n";
-            std::cout << cli::FormatTranscriptItems(transcript, theme, width, transcript_expanded);
-            std::cout.flush();
+            TermOut() << cli::FormatTranscriptItems(transcript, theme, width, transcript_expanded);
+            TermOut().flush();
             return true;
         }
         case cli::UiKeyAction::ViewInEditor: {
@@ -1998,19 +1968,19 @@ bool TerminalSessionController::HandleTranscriptUi(lubancode::cli::UiKeyAction a
                        ("lubancode-transcript-" +
                         std::to_string(lubancode::platform::CurrentProcessId()) + ".md");
             } catch (const std::exception&) {
-                std::cout << theme.error << tr("editor.no_temp") << theme.reset << "\n";
+                TermOut() << theme.error << tr("editor.no_temp") << theme.reset << "\n";
                 return true;
             }
             {
                 std::ofstream out(file, std::ios::binary | std::ios::trunc);
                 if (!out) {
-                    std::cout << theme.error << tr("editor.write_failed") << theme.reset << "\n";
+                    TermOut() << theme.error << tr("editor.write_failed") << theme.reset << "\n";
                     return true;
                 }
                 out << markdown;
             }
-            std::cout << theme.stats << trf("ui.view_in_editor", editor_cmd) << theme.reset << "\n";
-            std::cout.flush();
+            TermOut() << theme.stats << trf("ui.view_in_editor", editor_cmd) << theme.reset << "\n";
+            TermOut().flush();
             (void)lubancode::platform::RunInteractiveCommand(editor_cmd + " \"" +
                                                              lubancode::tools::PathToUtf8(file) + "\"");
             return true;
@@ -2190,7 +2160,7 @@ bool TerminalSessionController::EnsureSessionBegun(const std::string& first_text
     const auto result =
         session_runtime_.EnsureBegun(first_text, *current_model, CurrentDirUtf8());
     if (result == lubancode::runtime::SessionBeginResult::Failed) {
-        std::cout << theme.error << trf("session.create_failed", sessions_dir) << theme.reset << "\n";
+        TermOut() << theme.error << trf("session.create_failed", sessions_dir) << theme.reset << "\n";
         return false;
     }
     if (result != lubancode::runtime::SessionBeginResult::Begun) {
@@ -2215,7 +2185,7 @@ void TerminalSessionController::OpenArtifactStore() {
     }
     const std::string root = sessions_dir + "/" + session_store.session_id() + "/context";
     if (!artifact_store->Open(root, session_store.session_id())) {
-        std::cout << theme.stats << trf("artifact.store_open_failed", root) << theme.reset << "\n";
+        TermOut() << theme.stats << trf("artifact.store_open_failed", root) << theme.reset << "\n";
     }
 }
 
@@ -2228,7 +2198,7 @@ void TerminalSessionController::PersistNewMessages() {
     // 这边只在"Begun 且还没 active"的窗口补一句给用户的话与 hooks 上下文。
     const auto result = session_runtime_.PersistNew(main_agent->History(), *current_model, CurrentDirUtf8());
     if (result == lubancode::runtime::SessionPersistResult::BrokenNow) {
-        std::cout << theme.error << tr("session.append_failed") << theme.reset << "\n";
+        TermOut() << theme.error << tr("session.append_failed") << theme.reset << "\n";
         return;
     }
     if (result == lubancode::runtime::SessionPersistResult::Nothing && !session_store.active() &&
@@ -2279,14 +2249,14 @@ void TerminalSessionController::CollectPeerMessages() {
         lubancode::peers::PeerEnvelope envelope = std::move(peer_held_stash.front());
         peer_held_stash.erase(peer_held_stash.begin());
         // 扣住的信不进轮内:打印给用户看,问一句要不要交给模型。
-        std::cout << theme.stats << trf("cmd.peers.held_notice", envelope.sender_name, envelope.sender_id,
+        TermOut() << theme.stats << trf("cmd.peers.held_notice", envelope.sender_name, envelope.sender_id,
                                         envelope.text)
                   << theme.reset << "\n";
         const std::optional<std::string> answer =
             lubancode::cli::ReadLine(tr("cmd.peers.held_prompt"), theme, /*esc_rejects=*/true);
         if (!answer.has_value() ||
             !(answer == "y" || answer == "Y" || answer == "yes" || answer == "是")) {
-            std::cout << theme.stats << tr("cmd.peers.held_dropped") << theme.reset << "\n";
+            TermOut() << theme.stats << tr("cmd.peers.held_dropped") << theme.reset << "\n";
             continue;
         }
         peer_ready_messages.push_back(std::move(envelope));
@@ -2521,7 +2491,7 @@ void TerminalSessionController::HandleCopyCommand(const std::string& raw_args) {
         c = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
     }
     if (!args.empty() && args != "plain") {
-        std::cout << theme.stats << tr("cmd.copy.usage") << theme.reset << "\n";
+        TermOut() << theme.stats << tr("cmd.copy.usage") << theme.reset << "\n";
         return;
     }
 
@@ -2549,7 +2519,7 @@ void TerminalSessionController::HandleCopyCommand(const std::string& raw_args) {
         break;
     }
     if (text.empty()) {
-        std::cout << theme.error << tr("cmd.copy.no_assistant") << theme.reset << "\n";
+        TermOut() << theme.error << tr("cmd.copy.no_assistant") << theme.reset << "\n";
         return;
     }
     if (args == "plain") {
@@ -2559,14 +2529,14 @@ void TerminalSessionController::HandleCopyCommand(const std::string& raw_args) {
     std::string detail;
     switch (lubancode::platform::CopyTextToClipboard(text, detail)) {
         case lubancode::platform::ClipboardResult::Ok:
-            std::cout << theme.stats << trf("cmd.copy.done", text.size()) << theme.reset << "\n";
+            TermOut() << theme.stats << trf("cmd.copy.done", text.size()) << theme.reset << "\n";
             break;
         case lubancode::platform::ClipboardResult::Unsupported:
-            std::cout << theme.error << trf("cmd.copy.unsupported", detail) << theme.reset << "\n";
+            TermOut() << theme.error << trf("cmd.copy.unsupported", detail) << theme.reset << "\n";
             break;
         case lubancode::platform::ClipboardResult::Failure:
             // 失败必须报错,不得打印"已复制"后空着。
-            std::cout << theme.error << trf("cmd.copy.failed", detail) << theme.reset << "\n";
+            TermOut() << theme.error << trf("cmd.copy.failed", detail) << theme.reset << "\n";
             break;
     }
 }
@@ -2724,48 +2694,48 @@ void TerminalSessionController::HandleKeymapCommand(const std::string& raw_args)
 
     if (words.empty()) {
         // 列全表:作用域分组,和弦右对齐,固定键/未绑键标明。
-        std::cout << tr("keymap.list_header") << "\n";
+        TermOut() << tr("keymap.list_header") << "\n";
         for (const auto& record : keymap::ActiveKeymap().AllBindings()) {
             const std::string chord = record.has_default ? keymap::FormatKeyChord(record.chord) : "-";
-            std::cout << theme.stats << "  [" << keymap::ScopeName(record.scope) << "] " << chord;
+            TermOut() << theme.stats << "  [" << keymap::ScopeName(record.scope) << "] " << chord;
             for (int pad = static_cast<int>(chord.size()); pad < 12; ++pad) {
-                std::cout << ' ';
+                TermOut() << ' ';
             }
-            std::cout << keymap::ActionName(record.action)
+            TermOut() << keymap::ActionName(record.action)
                       << (!record.bindable ? tr("keymap.fixed_suffix")
                            : !record.has_default ? tr("keymap.unbound_suffix") : "")
                       << theme.reset << "\n";
         }
-        std::cout << tr("keymap.usage") << "\n";
+        TermOut() << tr("keymap.usage") << "\n";
         return;
     }
     if (words[0] == "set") {
         if (words.size() != 3) {
-            std::cout << theme.error << tr("keymap.usage") << theme.reset << "\n";
+            TermOut() << theme.error << tr("keymap.usage") << theme.reset << "\n";
             return;
         }
         const auto action = keymap::ActionFromName(words[1]);
         if (!action.has_value()) {
-            std::cout << theme.error << trf("keymap.unknown_action", words[1]) << theme.reset << "\n";
+            TermOut() << theme.error << trf("keymap.unknown_action", words[1]) << theme.reset << "\n";
             return;
         }
         const auto chord = keymap::ParseKeyChord(words[2]);
         if (!chord.has_value()) {
-            std::cout << theme.error << trf("keymap.bad_chord", words[2]) << theme.reset << "\n";
+            TermOut() << theme.error << trf("keymap.bad_chord", words[2]) << theme.reset << "\n";
             return;
         }
         std::string error;
         if (!keymap::ActiveKeymap().SetBinding(*action, *chord, error)) {
-            std::cout << theme.error << trf("keymap.bind_failed", error) << theme.reset << "\n";
+            TermOut() << theme.error << trf("keymap.bind_failed", error) << theme.reset << "\n";
             return;
         }
         if (home_lubancode.has_value()) {
             if (const auto save_error = keymap::SaveActiveKeymapOverrides(*home_lubancode);
                 save_error.has_value()) {
-                std::cout << theme.error << trf("keymap.save_failed", *save_error) << theme.reset << "\n";
+                TermOut() << theme.error << trf("keymap.save_failed", *save_error) << theme.reset << "\n";
             }
         }
-        std::cout << theme.stats
+        TermOut() << theme.stats
                   << trf("keymap.bound", keymap::ActionName(*action), keymap::FormatKeyChord(*chord))
                   << theme.reset << "\n";
         return;
@@ -2779,27 +2749,27 @@ void TerminalSessionController::HandleKeymapCommand(const std::string& raw_args)
                     (void)keymap::ActiveKeymap().ResetBinding(record.action, error);
                 }
             }
-            std::cout << theme.stats << tr("keymap.reset_all") << theme.reset << "\n";
+            TermOut() << theme.stats << tr("keymap.reset_all") << theme.reset << "\n";
         } else if (words.size() == 2) {
             const auto action = keymap::ActionFromName(words[1]);
             if (!action.has_value() || !keymap::ActiveKeymap().ResetBinding(*action, error)) {
-                std::cout << theme.error << trf("keymap.reset_failed", words[1]) << theme.reset << "\n";
+                TermOut() << theme.error << trf("keymap.reset_failed", words[1]) << theme.reset << "\n";
                 return;
             }
-            std::cout << theme.stats << trf("keymap.reset_one", words[1]) << theme.reset << "\n";
+            TermOut() << theme.stats << trf("keymap.reset_one", words[1]) << theme.reset << "\n";
         } else {
-            std::cout << theme.error << tr("keymap.usage") << theme.reset << "\n";
+            TermOut() << theme.error << tr("keymap.usage") << theme.reset << "\n";
             return;
         }
         if (home_lubancode.has_value()) {
             if (const auto save_error = keymap::SaveActiveKeymapOverrides(*home_lubancode);
                 save_error.has_value()) {
-                std::cout << theme.error << trf("keymap.save_failed", *save_error) << theme.reset << "\n";
+                TermOut() << theme.error << trf("keymap.save_failed", *save_error) << theme.reset << "\n";
             }
         }
         return;
     }
-    std::cout << theme.error << tr("keymap.usage") << theme.reset << "\n";
+    TermOut() << theme.error << tr("keymap.usage") << theme.reset << "\n";
 }
 
 void TerminalSessionController::EnsureMemoryTool() {
@@ -2812,12 +2782,12 @@ void TerminalSessionController::EnsureMemoryTool() {
 }
 
 void TerminalSessionController::PrintMemoryUsage() const {
-    std::cout << tr("cmd.memory.usage");
+    TermOut() << tr("cmd.memory.usage");
 }
 
 void TerminalSessionController::HandleMemoryCommand(const std::string& raw_args) {
     if (project_memory == nullptr) {
-        std::cout << tr("cmd.memory.unavailable") << "\n";
+        TermOut() << tr("cmd.memory.unavailable") << "\n";
         return;
     }
 
@@ -2829,7 +2799,7 @@ void TerminalSessionController::HandleMemoryCommand(const std::string& raw_args)
     if (action.empty() || action == "status") {
         const auto status = project_memory->Status();
         const auto toggle_word = [](bool enabled) { return enabled ? tr("cmd.memory.on") : tr("cmd.memory.off"); };
-        std::cout << trf("cmd.memory.global", toggle_word(status.global_allowed)) << "\n"
+        TermOut() << trf("cmd.memory.global", toggle_word(status.global_allowed)) << "\n"
                   << trf("cmd.memory.status", toggle_word(status.enabled), toggle_word(status.use),
                           toggle_word(status.generate))
                   << "\n"
@@ -2838,11 +2808,11 @@ void TerminalSessionController::HandleMemoryCommand(const std::string& raw_args)
                   << trf("cmd.memory.directory", PathToUtf8(status.memory_dir)) << "\n"
                   << trf("cmd.memory.counts", status.entry_count, status.pending_jobs) << "\n";
         if (status.user_enabled) {
-            std::cout << trf("cmd.memory.user_status", status.user_entry_count,
+            TermOut() << trf("cmd.memory.user_status", status.user_entry_count,
                              PathToUtf8(status.user_memory_dir))
                       << "\n";
         }
-        std::cout << trf("cmd.memory.candidates", status.pending_candidates) << "\n";
+        TermOut() << trf("cmd.memory.candidates", status.pending_candidates) << "\n";
         return;
     }
     if (action == "on" || action == "off") {
@@ -2850,11 +2820,11 @@ void TerminalSessionController::HandleMemoryCommand(const std::string& raw_args)
         // 不能凭本场命令翻开能力(规格"授权与本场状态分开")。
         const auto toggled = project_memory->set_enabled(action == "on");
         if (!toggled.has_value()) {
-            std::cout << tr("cmd.memory.denied") << "\n";
+            TermOut() << tr("cmd.memory.denied") << "\n";
             return;
         }
         if (action == "on") EnsureMemoryTool();
-        std::cout << trf("cmd.memory.master", action == "on" ? tr("cmd.memory.on") : tr("cmd.memory.off"))
+        TermOut() << trf("cmd.memory.master", action == "on" ? tr("cmd.memory.on") : tr("cmd.memory.off"))
                   << "\n";
         return;
     }
@@ -2869,11 +2839,11 @@ void TerminalSessionController::HandleMemoryCommand(const std::string& raw_args)
         }
         const bool enabled = value == "on";
         if (enabled && !project_memory->global_allowed()) {
-            std::cout << tr("cmd.memory.denied") << "\n";
+            TermOut() << tr("cmd.memory.denied") << "\n";
             return;
         }
         project_memory->set_use(enabled);
-        std::cout << trf("cmd.memory.toggle", tr("cmd.memory.retrieval"),
+        TermOut() << trf("cmd.memory.toggle", tr("cmd.memory.retrieval"),
                          enabled ? tr("cmd.memory.on") : tr("cmd.memory.off"))
                   << "\n";
         return;
@@ -2894,32 +2864,32 @@ void TerminalSessionController::HandleMemoryCommand(const std::string& raw_args)
         if (!switched.has_value()) {
             // 全局未授权(auto 上限之外的降档仍允许),给出指引。
             if (!project_memory->global_allowed()) {
-                std::cout << tr("cmd.memory.denied") << "\n";
+                TermOut() << tr("cmd.memory.denied") << "\n";
             } else {
-                std::cout << trf("cmd.memory.learn_denied", switched.error()) << "\n";
+                TermOut() << trf("cmd.memory.learn_denied", switched.error()) << "\n";
             }
             return;
         }
         EnsureMemoryTool();
-        std::cout << trf("cmd.memory.learn_set", lubancode::memory::LearnModeName(*mode)) << "\n";
+        TermOut() << trf("cmd.memory.learn_set", lubancode::memory::LearnModeName(*mode)) << "\n";
         return;
     }
     if (action == "review") {
         const auto candidates = project_memory->ListCandidates();
         if (candidates.empty()) {
-            std::cout << tr("cmd.memory.review.empty") << "\n";
+            TermOut() << tr("cmd.memory.review.empty") << "\n";
             return;
         }
-        std::cout << tr("cmd.memory.review.header") << "\n";
+        TermOut() << tr("cmd.memory.review.header") << "\n";
         for (const auto& candidate : candidates) {
-            std::cout << "- " << candidate.id << " [" << lubancode::memory::MemoryKindName(candidate.kind)
+            TermOut() << "- " << candidate.id << " [" << lubancode::memory::MemoryKindName(candidate.kind)
                       << "/" << candidate.confidence << "] " << candidate.title;
             if (!candidate.summary.empty() && candidate.summary != candidate.title) {
-                std::cout << " - " << candidate.summary;
+                TermOut() << " - " << candidate.summary;
             }
-            std::cout << "\n";
+            TermOut() << "\n";
         }
-        std::cout << tr("cmd.memory.review.hint") << "\n";
+        TermOut() << tr("cmd.memory.review.hint") << "\n";
         return;
     }
     if (action == "accept" || action == "reject") {
@@ -2934,12 +2904,12 @@ void TerminalSessionController::HandleMemoryCommand(const std::string& raw_args)
         reason = TrimAscii(std::move(reason));
         if (action == "accept") {
             const auto queued = project_memory->AcceptCandidate(id);
-            std::cout << (queued.has_value() ? trf("cmd.memory.queued", *queued)
+            TermOut() << (queued.has_value() ? trf("cmd.memory.queued", *queued)
                                              : trf("cmd.memory.queue_failed", queued.error()))
                       << "\n";
         } else {
             const auto rejected = project_memory->RejectCandidate(id, std::move(reason));
-            std::cout << (rejected.has_value() ? tr("cmd.memory.reject.done")
+            TermOut() << (rejected.has_value() ? tr("cmd.memory.reject.done")
                                                : trf("cmd.memory.queue_failed", rejected.error()))
                       << "\n";
         }
@@ -2961,7 +2931,7 @@ void TerminalSessionController::HandleMemoryCommand(const std::string& raw_args)
                                   ? std::string()
                                   : TrimAscii(remainder.substr(separator + 2));
         const auto edited = project_memory->EditCandidate(id, title, content);
-        std::cout << (edited.has_value() ? tr("cmd.memory.edit.done")
+        TermOut() << (edited.has_value() ? tr("cmd.memory.edit.done")
                                          : trf("cmd.memory.queue_failed", edited.error()))
                   << "\n";
         return;
@@ -2971,13 +2941,13 @@ void TerminalSessionController::HandleMemoryCommand(const std::string& raw_args)
         words >> id;
         const auto trace = project_memory->LastTrace();
         if (!trace.valid) {
-            std::cout << tr("cmd.memory.why.none") << "\n";
+            TermOut() << tr("cmd.memory.why.none") << "\n";
             return;
         }
-        std::cout << trf("cmd.memory.why.header", trace.at) << "\n";
-        std::cout << trf("cmd.memory.why.origin", trace.query_origin) << "\n";
+        TermOut() << trf("cmd.memory.why.header", trace.at) << "\n";
+        TermOut() << trf("cmd.memory.why.origin", trace.query_origin) << "\n";
         if (trace.skipped) {
-            std::cout << tr("cmd.memory.why.skipped_turn") << "\n";
+            TermOut() << tr("cmd.memory.why.skipped_turn") << "\n";
             return;
         }
         // 检索词带词路与权重:word=整词/词典实体,gram=中文二元,虚词碎片
@@ -2988,7 +2958,7 @@ void TerminalSessionController::HandleMemoryCommand(const std::string& raw_args)
             joined_terms << trace.terms[i].text << "[" << trace.terms[i].kind << "/"
                          << trace.terms[i].source << " ×" << trace.terms[i].weight << "]";
         }
-        std::cout << trf("cmd.memory.why.terms", joined_terms.str()) << "\n";
+        TermOut() << trf("cmd.memory.why.terms", joined_terms.str()) << "\n";
         bool matched_id = id.empty();
         for (const auto& entry : trace.entries) {
             if (!id.empty() && entry.id != id) continue;
@@ -2998,7 +2968,7 @@ void TerminalSessionController::HandleMemoryCommand(const std::string& raw_args)
             const std::string shown_id =
                 entry.layer == "user" ? entry.id + tr("cmd.memory.why.layer_user") : entry.id;
             if (entry.injected) {
-                std::cout << trf("cmd.memory.why.hit", shown_id, entry.score, entry.hard_hits,
+                TermOut() << trf("cmd.memory.why.hit", shown_id, entry.score, entry.hard_hits,
                                  entry.term_hits, entry.bytes)
                           << "\n";
                 continue;
@@ -3012,42 +2982,42 @@ void TerminalSessionController::HandleMemoryCommand(const std::string& raw_args)
             else if (entry.below_threshold) reason = tr("cmd.memory.why.below_threshold");
             else if (entry.budget_dropped) reason = tr("cmd.memory.why.budget");
             else reason = tr("cmd.memory.why.skipped");
-            std::cout << trf("cmd.memory.why.miss", shown_id, entry.score, entry.hard_hits,
+            TermOut() << trf("cmd.memory.why.miss", shown_id, entry.score, entry.hard_hits,
                              entry.term_hits, reason)
                       << "\n";
         }
         if (!matched_id) {
-            std::cout << trf("cmd.memory.why.missing", id) << "\n";
+            TermOut() << trf("cmd.memory.why.missing", id) << "\n";
         }
-        std::cout << trf("cmd.memory.why.total", trace.injected_count, trace.injected_bytes) << "\n";
+        TermOut() << trf("cmd.memory.why.total", trace.injected_count, trace.injected_bytes) << "\n";
         return;
     }
     if (action == "list") {
         std::string error;
         // 两层合并列:项目层在前,用户层带标注。
         const auto entries = project_memory->ListEntries(&error);
-        if (!error.empty()) std::cout << trf("cmd.memory.catalog_warning", error) << "\n";
+        if (!error.empty()) TermOut() << trf("cmd.memory.catalog_warning", error) << "\n";
         const auto user_entries = project_memory->ListUserEntries(&error);
-        if (!error.empty()) std::cout << trf("cmd.memory.catalog_warning", error) << "\n";
+        if (!error.empty()) TermOut() << trf("cmd.memory.catalog_warning", error) << "\n";
         if (entries.empty() && user_entries.empty()) {
-            std::cout << tr("cmd.memory.empty") << "\n";
+            TermOut() << tr("cmd.memory.empty") << "\n";
             return;
         }
         for (const auto& entry : entries) {
-            std::cout << "- " << entry.id << " [" << lubancode::memory::MemoryKindName(entry.kind) << "] "
+            TermOut() << "- " << entry.id << " [" << lubancode::memory::MemoryKindName(entry.kind) << "] "
                       << entry.title;
             if (!entry.summary.empty() && entry.summary != entry.title) {
-                std::cout << " - " << entry.summary;
+                TermOut() << " - " << entry.summary;
             }
-            std::cout << "\n";
+            TermOut() << "\n";
         }
         for (const auto& entry : user_entries) {
-            std::cout << "- " << entry.id << " [" << lubancode::memory::MemoryKindName(entry.kind) << "] "
+            TermOut() << "- " << entry.id << " [" << lubancode::memory::MemoryKindName(entry.kind) << "] "
                       << entry.title << " (" << tr("cmd.memory.user_layer") << ")";
             if (!entry.summary.empty() && entry.summary != entry.title) {
-                std::cout << " - " << entry.summary;
+                TermOut() << " - " << entry.summary;
             }
-            std::cout << "\n";
+            TermOut() << "\n";
         }
         return;
     }
@@ -3086,7 +3056,7 @@ void TerminalSessionController::HandleMemoryCommand(const std::string& raw_args)
             return;
         }
         const auto queued = project_memory->EnqueueSave(request);
-        std::cout << (queued.has_value() ? trf("cmd.memory.queued", *queued)
+        TermOut() << (queued.has_value() ? trf("cmd.memory.queued", *queued)
                                          : trf("cmd.memory.queue_failed", queued.error()))
                   << "\n";
         return;
@@ -3099,14 +3069,14 @@ void TerminalSessionController::HandleMemoryCommand(const std::string& raw_args)
             return;
         }
         const auto queued = project_memory->EnqueueForget(id);
-        std::cout << (queued.has_value() ? trf("cmd.memory.queued", *queued)
+        TermOut() << (queued.has_value() ? trf("cmd.memory.queued", *queued)
                                          : trf("cmd.memory.queue_failed", queued.error()))
                   << "\n";
         return;
     }
     if (action == "rebuild") {
         const auto queued = project_memory->EnqueueRebuild();
-        std::cout << (queued.has_value() ? trf("cmd.memory.queued", *queued)
+        TermOut() << (queued.has_value() ? trf("cmd.memory.queued", *queued)
                                          : trf("cmd.memory.queue_failed", queued.error()))
                   << "\n";
         return;
@@ -3114,20 +3084,20 @@ void TerminalSessionController::HandleMemoryCommand(const std::string& raw_args)
     if (action == "stale") {
         const auto stale = project_memory->ListStaleEntries();
         if (stale.empty()) {
-            std::cout << tr("cmd.memory.stale.empty") << "\n";
+            TermOut() << tr("cmd.memory.stale.empty") << "\n";
             return;
         }
-        std::cout << tr("cmd.memory.stale.header") << "\n";
+        TermOut() << tr("cmd.memory.stale.header") << "\n";
         for (const auto& item : stale) {
-            std::cout << "- " << item.entry.id << " [" << item.reason << "] " << item.entry.title;
+            TermOut() << "- " << item.entry.id << " [" << item.reason << "] " << item.entry.title;
             if (item.reason == "fingerprint") {
-                std::cout << " (" << tr("cmd.memory.stale.fingerprint") << ")";
+                TermOut() << " (" << tr("cmd.memory.stale.fingerprint") << ")";
             } else {
-                std::cout << " (" << tr("cmd.memory.stale.expired") << ": " << item.entry.expires_at << ")";
+                TermOut() << " (" << tr("cmd.memory.stale.expired") << ": " << item.entry.expires_at << ")";
             }
-            std::cout << "\n";
+            TermOut() << "\n";
         }
-        std::cout << tr("cmd.memory.stale.hint") << "\n";
+        TermOut() << tr("cmd.memory.stale.hint") << "\n";
         return;
     }
     if (action == "verify" || action == "refresh") {
@@ -3138,7 +3108,7 @@ void TerminalSessionController::HandleMemoryCommand(const std::string& raw_args)
             return;
         }
         const auto queued = project_memory->EnqueueVerify(id, action == "refresh");
-        std::cout << (queued.has_value() ? trf("cmd.memory.queued", *queued)
+        TermOut() << (queued.has_value() ? trf("cmd.memory.queued", *queued)
                                          : trf("cmd.memory.queue_failed", queued.error()))
                   << "\n";
         return;
@@ -3152,12 +3122,12 @@ void TerminalSessionController::HandleMemoryCommand(const std::string& raw_args)
         }
         const auto topic = project_memory->ReadTopicForShow(id);
         if (!topic.has_value()) {
-            std::cout << trf("cmd.memory.queue_failed", topic.error()) << "\n";
+            TermOut() << trf("cmd.memory.queue_failed", topic.error()) << "\n";
             return;
         }
         const auto& [text, dir] = *topic;
-        std::cout << trf("cmd.memory.show.header", id, PathToUtf8(dir)) << "\n" << text;
-        if (!text.empty() && text.back() != '\n') std::cout << "\n";
+        TermOut() << trf("cmd.memory.show.header", id, PathToUtf8(dir)) << "\n" << text;
+        if (!text.empty() && text.back() != '\n') TermOut() << "\n";
         return;
     }
     if (action == "open") {
@@ -3165,7 +3135,7 @@ void TerminalSessionController::HandleMemoryCommand(const std::string& raw_args)
         words >> id;
         const auto edited = id.empty() ? project_memory->OpenIndexInEditor()
                                        : project_memory->EditTopicInEditor(id);
-        std::cout << (edited.has_value() ? tr("cmd.memory.open.done")
+        TermOut() << (edited.has_value() ? tr("cmd.memory.open.done")
                                          : trf("cmd.memory.queue_failed", edited.error()))
                   << "\n";
         return;
@@ -3175,25 +3145,25 @@ void TerminalSessionController::HandleMemoryCommand(const std::string& raw_args)
         // .state/migration-backup/<时间>/,全部写妥、重建成功才报完成。
         const auto plan = project_memory->PlanMigration();
         if (plan.to_migrate == 0) {
-            std::cout << trf("cmd.memory.migrate.none", plan.to_skip, plan.warnings) << "\n";
+            TermOut() << trf("cmd.memory.migrate.none", plan.to_skip, plan.warnings) << "\n";
             return;
         }
-        std::cout << trf("cmd.memory.migrate.plan", plan.to_migrate, plan.to_skip, plan.warnings) << "\n";
+        TermOut() << trf("cmd.memory.migrate.plan", plan.to_migrate, plan.to_skip, plan.warnings) << "\n";
         for (const auto& item : plan.items) {
             if (item.action == "migrate") {
-                std::cout << "  - " << item.id << " (" << item.file << "; " << item.reason << ")\n";
+                TermOut() << "  - " << item.id << " (" << item.file << "; " << item.reason << ")\n";
             } else if (item.action == "warn") {
-                std::cout << "  [warn] " << item.reason << "\n";
+                TermOut() << "  [warn] " << item.reason << "\n";
             }
         }
         const auto answer = lubancode::cli::ReadLine(theme.confirm + tr("cmd.memory.migrate.confirm") + theme.reset,
                                                      theme, /*esc_rejects=*/true);
         if (!answer.has_value() || (*answer != "y" && *answer != "Y")) {
-            std::cout << tr("cmd.memory.migrate.cancelled") << "\n";
+            TermOut() << tr("cmd.memory.migrate.cancelled") << "\n";
             return;
         }
         const auto result = project_memory->RunMigration();
-        std::cout << (result.has_value()
+        TermOut() << (result.has_value()
                           ? trf("cmd.memory.migrate.done", result->migrated, result->backup_dir)
                           : trf("cmd.memory.queue_failed", result.error()))
                   << "\n";
@@ -3212,7 +3182,7 @@ void TerminalSessionController::SyncWorktreeDirectory() {
     if (project_memory != nullptr) {
         if (const auto updated = project_memory->SetWorkingDirectory(std::filesystem::current_path());
             !updated.has_value()) {
-            std::cout << trf("cmd.memory.switch_failed", updated.error()) << "\n";
+            TermOut() << trf("cmd.memory.switch_failed", updated.error()) << "\n";
         }
     }
     project_instructions = lubancode::config::LoadProjectInstructions(std::filesystem::current_path()).content;
@@ -3255,10 +3225,10 @@ CommandFlow TerminalSessionController::ProcessLine(const std::string& content, b
         }
         {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-            std::cerr << "\n"
+            TermErr() << "\n"
                       << theme.error << tr("error.prefix") << trf("error.unexpected", e.what()) << theme.reset
                       << "\n";
-            std::cerr.flush();
+            TermErr().flush();
         }
         try {
             PersistNewMessages();  // 已入 history 的部分照常落盘,/resume 接得回来
@@ -3353,21 +3323,21 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                                         trf("cmd.write_config_prompt", *write_target));
                                     write_config = answer.has_value() && (*answer == "y" || *answer == "Y");
                                 } else {
-                                    std::cout << tr("cmd.session_only") << "\n";
+                                    TermOut() << tr("cmd.session_only") << "\n";
                                 }
                                 const auto result = command_service.SetRoleModel(role_word, rest, write_config);
                                 if (result.switched) {
-                                    std::cout << trf("cmd.model.role_switched", result.role, result.model)
+                                    TermOut() << trf("cmd.model.role_switched", result.role, result.model)
                                               << "\n";
                                     if (write_config && result.config_written) {
-                                        std::cout << trf("cmd.write_config.updated", *write_target) << "\n";
+                                        TermOut() << trf("cmd.write_config.updated", *write_target) << "\n";
                                     } else if (write_config && !result.error.empty()) {
-                                        std::cout << trf("cmd.write_config.failed", result.error) << "\n";
+                                        TermOut() << trf("cmd.write_config.failed", result.error) << "\n";
                                     }
                                 } else if (result.error == "unknown_role") {
-                                    std::cout << trf("cmd.model.role_unknown", role_word) << "\n";
+                                    TermOut() << trf("cmd.model.role_unknown", role_word) << "\n";
                                 } else {
-                                    std::cout << trf("cmd.model.fetch_failed", result.error) << "\n";
+                                    TermOut() << trf("cmd.model.fetch_failed", result.error) << "\n";
                                 }
                                 break;
                             }
@@ -3380,11 +3350,11 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 if (chosen.empty()) {
                     const auto query = command_service.QueryModels();
                     if (query.fetch_failed) {
-                        std::cout << trf("cmd.model.fetch_failed", query.fetch_error) << "\n";
+                        TermOut() << trf("cmd.model.fetch_failed", query.fetch_error) << "\n";
                         break;
                     }
                     if (query.models.empty()) {
-                        std::cout << tr("cmd.model.list_empty") << "\n";
+                        TermOut() << tr("cmd.model.list_empty") << "\n";
                         break;
                     }
                     const std::optional<std::string> picked = ChooseModelId(query, model_catalog);
@@ -3402,7 +3372,7 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 // <项目>/.lubancode/config.json。
                 const auto result = command_service.SetModel(chosen, /*write_config=*/false);
                 if (!result.switched) {
-                    std::cout << trf("cmd.model.fetch_failed", result.error) << "\n";
+                    TermOut() << trf("cmd.model.fetch_failed", result.error) << "\n";
                     break;
                 }
                 // 五层后端退役(批四):/model 的即时生效改走皮上的 request
@@ -3410,15 +3380,15 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 // 请求带上新模型——前缀指纹从此看得见 model_changed,cache
                 // epoch 的账不再瞎(换模型那一份本来就是断前缀)。
                 SyncAgentRequestPolicy();
-                std::cout << trf("cmd.model.switched", result.model) << "\n";
+                TermOut() << trf("cmd.model.switched", result.model) << "\n";
                 if (result.think_from_catalog) {
-                    std::cout << trf("catalog.apply_think", result.think) << "\n";
+                    TermOut() << trf("catalog.apply_think", result.think) << "\n";
                 }
                 if (result.applied_context_window.has_value()) {
-                    std::cout << trf("catalog.apply_window", *result.applied_context_window) << "\n";
+                    TermOut() << trf("catalog.apply_window", *result.applied_context_window) << "\n";
                 }
                 if (result.instructions_replaced) {
-                    std::cout << trf("catalog.apply_instructions", result.model) << "\n";
+                    TermOut() << trf("catalog.apply_instructions", result.model) << "\n";
                 }
                 if (write_target.has_value()) {
                     const auto answer =
@@ -3426,13 +3396,13 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                     if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
                         const auto written = command_service.WriteModelToConfig(result.model);
                         if (written.has_value()) {
-                            std::cout << trf("cmd.write_config.updated", *write_target) << "\n";
+                            TermOut() << trf("cmd.write_config.updated", *write_target) << "\n";
                         } else {
-                            std::cout << trf("cmd.write_config.failed", written.error()) << "\n";
+                            TermOut() << trf("cmd.write_config.failed", written.error()) << "\n";
                         }
                     }
                 } else {
-                    std::cout << tr("cmd.session_only") << "\n";
+                    TermOut() << tr("cmd.session_only") << "\n";
                 }
                 break;
             }
@@ -3453,7 +3423,7 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
             case lubancode::cli::SlashCommand::Init: {
                 const auto result = lubancode::config::InitializeProjectInstructions(std::filesystem::current_path());
                 if (result.status == lubancode::config::InitProjectInstructionsStatus::Error) {
-                    std::cout << theme.error << trf("cmd.init.failed", PathToUtf8(result.path), result.error)
+                    TermOut() << theme.error << trf("cmd.init.failed", PathToUtf8(result.path), result.error)
                               << theme.reset << "\n";
                     break;
                 }
@@ -3461,7 +3431,7 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 const char* key = result.status == lubancode::config::InitProjectInstructionsStatus::Created
                                       ? "cmd.init.created"
                                       : "cmd.init.exists";
-                std::cout << trf(key, PathToUtf8(result.path)) << "\n";
+                TermOut() << trf(key, PathToUtf8(result.path)) << "\n";
                 break;
             }
             case lubancode::cli::SlashCommand::Language:
@@ -3476,7 +3446,7 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 // stash 是"还没说出口的话",不跟 history 一锅清(规格:草稿
                 // 各自存账);清场时提醒一句它还在。
                 if (lubancode::cli::ComposerStashHasContent()) {
-                    std::cout << theme.stats << tr("stash.still_there") << theme.reset << "\n";
+                    TermOut() << theme.stats << tr("stash.still_there") << theme.reset << "\n";
                 }
                 // Plan 模式单:/clear 起新 thread,回默认配置(单子"切换
                 // 规矩")。计划成品与审阅悬稿一并翻篇,不继承。
@@ -3581,7 +3551,7 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                         payload.match_value = "manual";
                         const auto merged = dispatcher->Emit(lubancode::hooks::HookEvent::PreCompact, payload);
                         if (merged.blocked) {
-                            std::cout << theme.error << "PreCompact 钩子拦下这次压缩: " << merged.block_reason
+                            TermOut() << theme.error << "PreCompact 钩子拦下这次压缩: " << merged.block_reason
                                       << theme.reset << "\n";
                             break;
                         }
@@ -3594,7 +3564,7 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 const auto compact_routed =
                     model_router->Route(lubancode::agent::TaskKind::Compact);
                 if (compact_routed.backend == nullptr) {
-                    std::cout << theme.error << "压缩路由找不到 provider \"" << compact_routed.route.provider
+                    TermOut() << theme.error << "压缩路由找不到 provider \"" << compact_routed.route.provider
                               << "\",本次 /compact 未执行" << theme.reset << "\n";
                     break;
                 }
@@ -3608,7 +3578,7 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                     lubancode::agent::ModelRole::Cheap, compact_routed.route.model, compact_accounting.usage,
                     compact_accounting.duration_ms, compact_accounting.usage_reported);
                 if (compact_result.event.has_value()) {
-                    std::cout << theme.stats
+                    TermOut() << theme.stats
                               << trf("router.compact_flash",
                                      lubancode::cli::FormatTokenCount(compact_result.before_tokens),
                                      lubancode::cli::FormatTokenCount(compact_result.after_tokens),
@@ -3636,7 +3606,7 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                     AttachGoalSnapshotToCompact(compact_event_with_goal);
                     AttachLoopSnapshotToCompact(compact_event_with_goal);
                     if (!session_store.AppendCompactV2Event(compact_event_with_goal)) {
-                        std::cout << theme.error << tr("session.compact_event_failed") << theme.reset << "\n";
+                        TermOut() << theme.error << tr("session.compact_event_failed") << theme.reset << "\n";
                     }
                 }
                 if (compact_result.event.has_value()) {
@@ -3667,7 +3637,7 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
             case lubancode::cli::SlashCommand::Skill:
                 if (HandleSkillCommand(parsed.args, global_skills_root, project_skills_root)) {
                     RefreshSkills();
-                    std::cout << tr("cmd.skill.refreshed") << "\n";
+                    TermOut() << tr("cmd.skill.refreshed") << "\n";
                 }
                 break;
             case lubancode::cli::SlashCommand::Mcp:
@@ -3677,7 +3647,7 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 PrintLspCommand(lsp_manager());
                 break;
             case lubancode::cli::SlashCommand::Todos:
-                std::cout << lubancode::cli::FormatTodoList(todo_state()->items, theme);
+                TermOut() << lubancode::cli::FormatTodoList(todo_state()->items, theme);
                 break;
             case lubancode::cli::SlashCommand::Plugins:
                 PrintPluginsCommand(plugin_mounted(), plugin_warnings());
@@ -3718,28 +3688,28 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                             out_path.erase(out_path.begin());
                         }
                         if (out_path == "--raw" || out_path.rfind("--raw ", 0) == 0) {
-                            std::cout << theme.error
+                            TermOut() << theme.error
                                       << "导出件会离开本机,一律脱敏,没有 --raw 档。" << theme.reset << "\n";
                             break;
                         }
                         if (out_path.empty()) {
-                            std::cout << theme.error << "用法: /trace export <路径>" << theme.reset << "\n";
+                            TermOut() << theme.error << "用法: /trace export <路径>" << theme.reset << "\n";
                             break;
                         }
                         if (!session_store.active()) {
-                            std::cout << theme.error << "本会话没有存档,没有可导出的追踪账。" << theme.reset
+                            TermOut() << theme.error << "本会话没有存档,没有可导出的追踪账。" << theme.reset
                                       << "\n";
                             break;
                         }
                         const auto bytes = lubancode::sessions::ReadSessionFileBytes(session_store.file_path());
                         if (!bytes.has_value()) {
-                            std::cout << theme.error << "会话档读不到: " << session_store.file_path() << theme.reset
+                            TermOut() << theme.error << "会话档读不到: " << session_store.file_path() << theme.reset
                                       << "\n";
                             break;
                         }
                         const auto loaded = lubancode::sessions::ParseSessionFile(*bytes);
                         if (!loaded.has_value()) {
-                            std::cout << theme.error << "会话档解析失败。" << theme.reset << "\n";
+                            TermOut() << theme.error << "会话档解析失败。" << theme.reset << "\n";
                             break;
                         }
                         const auto ledger =
@@ -3783,23 +3753,23 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
 
                         std::ofstream out_file(lubancode::platform::Utf8ToPath(out_path), std::ios::binary | std::ios::trunc);
                         if (!out_file.is_open()) {
-                            std::cout << theme.error << "导出文件打不开: " << out_path << theme.reset << "\n";
+                            TermOut() << theme.error << "导出文件打不开: " << out_path << theme.reset << "\n";
                             break;
                         }
                         const std::string body = bundle.dump(2);
                         out_file.write(body.data(), static_cast<std::streamsize>(body.size()));
                         out_file.close();
-                        std::cout << theme.stats << "已导出脱敏追踪账(" << ledger.executions().size()
+                        TermOut() << theme.stats << "已导出脱敏追踪账(" << ledger.executions().size()
                                   << " 枚 execution): " << out_path << theme.reset << "\n";
                         break;
                     }
                     if (parsed.args == "errors") {
                         const auto lines = trace_hub_->ErrorLines();
                         if (lines.empty()) {
-                            std::cout << theme.stats << "本会话没有明确失败或 unknown 的工具调用。" << theme.reset << "\n";
+                            TermOut() << theme.stats << "本会话没有明确失败或 unknown 的工具调用。" << theme.reset << "\n";
                         } else {
                             for (const std::string& line : lines) {
-                                std::cout << theme.stats << line << theme.reset << "\n";
+                                TermOut() << theme.stats << line << theme.reset << "\n";
                             }
                         }
                         break;
@@ -3818,7 +3788,7 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                                     if (parsed.args.rfind("toolu ", 0) == 0) {
                                         const std::string id = parsed.args.substr(6);
                                         for (const auto* record : ledger.FindByToolUse(id)) {
-                                            std::cout << theme.stats
+                                            TermOut() << theme.stats
                                                       << lubancode::agent::FormatExecutionSummaryLine(*record, false)
                                                       << theme.reset << "\n";
                                         }
@@ -3826,7 +3796,7 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                                         const std::string id = parsed.args.substr(5);
                                         for (const auto& record : ledger.executions()) {
                                             if (record.turn_id == id) {
-                                                std::cout << theme.stats
+                                                TermOut() << theme.stats
                                                           << lubancode::agent::FormatExecutionSummaryLine(record, false)
                                                           << theme.reset << "\n";
                                             }
@@ -3834,22 +3804,22 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                                     } else {
                                         const auto* record = ledger.FindByExecution(parsed.args);
                                         if (record != nullptr) {
-                                            std::cout << theme.stats
+                                            TermOut() << theme.stats
                                                       << lubancode::agent::FormatExecutionSummaryLine(*record, false)
                                                       << theme.reset << "\n";
                                             if (!record->error_code.empty()) {
-                                                std::cout << theme.stats << "  error_code: " << record->error_code
+                                                TermOut() << theme.stats << "  error_code: " << record->error_code
                                                           << theme.reset << "\n";
                                             }
                                             if (!record->source_instance.empty()) {
-                                                std::cout << theme.stats << "  source: " << record->source_instance
+                                                TermOut() << theme.stats << "  source: " << record->source_instance
                                                           << theme.reset << "\n";
                                             }
-                                            std::cout << theme.stats << "  recovery: "
+                                            TermOut() << theme.stats << "  recovery: "
                                                       << lubancode::agent::ToString(record->Classify()) << theme.reset
                                                       << "\n";
                                         } else {
-                                            std::cout << theme.stats << "没有这枚 execution 的账: " << parsed.args
+                                            TermOut() << theme.stats << "没有这枚 execution 的账: " << parsed.args
                                                       << theme.reset << "\n";
                                         }
                                     }
@@ -3860,9 +3830,9 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                     }
                     const std::string summary = trace_hub_->LastBatchSummary();
                     if (summary.empty()) {
-                        std::cout << theme.stats << "还没有工具调用的追踪账(本会话尚未跑过工具)。" << theme.reset << "\n";
+                        TermOut() << theme.stats << "还没有工具调用的追踪账(本会话尚未跑过工具)。" << theme.reset << "\n";
                     } else {
-                        std::cout << theme.stats << summary << theme.reset;
+                        TermOut() << theme.stats << summary << theme.reset;
                     }
                     break;
             }
@@ -3892,14 +3862,14 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 const lubancode::cli::ParsedGoalCommand goal =
                     lubancode::cli::ParseGoalCommand(parsed.args);
                 if (goal.action == lubancode::cli::GoalCommandAction::Invalid) {
-                    std::cout << theme.error;
+                    TermOut() << theme.error;
                     if (goal.bad_word.empty()) {
-                        std::cout << "用法: /goal <objective> | status | edit <objective> | pause | resume | clear";
+                        TermOut() << "用法: /goal <objective> | status | edit <objective> | pause | resume | clear";
                     } else {
-                        std::cout << "子命令或参数不对: " << goal.bad_word
+                        TermOut() << "子命令或参数不对: " << goal.bad_word
                                   << "。正文以子命令词开头时用 /goal -- <正文>";
                     }
-                    std::cout << theme.reset << "\n";
+                    TermOut() << theme.reset << "\n";
                     break;
                 }
                 return HandleGoalCommand(goal);
@@ -3929,7 +3899,7 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 // 后台子代理还在跑时拒绝——归档的是会话档,别把还在写档的
                 // 代理晾在半路。
                 if (!parsed.args.empty()) {
-                    std::cout << theme.error << tr("cmd.archive.usage") << theme.reset << "\n";
+                    TermOut() << theme.error << tr("cmd.archive.usage") << theme.reset << "\n";
                     break;
                 }
                 bool busy = false;
@@ -3943,11 +3913,11 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                     }
                 }
                 if (busy) {
-                    std::cout << theme.error << tr("cmd.archive.busy") << theme.reset << "\n";
+                    TermOut() << theme.error << tr("cmd.archive.busy") << theme.reset << "\n";
                     break;
                 }
                 if (ArchiveCurrentSession(sessions_dir, session_store, theme)) {
-                    std::cout << tr("cmd.archive.exiting") << "\n";
+                    TermOut() << tr("cmd.archive.exiting") << "\n";
                     return CommandFlow::Exit;
                 }
                 break;
@@ -3957,7 +3927,7 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 // 审批悬着时拒绝——slash 分派本身只在输入线程空闲时进,但
                 // 后台子代理可能在飞,这里如实拦。确认屏在 handler。
                 if (!parsed.args.empty()) {
-                    std::cout << theme.error << tr("cmd.delete.usage") << theme.reset << "\n";
+                    TermOut() << theme.error << tr("cmd.delete.usage") << theme.reset << "\n";
                     break;
                 }
                 bool busy = false;
@@ -3971,12 +3941,12 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                     }
                 }
                 if (busy) {
-                    std::cout << theme.error << tr("cmd.delete.busy") << theme.reset << "\n";
+                    TermOut() << theme.error << tr("cmd.delete.busy") << theme.reset << "\n";
                     break;
                 }
                 if (DeleteCurrentSession(sessions_dir, session_store, session_meta, session_title,
                                          theme)) {
-                    std::cout << tr("cmd.delete.exiting") << "\n";
+                    TermOut() << tr("cmd.delete.exiting") << "\n";
                     return CommandFlow::Exit;
                 }
                 break;
@@ -4096,7 +4066,7 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                         executors[lubancode::workflow::NodeKind::Llm] =
                             std::make_shared<lubancode::workflow::LlmExecutor>(llm_options);
                     }
-                    std::cout << lubancode::app::RunWorkflowById(wf_ctx, wf_parsed.id, wf_parsed.rest, executors);
+                    TermOut() << lubancode::app::RunWorkflowById(wf_ctx, wf_parsed.id, wf_parsed.rest, executors);
                     break;
                 }
                 HandleWorkflowCommand(parsed.args, wf_ctx);
@@ -4177,11 +4147,11 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                             executors[lubancode::workflow::NodeKind::Llm] =
                                 std::make_shared<lubancode::workflow::LlmExecutor>(llm_options);
                         }
-                        std::cout << lubancode::app::RunWorkflowById(wf_ctx, wf_id, parsed.args, executors);
+                        TermOut() << lubancode::app::RunWorkflowById(wf_ctx, wf_id, parsed.args, executors);
                         break;
                     }
                 }
-                std::cout << trf("error.unknown_command", parsed.raw_word) << "\n";
+                TermOut() << trf("error.unknown_command", parsed.raw_word) << "\n";
                 break;
             }
             case lubancode::cli::SlashCommand::NotSlash:
@@ -4245,14 +4215,14 @@ void TerminalSessionController::RestoreGoalFromArchive() {
     if (!loaded.has_value() || loaded->goal_events.empty()) return;
     const auto stats = goal_coordinator_->RestoreFromArchive(loaded->goal_events);
     if (stats.replayed == 0 && stats.skipped == 0) return;
-    std::cout << theme.stats
+    TermOut() << theme.stats
               << "目标账已随会话恢复(" << stats.replayed << " 条事件";
     if (stats.skipped > 0) {
-        std::cout << "," << stats.skipped << " 条坏行跳过";
+        TermOut() << "," << stats.skipped << " 条坏行跳过";
     }
-    std::cout << ")。默认暂停续跑;查看 /goal status,续跑 /goal resume。" << theme.reset << "\n";
+    TermOut() << ")。默认暂停续跑;查看 /goal status,续跑 /goal resume。" << theme.reset << "\n";
     if (stats.suspended_by_policy) {
-        std::cout << theme.stats
+        TermOut() << theme.stats
                   << "goals 功能当前未开启:目标挂起(SuspendedByPolicy),可查、可导出、可 clear,不自动跑。"
                   << theme.reset << "\n";
     }
@@ -4315,7 +4285,7 @@ CommandFlow TerminalSessionController::HandleGoalCommand(const lubancode::cli::P
         // 查账纯本地输出,不发模型(单子"状态查询不发模型")。
         const auto outcome = lubancode::app::FormatGoalStatus(*goal_coordinator_, now_ms);
         for (const std::string& line : outcome.lines) {
-            std::cout << theme.stats << line << theme.reset << "\n";
+            TermOut() << theme.stats << line << theme.reset << "\n";
         }
         return CommandFlow::Continue;
     }
@@ -4324,17 +4294,17 @@ CommandFlow TerminalSessionController::HandleGoalCommand(const lubancode::cli::P
         const auto result = goal_coordinator_->Create(goal.objective, workspace_root,
                                                       workspace_root, now_ms);
         if (!result.ok) {
-            std::cout << theme.error
+            TermOut() << theme.error
                       << lubancode::app::DescribeGoalErrorCode(result.error_code, result.error_message)
                       << theme.reset << "\n";
             if (result.error_code == lubancode::runtime::goal::kErrGoalStoreUnavailable) {
-                std::cout << theme.stats
+                TermOut() << theme.stats
                           << "开启:配置文件里 [features] goals = true(环境变量 LUBANCODE_DISABLE_GOALS=1 是总闸)"
                           << theme.reset << "\n";
             }
             return CommandFlow::Continue;
         }
-        std::cout << theme.stats << "目标已立: " << result.payload.value("goal_id", std::string())
+        TermOut() << theme.stats << "目标已立: " << result.payload.value("goal_id", std::string())
                   << "(状态 " << result.payload.value("state", std::string())
                   << ")。首轮将先拟合同(做什么/不动什么/拿什么验/何时停),合同冻结后才开始排轮。"
                   << theme.reset << "\n";
@@ -4350,12 +4320,12 @@ CommandFlow TerminalSessionController::HandleGoalCommand(const lubancode::cli::P
         const int expected = task != nullptr ? task->revision : 0;
         const auto result = goal_coordinator_->Edit(goal.objective, expected, now_ms);
         if (!result.ok) {
-            std::cout << theme.error
+            TermOut() << theme.error
                       << lubancode::app::DescribeGoalErrorCode(result.error_code, result.error_message)
                       << theme.reset << "\n";
             return CommandFlow::Continue;
         }
-        std::cout << theme.stats << "目标已改(revision " << result.payload.value("revision", 0)
+        TermOut() << theme.stats << "目标已改(revision " << result.payload.value("revision", 0)
                   << ");合同重拟,防空转连击清零,用量账保留。" << theme.reset << "\n";
         return CommandFlow::Continue;
     }
@@ -4363,18 +4333,18 @@ CommandFlow TerminalSessionController::HandleGoalCommand(const lubancode::cli::P
     if (goal.action == Action::Pause) {
         const auto result = goal_coordinator_->Pause(now_ms);
         if (!result.ok) {
-            std::cout << theme.error
+            TermOut() << theme.error
                       << lubancode::app::DescribeGoalErrorCode(result.error_code, result.error_message)
                       << theme.reset << "\n";
             return CommandFlow::Continue;
         }
-        std::cout << theme.stats;
+        TermOut() << theme.stats;
         if (result.payload.value("immediate", true)) {
-            std::cout << "目标已暂停;checkpoint/预算/防空转账都留着。";
+            TermOut() << "目标已暂停;checkpoint/预算/防空转账都留着。";
         } else {
-            std::cout << "pause 已请求;正在跑的轮在下一安全边界收口。";
+            TermOut() << "pause 已请求;正在跑的轮在下一安全边界收口。";
         }
-        std::cout << theme.reset << "\n";
+        TermOut() << theme.reset << "\n";
         EmitGoalHook(lubancode::hooks::HookEvent::GoalPaused,
                      nlohmann::json{{"goal_id", goal_coordinator_->task() != nullptr
                                                      ? goal_coordinator_->task()->id
@@ -4389,12 +4359,12 @@ CommandFlow TerminalSessionController::HandleGoalCommand(const lubancode::cli::P
         const int expected = task != nullptr ? task->revision : 0;
         const auto result = goal_coordinator_->Resume(expected, now_ms);
         if (!result.ok) {
-            std::cout << theme.error
+            TermOut() << theme.error
                       << lubancode::app::DescribeGoalErrorCode(result.error_code, result.error_message)
                       << theme.reset << "\n";
             return CommandFlow::Continue;
         }
-        std::cout << theme.stats << "目标已续(从最后 checkpoint 起,不重放旧 iteration)。"
+        TermOut() << theme.stats << "目标已续(从最后 checkpoint 起,不重放旧 iteration)。"
                   << theme.reset << "\n";
         return CommandFlow::Continue;
     }
@@ -4402,26 +4372,26 @@ CommandFlow TerminalSessionController::HandleGoalCommand(const lubancode::cli::P
     if (goal.action == Action::Clear) {
         const auto* task = goal_coordinator_->task();
         if (task == nullptr) {
-            std::cout << theme.stats << "当前会话没有目标。" << theme.reset << "\n";
+            TermOut() << theme.stats << "当前会话没有目标。" << theme.reset << "\n";
             return CommandFlow::Continue;
         }
         for (const std::string& line : lubancode::app::BuildGoalClearConfirmLines(*task)) {
-            std::cout << theme.stats << line << theme.reset << "\n";
+            TermOut() << theme.stats << line << theme.reset << "\n";
         }
         const std::optional<std::string> answer =
             lubancode::cli::ReadLine("y/N", theme, true);
         if (!answer.has_value() || !(*answer == "y" || *answer == "Y" || *answer == "yes")) {
-            std::cout << theme.stats << "未清除,目标照旧。" << theme.reset << "\n";
+            TermOut() << theme.stats << "未清除,目标照旧。" << theme.reset << "\n";
             return CommandFlow::Continue;
         }
         const auto result = goal_coordinator_->Clear(now_ms);
         if (!result.ok) {
-            std::cout << theme.error
+            TermOut() << theme.error
                       << lubancode::app::DescribeGoalErrorCode(result.error_code, result.error_message)
                       << theme.reset << "\n";
             return CommandFlow::Continue;
         }
-        std::cout << theme.stats << "目标已清除;审计账保留在会话存档,已改文件不撤销。" << theme.reset
+        TermOut() << theme.stats << "目标已清除;审计账保留在会话存档,已改文件不撤销。" << theme.reset
                   << "\n";
         return CommandFlow::Continue;
     }
@@ -4476,7 +4446,7 @@ void TerminalSessionController::FlushLoopEvents() {
         if (!session_store.AppendRawLine(line.dump())) {
             // 写盘失败熔断:失去恢复账后继续跑,风险大过便利。
             loop_scheduler_->FailStore("session append failed");
-            std::cout << theme.error
+            TermOut() << theme.error
                       << "loop 事件写盘失败,定时任务已熔断(已跑的拍照常收口;新拍不再排)。"
                       << theme.reset << "\n";
             return;
@@ -4626,13 +4596,13 @@ CommandFlow TerminalSessionController::HandleLoopCommand(
     const lubancode::cli::ParsedLoopCommand& command) {
     // 无交互入口明拒(pipe/one-shot 没人回来答审批,loop 会挂死)。
     if (!spinner_enabled) {
-        std::cout << theme.error
+        TermOut() << theme.error
                   << "当前不是交互终端,不能建常驻 loop(无人可答审批会挂死)。"
                   << theme.reset << "\n";
         return CommandFlow::Continue;
     }
     if (!config.features_loop || lubancode::app::LoopDisabledByEnv()) {
-        std::cout << theme.error
+        TermOut() << theme.error
                   << "loop 功能未开启:配置文件里 [features] loop = true(环境变量 "
                      "LUBANCODE_DISABLE_LOOP=1 是总闸)。"
                   << theme.reset << "\n";
@@ -4646,14 +4616,14 @@ CommandFlow TerminalSessionController::HandleLoopCommand(
     }();
 
     if (command.action == lubancode::cli::LoopCommandAction::Invalid) {
-        std::cout << theme.error;
+        TermOut() << theme.error;
         if (!command.error_hint.empty()) {
-            std::cout << command.error_hint;
+            TermOut() << command.error_hint;
         } else {
-            std::cout << "用法: /loop [间隔] [正文] | list | status <id|all> | pause <id|all> | "
+            TermOut() << "用法: /loop [间隔] [正文] | list | status <id|all> | pause <id|all> | "
                          "resume <id|all> | stop <id|all> | run <id>";
         }
-        std::cout << theme.reset << "\n";
+        TermOut() << theme.reset << "\n";
         return CommandFlow::Continue;
     }
 
@@ -4661,7 +4631,7 @@ CommandFlow TerminalSessionController::HandleLoopCommand(
         // inline prompt 以 '/' 开头:拒绝(首版不许调度 slash 命令;单子
         // "Slash prompt 的边界"——/exit /clear 这类定时执行会出事)。
         if (!command.prompt.empty() && command.prompt.front() == '/') {
-            std::cout << theme.error
+            TermOut() << theme.error
                       << "loop 正文不能以 / 开头(定时执行 slash 命令首版不支持);请改写成自然语言。"
                       << theme.reset << "\n";
             return CommandFlow::Continue;
@@ -4672,7 +4642,7 @@ CommandFlow TerminalSessionController::HandleLoopCommand(
             const auto parsed_interval =
                 lubancode::runtime::loop::ParseLoopInterval(command.interval_text);
             if (!parsed_interval.has_value()) {
-                std::cout << theme.error << "间隔写法不对: " << command.interval_text
+                TermOut() << theme.error << "间隔写法不对: " << command.interval_text
                           << "(只认 <正整数>m|h|d,最小 1m,最大 7d)。" << theme.reset << "\n";
                 return CommandFlow::Continue;
             }
@@ -4682,7 +4652,7 @@ CommandFlow TerminalSessionController::HandleLoopCommand(
         // 文件源每拍重读)。
         const auto resolved = ResolveLoopPrompt(command.prompt);
         if (!resolved.error.empty()) {
-            std::cout << theme.error << resolved.error << theme.reset << "\n";
+            TermOut() << theme.error << resolved.error << theme.reset << "\n";
             return CommandFlow::Continue;
         }
         const auto outcome = lubancode::app::HandleLoopCreateCommand(
@@ -4690,7 +4660,7 @@ CommandFlow TerminalSessionController::HandleLoopCommand(
             session_store.active() ? session_store.session_id() : std::string(), now_ms,
             resolved.source, resolved.file);
         for (const std::string& line : outcome.lines) {
-            std::cout << theme.stats << line << theme.reset << "\n";
+            TermOut() << theme.stats << line << theme.reset << "\n";
         }
         FlushLoopEvents();
         return CommandFlow::Continue;
@@ -4698,7 +4668,7 @@ CommandFlow TerminalSessionController::HandleLoopCommand(
 
     const auto outcome = lubancode::app::HandleLoopManageCommand(*loop_scheduler_, command, now_ms);
     for (const std::string& line : outcome.lines) {
-        std::cout << theme.stats << line << theme.reset << "\n";
+        TermOut() << theme.stats << line << theme.reset << "\n";
     }
     FlushLoopEvents();
     return CommandFlow::Continue;
@@ -4770,7 +4740,7 @@ bool TerminalSessionController::PumpLoopTicks() {
                                         now_ms, resolved.error.empty() ? "loop.md 没了" : resolved.error);
             loop_scheduler_->Stop(tick->task.task_id, now_ms, "prompt_source_missing");
             FlushLoopEvents();
-            std::cout << theme.error << "loop " << tick->task.task_id
+            TermOut() << theme.error << "loop " << tick->task.task_id
                       << " 的 prompt 源读失败,任务已停: "
                       << (resolved.error.empty() ? std::string("loop.md 没了") : resolved.error)
                       << theme.reset << "\n";
@@ -4793,7 +4763,7 @@ bool TerminalSessionController::PumpLoopTicks() {
         loop_control_state_->complete_requested = false;
         loop_control_state_->pause_requested = false;
     }
-    std::cout << theme.stats << "[loop " << tick->task.task_id << " 第 " << tick->tick.tick_no
+    TermOut() << theme.stats << "[loop " << tick->task.task_id << " 第 " << tick->tick.tick_no
               << " 拍]" << theme.reset << "\n";
     bool turn_failed = false;
     RunUserTurn(message, &turn_failed);
@@ -4823,7 +4793,7 @@ void TerminalSessionController::PumpGoalContinuation(std::int64_t now_ms) {
         goal_checkpoint_state_->iteration_id = started.iteration.id;
         goal_checkpoint_state_->entries.clear();
     }
-    std::cout << theme.stats << "[goal " << started.iteration.goal_id << " iteration "
+    TermOut() << theme.stats << "[goal " << started.iteration.goal_id << " iteration "
               << started.iteration.index << "]" << theme.reset << "\n";
     EmitGoalHook(lubancode::hooks::HookEvent::GoalIterationStart,
                  nlohmann::json{{"goal_id", started.iteration.goal_id},
@@ -4936,7 +4906,7 @@ void TerminalSessionController::CloseGoalIteration(const std::string& turn_id, b
     }
     const auto checkpoint_result = goal_coordinator_->CheckpointReached(checkpoint, now_ms);
     if (!checkpoint_result.ok) {
-        std::cout << theme.error << "goal checkpoint 落账失败: "
+        TermOut() << theme.error << "goal checkpoint 落账失败: "
                   << checkpoint_result.error_message << theme.reset << "\n";
         return;
     }
@@ -4970,12 +4940,12 @@ void TerminalSessionController::CloseGoalIteration(const std::string& turn_id, b
     if (input.evidence.empty()) {
         // checkpoint 引用的证据一枚都没有:evaluator 没有可判的材料,
         // 记 provider 连败同路的"无材料"分支——判 continue 只会空转。
-        std::cout << theme.stats
+        TermOut() << theme.stats
                   << "goal 轮收口:checkpoint 没有可核证据,不烧 evaluator(下轮先产证据)。"
                   << theme.reset << "\n";
         const auto schedule = goal_coordinator_->ScheduleNextIteration(now_ms);
         if (!schedule.ok) {
-            std::cout << theme.stats << "goal 停排下一轮: " << schedule.error_message
+            TermOut() << theme.stats << "goal 停排下一轮: " << schedule.error_message
                       << theme.reset << "\n";
         }
         return;
@@ -4998,7 +4968,7 @@ void TerminalSessionController::CloseGoalIteration(const std::string& turn_id, b
     if (!evaluation.has_value()) {
         // evaluator 两坏/请求失败:goal 进 Paused(evaluator_failed),
         // 不默认 achieved 也不盲开下一轮(单子"evaluator 失败")。
-        std::cout << theme.error << "goal evaluator 失败: " << evaluation.error()
+        TermOut() << theme.error << "goal evaluator 失败: " << evaluation.error()
                   << ";目标转暂停(/goal resume 续)。" << theme.reset << "\n";
         (void)goal_coordinator_->NoteEvaluatorFailed(evaluation.error(), now_ms);
         EmitGoalHook(lubancode::hooks::HookEvent::GoalPaused,
@@ -5011,15 +4981,15 @@ void TerminalSessionController::CloseGoalIteration(const std::string& turn_id, b
     // ---- 4) 判词落地:continue 排下一轮,terminal 收账 ----
     const auto applied = goal_coordinator_->ApplyEvaluation(evaluation->evaluation, now_ms);
     if (!applied.ok) {
-        std::cout << theme.error << "goal 判词落账失败: " << applied.error_message
+        TermOut() << theme.error << "goal 判词落账失败: " << applied.error_message
                   << theme.reset << "\n";
         return;
     }
     const std::string decision = applied.payload.value("decision", std::string());
-    std::cout << theme.stats << "[goal 判词: " << decision << "] "
+    TermOut() << theme.stats << "[goal 判词: " << decision << "] "
               << evaluation->evaluation.summary << theme.reset << "\n";
     if (evaluation->evaluation.overridden_achieved) {
-        std::cout << theme.stats << "  (evaluator 判 achieved 被程序门槛改判 continue: "
+        TermOut() << theme.stats << "  (evaluator 判 achieved 被程序门槛改判 continue: "
                   << evaluation->evaluation.override_reason << ")" << theme.reset << "\n";
     }
     EmitGoalHook(lubancode::hooks::HookEvent::GoalEvaluated,
@@ -5042,7 +5012,7 @@ void TerminalSessionController::CloseGoalIteration(const std::string& turn_id, b
     if (applied.payload.value("schedule_next", false)) {
         const auto schedule = goal_coordinator_->ScheduleNextIteration(now_ms);
         if (!schedule.ok) {
-            std::cout << theme.stats << "goal 停排下一轮: " << schedule.error_message
+            TermOut() << theme.stats << "goal 停排下一轮: " << schedule.error_message
                       << theme.reset << "\n";
         }
     }
@@ -5084,7 +5054,7 @@ void TerminalSessionController::FinishLoopTick(const std::string& tick_id, bool 
         loop_scheduler_->Complete(control_task_id, now_ms, "model_declared_complete");
         loop_scheduler_->FinishTick(tick_id, LoopTickOutcome::Succeeded, now_ms, "loop_control_complete");
         FlushLoopEvents();
-        std::cout << theme.stats << "loop " << control_task_id
+        TermOut() << theme.stats << "loop " << control_task_id
                   << ":模型声明完成,任务落终态(下一拍不再排)。" << theme.reset << "\n";
         return;
     }
@@ -5092,7 +5062,7 @@ void TerminalSessionController::FinishLoopTick(const std::string& tick_id, bool 
         loop_scheduler_->Pause(control_task_id, now_ms, "model_requested_pause");
         loop_scheduler_->FinishTick(tick_id, LoopTickOutcome::Succeeded, now_ms, "loop_control_pause");
         FlushLoopEvents();
-        std::cout << theme.stats << "loop " << control_task_id
+        TermOut() << theme.stats << "loop " << control_task_id
                   << ":模型请求暂停(需要用户处理);续跑 /loop resume。" << theme.reset << "\n";
         return;
     }
@@ -5159,7 +5129,7 @@ void TerminalSessionController::RestoreLoopFromArchive() {
             ++resumed_active;
         }
     }
-    std::cout << theme.stats << "loop 任务已随会话恢复(" << replayed << " 条事件;"
+    TermOut() << theme.stats << "loop 任务已随会话恢复(" << replayed << " 条事件;"
               << resumed_active << " 只默认暂停,续跑 /loop resume <id>)。" << theme.reset << "\n";
     FlushLoopEvents();
 }
@@ -5168,7 +5138,7 @@ CommandFlow TerminalSessionController::RunUserTurn(const std::string& content, b
     // 欢迎页允许空配置进主界面；slash 命令在 ProcessLine 上一层已先分流。
     // 普通正文到这里才拦，免得拿空 base_url 真发请求、落下一场假会话。
     if (!lubancode::config::RequireConfigured(config_result_).has_value()) {
-        std::cout << theme.error << tr("setup.turn.blocked") << theme.reset << "\n";
+        TermOut() << theme.error << tr("setup.turn.blocked") << theme.reset << "\n";
         if (autosend_failed != nullptr) {
             *autosend_failed = true;
         }
@@ -5195,7 +5165,7 @@ CommandFlow TerminalSessionController::RunUserTurn(const std::string& content, b
     // 活着的提及附账进 turn context(不进永久 history)。
     const auto [mention_error, mention_ledger] = BuildMentionLedger(content);
     if (!mention_error.empty()) {
-        std::cout << theme.error << mention_error << theme.reset << "\n";
+        TermOut() << theme.error << mention_error << theme.reset << "\n";
         if (autosend_failed != nullptr) {
             *autosend_failed = true;  // 这轮没发出去:自动发送的消息按"没送达"回队
         }
@@ -5346,7 +5316,7 @@ void TerminalSessionController::ExtractTurnMemory(const std::string& user_text, 
     // 短闪一行:任务种类 + 角色:模型(规格"运行提示")。采样走
     // ModelRouterService::Sample 一站(批一·病四):路由/采样/记账一扇门。
     const auto extract_route = model_router->RouteInfo(lubancode::agent::TaskKind::MemoryExtract);
-    std::cout << theme.stats
+    TermOut() << theme.stats
               << trf("router.task_flash", trf("memory.extract.running", task_type),
                      "cheap:" + extract_route.model)
               << theme.reset << "\n";
@@ -5373,7 +5343,7 @@ void TerminalSessionController::ExtractTurnMemory(const std::string& user_text, 
         extraction = FinishMemoryExtraction(sampled.result);
     }
     if (!extraction.has_value()) {
-        std::cout << theme.stats << trf("memory.extract.failed", extraction.error()) << theme.reset << "\n";
+        TermOut() << theme.stats << trf("memory.extract.failed", extraction.error()) << theme.reset << "\n";
         return;
     }
 
@@ -5428,7 +5398,7 @@ void TerminalSessionController::ExtractTurnMemory(const std::string& user_text, 
         }
     }
     if (queued + written > 0) {
-        std::cout << theme.stats << trf("memory.extract.done", queued, written) << theme.reset << "\n";
+        TermOut() << theme.stats << trf("memory.extract.done", queued, written) << theme.reset << "\n";
     }
 }
 
@@ -5510,12 +5480,12 @@ void TerminalSessionController::MaybeGenerateSessionTitle(lubancode::agent::Task
     }
     session_title = *title;
     if (session_store.AppendTitleEvent(session_title)) {
-        std::cout << theme.stats
+        TermOut() << theme.stats
                   << trf("router.task_flash", trf("cmd.title.set", session_title),
                          "cheap:" + routed.route.model)
                   << theme.reset << "\n";
     } else {
-        std::cout << theme.error << tr("cmd.title.write_failed") << theme.reset << "\n";
+        TermOut() << theme.error << tr("cmd.title.write_failed") << theme.reset << "\n";
         session_title.clear();  // 落不了盘就不占内存标题,/sessions 仍用首句
     }
 }
@@ -5580,14 +5550,14 @@ bool TerminalSessionController::TryRunCompact(bool midturn) {
             payload.match_value = "auto";
             const auto merged = dispatcher->Emit(lubancode::hooks::HookEvent::PreCompact, payload);
             if (merged.blocked) {
-                std::cout << theme.error << "PreCompact 钩子拦下这次自动压缩: " << merged.block_reason
+                TermOut() << theme.error << "PreCompact 钩子拦下这次自动压缩: " << merged.block_reason
                           << theme.reset << "\n";
                 return false;  // 压缩被拦不是错误:主流程照走,旧历史不动
             }
         }
     }
 
-    std::cout << theme.stats << tr(midturn ? "compact.midturn_start" : "compact.auto_start") << theme.reset << "\n";
+    TermOut() << theme.stats << tr(midturn ? "compact.midturn_start" : "compact.auto_start") << theme.reset << "\n";
     lubancode::cli::Spinner spinner(theme, spinner_enabled);
     // 走路由给的 backend(cheap 跨 provider 时是另一只裸 client,理由同
     // /compact:压缩自己把 route.model 写进 request.model)。分层路:装得下
@@ -5607,7 +5577,7 @@ bool TerminalSessionController::TryRunCompact(bool midturn) {
         model_router->ledger().RecordFallback(lubancode::agent::TaskKind::Compact,
                                               lubancode::agent::ModelRole::Cheap,
                                               lubancode::agent::ModelRole::Normal, reason);
-        std::cout << theme.stats
+        TermOut() << theme.stats
                   << trf("router.fallback_flash", "cheap:" + compact_routed.route.model,
                          "normal:" + repair_routed.route.model)
                   << theme.reset << "\n";
@@ -5628,7 +5598,7 @@ bool TerminalSessionController::TryRunCompact(bool midturn) {
                                   compact_accounting.duration_ms, compact_accounting.usage_reported);
 
     if (!result.has_value()) {
-        std::cout << theme.error << trf("compact.auto_failed", result.error().message) << theme.reset
+        TermOut() << theme.error << trf("compact.auto_failed", result.error().message) << theme.reset
                   << tr("compact.auto_failed_tail") << "\n";
         return false;
     }
@@ -5645,7 +5615,7 @@ bool TerminalSessionController::TryRunCompact(bool midturn) {
     main_agent->ReplaceHistory(new_history);
     const std::size_t after_tokens = lubancode::agent::EstimateHistoryTokens(main_agent->History());
     // 状态栏短闪:压缩前后与所用角色一行交代(规格"运行提示")。
-    std::cout << theme.stats
+    TermOut() << theme.stats
               << trf("router.compact_flash", lubancode::cli::FormatTokenCount(before_tokens),
                      lubancode::cli::FormatTokenCount(after_tokens),
                      (used_role == lubancode::agent::ModelRole::Normal ? std::string("normal:")
@@ -5686,21 +5656,21 @@ bool TerminalSessionController::TryRunCompact(bool midturn) {
         // 写盘校验,理由同 /compact 分支。
         AttachGoalSnapshotToCompact(compact_event);
         if (!session_store.AppendCompactV2Event(compact_event)) {
-            std::cout << theme.error << tr("session.compact_event_failed") << theme.reset << "\n";
+            TermOut() << theme.error << tr("session.compact_event_failed") << theme.reset << "\n";
         }
     }
     if (!options.budget.window_tokens.has_value()) {
-        std::cout << theme.stats << tr("cmd.compact.window_unknown") << theme.reset << "\n";
+        TermOut() << theme.stats << tr("cmd.compact.window_unknown") << theme.reset << "\n";
     }
     if (result->metrics.hierarchical) {
-        std::cout << trf("cmd.compact.hierarchical", result->metrics.chunks, result->metrics.reduce_passes)
+        TermOut() << trf("cmd.compact.hierarchical", result->metrics.chunks, result->metrics.reduce_passes)
                   << "\n";
     }
-    std::cout << trf("compact.done_stats", after_tokens, result->manifest.constraints.size(),
+    TermOut() << trf("compact.done_stats", after_tokens, result->manifest.constraints.size(),
                      result->manifest.open_items.size())
               << "\n";
     if (midturn) {
-        std::cout << tr("compact.midturn_done") << "\n";
+        TermOut() << tr("compact.midturn_done") << "\n";
     }
     // PostCompact 审计 + 压缩后的上下文重注入走 SessionStart(source=
     // compact)——自动压缩后紧接着的续请求前送达,不拖到下一条用户消息
@@ -5722,10 +5692,10 @@ void TerminalSessionController::HandleContextPressure(const lubancode::agent::Co
     // AfterHardTrim:字符安全网这次真丢了东西。显式告警,不许静默降级——
     // 用户须知道模型眼下已经看不到那段原文;完整流水仍在存档,/export 可查。
     if (pressure.hard_trimmed_turns) {
-        std::cout << theme.error << trf("compact.hard_trim_turns", pressure.hard_dropped_messages) << theme.reset
+        TermOut() << theme.error << trf("compact.hard_trim_turns", pressure.hard_dropped_messages) << theme.reset
                   << "\n";
     } else if (pressure.hard_truncated_results) {
-        std::cout << theme.error << tr("compact.hard_trim_results") << theme.reset << "\n";
+        TermOut() << theme.error << tr("compact.hard_trim_results") << theme.reset << "\n";
     }
 }
 
@@ -6048,14 +6018,14 @@ void TerminalSessionController::CleanupBackgroundAgents(bool dispose_queue) {
         if (!discarded.empty()) {
             PersistSteeringQueue();
             for (const std::string& row : lubancode::cli::BuildQueueDisposalRows(discarded)) {
-                std::cout << theme.error << row << theme.reset << "\n";
+                TermOut() << theme.error << row << theme.reset << "\n";
             }
         }
     } else if (!SessionSteeringQueue().empty()) {
         // 退场:排队账已在 Run() 落档,这里只说一句去处,别让人以为丢了。
         const auto snapshot = SessionSteeringQueue().Snapshot();
         for (const std::string& row : lubancode::cli::BuildQueueArchiveRows(snapshot)) {
-            std::cout << theme.stats << row << theme.reset << "\n";
+            TermOut() << theme.stats << row << theme.reset << "\n";
         }
     }
     if (session_agent_tool() == nullptr) {
@@ -6063,7 +6033,7 @@ void TerminalSessionController::CleanupBackgroundAgents(bool dispose_queue) {
     }
     session_agent_tool()->CancelAllTasks();
     for (const auto& line : session_agent_tool()->TakeUndeliveredInboxReport()) {
-        std::cout << theme.stats << line << theme.reset << "\n";
+        TermOut() << theme.stats << line << theme.reset << "\n";
     }
 }
 
@@ -6125,12 +6095,12 @@ void TerminalSessionController::RestorePlanStateFrom(
     if (restored_plan.has_value() && restored_plan->state == PlanReviewState::Approved &&
         restored_mode == CollaborationMode::Plan) {
         restored_mode = CollaborationMode::Default;
-        std::cout << theme.stats << tr("plan.resume.approved_pending") << theme.reset << "\n";
+        TermOut() << theme.stats << tr("plan.resume.approved_pending") << theme.reset << "\n";
     }
     session_runtime_.RestoreCollaborationMode(restored_mode, restored_revision);
     prompt_options.plan_mode = restored_mode == CollaborationMode::Plan;
     if (restored_mode == CollaborationMode::Plan) {
-        std::cout << theme.stats << tr("plan.status.in_plan") << theme.reset << "\n";
+        TermOut() << theme.stats << tr("plan.status.in_plan") << theme.reset << "\n";
     }
     if (restored_plan.has_value()) {
         if (restored_plan->state == PlanReviewState::Presented) {
@@ -6170,52 +6140,52 @@ CommandFlow TerminalSessionController::HandlePlanCommand(const std::string& args
     const bool busy = SessionSteeringQueue().HasDeliverable(lubancode::cli::MessageTarget::Main()) ||
                       (session_agent_tool() != nullptr && session_agent_tool()->HasRunningTasks());
     if (busy) {
-        std::cout << theme.error << tr("plan.busy") << theme.reset << "\n";
+        TermOut() << theme.error << tr("plan.busy") << theme.reset << "\n";
         return CommandFlow::Continue;
     }
 
     switch (parsed.action) {
         case PlanCommandAction::Invalid:
-            std::cout << theme.error << trf("plan.bad_sub", args) << theme.reset << "\n";
+            TermOut() << theme.error << trf("plan.bad_sub", args) << theme.reset << "\n";
             return CommandFlow::Continue;
         case PlanCommandAction::Status: {
-            std::cout << theme.stats
+            TermOut() << theme.stats
                       << tr(in_plan ? "plan.status.in_plan" : "plan.status.in_default") << theme.reset << "\n";
             if (const auto* plan = session_runtime_.latest_plan()) {
-                std::cout << theme.stats
+                TermOut() << theme.stats
                           << trf("plan.status.plan_line", plan->plan_id,
                                  static_cast<int>(plan->revision),
                                  lubancode::runtime::ToString(plan->state))
                           << theme.reset << "\n";
             } else {
-                std::cout << theme.stats << tr("plan.status.no_plan") << theme.reset << "\n";
+                TermOut() << theme.stats << tr("plan.status.no_plan") << theme.reset << "\n";
             }
             return CommandFlow::Continue;
         }
         case PlanCommandAction::Off:
             if (!in_plan) {
-                std::cout << theme.stats << tr("plan.not_in") << theme.reset << "\n";
+                TermOut() << theme.stats << tr("plan.not_in") << theme.reset << "\n";
                 return CommandFlow::Continue;
             }
             SwitchCollaborationMode(CollaborationMode::Default, "off");
             plan_review_pending_.reset();
-            std::cout << theme.stats << tr("plan.exited") << theme.reset << "\n";
+            TermOut() << theme.stats << tr("plan.exited") << theme.reset << "\n";
             return CommandFlow::Continue;
         case PlanCommandAction::Review:
             RunPlanReviewPrompt();
             return CommandFlow::Continue;
         case PlanCommandAction::Enter:
             if (in_plan) {
-                std::cout << theme.stats << tr("plan.already_in") << theme.reset << "\n";
+                TermOut() << theme.stats << tr("plan.already_in") << theme.reset << "\n";
                 return CommandFlow::Continue;
             }
             SwitchCollaborationMode(CollaborationMode::Plan, "slash");
-            std::cout << theme.stats << tr("plan.entered") << theme.reset << "\n";
+            TermOut() << theme.stats << tr("plan.entered") << theme.reset << "\n";
             return CommandFlow::Continue;
         case PlanCommandAction::EnterWithTask: {
             if (!in_plan) {
                 SwitchCollaborationMode(CollaborationMode::Plan, "slash");
-                std::cout << theme.stats << tr("plan.entered") << theme.reset << "\n";
+                TermOut() << theme.stats << tr("plan.entered") << theme.reset << "\n";
             }
             // 正文立刻作为规划请求发一轮(带 [Plan 模式规划请求] 前缀,与
             // 普通消息分得开——resume 重放时看得出这轮是规划请求)。
@@ -6316,11 +6286,11 @@ void TerminalSessionController::MaybeCollectPlanProposal(std::size_t history_bef
     }
     const lubancode::runtime::ProposedPlanScan scan = lubancode::runtime::ScanProposedPlan(text);
     if (scan.ambiguous) {
-        std::cout << theme.error << tr("plan.ambiguous") << theme.reset << "\n";
+        TermOut() << theme.error << tr("plan.ambiguous") << theme.reset << "\n";
         return;
     }
     if (scan.truncated) {
-        std::cout << theme.error << tr("plan.truncated") << theme.reset << "\n";
+        TermOut() << theme.error << tr("plan.truncated") << theme.reset << "\n";
         return;
     }
     if (!scan.found) {
@@ -6356,7 +6326,7 @@ void TerminalSessionController::MaybeCollectPlanProposal(std::size_t history_bef
     }
     session_runtime_.RecordPlanDocument(plan);
     plan_review_pending_ = plan;
-    std::cout << theme.stats
+    TermOut() << theme.stats
               << trf("plan.recorded", plan.plan_id, static_cast<int>(plan.revision), plan.markdown.size())
               << theme.reset << "\n";
     RunPlanReviewPrompt();
@@ -6365,11 +6335,11 @@ void TerminalSessionController::MaybeCollectPlanProposal(std::size_t history_bef
 void TerminalSessionController::RunPlanReviewPrompt() {
     using lubancode::runtime::CollaborationMode;
     if (session_runtime_.collaboration_mode() != CollaborationMode::Plan) {
-        std::cout << theme.error << tr("plan.review.no_plan") << theme.reset << "\n";
+        TermOut() << theme.error << tr("plan.review.no_plan") << theme.reset << "\n";
         return;
     }
     if (!plan_review_pending_.has_value()) {
-        std::cout << theme.error << tr("plan.review.no_plan") << theme.reset << "\n";
+        TermOut() << theme.error << tr("plan.review.no_plan") << theme.reset << "\n";
         return;
     }
     lubancode::runtime::PlanDocument plan = *plan_review_pending_;
@@ -6378,7 +6348,7 @@ void TerminalSessionController::RunPlanReviewPrompt() {
     const lubancode::runtime::PlanDocument* latest = session_runtime_.latest_plan();
     if (latest == nullptr || latest->plan_id != plan.plan_id || latest->revision != plan.revision ||
         latest->content_sha256 != plan.content_sha256) {
-        std::cout << theme.error << tr("plan.review.stale") << theme.reset << "\n";
+        TermOut() << theme.error << tr("plan.review.stale") << theme.reset << "\n";
         plan_review_pending_.reset();
         return;
     }
@@ -6388,13 +6358,13 @@ void TerminalSessionController::RunPlanReviewPrompt() {
     }
     {
         const lubancode::cli::StreamFooterSuspendScope footer_suspend;
-        std::cout << "\n"
+        TermOut() << "\n"
                   << theme.banner
                   << trf("plan.review.title", plan.plan_id, static_cast<int>(plan.revision),
                          plan.content_sha256.substr(0, 12))
                   << theme.reset << "\n";
         // 计划正文直接铺(终端审阅就是读正文;编辑器改稿是第 6 期)。
-        std::cout << plan.markdown << "\n\n";
+        TermOut() << plan.markdown << "\n\n";
         std::vector<lubancode::cli::ChoiceMenuItem> items = {
             {tr("plan.review.opt.approve_confirm"), {}},
             {tr("plan.review.opt.approve_auto"), {}},
@@ -6406,7 +6376,7 @@ void TerminalSessionController::RunPlanReviewPrompt() {
         opts.initial_cursor = 2;  // 默认"留在 Plan"(安全,回车不误批准)
         const auto selected = lubancode::cli::ReadChoiceMenu(items, opts, theme);
         if (!selected.has_value() || selected->selected_indices.empty()) {
-            std::cout << theme.stats << tr("plan.review.cancelled") << theme.reset << "\n";
+            TermOut() << theme.stats << tr("plan.review.cancelled") << theme.reset << "\n";
             return;  // ESC 只关框,仍留 Plan;/plan review 再开
         }
         switch (selected->selected_indices.front()) {
@@ -6419,13 +6389,13 @@ void TerminalSessionController::RunPlanReviewPrompt() {
             case 2: {
                 // 继续规划不换 mode;落一条 continued 审批账(不匹配 stale
                 // 判定,只作人话留痕)。恢复侧见 ReviewPlan 的拒绝分支。
-                std::cout << theme.stats << tr("plan.review.stayed") << theme.reset << "\n";
+                TermOut() << theme.stats << tr("plan.review.stayed") << theme.reset << "\n";
                 return;
             }
             default:
                 SwitchCollaborationMode(CollaborationMode::Default, "off");
                 plan_review_pending_.reset();
-                std::cout << theme.stats << tr("plan.review.exited") << theme.reset << "\n";
+                TermOut() << theme.stats << tr("plan.review.exited") << theme.reset << "\n";
                 return;
         }
     }
@@ -6440,7 +6410,7 @@ void TerminalSessionController::LaunchApprovedPlanExecution(lubancode::runtime::
     const auto outcome = session_runtime_.ReviewPlan(plan.plan_id, plan.revision, plan.content_sha256,
                                                      /*approve=*/true);
     if (outcome == lubancode::runtime::SessionRuntime::PlanReviewOutcome::Stale) {
-        std::cout << theme.error << tr("plan.review.stale") << theme.reset << "\n";
+        TermOut() << theme.error << tr("plan.review.stale") << theme.reset << "\n";
         return;
     }
     //   2. 切 CollaborationMode=Default(mode 事件先于 synthetic turn 落盘,
@@ -6455,7 +6425,7 @@ void TerminalSessionController::LaunchApprovedPlanExecution(lubancode::runtime::
     //      计划正文都喂给执行模型(不只剩"按上面的计划做"——compact 后
     //      "上面"可能早没了,单子明令)。
     plan_review_pending_.reset();
-    std::cout << theme.stats << trf("plan.review.approved", static_cast<int>(plan.revision)) << theme.reset << "\n";
+    TermOut() << theme.stats << trf("plan.review.approved", static_cast<int>(plan.revision)) << theme.reset << "\n";
     const std::string brief = trf("plan.turn.handoff", plan.plan_id, static_cast<int>(plan.revision)) + plan.markdown;
     RunUserTurn(brief);
     //   6. 执行模型先用 todo_write 拆施工清单——brief 文案里已带这句
@@ -6517,13 +6487,13 @@ void TerminalSessionController::Run() {
                     case lubancode::tools::BackgroundTaskStatus::StopFailed: label = "停止失败"; break;
                     default: break;
                 }
-                std::cout << theme.stats << "[后台任务 #" << t.task_id << " " << label << "]";
+                TermOut() << theme.stats << "[后台任务 #" << t.task_id << " " << label << "]";
                 if (t.status != lubancode::tools::BackgroundTaskStatus::Completed) {
-                    std::cout << " (exit "
+                    TermOut() << " (exit "
                               << (t.exit.exit_code.has_value() ? std::to_string(*t.exit.exit_code) : "unknown")
                               << ")";
                 }
-                std::cout << " " << t.command << theme.reset << "\n";
+                TermOut() << " " << t.command << theme.reset << "\n";
             }
         }
 
@@ -6539,7 +6509,7 @@ void TerminalSessionController::Run() {
         // 错误文案旁明写一句"没送达,已回队",不再无声吞掉。
         PumpSteeringToSubagents();
         if (auto head = SessionSteeringQueue().TakeFirstAutoSendable(lubancode::cli::MessageTarget::Main())) {
-            std::cout << theme.prompt << "> " << theme.reset << head->text << "\n";
+            TermOut() << theme.prompt << "> " << theme.reset << head->text << "\n";
             if (peer_started) {
                 peer_runtime->SetStatus("busy");
             }
@@ -6559,7 +6529,7 @@ void TerminalSessionController::Run() {
                 if (preview_cut != std::string::npos) {
                     preview.resize(preview_cut);
                 }
-                std::cout << theme.error << trf("queue.autosend_returned", preview) << theme.reset << "\n";
+                TermOut() << theme.error << trf("queue.autosend_returned", preview) << theme.reset << "\n";
             }
             PersistSteeringQueue();
             if (flow == CommandFlow::Exit) {
@@ -6591,7 +6561,7 @@ void TerminalSessionController::Run() {
         if (!peer_ready_messages.empty() && !SessionSteeringQueue().HasDeliverable(lubancode::cli::MessageTarget::Main())) {
             const lubancode::peers::PeerEnvelope envelope = std::move(peer_ready_messages.front());
             peer_ready_messages.erase(peer_ready_messages.begin());
-            std::cout << theme.stats
+            TermOut() << theme.stats
                       << trf("cmd.peers.incoming_notice", envelope.sender_name, envelope.sender_id) << theme.reset
                       << "\n";
             RunPeerTurn(FormatPeerText(envelope));
@@ -6631,21 +6601,16 @@ void TerminalSessionController::Run() {
             // 采证之前,checkpoint 引用得着。
             NoteSubagentCompletionForGoal();
             {
-                lubancode::cli::TranscriptItem item;
-                item.id = static_cast<int>(transcript.size()) + 1;
-                item.kind = lubancode::cli::TranscriptKind::Tool;
-                item.tool_name = "agent_notice";
-                item.title = tr("agent_panel.completion_notice");
-                item.status = lubancode::cli::TranscriptStatus::Ok;
-                item.start_time = item.end_time = std::chrono::steady_clock::now();
-                item.summary_lines = notices;
+                lubancode::cli::TranscriptItem item = lubancode::cli::MakeNoticeItem(
+                    static_cast<int>(transcript.size()) + 1, tr("agent_panel.completion_notice"),
+                    lubancode::cli::TranscriptStatus::Ok, notices);
                 if (!viewing) {
                     std::lock_guard<std::mutex> stdout_lock(lubancode::cli::StdoutWriteMutex());
-                    std::cout << theme.tool_line << item.title << theme.reset << "\n";
+                    TermOut() << theme.tool_line << item.title << theme.reset << "\n";
                     for (const auto& note : notices) {
-                        std::cout << theme.stats << "  ⎿ " << note << theme.reset << "\n";
+                        TermOut() << theme.stats << "  ⎿ " << note << theme.reset << "\n";
                     }
-                    std::cout.flush();
+                    TermOut().flush();
                 }
                 transcript.push_back(std::move(item));
             }
@@ -6671,7 +6636,7 @@ void TerminalSessionController::Run() {
                                       /*esc_rejects=*/false, /*composer=*/true);
         if (!line.has_value()) {
             if (lubancode::cli::ComposerStashHasContent()) {
-                std::cout << theme.stats << tr("stash.still_there") << theme.reset << "\n";
+                TermOut() << theme.stats << tr("stash.still_there") << theme.reset << "\n";
             }
             PersistSteeringQueue();  // EOF 退场同路(路径二,"先留后清")
             break;  // EOF:Ctrl+Z 或管道读尽
@@ -6684,7 +6649,7 @@ void TerminalSessionController::Run() {
 
         if (content == "exit" || content == "quit") {
             if (lubancode::cli::ComposerStashHasContent()) {
-                std::cout << theme.stats << tr("stash.still_there") << theme.reset << "\n";
+                TermOut() << theme.stats << tr("stash.still_there") << theme.reset << "\n";
             }
             PersistSteeringQueue();  // 裸退场同样先留账(路径二,"先留后清")
             break;
@@ -6697,7 +6662,7 @@ void TerminalSessionController::Run() {
             session_agent_tool() != nullptr) {
             const lubancode::tools::TaskMessageStatus status =
                 session_agent_tool()->SendTaskMessage(*composer_target, content);
-            std::cout << theme.stats
+            TermOut() << theme.stats
                       << (status == lubancode::tools::TaskMessageStatus::Queued
                               ? trf("agent_panel.target_queued", *composer_target)
                               : trf("agent_panel.target_rejected", *composer_target))
