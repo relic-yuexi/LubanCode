@@ -5,6 +5,9 @@
 
 #pragma once
 
+#include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
+#include "cli/slash_commands.hpp"          // ParsedSlashCommand(分派注册制)
+
 #include <string>
 
 namespace lubancode::runtime {
@@ -28,5 +31,9 @@ struct TraceCommandContext {
 // /trace 的四档:export <路径>(脱敏诊断包)/ errors(明确失败账)/
 // toolu|turn|<execution_id>(详细档,翻存档真本)/ 裸敲(最近一批摘要)。
 void HandleTraceCommand(const TraceCommandContext& ctx, const std::string& args);
+
+// 命令分派注册制(会话终章):/trace 的分派位(case 体原样搬自大 switch)。
+struct SlashDispatchContext;
+CommandFlow HandleSlashTrace(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

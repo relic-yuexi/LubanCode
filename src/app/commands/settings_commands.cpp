@@ -1,6 +1,8 @@
 // settings_commands.hpp 的实现:模型/供应商/配置/语言/技能/更新命令的函数体。
 #include "app/commands/settings_commands.hpp"
 
+#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
+
 #include <algorithm>
 #include <cctype>
 #include <iostream>
@@ -1871,6 +1873,73 @@ void HandleCopyCommand(const std::string& raw_args, const std::vector<lubancode:
             out << theme.error << trf("cmd.copy.failed", detail) << theme.reset << "\n";
             break;
     }
+}
+
+// ---------------------------------------------------------------------------
+// 命令分派注册制(会话终章):设置域的分派位。case 体原样自
+// interactive_session 的大 switch 搬来,材料经 SlashDispatchContext 递入。
+// ---------------------------------------------------------------------------
+
+CommandFlow HandleSlashProvider(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    HandleProviderCommand(parsed.args, *ctx.config, *ctx.active_provider, *ctx.real_backend, *ctx.wire_str,
+                          ctx.current_model, ctx.current_think, *ctx.context_tracker,
+                          ctx.current_model_instructions, *ctx.model_catalog, *ctx.prompt_options,
+                          ctx.rebuild_loop, ctx.spinner_enabled, *ctx.theme, *ctx.active_provider_write_path,
+                          ctx.config_result->sources.active_provider);
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashConfig(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    (void)parsed;
+    PrintConfigDiagnostics(*ctx.config_result, *ctx.current_model, ctx.model_catalog, ctx.settings_local);
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashUpdate(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    HandleUpdateCommand(parsed.args, ctx.config->connect_timeout_ms, ctx.config->request_timeout_secs);
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashLanguage(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    HandleLanguageCommand(parsed.args, *ctx.config_file_path);
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashThink(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    // 目录条目按"此刻的会话模型"现查——/model 切过之后,/think 列的就是
+    // 新模型声明的档位。目录没有声明再看当前 provider 配置的声明(Effort
+    // 诊断单:未知模型至少列本 provider 配置,不只甩一句"以服务商为准")。
+    HandleThinkCommand(parsed.args, ctx.current_think,
+                       ctx.model_catalog->FindByProviderAndSlug(*ctx.active_provider, *ctx.current_model),
+                       ctx.config->provider_think_levels, ctx.config->think_param);
+    // 五层后端退役(批四):effort 的即时生效改走皮上的 request 档案,
+    // 下一份请求带上新档位。
+    ctx.sync_request_policy();
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashSkills(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    (void)parsed;
+    PrintSkillsCommand(*ctx.skills, lubancode::platform::CurrentDirUtf8(), *ctx.home_dir);
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashSkill(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    if (HandleSkillCommand(parsed.args, *ctx.global_skills_root, *ctx.project_skills_root)) {
+        ctx.refresh_skills();
+        TermOut() << tr("cmd.skill.refreshed") << "\n";
+    }
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashKeymap(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    HandleKeymapCommand(parsed.args, *ctx.home_lubancode, *ctx.theme);
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashCopy(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    HandleCopyCommand(parsed.args, ctx.main_agent->History(), *ctx.theme);
+    return CommandFlow::Continue;
 }
 
 }  // namespace lubancode::app

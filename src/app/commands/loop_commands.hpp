@@ -17,6 +17,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
 #include "cli/slash_commands.hpp"
 #include "cli/theme.hpp"
 #include "runtime/loop_scheduler.hpp"
@@ -109,5 +110,9 @@ std::string FormatLoopInterval(std::chrono::seconds interval);
 
 // 把"距今多久"折成人话("4 分钟后"/"已到点"/"2 小时前")。
 std::string FormatLoopDelta(std::int64_t now_ms, std::int64_t at_ms);
+
+// 命令分派注册制(会话终章):/loop 的分派位(case 体原样搬自大 switch)。
+struct SlashDispatchContext;
+CommandFlow HandleSlashLoop(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

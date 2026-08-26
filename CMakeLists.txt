@@ -651,6 +651,8 @@ add_library(lubancode_app STATIC
   src/app/commands/trace_commands.cpp
   # 终端接线收尾单:/model 命令 presenter(自大类搬出)。
   src/app/commands/model_commands.cpp
+  # 会话终章:命令分派注册制(47 案 switch 换注册表,路由与门)。
+  src/app/commands/command_registry.cpp
   src/app/interactive_session.cpp
   src/app/one_shot.cpp
   src/app/cli_options.cpp

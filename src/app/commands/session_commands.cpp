@@ -1,6 +1,10 @@
 // session_commands.hpp 的实现:上下文/压缩/会话存档命令的函数体。
 #include "app/commands/session_commands.hpp"
 
+#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
+#include "cli/record_command.hpp"             // /record 的 presenter(cli 层)
+#include "tools/agent_tool.hpp"               // 归档/删除的后台忙查
+
 #include <cstdlib>
 #include <ctime>
 #include <iostream>
@@ -1570,6 +1574,162 @@ void HandleContextPressure(const lubancode::agent::ContextPressure& pressure, co
     } else if (pressure.hard_truncated_results) {
         out << theme.error << tr("compact.hard_trim_results") << theme.reset << "\n";
     }
+}
+
+// ---------------------------------------------------------------------------
+// 命令分派注册制(会话终章):会话域的分派位。case 体原样自
+// interactive_session 的大 switch 搬来,材料经 SlashDispatchContext 递入。
+// ---------------------------------------------------------------------------
+
+void PrintSlashHelp() {
+    TermOut() << tr("slash_help.body");
+}
+
+CommandFlow HandleSlashHelp(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    (void)ctx;
+    (void)parsed;
+    PrintSlashHelp();
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashClear(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    (void)parsed;
+    const lubancode::cli::Theme& theme = *ctx.theme;
+    // stash 是"还没说出口的话",不跟 history 一锅清(规格:草稿各自存账);
+    // 清场时提醒一句它还在。
+    if (lubancode::cli::ComposerStashHasContent()) {
+        TermOut() << theme.stats << tr("stash.still_there") << theme.reset << "\n";
+    }
+    // Plan 模式单:/clear 起新 thread,回默认配置(单子"切换规矩")。计划
+    // 成品与审阅悬稿一并翻篇,不继承。
+    if (ctx.session_runtime->collaboration_mode() == lubancode::runtime::CollaborationMode::Plan) {
+        ctx.switch_collaboration_mode(lubancode::runtime::CollaborationMode::Default, "clear");
+    }
+    ctx.reset_plan_review();
+    SessionCommandState session_state = ctx.make_session_command_state();
+    return HandleClearCommand(session_state, *ctx.config, theme, ctx.spinner_enabled);
+}
+
+CommandFlow HandleSlashContext(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    // /context presenter(终端接线收尾单):三类 token 与分层预算的现场收集
+    // 在本文件,分派位只装材料。
+    lubancode::app::ContextEstimateInputs context_in;
+    context_in.prompt_options = ctx.prompt_options;
+    context_in.model_instructions = ctx.current_model_instructions.get();
+    context_in.soul = ctx.current_soul.get();
+    context_in.registry = ctx.registry;
+    context_in.tool_filter = ctx.main_tool_filter;
+    context_in.tool_deferral = ctx.main_deferral;
+    context_in.loaded_tools = &**ctx.loaded_tools;
+    context_in.agent = ctx.main_agent;
+    context_in.context_tracker = ctx.context_tracker;
+    context_in.usage_ledger = ctx.model_router != nullptr ? &ctx.model_router->ledger() : nullptr;
+    context_in.artifact_store = ctx.artifact_store.get();
+    context_in.last_compact_line = ctx.last_compact_line;
+    RunContextCommand(parsed.args, context_in, *ctx.theme);
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashCompact(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    // /compact presenter:接线全在本文件,材料包由 make_compact_inputs 装好。
+    lubancode::app::RunCompactCommand(parsed.args, ctx.make_compact_inputs());
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashRecord(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    // 只做接线:解析/问话/起草/安装全在 cli/record_command.cpp。
+    lubancode::cli::RecordCommandContext record_ctx{*ctx.recorder,
+                                                    *ctx.recordings_root,
+                                                    *ctx.project_skills_root,
+                                                    *ctx.global_skills_root,
+                                                    ctx.refresh_skills};
+    lubancode::cli::HandleRecordCommand(parsed.args, record_ctx, *ctx.theme);
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashSessions(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    PrintSessionsCommand(*ctx.sessions_dir, parsed.args);
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashArchive(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    // /archive(会话管理器单第四步):刷盘关柄→搬 archive/→退出。后台子代理
+    // 还在跑时拒绝——归档的是会话档,别把还在写档的代理晾在半路。
+    const lubancode::cli::Theme& theme = *ctx.theme;
+    if (!parsed.args.empty()) {
+        TermOut() << theme.error << tr("cmd.archive.usage") << theme.reset << "\n";
+        return CommandFlow::Continue;
+    }
+    bool busy = false;
+    if (lubancode::tools::AgentTool* agent_tool = ctx.agent_tool; agent_tool != nullptr) {
+        for (const auto& task : agent_tool->TaskSummaries()) {
+            if (task.state == lubancode::tools::AgentTaskState::Running) {
+                busy = true;
+                break;
+            }
+        }
+    }
+    if (busy) {
+        TermOut() << theme.error << tr("cmd.archive.busy") << theme.reset << "\n";
+        return CommandFlow::Continue;
+    }
+    if (ArchiveCurrentSession(*ctx.sessions_dir, *ctx.session_store, theme)) {
+        TermOut() << tr("cmd.archive.exiting") << "\n";
+        return CommandFlow::Exit;
+    }
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashDelete(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    // /delete(第五步):永久删除当前会话。回合在跑/工具在飞/审批悬着时拒
+    // 绝——slash 分派本身只在输入线程空闲时进,但后台子代理可能在飞,这里
+    // 如实拦。确认屏在 handler。
+    const lubancode::cli::Theme& theme = *ctx.theme;
+    if (!parsed.args.empty()) {
+        TermOut() << theme.error << tr("cmd.delete.usage") << theme.reset << "\n";
+        return CommandFlow::Continue;
+    }
+    bool busy = false;
+    if (lubancode::tools::AgentTool* agent_tool = ctx.agent_tool; agent_tool != nullptr) {
+        for (const auto& task : agent_tool->TaskSummaries()) {
+            if (task.state == lubancode::tools::AgentTaskState::Running) {
+                busy = true;
+                break;
+            }
+        }
+    }
+    if (busy) {
+        TermOut() << theme.error << tr("cmd.delete.busy") << theme.reset << "\n";
+        return CommandFlow::Continue;
+    }
+    if (DeleteCurrentSession(*ctx.sessions_dir, *ctx.session_store, *ctx.session_meta, *ctx.session_title,
+                             theme)) {
+        TermOut() << tr("cmd.delete.exiting") << "\n";
+        return CommandFlow::Exit;
+    }
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashResume(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    SessionCommandState session_state = ctx.make_session_command_state();
+    return HandleResumeCommand(session_state, parsed.args, *ctx.theme);
+}
+
+CommandFlow HandleSlashExport(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    HandleExportCommand(parsed.args, *ctx.main_agent, *ctx.session_store, *ctx.sessions_dir, *ctx.session_meta,
+                        *ctx.session_title, ctx.artifact_store.get());
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashTitle(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    SessionCommandState session_state = ctx.make_session_command_state();
+    return HandleTitleCommand(session_state, parsed.args, *ctx.theme);
+}
+
+CommandFlow HandleSlashExit(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    (void)ctx;
+    (void)parsed;
+    return CommandFlow::Exit;
 }
 
 }  // namespace lubancode::app

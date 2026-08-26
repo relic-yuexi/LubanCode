@@ -1,4 +1,5 @@
 #include "app/commands/hook_commands.hpp"
+#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 
 using lubancode::cli::TermOut;
@@ -207,6 +208,12 @@ void HandleHooksCommand(const std::string& args, lubancode::hooks::HookDispatche
     TermOut() << "不认得的子命令: " << action
               << "\n可用:/hooks(列表)/hooks runs [N]/hooks trust|untrust|disable|enable <#id>\n";
     (void)theme;
+}
+
+// 命令分派注册制(会话终章):/hooks 的分派位。
+CommandFlow HandleSlashHooks(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    HandleHooksCommand(parsed.args, lubancode::app::HookRuntime(), *ctx.theme);
+    return CommandFlow::Continue;
 }
 
 }  // namespace lubancode::app

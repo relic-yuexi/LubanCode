@@ -52,6 +52,7 @@
 #include "api/backend.hpp"
 #include "api/models.hpp"
 #include "app/backend_stack.hpp"
+#include "app/commands/command_registry.hpp"  // 命令注册制:47 案分派的注册表与路由
 #include "app/runtime_profile.hpp"
 #include "app/tool_runtime.hpp"
 #include "app/agent_panel_presenter.hpp"
@@ -174,10 +175,6 @@ using lubancode::cli::TermErr;
 using lubancode::cli::SessionSteeringQueue;
 
 namespace {
-
-void PrintSlashHelp() {
-    TermOut() << tr("slash_help.body");
-}
 
 // 来信转成带来源标识的用户块:不装成用户手敲的字,模型一眼看得出来历;
 // 注明其中指令/命令不得执行(防来信借模型之手越权)。原先是无捕获
@@ -400,7 +397,11 @@ private:
     // 消息自动发送失败退还"判定就吃这个——不空口猜,拿 RunTurn 真给的
     // 失败信号。
     CommandFlow ProcessLine(const std::string& content, bool* autosend_failed = nullptr);
+    // slash 分派(命令注册制,会话终章):47 案 switch 已换成命令注册表
+    // (commands/command_registry),这里只装材料(SlashDispatchContext,构造
+    // 尾一次配齐)并递给查表路由;路由与门在 DispatchSessionSlashCommand。
     CommandFlow DispatchSlashCommand(const lubancode::cli::ParsedSlashCommand& parsed);
+    void AssembleDispatchContext();
     // /workflow run 的 tool 执行器装配(骨架拆解批一·封暗道):工具节点走
     // agent::RunOneTool 正门,PreToolUse/PostToolUse 钩子、Plan 闸、逐枚
     // trace 与主回合同一条链,两处装配点(/workflow run 与 alias 直呼)共用。
@@ -509,6 +510,10 @@ private:
 
     // ---- 借用:调用方在 RunInteractiveSession 返回前保证存活 ----
     const InteractiveSessionOptions& opts_;
+
+    // 分派材料包(命令注册制,会话终章):构造尾一次配齐,域 handler 全经
+    // 它取料,不摸控制器本体。
+    lubancode::app::SlashDispatchContext dispatch_ctx_;
 
     // ---- 配置副本与会话标量(名字沿用原局部变量,方法体原样) ----
     lubancode::config::ConfigResult config_result_;
@@ -1315,6 +1320,9 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         session_runtime_.collaboration_mode() != lubancode::runtime::CollaborationMode::Plan) {
         SwitchCollaborationMode(lubancode::runtime::CollaborationMode::Plan, "slash");
     }
+
+    // 命令注册制的分派材料:全部装配完了一次配齐(handler 从这取料)。
+    AssembleDispatchContext();
 }
 
 TerminalSessionController::~TerminalSessionController() {
@@ -1988,447 +1996,94 @@ CommandFlow TerminalSessionController::ProcessLine(const std::string& content, b
     }
 }
 
-// slash 分派:顶层 switch 只做路由,肥 case 全在各领域 handler
-// (commands/ 下按窄状态接活)。返回 Exit 表示触发 /exit,外层循环该退。
+// slash 分派(命令注册制,会话终章):47 案 switch 换成命令注册表——各案
+// handler 归各域文件(commands/*.cpp 的 HandleSlashXxx),注册表与查表路由
+// 在 commands/command_registry;这里只把会话材料装进 SlashDispatchContext
+// (构造尾一次配齐)递过去。
 CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli::ParsedSlashCommand& parsed) {
-    switch (parsed.command) {
-            case lubancode::cli::SlashCommand::Image:
-                // 进不来:ProcessLine 把 Image 截给图片路径,不进分派。
-                break;
-            case lubancode::cli::SlashCommand::Help:
-                PrintSlashHelp();
-                break;
-            case lubancode::cli::SlashCommand::Model: {
-                // /model presenter(终端接线收尾单):roles 短表、直切/菜单、
-                // 写回问话全在 commands/model_commands,这里只递会话状态。
-                lubancode::app::ModelCommandContext model_ctx;
-                model_ctx.config = &config;
-                model_ctx.model_catalog = &model_catalog;
-                model_ctx.theme = &theme;
-                model_ctx.context_tracker = &context_tracker;
-                model_ctx.current_model = current_model;
-                model_ctx.current_think = current_think;
-                model_ctx.current_model_instructions = current_model_instructions;
-                model_ctx.model_router = model_router.get();
-                // 写回目标默认全局,没有全局文件退 merged 路径(只剩项目级)。
-                model_ctx.config_file_path = config_result_.global_config_file_path.has_value()
-                                                 ? config_result_.global_config_file_path
-                                                 : config_file_path;
-                model_ctx.apply_context_window = [this](std::size_t tokens) {
-                    context_tracker.set_window_tokens(tokens);
-                };
-                model_ctx.fetch_models = [this]()
-                    -> std::expected<std::vector<std::pair<std::string, std::string>>, std::string> {
-                    const auto headers = lubancode::config::ResolveProviderHeaderTemplates(
-                        config.extra_headers, config.auth_token);
-                    auto listed = lubancode::api::ListModels(config.wire, config.base_url, config.auth_token,
-                                                             config.connect_timeout_ms,
-                                                             config.request_timeout_secs, headers);
-                    if (!listed.has_value()) {
-                        return std::unexpected(listed.error().message);
-                    }
-                    std::vector<std::pair<std::string, std::string>> out;
-                    for (const auto& info : *listed) {
-                        out.emplace_back(info.id, info.display_name);
-                    }
-                    return out;
-                };
-                model_ctx.sync_request_policy = [this]() { SyncAgentRequestPolicy(); };
-                HandleModelCommand(model_ctx, parsed.args);
-                break;
-            }
-            case lubancode::cli::SlashCommand::Provider:
-                HandleProviderCommand(parsed.args, config, active_provider, real_backend, wire_str,
-                                      current_model, current_think, context_tracker,
-                                      current_model_instructions, model_catalog, prompt_options,
-                                      [this](bool preserve_history) { RebuildLoop(preserve_history); },
-                                      spinner_enabled, theme, active_provider_write_path,
-                                      config_result_.sources.active_provider);
-                break;
-            case lubancode::cli::SlashCommand::Config:
-                PrintConfigDiagnostics(config_result_, *current_model, &model_catalog, &settings_local);
-                break;
-            case lubancode::cli::SlashCommand::Update:
-                HandleUpdateCommand(parsed.args, config.connect_timeout_ms, config.request_timeout_secs);
-                break;
-            case lubancode::cli::SlashCommand::Init: {
-                const auto result = lubancode::config::InitializeProjectInstructions(std::filesystem::current_path());
-                if (result.status == lubancode::config::InitProjectInstructionsStatus::Error) {
-                    TermOut() << theme.error << trf("cmd.init.failed", PathToUtf8(result.path), result.error)
-                              << theme.reset << "\n";
-                    break;
-                }
-                RefreshProjectInstructions();
-                const char* key = result.status == lubancode::config::InitProjectInstructionsStatus::Created
-                                      ? "cmd.init.created"
-                                      : "cmd.init.exists";
-                TermOut() << trf(key, PathToUtf8(result.path)) << "\n";
-                break;
-            }
-            case lubancode::cli::SlashCommand::Language:
-                HandleLanguageCommand(parsed.args, config_file_path);
-                break;
-            case lubancode::cli::SlashCommand::Worktree: {
-                WorkspaceCommandState worktree_state{worktree_session,
-                                                     [this]() { SyncWorktreeDirectory(); }};
-                return HandleWorktreeCommand(worktree_state, parsed.args, theme);
-            }
-            case lubancode::cli::SlashCommand::Clear: {
-                // stash 是"还没说出口的话",不跟 history 一锅清(规格:草稿
-                // 各自存账);清场时提醒一句它还在。
-                if (lubancode::cli::ComposerStashHasContent()) {
-                    TermOut() << theme.stats << tr("stash.still_there") << theme.reset << "\n";
-                }
-                // Plan 模式单:/clear 起新 thread,回默认配置(单子"切换
-                // 规矩")。计划成品与审阅悬稿一并翻篇,不继承。
-                if (session_runtime_.collaboration_mode() == lubancode::runtime::CollaborationMode::Plan) {
-                    SwitchCollaborationMode(lubancode::runtime::CollaborationMode::Default, "clear");
-                }
-                plan_review_pending_.reset();
-                SessionCommandState session_state = MakeSessionCommandState();
-                return HandleClearCommand(session_state, config, theme, spinner_enabled);
-            }
-            case lubancode::cli::SlashCommand::Context: {
-                // /context presenter(终端接线收尾单):三类 token 与分层
-                // 预算的现场收集在 commands/session_commands,这里只递材料。
-                lubancode::app::ContextEstimateInputs context_in;
-                context_in.prompt_options = &prompt_options;
-                context_in.model_instructions = current_model_instructions.get();
-                context_in.soul = current_soul.get();
-                context_in.registry = &registry();
-                context_in.tool_filter = &main_tool_filter();
-                context_in.tool_deferral = main_deferral;
-                context_in.loaded_tools = &*loaded_tools();
-                context_in.agent = &*main_agent;
-                context_in.context_tracker = &context_tracker;
-                context_in.usage_ledger = model_router != nullptr ? &model_router->ledger() : nullptr;
-                context_in.artifact_store = artifact_store.get();
-                context_in.last_compact_line = &last_compact_line;
-                RunContextCommand(parsed.args, context_in, theme);
-                break;
-            }
-            case lubancode::cli::SlashCommand::Compact: {
-                // /compact presenter(终端接线收尾单):接线全在
-                // commands/session_commands,材料包由 MakeCompactInputs 装好。
-                lubancode::app::RunCompactCommand(parsed.args, MakeCompactInputs());
-                break;
-            }
-            case lubancode::cli::SlashCommand::Think:
-                // 目录条目按"此刻的会话模型"现查——/model 切过之后,
-                // /think 列的就是新模型声明的档位。目录没有声明再看当前
-                // provider 配置的声明(Effort 诊断单:未知模型至少列本
-                // provider 配置,不只甩一句"以服务商为准")。
-                HandleThinkCommand(parsed.args, current_think,
-                                   model_catalog.FindByProviderAndSlug(active_provider, *current_model),
-                                   config.provider_think_levels, config.think_param);
-                // 五层后端退役(批四):effort 的即时生效改走皮上的 request
-                // 档案,下一份请求带上新档位。
-                SyncAgentRequestPolicy();
-                break;
-            case lubancode::cli::SlashCommand::Skills:
-                PrintSkillsCommand(skills, CurrentDirUtf8(), home_dir);
-                break;
-            case lubancode::cli::SlashCommand::Skill:
-                if (HandleSkillCommand(parsed.args, global_skills_root, project_skills_root)) {
-                    RefreshSkills();
-                    TermOut() << tr("cmd.skill.refreshed") << "\n";
-                }
-                break;
-            case lubancode::cli::SlashCommand::Mcp:
-                PrintMcpCommand(mcp_servers());
-                break;
-            case lubancode::cli::SlashCommand::Lsp:
-                PrintLspCommand(lsp_manager());
-                break;
-            case lubancode::cli::SlashCommand::Todos:
-                TermOut() << lubancode::cli::FormatTodoList(todo_state()->items, theme);
-                break;
-            case lubancode::cli::SlashCommand::Plugins:
-                PrintPluginsCommand(plugin_mounted(), plugin_warnings());
-                break;
-            case lubancode::cli::SlashCommand::Plugin:
-                HandlePluginCommand(parsed.args, plugin_mounted(),
-                                     tool_runtime_ ? tool_runtime_->process_manifests()
-                                                   : std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>{});
-                break;
-            case lubancode::cli::SlashCommand::Tools:
-                PrintToolsCommand(registry(), *loaded_tools(), main_deferral, tool_search_threshold);
-                break;
-            case lubancode::cli::SlashCommand::Hooks:
-                HandleHooksCommand(parsed.args, lubancode::app::HookRuntime(), theme);
-                break;
-            case lubancode::cli::SlashCommand::Background:
-                return HandleBackgroundCommand(theme);
-            case lubancode::cli::SlashCommand::Keymap:
-                HandleKeymapCommand(parsed.args, home_lubancode, theme);
-                break;
-            case lubancode::cli::SlashCommand::Plan:
-                return HandlePlanCommand(parsed.args);
-            case lubancode::cli::SlashCommand::Trace: {
-                // /trace presenter(终端接线收尾单):四档诊断的命令与排版
-                // 全在 commands/trace_commands,这里只递 hub 与存档。
-                lubancode::app::TraceCommandContext trace_ctx;
-                trace_ctx.trace_hub = trace_hub_.has_value() ? &*trace_hub_ : nullptr;
-                trace_ctx.session_store = &session_store;
-                trace_ctx.theme = &theme;
-                HandleTraceCommand(trace_ctx, parsed.args);
-                break;
-            }
-                        case lubancode::cli::SlashCommand::Doctor: {
-                // 本地兼容端 Effort/前缀缓存诊断。探针自己建临时 backend,
-                // 与会话 backend 无关;stream_usage 探针写回 config 后这里
-                // 顺手重建 real_backend,新能力下一次请求就带上。
-                lubancode::app::DoctorContext doctor_context{config,
-                                                             config.providers,
-                                                             active_provider,
-                                                             *current_model,
-                                                             *current_think,
-                                                             theme,
-                                                             context_tracker,
-                                                             active_provider_write_path,
-                                                             main_agent.has_value() ? &main_agent->runtime_profile() : nullptr,
-                                                             &registry(),
-                                                             &sub_registry(),
-                                                             tool_runtime_->explore_registry()};
-                HandleDoctorCommand(parsed.args, doctor_context);
-                real_backend.Rebuild(config);
-                break;
-            }
-            case lubancode::cli::SlashCommand::Goal: {
-                // 持久目标单:二级纯解析在 cli 层,业务在这(状态机唯一写口
-                // 是 GoalCoordinator;排版/gate/确认文案在 commands/goal_commands)。
-                const lubancode::cli::ParsedGoalCommand goal =
-                    lubancode::cli::ParseGoalCommand(parsed.args);
-                if (goal.action == lubancode::cli::GoalCommandAction::Invalid) {
-                    TermOut() << theme.error;
-                    if (goal.bad_word.empty()) {
-                        TermOut() << "用法: /goal <objective> | status | edit <objective> | pause | resume | clear";
-                    } else {
-                        TermOut() << "子命令或参数不对: " << goal.bad_word
-                                  << "。正文以子命令词开头时用 /goal -- <正文>";
-                    }
-                    TermOut() << theme.reset << "\n";
-                    break;
-                }
-                EnsureGoalCoordinator();
-                return lubancode::app::HandleGoalCommand(goal, MakeGoalWiring());
-            }
-            case lubancode::cli::SlashCommand::Loop: {
-                // loop 单:二级纯解析在 cli 层,业务在这(prompt 源解析/
-                // feature 门/非交互明拒在 HandleLoopCommand)。
-                EnsureLoopScheduler();
-                return static_cast<CommandFlow>(
-                    lubancode::app::HandleLoopCommand(lubancode::cli::ParseLoopCommand(parsed.args),
-                                                      MakeLoopWiring()));
-            }
-            case lubancode::cli::SlashCommand::Memory: {
-                // /memory presenter(终端接线收尾单):命令与排版全在
-                // commands/memory_commands,这里只递会话状态(工具补注册
-                // 走回调)。
-                lubancode::app::MemoryCommandContext memory_ctx;
-                memory_ctx.project_memory = project_memory.get();
-                memory_ctx.theme = &theme;
-                memory_ctx.ensure_tool = [this]() { EnsureMemoryTool(); };
-                HandleMemoryCommand(memory_ctx, parsed.args);
-                break;
-            }
-            case lubancode::cli::SlashCommand::Record: {
-                // 只做接线:解析/问话/起草/安装全在 cli/record_command.cpp。
-                lubancode::cli::RecordCommandContext record_ctx{recorder,
-                                                                recordings_root,
-                                                                project_skills_root,
-                                                                global_skills_root,
-                                                                [this]() { RefreshSkills(); }};
-                lubancode::cli::HandleRecordCommand(parsed.args, record_ctx, theme);
-            } break;
-            case lubancode::cli::SlashCommand::Sessions:
-                PrintSessionsCommand(sessions_dir, parsed.args);
-                break;
-            case lubancode::cli::SlashCommand::Archive: {
-                // /archive(会话管理器单第四步):刷盘关柄→搬 archive/→退出。
-                // 后台子代理还在跑时拒绝——归档的是会话档,别把还在写档的
-                // 代理晾在半路。
-                if (!parsed.args.empty()) {
-                    TermOut() << theme.error << tr("cmd.archive.usage") << theme.reset << "\n";
-                    break;
-                }
-                bool busy = false;
-                if (lubancode::tools::AgentTool* agent_tool = session_agent_tool();
-                    agent_tool != nullptr) {
-                    for (const auto& task : agent_tool->TaskSummaries()) {
-                        if (task.state == lubancode::tools::AgentTaskState::Running) {
-                            busy = true;
-                            break;
-                        }
-                    }
-                }
-                if (busy) {
-                    TermOut() << theme.error << tr("cmd.archive.busy") << theme.reset << "\n";
-                    break;
-                }
-                if (ArchiveCurrentSession(sessions_dir, session_store, theme)) {
-                    TermOut() << tr("cmd.archive.exiting") << "\n";
-                    return CommandFlow::Exit;
-                }
-                break;
-            }
-            case lubancode::cli::SlashCommand::Delete: {
-                // /delete(第五步):永久删除当前会话。回合在跑/工具在飞/
-                // 审批悬着时拒绝——slash 分派本身只在输入线程空闲时进,但
-                // 后台子代理可能在飞,这里如实拦。确认屏在 handler。
-                if (!parsed.args.empty()) {
-                    TermOut() << theme.error << tr("cmd.delete.usage") << theme.reset << "\n";
-                    break;
-                }
-                bool busy = false;
-                if (lubancode::tools::AgentTool* agent_tool = session_agent_tool();
-                    agent_tool != nullptr) {
-                    for (const auto& task : agent_tool->TaskSummaries()) {
-                        if (task.state == lubancode::tools::AgentTaskState::Running) {
-                            busy = true;
-                            break;
-                        }
-                    }
-                }
-                if (busy) {
-                    TermOut() << theme.error << tr("cmd.delete.busy") << theme.reset << "\n";
-                    break;
-                }
-                if (DeleteCurrentSession(sessions_dir, session_store, session_meta, session_title,
-                                         theme)) {
-                    TermOut() << tr("cmd.delete.exiting") << "\n";
-                    return CommandFlow::Exit;
-                }
-                break;
-            }
-            case lubancode::cli::SlashCommand::Resume: {
-                SessionCommandState session_state = MakeSessionCommandState();
-                return HandleResumeCommand(session_state, parsed.args, theme);
-            }
-            case lubancode::cli::SlashCommand::Export:
-                HandleExportCommand(parsed.args, *main_agent, session_store, sessions_dir, session_meta, session_title,
-                                    artifact_store.get());
-                break;
-            case lubancode::cli::SlashCommand::Copy:
-                HandleCopyCommand(parsed.args, main_agent->History(), theme);
-                break;
-            case lubancode::cli::SlashCommand::Title: {
-                SessionCommandState session_state = MakeSessionCommandState();
-                return HandleTitleCommand(session_state, parsed.args, theme);
-            }
-            case lubancode::cli::SlashCommand::Soul:
-                HandleSoulCommand(parsed.args, current_soul, current_soul_name, config_file_path);
-                // 五层后端退役(批四):魂的即时生效改走皮上的叠层字段。
-                SyncAgentRequestPolicy();
-                break;
-            case lubancode::cli::SlashCommand::Prompt:
-                HandlePromptCommand(parsed.args, opts_.law_source, persona, prompts_dir);
-                break;
-            case lubancode::cli::SlashCommand::Peers: {
-                PeerCommandState peer_state{peer_runtime, peer_started, peer_ready_messages,
-                                            peer_held_stash};
-                return HandlePeersCommand(peer_state, theme, spinner_enabled);
-            }
-            case lubancode::cli::SlashCommand::Send: {
-                PeerCommandState peer_state{peer_runtime, peer_started, peer_ready_messages,
-                                            peer_held_stash};
-                return HandleSendCommand(peer_state, parsed.args, theme);
-            }
-            case lubancode::cli::SlashCommand::Peerperm: {
-                PeerCommandState peer_state{peer_runtime, peer_started, peer_ready_messages,
-                                            peer_held_stash};
-                return HandlePeerpermCommand(peer_state, parsed.args);
-            }
-            case lubancode::cli::SlashCommand::Workflow: {
-                // Workflows 自然语言编排单:正门 /workflow。catalog 现扫现用,
-                // 不占会话状态;能力表取自当前主表(此刻挂着的工具)。
-                lubancode::app::WorkflowCommandContext wf_ctx;
-                wf_ctx.project_root = std::filesystem::current_path();
-                wf_ctx.user_root = home_dir.has_value()
-                                       ? std::optional<std::filesystem::path>(
-                                             lubancode::tools::Utf8ToPath(*home_dir))
-                                       : std::nullopt;
-                wf_ctx.home_lubancode = home_lubancode.has_value()
-                                            ? std::optional<std::filesystem::path>(
-                                                  lubancode::tools::Utf8ToPath(*home_lubancode))
-                                            : std::nullopt;
-                wf_ctx.registry = &registry();
-                for (const auto& skill : skills) wf_ctx.skill_names.push_back(skill.name);
-                wf_ctx.theme = &theme;
-                const lubancode::app::ParsedWorkflowCommand wf_parsed =
-                    lubancode::app::ParseWorkflowCommand(parsed.args);
-                if (wf_parsed.action == lubancode::app::WorkflowCommandAction::Run) {
-                    // run:执行器装配在 commands/workflow_commands(终端接线
-                    // 收尾单收口,与 alias 直呼共用一份)。
-                    lubancode::app::WorkflowExecutorContext wf_exec;
-                    wf_exec.registry = &registry();
-                    wf_exec.backend = &real_backend;
-                    wf_exec.build_tool_options = [this]() { return BuildWorkflowToolOptions(); };
-                    wf_exec.provider = active_provider;
-                    wf_exec.model = *current_model;
-                    wf_exec.effort = *current_think;
-                    wf_exec.model_catalog = &model_catalog;
-                    wf_exec.agent_profile = main_agent->runtime_profile();
-                    wf_exec.event_sink = &session_events_;
-                    wf_exec.thread_id = session_runtime_.thread_id();
-                    wf_exec.id_authority = &session_runtime_.ids();
-                    TermOut() << lubancode::app::RunWorkflowById(
-                        wf_ctx, wf_parsed.id, wf_parsed.rest,
-                        lubancode::app::BuildWorkflowExecutors(wf_ctx, wf_exec, wf_parsed.id));
-                    break;
-                }
-                HandleWorkflowCommand(parsed.args, wf_ctx);
-                break;
-            }
-            case lubancode::cli::SlashCommand::Exit:
-                return CommandFlow::Exit;
-            case lubancode::cli::SlashCommand::Unknown: {
-                // Workflows 单:不认得的 / 词先查 WorkflowCatalog——查着了
-                // 是 /<alias> 直呼(整行参数按 input_schema 解析,不当一坨
-                // prompt),查不着才打"不认得"。内建词永远居首,撞名禁用
-                // 的 alias 也不接(只留 /workflow run 正门)。
-                if (!parsed.alias_word.empty()) {
-                    lubancode::app::WorkflowCommandContext wf_ctx;
-                    wf_ctx.project_root = std::filesystem::current_path();
-                    wf_ctx.user_root = home_dir.has_value()
-                                           ? std::optional<std::filesystem::path>(
-                                                 lubancode::tools::Utf8ToPath(*home_dir))
-                                           : std::nullopt;
-                    wf_ctx.home_lubancode = home_lubancode.has_value()
-                                                ? std::optional<std::filesystem::path>(
-                                                      lubancode::tools::Utf8ToPath(*home_lubancode))
-                                                : std::nullopt;
-                    wf_ctx.registry = &registry();
-                    wf_ctx.theme = &theme;
-                    const std::string wf_id = ResolveWorkflowAlias(wf_ctx, parsed.alias_word);
-                    if (!wf_id.empty()) {
-                        // 与 /workflow run 同一道执行器装配(终端接线收尾单
-                        // 收口在 commands/workflow_commands,共用一份)。
-                        lubancode::app::WorkflowExecutorContext wf_exec;
-                        wf_exec.registry = &registry();
-                        wf_exec.backend = &real_backend;
-                        wf_exec.build_tool_options = [this]() { return BuildWorkflowToolOptions(); };
-                        wf_exec.provider = active_provider;
-                        wf_exec.model = *current_model;
-                        wf_exec.effort = *current_think;
-                        wf_exec.model_catalog = &model_catalog;
-                        wf_exec.agent_profile = main_agent->runtime_profile();
-                        wf_exec.event_sink = &session_events_;
-                        wf_exec.thread_id = session_runtime_.thread_id();
-                        wf_exec.id_authority = &session_runtime_.ids();
-                        TermOut() << lubancode::app::RunWorkflowById(
-                            wf_ctx, wf_id, parsed.args,
-                            lubancode::app::BuildWorkflowExecutors(wf_ctx, wf_exec, wf_id));
-                        break;
-                    }
-                }
-                TermOut() << trf("error.unknown_command", parsed.raw_word) << "\n";
-                break;
-            }
-            case lubancode::cli::SlashCommand::NotSlash:
-                break;  // 走不到这里,ProcessLine 已经分流
-        }
-        return CommandFlow::Continue;  // switch 完备性兜底
+    return lubancode::app::DispatchSessionSlashCommand(dispatch_ctx_, parsed);
+}
+
+// 分派材料的装配:全借用/回调,handler 不拥有会话资源。回调一律窄口
+// (控制器方法一跳),域文件不反向 include 会话层。
+void TerminalSessionController::AssembleDispatchContext() {
+    lubancode::app::SlashDispatchContext& ctx = dispatch_ctx_;
+    ctx.opts = &opts_;
+    ctx.config_result = &config_result_;
+    ctx.config = &config;
+    ctx.theme = &theme;
+    ctx.model_catalog = &model_catalog;
+    ctx.settings_local = &settings_local;
+    ctx.spinner_enabled = spinner_enabled;
+    ctx.wire_str = &wire_str;
+    ctx.active_provider = &active_provider;
+    ctx.active_provider_write_path = &active_provider_write_path;
+    ctx.config_file_path = &config_file_path;
+    ctx.home_dir = &home_dir;
+    ctx.home_lubancode = &home_lubancode;
+    ctx.prompts_dir = &prompts_dir;
+    ctx.persona = &persona;
+    ctx.global_skills_root = &global_skills_root;
+    ctx.project_skills_root = &project_skills_root;
+    ctx.recordings_root = &recordings_root;
+    ctx.skills = &skills;
+    ctx.real_backend = &real_backend;
+    ctx.current_model = current_model;
+    ctx.current_think = current_think;
+    ctx.current_model_instructions = current_model_instructions;
+    ctx.current_soul = current_soul;
+    ctx.current_soul_name = &current_soul_name;
+    ctx.context_tracker = &context_tracker;
+    ctx.model_router = model_router.get();
+    ctx.artifact_store = artifact_store;
+    ctx.registry = &registry();
+    ctx.sub_registry = &sub_registry();
+    ctx.agent_tool = session_agent_tool();
+    ctx.todo_state = &todo_state();
+    ctx.loaded_tools = &loaded_tools();
+    ctx.mcp_servers = &mcp_servers();
+    ctx.lsp_manager = &lsp_manager();
+    ctx.plugin_mounted = &plugin_mounted();
+    ctx.plugin_warnings = &plugin_warnings();
+    ctx.main_tool_filter = &main_tool_filter();
+    ctx.main_deferral = main_deferral;
+    ctx.tool_search_threshold = tool_search_threshold;
+    ctx.tool_runtime = tool_runtime_.has_value() ? &*tool_runtime_ : nullptr;
+    ctx.worktree_session = &worktree_session;
+    ctx.main_agent = main_agent.has_value() ? &*main_agent : nullptr;
+    ctx.session_runtime = &session_runtime_;
+    ctx.trace_hub = trace_hub_.has_value() ? &*trace_hub_ : nullptr;
+    ctx.session_events = &session_events_;
+    ctx.session_store = &session_store;
+    ctx.sessions_dir = &sessions_dir;
+    ctx.session_meta = &session_meta;
+    ctx.session_title = &session_title;
+    ctx.last_compact_line = &last_compact_line;
+    ctx.prompt_options = &prompt_options;
+    ctx.project_memory = project_memory.get();
+    ctx.peer_runtime = &peer_runtime;
+    ctx.peer_started = &peer_started;
+    ctx.peer_ready_messages = &peer_ready_messages;
+    ctx.peer_held_stash = &peer_held_stash;
+    ctx.recorder = &recorder;
+    ctx.rebuild_loop = [this](bool preserve_history) { RebuildLoop(preserve_history); };
+    ctx.sync_request_policy = [this]() { SyncAgentRequestPolicy(); };
+    ctx.refresh_skills = [this]() { RefreshSkills(); };
+    ctx.refresh_project_instructions = [this]() { RefreshProjectInstructions(); };
+    ctx.sync_worktree_directory = [this]() { SyncWorktreeDirectory(); };
+    ctx.ensure_memory_tool = [this]() { EnsureMemoryTool(); };
+    ctx.ensure_goal_coordinator = [this]() { EnsureGoalCoordinator(); };
+    ctx.ensure_loop_scheduler = [this]() { EnsureLoopScheduler(); };
+    ctx.make_goal_wiring = [this]() { return MakeGoalWiring(); };
+    ctx.make_loop_wiring = [this]() { return MakeLoopWiring(); };
+    ctx.make_compact_inputs = [this]() { return MakeCompactInputs(); };
+    ctx.make_session_command_state = [this]() { return MakeSessionCommandState(); };
+    ctx.handle_plan_command = [this](const std::string& args) { return HandlePlanCommand(args); };
+    ctx.switch_collaboration_mode = [this](lubancode::runtime::CollaborationMode mode, const std::string& reason) {
+        SwitchCollaborationMode(mode, reason);
+    };
+    ctx.reset_plan_review = [this]() { plan_review_pending_.reset(); };
+    ctx.build_workflow_tool_options = [this]() { return BuildWorkflowToolOptions(); };
 }
 
 // 发一轮用户正文:自动压缩检查 + 轮次材料 + RunTurn + 落盘 + 收排队。

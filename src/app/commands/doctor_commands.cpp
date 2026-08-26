@@ -3,6 +3,7 @@
 // 单测直接钉;这一头只留 IO(发请求、读 metrics、写回配置)与打印。
 
 #include "app/commands/doctor_commands.hpp"
+#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 
 using lubancode::cli::TermOut;
@@ -719,6 +720,28 @@ void HandleDoctorCommand(const std::string& args, const DoctorContext& context) 
     }
     TermOut() << tr("doctor.usage.usage_line") << "\n";
     TermOut().flush();
+}
+
+// 命令分派注册制(会话终章):/doctor 的分派位。本地兼容端 Effort/前缀
+// 缓存诊断——探针自己建临时 backend,与会话 backend 无关;stream_usage
+// 探针写回 config 后这里顺手重建 real_backend,新能力下一次请求就带上。
+CommandFlow HandleSlashDoctor(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    lubancode::app::DoctorContext doctor_context{*ctx.config,
+                                                 ctx.config->providers,
+                                                 *ctx.active_provider,
+                                                 *ctx.current_model,
+                                                 *ctx.current_think,
+                                                 *ctx.theme,
+                                                 *ctx.context_tracker,
+                                                 *ctx.active_provider_write_path,
+                                                 ctx.main_agent != nullptr ? &ctx.main_agent->runtime_profile() : nullptr,
+                                                 ctx.registry,
+                                                 ctx.sub_registry,
+                                                 ctx.tool_runtime != nullptr ? ctx.tool_runtime->explore_registry()
+                                                                             : nullptr};
+    HandleDoctorCommand(parsed.args, doctor_context);
+    ctx.real_backend->Rebuild(*ctx.config);
+    return CommandFlow::Continue;
 }
 
 }  // namespace lubancode::app

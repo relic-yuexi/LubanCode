@@ -9,6 +9,9 @@
 
 #pragma once
 
+#include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
+#include "cli/slash_commands.hpp"          // ParsedSlashCommand(分派注册制)
+
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -112,5 +115,14 @@ struct WorkflowExecutorContext {
 std::map<lubancode::workflow::NodeKind, std::shared_ptr<lubancode::workflow::NodeExecutor>>
 BuildWorkflowExecutors(const WorkflowCommandContext& wf_ctx, const WorkflowExecutorContext& exec_ctx,
                        const std::string& workflow_id);
+
+// ---------------------------------------------------------------------------
+// 命令分派注册制(会话终章):workflow 域的分派位(/workflow 正门与
+// /<alias> 直呼的 Unknown 兜底)。case 体原样自 interactive_session 的大
+// switch 搬来,材料经 SlashDispatchContext 递入。
+// ---------------------------------------------------------------------------
+struct SlashDispatchContext;
+CommandFlow HandleSlashWorkflow(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashUnknown(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

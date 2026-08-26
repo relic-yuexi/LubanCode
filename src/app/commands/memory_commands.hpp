@@ -9,6 +9,9 @@
 
 #pragma once
 
+#include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
+#include "cli/slash_commands.hpp"          // ParsedSlashCommand(分派注册制)
+
 #include <expected>
 #include <functional>
 #include <string>
@@ -75,5 +78,9 @@ std::expected<std::string, std::string> SummarizeArtifactOnDemand(const SessionT
 // 拿开头几条消息起一枚短标题,成功落 title 事件;失败安静降级。一场只试
 // 一次,不追着重试。
 void MaybeGenerateSessionTitle(const SessionTailContext& ctx, lubancode::agent::TaskKind kind);
+
+// 命令分派注册制(会话终章):/memory 的分派位(case 体原样搬自大 switch)。
+struct SlashDispatchContext;
+CommandFlow HandleSlashMemory(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

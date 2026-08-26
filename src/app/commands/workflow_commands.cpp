@@ -1,6 +1,8 @@
 // /workflow 命令终端薄壳实现(自然语言编排单第 1 批)。
 
 #include "app/commands/workflow_commands.hpp"
+#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
+#include "tools/path_utils.hpp"                // Utf8ToPath(catalog 锚点拼路径)
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 
 using lubancode::cli::TermOut;
@@ -589,6 +591,90 @@ BuildWorkflowExecutors(const WorkflowCommandContext& wf_ctx, const WorkflowExecu
             std::make_shared<lubancode::workflow::LlmExecutor>(llm_options);
     }
     return executors;
+}
+
+// ---------------------------------------------------------------------------
+// 命令分派注册制(会话终章):workflow 域的分派位。/workflow 正门与
+// /<alias> 直呼(Unknown 兜底)共用同一份 catalog/执行器装配。
+// ---------------------------------------------------------------------------
+namespace {
+
+// catalog 上下文的现场装配(两案共用):project_root 现取 cwd,user_root/
+// home_lubancode 按主目录,能力表取当前主表,技能名做撞名检查。
+lubancode::app::WorkflowCommandContext BuildWorkflowCatalogContext(SlashDispatchContext& ctx) {
+    lubancode::app::WorkflowCommandContext wf_ctx;
+    wf_ctx.project_root = std::filesystem::current_path();
+    wf_ctx.user_root = ctx.home_dir->has_value()
+                           ? std::optional<std::filesystem::path>(
+                                 lubancode::tools::Utf8ToPath(**ctx.home_dir))
+                           : std::nullopt;
+    wf_ctx.home_lubancode = ctx.home_lubancode->has_value()
+                                ? std::optional<std::filesystem::path>(
+                                      lubancode::tools::Utf8ToPath(**ctx.home_lubancode))
+                                : std::nullopt;
+    wf_ctx.registry = ctx.registry;
+    for (const auto& skill : *ctx.skills) {
+        wf_ctx.skill_names.push_back(skill.name);
+    }
+    wf_ctx.theme = ctx.theme;
+    return wf_ctx;
+}
+
+// run/alias 直呼共用的执行器装配(终端接线收尾单收口,与正门同源)。
+lubancode::app::WorkflowExecutorContext BuildWorkflowExecutorContext(SlashDispatchContext& ctx) {
+    lubancode::app::WorkflowExecutorContext wf_exec;
+    wf_exec.registry = ctx.registry;
+    wf_exec.backend = ctx.real_backend;
+    wf_exec.build_tool_options = ctx.build_workflow_tool_options;
+    wf_exec.provider = *ctx.active_provider;
+    wf_exec.model = *ctx.current_model;
+    wf_exec.effort = *ctx.current_think;
+    wf_exec.model_catalog = ctx.model_catalog;
+    wf_exec.agent_profile = ctx.main_agent->runtime_profile();
+    wf_exec.event_sink = ctx.session_events;
+    wf_exec.thread_id = ctx.session_runtime->thread_id();
+    wf_exec.id_authority = &ctx.session_runtime->ids();
+    return wf_exec;
+}
+
+}  // namespace
+
+CommandFlow HandleSlashWorkflow(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    // Workflows 自然语言编排单:正门 /workflow。catalog 现扫现用,不占会话
+    // 状态;能力表取自当前主表(此刻挂着的工具)。
+    lubancode::app::WorkflowCommandContext wf_ctx = BuildWorkflowCatalogContext(ctx);
+    const lubancode::app::ParsedWorkflowCommand wf_parsed = lubancode::app::ParseWorkflowCommand(parsed.args);
+    if (wf_parsed.action == lubancode::app::WorkflowCommandAction::Run) {
+        // run:执行器装配与 alias 直呼共用一份。
+        lubancode::app::WorkflowExecutorContext wf_exec = BuildWorkflowExecutorContext(ctx);
+        TermOut() << lubancode::app::RunWorkflowById(
+            wf_ctx, wf_parsed.id, wf_parsed.rest,
+            lubancode::app::BuildWorkflowExecutors(wf_ctx, wf_exec, wf_parsed.id));
+        return CommandFlow::Continue;
+    }
+    HandleWorkflowCommand(parsed.args, wf_ctx);
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashUnknown(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    // Workflows 单:不认得的 / 词先查 WorkflowCatalog——查着了是 /<alias>
+    // 直呼(整行参数按 input_schema 解析,不当一坨 prompt),查不着才打
+    // "不认得"。内建词永远居首,撞名禁用的 alias 也不接(只留 /workflow
+    // run 正门)。
+    if (!parsed.alias_word.empty()) {
+        lubancode::app::WorkflowCommandContext wf_ctx = BuildWorkflowCatalogContext(ctx);
+        const std::string wf_id = ResolveWorkflowAlias(wf_ctx, parsed.alias_word);
+        if (!wf_id.empty()) {
+            // 与 /workflow run 同一道执行器装配。
+            lubancode::app::WorkflowExecutorContext wf_exec = BuildWorkflowExecutorContext(ctx);
+            TermOut() << lubancode::app::RunWorkflowById(
+                wf_ctx, wf_id, parsed.args,
+                lubancode::app::BuildWorkflowExecutors(wf_ctx, wf_exec, wf_id));
+            return CommandFlow::Continue;
+        }
+    }
+    TermOut() << trf("error.unknown_command", parsed.raw_word) << "\n";
+    return CommandFlow::Continue;
 }
 
 }  // namespace lubancode::app

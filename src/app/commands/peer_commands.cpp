@@ -1,6 +1,7 @@
 // peer_commands.hpp 的实现:三个命令的函数体,原样搬自会话主循环的
 // slash case,行为一字未改。
 #include "app/commands/peer_commands.hpp"
+#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 
 using lubancode::cli::TermOut;
@@ -139,6 +140,28 @@ CommandFlow HandlePeerpermCommand(PeerCommandState& state, const std::string& ar
     state.runtime->SetTier(tier);
     TermOut() << trf("cmd.peerperm.set", args) << "\n";
     return CommandFlow::Continue;
+}
+
+// ---------------------------------------------------------------------------
+// 命令分派注册制(会话终章):跨会话传话域的分派位。
+// ---------------------------------------------------------------------------
+CommandFlow HandleSlashPeers(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    (void)parsed;
+    PeerCommandState peer_state{*ctx.peer_runtime, *ctx.peer_started, *ctx.peer_ready_messages,
+                                 *ctx.peer_held_stash};
+    return HandlePeersCommand(peer_state, *ctx.theme, ctx.spinner_enabled);
+}
+
+CommandFlow HandleSlashSend(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    PeerCommandState peer_state{*ctx.peer_runtime, *ctx.peer_started, *ctx.peer_ready_messages,
+                                 *ctx.peer_held_stash};
+    return HandleSendCommand(peer_state, parsed.args, *ctx.theme);
+}
+
+CommandFlow HandleSlashPeerperm(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    PeerCommandState peer_state{*ctx.peer_runtime, *ctx.peer_started, *ctx.peer_ready_messages,
+                                 *ctx.peer_held_stash};
+    return HandlePeerpermCommand(peer_state, parsed.args);
 }
 
 }  // namespace lubancode::app

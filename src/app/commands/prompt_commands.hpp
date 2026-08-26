@@ -7,6 +7,9 @@
 
 #pragma once
 
+#include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
+#include "cli/slash_commands.hpp"          // ParsedSlashCommand(分派注册制)
+
 #include <memory>
 #include <optional>
 #include <string>
@@ -58,5 +61,13 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
 // (~/.lubancode/prompts,找不到主目录时空串)。
 void HandlePromptCommand(const std::string& args, const std::string& law_source, const std::string& persona,
                           const std::string& prompts_dir);
+
+// ---------------------------------------------------------------------------
+// 命令分派注册制(会话终章):魂/法域的分派位。case 体原样自
+// interactive_session 的大 switch 搬来,材料经 SlashDispatchContext 递入。
+// ---------------------------------------------------------------------------
+struct SlashDispatchContext;
+CommandFlow HandleSlashSoul(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashPrompt(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

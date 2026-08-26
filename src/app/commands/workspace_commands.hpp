@@ -8,13 +8,15 @@
 
 #pragma once
 
+#include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
+#include "cli/slash_commands.hpp"          // ParsedSlashCommand(分派注册制)
+
 #include <functional>
 #include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
-#include "app/commands/command_flow.hpp"
 #include "app/tool_runtime.hpp"
 #include "cli/i18n.hpp"
 #include "cli/theme.hpp"
@@ -90,5 +92,21 @@ CommandFlow HandleWorktreeCommand(WorkspaceCommandState& state, const std::strin
 
 // /background:列后台命令任务清单(运维视图,字面量文案不经 i18n)。
 CommandFlow HandleBackgroundCommand(const lubancode::cli::Theme& theme);
+
+// ---------------------------------------------------------------------------
+// 命令分派注册制(会话终章):工作面域的分派位(init/worktree/mcp/lsp/
+// todos/plugins/plugin/tools/background)。case 体原样自 interactive_session
+// 的大 switch 搬来,材料经 SlashDispatchContext 递入。
+// ---------------------------------------------------------------------------
+struct SlashDispatchContext;
+CommandFlow HandleSlashInit(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashWorktree(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashMcp(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashLsp(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashTodos(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashPlugins(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashPlugin(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashTools(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashBackground(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

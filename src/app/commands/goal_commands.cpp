@@ -1,6 +1,7 @@
 // /goal 命令处理器实现(纯排版与 gate;状态机调用在 interactive_session)。
 
 #include "app/commands/goal_commands.hpp"
+#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
 
 #include <chrono>
 #include <utility>
@@ -527,5 +528,27 @@ void NoteSubagentCompletionForGoal(const GoalWiring& wiring) {
         }
     }
 }
+
+// 命令分派注册制(会话终章):/goal 的分派位。二级纯解析在 cli 层,业务
+// 在这(状态机唯一写口是 GoalCoordinator;装配 ensure 与材料包走
+// SlashDispatchContext 的回调)。
+CommandFlow HandleSlashGoal(SlashDispatchContext& dispatch, const lubancode::cli::ParsedSlashCommand& parsed) {
+    const lubancode::cli::ParsedGoalCommand goal = lubancode::cli::ParseGoalCommand(parsed.args);
+    if (goal.action == lubancode::cli::GoalCommandAction::Invalid) {
+        auto& out = lubancode::cli::TermOut();
+        out << dispatch.theme->error;
+        if (goal.bad_word.empty()) {
+            out << "用法: /goal <objective> | status | edit <objective> | pause | resume | clear";
+        } else {
+            out << "子命令或参数不对: " << goal.bad_word
+                << "。正文以子命令词开头时用 /goal -- <正文>";
+        }
+        out << dispatch.theme->reset << "\n";
+        return CommandFlow::Continue;
+    }
+    dispatch.ensure_goal_coordinator();
+    return lubancode::app::HandleGoalCommand(goal, dispatch.make_goal_wiring());
+}
+
 
 }  // namespace lubancode::app

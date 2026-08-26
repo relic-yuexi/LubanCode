@@ -3,6 +3,9 @@
 // (InteractiveSession)在命令执行期间保证存活。
 #pragma once
 
+#include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
+#include "cli/slash_commands.hpp"          // ParsedSlashCommand(分派注册制)
+
 #include <optional>
 #include <string>
 #include <vector>
@@ -33,5 +36,14 @@ CommandFlow HandleSendCommand(PeerCommandState& state, const std::string& args,
 
 // /peerperm [auto|accept|hold|refuse]:看/设来信权限档。
 CommandFlow HandlePeerpermCommand(PeerCommandState& state, const std::string& args);
+
+// ---------------------------------------------------------------------------
+// 命令分派注册制(会话终章):跨会话传话域的分派位(peers/send/peerperm)。
+// case 体原样自 interactive_session 的大 switch 搬来。
+// ---------------------------------------------------------------------------
+struct SlashDispatchContext;
+CommandFlow HandleSlashPeers(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashSend(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashPeerperm(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

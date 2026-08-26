@@ -25,6 +25,7 @@
 #include "cli/context_tracker.hpp"
 #include "cli/i18n.hpp"
 #include "cli/provider_wizard.hpp"
+#include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
 #include "cli/slash_commands.hpp"
 #include "cli/setup_wizard.hpp"
 #include "cli/theme.hpp"
@@ -181,5 +182,22 @@ void HandleKeymapCommand(const std::string& raw_args, const std::optional<std::s
 // history 是活对话账,倒着找最近一条有正文的 assistant 消息。
 void HandleCopyCommand(const std::string& raw_args, const std::vector<lubancode::api::Message>& history,
                        const lubancode::cli::Theme& theme);
+
+// ---------------------------------------------------------------------------
+// 命令分派注册制(会话终章):设置域的分派位(provider/model/config/
+// update/language/think/skills/skill/keymap/copy)。case 体原样自
+// interactive_session 的大 switch 搬来,材料经 SlashDispatchContext 递入。
+// ---------------------------------------------------------------------------
+struct SlashDispatchContext;
+
+CommandFlow HandleSlashProvider(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashConfig(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashUpdate(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashLanguage(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashThink(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashSkills(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashSkill(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashKeymap(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashCopy(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

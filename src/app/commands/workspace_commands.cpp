@@ -1,5 +1,8 @@
 // workspace_commands.hpp 的实现:工具清单/插件/MCP/LSP/worktree 命令的函数体。
 #include "app/commands/workspace_commands.hpp"
+#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
+#include "cli/todo_render.hpp"                // /todos 的排版
+#include "config/project_instructions.hpp"    // /init 的建档
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 
 using lubancode::cli::TermOut;
@@ -482,6 +485,76 @@ CommandFlow HandleBackgroundCommand(const lubancode::cli::Theme& theme) {
         TermOut() << "\n";
     }
     return CommandFlow::Continue;
+}
+
+// ---------------------------------------------------------------------------
+// 命令分派注册制(会话终章):工作面域的分派位。case 体原样自
+// interactive_session 的大 switch 搬来,材料经 SlashDispatchContext 递入。
+// ---------------------------------------------------------------------------
+
+CommandFlow HandleSlashInit(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    (void)parsed;
+    const lubancode::cli::Theme& theme = *ctx.theme;
+    const auto result = lubancode::config::InitializeProjectInstructions(std::filesystem::current_path());
+    if (result.status == lubancode::config::InitProjectInstructionsStatus::Error) {
+        TermOut() << theme.error << trf("cmd.init.failed", PathToUtf8(result.path), result.error)
+                  << theme.reset << "\n";
+        return CommandFlow::Continue;
+    }
+    ctx.refresh_project_instructions();
+    const char* key = result.status == lubancode::config::InitProjectInstructionsStatus::Created
+                          ? "cmd.init.created"
+                          : "cmd.init.exists";
+    TermOut() << trf(key, PathToUtf8(result.path)) << "\n";
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashWorktree(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    WorkspaceCommandState worktree_state{*ctx.worktree_session, ctx.sync_worktree_directory};
+    return HandleWorktreeCommand(worktree_state, parsed.args, *ctx.theme);
+}
+
+CommandFlow HandleSlashMcp(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    (void)parsed;
+    PrintMcpCommand(*ctx.mcp_servers);
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashLsp(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    (void)parsed;
+    PrintLspCommand(*ctx.lsp_manager);
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashTodos(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    (void)parsed;
+    TermOut() << lubancode::cli::FormatTodoList((*ctx.todo_state)->items, *ctx.theme);
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashPlugins(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    (void)parsed;
+    PrintPluginsCommand(*ctx.plugin_mounted, *ctx.plugin_warnings);
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashPlugin(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    HandlePluginCommand(parsed.args, *ctx.plugin_mounted,
+                        ctx.tool_runtime != nullptr
+                            ? ctx.tool_runtime->process_manifests()
+                            : std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>{});
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashTools(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    (void)parsed;
+    PrintToolsCommand(*ctx.registry, **ctx.loaded_tools, ctx.main_deferral, ctx.tool_search_threshold);
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashBackground(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    (void)parsed;
+    return HandleBackgroundCommand(*ctx.theme);
 }
 
 }  // namespace lubancode::app

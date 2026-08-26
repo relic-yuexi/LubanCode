@@ -1,0 +1,109 @@
+// /goal 子系统接线器(会话终章):goal 的"状态+装配+泵+存档恢复"自
+// TerminalSessionController 大类外迁,归这一只。控制器持句柄调;会话级
+// 状态(theme/config/session_store)仍留控制器,两边不互相摸。
+//
+// 状态归属(单子钉的):
+//   - coordinator(状态机)/checkpoint 工具账/work source/fairness 账/
+//     活跃 iteration 号——全跟接线器走;
+//   - 存档(SessionStore)/模型路由/评估 backend——会话借来(Host 全借用);
+//   - 开 turn 只经 start_turn 回调(单飞铁律:一场会话同时一枚主 turn)。
+//
+// 泵的公平仲裁(session_work_scheduler 的 PumpNextWork)不动,留控制器;
+// 这里只出候选(ProbeWork)与消费(PumpContinuation/CloseIteration)。
+#pragma once
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
+
+#include <nlohmann/json.hpp>
+
+#include "api/backend.hpp"
+#include "app/commands/goal_commands.hpp"     // GoalWiring(命令材料包)
+#include "app/model_router.hpp"
+#include "cli/theme.hpp"
+#include "runtime/goal_coordinator.hpp"
+#include "runtime/session_work_scheduler.hpp"  // GoalWorkSource/FairnessCounter
+#include "sessions/session_store.hpp"
+#include "tools/goal_checkpoint_tool.hpp"
+
+namespace lubancode::cli {
+struct Theme;
+}
+namespace lubancode::runtime {
+class ToolTraceHub;
+}
+namespace lubancode::tools {
+class AgentTool;
+class ToolRegistry;
+}
+namespace lubancode::runtime::loop {
+class LoopScheduler;
+}
+
+namespace lubancode::app {
+
+class GoalSessionWiring {
+public:
+    // 会话借给接线器的材料(全借用,接线器不拥有)。
+    struct Host {
+        const lubancode::cli::Theme* theme = nullptr;
+        lubancode::sessions::SessionStore* session_store = nullptr;
+        lubancode::runtime::ToolTraceHub* trace_hub = nullptr;   // 可空(采证)
+        lubancode::app::ModelRouterService* model_router = nullptr;  // 可空
+        lubancode::api::Backend* evaluation_backend = nullptr;   // 评估轮的独立请求
+        std::shared_ptr<std::string> current_model;              // 评估兜底模型
+        // 晚绑定槽(控制器在装配尾填):
+        std::function<lubancode::tools::AgentTool*()> agent_tool;       // 命令材料
+        std::function<lubancode::runtime::loop::LoopScheduler*()> loop_scheduler;
+        // 开一枚 goal 执行轮(text + 失败出参;单飞,主线程调)。
+        std::function<void(const std::string&, bool*)> start_turn;
+    };
+
+    explicit GoalSessionWiring(Host host);
+
+    // goal_checkpoint 窄工具的注册(装配期一次;靠 turn 级过滤放行,普通轮
+    // 不露面)。状态跟接线器走,工具只持 shared_ptr。
+    void RegisterTools(lubancode::tools::ToolRegistry& registry);
+
+    // 装配:coordinator 从 config+env 折 Options 安家,LedgerSink 接 session
+    // 存档(goal 事件行 append+flush),ready continuation 经 GoalWorkSource
+    // 出候选。幂等。
+    void Ensure(const lubancode::config::Config& config);
+
+    // ---- 泵(主线程安全边界) ----
+    // ready continuation 的取件口:TakeReadyIteration 落 started 事件,
+    // synthetic text 开 turn,收口走 CloseIteration。
+    void PumpContinuation(std::int64_t now_ms);
+    // goal 执行轮的收口路:采证(ToolTraceHub -> GoalEvidence)→ checkpoint
+    // → 独立 evaluator → ApplyEvaluation → continue 则 ScheduleNextIteration。
+    void CloseIteration(const std::string& turn_id, bool turn_failed);
+
+    // ---- 存档恢复与守恒面 ----
+    // /resume 后从存档 goal 事件账回放重建(默认 paused-on-resume)。
+    void RestoreFromArchive();
+    // compact_v2 事件落盘前补 goal snapshot(有 goal 才带)。
+    void AttachSnapshotToCompact(lubancode::sessions::CompactV2Event& event);
+
+    // ---- 查询口(控制器/状态栏用) ----
+    lubancode::runtime::goal::GoalCoordinator* coordinator();  // ensure 前空
+    bool HasActiveIteration() const { return !active_iteration_.empty(); }
+    // 公平账(泵的仲裁用;GoalWorkSource 的候选也在)。
+    lubancode::runtime::GoalWorkSource& work_source() { return work_source_; }
+    lubancode::runtime::FairnessCounter& fairness() { return fairness_; }
+    // 命令材料包(HandleGoalCommand/EmitGoalHook/回流喂账共用)。
+    lubancode::app::GoalWiring MakeCommandWiring(lubancode::tools::AgentTool* agent_tool,
+                                                 lubancode::runtime::loop::LoopScheduler* loop_scheduler);
+
+private:
+    Host host_;
+    std::optional<lubancode::runtime::goal::GoalCoordinator> coordinator_;
+    std::shared_ptr<lubancode::tools::GoalCheckpointState> checkpoint_state_;
+    lubancode::runtime::GoalWorkSource work_source_;
+    lubancode::runtime::FairnessCounter fairness_;
+    std::string active_iteration_;  // 当前在跑的 goal iteration(收口时清)
+};
+
+}  // namespace lubancode::app

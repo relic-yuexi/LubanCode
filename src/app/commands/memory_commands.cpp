@@ -4,6 +4,7 @@
 // 行为一字不差——注释一并随行。
 
 #include "app/commands/memory_commands.hpp"
+#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
 
 #include <algorithm>
 #include <cctype>
@@ -645,6 +646,17 @@ void MaybeGenerateSessionTitle(const SessionTailContext& ctx, lubancode::agent::
         TermOut() << theme.error << tr("cmd.title.write_failed") << theme.reset << "\n";
         session_title.clear();  // 落不了盘就不占内存标题,/sessions 仍用首句
     }
+}
+
+// 命令分派注册制(会话终章):/memory 的分派位——命令与排版全在本文件,
+// 分派位只递会话状态(工具补注册走回调)。
+CommandFlow HandleSlashMemory(SlashDispatchContext& dispatch, const lubancode::cli::ParsedSlashCommand& parsed) {
+    lubancode::app::MemoryCommandContext memory_ctx;
+    memory_ctx.project_memory = dispatch.project_memory;
+    memory_ctx.theme = dispatch.theme;
+    memory_ctx.ensure_tool = dispatch.ensure_memory_tool;
+    HandleMemoryCommand(memory_ctx, parsed.args);
+    return CommandFlow::Continue;
 }
 
 }  // namespace lubancode::app

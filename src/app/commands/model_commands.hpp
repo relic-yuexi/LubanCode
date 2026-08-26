@@ -10,6 +10,9 @@
 
 #pragma once
 
+#include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
+#include "cli/slash_commands.hpp"          // ParsedSlashCommand(分派注册制)
+
 #include <expected>
 #include <functional>
 #include <memory>
@@ -62,5 +65,10 @@ struct ModelCommandContext {
 // /model 的三路:roles(路由表短打)/ <role> <id>(角色设置,两段式)/
 // <id> 或裸敲(直切与菜单选,两条输入路合流)。
 void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args);
+
+// 命令分派注册制(会话终章):/model 的分派位(材料装包 + presenter),
+// 自 interactive_session 大 switch 原样搬来。
+struct SlashDispatchContext;
+CommandFlow HandleSlashModel(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

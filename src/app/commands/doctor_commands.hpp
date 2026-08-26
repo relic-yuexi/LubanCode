@@ -15,6 +15,9 @@
 
 #pragma once
 
+#include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
+#include "cli/slash_commands.hpp"          // ParsedSlashCommand(分派注册制)
+
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -112,5 +115,10 @@ struct DoctorContext {
 };
 
 void HandleDoctorCommand(const std::string& args, const DoctorContext& context);
+
+// 命令分派注册制(会话终章):/doctor 的分派位(case 体原样搬自大 switch;
+// 探针写回 config 后顺手重建会话 backend)。
+struct SlashDispatchContext;
+CommandFlow HandleSlashDoctor(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

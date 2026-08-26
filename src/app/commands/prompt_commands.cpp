@@ -1,5 +1,7 @@
 // prompt_commands.hpp 的实现:魂/法/提示词命令的函数体。
 #include "app/commands/prompt_commands.hpp"
+
+#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 
 using lubancode::cli::TermOut;
@@ -265,6 +267,22 @@ void HandlePromptCommand(const std::string& args, const std::string& law_source,
         TermOut() << trf("cmd.prompt.old_file", *reset_result);
     }
     TermOut() << "。\n" << tr("cmd.prompt.reset_tail") << "\n";
+}
+
+// ---------------------------------------------------------------------------
+// 命令分派注册制(会话终章):魂/法域的分派位。
+// ---------------------------------------------------------------------------
+
+CommandFlow HandleSlashSoul(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    HandleSoulCommand(parsed.args, ctx.current_soul, *ctx.current_soul_name, *ctx.config_file_path);
+    // 五层后端退役(批四):魂的即时生效改走皮上的叠层字段。
+    ctx.sync_request_policy();
+    return CommandFlow::Continue;
+}
+
+CommandFlow HandleSlashPrompt(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    HandlePromptCommand(parsed.args, ctx.opts->law_source, *ctx.persona, *ctx.prompts_dir);
+    return CommandFlow::Continue;
 }
 
 }  // namespace lubancode::app

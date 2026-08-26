@@ -22,6 +22,7 @@
 #include "sessions/session_lifecycle.hpp"
 #include "api/backend.hpp"
 #include "app/commands/command_flow.hpp"
+#include "cli/slash_commands.hpp"  // ParsedSlashCommand(分派注册制)
 #include "app/hook_runtime.hpp"
 #include "app/model_router.hpp"
 #include "config/config.hpp"
@@ -330,5 +331,25 @@ CommandFlow HandleTitleCommand(SessionCommandState& state, const std::string& ar
 // /resume [编号或id]:裸敲弹最近 20 场菜单;成功后接管存档继续追加。
 CommandFlow HandleResumeCommand(SessionCommandState& state, const std::string& args,
                                 const lubancode::cli::Theme& theme);
+
+// ---------------------------------------------------------------------------
+// 命令分派注册制(会话终章):会话域的分派位。旧 interactive_session 大
+// switch 的会话类 case 原样搬来,材料经 SlashDispatchContext(定义在
+// command_registry.hpp)递入;行为一字未改。
+// ---------------------------------------------------------------------------
+struct SlashDispatchContext;
+
+CommandFlow HandleSlashHelp(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashClear(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashContext(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashCompact(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashRecord(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashSessions(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashArchive(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashDelete(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashResume(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashExport(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashTitle(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+CommandFlow HandleSlashExit(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

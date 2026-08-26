@@ -1,6 +1,7 @@
 // /loop 命令处理器(loop 单第 2 期)实现。
 
 #include "app/commands/loop_commands.hpp"
+#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
 
 #include <algorithm>
 #include <chrono>
@@ -588,6 +589,15 @@ void EmitLoopServerEvents(const LoopWiring& wiring,
         event.payload["data"] = e.payload;
         sink->Emit(event);
     }
+}
+
+// 命令分派注册制(会话终章):/loop 的分派位。二级纯解析在 cli 层,业务
+// 在这(prompt 源解析/feature 门/非交互明拒在 HandleLoopCommand)。
+CommandFlow HandleSlashLoop(SlashDispatchContext& dispatch, const lubancode::cli::ParsedSlashCommand& parsed) {
+    dispatch.ensure_loop_scheduler();
+    return static_cast<CommandFlow>(
+        lubancode::app::HandleLoopCommand(lubancode::cli::ParseLoopCommand(parsed.args),
+                                          dispatch.make_loop_wiring()));
 }
 
 }  // namespace lubancode::app

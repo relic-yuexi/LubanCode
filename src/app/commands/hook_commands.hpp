@@ -5,6 +5,9 @@
 //得过、关得掉,先把账立住。
 #pragma once
 
+#include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
+#include "cli/slash_commands.hpp"          // ParsedSlashCommand(分派注册制)
+
 #include <string>
 
 #include "cli/theme.hpp"
@@ -22,5 +25,9 @@ namespace lubancode::app {
 // dispatcher 为空(没 Setup 过,理论只有异常路径)打一行说明。
 void HandleHooksCommand(const std::string& args, lubancode::hooks::HookDispatcher* dispatcher,
                          const lubancode::cli::Theme& theme);
+
+// 命令分派注册制(会话终章):/hooks 的分派位(case 体原样搬自大 switch)。
+struct SlashDispatchContext;
+CommandFlow HandleSlashHooks(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app
