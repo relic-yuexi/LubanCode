@@ -3,6 +3,7 @@
 
 #include "app/cli_options.hpp"
 #include "app/interactive_session.hpp"
+#include "app/session_stack.hpp"  // 组合根装配件(会话终章)
 #include "app/one_shot.hpp"
 #include "app/plugin_scaffold.hpp"
 #include "app_server/server.hpp"
@@ -709,10 +710,15 @@ int RunCli(const std::vector<std::string>& args) {
             const auto absolute = std::filesystem::absolute(lubancode::tools::Utf8ToPath(args[0]), ec);
             executable = PathToUtf8(ec ? lubancode::tools::Utf8ToPath(args[0]) : absolute);
         }
-        const lubancode::app::InteractiveSessionOptions session_options{
+        // 组合根外迁(会话终章):会话装配件(材料/后端栈/工具全栈)在这
+        // 装好递给会话控制器,控制器只收装好的件。
+        lubancode::app::InteractiveSessionOptions session_options{
             effective, theme, model_catalog, settings_local,
             cli_options.auto_confirm, persona, spinner_enabled, cli_options.continue_last, law_source,
             executable, ResolveStartupPlanMode(cli_options, settings_local)};
+        std::unique_ptr<lubancode::app::SessionStack> session_stack =
+            lubancode::app::BuildSessionStack(session_options);
+        session_options.stack = session_stack.get();
         RunInteractiveSession(session_options);
     } catch (const std::exception& e) {
         // 最后防线:到这里的是启动期/会话外层的真 fatal,退进程;交互会话

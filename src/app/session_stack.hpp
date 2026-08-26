@@ -26,7 +26,6 @@
 #include "cli/spinner_backend.hpp"
 #include "cli/worktree.hpp"
 #include "config/config.hpp"
-#include "config/settings_local.hpp"
 #include "memory/project_memory.hpp"
 #include "tools/skill_loader.hpp"  // SkillMeta
 
@@ -100,6 +99,9 @@ struct SessionStack {
     // 后台子代理的 detached 装配(每个任务各造一份 client 与基础工具表)。
     lubancode::tools::DetachedAgentBackend BuildDetachedBackend() const;
     std::unique_ptr<lubancode::tools::ToolRegistry> BuildDetachedRegistry() const;
+
+    // 构造 = 原控制器初始化列表的装配(成员声明序即装配序)。
+    explicit SessionStack(const InteractiveSessionOptions& options);
 };
 
 // 装配本体(组合根):原控制器构造函数的装配段逐字搬来。输出次序与原先

@@ -20,6 +20,9 @@ struct ConfigResult;
 struct ModelCatalog;
 struct SettingsLocal;
 }
+namespace lubancode::app {
+struct SessionStack;  // app/session_stack.hpp(组合根装配件,会话终章)
+}
 
 namespace lubancode::app {
 
@@ -42,6 +45,10 @@ struct InteractiveSessionOptions {
     // Plan 模式单:起手档(CLI/env/settings 已在 RunCli 按优先级算好)。
     // --continue 恢复出的档位压过它(resume 的 mode 事件才是真账)。
     bool start_in_plan = false;
+    // 组合根装配件(会话终章):cli_app 调 BuildSessionStack 装好递进来,
+    // 控制器只收装好的件。空 = 调用方没走组合根(单测/旧调用点),入口
+    // 自己现装一份,两条路共用同一只 BuildSessionStack。
+    SessionStack* stack = nullptr;
 };
 
 // 没带位置参数时的交互会话:读一行、问一句,exit/quit 或 EOF 退出。

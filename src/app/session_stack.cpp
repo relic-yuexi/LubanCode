@@ -8,7 +8,8 @@
 
 #include "agent/prompts.hpp"  // LoadSoulContentByName(魂的默认内容)
 #include "app/commands/settings_commands.hpp"  // PrintBanner/PrintLubanIcon/ApplyModelCatalog
-#include "cli/ask_user.hpp"
+#include "app/commands/prompt_commands.hpp"    // LoadSoulContentByName(魂内容)
+#include "app/turn_runner.hpp"                 // PromptAskUser(ask_user 工具的问话)
 #include "cli/i18n.hpp"
 #include "cli/terminal_port.hpp"
 #include "config/model_catalog.hpp"
@@ -18,7 +19,6 @@
 #include "platform/paths.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/ask_user.hpp"
-#include "tools/deferred_tools.hpp"
 #include "tools/path_utils.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool_search.hpp"
@@ -191,21 +191,21 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
     lubancode::app::ToolRuntime::Options runtime_options;
     runtime_options.with_explore = true;
     runtime_options.with_ask_user = spinner_enabled;
-    runtime_options.ask_user_handler = [&theme](const lubancode::tools::AskUserQuestion& question) {
+    runtime_options.ask_user_handler = [theme](const lubancode::tools::AskUserQuestion& question) {
         return PromptAskUser(question, theme);
     };
     runtime_options.memory = stack->project_memory;
     runtime_options.worktree_session = &stack->worktree_session;
     // worktree 工具的两道硬确认(进园子外的房、脏房强删)走自己的问话通道,
     // 不经三档确认——确认档压不住这一问,管道模式没人可问就拒。
-    runtime_options.worktree_confirm = [](const std::string& question) -> std::optional<bool> {
+    runtime_options.worktree_confirm = [theme_ref = &theme](const std::string& question) -> std::optional<bool> {
         if (!lubancode::platform::StdinIsInteractive() ||
             !lubancode::platform::ProbeStdoutConsole().is_console) {
             return std::nullopt;
         }
         const lubancode::cli::StreamFooterSuspendScope footer_suspend;
-        const lubancode::cli::Theme plain;
-        const auto answer = lubancode::cli::ReadLine(plain.confirm + question + plain.reset, plain,
+        const lubancode::cli::Theme& ask_theme = *theme_ref;
+        const auto answer = lubancode::cli::ReadLine(ask_theme.confirm + question + ask_theme.reset, ask_theme,
                                                      /*esc_rejects=*/true);
         return answer.has_value() && (*answer == "y" || *answer == "Y");
     };

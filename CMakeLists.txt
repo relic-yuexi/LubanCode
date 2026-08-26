@@ -659,6 +659,13 @@ add_library(lubancode_app STATIC
   src/app/wirings/plan_session_wiring.cpp
   src/app/wirings/peer_session_wiring.cpp
   src/app/wirings/record_session_wiring.cpp
+  # 会话终章:组合根装配件(控制器构造函数的装配段外迁,cli_app 调用)。
+  src/app/session_stack.cpp
+  # 会话终章:控制器的装配半边(构造/析构/接线/材料包;运行半边在
+  # interactive_session.cpp,类声明共享 interactive_session_controller.hpp)。
+  src/app/interactive_session_wiring.cpp
+  # 会话终章:@ 提及支件(索引缓存 + 提交前校验/账单,自大类搬出)。
+  src/app/mention_support.cpp
   src/app/interactive_session.cpp
   src/app/one_shot.cpp
   src/app/cli_options.cpp
