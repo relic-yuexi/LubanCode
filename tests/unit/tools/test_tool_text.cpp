@@ -707,7 +707,7 @@ TEST_CASE("清底批: 缺省(zh-CN)与改前一字不差") {
     CHECK(skill.input_schema()["required"] == nlohmann::json::array({"name"}));
 
     lubancode::tools::ListSessionsTool list_sessions(
-        [] { return std::vector<lubancode::agent::PeerCard>{}; }, "self");
+        [] { return std::vector<lubancode::peers::PeerCard>{}; }, "self");
     CHECK(list_sessions.description() == kListSessionsDescBefore);
     // 无参工具没有参数说明可钉,这里钉"壳合法且确实无参"。从前钉的是
     // "整份 schema == 空对象",把不合规的形状连带钉成了基准:严格端按 type
@@ -717,9 +717,9 @@ TEST_CASE("清底批: 缺省(zh-CN)与改前一字不差") {
     CHECK(lss["properties"] == nlohmann::json::object());
 
     lubancode::tools::SendSessionMessageTool send_session(
-        [] { return std::vector<lubancode::agent::PeerCard>{}; },
-        [](const lubancode::agent::PeerCard&, const std::string&) {
-            return lubancode::agent::PeerDelivery::Delivered;
+        [] { return std::vector<lubancode::peers::PeerCard>{}; },
+        [](const lubancode::peers::PeerCard&, const std::string&) {
+            return lubancode::peers::PeerDelivery::Delivered;
         });
     CHECK(send_session.description() == kSendSessionMessageDescBefore);
     const nlohmann::json sms = send_session.input_schema();
@@ -817,14 +817,14 @@ TEST_CASE("清底批: en 下 description 与参数说明都是英文") {
               "the same name as listed in the system prompt") != std::string::npos);
 
     lubancode::tools::ListSessionsTool list_sessions(
-        [] { return std::vector<lubancode::agent::PeerCard>{}; }, "self");
+        [] { return std::vector<lubancode::peers::PeerCard>{}; }, "self");
     CHECK(list_sessions.description().find(
               "List the other Lubancode sessions the current user has open") == 0);
 
     lubancode::tools::SendSessionMessageTool send_session(
-        [] { return std::vector<lubancode::agent::PeerCard>{}; },
-        [](const lubancode::agent::PeerCard&, const std::string&) {
-            return lubancode::agent::PeerDelivery::Delivered;
+        [] { return std::vector<lubancode::peers::PeerCard>{}; },
+        [](const lubancode::peers::PeerCard&, const std::string&) {
+            return lubancode::peers::PeerDelivery::Delivered;
         });
     CHECK(send_session.description().find("Hand a plain-text message to another Lubancode session") == 0);
     CHECK(send_session.input_schema()["properties"]["text"]["description"] == "Plain-text body");

@@ -20,8 +20,8 @@ namespace lubancode::tools {
 class SendSessionMessageTool : public Tool {
 public:
     // peers_provider:列会话(找目标);send:PeerRuntime::Send 的转发。
-    SendSessionMessageTool(std::function<std::vector<agent::PeerCard>()> peers_provider,
-                           std::function<agent::PeerDelivery(const agent::PeerCard&, const std::string&)> send);
+    SendSessionMessageTool(std::function<std::vector<peers::PeerCard>()> peers_provider,
+                           std::function<peers::PeerDelivery(const peers::PeerCard&, const std::string&)> send);
 
     std::string name() const override { return "send_session_message"; }
     std::string description() const override;
@@ -30,8 +30,8 @@ public:
     Tool::Result execute(const nlohmann::json& input) override;
 
 private:
-    std::function<std::vector<agent::PeerCard>()> peers_provider_;
-    std::function<agent::PeerDelivery(const agent::PeerCard&, const std::string&)> send_;
+    std::function<std::vector<peers::PeerCard>()> peers_provider_;
+    std::function<peers::PeerDelivery(const peers::PeerCard&, const std::string&)> send_;
 };
 
 }  // namespace lubancode::tools

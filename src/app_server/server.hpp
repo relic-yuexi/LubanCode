@@ -69,7 +69,7 @@ struct ThreadRecord {
     // 最近一轮的 turn/completed params(HandleTurnStart 同步口径取回)。
     nlohmann::json last_completed;
     // 场次存档句柄(落盘由它管;失败不拦协议,只打 stderr)。
-    std::unique_ptr<agent::SessionStore> store;
+    std::unique_ptr<sessions::SessionStore> store;
 
     // goal 单合流批:typed 命令面(goal 六 + loop 七 + plan 三)的会话级
     // 状态。goal/loop 的状态机真值按 thread 各一本(一场 thread 一只

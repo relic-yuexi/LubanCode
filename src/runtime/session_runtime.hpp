@@ -81,12 +81,12 @@ public:
     TurnEventAdapter MakeTurnAdapter();
 
     // ---- 会话存档账(本类持有,控制器按引用续用) ----------------------------
-    agent::SessionStore& store() { return store_; }
-    const agent::SessionStore& store() const { return store_; }
+    sessions::SessionStore& store() { return store_; }
+    const sessions::SessionStore& store() const { return store_; }
     const std::string& sessions_dir() const { return options_.sessions_dir; }
     const std::string& wire_name() const { return options_.wire_name; }
     const std::string& start_ts() const { return options_.start_ts; }
-    agent::SessionMeta& meta() { return meta_; }
+    sessions::SessionMeta& meta() { return meta_; }
     std::string& title() { return title_; }
     bool& title_pending() { return title_pending_; }
     std::size_t& persisted_count() { return persisted_count_; }
@@ -160,8 +160,8 @@ private:
     std::string thread_id_;
     EventSink* sink_ = nullptr;
 
-    agent::SessionStore store_;
-    agent::SessionMeta meta_{};
+    sessions::SessionStore store_;
+    sessions::SessionMeta meta_{};
     std::string title_;
     bool title_pending_ = false;
     std::size_t persisted_count_ = 0;
@@ -173,7 +173,7 @@ private:
     // Plan 模式单:两轴真值与计划成品账。
     ModeState mode_state_;
     // 存档未开时切过的档(起手 --mode plan):建档那一刻补落。
-    std::optional<agent::ModeEvent> pending_mode_event_;
+    std::optional<sessions::ModeEvent> pending_mode_event_;
     std::optional<PlanDocument> latest_plan_;
 };
 

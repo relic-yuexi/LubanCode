@@ -15,11 +15,11 @@ namespace lubancode::app {
 
 // 三个命令共用的窄状态:全部是借用。
 struct PeerCommandState {
-    std::optional<lubancode::agent::PeerRuntime>& runtime;  // 会话持有,可空
+    std::optional<lubancode::peers::PeerRuntime>& runtime;  // 会话持有,可空
     bool started = false;  // Start() 成功过才有 /peers /send /peerperm 可言
     // 轮内收件池(held 的确认弹问在会话的空闲路径,不在这组命令里)。
-    std::vector<lubancode::agent::PeerEnvelope>& ready_messages;
-    std::vector<lubancode::agent::PeerEnvelope>& held_stash;
+    std::vector<lubancode::peers::PeerEnvelope>& ready_messages;
+    std::vector<lubancode::peers::PeerEnvelope>& held_stash;
 };
 
 // /peers:列名册;真控制台给方向键菜单,管道给纯文本行。

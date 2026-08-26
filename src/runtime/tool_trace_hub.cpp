@@ -10,10 +10,10 @@
 
 namespace lubancode::runtime {
 
-ToolTraceHub::ToolTraceHub(IdAuthority& ids, agent::SessionStore* store)
+ToolTraceHub::ToolTraceHub(IdAuthority& ids, sessions::SessionStore* store)
     : ToolTraceHub(ids, store, Options{}) {}
 
-ToolTraceHub::ToolTraceHub(IdAuthority& ids, agent::SessionStore* store, const Options& options)
+ToolTraceHub::ToolTraceHub(IdAuthority& ids, sessions::SessionStore* store, const Options& options)
     : ids_(ids), store_(store), options_(options) {}
 
 
@@ -278,9 +278,9 @@ std::optional<agent::ToolUndoToken> ToolTraceHub::FindUndoToken(const std::strin
     }
     // 存档真本:重启后 recent_ 空,折叠 JSONL(调用方保证 store 活着)。
     if (store_ != nullptr && store_->active()) {
-        const auto bytes = agent::ReadSessionFileBytes(store_->file_path());
+        const auto bytes = sessions::ReadSessionFileBytes(store_->file_path());
         if (bytes.has_value()) {
-            const auto loaded = agent::ParseSessionFile(*bytes);
+            const auto loaded = sessions::ParseSessionFile(*bytes);
             if (loaded.has_value()) {
                 const auto ledger = BuildLedger(loaded->tool_trace_events);
                 if (const auto* record = ledger.FindByExecution(execution_id);

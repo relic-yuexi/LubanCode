@@ -38,12 +38,12 @@ SessionBeginResult SessionRuntime::EnsureBegun(const std::string& first_text, co
     if (options_.sessions_dir.empty() || store_broken_) {
         return SessionBeginResult::Disabled;
     }
-    meta_ = agent::SessionMeta{};
+    meta_ = sessions::SessionMeta{};
     meta_.wire = options_.wire_name;
     meta_.model = model;
     meta_.cwd = cwd;
-    meta_.started_at = agent::NowTimestamp();
-    const std::string session_id = agent::MakeSessionId(options_.start_ts, first_text);
+    meta_.started_at = sessions::NowTimestamp();
+    const std::string session_id = sessions::MakeSessionId(options_.start_ts, first_text);
     if (!store_.Begin(meta_, session_id)) {
         store_broken_ = true;
         return SessionBeginResult::Failed;
@@ -122,7 +122,7 @@ bool SessionRuntime::SetCollaborationMode(CollaborationMode mode, const std::str
     }
     // 存档活跃就落 mode_v1(append+flush);没建档先挂起(EnsureBegun 补落),
     // 写坏不拦切档——内存真值在,档是加层(与 queue 事件同取舍)。
-    agent::ModeEvent event;
+    sessions::ModeEvent event;
     event.mode = ToString(mode);
     event.reason = reason;
     event.revision = mode_state_.revision;
@@ -143,7 +143,7 @@ void SessionRuntime::RecordPlanDocument(const PlanDocument& plan) {
         latest_plan_ = superseded;
         // supersede 也留一行账:审阅历史看得见"哪稿被哪稿顶了"。
         if (store_.active() && !store_broken_) {
-            agent::PlanEvent event;
+            sessions::PlanEvent event;
             event.plan_id = superseded.plan_id;
             event.revision = superseded.revision;
             event.state = ToString(superseded.state);
@@ -155,7 +155,7 @@ void SessionRuntime::RecordPlanDocument(const PlanDocument& plan) {
     latest_plan_ = plan;
     mode_state_.latest_plan_id = plan.plan_id;
     if (store_.active() && !store_broken_) {
-        agent::PlanEvent event;
+        sessions::PlanEvent event;
         event.plan_id = plan.plan_id;
         event.revision = plan.revision;
         event.state = ToString(plan.state);
@@ -179,7 +179,7 @@ SessionRuntime::PlanReviewOutcome SessionRuntime::ReviewPlan(const std::string& 
     }
     latest_plan_->state = approve ? PlanReviewState::Approved : PlanReviewState::Rejected;
     if (store_.active() && !store_broken_) {
-        agent::PlanReviewEvent event;
+        sessions::PlanReviewEvent event;
         event.plan_id = plan_id;
         event.revision = revision;
         event.decision = approve ? "approved" : "rejected";

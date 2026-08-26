@@ -26,7 +26,7 @@
 
 #include <nlohmann/json.hpp>
 
-namespace lubancode::agent {
+namespace lubancode::sessions {
 
 // 一行 goal 事件(中立形状:type/event/goal_id/revision/iteration_id/
 // payload/timestamp_ms)。
@@ -76,4 +76,4 @@ struct GoalEvidenceRecord {
 std::string SerializeGoalEvidence(const GoalEvidenceRecord& evidence, const std::string& ts);
 std::optional<GoalEvidenceRecord> ParseGoalEvidence(const std::string& line);
 
-}  // namespace lubancode::agent
+}  // namespace lubancode::sessions

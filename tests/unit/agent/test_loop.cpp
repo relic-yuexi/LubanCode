@@ -913,9 +913,9 @@ TEST_CASE("本轮动态上下文:随本轮 user 消息尾部进请求视图,发�
     const auto* durable_user = std::get_if<api::TextBlock>(&loop.History()[0].content[0]);
     REQUIRE(durable_user != nullptr);
     CHECK(durable_user->text == "go");
-    const std::string session_line = agent::SerializeSessionMessage(loop.History()[0], "ts");
+    const std::string session_line = sessions::SerializeSessionMessage(loop.History()[0], "ts");
     CHECK(session_line.find("project memory context") == std::string::npos);
-    const std::string exported = agent::ExportSessionMarkdown(agent::SessionMeta{}, loop.History(), "test");
+    const std::string exported = sessions::ExportSessionMarkdown(sessions::SessionMeta{}, loop.History(), "test");
     CHECK(exported.find("project memory context") == std::string::npos);
 }
 

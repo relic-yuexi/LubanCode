@@ -15,8 +15,8 @@
 // 删除成功后发 thread.deleted——服务本身不持 EventSink,长活事件归
 // Runtime 装配层(与 ClientReceipt 的即时语义分层)。
 //
-// 依赖铁律:runtime 不 include cli/app;agent::SessionCatalog 与
-// agent::SessionLifecycle 是中立层(agent/ 不反向依赖 runtime),这里引
+// 依赖铁律:runtime 不 include cli/app;sessions::SessionCatalog 与
+// sessions::SessionLifecycle 是中立层(agent/ 不反向依赖 runtime),这里引
 // 它们不破层次。thread_id_to_path 形状的会话存档根由装配层注入。
 
 #pragma once
@@ -29,10 +29,10 @@
 
 #include "runtime/command.hpp"
 
-namespace lubancode::agent {
+namespace lubancode::sessions {
 class SessionCatalog;
 class SessionLifecycle;
-}  // namespace lubancode::agent
+}  // namespace lubancode::sessions
 
 namespace lubancode::runtime {
 
@@ -95,7 +95,7 @@ public:
 
 private:
     std::string sessions_dir_;
-    std::unique_ptr<agent::SessionLifecycle> lifecycle_;
+    std::unique_ptr<sessions::SessionLifecycle> lifecycle_;
 };
 
 // SessionSummary(agent 侧) -> JSON(协议形状;字段名与 app-server 的

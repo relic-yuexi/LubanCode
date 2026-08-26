@@ -4,7 +4,7 @@
 
 #include "platform/json_safe.hpp"  // DumpJsonSanitized:落档行的编码窄边界
 
-namespace lubancode::agent {
+namespace lubancode::sessions {
 
 namespace {
 
@@ -127,4 +127,4 @@ std::optional<GoalEvidenceRecord> ParseGoalEvidence(const std::string& line) {
     return e;
 }
 
-}  // namespace lubancode::agent
+}  // namespace lubancode::sessions

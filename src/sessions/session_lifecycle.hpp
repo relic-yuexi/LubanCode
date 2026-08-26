@@ -32,7 +32,7 @@
 #include <string>
 #include <vector>
 
-namespace lubancode::agent {
+namespace lubancode::sessions {
 
 // 生命周期操作的稳定结果码。ok 之外都是拒绝,人话在 message 里。
 enum class SessionLifecycleCode {
@@ -134,4 +134,4 @@ private:
     std::function<bool(const std::string&)> flush_close_;
 };
 
-}  // namespace lubancode::agent
+}  // namespace lubancode::sessions

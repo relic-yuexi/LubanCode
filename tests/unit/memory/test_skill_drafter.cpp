@@ -20,8 +20,8 @@
 namespace {
 
 namespace fs = std::filesystem;
-using lubancode::agent::RecordEvent;
-using lubancode::agent::RecordingStartInfo;
+using lubancode::skills::RecordEvent;
+using lubancode::skills::RecordingStartInfo;
 
 class TempDir {
 public:
@@ -61,7 +61,7 @@ std::vector<RecordEvent> DemoEvents() {
     start.seq = 1;
     start.ts = "2026-08-14 10:00:00";
     start.source = "user";
-    start.type = lubancode::agent::kEventRecordStart;
+    start.type = lubancode::skills::kEventRecordStart;
     start.data = {{"name", "weekly-report"},
                   {"goal", "生成 D:/demo 仓库的周报"},
                   {"variables", nlohmann::json::array({"日期"})},
@@ -69,22 +69,22 @@ std::vector<RecordEvent> DemoEvents() {
                   {"cwd", "D:/demo"}};
     events.push_back(std::move(start));
 
-    events.push_back(Ev(lubancode::agent::kEventToolCall,
+    events.push_back(Ev(lubancode::skills::kEventToolCall,
                         {{"tool", "read_file"}, {"input", nlohmann::json{{"path", "D:/demo/src/main.cpp"}}}}));
-    events.push_back(Ev(lubancode::agent::kEventToolResult, {{"tool", "read_file"}, {"ok", true},
+    events.push_back(Ev(lubancode::skills::kEventToolResult, {{"tool", "read_file"}, {"ok", true},
                                                              {"summary", "读出 120 行"}}));
-    events.push_back(Ev(lubancode::agent::kEventToolCall,
+    events.push_back(Ev(lubancode::skills::kEventToolCall,
                         {{"tool", "edit_file"},
                          {"input", nlohmann::json{{"path", "D:/demo/src/main.cpp"}, {"new_string", "fix"}}}}));
-    events.push_back(Ev(lubancode::agent::kEventToolResult, {{"tool", "edit_file"}, {"ok", true},
+    events.push_back(Ev(lubancode::skills::kEventToolResult, {{"tool", "edit_file"}, {"ok", true},
                                                              {"summary", "替换 1 处"}}));
-    events.push_back(Ev(lubancode::agent::kEventToolCall,
+    events.push_back(Ev(lubancode::skills::kEventToolCall,
                         {{"tool", "run_command"},
                          {"input", nlohmann::json{{"command", "ctest --date 2026-08-14 D:/demo/out-2026-08-14"}}}}));
-    events.push_back(Ev(lubancode::agent::kEventToolResult, {{"tool", "run_command"}, {"ok", true},
+    events.push_back(Ev(lubancode::skills::kEventToolResult, {{"tool", "run_command"}, {"ok", true},
                                                              {"summary", "100% tests passed"}}));
-    events.push_back(Ev(lubancode::agent::kEventUserNote, {{"text", "先跑测试再改文案"}}));
-    events.push_back(Ev(lubancode::agent::kEventVerification, {{"text", "ctest 全绿"}, {"ok", true}}));
+    events.push_back(Ev(lubancode::skills::kEventUserNote, {{"text", "先跑测试再改文案"}}));
+    events.push_back(Ev(lubancode::skills::kEventVerification, {{"text", "ctest 全绿"}, {"ok", true}}));
     return events;
 }
 
@@ -100,10 +100,10 @@ std::string SectionBetween(const std::string& text, const std::string& begin, co
 }  // namespace
 
 TEST_CASE("起草:读文件/改文件/跑测试的演示产出合法 SKILL.md") {
-    const std::string draft = lubancode::agent::ComposeSkillMarkdown(DemoEvents());
+    const std::string draft = lubancode::skills::ComposeSkillMarkdown(DemoEvents());
 
     // frontmatter 过现有解析器,name/description 齐全
-    const auto validated = lubancode::agent::ValidateSkillMarkdownForInstall(draft);
+    const auto validated = lubancode::skills::ValidateSkillMarkdownForInstall(draft);
     REQUIRE(validated.has_value());
     CHECK(*validated == "weekly-report");
     const auto parsed = lubancode::tools::ParseSkillMarkdown(draft);
@@ -137,10 +137,10 @@ TEST_CASE("起草:模型长输出不进正文,工具结果只用短摘要") {
     const std::vector<RecordEvent> events = DemoEvents();
     // 上面事件流的 tool_result 本来就只有一行摘要;再验一把超长摘要被截
     std::vector<RecordEvent> fat = events;
-    fat.push_back(Ev(lubancode::agent::kEventToolCall, {{"tool", "search"}, {"input", nlohmann::json{{"q", "x"}}}}));
-    fat.push_back(Ev(lubancode::agent::kEventToolResult,
+    fat.push_back(Ev(lubancode::skills::kEventToolCall, {{"tool", "search"}, {"input", nlohmann::json{{"q", "x"}}}}));
+    fat.push_back(Ev(lubancode::skills::kEventToolResult,
                      {{"tool", "search"}, {"ok", true}, {"summary", std::string(500, 'Z')}}));
-    const std::string draft = lubancode::agent::ComposeSkillMarkdown(fat);
+    const std::string draft = lubancode::skills::ComposeSkillMarkdown(fat);
     std::size_t count = 0;
     for (std::size_t at = draft.find('Z'); at != std::string::npos; at = draft.find('Z', at + 1)) {
         ++count;
@@ -152,22 +152,22 @@ TEST_CASE("起草:偶然的失败重试剔掉,连败写成分支") {
     std::vector<RecordEvent> events = DemoEvents();
     const nlohmann::json retry_input = {{"command", "ctest --rerun"}};
     // 同工具同入参:失败→成功,折成一步
-    events.push_back(Ev(lubancode::agent::kEventToolCall, {{"tool", "run_command"}, {"input", retry_input}}));
+    events.push_back(Ev(lubancode::skills::kEventToolCall, {{"tool", "run_command"}, {"input", retry_input}}));
     events.push_back(
-        Ev(lubancode::agent::kEventToolResult, {{"tool", "run_command"}, {"ok", false}, {"summary", "exit 1"}}));
-    events.push_back(Ev(lubancode::agent::kEventToolCall, {{"tool", "run_command"}, {"input", retry_input}}));
-    events.push_back(Ev(lubancode::agent::kEventToolResult,
+        Ev(lubancode::skills::kEventToolResult, {{"tool", "run_command"}, {"ok", false}, {"summary", "exit 1"}}));
+    events.push_back(Ev(lubancode::skills::kEventToolCall, {{"tool", "run_command"}, {"input", retry_input}}));
+    events.push_back(Ev(lubancode::skills::kEventToolResult,
                         {{"tool", "run_command"}, {"ok", true}, {"summary", "passed"}}));
     // 另一入参连败两次:留成分支
     const nlohmann::json fail_input = {{"command", "deploy --canary"}};
-    events.push_back(Ev(lubancode::agent::kEventToolCall, {{"tool", "run_command"}, {"input", fail_input}}));
-    events.push_back(Ev(lubancode::agent::kEventToolResult,
+    events.push_back(Ev(lubancode::skills::kEventToolCall, {{"tool", "run_command"}, {"input", fail_input}}));
+    events.push_back(Ev(lubancode::skills::kEventToolResult,
                         {{"tool", "run_command"}, {"ok", false}, {"summary", "canary 500"}}));
-    events.push_back(Ev(lubancode::agent::kEventToolCall, {{"tool", "run_command"}, {"input", fail_input}}));
-    events.push_back(Ev(lubancode::agent::kEventToolResult,
+    events.push_back(Ev(lubancode::skills::kEventToolCall, {{"tool", "run_command"}, {"input", fail_input}}));
+    events.push_back(Ev(lubancode::skills::kEventToolResult,
                         {{"tool", "run_command"}, {"ok", false}, {"summary", "canary 503"}}));
 
-    const std::string draft = lubancode::agent::ComposeSkillMarkdown(events);
+    const std::string draft = lubancode::skills::ComposeSkillMarkdown(events);
     const std::string steps = SectionBetween(draft, "## 步骤", "## 风险动作与确认点");
     // 重试折一步:整份步骤节里 rerun 只出现一次,且注明失败过
     CHECK(steps.find("ctest --rerun") != std::string::npos);
@@ -184,23 +184,23 @@ TEST_CASE("起草:偶然的失败重试剔掉,连败写成分支") {
 }
 
 TEST_CASE("校验:frontmatter 不合法不许装,回炉保正文") {
-    const auto ok = lubancode::agent::ValidateSkillMarkdownForInstall(
+    const auto ok = lubancode::skills::ValidateSkillMarkdownForInstall(
         "---\nname: a\ndescription: b\n---\n## 验收\n- x\n");
     REQUIRE(ok.has_value());
     CHECK(*ok == "a");
 
-    CHECK_FALSE(lubancode::agent::ValidateSkillMarkdownForInstall("---\nname: a\n---\n## 验收\n- x\n").has_value());
-    CHECK_FALSE(lubancode::agent::ValidateSkillMarkdownForInstall(
+    CHECK_FALSE(lubancode::skills::ValidateSkillMarkdownForInstall("---\nname: a\n---\n## 验收\n- x\n").has_value());
+    CHECK_FALSE(lubancode::skills::ValidateSkillMarkdownForInstall(
                     "---\nname: a\ndescription: b\n---\n正文里没有成事标准\n")
                     .has_value());
-    CHECK_FALSE(lubancode::agent::ValidateSkillMarkdownForInstall("---\nname: a\ndescription: b\n正文").has_value());
+    CHECK_FALSE(lubancode::skills::ValidateSkillMarkdownForInstall("---\nname: a\ndescription: b\n正文").has_value());
 
     // 回炉:损坏 frontmatter 推倒重建,正文保住
-    const std::string repaired = lubancode::agent::RepairSkillFrontmatter(
+    const std::string repaired = lubancode::skills::RepairSkillFrontmatter(
         "---\nname: a\ndescription: b\n## 验收\n- 正文还在\n");
-    CHECK(lubancode::agent::ValidateSkillMarkdownForInstall(repaired).has_value());
+    CHECK(lubancode::skills::ValidateSkillMarkdownForInstall(repaired).has_value());
     CHECK(repaired.find("正文还在") != std::string::npos);
-    CHECK(*lubancode::agent::ValidateSkillMarkdownForInstall(repaired) == "recorded-skill");
+    CHECK(*lubancode::skills::ValidateSkillMarkdownForInstall(repaired) == "recorded-skill");
 }
 
 TEST_CASE("落草稿 + 从草稿目录原子安装") {
@@ -208,7 +208,7 @@ TEST_CASE("落草稿 + 从草稿目录原子安装") {
     const fs::path recording_dir = temp.Root() / "20260814-000000-weekly";
     fs::create_directories(recording_dir);
 
-    const auto draft = lubancode::agent::WriteSkillDraft(recording_dir, DemoEvents());
+    const auto draft = lubancode::skills::WriteSkillDraft(recording_dir, DemoEvents());
     REQUIRE(draft.has_value());
     CHECK(fs::is_regular_file(recording_dir / "draft" / "SKILL.md"));
     REQUIRE(draft->files.size() == 1);
@@ -218,13 +218,13 @@ TEST_CASE("落草稿 + 从草稿目录原子安装") {
     // 空事件起不出草稿
     const fs::path empty_dir = temp.Root() / "20260814-000001-empty";
     fs::create_directories(empty_dir);
-    CHECK_FALSE(lubancode::agent::WriteSkillDraft(empty_dir, {}).has_value());
+    CHECK_FALSE(lubancode::skills::WriteSkillDraft(empty_dir, {}).has_value());
 
     // 原子安装:装进 skills_root/<frontmatter name>
     const fs::path skills_root = temp.Root() / "skills";
     const auto installed = lubancode::config::InstallDraftSkill(
         skills_root, draft->draft_dir,
-        [](const std::string& content) { return lubancode::agent::ValidateSkillMarkdownForInstall(content); });
+        [](const std::string& content) { return lubancode::skills::ValidateSkillMarkdownForInstall(content); });
     REQUIRE(installed.has_value());
     REQUIRE(installed->installed_names.size() == 1);
     CHECK(installed->installed_names[0] == "weekly-report");
@@ -233,7 +233,7 @@ TEST_CASE("落草稿 + 从草稿目录原子安装") {
     // 再装同名:拒绝,原目录不动
     CHECK_FALSE(lubancode::config::InstallDraftSkill(
                     skills_root, draft->draft_dir, [](const std::string& content) {
-                        return lubancode::agent::ValidateSkillMarkdownForInstall(content);
+                        return lubancode::skills::ValidateSkillMarkdownForInstall(content);
                     })
                     .has_value());
     CHECK(fs::is_regular_file(skills_root / "weekly-report" / "SKILL.md"));
@@ -245,7 +245,7 @@ TEST_CASE("落草稿 + 从草稿目录原子安装") {
     const fs::path skills_root_2 = temp.Root() / "skills2";
     CHECK_FALSE(lubancode::config::InstallDraftSkill(
                     skills_root_2, bad_draft, [](const std::string& content) {
-                        return lubancode::agent::ValidateSkillMarkdownForInstall(content);
+                        return lubancode::skills::ValidateSkillMarkdownForInstall(content);
                     })
                     .has_value());
     CHECK_FALSE(fs::exists(skills_root_2 / "bad"));
@@ -262,7 +262,7 @@ TEST_CASE("脱敏贯穿全链路:录制→事件→草稿,grep 不到假 token")
     info.goal = "部署演示";
     info.acceptance = "部署成功";
     info.cwd = "D:\\demo";
-    auto recorder = lubancode::agent::WorkflowRecorder::Start(temp.Root(), info);
+    auto recorder = lubancode::skills::WorkflowRecorder::Start(temp.Root(), info);
     REQUIRE(recorder.has_value());
     recorder->RecordToolCall("run_command",
                              nlohmann::json{{"command", "curl -H \"Authorization: Bearer test-token-123\" https://ci.example.test"},
@@ -271,8 +271,8 @@ TEST_CASE("脱敏贯穿全链路:录制→事件→草稿,grep 不到假 token")
     const fs::path dir = recorder->dir();
     REQUIRE(recorder->Stop("部署成功").has_value());
 
-    const std::vector<RecordEvent> events = lubancode::agent::ReadRecordingEvents(dir);
-    const auto draft = lubancode::agent::WriteSkillDraft(dir, events);
+    const std::vector<RecordEvent> events = lubancode::skills::ReadRecordingEvents(dir);
+    const auto draft = lubancode::skills::WriteSkillDraft(dir, events);
     REQUIRE(draft.has_value());
 
     std::ifstream file(draft->draft_dir / "SKILL.md", std::ios::binary);

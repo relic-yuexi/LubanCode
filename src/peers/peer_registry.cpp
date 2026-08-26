@@ -13,7 +13,7 @@
 
 #include "platform/paths.hpp"  // ReplaceFileAtomically
 
-namespace lubancode::agent {
+namespace lubancode::peers {
 
 namespace {
 
@@ -189,4 +189,4 @@ std::string GeneratePeerId() {
     return out.str();
 }
 
-}  // namespace lubancode::agent
+}  // namespace lubancode::peers

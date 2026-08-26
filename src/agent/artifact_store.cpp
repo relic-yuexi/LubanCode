@@ -8,7 +8,7 @@
 #include <utility>
 
 #include "agent/context_events.hpp"  // Fingerprint64:块局部指纹
-#include "sessions/session_store.hpp"   // NowTimestamp
+#include "sessions/session_store.hpp"   // sessions::NowTimestamp
 #include "hooks/hash.hpp"            // Sha256Hex:真本的内容寻址
 #include "platform/paths.hpp"        // Utf8ToPath:仓路径不走 ACP 窄口
 #include "platform/text_encoding.hpp"
@@ -521,7 +521,7 @@ std::optional<ArtifactRef> ContextArtifactStore::Offload(const std::string& tool
     ref.bytes = content.size();
     ref.lines = table.lines.size();
     ref.sha256 = sha;
-    ref.created_at = NowTimestamp();
+    ref.created_at = sessions::NowTimestamp();
     ref.source_message_index = source_message_index;
     // 预览:首行(剥空白,截 80 字节,码点安全)。
     {

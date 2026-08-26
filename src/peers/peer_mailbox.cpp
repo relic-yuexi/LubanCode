@@ -7,7 +7,7 @@
 #include <optional>
 #include <utility>
 
-namespace lubancode::agent {
+namespace lubancode::peers {
 
 nlohmann::json PeerEnvelopeToJson(const PeerEnvelope& envelope) {
     nlohmann::json json;
@@ -205,4 +205,4 @@ bool PeerCwdFarApart(const std::string& a, const std::string& b) {
     return false;
 }
 
-}  // namespace lubancode::agent
+}  // namespace lubancode::peers

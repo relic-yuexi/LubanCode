@@ -76,7 +76,7 @@ CommandFlow HandleSendCommand(PeerCommandState& state, const std::string& args,
         return CommandFlow::Continue;
     }
     const auto peers = state.runtime->ListPeers();
-    const auto* found = static_cast<const lubancode::agent::PeerCard*>(nullptr);
+    const auto* found = static_cast<const lubancode::peers::PeerCard*>(nullptr);
     for (const auto& card : peers) {
         if (card.peer_id == target || card.name == target) {
             found = &card;
@@ -87,18 +87,18 @@ CommandFlow HandleSendCommand(PeerCommandState& state, const std::string& args,
         std::cout << theme.error << trf("cmd.send.unknown_target", target) << theme.reset << "\n";
         return CommandFlow::Continue;
     }
-    const lubancode::agent::PeerDelivery delivery = state.runtime->Send(*found, text);
+    const lubancode::peers::PeerDelivery delivery = state.runtime->Send(*found, text);
     const char* delivery_key = "cmd.send.label.unavailable";
     switch (delivery) {
-        case lubancode::agent::PeerDelivery::Delivered: delivery_key = "cmd.send.label.delivered"; break;
-        case lubancode::agent::PeerDelivery::Held: delivery_key = "cmd.send.label.held"; break;
-        case lubancode::agent::PeerDelivery::Refused: delivery_key = "cmd.send.label.refused"; break;
-        case lubancode::agent::PeerDelivery::Expired: delivery_key = "cmd.send.label.expired"; break;
-        case lubancode::agent::PeerDelivery::Unavailable: break;
+        case lubancode::peers::PeerDelivery::Delivered: delivery_key = "cmd.send.label.delivered"; break;
+        case lubancode::peers::PeerDelivery::Held: delivery_key = "cmd.send.label.held"; break;
+        case lubancode::peers::PeerDelivery::Refused: delivery_key = "cmd.send.label.refused"; break;
+        case lubancode::peers::PeerDelivery::Expired: delivery_key = "cmd.send.label.expired"; break;
+        case lubancode::peers::PeerDelivery::Unavailable: break;
     }
-    const bool failed = delivery == lubancode::agent::PeerDelivery::Refused ||
-                        delivery == lubancode::agent::PeerDelivery::Expired ||
-                        delivery == lubancode::agent::PeerDelivery::Unavailable;
+    const bool failed = delivery == lubancode::peers::PeerDelivery::Refused ||
+                        delivery == lubancode::peers::PeerDelivery::Expired ||
+                        delivery == lubancode::peers::PeerDelivery::Unavailable;
     std::cout << (failed ? theme.error : theme.stats)
               << trf("cmd.send.result", found->name, found->peer_id, tr(delivery_key)) << theme.reset << "\n";
     return CommandFlow::Continue;
@@ -109,22 +109,22 @@ CommandFlow HandlePeerpermCommand(PeerCommandState& state, const std::string& ar
         std::cout << tr("cmd.peers.off") << "\n";
         return CommandFlow::Continue;
     }
-    lubancode::agent::PeerPermissionTier tier = state.runtime->tier();
+    lubancode::peers::PeerPermissionTier tier = state.runtime->tier();
     if (args == "auto") {
-        tier = lubancode::agent::PeerPermissionTier::Auto;
+        tier = lubancode::peers::PeerPermissionTier::Auto;
     } else if (args == "accept") {
-        tier = lubancode::agent::PeerPermissionTier::Accept;
+        tier = lubancode::peers::PeerPermissionTier::Accept;
     } else if (args == "hold") {
-        tier = lubancode::agent::PeerPermissionTier::Hold;
+        tier = lubancode::peers::PeerPermissionTier::Hold;
     } else if (args == "refuse") {
-        tier = lubancode::agent::PeerPermissionTier::Refuse;
+        tier = lubancode::peers::PeerPermissionTier::Refuse;
     } else if (args.empty()) {
         const char* name = "auto";
         switch (tier) {
-            case lubancode::agent::PeerPermissionTier::Accept: name = "accept"; break;
-            case lubancode::agent::PeerPermissionTier::Hold: name = "hold"; break;
-            case lubancode::agent::PeerPermissionTier::Refuse: name = "refuse"; break;
-            case lubancode::agent::PeerPermissionTier::Auto: break;
+            case lubancode::peers::PeerPermissionTier::Accept: name = "accept"; break;
+            case lubancode::peers::PeerPermissionTier::Hold: name = "hold"; break;
+            case lubancode::peers::PeerPermissionTier::Refuse: name = "refuse"; break;
+            case lubancode::peers::PeerPermissionTier::Auto: break;
         }
         std::cout << trf("cmd.peerperm.current", name) << "\n";
         return CommandFlow::Continue;

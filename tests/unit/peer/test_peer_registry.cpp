@@ -11,7 +11,7 @@
 
 #include "peers/peer_registry.hpp"
 
-using namespace lubancode::agent;
+using namespace lubancode::peers;
 
 namespace {
 

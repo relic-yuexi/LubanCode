@@ -80,7 +80,7 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
 // 口径;manifest_* 是摘要 manifest 里守住的目标数,供成功提示带一句
 // "保留了几条约束/待办"。
 struct CompactCommandResult {
-    std::optional<lubancode::agent::CompactV2Event> event;
+    std::optional<lubancode::sessions::CompactV2Event> event;
     std::size_t before_tokens = 0;
     std::size_t after_tokens = 0;
     std::size_t manifest_constraints = 0;
@@ -108,7 +108,7 @@ void PrintSessionsCommand(const std::string& sessions_dir, const std::string& ar
 
 // ---------------------------------------------------------------------------
 // 归档与永久删除(会话管理器单第四、五步)。搬与删全经
-// agent::SessionLifecycle——这里是接活的人:解析引用、列重名、走确认屏、
+// sessions::SessionLifecycle——这里是接活的人:解析引用、列重名、走确认屏、
 // 报结果,不直接碰 filesystem。
 // ---------------------------------------------------------------------------
 
@@ -134,13 +134,13 @@ int HandleSessionManagementCommand(const std::string& sessions_dir, int kind, co
 
 // 会话内 /archive:只归档当前会话。先经 lifecycle 刷盘收柄再搬,成功后
 // 调用方退场(返回 true = 该退出交互会话)。
-bool ArchiveCurrentSession(const std::string& sessions_dir, lubancode::agent::SessionStore& store,
+bool ArchiveCurrentSession(const std::string& sessions_dir, lubancode::sessions::SessionStore& store,
                            const lubancode::cli::Theme& theme);
 
 // 会话内 /delete:只删当前会话。回合在跑/工具在飞/审批悬着时拒绝
 // (调用方先验);闲下来后走确认屏,再关柄、删文件。返回 true = 该退出。
-bool DeleteCurrentSession(const std::string& sessions_dir, lubancode::agent::SessionStore& store,
-                          const lubancode::agent::SessionMeta& meta, const std::string& title,
+bool DeleteCurrentSession(const std::string& sessions_dir, lubancode::sessions::SessionStore& store,
+                          const lubancode::sessions::SessionMeta& meta, const std::string& title,
                           const lubancode::cli::Theme& theme);
 
 
@@ -168,17 +168,17 @@ std::optional<std::string> PromptResumeTarget(const std::string& sessions_dir,
 // 账(老档没 mode 行给 Default 与空表),会话层拿它恢复协作模式档位与
 // 最近计划成品。不接照旧丢弃。
 bool ResumeSession(const std::string& target, const std::string& sessions_dir,
-                    lubancode::agent::Agent& loop, lubancode::agent::SessionStore& store,
-                    std::size_t& persisted_count, lubancode::agent::SessionMeta& session_meta,
+                    lubancode::agent::Agent& loop, lubancode::sessions::SessionStore& store,
+                    std::size_t& persisted_count, lubancode::sessions::SessionMeta& session_meta,
                     std::string& session_title, const std::string& wire_str, const std::string& current_model,
                     const lubancode::cli::Theme& theme, bool quiet_if_none,
                     lubancode::cli::WorktreeSession* worktree_session = nullptr,
                     int* compact_epoch_out = nullptr,
-                    const std::function<void(const std::vector<lubancode::agent::ArchivedQueueItem>&)>*
+                    const std::function<void(const std::vector<lubancode::sessions::ArchivedQueueItem>&)>*
                         on_queue_restored = nullptr,
-                    const std::function<void(const std::optional<lubancode::agent::ModeEvent>&,
-                                             const std::vector<lubancode::agent::PlanEvent>&,
-                                             const std::optional<lubancode::agent::PlanReviewEvent>&)>*
+                    const std::function<void(const std::optional<lubancode::sessions::ModeEvent>&,
+                                             const std::vector<lubancode::sessions::PlanEvent>&,
+                                             const std::optional<lubancode::sessions::PlanReviewEvent>&)>*
                         on_mode_restored = nullptr);
 
 
@@ -189,8 +189,8 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
 // ——id/工具/字节/sha 指纹/真本路径,导出内容里被折叠的结果按 id 对得上
 // 真本(规格"/export 必须说明哪些内容来自 artifact")。
 void HandleExportCommand(const std::string& args, const lubancode::agent::Agent& loop,
-                          const lubancode::agent::SessionStore& store, const std::string& sessions_dir,
-                          const lubancode::agent::SessionMeta& session_meta, const std::string& session_title,
+                          const lubancode::sessions::SessionStore& store, const std::string& sessions_dir,
+                          const lubancode::sessions::SessionMeta& session_meta, const std::string& session_title,
                           const lubancode::agent::ContextArtifactStore* artifact_store = nullptr);
 
 
@@ -203,10 +203,10 @@ void HandleExportCommand(const std::string& args, const lubancode::agent::Agent&
 struct SessionCommandState {
     std::function<void(bool)> rebuild_loop;  // /clear 传 false = 丢历史重建
     lubancode::agent::Agent& loop;        // /compact /resume /export 用
-    lubancode::agent::SessionStore& store;
+    lubancode::sessions::SessionStore& store;
     std::size_t& persisted_count;             // 落盘基线
     int& compact_epoch;                       // 压缩序号(/resume 接旧账,/compact 进出两头用)
-    lubancode::agent::SessionMeta& meta;
+    lubancode::sessions::SessionMeta& meta;
     std::string& title;
     bool& title_pending;
     bool& store_broken;
@@ -226,12 +226,12 @@ struct SessionCommandState {
     std::function<void()> on_resumed;
     // /resume 成功后的排队账重建(取走即消费单路径二):收存档最后一条
     // queue 快照,会话层灌回 SessionSteeringQueue。可空(单测不接)。
-    std::function<void(const std::vector<lubancode::agent::ArchivedQueueItem>&)> on_queue_restored;
+    std::function<void(const std::vector<lubancode::sessions::ArchivedQueueItem>&)> on_queue_restored;
     // Plan 模式单:/resume 成功后的 mode/plan/review 账恢复。可空(单测
     // 不接;不接就丢弃,老档行为)。
-    std::function<void(const std::optional<lubancode::agent::ModeEvent>&,
-                       const std::vector<lubancode::agent::PlanEvent>&,
-                       const std::optional<lubancode::agent::PlanReviewEvent>&)>
+    std::function<void(const std::optional<lubancode::sessions::ModeEvent>&,
+                       const std::vector<lubancode::sessions::PlanEvent>&,
+                       const std::optional<lubancode::sessions::PlanReviewEvent>&)>
         on_mode_restored;
 };
 

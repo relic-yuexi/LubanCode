@@ -13,7 +13,7 @@
 #include "runtime/goal_types.hpp"
 #include "tools/goal_checkpoint_tool.hpp"
 
-using lubancode::agent::GoalSessionEvent;
+using lubancode::sessions::GoalSessionEvent;
 using lubancode::runtime::goal::GoalCheckpoint;
 using lubancode::runtime::goal::GoalContract;
 using lubancode::runtime::goal::GoalCoordinatorEvent;
@@ -100,8 +100,8 @@ TEST_CASE("RestoreFromArchive:序列化往返(存档行进出)不丢账") {
     // 事件行过一遍 SerializeGoalEvent/ParseGoalEvent(存档真路径)再回放。
     std::vector<GoalSessionEvent> round_tripped;
     for (const auto& line : lines) {
-        const std::string text = lubancode::agent::SerializeGoalEvent(line, "ts");
-        const auto parsed = lubancode::agent::ParseGoalEvent(text);
+        const std::string text = lubancode::sessions::SerializeGoalEvent(line, "ts");
+        const auto parsed = lubancode::sessions::ParseGoalEvent(text);
         REQUIRE(parsed.has_value());
         round_tripped.push_back(*parsed);
     }

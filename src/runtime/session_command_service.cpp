@@ -12,44 +12,44 @@ namespace lubancode::runtime {
 namespace {
 
 // lifecycle 结果码 -> 稳定字符串(协议侧的错误码,单子"代码边界"一节)。
-const char* LifecycleCodeToString(agent::SessionLifecycleCode code) {
+const char* LifecycleCodeToString(sessions::SessionLifecycleCode code) {
     switch (code) {
-        case agent::SessionLifecycleCode::Ok: return "";
-        case agent::SessionLifecycleCode::NotFound: return "not_found";
-        case agent::SessionLifecycleCode::Ambiguous: return "ambiguous";
-        case agent::SessionLifecycleCode::ActiveTurn: return "active_turn";
-        case agent::SessionLifecycleCode::ConfirmationRequired: return "confirmation_required";
-        case agent::SessionLifecycleCode::PathOutsideRoot: return "path_outside_root";
-        case agent::SessionLifecycleCode::TargetExists: return "target_exists";
-        case agent::SessionLifecycleCode::IoError: return "io_error";
+        case sessions::SessionLifecycleCode::Ok: return "";
+        case sessions::SessionLifecycleCode::NotFound: return "not_found";
+        case sessions::SessionLifecycleCode::Ambiguous: return "ambiguous";
+        case sessions::SessionLifecycleCode::ActiveTurn: return "active_turn";
+        case sessions::SessionLifecycleCode::ConfirmationRequired: return "confirmation_required";
+        case sessions::SessionLifecycleCode::PathOutsideRoot: return "path_outside_root";
+        case sessions::SessionLifecycleCode::TargetExists: return "target_exists";
+        case sessions::SessionLifecycleCode::IoError: return "io_error";
     }
     return "io_error";
 }
 
 // 查询 payload 的字符串档位 -> 枚举(认不出给缺省,不抛——协议演进里
 // "新加的档位老对端还没跟上"是常态)。
-agent::SessionScope ParseScope(const nlohmann::json& payload) {
+sessions::SessionScope ParseScope(const nlohmann::json& payload) {
     const auto it = payload.find("scope");
     if (it != payload.end() && it->is_string() && *it == "all") {
-        return agent::SessionScope::All;
+        return sessions::SessionScope::All;
     }
-    return agent::SessionScope::Cwd;
+    return sessions::SessionScope::Cwd;
 }
 
-agent::SessionState ParseState(const nlohmann::json& payload) {
+sessions::SessionState ParseState(const nlohmann::json& payload) {
     const auto it = payload.find("state");
     if (it != payload.end() && it->is_string() && *it == "archived") {
-        return agent::SessionState::Archived;
+        return sessions::SessionState::Archived;
     }
-    return agent::SessionState::Active;
+    return sessions::SessionState::Active;
 }
 
-agent::SessionSort ParseSort(const nlohmann::json& payload) {
+sessions::SessionSort ParseSort(const nlohmann::json& payload) {
     const auto it = payload.find("sort");
     if (it != payload.end() && it->is_string() && *it == "created") {
-        return agent::SessionSort::Created;
+        return sessions::SessionSort::Created;
     }
-    return agent::SessionSort::Updated;
+    return sessions::SessionSort::Updated;
 }
 
 std::string JsonStr(const nlohmann::json& payload, const char* key) {
@@ -71,12 +71,12 @@ std::size_t JsonSize(const nlohmann::json& payload, const char* key) {
     return value > 0 ? static_cast<std::size_t>(value) : 0;
 }
 
-const char* StateToString(agent::SessionState state) {
-    return state == agent::SessionState::Archived ? "archived" : "active";
+const char* StateToString(sessions::SessionState state) {
+    return state == sessions::SessionState::Archived ? "archived" : "active";
 }
 
-const char* HealthToString(agent::SessionHealth health) {
-    return health == agent::SessionHealth::Damaged ? "damaged" : "ok";
+const char* HealthToString(sessions::SessionHealth health) {
+    return health == sessions::SessionHealth::Damaged ? "damaged" : "ok";
 }
 
 }  // namespace
@@ -84,7 +84,7 @@ const char* HealthToString(agent::SessionHealth health) {
 SessionCommandService::SessionCommandService(std::string sessions_dir)
     : sessions_dir_(std::move(sessions_dir)) {
     if (!sessions_dir_.empty()) {
-        lifecycle_ = std::make_unique<agent::SessionLifecycle>(sessions_dir_);
+        lifecycle_ = std::make_unique<sessions::SessionLifecycle>(sessions_dir_);
     }
 }
 
@@ -103,9 +103,9 @@ SessionCommandOutcome SessionCommandService::ListThreads(const nlohmann::json& q
         outcome.payload = {{"threads", nlohmann::json::array()}, {"total", 0}};
         return outcome;
     }
-    agent::SessionCatalog catalog(sessions_dir_);
+    sessions::SessionCatalog catalog(sessions_dir_);
     catalog.Scan();
-    agent::SessionQuery query;
+    sessions::SessionQuery query;
     query.scope = ParseScope(query_payload);
     query.state = ParseState(query_payload);
     query.sort = ParseSort(query_payload);

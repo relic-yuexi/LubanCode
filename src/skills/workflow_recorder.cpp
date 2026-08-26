@@ -14,7 +14,7 @@
 #include "platform/log_sink.hpp"
 #include "platform/text_encoding.hpp"
 
-namespace lubancode::agent {
+namespace lubancode::skills {
 
 namespace {
 
@@ -701,4 +701,4 @@ std::expected<void, std::string> DiscardRecording(const fs::path& recordings_roo
     return {};
 }
 
-}  // namespace lubancode::agent
+}  // namespace lubancode::skills

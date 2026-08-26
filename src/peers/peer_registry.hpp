@@ -22,7 +22,7 @@
 
 #include <nlohmann/json.hpp>
 
-namespace lubancode::agent {
+namespace lubancode::peers {
 
 // 名册协议版本。信封(envelope)另有自己的 version 字段,这里管的是名片
 // 的字段布局。
@@ -82,4 +82,4 @@ private:
 // 生成一个短 peer_id(8 位十六进制,进程内随机源)。
 std::string GeneratePeerId();
 
-}  // namespace lubancode::agent
+}  // namespace lubancode::peers

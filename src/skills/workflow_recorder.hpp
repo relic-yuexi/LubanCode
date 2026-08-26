@@ -28,7 +28,7 @@
 
 #include <nlohmann/json.hpp>
 
-namespace lubancode::agent {
+namespace lubancode::skills {
 
 // ---------------------------------------------------------------------------
 // 状态机(纯)
@@ -186,4 +186,4 @@ std::vector<RecordEvent> ReadRecordingEvents(const std::filesystem::path& record
 std::expected<void, std::string> DiscardRecording(const std::filesystem::path& recordings_root,
                                                   const std::string& id);
 
-}  // namespace lubancode::agent
+}  // namespace lubancode::skills

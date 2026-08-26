@@ -13,7 +13,7 @@
 
 #include "sessions/session_store.hpp"
 
-namespace lubancode::agent {
+namespace lubancode::sessions {
 
 namespace {
 
@@ -390,4 +390,4 @@ const SessionSummary* SessionCatalog::Find(const std::string& id) const {
     return it == entries_.end() ? nullptr : &it->second;
 }
 
-}  // namespace lubancode::agent
+}  // namespace lubancode::sessions

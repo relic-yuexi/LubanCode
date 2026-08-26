@@ -355,13 +355,13 @@ TEST_CASE("SerializeSessionMessage: 坏串兜底,JSONL 行可重新解析,/resum
     message.role = api::Role::User;
     message.content.push_back(api::ToolResultBlock{"toolu_1", std::string("结果\xC4\xE3"), false});
 
-    const std::string assistant_line = agent::SerializeSessionMessage(assistant, "2026-08-14 00:00:00");
-    const std::string line = agent::SerializeSessionMessage(message, "2026-08-14 00:00:01");
-    CHECK(agent::DeserializeSessionMessage(line).has_value());
+    const std::string assistant_line = sessions::SerializeSessionMessage(assistant, "2026-08-14 00:00:00");
+    const std::string line = sessions::SerializeSessionMessage(message, "2026-08-14 00:00:01");
+    CHECK(sessions::DeserializeSessionMessage(line).has_value());
     // meta 行拼上,整文件解析(真实 /resume 路径)。
     const std::string file_content =
-        agent::SerializeSessionMeta(agent::SessionMeta{}) + "\n" + assistant_line + "\n" + line + "\n";
-    const auto session = agent::ParseSessionFile(file_content);
+        sessions::SerializeSessionMeta(sessions::SessionMeta{}) + "\n" + assistant_line + "\n" + line + "\n";
+    const auto session = sessions::ParseSessionFile(file_content);
     REQUIRE(session.has_value());
     REQUIRE(session->messages.size() == 2);
     REQUIRE(session->messages[1].content.size() == 1);
@@ -373,15 +373,15 @@ TEST_CASE("SerializeSessionMessage: 坏串兜底,JSONL 行可重新解析,/resum
 }
 
 TEST_CASE("SerializeRecordEvent: 录制器吃到坏输出,事件行仍是合法 JSON") {
-    agent::RecordEvent event;
+    skills::RecordEvent event;
     event.seq = 7;
     event.ts = "2026-08-14 00:00:00";
     event.source = "model";
-    event.type = agent::kEventToolResult;
+    event.type = skills::kEventToolResult;
     event.data["tool"] = "read_file";
     event.data["summary"] = std::string("首行\xC4\xE3摘要");
-    const std::string line = agent::SerializeRecordEvent(event);
-    const auto parsed = agent::ParseRecordEvent(line);
+    const std::string line = skills::SerializeRecordEvent(event);
+    const auto parsed = skills::ParseRecordEvent(line);
     REQUIRE(parsed.has_value());
     CHECK(parsed->seq == 7);
     CHECK(IsValidUtf8(parsed->data["summary"].get<std::string>()));

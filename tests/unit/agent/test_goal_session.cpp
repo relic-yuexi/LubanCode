@@ -15,12 +15,12 @@
 #include "sessions/session_store.hpp"
 #include "platform/text_encoding.hpp"  // IsValidUtf8:坏串落档行的出口校验
 
-using lubancode::agent::GoalEvidenceRecord;
-using lubancode::agent::GoalSessionEvent;
-using lubancode::agent::ParseGoalEvent;
-using lubancode::agent::ParseGoalEvidence;
-using lubancode::agent::SerializeGoalEvent;
-using lubancode::agent::SerializeGoalEvidence;
+using lubancode::sessions::GoalEvidenceRecord;
+using lubancode::sessions::GoalSessionEvent;
+using lubancode::sessions::ParseGoalEvent;
+using lubancode::sessions::ParseGoalEvidence;
+using lubancode::sessions::SerializeGoalEvent;
+using lubancode::sessions::SerializeGoalEvidence;
 
 namespace {
 
@@ -181,14 +181,14 @@ TEST_CASE("goal 证据行:serialize → parse roundtrip") {
 
 TEST_CASE("SessionStore:AppendGoalEvent/AppendGoalEvidence 落盘,回放整收") {
     TempDir tmp;
-    lubancode::agent::SessionStore store(tmp.path.string());
-    lubancode::agent::SessionMeta meta;
+    lubancode::sessions::SessionStore store(tmp.path.string());
+    lubancode::sessions::SessionMeta meta;
     meta.wire = "anthropic";
     meta.model = "m";
     meta.cwd = "/repo";
     REQUIRE(store.Begin(meta, "goal-test-session"));
 
-    lubancode::agent::GoalSessionEvent created = MakeCreated();
+    lubancode::sessions::GoalSessionEvent created = MakeCreated();
     REQUIRE(store.AppendGoalEvent(created));
     GoalSessionEvent scheduled = MakeCreated();
     scheduled.type = "goal_iteration_v1";
@@ -206,9 +206,9 @@ TEST_CASE("SessionStore:AppendGoalEvent/AppendGoalEvidence 落盘,回放整收")
     REQUIRE(store.AppendGoalEvidence(evidence));
 
     // 读回:文件里 meta + 3 行事件(created/scheduled/observed)。
-    const auto bytes = lubancode::agent::ReadSessionFileBytes(store.file_path());
+    const auto bytes = lubancode::sessions::ReadSessionFileBytes(store.file_path());
     REQUIRE(bytes.has_value());
-    const auto loaded = lubancode::agent::ParseSessionFile(*bytes);
+    const auto loaded = lubancode::sessions::ParseSessionFile(*bytes);
     REQUIRE(loaded.has_value());
     REQUIRE(loaded->goal_events.size() == 3);
     CHECK(loaded->goal_events[0].event == "created");
@@ -222,10 +222,10 @@ TEST_CASE("SessionStore:AppendGoalEvent/AppendGoalEvidence 落盘,回放整收")
 }
 
 TEST_CASE("IsGoalEventLine 粗筛与尾行截断") {
-    CHECK(lubancode::agent::IsGoalEventLine(R"({"type":"goal_v1","event":"created"})"));
-    CHECK(lubancode::agent::IsGoalEventLine(R"({"type": "goal_iteration_v1"})"));
-    CHECK_FALSE(lubancode::agent::IsGoalEventLine(R"({"type":"compact"})"));
-    CHECK_FALSE(lubancode::agent::IsGoalEventLine(R"({"type":"title"})"));
+    CHECK(lubancode::sessions::IsGoalEventLine(R"({"type":"goal_v1","event":"created"})"));
+    CHECK(lubancode::sessions::IsGoalEventLine(R"({"type": "goal_iteration_v1"})"));
+    CHECK_FALSE(lubancode::sessions::IsGoalEventLine(R"({"type":"compact"})"));
+    CHECK_FALSE(lubancode::sessions::IsGoalEventLine(R"({"type":"title"})"));
 
     // 尾行截断:半截 JSON 的 goal 行跳过,前面的完整事件为准。
     const std::string full = SerializeGoalEvent(MakeCreated(), "ts");

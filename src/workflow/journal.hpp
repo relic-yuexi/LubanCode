@@ -64,7 +64,7 @@ std::optional<JournalEvent> ParseJournalEvent(const std::string& line);
 
 // journal 载荷脱敏(纯函数):键名含 token/secret/password/passwd/
 // authorization/cookie/api_key 的字段值换 "[已打码]";字符串值再过一遍
-// 文本打码。与 agent::SanitizeToolInput 同规矩,不 include agent/*,两
+// 文本打码。与 skills::SanitizeToolInput 同规矩,不 include agent/*,两
 // 边各维护,单测钉一致。
 nlohmann::json SanitizeJournalPayload(const nlohmann::json& payload);
 std::string RedactJournalText(const std::string& text);

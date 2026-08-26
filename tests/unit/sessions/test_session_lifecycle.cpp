@@ -60,12 +60,12 @@ std::filesystem::path Utf8Name(const std::string& utf8) {
 
 std::string WriteSession(const TempSessionsDir& dir, const std::string& id, const std::string& cwd,
                          const std::string& started_at) {
-    agent::SessionMeta meta;
+    sessions::SessionMeta meta;
     meta.wire = "anthropic";
     meta.model = "m1";
     meta.cwd = cwd;
     meta.started_at = started_at;
-    const std::string line = agent::SerializeSessionMessage(
+    const std::string line = sessions::SerializeSessionMessage(
         []() {
             api::Message m;
             m.role = api::Role::User;
@@ -73,7 +73,7 @@ std::string WriteSession(const TempSessionsDir& dir, const std::string& id, cons
             return m;
         }(),
         started_at);
-    const std::string content = agent::SerializeSessionMeta(meta) + "\n" + line + "\n";
+    const std::string content = sessions::SerializeSessionMeta(meta) + "\n" + line + "\n";
     std::ofstream f(dir.base / Utf8Name(id + ".jsonl"), std::ios::binary);
     f << content;
     return content;
@@ -86,7 +86,7 @@ std::string WriteSession(const TempSessionsDir& dir, const std::string& id, cons
 // ---------------------------------------------------------------------------
 
 TEST_CASE("ResolveSessionRef: 完整 id > 唯一前缀 > 标题唯一;重名/认不出") {
-    std::vector<agent::SessionRefCandidate> candidates = {
+    std::vector<sessions::SessionRefCandidate> candidates = {
         {"20260820-101010-甲", "/tmp/a.jsonl", "房甲的场"},
         {"20260821-111111-乙", "/tmp/b.jsonl", "同名标题"},
         {"20260822-121212-丙", "/tmp/c.jsonl", "同名标题"},
@@ -94,44 +94,44 @@ TEST_CASE("ResolveSessionRef: 完整 id > 唯一前缀 > 标题唯一;重名/认
     bool ambiguous = false;
 
     // 完整 id。
-    auto hit = agent::ResolveSessionRef(candidates, "20260820-101010-甲", ambiguous);
+    auto hit = sessions::ResolveSessionRef(candidates, "20260820-101010-甲", ambiguous);
     REQUIRE(hit.has_value());
     CHECK(hit->size() == 1);
     CHECK((*hit)[0].id == "20260820-101010-甲");
     CHECK_FALSE(ambiguous);
 
     // 唯一前缀(只命中乙)。
-    hit = agent::ResolveSessionRef(candidates, "20260821", ambiguous);
+    hit = sessions::ResolveSessionRef(candidates, "20260821", ambiguous);
     REQUIRE(hit.has_value());
     CHECK(hit->size() == 1);
     CHECK((*hit)[0].id == "20260821-111111-乙");
 
     // 标题唯一命中。
-    hit = agent::ResolveSessionRef(candidates, "房甲的场", ambiguous);
+    hit = sessions::ResolveSessionRef(candidates, "房甲的场", ambiguous);
     REQUIRE(hit.has_value());
     CHECK((*hit)[0].id == "20260820-101010-甲");
 
     // 标题重名:ambiguous,两场都列出来,绝不猜。
-    hit = agent::ResolveSessionRef(candidates, "同名标题", ambiguous);
+    hit = sessions::ResolveSessionRef(candidates, "同名标题", ambiguous);
     REQUIRE(hit.has_value());
     CHECK(ambiguous);
     CHECK(hit->size() == 2);
 
     // 前缀多义:ambiguous。
     ambiguous = false;
-    hit = agent::ResolveSessionRef(candidates, "2026", ambiguous);
+    hit = sessions::ResolveSessionRef(candidates, "2026", ambiguous);
     REQUIRE(hit.has_value());
     CHECK(ambiguous);
     CHECK(hit->size() == 3);
 
     // 认不出。
     ambiguous = false;
-    hit = agent::ResolveSessionRef(candidates, "不存在的引用", ambiguous);
+    hit = sessions::ResolveSessionRef(candidates, "不存在的引用", ambiguous);
     CHECK_FALSE(hit.has_value());
     CHECK_FALSE(ambiguous);
 
     // 空引用:NotFound。
-    hit = agent::ResolveSessionRef(candidates, "", ambiguous);
+    hit = sessions::ResolveSessionRef(candidates, "", ambiguous);
     CHECK_FALSE(hit.has_value());
 }
 
@@ -144,7 +144,7 @@ TEST_CASE("archive: 根 -> archive/ 字节原样;重复归档幂等") {
     const std::string id = "20260820-101010-甲";
     const std::string content = WriteSession(dir, id, "D:/房", "2026-08-20 10:10:10");
 
-    agent::SessionLifecycle lifecycle(dir.str());
+    sessions::SessionLifecycle lifecycle(dir.str());
     const auto result = lifecycle.ArchiveSession(id);
     REQUIRE(result.ok());
     CHECK(result.file_path == PathUtf8(dir.archive() / Utf8Name(id + ".jsonl")));
@@ -171,9 +171,9 @@ TEST_CASE("archive: 目标同名拒绝覆盖,原文件不动") {
     std::filesystem::create_directories(dir.archive(), ec);
     std::ofstream(dir.archive() / Utf8Name(id + ".jsonl"), std::ios::binary) << "别人先占的";
 
-    agent::SessionLifecycle lifecycle(dir.str());
+    sessions::SessionLifecycle lifecycle(dir.str());
     const auto result = lifecycle.ArchiveSession(id);
-    CHECK(result.code == agent::SessionLifecycleCode::TargetExists);
+    CHECK(result.code == sessions::SessionLifecycleCode::TargetExists);
     // 原文件还在原地。
     CHECK(std::filesystem::exists(dir.base / Utf8Name(id + ".jsonl"), ec));
 }
@@ -182,19 +182,19 @@ TEST_CASE("unarchive: 搬回根;根同名拒绝;归档场不掺默认列表") {
     TempSessionsDir dir("unarchive_basic");
     const std::string id = "20260820-101010-甲";
     const std::string content = WriteSession(dir, id, "D:/房", "2026-08-20 10:10:10");
-    agent::SessionLifecycle lifecycle(dir.str());
+    sessions::SessionLifecycle lifecycle(dir.str());
     REQUIRE(lifecycle.ArchiveSession(id).ok());
 
     // 归档后:catalog 默认(active)查不到,Archived 查得到。
-    agent::SessionCatalog catalog(dir.str());
+    sessions::SessionCatalog catalog(dir.str());
     catalog.Scan();
-    agent::SessionQuery active_query;
-    active_query.scope = agent::SessionScope::All;
-    active_query.state = agent::SessionState::Active;
+    sessions::SessionQuery active_query;
+    active_query.scope = sessions::SessionScope::All;
+    active_query.state = sessions::SessionState::Active;
     active_query.limit = 0;
     CHECK(catalog.Query(active_query).total == 0);
-    agent::SessionQuery archived_query = active_query;
-    archived_query.state = agent::SessionState::Archived;
+    sessions::SessionQuery archived_query = active_query;
+    archived_query.state = sessions::SessionState::Archived;
     const auto archived_page = catalog.Query(archived_query);
     REQUIRE(archived_page.total == 1);
     CHECK(archived_page.entries[0].id == id);
@@ -208,7 +208,7 @@ TEST_CASE("unarchive: 搬回根;根同名拒绝;归档场不掺默认列表") {
     CHECK_FALSE(std::filesystem::exists(dir.archive() / Utf8Name(id + ".jsonl")));
 
     // 归档场回去后:active 又见,Archived 不见。
-    agent::SessionCatalog catalog2(dir.str());
+    sessions::SessionCatalog catalog2(dir.str());
     catalog2.Scan();
     CHECK(catalog2.Query(active_query).total == 1);
     CHECK(catalog2.Query(archived_query).total == 0);
@@ -233,10 +233,10 @@ TEST_CASE("delete: 缺确认不动盘;确认后只删目标一场") {
     WriteSession(dir, id_a, "D:/房", "2026-08-20 10:10:10");
     WriteSession(dir, id_b, "D:/房", "2026-08-21 11:11:11");
 
-    agent::SessionLifecycle lifecycle(dir.str());
+    sessions::SessionLifecycle lifecycle(dir.str());
     // 缺确认:一律拒绝,盘上不动。
     CHECK(lifecycle.DeleteSession(id_a, false).code ==
-          agent::SessionLifecycleCode::ConfirmationRequired);
+          sessions::SessionLifecycleCode::ConfirmationRequired);
     std::error_code ec;
     CHECK(std::filesystem::exists(dir.base / Utf8Name(id_a + ".jsonl"), ec));
 
@@ -253,23 +253,23 @@ TEST_CASE("delete: 缺确认不动盘;确认后只删目标一场") {
 
     // 删不存在的:NotFound。
     CHECK(lifecycle.DeleteSession("99999999-999999-无", true).code ==
-          agent::SessionLifecycleCode::NotFound);
+          sessions::SessionLifecycleCode::NotFound);
 }
 
 TEST_CASE("路径校验: 分隔符/点点冒充 id 一律拒绝;后缀不对拒绝") {
     TempSessionsDir dir("path_guard");
     WriteSession(dir, "20260820-101010-甲", "D:/房", "2026-08-20 10:10:10");
-    agent::SessionLifecycle lifecycle(dir.str());
+    sessions::SessionLifecycle lifecycle(dir.str());
 
     // id 里带路径分隔符:PathOf 直接给空(NotFound),拼都不拼。
-    CHECK(lifecycle.ArchiveSession("../config").code == agent::SessionLifecycleCode::NotFound);
-    CHECK(lifecycle.ArchiveSession("a/b").code == agent::SessionLifecycleCode::NotFound);
-    CHECK(lifecycle.ArchiveSession(".").code == agent::SessionLifecycleCode::NotFound);
-    CHECK(lifecycle.DeleteSession("..\\config", true).code == agent::SessionLifecycleCode::NotFound);
+    CHECK(lifecycle.ArchiveSession("../config").code == sessions::SessionLifecycleCode::NotFound);
+    CHECK(lifecycle.ArchiveSession("a/b").code == sessions::SessionLifecycleCode::NotFound);
+    CHECK(lifecycle.ArchiveSession(".").code == sessions::SessionLifecycleCode::NotFound);
+    CHECK(lifecycle.DeleteSession("..\\config", true).code == sessions::SessionLifecycleCode::NotFound);
 
     // 目录当成目标传不进来(接口只收 id);这里再钉一道:点开头的怪 id
     // 只要文件不存在就是 NotFound。
-    CHECK(lifecycle.ArchiveSession(".hidden").code == agent::SessionLifecycleCode::NotFound);
+    CHECK(lifecycle.ArchiveSession(".hidden").code == sessions::SessionLifecycleCode::NotFound);
 }
 
 TEST_CASE("Windows 开句柄回归: 活动句柄先关再搬,回调拒绝时不搬") {
@@ -279,17 +279,17 @@ TEST_CASE("Windows 开句柄回归: 活动句柄先关再搬,回调拒绝时不�
     // 活动会话:SessionStore 自己建档开 append 句柄(Windows 上的真实
     // 形态)。不预写文件——Begin 撞名会开 -2 后缀的新场,归档的就不再是
     // 同一场了。
-    agent::SessionStore store(dir.str());
-    agent::SessionMeta meta;
+    sessions::SessionStore store(dir.str());
+    sessions::SessionMeta meta;
     meta.wire = "anthropic";
     meta.cwd = "D:/房";
     meta.started_at = "2026-08-20 10:10:10";
     REQUIRE(store.Begin(meta, id));
     CHECK(store.active());
     const std::string content =
-        agent::SerializeSessionMeta(meta) + "\n";  // Begin 落的 meta 行
+        sessions::SerializeSessionMeta(meta) + "\n";  // Begin 落的 meta 行
 
-    agent::SessionLifecycle lifecycle(dir.str());
+    sessions::SessionLifecycle lifecycle(dir.str());
     bool flush_called = false;
     lifecycle.SetActiveFile(store.file_path(), [&](const std::string& path) {
         flush_called = true;
@@ -308,9 +308,9 @@ TEST_CASE("Windows 开句柄回归: 活动句柄先关再搬,回调拒绝时不�
     TempSessionsDir dir2("active_handle_fail");
     const std::string id2 = "20260820-101010-甲";
     WriteSession(dir2, id2, "D:/房", "2026-08-20 10:10:10");
-    agent::SessionLifecycle lifecycle2(dir2.str());
+    sessions::SessionLifecycle lifecycle2(dir2.str());
     lifecycle2.SetActiveFile(PathUtf8(dir2.base / Utf8Name(id2 + ".jsonl")), [](const std::string&) { return false; });
-    CHECK(lifecycle2.ArchiveSession(id2).code == agent::SessionLifecycleCode::IoError);
+    CHECK(lifecycle2.ArchiveSession(id2).code == sessions::SessionLifecycleCode::IoError);
     std::error_code ec;
     CHECK(std::filesystem::exists(dir2.base / Utf8Name(id2 + ".jsonl"), ec));
     CHECK_FALSE(std::filesystem::exists(dir2.archive() / Utf8Name(id2 + ".jsonl"), ec));
@@ -327,15 +327,15 @@ TEST_CASE("delete 柄收口: 目标是活动会话时先收柄再删(Windows sha
     const std::string id = "20260820-101010-甲";
 
     // 活动会话:SessionStore 建档开 append 句柄(Windows 上的真实形态)。
-    agent::SessionStore store(dir.str());
-    agent::SessionMeta meta;
+    sessions::SessionStore store(dir.str());
+    sessions::SessionMeta meta;
     meta.wire = "anthropic";
     meta.cwd = "D:/房";
     meta.started_at = "2026-08-20 10:10:10";
     REQUIRE(store.Begin(meta, id));
     CHECK(store.active());
 
-    agent::SessionLifecycle lifecycle(dir.str());
+    sessions::SessionLifecycle lifecycle(dir.str());
     bool flush_called = false;
     lifecycle.SetActiveFile(store.file_path(), [&](const std::string& path) {
         flush_called = true;
@@ -353,10 +353,10 @@ TEST_CASE("delete 柄收口: 目标是活动会话时先收柄再删(Windows sha
     TempSessionsDir dir2("delete_handle_fail");
     const std::string id2 = "20260820-101010-甲";
     WriteSession(dir2, id2, "D:/房", "2026-08-20 10:10:10");
-    agent::SessionLifecycle lifecycle2(dir2.str());
+    sessions::SessionLifecycle lifecycle2(dir2.str());
     lifecycle2.SetActiveFile(PathUtf8(dir2.base / Utf8Name(id2 + ".jsonl")),
                              [](const std::string&) { return false; });
-    CHECK(lifecycle2.DeleteSession(id2, true).code == agent::SessionLifecycleCode::IoError);
+    CHECK(lifecycle2.DeleteSession(id2, true).code == sessions::SessionLifecycleCode::IoError);
     CHECK(std::filesystem::exists(dir2.base / Utf8Name(id2 + ".jsonl"), ec));
 }
 
@@ -367,31 +367,31 @@ TEST_CASE("catalog 的 updated 账在归档里也认: queue 事件行与 clock �
     const std::string id = "20260820-101010-甲";
     std::string content = WriteSession(dir, id, "D:/房", "2026-08-20 10:10:10");
     // 补一条 queue 事件行(0.26.18 起 queue 快照也是账)。
-    std::vector<agent::ArchivedQueueItem> items;
-    agent::ArchivedQueueItem item;
+    std::vector<sessions::ArchivedQueueItem> items;
+    sessions::ArchivedQueueItem item;
     item.id = 1;
     item.text = "排队的话";
     items.push_back(item);
-    content += agent::SerializeQueueEvent(items, "2026-08-21 12:00:00") + "\n";
+    content += sessions::SerializeQueueEvent(items, "2026-08-21 12:00:00") + "\n";
     {
         std::ofstream f(dir.base / Utf8Name(id + ".jsonl"), std::ios::binary);
         f << content;
     }
-    agent::SessionLifecycle lifecycle(dir.str());
+    sessions::SessionLifecycle lifecycle(dir.str());
     REQUIRE(lifecycle.ArchiveSession(id).ok());
 
-    agent::SessionCatalog catalog(dir.str());
+    sessions::SessionCatalog catalog(dir.str());
     catalog.Scan();
-    agent::SessionQuery query;
-    query.scope = agent::SessionScope::All;
-    query.state = agent::SessionState::Archived;
+    sessions::SessionQuery query;
+    query.scope = sessions::SessionScope::All;
+    query.state = sessions::SessionState::Archived;
     query.limit = 0;
     const auto page = catalog.Query(query);
     REQUIRE(page.total == 1);
     // queue 行的 ts 是最后的账:updated_at 取它,不当坏行折 mtime。
     CHECK(page.entries[0].updated_at == "2026-08-21 12:00:00");
     CHECK(page.entries[0].message_count == 1);  // queue 行不是消息
-    CHECK(page.entries[0].health == agent::SessionHealth::Ok);
+    CHECK(page.entries[0].health == sessions::SessionHealth::Ok);
 }
 
 // ---------------------------------------------------------------------------
@@ -415,7 +415,7 @@ TEST_CASE("lifecycle: context 目录(artifact 仓)随 archive 搬、随 delete �
 
     // archive:jsonl 与 context 一起进 archive/。
     {
-        agent::SessionLifecycle lifecycle(PathUtf8(dir.base));
+        sessions::SessionLifecycle lifecycle(PathUtf8(dir.base));
         const auto result = lifecycle.ArchiveSession(id);
         REQUIRE(result.ok());
         const std::filesystem::path archived_context =
@@ -427,7 +427,7 @@ TEST_CASE("lifecycle: context 目录(artifact 仓)随 archive 搬、随 delete �
 
     // unarchive:一起搬回根。
     {
-        agent::SessionLifecycle lifecycle(PathUtf8(dir.base));
+        sessions::SessionLifecycle lifecycle(PathUtf8(dir.base));
         const auto result = lifecycle.UnarchiveSession(id);
         REQUIRE(result.ok());
         CHECK(std::filesystem::exists(context));
@@ -435,7 +435,7 @@ TEST_CASE("lifecycle: context 目录(artifact 仓)随 archive 搬、随 delete �
 
     // delete:一起删。
     {
-        agent::SessionLifecycle lifecycle(PathUtf8(dir.base));
+        sessions::SessionLifecycle lifecycle(PathUtf8(dir.base));
         const auto result = lifecycle.DeleteSession(id, true);
         REQUIRE(result.ok());
         CHECK_FALSE(std::filesystem::exists(dir.base / (id + ".jsonl")));
@@ -453,18 +453,18 @@ TEST_CASE("lifecycle: 没 context 目录的会话照常 archive/delete(空过不
     WriteSession(dir, id, "/tmp", "2026-08-23 10:00:00");
 
     {
-        agent::SessionLifecycle lifecycle(PathUtf8(dir.base));
+        sessions::SessionLifecycle lifecycle(PathUtf8(dir.base));
         const auto result = lifecycle.ArchiveSession(id);
         REQUIRE(result.ok());
         CHECK(result.detail.empty());
     }
     {
-        agent::SessionLifecycle lifecycle(PathUtf8(dir.base));
+        sessions::SessionLifecycle lifecycle(PathUtf8(dir.base));
         const auto result = lifecycle.UnarchiveSession(id);
         REQUIRE(result.ok());
     }
     {
-        agent::SessionLifecycle lifecycle(PathUtf8(dir.base));
+        sessions::SessionLifecycle lifecycle(PathUtf8(dir.base));
         const auto result = lifecycle.DeleteSession(id, true);
         REQUIRE(result.ok());
         CHECK(result.detail.empty());

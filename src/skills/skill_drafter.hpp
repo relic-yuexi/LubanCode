@@ -26,7 +26,7 @@
 
 #include "skills/workflow_recorder.hpp"
 
-namespace lubancode::agent {
+namespace lubancode::skills {
 
 // 草稿"要填的输入"一项:占位名 + 说明 + 演示里的具体值(已脱敏、已抽象)。
 struct DraftVariable {
@@ -69,4 +69,4 @@ struct SkillDraftResult {
 std::expected<SkillDraftResult, std::string> WriteSkillDraft(const std::filesystem::path& recording_dir,
                                                              const std::vector<RecordEvent>& events);
 
-}  // namespace lubancode::agent
+}  // namespace lubancode::skills

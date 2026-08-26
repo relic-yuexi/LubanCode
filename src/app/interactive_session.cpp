@@ -191,7 +191,7 @@ std::string NormalizeRoleWord(std::string word) {
 // 来信转成带来源标识的用户块:不装成用户手敲的字,模型一眼看得出来历;
 // 注明其中指令/命令不得执行(防来信借模型之手越权)。原先是无捕获
 // lambda,收对象时升成文件内自由函数。
-std::string FormatPeerText(const lubancode::agent::PeerEnvelope& envelope) {
+std::string FormatPeerText(const lubancode::peers::PeerEnvelope& envelope) {
     std::ostringstream out;
     out << "[来自另一场会话的字条]\n"
         << "发送方: " << envelope.sender_name << " (" << envelope.sender_id << ")\n"
@@ -391,14 +391,14 @@ private:
     void PersistSteeringQueue();
     // resume 重建队列:存档最后一条 queue 快照灌回 SessionSteeringQueue
     // (空档/没行 = 空队列,照旧)。恢复的条目保 id/次序/尝试次数。
-    void RestoreSteeringQueueFrom(const std::vector<lubancode::agent::ArchivedQueueItem>& items);
+    void RestoreSteeringQueueFrom(const std::vector<lubancode::sessions::ArchivedQueueItem>& items);
     // Plan 模式单:resume 恢复协作模式与计划账。老档没 mode 行按 Default
     // (不动当前档);mode 行坏了跳过不废场;Approved 已落而 Default 未落
     // 时按"已批准待执行"提示用户,不自动重跑 implementation turn(单子
     // session JSONL 与恢复的恢复规则)。
-    void RestorePlanStateFrom(const std::optional<lubancode::agent::ModeEvent>& mode_event,
-                              const std::vector<lubancode::agent::PlanEvent>& plans,
-                              const std::optional<lubancode::agent::PlanReviewEvent>& review);
+    void RestorePlanStateFrom(const std::optional<lubancode::sessions::ModeEvent>& mode_event,
+                              const std::vector<lubancode::sessions::PlanEvent>& plans,
+                              const std::optional<lubancode::sessions::PlanReviewEvent>& review);
     // Ctrl+R 提问历史搜索的数据源(0.30.x 第二批):只读 session 事件账
     // (存档 JSONL 的用户提问行)拼整份 PromptHistoryDataset。
     lubancode::cli::PromptHistoryDataset CollectPromptHistory();
@@ -450,11 +450,11 @@ private:
     void RestoreGoalFromArchive();
     // compact_v2 事件落盘前补 goal snapshot(有 goal 才带;manifest 守恒的
     // goal 面,resume 时与 goal ledger 对账)。
-    void AttachGoalSnapshotToCompact(lubancode::agent::CompactV2Event& event);
+    void AttachGoalSnapshotToCompact(lubancode::sessions::CompactV2Event& event);
     // loop 单:compact 事件衡接 active loop 摘要(守恒面:task id/
     // prompt hash/间隔/状态/下一拍时间;不抄全 tick 日志进
     // summary,单子"tick 前走现有自动 compact 水位检查" + 摘要守恒)。
-    void AttachLoopSnapshotToCompact(lubancode::agent::CompactV2Event& event);
+    void AttachLoopSnapshotToCompact(lubancode::sessions::CompactV2Event& event);
     // ---- /loop 会话定时循环(loop 单) ----
     // /loop 命令组的终端接线:create 走 prompt 源解析(inline 压 loop.md、
     // trust、hash),其余动作走 loop_commands 的排版;非交互入口明拒。
@@ -700,8 +700,8 @@ private:
     static constexpr std::size_t kMaxArchivedTurnViews = 8;
     std::string wire_str;
     const std::string& sessions_dir;
-    lubancode::agent::SessionStore& session_store;
-    lubancode::agent::SessionMeta& session_meta;  // /export 用;Begin/resume 时填
+    lubancode::sessions::SessionStore& session_store;
+    lubancode::sessions::SessionMeta& session_meta;  // /export 用;Begin/resume 时填
     std::string session_start_ts;
     // session_meta 的构造绑定(引用成员):在初始化列表里接 runtime 那份。
     std::size_t& persisted_count;       // history 里前多少条已经落过盘
@@ -715,18 +715,18 @@ private:
     std::string last_compact_line;
 
     // ---- 录制(0.25.x):会话里至多一场,/record 命令组驱动 ----
-    std::optional<lubancode::agent::WorkflowRecorder> recorder;
+    std::optional<lubancode::skills::WorkflowRecorder> recorder;
     const std::filesystem::path recordings_root;
 
     // ---- 排队消息与跨会话传话 ----
     // 0.28.x:排队消息住会话层 SteeringQueue(cli/queue_model.hpp 的
     // SessionSteeringQueue)——流式监听线程只提交编辑动作,投递由会话泵
     // (PumpSteeringQueue,循环顶/轮次边界)执行。这里不再另留一份副本。
-    std::optional<lubancode::agent::PeerRuntime> peer_runtime;
+    std::optional<lubancode::peers::PeerRuntime> peer_runtime;
     bool peer_started = false;
     // 轮内收件池:只被主线程碰(loop 的收件点与空闲收件都在主线程)。
-    std::vector<lubancode::agent::PeerEnvelope> peer_ready_messages;
-    std::vector<lubancode::agent::PeerEnvelope> peer_held_stash;
+    std::vector<lubancode::peers::PeerEnvelope> peer_ready_messages;
+    std::vector<lubancode::peers::PeerEnvelope> peer_held_stash;
 
     // ---- 杂项 ----
     // 项目配置若显式钉了 active_provider,后续切换继续写回项目;没钉就
@@ -884,7 +884,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
           runtime_options.sessions_dir =
               home_lubancode.has_value() ? (*home_lubancode + "/sessions") : std::string();
           runtime_options.wire_name = lubancode::config::ProviderWireName(config.wire);
-          runtime_options.start_ts = lubancode::agent::NowIdTimestamp();
+          runtime_options.start_ts = lubancode::sessions::NowIdTimestamp();
           return runtime_options;
       }()),
       wire_str(lubancode::config::ProviderWireName(config.wire)),
@@ -1204,18 +1204,18 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     // 一笔,后面 sync 定义好了再善后。
     bool resume_moved_into_worktree = false;
     if (opts_.continue_last) {
-        const std::function<void(const std::vector<lubancode::agent::ArchivedQueueItem>&)> queue_restorer =
-            [this](const std::vector<lubancode::agent::ArchivedQueueItem>& items) {
+        const std::function<void(const std::vector<lubancode::sessions::ArchivedQueueItem>&)> queue_restorer =
+            [this](const std::vector<lubancode::sessions::ArchivedQueueItem>& items) {
                 RestoreSteeringQueueFrom(items);
             };
         // Plan 模式单:mode/plan/review 账的恢复口(resume 后档位/计划成品
         // /审阅悬稿都接得回来)。
-        const std::function<void(const std::optional<lubancode::agent::ModeEvent>&,
-                                 const std::vector<lubancode::agent::PlanEvent>&,
-                                 const std::optional<lubancode::agent::PlanReviewEvent>&)>
-            mode_restorer = [this](const std::optional<lubancode::agent::ModeEvent>& mode_event,
-                                   const std::vector<lubancode::agent::PlanEvent>& plans,
-                                   const std::optional<lubancode::agent::PlanReviewEvent>& review) {
+        const std::function<void(const std::optional<lubancode::sessions::ModeEvent>&,
+                                 const std::vector<lubancode::sessions::PlanEvent>&,
+                                 const std::optional<lubancode::sessions::PlanReviewEvent>&)>
+            mode_restorer = [this](const std::optional<lubancode::sessions::ModeEvent>& mode_event,
+                                   const std::vector<lubancode::sessions::PlanEvent>& plans,
+                                   const std::optional<lubancode::sessions::PlanReviewEvent>& review) {
                 RestorePlanStateFrom(mode_event, plans, review);
             };
         if (ResumeSession("", sessions_dir, *main_agent, session_store, persisted_count, session_meta, session_title,
@@ -1250,7 +1250,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     // 回掉的 held。
     // -----------------------------------------------------------------------
     if (spinner_enabled && home_lubancode.has_value()) {
-        lubancode::agent::PeerRuntimeOptions peer_options;
+        lubancode::peers::PeerRuntimeOptions peer_options;
         peer_options.registry_dir = lubancode::tools::Utf8ToPath(*home_lubancode) / "peers";
         peer_options.name = session_title;
         peer_options.cwd = CurrentDirUtf8();
@@ -1270,7 +1270,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
             [this]() { return peer_runtime->ListPeers(); }, peer_runtime->self().peer_id));
         registry().Register(std::make_unique<lubancode::tools::SendSessionMessageTool>(
             [this]() { return peer_runtime->ListPeers(); },
-            [this](const lubancode::agent::PeerCard& target, const std::string& text) {
+            [this](const lubancode::peers::PeerCard& target, const std::string& text) {
                 return peer_runtime->Send(target, text);
             }));
         peer_inbox_poll = [this]() -> std::optional<lubancode::api::Message> {
@@ -2244,7 +2244,7 @@ void TerminalSessionController::CollectPeerMessages() {
     }
     RefillPeerPool();
     while (!peer_held_stash.empty()) {
-        lubancode::agent::PeerEnvelope envelope = std::move(peer_held_stash.front());
+        lubancode::peers::PeerEnvelope envelope = std::move(peer_held_stash.front());
         peer_held_stash.erase(peer_held_stash.begin());
         // 扣住的信不进轮内:打印给用户看,问一句要不要交给模型。
         std::cout << theme.stats << trf("cmd.peers.held_notice", envelope.sender_name, envelope.sender_id,
@@ -2381,10 +2381,10 @@ void TerminalSessionController::PersistSteeringQueue() {
         }
     }
     const auto snapshot = SessionSteeringQueue().Snapshot();
-    std::vector<lubancode::agent::ArchivedQueueItem> items;
+    std::vector<lubancode::sessions::ArchivedQueueItem> items;
     items.reserve(snapshot.size());
     for (const auto& item : snapshot) {
-        lubancode::agent::ArchivedQueueItem archived;
+        lubancode::sessions::ArchivedQueueItem archived;
         archived.id = item.id;
         archived.subagent = !item.target.is_main();
         archived.task_id = item.target.task_id;
@@ -2398,7 +2398,7 @@ void TerminalSessionController::PersistSteeringQueue() {
 // 存档快照 -> 会话层队列(resume 路)。RestoreFromArchive 只在队列还空着时
 // 收(本场自己还没排队),运行中的账不给旧档盖。
 void TerminalSessionController::RestoreSteeringQueueFrom(
-    const std::vector<lubancode::agent::ArchivedQueueItem>& items) {
+    const std::vector<lubancode::sessions::ArchivedQueueItem>& items) {
     if (items.empty()) {
         return;
     }
@@ -2424,17 +2424,17 @@ void TerminalSessionController::RestoreSteeringQueueFrom(
 lubancode::cli::PromptHistoryDataset TerminalSessionController::CollectPromptHistory() {
     lubancode::cli::PromptHistoryDataset data;
     data.current_session_id = session_store.session_id();
-    data.current_project_key = lubancode::agent::NormalizePathForCompare(CurrentDirUtf8());
+    data.current_project_key = lubancode::sessions::NormalizePathForCompare(CurrentDirUtf8());
     if (!sessions_dir.empty()) {
-        const std::vector<lubancode::agent::SessionListEntry> listed =
-            lubancode::agent::ListSessions(sessions_dir, /*limit=*/150);
+        const std::vector<lubancode::sessions::SessionListEntry> listed =
+            lubancode::sessions::ListSessions(sessions_dir, /*limit=*/150);
         for (auto it = listed.rbegin(); it != listed.rend(); ++it) {
-            const auto bytes = lubancode::agent::ReadSessionFileBytes(it->file_path);
+            const auto bytes = lubancode::sessions::ReadSessionFileBytes(it->file_path);
             if (!bytes.has_value()) {
                 continue;  // 读不动这场就跳过,不废整份
             }
-            const std::string project_key = lubancode::agent::NormalizePathForCompare(it->cwd);
-            for (auto& record : lubancode::agent::ExtractPromptHistory(*bytes)) {
+            const std::string project_key = lubancode::sessions::NormalizePathForCompare(it->cwd);
+            for (auto& record : lubancode::sessions::ExtractPromptHistory(*bytes)) {
                 lubancode::cli::PromptHistoryEntry entry;
                 entry.text = std::move(record.text);
                 entry.ts = std::move(record.ts);
@@ -2611,7 +2611,7 @@ std::pair<std::string, std::string> TerminalSessionController::BuildMentionLedge
     const std::filesystem::path cwd = std::filesystem::current_path();
     const auto root = lubancode::cli::FindRepositoryRoot(cwd);
     const std::filesystem::path base = root.value_or(cwd);
-    const std::string base_key = lubancode::agent::NormalizePathForCompare(lubancode::tools::PathToUtf8(base));
+    const std::string base_key = lubancode::sessions::NormalizePathForCompare(lubancode::tools::PathToUtf8(base));
     std::string ledger;
     for (const std::string& token : tokens) {
         if (lubancode::cli::MediaTypeForPath(token).has_value()) {
@@ -2637,7 +2637,7 @@ std::pair<std::string, std::string> TerminalSessionController::BuildMentionLedge
         std::error_code ec;
         const std::filesystem::path canon = std::filesystem::weakly_canonical(resolved, ec);
         const std::string canon_key =
-            lubancode::agent::NormalizePathForCompare(lubancode::tools::PathToUtf8(canon));
+            lubancode::sessions::NormalizePathForCompare(lubancode::tools::PathToUtf8(canon));
         if (!canon_key.empty() && canon_key.rfind(base_key + "/", 0) != 0 && canon_key != base_key) {
             return {trf("mention.outside_root", token), {}};
         }
@@ -3691,13 +3691,13 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                                       << "\n";
                             break;
                         }
-                        const auto bytes = lubancode::agent::ReadSessionFileBytes(session_store.file_path());
+                        const auto bytes = lubancode::sessions::ReadSessionFileBytes(session_store.file_path());
                         if (!bytes.has_value()) {
                             std::cout << theme.error << "会话档读不到: " << session_store.file_path() << theme.reset
                                       << "\n";
                             break;
                         }
-                        const auto loaded = lubancode::agent::ParseSessionFile(*bytes);
+                        const auto loaded = lubancode::sessions::ParseSessionFile(*bytes);
                         if (!loaded.has_value()) {
                             std::cout << theme.error << "会话档解析失败。" << theme.reset << "\n";
                             break;
@@ -3707,7 +3707,7 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                         nlohmann::json bundle;
                         bundle["schema"] = "tool_trace_export_v1";
                         bundle["session"] = session_store.session_id();
-                        bundle["exportedAt"] = lubancode::agent::NowTimestamp();
+                        bundle["exportedAt"] = lubancode::sessions::NowTimestamp();
                         bundle["note"] = "脱敏诊断包:只有遮敏摘要,无正文原文";
                         nlohmann::json items = nlohmann::json::array();
                         for (const auto& record : ledger.executions()) {
@@ -3769,9 +3769,9 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                                                parsed.args.find(' ') == std::string::npos);
                     if (detail_query) {
                         if (session_store.active()) {
-                            const auto bytes = lubancode::agent::ReadSessionFileBytes(session_store.file_path());
+                            const auto bytes = lubancode::sessions::ReadSessionFileBytes(session_store.file_path());
                             if (bytes.has_value()) {
-                                const auto loaded = lubancode::agent::ParseSessionFile(*bytes);
+                                const auto loaded = lubancode::sessions::ParseSessionFile(*bytes);
                                 if (loaded.has_value()) {
                                     const auto ledger =
                                         lubancode::runtime::ToolTraceHub::BuildLedger(loaded->tool_trace_events);
@@ -4162,7 +4162,7 @@ void TerminalSessionController::EnsureGoalCoordinator() {
     // 单子写盘栅栏管的是"已建档的会话",这里同取舍)。
     goal_coordinator_->SetLedgerSink([this](const lubancode::runtime::goal::GoalCoordinatorEvent& event) {
         if (!session_store.active()) return true;
-        lubancode::agent::GoalSessionEvent line;
+        lubancode::sessions::GoalSessionEvent line;
         line.event = event.event;
         line.goal_id = event.goal_id;
         line.iteration_id = event.iteration_id;
@@ -4197,9 +4197,9 @@ void TerminalSessionController::EnsureGoalCoordinator() {
 void TerminalSessionController::RestoreGoalFromArchive() {
     EnsureGoalCoordinator();
     if (!session_store.active()) return;  // 没档可恢复
-    const auto bytes = lubancode::agent::ReadSessionFileBytes(session_store.file_path());
+    const auto bytes = lubancode::sessions::ReadSessionFileBytes(session_store.file_path());
     if (!bytes.has_value()) return;
-    const auto loaded = lubancode::agent::ParseSessionFile(*bytes);
+    const auto loaded = lubancode::sessions::ParseSessionFile(*bytes);
     if (!loaded.has_value() || loaded->goal_events.empty()) return;
     const auto stats = goal_coordinator_->RestoreFromArchive(loaded->goal_events);
     if (stats.replayed == 0 && stats.skipped == 0) return;
@@ -4216,7 +4216,7 @@ void TerminalSessionController::RestoreGoalFromArchive() {
     }
 }
 
-void TerminalSessionController::AttachGoalSnapshotToCompact(lubancode::agent::CompactV2Event& event) {
+void TerminalSessionController::AttachGoalSnapshotToCompact(lubancode::sessions::CompactV2Event& event) {
     EnsureGoalCoordinator();
     const auto snapshot = lubancode::runtime::goal::BuildGoalSnapshot(*goal_coordinator_);
     if (!snapshot.has_value()) return;  // 没 goal:不带,普通会话照旧
@@ -4226,7 +4226,7 @@ void TerminalSessionController::AttachGoalSnapshotToCompact(lubancode::agent::Co
     event.metrics["goal"] = std::move(goal_metrics);
 }
 
-void TerminalSessionController::AttachLoopSnapshotToCompact(lubancode::agent::CompactV2Event& event) {
+void TerminalSessionController::AttachLoopSnapshotToCompact(lubancode::sessions::CompactV2Event& event) {
     if (!loop_scheduler_.has_value()) {
         return;
     }
@@ -4834,7 +4834,7 @@ void TerminalSessionController::CloseGoalIteration(const std::string& turn_id, b
                 continue;
             }
             // 事件行(goal_evidence_v1)先落:证据账是 hard gate 的查表底。
-            lubancode::agent::GoalSessionEvent line;
+            lubancode::sessions::GoalSessionEvent line;
             line.type = "goal_evidence_v1";
             line.event = "observed";
             line.goal_id = evidence->goal_id;
@@ -5069,7 +5069,7 @@ void TerminalSessionController::RestoreLoopFromArchive() {
     if (!session_store.active()) {
         return;
     }
-    const auto bytes = lubancode::agent::ReadSessionFileBytes(session_store.file_path());
+    const auto bytes = lubancode::sessions::ReadSessionFileBytes(session_store.file_path());
     if (!bytes.has_value()) {
         return;
     }
@@ -5599,7 +5599,7 @@ bool TerminalSessionController::TryRunCompact(bool midturn) {
 
     const std::size_t old_size = main_agent->History().size();
     const auto new_history = lubancode::agent::BuildCompactedHistory(main_agent->History(), result->archive);
-    const auto base_event = lubancode::agent::MakeCompactEvent(old_size, new_history);
+    const auto base_event = lubancode::sessions::MakeCompactEvent(old_size, new_history);
     main_agent->ReplaceHistory(new_history);
     const std::size_t after_tokens = lubancode::agent::EstimateHistoryTokens(main_agent->History());
     // 状态栏短闪:压缩前后与所用角色一行交代(规格"运行提示")。
@@ -5635,7 +5635,7 @@ bool TerminalSessionController::TryRunCompact(bool midturn) {
     metrics_json["pre_tokens"] = before_tokens;
     metrics_json["post_tokens"] = after_tokens;
     metrics_json["trigger"] = midturn ? "midturn" : "pre-turn";
-    auto compact_event = lubancode::agent::UpgradeToV2(base_event, session_compact_epoch,
+    auto compact_event = lubancode::sessions::UpgradeToV2(base_event, session_compact_epoch,
                                                        std::move(manifest_json), std::move(metrics_json));
 
     // 落盘基线收到新长度,补写 compact 事件,理由同 /compact 分支。
@@ -5732,13 +5732,13 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
             RestoreGoalFromArchive();
         },
         // /resume 的排队账重建(路径二):存档快照灌回会话层队列。
-        [this](const std::vector<lubancode::agent::ArchivedQueueItem>& items) {
+        [this](const std::vector<lubancode::sessions::ArchivedQueueItem>& items) {
             RestoreSteeringQueueFrom(items);
         },
         // Plan 模式单:/resume 的 mode/plan/review 账恢复。
-        [this](const std::optional<lubancode::agent::ModeEvent>& mode_event,
-               const std::vector<lubancode::agent::PlanEvent>& plans,
-               const std::optional<lubancode::agent::PlanReviewEvent>& review) {
+        [this](const std::optional<lubancode::sessions::ModeEvent>& mode_event,
+               const std::vector<lubancode::sessions::PlanEvent>& plans,
+               const std::optional<lubancode::sessions::PlanReviewEvent>& review) {
             RestorePlanStateFrom(mode_event, plans, review);
         }};
 }
@@ -5822,7 +5822,7 @@ void TerminalSessionController::NoteSubagentCompletionForGoal() {
         evidence.observed_at_ms = now_ms;
         evidence.fresh = true;
         // 事件行(goal_evidence_v1)先落再进账,与工具采证同序。
-        lubancode::agent::GoalSessionEvent line;
+        lubancode::sessions::GoalSessionEvent line;
         line.type = "goal_evidence_v1";
         line.event = "observed";
         line.goal_id = evidence.goal_id;
@@ -6030,15 +6030,15 @@ void TerminalSessionController::CleanupBackgroundAgents(bool dispose_queue) {
 // ---------------------------------------------------------------------------
 
 void TerminalSessionController::RestorePlanStateFrom(
-    const std::optional<lubancode::agent::ModeEvent>& mode_event,
-    const std::vector<lubancode::agent::PlanEvent>& plans,
-    const std::optional<lubancode::agent::PlanReviewEvent>& review) {
+    const std::optional<lubancode::sessions::ModeEvent>& mode_event,
+    const std::vector<lubancode::sessions::PlanEvent>& plans,
+    const std::optional<lubancode::sessions::PlanReviewEvent>& review) {
     using lubancode::runtime::CollaborationMode;
     using lubancode::runtime::PlanDocument;
     using lubancode::runtime::PlanReviewState;
     // 计划账:按 plan_id 取最高 revision(逐稿都在,取最新);审批只认与
     // 最新稿匹配的 approved(单子:批准须同时匹配 id/revision/hash)。
-    std::map<std::string, const lubancode::agent::PlanEvent*> latest_by_id;
+    std::map<std::string, const lubancode::sessions::PlanEvent*> latest_by_id;
     for (const auto& event : plans) {
         const auto it = latest_by_id.find(event.plan_id);
         if (it == latest_by_id.end() || event.revision >= it->second->revision) {
@@ -6547,7 +6547,7 @@ void TerminalSessionController::Run() {
         // 另起一轮外来消息,不等用户再敲一行。用户自己的排队消息优先。
         CollectPeerMessages();
         if (!peer_ready_messages.empty() && !SessionSteeringQueue().HasDeliverable(lubancode::cli::MessageTarget::Main())) {
-            const lubancode::agent::PeerEnvelope envelope = std::move(peer_ready_messages.front());
+            const lubancode::peers::PeerEnvelope envelope = std::move(peer_ready_messages.front());
             peer_ready_messages.erase(peer_ready_messages.begin());
             std::cout << theme.stats
                       << trf("cmd.peers.incoming_notice", envelope.sender_name, envelope.sender_id) << theme.reset

@@ -385,11 +385,11 @@ void Server::RegisterMethods() {
                 return MakeError(request.id, kErrInvalidParams,
                                  "trace/query: 没有会话存档(纯内存 thread 或未配置 sessionsDir)");
             }
-            const auto bytes = agent::ReadSessionFileBytes(file_path);
+            const auto bytes = sessions::ReadSessionFileBytes(file_path);
             if (!bytes.has_value()) {
                 return MakeError(request.id, kErrInvalidParams, "trace/query: 会话档读不到: " + file_path);
             }
-            const auto loaded = agent::ParseSessionFile(*bytes);
+            const auto loaded = sessions::ParseSessionFile(*bytes);
             if (!loaded.has_value()) {
                 return MakeError(request.id, kErrInvalidParams, "trace/query: 会话档解析失败: " + file_path);
             }
@@ -623,18 +623,18 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
     // 会话账:复用 SessionStore,不另立第二本账。首句摘要用一句占位的
     // 协议话——thread/start 阶段还没有用户文本(单子的存档恢复线会把
     // 真首句补进来);MakeSessionId 的 slug 拿它生成文件名。
-    record->thread_id = agent::MakeSessionId(agent::NowIdTimestamp(), "app-server-thread");
+    record->thread_id = sessions::MakeSessionId(sessions::NowIdTimestamp(), "app-server-thread");
     record->interactions = std::make_unique<InteractionLedger>(record->thread_id);
     if (!sessions_dir_.empty()) {
-        record->store = std::make_unique<agent::SessionStore>(sessions_dir_);
-        agent::SessionMeta meta;
+        record->store = std::make_unique<sessions::SessionStore>(sessions_dir_);
+        sessions::SessionMeta meta;
         // 阶段 3 冻结项:meta 写真值。wire 是协议名(anthropic/responses/
         // chat,配置四级合并的结果),model 是配置里的模型名;测试/纯内存
         // 跑没有配置,空串照写(与 CLI 会话档同一张 meta 表)。
         meta.wire = options_.session_wire;
         meta.model = options_.session_model;
         meta.cwd = record->cwd;
-        meta.started_at = agent::NowTimestamp();
+        meta.started_at = sessions::NowTimestamp();
         if (!record->store->Begin(meta, record->thread_id)) {
             // 落盘失败不拦协议:thread 照开,只打 stderr。
             Diagnose("会话建档失败,本场不落盘: " + sessions_dir_);

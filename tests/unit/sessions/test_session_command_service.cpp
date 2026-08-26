@@ -57,7 +57,7 @@ struct TempSessionsDir {
 
 void WriteSession(const TempSessionsDir& dir, const std::string& id, const std::string& title,
                   const std::string& cwd, const std::string& started_at) {
-    agent::SessionMeta meta;
+    sessions::SessionMeta meta;
     meta.wire = "anthropic";
     meta.model = "m1";
     meta.cwd = cwd;
@@ -65,10 +65,10 @@ void WriteSession(const TempSessionsDir& dir, const std::string& id, const std::
     api::Message message;
     message.role = api::Role::User;
     message.content.push_back(api::TextBlock{"首句" + id});
-    std::string content = agent::SerializeSessionMeta(meta) + "\n" +
-                          agent::SerializeSessionMessage(message, started_at) + "\n";
+    std::string content = sessions::SerializeSessionMeta(meta) + "\n" +
+                          sessions::SerializeSessionMessage(message, started_at) + "\n";
     if (!title.empty()) {
-        content += agent::SerializeTitleEvent(title, started_at) + "\n";
+        content += sessions::SerializeTitleEvent(title, started_at) + "\n";
     }
     std::ofstream f(dir.base / U8Name(id + ".jsonl"), std::ios::binary);
     f << content;
@@ -212,11 +212,11 @@ TEST_CASE("终端与 app-server 同一查询同一份账:catalog 直查与 servi
     WriteSession(dir, "20260821-111111-乙", "乙", "D:/房", "2026-08-21 11:11:11");
 
     // 终端路(SessionCatalog 直查,picker 吃这份)。
-    agent::SessionCatalog catalog(dir.str());
+    sessions::SessionCatalog catalog(dir.str());
     catalog.Scan();
-    agent::SessionQuery query;
-    query.scope = agent::SessionScope::All;
-    query.sort = agent::SessionSort::Updated;
+    sessions::SessionQuery query;
+    query.scope = sessions::SessionScope::All;
+    query.sort = sessions::SessionSort::Updated;
     query.limit = 0;
     const auto page = catalog.Query(query);
 

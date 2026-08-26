@@ -1248,7 +1248,7 @@ void GoalCoordinator::ReplayEvent(const GoalCoordinatorEvent& event) {
 }
 
 GoalCoordinator::ReplayStats GoalCoordinator::RestoreFromArchive(
-    const std::vector<lubancode::agent::GoalSessionEvent>& events) {
+    const std::vector<lubancode::sessions::GoalSessionEvent>& events) {
     ReplayStats stats;
     for (const auto& line : events) {
         GoalCoordinatorEvent event;

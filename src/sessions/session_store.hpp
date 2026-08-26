@@ -44,7 +44,7 @@
 #include "agent/tool_trace.hpp"
 #include "api/types.hpp"
 
-namespace lubancode::agent {
+namespace lubancode::sessions {
 
 // ---------------------------------------------------------------------------
 // meta(首行)
@@ -283,7 +283,7 @@ struct TraceRepairReport {
     int result_recovered = 0; // 从 trace 恢复出原始结果的块数
 };
 TraceRepairReport RepairToolPairsWithTrace(std::vector<api::Message>& history,
-                                           const ToolExecutionLedger& ledger);
+                                           const agent::ToolExecutionLedger& ledger);
 
 // ---------------------------------------------------------------------------
 // 整文件解析 / 导出
@@ -310,9 +310,9 @@ struct LoadedSession {
     // /resume 拿它重建会话层 SteeringQueue(空表 = 档里没排队的账)。
     std::vector<ArchivedQueueItem> queued_messages;
     // 工具追踪栅栏事件(tool_trace_v1),按文件序。逐枚追踪单:/resume 的
-    // trace-aware 修复从这份账折叠 ToolExecutionLedger;老档没这些行,
+    // trace-aware 修复从这份账折叠 agent::ToolExecutionLedger;老档没这些行,
     // 空表 = 走旧逻辑(RepairToolPairs 补洞),向后兼容。
-    std::vector<ToolTraceEvent> tool_trace_events;
+    std::vector<agent::ToolTraceEvent> tool_trace_events;
     // goal 事件(goal_v1 族),按文件序。持久目标单:/resume 从这份账
     // 重建 GoalCoordinator(ReplayEvent);老档没这些行,空表 = 没有 goal,
     // 不影响消息账。
@@ -384,7 +384,7 @@ public:
     // 追加一条工具追踪栅栏事件行(tool_trace_v1,自动带 ts),append+flush。
     // 逐枚追踪单:一行一栅栏,append-only;这是 durable started/finished
     // 的落点,写失败即知(process-crash durable 的口径,见单子 Durability 节)。
-    bool AppendToolTraceEvent(const ToolTraceEvent& event);
+    bool AppendToolTraceEvent(const agent::ToolTraceEvent& event);
 
     // 追加一条原始 JSON 事件行(loop 单:loop_task_v1/loop_tick_v1 一族;
     // 调用方拼好 json,这里只做 append+flush 的薄壳,不校验 schema——坏
@@ -462,4 +462,4 @@ std::string NowTimestamp();
 // 当前本地时间,"yyyymmddHHMMSS" 掐成 "yyyymmdd-HHMMSS"。会话 id 用。
 std::string NowIdTimestamp();
 
-}  // namespace lubancode::agent
+}  // namespace lubancode::sessions

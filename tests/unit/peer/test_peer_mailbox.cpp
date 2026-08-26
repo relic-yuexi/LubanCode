@@ -7,7 +7,7 @@
 
 #include "peers/peer_mailbox.hpp"
 
-using namespace lubancode::agent;
+using namespace lubancode::peers;
 
 namespace {
 

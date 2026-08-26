@@ -26,7 +26,7 @@
 #include <string>
 #include <vector>
 
-namespace lubancode::agent {
+namespace lubancode::sessions {
 
 // 查询合同。scope/state/sort/search/cursor/limit 五件,与单子
 // "代码边界 SessionCatalog"一节逐字对齐。
@@ -138,4 +138,4 @@ private:
     std::map<std::string, SessionSummary> entries_;
 };
 
-}  // namespace lubancode::agent
+}  // namespace lubancode::sessions

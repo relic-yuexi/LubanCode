@@ -1,7 +1,7 @@
 // SessionPicker 的 TTY 面板宿主(会话管理器单第二步):真终端下把纯逻辑
 // 控制器(cli/session_picker.hpp)画出来——标题、搜索行、Filter/Sort、
 // 列表、底栏,单帧重画、resize 重探。数据由调用方(app 层)从
-// agent::SessionCatalog 摘好喂进来;这里不读盘、不知道存档在哪、没有
+// sessions::SessionCatalog 摘好喂进来;这里不读盘、不知道存档在哪、没有
 // delete。Enter 返回选中的 id,Esc 原路返回(std::nullopt),什么盘都不碰。
 //
 // 与 provider_switch 同一层路数:platform 原语(RawInputScope/KeyReader/

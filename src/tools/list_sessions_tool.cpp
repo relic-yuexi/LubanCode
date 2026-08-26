@@ -26,7 +26,7 @@ std::string StatusLabel(const std::string& status) {
 
 }  // namespace
 
-ListSessionsTool::ListSessionsTool(std::function<std::vector<agent::PeerCard>()> peers_provider,
+ListSessionsTool::ListSessionsTool(std::function<std::vector<peers::PeerCard>()> peers_provider,
                                    std::string self_peer_id)
     : peers_provider_(std::move(peers_provider)), self_peer_id_(std::move(self_peer_id)) {}
 
@@ -46,7 +46,7 @@ nlohmann::json ListSessionsTool::input_schema() const {
 }
 
 Tool::Result ListSessionsTool::execute(const nlohmann::json& /*input*/) {
-    std::vector<agent::PeerCard> peers;
+    std::vector<peers::PeerCard> peers;
     if (peers_provider_) {
         peers = peers_provider_();
     }

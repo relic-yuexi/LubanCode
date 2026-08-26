@@ -9,7 +9,7 @@
 
 #include "tools/skill_loader.hpp"
 
-namespace lubancode::agent {
+namespace lubancode::skills {
 
 namespace {
 
@@ -679,4 +679,4 @@ std::expected<SkillDraftResult, std::string> WriteSkillDraft(const fs::path& rec
     return result;
 }
 
-}  // namespace lubancode::agent
+}  // namespace lubancode::skills

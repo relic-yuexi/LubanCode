@@ -59,12 +59,12 @@ private:
 
 // 一场真存档:Begin + 两条消息,给 resume 接管。
 std::string WriteSampleSession(const std::string& dir, const std::string& slug) {
-    agent::SessionStore store(dir);
-    agent::SessionMeta meta;
+    sessions::SessionStore store(dir);
+    sessions::SessionMeta meta;
     meta.wire = "anthropic";
     meta.model = "old-model";
     meta.cwd = "/tmp";
-    meta.started_at = agent::NowTimestamp();
+    meta.started_at = sessions::NowTimestamp();
     REQUIRE(store.Begin(meta, slug));
     api::Message user;
     user.role = api::Role::User;

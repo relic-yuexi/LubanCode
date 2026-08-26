@@ -644,7 +644,7 @@ TEST_CASE("trace-aware 修补: unknown 补 [会话恢复] 结果,老档回落 le
     ledger.Fold(start2);
 
     std::vector<api::Message> history{assistant};
-    const auto report = agent::RepairToolPairsWithTrace(history, ledger);
+    const auto report = sessions::RepairToolPairsWithTrace(history, ledger);
     CHECK(report.trace_matched == 2);
     CHECK(report.unknown_after_start == 1);
     CHECK(report.result_recovered >= 1);
@@ -667,8 +667,8 @@ TEST_CASE("session: tool_trace_v1 行落盘与回读;老版本读档不坏") {
     const std::string file = (tmp.Get() / "s.jsonl").string();
 
     {
-        agent::SessionStore store(tmp.Get().string());
-        agent::SessionMeta meta;
+        sessions::SessionStore store(tmp.Get().string());
+        sessions::SessionMeta meta;
         meta.wire = "anthropic";
         meta.model = "m";
         REQUIRE(store.Begin(meta, "s"));
@@ -684,9 +684,9 @@ TEST_CASE("session: tool_trace_v1 行落盘与回读;老版本读档不坏") {
         CHECK(store.AppendToolTraceEvent(started));
     }
 
-    const auto bytes = agent::ReadSessionFileBytes(file);
+    const auto bytes = sessions::ReadSessionFileBytes(file);
     REQUIRE(bytes.has_value());
-    const auto loaded = agent::ParseSessionFile(*bytes);
+    const auto loaded = sessions::ParseSessionFile(*bytes);
     REQUIRE(loaded.has_value());
     REQUIRE(loaded->tool_trace_events.size() == 2);
     CHECK(loaded->tool_trace_events[0].kind == agent::ToolTraceEventKind::Scheduled);

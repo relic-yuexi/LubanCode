@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <sstream>
 
-#include "skills/workflow_recorder.hpp"  // RedactSecrets:预览打码(纯函数,不带磁盘件)
+#include "skills/workflow_recorder.hpp"  // skills::RedactSecrets:预览打码(纯函数,不带磁盘件)
 #include "hooks/hash.hpp"               // Sha256Hex:结果/入参摘要锚
 #include "platform/json_safe.hpp"       // DumpJsonSanitized:追踪 JSONL 的末道编码闸
 #include "platform/text_encoding.hpp"   // UTF-8 安全截头尾
@@ -439,13 +439,13 @@ std::optional<ToolTraceEvent> ParseToolTraceEvent(const std::string& line) {
 
 std::string BuildTracePreview(const std::string& content, std::size_t head, std::size_t tail) {
     if (content.size() <= head + tail) {
-        return RedactSecrets(content);
+        return skills::RedactSecrets(content);
     }
     const std::size_t head_end = platform::Utf8PrefixBoundary(content, head);
     const std::size_t tail_begin = platform::Utf8SuffixBoundary(content, content.size() - tail);
     const std::string head_part = content.substr(0, head_end);
     const std::string tail_part = content.substr(tail_begin);
-    return RedactSecrets(head_part) + "…" + RedactSecrets(tail_part);
+    return skills::RedactSecrets(head_part) + "…" + skills::RedactSecrets(tail_part);
 }
 
 // ---------------------------------------------------------------------------

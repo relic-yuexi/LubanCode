@@ -21,7 +21,7 @@
 
 #include <nlohmann/json.hpp>
 
-namespace lubancode::agent {
+namespace lubancode::peers {
 
 constexpr int kPeerEnvelopeVersion = 1;
 
@@ -109,4 +109,4 @@ PeerPermissionTier DefaultReceiveTier(int local_mode, int remote_mode, bool cwd_
 // 项目算近。空 cwd(信息不全)按远算,保守。
 bool PeerCwdFarApart(const std::string& a, const std::string& b);
 
-}  // namespace lubancode::agent
+}  // namespace lubancode::peers

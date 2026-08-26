@@ -19,10 +19,10 @@
 #include "runtime/loop_types.hpp"
 #include "tools/path_utils.hpp"  // PathToUtf8
 
-using lubancode::agent::ParseSessionFile;
-using lubancode::agent::ReadSessionFileBytes;
-using lubancode::agent::SessionMeta;
-using lubancode::agent::SessionStore;
+using lubancode::sessions::ParseSessionFile;
+using lubancode::sessions::ReadSessionFileBytes;
+using lubancode::sessions::SessionMeta;
+using lubancode::sessions::SessionStore;
 using lubancode::runtime::loop::LoopPromptSource;
 using lubancode::runtime::loop::LoopScheduler;
 using lubancode::runtime::loop::LoopSchedulerEvent;

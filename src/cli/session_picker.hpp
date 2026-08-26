@@ -1,7 +1,7 @@
 // SessionPicker(会话管理器单第二、三步)的纯逻辑层:焦点轮换、搜索词、
 // 筛选/排序切换、选中保持与视口翻页;Ctrl+T 转录查看、Ctrl+E 展开详情、
 // Ctrl+O 紧凑/舒展三种查看态也是本层的状态机。不碰终端、不碰磁盘、
-// 不知道存档在哪——数据由调用方从 agent::SessionCatalog 摘好喂进来,
+// 不知道存档在哪——数据由调用方从 sessions::SessionCatalog 摘好喂进来,
 // resume 结果只是一枚 id。没有 delete;转录内容(excerpt 行)同样由
 // 调用方按需读好带进来(大文件按需读的"按需"归接线层管)。
 //
@@ -20,7 +20,7 @@
 namespace lubancode::cli {
 
 // 列表一行的展示数据(中立形状:cli 不反向依赖 agent,由接线层从
-// agent::SessionSummary 转过来;相对时间文字也由接线层算好带进来)。
+// sessions::SessionSummary 转过来;相对时间文字也由接线层算好带进来)。
 struct SessionPickerEntry {
     std::string id;
     std::string title;           // 没设标题就空,展示层回退 preview
@@ -50,7 +50,7 @@ enum class SessionPickerFocus { Search, Filter, Sort };
 enum class SessionPickerLayout { Compact, Comfortable };
 
 // 搜索命中规则:title/preview/id/cwd 四路,ASCII 不分大小写,中文按原字
-// (与 agent::SessionMatchesQuery 同一口径;这里对着喂进来的行数据再筛
+// (与 sessions::SessionMatchesQuery 同一口径;这里对着喂进来的行数据再筛
 // 一遍,免得接线层漏筛)。
 bool SessionPickerMatches(const SessionPickerEntry& entry, const std::string& search);
 

@@ -18,7 +18,7 @@ namespace lubancode::tools {
 class ListSessionsTool : public Tool {
 public:
     // self_peer_id:本场的 peer_id,列表里不出现自己。
-    explicit ListSessionsTool(std::function<std::vector<agent::PeerCard>()> peers_provider,
+    explicit ListSessionsTool(std::function<std::vector<peers::PeerCard>()> peers_provider,
                               std::string self_peer_id);
 
     std::string name() const override { return "list_sessions"; }
@@ -27,7 +27,7 @@ public:
     Tool::Result execute(const nlohmann::json& input) override;
 
 private:
-    std::function<std::vector<agent::PeerCard>()> peers_provider_;
+    std::function<std::vector<peers::PeerCard>()> peers_provider_;
     std::string self_peer_id_;
 };
 

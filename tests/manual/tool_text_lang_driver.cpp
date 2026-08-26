@@ -266,13 +266,13 @@ int main() {
 
     // ---- 清底批:跨会话族(list_sessions/send_session_message)----
     lubancode::tools::ListSessionsTool list_sessions(
-        [] { return std::vector<lubancode::agent::PeerCard>{}; }, "self");
+        [] { return std::vector<lubancode::peers::PeerCard>{}; }, "self");
     std::cout << "== list_sessions.description ==\n" << list_sessions.description() << "\n";
 
     lubancode::tools::SendSessionMessageTool send_session(
-        [] { return std::vector<lubancode::agent::PeerCard>{}; },
-        [](const lubancode::agent::PeerCard&, const std::string&) {
-            return lubancode::agent::PeerDelivery::Delivered;
+        [] { return std::vector<lubancode::peers::PeerCard>{}; },
+        [](const lubancode::peers::PeerCard&, const std::string&) {
+            return lubancode::peers::PeerDelivery::Delivered;
         });
     std::cout << "== send_session_message.description ==\n" << send_session.description() << "\n";
     const nlohmann::json sms = send_session.input_schema();

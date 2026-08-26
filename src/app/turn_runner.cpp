@@ -566,7 +566,7 @@ lubancode::agent::Callbacks BuildCallbacks(TurnContext& ctx, TurnWiring wiring) 
     const std::vector<std::string>& allow_commands = ctx.allow_commands;
     const std::vector<std::string>& deny_commands = ctx.deny_commands;
     const std::atomic<bool>* cancel_flag = wiring.cancel_flag;
-    lubancode::agent::WorkflowRecorder* recorder = ctx.recorder;
+    lubancode::skills::WorkflowRecorder* recorder = ctx.recorder;
     lubancode::runtime::ToolTraceHub* trace_hub = ctx.trace_hub;
     lubancode::runtime::TurnCollector* view_collector = wiring.view_collector;
     const std::function<std::string(const std::string&, const nlohmann::json&)>& mode_gate = ctx.mode_gate;
@@ -1019,7 +1019,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
     const std::vector<std::string>& allow_commands = ctx.allow_commands;
     const std::vector<std::string>& deny_commands = ctx.deny_commands;
     lubancode::tools::AgentTool* completion_agent = ctx.completion_agent;
-    lubancode::agent::WorkflowRecorder* recorder = ctx.recorder;
+    lubancode::skills::WorkflowRecorder* recorder = ctx.recorder;
     const bool silent = ctx.silent;
     lubancode::runtime::TurnUsageStats* usage_out = ctx.usage_out;
     lubancode::runtime::ToolTraceHub* turn_trace_hub = ctx.trace_hub;

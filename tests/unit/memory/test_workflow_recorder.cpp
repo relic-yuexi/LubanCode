@@ -20,11 +20,11 @@
 namespace {
 
 namespace fs = std::filesystem;
-using lubancode::agent::RecordEvent;
-using lubancode::agent::RecorderAction;
-using lubancode::agent::RecorderState;
-using lubancode::agent::RecordingStartInfo;
-using lubancode::agent::WorkflowRecorder;
+using lubancode::skills::RecordEvent;
+using lubancode::skills::RecorderAction;
+using lubancode::skills::RecorderState;
+using lubancode::skills::RecordingStartInfo;
+using lubancode::skills::WorkflowRecorder;
 
 class TempRecordings {
 public:
@@ -72,23 +72,23 @@ RecordingStartInfo DemoInfo() {
 TEST_CASE("状态机:开录/暂停/续录/停止/取消的合法与非法迁移") {
     using A = RecorderAction;
     using S = RecorderState;
-    CHECK(lubancode::agent::IsValidRecorderTransition(S::Inactive, A::Start));
-    CHECK_FALSE(lubancode::agent::IsValidRecorderTransition(S::Inactive, A::Pause));
-    CHECK_FALSE(lubancode::agent::IsValidRecorderTransition(S::Inactive, A::Resume));
-    CHECK_FALSE(lubancode::agent::IsValidRecorderTransition(S::Inactive, A::Stop));
-    CHECK_FALSE(lubancode::agent::IsValidRecorderTransition(S::Inactive, A::Cancel));
+    CHECK(lubancode::skills::IsValidRecorderTransition(S::Inactive, A::Start));
+    CHECK_FALSE(lubancode::skills::IsValidRecorderTransition(S::Inactive, A::Pause));
+    CHECK_FALSE(lubancode::skills::IsValidRecorderTransition(S::Inactive, A::Resume));
+    CHECK_FALSE(lubancode::skills::IsValidRecorderTransition(S::Inactive, A::Stop));
+    CHECK_FALSE(lubancode::skills::IsValidRecorderTransition(S::Inactive, A::Cancel));
 
-    CHECK(lubancode::agent::IsValidRecorderTransition(S::Recording, A::Pause));
-    CHECK(lubancode::agent::IsValidRecorderTransition(S::Recording, A::Stop));
-    CHECK(lubancode::agent::IsValidRecorderTransition(S::Recording, A::Cancel));
-    CHECK_FALSE(lubancode::agent::IsValidRecorderTransition(S::Recording, A::Start));
-    CHECK_FALSE(lubancode::agent::IsValidRecorderTransition(S::Recording, A::Resume));
+    CHECK(lubancode::skills::IsValidRecorderTransition(S::Recording, A::Pause));
+    CHECK(lubancode::skills::IsValidRecorderTransition(S::Recording, A::Stop));
+    CHECK(lubancode::skills::IsValidRecorderTransition(S::Recording, A::Cancel));
+    CHECK_FALSE(lubancode::skills::IsValidRecorderTransition(S::Recording, A::Start));
+    CHECK_FALSE(lubancode::skills::IsValidRecorderTransition(S::Recording, A::Resume));
 
-    CHECK(lubancode::agent::IsValidRecorderTransition(S::Paused, A::Resume));
-    CHECK(lubancode::agent::IsValidRecorderTransition(S::Paused, A::Stop));
-    CHECK(lubancode::agent::IsValidRecorderTransition(S::Paused, A::Cancel));
-    CHECK_FALSE(lubancode::agent::IsValidRecorderTransition(S::Paused, A::Start));
-    CHECK_FALSE(lubancode::agent::IsValidRecorderTransition(S::Paused, A::Pause));
+    CHECK(lubancode::skills::IsValidRecorderTransition(S::Paused, A::Resume));
+    CHECK(lubancode::skills::IsValidRecorderTransition(S::Paused, A::Stop));
+    CHECK(lubancode::skills::IsValidRecorderTransition(S::Paused, A::Cancel));
+    CHECK_FALSE(lubancode::skills::IsValidRecorderTransition(S::Paused, A::Start));
+    CHECK_FALSE(lubancode::skills::IsValidRecorderTransition(S::Paused, A::Pause));
 }
 
 TEST_CASE("录制器:开录→工具事件→暂停静默→续录→停止走通,非法操作被拒") {
@@ -100,9 +100,9 @@ TEST_CASE("录制器:开录→工具事件→暂停静默→续录→停止走�
     CHECK(fs::exists(recorder->dir() / "events.jsonl"));
 
     // 开录三问落在 record_start 里
-    std::vector<RecordEvent> events = lubancode::agent::ReadRecordingEvents(recorder->dir());
+    std::vector<RecordEvent> events = lubancode::skills::ReadRecordingEvents(recorder->dir());
     REQUIRE_FALSE(events.empty());
-    CHECK(events.front().type == lubancode::agent::kEventRecordStart);
+    CHECK(events.front().type == lubancode::skills::kEventRecordStart);
     CHECK(events.front().data.at("goal") == "把本周的版本发出去");
     CHECK(events.front().data.at("acceptance") == "测试全绿,tag 打上");
 
@@ -110,21 +110,21 @@ TEST_CASE("录制器:开录→工具事件→暂停静默→续录→停止走�
     const std::size_t count_after_start = events.size();
     recorder->RecordToolCall("read_file", nlohmann::json{{"path", "src/main.cpp"}});
     recorder->RecordToolResult("read_file", false, "读出 120 行\n后面还有");
-    events = lubancode::agent::ReadRecordingEvents(recorder->dir());
+    events = lubancode::skills::ReadRecordingEvents(recorder->dir());
     REQUIRE(events.size() == count_after_start + 2);
-    CHECK(events[events.size() - 2].type == lubancode::agent::kEventToolCall);
+    CHECK(events[events.size() - 2].type == lubancode::skills::kEventToolCall);
     CHECK(events[events.size() - 2].source == "model");
     CHECK(events[events.size() - 2].data.at("tool") == "read_file");
-    CHECK(events.back().type == lubancode::agent::kEventToolResult);
+    CHECK(events.back().type == lubancode::skills::kEventToolResult);
     CHECK(events.back().data.at("ok") == true);
     CHECK(events.back().data.at("summary") == "读出 120 行");  // 只留首行短摘要
 
     // 暂停:事件照旧在盘,但暂停期间的动作不录
     REQUIRE(recorder->Pause().has_value());
     CHECK(recorder->state() == RecorderState::Paused);
-    const std::size_t count_when_paused = lubancode::agent::ReadRecordingEvents(recorder->dir()).size();
+    const std::size_t count_when_paused = lubancode::skills::ReadRecordingEvents(recorder->dir()).size();
     recorder->RecordToolCall("run_command", nlohmann::json{{"command", "echo hi"}});
-    CHECK(lubancode::agent::ReadRecordingEvents(recorder->dir()).size() == count_when_paused);
+    CHECK(lubancode::skills::ReadRecordingEvents(recorder->dir()).size() == count_when_paused);
     CHECK_FALSE(recorder->Pause().has_value());   // 暂停中不能再暂停
     REQUIRE(recorder->Resume().has_value());
     CHECK_FALSE(recorder->Resume().has_value());  // 录制中不能续录
@@ -132,10 +132,10 @@ TEST_CASE("录制器:开录→工具事件→暂停静默→续录→停止走�
 
     // 备注(脱敏在这里也过一遍)
     REQUIRE(recorder->Note("这一步先跑测试,token=abc 备用").has_value());
-    events = lubancode::agent::ReadRecordingEvents(recorder->dir());
+    events = lubancode::skills::ReadRecordingEvents(recorder->dir());
     bool has_note = false;
     for (const RecordEvent& event : events) {
-        if (event.type == lubancode::agent::kEventUserNote) {
+        if (event.type == lubancode::skills::kEventUserNote) {
             has_note = true;
             CHECK(event.data.at("text").get<std::string>().find("token=abc") == std::string::npos);
         }
@@ -150,11 +150,11 @@ TEST_CASE("录制器:开录→工具事件→暂停静默→续录→停止走�
     CHECK(recorder->state() == RecorderState::Inactive);
     CHECK_FALSE(recorder->Stop("").has_value());         // 停过了不能再停
     CHECK_FALSE(recorder->Note("再补一句").has_value());  // 停了就记不进
-    events = lubancode::agent::ReadRecordingEvents(dir);
-    CHECK(events.back().type == lubancode::agent::kEventRecordStop);
+    events = lubancode::skills::ReadRecordingEvents(dir);
+    CHECK(events.back().type == lubancode::skills::kEventRecordStop);
 
     // 盘点:这一场 finished,还没有草稿
-    const auto listed = lubancode::agent::ListRecordings(temp.Root());
+    const auto listed = lubancode::skills::ListRecordings(temp.Root());
     REQUIRE(listed.size() == 1);
     CHECK(listed[0].finished);
     CHECK_FALSE(listed[0].has_draft);
@@ -169,7 +169,7 @@ TEST_CASE("取消:整目录删除,已装好的技能不归它管") {
     REQUIRE(fs::exists(dir));
     REQUIRE(recorder->Cancel().has_value());
     CHECK_FALSE(fs::exists(dir));
-    CHECK(lubancode::agent::ListRecordings(temp.Root()).empty());
+    CHECK(lubancode::skills::ListRecordings(temp.Root()).empty());
 }
 
 TEST_CASE("events.jsonl:序列化/解析回放,坏行与半截行跳过") {
@@ -177,27 +177,27 @@ TEST_CASE("events.jsonl:序列化/解析回放,坏行与半截行跳过") {
     event.seq = 7;
     event.ts = "2026-08-14 10:00:00";
     event.source = "model";
-    event.type = lubancode::agent::kEventToolCall;
+    event.type = lubancode::skills::kEventToolCall;
     event.data = {{"tool", "read_file"}, {"input", nlohmann::json{{"path", "a.txt"}}}};
-    const std::string line = lubancode::agent::SerializeRecordEvent(event);
-    const auto parsed = lubancode::agent::ParseRecordEvent(line);
+    const std::string line = lubancode::skills::SerializeRecordEvent(event);
+    const auto parsed = lubancode::skills::ParseRecordEvent(line);
     REQUIRE(parsed.has_value());
     CHECK(parsed->seq == 7);
     CHECK(parsed->ts == "2026-08-14 10:00:00");
     CHECK(parsed->source == "model");
-    CHECK(parsed->type == lubancode::agent::kEventToolCall);
+    CHECK(parsed->type == lubancode::skills::kEventToolCall);
     CHECK(parsed->data.at("tool") == "read_file");
 
-    CHECK_FALSE(lubancode::agent::ParseRecordEvent("not json").has_value());
-    CHECK_FALSE(lubancode::agent::ParseRecordEvent("{\"seq\":\"x\"}").has_value());
-    CHECK_FALSE(lubancode::agent::ParseRecordEvent("{}").has_value());
+    CHECK_FALSE(lubancode::skills::ParseRecordEvent("not json").has_value());
+    CHECK_FALSE(lubancode::skills::ParseRecordEvent("{\"seq\":\"x\"}").has_value());
+    CHECK_FALSE(lubancode::skills::ParseRecordEvent("{}").has_value());
 
     // 崩溃截断的半截行:读回放时跳过,不废整场
     TempRecordings temp;
     const fs::path dir = temp.Root() / "20260814-000000-crash";
     fs::create_directories(dir);
     WriteFileBytes(dir / "events.jsonl", line + "\n{\"seq\":8,\"ts\":\"2026-08");  // 第二行写到一半崩了
-    const std::vector<RecordEvent> events = lubancode::agent::ReadRecordingEvents(dir);
+    const std::vector<RecordEvent> events = lubancode::skills::ReadRecordingEvents(dir);
     CHECK(events.size() == 1);
 }
 
@@ -212,12 +212,12 @@ TEST_CASE("崩溃恢复:半截录制件可列出、可丢弃,装不进 skills") 
                                   {"started_at", "2026-08-14 12:00:00"}}
                        .dump());
     WriteFileBytes(dir / "events.jsonl",
-                   lubancode::agent::SerializeRecordEvent(RecordEvent{1, "2026-08-14 12:00:01", "user",
-                                                                       lubancode::agent::kEventRecordStart,
+                   lubancode::skills::SerializeRecordEvent(RecordEvent{1, "2026-08-14 12:00:01", "user",
+                                                                       lubancode::skills::kEventRecordStart,
                                                                        nlohmann::json::object()}) +
                        "\n");
 
-    const auto listed = lubancode::agent::ListRecordings(temp.Root());
+    const auto listed = lubancode::skills::ListRecordings(temp.Root());
     REQUIRE(listed.size() == 1);
     CHECK(listed[0].id == "20260814-120000-crashleft");
     CHECK_FALSE(listed[0].finished);  // 没有 record_stop:崩溃/没停
@@ -227,40 +227,40 @@ TEST_CASE("崩溃恢复:半截录制件可列出、可丢弃,装不进 skills") 
     const fs::path skills_root = temp.Root() / "skills";
     const auto installed = lubancode::config::InstallDraftSkill(
         skills_root, dir, [](const std::string& content) {
-            return lubancode::agent::ValidateSkillMarkdownForInstall(content);
+            return lubancode::skills::ValidateSkillMarkdownForInstall(content);
         });
     CHECK_FALSE(installed.has_value());
     CHECK_FALSE(fs::exists(skills_root / "crashleft"));
 
     // 丢弃:整目录删掉;路径花招拒绝
-    REQUIRE(lubancode::agent::DiscardRecording(temp.Root(), "20260814-120000-crashleft").has_value());
+    REQUIRE(lubancode::skills::DiscardRecording(temp.Root(), "20260814-120000-crashleft").has_value());
     CHECK_FALSE(fs::exists(dir));
-    CHECK_FALSE(lubancode::agent::DiscardRecording(temp.Root(), "../evil").has_value());
-    CHECK_FALSE(lubancode::agent::DiscardRecording(temp.Root(), "a/b").has_value());
-    CHECK_FALSE(lubancode::agent::DiscardRecording(temp.Root(), "no-such-id").has_value());
+    CHECK_FALSE(lubancode::skills::DiscardRecording(temp.Root(), "../evil").has_value());
+    CHECK_FALSE(lubancode::skills::DiscardRecording(temp.Root(), "a/b").has_value());
+    CHECK_FALSE(lubancode::skills::DiscardRecording(temp.Root(), "no-such-id").has_value());
 }
 
 TEST_CASE("脱敏:假 token 在录制件全文里 grep 不到") {
     const std::string token = "test-token-123";
 
     SUBCASE("值形态打码") {
-        const std::string a = lubancode::agent::RedactSecrets("Authorization: Bearer " + token);
+        const std::string a = lubancode::skills::RedactSecrets("Authorization: Bearer " + token);
         CHECK(a.find(token) == std::string::npos);
-        const std::string b = lubancode::agent::RedactSecrets("curl -H \"authorization: " + token + "\" url");
+        const std::string b = lubancode::skills::RedactSecrets("curl -H \"authorization: " + token + "\" url");
         CHECK(b.find(token) == std::string::npos);
-        const std::string c = lubancode::agent::RedactSecrets("token=" + token + " env");
+        const std::string c = lubancode::skills::RedactSecrets("token=" + token + " env");
         CHECK(c.find(token) == std::string::npos);
-        const std::string d = lubancode::agent::RedactSecrets("password=" + token);
+        const std::string d = lubancode::skills::RedactSecrets("password=" + token);
         CHECK(d.find(token) == std::string::npos);
-        const std::string e = lubancode::agent::RedactSecrets("key sk-abc123def456ghi789xyz");
+        const std::string e = lubancode::skills::RedactSecrets("key sk-abc123def456ghi789xyz");
         CHECK(e.find("sk-abc123def456ghi789xyz") == std::string::npos);
         // 无关文本原样保留
-        CHECK(lubancode::agent::RedactSecrets("read README.md and run tests") ==
+        CHECK(lubancode::skills::RedactSecrets("read README.md and run tests") ==
               "read README.md and run tests");
     }
 
     SUBCASE("入参字段抹掉 + 嵌套 + 值内打码") {
-        const nlohmann::json sanitized = lubancode::agent::SanitizeToolInput(nlohmann::json{
+        const nlohmann::json sanitized = lubancode::skills::SanitizeToolInput(nlohmann::json{
             {"command", "curl -H \"Authorization: Bearer " + token + "\" https://example.test"},
             {"api_key", token},
             {"nested", nlohmann::json{{"auth_token", token}, {"path", "src/main.cpp"}}},
@@ -289,7 +289,7 @@ TEST_CASE("脱敏:假 token 在录制件全文里 grep 不到") {
 }
 
 TEST_CASE("录制件命名:中文名落成安全 slug,危险字符清洗") {
-    using lubancode::agent::MakeRecordingSlug;
+    using lubancode::skills::MakeRecordingSlug;
     CHECK(MakeRecordingSlug("release demo") == "release-demo");
     CHECK(MakeRecordingSlug("发版演示") == "发版演示");  // 中文按码点保留
     CHECK(MakeRecordingSlug("a/b\\c:d*e?f") == "a-b-c-d-e-f");

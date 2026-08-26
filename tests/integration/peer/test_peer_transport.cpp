@@ -16,7 +16,7 @@
 #include "platform/peer_transport.hpp"
 
 using namespace lubancode;
-using namespace lubancode::agent;
+using namespace lubancode::peers;
 
 namespace {
 

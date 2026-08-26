@@ -16,7 +16,7 @@
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:旧会话档读入时的编码关口
 #include "platform/wall_clock.hpp"  // 统一墙钟(批五):ts 的钟同源五套台账
 
-namespace lubancode::agent {
+namespace lubancode::sessions {
 
 namespace {
 
@@ -830,7 +830,7 @@ int RepairToolPairs(std::vector<api::Message>& history) {
 // ---------------------------------------------------------------------------
 
 TraceRepairReport RepairToolPairsWithTrace(std::vector<api::Message>& history,
-                                            const ToolExecutionLedger& ledger) {
+                                            const agent::ToolExecutionLedger& ledger) {
     TraceRepairReport report;
     // 先按 trace 账修:扫全部 tool_use,查 ledger 里这枚 tool_use_id 的账。
     // Provider 给重复/空 tool_use id 时按 execution 序全列,不串账(单子:
@@ -851,26 +851,26 @@ TraceRepairReport RepairToolPairsWithTrace(std::vector<api::Message>& history,
                 continue;  // 没挂 trace 的(老档/内层),留给 legacy 补洞
             }
             answered_by_trace.insert(use->id);
-            const ToolExecutionRecord& record = *records.front();
+            const agent::ToolExecutionRecord& record = *records.front();
             api::ToolResultBlock patch;
             patch.tool_use_id = use->id;
-            patch.content = BuildRecoveredResultText(record);
-            patch.is_error = record.Classify() != RecoveryClass::Finished ||
-                             record.outcome != ToolOutcome::Succeeded;
+            patch.content = agent::BuildRecoveredResultText(record);
+            patch.is_error = record.Classify() != agent::RecoveryClass::Finished ||
+                             record.outcome != agent::ToolOutcome::Succeeded;
             switch (record.Classify()) {
-                case RecoveryClass::Finished:
-                    if (record.outcome == ToolOutcome::Succeeded &&
-                        record.result_ref.kind == ToolResultRef::Kind::Inline) {
+                case agent::RecoveryClass::Finished:
+                    if (record.outcome == agent::ToolOutcome::Succeeded &&
+                        record.result_ref.kind == agent::ToolResultRef::Kind::Inline) {
                         ++report.result_recovered;
                     }
                     break;
-                case RecoveryClass::ResultRecoverable:
+                case agent::RecoveryClass::ResultRecoverable:
                     ++report.result_recovered;
                     break;
-                case RecoveryClass::UnknownAfterStart:
+                case agent::RecoveryClass::UnknownAfterStart:
                     ++report.unknown_after_start;
                     break;
-                case RecoveryClass::NotStarted:
+                case agent::RecoveryClass::NotStarted:
                     ++report.not_started;
                     break;
             }
@@ -1010,7 +1010,7 @@ std::optional<LoadedSession> ParseSessionFile(const std::string& content) {
             if (type == "tool_trace_v1") {
                 // 逐枚追踪:栅栏事件按文件序整收(账本折叠在 /resume 侧做,
                 // 这里只管收行);坏行跳过不废整场(事件行通用约定)。
-                auto traced = ParseToolTraceEvent(line);
+                auto traced = agent::ParseToolTraceEvent(line);
                 if (traced.has_value()) {
                     session.tool_trace_events.push_back(std::move(*traced));
                 } else {
@@ -1076,7 +1076,7 @@ std::optional<LoadedSession> ParseSessionFile(const std::string& content) {
     // unknown 标 unknown,未执行标未执行),legacy 补洞兜底;老档没 trace
     // 行,走的还是纯老逻辑,一个不坏。
     if (!session.tool_trace_events.empty()) {
-        ToolExecutionLedger ledger;
+        agent::ToolExecutionLedger ledger;
         for (const auto& event : session.tool_trace_events) {
             ledger.Fold(event);
         }
@@ -1285,11 +1285,11 @@ bool SessionStore::AppendQueueEvent(const std::vector<ArchivedQueueItem>& items)
     return out_.good();
 }
 
-bool SessionStore::AppendToolTraceEvent(const ToolTraceEvent& event) {
+bool SessionStore::AppendToolTraceEvent(const agent::ToolTraceEvent& event) {
     if (!out_.is_open()) {
         return false;
     }
-    out_ << SerializeToolTraceEvent(event, NowTimestamp()) << "\n";
+    out_ << agent::SerializeToolTraceEvent(event, NowTimestamp()) << "\n";
     out_.flush();
     return out_.good();
 }
@@ -1565,4 +1565,4 @@ std::vector<PromptHistoryRecord> ExtractPromptHistory(const std::string& jsonl_c
     return out;
 }
 
-}  // namespace lubancode::agent
+}  // namespace lubancode::sessions

@@ -10,8 +10,8 @@
 namespace lubancode::tools {
 
 SendSessionMessageTool::SendSessionMessageTool(
-    std::function<std::vector<agent::PeerCard>()> peers_provider,
-    std::function<agent::PeerDelivery(const agent::PeerCard&, const std::string&)> send)
+    std::function<std::vector<peers::PeerCard>()> peers_provider,
+    std::function<peers::PeerDelivery(const peers::PeerCard&, const std::string&)> send)
     : peers_provider_(std::move(peers_provider)), send_(std::move(send)) {}
 
 std::string SendSessionMessageTool::description() const {
@@ -49,11 +49,11 @@ Tool::Result SendSessionMessageTool::execute(const nlohmann::json& input) {
         return Tool::Result{"target 与 text 都不能为空。", true};
     }
 
-    std::vector<agent::PeerCard> peers;
+    std::vector<peers::PeerCard> peers;
     if (peers_provider_) {
         peers = peers_provider_();
     }
-    std::optional<agent::PeerCard> found;
+    std::optional<peers::PeerCard> found;
     for (const auto& card : peers) {
         if (card.peer_id == target || card.name == target) {
             found = card;
@@ -69,17 +69,17 @@ Tool::Result SendSessionMessageTool::execute(const nlohmann::json& input) {
         return Tool::Result{"跨会话传话在本场会话没有启用。", true};
     }
 
-    const agent::PeerDelivery status = send_(*found, text);
+    const peers::PeerDelivery status = send_(*found, text);
     switch (status) {
-        case agent::PeerDelivery::Delivered:
+        case peers::PeerDelivery::Delivered:
             return Tool::Result{"已送达 " + found->name + "(" + found->peer_id + ")。", false};
-        case agent::PeerDelivery::Held:
+        case peers::PeerDelivery::Held:
             return Tool::Result{"对方已收到但先扣住了,等它的用户点头。", false};
-        case agent::PeerDelivery::Refused:
+        case peers::PeerDelivery::Refused:
             return Tool::Result{"对方回绝了这条消息(权限档为 refuse)。", true};
-        case agent::PeerDelivery::Expired:
+        case peers::PeerDelivery::Expired:
             return Tool::Result{"对方限速或队列已满,这条没有收下;稍等再试,别连续重发。", true};
-        case agent::PeerDelivery::Unavailable:
+        case peers::PeerDelivery::Unavailable:
             return Tool::Result{"对方会话不在(已退出或不可达),这条没有送达。", true};
     }
     return Tool::Result{"未知发送结果。", true};

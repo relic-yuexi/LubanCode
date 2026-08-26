@@ -15,7 +15,7 @@
 #include <system_error>
 #include <utility>
 
-namespace lubancode::agent {
+namespace lubancode::sessions {
 
 namespace {
 
@@ -390,4 +390,4 @@ std::vector<SessionRefCandidate> SessionLifecycle::ListArchived() {
     return out;
 }
 
-}  // namespace lubancode::agent
+}  // namespace lubancode::sessions

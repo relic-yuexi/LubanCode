@@ -68,7 +68,7 @@ bool InstallDraftWithConfirm(const fs::path& draft_dir, const fs::path& skills_r
     }
     const auto installed = config::InstallDraftSkill(
         skills_root, draft_dir, [](const std::string& content) {
-            return agent::ValidateSkillMarkdownForInstall(content);
+            return skills::ValidateSkillMarkdownForInstall(content);
         });
     if (!installed.has_value()) {
         std::cout << theme.error << trf("record.install.failed", installed.error()) << theme.reset << "\n";
@@ -87,8 +87,8 @@ bool InstallDraftWithConfirm(const fs::path& draft_dir, const fs::path& skills_r
 
 // /record stop 之后的那一串:落草稿、打预览、问装不装。
 void FinishRecording(RecordCommandContext& ctx, const Theme& theme, const fs::path& recording_dir) {
-    const std::vector<agent::RecordEvent> events = agent::ReadRecordingEvents(recording_dir);
-    const auto draft = agent::WriteSkillDraft(recording_dir, events);
+    const std::vector<skills::RecordEvent> events = skills::ReadRecordingEvents(recording_dir);
+    const auto draft = skills::WriteSkillDraft(recording_dir, events);
     if (!draft.has_value()) {
         std::cout << theme.error << trf("record.stop.draft_failed", draft.error()) << theme.reset << "\n";
         return;
@@ -121,11 +121,11 @@ void FinishRecording(RecordCommandContext& ctx, const Theme& theme, const fs::pa
 
 }  // namespace
 
-std::string RecorderStatusMarker(const std::optional<agent::WorkflowRecorder>& recorder) {
+std::string RecorderStatusMarker(const std::optional<skills::WorkflowRecorder>& recorder) {
     if (!recorder.has_value()) {
         return std::string();
     }
-    if (recorder->state() == agent::RecorderState::Paused) {
+    if (recorder->state() == skills::RecorderState::Paused) {
         return tr("record.status.paused_marker");
     }
     return "REC · " + recorder->name();
@@ -141,7 +141,7 @@ void HandleRecordCommand(const std::string& args, RecordCommandContext& ctx, con
         case RecordCommandAction::Status:
             if (ctx.recorder.has_value()) {
                 std::cout << trf("record.status.recording",
-                                 ctx.recorder->state() == agent::RecorderState::Paused
+                                 ctx.recorder->state() == skills::RecorderState::Paused
                                      ? tr("record.status.paused_word")
                                      : tr("record.status.recording_word"),
                                  ctx.recorder->name(), PathToUtf8(ctx.recorder->dir()))
@@ -162,7 +162,7 @@ void HandleRecordCommand(const std::string& args, RecordCommandContext& ctx, con
             }
             // 开录先问三句:目标、可变输入、成事标准。管道里喂不齐就空着,
             // 草稿里如实落"(未口述)"。
-            agent::RecordingStartInfo info;
+            skills::RecordingStartInfo info;
             info.name = command.name;
             if (const auto goal = Ask(tr("record.ask.goal"), theme); goal.has_value()) {
                 info.goal = *goal;
@@ -175,7 +175,7 @@ void HandleRecordCommand(const std::string& args, RecordCommandContext& ctx, con
             if (const auto acceptance = Ask(tr("record.ask.acceptance"), theme); acceptance.has_value()) {
                 info.acceptance = *acceptance;
             }
-            auto started = agent::WorkflowRecorder::Start(ctx.recordings_root, info);
+            auto started = skills::WorkflowRecorder::Start(ctx.recordings_root, info);
             if (!started.has_value()) {
                 std::cout << theme.error << trf("record.start.failed", started.error()) << theme.reset << "\n";
                 return;
@@ -257,7 +257,7 @@ void HandleRecordCommand(const std::string& args, RecordCommandContext& ctx, con
                 std::cout << theme.error << tr("record.unavailable") << theme.reset << "\n";
                 return;
             }
-            const auto recordings = agent::ListRecordings(ctx.recordings_root);
+            const auto recordings = skills::ListRecordings(ctx.recordings_root);
             if (recordings.empty()) {
                 std::cout << tr("record.list.empty") << "\n";
                 return;
@@ -276,7 +276,7 @@ void HandleRecordCommand(const std::string& args, RecordCommandContext& ctx, con
                 std::cout << theme.error << tr("record.unavailable") << theme.reset << "\n";
                 return;
             }
-            const auto discarded = agent::DiscardRecording(ctx.recordings_root, command.name);
+            const auto discarded = skills::DiscardRecording(ctx.recordings_root, command.name);
             if (!discarded.has_value()) {
                 std::cout << theme.error << trf("record.op_failed", discarded.error()) << theme.reset << "\n";
                 return;
@@ -289,9 +289,9 @@ void HandleRecordCommand(const std::string& args, RecordCommandContext& ctx, con
                 std::cout << theme.error << tr("record.unavailable") << theme.reset << "\n";
                 return;
             }
-            const auto recordings = agent::ListRecordings(ctx.recordings_root);
+            const auto recordings = skills::ListRecordings(ctx.recordings_root);
             const auto found = std::find_if(recordings.begin(), recordings.end(),
-                                            [&](const agent::RecordingStatus& status) {
+                                            [&](const skills::RecordingStatus& status) {
                                                 return status.id == command.name;
                                             });
             if (found == recordings.end()) {

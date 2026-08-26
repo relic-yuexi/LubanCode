@@ -33,7 +33,7 @@
 #include "peers/peer_registry.hpp"
 #include "platform/peer_transport.hpp"
 
-namespace lubancode::agent {
+namespace lubancode::peers {
 
 // 取走的一条来信:envelope + 它进来时是不是被扣住(hold)了。
 struct PeerIncoming {
@@ -98,4 +98,4 @@ private:
 // 平台默认 endpoint:Windows 是具名管道名,POSIX 是临时目录下的 socket 路径。
 std::string DefaultPeerEndpoint(const std::string& peer_id);
 
-}  // namespace lubancode::agent
+}  // namespace lubancode::peers

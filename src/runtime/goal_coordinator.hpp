@@ -225,7 +225,7 @@ public:
         int skipped = 0;
         bool suspended_by_policy = false;
     };
-    ReplayStats RestoreFromArchive(const std::vector<lubancode::agent::GoalSessionEvent>& events);
+    ReplayStats RestoreFromArchive(const std::vector<lubancode::sessions::GoalSessionEvent>& events);
 
     // 迟到事件(terminal 后到的旧 evaluator/子代理/Hook):只留账,不改
     // 状态。返回 true = 已吸收(留审计),false = 拒。

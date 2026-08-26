@@ -19,7 +19,7 @@
 
 #include "platform/process.hpp"
 
-namespace lubancode::agent {
+namespace lubancode::peers {
 
 namespace {
 
@@ -313,4 +313,4 @@ void PeerRuntime::RewriteCard() {
     static_cast<void>(registry_.WriteOwn(snapshot));
 }
 
-}  // namespace lubancode::agent
+}  // namespace lubancode::peers

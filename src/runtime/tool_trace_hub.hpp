@@ -49,8 +49,8 @@ public:
         bool power_loss_durable = false;  // started/finished 额外 fsync;增延迟,不默认
     };
 
-    ToolTraceHub(IdAuthority& ids, agent::SessionStore* store);
-    ToolTraceHub(IdAuthority& ids, agent::SessionStore* store, const Options& options);
+    ToolTraceHub(IdAuthority& ids, sessions::SessionStore* store);
+    ToolTraceHub(IdAuthority& ids, sessions::SessionStore* store, const Options& options);
     ~ToolTraceHub();
 
     ToolTraceHub(const ToolTraceHub&) = delete;
@@ -130,7 +130,7 @@ private:
     bool ShouldBlockOnFailedStart(agent::EffectClass cls) const;
 
     IdAuthority& ids_;
-    agent::SessionStore* store_;  // 不持有;空 = 只投影不落盘
+    sessions::SessionStore* store_;  // 不持有;空 = 只投影不落盘
     Options options_;
     EventSink* sink_ = nullptr;
     Projection projection_;

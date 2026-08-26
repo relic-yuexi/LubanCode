@@ -57,10 +57,10 @@ std::string PathUtf8(const std::filesystem::path& p) {
 
 TEST_CASE("消息序列化往返: 纯文本(中文)") {
     const api::Message original = UserText("我的暗号是青龙,记住了。");
-    const std::string line = agent::SerializeSessionMessage(original, "2026-07-17 10:00:00");
+    const std::string line = sessions::SerializeSessionMessage(original, "2026-07-17 10:00:00");
     CHECK(line.find('\n') == std::string::npos);  // 一行一条,不许夹换行
 
-    const auto parsed = agent::DeserializeSessionMessage(line);
+    const auto parsed = sessions::DeserializeSessionMessage(line);
     REQUIRE(parsed.has_value());
     CHECK(parsed->role == api::Role::User);
     REQUIRE(parsed->content.size() == 1);
@@ -74,7 +74,7 @@ TEST_CASE("消息序列化往返: user 带图片") {
     original.role = api::Role::User;
     original.content.push_back(api::ImageBlock{"image/webp", "cGl4ZWxz", "截图.webp", 800, 600});
 
-    const auto parsed = agent::DeserializeSessionMessage(agent::SerializeSessionMessage(original, "ts"));
+    const auto parsed = sessions::DeserializeSessionMessage(sessions::SerializeSessionMessage(original, "ts"));
     REQUIRE(parsed.has_value());
     REQUIRE(parsed->content.size() == 1);
     const auto* image = std::get_if<api::ImageBlock>(&parsed->content[0]);
@@ -95,7 +95,7 @@ TEST_CASE("消息序列化往返: assistant 带 tool_use") {
     use.input = nlohmann::json{{"path", "C:/测试/a.txt"}};
     original.content.push_back(use);
 
-    const auto parsed = agent::DeserializeSessionMessage(agent::SerializeSessionMessage(original, "ts"));
+    const auto parsed = sessions::DeserializeSessionMessage(sessions::SerializeSessionMessage(original, "ts"));
     REQUIRE(parsed.has_value());
     CHECK(parsed->role == api::Role::Assistant);
     REQUIRE(parsed->content.size() == 2);
@@ -115,7 +115,7 @@ TEST_CASE("消息序列化往返: user 带 tool_result(含 is_error)") {
     result.is_error = true;
     original.content.push_back(result);
 
-    const auto parsed = agent::DeserializeSessionMessage(agent::SerializeSessionMessage(original, "ts"));
+    const auto parsed = sessions::DeserializeSessionMessage(sessions::SerializeSessionMessage(original, "ts"));
     REQUIRE(parsed.has_value());
     REQUIRE(parsed->content.size() == 1);
     const auto* got = std::get_if<api::ToolResultBlock>(&parsed->content[0]);
@@ -134,7 +134,7 @@ TEST_CASE("消息序列化往返: assistant 带 thinking(signature 也要往返)
     original.content.push_back(thinking);
     original.content.push_back(api::TextBlock{"答案是 42"});
 
-    const auto parsed = agent::DeserializeSessionMessage(agent::SerializeSessionMessage(original, "ts"));
+    const auto parsed = sessions::DeserializeSessionMessage(sessions::SerializeSessionMessage(original, "ts"));
     REQUIRE(parsed.has_value());
     REQUIRE(parsed->content.size() == 2);
     const auto* got_thinking = std::get_if<api::ThinkingBlock>(&parsed->content[0]);
@@ -147,10 +147,10 @@ TEST_CASE("消息序列化往返: assistant 带 thinking(signature 也要往返)
 }
 
 TEST_CASE("反序列化: 坏行给 nullopt,不抛异常") {
-    CHECK_FALSE(agent::DeserializeSessionMessage("").has_value());
-    CHECK_FALSE(agent::DeserializeSessionMessage("不是 JSON").has_value());
-    CHECK_FALSE(agent::DeserializeSessionMessage("{\"role\":\"盗号的\",\"content\":[]}").has_value());
-    CHECK_FALSE(agent::DeserializeSessionMessage("{\"role\":\"user\"}").has_value());  // 缺 content
+    CHECK_FALSE(sessions::DeserializeSessionMessage("").has_value());
+    CHECK_FALSE(sessions::DeserializeSessionMessage("不是 JSON").has_value());
+    CHECK_FALSE(sessions::DeserializeSessionMessage("{\"role\":\"盗号的\",\"content\":[]}").has_value());
+    CHECK_FALSE(sessions::DeserializeSessionMessage("{\"role\":\"user\"}").has_value());  // 缺 content
 }
 
 // ---------------------------------------------------------------------------
@@ -158,14 +158,14 @@ TEST_CASE("反序列化: 坏行给 nullopt,不抛异常") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("meta 序列化往返") {
-    agent::SessionMeta meta;
+    sessions::SessionMeta meta;
     meta.version = 1;
     meta.wire = "anthropic";
     meta.model = "MiniMax-M2";
     meta.cwd = "D:\\工程\\lubancode";
     meta.started_at = "2026-07-17 09:30:00";
 
-    const auto parsed = agent::ParseSessionMeta(agent::SerializeSessionMeta(meta));
+    const auto parsed = sessions::ParseSessionMeta(sessions::SerializeSessionMeta(meta));
     REQUIRE(parsed.has_value());
     CHECK(parsed->version == 1);
     CHECK(parsed->wire == "anthropic");
@@ -175,11 +175,11 @@ TEST_CASE("meta 序列化往返") {
 }
 
 TEST_CASE("meta 解析: 坏行/缺 version 给 nullopt") {
-    CHECK_FALSE(agent::ParseSessionMeta("").has_value());
-    CHECK_FALSE(agent::ParseSessionMeta("垃圾").has_value());
-    CHECK_FALSE(agent::ParseSessionMeta("{\"wire\":\"anthropic\"}").has_value());
+    CHECK_FALSE(sessions::ParseSessionMeta("").has_value());
+    CHECK_FALSE(sessions::ParseSessionMeta("垃圾").has_value());
+    CHECK_FALSE(sessions::ParseSessionMeta("{\"wire\":\"anthropic\"}").has_value());
     // 消息行不是 meta(没有 version 字段)
-    CHECK_FALSE(agent::ParseSessionMeta("{\"role\":\"user\",\"content\":[],\"ts\":\"x\"}").has_value());
+    CHECK_FALSE(sessions::ParseSessionMeta("{\"role\":\"user\",\"content\":[],\"ts\":\"x\"}").has_value());
 }
 
 // ---------------------------------------------------------------------------
@@ -188,30 +188,30 @@ TEST_CASE("meta 解析: 坏行/缺 version 给 nullopt") {
 
 TEST_CASE("slug: 中文按码点截前 20 字,不从多字节字符中间掐断") {
     const std::string text = "这是一条很长很长的中文消息用来测试截断是否安全无虞";  // >20 字
-    const std::string slug = agent::MakeSessionSlug(text);
+    const std::string slug = sessions::MakeSessionSlug(text);
     CHECK(slug == "这是一条很长很长的中文消息用来测试截断是");  // 恰 20 个字
     // 截出来的必须是合法 UTF-8:字节数是 3 的倍数(全汉字)
     CHECK(slug.size() == 20 * 3);
 }
 
 TEST_CASE("slug: 空白和文件名危险字符换成 -,连续并一个,首尾剥掉") {
-    CHECK(agent::MakeSessionSlug("fix: a/b\\c?") == "fix-a-b-c");
-    CHECK(agent::MakeSessionSlug("  hello   world  ") == "hello-world");
-    CHECK(agent::MakeSessionSlug("<>:\"|?*") == "untitled");
-    CHECK(agent::MakeSessionSlug("") == "untitled");
+    CHECK(sessions::MakeSessionSlug("fix: a/b\\c?") == "fix-a-b-c");
+    CHECK(sessions::MakeSessionSlug("  hello   world  ") == "hello-world");
+    CHECK(sessions::MakeSessionSlug("<>:\"|?*") == "untitled");
+    CHECK(sessions::MakeSessionSlug("") == "untitled");
 }
 
 TEST_CASE("slug: 中英混排,ASCII 字母数字原样留") {
-    CHECK(agent::MakeSessionSlug("修 bug 123") == "修-bug-123");
+    CHECK(sessions::MakeSessionSlug("修 bug 123") == "修-bug-123");
 }
 
 TEST_CASE("会话 id: 时间戳 + slug") {
-    CHECK(agent::MakeSessionId("20260717-093000", "我的暗号是青龙") == "20260717-093000-我的暗号是青龙");
+    CHECK(sessions::MakeSessionId("20260717-093000", "我的暗号是青龙") == "20260717-093000-我的暗号是青龙");
 }
 
 TEST_CASE("TruncateUtf8Chars: 不截/截了补省略号") {
-    CHECK(agent::TruncateUtf8Chars("短句", 40) == "短句");
-    const std::string cut = agent::TruncateUtf8Chars("一二三四五", 3);
+    CHECK(sessions::TruncateUtf8Chars("短句", 40) == "短句");
+    const std::string cut = sessions::TruncateUtf8Chars("一二三四五", 3);
     CHECK(cut == "一二三…");
 }
 
@@ -231,7 +231,7 @@ TEST_CASE("修补: 孤儿 tool_use 补一条 is_error 的 tool_result") {
     assistant.content.push_back(use);
     history.push_back(assistant);  // 到此存档中断:没有 tool_result
 
-    const int repaired = agent::RepairToolPairs(history);
+    const int repaired = sessions::RepairToolPairs(history);
     CHECK(repaired == 1);
     REQUIRE(history.size() == 3);
     CHECK(history[2].role == api::Role::User);
@@ -255,7 +255,7 @@ TEST_CASE("修补: 下一条 user 消息已有部分结果,只补缺的那几个
     user.content.push_back(api::ToolResultBlock{"id_a", "读到了", false});
     history.push_back(user);
 
-    const int repaired = agent::RepairToolPairs(history);
+    const int repaired = sessions::RepairToolPairs(history);
     CHECK(repaired == 1);
     REQUIRE(history.size() == 2);
     REQUIRE(history[1].content.size() == 2);
@@ -277,7 +277,7 @@ TEST_CASE("修补: 成对齐全的历史一动不动") {
     history.push_back(user);
     history.push_back(AssistantText("看完了。"));
 
-    CHECK(agent::RepairToolPairs(history) == 0);
+    CHECK(sessions::RepairToolPairs(history) == 0);
     CHECK(history.size() == 3);
 }
 
@@ -289,7 +289,7 @@ TEST_CASE("修补: 孤儿 tool_result(对不上任何 tool_use)删掉") {
     user.content.push_back(api::TextBlock{"顺带一句话"});
     history.push_back(user);
 
-    agent::RepairToolPairs(history);
+    sessions::RepairToolPairs(history);
     REQUIRE(history.size() == 1);
     REQUIRE(history[0].content.size() == 1);
     CHECK(std::holds_alternative<api::TextBlock>(history[0].content[0]));
@@ -300,7 +300,7 @@ TEST_CASE("修补: 孤儿 tool_result(对不上任何 tool_use)删掉") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("ParseSessionFile: meta + 消息 + 坏行跳过 + 孤儿修补") {
-    agent::SessionMeta meta;
+    sessions::SessionMeta meta;
     meta.wire = "anthropic";
     meta.model = "m1";
     meta.cwd = "/tmp";
@@ -310,12 +310,12 @@ TEST_CASE("ParseSessionFile: meta + 消息 + 坏行跳过 + 孤儿修补") {
     assistant.role = api::Role::Assistant;
     assistant.content.push_back(api::ToolUseBlock{"id_x", "run_command", nlohmann::json{{"command", "dir"}}});
 
-    std::string content = agent::SerializeSessionMeta(meta) + "\n";
-    content += agent::SerializeSessionMessage(UserText("你好"), "t1") + "\n";
+    std::string content = sessions::SerializeSessionMeta(meta) + "\n";
+    content += sessions::SerializeSessionMessage(UserText("你好"), "t1") + "\n";
     content += "这一行是坏的\n";
-    content += agent::SerializeSessionMessage(assistant, "t2") + "\n";  // 孤儿 tool_use
+    content += sessions::SerializeSessionMessage(assistant, "t2") + "\n";  // 孤儿 tool_use
 
-    const auto session = agent::ParseSessionFile(content);
+    const auto session = sessions::ParseSessionFile(content);
     REQUIRE(session.has_value());
     CHECK(session->meta.model == "m1");
     CHECK(session->skipped_lines == 1);
@@ -330,16 +330,16 @@ TEST_CASE("ParseSessionFile: meta + 消息 + 坏行跳过 + 孤儿修补") {
 }
 
 TEST_CASE("ParseSessionFile: 首行不是 meta 给 nullopt") {
-    CHECK_FALSE(agent::ParseSessionFile("").has_value());
-    CHECK_FALSE(agent::ParseSessionFile("{\"role\":\"user\",\"content\":[]}\n").has_value());
+    CHECK_FALSE(sessions::ParseSessionFile("").has_value());
+    CHECK_FALSE(sessions::ParseSessionFile("{\"role\":\"user\",\"content\":[]}\n").has_value());
 }
 
 TEST_CASE("ParseSessionFile: 兼容 CRLF 行尾") {
-    agent::SessionMeta meta;
+    sessions::SessionMeta meta;
     meta.started_at = "x";
-    std::string content = agent::SerializeSessionMeta(meta) + "\r\n";
-    content += agent::SerializeSessionMessage(UserText("青龙"), "t") + "\r\n";
-    const auto session = agent::ParseSessionFile(content);
+    std::string content = sessions::SerializeSessionMeta(meta) + "\r\n";
+    content += sessions::SerializeSessionMessage(UserText("青龙"), "t") + "\r\n";
+    const auto session = sessions::ParseSessionFile(content);
     REQUIRE(session.has_value());
     REQUIRE(session->messages.size() == 1);
 }
@@ -349,7 +349,7 @@ TEST_CASE("ParseSessionFile: 兼容 CRLF 行尾") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("导出 MD: 用户/助手分节,工具调用折叠成 details,结果截前 N 行") {
-    agent::SessionMeta meta;
+    sessions::SessionMeta meta;
     meta.wire = "anthropic";
     meta.model = "m1";
     meta.cwd = "/tmp";
@@ -372,7 +372,7 @@ TEST_CASE("导出 MD: 用户/助手分节,工具调用折叠成 details,结果�
     messages.push_back(tool_user);
     messages.push_back(AssistantText("看完了,一共 40 行。"));
 
-    const std::string md = agent::ExportSessionMarkdown(meta, messages, "20260717-080000-帮我看文件");
+    const std::string md = sessions::ExportSessionMarkdown(meta, messages, "20260717-080000-帮我看文件");
 
     CHECK(md.find("# 会话 20260717-080000-帮我看文件") != std::string::npos);
     CHECK(md.find("## 用户") != std::string::npos);
@@ -431,16 +431,16 @@ TEST_CASE("ParseSlashCommand: /export 带路径") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("compact 事件序列化往返") {
-    agent::CompactEvent event;
+    sessions::CompactEvent event;
     event.archive = UserText("[对话存档,此前内容已压缩] 暗号玄武,任务是修 bug。");
     event.kept_from = 3;
 
-    const std::string line = agent::SerializeCompactEvent(event, "2026-07-18 10:00:00");
+    const std::string line = sessions::SerializeCompactEvent(event, "2026-07-18 10:00:00");
     CHECK(line.find('\n') == std::string::npos);
     // 事件行不是消息行:旧版本的消息反序列化认不得它,当坏行跳过。
-    CHECK_FALSE(agent::DeserializeSessionMessage(line).has_value());
+    CHECK_FALSE(sessions::DeserializeSessionMessage(line).has_value());
 
-    const auto parsed = agent::ParseCompactEvent(line);
+    const auto parsed = sessions::ParseCompactEvent(line);
     REQUIRE(parsed.has_value());
     CHECK(parsed->kept_from == 3);
     CHECK(parsed->archive.role == api::Role::User);
@@ -448,17 +448,17 @@ TEST_CASE("compact 事件序列化往返") {
 }
 
 TEST_CASE("compact 事件解析: 坏行给 nullopt") {
-    CHECK_FALSE(agent::ParseCompactEvent("").has_value());
-    CHECK_FALSE(agent::ParseCompactEvent("不是 JSON").has_value());
-    CHECK_FALSE(agent::ParseCompactEvent("{\"type\":\"compact\"}").has_value());  // 缺 archive/kept_from
-    CHECK_FALSE(agent::ParseCompactEvent("{\"type\":\"compact\",\"archive\":5,\"kept_from\":0}").has_value());
+    CHECK_FALSE(sessions::ParseCompactEvent("").has_value());
+    CHECK_FALSE(sessions::ParseCompactEvent("不是 JSON").has_value());
+    CHECK_FALSE(sessions::ParseCompactEvent("{\"type\":\"compact\"}").has_value());  // 缺 archive/kept_from
+    CHECK_FALSE(sessions::ParseCompactEvent("{\"type\":\"compact\",\"archive\":5,\"kept_from\":0}").has_value());
     CHECK_FALSE(
-        agent::ParseCompactEvent("{\"type\":\"compact\",\"archive\":{\"role\":\"user\",\"content\":[]},\"kept_from\":-1}")
+        sessions::ParseCompactEvent("{\"type\":\"compact\",\"archive\":{\"role\":\"user\",\"content\":[]},\"kept_from\":-1}")
             .has_value());
     // 消息行不是 compact 事件
-    CHECK_FALSE(agent::ParseCompactEvent(agent::SerializeSessionMessage(UserText("你好"), "t")).has_value());
+    CHECK_FALSE(sessions::ParseCompactEvent(sessions::SerializeSessionMessage(UserText("你好"), "t")).has_value());
     // title 事件不是 compact 事件
-    CHECK_FALSE(agent::ParseCompactEvent(agent::SerializeTitleEvent("标题", "t")).has_value());
+    CHECK_FALSE(sessions::ParseCompactEvent(sessions::SerializeTitleEvent("标题", "t")).has_value());
 }
 
 TEST_CASE("MakeCompactEvent 跟 BuildCompactedHistory 对得上账") {
@@ -472,19 +472,19 @@ TEST_CASE("MakeCompactEvent 跟 BuildCompactedHistory 对得上账") {
     const auto new_history = agent::BuildCompactedHistory(history, archive, /*hot_zone_tokens=*/1);
     REQUIRE(new_history.size() == 2);
 
-    const auto event = agent::MakeCompactEvent(history.size(), new_history);
+    const auto event = sessions::MakeCompactEvent(history.size(), new_history);
     CHECK(event.kept_from == 3);  // 老历史里 a2 那条起保留
     CHECK(FirstText(event.archive) == FirstText(new_history[0]));
 
     // 回放老历史 + 事件,得到的正是内存里的新历史。
-    const auto replayed = agent::ApplyCompactEvent(history, event);
+    const auto replayed = sessions::ApplyCompactEvent(history, event);
     REQUIRE(replayed.size() == new_history.size());
     CHECK(FirstText(replayed[0]) == FirstText(new_history[0]));
     CHECK(FirstText(replayed[1]) == "a2");
 }
 
 TEST_CASE("MakeCompactEvent: 新历史为空的防御路径") {
-    const auto event = agent::MakeCompactEvent(5, {});
+    const auto event = sessions::MakeCompactEvent(5, {});
     CHECK(event.kept_from == 5);  // 全不保留
     CHECK(event.archive.content.empty());
 }
@@ -493,10 +493,10 @@ TEST_CASE("ApplyCompactEvent: kept_from 越界夹到列表长度,不越界访问
     std::vector<api::Message> effective;
     effective.push_back(UserText("m1"));
     effective.push_back(AssistantText("m2"));
-    agent::CompactEvent event;
+    sessions::CompactEvent event;
     event.archive = UserText("[存档]");
     event.kept_from = 999;
-    const auto out = agent::ApplyCompactEvent(effective, event);
+    const auto out = sessions::ApplyCompactEvent(effective, event);
     REQUIRE(out.size() == 1);  // 只剩 archive
     CHECK(FirstText(out[0]) == "[存档]");
 }
@@ -509,12 +509,12 @@ namespace {
 
 // 拼一份存档:meta 行 + 给定行。
 std::string JoinLines(const std::vector<std::string>& lines) {
-    agent::SessionMeta meta;
+    sessions::SessionMeta meta;
     meta.wire = "anthropic";
     meta.model = "m1";
     meta.cwd = "D:/场子";
     meta.started_at = "2026-07-18 09:00:00";
-    std::string content = agent::SerializeSessionMeta(meta) + "\n";
+    std::string content = sessions::SerializeSessionMeta(meta) + "\n";
     for (const auto& line : lines) {
         content += line + "\n";
     }
@@ -527,17 +527,17 @@ TEST_CASE("回放: 单次压缩,恢复的是压缩后的活状态") {
     // 流水:u1 a1 u2 a2 | compact | u3 a3
     std::vector<api::Message> history{UserText("u1"), AssistantText("a1"), UserText("u2"), AssistantText("a2")};
     const auto new_history = agent::BuildCompactedHistory(history, UserText("[对话存档,此前内容已压缩] 玄武"), /*hot_zone_tokens=*/1);
-    const auto event = agent::MakeCompactEvent(history.size(), new_history);
+    const auto event = sessions::MakeCompactEvent(history.size(), new_history);
 
     std::vector<std::string> lines;
     for (const auto& m : history) {
-        lines.push_back(agent::SerializeSessionMessage(m, "t"));
+        lines.push_back(sessions::SerializeSessionMessage(m, "t"));
     }
-    lines.push_back(agent::SerializeCompactEvent(event, "t"));
-    lines.push_back(agent::SerializeSessionMessage(UserText("u3"), "t"));
-    lines.push_back(agent::SerializeSessionMessage(AssistantText("a3"), "t"));
+    lines.push_back(sessions::SerializeCompactEvent(event, "t"));
+    lines.push_back(sessions::SerializeSessionMessage(UserText("u3"), "t"));
+    lines.push_back(sessions::SerializeSessionMessage(AssistantText("a3"), "t"));
 
-    const auto session = agent::ParseSessionFile(JoinLines(lines));
+    const auto session = sessions::ParseSessionFile(JoinLines(lines));
     REQUIRE(session.has_value());
     CHECK(session->compact_count == 1);
     REQUIRE(session->compact_positions.size() == 1);
@@ -558,26 +558,26 @@ TEST_CASE("回放: 两次压缩,逐次替换,最后一次说了算") {
     std::vector<api::Message> effective{UserText("u1"), AssistantText("a1"), UserText("u2"), AssistantText("a2")};
     std::vector<std::string> lines;
     for (const auto& m : effective) {
-        lines.push_back(agent::SerializeSessionMessage(m, "t"));
+        lines.push_back(sessions::SerializeSessionMessage(m, "t"));
     }
     auto compacted1 = agent::BuildCompactedHistory(effective, UserText("[对话存档,此前内容已压缩] 存档一"), /*hot_zone_tokens=*/1);
-    lines.push_back(agent::SerializeCompactEvent(agent::MakeCompactEvent(effective.size(), compacted1), "t"));
+    lines.push_back(sessions::SerializeCompactEvent(sessions::MakeCompactEvent(effective.size(), compacted1), "t"));
     effective = compacted1;
 
     // 第二段:续聊 u3 a3,再压缩一次
     effective.push_back(UserText("u3"));
     effective.push_back(AssistantText("a3"));
-    lines.push_back(agent::SerializeSessionMessage(UserText("u3"), "t"));
-    lines.push_back(agent::SerializeSessionMessage(AssistantText("a3"), "t"));
+    lines.push_back(sessions::SerializeSessionMessage(UserText("u3"), "t"));
+    lines.push_back(sessions::SerializeSessionMessage(AssistantText("a3"), "t"));
     auto compacted2 = agent::BuildCompactedHistory(effective, UserText("[对话存档,此前内容已压缩] 存档二"), /*hot_zone_tokens=*/1);
-    lines.push_back(agent::SerializeCompactEvent(agent::MakeCompactEvent(effective.size(), compacted2), "t"));
+    lines.push_back(sessions::SerializeCompactEvent(sessions::MakeCompactEvent(effective.size(), compacted2), "t"));
     effective = compacted2;
 
     // 压缩后再来一条普通消息
     effective.push_back(UserText("u4"));
-    lines.push_back(agent::SerializeSessionMessage(UserText("u4"), "t"));
+    lines.push_back(sessions::SerializeSessionMessage(UserText("u4"), "t"));
 
-    const auto session = agent::ParseSessionFile(JoinLines(lines));
+    const auto session = sessions::ParseSessionFile(JoinLines(lines));
     REQUIRE(session.has_value());
     CHECK(session->compact_count == 2);
     CHECK(session->all_messages.size() == 7);  // u1 a1 u2 a2 u3 a3 u4
@@ -595,13 +595,13 @@ TEST_CASE("回放: 两次压缩,逐次替换,最后一次说了算") {
 
 TEST_CASE("回放: 坏 compact 事件行跳过,不影响其余") {
     std::vector<std::string> lines;
-    lines.push_back(agent::SerializeSessionMessage(UserText("u1"), "t"));
+    lines.push_back(sessions::SerializeSessionMessage(UserText("u1"), "t"));
     lines.push_back("{\"type\":\"compact\",\"kept_from\":0}");            // 缺 archive
     lines.push_back("{\"type\":\"compact\",\"archive\":\"不是对象\",\"kept_from\":1}");
     lines.push_back("{\"type\":\"没见过的事件\",\"x\":1}");
-    lines.push_back(agent::SerializeSessionMessage(AssistantText("a1"), "t"));
+    lines.push_back(sessions::SerializeSessionMessage(AssistantText("a1"), "t"));
 
-    const auto session = agent::ParseSessionFile(JoinLines(lines));
+    const auto session = sessions::ParseSessionFile(JoinLines(lines));
     REQUIRE(session.has_value());
     CHECK(session->compact_count == 0);
     CHECK(session->skipped_lines == 3);
@@ -611,15 +611,15 @@ TEST_CASE("回放: 坏 compact 事件行跳过,不影响其余") {
 }
 
 TEST_CASE("回放: 存档里 kept_from 越界,防御成只剩 archive") {
-    agent::CompactEvent event;
+    sessions::CompactEvent event;
     event.archive = UserText("[对话存档,此前内容已压缩] 只剩我");
     event.kept_from = 999;
     std::vector<std::string> lines;
-    lines.push_back(agent::SerializeSessionMessage(UserText("u1"), "t"));
-    lines.push_back(agent::SerializeSessionMessage(AssistantText("a1"), "t"));
-    lines.push_back(agent::SerializeCompactEvent(event, "t"));
+    lines.push_back(sessions::SerializeSessionMessage(UserText("u1"), "t"));
+    lines.push_back(sessions::SerializeSessionMessage(AssistantText("a1"), "t"));
+    lines.push_back(sessions::SerializeCompactEvent(event, "t"));
 
-    const auto session = agent::ParseSessionFile(JoinLines(lines));
+    const auto session = sessions::ParseSessionFile(JoinLines(lines));
     REQUIRE(session.has_value());
     CHECK(session->compact_count == 1);
     REQUIRE(session->messages.size() == 1);
@@ -632,29 +632,29 @@ TEST_CASE("回放: 存档里 kept_from 越界,防御成只剩 archive") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("title 事件序列化往返") {
-    const std::string line = agent::SerializeTitleEvent("修会话存档三件套", "2026-07-18 10:00:00");
+    const std::string line = sessions::SerializeTitleEvent("修会话存档三件套", "2026-07-18 10:00:00");
     CHECK(line.find('\n') == std::string::npos);
-    CHECK_FALSE(agent::DeserializeSessionMessage(line).has_value());  // 不是消息行
-    const auto title = agent::ParseTitleEvent(line);
+    CHECK_FALSE(sessions::DeserializeSessionMessage(line).has_value());  // 不是消息行
+    const auto title = sessions::ParseTitleEvent(line);
     REQUIRE(title.has_value());
     CHECK(*title == "修会话存档三件套");
 }
 
 TEST_CASE("title 事件解析: 坏行给 nullopt") {
-    CHECK_FALSE(agent::ParseTitleEvent("").has_value());
-    CHECK_FALSE(agent::ParseTitleEvent("{\"type\":\"title\"}").has_value());       // 缺 title
-    CHECK_FALSE(agent::ParseTitleEvent("{\"type\":\"title\",\"title\":42}").has_value());
-    CHECK_FALSE(agent::ParseTitleEvent(agent::SerializeSessionMessage(UserText("x"), "t")).has_value());
+    CHECK_FALSE(sessions::ParseTitleEvent("").has_value());
+    CHECK_FALSE(sessions::ParseTitleEvent("{\"type\":\"title\"}").has_value());       // 缺 title
+    CHECK_FALSE(sessions::ParseTitleEvent("{\"type\":\"title\",\"title\":42}").has_value());
+    CHECK_FALSE(sessions::ParseTitleEvent(sessions::SerializeSessionMessage(UserText("x"), "t")).has_value());
 }
 
 TEST_CASE("回放: title 追加,最后一条胜") {
     std::vector<std::string> lines;
-    lines.push_back(agent::SerializeSessionMessage(UserText("u1"), "t"));
-    lines.push_back(agent::SerializeTitleEvent("初稿标题", "t"));
-    lines.push_back(agent::SerializeSessionMessage(AssistantText("a1"), "t"));
-    lines.push_back(agent::SerializeTitleEvent("定稿标题", "t"));
+    lines.push_back(sessions::SerializeSessionMessage(UserText("u1"), "t"));
+    lines.push_back(sessions::SerializeTitleEvent("初稿标题", "t"));
+    lines.push_back(sessions::SerializeSessionMessage(AssistantText("a1"), "t"));
+    lines.push_back(sessions::SerializeTitleEvent("定稿标题", "t"));
 
-    const auto session = agent::ParseSessionFile(JoinLines(lines));
+    const auto session = sessions::ParseSessionFile(JoinLines(lines));
     REQUIRE(session.has_value());
     CHECK(session->title == "定稿标题");
     CHECK(session->messages.size() == 2);      // 事件行不算消息
@@ -664,8 +664,8 @@ TEST_CASE("回放: title 追加,最后一条胜") {
 
 TEST_CASE("回放: 没有 title 事件就是空,展示层回退首句摘要") {
     std::vector<std::string> lines;
-    lines.push_back(agent::SerializeSessionMessage(UserText("首句在此"), "t"));
-    const auto session = agent::ParseSessionFile(JoinLines(lines));
+    lines.push_back(sessions::SerializeSessionMessage(UserText("首句在此"), "t"));
+    const auto session = sessions::ParseSessionFile(JoinLines(lines));
     REQUIRE(session.has_value());
     CHECK(session->title.empty());
 }
@@ -675,25 +675,25 @@ TEST_CASE("回放: 没有 title 事件就是空,展示层回退首句摘要") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("cwd 事件序列化往返") {
-    const std::string line = agent::SerializeCwdEvent("D:/repo/.lubancode/worktrees/fix-1", "t");
+    const std::string line = sessions::SerializeCwdEvent("D:/repo/.lubancode/worktrees/fix-1", "t");
     CHECK(line.find('\n') == std::string::npos);
-    CHECK_FALSE(agent::DeserializeSessionMessage(line).has_value());  // 不是消息行
-    const auto cwd = agent::ParseCwdEvent(line);
+    CHECK_FALSE(sessions::DeserializeSessionMessage(line).has_value());  // 不是消息行
+    const auto cwd = sessions::ParseCwdEvent(line);
     REQUIRE(cwd.has_value());
     CHECK(*cwd == "D:/repo/.lubancode/worktrees/fix-1");
-    CHECK_FALSE(agent::ParseCwdEvent("").has_value());
-    CHECK_FALSE(agent::ParseCwdEvent("{\"type\":\"cwd\"}").has_value());  // 缺 cwd
-    CHECK_FALSE(agent::ParseCwdEvent(agent::SerializeTitleEvent("x", "t")).has_value());
+    CHECK_FALSE(sessions::ParseCwdEvent("").has_value());
+    CHECK_FALSE(sessions::ParseCwdEvent("{\"type\":\"cwd\"}").has_value());  // 缺 cwd
+    CHECK_FALSE(sessions::ParseCwdEvent(sessions::SerializeTitleEvent("x", "t")).has_value());
 }
 
 TEST_CASE("回放: cwd 事件追加,最后一条覆盖 meta.cwd") {
     std::vector<std::string> lines;
-    lines.push_back(agent::SerializeSessionMessage(UserText("u1"), "t"));
-    lines.push_back(agent::SerializeCwdEvent("D:/repo/.lubancode/worktrees/fix-1", "t"));
-    lines.push_back(agent::SerializeSessionMessage(AssistantText("a1"), "t"));
-    lines.push_back(agent::SerializeCwdEvent("D:/repo", "t"));
+    lines.push_back(sessions::SerializeSessionMessage(UserText("u1"), "t"));
+    lines.push_back(sessions::SerializeCwdEvent("D:/repo/.lubancode/worktrees/fix-1", "t"));
+    lines.push_back(sessions::SerializeSessionMessage(AssistantText("a1"), "t"));
+    lines.push_back(sessions::SerializeCwdEvent("D:/repo", "t"));
 
-    const auto session = agent::ParseSessionFile(JoinLines(lines));
+    const auto session = sessions::ParseSessionFile(JoinLines(lines));
     REQUIRE(session.has_value());
     CHECK(session->meta.cwd == "D:/repo");  // meta 首行是 D:/场子,被最后一条 cwd 事件盖掉
     CHECK(session->messages.size() == 2);   // 事件行不算消息
@@ -706,19 +706,19 @@ TEST_CASE("回放: cwd 事件追加,最后一条覆盖 meta.cwd") {
 
 namespace {
 
-std::vector<agent::ArchivedQueueItem> SampleQueue() {
-    std::vector<agent::ArchivedQueueItem> items;
-    agent::ArchivedQueueItem main_item;
+std::vector<sessions::ArchivedQueueItem> SampleQueue() {
+    std::vector<sessions::ArchivedQueueItem> items;
+    sessions::ArchivedQueueItem main_item;
     main_item.id = 1;
     main_item.text = "排在第一的";
     items.push_back(main_item);
-    agent::ArchivedQueueItem agent_item;
+    sessions::ArchivedQueueItem agent_item;
     agent_item.id = 2;
     agent_item.subagent = true;
     agent_item.task_id = 3;
     agent_item.text = "给三号的";
     items.push_back(agent_item);
-    agent::ArchivedQueueItem retried;
+    sessions::ArchivedQueueItem retried;
     retried.id = 3;
     retried.text = "失败回还过的";
     retried.attempts = 2;
@@ -729,11 +729,11 @@ std::vector<agent::ArchivedQueueItem> SampleQueue() {
 }  // namespace
 
 TEST_CASE("queue 事件序列化往返:main/子代理/回还账都在") {
-    const std::string line = agent::SerializeQueueEvent(SampleQueue(), "2026-08-22 10:00:00");
+    const std::string line = sessions::SerializeQueueEvent(SampleQueue(), "2026-08-22 10:00:00");
     CHECK(line.find('\n') == std::string::npos);
-    CHECK_FALSE(agent::DeserializeSessionMessage(line).has_value());  // 不是消息行
+    CHECK_FALSE(sessions::DeserializeSessionMessage(line).has_value());  // 不是消息行
 
-    const auto parsed = agent::ParseQueueEvent(line);
+    const auto parsed = sessions::ParseQueueEvent(line);
     REQUIRE(parsed.has_value());
     REQUIRE(parsed->size() == 3);
     CHECK((*parsed)[0].id == 1);
@@ -746,16 +746,16 @@ TEST_CASE("queue 事件序列化往返:main/子代理/回还账都在") {
     CHECK((*parsed)[2].attempts == 2);  // 自动重试到顶的账也往返
 
     // 空快照也合法(清账后落的"没排队了")。
-    const auto empty = agent::ParseQueueEvent(agent::SerializeQueueEvent({}, "t"));
+    const auto empty = sessions::ParseQueueEvent(sessions::SerializeQueueEvent({}, "t"));
     REQUIRE(empty.has_value());
     CHECK(empty->empty());
 }
 
 TEST_CASE("queue 事件解析: 坏行/坏条目不废整份") {
-    CHECK_FALSE(agent::ParseQueueEvent("").has_value());
-    CHECK_FALSE(agent::ParseQueueEvent("{\"type\":\"queue\"}").has_value());  // 缺 items
-    CHECK_FALSE(agent::ParseQueueEvent("{\"type\":\"queue\",\"items\":42}").has_value());
-    CHECK_FALSE(agent::ParseQueueEvent(agent::SerializeTitleEvent("x", "t")).has_value());
+    CHECK_FALSE(sessions::ParseQueueEvent("").has_value());
+    CHECK_FALSE(sessions::ParseQueueEvent("{\"type\":\"queue\"}").has_value());  // 缺 items
+    CHECK_FALSE(sessions::ParseQueueEvent("{\"type\":\"queue\",\"items\":42}").has_value());
+    CHECK_FALSE(sessions::ParseQueueEvent(sessions::SerializeTitleEvent("x", "t")).has_value());
 
     // 单条缺 text / 空 text / id=0 / 认不出的目标号:跳过那一条,其余保住。
     const std::string mixed =
@@ -766,7 +766,7 @@ TEST_CASE("queue 事件解析: 坏行/坏条目不废整份") {
         "{\"id\":9,\"target\":\"#abc\",\"text\":\"目标号认不出\"},"
         "{\"id\":10,\"target\":\"#5\",\"text\":\"五号的\"}"
         "],\"ts\":\"t\"}";
-    const auto parsed = agent::ParseQueueEvent(mixed);
+    const auto parsed = sessions::ParseQueueEvent(mixed);
     REQUIRE(parsed.has_value());
     REQUIRE(parsed->size() == 2);
     CHECK((*parsed)[0].text == "好的条目");
@@ -776,20 +776,20 @@ TEST_CASE("queue 事件解析: 坏行/坏条目不废整份") {
 
 TEST_CASE("回放: queue 事件快照式,最后一条胜;消息账不受牵连") {
     std::vector<std::string> lines;
-    lines.push_back(agent::SerializeSessionMessage(UserText("u1"), "t"));
-    lines.push_back(agent::SerializeQueueEvent(SampleQueue(), "t"));
-    lines.push_back(agent::SerializeSessionMessage(AssistantText("a1"), "t"));
+    lines.push_back(sessions::SerializeSessionMessage(UserText("u1"), "t"));
+    lines.push_back(sessions::SerializeQueueEvent(SampleQueue(), "t"));
+    lines.push_back(sessions::SerializeSessionMessage(AssistantText("a1"), "t"));
     // 送走一条之后的快照:只剩给三号的。
-    std::vector<agent::ArchivedQueueItem> after_deliver;
-    agent::ArchivedQueueItem only_agent;
+    std::vector<sessions::ArchivedQueueItem> after_deliver;
+    sessions::ArchivedQueueItem only_agent;
     only_agent.id = 2;
     only_agent.subagent = true;
     only_agent.task_id = 3;
     only_agent.text = "给三号的";
     after_deliver.push_back(only_agent);
-    lines.push_back(agent::SerializeQueueEvent(after_deliver, "t"));
+    lines.push_back(sessions::SerializeQueueEvent(after_deliver, "t"));
 
-    const auto session = agent::ParseSessionFile(JoinLines(lines));
+    const auto session = sessions::ParseSessionFile(JoinLines(lines));
     REQUIRE(session.has_value());
     CHECK(session->messages.size() == 2);  // 事件行不算消息
     CHECK(session->skipped_lines == 0);
@@ -798,8 +798,8 @@ TEST_CASE("回放: queue 事件快照式,最后一条胜;消息账不受牵连")
 
     // 没有 queue 行的老档:空表,老场子照旧全量恢复。
     std::vector<std::string> legacy;
-    legacy.push_back(agent::SerializeSessionMessage(UserText("u1"), "t"));
-    const auto legacy_session = agent::ParseSessionFile(JoinLines(legacy));
+    legacy.push_back(sessions::SerializeSessionMessage(UserText("u1"), "t"));
+    const auto legacy_session = sessions::ParseSessionFile(JoinLines(legacy));
     REQUIRE(legacy_session.has_value());
     CHECK(legacy_session->queued_messages.empty());
 }
@@ -809,15 +809,15 @@ TEST_CASE("queue 事件经真 SessionStore 落盘再读回:排队→退出→res
     const std::filesystem::path dir = std::filesystem::temp_directory_path(ec) /
                                       ("lubancode_queue_event_" + std::to_string(::rand()));
     std::filesystem::create_directories(dir, ec);
-    agent::SessionStore store(dir.string());
-    REQUIRE(store.Begin(agent::SessionMeta{}, "sess-queue-test"));
+    sessions::SessionStore store(dir.string());
+    REQUIRE(store.Begin(sessions::SessionMeta{}, "sess-queue-test"));
     CHECK(store.AppendMessage(UserText("第一问")));
     CHECK(store.AppendQueueEvent(SampleQueue()));
     store.Reset();  // 模拟 /exit 关档;柄先关,目录才能收
 
-    const auto bytes = agent::ReadSessionFileBytes(dir.string() + "/sess-queue-test.jsonl");
+    const auto bytes = sessions::ReadSessionFileBytes(dir.string() + "/sess-queue-test.jsonl");
     REQUIRE(bytes.has_value());
-    const auto session = agent::ParseSessionFile(*bytes);
+    const auto session = sessions::ParseSessionFile(*bytes);
     REQUIRE(session.has_value());
     REQUIRE(session->queued_messages.size() == 3);
     CHECK(session->queued_messages[0].text == "排在第一的");
@@ -832,19 +832,19 @@ TEST_CASE("queue 事件经真 SessionStore 落盘再读回:排队→退出→res
 // ---------------------------------------------------------------------------
 
 TEST_CASE("NormalizePathForCompare: 斜杠方向、大小写、尾斜杠都归一") {
-    CHECK(agent::NormalizePathForCompare("C:\\Foo\\Bar") == agent::NormalizePathForCompare("c:/foo/bar/"));
-    CHECK(agent::NormalizePathForCompare("C:/foo/./bar/../bar") == agent::NormalizePathForCompare("C:\\foo\\bar"));
-    CHECK(agent::NormalizePathForCompare("C:/工程/子目录") == agent::NormalizePathForCompare("C:\\工程\\子目录\\"));
-    CHECK(agent::NormalizePathForCompare("C:/foo") != agent::NormalizePathForCompare("C:/foobar"));
-    CHECK(agent::NormalizePathForCompare("").empty());
+    CHECK(sessions::NormalizePathForCompare("C:\\Foo\\Bar") == sessions::NormalizePathForCompare("c:/foo/bar/"));
+    CHECK(sessions::NormalizePathForCompare("C:/foo/./bar/../bar") == sessions::NormalizePathForCompare("C:\\foo\\bar"));
+    CHECK(sessions::NormalizePathForCompare("C:/工程/子目录") == sessions::NormalizePathForCompare("C:\\工程\\子目录\\"));
+    CHECK(sessions::NormalizePathForCompare("C:/foo") != sessions::NormalizePathForCompare("C:/foobar"));
+    CHECK(sessions::NormalizePathForCompare("").empty());
 }
 
 TEST_CASE("AbbreviateUtf8Middle: 不超长原样,超长头尾留、中间省略") {
-    CHECK(agent::AbbreviateUtf8Middle("short", 10) == "short");
-    CHECK(agent::AbbreviateUtf8Middle("abcdefghij", 5) == "ab…ij");
+    CHECK(sessions::AbbreviateUtf8Middle("short", 10) == "short");
+    CHECK(sessions::AbbreviateUtf8Middle("abcdefghij", 5) == "ab…ij");
     // 中文按码点算,不从多字节字符中间掐断
-    CHECK(agent::AbbreviateUtf8Middle("D:/一二三四五六七八九十/工程", 9) == "D:/一…十/工程");
-    CHECK(agent::AbbreviateUtf8Middle("一二三四", 4) == "一二三四");
+    CHECK(sessions::AbbreviateUtf8Middle("D:/一二三四五六七八九十/工程", 9) == "D:/一…十/工程");
+    CHECK(sessions::AbbreviateUtf8Middle("一二三四", 4) == "一二三四");
 }
 
 // ---------------------------------------------------------------------------
@@ -861,16 +861,16 @@ TEST_CASE("ListSessions: cwd 过滤只出本目录,all 全出且带 cwd/title") 
 
     const auto write_session = [&](const std::string& id, const std::string& cwd, const std::string& text,
                                     const std::string& title) {
-        agent::SessionMeta meta;
+        sessions::SessionMeta meta;
         meta.wire = "anthropic";
         meta.model = "m";
         meta.cwd = cwd;
         meta.started_at = "2026-07-18 08:00:00";
         std::ofstream f(base / (id + ".jsonl"), std::ios::binary);
-        f << agent::SerializeSessionMeta(meta) << "\n";
-        f << agent::SerializeSessionMessage(UserText(text), "t") << "\n";
+        f << sessions::SerializeSessionMeta(meta) << "\n";
+        f << sessions::SerializeSessionMessage(UserText(text), "t") << "\n";
         if (!title.empty()) {
-            f << agent::SerializeTitleEvent(title, "t") << "\n";
+            f << sessions::SerializeTitleEvent(title, "t") << "\n";
         }
     };
     // 混录三个目录的场子;甲目录两场,故意用不同斜杠方向/大小写/尾斜杠。
@@ -882,7 +882,7 @@ TEST_CASE("ListSessions: cwd 过滤只出本目录,all 全出且带 cwd/title") 
     write_session("20260718-090003-d", "E:/场子丙", "丙一", "");
 
     // 过滤:斜杠方向和大小写都跟 meta 里写的不一样,照样对上。
-    const auto mine = agent::ListSessions(dir, 20, "d:/场子甲");
+    const auto mine = sessions::ListSessions(dir, 20, "d:/场子甲");
     REQUIRE(mine.size() == 2);
     CHECK(mine[0].id == "20260718-090002-c");  // 倒序,新的在前
     CHECK(mine[0].title == "甲二的标题");       // title 事件进列表
@@ -892,14 +892,14 @@ TEST_CASE("ListSessions: cwd 过滤只出本目录,all 全出且带 cwd/title") 
     CHECK(mine[1].first_user_text == "甲一");
 
     // 不过滤(/sessions all):四场全出,每条带 cwd。
-    const auto all = agent::ListSessions(dir, 20);
+    const auto all = sessions::ListSessions(dir, 20);
     REQUIRE(all.size() == 4);
     CHECK(all[0].id == "20260718-090003-d");
     CHECK(all[0].cwd == "E:/场子丙");  // 原样保留,展示层自己缩略
     CHECK(all[3].cwd == "D:\\场子甲");
 
     // 别的目录过滤:只出乙那一场。
-    const auto other = agent::ListSessions(dir, 20, "D:\\场子乙\\");
+    const auto other = sessions::ListSessions(dir, 20, "D:\\场子乙\\");
     REQUIRE(other.size() == 1);
     CHECK(other[0].id == "20260718-090001-b");
 
@@ -911,7 +911,7 @@ TEST_CASE("ListSessions: cwd 过滤只出本目录,all 全出且带 cwd/title") 
 // ---------------------------------------------------------------------------
 
 TEST_CASE("导出 MD: title 当大标题,压缩发生点插标注行") {
-    agent::SessionMeta meta;
+    sessions::SessionMeta meta;
     meta.wire = "anthropic";
     meta.model = "m1";
     meta.cwd = "/tmp";
@@ -923,7 +923,7 @@ TEST_CASE("导出 MD: title 当大标题,压缩发生点插标注行") {
     messages.push_back(UserText("第二问"));
     messages.push_back(AssistantText("第二答"));
 
-    const std::string md = agent::ExportSessionMarkdown(meta, messages, "20260718-080000-x",
+    const std::string md = sessions::ExportSessionMarkdown(meta, messages, "20260718-080000-x",
                                                          /*max_result_lines=*/30, "玄武任务", {2});
     CHECK(md.rfind("# 玄武任务", 0) == 0);                       // 标题当大标题
     CHECK(md.find("- 会话: 20260718-080000-x") != std::string::npos);
@@ -934,17 +934,17 @@ TEST_CASE("导出 MD: title 当大标题,压缩发生点插标注行") {
     CHECK(note < md.find("第二问"));  // 在第二问之前
 
     // 没标题、没压缩:老样子,一行标注都不多。
-    const std::string plain = agent::ExportSessionMarkdown(meta, messages, "20260718-080000-x");
+    const std::string plain = sessions::ExportSessionMarkdown(meta, messages, "20260718-080000-x");
     CHECK(plain.rfind("# 会话 20260718-080000-x", 0) == 0);
     CHECK(plain.find("上下文压缩") == std::string::npos);
 }
 
 TEST_CASE("导出 MD: 压缩发生在末尾,标注补在最后") {
-    agent::SessionMeta meta;
+    sessions::SessionMeta meta;
     meta.started_at = "x";
     std::vector<api::Message> messages;
     messages.push_back(UserText("唯一一问"));
-    const std::string md = agent::ExportSessionMarkdown(meta, messages, "id", 30, "", {1});
+    const std::string md = sessions::ExportSessionMarkdown(meta, messages, "id", 30, "", {1});
     const std::size_t note = md.find("> ⚡ 此处发生过一次上下文压缩");
     REQUIRE(note != std::string::npos);
     CHECK(note > md.find("唯一一问"));
@@ -975,14 +975,14 @@ TEST_CASE("ParseSlashCommand: /title 裸敲与带标题") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("compact_v2: 序列化/解析往返,epoch/manifest/metrics 都在") {
-    agent::CompactV2Event event;
+    sessions::CompactV2Event event;
     event.archive = UserText("[对话存档,此前内容已压缩] 正文");
     event.kept_from = 3;
     event.epoch = 2;
     event.manifest = nlohmann::json::parse(R"({"goal":"修好压缩","open_items":["补测试"]})");
     event.metrics = nlohmann::json::parse(R"({"chunks":4,"reduce_passes":1,"trigger":"midturn"})");
 
-    const auto parsed = agent::ParseCompactV2Event(agent::SerializeCompactV2Event(event, "t"));
+    const auto parsed = sessions::ParseCompactV2Event(sessions::SerializeCompactV2Event(event, "t"));
     REQUIRE(parsed.has_value());
     CHECK(parsed->kept_from == 3);
     CHECK(parsed->epoch == 2);
@@ -992,19 +992,19 @@ TEST_CASE("compact_v2: 序列化/解析往返,epoch/manifest/metrics 都在") {
 }
 
 TEST_CASE("compact_v2: type 不对 / 缺 archive、kept_from → nullopt") {
-    CHECK_FALSE(agent::ParseCompactV2Event(agent::SerializeCompactEvent(agent::CompactEvent{}, "t")).has_value());
-    CHECK_FALSE(agent::ParseCompactV2Event("{bad json").has_value());
-    CHECK_FALSE(agent::ParseCompactV2Event(R"({"type":"compact_v2","archive":{"role":"user","content":[]}})")
+    CHECK_FALSE(sessions::ParseCompactV2Event(sessions::SerializeCompactEvent(sessions::CompactEvent{}, "t")).has_value());
+    CHECK_FALSE(sessions::ParseCompactV2Event("{bad json").has_value());
+    CHECK_FALSE(sessions::ParseCompactV2Event(R"({"type":"compact_v2","archive":{"role":"user","content":[]}})")
                     .has_value());  // 缺 kept_from
 }
 
 TEST_CASE("compact_v2: UpgradeToV2/AsCompactEvent 折返,v1 回放路共用") {
-    agent::CompactEvent v1;
+    sessions::CompactEvent v1;
     v1.archive = UserText("[存档]");
     v1.kept_from = 2;
-    const auto v2 = agent::UpgradeToV2(v1, /*epoch=*/5, nlohmann::json::object(), nlohmann::json::object());
+    const auto v2 = sessions::UpgradeToV2(v1, /*epoch=*/5, nlohmann::json::object(), nlohmann::json::object());
     CHECK(v2.epoch == 5);
-    const auto back = agent::AsCompactEvent(v2);
+    const auto back = sessions::AsCompactEvent(v2);
     CHECK(back.kept_from == 2);
     CHECK(FirstText(back.archive) == "[存档]");
 }
@@ -1014,7 +1014,7 @@ TEST_CASE("回放: v1 与 v2 混排,活状态逐次替换,epoch/manifest 记账"
     std::vector<api::Message> first{UserText("u1"), AssistantText("a1")};
     auto compacted1 = agent::BuildCompactedHistory(first, UserText("[对话存档,此前内容已压缩] 存档一"),
                                                    /*hot_zone_tokens=*/1);
-    agent::CompactEvent v1_event = agent::MakeCompactEvent(first.size(), compacted1);
+    sessions::CompactEvent v1_event = sessions::MakeCompactEvent(first.size(), compacted1);
 
     std::vector<api::Message> effective = compacted1;
     effective.push_back(UserText("u2"));
@@ -1022,23 +1022,23 @@ TEST_CASE("回放: v1 与 v2 混排,活状态逐次替换,epoch/manifest 记账"
     auto compacted2 = agent::BuildCompactedHistory(effective, UserText("[对话存档,此前内容已压缩] 存档二"),
                                                    /*hot_zone_tokens=*/1);
     const auto v2_event =
-        agent::UpgradeToV2(agent::MakeCompactEvent(effective.size(), compacted2), /*epoch=*/2,
+        sessions::UpgradeToV2(sessions::MakeCompactEvent(effective.size(), compacted2), /*epoch=*/2,
                            nlohmann::json::parse(R"({"goal":"二期目标","open_items":["收尾"]})"),
                            nlohmann::json::parse(R"({"chunks":3,"hierarchical":true})"));
 
     std::vector<std::string> lines;
     for (const auto& m : first) {
-        lines.push_back(agent::SerializeSessionMessage(m, "t"));
+        lines.push_back(sessions::SerializeSessionMessage(m, "t"));
     }
-    lines.push_back(agent::SerializeCompactEvent(v1_event, "t"));
+    lines.push_back(sessions::SerializeCompactEvent(v1_event, "t"));
     for (std::size_t i = compacted1.size(); i < effective.size(); ++i) {
-        lines.push_back(agent::SerializeSessionMessage(effective[i], "t"));
+        lines.push_back(sessions::SerializeSessionMessage(effective[i], "t"));
     }
-    lines.push_back(agent::SerializeCompactV2Event(v2_event, "t"));
-    lines.push_back(agent::SerializeSessionMessage(UserText("u3"), "t"));
-    lines.push_back(agent::SerializeSessionMessage(AssistantText("a3"), "t"));
+    lines.push_back(sessions::SerializeCompactV2Event(v2_event, "t"));
+    lines.push_back(sessions::SerializeSessionMessage(UserText("u3"), "t"));
+    lines.push_back(sessions::SerializeSessionMessage(AssistantText("a3"), "t"));
 
-    const auto session = agent::ParseSessionFile(JoinLines(lines));
+    const auto session = sessions::ParseSessionFile(JoinLines(lines));
     REQUIRE(session.has_value());
     CHECK(session->compact_count == 2);       // v1 + v2 都算
     CHECK(session->compact_epoch == 2);       // v2 记的序号
@@ -1055,7 +1055,7 @@ TEST_CASE("回放: v1 与 v2 混排,活状态逐次替换,epoch/manifest 记账"
 // ExtractPromptHistory(0.30.x Ctrl+R 反向搜索):只读事件账的用户提问行。
 // ---------------------------------------------------------------------------
 TEST_CASE("ExtractPromptHistory:只收用户纯文本提问,事件行/工具回执/slash 不进") {
-    using agent::SerializeSessionMessage;
+    using sessions::SerializeSessionMessage;
     const api::Message user_text = api::Message{api::Role::User, {api::TextBlock{"怎么配代理"}}};
     const api::Message user_slash = api::Message{api::Role::User, {api::TextBlock{"/model gpt"}}};
     const api::Message user_tool_result =
@@ -1063,14 +1063,14 @@ TEST_CASE("ExtractPromptHistory:只收用户纯文本提问,事件行/工具回�
     const api::Message assistant_text =
         api::Message{api::Role::Assistant, {api::TextBlock{"这样配:……"}}};
     const std::string jsonl =
-        SerializeSessionMeta(agent::SessionMeta{1, "anthropic", "m", "d", "t"}) + "\n" +
+        SerializeSessionMeta(sessions::SessionMeta{1, "anthropic", "m", "d", "t"}) + "\n" +
         SerializeSessionMessage(user_text, "2026-08-16 10:00:00") + "\n" +
-        agent::SerializeTitleEvent("标题", "2026-08-16 10:00:01") + "\n" +
+        sessions::SerializeTitleEvent("标题", "2026-08-16 10:00:01") + "\n" +
         SerializeSessionMessage(user_slash, "2026-08-16 10:01:00") + "\n" +
         SerializeSessionMessage(assistant_text, "2026-08-16 10:02:00") + "\n" +
         SerializeSessionMessage(user_tool_result, "2026-08-16 10:03:00") + "\n" + "{bad json line" +
         "\n";
-    const auto records = agent::ExtractPromptHistory(jsonl);
+    const auto records = sessions::ExtractPromptHistory(jsonl);
     REQUIRE(records.size() == 1);
     CHECK(records[0].text == "怎么配代理");
     CHECK(records[0].ts == "2026-08-16 10:00:00");
@@ -1080,7 +1080,7 @@ TEST_CASE("ExtractPromptHistory:只收用户纯文本提问,事件行/工具回�
     const api::Message blank = api::Message{api::Role::User, {api::TextBlock{"   "}}};
     const std::string jsonl2 =
         SerializeSessionMessage(multiline, "ts1") + "\n" + SerializeSessionMessage(blank, "ts2") + "\n";
-    const auto records2 = agent::ExtractPromptHistory(jsonl2);
+    const auto records2 = sessions::ExtractPromptHistory(jsonl2);
     REQUIRE(records2.size() == 1);
     CHECK(records2[0].text == "第一行\n第二行");
 
@@ -1091,5 +1091,5 @@ TEST_CASE("ExtractPromptHistory:只收用户纯文本提问,事件行/工具回�
     const api::Message goal_turn = api::Message{api::Role::User, {api::TextBlock{"[goal goal-3 r1 iteration 2]\n目标:..."}}};
     const std::string jsonl3 =
         SerializeSessionMessage(loop_tick, "ts3") + "\n" + SerializeSessionMessage(goal_turn, "ts4") + "\n";
-    CHECK(agent::ExtractPromptHistory(jsonl3).empty());
+    CHECK(sessions::ExtractPromptHistory(jsonl3).empty());
 }

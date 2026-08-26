@@ -105,7 +105,7 @@ struct TurnContext {
 
     // ---- 周边接线 ----
     lubancode::tools::AgentTool* completion_agent = nullptr;  // 后台子代理结果回流口
-    lubancode::agent::WorkflowRecorder* recorder = nullptr;   // 生成技能录制(旁听)
+    lubancode::skills::WorkflowRecorder* recorder = nullptr;   // 生成技能录制(旁听)
     // Plan 模式(只读研究硬闸):ModePolicy 闸,空 = 没装。
     std::function<std::string(const std::string&, const nlohmann::json&)> mode_gate;
     // 审批悬起旁听(loop 单遗留):真要问用户前 asked(true),答完 answered

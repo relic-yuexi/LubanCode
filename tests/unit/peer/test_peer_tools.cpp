@@ -11,7 +11,7 @@
 #include "tools/send_session_message_tool.hpp"
 
 using namespace lubancode;
-using namespace lubancode::agent;
+using namespace lubancode::peers;
 
 namespace {
 

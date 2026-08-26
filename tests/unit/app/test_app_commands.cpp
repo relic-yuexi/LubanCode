@@ -130,7 +130,7 @@ TEST_CASE("/config hooks 摘要:什么都没配时仍说未配置") {
 
 TEST_CASE("/title 状态账:建档前挂起,建档后补写,再设当场落事件行") {
     const auto dir = TempDir("title");
-    lubancode::agent::SessionStore store(dir.string());
+    lubancode::sessions::SessionStore store(dir.string());
     lubancode::tools::ToolRegistry registry;
     NullBackend backend;
     lubancode::agent::Agent loop(backend, registry, "test-model", "system");
@@ -140,13 +140,13 @@ TEST_CASE("/title 状态账:建档前挂起,建档后补写,再设当场落事�
     std::size_t persisted = 0;
     bool broken = false;
     std::string start_ts = "ts-1";
-    lubancode::agent::SessionMeta meta;
+    lubancode::sessions::SessionMeta meta;
     const std::string sessions_dir = dir.string();
     const std::string wire = "anthropic";
     auto model = std::make_shared<std::string>("test-model");
     lubancode::cli::WorktreeSession worktree;
-    std::vector<lubancode::agent::PeerEnvelope> ready;
-    std::vector<lubancode::agent::PeerEnvelope> held;
+    std::vector<lubancode::peers::PeerEnvelope> ready;
+    std::vector<lubancode::peers::PeerEnvelope> held;
 
     int compact_epoch = 0;
     SessionCommandState state{[](bool) {}, loop, store,  persisted, compact_epoch, meta, title,
@@ -161,7 +161,7 @@ TEST_CASE("/title 状态账:建档前挂起,建档后补写,再设当场落事�
     CHECK_FALSE(store.active());
 
     // 建档后(模拟首条消息落盘路径):再设标题当场补写事件行。
-    lubancode::agent::SessionMeta begin_meta;
+    lubancode::sessions::SessionMeta begin_meta;
     begin_meta.wire = wire;
     REQUIRE(store.Begin(begin_meta, "sess-title-test"));
     CHECK(HandleTitleCommand(state, "场子二", theme) == CommandFlow::Continue);
@@ -181,11 +181,11 @@ TEST_CASE("/title 状态账:建档前挂起,建档后补写,再设当场落事�
 
 TEST_CASE("/clear 状态账:重建不带历史、存档翻篇、标题清空") {
     const auto dir = TempDir("clear");
-    lubancode::agent::SessionStore store(dir.string());
+    lubancode::sessions::SessionStore store(dir.string());
     lubancode::tools::ToolRegistry registry;
     NullBackend backend;
     lubancode::agent::Agent loop(backend, registry, "test-model", "system");
-    lubancode::agent::SessionMeta begin_meta;
+    lubancode::sessions::SessionMeta begin_meta;
     REQUIRE(store.Begin(begin_meta, "sess-clear-test"));
     store.AppendTitleEvent("旧标题");
 
@@ -194,7 +194,7 @@ TEST_CASE("/clear 状态账:重建不带历史、存档翻篇、标题清空") {
     std::size_t persisted = 7;
     bool broken = true;  // 旧场的坏账,/clear 后该翻篇
     std::string start_ts = "ts-old";
-    lubancode::agent::SessionMeta meta;
+    lubancode::sessions::SessionMeta meta;
     const std::string sessions_dir = dir.string();
     const std::string wire = "anthropic";
     auto model = std::make_shared<std::string>("test-model");
@@ -245,9 +245,9 @@ TEST_CASE("/clear 状态账:重建不带历史、存档翻篇、标题清空") {
 }
 
 TEST_CASE("/send 与 /peerperm 状态账:off 档、空名册、权限档切换") {
-    std::vector<lubancode::agent::PeerEnvelope> ready;
-    std::vector<lubancode::agent::PeerEnvelope> held;
-    std::optional<lubancode::agent::PeerRuntime> idle_runtime;
+    std::vector<lubancode::peers::PeerEnvelope> ready;
+    std::vector<lubancode::peers::PeerEnvelope> held;
+    std::optional<lubancode::peers::PeerRuntime> idle_runtime;
     const lubancode::cli::Theme theme;
 
     // 没起服务:/send /peerperm 只说明一句,不碰任何状态。
@@ -258,7 +258,7 @@ TEST_CASE("/send 与 /peerperm 状态账:off 档、空名册、权限档切换")
 
     // 起真服务(临时名册目录):空名册里 /send 找不到人;权限档可设可查。
     const auto dir = TempDir("peer");
-    lubancode::agent::PeerRuntimeOptions options;
+    lubancode::peers::PeerRuntimeOptions options;
     options.registry_dir = dir;
     options.name = "solo";
     options.cwd = dir.string();
@@ -271,11 +271,11 @@ TEST_CASE("/send 与 /peerperm 状态账:off 档、空名册、权限档切换")
     CHECK(HandleSendCommand(on, "who-is-this 你好", theme) == CommandFlow::Continue);  // 名册没人
     CHECK(HandleSendCommand(on, "no-space", theme) == CommandFlow::Continue);          // 缺正文
     CHECK(HandlePeerpermCommand(on, "hold") == CommandFlow::Continue);
-    CHECK(idle_runtime->tier() == lubancode::agent::PeerPermissionTier::Hold);
+    CHECK(idle_runtime->tier() == lubancode::peers::PeerPermissionTier::Hold);
     CHECK(HandlePeerpermCommand(on, "refuse") == CommandFlow::Continue);
-    CHECK(idle_runtime->tier() == lubancode::agent::PeerPermissionTier::Refuse);
+    CHECK(idle_runtime->tier() == lubancode::peers::PeerPermissionTier::Refuse);
     CHECK(HandlePeerpermCommand(on, "nonsense") == CommandFlow::Continue);  // 认不出的值不改档
-    CHECK(idle_runtime->tier() == lubancode::agent::PeerPermissionTier::Refuse);
+    CHECK(idle_runtime->tier() == lubancode::peers::PeerPermissionTier::Refuse);
 
     idle_runtime->Stop();
     std::error_code ec;
@@ -302,7 +302,7 @@ std::string CmdPathUtf8(const std::filesystem::path& p) {
 // 的 u8 拼名对不上,exists 落空回 NotFound)。夹具必须写真名。
 std::filesystem::path CmdWriteSession(const std::filesystem::path& dir, const std::string& id,
                                       const std::string& title, const std::string& cwd) {
-    lubancode::agent::SessionMeta meta;
+    lubancode::sessions::SessionMeta meta;
     meta.wire = "anthropic";
     meta.model = "m1";
     meta.cwd = cwd;
@@ -310,11 +310,11 @@ std::filesystem::path CmdWriteSession(const std::filesystem::path& dir, const st
     lubancode::api::Message message;
     message.role = lubancode::api::Role::User;
     message.content.push_back(lubancode::api::TextBlock{"首句"});
-    const std::string content = lubancode::agent::SerializeSessionMeta(meta) + "\n" +
-                                lubancode::agent::SerializeSessionMessage(message, "2026-08-20 10:10:11") +
+    const std::string content = lubancode::sessions::SerializeSessionMeta(meta) + "\n" +
+                                lubancode::sessions::SerializeSessionMessage(message, "2026-08-20 10:10:11") +
                                 "\n" +
                                 (title.empty() ? std::string()
-                                               : lubancode::agent::SerializeTitleEvent(title,
+                                               : lubancode::sessions::SerializeTitleEvent(title,
                                                                                       "2026-08-20 10:10:12") +
                                                      "\n");
     const std::u8string u8name(reinterpret_cast<const char8_t*>((id + ".jsonl").data()),
@@ -409,7 +409,7 @@ TEST_CASE("顶层 archive/unarchive 往返;归档后默认列表不见、archive
                                       sizeof("20260820-101010-甲.jsonl") - 1))));
 
     // ListSessions(默认列表/--continue 的口径)不掺归档:根里没有 .jsonl。
-    CHECK(lubancode::agent::ListSessions(sessions).empty());
+    CHECK(lubancode::sessions::ListSessions(sessions).empty());
 
     // /sessions archived(只读入口)列得到。
     PrintSessionsCommand(sessions, "archived");
@@ -418,7 +418,7 @@ TEST_CASE("顶层 archive/unarchive 往返;归档后默认列表不见、archive
     CHECK(HandleSessionManagementCommand(sessions, /*kind=unarchive=*/1, "20260820-101010-甲",
                                          false, theme, nullptr) == 0);
     CHECK(std::filesystem::exists(file));
-    CHECK(lubancode::agent::ListSessions(sessions).size() == 1);
+    CHECK(lubancode::sessions::ListSessions(sessions).size() == 1);
 
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);

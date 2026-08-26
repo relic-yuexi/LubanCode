@@ -195,7 +195,7 @@ std::vector<ThreadListEntry> CommandService::ListThreads(std::size_t limit) cons
     }
     // cwd 过滤不做(远端前端看得见全部场子,自己按 cwd 列组);resume 的
     // 序号以这份清单为准。
-    const std::vector<agent::SessionListEntry> entries = agent::ListSessions(options_.sessions_dir, limit);
+    const std::vector<sessions::SessionListEntry> entries = sessions::ListSessions(options_.sessions_dir, limit);
     out.reserve(entries.size());
     std::size_t index = 1;
     for (const auto& entry : entries) {
@@ -222,8 +222,8 @@ ResumeResult CommandService::ResumeThread(agent::Agent& loop, SessionRuntime& ru
     // 目标解析:空串 = 最近一场;纯数字 = 列表序号(倒序,1 起);其余按
     // id 找,不在前列就拼路径兜底(与终端 ResumeSession 同规矩,只是这里
     // 不限"本目录"——远端前端看得见全部场子)。
-    const std::vector<agent::SessionListEntry> entries =
-        agent::ListSessions(runtime.sessions_dir(), 200, /*cwd_filter=*/std::string());
+    const std::vector<sessions::SessionListEntry> entries =
+        sessions::ListSessions(runtime.sessions_dir(), 200, /*cwd_filter=*/std::string());
     std::string id;
     std::string file_path;
     bool all_digits = !thread_ref.empty();
@@ -267,12 +267,12 @@ ResumeResult CommandService::ResumeThread(agent::Agent& loop, SessionRuntime& ru
         }
     }
 
-    const auto content = agent::ReadSessionFileBytes(file_path);
+    const auto content = sessions::ReadSessionFileBytes(file_path);
     if (!content.has_value()) {
         out.error = "read_failed";
         return out;
     }
-    auto session = agent::ParseSessionFile(*content);
+    auto session = sessions::ParseSessionFile(*content);
     if (!session.has_value()) {
         out.error = "bad_meta";
         return out;
