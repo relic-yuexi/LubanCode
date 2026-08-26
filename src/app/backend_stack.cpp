@@ -1,15 +1,13 @@
-// backend_stack.hpp 的实现:各请求改写层的函数体全在这只 translation
-// unit 里,具体 client(anthropic/chat/responses)与 prompts 拼接的依赖
-// 不再从公开头漏出去。(SpinnerBackend 批二挪去了 cli/spinner_backend.cpp。)
+// backend_stack.hpp 的实现(骨架拆解批四:五层请求改写后端退役,这里
+// 只剩按 wire 造 client 与稳定壳 RebuildableBackend;请求策略的现拼挪去
+// Agent 拼请求那一步,见 agent/agent.hpp)。
 
 #include "app/backend_stack.hpp"
 
-#include "agent/prompts.hpp"
 #include "api/anthropic/client.hpp"
 #include "api/chat/client.hpp"
 #include "api/gemini/client.hpp"
 #include "api/responses/client.hpp"
-#include "cli/spinner.hpp"
 #include "config/provider_catalog.hpp"
 
 namespace lubancode::app {
@@ -63,90 +61,6 @@ std::expected<void, lubancode::api::Error> RebuildableBackend::send_stream(
     const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
     const std::atomic<bool>* cancel) {
     return inner_->send_stream(request, on_event, cancel);
-}
-
-ModelOverrideBackend::ModelOverrideBackend(lubancode::api::Backend& inner,
-                                           std::shared_ptr<std::string> current_model)
-    : inner_(inner), current_model_(std::move(current_model)) {}
-
-std::expected<void, lubancode::api::Error> ModelOverrideBackend::send_stream(
-    const lubancode::api::Request& request,
-    const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
-    const std::atomic<bool>* cancel) {
-    lubancode::api::Request patched = request;
-    patched.model = *current_model_;
-    return inner_.send_stream(patched, on_event, cancel);
-}
-
-ThinkOverrideBackend::ThinkOverrideBackend(lubancode::api::Backend& inner,
-                                           std::shared_ptr<std::string> current_think,
-                                           std::shared_ptr<std::string> current_model,
-                                           const lubancode::config::ModelCatalog* catalog,
-                                           const std::string* current_provider)
-    : inner_(inner),
-      current_think_(std::move(current_think)),
-      current_model_(std::move(current_model)),
-      catalog_(catalog),
-      current_provider_(current_provider) {}
-
-std::expected<void, lubancode::api::Error> ThinkOverrideBackend::send_stream(
-    const lubancode::api::Request& request,
-    const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
-    const std::atomic<bool>* cancel) {
-    lubancode::api::Request patched = request;
-    lubancode::api::RequestProfile profile;
-    profile.model = patched.model;
-    profile.reasoning_effort = *current_think_;
-    if (catalog_ != nullptr) {
-        const auto* entry = current_provider_ == nullptr
-                                ? catalog_->FindBySlug(*current_model_)
-                                : catalog_->FindByProviderAndSlug(*current_provider_, *current_model_);
-        if (entry != nullptr) {
-            profile.reasoning = entry->reasoning;
-        }
-    }
-    lubancode::api::ApplyRequestProfile(patched, profile);
-    return inner_.send_stream(patched, on_event, cancel);
-}
-
-ModelInstructionsBackend::ModelInstructionsBackend(lubancode::api::Backend& inner,
-                                                   std::shared_ptr<std::string> current_instructions)
-    : inner_(inner), current_instructions_(std::move(current_instructions)) {}
-
-std::expected<void, lubancode::api::Error> ModelInstructionsBackend::send_stream(
-    const lubancode::api::Request& request,
-    const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
-    const std::atomic<bool>* cancel) {
-    lubancode::api::Request patched = request;
-    patched.system = lubancode::agent::WithModelInstructions(request.system, *current_instructions_);
-    return inner_.send_stream(patched, on_event, cancel);
-}
-
-SoulOverlayBackend::SoulOverlayBackend(lubancode::api::Backend& inner,
-                                       std::shared_ptr<std::string> current_soul)
-    : inner_(inner), current_soul_(std::move(current_soul)) {}
-
-std::expected<void, lubancode::api::Error> SoulOverlayBackend::send_stream(
-    const lubancode::api::Request& request,
-    const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
-    const std::atomic<bool>* cancel) {
-    lubancode::api::Request patched = request;
-    patched.system = lubancode::agent::WithSoul(request.system, *current_soul_);
-    return inner_.send_stream(patched, on_event, cancel);
-}
-
-DeferredIndexBackend::DeferredIndexBackend(lubancode::api::Backend& inner,
-                                           std::function<std::string()> index_provider)
-    : inner_(inner), index_provider_(std::move(index_provider)) {}
-
-std::expected<void, lubancode::api::Error> DeferredIndexBackend::send_stream(
-    const lubancode::api::Request& request,
-    const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
-    const std::atomic<bool>* cancel) {
-    lubancode::api::Request patched = request;
-    patched.system = lubancode::agent::WithDeferredToolsIndex(
-        request.system, index_provider_ ? index_provider_() : std::string());
-    return inner_.send_stream(patched, on_event, cancel);
 }
 
 }  // namespace lubancode::app

@@ -1,10 +1,8 @@
-// BackendStack 请求改写层的性状测试:按 InteractiveLoop 的真实包装次序
-// (index -> spinner -> instructions -> soul -> think -> model -> 真实 client)
-// 组装各层,对最终发出的 Request 做断言——包装次序一错,系统提示里
-// "延迟工具索引段 / 模型专属指令段 / 魂段"的先后就错,这类回归编译期看
-// 不出来,只能靠对最终 Request 断言。SpinnerBackend 依赖真终端的
-// cli::Spinner(实现在可执行文件一侧),单测不构造它;它不改 Request,
-// 略去不影响次序断言。
+// 请求改写层的性状测试(骨架拆解批四改版):五层 override 后端退役后,
+// 会话级请求策略(model/effort/模型指令/魂/延迟索引)由 Agent 拼请求时
+// 就地生效——这里对最终发出的 Request 做断言:叠层先后(索引段 -> 模型
+// 指令段 -> 魂段,魂压轴)一错,系统提示的段序就错,这类回归编译期看不
+// 出来,只能靠对最终 Request 断言。RebuildableBackend 的稳定引用断言照旧。
 #include <doctest/doctest.h>
 
 #include <atomic>
@@ -12,60 +10,56 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
+#include "agent/agent.hpp"
+#include "agent/loop.hpp"
 #include "api/backend.hpp"
 #include "app/backend_stack.hpp"
+#include "tools/registry.hpp"
 
 namespace {
 
-// 假内芯:记录收到的 Request,不当真发网络。
+// 假内芯:记录收到的 Request,回一条极简 end_turn 流,不当真发网络。
 class CapturingBackend : public lubancode::api::Backend {
 public:
     std::expected<void, lubancode::api::Error> send_stream(
         const lubancode::api::Request& request,
         const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
         const std::atomic<bool>* cancel = nullptr) override {
-        (void)on_event;
         (void)cancel;
-        captured = request;
-        ++calls;
+        captured.push_back(request);
+        using lubancode::api::StreamEvent;
+        on_event(lubancode::api::MessageStart{"m-1", request.model});
+        on_event(lubancode::api::TextDelta{"好"});
+        on_event(lubancode::api::ContentBlockDone{0});
+        on_event(lubancode::api::MessageDone{"end_turn", lubancode::api::Usage{}});
         return {};
     }
 
-    lubancode::api::Request captured;
-    int calls = 0;
+    std::vector<lubancode::api::Request> captured;
 };
-
-lubancode::api::Request BaseRequest() {
-    lubancode::api::Request request;
-    request.model = "config-model";
-    request.system = "BASE-SYSTEM";
-    return request;
-}
-
-constexpr auto kNoEvent = [](const lubancode::api::StreamEvent&) {};
 
 }  // namespace
 
 using namespace lubancode::app;
 
-TEST_CASE("包装次序:索引段 -> 模型指令段 -> 魂段依次追加,魂压轴") {
+TEST_CASE("叠层次序:索引段 -> 模型指令段 -> 魂段依次追加,魂压轴") {
     CapturingBackend inner;
-    auto current_model = std::make_shared<std::string>("glm-x");
-    auto current_think = std::make_shared<std::string>("high");
-    auto current_instructions = std::make_shared<std::string>("MODEL-ONLY-INSTRUCTIONS");
-    auto current_soul = std::make_shared<std::string>("<!-- 说明:给人看的,不注入 -->\nSOUL-BODY");
+    lubancode::tools::ToolRegistry registry;
 
-    ModelOverrideBackend model_backend(inner, current_model);
-    ThinkOverrideBackend think_backend(model_backend, current_think, current_model, nullptr);
-    SoulOverlayBackend soul_backend(think_backend, current_soul);
-    ModelInstructionsBackend instructions_backend(soul_backend, current_instructions);
-    DeferredIndexBackend index_backend(instructions_backend, [] { return std::string("INDEX-SEGMENT"); });
+    lubancode::agent::AgentProfile profile;
+    profile.request.model = "glm-x";
+    profile.request.reasoning_effort = "high";
+    profile.system_prompt = "BASE-SYSTEM";
+    profile.model_instructions = "MODEL-ONLY-INSTRUCTIONS";
+    profile.soul = "<!-- 说明:给人看的,不注入 -->\nSOUL-BODY";
+    profile.deferred_index_provider = [] { return std::string("INDEX-SEGMENT"); };
+    lubancode::agent::Agent agent(inner, registry, std::move(profile));
 
-    CHECK(index_backend.send_stream(BaseRequest(), kNoEvent).has_value());
-
-    REQUIRE(inner.calls == 1);
-    const auto& sent = inner.captured;
+    REQUIRE(agent.Run("问", lubancode::agent::Callbacks{}).has_value());
+    REQUIRE(inner.captured.size() == 1);
+    const auto& sent = inner.captured.front();
     CHECK(sent.model == "glm-x");
     CHECK(sent.reasoning_effort == "high");
 
@@ -82,44 +76,55 @@ TEST_CASE("包装次序:索引段 -> 模型指令段 -> 魂段依次追加,魂�
     CHECK(instructions_pos < soul_pos);
 }
 
-TEST_CASE("全空透传:空 think/指令/索引段与纯注释的魂不改动 system") {
+TEST_CASE("全空透传:空指令/索引段与纯注释的魂不改动 system") {
     CapturingBackend inner;
-    auto current_model = std::make_shared<std::string>("glm-x");
-    auto current_think = std::make_shared<std::string>("");
-    auto current_instructions = std::make_shared<std::string>("");
-    auto current_soul = std::make_shared<std::string>("<!-- 默认魂:整个文件只有一行注释 -->");
+    lubancode::tools::ToolRegistry registry;
 
-    ModelOverrideBackend model_backend(inner, current_model);
-    ThinkOverrideBackend think_backend(model_backend, current_think, current_model, nullptr);
-    SoulOverlayBackend soul_backend(think_backend, current_soul);
-    ModelInstructionsBackend instructions_backend(soul_backend, current_instructions);
-    DeferredIndexBackend index_backend(instructions_backend, [] { return std::string(); });
+    lubancode::agent::AgentProfile profile;
+    profile.request.model = "glm-x";
+    profile.request.reasoning_effort = "";
+    profile.system_prompt = "BASE-SYSTEM";
+    profile.model_instructions = "";
+    profile.soul = "<!-- 默认魂:整个文件只有一行注释 -->";
+    profile.deferred_index_provider = [] { return std::string(); };
+    lubancode::agent::Agent agent(inner, registry, std::move(profile));
 
-    CHECK(index_backend.send_stream(BaseRequest(), kNoEvent).has_value());
+    REQUIRE(agent.Run("问", lubancode::agent::Callbacks{}).has_value());
 
-    CHECK(inner.captured.system == "BASE-SYSTEM");
-    CHECK(inner.captured.reasoning_effort.empty());
-    CHECK(inner.captured.model == "glm-x");
-    CHECK(inner.captured.extra_body.empty());
+    CHECK(inner.captured.front().system == "BASE-SYSTEM");
+    CHECK(inner.captured.front().reasoning_effort.empty());
+    CHECK(inner.captured.front().model == "glm-x");
+    CHECK(inner.captured.front().extra_body.empty());
 }
 
-TEST_CASE("会话中改 shared_ptr 指的值,下一次请求立即生效") {
+TEST_CASE("会话中改皮上的活字段,下一次请求立即生效") {
     CapturingBackend inner;
-    auto current_model = std::make_shared<std::string>("glm-a");
-    auto current_think = std::make_shared<std::string>("low");
+    lubancode::tools::ToolRegistry registry;
 
-    ModelOverrideBackend model_backend(inner, current_model);
-    ThinkOverrideBackend think_backend(model_backend, current_think, current_model, nullptr);
+    lubancode::agent::AgentProfile profile;
+    profile.request.model = "glm-a";
+    profile.request.reasoning_effort = "low";
+    profile.system_prompt = "BASE-SYSTEM";
+    lubancode::agent::Agent agent(inner, registry, std::move(profile));
 
-    CHECK(think_backend.send_stream(BaseRequest(), kNoEvent).has_value());
-    CHECK(inner.captured.model == "glm-a");
-    CHECK(inner.captured.reasoning_effort == "low");
+    REQUIRE(agent.Run("问", lubancode::agent::Callbacks{}).has_value());
+    CHECK(inner.captured.front().model == "glm-a");
+    CHECK(inner.captured.front().reasoning_effort == "low");
 
-    *current_model = "glm-b";
-    *current_think = "high";
-    CHECK(think_backend.send_stream(BaseRequest(), kNoEvent).has_value());
-    CHECK(inner.captured.model == "glm-b");
-    CHECK(inner.captured.reasoning_effort == "high");
+    // /model、/think 走的正门:SetRequestProfile 整份换(批四:五层后端
+    // 退役后 shared_ptr<string> 旁路拆掉,同一份即时生效)。
+    lubancode::api::RequestProfile request;
+    request.model = "glm-b";
+    request.reasoning_effort = "high";
+    agent.SetRequestProfile(std::move(request));
+    agent.SetModelInstructions("NEW-INSTRUCTIONS");
+    agent.SetSoul("NEW-SOUL");
+
+    REQUIRE(agent.Run("再问", lubancode::agent::Callbacks{}).has_value());
+    CHECK(inner.captured.back().model == "glm-b");
+    CHECK(inner.captured.back().reasoning_effort == "high");
+    CHECK(inner.captured.back().system.find("NEW-INSTRUCTIONS") != std::string::npos);
+    CHECK(inner.captured.back().system.find("NEW-SOUL") != std::string::npos);
 }
 
 TEST_CASE("RebuildableBackend:构造/重建/析构不崩,对外引用地址不变") {

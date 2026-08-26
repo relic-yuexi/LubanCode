@@ -243,8 +243,19 @@ public:
     }
     // 皮(骨架拆解批四起的正门):provider/request/runtime/system_prompt 与
     // 四段开关(病十)全在 AgentProfile 上,子代理默认与主代理同段。
+    // main 专属的活字段(叠层与工具可见性)在拷贝时剥掉:它们引用的是
+    // main 的会话状态与注册表——模型指令/魂由派生处按需另烤进系统提示
+    //(后台任务)或按现状不注(前台子代理,病十的既有不对称),延迟索引
+    // 与过滤走 AgentTool 自己的口(SetDeferredIndexProvider/SetToolFilter,
+    // 按子代理自己的注册表算)。批四行为不变;子代理要不要同享指令与魂,
+    // 由后续单子显式裁决,不做拷贝里的暗继承。
     void SetAgentProfile(agent::AgentProfile profile) {
         agent_profile_ = std::move(profile);
+        agent_profile_.model_instructions.clear();
+        agent_profile_.soul.clear();
+        agent_profile_.deferred_index_provider = nullptr;
+        agent_profile_.tool_filter = nullptr;
+        agent_profile_.tool_filter_denial.clear();
         runtime_profile_ = agent_profile_.runtime;
         if (!agent_profile_.request.model.empty()) {
             model_ = agent_profile_.request.model;

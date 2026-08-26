@@ -38,10 +38,10 @@ inline std::string ModelInstructionsSegment(const std::string& base_instructions
 
 // 把模型专属段追加到一份已拼好的系统提示末尾;base_instructions 为空就
 // 原样返回,一个字符都不多。之所以单独给这个函数、不并进 BuildSystemPrompt
-// 的参数表:/model 切换要"下一轮请求生效",而 AgentLoop 的系统提示构造后
-// 改不了(agent 层现有文件不动),只能由发请求前的包装层(main.cpp 的
-// ModelInstructionsBackend)对 Request.system 现拼现用——单发模式没有
-// /model,构造时直接用这个函数拼一次也是同一份结构。
+// 的参数表:/model 切换要"下一轮请求生效",而系统提示本体跨轮稳定——
+// 批四起这段由 Agent 拼请求时按皮上的 model_instructions 现拼(从前是
+// 传输层的 ModelInstructionsBackend 干的活);单发模式没有 /model,构造
+// 时直接用这个函数拼一次也是同一份结构。
 inline std::string WithModelInstructions(const std::string& system_prompt, const std::string& base_instructions) {
     if (base_instructions.empty()) {
         return system_prompt;
@@ -51,10 +51,10 @@ inline std::string WithModelInstructions(const std::string& system_prompt, const
 
 // tool_search(延迟挂载)的索引段注入点:把"另有 N 个延迟工具……"那一段
 // (tools::BuildDeferredToolsIndexSegment 算出来)追加到已拼好的系统提示
-// 末尾;空串原样返回,一个字符都不多。跟 WithModelInstructions 同一个路数、
-// 同一个理由:索引段随 loaded 集合逐轮变化(检索命中的工具要从索引里消失),
-// AgentLoop 的系统提示构造后改不了,只能由发请求前的包装层(main.cpp 的
-// DeferredIndexBackend)对 Request.system 现拼现用;子代理则在 AgentTool
+// 末尾;空串原样返回,一个字符都不多。跟 WithModelInstructions 同一个
+// 路数:索引段随 loaded 集合逐轮变化(检索命中的工具要从索引里消失),
+// 批四起这段由 Agent 拼请求时按皮上的 deferred_index_provider 现查现拼
+// (从前是传输层的 DeferredIndexBackend 干的活);子代理则在 AgentTool
 // 构造 sub_loop 系统提示时按当下的 loaded 拼一次。
 inline std::string WithDeferredToolsIndex(const std::string& system_prompt, const std::string& index_segment) {
     if (index_segment.empty()) {

@@ -1,13 +1,22 @@
-// 会话后端栈:按 wire 造真实 client(BuildBackend),再按固定次序包若干层
-// 请求改写器——切 provider 不换引用(RebuildableBackend)、/model 与 /think
-// 即时生效(Model/ThinkOverrideBackend)、模型目录专属指令与"魂"追加进
-// 系统提示(压轴次序见各类注释)、延迟工具索引段(tool_search)。
+// 会话后端栈(骨架拆解批四收口):按 wire 造真实 client(BuildBackend),
+// 外加一只稳定壳(RebuildableBackend)——会话里切 provider 时,Spinner、
+// ToolRuntime、模型路由、Agent 都还握着 Backend&;这层把真正的 client 藏
+// 起来并按需替换,引用地址不变,下一次请求自然落到新 base_url/wire/key
+// 上。切端的绑定规矩(病十一其二):provider 字符串与 backend 引用只在
+// HandleProviderCommand 一条路上一起换(Rebuild + rebuild_loop 重建皮),
+// 不再有第二处改字符串不动后端的旁路。
 //
-// 这一层只认 api/config/agent/cli 的既有抽象,不 include 交互会话的东西;
-// 各层可直测。
+// 从前的五层请求改写后端(Model/Think/ModelInstructions/SoulOverlay/
+// DeferredIndex,backend_stack.hpp:52-158 的老账)已整体退役:那五样会话
+// 级请求策略当年为不碰 agent 文件全挂传输层,现在归皮上管道——model/
+// effort 走 AgentProfile.request,模型指令/魂/延迟索引是皮上叠层,由
+// Agent 拼请求时就地生效(见 agent/agent.hpp 的 AgentProfile 注释);
+// /model、/think、/soul 的即时生效由会话层 SyncAgentRequestPolicy 同步。
+//
+// 这一层只认 api/config 的既有抽象,不 include 交互会话的东西;可直测。
 //
 // 实现在 backend_stack.cpp(编译边界:头文件只放类形状与函数声明,具体
-// client、prompts 的依赖都留在 .cpp 一侧)。
+// client 的依赖都留在 .cpp 一侧)。
 //
 // SpinnerBackend 原先住这(最外层起停"思考中"转轮);骨架拆解批二把它
 // 挪去了 cli/spinner_backend.hpp——UI 件不混传输层。
@@ -21,9 +30,7 @@
 #include <string>
 
 #include "api/backend.hpp"
-#include "cli/theme.hpp"
 #include "config/config.hpp"
-#include "config/model_catalog.hpp"
 
 namespace lubancode::app {
 
@@ -31,9 +38,9 @@ namespace lubancode::app {
 // 背后具体是哪个协议在干活。
 std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::Config& config);
 
-// 会话里切 provider 时，外层 Model/Think/Soul 等包装器、AgentLoop 和工具
-// 都还握着 Backend&。这一层把真正的 client 藏起来并按需替换，引用地址
-// 不变；下一次请求自然落到新 base_url/wire/key 上。
+// 会话里切 provider 时,外层包装器、Agent 和工具都还握着 Backend&。这一层
+// 把真正的 client 藏起来并按需替换,引用地址不变;下一次请求自然落到新
+// base_url/wire/key 上。
 class RebuildableBackend : public lubancode::api::Backend {
 public:
     explicit RebuildableBackend(const lubancode::config::Config& config);
@@ -47,115 +54,6 @@ public:
 
 private:
     std::unique_ptr<lubancode::api::Backend> inner_;
-};
-
-// 包一层 Backend:真正发请求前,把 Request.model 换成"当前会话实际在用的
-// model"。AgentLoop 的 model 是构造时定死的私有成员,没有 setter(agent 层
-// 现有文件不让动,详见任务规矩),这层包装是唯一能让 /model 切换在下一次
-// 请求"真正生效"、又不用碰 agent/loop.hpp/.cpp 的办法。current_model 用
-// shared_ptr,是因为 /model 命令改的和这里读的得是同一块内存,AgentLoop
-// 只认引用、包装器要跨多轮 Run() 存活。
-class ModelOverrideBackend : public lubancode::api::Backend {
-public:
-    ModelOverrideBackend(lubancode::api::Backend& inner, std::shared_ptr<std::string> current_model);
-
-    std::expected<void, lubancode::api::Error> send_stream(
-        const lubancode::api::Request& request,
-        const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
-        const std::atomic<bool>* cancel = nullptr) override;
-
-private:
-    lubancode::api::Backend& inner_;
-    std::shared_ptr<std::string> current_model_;
-};
-
-// 包一层 Backend:真正发请求前,把 Request.reasoning_effort 换成"当前会话
-// 实际在用的推理强度"。跟 ModelOverrideBackend 是同一个套路,同样的理由
-// (AgentLoop 没有 setter,agent 层现有文件不让动)——current_think 为空串
-// 就是"不发这个参数",维持原有行为不变。/think 命令改的和这里读的是同一
-// 块 shared_ptr<string> 内存,单发模式(AskOnce)没有 /think 命令,
-// current_think 构造后就不再变,等价于"直接按配置发一次"。
-class ThinkOverrideBackend : public lubancode::api::Backend {
-public:
-    ThinkOverrideBackend(lubancode::api::Backend& inner, std::shared_ptr<std::string> current_think,
-                         std::shared_ptr<std::string> current_model,
-                         const lubancode::config::ModelCatalog* catalog,
-                         const std::string* current_provider = nullptr);
-
-    std::expected<void, lubancode::api::Error> send_stream(
-        const lubancode::api::Request& request,
-        const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
-        const std::atomic<bool>* cancel = nullptr) override;
-
-private:
-    lubancode::api::Backend& inner_;
-    std::shared_ptr<std::string> current_think_;
-    std::shared_ptr<std::string> current_model_;
-    const lubancode::config::ModelCatalog* catalog_ = nullptr;
-    const std::string* current_provider_ = nullptr;
-};
-
-// 包一层 Backend:真正发请求前,把模型目录(models.json)里当前模型的
-// base_instructions 作为独立段追加到 Request.system 末尾。跟 Model/
-// ThinkOverrideBackend 同一个套路、同一个理由(AgentLoop 的系统提示构造时
-// 定死,agent 层现有文件不动)——current_instructions 为空串就是"不追加",
-// 原样透传,零破坏。/model 切换改的和这里读的是同一块 shared_ptr<string>
-// 内存,切到目录外模型时上层把它清空,旧模型的指令自然不再发。
-class ModelInstructionsBackend : public lubancode::api::Backend {
-public:
-    ModelInstructionsBackend(lubancode::api::Backend& inner, std::shared_ptr<std::string> current_instructions);
-
-    std::expected<void, lubancode::api::Error> send_stream(
-        const lubancode::api::Request& request,
-        const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
-        const std::atomic<bool>* cancel = nullptr) override;
-
-private:
-    lubancode::api::Backend& inner_;
-    std::shared_ptr<std::string> current_instructions_;
-};
-
-// 包一层 Backend:真正发请求前,把当前的"魂"(SOUL.md / souls/ 的风格叠加
-// 层)追加到 Request.system 最后。跟上面几层同一个套路、同一个理由。魂
-// 必须压轴——所以这一层要放在 ModelInstructionsBackend 的更内侧(请求先
-// 经过 instructions 层追加模型专属段,再到这层追加魂),字符串里魂自然
-// 排最后。current_soul 存的是魂文件的原始内容(注释由 agent::WithSoul 在
-// 注入时剥),/soul 切换改的和这里读的是同一块 shared_ptr<string> 内存,
-// 下一轮请求即时生效;空串(SOUL.md 默认、或 /soul off)= 不追加,零破坏。
-class SoulOverlayBackend : public lubancode::api::Backend {
-public:
-    SoulOverlayBackend(lubancode::api::Backend& inner, std::shared_ptr<std::string> current_soul);
-
-    std::expected<void, lubancode::api::Error> send_stream(
-        const lubancode::api::Request& request,
-        const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
-        const std::atomic<bool>* cancel = nullptr) override;
-
-private:
-    lubancode::api::Backend& inner_;
-    std::shared_ptr<std::string> current_soul_;
-};
-
-// tool_search(延迟挂载):包一层 Backend,真正发请求前把"延迟未加载"工具
-// 的紧凑索引段追加到 Request.system 末尾。跟 ModelInstructionsBackend 同一个
-// 套路、同一个理由(AgentLoop 的系统提示构造后改不了,agent 层现有构造不
-// 破)——index_provider 每次 send_stream 现算,tool_search 命中后的下一次
-// 请求,新挂载的工具自然从索引段里消失;provider 给空串就原样透传,零破坏。
-// 这层只包给主 AgentLoop 用,不进 AgentTool 拿的那条链——子代理的索引段
-// 按它自己的注册表算,由 AgentTool::SetDeferredIndexProvider 单独注入,
-// 两边各管各的,不会重复追加。
-class DeferredIndexBackend : public lubancode::api::Backend {
-public:
-    DeferredIndexBackend(lubancode::api::Backend& inner, std::function<std::string()> index_provider);
-
-    std::expected<void, lubancode::api::Error> send_stream(
-        const lubancode::api::Request& request,
-        const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
-        const std::atomic<bool>* cancel = nullptr) override;
-
-private:
-    lubancode::api::Backend& inner_;
-    std::function<std::string()> index_provider_;
 };
 
 }  // namespace lubancode::app
