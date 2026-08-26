@@ -281,33 +281,12 @@ private:
     bool turn_finished_ = false;
 };
 
-// 两轨并行的装配笔(骨架拆解批二):把 events(适配器 MakeCallbacks 出的
-// 显示回调)并进 target(既有消费方的回调)——每个出水口先走 events
-// (事件流,canonical 账)再走 target,次序稳定;任一侧缺省就只走另一侧。
-// 只并 void 出水口(正文/思考增量、工具起止、服务端内置工具、usage);
-// 确认/钩子/权限/拦截查询这些控制口有返回值、不是出水口,不并——它们
-// 仍归各装配点自己配。
+// 两轨并行的装配笔(骨架拆解批二;批三起本体下沉 engine,这里转发):
+// 把 events(适配器 MakeCallbacks 出的显示回调)并进 target(既有消费方
+// 的回调)。语义见 agent/loop.hpp 的 agent::ComposeDisplayCallbacks——
+// 只并 void 出水口;控制口不并。老消费方(app 装配层)继续从这里引。
 inline void ComposeDisplayCallbacks(agent::Callbacks& target, const agent::Callbacks& events) {
-    const auto compose = [](auto& target_fn, const auto& events_fn) {
-        if (!events_fn) {
-            return;
-        }
-        if (!target_fn) {
-            target_fn = events_fn;
-            return;
-        }
-        target_fn = [front = events_fn, back = std::move(target_fn)](auto&&... args) -> void {
-            front(args...);
-            back(std::forward<decltype(args)>(args)...);
-        };
-    };
-    compose(target.on_text_delta, events.on_text_delta);
-    compose(target.on_thinking_delta, events.on_thinking_delta);
-    compose(target.on_tool_start, events.on_tool_start);
-    compose(target.on_tool_done, events.on_tool_done);
-    compose(target.on_builtin_tool_start, events.on_builtin_tool_start);
-    compose(target.on_builtin_tool_done, events.on_builtin_tool_done);
-    compose(target.on_usage, events.on_usage);
+    agent::ComposeDisplayCallbacks(target, events);
 }
 
 }  // namespace lubancode::runtime

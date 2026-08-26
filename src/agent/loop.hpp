@@ -397,6 +397,18 @@ void InjectIncomingMessage(std::vector<api::Message>& history, api::Message inco
 
 using InboxPoll = std::function<std::optional<api::Message>()>;
 
+// 系统提示的段落开关(骨架拆解批三·病十裁决):mcp/web/lsp/platforms 四段
+// 从前只在主循环的 AssembleSystemPrompt 里按配置拼,子代理走 BuildSystemPrompt
+// 薄壳不传——子代理天生缺这四段,无文档说是设计还是疏漏。裁决:补,写明补
+// ——四段开关写进皮(显式声明),子代理默认与主代理同段;真要少的皮显式
+// 关。皮上写不出的差别,就是还没想清的差别。
+struct PromptSectionSwitches {
+    bool mcp = true;   // features/mcp.md 段
+    bool web = true;   // features/web.md 段
+    bool lsp = true;   // features/lsp.md 段
+    std::string wire;  // platforms/<wire>.md 段;空 = 不注平台段
+};
+
 // Agent 的完整装配档案。宿主只需换这份数据，便能得到 main、Explore、
 // general-purpose 或 workflow agent；不靠继承分叉实现。
 struct AgentProfile {
@@ -404,7 +416,40 @@ struct AgentProfile {
     api::RequestProfile request;
     AgentRuntimeProfile runtime;
     std::string system_prompt;
+    // 病十:四段开关随皮走。main 的皮按实际配置填(config.mcp_servers/
+    // search/lsp_servers/wire);子代理的皮从 main 派生时同段拷贝;旧调用
+    // 方不填就是缺省全开(裁决:补)。
+    PromptSectionSwitches prompt_sections;
 };
+
+// 装配并行的回调笔(骨架拆解批三,原语自 runtime 下沉 engine):把 events
+// 的显示回调并进 target——每个出水口先走 events(事件流,canonical 账)再
+// 走 target,次序稳定;任一侧缺省就只走另一侧。只并 void 出水口(正文/
+// 思考增量、工具起止、服务端内置工具、usage);确认/钩子/权限/拦截查询
+// 这些控制口有返回值、不是出水口,不并——它们仍归各装配点自己配。
+// runtime/turn_event_adapter.hpp 的同名函数是这枚的转发(老消费方不断链)。
+inline void ComposeDisplayCallbacks(Callbacks& target, const Callbacks& events) {
+    const auto compose = [](auto& target_fn, const auto& events_fn) {
+        if (!events_fn) {
+            return;
+        }
+        if (!target_fn) {
+            target_fn = events_fn;
+            return;
+        }
+        target_fn = [front = events_fn, back = std::move(target_fn)](auto&&... args) -> void {
+            front(args...);
+            back(std::forward<decltype(args)>(args)...);
+        };
+    };
+    compose(target.on_text_delta, events.on_text_delta);
+    compose(target.on_thinking_delta, events.on_thinking_delta);
+    compose(target.on_tool_start, events.on_tool_start);
+    compose(target.on_tool_done, events.on_tool_done);
+    compose(target.on_builtin_tool_start, events.on_builtin_tool_start);
+    compose(target.on_builtin_tool_done, events.on_builtin_tool_done);
+    compose(target.on_usage, events.on_usage);
+}
 
 class Agent;
 

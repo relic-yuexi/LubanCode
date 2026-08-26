@@ -37,6 +37,11 @@ namespace lubancode::app_server {
 
 namespace {
 
+// 病十(骨架拆解批三):app-server 回合的步数硬闸,从前散在装配处的魔数
+// 32,现在立名进皮(AgentProfile.runtime.max_steps_per_turn 的取值源)。
+// 协议前端没有 ESC 可打断,不设闸会真跑飞;真配置线接进来再换。
+constexpr int kAppServerMaxStepsPerTurn = 32;
+
 void Diagnose(const std::string& text) {
     std::fprintf(stderr, "[app-server] %s\n", text.c_str());
 }
@@ -937,9 +942,16 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         std::unique_ptr<tools::ToolRegistry> registry =
             registry_factory_ ? registry_factory_() : std::make_unique<tools::ToolRegistry>();
 
-        agent::AgentRuntimeProfile profile;
-        profile.max_steps_per_turn = 32; // 骨架期防跑飞;真配置线接进来再换
-        agent::Agent loop(*backend, *registry, std::move(profile), std::string("lubancode app-server"));
+        // 病十(骨架拆解批三):差别全部进皮。app-server 这张皮从前走兼容
+        // 门旁参 + 字面量,现在正门构造,两处差别显式写在皮上:
+        //   max_steps——骨架期防跑飞的硬闸(协议前端没有 ESC 可打断,不设
+        //   闸会真跑飞;真配置线接进来再换);
+        //   system_prompt——协议服务器的最小人格(不吃终端人格/法文件:
+        //   这里没有交互提示词栈,装了反而是没想清的差别)。
+        agent::AgentProfile profile;
+        profile.runtime.max_steps_per_turn = kAppServerMaxStepsPerTurn;
+        profile.system_prompt = "lubancode app-server";
+        agent::Agent loop(*backend, *registry, std::move(profile));
 
         // ---- 事件流(骨架拆解批二:整装切到 TurnEventAdapter) ----
         // 旧路在本地手拼 text/thinking 懒起条、open_tools 对账、收口补账,
