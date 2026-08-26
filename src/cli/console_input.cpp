@@ -971,12 +971,23 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             SetComposerTarget(std::nullopt);
         }
         std::vector<std::string> lines = RenderAgentDockLines(layout, width);
+        // 小提示挂点:插在首行(操作提示)之下,只认非空坞。全部条目退场
+        // (done+delivered/cancelled)或矮屏摆不下时 LayoutAgentDock 整坞
+        // 不出场,lines 是空的——begin()+1 已越过 end(),insert 属未定义
+        // 行为:MSVC 在新配的 1 格缓冲之外落笔,写出堆外。查看态完成退场
+        // 一拍(结果交回 main、toast 刚挂上、场上再无活动代理)正踩中这条。
+        // 空坞连提示一起不挂:没有可挂的帧,按过期自收,绝不越界落笔。
+        const auto hang_dock_notice_row = [&lines](std::string row) {
+            if (!lines.empty()) {
+                lines.insert(lines.begin() + 1, std::move(row));
+            }
+        };
         if (!panel_notice.empty()) {
             if (std::chrono::steady_clock::now() < panel_notice_until) {
                 // move 版 insert:提示行打完就不再用 panel_notice(走 else 分支
                 // 才 clear),顺带绕开 GCC 13 对 const& 插入路径的
                 // -Warray-bounds 误报(把内联后的栈上 string 认成地址零)。
-                lines.insert(lines.begin() + 1, std::move(panel_notice));
+                hang_dock_notice_row(std::move(panel_notice));
             } else {
                 panel_notice.clear();
             }
@@ -987,7 +998,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         PanelToastState& toast = PanelToastSlot();
         if (!toast.text.empty()) {
             if (std::chrono::steady_clock::now() < toast.until) {
-                lines.insert(lines.begin() + 1, toast.text);
+                hang_dock_notice_row(toast.text);
             } else {
                 toast.text.clear();
             }
