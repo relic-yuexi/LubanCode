@@ -2087,165 +2087,57 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 return HandleClearCommand(session_state, config, theme, spinner_enabled);
             }
             case lubancode::cli::SlashCommand::Context: {
-                // 裸敲才收集三类 token 估算(带参数走切窗口分支,收了也白收)。
-                // 口径对齐"实际发出的请求",token 全按统一口径
-                // (agent/context.hpp:ASCII 4 字符约 1 token,非 ASCII 每字
-                // 约 1.5 token)折算:
-                //   系统提示 = AgentLoop 那份拼装结果 + 目录 base_instructions
-                //              + 魂(几层 Backend 包装发请求前拼进 system 的);
-                //   工具定义 = registry 里"会真进 tools 数组"的工具(延迟
-                //              机制开着就按谓词过滤成核心+已挂载)的
-                //              名字+描述+schema,外加延迟索引段;
-                //   对话历史 = loop.History() 全量(文本/工具调用/工具结果)。
-                std::size_t sys_tokens = 0;
-                std::size_t tools_tokens = 0;
-                std::size_t history_tokens = 0;
-                if (parsed.args.empty()) {
-                    sys_tokens =
-                        lubancode::agent::EstimateUtf8Tokens(lubancode::agent::AssembleSystemPrompt(prompt_options)) +
-                        lubancode::agent::EstimateUtf8Tokens(*current_model_instructions) +
-                        lubancode::agent::EstimateUtf8Tokens(*current_soul);
-                    for (const auto& tool : registry().All()) {
-                        if (!main_tool_filter()(*tool)) {
-                            continue;  // 延迟未挂载:不在 tools 数组里,不算
-                        }
-                        tools_tokens += lubancode::agent::EstimateUtf8Tokens(tool->name()) +
-                                        lubancode::agent::EstimateUtf8Tokens(tool->description()) +
-                                        lubancode::agent::EstimateUtf8Tokens(tool->input_schema().dump());
-                    }
-                    if (main_deferral) {
-                        tools_tokens += lubancode::agent::EstimateUtf8Tokens(
-                            lubancode::tools::BuildDeferredToolsIndexSegment(registry(), *loaded_tools()));
-                    }
-                    history_tokens = lubancode::agent::EstimateHistoryTokens(main_agent->History());
-                }
-                // 分层占用 + 预算总账(第四期,规格"/context"节):视图各层
-                // 枚数从决策台账数,预算从统一公式算,/context 打的就是
-                // compact 用的同一本账。
-                app::ContextLayersReport layers;
-                if (parsed.args.empty()) {
-                    for (const auto& [id, decision] : main_agent->result_view_memo().decisions) {
-                        (void)id;
-                        switch (decision.kind) {
-                            case lubancode::agent::ResultViewKind::Full:
-                            case lubancode::agent::ResultViewKind::NewVersion:
-                                layers.inline_full_results += 1;
-                                break;
-                            case lubancode::agent::ResultViewKind::Artifact:
-                                layers.artifact_previews += 1;
-                                break;
-                            case lubancode::agent::ResultViewKind::DuplicateRef:
-                                break;
-                        }
-                    }
-                    layers.reclaimable_bytes = main_agent->structural_stats().reclaimable_bytes();
-                    lubancode::agent::ContextBudgetInputs budget_inputs;
-                    budget_inputs.window_tokens = context_tracker.window_tokens() > 0
-                                                      ? std::optional<std::size_t>(context_tracker.window_tokens())
-                                                      : std::nullopt;
-                    budget_inputs.stable_system_tokens =
-                        lubancode::agent::EstimateUtf8Tokens(lubancode::agent::AssembleSystemPrompt(prompt_options));
-                    budget_inputs.model_instructions_tokens =
-                        lubancode::agent::EstimateUtf8Tokens(*current_model_instructions) +
-                        lubancode::agent::EstimateUtf8Tokens(*current_soul);
-                    budget_inputs.tool_schemas_tokens = tools_tokens;
-                    budget_inputs.current_user_turn_tokens =
-                        lubancode::agent::EstimateHistoryTokens(std::vector<lubancode::api::Message>(
-                            main_agent->History().begin() + static_cast<std::ptrdiff_t>(
-                                                       lubancode::agent::HotZoneStartIndex(main_agent->History())),
-                            main_agent->History().end()));
-                    budget_inputs.protected_hot_zone_tokens = lubancode::agent::kDefaultHotZoneTokens;
-                    budget_inputs.requested_output_reserve_tokens =
-                        static_cast<std::size_t>(main_agent->runtime_profile().max_output_tokens.value_or(
-                            lubancode::agent::kUnsetOutputReserveEstimateTokens));
-                    budget_inputs.compact_prompt_overhead_tokens = 512;  // 压缩指令的公开估算档
-                    layers.budget = lubancode::agent::BuildContextBudgetPlan(budget_inputs);
-                    layers.last_compact_line = last_compact_line;
-                }
-                HandleContextCommand(parsed.args, context_tracker, sys_tokens, tools_tokens, history_tokens, theme,
-                                     main_agent->cache_epoch(), &main_agent->runtime_profile(),
-                                     model_router != nullptr ? &model_router->ledger() : nullptr,
-                                     artifact_store.get(), &layers);
+                // /context presenter(终端接线收尾单):三类 token 与分层
+                // 预算的现场收集在 commands/session_commands,这里只递材料。
+                lubancode::app::ContextEstimateInputs context_in;
+                context_in.prompt_options = &prompt_options;
+                context_in.model_instructions = current_model_instructions.get();
+                context_in.soul = current_soul.get();
+                context_in.registry = &registry();
+                context_in.tool_filter = &main_tool_filter();
+                context_in.tool_deferral = main_deferral;
+                context_in.loaded_tools = &*loaded_tools();
+                context_in.agent = &*main_agent;
+                context_in.context_tracker = &context_tracker;
+                context_in.usage_ledger = model_router != nullptr ? &model_router->ledger() : nullptr;
+                context_in.artifact_store = artifact_store.get();
+                context_in.last_compact_line = &last_compact_line;
+                RunContextCommand(parsed.args, context_in, theme);
                 break;
             }
             case lubancode::cli::SlashCommand::Compact: {
-                // PreCompact(trigger=manual):钩子可以拦这一压(备份场景)。
-                {
-                    lubancode::hooks::HookDispatcher* dispatcher = lubancode::app::HookRuntime();
-                    if (dispatcher != nullptr && !dispatcher->Empty() &&
-                        dispatcher->HasHandlersFor(lubancode::hooks::HookEvent::PreCompact)) {
-                        lubancode::hooks::HookPayload payload;
-                        payload.event = lubancode::hooks::HookEvent::PreCompact;
-                        payload.fields["trigger"] = "manual";
-                        payload.match_value = "manual";
-                        const auto merged = dispatcher->Emit(lubancode::hooks::HookEvent::PreCompact, payload);
-                        if (merged.blocked) {
-                            TermOut() << theme.error << "PreCompact 钩子拦下这次压缩: " << merged.block_reason
-                                      << theme.reset << "\n";
-                            break;
-                        }
-                    }
-                }
-                // 压缩路由(模型分工第一期):/compact 走 cheap 角色的有效值
-                // (cheap_model 未配置回落 normal;compact_model 旧字段只在
-                // 没配 cheap 时顶替压缩)。backend 可能是跨 provider 的另一只
-                // client,拿不到就明说,不拿会话模型顶包。
-                const auto compact_routed =
-                    model_router->Route(lubancode::agent::TaskKind::Compact);
-                if (compact_routed.backend == nullptr) {
-                    TermOut() << theme.error << "压缩路由找不到 provider \"" << compact_routed.route.provider
-                              << "\",本次 /compact 未执行" << theme.reset << "\n";
-                    break;
-                }
-                lubancode::agent::BackgroundCallAccounting compact_accounting;
-                const auto compact_result =
-                    HandleCompactCommand(parsed.args, *main_agent, *compact_routed.backend, compact_routed.route, theme,
-                                          spinner_enabled, BuildCompactOptions(), session_compact_epoch,
-                                          &compact_accounting);
-                // 分角色记账 + 状态栏短闪:压缩用了谁、前后多少,一行交代。
-                model_router->ledger().Record(
-                    lubancode::agent::ModelRole::Cheap, compact_routed.route.model, compact_accounting.usage,
-                    compact_accounting.duration_ms, compact_accounting.usage_reported);
-                if (compact_result.event.has_value()) {
-                    TermOut() << theme.stats
-                              << trf("router.compact_flash",
-                                     lubancode::cli::FormatTokenCount(compact_result.before_tokens),
-                                     lubancode::cli::FormatTokenCount(compact_result.after_tokens),
-                                     "cheap:" + compact_routed.route.model)
-                              << theme.reset << "\n";
-                    // 最近一次 compact 的台账(/context 展示,第四期)。
-                    last_compact_line = "cheap:" + compact_routed.route.model + " · " +
-                                        lubancode::cli::FormatTokenCount(compact_result.before_tokens) + "→" +
-                                        lubancode::cli::FormatTokenCount(compact_result.after_tokens) + " · " +
-                                        std::to_string(compact_accounting.duration_ms / 1000) + "." +
-                                        std::to_string((compact_accounting.duration_ms % 1000) / 100) +
-                                        "s · 校验通过(manifest 守恒)";
-                }
-                // 压缩把 history 换短了(失败则原样):落盘基线收到新长度,
-                // 存档文件保持只追加——全量流水不动,补写一行 compact_v2
-                // 事件(回放语义与 v1 同型,另记 manifest/epoch/metrics),
-                // /resume 按事件回放出压缩后的活状态,/export 仍走全量。
-                persisted_count = (std::min)(persisted_count, main_agent->History().size());
-                if (compact_result.event.has_value() && session_store.active() && !session_store_broken) {
-                    // 写盘校验:compact 事件没落盘,存档里就没有压缩记录,
-                    // /resume 会按全量流水回放到压缩前状态——打警告说明白。
-                    // 取非 const 副本补 goal snapshot(metrics 是加层,不动
-                    // 压缩正账)。
-                    auto compact_event_with_goal = *compact_result.event;
-                    AttachGoalSnapshotToCompact(compact_event_with_goal);
-                    AttachLoopSnapshotToCompact(compact_event_with_goal);
-                    if (!session_store.AppendCompactV2Event(compact_event_with_goal)) {
-                        TermOut() << theme.error << tr("session.compact_event_failed") << theme.reset << "\n";
-                    }
-                }
-                if (compact_result.event.has_value()) {
-                    // PostCompact 审计 + 压缩后的上下文重注入走 SessionStart
-                    // (source=compact),不靠 PostCompact 硬塞(规格)。
-                    EmitSessionHook(lubancode::hooks::HookEvent::PostCompact,
-                                    nlohmann::json{{"trigger", "manual"}}, "manual");
-                    EmitSessionHook(lubancode::hooks::HookEvent::SessionStart,
-                                    nlohmann::json{{"source", "compact"}}, "compact");
-                }
+                // /compact presenter(终端接线收尾单):PreCompact 闸、cheap
+                // 路由、正戏、记账、落盘与审计钩子的接线全在
+                // commands/session_commands,这里只递会话材料。
+                lubancode::app::CompactSessionInputs compact_in;
+                compact_in.agent = &*main_agent;
+                compact_in.theme = &theme;
+                compact_in.spinner_enabled = spinner_enabled;
+                compact_in.session_compact_epoch = &session_compact_epoch;
+                compact_in.last_compact_line = &last_compact_line;
+                compact_in.persisted_count = &persisted_count;
+                compact_in.session_store = &session_store;
+                compact_in.session_store_broken = session_store_broken;
+                compact_in.build_compact_options = [this]() { return BuildCompactOptions(); };
+                compact_in.attach_goal_snapshot = [this](lubancode::sessions::CompactV2Event& event) {
+                    AttachGoalSnapshotToCompact(event);
+                };
+                compact_in.attach_loop_snapshot = [this](lubancode::sessions::CompactV2Event& event) {
+                    AttachLoopSnapshotToCompact(event);
+                };
+                compact_in.emit_session_hook =
+                    [this](lubancode::hooks::HookEvent event, nlohmann::json fields, const std::string& match_value) {
+                        EmitSessionHook(event, std::move(fields), match_value);
+                    };
+                compact_in.route_compact = [this]() {
+                    return model_router->Route(lubancode::agent::TaskKind::Compact);
+                };
+                compact_in.record_usage = [this](const lubancode::agent::ModelRoute& route,
+                                                 const lubancode::agent::BackgroundCallAccounting& accounting) {
+                    model_router->ledger().Record(lubancode::agent::ModelRole::Cheap, route.model, accounting.usage,
+                                                  accounting.duration_ms, accounting.usage_reported);
+                };
+                RunCompactCommand(parsed.args, compact_in);
                 break;
             }
             case lubancode::cli::SlashCommand::Think:
@@ -2489,65 +2381,23 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 const lubancode::app::ParsedWorkflowCommand wf_parsed =
                     lubancode::app::ParseWorkflowCommand(parsed.args);
                 if (wf_parsed.action == lubancode::app::WorkflowCommandAction::Run) {
-                    // run:执行器装配(第 4 批宿主执行器)。transform/template
-                    // 用内建;tool/llm/approval/ask_user 接现成设施。llm 的
-                    // prompt 从 workflow 目录现读。
-                    std::map<lubancode::workflow::NodeKind,
-                             std::shared_ptr<lubancode::workflow::NodeExecutor>>
-                        executors;
-                    auto transform = std::make_shared<lubancode::workflow::TransformExecutor>();
-                    transform->Register("json_merge", [](const nlohmann::json& in) { return in; });
-                    executors[lubancode::workflow::NodeKind::Transform] = transform;
-                    executors[lubancode::workflow::NodeKind::Template] =
-                        std::make_shared<lubancode::workflow::TemplateExecutor>();
-                    executors[lubancode::workflow::NodeKind::Tool] =
-                        std::make_shared<lubancode::workflow::ToolExecutor>(BuildWorkflowToolOptions());
-                    {
-                        // prompt 从 workflow 目录读(包内相对路径;越界已被
-                        // validator 拦,这里只管读)。
-                        const lubancode::workflow::Catalog wf_catalog = lubancode::workflow::LoadCatalog(
-                            wf_ctx.project_root, wf_ctx.user_root);
-                        const lubancode::workflow::CatalogEntry* wf_entry = wf_catalog.Find(wf_parsed.id);
-                        const std::filesystem::path prompt_dir =
-                            wf_entry != nullptr ? wf_entry->dir : std::filesystem::path();
-                        const lubancode::workflow::PromptLoader workflow_prompt_loader =
-                            [prompt_dir](const std::string& relative) {
-                                if (prompt_dir.empty()) return std::string();
-                                std::error_code ec;
-                                const std::filesystem::path file = prompt_dir / relative;
-                                if (!std::filesystem::exists(file, ec)) return std::string();
-                                std::ifstream in(file, std::ios::binary);
-                                std::ostringstream buffer;
-                                buffer << in.rdbuf();
-                                return buffer.str();
-                            };
-                        lubancode::workflow::AgentExecutor::Options agent_options;
-                        agent_options.default_binding.backend = &real_backend;
-                        agent_options.default_binding.profile.provider = active_provider;
-                        agent_options.default_binding.profile.request.model = *current_model;
-                        agent_options.default_binding.profile.request.reasoning_effort = *current_think;
-                        if (const auto* entry = model_catalog.FindByProviderAndSlug(active_provider, *current_model);
-                            entry != nullptr) {
-                            agent_options.default_binding.profile.request.reasoning = entry->reasoning;
-                        }
-                        agent_options.default_binding.profile.runtime = main_agent->runtime_profile();
-                        agent_options.registry = &registry();
-                        agent_options.task_loader = workflow_prompt_loader;
-                        // 批二:agent 节点上事件流(会话 sink,seq 与主回合
-                        // 同源)。
-                        agent_options.event_sink = &session_events_;
-                        agent_options.thread_id = session_runtime_.thread_id();
-                        agent_options.ids = &session_runtime_.ids();
-                        executors[lubancode::workflow::NodeKind::Agent] =
-                            std::make_shared<lubancode::workflow::AgentExecutor>(std::move(agent_options));
-                        lubancode::workflow::LlmExecutor::Options llm_options;
-                        llm_options.backend = &real_backend;
-                        llm_options.model = *current_model;
-                        llm_options.prompt_loader = workflow_prompt_loader;
-                        executors[lubancode::workflow::NodeKind::Llm] =
-                            std::make_shared<lubancode::workflow::LlmExecutor>(llm_options);
-                    }
-                    TermOut() << lubancode::app::RunWorkflowById(wf_ctx, wf_parsed.id, wf_parsed.rest, executors);
+                    // run:执行器装配在 commands/workflow_commands(终端接线
+                    // 收尾单收口,与 alias 直呼共用一份)。
+                    lubancode::app::WorkflowExecutorContext wf_exec;
+                    wf_exec.registry = &registry();
+                    wf_exec.backend = &real_backend;
+                    wf_exec.build_tool_options = [this]() { return BuildWorkflowToolOptions(); };
+                    wf_exec.provider = active_provider;
+                    wf_exec.model = *current_model;
+                    wf_exec.effort = *current_think;
+                    wf_exec.model_catalog = &model_catalog;
+                    wf_exec.agent_profile = main_agent->runtime_profile();
+                    wf_exec.event_sink = &session_events_;
+                    wf_exec.thread_id = session_runtime_.thread_id();
+                    wf_exec.id_authority = &session_runtime_.ids();
+                    TermOut() << lubancode::app::RunWorkflowById(
+                        wf_ctx, wf_parsed.id, wf_parsed.rest,
+                        lubancode::app::BuildWorkflowExecutors(wf_ctx, wf_exec, wf_parsed.id));
                     break;
                 }
                 HandleWorkflowCommand(parsed.args, wf_ctx);
@@ -2575,60 +2425,23 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                     wf_ctx.theme = &theme;
                     const std::string wf_id = ResolveWorkflowAlias(wf_ctx, parsed.alias_word);
                     if (!wf_id.empty()) {
-                        // 与 /workflow run 同一道执行器装配。
-                        std::map<lubancode::workflow::NodeKind,
-                                 std::shared_ptr<lubancode::workflow::NodeExecutor>>
-                            executors;
-                        auto transform = std::make_shared<lubancode::workflow::TransformExecutor>();
-                        transform->Register("json_merge", [](const nlohmann::json& in) { return in; });
-                        executors[lubancode::workflow::NodeKind::Transform] = transform;
-                        executors[lubancode::workflow::NodeKind::Template] =
-                            std::make_shared<lubancode::workflow::TemplateExecutor>();
-                        executors[lubancode::workflow::NodeKind::Tool] =
-                            std::make_shared<lubancode::workflow::ToolExecutor>(BuildWorkflowToolOptions());
-                        {
-                            const lubancode::workflow::Catalog wf_catalog = lubancode::workflow::LoadCatalog(
-                                wf_ctx.project_root, wf_ctx.user_root);
-                            const lubancode::workflow::CatalogEntry* wf_entry = wf_catalog.Find(wf_id);
-                            const std::filesystem::path prompt_dir =
-                                wf_entry != nullptr ? wf_entry->dir : std::filesystem::path();
-                            const lubancode::workflow::PromptLoader workflow_prompt_loader =
-                                [prompt_dir](const std::string& relative) {
-                                    if (prompt_dir.empty()) return std::string();
-                                    std::error_code ec;
-                                    const std::filesystem::path file = prompt_dir / relative;
-                                    if (!std::filesystem::exists(file, ec)) return std::string();
-                                    std::ifstream in(file, std::ios::binary);
-                                    std::ostringstream buffer;
-                                    buffer << in.rdbuf();
-                                    return buffer.str();
-                                };
-                            lubancode::workflow::AgentExecutor::Options agent_options;
-                            agent_options.default_binding.backend = &real_backend;
-                            agent_options.default_binding.profile.provider = active_provider;
-                            agent_options.default_binding.profile.request.model = *current_model;
-                            agent_options.default_binding.profile.request.reasoning_effort = *current_think;
-                            if (const auto* entry = model_catalog.FindByProviderAndSlug(active_provider, *current_model);
-                                entry != nullptr) {
-                                agent_options.default_binding.profile.request.reasoning = entry->reasoning;
-                            }
-                            agent_options.default_binding.profile.runtime = main_agent->runtime_profile();
-                            agent_options.registry = &registry();
-                            agent_options.task_loader = workflow_prompt_loader;
-                            // 批二:agent 节点上事件流(与 /workflow run 同一道装配)。
-                            agent_options.event_sink = &session_events_;
-                            agent_options.thread_id = session_runtime_.thread_id();
-                            agent_options.ids = &session_runtime_.ids();
-                            executors[lubancode::workflow::NodeKind::Agent] =
-                                std::make_shared<lubancode::workflow::AgentExecutor>(std::move(agent_options));
-                            lubancode::workflow::LlmExecutor::Options llm_options;
-                            llm_options.backend = &real_backend;
-                            llm_options.model = *current_model;
-                            llm_options.prompt_loader = workflow_prompt_loader;
-                            executors[lubancode::workflow::NodeKind::Llm] =
-                                std::make_shared<lubancode::workflow::LlmExecutor>(llm_options);
-                        }
-                        TermOut() << lubancode::app::RunWorkflowById(wf_ctx, wf_id, parsed.args, executors);
+                        // 与 /workflow run 同一道执行器装配(终端接线收尾单
+                        // 收口在 commands/workflow_commands,共用一份)。
+                        lubancode::app::WorkflowExecutorContext wf_exec;
+                        wf_exec.registry = &registry();
+                        wf_exec.backend = &real_backend;
+                        wf_exec.build_tool_options = [this]() { return BuildWorkflowToolOptions(); };
+                        wf_exec.provider = active_provider;
+                        wf_exec.model = *current_model;
+                        wf_exec.effort = *current_think;
+                        wf_exec.model_catalog = &model_catalog;
+                        wf_exec.agent_profile = main_agent->runtime_profile();
+                        wf_exec.event_sink = &session_events_;
+                        wf_exec.thread_id = session_runtime_.thread_id();
+                        wf_exec.id_authority = &session_runtime_.ids();
+                        TermOut() << lubancode::app::RunWorkflowById(
+                            wf_ctx, wf_id, parsed.args,
+                            lubancode::app::BuildWorkflowExecutors(wf_ctx, wf_exec, wf_id));
                         break;
                     }
                 }

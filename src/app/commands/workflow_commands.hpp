@@ -10,15 +10,22 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "agent/agent.hpp"  // AgentProfile(批四自立门户)
+#include "api/backend.hpp"
 #include "cli/theme.hpp"
+#include "config/model_catalog.hpp"
+#include "runtime/event_sink.hpp"
+#include "runtime/id_authority.hpp"
 #include "tools/registry.hpp"
 #include "workflow/catalog.hpp"
+#include "workflow/host_executors.hpp"  // ToolExecutor::Options(执行器装配)
 #include "workflow/runtime.hpp"
 #include "workflow/validator.hpp"
 
@@ -79,5 +86,31 @@ std::string RunWorkflowById(const WorkflowCommandContext& context, const std::st
 // 会话层给 alias 直呼用的查询:catalog 里有没有这个 alias;返回 workflow
 // id(撞名禁用/不存在给空串)。第 5 批把这里换成 autocomplete 同源。
 std::string ResolveWorkflowAlias(const WorkflowCommandContext& context, const std::string& alias);
+
+// ---- 执行器装配(终端接线收尾单自大类两段重复装配收口) ------------------
+//
+// /workflow run 与 alias 直呼原先在 DispatchSlashCommand 里各拼一份一模
+// 一样的执行器表(第 4 批宿主执行器);收进这一只函数,两路共用。材料由
+// 会话侧递进来;prompt 目录按 workflow id 现查 catalog。
+struct WorkflowExecutorContext {
+    lubancode::tools::ToolRegistry* registry = nullptr;
+    lubancode::api::Backend* backend = nullptr;  // RebuildableBackend 那只
+    std::function<lubancode::workflow::ToolExecutor::Options()> build_tool_options;
+    std::string provider;                       // active_provider
+    std::string model;                          // *current_model
+    std::string effort;                         // *current_think
+    const lubancode::config::ModelCatalog* model_catalog = nullptr;  // reasoning 档;可空
+    lubancode::agent::AgentRuntimeProfile agent_profile;  // main_agent 的运行档案副本
+    lubancode::runtime::EventSink* event_sink = nullptr;  // 会话 fanout;可空
+    std::string thread_id;
+    lubancode::runtime::IdAuthority* id_authority = nullptr;  // 空 = 进程级
+};
+
+// 拼执行器表(transform/template/tool/agent/llm 五路)。wf_catalog_root 是
+// catalog 锚点(project_root/user_root),prompt 相对路径按 id 对应条目的
+// 目录读。
+std::map<lubancode::workflow::NodeKind, std::shared_ptr<lubancode::workflow::NodeExecutor>>
+BuildWorkflowExecutors(const WorkflowCommandContext& wf_ctx, const WorkflowExecutorContext& exec_ctx,
+                       const std::string& workflow_id);
 
 }  // namespace lubancode::app

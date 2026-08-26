@@ -2,10 +2,13 @@
 
 #include "app/commands/workflow_commands.hpp"
 
+#include <fstream>
 #include <iostream>
 #include <sstream>
 
+#include "agent/agent.hpp"  // AgentProfile(批四自立门户)
 #include "cli/slash_commands.hpp"
+#include "config/model_catalog.hpp"
 #include "platform/paths.hpp"
 #include "workflow/compiler.hpp"
 #include "workflow/graph_view.hpp"
@@ -521,6 +524,67 @@ std::string RunWorkflowById(const WorkflowCommandContext& context, const std::st
         out << theme.error << "  " << summary.error_code << ": " << summary.error_message << theme.reset << "\n";
     }
     return out.str();
+}
+
+// ---- 执行器装配(终端接线收尾单自大类两段重复装配收口;原文随行) -------
+
+std::map<lubancode::workflow::NodeKind, std::shared_ptr<lubancode::workflow::NodeExecutor>>
+BuildWorkflowExecutors(const WorkflowCommandContext& wf_ctx, const WorkflowExecutorContext& exec_ctx,
+                       const std::string& workflow_id) {
+    std::map<lubancode::workflow::NodeKind, std::shared_ptr<lubancode::workflow::NodeExecutor>> executors;
+    auto transform = std::make_shared<lubancode::workflow::TransformExecutor>();
+    transform->Register("json_merge", [](const nlohmann::json& in) { return in; });
+    executors[lubancode::workflow::NodeKind::Transform] = transform;
+    executors[lubancode::workflow::NodeKind::Template] =
+        std::make_shared<lubancode::workflow::TemplateExecutor>();
+    executors[lubancode::workflow::NodeKind::Tool] =
+        std::make_shared<lubancode::workflow::ToolExecutor>(exec_ctx.build_tool_options());
+    {
+        // prompt 从 workflow 目录读(包内相对路径;越界已被 validator
+        // 拦,这里只管读)。
+        const lubancode::workflow::Catalog wf_catalog =
+            lubancode::workflow::LoadCatalog(wf_ctx.project_root, wf_ctx.user_root);
+        const lubancode::workflow::CatalogEntry* wf_entry = wf_catalog.Find(workflow_id);
+        const std::filesystem::path prompt_dir =
+            wf_entry != nullptr ? wf_entry->dir : std::filesystem::path();
+        const lubancode::workflow::PromptLoader workflow_prompt_loader = [prompt_dir](const std::string& relative) {
+            if (prompt_dir.empty()) return std::string();
+            std::error_code ec;
+            const std::filesystem::path file = prompt_dir / relative;
+            if (!std::filesystem::exists(file, ec)) return std::string();
+            std::ifstream in(file, std::ios::binary);
+            std::ostringstream buffer;
+            buffer << in.rdbuf();
+            return buffer.str();
+        };
+        lubancode::workflow::AgentExecutor::Options agent_options;
+        agent_options.default_binding.backend = exec_ctx.backend;
+        agent_options.default_binding.profile.provider = exec_ctx.provider;
+        agent_options.default_binding.profile.request.model = exec_ctx.model;
+        agent_options.default_binding.profile.request.reasoning_effort = exec_ctx.effort;
+        if (exec_ctx.model_catalog != nullptr) {
+            if (const auto* entry = exec_ctx.model_catalog->FindByProviderAndSlug(exec_ctx.provider, exec_ctx.model);
+                entry != nullptr) {
+                agent_options.default_binding.profile.request.reasoning = entry->reasoning;
+            }
+        }
+        agent_options.default_binding.profile.runtime = exec_ctx.agent_profile;
+        agent_options.registry = exec_ctx.registry;
+        agent_options.task_loader = workflow_prompt_loader;
+        // 批二:agent 节点上事件流(会话 sink,seq 与主回合同源)。
+        agent_options.event_sink = exec_ctx.event_sink;
+        agent_options.thread_id = exec_ctx.thread_id;
+        agent_options.ids = exec_ctx.id_authority;
+        executors[lubancode::workflow::NodeKind::Agent] =
+            std::make_shared<lubancode::workflow::AgentExecutor>(std::move(agent_options));
+        lubancode::workflow::LlmExecutor::Options llm_options;
+        llm_options.backend = exec_ctx.backend;
+        llm_options.model = exec_ctx.model;
+        llm_options.prompt_loader = workflow_prompt_loader;
+        executors[lubancode::workflow::NodeKind::Llm] =
+            std::make_shared<lubancode::workflow::LlmExecutor>(llm_options);
+    }
+    return executors;
 }
 
 }  // namespace lubancode::app

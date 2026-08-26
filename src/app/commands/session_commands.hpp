@@ -17,17 +17,22 @@
 #include "agent/agent.hpp"  // Agent/AgentProfile(批四自立门户)
 #include "agent/context.hpp"  // EstimateHistory*:token 估算
 #include "agent/loop.hpp"
+#include "agent/prompt_assembler.hpp"  // PromptOptions(/context 的系统提示估算)
 #include "sessions/session_store.hpp"
 #include "sessions/session_lifecycle.hpp"
 #include "api/backend.hpp"
 #include "app/commands/command_flow.hpp"
+#include "app/hook_runtime.hpp"
+#include "app/model_router.hpp"
 #include "config/config.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/i18n.hpp"
 #include "cli/theme.hpp"
 #include "cli/worktree.hpp"
+#include "hooks/dispatcher.hpp"
 #include "platform/paths.hpp"
+#include "tools/tool.hpp"
 
 namespace lubancode::app {
 
@@ -74,6 +79,59 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                            const lubancode::agent::ModelUsageLedger* usage_ledger = nullptr,
                            const lubancode::agent::ContextArtifactStore* artifact_store = nullptr,
                            const ContextLayersReport* layers = nullptr);
+
+// ---- /context 的会话现场收集(终端接线收尾单自大类搬出) ------------------
+//
+// 裸敲才现算三类 token(带参数走切窗口分支,收了也白收)与分层预算账,
+// 收完递给上面那只 HandleContextCommand 打印。口径对齐"实际发出的请求",
+// token 全按统一口径(agent/context.hpp)折算:系统提示 = 拼装结果 +
+// 目录 base_instructions + 魂;工具定义 = 会真进 tools 数组的工具 +
+// 延迟索引段;对话历史 = loop.History() 全量。
+struct ContextEstimateInputs {
+    const lubancode::agent::PromptOptions* prompt_options = nullptr;
+    const std::string* model_instructions = nullptr;  // 目录 base_instructions
+    const std::string* soul = nullptr;
+    lubancode::tools::ToolRegistry* registry = nullptr;
+    const std::function<bool(const lubancode::tools::Tool&)>* tool_filter = nullptr;  // 延迟挂载谓词
+    bool tool_deferral = false;
+    const std::set<std::string>* loaded_tools = nullptr;
+    lubancode::agent::Agent* agent = nullptr;  // 活 loop(要能会话路由)
+    lubancode::cli::ContextTracker* context_tracker = nullptr;
+    const lubancode::agent::ModelUsageLedger* usage_ledger = nullptr;  // 可空
+    const lubancode::agent::ContextArtifactStore* artifact_store = nullptr;  // 可空
+    const std::string* last_compact_line = nullptr;
+};
+void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
+                       const lubancode::cli::Theme& theme);
+
+// ---- /compact 的会话接线(终端接线收尾单自大类搬出) ----------------------
+//
+// PreCompact 钩子闸 → cheap 路由 → HandleCompactCommand 正戏 → 分角色
+// 记账 + 状态栏短闪 → 落盘基线收缩 + compact_v2 事件追加(goal/loop
+// snapshot 由会话补)→ PostCompact/SessionStart 审计钩子。
+struct CompactSessionInputs {
+    lubancode::agent::Agent* agent = nullptr;
+    const lubancode::cli::Theme* theme = nullptr;
+    bool spinner_enabled = false;
+    int* session_compact_epoch = nullptr;          // 本场第几次压缩(递给正戏)
+    std::string* last_compact_line = nullptr;      // /context 的台账行(写出)
+    std::size_t* persisted_count = nullptr;        // 落盘基线(压缩后收缩)
+    lubancode::sessions::SessionStore* session_store = nullptr;
+    bool session_store_broken = false;
+    // 压缩参数现场收集(compact 的窗口预算/守恒校验材料)。
+    std::function<lubancode::agent::CompactOptions()> build_compact_options;
+    // compact_v2 事件落盘前补 goal/loop snapshot(有才带;manifest 守恒面)。
+    std::function<void(lubancode::sessions::CompactV2Event&)> attach_goal_snapshot;
+    std::function<void(lubancode::sessions::CompactV2Event&)> attach_loop_snapshot;
+    // PostCompact/SessionStart 审计钩子的会话级发射口。
+    std::function<void(lubancode::hooks::HookEvent, nlohmann::json, const std::string&)> emit_session_hook;
+    // 压缩路由:cheap 角色的 backend + route(会话侧的 ModelRouterService)。
+    std::function<lubancode::app::ModelRouterService::Routed()> route_compact;
+    // 分角色记账(压缩用了谁)。
+    std::function<void(const lubancode::agent::ModelRoute&, const lubancode::agent::BackgroundCallAccounting&)>
+        record_usage;
+};
+void RunCompactCommand(const std::string& args, const CompactSessionInputs& in);
 
 
 // /compact 命令的结果:event 是 compact_v2 压缩事件(archive + kept_from +
