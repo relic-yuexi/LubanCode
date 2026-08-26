@@ -476,17 +476,32 @@ private:
 
 }  // namespace
 
-TEST_CASE("ModelProviderHopFor:目录条目带归属才跨家,没归属/当前家/没条目都不动") {
+TEST_CASE("ModelProviderHopFor:当前家有的模型不报跨家,归属只认配置里真有的那家") {
     lubancode::config::ModelCatalog catalog;
+    lubancode::config::ModelCatalogEntry openai;
+    openai.provider_id = "openai";
+    openai.slug = "gpt-x";
     lubancode::config::ModelCatalogEntry cc;
     cc.provider_id = "ccmoon";
-    cc.slug = "gpt-x";
-    lubancode::config::ModelCatalogEntry local;
-    local.provider_id = "local";
-    local.slug = "qwen-y";
+    cc.slug = "gpt-x";  // 同名多家:官方 openai 与中转家 ccmoon 都列着
+    lubancode::config::ModelCatalogEntry own;
+    own.provider_id = "local";
+    own.slug = "qwen-y";
+    lubancode::config::ModelCatalogEntry relay;
+    relay.provider_id = "local";
+    relay.slug = "gpt-x";  // 当前家(自建中转)目录里也列着 openai 家的模型名
     lubancode::config::ModelCatalogEntry mine;
-    mine.slug = "anonymous-model";  // 用户自写条目:没写归属
-    catalog.models = {cc, local, mine};
+    mine.slug = "anonymous-model";  // 用户自写条目:没写归属,全局覆盖
+    lubancode::config::ModelCatalogEntry cc_lm_official;
+    cc_lm_official.provider_id = "openai";  // 没配的家排前
+    cc_lm_official.slug = "cc-lm";
+    lubancode::config::ModelCatalogEntry cc_lm;
+    cc_lm.provider_id = "ccmoon";  // 配了的家排后
+    cc_lm.slug = "cc-lm";
+    lubancode::config::ModelCatalogEntry other;
+    other.provider_id = "gemini";
+    other.slug = "solo-model";
+    catalog.models = {openai, cc, own, relay, mine, cc_lm_official, cc_lm, other};
 
     lubancode::config::ProviderConfig p_cc{
         .name = "ccmoon",
@@ -498,21 +513,26 @@ TEST_CASE("ModelProviderHopFor:目录条目带归属才跨家,没归属/当前�
     };
     std::vector<lubancode::config::ProviderConfig> providers = {p_cc};
 
-    // 当前家 local 的模型:不切。
+    // 当前家 local 的模型(目录条目):本家切换,零提示零动作。
     CHECK_FALSE(ModelProviderHopFor(catalog, providers, "local", "qwen-y").has_value());
+    // 中转家场景(验收返件):同名条目里 openai 官方排前、当前家 local
+    // 排后,当前家列着就是本家,不拿先出现的 openai 条目报跨家。
+    CHECK_FALSE(ModelProviderHopFor(catalog, providers, "local", "gpt-x").has_value());
+    // 用户自写条目(归属不明)压过一切:本家,不猜。
+    CHECK_FALSE(ModelProviderHopFor(catalog, providers, "local", "anonymous-model").has_value());
     // 目录没有的模型(手敲的裸名):不猜归属。
     CHECK_FALSE(ModelProviderHopFor(catalog, providers, "local", "who-am-i").has_value());
-    // 条目没写归属:不猜。
-    CHECK_FALSE(ModelProviderHopFor(catalog, providers, "local", "anonymous-model").has_value());
-    // 别家的模型:要切,配置里有这家 → configured。
-    const auto hop = ModelProviderHopFor(catalog, providers, "local", "gpt-x");
+    // 真跨家:当前家没有、别家条目列了、配置里有那家 → 切那家。没配的
+    // openai 条目排前也拦不住——归属只认配置里真有的那家。
+    const auto hop = ModelProviderHopFor(catalog, providers, "local", "cc-lm");
     REQUIRE(hop.has_value());
     CHECK(hop->provider_id == "ccmoon");
     CHECK(hop->configured);
-    // 别家的模型但没配这家:hop 仍给出,configured 为假(调用方提示不切)。
-    const auto hop2 = ModelProviderHopFor(catalog, {}, "local", "gpt-x");
+    // 同名条目全是没配的家(只列在官方 gemini 条目下):提示属谁未配置,
+    // configured=false 由调用方提示并保持本家。
+    const auto hop2 = ModelProviderHopFor(catalog, providers, "local", "solo-model");
     REQUIRE(hop2.has_value());
-    CHECK(hop2->provider_id == "ccmoon");
+    CHECK(hop2->provider_id == "gemini");
     CHECK_FALSE(hop2->configured);
 }
 

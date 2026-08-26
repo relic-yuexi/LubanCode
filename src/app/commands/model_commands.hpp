@@ -71,10 +71,16 @@ struct ModelCommandContext {
     std::function<void()> sync_request_policy;
 };
 
-// /model 直切的跨家判定(纯函数,单测钉):目录条目带 provider_id 且与
-// active 不同 → 该模型属别家。返回 nullopt = 不用切(无条目、条目没写
-// 归属、或就是当前家);有值时 provider_id 是归属家,configured 说配置里
-// 有没有这家(没有就切不了,调用方如实提示)。
+// /model 直切的跨家判定(纯函数,单测钉),判定序三条:
+//   1. 当前家目录条目里有这个模型(含用户自写 models.json 条目的全局
+//      覆盖)→ 返回 nullopt:本家切换,零提示零动作。中转家的常态——
+//      目录里中转家也摆着官方家的模型名,那是本家的模型,不拿别家
+//      条目的归属说事(FindBySlug 的"重名取先出现"在这里独断就是误报)。
+//   2. 当前家没有 → 列了这名的各家条目里挑配置里真有的那家返回
+//      (configured=true,多家都配取目录序第一);没配的条目排前不拦。
+//   3. 同名条目全是没配的家 → 返回第一家 (configured=false),调用方
+//      提示"属 X 家未配置"并保持本家连接。
+// 目录压根没这名的 → nullopt(手敲的裸名,不猜归属)。
 struct ModelProviderHop {
     std::string provider_id;
     bool configured = false;

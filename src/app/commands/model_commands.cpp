@@ -53,16 +53,40 @@ std::optional<ModelProviderHop> ModelProviderHopFor(const lubancode::config::Mod
                                                     const std::vector<lubancode::config::ProviderConfig>& providers,
                                                     const std::string& active_provider,
                                                     const std::string& model_id) {
-    // 只认目录条目声明的归属:用户自写条目(models.json)provider_id 留空,
-    // 归属不明,一律不动——不猜。
-    const lubancode::config::ModelCatalogEntry* entry = catalog.FindBySlug(model_id);
-    if (entry == nullptr || entry->provider_id.empty() || entry->provider_id == active_provider) {
-        return std::nullopt;
+    // 判定序(跨家收口验收返件):同名模型多家目录都列是中转常态
+    //(gateway/openrouter 家都摆着 openai 家的模型名),归属不能拿
+    // FindBySlug 的"重名取先出现"一家独断。
+    //
+    // 第一优先:当前家目录条目里就有这个模型(含用户自写 models.json
+    // 条目的全局覆盖——provider_id 空 = 归属不明,压过内置档案)。当前
+    // 家有的模型就是本家切换,零提示零动作,绝不拿别家条目的归属说事。
+    // 注意不能拿 FindByProviderAndSlug 一把梭:它带"全局兜底",兜底命中
+    // 时恰恰是当前家没有、只有别家条目——那正是要往下判定的场面。
+    for (const auto& entry : catalog.models) {
+        if (entry.slug == model_id &&
+            (entry.provider_id.empty() || entry.provider_id == active_provider)) {
+            return std::nullopt;
+        }
     }
-    ModelProviderHop hop;
-    hop.provider_id = entry->provider_id;
-    hop.configured = lubancode::config::FindProvider(providers, entry->provider_id) != nullptr;
-    return hop;
+    // 当前家没有:遍历列了这个模型名的各家条目,归属只认配置里真有的
+    // 那家(多家都配了取目录序第一);全是没配的家(比如只列在官方
+    // openai 条目下)才提示属谁未配置,模型照旧本家切,由调用方提示。
+    const std::string* unconfigured = nullptr;
+    for (const auto& entry : catalog.models) {
+        if (entry.slug != model_id || entry.provider_id.empty()) {
+            continue;  // 用户条目上面已按本家接住,这里只看各家归属
+        }
+        if (lubancode::config::FindProvider(providers, entry.provider_id) != nullptr) {
+            return ModelProviderHop{entry.provider_id, /*configured=*/true};
+        }
+        if (unconfigured == nullptr) {
+            unconfigured = &entry.provider_id;
+        }
+    }
+    if (unconfigured != nullptr) {
+        return ModelProviderHop{*unconfigured, /*configured=*/false};
+    }
+    return std::nullopt;  // 目录没这个名:手敲的裸名,不猜归属
 }
 
 void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args) {
