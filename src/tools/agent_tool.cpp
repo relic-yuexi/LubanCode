@@ -6,6 +6,7 @@
 #include "tools/agent_tool.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdio>
 #include <ctime>
 #include <exception>
@@ -381,7 +382,8 @@ AgentTool::~AgentTool() {
     // 等不到的线程 detach 掉放它走。台账已是终态(或由看门狗强制收账),
     // detach 不丢账;线程闭包自持 TaskRecord 的 shared_ptr,晚归也不悬垂。
     ledger_.BroadcastCancel();
-    for (auto& thread : task_threads_) {
+    for (auto& entry : task_threads_) {
+        auto& thread = entry.thread;
         if (!thread.joinable()) {
             continue;
         }
@@ -676,11 +678,19 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
     }
 
     // 已收尾的 std::thread 若一直不 join，系统线程句柄会跟着会话一路攒。
-    // 状态变成终态后，线程只剩 Touch 一步，挨个收柄不会拖住界面。
-    for (std::size_t i = 0; i < task_threads_.size(); ++i) {
-        if (ledger_.TaskSettledAt(i) && task_threads_[i].joinable()) {
-            task_threads_[i].join();
+    // 收柄对账按**自家任务号**查，不按注册序下标——台账里混着前台任务
+    // (注册了但无线程),按下标对齐会把"早终态的旧任务"误认成"这只线程
+    // 已收尾",join 到正在跑的任务线程上:孵化请求被押到那只任务寿终才
+    // 放行(病灶一,SERVER 时戳逮出的并发押死)。settled ⇒ 任务线程至多
+    // 还差看门狗那一小步(ForceFinalize 的绝境另有请求硬墙钟兜底),join
+    // 不跨网络等;join 完的条目当场抹掉,表不攒。
+    for (std::size_t i = 0; i < task_threads_.size();) {
+        if (ledger_.TaskSettled(task_threads_[i].task_id) && task_threads_[i].thread.joinable()) {
+            task_threads_[i].thread.join();
+            task_threads_.erase(task_threads_.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
         }
+        ++i;
     }
     {
         // 全局并发槽(规格"递归派工")的同步先手检查:满了明报,不等
@@ -742,7 +752,8 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
         background_hooks = std::make_shared<lubancode::hooks::DetachedHookSession>(
             hooks_.hook_dispatcher, hooks_.hook_dispatcher->context());
     }
-    task_threads_.emplace_back([this, task, registry, prompt, agent_type, max_steps_per_turn,
+    task_threads_.push_back(
+        {id, std::thread([this, task, registry, prompt, agent_type, max_steps_per_turn,
                                 detached = std::move(detached),
                                 system_prompt = std::move(system_prompt),
                                 detached_registry = std::move(detached_registry),
@@ -780,7 +791,7 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
         result.content += TaskLedger::UndeliveredInboxNote(task);
         ledger_.FinalizeFromToolResult(task, result.content,
                                        task->cancel.load(std::memory_order_acquire));
-    });
+    })});
 
     return {"后台子代理 #" + std::to_string(id) + " (" + agent_type + ") 已启动。主会话可以继续；完成结果会在后续回合送达。",
             false};

@@ -347,10 +347,12 @@ public:
     bool HasRunningTasks() const;
     std::size_t RunningCount() const;  // 后台启动前的同步先手检查用
     bool HasUndeliveredCompletions() const;
-    // 旧线程收柄探测:第 index 只任务(注册序)是否已进终态。后台线程与
-    // 任务按注册序对齐;ClearFinishedTask 抹掉对齐后认不出,按"未收尾"
-    // 返回(下轮再试),不瞎 join。
-    bool TaskSettledAt(std::size_t index) const;
+    // 旧线程收柄探测:这只任务(按 id)是否已进终态、它的线程可以收柄。
+    // 认不出(没这只任务——比如已被 ClearFinishedTask 清掉)也按已收尾
+    // 返回:能被清掉的任务必是终态,线程早退了,不收白漏一枚句柄。
+    // 按任务号对账,不按注册序下标——台账里混着无线程的前台任务,下标
+    // 对不齐会把旧任务的终态安到活线程头上(join 押死孵化,病灶一)。
+    bool TaskSettled(int task_id) const;
     // 退出兜底:给所有任务广播取消(只置 task->cancel,不动状态)。
     void BroadcastCancel();
     std::vector<std::string> CompletionNoticeLines() const;

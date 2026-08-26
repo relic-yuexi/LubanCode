@@ -344,9 +344,15 @@ private:
     // 六职拆分(批三):台账与调度各归各家,门面只转不发。
     TaskLedger ledger_;
     SubagentScheduler scheduler_;
-    // 后台任务线程表:已收尾的 join 回收(LaunchBackground 顺带),析构
-    // 再兜底(有界 join,detach 绝不冻退出——见析构注释)。
-    std::vector<std::thread> task_threads_;
+    // 后台任务线程表(线程 + 自家任务号):已收尾的 join 回收
+    // (LaunchBackground 顺带按任务号对账,见那处注释),析构再兜底
+    //(有界 join,detach 绝不冻退出——见析构注释)。挂任务号是因为台账
+    // 里混着无线程的前台任务,按下标对齐会把旧任务的终态安到活线程头上。
+    struct TaskThreadEntry {
+        int task_id = 0;
+        std::thread thread;
+    };
+    std::vector<TaskThreadEntry> task_threads_;
     std::function<bool(const Tool&)> tool_filter_;            // tool_search:空 = 不过滤
     std::function<std::string()> deferred_index_provider_;    // tool_search:空 = 不注索引段
     lubancode::cli::GitRunner git_runner_;                    // isolation 房务;空 = 真 git

@@ -588,12 +588,14 @@ std::size_t TaskLedger::RunningCount() const {
     }));
 }
 
-bool TaskLedger::TaskSettledAt(std::size_t index) const {
+bool TaskLedger::TaskSettled(int task_id) const {
     std::lock_guard<std::mutex> lock(mutex);
-    if (index >= tasks_.size()) {
-        return false;  // 对不齐(被清理/未注册):按未收尾处理,不瞎 join
+    for (const auto& task : tasks_) {
+        if (task->snapshot.id == task_id) {
+            return task->snapshot.state != AgentTaskState::Running;
+        }
     }
-    return tasks_[index]->snapshot.state != AgentTaskState::Running;
+    return true;  // 台账里没了:能清掉的必是终态,线程早退,按可收柄处理
 }
 
 void TaskLedger::BroadcastCancel() {
