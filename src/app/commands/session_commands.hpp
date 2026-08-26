@@ -118,7 +118,8 @@ struct CompactSessionInputs {
     std::size_t* persisted_count = nullptr;        // 落盘基线(压缩后收缩)
     lubancode::sessions::SessionStore* session_store = nullptr;
     bool session_store_broken = false;
-    // 压缩参数现场收集(compact 的窗口预算/守恒校验材料)。
+    // 压缩参数现场收集(compact 的窗口预算/守恒校验材料)。BuildCompactOptions
+    // 的现算(路由声明/目录条目/活动待办守恒)全在里面。
     std::function<lubancode::agent::CompactOptions()> build_compact_options;
     // compact_v2 事件落盘前补 goal/loop snapshot(有才带;manifest 守恒面)。
     std::function<void(lubancode::sessions::CompactV2Event&)> attach_goal_snapshot;
@@ -127,11 +128,34 @@ struct CompactSessionInputs {
     std::function<void(lubancode::hooks::HookEvent, nlohmann::json, const std::string&)> emit_session_hook;
     // 压缩路由:cheap 角色的 backend + route(会话侧的 ModelRouterService)。
     std::function<lubancode::app::ModelRouterService::Routed()> route_compact;
+    // 修理路由(cheap 失败回退 normal 的那只)。
+    std::function<lubancode::app::ModelRouterService::Routed()> route_repair;
+    // normal 回退的落点(cheap 跨 provider 拿不到时的主 backend)。
+    lubancode::api::Backend* normal_backend = nullptr;
+    // 会话当前模型(判"配了独立 cheap 路由"用)。
+    const std::string* current_model = nullptr;
     // 分角色记账(压缩用了谁)。
-    std::function<void(const lubancode::agent::ModelRoute&, const lubancode::agent::BackgroundCallAccounting&)>
+    std::function<void(lubancode::agent::ModelRole, const lubancode::agent::ModelRoute&,
+                       const lubancode::agent::BackgroundCallAccounting&)>
         record_usage;
+    // 回退留痕(cheap -> normal 的台账)。
+    std::function<void(lubancode::agent::TaskKind kind, lubancode::agent::ModelRole from,
+                       lubancode::agent::ModelRole to, const std::string& reason)>
+        record_fallback;
+    // mid-turn 压缩前补全量落盘(JSONL 一字不丢)。
+    std::function<void()> persist_new_messages;
 };
 void RunCompactCommand(const std::string& args, const CompactSessionInputs& in);
+
+// 自动(外层用户消息前)与 mid-turn(工具循环边界)压缩共用的一条路
+//(终端接线收尾单自大类搬出):压缩 → 校验 → 换历史 → 落盘事件 → 报数。
+// 返回 true = 压缩成功。正戏(HandleCompactCommand)之外还有 PreCompact
+// auto 闸、cheap 失败回退 normal 修一次、分层压缩与 v2 事件。
+bool TryRunCompact(bool midturn, const CompactSessionInputs& in);
+
+// AgentLoop 每次模型请求前的压力通报接线:PreRequest 安全点撞线就
+// mid-turn 收一次历史;HardTrim 真丢了东西就显式告警,不静默降级。
+void HandleContextPressure(const lubancode::agent::ContextPressure& pressure, const CompactSessionInputs& in);
 
 
 // /compact 命令的结果:event 是 compact_v2 压缩事件(archive + kept_from +

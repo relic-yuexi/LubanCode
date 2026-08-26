@@ -1349,7 +1349,7 @@ void RunCompactCommand(const std::string& args, const CompactSessionInputs& in) 
                              in.spinner_enabled, in.build_compact_options(), *in.session_compact_epoch,
                              &compact_accounting);
     // 分角色记账 + 状态栏短闪:压缩用了谁、前后多少,一行交代。
-    in.record_usage(compact_routed.route, compact_accounting);
+    in.record_usage(lubancode::agent::ModelRole::Cheap, compact_routed.route, compact_accounting);
     if (compact_result.event.has_value()) {
         out << theme.stats
             << trf("router.compact_flash", lubancode::cli::FormatTokenCount(compact_result.before_tokens),
@@ -1394,6 +1394,179 @@ void RunCompactCommand(const std::string& args, const CompactSessionInputs& in) 
             in.emit_session_hook(lubancode::hooks::HookEvent::SessionStart, nlohmann::json{{"source", "compact"}},
                                  "compact");
         }
+    }
+}
+
+// ---- 自动压缩的会话现场路(终端接线收尾单自大类搬出;原文随行) ---------
+
+bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
+    auto& out = lubancode::cli::TermOut();
+    lubancode::agent::Agent& loop = *in.agent;
+    const lubancode::cli::Theme& theme = *in.theme;
+    // 压缩路由(模型分工第一期):cheap 角色的有效值;跨 provider 拿不到
+    // backend 就直接走 normal 修一次的路(同一只),失败再报,不静默截史。
+    auto compact_routed = in.route_compact();
+    const lubancode::agent::CompactOptions options = in.build_compact_options();
+    const std::size_t before_tokens = lubancode::agent::EstimateHistoryTokens(loop.History());
+
+    // PreCompact(trigger=auto):自动/中途压缩也过一遍门,可拦。
+    {
+        lubancode::hooks::HookDispatcher* dispatcher = lubancode::app::HookRuntime();
+        if (dispatcher != nullptr && !dispatcher->Empty() &&
+            dispatcher->HasHandlersFor(lubancode::hooks::HookEvent::PreCompact)) {
+            lubancode::hooks::HookPayload payload;
+            payload.event = lubancode::hooks::HookEvent::PreCompact;
+            payload.fields["trigger"] = "auto";
+            payload.match_value = "auto";
+            const auto merged = dispatcher->Emit(lubancode::hooks::HookEvent::PreCompact, payload);
+            if (merged.blocked) {
+                out << theme.error << "PreCompact 钩子拦下这次自动压缩: " << merged.block_reason
+                    << theme.reset << "\n";
+                return false;  // 压缩被拦不是错误:主流程照走,旧历史不动
+            }
+        }
+    }
+
+    out << theme.stats << tr(midturn ? "compact.midturn_start" : "compact.auto_start") << theme.reset << "\n";
+    lubancode::cli::Spinner spinner(theme, in.spinner_enabled);
+    // 走路由给的 backend(cheap 跨 provider 时是另一只裸 client,理由同
+    // /compact:压缩自己把 route.model 写进 request.model)。分层路:装得下
+    // 单次摘要,装不下按 episode 分块 map、归并 reduce。
+    lubancode::agent::BackgroundCallAccounting compact_accounting;
+    lubancode::agent::ModelRole used_role = lubancode::agent::ModelRole::Cheap;
+    auto result = lubancode::agent::CompactHierarchical(
+        compact_routed.backend != nullptr ? *compact_routed.backend : *in.normal_backend,
+        compact_routed.route.model, loop.History(), options, compact_routed.route.effort, &compact_accounting);
+
+    // cheap 失败的回退(规格"失败与安全"):配了独立 cheap 路由(与 normal
+    // 不同模型)、而压缩又没成(请求/校验任一环)时,先试 normal 修一次;
+    // 仍失败旧史不动。回退要留痕:状态栏打一行,台账记一笔,不悄悄换人。
+    if (!result.has_value() && compact_routed.route.model != *in.current_model) {
+        const auto repair_routed = in.route_repair();
+        const std::string reason = result.error().message;
+        in.record_fallback(lubancode::agent::TaskKind::Compact, lubancode::agent::ModelRole::Cheap,
+                           lubancode::agent::ModelRole::Normal, reason);
+        out << theme.stats
+            << trf("router.fallback_flash", "cheap:" + compact_routed.route.model, "normal:" + repair_routed.route.model)
+            << theme.reset << "\n";
+        if (repair_routed.backend != nullptr) {
+            result = lubancode::agent::CompactHierarchical(*repair_routed.backend, repair_routed.route.model,
+                                                           loop.History(), options, repair_routed.route.effort,
+                                                           &compact_accounting);
+            if (result.has_value()) {
+                compact_routed.route = repair_routed.route;
+                used_role = lubancode::agent::ModelRole::Normal;
+            }
+        }
+    }
+    spinner.Stop();
+
+    // 分角色记账:成功走的哪个角色就记哪笔(回退后是 normal)。
+    in.record_usage(used_role, compact_routed.route, compact_accounting);
+
+    if (!result.has_value()) {
+        out << theme.error << trf("compact.auto_failed", result.error().message) << theme.reset
+            << tr("compact.auto_failed_tail") << "\n";
+        return false;
+    }
+
+    // mid-turn 触发时这一轮攒下的 assistant/工具消息还没落盘——先补全量
+    // 账再换史,JSONL 一字不丢;压缩只改后续模型看的活历史形状。
+    if (midturn && in.persist_new_messages) {
+        in.persist_new_messages();
+    }
+
+    const std::size_t old_size = loop.History().size();
+    const auto new_history = lubancode::agent::BuildCompactedHistory(loop.History(), result->archive);
+    const auto base_event = lubancode::sessions::MakeCompactEvent(old_size, new_history);
+    loop.ReplaceHistory(new_history);
+    const std::size_t after_tokens = lubancode::agent::EstimateHistoryTokens(loop.History());
+    // 状态栏短闪:压缩前后与所用角色一行交代(规格"运行提示")。
+    out << theme.stats
+        << trf("router.compact_flash", lubancode::cli::FormatTokenCount(before_tokens),
+               lubancode::cli::FormatTokenCount(after_tokens),
+               (used_role == lubancode::agent::ModelRole::Normal ? std::string("normal:") : std::string("cheap:")) +
+                   compact_routed.route.model)
+        << theme.reset << "\n";
+    // 最近一次 compact 的台账(/context"最近一次 compact"一行,规格第四期)。
+    *in.last_compact_line =
+        (used_role == lubancode::agent::ModelRole::Normal ? std::string("normal:") : std::string("cheap:")) +
+        compact_routed.route.model + " · " + lubancode::cli::FormatTokenCount(before_tokens) + "→" +
+        lubancode::cli::FormatTokenCount(after_tokens) + " · " +
+        std::to_string(compact_accounting.duration_ms / 1000) + "." +
+        std::to_string((compact_accounting.duration_ms % 1000) / 100) + "s · 校验通过(manifest 守恒)";
+
+    // compact_v2 事件(第三期):回放与 v1 同型;manifest/epoch/metrics 另记,
+    // 审计与"从原始事件 rebase"都有账可查。
+    *in.session_compact_epoch += 1;
+    nlohmann::json manifest_json;
+    manifest_json["goal"] = result->manifest.goal;
+    manifest_json["constraints"] = result->manifest.constraints;
+    manifest_json["open_items"] = result->manifest.open_items;
+    manifest_json["next_action"] = result->manifest.next_action;
+    nlohmann::json metrics_json;
+    metrics_json["chunks"] = result->metrics.chunks;
+    metrics_json["reduce_passes"] = result->metrics.reduce_passes;
+    metrics_json["hierarchical"] = result->metrics.hierarchical;
+    metrics_json["implementation"] = result->metrics.implementation;
+    metrics_json["source_digest"] = result->metrics.source_digest;  // 第四期预计算复用钩子
+    metrics_json["pre_tokens"] = before_tokens;
+    metrics_json["post_tokens"] = after_tokens;
+    metrics_json["trigger"] = midturn ? "midturn" : "pre-turn";
+    auto compact_event = lubancode::sessions::UpgradeToV2(base_event, *in.session_compact_epoch,
+                                                          std::move(manifest_json), std::move(metrics_json));
+
+    // 落盘基线收到新长度,补写 compact 事件,理由同 /compact 分支。
+    *in.persisted_count = (std::min)(*in.persisted_count, loop.History().size());
+    if (in.session_store->active() && !in.session_store_broken) {
+        // 写盘校验,理由同 /compact 分支。
+        if (in.attach_goal_snapshot) {
+            in.attach_goal_snapshot(compact_event);
+        }
+        if (!in.session_store->AppendCompactV2Event(compact_event)) {
+            out << theme.error << tr("session.compact_event_failed") << theme.reset << "\n";
+        }
+    }
+    if (!options.budget.window_tokens.has_value()) {
+        out << theme.stats << tr("cmd.compact.window_unknown") << theme.reset << "\n";
+    }
+    if (result->metrics.hierarchical) {
+        out << trf("cmd.compact.hierarchical", result->metrics.chunks, result->metrics.reduce_passes) << "\n";
+    }
+    out << trf("compact.done_stats", after_tokens, result->manifest.constraints.size(),
+               result->manifest.open_items.size())
+        << "\n";
+    if (midturn) {
+        out << tr("compact.midturn_done") << "\n";
+    }
+    // PostCompact 审计 + 压缩后的上下文重注入走 SessionStart(source=
+    // compact)——自动压缩后紧接着的续请求前送达,不拖到下一条用户消息
+    // (本函数就活在那个安全点里)。
+    if (in.emit_session_hook) {
+        in.emit_session_hook(lubancode::hooks::HookEvent::PostCompact, nlohmann::json{{"trigger", "auto"}}, "auto");
+        in.emit_session_hook(lubancode::hooks::HookEvent::SessionStart, nlohmann::json{{"source", "compact"}},
+                             "compact");
+    }
+    return true;
+}
+
+void HandleContextPressure(const lubancode::agent::ContextPressure& pressure, const CompactSessionInputs& in) {
+    auto& out = lubancode::cli::TermOut();
+    const lubancode::cli::Theme& theme = *in.theme;
+    if (pressure.phase == lubancode::agent::ContextPressure::Phase::PreRequest) {
+        // 工具结果已攒完、请求尚未发出——正是不打断工具的安全点。撞线就
+        // 在这里收一次历史,不再等下一条外层用户消息。
+        if (pressure.projected_overflow) {
+            TryRunCompact(/*midturn=*/true, in);
+        }
+        return;
+    }
+    // AfterHardTrim:字符安全网这次真丢了东西。显式告警,不许静默降级——
+    // 用户须知道模型眼下已经看不到那段原文;完整流水仍在存档,/export 可查。
+    if (pressure.hard_trimmed_turns) {
+        out << theme.error << trf("compact.hard_trim_turns", pressure.hard_dropped_messages) << theme.reset << "\n";
+    } else if (pressure.hard_truncated_results) {
+        out << theme.error << tr("compact.hard_trim_results") << theme.reset << "\n";
     }
 }
 

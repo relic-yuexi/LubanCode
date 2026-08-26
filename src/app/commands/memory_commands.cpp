@@ -10,11 +10,16 @@
 #include <sstream>
 #include <utility>
 
+#include "agent/microcompact.hpp"  // RunMicrocompact(按需摘要)
+#include "app/memory_extract.hpp"  // ClassifyTaskType/BuildTurnTranscript 一族
+#include "app/model_router.hpp"
+#include "app/session_title.hpp"  // GenerateSessionTitle
 #include "cli/console_input.hpp"
 #include "cli/i18n.hpp"
 #include "cli/terminal_port.hpp"
 #include "cli/theme.hpp"
 #include "memory/project_memory.hpp"
+#include "sessions/session_store.hpp"
 #include "tools/path_utils.hpp"
 
 namespace lubancode::app {
@@ -430,6 +435,216 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         return;
     }
     PrintMemoryUsage();
+}
+
+// ---- 会话尾款的 memory 接线(终端接线收尾单自大类搬出;原文随行) -------
+
+void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_text, std::size_t history_before) {
+    lubancode::memory::ProjectMemory* project_memory = ctx.project_memory;
+    const lubancode::cli::Theme& theme = *ctx.theme;
+    lubancode::app::ModelRouterService& model_router = *ctx.model_router;
+    if (project_memory == nullptr || !project_memory->generate_enabled()) return;
+
+    const auto& history = ctx.agent->History();
+    if (history_before >= history.size()) return;
+    std::vector<api::Message> slice(history.begin() + static_cast<std::ptrdiff_t>(history_before),
+                                    history.end());
+
+    // 工具名清单喂给分型器;转写压缩后整段不超 24 KiB。
+    std::vector<std::string> tool_names;
+    for (const auto& message : slice) {
+        for (const auto& block : message.content) {
+            if (const auto* use = std::get_if<api::ToolUseBlock>(&block)) {
+                tool_names.push_back(use->name);
+            }
+        }
+    }
+    const std::string turn_transcript = BuildTurnTranscript(slice, 24 * 1024);
+    if (turn_transcript.empty()) return;
+
+    const std::string task_type = ClassifyTaskType(user_text, tool_names);
+    const std::string system_prompt = BuildExtractionSystemPrompt(*ctx.prompts_dir, task_type);
+    if (system_prompt.empty()) return;
+
+    // 抽取走 cheap 角色(模型分工第一期):低风险后台小活,配了 cheap_model
+    // 用便宜的,没配回落 normal(与 main 同模型,行为与从前一致)。状态栏
+    // 短闪一行:任务种类 + 角色:模型(规格"运行提示")。采样走
+    // ModelRouterService::Sample 一站(批一·病四):路由/采样/记账一扇门。
+    const auto extract_route = model_router.RouteInfo(lubancode::agent::TaskKind::MemoryExtract);
+    TermOut() << theme.stats
+              << trf("router.task_flash", trf("memory.extract.running", task_type),
+                     "cheap:" + extract_route.model)
+              << theme.reset << "\n";
+    lubancode::app::ModelRouterService::SampleCall sample_call;
+    sample_call.system = system_prompt;
+    {
+        api::Message message;
+        message.role = api::Role::User;
+        message.content.push_back(api::TextBlock{turn_transcript});
+        sample_call.messages.push_back(std::move(message));
+        sample_call.max_tokens = 1500;
+    }
+    lubancode::agent::SampleOptions sample_options;
+    sample_options.timeout_secs = 45;
+    const auto sampled =
+        model_router.Sample(lubancode::agent::TaskKind::MemoryExtract, sample_call, sample_options);
+    std::expected<MemoryExtraction, std::string> extraction;
+    if (sampled.backend == nullptr) {
+        // 路由落空:旧口径也记一笔零账(calls=1,零 token,"未报告"),不吞。
+        model_router.ledger().Record(lubancode::agent::ModelRole::Cheap, sampled.route.model,
+                                      lubancode::api::Usage{}, /*duration_ms=*/0, /*reported=*/false);
+        extraction = std::unexpected("cheap 路由找不到 provider \"" + sampled.route.provider + "\"");
+    } else {
+        extraction = FinishMemoryExtraction(sampled.result);
+    }
+    if (!extraction.has_value()) {
+        TermOut() << theme.stats << trf("memory.extract.failed", extraction.error()) << theme.reset << "\n";
+        return;
+    }
+
+    // 检索扩展词:合并进 ProjectMemory,下一轮 BM25/词法查询用;learns off
+    // 或失败时不清旧值,自然退回纯词法。
+    std::vector<std::string> hints = extraction->retrieval_terms;
+    hints.reserve(hints.size() + extraction->candidates.size());
+    for (const auto& candidate : extraction->candidates) {
+        for (const auto& keyword : candidate.keywords) hints.push_back(keyword);
+    }
+    if (!hints.empty()) project_memory->SetRetrievalHints(std::move(hints));
+
+    std::size_t queued = 0;
+    std::size_t written = 0;
+    for (const auto& proposed : extraction->candidates) {
+        lubancode::memory::MemoryCandidate candidate;
+        auto kind = lubancode::memory::ParseMemoryKind(proposed.kind);
+        if (!kind.has_value()) continue;
+        candidate.kind = *kind;
+        candidate.title = proposed.title;
+        candidate.summary = proposed.summary;
+        candidate.content = proposed.content;
+        candidate.keywords = proposed.keywords;
+        candidate.paths = proposed.paths;
+        candidate.confidence = proposed.confidence;
+        candidate.task_type = task_type;
+
+        // auto 档直写闸:inferred 只进候选区;fact 须 verified 且带证据,
+        // feedback 须用户明说,否则也落待审区让人把关(规格"inferred 只准
+        // 进候选区"、"模型推断不得直写 feedback")。
+        const bool auto_writable = project_memory->learn_mode() == lubancode::memory::LearnMode::Auto &&
+                                   candidate.confidence != "inferred" &&
+                                   !(candidate.kind == lubancode::memory::MemoryKind::Fact &&
+                                     (candidate.confidence != "verified" || candidate.paths.empty())) &&
+                                   !(candidate.kind == lubancode::memory::MemoryKind::Feedback &&
+                                     candidate.confidence != "user-stated");
+        if (auto_writable) {
+            lubancode::memory::SaveRequest request;
+            request.kind = candidate.kind;
+            request.title = candidate.title;
+            request.summary = candidate.summary;
+            request.content = candidate.content;
+            request.keywords = candidate.keywords;
+            request.paths = candidate.paths;
+            if (project_memory->EnqueueSave(request).has_value()) {
+                ++written;
+                continue;
+            }
+        }
+        if (project_memory->AddCandidate(std::move(candidate)).has_value()) {
+            ++queued;
+        }
+    }
+    if (queued + written > 0) {
+        TermOut() << theme.stats << trf("memory.extract.done", queued, written) << theme.reset << "\n";
+    }
+}
+
+std::expected<std::string, std::string> SummarizeArtifactOnDemand(const SessionTailContext& ctx,
+                                                                  const lubancode::agent::ArtifactRef& ref) {
+    if (ctx.model_router == nullptr || ctx.artifact_store == nullptr || !ctx.artifact_store->active()) {
+        return std::unexpected("按需摘要暂不可用:artifact 仓或模型路由未就绪");
+    }
+    auto routed = ctx.model_router->RouteDetached(lubancode::agent::TaskKind::Microcompact);
+    if (routed.route.model.empty()) {
+        return std::unexpected("按需摘要暂不可用:cheap 模型未配置");
+    }
+    if (routed.backend == nullptr) {
+        return std::unexpected("按需摘要暂不可用:cheap provider 找不到");
+    }
+    lubancode::agent::BackgroundCallAccounting accounting;
+    auto summary = lubancode::agent::RunMicrocompact(
+        *routed.backend, routed.route.model, routed.route.effort, *ctx.artifact_store, ref,
+        lubancode::agent::MicrocompactOptions{}, &accounting);
+    ctx.model_router->ledger().Record(lubancode::agent::ModelRole::Cheap, routed.route.model,
+                                      accounting.usage, accounting.duration_ms,
+                                      accounting.usage_reported);
+    if (!summary.has_value()) {
+        return std::unexpected(summary.error());
+    }
+    std::string out = "artifact " + ref.artifact_id + "(" + ref.tool_name + ")按需摘要 · cheap:" +
+                      routed.route.model + " · 原文未改:\n" + summary->summary;
+    if (!summary->key_facts.empty()) {
+        out += "\n关键事实:";
+        for (const auto& fact : summary->key_facts) {
+            out += "\n- " + fact;
+        }
+    }
+    out += "\n摘要不作最终证据;有疑点请用 context_search/context_read 回看 artifact " +
+           ref.artifact_id + " 原文。";
+    return out;
+}
+
+void MaybeGenerateSessionTitle(const SessionTailContext& ctx, lubancode::agent::TaskKind kind) {
+    const lubancode::cli::Theme& theme = *ctx.theme;
+    std::string& session_title = *ctx.session_title;
+    if (*ctx.session_title_auto_attempted || *ctx.session_title_pending || !session_title.empty()) {
+        return;
+    }
+    if (!ctx.session_store->active()) {
+        return;  // 没建档就没什么好起名的,/title 的人工路径照旧
+    }
+    // 得有真实对话可看:至少一条 assistant 正文(用户消息建房时必有)。
+    const auto& history = ctx.agent->History();
+    bool has_reply = false;
+    for (const auto& message : history) {
+        if (message.role != api::Role::Assistant) {
+            continue;
+        }
+        for (const auto& block : message.content) {
+            if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr && !text->text.empty()) {
+                has_reply = true;
+                break;
+            }
+        }
+        if (has_reply) {
+            break;
+        }
+    }
+    if (!has_reply) {
+        return;
+    }
+    *ctx.session_title_auto_attempted = true;  // 一场只试一次,失败安静降级
+
+    const auto routed = ctx.model_router->Route(kind);
+    if (routed.backend == nullptr) {
+        return;
+    }
+    lubancode::agent::BackgroundCallAccounting accounting;
+    const auto title = GenerateSessionTitle(*routed.backend, routed.route.model, routed.route.effort, history,
+                                            /*timeout_secs=*/30, &accounting);
+    ctx.model_router->ledger().Record(lubancode::agent::ModelRole::Cheap, routed.route.model, accounting.usage,
+                                      accounting.duration_ms, accounting.usage_reported);
+    if (!title.has_value() || title->empty()) {
+        return;
+    }
+    session_title = *title;
+    if (ctx.session_store->AppendTitleEvent(session_title)) {
+        TermOut() << theme.stats
+                  << trf("router.task_flash", trf("cmd.title.set", session_title),
+                         "cheap:" + routed.route.model)
+                  << theme.reset << "\n";
+    } else {
+        TermOut() << theme.error << tr("cmd.title.write_failed") << theme.reset << "\n";
+        session_title.clear();  // 落不了盘就不占内存标题,/sessions 仍用首句
+    }
 }
 
 }  // namespace lubancode::app
