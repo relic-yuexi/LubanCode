@@ -144,6 +144,15 @@ add_executable(deepseek_e2e EXCLUDE_FROM_ALL manual/deepseek_e2e.cpp)
 target_link_libraries(deepseek_e2e PRIVATE lubancode_core)
 target_compile_features(deepseek_e2e PRIVATE cxx_std_23)
 
+# 任意 provider 的真端点抽验模板(模型怪癖矩阵单,opt-in,不进 ctest):
+#   model_probe_e2e
+#     MODEL_PROBE_PROVIDER=<catalog id>(必填) + 该 provider 的 key_env
+#     可配 MODEL_PROBE_MODEL / MODEL_PROBE_KEY / MODEL_PROBE_BASE_URL /
+#     MODEL_PROBE_EFFORT;MODEL_PROBE_STUB=1 离线自测模板自身(无网络)。
+add_executable(model_probe_e2e EXCLUDE_FROM_ALL manual/model_probe_e2e.cpp)
+target_link_libraries(model_probe_e2e PRIVATE lubancode_core)
+target_compile_features(model_probe_e2e PRIVATE cxx_std_23)
+
 # 多行字符公式的视觉小样：直连正式渲染器，不进 ctest。
 add_executable(latex_box_experiment EXCLUDE_FROM_ALL manual/latex_box_experiment.cpp)
 target_link_libraries(latex_box_experiment PRIVATE lubancode_core)

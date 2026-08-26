@@ -25,23 +25,40 @@ std::string StopReason(const std::string& reason, bool has_calls) {
 }
 
 // usageMetadata -> 统一口径(api::Usage 文件头注释)。Gemini 的账本:
-//   promptTokenCount        输入总数(含缓存命中的部分)
+//   promptTokenCount        输入总数(官方手册:cachedContent 命中时它仍报
+//                           完整有效的 prompt 大小,即已含缓存部分)
 //   cachedContentTokenCount 从隐式上下文缓存命中读走的输入
-//   candidatesTokenCount    输出(Gemini 官方 API 里已含思考;Vertex 才另计)
-//   thoughtsTokenCount      思考输出(官方 API 里是 candidatesTokenCount 的
-//                           子集,单拆一笔账)
+//   candidatesTokenCount    生成的候选正文
+//   thoughtsTokenCount      思考输出
+//   totalTokenCount         总数
 // 摊开:input = prompt - cached,cache_read = cached(服务端没报 cached
-// 字段就是 0,不许拿 0 冒充"未命中");output = candidates;思考拆账进
-// output_reasoning_tokens——中立口径要求"reasoning 含在 output 里,不是
-// 另加的一笔",Gemini 官方 API 恰好就是这个口径,原样照抄,不叠加。
+// 字段就是 0,不许拿 0 冒充"未命中")。
+//
+// 思考账的两代口径(模型怪癖矩阵单查实):2.5 时代 Gemini API 的
+// candidatesTokenCount 已含思考(total = prompt + candidates);现行
+// v1beta 参考手册写的是 total = prompt + thoughts + candidates(Gemini 3
+// 思考另计一笔,Interactions API 的 total_thought_tokens 同口径)。中立
+// 契约要求"reasoning 含在 output_tokens 里,不是另加的一笔",所以拿
+// 服务端自己报的 totalTokenCount 对账:对得上"另计"就把 thoughts 并进
+// output;对得上"已含"照旧;两者都对不上或没报 total(旧端、账目不合),
+// 按 2.5 旧口径,不改判——宁可少算不瞎加。
 Usage ParseUsage(const json& usage) {
     Usage out;
     const std::int64_t prompt_total = usage.value("promptTokenCount", static_cast<std::int64_t>(0));
     const std::int64_t cached = usage.value("cachedContentTokenCount", static_cast<std::int64_t>(0));
     out.cache_read_tokens = cached;
     out.input_tokens = prompt_total > cached ? prompt_total - cached : 0;
-    out.output_tokens = usage.value("candidatesTokenCount", static_cast<std::int64_t>(0));
-    out.output_reasoning_tokens = usage.value("thoughtsTokenCount", static_cast<std::int64_t>(0));
+    const std::int64_t candidates = usage.value("candidatesTokenCount", static_cast<std::int64_t>(0));
+    const std::int64_t thoughts = usage.value("thoughtsTokenCount", static_cast<std::int64_t>(0));
+    out.output_tokens = candidates;
+    out.output_reasoning_tokens = thoughts;
+    const std::int64_t total = usage.value("totalTokenCount", static_cast<std::int64_t>(0));
+    if (total > 0 && thoughts > 0) {
+        const std::int64_t base = prompt_total + candidates;
+        if (total == base + thoughts && total != base) {
+            out.output_tokens = candidates + thoughts;  // 思考另计的一代,并进 output
+        }
+    }
     return out;
 }
 

@@ -73,7 +73,8 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
         body["reasoning"] = json{{"effort", request.reasoning_effort}};
     }
     if (!request.reasoning_effort.empty() && request.reasoning.supports_toggle) {
-        body["thinking"] = json{{"type", ReasoningEffortIsOff(request.reasoning_effort)
+        body["thinking"] = json{{"type", ReasoningEffortIsOff(request.reasoning_effort,
+                                                              request.reasoning)
                                              ? "disabled" : "enabled"}};
     }
 

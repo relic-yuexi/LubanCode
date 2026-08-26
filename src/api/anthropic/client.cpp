@@ -72,7 +72,7 @@ std::optional<json> BuildThinkingJson(const Request& request) {
         return std::nullopt;
     }
     const std::string lower = LowerReasoningEffort(request.reasoning_effort);
-    if (ReasoningEffortIsOff(lower)) {
+    if (ReasoningEffortIsOff(lower, request.reasoning)) {
         return json{{"type", "disabled"}};
     }
 
@@ -121,7 +121,7 @@ json BuildRequestJson(const Request& request, bool native_web_search, const json
         body["thinking"] = *thinking;
     }
     if (!request.reasoning_effort.empty() && request.reasoning.wire_dialect == "effort" &&
-        !ReasoningEffortIsOff(request.reasoning_effort)) {
+        !ReasoningEffortIsOff(request.reasoning_effort, request.reasoning)) {
         std::string effort = LowerReasoningEffort(request.reasoning_effort);
         if (effort == "extra") effort = "xhigh";
         body["output_config"] = json{{"effort", effort}};
