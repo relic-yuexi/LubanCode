@@ -282,6 +282,22 @@ TEST_CASE("导航表:done+delivered 与 cancelled 退场,running/failed 留坞")
     CHECK(layout.hidden_idle == 0);
 }
 
+TEST_CASE("导航表:全部条目退场(条目表非空、导航表空)整坞也消失") {
+    SetLanguage("zh");
+    std::vector<AgentPanelEntry> agents = MakeAgents(2);
+    agents[0].running = false;
+    agents[0].done_delivered = true;  // 完成,结果已交回 main
+    agents[1].running = false;
+    agents[1].cancelled = true;  // 用户中止
+    // 退场条目还躺在条目表里(台账照查),但导航表一只不剩:整坞不出场,
+    // rows 交白卷。空闲路的小提示挂点(panel_notice/toast)只往非空坞的
+    // 首行之下插——这份"空坞"契约正是它们不越界落笔的依据(查看态完成
+    // 退场一拍 0xC0000005 的根因单,2026-08-26)。
+    CHECK(DockNavigationIds(agents, false, 0).empty());
+    const auto layout = LayoutAgentDock(agents, 0, false, 5, 15, 120, false, false, false);
+    CHECK(layout.rows.empty());
+}
+
 TEST_CASE("状态机:正在查看的任务完成退场,原子回 main,选择落相邻运行项") {
     SetLanguage("zh");
     AgentPanelController c;
