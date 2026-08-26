@@ -11,6 +11,9 @@
 #include <vector>
 
 #include "agent/agent.hpp"
+#include "runtime/event.hpp"
+#include "runtime/event_sink.hpp"
+#include "runtime/turn_event_adapter.hpp"
 #include "agent/loop.hpp"
 #include "sessions/session_store.hpp"
 #include "api/backend.hpp"
@@ -123,6 +126,55 @@ std::vector<api::StreamEvent> ToolUseScript(const std::string& tool_id, const st
 // 同一条 assistant 消息里带 N 枚 tool_use 块(并行工具调用):一次模型
 // 请求回来,块下标 0..N-1 各收一个 tool_use。计数语义测试用它钉"一个
 // step 可含多枚工具调用"。
+// 显示观察改吃事件流后的录音 sink(批二余款:Callbacks 显示回调退役,
+// 测试从 ServerEvent 流里取正文/思考/工具起止/usage)。
+class EventRecorder final : public runtime::EventSink {
+public:
+    void Emit(const runtime::ServerEvent& event) override {
+        switch (event.kind) {
+            case runtime::ServerEventKind::ItemDelta:
+                if (event.item_kind == runtime::ItemKind::Text) {
+                    text += event.text;
+                } else if (event.item_kind == runtime::ItemKind::Thinking) {
+                    thinking += event.text;
+                }
+                break;
+            case runtime::ServerEventKind::ItemStarted:
+                if (event.item_kind == runtime::ItemKind::Tool) {
+                    started_tools.push_back(event.payload.value("tool_name", std::string()));
+                }
+                break;
+            case runtime::ServerEventKind::UsageUpdated: {
+                api::UsageReport report;
+                report.usage.input_tokens = event.payload.value("input_tokens", std::int64_t{0});
+                report.usage.output_tokens = event.payload.value("output_tokens", std::int64_t{0});
+                report.step_index = event.payload.value("step_index", 0);
+                report.request_id = event.payload.value("request_id", std::string());
+                report.model = event.payload.value("model", std::string());
+                reports.push_back(report);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+    std::string text;
+    std::string thinking;
+    std::vector<std::string> started_tools;
+    std::vector<api::UsageReport> reports;
+};
+
+// 一轮录音装配:本地适配器 + 录音 sink,wiring.events 直连。
+struct RecordedTurn {
+    runtime::IdAuthority ids;
+    runtime::TurnEventAdapter adapter;
+    EventRecorder recorder;
+    RecordedTurn() : adapter("test", ids) {
+        adapter.Attach([this](const runtime::ServerEvent& event) { recorder.Emit(event); });
+        adapter.Start();
+    }
+};
+
 std::vector<api::StreamEvent> MultiToolUseScript(const std::vector<std::string>& tool_ids,
                                                   const std::string& tool_name) {
     std::vector<api::StreamEvent> events;
@@ -145,14 +197,14 @@ TEST_CASE("一轮纯文本直接结束:一次请求,历史里 user+assistant 两
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
-    std::string accumulated_text;
-    agent::Callbacks callbacks;
-    callbacks.on_text_delta = [&](const std::string& text) { accumulated_text += text; };
+    RecordedTurn turn;
+    agent::TurnWiring callbacks;
+    callbacks.events = &turn.adapter;
 
     const auto result = loop.Run("你好", callbacks);
 
     REQUIRE(result.has_value());
-    CHECK(accumulated_text == "你好呀");
+    CHECK(turn.recorder.text == "你好呀");
     CHECK(backend.captured_requests.size() == 1);
     // 计数语义(命名规范阶段 A):一条用户输入 = 一个 turn;纯文本直接
     // 收口,turn 内只有一个 step(一次模型请求),零次工具调用。
@@ -166,7 +218,7 @@ TEST_CASE("输出上限 unset:请求里不带 max_tokens;声明了才带(规格�
     FakeBackend backend;
     backend.scripts = {TextOnlyScript("好")};
     tools::ToolRegistry registry;
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
 
     // 默认构造(兼容门不传值)= unset:api::Request::max_tokens 是 nullopt,
     // 不再有一枚写死的 4096——chat/responses 端整个不发字段,交服务端默认。
@@ -212,7 +264,7 @@ TEST_CASE("finish_reason=length 且正文为空:续跑一次后仍空,结构化�
     };
     tools::ToolRegistry registry;
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     const auto result = loop.Run("说点什么", callbacks);
     REQUIRE(result.has_value());
     CHECK(result->cancelled == false);
@@ -289,7 +341,7 @@ TEST_CASE("length 续跑救得回来:第一轮思考撞墙,标记后续轮交出
     };
     tools::ToolRegistry registry;
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     const auto result = loop.Run("问个问题", callbacks);
     REQUIRE(result.has_value());
     CHECK(result->stop_reason == "end_turn");
@@ -313,7 +365,7 @@ TEST_CASE("length 续跑次数为 0:撞墙即收场,不烧第二次") {
     agent::AgentRuntimeProfile profile;
     profile.length_continuations = 0;  // 显式关掉续跑
     agent::Agent loop(backend, registry, [&] { agent::AgentProfile out; out.runtime = profile; out.request.model = "test-model"; out.system_prompt = "system prompt"; return out; }());
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     const auto result = loop.Run("问", callbacks);
     REQUIRE(result.has_value());
     CHECK(result->length_empty_output == true);
@@ -338,7 +390,7 @@ TEST_CASE("max_tokens 撞墙但块里有完整 tool_use:信块不信帧,照常�
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"工具结果", false}, false));
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     const auto result = loop.Run("查", callbacks);
     REQUIRE(result.has_value());
     CHECK(result->stop_reason == "end_turn");
@@ -358,10 +410,9 @@ TEST_CASE("tool_use 一轮 -> 执行工具 -> 第二次请求历史带 tool_resu
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
-    std::vector<std::string> started_tools;
-    agent::Callbacks callbacks;
-    callbacks.on_tool_start = [&](const std::string&, const std::string& name,
-                                 const nlohmann::json&) { started_tools.push_back(name); };
+    RecordedTurn turn;
+    agent::TurnWiring callbacks;
+    callbacks.events = &turn.adapter;
 
     const auto result = loop.Run("帮我用一下工具", callbacks);
 
@@ -369,8 +420,8 @@ TEST_CASE("tool_use 一轮 -> 执行工具 -> 第二次请求历史带 tool_resu
     CHECK(backend.captured_requests.size() == 2);
     // 计数语义:工具回填后再请求收正文,turn 内走了两步(step)。
     CHECK(result->steps_used == 2);
-    REQUIRE(started_tools.size() == 1);
-    CHECK(started_tools[0] == "fake_tool");
+    REQUIRE(turn.recorder.started_tools.size() == 1);
+    CHECK(turn.recorder.started_tools[0] == "fake_tool");
 
     // 历史:user、assistant(tool_use)、user(tool_result)、assistant(text)
     REQUIRE(loop.history().size() == 4);
@@ -400,7 +451,7 @@ TEST_CASE("计数语义:一次 assistant 并行叫三件工具,仍是一步;工�
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     const auto result = loop.Run("把三件事都办了", callbacks);
 
     // 一个 turn、两步:第一步(一次模型请求)带回了三枚工具调用,第二步
@@ -430,7 +481,7 @@ TEST_CASE("用户拒绝确认:工具不执行,tool_result 是 is_error") {
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
     bool confirm_asked = false;
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     callbacks.on_tool_confirm = [&](const std::string&, const std::string&, const nlohmann::json&) -> bool {
         confirm_asked = true;
         return false;  // 拒绝
@@ -465,7 +516,7 @@ TEST_CASE("拒绝文案回调:设了 on_tool_denial_text 用回调的,没设用�
             std::make_unique<FakeTool>("dangerous_tool", tools::Tool::Result{"不该被看到的结果", false}, true));
 
         agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
-        agent::Callbacks callbacks;
+        agent::TurnWiring callbacks;
         callbacks.on_tool_confirm = [](const std::string&, const std::string&, const nlohmann::json&) -> bool {
             return false;
         };
@@ -493,7 +544,7 @@ TEST_CASE("拒绝文案回调:设了 on_tool_denial_text 用回调的,没设用�
             std::make_unique<FakeTool>("dangerous_tool", tools::Tool::Result{"不该被看到的结果", false}, true));
 
         agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
-        agent::Callbacks callbacks;
+        agent::TurnWiring callbacks;
         callbacks.on_tool_confirm = [](const std::string&, const std::string&, const nlohmann::json&) -> bool {
             return false;
         };
@@ -515,7 +566,7 @@ TEST_CASE("超过步数上限:预算耗尽不是错误,hit_step_limit 带 steps/
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .runtime{.max_output_tokens = 4096, .max_steps_per_turn = 3}, .system_prompt = "system prompt"});
 
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     const auto result = loop.Run("死循环吧", callbacks);
 
     // 0.30.x:步数耗尽从"报错"改为"预算耗尽"——value 分支交回,history 里
@@ -541,7 +592,7 @@ TEST_CASE("max_steps_per_turn=0(无上限):来回步数不受硬顶限制,跑到
     registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"ok", false}, false));
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .runtime{.max_output_tokens = 4096, .max_steps_per_turn = 0}, .system_prompt = "system prompt"});
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     const auto result = loop.Run("跑很多轮", callbacks);
 
     REQUIRE(result.has_value());
@@ -558,7 +609,7 @@ TEST_CASE("默认步数预算(不传参数)= 无上限:多步工具调用不报�
     registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"ok", false}, false));
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});  // 不传步数预算,用默认值
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     const auto result = loop.Run("跑几轮", callbacks);
 
     REQUIRE(result.has_value());
@@ -590,13 +641,14 @@ TEST_CASE("on_usage: 一次 Run() 内多次请求(工具调用来回),每次 Mes
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
-    std::vector<api::UsageReport> reports;
-    agent::Callbacks callbacks;
-    callbacks.on_usage = [&](const api::UsageReport& report) { reports.push_back(report); };
+    RecordedTurn turn;
+    agent::TurnWiring callbacks;
+    callbacks.events = &turn.adapter;
 
     const auto result = loop.Run("帮我用一下工具", callbacks);
 
     REQUIRE(result.has_value());
+    const std::vector<api::UsageReport>& reports = turn.recorder.reports;
     REQUIRE(reports.size() == 2);
     // 逐笔带身份:步号、请求 id、模型——逐步流水账有键可落。
     CHECK(reports[0].step_index == 0);
@@ -625,7 +677,7 @@ TEST_CASE("on_usage: 没设这个回调,不影响其余行为(可选回调,空�
     tools::ToolRegistry registry;
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
-    agent::Callbacks callbacks;  // on_usage 没设
+    agent::TurnWiring callbacks;  // on_usage 没设
 
     const auto result = loop.Run("你好", callbacks);
     REQUIRE(result.has_value());
@@ -640,7 +692,7 @@ TEST_CASE("未知工具名:不崩,tool_result 里说明是未知工具") {
     tools::ToolRegistry registry;  // 空注册表,什么工具都没有
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
 
     const auto result = loop.Run("用个不存在的工具", callbacks);
 
@@ -669,7 +721,7 @@ TEST_CASE("ESC 打断:流中途取消,半截文本入历史带打断标注,Run()
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
     std::atomic<bool> cancel_flag{false};
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     const auto result = loop.Run("问点啥", callbacks, &cancel_flag);
 
     REQUIRE(result.has_value());  // Cancelled 不当错误报
@@ -695,7 +747,7 @@ TEST_CASE("ESC 打断:什么都还没流出来就取消,assistant 消息只有�
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     std::atomic<bool> cancel_flag{false};
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     const auto result = loop.Run("问点啥", callbacks, &cancel_flag);
 
     REQUIRE(result.has_value());
@@ -726,7 +778,7 @@ TEST_CASE("ESC 打断:工具执行后才发现取消,正在跑的工具结果照
     registry.Register(std::unique_ptr<FakeTool>(fake_tool_ptr));
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     const auto result = loop.Run("跑两个工具", callbacks, &cancel_flag);
 
     REQUIRE(result.has_value());
@@ -757,7 +809,7 @@ TEST_CASE("没有取消:cancel 指针传了但没置位,行为跟不传一模一
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     std::atomic<bool> cancel_flag{false};
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     const auto result = loop.Run("你好", callbacks, &cancel_flag);
 
     REQUIRE(result.has_value());
@@ -785,7 +837,7 @@ TEST_CASE("防御:stop_reason 不是 tool_use(帧丢了/说成 end_turn)但消�
     registry.Register(std::unique_ptr<FakeTool>(fake_tool_ptr));
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     const auto result = loop.Run("用工具", callbacks);
 
     REQUIRE(result.has_value());
@@ -806,7 +858,7 @@ TEST_CASE("上下文硬上限:裁剪与截断后仍超限(单条用户输入就�
     // max_context_chars 压到 200,用户输入 10 倍于此——裁不动也截不动
     // (截断只动 tool_result),该明确报错,不能把超大请求发出去。
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .runtime{.max_output_tokens = 4096, .max_steps_per_turn = 25, .max_context_chars = 200}, .system_prompt = "system prompt"});
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     const auto result = loop.Run(std::string(2000, 'x'), callbacks);
 
     REQUIRE_FALSE(result.has_value());
@@ -856,7 +908,7 @@ TEST_CASE("步数将尽提醒:剩 3 步那一步随尾部消息带一次固定�
     registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"ok", false}, false));
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .runtime{.max_output_tokens = 4096, .max_steps_per_turn = 4}, .system_prompt = "system prompt"});
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     const auto result = loop.Run("跑吧", callbacks);
 
     REQUIRE(result.has_value());
@@ -890,7 +942,7 @@ TEST_CASE("本轮动态上下文:随本轮 user 消息尾部进请求视图,发�
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "stable system"});
     loop.SetTurnContext("project memory context");
 
-    REQUIRE(loop.Run("go", agent::Callbacks{}).has_value());
+    REQUIRE(loop.Run("go", agent::TurnWiring{}).has_value());
     REQUIRE(backend.captured_requests.size() == 2);
     // system 不带动态上下文——那是会话稳定材料的地盘。
     CHECK(backend.captured_requests[0].system == "stable system");
@@ -922,7 +974,7 @@ TEST_CASE("图片用户消息入历史，下一轮请求仍带着") {
     backend.scripts = {TextOnlyScript("看到了"), TextOnlyScript("还在")};
     tools::ToolRegistry registry;
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
 
     api::Message image_message;
     image_message.role = api::Role::User;

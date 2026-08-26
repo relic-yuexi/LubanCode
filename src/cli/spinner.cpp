@@ -1,4 +1,5 @@
 #include "cli/spinner.hpp"
+#include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 
 #include <algorithm>
 #include <chrono>
@@ -59,12 +60,12 @@ Spinner::Spinner(const Theme& theme, bool enabled) : enabled_(enabled), stopped_
                 // 跟 ESC 监听线程的"已打断/已排队"提示共用一个 stdout 锁,
                 // 不持锁的话转轮帧会跟那些提示交错,花屏。
                 std::lock_guard<std::mutex> lock(StdoutWriteMutex());
-                std::cout << "\r\x1b[2K" << theme.spinner << "• " << theme.reset;
+                TermOut() << "\r\x1b[2K" << theme.spinner << "• " << theme.reset;
                 for (std::size_t i = 0; i < glyphs.size(); ++i) {
                     const bool lit = !theme.reset.empty() && i == frame % glyphs.size();
-                    std::cout << (lit ? theme.spinner : theme.stats) << glyphs[i];
+                    TermOut() << (lit ? theme.spinner : theme.stats) << glyphs[i];
                 }
-                std::cout << theme.stats << " (" << seconds << "s)"
+                TermOut() << theme.stats << " (" << seconds << "s)"
                           << theme.reset << std::flush;
             }
             ++frame;
@@ -90,7 +91,7 @@ void Spinner::Stop() {
     } else {
         // 独立单行模式整行擦净，免得耗时数字变长后留下尾巴。
         std::lock_guard<std::mutex> lock(StdoutWriteMutex());
-        std::cout << "\r\x1b[2K\r" << std::flush;
+        TermOut() << "\r\x1b[2K\r" << std::flush;
     }
     stopped_ = true;
 }

@@ -329,7 +329,7 @@ std::string NormalizeEditorDraft(std::string bytes);
 void SetStatusLineData(const StatusPanelData& values, const std::vector<std::string>& items,
                        const std::string& separator);
 
-// 状态行的局部更新:主请求 usage 一到(BuildCallbacks::on_usage 更新
+// 状态行的局部更新:主请求 usage 一到(TerminalTurnSink 的 usage 更新
 // ContextTracker 之后)把 context 百分比/已用/窗口发布进来——只改
 // context/tokens 两段的数字与旧值标记,model、cwd、git_branch、provider、
 // effort、REC 等其余字段原样保住,不在回调里另造一份残缺 StatusPanelData

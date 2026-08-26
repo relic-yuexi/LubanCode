@@ -255,7 +255,7 @@ TEST_CASE("集成:假 main 发 agent_message,目标 inbox 收到,子代理下一
     main_registry.Register(std::make_unique<tools::AgentMessageTool>(agent_tool));
 
     agent::Agent main_loop(main_backend, main_registry, agent::AgentProfile{.request{.model = "model"}, .system_prompt = "system"});
-    const auto outcome = main_loop.Run("起一只后台代理,把用户的补充转给它", agent::Callbacks{}, nullptr);
+    const auto outcome = main_loop.Run("起一只后台代理,把用户的补充转给它", agent::TurnWiring{}, nullptr);
     REQUIRE(outcome.has_value());
 
     // main history 留完整 tool_use/tool_result 审计:agent 起了任务,

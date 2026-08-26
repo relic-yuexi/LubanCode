@@ -541,7 +541,7 @@ TEST_CASE("守护:压缩前后 AgentLoop 发出的 system 逐字节不变") {
     loop_profile.system_prompt = system_prompt;
     agent::Agent loop(loop_backend, registry, std::move(loop_profile));
 
-    REQUIRE(loop.Run("第一问 " + std::string(2400, 'x'), agent::Callbacks{}).has_value());
+    REQUIRE(loop.Run("第一问 " + std::string(2400, 'x'), agent::TurnWiring{}).has_value());
     REQUIRE_FALSE(loop_backend.captured_requests.empty());
     const std::string system_before = loop_backend.captured_requests.front().system;
     CHECK(system_before == system_prompt);
@@ -553,7 +553,7 @@ TEST_CASE("守护:压缩前后 AgentLoop 发出的 system 逐字节不变") {
     REQUIRE(summary.has_value());
     loop.ReplaceHistory(agent::BuildCompactedHistory(loop.History(), summary->archive));
 
-    REQUIRE(loop.Run("第二问", agent::Callbacks{}).has_value());
+    REQUIRE(loop.Run("第二问", agent::TurnWiring{}).has_value());
     const std::string system_after = loop_backend.captured_requests.back().system;
 
     CHECK(system_after == system_before);
@@ -583,7 +583,7 @@ TEST_CASE("AgentLoop: 窗口未知或没设回调时,请求前不做任何通报
     agent::AgentWiring wiring;
     wiring.on_context_pressure = [&calls](const agent::ContextPressure&) { ++calls; };
     loop.SetWiring(std::move(wiring));
-    REQUIRE(loop.Run("第一问 " + std::string(2400, 'x'), agent::Callbacks{}).has_value());
+    REQUIRE(loop.Run("第一问 " + std::string(2400, 'x'), agent::TurnWiring{}).has_value());
     CHECK(calls == 0);  // 窗口 0 = 未知,不评估
 }
 
@@ -613,7 +613,7 @@ TEST_CASE("AgentLoop: projected overflow 在请求前通报,回调里压缩后�
     };
     loop.SetWiring(std::move(wiring));
 
-    REQUIRE(loop.Run(std::string(6000, 'a') + "的问题", agent::Callbacks{}).has_value());
+    REQUIRE(loop.Run(std::string(6000, 'a') + "的问题", agent::TurnWiring{}).has_value());
 
     REQUIRE_FALSE(seen.empty());
     CHECK(seen.front().phase == agent::ContextPressure::Phase::PreRequest);
@@ -657,13 +657,13 @@ TEST_CASE("AgentLoop: TrimHistory 兜底真丢东西时,AfterHardTrim 通报") {
 
     // 前四轮:轮数不够裁,没有通报。
     for (int i = 0; i < 4; ++i) {
-        REQUIRE(loop.Run("第" + std::to_string(i) + "问" + std::string(500, 'x'), agent::Callbacks{}).has_value());
+        REQUIRE(loop.Run("第" + std::to_string(i) + "问" + std::string(500, 'x'), agent::TurnWiring{}).has_value());
     }
     CHECK(seen.empty());
 
     // 第五轮:轮数盖过 keep_recent_turns + 1,中间轮被整轮丢掉,请求发出去
     // 之前必须通报——静默降级不许再有。
-    REQUIRE(loop.Run("第5问" + std::string(500, 'x'), agent::Callbacks{}).has_value());
+    REQUIRE(loop.Run("第5问" + std::string(500, 'x'), agent::TurnWiring{}).has_value());
     REQUIRE_FALSE(seen.empty());
     bool saw_hard_trim = false;
     for (const auto& pressure : seen) {

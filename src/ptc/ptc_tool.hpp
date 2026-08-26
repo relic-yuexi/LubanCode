@@ -4,9 +4,9 @@
 // 关键铁律(规格"安全边界"节):脚本里的每一枚 stub 调用都走 agent::
 // RunOneTool 这条与 JSON 后端完全相同的链——schema 复检、PreToolUse、
 // PermissionRequest(确认档)、执行、PostToolUse、编码信任边界、审计
-// (on_tool_start/on_tool_done)。PTC 不是越权暗门。
+// (工具起止上事件流)。PTC 不是越权暗门。
 //
-// 每轮的确认/钩子/展示回调由 BuildCallbacks 经 SetHooks 灌入(与 AgentTool
+// 每轮的确认/钩子接线与事件口由终端装配经 SetHooks 灌入(与 AgentTool
 // 的 SetHooks 同一套思路):PtcTool 构造一次活整个会话,回调每轮换新。
 
 #pragma once
@@ -22,7 +22,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "agent/loop.hpp"  // Callbacks/ToolHookDecision/ToolPhase:执行链的类型
+#include "agent/loop.hpp"  // TurnWiring/ToolHookDecision/ToolPhase:执行链的类型
 #include "ptc/runner.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
@@ -31,15 +31,11 @@ namespace lubancode::ptc {
 
 class PtcTool : public tools::Tool {
 public:
-    // 每轮由 BuildCallbacks 刷新的转发钩子(字段语义与 agent::Callbacks
-    // 同名项一一对应;不设 = 不转发,工具照常执行)。
+    // 每轮由终端装配(控制面)刷新的转发钩子——控制口字段语义与
+    // agent::TurnWiring 同名项一一对应;不设 = 不转发,工具照常执行。
     struct Hooks {
-        std::function<void(const std::string& tool_use_id, const std::string& name,
-                          const nlohmann::json& input)> on_tool_start;
         std::function<bool(const std::string& tool_use_id, const std::string& name,
                            const nlohmann::json& input)> on_tool_confirm;
-        std::function<void(const std::string& tool_use_id, const std::string& name,
-                           const tools::Tool::Result& result)> on_tool_done;
         std::function<runtime::ToolHookDecision(const std::string& tool_use_id, const std::string& name,
                                               const nlohmann::json& input)>
             on_pre_tool_use_hook;
@@ -55,6 +51,11 @@ public:
         // ——单子明令"PTC 生成的调用也走 RunOneTool 与 ModePolicy,不能只
         // 拦 JSON tool calling"。不设 = 不转发(旧行为)。
         std::function<std::string(const std::string& tool_name, const nlohmann::json& input)> on_mode_policy;
+        // 显示出水口(骨架拆解批二余款):stub 调用的起止上宿主的事件流
+        // ——16 枚同构调用逐枚有账;subordinate_stream 恒真(从路):终端只
+        // 画一张外层卡,不刷满屏(规格 UI 节)。不设 = 不上事件流(旧行为)。
+        runtime::TurnEventAdapter* events = nullptr;
+        bool subordinate_stream = true;
         const std::atomic<bool>* cancel = nullptr;  // Esc 取消链(每轮的旗子)
     };
 

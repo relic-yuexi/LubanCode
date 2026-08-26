@@ -1,4 +1,5 @@
 #include "cli/record_command.hpp"
+#include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 
 #include <algorithm>
 #include <filesystem>
@@ -31,7 +32,7 @@ std::optional<std::string> Ask(const std::string& question, const Theme& theme) 
     return ReadLine(theme.stats + question + theme.reset + " ", theme, /*esc_rejects=*/true);
 }
 
-void PrintUsage() { std::cout << tr("record.usage") << "\n"; }
+void PrintUsage() { TermOut() << tr("record.usage") << "\n"; }
 
 // 草稿目录里的全部常规文件(相对路径,正斜杠),安装前列给用户看。
 std::vector<std::string> DraftFiles(const fs::path& draft_dir) {
@@ -53,17 +54,17 @@ std::vector<std::string> DraftFiles(const fs::path& draft_dir) {
 bool InstallDraftWithConfirm(const fs::path& draft_dir, const fs::path& skills_root,
                              RecordCommandContext& ctx, const Theme& theme) {
     const std::vector<std::string> files = DraftFiles(draft_dir);
-    std::cout << trf("record.install.files", PathToUtf8(skills_root) + "/<"
+    TermOut() << trf("record.install.files", PathToUtf8(skills_root) + "/<"
                                                + tr("record.skill_name_placeholder") + ">")
               << "\n";
     for (const std::string& file : files) {
-        std::cout << "  " << file << "\n";
+        TermOut() << "  " << file << "\n";
     }
     const auto answer = ReadLine(theme.confirm + tr("record.install.confirm") + theme.reset, theme,
                                  /*esc_rejects=*/true);
     const bool confirmed = answer.has_value() && (*answer == "y" || *answer == "Y");
     if (!confirmed) {
-        std::cout << tr("record.install.cancelled") << "\n";
+        TermOut() << tr("record.install.cancelled") << "\n";
         return false;
     }
     const auto installed = config::InstallDraftSkill(
@@ -71,10 +72,10 @@ bool InstallDraftWithConfirm(const fs::path& draft_dir, const fs::path& skills_r
             return skills::ValidateSkillMarkdownForInstall(content);
         });
     if (!installed.has_value()) {
-        std::cout << theme.error << trf("record.install.failed", installed.error()) << theme.reset << "\n";
+        TermOut() << theme.error << trf("record.install.failed", installed.error()) << theme.reset << "\n";
         return false;
     }
-    std::cout << trf("record.install.done", installed->installed_names.empty()
+    TermOut() << trf("record.install.done", installed->installed_names.empty()
                                                 ? std::string("?")
                                                 : installed->installed_names.front(),
                      PathToUtf8(skills_root))
@@ -90,7 +91,7 @@ void FinishRecording(RecordCommandContext& ctx, const Theme& theme, const fs::pa
     const std::vector<skills::RecordEvent> events = skills::ReadRecordingEvents(recording_dir);
     const auto draft = skills::WriteSkillDraft(recording_dir, events);
     if (!draft.has_value()) {
-        std::cout << theme.error << trf("record.stop.draft_failed", draft.error()) << theme.reset << "\n";
+        TermOut() << theme.error << trf("record.stop.draft_failed", draft.error()) << theme.reset << "\n";
         return;
     }
     std::string draft_text;
@@ -100,12 +101,12 @@ void FinishRecording(RecordCommandContext& ctx, const Theme& theme, const fs::pa
         buffer << file.rdbuf();
         draft_text = buffer.str();
     }
-    std::cout << trf("record.draft.header", draft->files.size()) << "\n\n" << draft_text << "\n";
+    TermOut() << trf("record.draft.header", draft->files.size()) << "\n\n" << draft_text << "\n";
 
     const auto answer = ReadLine(theme.confirm + tr("record.install.prompt") + theme.reset, theme,
                                  /*esc_rejects=*/true);
     if (!answer.has_value()) {
-        std::cout << tr("record.install.cancelled") << "\n";
+        TermOut() << tr("record.install.cancelled") << "\n";
         return;
     }
     const std::string choice = *answer;
@@ -113,7 +114,7 @@ void FinishRecording(RecordCommandContext& ctx, const Theme& theme, const fs::pa
                                  (choice == "p" || choice == "P" || choice.empty()) ? ctx.project_skills_root
                                                                                     : fs::path());
     if (skills_root.empty()) {
-        std::cout << tr("record.install.cancelled") << "\n";
+        TermOut() << tr("record.install.cancelled") << "\n";
         return;
     }
     InstallDraftWithConfirm(draft->draft_dir, skills_root, ctx, theme);
@@ -140,24 +141,24 @@ void HandleRecordCommand(const std::string& args, RecordCommandContext& ctx, con
             return;
         case RecordCommandAction::Status:
             if (ctx.recorder.has_value()) {
-                std::cout << trf("record.status.recording",
+                TermOut() << trf("record.status.recording",
                                  ctx.recorder->state() == skills::RecorderState::Paused
                                      ? tr("record.status.paused_word")
                                      : tr("record.status.recording_word"),
                                  ctx.recorder->name(), PathToUtf8(ctx.recorder->dir()))
                           << "\n";
             } else {
-                std::cout << tr("record.status.idle") << "\n";
+                TermOut() << tr("record.status.idle") << "\n";
             }
             return;
         case RecordCommandAction::Start: {
             if (ctx.recorder.has_value()) {
-                std::cout << theme.error << trf("record.already_active", ctx.recorder->name()) << theme.reset
+                TermOut() << theme.error << trf("record.already_active", ctx.recorder->name()) << theme.reset
                           << "\n";
                 return;
             }
             if (ctx.recordings_root.empty()) {
-                std::cout << theme.error << tr("record.unavailable") << theme.reset << "\n";
+                TermOut() << theme.error << tr("record.unavailable") << theme.reset << "\n";
                 return;
             }
             // 开录先问三句:目标、可变输入、成事标准。管道里喂不齐就空着,
@@ -177,49 +178,49 @@ void HandleRecordCommand(const std::string& args, RecordCommandContext& ctx, con
             }
             auto started = skills::WorkflowRecorder::Start(ctx.recordings_root, info);
             if (!started.has_value()) {
-                std::cout << theme.error << trf("record.start.failed", started.error()) << theme.reset << "\n";
+                TermOut() << theme.error << trf("record.start.failed", started.error()) << theme.reset << "\n";
                 return;
             }
-            std::cout << trf("record.started", started->id(), PathToUtf8(started->dir())) << "\n";
+            TermOut() << trf("record.started", started->id(), PathToUtf8(started->dir())) << "\n";
             ctx.recorder.emplace(std::move(*started));
             return;
         }
         case RecordCommandAction::Note:
             if (!ctx.recorder.has_value()) {
-                std::cout << theme.error << tr("record.not_active") << theme.reset << "\n";
+                TermOut() << theme.error << tr("record.not_active") << theme.reset << "\n";
                 return;
             }
             if (const auto noted = ctx.recorder->Note(command.text); !noted.has_value()) {
-                std::cout << theme.error << trf("record.op_failed", noted.error()) << theme.reset << "\n";
+                TermOut() << theme.error << trf("record.op_failed", noted.error()) << theme.reset << "\n";
                 return;
             }
-            std::cout << tr("record.note_saved") << "\n";
+            TermOut() << tr("record.note_saved") << "\n";
             return;
         case RecordCommandAction::Pause:
             if (!ctx.recorder.has_value()) {
-                std::cout << theme.error << tr("record.not_active") << theme.reset << "\n";
+                TermOut() << theme.error << tr("record.not_active") << theme.reset << "\n";
                 return;
             }
             if (const auto paused = ctx.recorder->Pause(); !paused.has_value()) {
-                std::cout << theme.error << trf("record.op_failed", paused.error()) << theme.reset << "\n";
+                TermOut() << theme.error << trf("record.op_failed", paused.error()) << theme.reset << "\n";
                 return;
             }
-            std::cout << tr("record.paused_msg") << "\n";
+            TermOut() << tr("record.paused_msg") << "\n";
             return;
         case RecordCommandAction::Resume:
             if (!ctx.recorder.has_value()) {
-                std::cout << theme.error << tr("record.not_active") << theme.reset << "\n";
+                TermOut() << theme.error << tr("record.not_active") << theme.reset << "\n";
                 return;
             }
             if (const auto resumed = ctx.recorder->Resume(); !resumed.has_value()) {
-                std::cout << theme.error << trf("record.op_failed", resumed.error()) << theme.reset << "\n";
+                TermOut() << theme.error << trf("record.op_failed", resumed.error()) << theme.reset << "\n";
                 return;
             }
-            std::cout << tr("record.resumed_msg") << "\n";
+            TermOut() << tr("record.resumed_msg") << "\n";
             return;
         case RecordCommandAction::Stop: {
             if (!ctx.recorder.has_value()) {
-                std::cout << theme.error << tr("record.not_active") << theme.reset << "\n";
+                TermOut() << theme.error << tr("record.not_active") << theme.reset << "\n";
                 return;
             }
             std::string verification;
@@ -231,40 +232,40 @@ void HandleRecordCommand(const std::string& args, RecordCommandContext& ctx, con
             const fs::path dir = ctx.recorder->dir();
             ctx.recorder.reset();
             if (!stopped.has_value()) {
-                std::cout << theme.error << trf("record.op_failed", stopped.error()) << theme.reset << "\n";
+                TermOut() << theme.error << trf("record.op_failed", stopped.error()) << theme.reset << "\n";
                 return;
             }
-            std::cout << trf("record.stop_done", id, PathToUtf8(dir)) << "\n";
+            TermOut() << trf("record.stop_done", id, PathToUtf8(dir)) << "\n";
             FinishRecording(ctx, theme, dir);
             return;
         }
         case RecordCommandAction::Cancel: {
             if (!ctx.recorder.has_value()) {
-                std::cout << theme.error << tr("record.not_active") << theme.reset << "\n";
+                TermOut() << theme.error << tr("record.not_active") << theme.reset << "\n";
                 return;
             }
             const auto cancelled = ctx.recorder->Cancel();
             ctx.recorder.reset();
             if (!cancelled.has_value()) {
-                std::cout << theme.error << trf("record.op_failed", cancelled.error()) << theme.reset << "\n";
+                TermOut() << theme.error << trf("record.op_failed", cancelled.error()) << theme.reset << "\n";
                 return;
             }
-            std::cout << tr("record.cancel_done") << "\n";
+            TermOut() << tr("record.cancel_done") << "\n";
             return;
         }
         case RecordCommandAction::List: {
             if (ctx.recordings_root.empty()) {
-                std::cout << theme.error << tr("record.unavailable") << theme.reset << "\n";
+                TermOut() << theme.error << tr("record.unavailable") << theme.reset << "\n";
                 return;
             }
             const auto recordings = skills::ListRecordings(ctx.recordings_root);
             if (recordings.empty()) {
-                std::cout << tr("record.list.empty") << "\n";
+                TermOut() << tr("record.list.empty") << "\n";
                 return;
             }
-            std::cout << tr("record.list.header") << "\n";
+            TermOut() << tr("record.list.header") << "\n";
             for (const auto& status : recordings) {
-                std::cout << trf("record.list.entry", status.id, status.name, status.started_at,
+                TermOut() << trf("record.list.entry", status.id, status.name, status.started_at,
                                  status.finished ? tr("record.list.finished") : tr("record.list.unfinished"),
                                  status.has_draft ? tr("record.list.has_draft") : tr("record.list.no_draft"))
                           << "\n";
@@ -273,20 +274,20 @@ void HandleRecordCommand(const std::string& args, RecordCommandContext& ctx, con
         }
         case RecordCommandAction::Discard: {
             if (ctx.recordings_root.empty()) {
-                std::cout << theme.error << tr("record.unavailable") << theme.reset << "\n";
+                TermOut() << theme.error << tr("record.unavailable") << theme.reset << "\n";
                 return;
             }
             const auto discarded = skills::DiscardRecording(ctx.recordings_root, command.name);
             if (!discarded.has_value()) {
-                std::cout << theme.error << trf("record.op_failed", discarded.error()) << theme.reset << "\n";
+                TermOut() << theme.error << trf("record.op_failed", discarded.error()) << theme.reset << "\n";
                 return;
             }
-            std::cout << trf("record.discard_done", command.name) << "\n";
+            TermOut() << trf("record.discard_done", command.name) << "\n";
             return;
         }
         case RecordCommandAction::Install: {
             if (ctx.recordings_root.empty()) {
-                std::cout << theme.error << tr("record.unavailable") << theme.reset << "\n";
+                TermOut() << theme.error << tr("record.unavailable") << theme.reset << "\n";
                 return;
             }
             const auto recordings = skills::ListRecordings(ctx.recordings_root);
@@ -295,11 +296,11 @@ void HandleRecordCommand(const std::string& args, RecordCommandContext& ctx, con
                                                 return status.id == command.name;
                                             });
             if (found == recordings.end()) {
-                std::cout << theme.error << trf("record.install.not_found", command.name) << theme.reset << "\n";
+                TermOut() << theme.error << trf("record.install.not_found", command.name) << theme.reset << "\n";
                 return;
             }
             if (!found->has_draft) {
-                std::cout << theme.error << trf("record.install.no_draft", command.name) << theme.reset << "\n";
+                TermOut() << theme.error << trf("record.install.no_draft", command.name) << theme.reset << "\n";
                 return;
             }
             const fs::path skills_root = command.to_project ? ctx.project_skills_root : ctx.home_skills_root;

@@ -45,6 +45,8 @@ namespace lubancode::app {
 
 
 using lubancode::platform::CurrentDirUtf8;
+using lubancode::cli::TermOut;
+using lubancode::cli::TermErr;
 using lubancode::cli::tr;
 using lubancode::cli::trf;
 
@@ -78,20 +80,20 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
         // 占用卡片(核心,第一组):系统/工具/历史条形图 + 已用/触发线/剩余。
         // FormatContextBreakdown 自带表头"上下文占用分析(窗口 {0})"。
         for (const auto& line : lines) {
-            std::cout << line << "\n";
+            TermOut() << line << "\n";
         }
         // 接近上限提醒跟着占用卡片走。
         if (context_tracker.ShouldAutoCompact()) {
-            std::cout << tr("cmd.context.compact_hint") << "\n";
+            TermOut() << tr("cmd.context.compact_hint") << "\n";
         }
 
         // 缓存卡片(第二组):前缀 epoch 与最近一次请求的命中率。
         // 命中跌下去时,用户看得出是主动换了哪根梁(epoch 断因在回合统计
         // 行/逐步流水账里),不再笼统赖服务端。没实测过就明说。
         if (context_tracker.last_total_input_tokens() > 0) {
-            std::cout << "\n── " << trf("cmd.context.group.cache") << " ──\n";
+            TermOut() << "\n── " << trf("cmd.context.group.cache") << " ──\n";
             const int hit_percent = context_tracker.last_cache_hit_percent();
-            std::cout << "  " << trf("cmd.context.epoch", cache_epoch,
+            TermOut() << "  " << trf("cmd.context.epoch", cache_epoch,
                                      lubancode::cli::FormatTokenCount(context_tracker.last_cache_read_tokens()),
                                      lubancode::cli::FormatTokenCount(context_tracker.last_total_input_tokens()),
                                      hit_percent >= 0 ? std::to_string(hit_percent) : std::string("?"))
@@ -101,7 +103,7 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
             // 缓存读",不是"每轮都这么多"。
             if (context_tracker.session_input_total() > 0) {
                 const int session_percent = context_tracker.session_cache_hit_percent();
-                std::cout << "  "
+                TermOut() << "  "
                           << trf("cmd.context.cache_session",
                                  lubancode::cli::FormatTokenCount(context_tracker.session_cache_read_total()),
                                  lubancode::cli::FormatTokenCount(context_tracker.session_input_total()),
@@ -112,10 +114,10 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
             // 命中率掉的时候一眼看出是哪一轮、什么操作导致的。
             const auto& history = context_tracker.cache_history();
             if (!history.empty()) {
-                std::cout << "  " << trf("cmd.context.cache_history_header", history.size()) << "\n";
+                TermOut() << "  " << trf("cmd.context.cache_history_header", history.size()) << "\n";
                 for (const auto& turn : history) {
                     const int pct = turn.hit_percent();
-                    std::cout << "    " << trf("cmd.context.cache_history_row",
+                    TermOut() << "    " << trf("cmd.context.cache_history_row",
                                                lubancode::cli::FormatTokenCount(turn.input_tokens),
                                                lubancode::cli::FormatTokenCount(turn.cache_read_tokens),
                                                pct >= 0 ? std::to_string(pct) : std::string("?"))
@@ -128,68 +130,68 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
         // tracker,都是"最近一次主请求的占用",不是会话累计花销,也不含
         // 独立子代理的 token。最近一次请求没带回 usage 时再补一行旧值提醒。
         {
-            std::cout << "\n" << tr("cmd.context.note.semantics") << "\n";
+            TermOut() << "\n" << tr("cmd.context.note.semantics") << "\n";
             if (context_tracker.usage_stale()) {
-                std::cout << tr("cmd.context.note.stale") << "\n";
+                TermOut() << tr("cmd.context.note.stale") << "\n";
             }
         }
 
         // 结构与回收卡片(第三组):artifact 层、分层占用、回收字节、最近
         // compact——"原文还能去哪找、token 花在哪、何时会压"一张单子。
         if (artifact_store != nullptr || layers != nullptr) {
-            std::cout << "\n── " << trf("cmd.context.group.structure") << " ──\n";
+            TermOut() << "\n── " << trf("cmd.context.group.structure") << " ──\n";
         }
         if (artifact_store != nullptr && artifact_store->active()) {
             const auto stats = artifact_store->StatsOf();
             if (stats.artifacts > 0) {
-                std::cout << "  " << trf("cmd.context.artifacts", stats.artifacts, stats.total_bytes) << "\n";
+                TermOut() << "  " << trf("cmd.context.artifacts", stats.artifacts, stats.total_bytes) << "\n";
             } else {
-                std::cout << "  " << tr("cmd.context.artifacts_none") << "\n";
+                TermOut() << "  " << tr("cmd.context.artifacts_none") << "\n";
             }
         }
         if (layers != nullptr) {
-            std::cout << "  " << trf("cmd.context.layers", layers->inline_full_results,
+            TermOut() << "  " << trf("cmd.context.layers", layers->inline_full_results,
                                      layers->artifact_previews)
                       << "\n";
             if (layers->reclaimable_bytes > 0) {
-                std::cout << "  " << trf("cmd.context.reclaimable", layers->reclaimable_bytes) << "\n";
+                TermOut() << "  " << trf("cmd.context.reclaimable", layers->reclaimable_bytes) << "\n";
             }
             if (!layers->last_compact_line.empty()) {
-                std::cout << "  " << trf("cmd.context.last_compact", layers->last_compact_line) << "\n";
+                TermOut() << "  " << trf("cmd.context.last_compact", layers->last_compact_line) << "\n";
             }
         }
 
         // 预算与角色账卡片(第四组):输出上限、预算总账、开销明细、压缩预算、
         // 分角色 usage 台账——模型分工各归各的账,一眼见底。
         if (main_profile != nullptr || layers != nullptr || usage_ledger != nullptr) {
-            std::cout << "\n── " << trf("cmd.context.group.budget") << " ──\n";
+            TermOut() << "\n── " << trf("cmd.context.group.budget") << " ──\n";
         }
         // 输出上限与来源(规格根因一):本轮每份请求给模型留的输出空间,
         // unset 也说破——"交服务端默认"比一枚看不见的 4096 诚实。
         if (main_profile != nullptr) {
             if (main_profile->max_output_tokens.has_value()) {
-                std::cout << "  " << trf("cmd.context.output_budget", *main_profile->max_output_tokens,
+                TermOut() << "  " << trf("cmd.context.output_budget", *main_profile->max_output_tokens,
                                          app::OutputBudgetSourceText(main_profile->max_output_tokens_source, false))
                           << "\n";
             } else {
-                std::cout << "  " << tr("cmd.context.output_budget_unset") << "\n";
+                TermOut() << "  " << tr("cmd.context.output_budget_unset") << "\n";
             }
         }
         if (layers != nullptr && layers->budget.has_value()) {
             const auto& plan = *layers->budget;
-            std::cout << "  " << trf("cmd.context.budget", plan.window,
+            TermOut() << "  " << trf("cmd.context.budget", plan.window,
                                      plan.compactable_history_budget.has_value()
                                          ? lubancode::cli::FormatTokenCount(*plan.compactable_history_budget)
                                          : std::string("?"),
                                      lubancode::cli::FormatTokenCount(plan.overhead_total()))
                       << "\n";
-            std::cout << "  " << trf("cmd.context.budget_detail", plan.stable_system + plan.model_instructions,
+            TermOut() << "  " << trf("cmd.context.budget_detail", plan.stable_system + plan.model_instructions,
                                      plan.tool_schemas, plan.protected_hot_zone, plan.requested_output_reserve,
                                      plan.compact_prompt_overhead + plan.protocol_headroom,
                                      plan.tokenizer_error_margin)
                       << "\n";
             if (plan.compact_call_input_budget.has_value()) {
-                std::cout << "  " << trf("cmd.context.compact_budget",
+                TermOut() << "  " << trf("cmd.context.compact_budget",
                                          lubancode::cli::FormatTokenCount(*plan.compact_call_input_budget),
                                          lubancode::cli::FormatTokenCount(plan.summary_target_budget))
                           << "\n";
@@ -200,7 +202,7 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
             if (window > 0) {
                 const std::size_t line = window * 80 / 100;  // 与 kAutoCompactThresholdPercent 同档
                 const auto used = static_cast<std::int64_t>(context_tracker.current_tokens());
-                std::cout << "  " << trf("cmd.context.next_line", lubancode::cli::FormatTokenCount(line),
+                TermOut() << "  " << trf("cmd.context.next_line", lubancode::cli::FormatTokenCount(line),
                                          used >= 0 ? lubancode::cli::FormatTokenCount(used) : std::string("0"),
                                          used >= static_cast<std::int64_t>(line)
                                                  ? tr("cmd.context.next_line_over")
@@ -214,15 +216,15 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
         if (usage_ledger != nullptr) {
             const auto role_lines = usage_ledger->ReportLines();
             if (!role_lines.empty()) {
-                std::cout << "  " << tr("router.usage.header") << "\n";
+                TermOut() << "  " << tr("router.usage.header") << "\n";
                 for (const std::string& line : role_lines) {
-                    std::cout << "    " << line << "\n";
+                    TermOut() << "    " << line << "\n";
                 }
             }
             if (!usage_ledger->fallback_notes().empty()) {
-                std::cout << "  " << tr("router.usage.fallback_header") << "\n";
+                TermOut() << "  " << tr("router.usage.fallback_header") << "\n";
                 for (const std::string& note : usage_ledger->fallback_notes()) {
-                    std::cout << "    " << note << "\n";
+                    TermOut() << "    " << note << "\n";
                 }
             }
         }
@@ -230,11 +232,11 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
     }
     const auto parsed = lubancode::config::ParseContextWindowTokens(args);
     if (!parsed.has_value()) {
-        std::cout << parsed.error() << "\n";
+        TermOut() << parsed.error() << "\n";
         return;
     }
     context_tracker.set_window_tokens(*parsed);
-    std::cout << trf("cmd.context.window_changed", *parsed) << "\n";
+    TermOut() << trf("cmd.context.window_changed", *parsed) << "\n";
 }
 
 // /compact 命令:窗口预算 + manifest 守恒校验 + 热区保留,一条路走到底。
@@ -247,7 +249,7 @@ CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::ag
                                           lubancode::agent::BackgroundCallAccounting* accounting) {
     const std::vector<lubancode::api::Message>& history = loop.History();
     if (history.empty()) {
-        std::cout << tr("cmd.compact.empty") << "\n";
+        TermOut() << tr("cmd.compact.empty") << "\n";
         return {};
     }
 
@@ -268,12 +270,12 @@ CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::ag
         const std::size_t hot_from = lubancode::agent::HotZoneStartIndex(history);
         std::vector<lubancode::api::Message> hot(history.begin() + static_cast<std::ptrdiff_t>(hot_from),
                                                  history.end());
-        std::cout << tr("cmd.compact.dryrun.header") << "\n";
-        std::cout << trf("cmd.compact.dryrun.reclaim", struct_stats.reclaimable_bytes(),
+        TermOut() << tr("cmd.compact.dryrun.header") << "\n";
+        TermOut() << trf("cmd.compact.dryrun.reclaim", struct_stats.reclaimable_bytes(),
                          struct_stats.duplicate_groups, struct_stats.superseded_observations,
                          struct_stats.offloaded_results)
                   << "\n";
-        std::cout << trf("cmd.compact.dryrun.pinned", lubancode::agent::EstimateHistoryTokens(hot),
+        TermOut() << trf("cmd.compact.dryrun.pinned", lubancode::agent::EstimateHistoryTokens(hot),
                          options.required_open_items.size())
                   << "\n";
         return {};
@@ -291,7 +293,7 @@ CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::ag
     spinner.Stop();
 
     if (!result.has_value()) {
-        std::cout << theme.error << trf("cmd.compact.failed", result.error().message) << theme.reset << "\n";
+        TermOut() << theme.error << trf("cmd.compact.failed", result.error().message) << theme.reset << "\n";
         return {};
     }
 
@@ -320,15 +322,15 @@ CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::ag
     const auto event = lubancode::sessions::UpgradeToV2(base_event, compact_epoch, std::move(manifest_json),
                                                      std::move(metrics_json));
 
-    std::cout << trf("cmd.compact.result", before_tokens, after_tokens) << "\n";
+    TermOut() << trf("cmd.compact.result", before_tokens, after_tokens) << "\n";
     if (result->metrics.hierarchical) {
-        std::cout << trf("cmd.compact.hierarchical", result->metrics.chunks, result->metrics.reduce_passes)
+        TermOut() << trf("cmd.compact.hierarchical", result->metrics.chunks, result->metrics.reduce_passes)
                   << "\n";
     }
     if (!options.budget.window_tokens.has_value()) {
-        std::cout << theme.stats << tr("cmd.compact.window_unknown") << theme.reset << "\n";
+        TermOut() << theme.stats << tr("cmd.compact.window_unknown") << theme.reset << "\n";
     }
-    std::cout << trf("cmd.compact.manifest", result->manifest.constraints.size(),
+    TermOut() << trf("cmd.compact.manifest", result->manifest.constraints.size(),
                      result->manifest.open_items.size())
               << "\n";
     return CompactCommandResult{event, before_tokens, after_tokens, result->manifest.constraints.size(),
@@ -336,7 +338,7 @@ CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::ag
 }
 void PrintSessionsCommand(const std::string& sessions_dir, const std::string& args) {
     if (sessions_dir.empty()) {
-        std::cout << tr("session.no_home") << "\n";
+        TermOut() << tr("session.no_home") << "\n";
         return;
     }
     // /sessions archived:归档只读入口(第四步)。列 archive/ 子目录,标明
@@ -351,13 +353,13 @@ void PrintSessionsCommand(const std::string& sessions_dir, const std::string& ar
         query.limit = 0;
         const auto page = catalog.Query(query);
         if (page.entries.empty()) {
-            std::cout << tr("cmd.sessions.archived_none") << "\n";
+            TermOut() << tr("cmd.sessions.archived_none") << "\n";
             return;
         }
-        std::cout << trf("cmd.sessions.archived_header", page.total) << "\n";
+        TermOut() << trf("cmd.sessions.archived_header", page.total) << "\n";
         for (const auto& entry : page.entries) {
             const std::string& label = !entry.title.empty() ? entry.title : entry.first_user_text;
-            std::cout << "  " << entry.id << "\n"
+            TermOut() << "  " << entry.id << "\n"
                       << trf("cmd.sessions.entry",
                               entry.updated_at.empty() ? tr("cmd.sessions.unknown_time") : entry.updated_at,
                               entry.message_count,
@@ -365,32 +367,32 @@ void PrintSessionsCommand(const std::string& sessions_dir, const std::string& ar
                                              : lubancode::sessions::TruncateUtf8Chars(label, 40))
                       << "\n";
         }
-        std::cout << tr("cmd.sessions.archived_hint") << "\n";
+        TermOut() << tr("cmd.sessions.archived_hint") << "\n";
         return;
     }
     const bool all = args == "all";
     if (!args.empty() && !all) {
-        std::cout << tr("cmd.sessions.usage") << "\n";
+        TermOut() << tr("cmd.sessions.usage") << "\n";
         return;
     }
     const auto entries =
         lubancode::sessions::ListSessions(sessions_dir, 20, all ? std::string() : CurrentDirUtf8());
     if (entries.empty()) {
         if (all) {
-            std::cout << trf("cmd.sessions.none_all", sessions_dir) << "\n";
+            TermOut() << trf("cmd.sessions.none_all", sessions_dir) << "\n";
         } else {
-            std::cout << tr("cmd.sessions.none_here") << "\n";
+            TermOut() << tr("cmd.sessions.none_here") << "\n";
         }
         return;
     }
-    std::cout << trf("cmd.sessions.header", entries.size(),
+    TermOut() << trf("cmd.sessions.header", entries.size(),
                       all ? tr("cmd.sessions.scope_all") : tr("cmd.sessions.scope_here"))
               << "\n";
     for (std::size_t i = 0; i < entries.size(); ++i) {
         const auto& entry = entries[i];
         // 标题优先,没设过标题回退首句摘要。
         const std::string& label = !entry.title.empty() ? entry.title : entry.first_user_text;
-        std::cout << "  " << (i + 1) << ") " << entry.id << "\n"
+        TermOut() << "  " << (i + 1) << ") " << entry.id << "\n"
                    << trf("cmd.sessions.entry",
                            entry.started_at.empty() ? tr("cmd.sessions.unknown_time") : entry.started_at,
                            entry.message_count,
@@ -398,7 +400,7 @@ void PrintSessionsCommand(const std::string& sessions_dir, const std::string& ar
                                           : lubancode::sessions::TruncateUtf8Chars(label, 40))
                    << "\n";
         if (all) {
-            std::cout << trf("cmd.sessions.dir_line",
+            TermOut() << trf("cmd.sessions.dir_line",
                               entry.cwd.empty() ? tr("cmd.sessions.dir_unknown")
                                                  : lubancode::sessions::AbbreviateUtf8Middle(entry.cwd, 48))
                        << "\n";
@@ -547,11 +549,11 @@ std::vector<std::string> MakeTranscriptExcerpt(const std::string& sessions_dir, 
 std::optional<std::string> PromptResumeTarget(const std::string& sessions_dir,
                                               const lubancode::cli::Theme& theme) {
     if (sessions_dir.empty()) {
-        std::cout << tr("session.no_home") << "\n";
+        TermOut() << tr("session.no_home") << "\n";
         return std::nullopt;
     }
     if (!lubancode::platform::StdinIsInteractive() || !lubancode::platform::ProbeStdoutConsole().is_console) {
-        std::cout << tr("cmd.resume.usage") << "\n";
+        TermOut() << tr("cmd.resume.usage") << "\n";
         return std::nullopt;
     }
 
@@ -567,7 +569,7 @@ std::optional<std::string> PromptResumeTarget(const std::string& sessions_dir,
         lubancode::sessions::SessionQuery all_query = query;
         all_query.scope = lubancode::sessions::SessionScope::All;
         if (catalog.Query(all_query).total == 0) {
-            std::cout << tr("cmd.resume.none") << "\n";
+            TermOut() << tr("cmd.resume.none") << "\n";
             return std::nullopt;
         }
     }
@@ -601,7 +603,7 @@ std::optional<std::string> PromptResumeTarget(const std::string& sessions_dir,
                 keep_id = result.selected_id;
                 continue;
             }
-            std::cout << theme.stats << tr("cmd.resume.cancelled") << theme.reset << "\n";
+            TermOut() << theme.stats << tr("cmd.resume.cancelled") << theme.reset << "\n";
             return std::nullopt;
         }
         return *result.picked_id;
@@ -632,7 +634,7 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
                                              const std::optional<lubancode::sessions::PlanReviewEvent>&)>*
                         on_mode_restored) {
     if (sessions_dir.empty()) {
-        std::cout << tr("session.no_home") << "\n";
+        TermOut() << tr("session.no_home") << "\n";
         return false;
     }
     const auto entries = lubancode::sessions::ListSessions(sessions_dir, 20, CurrentDirUtf8());
@@ -650,7 +652,7 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
         // --continue:本目录最近一场;一场都没有就按 quiet_if_none 处理。
         if (entries.empty()) {
             if (!quiet_if_none) {
-                std::cout << tr("cmd.resume.none") << "\n";
+                TermOut() << tr("cmd.resume.none") << "\n";
             }
             return false;
         }
@@ -664,7 +666,7 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
             n = 0;
         }
         if (n < 1 || n > entries.size()) {
-            std::cout << trf("cmd.resume.out_of_range", target, entries.size()) << "\n";
+            TermOut() << trf("cmd.resume.out_of_range", target, entries.size()) << "\n";
             return false;
         }
         id = entries[n - 1].id;
@@ -686,19 +688,19 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
 
     const auto content = lubancode::sessions::ReadSessionFileBytes(file_path);
     if (!content.has_value()) {
-        std::cout << trf("cmd.resume.read_failed", file_path) << "\n";
+        TermOut() << trf("cmd.resume.read_failed", file_path) << "\n";
         return false;
     }
     auto session = lubancode::sessions::ParseSessionFile(*content);
     if (!session.has_value()) {
-        std::cout << trf("cmd.resume.bad_meta", file_path) << "\n";
+        TermOut() << trf("cmd.resume.bad_meta", file_path) << "\n";
         return false;
     }
 
     loop.ReplaceHistory(session->messages);
     persisted_count = session->messages.size();
     if (!store.ResumeAt(file_path, id)) {
-        std::cout << theme.error << trf("cmd.resume.takeover_failed", file_path) << theme.reset << "\n";
+        TermOut() << theme.error << trf("cmd.resume.takeover_failed", file_path) << theme.reset << "\n";
     }
     session_meta = session->meta;
     session_title = session->title;
@@ -710,30 +712,30 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
         session->all_messages, theme, lubancode::cli::DetectConsoleWidth().value_or(80),
         session->compact_positions);
     if (!restored_history.empty()) {
-        std::cout << "\n" << theme.banner << trf("cmd.resume.history.header", id) << theme.reset << "\n\n"
+        TermOut() << "\n" << theme.banner << trf("cmd.resume.history.header", id) << theme.reset << "\n\n"
                   << restored_history << theme.stats << tr("cmd.resume.history.end") << theme.reset << "\n\n";
     }
 
     if (session->compact_count > 0) {
         // 经过压缩的场子:恢复的是回放出来的有效态,不是全量流水。
-        std::cout << trf("cmd.resume.restored_compact", id, session->messages.size(),
+        TermOut() << trf("cmd.resume.restored_compact", id, session->messages.size(),
                           session->all_messages.size(), session->compact_count);
     } else {
-        std::cout << trf("cmd.resume.restored", id, session->messages.size());
+        TermOut() << trf("cmd.resume.restored", id, session->messages.size());
     }
     if (session->repaired > 0) {
-        std::cout << trf("cmd.resume.repaired", session->repaired);
+        TermOut() << trf("cmd.resume.repaired", session->repaired);
     }
     if (session->skipped_lines > 0) {
-        std::cout << trf("cmd.resume.skipped", session->skipped_lines);
+        TermOut() << trf("cmd.resume.skipped", session->skipped_lines);
     }
-    std::cout << "。\n";
+    TermOut() << "。\n";
     // 排队账重建(路径二):存档最后一条 queue 快照交还会话层;有货时给
     // 用户一行,别让人以为排过的话凭空蒸发。
     if (on_queue_restored != nullptr && *on_queue_restored) {
         (*on_queue_restored)(session->queued_messages);
         if (!session->queued_messages.empty()) {
-            std::cout << theme.stats << trf("cmd.resume.queue_restored", session->queued_messages.size())
+            TermOut() << theme.stats << trf("cmd.resume.queue_restored", session->queued_messages.size())
                       << theme.reset << "\n";
         }
     }
@@ -748,13 +750,13 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
     }
     // context 记账:真实 usage 得等恢复后第一次请求才校准,这里先按字符
     // 粗估打一行,心里有数。
-    std::cout << trf("cmd.resume.estimate", EstimateHistoryTokens(session->messages)) << "\n";
+    TermOut() << trf("cmd.resume.estimate", EstimateHistoryTokens(session->messages)) << "\n";
     if (!session->meta.model.empty() && session->meta.model != current_model) {
-        std::cout << theme.stats << trf("cmd.resume.model_mismatch", session->meta.model, current_model)
+        TermOut() << theme.stats << trf("cmd.resume.model_mismatch", session->meta.model, current_model)
                   << theme.reset << "\n";
     }
     if (!session->meta.wire.empty() && session->meta.wire != wire_str) {
-        std::cout << theme.stats << trf("cmd.resume.wire_mismatch", session->meta.wire, wire_str) << theme.reset
+        TermOut() << theme.stats << trf("cmd.resume.wire_mismatch", session->meta.wire, wire_str) << theme.reset
                   << "\n";
     }
 
@@ -768,14 +770,14 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
                 std::u8string(reinterpret_cast<const char8_t*>(saved.data()), saved.size()));
             std::error_code path_ec;
             if (!std::filesystem::exists(saved_path, path_ec)) {
-                std::cout << theme.stats << trf("cmd.resume.worktree_gone", saved) << theme.reset << "\n";
+                TermOut() << theme.stats << trf("cmd.resume.worktree_gone", saved) << theme.reset << "\n";
             } else {
                 const auto entered = worktree_session->EnterByPath(saved_path);
                 if (entered.code == lubancode::cli::WorktreeResultCode::VerificationFailed) {
-                    std::cout << theme.error << trf("cmd.resume.worktree_refused", saved, entered.detail)
+                    TermOut() << theme.error << trf("cmd.resume.worktree_refused", saved, entered.detail)
                               << theme.reset << "\n";
                 } else if (entered.code == lubancode::cli::WorktreeResultCode::Created) {
-                    std::cout << theme.stats << trf("cmd.resume.worktree_back", saved) << theme.reset << "\n";
+                    TermOut() << theme.stats << trf("cmd.resume.worktree_back", saved) << theme.reset << "\n";
                 }
             }
         }
@@ -792,7 +794,7 @@ void HandleExportCommand(const std::string& args, const lubancode::agent::Agent&
                           const lubancode::agent::ContextArtifactStore* artifact_store) {
     const auto& history = loop.History();
     if (history.empty()) {
-        std::cout << tr("cmd.export.empty") << "\n";
+        TermOut() << tr("cmd.export.empty") << "\n";
         return;
     }
     const std::string id =
@@ -800,7 +802,7 @@ void HandleExportCommand(const std::string& args, const lubancode::agent::Agent&
     std::string out_path = args;
     if (out_path.empty()) {
         if (sessions_dir.empty()) {
-            std::cout << tr("cmd.export.need_path") << "\n";
+            TermOut() << tr("cmd.export.need_path") << "\n";
             return;
         }
         out_path = sessions_dir + "/" + id + ".md";
@@ -851,12 +853,12 @@ void HandleExportCommand(const std::string& args, const lubancode::agent::Agent&
     }
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file.is_open()) {
-        std::cout << trf("cmd.export.write_failed", out_path) << "\n";
+        TermOut() << trf("cmd.export.write_failed", out_path) << "\n";
         return;
     }
     file << markdown;
     file.close();
-    std::cout << trf("cmd.export.done", out_path) << "\n";
+    TermOut() << trf("cmd.export.done", out_path) << "\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -890,29 +892,29 @@ CommandFlow HandleClearCommand(SessionCommandState& state, const lubancode::conf
     state.store_broken = false;
     state.title.clear();
     state.title_pending = false;
-    std::cout << tr("cmd.clear.done") << "\n";
+    TermOut() << tr("cmd.clear.done") << "\n";
     return CommandFlow::Continue;
 }
 
 CommandFlow HandleTitleCommand(SessionCommandState& state, const std::string& args,
                                const lubancode::cli::Theme& theme) {
     if (args.empty()) {
-        std::cout << (state.title.empty() ? tr("cmd.title.none") : trf("cmd.title.current", state.title))
+        TermOut() << (state.title.empty() ? tr("cmd.title.none") : trf("cmd.title.current", state.title))
                   << "\n";
         return CommandFlow::Continue;
     }
     state.title = args;
     if (state.store.active() && !state.store_broken) {
         if (state.store.AppendTitleEvent(state.title)) {
-            std::cout << trf("cmd.title.set", state.title) << "\n";
+            TermOut() << trf("cmd.title.set", state.title) << "\n";
         } else {
-            std::cout << theme.error << tr("cmd.title.write_failed") << theme.reset << "\n";
+            TermOut() << theme.error << tr("cmd.title.write_failed") << theme.reset << "\n";
         }
     } else {
         // 还没建档(首条消息才落盘):先记着,建档成功后由落盘路径补写
         // 事件行。
         state.title_pending = true;
-        std::cout << trf("cmd.title.set_pending", state.title) << "\n";
+        TermOut() << trf("cmd.title.set_pending", state.title) << "\n";
     }
     // 跨会话名册跟着改名(重名仍用短 peer_id 定人)。
     if (state.on_title_changed) {
@@ -1063,13 +1065,13 @@ int HandleSessionManagementCommand(const std::string& sessions_dir, int kind, co
                                    const std::function<std::string()>& stdin_line) {
     (void)theme;
     if (sessions_dir.empty()) {
-        std::cout << tr("session.no_home") << "\n";
+        TermOut() << tr("session.no_home") << "\n";
         return 1;
     }
     const bool is_delete = kind == 2;
     const bool is_archive = kind == 0;
     if (ref.empty()) {
-        std::cout << tr(is_delete ? "cmd.session.delete.usage" : "cmd.session.archive.usage") << "\n";
+        TermOut() << tr(is_delete ? "cmd.session.delete.usage" : "cmd.session.archive.usage") << "\n";
         return 1;
     }
     // 搬删经 runtime 侧的 SessionCommandService(第六步:typed command
@@ -1085,7 +1087,7 @@ int HandleSessionManagementCommand(const std::string& sessions_dir, int kind, co
     // (已归档的重复归档无意义,幂等成功)。
     if (!ResolveSessionReference(sessions_dir, ref, stdin_line, !is_archive, id, title,
                                  message, ambiguous)) {
-        std::cout << message << "\n";
+        TermOut() << message << "\n";
         return 1;
     }
 
@@ -1104,7 +1106,7 @@ int HandleSessionManagementCommand(const std::string& sessions_dir, int kind, co
         // --force 只给脚本:跳过确认(帮助里写明不可恢复)。
         bool confirmed = force;
         if (!confirmed) {
-            std::cout << tr("cmd.session.delete.confirm_header") << "\n"
+            TermOut() << tr("cmd.session.delete.confirm_header") << "\n"
                       << trf("cmd.session.delete.confirm_title",
                              lubancode::sessions::TruncateUtf8Chars(label, 60))
                       << "\n"
@@ -1114,10 +1116,10 @@ int HandleSessionManagementCommand(const std::string& sessions_dir, int kind, co
                                          : lubancode::sessions::AbbreviateUtf8Middle(cwd, 60))
                       << "\n"
                       << tr("cmd.session.delete.confirm_prompt");
-            std::cout.flush();
+            TermOut().flush();
             confirmed = ConfirmAnswer(ReadConfirmLine(stdin_line));
             if (!confirmed) {
-                std::cout << tr("cmd.session.delete.cancelled") << "\n";
+                TermOut() << tr("cmd.session.delete.cancelled") << "\n";
                 return 1;
             }
         }
@@ -1129,10 +1131,10 @@ int HandleSessionManagementCommand(const std::string& sessions_dir, int kind, co
         command.payload = {{"confirm", true}};
         const auto receipt = service.HandleCommand(command);
         if (!receipt.accepted) {
-            std::cout << trf("cmd.session.delete.failed", id) << "\n";
+            TermOut() << trf("cmd.session.delete.failed", id) << "\n";
             return 1;
         }
-        std::cout << trf("cmd.session.delete.done", id) << "\n";
+        TermOut() << trf("cmd.session.delete.done", id) << "\n";
         return 0;
     }
 
@@ -1142,11 +1144,11 @@ int HandleSessionManagementCommand(const std::string& sessions_dir, int kind, co
     command.thread_id = id;
     const auto receipt = service.HandleCommand(command);
     if (!receipt.accepted) {
-        std::cout << trf(is_archive ? "cmd.session.archive.failed" : "cmd.session.unarchive.failed", id)
+        TermOut() << trf(is_archive ? "cmd.session.archive.failed" : "cmd.session.unarchive.failed", id)
                   << "\n";
         return 1;
     }
-    std::cout << trf(is_archive ? "cmd.session.archive.done" : "cmd.session.unarchive.done", id) << "\n";
+    TermOut() << trf(is_archive ? "cmd.session.archive.done" : "cmd.session.unarchive.done", id) << "\n";
     return 0;
 }
 
@@ -1154,11 +1156,11 @@ bool ArchiveCurrentSession(const std::string& sessions_dir, lubancode::sessions:
                            const lubancode::cli::Theme& theme) {
     (void)theme;
     if (sessions_dir.empty()) {
-        std::cout << tr("session.no_home") << "\n";
+        TermOut() << tr("session.no_home") << "\n";
         return false;
     }
     if (!store.active() || store.session_id().empty()) {
-        std::cout << tr("cmd.archive.not_active") << "\n";
+        TermOut() << tr("cmd.archive.not_active") << "\n";
         return false;
     }
     lubancode::runtime::SessionCommandService service(sessions_dir);
@@ -1174,10 +1176,10 @@ bool ArchiveCurrentSession(const std::string& sessions_dir, lubancode::sessions:
     const auto receipt = service.HandleCommand(command);
     if (!receipt.accepted) {
         // 搬失败:句柄已收但文件还在原地,账没坏;如实告诉人。
-        std::cout << trf("cmd.session.archive.failed", store.session_id()) << "\n";
+        TermOut() << trf("cmd.session.archive.failed", store.session_id()) << "\n";
         return false;
     }
-    std::cout << trf("cmd.session.archive.done", store.session_id()) << "\n";
+    TermOut() << trf("cmd.session.archive.done", store.session_id()) << "\n";
     return true;
 }
 
@@ -1186,17 +1188,17 @@ bool DeleteCurrentSession(const std::string& sessions_dir, lubancode::sessions::
                           const lubancode::cli::Theme& theme) {
     (void)theme;
     if (sessions_dir.empty()) {
-        std::cout << tr("session.no_home") << "\n";
+        TermOut() << tr("session.no_home") << "\n";
         return false;
     }
     if (!store.active() || store.session_id().empty()) {
-        std::cout << tr("cmd.delete.not_active") << "\n";
+        TermOut() << tr("cmd.delete.not_active") << "\n";
         return false;
     }
     // 确认屏:标题/完整 id/cwd/"永久删除"。缺省取消;EOF、空答皆取消。
     const std::string label =
         !title.empty() ? title : (!meta.cwd.empty() ? meta.cwd : tr("cmd.sessions.no_text"));
-    std::cout << tr("cmd.session.delete.confirm_header") << "\n"
+    TermOut() << tr("cmd.session.delete.confirm_header") << "\n"
               << trf("cmd.session.delete.confirm_title", lubancode::sessions::TruncateUtf8Chars(label, 60))
               << "\n"
               << trf("cmd.session.delete.confirm_id", store.session_id()) << "\n"
@@ -1205,9 +1207,9 @@ bool DeleteCurrentSession(const std::string& sessions_dir, lubancode::sessions::
                                       : lubancode::sessions::AbbreviateUtf8Middle(meta.cwd, 60))
               << "\n"
               << tr("cmd.session.delete.confirm_prompt");
-    std::cout.flush();
+    TermOut().flush();
     if (!ConfirmAnswer(ReadConfirmLine(nullptr))) {
-        std::cout << tr("cmd.session.delete.cancelled") << "\n";
+        TermOut() << tr("cmd.session.delete.cancelled") << "\n";
         return false;
     }
     lubancode::runtime::SessionCommandService service(sessions_dir);
@@ -1221,10 +1223,10 @@ bool DeleteCurrentSession(const std::string& sessions_dir, lubancode::sessions::
     command.payload = {{"confirm", true}};  // 确认屏已收过,这里带确认动手
     const auto receipt = service.HandleCommand(command);
     if (!receipt.accepted) {
-        std::cout << trf("cmd.session.delete.failed", store.session_id()) << "\n";
+        TermOut() << trf("cmd.session.delete.failed", store.session_id()) << "\n";
         return false;
     }
-    std::cout << trf("cmd.session.delete.done", store.session_id()) << "\n";
+    TermOut() << trf("cmd.session.delete.done", store.session_id()) << "\n";
     return true;
 }
 

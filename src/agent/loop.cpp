@@ -47,30 +47,30 @@ std::int64_t NowMsEpoch() {
 // 里的每一枚 stub 调用都要走这条完整链(schema 校验在钩子改写复检里、
 // PreToolUse/权限/执行/PostToolUse/编码信任边界一个不少),不许另开一条
 // 绕过 hooks 的暗门。JSON 与 PTC 两个后端共用同一份执行代码。
-tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUseBlock& call, const Callbacks& callbacks,
+tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUseBlock& call, const TurnWiring& wiring,
                                 const std::function<bool(const tools::Tool&)>& tool_filter,
                                 const std::string& filter_denial,
                                 const ToolTraceContext* trace) {
     // 每条收尾路共用的分发口:先清洗,再 on_tool_done,清洗版随返回值交给
     // 调用方(进 history / 下一轮请求)。日志只记字段名、长度、坏字节位置
     // 与前后几个十六进制字节,不倒正文。
-    const auto dispatch_done = [&callbacks](const std::string& tool_use_id, const std::string& name,
+    const auto dispatch_done = [&wiring](const std::string& tool_use_id, const std::string& name,
                                              tools::Tool::Result result) {
         if (!platform::IsValidUtf8(result.content)) {
             platform::LogSink::Instance().Warn(
                 "loop", platform::DescribeUtf8Issue("tool_result:" + name, result.content));
             result.content = platform::SanitizeExternalText(result.content);
         }
-        if (callbacks.on_tool_done) {
-            callbacks.on_tool_done(tool_use_id, name, result);
+        if (wiring.events != nullptr) {
+            wiring.events->OnToolDone(tool_use_id, name, result, wiring.subordinate_stream);
         }
         return result;
     };
 
     // 工具状态机相位通报(没设回调 = 没配 hooks,行为与从前逐字节一致)。
-    const auto phase = [&callbacks, &call](runtime::ToolPhase p) {
-        if (callbacks.on_tool_phase) {
-            callbacks.on_tool_phase(call.id, call.name, p);
+    const auto phase = [&wiring, &call](runtime::ToolPhase p) {
+        if (wiring.on_tool_phase) {
+            wiring.on_tool_phase(call.id, call.name, p);
         }
     };
 
@@ -80,7 +80,7 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     const auto started_at = std::chrono::steady_clock::now();
     ToolTraceEvent fired_started;  // 已越过 started 的载荷,finished 时复用
     bool crossed_start = false;
-    const auto emit = [trace, &callbacks, &call, &fired_started, &crossed_start](ToolTraceEvent event) {
+    const auto emit = [trace, &wiring, &call, &fired_started, &crossed_start](ToolTraceEvent event) {
         if (trace == nullptr) {
             return;
         }
@@ -110,7 +110,7 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
             fired_started = event;
             crossed_start = true;
         }
-        callbacks.on_tool_trace(event);
+        wiring.on_tool_trace(event);
     };
     // 结果引用:小结果内联(过 kInlineResultCap),大结果标 Unavailable
     // (artifact 卸载是装配层/artifact store 的活,RunOneTool 不重复落一份;
@@ -183,8 +183,8 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         // 补偿关系边(单子第四期):静态(context.compensates)优先;
         // 没有时问装配层(undo/补偿工具 execute 后才报得出自己补偿谁)。
         // 只补空不覆盖——原调用与已钉的边不动。
-        if (event.compensates.empty() && callbacks.on_tool_compensates && trace != nullptr) {
-            event.compensates = callbacks.on_tool_compensates(trace->execution_id, call.name);
+        if (event.compensates.empty() && wiring.on_tool_compensates && trace != nullptr) {
+            event.compensates = wiring.on_tool_compensates(trace->execution_id, call.name);
         }
         emit(std::move(event));
     };
@@ -201,8 +201,8 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         return dispatch_done(call.id, call.name, tools::Tool::Result{content, true});
     };
 
-    if (callbacks.on_tool_start) {
-        callbacks.on_tool_start(call.id, call.name, call.input);
+    if (wiring.events != nullptr) {
+        wiring.events->OnToolStart(call.id, call.name, call.input, wiring.subordinate_stream);
     }
 
     tools::Tool* tool = registry.Find(call.name);
@@ -278,8 +278,8 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     // Yolo(单子:先过 Plan capability gate,再过 Hook/schema,再过
     // permission)。终态 ModeDenied,错误码 mode.denied*(装配层给的稳定
     // 细码),不冒充"没挂载"也不冒充"用户拒绝"。
-    if (callbacks.on_mode_policy) {
-        const std::string mode_denial = callbacks.on_mode_policy(call.name, call.input);
+    if (wiring.on_mode_policy) {
+        const std::string mode_denial = wiring.on_mode_policy(call.name, call.input);
         if (!mode_denial.empty()) {
             phase(runtime::ToolPhase::Blocked);
             // 回调交回的是"细码|人话"两截(细码给账,人话给模型与用户);
@@ -306,11 +306,11 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     // 同返,先过一遍工具 schema,改写打回即拦。
     phase(runtime::ToolPhase::CheckingHook);
     runtime::ToolHookDecision pre;
-    if (callbacks.on_pre_tool_use_hook) {
-        pre = callbacks.on_pre_tool_use_hook(call.id, call.name, call.input);
-    } else if (callbacks.on_pre_tool_hook) {
+    if (wiring.on_pre_tool_use_hook) {
+        pre = wiring.on_pre_tool_use_hook(call.id, call.name, call.input);
+    } else if (wiring.on_pre_tool_hook) {
         // 旧回调兼容:非空 = deny。
-        const std::optional<std::string> legacy_blocked = callbacks.on_pre_tool_hook(call.id, call.name, call.input);
+        const std::optional<std::string> legacy_blocked = wiring.on_pre_tool_hook(call.id, call.name, call.input);
         if (legacy_blocked.has_value()) {
             pre.decision = runtime::ToolHookDecision::Decision::Deny;
             pre.reason = *legacy_blocked;
@@ -361,9 +361,9 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         // async 缺位回落到旧同步回调(子代理转发、单测、后台"没人可问"
         // 的短路都还在旧路上,不许变慢、不许多线程化)。
         bool allowed = true;
-        if (callbacks.on_tool_confirm_async) {
+        if (wiring.on_tool_confirm_async) {
             const std::shared_ptr<runtime::InteractionFuture> future =
-                callbacks.on_tool_confirm_async(
+                wiring.on_tool_confirm_async(
                     runtime::ApprovalRequest{call.id, call.name, effective_input, std::string()});
             const std::optional<runtime::ApprovalResponse> response =
                 future != nullptr ? future->WaitApproval() : std::nullopt;
@@ -371,8 +371,8 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
                 // 悬空收口(cancel):等价拒绝,拒绝文案照"没人可答"写,
                 // 不冒充用户拒绝。
                 const std::string denial =
-                    callbacks.on_tool_denial_text ? callbacks.on_tool_denial_text(call.id, call.name)
-                                                  : std::string("审批请求悬空收口,未执行该工具");
+                    wiring.on_tool_denial_text ? wiring.on_tool_denial_text(call.id, call.name)
+                                               : std::string("审批请求悬空收口,未执行该工具");
                 tools::Tool::Result cancelled{denial, true};
                 cancelled.outcome = ToString(ToolOutcome::PermissionDeclined);
                 cancelled.error_code = kErrPermissionDeclined;
@@ -391,14 +391,14 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
             }
         } else {
             allowed =
-                callbacks.on_tool_confirm ? callbacks.on_tool_confirm(call.id, call.name, effective_input) : true;
+                wiring.on_tool_confirm ? wiring.on_tool_confirm(call.id, call.name, effective_input) : true;
         }
         if (!allowed) {
             // 拒绝文案可由回调层给(后台子代理的拒绝是"无法弹确认、未预放
             // 行",不是用户拒绝——缺省文案会把子代理的最终报告带偏成"均被
             // 用户拒绝")。
-            const std::string denial = callbacks.on_tool_denial_text
-                                           ? callbacks.on_tool_denial_text(call.id, call.name)
+            const std::string denial = wiring.on_tool_denial_text
+                                           ? wiring.on_tool_denial_text(call.id, call.name)
                                            : std::string("用户拒绝执行该工具");
             tools::Tool::Result declined{denial, true};
             declined.outcome = ToString(ToolOutcome::PermissionDeclined);
@@ -424,8 +424,8 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     // 副作用闸:started 落不住的副作用工具,这里拦(单子:写不成时,
     // 副作用工具不得继续执行)。拦下的以 result_store_failed 收尾——不
     // 冒充工具失败,也不冒充成功;模型与恢复账都看得出是宿主拦的。
-    if (trace != nullptr && callbacks.on_tool_trace_blocked &&
-        callbacks.on_tool_trace_blocked(trace->execution_id)) {
+    if (trace != nullptr && wiring.on_tool_trace_blocked &&
+        wiring.on_tool_trace_blocked(trace->execution_id)) {
         tools::Tool::Result blocked_by_trace{"追踪账写盘失败,该工具未执行(副作用档默认拦截)", true};
         blocked_by_trace.outcome = ToString(ToolOutcome::ResultStoreFailed);
         blocked_by_trace.error_code = kErrSessionTraceAppendFailed;
@@ -445,15 +445,15 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     // trace 里的 result_ref 记的是追加前的原始结果(两份 digest 分得开,
     // 恢复时能判断 Hook 到底改了什么)。
     finish(result, source_kind, source_instance, effect_class);
-    if (callbacks.on_post_tool_use_hook) {
+    if (wiring.on_post_tool_use_hook) {
         const std::vector<std::string> feedback =
-            callbacks.on_post_tool_use_hook(call.id, call.name, effective_input, result);
+            wiring.on_post_tool_use_hook(call.id, call.name, effective_input, result);
         for (const auto& line : feedback) {
             result.content += "\n[post-tool-use hook 追加] " + line;
         }
     }
-    if (callbacks.on_post_tool_hook) {
-        callbacks.on_post_tool_hook(call.id, call.name, effective_input, result);
+    if (wiring.on_post_tool_hook) {
+        wiring.on_post_tool_hook(call.id, call.name, effective_input, result);
     }
     return dispatch_done(call.id, call.name, std::move(result));
 }
@@ -515,7 +515,7 @@ bool ShouldNudgeStepLimit(int step_index, int max_steps_per_turn) {
 }
 
 std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message user_message,
-                                                       const Callbacks& callbacks,
+                                                       const TurnWiring& wiring,
                                                        const std::atomic<bool>* cancel) {
     api::Backend& backend_ = agent.backend_;
     tools::ToolRegistry& registry_ = agent.registry_;
@@ -582,8 +582,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
     for (int step_index = 0; profile_.max_steps_per_turn <= 0 || step_index < profile_.max_steps_per_turn; ++step_index) {
         // 回合视觉收束:step 边界。请求还没发,先报"这一拍开始了"——
         // 界面(工具批次分组)凭它知道上一批已换拍。没设回调零影响。
-        if (callbacks.on_model_step_started) {
-            callbacks.on_model_step_started(step_index);
+        if (wiring.events != nullptr) {
+            wiring.events->OnModelStepStarted(step_index);
         }
         // 跨会话传话的安全收件点:工具结果已攒完、下一次请求尚未发出——
         // 正是"不打断工具、步边界收信"的那个缝。step_index==0 不收:这一步
@@ -743,10 +743,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                             stream_request_id = e.id;
                             stream_model = e.model;
                         } else if constexpr (std::is_same_v<T, api::TextDelta>) {
-                            if (callbacks.on_text_delta) {
+                            if (wiring.events != nullptr) {
                                 const std::string gated = text_delta_gate.Feed(e.text);
                                 if (!gated.empty()) {
-                                    callbacks.on_text_delta(gated);
+                                    wiring.events->OnTextDelta(gated);
                                 }
                             }
                         } else if constexpr (std::is_same_v<T, api::ThinkingDelta>) {
@@ -765,22 +765,22 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                                 }
                                 budget_report.thinking_tail.erase(0, start);
                             }
-                            if (callbacks.on_thinking_delta) {
+                            if (wiring.events != nullptr) {
                                 const std::string gated = thinking_delta_gate.Feed(e.text);
                                 if (!gated.empty()) {
-                                    callbacks.on_thinking_delta(gated);
+                                    wiring.events->OnThinkingDelta(gated);
                                 }
                             }
                         } else if constexpr (std::is_same_v<T, api::StreamError>) {
                             stream_error = true;
                             stream_error_message = e.message;
                         } else if constexpr (std::is_same_v<T, api::BuiltinToolStart>) {
-                            if (callbacks.on_builtin_tool_start) {
-                                callbacks.on_builtin_tool_start(e.id, e.name, e.input);
+                            if (wiring.events != nullptr) {
+                                wiring.events->OnBuiltinToolStart(e.id, e.name, e.input);
                             }
                         } else if constexpr (std::is_same_v<T, api::BuiltinToolDone>) {
-                            if (callbacks.on_builtin_tool_done) {
-                                callbacks.on_builtin_tool_done(e.id, e.name, e.input, e.summary, e.is_error);
+                            if (wiring.events != nullptr) {
+                                wiring.events->OnBuiltinToolDone(e.id, e.name, e.input, e.summary, e.is_error);
                             }
                         }
                     },
@@ -790,16 +790,16 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
 
         // 流收口:闸里扣着的尾巴拼不齐就是坏字节,按 U+FFFD 放完——错误/
         // 打断路径也要放,显示层与 history 的账对得上。
-        if (callbacks.on_text_delta) {
+        if (wiring.events != nullptr) {
             const std::string text_tail = text_delta_gate.Flush();
             if (!text_tail.empty()) {
-                callbacks.on_text_delta(text_tail);
+                wiring.events->OnTextDelta(text_tail);
             }
         }
-        if (callbacks.on_thinking_delta) {
+        if (wiring.events != nullptr) {
             const std::string thinking_tail = thinking_delta_gate.Flush();
             if (!thinking_tail.empty()) {
-                callbacks.on_thinking_delta(thinking_tail);
+                wiring.events->OnThinkingDelta(thinking_tail);
             }
         }
 
@@ -851,8 +851,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 老路(收口后 PersistNewMessages)照旧兜底——没装 trace 的会话
         // 一字不变;装了的,PersistNew 的只增不减账不会重复落(persisted
         // 基线此刻还没推进)。
-        if (callbacks.on_assistant_message_ready) {
-            callbacks.on_assistant_message_ready(assistant_message);
+        if (wiring.on_assistant_message_ready) {
+            wiring.on_assistant_message_ready(assistant_message);
         }
         context_.PushMessage(std::move(assistant_message));
         // usage 是否报告(规格根因四):任一请求带回过非零 usage 就算报告过,
@@ -864,7 +864,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                                             usage.cache_creation_tokens > 0 || usage.output_reasoning_tokens > 0;
         }
 
-        if (callbacks.on_usage) {
+        if (wiring.events != nullptr) {
             api::UsageReport report;
             report.usage = assembler.usage();
             report.step_index = step_index;
@@ -873,7 +873,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             report.cache_epoch = context_.cache_epoch();
             report.epoch_break_reason = step_epoch_break_reason;
             report.prefix_append_only = step_prefix_append_only;
-            callbacks.on_usage(report);
+            wiring.events->OnUsage(report);
         }
 
         // 防御:stop_reason 说的是 end_turn(或者干脆是空的——终止帧丢了),
@@ -937,7 +937,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 后再发批次尾(装配层补落 user 消息 + 各枚 result_committed)。
         // 审计按枚及时落,崩溃窗口从"整轮"缩到"当前这枚";wire 语义不变,
         // 五枚结果仍同一条 user message。
-        const bool trace_armed = callbacks.on_tool_trace != nullptr;
+        const bool trace_armed = wiring.on_tool_trace != nullptr;
         std::string batch_id;
         int sequence_in_batch = 0;
         if (trace_armed) {
@@ -946,7 +946,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         std::vector<std::string> scheduled_ids;  // 本批各枚 execution_id(装 trace 时才有)
         std::vector<std::string> scheduled_tool_use_ids;
         std::vector<std::string> scheduled_names;
-        if (trace_armed && callbacks.on_tool_trace) {
+        if (trace_armed && wiring.on_tool_trace) {
             for (const auto& block : last_assistant.content) {
                 if (!std::holds_alternative<api::ToolUseBlock>(block)) {
                     continue;
@@ -960,7 +960,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 scheduled.tool_use_id = call.id;
                 scheduled.tool_name = call.name;
                 scheduled.timestamp_ms = NowMsEpoch();
-                callbacks.on_tool_trace(scheduled);
+                wiring.on_tool_trace(scheduled);
                 scheduled_ids.push_back(scheduled.execution_id);
                 scheduled_tool_use_ids.push_back(call.id);
                 scheduled_names.push_back(call.name);
@@ -979,8 +979,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     batch_ids.push_back(std::get<api::ToolUseBlock>(block).id);
                 }
             }
-            if (!batch_ids.empty() && callbacks.on_tool_batch_started) {
-                callbacks.on_tool_batch_started(step_index, static_cast<int>(batches_emitted), batch_ids);
+            if (!batch_ids.empty() && wiring.events != nullptr) {
+                wiring.events->OnToolBatchStarted(step_index, static_cast<int>(batches_emitted), batch_ids);
             }
             if (!batch_ids.empty()) {
                 batch_index_for_this_step = static_cast<int>(batches_emitted);
@@ -1010,7 +1010,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     cancelled.tool_use_id = call.id;
                     cancelled.tool_name = call.name;
                     cancelled.timestamp_ms = NowMsEpoch();
-                    callbacks.on_tool_trace(cancelled);
+                    wiring.on_tool_trace(cancelled);
                 }
                 tool_results.push_back(api::ToolResultBlock{call.id, "用户按 ESC 打断,该工具未执行", true});
                 continue;
@@ -1023,7 +1023,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 trace_ctx.provider_request_id = stream_request_id;
             }
             const tools::Tool::Result result =
-                RunOneTool(registry_, call, callbacks, tool_filter_, tool_filter_denial_,
+                RunOneTool(registry_, call, wiring, tool_filter_, tool_filter_denial_,
                            trace_armed ? &trace_ctx : nullptr);
             // 断言式兜底:RunOneTool 出口已经规范化过(见它文件头的信任边界
             // 注释),这里再过一遍 SanitizeUtf8 只为防将来有人在 Run() 之外
@@ -1040,12 +1040,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         tool_result_message.content = std::move(tool_results);
         // 批次尾回调要在消息 move 进双账之前拿:回调里读的是五枚结果齐的
         // user message(装配层此刻 append+flush 它)。
-        const bool results_callback_armed = callbacks.on_tool_results_committed != nullptr;
+        const bool results_callback_armed = wiring.on_tool_results_committed != nullptr;
         api::Message message_for_callback = results_callback_armed ? tool_result_message : api::Message{};
         context_.PushMessage(std::move(tool_result_message));
 
-        if (batch_index_for_this_step >= 0 && callbacks.on_tool_batch_finished) {
-            callbacks.on_tool_batch_finished(batch_index_for_this_step, interrupted);
+        if (batch_index_for_this_step >= 0 && wiring.events != nullptr) {
+            wiring.events->OnToolBatchFinished(batch_index_for_this_step, interrupted);
         }
 
         if (trace_armed) {
@@ -1056,7 +1056,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             // result ref 恢复,started 无 finished 的标 unknown,只有
             // scheduled 的标未执行(单子"消息落盘次序")。
             if (results_callback_armed) {
-                callbacks.on_tool_results_committed(batch_id, message_for_callback);
+                wiring.on_tool_results_committed(batch_id, message_for_callback);
             }
             for (const std::string& execution_id : scheduled_ids) {
                 ToolTraceEvent committed;
@@ -1064,7 +1064,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 committed.batch_id = batch_id;
                 committed.execution_id = execution_id;
                 committed.timestamp_ms = NowMsEpoch();
-                callbacks.on_tool_trace(committed);
+                wiring.on_tool_trace(committed);
             }
         }
 

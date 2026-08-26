@@ -43,7 +43,7 @@ NodeExecResult ToolExecutor::Execute(const NodeExecRequest& request) {
 
     // 装配链:宿主带来的钩子/权限/trace 原样用;旧 confirm gate 只在宿主
     // 没给确认口时兜底(不越权覆盖正门装配)。
-    agent::Callbacks chain = options_.callbacks;
+    agent::TurnWiring chain = options_.callbacks;
     if (!chain.on_tool_confirm && !chain.on_tool_confirm_async && options_.confirm) {
         chain.on_tool_confirm = [gate = options_.confirm](const std::string&, const std::string& name,
                                                           const nlohmann::json& input) {
@@ -169,47 +169,57 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
 
     std::string text;
     std::int64_t tokens = 0;
-    agent::Callbacks callbacks = options_.callbacks;
-    // 事件流(批二):装了 sink 的节点,嵌套回合经 TurnEventAdapter 翻成
-    // ServerEvent 落会话 sink——turn_id 用本次 run 的 run_id(节点嵌套轮,
-    // 与 ToolExecutor 的 trace 上下文同口径)。没装(单测/旧装配)零开销。
-    std::optional<runtime::TurnEventAdapter> events;
-    if (options_.event_sink != nullptr) {
-        events.emplace(!options_.thread_id.empty() ? options_.thread_id : std::string("workflow"),
-                       options_.ids != nullptr ? *options_.ids : runtime::ProcessIdAuthority());
+    // 事件流(批二余款:显示出水只有这只口)。适配器常起——结果要观察正文
+    // 与 usage 记账(result 的 text/tokens 从流里取);装了 sink 的节点再把
+    // 同一份流落会话 sink——turn_id 用本次 run 的 run_id(节点嵌套轮,与
+    // ToolExecutor 的 trace 上下文同口径)。控制口(确认/钩子)原样走
+    // TurnWiring。
+    agent::TurnWiring wiring = options_.callbacks;
+    runtime::TurnEventAdapter events(!options_.thread_id.empty() ? options_.thread_id : std::string("workflow"),
+                                     options_.ids != nullptr ? *options_.ids : runtime::ProcessIdAuthority());
+    {
         runtime::EventSink* sink = options_.event_sink;
-        events->Attach([sink](const runtime::ServerEvent& event) { sink->Emit(event); });
-        events->Start(request.run_id);
-        runtime::ComposeDisplayCallbacks(callbacks, events->MakeCallbacks());
+        std::string* text_out = &text;
+        std::int64_t* tokens_out = &tokens;
+        events.Attach([sink, text_out, tokens_out](const runtime::ServerEvent& event) {
+            switch (event.kind) {
+                case runtime::ServerEventKind::ItemDelta:
+                    if (event.item_kind == runtime::ItemKind::Text) {
+                        *text_out += event.text;
+                    }
+                    break;
+                case runtime::ServerEventKind::UsageUpdated:
+                    *tokens_out += event.payload.value("input_tokens", std::int64_t{0}) +
+                                   event.payload.value("cache_read_tokens", std::int64_t{0}) +
+                                   event.payload.value("cache_creation_tokens", std::int64_t{0}) +
+                                   event.payload.value("output_tokens", std::int64_t{0});
+                    break;
+                default:
+                    break;
+            }
+            if (sink != nullptr) {
+                sink->Emit(event);
+            }
+        });
+        events.Start(request.run_id);
     }
-    const auto outer_text = callbacks.on_text_delta;
-    callbacks.on_text_delta = [&](const std::string& delta) {
-        text += delta;
-        if (outer_text) outer_text(delta);
-    };
-    const auto outer_usage = callbacks.on_usage;
-    callbacks.on_usage = [&](const api::UsageReport& report) {
-        tokens += api::TotalInputTokens(report.usage) + report.usage.output_tokens;
-        if (outer_usage) outer_usage(report);
-    };
-    // workflow 没接审批宿主时，危险工具明拒；不能因回调空着便默认放行。
-    if (!callbacks.on_tool_confirm && !callbacks.on_tool_confirm_async) {
-        callbacks.on_tool_confirm = [](const std::string&, const std::string&, const nlohmann::json&) {
+    wiring.events = &events;
+    // workflow 没接审批宿主时,危险工具明拒;不能因回调空着便默认放行。
+    if (!wiring.on_tool_confirm && !wiring.on_tool_confirm_async) {
+        wiring.on_tool_confirm = [](const std::string&, const std::string&, const nlohmann::json&) {
             return false;
         };
     }
 
-    const auto outcome = task_agent.Run(request.resolved_input.dump(), callbacks, nullptr);
+    const auto outcome = task_agent.Run(request.resolved_input.dump(), wiring, nullptr);
     // 事件流收口:Run 一返回就按收场分型 Finish(后面的早退分支各走各的
     // error_code,终态映射在这定死:报错/预算尽 = Failed,打断 = Cancelled,
     // 其余 Succeeded)。
-    if (events.has_value()) {
-        events->Finish(!outcome.has_value() || outcome->hit_step_limit || outcome->length_empty_output
-                           ? runtime::Outcome::Failed
-                       : outcome->cancelled ? runtime::Outcome::Cancelled
-                                            : runtime::Outcome::Succeeded,
-                       outcome.has_value() ? std::string() : outcome.error());
-    }
+    events.Finish(!outcome.has_value() || outcome->hit_step_limit || outcome->length_empty_output
+                      ? runtime::Outcome::Failed
+                  : outcome->cancelled ? runtime::Outcome::Cancelled
+                                       : runtime::Outcome::Succeeded,
+                  outcome.has_value() ? std::string() : outcome.error());
     result.tokens_used = tokens;
     if (!outcome.has_value()) {
         result.error_code = "agent_error";

@@ -969,7 +969,10 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         runtime::TurnEventAdapter turn_events(thread_id, runtime::ProcessIdAuthority());
         turn_events.Attach([&bridge](const runtime::ServerEvent& event) { bridge.Emit(event); });
         turn_events.Start(turn_id);
-        agent::Callbacks callbacks = turn_events.MakeCallbacks();
+        // 批二余款:显示出水直连适配器(唯一出水口);控制口(审批)收在
+        // TurnWiring,协议形状与旧手拼回调逐事件对得上。
+        agent::TurnWiring wiring;
+        wiring.events = &turn_events;
         // 接线(批四·病十二):压力钩进 AgentWiring。
         agent::AgentWiring loop_wiring;
         loop_wiring.on_context_pressure = [this, &thread_id, &turn_id](
@@ -997,7 +1000,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         //   - 读线程 HandleInteractionResponse 把答复 resolve 进 promise;
         //   - turn/interrupt 置旗 + CancelPending,future 按 cancel 醒;
         //   - 超时(选项给了时限)按"没人可答"悬空收口,不冒充用户拒绝。
-        callbacks.on_tool_confirm_async =
+        wiring.on_tool_confirm_async =
             [this, record, turn_id](const runtime::ApprovalRequest& request)
             -> std::shared_ptr<runtime::InteractionFuture> {
                 // 会话级放行:免问直接放。
@@ -1025,7 +1028,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
             };
         // 悬空收口的拒绝文案:写明真因,不冒充用户拒绝(P2 工人接线
         // 注意 3)。interrupt 旗置位 = 打断;否则是超时/断线。
-        callbacks.on_tool_denial_text = [&record](const std::string& /*tool_use_id*/, const std::string& name) {
+        wiring.on_tool_denial_text = [&record](const std::string& /*tool_use_id*/, const std::string& name) {
             if (record->interrupt_requested.load()) {
                 return "回合被 turn/interrupt 打断," + name + " 的审批按取消收口,未执行。";
             }
@@ -1078,7 +1081,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         // ---- 跑 ----
         // 图片走 Message 入口(与字符串入口同义,图片原样入 history)。
         const std::expected<agent::RunOutcome, std::string> outcome =
-            loop.Run(user_message, callbacks, &record->interrupt_requested);
+            loop.Run(user_message, wiring, &record->interrupt_requested);
         // 事件流收口:没收尾的条目(正文/思考/没终态的工具)由适配器统一
         // 按 Cancelled 补账——条目不悬空,前端好对账;终态分型随本地账。
         turn_events.Finish(!outcome.has_value() ? runtime::Outcome::Failed

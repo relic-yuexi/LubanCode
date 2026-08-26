@@ -3,6 +3,8 @@
 
 #include "cli/provider_switch.hpp"
 
+#include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
+
 #include <algorithm>
 #include <iostream>
 #include <mutex>
@@ -357,7 +359,7 @@ ProviderSwitchResult RunProviderSwitchPicker(const std::vector<config::ProviderC
         start_row = after->cursor_y;
         const int rows_to_draw = static_cast<int>(lines.size());
         const int clear_rows = (std::max)(rows_drawn, rows_to_draw);
-        std::cout << "\x1b[?2026h\x1b[?25l";
+        TermOut() << "\x1b[?2026h\x1b[?25l";
         for (int r = 0; r < clear_rows; ++r) {
             platform::ClearRowHardFrom(0, start_row + r, width);
         }
@@ -365,15 +367,15 @@ ProviderSwitchResult RunProviderSwitchPicker(const std::vector<config::ProviderC
             platform::SetCursorPos(0, start_row + r);
             const std::string& line = lines[static_cast<std::size_t>(r)];
             if (line.rfind("> ", 0) == 0 && !theme.confirm.empty()) {
-                std::cout << theme.confirm << line << theme.reset;  // 光标行上色
+                TermOut() << theme.confirm << line << theme.reset;  // 光标行上色
             } else {
-                std::cout << line;
+                TermOut() << line;
             }
         }
         rows_drawn = rows_to_draw;
-        std::cout << "\x1b[?2026l\x1b[?25h";
+        TermOut() << "\x1b[?2026l\x1b[?25h";
         platform::SetCursorPos(0, start_row + rows_to_draw);
-        std::cout.flush();
+        TermOut().flush();
         return true;
     };
 

@@ -175,12 +175,12 @@ public:
     // 还没轮到的补一条"未执行"的合成 tool_result(保住 tool_use/tool_result
     // 成对约束,不然下一轮重放历史会被 API 拒绝);两种情况都从 Run() 正常
     // 返回(RunOutcome::cancelled = true),不是 std::unexpected——打断不是错误。
-    std::expected<RunOutcome, std::string> Run(const std::string& user_input, const Callbacks& callbacks,
+    std::expected<RunOutcome, std::string> Run(const std::string& user_input, const TurnWiring& wiring,
                                                 const std::atomic<bool>* cancel = nullptr);
 
     // 跟字符串入口同义,只是调用方已经把本地图片装进 user_message 了。图片
     // 也须原样入 history,下一轮、重发、会话恢复才能带得上。
-    std::expected<RunOutcome, std::string> Run(api::Message user_message, const Callbacks& callbacks,
+    std::expected<RunOutcome, std::string> Run(api::Message user_message, const TurnWiring& wiring,
                                                 const std::atomic<bool>* cancel = nullptr);
 
     const std::vector<api::Message>& history() const { return context_.durable_history(); }

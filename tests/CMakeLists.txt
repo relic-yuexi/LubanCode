@@ -53,6 +53,9 @@ add_executable(lubancode_tests
   ${LUBANCODE_TEST_SOURCES}
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
+# 批二余款:测试共用的回合事件录音器(Callbacks 显示回调退役,观察点
+# 改吃事件流)住 support/。
+target_include_directories(lubancode_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support)
 # 依赖守门(显示系统剥离单第八步):测试要现扫源码树,把源码根递进去。
 target_compile_definitions(lubancode_tests PRIVATE
   LUBANCODE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/..")

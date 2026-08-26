@@ -23,6 +23,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agent/agent.hpp"
+#include "runtime/turn_event_adapter.hpp"
 #include "agent/loop.hpp"
 #include "sessions/session_store.hpp"
 #include "skills/workflow_recorder.hpp"
@@ -253,18 +254,24 @@ TEST_CASE("RunOneTool 信任边界: on_tool_done 与下一轮请求拿同一份�
 
     std::vector<std::string> order;
     std::string done_content;
-    agent::Callbacks callbacks;
+    runtime::IdAuthority event_ids;
+    runtime::TurnEventAdapter events("test", event_ids);
+    events.Attach([&order, &done_content](const runtime::ServerEvent& event) {
+        if (event.kind == runtime::ServerEventKind::ItemCompleted &&
+            event.item_kind == runtime::ItemKind::Tool && event.outcome != runtime::Outcome::Cancelled) {
+            order.push_back("done");
+            done_content = event.payload.value("result", std::string());
+        }
+    });
+    events.Start();
+    agent::TurnWiring callbacks;
+    callbacks.events = &events;
     callbacks.on_post_tool_hook = [&order](const std::string&, const std::string&, const nlohmann::json&,
                                            const tools::Tool::Result& result) {
         // hooks 框架第三步起的次序:PostToolUse 在工具结果已清洗成合法
         // UTF-8 之后触发(规格"PostToolUse 在工具结果已清洗、已结构化后
         // 触发")——post hook 看到的必须是干净内容。
         order.push_back(IsValidUtf8(result.content) ? "post:clean" : "post:raw");
-    };
-    callbacks.on_tool_done = [&order, &done_content](const std::string&, const std::string&,
-                                                     const tools::Tool::Result& result) {
-        order.push_back("done");
-        done_content = result.content;
     };
 
     const auto outcome = loop.Run("跑一趟", callbacks);

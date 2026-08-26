@@ -1,4 +1,8 @@
 #include "app/commands/hook_commands.hpp"
+#include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
+
+using lubancode::cli::TermOut;
+using lubancode::cli::TermErr;
 
 #include <iostream>
 #include <sstream>
@@ -49,13 +53,13 @@ std::string OutcomeText(const HookRunRecord* record) {
 void PrintDefinitionList(HookDispatcher& dispatcher) {
     const auto& defs = dispatcher.definitions();
     if (defs.empty()) {
-        std::cout << "没有装载任何 hooks。配置写在 <目录>/.lubancode/config.json 的 hooks 段"
+        TermOut() << "没有装载任何 hooks。配置写在 <目录>/.lubancode/config.json 的 hooks 段"
                      "(schema 2 用事件名键,如 PreToolUse;旧 pre_tool 等四类仍受支持)。\n";
         return;
     }
-    std::cout << "已装载 " << defs.size() << " 条 hook 定义(user 与项目配置相加;项目级须先信任才执行):\n";
+    TermOut() << "已装载 " << defs.size() << " 条 hook 定义(user 与项目配置相加;项目级须先信任才执行):\n";
     for (const auto& def : defs) {
-        std::cout << "  #" << def.id << " [" << std::string(lubancode::hooks::ToString(def.event)) << "]"
+        TermOut() << "  #" << def.id << " [" << std::string(lubancode::hooks::ToString(def.event)) << "]"
                   << (def.legacy ? "[legacy]" : "") << "\n"
                   << "      命令    : " << lubancode::hooks::HookCommandDisplay(def.handler) << "\n"
                   << "      来源    : " << def.source_label << "\n"
@@ -69,7 +73,7 @@ void PrintDefinitionList(HookDispatcher& dispatcher) {
                   << " 失败策略 " << def.handler.failure_policy << "\n"
                   << "      最近    : " << OutcomeText(dispatcher.LastRecordFor(def.id)) << "\n";
     }
-    std::cout << "动作:/hooks trust <#id> 审查后信任当前 hash;/hooks untrust <#id> 撤信;"
+    TermOut() << "动作:/hooks trust <#id> 审查后信任当前 hash;/hooks untrust <#id> 撤信;"
                  "/hooks disable|enable <#id> 禁用/启用;/hooks runs 看运行记录。\n"
                  "命令或参数一改,hash 即变,项目级须重审。\n";
 }
@@ -77,12 +81,12 @@ void PrintDefinitionList(HookDispatcher& dispatcher) {
 void PrintRunRecords(HookDispatcher& dispatcher, int limit) {
     const std::vector<HookRunRecord> records = dispatcher.RecentRecords(static_cast<std::size_t>(limit));
     if (records.empty()) {
-        std::cout << "还没有任何 hook 运行记录。\n";
+        TermOut() << "还没有任何 hook 运行记录。\n";
         return;
     }
-    std::cout << "最近 " << records.size() << " 条 hook 运行记录(新在前):\n";
+    TermOut() << "最近 " << records.size() << " 条 hook 运行记录(新在前):\n";
     for (const auto& record : records) {
-        std::cout << "  #" << record.definition_id << " [" << record.event_name << "] " << record.outcome
+        TermOut() << "  #" << record.definition_id << " [" << record.event_name << "] " << record.outcome
                   << " 退出码 " << record.exit_code << " 耗时 " << record.duration_ms << "ms"
                   << " 来自 " << record.source_label << "\n";
         // stderr 首段单列一行:解码口径标清(utf-8/cp936/unknown),超上限带
@@ -95,7 +99,7 @@ void PrintRunRecords(HookDispatcher& dispatcher, int limit) {
             if (record.stderr_truncated) {
                 head += " …(截断)";
             }
-            std::cout << "      stderr: " << head << "\n";
+            TermOut() << "      stderr: " << head << "\n";
         }
         if (!record.detail.empty()) {
             std::string detail = record.detail;
@@ -103,7 +107,7 @@ void PrintRunRecords(HookDispatcher& dispatcher, int limit) {
                 detail.resize(lubancode::platform::Utf8PrefixBoundary(detail, 160));
                 detail += "…";
             }
-            std::cout << "      " << detail << "\n";
+            TermOut() << "      " << detail << "\n";
         }
     }
 }
@@ -125,12 +129,12 @@ bool ParseId(const std::string& text, int& out) {
 void HandleHooksCommand(const std::string& args, lubancode::hooks::HookDispatcher* dispatcher,
                          const lubancode::cli::Theme& theme) {
     if (dispatcher == nullptr) {
-        std::cout << "hooks 运行时未初始化(异常路径),本命令不可用。\n";
+        TermOut() << "hooks 运行时未初始化(异常路径),本命令不可用。\n";
         return;
     }
     // 安全点:先把后台子代理投递的记录归并进来,列表与流水看到的才是全账。
     for (const std::string& notice : AdoptBackgroundHookRecordNotices()) {
-        std::cout << "[hooks] " << notice << "\n";
+        TermOut() << "[hooks] " << notice << "\n";
     }
     if (dispatcher->Empty()) {
         PrintDefinitionList(*dispatcher);
@@ -167,40 +171,40 @@ void HandleHooksCommand(const std::string& args, lubancode::hooks::HookDispatche
     if (action == "trust" || action == "untrust" || action == "disable" || action == "enable") {
         int id = 0;
         if (!ParseId(id_text, id)) {
-            std::cout << "用法:/hooks " << action << " <#id>(id 见 /hooks 列表,如 #3 就写 #3)\n";
+            TermOut() << "用法:/hooks " << action << " <#id>(id 见 /hooks 列表,如 #3 就写 #3)\n";
             return;
         }
         const HookDefinition* def = dispatcher->FindDefinition(id);
         if (def == nullptr) {
-            std::cout << "没有 #" << id << " 这条定义,先 /hooks 看清单。\n";
+            TermOut() << "没有 #" << id << " 这条定义,先 /hooks 看清单。\n";
             return;
         }
         if (action == "trust") {
             if (dispatcher->TrustDefinition(id)) {
-                std::cout << "#" << id << " 已信任当前 hash(" << def->definition_hash_short << "),即时生效。\n";
+                TermOut() << "#" << id << " 已信任当前 hash(" << def->definition_hash_short << "),即时生效。\n";
             }
             return;
         }
         if (action == "untrust") {
             if (dispatcher->UntrustDefinition(id)) {
-                std::cout << "#" << id << " 已撤信;项目级定义下次起跳过,直到重新 trust。\n";
+                TermOut() << "#" << id << " 已撤信;项目级定义下次起跳过,直到重新 trust。\n";
             }
             return;
         }
         if (action == "disable") {
             if (!dispatcher->SetDefinitionDisabled(id, true)) {
-                std::cout << "#" << id << " 是 managed 策略钩子,普通用户不能禁用。\n";
+                TermOut() << "#" << id << " 是 managed 策略钩子,普通用户不能禁用。\n";
             } else {
-                std::cout << "#" << id << " 已禁用。\n";
+                TermOut() << "#" << id << " 已禁用。\n";
             }
             return;
         }
         if (dispatcher->SetDefinitionDisabled(id, false)) {
-            std::cout << "#" << id << " 已重新启用。\n";
+            TermOut() << "#" << id << " 已重新启用。\n";
         }
         return;
     }
-    std::cout << "不认得的子命令: " << action
+    TermOut() << "不认得的子命令: " << action
               << "\n可用:/hooks(列表)/hooks runs [N]/hooks trust|untrust|disable|enable <#id>\n";
     (void)theme;
 }

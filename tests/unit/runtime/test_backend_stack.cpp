@@ -57,7 +57,7 @@ TEST_CASE("叠层次序:索引段 -> 模型指令段 -> 魂段依次追加,魂�
     profile.deferred_index_provider = [] { return std::string("INDEX-SEGMENT"); };
     lubancode::agent::Agent agent(inner, registry, std::move(profile));
 
-    REQUIRE(agent.Run("问", lubancode::agent::Callbacks{}).has_value());
+    REQUIRE(agent.Run("问", lubancode::agent::TurnWiring{}).has_value());
     REQUIRE(inner.captured.size() == 1);
     const auto& sent = inner.captured.front();
     CHECK(sent.model == "glm-x");
@@ -89,7 +89,7 @@ TEST_CASE("全空透传:空指令/索引段与纯注释的魂不改动 system") 
     profile.deferred_index_provider = [] { return std::string(); };
     lubancode::agent::Agent agent(inner, registry, std::move(profile));
 
-    REQUIRE(agent.Run("问", lubancode::agent::Callbacks{}).has_value());
+    REQUIRE(agent.Run("问", lubancode::agent::TurnWiring{}).has_value());
 
     CHECK(inner.captured.front().system == "BASE-SYSTEM");
     CHECK(inner.captured.front().reasoning_effort.empty());
@@ -107,7 +107,7 @@ TEST_CASE("会话中改皮上的活字段,下一次请求立即生效") {
     profile.system_prompt = "BASE-SYSTEM";
     lubancode::agent::Agent agent(inner, registry, std::move(profile));
 
-    REQUIRE(agent.Run("问", lubancode::agent::Callbacks{}).has_value());
+    REQUIRE(agent.Run("问", lubancode::agent::TurnWiring{}).has_value());
     CHECK(inner.captured.front().model == "glm-a");
     CHECK(inner.captured.front().reasoning_effort == "low");
 
@@ -120,7 +120,7 @@ TEST_CASE("会话中改皮上的活字段,下一次请求立即生效") {
     agent.SetModelInstructions("NEW-INSTRUCTIONS");
     agent.SetSoul("NEW-SOUL");
 
-    REQUIRE(agent.Run("再问", lubancode::agent::Callbacks{}).has_value());
+    REQUIRE(agent.Run("再问", lubancode::agent::TurnWiring{}).has_value());
     CHECK(inner.captured.back().model == "glm-b");
     CHECK(inner.captured.back().reasoning_effort == "high");
     CHECK(inner.captured.back().system.find("NEW-INSTRUCTIONS") != std::string::npos);

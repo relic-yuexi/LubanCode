@@ -17,6 +17,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 
 #include "cli/console_input.hpp"
 #include "cli/line_editor.hpp"
@@ -89,10 +90,10 @@ public:
             return;
         }
         if (info->cursor_x > 0) {
-            std::cout << "\n";  // 流式正文多半没换行收尾,先把光标归位到行首
+            TermOut() << "\n";  // 流式正文多半没换行收尾,先把光标归位到行首
         }
-        std::cout << "\n";  // 空行分隔
-        std::cout.flush();
+        TermOut() << "\n";  // 空行分隔
+        TermOut().flush();
         info = lubancode::platform::GetScreenInfo();
         if (!info.has_value()) {
             return;
@@ -104,8 +105,8 @@ public:
         // 只能在旧黄行下面另起绿行。
         EnsureRoom(start_row, rows + 1);
         lubancode::platform::SetCursorPos(0, start_row);
-        std::cout << text;
-        std::cout.flush();
+        TermOut() << text;
+        TermOut().flush();
         anchors_.push_back(Anchor{item.id, start_row, rows, BuildFrame(text, info->width)});
     }
 
@@ -122,14 +123,14 @@ public:
         }
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         if (!screen_) {
-            std::cout << "\n" << Render(item);
-            std::cout.flush();
+            TermOut() << "\n" << Render(item);
+            TermOut().flush();
             return;
         }
         Anchor* anchor = Find(item.id);
         if (anchor == nullptr) {
-            std::cout << "\n" << Render(item);
-            std::cout.flush();
+            TermOut() << "\n" << Render(item);
+            TermOut().flush();
             return;
         }
         const std::optional<lubancode::platform::ScreenInfo> info = lubancode::platform::GetScreenInfo();
@@ -181,8 +182,8 @@ public:
                 lubancode::platform::ClearRowFrom(0, anchor->start_row + r, buffer_width);
             }
             lubancode::platform::SetCursorPos(0, anchor->start_row);
-            std::cout << text;
-            std::cout.flush();
+            TermOut() << text;
+            TermOut().flush();
             if (!at_tail) {
                 lubancode::platform::SetCursorPos(saved_cursor_x, saved_cursor_y);
             }
@@ -505,13 +506,13 @@ public:
         // 贴住最后一条工具；这里另起一空行，且不把它塞进 Markdown 缓冲，
         // 免得收束重画时被 RenderMarkdown 的头尾裁剪吃掉。
         if (separate_next_body_) {
-            std::cout << "\n";
-            std::cout.flush();
+            TermOut() << "\n";
+            TermOut().flush();
             separate_next_body_ = false;
         }
         if (!enabled_) {
-            std::cout << text;
-            std::cout.flush();
+            TermOut() << text;
+            TermOut().flush();
             lubancode::cli::RedrawStreamFooterLocked();
             return;
         }
@@ -643,8 +644,8 @@ private:
                 unsafe_ = true;
             }
         }
-        std::cout << text;
-        std::cout.flush();
+        TermOut() << text;
+        TermOut().flush();
         buffer_ += text;
     }
 
@@ -727,8 +728,8 @@ private:
                 lubancode::platform::ClearRowFrom(0, start_row_ + r, buffer_width);
             }
             lubancode::platform::SetCursorPos(0, start_row_);
-            std::cout << rendered;
-            std::cout.flush();
+            TermOut() << rendered;
+            TermOut().flush();
         }
         // 渲染版每行都截到 width-1,绝不物理折行;末行不带换行收梢,跟原样
         // 流式一致——RunTurn 随后那个 "\n" 照常把行关上,下游行为分毫不差。

@@ -64,11 +64,13 @@ public:
     struct Options {
         tools::ToolRegistry* registry = nullptr;  // RunOneTool 要可写引用
         ToolConfirmGate confirm;                  // 旧确认门(缺省兜底)
-        // 宿主的钩子/权限/trace 链(与主回合同一份装配):on_pre_tool_use_hook/
-        // on_post_tool_use_hook/on_mode_policy/on_tool_phase/on_tool_trace/
-        // on_tool_trace_blocked/on_tool_confirm(_async)。空装 = 没配,行为
-        // 与旧路一致(needs_confirm 仍走旧 gate 或明拒)。
-        agent::Callbacks callbacks;
+        // 宿主的钩子/权限/trace 链(与主回合同一份装配,全是控制口):
+        // on_pre_tool_use_hook/on_post_tool_use_hook/on_mode_policy/
+        // on_tool_phase/on_tool_trace/on_tool_trace_blocked/on_tool_confirm
+        // (_async)。空装 = 没配,行为与旧路一致(needs_confirm 仍走旧 gate
+        // 或明拒)。显示出水(events)不在这条链上——工具节点不上事件流
+        // (trace 分线已够,同一枚执行不记两本 item 账)。
+        agent::TurnWiring callbacks;
         // trace 发号(ToolTraceHub::NextExecutionId 那口)。空或 on_tool_trace
         // 缺席 = 不追踪,栅栏事件全空操作(旧行为)。
         std::function<std::string()> execution_id_issuer;
@@ -103,10 +105,11 @@ public:
         BindingResolver resolve_binding;  // model_role/provider 路由；空则用 default
         tools::ToolRegistry* registry = nullptr;
         PromptLoader task_loader;
-        agent::Callbacks callbacks;
-        // 批二(事件流升正房):装了 sink 的节点,显示回调经 TurnEventAdapter
-        // 上事件流。ids/thread_id 用宿主会话的(与主回合同源,seq 才单调);
-        // ids 缺省落 ProcessIdAuthority(单测)。不装 = 不上事件流(旧行为)。
+        agent::TurnWiring callbacks;  // 控制口(确认/钩子);显示走下面的 sink
+        // 批二余款:装了 sink 的节点,嵌套回合经 TurnEventAdapter 上事件流
+        //(ids/thread_id 用宿主会话的,与主回合同源,seq 才单调;ids 缺省落
+        // ProcessIdAuthority,单测)。本执行器另从流里观察正文/usage 记账
+        //(result 的 text/tokens),不另开旁路。不装 = 不上事件流(旧行为)。
         runtime::EventSink* event_sink = nullptr;
         runtime::IdAuthority* ids = nullptr;
         std::string thread_id;

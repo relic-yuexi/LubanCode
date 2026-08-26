@@ -27,17 +27,17 @@ std::vector<api::ToolDefinition> Agent::BuildToolDefinitions() const {
     return defs;
 }
 
-std::expected<RunOutcome, std::string> Agent::Run(const std::string& user_input, const Callbacks& callbacks,
+std::expected<RunOutcome, std::string> Agent::Run(const std::string& user_input, const TurnWiring& wiring,
                                                   const std::atomic<bool>* cancel) {
     api::Message user_message;
     user_message.role = api::Role::User;
     user_message.content.push_back(api::TextBlock{user_input});
-    return AgentLoop::Run(*this, std::move(user_message), callbacks, cancel);
+    return AgentLoop::Run(*this, std::move(user_message), wiring, cancel);
 }
 
-std::expected<RunOutcome, std::string> Agent::Run(api::Message user_message, const Callbacks& callbacks,
+std::expected<RunOutcome, std::string> Agent::Run(api::Message user_message, const TurnWiring& wiring,
                                                   const std::atomic<bool>* cancel) {
-    return AgentLoop::Run(*this, std::move(user_message), callbacks, cancel);
+    return AgentLoop::Run(*this, std::move(user_message), wiring, cancel);
 }
 
 }  // namespace lubancode::agent

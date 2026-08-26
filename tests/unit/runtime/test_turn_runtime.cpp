@@ -20,6 +20,7 @@
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "agent/agent.hpp"
+#include "turn_event_recorder.hpp"
 #include "agent/loop.hpp"
 #include "hooks/dispatcher.hpp"
 #include "runtime/id_authority.hpp"
@@ -222,7 +223,7 @@ TEST_CASE("取消:另一线程 request_interrupt,Run 线程可见,loop 真打断
     rt::TurnRuntime core(rt::TurnRuntime::Options{});
     CHECK_FALSE(core.interrupted());
 
-    agent::Callbacks callbacks;  // 什么都不设:纯取消路径
+    agent::TurnWiring callbacks;  // 什么都不设:纯取消路径
     std::atomic<bool> run_returned{false};
     std::thread runner([&] {
         const auto outcome = loop.Run("慢慢想", callbacks, &core.cancel);
@@ -411,25 +412,24 @@ TEST_CASE("AgentLoop 回调带 tool_use_id:审批请求与终态都认得这次�
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system"});
 
     std::vector<std::string> seen_ids;
-    agent::Callbacks callbacks;
-    callbacks.on_tool_start = [&seen_ids](const std::string& tool_use_id, const std::string& name,
-                                          const nlohmann::json&) {
-        CHECK(name == "needs_ask");
-        seen_ids.push_back("start:" + tool_use_id);
-    };
+    lubancode::test::RecordedTurn turn;
+    agent::TurnWiring callbacks;
+    callbacks.events = &turn.adapter;
     callbacks.on_tool_confirm = [&seen_ids](const std::string& tool_use_id, const std::string&,
                                             const nlohmann::json&) {
         seen_ids.push_back("confirm:" + tool_use_id);
         return true;
     };
-    callbacks.on_tool_done = [&seen_ids](const std::string& tool_use_id, const std::string&,
-                                         const tools::Tool::Result&) {
-        seen_ids.push_back("done:" + tool_use_id);
-    };
 
     REQUIRE(loop.Run("用工具", callbacks).has_value());
-    REQUIRE(seen_ids.size() == 3);
-    CHECK(seen_ids[0] == "start:toolu_A1");      // 模型给的 ToolUseBlock.id 原样透传
-    CHECK(seen_ids[1] == "confirm:toolu_A1");    // 确认问话带同一枚 id
-    CHECK(seen_ids[2] == "done:toolu_A1");       // 终态也认得
+    // 显示观察改吃事件流:起止的 id 从 ItemStarted/ItemCompleted 里读,
+    // 确认侧(seen_ids)与事件侧是同一枚 tool_use_id——模型给的
+    // ToolUseBlock.id 三处原样透传。
+    REQUIRE(turn.recorder.started_tools.size() == 1);
+    CHECK(turn.recorder.started_tools[0].name == "needs_ask");
+    CHECK(turn.recorder.started_tools[0].tool_use_id == "toolu_A1");
+    REQUIRE(turn.recorder.done_tools.size() == 1);
+    CHECK(turn.recorder.done_tools[0].tool_use_id == "toolu_A1");
+    REQUIRE(seen_ids.size() == 1);               // 确认问话带同一枚 id
+    CHECK(seen_ids[0] == "confirm:toolu_A1");
 }

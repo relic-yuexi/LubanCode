@@ -115,6 +115,9 @@ std::string ToString(ServerEventKind kind) {
         case ServerEventKind::ThreadDeleted: return "thread.deleted";
         case ServerEventKind::TurnStarted: return "turn.started";
         case ServerEventKind::TurnCompleted: return "turn.completed";
+        case ServerEventKind::ModelStepStarted: return "turn.model_step_started";
+        case ServerEventKind::ToolBatchStarted: return "turn.tool_batch_started";
+        case ServerEventKind::ToolBatchFinished: return "turn.tool_batch_finished";
         case ServerEventKind::ItemStarted: return "item.started";
         case ServerEventKind::ItemDelta: return "item.delta";
         case ServerEventKind::ItemCompleted: return "item.completed";
@@ -179,6 +182,9 @@ bool ParseServerEventKind(const std::string& s, ServerEventKind& out) {
     if (s == "thread.deleted") { out = ServerEventKind::ThreadDeleted; return true; }
     if (s == "turn.started") { out = ServerEventKind::TurnStarted; return true; }
     if (s == "turn.completed") { out = ServerEventKind::TurnCompleted; return true; }
+    if (s == "turn.model_step_started") { out = ServerEventKind::ModelStepStarted; return true; }
+    if (s == "turn.tool_batch_started") { out = ServerEventKind::ToolBatchStarted; return true; }
+    if (s == "turn.tool_batch_finished") { out = ServerEventKind::ToolBatchFinished; return true; }
     if (s == "item.started") { out = ServerEventKind::ItemStarted; return true; }
     if (s == "item.delta") { out = ServerEventKind::ItemDelta; return true; }
     if (s == "item.completed") { out = ServerEventKind::ItemCompleted; return true; }

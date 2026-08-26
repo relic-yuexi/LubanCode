@@ -4,7 +4,7 @@
 //       标旧值、带 cache 的组、两次请求覆盖不累加;
 //     - 状态行局部更新(WithContextUpdate):只改 context/tokens 两段,其他
 //       段原样保住;旧值渲染带 ~ 前缀;
-//     - BuildCallbacks::on_usage 接线:主请求 usage 更新 tracker 并发布
+//     - 事件流侧的 usage 接线:主请求 usage 更新 tracker 并发布
 //       状态;子代理 usage 只进累计花销,不碰 tracker、不发布状态;
 //     - footer 挂起期间发布:只改数据、不落一个字节(发布与重画分开)。
 //  2) "流式中 Shift+Tab 切档失效":切档与空闲路同源——SetConfirmMode/
@@ -24,7 +24,9 @@
 
 #include "api/backend.hpp"
 #include "api/types.hpp"
+#include "app/terminal_turn_sink.hpp"
 #include "app/turn_runner.hpp"
+#include "runtime/turn_event_adapter.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/format_utils.hpp"
@@ -217,10 +219,10 @@ TEST_CASE("BuildStatusPanelSegments: 旧值时 context/tokens 段带 ~ 前缀,�
 }
 
 // ---------------------------------------------------------------------------
-// BuildCallbacks::on_usage 接线
+// 事件流侧(TerminalTurnSink)的 usage 接线
 // ---------------------------------------------------------------------------
 
-TEST_CASE("BuildCallbacks::on_usage: 主请求 usage 更新 tracker 并发布状态,其他段保住") {
+TEST_CASE("TerminalTurnSink::usage: 主请求 usage 更新 tracker 并发布状态,其他段保住") {
     cli::SetStatusLineData(BasePanelData(), {"permission_mode", "model", "cwd", "git_branch", "context", "tokens"},
                            " · ");
 
@@ -236,25 +238,25 @@ TEST_CASE("BuildCallbacks::on_usage: 主请求 usage 更新 tracker 并发布状
     std::set<std::string> always_allowed;
     hooks::HookDispatcher hooks;  // 空 dispatcher:不挂 hook 回调,与"没配 hooks"同待遇
 
-    app::TurnContext ctx;
-    ctx.auto_confirm = false;
-    ctx.always_allowed_tools = &always_allowed;
-    ctx.theme = theme;
-    ctx.context_tracker = &tracker;
-    ctx.registry = &registry;
-    ctx.hook_dispatcher = &hooks;
-    app::TurnWiring wiring;
-    wiring.usage_stats = &stats;
-    wiring.display = &display;
-    wiring.body_tracker = &body;
-    const agent::Callbacks callbacks = app::BuildCallbacks(ctx, wiring);
+    // 批二余款:BuildCallbacks 退役,usage 接线改从事件流侧钉——适配器
+    // 出 UsageUpdated,TerminalTurnSink 落账(stats/tracker)并发布状态行。
+    runtime::IdAuthority event_ids;
+    runtime::TurnEventAdapter events("test", event_ids);
+    app::TerminalTurnSink::Ingredients ingredients;
+    ingredients.display = &display;
+    ingredients.body_tracker = &body;
+    ingredients.usage_stats = &stats;
+    ingredients.context_tracker = &tracker;
+    app::TerminalTurnSink sink(std::move(ingredients));
+    events.Attach([&sink](const runtime::ServerEvent& event) { sink.Emit(event); });
+    events.Start();
 
-    callbacks.on_usage(api::UsageReport{api::Usage{300, 50}, 0, "msg_1", "test-model"});
+    events.OnUsage(api::UsageReport{api::Usage{300, 50}, 0, "msg_1", "test-model"});
     CHECK(tracker.current_tokens() == 350);
     CHECK(stats.input_tokens() == 300);
     CHECK(stats.output_tokens() == 50);
     CHECK(stats.request_count() == 1);
-    // 逐步流水账:on_usage 落的是一条 StepUsageRecord,身份齐。
+    // 逐步流水账:每笔 UsageUpdated 落一条 StepUsageRecord,身份齐。
     REQUIRE(stats.steps.size() == 1);
     CHECK(stats.steps[0].step_index == 0);
     CHECK(stats.steps[0].request_id == "msg_1");
@@ -275,7 +277,7 @@ TEST_CASE("BuildCallbacks::on_usage: 主请求 usage 更新 tracker 并发布状
     CHECK(snapshot.rec == "REC · demo");
 }
 
-TEST_CASE("BuildCallbacks::on_usage: 第二次请求覆盖发布,不累加;缺 usage 标旧值不清零") {
+TEST_CASE("TerminalTurnSink::usage: 第二次请求覆盖发布,不累加;缺 usage 标旧值不清零") {
     cli::SetStatusLineData(BasePanelData(), {"context", "tokens"}, " · ");
     cli::ContextTracker tracker(1000);
     runtime::TurnUsageStats stats;
@@ -288,21 +290,21 @@ TEST_CASE("BuildCallbacks::on_usage: 第二次请求覆盖发布,不累加;缺 u
     tools::ToolRegistry registry;
     std::set<std::string> always_allowed;
     hooks::HookDispatcher hooks;  // 空 dispatcher:不挂 hook 回调,与"没配 hooks"同待遇
-    app::TurnContext ctx;
-    ctx.auto_confirm = false;
-    ctx.always_allowed_tools = &always_allowed;
-    ctx.theme = theme;
-    ctx.context_tracker = &tracker;
-    ctx.registry = &registry;
-    ctx.hook_dispatcher = &hooks;
-    app::TurnWiring wiring;
-    wiring.usage_stats = &stats;
-    wiring.display = &display;
-    wiring.body_tracker = &body;
-    const agent::Callbacks callbacks = app::BuildCallbacks(ctx, wiring);
+    // 批二余款:BuildCallbacks 退役,usage 接线改从事件流侧钉——适配器
+    // 出 UsageUpdated,TerminalTurnSink 落账(stats/tracker)并发布状态行。
+    runtime::IdAuthority event_ids;
+    runtime::TurnEventAdapter events("test", event_ids);
+    app::TerminalTurnSink::Ingredients ingredients;
+    ingredients.display = &display;
+    ingredients.body_tracker = &body;
+    ingredients.usage_stats = &stats;
+    ingredients.context_tracker = &tracker;
+    app::TerminalTurnSink sink(std::move(ingredients));
+    events.Attach([&sink](const runtime::ServerEvent& event) { sink.Emit(event); });
+    events.Start();
 
-    callbacks.on_usage(api::UsageReport{api::Usage{300, 50}, 0, "m1", "test-model"});
-    callbacks.on_usage(api::UsageReport{api::Usage{100, 20}, 1, "m2", "test-model"});
+    events.OnUsage(api::UsageReport{api::Usage{300, 50}, 0, "m1", "test-model"});
+    events.OnUsage(api::UsageReport{api::Usage{100, 20}, 1, "m2", "test-model"});
     // tracker 覆盖式:120;花销统计累加式:400/70/2——两本账各归各。
     CHECK(tracker.current_tokens() == 120);
     CHECK(stats.input_tokens() == 400);
@@ -310,7 +312,7 @@ TEST_CASE("BuildCallbacks::on_usage: 第二次请求覆盖发布,不累加;缺 u
     CHECK(stats.request_count() == 2);
     CHECK(cli::SnapshotStatusLineValues().used_tokens == 120);
 
-    callbacks.on_usage(api::UsageReport{api::Usage{}, 2, "m3", "test-model"});  // provider 没回 usage
+    events.OnUsage(api::UsageReport{api::Usage{}, 2, "m3", "test-model"});  // provider 没回 usage
     CHECK(tracker.current_tokens() == 120);  // 不清零
     CHECK(stats.request_count() == 3);       // 请求次数照记
     const cli::StatusPanelData snapshot = cli::SnapshotStatusLineValues();
@@ -318,7 +320,7 @@ TEST_CASE("BuildCallbacks::on_usage: 第二次请求覆盖发布,不累加;缺 u
     CHECK(snapshot.context_stale);  // 状态行数据标旧,渲染带 ~
 }
 
-TEST_CASE("BuildCallbacks::on_usage: 子代理 usage 只进累计花销,不碰 tracker、不发布状态") {
+TEST_CASE("AgentTool::Hooks::on_usage: 子代理 usage 只进累计花销,不碰 tracker、不发布状态") {
     cli::SetStatusLineData(BasePanelData(), {"context", "tokens"}, " · ");
 
     FakeBackend backend;
@@ -337,21 +339,28 @@ TEST_CASE("BuildCallbacks::on_usage: 子代理 usage 只进累计花销,不碰 t
     registry.Register(std::make_unique<tools::AgentTool>(backend, sub_registry, "/work/dir"));
     std::set<std::string> always_allowed;
     hooks::HookDispatcher hooks;  // 空 dispatcher:不挂 hook 回调,与"没配 hooks"同待遇
-    app::TurnContext ctx;
-    ctx.auto_confirm = false;
-    ctx.always_allowed_tools = &always_allowed;
-    ctx.theme = theme;
-    ctx.context_tracker = &tracker;
-    ctx.registry = &registry;
-    ctx.hook_dispatcher = &hooks;
-    app::TurnWiring wiring;
-    wiring.usage_stats = &stats;
-    wiring.display = &display;
-    wiring.body_tracker = &body;
-    const agent::Callbacks callbacks = app::BuildCallbacks(ctx, wiring);
+    // 批二余款:BuildCallbacks 退役,usage 接线改从事件流侧钉——适配器
+    // 出 UsageUpdated,TerminalTurnSink 落账(stats/tracker)并发布状态行。
+    runtime::IdAuthority event_ids;
+    runtime::TurnEventAdapter events("test", event_ids);
+    app::TerminalTurnSink::Ingredients ingredients;
+    ingredients.display = &display;
+    ingredients.body_tracker = &body;
+    ingredients.usage_stats = &stats;
+    ingredients.context_tracker = &tracker;
+    app::TerminalTurnSink sink(std::move(ingredients));
+    events.Attach([&sink](const runtime::ServerEvent& event) { sink.Emit(event); });
+    events.Start();
 
-    // BuildCallbacks 内部给 agent 工具灌了转发钩子;跑一轮子代理(500+100
-    // tokens),花销统计要吃到,主 context 与状态行数据都不能动。
+    // 子代理的 usage 转发走 AgentTool::Hooks(终端装配灌的那份,台账
+    // sink 从事件流里喂);跑一轮子代理(500+100 tokens),花销统计要吃
+    // 到,主 context 与状态行数据都不能动。
+    tools::AgentTool::Hooks agent_hooks;
+    agent_hooks.on_usage = [&stats, &display](const api::UsageReport& report) {
+        stats.Add(report);
+        display.agent_step_count += 1;
+    };
+    dynamic_cast<tools::AgentTool*>(registry.Find("agent"))->SetHooks(std::move(agent_hooks));
     const tools::Tool::Result result = registry.Find("agent")->execute(nlohmann::json{{"title", "干点活"}, {"prompt", "干点活"}});
     CHECK_FALSE(result.is_error);
     CHECK(stats.input_tokens() == 500);

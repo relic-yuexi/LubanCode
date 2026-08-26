@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "agent/agent.hpp"
+#include "runtime/turn_event_adapter.hpp"
 #include "agent/loop.hpp"
 #include "agent/prefix.hpp"
 #include "api/backend.hpp"
@@ -129,19 +130,42 @@ int main() {
         "你是测试会话里的被测模型。回答保持极短。以下是一段稳定填充材料,用于撑起前缀缓存:\n" +
         stable_block + "\n填充材料结束。";
 
-    agent::Agent loop(backend, registry, model, system_prompt,
-                          /*max_tokens=*/512, /*max_steps_per_turn=*/0);
+    agent::AgentProfile profile;
+    profile.provider = "deepseek";
+    profile.request.model = model;
+    profile.runtime.max_output_tokens = 512;
+    profile.runtime.max_steps_per_turn = 0;
+    profile.system_prompt = system_prompt;
+    agent::Agent loop(backend, registry, std::move(profile));
 
+    // usage 观察改吃事件流(批二余款):UsageUpdated 的载荷里身份齐,
+    // 还原成 UsageReport 落账。
     std::vector<StepLog> steps;
-    agent::Callbacks callbacks;
-    callbacks.on_usage = [&steps, &backend](const api::UsageReport& report) {
-        // on_usage 在请求收尾时触发,同一时间只有一步在飞——捕获数组里
-        // 最后一份就是本步刚发出去的请求。
+    runtime::IdAuthority event_ids;
+    runtime::TurnEventAdapter events("deepseek-e2e", event_ids);
+    events.Attach([&steps, &backend](const runtime::ServerEvent& event) {
+        if (event.kind != runtime::ServerEventKind::UsageUpdated) {
+            return;
+        }
+        // usage 在请求收口时到,同一时间只有一步在飞——捕获数组里最后
+        // 一份就是本步刚发出去的请求。
         StepLog log;
         log.request = backend.captured.back();
-        log.report = report;
+        log.report.usage.input_tokens = event.payload.value("input_tokens", std::int64_t{0});
+        log.report.usage.output_tokens = event.payload.value("output_tokens", std::int64_t{0});
+        log.report.usage.cache_read_tokens = event.payload.value("cache_read_tokens", std::int64_t{0});
+        log.report.usage.cache_creation_tokens =
+            event.payload.value("cache_creation_tokens", std::int64_t{0});
+        log.report.usage.output_reasoning_tokens =
+            event.payload.value("reasoning_tokens", std::int64_t{0});
+        log.report.step_index = event.payload.value("step_index", 0);
+        log.report.request_id = event.payload.value("request_id", std::string());
+        log.report.model = event.payload.value("model", std::string());
         steps.push_back(std::move(log));
-    };
+    });
+    events.Start();
+    agent::TurnWiring callbacks;
+    callbacks.events = &events;
 
     auto run_turn = [&](const std::string& user_text) -> bool {
         const auto result = loop.Run(user_text, callbacks);

@@ -1,11 +1,11 @@
-// 批二尾巴(骨架拆解批三):子代理 sub_callbacks 切到事件流。
-// 编译边界:tools/ 住 engine 库不许 include runtime——TurnEventAdapter 的
-// 翻译在宿主(app)侧做完,经 AgentTool::Hooks::event_callbacks 以
-// agent::Callbacks 的中立形状递进去,agent_tool 里并轨。这份测试钉三桩:
+// 批二尾巴(骨架拆解批三):子代理 sub_callbacks 切到事件流;批二余款起
+// Callbacks 退役,宿主的出水口(TurnEventAdapter*)经 AgentTool::Hooks::events
+// 递进 agent_tool,RunTask 里现起一只从路适配器:台账 sink 先吃,宿主流
+// 原样转发(payload 带 subordinate 标,画屏侧跳过)。这份测试钉三桩:
 //   1. 前台子代理的正文/思考增量、工具起止落进宿主轮的事件流(先于台账,
 //      一份事件两路消费);
-//   2. 不设 event_callbacks(后台任务/旧调用方)时事件流零事件,行为不变;
-//   3. 工具条目不重复开(批二的 on_sub_tool_start 喂法已拆,并轨只此一路)。
+//   2. 不设 events(后台任务/旧调用方)时宿主流零事件,行为不变;
+//   3. 工具条目不重复开(台账 sink 只此一路,ItemStarted 恰一枚)。
 
 #include <doctest/doctest.h>
 
@@ -21,14 +21,10 @@
 #include "agent/loop.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
-#include "app/turn_runner.hpp"
-#include "cli/context_tracker.hpp"
 #include "cli/theme.hpp"
 #include "cli/tool_display.hpp"
 #include "cli/transcript.hpp"
-#include "hooks/dispatcher.hpp"
 #include "runtime/turn_event_adapter.hpp"
-#include "runtime/turn_runtime.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
@@ -135,51 +131,37 @@ TEST_CASE("批二尾巴:前台子代理的增量与工具起止先落事件流,�
     FakeBackend main_backend;  // 主回合不跑,只借装配
 
     tools::ToolRegistry registry;
-    registry.Register(std::make_unique<tools::AgentTool>(sub_backend, sub_registry, "/work/dir"));
+    auto agent_tool = std::make_unique<tools::AgentTool>(sub_backend, sub_registry, "/work/dir");
+    tools::AgentTool* agent_tool_ptr = agent_tool.get();
+    registry.Register(std::move(agent_tool));
 
     Collected collected;
     runtime::TurnEventAdapter adapter("test-thread", runtime::ProcessIdAuthority());
     adapter.Attach([&collected](const runtime::ServerEvent& event) { collected.events.push_back(event); });
     adapter.Start("turn-1");
-    lubancode::agent::Callbacks event_callbacks = adapter.MakeCallbacks();
 
-    cli::Theme theme;
-    std::vector<cli::TranscriptItem> transcript;
-    std::atomic<bool> cancel_flag{false};
-    std::atomic<bool> expanded{false};
-    cli::ToolDisplay display(transcript, theme, /*console=*/false, nullptr, &cancel_flag, &expanded);
-    cli::StreamBodyTracker body(theme, false);
-    cli::ContextTracker tracker(1000);
-    runtime::TurnUsageStats stats;
-    std::set<std::string> always_allowed;
-    hooks::HookDispatcher hooks;
+    tools::AgentTool::Hooks hooks;
+    hooks.events = &adapter;
+    agent_tool_ptr->SetHooks(std::move(hooks));
 
-    app::TurnContext ctx;
-    ctx.auto_confirm = false;
-    ctx.always_allowed_tools = &always_allowed;
-    ctx.theme = theme;
-    ctx.context_tracker = &tracker;
-    ctx.registry = &registry;
-    ctx.hook_dispatcher = &hooks;
-    app::TurnWiring wiring;
-    wiring.usage_stats = &stats;
-    wiring.display = &display;
-    wiring.body_tracker = &body;
-    wiring.cancel_flag = &cancel_flag;
-    wiring.event_callbacks = &event_callbacks;
-    const agent::Callbacks callbacks = app::BuildCallbacks(ctx, wiring);
-    CHECK(callbacks.on_text_delta != nullptr);  // 装配本身没坏
-
-    // 跑一只前台子代理:它的增量/工具事件应经 hooks.event_callbacks 并轨,
-    // 出现在宿主轮的事件流里。
+    // 跑一只前台子代理:它的增量/工具事件应经从路适配器并轨,出现在宿主
+    // 轮的事件流里(带 subordinate 标——画屏侧跳过,账面侧照收)。
     const tools::Tool::Result result =
-        registry.Find("agent")->execute(nlohmann::json{{"title", "事件流"}, {"prompt", "干完汇报"}});
+        agent_tool_ptr->execute(nlohmann::json{{"title", "事件流"}, {"prompt", "干完汇报"}});
     CHECK_FALSE(result.is_error);
 
     CHECK(collected.SawToolStarted("sub_t1"));                 // 子代理内层工具上了事件流
     CHECK(collected.JoinText().find("子代理的最终结论。") != std::string::npos);  // 正文增量上了
-    // 工具条目不重复开:同 id 的 ItemStarted 恰一枚(并轨只此一路,批二的
-    // on_sub_tool_start 喂法已拆)。
+    // 从路标:嵌套条目不画屏(终端 sink 跳过),账面侧照收——标记得在。
+    bool saw_subordinate_mark = false;
+    for (const auto& event : collected.events) {
+        if (event.payload.value("subordinate", false)) {
+            saw_subordinate_mark = true;
+            break;
+        }
+    }
+    CHECK(saw_subordinate_mark);
+    // 工具条目不重复开:同 id 的 ItemStarted 恰一枚(并轨只此一路)。
     int started_count = 0;
     for (const auto& event : collected.events) {
         if (event.kind == runtime::ServerEventKind::ItemStarted && event.item_kind == runtime::ItemKind::Tool) {
@@ -191,51 +173,27 @@ TEST_CASE("批二尾巴:前台子代理的增量与工具起止先落事件流,�
     CHECK(started_count == 1);
 }
 
-TEST_CASE("批二尾巴:不设 event_callbacks 时子代理不上事件流(行为与从前一致)") {
+TEST_CASE("批二尾巴:不设 events 时子代理不上宿主流(行为与从前一致)") {
     FakeBackend sub_backend;
     sub_backend.scripts = {TextScript("后台照常跑。")};
     tools::ToolRegistry sub_registry;
     tools::ToolRegistry registry;
-    registry.Register(std::make_unique<tools::AgentTool>(sub_backend, sub_registry, "/work/dir"));
+    auto agent_tool = std::make_unique<tools::AgentTool>(sub_backend, sub_registry, "/work/dir");
+    tools::AgentTool* agent_tool_ptr = agent_tool.get();
+    registry.Register(std::move(agent_tool));
 
     Collected collected;
     runtime::TurnEventAdapter adapter("test-thread", runtime::ProcessIdAuthority());
     adapter.Attach([&collected](const runtime::ServerEvent& event) { collected.events.push_back(event); });
     adapter.Start("turn-2");
-    lubancode::agent::Callbacks event_callbacks = adapter.MakeCallbacks();
-    (void)event_callbacks;  // 不递进 wiring:模拟后台任务/旧调用方
 
-    cli::Theme theme;
-    std::vector<cli::TranscriptItem> transcript;
-    std::atomic<bool> cancel_flag{false};
-    std::atomic<bool> expanded{false};
-    cli::ToolDisplay display(transcript, theme, false, nullptr, &cancel_flag, &expanded);
-    cli::StreamBodyTracker body(theme, false);
-    cli::ContextTracker tracker(1000);
-    runtime::TurnUsageStats stats;
-    std::set<std::string> always_allowed;
-    hooks::HookDispatcher hooks;
-
-    app::TurnContext ctx;
-    ctx.auto_confirm = false;
-    ctx.always_allowed_tools = &always_allowed;
-    ctx.theme = theme;
-    ctx.context_tracker = &tracker;
-    ctx.registry = &registry;
-    ctx.hook_dispatcher = &hooks;
-    app::TurnWiring wiring;
-    wiring.usage_stats = &stats;
-    wiring.display = &display;
-    wiring.body_tracker = &body;
-    wiring.cancel_flag = &cancel_flag;
-    wiring.event_callbacks = nullptr;  // 不上事件流
-    const agent::Callbacks callbacks = app::BuildCallbacks(ctx, wiring);
-    (void)callbacks;
+    tools::AgentTool::Hooks hooks;  // events 不设:模拟后台任务/旧调用方
+    agent_tool_ptr->SetHooks(std::move(hooks));
 
     const tools::Tool::Result result =
-        registry.Find("agent")->execute(nlohmann::json{{"title", "无事件流"}, {"prompt", "干完汇报"}});
+        agent_tool_ptr->execute(nlohmann::json{{"title", "无事件流"}, {"prompt", "干完汇报"}});
     CHECK_FALSE(result.is_error);
-    // 事件流一个字节没进:Start 的那枚 TurnStarted 是适配器自己的开卷标记,
+    // 宿主流一个字节没进:Start 的那枚 TurnStarted 是适配器自己的开卷标记,
     // 除它之外零事件——子代理的增量/工具/usage 都没进来(不设零变化)。
     int beyond_turn_started = 0;
     for (const auto& event : collected.events) {

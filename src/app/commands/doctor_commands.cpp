@@ -3,6 +3,10 @@
 // 单测直接钉;这一头只留 IO(发请求、读 metrics、写回配置)与打印。
 
 #include "app/commands/doctor_commands.hpp"
+#include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
+
+using lubancode::cli::TermOut;
+using lubancode::cli::TermErr;
 
 #include <algorithm>
 #include <cctype>
@@ -354,70 +358,70 @@ void RunEffortProbe(const std::string& level, const DoctorContext& context) {
     const lubancode::config::Config& config = context.config;
     const api::Request probe = BuildEffortProbeRequest(context.current_model, level);
 
-    std::cout << trf("doctor.effort.probe_header", context.current_model,
+    TermOut() << trf("doctor.effort.probe_header", context.current_model,
                      level.empty() ? tr("doctor.level.unset") : level)
               << "\n";
     // 请求侧:先看"实际发送值"——按当前 wire 把请求体翻出来,字段在不在、
     // 值是什么,如实报告(不发送任何正文,只报参数名与档位值)。
-    std::cout << tr("doctor.effort.request_field") << " "
+    TermOut() << tr("doctor.effort.request_field") << " "
               << DescribeRequestEffort(config.wire, probe, config.extra_body, config.think_param) << "\n";
-    std::cout << tr("doctor.probe.sending") << "\n";
-    std::cout.flush();
+    TermOut() << tr("doctor.probe.sending") << "\n";
+    TermOut().flush();
 
     auto backend = BuildBackend(config);
     const ProbeOutcome outcome = RunProbe(*backend, probe);
 
     if (!outcome.error.empty()) {
-        std::cout << trf("doctor.effort.http_error",
+        TermOut() << trf("doctor.effort.http_error",
                          outcome.http_status > 0 ? std::to_string(outcome.http_status) : std::string("-"))
                   << "\n"
                   << "  " << SanitizeProbeError(outcome.error) << "\n";
     } else {
-        std::cout << tr("doctor.effort.http_ok") << "\n";
+        TermOut() << tr("doctor.effort.http_ok") << "\n";
     }
-    std::cout << tr("doctor.effort.finish") << " "
+    TermOut() << tr("doctor.effort.finish") << " "
               << (outcome.stop_reason.empty() ? tr("doctor.value.absent") : outcome.stop_reason) << "\n";
-    std::cout << trf("doctor.effort.body", outcome.text_chars, outcome.thinking_chars) << "\n";
+    TermOut() << trf("doctor.effort.body", outcome.text_chars, outcome.thinking_chars) << "\n";
     if (!outcome.usage_reported) {
-        std::cout << tr("doctor.effort.usage_not_reported") << "\n";
+        TermOut() << tr("doctor.effort.usage_not_reported") << "\n";
     } else {
-        std::cout << trf("doctor.effort.usage", lubancode::cli::FormatTokenCount(outcome.usage.input_tokens),
+        TermOut() << trf("doctor.effort.usage", lubancode::cli::FormatTokenCount(outcome.usage.input_tokens),
                          lubancode::cli::FormatTokenCount(outcome.usage.output_tokens),
                          lubancode::cli::FormatTokenCount(outcome.usage.cache_read_tokens))
                   << "\n";
         if (outcome.usage.output_tokens > 0) {
-            std::cout << (outcome.usage.output_reasoning_tokens > 0
+            TermOut() << (outcome.usage.output_reasoning_tokens > 0
                               ? trf("doctor.effort.usage_reasoning",
                                     lubancode::cli::FormatTokenCount(outcome.usage.output_reasoning_tokens))
                               : tr("doctor.effort.usage_no_split"))
                       << "\n";
         }
     }
-    std::cout.flush();
+    TermOut().flush();
 }
 
 // metrics 读得到就回填会话缓存结论(状态栏/统计行跟着换措辞)。
 std::optional<PrefixCacheMetrics> ReadAndReportMetrics(const DoctorContext& context) {
     const lubancode::config::Config& config = context.config;
     if (config.metrics_url.empty()) {
-        std::cout << tr("doctor.cache.no_metrics") << "\n";
+        TermOut() << tr("doctor.cache.no_metrics") << "\n";
         return std::nullopt;
     }
-    std::cout << trf("doctor.cache.metrics_header", config.metrics_url) << "\n";
+    TermOut() << trf("doctor.cache.metrics_header", config.metrics_url) << "\n";
     const auto text = FetchMetricsText(config.metrics_url, config);
     if (!text.has_value()) {
-        std::cout << trf("doctor.cache.metrics_read_failed", text.error()) << "\n";
+        TermOut() << trf("doctor.cache.metrics_read_failed", text.error()) << "\n";
         return std::nullopt;
     }
     const PrefixCacheMetrics metrics = ParsePrefixCacheMetrics(*text);
     if (metrics.enabled.has_value()) {
-        std::cout << (*metrics.enabled ? tr("doctor.cache.metrics_enabled") : tr("doctor.cache.metrics_disabled"))
+        TermOut() << (*metrics.enabled ? tr("doctor.cache.metrics_enabled") : tr("doctor.cache.metrics_disabled"))
                   << "\n";
         context.context_tracker.set_server_prefix_caching(metrics.enabled);
     } else {
-        std::cout << tr("doctor.cache.metrics_enabled_unknown") << "\n";
+        TermOut() << tr("doctor.cache.metrics_enabled_unknown") << "\n";
     }
-    std::cout << trf("doctor.cache.metrics_counters",
+    TermOut() << trf("doctor.cache.metrics_counters",
                      metrics.queries_total.has_value() ? std::to_string(*metrics.queries_total)
                                                        : std::string(tr("doctor.value.absent")),
                      metrics.hits_total.has_value() ? std::to_string(*metrics.hits_total)
@@ -434,7 +438,7 @@ void RunCacheProbe(const DoctorContext& context) {
     const lubancode::config::Config& config = context.config;
     // 安全闸:公网 provider 不发探针。metrics_url 明配 = 用户声明这是自有端。
     if (!IsLoopbackUrl(config.base_url) && config.metrics_url.empty()) {
-        std::cout << tr("doctor.cache.probe_gate") << "\n";
+        TermOut() << tr("doctor.cache.probe_gate") << "\n";
         return;
     }
     std::optional<PrefixCacheMetrics> before = ReadAndReportMetrics(context);
@@ -443,9 +447,9 @@ void RunCacheProbe(const DoctorContext& context) {
     auto backend = BuildBackend(config);
 
     const auto describe_round = [&](int round, const ProbeOutcome& outcome) {
-        std::cout << trf("doctor.cache.probe_round", round) << "\n";
+        TermOut() << trf("doctor.cache.probe_round", round) << "\n";
         if (!outcome.error.empty()) {
-            std::cout << "  "
+            TermOut() << "  "
                       << trf("doctor.effort.http_error", outcome.http_status > 0
                                                                 ? std::to_string(outcome.http_status)
                                                                 : std::string("-"))
@@ -453,14 +457,14 @@ void RunCacheProbe(const DoctorContext& context) {
                       << "  " << SanitizeProbeError(outcome.error) << "\n";
             return;
         }
-        std::cout << tr("doctor.effort.http_ok") << "\n";
+        TermOut() << tr("doctor.effort.http_ok") << "\n";
         if (outcome.usage_reported) {
-            std::cout << trf("doctor.cache.probe_usage",
+            TermOut() << trf("doctor.cache.probe_usage",
                              lubancode::cli::FormatTokenCount(outcome.usage.input_tokens),
                              lubancode::cli::FormatTokenCount(outcome.usage.cache_read_tokens))
                       << "\n";
         } else {
-            std::cout << tr("doctor.effort.usage_not_reported") << "\n";
+            TermOut() << tr("doctor.effort.usage_not_reported") << "\n";
         }
     };
 
@@ -489,7 +493,7 @@ void RunCacheProbe(const DoctorContext& context) {
             dump2 = lubancode::api::anthropic::BuildRequestJson(pair.round2, false, config.extra_body).dump();
         }
         const std::size_t common = CommonPrefixBytes(dump1, dump2);
-        std::cout << trf("doctor.cache.probe_prefix", common, pair.designed_prefix_bytes)
+        TermOut() << trf("doctor.cache.probe_prefix", common, pair.designed_prefix_bytes)
                   << (common >= pair.designed_prefix_bytes ? tr("doctor.cache.probe_prefix_stable")
                                                             : tr("doctor.cache.probe_prefix_broken"))
                   << "\n";
@@ -508,31 +512,31 @@ void RunCacheProbe(const DoctorContext& context) {
                 }
                 return std::to_string(*a - *b);
             };
-            std::cout << trf("doctor.cache.probe_delta", delta(before->queries_total, after.queries_total),
+            TermOut() << trf("doctor.cache.probe_delta", delta(before->queries_total, after.queries_total),
                              delta(before->hits_total, after.hits_total),
                              delta(before->prompt_tokens_cached_total, after.prompt_tokens_cached_total))
                       << "\n";
         } else {
-            std::cout << trf("doctor.cache.metrics_read_failed", after_text.error()) << "\n";
+            TermOut() << trf("doctor.cache.metrics_read_failed", after_text.error()) << "\n";
         }
     }
-    std::cout.flush();
+    TermOut().flush();
 }
 
 // /doctor cache usage:stream_usage 能力探针,结论写回 provider 配置。
 void RunStreamUsageProbe(const DoctorContext& context) {
     lubancode::config::Config& config = context.config;
     if (config.wire != lubancode::config::Wire::ChatCompletions) {
-        std::cout << tr("doctor.usage.not_chat") << "\n";
+        TermOut() << tr("doctor.usage.not_chat") << "\n";
         return;
     }
     if (context.active_provider.empty() || lubancode::config::FindProvider(context.providers,
                                                                             context.active_provider) == nullptr) {
-        std::cout << tr("doctor.usage.no_provider") << "\n";
+        TermOut() << tr("doctor.usage.no_provider") << "\n";
         return;
     }
-    std::cout << tr("doctor.usage.probing") << "\n";
-    std::cout.flush();
+    TermOut() << tr("doctor.usage.probing") << "\n";
+    TermOut().flush();
 
     // 探针 backend:与正常请求同一套地址/密钥/超时/extra_body,唯独
     // stream_usage 强制为 true——要试的就是这个能力。
@@ -549,7 +553,7 @@ void RunStreamUsageProbe(const DoctorContext& context) {
     const api::Request probe = BuildEffortProbeRequest(context.current_model, context.current_think);
     const ProbeOutcome outcome = RunProbe(backend, probe);
     if (!outcome.error.empty()) {
-        std::cout << trf("doctor.effort.http_error", outcome.http_status > 0
+        TermOut() << trf("doctor.effort.http_error", outcome.http_status > 0
                                                          ? std::to_string(outcome.http_status)
                                                          : std::string("-"))
                   << "\n"
@@ -557,7 +561,7 @@ void RunStreamUsageProbe(const DoctorContext& context) {
         return;
     }
     const bool supported = outcome.usage_reported;
-    std::cout << (supported ? tr("doctor.usage.supported") : tr("doctor.usage.unsupported")) << "\n";
+    TermOut() << (supported ? tr("doctor.usage.supported") : tr("doctor.usage.unsupported")) << "\n";
     // 写回:内存里的 providers 列表先改,再落到 active_provider 所在的配置
     // 文件(项目级钉住写项目路径,否则写全局),当前生效的 config.stream_usage
     // 一并同步(backend 由调用方 rebuild)。
@@ -568,26 +572,26 @@ void RunStreamUsageProbe(const DoctorContext& context) {
                   .transform([path = *context.provider_write_path]() { return path; })
             : lubancode::config::SetProviderStreamUsageInGlobalConfig(context.active_provider, supported);
     if (!saved.has_value()) {
-        std::cout << trf("doctor.usage.write_failed", saved.error()) << "\n";
+        TermOut() << trf("doctor.usage.write_failed", saved.error()) << "\n";
         return;
     }
     config.stream_usage = supported;
     config.stream_usage_declared = true;
-    std::cout << trf("doctor.usage.written", context.active_provider, *saved) << "\n";
-    std::cout.flush();
+    TermOut() << trf("doctor.usage.written", context.active_provider, *saved) << "\n";
+    TermOut().flush();
 }
 
 void PrintDoctorOverview(const DoctorContext& context) {
     const lubancode::config::Config& config = context.config;
-    std::cout << tr("doctor.overview.header") << "\n";
-    std::cout << tr("doctor.overview.effort")
+    TermOut() << tr("doctor.overview.header") << "\n";
+    TermOut() << tr("doctor.overview.effort")
               << (context.current_think.empty() ? tr("doctor.level.unset") : context.current_think) << "\n";
-    std::cout << tr("doctor.overview.declared")
+    TermOut() << tr("doctor.overview.declared")
               << (config.provider_think_levels.empty()
                       ? tr("doctor.overview.unverified")
                       : trf("doctor.overview.levels", config.provider_think_levels.size()))
               << "\n";
-    std::cout << tr("doctor.overview.cache")
+    TermOut() << tr("doctor.overview.cache")
               << [&] {
                     const auto observed = context.context_tracker.server_prefix_caching();
                     if (!observed.has_value()) {
@@ -597,45 +601,45 @@ void PrintDoctorOverview(const DoctorContext& context) {
                                      : std::string(tr("doctor.cache.metrics_disabled"));
                 }()
               << "\n";
-    std::cout << tr("doctor.overview.usage_hint") << "\n";
-    std::cout.flush();
+    TermOut() << tr("doctor.overview.usage_hint") << "\n";
+    TermOut().flush();
 }
 
 // /doctor agents:main 与各 agent type 的差异矩阵(规格"架构落点":能力
 // 差异要打印得出来,不靠散落的 Register/不 Register 暗示)。矩阵材料从
 // DoctorContext 来,没接(单测/旧调用方)就整节省略。i18n 中英成对。
 void PrintAgentsMatrix(const DoctorContext& context) {
-    std::cout << tr("doctor.agents.header") << "\n";
+    TermOut() << tr("doctor.agents.header") << "\n";
     const auto tool_count = [](const lubancode::tools::ToolRegistry* registry) {
         return registry != nullptr ? registry->All().size() : std::size_t{0};
     };
     if (context.main_profile != nullptr) {
-        std::cout << trf("doctor.agents.budget",
+        TermOut() << trf("doctor.agents.budget",
                          context.main_profile->max_output_tokens.value_or(0),
                          context.main_profile->max_steps_per_turn == 0
                              ? std::string(tr("config.steps.unlimited"))
                              : std::to_string(context.main_profile->max_steps_per_turn),
                          context.main_profile->length_continuations)
                   << "\n";
-        std::cout << trf("doctor.agents.governance",
+        TermOut() << trf("doctor.agents.governance",
                          context.config.subagent.max_active.value_or(lubancode::config::kDefaultSubagentMaxActive),
                          context.config.subagent.max_depth.value_or(lubancode::config::kDefaultSubagentMaxDepth))
                   << "\n";
     }
     if (context.main_registry != nullptr) {
-        std::cout << trf("doctor.agents.row_main", tool_count(context.main_registry)) << "\n";
+        TermOut() << trf("doctor.agents.row_main", tool_count(context.main_registry)) << "\n";
     }
     if (context.sub_registry != nullptr) {
-        std::cout << trf("doctor.agents.row_sub", tool_count(context.sub_registry)) << "\n";
+        TermOut() << trf("doctor.agents.row_sub", tool_count(context.sub_registry)) << "\n";
     }
     if (context.explore_registry != nullptr) {
-        std::cout << trf("doctor.agents.row_explore", tool_count(context.explore_registry)) << "\n";
+        TermOut() << trf("doctor.agents.row_explore", tool_count(context.explore_registry)) << "\n";
     }
-    std::cout << tr("doctor.agents.note") << "\n";
+    TermOut() << tr("doctor.agents.note") << "\n";
     // 子代理流诊断开关(规格"二、治'无法证明'"):这里提一句,下次用户问
     // "你怎么知道真入了账"就有现成的自查口。
-    std::cout << tr("doctor.agents.subagent_debug_log") << "\n";
-    std::cout.flush();
+    TermOut() << tr("doctor.agents.subagent_debug_log") << "\n";
+    TermOut().flush();
 }
 
 }  // namespace
@@ -689,32 +693,32 @@ void HandleDoctorCommand(const std::string& args, const DoctorContext& context) 
         // 进程生命线单 P2:shell 方言、版本、profile、TTY 语义明牌。
         // 这些是产品边界,不是 bug——用户拿交互终端(Bash/Zsh/Fish、pwsh)
         // 的经验套 run_command,落差在这里摊开说清。
-        std::cout << context.theme.stats << "run_command 的 shell 环境:" << context.theme.reset << "\n";
+        TermOut() << context.theme.stats << "run_command 的 shell 环境:" << context.theme.reset << "\n";
         for (const auto& shell : lubancode::tools::ProbeShells()) {
-            std::cout << "  [" << shell.id << "] " << shell.executable;
+            TermOut() << "  [" << shell.id << "] " << shell.executable;
             if (!shell.version.empty()) {
-                std::cout << "  版本: " << shell.version;
+                TermOut() << "  版本: " << shell.version;
             }
-            std::cout << "\n";
-            std::cout << "    login shell: " << (shell.login_shell ? "是" : "否")
+            TermOut() << "\n";
+            TermOut() << "    login shell: " << (shell.login_shell ? "是" : "否")
                       << "  加载 profile: " << (shell.profile_loaded ? "是" : "否")
                       << "  stdin TTY: " << (shell.stdin_is_tty ? "是" : "否")
                       << "  stdout TTY: " << (shell.stdout_is_tty ? "是" : "否") << "\n";
             if (!shell.notes.empty()) {
-                std::cout << "    " << shell.notes << "\n";
+                TermOut() << "    " << shell.notes << "\n";
             }
         }
-        std::cout << "  shell 由操作系统提供,LubanCode 只拉进程,不随包附送 Bash;"
+        TermOut() << "  shell 由操作系统提供,LubanCode 只拉进程,不随包附送 Bash;"
                      "也不把 sh 偷换成 Bash、不把 powershell 偷换成 pwsh。\n";
-        std::cout.flush();
+        TermOut().flush();
         return;
     }
     if (subcommand.empty()) {
         PrintDoctorOverview(context);
         return;
     }
-    std::cout << tr("doctor.usage.usage_line") << "\n";
-    std::cout.flush();
+    TermOut() << tr("doctor.usage.usage_line") << "\n";
+    TermOut().flush();
 }
 
 }  // namespace lubancode::app

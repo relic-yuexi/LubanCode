@@ -137,7 +137,7 @@ TEST_CASE("DriveTurn:两步工具 + 一步正文,turn 数式对账——1 user +
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
     agent::DriveOptions options;
-    const agent::DriveReport report = agent::DriveTurn(loop, agent::Callbacks{}, UserText("干三步活"), options);
+    const agent::DriveReport report = agent::DriveTurn(loop, agent::TurnWiring{}, UserText("干三步活"), options);
 
     CHECK(report.ok);
     CHECK_FALSE(report.cancelled);
@@ -192,7 +192,7 @@ TEST_CASE("DriveTurn:报错轮 ok=false 带错误文案,步数不计") {
     tools::ToolRegistry registry;
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
-    const agent::DriveReport report = agent::DriveTurn(loop, agent::Callbacks{}, UserText("问一句"), agent::DriveOptions{});
+    const agent::DriveReport report = agent::DriveTurn(loop, agent::TurnWiring{}, UserText("问一句"), agent::DriveOptions{});
     CHECK_FALSE(report.ok);
     CHECK(report.error.find("脚本用完") != std::string::npos);
     CHECK(report.steps_used == 0);
@@ -219,7 +219,7 @@ TEST_CASE("DriveTurn:续投源领批后再跑一轮,封账即收;失败轮按批
             }
             return std::nullopt;  // 第二次问询:封账
         };
-        const agent::DriveReport report = agent::DriveTurn(loop, agent::Callbacks{}, UserText("开工"), options);
+        const agent::DriveReport report = agent::DriveTurn(loop, agent::TurnWiring{}, UserText("开工"), options);
         CHECK(report.ok);
         CHECK(report.steps_used == 2);
         CHECK(pulls == 2);
@@ -256,7 +256,7 @@ TEST_CASE("DriveTurn:续投源领批后再跑一轮,封账即收;失败轮按批
             batch.restore = [&restored]() { restored = true; };
             return batch;
         };
-        const agent::DriveReport report = agent::DriveTurn(loop, agent::Callbacks{}, UserText("开工"), options);
+        const agent::DriveReport report = agent::DriveTurn(loop, agent::TurnWiring{}, UserText("开工"), options);
         CHECK_FALSE(report.ok);  // 续投轮报错如实交账
         CHECK(restored);         // 批退回未送——"取走了不等于送到了"
     }
@@ -273,7 +273,7 @@ TEST_CASE("RunStopContinuation:拉闸一次续一轮,防咬尾最多一次;没�
     };
     tools::ToolRegistry registry;
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
-    REQUIRE(agent::AgentLoop::Run(loop, UserText("先收口一轮"), agent::Callbacks{}).has_value());
+    REQUIRE(agent::AgentLoop::Run(loop, UserText("先收口一轮"), agent::TurnWiring{}).has_value());
 
     agent::DriveReport report;
     agent::StopOptions options;
@@ -287,7 +287,7 @@ TEST_CASE("RunStopContinuation:拉闸一次续一轮,防咬尾最多一次;没�
             CHECK(last_text == "第一轮的结论。");
             return hooks::HookEventResult{};  // blocked=false
         };
-        agent::RunStopContinuation(loop, agent::Callbacks{}, options, report);
+        agent::RunStopContinuation(loop, agent::TurnWiring{}, options, report);
         CHECK(emits == 1);
         CHECK(report.steps_used == 0);  // 没续跑,不加步数
         CHECK(backend.captured_requests.size() == 1);
@@ -309,7 +309,7 @@ TEST_CASE("RunStopContinuation:拉闸一次续一轮,防咬尾最多一次;没�
             ++continue_requests;
             CHECK(reason == "还有活没收口");
         };
-        agent::RunStopContinuation(loop, agent::Callbacks{}, options, report);
+        agent::RunStopContinuation(loop, agent::TurnWiring{}, options, report);
         CHECK(emits == 2);                       // 第二次带 stop_hook_active=true,不再续
         CHECK(continue_requests == 1);           // 报信口恰一次
         CHECK(report.steps_used == 1);           // 续跑一轮记一步
@@ -329,7 +329,7 @@ TEST_CASE("RunStopContinuation:拉闸一次续一轮,防咬尾最多一次;没�
     }
 
     SUBCASE("emit 为空:整环跳过") {
-        agent::RunStopContinuation(loop, agent::Callbacks{}, options, report);
+        agent::RunStopContinuation(loop, agent::TurnWiring{}, options, report);
         CHECK(report.steps_used == 0);
     }
 }

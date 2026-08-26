@@ -1,8 +1,12 @@
-// 一轮问答的执行器:BuildCallbacks(流式正文/工具条目/确认/usage 记账的
-// 回调装配)、RunTurn(发一轮、起监听线程与状态画板、收排队消息、打统计
-// 行),连带 ask_user 的控制台问询(PromptAskUser)与确认前的参数摘要
-// (PrintConfirmDetails/PrintFirstLines)。分界线(PrintDivider)只有
+// 一轮问答的执行器:RunTurn(发一轮、起监听线程与状态画板、收排队消息、
+// 打统计行),连带 ask_user 的控制台问询(PromptAskUser)与确认前的参数
+// 摘要(PrintConfirmDetails/PrintFirstLines)。分界线(PrintDivider)只有
 // RunTurn 用,一并住在这。
+//
+// 骨架拆解批二余款:BuildCallbacks(显示回调装配)随 Callbacks 老路退役。
+// 显示出水只剩一只口——轮内起(或宿主给)一只 TurnEventAdapter,终端画
+// 屏的 TerminalTurnSink 从 sink 侧吃事件流;控制面(确认/钩子/Plan 闸/
+// 逐枚追踪)在 RunTurn 里装配 agent::TurnWiring,递给引擎。
 //
 // 这一层只认 agent/cli/config/tools/platform 的既有抽象,不 include 会话
 // 层的东西;Interactive 与 OneShot 共用。行为、文案、回调次序与搬家前
@@ -77,10 +81,11 @@ std::expected<std::vector<std::string>, std::string> PromptAskUser(
 
 // ---------------------------------------------------------------------------
 // TurnContext(骨架拆解批三:harness 合流):RunTurn 二十四参 +
-// BuildCallbacks 十五参收成一只。三个装配点(交互会话、peer 轮、单发)从前
+// 回调装配十五参收成一只。三个装配点(交互会话、peer 轮、单发)从前
 // 各抱一串位置参数,漏一位就是静默错位;现在填字段,名字自带说明。
-// 渲染三档也在这只上表达:终端画(缺省)、静默(silent,查看态回流)、
-// 事件流(turn_events 非空,显示回调先落事件账再画屏)。
+// 渲染档位也在这只上表达:终端画(缺省,吃事件流的 TerminalTurnSink)、
+// 静默(silent,查看态回流)。事件流适配器(turn_events)批二余款起是唯一
+// 出水口:给了用宿主的,没给 RunTurn 自起一只。
 // ---------------------------------------------------------------------------
 struct TurnContext {
     // ---- 回合本体 ----
@@ -120,34 +125,14 @@ struct TurnContext {
     std::string turn_id_for_trace;                // trace 口径的轮号(空 = 现发)
     lubancode::runtime::TurnView* turn_view_out = nullptr;     // 轮视图存档(Ctrl+L/resume)
 
-    // ---- 事件流(骨架拆解批二)----
-    // SessionRuntime::MakeTurnAdapter() 造的那只。给了就 Start(复用 trace
-    // 口径的 turn_id)→ 显示回调并进终端回调 → 收口 Finish(三档 tone 映射
-    // 终态),Stop 钩子续跑轮并入同一 turn 的账;缺省 nullptr = 不上事件流。
+    // ---- 事件流(骨架拆解批二;批二余款升唯一出水口)----
+    // SessionRuntime::MakeTurnAdapter() 造的那只(落点已挂会话事件链)。
+    // 给了就复用:Start(复用 trace 口径的 turn_id)→ 终端画屏的 sink 从
+    // AttachAlongside 补挂 → 收口 Finish(三档 tone 映射终态),Stop 钩子
+    // 续跑轮并入同一 turn 的账;缺省 nullptr(单发/单测)= RunTurn 就地起
+    // 一只本地适配器,同一套接线。终端渲染照旧逐字节——改的是水的来路。
     lubancode::runtime::TurnEventAdapter* turn_events = nullptr;
 };
-
-// 回合内装配材料:RunTurn 造好递给 BuildCallbacks 的活物件(这一轮的
-// usage 账、显示总管、正文记账、取消旗、视图账、事件流回调存储)。单独调
-// BuildCallbacks 的测试自备一份。
-struct TurnWiring {
-    lubancode::runtime::TurnUsageStats* usage_stats = nullptr;
-    ToolDisplay* display = nullptr;
-    StreamBodyTracker* body_tracker = nullptr;
-    const std::atomic<bool>* cancel_flag = nullptr;
-    lubancode::runtime::TurnCollector* view_collector = nullptr;
-    const lubancode::agent::Callbacks* event_callbacks = nullptr;
-};
-
-// 交互循环、单发模式共用的回调装配(骨架拆解批三:参数收进 TurnContext/
-// TurnWiring):文本打字机打印(正文保持原色,不着色),工具调用打一行提示,
-// needs_confirm 的工具按确认档决定是自动放行还是问用户一句(三选:y 本次
-// 允许 / a 本会话总是允许该工具 / N 拒绝)。registry 里注册了 "agent" 工具
-// 的话,顺带把这一轮现算好的确认/记账/打印逻辑通过 SetHooks 灌给它,子代理
-// 被调用时就能用上同一套(详见 tools/agent_tool.hpp 顶部注释);批二尾巴
-// (批三)起,agent 工具的 hooks 还带上事件流回调(event_callbacks),子代理
-// 自己的 sub_callbacks 先过事件流再落台账。PTC 工具同链。
-lubancode::agent::Callbacks BuildCallbacks(TurnContext& ctx, TurnWiring wiring);
 
 // RunTurn() 的结果:status 沿用老语义(0 成功、非 0 出错);cancelled 标记
 // 这一轮是不是被 ESC 打断的(打断不算错误,status 照样是 0)。

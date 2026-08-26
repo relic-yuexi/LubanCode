@@ -1,5 +1,9 @@
 // workspace_commands.hpp 的实现:工具清单/插件/MCP/LSP/worktree 命令的函数体。
 #include "app/commands/workspace_commands.hpp"
+#include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
+
+using lubancode::cli::TermOut;
+using lubancode::cli::TermErr;
 
 #include <iostream>
 
@@ -45,30 +49,30 @@ void PrintToolsCommand(const lubancode::tools::ToolRegistry& registry, const std
         }
     }
     if (!deferral_enabled) {
-        std::cout << trf("cmd.tools.no_deferral", registry.All().size(),
+        TermOut() << trf("cmd.tools.no_deferral", registry.All().size(),
                           threshold == 0 ? tr("cmd.tools.threshold_zero")
                                           : trf("cmd.tools.below_threshold", threshold))
                    << "\n";
         for (const auto& tool : registry.All()) {
-            std::cout << "  - " << tool->name() << "\n";
+            TermOut() << "  - " << tool->name() << "\n";
         }
         return;
     }
-    std::cout << trf("cmd.tools.enabled", threshold) << "\n";
-    std::cout << trf("cmd.tools.core", core.size()) << "\n";
+    TermOut() << trf("cmd.tools.enabled", threshold) << "\n";
+    TermOut() << trf("cmd.tools.core", core.size()) << "\n";
     for (const auto* tool : core) {
-        std::cout << "  - " << tool->name() << "\n";
+        TermOut() << "  - " << tool->name() << "\n";
     }
-    std::cout << trf("cmd.tools.loaded", loaded_deferred.size()) << "\n";
+    TermOut() << trf("cmd.tools.loaded", loaded_deferred.size()) << "\n";
     for (const auto* tool : loaded_deferred) {
-        std::cout << "  - " << tool->name() << "\n";
+        TermOut() << "  - " << tool->name() << "\n";
     }
     if (loaded_deferred.empty()) {
-        std::cout << tr("cmd.tools.none_loaded") << "\n";
+        TermOut() << tr("cmd.tools.none_loaded") << "\n";
     }
-    std::cout << trf("cmd.tools.pending", pending_deferred.size()) << "\n";
+    TermOut() << trf("cmd.tools.pending", pending_deferred.size()) << "\n";
     for (const auto* tool : pending_deferred) {
-        std::cout << "  - " << tool->name() << "\n";
+        TermOut() << "  - " << tool->name() << "\n";
     }
 }
 
@@ -81,59 +85,59 @@ void PrintWorktreeResult(const lubancode::cli::WorktreeResult& result) {
     namespace worktree = lubancode::cli;
     switch (result.code) {
         case worktree::WorktreeResultCode::Created:
-            std::cout << trf("cmd.worktree.created", PathToUtf8(result.path), result.branch) << "\n";
+            TermOut() << trf("cmd.worktree.created", PathToUtf8(result.path), result.branch) << "\n";
             break;
         case worktree::WorktreeResultCode::Listed:
-            std::cout << tr("cmd.worktree.list_header") << "\n";
+            TermOut() << tr("cmd.worktree.list_header") << "\n";
             for (const auto& entry : result.entries) {
                 const bool current = SameFilesystemPath(entry.path, result.path);
-                std::cout << "  " << (current ? "* " : "- ") << PathToUtf8(entry.path);
+                TermOut() << "  " << (current ? "* " : "- ") << PathToUtf8(entry.path);
                 if (!entry.branch.empty()) {
-                    std::cout << " [" << entry.branch << "]";
+                    TermOut() << " [" << entry.branch << "]";
                 } else if (entry.detached) {
-                    std::cout << " " << tr("cmd.worktree.detached");
+                    TermOut() << " " << tr("cmd.worktree.detached");
                 }
                 if (current) {
-                    std::cout << " " << tr("cmd.worktree.current");
+                    TermOut() << " " << tr("cmd.worktree.current");
                 }
-                std::cout << "\n";
+                TermOut() << "\n";
             }
             break;
         case worktree::WorktreeResultCode::Kept:
-            std::cout << trf("cmd.worktree.kept", PathToUtf8(result.path)) << "\n";
+            TermOut() << trf("cmd.worktree.kept", PathToUtf8(result.path)) << "\n";
             break;
         case worktree::WorktreeResultCode::Removed:
-            std::cout << trf("cmd.worktree.removed", result.branch) << "\n";
+            TermOut() << trf("cmd.worktree.removed", result.branch) << "\n";
             break;
         case worktree::WorktreeResultCode::NeedsRemoveConfirmation:
-            std::cout << trf("cmd.worktree.dirty", PathToUtf8(result.path)) << "\n";
+            TermOut() << trf("cmd.worktree.dirty", PathToUtf8(result.path)) << "\n";
             break;
         case worktree::WorktreeResultCode::NeedsUserConfirmation:
-            std::cout << trf("cmd.worktree.outside_confirm", PathToUtf8(result.path)) << "\n";
+            TermOut() << trf("cmd.worktree.outside_confirm", PathToUtf8(result.path)) << "\n";
             break;
         case worktree::WorktreeResultCode::VerificationFailed:
-            std::cout << trf("cmd.worktree.verify_failed", result.detail) << "\n";
+            TermOut() << trf("cmd.worktree.verify_failed", result.detail) << "\n";
             break;
         case worktree::WorktreeResultCode::NotRepository:
-            std::cout << tr("cmd.worktree.not_repo") << "\n";
+            TermOut() << tr("cmd.worktree.not_repo") << "\n";
             break;
         case worktree::WorktreeResultCode::InvalidArgument:
-            std::cout << tr("cmd.worktree.usage") << "\n";
+            TermOut() << tr("cmd.worktree.usage") << "\n";
             break;
         case worktree::WorktreeResultCode::InvalidName:
-            std::cout << tr("cmd.worktree.invalid_name") << "\n";
+            TermOut() << tr("cmd.worktree.invalid_name") << "\n";
             break;
         case worktree::WorktreeResultCode::AlreadyActive:
-            std::cout << tr("cmd.worktree.already_active") << "\n";
+            TermOut() << tr("cmd.worktree.already_active") << "\n";
             break;
         case worktree::WorktreeResultCode::NoActiveWorktree:
-            std::cout << tr("cmd.worktree.no_active") << "\n";
+            TermOut() << tr("cmd.worktree.no_active") << "\n";
             break;
         case worktree::WorktreeResultCode::GitError:
-            std::cout << trf("cmd.worktree.git_failed", result.detail) << "\n";
+            TermOut() << trf("cmd.worktree.git_failed", result.detail) << "\n";
             break;
         case worktree::WorktreeResultCode::FilesystemError:
-            std::cout << trf("cmd.worktree.filesystem_failed", result.detail) << "\n";
+            TermOut() << trf("cmd.worktree.filesystem_failed", result.detail) << "\n";
             break;
     }
 }
@@ -158,19 +162,19 @@ void PrintPluginsCommand(const std::vector<PluginMountInfo>& mounted, const std:
         const auto home_dir = lubancode::config::HomeLubancodeDir();
         const std::string dir =
             (home_dir.has_value() ? *home_dir : tr("path.no_home") + "/.lubancode") + "/plugins";
-        std::cout << trf("cmd.plugins.empty", dir) << "\n";
+        TermOut() << trf("cmd.plugins.empty", dir) << "\n";
         return;
     }
     if (!mounted.empty()) {
-        std::cout << trf("cmd.plugins.mounted", mounted.size()) << "\n";
+        TermOut() << trf("cmd.plugins.mounted", mounted.size()) << "\n";
         for (const auto& info : mounted) {
-            std::cout << "  - " << info.tool_name << "  (" << info.kind << ")\n";
+            TermOut() << "  - " << info.tool_name << "  (" << info.kind << ")\n";
         }
     }
     if (!warnings.empty()) {
-        std::cout << tr("cmd.plugins.warnings") << "\n";
+        TermOut() << tr("cmd.plugins.warnings") << "\n";
         for (const auto& warning : warnings) {
-            std::cout << "  - " << warning << "\n";
+            TermOut() << "  - " << warning << "\n";
         }
     }
 }
@@ -200,7 +204,7 @@ void HandlePluginCommand(const std::string& args,
     }
 
     if (sub.empty()) {
-        std::cout << tr("cmd.plugin.usage") << "\n";
+        TermOut() << tr("cmd.plugin.usage") << "\n";
         return;
     }
 
@@ -221,29 +225,29 @@ void HandlePluginCommand(const std::string& args,
 
     if (action == "inspect") {
         if (manifest != nullptr) {
-            std::cout << trf("cmd.plugin.inspect.header", manifest->id, manifest->version,
+            TermOut() << trf("cmd.plugin.inspect.header", manifest->id, manifest->version,
                              std::string(lubancode::runtime::RuntimeKindName(manifest->kind)),
                              manifest->language.empty() ? std::string("-") : manifest->language)
                       << "\n";
-            std::cout << trf("cmd.plugin.inspect.dir", lubancode::tools::PathToUtf8(manifest->plugin_dir)) << "\n";
+            TermOut() << trf("cmd.plugin.inspect.dir", lubancode::tools::PathToUtf8(manifest->plugin_dir)) << "\n";
             if (manifest->kind == lubancode::runtime::RuntimeKind::Process) {
                 std::string argv_text;
                 for (const auto& a : manifest->argv) {
                     argv_text += argv_text.empty() ? a : (" " + a);
                 }
-                std::cout << trf("cmd.plugin.inspect.argv", argv_text) << "\n";
-                std::cout << trf("cmd.plugin.inspect.timeout", manifest->timeout_ms) << "\n";
+                TermOut() << trf("cmd.plugin.inspect.argv", argv_text) << "\n";
+                TermOut() << trf("cmd.plugin.inspect.timeout", manifest->timeout_ms) << "\n";
                 if (!manifest->env_allowlist.empty()) {
                     std::string env_names;
                     for (const auto& name : manifest->env_allowlist) {
                         env_names += env_names.empty() ? name : (", " + name);
                     }
-                    std::cout << trf("cmd.plugin.inspect.env", env_names) << "\n";
+                    TermOut() << trf("cmd.plugin.inspect.env", env_names) << "\n";
                 }
             }
-            std::cout << trf("cmd.plugin.inspect.tools", manifest->tools.size()) << "\n";
+            TermOut() << trf("cmd.plugin.inspect.tools", manifest->tools.size()) << "\n";
             for (const auto& tool : manifest->tools) {
-                std::cout << "  - " << tool.full_name << "\n";
+                TermOut() << "  - " << tool.full_name << "\n";
             }
             return;
         }
@@ -253,16 +257,16 @@ void HandlePluginCommand(const std::string& args,
         for (const auto& info : mounted) {
             if (info.tool_name.rfind(prefix, 0) == 0) {
                 if (!found) {
-                    std::cout << trf("cmd.plugin.inspect.legacy_header", target_id, info.kind) << "\n";
+                    TermOut() << trf("cmd.plugin.inspect.legacy_header", target_id, info.kind) << "\n";
                     found = true;
                 }
-                std::cout << "  - " << info.tool_name << "\n";
+                TermOut() << "  - " << info.tool_name << "\n";
             }
         }
         if (found) {
             return;
         }
-        std::cout << trf("cmd.plugin.not_found", target_id) << "\n";
+        TermOut() << trf("cmd.plugin.not_found", target_id) << "\n";
         return;
     }
 
@@ -272,7 +276,7 @@ void HandlePluginCommand(const std::string& args,
             if (manifest->kind == lubancode::runtime::RuntimeKind::Process) {
                 const auto result = lubancode::platform::RunProcess({manifest->argv[0], "--version"}, 15000);
                 if (result.spawn_failed || result.exit_code != 0) {
-                    std::cout << trf("cmd.plugin.doctor.command_bad", manifest->argv[0],
+                    TermOut() << trf("cmd.plugin.doctor.command_bad", manifest->argv[0],
                                      result.spawn_failed ? result.spawn_error : std::to_string(result.exit_code))
                               << "\n";
                 } else {
@@ -280,21 +284,21 @@ void HandlePluginCommand(const std::string& args,
                     if (version.size() > 80) {
                         version = version.substr(0, 80) + "...";
                     }
-                    std::cout << trf("cmd.plugin.doctor.command_ok", manifest->argv[0], version) << "\n";
+                    TermOut() << trf("cmd.plugin.doctor.command_ok", manifest->argv[0], version) << "\n";
                 }
             } else {
-                std::cout << tr("cmd.plugin.doctor.not_process") << "\n";
+                TermOut() << tr("cmd.plugin.doctor.not_process") << "\n";
             }
             return;
         }
         for (const auto& info : mounted) {
             const std::string prefix = "plugin__" + target_id + "__";
             if (info.tool_name.rfind(prefix, 0) == 0) {
-                std::cout << trf("cmd.plugin.doctor.legacy_ok", info.kind) << "\n";
+                TermOut() << trf("cmd.plugin.doctor.legacy_ok", info.kind) << "\n";
                 return;
             }
         }
-        std::cout << trf("cmd.plugin.not_found", target_id) << "\n";
+        TermOut() << trf("cmd.plugin.not_found", target_id) << "\n";
         return;
     }
 
@@ -302,37 +306,37 @@ void HandlePluginCommand(const std::string& args,
         // test 的口径:与模型调用同一条链(schema 验参、确认、timeout)。
         // 确认流在交互层,命令层不另开无防护捷径——这里指路,真跑让模型
         // 调(或用 scaffold 生成的 test_runner.py 离线自测)。
-        std::cout << tr("cmd.plugin.test.hint") << "\n";
+        TermOut() << tr("cmd.plugin.test.hint") << "\n";
         return;
     }
 
     if (action == "reload") {
-        std::cout << tr("cmd.plugin.reload.hint") << "\n";
+        TermOut() << tr("cmd.plugin.reload.hint") << "\n";
         return;
     }
     if (action == "enable" || action == "disable") {
-        std::cout << tr("cmd.plugin.toggle.hint") << "\n";
+        TermOut() << tr("cmd.plugin.toggle.hint") << "\n";
         return;
     }
 
-    std::cout << trf("cmd.plugin.unknown_sub", sub) << "\n";
-    std::cout << tr("cmd.plugin.usage") << "\n";
+    TermOut() << trf("cmd.plugin.unknown_sub", sub) << "\n";
+    TermOut() << tr("cmd.plugin.usage") << "\n";
 }
 
 // /mcp 命令:每个服务器一行状态(运行中/已退出)+ 工具数,底下缩进列出
 // 完整工具名(mcp__服务器名__工具名,跟模型实际看到的名字一致)。
 void PrintMcpCommand(const std::vector<McpServerRuntime>& mcp_servers) {
     if (mcp_servers.empty()) {
-        std::cout << tr("cmd.mcp.empty") << "\n";
+        TermOut() << tr("cmd.mcp.empty") << "\n";
         return;
     }
     for (const auto& runtime : mcp_servers) {
         const bool alive = runtime.client != nullptr && runtime.client->Alive();
-        std::cout << trf("cmd.mcp.line", runtime.name, alive ? tr("mcp.state.alive") : tr("mcp.state.dead"),
+        TermOut() << trf("cmd.mcp.line", runtime.name, alive ? tr("mcp.state.alive") : tr("mcp.state.dead"),
                           runtime.tools.size())
                    << "\n";
         for (const auto& tool_info : runtime.tools) {
-            std::cout << "      mcp__" << runtime.name << "__" << tool_info.name << "\n";
+            TermOut() << "      mcp__" << runtime.name << "__" << tool_info.name << "\n";
         }
     }
 }
@@ -342,13 +346,13 @@ void PrintMcpCommand(const std::vector<McpServerRuntime>& mcp_servers) {
 // 不装 const。
 void PrintLspCommand(std::optional<lubancode::lsp::Manager>& lsp_manager) {
     if (!lsp_manager.has_value()) {
-        std::cout << tr("cmd.lsp.empty") << "\n";
+        TermOut() << tr("cmd.lsp.empty") << "\n";
         return;
     }
     const auto statuses = lsp_manager->StatusList();
-    std::cout << trf("cmd.lsp.header", statuses.size()) << "\n";
+    TermOut() << trf("cmd.lsp.header", statuses.size()) << "\n";
     for (const auto& status : statuses) {
-        std::cout << "  - " << status.language << " (" << status.command << "): " << status.state << "\n";
+        TermOut() << "  - " << status.language << " (" << status.command << "): " << status.state << "\n";
     }
 }
 
@@ -383,7 +387,7 @@ CommandFlow HandleWorktreeCommand(WorkspaceCommandState& state, const std::strin
             result = state.worktree.ConfirmRemove();
             PrintWorktreeResult(result);
         } else {
-            std::cout << tr("cmd.worktree.remove_cancelled") << "\n";
+            TermOut() << tr("cmd.worktree.remove_cancelled") << "\n";
         }
     }
     // /worktree new 撞上园子外的已有房:跟模型工具同一道硬确认。
@@ -413,10 +417,10 @@ CommandFlow HandleBackgroundCommand(const lubancode::cli::Theme& theme) {
     // 只是那一项少几行,菜单不带崩。
     const auto tasks = lubancode::tools::BackgroundTaskRegistry::Instance().List();
     if (tasks.empty()) {
-        std::cout << "当前没有后台任务。" << "\n";
+        TermOut() << "当前没有后台任务。" << "\n";
         return CommandFlow::Continue;
     }
-    std::cout << "后台任务共 " << tasks.size() << " 个:" << "\n" << "\n";
+    TermOut() << "后台任务共 " << tasks.size() << " 个:" << "\n" << "\n";
     for (const auto& t : tasks) {
         const char* label = "未知";
         switch (t.status) {
@@ -436,13 +440,13 @@ CommandFlow HandleBackgroundCommand(const lubancode::cli::Theme& theme) {
             span_end > t.start_time
                 ? std::chrono::duration_cast<std::chrono::seconds>(span_end - t.start_time).count()
                 : 0;
-        std::cout << theme.tool_line << "[#" << t.task_id << "] " << label;
+        TermOut() << theme.tool_line << "[#" << t.task_id << "] " << label;
         if (t.status != lubancode::tools::BackgroundTaskStatus::Running &&
             t.status != lubancode::tools::BackgroundTaskStatus::Stopping) {
-            std::cout << " (exit "
+            TermOut() << " (exit "
                       << (t.exit.exit_code.has_value() ? std::to_string(*t.exit.exit_code) : "unknown") << ")";
         }
-        std::cout << theme.reset << "  PID=" << t.pid << "  已跑 " << secs << "s" << "\n"
+        TermOut() << theme.reset << "  PID=" << t.pid << "  已跑 " << secs << "s" << "\n"
                   << theme.stats << "  命令: " << t.command << theme.reset << "\n"
                   << theme.stats << "  日志: " << t.log_path << theme.reset << "\n";
         // 尾巴:尾部若干行里挑最近三行非空(输出正增长时看得到在动)。
@@ -472,10 +476,10 @@ CommandFlow HandleBackgroundCommand(const lubancode::cli::Theme& theme) {
                                 non_empty.end() - 3);  // 只要最近三行非空
             }
             for (const std::string& line : non_empty) {
-                std::cout << theme.stats << "  ⎿ " << line << theme.reset << "\n";
+                TermOut() << theme.stats << "  ⎿ " << line << theme.reset << "\n";
             }
         }
-        std::cout << "\n";
+        TermOut() << "\n";
     }
     return CommandFlow::Continue;
 }

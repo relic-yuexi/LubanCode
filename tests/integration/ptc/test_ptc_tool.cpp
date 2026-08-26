@@ -10,12 +10,14 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
 
 #include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "platform/process.hpp"
 #include "ptc/ptc_tool.hpp"
+#include "runtime/turn_event_adapter.hpp"
 #include "tools/read_file.hpp"
 #include "tools/registry.hpp"
 #include "tools/search.hpp"
@@ -74,6 +76,11 @@ struct ToolFixture {
     std::unique_ptr<PtcTool> tool;
     std::vector<std::string> events;         // 钩子/确认/执行的轨迹
     std::atomic<bool> cancel{false};
+    // 批二余款:stub 调用的起止观察改吃事件流(从路适配器,与主回合
+    // 同一只出水口;16 枚同构调用逐枚有账)。
+    std::unique_ptr<lubancode::runtime::IdAuthority> event_ids;
+    std::unique_ptr<lubancode::runtime::TurnEventAdapter> events_adapter;
+    std::map<std::string, std::string> open_tools;  // item_id -> 工具名
     PtcTool::Hooks hooks;
 
     explicit ToolFixture(std::vector<std::string> eligible = {})
@@ -83,13 +90,28 @@ struct ToolFixture {
         registry.Register(std::make_unique<GuardedEchoTool>());
         tool = std::make_unique<PtcTool>(registry, nullptr, config);
         hooks.cancel = &cancel;
-        hooks.on_tool_start = [this](const std::string&, const std::string& name, const nlohmann::json&) {
-            events.push_back("start:" + name);
-        };
-        hooks.on_tool_done = [this](const std::string&, const std::string& name,
-                                    const lubancode::tools::Tool::Result& result) {
-            events.push_back(std::string("done:") + name + (result.is_error ? ":err" : ":ok"));
-        };
+        event_ids = std::make_unique<lubancode::runtime::IdAuthority>();
+        events_adapter =
+            std::make_unique<lubancode::runtime::TurnEventAdapter>("ptc-test", *event_ids);
+        events_adapter->Attach([this](const lubancode::runtime::ServerEvent& event) {
+            if (event.kind == lubancode::runtime::ServerEventKind::ItemStarted &&
+                event.item_kind == lubancode::runtime::ItemKind::Tool) {
+                open_tools[event.item_id] = event.payload.value("tool_name", std::string());
+                events.push_back("start:" + open_tools[event.item_id]);
+            } else if (event.kind == lubancode::runtime::ServerEventKind::ItemCompleted &&
+                       event.item_kind == lubancode::runtime::ItemKind::Tool &&
+                       event.outcome != lubancode::runtime::Outcome::Cancelled) {
+                const auto it = open_tools.find(event.item_id);
+                const std::string name = it != open_tools.end() ? it->second : std::string();
+                if (it != open_tools.end()) {
+                    open_tools.erase(it);
+                }
+                events.push_back(std::string("done:") + name +
+                                 (event.payload.value("is_error", false) ? ":err" : ":ok"));
+            }
+        });
+        events_adapter->Start("turn-ptc");
+        hooks.events = &*events_adapter;
         hooks.on_tool_confirm = [this](const std::string&, const std::string& name, const nlohmann::json&) {
             events.push_back("confirm:" + name);
             return true;

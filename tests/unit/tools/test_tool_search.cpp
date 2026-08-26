@@ -349,7 +349,7 @@ TEST_CASE("启用延迟: 请求 tools = 核心 + tool_search,不带未加载的�
     profile.tool_filter = setup.Filter();
     agent::Agent loop(backend, setup.registry, std::move(profile));
 
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     REQUIRE(loop.Run("你好", callbacks).has_value());
     REQUIRE(backend.captured_requests.size() == 1);
     const auto& req = backend.captured_requests[0];
@@ -380,7 +380,7 @@ TEST_CASE("一次 Run() 中途 tool_search 挂载:下一轮请求立即带上新
     profile.tool_filter = setup.Filter();
     agent::Agent loop(backend, setup.registry, std::move(profile));
 
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     REQUIRE(loop.Run("算 17+25", callbacks).has_value());
     REQUIRE(backend.captured_requests.size() == 3);
 
@@ -411,7 +411,7 @@ TEST_CASE("未挂载的延迟工具被直接调用:不执行,友好错误指路 
     profile.tool_filter = setup.Filter();
     agent::Agent loop(backend, setup.registry, std::move(profile));
 
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     REQUIRE(loop.Run("直接算", callbacks).has_value());
     CHECK(add_tool->call_count == 0);  // 真没执行
 
@@ -427,7 +427,7 @@ TEST_CASE("不设过滤谓词: 全量直挂,延迟标记不影响任何行为(�
     backend.scripts = {ToolCallScript("t1", "mcp__test__add", R"({"a":1,"b":2})"), TextScript("好")};
 
     agent::Agent loop(backend, setup.registry, agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     REQUIRE(loop.Run("算", callbacks).has_value());
 
     // 请求带全部工具,未挂载的延迟工具照样直接执行成功。

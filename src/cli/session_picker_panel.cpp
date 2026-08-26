@@ -6,6 +6,7 @@
 // 搜索词在面板内本地筛(单子口径:键盘搜索不重读盘)。
 
 #include "cli/session_picker_panel.hpp"
+#include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 
 #include <iostream>
 #include <mutex>
@@ -169,7 +170,7 @@ SessionPickerPanelResult RunSessionPickerPanel(const SessionPickerFeed& feed, co
         start_row = after->cursor_y;
         const int rows_to_draw = static_cast<int>(frame.lines.size());
         const int clear_rows = (std::max)(rows_drawn, rows_to_draw);
-        std::cout << "\x1b[?2026h\x1b[?25l";  // 单帧事务 + 藏光标,不闪屏
+        TermOut() << "\x1b[?2026h\x1b[?25l";  // 单帧事务 + 藏光标,不闪屏
         for (int r = 0; r < clear_rows; ++r) {
             platform::ClearRowHardFrom(0, start_row + r, width);  // 整行清,不残尾巴
         }
@@ -178,19 +179,19 @@ SessionPickerPanelResult RunSessionPickerPanel(const SessionPickerFeed& feed, co
             const std::string& line = frame.lines[static_cast<std::size_t>(r)];
             const std::size_t match = frame.row_match_index[static_cast<std::size_t>(r)];
             if (match != SessionPickerFrame::kNoMatch && match == core.selected()) {
-                std::cout << theme.confirm << TruncateUtf8ToDisplayWidth(line, width - 1) << theme.reset;
+                TermOut() << theme.confirm << TruncateUtf8ToDisplayWidth(line, width - 1) << theme.reset;
             } else if (match == SessionPickerFrame::kNoMatch) {
                 // 标题/搜索/筛选行与底栏:淡色;列表普通行原色。
-                std::cout << theme.stats << TruncateUtf8ToDisplayWidth(line, width - 1) << theme.reset;
+                TermOut() << theme.stats << TruncateUtf8ToDisplayWidth(line, width - 1) << theme.reset;
             } else {
-                std::cout << TruncateUtf8ToDisplayWidth(line, width - 1);
+                TermOut() << TruncateUtf8ToDisplayWidth(line, width - 1);
             }
         }
         rows_drawn = rows_to_draw;
-        std::cout << "\x1b[?2026l";
+        TermOut() << "\x1b[?2026l";
         platform::SetCursorPos(0, start_row + rows_to_draw);
-        std::cout << "\x1b[?25h";
-        std::cout.flush();
+        TermOut() << "\x1b[?25h";
+        TermOut().flush();
         return true;
     };
 

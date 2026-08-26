@@ -1,5 +1,9 @@
 // prompt_commands.hpp 的实现:魂/法/提示词命令的函数体。
 #include "app/commands/prompt_commands.hpp"
+#include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
+
+using lubancode::cli::TermOut;
+using lubancode::cli::TermErr;
 
 #include <iostream>
 
@@ -58,7 +62,7 @@ std::string LoadSoulContentByName(const std::string& name, bool warn) {
                                       : lubancode::config::ReadTextFileIfExists(path);
     if (!content.has_value()) {
         if (warn) {
-            std::cout << trf("soul.unavailable", path) << "\n";
+            TermOut() << trf("soul.unavailable", path) << "\n";
         }
         return std::string();
     }
@@ -76,32 +80,32 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
                         std::string& current_soul_name, const std::optional<std::string>& config_file_path) {
     const auto luban_dir = lubancode::config::HomeLubancodeDir();
     if (!luban_dir.has_value()) {
-        std::cout << tr("cmd.soul.no_home") << "\n";
+        TermOut() << tr("cmd.soul.no_home") << "\n";
         return;
     }
 
     if (args.empty()) {
         const std::vector<std::string> souls = lubancode::config::ListSouls(*luban_dir);
-        std::cout << trf("cmd.soul.current", current_soul_name) << "\n";
+        TermOut() << trf("cmd.soul.current", current_soul_name) << "\n";
         const std::string visible = lubancode::agent::StripPromptComments(*current_soul);
         if (visible.empty()) {
-            std::cout << tr("cmd.soul.empty_note") << "\n";
+            TermOut() << tr("cmd.soul.empty_note") << "\n";
         } else {
-            std::cout << visible << "\n";
+            TermOut() << visible << "\n";
         }
-        std::cout << tr("cmd.soul.available_header") << "\n";
-        std::cout << tr("cmd.soul.default_item") << "\n";
+        TermOut() << tr("cmd.soul.available_header") << "\n";
+        TermOut() << tr("cmd.soul.default_item") << "\n";
         for (const auto& name : souls) {
-            std::cout << "  - " << name << "\n";
+            TermOut() << "  - " << name << "\n";
         }
-        std::cout << "\n" << tr("cmd.soul.usage") << "\n";
+        TermOut() << "\n" << tr("cmd.soul.usage") << "\n";
         return;
     }
 
     if (args == "off") {
         current_soul->clear();
         current_soul_name = "off";
-        std::cout << tr("cmd.soul.off") << "\n" << tr("cmd.soul.switch_hint") << "\n";
+        TermOut() << tr("cmd.soul.off") << "\n" << tr("cmd.soul.switch_hint") << "\n";
 
         // 跟 /soul <名字> 一路的持久化问法对齐:配置里原先若存着旧魂名,
         // 不问清楚就不动它,免得下次启动又被旧值盖过去。
@@ -110,13 +114,13 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
             if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
                 const auto updated = lubancode::config::UpdateSoulInConfigFile(*config_file_path, "off");
                 if (updated.has_value()) {
-                    std::cout << trf("cmd.write_config.updated", *config_file_path) << "\n";
+                    TermOut() << trf("cmd.write_config.updated", *config_file_path) << "\n";
                 } else {
-                    std::cout << trf("cmd.write_config.failed", updated.error()) << "\n";
+                    TermOut() << trf("cmd.write_config.failed", updated.error()) << "\n";
                 }
             }
         } else {
-            std::cout << tr("cmd.session_only") << "\n";
+            TermOut() << tr("cmd.session_only") << "\n";
         }
         return;
     }
@@ -124,11 +128,11 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
     if (args == "default") {
         *current_soul = LoadSoulContentByName("default", /*warn=*/true);
         current_soul_name = "default";
-        std::cout << tr("cmd.soul.back_default");
+        TermOut() << tr("cmd.soul.back_default");
         if (lubancode::agent::StripPromptComments(*current_soul).empty()) {
-            std::cout << tr("cmd.soul.empty_note");
+            TermOut() << tr("cmd.soul.empty_note");
         }
-        std::cout << "。\n" << tr("cmd.soul.switch_hint") << "\n";
+        TermOut() << "。\n" << tr("cmd.soul.switch_hint") << "\n";
 
         // 同上:配置里原先若存着旧魂名,问清楚了才改,不然下次启动照旧
         // 被旧值盖过去(这就是本函数要修的那个 bug)。
@@ -137,13 +141,13 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
             if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
                 const auto updated = lubancode::config::UpdateSoulInConfigFile(*config_file_path, "default");
                 if (updated.has_value()) {
-                    std::cout << trf("cmd.write_config.updated", *config_file_path) << "\n";
+                    TermOut() << trf("cmd.write_config.updated", *config_file_path) << "\n";
                 } else {
-                    std::cout << trf("cmd.write_config.failed", updated.error()) << "\n";
+                    TermOut() << trf("cmd.write_config.failed", updated.error()) << "\n";
                 }
             }
         } else {
-            std::cout << tr("cmd.session_only") << "\n";
+            TermOut() << tr("cmd.session_only") << "\n";
         }
         return;
     }
@@ -151,7 +155,7 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
     if (args == "clear") {
         const auto cleared = lubancode::config::ClearSoulFile(*luban_dir);
         if (!cleared.has_value()) {
-            std::cout << trf("cmd.soul.write_failed", cleared.error()) << "\n";
+            TermOut() << trf("cmd.soul.write_failed", cleared.error()) << "\n";
             return;
         }
         *current_soul = lubancode::config::DefaultSoulFileContent();
@@ -159,10 +163,10 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
         if (config_file_path.has_value()) {
             const auto updated = lubancode::config::UpdateSoulInConfigFile(*config_file_path, "default");
             if (!updated.has_value()) {
-                std::cout << trf("cmd.soul.default_config_failed", updated.error()) << "\n";
+                TermOut() << trf("cmd.soul.default_config_failed", updated.error()) << "\n";
             }
         }
-        std::cout << tr("cmd.soul.cleared") << "\n" << tr("cmd.soul.switch_hint") << "\n";
+        TermOut() << tr("cmd.soul.cleared") << "\n" << tr("cmd.soul.switch_hint") << "\n";
         return;
     }
 
@@ -171,27 +175,27 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
     if (content.has_value()) {
         *current_soul = *content;
         current_soul_name = args;
-        std::cout << trf("cmd.soul.switched", args) << "\n" << tr("cmd.soul.switch_hint") << "\n";
+        TermOut() << trf("cmd.soul.switched", args) << "\n" << tr("cmd.soul.switch_hint") << "\n";
 
         if (config_file_path.has_value()) {
             const std::optional<std::string> answer = lubancode::cli::ReadLine(tr("cmd.soul.write_prompt"));
             if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
                 const auto updated = lubancode::config::UpdateSoulInConfigFile(*config_file_path, args);
                 if (updated.has_value()) {
-                    std::cout << trf("cmd.write_config.updated", *config_file_path) << "\n";
+                    TermOut() << trf("cmd.write_config.updated", *config_file_path) << "\n";
                 } else {
-                    std::cout << trf("cmd.write_config.failed", updated.error()) << "\n";
+                    TermOut() << trf("cmd.write_config.failed", updated.error()) << "\n";
                 }
             }
         } else {
-            std::cout << tr("cmd.session_only") << "\n";
+            TermOut() << tr("cmd.session_only") << "\n";
         }
         return;
     }
 
     const auto written = lubancode::config::WriteSoulFile(*luban_dir, args);
     if (!written.has_value()) {
-        std::cout << trf("cmd.soul.write_failed", written.error()) << "\n";
+        TermOut() << trf("cmd.soul.write_failed", written.error()) << "\n";
         return;
     }
     *current_soul = args;
@@ -199,10 +203,10 @@ void HandleSoulCommand(const std::string& args, const std::shared_ptr<std::strin
     if (config_file_path.has_value()) {
         const auto updated = lubancode::config::UpdateSoulInConfigFile(*config_file_path, "default");
         if (!updated.has_value()) {
-            std::cout << trf("cmd.soul.default_config_failed", updated.error()) << "\n";
+            TermOut() << trf("cmd.soul.default_config_failed", updated.error()) << "\n";
         }
     }
-    std::cout << tr("cmd.soul.saved") << "\n" << tr("cmd.soul.switch_hint") << "\n";
+    TermOut() << tr("cmd.soul.saved") << "\n" << tr("cmd.soul.switch_hint") << "\n";
 }
 
 // /prompt 命令:裸敲显示当前法(人格段)的来源和字数,外加各提示词模块
@@ -216,7 +220,7 @@ void HandlePromptCommand(const std::string& args, const std::string& law_source,
     if (args.empty()) {
         const std::string effective =
             persona.empty() ? lubancode::agent::AssembledCorePersona(prompts_dir) : persona;
-        std::cout << trf("cmd.prompt.info", law_source, CountUtf8Chars(effective)) << "\n";
+        TermOut() << trf("cmd.prompt.info", law_source, CountUtf8Chars(effective)) << "\n";
         if (!prompts_dir.empty()) {
             const auto sources = lubancode::agent::PromptModuleSources(prompts_dir);
             std::size_t modified_count = 0;
@@ -225,42 +229,42 @@ void HandlePromptCommand(const std::string& args, const std::string& law_source,
                     ++modified_count;
                 }
             }
-            std::cout << trf("cmd.prompt.modules_header", prompts_dir, modified_count, sources.size()) << "\n";
+            TermOut() << trf("cmd.prompt.modules_header", prompts_dir, modified_count, sources.size()) << "\n";
             for (const auto& source : sources) {
                 const char* tag = !source.from_user_file          ? "cmd.prompt.module_builtin"
                                   : source.differs_from_embedded ? "cmd.prompt.module_user_modified"
                                                                   : "cmd.prompt.module_user_same";
-                std::cout << "  - " << source.rel_path << "  [" << tr(tag) << "]\n";
+                TermOut() << "  - " << source.rel_path << "  [" << tr(tag) << "]\n";
             }
         }
         return;
     }
     if (args != "reset") {
-        std::cout << tr("cmd.prompt.usage") << "\n";
+        TermOut() << tr("cmd.prompt.usage") << "\n";
         return;
     }
 
     const std::optional<std::string> answer = lubancode::cli::ReadLine(tr("cmd.prompt.confirm"));
     if (!answer.has_value() || (*answer != "y" && *answer != "Y")) {
-        std::cout << tr("cmd.prompt.cancelled") << "\n";
+        TermOut() << tr("cmd.prompt.cancelled") << "\n";
         return;
     }
     const auto luban_dir = lubancode::config::HomeLubancodeDir();
     if (!luban_dir.has_value()) {
-        std::cout << tr("cmd.prompt.no_home") << "\n";
+        TermOut() << tr("cmd.prompt.no_home") << "\n";
         return;
     }
     const auto reset_result =
         lubancode::config::ResetSystemPromptFile(*luban_dir, lubancode::agent::DefaultPersona());
     if (!reset_result.has_value()) {
-        std::cout << trf("cmd.prompt.reset_failed", reset_result.error()) << "\n";
+        TermOut() << trf("cmd.prompt.reset_failed", reset_result.error()) << "\n";
         return;
     }
-    std::cout << trf("cmd.prompt.reset_done", lubancode::config::SystemPromptFilePath(*luban_dir));
+    TermOut() << trf("cmd.prompt.reset_done", lubancode::config::SystemPromptFilePath(*luban_dir));
     if (!reset_result->empty()) {
-        std::cout << trf("cmd.prompt.old_file", *reset_result);
+        TermOut() << trf("cmd.prompt.old_file", *reset_result);
     }
-    std::cout << "。\n" << tr("cmd.prompt.reset_tail") << "\n";
+    TermOut() << "。\n" << tr("cmd.prompt.reset_tail") << "\n";
 }
 
 }  // namespace lubancode::app

@@ -1,6 +1,6 @@
-// turn_runner.hpp 的实现:PrintDivider/PromptAskUser/BuildCallbacks/RunTurn
-// 的函数体全在这只 translation unit 里,控制台读取、状态画板、分界线、
-// 图像输入等终端依赖不往公开头漏。
+// turn_runner.hpp 的实现:PrintDivider/PromptAskUser/RunTurn 与控制面装配
+//(BuildTurnWiring)的函数体全在这只 translation unit 里,控制台读取、
+// 状态画板、分界线、图像输入等终端依赖不往公开头漏。
 
 #include "app/turn_runner.hpp"
 
@@ -18,6 +18,7 @@
 #include "agent/compact.hpp"
 #include "agent/turn_harness.hpp"
 #include "app/hook_runtime.hpp"
+#include "app/terminal_turn_sink.hpp"
 #include "cli/console_input.hpp"
 #include "cli/divider.hpp"
 #include "cli/format_utils.hpp"
@@ -551,46 +552,36 @@ bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
     return allowed;
 }
 
-// 交互循环、单发模式共用的回调装配(骨架拆解批三:参数收进 TurnContext/
-// TurnWiring,本体不变):文本打字机打印,工具调用打一行提示,needs_confirm
-// 的工具按确认档决定是自动放行还是问用户一句。确认逻辑本体在
-// ConfirmToolUse(见上),这里只接两条门:同步回落(on_tool_confirm,
-// 子代理/PTC 转发与单测走的旧路)与异步审批(on_tool_confirm_async,Broker
-// 的终端实现)。registry 里注册了 "agent" 工具的话,顺带把这一轮现算好的
-// 确认/记账/打印逻辑通过 SetHooks 灌给它,子代理被调用时就能用上同一套
-//(详见 tools/agent_tool.hpp 顶部注释);批二尾巴(批三)起 hooks 还带上
-// 事件流回调(event_callbacks),子代理自己的 sub_callbacks 先过事件流
-// 再落台账。PTC 工具同链。
-lubancode::agent::Callbacks BuildCallbacks(TurnContext& ctx, TurnWiring wiring) {
-    // 批三改名收参:字段别名对齐旧参数名,函数体与从前一字不差。
+namespace {
+
+// 一轮的控制面装配 + 本轮工具接线(骨架拆解批二余款:BuildCallbacks 退役
+// 后的控制半;显示半在 TerminalTurnSink,sink 侧吃事件流)。确认逻辑本体在
+// ConfirmToolUse(见上),这里只接两条门:同步回落(on_tool_confirm,子代理/
+// PTC 转发与单测走的旧路)与异步审批(on_tool_confirm_async,当场问完的
+// 同步短路)。registry 里注册了 "agent" 工具的话,顺带把这一轮现算好的确认/
+// 记账/打印逻辑通过 SetHooks 灌给它,子代理被调用时就能用上同一套(详见
+// tools/agent_tool.hpp 顶部注释);子代理自己的显示事件走 events 这只口
+//(从路适配器在 agent_tool 里现起,原样并进宿主流)。PTC 工具同链。
+lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& display,
+                                             lubancode::runtime::TurnUsageStats& usage_stats,
+                                             const std::atomic<bool>& cancel_flag,
+                                             lubancode::runtime::TurnEventAdapter& events) {
     const bool auto_confirm = ctx.auto_confirm;
     std::set<std::string>& always_allowed_tools = *ctx.always_allowed_tools;
     const lubancode::cli::Theme& theme = ctx.theme;
-    lubancode::runtime::TurnUsageStats& usage_stats = *wiring.usage_stats;
-    lubancode::cli::ContextTracker& context_tracker = *ctx.context_tracker;
     lubancode::tools::ToolRegistry& registry = *ctx.registry;
     lubancode::hooks::HookDispatcher* hook_dispatcher = ctx.hook_dispatcher;
-    ToolDisplay& display = *wiring.display;
-    StreamBodyTracker& body_tracker = *wiring.body_tracker;
     const std::vector<std::string>& allow_commands = ctx.allow_commands;
     const std::vector<std::string>& deny_commands = ctx.deny_commands;
-    const std::atomic<bool>* cancel_flag = wiring.cancel_flag;
-    lubancode::skills::WorkflowRecorder* recorder = ctx.recorder;
+    const std::atomic<bool>* cancel_flag_ptr = &cancel_flag;
     lubancode::runtime::ToolTraceHub* trace_hub = ctx.trace_hub;
-    lubancode::runtime::TurnCollector* view_collector = wiring.view_collector;
     const std::function<std::string(const std::string&, const nlohmann::json&)>& mode_gate = ctx.mode_gate;
     const std::function<void(bool asked, bool allowed)>& approval_observer = ctx.approval_observer;
-    const lubancode::agent::Callbacks* event_callbacks = wiring.event_callbacks;
-    lubancode::agent::Callbacks callbacks;
+    lubancode::agent::TurnWiring wiring;
 
     // Plan 模式(只读研究硬闸单):ModePolicy 接到 RunOneTool 的
     // on_mode_policy 挂点。空 gate = 没装 Plan 闸(单测/子代理旧路)。
-    callbacks.on_mode_policy = mode_gate;
-
-    // 逐枚追踪单:装了 hub 的轮次,recorder 吃 canonical trace 的投影
-    // (hub.AttachProjection),不走 on_tool_start/on_tool_done 各自手打——
-    // 一份事件,两路消费,次序不再分叉。
-    const bool trace_projection_installed = trace_hub != nullptr;
+    wiring.on_mode_policy = mode_gate;
 
     // hooks:dispatcher 为空指针或没有工具事件的定义是常态(没配 hooks 的
     // 用户占多数),这时候干脆不设这些回调——跟"没有 hooks 系统"时行为
@@ -605,28 +596,28 @@ lubancode::agent::Callbacks BuildCallbacks(TurnContext& ctx, TurnWiring wiring) 
     // 转发的是同一批 std::function(闭包随行),槽照常可用。
     auto pre_decision_slot = std::make_shared<lubancode::runtime::ToolHookDecision>();
     if (has_tool_hooks) {
-        callbacks.on_pre_tool_use_hook = [hook_dispatcher, pre_decision_slot](
-                                             const std::string& /*tool_use_id*/, const std::string& name,
-                                             const nlohmann::json& input) -> lubancode::runtime::ToolHookDecision {
+        wiring.on_pre_tool_use_hook = [hook_dispatcher, pre_decision_slot](
+                                          const std::string& /*tool_use_id*/, const std::string& name,
+                                          const nlohmann::json& input) -> lubancode::runtime::ToolHookDecision {
             lubancode::runtime::ToolHookDecision decision =
                 lubancode::runtime::EmitPreToolUse(hook_dispatcher, name, input);
             *pre_decision_slot = decision;
             return decision;
         };
 
-        callbacks.on_post_tool_use_hook = [hook_dispatcher](
-                                              const std::string& /*tool_use_id*/, const std::string& name,
-                                              const nlohmann::json& input,
-                                              const lubancode::tools::Tool::Result&
-                                              result) -> std::vector<std::string> {
+        wiring.on_post_tool_use_hook = [hook_dispatcher](
+                                           const std::string& /*tool_use_id*/, const std::string& name,
+                                           const nlohmann::json& input,
+                                           const lubancode::tools::Tool::Result&
+                                           result) -> std::vector<std::string> {
             return lubancode::runtime::EmitPostToolUse(hook_dispatcher, name, input, result);
         };
 
         // UI 相位:checking_hook/blocked 由 ToolDisplay 按 tool_use_id 路由到
         // 对应条目(P4;子代理工具的 id 在转发链上随行);等权限/运行的过渡
         // 由既有 OnConfirmRequest/终态渲染覆盖,不重复画。
-        callbacks.on_tool_phase = [&display](const std::string& tool_use_id, const std::string& /*name*/,
-                                            lubancode::runtime::ToolPhase phase) {
+        wiring.on_tool_phase = [&display](const std::string& tool_use_id, const std::string& /*name*/,
+                                          lubancode::runtime::ToolPhase phase) {
             switch (phase) {
                 case lubancode::runtime::ToolPhase::CheckingHook:
                     display.OnHookCheckingText(tool_use_id);
@@ -641,59 +632,11 @@ lubancode::agent::Callbacks BuildCallbacks(TurnContext& ctx, TurnWiring wiring) 
         };
     }
 
-    // M10:流式期间的 TermOut() 写要拿 StdoutWriteMutex 跟监听线程错开——
-    // 这条规矩没变,只是打印挪进了 StreamBodyTracker::OnDelta(锁在它里面
-    // 拿):正文照旧逐字原样打,顺带给回合收束后的 markdown 重画记账;
-    // 管道模式/plain 主题下 tracker 不启用,OnDelta 就是原来那三行。
-    // 先收掉正在展示的思考折叠块(如果有),再加分隔,最后打正文。
-    // view_collector(回合视觉收束):旁路入账,屏上一个字节不变。
-    callbacks.on_text_delta = [&display, &body_tracker, view_collector](const std::string& text) {
-        if (view_collector != nullptr) {
-            view_collector->OnTextDelta(text, /*thinking=*/false);
-        }
-        if (display.HasActiveThinking()) {
-            display.OnThinkingDone();
-            body_tracker.OnToolBlockDone();  // 下一段正文前垫一空行,别粘在思考条目上
-        }
-        body_tracker.OnDelta(text);
-    };
-
-    // 思考增量(thinking/reasoning):首 delta 断开正文块 + PaintNew "思考中…",
-    // 后续 delta 只攒正文不刷屏。结束时标题换成 "思考 Xs"。
-    callbacks.on_thinking_delta = [&display, &body_tracker, view_collector](const std::string& text) {
-        if (view_collector != nullptr) {
-            view_collector->OnTextDelta(text, /*thinking=*/true);
-        }
-        if (!display.HasActiveThinking()) {
-            body_tracker.OnBlockBreak();
-        }
-        display.OnThinkingDelta(text);
-    };
-
-    // UI-B:工具条目化渲染,建条目/画条目/管道行全在 ToolDisplay 里。
-    // markdown:条目要开画了,正文当前块到此为止(保持原样,不重画)。
-    // recorder:录一遍生成技能(0.25.x)的监听挂点——只在这里旁听事件,
-    // 不改工具本身的执行路径;没在录(nullptr)零影响。
-    callbacks.on_tool_start = [&display, &body_tracker, recorder, view_collector, trace_projection_installed](
-                                  const std::string& tool_use_id,
-                                                                  const std::string& name,
-                                                                  const nlohmann::json& input) {
-        if (recorder != nullptr && !trace_projection_installed) {
-            recorder->RecordToolCall(name, input);
-        }
-        if (view_collector != nullptr) {
-            view_collector->OnToolStarted(tool_use_id, name, input);
-        }
-        display.OnThinkingDone();  // 思考块若有,先收尾
-        body_tracker.OnBlockBreak();
-        display.OnToolStart(tool_use_id, name, input);
-    };
-
-    callbacks.on_tool_confirm = [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands,
-                                  &deny_commands, hook_dispatcher, pre_decision_slot,
-                                  has_permission_hooks, approval_observer](const std::string& tool_use_id,
-                                                                          const std::string& name,
-                                                                          const nlohmann::json& input) -> bool {
+    wiring.on_tool_confirm = [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands,
+                              &deny_commands, hook_dispatcher, pre_decision_slot,
+                              has_permission_hooks, approval_observer](const std::string& tool_use_id,
+                                                                      const std::string& name,
+                                                                      const nlohmann::json& input) -> bool {
         return ConfirmToolUse(tool_use_id, auto_confirm, always_allowed_tools, theme, display, allow_commands,
                               deny_commands, hook_dispatcher, *pre_decision_slot, has_permission_hooks, name, input,
                               approval_observer);
@@ -706,7 +649,7 @@ lubancode::agent::Callbacks BuildCallbacks(TurnContext& ctx, TurnWiring wiring) 
     // 行为与今日一字不差;远端前端(app-server/Web/Tauri)后续换成登记
     // request_id 悬起的实现,内核零改动。on_tool_confirm_async 缺位的旧
     // 路(子代理/PTC 转发、单测)不走这里,照旧同步、不许多线程化。
-    callbacks.on_tool_confirm_async =
+    wiring.on_tool_confirm_async =
         [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands, &deny_commands, hook_dispatcher,
          pre_decision_slot, has_permission_hooks, approval_observer](const lubancode::runtime::ApprovalRequest& request)
         -> std::shared_ptr<lubancode::runtime::InteractionFuture> {
@@ -720,103 +663,9 @@ lubancode::agent::Callbacks BuildCallbacks(TurnContext& ctx, TurnWiring wiring) 
         return std::make_shared<ReadyApprovalFuture>(std::move(response));
     };
 
-    // 回合视觉收束:step 边界入账(批次边界在下面)。零成本旁路,不设
-    // 回调的既有消费方(单测)行为不变。
-    callbacks.on_model_step_started = [view_collector](int step_index) {
-        if (view_collector != nullptr) {
-            view_collector->OnModelStepStarted(step_index);
-        }
-    };
-
-    // 批次边界照常进结构化账,供 app-server/Web 等前端自行编排。终端不抢画
-    // 无名 Pending 空壳;等 tool_start 带来名字和参数后再落条目。
-    callbacks.on_tool_batch_started = [view_collector](int step_index, int batch_index,
-                                                        const std::vector<std::string>& ordered_tool_use_ids) {
-        if (view_collector != nullptr) {
-            view_collector->OnToolBatchStarted(step_index, batch_index, ordered_tool_use_ids);
-        }
-    };
-
-    callbacks.on_tool_batch_finished = [&display, view_collector](int batch_index, bool interrupted) {
-        if (view_collector != nullptr) {
-            view_collector->OnToolBatchFinished(batch_index, interrupted);
-        }
-        if (interrupted) {
-            display.OnBatchSkipped();  // 已露脸却尚未执行的确认条目按 Skipped 收口
-        }
-    };
-
-    callbacks.on_tool_done = [&display, &body_tracker, recorder, view_collector, cancel_flag,
-                              trace_projection_installed](
-                                                                 const std::string& tool_use_id,
-                                                                 const std::string& name,
-                                                                 const lubancode::tools::Tool::Result& result) {
-        if (recorder != nullptr && !trace_projection_installed) {
-            recorder->RecordToolResult(name, result.is_error, result.content);
-        }
-        if (view_collector != nullptr) {
-            // ESC 后补的合成结果(is_error 且 cancel 已置)按 Interrupted 记,
-            // 不冒充跑过又失败;真失败照 Failed。
-            std::optional<lubancode::runtime::TurnItemViewState> forced;
-            if (result.is_error && cancel_flag != nullptr && cancel_flag->load()) {
-                forced = lubancode::runtime::TurnItemViewState::Interrupted;
-            }
-            view_collector->OnToolFinished(tool_use_id, result.content, result.is_error, forced);
-        }
-        display.OnToolDone(tool_use_id, name, result);
-        body_tracker.OnToolBlockDone();
-    };
-
-    callbacks.on_builtin_tool_start = [&display, &body_tracker](const std::string& tool_use_id,
-                                                                 const std::string& name,
-                                                                 const nlohmann::json& input) {
-        display.OnThinkingDone();  // 思考块若有,先收尾
-        body_tracker.OnBlockBreak();
-        display.OnToolStart(tool_use_id, name, input);
-    };
-    callbacks.on_builtin_tool_done = [&display, &body_tracker](const std::string& tool_use_id,
-                                                                const std::string& name,
-                                                                const nlohmann::json& input,
-                                                                const std::string& summary, bool is_error) {
-        display.OnBuiltinToolDone(tool_use_id, name, input, lubancode::tools::Tool::Result{summary, is_error});
-        body_tracker.OnToolBlockDone();
-    };
-
-    callbacks.on_usage = [&display, &usage_stats, &context_tracker, view_collector](const lubancode::api::UsageReport& report) {
-        // 请求结束:思考块若无后续文本/工具接上(只思考不回答的极端情况),
-        // 在这里收尾。有后续时 OnThinkingDone 是幂等空操作。
-        display.OnThinkingDone();
-        if (view_collector != nullptr) {
-            view_collector->OnUsage(report);
-        }
-        usage_stats.Add(report);
-        // ContextTracker 只认"最近一次请求"的真实用量,整个覆盖,不跟着
-        // usage_stats 一起累加——语义区别见 cli/context_tracker.hpp 文件头。
-        // ApplyUsage 兼管"provider 没回 usage"(四项全零)的语义:不清零、
-        // 只把现有数字标成旧值;ESC/HTTP 错误路径压根走不到 on_usage,不会
-        // 把旧数伪装成本次新值。
-        context_tracker.ApplyUsage(report.usage);
-        // usage 一到就把 context/tokens 两段发布给状态行数据源——只改数据
-        // 不落笔(锁与重画事务在 cli::UpdateStatusLineContext 里),回合内
-        // 状态栏跟着前进,不必等整轮收口回外层循环重建快照;外层重建与这里
-        // 读的是同一只 tracker,同一笔数,不存在先新后旧。子代理的 usage 走
-        // agent_tool 那份钩子(见下),不进这里、不碰 tracker——主 context
-        // 不被独立子代理的上下文虚抬。
-        lubancode::cli::UpdateStatusLineContext(
-            context_tracker.UsagePercent(), static_cast<std::int64_t>(context_tracker.current_tokens()),
-            static_cast<std::int64_t>(context_tracker.window_tokens()), !context_tracker.usage_stale(),
-            // 缓存注记(缓存诊断单):cached_tokens 有则摆本场命中与命中率,
-            // 没回就写"未报告"——同一个 0 不糊。空闲重建那路(InteractiveSession
-            // 每圈)读同一只 helper,两处口径一致。
-            lubancode::cli::BuildCacheNote(context_tracker, report.reported()));
-    };
-
-    // 批二(事件流升正房):显示回调先过事件流(TurnEventAdapter 翻的
-    // ServerEvent 流,落会话 sink),再落终端老路——一份事件、两路消费,
-    // 屏上一个字节不变。只并 void 出水口;确认/钩子/权限这些控制口不并。
-    if (event_callbacks != nullptr) {
-        lubancode::runtime::ComposeDisplayCallbacks(callbacks, *event_callbacks);
-    }
+    // 显示出水口(唯一):主轮回合直连这只适配器;终端画屏(TerminalTurnSink,
+    // 见 RunTurn 的装配)与会话事件链都在 sink 侧。
+    wiring.events = &events;
 
     // agent 工具(注册了的话)需要这一轮现算好的转发逻辑:确认回调直接
     // 转发父级那份(三档确认模式照管子代理);usage 累进 usage_stats(统计
@@ -828,28 +677,24 @@ lubancode::agent::Callbacks BuildCallbacks(TurnContext& ctx, TurnWiring wiring) 
     if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry.Find("agent"));
         agent_tool != nullptr) {
         lubancode::tools::AgentTool::Hooks hooks;
-        // 批二尾巴(批三):子代理自己的 sub_callbacks 并上事件流——装配提
-        // 到宿主侧这枚挂点(tools/ 住 engine 库不许 include runtime,适配器
-        // 的翻译在宿主侧做完,agent_tool 只收 agent::Callbacks 中立形状)。
-        // 给了之后子代理的正文/思考增量、工具起止、usage 都先落事件账
-        //(canonical)再进台账;没给(单发/单测/后台)零变化。
-        hooks.event_callbacks = event_callbacks;
+        // 子代理的显示事件并进宿主流(从路):agent_tool 现起一只本地适配器,
+        // 台账吃一遍、宿主流原样转发(标 subordinate,画屏侧跳过)。给了
+        // 这枚指针才并轨;没给(后台)零变化。
+        hooks.events = &events;
         // P2(显示系统剥离单):确认转发走旧同步 on_tool_confirm——子代理
         // 的任务线程不该吃 async future(那要 Broker 悬起表配合,后台任务
         // "没人可问"的同步短路正是要保住的路径)。主轮回合有 async 就走
         // async,子代理转发保持同步,两不串。
-        hooks.on_tool_confirm = callbacks.on_tool_confirm;
+        hooks.on_tool_confirm = wiring.on_tool_confirm;
         // ESC/Ctrl+C 打断信号透传:没这一行,子代理内部工具循环永远拿到
         // nullptr,顶层怎么置位 cancel_flag 都传不进去——子代理会一路跑到
         // 自己的步数上限(max_steps_per_turn)或任务自然完成才停,ESC/Ctrl+C 对它形同虚设。
-        hooks.cancel = cancel_flag;
+        hooks.cancel = cancel_flag_ptr;
         // UI-B:子代理内层工具也走条目样式(前缀缩进四空格),状态同样原地
-        // 更新——启动靠 on_sub_tool_start,终态靠下面包了一层的 post_tool
-        // 钩子(agent 工具没有单独的"子工具结束"回调,post_tool 正好在真
-        // 执行完之后带着 Result 触发一次,借它回写;拒绝那条路在确认回调里
-        // 已经定格,pre_tool 拦截另包一层)。批三起事件流的喂入改走
-        // hooks.event_callbacks(上面的并轨),这里只画终端子条目——同一条
-        // 生命周期事件不再两处喂,条目不重复开。
+        // 更新——启动靠 on_sub_tool_start(台账 sink 在事件侧喂),终态靠
+        // 下面包了一层的 post_tool 钩子(agent 工具没有单独的"子工具结束"
+        // 回调,post_tool 正好在真执行完之后带着 Result 触发一次,借它回
+        // 写;拒绝那条路在确认回调里已经定格)。
         hooks.on_sub_tool_start = [&display](const std::string& tool_use_id, const std::string& name,
                                              const nlohmann::json& input) {
             display.OnSubToolStart(tool_use_id, name, input);
@@ -860,32 +705,19 @@ lubancode::agent::Callbacks BuildCallbacks(TurnContext& ctx, TurnWiring wiring) 
             // 子代理自己的 token/工具次数/耗时都记在 AgentTool 统一台账里,
             // 代理面板(footer 里那块)按修订号自己刷新,这里不再另记一本。
         };
-        // M9:pre_tool/post_tool 钩子照旧转发给父级同一份;UI-B 在外面再包
-        // 一层,给子工具条目回写终态/拦截态用。
-        if (callbacks.on_pre_tool_hook) {
-            hooks.on_pre_tool_hook = [&display, base = callbacks.on_pre_tool_hook](
-                                          const std::string& tool_use_id, const std::string& name,
-                                          const nlohmann::json& input) -> std::optional<std::string> {
-                std::optional<std::string> blocked = base(tool_use_id, name, input);
-                if (blocked.has_value()) {
-                    display.OnSubBlocked(tool_use_id, *blocked);
-                }
-                return blocked;
-            };
-        }
-        // hooks 第三步:新回调同样转发(deny 定格由 phase(Blocked) 走 display
-        // 路由,这里不重复画)。
-        hooks.on_pre_tool_use_hook = callbacks.on_pre_tool_use_hook;
-        hooks.on_permission_request = callbacks.on_permission_request;
-        hooks.on_tool_phase = callbacks.on_tool_phase;
+        // hooks 第三步:控制回调原样转发(deny 定格由 phase(Blocked) 走
+        // display 路由,这里不重复画)。
+        hooks.on_pre_tool_use_hook = wiring.on_pre_tool_use_hook;
+        hooks.on_permission_request = wiring.on_permission_request;
+        hooks.on_tool_phase = wiring.on_tool_phase;
         // Plan 模式:子代理同过 ModePolicy(单子:Explore 子代理拿同一
         // Plan mode + 更窄 allowlist,不因独立 context 逃闸)。
-        hooks.on_mode_policy = callbacks.on_mode_policy;
+        hooks.on_mode_policy = wiring.on_mode_policy;
         hooks.hook_dispatcher = hook_dispatcher;
         // 逐枚追踪单:子代理内层工具事件并轨进主会话的 trace hub。hub 的
         // OnTrace 自带锁与单 writer 落盘,子代理任务线程投递不会跟主
         // JSONL 交错(单子 agent/PTC 节)。parent_execution_id 延迟取值
-        // (agent 工具真正开跑时才由 hub 钉)。
+        //(agent 工具真正开跑时才由 hub 钉)。
         if (trace_hub != nullptr) {
             hooks.on_tool_trace = [trace_hub](const lubancode::agent::ToolTraceEvent& event) {
                 trace_hub->OnTrace(event);
@@ -894,8 +726,8 @@ lubancode::agent::Callbacks BuildCallbacks(TurnContext& ctx, TurnWiring wiring) 
                 return trace_hub->current_agent_execution();
             };
         }
-        if (callbacks.on_post_tool_use_hook) {
-            hooks.on_post_tool_use_hook = [&display, base = callbacks.on_post_tool_use_hook](
+        if (wiring.on_post_tool_use_hook) {
+            hooks.on_post_tool_use_hook = [&display, base = wiring.on_post_tool_use_hook](
                                               const std::string& tool_use_id, const std::string& name,
                                               const nlohmann::json& input,
                                               const lubancode::tools::Tool::Result&
@@ -905,15 +737,11 @@ lubancode::agent::Callbacks BuildCallbacks(TurnContext& ctx, TurnWiring wiring) 
                 return feedback;
             };
         }
-        hooks.on_post_tool_hook = [&display, base = callbacks.on_post_tool_hook](
-                                       const std::string& tool_use_id, const std::string& name,
-                                       const nlohmann::json& input,
-                                       const lubancode::tools::Tool::Result& result) {
-            if (base) {
-                base(tool_use_id, name, input, result);
-            }
-            // 事件流的收口改走 hooks.event_callbacks 并轨(sub_callbacks 的
-            // on_tool_done 直接触发),这里只回写终端子条目终态。
+        hooks.on_post_tool_hook = [&display](const std::string& tool_use_id, const std::string& name,
+                                             const nlohmann::json& input,
+                                             const lubancode::tools::Tool::Result& result) {
+            // 事件流的收口走子代理自己的从路适配器(sub 工具的 on_tool_done
+            // 在那条流上),这里只回写终端子条目终态。
             display.OnSubToolResult(tool_use_id, name, input, result);
         };
         agent_tool->SetHooks(std::move(hooks));
@@ -921,56 +749,52 @@ lubancode::agent::Callbacks BuildCallbacks(TurnContext& ctx, TurnWiring wiring) 
 
     // PTC 工具(注册了的话):脚本里每一枚 stub 调用都要过这一轮的完整
     // 执行链——PreToolUse/权限/PostToolUse 原样转发(schema 复检与审计在
-    // agent::RunOneTool 里),Esc 取消链透传。展示回调(on_tool_start/
-    // on_tool_done)刻意不转发:规格 UI 节要求 PTC 只画一张卡、聚合行在
+    // agent::RunOneTool 里),Esc 取消链透传。显示事件刻意走从路(events
+    // 直连 + subordinate 标):规格 UI 节要求 PTC 只画一张卡、聚合行在
     // 结果文本里,不把 16 枚同构工具卡刷满屏;外层那枚
     // programmatic_tool_calling 调用照常走 display 的一条卡。
     if (auto* ptc_tool = dynamic_cast<lubancode::ptc::PtcTool*>(registry.Find("programmatic_tool_calling"));
         ptc_tool != nullptr) {
         lubancode::ptc::PtcTool::Hooks hooks;
         // P2:同 agent 工具,转发走旧同步回调(PTC 脚本线程不吃 async future)。
-        hooks.on_tool_confirm = callbacks.on_tool_confirm;
-        hooks.on_pre_tool_use_hook = callbacks.on_pre_tool_use_hook;
-        hooks.on_permission_request = callbacks.on_permission_request;
-        hooks.on_tool_phase = callbacks.on_tool_phase;
-        hooks.on_post_tool_use_hook = callbacks.on_post_tool_use_hook;
+        hooks.on_tool_confirm = wiring.on_tool_confirm;
+        hooks.on_pre_tool_use_hook = wiring.on_pre_tool_use_hook;
+        hooks.on_permission_request = wiring.on_permission_request;
+        hooks.on_tool_phase = wiring.on_tool_phase;
+        hooks.on_post_tool_use_hook = wiring.on_post_tool_use_hook;
         // Plan 模式:stub 调用同过 ModePolicy(单子明令)。
-        hooks.on_mode_policy = callbacks.on_mode_policy;
-        // 批二(事件流升正房):stub 调用上事件流——16 枚同构调用在 sink 账
-        // 上逐枚有起止;终端画面照旧只画一张外层卡(规格"不刷满屏"是画面
-        // 的规矩,不是账的规矩)。
-        if (event_callbacks != nullptr) {
-            hooks.on_tool_start = event_callbacks->on_tool_start;
-            hooks.on_tool_done = event_callbacks->on_tool_done;
-        }
-        hooks.cancel = cancel_flag;
+        hooks.on_mode_policy = wiring.on_mode_policy;
+        // stub 调用上事件流(从路):16 枚同构调用在 sink 账上逐枚有起止;
+        // 终端画面照旧只画一张外层卡(规格"不刷满屏"是画面的规矩,不是
+        // 账的规矩)。
+        hooks.events = &events;
+        hooks.subordinate_stream = true;
+        hooks.cancel = cancel_flag_ptr;
         ptc_tool->SetHooks(std::move(hooks));
     }
 
     // 插件工具(plugins 单第 7 步的 ESC 链):process 插件的 adapter
-    // (进程超时/取消同一落锤路)与 Lua 工具(hook 里查旗掐死循环)每轮
+    //(进程超时/取消同一落锤路)与 Lua 工具(hook 里查旗掐死循环)每轮
     // 灌这一轮的取消旗。registry 是本轮实际在用的表(main/sub 都从这走)。
     // run_command 同链(进程生命线单 P1:前台命令的取消通道——ESC 不再
     // 只能等 120 秒超时)。
-    if (cancel_flag != nullptr) {
-        for (const auto& tool : registry.All()) {
-            if (auto* plugin_adapter = dynamic_cast<lubancode::runtime::PluginToolAdapter*>(tool.get());
-                plugin_adapter != nullptr) {
-                plugin_adapter->SetCancel(cancel_flag);
-            }
-            if (auto* lua_tool = dynamic_cast<lubancode::tools::LuaTool*>(tool.get()); lua_tool != nullptr) {
-                lua_tool->SetCancel(cancel_flag);
-            }
-            if (auto* run_command = dynamic_cast<lubancode::tools::RunCommandTool*>(tool.get());
-                run_command != nullptr) {
-                run_command->SetCancel(cancel_flag);
-            }
+    for (const auto& tool : registry.All()) {
+        if (auto* plugin_adapter = dynamic_cast<lubancode::runtime::PluginToolAdapter*>(tool.get());
+            plugin_adapter != nullptr) {
+            plugin_adapter->SetCancel(cancel_flag_ptr);
+        }
+        if (auto* lua_tool = dynamic_cast<lubancode::tools::LuaTool*>(tool.get()); lua_tool != nullptr) {
+            lua_tool->SetCancel(cancel_flag_ptr);
+        }
+        if (auto* run_command = dynamic_cast<lubancode::tools::RunCommandTool*>(tool.get()); run_command != nullptr) {
+            run_command->SetCancel(cancel_flag_ptr);
         }
     }
 
-    return callbacks;
+    return wiring;
 }
 
+}  // namespace
 
 std::string ImageInputErrorText(const lubancode::cli::ImageInputError& error) {
     using Kind = lubancode::cli::ImageInputErrorKind;
@@ -997,7 +821,7 @@ std::string ImageInputErrorText(const lubancode::cli::ImageInputError& error) {
 // 构造函数自己判断不起线程,行为跟 0.7.0 完全一致。
 // is_console:M11(0.10.0)新增,决定要不要打输入/输出分界线(管道/重定向
 // 模式恒为假,分界线完全不出现,不污染被重定向的输出)。todo_state 同样
-// M11 新增,转发给 BuildCallbacks 给 on_tool_done 用;留空指针表示这一轮
+// M11 新增,转发给终端事件 sink 给工具终态渲染用;留空指针表示这一轮
 // 的 registry 没注册 todo_write(目前两个调用点都注册了,这个默认值只是
 // 留个口子)。
 // transcript:UI-B(0.12.0)新增,会话级工具条目存档(InteractiveLoop/
@@ -1010,7 +834,7 @@ std::string ImageInputErrorText(const lubancode::cli::ImageInputError& error) {
 // 实测踩到过普通 bool 在这条跨线程路径上的可见性问题(写了但读的那一刻
 // 还没看见),换成 atomic<bool> 用 load/store 的 acquire/release 语义堵上。
 // allow_commands/deny_commands:settings.local.json 的 run_command 前缀白/黑
-// 名单,原样递给 BuildCallbacks 的确认回调叠加判定(缺省空表 = 无叠加)。
+// 名单,原样递给 ConfirmToolUse 的权限叠加判定(缺省空表 = 无叠加)。
 RunTurnResult RunTurn(TurnContext ctx) {
     // 批三收参后的字段别名:函数体与从前一字不差。
     lubancode::agent::Agent& loop = *ctx.loop;
@@ -1096,7 +920,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
                         .count());
     // 轮级核(P3):cancel 旗挪进 runtime::TurnRuntime——监听线程写
     // (request_interrupt)、Run 线程读(interrupted),acquire/release 语义
-    // 原文照搬。ToolDisplay/BuildCallbacks/loop.Run 收它的地址,行为与
+    // 原文照搬。ToolDisplay/TerminalTurnSink/loop.Run 收它的地址,行为与
     // 从前那只裸 atomic<bool> 一字不差。
     lubancode::runtime::TurnRuntime turn_core(BuildTurnRuntimeOptions(auto_confirm, always_allowed_tools,
                                                                        allow_commands, deny_commands,
@@ -1116,24 +940,30 @@ RunTurnResult RunTurn(TurnContext ctx) {
         turn_context.permission_mode = lubancode::app::HookPermissionModeText();
         hook_dispatcher->UpdateContext(std::move(turn_context));
     }
-    // 事件流(骨架拆解批二):装了适配器的轮次,Start 先行(turn_id 复用
-    // trace 口径那枚,宿主没给就现发),显示回调经 BuildCallbacks 并轨;收
-    // 口在 finish_turn_chrome 三条路共用的漏斗里 Finish。Stop 钩子续跑的
-    // 那轮 Run 并进同一 turn 的账(终端 footer 也只有一枚,口径一致)。
-    // 没装(单发/单测)零开销,行为与从前一致。
-    lubancode::agent::Callbacks event_callbacks_storage;
-    if (turn_events != nullptr) {
-        turn_events->Start(turn_id_for_trace);
-        event_callbacks_storage = turn_events->MakeCallbacks();
-    }
-    TurnWiring wiring;
-    wiring.usage_stats = &usage_stats;
-    wiring.display = &display;
-    wiring.body_tracker = &body_tracker;
-    wiring.cancel_flag = &cancel_flag;
-    wiring.view_collector = &view_collector;
-    wiring.event_callbacks = turn_events != nullptr ? &event_callbacks_storage : nullptr;
-    lubancode::agent::Callbacks callbacks = BuildCallbacks(ctx, wiring);
+    // 事件流(骨架拆解批二余款:唯一出水口)。宿主给的(ctx.turn_events,
+    // SessionRuntime 造,落点已挂会话事件链)旁边补挂终端画屏的 sink;没给
+    //(单发/单测)就地起一只本地适配器,同一套接线。Start 的 turn_id 复用
+    // trace 口径那枚,宿主没给就现发;收口在 finish_turn_chrome 三条路共用
+    // 的漏斗里 Finish。Stop 钩子续跑的那轮 Run 并进同一 turn 的账(终端
+    // footer 也只有一枚,口径一致)。终端渲染逐字节照旧——改的是水的来路,
+    // 不是画的样子。
+    lubancode::runtime::TurnEventAdapter local_turn_events("oneshot", lubancode::runtime::ProcessIdAuthority());
+    lubancode::runtime::TurnEventAdapter& turn_event_stream =
+        turn_events != nullptr ? *turn_events : local_turn_events;
+    TerminalTurnSink::Ingredients sink_ingredients;
+    sink_ingredients.display = &display;
+    sink_ingredients.body_tracker = &body_tracker;
+    sink_ingredients.view_collector = &view_collector;
+    sink_ingredients.usage_stats = &usage_stats;
+    sink_ingredients.context_tracker = &context_tracker;
+    sink_ingredients.recorder = recorder;
+    sink_ingredients.trace_projection_installed = turn_trace_hub != nullptr;
+    sink_ingredients.cancel_flag = &cancel_flag;
+    TerminalTurnSink terminal_sink(std::move(sink_ingredients));
+    turn_event_stream.AttachAlongside(
+        [&terminal_sink](const lubancode::runtime::ServerEvent& event) { terminal_sink.Emit(event); });
+    turn_event_stream.Start(turn_id_for_trace);
+    lubancode::agent::TurnWiring wiring = BuildTurnWiring(ctx, display, usage_stats, cancel_flag, turn_event_stream);
     if (turn_trace_hub != nullptr) {
         if (recorder != nullptr) {
             turn_trace_hub->AttachProjection(
@@ -1149,11 +979,11 @@ RunTurnResult RunTurn(TurnContext ctx) {
                     }
                 });
         }
-        turn_trace_hub->Install(loop, callbacks, thread_id_for_trace, turn_id_for_trace);
+        turn_trace_hub->Install(loop, wiring, thread_id_for_trace, turn_id_for_trace);
         // 补偿关系边(单子第四期):undo_file_edit execute 后报"这枚补偿
         // 谁",finished 栅栏随账落 compensates。
-        callbacks.on_tool_compensates = [&registry](const std::string& /*execution_id*/,
-                                                    const std::string& tool_name) -> std::string {
+        wiring.on_tool_compensates = [&registry](const std::string& /*execution_id*/,
+                                                const std::string& tool_name) -> std::string {
             if (tool_name != "undo_file_edit") {
                 return std::string();
             }
@@ -1325,7 +1155,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
     try {
         lubancode::agent::DriveOptions drive_options;
         drive_options.cancel = &cancel_flag;
-        drive = lubancode::agent::DriveTurn(loop, callbacks, std::move(prepared_input->message), drive_options);
+        drive = lubancode::agent::DriveTurn(loop, wiring, std::move(prepared_input->message), drive_options);
         if (!drive.ok) {
             result = std::unexpected(drive.error);
         } else {
@@ -1402,15 +1232,13 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // 文案随 Failed 带上;没收尾的条目由适配器按 Cancelled 兜底。
     const std::string turn_error_text = result.has_value() ? std::string() : result.error();
     const auto finish_turn_chrome = [&](lubancode::cli::TurnFooterTone tone) {
-        if (turn_events != nullptr) {
-            turn_events->Finish(tone == lubancode::cli::TurnFooterTone::Worked
-                                    ? lubancode::runtime::Outcome::Succeeded
-                                : tone == lubancode::cli::TurnFooterTone::Stopped
-                                    ? lubancode::runtime::Outcome::Cancelled
-                                    : lubancode::runtime::Outcome::Failed,
-                                tone == lubancode::cli::TurnFooterTone::Failed ? turn_error_text
-                                                                              : std::string());
-        }
+        turn_event_stream.Finish(tone == lubancode::cli::TurnFooterTone::Worked
+                                     ? lubancode::runtime::Outcome::Succeeded
+                                 : tone == lubancode::cli::TurnFooterTone::Stopped
+                                     ? lubancode::runtime::Outcome::Cancelled
+                                     : lubancode::runtime::Outcome::Failed,
+                                 tone == lubancode::cli::TurnFooterTone::Failed ? turn_error_text
+                                                                               : std::string());
         (void)activity_seconds;  // Working 秒数与 footer 同钟(同一只 steady 钟),
                                  // 单测钉口径;这里不再二次对账,免得双写。
         const auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1544,7 +1372,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
             payload.fields["last_assistant_message"] = last_text;
             return hook_dispatcher->Emit(lubancode::hooks::HookEvent::Stop, payload);
         };
-        lubancode::agent::RunStopContinuation(loop, callbacks, stop_options, drive);
+        lubancode::agent::RunStopContinuation(loop, wiring, stop_options, drive);
         out.cancelled = out.cancelled || drive.cancelled;
     }
 

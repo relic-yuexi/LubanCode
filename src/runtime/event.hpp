@@ -88,6 +88,14 @@ enum class ServerEventKind {
     // turn 层
     TurnStarted,
     TurnCompleted,
+    // turn 层的边界通报(骨架拆解批二余款:Callbacks 老路拔除后,step/
+    // 批次边界随事件流走,payload 带 step_index/batch_index/interrupted 与
+    // ordered_tool_use_ids)。终端的视图账(TurnCollector)从这只里取;
+    // 不带 item_id,与 Item* 三枚分家。app-server 的桥不翻这三种(协议
+    // 冻结),远端前端要边界时另立单子扩协议。
+    ModelStepStarted,
+    ToolBatchStarted,
+    ToolBatchFinished,
     // item 层:非终态可多次,终态一次
     ItemStarted,
     ItemDelta,

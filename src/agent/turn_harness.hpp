@@ -174,7 +174,7 @@ struct DriveReport {
 // 罩在外层,harness 不抢它们的活。
 // input 是首轮的完整 user 消息(可带图像附件);续投轮的输入是字符串,
 // 走 Agent::Run 的字符串重载。
-DriveReport DriveTurn(Agent& agent, const Callbacks& callbacks, api::Message input,
+DriveReport DriveTurn(Agent& agent, const TurnWiring& wiring, api::Message input,
                       const DriveOptions& options);
 
 // ---------------------------------------------------------------------------
@@ -206,7 +206,7 @@ struct StopOptions {
 // 跑 Stop 续跑环。steps_used/output_budget 的增量并进 drive 交来的账
 //(子代理的口径;主回合不读这两个字段)。cancelled 只添不改(打断收场
 // 时调用方压根不该调这函数——与合流前两家的门一致)。
-void RunStopContinuation(Agent& agent, const Callbacks& callbacks, const StopOptions& options,
+void RunStopContinuation(Agent& agent, const TurnWiring& wiring, const StopOptions& options,
                          DriveReport& report);
 
 }  // namespace lubancode::agent

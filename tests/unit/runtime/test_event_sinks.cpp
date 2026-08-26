@@ -3,7 +3,7 @@
 // JsonEventSink——单子验收原文:"事件 id、次序、终态和领域数据完全一致,
 // 只有渲染不同"。
 //
-// 这里把"同一事件流"的产线也立起来:TurnEventAdapter(agent::Callbacks ->
+// 这里把"同一事件流"的产线也立起来:TurnEventAdapter(agent::TurnWiring ->
 // ServerEvent 流 -> EventSink)就是第 5/6 步交界的那只适配器,终端与
 // JSON 两家都从它手上拿饭吃。此测试钉三件事:
 //   1. 同一 callbacks 驱动,两 sink 收到的条目 id、次序、正文累计、终态
@@ -122,9 +122,10 @@ TEST_CASE("同一假 backend 脚本:Terminal 与 Json 两 sink 同流同账") {
         terminal_sink.Emit(event);
         json_sink.Emit(event);
     });
-    agent::Callbacks callbacks = adapter.MakeCallbacks();
+    agent::TurnWiring wiring;
+    wiring.events = &adapter;
 
-    const auto outcome = loop.Run(std::string("问一句"), callbacks);
+    const auto outcome = loop.Run(std::string("问一句"), wiring);
     REQUIRE(outcome.has_value());
 
     // ---- 1. 录音机与终端账本对账:条目 id、次序、正文、终态 ----
@@ -260,9 +261,8 @@ TEST_CASE("批二·显式 turn_id 透传;没收尾的条目按 Cancelled 收口,
     });
 
     CHECK(adapter.Start("turn-explicit") == "turn-explicit");
-    agent::Callbacks callbacks = adapter.MakeCallbacks();
-    callbacks.on_tool_start("toolu_9", "read_file", nlohmann::json{{"path", "a.txt"}});
-    callbacks.on_text_delta("被打断的半截话");
+    adapter.OnToolStart("toolu_9", "read_file", nlohmann::json{{"path", "a.txt"}});
+    adapter.OnTextDelta("被打断的半截话");
     adapter.Finish(rt::Outcome::Cancelled);
     adapter.Finish(rt::Outcome::Cancelled);  // 幂等:重复收口不再发终态
 
@@ -345,7 +345,9 @@ TEST_CASE("批二·FanoutEventSink:一表事件多家齐收,次序与载荷一�
 
     rt::TurnEventAdapter adapter("th-fanout", rt::ProcessIdAuthority());
     adapter.Attach([&fanout](const rt::ServerEvent& event) { fanout.Emit(event); });
-    const auto outcome = loop.Run(std::string("问一句"), adapter.MakeCallbacks());
+    agent::TurnWiring wiring;
+    wiring.events = &adapter;
+    const auto outcome = loop.Run(std::string("问一句"), wiring);
     REQUIRE(outcome.has_value());
     adapter.Finish(rt::Outcome::Succeeded);
 
@@ -360,41 +362,27 @@ TEST_CASE("批二·FanoutEventSink:一表事件多家齐收,次序与载荷一�
     }
 }
 
-TEST_CASE("批二·ComposeDisplayCallbacks:事件流在前、终端老路在后,缺侧直通") {
-    // 两轨并行的装配笔(turn_runner/AgentExecutor 共用):两侧都有时先事件
-    // 后终端(事件是 canonical 账,先落账再画屏);一侧缺省只走另一侧;
-    // 控制口(on_tool_confirm 这类带返回值的)不并。
+TEST_CASE("批二余款·AttachAlongside:已有落点在前、后挂的在后,次序稳定") {
+    // ComposeDisplayCallbacks 随 Callbacks 老路退役;次序语义(先事件账、
+    // 后终端画屏)由这只承接:已有落点在前,后挂的在后,一条不多一条
+    // 不少;空落点直接顶上。
     std::vector<std::string> calls;
-    agent::Callbacks terminal;
-    terminal.on_text_delta = [&calls](const std::string& text) { calls.push_back("term:" + text); };
-    terminal.on_tool_confirm = [&calls](const std::string&, const std::string&, const nlohmann::json&) {
-        calls.push_back("term:confirm");
-        return true;
-    };
+    rt::TurnEventAdapter adapter("th-alongside", rt::ProcessIdAuthority());
+    adapter.Attach([&calls](const rt::ServerEvent&) { calls.push_back("first"); });
+    adapter.AttachAlongside([&calls](const rt::ServerEvent&) { calls.push_back("second"); });
+    adapter.Start("turn-alongside");
+    adapter.OnTextDelta("正文");
+    REQUIRE(calls.size() == 6);  // TurnStarted + ItemStarted + ItemDelta,各两份
+    CHECK(calls[0] == "first");
+    CHECK(calls[1] == "second");
+    CHECK(calls[2] == "first");
+    CHECK(calls[3] == "second");
+    CHECK(calls[4] == "first");
+    CHECK(calls[5] == "second");
 
-    agent::Callbacks events;
-    events.on_text_delta = [&calls](const std::string& text) { calls.push_back("event:" + text); };
-    events.on_usage = [&calls](const api::UsageReport&) { calls.push_back("event:usage"); };
-
-    rt::ComposeDisplayCallbacks(terminal, events);
-    REQUIRE(terminal.on_text_delta);
-    REQUIRE(terminal.on_usage);
-    terminal.on_text_delta("正文");
-    terminal.on_usage(api::UsageReport{});
-    CHECK(calls == std::vector<std::string>{"event:正文", "term:正文", "event:usage"});
-
-    // 事件侧缺省的口子直通终端;终端缺省的口子直通事件。
-    agent::Callbacks only_back;
-    only_back.on_thinking_delta = [&calls](const std::string&) { calls.push_back("back:think"); };
-    rt::ComposeDisplayCallbacks(only_back, events);  // events 没有 thinking 口
-    only_back.on_thinking_delta("想");
-    CHECK(calls.back() == "back:think");
-
-    // 控制口不并:events 侧就算给了 confirm 也不吃(那不是出水口,装配点
-    // 自己配自己的)。
-    events.on_tool_confirm = [](const std::string&, const std::string&, const nlohmann::json&) {
-        return false;
-    };
-    rt::ComposeDisplayCallbacks(terminal, events);
-    CHECK(terminal.on_tool_confirm({}, "run_command", nlohmann::json::object()) == true);  // 仍是终端那份
+    // 空落点:AttachAlongside 顶成唯一落点。
+    rt::TurnEventAdapter fresh("th-fresh", rt::ProcessIdAuthority());
+    fresh.AttachAlongside([&calls](const rt::ServerEvent&) { calls.push_back("only"); });
+    fresh.Start();
+    CHECK(calls.back() == "only");
 }

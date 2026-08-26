@@ -225,7 +225,7 @@ TEST_CASE("ProjectMemory: uv 与 yarn 偏好按问题召回并注入完整请求
     tools::ToolRegistry registry;
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "stable system"});
     loop.SetTurnContext(python_context);
-    const auto outcome = loop.Run(python_query, agent::Callbacks{});
+    const auto outcome = loop.Run(python_query, agent::TurnWiring{});
     REQUIRE(outcome.has_value());
     REQUIRE(backend.requests.size() == 1);
     // 第五期起:记忆召回随本轮 user 消息尾部进请求,system 只留稳定材料。
@@ -266,7 +266,7 @@ TEST_CASE("ProjectMemory: 端到端 captured request——无命中不含索引,
         tools::ToolRegistry registry;
         agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "stable system"});
         loop.SetTurnContext(store.BuildTurnContext("部署到树莓派怎么做", repo));
-        REQUIRE(loop.Run("部署到树莓派怎么做", agent::Callbacks{}).has_value());
+        REQUIRE(loop.Run("部署到树莓派怎么做", agent::TurnWiring{}).has_value());
         REQUIRE(backend.requests.size() == 1);
         CHECK(backend.requests[0].system == "stable system");  // 动态上下文不进 system
         CHECK(backend.requests[0].messages[0].content.size() == 1);  // 空 suffix 不挂第二块
@@ -279,7 +279,7 @@ TEST_CASE("ProjectMemory: 端到端 captured request——无命中不含索引,
         tools::ToolRegistry registry;
         agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "stable system"});
         loop.SetTurnContext(store.BuildTurnContext("用 uv 加依赖", repo));
-        REQUIRE(loop.Run("用 uv 加依赖", agent::Callbacks{}).has_value());
+        REQUIRE(loop.Run("用 uv 加依赖", agent::TurnWiring{}).has_value());
         REQUIRE(backend.requests.size() >= 1);
         CHECK(backend.requests[0].system == "stable system");
         const auto* hit = std::get_if<api::TextBlock>(&backend.requests[0].messages[0].content[1]);
