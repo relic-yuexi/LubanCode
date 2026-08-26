@@ -272,8 +272,13 @@ private:
     // 外来消息轮:peer 来信是 user 语义(另一会话的用户正文);后台完成
     // 唤醒是宿主合成控制消息,传 BackgroundCompletion——检索整轮跳过,
     // 不在 trace 里留一串无意义词。
-    void RunPeerTurn(const std::string& text, bool silent = false,
-                     memory::QueryOrigin origin = memory::QueryOrigin::User);
+    // 双胞胎合一(会话终章):用户正文与外来消息共用 RunSessionTurn 一只
+    // 回合入口,来源参数分档,原先的两只胞胎方法(RunUserTurn/RunPeerTurn)
+    // 行为差异逐一保真(差异清单见实现处注释)。
+    enum class TurnSource { User, Incoming };
+    void RunSessionTurn(const std::string& content, TurnSource source,
+                        bool* autosend_failed = nullptr, bool silent = false,
+                        memory::QueryOrigin origin = memory::QueryOrigin::User);
     void PumpSteeringToSubagents();
     // 排队账落会话存档(取走即消费单路径二):queue 事件行,快照式,回放取
     // 最后一条。排队账一变(进队/送达/回还/清账)都追一份;存档没建档或
@@ -400,7 +405,6 @@ private:
     // agent::RunOneTool 正门,PreToolUse/PostToolUse 钩子、Plan 闸、逐枚
     // trace 与主回合同一条链,两处装配点(/workflow run 与 alias 直呼)共用。
     lubancode::workflow::ToolExecutor::Options BuildWorkflowToolOptions();
-    CommandFlow RunUserTurn(const std::string& content, bool* autosend_failed = nullptr);
     // ---- /goal 持久目标(持久目标单) ----
     // /goal 七动作的终端接线:coordinator 调用 + 排版。clear 走二次确认。
     // goal 装配:coordinator 从 config+env 折 Options 安家,LedgerSink 接
@@ -1623,67 +1627,6 @@ void TerminalSessionController::CollectPeerMessages() {
     }
 }
 
-// 空闲时收到的信直接另起一轮(规格:会话空闲,把信作为一轮"外来消息"
-// 交给模型)。走 RunTurn,不走 ProcessLine——来信不得当 slash 命令跑。
-// silent:查看态下的后台回流轮用——轮子照常跑(消化/输出/usage),但所有
-// 输出只进 transcript 台账不上屏,用户正看的子代理视口零扰动(回流单规格
-// 第一节;语义细节见 turn_runner.hpp RunTurn 的 silent 注释)。
-void TerminalSessionController::RunPeerTurn(const std::string& text, bool silent, memory::QueryOrigin origin) {
-    if (peer_started) {
-        peer_runtime->SetStatus("busy");
-    }
-    transcript_ui_.ExitFocusView();
-    std::string turn_suffix =
-        project_memory != nullptr
-            ? project_memory->BuildTurnContext(text, std::filesystem::current_path(), origin)
-            : std::string();
-    // 运行中子代理名册(动态 context):本轮重算,不进 history——compact
-    // 后下一条用户消息照常从 TaskRecord 重注入,不依赖摘要记任务号。
-    if (session_agent_tool() != nullptr) {
-        turn_suffix += session_agent_tool()->RunningTasksRoster();
-    }
-    // PTC 指南(PTC 单):当前已挂载 stub 的签名索引,随轮次请求视图走
-    // (不进稳定的 system——前缀缓存守恒)。tool_search 中途挂载新工具,
-    // 下一轮这里自动带上新签名。
-    if (tool_runtime_->ptc_tool() != nullptr) {
-        turn_suffix += tool_runtime_->ptc_tool()->GuideSegment();
-    }
-    main_agent->SetTurnContext(std::move(turn_suffix));
-    // 批二:peer 轮同样上事件流(turn_id 由适配器现发——这轮没有 trace
-    // 口径的现成号)。
-    lubancode::runtime::TurnEventAdapter turn_events = session_runtime_.MakeTurnAdapter();
-    // RunTurnResult 只剩 status/cancelled,peer 来信轮两边都不看;排队消息
-    // 走会话层 SteeringQueue,不在这里收。直接调,不接没人用的返回值。
-    // (批三:RunTurn 二十四参收成一只 TurnContext。)
-    {
-        lubancode::app::TurnContext turn;
-        turn.loop = &*main_agent;
-        turn.user_input = text;
-        turn.auto_confirm = auto_confirm;
-        turn.always_allowed_tools = &always_allowed_tools;
-        turn.theme = theme;
-        turn.context_tracker = &context_tracker;
-        turn.registry = &registry();
-        turn.hook_dispatcher = lubancode::app::HookRuntime();
-        turn.is_console = spinner_enabled;
-        turn.transcript = &transcript_ui_.items();
-        turn.todo_state = todo_state();
-        turn.transcript_expanded = transcript_ui_.expanded_flag();
-        turn.allow_commands = settings_local.allow_commands;
-        turn.deny_commands = settings_local.deny_commands;
-        turn.completion_agent = session_agent_tool();
-        turn.recorder = nullptr;
-        turn.silent = silent;
-        turn.turn_events = &turn_events;
-        RunTurn(std::move(turn));
-    }
-    PersistNewMessages();
-    PersistSteeringQueue();  // peer 轮里也可能进队/送走过(路径二,快照对齐)
-    if (peer_started) {
-        peer_runtime->SetStatus("idle");
-    }
-}
-
 // 子代理目标的排队消息转投任务 inbox(与面板定向介入同一条通道:
 // AgentTool::SendTaskMessage——那只子代理自己的 AgentLoop 会在"当前工具
 // 收尾、下一次请求未发"的边界收信)。终态明确拒收:标 TargetGone 留在
@@ -2023,7 +1966,8 @@ CommandFlow TerminalSessionController::ProcessLine(const std::string& content, b
             return DispatchSlashCommand(parsed);
         }
         // 普通正文(含 peer 来信组包后的文字):自动压缩检查 + 发一轮。
-        return RunUserTurn(content, autosend_failed);
+        RunSessionTurn(content, TurnSource::User, autosend_failed);
+        return CommandFlow::Continue;
     } catch (const std::exception& e) {
         if (autosend_failed != nullptr) {
             *autosend_failed = true;  // 回合异常收场:排队消息按失败退还(路径一的兜底判定)
@@ -2741,7 +2685,7 @@ bool TerminalSessionController::PumpLoopTicks() {
     TermOut() << theme.stats << "[loop " << tick->task.task_id << " 第 " << tick->tick.tick_no
               << " 拍]" << theme.reset << "\n";
     bool turn_failed = false;
-    RunUserTurn(message, &turn_failed);
+    RunSessionTurn(message, TurnSource::User, &turn_failed);
     FinishLoopTick(tick->tick.tick_id, turn_failed, /*cancelled=*/false);
     return true;
 }
@@ -2777,7 +2721,7 @@ void TerminalSessionController::PumpGoalContinuation(std::int64_t now_ms) {
                                 {"dedupe_key", started.dedupe_key}},
                  /*match_value=*/std::string());
     bool turn_failed = false;
-    RunUserTurn(started.synthetic_text, &turn_failed);
+    RunSessionTurn(started.synthetic_text, TurnSource::User, &turn_failed);
     // 收口:completion-driven 泵的真接线——采证/checkpoint/evaluator/
     // ApplyEvaluation/ScheduleNextIteration 都在主线程安全边界跑。
     CloseGoalIteration("goal-turn", turn_failed);
@@ -3051,78 +2995,103 @@ void TerminalSessionController::FinishLoopTick(const std::string& tick_id, bool 
     lubancode::app::FlushLoopEvents(MakeLoopWiring());
 }
 
-CommandFlow TerminalSessionController::RunUserTurn(const std::string& content, bool* autosend_failed) {
-    // 欢迎页允许空配置进主界面；slash 命令在 ProcessLine 上一层已先分流。
-    // 普通正文到这里才拦，免得拿空 base_url 真发请求、落下一场假会话。
-    if (!lubancode::config::RequireConfigured(config_result_).has_value()) {
-        TermOut() << theme.error << tr("setup.turn.blocked") << theme.reset << "\n";
-        if (autosend_failed != nullptr) {
-            *autosend_failed = true;
+// 双胞胎合一(会话终章):RunUserTurn/RunPeerTurn 收成这一只带来源参数的
+// 回合入口。User 走全套(配置门/建档/窗口同步/自动压缩/提及账/标题铃/
+// trace 与 usage 记账/计划与记忆收尾);Incoming(peer 来信、后台子代理
+// 回流)走精简路:peer 名册亮忙,silent 档可静默(查看态回流不上屏),
+// 不挂录制、不追 usage、不做提及与收尾抽取。两路差异逐一保真:
+//   - User 拦空配置(欢迎页逻辑),Incoming 不拦(能起 peer 必已配好);
+//   - User 的 turn_id 复 trace 那枚(两本账对得上),Incoming 由适配器现发;
+//   - 排队账快照(PersistSteeringQueue)两路都收(轮内可能进队/送走过)。
+void TerminalSessionController::RunSessionTurn(const std::string& content, TurnSource source,
+                                               bool* autosend_failed, bool silent,
+                                               memory::QueryOrigin origin) {
+    const bool is_user_turn = source == TurnSource::User;
+    if (!is_user_turn && peer_started) {
+        peer_runtime->SetStatus("busy");
+    }
+    if (is_user_turn) {
+        // 欢迎页允许空配置进主界面;slash 命令在 ProcessLine 上一层已先分流。
+        // 普通正文到这里才拦,免得拿空 base_url 真发请求、落下一场假会话。
+        if (!lubancode::config::RequireConfigured(config_result_).has_value()) {
+            TermOut() << theme.error << tr("setup.turn.blocked") << theme.reset << "\n";
+            if (autosend_failed != nullptr) {
+                *autosend_failed = true;
+            }
+            return;
         }
-        return CommandFlow::Continue;
+        // 建档提前到发轮之前(第二期):仓要拿 session id 开张,第一轮请求里
+        // 的超长结果才有地方落盘。失败不拦会话,只是没有 artifact 可追。
+        EnsureSessionBegun(content);
+        // 窗口同步(0.27.x):/context、/model 改的是 tracker 的窗口,loop 的
+        // mid-turn 评估用同一份,发轮前对齐一次。
+        main_agent->SetContextWindowTokens(context_tracker.window_tokens());
+        // 自动压缩:发真正的用户输入前,占用超过阈值(80%)就先压一压。失败只
+        // 警告不拦——字符数硬安全网(TrimHistory)还在,不会真的爆掉;工具循环
+        // 中途的溢出由 loop 的压力通报(HandleContextPressure)另走 mid-turn 路。
+        if (context_tracker.ShouldAutoCompact()) {
+            lubancode::app::TryRunCompact(/*midturn=*/false, MakeCompactInputs());
+        }
     }
-    // 建档提前到发轮之前(第二期):仓要拿 session id 开张,第一轮请求里
-    // 的超长结果才有地方落盘。失败不拦会话,只是没有 artifact 可追。
-    EnsureSessionBegun(content);
-    // 窗口同步(0.27.x):/context、/model 改的是 tracker 的窗口,loop 的
-    // mid-turn 评估用同一份,发轮前对齐一次。
-    main_agent->SetContextWindowTokens(context_tracker.window_tokens());
-    // 自动压缩:发真正的用户输入前,占用超过阈值(80%)就先压一压。失败只
-    // 警告不拦——字符数硬安全网(TrimHistory)还在,不会真的爆掉;工具循环
-    // 中途的溢出由 loop 的压力通报(HandleContextPressure)另走 mid-turn 路。
-    if (context_tracker.ShouldAutoCompact()) {
-        lubancode::app::TryRunCompact(/*midturn=*/false, MakeCompactInputs());
-    }
-
     // 人在聚焦查看画面里直接敲了正文发送:视为离开聚焦态(新一轮输出
     // 马上往下铺,聚焦画面已经不是"当前画面"了),下次 Ctrl+E 是重新
     // 聚焦,不是"返回"。
     transcript_ui_.ExitFocusView();
-    // @ 提及校验(0.30.x 第三批):目标消失/越出项目根,明报错拦下这轮;
-    // 活着的提及附账进 turn context(不进永久 history)。
-    const auto [mention_error, mention_ledger] = BuildMentionLedger(content);
-    if (!mention_error.empty()) {
-        TermOut() << theme.error << mention_error << theme.reset << "\n";
-        if (autosend_failed != nullptr) {
-            *autosend_failed = true;  // 这轮没发出去:自动发送的消息按"没送达"回队
+    std::string turn_suffix;
+    if (is_user_turn) {
+        // @ 提及校验(0.30.x 第三批):目标消失/越出项目根,明报错拦下这轮;
+        // 活着的提及附账进 turn context(不进永久 history)。
+        const auto [mention_error, mention_ledger] = BuildMentionLedger(content);
+        if (!mention_error.empty()) {
+            TermOut() << theme.error << mention_error << theme.reset << "\n";
+            if (autosend_failed != nullptr) {
+                *autosend_failed = true;  // 这轮没发出去:自动发送的消息按"没送达"回队
+            }
+            return;
         }
-        return CommandFlow::Continue;
+        turn_suffix = mention_ledger;
     }
-    std::string turn_suffix = mention_ledger;
     turn_suffix += project_memory != nullptr
-                       ? project_memory->BuildTurnContext(content, std::filesystem::current_path(),
-                                                          memory::QueryOrigin::User)
+                       ? project_memory->BuildTurnContext(content, std::filesystem::current_path(), origin)
                        : std::string();
-    // 运行中子代理名册(规格第二节):每条外层用户消息到来时给 main 一份
-    // 动态重算的名册——task id + 真 title + 类型 + 待送数,不塞 prompt 与
-    // 日志。走请求级 turn_context:不永久复制进 history,任务状态变了下轮
-    // 重算,compact 后照常从台账重注入。主模型认得 task id,才知道
+    // 运行中子代理名册(规格第二节):每条外层用户消息/外来消息到来时给
+    // main 一份动态重算的名册——task id + 真 title + 类型 + 待送数,不塞
+    // prompt 与日志。走请求级 turn_context:不永久复制进 history,任务状态
+    // 变了下轮重算,compact 后照常从台账重注入。主模型认得 task id,才知道
     // agent_message 该投给谁。
     if (session_agent_tool() != nullptr) {
         turn_suffix += session_agent_tool()->RunningTasksRoster();
     }
-    // PTC 指南:与 RunPeerTurn 同一份(GuideSegment 含当前挂载集的签名)。
+    // PTC 指南(PTC 单):当前已挂载 stub 的签名索引,随轮次请求视图走
+    //(不进稳定的 system——前缀缓存守恒)。tool_search 中途挂载新工具,
+    // 下一轮这里自动带上新签名。
     if (tool_runtime_->ptc_tool() != nullptr) {
         turn_suffix += tool_runtime_->ptc_tool()->GuideSegment();
     }
     main_agent->SetTurnContext(std::move(turn_suffix));
-    const std::size_t history_before = main_agent->History().size();
-    // 查看帧的 app 侧擦账已拆(见 PrintViewedTranscript 注释):新回合铺正文
-    // 不再需要在这里复位什么行账,终端层那本 view_body_top 按读取段自生灭。
-    // 终端标题(0.30.x 第四批):跑着/等输入两态,项目·分支跟着;拿不到
-    // 焦点状态,不做"未聚焦才通知"的假判断,只在长轮收口时叫一声铃。
-    if (spinner_enabled) {
-        lubancode::cli::SetTerminalTitle(BuildTerminalTitleText(tr("notify.state_busy")));
-    }
-    // usage 出账(模型分工第一期):整轮逐步 usage 带出来记进分角色台账
-    // (普通 turn = normal 档);compact/抽取的后台采样在各自路径另记,
-    // 不混进这里。
+    std::size_t history_before = 0;
+    std::string trace_turn_id;
     lubancode::runtime::TurnUsageStats turn_usage;
     const auto turn_started = std::chrono::steady_clock::now();
-    const std::string trace_turn_id = session_runtime_.ids().NextTurnId();
-    turn_views_.emplace_back();
-    // 批二:这轮的事件适配器(sink 已在 SessionRuntime 上配好;turn_id 复
-    // 用 trace 那枚,两本账对得上)。
+    if (is_user_turn) {
+        // 查看帧的 app 侧擦账已拆(见 PrintViewedTranscript 注释):新回合铺
+        // 正文不再需要在这里复位什么行账,终端层那本 view_body_top 按读取段
+        // 自生灭。终端标题(0.30.x 第四批):跑着/等输入两态,项目·分支跟
+        // 着;拿不到焦点状态,不做"未聚焦才通知"的假判断,只在长轮收口时
+        // 叫一声铃。
+        history_before = main_agent->History().size();
+        if (spinner_enabled) {
+            lubancode::cli::SetTerminalTitle(BuildTerminalTitleText(tr("notify.state_busy")));
+        }
+        // usage 出账(模型分工第一期):整轮逐步 usage 带出来记进分角色台账
+        // (普通 turn = normal 档);compact/抽取的后台采样在各自路径另记,
+        // 不混进这里。
+        trace_turn_id = session_runtime_.ids().NextTurnId();
+        turn_views_.emplace_back();
+    }
+    // 批二:这轮的事件适配器(sink 已在 SessionRuntime 上配好;User 的
+    // turn_id 复 trace 那枚,两本账对得上;Incoming 由适配器现发——这轮
+    // 没有 trace 口径的现成号)。
     lubancode::runtime::TurnEventAdapter turn_events = session_runtime_.MakeTurnAdapter();
     // 批三:RunTurn 二十四参收成一只 TurnContext。
     lubancode::app::TurnContext turn;
@@ -3141,64 +3110,72 @@ CommandFlow TerminalSessionController::RunUserTurn(const std::string& content, b
     turn.allow_commands = settings_local.allow_commands;
     turn.deny_commands = settings_local.deny_commands;
     turn.completion_agent = session_agent_tool();
-    turn.recorder = recorder.has_value() ? &*recorder : nullptr;
-    turn.silent = false;
-    turn.usage_out = &turn_usage;
-    turn.trace_hub = &*trace_hub_;
-    turn.thread_id_for_trace = session_runtime_.thread_id();
-    turn.turn_id_for_trace = trace_turn_id;
-    turn.turn_view_out = &turn_views_.back();
-    turn.mode_gate = [this](const std::string& tool_name, const nlohmann::json& input) {
-        return EvaluatePlanGate(tool_name, input);
-    };
-    turn.approval_observer = [this](bool asked, bool allowed) {
-        NoteLoopPermissionWait(asked, allowed);
-    };
+    turn.recorder = is_user_turn && recorder.has_value() ? &*recorder : nullptr;
+    turn.silent = silent;
     turn.turn_events = &turn_events;
+    if (is_user_turn) {
+        turn.usage_out = &turn_usage;
+        turn.trace_hub = &*trace_hub_;
+        turn.thread_id_for_trace = session_runtime_.thread_id();
+        turn.turn_id_for_trace = trace_turn_id;
+        turn.turn_view_out = &turn_views_.back();
+        turn.mode_gate = [this](const std::string& tool_name, const nlohmann::json& input) {
+            return EvaluatePlanGate(tool_name, input);
+        };
+        turn.approval_observer = [this](bool asked, bool allowed) {
+            NoteLoopPermissionWait(asked, allowed);
+        };
+    }
     const lubancode::app::RunTurnResult turn_result = RunTurn(std::move(turn));
-    // 轮次视图存档封顶(最近 N 轮,重铺够用;不无界攒)。
-    if (turn_views_.size() > kMaxArchivedTurnViews) {
-        turn_views_.erase(turn_views_.begin());
-    }
-    if (autosend_failed != nullptr) {
-        *autosend_failed = turn_result.status != 0;  // 取走即消费单:失败信号原样递给会话泵
-    }
-    for (const auto& step : turn_usage.steps) {
-        api::Usage step_usage;
-        step_usage.input_tokens = step.input_tokens;
-        step_usage.output_tokens = step.output_tokens;
-        step_usage.cache_read_tokens = step.cache_read_tokens;
-        step_usage.cache_creation_tokens = step.cache_creation_tokens;
-        step_usage.output_reasoning_tokens = step.reasoning_tokens;
-        model_router->ledger().Record(lubancode::agent::ModelRole::Normal,
-                                      step.model.empty() ? *current_model : step.model, step_usage,
-                                      /*duration_ms=*/0, step.reported);
-    }
-    if (spinner_enabled) {
-        lubancode::cli::SetTerminalTitle(BuildTerminalTitleText(tr("notify.state_idle")));
-        const auto elapsed = std::chrono::steady_clock::now() - turn_started;
-        if (elapsed > std::chrono::seconds(30)) {
-            lubancode::cli::NotifyUserAttention();  // 长轮跑完叫一声,每轮至多一次
+    if (is_user_turn) {
+        // 轮次视图存档封顶(最近 N 轮,重铺够用;不无界攒)。
+        if (turn_views_.size() > kMaxArchivedTurnViews) {
+            turn_views_.erase(turn_views_.begin());
+        }
+        if (autosend_failed != nullptr) {
+            *autosend_failed = turn_result.status != 0;  // 取走即消费单:失败信号原样递给会话泵
+        }
+        for (const auto& step : turn_usage.steps) {
+            api::Usage step_usage;
+            step_usage.input_tokens = step.input_tokens;
+            step_usage.output_tokens = step.output_tokens;
+            step_usage.cache_read_tokens = step.cache_read_tokens;
+            step_usage.cache_creation_tokens = step.cache_creation_tokens;
+            step_usage.output_reasoning_tokens = step.reasoning_tokens;
+            model_router->ledger().Record(lubancode::agent::ModelRole::Normal,
+                                          step.model.empty() ? *current_model : step.model, step_usage,
+                                          /*duration_ms=*/0, step.reported);
+        }
+        if (spinner_enabled) {
+            lubancode::cli::SetTerminalTitle(BuildTerminalTitleText(tr("notify.state_idle")));
+            const auto elapsed = std::chrono::steady_clock::now() - turn_started;
+            if (elapsed > std::chrono::seconds(30)) {
+                lubancode::cli::NotifyUserAttention();  // 长轮跑完叫一声,每轮至多一次
+            }
         }
     }
     // 每轮结束(成功/出错/ESC 打断都算)把新增消息逐条追加落盘。
     PersistNewMessages();
-    // Plan 模式(只读研究硬闸单):turn 正常收口后扫本轮 assistant 正文,
-    // <proposed_plan> 完整则记 PlanDocument 并弹审阅框(单子:不在解析到
-    // </proposed_plan> 的同一次 Provider response 内直接执行——工具表、
-    // 提示词、mode event 与 UI 都在半新半旧状态时不动手)。
-    if (turn_result.status == 0 && !turn_result.cancelled) {
-        MaybeCollectPlanProposal(history_before, trace_turn_id);
+    if (is_user_turn) {
+        // Plan 模式(只读研究硬闸单):turn 正常收口后扫本轮 assistant 正文,
+        // <proposed_plan> 完整则记 PlanDocument 并弹审阅框(单子:不在解析到
+        // </proposed_plan> 的同一次 Provider response 内直接执行——工具表、
+        // 提示词、mode event 与 UI 都在半新半旧状态时不动手)。
+        if (turn_result.status == 0 && !turn_result.cancelled) {
+            MaybeCollectPlanProposal(history_before, trace_turn_id);
+        }
+        // 会话起名(cheap 角色):建档后第一轮回合收尾、还没有标题时起一枚,
+        // 成功落 title 事件;失败安静降级(/sessions 继续用首句摘要,不拦人)。
+        lubancode::app::MaybeGenerateSessionTitle(MakeTailContext(), lubancode::agent::TaskKind::SessionTitle);
+        // 回合收尾总结与候选抽取(learn off 时是空操作)。
+        lubancode::app::ExtractTurnMemory(MakeTailContext(), content, history_before);
     }
-    // 会话起名(cheap 角色):建档后第一轮回合收尾、还没有标题时起一枚,
-    // 成功落 title 事件;失败安静降级(/sessions 继续用首句摘要,不拦人)。
-    lubancode::app::MaybeGenerateSessionTitle(MakeTailContext(), lubancode::agent::TaskKind::SessionTitle);
-    // 回合收尾总结与候选抽取(learn off 时是空操作)。
-    lubancode::app::ExtractTurnMemory(MakeTailContext(), content, history_before);
     // 排队账快照落档(路径二):轮内可能进过队/边界注入送走过,趁收尾把
     // 最新一份快照追进存档,/exit 或崩掉后 resume 接得回来。
     PersistSteeringQueue();
-    return CommandFlow::Continue;
+    if (!is_user_turn && peer_started) {
+        peer_runtime->SetStatus("idle");
+    }
 }
 // ---------------------------------------------------------------------------
 // 上下文压缩的会话现场路(0.27.x 分层压缩第一期)
@@ -3477,7 +3454,8 @@ CommandFlow TerminalSessionController::HandlePlanCommand(const std::string& args
             // 正文立刻作为规划请求发一轮(带 [Plan 模式规划请求] 前缀,与
             // 普通消息分得开——resume 重放时看得出这轮是规划请求)。
             const std::string task = tr("plan.turn.task_prefix") + parsed.description;
-            return RunUserTurn(task);
+            RunSessionTurn(task, TurnSource::User);
+            return CommandFlow::Continue;
         }
     }
     return CommandFlow::Continue;
@@ -3714,7 +3692,7 @@ void TerminalSessionController::LaunchApprovedPlanExecution(lubancode::runtime::
     plan_review_pending_.reset();
     TermOut() << theme.stats << trf("plan.review.approved", static_cast<int>(plan.revision)) << theme.reset << "\n";
     const std::string brief = trf("plan.turn.handoff", plan.plan_id, static_cast<int>(plan.revision)) + plan.markdown;
-    RunUserTurn(brief);
+    RunSessionTurn(brief, TurnSource::User);
     //   6. 执行模型先用 todo_write 拆施工清单——brief 文案里已带这句
     //      (plan.turn.handoff),不在这里另塞指令。
 }
@@ -3853,7 +3831,7 @@ void TerminalSessionController::Run() {
             TermOut() << theme.stats
                       << trf("cmd.peers.incoming_notice", envelope.sender_name, envelope.sender_id) << theme.reset
                       << "\n";
-            RunPeerTurn(FormatPeerText(envelope));
+            RunSessionTurn(FormatPeerText(envelope), TurnSource::Incoming);
             continue;
         }
 
@@ -3904,9 +3882,10 @@ void TerminalSessionController::Run() {
                 }
                 transcript.push_back(std::move(item));
             }
-            RunPeerTurn("后台子代理有新结果送达(资料附在本条消息里)。请阅读后继续推进手头任务;"
-                        "若结论已够用,向用户简要汇报要点,不要重新摸排。",
-                        /*silent=*/viewing, memory::QueryOrigin::BackgroundCompletion);
+            RunSessionTurn("后台子代理有新结果送达(资料附在本条消息里)。请阅读后继续推进手头任务;"
+                           "若结论已够用,向用户简要汇报要点,不要重新摸排。",
+                           TurnSource::Incoming, /*autosend_failed=*/nullptr,
+                           /*silent=*/viewing, memory::QueryOrigin::BackgroundCompletion);
             if (viewing) {
                 // 坞行退场由 DrainCompletionNotices 的 TouchTasks + 下一帧带出;
                 // toast 替那行留一句人话,几秒自收,不抢屏。
