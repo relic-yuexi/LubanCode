@@ -497,7 +497,7 @@ private:
     // composer 生效;EnterWithTask 切档后把正文当规划请求发一轮。
     CommandFlow HandlePlanCommand(const std::string& args);
     // ModePolicy 装配:按注册表元数据 + 模式判一枚工具放不放行(给
-    // BuildCallbacks 的 on_mode_policy)。返回空串 = 放行;"code|reason"
+    // TurnWiring 的 on_mode_policy)。返回空串 = 放行;"code|reason"
     // = 拒绝。run_command 走 Plan shell 分类器,agent 看 agent_type。
     std::string EvaluatePlanGate(const std::string& tool_name, const nlohmann::json& input);
     // 切档的正路:落 mode_v1、重拼系统提示(mode 段)、刷状态栏。

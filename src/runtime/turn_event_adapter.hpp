@@ -1,24 +1,27 @@
-// TurnEventAdapter(显示系统剥离单第五步后半;骨架拆解批二升正房:装配
-// 点的显示回调从各挑各的 Callbacks 子集,改成这适配器一份翻译、sink 列表
-// 多路消费)。
+// TurnEventAdapter(显示系统剥离单第五步后半;骨架拆解批二余款升唯一
+// 出水口:Callbacks 老路拔除,引擎经 agent::TurnWiring::events 直连这只,
+// 回调装配的 MakeCallbacks/ComposeDisplayCallbacks 随老路退役)。
 //
-// agent::Callbacks -> ServerEvent 流的适配器:一轮 Run() 里模型给的正文/
-// 思考/工具起止/usage,逐枚翻成带 seq/thread_id/turn_id/item_id 的
-// ServerEvent,交给 EventSink。终端(TerminalEventSink)、app-server
-// (JsonEventSink)、Web/Tauri 都从这只适配器手上拿同一份事件流——
-// "内核只吐结构化事件"的单子边界,这只就是出水口。
+// 一轮 Run() 里模型给的正文/思考/工具起止/usage/step 与批次边界,逐枚翻
+// 成带 seq/thread_id/turn_id/item_id 的 ServerEvent,交给 sink。终端(画
+// 屏的那只 sink 住装配层,如 app::TerminalTurnSink)、app-server(桥式
+// sink)、Web/Tauri 都从同一份事件流里取自己那份——"内核只吐结构化事件"
+// 的单子边界,这只就是出水口。
 //
-// 两轨并行(批二的格局):终端装配(turn_runner 的 BuildCallbacks)保住
-// 现有 TUI 逐字节不变,同时经 ComposeDisplayCallbacks 把本适配器的回调
-// 并在终端回调前头——一份事件先落账、再画屏;app-server 一侧已整装切到
-// 这只适配器(旧的手拼回调拆掉)。终终端渲染改吃事件流后,老路退役。
+// 两条水路:
+//   - 主路(OnXxx 口):引擎直接调;条目状态机(正文/思考懒起条、工具
+//     开账/销账)在这只上滚。
+//   - 从路(ForwardFromSubordinate):子代理/嵌套回合的事件原样并入本流,
+//     payload 标 subordinate=true——画屏侧(终端 sink)跳过,账面侧
+//     (会话事件链)照收;不经条目状态机,嵌套条目各带各的 item_id。
 //
 // id 规矩(event.hpp 文件头):thread_id 会话级、turn_id 一轮、item_id
 // 一条;全部从 IdAuthority 发,seq thread 内单调。正文/思考各占一枚
-// item(多条 TextDelta 并入同一枚,首次 delta 开 ItemStarted,收不到
+// item(多条 ItemDelta 并入同一枚,首次 delta 开 ItemStarted,收不到
 // 显式边界就在下一枚 item 开始时收上一枚)。
 //
-// 依赖:合同头 + agent/loop.hpp 的 Callbacks,零 cli/app 依赖。
+// 依赖:合同头 + api/tools 的领域形状,零 cli/app 依赖,也不再倒挂
+// agent/loop(那头的 TurnWiring 持本类的指针,方向是 agent -> runtime)。
 
 #pragma once
 
@@ -28,13 +31,16 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
-#include "agent/loop.hpp"
+#include "api/types.hpp"
 #include "runtime/event.hpp"
 #include "runtime/event_sink.hpp"
 #include "runtime/id_authority.hpp"
+#include "tools/tool.hpp"
 
 namespace lubancode::runtime {
 
@@ -54,8 +60,23 @@ public:
     TurnEventAdapter(TurnEventAdapter&&) = default;
     TurnEventAdapter& operator=(TurnEventAdapter&&) = default;
 
-    // 挂事件落点(可换多次;每次 MakeCallbacks 之前挂好)。
+    // 挂事件落点(可换;每次开轮之前挂好)。
     void Attach(std::function<void(const ServerEvent&)> sink) { sink_ = std::move(sink); }
+
+    // 在既有落点旁边再挂一只(批二余款:终端渲染改吃事件流——SessionRuntime
+    // 造的适配器已带着会话事件链,画屏的 sink 从这里补挂,两条吃同一份流,
+    // 次序 = 原有在前、后挂在后)。
+    void AttachAlongside(std::function<void(const ServerEvent&)> sink) {
+        if (!sink_) {
+            sink_ = std::move(sink);
+            return;
+        }
+        std::function<void(const ServerEvent&)> front = std::move(sink_);
+        sink_ = [front = std::move(front), back = std::move(sink)](const ServerEvent& event) {
+            front(event);
+            back(event);
+        };
+    }
 
     // 一轮开始:发 turn_id、TurnStarted;返回这轮的 turn_id(调用方对账)。
     // 每轮调一次;上一轮没收尾的条目在这里统一按 Cancelled 收口(打断/
@@ -75,88 +96,143 @@ public:
 
     // 本轮 turn_id(Start 之前为空)。
     const std::string& turn_id() const { return turn_id_; }
+    // 会话 id 与发号局(从路适配器对账用:同一场会话、同一本号,seq 才单
+    // 调得起来)。
+    const std::string& thread_id() const { return thread_id_; }
+    IdAuthority& ids() const { return ids_; }
 
-    // 装配这一轮的回调:正文/思考/工具起止/审批/usage 全翻译,零终端依赖。
-    agent::Callbacks MakeCallbacks() {
-        agent::Callbacks callbacks;
+    // ------------------------------------------------------------------
+    // 主路出水口(引擎直连;subordinate=true 时事件带从路标记——画屏侧
+    // 跳过,账面侧照收。PTC 的 stub 调用走这条:16 枚同构调用逐枚有账,
+    // 终端照旧只画一张外层卡)。
+    // ------------------------------------------------------------------
 
-        callbacks.on_text_delta = [this](const std::string& text) {
-            CloseThinking();
-            if (text_item_id_.empty()) {
-                text_item_id_ = StartItem(ItemKind::Text, std::string());
-            }
-            ServerEvent event = MakeEvent(ServerEventKind::ItemDelta, text_item_id_, ItemKind::Text);
-            event.text = text;
-            Emit(std::move(event));
-        };
+    void OnTextDelta(const std::string& text, bool subordinate = false) {
+        CloseThinking();
+        if (text_item_id_.empty()) {
+            text_item_id_ = StartItem(ItemKind::Text, std::string());
+        }
+        ServerEvent event = MakeEvent(ServerEventKind::ItemDelta, text_item_id_, ItemKind::Text);
+        event.text = text;
+        MarkSubordinate(event, subordinate);
+        Emit(std::move(event));
+    }
 
-        callbacks.on_thinking_delta = [this](const std::string& text) {
-            CloseText();
-            if (thinking_item_id_.empty()) {
-                thinking_item_id_ = StartItem(ItemKind::Thinking, std::string());
-            }
-            ServerEvent event = MakeEvent(ServerEventKind::ItemDelta, thinking_item_id_, ItemKind::Thinking);
-            event.text = text;
-            Emit(std::move(event));
-        };
+    void OnThinkingDelta(const std::string& text, bool subordinate = false) {
+        CloseText();
+        if (thinking_item_id_.empty()) {
+            thinking_item_id_ = StartItem(ItemKind::Thinking, std::string());
+        }
+        ServerEvent event = MakeEvent(ServerEventKind::ItemDelta, thinking_item_id_, ItemKind::Thinking);
+        event.text = text;
+        MarkSubordinate(event, subordinate);
+        Emit(std::move(event));
+    }
 
-        callbacks.on_tool_start = [this](const std::string& tool_use_id, const std::string& name,
-                                         const nlohmann::json& input) {
-            CloseText();
-            CloseThinking();
-            const std::string item_id = StartItem(ItemKind::Tool, name, tool_use_id, input);
-            open_tools_.emplace(tool_use_id, item_id);
-        };
+    void OnToolStart(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input,
+                     bool subordinate = false) {
+        CloseText();
+        CloseThinking();
+        const std::string item_id = StartItem(ItemKind::Tool, name, tool_use_id, input, /*builtin=*/false, subordinate);
+        open_tools_.emplace(tool_use_id, item_id);
+    }
 
-        callbacks.on_tool_done = [this](const std::string& tool_use_id, const std::string& name,
-                                        const tools::Tool::Result& result) {
-            (void)name;
-            const std::string item_id = TakeToolItem(tool_use_id);
-            if (item_id.empty()) {
-                return;  // 迟到/陌生终态:丢弃不误伤(与 ToolDisplay 同规矩)
-            }
-            ServerEvent event = MakeEvent(ServerEventKind::ItemCompleted, item_id, ItemKind::Tool);
-            event.outcome = result.is_error ? Outcome::Failed : Outcome::Succeeded;
-            event.payload = nlohmann::json{{"result", result.content}, {"is_error", result.is_error}};
-            Emit(std::move(event));
-        };
+    void OnToolDone(const std::string& tool_use_id, const std::string& name, const tools::Tool::Result& result,
+                    bool subordinate = false) {
+        (void)name;
+        const std::string item_id = TakeToolItem(tool_use_id);
+        if (item_id.empty()) {
+            return;  // 迟到/陌生终态:丢弃不误伤(与 ToolDisplay 同规矩)
+        }
+        ServerEvent event = MakeEvent(ServerEventKind::ItemCompleted, item_id, ItemKind::Tool);
+        event.outcome = result.is_error ? Outcome::Failed : Outcome::Succeeded;
+        event.payload = nlohmann::json{{"result", result.content}, {"is_error", result.is_error}};
+        MarkSubordinate(event, subordinate);
+        Emit(std::move(event));
+    }
 
-        callbacks.on_builtin_tool_start = [this](const std::string& tool_use_id, const std::string& name,
-                                                 const nlohmann::json& input) {
-            CloseText();
-            CloseThinking();
-            const std::string item_id = StartItem(ItemKind::Tool, name, tool_use_id, input);
-            open_tools_.emplace(tool_use_id, item_id);
-        };
+    // 服务端内置工具(Responses 的 web_search_call 一类):与本地工具同一
+    // 种条目,payload 加 builtin 标——画屏侧凭它走"只画一张卡、不走视图账"
+    // 的老规矩(与拔除前的 on_builtin_tool_* 闭包逐字节同画面)。
+    void OnBuiltinToolStart(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input,
+                            bool subordinate = false) {
+        CloseText();
+        CloseThinking();
+        const std::string item_id = StartItem(ItemKind::Tool, name, tool_use_id, input, /*builtin=*/true, subordinate);
+        open_tools_.emplace(tool_use_id, item_id);
+    }
 
-        callbacks.on_builtin_tool_done = [this](const std::string& tool_use_id, const std::string& name,
-                                                const nlohmann::json& input, const std::string& summary,
-                                                bool is_error) {
-            (void)name;
-            (void)input;
-            const std::string item_id = TakeToolItem(tool_use_id);
-            if (item_id.empty()) {
-                return;
-            }
-            ServerEvent event = MakeEvent(ServerEventKind::ItemCompleted, item_id, ItemKind::Tool);
-            event.outcome = is_error ? Outcome::Failed : Outcome::Succeeded;
-            event.payload = nlohmann::json{{"result", summary}, {"is_error", is_error}};
-            Emit(std::move(event));
-        };
+    void OnBuiltinToolDone(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input,
+                           const std::string& summary, bool is_error, bool subordinate = false) {
+        (void)name;
+        const std::string item_id = TakeToolItem(tool_use_id);
+        if (item_id.empty()) {
+            return;
+        }
+        ServerEvent event = MakeEvent(ServerEventKind::ItemCompleted, item_id, ItemKind::Tool);
+        event.outcome = is_error ? Outcome::Failed : Outcome::Succeeded;
+        event.payload = nlohmann::json{{"result", summary}, {"is_error", is_error}, {"builtin", true}};
+        // 终态参数原样带出:Responses 兼容端到 done 才补全 query,画屏侧要
+        // 拿它回填条目标题(老路 on_builtin_tool_done 直传 e.input)。
+        if (!input.is_null() && !input.empty()) {
+            event.payload["input"] = input;
+        }
+        MarkSubordinate(event, subordinate);
+        Emit(std::move(event));
+    }
 
-        callbacks.on_usage = [this](const api::UsageReport& report) {
-            ServerEvent event = MakeEvent(ServerEventKind::UsageUpdated);
-            event.payload = nlohmann::json{{"input_tokens", report.usage.input_tokens},
-                                           {"output_tokens", report.usage.output_tokens},
-                                           {"cache_read_tokens", report.usage.cache_read_tokens},
-                                           {"cache_creation_tokens", report.usage.cache_creation_tokens},
-                                           {"reasoning_tokens", report.usage.output_reasoning_tokens},
-                                           {"model", report.model},
-                                           {"reported", report.reported()}};
-            Emit(std::move(event));
-        };
+    // usage:身份齐着带(step 号/请求 id/缓存 epoch/追加律)——终端的逐步
+    // 流水账(TurnUsageStats)从这份 payload 里还原 UsageReport,不必另开
+    // 一条旁路回调。
+    void OnUsage(const api::UsageReport& report, bool subordinate = false) {
+        ServerEvent event = MakeEvent(ServerEventKind::UsageUpdated);
+        event.payload = nlohmann::json{{"input_tokens", report.usage.input_tokens},
+                                       {"output_tokens", report.usage.output_tokens},
+                                       {"cache_read_tokens", report.usage.cache_read_tokens},
+                                       {"cache_creation_tokens", report.usage.cache_creation_tokens},
+                                       {"reasoning_tokens", report.usage.output_reasoning_tokens},
+                                       {"model", report.model},
+                                       {"reported", report.reported()},
+                                       {"step_index", report.step_index},
+                                       {"request_id", report.request_id},
+                                       {"cache_epoch", report.cache_epoch},
+                                       {"epoch_break_reason", report.epoch_break_reason},
+                                       {"prefix_append_only", report.prefix_append_only}};
+        MarkSubordinate(event, subordinate);
+        Emit(std::move(event));
+    }
 
-        return callbacks;
+    // ---- 回合边界(step/批次):turn 层事件,不带 item_id ----------------
+
+    void OnModelStepStarted(int step_index) {
+        ServerEvent event = MakeEvent(ServerEventKind::ModelStepStarted);
+        event.payload = nlohmann::json{{"step_index", step_index}};
+        Emit(std::move(event));
+    }
+
+    void OnToolBatchStarted(int step_index, int batch_index,
+                            const std::vector<std::string>& ordered_tool_use_ids) {
+        ServerEvent event = MakeEvent(ServerEventKind::ToolBatchStarted);
+        event.payload = nlohmann::json{{"step_index", step_index},
+                                       {"batch_index", batch_index},
+                                       {"ordered_tool_use_ids", ordered_tool_use_ids}};
+        Emit(std::move(event));
+    }
+
+    void OnToolBatchFinished(int batch_index, bool interrupted) {
+        ServerEvent event = MakeEvent(ServerEventKind::ToolBatchFinished);
+        event.payload = nlohmann::json{{"batch_index", batch_index}, {"interrupted", interrupted}};
+        Emit(std::move(event));
+    }
+
+    // ------------------------------------------------------------------
+    // 从路并入:嵌套回合(子代理/PTC 之外的宿主侧装配)把已翻好的事件
+    // 原样递进来——本流只补 subordinate 标与转发,不动条目状态机。
+    // ------------------------------------------------------------------
+    void ForwardFromSubordinate(const ServerEvent& event) {
+        ServerEvent forwarded = event;
+        MarkSubordinate(forwarded, true);
+        Emit(std::move(forwarded));
     }
 
     // 一轮结束:没收尾的条目按给定终态收口(正常跑完 = Succeeded,打断 =
@@ -200,7 +276,8 @@ private:
     }
 
     std::string StartItem(ItemKind kind, const std::string& tool_name, const std::string& tool_use_id = std::string(),
-                          const nlohmann::json& input = nlohmann::json::object()) {
+                          const nlohmann::json& input = nlohmann::json::object(), bool builtin = false,
+                          bool subordinate = false) {
         const std::string item_id = ids_.NextItemId();
         ServerEvent event = MakeEvent(ServerEventKind::ItemStarted, item_id, kind);
         if (!tool_name.empty()) {
@@ -211,9 +288,23 @@ private:
             if (!input.is_null() && !input.empty()) {
                 event.payload["input"] = input;
             }
+            if (builtin) {
+                event.payload["builtin"] = true;
+            }
         }
+        MarkSubordinate(event, subordinate);
         Emit(std::move(event));
         return item_id;
+    }
+
+    // 从路标记:payload 里落一枚稳定键。画屏侧(终端 sink)凭它跳过嵌套
+    // 回合的条目(画面规矩:子代理只画外层卡,不刷主屏),账面侧不认它,
+    // 照单全收。主路(subordinate=false)一个字节不加,payload 与老路
+    // 逐字节一致。
+    static void MarkSubordinate(ServerEvent& event, bool subordinate) {
+        if (subordinate) {
+            event.payload["subordinate"] = true;
+        }
     }
 
     // 正文/思考没有显式的"结束"回调:下一枚 item 开始时收上一枚(终态唯一,
@@ -280,13 +371,5 @@ private:
     std::map<std::string, std::string> open_tools_;  // tool_use_id -> item_id
     bool turn_finished_ = false;
 };
-
-// 两轨并行的装配笔(骨架拆解批二;批三起本体下沉 engine,这里转发):
-// 把 events(适配器 MakeCallbacks 出的显示回调)并进 target(既有消费方
-// 的回调)。语义见 agent/loop.hpp 的 agent::ComposeDisplayCallbacks——
-// 只并 void 出水口;控制口不并。老消费方(app 装配层)继续从这里引。
-inline void ComposeDisplayCallbacks(agent::Callbacks& target, const agent::Callbacks& events) {
-    agent::ComposeDisplayCallbacks(target, events);
-}
 
 }  // namespace lubancode::runtime

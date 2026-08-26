@@ -1,6 +1,10 @@
 // peer_commands.hpp 的实现:三个命令的函数体,原样搬自会话主循环的
 // slash case,行为一字未改。
 #include "app/commands/peer_commands.hpp"
+#include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
+
+using lubancode::cli::TermOut;
+using lubancode::cli::TermErr;
 
 #include <iostream>
 
@@ -16,12 +20,12 @@ using lubancode::cli::trf;
 CommandFlow HandlePeersCommand(PeerCommandState& state, const lubancode::cli::Theme& theme,
                                bool spinner_enabled) {
     if (!state.started) {
-        std::cout << theme.stats << tr("cmd.peers.off") << theme.reset << "\n";
+        TermOut() << theme.stats << tr("cmd.peers.off") << theme.reset << "\n";
         return CommandFlow::Continue;
     }
     const auto peers = state.runtime->ListPeers();
     if (peers.empty()) {
-        std::cout << tr("cmd.peers.empty") << "\n";
+        TermOut() << tr("cmd.peers.empty") << "\n";
         return CommandFlow::Continue;
     }
     const auto status_label = [](const std::string& status) {
@@ -43,7 +47,7 @@ CommandFlow HandlePeersCommand(PeerCommandState& state, const lubancode::cli::Th
         if (const auto selected = lubancode::cli::ReadChoiceMenu(items, options, theme);
             selected.has_value() && !selected->selected_indices.empty()) {
             const auto& card = peers[selected->selected_indices.front()];
-            std::cout << theme.tool_line << card.name << " (" << card.peer_id << ")" << theme.reset << "\n"
+            TermOut() << theme.tool_line << card.name << " (" << card.peer_id << ")" << theme.reset << "\n"
                       << theme.stats << "  " << status_label(card.status) << " · cwd " << card.cwd << "\n"
                       << "  pid " << card.pid
                       << (card.session_id.empty() ? std::string() : " · session " + card.session_id)
@@ -51,7 +55,7 @@ CommandFlow HandlePeersCommand(PeerCommandState& state, const lubancode::cli::Th
         }
     } else {
         for (const auto& card : peers) {
-            std::cout << "- " << card.name << " (" << card.peer_id << ") · " << status_label(card.status)
+            TermOut() << "- " << card.name << " (" << card.peer_id << ") · " << status_label(card.status)
                       << " · " << card.cwd << "\n";
         }
     }
@@ -61,18 +65,18 @@ CommandFlow HandlePeersCommand(PeerCommandState& state, const lubancode::cli::Th
 CommandFlow HandleSendCommand(PeerCommandState& state, const std::string& args,
                               const lubancode::cli::Theme& theme) {
     if (!state.started) {
-        std::cout << theme.stats << tr("cmd.peers.off") << theme.reset << "\n";
+        TermOut() << theme.stats << tr("cmd.peers.off") << theme.reset << "\n";
         return CommandFlow::Continue;
     }
     const std::size_t space = args.find_first_of(" \t");
     if (space == std::string::npos) {
-        std::cout << tr("cmd.send.usage") << "\n";
+        TermOut() << tr("cmd.send.usage") << "\n";
         return CommandFlow::Continue;
     }
     const std::string target = args.substr(0, space);
     const std::string text = args.substr(space + 1);
     if (target.empty() || text.empty()) {
-        std::cout << tr("cmd.send.usage") << "\n";
+        TermOut() << tr("cmd.send.usage") << "\n";
         return CommandFlow::Continue;
     }
     const auto peers = state.runtime->ListPeers();
@@ -84,7 +88,7 @@ CommandFlow HandleSendCommand(PeerCommandState& state, const std::string& args,
         }
     }
     if (found == nullptr) {
-        std::cout << theme.error << trf("cmd.send.unknown_target", target) << theme.reset << "\n";
+        TermOut() << theme.error << trf("cmd.send.unknown_target", target) << theme.reset << "\n";
         return CommandFlow::Continue;
     }
     const lubancode::peers::PeerDelivery delivery = state.runtime->Send(*found, text);
@@ -99,14 +103,14 @@ CommandFlow HandleSendCommand(PeerCommandState& state, const std::string& args,
     const bool failed = delivery == lubancode::peers::PeerDelivery::Refused ||
                         delivery == lubancode::peers::PeerDelivery::Expired ||
                         delivery == lubancode::peers::PeerDelivery::Unavailable;
-    std::cout << (failed ? theme.error : theme.stats)
+    TermOut() << (failed ? theme.error : theme.stats)
               << trf("cmd.send.result", found->name, found->peer_id, tr(delivery_key)) << theme.reset << "\n";
     return CommandFlow::Continue;
 }
 
 CommandFlow HandlePeerpermCommand(PeerCommandState& state, const std::string& args) {
     if (!state.started) {
-        std::cout << tr("cmd.peers.off") << "\n";
+        TermOut() << tr("cmd.peers.off") << "\n";
         return CommandFlow::Continue;
     }
     lubancode::peers::PeerPermissionTier tier = state.runtime->tier();
@@ -126,14 +130,14 @@ CommandFlow HandlePeerpermCommand(PeerCommandState& state, const std::string& ar
             case lubancode::peers::PeerPermissionTier::Refuse: name = "refuse"; break;
             case lubancode::peers::PeerPermissionTier::Auto: break;
         }
-        std::cout << trf("cmd.peerperm.current", name) << "\n";
+        TermOut() << trf("cmd.peerperm.current", name) << "\n";
         return CommandFlow::Continue;
     } else {
-        std::cout << tr("cmd.peerperm.usage") << "\n";
+        TermOut() << tr("cmd.peerperm.usage") << "\n";
         return CommandFlow::Continue;
     }
     state.runtime->SetTier(tier);
-    std::cout << trf("cmd.peerperm.set", args) << "\n";
+    TermOut() << trf("cmd.peerperm.set", args) << "\n";
     return CommandFlow::Continue;
 }
 

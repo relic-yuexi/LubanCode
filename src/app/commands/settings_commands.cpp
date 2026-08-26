@@ -45,6 +45,8 @@ namespace lubancode::app {
 
 
 using lubancode::platform::CurrentDirUtf8;
+using lubancode::cli::TermOut;
+using lubancode::cli::TermErr;
 using lubancode::cli::tr;
 using lubancode::cli::trf;
 
@@ -59,10 +61,10 @@ constexpr std::size_t kWizardChoicePlainRows = static_cast<std::size_t>(kWizardC
 }  // namespace
 
 void PrintLubanIcon(const lubancode::cli::Theme& theme) {
-    std::cout << theme.banner << "╭───────────────────────╮" << theme.reset << "\n";
-    std::cout << theme.banner << "│  鲁 班 code           │" << theme.reset << "\n";
-    std::cout << theme.stats << "│  匠心运斤 · 代码成器  │" << theme.reset << "\n";
-    std::cout << theme.banner << "╰───────────────────────╯" << theme.reset << "\n";
+    TermOut() << theme.banner << "╭───────────────────────╮" << theme.reset << "\n";
+    TermOut() << theme.banner << "│  鲁 班 code           │" << theme.reset << "\n";
+    TermOut() << theme.stats << "│  匠心运斤 · 代码成器  │" << theme.reset << "\n";
+    TermOut() << theme.banner << "╰───────────────────────╯" << theme.reset << "\n";
 }
 
 // 交互模式启动横幅:一眼看全版本、wire、当前模型、工作目录,两行,不啰嗦。
@@ -71,14 +73,14 @@ void PrintBanner(const lubancode::config::Config& config, const lubancode::cli::
     const bool connected = !config.base_url.empty() && !config.model.empty() &&
                            (!config.auth_token.empty() ||
                             config.auth_mode == lubancode::config::ProviderAuthMode::None);
-    std::cout << theme.banner << "lubancode " << kVersion << "  ";
+    TermOut() << theme.banner << "lubancode " << kVersion << "  ";
     if (connected) {
-        std::cout << "[" << wire_str << "] " << config.model;
+        TermOut() << "[" << wire_str << "] " << config.model;
     } else {
-        std::cout << "[" << tr("banner.not_connected") << "]";
+        TermOut() << "[" << tr("banner.not_connected") << "]";
     }
-    std::cout << theme.reset << "\n";
-    std::cout << theme.stats << "cwd: " << CurrentDirUtf8() << "  ·  "
+    TermOut() << theme.reset << "\n";
+    TermOut() << theme.stats << "cwd: " << CurrentDirUtf8() << "  ·  "
               << tr(connected ? "banner.hint" : "setup.session.hint") << theme.reset << "\n";
 }
 
@@ -103,8 +105,8 @@ lubancode::cli::WizardIO MakeInteractiveWizardIO(const lubancode::cli::Theme& th
     auto panel = std::make_shared<lubancode::cli::WizardPanel>();
     const bool panel_active = lubancode::cli::WizardPanel::Available();
     io.print = [](const std::string& line) {
-        std::cout << line << "\n";
-        std::cout.flush();
+        TermOut() << line << "\n";
+        TermOut().flush();
     };
     // prompt 已经由向导自己通过 print 打出来了,这里传空串,别让 ReadLine 再打一遍。
     io.read_line = []() -> std::optional<std::string> { return lubancode::cli::ReadLine(""); };
@@ -176,24 +178,24 @@ bool HandleUpdateCommand(const std::string& args, int connect_timeout_ms, int re
         ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
     }
     if (!action.empty() && action != "check") {
-        std::cout << tr("cmd.update.usage") << "\n";
+        TermOut() << tr("cmd.update.usage") << "\n";
         return false;
     }
 
-    std::cout << tr("cmd.update.checking") << "\n";
-    std::cout.flush();
+    TermOut() << tr("cmd.update.checking") << "\n";
+    TermOut().flush();
     const auto checked = lubancode::config::CheckForUpdate(
         std::string(kVersion), connect_timeout_ms, request_timeout_secs);
     if (!checked.has_value()) {
-        std::cout << trf("cmd.update.failed", checked.error()) << "\n";
+        TermOut() << trf("cmd.update.failed", checked.error()) << "\n";
         return false;
     }
     if (!checked->update_available) {
-        std::cout << trf("cmd.update.current", checked->current_version, checked->latest_version) << "\n";
+        TermOut() << trf("cmd.update.current", checked->current_version, checked->latest_version) << "\n";
         return true;
     }
 
-    std::cout << trf("cmd.update.available", checked->current_version, checked->latest_version) << "\n"
+    TermOut() << trf("cmd.update.available", checked->current_version, checked->latest_version) << "\n"
               << trf("cmd.update.release", checked->release_url) << "\n"
               << tr("cmd.update.install_hint") << "\n";
     return true;
@@ -204,16 +206,16 @@ bool HandleUpdateCommand(const std::string& args, int connect_timeout_ms, int re
 void PrintSkillsCommand(const std::vector<lubancode::tools::SkillMeta>& skills, const std::string& project_dir,
                          const std::optional<std::string>& home_dir) {
     if (skills.empty()) {
-        std::cout << trf("cmd.skills.empty", project_dir,
+        TermOut() << trf("cmd.skills.empty", project_dir,
                           home_dir.has_value() ? *home_dir : tr("path.no_home"))
                    << "\n";
         return;
     }
-    std::cout << trf("cmd.skills.header", skills.size()) << "\n";
+    TermOut() << trf("cmd.skills.header", skills.size()) << "\n";
     for (const auto& skill : skills) {
-        std::cout << "  - " << skill.name << " [" << skill.source_level << "]: "
+        TermOut() << "  - " << skill.name << " [" << skill.source_level << "]: "
                    << (skill.description.empty() ? tr("cmd.skills.no_desc") : skill.description) << "\n";
-        std::cout << "      " << skill.dir_path << "\n";
+        TermOut() << "      " << skill.dir_path << "\n";
     }
 }
 
@@ -255,7 +257,7 @@ std::string JoinSkillNames(const std::vector<std::string>& names) {
 bool HandleSkillCommand(const std::string& args, const std::filesystem::path& global_skills_root,
                         const std::filesystem::path& project_skills_root) {
     if (global_skills_root.empty()) {
-        std::cout << tr("cmd.skill.no_home") << "\n";
+        TermOut() << tr("cmd.skill.no_home") << "\n";
         return false;
     }
     const auto [verb, value] = SplitSkillCommandArgs(args);
@@ -263,19 +265,19 @@ bool HandleSkillCommand(const std::string& args, const std::filesystem::path& gl
         const auto global = lubancode::config::ListStoredSkills(global_skills_root);
         const auto project = lubancode::config::ListStoredSkills(project_skills_root);
         if (!global.has_value()) {
-            std::cout << trf("cmd.skill.error", "/skill list", global.error()) << "\n";
+            TermOut() << trf("cmd.skill.error", "/skill list", global.error()) << "\n";
             return false;
         }
         if (!project.has_value()) {
-            std::cout << trf("cmd.skill.error", "/skill list", project.error()) << "\n";
+            TermOut() << trf("cmd.skill.error", "/skill list", project.error()) << "\n";
             return false;
         }
         if (global->empty() && project->empty()) {
-            std::cout << tr("cmd.skill.list_empty") << "\n";
+            TermOut() << tr("cmd.skill.list_empty") << "\n";
             return false;
         }
 
-        std::cout << tr("cmd.skill.list_header") << "\n";
+        TermOut() << tr("cmd.skill.list_header") << "\n";
         const auto print_entries = [](const std::vector<lubancode::config::StoredSkill>& entries,
                                       const std::string& scope) {
             for (const auto& skill : entries) {
@@ -283,7 +285,7 @@ bool HandleSkillCommand(const std::string& args, const std::filesystem::path& gl
                     skill.source_url.has_value() ? trf("cmd.skill.remote", *skill.source_url,
                                                        skill.installed_at.value_or(std::string()))
                                                  : tr("cmd.skill.local");
-                std::cout << "  - " << skill.name << " [" << scope << "; " << source << "]\n"
+                TermOut() << "  - " << skill.name << " [" << scope << "; " << source << "]\n"
                           << "      " << skill.dir_path << "\n";
             }
         };
@@ -293,22 +295,22 @@ bool HandleSkillCommand(const std::string& args, const std::filesystem::path& gl
     }
     if (verb == "install") {
         if (value.empty()) {
-            std::cout << tr("cmd.skill.usage") << "\n";
+            TermOut() << tr("cmd.skill.usage") << "\n";
             return false;
         }
         const auto installed = lubancode::config::InstallSkillSource(
             global_skills_root, value, lubancode::config::FetchRemoteSkillUrl);
         if (!installed.has_value()) {
-            std::cout << trf("cmd.skill.error", "/skill install", installed.error()) << "\n";
+            TermOut() << trf("cmd.skill.error", "/skill install", installed.error()) << "\n";
             return false;
         }
-        std::cout << trf("cmd.skill.install_done", JoinSkillNames(installed->installed_names)) << "\n";
+        TermOut() << trf("cmd.skill.install_done", JoinSkillNames(installed->installed_names)) << "\n";
         return true;
     }
     if (verb == "update") {
         const auto records = lubancode::config::LoadRemoteSkillRecords(global_skills_root);
         if (!records.has_value()) {
-            std::cout << trf("cmd.skill.error", "/skill update", records.error()) << "\n";
+            TermOut() << trf("cmd.skill.error", "/skill update", records.error()) << "\n";
             return false;
         }
         std::vector<lubancode::config::RemoteSkillRecord> chosen;
@@ -318,7 +320,7 @@ bool HandleSkillCommand(const std::string& args, const std::filesystem::path& gl
             }
         }
         if (chosen.empty()) {
-            std::cout << tr("cmd.skill.update_none") << "\n";
+            TermOut() << tr("cmd.skill.update_none") << "\n";
             return false;
         }
 
@@ -330,28 +332,28 @@ bool HandleSkillCommand(const std::string& args, const std::filesystem::path& gl
             const auto updated = lubancode::config::InstallRemoteSkills(
                 global_skills_root, record.source_url, lubancode::config::FetchRemoteSkillUrl, options);
             if (!updated.has_value()) {
-                std::cout << trf("cmd.skill.error", "/skill update " + record.name, updated.error()) << "\n";
+                TermOut() << trf("cmd.skill.error", "/skill update " + record.name, updated.error()) << "\n";
                 continue;
             }
-            std::cout << trf("cmd.skill.update_done", JoinSkillNames(updated->installed_names)) << "\n";
+            TermOut() << trf("cmd.skill.update_done", JoinSkillNames(updated->installed_names)) << "\n";
             changed = true;
         }
         return changed;
     }
     if (verb == "remove") {
         if (value.empty()) {
-            std::cout << tr("cmd.skill.usage") << "\n";
+            TermOut() << tr("cmd.skill.usage") << "\n";
             return false;
         }
         const auto removed = lubancode::config::RemoveStoredSkill(global_skills_root, value);
         if (!removed.has_value()) {
-            std::cout << trf("cmd.skill.error", "/skill remove", removed.error()) << "\n";
+            TermOut() << trf("cmd.skill.error", "/skill remove", removed.error()) << "\n";
             return false;
         }
-        std::cout << trf("cmd.skill.remove_done", value) << "\n";
+        TermOut() << trf("cmd.skill.remove_done", value) << "\n";
         return true;
     }
-    std::cout << tr("cmd.skill.usage") << "\n";
+    TermOut() << tr("cmd.skill.usage") << "\n";
     return false;
 }
 
@@ -365,34 +367,34 @@ void HandleThinkCommand(const std::string& args, const std::shared_ptr<std::stri
     const std::vector<std::string> hint_lines = lubancode::config::ThinkLevelHintLines(entry);
     const std::string param_name = think_param.empty() ? std::string("reasoning_effort") : think_param;
     if (args.empty()) {
-        std::cout << trf("cmd.think.current",
+        TermOut() << trf("cmd.think.current",
                          current_think->empty() ? std::string(tr("config.think.unset")) : *current_think)
                   << "\n";
         if (!hint_lines.empty()) {
-            std::cout << trf("cmd.think.catalog_header", entry->slug) << "\n";
+            TermOut() << trf("cmd.think.catalog_header", entry->slug) << "\n";
             for (const auto& line : hint_lines) {
-                std::cout << line << "\n";
+                TermOut() << line << "\n";
             }
         } else if (!provider_levels.empty()) {
             // 模型不在目录(或目录没声明),provider 配置声明了就列它——
             // 本地兼容端的主路:声明在 providers[].supported_think_levels。
-            std::cout << trf("cmd.think.provider_header", param_name) << "\n";
+            TermOut() << trf("cmd.think.provider_header", param_name) << "\n";
             for (const auto& level : provider_levels) {
-                std::cout << "  - " << level << "\n";
+                TermOut() << "  - " << level << "\n";
             }
         } else {
-            std::cout << tr("cmd.think.unverified") << "\n";
+            TermOut() << tr("cmd.think.unverified") << "\n";
         }
-        std::cout << tr("cmd.think.doctor_hint") << "\n";
+        TermOut() << tr("cmd.think.doctor_hint") << "\n";
         return;
     }
     *current_think = args;
-    std::cout << trf("cmd.think.switched", args);
+    TermOut() << trf("cmd.think.switched", args);
     if (!hint_lines.empty()) {
         if (!lubancode::config::ThinkLevelDeclared(*entry, args)) {
-            std::cout << tr("cmd.think.undeclared");
+            TermOut() << tr("cmd.think.undeclared");
         }
-        std::cout << "\n";
+        TermOut() << "\n";
     } else if (!provider_levels.empty()) {
         const bool declared = std::any_of(provider_levels.begin(), provider_levels.end(),
                                           [&args](const std::string& level) {
@@ -411,10 +413,10 @@ void HandleThinkCommand(const std::string& args, const std::shared_ptr<std::stri
                                               }
                                               return true;
                                           });
-        std::cout << (declared ? tr("cmd.think.provider_declared") : tr("cmd.think.provider_undeclared"))
+        TermOut() << (declared ? tr("cmd.think.provider_declared") : tr("cmd.think.provider_undeclared"))
                   << "\n";
     } else {
-        std::cout << tr("cmd.think.unverified_send") << "\n";
+        TermOut() << tr("cmd.think.unverified_send") << "\n";
     }
 }
 
@@ -433,16 +435,16 @@ void ApplyModelCatalog(const lubancode::config::ModelCatalog& catalog, const std
         lubancode::config::ComputeCatalogApplication(catalog, slug, think_explicit, window_explicit);
     if (apply.think.has_value()) {
         *current_think = *apply.think;
-        std::cout << trf("catalog.apply_think", *apply.think) << "\n";
+        TermOut() << trf("catalog.apply_think", *apply.think) << "\n";
     }
     if (apply.context_window_tokens.has_value()) {
         context_tracker.set_window_tokens(*apply.context_window_tokens);
-        std::cout << trf("catalog.apply_window", *apply.context_window_tokens) << "\n";
+        TermOut() << trf("catalog.apply_window", *apply.context_window_tokens) << "\n";
     }
     if (*current_model_instructions != apply.base_instructions) {
         *current_model_instructions = apply.base_instructions;
         if (!apply.base_instructions.empty()) {
-            std::cout << trf("catalog.apply_instructions", slug) << "\n";
+            TermOut() << trf("catalog.apply_instructions", slug) << "\n";
         }
     }
 }
@@ -451,12 +453,12 @@ void ApplyModelCatalog(const lubancode::config::ModelCatalog& catalog, const std
 // "回落到 normal",不把同名重印一遍(规格"界面"节)。
 void PrintModelRolesTable(const lubancode::agent::ModelRouteTable* roles_table) {
     if (roles_table == nullptr) {
-        std::cout << tr("cmd.model.roles_unavailable") << "\n";
+        TermOut() << tr("cmd.model.roles_unavailable") << "\n";
         return;
     }
-    std::cout << tr("cmd.model.roles_header") << "\n";
+    TermOut() << tr("cmd.model.roles_header") << "\n";
     for (const std::string& line : lubancode::app::FormatModelRolesTable(*roles_table)) {
-        std::cout << "  " << line << "\n";
+        TermOut() << "  " << line << "\n";
     }
 }
 
@@ -495,19 +497,19 @@ std::optional<std::string> ChooseModelId(const lubancode::runtime::ModelQueryRes
         opts.initial_cursor = default_idx;
         const auto sel = lubancode::cli::ReadChoiceMenu(items, opts, lubancode::cli::Theme{});
         if (!sel.has_value()) {
-            std::cout << tr("cmd.model.cancelled") << "\n";
+            TermOut() << tr("cmd.model.cancelled") << "\n";
             return std::nullopt;
         }
         idx = sel->selected_indices.empty() ? default_idx : sel->selected_indices.front();
     } else {
         for (std::size_t i = 0; i < items.size(); ++i) {
-            std::cout << "  " << (i + 1) << ") " << items[i].label
+            TermOut() << "  " << (i + 1) << ") " << items[i].label
                       << (items[i].description.empty() ? "" : "  " + items[i].description) << "\n";
         }
         const std::optional<std::string> selection = lubancode::cli::ReadLine(
             trf("cmd.model.choose", default_idx + 1), {}, /*esc_rejects=*/true);
         if (!selection.has_value()) {
-            std::cout << tr("cmd.model.cancelled") << "\n";
+            TermOut() << tr("cmd.model.cancelled") << "\n";
             return std::nullopt;
         }
         if (!selection->empty()) {
@@ -515,12 +517,12 @@ std::optional<std::string> ChooseModelId(const lubancode::runtime::ModelQueryRes
                 std::size_t consumed = 0;
                 const int n = std::stoi(*selection, &consumed);
                 if (consumed != selection->size() || n < 1 || static_cast<std::size_t>(n) > ids.size()) {
-                    std::cout << tr("cmd.model.bad_number") << "\n";
+                    TermOut() << tr("cmd.model.bad_number") << "\n";
                     return std::nullopt;
                 }
                 idx = static_cast<std::size_t>(n - 1);
             } catch (...) {
-                std::cout << tr("cmd.model.not_number") << "\n";
+                TermOut() << tr("cmd.model.not_number") << "\n";
                 return std::nullopt;
             }
         }
@@ -531,10 +533,10 @@ void PrintProviderList(const std::vector<lubancode::config::ProviderConfig>& pro
                        const lubancode::config::Config& current_config,
                        const std::string& active_provider) {
     if (providers.empty()) {
-        std::cout << tr("cmd.provider.empty") << "\n";
+        TermOut() << tr("cmd.provider.empty") << "\n";
         return;
     }
-    std::cout << tr("cmd.provider.header") << "\n";
+    TermOut() << tr("cmd.provider.header") << "\n";
     for (const auto& provider : providers) {
         const std::string model = provider.model.empty() ? tr("cmd.provider.model_unset") : provider.model;
         const bool is_current = provider.name == active_provider ||
@@ -569,7 +571,7 @@ void PrintProviderList(const std::vector<lubancode::config::ProviderConfig>& pro
         if (!provider.extra_headers.empty()) {
             extra += trf("cmd.provider.extra_headers_hint", provider.extra_headers.size());
         }
-        std::cout << trf("cmd.provider.line", provider.name, lubancode::config::ProviderWireName(provider.wire),
+        TermOut() << trf("cmd.provider.line", provider.name, lubancode::config::ProviderWireName(provider.wire),
                           provider.base_url, model, provider.context_window_tokens, auth_display, extra, current)
                   << "\n";
     }
@@ -586,30 +588,30 @@ std::optional<std::string> RunProviderAddWizardInteractive(const std::string& na
     lubancode::cli::WizardIO io = MakeInteractiveWizardIO(theme);
 
     if (lubancode::config::ProviderCatalogCacheIsStale()) {
-        std::cout << tr("provider_catalog.refreshing") << "\n";
+        TermOut() << tr("provider_catalog.refreshing") << "\n";
         const auto refreshed = lubancode::config::RefreshProviderCatalog();
         if (!refreshed.has_value()) {
-            std::cout << trf("provider_catalog.refresh_failed", refreshed.error()) << "\n";
+            TermOut() << trf("provider_catalog.refresh_failed", refreshed.error()) << "\n";
         }
     }
     const lubancode::config::ProviderCatalog provider_catalog = lubancode::config::LoadProviderCatalog();
     for (const auto& warning : provider_catalog.warnings) {
-        std::cout << trf("provider_catalog.warning", warning) << "\n";
+        TermOut() << trf("provider_catalog.warning", warning) << "\n";
     }
     const auto outcome =
         lubancode::cli::RunProviderPresetWizard(io, provider_catalog, name_prefill, config.providers);
     if (!outcome.has_value() || !outcome->save_requested) {
-        std::cout << tr("cmd.provider.add_cancelled") << "\n";
+        TermOut() << tr("cmd.provider.add_cancelled") << "\n";
         return std::nullopt;
     }
 
     const auto saved = lubancode::config::AddProviderToGlobalConfig(outcome->provider);
     if (!saved.has_value()) {
-        std::cout << trf("cmd.provider.add_failed", saved.error()) << "\n";
+        TermOut() << trf("cmd.provider.add_failed", saved.error()) << "\n";
         return std::nullopt;
     }
     config.providers.push_back(outcome->provider);
-    std::cout << trf("cmd.provider.added", outcome->provider.name, *saved) << "\n";
+    TermOut() << trf("cmd.provider.added", outcome->provider.name, *saved) << "\n";
     return outcome->provider.name;
 }
 
@@ -637,7 +639,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
         const lubancode::config::ProviderConfig* provider =
             lubancode::config::FindProvider(config.providers, switch_name);
         if (provider == nullptr) {
-            std::cout << trf("cmd.provider.not_found", switch_name) << "\n";
+            TermOut() << trf("cmd.provider.not_found", switch_name) << "\n";
             return;
         }
         // 项目配置显式写了 active_provider 就继续写回项目；其余场景
@@ -677,18 +679,18 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
         // 放在 ApplyModelCatalog 之后:provider 的显式配置该压过目录默认。
         if (!provider->model_reasoning_effort.empty()) {
             *current_think = provider->model_reasoning_effort;
-            std::cout << trf("cmd.provider.effort_applied", provider->name, provider->model_reasoning_effort)
+            TermOut() << trf("cmd.provider.effort_applied", provider->name, provider->model_reasoning_effort)
                       << "\n";
         }
         rebuild_loop(/*preserve_history=*/true);
-        std::cout << trf("cmd.provider.switched", provider->name, provider->base_url) << "\n";
+        TermOut() << trf("cmd.provider.switched", provider->name, provider->base_url) << "\n";
         if (remembered.has_value()) {
             active_provider_source = active_provider_write_path.has_value()
                                          ? lubancode::config::Source::ProjectConfigFile
                                          : lubancode::config::Source::GlobalConfigFile;
-            std::cout << trf("cmd.provider.remembered", provider->name) << "\n";
+            TermOut() << trf("cmd.provider.remembered", provider->name) << "\n";
         } else {
-            std::cout << trf("cmd.provider.remember_failed", remembered.error()) << "\n";
+            TermOut() << trf("cmd.provider.remember_failed", remembered.error()) << "\n";
         }
     };
 
@@ -716,8 +718,8 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                 {tr("provider_remedy.opt_howto"), {}},
                 {tr("provider_remedy.opt_back"), {}},
             };
-            std::cout << trf("provider_remedy.title", name) << "\n";
-            std::cout << (inline_missing ? trf("provider_remedy.body_inline", name)
+            TermOut() << trf("provider_remedy.title", name) << "\n";
+            TermOut() << (inline_missing ? trf("provider_remedy.body_inline", name)
                                          : trf("provider_remedy.body_env", name, auth.env_name)) << "\n";
             lubancode::cli::ChoiceMenuOptions opts;
             opts.hint = tr("provider_remedy.footer");
@@ -757,13 +759,13 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                 if (persist) {
                     const auto saved = lubancode::config::SetProviderAuthInlineInGlobalConfig(name, *key);
                     if (!saved.has_value()) {
-                        std::cout << trf("cmd.provider.set_failed", saved.error()) << "\n";
+                        TermOut() << trf("cmd.provider.set_failed", saved.error()) << "\n";
                         return false;
                     }
-                    std::cout << trf("provider_remedy.key_saved", name,
+                    TermOut() << trf("provider_remedy.key_saved", name,
                                      lubancode::config::MaskApiKey(*key), *saved) << "\n";
                 } else {
-                    std::cout << trf("provider_remedy.key_session_only",
+                    TermOut() << trf("provider_remedy.key_session_only",
                                      lubancode::config::MaskApiKey(*key)) << "\n";
                 }
                 continue;  // 回页顶复查:现在 Ready 了,直接返回 true
@@ -778,7 +780,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                 }
                 const auto saved = lubancode::config::SetProviderAuthEnvInGlobalConfig(name, *env_name);
                 if (!saved.has_value()) {
-                    std::cout << trf("cmd.provider.set_failed", saved.error()) << "\n";
+                    TermOut() << trf("cmd.provider.set_failed", saved.error()) << "\n";
                     return false;
                 }
                 const auto it = std::find_if(config.providers.begin(), config.providers.end(),
@@ -790,7 +792,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     it->key_env = *env_name;
                 }
                 const std::optional<std::string> value = lubancode::platform::GetEnvVar(env_name->c_str());
-                std::cout << (value.has_value() && !value->empty()
+                TermOut() << (value.has_value() && !value->empty()
                                   ? trf("provider_wizard.auth.env.note_set", *env_name)
                                   : trf("provider_wizard.auth.env.note_unset", *env_name)) << "\n";
                 continue;
@@ -800,7 +802,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                 const auto saved = lubancode::config::SetProviderAuthModeInGlobalConfig(
                     name, lubancode::config::ProviderAuthMode::None);
                 if (!saved.has_value()) {
-                    std::cout << trf("cmd.provider.set_failed", saved.error()) << "\n";
+                    TermOut() << trf("cmd.provider.set_failed", saved.error()) << "\n";
                     return false;
                 }
                 const auto it = std::find_if(config.providers.begin(), config.providers.end(),
@@ -811,7 +813,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     it->auth = lubancode::config::ProviderAuthMode::None;
                     it->key_env.clear();
                 }
-                std::cout << trf("provider_remedy.none_saved", name, *saved) << "\n";
+                TermOut() << trf("provider_remedy.none_saved", name, *saved) << "\n";
                 continue;
             }
             if (pick == 3) {
@@ -819,12 +821,12 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                 const std::string env_for_howto =
                     auth.env_name.empty() ? provider->key_env : auth.env_name;
 #ifdef _WIN32
-                std::cout << trf("provider_remedy.howto_powershell", env_for_howto) << "\n";
-                std::cout << trf("provider_remedy.howto_cmd", env_for_howto) << "\n";
+                TermOut() << trf("provider_remedy.howto_powershell", env_for_howto) << "\n";
+                TermOut() << trf("provider_remedy.howto_cmd", env_for_howto) << "\n";
 #else
-                std::cout << trf("provider_remedy.howto_posix", env_for_howto) << "\n";
+                TermOut() << trf("provider_remedy.howto_posix", env_for_howto) << "\n";
 #endif
-                std::cout << tr("provider_remedy.howto_restart") << "\n";
+                TermOut() << tr("provider_remedy.howto_restart") << "\n";
                 continue;
             }
             return false;  // 返回 provider 列表
@@ -837,18 +839,18 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
         const lubancode::config::ProviderConfig* provider =
             lubancode::config::FindProvider(config.providers, name);
         if (provider == nullptr) {
-            std::cout << trf("cmd.provider.not_found", name) << "\n";
+            TermOut() << trf("cmd.provider.not_found", name) << "\n";
             return;
         }
         lubancode::cli::WizardIO io = MakeInteractiveWizardIO(theme);
         const auto outcome = lubancode::cli::RunProviderEditWizard(io, *provider);
         if (!outcome.has_value() || !outcome->save_requested) {
-            std::cout << tr("cmd.provider.edit.cancelled") << "\n";
+            TermOut() << tr("cmd.provider.edit.cancelled") << "\n";
             return;
         }
         const auto saved = lubancode::config::ReplaceProviderInGlobalConfig(name, outcome->provider);
         if (!saved.has_value()) {
-            std::cout << trf("cmd.provider.edit.save_failed", saved.error()) << "\n";
+            TermOut() << trf("cmd.provider.edit.save_failed", saved.error()) << "\n";
             return;
         }
         // 内存里的这份跟着换,后续 execute_switch / list 看到的都是新值。
@@ -857,7 +859,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
         if (it != config.providers.end()) {
             *it = outcome->provider;
         }
-        std::cout << trf("cmd.provider.edit.saved", name, *saved) << "\n";
+        TermOut() << trf("cmd.provider.edit.saved", name, *saved) << "\n";
         if (active_provider == name) {
             execute_switch(name, "");  // 重新应用整套配置,立即生效
         }
@@ -868,14 +870,14 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             PrintProviderList(config.providers, config, active_provider);
             return;
         case lubancode::cli::ProviderCommandAction::Refresh: {
-            std::cout << tr("provider_catalog.refreshing") << "\n";
+            TermOut() << tr("provider_catalog.refreshing") << "\n";
             const auto refreshed = lubancode::config::RefreshProviderCatalog();
             if (!refreshed.has_value()) {
-                std::cout << trf("provider_catalog.refresh_failed", refreshed.error()) << "\n";
+                TermOut() << trf("provider_catalog.refresh_failed", refreshed.error()) << "\n";
             } else if (refreshed->not_modified) {
-                std::cout << tr("provider_catalog.refresh_current") << "\n";
+                TermOut() << tr("provider_catalog.refresh_current") << "\n";
             } else {
-                std::cout << trf("provider_catalog.refresh_ok", refreshed->revision, refreshed->cache_path) << "\n";
+                TermOut() << trf("provider_catalog.refresh_ok", refreshed->revision, refreshed->cache_path) << "\n";
             }
             return;
         }
@@ -904,14 +906,14 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             }
             const auto wire = lubancode::config::ParseProviderWire(command.wire);
             if (!wire.has_value()) {
-                std::cout << trf("cmd.provider.add_failed", wire.error()) << "\n";
+                TermOut() << trf("cmd.provider.add_failed", wire.error()) << "\n";
                 return;
             }
             std::size_t window = lubancode::config::kDefaultContextWindowTokens;
             if (!command.window.empty()) {
                 const auto parsed_window = lubancode::config::ParseContextWindowTokens(command.window);
                 if (!parsed_window.has_value()) {
-                    std::cout << trf("cmd.provider.add_failed", parsed_window.error()) << "\n";
+                    TermOut() << trf("cmd.provider.add_failed", parsed_window.error()) << "\n";
                     return;
                 }
                 window = *parsed_window;
@@ -928,20 +930,20 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             };
             const auto valid = lubancode::config::ValidateProviderConfig(provider);
             if (!valid.has_value()) {
-                std::cout << trf("cmd.provider.add_failed", valid.error()) << "\n";
+                TermOut() << trf("cmd.provider.add_failed", valid.error()) << "\n";
                 return;
             }
             if (lubancode::config::FindProvider(config.providers, provider.name) != nullptr) {
-                std::cout << trf("cmd.provider.add_failed", trf("cmd.provider.exists", provider.name)) << "\n";
+                TermOut() << trf("cmd.provider.add_failed", trf("cmd.provider.exists", provider.name)) << "\n";
                 return;
             }
             const auto saved = lubancode::config::AddProviderToGlobalConfig(provider);
             if (!saved.has_value()) {
-                std::cout << trf("cmd.provider.add_failed", saved.error()) << "\n";
+                TermOut() << trf("cmd.provider.add_failed", saved.error()) << "\n";
                 return;
             }
             config.providers.push_back(std::move(provider));
-            std::cout << trf("cmd.provider.added", command.name, *saved) << "\n";
+            TermOut() << trf("cmd.provider.added", command.name, *saved) << "\n";
             if (needs_connection) {
                 const lubancode::config::ProviderConfig* added =
                     lubancode::config::FindProvider(config.providers, command.name);
@@ -985,7 +987,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     }
                     return;
                 }
-                std::cout << trf("cmd.provider.not_found", command.name) << "\n";
+                TermOut() << trf("cmd.provider.not_found", command.name) << "\n";
                 return;
             }
             // 鉴权三态:预检吃 ResolveProviderAuth 这一份共享结果——none 直接过,
@@ -999,9 +1001,9 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     }
                 } else {
                     if (provider->auth == lubancode::config::ProviderAuthMode::Inline) {
-                        std::cout << trf("cmd.provider.key_missing_inline", provider->name) << "\n";
+                        TermOut() << trf("cmd.provider.key_missing_inline", provider->name) << "\n";
                     } else {
-                        std::cout << trf("cmd.provider.key_missing", provider->name, auth.env_name) << "\n";
+                        TermOut() << trf("cmd.provider.key_missing", provider->name, auth.env_name) << "\n";
                     }
                     return;
                 }
@@ -1014,7 +1016,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             // 非 TTY 只给 switch 专用短用法,不打印 add/remove/set 全家桶。
             const bool can_panel = is_console && lubancode::platform::StdinIsInteractive();
             if (!can_panel) {
-                std::cout << tr("cmd.provider.switch.usage_short") << "\n";
+                TermOut() << tr("cmd.provider.switch.usage_short") << "\n";
                 return;
             }
             std::string filter;
@@ -1060,22 +1062,22 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             if (command.field == "native_web_search") {
                 const auto enabled = lubancode::config::ParseBoolToggle(command.value);
                 if (!enabled.has_value()) {
-                    std::cout << trf("cmd.provider.set_failed", enabled.error()) << "\n";
+                    TermOut() << trf("cmd.provider.set_failed", enabled.error()) << "\n";
                     return;
                 }
                 // 先改内存里这份:SetProviderNativeWebSearch 顺带当"名字存不存在"
                 // 的判断——找不到就原样不动、返回 false,不往下走落盘那一步。
                 if (!lubancode::config::SetProviderNativeWebSearch(config.providers, command.name, *enabled)) {
-                    std::cout << trf("cmd.provider.not_found", command.name) << "\n";
+                    TermOut() << trf("cmd.provider.not_found", command.name) << "\n";
                     return;
                 }
                 const auto saved =
                     lubancode::config::SetProviderNativeWebSearchInGlobalConfig(command.name, *enabled);
                 if (!saved.has_value()) {
-                    std::cout << trf("cmd.provider.set_failed", saved.error()) << "\n";
+                    TermOut() << trf("cmd.provider.set_failed", saved.error()) << "\n";
                     return;
                 }
-                std::cout << trf("cmd.provider.set_ok", command.name, command.field, *enabled ? "on" : "off", *saved)
+                TermOut() << trf("cmd.provider.set_ok", command.name, command.field, *enabled ? "on" : "off", *saved)
                           << "\n";
                 // 改的正好是当前活跃端:顶层镜像字段跟着同步、重建 backend,别让
                 // "刚改完当前端却要等下次 /provider switch 才生效"这种反直觉
@@ -1083,7 +1085,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                 if (active_provider == command.name) {
                     config.native_web_search = *enabled;
                     real_backend.Rebuild(config);
-                    std::cout << trf("cmd.provider.set_active_applied", command.name) << "\n";
+                    TermOut() << trf("cmd.provider.set_active_applied", command.name) << "\n";
                 }
                 return;
             }
@@ -1098,27 +1100,27 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     try {
                         candidate = nlohmann::json::parse(trimmed_value);
                     } catch (const nlohmann::json::parse_error& e) {
-                        std::cout << trf("cmd.provider.set_failed",
+                        TermOut() << trf("cmd.provider.set_failed",
                                           trf("cmd.provider.extra_body_invalid_json", e.what()))
                                   << "\n";
                         return;
                     }
                     if (!candidate.is_object()) {
-                        std::cout << trf("cmd.provider.set_failed", tr("cmd.provider.extra_body_not_object")) << "\n";
+                        TermOut() << trf("cmd.provider.set_failed", tr("cmd.provider.extra_body_not_object")) << "\n";
                         return;
                     }
                     parsed = std::move(candidate);
                 }
                 if (!lubancode::config::SetProviderExtraBody(config.providers, command.name, parsed)) {
-                    std::cout << trf("cmd.provider.not_found", command.name) << "\n";
+                    TermOut() << trf("cmd.provider.not_found", command.name) << "\n";
                     return;
                 }
                 const auto saved = lubancode::config::SetProviderExtraBodyInGlobalConfig(command.name, parsed);
                 if (!saved.has_value()) {
-                    std::cout << trf("cmd.provider.set_failed", saved.error()) << "\n";
+                    TermOut() << trf("cmd.provider.set_failed", saved.error()) << "\n";
                     return;
                 }
-                std::cout << trf("cmd.provider.set_ok", command.name, command.field,
+                TermOut() << trf("cmd.provider.set_ok", command.name, command.field,
                                   parsed.empty() ? tr("provider_wizard.extra_body.unset")
                                                   : trf("provider_wizard.extra_body.summary", parsed.size()),
                                   *saved)
@@ -1126,27 +1128,27 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                 if (active_provider == command.name) {
                     config.extra_body = parsed;
                     real_backend.Rebuild(config);
-                    std::cout << trf("cmd.provider.set_active_applied", command.name) << "\n";
+                    TermOut() << trf("cmd.provider.set_active_applied", command.name) << "\n";
                 }
                 return;
             }
             if (command.field == "extra_header") {
                 if (command.header_name.empty()) {
-                    std::cout << trf("cmd.provider.set_failed", tr("cmd.provider.extra_header_name_missing")) << "\n";
+                    TermOut() << trf("cmd.provider.set_failed", tr("cmd.provider.extra_header_name_missing")) << "\n";
                     return;
                 }
                 if (!lubancode::config::SetProviderExtraHeader(config.providers, command.name, command.header_name,
                                                                 command.value)) {
-                    std::cout << trf("cmd.provider.not_found", command.name) << "\n";
+                    TermOut() << trf("cmd.provider.not_found", command.name) << "\n";
                     return;
                 }
                 const auto saved = lubancode::config::SetProviderExtraHeaderInGlobalConfig(
                     command.name, command.header_name, command.value);
                 if (!saved.has_value()) {
-                    std::cout << trf("cmd.provider.set_failed", saved.error()) << "\n";
+                    TermOut() << trf("cmd.provider.set_failed", saved.error()) << "\n";
                     return;
                 }
-                std::cout << trf("cmd.provider.set_ok", command.name, command.header_name,
+                TermOut() << trf("cmd.provider.set_ok", command.name, command.header_name,
                                   command.value.empty() ? tr("provider_wizard.extra_body.unset") : command.value,
                                   *saved)
                           << "\n";
@@ -1157,7 +1159,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                         config.extra_headers[command.header_name] = command.value;
                     }
                     real_backend.Rebuild(config);
-                    std::cout << trf("cmd.provider.set_active_applied", command.name) << "\n";
+                    TermOut() << trf("cmd.provider.set_active_applied", command.name) << "\n";
                 }
                 return;
             }
@@ -1167,13 +1169,13 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                 // 半截配置;none 必须由用户显式敲这命令,谁也不许凭地址猜。
                 const auto mode = lubancode::config::ParseProviderAuthMode(command.value);
                 if (!mode.has_value()) {
-                    std::cout << trf("cmd.provider.set_failed", mode.error()) << "\n";
+                    TermOut() << trf("cmd.provider.set_failed", mode.error()) << "\n";
                     return;
                 }
                 const lubancode::config::ProviderConfig* target =
                     lubancode::config::FindProvider(config.providers, command.name);
                 if (target == nullptr) {
-                    std::cout << trf("cmd.provider.not_found", command.name) << "\n";
+                    TermOut() << trf("cmd.provider.not_found", command.name) << "\n";
                     return;
                 }
                 std::string prompted_env;
@@ -1183,7 +1185,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     const std::optional<std::string> key_env =
                         lubancode::cli::ReadLine(tr("cmd.provider.auth_env_prompt"));
                     if (!key_env.has_value() || key_env->empty()) {
-                        std::cout << tr("cmd.provider.auth_aborted") << "\n";
+                        TermOut() << tr("cmd.provider.auth_aborted") << "\n";
                         return;
                     }
                     prompted_env = *key_env;
@@ -1192,7 +1194,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     const std::optional<std::string> key =
                         lubancode::cli::ReadLine(tr("cmd.provider.auth_inline_prompt"));
                     if (!key.has_value() || key->empty()) {
-                        std::cout << tr("cmd.provider.auth_aborted") << "\n";
+                        TermOut() << tr("cmd.provider.auth_aborted") << "\n";
                         return;
                     }
                     prompted_key = *key;
@@ -1201,7 +1203,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     saved = lubancode::config::SetProviderAuthModeInGlobalConfig(command.name, *mode);
                 }
                 if (!saved.has_value()) {
-                    std::cout << trf("cmd.provider.set_failed", saved.error()) << "\n";
+                    TermOut() << trf("cmd.provider.set_failed", saved.error()) << "\n";
                     return;
                 }
                 // 内存这份跟着换(补过的变量名/key 一并同步),活跃端立即生效。
@@ -1230,25 +1232,25 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                         real_backend.Rebuild(config);
                     }
                 }
-                std::cout << trf("cmd.provider.set_ok", command.name, command.field,
+                TermOut() << trf("cmd.provider.set_ok", command.name, command.field,
                                  lubancode::config::ProviderAuthModeName(*mode), *saved)
                           << "\n";
                 if (active_provider == command.name) {
-                    std::cout << trf("cmd.provider.set_active_applied", command.name) << "\n";
+                    TermOut() << trf("cmd.provider.set_active_applied", command.name) << "\n";
                 }
                 return;
             }
-            std::cout << trf("cmd.provider.set_failed", trf("cmd.provider.set_unknown_field", command.field))
+            TermOut() << trf("cmd.provider.set_failed", trf("cmd.provider.set_unknown_field", command.field))
                       << "\n";
             return;
         }
         case lubancode::cli::ProviderCommandAction::Remove:
             if (!lubancode::cli::CanRemoveProvider(active_provider, command.name)) {
-                std::cout << trf("cmd.provider.remove_active", command.name) << "\n";
+                TermOut() << trf("cmd.provider.remove_active", command.name) << "\n";
                 return;
             }
             if (lubancode::config::FindProvider(config.providers, command.name) == nullptr) {
-                std::cout << trf("cmd.provider.not_found", command.name) << "\n";
+                TermOut() << trf("cmd.provider.not_found", command.name) << "\n";
                 return;
             }
             if (const auto removed = lubancode::config::RemoveProviderFromGlobalConfig(command.name);
@@ -1258,9 +1260,9 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                                                           return provider.name == command.name;
                                                       }),
                                        config.providers.end());
-                std::cout << trf("cmd.provider.removed", command.name, *removed) << "\n";
+                TermOut() << trf("cmd.provider.removed", command.name, *removed) << "\n";
             } else {
-                std::cout << trf("cmd.provider.remove_failed", removed.error()) << "\n";
+                TermOut() << trf("cmd.provider.remove_failed", removed.error()) << "\n";
             }
             return;
         case lubancode::cli::ProviderCommandAction::Edit: {
@@ -1284,7 +1286,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     }
                     return;
                 }
-                std::cout << trf("cmd.provider.not_found", command.name) << "\n";
+                TermOut() << trf("cmd.provider.not_found", command.name) << "\n";
                 return;
             }
             run_edit(command.name);
@@ -1295,7 +1297,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             // Enter 语义换成"编辑"。非 TTY 只给 edit 专用短用法,不倒总表。
             const bool can_panel = is_console && lubancode::platform::StdinIsInteractive();
             if (!can_panel) {
-                std::cout << lubancode::cli::ProviderSubcommandUsageLine("edit") << "\n";
+                TermOut() << lubancode::cli::ProviderSubcommandUsageLine("edit") << "\n";
                 return;
             }
             const auto picked = lubancode::cli::RunProviderSwitchPicker(
@@ -1324,18 +1326,18 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             const auto nearest = lubancode::cli::NearestProviderSubcommand(lowered_word);
             if (nearest.has_value()) {
                 if (*nearest == lowered_word) {
-                    std::cout << tr("cmd.provider.bad_args") << "\n";
+                    TermOut() << tr("cmd.provider.bad_args") << "\n";
                 } else {
-                    std::cout << trf("cmd.provider.typo_hint", command.bad_word, *nearest) << "\n";
+                    TermOut() << trf("cmd.provider.typo_hint", command.bad_word, *nearest) << "\n";
                 }
-                std::cout << lubancode::cli::ProviderSubcommandUsageLine(*nearest) << "\n";
+                TermOut() << lubancode::cli::ProviderSubcommandUsageLine(*nearest) << "\n";
                 return;
             }
             const bool tty = is_console && lubancode::platform::StdinIsInteractive();
             if (tty) {
-                std::cout << trf("cmd.provider.unknown_sub.tty", command.bad_word) << "\n";
+                TermOut() << trf("cmd.provider.unknown_sub.tty", command.bad_word) << "\n";
             } else {
-                std::cout << tr("cmd.provider.unknown_sub.pipe") << "\n";
+                TermOut() << tr("cmd.provider.unknown_sub.pipe") << "\n";
             }
             return;
         }
@@ -1351,7 +1353,7 @@ void HandleLanguageCommand(const std::string& args, std::optional<std::string>& 
 
     if (!args.empty()) {
         if (!cli::HasLanguage(args)) {
-            std::cout << trf("cmd.language.unknown", args) << "\n";
+            TermOut() << trf("cmd.language.unknown", args) << "\n";
             return;
         }
         chosen = args;
@@ -1367,7 +1369,7 @@ void HandleLanguageCommand(const std::string& args, std::optional<std::string>& 
                              is_current ? tr("cmd.language.current_mark") : std::string{}});
         }
         std::size_t idx = current_idx;
-        std::cout << tr("cmd.language.list_header") << "\n";
+        TermOut() << tr("cmd.language.list_header") << "\n";
         const bool interactive_menu = lubancode::platform::StdinIsInteractive() &&
                                       lubancode::platform::ProbeStdoutConsole().is_console;
         if (interactive_menu) {
@@ -1381,7 +1383,7 @@ void HandleLanguageCommand(const std::string& args, std::optional<std::string>& 
             idx = sel->selected_indices.empty() ? current_idx : sel->selected_indices.front();
         } else {
             for (std::size_t i = 0; i < items.size(); ++i) {
-                std::cout << "  " << (i + 1) << ") " << items[i].label
+                TermOut() << "  " << (i + 1) << ") " << items[i].label
                           << (items[i].description.empty() ? "" : "  " + items[i].description) << "\n";
             }
             const std::optional<std::string> selection = cli::ReadLine(trf("cmd.language.choose", current_idx + 1));
@@ -1393,12 +1395,12 @@ void HandleLanguageCommand(const std::string& args, std::optional<std::string>& 
                     std::size_t consumed = 0;
                     const int n = std::stoi(*selection, &consumed);
                     if (consumed != selection->size() || n < 1 || static_cast<std::size_t>(n) > langs.size()) {
-                        std::cout << tr("cmd.language.bad_number") << "\n";
+                        TermOut() << tr("cmd.language.bad_number") << "\n";
                         return;
                     }
                     idx = static_cast<std::size_t>(n - 1);
                 } catch (...) {
-                    std::cout << tr("cmd.language.bad_number") << "\n";
+                    TermOut() << tr("cmd.language.bad_number") << "\n";
                     return;
                 }
             }
@@ -1407,7 +1409,7 @@ void HandleLanguageCommand(const std::string& args, std::optional<std::string>& 
     }
 
     cli::SetLanguage(chosen);
-    std::cout << trf("cmd.language.switched", cli::LanguageDisplayName(chosen)) << "\n";
+    TermOut() << trf("cmd.language.switched", cli::LanguageDisplayName(chosen)) << "\n";
 
     if (config_file_path.has_value()) {
         const std::optional<std::string> answer =
@@ -1415,13 +1417,13 @@ void HandleLanguageCommand(const std::string& args, std::optional<std::string>& 
         if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
             const auto updated = lubancode::config::UpdateLanguageInConfigFile(*config_file_path, chosen);
             if (updated.has_value()) {
-                std::cout << trf("cmd.write_config.updated", *config_file_path) << "\n";
+                TermOut() << trf("cmd.write_config.updated", *config_file_path) << "\n";
             } else {
-                std::cout << trf("cmd.write_config.failed", updated.error()) << "\n";
+                TermOut() << trf("cmd.write_config.failed", updated.error()) << "\n";
             }
         }
     } else {
-        std::cout << tr("cmd.session_only") << "\n";
+        TermOut() << tr("cmd.session_only") << "\n";
     }
 }
 
@@ -1438,23 +1440,23 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
     const auto& sources = result.sources;
     const std::string wire_str = lubancode::config::ProviderWireName(config.wire);
 
-    std::cout << tr("config.header") << "\n\n";
-    std::cout << "  wire               = " << wire_str << "  [" << lubancode::config::ToString(sources.wire) << "]\n";
-    std::cout << "  base_url           = " << (config.base_url.empty() ? tr("config.not_set") : config.base_url)
+    TermOut() << tr("config.header") << "\n\n";
+    TermOut() << "  wire               = " << wire_str << "  [" << lubancode::config::ToString(sources.wire) << "]\n";
+    TermOut() << "  base_url           = " << (config.base_url.empty() ? tr("config.not_set") : config.base_url)
               << "  [" << lubancode::config::ToString(sources.base_url) << "]\n";
-    std::cout << "  api_key            = "
+    TermOut() << "  api_key            = "
               << (config.auth_mode == lubancode::config::ProviderAuthMode::None
                       ? tr("cmd.provider.auth_none")
                       : lubancode::config::MaskApiKey(config.auth_token))
               << "  [" << lubancode::config::ToString(sources.auth_token) << "]\n";
-    std::cout << "  model              = " << (config.model.empty() ? tr("config.not_set") : config.model) << "  ["
+    TermOut() << "  model              = " << (config.model.empty() ? tr("config.not_set") : config.model) << "  ["
               << lubancode::config::ToString(sources.model) << "]\n";
-    std::cout << "  active_provider    = "
+    TermOut() << "  active_provider    = "
               << (config.active_provider.empty() ? tr("config.not_set") : config.active_provider) << "  ["
               << lubancode::config::ToString(sources.active_provider) << "]\n";
-    std::cout << "  max_context_chars  = " << config.max_context_chars << "  ["
+    TermOut() << "  max_context_chars  = " << config.max_context_chars << "  ["
               << lubancode::config::ToString(sources.max_context_chars) << "]\n";
-    std::cout << "  max_steps_per_turn = " << config.max_steps_per_turn
+    TermOut() << "  max_steps_per_turn = " << config.max_steps_per_turn
               << (config.max_steps_per_turn == 0 ? tr("config.steps.unlimited") : "") << "  ["
               << lubancode::config::ToString(sources.max_steps_per_turn) << "]\n";
     // 输出预算(规格根因一):写明实际值与来源——unset 交服务端默认
@@ -1473,51 +1475,51 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
             }
             return trf("config.output.tokens", *profile.max_output_tokens);
         };
-        std::cout << "  max_output_tokens  = "
+        TermOut() << "  max_output_tokens  = "
                   << budget_line(main_profile) << "  ["
                   << lubancode::app::OutputBudgetSourceText(
                          main_profile.max_output_tokens_source, /*subagent_override=*/false)
                   << "]\n";
-        std::cout << "  max_output_tokens (subagent) = "
+        TermOut() << "  max_output_tokens (subagent) = "
                   << budget_line(subagent_profile) << "  ["
                   << lubancode::app::OutputBudgetSourceText(
                          subagent_profile.max_output_tokens_source,
                          config.subagent.max_output_tokens.has_value())
                   << "]\n";
-        std::cout << "  length_continuations = " << config.agent.length_continuations << "  ["
+        TermOut() << "  length_continuations = " << config.agent.length_continuations << "  ["
                   << lubancode::config::ToString(sources.agent) << "]\n";
     }
-    std::cout << "  theme              = " << config.theme << "  [" << lubancode::config::ToString(sources.theme)
+    TermOut() << "  theme              = " << config.theme << "  [" << lubancode::config::ToString(sources.theme)
               << "]\n";
-    std::cout << "  status_panel       = ";
+    TermOut() << "  status_panel       = ";
     for (std::size_t i = 0; i < config.status_panel.items.size(); ++i) {
         if (i > 0) {
-            std::cout << ",";
+            TermOut() << ",";
         }
-        std::cout << config.status_panel.items[i];
+        TermOut() << config.status_panel.items[i];
     }
-    std::cout << "  [" << lubancode::config::ToString(sources.status_panel) << "]\n";
+    TermOut() << "  [" << lubancode::config::ToString(sources.status_panel) << "]\n";
     // i18n:language 空 = 跟系统,顺带亮出此刻实际生效的语言码。
-    std::cout << "  language           = "
+    TermOut() << "  language           = "
               << (config.language.empty() ? trf("config.language.follow_system", lubancode::cli::CurrentLanguage())
                                            : config.language)
               << "  [" << lubancode::config::ToString(sources.language) << "]\n";
-    std::cout << "  system_prompt_file = "
+    TermOut() << "  system_prompt_file = "
               << (config.system_prompt_file.empty() ? tr("config.not_set") : config.system_prompt_file) << "  ["
               << lubancode::config::ToString(sources.system_prompt_file) << "]\n";
-    std::cout << "  context_window     = " << config.context_window_tokens << " tokens  ["
+    TermOut() << "  context_window     = " << config.context_window_tokens << " tokens  ["
               << lubancode::config::ToString(sources.context_window_tokens) << "]\n";
-    std::cout << "  compact_model      = "
+    TermOut() << "  compact_model      = "
               << (config.compact_model.empty() ? tr("config.compact_model.unset") : config.compact_model) << "  ["
               << lubancode::config::ToString(sources.compact_model) << "]\n";
-    std::cout << "  think              = " << (config.think.empty() ? tr("config.think.unset") : config.think)
+    TermOut() << "  think              = " << (config.think.empty() ? tr("config.think.unset") : config.think)
               << "  [" << lubancode::config::ToString(sources.think) << "]\n";
-    std::cout << "  soul               = " << (config.soul.empty() ? tr("config.soul.unset") : config.soul)
+    TermOut() << "  soul               = " << (config.soul.empty() ? tr("config.soul.unset") : config.soul)
               << "  [" << lubancode::config::ToString(sources.soul) << "]\n";
-    std::cout << "  tool_search_threshold = " << config.tool_search_threshold
+    TermOut() << "  tool_search_threshold = " << config.tool_search_threshold
               << (config.tool_search_threshold == 0 ? tr("config.threshold.never") : "") << "  ["
               << lubancode::config::ToString(sources.tool_search_threshold) << "]\n";
-    std::cout << "  memory            = " << (config.memory.enabled ? "on" : "off")
+    TermOut() << "  memory            = " << (config.memory.enabled ? "on" : "off")
               << " (use=" << (config.memory.use ? "on" : "off")
               << ", generate=" << (config.memory.generate ? "on" : "off") << ")  ["
               << lubancode::config::ToString(sources.memory) << "]\n";
@@ -1525,13 +1527,13 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
     // 哪一级),都没有就沿用老的单行 config.label.file(通常也不会走到)。
     if (result.project_config_file_path.has_value() || result.global_config_file_path.has_value()) {
         if (result.project_config_file_path.has_value()) {
-            std::cout << "  项目级配置       = " << *result.project_config_file_path << "\n";
+            TermOut() << "  项目级配置       = " << *result.project_config_file_path << "\n";
         }
         if (result.global_config_file_path.has_value()) {
-            std::cout << "  全局配置         = " << *result.global_config_file_path << "\n";
+            TermOut() << "  全局配置         = " << *result.global_config_file_path << "\n";
         }
     } else if (result.config_file_path.has_value()) {
-        std::cout << trf("config.label.file", *result.config_file_path) << "\n";
+        TermOut() << trf("config.label.file", *result.config_file_path) << "\n";
     }
     // hooks 摘要:schema 2 按事件名数 handler(=装载后的定义数,与启动横幅、
     // /hooks 的"已装载 N 条"对得上账),分 user/project 两层;旧四类另列。
@@ -1599,49 +1601,49 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
         if (!hooks.session_end.empty()) {
             parts.push_back("legacy session_end×" + std::to_string(hooks.session_end.size()));
         }
-        std::cout << "  hooks              = ";
+        TermOut() << "  hooks              = ";
         if (parts.empty()) {
-            std::cout << tr("config.hooks.none");
+            TermOut() << tr("config.hooks.none");
         } else {
             for (std::size_t i = 0; i < parts.size(); ++i) {
                 if (i > 0) {
-                    std::cout << "; ";
+                    TermOut() << "; ";
                 }
-                std::cout << parts[i];
+                TermOut() << parts[i];
             }
         }
-        std::cout << "\n";
+        TermOut() << "\n";
     }
     // M8:mcpServers 同样只从配置文件来,没有分级来源可打,只打个数——
     // /config 只报"配置了几个",实际存活状态得看 /mcp(那个才知道哪个真的
     // 起来了、握手成没成功)。
     {
-        std::cout << "  mcpServers         = ";
+        TermOut() << "  mcpServers         = ";
         if (config.mcp_servers.empty()) {
-            std::cout << tr("config.hooks.none");
+            TermOut() << tr("config.hooks.none");
         } else {
-            std::cout << trf("config.mcp.count", config.mcp_servers.size());
+            TermOut() << trf("config.mcp.count", config.mcp_servers.size());
         }
-        std::cout << "\n";
+        TermOut() << "\n";
     }
     // websearch:search 段同样只从配置文件来。api_key 照例打码,provider
     // 直接亮出来——配了这一段 web_search 工具才会注册。
     {
-        std::cout << "  search             = ";
+        TermOut() << "  search             = ";
         if (!config.search.Configured()) {
-            std::cout << tr("config.search.none");
+            TermOut() << tr("config.search.none");
         } else {
-            std::cout << config.search.provider
+            TermOut() << config.search.provider
                       << " (api_key " << lubancode::config::MaskApiKey(config.search.api_key) << ")";
         }
-        std::cout << "\n";
+        TermOut() << "\n";
     }
     // permissions(settings.local.json):项目级本地权限摘要——allow_tools
     // 几个、allow/deny_commands 几条、起手确认档。没有这份文件就说"未配置"。
     {
-        std::cout << "  permissions        = ";
+        TermOut() << "  permissions        = ";
         if (settings == nullptr || settings->Empty()) {
-            std::cout << tr("config.hooks.none");
+            TermOut() << tr("config.hooks.none");
         } else {
             std::vector<std::string> parts;
             if (!settings->allow_tools.empty()) {
@@ -1658,46 +1660,46 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
             }
             for (std::size_t i = 0; i < parts.size(); ++i) {
                 if (i > 0) {
-                    std::cout << ", ";
+                    TermOut() << ", ";
                 }
-                std::cout << parts[i];
+                TermOut() << parts[i];
             }
         }
-        std::cout << "\n";
+        TermOut() << "\n";
     }
     // 模型目录(models.json):路径 + 条目数,以及当前模型命没命中。
     if (catalog != nullptr) {
-        std::cout << tr("config.label.catalog");
+        TermOut() << tr("config.label.catalog");
         if (catalog->source_path.empty()) {
             const auto expected = lubancode::config::ModelCatalogPath();
-            std::cout << trf("config.catalog.none",
+            TermOut() << trf("config.catalog.none",
                               expected.has_value() ? *expected
                                                     : tr("path.no_home") + "/.lubancode/models.json");
         } else {
-            std::cout << trf("config.catalog.entries", catalog->source_path, catalog->models.size());
+            TermOut() << trf("config.catalog.entries", catalog->source_path, catalog->models.size());
         }
-        std::cout << "\n";
+        TermOut() << "\n";
         const std::string& current = session_model.has_value() ? *session_model : config.model;
         const auto* entry = catalog->FindBySlug(current);
-        std::cout << tr("config.label.catalog_hit");
+        TermOut() << tr("config.label.catalog_hit");
         if (current.empty()) {
-            std::cout << tr("config.catalog.model_unset");
+            TermOut() << tr("config.catalog.model_unset");
         } else if (entry != nullptr) {
-            std::cout << trf("config.catalog.hit",
+            TermOut() << trf("config.catalog.hit",
                               entry->slug + (entry->display_name.empty()
                                                   ? std::string()
                                                   : trf("config.catalog.display_name", entry->display_name)));
         } else {
-            std::cout << trf("config.catalog.miss", current);
+            TermOut() << trf("config.catalog.miss", current);
         }
-        std::cout << "\n";
+        TermOut() << "\n";
     }
     if (session_model.has_value()) {
-        std::cout << "\n" << trf("config.session_model", *session_model);
+        TermOut() << "\n" << trf("config.session_model", *session_model);
         if (*session_model != config.model) {
-            std::cout << tr("config.session_model.note");
+            TermOut() << tr("config.session_model.note");
         }
-        std::cout << "\n";
+        TermOut() << "\n";
     }
 }
 

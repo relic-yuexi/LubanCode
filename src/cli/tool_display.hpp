@@ -19,6 +19,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 
 #include <nlohmann/json.hpp>
 
@@ -337,9 +338,9 @@ struct ToolDisplay {
         const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
         if (!is_console && !silent_) {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-            std::cout << "\n" << theme.tool_line << tr("pipe.tool_start") << name << " " << input.dump() << theme.reset
+            TermOut() << "\n" << theme.tool_line << tr("pipe.tool_start") << name << " " << input.dump() << theme.reset
                       << "\n";
-            std::cout.flush();
+            TermOut().flush();
         }
         main_input = input;
         main_write_old_lines =
@@ -500,13 +501,13 @@ struct ToolDisplay {
             painter.Repaint(item);
         } else if (!silent_) {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-            std::cout << tr("pipe.tool_done") << name << ": " << PipeSummary(item, name) << "\n";
+            TermOut() << tr("pipe.tool_done") << name << ": " << PipeSummary(item, name) << "\n";
             // 管道模式沿用 M11 的行为:todo_write 成功后紧跟着把清单打出来,
             // 重定向日志里"计划走到哪一步了"仍然可读。
             if (name == "todo_write" && !result.is_error && todo_state) {
-                std::cout << lubancode::cli::FormatTodoList(todo_state->items, theme);
+                TermOut() << lubancode::cli::FormatTodoList(todo_state->items, theme);
             }
-            std::cout.flush();
+            TermOut().flush();
         }
         if (resolved == active_main) {
             active_main = -1;
@@ -550,9 +551,9 @@ struct ToolDisplay {
                 painter.PaintNew(transcript[static_cast<std::size_t>(active_thinking)]);
             } else if (!silent_) {
                 std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-                std::cout << "\n" << theme.tool_line
+                TermOut() << "\n" << theme.tool_line
                           << lubancode::cli::tr("transcript.thinking_running") << theme.reset << "\n";
-                std::cout.flush();
+                TermOut().flush();
             }
         }
         thinking_buffer += text;
@@ -604,10 +605,10 @@ struct ToolDisplay {
         agent_sub_tools += 1;
         if (!is_console && !silent_) {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-            std::cout << "\n"
+            TermOut() << "\n"
                        << theme.stats << tr("pipe.subtool_start") << name << " " << input.dump() << theme.reset
                        << "\n";
-            std::cout.flush();
+            TermOut().flush();
         }
         sub_input = input;
         sub_write_old_lines =
@@ -733,8 +734,8 @@ struct ToolDisplay {
         painter.ReserveRows(presentation.reserve_rows);
         {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-            std::cout << preview->colored;
-            std::cout.flush();
+            TermOut() << preview->colored;
+            TermOut().flush();
         }
     }
 

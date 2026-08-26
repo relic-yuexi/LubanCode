@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "agent/agent.hpp"
+#include "turn_event_recorder.hpp"
 #include "agent/loop.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
@@ -130,20 +131,25 @@ TEST_CASE("loop 批次边界:三枚 tool_use 一批,start 带齐 id、串行推�
         std::vector<std::string> tool_donels;
     } log;
 
-    lubancode::agent::Callbacks cb;
-    cb.on_model_step_started = [&](int s) { log.steps.push_back(s); };
-    cb.on_tool_batch_started = [&](int s, int b, const std::vector<std::string>& ids) {
-        log.batches_started.push_back({s, b, ids});
-    };
-    cb.on_tool_batch_finished = [&](int b, bool interrupted) { log.batches_finished.emplace_back(b, interrupted); };
-    cb.on_tool_start = [&](const std::string& id, const std::string&, const nlohmann::json&) {
-        log.tool_starts.push_back(id);
-    };
-    cb.on_tool_done = [&](const std::string& id, const std::string&, const lubancode::tools::Tool::Result&) {
-        log.tool_donels.push_back(id);
-    };
+    lubancode::test::RecordedTurn turn;
+    lubancode::agent::TurnWiring cb;
+    cb.events = &turn.adapter;
 
     const auto result = loop.Run("问题", cb);
+    const auto& rec = turn.recorder;
+    log.steps = rec.steps;
+    for (const auto& batch : rec.batches_started) {
+        log.batches_started.push_back({batch.step_index, batch.batch_index, batch.ordered_tool_use_ids});
+    }
+    for (const auto& batch : rec.batches_finished) {
+        log.batches_finished.emplace_back(batch.batch_index, batch.interrupted);
+    }
+    for (const auto& tool : rec.started_tools) {
+        log.tool_starts.push_back(tool.tool_use_id);
+    }
+    for (const auto& tool : rec.done_tools) {
+        log.tool_donels.push_back(tool.tool_use_id);
+    }
     REQUIRE(result.has_value());
 
     // 两次模型请求 = 两个 step(0 与 1);只有第一个 step 有批次。
@@ -180,15 +186,13 @@ TEST_CASE("loop 批次边界:纯文本轮不发空 batch") {
     lubancode::tools::ToolRegistry registry;
     lubancode::agent::Agent loop(backend, registry, lubancode::agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
 
-    int batches = 0;
-    int steps = 0;
-    lubancode::agent::Callbacks cb;
-    cb.on_model_step_started = [&](int) { ++steps; };
-    cb.on_tool_batch_started = [&](int, int, const std::vector<std::string>&) { ++batches; };
+    lubancode::test::RecordedTurn turn;
+    lubancode::agent::TurnWiring cb;
+    cb.events = &turn.adapter;
 
     REQUIRE(loop.Run("问", cb).has_value());
-    CHECK(steps == 1);
-    CHECK(batches == 0);  // 单子:没有工具不发空 batch
+    CHECK(turn.recorder.steps.size() == 1);
+    CHECK(turn.recorder.batches_started.empty());  // 单子:没有工具不发空 batch
 }
 
 TEST_CASE("loop 批次边界:两批之间 step 换拍,批次序号跨 step 不重号") {
@@ -202,16 +206,17 @@ TEST_CASE("loop 批次边界:两批之间 step 换拍,批次序号跨 step 不�
     registry.Register(std::make_unique<EchoTool>("echo"));
     lubancode::agent::Agent loop(backend, registry, lubancode::agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
 
-    std::vector<std::pair<int, int>> started;  // (step, batch)
-    lubancode::agent::Callbacks cb;
-    cb.on_tool_batch_started = [&](int s, int b, const std::vector<std::string>&) { started.emplace_back(s, b); };
+    lubancode::test::RecordedTurn turn;
+    lubancode::agent::TurnWiring cb;
+    cb.events = &turn.adapter;
 
     REQUIRE(loop.Run("问", cb).has_value());
+    const auto& started = turn.recorder.batches_started;  // (step, batch)
     REQUIRE(started.size() == 2);
-    CHECK(started[0].first == 0);
-    CHECK(started[0].second == 0);
-    CHECK(started[1].first == 1);
-    CHECK(started[1].second == 1);  // 第二个 step 的批次是 1,不是 0
+    CHECK(started[0].step_index == 0);
+    CHECK(started[0].batch_index == 0);
+    CHECK(started[1].step_index == 1);
+    CHECK(started[1].batch_index == 1);  // 第二个 step 的批次是 1,不是 0
 }
 
 TEST_CASE("loop 批次边界:ESC 中断时 finished 带 interrupted=true") {
@@ -244,19 +249,16 @@ TEST_CASE("loop 批次边界:ESC 中断时 finished 带 interrupted=true") {
     registry.Register(std::move(tool));
     lubancode::agent::Agent loop(backend, registry, lubancode::agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
 
-    bool finished_interrupted = false;
-    int finished_batch = -1;
-    lubancode::agent::Callbacks cb;
-    cb.on_tool_batch_finished = [&](int b, bool interrupted) {
-        finished_batch = b;
-        finished_interrupted = interrupted;
-    };
+    lubancode::test::RecordedTurn turn;
+    lubancode::agent::TurnWiring cb;
+    cb.events = &turn.adapter;
 
     const auto result = loop.Run("问", cb, &cancel);
     REQUIRE(result.has_value());
     CHECK(result->cancelled);
-    CHECK(finished_batch == 0);
-    CHECK(finished_interrupted);
+    REQUIRE(turn.recorder.batches_finished.size() == 1);
+    CHECK(turn.recorder.batches_finished[0].batch_index == 0);
+    CHECK(turn.recorder.batches_finished[0].interrupted);
 }
 
 // ---------------------------------------------------------------------------

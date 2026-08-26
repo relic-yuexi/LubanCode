@@ -240,7 +240,7 @@ TEST_CASE("AgentLoop 往返: on_pre_tool_hook 拦截后,模型在下一轮 tool_
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     callbacks.on_pre_tool_hook = [](const std::string&, const std::string& name,
                                      const nlohmann::json&) -> std::optional<std::string> {
         if (name == "write_file") {
@@ -277,7 +277,7 @@ TEST_CASE("AgentLoop 往返: on_pre_tool_hook 放行(nullopt)时工具正常执�
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     bool hook_called = false;
     callbacks.on_pre_tool_hook = [&](const std::string&, const std::string&,
                                      const nlohmann::json&) -> std::optional<std::string> {
@@ -314,7 +314,7 @@ TEST_CASE("RunOneTool 状态机: 相位序列 requested->checking_hook->running-
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
     std::vector<runtime::ToolPhase> phases;
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     callbacks.on_tool_phase = [&phases](const std::string&, const std::string&,
                                         runtime::ToolPhase phase) { phases.push_back(phase); };
     callbacks.on_pre_tool_use_hook = [](const std::string& /*tool_use_id*/, const std::string&,
@@ -352,7 +352,7 @@ TEST_CASE("RunOneTool: updatedInput 合法时按改写后的入参执行") {
     registry.Register(std::unique_ptr<FakeWriteTool>(write_tool));
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     callbacks.on_pre_tool_use_hook = [](const std::string& /*tool_use_id*/, const std::string&,
                                         const nlohmann::json& input) -> runtime::ToolHookDecision {
         runtime::ToolHookDecision decision;
@@ -406,7 +406,7 @@ TEST_CASE("RunOneTool: updatedInput 不过工具 schema = 打回并拦截,不按
     registry.Register(std::unique_ptr<StrictSchemaTool>(strict_tool));
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     callbacks.on_pre_tool_use_hook = [](const std::string& /*tool_use_id*/, const std::string&,
                                         const nlohmann::json&) -> runtime::ToolHookDecision {
         runtime::ToolHookDecision decision;
@@ -436,7 +436,7 @@ TEST_CASE("RunOneTool: PostToolUse 反馈追加进模型所见 tool_result") {
     registry.Register(std::unique_ptr<FakeWriteTool>(write_tool));
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     bool post_hook_called = false;
     callbacks.on_post_tool_hook = [&](const std::string&, const std::string&, const nlohmann::json&,
                                       const tools::Tool::Result&) {
@@ -477,7 +477,7 @@ TEST_CASE("RunOneTool: ask 决策时仍走确认回调(钩子不越过确认,确
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
     bool confirm_asked = false;
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     callbacks.on_pre_tool_use_hook =
         [](const std::string&, const std::string&, const nlohmann::json&) -> runtime::ToolHookDecision {
         runtime::ToolHookDecision decision;

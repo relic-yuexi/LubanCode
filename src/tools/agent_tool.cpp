@@ -11,7 +11,9 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string_view>
 #include <utility>
@@ -971,11 +973,11 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     // 调,RunTask 栈上局部共享):空 = 未预放行;非空 = 钩子 deny 的理由。
     // 声明必须罩住两个 lambda 的整段存活期。
     std::string last_denial_hook_reason;
-    agent::Callbacks sub_callbacks;
+    agent::TurnWiring turn_wiring;
     // 逐枚追踪单:子代理内层工具的 canonical 事件转发(只读 sink 并轨)。
     if (foreground_hooks != nullptr && foreground_hooks->on_tool_trace) {
         auto parent_getter = foreground_hooks->parent_execution_id_getter;
-        sub_callbacks.on_tool_trace = [parent_getter, trace_hook = foreground_hooks->on_tool_trace](
+        turn_wiring.on_tool_trace = [parent_getter, trace_hook = foreground_hooks->on_tool_trace](
                                           const agent::ToolTraceEvent& event) {
             agent::ToolTraceEvent forwarded = event;
             if (parent_getter) {
@@ -995,113 +997,226 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             event.text = prompt;
             ledger_.AppendEventLocked(task, std::move(event));
         }
-        // 活度账的节流拍:增量路径 1s 一拍 Touch;阶段翻页与事件边界不受
-        // 节流,立即拍。content_revision 不节流,每笔增量都 +1。
-        const auto touch_activity = [this, task](AgentTaskActivity::Stage stage) {
-            const auto now = std::chrono::steady_clock::now();
-            const bool stage_changed = task->activity.stage != stage;
-            if (stage_changed) {
-                task->activity.stage = stage;  // 阶段翻页:立即拍,坞行当秒换文案
-                task->last_activity_touch = now;
-                ledger_.Touch();
-            } else if (now - task->last_activity_touch >= std::chrono::seconds(1)) {
-                task->last_activity_touch = now;
-                ledger_.Touch();
-            }
-        };
-        sub_callbacks.on_text_delta = [this, task, touch_activity](const std::string& text) {
-            std::lock_guard<std::mutex> lock(ledger_.mutex);
-            task->snapshot.live_output += text;
-            constexpr std::size_t kLiveOutputCap = 64 * 1024;
-            if (task->snapshot.live_output.size() > kLiveOutputCap) {
-                task->snapshot.live_output.erase(0, task->snapshot.live_output.size() - kLiveOutputCap);
-            }
-            task->pending_text += text;  // 消息账:事件边界(工具/轮次收口)切成段
-            task->activity.text_bytes = task->pending_text.size();
-            ++task->content_revision;
-            touch_activity(AgentTaskActivity::Stage::Text);
-        };
-        sub_callbacks.on_thinking_delta = [this, task, touch_activity](const std::string& text) {
-            std::lock_guard<std::mutex> lock(ledger_.mutex);
-            task->pending_reasoning += text;  // 思考也入账,查看态与 main 同款折叠
-            task->activity.reasoning_bytes = task->pending_reasoning.size();
-            ++task->content_revision;
-            touch_activity(AgentTaskActivity::Stage::Thinking);
-        };
-        sub_callbacks.on_tool_start = [this, task, foreground_hooks](const std::string& tool_use_id,
-                                                                     const std::string& tool_name,
-                                                                     const nlohmann::json& tool_input) {
-            {
-                std::lock_guard<std::mutex> lock(ledger_.mutex);
-                // 先把已流出的正文/思考切成事件,再记工具发起——"助手文字 ->
-                // 工具卡"的时序不许倒(规格 transcript 单测第 1 条)。
-                ledger_.FlushPendingTextLocked(task);
-                AgentTaskEvent event;
-                event.kind = AgentTaskEventKind::ToolStart;
-                event.tool_name = tool_name;
-                event.input_json = tool_input.dump();
-                ledger_.AppendEventLocked(task, std::move(event));
-                task->snapshot.tool_calls.push_back(
-                    AgentTaskToolCall{tool_name, tool_input.dump(), std::string(), false, false, tool_use_id});
-                task->activity.stage = AgentTaskActivity::Stage::Tool;
-                task->activity.tool_name = tool_name;
-                task->activity.tool_started = std::chrono::steady_clock::now();
-                ++task->content_revision;
-                ledger_.Touch();
-            }
-            if (foreground_hooks != nullptr && foreground_hooks->on_sub_tool_start) {
-                foreground_hooks->on_sub_tool_start(tool_use_id, tool_name, tool_input);
-            }
-        };
-        sub_callbacks.on_tool_done = [this, task](const std::string& tool_use_id, const std::string& tool_name,
-                                                  const Result& result) {
-            std::lock_guard<std::mutex> lock(ledger_.mutex);
-            ledger_.FlushPendingTextLocked(task);  // 工具结果前若有残余正文,先入账
-            // 先按 tool_use_id 精确对账;老档(没存 id 的)退回"最近一笔
-            // 未完的同名工具"——两代数据都能收口。
-            bool matched_by_id = false;
-            for (auto it = task->snapshot.tool_calls.rbegin(); it != task->snapshot.tool_calls.rend(); ++it) {
-                if (!it->done && !it->tool_use_id.empty() && it->tool_use_id == tool_use_id) {
-                    it->done = true;
-                    it->is_error = result.is_error;
-                    it->result = result.content;
-                    matched_by_id = true;
-                    break;
-                }
-            }
-            if (!matched_by_id) {
-                for (auto it = task->snapshot.tool_calls.rbegin(); it != task->snapshot.tool_calls.rend(); ++it) {
-                    if (!it->done && it->name == tool_name) {
-                        it->done = true;
-                        it->is_error = result.is_error;
-                        it->result = result.content;
+    }
+
+    // 活度账的节流拍:增量路径 1s 一拍 Touch;阶段翻页与事件边界不受
+    // 节流,立即拍。content_revision 不节流,每笔增量都 +1。task 为空的旧
+    // 路径(测试直调)没有 activity 账,进来直接返回。
+    const auto touch_activity = [this, task](AgentTaskActivity::Stage stage) {
+        if (task == nullptr) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        const bool stage_changed = task->activity.stage != stage;
+        if (stage_changed) {
+            task->activity.stage = stage;  // 阶段翻页:立即拍,坞行当秒换文案
+            task->last_activity_touch = now;
+            ledger_.Touch();
+        } else if (now - task->last_activity_touch >= std::chrono::seconds(1)) {
+            task->last_activity_touch = now;
+            ledger_.Touch();
+        }
+    };
+
+    // ---- 显示出水口(骨架拆解批二余款):子代理的从路适配器 ------------------
+    // 台账 sink 先吃(正文/思考增量、工具起止、usage 从 ServerEvent 流里
+    // 取,闭包原文照搬),宿主给了口子(hooks.events)的再原样转发进宿主
+    // 流(payload 带 subordinate 标,画屏侧跳过——子代理只画外层卡,与
+    // 批二并轨时同一画面规矩);后台任务没有宿主流,只有台账。task 与前台
+    // hooks 两样都没有的旧路径连适配器都不起,显示零出水。
+    runtime::IdAuthority local_event_ids;
+    std::optional<runtime::TurnEventAdapter> sub_events;
+    runtime::TurnEventAdapter* host_events = foreground_hooks != nullptr ? foreground_hooks->events : nullptr;
+    if (task != nullptr || foreground_hooks != nullptr) {
+        sub_events.emplace(host_events != nullptr ? host_events->thread_id() : std::string("subagent"),
+                           host_events != nullptr ? host_events->ids() : local_event_ids);
+        // 台账 sink 的工具对账:item_id -> (tool_use_id, name)。ItemCompleted
+        // 的载荷不带工具名(台账事件与兜底对账都要它),从这里取。
+        auto open_tools = std::make_shared<std::map<std::string, std::pair<std::string, std::string>>>();
+        auto ledger_sink = [this, task, foreground_hooks, &touch_activity, open_tools](
+                               const runtime::ServerEvent& event) {
+            switch (event.kind) {
+                case runtime::ServerEventKind::ItemDelta: {
+                    if (task == nullptr) {
                         break;
                     }
+                    std::lock_guard<std::mutex> lock(ledger_.mutex);
+                    if (event.item_kind == runtime::ItemKind::Text) {
+                        task->snapshot.live_output += event.text;
+                        constexpr std::size_t kLiveOutputCap = 64 * 1024;
+                        if (task->snapshot.live_output.size() > kLiveOutputCap) {
+                            task->snapshot.live_output.erase(
+                                0, task->snapshot.live_output.size() - kLiveOutputCap);
+                        }
+                        task->pending_text += event.text;  // 消息账:事件边界(工具/轮次收口)切成段
+                        task->activity.text_bytes = task->pending_text.size();
+                        ++task->content_revision;
+                        touch_activity(AgentTaskActivity::Stage::Text);
+                    } else if (event.item_kind == runtime::ItemKind::Thinking) {
+                        task->pending_reasoning += event.text;  // 思考也入账,查看态与 main 同款折叠
+                        task->activity.reasoning_bytes = task->pending_reasoning.size();
+                        ++task->content_revision;
+                        touch_activity(AgentTaskActivity::Stage::Thinking);
+                    }
+                    break;
                 }
+                case runtime::ServerEventKind::ItemStarted: {
+                    if (event.item_kind != runtime::ItemKind::Tool || event.payload.value("builtin", false)) {
+                        break;  // 服务端内置工具:老路子代理不落台账,照旧
+                    }
+                    const std::string tool_use_id = event.payload.value("tool_use_id", std::string());
+                    const std::string tool_name = event.payload.value("tool_name", std::string());
+                    const nlohmann::json tool_input = event.payload.contains("input") ? event.payload["input"]
+                                                                                      : nlohmann::json::object();
+                    (*open_tools)[event.item_id] = {tool_use_id, tool_name};
+                    if (task != nullptr) {
+                        std::lock_guard<std::mutex> lock(ledger_.mutex);
+                        // 先把已流出的正文/思考切成事件,再记工具发起——"助手文字 ->
+                        // 工具卡"的时序不许倒(规格 transcript 单测第 1 条)。
+                        ledger_.FlushPendingTextLocked(task);
+                        AgentTaskEvent ledger_event;
+                        ledger_event.kind = AgentTaskEventKind::ToolStart;
+                        ledger_event.tool_name = tool_name;
+                        ledger_event.input_json = tool_input.dump();
+                        ledger_.AppendEventLocked(task, std::move(ledger_event));
+                        task->snapshot.tool_calls.push_back(
+                            AgentTaskToolCall{tool_name, tool_input.dump(), std::string(), false, false, tool_use_id});
+                        task->activity.stage = AgentTaskActivity::Stage::Tool;
+                        task->activity.tool_name = tool_name;
+                        task->activity.tool_started = std::chrono::steady_clock::now();
+                        ++task->content_revision;
+                        ledger_.Touch();
+                    }
+                    if (foreground_hooks != nullptr && foreground_hooks->on_sub_tool_start) {
+                        foreground_hooks->on_sub_tool_start(tool_use_id, tool_name, tool_input);
+                    }
+                    break;
+                }
+                case runtime::ServerEventKind::ItemCompleted: {
+                    if (event.item_kind != runtime::ItemKind::Tool) {
+                        break;
+                    }
+                    // 适配器 Finish 的 Cancelled 兜底:老路上没有对应的台账
+                    // 回调,照旧不落。
+                    if (event.outcome == runtime::Outcome::Cancelled) {
+                        open_tools->erase(event.item_id);
+                        break;
+                    }
+                    const auto it = open_tools->find(event.item_id);
+                    if (it == open_tools->end()) {
+                        break;  // 迟到/陌生终态:丢弃不误伤(老台账同规矩)
+                    }
+                    const auto [tool_use_id, tool_name] = it->second;
+                    open_tools->erase(it);
+                    if (task == nullptr) {
+                        break;
+                    }
+                    const std::string result_text = event.payload.value("result", std::string());
+                    const bool is_error = event.payload.value("is_error", false);
+                    std::lock_guard<std::mutex> lock(ledger_.mutex);
+                    ledger_.FlushPendingTextLocked(task);  // 工具结果前若有残余正文,先入账
+                    // 先按 tool_use_id 精确对账;老档(没存 id 的)退回"最近一笔
+                    // 未完的同名工具"——两代数据都能收口。
+                    bool matched_by_id = false;
+                    for (auto call_it = task->snapshot.tool_calls.rbegin();
+                         call_it != task->snapshot.tool_calls.rend(); ++call_it) {
+                        if (!call_it->done && !call_it->tool_use_id.empty() && call_it->tool_use_id == tool_use_id) {
+                            call_it->done = true;
+                            call_it->is_error = is_error;
+                            call_it->result = result_text;
+                            matched_by_id = true;
+                            break;
+                        }
+                    }
+                    if (!matched_by_id) {
+                        for (auto call_it = task->snapshot.tool_calls.rbegin();
+                             call_it != task->snapshot.tool_calls.rend(); ++call_it) {
+                            if (!call_it->done && call_it->name == tool_name) {
+                                call_it->done = true;
+                                call_it->is_error = is_error;
+                                call_it->result = result_text;
+                                break;
+                            }
+                        }
+                    }
+                    AgentTaskEvent ledger_event;
+                    ledger_event.kind = AgentTaskEventKind::ToolResult;
+                    ledger_event.tool_name = tool_name;
+                    ledger_event.result = result_text;
+                    ledger_event.is_error = is_error;
+                    ledger_.AppendEventLocked(task, std::move(ledger_event));
+                    // 工具收口:阶段退回 None;工具名即时清,不拿旧名字接着报秒。
+                    task->activity.stage = AgentTaskActivity::Stage::None;
+                    task->activity.tool_name.clear();
+                    ++task->content_revision;
+                    ledger_.Touch();
+                    break;
+                }
+                case runtime::ServerEventKind::UsageUpdated: {
+                    api::UsageReport report;
+                    report.usage.input_tokens = event.payload.value("input_tokens", std::int64_t{0});
+                    report.usage.output_tokens = event.payload.value("output_tokens", std::int64_t{0});
+                    report.usage.cache_read_tokens = event.payload.value("cache_read_tokens", std::int64_t{0});
+                    report.usage.cache_creation_tokens =
+                        event.payload.value("cache_creation_tokens", std::int64_t{0});
+                    report.usage.output_reasoning_tokens = event.payload.value("reasoning_tokens", std::int64_t{0});
+                    report.step_index = event.payload.value("step_index", 0);
+                    report.request_id = event.payload.value("request_id", std::string());
+                    report.model = event.payload.value("model", std::string());
+                    report.cache_epoch = event.payload.value("cache_epoch", 1);
+                    report.epoch_break_reason = event.payload.value("epoch_break_reason", std::string());
+                    report.prefix_append_only = event.payload.value("prefix_append_only", true);
+                    const bool reported = event.payload.value("reported", report.reported());
+                    if (task != nullptr) {
+                        std::lock_guard<std::mutex> lock(ledger_.mutex);
+                        task->snapshot.input_tokens += report.usage.input_tokens;
+                        task->snapshot.cache_read_tokens += report.usage.cache_read_tokens;
+                        task->snapshot.cache_creation_tokens += report.usage.cache_creation_tokens;
+                        task->snapshot.output_tokens += report.usage.output_tokens;
+                        if (reported) {
+                            task->snapshot.usage_reported = true;
+                        }
+                        // 步数不在这里记:usage 只是"一次请求结束"的时机,拿它
+                        // 猜步数,provider 漏 usage 就会少算——直接账在 Run 循环
+                        // 里按 RunOutcome::steps_used 累计。
+                        ledger_.Touch();
+                    }
+                    if (foreground_hooks != nullptr && foreground_hooks->on_usage) {
+                        foreground_hooks->on_usage(report);
+                    }
+                    break;
+                }
+                default:
+                    break;  // step/批次等边界事件不进台账
             }
-            AgentTaskEvent event;
-            event.kind = AgentTaskEventKind::ToolResult;
-            event.tool_name = tool_name;
-            event.result = result.content;
-            event.is_error = result.is_error;
-            ledger_.AppendEventLocked(task, std::move(event));
-            // 工具收口:阶段退回 None;工具名即时清,不拿旧名字接着报秒。
-            task->activity.stage = AgentTaskActivity::Stage::None;
-            task->activity.tool_name.clear();
-            ++task->content_revision;
-            ledger_.Touch();
         };
+        if (host_events != nullptr) {
+            runtime::TurnEventAdapter* host = host_events;
+            sub_events->Attach([ledger_sink, host](const runtime::ServerEvent& event) {
+                ledger_sink(event);
+                host->ForwardFromSubordinate(event);
+            });
+            sub_events->Start(host_events->turn_id());
+        } else {
+            sub_events->Attach(ledger_sink);
+            sub_events->Start();
+        }
+        turn_wiring.events = &*sub_events;
+    }
+
+    // ---- 控制面:确认/钩子/Plan 闸(问话口原样走 TurnWiring)----------------
+    if (task != nullptr) {
         if (foreground_hooks != nullptr) {
-            sub_callbacks.on_tool_confirm = foreground_hooks->on_tool_confirm;
+            turn_wiring.on_tool_confirm = foreground_hooks->on_tool_confirm;
         } else {
             // 后台任务没人可问:需确认的操作被拒那一刻,除了给子代理一份
             // 如实的拒绝文案,还当场推一条通知进台账——主会话空闲拍里取走,
             // toast + transcript 事件同拍落地。
             const std::shared_ptr<lubancode::hooks::DetachedHookSession> hooks_session =
                 background_hooks != nullptr && !background_hooks->Empty() ? background_hooks : nullptr;
-            sub_callbacks.on_tool_confirm = [this, task, hooks_session, &last_denial_hook_reason](
-                                                const std::string& /*tool_use_id*/, const std::string& name,
-                                                const nlohmann::json& input) {
+            turn_wiring.on_tool_confirm = [this, task, hooks_session, &last_denial_hook_reason](
+                                             const std::string& /*tool_use_id*/, const std::string& name,
+                                             const nlohmann::json& input) {
                 last_denial_hook_reason.clear();
                 if (hooks_session != nullptr) {
                     lubancode::hooks::HookPayload payload;
@@ -1133,8 +1248,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             };
             // 给模型的拒绝文案:如实说"后台无法弹确认、未预放行",把出路也
             // 写上——缺省那份"用户拒绝执行该工具"会把后台边界藏起来。
-            sub_callbacks.on_tool_denial_text = [&last_denial_hook_reason](const std::string& /*tool_use_id*/,
-                                                                           const std::string& name) {
+            turn_wiring.on_tool_denial_text = [&last_denial_hook_reason](const std::string& /*tool_use_id*/,
+                                                                        const std::string& name) {
                 std::string text = "后台任务无法弹出权限确认," + name + " 未预先放行,已被拒绝。";
                 if (!last_denial_hook_reason.empty()) {
                     text += "拒绝来自 PermissionRequest 钩子:" + last_denial_hook_reason + "。";
@@ -1144,39 +1259,20 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 return text;
             };
         }
-        sub_callbacks.on_usage = [this, task, foreground_hooks](const api::UsageReport& report) {
-            {
-                std::lock_guard<std::mutex> lock(ledger_.mutex);
-                task->snapshot.input_tokens += report.usage.input_tokens;
-                task->snapshot.cache_read_tokens += report.usage.cache_read_tokens;
-                task->snapshot.cache_creation_tokens += report.usage.cache_creation_tokens;
-                task->snapshot.output_tokens += report.usage.output_tokens;
-                if (report.reported()) {
-                    task->snapshot.usage_reported = true;
-                }
-                // 步数不在这里记:usage 回调只是"一次请求结束"的时机,拿它
-                // 猜步数,provider 漏 usage 就会少算——直接账在 Run 循环里按
-                // RunOutcome::steps_used 累计。
-                ledger_.Touch();
-            }
-            if (foreground_hooks != nullptr && foreground_hooks->on_usage) {
-                foreground_hooks->on_usage(report);
-            }
-        };
         if (foreground_hooks != nullptr) {
-            sub_callbacks.on_pre_tool_hook = foreground_hooks->on_pre_tool_hook;
-            sub_callbacks.on_post_tool_hook = foreground_hooks->on_post_tool_hook;
-            sub_callbacks.on_pre_tool_use_hook = foreground_hooks->on_pre_tool_use_hook;
-            sub_callbacks.on_permission_request = foreground_hooks->on_permission_request;
-            sub_callbacks.on_tool_phase = foreground_hooks->on_tool_phase;
-            sub_callbacks.on_post_tool_use_hook = foreground_hooks->on_post_tool_use_hook;
+            turn_wiring.on_pre_tool_hook = foreground_hooks->on_pre_tool_hook;
+            turn_wiring.on_post_tool_hook = foreground_hooks->on_post_tool_hook;
+            turn_wiring.on_pre_tool_use_hook = foreground_hooks->on_pre_tool_use_hook;
+            turn_wiring.on_permission_request = foreground_hooks->on_permission_request;
+            turn_wiring.on_tool_phase = foreground_hooks->on_tool_phase;
+            turn_wiring.on_post_tool_use_hook = foreground_hooks->on_post_tool_use_hook;
             // Plan 模式:子代理同样过 ModePolicy(Explore 拿更窄表,不因独立
             // context 逃闸;单子明令)。
-            sub_callbacks.on_mode_policy = foreground_hooks->on_mode_policy;
+            turn_wiring.on_mode_policy = foreground_hooks->on_mode_policy;
         } else if (background_hooks != nullptr && !background_hooks->Empty()) {
             // 后台 hooks:同步决策用只读策略快照真跑,不静默绕过。
             const std::shared_ptr<lubancode::hooks::DetachedHookSession> hooks_session = background_hooks;
-            sub_callbacks.on_pre_tool_use_hook =
+            turn_wiring.on_pre_tool_use_hook =
                 [hooks_session](const std::string& /*tool_use_id*/, const std::string& name,
                                 const nlohmann::json& input) {
                     lubancode::hooks::HookPayload payload;
@@ -1203,7 +1299,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                     }
                     return lubancode::runtime::MapPreToolDecision(merged);
                 };
-            sub_callbacks.on_post_tool_use_hook =
+            turn_wiring.on_post_tool_use_hook =
                 [hooks_session](const std::string& /*tool_use_id*/, const std::string& name,
                                 const nlohmann::json& input, const Result& result) {
                     lubancode::hooks::HookPayload payload;
@@ -1218,31 +1314,16 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 };
         }
     } else if (foreground_hooks != nullptr) {
-        // 没进台账的旧路径(测试直调 RunTask 等边缘):沿用旧回调。
-        sub_callbacks.on_tool_start = [foreground_hooks](const std::string& tool_use_id,
-                                                          const std::string& tool_name,
-                                                          const nlohmann::json& tool_input) {
-            if (foreground_hooks->on_sub_tool_start) {
-                foreground_hooks->on_sub_tool_start(tool_use_id, tool_name, tool_input);
-            }
-        };
-        sub_callbacks.on_tool_confirm = foreground_hooks->on_tool_confirm;
-        sub_callbacks.on_usage = foreground_hooks->on_usage;
-        sub_callbacks.on_pre_tool_hook = foreground_hooks->on_pre_tool_hook;
-        sub_callbacks.on_post_tool_hook = foreground_hooks->on_post_tool_hook;
-        sub_callbacks.on_pre_tool_use_hook = foreground_hooks->on_pre_tool_use_hook;
-        sub_callbacks.on_permission_request = foreground_hooks->on_permission_request;
-        sub_callbacks.on_tool_phase = foreground_hooks->on_tool_phase;
-        sub_callbacks.on_post_tool_use_hook = foreground_hooks->on_post_tool_use_hook;
-        sub_callbacks.on_mode_policy = foreground_hooks->on_mode_policy;
-    }
-
-    // 批二尾巴(骨架拆解批三):宿主侧装配好的事件流回调并进 sub_callbacks
-    // ——一份事件先落事件流(canonical 账)、再进台账,与主回合同一格局。
-    // 只并 void 出水口;确认/钩子这些控制口照旧各走各。前台任务才有宿主
-    // 轮(后台没有,旧调用方不设),行为对不设者零变化。
-    if (foreground_hooks != nullptr && foreground_hooks->event_callbacks != nullptr) {
-        agent::ComposeDisplayCallbacks(sub_callbacks, *foreground_hooks->event_callbacks);
+        // 没进台账的旧路径(测试直调 RunTask 等边缘):控制钩子照旧转发,
+        // 显示走上面的台账 sink(on_sub_tool_start/on_usage 从事件流里喂)。
+        turn_wiring.on_tool_confirm = foreground_hooks->on_tool_confirm;
+        turn_wiring.on_pre_tool_hook = foreground_hooks->on_pre_tool_hook;
+        turn_wiring.on_post_tool_hook = foreground_hooks->on_post_tool_hook;
+        turn_wiring.on_pre_tool_use_hook = foreground_hooks->on_pre_tool_use_hook;
+        turn_wiring.on_permission_request = foreground_hooks->on_permission_request;
+        turn_wiring.on_tool_phase = foreground_hooks->on_tool_phase;
+        turn_wiring.on_post_tool_use_hook = foreground_hooks->on_post_tool_use_hook;
+        turn_wiring.on_mode_policy = foreground_hooks->on_mode_policy;
     }
 
     // 打断信号(取消链,与主回合同一份):前台任务有三根——面板 x 置的
@@ -1411,7 +1492,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     api::Message initial_input;
     initial_input.role = api::Role::User;
     initial_input.content.push_back(api::TextBlock{prompt});
-    agent::DriveReport drive = agent::DriveTurn(sub_agent, sub_callbacks, std::move(initial_input), drive_options);
+    agent::DriveReport drive = agent::DriveTurn(sub_agent, turn_wiring, std::move(initial_input), drive_options);
     // 取消链收口(合流前的次序:join 在 Stop 续跑环之前;合并旗 Stop 时
     // 置真,续跑轮拿到即收——与旧行为一致)。
     cancel_chain.Stop();
@@ -1463,7 +1544,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         }
         // 续跑轮的步数/预算/打断账由 RunStopContinuation 直接并进 drive
         //(harness 只并增量,主账不重算)。
-        agent::RunStopContinuation(sub_agent, sub_callbacks, stop_options, drive);
+        agent::RunStopContinuation(sub_agent, turn_wiring, stop_options, drive);
         if (task != nullptr) {
             std::lock_guard<std::mutex> lock(ledger_.mutex);
             task->snapshot.steps_used = drive.steps_used;

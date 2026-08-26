@@ -149,7 +149,7 @@ TEST_CASE("收件点:工具轮回之间来信,注进 history 并出现在下一�
     };
     loop.SetWiring(std::move(wiring));
 
-    REQUIRE(loop.Run("帮我用一下工具", agent::Callbacks{}).has_value());
+    REQUIRE(loop.Run("帮我用一下工具", agent::TurnWiring{}).has_value());
 
     REQUIRE(backend.captured_requests.size() == 2);
     // 第二次请求的末条消息里既有 tool_result 也有来信文本(同一条 user)。
@@ -198,7 +198,7 @@ TEST_CASE("收件点:权限确认当口来信不作答——信只在确认收�
     loop.SetWiring(std::move(wiring));
 
     bool confirm_asked = false;
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     callbacks.on_tool_confirm = [&](const std::string&, const std::string&, const nlohmann::json&) {
         confirm_asked = true;
         return true;
@@ -233,7 +233,7 @@ TEST_CASE("收件点:不设或交空,行为跟从前完全一致") {
     agent::AgentWiring wiring;
     wiring.inbox = []() -> std::optional<api::Message> { return std::nullopt; };
     loop.SetWiring(std::move(wiring));
-    REQUIRE(loop.Run("问", agent::Callbacks{}).has_value());
+    REQUIRE(loop.Run("问", agent::TurnWiring{}).has_value());
     REQUIRE(loop.history().size() == 2);
 }
 
@@ -265,7 +265,7 @@ TEST_CASE("收件点:同一边界多条排队消息,按落队顺序一并注入�
     };
     loop.SetWiring(std::move(wiring));
 
-    REQUIRE(loop.Run("去查", agent::Callbacks{}).has_value());
+    REQUIRE(loop.Run("去查", agent::TurnWiring{}).has_value());
     REQUIRE(backend.captured_requests.size() == 2);
     const auto& last = backend.captured_requests[1].messages.back();
     REQUIRE(last.content.size() == 4);  // tool_result + 三块排队消息
@@ -297,7 +297,7 @@ TEST_CASE("收件点:无工具自然收尾,本轮不注入——排队消息留�
     };
     loop.SetWiring(std::move(wiring));
 
-    REQUIRE(loop.Run("普通一问", agent::Callbacks{}).has_value());
+    REQUIRE(loop.Run("普通一问", agent::TurnWiring{}).has_value());
     CHECK(inbox_calls == 0);  // 没有工具边界,收件点压根没被调
     REQUIRE(backend.captured_requests.size() == 1);
     for (const auto& message : backend.captured_requests[0].messages) {

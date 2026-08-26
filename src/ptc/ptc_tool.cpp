@@ -226,16 +226,18 @@ tools::Tool::Result PtcTool::execute(const nlohmann::json& input) {
     }
     // P4:转发链原样(签名已带 tool_use_id——stub 调用的 id 是宿主合成的
     // "ptc-N",见 executor 里 call.id)。
-    agent::Callbacks chain;
-    chain.on_tool_start = hooks.on_tool_start;
+    agent::TurnWiring chain;
     chain.on_tool_confirm = hooks.on_tool_confirm;
-    chain.on_tool_done = hooks.on_tool_done;
     chain.on_pre_tool_use_hook = hooks.on_pre_tool_use_hook;
     chain.on_permission_request = hooks.on_permission_request;
     chain.on_tool_phase = hooks.on_tool_phase;
     chain.on_post_tool_use_hook = hooks.on_post_tool_use_hook;
     // Plan 模式:stub 调用走同一 ModePolicy(单子明令,不另开旁路)。
     chain.on_mode_policy = hooks.on_mode_policy;
+    // 显示出水口(批二余款):stub 调用的起止上宿主事件流(从路标恒真,
+    // 画屏侧跳过——终端只画一张外层卡)。
+    chain.events = hooks.events;
+    chain.subordinate_stream = hooks.subordinate_stream;
 
     PtcRunner::Options options;
     options.python_cmd = config_.python_cmd;

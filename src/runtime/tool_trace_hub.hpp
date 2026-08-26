@@ -1,7 +1,7 @@
 // ToolTraceHub(逐枚追踪单"一份事件,两路消费"):canonical 领域事件的
 // 装配层分线器。
 //
-// AgentLoop 只吐一份 ToolTraceEvent(经 Callbacks::on_tool_trace);本类
+// AgentLoop 只吐一份 ToolTraceEvent(经 TurnWiring::on_tool_trace);本类
 // 把它分发到三处:
 //   - Runtime EventSink(TurnEventAdapter 的 ServerEvent 投影,UI 侧)
 //   - SessionTraceSink(session JSONL 的 durable 栅栏,append+flush)
@@ -71,7 +71,7 @@ public:
     std::string NextExecutionId();
 
     // 装配 AgentLoop 的三个 trace 关口。调用方把返回的 lambdas 塞进
-    // Callbacks,loop 自己不知道 hub 存在(依赖单向)。
+    // TurnWiring,loop 自己不知道 hub 存在(依赖单向)。
     //   on_trace      —— canonical 事件分线(栅栏持久化 + UI 投影 + 录制)
     //   on_assistant  —— assistant 消息 append+flush(批次头,单子落盘次序 1-2)
     //   on_results    —— tool result 消息 append+flush + 各枚 result_committed
@@ -79,7 +79,7 @@ public:
     // 返回 false 的 started(副作用工具写不落)会在 OnTrace 里直接拦:
     // 拦的方式是抛出 kErrSessionTraceAppendFailed 的拦执行信号——见
     // OnTrace 的注释,AgentLoop 侧由 RunOneTool 在 execute 前查询。
-    void Install(agent::Agent& loop, agent::Callbacks& callbacks, const std::string& thread_id,
+    void Install(agent::Agent& loop, agent::TurnWiring& wiring, const std::string& thread_id,
                  const std::string& turn_id);
 
     // 单笔分发(Install 之外的手工投递口:恢复侧、测试、后台子代理的

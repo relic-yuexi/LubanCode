@@ -26,22 +26,22 @@ std::string ToolTraceHub::NextExecutionId() {
     return ids_.NextItemId();
 }
 
-void ToolTraceHub::Install(agent::Agent& loop, agent::Callbacks& callbacks, const std::string& thread_id,
+void ToolTraceHub::Install(agent::Agent& loop, agent::TurnWiring& wiring, const std::string& thread_id,
                            const std::string& turn_id) {
     // execution 发号:与 Runtime item id 同源(单子:不可再造第二只计数器)。
     // 批四·病十二:发号口是接线,进 AgentWiring——其余接线(inbox/压力钩)
     // 是装配层先灌好的,这里照原样带上,只换发号这一路。
-    agent::AgentWiring wiring = loop.wiring();
-    wiring.execution_id_issuer = [this] { return NextExecutionId(); };
-    loop.SetWiring(std::move(wiring));
+    agent::AgentWiring agent_wiring = loop.wiring();
+    agent_wiring.execution_id_issuer = [this] { return NextExecutionId(); };
+    loop.SetWiring(std::move(agent_wiring));
     thread_id_ = thread_id;
     turn_id_ = turn_id;
-    callbacks.on_tool_trace = [this](const agent::ToolTraceEvent& event) { OnTrace(event); };
+    wiring.on_tool_trace = [this](const agent::ToolTraceEvent& event) { OnTrace(event); };
     // 拦截查询口:RunOneTool 在 emit(execution_started) 之后、execute
     // 之前同步问一句。hub 见过"started 写盘失败 + 副作用档"时答 false,
     // RunOneTool 立即以 result_store_failed 收尾,不 execute(单子:
     // 副作用工具不得继续执行)。
-    callbacks.on_tool_trace_blocked = [this](const std::string& execution_id) {
+    wiring.on_tool_trace_blocked = [this](const std::string& execution_id) {
         std::lock_guard<std::mutex> lock(mutex_);
         return blocked_executions_.count(execution_id) != 0;
     };
@@ -49,12 +49,12 @@ void ToolTraceHub::Install(agent::Agent& loop, agent::Callbacks& callbacks, cons
     // 工具之前 append+flush;五枚结果收齐后 user 消息 append+flush,再补
     // 各枚 result_committed。store 没开张(空指针/没 active)时这两个口
     // 空操作——老路 PersistNewMessages 仍会在轮末兜底,一个不丢。
-    callbacks.on_assistant_message_ready = [this](const api::Message& message) {
+    wiring.on_assistant_message_ready = [this](const api::Message& message) {
         if (store_ != nullptr && store_->active()) {
             store_->AppendMessage(message);
         }
     };
-    callbacks.on_tool_results_committed = [this](const std::string& batch_id, const api::Message& message) {
+    wiring.on_tool_results_committed = [this](const std::string& batch_id, const api::Message& message) {
         if (store_ != nullptr && store_->active()) {
             store_->AppendMessage(message);
         }

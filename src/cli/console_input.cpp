@@ -48,6 +48,7 @@
 
 #include "cli/agent_panel_host.hpp"
 #include "cli/console_input.hpp"
+#include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 
 #include "cli/bottom_chrome.hpp"
 
@@ -642,8 +643,8 @@ void PaintInlineFrameLegacy(const InlineFrame* previous, const InlineFrame& next
         }
         if (new_row != nullptr && !new_row->text.empty()) {
             platform::SetCursorPos(new_row->x, origin_y + static_cast<int>(i));
-            std::cout << new_row->text;
-            std::cout.flush();
+            TermOut() << new_row->text;
+            TermOut().flush();
         }
     }
     platform::SetCursorPos(next.cursor_x, origin_y + next.cursor_row);
@@ -807,13 +808,13 @@ void CollapseBoxOnSubmit(int frame_top, int prompt_width, int prev_body_row_coun
     if (block_text.empty()) {
         for (std::size_t i = 0; i < layout.rows.size(); ++i) {
             platform::SetCursorPos(0, top + static_cast<int>(i));
-            std::cout << row_text(i);
-            std::cout.flush();
+            TermOut() << row_text(i);
+            TermOut().flush();
         }
     } else {
         platform::SetCursorPos(0, top);
-        std::cout << block_text;
-        std::cout.flush();
+        TermOut() << block_text;
+        TermOut().flush();
     }
     platform::SetCursorPos(final_x, final_y);
 }
@@ -827,12 +828,12 @@ class BracketedPasteScope {
 public:
     explicit BracketedPasteScope(bool enabled) : enabled_(enabled) {
         if (enabled_) {
-            std::cout << "\x1b[?2004h" << std::flush;
+            TermOut() << "\x1b[?2004h" << std::flush;
         }
     }
     ~BracketedPasteScope() {
         if (enabled_) {
-            std::cout << "\x1b[?2004l" << std::flush;
+            TermOut() << "\x1b[?2004l" << std::flush;
         }
     }
 
@@ -870,16 +871,16 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     if (box) {
         const std::optional<platform::ScreenInfo> pre_info = platform::GetScreenInfo();
         const int console_width = pre_info.has_value() ? pre_info->width : 80;
-        std::cout << BoxRuleLine(theme, console_width) << "\n";
+        TermOut() << BoxRuleLine(theme, console_width) << "\n";
         for (int i = 0; i < kComposerTopPaddingRows; ++i) {
-            std::cout << "\n";
+            TermOut() << "\n";
         }
     }
 
     // 0.21.x:提示符统一回归 `> `,不再冠 [auto]/[yolo] 档位前缀——档位改
     // 由常驻状态行(颜色 + 文字)承载,提示符不再重复一遍。
-    std::cout << prompt;
-    std::cout.flush();
+    TermOut() << prompt;
+    TermOut().flush();
 
     const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
     if (!info.has_value()) {
@@ -1196,13 +1197,13 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         if (box) {
             const std::optional<platform::ScreenInfo> rule_info = platform::GetScreenInfo();
             const int console_width = rule_info.has_value() ? rule_info->width : 80;
-            std::cout << BoxRuleLine(theme, console_width) << "\n";
+            TermOut() << BoxRuleLine(theme, console_width) << "\n";
             for (int i = 0; i < kComposerTopPaddingRows; ++i) {
-                std::cout << "\n";
+                TermOut() << "\n";
             }
         }
-        std::cout << prompt;
-        std::cout.flush();
+        TermOut() << prompt;
+        TermOut().flush();
         if (const std::optional<platform::ScreenInfo> after_info = platform::GetScreenInfo();
             after_info.has_value()) {
             start_row = after_info->cursor_y;
@@ -1270,13 +1271,13 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                         std::chrono::steady_clock::now().time_since_epoch().count()) +
                     ".md");
         } catch (const std::exception&) {
-            std::cout << theme.error << tr("editor.no_temp") << theme.reset << "\n";
+            TermOut() << theme.error << tr("editor.no_temp") << theme.reset << "\n";
             return;
         }
         {
             std::ofstream out(file, std::ios::binary | std::ios::trunc);
             if (!out) {
-                std::cout << theme.error << tr("editor.write_failed") << theme.reset << "\n";
+                TermOut() << theme.error << tr("editor.write_failed") << theme.reset << "\n";
                 return;
             }
             out << draft;
@@ -1284,12 +1285,12 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             if (!out) {
                 std::error_code rm;
                 fs::remove(file, rm);
-                std::cout << theme.error << tr("editor.write_failed") << theme.reset << "\n";
+                TermOut() << theme.error << tr("editor.write_failed") << theme.reset << "\n";
                 return;
             }
         }
         retire_idle_chrome();
-        std::cout << "\n" << std::flush;
+        TermOut() << "\n" << std::flush;
         const std::string command = editor_cmd + " \"" + lubancode::tools::PathToUtf8(file) + "\"";
         const int exit_code = platform::RunInteractiveCommand(command);
         std::string read_back;
@@ -1306,23 +1307,23 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         std::error_code rm_ec;
         fs::remove(file, rm_ec);  // 用完即清;崩溃残件留给系统临时目录回收
         if (exit_code != 0) {
-            std::cout << theme.error << trf("editor.nonzero", exit_code) << theme.reset << "\n";
+            TermOut() << theme.error << trf("editor.nonzero", exit_code) << theme.reset << "\n";
             reanchor_prompt_and_redraw();
             return;
         }
         if (!read_ok) {
-            std::cout << theme.error << tr("editor.file_gone") << theme.reset << "\n";
+            TermOut() << theme.error << tr("editor.file_gone") << theme.reset << "\n";
             reanchor_prompt_and_redraw();
             return;
         }
         if (!platform::IsValidUtf8(read_back)) {
-            std::cout << theme.error << tr("editor.bad_utf8") << theme.reset << "\n";
+            TermOut() << theme.error << tr("editor.bad_utf8") << theme.reset << "\n";
             reanchor_prompt_and_redraw();
             return;
         }
         const std::string normalized = NormalizeEditorDraft(read_back);
         editor.LoadTextWithCursor(Utf8ToUtf32(normalized), normalized.size());
-        std::cout << theme.stats << trf("editor.done", editor_cmd) << theme.reset << "\n";
+        TermOut() << theme.stats << trf("editor.done", editor_cmd) << theme.reset << "\n";
         reanchor_prompt_and_redraw();
     };
 
@@ -1465,13 +1466,13 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         if (box) {
             const std::optional<platform::ScreenInfo> rule_info = platform::GetScreenInfo();
             const int console_width = rule_info.has_value() ? rule_info->width : 80;
-            std::cout << BoxRuleLine(theme, console_width) << "\n";
+            TermOut() << BoxRuleLine(theme, console_width) << "\n";
             for (int i = 0; i < kComposerTopPaddingRows; ++i) {
-                std::cout << "\n";
+                TermOut() << "\n";
             }
         }
-        std::cout << prompt;
-        std::cout.flush();
+        TermOut() << prompt;
+        TermOut().flush();
         if (const std::optional<platform::ScreenInfo> after_info = platform::GetScreenInfo();
             after_info.has_value()) {
             start_row = after_info->cursor_y;
@@ -1620,7 +1621,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                         queue_edit.reset();
                     }
                     retire_idle_chrome();
-                    std::cout << "\n";
+                    TermOut() << "\n";
                     if (exit_reason != nullptr) {
                         *exit_reason = ReadExitReason::Submitted;
                     }
@@ -1709,30 +1710,30 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                             break;
                         }
                         retire_idle_chrome();
-                        std::cout << "\n";
+                        TermOut() << "\n";
                         {
                             std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
-                            std::cout << theme.tool_line << tr("help.scene_header") << theme.reset << "\n";
+                            TermOut() << theme.tool_line << tr("help.scene_header") << theme.reset << "\n";
                             for (const auto& record : keymap::ActiveKeymap().AllBindings()) {
                                 if (record.scope == keymap::KeyScope::Streaming) {
                                     continue;  // 流式脚注那批不属"当前场景"(空闲 composer)
                                 }
                                 const std::string chord_text =
                                     record.has_default ? keymap::FormatKeyChord(record.chord) : "-";
-                                std::cout << theme.stats << "  " << chord_text;
+                                TermOut() << theme.stats << "  " << chord_text;
                                 for (int pad = static_cast<int>(chord_text.size()); pad < 12; ++pad) {
-                                    std::cout << ' ';
+                                    TermOut() << ' ';
                                 }
-                                std::cout << keymap::ActionName(record.action);
+                                TermOut() << keymap::ActionName(record.action);
                                 if (!record.bindable) {
-                                    std::cout << tr("help.fixed_suffix");
+                                    TermOut() << tr("help.fixed_suffix");
                                 } else if (!record.has_default) {
-                                    std::cout << tr("help.unbound_suffix");
+                                    TermOut() << tr("help.unbound_suffix");
                                 }
-                                std::cout << theme.reset << "\n";
+                                TermOut() << theme.reset << "\n";
                             }
-                            std::cout << theme.stats << tr("help.scene_footer") << theme.reset << "\n";
-                            std::cout.flush();
+                            TermOut() << theme.stats << tr("help.scene_footer") << theme.reset << "\n";
+                            TermOut().flush();
                         }
                         reanchor_prompt_and_redraw();
                         continue;
@@ -1757,7 +1758,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                             default: break;
                         }
                         retire_idle_chrome();
-                        std::cout << "\n";
+                        TermOut() << "\n";
                         if (UiHandlerSlot()) {
                             (void)UiHandlerSlot()(action);
                         }
@@ -1773,7 +1774,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                         const auto png =
                             platform::ReadClipboardImagePng(kMaxImageBytes, paste_error);
                         if (!png.has_value()) {
-                            std::cout << theme.error
+                            TermOut() << theme.error
                                       << trf("image.paste_failed", paste_error)
                                       << theme.reset << "\n";
                             redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
@@ -1787,13 +1788,13 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                                    ("lubancode-paste-" + std::to_string(platform::CurrentProcessId()) +
                                     "-" + std::to_string(++paste_seq) + ".png");
                         } catch (const std::exception&) {
-                            std::cout << theme.error << tr("editor.no_temp") << theme.reset << "\n";
+                            TermOut() << theme.error << tr("editor.no_temp") << theme.reset << "\n";
                             continue;
                         }
                         {
                             std::ofstream out(file, std::ios::binary | std::ios::trunc);
                             if (!out) {
-                                std::cout << theme.error << tr("editor.write_failed") << theme.reset << "\n";
+                                TermOut() << theme.error << tr("editor.write_failed") << theme.reset << "\n";
                                 continue;
                             }
                             out.write(reinterpret_cast<const char*>(png->data()),
@@ -1807,7 +1808,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                         const std::size_t at = (std::min)(before.cursor, joined.size());
                         joined.insert(at, token);
                         editor.LoadTextWithCursor(Utf8ToUtf32(joined), at + token.size());
-                        std::cout << theme.stats
+                        TermOut() << theme.stats
                                   << trf("image.pasted", png->size() / 1024,
                                          lubancode::tools::PathToUtf8(file))
                                   << theme.reset << "\n";
@@ -1837,7 +1838,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                         CollapseBoxOnSubmit(prev_frame_origin, prompt_end_col, prev_body_row_count,
                                             state, prompt, vt_enabled, theme);
                     }
-                    std::cout << "\n";
+                    TermOut() << "\n";
                     if (exit_reason != nullptr) {
                         *exit_reason = ReadExitReason::Submitted;
                     }
@@ -2221,7 +2222,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             // 注释)。帧顶用上一帧记的绝对帧顶(含面板行与上横线)。
             CollapseBoxOnSubmit(prev_frame_origin, prompt_end_col, prev_body_row_count, state, prompt,
                                 vt_enabled, theme);
-            std::cout << "\n";
+            TermOut() << "\n";
             if (exit_reason != nullptr) {
                 *exit_reason = ReadExitReason::Submitted;
             }
@@ -2233,7 +2234,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         if (state.esc_pressed && esc_rejects) {
             // 确认与可取消选择场景:Esc 不留在循环里继续等，直接交回
             // nullopt。不能拿空串代替——/model 明明把空串当默认第一项。
-            std::cout << "\n";
+            TermOut() << "\n";
             if (exit_reason != nullptr) {
                 *exit_reason = ReadExitReason::Esc;
             }
@@ -2253,7 +2254,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 const int frame_top = prev_frame_origin >= 0 ? prev_frame_origin : start_row;
                 platform::SetCursorPos(0, frame_top + prev_body_row_count);
             }
-            std::cout << "\n";
+            TermOut() << "\n";
             if (exit_reason != nullptr) {
                 *exit_reason = ReadExitReason::Cancel;
             }
@@ -2265,7 +2266,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         if (state.submitted) {
             // 非框读取的提交:RedrawEditArea 刚按提交帧把完整多行内容画在
             // 屏幕上、光标停在末行末尾,这里换行收尾。
-            std::cout << "\n";
+            TermOut() << "\n";
             if (exit_reason != nullptr) {
                 *exit_reason = ReadExitReason::Submitted;
             }
@@ -2284,8 +2285,8 @@ std::optional<std::string> ReadLine(const std::string& prompt, const Theme& them
     (void)composer;  // 管道/重定向:没有 composer 概念,照旧逐行 getline
 
     if (!prompt.empty()) {
-        std::cout << prompt;
-        std::cout.flush();
+        TermOut() << prompt;
+        TermOut().flush();
     }
     std::string line;
     if (!std::getline(std::cin, line)) {
@@ -2643,7 +2644,7 @@ std::optional<ChoiceMenuResult> ReadChoiceMenuSearch(const std::vector<ChoiceMen
             view.empty() ? 0 : (std::min)(view.size() - menu.scroll(), menu.window_rows());
         const int rows_now = 2 + (view.empty() ? 1 : static_cast<int>(visible));
         const int clear_rows = (std::max)(frame_rows, rows_now);
-        std::cout << kSyncOutputBegin << "\x1b[?25l";
+        TermOut() << kSyncOutputBegin << "\x1b[?25l";
         for (int r = 0; r < clear_rows; ++r) {
             platform::ClearRowHardFrom(0, start_row + r, width);
         }
@@ -2651,7 +2652,7 @@ std::optional<ChoiceMenuResult> ReadChoiceMenuSearch(const std::vector<ChoiceMen
         const std::string search_line = "搜索名称/说明: " + menu.search() + "_ (" +
                                         std::to_string(view.size()) + "/" + std::to_string(items.size()) + ")";
         platform::SetCursorPos(0, start_row);
-        std::cout << theme.stats << TruncateUtf8ToDisplayWidth(search_line, width - 1) << theme.reset;
+        TermOut() << theme.stats << TruncateUtf8ToDisplayWidth(search_line, width - 1) << theme.reset;
         // 窗口内条目:行样式与老路径一字同款(> 前缀、多选 [x]、选中高亮、
         // description 同行尾随、editable 行内文本)。
         for (std::size_t row = 0; row < visible; ++row) {
@@ -2678,18 +2679,18 @@ std::optional<ChoiceMenuResult> ReadChoiceMenuSearch(const std::vector<ChoiceMen
 
             platform::SetCursorPos(0, start_row + 1 + static_cast<int>(row));
             if (active) {
-                std::cout << theme.confirm;
+                TermOut() << theme.confirm;
             }
-            std::cout << prefix << label << theme.reset;
+            TermOut() << prefix << label << theme.reset;
             if (!items[original].description.empty() && description_room > 0) {
-                std::cout << theme.stats << " - "
+                TermOut() << theme.stats << " - "
                           << TruncateUtf8ToDisplayWidth(items[original].description, description_room)
                           << theme.reset;
             }
         }
         if (view.empty()) {
             platform::SetCursorPos(0, start_row + 1);
-            std::cout << theme.stats << TruncateUtf8ToDisplayWidth(std::string("无匹配项"), width - 1)
+            TermOut() << theme.stats << TruncateUtf8ToDisplayWidth(std::string("无匹配项"), width - 1)
                       << theme.reset;
         }
         // hint 行:invalid 最优先,editable 行内编辑次之,能翻页给翻页提示,
@@ -2705,9 +2706,9 @@ std::optional<ChoiceMenuResult> ReadChoiceMenuSearch(const std::vector<ChoiceMen
         } else {
             hint = options.hint;
         }
-        std::cout << (menu.state().invalid ? theme.error : theme.stats)
+        TermOut() << (menu.state().invalid ? theme.error : theme.stats)
                   << TruncateUtf8ToDisplayWidth(hint, width - 1) << theme.reset << kSyncOutputEnd;
-        std::cout.flush();
+        TermOut().flush();
         frame_rows = rows_now;
         return true;
     };
@@ -2716,15 +2717,15 @@ std::optional<ChoiceMenuResult> ReadChoiceMenuSearch(const std::vector<ChoiceMen
         std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
         const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
         if (info.has_value()) {
-            std::cout << kSyncOutputBegin;
+            TermOut() << kSyncOutputBegin;
             for (int r = 0; r < frame_rows; ++r) {
                 platform::ClearRowHardFrom(0, start_row + r, info->width);
             }
             platform::SetCursorPos(0, start_row);
-            std::cout << "\x1b[?25h" << kSyncOutputEnd;
-            std::cout.flush();
+            TermOut() << "\x1b[?25h" << kSyncOutputEnd;
+            TermOut().flush();
         } else {
-            std::cout << "\x1b[?25h" << std::flush;
+            TermOut() << "\x1b[?25h" << std::flush;
         }
     };
 
@@ -2825,7 +2826,7 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
             return false;
         }
         const int width = info->width;
-        std::cout << kSyncOutputBegin << "\x1b[?25l";
+        TermOut() << kSyncOutputBegin << "\x1b[?25l";
         for (std::size_t i = 0; i < items.size(); ++i) {
             const bool active = i == menu.state().cursor;
             const bool editable = options.editable_index.has_value() && i == *options.editable_index;
@@ -2848,11 +2849,11 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
             platform::ClearRowHardFrom(0, start_row + static_cast<int>(i), width);
             platform::SetCursorPos(0, start_row + static_cast<int>(i));
             if (active) {
-                std::cout << theme.confirm;
+                TermOut() << theme.confirm;
             }
-            std::cout << prefix << label << theme.reset;
+            TermOut() << prefix << label << theme.reset;
             if (!items[i].description.empty() && description_room > 0) {
-                std::cout << theme.stats << " - "
+                TermOut() << theme.stats << " - "
                           << TruncateUtf8ToDisplayWidth(items[i].description, description_room)
                           << theme.reset;
             }
@@ -2867,9 +2868,9 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
         } else {
             hint = options.hint;
         }
-        std::cout << (menu.state().invalid ? theme.error : theme.stats)
+        TermOut() << (menu.state().invalid ? theme.error : theme.stats)
                   << TruncateUtf8ToDisplayWidth(hint, width - 1) << theme.reset << kSyncOutputEnd;
-        std::cout.flush();
+        TermOut().flush();
         return true;
     };
 
@@ -2877,15 +2878,15 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
         std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
         const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
         if (info.has_value()) {
-            std::cout << kSyncOutputBegin;
+            TermOut() << kSyncOutputBegin;
             for (int r = 0; r < menu_rows; ++r) {
                 platform::ClearRowHardFrom(0, start_row + r, info->width);
             }
             platform::SetCursorPos(0, start_row);
-            std::cout << "\x1b[?25h" << kSyncOutputEnd;
-            std::cout.flush();
+            TermOut() << "\x1b[?25h" << kSyncOutputEnd;
+            TermOut().flush();
         } else {
-            std::cout << "\x1b[?25h" << std::flush;
+            TermOut() << "\x1b[?25h" << std::flush;
         }
     };
 
@@ -3026,8 +3027,8 @@ void SetTerminalTitle(const std::string& text) {
         return;  // 管道/重定向不添转义
     }
     std::lock_guard<std::mutex> lock(StdoutWriteMutex());
-    std::cout << "\x1b]0;" << text << "\x07";
-    std::cout.flush();
+    TermOut() << "\x1b]0;" << text << "\x07";
+    TermOut().flush();
 }
 
 void NotifyUserAttention() {
@@ -3035,8 +3036,8 @@ void NotifyUserAttention() {
         return;
     }
     std::lock_guard<std::mutex> lock(StdoutWriteMutex());
-    std::cout << "\a";
-    std::cout.flush();
+    TermOut() << "\a";
+    TermOut().flush();
 }
 
 std::optional<int> DetectConsoleWidth() {
@@ -3106,9 +3107,9 @@ void EchoDeliveredQueuedMessages(const std::vector<QueuedMessage>& messages, con
     std::lock_guard<std::mutex> lock(StdoutWriteMutex());
     EraseStreamFooterLocked();
     for (const auto& message : messages) {
-        std::cout << theme.prompt << "> " << theme.reset << message.text << "\n";
+        TermOut() << theme.prompt << "> " << theme.reset << message.text << "\n";
     }
-    std::cout.flush();
+    TermOut().flush();
     if (const auto& hook = StreamScreenPrintHookSlot()) {
         hook();  // 持久插入不在流式正文行数账里，旧 Markdown 锚点不能再重画
     }
@@ -3135,9 +3136,9 @@ int EnsureViewportRowsLocked(int top_row, int rows_needed) {
         const int shortfall = plan.pan_rows;
         platform::SetCursorPos(0, info->height - 1);
         for (int i = 0; i < shortfall + plan.scroll_rows; ++i) {
-            std::cout << "\n";
+            TermOut() << "\n";
         }
-        std::cout.flush();
+        TermOut().flush();
         return shortfall + plan.scroll_rows;
     }
     // 视口已贴缓冲区底(WT/ConPTY 常态):老法,末行写换行滚内容。滚掉的
@@ -3145,9 +3146,9 @@ int EnsureViewportRowsLocked(int top_row, int rows_needed) {
     if (plan.scroll_rows > 0) {
         platform::SetCursorPos(0, info->height - 1);
         for (int i = 0; i < plan.scroll_rows; ++i) {
-            std::cout << "\n";
+            TermOut() << "\n";
         }
-        std::cout.flush();
+        TermOut().flush();
         return plan.scroll_rows;
     }
     return 0;
@@ -3203,7 +3204,7 @@ void EraseStreamFooterLocked() {
         // 正文，下一笔流式文字才能接对地方。
         int bx = f.body_x >= 0 ? f.body_x : info->cursor_x;
         int by = f.body_y >= 0 ? f.body_y : info->cursor_y;
-        std::cout << kSyncOutputBegin;
+        TermOut() << kSyncOutputBegin;
         if (f.last_width != -1 && f.last_width != info->width &&
             f.input_row >= 0 && !f.painted_row_widths.empty()) {
             // 正文 delta 可能抢在 200ms heartbeat 前到。Erase 自己也要追
@@ -3220,8 +3221,8 @@ void EraseStreamFooterLocked() {
         } else {
             ClearStreamFooterRowsAt(f.row, f.rows, info->width, info->height);
         }
-        std::cout << kSyncOutputEnd;
-        std::cout.flush();
+        TermOut() << kSyncOutputEnd;
+        TermOut().flush();
         platform::SetCursorPos(bx, by);
         f.last_width = info->width;
     }
@@ -3242,7 +3243,7 @@ void RedrawStreamFooterLocked() {
     int bx = f.row >= 0 && f.body_x >= 0 ? f.body_x : info->cursor_x;
     int by = f.row >= 0 && f.body_y >= 0 ? f.body_y : info->cursor_y;
 
-    std::cout << kSyncOutputBegin;  // 擦旧框 + 画新框整个当一帧提交,别让半路的画面露出来
+    TermOut() << kSyncOutputBegin;  // 擦旧框 + 画新框整个当一帧提交,别让半路的画面露出来
 
     if (f.last_width != -1 && f.last_width != info->width && f.row >= 0 &&
         f.input_row >= 0 && !f.painted_row_widths.empty()) {
@@ -3270,8 +3271,8 @@ void RedrawStreamFooterLocked() {
 
     if (f.hint.empty() && f.composer.line.empty() && f.composer.hint_lines.empty()) {
         // 没启用 / 还没准备好文案:跟老逻辑一样,这一笔不画。
-        std::cout << kSyncOutputEnd;
-        std::cout.flush();
+        TermOut() << kSyncOutputEnd;
+        TermOut().flush();
         platform::SetCursorPos(bx, by);
         return;
     }
@@ -3366,8 +3367,8 @@ void RedrawStreamFooterLocked() {
     platform::SetCursorPos(bx, by);
     const int body_offset = bx > 0 ? 1 : 0;
     if (!EnsureStreamScreenRowsLocked(body_offset + total_rows)) {
-        std::cout << kSyncOutputEnd;
-        std::cout.flush();
+        TermOut() << kSyncOutputEnd;
+        TermOut().flush();
         platform::SetCursorPos(bx, by);
         return;
     }
@@ -3379,11 +3380,11 @@ void RedrawStreamFooterLocked() {
 
     for (std::size_t i = 0; i < layout.frame.rows.size(); ++i) {
         platform::SetCursorPos(0, target + static_cast<int>(i));
-        std::cout << layout.frame.rows[i].text;
+        TermOut() << layout.frame.rows[i].text;
     }
 
-    std::cout << kSyncOutputEnd;
-    std::cout.flush();
+    TermOut() << kSyncOutputEnd;
+    TermOut().flush();
     // 正文位置藏起来，肉眼所见的光标留在输入框。下一笔正文来时
     // EraseStreamFooterLocked 会先拨回 bx/by。光标来自布局(真实软换行位置),
     // 不再按首行回显宽度猜;resize 追踪跟着光标行走(ComputeFooterResize
@@ -3714,8 +3715,8 @@ void TurnInputListener::ThreadMain() {
             const int stopped = actions.cancel_all();
             std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
             EraseStreamFooterLocked();
-            std::cout << "\n" << theme_.stats << trf("agent_panel.stop_all_notice", stopped) << theme_.reset << "\n";
-            std::cout.flush();
+            TermOut() << "\n" << theme_.stats << trf("agent_panel.stop_all_notice", stopped) << theme_.reset << "\n";
+            TermOut().flush();
             if (const auto& hook = StreamScreenPrintHookSlot()) {
                 hook();
             }
@@ -3851,8 +3852,8 @@ void TurnInputListener::ThreadMain() {
         cancel_flag_.store(true);
         std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
         EraseStreamFooterLocked();  // 先把脚注那行擦掉,[已打断] 才打得干净
-        std::cout << "\n" << theme_.stats << tr("input.interrupted") << theme_.reset << "\n";
-        std::cout.flush();
+        TermOut() << "\n" << theme_.stats << tr("input.interrupted") << theme_.reset << "\n";
+        TermOut().flush();
         if (const auto& hook = StreamScreenPrintHookSlot()) {
             hook();  // 插打了整行,正文块的行数账作废(锁还攥着,见头文件约定)
         }
@@ -3977,8 +3978,8 @@ void TurnInputListener::ThreadMain() {
                 {
                     std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
                     EraseStreamFooterLocked();
-                    std::cout << "\n" << theme_.stats << tr("input.ctrlc_exit") << theme_.reset << "\n";
-                    std::cout.flush();
+                    TermOut() << "\n" << theme_.stats << tr("input.ctrlc_exit") << theme_.reset << "\n";
+                    TermOut().flush();
                 }  // 退出前先放锁——std::exit 会跑静态对象析构,别让它们卡死在这把锁上。
                 std::exit(130);  // 130 = 128+SIGINT,"被 Ctrl+C 中断"的约定退出码
             }
@@ -4002,12 +4003,12 @@ void TurnInputListener::ThreadMain() {
                 transcript_expanded_->store(expanded, std::memory_order_release);
                 std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
                 EraseStreamFooterLocked();
-                std::cout << "\n" << theme_.stats
+                TermOut() << "\n" << theme_.stats
                           << (expanded ? tr("ui.expanded") : tr("ui.compact")) << theme_.reset << "\n";
                 if (expand_renderer_) {
-                    std::cout << expand_renderer_(expanded);
+                    TermOut() << expand_renderer_(expanded);
                 }
-                std::cout.flush();
+                TermOut().flush();
                 if (const auto& hook = StreamScreenPrintHookSlot()) {
                     hook();  // 模式行和转录快照都不在正文行数账里,旧锚点作废
                 }
@@ -4118,8 +4119,8 @@ void TurnInputListener::ThreadMain() {
                     {
                         std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
                         EraseStreamFooterLocked();
-                        std::cout << "\n" << theme_.stats << tr("queue.commit_conflict") << theme_.reset << "\n";
-                        std::cout.flush();
+                        TermOut() << "\n" << theme_.stats << tr("queue.commit_conflict") << theme_.reset << "\n";
+                        TermOut().flush();
                         if (const auto& hook = StreamScreenPrintHookSlot()) {
                             hook();  // 插打了整行,正文块的行数账作废(锁还攥着)
                         }

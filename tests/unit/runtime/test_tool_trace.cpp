@@ -162,7 +162,7 @@ public:
 // 收 trace 事件的回调壳。
 struct TraceCollector {
     std::vector<agent::ToolTraceEvent> events;
-    agent::Callbacks Decorate(agent::Callbacks callbacks) {
+    agent::TurnWiring Decorate(agent::TurnWiring callbacks) {
         callbacks.on_tool_trace = [this](const agent::ToolTraceEvent& event) { events.push_back(event); };
         return callbacks;
     }
@@ -237,7 +237,7 @@ TEST_CASE("tool_trace: 中文结果截头尾不劈 UTF-8,完成事件仍可序�
     call.input = nlohmann::json::object();
 
     TraceCollector collector;
-    agent::Callbacks callbacks = collector.Decorate({});
+    agent::TurnWiring callbacks = collector.Decorate({});
     agent::ToolTraceContext ctx;
     ctx.execution_id = "e_utf8";
     ctx.batch_id = "b_utf8";
@@ -309,7 +309,7 @@ TEST_CASE("五工具全成功: sequence 与 id 配对不乱") {
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
     TraceCollector collector;
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     callbacks = collector.Decorate(callbacks);
     const auto result = loop.Run("五枚", callbacks);
     REQUIRE(result.has_value());
@@ -389,7 +389,7 @@ TEST_CASE("第三枚 is_error: 最早明确失败是 #2,#3/#4 照跑") {
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
     TraceCollector collector;
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     callbacks = collector.Decorate(callbacks);
     const auto result = loop.Run("跑", callbacks);
     REQUIRE(result.has_value());
@@ -433,7 +433,7 @@ TEST_CASE("第三枚后 ESC: 三收口,四五记 cancelled_before_start") {
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
     TraceCollector collector;
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     callbacks = collector.Decorate(callbacks);
     const auto result = loop.Run("跑", callbacks, &cancel);
     REQUIRE(result.has_value());
@@ -467,7 +467,7 @@ TEST_CASE("五枚同名工具: 按 execution/tool_use id 配准") {
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
     TraceCollector collector;
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     callbacks = collector.Decorate(callbacks);
     REQUIRE(loop.Run("跑", callbacks).has_value());
 
@@ -707,7 +707,7 @@ TEST_CASE("消息落盘次序: assistant 先落、五结果一条 user message �
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
     std::vector<std::string> persist_log;
     TraceCollector collector;
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     callbacks.on_assistant_message_ready = [&persist_log](const api::Message& message) {
         persist_log.push_back(message.role == api::Role::Assistant ? "assistant" : "?");
     };
@@ -762,7 +762,7 @@ TEST_CASE("RunOneTool: 来源/错误码随 trace 落账(unknown_tool/hook_denied
     call.name = "ghost";
 
     TraceCollector collector;
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     callbacks = collector.Decorate(callbacks);
     agent::ToolTraceContext ctx;
     ctx.execution_id = "e1";
@@ -782,7 +782,7 @@ TEST_CASE("RunOneTool: 来源/错误码随 trace 落账(unknown_tool/hook_denied
     tools::ToolRegistry deny_registry;
     deny_registry.Register(std::make_unique<FakeTool>("ghost", tools::Tool::Result{"ok", false}));
     TraceCollector deny_collector;
-    agent::Callbacks deny_callbacks;
+    agent::TurnWiring deny_callbacks;
     deny_callbacks.on_pre_tool_use_hook = [](const std::string&, const std::string&,
                                              const nlohmann::json&) -> runtime::ToolHookDecision {
         runtime::ToolHookDecision decision;
@@ -811,7 +811,7 @@ TEST_CASE("RunOneTool: 来源/错误码随 trace 落账(unknown_tool/hook_denied
     danger_call.id = "u2";
     danger_call.name = "danger";
     TraceCollector declined_collector;
-    agent::Callbacks declined_callbacks;
+    agent::TurnWiring declined_callbacks;
     declined_callbacks.on_tool_confirm = [](const std::string&, const std::string&, const nlohmann::json&) {
         return false;
     };
@@ -1099,7 +1099,7 @@ TEST_CASE("undo_file_edit: needs_confirm 恒真,补偿关系边随 finished 落�
     call.input = nlohmann::json{{"execution_id", "item-17"}};
 
     TraceCollector collector;
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
     callbacks.on_tool_compensates = [&registry](const std::string&, const std::string& tool_name) {
         if (tool_name != "undo_file_edit") {
             return std::string();

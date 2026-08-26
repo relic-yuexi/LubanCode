@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "agent/agent.hpp"
+#include "turn_event_recorder.hpp"
 #include "agent/loop.hpp"
 #include "agent/prefix.hpp"
 #include "api/backend.hpp"
@@ -208,9 +209,12 @@ TEST_CASE("前缀: 默认工具往返,后一份请求是前一份的原样追加
     registry.Register(std::make_unique<FixedTool>("read_file", "正文"));
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
-    agent::Callbacks callbacks;
-    std::vector<api::UsageReport> reports;
-    callbacks.on_usage = [&](const api::UsageReport& report) { reports.push_back(report); };
+    agent::TurnWiring callbacks;
+    lubancode::test::RecordedTurn turn;
+    callbacks.events = &turn.adapter;
+    // usage 观察改吃事件流(批二余款):UsageReport 从 UsageUpdated 的
+    // 载荷里还原,身份(cache_epoch/追加律)齐。
+    const std::vector<api::UsageReport>& reports = turn.recorder.usage_reports;
 
     const auto result = loop.Run("帮我读一下", callbacks);
     REQUIRE(result.has_value());
@@ -241,9 +245,12 @@ TEST_CASE("前缀: 按需 artifact 摘要只追加 tool result,不追改旧消�
         "context_read", "artifact a0001 按需摘要:构建通过。原文未改。"));
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
-    agent::Callbacks callbacks;
-    std::vector<api::UsageReport> reports;
-    callbacks.on_usage = [&](const api::UsageReport& report) { reports.push_back(report); };
+    agent::TurnWiring callbacks;
+    lubancode::test::RecordedTurn turn;
+    callbacks.events = &turn.adapter;
+    // usage 观察改吃事件流(批二余款):UsageReport 从 UsageUpdated 的
+    // 载荷里还原,身份(cache_epoch/追加律)齐。
+    const std::vector<api::UsageReport>& reports = turn.recorder.usage_reports;
 
     REQUIRE(loop.Run("摘要这枚 artifact", callbacks).has_value());
     REQUIRE(backend.captured.size() == 2);
@@ -271,7 +278,7 @@ TEST_CASE("前缀: 轮间换动态上下文(记忆/名册)不改 system,旧前�
     tools::ToolRegistry registry;
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
-    agent::Callbacks callbacks;
+    agent::TurnWiring callbacks;
 
     loop.SetTurnContext("项目记忆召回(甲)");
     REQUIRE(loop.Run("第一句", callbacks).has_value());
@@ -312,9 +319,12 @@ TEST_CASE("前缀: 步数将尽提醒只随消息尾部追加一次,system 全�
     registry.Register(std::make_unique<FixedTool>("read_file", "正文"));
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .runtime{.max_output_tokens = 4096, .max_steps_per_turn = 5}, .system_prompt = "system prompt"});
-    agent::Callbacks callbacks;
-    std::vector<api::UsageReport> reports;
-    callbacks.on_usage = [&](const api::UsageReport& report) { reports.push_back(report); };
+    agent::TurnWiring callbacks;
+    lubancode::test::RecordedTurn turn;
+    callbacks.events = &turn.adapter;
+    // usage 观察改吃事件流(批二余款):UsageReport 从 UsageUpdated 的
+    // 载荷里还原,身份(cache_epoch/追加律)齐。
+    const std::vector<api::UsageReport>& reports = turn.recorder.usage_reports;
 
     REQUIRE(loop.Run("干活", callbacks).has_value());
     REQUIRE(backend.captured.size() == 3);
@@ -374,9 +384,12 @@ TEST_CASE("前缀: 工具表中途成批挂载只断一次,断因 tools_changed,
         return tool.name().rfind(prefix, 0) != 0 || loaded.count(tool.name()) != 0;
     };
     agent::Agent loop(backend, registry, std::move(profile));
-    agent::Callbacks callbacks;
-    std::vector<api::UsageReport> reports;
-    callbacks.on_usage = [&](const api::UsageReport& report) { reports.push_back(report); };
+    agent::TurnWiring callbacks;
+    lubancode::test::RecordedTurn turn;
+    callbacks.events = &turn.adapter;
+    // usage 观察改吃事件流(批二余款):UsageReport 从 UsageUpdated 的
+    // 载荷里还原,身份(cache_epoch/追加律)齐。
+    const std::vector<api::UsageReport>& reports = turn.recorder.usage_reports;
     class MountingTool : public tools::Tool {
     public:
         MountingTool(std::set<std::string>& loaded) : loaded_(loaded) {}
@@ -430,9 +443,12 @@ TEST_CASE("前缀: 长工具结果首次即预览,由热转冷不再追改旧消
     registry.Register(std::make_unique<FixedTool>("read_file", big));
 
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
-    agent::Callbacks callbacks;
-    std::vector<api::UsageReport> reports;
-    callbacks.on_usage = [&](const api::UsageReport& report) { reports.push_back(report); };
+    agent::TurnWiring callbacks;
+    lubancode::test::RecordedTurn turn;
+    callbacks.events = &turn.adapter;
+    // usage 观察改吃事件流(批二余款):UsageReport 从 UsageUpdated 的
+    // 载荷里还原,身份(cache_epoch/追加律)齐。
+    const std::vector<api::UsageReport>& reports = turn.recorder.usage_reports;
 
     REQUIRE(loop.Run("读大文件", callbacks).has_value());
     REQUIRE(loop.Run("追问", callbacks).has_value());
@@ -472,9 +488,12 @@ TEST_CASE("前缀: hard trim 后 sticky view 钉住,后续请求不再滑窗") {
     // (留第一轮 + 最近 3 轮,约 4000 字符,给后续追加留了余量——余量内
     // sticky 不再动手,余量耗尽再裁一次是新的明确 epoch break)。
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .runtime{.max_output_tokens = 4096, .max_steps_per_turn = 0, .max_context_chars = 6000}, .system_prompt = "system prompt"});
-    agent::Callbacks callbacks;
-    std::vector<api::UsageReport> reports;
-    callbacks.on_usage = [&](const api::UsageReport& report) { reports.push_back(report); };
+    agent::TurnWiring callbacks;
+    lubancode::test::RecordedTurn turn;
+    callbacks.events = &turn.adapter;
+    // usage 观察改吃事件流(批二余款):UsageReport 从 UsageUpdated 的
+    // 载荷里还原,身份(cache_epoch/追加律)齐。
+    const std::vector<api::UsageReport>& reports = turn.recorder.usage_reports;
 
     for (int turn = 1; turn <= 7; ++turn) {
         const std::string prompt(1000, static_cast<char>('a' + turn));

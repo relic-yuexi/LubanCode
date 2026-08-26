@@ -452,31 +452,36 @@ nodes:
     const NodeExecResult result = executor.Execute(request);
     REQUIRE(result.ok);
 
-    // 事件账:TurnStarted(run_id 当 turn_id)→ 两轮请求各一枚 UsageUpdated,
-    // 工具与正文条目有起有终,TurnCompleted(Succeeded) 收口;seq 单调、
-    // thread_id 透传、领域数据(工具名/结果)在场。
+    // 事件账(批二余款:step/批次边界也随事件流走):TurnStarted(run_id 当
+    // turn_id)→ 两轮请求各一枚 UsageUpdated,工具与正文条目有起有终,
+    // TurnCompleted(Succeeded) 收口;seq 单调、thread_id 透传、领域数据
+    // (工具名/结果)在场。
     using lubancode::runtime::ServerEventKind;
     using lubancode::runtime::ItemKind;
     using lubancode::runtime::Outcome;
-    REQUIRE(sink.events.size() == 9);
+    REQUIRE(sink.events.size() == 13);
     CHECK(sink.events[0].kind == ServerEventKind::TurnStarted);
     CHECK(sink.events[0].turn_id == "run-wf-1");
-    CHECK(sink.events[1].kind == ServerEventKind::UsageUpdated);
-    CHECK(sink.events[2].kind == ServerEventKind::ItemStarted);
-    CHECK(sink.events[2].item_kind == ItemKind::Tool);
-    CHECK(sink.events[2].payload.value("tool_name", std::string()) == "reader");
-    CHECK(sink.events[3].kind == ServerEventKind::ItemCompleted);
-    CHECK(sink.events[3].payload.value("result", std::string()) == R"({"read":true})");
-    // 第二轮请求:流式 delta 先于 MessageDone 的 usage(流式次序,如实钉)。
+    CHECK(sink.events[1].kind == ServerEventKind::ModelStepStarted);
+    CHECK(sink.events[2].kind == ServerEventKind::UsageUpdated);
+    CHECK(sink.events[3].kind == ServerEventKind::ToolBatchStarted);
     CHECK(sink.events[4].kind == ServerEventKind::ItemStarted);
-    CHECK(sink.events[4].item_kind == ItemKind::Text);
-    CHECK(sink.events[5].kind == ServerEventKind::ItemDelta);
-    CHECK(sink.events[5].text == R"({"answer":"ok"})");
-    CHECK(sink.events[6].kind == ServerEventKind::UsageUpdated);
-    CHECK(sink.events[7].kind == ServerEventKind::ItemCompleted);
-    CHECK(sink.events[7].outcome == Outcome::Succeeded);
-    CHECK(sink.events[8].kind == ServerEventKind::TurnCompleted);
-    CHECK(sink.events[8].outcome == Outcome::Succeeded);
+    CHECK(sink.events[4].item_kind == ItemKind::Tool);
+    CHECK(sink.events[4].payload.value("tool_name", std::string()) == "reader");
+    CHECK(sink.events[5].kind == ServerEventKind::ItemCompleted);
+    CHECK(sink.events[5].payload.value("result", std::string()) == R"({"read":true})");
+    CHECK(sink.events[6].kind == ServerEventKind::ToolBatchFinished);
+    CHECK(sink.events[7].kind == ServerEventKind::ModelStepStarted);
+    // 第二轮请求:流式 delta 先于 MessageDone 的 usage(流式次序,如实钉)。
+    CHECK(sink.events[8].kind == ServerEventKind::ItemStarted);
+    CHECK(sink.events[8].item_kind == ItemKind::Text);
+    CHECK(sink.events[9].kind == ServerEventKind::ItemDelta);
+    CHECK(sink.events[9].text == R"({"answer":"ok"})");
+    CHECK(sink.events[10].kind == ServerEventKind::UsageUpdated);
+    CHECK(sink.events[11].kind == ServerEventKind::ItemCompleted);
+    CHECK(sink.events[11].outcome == Outcome::Succeeded);
+    CHECK(sink.events[12].kind == ServerEventKind::TurnCompleted);
+    CHECK(sink.events[12].outcome == Outcome::Succeeded);
 
     std::uint64_t last_seq = 0;
     for (const auto& event : sink.events) {

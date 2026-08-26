@@ -133,7 +133,7 @@ TurnVerdict ClassifyTurnEnd(const TurnEndgame& end) {
 // 续投外环
 // ---------------------------------------------------------------------------
 
-DriveReport DriveTurn(Agent& agent, const Callbacks& callbacks, api::Message input,
+DriveReport DriveTurn(Agent& agent, const TurnWiring& wiring, api::Message input,
                       const DriveOptions& options) {
     DriveReport report;
     // 首轮吃完整 Message(可带图像附件);续投轮的输入是字符串(拼好的
@@ -151,8 +151,8 @@ DriveReport DriveTurn(Agent& agent, const Callbacks& callbacks, api::Message inp
     };
 
     for (;;) {
-        const auto outcome = first_round ? agent.Run(std::move(input), callbacks, options.cancel)
-                                         : agent.Run(run_input, callbacks, options.cancel);
+        const auto outcome = first_round ? agent.Run(std::move(input), wiring, options.cancel)
+                                         : agent.Run(run_input, wiring, options.cancel);
         first_round = false;
         if (!outcome.has_value()) {
             restore_inflight();
@@ -212,7 +212,7 @@ DriveReport DriveTurn(Agent& agent, const Callbacks& callbacks, api::Message inp
 // Stop 续跑环
 // ---------------------------------------------------------------------------
 
-void RunStopContinuation(Agent& agent, const Callbacks& callbacks, const StopOptions& options,
+void RunStopContinuation(Agent& agent, const TurnWiring& wiring, const StopOptions& options,
                          DriveReport& report) {
     if (!options.emit) {
         return;  // 没配 stop 钩子,整环跳过
@@ -227,7 +227,7 @@ void RunStopContinuation(Agent& agent, const Callbacks& callbacks, const StopOpt
         if (options.on_continue_request) {
             options.on_continue_request(merged.block_reason);
         }
-        const auto continuation = agent.Run(options.label + merged.block_reason, callbacks, options.cancel);
+        const auto continuation = agent.Run(options.label + merged.block_reason, wiring, options.cancel);
         if (!continuation.has_value() || continuation->cancelled || continuation->hit_step_limit) {
             break;  // 续跑轮报错/被打断/撞预算:如实停,不带病硬续
         }

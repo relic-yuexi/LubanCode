@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "agent/agent.hpp"
+#include "runtime/turn_event_adapter.hpp"
 #include "agent/loop.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
@@ -204,8 +205,16 @@ TEST_CASE("AgentLoop:劈半 emoji 的 delta 流,回调每段合法、history 自
     agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .runtime{.max_steps_per_turn = 5, .max_context_chars = 200000}, .system_prompt = "system"});
 
     std::vector<std::string> shown;
-    agent::Callbacks callbacks;
-    callbacks.on_text_delta = [&shown](const std::string& text) { shown.push_back(text); };
+    runtime::IdAuthority event_ids;
+    runtime::TurnEventAdapter events("test", event_ids);
+    events.Attach([&shown](const runtime::ServerEvent& event) {
+        if (event.kind == runtime::ServerEventKind::ItemDelta && event.item_kind == runtime::ItemKind::Text) {
+            shown.push_back(event.text);
+        }
+    });
+    events.Start();
+    agent::TurnWiring callbacks;
+    callbacks.events = &events;
 
     const auto result = loop.Run("劈半流", callbacks, nullptr);
     REQUIRE(result.has_value());

@@ -2,6 +2,8 @@
 
 #include "cli/wizard_panel.hpp"
 
+#include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
+
 #include <algorithm>
 #include <iostream>
 #include <mutex>
@@ -142,21 +144,21 @@ void WizardPanel::Draw(const WizardFrame& frame, int reserve_rows) {
     // 清旧画新:旧区域逐行硬清(连背景属性一起还原),再从同一处画回。
     const int rows_to_draw = static_cast<int>(lines.size());
     const int clear_rows = (std::max)(rows_drawn_, rows_to_draw);
-    std::cout << kPanelSyncBegin << "\x1b[?25l";
+    TermOut() << kPanelSyncBegin << "\x1b[?25l";
     for (int r = 0; r < clear_rows; ++r) {
         platform::ClearRowHardFrom(0, start_row_ + r, width_);
     }
     for (int r = 0; r < rows_to_draw; ++r) {
         platform::SetCursorPos(0, start_row_ + r);
-        std::cout << lines[static_cast<std::size_t>(r)];
+        TermOut() << lines[static_cast<std::size_t>(r)];
     }
     rows_drawn_ = rows_to_draw;
-    std::cout << kPanelSyncEnd;
-    std::cout.flush();
+    TermOut() << kPanelSyncEnd;
+    TermOut().flush();
 
     // 光标:文本帧停在 prompt 行末(ReadText 接手编辑);选择帧停在预留区
     // 首行(ReadChoiceMenu 在那里画菜单)。
-    std::cout << "\x1b[?25h";
+    TermOut() << "\x1b[?25h";
     if (prompt_row_ >= 0) {
         platform::SetCursorPos(static_cast<int>(DisplayWidthUtf8(frame.prompt)), start_row_ + prompt_row_);
     } else if (menu_top_ >= 0) {
@@ -164,7 +166,7 @@ void WizardPanel::Draw(const WizardFrame& frame, int reserve_rows) {
     } else {
         platform::SetCursorPos(0, start_row_ + rows_to_draw);
     }
-    std::cout.flush();
+    TermOut().flush();
 }
 
 std::optional<std::string> WizardPanel::ReadText(ReadExitReason* reason) {
@@ -192,13 +194,13 @@ void WizardPanel::Finish() {
     std::lock_guard<std::mutex> lock(StdoutWriteMutex());
     const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
     if (info.has_value()) {
-        std::cout << kPanelSyncBegin;
+        TermOut() << kPanelSyncBegin;
         for (int r = 0; r < rows_drawn_; ++r) {
             platform::ClearRowHardFrom(0, start_row_ + r, info->width);
         }
         platform::SetCursorPos(0, start_row_);
-        std::cout << kPanelSyncEnd;
-        std::cout.flush();
+        TermOut() << kPanelSyncEnd;
+        TermOut().flush();
     }
     rows_drawn_ = 0;
     prompt_row_ = -1;

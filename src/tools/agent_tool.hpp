@@ -155,14 +155,14 @@ public:
         // 不过 Plan 闸(旧路)。
         std::function<std::string(const std::string& tool_name, const nlohmann::json& input)> on_mode_policy;
 
-        // 批二尾巴(骨架拆解批三):宿主侧装配好的事件流显示回调。子代理
-        // 自己的 sub_callbacks(正文/思考/工具起止/usage)先过这份事件流
-        // (canonical 账),再落台账/终端——与主回合"一份事件、两路消费"
-        // 同一格局。编译边界:tools/ 住 engine 库不许 include runtime,
-        // TurnEventAdapter 的翻译在宿主(app)侧做完,这里只收
-        // agent::Callbacks 这份中立形状。不设 = 这只子代理不上事件流
-        // (后台任务没有宿主轮、旧调用方),行为与从前一致。
-        const agent::Callbacks* event_callbacks = nullptr;
+        // 批二余款(骨架拆解):宿主的显示出水口。给了就在 RunTask 里现起
+        // 一只从路适配器(同一本发号局、同一枚 turn_id):子代理的正文/思考
+        // 增量、工具起止、usage 先落台账 sink,再原样转发进宿主流(payload
+        // 带 subordinate 标,画屏侧跳过——子代理只画外层卡)。编译边界:
+        // tools/ 不直接 include runtime 头,指针形状经 agent/loop.hpp 过路。
+        // 不设 = 这只子代理不上宿主流(后台任务没有宿主轮、旧调用方),
+        // 台账照走(自己的本地适配器),行为与从前一致。
+        runtime::TurnEventAdapter* events = nullptr;
 
         // hooks 框架第四五步:进程级 dispatcher。前台子代理用它发
         // SubagentStart/SubagentStop,并把 dispatcher 的上下文换成这只子代理
