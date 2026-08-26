@@ -336,7 +336,7 @@ private:
         wiring.session_store = &session_store;
         wiring.home_lubancode = &home_lubancode;
         wiring.session_runtime = &session_runtime_;
-        wiring.flush_events = [this]() { FlushLoopEvents(); };
+        wiring.flush_events = [this]() { lubancode::app::FlushLoopEvents(MakeLoopWiring()); };
         return wiring;
     }
     lubancode::app::CompactSessionInputs MakeCompactInputs() {
@@ -456,7 +456,6 @@ private:
     // 拍子收口:turn 终态回写 tick,算 outcome/退避/连败账。
     void FinishLoopTick(const std::string& tick_id, bool turn_failed, bool cancelled);
     // scheduler 攒的事件账落盘(append+flush);失败即 FailStore 熔断。
-    void FlushLoopEvents();
     // loop 事件 -> ServerEvent 投影(loop 单遗留:EventSink 面已立,这里
     // 灌)。sink 没挂零影响(终端老路);挂了(JsonEventSink/app-server)
     // 前端凭 payload 画状态栏与任务行。
@@ -1126,7 +1125,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
                 }
             }
             if (stopped > 0) {
-                FlushLoopEvents();
+                lubancode::app::FlushLoopEvents(MakeLoopWiring());
             }
             return stopped;
         };
@@ -2631,43 +2630,6 @@ void TerminalSessionController::EnsureLoopScheduler() {
     loop_scheduler_->StartTimer();
 }
 
-void TerminalSessionController::FlushLoopEvents() {
-    if (!loop_scheduler_.has_value()) {
-        return;
-    }
-    const auto events = loop_scheduler_->TakeEvents();
-    if (events.empty()) {
-        return;
-    }
-    // EventSink 投影(loop 单遗留:ServerEvent 面已立未灌):loop 的状态
-    // 变更折 thread 层 ServerEvent 给挂了的 sink——前端凭 payload 画
-    // 状态栏与任务行,不解析 slash 字符串(单子"前端凭 payload 画")。
-    // 投影不拦落盘:UI 失败不拦工具的规矩在这里同款。
-    lubancode::app::EmitLoopServerEvents(MakeLoopWiring(), events);
-    if (!session_store.active()) {
-        return;  // 没建档的会话照常跑,事件只进内存
-    }
-    for (const auto& e : events) {
-        nlohmann::json line;
-        line["type"] = e.family;
-        line["event"] = e.event;
-        line["task_id"] = e.task_id;
-        if (!e.tick_id.empty()) {
-            line["tick_id"] = e.tick_id;
-        }
-        line["payload"] = e.payload;
-        line["timestamp_ms"] = e.timestamp_ms;
-        if (!session_store.AppendRawLine(line.dump())) {
-            // 写盘失败熔断:失去恢复账后继续跑,风险大过便利。
-            loop_scheduler_->FailStore("session append failed");
-            TermOut() << theme.error
-                      << "loop 事件写盘失败,定时任务已熔断(已跑的拍照常收口;新拍不再排)。"
-                      << theme.reset << "\n";
-            return;
-        }
-    }
-}
-
 void TerminalSessionController::NoteLoopPermissionWait(bool asked, bool allowed) {
     // WaitingPermission 真接线:只在 loop 拍的 turn 里记账(普通轮的审批
     // 与 scheduler 无关)。RunTurn 的审批旁听口从 RunUserTurn 进来,这里
@@ -2682,7 +2644,7 @@ void TerminalSessionController::NoteLoopPermissionWait(bool asked, bool allowed)
     }();
     if (asked) {
         loop_scheduler_->NotePermissionWait(loop_active_tick_id_, now_ms);
-        FlushLoopEvents();
+        lubancode::app::FlushLoopEvents(MakeLoopWiring());
         return;
     }
     // 答完:allowed 走 resolved(本拍继续),拒走 declined(连三拍自动
@@ -2692,7 +2654,7 @@ void TerminalSessionController::NoteLoopPermissionWait(bool asked, bool allowed)
     } else {
         loop_scheduler_->NotePermissionDeclined(loop_active_tick_id_, now_ms);
     }
-    FlushLoopEvents();
+    lubancode::app::FlushLoopEvents(MakeLoopWiring());
 }
 
 bool TerminalSessionController::PumpLoopTicks() {
@@ -2727,7 +2689,7 @@ bool TerminalSessionController::PumpLoopTicks() {
     }
     const auto picked = lubancode::runtime::PumpNextWork(candidates, goal_fairness_);
     if (!picked.has_value()) {
-        FlushLoopEvents();
+        lubancode::app::FlushLoopEvents(MakeLoopWiring());
         return false;
     }
     if (picked->kind == lubancode::runtime::WorkKind::GoalContinuation) {
@@ -2739,12 +2701,12 @@ bool TerminalSessionController::PumpLoopTicks() {
     }
     const auto tick = loop_scheduler_->PumpDueTick(now_ms, "loop-turn");
     if (!tick.has_value()) {
-        FlushLoopEvents();
+        lubancode::app::FlushLoopEvents(MakeLoopWiring());
         return false;
     }
     // 事件落盘先于 synthetic message(due/started 必须在 turn 前落,写盘
     // 栅栏 2)。
-    FlushLoopEvents();
+    lubancode::app::FlushLoopEvents(MakeLoopWiring());
     // prompt 源每拍现读(用户改文件,下一拍生效;读失败本拍 Broken,不拿
     // 上一版暗跑)。文件源才重读;inline/builtin 直接用建任务的正文。
     std::string prompt_text = tick->text;
@@ -2760,7 +2722,7 @@ bool TerminalSessionController::PumpLoopTicks() {
                                         lubancode::runtime::loop::LoopTickOutcome::PromptSourceMissing,
                                         now_ms, resolved.error.empty() ? "loop.md 没了" : resolved.error);
             loop_scheduler_->Stop(tick->task.task_id, now_ms, "prompt_source_missing");
-            FlushLoopEvents();
+            lubancode::app::FlushLoopEvents(MakeLoopWiring());
             TermOut() << theme.error << "loop " << tick->task.task_id
                       << " 的 prompt 源读失败,任务已停: "
                       << (resolved.error.empty() ? std::string("loop.md 没了") : resolved.error)
@@ -3074,7 +3036,7 @@ void TerminalSessionController::FinishLoopTick(const std::string& tick_id, bool 
         //(terminal 同态回写补账,转换表明收)。
         loop_scheduler_->Complete(control_task_id, now_ms, "model_declared_complete");
         loop_scheduler_->FinishTick(tick_id, LoopTickOutcome::Succeeded, now_ms, "loop_control_complete");
-        FlushLoopEvents();
+        lubancode::app::FlushLoopEvents(MakeLoopWiring());
         TermOut() << theme.stats << "loop " << control_task_id
                   << ":模型声明完成,任务落终态(下一拍不再排)。" << theme.reset << "\n";
         return;
@@ -3082,7 +3044,7 @@ void TerminalSessionController::FinishLoopTick(const std::string& tick_id, bool 
     if (control_pause && !control_task_id.empty()) {
         loop_scheduler_->Pause(control_task_id, now_ms, "model_requested_pause");
         loop_scheduler_->FinishTick(tick_id, LoopTickOutcome::Succeeded, now_ms, "loop_control_pause");
-        FlushLoopEvents();
+        lubancode::app::FlushLoopEvents(MakeLoopWiring());
         TermOut() << theme.stats << "loop " << control_task_id
                   << ":模型请求暂停(需要用户处理);续跑 /loop resume。" << theme.reset << "\n";
         return;
@@ -3094,7 +3056,7 @@ void TerminalSessionController::FinishLoopTick(const std::string& tick_id, bool 
     } else {
         loop_scheduler_->FinishTick(tick_id, LoopTickOutcome::Succeeded, now_ms);
     }
-    FlushLoopEvents();
+    lubancode::app::FlushLoopEvents(MakeLoopWiring());
 }
 
 CommandFlow TerminalSessionController::RunUserTurn(const std::string& content, bool* autosend_failed) {

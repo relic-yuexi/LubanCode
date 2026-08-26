@@ -96,6 +96,10 @@ void RestoreLoopFromArchive(const LoopWiring& wiring);
 // compact_v2 事件落盘前补 active loop 摘要(守恒面;没活任务不带)。
 void AttachLoopSnapshotToCompact(const LoopWiring& wiring, nlohmann::json& metrics_out);
 
+// scheduler 攒的事件账落盘(append+flush);失败即 FailStore 熔断。投影
+// (EmitLoopServerEvents)同在里头。没建档的会话照常跑,事件只进内存。
+void FlushLoopEvents(const LoopWiring& wiring);
+
 // loop 事件 -> ServerEvent 投影(sink 没挂零影响)。
 void EmitLoopServerEvents(const LoopWiring& wiring,
                           const std::vector<lubancode::runtime::loop::LoopSchedulerEvent>& events);

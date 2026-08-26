@@ -515,6 +515,44 @@ void AttachLoopSnapshotToCompact(const LoopWiring& wiring, nlohmann::json& metri
     metrics_out["loop"] = nlohmann::json{{"active_tasks", std::move(tasks)}};
 }
 
+void FlushLoopEvents(const LoopWiring& wiring) {
+    auto& out = lubancode::cli::TermOut();
+    if (wiring.scheduler == nullptr) {
+        return;
+    }
+    const auto events = wiring.scheduler->TakeEvents();
+    if (events.empty()) {
+        return;
+    }
+    // EventSink 投影(loop 单遗留:ServerEvent 面已立未灌):loop 的状态
+    // 变更折 thread 层 ServerEvent 给挂了的 sink——前端凭 payload 画
+    // 状态栏与任务行,不解析 slash 字符串(单子"前端凭 payload 画")。
+    // 投影不拦落盘:UI 失败不拦工具的规矩在这里同款。
+    EmitLoopServerEvents(wiring, events);
+    if (wiring.session_store == nullptr || !wiring.session_store->active()) {
+        return;  // 没建档的会话照常跑,事件只进内存
+    }
+    for (const auto& e : events) {
+        nlohmann::json line;
+        line["type"] = e.family;
+        line["event"] = e.event;
+        line["task_id"] = e.task_id;
+        if (!e.tick_id.empty()) {
+            line["tick_id"] = e.tick_id;
+        }
+        line["payload"] = e.payload;
+        line["timestamp_ms"] = e.timestamp_ms;
+        if (!wiring.session_store->AppendRawLine(line.dump())) {
+            // 写盘失败熔断:失去恢复账后继续跑,风险大过便利。
+            wiring.scheduler->FailStore("session append failed");
+            out << wiring.theme->error
+                << "loop 事件写盘失败,定时任务已熔断(已跑的拍照常收口;新拍不再排)。"
+                << wiring.theme->reset << "\n";
+            return;
+        }
+    }
+}
+
 void EmitLoopServerEvents(const LoopWiring& wiring,
                           const std::vector<lubancode::runtime::loop::LoopSchedulerEvent>& events) {
     if (wiring.session_runtime == nullptr) {
