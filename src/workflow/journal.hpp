@@ -21,12 +21,14 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
+#include "runtime/id_authority.hpp"
 #include "workflow/definition.hpp"
 
 namespace lubancode::workflow {
@@ -111,7 +113,7 @@ public:
     // 终态落 manifest(成功/失败/取消/预算耗尽)。
     void Finish(const std::string& final_state, const nlohmann::json& summary);
 
-    std::uint64_t last_seq() const { return next_seq_ - 1; }
+    std::uint64_t last_seq() const { return seq_ids_ ? seq_ids_->seq_issued() : 0; }
     const std::filesystem::path& dir() const { return dir_; }
     const std::string& run_id() const { return run_id_; }
     bool broken() const { return broken_; }
@@ -133,7 +135,9 @@ private:
     std::ofstream out_;
     const JournalClock* clock_ = nullptr;
     nlohmann::json start_manifest_ = nlohmann::json();
-    std::uint64_t next_seq_ = 1;
+    // 事件 seq 的发号局(批五):一场 run 一只实例(1 起,run 内单调);
+    // unique_ptr 是为了保 RunJournal 的 move(IdAuthority 带 mutex 不可移)。
+    std::unique_ptr<runtime::IdAuthority> seq_ids_;
     bool broken_ = false;
     bool finish_called_ = false;
 };

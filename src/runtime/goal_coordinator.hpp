@@ -31,6 +31,7 @@
 
 #include "sessions/goal_session.hpp"
 #include "runtime/goal_types.hpp"
+#include "runtime/id_authority.hpp"
 
 namespace lubancode::runtime::goal {
 
@@ -268,9 +269,9 @@ private:
     std::string ready_dedupe_;
     bool pause_requested_ = false;
     int next_iteration_index_ = 0;
-    int goal_seq_ = 0;                     // session-local monotonic(goal-N)
-    int evidence_seq_ = 0;                 // ev-N
-    int eval_seq_ = 0;                     // eval-N
+    // goal-N 发号(批五:台账 id 收编 IdAuthority;session 域号,一场
+    // coordinator 一只实例,与旧 goal_seq_ 的起算口径一致)。
+    IdAuthority ids_;
     std::vector<GoalCoordinatorEvent> late_arrivals_;  // 审计留账
     std::unordered_map<std::string, GoalEvidence> evidence_;  // 证据账(ev-id → 证据)
 };

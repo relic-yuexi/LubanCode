@@ -9,6 +9,7 @@
 
 #include "hooks/hash.hpp"
 #include "platform/json_safe.hpp"  // DumpJsonSanitized:goal 事件落档的编码窄边界
+#include "runtime/budget_gate.hpp"  // 预算闸/连撞计数机制(批五:外壳横切件)
 
 namespace lubancode::runtime::goal {
 
@@ -72,9 +73,10 @@ GoalCommandResult GoalCoordinator::CreateWithLineage(const std::string& objectiv
         return Fail(kErrGoalAlreadyActive, "已有一只活动目标;用 edit/clear,或另开 thread");
     }
 
-    ++goal_seq_;
     GoalTask t;
-    t.id = id_issuer ? id_issuer() : "goal-" + std::to_string(goal_seq_);
+    // 发号(批五):goal-N 走 IdAuthority(与旧 goal_seq_ 同起算,1 起);
+    // 注入口照旧(测试定死 id)。
+    t.id = id_issuer ? id_issuer() : ids_.NextPrefixedId("goal");
     t.parent_goal_id = parent_goal_id;  // fork lineage:只记账,不构成复活/共享
     t.revision = 1;
     t.objective = objective;
@@ -833,16 +835,20 @@ GoalCoordinator::ProgressCheck GoalCoordinator::NoteProgressFingerprint(const st
                                                                         std::int64_t now_ms) {
     ProgressCheck out;
     if (!task_.has_value()) return out;
+    // 防空转(批五):连撞计数走 StreakMeter,计数仍落在 counters 域字段
+    // 上(存档要);阈值是 goal 自己的尺(max_no_progress_iterations)。
+    StreakMeter meter{task_->budget.max_no_progress_iterations,
+                      task_->counters.no_progress_streak};
     out.progressed = task_->counters.last_progress_fingerprint != fingerprint;
     if (out.progressed) {
-        task_->counters.no_progress_streak = 0;
+        meter.NoteGood();
         task_->counters.last_progress_fingerprint = fingerprint;
     } else {
-        task_->counters.no_progress_streak += 1;
+        meter.NoteBad();
     }
+    task_->counters.no_progress_streak = meter.count;
     out.streak_after = task_->counters.no_progress_streak;
-    if (task_->counters.no_progress_streak >= task_->budget.max_no_progress_iterations &&
-        !IsGoalTerminal(task_->state)) {
+    if (meter.tripped() && !IsGoalTerminal(task_->state)) {
         GoalCoordinatorEvent ev;
         ev.event = "paused";
         ev.goal_id = task_->id;
@@ -863,15 +869,20 @@ GoalCoordinator::ProgressCheck GoalCoordinator::NoteProgressFingerprint(const st
 GoalCoordinator::BlockerCheck GoalCoordinator::NoteBlocker(const std::string& blocker_key, std::int64_t now_ms) {
     BlockerCheck out;
     if (!task_.has_value()) return out;
+    // 同 blocker 反复(批五):换 key 归零重数(Reset + NoteBad = 从 1 起),
+    // 与旧"换 key 记 1"同账。
+    StreakMeter meter{task_->budget.max_same_blocker_iterations,
+                      task_->counters.same_blocker_streak};
     if (blocker_key == task_->counters.last_blocker_key) {
-        task_->counters.same_blocker_streak += 1;
+        meter.NoteBad();
     } else {
-        task_->counters.same_blocker_streak = 1;
+        meter.NoteGood();
+        meter.NoteBad();
         task_->counters.last_blocker_key = blocker_key;
     }
+    task_->counters.same_blocker_streak = meter.count;
     out.streak_after = task_->counters.same_blocker_streak;
-    if (task_->counters.same_blocker_streak >= task_->budget.max_same_blocker_iterations &&
-        !IsGoalTerminal(task_->state)) {
+    if (meter.tripped() && !IsGoalTerminal(task_->state)) {
         GoalCoordinatorEvent ev;
         ev.event = "blocked";
         ev.goal_id = task_->id;
@@ -893,31 +904,46 @@ bool GoalCoordinator::CheckBudgetHeadroom(std::int64_t now_ms, std::string* reas
         if (reason != nullptr) *reason = "没有目标";
         return false;
     }
-    if (task_->budget.max_iterations.has_value() &&
-        task_->counters.iterations_started >= *task_->budget.max_iterations) {
-        if (reason != nullptr) {
-            *reason = "iteration 上限 " + std::to_string(*task_->budget.max_iterations) + " 已用满";
-        }
-        return false;
+    // 预算闸(批五):三尺声明进公共件,Headroom 口径(开新轮前问,
+    // "下一轮装不下"即拦);没账可对的尺(started 未落、usage 未报)跳过,
+    // 与旧逐尺短路同序同文。
+    BudgetScales scales;
+    if (task_->budget.max_iterations.has_value()) {
+        scales.count = static_cast<std::int64_t>(*task_->budget.max_iterations);
     }
-    if (task_->budget.max_elapsed_ms.has_value() && task_->started_at_ms.has_value()) {
-        const std::int64_t elapsed = now_ms - *task_->started_at_ms;
-        if (elapsed >= *task_->budget.max_elapsed_ms) {
+    scales.elapsed_ms = task_->budget.max_elapsed_ms;
+    scales.tokens = task_->budget.max_total_tokens;
+    const BudgetGate gate(scales);
+    const bool started = task_->started_at_ms.has_value();
+    const std::int64_t elapsed = started ? now_ms - *task_->started_at_ms : 0;
+    // token 未回报不能拿 0 冒充没花:usage_reported=false 时跳过 token 闸
+    // (time/iteration 仍能收口)。
+    const std::optional<std::int64_t> tokens_used = [this]() -> std::optional<std::int64_t> {
+        if (!task_->budget.max_total_tokens.has_value() || !task_->usage.usage_reported) {
+            return std::nullopt;
+        }
+        return task_->usage.input_tokens + task_->usage.output_tokens +
+               task_->usage.cache_read_tokens + task_->usage.cache_creation_tokens;
+    }();
+    switch (gate.CheckHeadroom(task_->counters.iterations_started,
+                               started ? std::optional<std::int64_t>(elapsed) : std::nullopt,
+                               tokens_used)) {
+        case BudgetStopReason::kCount:
+            if (reason != nullptr) {
+                *reason =
+                    "iteration 上限 " + std::to_string(*task_->budget.max_iterations) + " 已用满";
+            }
+            return false;
+        case BudgetStopReason::kElapsed:
             if (reason != nullptr) {
                 *reason = "elapsed 上限已到(用了 " + std::to_string(elapsed / 1000) + "s)";
             }
             return false;
-        }
-    }
-    if (task_->budget.max_total_tokens.has_value()) {
-        std::int64_t total = task_->usage.input_tokens + task_->usage.output_tokens +
-                             task_->usage.cache_read_tokens + task_->usage.cache_creation_tokens;
-        // token 未回报不能拿 0 冒充没花:usage_reported=false 时跳过 token 闸
-        // (time/iteration 仍能收口)。
-        if (task_->usage.usage_reported && total >= *task_->budget.max_total_tokens) {
+        case BudgetStopReason::kTokens:
             if (reason != nullptr) *reason = "token 上限已到";
             return false;
-        }
+        case BudgetStopReason::kNone:
+            break;
     }
     return true;
 }
@@ -928,7 +954,9 @@ bool GoalCoordinator::ElapsedExceeded(std::int64_t now_ms, std::int64_t* over_by
         return false;
     }
     const std::int64_t elapsed = now_ms - *task_->started_at_ms;
-    if (elapsed > *task_->budget.max_elapsed_ms) {
+    // 轮外收口是"已经越线"口径:Overrun(严格 >)。与 Headroom 的 >= 差
+    // 一线——休眠醒来恰等于上限不算越线,开新轮才算到顶。
+    if (BudgetGate(BudgetScales{.elapsed_ms = task_->budget.max_elapsed_ms}).OverrunElapsed(elapsed)) {
         if (over_by_ms != nullptr) *over_by_ms = elapsed - *task_->budget.max_elapsed_ms;
         return true;
     }
@@ -937,14 +965,17 @@ bool GoalCoordinator::ElapsedExceeded(std::int64_t now_ms, std::int64_t* over_by
 
 void GoalCoordinator::NoteProviderOutcome(bool succeeded) {
     if (!task_.has_value()) return;
+    // provider 连败(批五):连撞计数走 StreakMeter,计数落 counters 域字段。
+    StreakMeter meter{task_->budget.max_consecutive_provider_failures,
+                      task_->counters.consecutive_provider_failures};
     if (succeeded) {
-        task_->counters.consecutive_provider_failures = 0;
+        meter.NoteGood();
+        task_->counters.consecutive_provider_failures = meter.count;
         return;
     }
-    task_->counters.consecutive_provider_failures += 1;
-    if (task_->counters.consecutive_provider_failures >=
-            task_->budget.max_consecutive_provider_failures &&
-        !IsGoalTerminal(task_->state)) {
+    meter.NoteBad();
+    task_->counters.consecutive_provider_failures = meter.count;
+    if (meter.tripped() && !IsGoalTerminal(task_->state)) {
         GoalCoordinatorEvent ev;
         ev.event = "paused";
         ev.goal_id = task_->id;

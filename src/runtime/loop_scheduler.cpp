@@ -7,13 +7,18 @@
 #include <exception>
 #include <thread>
 
+#include "platform/wall_clock.hpp"
+#include "runtime/budget_gate.hpp"
+#include "runtime/id_authority.hpp"
+#include "runtime/retry_backoff.hpp"
+
 namespace lubancode::runtime::loop {
 
 WallTimeMs LoopClock::NowWallMs() const {
-    // 墙钟(system_clock):账面、存档、resume 全用它。进程内等待由
+    // 墙钟(system_clock):账面、存档、resume 全用它。批五起五套台账的
+    // 真钟同读 platform 这一枚(口径不变,只收源);进程内等待由
     // scheduler 的轮询间隔承载(steady 语义),这里不掺和。
-    const auto now = std::chrono::system_clock::now().time_since_epoch();
-    return std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    return platform::WallClockNowMs();
 }
 
 struct LoopScheduler::Impl {
@@ -22,7 +27,9 @@ struct LoopScheduler::Impl {
     std::shared_ptr<LoopClock> clock;
     std::map<std::string, TaskEntry> tasks;   // task_id -> entry
     std::vector<LoopSchedulerEvent> pending;  // 攒账,TakeEvents 交出去
-    std::uint64_t next_seq = 1;               // 发号:task 序号
+    std::uint64_t next_seq = 1;               // creation_seq 的源(稳定排序键)
+    IdAuthority ids;  // loop-N 发号(批五:台账 id 收编同一发号器;session
+                      // 域号,一场 scheduler 一只实例,回放 SeedPrefixedId 续)
     bool store_failed = false;
     bool stopping = false;
     std::thread timer;
@@ -148,9 +155,11 @@ auto LoopScheduler::Create(std::string prompt, std::chrono::seconds interval, Wa
         return result;
     }
     LoopTask task;
-    task.task_id = id_issuer ? id_issuer() : ("loop-" + std::to_string(impl_->next_seq));
+    // 发号(批五):默认 id 走 IdAuthority;注入口照旧(测试定死 id)。
+    // next_seq 只当 creation_seq 的源(稳定排序键),不再拼 id。
+    task.task_id = id_issuer ? id_issuer() : impl_->ids.NextPrefixedId("loop");
     while (impl_->tasks.count(task.task_id) > 0) {
-        task.task_id = id_issuer ? id_issuer() : ("loop-" + std::to_string(++impl_->next_seq));
+        task.task_id = id_issuer ? id_issuer() : impl_->ids.NextPrefixedId("loop");
     }
     ++impl_->next_seq;
     task.session_id = std::move(session_id);
@@ -516,17 +525,24 @@ void LoopScheduler::FinishTick(const std::string& tick_id, LoopTickOutcome outco
     entry.current_tick->finished_at_ms = now_ms;
     entry.current_tick->next_due_at_ms = task.next_due_at_ms;
 
-    // 连败/连拒账。
+    // 连败/连拒账(批五:连撞计数的机制走 StreakMeter,计数仍落在
+    // task 域字段上——存档要)。
+    StreakMeter provider_streak{LoopDefaults::kProviderFailPauseThreshold,
+                                static_cast<std::int64_t>(task.consecutive_failures)};
     if (outcome == LoopTickOutcome::ProviderError || outcome == LoopTickOutcome::RateLimited) {
-        ++task.consecutive_failures;
+        provider_streak.NoteBad();
     } else {
-        task.consecutive_failures = 0;
+        provider_streak.NoteGood();
     }
+    task.consecutive_failures = static_cast<std::uint64_t>(provider_streak.count);
+    StreakMeter denial_streak{LoopDefaults::kDenialPauseThreshold,
+                              static_cast<std::int64_t>(task.consecutive_denials)};
     if (outcome == LoopTickOutcome::Declined) {
-        ++task.consecutive_denials;
-    } else if (outcome != LoopTickOutcome::Declined) {
-        task.consecutive_denials = 0;
+        denial_streak.NoteBad();
+    } else {
+        denial_streak.NoteGood();
     }
+    task.consecutive_denials = static_cast<std::uint64_t>(denial_streak.count);
 
     nlohmann::json payload;
     payload["tick"] = entry.current_tick->tick_no;
@@ -543,10 +559,8 @@ void LoopScheduler::FinishTick(const std::string& tick_id, LoopTickOutcome outco
         return;
     }
     // provider 连败五拍自动 Pause;denial 连三拍自动 Pause。
-    const bool provider_tripped = task.consecutive_failures >=
-                                  static_cast<std::uint64_t>(LoopDefaults::kProviderFailPauseThreshold);
-    const bool denial_tripped = task.consecutive_denials >=
-                                static_cast<std::uint64_t>(LoopDefaults::kDenialPauseThreshold);
+    const bool provider_tripped = provider_streak.tripped();
+    const bool denial_tripped = denial_streak.tripped();
     if (LoopExpired(task.expires_at_ms, now_ms)) {
         impl_->EmitLocked("loop_tick_v1", "finished", task, &*entry.current_tick, std::move(payload));
         entry.current_tick.reset();
@@ -590,11 +604,19 @@ std::optional<std::chrono::milliseconds> LoopScheduler::RetryBackoffFor(const st
     if (tick.attempts >= static_cast<std::uint32_t>(LoopDefaults::kMaxAttemptsPerTick)) {
         return std::nullopt;  // 首发+两次重试用完
     }
-    const std::chrono::milliseconds wait =
-        tick.attempts == 1 ? std::chrono::duration_cast<std::chrono::milliseconds>(
-                                 LoopDefaults::kRetryBackoffFirst)
-                           : std::chrono::duration_cast<std::chrono::milliseconds>(
-                                 LoopDefaults::kRetryBackoffSecond);
+    // 退避阶梯(批五):5s/15s 两级走公共退避件的 Ladder 档——越表即
+    // 没得再等,与 attempts 上限同一道闸(这里 attempts 顶在先,阶梯
+    // 越表是同一件事的双保险)。
+    BackoffPolicy ladder;
+    ladder.kind = BackoffPolicy::Kind::Ladder;
+    ladder.ladder_ms = {
+        std::chrono::duration_cast<std::chrono::milliseconds>(LoopDefaults::kRetryBackoffFirst).count(),
+        std::chrono::duration_cast<std::chrono::milliseconds>(LoopDefaults::kRetryBackoffSecond).count(),
+    };
+    auto wait = BackoffWaitMs(ladder, tick.attempts);
+    if (!wait.has_value()) {
+        return std::nullopt;
+    }
     ++tick.attempts;
     return wait;
 }
@@ -821,6 +843,9 @@ bool LoopScheduler::ReplayEvent(const LoopSchedulerEvent& event) {
             return false;
         }
         impl_->next_seq = std::max(impl_->next_seq, task.creation_seq + 1);
+        // 发号器抬底(批五):恢复后新 task 号接在存档已发的号之后,
+        // 与旧 next_seq 口径一致(creation_seq+1 起发,不重号)。
+        impl_->ids.SeedPrefixedId("loop", task.creation_seq);
         TaskEntry entry;
         entry.task = task;
         entry.task.state = LoopTaskState::Active;  // created 那一刻的态

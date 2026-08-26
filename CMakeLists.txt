@@ -510,6 +510,12 @@ add_library(lubancode_runtime STATIC
   # Plan 模式(只读研究硬闸单):CollaborationMode/ModePolicy/PlanDocument
   # 合同与纯函数(ModePolicy 硬闸、Plan shell 分类、<proposed_plan> 扫描)。
   src/runtime/plan_mode.cpp
+  # 骨架拆解批五先行半批:预算闸(三尺 + 停因分型 + 连撞计数)——三外壳
+  # (loop/goal/workflow)各声明自己的尺,机制只此一份。
+  src/runtime/budget_gate.cpp
+  # 骨架拆解批五先行半批:重试退避(固定/指数/阶梯 + 上限 + 抖动档 +
+  # 可取消等待)——loop 的 5s/15s 与 workflow 的节点级指数同走这枚。
+  src/runtime/retry_backoff.cpp
 )
 target_include_directories(lubancode_runtime PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src

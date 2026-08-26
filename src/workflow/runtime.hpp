@@ -33,6 +33,7 @@
 #include <nlohmann/json.hpp>
 
 #include "runtime/event_sink.hpp"
+#include "runtime/id_authority.hpp"
 #include "runtime/interaction_broker.hpp"
 #include "workflow/definition.hpp"
 #include "workflow/journal.hpp"
@@ -144,6 +145,9 @@ struct RuntimeOptions {
     std::shared_ptr<JournalClock> clock;
     std::function<std::string()> run_id_generator;  // 空 = 时间戳+随机
     std::string thread_id;  // 事件信封用;空 = "workflow"
+    // 事件信封 seq 的发号局(批五):空 = 进程级 ProcessIdAuthority。
+    // 从前是本文件里一只 static 计数器——发号局规矩"只此一家",收编。
+    runtime::IdAuthority* id_authority = nullptr;
 };
 
 // 起跑入参。

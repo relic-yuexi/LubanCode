@@ -14,6 +14,7 @@
 
 #include "platform/json_safe.hpp"  // DumpJsonSanitized:落盘行的编码窄边界
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:旧会话档读入时的编码关口
+#include "platform/wall_clock.hpp"  // 统一墙钟(批五):ts 的钟同源五套台账
 
 namespace lubancode::agent {
 
@@ -187,7 +188,8 @@ std::optional<api::Message> MessageFromJson(const nlohmann::json& j) {
 }
 
 std::string FormatLocalTime(const char* fmt) {
-    const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    // 批五:钟读 platform 统一墙钟(五套台账同源);本地串格式不动。
+    const std::time_t now = platform::WallClockToTimeT(platform::WallClockNowMs());
     std::tm tm_buf{};
 #ifdef _WIN32
     localtime_s(&tm_buf, &now);
