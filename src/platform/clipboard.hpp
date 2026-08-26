@@ -33,4 +33,15 @@ bool ClipboardLikelyAvailable();
 // max_bytes:超限直接拒(不暗降糊图),error 写明原因。失败给空。
 std::optional<std::vector<unsigned char>> ReadClipboardImagePng(std::size_t max_bytes, std::string& error);
 
+// 只探"剪贴板里有没有位图"(查格式可用性,不搬数据,快)。Ctrl+V 智能
+// 粘贴先问这个:有图才走读图路,没图再读文本——免得"没图"也得等一遍
+// WIC 转码。Windows 查 "PNG" 注册格式与 CF_DIB;POSIX OSC 52 只写不
+// 读,恒 false。
+bool ClipboardHasImage();
+
+// 读剪贴板文本(UTF-8)。Windows: CF_UNICODETEXT;POSIX 明确不支持
+// (OSC 52 只写不读),返回空并写明原因。error 给人看的短句(由调用方
+// 拼进 i18n 文案)。空剪贴板文本按失败处理(没东西可贴)。
+std::optional<std::string> ReadClipboardTextUtf8(std::string& error);
+
 }  // namespace lubancode::platform

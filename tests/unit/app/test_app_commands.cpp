@@ -21,6 +21,7 @@
 #include "sessions/session_store.hpp"
 #include "api/backend.hpp"
 #include "app/commands/command_flow.hpp"
+#include "app/commands/model_commands.hpp"
 #include "app/commands/peer_commands.hpp"
 #include "app/commands/session_commands.hpp"
 #include "app/commands/settings_commands.hpp"
@@ -423,4 +424,180 @@ TEST_CASE("顶层 archive/unarchive 往返;归档后默认列表不见、archive
 
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
+}
+
+// ---------------------------------------------------------------------------
+// /model 跨 provider 收口 + provider 切换同路(ExecuteProviderSwitch)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 隔离 HOME 的 RAII:ExecuteProviderSwitch 会把 active_provider 写进
+// <HOME>/.lubancode/config.json,别碰开发机真配置。Windows 换 USERPROFILE,
+// POSIX 换 HOME——platform::HomeDir 只认这两个。
+class HomeEnvGuard {
+public:
+    explicit HomeEnvGuard(const std::filesystem::path& home) {
+#ifdef _WIN32
+        const char* old = std::getenv("USERPROFILE");
+        if (old != nullptr) {
+            old_.emplace(old);
+        }
+        _putenv_s("USERPROFILE", CmdPathUtf8(home).c_str());
+#else
+        const char* old = std::getenv("HOME");
+        if (old != nullptr) {
+            old_.emplace(old);
+        }
+        setenv("HOME", home.c_str(), /*replace=*/1);
+#endif
+    }
+    ~HomeEnvGuard() {
+#ifdef _WIN32
+        if (old_.has_value()) {
+            _putenv_s("USERPROFILE", old_->c_str());
+        } else {
+            _putenv_s("USERPROFILE", "");
+        }
+#else
+        if (old_.has_value()) {
+            setenv("HOME", old_->c_str(), /*replace=*/1);
+        } else {
+            unsetenv("HOME");
+        }
+#endif
+    }
+    HomeEnvGuard(const HomeEnvGuard&) = delete;
+    HomeEnvGuard& operator=(const HomeEnvGuard&) = delete;
+
+private:
+    std::optional<std::string> old_;
+};
+
+}  // namespace
+
+TEST_CASE("ModelProviderHopFor:目录条目带归属才跨家,没归属/当前家/没条目都不动") {
+    lubancode::config::ModelCatalog catalog;
+    lubancode::config::ModelCatalogEntry cc;
+    cc.provider_id = "ccmoon";
+    cc.slug = "gpt-x";
+    lubancode::config::ModelCatalogEntry local;
+    local.provider_id = "local";
+    local.slug = "qwen-y";
+    lubancode::config::ModelCatalogEntry mine;
+    mine.slug = "anonymous-model";  // 用户自写条目:没写归属
+    catalog.models = {cc, local, mine};
+
+    lubancode::config::ProviderConfig p_cc{
+        .name = "ccmoon",
+        .base_url = "https://cc.test/v1",
+        .wire = lubancode::config::Wire::ChatCompletions,
+        .key_env = "CC_KEY",
+        .api_key = "",
+        .model = "gpt-x",
+    };
+    std::vector<lubancode::config::ProviderConfig> providers = {p_cc};
+
+    // 当前家 local 的模型:不切。
+    CHECK_FALSE(ModelProviderHopFor(catalog, providers, "local", "qwen-y").has_value());
+    // 目录没有的模型(手敲的裸名):不猜归属。
+    CHECK_FALSE(ModelProviderHopFor(catalog, providers, "local", "who-am-i").has_value());
+    // 条目没写归属:不猜。
+    CHECK_FALSE(ModelProviderHopFor(catalog, providers, "local", "anonymous-model").has_value());
+    // 别家的模型:要切,配置里有这家 → configured。
+    const auto hop = ModelProviderHopFor(catalog, providers, "local", "gpt-x");
+    REQUIRE(hop.has_value());
+    CHECK(hop->provider_id == "ccmoon");
+    CHECK(hop->configured);
+    // 别家的模型但没配这家:hop 仍给出,configured 为假(调用方提示不切)。
+    const auto hop2 = ModelProviderHopFor(catalog, {}, "local", "gpt-x");
+    REQUIRE(hop2.has_value());
+    CHECK(hop2->provider_id == "ccmoon");
+    CHECK_FALSE(hop2->configured);
+}
+
+TEST_CASE("ExecuteProviderSwitch:整套连接字段连同 backend/会话状态一起换家") {
+    const auto home = TempDir("pswitch_home");
+    HomeEnvGuard guard(home);
+
+    lubancode::config::Config config;
+    config.wire = lubancode::config::Wire::Responses;
+    config.base_url = "http://127.0.0.1:49821/v1";
+    config.model = "old-model";
+    config.auth_mode = lubancode::config::ProviderAuthMode::None;
+    lubancode::config::ProviderConfig ccmoon{
+        .name = "ccmoon",
+        .base_url = "https://cc.test/v1",
+        .wire = lubancode::config::Wire::ChatCompletions,
+        .key_env = "CC_KEY",
+        .api_key = "sk-cc",
+        .model = "gpt-x",
+        .model_reasoning_effort = "high",
+        .context_window_tokens = 64000,
+    };
+    ccmoon.auth = lubancode::config::ProviderAuthMode::Inline;
+    lubancode::config::ProviderConfig local{
+        .name = "local",
+        .base_url = "http://127.0.0.1:49821/v1",
+        .wire = lubancode::config::Wire::Responses,
+        .model = "old-model",
+    };
+    local.auth = lubancode::config::ProviderAuthMode::None;
+    config.providers = {local, ccmoon};
+
+    std::string active_provider = "local";
+    RebuildableBackend backend(config);
+    std::string session_wire = lubancode::config::ProviderWireName(config.wire);
+    auto current_model = std::make_shared<std::string>("old-model");
+    auto current_think = std::make_shared<std::string>("low");
+    auto current_instructions = std::make_shared<std::string>("OLD");
+    lubancode::cli::ContextTracker tracker(128000);
+    lubancode::config::ModelCatalog catalog;  // 空目录:ApplyModelCatalog 全空应用
+    lubancode::agent::PromptOptions prompt_options;
+    int rebuild_count = 0;
+    const auto rebuild_loop = [&](bool preserve_history) {
+        CHECK(preserve_history);
+        ++rebuild_count;
+    };
+    const lubancode::cli::Theme theme;
+    lubancode::config::Source source = lubancode::config::Source::Default;
+
+    CHECK(ExecuteProviderSwitch("ccmoon", /*switch_model=*/"", config, active_provider, backend,
+                                session_wire, current_model, current_think, tracker,
+                                current_instructions, catalog, prompt_options, rebuild_loop,
+                                /*is_console=*/false, theme, /*active_provider_write_path=*/std::nullopt,
+                                source));
+
+    // 顶层镜像字段全套换成 ccmoon(provider add 收尾切与 /model 跨家切
+    // 共用的就是这一条路)。
+    CHECK(config.wire == lubancode::config::Wire::ChatCompletions);
+    CHECK(config.base_url == "https://cc.test/v1");
+    CHECK(config.auth_token == "sk-cc");
+    CHECK(config.model == "gpt-x");
+    CHECK(config.context_window_tokens == 64000);
+    CHECK(config.active_provider == "ccmoon");
+    CHECK(*current_model == "gpt-x");
+    CHECK(*current_think == "high");  // provider 声明的档位跟着上
+    CHECK(active_provider == "ccmoon");
+    CHECK(session_wire == "openai-chat-completions");
+    CHECK(prompt_options.wire == "openai-chat-completions");
+    CHECK(tracker.window_tokens() == 64000);
+    CHECK(rebuild_count == 1);
+    CHECK(source == lubancode::config::Source::GlobalConfigFile);
+    // 记忆落进隔离 HOME:全局 config.json 里 active_provider 已写回。
+    std::error_code ec;
+    const bool remembered =
+        std::filesystem::exists(home / ".lubancode" / std::filesystem::path("config.json"), ec);
+    CHECK(remembered);
+
+    // 名字找不着:报一行、返回 false,任何状态都不动。
+    const std::string wire_before = session_wire;
+    CHECK_FALSE(ExecuteProviderSwitch("no-such", "", config, active_provider, backend, session_wire,
+                                      current_model, current_think, tracker, current_instructions,
+                                      catalog, prompt_options, rebuild_loop, false, theme,
+                                      std::nullopt, source));
+    CHECK(session_wire == wire_before);
+    CHECK(rebuild_count == 1);
+
+    std::filesystem::remove_all(home, ec);
 }

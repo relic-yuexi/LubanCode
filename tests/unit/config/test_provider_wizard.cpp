@@ -10,6 +10,7 @@
 
 #include <iostream>
 
+#include "cli/i18n.hpp"
 #include "cli/provider_wizard.hpp"
 
 using namespace lubancode;
@@ -530,7 +531,7 @@ TEST_CASE("RunProviderPresetWizard: 选预设只问密钥与确认,参数全带�
         "p");
     REQUIRE(catalog.has_value());
     ScriptedIO scripted;
-    scripted.lines = {"1", "3"};  // 目录选 glm, auth=inline
+    scripted.lines = {"2", "3"};  // 目录选 glm(自定义置顶后预设从 2 起), auth=inline
     scripted.Say("sk-demo");      // inline key
     scripted.Say("");             // 确认:回车写入
     auto io = scripted.Build();
@@ -555,7 +556,7 @@ TEST_CASE("RunProviderPresetWizard: 汇总页编号真能跳回改单项,改完�
         "p");
     REQUIRE(catalog.has_value());
     ScriptedIO scripted;
-    scripted.lines = {"1", "1"};  // 目录选 p,auth=none
+    scripted.lines = {"2", "1"};  // 目录选 p(自定义置顶后预设从 2 起),auth=none
     scripted.Say("6");             // 汇总页跳回 effort
     scripted.Say("high");          // 改完拿回程票,直回汇总
     scripted.Say("");              // 不再修改,直接保存
@@ -574,7 +575,7 @@ TEST_CASE("RunProviderPresetWizard: 预设也认'无需鉴权'") {
         "p");
     REQUIRE(catalog.has_value());
     ScriptedIO scripted;
-    scripted.lines = {"1", "1"};  // 目录选 p, auth=none
+    scripted.lines = {"2", "1"};  // 目录选 p(自定义置顶后预设从 2 起), auth=none
     scripted.Say("");             // 确认
     auto io = scripted.Build();
     const auto outcome = cli::RunProviderPresetWizard(io, *catalog, "", {});
@@ -583,13 +584,13 @@ TEST_CASE("RunProviderPresetWizard: 预设也认'无需鉴权'") {
     CHECK(outcome->provider.model == "m");
 }
 
-TEST_CASE("RunProviderPresetWizard: 末项回到全手填向导(新次序)") {
+TEST_CASE("RunProviderPresetWizard: 首项是自定义,选 1 回到全手填向导") {
     const auto catalog = config::ParseProviderCatalogJson(
         R"({"schema_version":2,"revision":"2026-07-25","providers":{"p":{"name":"P","wire":"responses","base_url":"https://api.test/v1","key_env":"P_KEY","default_model":"m","models":{"m":{"name":"M"}}}}})",
         "p");
     REQUIRE(catalog.has_value());
     ScriptedIO scripted;
-    scripted.lines = {"2", "3", "3"};  // 目录选自定义, wire=chat(3), auth=inline(3)
+    scripted.lines = {"1", "3", "3"};  // 目录选自定义(置顶第 1 项), wire=chat(3), auth=inline(3)
     scripted.Say("custom");
     scripted.Say("https://custom.test/v1");
     scripted.Say("key");
@@ -602,6 +603,40 @@ TEST_CASE("RunProviderPresetWizard: 末项回到全手填向导(新次序)") {
     REQUIRE(outcome.has_value());
     CHECK(outcome->provider.name == "custom");
     CHECK(outcome->provider.wire == config::Wire::ChatCompletions);
+}
+
+TEST_CASE("PresetChoiceItems: 自定义顶在最前,预设依次在后,默认光标落第一预设") {
+    const auto catalog = config::ParseProviderCatalogJson(
+        R"({"schema_version":2,"revision":"2026-07-25","providers":{"a":{"name":"A 家","description":"da","wire":"responses","base_url":"https://a.test/v1","key_env":"A_KEY","default_model":"ma","models":{"ma":{"name":"MA"}}},"b":{"name":"B 家","description":"db","wire":"chat_completions","base_url":"https://b.test/v1","key_env":"B_KEY","default_model":"mb","models":{"mb":{"name":"MB"}}}}})",
+        "p");
+    REQUIRE(catalog.has_value());
+    const std::vector<cli::WizardChoiceItem> items = cli::PresetChoiceItems(*catalog);
+    REQUIRE(items.size() == 3);
+    // 第 1 项 = 自定义(全手填),label 来自 i18n 键,不含任何预设名。
+    CHECK(items[cli::kPresetChoiceCustomIndex].label == cli::tr("provider_catalog.choose.custom"));
+    CHECK(items[cli::kPresetChoiceCustomIndex].description.empty());
+    // 预设依次在后,下标 = 目录序 + 1。
+    CHECK(items[1].label == "A 家");
+    CHECK(items[1].description == "da");
+    CHECK(items[2].label == "B 家");
+    CHECK(items[2].description == "db");
+    // 默认光标落第一预设(自定义在顶但不抢光标)。
+    CHECK(cli::PresetChoiceDefaultIndex(*catalog) == 1);
+}
+
+TEST_CASE("RunProviderPresetWizard: 回车默认选第一预设,不误进全手填") {
+    const auto catalog = config::ParseProviderCatalogJson(
+        R"({"schema_version":2,"revision":"2026-07-25","providers":{"p":{"name":"P","wire":"responses","base_url":"https://api.test/v1","key_env":"P_KEY","default_model":"m","models":{"m":{"name":"M"}}}}})",
+        "p");
+    REQUIRE(catalog.has_value());
+    ScriptedIO scripted;
+    scripted.lines = {"", "1"};  // 目录页回车(默认第一预设), auth=none
+    scripted.Say("");            // 确认页回车保存
+    auto io = scripted.Build();
+    const auto outcome = cli::RunProviderPresetWizard(io, *catalog, "", {});
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->provider.name == "p");
+    CHECK(outcome->provider.model == "m");
 }
 
 // ---------------------------------------------------------------------------

@@ -30,6 +30,13 @@ KeyChord Plain(char32_t ch) {
     c.ch = ch;
     return c;
 }
+KeyChord Alt(char32_t ch) {
+    KeyChord c;
+    c.key = KeyChord::Key::Char;
+    c.ch = ch;
+    c.alt = true;
+    return c;
+}
 lubancode::platform::KeyInput CharKey(char32_t ch, bool ctrl = false, bool alt = false) {
     lubancode::platform::KeyInput key;
     key.kind = lubancode::platform::KeyInput::Kind::Char;
@@ -114,6 +121,15 @@ TEST_CASE("默认表:三域键位在位,固定键入账") {
     CHECK(map.Lookup(KeyScope::Composer, Ctrl(U's')) == ActionId::None);
     CHECK_FALSE(map.ChordFor(ActionId::ComposerStash).has_value());
     CHECK(ActionFromName("composer.stash").has_value());
+
+    // 贴图两键各归各:Alt+V 直贴图,Ctrl+V 智能粘贴(图优先,文本兜底)。
+    // platform 两边都把 Ctrl+V 送成 Char 'v'+ctrl,路由必须查得中,否则
+    // Ctrl+V 退回死键。
+    CHECK(map.Lookup(KeyScope::Composer, Alt(U'v')) == ActionId::ImagePasteClipboard);
+    CHECK(map.Lookup(KeyScope::Composer, Ctrl(U'v')) == ActionId::ClipboardSmartPaste);
+    CHECK(FormatKeyChord(*map.ChordFor(ActionId::ClipboardSmartPaste)) == "Ctrl+V");
+    CHECK(ChordFromKeyInput(CharKey(U'v', /*ctrl=*/true))->key == KeyChord::Key::Char);
+    CHECK(ActionFromName("clipboard.smart_paste").has_value());
 
     // Search 域:Ctrl+R 是"往更早走",与 Composer 的"打开搜索"同键各义。
     CHECK(map.Lookup(KeyScope::Search, Ctrl(U'r')) == ActionId::SearchOlder);

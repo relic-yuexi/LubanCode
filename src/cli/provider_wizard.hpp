@@ -80,12 +80,23 @@ struct ProviderWizardState {
 std::optional<ProviderWizardOutcome> RunProviderAddWizard(WizardIO& io, const std::string& name_prefill,
                                                           const std::vector<config::ProviderConfig>& existing);
 
-// 带在线目录的入口：先选常见厂家，最后一项仍可走全手填旧向导。选中预设后
-// base_url/wire/model/窗口/私有参数全带上，密钥来源与确认复用新向导的
-// 同一套导航原语。确认页可直接保存,也可按 1-7 跳回改单项。
+// 带在线目录的入口：先选常见厂家，选中预设后 base_url/wire/model/窗口/
+// 私有参数全带上，密钥来源与确认复用新向导的同一套导航原语。确认页可直接
+// 保存,也可按 1-7 跳回改单项。
 std::optional<ProviderWizardOutcome> RunProviderPresetWizard(
     WizardIO& io, const config::ProviderCatalog& catalog, const std::string& name_prefill,
     const std::vector<config::ProviderConfig>& existing);
+
+// 目录选择页的条目拼装(纯函数,单测钉次序):"自定义(全手填)"在第一项,
+// 目录预设依次在后。选中下标 == kPresetChoiceCustomIndex 走全手填旧向导,
+// 否则 preset = catalog.providers[下标 - 1]。
+inline constexpr std::size_t kPresetChoiceCustomIndex = 0;
+std::vector<WizardChoiceItem> PresetChoiceItems(const config::ProviderCatalog& catalog);
+
+// 目录选择页的默认光标位(纯函数):有预设时光标落在第一预设——自定义在
+// 顶但不高亮,一回车选中的是常见厂家的现成配置,免得误进八步全手填;
+// 目录空(理论上到不了选择页)退回首项。
+std::size_t PresetChoiceDefaultIndex(const config::ProviderCatalog& catalog);
 
 // /provider edit <名字>(容错单):同一套八步面板改旧 provider。draft 全字段
 // 预填现有值,起手直接进汇总页——改哪项点哪项,回程票直回汇总;回车=保留,

@@ -49,6 +49,22 @@ std::string NormalizeRoleWord(std::string word) {
 
 }  // namespace
 
+std::optional<ModelProviderHop> ModelProviderHopFor(const lubancode::config::ModelCatalog& catalog,
+                                                    const std::vector<lubancode::config::ProviderConfig>& providers,
+                                                    const std::string& active_provider,
+                                                    const std::string& model_id) {
+    // 只认目录条目声明的归属:用户自写条目(models.json)provider_id 留空,
+    // 归属不明,一律不动——不猜。
+    const lubancode::config::ModelCatalogEntry* entry = catalog.FindBySlug(model_id);
+    if (entry == nullptr || entry->provider_id.empty() || entry->provider_id == active_provider) {
+        return std::nullopt;
+    }
+    ModelProviderHop hop;
+    hop.provider_id = entry->provider_id;
+    hop.configured = lubancode::config::FindProvider(providers, entry->provider_id) != nullptr;
+    return hop;
+}
+
 void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args) {
     lubancode::config::Config& config = *ctx.config;
     const lubancode::config::ModelCatalog& model_catalog = *ctx.model_catalog;
@@ -138,6 +154,30 @@ void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args)
         }
         chosen = *picked;
     }
+    // 统一提交:先跨家判定(/model 跨家收口)——所选模型目录条目声明了
+    // 归属别家时,连 provider 一起切(base_url/鉴权/wire/目录声明全套,
+    // 与 /provider switch 同一条 ExecuteProviderSwitch 路),再切换模型;
+    // 否则旧行为,只切模型不动连接。切不动(该家没配、缺密钥、没递切换
+    // 能力)如实提示;该家没配或缺 key 时连接未换,模型照旧切过去(用户
+    // 要在当前家硬试同名模型,不拦,但把话说在前头)。
+    bool switched_provider = false;
+    if (ctx.model_catalog != nullptr && ctx.active_provider != nullptr) {
+        const std::vector<lubancode::config::ProviderConfig> no_providers;
+        const std::vector<lubancode::config::ProviderConfig>& providers =
+            ctx.providers != nullptr ? *ctx.providers : no_providers;
+        const auto hop = ModelProviderHopFor(*ctx.model_catalog, providers, *ctx.active_provider, chosen);
+        if (hop.has_value()) {
+            if (!hop->configured) {
+                TermOut() << trf("cmd.model.other_provider_unconfigured", chosen, hop->provider_id) << "\n";
+            } else if (!ctx.switch_provider) {
+                TermOut() << trf("cmd.model.other_provider_unswitchable", chosen, hop->provider_id) << "\n";
+            } else if (ctx.switch_provider(hop->provider_id)) {
+                switched_provider = true;
+            } else {
+                return;  // 切换失败已自打提示,连接未动;模型不切,不留半切换
+            }
+        }
+    }
     // 统一提交:先切换 + 应用目录条目(回执就地排版),随后问一
     // 句是否写盘。写盘时 active_provider 在场,service 会把模型写
     // 进 provider 条目(每个 provider 各记各的,切走再切回来还是
@@ -157,7 +197,12 @@ void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args)
     if (ctx.sync_request_policy) {
         ctx.sync_request_policy();
     }
-    TermOut() << trf("cmd.model.switched", result.model) << "\n";
+    // 跨家切开的回执多带一顶帽子:明说模型连同 provider 一起换了家。
+    if (switched_provider) {
+        TermOut() << trf("cmd.model.switched_with_provider", result.model, *ctx.active_provider) << "\n";
+    } else {
+        TermOut() << trf("cmd.model.switched", result.model) << "\n";
+    }
     if (result.think_from_catalog) {
         TermOut() << trf("catalog.apply_think", result.think) << "\n";
     }
@@ -197,6 +242,31 @@ CommandFlow HandleSlashModel(SlashDispatchContext& dispatch, const lubancode::cl
     model_ctx.current_think = dispatch.current_think;
     model_ctx.current_model_instructions = dispatch.current_model_instructions;
     model_ctx.model_router = dispatch.model_router;
+    // /model 跨家收口:直切属别家的模型时连 provider 一起切。判定材料
+    //(活跃端、已配清单)与切换执行(ExecuteProviderSwitch,与 /provider
+    // switch 同一条路)都在这里装配;缺密钥如实提示并保持旧连接,不硬切。
+    model_ctx.active_provider = dispatch.active_provider;
+    model_ctx.providers = &dispatch.config->providers;
+    model_ctx.switch_provider = [&dispatch](const std::string& name) -> bool {
+        const lubancode::config::ProviderConfig* provider =
+            lubancode::config::FindProvider(dispatch.config->providers, name);
+        if (provider == nullptr) {
+            TermOut() << trf("cmd.provider.not_found", name) << "\n";
+            return false;
+        }
+        if (lubancode::config::ResolveProviderAuth(*provider).status ==
+            lubancode::config::ProviderAuthResolution::Status::Missing) {
+            TermOut() << trf("cmd.model.provider_key_missing", name) << "\n";
+            return false;
+        }
+        return ExecuteProviderSwitch(name, "", *dispatch.config, *dispatch.active_provider,
+                                     *dispatch.real_backend, *dispatch.wire_str, dispatch.current_model,
+                                     dispatch.current_think, *dispatch.context_tracker,
+                                     dispatch.current_model_instructions, *dispatch.model_catalog,
+                                     *dispatch.prompt_options, dispatch.rebuild_loop, dispatch.spinner_enabled,
+                                     *dispatch.theme, *dispatch.active_provider_write_path,
+                                     dispatch.config_result->sources.active_provider);
+    };
     // 写回目标默认全局,没有全局文件退 merged 路径(只剩项目级)。
     model_ctx.config_file_path = dispatch.config_result->global_config_file_path.has_value()
                                      ? dispatch.config_result->global_config_file_path
